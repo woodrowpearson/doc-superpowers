@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# doc-superpowers hook v1 — installed __INSTALL_DATE__
+# DO NOT EDIT — managed by doc-superpowers hooks installer
+
+DOC_TOOLS="${DOC_TOOLS:-__DOC_TOOLS_PATH__}"
+DOC_INDEX="${DOC_INDEX:-docs/.doc-index.json}"
+COMMIT_MSG_FILE="${1:-}"
+
+[[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
+[[ -n "$COMMIT_MSG_FILE" ]] || exit 0
+[[ -f "$DOC_TOOLS" ]] || exit 0
+[[ -f "$DOC_INDEX" ]] || exit 0
+
+# Scope to staged files (consistent with pre-commit)
+staged=$(git diff --cached --name-only 2>/dev/null)
+[[ -z "$staged" ]] && exit 0
+
+code_refs_args=()
+while IFS= read -r f; do
+  [[ -n "$f" ]] && code_refs_args+=("$f")
+done <<< "$staged"
+
+result=$("$DOC_TOOLS" check-freshness --code-refs "${code_refs_args[@]}" 2>/dev/null) || exit 0
+
+stale_count=$(echo "$result" | jq -r '.summary.stale // 0' 2>/dev/null) || exit 0
+[[ "$stale_count" -eq 0 ]] && exit 0
+
+# Append freshness comment block
+{
+  echo ""
+  echo "# Doc freshness: $stale_count stale doc(s) related to this commit"
+  echo "$result" | jq -r '
+    .docs | to_entries[] |
+    select(.value.status == "stale") |
+    "#   stale: \(.key)\(
+      if .value.reason then " (\(.value.reason))" else "" end
+    )"
+  ' 2>/dev/null
+} >> "$COMMIT_MSG_FILE"
+
+exit 0
