@@ -251,6 +251,7 @@ This skill is designed as a **documentation superset** of the [obra/superpowers]
 
 ```
 doc-superpowers/
+├── .gitignore            # Git ignore rules
 ├── .claude-plugin/       # Claude Code plugin manifest + marketplace
 │   ├── plugin.json
 │   └── marketplace.json
@@ -307,8 +308,7 @@ doc-superpowers/
 ├── README.md
 ├── LICENSE               # MIT
 ├── RELEASE-NOTES.md
-├── CLAUDE.md
-└── .gitignore
+└── CLAUDE.md
 ```
 
 ## Dependencies
