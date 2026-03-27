@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# doc-superpowers hook v1 — installed __INSTALL_DATE__
+# DO NOT EDIT — managed by doc-superpowers hooks installer
+
+DOC_TOOLS="${DOC_TOOLS:-__DOC_TOOLS_PATH__}"
+DOC_INDEX="${DOC_INDEX:-docs/.doc-index.json}"
+
+[[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
+
+# Only fire on branch switches ($3=1), not file checkouts ($3=0)
+# Also fires during git clone with $3=1 — index guard handles gracefully
+[[ "${3:-1}" == "0" ]] && exit 0
+
+[[ -f "$DOC_TOOLS" ]] || exit 0
+[[ -f "$DOC_INDEX" ]] || exit 0
+
+result=$("$DOC_TOOLS" check-freshness 2>/dev/null) || exit 0
+
+stale_count=$(echo "$result" | jq -r '.summary.stale // 0' 2>/dev/null) || exit 0
+missing_count=$(echo "$result" | jq -r '.summary.missing // 0' 2>/dev/null) || missing_count=0
+[[ "$stale_count" -eq 0 && "$missing_count" -eq 0 ]] && exit 0
+
+if [[ "${DOC_SUPERPOWERS_QUIET:-}" != "1" ]]; then
+  if [[ "$stale_count" -gt 0 ]]; then
+    stale_docs=$(echo "$result" | jq -r '.docs | to_entries[] | select(.value.status == "stale") | .key' 2>/dev/null)
+    echo ""
+    echo "doc-superpowers: $stale_count stale doc(s) on this branch"
+    echo "  $(echo "$stale_docs" | tr '\n' ', ' | sed 's/, $//')"
+    echo "  Run '/doc-superpowers audit' to review."
+  fi
+
+  if [[ "$missing_count" -gt 0 ]]; then
+    missing_docs=$(echo "$result" | jq -r '.docs | to_entries[] | select(.value.status == "missing") | .key' 2>/dev/null)
+    echo ""
+    echo "doc-superpowers: $missing_count indexed doc(s) missing from disk"
+    echo "  $(echo "$missing_docs" | tr '\n' ', ' | sed 's/, $//')"
+    echo "  Run 'doc-tools.sh remove-entry' or 'deprecate-entry' to clean up."
+  fi
+
+  echo ""
+fi
+
+exit 0

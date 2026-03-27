@@ -1,0 +1,21 @@
+{
+  "name": "doc-superpowers",
+  "owner": {
+    "name": "Woodrow Pearson"
+  },
+  "metadata": {
+    "description": "Documentation orchestrator skill for Claude Code",
+    "version": "2.4.0"
+  },
+  "plugins": [
+    {
+      "name": "doc-superpowers",
+      "description": "Generates, audits, and maintains project docs through parallel agent dispatch, agentic workflow discovery, diagram generation, and spec lifecycle tracking",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./"
+      ]
+    }
+  ]
+}

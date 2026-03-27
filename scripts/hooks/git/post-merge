@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# doc-superpowers hook v1 — installed __INSTALL_DATE__
+# DO NOT EDIT — managed by doc-superpowers hooks installer
+
+DOC_TOOLS="${DOC_TOOLS:-__DOC_TOOLS_PATH__}"
+DOC_INDEX="${DOC_INDEX:-docs/.doc-index.json}"
+
+[[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
+[[ -f "$DOC_TOOLS" ]] || exit 0
+[[ -f "$DOC_INDEX" ]] || exit 0
+
+result=$("$DOC_TOOLS" check-freshness 2>/dev/null) || exit 0
+
+stale_count=$(echo "$result" | jq -r '.summary.stale // 0' 2>/dev/null) || stale_count=0
+missing_count=$(echo "$result" | jq -r '.summary.missing // 0' 2>/dev/null) || missing_count=0
+untracked_count=$(echo "$result" | jq -r '.summary.untracked // 0' 2>/dev/null) || untracked_count=0
+
+[[ "$stale_count" -eq 0 && "$missing_count" -eq 0 && "$untracked_count" -eq 0 ]] && exit 0
+
+if [[ "${DOC_SUPERPOWERS_QUIET:-}" != "1" ]]; then
+  if [[ "$stale_count" -gt 0 ]]; then
+    stale_list=$(echo "$result" | jq -r '[.docs | to_entries[] | select(.value.status == "stale") | .key] | join(", ")' 2>/dev/null)
+    echo ""
+    echo "doc-superpowers: $stale_count doc(s) became stale after merge"
+    echo "  $stale_list"
+    echo "  Run '/doc-superpowers audit' to review."
+  fi
+
+  if [[ "$missing_count" -gt 0 ]]; then
+    missing_list=$(echo "$result" | jq -r '[.docs | to_entries[] | select(.value.status == "missing") | .key] | join(", ")' 2>/dev/null)
+    echo ""
+    echo "doc-superpowers: $missing_count indexed doc(s) missing from disk"
+    echo "  $missing_list"
+    echo "  Run 'doc-tools.sh remove-entry' or 'deprecate-entry' to clean up."
+  fi
+
+  if [[ "$untracked_count" -gt 0 ]]; then
+    echo ""
+    echo "doc-superpowers: $untracked_count untracked doc(s) not in index"
+    echo "  Run '/doc-superpowers sync' or 'doc-tools.sh add-entry' to add them."
+  fi
+
+  echo ""
+fi
+
+exit 0

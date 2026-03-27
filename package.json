@@ -1,0 +1,12 @@
+{
+  "name": "doc-superpowers",
+  "version": "2.4.0",
+  "description": "Documentation orchestrator skill for AI coding agents",
+  "type": "module",
+  "main": ".opencode/plugins/doc-superpowers.js",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/woodrowpearson/doc-superpowers.git"
+  }
+}
