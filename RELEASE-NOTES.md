@@ -1,5 +1,10 @@
 # Release Notes
 
+## v2.6.1 (2026-03-29)
+
+### Fixes
+- **Hooks resolve from git root**: Hook commands in `settings.local.json` and hook scripts now cd to `$(git rev-parse --show-toplevel)` before executing, fixing "No such file or directory" errors when cwd drifts to a subdirectory (e.g., after `cd functions && npx jest`). Defense in depth — both the installer command wrapper and each hook script independently resolve to the project root.
+
 ## v2.6.0 (2026-03-29)
 
 ### Features
