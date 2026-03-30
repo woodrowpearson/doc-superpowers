@@ -327,6 +327,77 @@ test_prepare_commit_msg_appends_stale
 test_prepare_commit_msg_skips_when_current
 test_prepare_commit_msg_skips_no_index
 
+# --- pre-push hook tests ---
+
+test_pre_push_silent_few_commits() {
+  echo "test: pre-push silent when <=5 commits since tag"
+  setup
+  git tag v1.0.0
+  echo "change" > src/index.js
+  git add src/index.js && git commit -m "one change" --quiet
+  set +e
+  output=$(bash "$HOOKS_DIR/git/pre-push" 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_eq "" "$output" "silent with few commits"
+  teardown
+}
+
+test_pre_push_warns_many_commits() {
+  echo "test: pre-push warns when >5 commits since tag"
+  setup
+  git tag v1.0.0
+  for i in $(seq 1 6); do
+    echo "change $i" > src/index.js
+    git add src/index.js && git commit -m "change $i" --quiet
+  done
+  set +e
+  output=$(bash "$HOOKS_DIR/git/pre-push" 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "always exits 0"
+  assert_contains "$output" "6 commits since v1.0.0" "reports commit count"
+  assert_contains "$output" "release" "suggests release"
+  teardown
+}
+
+test_pre_push_silent_no_tags() {
+  echo "test: pre-push silent when no tags exist"
+  setup
+  set +e
+  output=$(bash "$HOOKS_DIR/git/pre-push" 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_eq "" "$output" "silent with no tags"
+  teardown
+}
+
+test_pre_push_skip_env() {
+  echo "test: pre-push respects SKIP"
+  setup
+  git tag v1.0.0
+  for i in $(seq 1 6); do
+    echo "change $i" > src/index.js
+    git add src/index.js && git commit -m "change $i" --quiet
+  done
+  set +e
+  output=$(DOC_SUPERPOWERS_SKIP=1 bash "$HOOKS_DIR/git/pre-push" 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0 with SKIP"
+  assert_eq "" "$output" "silent with SKIP"
+  teardown
+}
+
+echo ""
+echo "=== Git Hook: pre-push ==="
+test_pre_push_silent_few_commits
+test_pre_push_warns_many_commits
+test_pre_push_silent_no_tags
+test_pre_push_skip_env
+
 # --- Claude Code Hook: pre-commit-gate ---
 
 test_claude_gate_skips_non_commit() {
@@ -444,6 +515,70 @@ test_session_summary_reports_stale
 test_session_summary_silent_when_current
 test_session_summary_skip_env
 
+# --- Claude Code Hook: post-commit-sync ---
+
+test_post_commit_sync_skips_non_commit() {
+  echo "test: post-commit-sync skips non-commit bash commands"
+  setup
+  build_test_index
+  set +e
+  output=$(DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"ls -la"}' bash "$HOOKS_DIR/claude/post-commit-sync.sh" 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0 for non-commit"
+  assert_eq "" "$output" "silent for non-commit"
+  teardown
+}
+
+test_post_commit_sync_reports_stale_after_commit() {
+  echo "test: post-commit-sync reports stale docs after commit"
+  setup
+  build_test_index
+  echo "changed" > src/index.js
+  git add src/index.js && git commit -m "change code" --quiet
+  set +e
+  output=$(DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"git commit -m \"update\""}' bash "$HOOKS_DIR/claude/post-commit-sync.sh" 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "always exits 0"
+  assert_contains "$output" "doc-superpowers" "identifies source"
+  assert_contains "$output" "update" "suggests update"
+  teardown
+}
+
+test_post_commit_sync_silent_when_current() {
+  echo "test: post-commit-sync silent when docs current"
+  setup
+  build_test_index
+  set +e
+  output=$(DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"git commit -m \"update\""}' bash "$HOOKS_DIR/claude/post-commit-sync.sh" 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  # No stale docs, so output should be empty (update-index runs silently)
+  assert_eq "" "$output" "silent when current"
+  teardown
+}
+
+test_post_commit_sync_skip_env() {
+  echo "test: post-commit-sync respects SKIP"
+  setup
+  set +e
+  output=$(DOC_SUPERPOWERS_SKIP=1 DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"git commit -m \"test\""}' bash "$HOOKS_DIR/claude/post-commit-sync.sh" 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0 with SKIP"
+  assert_eq "" "$output" "silent with SKIP"
+  teardown
+}
+
+echo ""
+echo "=== Claude Code Hook: post-commit-sync ==="
+test_post_commit_sync_skips_non_commit
+test_post_commit_sync_reports_stale_after_commit
+test_post_commit_sync_silent_when_current
+test_post_commit_sync_skip_env
+
 # --- Installer tests ---
 
 test_install_git_creates_hooks() {
@@ -458,6 +593,7 @@ test_install_git_creates_hooks() {
   assert_file_exists ".git/hooks/post-merge" "post-merge installed"
   assert_file_exists ".git/hooks/post-checkout" "post-checkout installed"
   assert_file_exists ".git/hooks/prepare-commit-msg" "prepare-commit-msg installed"
+  assert_file_exists ".git/hooks/pre-push" "pre-push installed"
   # Verify marker
   assert_contains "$(head -2 .git/hooks/pre-commit)" "doc-superpowers hook v1" "has marker"
   # Verify DOC_TOOLS path was substituted
@@ -565,12 +701,15 @@ test_install_claude_creates_settings() {
   assert_eq "0" "$exit_code" "exits 0"
   assert_file_exists ".claude/settings.local.json" "settings file created"
   assert_file_exists ".claude/hooks/doc-superpowers/pre-commit-gate.sh" "pre-commit-gate script copied"
+  assert_file_exists ".claude/hooks/doc-superpowers/post-commit-sync.sh" "post-commit-sync script copied"
   assert_file_exists ".claude/hooks/doc-superpowers/session-summary.sh" "session-summary script copied"
   local settings
   settings=$(cat .claude/settings.local.json)
   assert_contains "$settings" "PreToolUse" "has PreToolUse hook"
+  assert_contains "$settings" "PostToolUse" "has PostToolUse hook"
   assert_contains "$settings" "Stop" "has Stop hook"
   assert_contains "$settings" "pre-commit-gate" "has pre-commit-gate"
+  assert_contains "$settings" "post-commit-sync" "has post-commit-sync"
   assert_contains "$settings" "session-summary" "has session-summary"
   # Verify hooks array structure (not flat command)
   assert_contains "$settings" '"hooks"' "uses hooks array format"
@@ -615,7 +754,9 @@ test_uninstall_claude_removes_hooks() {
   local settings
   settings=$(cat .claude/settings.local.json)
   assert_not_contains "$settings" "pre-commit-gate" "hooks removed from settings"
+  assert_not_contains "$settings" "PostToolUse" "PostToolUse removed from settings"
   assert_file_not_exists ".claude/hooks/doc-superpowers/pre-commit-gate.sh" "script removed"
+  assert_file_not_exists ".claude/hooks/doc-superpowers/post-commit-sync.sh" "script removed"
   assert_file_not_exists ".claude/hooks/doc-superpowers/session-summary.sh" "script removed"
   teardown
 }

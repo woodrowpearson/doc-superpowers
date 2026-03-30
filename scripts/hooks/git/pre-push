@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# doc-superpowers hook v1 — installed __INSTALL_DATE__ — release reminder
+# DO NOT EDIT — managed by doc-superpowers hooks installer
+
+[[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
+
+# Find the most recent git tag
+latest_tag=$(git describe --tags --abbrev=0 2>/dev/null) || exit 0
+[[ -z "$latest_tag" ]] && exit 0
+
+# Count commits since that tag
+commit_count=$(git rev-list "${latest_tag}..HEAD" --count 2>/dev/null) || exit 0
+[[ "$commit_count" -le 5 ]] && exit 0
+
+if [[ "${DOC_SUPERPOWERS_QUIET:-}" != "1" ]]; then
+  echo ""
+  echo "doc-superpowers: $commit_count commits since $latest_tag"
+  echo "  Consider running '/doc-superpowers release' to draft release notes."
+  echo ""
+fi
+
+exit 0

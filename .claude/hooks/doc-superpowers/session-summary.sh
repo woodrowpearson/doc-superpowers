@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# doc-superpowers hook v1 — installed __INSTALL_DATE__ — Claude Code Stop hook
+# doc-superpowers hook v1 — installed 2026-03-29 — Claude Code Stop hook
 # DO NOT EDIT — managed by doc-superpowers hooks installer
 
-DOC_TOOLS="${DOC_TOOLS:-__DOC_TOOLS_PATH__}"
+DOC_TOOLS="${DOC_TOOLS:-/Users/w/code/doc-superpowers/scripts/doc-tools.sh}"
 DOC_INDEX="${DOC_INDEX:-docs/.doc-index.json}"
 
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0

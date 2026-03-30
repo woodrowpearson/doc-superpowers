@@ -35,8 +35,8 @@ Usage:
   install.sh status
 
 Tier flags:
-  --git      Git hooks (pre-commit, post-merge, post-checkout, prepare-commit-msg)
-  --claude   Claude Code hooks (pre-commit gate, session summary)
+  --git      Git hooks (pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push)
+  --claude   Claude Code hooks (pre-commit gate, post-commit sync, session summary)
   --ci       CI/CD workflows (PR check, weekly audit, index update)
   --all      All tiers
 
@@ -88,7 +88,7 @@ install_git() {
 
   echo "  Hooks directory: $hooks_dir"
 
-  for hook_name in pre-commit post-merge post-checkout prepare-commit-msg; do
+  for hook_name in pre-commit post-merge post-checkout prepare-commit-msg pre-push; do
     local hook_src="$SCRIPT_DIR/git/$hook_name"
     [[ -f "$hook_src" ]] || continue
     local hook_dest="$hooks_dir/$hook_name"
@@ -156,7 +156,7 @@ uninstall_git() {
   fi
 
   local removed=0
-  for hook_name in pre-commit post-merge post-checkout prepare-commit-msg; do
+  for hook_name in pre-commit post-merge post-checkout prepare-commit-msg pre-push; do
     local hook_dest="$hooks_dir/$hook_name"
     if is_doc_superpowers_hook "$hook_dest"; then
       rm "$hook_dest"
@@ -181,7 +181,7 @@ status_git() {
   local hooks_dir
   hooks_dir=$(resolve_hooks_dir)
   echo "Git Hooks (dir: $hooks_dir):"
-  for hook_name in pre-commit post-merge post-checkout prepare-commit-msg; do
+  for hook_name in pre-commit post-merge post-checkout prepare-commit-msg pre-push; do
     local hook_dest="$hooks_dir/$hook_name"
     if is_doc_superpowers_hook "$hook_dest" 2>/dev/null; then
       local install_date
@@ -222,23 +222,26 @@ install_claude() {
   fi
 
   local pre_commit_cmd="$hooks_dir/pre-commit-gate.sh"
+  local post_commit_cmd="$hooks_dir/post-commit-sync.sh"
   local session_cmd="$hooks_dir/session-summary.sh"
 
   # Build new hook entries using Claude Code's required format:
   # Each event has an array of matcher objects, each with a "hooks" array of command objects
   local pre_tool_entry="{\"matcher\":\"Bash\",\"hooks\":[{\"type\":\"command\",\"command\":\"$pre_commit_cmd\",\"timeout\":10}]}"
+  local post_tool_entry="{\"matcher\":\"Bash\",\"hooks\":[{\"type\":\"command\",\"command\":\"$post_commit_cmd\",\"timeout\":10}]}"
   local stop_entry="{\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"$session_cmd\",\"timeout\":10}]}"
 
   # Deep merge: preserve existing hooks, append ours
   # Filter out any existing doc-superpowers entries by checking nested hooks[].command
-  settings=$(echo "$settings" | jq --argjson pte "$pre_tool_entry" --argjson se "$stop_entry" '
+  settings=$(echo "$settings" | jq --argjson pte "$pre_tool_entry" --argjson pote "$post_tool_entry" --argjson se "$stop_entry" '
     # Remove any existing doc-superpowers entries first (check nested .hooks[].command)
     .hooks.PreToolUse = ([(.hooks.PreToolUse // [])[] | select(any(.hooks[]?; .command | contains("doc-superpowers")) | not)] + [$pte]) |
+    .hooks.PostToolUse = ([(.hooks.PostToolUse // [])[] | select(any(.hooks[]?; .command | contains("doc-superpowers")) | not)] + [$pote]) |
     .hooks.Stop = ([(.hooks.Stop // [])[] | select(any(.hooks[]?; .command | contains("doc-superpowers")) | not)] + [$se])
   ')
 
   echo "$settings" | jq '.' > "$settings_file"
-  echo "Claude Code hooks: 2 installed (pre-commit-gate, session-summary)"
+  echo "Claude Code hooks: 3 installed (pre-commit-gate, post-commit-sync, session-summary)"
   echo "  Scripts copied to $hooks_dir/"
   echo "  Settings written to $settings_file"
 }
@@ -259,9 +262,11 @@ uninstall_claude() {
 
     settings=$(echo "$settings" | jq '
       .hooks.PreToolUse = [(.hooks.PreToolUse // [])[] | select(any(.hooks[]?; .command | contains("doc-superpowers")) | not)] |
+      .hooks.PostToolUse = [(.hooks.PostToolUse // [])[] | select(any(.hooks[]?; .command | contains("doc-superpowers")) | not)] |
       .hooks.Stop = [(.hooks.Stop // [])[] | select(any(.hooks[]?; .command | contains("doc-superpowers")) | not)] |
       # Clean up empty arrays
       if (.hooks.PreToolUse | length) == 0 then del(.hooks.PreToolUse) else . end |
+      if (.hooks.PostToolUse | length) == 0 then del(.hooks.PostToolUse) else . end |
       if (.hooks.Stop | length) == 0 then del(.hooks.Stop) else . end |
       if (.hooks | length) == 0 then del(.hooks) else . end
     ')
@@ -292,7 +297,7 @@ status_claude() {
   local settings
   settings=$(cat "$settings_file")
 
-  for hook_name in pre-commit-gate session-summary; do
+  for hook_name in pre-commit-gate post-commit-sync session-summary; do
     local script_exists="✗"
     [[ -x "$hooks_dir/${hook_name}.sh" ]] && script_exists="✓"
 
