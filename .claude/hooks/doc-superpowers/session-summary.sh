@@ -6,6 +6,10 @@ DOC_TOOLS="${DOC_TOOLS:-/Users/w/code/doc-superpowers/scripts/doc-tools.sh}"
 DOC_INDEX="${DOC_INDEX:-docs/.doc-index.json}"
 
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
+
+# Resolve to git root so relative paths work from any subdirectory
+cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || exit 0
+
 [[ -f "$DOC_TOOLS" ]] || exit 0
 [[ -f "$DOC_INDEX" ]] || exit 0
 

@@ -31,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/doc-superpowers/pre-commit-gate.sh",
+            "command": "bash -c 'cd \"$(git rev-parse --show-toplevel 2>/dev/null)\" 2>/dev/null && exec .claude/hooks/doc-superpowers/pre-commit-gate.sh'",
             "timeout": 10
           }
         ]
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/doc-superpowers/post-commit-sync.sh",
+            "command": "bash -c 'cd \"$(git rev-parse --show-toplevel 2>/dev/null)\" 2>/dev/null && exec .claude/hooks/doc-superpowers/post-commit-sync.sh'",
             "timeout": 10
           }
         ]
@@ -55,7 +55,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/doc-superpowers/session-summary.sh",
+            "command": "bash -c 'cd \"$(git rev-parse --show-toplevel 2>/dev/null)\" 2>/dev/null && exec .claude/hooks/doc-superpowers/session-summary.sh'",
             "timeout": 10
           }
         ]

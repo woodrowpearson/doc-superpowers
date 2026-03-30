@@ -7,6 +7,9 @@ DOC_INDEX="${DOC_INDEX:-docs/.doc-index.json}"
 
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
 
+# Resolve to git root so relative paths work from any subdirectory
+cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || exit 0
+
 # Check if this is a git commit command
 command_str="${TOOL_INPUT:-}"
 if [[ -n "$command_str" ]]; then
