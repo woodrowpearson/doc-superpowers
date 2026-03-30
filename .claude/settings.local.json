@@ -5,7 +5,61 @@
       "Bash(git stash:*)",
       "Bash(git checkout:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(git branch:*)",
+      "Bash(git push:*)",
+      "Bash(DOC_TOOLS=\"/Users/w/.claude/skills/doc-superpowers/scripts/doc-tools.sh\")",
+      "Bash(bash \"$DOC_TOOLS\" check-freshness /Users/w/code/doc-superpowers/docs)",
+      "Bash(bash /Users/w/.claude/skills/doc-superpowers/scripts/hooks/install.sh status /Users/w/code/doc-superpowers)",
+      "Bash(bash /Users/w/.claude/skills/doc-superpowers/scripts/hooks/install.sh status)",
+      "Bash(while read:*)",
+      "Bash(do git:*)",
+      "Bash(done)",
+      "Bash(/usr/bin/find . -not -path './.git/*' -not -path './.worktrees/*' -not -path './node_modules/*')",
+      "Bash(/usr/bin/find ./.claude -not -path './.git/*')",
+      "Bash(git tag:*)",
+      "Bash(DOC_TOOLS=\"/Users/w/.claude/skills/doc-superpowers/scripts/doc-tools.sh\" cd /Users/w/code/doc-superpowers __NEW_LINE_c08cb220761e4c9b__ cat <<'ENTRIES':*)",
+      "Bash(bash \"$DOC_TOOLS\" build-index docs)",
+      "Bash(DOC_TOOLS=\"/Users/w/.claude/skills/doc-superpowers/scripts/doc-tools.sh\" bash \"$DOC_TOOLS\" check-freshness /Users/w/code/doc-superpowers/docs)",
+      "mcp__mermaid__generate_mermaid_diagram"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/doc-superpowers/pre-commit-gate.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/doc-superpowers/post-commit-sync.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/doc-superpowers/session-summary.sh",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

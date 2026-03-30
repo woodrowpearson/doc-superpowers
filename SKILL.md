@@ -444,8 +444,8 @@ Routes to `scripts/hooks/install.sh <subcommand> [flags]`.
 **IMPORTANT:** ALWAYS use the installer script. NEVER manually add hook entries to `.claude/settings.json` or `.claude/settings.local.json` — the installer handles template processing, path resolution, and deep-merge with existing settings. Manual entries will contain unresolved `__DOC_TOOLS_PATH__` placeholders and break.
 
 **Tier options:**
-- `--git` — Git hooks: pre-commit (freshness gate), post-merge (stale alert), post-checkout (branch check), prepare-commit-msg (inject comments)
-- `--claude` — Claude Code hooks: PreToolUse pre-commit gate, Stop session summary
+- `--git` — Git hooks: pre-commit (freshness gate), post-merge (stale alert), post-checkout (branch check), prepare-commit-msg (inject comments), pre-push (release reminder)
+- `--claude` — Claude Code hooks: PreToolUse pre-commit gate, PostToolUse post-commit sync, Stop session summary
 - `--ci` — CI/CD workflows: PR freshness check, weekly audit, doc-index auto-update
 
 **CI-specific flags:**

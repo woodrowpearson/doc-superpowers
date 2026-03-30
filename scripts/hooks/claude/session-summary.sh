@@ -26,6 +26,11 @@ else
 fi
 
 stale_count=$(echo "$result" | jq -r '.summary.stale // 0' 2>/dev/null) || exit 0
+
+# Auto-refresh index to keep it current between sessions
+# Safe: update-index only writes metadata (content hashes + commit SHAs), never doc content
+bash "$DOC_TOOLS" update-index 2>/dev/null || true
+
 [[ "$stale_count" -eq 0 ]] && exit 0
 
 if [[ "${DOC_SUPERPOWERS_QUIET:-}" != "1" ]]; then
