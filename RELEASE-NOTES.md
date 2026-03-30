@@ -1,5 +1,14 @@
 # Release Notes
 
+## v2.4.1 (2026-03-29)
+
+### Fixes
+- **Plugin manifest conflict resolved**: Removed `strict` and `skills` keys from `.claude-plugin/marketplace.json` that created ambiguous dual-source component discovery, causing Claude Code to reject the plugin with "conflicting manifests." Plugin now delegates all component discovery to `plugin.json`, matching the pattern used by other single-plugin marketplaces.
+
+### Docs
+- **Architecture and workflow diagrams refreshed**: Regenerated C4 container/context, workflow, and sequence diagrams to reflect multi-framework support additions from v2.4.0.
+- **Audit findings resolved**: Addressed 15 documentation audit findings across codebase guide, conventions, getting-started guide, and workflow docs. Rebuilt doc index after git history squash.
+
 ## v2.4.0 (2026-03-27)
 
 ### Features
