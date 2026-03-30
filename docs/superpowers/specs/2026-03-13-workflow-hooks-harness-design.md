@@ -44,10 +44,12 @@ scripts/
     │   ├── pre-commit        # Freshness gate on staged files
     │   ├── post-merge        # Freshness alert after pull/merge
     │   ├── post-checkout     # Freshness check on branch switch
-    │   └── prepare-commit-msg # Inject freshness into commit msg
+    │   ├── prepare-commit-msg # Inject freshness into commit msg
+    │   └── pre-push          # Release reminder when >5 unreleased commits
     ├── claude/
     │   ├── pre-commit-gate.sh   # PreToolUse matcher for git commit
-    │   └── session-summary.sh   # Stop hook — stale doc reminder
+    │   ├── post-commit-sync.sh  # PostToolUse matcher — index sync after commits
+    │   └── session-summary.sh   # Stop hook — stale doc reminder + index refresh
     └── ci/
         ├── doc-freshness-pr.yml          # PR freshness check
         ├── doc-freshness-schedule.yml    # Weekly cron audit
@@ -180,6 +182,27 @@ Surfaces staleness when landing on a new branch.
 3. Report only, never blocks
 4. Silent if nothing stale
 
+### pre-push
+
+Release reminder — warns when unreleased commits accumulate since the last tag.
+
+**Behavior:**
+1. Check `DOC_SUPERPOWERS_SKIP` — exit 0 if set
+2. Find the most recent git tag: `git describe --tags --abbrev=0`
+3. If no tags exist: exit 0 silently
+4. Count commits since that tag: `git rev-list <tag>..HEAD --count`
+5. If count <= 5: exit 0 silently
+6. If count > 5: print reminder suggesting `/doc-superpowers release`
+7. Never blocks (always exit 0)
+
+**Output format:**
+```
+doc-superpowers: 12 commits since v2.3.0
+  Consider running '/doc-superpowers release' to draft release notes.
+```
+
+**Performance target:** <0.5s (just `git describe` + `git rev-list --count`).
+
 ### prepare-commit-msg
 
 Optional traceability — injects freshness status into commit message template.
@@ -247,15 +270,51 @@ Catches Claude-initiated commits that bypass git hooks.
 }
 ```
 
+### post-commit-sync.sh (PostToolUse on Bash)
+
+Auto-syncs the doc index after Claude-initiated git commits and reports stale doc guidance.
+
+**Behavior:**
+1. Inspect Bash tool input for `git commit` pattern
+2. If not a commit command: exit 0 (pass through)
+3. Run `doc-tools.sh update-index` to refresh the index with the new commit
+4. Extract just-committed files: `git diff --name-only HEAD~1..HEAD` (with `git diff-tree` fallback for initial commits)
+5. Run `doc-tools.sh check-freshness --code-refs <committed files>`
+6. If stale or missing docs found: output summary with paths and reasons
+7. Always exit 0 (informational only)
+
+**Matcher configuration:**
+```json
+{
+  "matcher": "Bash",
+  "hooks": [
+    {
+      "type": "command",
+      "command": ".claude/hooks/doc-superpowers/post-commit-sync.sh",
+      "timeout": 10
+    }
+  ]
+}
+```
+
+**Output format:**
+```
+doc-superpowers: 2 doc(s) affected by this commit
+  docs/architecture.md — code_changed: src/api/ (3 commits behind)
+  docs/data-layer.md — code_changed: src/models/ (1 commit behind)
+  Run '/doc-superpowers update' to refresh stale documentation.
+```
+
 ### session-summary.sh (Stop hook)
 
-Reminds developer about stale docs before leaving a Claude session.
+Reminds developer about stale docs before leaving a Claude session and auto-refreshes the doc index.
 
 **Behavior:**
 1. Run `doc-tools.sh check-freshness` (full scope)
-2. If stale docs found: output summary
-3. If all current: silent
-4. Must complete in <1s (on exit path) — enforced via `timeout 1` wrapper to prevent blocking session exit
+2. Auto-refresh the doc index via `doc-tools.sh update-index` (with 1-second timeout guard to prevent blocking session exit)
+3. If stale docs found: output summary
+4. If all current: silent
+5. Must complete in <1s (on exit path) — enforced via `timeout 1` / `gtimeout 1` wrapper with manual background+kill fallback for vanilla macOS
 
 **Output format:**
 ```
@@ -283,6 +342,18 @@ The installer copies hook scripts to `.claude/hooks/doc-superpowers/` and deep-m
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/doc-superpowers/post-commit-sync.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "matcher": "",
@@ -301,7 +372,7 @@ The installer copies hook scripts to `.claude/hooks/doc-superpowers/` and deep-m
 
 Note the nested structure: each event entry has a `matcher` (empty string for Stop hooks, which fire unconditionally) and a `hooks` array of command objects with `type`, `command`, and `timeout` fields. This matches Claude Code's required hook format.
 
-Existing entries in `PreToolUse` or `Stop` arrays are preserved — doc-superpowers entries are appended. Existing doc-superpowers entries are replaced (filtered by `command` path containing `doc-superpowers`).
+Existing entries in `PreToolUse`, `PostToolUse`, or `Stop` arrays are preserved — doc-superpowers entries are appended. Existing doc-superpowers entries are replaced (filtered by `command` path containing `doc-superpowers`).
 
 ---
 
@@ -406,8 +477,8 @@ Routes to `scripts/hooks/install.sh <subcommand> [flags]`.
 doc-superpowers hooks installer
 
 Which tiers would you like to install?
-  [1] Git hooks (pre-commit, post-merge, post-checkout, prepare-commit-msg)
-  [2] Claude Code hooks (pre-commit gate, session summary)
+  [1] Git hooks (pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push)
+  [2] Claude Code hooks (pre-commit gate, post-commit sync, session summary)
   [3] CI/CD workflows (PR check, weekly audit, index update)
   [a] All of the above
 
@@ -452,7 +523,7 @@ When invoked without tier flags:
 
 Per-tier behavior:
 - **Git:** Remove hooks with doc-superpowers marker from the resolved hooks dir. For source-integrated hooks, perform begin/end marker range deletion (`/# doc-superpowers:begin/,/# doc-superpowers:end/d`) with a legacy single-line pattern fallback (for hooks integrated before the begin/end convention). Also remove the local `.doc-superpowers-{name}` hook copy from the hooks directory.
-- **Claude:** Remove doc-superpowers entries from `.claude/settings.local.json` hook arrays (filtered by `command` containing `doc-superpowers`). Remove copied scripts from `.claude/hooks/doc-superpowers/`. Clean up empty `hooks.PreToolUse`, `hooks.Stop`, and `hooks` keys.
+- **Claude:** Remove doc-superpowers entries from `.claude/settings.local.json` hook arrays (filtered by `command` containing `doc-superpowers`). Remove copied scripts from `.claude/hooks/doc-superpowers/`. Clean up empty `hooks.PreToolUse`, `hooks.PostToolUse`, `hooks.Stop`, and `hooks` keys.
 - **CI:** Remove workflow files with doc-superpowers marker from `.github/workflows/`
 
 Never touches files/entries without the doc-superpowers marker.
@@ -472,9 +543,11 @@ Git Hooks (dir: .git/hooks):
   ✓ post-merge            integrated (source)
   ✗ post-checkout         not installed
   ✗ prepare-commit-msg    not installed
+  ✗ pre-push              not installed
 
 Claude Code Hooks:
   ✓ pre-commit-gate       active (script + settings)
+  ✓ post-commit-sync      active (script + settings)
   ✓ session-summary       active (script + settings)
 
 CI/CD Workflows:
@@ -565,7 +638,10 @@ Test each hook script:
 - post-merge: mock stale results, verify output format
 - post-checkout: verify branch-switch filter ($3 check)
 - prepare-commit-msg: verify comment block format in temp commit msg file
-- Claude hooks: mock tool input, verify matcher logic and output
+- pre-push: mock `git describe` and `git rev-list --count` at various thresholds (<=5 silent, >5 warns), verify output format
+- Claude pre-commit-gate: mock tool input, verify git commit matcher logic and output
+- Claude post-commit-sync: mock tool input with git commit pattern, verify update-index is called, verify freshness check scoped to committed files, verify non-commit commands are ignored
+- Claude session-summary: mock stale results, verify output format, verify update-index runs with timeout guard
 
 ### Graceful Degradation Matrix
 
@@ -598,4 +674,4 @@ Every hook wraps its `doc-tools.sh` call in a subshell that traps errors: `resul
    - `--cron <expression>` (default: `0 9 * * 1`) — schedule for drift detector
    - `--ci-strict` — make PR check a required status (exits 1 on stale)
 
-3. **`hooks status` in `sync` output:** Yes. Append a one-line hooks summary to `sync` output: `Hooks: 4/4 git, 2/2 claude, 0/3 ci`
+3. **`hooks status` in `sync` output:** Yes. Append a one-line hooks summary to `sync` output: `Hooks: 5/5 git, 3/3 claude, 0/3 ci`

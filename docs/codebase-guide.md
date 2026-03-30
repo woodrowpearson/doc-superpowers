@@ -33,10 +33,12 @@ doc-superpowers/
 │       │   ├── pre-commit          # Freshness gate — warns/blocks on stale docs
 │       │   ├── post-merge          # Stale alert after merge
 │       │   ├── post-checkout       # Branch switch check
-│       │   └── prepare-commit-msg  # Injects freshness comments
+│       │   ├── prepare-commit-msg  # Injects freshness comments
+│       │   └── pre-push            # Release reminder — warns when >5 unreleased commits since last tag
 │       ├── claude/           # Claude Code hook scripts
 │       │   ├── pre-commit-gate.sh  # PreToolUse pre-commit gate
-│       │   └── session-summary.sh  # Stop session summary reminder
+│       │   ├── post-commit-sync.sh # PostToolUse hook — auto-runs update-index after git commits, reports stale docs
+│       │   └── session-summary.sh  # Stop session summary reminder (includes auto index-update with 1-second timeout guard)
 │       └── ci/               # GitHub Actions workflow templates
 │           ├── doc-freshness-pr.yml       # PR freshness check
 │           ├── doc-freshness-schedule.yml # Weekly scheduled audit
@@ -83,7 +85,7 @@ doc-superpowers/
 | `scripts/doc-tools.sh` | Bundled freshness tooling with 7 subcommands: `build-index`, `check-freshness`, `update-index`, `add-entry`, `remove-entry`, `deprecate-entry`, `status`. Content hashing for docs, commit SHA for code | Changing staleness detection, index schema, adding subcommands |
 | `scripts/test-doc-tools.sh` | Comprehensive test suite for doc-tools.sh — tests all subcommands, edge cases, error handling | Adding tests for new doc-tools features |
 | `scripts/test-helpers.sh` | Shared test helpers (setup, teardown, assertions) sourced by test suites | Adding shared test utilities or assertions |
-| `scripts/hooks/install.sh` | Hook installer engine — install/uninstall/status for git, Claude Code, and CI tiers. Routes to hook scripts in git/, claude/, ci/ subdirectories | Adding hook tiers, changing installer logic, adding new hook scripts |
+| `scripts/hooks/install.sh` | Hook installer engine — install/uninstall/status for git, Claude Code, and CI tiers. Registers 3 Claude Code hooks (PreToolUse, PostToolUse, Stop) and 5 git hooks. Routes to hook scripts in git/, claude/, ci/ subdirectories | Adding hook tiers, changing installer logic, adding new hook scripts |
 | `scripts/test-hooks.sh` | Test suite for hooks installer and all hook scripts — covers install, uninstall, status, and per-hook behavior | Adding tests for new hooks or installer features |
 | `references/doc-spec.md` | Templates for doc types + agentic workflow extension + Mermaid diagram syntax + CLAUDE.md rules + naming conventions + doc-index schema | Adding new doc types, changing template structure, updating Mermaid syntax |
 | `references/agent-prompt-template.md` | Review agent prompt template + scope-specific focus areas dispatched to each review agent | Changing agent review instructions, adding scope focus areas |
@@ -121,8 +123,8 @@ doc-superpowers/
 | Installation instructions | `README.md` "Installation" |
 | Version history | `RELEASE-NOTES.md` |
 | Hook installer logic | `scripts/hooks/install.sh` — tier routing, file copying, status reporting |
-| Git hook scripts | `scripts/hooks/git/` — pre-commit, post-merge, post-checkout, prepare-commit-msg |
-| Claude Code hook scripts | `scripts/hooks/claude/` — pre-commit-gate.sh, session-summary.sh |
+| Git hook scripts | `scripts/hooks/git/` — pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push |
+| Claude Code hook scripts | `scripts/hooks/claude/` — pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh |
 | CI workflow templates | `scripts/hooks/ci/` — doc-freshness-pr.yml, doc-freshness-schedule.yml, doc-index-update.yml |
 | Hook test suite | `scripts/test-hooks.sh` |
 | Hooks action routing | `SKILL.md` Section 1 "`hooks`" subsection |
@@ -232,6 +234,7 @@ User invokes /doc-superpowers hooks install --all
       → Copy hook scripts to .claude/hooks/doc-superpowers/ with __DOC_TOOLS_PATH__ and __INSTALL_DATE__ placeholder substitution
       → Register hooks in .claude/settings.local.json using relative paths
       → PreToolUse: .claude/hooks/doc-superpowers/pre-commit-gate.sh (Bash matcher)
+      → PostToolUse: .claude/hooks/doc-superpowers/post-commit-sync.sh (Bash matcher)
       → Stop: .claude/hooks/doc-superpowers/session-summary.sh
       → Deep-merge into existing settings (preserves other hook entries, deduplicates doc-superpowers entries)
     → For --ci tier:

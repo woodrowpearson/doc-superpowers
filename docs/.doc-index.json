@@ -1,35 +1,35 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-03-30T02:43:41Z",
+  "generated_at": "2026-03-30T03:33:38Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
-      "content_hash": "sha256:2fa7a59acff6cc75f1ca3050b092fe40c02b7e3b57a31060a3dc944618a654eb",
+      "content_hash": "sha256:ffa68e2ae6b40f8bcea303837842e819b3a751fc4b5a834f7e915de50cadd768",
       "code_refs": [
         "SKILL.md",
         "scripts/",
         "references/"
       ],
-      "code_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
+      "code_commit": "7db0d5e2eb5af9144719f5d7ea2575fec6992f61",
       "doc_type": "architecture",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-27T21:02:26Z"
+      "last_verified": "2026-03-30T03:33:38Z"
     },
     "docs/codebase-guide.md": {
-      "content_hash": "sha256:1c3d1ad7248d03c38bb1410a910a06d887f1a2b958533aa2340114afa8d20bb4",
+      "content_hash": "sha256:f75864024ea1aa4f63182bf43c3bc84ff91b1f4723e67f4a020debc32690f6f7",
       "code_refs": [
         "SKILL.md",
         "scripts/"
       ],
-      "code_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
+      "code_commit": "7db0d5e2eb5af9144719f5d7ea2575fec6992f61",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-27T21:02:26Z"
+      "last_verified": "2026-03-30T03:33:38Z"
     },
     "docs/conventions.md": {
       "content_hash": "sha256:eff47c85224ed5ed58b02b668c59ba84a7dbd7d1b500c67ce27921f5fcaf50d1",
@@ -37,12 +37,12 @@
         "SKILL.md",
         "references/doc-spec.md"
       ],
-      "code_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
+      "code_commit": "cba0330f4cc58bd871fb1a30f790d58304ac2836",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-27T21:02:26Z"
+      "last_verified": "2026-03-30T03:33:38Z"
     },
     "docs/guides/getting-started.md": {
       "content_hash": "sha256:bbbdedb3c9b4dee1e6378c1fa981eaf6c6ecac1696f7264392df2848260914c8",
@@ -50,49 +50,49 @@
         "README.md",
         "SKILL.md"
       ],
-      "code_commit": "74ad35a3b4ee0e6f8d5b5ca3f62a49f7a67b51f0",
+      "code_commit": "cba0330f4cc58bd871fb1a30f790d58304ac2836",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-30T02:43:41Z"
+      "last_verified": "2026-03-30T03:33:38Z"
     },
     "docs/workflows/doc-superpowers.md": {
-      "content_hash": "sha256:bfb60f45912f23071cf62a7608dd535404ee3c49fdffa7075780af24b0e92155",
+      "content_hash": "sha256:44532011abae01e906780f77c8c79becdeccde15c168b6ef81c0b4cfa7f5d8e7",
       "code_refs": [
         "SKILL.md",
         "scripts/"
       ],
-      "code_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
+      "code_commit": "7db0d5e2eb5af9144719f5d7ea2575fec6992f61",
       "doc_type": "workflows",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-27T21:02:26Z"
+      "last_verified": "2026-03-30T03:33:38Z"
     },
     "docs/plans/2026-03-26-audit-report.md": {
       "content_hash": "sha256:330e4350a91ef66501f4b0286111860289135f4158f2abdb9f5fc27e628a59bd",
       "code_refs": [
         "SKILL.md"
       ],
-      "code_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
+      "code_commit": "cba0330f4cc58bd871fb1a30f790d58304ac2836",
       "doc_type": "plan",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-27T21:02:26Z"
+      "last_verified": "2026-03-30T03:33:38Z"
     },
     "docs/plans/2026-03-27-audit-report.md": {
       "content_hash": "sha256:4f5be7284798fd335dd1a4428844b2cb7e8b3210636037410d50343aea4b5185",
       "code_refs": [
         "SKILL.md"
       ],
-      "code_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
+      "code_commit": "cba0330f4cc58bd871fb1a30f790d58304ac2836",
       "doc_type": "plan",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-27T21:02:26Z"
+      "last_verified": "2026-03-30T03:33:38Z"
     },
     "docs/superpowers/plans/2026-03-12-bundled-doc-tooling.md": {
       "content_hash": "sha256:eefc40bbe77f014857e3d83f72299674e320d93d8a7ae3dfff76833ef0f56c86",
@@ -100,25 +100,25 @@
         "SKILL.md",
         "scripts/doc-tools.sh"
       ],
-      "code_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
+      "code_commit": "cba0330f4cc58bd871fb1a30f790d58304ac2836",
       "doc_type": "plan",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-27T21:02:26Z"
+      "last_verified": "2026-03-30T03:33:38Z"
     },
     "docs/superpowers/plans/2026-03-13-workflow-hooks-harness.md": {
-      "content_hash": "sha256:bb8722cecbb5f990f7e2f1a8ca3f42c02053a5c66da9a95819f16622c5903d33",
+      "content_hash": "sha256:0d4b1ff05f017e47c81477f405ded4df56107087a6d6055a93c6bc34e44664b7",
       "code_refs": [
         "SKILL.md",
         "scripts/hooks/"
       ],
-      "code_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
+      "code_commit": "7db0d5e2eb5af9144719f5d7ea2575fec6992f61",
       "doc_type": "plan",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-27T21:02:26Z"
+      "last_verified": "2026-03-30T03:33:38Z"
     },
     "docs/superpowers/plans/2026-03-14-spec-lifecycle-protocol.md": {
       "content_hash": "sha256:449c9b33ce9872f09044e50f23ab5756f82e45173391afb6c2a111a8ddabd178",
@@ -127,12 +127,12 @@
         "references/spec-lifecycle-actions.md",
         "references/spec-lifecycle-protocol.md"
       ],
-      "code_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
+      "code_commit": "cba0330f4cc58bd871fb1a30f790d58304ac2836",
       "doc_type": "plan",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-27T21:02:26Z"
+      "last_verified": "2026-03-30T03:33:38Z"
     },
     "docs/superpowers/plans/2026-03-25-release-notes-readme-sync.md": {
       "content_hash": "sha256:6119db66c5b6f0731dcbbe22edaf818b8ab050e966a4749df29148661722b189",
@@ -140,12 +140,12 @@
         "SKILL.md",
         "references/"
       ],
-      "code_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
+      "code_commit": "cba0330f4cc58bd871fb1a30f790d58304ac2836",
       "doc_type": "plan",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-27T21:02:26Z"
+      "last_verified": "2026-03-30T03:33:38Z"
     },
     "docs/superpowers/plans/2026-03-26-multi-framework-support.md": {
       "content_hash": "sha256:fffc55c2b173d8f88ca484173066bb5f319ef972b0de4c54e18a0afcbe657ea2",
@@ -153,12 +153,12 @@
         "SKILL.md",
         "references/tool-mappings.md"
       ],
-      "code_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
+      "code_commit": "cba0330f4cc58bd871fb1a30f790d58304ac2836",
       "doc_type": "plan",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-27T21:02:26Z"
+      "last_verified": "2026-03-30T03:33:38Z"
     },
     "docs/superpowers/specs/2026-03-12-bundled-doc-tooling-design.md": {
       "content_hash": "sha256:0f053453a6ecabeeb40cf87a721b697e90efabe1dea119a246adc5d733652e39",
@@ -173,16 +173,16 @@
       "last_verified": "2026-03-27T21:02:26Z"
     },
     "docs/superpowers/specs/2026-03-13-workflow-hooks-harness-design.md": {
-      "content_hash": "sha256:2598e5d3bcbf35f0eaa7072f5ec4709d37e0fd53561bb09616ac1368753d364d",
+      "content_hash": "sha256:d7080461eefe13d8aa12c938fa8a621019ea267a6ee6863c3cc6ff7c2d734b1b",
       "code_refs": [
         "scripts/hooks/"
       ],
-      "code_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
+      "code_commit": "7db0d5e2eb5af9144719f5d7ea2575fec6992f61",
       "doc_type": "spec",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-27T21:02:26Z"
+      "last_verified": "2026-03-30T03:33:38Z"
     },
     "docs/superpowers/specs/2026-03-14-spec-lifecycle-protocol-design.md": {
       "content_hash": "sha256:acf3d090a48f4efe2a34180cac359ced230ea6375327cdbfefe49f2518c1097a",
@@ -203,36 +203,36 @@
         "SKILL.md",
         "references/"
       ],
-      "code_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
+      "code_commit": "cba0330f4cc58bd871fb1a30f790d58304ac2836",
       "doc_type": "spec",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-27T21:02:26Z"
+      "last_verified": "2026-03-30T03:33:38Z"
     },
     "docs/archive/plans/2026-03-15-audit-report.md": {
       "content_hash": "sha256:0e5834ae0d9dc4f82ed716747692392db5a04beb673b26fc9e8dff90747d6e5b",
       "code_refs": [
         "SKILL.md"
       ],
-      "code_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
+      "code_commit": "cba0330f4cc58bd871fb1a30f790d58304ac2836",
       "doc_type": "plan",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-27T21:02:26Z"
+      "last_verified": "2026-03-30T03:33:38Z"
     },
     "docs/archive/plans/2026-03-25-audit-report.md": {
       "content_hash": "sha256:c88c7fbe8e35d05422c628d707f11184b6bb3dfa6d910dea672a524623ad66ae",
       "code_refs": [
         "SKILL.md"
       ],
-      "code_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
+      "code_commit": "cba0330f4cc58bd871fb1a30f790d58304ac2836",
       "doc_type": "plan",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-27T21:02:26Z"
+      "last_verified": "2026-03-30T03:33:38Z"
     }
   }
 }
