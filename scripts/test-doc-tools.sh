@@ -528,6 +528,106 @@ test_update_index_multiple_paths() {
   teardown
 }
 
+# --- Version management tests ---
+
+# Helper: create minimal version manifest files in test dir
+setup_version_files() {
+  echo '{"name":"test","version":"1.0.0"}' > package.json
+  echo '{"name":"test","version":"1.0.0"}' > claude-code.json
+  mkdir -p .claude-plugin .cursor-plugin
+  echo '{"name":"test","version":"1.0.0"}' > .claude-plugin/plugin.json
+  echo '{"name":"test","metadata":{"version":"1.0.0"},"plugins":[]}' > .claude-plugin/marketplace.json
+  echo '{"name":"test","version":"1.0.0"}' > .cursor-plugin/plugin.json
+  echo '{"name":"test","version":"1.0.0"}' > gemini-extension.json
+  echo -e "# Release Notes\n\n## v1.0.0 (2026-01-01)" > RELEASE-NOTES.md
+}
+
+test_bump_version_updates_all_files() {
+  echo "test: bump-version updates all 6 manifest files"
+  setup
+  setup_version_files
+  set +e
+  output=$("$DOC_TOOLS" bump-version 2.0.0 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_contains "$output" "Updated 6 file(s)" "reports 6 files updated"
+  assert_eq "2.0.0" "$(jq -r .version package.json)" "package.json bumped"
+  assert_eq "2.0.0" "$(jq -r .version claude-code.json)" "claude-code.json bumped"
+  assert_eq "2.0.0" "$(jq -r .version .claude-plugin/plugin.json)" "plugin.json bumped"
+  assert_eq "2.0.0" "$(jq -r .metadata.version .claude-plugin/marketplace.json)" "marketplace.json bumped"
+  assert_eq "2.0.0" "$(jq -r .version .cursor-plugin/plugin.json)" "cursor plugin.json bumped"
+  assert_eq "2.0.0" "$(jq -r .version gemini-extension.json)" "gemini-extension.json bumped"
+  teardown
+}
+
+test_bump_version_idempotent() {
+  echo "test: bump-version is idempotent"
+  setup
+  setup_version_files
+  "$DOC_TOOLS" bump-version 1.0.0 >/dev/null 2>&1
+  set +e
+  output=$("$DOC_TOOLS" bump-version 1.0.0 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_contains "$output" "Updated 0 file(s)" "no files changed"
+  teardown
+}
+
+test_bump_version_validates_semver() {
+  echo "test: bump-version rejects invalid version format"
+  setup
+  set +e
+  output=$("$DOC_TOOLS" bump-version "abc" 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "exits 1"
+  assert_contains "$output" "invalid version format" "error message"
+  teardown
+}
+
+test_bump_version_requires_arg() {
+  echo "test: bump-version requires a version argument"
+  setup
+  set +e
+  output=$("$DOC_TOOLS" bump-version 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "exits 1"
+  assert_contains "$output" "requires a version" "error message"
+  teardown
+}
+
+test_check_version_detects_mismatch() {
+  echo "test: check-version detects version mismatch"
+  setup
+  setup_version_files
+  # Desync one file
+  echo '{"name":"test","version":"0.9.0"}' > package.json
+  set +e
+  output=$("$DOC_TOOLS" check-version 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "exits 1 on mismatch"
+  assert_contains "$output" "MISMATCH" "reports mismatch"
+  assert_contains "$output" "package.json" "names the file"
+  teardown
+}
+
+test_check_version_passes_when_synced() {
+  echo "test: check-version passes when all versions match"
+  setup
+  setup_version_files
+  set +e
+  output=$("$DOC_TOOLS" check-version 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_contains "$output" "PASS" "reports pass"
+  teardown
+}
+
 # --- Runner ---
 
 run_tests() {
@@ -569,6 +669,12 @@ run_tests() {
   test_update_index_updates_generated_at
   test_build_index_empty_stdin
   test_update_index_multiple_paths
+  test_bump_version_updates_all_files
+  test_bump_version_idempotent
+  test_bump_version_validates_semver
+  test_bump_version_requires_arg
+  test_check_version_detects_mismatch
+  test_check_version_passes_when_synced
   print_summary
 }
 

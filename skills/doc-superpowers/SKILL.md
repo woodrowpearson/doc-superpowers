@@ -426,8 +426,9 @@ Use when cutting a new version. Analyzes commits since the last release, drafts 
    - Instructions: group changes into Features / Fixes / Breaking Changes / Dependencies sections using the existing bold-title-colon-description format. Flag anything that looks like a breaking change. Omit sections with no entries.
 5. **Present draft to user** — Show the drafted entry in full. User edits or approves.
 6. **Prepend to RELEASE-NOTES.md** — Insert new version entry after the `# Release Notes` header, before the previous version entry.
-7. **Sync CLAUDE.md and README.md** — If unreleased commits changed commands, key files, directory structure, actions, or features, update CLAUDE.md and README.md per `references/doc-spec.md` rules. This catches drift that accumulated across the commits being released.
-8. **Offer git tag** — Prompt: "Create git tag `vX.Y.Z`?" If yes, run `git tag vX.Y.Z`. If the project has older untagged versions (entries in RELEASE-NOTES.md with no matching tag), mention them and offer to backfill.
+7. **Bump version in all manifests** — Run `doc-tools.sh bump-version X.Y.Z` to deterministically update version strings across all manifest files (package.json, claude-code.json, plugin.json, marketplace.json, gemini-extension.json, cursor plugin.json). Then run `doc-tools.sh check-version` to verify all files match. This step is **mandatory** — never manually edit version strings in individual files.
+8. **Sync CLAUDE.md and README.md** — If unreleased commits changed commands, key files, directory structure, actions, or features, update CLAUDE.md and README.md per `references/doc-spec.md` rules. This catches drift that accumulated across the commits being released.
+9. **Offer git tag** — Prompt: "Create git tag `vX.Y.Z`?" If yes, run `git tag vX.Y.Z`. If the project has older untagged versions (entries in RELEASE-NOTES.md with no matching tag), mention them and offer to backfill.
 
 ### `hooks` — Install Workflow Hooks
 

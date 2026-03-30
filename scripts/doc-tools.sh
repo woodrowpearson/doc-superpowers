@@ -128,6 +128,11 @@ Subcommands:
   deprecate-entry   Mark entries as deprecated in docs/.doc-index.json
                     Usage: deprecate-entry [--superseded-by <path>] <doc_path> ...
   status <path>     Query freshness of a single doc (read-only)
+  bump-version VER  Update version string in all manifest files
+                    Files: RELEASE-NOTES.md, package.json, claude-code.json,
+                    .claude-plugin/plugin.json, .claude-plugin/marketplace.json,
+                    .cursor-plugin/plugin.json, gemini-extension.json
+  check-version     Verify all manifest files have the same version
 
 Options:
   --help            Show this help message
@@ -764,6 +769,102 @@ cmd_status() {
     '{path: $path} + . + {doc_type: $doc_type, last_verified: $last_verified}'
 }
 
+# --- Version management ---
+
+# All files that carry a version string, with their jq path
+VERSION_FILES=(
+  "package.json:.version"
+  "claude-code.json:.version"
+  ".claude-plugin/plugin.json:.version"
+  ".claude-plugin/marketplace.json:.metadata.version"
+  ".cursor-plugin/plugin.json:.version"
+  "gemini-extension.json:.version"
+)
+
+cmd_bump_version() {
+  local new_version="${1:-}"
+  if [[ -z "$new_version" ]]; then
+    echo "ERROR: bump-version requires a version argument (e.g., 2.5.0)" >&2
+    exit 1
+  fi
+
+  # Validate semver format
+  if ! [[ "$new_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "ERROR: invalid version format '$new_version' — expected MAJOR.MINOR.PATCH" >&2
+    exit 1
+  fi
+
+  local updated=0
+
+  for entry in "${VERSION_FILES[@]}"; do
+    local file="${entry%%:*}"
+    local jq_path="${entry#*:}"
+
+    if [[ ! -f "$file" ]]; then
+      echo "  skip: $file (not found)"
+      continue
+    fi
+
+    local current
+    current=$(jq -r "$jq_path // empty" "$file" 2>/dev/null)
+    if [[ "$current" == "$new_version" ]]; then
+      echo "  ok:   $file (already $new_version)"
+      continue
+    fi
+
+    local tmp
+    tmp=$(mktemp)
+    jq "$jq_path = \"$new_version\"" "$file" > "$tmp" && mv "$tmp" "$file"
+    echo "  bump: $file ($current → $new_version)"
+    updated=$((updated + 1))
+  done
+
+  echo "Updated $updated file(s) to v$new_version"
+}
+
+cmd_check_version() {
+  # Extract canonical version from RELEASE-NOTES.md
+  local canonical
+  canonical=$(grep -m 1 -o '## v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' RELEASE-NOTES.md 2>/dev/null | sed 's/## v//')
+  if [[ -z "$canonical" ]]; then
+    echo "ERROR: could not extract version from RELEASE-NOTES.md" >&2
+    exit 1
+  fi
+
+  local mismatched=0
+  local checked=0
+
+  echo "Canonical version (RELEASE-NOTES.md): v$canonical"
+
+  for entry in "${VERSION_FILES[@]}"; do
+    local file="${entry%%:*}"
+    local jq_path="${entry#*:}"
+
+    if [[ ! -f "$file" ]]; then
+      continue
+    fi
+
+    local actual
+    actual=$(jq -r "$jq_path // empty" "$file" 2>/dev/null)
+    checked=$((checked + 1))
+
+    if [[ "$actual" != "$canonical" ]]; then
+      echo "  MISMATCH: $file has $actual (expected $canonical)"
+      mismatched=$((mismatched + 1))
+    else
+      echo "  ok:       $file"
+    fi
+  done
+
+  if [[ "$mismatched" -gt 0 ]]; then
+    echo "FAIL: $mismatched/$checked file(s) have mismatched versions"
+    echo "  Run: doc-tools.sh bump-version $canonical"
+    exit 1
+  fi
+
+  echo "PASS: all $checked file(s) match v$canonical"
+}
+
 # --- Main ---
 
 check_deps
@@ -776,6 +877,8 @@ case "${1:-}" in
   remove-entry)     shift; cmd_remove_entry "$@" ;;
   deprecate-entry)  shift; cmd_deprecate_entry "$@" ;;
   status)           shift; cmd_status "$@" ;;
+  bump-version)     shift; cmd_bump_version "$@" ;;
+  check-version)    shift; cmd_check_version "$@" ;;
   --help|"")        usage ;;
   *)                usage ;;
 esac
