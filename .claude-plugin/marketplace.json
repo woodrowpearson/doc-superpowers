@@ -11,11 +11,7 @@
     {
       "name": "doc-superpowers",
       "description": "Generates, audits, and maintains project docs through parallel agent dispatch, agentic workflow discovery, diagram generation, and spec lifecycle tracking",
-      "source": "./",
-      "strict": false,
-      "skills": [
-        "./"
-      ]
+      "source": "./"
     }
   ]
 }
