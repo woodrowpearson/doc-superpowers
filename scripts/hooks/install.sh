@@ -227,9 +227,16 @@ install_claude() {
 
   # Build new hook entries using Claude Code's required format:
   # Each event has an array of matcher objects, each with a "hooks" array of command objects
-  local pre_tool_entry="{\"matcher\":\"Bash\",\"hooks\":[{\"type\":\"command\",\"command\":\"$pre_commit_cmd\",\"timeout\":10}]}"
-  local post_tool_entry="{\"matcher\":\"Bash\",\"hooks\":[{\"type\":\"command\",\"command\":\"$post_commit_cmd\",\"timeout\":10}]}"
-  local stop_entry="{\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"$session_cmd\",\"timeout\":10}]}"
+  # Wrap commands with git-root cd so hooks work from any subdirectory
+  local wrap_prefix='cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null && exec '
+  local pre_tool_entry post_tool_entry stop_entry
+  pre_tool_entry=$(jq -n --arg cmd "bash -c '${wrap_prefix}${pre_commit_cmd}'" \
+    '{"matcher":"Bash","hooks":[{"type":"command","command":$cmd,"timeout":10}]}')
+  post_tool_entry=$(jq -n --arg cmd "bash -c '${wrap_prefix}${post_commit_cmd}'" \
+    '{"matcher":"Bash","hooks":[{"type":"command","command":$cmd,"timeout":10}]}')
+  stop_entry=$(jq -n --arg cmd "bash -c '${wrap_prefix}${session_cmd}'" \
+    '{"matcher":"","hooks":[{"type":"command","command":$cmd,"timeout":10}]}')
+
 
   # Deep merge: preserve existing hooks, append ours
   # Filter out any existing doc-superpowers entries by checking nested hooks[].command
