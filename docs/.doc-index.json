@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-03-30T03:33:38Z",
+  "generated_at": "2026-03-30T04:23:38Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -11,12 +11,12 @@
         "scripts/",
         "references/"
       ],
-      "code_commit": "7db0d5e2eb5af9144719f5d7ea2575fec6992f61",
+      "code_commit": "fc3621ced2f7d22f309f5847d393835f6a0d5723",
       "doc_type": "architecture",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-30T03:33:38Z"
+      "last_verified": "2026-03-30T04:23:38Z"
     },
     "docs/codebase-guide.md": {
       "content_hash": "sha256:f75864024ea1aa4f63182bf43c3bc84ff91b1f4723e67f4a020debc32690f6f7",
@@ -24,12 +24,12 @@
         "SKILL.md",
         "scripts/"
       ],
-      "code_commit": "7db0d5e2eb5af9144719f5d7ea2575fec6992f61",
+      "code_commit": "fc3621ced2f7d22f309f5847d393835f6a0d5723",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-30T03:33:38Z"
+      "last_verified": "2026-03-30T04:23:38Z"
     },
     "docs/conventions.md": {
       "content_hash": "sha256:eff47c85224ed5ed58b02b668c59ba84a7dbd7d1b500c67ce27921f5fcaf50d1",
@@ -63,12 +63,12 @@
         "SKILL.md",
         "scripts/"
       ],
-      "code_commit": "7db0d5e2eb5af9144719f5d7ea2575fec6992f61",
+      "code_commit": "fc3621ced2f7d22f309f5847d393835f6a0d5723",
       "doc_type": "workflows",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-30T03:33:38Z"
+      "last_verified": "2026-03-30T04:23:38Z"
     },
     "docs/plans/2026-03-26-audit-report.md": {
       "content_hash": "sha256:330e4350a91ef66501f4b0286111860289135f4158f2abdb9f5fc27e628a59bd",
@@ -100,12 +100,12 @@
         "SKILL.md",
         "scripts/doc-tools.sh"
       ],
-      "code_commit": "cba0330f4cc58bd871fb1a30f790d58304ac2836",
+      "code_commit": "fc3621ced2f7d22f309f5847d393835f6a0d5723",
       "doc_type": "plan",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-30T03:33:38Z"
+      "last_verified": "2026-03-30T04:23:38Z"
     },
     "docs/superpowers/plans/2026-03-13-workflow-hooks-harness.md": {
       "content_hash": "sha256:0d4b1ff05f017e47c81477f405ded4df56107087a6d6055a93c6bc34e44664b7",
