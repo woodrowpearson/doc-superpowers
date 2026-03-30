@@ -1,5 +1,17 @@
 # Release Notes
 
+## v2.5.0 (2026-03-29)
+
+### Features
+- **Post-commit doc sync hook**: New `post-commit-sync.sh` Claude Code hook (PostToolUse event) auto-runs `update-index` after git commits and surfaces stale doc guidance, closing the gap where hooks only detected staleness but never triggered remediation.
+- **Pre-push release reminder**: New `pre-push` git hook warns when more than 5 unreleased commits exist since the last tag, prompting developers to run `/doc-superpowers release`.
+- **Session-summary auto index-update**: The Stop hook now auto-refreshes the doc index before session exit, keeping it current between sessions without requiring manual `/doc-superpowers sync`.
+- **All hooks installed on this repo**: Git (5), Claude Code (3), and CI/CD (3) hooks deployed with `--ci-strict` for self-enforcing documentation quality.
+
+### Fixes
+- **Session-summary timeout guard**: The `update-index` call in `session-summary.sh` is now wrapped in a 1-second timeout guard matching the existing `check-freshness` timeout pattern, preventing potential session exit delays.
+- **Post-commit-sync initial commit handling**: Falls back to `git diff-tree` when `HEAD~1` doesn't exist on initial commits, instead of silently failing.
+
 ## v2.4.1 (2026-03-29)
 
 ### Fixes
