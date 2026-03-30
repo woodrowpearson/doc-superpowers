@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-03-30T04:23:38Z",
+  "generated_at": "2026-03-30T05:50:14Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -113,12 +113,12 @@
         "SKILL.md",
         "scripts/hooks/"
       ],
-      "code_commit": "7db0d5e2eb5af9144719f5d7ea2575fec6992f61",
+      "code_commit": "39fb590c5f5ab44f566823a59c8098fdeb29e5e4",
       "doc_type": "plan",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-03-30T03:33:38Z"
+      "last_verified": "2026-03-30T05:50:14Z"
     },
     "docs/superpowers/plans/2026-03-14-spec-lifecycle-protocol.md": {
       "content_hash": "sha256:449c9b33ce9872f09044e50f23ab5756f82e45173391afb6c2a111a8ddabd178",
