@@ -21,8 +21,10 @@
 | `scripts/hooks/git/post-merge` | Check freshness after merge, report stale docs. |
 | `scripts/hooks/git/post-checkout` | Check freshness on branch switch, report stale docs. |
 | `scripts/hooks/git/prepare-commit-msg` | Inject stale doc comments into commit message. |
+| `scripts/hooks/git/pre-push` | Release reminder: warn when >5 unreleased commits since last tag. |
 | `scripts/hooks/claude/pre-commit-gate.sh` | PreToolUse hook: check freshness before Claude-initiated commits. |
-| `scripts/hooks/claude/session-summary.sh` | Stop hook: summarize stale docs at session end. |
+| `scripts/hooks/claude/post-commit-sync.sh` | PostToolUse hook: auto-refresh index after commits, report stale docs. |
+| `scripts/hooks/claude/session-summary.sh` | Stop hook: summarize stale docs at session end, auto-refresh index. |
 | `scripts/hooks/ci/doc-freshness-pr.yml` | GitHub Action: PR freshness check + comment. |
 | `scripts/hooks/ci/doc-freshness-schedule.yml` | GitHub Action: weekly cron drift detector. |
 | `scripts/hooks/ci/doc-index-update.yml` | GitHub Action: post-merge index update PR. |

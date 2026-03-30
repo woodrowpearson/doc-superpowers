@@ -299,7 +299,7 @@ Update is the **write counterpart** to audit's read-only analysis. It consumes a
 5. Update `docs/specs/README.md` and `docs/adr/README.md` indexes
 6. Check CLAUDE.md currency — compare sections against actual filesystem; update if stale per `references/doc-spec.md` rules
 7. Check README.md currency — compare feature list, action list, and usage examples against actual SKILL.md actions; update if stale per `references/doc-spec.md` rules
-8. If `scripts/hooks/install.sh` exists, run `install.sh status` and append a one-line summary: `Hooks: N/4 git, N/2 claude, N/3 ci`
+8. If `scripts/hooks/install.sh` exists, run `install.sh status` and append a one-line summary: `Hooks: N/5 git, N/3 claude, N/3 ci`
 
 ## Process: `hooks` — Install Workflow Hooks
 
@@ -317,8 +317,8 @@ Scaffolding command that installs opt-in hooks into the target project for autom
 
 | Tier | Flag | Hooks Installed |
 |------|------|----------------|
-| Git | `--git` | `pre-commit` (freshness gate), `post-merge` (stale + untracked alert), `post-checkout` (branch check), `prepare-commit-msg` (inject comments) |
-| Claude Code | `--claude` | PreToolUse pre-commit gate, Stop session summary |
+| Git | `--git` | `pre-commit` (freshness gate), `post-merge` (stale + untracked alert), `post-checkout` (branch check), `prepare-commit-msg` (inject comments), `pre-push` (unreleased commits warning) |
+| Claude Code | `--claude` | PreToolUse pre-commit gate, PostToolUse post-commit sync, Stop session summary |
 | CI/CD | `--ci` | PR freshness check workflow, weekly audit workflow, doc-index auto-update workflow |
 
 ### CI-Specific Flags
@@ -335,7 +335,7 @@ The `--ci-strict` flag maps to the `__CI_STRICT__` placeholder in CI workflow te
 2. Route to `scripts/hooks/install.sh <subcommand> [flags]`
 3. **install**:
    - **Git**: Resolve hooks directory via priority chain (`core.hooksPath` > `.githooks/` > `.git/hooks/`). For new hooks, copy scripts with `__DOC_TOOLS_PATH__` and `__INSTALL_DATE__` placeholder substitution, stamped with `doc-superpowers hook v1` marker. For existing hooks, copy hook script locally as `.doc-superpowers-{name}` with placeholder substitution, then auto-integrate via `# doc-superpowers:begin`/`end` marker block using `dirname $0` for portability — inserts before `exit 0` if present, otherwise appends.
-   - **Claude Code**: Copy hook scripts to `.claude/hooks/doc-superpowers/` with `__DOC_TOOLS_PATH__` and `__INSTALL_DATE__` placeholder substitution, add entries to `.claude/settings.local.json` (PreToolUse + Stop events) using nested format: `{"matcher":"Bash","hooks":[{"type":"command","command":"...","timeout":10}]}`. Stop hooks use an empty matcher (`"matcher":""`).
+   - **Claude Code**: Copy hook scripts to `.claude/hooks/doc-superpowers/` with `__DOC_TOOLS_PATH__` and `__INSTALL_DATE__` placeholder substitution, add entries to `.claude/settings.local.json` (PreToolUse + PostToolUse + Stop events) using nested format: `{"matcher":"Bash","hooks":[{"type":"command","command":"...","timeout":10}]}`. PostToolUse hooks use a Bash matcher to trigger after git commits. Stop hooks use an empty matcher (`"matcher":""`). The `post-commit-sync.sh` hook auto-runs `update-index` after git commits and reports any stale docs. The `session-summary.sh` hook auto-refreshes the doc index before session exit.
    - **CI/CD**: Generate `.github/workflows/` YAML files from templates with placeholder substitution (`__BASE_BRANCH__`, `__VERSION__`, `__CRON_SCHEDULE__`, `__CI_STRICT__`)
 4. **uninstall**: When tier flags are provided:
    - **Git**: Two modes — full removal for hooks owned by doc-superpowers (matching the marker), or begin/end marker block deletion plus local hook copy cleanup (with legacy single-line fallback) for integrated hooks in third-party hook files.
@@ -358,8 +358,8 @@ flowchart LR
   B -->|uninstall| D["Parse tier flags"]
   B -->|status| E["Report all tiers (3 states)"]
   C --> F{Tiers}
-  F -->|--git| G["Resolve hooks dir\n(core.hooksPath > .githooks/ > .git/hooks/)\nNew: copy with substitution\nExisting: copy locally + integrate\nwith begin/end markers"]
-  F -->|--claude| H["Copy to .claude/hooks/doc-superpowers/\nAdd nested entries to settings.local.json"]
+  F -->|--git| G["Resolve hooks dir\n(core.hooksPath > .githooks/ > .git/hooks/)\n5 hooks: pre-commit, post-merge,\npost-checkout, prepare-commit-msg, pre-push\nNew: copy with substitution\nExisting: copy locally + integrate\nwith begin/end markers"]
+  F -->|--claude| H["Copy to .claude/hooks/doc-superpowers/\n3 hooks: pre-commit-gate (PreToolUse),\npost-commit-sync (PostToolUse),\nsession-summary (Stop)\nAdd nested entries to settings.local.json"]
   F -->|--ci| I["Generate .github/workflows/"]
   D --> J{Tiers}
   J -->|--git| K["Owned: remove file\nIntegrated: begin/end block delete\n+ remove local copy"]
