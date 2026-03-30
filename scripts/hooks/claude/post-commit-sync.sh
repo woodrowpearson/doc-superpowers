@@ -24,8 +24,8 @@ echo "$command_str" | grep -qE '\bgit\s+commit\b' || exit 0
 # Auto-refresh index after commit to keep it current
 bash "$DOC_TOOLS" update-index 2>/dev/null || true
 
-# Check freshness scoped to just-committed files
-committed=$(git diff --name-only HEAD~1..HEAD 2>/dev/null)
+# Check freshness scoped to just-committed files (handles initial commit)
+committed=$(git diff --name-only HEAD~1..HEAD 2>/dev/null || git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null)
 [[ -z "$committed" ]] && exit 0
 
 code_refs_args=()

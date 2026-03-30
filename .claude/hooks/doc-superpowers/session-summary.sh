@@ -27,9 +27,18 @@ fi
 
 stale_count=$(echo "$result" | jq -r '.summary.stale // 0' 2>/dev/null) || exit 0
 
-# Auto-refresh index to keep it current between sessions
+# Auto-refresh index to keep it current between sessions (with 1s timeout guard)
 # Safe: update-index only writes metadata (content hashes + commit SHAs), never doc content
-bash "$DOC_TOOLS" update-index 2>/dev/null || true
+if command -v timeout >/dev/null 2>&1; then
+  timeout 1 bash "$DOC_TOOLS" update-index 2>/dev/null || true
+elif command -v gtimeout >/dev/null 2>&1; then
+  gtimeout 1 bash "$DOC_TOOLS" update-index 2>/dev/null || true
+else
+  bash "$DOC_TOOLS" update-index 2>/dev/null &
+  _up_pid=$!
+  ( sleep 1; kill "$_up_pid" 2>/dev/null ) &
+  wait "$_up_pid" 2>/dev/null || true
+fi
 
 [[ "$stale_count" -eq 0 ]] && exit 0
 
