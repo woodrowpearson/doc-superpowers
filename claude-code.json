@@ -1,0 +1,13 @@
+{
+  "name": "doc-superpowers",
+  "version": "2.5.0",
+  "description": "Documentation orchestrator for Claude Code: generates, audits, and maintains project docs through parallel agent dispatch, agentic workflow discovery, diagram generation, and spec lifecycle tracking",
+  "author": "Woodrow Pearson",
+  "license": "MIT",
+  "skills": [
+    {
+      "name": "doc-superpowers",
+      "description": "Use when documentation is missing, stale, or inconsistent with code — or when auditing doc freshness, reviewing PR doc impact, managing formal specs/ADRs, setting up doc automation hooks, or drafting release notes. Also use when the user mentions doc quality, stale docs, architecture docs, spec tracking, design-to-spec conversion, or release notes."
+    }
+  ]
+}
