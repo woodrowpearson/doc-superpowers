@@ -84,7 +84,7 @@ site/
 | Reference | `/reference/doc-templates` |
 | Architecture | `/architecture/overview` |
 
-Plus a GitHub icon link to the repo.
+Plus a GitHub icon link to the repo and a "Releases" nav link pointing to `https://github.com/woodrowpearson/doc-superpowers/releases`.
 
 ### Sidebar
 
@@ -101,11 +101,12 @@ export default defineConfig({
 
   themeConfig: {
     logo: '/logo.svg',
-    nav: [/* 6 items as above */],
+    nav: [/* 6 section items + Releases external link */],
     sidebar: {/* per-section groups */},
     socialLinks: [
       { icon: 'github', link: 'https://github.com/woodrowpearson/doc-superpowers' }
     ],
+    nav: [/* 6 section items + Releases external link */],
     search: { provider: 'local' },
     darkModeSwitchLabel: 'Theme',
   }
@@ -184,9 +185,14 @@ cd site && npm run dev
 | Installation page | All 6 platforms consolidated |
 | Verification page | How to confirm it's working |
 
+### Included (linked from nav)
+
+| Page | Source | Notes |
+|------|--------|-------|
+| Release Notes | `RELEASE-NOTES.md` (reused) | Nav bar link pointing to GitHub releases page (`https://github.com/woodrowpearson/doc-superpowers/releases`) |
+
 ### Deferred (add as project grows)
 
-- Changelog/release notes page
 - Blog/announcements
 - Community/contributing guide
 - API reference (if programmatic API is added)
