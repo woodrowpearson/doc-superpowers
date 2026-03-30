@@ -1,5 +1,14 @@
 # Release Notes
 
+## v2.6.0 (2026-03-29)
+
+### Features
+- **Deterministic version management**: New `doc-tools.sh bump-version` and `check-version` subcommands update and verify version strings across all 6 manifest files (package.json, claude-code.json, plugin.json, marketplace.json, cursor plugin.json, gemini-extension.json). The `release` action now mandates `bump-version` + `check-version` before tagging, preventing version drift.
+
+### Fixes
+- **Skill directory structure**: Moved SKILL.md to `skills/doc-superpowers/SKILL.md` for correct Claude Code plugin discovery when installed via the marketplace.
+- **Stale version sync**: Fixed `gemini-extension.json` and `.cursor-plugin/plugin.json` which were stuck at v2.4.0 while other manifests were at v2.5.0.
+
 ## v2.5.0 (2026-03-29)
 
 ### Features
