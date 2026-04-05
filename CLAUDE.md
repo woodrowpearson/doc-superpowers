@@ -43,7 +43,8 @@ doc-superpowers/
 │           ├── doc-audit-update.yml      # AI audit+update on feature branches
 │           ├── doc-review-pr.yml         # AI PR doc review + @claude interactive
 │           ├── doc-release.yml           # AI release notes drafting
-│           └── doc-spec-verify.yml       # AI spec compliance on PRs
+│           ├── doc-spec-verify.yml       # AI spec compliance on PRs
+│           └── doc-pr-full-cycle.yml     # AI PR full cycle: review, update, diagram, sync
 ├── references/
 │   ├── doc-spec.md       # Templates for generated docs (C4, ERD, workflows, agentic, specs, ADRs)
 │   ├── agent-prompt-template.md   # Review agent prompt template + scope focus areas

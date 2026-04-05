@@ -49,7 +49,8 @@ doc-superpowers/
 │           ├── doc-audit-update.yml       # AI audit+update on feature branches (concurrency group)
 │           ├── doc-review-pr.yml          # AI PR doc review + @claude interactive (author gate + concurrency)
 │           ├── doc-release.yml            # AI release notes drafting (concurrency group)
-│           └── doc-spec-verify.yml        # AI spec compliance on PRs (concurrency group)
+│           ├── doc-spec-verify.yml        # AI spec compliance on PRs (concurrency group)
+│           └── doc-pr-full-cycle.yml      # AI PR full cycle: review, update, diagram, sync (concurrency group)
 ├── references/
 │   ├── doc-spec.md       # Templates for all generated doc types + Mermaid syntax + naming conventions
 │   ├── agent-prompt-template.md   # Review agent prompt template + scope focus areas
@@ -134,7 +135,7 @@ doc-superpowers/
 | Hook installer logic | `scripts/hooks/install.sh` — tier routing, file copying, status reporting |
 | Git hook scripts | `scripts/hooks/git/` — pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push |
 | Claude Code hook scripts | `scripts/hooks/claude/` — pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh |
-| CI workflow templates | `scripts/hooks/ci/` — doc-freshness-pr.yml, doc-freshness-schedule.yml, doc-index-update.yml (shell-based, use vendored `.github/scripts/doc-tools.sh`); doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml (Claude-powered, with concurrency groups and author gates). All actions SHA-pinned |
+| CI workflow templates | `scripts/hooks/ci/` — doc-freshness-pr.yml, doc-freshness-schedule.yml, doc-index-update.yml (shell-based, use vendored `.github/scripts/doc-tools.sh`); doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml (Claude-powered, with concurrency groups and author gates). All actions SHA-pinned |
 | Hook test suite | `scripts/test-hooks.sh` |
 | Hooks action routing | `skills/doc-superpowers/SKILL.md` Section 1 "`hooks`" subsection |
 | Spec lifecycle routing | `skills/doc-superpowers/SKILL.md` Section 1 "Spec Lifecycle Routing" + `spec-generate`, `spec-inject`, `spec-verify` subsections |
