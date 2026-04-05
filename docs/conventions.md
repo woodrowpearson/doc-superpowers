@@ -52,6 +52,8 @@ Version consistency is managed via `doc-tools.sh`:
 
 Manifest files managed: `package.json`, `claude-code.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.cursor-plugin/plugin.json`, `gemini-extension.json`, `RELEASE-NOTES.md`.
 
+**After bumping**, also check for stale version references in INSTALL.md files (`.codex/INSTALL.md`, `.opencode/INSTALL.md`) — these contain version-pinned install examples that `bump-version` does not update automatically.
+
 ## Git Conventions
 
 ### Branches
