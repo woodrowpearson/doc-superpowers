@@ -37,7 +37,7 @@ ln -s ~/code/doc-superpowers ~/.claude/skills/doc-superpowers
 
 ### Manual
 
-Copy `SKILL.md` and `references/` into `.claude/skills/doc-superpowers/` in any project.
+Copy `skills/doc-superpowers/SKILL.md` and `references/` into `.claude/skills/doc-superpowers/` in any project.
 
 ### Cursor
 
@@ -173,11 +173,11 @@ Install opt-in hooks for automated freshness monitoring:
 /doc-superpowers hooks uninstall --all
 ```
 
-**Git hooks:** Pre-commit warns when staged files affect stale docs. Post-merge and post-checkout alert on branch switches. Prepare-commit-msg injects freshness comments.
+**Git hooks (5):** Pre-commit warns when staged files affect stale docs. Post-merge and post-checkout alert on branch switches. Prepare-commit-msg injects freshness comments. Pre-push reminds about unreleased commits.
 
-**Claude Code hooks:** Pre-commit gate catches Claude-initiated commits. Session summary reminds about stale docs when ending a session.
+**Claude Code hooks (3):** Pre-commit gate catches Claude-initiated commits. Post-commit sync auto-runs `update-index` after commits. Session summary reminds about stale docs when ending a session.
 
-**CI/CD:** PR freshness check comments on PRs. Weekly cron detects drift. Post-merge workflow keeps the doc index in sync.
+**CI/CD (7 workflows — 3 shell-based, 4 Claude-powered):** PR freshness check comments on PRs. Weekly cron detects drift. Post-merge workflow keeps the doc index in sync. Claude-powered workflows provide AI audit+update on feature branches, AI PR doc review with @claude interactive support, AI release notes drafting on release branches, and AI spec compliance checks on PRs. Claude-powered workflows require an `ANTHROPIC_API_KEY` GitHub Actions secret.
 
 Set `DOC_SUPERPOWERS_STRICT=1` to make pre-commit block instead of warn. Set `DOC_SUPERPOWERS_QUIET=1` to suppress hook output while still enforcing checks. Set `DOC_SUPERPOWERS_SKIP=1` to bypass all hooks temporarily.
 
