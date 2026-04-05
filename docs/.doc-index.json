@@ -1,35 +1,35 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-04-05T08:33:36Z",
+  "generated_at": "2026-04-05T08:58:41Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
-      "content_hash": "sha256:8ab287a85f8e1088aae75094ec2f84bd710f4ca6a00055423e1d4e6ccfd755b6",
+      "content_hash": "sha256:25b355550db06ca15fe59cbf23ea2f81080e14a5baa902b27cbe60c2bf260979",
       "code_refs": [
         "SKILL.md",
         "scripts/",
         "references/"
       ],
-      "code_commit": "f8578e508e7934111c5dc13f8e773b8cd878c394",
+      "code_commit": "4727d2f4c37c8497f9d5e7d18cc9ac38125df0d7",
       "doc_type": "architecture",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-05T08:33:36Z"
+      "last_verified": "2026-04-05T08:58:41Z"
     },
     "docs/codebase-guide.md": {
-      "content_hash": "sha256:8b1f7f3bb42383acda8b665436426e5d803bc7e2801d11de0f969b2b739a0aa4",
+      "content_hash": "sha256:d26c964c7580a03f8be85d81eb18fb2f3ea4ea142c76112bc7dde99b87d2dbfd",
       "code_refs": [
         "SKILL.md",
         "scripts/"
       ],
-      "code_commit": "696ba07f2d57cd2c0358b9dea5aacc4af20f0479",
+      "code_commit": "4727d2f4c37c8497f9d5e7d18cc9ac38125df0d7",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-05T08:33:36Z"
+      "last_verified": "2026-04-05T08:58:41Z"
     },
     "docs/conventions.md": {
       "content_hash": "sha256:d2bc7f1540bfacf92c020007ca5578cdc5fec35e8164f760e96b6cda3d59c8e9",
@@ -58,17 +58,17 @@
       "last_verified": "2026-04-05T08:33:36Z"
     },
     "docs/workflows/doc-superpowers.md": {
-      "content_hash": "sha256:643a6a9898952c61a63049f7e206b9339783e455df95311a229ebc9f8da15d4e",
+      "content_hash": "sha256:3fefd5770b5cbc896b1bb16fcbd28e27d49dc8a5d83ecdbc674c37feff202f4c",
       "code_refs": [
         "SKILL.md",
         "scripts/"
       ],
-      "code_commit": "696ba07f2d57cd2c0358b9dea5aacc4af20f0479",
+      "code_commit": "4727d2f4c37c8497f9d5e7d18cc9ac38125df0d7",
       "doc_type": "workflows",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-05T08:33:36Z"
+      "last_verified": "2026-04-05T08:58:41Z"
     },
     "docs/plans/2026-03-26-audit-report.md": {
       "content_hash": "sha256:330e4350a91ef66501f4b0286111860289135f4158f2abdb9f5fc27e628a59bd",
@@ -108,17 +108,17 @@
       "last_verified": "2026-04-05T08:33:36Z"
     },
     "docs/superpowers/plans/2026-03-13-workflow-hooks-harness.md": {
-      "content_hash": "sha256:f097bb4525292b9bf57cd2d0d2cbd41a1afb4e96ca0f44a24bde6af61f07a2bf",
+      "content_hash": "sha256:e7696c4adc4356971bca6576df7366dafe81bd8a93e2580195a22bbdec118c9d",
       "code_refs": [
         "SKILL.md",
         "scripts/hooks/"
       ],
-      "code_commit": "696ba07f2d57cd2c0358b9dea5aacc4af20f0479",
+      "code_commit": "4727d2f4c37c8497f9d5e7d18cc9ac38125df0d7",
       "doc_type": "plan",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-05T08:33:36Z"
+      "last_verified": "2026-04-05T08:58:41Z"
     },
     "docs/superpowers/plans/2026-03-14-spec-lifecycle-protocol.md": {
       "content_hash": "sha256:449c9b33ce9872f09044e50f23ab5756f82e45173391afb6c2a111a8ddabd178",
@@ -173,16 +173,16 @@
       "last_verified": "2026-04-05T08:33:36Z"
     },
     "docs/superpowers/specs/2026-03-13-workflow-hooks-harness-design.md": {
-      "content_hash": "sha256:ebb2dad104df117c5b92824545eea056b94674a5174418fd62b5906e3a5b47dc",
+      "content_hash": "sha256:4556af3cf1df8f65f4890e98484c3506076903de18c1744f3aa0fe41d3383854",
       "code_refs": [
         "scripts/hooks/"
       ],
-      "code_commit": "696ba07f2d57cd2c0358b9dea5aacc4af20f0479",
+      "code_commit": "4727d2f4c37c8497f9d5e7d18cc9ac38125df0d7",
       "doc_type": "spec",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-05T08:33:36Z"
+      "last_verified": "2026-04-05T08:58:41Z"
     },
     "docs/superpowers/specs/2026-03-14-spec-lifecycle-protocol-design.md": {
       "content_hash": "sha256:acf3d090a48f4efe2a34180cac359ced230ea6375327cdbfefe49f2518c1097a",
