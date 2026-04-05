@@ -21,6 +21,10 @@ on:
         type: choice
         options: ['auto', 'major', 'minor', 'patch']
 
+concurrency:
+  group: doc-release-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   DOC_SUPERPOWERS_VERSION: "__VERSION__"
 
@@ -34,7 +38,7 @@ jobs:
       pull-requests: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
@@ -58,7 +62,7 @@ jobs:
 
       - name: Draft release notes
         if: steps.precheck.outputs.skip != 'true'
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |

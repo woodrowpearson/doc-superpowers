@@ -352,6 +352,14 @@ install_ci() {
     installed=$((installed + 1))
   done
 
+  # Vendor doc-tools.sh into the project for local CI execution
+  if [[ -f "$DOC_TOOLS" ]]; then
+    mkdir -p .github/scripts
+    cp "$DOC_TOOLS" .github/scripts/doc-tools.sh
+    chmod +x .github/scripts/doc-tools.sh
+    echo "  Vendored doc-tools.sh → .github/scripts/doc-tools.sh"
+  fi
+
   echo "CI/CD workflows: $installed installed, $skipped skipped"
   if [[ $installed -gt 0 ]]; then
     echo "  Remember to commit and push these workflows."
@@ -379,6 +387,12 @@ uninstall_ci() {
       removed=$((removed + 1))
     fi
   done
+
+  # Remove vendored doc-tools.sh
+  if [[ -f ".github/scripts/doc-tools.sh" ]]; then
+    rm .github/scripts/doc-tools.sh
+    rmdir .github/scripts 2>/dev/null || true
+  fi
 
   echo "CI/CD workflows: $removed removed"
 }
