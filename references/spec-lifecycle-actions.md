@@ -18,6 +18,26 @@ Use after brainstorming produces a design spec. Decomposes a narrative design do
    - If the design doc **replaces** the existing spec's scope entirely → Create the new spec with `Supersedes: <path-to-old>`, update the old spec's `Superseded by` field, move the old spec to `docs/archive/specs/`, and update the archived spec's `.doc-index.json` entry to `status: "deprecated"`.
    - If the design doc **extends** existing scope → Create a new spec with the next sequential number (e.g., AUTH-002 if AUTH-001 exists), no supersession.
    - If the design doc covers the **same scope with the same intent** → Do not create a duplicate. Flag for human review: "Existing SPEC-{CAT}-NNN already covers this scope. Update existing or supersede?"
+5b. **Stale content scan for overlapping specs** — For specs identified as "extends" or "overlaps" in Step 5 (i.e., NOT superseded/archived, but still active):
+   1. **Extract removal keywords** from the design doc — scan for section headings containing "Delete", "Remove", "Drop", "Deprecate", "Replace", and collect the component/feature names listed for removal or replacement.
+   2. **Grep each overlapping spec** for those keywords. Count matches per spec.
+   3. **Classify severity:**
+      - **HIGH** (>5 matches): Spec has significant stale content describing removed architecture. Recommend immediate deprecation notices.
+      - **MEDIUM** (1–5 matches): Spec has some stale references. Note in "Specs Requiring Updates" table.
+   4. **Report findings** — Output a table:
+      ```
+      | Spec | Stale Refs | Severity | Key Terms |
+      |------|-----------|----------|-----------|
+      | SPEC-PIPE-007 | 34 | HIGH | sweep mode, EdgeTAM |
+      ```
+   5. **Offer deprecation notices** — "N specs have stale content (M total references). Apply deprecation notices now?"
+      - **If yes:** For each stale section in affected specs, prepend a blockquote deprecation notice:
+        ```markdown
+        > **Deprecated (YYYY-MM-DD):** This section references {removed feature} which has been superseded by {new approach}. See [SPEC-{NEW}]({path}) for current architecture.
+        ```
+        Then call `doc-tools.sh update-index` for each modified spec.
+      - **If no:** Defer to `spec-inject` execute phase (current behavior). The "Specs Requiring Updates" table from Step 9 will still list them.
+   6. **Include stale reference count in design doc table** — When writing the "Specs Requiring Updates" table (appended in Step 9), add a `Stale Refs` column so severity is visible to downstream consumers.
 6. **Generate formal specs** — For each identified domain, create `SPEC-{CAT}-NNN-{slug}.md` using the template from `references/doc-spec.md`:
    - `Status`: Draft
    - `Category`: matched CAT code
@@ -36,6 +56,17 @@ Use after brainstorming produces a design spec. Decomposes a narrative design do
    |------|----------|------|
    | SPEC-AUTH-001-oauth-flow | AUTH | docs/specs/SPEC-AUTH-001-oauth-flow.md |
    ```
+   If Step 5b identified specs with stale content, also append a `## Specs Requiring Updates` section:
+   ```markdown
+   ## Specs Requiring Updates
+
+   | Spec | Stale Refs | Severity | Status |
+   |------|-----------|----------|--------|
+   | SPEC-PIPE-007 | 34 | HIGH | Deprecation notices applied |
+   | SPEC-UI-001 | 12 | HIGH | Deferred to spec-inject |
+   | SPEC-PIPE-005 | 3 | MEDIUM | Deferred to spec-inject |
+   ```
+   The `Status` column reflects whether deprecation notices were applied (Step 5b.5) or deferred.
 10. **Sync CLAUDE.md** — If any new files or directories were created (spec files, `docs/specs/` bootstrap, new category dirs), update CLAUDE.md to reflect the new paths and any new commands. **SEE** `references/doc-spec.md` for CLAUDE.md update rules. This ensures Claude sessions see the new spec infrastructure immediately.
 11. **Sync README.md** — If any new actions or capabilities were documented in the generated specs, update README.md per `references/doc-spec.md` README.md update rules. This ensures the project's public documentation reflects the new spec infrastructure.
 12. **Output**: Report list of generated spec paths. These paths are the `--specs` input for downstream `spec-inject` and `spec-verify` actions.
