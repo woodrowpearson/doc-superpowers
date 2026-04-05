@@ -17,6 +17,7 @@
 | Already exists | `.claude-plugin/plugin.json` | Claude Code plugin manifest |
 | Already exists | `.claude-plugin/marketplace.json` | Self-hosted marketplace registry |
 | Create | `.cursor-plugin/plugin.json` | Cursor plugin manifest (explicit path fields) |
+| Create | `.cursor-plugin/INSTALL.md` | Cursor installation guide (command table, hooks support, spec lifecycle) |
 | Create | `.codex/INSTALL.md` | Codex installation instructions (symlink-based) |
 | Create | `.opencode/INSTALL.md` | OpenCode installation instructions |
 | Create | `.opencode/plugins/doc-superpowers.js` | OpenCode ESM plugin (injects skill path + system context) |
@@ -512,8 +513,9 @@ Add the new framework integration files to the directory structure table so futu
 Add these to the tree in CLAUDE.md under the root level:
 
 ```
-├── .cursor-plugin/
-│   └── plugin.json       # Cursor plugin manifest
+├── .cursor-plugin/       # Cursor plugin manifest + installation guide
+│   ├── plugin.json
+│   └── INSTALL.md
 ├── .codex/
 │   └── INSTALL.md        # Codex installation guide
 ├── .opencode/

@@ -38,7 +38,7 @@ doc-superpowers manages documentation freshness across a project but has two bli
 4. **Dispatch drafting agent** — Single `general-purpose` agent receives:
    - The commit list with messages
    - The full `git diff` for the range (or per-commit diffs if range is large)
-   - The conventions.md bump table for cross-referencing
+   - The docs/conventions.md bump table for cross-referencing
    - The previous RELEASE-NOTES.md entry as a format exemplar
    - Instructions: group changes into Features/Fixes/Breaking Changes/Dependencies sections using the existing bold-title-colon-description format, flag anything that looks like a breaking change
 
@@ -122,7 +122,7 @@ New "README.md Updates" section alongside "CLAUDE.md Updates":
 
 The `bump-version` and `check-version` subcommands were added to `doc-tools.sh` as supporting tooling for the release workflow. These were not part of the original design but emerged as necessary infrastructure:
 
-- `bump-version` deterministically updates version strings across all 7 manifest files (`package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.cursor-plugin/plugin.json`, `gemini-extension.json`, `.opencode/plugins/doc-superpowers.js`, `RELEASE-NOTES.md`). This ensures no manifest is missed during a release.
+- `bump-version` deterministically updates version strings across all 6 manifest files (`package.json`, `claude-code.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.cursor-plugin/plugin.json`, `gemini-extension.json`). This ensures no manifest is missed during a release.
 - `check-version` verifies all manifest files contain a consistent version string, catching drift before it ships.
 
 The SKILL.md `release` action mandates these as step 7 (after drafting and prepending the release notes entry, before the git tag offer). This closes the loop between the release notes draft and the version bump that accompanies it.
