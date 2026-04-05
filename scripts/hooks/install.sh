@@ -380,7 +380,7 @@ uninstall_ci() {
   fi
 
   local removed=0
-  for workflow_name in doc-freshness-pr.yml doc-freshness-schedule.yml doc-index-update.yml doc-audit-update.yml doc-review-pr.yml doc-release.yml doc-spec-verify.yml; do
+  for workflow_name in doc-freshness-pr.yml doc-freshness-schedule.yml doc-index-update.yml doc-audit-update.yml doc-review-pr.yml doc-release.yml doc-spec-verify.yml doc-pr-full-cycle.yml; do
     local workflow_dest=".github/workflows/$workflow_name"
     if is_doc_superpowers_workflow "$workflow_dest" 2>/dev/null; then
       rm "$workflow_dest"
@@ -405,7 +405,7 @@ status_ci() {
   fi
 
   local found=0
-  for workflow_name in doc-freshness-pr.yml doc-freshness-schedule.yml doc-index-update.yml doc-audit-update.yml doc-review-pr.yml doc-release.yml doc-spec-verify.yml; do
+  for workflow_name in doc-freshness-pr.yml doc-freshness-schedule.yml doc-index-update.yml doc-audit-update.yml doc-review-pr.yml doc-release.yml doc-spec-verify.yml doc-pr-full-cycle.yml; do
     local workflow_dest=".github/workflows/$workflow_name"
     if is_doc_superpowers_workflow "$workflow_dest" 2>/dev/null; then
       printf "  ✓ %-22s installed\n" "$workflow_name"

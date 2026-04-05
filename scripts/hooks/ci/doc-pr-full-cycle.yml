@@ -1,0 +1,72 @@
+# doc-superpowers workflow v1
+# AI-powered PR doc review, update, diagram regeneration, and sync
+# Installed by doc-superpowers hooks installer
+
+name: Doc PR Full Cycle (AI)
+
+on:
+  pull_request:
+    branches: [__BASE_BRANCH__]
+    types: [opened]
+    paths:
+      - 'docs/**'
+      - 'src/**'
+      - 'scripts/**'
+      - '*.md'
+  workflow_dispatch:
+
+concurrency:
+  group: doc-pr-full-cycle-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  DOC_SUPERPOWERS_VERSION: "__VERSION__"
+
+jobs:
+  pr-full-cycle:
+    if: >-
+      !contains(github.event.pull_request.title, '[doc-superpowers]') &&
+      !contains(github.event.head_commit.message, '[skip ci]')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Check for doc index
+        id: precheck
+        run: |
+          if [ ! -f "docs/.doc-index.json" ]; then
+            echo "No doc-index found — init has not run. Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Review, update, diagram, and sync docs
+        if: steps.precheck.outputs.skip != 'true'
+        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Run the following doc-superpowers actions in order on this pull request:
+
+            1. Run /doc-superpowers review-pr to analyze documentation impact and
+               identify stale or missing docs. Save findings for the next step.
+
+            2. Run /doc-superpowers update to fix any stale docs found by the review.
+
+            3. Run /doc-superpowers diagram to regenerate any affected Mermaid diagrams.
+
+            4. Run /doc-superpowers sync to reconcile the doc index with the filesystem.
+
+            If any files were created or modified by steps 2-4, commit all changes
+            with the message "[doc-superpowers] pr docs: review, update, diagrams, sync".
+            Do not create a new pull request — commit directly to this PR branch.
+
+            If no files changed, post a PR comment confirming docs are current.
