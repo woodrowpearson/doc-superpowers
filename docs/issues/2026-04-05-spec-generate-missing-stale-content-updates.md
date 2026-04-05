@@ -1,6 +1,6 @@
 ---
 date: 2026-04-05
-status: Open
+status: Resolved
 priority: P2
 type: enhancement
 component: shared
