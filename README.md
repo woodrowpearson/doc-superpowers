@@ -106,7 +106,7 @@ Scopes:  all | <auto-detected from docs/ structure>
 | `sync` | Sync doc index with filesystem | After adding/removing doc files |
 | `hooks` | Install workflow hooks (git, Claude Code, CI/CD) | Setting up automated freshness monitoring |
 | `release` | Draft release notes entry from git history | Cutting a new version |
-| `spec-generate` | Generate formal specs from design doc | After brainstorming produces a design spec |
+| `spec-generate` | Generate formal specs from design doc; scans overlapping specs for stale content | After brainstorming produces a design spec |
 | `spec-inject` | Inject spec tasks into plans, track during execution | During plan writing and after each chunk executes |
 | `spec-verify` | Verify spec compliance, review spec coverage | Before merging or during code review |
 
