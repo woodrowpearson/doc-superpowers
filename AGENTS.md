@@ -4,7 +4,7 @@ Documentation orchestrator skill for AI coding agents. Generates, audits, and ma
 
 ## Skill Location
 
-The main skill definition is `SKILL.md` at the repository root. Activate it when the user asks about documentation quality, auditing, freshness, diagrams, specs, ADRs, or release notes.
+The main skill definition is `skills/doc-superpowers/SKILL.md`. Activate it when the user asks about documentation quality, auditing, freshness, diagrams, specs, ADRs, or release notes.
 
 ## Key Commands
 
@@ -16,11 +16,35 @@ The main skill definition is `SKILL.md` at the repository root. Activate it when
 | `update` | Execute doc updates from audit |
 | `diagram` | Regenerate diagrams |
 | `sync` | Sync doc index with filesystem |
-| `hooks` | Install/manage workflow hooks |
+| `hooks install` | Install workflow hooks |
+| `hooks status` | Show installed hooks |
+| `hooks uninstall` | Remove installed hooks |
 | `release` | Draft release notes |
 | `spec-generate` | Generate formal specs from design doc |
 | `spec-inject` | Inject spec tasks or track drift |
 | `spec-verify` | Verify spec compliance |
+
+## Platform Setup
+
+| Platform | Setup Guide | Tool Translation |
+|----------|-------------|------------------|
+| Claude Code | `.claude-plugin/plugin.json` (auto-discovered) | Native — no translation |
+| Cursor | `.cursor-plugin/INSTALL.md` | Native — same as Claude Code |
+| Codex | `.codex/INSTALL.md` | `references/tool-mappings.md` |
+| OpenCode | `.opencode/INSTALL.md` | Auto-injected by plugin |
+| Gemini CLI | `GEMINI.md` (loaded via `gemini-extension.json`) | `references/tool-mappings.md` |
+
+## Capability Matrix
+
+| Capability | Claude Code | Cursor | Codex | OpenCode | Gemini CLI |
+|------------|------------|--------|-------|----------|------------|
+| All 11 commands | Yes | Yes | Yes | Yes | Yes |
+| Parallel agent dispatch | Yes | Yes | Yes (needs config) | Yes (`@mention`) | No (sequential) |
+| Git hooks | Yes | Yes | Partial (sandbox) | Yes | Yes |
+| Claude Code hooks | Yes | Yes | No | No | No |
+| CI/CD workflows | Yes | Yes | Yes | Yes | Yes |
+| WebSearch / WebFetch | Yes | Yes | No | No | Yes |
+| Mermaid MCP diagrams | Yes | Yes | If configured | If configured | No (source only) |
 
 ## Tool Mapping
 
