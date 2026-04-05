@@ -854,19 +854,22 @@ test_install_ci_creates_claude_powered_workflows() {
   assert_file_exists ".github/workflows/doc-review-pr.yml" "review-pr workflow"
   assert_file_exists ".github/workflows/doc-release.yml" "release workflow"
   assert_file_exists ".github/workflows/doc-spec-verify.yml" "spec-verify workflow"
+  assert_file_exists ".github/workflows/doc-pr-full-cycle.yml" "pr-full-cycle workflow"
   # Verify placeholders were substituted
   assert_not_contains "$(cat .github/workflows/doc-audit-update.yml)" "__BASE_BRANCH__" "base branch substituted in audit-update"
   assert_not_contains "$(cat .github/workflows/doc-audit-update.yml)" "__VERSION__" "version substituted in audit-update"
   assert_not_contains "$(cat .github/workflows/doc-review-pr.yml)" "__BASE_BRANCH__" "base branch substituted in review-pr"
   assert_not_contains "$(cat .github/workflows/doc-release.yml)" "__VERSION__" "version substituted in release"
   assert_not_contains "$(cat .github/workflows/doc-spec-verify.yml)" "__BASE_BRANCH__" "base branch substituted in spec-verify"
+  assert_not_contains "$(cat .github/workflows/doc-pr-full-cycle.yml)" "__BASE_BRANCH__" "base branch substituted in pr-full-cycle"
+  assert_not_contains "$(cat .github/workflows/doc-pr-full-cycle.yml)" "__VERSION__" "version substituted in pr-full-cycle"
   teardown
 }
 
 test_install_ci_claude_workflows_have_marker() {
   echo "test: Claude-powered workflows start with workflow marker"
   setup
-  for template in doc-audit-update.yml doc-review-pr.yml doc-release.yml doc-spec-verify.yml; do
+  for template in doc-audit-update.yml doc-review-pr.yml doc-release.yml doc-spec-verify.yml doc-pr-full-cycle.yml; do
     local first_line
     first_line=$(head -1 "$HOOKS_DIR/ci/$template")
     assert_contains "$first_line" "doc-superpowers workflow v1" "marker in $template"
@@ -877,7 +880,7 @@ test_install_ci_claude_workflows_have_marker() {
 test_install_ci_claude_workflows_reference_api_key() {
   echo "test: Claude-powered workflows reference ANTHROPIC_API_KEY"
   setup
-  for template in doc-audit-update.yml doc-review-pr.yml doc-release.yml doc-spec-verify.yml; do
+  for template in doc-audit-update.yml doc-review-pr.yml doc-release.yml doc-spec-verify.yml doc-pr-full-cycle.yml; do
     assert_contains "$(cat "$HOOKS_DIR/ci/$template")" "ANTHROPIC_API_KEY" "API key in $template"
   done
   teardown
@@ -929,6 +932,7 @@ test_uninstall_ci_removes_claude_workflows() {
   assert_file_not_exists ".github/workflows/doc-review-pr.yml" "review-pr removed"
   assert_file_not_exists ".github/workflows/doc-release.yml" "release removed"
   assert_file_not_exists ".github/workflows/doc-spec-verify.yml" "spec-verify removed"
+  assert_file_not_exists ".github/workflows/doc-pr-full-cycle.yml" "pr-full-cycle removed"
   teardown
 }
 

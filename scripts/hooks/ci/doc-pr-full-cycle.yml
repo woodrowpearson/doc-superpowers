@@ -1,6 +1,10 @@
 # doc-superpowers workflow v1
 # AI-powered PR doc review, update, diagram regeneration, and sync
 # Installed by doc-superpowers hooks installer
+#
+# NOTE: This workflow overlaps with doc-review-pr.yml (both trigger on PR open).
+# Install one or the other, not both. This workflow is a superset — it runs
+# review-pr AND also applies fixes, regenerates diagrams, and syncs the index.
 
 name: Doc PR Full Cycle (AI)
 
@@ -25,8 +29,7 @@ env:
 jobs:
   pr-full-cycle:
     if: >-
-      !contains(github.event.pull_request.title, '[doc-superpowers]') &&
-      !contains(github.event.head_commit.message, '[skip ci]')
+      !contains(github.event.pull_request.title, '[doc-superpowers]')
     runs-on: ubuntu-latest
     permissions:
       contents: write
