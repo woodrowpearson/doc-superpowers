@@ -1,5 +1,13 @@
 # Release Notes
 
+## v2.8.0 (2026-04-05)
+
+### Features
+- **Vendor doc-tools.sh locally for CI**: The `hooks install --ci` command now copies `doc-tools.sh` into `.github/scripts/doc-tools.sh` in the consuming project. Shell-based CI workflows reference this local copy instead of curling from `raw.githubusercontent.com` at runtime. Uninstall cleans up the vendored file.
+- **SHA-pinned GitHub Actions**: All actions in CI workflow templates (`actions/checkout`, `actions/github-script`, `anthropics/claude-code-action`) are now pinned to full commit SHAs to prevent tag-mutation supply-chain attacks.
+- **Author association gate on @claude trigger**: `doc-review-pr.yml` now restricts `issue_comment` triggers to OWNER/MEMBER/COLLABORATOR, preventing unauthorized users from consuming `ANTHROPIC_API_KEY` credits.
+- **Concurrency groups on AI workflows**: `doc-audit-update.yml`, `doc-release.yml`, and `doc-spec-verify.yml` now include concurrency groups to prevent duplicate concurrent runs.
+
 ## v2.7.0 (2026-04-05)
 
 ### Features
