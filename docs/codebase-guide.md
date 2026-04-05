@@ -9,8 +9,9 @@ doc-superpowers/
 ├── .claude-plugin/       # Claude Code plugin manifest + marketplace
 │   ├── plugin.json
 │   └── marketplace.json
-├── .cursor-plugin/       # Cursor plugin manifest
-│   └── plugin.json
+├── .cursor-plugin/       # Cursor plugin manifest + installation guide
+│   ├── plugin.json
+│   └── INSTALL.md
 ├── .codex/               # Codex installation guide
 │   └── INSTALL.md
 ├── .opencode/            # OpenCode plugin + installation guide
