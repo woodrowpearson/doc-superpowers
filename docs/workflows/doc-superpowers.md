@@ -299,7 +299,7 @@ Update is the **write counterpart** to audit's read-only analysis. It consumes a
 5. Update `docs/specs/README.md` and `docs/adr/README.md` indexes
 6. Check CLAUDE.md currency — compare sections against actual filesystem; update if stale per `references/doc-spec.md` rules
 7. Check README.md currency — compare feature list, action list, and usage examples against actual SKILL.md actions; update if stale per `references/doc-spec.md` rules
-8. If `scripts/hooks/install.sh` exists, run `install.sh status` and append a one-line summary: `Hooks: N/5 git, N/3 claude, N/3 ci`
+8. If `scripts/hooks/install.sh` exists, run `install.sh status` and append a one-line summary: `Hooks: N/5 git, N/3 claude, N/7 ci`
 
 ## Process: `hooks` — Install Workflow Hooks
 

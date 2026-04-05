@@ -1,0 +1,73 @@
+# doc-superpowers workflow v1
+# AI-powered release notes drafting
+# Installed by doc-superpowers hooks installer
+
+name: Doc Release Notes (AI)
+
+on:
+  push:
+    branches:
+      - 'release/**'
+  workflow_dispatch:
+    inputs:
+      from_ref:
+        description: 'Starting git ref for release notes (default: last tag)'
+        required: false
+        type: string
+      version_bump:
+        description: 'Version bump type'
+        required: false
+        default: 'auto'
+        type: choice
+        options: ['auto', 'major', 'minor', 'patch']
+
+env:
+  DOC_SUPERPOWERS_VERSION: "__VERSION__"
+
+jobs:
+  release-notes:
+    if: >-
+      !contains(github.event.head_commit.message, '[doc-superpowers]')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for unreleased commits
+        id: precheck
+        run: |
+          last_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$last_tag" ]; then
+            echo "No tags found — first release."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          commit_count=$(git rev-list "${last_tag}..HEAD" --count)
+          if [ "$commit_count" -eq 0 ]; then
+            echo "No unreleased commits since $last_tag. Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "$commit_count commits since $last_tag."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Draft release notes
+        if: steps.precheck.outputs.skip != 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Run /doc-superpowers release to draft release notes from git history.
+            ${{ inputs.from_ref && format('Use commits since {0} as the starting point.', inputs.from_ref) || '' }}
+            ${{ inputs.version_bump && inputs.version_bump != 'auto' && format('Use a {0} version bump.', inputs.version_bump) || '' }}
+
+            Analyze commits since the last release, suggest a version bump,
+            and draft the RELEASE-NOTES.md entry. Create a pull request with
+            the changes. Do NOT create git tags — leave that for the maintainer.
+
+            Use "[doc-superpowers] draft release notes" as the commit message.

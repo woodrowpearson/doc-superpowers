@@ -838,6 +838,76 @@ test_install_ci_default_strict_disabled() {
   teardown
 }
 
+test_install_ci_creates_claude_powered_workflows() {
+  echo "test: install --ci creates Claude-powered workflow files"
+  setup
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_file_exists ".github/workflows/doc-audit-update.yml" "audit-update workflow"
+  assert_file_exists ".github/workflows/doc-review-pr.yml" "review-pr workflow"
+  assert_file_exists ".github/workflows/doc-release.yml" "release workflow"
+  assert_file_exists ".github/workflows/doc-spec-verify.yml" "spec-verify workflow"
+  # Verify placeholders were substituted
+  assert_not_contains "$(cat .github/workflows/doc-audit-update.yml)" "__BASE_BRANCH__" "base branch substituted in audit-update"
+  assert_not_contains "$(cat .github/workflows/doc-audit-update.yml)" "__VERSION__" "version substituted in audit-update"
+  assert_not_contains "$(cat .github/workflows/doc-review-pr.yml)" "__BASE_BRANCH__" "base branch substituted in review-pr"
+  assert_not_contains "$(cat .github/workflows/doc-release.yml)" "__VERSION__" "version substituted in release"
+  assert_not_contains "$(cat .github/workflows/doc-spec-verify.yml)" "__BASE_BRANCH__" "base branch substituted in spec-verify"
+  teardown
+}
+
+test_install_ci_claude_workflows_have_marker() {
+  echo "test: Claude-powered workflows start with workflow marker"
+  setup
+  for template in doc-audit-update.yml doc-review-pr.yml doc-release.yml doc-spec-verify.yml; do
+    local first_line
+    first_line=$(head -1 "$HOOKS_DIR/ci/$template")
+    assert_contains "$first_line" "doc-superpowers workflow v1" "marker in $template"
+  done
+  teardown
+}
+
+test_install_ci_claude_workflows_reference_api_key() {
+  echo "test: Claude-powered workflows reference ANTHROPIC_API_KEY"
+  setup
+  for template in doc-audit-update.yml doc-review-pr.yml doc-release.yml doc-spec-verify.yml; do
+    assert_contains "$(cat "$HOOKS_DIR/ci/$template")" "ANTHROPIC_API_KEY" "API key in $template"
+  done
+  teardown
+}
+
+test_install_ci_api_key_message() {
+  echo "test: install --ci prints API key message for Claude-powered workflows"
+  setup
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_contains "$output" "ANTHROPIC_API_KEY" "API key reminder shown"
+  teardown
+}
+
+test_uninstall_ci_removes_claude_workflows() {
+  echo "test: uninstall --ci removes Claude-powered workflows"
+  setup
+  bash "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
+  assert_file_exists ".github/workflows/doc-audit-update.yml" "installed first"
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" uninstall --ci 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_file_not_exists ".github/workflows/doc-audit-update.yml" "audit-update removed"
+  assert_file_not_exists ".github/workflows/doc-review-pr.yml" "review-pr removed"
+  assert_file_not_exists ".github/workflows/doc-release.yml" "release removed"
+  assert_file_not_exists ".github/workflows/doc-spec-verify.yml" "spec-verify removed"
+  teardown
+}
+
 test_uninstall_no_flags_non_tty_fails() {
   echo "test: uninstall without flags in non-TTY context exits 1"
   setup
@@ -1033,6 +1103,11 @@ test_install_ci_with_custom_base_branch
 test_install_ci_with_custom_cron
 test_install_ci_strict_enables_strict
 test_install_ci_default_strict_disabled
+test_install_ci_creates_claude_powered_workflows
+test_install_ci_claude_workflows_have_marker
+test_install_ci_claude_workflows_reference_api_key
+test_install_ci_api_key_message
+test_uninstall_ci_removes_claude_workflows
 test_uninstall_no_flags_non_tty_fails
 test_status_reports_installed
 test_status_reports_not_installed

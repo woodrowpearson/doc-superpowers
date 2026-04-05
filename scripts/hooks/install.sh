@@ -355,6 +355,13 @@ install_ci() {
   echo "CI/CD workflows: $installed installed, $skipped skipped"
   if [[ $installed -gt 0 ]]; then
     echo "  Remember to commit and push these workflows."
+    # Check if any installed workflow requires an API key
+    if grep -rql 'ANTHROPIC_API_KEY' .github/workflows/doc-*.yml 2>/dev/null; then
+      echo ""
+      echo "  NOTE: Claude-powered workflows require ANTHROPIC_API_KEY"
+      echo "  as a GitHub Actions secret. Set it at:"
+      echo "  Settings > Secrets and variables > Actions > New repository secret"
+    fi
   fi
 }
 
@@ -365,7 +372,7 @@ uninstall_ci() {
   fi
 
   local removed=0
-  for workflow_name in doc-freshness-pr.yml doc-freshness-schedule.yml doc-index-update.yml; do
+  for workflow_name in doc-freshness-pr.yml doc-freshness-schedule.yml doc-index-update.yml doc-audit-update.yml doc-review-pr.yml doc-release.yml doc-spec-verify.yml; do
     local workflow_dest=".github/workflows/$workflow_name"
     if is_doc_superpowers_workflow "$workflow_dest" 2>/dev/null; then
       rm "$workflow_dest"
@@ -384,7 +391,7 @@ status_ci() {
   fi
 
   local found=0
-  for workflow_name in doc-freshness-pr.yml doc-freshness-schedule.yml doc-index-update.yml; do
+  for workflow_name in doc-freshness-pr.yml doc-freshness-schedule.yml doc-index-update.yml doc-audit-update.yml doc-review-pr.yml doc-release.yml doc-spec-verify.yml; do
     local workflow_dest=".github/workflows/$workflow_name"
     if is_doc_superpowers_workflow "$workflow_dest" 2>/dev/null; then
       printf "  ✓ %-22s installed\n" "$workflow_name"

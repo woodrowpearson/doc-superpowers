@@ -407,7 +407,7 @@ Update is the **write counterpart** to audit's read-only analysis. It consumes a
 5. Update `docs/specs/README.md` and `docs/adr/README.md` indexes.
 6. **Check CLAUDE.md currency** — Compare CLAUDE.md sections against actual filesystem. If stale, update per `references/doc-spec.md` CLAUDE.md update rules. Sync is the natural place to catch CLAUDE.md drift that accumulated across multiple doc changes.
 7. **Check README.md currency** — Compare README.md feature list, action list, and usage examples against actual SKILL.md actions and capabilities. If stale, update per `references/doc-spec.md` README.md update rules. Sync is the natural place to catch README.md drift alongside CLAUDE.md.
-8. If `scripts/hooks/install.sh` exists in the skill directory, run `install.sh status` and append a one-line summary: `Hooks: N/4 git, N/2 claude, N/3 ci`
+8. If `scripts/hooks/install.sh` exists in the skill directory, run `install.sh status` and append a one-line summary: `Hooks: N/4 git, N/2 claude, N/7 ci`
 
 ### `release` — Draft Release Notes Entry
 
