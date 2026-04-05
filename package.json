@@ -1,6 +1,6 @@
 {
   "name": "doc-superpowers",
-  "version": "2.6.1",
+  "version": "2.7.0",
   "description": "Documentation orchestrator skill for AI coding agents",
   "type": "module",
   "main": ".opencode/plugins/doc-superpowers.js",

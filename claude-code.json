@@ -1,6 +1,6 @@
 {
   "name": "doc-superpowers",
-  "version": "2.6.1",
+  "version": "2.7.0",
   "description": "Documentation orchestrator for Claude Code: generates, audits, and maintains project docs through parallel agent dispatch, agentic workflow discovery, diagram generation, and spec lifecycle tracking",
   "author": "Woodrow Pearson",
   "license": "MIT",

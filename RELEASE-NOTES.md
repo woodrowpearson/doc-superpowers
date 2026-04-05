@@ -1,5 +1,15 @@
 # Release Notes
 
+## v2.7.0 (2026-04-05)
+
+### Features
+- **Claude-powered CI workflow templates**: Four new GitHub Actions templates using `anthropics/claude-code-action` for AI-driven doc management on feature branches: `doc-audit-update.yml` (auto audit+update on push), `doc-review-pr.yml` (PR doc review with `@claude` interactive support), `doc-release.yml` (release notes drafting on release branches), and `doc-spec-verify.yml` (spec compliance checks on PRs). Install with `hooks install --ci`.
+- **Stale content scan in spec-generate**: New Step 5b detects existing specs with invalidated content when generating specs from a design doc. Extracts removal keywords, greps overlapping specs, classifies severity (HIGH/MEDIUM), and offers to apply deprecation notices immediately rather than deferring to the spec-inject execute phase.
+
+### Other
+- **Eval coverage for new features**: Added eval #5 for spec-generate stale content scan (6 assertions) and updated eval #6 hook assertions to match the expanded CI template count (3 to 7).
+- **CLAUDE.md path corrections**: Fixed SKILL.md path reference and added missing directory entries for `skills/` and `docs/issues/`.
+
 ## v2.6.1 (2026-03-29)
 
 ### Fixes
