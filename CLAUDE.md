@@ -34,6 +34,13 @@ doc-superpowers/
 │       ├── git/              # Git hook scripts
 │       ├── claude/           # Claude Code hook scripts
 │       └── ci/               # GitHub Actions workflow templates
+│           ├── doc-freshness-pr.yml      # PR freshness check (shell-based)
+│           ├── doc-freshness-schedule.yml # Weekly audit cron (shell-based)
+│           ├── doc-index-update.yml      # Auto-index update on push (shell-based)
+│           ├── doc-audit-update.yml      # AI audit+update on feature branches
+│           ├── doc-review-pr.yml         # AI PR doc review + @claude interactive
+│           ├── doc-release.yml           # AI release notes drafting
+│           └── doc-spec-verify.yml       # AI spec compliance on PRs
 ├── references/
 │   ├── doc-spec.md       # Templates for generated docs (C4, ERD, workflows, agentic, specs, ADRs)
 │   ├── agent-prompt-template.md   # Review agent prompt template + scope focus areas

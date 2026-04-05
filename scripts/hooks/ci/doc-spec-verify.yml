@@ -1,0 +1,60 @@
+# doc-superpowers workflow v1
+# AI-powered spec compliance check on pull requests
+# Installed by doc-superpowers hooks installer
+
+name: Spec Compliance Check (AI)
+
+on:
+  pull_request:
+    branches: [__BASE_BRANCH__]
+    types: [opened, synchronize, ready_for_review]
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - 'lib/**'
+      - 'app/**'
+  workflow_dispatch:
+
+env:
+  DOC_SUPERPOWERS_VERSION: "__VERSION__"
+
+jobs:
+  spec-verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for specs directory
+        id: precheck
+        run: |
+          if [ ! -d "docs/specs" ]; then
+            echo "No docs/specs/ directory found. Skipping spec verification."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            spec_count=$(find docs/specs -name 'SPEC-*.md' 2>/dev/null | wc -l | tr -d ' ')
+            if [ "$spec_count" -eq 0 ]; then
+              echo "No spec files found in docs/specs/. Skipping."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "$spec_count spec file(s) found."
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Verify spec compliance
+        if: steps.precheck.outputs.skip != 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Run /doc-superpowers spec-verify --mode=review to check this PR
+            against governing specifications in docs/specs/.
+
+            Post compliance findings as a PR comment. This is a read-only
+            check — do not modify any files.

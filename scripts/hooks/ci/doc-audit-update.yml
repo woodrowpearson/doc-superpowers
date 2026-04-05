@@ -1,0 +1,58 @@
+# doc-superpowers workflow v1
+# AI-powered documentation audit and update on feature branches
+# Installed by doc-superpowers hooks installer
+
+name: Doc Audit & Update (AI)
+
+on:
+  push:
+    branches-ignore: [__BASE_BRANCH__]
+    paths:
+      - 'docs/**'
+      - 'src/**'
+      - 'scripts/**'
+      - 'SKILL.md'
+      - 'CLAUDE.md'
+      - 'README.md'
+  workflow_dispatch:
+
+env:
+  DOC_SUPERPOWERS_VERSION: "__VERSION__"
+
+jobs:
+  audit-update:
+    if: >-
+      !contains(github.event.head_commit.message, '[doc-superpowers]') &&
+      !contains(github.event.head_commit.message, '[skip ci]')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for doc index
+        id: precheck
+        run: |
+          if [ ! -f "docs/.doc-index.json" ]; then
+            echo "No doc-index found — init has not run. Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Audit and update docs
+        if: steps.precheck.outputs.skip != 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Run /doc-superpowers audit to check documentation freshness against
+            the recent changes on this branch. Then run /doc-superpowers update
+            to fix any stale docs found.
+
+            Commit the changes with a "[doc-superpowers] update stale docs" message.
+            Do not create a pull request — commit directly to this branch.
