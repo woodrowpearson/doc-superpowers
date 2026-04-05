@@ -772,10 +772,14 @@ test_install_ci_creates_workflows() {
   assert_file_exists ".github/workflows/doc-freshness-pr.yml" "PR workflow"
   assert_file_exists ".github/workflows/doc-freshness-schedule.yml" "schedule workflow"
   assert_file_exists ".github/workflows/doc-index-update.yml" "index workflow"
+  assert_file_exists ".github/scripts/doc-tools.sh" "vendored doc-tools.sh"
   # Verify placeholders were substituted
   assert_not_contains "$(cat .github/workflows/doc-freshness-pr.yml)" "__BASE_BRANCH__" "base branch substituted"
-  assert_not_contains "$(cat .github/workflows/doc-freshness-pr.yml)" "__VERSION__" "version substituted"
   assert_not_contains "$(cat .github/workflows/doc-freshness-schedule.yml)" "__CRON_SCHEDULE__" "cron schedule substituted"
+  # Verify no remote curl in shell-based workflows
+  assert_not_contains "$(cat .github/workflows/doc-freshness-pr.yml)" "curl" "no remote fetch in PR workflow"
+  assert_not_contains "$(cat .github/workflows/doc-freshness-schedule.yml)" "curl" "no remote fetch in schedule workflow"
+  assert_not_contains "$(cat .github/workflows/doc-index-update.yml)" "curl" "no remote fetch in index workflow"
   teardown
 }
 
@@ -891,6 +895,26 @@ test_install_ci_api_key_message() {
   teardown
 }
 
+test_install_ci_vendors_doc_tools() {
+  echo "test: install --ci vendors doc-tools.sh into .github/scripts"
+  setup
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_file_exists ".github/scripts/doc-tools.sh" "doc-tools.sh vendored"
+  assert_contains "$output" "Vendored doc-tools.sh" "vendor message shown"
+  # Verify the vendored file is executable
+  [[ -x ".github/scripts/doc-tools.sh" ]]
+  assert_eq "0" "$?" "doc-tools.sh is executable"
+  # Verify workflows reference the local copy
+  assert_contains "$(cat .github/workflows/doc-freshness-pr.yml)" ".github/scripts/doc-tools.sh" "PR workflow uses local script"
+  assert_contains "$(cat .github/workflows/doc-freshness-schedule.yml)" ".github/scripts/doc-tools.sh" "schedule workflow uses local script"
+  assert_contains "$(cat .github/workflows/doc-index-update.yml)" ".github/scripts/doc-tools.sh" "index workflow uses local script"
+  teardown
+}
+
 test_uninstall_ci_removes_claude_workflows() {
   echo "test: uninstall --ci removes Claude-powered workflows"
   setup
@@ -905,6 +929,23 @@ test_uninstall_ci_removes_claude_workflows() {
   assert_file_not_exists ".github/workflows/doc-review-pr.yml" "review-pr removed"
   assert_file_not_exists ".github/workflows/doc-release.yml" "release removed"
   assert_file_not_exists ".github/workflows/doc-spec-verify.yml" "spec-verify removed"
+  teardown
+}
+
+test_uninstall_ci_removes_vendored_doc_tools() {
+  echo "test: uninstall --ci removes vendored doc-tools.sh"
+  setup
+  bash "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
+  assert_file_exists ".github/scripts/doc-tools.sh" "vendored first"
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" uninstall --ci 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_file_not_exists ".github/scripts/doc-tools.sh" "doc-tools.sh removed"
+  # .github/scripts/ dir should be cleaned up if empty
+  [[ ! -d ".github/scripts" ]]
+  assert_eq "0" "$?" "scripts dir cleaned up"
   teardown
 }
 
@@ -1107,7 +1148,9 @@ test_install_ci_creates_claude_powered_workflows
 test_install_ci_claude_workflows_have_marker
 test_install_ci_claude_workflows_reference_api_key
 test_install_ci_api_key_message
+test_install_ci_vendors_doc_tools
 test_uninstall_ci_removes_claude_workflows
+test_uninstall_ci_removes_vendored_doc_tools
 test_uninstall_no_flags_non_tty_fails
 test_status_reports_installed
 test_status_reports_not_installed

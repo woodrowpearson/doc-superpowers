@@ -10,9 +10,6 @@ on:
     paths:
       - 'docs/**'
 
-env:
-  DOC_SUPERPOWERS_VERSION: "__VERSION__"
-
 jobs:
   update-index:
     # Skip if this push was made by doc-superpowers itself
@@ -23,7 +20,7 @@ jobs:
       pull-requests: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 2
 
@@ -45,13 +42,6 @@ jobs:
           fi
           echo "needed=true" >> "$GITHUB_OUTPUT"
 
-      - name: Fetch doc-superpowers tooling
-        if: steps.check.outputs.needed == 'true'
-        run: |
-          curl -sSfL "https://raw.githubusercontent.com/woodrowpearson/doc-superpowers/${DOC_SUPERPOWERS_VERSION}/scripts/doc-tools.sh" \
-            -o /tmp/doc-tools.sh
-          chmod +x /tmp/doc-tools.sh
-
       - name: Update index
         if: steps.check.outputs.needed == 'true'
         env:
@@ -59,7 +49,7 @@ jobs:
         run: |
           # Word-split CHANGED_DOCS intentionally — each space-separated path becomes an arg
           # shellcheck disable=SC2086
-          /tmp/doc-tools.sh update-index $CHANGED_DOCS
+          .github/scripts/doc-tools.sh update-index $CHANGED_DOCS
 
       - name: Create PR if index changed
         if: steps.check.outputs.needed == 'true'

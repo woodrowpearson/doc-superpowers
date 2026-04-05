@@ -9,9 +9,6 @@ on:
     - cron: '__CRON_SCHEDULE__'
   workflow_dispatch: # Allow manual trigger
 
-env:
-  DOC_SUPERPOWERS_VERSION: "__VERSION__"
-
 jobs:
   audit-freshness:
     runs-on: ubuntu-latest
@@ -20,15 +17,9 @@ jobs:
       issues: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
-
-      - name: Fetch doc-superpowers tooling
-        run: |
-          curl -sSfL "https://raw.githubusercontent.com/woodrowpearson/doc-superpowers/${DOC_SUPERPOWERS_VERSION}/scripts/doc-tools.sh" \
-            -o /tmp/doc-tools.sh
-          chmod +x /tmp/doc-tools.sh
 
       - name: Check doc freshness
         id: freshness
@@ -39,7 +30,7 @@ jobs:
             exit 0
           fi
 
-          result=$(/tmp/doc-tools.sh check-freshness) || {
+          result=$(.github/scripts/doc-tools.sh check-freshness) || {
             echo "Freshness check failed."
             echo "stale_count=0" >> "$GITHUB_OUTPUT"
             exit 0
@@ -54,7 +45,7 @@ jobs:
 
       - name: Create or update issue
         if: steps.freshness.outputs.stale_count != '0'
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const result = JSON.parse(process.env.FRESHNESS_RESULT);
@@ -114,7 +105,7 @@ jobs:
 
       - name: Close issue if all clear
         if: steps.freshness.outputs.stale_count == '0'
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const title = '[doc-superpowers] Stale documentation detected';
