@@ -169,15 +169,54 @@
     },
     {
       "id": 5,
+      "name": "spec-generate-stale-content-scan",
+      "prompt": "I have a design doc at docs/superpowers/specs/2026-04-01-pipeline-v2-design.md that replaces our old EdgeTAM sweep detection with a new Gemma-4 on-device model. Several existing specs (SPEC-PIPE-005, SPEC-PIPE-007, SPEC-UI-005) reference sweep mode and EdgeTAM heavily. Run spec-generate on this design doc. /doc-superpowers spec-generate --design-doc=docs/superpowers/specs/2026-04-01-pipeline-v2-design.md",
+      "expected_output": "Should create new spec(s) for the Gemma-4 domain. Should run Step 5b stale content scan on overlapping specs, extracting removal keywords (sweep, EdgeTAM) from the design doc. Should grep existing specs and report a findings table with stale ref counts and severity (HIGH/MEDIUM). Should offer to apply deprecation notices to stale sections. Should append a '## Specs Requiring Updates' section to the design doc with stale ref counts and severity. Should still perform all standard spec-generate steps (index update, CLAUDE.md sync, etc.).",
+      "files": [],
+      "assertions": [
+        {
+          "name": "extracts-removal-keywords",
+          "type": "behavior_check",
+          "description": "Identifies removal/deprecation keywords from design doc (e.g., sweep, EdgeTAM) by scanning section headings with Delete/Remove/Drop/Replace"
+        },
+        {
+          "name": "scans-overlapping-specs",
+          "type": "tool_call_check",
+          "description": "Greps existing overlapping specs for the extracted removal keywords"
+        },
+        {
+          "name": "reports-stale-ref-table",
+          "type": "output_check",
+          "description": "Outputs a table with Spec, Stale Refs count, Severity (HIGH/MEDIUM), and Key Terms columns"
+        },
+        {
+          "name": "classifies-severity",
+          "type": "output_check",
+          "description": "Classifies specs as HIGH (>5 matches) or MEDIUM (1-5 matches)"
+        },
+        {
+          "name": "offers-deprecation-notices",
+          "type": "output_check",
+          "description": "Asks user whether to apply deprecation notices now or defer to spec-inject"
+        },
+        {
+          "name": "appends-specs-requiring-updates",
+          "type": "content_check",
+          "description": "Appends '## Specs Requiring Updates' section to design doc with Stale Refs and Severity columns"
+        }
+      ]
+    },
+    {
+      "id": 6,
       "name": "hooks-install-all",
       "prompt": "I want to set up automated doc freshness monitoring. Install all the hooks for me. /doc-superpowers hooks install --all",
-      "expected_output": "Should install git hooks to .git/hooks/ (pre-commit, post-merge, post-checkout, prepare-commit-msg), add Claude Code hook entries to .claude/settings.local.json (PreToolUse + Stop), and generate GitHub Actions workflows to .github/workflows/ (3 YAML files). Should report counts of installed hooks per tier.",
+      "expected_output": "Should install git hooks to .git/hooks/ (pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push), add Claude Code hook entries to .claude/settings.local.json (PreToolUse + PostToolUse + Stop), and generate GitHub Actions workflows to .github/workflows/ (7 YAML files — 3 shell-based + 4 Claude-powered). Should report counts of installed hooks per tier.",
       "files": [],
       "assertions": [
         {
           "name": "installs-git-hooks",
           "type": "file_exists",
-          "description": "Creates .git/hooks/pre-commit, .git/hooks/post-merge, .git/hooks/post-checkout, .git/hooks/prepare-commit-msg"
+          "description": "Creates .git/hooks/pre-commit, .git/hooks/post-merge, .git/hooks/post-checkout, .git/hooks/prepare-commit-msg, .git/hooks/pre-push"
         },
         {
           "name": "git-hooks-executable",
@@ -187,12 +226,12 @@
         {
           "name": "claude-settings-updated",
           "type": "content_check",
-          "description": "Adds PreToolUse and Stop hook entries to .claude/settings.local.json (NOT .claude/hooks/)"
+          "description": "Adds PreToolUse, PostToolUse, and Stop hook entries to .claude/settings.local.json (NOT .claude/hooks/)"
         },
         {
           "name": "ci-workflows-created",
           "type": "file_exists",
-          "description": "Creates .github/workflows/doc-freshness-pr.yml, doc-freshness-schedule.yml, doc-index-update.yml"
+          "description": "Creates .github/workflows/ with 7 workflow files: doc-freshness-pr.yml, doc-freshness-schedule.yml, doc-index-update.yml, doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml"
         },
         {
           "name": "reports-install-counts",
@@ -207,7 +246,7 @@
       ]
     },
     {
-      "id": 6,
+      "id": 7,
       "name": "review-pr-scoped",
       "prompt": "I'm about to merge a PR that touched src/auth/oauth.py, src/auth/session.py, and tests/test_auth.py. Can you check if any docs need updating before I merge? /doc-superpowers review-pr",
       "expected_output": "Should run discovery, identify changed files from PR diff (git diff against base branch), call doc-tools.sh check-freshness scoped to changed paths, map files to affected scopes, dispatch scope agents for each affected scope with isolation, produce review output with P0-P3 findings. Should NOT modify any docs.",
@@ -241,7 +280,7 @@
       ]
     },
     {
-      "id": 7,
+      "id": 8,
       "name": "diagram-regenerate",
       "prompt": "I've restructured the API layer significantly. Can you regenerate the architecture diagrams? /doc-superpowers diagram",
       "expected_output": "Should find docs containing mermaid code blocks, verify diagram accuracy against current code, check agentic inventory for missing workflow diagrams, regenerate PNGs to co-located diagrams/ dirs (architecture/diagrams/ and workflows/diagrams/). Should flag diagrams where code has diverged.",
@@ -265,7 +304,7 @@
       ]
     },
     {
-      "id": 8,
+      "id": 9,
       "name": "sync-index",
       "prompt": "I manually added a few doc files and removed one. Can you sync the doc index? /doc-superpowers sync",
       "expected_output": "Should call check-freshness to detect drift, investigate doc_modified entries, run optional user scripts if detected, call update-index for verified docs, update specs/README.md and adr/README.md indexes.",
@@ -289,7 +328,7 @@
       ]
     },
     {
-      "id": 9,
+      "id": 10,
       "name": "spec-inject-plan",
       "prompt": "I have formal specs at docs/specs/SPEC-AUTH-001-oauth-flow.md and docs/specs/SPEC-DATA-001-user-schema.md, and my implementation plan is at docs/superpowers/plans/2026-03-15-auth-feature.md. Can you inject spec maintenance tasks into the plan? /doc-superpowers spec-inject --phase=plan --plan=docs/superpowers/plans/2026-03-15-auth-feature.md --specs=docs/specs/SPEC-AUTH-001-oauth-flow.md,docs/specs/SPEC-DATA-001-user-schema.md",
       "expected_output": "Should read the plan, identify chunk boundaries, append spec update tasks at the end of each chunk, add a spec finalization task in the last chunk. Should NOT modify the specs themselves (only the plan). Tasks should use checkbox syntax.",
@@ -318,7 +357,7 @@
       ]
     },
     {
-      "id": 10,
+      "id": 11,
       "name": "spec-verify-post-execute",
       "prompt": "All implementation tasks are done for the auth feature. Before I merge, can you verify that the specs are all satisfied? /doc-superpowers spec-verify --mode=post-execute --specs=docs/specs/SPEC-AUTH-001-oauth-flow.md,docs/specs/SPEC-DATA-001-user-schema.md --design-doc=docs/superpowers/specs/2026-03-14-user-auth-design.md",
       "expected_output": "Should run check-freshness on all specs, check Status fields (all should be Implemented), perform three-way coverage check (design doc → specs → code), produce a compliance report with PASS/FAIL verdict. Report should include summary stats, per-spec details, unresolved items, and a recommendation.",
@@ -352,7 +391,7 @@
       ]
     },
     {
-      "id": 11,
+      "id": 12,
       "name": "release-draft",
       "prompt": "We've landed several fixes and a new feature since the last release. Let's cut a new version. /doc-superpowers release",
       "expected_output": "Should parse RELEASE-NOTES.md for latest version and date, determine commit range since last release (via git tag or date fallback), auto-suggest semver bump from conventional commit prefixes, dispatch a drafting agent that reads actual diffs, present draft entry to user for approval, prepend to RELEASE-NOTES.md, sync CLAUDE.md and README.md if needed, and offer to create a git tag.",

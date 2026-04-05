@@ -19,7 +19,9 @@ doc-superpowers/
 │   ├── INSTALL.md
 │   └── plugins/
 │       └── doc-superpowers.js
-├── SKILL.md              # Main skill definition — action routing, discovery, verification
+├── skills/
+│   └── doc-superpowers/
+│       └── SKILL.md      # Main skill definition — action routing, discovery, verification
 ├── AGENTS.md             # Cross-client agent instructions
 ├── GEMINI.md             # Gemini CLI context redirect
 ├── gemini-extension.json # Gemini CLI extension manifest
@@ -62,6 +64,7 @@ doc-superpowers/
 │   │   ├── specs/              # Design specs from brainstorming
 │   │   └── plans/              # Implementation plans from writing-plans
 │   ├── .doc-index.json   # Machine-readable freshness index (generated)
+│   ├── issues/           # Bug reports and enhancement requests
 │   ├── plans/            # Audit reports and update plans
 │   ├── archive/          # Archived docs (created on demand by `update` when superseding)
 │   │   └── plans/              # Archived audit plans
@@ -79,7 +82,7 @@ doc-superpowers/
 
 | File | Purpose | When to Modify |
 |------|---------|---------------|
-| `SKILL.md` | Skill logic — discovery, action routing, agent prompts, verification | Adding actions, changing workflow |
+| `skills/doc-superpowers/SKILL.md` | Skill logic — discovery, action routing, agent prompts, verification | Adding actions, changing workflow |
 | `scripts/doc-tools.sh` | Bundled freshness tooling — 9 subcommands for index and version management | Changing staleness detection, index schema, version sync |
 | `scripts/test-doc-tools.sh` | Test suite for doc-tools.sh | Adding tests for new doc-tools features |
 | `scripts/test-hooks.sh` | Test suite for hooks installer and hook scripts | Adding tests for new hooks or installer features |
@@ -87,7 +90,7 @@ doc-superpowers/
 | `references/doc-spec.md` | Doc templates, Mermaid syntax, naming conventions, schema reference | Adding doc types, changing templates |
 | `references/agent-prompt-template.md` | Review agent prompt template + scope-specific focus areas | Changing agent review instructions or adding project signals |
 | `references/output-templates.md` | Audit report format + plan template | Changing report structure or plan format |
-| `references/spec-lifecycle-actions.md` | Detailed procedures for spec-generate, spec-inject, spec-verify | Changing spec action steps or adding new spec actions |
+| `references/spec-lifecycle-actions.md` | Detailed procedures for spec-generate (incl. Step 5b stale content scan), spec-inject, spec-verify | Changing spec action steps or adding new spec actions |
 | `references/spec-lifecycle-protocol.md` | Wrapper author integration guide — input/output contracts, integration patterns | Adding integration patterns, changing action contracts |
 | `references/integration-patterns.md` | How other skills integrate with doc-superpowers (code review, commit review, wrapper skills) | Adding integration patterns |
 | `docs/codebase-guide.md` | Directory map, key files, code flow for this skill | Structural changes to the skill |
