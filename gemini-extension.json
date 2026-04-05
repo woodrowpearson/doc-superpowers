@@ -1,6 +1,6 @@
 {
   "name": "doc-superpowers",
   "description": "Documentation orchestrator: generates, audits, and maintains project docs through parallel agent dispatch, agentic workflow discovery, diagram generation, and spec lifecycle tracking",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "contextFileName": "GEMINI.md"
 }
