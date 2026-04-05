@@ -82,13 +82,16 @@ Run before any action to understand the project's documentation infrastructure.
 
 ### Detect Bundled Tooling
 
-doc-superpowers bundles `scripts/doc-tools.sh` in its skill directory. Use it directly:
+doc-superpowers bundles `scripts/doc-tools.sh` in its skill directory. Resolve the path before first use:
 
 ```bash
-# Script location (relative to skill directory)
-SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOC_TOOLS="$SKILL_DIR/scripts/doc-tools.sh"
+# Resolve from plugin cache (shell glob ignores .gitignore — fd does NOT by default)
+DOC_TOOLS="$(printf '%s\n' ~/.claude/plugins/cache/doc-superpowers/doc-superpowers/*/scripts/doc-tools.sh | sort -V | tail -1)"
 ```
+
+**Important**: Do NOT use `fd` to search the plugin cache — `~/.claude/.gitignore` ignores `plugins/` which causes `fd` to return empty results. Use a shell glob as shown above.
+
+All `doc-tools.sh` references below assume `$DOC_TOOLS` has been resolved. Use `$DOC_TOOLS <subcommand>` for every call.
 
 For user-provided optional scripts, detect dynamically:
 
