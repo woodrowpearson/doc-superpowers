@@ -152,7 +152,10 @@ INTEGRATION_EOF
     # Add .gitattributes entry if not already present
     local gitattributes=".gitattributes"
     if ! grep -q 'merge=doc-index' "$gitattributes" 2>/dev/null; then
-      echo "" >> "$gitattributes"
+      # Add blank separator only if file exists and is non-empty
+      if [[ -s "$gitattributes" ]]; then
+        echo "" >> "$gitattributes"
+      fi
       echo "# doc-superpowers: auto-resolve doc-index.json merge conflicts" >> "$gitattributes"
       echo "docs/.doc-index.json merge=doc-index" >> "$gitattributes"
       echo "  Added merge driver to .gitattributes"
@@ -183,7 +186,6 @@ uninstall_git() {
       sed -i.bak '/# doc-superpowers:begin/,/# doc-superpowers:end/d;/# doc-superpowers/d;/DOC_SP_HOOK=/d;/bash.*DOC_SP_HOOK/d;/source.*DOC_SP_HOOK/d' "$hook_dest"
       # Squeeze consecutive blank lines left by marker removal
       sed -i.bak '/^$/N;/^\n$/d' "$hook_dest"
-      rm -f "$hook_dest.bak"
       rm -f "$hook_dest.bak"
       # Remove local hook copy
       rm -f "$hooks_dir/.doc-superpowers-$hook_name"
@@ -229,7 +231,13 @@ status_git() {
 
   # Merge driver status
   if git config --local --get merge.doc-index.driver &>/dev/null; then
-    printf "  ✓ %-22s registered\n" "merge-driver"
+    local driver_path
+    driver_path=$(git config --local --get merge.doc-index.driver | awk '{print $1}')
+    if [[ -f "$driver_path" ]]; then
+      printf "  ✓ %-22s registered\n" "merge-driver"
+    else
+      printf "  ⚠ %-22s registered but script missing: %s\n" "merge-driver" "$driver_path"
+    fi
   else
     printf "  ✗ %-22s not registered\n" "merge-driver"
   fi

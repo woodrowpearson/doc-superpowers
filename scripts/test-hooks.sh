@@ -691,6 +691,84 @@ test_uninstall_git_removes_integrated_hooks() {
   teardown
 }
 
+test_install_git_registers_merge_driver() {
+  echo "test: install --git registers merge driver in git config and .gitattributes"
+  setup
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" install --git 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  # Verify git config entries
+  local driver_config
+  driver_config=$(git config --local --get merge.doc-index.driver 2>/dev/null || echo "")
+  assert_contains "$driver_config" "merge-doc-index.sh" "merge driver registered in git config"
+  local name_config
+  name_config=$(git config --local --get merge.doc-index.name 2>/dev/null || echo "")
+  assert_eq "doc-superpowers index merger" "$name_config" "merge driver name set"
+  # Verify .gitattributes entry
+  assert_file_exists ".gitattributes" ".gitattributes created"
+  assert_contains "$(cat .gitattributes)" "merge=doc-index" ".gitattributes has merge driver entry"
+  # Verify no leading blank line when .gitattributes was created fresh
+  local first_char
+  first_char=$(head -c 1 .gitattributes)
+  assert_eq "#" "$first_char" "no leading blank line in fresh .gitattributes"
+  teardown
+}
+
+test_uninstall_git_removes_merge_driver() {
+  echo "test: uninstall --git removes merge driver from git config and .gitattributes"
+  setup
+  bash "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
+  # Verify installed first
+  assert_contains "$(git config --local --get merge.doc-index.driver 2>/dev/null)" "merge-doc-index.sh" "driver present before uninstall"
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" uninstall --git 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  # Verify git config entries removed
+  local driver_config
+  driver_config=$(git config --local --get merge.doc-index.driver 2>/dev/null || echo "UNSET")
+  assert_eq "UNSET" "$driver_config" "merge driver removed from git config"
+  # Verify .gitattributes entry removed
+  assert_not_contains "$(cat .gitattributes 2>/dev/null)" "merge=doc-index" "merge driver removed from .gitattributes"
+  assert_contains "$output" "Unregistered merge driver" "reports unregistration"
+  teardown
+}
+
+test_status_reports_merge_driver() {
+  echo "test: status reports merge driver state"
+  setup
+  # Before install: not registered
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" status 2>&1)
+  set -e
+  assert_contains "$output" "merge-driver" "shows merge-driver line"
+  assert_contains "$output" "not registered" "shows not registered before install"
+  # After install: registered
+  bash "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" status 2>&1)
+  set -e
+  assert_contains "$output" "registered" "shows registered after install"
+  assert_contains "$output" "configured" "shows .gitattributes configured"
+  teardown
+}
+
+test_status_warns_stale_merge_driver_path() {
+  echo "test: status warns when merge driver script path is stale"
+  setup
+  bash "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
+  # Point git config at a non-existent path
+  git config --local merge.doc-index.driver "/nonexistent/merge-doc-index.sh %O %A %B"
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" status 2>&1)
+  set -e
+  assert_contains "$output" "script missing" "warns about missing driver script"
+  teardown
+}
+
 test_install_claude_creates_settings() {
   echo "test: install --claude creates settings and copies scripts"
   setup
@@ -1140,6 +1218,10 @@ test_install_git_overwrites_own_hook
 test_uninstall_git_removes_hooks
 test_uninstall_git_preserves_foreign_hooks
 test_uninstall_git_removes_integrated_hooks
+test_install_git_registers_merge_driver
+test_uninstall_git_removes_merge_driver
+test_status_reports_merge_driver
+test_status_warns_stale_merge_driver_path
 test_install_claude_creates_settings
 test_install_claude_preserves_existing
 test_uninstall_claude_removes_hooks

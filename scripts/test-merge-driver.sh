@@ -37,10 +37,10 @@ write_index() {
   printf '{"version":1,"generated_by":"doc-superpowers","generated_at":"%s","build_commit":"%s","docs":%s}' "$ga" "$bc" "$docs" > "$file"
 }
 
-# Temp files for each test
-B="/tmp/mdm-base.json"
-O="/tmp/mdm-ours.json"
-T="/tmp/mdm-theirs.json"
+# Temp files for each test (unique to avoid parallel-run collisions)
+B=$(mktemp /tmp/mdm-base.XXXXXX.json)
+O=$(mktemp /tmp/mdm-ours.XXXXXX.json)
+T=$(mktemp /tmp/mdm-theirs.XXXXXX.json)
 
 # ===================================================================
 # Test 1: Timestamp conflict — takes newer entry, regenerates metadata
