@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-04-07T06:47:40Z",
+  "generated_at": "2026-04-07T08:09:48Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -11,12 +11,12 @@
         "scripts/",
         "references/"
       ],
-      "code_commit": "d0fa4166cad671f828942c42e865b0d872f1d051",
+      "code_commit": "53bdd04a750d1c2bd1b9f6cb10992054a01933b5",
       "doc_type": "architecture",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-07T06:47:40Z"
+      "last_verified": "2026-04-07T07:25:04Z"
     },
     "docs/codebase-guide.md": {
       "content_hash": "sha256:464462cda576f7c8a3ccdb22736c7c0895265a7cfe096864d7c4a0e82e9e09a6",
@@ -24,15 +24,15 @@
         "SKILL.md",
         "scripts/"
       ],
-      "code_commit": "d0fa4166cad671f828942c42e865b0d872f1d051",
+      "code_commit": "53bdd04a750d1c2bd1b9f6cb10992054a01933b5",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-07T06:47:40Z"
+      "last_verified": "2026-04-07T07:25:04Z"
     },
     "docs/conventions.md": {
-      "content_hash": "sha256:d2bc7f1540bfacf92c020007ca5578cdc5fec35e8164f760e96b6cda3d59c8e9",
+      "content_hash": "sha256:e91bab1554a490eb3fd3d1aae4e850e7d2d46c691ad7f4dc82d885258d689b1b",
       "code_refs": [
         "SKILL.md",
         "references/doc-spec.md"
@@ -42,7 +42,7 @@
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-05T08:33:36Z"
+      "last_verified": "2026-04-07T08:09:48Z"
     },
     "docs/guides/getting-started.md": {
       "content_hash": "sha256:0d80ba66864e2cc981bb65ad3ec43f9665c3815995043f606dfadf3f5d0a05fb",
@@ -50,12 +50,12 @@
         "README.md",
         "SKILL.md"
       ],
-      "code_commit": "81cdd55a9e4180400a180e7ee412a3d03c87f2a0",
+      "code_commit": "fed10f0ba9b7273fc45b1d115710620de7c8d392",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-05T08:33:36Z"
+      "last_verified": "2026-04-07T07:25:04Z"
     },
     "docs/workflows/doc-superpowers.md": {
       "content_hash": "sha256:d6e793b10f57bb10ea0d64440075f237280b67f6e1d21acbd114cea4a98b8ca6",
@@ -63,12 +63,12 @@
         "SKILL.md",
         "scripts/"
       ],
-      "code_commit": "d0fa4166cad671f828942c42e865b0d872f1d051",
+      "code_commit": "53bdd04a750d1c2bd1b9f6cb10992054a01933b5",
       "doc_type": "workflows",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-07T06:47:40Z"
+      "last_verified": "2026-04-07T07:25:04Z"
     },
     "docs/plans/2026-03-26-audit-report.md": {
       "content_hash": "sha256:330e4350a91ef66501f4b0286111860289135f4158f2abdb9f5fc27e628a59bd",
@@ -113,12 +113,12 @@
         "SKILL.md",
         "scripts/hooks/"
       ],
-      "code_commit": "d0fa4166cad671f828942c42e865b0d872f1d051",
+      "code_commit": "53bdd04a750d1c2bd1b9f6cb10992054a01933b5",
       "doc_type": "plan",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-07T06:47:40Z"
+      "last_verified": "2026-04-07T07:25:04Z"
     },
     "docs/superpowers/plans/2026-03-14-spec-lifecycle-protocol.md": {
       "content_hash": "sha256:449c9b33ce9872f09044e50f23ab5756f82e45173391afb6c2a111a8ddabd178",
@@ -177,12 +177,12 @@
       "code_refs": [
         "scripts/hooks/"
       ],
-      "code_commit": "d0fa4166cad671f828942c42e865b0d872f1d051",
+      "code_commit": "53bdd04a750d1c2bd1b9f6cb10992054a01933b5",
       "doc_type": "spec",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-07T06:47:40Z"
+      "last_verified": "2026-04-07T07:25:04Z"
     },
     "docs/superpowers/specs/2026-03-14-spec-lifecycle-protocol-design.md": {
       "content_hash": "sha256:acf3d090a48f4efe2a34180cac359ced230ea6375327cdbfefe49f2518c1097a",
