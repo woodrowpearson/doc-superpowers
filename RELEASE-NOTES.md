@@ -1,5 +1,18 @@
 # Release Notes
 
+## v2.9.0 (2026-04-07)
+
+### Features
+- **Full-cycle PR documentation workflow**: New `doc-pr-full-cycle.yml` CI workflow template orchestrates the complete doc lifecycle on PR open — review, update, diagram regeneration, and index sync — in a single Claude-powered workflow. This is the 5th AI workflow, bringing the total CI template count to 8.
+- **Custom merge driver for doc-index.json**: `hooks install --git` now registers a custom git merge driver that auto-resolves timestamp and entry conflicts in `docs/.doc-index.json` during merge and rebase using jq three-way merge. Includes a companion test suite with 314 lines of coverage.
+
+### Fixes
+- **Broken Gemini CLI include path**: Fix incorrect include path in `gemini-extension.json` and expand platform installation docs for Codex, OpenCode, and Gemini.
+- **Missing Cursor INSTALL.md in directory trees**: Add Cursor INSTALL.md entries to directory trees in AGENTS.md and README.md, and expand Cursor plugin documentation.
+- **Dead guard and overlap warning in SKILL.md**: Remove unreachable guard clause and add an overlap warning for the spec-generate stale content scan step.
+- **doc-tools.sh resolution in plugin cache**: Use shell glob instead of `fd` to locate the bundled `doc-tools.sh` script, fixing failures when the skill is installed in a plugin cache directory.
+- **Merge driver installer hardening**: Add 4 installer tests (16 assertions), validate paths in `status_git()`, and fix blank-line and duplicate-rm bugs in the hook scripts.
+
 ## v2.8.0 (2026-04-05)
 
 ### Features
