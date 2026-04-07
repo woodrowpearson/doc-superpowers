@@ -177,7 +177,7 @@ Install opt-in hooks for automated freshness monitoring:
 
 **Claude Code hooks (3):** Pre-commit gate catches Claude-initiated commits. Post-commit sync auto-runs `update-index` after commits. Session summary reminds about stale docs when ending a session.
 
-**CI/CD (7 workflows — 3 shell-based, 4 Claude-powered):** PR freshness check comments on PRs. Weekly cron detects drift. Post-merge workflow keeps the doc index in sync. Claude-powered workflows provide AI audit+update on feature branches, AI PR doc review with @claude interactive support, AI release notes drafting on release branches, and AI spec compliance checks on PRs. Claude-powered workflows require an `ANTHROPIC_API_KEY` GitHub Actions secret.
+**CI/CD (8 workflows — 3 shell-based, 5 Claude-powered):** PR freshness check comments on PRs. Weekly cron detects drift. Post-merge workflow keeps the doc index in sync. Claude-powered workflows provide AI audit+update on feature branches, AI PR doc review with @claude interactive support, AI release notes drafting on release branches, AI spec compliance checks on PRs, and AI PR full-cycle orchestration (review, update, diagram, sync). Claude-powered workflows require an `ANTHROPIC_API_KEY` GitHub Actions secret.
 
 Set `DOC_SUPERPOWERS_STRICT=1` to make pre-commit block instead of warn. Set `DOC_SUPERPOWERS_QUIET=1` to suppress hook output while still enforcing checks. Set `DOC_SUPERPOWERS_SKIP=1` to bypass all hooks temporarily.
 

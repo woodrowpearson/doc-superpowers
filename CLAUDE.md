@@ -32,6 +32,8 @@ doc-superpowers/
 │   ├── test-doc-tools.sh # Test suite for doc-tools.sh
 │   ├── test-helpers.sh   # Shared test utilities
 │   ├── test-hooks.sh     # Test suite for hooks installer and hook scripts
+│   ├── merge-doc-index.sh  # Custom git merge driver for .doc-index.json
+│   ├── test-merge-driver.sh # Test suite for merge driver
 │   └── hooks/
 │       ├── install.sh        # Hook installer engine
 │       ├── git/              # Git hook scripts
@@ -88,7 +90,9 @@ doc-superpowers/
 | `scripts/doc-tools.sh` | Bundled freshness tooling — 9 subcommands for index and version management | Changing staleness detection, index schema, version sync |
 | `scripts/test-doc-tools.sh` | Test suite for doc-tools.sh | Adding tests for new doc-tools features |
 | `scripts/test-hooks.sh` | Test suite for hooks installer and hook scripts | Adding tests for new hooks or installer features |
-| `scripts/hooks/install.sh` | Hook installer — install/uninstall/status for all tiers | Adding hook tiers, changing installer logic |
+| `scripts/merge-doc-index.sh` | Custom git merge driver for .doc-index.json — auto-resolves timestamp/entry conflicts during merge/rebase | Changing merge conflict resolution logic |
+| `scripts/test-merge-driver.sh` | Test suite for merge-doc-index.sh | Adding tests for merge driver features |
+| `scripts/hooks/install.sh` | Hook installer — install/uninstall/status for all tiers (including merge driver registration) | Adding hook tiers, changing installer logic |
 | `references/doc-spec.md` | Doc templates, Mermaid syntax, naming conventions, schema reference | Adding doc types, changing templates |
 | `references/agent-prompt-template.md` | Review agent prompt template + scope-specific focus areas | Changing agent review instructions or adding project signals |
 | `references/output-templates.md` | Audit report format + plan template | Changing report structure or plan format |
