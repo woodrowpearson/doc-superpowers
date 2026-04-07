@@ -143,6 +143,23 @@ INTEGRATION_EOF
     installed=$((installed + 1))
   done
 
+  # Register custom merge driver for doc-index.json (auto-resolves timestamp conflicts)
+  local merge_driver="$SKILL_DIR/scripts/merge-doc-index.sh"
+  if [[ -f "$merge_driver" ]]; then
+    git config --local merge.doc-index.name "doc-superpowers index merger"
+    git config --local merge.doc-index.driver "$merge_driver %O %A %B"
+
+    # Add .gitattributes entry if not already present
+    local gitattributes=".gitattributes"
+    if ! grep -q 'merge=doc-index' "$gitattributes" 2>/dev/null; then
+      echo "" >> "$gitattributes"
+      echo "# doc-superpowers: auto-resolve doc-index.json merge conflicts" >> "$gitattributes"
+      echo "docs/.doc-index.json merge=doc-index" >> "$gitattributes"
+      echo "  Added merge driver to .gitattributes"
+    fi
+    echo "  Registered merge driver: doc-index"
+  fi
+
   echo "Git hooks: $installed installed, $skipped skipped (existing)"
 }
 
@@ -174,6 +191,21 @@ uninstall_git() {
     fi
   done
 
+  # Unregister merge driver
+  if git config --local --get merge.doc-index.driver &>/dev/null; then
+    git config --local --unset merge.doc-index.name 2>/dev/null || true
+    git config --local --unset merge.doc-index.driver 2>/dev/null || true
+    echo "  Unregistered merge driver: doc-index"
+  fi
+  # Remove .gitattributes entry
+  if grep -q 'merge=doc-index' ".gitattributes" 2>/dev/null; then
+    sed -i.bak '/# doc-superpowers: auto-resolve doc-index/d;/docs\/.doc-index.json merge=doc-index/d' ".gitattributes"
+    # Remove trailing blank lines
+    sed -i.bak -e :a -e '/^\n*$/{$d;N;ba' -e '}' ".gitattributes"
+    rm -f ".gitattributes.bak"
+    echo "  Removed merge driver from .gitattributes"
+  fi
+
   echo "Git hooks: $removed removed (from $hooks_dir)"
 }
 
@@ -194,6 +226,18 @@ status_git() {
       printf "  ✗ %-22s not installed\n" "$hook_name"
     fi
   done
+
+  # Merge driver status
+  if git config --local --get merge.doc-index.driver &>/dev/null; then
+    printf "  ✓ %-22s registered\n" "merge-driver"
+  else
+    printf "  ✗ %-22s not registered\n" "merge-driver"
+  fi
+  if grep -q 'merge=doc-index' ".gitattributes" 2>/dev/null; then
+    printf "  ✓ %-22s configured\n" ".gitattributes"
+  else
+    printf "  ✗ %-22s not configured\n" ".gitattributes"
+  fi
 }
 
 # --- Claude tier ---
