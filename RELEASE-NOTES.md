@@ -1,5 +1,10 @@
 # Release Notes
 
+## v2.9.1 (2026-05-04)
+
+### Other
+- **Issue filed: doc-index metadata churn on every commit**: Top-level `generated_at` and `build_commit` rewrite on every `update-index` call, causing GitHub PRs to flag conflicts even when no docs were touched. The shipped merge driver resolves these locally but GitHub's server-side mergeability check ignores it. Issue proposes moving regeneration metadata to a gitignored sidecar so the version-controlled index becomes content-addressable. See `docs/issues/2026-05-04-doc-index-metadata-rewrite-on-every-commit.md`.
+
 ## v2.9.0 (2026-04-07)
 
 ### Features
