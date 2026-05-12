@@ -2,7 +2,7 @@
 # Bundled Documentation Tooling for doc-superpowers
 
 **Date**: 2026-03-12
-**Status**: Approved
+**Status**: Implemented (substantially extended — current surface includes 11 subcommands; see `docs/superpowers/plans/2026-03-12-bundled-doc-tooling.md` status note)
 **Scope**: Add `scripts/doc-tools.sh`, define init/audit boundaries, standardize doc directory structure and naming conventions
 
 ## Problem
