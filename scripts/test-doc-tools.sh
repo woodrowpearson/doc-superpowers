@@ -628,6 +628,91 @@ test_check_version_passes_when_synced() {
   teardown
 }
 
+# --- fragments subcommand ---
+
+_write_fragment() {
+  # _write_fragment <path> <pr_number> <payload>
+  # Computes hash from payload bytes and writes a well-formed fragment.
+  local path="$1" pr_number="$2" payload="$3"
+  local hash
+  hash=$(printf '%s' "$payload" | { command -v sha256sum >/dev/null 2>&1 && sha256sum || shasum -a 256; } | awk '{print $1}')
+  printf '<!-- doc-superpowers:fragment PR-%s -->\n<!-- doc-superpowers:hash %s -->\n%s' \
+    "$pr_number" "$hash" "$payload" > "$path"
+}
+
+test_fragments_list_empty() {
+  echo "test: fragments list with no RELEASE-NOTES.next dir prints []"
+  setup
+  local output
+  output=$("$DOC_TOOLS" fragments list)
+  assert_eq "[]" "$output" "list returns empty JSON array"
+  teardown
+}
+
+test_fragments_list_valid() {
+  echo "test: fragments list with one valid fragment"
+  setup
+  mkdir -p RELEASE-NOTES.next
+  _write_fragment RELEASE-NOTES.next/PR-42.md 42 $'### Added\n- thing\n'
+  local count valid
+  count=$("$DOC_TOOLS" fragments list | jq 'length')
+  assert_eq "1" "$count" "list reports one fragment"
+  valid=$("$DOC_TOOLS" fragments list | jq '.[0].hash_valid')
+  assert_eq "true" "$valid" "hash_valid is true"
+  teardown
+}
+
+test_fragments_validate_drifted() {
+  echo "test: validate detects drifted hash (exit 1)"
+  setup
+  mkdir -p RELEASE-NOTES.next
+  cat > RELEASE-NOTES.next/PR-42.md <<'EOF'
+<!-- doc-superpowers:fragment PR-42 -->
+<!-- doc-superpowers:hash 0000000000000000000000000000000000000000000000000000000000000000 -->
+### Added
+- thing
+EOF
+  set +e
+  "$DOC_TOOLS" fragments validate RELEASE-NOTES.next/PR-42.md >/dev/null 2>&1
+  local rc=$?
+  set -e
+  assert_eq "1" "$rc" "validate exits 1 on drifted hash"
+  teardown
+}
+
+test_fragments_merge_orders_by_n() {
+  echo "test: merge orders fragments by ascending integer N"
+  setup
+  mkdir -p RELEASE-NOTES.next
+
+  # PR-101 introduced first.
+  _write_fragment RELEASE-NOTES.next/PR-101.md 101 $'### Added\n- larger N\n'
+  git add RELEASE-NOTES.next/PR-101.md
+  git commit -q -m "PR-101"
+  local base
+  base=$(git rev-list --max-parents=0 HEAD)
+
+  # PR-99 introduced second.
+  _write_fragment RELEASE-NOTES.next/PR-99.md 99 $'### Added\n- smaller N\n'
+  git add RELEASE-NOTES.next/PR-99.md
+  git commit -q -m "PR-99"
+
+  local out pos_99 pos_101
+  out=$("$DOC_TOOLS" fragments merge "$base" HEAD)
+  pos_99=$(printf '%s' "$out" | grep -n "smaller N" | head -1 | cut -d: -f1)
+  pos_101=$(printf '%s' "$out" | grep -n "larger N" | head -1 | cut -d: -f1)
+
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if [ -n "$pos_99" ] && [ -n "$pos_101" ] && [ "$pos_99" -lt "$pos_101" ]; then
+    PASS=$((PASS + 1))
+    printf "${GREEN}  PASS${NC}: PR-99 appears before PR-101 (pos_99=%s pos_101=%s)\n" "$pos_99" "$pos_101"
+  else
+    FAIL=$((FAIL + 1))
+    printf "${RED}  FAIL${NC}: expected PR-99 before PR-101, got pos_99=%s pos_101=%s\n    output: %s\n" "$pos_99" "$pos_101" "$out"
+  fi
+  teardown
+}
+
 # --- Runner ---
 
 run_tests() {
@@ -675,6 +760,10 @@ run_tests() {
   test_bump_version_requires_arg
   test_check_version_detects_mismatch
   test_check_version_passes_when_synced
+  test_fragments_list_empty
+  test_fragments_list_valid
+  test_fragments_validate_drifted
+  test_fragments_merge_orders_by_n
   print_summary
 }
 
