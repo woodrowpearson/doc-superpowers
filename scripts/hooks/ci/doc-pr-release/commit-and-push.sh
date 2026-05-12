@@ -9,10 +9,12 @@
 #   FRAGMENT_PATH   Path to the fragment file (default: RELEASE-NOTES.next/PR-<N>.md)
 #   GIT_USER_NAME   Override commit author name  (default: github-actions[bot])
 #   GIT_USER_EMAIL  Override commit author email (default: 41898282+github-actions[bot]@users.noreply.github.com)
+#   DOC_PR_RELEASE_PUSH_RETRIES  Number of rebase-and-retry attempts on
+#                                non-fast-forward push rejection (default: 2).
 #
 # Exit codes:
 #   0  committed and pushed, OR no changes staged (no-op)
-#   1  git error
+#   1  git error (including push rejected after all retries)
 #   2  bad arguments
 set -euo pipefail
 
@@ -56,4 +58,36 @@ if [ -z "$BRANCH" ]; then
   echo "Set GITHUB_HEAD_REF to the PR branch name (the workflow does this automatically for pull_request events)." >&2
   exit 1
 fi
-git push origin "HEAD:${BRANCH}"
+
+# Push with retry on non-fast-forward rejection. A human (or another workflow)
+# may have pushed to the PR branch between checkout and now. Rebase our single
+# fragment commit onto the new tip and retry. We deliberately do NOT use
+# `--force-with-lease`: the goal is to preserve the human's work, not overwrite
+# it. If the rebase itself conflicts (extremely unlikely — we only touch one
+# fragment file the bot exclusively manages), we fail loudly rather than
+# guessing how to resolve.
+PUSH_RETRIES="${DOC_PR_RELEASE_PUSH_RETRIES:-2}"
+attempt=0
+while :; do
+  if git push origin "HEAD:${BRANCH}"; then
+    break
+  fi
+  attempt=$((attempt + 1))
+  if [ "$attempt" -gt "$PUSH_RETRIES" ]; then
+    echo "Push to origin/${BRANCH} rejected after ${PUSH_RETRIES} retries." >&2
+    exit 1
+  fi
+  echo "Push rejected (non-fast-forward?); fetching and rebasing attempt ${attempt}/${PUSH_RETRIES}." >&2
+  if ! git fetch origin "$BRANCH"; then
+    echo "git fetch origin ${BRANCH} failed." >&2
+    exit 1
+  fi
+  if ! git \
+    -c "user.name=${GIT_USER_NAME}" \
+    -c "user.email=${GIT_USER_EMAIL}" \
+    rebase "origin/${BRANCH}"; then
+    echo "Rebase onto origin/${BRANCH} failed (conflict in fragment?); aborting." >&2
+    git rebase --abort 2>/dev/null || true
+    exit 1
+  fi
+done

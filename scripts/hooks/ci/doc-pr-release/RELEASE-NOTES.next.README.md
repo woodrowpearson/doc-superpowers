@@ -29,8 +29,12 @@ RELEASE-NOTES.next/PR-107.md  ----/
      sections, preserve fragment order = ascending integer value of `<N>`,
      e.g., PR-99 before PR-101)
    - Deletes the consumed fragment files in the same commit
-   - Skips fragments whose PR has not landed in the commit range being released
-     (detect via `git log --all -- RELEASE-NOTES.next/PR-N.md` ancestry)
+   - Skips fragments whose PR has not landed in the commit range being released.
+     The consumer determines this by finding the commit that introduced the
+     fragment file (`git log --diff-filter=A --format=%H -- RELEASE-NOTES.next/PR-N.md | tail -1`)
+     and checking that commit is an ancestor of the release tip
+     (`git merge-base --is-ancestor "$fragment_introducing_commit" "$release_tip"`).
+     If `--is-ancestor` returns non-zero, skip the fragment.
 
 ## Fragment Format
 
