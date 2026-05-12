@@ -1,5 +1,7 @@
 # Per-PR Release-Notes Fragment Producer + Consumer Implementation Plan
 
+> **Status:** Completed in v2.10.0 (merged 2026-05-12 via [PR #2](https://github.com/woodrowpearson/doc-superpowers/pull/2) — landed as a single PR combining both halves rather than separate PRs A and B). All tasks A1–A9 (producer) and B1–B5 (consumer) shipped. The consumer half was reviewed independently as [PR #3](https://github.com/woodrowpearson/doc-superpowers/pull/3) and folded into PR #2 at merge time; review feedback addressed in commit `33aebdf` (non-canonical section preservation, non-numeric filename handling, paths-out scoping for deletion). Preserved as historical context.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Bring the doc-pr-release workflow upstream into the doc-superpowers plugin. Adds a CI workflow that drafts/maintains `RELEASE-NOTES.next/PR-<N>.md` fragments on every PR push, AND extends the `release` action to glob/validate/merge/delete those fragments at release time. End state: a complete two-sided fragment lifecycle, opt-in via the existing `--ci` installer flag.

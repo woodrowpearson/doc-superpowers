@@ -2,7 +2,7 @@
 # Workflow Hooks Harness — Design Spec
 
 **Date:** 2026-03-13
-**Status:** Approved (spec review passed)
+**Status:** Implemented and extended. Original 3-tier surface (git/claude/ci) is live. CI tier has since grown from 3 templates to 8 (added `doc-audit-update.yml`, `doc-review-pr.yml`, `doc-pr-full-cycle.yml`, `doc-spec-verify.yml`, `doc-pr-release.yml`). Git tier registers a custom merge driver for `docs/.doc-index.json`. v2.10.0 adds the per-PR release-notes fragment producer workflow + 3 colocated shell helpers. See `docs/workflows/doc-superpowers.md` for current behaviour.
 **Author:** Claude (brainstorming with @woodrowpearson)
 
 ## Problem
