@@ -1,5 +1,17 @@
 # Release Notes
 
+## v2.10.0 (2026-05-12)
+
+### Features
+- **Per-PR release-notes fragment producer**: New `doc-pr-release.yml` CI workflow template (installed by `--ci` tier) drafts and maintains a `RELEASE-NOTES.next/PR-<N>.md` fragment for every open PR. On each push, an AI step rewrites the fragment in Keep-a-Changelog format and syncs a managed `<!-- doc-superpowers:start/end -->` section in the PR body. Fragments use a SHA-256 hash on line 2 over the bytes from line 3 onwards so human edits are detected and never silently overwritten — the workflow comments on the PR asking for reconciliation instead. This is the producer half of the fragment lifecycle; the consumer half (release-time merge and delete) ships in a forthcoming PR.
+- **Three colocated shell helpers**: `extract-context.sh` emits a JSON context blob (PR body, existing fragment, full and new commit ranges); `update-pr-body.sh` idempotently merges a managed section into the PR body with marker-injection, CRLF, and trailing-newline hardening; `commit-and-push.sh` stages, commits with a `[doc-superpowers]` prefix, and pushes the fragment back to the PR branch. The installer copies them to `.github/scripts/doc-pr-release/` alongside the workflow.
+- **Fragment-format spec installed in consuming repos**: `hooks install --ci` now also drops a `RELEASE-NOTES.next/README.md` into the consuming repo (only if missing — never overwritten) that documents the fragment lifecycle, marker conventions, and the SHA-256 manual-edit protocol. Both halves of the lifecycle adhere to this format.
+- **CLAUDE_CODE_OAUTH_TOKEN auth for new template**: The new `doc-pr-release.yml` template uses `claude_code_oauth_token` rather than `anthropic_api_key`. Sibling templates still reference `ANTHROPIC_API_KEY` and will migrate in a separate PR.
+
+### Other
+- **25-assertion test harness for the new helpers**: `scripts/test-doc-pr-release.sh` covers update-pr-body (8 cases — insert, replace, empty body, no-op, malformed markers, trailing newline, CRLF, marker injection), extract-context (12 cases on a fixture repo with a `gh` shim), and commit-and-push (5 smoke tests covering argv validation, no-op, and missing `GITHUB_HEAD_REF`).
+- **Installer hardening for the helper tier**: `install_ci`, `uninstall_ci`, and `status_ci` know about `doc-pr-release.yml` and the helper subdirectory. Uninstall removes the workflow and helpers but intentionally preserves `RELEASE-NOTES.next/README.md` (since the directory may carry unmerged fragments).
+
 ## v2.9.1 (2026-05-04)
 
 ### Other
