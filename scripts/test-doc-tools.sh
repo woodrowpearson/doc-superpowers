@@ -680,6 +680,142 @@ EOF
   teardown
 }
 
+test_fragments_merge_includes_drifted() {
+  echo "test: merge includes drifted fragments (human edits authoritative) with WARN"
+  setup
+  mkdir -p RELEASE-NOTES.next
+  # Write a fragment with a deliberately-wrong stored hash.
+  cat > RELEASE-NOTES.next/PR-7.md <<'EOF'
+<!-- doc-superpowers:fragment PR-7 -->
+<!-- doc-superpowers:hash 0000000000000000000000000000000000000000000000000000000000000000 -->
+### Added
+- drifted bullet
+EOF
+  git add RELEASE-NOTES.next/PR-7.md
+  git commit -q -m "PR-7 drifted"
+
+  # Use the empty tree as the half-open range start so the PR-7 commit (the
+  # root commit) is included.
+  local empty_tree out stderr_out
+  empty_tree=$(git hash-object -t tree --stdin </dev/null)
+  out=$("$DOC_TOOLS" fragments merge "$empty_tree" HEAD 2>/tmp/.merge-stderr || true)
+  stderr_out=$(cat /tmp/.merge-stderr || true)
+  rm -f /tmp/.merge-stderr
+
+  assert_contains "$out" "drifted bullet" "drifted fragment content is merged"
+  assert_contains "$stderr_out" "drifted" "WARN about drift on stderr"
+  teardown
+}
+
+test_fragments_merge_preserves_non_canonical_sections() {
+  echo "test: merge preserves non-canonical headings (e.g. ### Notes)"
+  setup
+  mkdir -p RELEASE-NOTES.next
+  _write_fragment RELEASE-NOTES.next/PR-5.md 5 $'### Notes\n- non-canonical note\n### Breaking Changes\n- multi-word heading\n'
+  git add RELEASE-NOTES.next/PR-5.md
+  git commit -q -m "PR-5"
+  local out
+  out=$("$DOC_TOOLS" fragments merge "$(git hash-object -t tree --stdin </dev/null)" HEAD)
+  assert_contains "$out" "non-canonical note" "non-canonical bullet survives merge"
+  assert_contains "$out" "multi-word heading" "multi-word heading bullet survives"
+  assert_contains "$out" "### Notes" "Notes heading emitted"
+  assert_contains "$out" "### Breaking Changes" "multi-word heading emitted verbatim"
+  teardown
+}
+
+test_fragments_merge_dedupes_bullets() {
+  echo "test: merge dedupes identical bullets within a section"
+  setup
+  mkdir -p RELEASE-NOTES.next
+  _write_fragment RELEASE-NOTES.next/PR-1.md 1 $'### Added\n- same bullet\n'
+  _write_fragment RELEASE-NOTES.next/PR-2.md 2 $'### Added\n- same bullet\n'
+  git add RELEASE-NOTES.next/PR-1.md RELEASE-NOTES.next/PR-2.md
+  git commit -q -m "PRs"
+  local out count
+  out=$("$DOC_TOOLS" fragments merge "$(git hash-object -t tree --stdin </dev/null)" HEAD)
+  count=$(printf '%s\n' "$out" | grep -c -- "- same bullet" || true)
+  assert_eq "1" "$count" "duplicate bullet appears exactly once"
+  teardown
+}
+
+test_fragments_list_skips_non_numeric() {
+  echo "test: list skips non-numeric PR filenames without crashing"
+  setup
+  mkdir -p RELEASE-NOTES.next
+  _write_fragment RELEASE-NOTES.next/PR-9.md 9 $'### Added\n- ok\n'
+  # Drop a junk file that matches PR-*.md but isn't numeric.
+  cat > RELEASE-NOTES.next/PR-junk.md <<'EOF'
+<!-- doc-superpowers:fragment PR-junk -->
+<!-- doc-superpowers:hash 0000000000000000000000000000000000000000000000000000000000000000 -->
+### Added
+- junk
+EOF
+  local out count
+  set +e
+  out=$("$DOC_TOOLS" fragments list 2>/dev/null)
+  local rc=$?
+  set -e
+  assert_eq "0" "$rc" "list does not crash on non-numeric filename"
+  count=$(printf '%s' "$out" | jq 'length')
+  assert_eq "1" "$count" "only the numeric fragment is listed"
+  teardown
+}
+
+test_fragments_merge_paths_out() {
+  echo "test: merge --paths-out writes only consumed fragment paths"
+  setup
+  mkdir -p RELEASE-NOTES.next
+  _write_fragment RELEASE-NOTES.next/PR-3.md 3 $'### Added\n- in-range\n'
+  git add RELEASE-NOTES.next/PR-3.md
+  git commit -q -m "PR-3"
+  local before_tag
+  before_tag=$(git rev-parse HEAD)
+  # Fragment introduced AFTER the tag — should be the only consumed one.
+  _write_fragment RELEASE-NOTES.next/PR-4.md 4 $'### Added\n- after-tag\n'
+  git add RELEASE-NOTES.next/PR-4.md
+  git commit -q -m "PR-4"
+
+  local out paths_file=/tmp/test-paths-out.txt
+  out=$("$DOC_TOOLS" fragments merge "$before_tag" HEAD --paths-out="$paths_file")
+  assert_contains "$out" "after-tag" "PR-4 (post-tag) is consumed"
+  # shellcheck disable=SC2059
+  if printf '%s' "$out" | grep -q "in-range"; then
+    FAIL=$((FAIL + 1))
+    TESTS_RUN=$((TESTS_RUN + 1))
+    printf "${RED}  FAIL${NC}: PR-3 (pre-tag) should NOT be in merged output (%s)\n" "$out"
+  fi
+  # paths-out should contain PR-4.md only.
+  if grep -q "PR-4.md" "$paths_file" && ! grep -q "PR-3.md" "$paths_file"; then
+    PASS=$((PASS + 1))
+    TESTS_RUN=$((TESTS_RUN + 1))
+    # shellcheck disable=SC2059
+    printf "${GREEN}  PASS${NC}: paths-out contains only %s\n" "PR-4.md"
+  else
+    FAIL=$((FAIL + 1))
+    TESTS_RUN=$((TESTS_RUN + 1))
+    # shellcheck disable=SC2059
+    printf "${RED}  FAIL${NC}: paths-out content unexpected: %s\n" "$(cat "$paths_file")"
+  fi
+  rm -f "$paths_file"
+  teardown
+}
+
+test_fragments_merge_errors_outside_git_repo() {
+  echo "test: merge errors gracefully outside a git repo"
+  local tmp
+  tmp=$(mktemp -d)
+  set +e
+  ( cd "$tmp" && "$DOC_TOOLS" fragments merge HEAD~1 HEAD >/dev/null 2>/tmp/.merge-stderr )
+  local rc=$?
+  set -e
+  local stderr_out
+  stderr_out=$(cat /tmp/.merge-stderr 2>/dev/null || true)
+  rm -f /tmp/.merge-stderr
+  rm -rf "$tmp"
+  assert_eq "2" "$rc" "merge exits 2 outside git repo"
+  assert_contains "$stderr_out" "git repo" "stderr explains the problem"
+}
+
 test_fragments_merge_orders_by_n() {
   echo "test: merge orders fragments by ascending integer N"
   setup
@@ -764,6 +900,12 @@ run_tests() {
   test_fragments_list_valid
   test_fragments_validate_drifted
   test_fragments_merge_orders_by_n
+  test_fragments_merge_includes_drifted
+  test_fragments_merge_preserves_non_canonical_sections
+  test_fragments_merge_dedupes_bullets
+  test_fragments_list_skips_non_numeric
+  test_fragments_merge_paths_out
+  test_fragments_merge_errors_outside_git_repo
   print_summary
 }
 
