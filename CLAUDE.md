@@ -30,6 +30,7 @@ doc-superpowers/
 ├── scripts/
 │   ├── doc-tools.sh      # Bundled freshness tooling (build-index, check-freshness, update-index, add-entry, remove-entry, deprecate-entry, status, bump-version, check-version)
 │   ├── test-doc-tools.sh # Test suite for doc-tools.sh
+│   ├── test-doc-pr-release.sh # Test suite for doc-pr-release helpers
 │   ├── test-helpers.sh   # Shared test utilities
 │   ├── test-hooks.sh     # Test suite for hooks installer and hook scripts
 │   ├── merge-doc-index.sh  # Custom git merge driver for .doc-index.json
@@ -44,9 +45,15 @@ doc-superpowers/
 │           ├── doc-index-update.yml      # Auto-index update on push (shell-based)
 │           ├── doc-audit-update.yml      # AI audit+update on feature branches
 │           ├── doc-review-pr.yml         # AI PR doc review + @claude interactive
-│           ├── doc-release.yml           # AI release notes drafting
+│           ├── doc-release.yml           # AI release notes drafting (consumer)
 │           ├── doc-spec-verify.yml       # AI spec compliance on PRs
-│           └── doc-pr-full-cycle.yml     # AI PR full cycle: review, update, diagram, sync
+│           ├── doc-pr-full-cycle.yml     # AI PR full cycle: review, update, diagram, sync
+│           ├── doc-pr-release.yml        # AI per-PR release-notes fragment producer
+│           └── doc-pr-release/           # Helper scripts + fragment-format spec
+│               ├── extract-context.sh    # Build context.json for the agent
+│               ├── update-pr-body.sh     # Idempotent PR-body managed-section editor
+│               ├── commit-and-push.sh    # FF-safe fragment commit + push (rebase retry)
+│               └── RELEASE-NOTES.next.README.md # Fragment-format spec (producer/consumer contract)
 ├── references/
 │   ├── doc-spec.md       # Templates for generated docs (C4, ERD, workflows, agentic, specs, ADRs)
 │   ├── agent-prompt-template.md   # Review agent prompt template + scope focus areas
@@ -90,6 +97,10 @@ doc-superpowers/
 | `scripts/doc-tools.sh` | Bundled freshness tooling — 9 subcommands for index and version management | Changing staleness detection, index schema, version sync |
 | `scripts/test-doc-tools.sh` | Test suite for doc-tools.sh | Adding tests for new doc-tools features |
 | `scripts/test-hooks.sh` | Test suite for hooks installer and hook scripts | Adding tests for new hooks or installer features |
+| `scripts/test-doc-pr-release.sh` | Test suite for doc-pr-release helpers (extract-context, update-pr-body, commit-and-push) + YAML placeholder substitution | Adding tests for fragment-producer features |
+| `scripts/hooks/ci/doc-pr-release.yml` | AI per-PR release-notes fragment producer — drafts `RELEASE-NOTES.next/PR-<N>.md` on every push | Changing the producer workflow, prompt, or post-Claude verification |
+| `scripts/hooks/ci/doc-pr-release/*.sh` | Producer helpers: extract-context, update-pr-body, commit-and-push | Changing fragment context schema, PR-body editing, or push logic |
+| `scripts/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md` | Fragment-format spec — producer/consumer contract for `RELEASE-NOTES.next/PR-*.md` | Changing fragment markers, hash protocol, or consumer rules |
 | `scripts/merge-doc-index.sh` | Custom git merge driver for .doc-index.json — auto-resolves timestamp/entry conflicts during merge/rebase | Changing merge conflict resolution logic |
 | `scripts/test-merge-driver.sh` | Test suite for merge-doc-index.sh | Adding tests for merge driver features |
 | `scripts/hooks/install.sh` | Hook installer — install/uninstall/status for all tiers (including merge driver registration) | Adding hook tiers, changing installer logic |
