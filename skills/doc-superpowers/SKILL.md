@@ -450,7 +450,7 @@ Routes to `scripts/hooks/install.sh <subcommand> [flags]`.
 **Tier options:**
 - `--git` — Git hooks: pre-commit (freshness gate), post-merge (stale alert), post-checkout (branch check), prepare-commit-msg (inject comments), pre-push (release reminder)
 - `--claude` — Claude Code hooks: PreToolUse pre-commit gate, PostToolUse post-commit sync, Stop session summary
-- `--ci` — CI/CD workflows: PR freshness check, weekly audit, doc-index auto-update
+- `--ci` — CI/CD workflows: PR freshness check, weekly audit, doc-index auto-update, per-PR release-notes fragment producer
 
 **CI-specific flags:**
 - `--base-branch NAME` — Target branch (default: `main`)
@@ -458,6 +458,34 @@ Routes to `scripts/hooks/install.sh <subcommand> [flags]`.
 - `--ci-strict` — Fail PR check on stale docs (exit non-zero)
 
 When no tier flags are provided via SKILL.md routing, present options to the user and pass the appropriate flags. The installer's interactive menu is for direct terminal invocation only.
+
+#### CI sub-workflows installed
+
+The `--ci` tier installs these workflows (skipped if a non-doc-superpowers
+workflow already exists at that path):
+
+| Workflow | Trigger | Purpose |
+|---|---|---|
+| `doc-freshness-pr.yml` | PR open/sync | Comments on PRs when docs touched by the diff are stale |
+| `doc-freshness-schedule.yml` | Weekly cron | Posts an audit report as an issue |
+| `doc-index-update.yml` | Push to main | Re-syncs `docs/.doc-index.json` after merges |
+| `doc-audit-update.yml` | Push to non-main | AI-powered audit + update on feature branches |
+| `doc-review-pr.yml` | PR open + `@claude` comment | AI-powered PR doc review |
+| `doc-release.yml` | Push to `release/**` | AI-powered release-notes drafting |
+| `doc-spec-verify.yml` | PR open/sync | Verifies spec compliance against changed code |
+| `doc-pr-full-cycle.yml` | PR open | Superset of review-pr — runs review + update + diagram + sync |
+| `doc-pr-release.yml` | PR open/sync/reopen | Drafts/maintains `RELEASE-NOTES.next/PR-<N>.md` fragments and the managed `<!-- doc-superpowers:start/end -->` section of the PR body |
+
+The `doc-pr-release.yml` workflow uses three shell helpers installed alongside
+it at `.github/scripts/doc-pr-release/`:
+- `extract-context.sh` — emits JSON context (PR body, fragment, commit ranges)
+- `update-pr-body.sh` — idempotent marker-based PR body merge
+- `commit-and-push.sh` — stages/commits/pushes the fragment
+
+It also installs `RELEASE-NOTES.next/README.md` (if missing) with the
+fragment-format spec — markers, SHA-256 hash from line 3+, Keep-a-Changelog
+closed set, ascending integer-N sort. Both PR A producer and the future PR B
+consumer adhere to this format.
 
 ### Spec Lifecycle Actions — `spec-generate` / `spec-inject` / `spec-verify`
 
