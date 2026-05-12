@@ -1,5 +1,7 @@
 # Bundled Doc Tooling Implementation Plan
 
+> **Status:** Implemented and substantially extended. The original 4-subcommand surface (`build-index`, `check-freshness`, `update-index`, `status`) has grown to 11 subcommands — adding `add-entry`, `remove-entry`, `deprecate-entry`, `bump-version`, `check-version`, and the `fragments {list,validate,merge}` subcommand for per-PR release-notes lifecycle (v2.10.0). This plan is preserved as historical context; current behaviour is documented in `docs/workflows/doc-superpowers.md` and `scripts/doc-tools.sh --help`.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add bundled shell tooling (`scripts/doc-tools.sh`) for doc freshness tracking, restructure `SKILL.md` with audit-owned discovery and orchestrator pattern, standardize doc directory structure and naming conventions, and update all templates and project docs.
