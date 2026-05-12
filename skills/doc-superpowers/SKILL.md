@@ -438,18 +438,33 @@ Use when cutting a new version. Analyzes commits since the last release, drafts 
      -- <path> | head -n 1`) is not in the range being released, SKIP the
      fragment (it belongs to a still-open PR).
 6. **Merge fragment sections into the draft** — Run `doc-tools.sh fragments
-   merge <last-tag> HEAD` (or `<from-ref> HEAD` if `--from` was provided). The
-   command emits Keep-a-Changelog sections (`### Added`, `### Changed`, …) in
-   canonical order, dedupe within each section, ascending integer-N order. The
-   drafting agent integrates this output WITH the commit-derived draft: bullets
-   from fragments take priority (they're human-curated and PR-scoped); the
-   agent uses commit-derived content only to fill gaps the fragments missed.
+   merge <last-tag> HEAD --paths-out=/tmp/doc-superpowers-consumed.txt` (or
+   `<from-ref> HEAD …` if `--from` was provided). The command emits
+   Keep-a-Changelog sections (`### Added`, `### Changed`, …) in canonical order
+   first, then any non-canonical sections in first-seen order; bullets within
+   each section are deduped; fragments are processed in ascending integer-N
+   order. The `--paths-out` flag writes the list of fragment paths that were
+   actually consumed (one per line) — keep this file for step 9. The drafting
+   agent integrates this output WITH the commit-derived draft: bullets from
+   fragments take priority (they're human-curated and PR-scoped); the agent
+   uses commit-derived content only to fill gaps the fragments missed.
+
+   **Range semantics:** the range is half-open like `git log A..B` — fragments
+   whose introducing commit equals `<range-start>` are EXCLUDED (they were part
+   of the previous release), fragments at `<range-end>` or any ancestor are
+   included. If the previous release tag points exactly at a fragment-introducing
+   commit, that fragment will not be picked up; pass `--from=<tag>~1` to include it.
 7. **Present draft to user** — Show the drafted entry in full. User edits or approves.
 8. **Prepend to RELEASE-NOTES.md** — Insert new version entry after the `# Release Notes` header, before the previous version entry.
-9. **Delete consumed fragments** — For each fragment whose contents were
-   incorporated into the new version entry, delete the file:
+9. **Delete consumed fragments** — Delete ONLY the fragments listed in the
+   `--paths-out` file from step 6. Do NOT glob `RELEASE-NOTES.next/PR-*.md`
+   unconditionally — fragments whose introducing commit was outside the release
+   range belong to still-open PRs and must be preserved.
    ```bash
-   git rm RELEASE-NOTES.next/PR-*.md
+   if [[ -s /tmp/doc-superpowers-consumed.txt ]]; then
+     xargs -r git rm < /tmp/doc-superpowers-consumed.txt
+   fi
+   rm -f /tmp/doc-superpowers-consumed.txt
    ```
    These deletions land in the SAME commit as the RELEASE-NOTES.md update. Do
    not stage fragment deletions separately — that's a class of bug where the

@@ -135,7 +135,9 @@ Subcommands:
   check-version     Verify all manifest files have the same version
   fragments list                       List per-PR release-notes fragments + hash status
   fragments validate <path>            Exit 0 if fragment hash matches, 1 if drifted
-  fragments merge <start> <end>        Print merged sections from fragments in commit range
+  fragments merge <start> <end> [--paths-out=<file>]
+                                       Print merged sections from fragments in commit range
+                                       (--paths-out writes consumed fragment paths, one per line)
 
 Options:
   --help            Show this help message
@@ -891,20 +893,34 @@ _fragment_payload_sha256() {
 _fragment_stored_hash() {
   local path="$1"
   sed -n '2p' "$path" \
-    | grep -oE 'hash [a-f0-9]+' \
-    | awk '{print $2}'
+    | grep -oE '^<!-- doc-superpowers:hash [a-f0-9]+ -->$' \
+    | awk '{print $3}'
 }
 
 # Extract the integer N from a fragment filename "PR-<N>.md".
+# Returns empty string if filename is not "PR-<digits>.md".
 _fragment_pr_number() {
   local path="$1"
-  basename "$path" .md | sed -E 's/^PR-//'
+  local base
+  base=$(basename "$path" .md)
+  if [[ "$base" =~ ^PR-([0-9]+)$ ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    echo ""
+  fi
 }
 
-# Extract section names (### Added, ### Fixed, etc.) from a fragment.
-_fragment_section_names() {
+# Parse section headings from a fragment body (line 3 onwards).
+# Emits one heading per line, with the leading "### " stripped (full heading text).
+# Accepts any heading text (single or multi-word).
+_fragment_section_headings() {
   local path="$1"
-  tail -n +3 "$path" | grep -oE '^### \w+' | awk '{print $2}' | sort -u
+  tail -n +3 "$path" | grep -E '^###[[:space:]]+.+' | sed -E 's/^###[[:space:]]+//'
+}
+
+# Backward-compat shim used by cmd_fragments_list — emits unique section headings.
+_fragment_section_names() {
+  _fragment_section_headings "$1" | sort -u
 }
 
 cmd_fragments_list() {
@@ -917,9 +933,13 @@ cmd_fragments_list() {
   local found=0
   for path in "$dir"/PR-*.md; do
     [[ -f "$path" ]] || continue
-    found=1
     local n hash_stored hash_actual hash_valid sections_json
     n=$(_fragment_pr_number "$path")
+    if [[ -z "$n" ]]; then
+      echo "WARN: skipping non-numeric fragment filename: $path" >&2
+      continue
+    fi
+    found=1
     hash_stored=$(_fragment_stored_hash "$path")
     hash_actual=$(_fragment_payload_sha256 "$path")
     if [[ "$hash_stored" = "$hash_actual" ]] && [[ -n "$hash_stored" ]]; then
@@ -973,8 +993,20 @@ cmd_fragments_validate() {
 
 cmd_fragments_merge() {
   local range_start="$1" range_end="$2"
+  local paths_out_file=""
+  # Optional --paths-out=<file>: write one consumed-fragment path per line.
+  # Lets callers (e.g., SKILL.md step 9) `git rm` only the fragments that were
+  # actually merged, instead of globbing PR-*.md unconditionally.
+  if [[ "${3:-}" == --paths-out=* ]]; then
+    paths_out_file="${3#--paths-out=}"
+    : > "$paths_out_file"
+  fi
   if [[ -z "$range_start" ]] || [[ -z "$range_end" ]]; then
-    echo "Usage: $0 fragments merge <range-start> <range-end>" >&2
+    echo "Usage: $0 fragments merge <range-start> <range-end> [--paths-out=<file>]" >&2
+    return 2
+  fi
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "ERROR: fragments merge must be run inside a git repo" >&2
     return 2
   fi
   local dir="RELEASE-NOTES.next"
@@ -986,6 +1018,13 @@ cmd_fragments_merge() {
   local -a included_paths=()
   for path in "$dir"/PR-*.md; do
     [[ -f "$path" ]] || continue
+    # Skip non-numeric PR filenames (defensive — see cmd_fragments_list).
+    local n
+    n=$(_fragment_pr_number "$path")
+    if [[ -z "$n" ]]; then
+      echo "WARN: skipping non-numeric fragment filename: $path" >&2
+      continue
+    fi
     # Find the commit that introduced this fragment (oldest commit touching it).
     local introduced
     introduced=$(git log --format="%H" --reverse -- "$path" 2>/dev/null | head -n 1)
@@ -994,7 +1033,7 @@ cmd_fragments_merge() {
       echo "WARN: $path is not tracked; skipping" >&2
       continue
     fi
-    # Check if `introduced` is in `range_start..range_end`.
+    # Check if `introduced` is in `range_start..range_end` (exclusive of range_start).
     if git merge-base --is-ancestor "$introduced" "$range_end" 2>/dev/null \
        && ! git merge-base --is-ancestor "$introduced" "$range_start" 2>/dev/null; then
       included_paths+=("$path")
@@ -1012,9 +1051,16 @@ cmd_fragments_merge() {
     printf "%s\t%s\n" "$(_fragment_pr_number "$p")" "$p"
   done | sort -n -k1,1 | awk -F'\t' '{print $2}'))
 
-  # Collect section bodies, grouped by section name in Keep-a-Changelog order.
-  local -a section_order=(Added Changed Deprecated Removed Fixed Security Dependencies)
-  declare -A section_bodies=()
+  # Section storage: any heading is accepted. Canonical Keep-a-Changelog
+  # sections emit in a fixed order; non-canonical sections emit after, in
+  # first-seen order.
+  local -a canonical_order=(Added Changed Deprecated Removed Fixed Security Dependencies)
+  local -A is_canonical=()
+  local s
+  for s in "${canonical_order[@]}"; do is_canonical["$s"]=1; done
+
+  local -A section_bodies=()
+  local -a non_canonical_seen=()
 
   for path in "${sorted[@]}"; do
     # Validate hash; include drifted fragments anyway (human edits authoritative)
@@ -1022,25 +1068,56 @@ cmd_fragments_merge() {
     if ! cmd_fragments_validate "$path" >/dev/null 2>&1; then
       echo "WARN: including drifted fragment $path (human edits are authoritative)" >&2
     fi
-    # Parse sections out of the fragment body (line 3 onwards).
+    # Parse sections out of the fragment body (line 3 onwards). Accept any
+    # heading text after "### " (single or multi-word).
     local current_section=""
     while IFS= read -r line; do
-      if [[ "$line" =~ ^###\ ([A-Za-z]+)$ ]]; then
+      if [[ "$line" =~ ^###[[:space:]]+(.+)$ ]]; then
         current_section="${BASH_REMATCH[1]}"
+        # Track non-canonical headings in first-seen order.
+        if [[ -z "${is_canonical[$current_section]:-}" ]]; then
+          local already_seen=0
+          local seen
+          for seen in "${non_canonical_seen[@]}"; do
+            if [[ "$seen" = "$current_section" ]]; then
+              already_seen=1
+              break
+            fi
+          done
+          if [[ "$already_seen" -eq 0 ]]; then
+            non_canonical_seen+=("$current_section")
+          fi
+        fi
         continue
       fi
       if [[ -n "$current_section" ]] && [[ -n "$line" ]]; then
         section_bodies[$current_section]+="${line}"$'\n'
       fi
     done < <(tail -n +3 "$path")
+
+    if [[ -n "$paths_out_file" ]]; then
+      printf '%s\n' "$path" >> "$paths_out_file"
+    fi
   done
 
-  # Emit sections in canonical order, skipping empty ones.
-  for section in "${section_order[@]}"; do
+  # Emit canonical sections first (fixed order), then non-canonical (first-seen).
+  # Dedupe bullets within each section, preserving first-occurrence order.
+  _emit_section() {
+    local section="$1"
     local body="${section_bodies[$section]:-}"
-    if [[ -n "$body" ]]; then
-      printf '### %s\n%s\n' "$section" "$body"
+    if [[ -z "$body" ]]; then
+      return 0
     fi
+    local deduped
+    deduped=$(printf '%s' "$body" | awk '!seen[$0]++')
+    printf '### %s\n%s\n' "$section" "$deduped"
+  }
+
+  for s in "${canonical_order[@]}"; do
+    _emit_section "$s"
+  done
+  for s in "${non_canonical_seen[@]}"; do
+    _emit_section "$s"
   done
 }
 
@@ -1068,10 +1145,10 @@ case "${1:-}" in
         cmd_fragments_validate "${2:-}"
         ;;
       merge)
-        cmd_fragments_merge "${2:-}" "${3:-}"
+        cmd_fragments_merge "${2:-}" "${3:-}" "${4:-}"
         ;;
       *)
-        echo "Usage: $0 fragments {list|validate <path>|merge <range-start> <range-end>}" >&2
+        echo "Usage: $0 fragments {list|validate <path>|merge <range-start> <range-end> [--paths-out=<file>]}" >&2
         exit 2
         ;;
     esac
