@@ -1,5 +1,14 @@
 # Release Notes
 
+## v2.10.0 (2026-05-12)
+
+### Features
+- **`release` action consumes per-PR release-notes fragments**: The `/doc-superpowers release` action now globs `RELEASE-NOTES.next/PR-*.md`, validates each fragment's SHA-256 hash against its line-3-onward payload, merges sections in Keep-a-Changelog canonical order with ascending integer-N ordering, and deletes consumed fragments in the same commit as the new version entry. Drifted hashes (human edits) emit a warning but are still merged — human edits are authoritative. Fragments whose introducing commit is outside the release range are skipped via `git merge-base --is-ancestor`. Completes the fragment lifecycle started by the producer in v2.10.0's `doc-pr-release.yml` workflow.
+- **New `doc-tools.sh fragments` subcommand**: Three verbs — `fragments list` (JSON enumeration with hash validity), `fragments validate <path>` (exit 0 valid / 1 drifted / 2 missing), `fragments merge <start> <end>` (markdown sections ready to insert under a `## vX.Y.Z` header). Encapsulates fragment-parsing in deterministic shell so the AI drafting step doesn't re-implement hashing/parsing in the prompt.
+
+### Other
+- **4 new test cases in `scripts/test-doc-tools.sh`**: cover empty list, valid list, drifted-hash detection, and ascending-integer-N merge order. Total `test-doc-tools.sh` count: 87 assertions across 45 tests.
+
 ## v2.9.1 (2026-05-04)
 
 ### Other
