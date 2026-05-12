@@ -133,6 +133,9 @@ Subcommands:
                     .claude-plugin/plugin.json, .claude-plugin/marketplace.json,
                     .cursor-plugin/plugin.json, gemini-extension.json
   check-version     Verify all manifest files have the same version
+  fragments list                       List per-PR release-notes fragments + hash status
+  fragments validate <path>            Exit 0 if fragment hash matches, 1 if drifted
+  fragments merge <start> <end>        Print merged sections from fragments in commit range
 
 Options:
   --help            Show this help message
@@ -865,6 +868,182 @@ cmd_check_version() {
   echo "PASS: all $checked file(s) match v$canonical"
 }
 
+# --- Fragments subcommand ---
+
+# Compute SHA-256 of bytes from line 3 onwards of a fragment file.
+_fragment_payload_sha256() {
+  local path="$1"
+  if [[ ! -f "$path" ]]; then
+    echo ""
+    return 0
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    tail -n +3 "$path" | sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    tail -n +3 "$path" | shasum -a 256 | awk '{print $1}'
+  else
+    echo "no sha256 tool available" >&2
+    return 1
+  fi
+}
+
+# Extract the line-2 hash from a fragment file (returns empty if missing).
+_fragment_stored_hash() {
+  local path="$1"
+  sed -n '2p' "$path" \
+    | grep -oE 'hash [a-f0-9]+' \
+    | awk '{print $2}'
+}
+
+# Extract the integer N from a fragment filename "PR-<N>.md".
+_fragment_pr_number() {
+  local path="$1"
+  basename "$path" .md | sed -E 's/^PR-//'
+}
+
+# Extract section names (### Added, ### Fixed, etc.) from a fragment.
+_fragment_section_names() {
+  local path="$1"
+  tail -n +3 "$path" | grep -oE '^### \w+' | awk '{print $2}' | sort -u
+}
+
+cmd_fragments_list() {
+  local dir="RELEASE-NOTES.next"
+  if [[ ! -d "$dir" ]]; then
+    echo "[]"
+    return 0
+  fi
+  local out="[]"
+  local found=0
+  for path in "$dir"/PR-*.md; do
+    [[ -f "$path" ]] || continue
+    found=1
+    local n hash_stored hash_actual hash_valid sections_json
+    n=$(_fragment_pr_number "$path")
+    hash_stored=$(_fragment_stored_hash "$path")
+    hash_actual=$(_fragment_payload_sha256 "$path")
+    if [[ "$hash_stored" = "$hash_actual" ]] && [[ -n "$hash_stored" ]]; then
+      hash_valid="true"
+    else
+      hash_valid="false"
+    fi
+    sections_json=$(_fragment_section_names "$path" \
+      | jq -R -s 'split("\n") | map(select(length > 0))')
+    out=$(printf '%s' "$out" | jq \
+      --argjson n "$n" \
+      --arg path "$path" \
+      --arg hash_stored "$hash_stored" \
+      --arg hash_actual "$hash_actual" \
+      --arg hash_valid "$hash_valid" \
+      --argjson sections "$sections_json" \
+      '. += [{pr_number: $n, path: $path, hash_stored: $hash_stored, hash_actual: $hash_actual, hash_valid: ($hash_valid == "true"), sections: $sections}]'
+    )
+  done
+  if [[ "$found" -eq 0 ]]; then
+    echo "[]"
+    return 0
+  fi
+  printf '%s\n' "$out" | jq 'sort_by(.pr_number)'
+}
+
+cmd_fragments_validate() {
+  local path="$1"
+  if [[ -z "$path" ]]; then
+    echo "Usage: $0 fragments validate <path>" >&2
+    return 2
+  fi
+  if [[ ! -f "$path" ]]; then
+    echo "ERROR: fragment not found: $path" >&2
+    return 2
+  fi
+  local stored actual
+  stored=$(_fragment_stored_hash "$path")
+  actual=$(_fragment_payload_sha256 "$path")
+  if [[ -z "$stored" ]]; then
+    echo "ERROR: no hash marker on line 2 of $path" >&2
+    return 1
+  fi
+  if [[ "$stored" = "$actual" ]]; then
+    echo "valid: $path"
+    return 0
+  fi
+  echo "drifted: $path (stored=$stored, actual=$actual)" >&2
+  return 1
+}
+
+cmd_fragments_merge() {
+  local range_start="$1" range_end="$2"
+  if [[ -z "$range_start" ]] || [[ -z "$range_end" ]]; then
+    echo "Usage: $0 fragments merge <range-start> <range-end>" >&2
+    return 2
+  fi
+  local dir="RELEASE-NOTES.next"
+  if [[ ! -d "$dir" ]]; then
+    return 0  # Empty output is valid (no fragments)
+  fi
+
+  # Collect fragments whose introducing commit is in the range.
+  local -a included_paths=()
+  for path in "$dir"/PR-*.md; do
+    [[ -f "$path" ]] || continue
+    # Find the commit that introduced this fragment (oldest commit touching it).
+    local introduced
+    introduced=$(git log --format="%H" --reverse -- "$path" 2>/dev/null | head -n 1)
+    if [[ -z "$introduced" ]]; then
+      # Untracked; skip with a warning.
+      echo "WARN: $path is not tracked; skipping" >&2
+      continue
+    fi
+    # Check if `introduced` is in `range_start..range_end`.
+    if git merge-base --is-ancestor "$introduced" "$range_end" 2>/dev/null \
+       && ! git merge-base --is-ancestor "$introduced" "$range_start" 2>/dev/null; then
+      included_paths+=("$path")
+    fi
+  done
+
+  if [[ "${#included_paths[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  # Sort by integer PR number.
+  local -a sorted
+  # shellcheck disable=SC2207
+  sorted=($(for p in "${included_paths[@]}"; do
+    printf "%s\t%s\n" "$(_fragment_pr_number "$p")" "$p"
+  done | sort -n -k1,1 | awk -F'\t' '{print $2}'))
+
+  # Collect section bodies, grouped by section name in Keep-a-Changelog order.
+  local -a section_order=(Added Changed Deprecated Removed Fixed Security Dependencies)
+  declare -A section_bodies=()
+
+  for path in "${sorted[@]}"; do
+    # Validate hash; include drifted fragments anyway (human edits authoritative)
+    # but warn on stderr.
+    if ! cmd_fragments_validate "$path" >/dev/null 2>&1; then
+      echo "WARN: including drifted fragment $path (human edits are authoritative)" >&2
+    fi
+    # Parse sections out of the fragment body (line 3 onwards).
+    local current_section=""
+    while IFS= read -r line; do
+      if [[ "$line" =~ ^###\ ([A-Za-z]+)$ ]]; then
+        current_section="${BASH_REMATCH[1]}"
+        continue
+      fi
+      if [[ -n "$current_section" ]] && [[ -n "$line" ]]; then
+        section_bodies[$current_section]+="${line}"$'\n'
+      fi
+    done < <(tail -n +3 "$path")
+  done
+
+  # Emit sections in canonical order, skipping empty ones.
+  for section in "${section_order[@]}"; do
+    local body="${section_bodies[$section]:-}"
+    if [[ -n "$body" ]]; then
+      printf '### %s\n%s\n' "$section" "$body"
+    fi
+  done
+}
+
 # --- Main ---
 
 check_deps
@@ -879,6 +1058,24 @@ case "${1:-}" in
   status)           shift; cmd_status "$@" ;;
   bump-version)     shift; cmd_bump_version "$@" ;;
   check-version)    shift; cmd_check_version "$@" ;;
+  fragments)
+    shift
+    case "${1:-}" in
+      list)
+        cmd_fragments_list
+        ;;
+      validate)
+        cmd_fragments_validate "${2:-}"
+        ;;
+      merge)
+        cmd_fragments_merge "${2:-}" "${3:-}"
+        ;;
+      *)
+        echo "Usage: $0 fragments {list|validate <path>|merge <range-start> <range-end>}" >&2
+        exit 2
+        ;;
+    esac
+    ;;
   --help|"")        usage ;;
   *)                usage ;;
 esac
