@@ -51,11 +51,31 @@ jobs:
             fi
           fi
 
+      - name: Resolve Anthropic auth
+        id: auth
+        if: steps.precheck.outputs.skip != 'true'
+        env:
+          OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$OAUTH" ]; then
+            echo "use_oauth=true" >> "$GITHUB_OUTPUT"
+            if [ -n "$API_KEY" ]; then
+              echo "::notice::Both CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are set; using CLAUDE_CODE_OAUTH_TOKEN."
+            fi
+          elif [ -n "$API_KEY" ]; then
+            echo "use_oauth=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY is set as a repository secret. Add one under Settings > Secrets and variables > Actions." >&2
+            exit 1
+          fi
+
       - name: Verify spec compliance
         if: steps.precheck.outputs.skip != 'true'
         uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ steps.auth.outputs.use_oauth == 'true' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
+          anthropic_api_key: ${{ steps.auth.outputs.use_oauth == 'false' && secrets.ANTHROPIC_API_KEY || '' }}
           prompt: |
             Run /doc-superpowers spec-verify --mode=review to check this PR
             against governing specifications in docs/specs/.

@@ -17,11 +17,17 @@
 #   "head_sha":          string,
 #   "base_sha":          string,
 #   "pr_body":           string,
-#   "existing_fragment": string | null,
-#   "fragment_path":     string,
-#   "new_commits":       [{"sha": str, "subject": str, "body": str}],
-#   "full_commits":      [{"sha": str, "subject": str, "body": str}]
+#   "existing_fragment":         string | null,
+#   "existing_fragment_corrupt": bool,
+#   "fragment_path":             string,
+#   "new_commits":               [{"sha": str, "subject": str, "body": str}],
+#   "full_commits":              [{"sha": str, "subject": str, "body": str}]
 # }
+#
+# `existing_fragment_corrupt` is true when a fragment file exists but does not
+# parse as a well-formed doc-superpowers fragment (missing markers, truncated
+# to <3 lines, or oversized). The agent treats this case as "do not auto-edit;
+# post a PR comment requesting reconciliation."
 set -euo pipefail
 
 # Resolve PR number / base ref from env or event payload.
@@ -52,6 +58,8 @@ HEAD_REF=$(printf '%s' "$PR_JSON" | jq -r '.headRefName')
 
 HEAD_SHA=$(git rev-parse HEAD)
 # Use merge-base so we get the divergence point, not a stale base tip.
+# `origin/$BASE_REF` is preferred; in CI it's populated by `fetch-depth: 0`.
+# The bare-name fallback handles non-Actions environments (manual runs).
 if git rev-parse --verify "origin/$BASE_REF" >/dev/null 2>&1; then
   BASE_SHA=$(git merge-base "origin/$BASE_REF" HEAD)
 else
@@ -60,8 +68,32 @@ fi
 
 FRAGMENT_PATH="RELEASE-NOTES.next/PR-${PR_NUMBER}.md"
 EXISTING_FRAGMENT_JSON="null"
+EXISTING_FRAGMENT_CORRUPT="false"
+# Cap on fragment size to read into memory; a malicious mega-fragment would
+# otherwise OOM the runner. 1 MiB is ~5000 lines of release notes — far
+# beyond any plausible legitimate use.
+FRAGMENT_MAX_BYTES=1048576
 if [ -f "$FRAGMENT_PATH" ]; then
-  EXISTING_FRAGMENT_JSON=$(jq -Rs '.' <"$FRAGMENT_PATH")
+  frag_bytes=$(wc -c <"$FRAGMENT_PATH" | tr -d ' ')
+  if [ "$frag_bytes" -gt "$FRAGMENT_MAX_BYTES" ]; then
+    echo "Existing fragment is ${frag_bytes} bytes (>${FRAGMENT_MAX_BYTES}); marking corrupt." >&2
+    EXISTING_FRAGMENT_CORRUPT="true"
+  else
+    EXISTING_FRAGMENT_JSON=$(jq -Rs '.' <"$FRAGMENT_PATH")
+    # Sanity-check: the fragment must have at least 3 lines (two markers + at
+    # least one content line) AND line 1 must be the fragment marker AND
+    # line 2 must be the hash marker. Anything else is a corrupted fragment
+    # we should not auto-edit.
+    frag_lines=$(wc -l <"$FRAGMENT_PATH" | tr -d ' ')
+    line1=$(sed -n '1p' "$FRAGMENT_PATH")
+    line2=$(sed -n '2p' "$FRAGMENT_PATH")
+    expected_line1="<!-- doc-superpowers:fragment PR-${PR_NUMBER} -->"
+    if [ "$frag_lines" -lt 3 ] \
+       || [ "$line1" != "$expected_line1" ] \
+       || ! printf '%s' "$line2" | grep -qE '^<!-- doc-superpowers:hash [0-9a-f]+ -->$'; then
+      EXISTING_FRAGMENT_CORRUPT="true"
+    fi
+  fi
 fi
 
 # Find the last commit on this branch that touched the fragment file.
@@ -109,6 +141,7 @@ jq -n \
   --arg base_sha "$BASE_SHA" \
   --arg pr_body "$PR_BODY" \
   --argjson existing_fragment "$EXISTING_FRAGMENT_JSON" \
+  --argjson existing_fragment_corrupt "$EXISTING_FRAGMENT_CORRUPT" \
   --arg fragment_path "$FRAGMENT_PATH" \
   --argjson new_commits "$NEW_COMMITS_JSON" \
   --argjson full_commits "$FULL_COMMITS_JSON" \
@@ -120,6 +153,7 @@ jq -n \
     base_sha: $base_sha,
     pr_body: $pr_body,
     existing_fragment: $existing_fragment,
+    existing_fragment_corrupt: $existing_fragment_corrupt,
     fragment_path: $fragment_path,
     new_commits: $new_commits,
     full_commits: $full_commits

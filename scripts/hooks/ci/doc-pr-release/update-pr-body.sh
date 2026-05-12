@@ -49,11 +49,22 @@ fi
 # Normalize line endings to LF (handles bodies edited via Windows web UI).
 EXISTING_BODY="${EXISTING_BODY//$'\r'/}"
 
-# Validate marker pairing. Count occurrences (not lines), so same-line duplicates
-# are caught too. `grep -oF` exits 1 on zero matches; with `pipefail` set we must
-# allow that — fall back to 0.
-start_count=$( { printf '%s\n' "$EXISTING_BODY" | grep -oF "$START_MARKER" || true; } | wc -l | tr -d ' ')
-end_count=$( { printf '%s\n' "$EXISTING_BODY" | grep -oF "$END_MARKER" || true; } | wc -l | tr -d ' ')
+# Validate marker pairing. We count lines where the marker is the ENTIRE line
+# (`grep -cFx`), matching the awk replace below which uses `$0 == start`. An
+# `grep -oF | wc -l` (any-substring) count would over-accept: a stray
+# mid-line `<!-- doc-superpowers:start -->` in user prose would pass validation
+# but awk would not replace it, leaving an orphan marker after fresh-append.
+# `grep -c` exits 1 on zero matches; with `pipefail` set we allow that.
+start_count=$( { printf '%s\n' "$EXISTING_BODY" | grep -cFx "$START_MARKER" || true; } | tr -d ' \n')
+end_count=$( { printf '%s\n' "$EXISTING_BODY" | grep -cFx "$END_MARKER" || true; } | tr -d ' \n')
+# Belt-and-suspenders: catch ANY occurrence (including same-line dupes or stray
+# mid-line markers). A non-line-anchored hit means a malformed body.
+any_start=$( { printf '%s\n' "$EXISTING_BODY" | grep -oF "$START_MARKER" || true; } | wc -l | tr -d ' ')
+any_end=$( { printf '%s\n' "$EXISTING_BODY" | grep -oF "$END_MARKER" || true; } | wc -l | tr -d ' ')
+if [ "$any_start" -ne "$start_count" ] || [ "$any_end" -ne "$end_count" ]; then
+  echo "ERROR: doc-superpowers marker found outside of a line on its own — refusing to edit" >&2
+  exit 1
+fi
 if [ "$start_count" -gt 1 ] || [ "$end_count" -gt 1 ]; then
   echo "ERROR: duplicate doc-superpowers markers in PR body" >&2
   exit 1
@@ -71,7 +82,14 @@ if [ "$start_count" -eq 0 ]; then
 ${NEW_SECTION}
 ${END_MARKER}"
   else
-    NEW_BODY="${EXISTING_BODY}
+    # Strip any trailing newlines from the existing body before adding the
+    # blank-line separator, so we don't end up with 3+ blank lines if the
+    # body already ended with whitespace.
+    existing_stripped="${EXISTING_BODY}"
+    while [ "${existing_stripped: -1}" = $'\n' ]; do
+      existing_stripped="${existing_stripped%$'\n'}"
+    done
+    NEW_BODY="${existing_stripped}
 
 ${START_MARKER}
 ${NEW_SECTION}

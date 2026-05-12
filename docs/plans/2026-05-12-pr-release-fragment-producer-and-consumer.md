@@ -87,7 +87,7 @@ This is the contract file that both PR A's workflow and PR B's release action wi
 **Files:**
 - Create: `scripts/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md`
 
-- [ ] **Step 1: Create the spec file**
+- [x] **Step 1: Create the spec file**
 
 Write `scripts/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md` with this exact content:
 
@@ -152,7 +152,7 @@ overwrite** a fragment whose hash has been broken by a human edit — it adds
 a PR comment requesting the edit be reconciled with the new commits instead.
 ````
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 cd ~/code/doc-superpowers
@@ -170,7 +170,7 @@ The 3 shell helpers live under `scripts/hooks/ci/doc-pr-release/` so the install
 **Files:**
 - Create: `scripts/hooks/ci/doc-pr-release/.gitkeep` (placeholder; tasks A3–A5 fill the dir).
 
-- [ ] **Step 1: Reserve the directory**
+- [x] **Step 1: Reserve the directory**
 
 ```bash
 mkdir -p scripts/hooks/ci/doc-pr-release
@@ -193,7 +193,7 @@ This is the highest-blast-radius helper — it edits PR descriptions visible to 
 - Create: `scripts/hooks/ci/doc-pr-release/update-pr-body.sh`
 - Create: `scripts/test-doc-pr-release.sh` (initial scaffolding; Tasks A4/A5 extend it)
 
-- [ ] **Step 1: Lift the helper verbatim from abundance-mvp commit `49f15e0a`**
+- [x] **Step 1: Lift the helper verbatim from abundance-mvp commit `49f15e0a`**
 
 Source: `https://github.com/woodrowpearson/abundance-mvp/blob/49f15e0a/.github/scripts/doc-pr-release/update-pr-body.sh`
 
@@ -206,7 +206,7 @@ cp /Users/w/code/abundance-mvp/.worktrees/doc-pr-release-action/.github/scripts/
 chmod +x scripts/hooks/ci/doc-pr-release/update-pr-body.sh
 ```
 
-- [ ] **Step 2: Scaffold the test harness**
+- [x] **Step 2: Scaffold the test harness**
 
 Create `scripts/test-doc-pr-release.sh` with this content:
 
@@ -416,14 +416,14 @@ echo "Results: $PASS passed, $FAIL failed"
 chmod +x scripts/test-doc-pr-release.sh
 ```
 
-- [ ] **Step 3: Run the tests**
+- [x] **Step 3: Run the tests**
 
 ```bash
 bash scripts/test-doc-pr-release.sh
 ```
 Expected: `Results: 8 passed, 0 failed`, exit 0.
 
-- [ ] **Step 4: Shellcheck**
+- [x] **Step 4: Shellcheck**
 
 ```bash
 shellcheck scripts/hooks/ci/doc-pr-release/update-pr-body.sh \
@@ -431,7 +431,7 @@ shellcheck scripts/hooks/ci/doc-pr-release/update-pr-body.sh \
 ```
 Expected: silent.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/hooks/ci/doc-pr-release/update-pr-body.sh \
@@ -447,7 +447,7 @@ git commit -m "feat(ci): add doc-pr-release PR body marker-merge helper"
 - Create: `scripts/hooks/ci/doc-pr-release/extract-context.sh`
 - Modify: `scripts/test-doc-pr-release.sh` (append extract-context tests)
 
-- [ ] **Step 1: Lift the helper verbatim from abundance-mvp commit `49f15e0a`**
+- [x] **Step 1: Lift the helper verbatim from abundance-mvp commit `49f15e0a`**
 
 ```bash
 cp /Users/w/code/abundance-mvp/.worktrees/doc-pr-release-action/.github/scripts/doc-pr-release/extract-context.sh \
@@ -457,7 +457,7 @@ chmod +x scripts/hooks/ci/doc-pr-release/extract-context.sh
 
 The file is 126 lines. The PR_NUMBER validation regex is `^[1-9][0-9]*$`.
 
-- [ ] **Step 2: Append extract-context tests to `scripts/test-doc-pr-release.sh`**
+- [x] **Step 2: Append extract-context tests to `scripts/test-doc-pr-release.sh`**
 
 Find the line in `scripts/test-doc-pr-release.sh` that reads:
 
@@ -614,14 +614,14 @@ echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
 ```
 
-- [ ] **Step 3: Run the tests**
+- [x] **Step 3: Run the tests**
 
 ```bash
 bash scripts/test-doc-pr-release.sh
 ```
 Expected: `Results: 19 passed, 0 failed` (8 from update-pr-body + 11 from extract-context). Exit 0.
 
-- [ ] **Step 4: Shellcheck**
+- [x] **Step 4: Shellcheck**
 
 ```bash
 shellcheck scripts/hooks/ci/doc-pr-release/extract-context.sh \
@@ -629,7 +629,7 @@ shellcheck scripts/hooks/ci/doc-pr-release/extract-context.sh \
 ```
 Expected: silent.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/hooks/ci/doc-pr-release/extract-context.sh \
@@ -646,7 +646,7 @@ git commit -m "feat(ci): add doc-pr-release context extractor"
 - Delete: `scripts/hooks/ci/doc-pr-release/.gitkeep`
 - Modify: `scripts/test-doc-pr-release.sh` (append commit-and-push smoke tests)
 
-- [ ] **Step 1: Lift the helper from abundance-mvp commit `49f15e0a`**
+- [x] **Step 1: Lift the helper from abundance-mvp commit `49f15e0a`**
 
 ```bash
 cp /Users/w/code/abundance-mvp/.worktrees/doc-pr-release-action/.github/scripts/doc-pr-release/commit-and-push.sh \
@@ -656,7 +656,7 @@ chmod +x scripts/hooks/ci/doc-pr-release/commit-and-push.sh
 
 The file is 59 lines, uses `^[1-9][0-9]*$` regex, fails loud on missing `GITHUB_HEAD_REF`, uses inline `git -c` overrides (no local config pollution).
 
-- [ ] **Step 2: Append smoke tests**
+- [x] **Step 2: Append smoke tests**
 
 Append the following before the final `echo "Results: ..."` block in `scripts/test-doc-pr-release.sh`:
 
@@ -767,20 +767,20 @@ test_commit_no_fragment_rc0
 test_commit_unset_head_ref_rc1
 ```
 
-- [ ] **Step 3: Run the tests**
+- [x] **Step 3: Run the tests**
 
 ```bash
 bash scripts/test-doc-pr-release.sh
 ```
 Expected: `Results: 24 passed, 0 failed`. Exit 0.
 
-- [ ] **Step 4: Delete the .gitkeep**
+- [x] **Step 4: Delete the .gitkeep**
 
 ```bash
 git rm scripts/hooks/ci/doc-pr-release/.gitkeep
 ```
 
-- [ ] **Step 5: Shellcheck**
+- [x] **Step 5: Shellcheck**
 
 ```bash
 shellcheck scripts/hooks/ci/doc-pr-release/commit-and-push.sh \
@@ -788,7 +788,7 @@ shellcheck scripts/hooks/ci/doc-pr-release/commit-and-push.sh \
 ```
 Expected: silent.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add scripts/hooks/ci/doc-pr-release/commit-and-push.sh \
@@ -805,7 +805,7 @@ The workflow lifted from abundance-mvp ships **disabled**; the plugin template s
 **Files:**
 - Create: `scripts/hooks/ci/doc-pr-release.yml`
 
-- [ ] **Step 1: Author the template**
+- [x] **Step 1: Author the template**
 
 Create `scripts/hooks/ci/doc-pr-release.yml` with this content:
 
@@ -1025,7 +1025,7 @@ jobs:
               may be more detailed.
 ```
 
-- [ ] **Step 2: Validate the YAML BEFORE template substitution**
+- [x] **Step 2: Validate the YAML BEFORE template substitution**
 
 The template uses `__BASE_BRANCH__` and `__VERSION__` literals; these are NOT valid YAML keys/values until install.sh substitutes them. But the template's structure should still parse as a YAML document if you replace placeholders inline for the check:
 
@@ -1039,14 +1039,14 @@ sed -e 's|__BASE_BRANCH__|main|g' -e 's|__VERSION__|test|g' \
 
 Expected: `ok`.
 
-- [ ] **Step 3: Spot-check against sibling templates**
+- [x] **Step 3: Spot-check against sibling templates**
 
 ```bash
 diff <(head -3 scripts/hooks/ci/doc-pr-release.yml) <(head -3 scripts/hooks/ci/doc-release.yml)
 ```
 The first 3 lines should follow the same `# doc-superpowers workflow v1` header convention. (Header text differs; only the FIRST line — `# doc-superpowers workflow v1` — must match for `is_doc_superpowers_workflow()` in install.sh to recognize it.)
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add scripts/hooks/ci/doc-pr-release.yml
@@ -1066,7 +1066,7 @@ The existing `install_ci()` globs `*.yml`. New responsibilities:
 **Files:**
 - Modify: `scripts/hooks/install.sh`
 
-- [ ] **Step 1: Read the current install_ci, uninstall_ci, status_ci**
+- [x] **Step 1: Read the current install_ci, uninstall_ci, status_ci**
 
 ```bash
 sed -n '375,475p' scripts/hooks/install.sh
@@ -1074,7 +1074,7 @@ sed -n '375,475p' scripts/hooks/install.sh
 
 Note the existing pattern: hardcoded workflow list at lines 435 and 460. Add `doc-pr-release.yml` to both. Also add a new helper-files mechanism.
 
-- [ ] **Step 2: Add helper-copy logic to install_ci**
+- [x] **Step 2: Add helper-copy logic to install_ci**
 
 Find the `install_ci()` function (around line 377). After the existing `for workflow_src in "$SCRIPT_DIR/ci/"*.yml; do … done` loop, ADD:
 
@@ -1105,7 +1105,7 @@ Find the `install_ci()` function (around line 377). After the existing `for work
   fi
 ```
 
-- [ ] **Step 3: Add helper-removal logic to uninstall_ci**
+- [x] **Step 3: Add helper-removal logic to uninstall_ci**
 
 In `uninstall_ci()`, add `doc-pr-release.yml` to the hardcoded list at line 435. After the workflow-removal loop, ADD:
 
@@ -1120,7 +1120,7 @@ In `uninstall_ci()`, add `doc-pr-release.yml` to the hardcoded list at line 435.
   # nuking the directory would lose unmerged release notes. Leave it.
 ```
 
-- [ ] **Step 4: Add to status_ci**
+- [x] **Step 4: Add to status_ci**
 
 In `status_ci()`, add `doc-pr-release.yml` to the hardcoded list at line 460. After the loop, ADD:
 
@@ -1133,7 +1133,7 @@ In `status_ci()`, add `doc-pr-release.yml` to the hardcoded list at line 460. Af
   fi
 ```
 
-- [ ] **Step 5: Smoke test the installer end-to-end**
+- [x] **Step 5: Smoke test the installer end-to-end**
 
 ```bash
 # In a clean tempdir, simulate a target repo.
@@ -1170,21 +1170,21 @@ Expected:
 - Status command reports 1 workflow + 3 helpers + the README path
 - After uninstall, workflow + helper dir are gone; `RELEASE-NOTES.next/README.md` remains
 
-- [ ] **Step 6: Shellcheck**
+- [x] **Step 6: Shellcheck**
 
 ```bash
 shellcheck scripts/hooks/install.sh
 ```
 Expected: no new warnings vs baseline.
 
-- [ ] **Step 7: Run the existing hooks test harness**
+- [x] **Step 7: Run the existing hooks test harness**
 
 ```bash
 bash scripts/test-hooks.sh
 ```
 Expected: existing tests still pass. (If any test fails, it's likely an off-by-one in the hardcoded workflow lists — verify both occurrences include `doc-pr-release.yml`.)
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add scripts/hooks/install.sh
@@ -1198,7 +1198,7 @@ git commit -m "feat(install): wire doc-pr-release workflow + helpers into instal
 **Files:**
 - Modify: `skills/doc-superpowers/SKILL.md`
 
-- [ ] **Step 1: Locate the actions table near the top of SKILL.md**
+- [x] **Step 1: Locate the actions table near the top of SKILL.md**
 
 ```bash
 rg -n '\| `release` \|' skills/doc-superpowers/SKILL.md | head -3
@@ -1206,11 +1206,11 @@ rg -n '\| `release` \|' skills/doc-superpowers/SKILL.md | head -3
 
 The table is the "Quick Reference" near the top.
 
-- [ ] **Step 2: No new action needed**
+- [x] **Step 2: No new action needed**
 
 The producer doesn't add a new `/doc-superpowers <action>` — it's installed via `hooks install --ci`. So the actions table doesn't change. The consumer (PR B) will extend the existing `release` action description.
 
-- [ ] **Step 3: Update the `hooks` action description (the `--ci` bullet)**
+- [x] **Step 3: Update the `hooks` action description (the `--ci` bullet)**
 
 Find:
 
@@ -1224,7 +1224,7 @@ Replace with:
 - `--ci` — CI/CD workflows: PR freshness check, weekly audit, doc-index auto-update, per-PR release-notes fragment producer
 ```
 
-- [ ] **Step 4: Add a paragraph documenting the new workflow**
+- [x] **Step 4: Add a paragraph documenting the new workflow**
 
 Find the `## 3. Error Handling` section (or wherever the CI installer is described in detail). Before that section, ADD a new subsection under `hooks`:
 
@@ -1258,13 +1258,13 @@ closed set, ascending integer-N sort. Both PR A producer and the future PR B
 consumer adhere to this format.
 ```
 
-- [ ] **Step 5: Update doc-index for SKILL.md**
+- [x] **Step 5: Update doc-index for SKILL.md**
 
 ```bash
 bash scripts/doc-tools.sh update-index skills/doc-superpowers/SKILL.md
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add skills/doc-superpowers/SKILL.md docs/.doc-index.json

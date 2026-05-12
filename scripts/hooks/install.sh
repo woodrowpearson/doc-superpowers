@@ -413,6 +413,10 @@ install_ci() {
   fi
 
   # Install doc-pr-release helper scripts (alongside the workflow).
+  # Convention: helpers MUST be `*.sh`. The non-shell `.md` spec is handled
+  # separately below. If a future helper is added in a different language
+  # (e.g. `*.py`), either rename it to `.sh` (wrap with `#!/usr/bin/env python3`
+  # is fine) or extend this glob explicitly — silent-skip is the wrong default.
   if [[ -d "$SCRIPT_DIR/ci/doc-pr-release" ]]; then
     mkdir -p .github/scripts/doc-pr-release
     local helpers_installed=0
@@ -441,12 +445,17 @@ install_ci() {
   echo "CI/CD workflows: $installed installed, $skipped skipped"
   if [[ $installed -gt 0 ]]; then
     echo "  Remember to commit and push these workflows."
-    # Check if any installed workflow requires an API key
-    if grep -rql 'ANTHROPIC_API_KEY' .github/workflows/doc-*.yml 2>/dev/null; then
+    # Check if any installed workflow requires Anthropic auth.
+    # Workflows accept either CLAUDE_CODE_OAUTH_TOKEN (preferred) or
+    # ANTHROPIC_API_KEY; the in-workflow preflight step picks one and fails
+    # fast if both are unset.
+    if grep -rlqE 'CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY' .github/workflows/doc-*.yml 2>/dev/null; then
       echo ""
-      echo "  NOTE: Claude-powered workflows require ANTHROPIC_API_KEY"
-      echo "  as a GitHub Actions secret. Set it at:"
-      echo "  Settings > Secrets and variables > Actions > New repository secret"
+      echo "  NOTE: Claude-powered workflows require ONE of these GitHub Actions secrets:"
+      echo "    - CLAUDE_CODE_OAUTH_TOKEN (preferred — Claude Code OAuth token)"
+      echo "    - ANTHROPIC_API_KEY       (fallback — Anthropic API key)"
+      echo "  If both are set, CLAUDE_CODE_OAUTH_TOKEN takes precedence."
+      echo "  Set one at: Settings > Secrets and variables > Actions > New repository secret"
     fi
   fi
 }
