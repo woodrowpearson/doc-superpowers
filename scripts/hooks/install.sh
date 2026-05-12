@@ -412,6 +412,32 @@ install_ci() {
     echo "  Vendored doc-tools.sh → .github/scripts/doc-tools.sh"
   fi
 
+  # Install doc-pr-release helper scripts (alongside the workflow).
+  if [[ -d "$SCRIPT_DIR/ci/doc-pr-release" ]]; then
+    mkdir -p .github/scripts/doc-pr-release
+    local helpers_installed=0
+    for helper in "$SCRIPT_DIR/ci/doc-pr-release/"*.sh; do
+      [[ -f "$helper" ]] || continue
+      local helper_dest
+      helper_dest=".github/scripts/doc-pr-release/$(basename "$helper")"
+      cp "$helper" "$helper_dest"
+      chmod +x "$helper_dest"
+      helpers_installed=$((helpers_installed + 1))
+    done
+    if [[ "$helpers_installed" -gt 0 ]]; then
+      echo "  Installed $helpers_installed doc-pr-release helpers in .github/scripts/doc-pr-release/"
+    fi
+
+    # Install the RELEASE-NOTES.next/ fragment-format spec (only if missing —
+    # never overwrite user customizations).
+    if [[ ! -f "RELEASE-NOTES.next/README.md" ]]; then
+      mkdir -p RELEASE-NOTES.next
+      cp "$SCRIPT_DIR/ci/doc-pr-release/RELEASE-NOTES.next.README.md" \
+         "RELEASE-NOTES.next/README.md"
+      echo "  Created RELEASE-NOTES.next/README.md (fragment format spec)"
+    fi
+  fi
+
   echo "CI/CD workflows: $installed installed, $skipped skipped"
   if [[ $installed -gt 0 ]]; then
     echo "  Remember to commit and push these workflows."
@@ -432,13 +458,22 @@ uninstall_ci() {
   fi
 
   local removed=0
-  for workflow_name in doc-freshness-pr.yml doc-freshness-schedule.yml doc-index-update.yml doc-audit-update.yml doc-review-pr.yml doc-release.yml doc-spec-verify.yml doc-pr-full-cycle.yml; do
+  for workflow_name in doc-freshness-pr.yml doc-freshness-schedule.yml doc-index-update.yml doc-audit-update.yml doc-review-pr.yml doc-release.yml doc-spec-verify.yml doc-pr-full-cycle.yml doc-pr-release.yml; do
     local workflow_dest=".github/workflows/$workflow_name"
     if is_doc_superpowers_workflow "$workflow_dest" 2>/dev/null; then
       rm "$workflow_dest"
       removed=$((removed + 1))
     fi
   done
+
+  # Remove doc-pr-release helpers if present and unmodified (best-effort).
+  if [[ -d ".github/scripts/doc-pr-release" ]]; then
+    rm -rf .github/scripts/doc-pr-release
+    echo "  Removed .github/scripts/doc-pr-release/"
+  fi
+  # Note: RELEASE-NOTES.next/README.md is NOT auto-removed — it may have
+  # accumulated user-authored fragment edits via PR-<N>.md siblings, and
+  # nuking the directory would lose unmerged release notes. Leave it.
 
   # Remove vendored doc-tools.sh
   if [[ -f ".github/scripts/doc-tools.sh" ]]; then
@@ -457,7 +492,7 @@ status_ci() {
   fi
 
   local found=0
-  for workflow_name in doc-freshness-pr.yml doc-freshness-schedule.yml doc-index-update.yml doc-audit-update.yml doc-review-pr.yml doc-release.yml doc-spec-verify.yml doc-pr-full-cycle.yml; do
+  for workflow_name in doc-freshness-pr.yml doc-freshness-schedule.yml doc-index-update.yml doc-audit-update.yml doc-review-pr.yml doc-release.yml doc-spec-verify.yml doc-pr-full-cycle.yml doc-pr-release.yml; do
     local workflow_dest=".github/workflows/$workflow_name"
     if is_doc_superpowers_workflow "$workflow_dest" 2>/dev/null; then
       printf "  ✓ %-22s installed\n" "$workflow_name"
@@ -466,6 +501,13 @@ status_ci() {
       printf "  ✗ %-22s not installed\n" "$workflow_name"
     fi
   done
+
+  # Also report whether helpers are installed.
+  if [[ -d ".github/scripts/doc-pr-release" ]]; then
+    local helper_count
+    helper_count=$(find .github/scripts/doc-pr-release -maxdepth 1 -name '*.sh' | wc -l | tr -d ' ')
+    echo "  doc-pr-release helpers: $helper_count installed"
+  fi
 }
 
 # --- Main ---
