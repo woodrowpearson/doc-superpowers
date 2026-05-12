@@ -327,7 +327,124 @@ test_extract_context_rejects_zero() {
 test_extract_context_full
 test_extract_context_rejects_zero
 
-# commit-and-push.sh tests are appended in Task A5.
+# ============================================================================
+# commit-and-push.sh smoke tests
+# ============================================================================
+echo
+echo "=== commit-and-push.sh ==="
+
+COMMIT_SCRIPT="$HELPERS_DIR/commit-and-push.sh"
+[ -x "$COMMIT_SCRIPT" ] || {
+  echo "FAIL: $COMMIT_SCRIPT not found or not executable" >&2
+  exit 1
+}
+
+test_commit_no_args() {
+  echo "Test: no args → rc=2"
+  local rc=0
+  "$COMMIT_SCRIPT" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "  PASS: no_args_rc2 (rc=$rc)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: no_args_rc2 — expected rc=2, got rc=$rc"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+test_commit_nonnumeric() {
+  echo "Test: non-numeric PR number → rc=2"
+  local rc=0
+  "$COMMIT_SCRIPT" abc >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "  PASS: nonnumeric_rc2 (rc=$rc)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: nonnumeric_rc2 — expected rc=2, got rc=$rc"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+test_commit_zero_rejected() {
+  echo "Test: PR_NUMBER=0 → rc=2"
+  local rc=0
+  "$COMMIT_SCRIPT" 0 >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "  PASS: zero_rc2 (rc=$rc)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: zero_rc2 — expected rc=2, got rc=$rc"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+test_commit_no_fragment_rc0() {
+  echo "Test: fragment file missing → rc=0 with no-op message"
+  # Run in a temp dir so we don't accidentally commit anything here.
+  local rc=0
+  local tmp
+  tmp=$(mktemp -d)
+  local rc_file="$tmp/.rc"
+  (
+    cd "$tmp"
+    git init -q -b main >/dev/null 2>&1
+    local inner_rc=0
+    "$COMMIT_SCRIPT" 999 >/dev/null 2>&1 || inner_rc=$?
+    echo "$inner_rc" > "$rc_file"
+  )
+  if [ -f "$rc_file" ]; then
+    rc=$(cat "$rc_file")
+  fi
+  rm -rf "$tmp"
+  if [ "$rc" -eq 0 ]; then
+    echo "  PASS: no_fragment_rc0 (rc=$rc)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: no_fragment_rc0 — expected rc=0, got rc=$rc"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+test_commit_unset_head_ref_rc1() {
+  echo "Test: GITHUB_HEAD_REF unset + fragment present → rc=1 (refuses push)"
+  local rc=0
+  local tmp
+  tmp=$(mktemp -d)
+  # Subshell can't propagate rc back to parent; persist via sentinel file.
+  local rc_file="$tmp/.rc"
+  (
+    cd "$tmp"
+    git init -q -b main >/dev/null 2>&1
+    mkdir -p RELEASE-NOTES.next
+    echo "<!-- doc-superpowers:fragment PR-7 -->" > RELEASE-NOTES.next/PR-7.md
+    echo "### Added" >> RELEASE-NOTES.next/PR-7.md
+    echo "- thing" >> RELEASE-NOTES.next/PR-7.md
+    # Don't stage — script will git add itself. But we need a HEAD commit
+    # for git rev-parse --short to work.
+    git -c user.name=t -c user.email=t@t.com commit --allow-empty -q -m "init"
+    local inner_rc=0
+    # shellcheck disable=SC1007  # intentional: clear GITHUB_HEAD_REF for the command only
+    GITHUB_HEAD_REF= "$COMMIT_SCRIPT" 7 >/dev/null 2>&1 || inner_rc=$?
+    echo "$inner_rc" > "$rc_file"
+  )
+  if [ -f "$rc_file" ]; then
+    rc=$(cat "$rc_file")
+  fi
+  rm -rf "$tmp"
+  if [ "$rc" -eq 1 ]; then
+    echo "  PASS: unset_head_ref_rc1 (rc=$rc)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: unset_head_ref_rc1 — expected rc=1, got rc=$rc"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+test_commit_no_args
+test_commit_nonnumeric
+test_commit_zero_rejected
+test_commit_no_fragment_rc0
+test_commit_unset_head_ref_rc1
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
