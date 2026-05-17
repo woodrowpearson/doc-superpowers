@@ -93,6 +93,18 @@ DOC_TOOLS="$(printf '%s\n' ~/.claude/plugins/cache/doc-superpowers/doc-superpowe
 
 All `doc-tools.sh` references below assume `$DOC_TOOLS` has been resolved. Use `$DOC_TOOLS <subcommand>` for every call.
 
+#### Path precedence (when multiple copies exist)
+
+With the `tools install` subcommand (v2.12.0+), projects can vendor `doc-tools.sh` into their own tree. Three valid paths can coexist:
+
+| # | Path | Use for | Notes |
+|---|---|---|---|
+| 1 | `~/.claude/plugins/cache/doc-superpowers/.../scripts/doc-tools.sh` | Local Claude Code sessions | Canonical — the plugin's own source. Always up-to-date with the installed plugin version. |
+| 2 | `.github/scripts/doc-tools.sh` (project-vendored) | CI workflows (GitHub Actions) | Created by `tools install` or `install --ci`. CI runners don't have the plugin cache, so they need a vendored copy. |
+| 3 | `<repo>/scripts/doc-tools.sh` (plugin source) | doc-superpowers itself, only | The plugin's working copy when iterating on doc-superpowers source. Not relevant for downstream consumers. |
+
+**Recommended precedence for `$DOC_TOOLS` resolution:** prefer path #1 (plugin cache) for local sessions; let CI workflows reference path #2 directly via `.github/scripts/doc-tools.sh`. Don't mix — never use path #2 from a local session (it may be stale relative to the installed plugin version; use `tools status` to confirm).
+
 For user-provided optional scripts, detect dynamically:
 
 ```bash
@@ -496,6 +508,33 @@ Routes to `scripts/hooks/install.sh <subcommand> [flags]`.
 - `--base-branch NAME` — Target branch (default: `main`)
 - `--cron EXPR` — Schedule expression (default: `0 9 * * 1`)
 - `--ci-strict` — Fail PR check on stale docs (exit non-zero)
+- `--workflows=<csv|all|none>` (v2.12.0+) — Granular workflow selection.
+  - `all` (default): install every template (legacy behavior).
+  - `none`: skip workflow files entirely but still vendor `doc-tools.sh`. Equivalent to `tools install` (preferred for "I only want the bundled CLI" cases).
+  - CSV (e.g. `--workflows=doc-pr-release,doc-index-update`): install ONLY the listed workflows. Names are workflow basenames without `.yml`. Unknown names error out with the full valid set listed.
+- `--helpers=<true|false>` (v2.12.0+) — Whether to install the `doc-pr-release` shell helpers + `RELEASE-NOTES.next/README.md` spec. Default `true`. No effect if `doc-pr-release` is not in the install set.
+- `--force` (v2.12.0+) — Bypass state-respect; re-install workflows that were previously uninstalled with `intentional:true`.
+
+**Uninstall-specific flags:**
+- `--transient` (v2.12.0+) — Mark the uninstall as `intentional:false` so the next plain `install --ci` re-installs them. Without this flag, `uninstall` marks `intentional:true` (the default — "I really mean to remove this").
+
+**State tracking (v2.12.0+):**
+- Install state is committed to `.claude/doc-superpowers/installed.json` (per-workflow + tools + helpers).
+- First install on a repo with no state file → inferred from filesystem.
+- Subsequent installs (no `--workflows=` flag) respect prior uninstall decisions; pass `--workflows=<name>` or `--force` to override.
+- Malformed state file → graceful fallback + one-line WARN.
+
+**Standalone `tools` subcommand (v2.12.0+):**
+
+For projects that want only `doc-tools.sh` (and optionally the `doc-pr-release` helpers) without the full 9-workflow CI install, route to `$DOC_TOOLS tools …` directly instead of `hooks install --ci`:
+
+```bash
+$DOC_TOOLS tools install [--dest <path>] [--with-helpers]
+$DOC_TOOLS tools uninstall [--dest <path>]
+$DOC_TOOLS tools status    [--dest <path>]
+```
+
+`--dest` defaults to `.github/scripts`. `--with-helpers` ALSO installs `doc-pr-release/*.sh` + `RELEASE-NOTES.next/README.md` (the bits `install --ci` bundles). Use this when the user wants to wire `doc-tools.sh` into their own (non-doc-superpowers) workflows.
 
 When no tier flags are provided via SKILL.md routing, present options to the user and pass the appropriate flags. The installer's interactive menu is for direct terminal invocation only.
 

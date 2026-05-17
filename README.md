@@ -164,14 +164,27 @@ Install opt-in hooks for automated freshness monitoring:
 # Or pick specific tiers
 /doc-superpowers hooks install --git           # Git hooks
 /doc-superpowers hooks install --claude        # Claude Code hooks
-/doc-superpowers hooks install --ci            # GitHub Actions
+/doc-superpowers hooks install --ci            # GitHub Actions (all 9 workflows)
+
+# Granular CI install (v2.12.0+) — pick specific workflows
+/doc-superpowers hooks install --ci --workflows=doc-pr-release,doc-index-update
+/doc-superpowers hooks install --ci --workflows=none   # only vendor doc-tools.sh
+/doc-superpowers hooks install --ci --force            # override "intentionally removed"
+
+# Standalone tool install (v2.12.0+) — doc-tools.sh only, no workflows
+$DOC_TOOLS tools install                       # → .github/scripts/doc-tools.sh
+$DOC_TOOLS tools install --with-helpers        # +doc-pr-release helpers
+$DOC_TOOLS tools status
 
 # Check what's installed
 /doc-superpowers hooks status
 
 # Remove hooks
 /doc-superpowers hooks uninstall --all
+/doc-superpowers hooks uninstall --ci --workflows=doc-release  # remove ONE workflow
 ```
+
+**State tracking (v2.12.0+):** install choices persist via `.claude/doc-superpowers/installed.json` (committed to the repo). A subsequent `install --ci` respects prior intentional uninstalls; pass `--workflows=<name>` to override, `--force` to ignore state, or `uninstall --ci --transient` so the next install re-installs.
 
 **Git hooks (5):** Pre-commit warns when staged files affect stale docs. Post-merge and post-checkout alert on branch switches. Prepare-commit-msg injects freshness comments. Pre-push reminds about unreleased commits.
 
