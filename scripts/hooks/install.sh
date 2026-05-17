@@ -23,6 +23,22 @@ BASE_BRANCH="main"
 CRON_SCHEDULE="0 9 * * 1"
 CI_STRICT="false"
 
+# Granular CI install (v2.12.0+):
+#   WORKFLOWS_FILTER  — "" (default = "all"), "all", "none", or csv of names (no .yml).
+#   HELPERS_FLAG      — "true" (default) or "false".
+#   FORCE_FLAG        — "true" bypasses state-respect (re-installs prior-uninstalled).
+#   TRANSIENT_FLAG    — "true" on uninstall marks intentional:false.
+WORKFLOWS_FILTER=""
+HELPERS_FLAG="true"
+FORCE_FLAG="false"
+TRANSIENT_FLAG="false"
+
+# Source state-tracking helpers (must come AFTER WORKFLOW_MARKER def for
+# is_doc_superpowers_workflow, but state.sh uses caller-defined helpers so
+# we can source here.)
+# shellcheck source=scripts/hooks/state.sh
+source "$SCRIPT_DIR/state.sh"
+
 # --- Usage ---
 
 usage() {
@@ -41,9 +57,27 @@ Tier flags:
   --all      All tiers
 
 CI options (used with --ci):
-  --base-branch NAME   Target branch (default: main)
-  --cron EXPR          Schedule cron expression (default: 0 9 * * 1)
-  --ci-strict          Make PR check fail on stale docs
+  --base-branch NAME       Target branch (default: main)
+  --cron EXPR              Schedule cron expression (default: 0 9 * * 1)
+  --ci-strict              Make PR check fail on stale docs
+  --workflows=<csv|all|none>
+                           Granular workflow selection. "all" (default) installs
+                           every template; "none" skips workflows but still
+                           vendors doc-tools.sh; a CSV picks specific workflows
+                           by basename (no .yml). Unknown names error out.
+  --helpers=<true|false>   Install doc-pr-release helpers (default: true).
+                           No effect if doc-pr-release workflow isn't installed.
+  --force                  Bypass state-respect — re-install workflows that were
+                           previously uninstalled with intentional:true.
+
+CI options (used with uninstall --ci):
+  --transient              Mark uninstall as transient (intentional:false) so
+                           the next plain install --ci re-installs them.
+
+Known workflow names (for --workflows=):
+  doc-freshness-pr, doc-freshness-schedule, doc-index-update,
+  doc-audit-update, doc-review-pr, doc-release, doc-spec-verify,
+  doc-pr-full-cycle, doc-pr-release
 EOF
   exit 1
 }
@@ -374,50 +408,170 @@ status_claude() {
 
 # --- CI tier ---
 
+# --- CI install helpers (granular workflow selection) ---
+
+# Resolve WORKFLOWS_FILTER into a newline-separated list of workflow names
+# (without .yml) that should be installed. Echoes nothing for "none".
+# Validates CSV entries against state_known_workflows; errors on unknowns.
+ci_resolve_workflow_set() {
+  local filter="${WORKFLOWS_FILTER:-all}"
+  [[ -z "$filter" ]] && filter="all"
+
+  case "$filter" in
+    all)
+      state_known_workflows
+      ;;
+    none)
+      # Echo nothing — caller skips the install loop.
+      ;;
+    *)
+      # CSV path. Split, trim, validate each entry.
+      local -a names=()
+      local IFS_save="$IFS"
+      IFS=','
+      # shellcheck disable=SC2206
+      local raw=( $filter )
+      IFS="$IFS_save"
+      local n
+      for n in "${raw[@]}"; do
+        # Trim whitespace.
+        n="${n#"${n%%[![:space:]]*}"}"
+        n="${n%"${n##*[![:space:]]}"}"
+        [[ -z "$n" ]] && continue
+        if ! state_is_known_workflow "$n"; then
+          {
+            echo "ERROR: unknown workflow name: $n"
+            echo "Valid names:"
+            state_known_workflows | sed 's/^/  - /'
+          } >&2
+          exit 1
+        fi
+        names+=( "$n" )
+      done
+      printf '%s\n' "${names[@]}"
+      ;;
+  esac
+}
+
+# Copy a single workflow template into .github/workflows.
+ci_copy_workflow_template() {
+  local workflow_name="$1"          # bare name (no .yml)
+  local workflow_src="$SCRIPT_DIR/ci/${workflow_name}.yml"
+  local workflow_dest=".github/workflows/${workflow_name}.yml"
+
+  if [[ ! -f "$workflow_src" ]]; then
+    echo "  WARN: template not found: $workflow_src — skipping" >&2
+    return 1
+  fi
+
+  if [[ -f "$workflow_dest" ]] && ! is_doc_superpowers_workflow "$workflow_dest"; then
+    echo "  Existing ${workflow_name}.yml found (not doc-superpowers-managed), skipping."
+    return 2
+  fi
+
+  local ci_strict_value="0"
+  [[ "$CI_STRICT" == "true" ]] && ci_strict_value="1"
+
+  sed \
+    -e "s|__BASE_BRANCH__|$BASE_BRANCH|g" \
+    -e "s|__VERSION__|v$VERSION|g" \
+    -e "s|__CRON_SCHEDULE__|$CRON_SCHEDULE|g" \
+    -e "s|__CI_STRICT__|$ci_strict_value|g" \
+    "$workflow_src" > "$workflow_dest"
+
+  return 0
+}
+
 install_ci() {
+  # Validate WORKFLOWS_FILTER UP FRONT so a bogus name aborts before we
+  # touch the filesystem. The validation must happen here (not in a subshell)
+  # so `exit 1` propagates.
+  case "${WORKFLOWS_FILTER:-all}" in
+    ""|all|none) ;;
+    *)
+      local _w_save _IFS_save="$IFS"
+      IFS=','
+      # shellcheck disable=SC2206
+      local -a _wfs=( ${WORKFLOWS_FILTER} )
+      IFS="$_IFS_save"
+      for _w_save in "${_wfs[@]}"; do
+        _w_save="${_w_save#"${_w_save%%[![:space:]]*}"}"
+        _w_save="${_w_save%"${_w_save##*[![:space:]]}"}"
+        [[ -z "$_w_save" ]] && continue
+        if ! state_is_known_workflow "$_w_save"; then
+          {
+            echo "ERROR: unknown workflow name: $_w_save"
+            echo "Valid names:"
+            state_known_workflows | sed 's/^/  - /'
+          } >&2
+          exit 1
+        fi
+      done
+      ;;
+  esac
+
   mkdir -p .github/workflows
-  local installed=0 skipped=0
 
-  for workflow_src in "$SCRIPT_DIR/ci/"*.yml; do
-    local workflow_name
-    workflow_name=$(basename "$workflow_src")
-    local workflow_dest=".github/workflows/$workflow_name"
+  # Bootstrap state file if missing/invalid.
+  if ! state_is_valid; then
+    state_bootstrap
+  fi
 
-    if [[ -f "$workflow_dest" ]] && ! is_doc_superpowers_workflow "$workflow_dest"; then
-      echo "  Existing $workflow_name found, skipping."
-      skipped=$((skipped + 1))
+  local -a install_set=()
+  local name
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    install_set+=( "$name" )
+  done < <(ci_resolve_workflow_set)
+
+  local installed=0 skipped_existing=0 skipped_intentional=0
+  local -a skipped_intentional_names=()
+
+  for name in "${install_set[@]}"; do
+    # State-respect check (skipped if --force or if --workflows= was passed
+    # explicitly listing this workflow — explicit beats state).
+    if [[ "$FORCE_FLAG" != "true" ]] \
+       && [[ "$WORKFLOWS_FILTER" == "" || "$WORKFLOWS_FILTER" == "all" ]] \
+       && state_should_skip_workflow "$name"; then
+      skipped_intentional_names+=( "$name" )
+      skipped_intentional=$((skipped_intentional + 1))
       continue
     fi
 
-    # Map CI_STRICT boolean to the value the workflow expects
-    local ci_strict_value="0"
-    [[ "$CI_STRICT" == "true" ]] && ci_strict_value="1"
-
-    # Copy with placeholder substitution
-    sed \
-      -e "s|__BASE_BRANCH__|$BASE_BRANCH|g" \
-      -e "s|__VERSION__|v$VERSION|g" \
-      -e "s|__CRON_SCHEDULE__|$CRON_SCHEDULE|g" \
-      -e "s|__CI_STRICT__|$ci_strict_value|g" \
-      "$workflow_src" > "$workflow_dest"
-
-    installed=$((installed + 1))
+    local rc=0
+    ci_copy_workflow_template "$name" || rc=$?
+    case "$rc" in
+      0) installed=$((installed + 1))
+         state_mark_workflow_installed "$name" ;;
+      2) skipped_existing=$((skipped_existing + 1)) ;;
+      *) : ;;
+    esac
   done
 
   # Vendor doc-tools.sh into the project for local CI execution
+  # (always done — independent of workflow set; mirrors `tools install`
+  # contract).
   if [[ -f "$DOC_TOOLS" ]]; then
     mkdir -p .github/scripts
     cp "$DOC_TOOLS" .github/scripts/doc-tools.sh
     chmod +x .github/scripts/doc-tools.sh
     echo "  Vendored doc-tools.sh → .github/scripts/doc-tools.sh"
+    state_mark_component tools installed ".github/scripts"
   fi
 
-  # Install doc-pr-release helper scripts (alongside the workflow).
-  # Convention: helpers MUST be `*.sh`. The non-shell `.md` spec is handled
-  # separately below. If a future helper is added in a different language
-  # (e.g. `*.py`), either rename it to `.sh` (wrap with `#!/usr/bin/env python3`
-  # is fine) or extend this glob explicitly — silent-skip is the wrong default.
-  if [[ -d "$SCRIPT_DIR/ci/doc-pr-release" ]]; then
+  # Install doc-pr-release helper scripts (alongside the workflow), gated on
+  # --helpers=true AND (doc-pr-release in install_set OR no --workflows filter).
+  # Rationale: helpers are useless without the workflow, but a user passing
+  # --workflows=doc-pr-release with --helpers=false is a valid "bring your own
+  # helpers" case.
+  local should_install_helpers=false
+  if [[ "$HELPERS_FLAG" == "true" ]] \
+     && printf '%s\n' "${install_set[@]}" | grep -qx 'doc-pr-release'; then
+    should_install_helpers=true
+  fi
+
+  if [[ "$should_install_helpers" == "true" ]] \
+     && [[ -d "$SCRIPT_DIR/ci/doc-pr-release" ]]; then
     mkdir -p .github/scripts/doc-pr-release
     local helpers_installed=0
     for helper in "$SCRIPT_DIR/ci/doc-pr-release/"*.sh; do
@@ -430,6 +584,7 @@ install_ci() {
     done
     if [[ "$helpers_installed" -gt 0 ]]; then
       echo "  Installed $helpers_installed doc-pr-release helpers in .github/scripts/doc-pr-release/"
+      state_mark_component helpers installed
     fi
 
     # Install the RELEASE-NOTES.next/ fragment-format spec (only if missing —
@@ -442,7 +597,13 @@ install_ci() {
     fi
   fi
 
-  echo "CI/CD workflows: $installed installed, $skipped skipped"
+  echo "CI/CD workflows: $installed installed, $skipped_existing skipped (existing non-managed), $skipped_intentional skipped (intentionally uninstalled)"
+  if [[ "$skipped_intentional" -gt 0 ]]; then
+    for n in "${skipped_intentional_names[@]}"; do
+      echo "  skipping ${n}.yml (previously uninstalled; pass --workflows=$n to override, or --force)"
+    done
+  fi
+
   if [[ $installed -gt 0 ]]; then
     echo "  Remember to commit and push these workflows."
     # Check if any installed workflow requires Anthropic auth.
@@ -466,28 +627,68 @@ uninstall_ci() {
     return 0
   fi
 
+  # --transient flips intentional:false; default is intentional:true.
+  local intentional_flag="true"
+  [[ "$TRANSIENT_FLAG" == "true" ]] && intentional_flag="false"
+
+  # Determine the set of workflows to uninstall.
+  #   No --workflows= → ALL doc-superpowers workflows (legacy behavior).
+  #   --workflows=csv → only those.
+  #   --workflows=none → uninstall nothing (no-op for workflows; still removes
+  #     helpers + vendored doc-tools.sh below).
+  local -a uninstall_set=()
+  local name
+  if [[ -z "$WORKFLOWS_FILTER" || "$WORKFLOWS_FILTER" == "all" ]]; then
+    while IFS= read -r name; do
+      uninstall_set+=( "$name" )
+    done < <(state_known_workflows)
+  elif [[ "$WORKFLOWS_FILTER" == "none" ]]; then
+    : # leave empty
+  else
+    while IFS= read -r name; do
+      [[ -z "$name" ]] && continue
+      uninstall_set+=( "$name" )
+    done < <(ci_resolve_workflow_set)
+  fi
+
   local removed=0
-  for workflow_name in doc-freshness-pr.yml doc-freshness-schedule.yml doc-index-update.yml doc-audit-update.yml doc-review-pr.yml doc-release.yml doc-spec-verify.yml doc-pr-full-cycle.yml doc-pr-release.yml; do
-    local workflow_dest=".github/workflows/$workflow_name"
+  for name in "${uninstall_set[@]}"; do
+    local workflow_dest=".github/workflows/${name}.yml"
     if is_doc_superpowers_workflow "$workflow_dest" 2>/dev/null; then
       rm "$workflow_dest"
       removed=$((removed + 1))
     fi
+    # Always record state so the next install respects it — even if the file
+    # was missing on disk (user manually deleted), we still flip state.
+    state_mark_workflow_uninstalled "$name" "$intentional_flag"
   done
 
   # Remove doc-pr-release helpers if present and unmodified (best-effort).
-  if [[ -d ".github/scripts/doc-pr-release" ]]; then
+  # Only triggered when ALL workflows uninstalled OR doc-pr-release is in set.
+  local should_remove_helpers=false
+  if [[ -z "$WORKFLOWS_FILTER" || "$WORKFLOWS_FILTER" == "all" ]]; then
+    should_remove_helpers=true
+  elif printf '%s\n' "${uninstall_set[@]}" | grep -qx 'doc-pr-release'; then
+    should_remove_helpers=true
+  fi
+  if [[ "$should_remove_helpers" == "true" ]] \
+     && [[ -d ".github/scripts/doc-pr-release" ]]; then
     rm -rf .github/scripts/doc-pr-release
     echo "  Removed .github/scripts/doc-pr-release/"
+    state_mark_component helpers uninstalled
   fi
   # Note: RELEASE-NOTES.next/README.md is NOT auto-removed — it may have
   # accumulated user-authored fragment edits via PR-<N>.md siblings, and
   # nuking the directory would lose unmerged release notes. Leave it.
 
-  # Remove vendored doc-tools.sh
-  if [[ -f ".github/scripts/doc-tools.sh" ]]; then
+  # Remove vendored doc-tools.sh ONLY on a full uninstall (no --workflows= or
+  # --workflows=all). Partial uninstalls keep doc-tools.sh — it's a per-
+  # project tool, not per-workflow.
+  if [[ -z "$WORKFLOWS_FILTER" || "$WORKFLOWS_FILTER" == "all" ]] \
+     && [[ -f ".github/scripts/doc-tools.sh" ]]; then
     rm .github/scripts/doc-tools.sh
     rmdir .github/scripts 2>/dev/null || true
+    state_mark_component tools uninstalled
   fi
 
   echo "CI/CD workflows: $removed removed"
@@ -500,22 +701,37 @@ status_ci() {
     return
   fi
 
-  local found=0
-  for workflow_name in doc-freshness-pr.yml doc-freshness-schedule.yml doc-index-update.yml doc-audit-update.yml doc-review-pr.yml doc-release.yml doc-spec-verify.yml doc-pr-full-cycle.yml doc-pr-release.yml; do
-    local workflow_dest=".github/workflows/$workflow_name"
+  local found=0 name
+  while IFS= read -r name; do
+    local workflow_dest=".github/workflows/${name}.yml"
     if is_doc_superpowers_workflow "$workflow_dest" 2>/dev/null; then
-      printf "  ✓ %-22s installed\n" "$workflow_name"
+      printf "  ✓ %-26s installed\n" "${name}.yml"
       found=$((found + 1))
+    elif state_is_valid \
+         && [[ "$(jq -r --arg n "$name" '.tiers.ci.workflows[$n].state // "never"' "$(state_file_path)" 2>/dev/null)" == "uninstalled" ]]; then
+      local intentional
+      intentional=$(jq -r --arg n "$name" '.tiers.ci.workflows[$n].intentional // false' "$(state_file_path)" 2>/dev/null)
+      if [[ "$intentional" == "true" ]]; then
+        printf "  ✗ %-26s uninstalled (intentional)\n" "${name}.yml"
+      else
+        printf "  ✗ %-26s uninstalled (transient)\n" "${name}.yml"
+      fi
     else
-      printf "  ✗ %-22s not installed\n" "$workflow_name"
+      printf "  ✗ %-26s not installed\n" "${name}.yml"
     fi
-  done
+  done < <(state_known_workflows)
 
   # Also report whether helpers are installed.
   if [[ -d ".github/scripts/doc-pr-release" ]]; then
     local helper_count
     helper_count=$(find .github/scripts/doc-pr-release -maxdepth 1 -name '*.sh' | wc -l | tr -d ' ')
     echo "  doc-pr-release helpers: $helper_count installed"
+  fi
+  if [[ -f ".github/scripts/doc-tools.sh" ]]; then
+    echo "  doc-tools.sh: vendored at .github/scripts/doc-tools.sh"
+  fi
+  if state_is_valid; then
+    echo "  state file: $(state_file_path)"
   fi
 }
 
@@ -551,9 +767,25 @@ while [[ $# -gt 0 ]]; do
       [[ $# -lt 2 ]] && { echo "ERROR: --cron requires a value" >&2; exit 1; }
       CRON_SCHEDULE="$2"; shift 2 ;;
     --ci-strict) CI_STRICT="true"; shift ;;
+    --workflows=*) WORKFLOWS_FILTER="${1#--workflows=}"; shift ;;
+    --workflows)
+      [[ $# -lt 2 ]] && { echo "ERROR: --workflows requires a value" >&2; exit 1; }
+      WORKFLOWS_FILTER="$2"; shift 2 ;;
+    --helpers=*) HELPERS_FLAG="${1#--helpers=}"; shift ;;
+    --helpers)
+      [[ $# -lt 2 ]] && { echo "ERROR: --helpers requires a value" >&2; exit 1; }
+      HELPERS_FLAG="$2"; shift 2 ;;
+    --force) FORCE_FLAG="true"; shift ;;
+    --transient) TRANSIENT_FLAG="true"; shift ;;
     *) echo "Unknown option: $1" >&2; usage ;;
   esac
 done
+
+# Validate --helpers value.
+case "$HELPERS_FLAG" in
+  true|false) ;;
+  *) echo "ERROR: --helpers must be 'true' or 'false' (got: $HELPERS_FLAG)" >&2; exit 1 ;;
+esac
 
 case "$COMMAND" in
   install)
