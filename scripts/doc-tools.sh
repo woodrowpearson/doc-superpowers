@@ -153,6 +153,14 @@ Subcommands:
   fragments merge <start> <end> [--paths-out=<file>]
                                        Print merged sections from fragments in commit range
                                        (--paths-out writes consumed fragment paths, one per line)
+  tools install [--dest <path>] [--with-helpers]
+                                       Vendor doc-tools.sh (and optionally doc-pr-release
+                                       helpers + RELEASE-NOTES.next/README.md) into <path>.
+                                       Default --dest is .github/scripts.
+  tools uninstall [--dest <path>]      Remove vendored doc-tools.sh (and matching helpers)
+                                       from <path>. Default --dest is .github/scripts.
+  tools status [--dest <path>]         Report whether doc-tools.sh is vendored, version,
+                                       drift state, helper presence.
 
 Options:
   --help            Show this help message
@@ -1284,6 +1292,202 @@ cmd_implementation_status() {
     done
 }
 
+# --- `tools` subcommand: vendor/uninstall/status doc-tools.sh itself ---
+
+# Source of truth: SCRIPT_DIR points at the directory containing the running
+# script. Use that as the "plugin copy" — when this script lives in a plugin
+# cache, the plugin copy is the one being executed; when it lives in
+# .github/scripts/ (already-vendored), `tools install` becomes a no-op
+# self-copy which is still valid.
+_tools_plugin_source() {
+  echo "$SCRIPT_DIR/doc-tools.sh"
+}
+
+_tools_plugin_helpers_dir() {
+  # Helpers live under scripts/hooks/ci/doc-pr-release/ in the plugin source
+  # tree. When the script has been vendored to .github/scripts/, there are no
+  # helpers next to it — return empty so callers can skip gracefully.
+  local candidate="$SCRIPT_DIR/hooks/ci/doc-pr-release"
+  [[ -d "$candidate" ]] && echo "$candidate" || echo ""
+}
+
+cmd_tools() {
+  local sub="${1:-}"
+  shift || true
+  case "$sub" in
+    install)   _tools_install "$@" ;;
+    uninstall) _tools_uninstall "$@" ;;
+    status)    _tools_status "$@" ;;
+    ""|--help) cat >&2 <<'EOF'
+Usage:
+  doc-tools.sh tools install   [--dest <path>] [--with-helpers]
+  doc-tools.sh tools uninstall [--dest <path>]
+  doc-tools.sh tools status    [--dest <path>]
+
+--dest defaults to .github/scripts (project-relative).
+--with-helpers also installs doc-pr-release/*.sh + RELEASE-NOTES.next/README.md
+EOF
+      exit 1 ;;
+    *) echo "Unknown tools sub-command: $sub" >&2; exit 2 ;;
+  esac
+}
+
+_tools_install() {
+  local dest=".github/scripts"
+  local with_helpers=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dest)
+        [[ $# -lt 2 ]] && { echo "ERROR: --dest requires a value" >&2; exit 1; }
+        dest="$2"; shift 2 ;;
+      --with-helpers) with_helpers=true; shift ;;
+      *) echo "Unknown option: $1" >&2; exit 2 ;;
+    esac
+  done
+
+  local src
+  src="$(_tools_plugin_source)"
+  if [[ ! -f "$src" ]]; then
+    echo "ERROR: source doc-tools.sh not found at $src" >&2
+    exit 1
+  fi
+
+  mkdir -p "$dest"
+  cp "$src" "$dest/doc-tools.sh"
+  chmod +x "$dest/doc-tools.sh"
+  echo "Installed doc-tools.sh → $dest/doc-tools.sh"
+
+  if [[ "$with_helpers" == "true" ]]; then
+    local helpers_src
+    helpers_src="$(_tools_plugin_helpers_dir)"
+    if [[ -z "$helpers_src" ]]; then
+      echo "WARN: --with-helpers requested but plugin helpers dir not found." >&2
+      echo "      (Are you running from a vendored copy? Re-run from plugin source.)" >&2
+    else
+      mkdir -p "$dest/doc-pr-release"
+      local helpers_installed=0
+      for helper in "$helpers_src"/*.sh; do
+        [[ -f "$helper" ]] || continue
+        cp "$helper" "$dest/doc-pr-release/$(basename "$helper")"
+        chmod +x "$dest/doc-pr-release/$(basename "$helper")"
+        helpers_installed=$((helpers_installed + 1))
+      done
+      echo "Installed $helpers_installed doc-pr-release helpers → $dest/doc-pr-release/"
+
+      # RELEASE-NOTES.next/README.md — never overwrite (user may have edits).
+      if [[ -f "$helpers_src/RELEASE-NOTES.next.README.md" ]] \
+         && [[ ! -f "RELEASE-NOTES.next/README.md" ]]; then
+        mkdir -p RELEASE-NOTES.next
+        cp "$helpers_src/RELEASE-NOTES.next.README.md" \
+           "RELEASE-NOTES.next/README.md"
+        echo "Created RELEASE-NOTES.next/README.md (fragment format spec)"
+      fi
+    fi
+  fi
+}
+
+_tools_uninstall() {
+  local dest=".github/scripts"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dest)
+        [[ $# -lt 2 ]] && { echo "ERROR: --dest requires a value" >&2; exit 1; }
+        dest="$2"; shift 2 ;;
+      *) echo "Unknown option: $1" >&2; exit 2 ;;
+    esac
+  done
+
+  local removed=0
+  if [[ -f "$dest/doc-tools.sh" ]]; then
+    rm "$dest/doc-tools.sh"
+    echo "Removed $dest/doc-tools.sh"
+    removed=$((removed + 1))
+  fi
+
+  # Best-effort helper cleanup: only remove if files match the plugin copy
+  # byte-for-byte (no local edits). The `RELEASE-NOTES.next/README.md` is
+  # intentionally NOT removed — it may have user-authored fragment edits.
+  local helpers_src
+  helpers_src="$(_tools_plugin_helpers_dir)"
+  if [[ -d "$dest/doc-pr-release" ]] && [[ -n "$helpers_src" ]]; then
+    local has_local_edits=false
+    for installed in "$dest/doc-pr-release"/*.sh; do
+      [[ -f "$installed" ]] || continue
+      local plugin_copy="$helpers_src/$(basename "$installed")"
+      if [[ ! -f "$plugin_copy" ]] \
+         || ! cmp -s "$plugin_copy" "$installed"; then
+        has_local_edits=true
+        break
+      fi
+    done
+    if [[ "$has_local_edits" == "true" ]]; then
+      echo "Kept $dest/doc-pr-release/ (contains local edits or unknown files)"
+    else
+      rm -rf "$dest/doc-pr-release"
+      echo "Removed $dest/doc-pr-release/"
+      removed=$((removed + 1))
+    fi
+  fi
+
+  # Clean up empty parent dir.
+  rmdir "$dest" 2>/dev/null || true
+
+  [[ "$removed" -eq 0 ]] && echo "Nothing to uninstall at $dest"
+}
+
+_tools_status() {
+  local dest=".github/scripts"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dest)
+        [[ $# -lt 2 ]] && { echo "ERROR: --dest requires a value" >&2; exit 1; }
+        dest="$2"; shift 2 ;;
+      *) echo "Unknown option: $1" >&2; exit 2 ;;
+    esac
+  done
+
+  local installed="$dest/doc-tools.sh"
+  local plugin
+  plugin="$(_tools_plugin_source)"
+
+  if [[ ! -f "$installed" ]]; then
+    echo "doc-tools.sh: not installed at $dest"
+    return 0
+  fi
+
+  if cmp -s "$plugin" "$installed"; then
+    echo "doc-tools.sh: installed at $dest (matches plugin v$( _tools_extract_version ))"
+  else
+    echo "doc-tools.sh: installed at $dest (DRIFTED from plugin source)"
+  fi
+
+  # Helper-presence summary.
+  if [[ -d "$dest/doc-pr-release" ]]; then
+    local helper_count
+    helper_count=$(find "$dest/doc-pr-release" -maxdepth 1 -name '*.sh' 2>/dev/null | wc -l | tr -d ' ')
+    echo "doc-pr-release helpers: $helper_count installed at $dest/doc-pr-release/"
+  else
+    echo "doc-pr-release helpers: not installed at $dest"
+  fi
+  if [[ -f "RELEASE-NOTES.next/README.md" ]]; then
+    echo "RELEASE-NOTES.next/README.md: present"
+  else
+    echo "RELEASE-NOTES.next/README.md: not present"
+  fi
+}
+
+# Best-effort: parse version from a sibling RELEASE-NOTES.md if present.
+_tools_extract_version() {
+  local relnotes
+  relnotes="$(dirname "$SCRIPT_DIR")/RELEASE-NOTES.md"
+  if [[ -f "$relnotes" ]]; then
+    grep -m 1 -o '## v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' "$relnotes" \
+      | sed 's/## v//' || echo "unknown"
+  else
+    echo "unknown"
+  fi
+}
+
 # --- Main ---
 
 check_deps
@@ -1318,6 +1522,7 @@ case "${1:-}" in
         ;;
     esac
     ;;
+  tools)            shift; cmd_tools "$@" ;;
   --help|"")        usage ;;
   *)                usage ;;
 esac
