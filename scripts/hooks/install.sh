@@ -527,7 +527,9 @@ install_ci() {
   local installed=0 skipped_existing=0 skipped_intentional=0
   local -a skipped_intentional_names=()
 
-  for name in "${install_set[@]}"; do
+  # `${arr[@]+"${arr[@]}"}` guards against empty-array expansion under
+  # `set -u` on bash 3.2 (default /bin/bash on macOS).
+  for name in ${install_set[@]+"${install_set[@]}"}; do
     # State-respect check (skipped if --force or if --workflows= was passed
     # explicitly listing this workflow — explicit beats state).
     if [[ "$FORCE_FLAG" != "true" ]] \
@@ -565,7 +567,7 @@ install_ci() {
   # --workflows=doc-pr-release with --helpers=false is a valid "bring your own
   # helpers" case.
   local should_install_helpers=false
-  if [[ "$HELPERS_FLAG" == "true" ]] \
+  if [[ "$HELPERS_FLAG" == "true" ]] && [[ ${#install_set[@]} -gt 0 ]] \
      && printf '%s\n' "${install_set[@]}" | grep -qx 'doc-pr-release'; then
     should_install_helpers=true
   fi
@@ -652,7 +654,9 @@ uninstall_ci() {
   fi
 
   local removed=0
-  for name in "${uninstall_set[@]}"; do
+  # `${arr[@]+...}` guards against empty-array expansion under `set -u`
+  # on bash 3.2 (default /bin/bash on macOS) — relevant for --workflows=none.
+  for name in ${uninstall_set[@]+"${uninstall_set[@]}"}; do
     local workflow_dest=".github/workflows/${name}.yml"
     if is_doc_superpowers_workflow "$workflow_dest" 2>/dev/null; then
       rm "$workflow_dest"
@@ -668,7 +672,8 @@ uninstall_ci() {
   local should_remove_helpers=false
   if [[ -z "$WORKFLOWS_FILTER" || "$WORKFLOWS_FILTER" == "all" ]]; then
     should_remove_helpers=true
-  elif printf '%s\n' "${uninstall_set[@]}" | grep -qx 'doc-pr-release'; then
+  elif [[ ${#uninstall_set[@]} -gt 0 ]] \
+       && printf '%s\n' "${uninstall_set[@]}" | grep -qx 'doc-pr-release'; then
     should_remove_helpers=true
   fi
   if [[ "$should_remove_helpers" == "true" ]] \
@@ -701,20 +706,33 @@ status_ci() {
     return
   fi
 
-  local found=0 name
+  local found=0 name state_file_cache="" have_state_file=false
+  if state_is_valid; then
+    have_state_file=true
+    state_file_cache="$(state_file_path)"
+  fi
   while IFS= read -r name; do
     local workflow_dest=".github/workflows/${name}.yml"
     if is_doc_superpowers_workflow "$workflow_dest" 2>/dev/null; then
       printf "  ✓ %-26s installed\n" "${name}.yml"
       found=$((found + 1))
-    elif state_is_valid \
-         && [[ "$(jq -r --arg n "$name" '.tiers.ci.workflows[$n].state // "never"' "$(state_file_path)" 2>/dev/null)" == "uninstalled" ]]; then
-      local intentional
-      intentional=$(jq -r --arg n "$name" '.tiers.ci.workflows[$n].intentional // false' "$(state_file_path)" 2>/dev/null)
-      if [[ "$intentional" == "true" ]]; then
-        printf "  ✗ %-26s uninstalled (intentional)\n" "${name}.yml"
+    elif [[ "$have_state_file" == "true" ]]; then
+      # One jq invocation per workflow — pull state + intentional together.
+      local entry
+      entry=$(jq -r --arg n "$name" '
+        .tiers.ci.workflows[$n] // {} |
+        "\(.state // "never")|\(.intentional // false)"
+      ' "$state_file_cache" 2>/dev/null)
+      local entry_state="${entry%%|*}"
+      local entry_intentional="${entry##*|}"
+      if [[ "$entry_state" == "uninstalled" ]]; then
+        if [[ "$entry_intentional" == "true" ]]; then
+          printf "  ✗ %-26s uninstalled (intentional)\n" "${name}.yml"
+        else
+          printf "  ✗ %-26s uninstalled (transient)\n" "${name}.yml"
+        fi
       else
-        printf "  ✗ %-26s uninstalled (transient)\n" "${name}.yml"
+        printf "  ✗ %-26s not installed\n" "${name}.yml"
       fi
     else
       printf "  ✗ %-26s not installed\n" "${name}.yml"

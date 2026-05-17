@@ -1244,6 +1244,33 @@ test_install_ci_workflows_none_skips_all_but_vendors_tools() {
   teardown
 }
 
+test_uninstall_ci_workflows_none_keeps_workflows() {
+  echo "test: uninstall --ci --workflows=none removes no workflows (helpers/tools handled separately)"
+  setup
+  # Install everything first.
+  set +e
+  bash "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
+  set -e
+  assert_file_exists ".github/workflows/doc-freshness-pr.yml" "precondition: installed"
+  assert_file_exists ".github/workflows/doc-pr-release.yml" "precondition: installed"
+
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" uninstall --ci --workflows=none 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  # All workflow files should still be on disk.
+  assert_file_exists ".github/workflows/doc-freshness-pr.yml" "doc-freshness-pr preserved"
+  assert_file_exists ".github/workflows/doc-pr-release.yml" "doc-pr-release preserved"
+  # vendored doc-tools.sh should NOT have been removed (partial uninstall).
+  assert_file_exists ".github/scripts/doc-tools.sh" "doc-tools.sh preserved on partial uninstall"
+  # And no spurious state flips for individual workflows.
+  local state
+  state=$(jq -r '.tiers.ci.workflows."doc-freshness-pr".state' .claude/doc-superpowers/installed.json)
+  assert_eq "installed" "$state" "doc-freshness-pr state unchanged"
+  teardown
+}
+
 test_install_ci_workflows_bogus_errors_with_valid_set() {
   echo "test: install --ci --workflows=bogus errors with clear message listing valid names"
   setup
@@ -1283,13 +1310,16 @@ test_install_ci_writes_state_file_on_first_install() {
   set -e
   assert_eq "0" "$exit_code" "exits 0"
   assert_file_exists ".claude/doc-superpowers/installed.json" "state file created"
-  # Every workflow should be marked installed.
+  # Every workflow listed by state_known_workflows should be marked installed.
+  # Source state.sh in a subshell so we get the canonical list rather than
+  # duplicating it here (drift risk).
   local n
-  for n in doc-freshness-pr doc-freshness-schedule doc-index-update doc-audit-update doc-review-pr doc-release doc-spec-verify doc-pr-full-cycle doc-pr-release; do
+  while IFS= read -r n; do
+    [[ -z "$n" ]] && continue
     local state
     state=$(jq -r --arg n "$n" '.tiers.ci.workflows[$n].state' .claude/doc-superpowers/installed.json)
     assert_eq "installed" "$state" "$n marked installed in state file"
-  done
+  done < <(SCRIPT_DIR="$HOOKS_DIR" bash -c "source '$HOOKS_DIR/state.sh' && state_known_workflows")
   teardown
 }
 
@@ -1460,6 +1490,7 @@ echo ""
 echo "=== Granular install --ci (v2.12.0+) ==="
 test_install_ci_workflows_csv_installs_subset_only
 test_install_ci_workflows_none_skips_all_but_vendors_tools
+test_uninstall_ci_workflows_none_keeps_workflows
 test_install_ci_workflows_bogus_errors_with_valid_set
 test_install_ci_workflows_helpers_false_skips_helpers
 test_install_ci_writes_state_file_on_first_install
