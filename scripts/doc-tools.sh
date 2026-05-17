@@ -33,6 +33,21 @@ hash_file() {
   fi
 }
 
+# Resolve a GNU-compatible sed binary.
+# macOS Homebrew ships GNU sed as `gsed`; on Linux/CI it's just `sed`.
+# BSD sed (macOS default `sed`) differs on `-i` syntax + extended regex flags,
+# so we require GNU sed. Exits with a clear error if neither is available.
+gnu_sed() {
+  if command -v gsed >/dev/null 2>&1; then
+    printf '%s' gsed
+  elif sed --version 2>/dev/null | grep -q 'GNU sed'; then
+    printf '%s' sed
+  else
+    echo "ERROR: GNU sed required (install via 'brew install gnu-sed' on macOS, or use the system sed on Linux)" >&2
+    exit 2
+  fi
+}
+
 iso_now() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
@@ -235,15 +250,19 @@ cmd_build_index() {
   exec 3<&-
 
   # Build the final index
+  # schema_version bumped 1 → 2 in Task 3.4 of
+  # docs/plans/2026-05-16-adr-implementation-field-rollout.md to capture the
+  # new per-entry `implementation` array. Renamed from `version` (only test
+  # helpers read the field; live doc-index migrated in the same commit).
   local index_json
   index_json=$(jq -n \
-    --argjson version 1 \
+    --argjson schema_version 2 \
     --arg generated_by "doc-superpowers" \
     --arg generated_at "$now" \
     --arg build_commit "$build_commit" \
     --argjson docs "$docs_json" \
     '{
-      version: $version,
+      schema_version: $schema_version,
       generated_by: $generated_by,
       generated_at: $generated_at,
       build_commit: $build_commit,
@@ -467,7 +486,26 @@ cmd_update_index() {
       code_commit_json="null"
     fi
 
-    # Update the entry: re-hash, re-query code_commit, set status=current, update last_verified
+    # Capture Implementation: (ADRs) or Realized-by: (SPECs) field as a list
+    # of bullet strings (leading "  - " stripped). Both fields are stored under
+    # the single JSON key "implementation" to keep downstream consumers simple
+    # (validate_docs.py, doc-audit routine) — see Task 3.4 of
+    # docs/plans/2026-05-16-adr-implementation-field-rollout.md.
+    local impl_block impl_json
+    impl_block=$(awk '
+        /^Implementation:[[:space:]]*$|^Realized-by:[[:space:]]*$/ { capture=1; next }
+        capture && /^[[:space:]]+-/ { print; next }
+        capture && /^[[:space:]]*$|^[^[:space:]]/ { exit 0 }
+    ' "$doc_path")
+
+    if [[ -n "$impl_block" ]]; then
+      impl_json=$(printf '%s\n' "$impl_block" | sed 's/^  - //' | jq -R . | jq -s .)
+    else
+      impl_json="[]"
+    fi
+
+    # Update the entry: re-hash, re-query code_commit, set status=current, update last_verified,
+    # capture implementation array.
     # Preserve: replaces, superseded_by, doc_type, build_commit (top-level), code_refs
     index=$(echo "$index" | jq \
       --arg p "$doc_path" \
@@ -475,10 +513,12 @@ cmd_update_index() {
       --argjson code_commit "$code_commit_json" \
       --arg status "current" \
       --arg last_verified "$now" \
+      --argjson implementation "$impl_json" \
       '.docs[$p].content_hash = $content_hash
       | .docs[$p].code_commit = $code_commit
       | .docs[$p].status = $status
-      | .docs[$p].last_verified = $last_verified')
+      | .docs[$p].last_verified = $last_verified
+      | .docs[$p].implementation = $implementation')
     refreshed+=("$doc_path")
   done
 
@@ -1121,6 +1161,129 @@ cmd_fragments_merge() {
   done
 }
 
+cmd_set_implementation() {
+    # Append/update a single Implementation: ref in a doc.
+    # Usage: doc-tools.sh set-implementation <path> --ref <kind: ref> --status <status> [--note <note>]
+    local FILE="" REF="" STATUS="" NOTE=""
+    local VALID_STATUSES="complete partial in-progress not-started reverted superseded blocked"
+
+    if [[ $# -eq 0 ]]; then
+        echo "Usage: set-implementation <path> --ref <kind: ref> --status <status> [--note <note>]" >&2
+        exit 2
+    fi
+
+    # Positional: path
+    FILE="$1"; shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --ref) REF="$2"; shift 2 ;;
+            --status) STATUS="$2"; shift 2 ;;
+            --note) NOTE="$2"; shift 2 ;;
+            *) echo "Unknown arg: $1" >&2; exit 2 ;;
+        esac
+    done
+
+    if [[ -z "$FILE" || -z "$REF" || -z "$STATUS" ]]; then
+        echo "Usage: set-implementation <path> --ref <kind: ref> --status <status> [--note <note>]" >&2
+        exit 2
+    fi
+    if [[ ! -f "$FILE" ]]; then
+        echo "ERROR: file not found: $FILE" >&2
+        exit 2
+    fi
+    # Validate status enum
+    if ! echo " $VALID_STATUSES " | grep -q " $STATUS "; then
+        echo "invalid status: $STATUS (allowed: $VALID_STATUSES)" >&2
+        exit 2
+    fi
+
+    # Build the new line
+    local new_line
+    if [[ -n "$NOTE" ]]; then
+        new_line="  - ${REF} — ${STATUS} — ${NOTE}"
+    else
+        new_line="  - ${REF} — ${STATUS}"
+    fi
+
+    # Resolve a GNU-compatible sed (macOS: gsed; Linux: sed).
+    local SED
+    SED=$(gnu_sed)
+
+    # If the ref already exists in the file's Implementation block, replace its line.
+    # Escape regex metachars in REF for grep/sed safety.
+    local ref_escaped
+    ref_escaped=$(printf '%s' "$REF" | sed 's/[][\/.^$*]/\\&/g')
+    if grep -qE "^  - ${ref_escaped} —" "$FILE"; then
+        "$SED" -i "s|^  - ${ref_escaped} —.*$|${new_line}|" "$FILE"
+    else
+        # Append after last existing Implementation block line, OR
+        # create new Implementation: block if absent.
+        if grep -q "^Implementation:" "$FILE"; then
+            local last_bullet
+            last_bullet=$(awk '
+                /^Implementation:/ { in_block=1; last_line=NR; next }
+                in_block && /^  -/ { last_line=NR; next }
+                in_block && /^[^[:space:]]|^$/ { in_block=0 }
+                END { print last_line }
+            ' "$FILE")
+            "$SED" -i "${last_bullet}a\\
+${new_line}" "$FILE"
+        else
+            # Append a new Implementation: block after the Date: line
+            "$SED" -i "/^\*\*Date:\*\*/a\\
+\\
+Implementation:\\
+${new_line}" "$FILE"
+        fi
+    fi
+}
+
+cmd_implementation_status() {
+    # Parse Implementation: YAML field from one or more docs.
+    # Usage: doc-tools.sh implementation-status [--filter <status>[,<status>...]] <path> [<path>...]
+    local FILTER=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --filter) FILTER="$2"; shift 2 ;;
+            *) break ;;
+        esac
+    done
+
+    local path block filter_re
+    for path in "$@"; do
+        if [[ ! -f "$path" ]]; then
+            echo "$path: not found" >&2
+            continue
+        fi
+        # Find the Implementation: block — from the line matching '^Implementation:' to the next blank line or non-indented line
+        block=$(awk '
+            /^Implementation:[[:space:]]*\[\][[:space:]]*$/ { print "(empty)"; exit 0 }
+            /^Implementation:[[:space:]]*$/ { capture=1; next }
+            capture && /^[[:space:]]+-/ { print; next }
+            capture && /^[[:space:]]*$/ { exit 0 }
+            capture && /^[^[:space:]]/ { exit 0 }
+        ' "$path")
+
+        if [[ -z "$block" ]]; then
+            echo "$path: no Implementation field"
+            continue
+        fi
+        if [[ "$block" == "(empty)" ]]; then
+            echo "$path: Implementation: [] (intentionally empty)"
+            continue
+        fi
+
+        echo "$path:"
+        if [[ -n "$FILTER" ]]; then
+            # Filter to refs whose status matches one of FILTER's comma-separated values
+            filter_re=$(echo "$FILTER" | sed 's/,/|/g')
+            echo "$block" | rg -- " (${filter_re}) " | sed 's/^/  /'
+        else
+            echo "$block" | sed 's/^/  /'
+        fi
+    done
+}
+
 # --- Main ---
 
 check_deps
@@ -1135,6 +1298,8 @@ case "${1:-}" in
   status)           shift; cmd_status "$@" ;;
   bump-version)     shift; cmd_bump_version "$@" ;;
   check-version)    shift; cmd_check_version "$@" ;;
+  implementation-status) shift; cmd_implementation_status "$@" ;;
+  set-implementation) shift; cmd_set_implementation "$@" ;;
   fragments)
     shift
     case "${1:-}" in

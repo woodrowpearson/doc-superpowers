@@ -1,5 +1,18 @@
 # Release Notes
 
+## v2.11.0 (2026-05-16)
+
+Adds two new `doc-tools.sh` subcommands for tracking ADR/SPEC realization through code, plus an `update-index` extension that captures the new YAML fields into the doc-index. Supports the orthogonal-implementation-metadata convention (decision lifecycle in `Status:` stays canonical 4-state for ADRs / 5-state for SPECs; realization lifecycle moves to a separate `Implementation:` / `Realized-by:` YAML list with a 7-state per-ref status enum).
+
+### Features
+- **`implementation-status [--filter <enum>] <path>...`**: Parse the `Implementation:` (ADR convention) or `Realized-by:` (SPEC convention) YAML block from one or more docs and emit each bullet, optionally filtered by per-ref status (`complete | partial | in-progress | not-started | reverted | superseded | blocked`). Handles the `Implementation: []` empty-list sentinel ("intentionally empty"), missing-field ("no Implementation field"), and missing-file ("not found") cases distinctly.
+- **`set-implementation <path> --ref <kind: ref> --status <enum> [--note <txt>]`**: Append or update a single bullet in the Implementation/Realized-by block. Creates the block after the `**Date:**` line if absent. Validates `--status` against the 7-state enum (exit 2 on invalid). If the `--ref` already exists, replaces that line in-place — does NOT duplicate. Uses the new `gnu_sed` helper for cross-platform macOS (`gsed` preferred) / Linux (`sed` fallback when GNU) portability; errors with a clear install hint when neither is available.
+- **`update-index` captures Implementation/Realized-by**: Each ADR/SPEC entry in `docs/.doc-index.json` now carries an `implementation` array parsed from the YAML frontmatter field, enabling downstream consumers (validators, doc-audit) to read realization state from the index without re-parsing the markdown.
+
+### Other
+- **doc-index schema bump `version: 1` → `schema_version: 2`**: Renamed the top-level field because only test helpers consumed the old `version` key — live consumers walk the `docs:` map directly. Test fixtures updated in lockstep; no live code paths needed changes.
+- **Test harness expansion**: `scripts/test-doc-tools.sh` adds 7 new tests (+13 assertions) covering all three new code paths — `implementation-status` (parse / filter / missing-field), `set-implementation` (create / append / replace / invalid-status), and `update-index` (`implementation`-array capture). Total assertions: 113.
+
 ## v2.10.0 (2026-05-12)
 
 This release lands both halves of the per-PR release-notes fragment lifecycle in one shot — the producer-side CI workflow that drafts and maintains a `RELEASE-NOTES.next/PR-<N>.md` for every open PR, and the consumer-side `release` action that merges and cleans up those fragments at release time.
