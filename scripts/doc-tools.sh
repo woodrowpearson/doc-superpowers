@@ -1432,7 +1432,10 @@ _tools_uninstall() {
   # Clean up empty parent dir.
   rmdir "$dest" 2>/dev/null || true
 
-  [[ "$removed" -eq 0 ]] && echo "Nothing to uninstall at $dest"
+  if [[ "$removed" -eq 0 ]]; then
+    echo "Nothing to uninstall at $dest"
+  fi
+  return 0
 }
 
 _tools_status() {

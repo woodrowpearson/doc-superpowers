@@ -1210,6 +1210,211 @@ test_cron_missing_value() {
   teardown
 }
 
+# --- Granular install --ci (Feature B + state-respect Feature C) ---
+
+test_install_ci_workflows_csv_installs_subset_only() {
+  echo "test: install --ci --workflows=csv installs ONLY the listed workflows"
+  setup
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" install --ci --workflows=doc-pr-release,doc-index-update 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_file_exists ".github/workflows/doc-pr-release.yml" "doc-pr-release installed"
+  assert_file_exists ".github/workflows/doc-index-update.yml" "doc-index-update installed"
+  assert_file_not_exists ".github/workflows/doc-freshness-pr.yml" "doc-freshness-pr NOT installed"
+  assert_file_not_exists ".github/workflows/doc-audit-update.yml" "doc-audit-update NOT installed"
+  assert_file_not_exists ".github/workflows/doc-release.yml" "doc-release NOT installed"
+  # doc-tools.sh is still vendored even with selective install.
+  assert_file_exists ".github/scripts/doc-tools.sh" "doc-tools.sh vendored"
+  teardown
+}
+
+test_install_ci_workflows_none_skips_all_but_vendors_tools() {
+  echo "test: install --ci --workflows=none skips workflow files but vendors doc-tools.sh"
+  setup
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" install --ci --workflows=none 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_file_not_exists ".github/workflows/doc-freshness-pr.yml" "no workflows installed"
+  assert_file_not_exists ".github/workflows/doc-release.yml" "no workflows installed"
+  assert_file_exists ".github/scripts/doc-tools.sh" "doc-tools.sh STILL vendored"
+  teardown
+}
+
+test_install_ci_workflows_bogus_errors_with_valid_set() {
+  echo "test: install --ci --workflows=bogus errors with clear message listing valid names"
+  setup
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" install --ci --workflows=bogus 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "exits 1"
+  assert_contains "$output" "unknown workflow name: bogus" "clear error"
+  assert_contains "$output" "doc-freshness-pr" "lists valid names"
+  assert_contains "$output" "doc-release" "lists valid names (multiple)"
+  # And no partial state should have been written.
+  assert_file_not_exists ".github/workflows/doc-freshness-pr.yml" "no workflows created on error"
+  teardown
+}
+
+test_install_ci_workflows_helpers_false_skips_helpers() {
+  echo "test: install --ci --workflows=doc-pr-release --helpers=false skips helpers"
+  setup
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" install --ci --workflows=doc-pr-release --helpers=false 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_file_exists ".github/workflows/doc-pr-release.yml" "workflow installed"
+  [[ ! -d ".github/scripts/doc-pr-release" ]]
+  assert_eq "0" "$?" "helpers dir NOT created"
+  teardown
+}
+
+test_install_ci_writes_state_file_on_first_install() {
+  echo "test: install --ci writes .claude/doc-superpowers/installed.json"
+  setup
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_file_exists ".claude/doc-superpowers/installed.json" "state file created"
+  # Every workflow should be marked installed.
+  local n
+  for n in doc-freshness-pr doc-freshness-schedule doc-index-update doc-audit-update doc-review-pr doc-release doc-spec-verify doc-pr-full-cycle doc-pr-release; do
+    local state
+    state=$(jq -r --arg n "$n" '.tiers.ci.workflows[$n].state' .claude/doc-superpowers/installed.json)
+    assert_eq "installed" "$state" "$n marked installed in state file"
+  done
+  teardown
+}
+
+test_install_ci_bootstraps_state_from_filesystem() {
+  echo "test: install --ci infers state from filesystem on first run (migration)"
+  setup
+  # Pre-install one workflow manually (simulate prior install w/o state file).
+  mkdir -p .github/workflows
+  sed -e "s|__BASE_BRANCH__|main|g" -e "s|__VERSION__|v2.0|g" \
+      -e "s|__CRON_SCHEDULE__|0 9 * * 1|g" -e "s|__CI_STRICT__|0|g" \
+      "$HOOKS_DIR/ci/doc-freshness-pr.yml" > .github/workflows/doc-freshness-pr.yml
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  # Bootstrap should have detected the pre-existing workflow.
+  assert_file_exists ".claude/doc-superpowers/installed.json" "state file created"
+  local state
+  state=$(jq -r '.tiers.ci.workflows."doc-freshness-pr".state' .claude/doc-superpowers/installed.json)
+  assert_eq "installed" "$state" "pre-existing workflow detected as installed"
+  teardown
+}
+
+test_install_ci_malformed_state_file_falls_back_with_warn() {
+  echo "test: install --ci with malformed state file warns + falls back to filesystem"
+  setup
+  mkdir -p .claude/doc-superpowers
+  echo "{not valid json" > .claude/doc-superpowers/installed.json
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0 (graceful fallback)"
+  assert_contains "$output" "malformed" "WARN emitted"
+  # And the install still ran.
+  assert_file_exists ".github/workflows/doc-freshness-pr.yml" "install proceeded"
+  teardown
+}
+
+test_uninstall_install_cycle_respects_intentional_uninstall() {
+  echo "test: uninstall --ci then install --ci keeps intentionally-removed workflows uninstalled"
+  setup
+  bash "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
+  bash "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release >/dev/null 2>&1
+  assert_file_not_exists ".github/workflows/doc-release.yml" "uninstall removed doc-release"
+  # State should say intentional.
+  local intentional
+  intentional=$(jq -r '.tiers.ci.workflows."doc-release".intentional' .claude/doc-superpowers/installed.json)
+  assert_eq "true" "$intentional" "marked intentional"
+  # Now re-install — doc-release should stay GONE.
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "install exits 0"
+  assert_file_not_exists ".github/workflows/doc-release.yml" "doc-release stays uninstalled"
+  assert_contains "$output" "skipping doc-release.yml" "skip message shown"
+  assert_contains "$output" "--workflows=doc-release" "override hint shown"
+  # Other workflows should be re-installed.
+  assert_file_exists ".github/workflows/doc-freshness-pr.yml" "other workflows present"
+  teardown
+}
+
+test_uninstall_transient_then_install_reinstalls() {
+  echo "test: uninstall --ci --transient lets next install --ci re-install"
+  setup
+  bash "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
+  bash "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release --transient >/dev/null 2>&1
+  local intentional
+  intentional=$(jq -r '.tiers.ci.workflows."doc-release".intentional' .claude/doc-superpowers/installed.json)
+  assert_eq "false" "$intentional" "marked transient"
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_file_exists ".github/workflows/doc-release.yml" "doc-release re-installed"
+  assert_not_contains "$output" "skipping doc-release.yml" "no skip message"
+  teardown
+}
+
+test_install_force_bypasses_intentional_uninstall() {
+  echo "test: install --ci --force re-installs intentionally-uninstalled workflows"
+  setup
+  bash "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
+  bash "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release >/dev/null 2>&1
+  assert_file_not_exists ".github/workflows/doc-release.yml" "uninstall removed doc-release"
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" install --ci --force 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_file_exists ".github/workflows/doc-release.yml" "doc-release re-installed via --force"
+  assert_not_contains "$output" "skipping doc-release.yml" "no skip message with --force"
+  teardown
+}
+
+test_install_explicit_workflows_overrides_state() {
+  echo "test: install --ci --workflows=<name> beats state-respect (explicit > implicit)"
+  setup
+  bash "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
+  bash "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release >/dev/null 2>&1
+  # Explicit re-add — should NOT skip even though state says intentional:uninstalled.
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" install --ci --workflows=doc-release 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_file_exists ".github/workflows/doc-release.yml" "doc-release re-installed via explicit --workflows"
+  teardown
+}
+
+test_install_ci_helpers_invalid_value_errors() {
+  echo "test: install --ci --helpers=garbage errors with clear message"
+  setup
+  set +e
+  output=$(bash "$HOOKS_DIR/install.sh" install --ci --helpers=garbage 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "exits 1"
+  assert_contains "$output" "--helpers must be" "clear error"
+  teardown
+}
+
 echo ""
 echo "=== Installer ==="
 test_install_git_creates_hooks
@@ -1250,5 +1455,20 @@ test_install_git_idempotent
 test_integration_does_not_terminate_parent
 test_base_branch_missing_value
 test_cron_missing_value
+
+echo ""
+echo "=== Granular install --ci (v2.12.0+) ==="
+test_install_ci_workflows_csv_installs_subset_only
+test_install_ci_workflows_none_skips_all_but_vendors_tools
+test_install_ci_workflows_bogus_errors_with_valid_set
+test_install_ci_workflows_helpers_false_skips_helpers
+test_install_ci_writes_state_file_on_first_install
+test_install_ci_bootstraps_state_from_filesystem
+test_install_ci_malformed_state_file_falls_back_with_warn
+test_uninstall_install_cycle_respects_intentional_uninstall
+test_uninstall_transient_then_install_reinstalls
+test_install_force_bypasses_intentional_uninstall
+test_install_explicit_workflows_overrides_state
+test_install_ci_helpers_invalid_value_errors
 
 print_summary
