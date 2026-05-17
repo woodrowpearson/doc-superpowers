@@ -29,6 +29,13 @@
 #   - uninstall --ci --transient → marks as intentional:false.
 #   - --force on install → bypass the state-respect check.
 #   - Malformed state file → fall back to filesystem inference + warn.
+#
+# Concurrency contract:
+#   - Single-writer assumed. Atomic writes (state_atomic_write) guarantee
+#     readers never see a partially-written file, but two concurrent
+#     install/uninstall invocations will race: last writer wins, and
+#     intermediate state-marks made by the loser are lost. Wrap parallel
+#     invocations in `flock` if your runner needs this.
 
 # shellcheck disable=SC2034
 STATE_FILE=".claude/doc-superpowers/installed.json"
@@ -36,17 +43,30 @@ STATE_SCHEMA_VERSION=1
 
 # Canonical list of workflow names (without .yml extension). Single source
 # of truth — referenced by install_ci, uninstall_ci, and state code.
+#
+# Derived from scripts/hooks/ci/*.yml so that adding a new workflow template
+# is picked up automatically. SCRIPT_DIR is set by install.sh (the only
+# script that sources state.sh). If unset (e.g. unit-testing state.sh in
+# isolation), falls back to a hardcoded list to avoid silent breakage.
 state_known_workflows() {
+  if [[ -n "${SCRIPT_DIR:-}" && -d "$SCRIPT_DIR/ci" ]]; then
+    local f
+    for f in "$SCRIPT_DIR"/ci/*.yml; do
+      [[ -f "$f" ]] || continue
+      basename "$f" .yml
+    done | sort
+    return
+  fi
   cat <<'EOF'
+doc-audit-update
 doc-freshness-pr
 doc-freshness-schedule
 doc-index-update
-doc-audit-update
-doc-review-pr
-doc-release
-doc-spec-verify
 doc-pr-full-cycle
 doc-pr-release
+doc-release
+doc-review-pr
+doc-spec-verify
 EOF
 }
 
@@ -86,6 +106,10 @@ state_is_valid() {
 #
 # Requires: is_doc_superpowers_workflow() to be defined by caller (install.sh).
 state_bootstrap() {
+  if ! declare -F is_doc_superpowers_workflow >/dev/null 2>&1; then
+    echo "INTERNAL: state_bootstrap requires caller to define is_doc_superpowers_workflow()" >&2
+    return 1
+  fi
   local f
   f="$(state_file_path)"
   mkdir -p "$(dirname "$f")"
