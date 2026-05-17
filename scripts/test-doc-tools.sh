@@ -56,7 +56,7 @@ test_build_index_creates_index() {
   assert_file_exists "docs/.doc-index.json" "index file created"
   local json
   json=$(cat docs/.doc-index.json)
-  assert_json_field "$json" ".version" "1" "version is 1"
+  assert_json_field "$json" ".schema_version" "2" "schema_version is 2"
   assert_json_field "$json" ".generated_by" "doc-superpowers" "generated_by is doc-superpowers"
   teardown
 }
@@ -849,6 +849,143 @@ test_fragments_merge_orders_by_n() {
   teardown
 }
 
+test_set_implementation_creates_block() {
+  echo "test: set-implementation creates Implementation: block when absent"
+  setup
+  cat > test-adr.md <<'EOF'
+# Test ADR
+
+**Date:** 2026-05-16
+
+## Context
+EOF
+  "$DOC_TOOLS" set-implementation test-adr.md --ref "PR: #123" --status complete >/dev/null
+  assert_contains "$(cat test-adr.md)" "Implementation:" "Implementation: block added"
+  assert_contains "$(cat test-adr.md)" "  - PR: #123 — complete" "ref line added"
+  teardown
+}
+
+test_set_implementation_appends_to_existing() {
+  echo "test: set-implementation appends to existing Implementation: block"
+  setup
+  cat > test-adr.md <<'EOF'
+# Test ADR
+
+**Date:** 2026-05-16
+
+Implementation:
+  - PR: #100 — complete
+
+## Context
+EOF
+  "$DOC_TOOLS" set-implementation test-adr.md --ref "PR: #200" --status partial --note "phase 1" >/dev/null
+  local content
+  content=$(cat test-adr.md)
+  assert_contains "$content" "  - PR: #100 — complete" "preserves existing ref"
+  assert_contains "$content" "  - PR: #200 — partial — phase 1" "appends new ref with note"
+  teardown
+}
+
+test_set_implementation_replaces_existing_ref() {
+  echo "test: set-implementation replaces line when ref already present"
+  setup
+  cat > test-adr.md <<'EOF'
+# Test ADR
+
+**Date:** 2026-05-16
+
+Implementation:
+  - PR: #100 — in-progress
+EOF
+  "$DOC_TOOLS" set-implementation test-adr.md --ref "PR: #100" --status complete >/dev/null
+  local content
+  content=$(cat test-adr.md)
+  assert_contains "$content" "  - PR: #100 — complete" "ref status updated"
+  if echo "$content" | grep -q "in-progress"; then
+    FAIL=$((FAIL + 1))
+    printf "${RED}  FAIL${NC}: stale 'in-progress' status still present\n"
+  else
+    PASS=$((PASS + 1))
+    printf "${GREEN}  PASS${NC}: old status replaced\n"
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+  teardown
+}
+
+test_set_implementation_rejects_invalid_status() {
+  echo "test: set-implementation rejects invalid status enum"
+  setup
+  cat > test-adr.md <<'EOF'
+# Test ADR
+
+**Date:** 2026-05-16
+EOF
+  set +e
+  local output
+  output=$("$DOC_TOOLS" set-implementation test-adr.md --ref "PR: #1" --status nonsense 2>&1)
+  local rc=$?
+  set -e
+  assert_eq "2" "$rc" "exits 2 on invalid status"
+  assert_contains "$output" "invalid status" "error message names the problem"
+  teardown
+}
+
+test_implementation_status_parses_block() {
+  echo "test: implementation-status emits the parsed block"
+  setup
+  cat > test-adr.md <<'EOF'
+# Test ADR
+
+Implementation:
+  - PR: #1 — complete
+  - PR: #2 — partial
+
+## Body
+EOF
+  local out
+  out=$("$DOC_TOOLS" implementation-status test-adr.md)
+  assert_contains "$out" "PR: #1 — complete" "first ref echoed"
+  assert_contains "$out" "PR: #2 — partial" "second ref echoed"
+  teardown
+}
+
+test_implementation_status_no_field() {
+  echo "test: implementation-status reports missing field"
+  setup
+  cat > test-adr.md <<'EOF'
+# Test ADR
+
+## Body
+EOF
+  local out
+  out=$("$DOC_TOOLS" implementation-status test-adr.md)
+  assert_contains "$out" "no Implementation field" "missing-field message"
+  teardown
+}
+
+test_update_index_captures_implementation() {
+  echo "test: update-index captures Implementation: block into entry"
+  setup
+  mkdir -p docs/adr
+  cat > docs/adr/ADR-X.md <<'EOF'
+# ADR X
+
+Implementation:
+  - PR: #42 — complete
+  - PR: #43 — partial
+EOF
+  local mapping="docs/adr/ADR-X.md::adr"
+  echo "$mapping" | "$DOC_TOOLS" build-index
+  "$DOC_TOOLS" update-index docs/adr/ADR-X.md 2>/dev/null
+  local impl_count
+  impl_count=$(jq '.docs["docs/adr/ADR-X.md"].implementation | length' docs/.doc-index.json)
+  assert_eq "2" "$impl_count" "implementation array has 2 entries"
+  local first
+  first=$(jq -r '.docs["docs/adr/ADR-X.md"].implementation[0]' docs/.doc-index.json)
+  assert_eq "PR: #42 — complete" "$first" "first impl entry preserved"
+  teardown
+}
+
 # --- Runner ---
 
 run_tests() {
@@ -906,6 +1043,13 @@ run_tests() {
   test_fragments_list_skips_non_numeric
   test_fragments_merge_paths_out
   test_fragments_merge_errors_outside_git_repo
+  test_set_implementation_creates_block
+  test_set_implementation_appends_to_existing
+  test_set_implementation_replaces_existing_ref
+  test_set_implementation_rejects_invalid_status
+  test_implementation_status_parses_block
+  test_implementation_status_no_field
+  test_update_index_captures_implementation
   print_summary
 }
 
