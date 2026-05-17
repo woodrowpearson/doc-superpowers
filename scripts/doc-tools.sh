@@ -1316,16 +1316,28 @@ _tools_status() {
   fi
 }
 
-# Best-effort: parse version from a sibling RELEASE-NOTES.md if present.
+# Best-effort: parse version from RELEASE-NOTES.md.
+# Looks in two places, in order:
+#   1. $SCRIPT_DIR/../RELEASE-NOTES.md (canonical plugin layout: scripts/doc-tools.sh
+#      + RELEASE-NOTES.md at repo root).
+#   2. <git-toplevel>/RELEASE-NOTES.md (vendored case: .github/scripts/doc-tools.sh
+#      within a consuming repo — only useful if that repo also versions its docs
+#      with the same convention; otherwise falls through to "unknown").
+# Prints "unknown" if neither resolves.
 _tools_extract_version() {
-  local relnotes
-  relnotes="$(dirname "$SCRIPT_DIR")/RELEASE-NOTES.md"
-  if [[ -f "$relnotes" ]]; then
-    grep -m 1 -o '## v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' "$relnotes" \
-      | sed 's/## v//' || echo "unknown"
-  else
-    echo "unknown"
-  fi
+  local candidate version
+  for candidate in \
+    "$(dirname "$SCRIPT_DIR")/RELEASE-NOTES.md" \
+    "$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)/RELEASE-NOTES.md"; do
+    [[ -f "$candidate" ]] || continue
+    version=$(grep -m 1 -o '## v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' "$candidate" \
+              | sed 's/## v//')
+    if [[ -n "$version" ]]; then
+      echo "$version"
+      return
+    fi
+  done
+  echo "unknown"
 }
 
 # --- Main ---
