@@ -849,6 +849,178 @@ test_fragments_merge_orders_by_n() {
   teardown
 }
 
+# --- `tools` subcommand (Feature A: standalone install/uninstall/status) ---
+
+test_tools_install_vendors_doc_tools_default_dest() {
+  echo "test: tools install vendors doc-tools.sh into .github/scripts by default"
+  setup
+  set +e
+  local output
+  output=$("$DOC_TOOLS" tools install 2>&1)
+  local exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_file_exists ".github/scripts/doc-tools.sh" "doc-tools.sh vendored at default dest"
+  [[ -x ".github/scripts/doc-tools.sh" ]]
+  assert_eq "0" "$?" "vendored copy is executable"
+  assert_contains "$output" "Installed doc-tools.sh" "install message"
+  teardown
+}
+
+test_tools_install_custom_dest() {
+  echo "test: tools install --dest <path> vendors to custom dest"
+  setup
+  set +e
+  local output
+  output=$("$DOC_TOOLS" tools install --dest scripts/vendor 2>&1)
+  local exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_file_exists "scripts/vendor/doc-tools.sh" "doc-tools.sh at custom dest"
+  assert_file_not_exists ".github/scripts/doc-tools.sh" "default dest NOT used"
+  teardown
+}
+
+test_tools_install_with_helpers() {
+  echo "test: tools install --with-helpers copies doc-pr-release helpers + RELEASE-NOTES.next/README.md"
+  setup
+  set +e
+  local output
+  output=$("$DOC_TOOLS" tools install --with-helpers 2>&1)
+  local exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_file_exists ".github/scripts/doc-tools.sh" "doc-tools.sh vendored"
+  assert_file_exists ".github/scripts/doc-pr-release/extract-context.sh" "helper installed"
+  assert_file_exists ".github/scripts/doc-pr-release/update-pr-body.sh" "helper installed"
+  assert_file_exists ".github/scripts/doc-pr-release/commit-and-push.sh" "helper installed"
+  assert_file_exists "RELEASE-NOTES.next/README.md" "fragment spec installed"
+  teardown
+}
+
+test_tools_install_without_helpers_default() {
+  echo "test: tools install (default, no --with-helpers) does NOT install helpers"
+  setup
+  set +e
+  "$DOC_TOOLS" tools install >/dev/null 2>&1
+  set -e
+  assert_file_exists ".github/scripts/doc-tools.sh" "doc-tools.sh vendored"
+  [[ ! -d ".github/scripts/doc-pr-release" ]]
+  assert_eq "0" "$?" "helpers dir NOT created"
+  assert_file_not_exists "RELEASE-NOTES.next/README.md" "fragment spec NOT created"
+  teardown
+}
+
+test_tools_uninstall_removes_vendored_copy() {
+  echo "test: tools uninstall removes vendored doc-tools.sh"
+  setup
+  "$DOC_TOOLS" tools install >/dev/null 2>&1
+  assert_file_exists ".github/scripts/doc-tools.sh" "installed first"
+  set +e
+  local output
+  output=$("$DOC_TOOLS" tools uninstall 2>&1)
+  local exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_file_not_exists ".github/scripts/doc-tools.sh" "doc-tools.sh removed"
+  assert_contains "$output" "Removed" "removal message"
+  teardown
+}
+
+test_tools_uninstall_removes_unmodified_helpers() {
+  echo "test: tools uninstall removes helper dir when files match plugin copy"
+  setup
+  "$DOC_TOOLS" tools install --with-helpers >/dev/null 2>&1
+  assert_file_exists ".github/scripts/doc-pr-release/extract-context.sh" "installed"
+  set +e
+  "$DOC_TOOLS" tools uninstall >/dev/null 2>&1
+  set -e
+  [[ ! -d ".github/scripts/doc-pr-release" ]]
+  assert_eq "0" "$?" "helpers dir removed (no local edits)"
+  teardown
+}
+
+test_tools_uninstall_keeps_modified_helpers() {
+  echo "test: tools uninstall KEEPS helpers if they have local edits"
+  setup
+  "$DOC_TOOLS" tools install --with-helpers >/dev/null 2>&1
+  echo "# locally modified" >> .github/scripts/doc-pr-release/extract-context.sh
+  set +e
+  local output
+  output=$("$DOC_TOOLS" tools uninstall 2>&1)
+  set -e
+  assert_file_exists ".github/scripts/doc-pr-release/extract-context.sh" "modified helper preserved"
+  assert_contains "$output" "Kept" "kept message shown"
+  teardown
+}
+
+test_tools_uninstall_preserves_release_notes_next_readme() {
+  echo "test: tools uninstall does NOT remove RELEASE-NOTES.next/README.md (may have edits)"
+  setup
+  "$DOC_TOOLS" tools install --with-helpers >/dev/null 2>&1
+  assert_file_exists "RELEASE-NOTES.next/README.md" "installed"
+  set +e
+  "$DOC_TOOLS" tools uninstall >/dev/null 2>&1
+  set -e
+  assert_file_exists "RELEASE-NOTES.next/README.md" "README preserved on uninstall"
+  teardown
+}
+
+test_tools_status_not_installed() {
+  echo "test: tools status reports not-installed when nothing vendored"
+  setup
+  set +e
+  local output
+  output=$("$DOC_TOOLS" tools status 2>&1)
+  local exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0 (read-only)"
+  assert_contains "$output" "not installed" "reports not installed"
+  teardown
+}
+
+test_tools_status_installed_matches_plugin() {
+  echo "test: tools status reports matches-plugin when installed unmodified"
+  setup
+  "$DOC_TOOLS" tools install >/dev/null 2>&1
+  set +e
+  local output
+  output=$("$DOC_TOOLS" tools status 2>&1)
+  local exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_contains "$output" "matches plugin" "reports matches plugin"
+  teardown
+}
+
+test_tools_status_reports_drift() {
+  echo "test: tools status reports DRIFTED when vendored copy diverges"
+  setup
+  "$DOC_TOOLS" tools install >/dev/null 2>&1
+  echo "# drifted" >> .github/scripts/doc-tools.sh
+  set +e
+  local output
+  output=$("$DOC_TOOLS" tools status 2>&1)
+  local exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_contains "$output" "DRIFTED" "reports drift"
+  teardown
+}
+
+test_tools_install_unknown_flag_errors() {
+  echo "test: tools install --bogus errors"
+  setup
+  set +e
+  local output
+  output=$("$DOC_TOOLS" tools install --bogus 2>&1)
+  local exit_code=$?
+  set -e
+  assert_eq "2" "$exit_code" "exits 2"
+  assert_contains "$output" "Unknown option" "clear error"
+  teardown
+}
+
 # --- Runner ---
 
 run_tests() {
@@ -906,6 +1078,21 @@ run_tests() {
   test_fragments_list_skips_non_numeric
   test_fragments_merge_paths_out
   test_fragments_merge_errors_outside_git_repo
+
+  # --- tools subcommand (Feature A) ---
+  test_tools_install_vendors_doc_tools_default_dest
+  test_tools_install_custom_dest
+  test_tools_install_with_helpers
+  test_tools_install_without_helpers_default
+  test_tools_uninstall_removes_vendored_copy
+  test_tools_uninstall_removes_unmodified_helpers
+  test_tools_uninstall_keeps_modified_helpers
+  test_tools_uninstall_preserves_release_notes_next_readme
+  test_tools_status_not_installed
+  test_tools_status_installed_matches_plugin
+  test_tools_status_reports_drift
+  test_tools_install_unknown_flag_errors
+
   print_summary
 }
 
