@@ -598,7 +598,11 @@ test_install_git_creates_hooks() {
   assert_contains "$(head -2 .git/hooks/pre-commit)" "doc-superpowers hook v1" "has marker"
   # Verify DOC_TOOLS path was substituted
   assert_not_contains "$(cat .git/hooks/pre-commit)" "__DOC_TOOLS_PATH__" "path substituted"
+  assert_not_contains "$(cat .git/hooks/pre-commit)" "__DOC_TOOLS_PARENT__" "parent substituted"
   assert_contains "$(cat .git/hooks/pre-commit)" "doc-tools.sh" "has real path"
+  # v2.12.2: hook resolves the latest plugin-cache version at runtime instead of
+  # pinning the install-time version. Check the resolver fragment is present.
+  assert_contains "$(cat .git/hooks/pre-commit)" "sort -V | tail -1" "uses runtime version resolver"
   teardown
 }
 
@@ -798,7 +802,10 @@ test_install_claude_creates_settings() {
   assert_not_contains "$settings" "/Users/" "no absolute home path"
   # Verify placeholder substitution in copied scripts
   assert_not_contains "$(cat .claude/hooks/doc-superpowers/pre-commit-gate.sh)" "__DOC_TOOLS_PATH__" "DOC_TOOLS path substituted"
+  assert_not_contains "$(cat .claude/hooks/doc-superpowers/pre-commit-gate.sh)" "__DOC_TOOLS_PARENT__" "DOC_TOOLS parent substituted"
   assert_not_contains "$(cat .claude/hooks/doc-superpowers/pre-commit-gate.sh)" "__INSTALL_DATE__" "install date substituted"
+  # v2.12.2: claude-side hook also resolves the latest plugin-cache version at runtime
+  assert_contains "$(cat .claude/hooks/doc-superpowers/pre-commit-gate.sh)" "sort -V | tail -1" "uses runtime version resolver"
   teardown
 }
 
