@@ -2,7 +2,7 @@
 # doc-superpowers hook v1 — installed __INSTALL_DATE__
 # DO NOT EDIT — managed by doc-superpowers hooks installer
 
-DOC_TOOLS="${DOC_TOOLS:-__DOC_TOOLS_PATH__}"
+DOC_TOOLS="${DOC_TOOLS:-$(printf '%s\n' __DOC_TOOLS_PARENT__/*/scripts/doc-tools.sh | sort -V | tail -1)}"
 DOC_INDEX="${DOC_INDEX:-docs/.doc-index.json}"
 
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
