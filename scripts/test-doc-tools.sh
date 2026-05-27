@@ -361,6 +361,52 @@ test_check_freshness_untracked_docs() {
   teardown
 }
 
+test_check_freshness_scales_to_large_index() {
+  # Regression guard for the 2026-05-26 perf rewrite (issue: per-entry jq
+  # spawns made the full walk hit a ~10 min wall-clock ceiling at ~2000
+  # entries). With the streaming-extraction + JSON-lines accumulator,
+  # 500 entries should complete in well under 60 s on a developer laptop.
+  echo "test: check-freshness scales to ~500 entries within 60s"
+  setup
+  # Build a synthetic index with 500 docs pointing at a single tracked
+  # code dir, plus a deliberate stale ref to exercise compute_freshness.
+  mkdir -p docs/synthetic
+  local mapping_tmp
+  mapping_tmp=$(mktemp -t synth.XXXXXX)
+  local i=0
+  while [ "$i" -lt 500 ]; do
+    printf '# doc %d\n' "$i" > "docs/synthetic/d$i.md"
+    printf 'docs/synthetic/d%d.md:src/:synthetic\n' "$i" >> "$mapping_tmp"
+    i=$((i + 1))
+  done
+  git add -A && git commit -m "synthetic docs" --quiet
+  "$DOC_TOOLS" build-index < "$mapping_tmp"
+  rm -f "$mapping_tmp"
+
+  # Touch code to make all 500 stale in one pass.
+  echo "v2" > src/index.js
+  git add -A && git commit -m "stale all" --quiet
+
+  local start_ts end_ts elapsed output
+  start_ts=$(date +%s)
+  output=$("$DOC_TOOLS" check-freshness)
+  end_ts=$(date +%s)
+  elapsed=$((end_ts - start_ts))
+
+  local stale_count
+  stale_count=$(echo "$output" | jq '.summary.stale')
+  assert_eq "500" "$stale_count" "all 500 synthetic docs reported stale"
+
+  # Soft budget: 60 s is generous (real-world failures hit ~600 s SIGKILL).
+  # A regression here would mean the per-entry jq spawn pattern crept back in.
+  if [ "$elapsed" -gt 60 ]; then
+    echo "    FAIL: check-freshness took ${elapsed}s for 500 docs (budget: 60s)" >&2
+    return 1
+  fi
+  echo "    elapsed: ${elapsed}s for 500 docs (budget: 60s)"
+  teardown
+}
+
 # --- status tests ---
 
 test_status_single_doc() {
@@ -1183,6 +1229,7 @@ run_tests() {
   test_check_freshness_code_refs_filter
   test_check_freshness_code_refs_bidirectional_prefix
   test_check_freshness_untracked_docs
+  test_check_freshness_scales_to_large_index
   test_update_index_refreshes_entry
   test_update_index_preserves_build_commit
   test_update_index_preserves_replaces

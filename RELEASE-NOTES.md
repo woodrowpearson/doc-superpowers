@@ -1,5 +1,12 @@
 # Release Notes
 
+## v2.12.1 (2026-05-26)
+
+Performance fix for `check-freshness` — the full walk now completes on 2000+ entry indexes that previously hit the harness's 10-min ceiling. No API change.
+
+### Fixes
+- **`check-freshness` full walk timed out at ~10 min on indexes ≥ ~2000 entries** (`doc-tools.sh`) — Root cause: the inner loop invoked `jq` ~10× per entry (5 field extractions on the parsed entry, then 3–4 calls to rebuild the running `docs_out` accumulator). At 2083 entries that's ~20,000 `jq` process spawns; on the abundance-mvp index this consistently SIGKILL'd around 600 s wall-clock. The rewrite extracts every entry's fields in **one** `jq -j ... | @tsv` streaming pass, processes each row in pure bash, and appends per-doc results as JSON-lines to a `mktemp` file that's merged once with `jq -s 'reduce .[] as $row ({}; . + $row)'`. Untracked detection switched from per-file `jq '.docs | has($p)'` calls to a single `jq keys` + `comm -23` set-difference. Real-world measurement on the abundance-mvp 2082-entry index: **133 s** (down from >600 s SIGKILL) — well under the harness ceiling and runnable as a full audit pass. `compute_freshness` is left untouched so `cmd_status` callers keep their existing signature. All 147 prior tests pass unchanged; one new regression-guard test (`test_check_freshness_scales_to_large_index`) builds a synthetic 500-entry index, walks it under a 60 s budget, and asserts the freshness summary. The new test measured at **23 s** on a developer laptop.
+
 ## v2.12.0 (2026-05-16)
 
 Adds granular CI install with persistent install-state tracking, a standalone `tools install/uninstall/status` subcommand on `doc-tools.sh`, and a new `scripts/hooks/state.sh` module that backs the state file. Lets users opt out of subsets of the 9 doc-superpowers CI workflows, with the installer remembering uninstall decisions so they survive across re-runs.
