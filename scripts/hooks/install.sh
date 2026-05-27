@@ -8,6 +8,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DOC_TOOLS="$SKILL_DIR/scripts/doc-tools.sh"
+# Plugin-cache parent (containing all versioned sibling dirs). Substituted into
+# hook bodies so they resolve the latest installed version at runtime instead
+# of pinning the version active at install time. See issue 2026-05-26-doc-
+# superpowers-hook-pins-v2.12.0-despite-v2.12.1-fix in the abundance-mvp repo
+# for the motivating bug.
+DOC_TOOLS_PARENT="$(dirname "$SKILL_DIR")"
 MARKER="doc-superpowers hook v1"
 WORKFLOW_MARKER="doc-superpowers workflow v1"
 DATE=$(date +%Y-%m-%d)
@@ -135,7 +141,7 @@ install_git() {
       fi
       # Copy hook script locally so integration survives skill reinstall
       local local_hook="$hooks_dir/.doc-superpowers-$hook_name"
-      sed -e "s|__DOC_TOOLS_PATH__|$DOC_TOOLS|g" -e "s|__INSTALL_DATE__|$DATE|g" "$hook_src" > "$local_hook"
+      sed -e "s|__DOC_TOOLS_PATH__|$DOC_TOOLS|g" -e "s|__DOC_TOOLS_PARENT__|$DOC_TOOLS_PARENT|g" -e "s|__INSTALL_DATE__|$DATE|g" "$hook_src" > "$local_hook"
       chmod +x "$local_hook"
       # Auto-integrate: use begin/end markers for clean uninstall, dirname $0 for portability
       local tmpblock
@@ -172,7 +178,7 @@ INTEGRATION_EOF
     fi
 
     # Copy with DOC_TOOLS path substituted
-    sed -e "s|__DOC_TOOLS_PATH__|$DOC_TOOLS|g" -e "s|__INSTALL_DATE__|$DATE|g" "$hook_src" > "$hook_dest"
+    sed -e "s|__DOC_TOOLS_PATH__|$DOC_TOOLS|g" -e "s|__DOC_TOOLS_PARENT__|$DOC_TOOLS_PARENT|g" -e "s|__INSTALL_DATE__|$DATE|g" "$hook_src" > "$hook_dest"
     chmod +x "$hook_dest"
     installed=$((installed + 1))
   done
@@ -295,7 +301,7 @@ install_claude() {
   for hook_src in "$SCRIPT_DIR/claude/"*; do
     local hook_name
     hook_name=$(basename "$hook_src")
-    sed -e "s|__DOC_TOOLS_PATH__|$DOC_TOOLS|g" -e "s|__INSTALL_DATE__|$DATE|g" "$hook_src" > "$hooks_dir/$hook_name"
+    sed -e "s|__DOC_TOOLS_PATH__|$DOC_TOOLS|g" -e "s|__DOC_TOOLS_PARENT__|$DOC_TOOLS_PARENT|g" -e "s|__INSTALL_DATE__|$DATE|g" "$hook_src" > "$hooks_dir/$hook_name"
     chmod +x "$hooks_dir/$hook_name"
   done
 

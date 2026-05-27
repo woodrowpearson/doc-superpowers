@@ -4,7 +4,7 @@
 
 # --- Path resolution (DOC_TOOLS is replaced at install time) ---
 # When running from test harness or directly, DOC_TOOLS env var overrides.
-DOC_TOOLS="${DOC_TOOLS:-__DOC_TOOLS_PATH__}"
+DOC_TOOLS="${DOC_TOOLS:-$(printf '%s\n' __DOC_TOOLS_PARENT__/*/scripts/doc-tools.sh | sort -V | tail -1)}"
 DOC_INDEX="${DOC_INDEX:-docs/.doc-index.json}"
 
 # --- Graceful degradation ---

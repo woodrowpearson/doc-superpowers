@@ -1,5 +1,12 @@
 # Release Notes
 
+## v2.12.2 (2026-05-26)
+
+Hook-installer fix — generated git/Claude hooks now resolve the latest installed plugin-cache version at runtime instead of pinning the version that was active at install time. Closes a class of bug where the `check-freshness` perf fix (v2.12.1) was shipping but invisible at the commit boundary because hook bodies kept invoking the older `2.12.0/scripts/doc-tools.sh` baked into them at install.
+
+### Fixes
+- **Hooks pinned `DOC_TOOLS` to the install-time plugin-cache version, so `check-freshness` perf fixes were invisible at the commit boundary** (`scripts/hooks/git/*`, `scripts/hooks/claude/*`, `scripts/hooks/install.sh`) — Hook templates substituted `__DOC_TOOLS_PATH__` with the version-pinned `$SKILL_DIR/scripts/doc-tools.sh` at install time. When the user `claude plugin update doc-superpowers` brought in a newer version, the new sibling appeared in `~/.claude/plugins/cache/doc-superpowers/doc-superpowers/<NEW>/` but the hooks kept calling `<OLD>/scripts/doc-tools.sh` indefinitely. Symptom: even with v2.12.1 installed, commits on doc-heavy branches still hit the v2.12.0 slow path (e.g., the abundance-mvp repo observed 4+ minute hangs on a 2-file docs commit despite v2.12.1 being in cache). Fix: a new `DOC_TOOLS_PARENT` substitution carries the plugin-cache parent directory (computed via `dirname "$SKILL_DIR"`) into each hook template; the hook then runs `$(printf '%s\n' $DOC_TOOLS_PARENT/*/scripts/doc-tools.sh | sort -V | tail -1)` at hook-invocation time, picking the highest-version sibling on every commit. `DOC_TOOLS` env-var override (already present in templates) still wins for test harnesses and operator overrides. Two new test assertions per hook surface: the new `__DOC_TOOLS_PARENT__` placeholder is substituted away AND the `sort -V | tail -1` resolver fragment is present in the rendered hook. No API change; no migration needed — operators get the fix on the next `hooks install` run.
+
 ## v2.12.1 (2026-05-26)
 
 Performance fix for `check-freshness` — the full walk now completes on 2000+ entry indexes that previously hit the harness's 10-min ceiling. No API change.
