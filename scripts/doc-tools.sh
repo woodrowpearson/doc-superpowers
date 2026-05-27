@@ -304,12 +304,8 @@ cmd_check_freshness() {
     exit 1
   fi
 
-  local index
-  index=$(cat "$index_file")
-
-  local checked_at
+  local checked_at repo_head_val
   checked_at=$(iso_now)
-  local repo_head_val
   repo_head_val=$(repo_head)
 
   local count_current=0
@@ -317,37 +313,42 @@ cmd_check_freshness() {
   local count_missing=0
   local count_deprecated=0
 
-  local docs_out="{}"
+  # Per-doc result accumulator: one JSON object per line (path -> result),
+  # merged once at the end with `jq -s` instead of rebuilding via
+  # `jq '. + {(p): v}'` per iteration. Eliminates O(N) jq spawns for
+  # accumulator updates — the dominant cost on large indexes.
+  local jsonl_tmp idx_paths_tmp fs_paths_tmp
+  jsonl_tmp=$(mktemp -t doc-tools-fresh.XXXXXX) || { echo "ERROR: mktemp failed" >&2; exit 1; }
+  idx_paths_tmp=$(mktemp -t doc-tools-idx.XXXXXX)
+  fs_paths_tmp=$(mktemp -t doc-tools-fs.XXXXXX)
+  # shellcheck disable=SC2064  # expand vars now, not at trap time
+  trap "rm -f \"$jsonl_tmp\" \"$idx_paths_tmp\" \"$fs_paths_tmp\"" RETURN EXIT INT TERM
 
-  # Iterate over each doc path in the index
-  local doc_paths
-  doc_paths=$(echo "$index" | jq -r '.docs | keys[]')
-
-  while IFS= read -r doc_path; do
-    local entry
-    entry=$(echo "$index" | jq --arg p "$doc_path" '.docs[$p]')
-
-    local stored_status
-    stored_status=$(echo "$entry" | jq -r '.status')
-
-    local doc_type
-    doc_type=$(echo "$entry" | jq -r '.doc_type')
-
-    local last_verified
-    last_verified=$(echo "$entry" | jq -r '.last_verified // empty')
-
-    # Extract code_refs as array (bash 3.2 compatible)
+  # Single-pass field extraction: one `jq` call emits every entry's fields
+  # in NUL-delimited records (tab-separated within each record). The body
+  # of the loop never re-invokes `jq` to read a field — replaces ~5 jq
+  # spawns per entry. Records are NUL-delimited to tolerate paths/values
+  # containing newlines; tabs in paths would corrupt parsing but are
+  # vanishingly rare in `docs/` (and `add-entry` already rejects colons).
+  while IFS=$'\t' read -r -d '' doc_path stored_status doc_type last_verified content_hash code_commit code_refs_csv; do
+    # Reconstruct code_refs array from CSV. Refs may contain spaces but
+    # not commas (commas are the build-index/add-entry CSV separator).
     local code_refs_arr=()
-    while IFS= read -r _ref; do
-      [[ -n "$_ref" ]] && code_refs_arr+=("$_ref")
-    done < <(echo "$entry" | jq -r '.code_refs[]' 2>/dev/null || true)
+    if [[ -n "$code_refs_csv" ]]; then
+      local _IFS_SAVE="$IFS"
+      IFS=','
+      # shellcheck disable=SC2206
+      code_refs_arr=( $code_refs_csv )
+      IFS="$_IFS_SAVE"
+    fi
 
-    # Apply --code-refs filter if provided (bidirectional prefix match)
+    # Apply --code-refs filter if provided (bidirectional prefix match) —
+    # unchanged semantics from the per-jq-call path; just operates on the
+    # pre-extracted array.
     if [ ${#filter_refs[@]} -gt 0 ]; then
       local matched=0
       for filter_ref in "${filter_refs[@]}"; do
-        for doc_ref in "${code_refs_arr[@]}"; do
-          # Bidirectional prefix: filter is prefix of doc_ref OR doc_ref is prefix of filter
+        for doc_ref in "${code_refs_arr[@]+"${code_refs_arr[@]}"}"; do
           if [[ "$doc_ref" == "$filter_ref"* || "$filter_ref" == "$doc_ref"* ]]; then
             matched=1
             break 2
@@ -357,33 +358,65 @@ cmd_check_freshness() {
       [ "$matched" -eq 0 ] && continue
     fi
 
-    # Deprecated: preserve status, no freshness fields
+    # Deprecated: preserve status, no freshness fields.
     if [ "$stored_status" = "deprecated" ]; then
       count_deprecated=$((count_deprecated + 1))
-      docs_out=$(echo "$docs_out" | jq \
+      jq -nc \
         --arg p "$doc_path" \
-        --arg status "deprecated" \
         --arg doc_type "$doc_type" \
-        '. + {($p): {status: $status, doc_type: $doc_type}}')
+        '{($p): {status: "deprecated", doc_type: $doc_type}}' >> "$jsonl_tmp"
       continue
     fi
 
-    # Missing: doc file no longer exists
+    # Missing: doc file no longer exists.
     if [ ! -f "$doc_path" ]; then
       count_missing=$((count_missing + 1))
-      docs_out=$(echo "$docs_out" | jq \
+      jq -nc \
         --arg p "$doc_path" \
-        --arg status "missing" \
         --arg doc_type "$doc_type" \
-        '. + {($p): {status: $status, doc_type: $doc_type}}')
+        '{($p): {status: "missing", doc_type: $doc_type}}' >> "$jsonl_tmp"
       continue
     fi
 
-    # Compute freshness via shared helper
-    local freshness
-    freshness=$(compute_freshness "$doc_path" "$entry")
-    local status
-    status=$(echo "$freshness" | jq -r '.status')
+    # Compute freshness inline — same logic as `compute_freshness` but
+    # works on pre-extracted fields, avoiding 4 internal jq spawns
+    # (status/code_refs/hash/code_commit reads). `compute_freshness`
+    # itself stays unchanged for the `cmd_status` single-doc caller.
+    local current_hash doc_modified
+    current_hash="sha256:$(hash_file "$doc_path")"
+    [ "$current_hash" != "$content_hash" ] && doc_modified=true || doc_modified=false
+
+    local current_code_commit=""
+    if [ ${#code_refs_arr[@]} -gt 0 ]; then
+      current_code_commit=$(git log -1 --format=%H -- "${code_refs_arr[@]}" 2>/dev/null || true)
+    fi
+
+    local status reason
+    if [ -n "$current_code_commit" ] && [ "$current_code_commit" != "$code_commit" ]; then
+      status="stale"; reason="code_changed"
+    else
+      status="current"; reason=""
+    fi
+
+    local commits_behind=0
+    if [ -n "$code_commit" ] && [ ${#code_refs_arr[@]} -gt 0 ]; then
+      commits_behind=$(git rev-list --count "${code_commit}..HEAD" -- "${code_refs_arr[@]}" 2>/dev/null || echo 0)
+    fi
+
+    local code_refs_changed_json="[]"
+    if [ "$status" = "stale" ] && [ -n "$code_commit" ]; then
+      local changed_refs=()
+      for ref in "${code_refs_arr[@]+"${code_refs_arr[@]}"}"; do
+        local ref_commit
+        ref_commit=$(git log -1 --format=%H -- "$ref" 2>/dev/null || true)
+        if [ -n "$ref_commit" ] && [ "$ref_commit" != "$code_commit" ]; then
+          changed_refs+=("$ref")
+        fi
+      done
+      if [ ${#changed_refs[@]} -gt 0 ]; then
+        code_refs_changed_json=$(printf '%s\n' "${changed_refs[@]}" | jq -R . | jq -cs .)
+      fi
+    fi
 
     if [ "$status" = "current" ]; then
       count_current=$((count_current + 1))
@@ -391,32 +424,67 @@ cmd_check_freshness() {
       count_stale=$((count_stale + 1))
     fi
 
-    # Add doc_type and last_verified to the freshness result
-    local doc_entry
-    doc_entry=$(echo "$freshness" | jq \
-      --arg doc_type "$doc_type" \
-      --arg last_verified "$last_verified" \
-      '. + {doc_type: $doc_type, last_verified: $last_verified}')
-
-    docs_out=$(echo "$docs_out" | jq \
-      --arg p "$doc_path" \
-      --argjson entry "$doc_entry" \
-      '. + {($p): $entry}')
-
-  done <<< "$doc_paths"
-
-  # Detect untracked docs: .md files in docs/ not present in the index
-  local untracked_docs="[]"
-  local count_untracked=0
-  while IFS= read -r md_file; do
-    # Check if this file is in the index
-    local in_index
-    in_index=$(echo "$index" | jq --arg p "$md_file" '.docs | has($p)')
-    if [ "$in_index" = "false" ]; then
-      count_untracked=$((count_untracked + 1))
-      untracked_docs=$(echo "$untracked_docs" | jq --arg p "$md_file" '. + [$p]')
+    if [ -n "$reason" ]; then
+      jq -nc \
+        --arg p "$doc_path" \
+        --arg status "$status" \
+        --arg reason "$reason" \
+        --argjson doc_modified "$doc_modified" \
+        --argjson commits_behind "$commits_behind" \
+        --argjson code_refs_changed "$code_refs_changed_json" \
+        --arg doc_type "$doc_type" \
+        --arg last_verified "$last_verified" \
+        '{($p): {status: $status, reason: $reason, doc_modified: $doc_modified, commits_behind: $commits_behind, code_refs_changed: $code_refs_changed, doc_type: $doc_type, last_verified: $last_verified}}' \
+        >> "$jsonl_tmp"
+    else
+      jq -nc \
+        --arg p "$doc_path" \
+        --arg status "$status" \
+        --argjson doc_modified "$doc_modified" \
+        --argjson commits_behind "$commits_behind" \
+        --arg doc_type "$doc_type" \
+        --arg last_verified "$last_verified" \
+        '{($p): {status: $status, doc_modified: $doc_modified, commits_behind: $commits_behind, doc_type: $doc_type, last_verified: $last_verified}}' \
+        >> "$jsonl_tmp"
     fi
-  done < <(find docs -name '*.md' -not -path 'docs/archive/*' 2>/dev/null | sort)
+
+  done < <(jq -j '
+    .docs | to_entries[] | (
+      [
+        .key,
+        (.value.status // ""),
+        (.value.doc_type // ""),
+        (.value.last_verified // ""),
+        (.value.content_hash // ""),
+        (.value.code_commit // ""),
+        ((.value.code_refs // []) | join(","))
+      ] | @tsv
+    ) + "\u0000"
+  ' "$index_file")
+
+  # Merge JSON-lines accumulator into a single object in ONE jq invocation
+  # instead of N. `reduce .[] as $row (...; . + $row)` works because each
+  # row is a single-key object and the union operator on disjoint keys is
+  # just object merge.
+  local docs_out
+  if [ -s "$jsonl_tmp" ]; then
+    docs_out=$(jq -cs 'reduce .[] as $row ({}; . + $row)' "$jsonl_tmp")
+  else
+    docs_out="{}"
+  fi
+
+  # Untracked detection — set-difference between filesystem and index keys.
+  # Replaces N per-file `jq '.docs | has($p)'` queries with a single
+  # `jq keys` + `find` + `comm`.
+  jq -r '.docs | keys[]' "$index_file" | sort > "$idx_paths_tmp"
+  find docs -name '*.md' -not -path 'docs/archive/*' 2>/dev/null | sort > "$fs_paths_tmp"
+  local untracked_docs untracked_count
+  if [ -s "$fs_paths_tmp" ]; then
+    untracked_docs=$(comm -23 "$fs_paths_tmp" "$idx_paths_tmp" | jq -R . | jq -cs .)
+  else
+    untracked_docs="[]"
+  fi
+  untracked_count=$(printf '%s' "$untracked_docs" | jq 'length')
 
   # Build final output
   jq -n \
@@ -426,7 +494,7 @@ cmd_check_freshness() {
     --argjson stale "$count_stale" \
     --argjson missing "$count_missing" \
     --argjson deprecated "$count_deprecated" \
-    --argjson untracked "$count_untracked" \
+    --argjson untracked "$untracked_count" \
     --argjson untracked_docs "$untracked_docs" \
     --argjson docs "$docs_out" \
     '{
