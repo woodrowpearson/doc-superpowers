@@ -14,7 +14,20 @@ DOC_INDEX="${DOC_INDEX:-docs/.doc-index.json}"
 [[ -f "$DOC_TOOLS" ]] || exit 0
 [[ -f "$DOC_INDEX" ]] || exit 0
 
-result=$("$DOC_TOOLS" check-freshness 2>/dev/null) || exit 0
+# Scope the freshness check to files that changed between the two checked-out
+# revisions ($1=prev HEAD, $2=new HEAD). Running the full-index walk
+# synchronously here freezes the terminal on large indices. Mirror the
+# pre-commit hook's --code-refs scoping. If the changed-file set can't be
+# determined (e.g. unknown revisions), skip silently rather than full-walk.
+changed=$(git diff --name-only "${1:-}" "${2:-}" 2>/dev/null)
+[[ -z "$changed" ]] && exit 0
+
+code_refs_args=()
+while IFS= read -r f; do
+  [[ -n "$f" ]] && code_refs_args+=("$f")
+done <<< "$changed"
+
+result=$("$DOC_TOOLS" check-freshness --code-refs "${code_refs_args[@]}" 2>/dev/null) || exit 0
 
 stale_count=$(echo "$result" | jq -r '.summary.stale // 0' 2>/dev/null) || exit 0
 missing_count=$(echo "$result" | jq -r '.summary.missing // 0' 2>/dev/null) || missing_count=0
