@@ -174,9 +174,15 @@ test_post_merge_reports_stale() {
   echo "test: post-merge reports stale docs"
   setup
   build_test_index
-  # Make code change to trigger staleness
+  # The hook scopes to ORIG_HEAD..HEAD, so a real merge must bring in the
+  # code change. Change src/ on a feature branch and merge it (git merge
+  # sets ORIG_HEAD), making the src/-referencing doc stale within the range.
+  base=$(git rev-parse --abbrev-ref HEAD)
+  git checkout -b feature --quiet
   echo "changed" > src/index.js
   git add src/index.js && git commit -m "change code" --quiet
+  git checkout "$base" --quiet
+  git merge --no-ff feature -m "merge feature" --quiet
   set +e
   output=$(DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/post-merge" 2>&1)
   exit_code=$?
@@ -184,6 +190,26 @@ test_post_merge_reports_stale() {
   assert_eq "0" "$exit_code" "always exits 0"
   assert_contains "$output" "stale" "reports stale docs"
   assert_contains "$output" "doc-superpowers" "identifies source"
+  teardown
+}
+
+test_post_merge_silent_when_merge_untouched_code() {
+  echo "test: post-merge silent when merge changed no referenced code"
+  setup
+  build_test_index
+  # Merge brings in only an unrelated file — scoped check finds nothing stale.
+  base=$(git rev-parse --abbrev-ref HEAD)
+  git checkout -b feature --quiet
+  echo "unrelated" > unrelated.txt
+  git add unrelated.txt && git commit -m "unrelated" --quiet
+  git checkout "$base" --quiet
+  git merge --no-ff feature -m "merge feature" --quiet
+  set +e
+  output=$(DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/post-merge" 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_eq "" "$output" "silent — merge touched no referenced code"
   teardown
 }
 
@@ -206,6 +232,7 @@ echo ""
 echo "=== Git Hook: post-merge ==="
 test_post_merge_silent_no_stale
 test_post_merge_reports_stale
+test_post_merge_silent_when_merge_untouched_code
 test_post_merge_skip_env
 
 # --- post-checkout hook tests ---
@@ -230,10 +257,14 @@ test_post_checkout_reports_on_branch_switch() {
   echo "test: post-checkout reports stale on branch switch (flag=1)"
   setup
   build_test_index
+  # The hook scopes to the diff between the two checked-out revisions ($1,$2),
+  # so pass the real prev/new SHAs spanning the src/ change.
+  prev=$(git rev-parse HEAD)
   echo "changed" > src/index.js
   git add src/index.js && git commit -m "change" --quiet
+  new=$(git rev-parse HEAD)
   set +e
-  output=$(DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/post-checkout" abc123 def456 1 2>&1)
+  output=$(DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/post-checkout" "$prev" "$new" 1 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "always exits 0"
