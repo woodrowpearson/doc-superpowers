@@ -124,4 +124,20 @@ assert_not_contains "$WORKFLOWS" "are all governing specs in \`Implemented\` sta
 assert_not_contains "$CONVENTIONS" 'Transitions: `Draft` → `In Review` (first implementation chunk) → `Implemented` (verification passes).' \
   "conventions doc no longer states the pre-fix three-rung ladder"
 
+echo "--- closing pass ---"
+assert_contains "$DOCSPEC" 'spec-verify` is read-only' \
+  "spec template note does not attribute Status writes to spec-verify"
+assert_not_contains "$ACTIONS" "two **P3 informational** lines" \
+  "P3 informational line count is not stale"
+assert_contains "$ACTIONS" 'held at `In Review` by design' \
+  "spec-verify reports deliberately-held targets informationally"
+assert_contains "$WORKFLOWS" "never writing over a later status" \
+  "workflow doc's finalize summary carries the monotonicity qualifier"
+
+GUIDE="$(cat "$REPO_ROOT/docs/codebase-guide.md")"
+assert_not_contains "$GUIDE" "all should be Implemented" \
+  "codebase guide does not restate the unconditional status check"
+assert_not_contains "$WORKFLOWS" "All specs implemented" \
+  "workflow diagram source does not restate the unconditional PASS condition"
+
 print_summary

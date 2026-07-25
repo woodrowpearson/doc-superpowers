@@ -230,9 +230,10 @@ Two modes: **post-execute** (final compliance check before merging) and **review
    - **target** at an exempt status (`Active`, `Deprecated`, `Superseded`, …) → **not a finding**. `Active` reference specs are continuously evolving and never reach `Implemented` by design.
    - **constraint** → **not a finding** at any status. The work was never expected to advance it.
 
-   Then emit two **P3 informational** lines. These are never findings and never cause a FAIL — they exist because the two suppressions above are otherwise silent in the failing direction:
+   Then emit three **P3 informational** lines. These are never findings and never cause a FAIL — they exist because the suppressions above are otherwise silent in the failing direction:
    - **Inferred constraints** — list specs treated as constraint references *by inference* rather than by an explicit `:constraint` marker: "N spec(s) treated as constraint references by inference — pass `:constraint` to confirm, or fix their `code_refs` if they were meant to be implementation targets." Role inference is circular: wrong `code_refs` produce a constraint verdict, the constraint branch skips the `code_refs` refinement step, so the `code_refs` stay wrong and the spec silently never advances. Specs marked `:constraint` explicitly are not listed — the caller already said so.
    - **Unrecognized statuses** — list specs at an unrecognized status, i.e. one outside the documented vocabulary (a typo such as `Implemenetd`, or a value from a downstream vocabulary): "N spec(s) at an unrecognized status — automation will never transition these." R3 correctly declines to write them; reporting them is what keeps them from being invisible forever.
+   - **Held at `In Review`** — list partially-covered targets held by design: "N spec(s) held at `In Review` by design — remaining scope recorded in Implementation Notes." Without this line a deliberate hold is indistinguishable from a skipped task in the report, which is the ambiguity the recorded scope exists to resolve.
 4. **Coverage check** — Five-way alignment across five artifact relationships:
 
    **Design doc → Specs:** Parse the design doc's major sections (identified by `##` headings that describe system behavior or architecture). For each section, check whether a governing spec exists whose `Source` field points to this design doc AND whose category and content correspond to that section's domain. Missing correspondence = "design intent without formal spec."
@@ -249,7 +250,7 @@ Two modes: **post-execute** (final compliance check before merging) and **review
    - **PASS:** Every spec required to be `Implemented` by the Status check (step 3) is `Implemented` AND no unresolved deviations AND no "design intent without formal spec" findings AND CLAUDE.md and README.md are current
    - **FAIL:** Any spec required to be `Implemented` by the Status check (step 3) is not, OR any unresolved deviation, OR any "design intent without formal spec" finding, OR CLAUDE.md/README.md staleness detected
 
-   Specs the Status check exempts — constraint references, and specs at `Active` / `Deprecated` / `Superseded` — never contribute to a FAIL verdict. Neither do the two P3 informational lines.
+   Specs the Status check exempts — constraint references, targets held at `In Review` with recorded remaining scope, and specs at `Active` / `Deprecated` / `Superseded` — never contribute to a FAIL verdict. Neither do the three P3 informational lines.
 
    **Recovery:** update per `references/doc-spec.md` CLAUDE.md / README.md update rules, then re-run `spec-verify`.
 
