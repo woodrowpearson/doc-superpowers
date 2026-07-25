@@ -101,4 +101,27 @@ assert_not_contains "$EVALS" "all should be Implemented" \
 if jq empty "$REPO_ROOT/evals/evals.json" >/dev/null 2>&1; then JSON_OK=0; else JSON_OK=1; fi
 assert_eq "0" "$JSON_OK" "evals.json is valid JSON"
 
+echo "--- final-review fixes ---"
+assert_contains "$ACTIONS" 'never write `In Review` over a later status' \
+  "canonical partial-coverage branch is R2-qualified"
+assert_contains "$ACTIONS" "sanctioned outcome for a partially-covered target" \
+  "spec-verify does not flag deliberately-held targets"
+assert_contains "$ACTIONS" "Match statuses case-insensitively" \
+  "status matching semantics defined"
+assert_contains "$AGENTPROMPT" "Rows are evaluated top-down" \
+  "review-agent table states row precedence"
+
+TEMPLATES="$(cat "$REPO_ROOT/references/output-templates.md")"
+assert_contains "$TEMPLATES" "### Informational (P3)" \
+  "compliance report has a surface for the P3 informational lines"
+
+WORKFLOWS="$(cat "$REPO_ROOT/docs/workflows/doc-superpowers.md")"
+CONVENTIONS="$(cat "$REPO_ROOT/docs/conventions.md")"
+assert_not_contains "$WORKFLOWS" "set all specs to \`Implemented\`" \
+  "workflow doc no longer restates the unconditional finalize"
+assert_not_contains "$WORKFLOWS" "are all governing specs in \`Implemented\` status?" \
+  "workflow doc no longer restates the unconditional status check"
+assert_not_contains "$CONVENTIONS" 'Transitions: `Draft` → `In Review` (first implementation chunk) → `Implemented` (verification passes).' \
+  "conventions doc no longer states the pre-fix three-rung ladder"
+
 print_summary

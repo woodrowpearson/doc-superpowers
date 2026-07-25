@@ -254,15 +254,19 @@ The Claude tier **copies** hook scripts to `.claude/hooks/doc-superpowers/` with
 
 ### Status Transitions
 
-Spec files use a `Status` field that follows a linear progression:
+Spec files use a `Status` field. Ladder statuses progress monotonically; exempt statuses sit outside the ladder and automation never transitions them. The canonical rules live in the **Spec Status Model** section of `references/spec-lifecycle-actions.md` — this table summarizes, it does not define.
 
-| Status | Meaning | Set By |
-|--------|---------|--------|
-| `Draft` | Spec generated, not yet implemented | `spec-generate` |
-| `In Review` | Implementation started, spec under active verification | `spec-inject --phase=execute` |
-| `Implemented` | Verification passed, spec matches code | `spec-verify --mode=post-execute` |
+| Status | Class | Meaning | Written by |
+|--------|-------|---------|-----------|
+| `Draft` | Ladder | Spec generated, not yet implemented | `spec-generate` |
+| `In Review` | Ladder | Implementation started, or a partially-covered target held pending deferred scope | `spec-inject` |
+| `Approved` | Ladder | Human-approved pre-implementation; automation never writes it | human only |
+| `Implemented` | Ladder | Scope-covered target, verification passed | `spec-inject` |
+| `Active` | Exempt | Continuously-evolving reference spec; never "completes" | human only |
+| `Deprecated` | Exempt | No longer governing | human only |
+| `Superseded` | Exempt | Replaced by another spec | `spec-generate` |
 
-Transitions: `Draft` → `In Review` (first implementation chunk) → `Implemented` (verification passes).
+Transitions: `Draft` → `In Review` → `Approved` → `Implemented`, monotonic — never regress. `spec-verify` is read-only and writes no `Status`; the writes belong to `spec-inject`.
 
 ### Supersession Conventions
 
