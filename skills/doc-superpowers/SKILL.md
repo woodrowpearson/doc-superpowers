@@ -655,7 +655,7 @@ Agent reports without specific evidence (exact doc text vs exact code text) are 
 | Putting diagrams in global `docs/diagrams/` | Co-locate: `docs/architecture/diagrams/`, `docs/workflows/diagrams/` |
 | Making audit write changes | Audit is read-only (gather→analyze→report). Execution belongs in `update` |
 | Running `spec-inject` without `spec-generate` first | Run `spec-generate` to create governing specs before injecting into plans |
-| Auto-updating spec content on drift | Only update status and Implementation Notes when aligned; flag drifted content for human review |
+| Auto-updating spec content on drift | Only update status and Implementation Notes when aligned AND the **Spec Status Model** permits the write — target role, ladder status, forward transition; see `references/spec-lifecycle-actions.md`. Flag drifted content for human review |
 | Running `spec-inject --phase=execute` after every task | Run after each chunk, not each task — per-task is excessive and noisy |
 
 ### Red Flags — STOP and Reconsider

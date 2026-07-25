@@ -121,7 +121,7 @@ doc-superpowers/
 | `references/doc-spec.md` | Doc templates, Mermaid syntax, naming conventions, schema reference | Adding doc types, changing templates |
 | `references/agent-prompt-template.md` | Review agent prompt template + scope-specific focus areas | Changing agent review instructions or adding project signals |
 | `references/output-templates.md` | Audit report format + plan template | Changing report structure or plan format |
-| `references/spec-lifecycle-actions.md` | Detailed procedures for spec-generate (incl. Step 5b stale content scan), spec-inject, spec-verify | Changing spec action steps or adding new spec actions |
+| `references/spec-lifecycle-actions.md` | Detailed procedures for spec-generate (incl. Step 5b stale content scan), spec-inject, spec-verify; defines the canonical **Spec Status Model** (ladder, exempt class, rules R1-R4, evaluation order) | Changing spec action steps or adding new spec actions; changing status transition rules, roles, or vocabulary |
 | `references/spec-lifecycle-protocol.md` | Wrapper author integration guide — input/output contracts, integration patterns | Adding integration patterns, changing action contracts |
 | `references/integration-patterns.md` | How other skills integrate with doc-superpowers (code review, commit review, wrapper skills) | Adding integration patterns |
 | `docs/codebase-guide.md` | Directory map, key files, code flow for this skill | Structural changes to the skill |

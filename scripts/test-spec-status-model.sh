@@ -169,4 +169,17 @@ assert_contains "$WORKFLOWS" "CLAUDE.md → Filesystem" \
 assert_contains "$WORKFLOWS" "README.md → Capabilities" \
   "workflow doc lists the README.md coverage axis"
 
+echo "--- previously-unpinned surfaces ---"
+SKILLMD="$(cat "$REPO_ROOT/skills/doc-superpowers/SKILL.md")"
+OVERVIEW="$(cat "$REPO_ROOT/docs/architecture/system-overview.md")"
+
+assert_not_contains "$SKILLMD" "Only update status and Implementation Notes when aligned;" \
+  "SKILL.md does not state that alignment alone licenses a status write"
+assert_contains "$SKILLMD" "**Spec Status Model** permits the write" \
+  "SKILL.md gates status writes on the model"
+assert_not_contains "$OVERVIEW" "auto-update spec status" \
+  "system overview does not state unconditional status auto-update"
+assert_contains "$OVERVIEW" "Spec Status Model" \
+  "system overview cites the canonical model"
+
 print_summary
