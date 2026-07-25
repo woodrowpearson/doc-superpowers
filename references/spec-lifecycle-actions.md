@@ -4,6 +4,68 @@ Read this file when executing `spec-generate`, `spec-inject`, or `spec-verify`. 
 
 ---
 
+## Spec Status Model — Canonical Transition Rules
+
+**Every action in this file MUST follow this model. Do not restate these rules elsewhere — cite this section.**
+
+### Vocabulary
+
+| Class | Statuses | Automation behaviour |
+|---|---|---|
+| **Ladder** | `Draft` → `In Review` → `Approved` → `Implemented` | Participate in automated transitions |
+| **Exempt** | `Active`, `Deprecated`, `Superseded`, **and any status not listed in the ladder** | Never transitioned by any action |
+
+The exempt class is open-world. A spec carrying an unrecognized status is exempt — leave it alone. Do not treat it as a data-entry error to be corrected, and do not extend automation by enumerating exempt values.
+
+### Rules
+
+- **R1 — Read before write.** Parse the spec's current `Status` before assigning any value. Never write `Status` without having read it first.
+- **R2 — Monotonic.** Transitions move forward along the ladder only. Never write a status earlier in the ladder than the current value. A regression is always a defect, never an intended outcome.
+- **R3 — Open-world exemption.** If the current `Status` is not a ladder value, make no transition, add no Implementation Notes, and make no `code_refs` write. Leave the spec untouched.
+- **R4 — Scope-gated advancement.** Advance a spec to `Implemented` only when this work implemented the spec's surface **and** that surface is fully covered.
+
+`Approved` needs no special-casing: it sits past `In Review` on the ladder, so R2 alone prevents a `Draft → In Review` step from regressing it.
+
+### Spec roles — implementation target vs. constraint reference
+
+A path passed via `--specs` is one of:
+
+- **target** — the work is expected to implement this spec's surface and advance its status.
+- **constraint** — the work must respect this spec (e.g. a field allowlist it must not violate) but must **not** advance it.
+
+Resolution, in precedence order:
+
+1. **Explicit marker.** `--specs=<path>:target` or `--specs=<path>:constraint`. An explicit marker always wins. The suffix is optional — unsuffixed paths remain valid.
+   ```
+   --specs=docs/specs/SPEC-UI-010-collection-view.md:target,docs/specs/SPEC-API-006-backend.md:constraint
+   ```
+2. **Inferred.** For an unsuffixed path, intersect the work's changed files (`git diff` against the branch base) with the spec's `code_refs` in `.doc-index.json`. Non-empty intersection → **target**. Empty intersection → **constraint**.
+
+A spec resolved as **constraint** is never written: no `Status` change, no Implementation Notes, no `code_refs` refinement, no `update-index` call.
+
+**Timing.** Role inference needs the changed-file set, which does not exist during `spec-inject --phase=plan` — nothing is implemented yet at plan-authoring time. So at injection time the explicit marker is the only role signal available, and injected tasks are written as instructions the executing agent evaluates against `git diff` **at execution time**. `spec-inject --phase=plan` never bakes a role decision into the plan text.
+
+### Coverage completeness
+
+For a **target** spec, classify how much of its surface this work implemented:
+
+- **Full** — the whole surface is implemented → eligible for `Implemented`, subject to R2.
+- **Partial** — the spec has surfaces this work deliberately deferred → leave at `In Review` and record the remaining scope in Implementation Notes.
+
+### Evaluation order
+
+Check in this order; the first rule that blocks a write wins:
+
+1. **Role** — resolved as constraint → stop, write nothing.
+2. **R3** — current status is exempt → stop, write nothing.
+3. **R4** — scope and coverage determine the target status.
+4. **R2** — target status is earlier on the ladder than the current status → stop, write nothing.
+5. Write.
+
+A constraint spec at `Draft` is left alone by step 1; a target spec at `Active` is left alone by step 2. Neither reaches R4.
+
+---
+
 ## `spec-generate` — Generate Formal Specs from Design Doc
 
 Use after brainstorming produces a design spec. Decomposes a narrative design document into formal `SPEC-{CAT}-NNN-{slug}.md` files with full metadata, indexing, and freshness tracking.
