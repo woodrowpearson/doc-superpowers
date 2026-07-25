@@ -59,14 +59,14 @@ PR review ──→ spec-verify (review) ──→ freshness + coverage findings
 **Input (plan phase):**
 - `--phase=plan`
 - `--plan=<path>` — Path to the implementation plan
-- `--specs=<paths>` — Comma-separated paths to governing specs
+- `--specs=<paths>` — Comma-separated paths to governing specs. Each path may carry an optional role suffix — `<path>:target` or `<path>:constraint` — declaring whether the work is expected to advance that spec. Unsuffixed paths are resolved by intersecting changed files with the spec's `code_refs` at execution time.
 
 **Output (plan phase):**
-- Modified plan document with spec maintenance tasks appended to each chunk
+- Modified plan document with spec maintenance tasks appended to each chunk. Injected tasks are status-aware and scope-aware: they read a spec's current `Status` before writing and resolve target vs. constraint at execution time. Constraint specs are never written.
 
 **Input (execute phase):**
 - `--phase=execute`
-- `--specs=<paths>` — Paths to governing specs
+- `--specs=<paths>` — Paths to governing specs, each with an optional `:target` / `:constraint` role suffix
 
 **Output (execute phase):**
 - Updated spec files (status, Implementation Notes, code_refs) if aligned

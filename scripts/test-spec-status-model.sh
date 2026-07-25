@@ -73,4 +73,20 @@ assert_contains "$AGENTPROMPT" "Exempt specs sit outside the ladder by design" \
 assert_not_contains "$AGENTPROMPT" 'Spec has `Status: Draft` but code exists' \
   "review-agent template no longer flags any Draft spec with code as P1"
 
+echo "--- template vocabulary and wrapper contract ---"
+DOCSPEC="$(cat "$REPO_ROOT/references/doc-spec.md")"
+PROTOCOL="$(cat "$REPO_ROOT/references/spec-lifecycle-protocol.md")"
+
+assert_contains "$DOCSPEC" \
+  "**Status**: Draft | In Review | Approved | Implemented | Active | Deprecated | Superseded" \
+  "spec template vocabulary includes Active and Deprecated"
+assert_contains "$DOCSPEC" "Spec Status Model" \
+  "spec template points at the canonical model"
+assert_contains "$DOCSPEC" "**Status**: Proposed | Active | Superseded | Deprecated" \
+  "ADR template vocabulary is unchanged"
+assert_contains "$PROTOCOL" '`<path>:target` or `<path>:constraint`' \
+  "wrapper-author --specs contract documents the role suffix"
+assert_contains "$PROTOCOL" "Constraint specs are never written" \
+  "wrapper-author output contract states constraint specs are never written"
+
 print_summary
