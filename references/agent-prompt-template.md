@@ -57,10 +57,13 @@ When the project has `docs/specs/` with formal specs, agents should also check:
 |--------|-------------|
 | `SPEC-{CAT}-NNN-*.md` files exist | Check spec `Status` field matches implementation state; verify `code_refs` point to real files |
 | Spec at a ladder status (`Draft` / `In Review` / `Approved`) but code exists in its `code_refs` | Flag as P1 — spec wasn't updated during implementation |
+| Spec held at `In Review` with remaining scope recorded in Implementation Notes | **Not a finding.** A partially-covered target is held at `In Review` by design — see **Coverage completeness** in `references/spec-lifecycle-actions.md` |
 | Spec has `Status: Implemented` but code diverged | Flag as P0 — spec claims implementation matches but code has changed |
 | Spec at an exempt status (`Active`, `Deprecated`, `Superseded`, or any status not on the ladder) | **Not a finding.** Exempt specs sit outside the ladder by design — see **Spec Status Model** in `references/spec-lifecycle-actions.md` |
 | Spec passed as a constraint reference (`:constraint`) for the work under review | **Not a finding** at any status. The work was never expected to advance it |
 | Changed files not covered by any spec's `code_refs` | Flag as P2 — unspecified implementation |
 | `Source` field in spec points to design doc | Cross-check design doc intent against spec content |
+
+Rows are evaluated top-down and the **Not a finding** rows override the P0/P1 rows above them: a spec that matches both is not a finding. Role first — a spec passed as a constraint reference is never a finding at any status, whatever else it matches.
 
 Add these checks to the standard review cycle when specs are detected in the project.

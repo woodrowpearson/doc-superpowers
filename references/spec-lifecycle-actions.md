@@ -17,6 +17,8 @@ Read this file when executing `spec-generate`, `spec-inject`, or `spec-verify`. 
 
 The exempt class is open-world. A spec carrying an unrecognized status is exempt — leave it alone. Do not treat it as a data-entry error to be corrected, and do not extend automation by enumerating exempt values.
 
+Match statuses case-insensitively and with surrounding whitespace trimmed, so `implemented` and `` `In Review` `` with a trailing space resolve to their ladder values rather than falling into the exempt class. A value that still does not match a ladder status after that normalization is genuinely exempt — and is reported by `spec-verify`'s unrecognized-status line, not silently corrected.
+
 ### Rules
 
 - **R1 — Read before write.** Parse the spec's current `Status` before assigning any value. Never write `Status` without having read it first.
@@ -43,14 +45,14 @@ Resolution, in precedence order:
 
 A spec resolved as **constraint** is never written: no `Status` change, no Implementation Notes, no `code_refs` refinement, no `update-index` call.
 
-**Timing.** Role inference needs the changed-file set, which does not exist during `spec-inject --phase=plan` — nothing is implemented yet at plan-authoring time. So at injection time the explicit marker is the only role signal available, and injected tasks are written as instructions the executing agent evaluates against `git diff` **at execution time**. `spec-inject --phase=plan` never bakes a role decision into the plan text.
+**Timing.** Role inference needs the changed-file set, which does not exist during `spec-inject --phase=plan` — nothing is implemented yet at plan-authoring time. So at injection time the explicit marker is the only role signal available, and injected tasks are written as instructions the executing agent evaluates against `git diff` **at execution time**. `spec-inject --phase=plan` never bakes a role decision into the plan text. At per-chunk execution the changed-file set reflects only the chunks run so far, so a spec whose surface lands in a later chunk infers as **constraint** in earlier ones and is skipped; this self-corrects at finalize, when the full range is visible, but it does make the inferred-constraints report noisier mid-plan.
 
 ### Coverage completeness
 
 For a **target** spec, classify how much of its surface this work implemented:
 
 - **Full** — the whole surface is implemented → eligible for `Implemented`, subject to R2.
-- **Partial** — the spec has surfaces this work deliberately deferred → leave at `In Review` and record the remaining scope in Implementation Notes.
+- **Partial** — the spec has surfaces this work deliberately deferred → hold at `In Review` and record the remaining scope in Implementation Notes. Subject to R2: "hold at `In Review`" means *do not advance to `Implemented`* — never write `In Review` over a later status. A partially-covered spec already at `Approved` or `Implemented` stays exactly where it is.
 
 ### Evaluation order
 
@@ -224,6 +226,7 @@ Two modes: **post-execute** (final compliance check before merging) and **review
 2. **Staleness check** — Are any specs still flagged stale after all tasks completed? This catches specs that `spec-inject` (execute phase) flagged for review but were never addressed.
 3. **Status check** — For each governing spec, resolve its role and status class per the **Spec Status Model**, then check only what applies:
    - **target** at a ladder status → expect `Implemented`. Still at `Draft`, `In Review`, or `Approved` means implementation tasks were skipped or the plan didn't cover that spec's scope — report which of the two it is.
+   - **target** held at `In Review` with the remaining scope recorded in Implementation Notes → **not a finding**. This is the Spec Status Model's sanctioned outcome for a partially-covered target (see **Coverage completeness**), not a skipped task. Report it as informational. Absent that recorded scope it falls under the branch above — the Implementation Notes are what distinguish a deliberate hold from a skipped task.
    - **target** at an exempt status (`Active`, `Deprecated`, `Superseded`, …) → **not a finding**. `Active` reference specs are continuously evolving and never reach `Implemented` by design.
    - **constraint** → **not a finding** at any status. The work was never expected to advance it.
 

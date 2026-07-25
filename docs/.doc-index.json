@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-07-25T01:37:14Z",
+  "generated_at": "2026-07-25T01:59:59Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -20,31 +20,32 @@
       "implementation": []
     },
     "docs/codebase-guide.md": {
-      "content_hash": "sha256:0917ab845e29e441d5678c2c9da59d7485ba5e63b0be5497ed6018511e464cd6",
+      "content_hash": "sha256:ae9d4b1e558b7aa8a63d6c8ba02b61584537c28e801fe4d4320e0131751054b7",
       "code_refs": [
         "SKILL.md",
         "scripts/"
       ],
-      "code_commit": "feecd7e00ed62f17124aaa6c94e9e82a5bbd4284",
+      "code_commit": "54f545748a0c319b45043e197e70ffa7fd7a9b18",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-05-28T00:42:54Z",
+      "last_verified": "2026-07-25T01:59:59Z",
       "implementation": []
     },
     "docs/conventions.md": {
-      "content_hash": "sha256:e91bab1554a490eb3fd3d1aae4e850e7d2d46c691ad7f4dc82d885258d689b1b",
+      "content_hash": "sha256:b14833a6ac03422d43dc850ac72f426806098c8fb680d144adbee95bd4567774",
       "code_refs": [
         "SKILL.md",
         "references/doc-spec.md"
       ],
-      "code_commit": "25401a5be961ac927872a0d4f1d2623d4067f01e",
+      "code_commit": "db9cede6bd335c0572ec4c52f6564558c8a7b860",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-07T08:09:48Z"
+      "last_verified": "2026-07-25T01:59:59Z",
+      "implementation": []
     },
     "docs/guides/getting-started.md": {
       "content_hash": "sha256:2e5fd5eb3819e88f85a1c4acf62ddd96d3b042be526d93e6722f57a92626d2c4",
@@ -60,17 +61,17 @@
       "last_verified": "2026-05-17T03:36:49Z"
     },
     "docs/workflows/doc-superpowers.md": {
-      "content_hash": "sha256:c890acec9e1014ce2249cd3604db6508becac647964e67e568b131c18b44e2e8",
+      "content_hash": "sha256:9e051040c34001c393a666c1d917b1c0858d5cb6841eaded630dba7afe26783e",
       "code_refs": [
         "SKILL.md",
         "scripts/"
       ],
-      "code_commit": "feecd7e00ed62f17124aaa6c94e9e82a5bbd4284",
+      "code_commit": "54f545748a0c319b45043e197e70ffa7fd7a9b18",
       "doc_type": "workflows",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-05-28T00:42:54Z",
+      "last_verified": "2026-07-25T01:59:59Z",
       "implementation": []
     },
     "docs/plans/2026-03-26-audit-report.md": {

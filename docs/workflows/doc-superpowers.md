@@ -509,7 +509,7 @@ Two modes: **plan phase** (inject spec maintenance tasks into implementation pla
 
 1. Read the plan document and identify chunk boundaries (`## Chunk N:` or `### Task N:` headings)
 2. For each chunk, append a spec update task (update status, verify Implementation Notes, refine `code_refs`, run `update-index`)
-3. In the last chunk, also append a spec finalization task (set all specs to `Implemented`, fill Implementation Notes, final index update)
+3. In the last chunk, also append a spec finalization task (advance only scope-covered target specs to `Implemented`, hold partially-covered ones at `In Review`, leave constraint references and exempt statuses untouched, fill Implementation Notes, final index update)
 4. Output modified plan document
 
 ### Execute Phase
@@ -526,7 +526,7 @@ Runs after each plan chunk completes (not after every individual task).
 2. **Determine alignment vs. drift:**
    - **Aligned** (implementation achieves spec intent) — update spec `Status`, update Implementation Notes, refine `code_refs`, call `update-index`
    - **Drifted** (implementation contradicts spec intent) — flag for human review with deviation note; do not auto-update spec content
-3. **Status transitions**: Draft → In Review (first implementation) → Implemented (verification passes)
+3. **Status transitions**: governed by the **Spec Status Model** in `references/spec-lifecycle-actions.md` — `Draft` → `In Review` (first implementation) → `Approved` → `Implemented` (verification passes), monotonic, with exempt statuses and constraint specs never transitioned
 4. Output updated spec files (if aligned) or deviation flags (if drifted)
 
 ![spec-inject Sequence](diagrams/sequence-spec-inject.png)
@@ -578,14 +578,14 @@ Two modes: **post-execute** (final compliance check before merging) and **review
 
 1. **Existence check** — run `doc-tools.sh check-freshness` across all specs in scope
 2. **Staleness check** — are any specs still flagged stale after all tasks completed?
-3. **Status check** — are all governing specs in `Implemented` status?
+3. **Status check** — is every spec the Spec Status Model requires to reach `Implemented` there? Constraint references and exempt statuses are not findings
 4. **Coverage check** — three-way alignment:
    - **Design doc → Specs**: does each design section have a corresponding formal spec?
    - **Specs → Code**: do spec `code_refs` directories/files exist with implementation?
    - **Code → Specs**: do changed files fall within a governing spec's `code_refs`?
 5. **PASS/FAIL verdict**:
-   - **PASS**: all specs `Implemented`, no unresolved deviations, no uncovered design intent
-   - **FAIL**: any spec not `Implemented`, unresolved deviations, or uncovered design intent
+   - **PASS**: every spec the Status check requires to be `Implemented` is, no unresolved deviations, no uncovered design intent
+   - **FAIL**: any spec the Status check requires to be `Implemented` is not, unresolved deviations, or uncovered design intent
 6. **Output compliance report** with verdict, summary, details table, unresolved items, and recommendation
 
 ### Review Mode

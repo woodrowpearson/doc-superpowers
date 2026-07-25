@@ -321,7 +321,7 @@ Wrapper skill calls /doc-superpowers spec-verify --mode=post-execute --specs=<pa
   → Existence check, staleness check, status check (target specs at a ladder status should be Implemented; constraint refs and exempt statuses are not findings)
   → Three-way coverage check: design doc ↔ specs ↔ code
   → Output: PASS/FAIL verdict with compliance report
-  → Status transition: In Review → Implemented (if aligned, and only for scope-covered target specs)
+  → Reports status only — spec-verify is read-only; the In Review → Implemented write belongs to spec-inject, and only for scope-covered target specs
 
 During review: /doc-superpowers spec-verify --mode=review --changed-files=<paths>
   → Map changed files to governing specs via code_refs
