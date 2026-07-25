@@ -38,8 +38,10 @@ action rather than use it.
 Not the two lines. The root cause is that **the status-transition rules are restated
 independently at each call site**, so the call sites drift apart and contradict each other.
 `spec-lifecycle-actions.md` states transition rules in four places (`:100`, `:116`, `:135`,
-`:137`) and `spec-verify` assumes a fifth (`:155`). Fixing only `:100-101` and `:116-117`
-leaves that structure intact and invites recurrence.
+`:137`), `spec-verify` assumes a fifth (`:155`), and `references/agent-prompt-template.md`
+— marked **REQUIRED** for dispatched review agents at `SKILL.md:40` — restates them a sixth
+time in its Spec-Aware Review table (`:58-60`). Fixing only `:100-101` and `:116-117` leaves
+that structure intact and invites recurrence.
 
 ### Taxonomy gap discovered during design
 
@@ -122,8 +124,16 @@ the model states it explicitly so implementers do not attempt inference during i
 **Coverage completeness.** For a target spec, the executing agent classifies coverage:
 
 - **Fully covered** — the plan implemented the spec's whole surface → set `Implemented`.
-- **Partially covered** — the spec has surfaces this plan deliberately deferred → leave at
+- **Partially covered** — the spec has surfaces this plan deliberately deferred → hold at
   `In Review` and record the remaining scope in Implementation Notes.
+
+**The partial branch is still subject to R2.** "Hold at `In Review`" means *do not advance
+to `Implemented`* — it does not license writing `In Review` over a later status. Issue #12's
+own headline spec is exactly this case: `SPEC-UI-032` sits at `Implemented` and the plan
+only added regression guards around it, so it is a partially-covered target. Written without
+the R2 guard, the partial branch would drive it back to `In Review` — reproducing failure
+mode 1 through the finalize door instead of the per-chunk door. The branch must therefore
+state the guard inline, not rely on the reader applying the evaluation order.
 
 ### B. Call sites rewritten to cite the model
 
@@ -136,6 +146,26 @@ the model states it explicitly so implementers do not attempt inference during i
 | `:137` (execute phase, ladder) | Replace the standalone ladder restatement with a pointer to the model; ladder gains `Approved` |
 | `:155` (spec-verify status check) | Require `Implemented` only for fully-covered target specs; exempt statuses and constraint specs are not findings |
 | `:169-170` (spec-verify PASS/FAIL) | Align verdict criteria with the revised status check |
+| `agent-prompt-template.md:58-60` | Gate the P1 "Draft but code exists" rule on ladder-status target specs; add rows stating exempt and constraint specs are not findings |
+
+### B2. Don't-write is not don't-report
+
+Two of the new rules suppress a *write*; neither should suppress *visibility*. Both hazards
+are silent by construction, which is the exact harm the issue is about:
+
+- **Inference can be wrong in the quiet direction.** `code_refs` are documented as
+  best-effort (`spec-lifecycle-actions.md:49`) and are refined by the per-chunk step that
+  the constraint branch skips. So wrong `code_refs` → inferred constraint → refinement never
+  runs → `code_refs` stay wrong permanently, and a genuine implementation target silently
+  never advances. Worse, `spec-verify` exempting constraint specs means the same faulty
+  inference suppresses both the write and the check.
+- **Open-world exemption swallows typos.** A spec at `Implemenetd` or `In-Review` is exempt
+  forever, invisible to both automation and verification.
+
+`spec-verify` therefore emits two **non-blocking P3 informational** lines — never a FAIL:
+specs treated as constraint by *inference* (as opposed to an explicit marker), and specs at
+statuses outside the documented vocabulary. This keeps the open-world write semantics while
+closing the reporting hole.
 
 ### C. Supporting files
 
@@ -145,6 +175,11 @@ the model states it explicitly so implementers do not attempt inference during i
 - **`references/spec-lifecycle-protocol.md:62,69,72`** — document the `--specs` role suffix
   in the wrapper-author contract; state in the output section that constraint specs are
   never written.
+- **`docs/codebase-guide.md:162,313,321,324`** — restates the old ladder in four places.
+  `:321` ("status check — all should be Implemented") directly contradicts the revised
+  check, and `:162` already misattributes status transitions to `SKILL.md`, which contains
+  none. This repo ships doc-freshness tooling and indexes this file, so leaving it stale is
+  self-inconsistent.
 - **`evals/evals.json`** — eval 10 (`spec-inject-plan`) currently *asserts the bug*: its
   `injects-finalization-task` assertion reads "set all specs to Implemented". Rewrite that
   assertion and the `expected_output`. Add a new eval reproducing issue #12's scenario:
