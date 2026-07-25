@@ -159,7 +159,7 @@ doc-superpowers/
 | Hooks action routing | `skills/doc-superpowers/SKILL.md` Section 1 "`hooks`" subsection |
 | Spec lifecycle routing | `skills/doc-superpowers/SKILL.md` Section 1 "Spec Lifecycle Routing" + `spec-generate`, `spec-inject`, `spec-verify` subsections |
 | Spec lifecycle integration guide | `references/spec-lifecycle-protocol.md` — wrapper author contracts, integration patterns |
-| Spec status transitions | `skills/doc-superpowers/SKILL.md` `spec-inject` and `spec-verify` subsections (Draft -> In Review -> Implemented) |
+| Spec status transitions | `references/spec-lifecycle-actions.md` **Spec Status Model** section — canonical ladder, exemptions, and roles |
 | Spec supersession logic | `skills/doc-superpowers/SKILL.md` `spec-generate` subsection — replaces/superseded_by handling |
 | Release action routing | `skills/doc-superpowers/SKILL.md` Section 1 "`release`" subsection — commit range, semver bump, drafting agent, RELEASE-NOTES.md prepend |
 | RELEASE-NOTES.md auditing | `skills/doc-superpowers/SKILL.md` audit step 8 — parse latest version date, detect unreleased commits, emit P2 Incomplete |
@@ -310,7 +310,7 @@ User invokes /doc-superpowers spec-generate --design-doc=<path>
 ```
 Wrapper skill calls /doc-superpowers spec-inject --phase=plan --plan=<path> --specs=<paths>
   → Reads governing specs, injects spec compliance tasks into plan
-  → Updates spec Status: Draft → In Review
+  → Updates spec Status per the Spec Status Model (guarded: Draft → In Review only, never regresses)
 
 Wrapper skill calls /doc-superpowers spec-inject --phase=execute --specs=<paths>
   → Runs freshness check on governing specs
@@ -318,10 +318,10 @@ Wrapper skill calls /doc-superpowers spec-inject --phase=execute --specs=<paths>
   → Flags drift for human review if detected
 
 Wrapper skill calls /doc-superpowers spec-verify --mode=post-execute --specs=<paths>
-  → Existence check, staleness check, status check (all should be Implemented)
+  → Existence check, staleness check, status check (target specs at a ladder status should be Implemented; constraint refs and exempt statuses are not findings)
   → Three-way coverage check: design doc ↔ specs ↔ code
   → Output: PASS/FAIL verdict with compliance report
-  → Status transition: In Review → Implemented (if aligned)
+  → Status transition: In Review → Implemented (if aligned, and only for scope-covered target specs)
 
 During review: /doc-superpowers spec-verify --mode=review --changed-files=<paths>
   → Map changed files to governing specs via code_refs

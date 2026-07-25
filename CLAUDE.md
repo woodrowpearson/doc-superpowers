@@ -33,6 +33,7 @@ doc-superpowers/
 │   ├── test-doc-pr-release.sh # Test suite for doc-pr-release helpers
 │   ├── test-helpers.sh   # Shared test utilities
 │   ├── test-hooks.sh     # Test suite for hooks installer and hook scripts
+│   ├── test-spec-status-model.sh # Test suite for the canonical Spec Status Model + call sites
 │   ├── merge-doc-index.sh  # Custom git merge driver for .doc-index.json
 │   ├── test-merge-driver.sh # Test suite for merge driver
 │   └── hooks/
@@ -97,6 +98,7 @@ doc-superpowers/
 | `scripts/doc-tools.sh` | Bundled freshness tooling — 9 subcommands for index and version management | Changing staleness detection, index schema, version sync |
 | `scripts/test-doc-tools.sh` | Test suite for doc-tools.sh | Adding tests for new doc-tools features |
 | `scripts/test-hooks.sh` | Test suite for hooks installer and hook scripts | Adding tests for new hooks or installer features |
+| `scripts/test-spec-status-model.sh` | Test suite pinning the canonical Spec Status Model wording and its call sites | Changing spec status transition rules, roles, or vocabulary |
 | `scripts/test-doc-pr-release.sh` | Test suite for doc-pr-release helpers (extract-context, update-pr-body, commit-and-push) + YAML placeholder substitution | Adding tests for fragment-producer features |
 | `scripts/hooks/ci/doc-pr-release.yml` | AI per-PR release-notes fragment producer — drafts `RELEASE-NOTES.next/PR-<N>.md` on every push | Changing the producer workflow, prompt, or post-Claude verification |
 | `scripts/hooks/ci/doc-pr-release/*.sh` | Producer helpers: extract-context, update-pr-body, commit-and-push | Changing fragment context schema, PR-body editing, or push logic |

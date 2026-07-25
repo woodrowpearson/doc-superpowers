@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-05-28T00:42:54Z",
+  "generated_at": "2026-07-25T01:37:14Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -360,6 +360,33 @@
       "replaces": null,
       "superseded_by": null,
       "last_verified": "2026-05-17T03:36:56Z"
+    },
+    "docs/superpowers/specs/2026-07-24-spec-status-transition-model-design.md": {
+      "content_hash": "sha256:5c54a8a3ff4fc4c3bcba8184cb76c43c5c2522c6b012e42bc42acf6a196eb1d9",
+      "code_refs": [
+        "references/",
+        "skills/"
+      ],
+      "code_commit": "db9cede6bd335c0572ec4c52f6564558c8a7b860",
+      "doc_type": "spec",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-07-25T01:37:14Z"
+    },
+    "docs/superpowers/plans/2026-07-24-spec-status-transition-model.md": {
+      "content_hash": "sha256:35a990bbea9ab58cc58784a0fec6d71635ee2cf873037dd16f8baa62c1bcb565",
+      "code_refs": [
+        "references/",
+        "scripts/",
+        "evals/"
+      ],
+      "code_commit": "54f545748a0c319b45043e197e70ffa7fd7a9b18",
+      "doc_type": "plan",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-07-25T01:37:14Z"
     }
   }
 }
