@@ -319,7 +319,7 @@ Wrapper skill calls /doc-superpowers spec-inject --phase=execute --specs=<paths>
 
 Wrapper skill calls /doc-superpowers spec-verify --mode=post-execute --specs=<paths>
   → Existence check, staleness check, status check (target specs at a ladder status should be Implemented; constraint refs, exempt statuses, and targets held at In Review with recorded remaining scope are not findings)
-  → Three-way coverage check: design doc ↔ specs ↔ code
+  → Five-way coverage check: design doc ↔ specs ↔ code ↔ CLAUDE.md ↔ README.md
   → Output: PASS/FAIL verdict with compliance report
   → Reports status only — spec-verify is read-only; the In Review → Implemented write belongs to spec-inject, and only for scope-covered target specs
 

@@ -572,20 +572,22 @@ Two modes: **post-execute** (final compliance check before merging) and **review
 **Input:**
 - `--mode=post-execute`
 - `--specs=<paths>` — Paths to governing specs
-- `--design-doc=<path>` — Path to original design doc (for three-way check)
+- `--design-doc=<path>` — Path to original design doc (for the five-way coverage check)
 
 **Steps:**
 
 1. **Existence check** — run `doc-tools.sh check-freshness` across all specs in scope
 2. **Staleness check** — are any specs still flagged stale after all tasks completed?
 3. **Status check** — is every spec the Spec Status Model requires to reach `Implemented` there? Constraint references and exempt statuses are not findings
-4. **Coverage check** — three-way alignment:
+4. **Coverage check** — five-way alignment:
    - **Design doc → Specs**: does each design section have a corresponding formal spec?
    - **Specs → Code**: do spec `code_refs` directories/files exist with implementation?
    - **Code → Specs**: do changed files fall within a governing spec's `code_refs`?
+   - **CLAUDE.md → Filesystem**: do CLAUDE.md's Directory Structure, Key Files, and Commands sections match the current project state?
+   - **README.md → Capabilities**: do README.md's feature list, action list, and usage examples match current project capabilities?
 5. **PASS/FAIL verdict**:
-   - **PASS**: every spec the Status check requires to be `Implemented` is, no unresolved deviations, no uncovered design intent
-   - **FAIL**: any spec the Status check requires to be `Implemented` is not, unresolved deviations, or uncovered design intent
+   - **PASS**: every spec the Status check requires to be `Implemented` is, no unresolved deviations, no uncovered design intent, and CLAUDE.md and README.md are current
+   - **FAIL**: any spec the Status check requires to be `Implemented` is not, unresolved deviations, uncovered design intent, or CLAUDE.md/README.md staleness
 6. **Output compliance report** with verdict, summary, details table, unresolved items, and recommendation
 
 ### Review Mode
@@ -611,7 +613,7 @@ flowchart LR
   subgraph PE["Post-Execute Mode"]
     A["Existence check"] --> B["Staleness check"]
     B --> C["Status check"]
-    C --> D["Three-way coverage check"]
+    C --> D["Five-way coverage check"]
     D --> E{Verdict}
     E -->|PASS| F["Required specs implemented"]
     E -->|FAIL| G["Surface report to user"]
@@ -730,7 +732,7 @@ flowchart LR
 | Spec generate (per domain) | spec-generate Phase 3 | Parse design doc, create formal SPEC-{CAT}-NNN files | Yes |
 | Spec inject (plan) | spec-inject plan phase | Read plan, inject spec maintenance tasks per chunk | Yes |
 | Spec inject (execute) | spec-inject execute phase | Check freshness, determine aligned vs. drifted | Yes |
-| Spec verify (post-execute) | spec-verify post-execute | Three-way coverage check, PASS/FAIL verdict | Yes |
+| Spec verify (post-execute) | spec-verify post-execute | Five-way coverage check, PASS/FAIL verdict | Yes |
 | Spec verify (review) | spec-verify review mode | Map changed files to specs, produce severity findings | Yes |
 
 ### User Interaction Gates
@@ -792,5 +794,5 @@ sequenceDiagram
 |-------|---------------|----------|
 | Agent evidence | Exact doc vs code quotes in findings | Always |
 | Freshness check | Hash or git-based staleness | After update |
-| Spec compliance | Three-way design→spec→code alignment | After spec-verify |
+| Spec compliance | Five-way design→spec→code→CLAUDE.md→README.md alignment | After spec-verify |
 | Human review | Git diff coherence | Before commit |

@@ -153,4 +153,20 @@ assert_not_contains "$CONVENTIONS" '| `Superseded` | Exempt | Replaced by anothe
 assert_contains "$ACTIONS" "any other non-ladder status — never contribute to a FAIL verdict" \
   "FAIL-exemption sentence keeps the exempt class open-world"
 
+echo "--- coverage-check arity ---"
+assert_not_contains "$ACTIONS" "for three-way check" \
+  "canonical file does not contradict itself on coverage arity"
+assert_not_contains "$WORKFLOWS" "three-way alignment" \
+  "workflow doc states five-way coverage alignment"
+assert_not_contains "$WORKFLOWS" "Three-way coverage check" \
+  "workflow doc diagram and tables state five-way"
+assert_not_contains "$GUIDE" "Three-way coverage check" \
+  "codebase guide states five-way coverage"
+assert_not_contains "$EVALS" "three-way coverage check" \
+  "eval 11 states five-way coverage"
+assert_contains "$WORKFLOWS" "CLAUDE.md → Filesystem" \
+  "workflow doc lists the CLAUDE.md coverage axis"
+assert_contains "$WORKFLOWS" "README.md → Capabilities" \
+  "workflow doc lists the README.md coverage axis"
+
 print_summary

@@ -220,7 +220,7 @@ Two modes: **post-execute** (final compliance check before merging) and **review
 **Input:**
 - `--mode=post-execute`
 - `--specs=<paths>` — Paths to governing specs
-- `--design-doc=<path>` — Path to original design doc (for three-way check)
+- `--design-doc=<path>` — Path to original design doc (for the five-way coverage check)
 
 1. **Existence check** — Run `doc-tools.sh check-freshness` across all specs in scope. If governing specs don't exist, that's a finding.
 2. **Staleness check** — Are any specs still flagged stale after all tasks completed? This catches specs that `spec-inject` (execute phase) flagged for review but were never addressed.
