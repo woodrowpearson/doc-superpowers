@@ -318,7 +318,7 @@ Wrapper skill calls /doc-superpowers spec-inject --phase=execute --specs=<paths>
   → Flags drift for human review if detected
 
 Wrapper skill calls /doc-superpowers spec-verify --mode=post-execute --specs=<paths>
-  → Existence check, staleness check, status check (target specs at a ladder status should be Implemented; constraint refs and exempt statuses are not findings)
+  → Existence check, staleness check, status check (target specs at a ladder status should be Implemented; constraint refs, exempt statuses, and targets held at In Review with recorded remaining scope are not findings)
   → Three-way coverage check: design doc ↔ specs ↔ code
   → Output: PASS/FAIL verdict with compliance report
   → Reports status only — spec-verify is read-only; the In Review → Implemented write belongs to spec-inject, and only for scope-covered target specs

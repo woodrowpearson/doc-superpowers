@@ -264,7 +264,7 @@ Spec files use a `Status` field. Ladder statuses progress monotonically; exempt 
 | `Implemented` | Ladder | Scope-covered target, verification passed | `spec-inject` |
 | `Active` | Exempt | Continuously-evolving reference spec; never "completes" | human only |
 | `Deprecated` | Exempt | No longer governing | human only |
-| `Superseded` | Exempt | Replaced by another spec | `spec-generate` |
+| `Superseded` | Exempt | Replaced by another spec | human only — `spec-generate` writes the `Superseded by` field and the index entry, not this `Status` |
 
 Transitions: `Draft` → `In Review` → `Approved` → `Implemented`, monotonic — never regress. `spec-verify` is read-only and writes no `Status`; the writes belong to `spec-inject`.
 

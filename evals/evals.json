@@ -360,7 +360,7 @@
       "id": 11,
       "name": "spec-verify-post-execute",
       "prompt": "All implementation tasks are done for the auth feature. Before I merge, can you verify that the specs are all satisfied? /doc-superpowers spec-verify --mode=post-execute --specs=docs/specs/SPEC-AUTH-001-oauth-flow.md,docs/specs/SPEC-DATA-001-user-schema.md --design-doc=docs/superpowers/specs/2026-03-14-user-auth-design.md",
-      "expected_output": "Should run check-freshness on all specs, check Status fields per the Spec Status Model (target specs at a ladder status should be Implemented; constraint references and specs at exempt statuses such as Active are not findings), perform three-way coverage check (design doc → specs → code), produce a compliance report with PASS/FAIL verdict. Report should include summary stats, per-spec details, unresolved items, and a recommendation.",
+      "expected_output": "Should run check-freshness on all specs, check Status fields per the Spec Status Model (target specs at a ladder status should be Implemented; constraint references, specs at exempt statuses such as Active, and targets held at In Review with recorded remaining scope are not findings), perform three-way coverage check (design doc → specs → code), produce a compliance report with PASS/FAIL verdict. Report should include summary stats, per-spec details, unresolved items, and a recommendation.",
       "files": [],
       "assertions": [
         {
@@ -371,7 +371,7 @@
         {
           "name": "checks-status-fields",
           "type": "output_check",
-          "description": "Verifies Status only where the model requires it — target specs at a ladder status must be Implemented; constraint references and exempt statuses are not findings"
+          "description": "Verifies Status only where the model requires it — target specs at a ladder status must be Implemented; constraint references, exempt statuses, and targets held at In Review with recorded remaining scope are not findings"
         },
         {
           "name": "three-way-coverage",

@@ -140,4 +140,17 @@ assert_not_contains "$GUIDE" "all should be Implemented" \
 assert_not_contains "$WORKFLOWS" "All specs implemented" \
   "workflow diagram source does not restate the unconditional PASS condition"
 
+echo "--- final consistency ---"
+NOTES="$(cat "$REPO_ROOT/RELEASE-NOTES.md")"
+assert_not_contains "$NOTES" "gains two non-blocking P3 informational lines" \
+  "release note states the correct P3 informational line count"
+assert_contains "$GUIDE" "targets held at In Review with recorded remaining scope are not findings" \
+  "codebase guide lists all three status-check carve-outs"
+assert_contains "$EVALS" "targets held at In Review with recorded remaining scope are not findings" \
+  "eval 11 lists all three status-check carve-outs"
+assert_not_contains "$CONVENTIONS" '| `Superseded` | Exempt | Replaced by another spec | `spec-generate` |' \
+  "conventions table does not attribute a Status: Superseded write to spec-generate"
+assert_contains "$ACTIONS" "any other non-ladder status — never contribute to a FAIL verdict" \
+  "FAIL-exemption sentence keeps the exempt class open-world"
+
 print_summary
