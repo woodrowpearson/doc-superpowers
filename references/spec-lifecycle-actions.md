@@ -250,7 +250,7 @@ Two modes: **post-execute** (final compliance check before merging) and **review
    - **PASS:** Every spec required to be `Implemented` by the Status check (step 3) is `Implemented` AND no unresolved deviations AND no "design intent without formal spec" findings AND CLAUDE.md and README.md are current
    - **FAIL:** Any spec required to be `Implemented` by the Status check (step 3) is not, OR any unresolved deviation, OR any "design intent without formal spec" finding, OR CLAUDE.md/README.md staleness detected
 
-   Specs the Status check exempts — constraint references, targets held at `In Review` with recorded remaining scope, and specs at `Active` / `Deprecated` / `Superseded` — never contribute to a FAIL verdict. Neither do the three P3 informational lines.
+   Specs the Status check exempts — constraint references, targets held at `In Review` with recorded remaining scope, and specs at `Active` / `Deprecated` / `Superseded` / any other non-ladder status — never contribute to a FAIL verdict. Neither do the three P3 informational lines.
 
    **Recovery:** update per `references/doc-spec.md` CLAUDE.md / README.md update rules, then re-run `spec-verify`.
 
