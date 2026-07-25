@@ -234,7 +234,7 @@ Two modes: **post-execute** (final compliance check before merging) and **review
 
    **Design doc → Specs:** Parse the design doc's major sections (identified by `##` headings that describe system behavior or architecture). For each section, check whether a governing spec exists whose `Source` field points to this design doc AND whose category and content correspond to that section's domain. Missing correspondence = "design intent without formal spec."
 
-   **Specs → Code:** For each governing spec, check whether its `code_refs` directories/files exist and contain implementation. A spec with empty or nonexistent `code_refs` targets = "spec without implementation." A spec whose `code_refs` exist but whose status is still `Draft` = "spec with untouched implementation."
+   **Specs → Code:** For each governing spec, check whether its `code_refs` directories/files exist and contain implementation. A spec with empty or nonexistent `code_refs` targets = "spec without implementation." A **target** spec whose `code_refs` exist but whose status is still `Draft` = "spec with untouched implementation." Constraint references and specs at exempt statuses are excluded — by design they hold populated `code_refs` and are never advanced, so an unadvanced status is not evidence of untouched implementation (see **Spec Status Model**).
 
    **Code → Specs:** For files changed during this implementation (identified via `git diff` against the branch base), check whether each changed file falls within any governing spec's `code_refs`. Changed files with no governing spec = "unspecified implementation."
 

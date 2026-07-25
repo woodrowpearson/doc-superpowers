@@ -64,6 +64,8 @@ assert_contains "$ACTIONS" "treated as constraint references by inference" \
   "spec-verify reports inferred constraints informationally"
 assert_contains "$ACTIONS" "at an unrecognized status" \
   "spec-verify reports unrecognized statuses informationally"
+assert_contains "$ACTIONS" "Constraint references and specs at exempt statuses are excluded" \
+  "spec-verify coverage check excludes constraint and exempt specs"
 
 AGENTPROMPT="$(cat "$REPO_ROOT/references/agent-prompt-template.md")"
 assert_contains "$AGENTPROMPT" "Exempt specs sit outside the ladder by design" \
