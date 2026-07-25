@@ -149,7 +149,7 @@ Two modes: **plan phase** (inject spec tasks into implementation plan) and **exe
 **Input:**
 - `--phase=plan`
 - `--plan=<path>` — Path to the implementation plan
-- `--specs=<paths>` — Comma-separated paths to governing specs (output of `spec-generate`)
+- `--specs=<paths>` — Comma-separated paths to governing specs (output of `spec-generate`). Each path may carry an optional role suffix — `<path>:target` or `<path>:constraint` — declaring whether the work is expected to advance that spec. Unsuffixed paths are resolved by inference at execution time. See **Spec Status Model → Spec roles**.
 
 1. **Read the plan document** and identify chunk boundaries. Plans produced by `superpowers:writing-plans` use `## Chunk N: <name>` headings (each chunk ≤1000 lines). If the plan doesn't use that convention, treat each `### Task N:` heading as a chunk boundary instead.
 2. **Per-chunk injection** — Append a spec update task at the end of each chunk:
@@ -159,8 +159,12 @@ Two modes: **plan phase** (inject spec tasks into implementation plan) and **exe
    **Files:**
    - Modify: {paths to governing specs relevant to this chunk}
 
-   - [ ] **Step 1: Update spec status**
-   Update SPEC-{CAT}-NNN `Status` from `Draft` to `In Review`.
+   - [ ] **Step 1: Update spec status (guarded)**
+   Read SPEC-{CAT}-NNN's current `Status` first, then apply the **Spec Status Model**:
+     - Resolved as **constraint** for this work (resolve role per **Spec Status Model → Spec roles**) → leave untouched, and skip Steps 2–4 as well.
+     - `Draft` → set `In Review`.
+     - `In Review` / `Approved` / `Implemented` → leave unchanged (R2 — never regress).
+     - Any other status (`Active`, `Deprecated`, `Superseded`, …) → leave unchanged (R3).
    - [ ] **Step 2: Verify implementation notes**
    Check that the spec's Implementation Notes section matches what was built in this chunk. Add notes for actual file paths created/modified.
    - [ ] **Step 3: Refine code_refs**
@@ -175,12 +179,16 @@ Two modes: **plan phase** (inject spec tasks into implementation plan) and **exe
    **Files:**
    - Modify: {all governing spec paths}
 
-   - [ ] **Step 1: Set all specs to Implemented**
-   Update every governing spec's `Status` to `Implemented`.
+   - [ ] **Step 1: Advance implemented specs (scope-gated)**
+   For each governing spec, resolve its role, then apply the **Spec Status Model**. Resolve role from the caller's explicit `:target` / `:constraint` marker if present; otherwise intersect this plan's changed files (`git diff` against the branch base) with the spec's `code_refs`.
+     - **constraint** (marked `:constraint`, or no intersection with `code_refs`) → leave `Status` unchanged and add no Implementation Notes. It was passed as a read-only reference, not an implementation target.
+     - **target** at an exempt status (`Active`, `Deprecated`, `Superseded`, …) → leave unchanged (R3). `Active` reference specs sit outside the ladder and never transition.
+     - **target**, fully covered by this plan → set `Implemented`.
+     - **target**, partially covered (the spec has surfaces this plan deferred) → do **not** advance to `Implemented`. Never write a status earlier than the current value (R2): if the spec is at `Draft` or `In Review`, hold it at `In Review`; if it is already at `Approved` or `Implemented`, leave it exactly as it is. Record the remaining scope in Implementation Notes either way.
    - [ ] **Step 2: Fill Implementation Notes**
-   For each spec, ensure the Implementation Notes section has actual file paths, decisions made, and any deviations from the original design.
+   For each spec Step 1 advanced or left at `In Review`, ensure the Implementation Notes section has actual file paths, decisions made, and any deviations from the original design. Skip specs Step 1 left untouched.
    - [ ] **Step 3: Final index update**
-   Run `doc-tools.sh update-index` for all governing specs.
+   Run `doc-tools.sh update-index` for each spec modified in Steps 1–2. Do not re-index untouched specs.
    ```
 4. **Output**: Modified plan document with spec maintenance tasks injected. Tasks follow the same checkbox syntax as other plan tasks.
 
