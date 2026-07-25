@@ -121,6 +121,12 @@ ls scripts/*validate_docs* scripts/*validate_doc_references* scripts/*fix_doc_re
 | `doc-tools.sh remove-entry` | Bundled | Remove entries from index by path |
 | `doc-tools.sh deprecate-entry` | Bundled | Mark entries as deprecated (`--superseded-by`) |
 | `doc-tools.sh status` | Bundled | Single-doc freshness query (read-only) |
+| `doc-tools.sh bump-version` | Bundled | Write a version string across the 6 manifest files |
+| `doc-tools.sh check-version` | Bundled | Verify all manifests match RELEASE-NOTES.md's canonical version (read-only) |
+| `doc-tools.sh implementation-status` | Bundled | Report ADR/SPEC realization state from `Implementation:` blocks (read-only) |
+| `doc-tools.sh set-implementation` | Bundled | Create/append/replace a realization entry on an ADR or SPEC |
+| `doc-tools.sh fragments` | Bundled | `list` / `validate` / `merge` per-PR release-notes fragments |
+| `doc-tools.sh tools` | Bundled | `install` / `uninstall` / `status` — vendor `doc-tools.sh` into a consumer repo |
 | `*validate_docs*` | Optional, user-provided | Doc validation (links, structure) |
 | `*validate_doc_references*` | Optional, user-provided | Code reference validation |
 | `*fix_doc_references*` | Optional, user-provided | Broken reference repair |
@@ -422,7 +428,7 @@ Update is the **write counterpart** to audit's read-only analysis. It consumes a
 5. Update `docs/specs/README.md` and `docs/adr/README.md` indexes.
 6. **Check CLAUDE.md currency** — Compare CLAUDE.md sections against actual filesystem. If stale, update per `references/doc-spec.md` CLAUDE.md update rules. Sync is the natural place to catch CLAUDE.md drift that accumulated across multiple doc changes.
 7. **Check README.md currency** — Compare README.md feature list, action list, and usage examples against actual SKILL.md actions and capabilities. If stale, update per `references/doc-spec.md` README.md update rules. Sync is the natural place to catch README.md drift alongside CLAUDE.md.
-8. If `scripts/hooks/install.sh` exists in the skill directory, run `install.sh status` and append a one-line summary: `Hooks: N/5 git, N/3 claude, N/8 ci`
+8. If `scripts/hooks/install.sh` exists in the skill directory, run `install.sh status` and append a one-line summary: `Hooks: N/5 git, N/3 claude, N/9 ci`
 
 ### `release` — Draft Release Notes Entry
 
@@ -500,9 +506,9 @@ Routes to `scripts/hooks/install.sh <subcommand> [flags]`.
 **IMPORTANT:** ALWAYS use the installer script. NEVER manually add hook entries to `.claude/settings.json` or `.claude/settings.local.json` — the installer handles template processing, path resolution, and deep-merge with existing settings. Manual entries will contain unresolved `__DOC_TOOLS_PATH__` placeholders and break.
 
 **Tier options:**
-- `--git` — Git hooks: pre-commit (freshness gate), post-merge (stale alert), post-checkout (branch check), prepare-commit-msg (inject comments), pre-push (release reminder)
+- `--git` — Git hooks: pre-commit (freshness gate), post-merge (stale alert), post-checkout (branch check), prepare-commit-msg (inject comments), pre-push (release reminder). Also registers the `docs/.doc-index.json` custom merge driver (`scripts/merge-doc-index.sh`) via `git config` + `.gitattributes`
 - `--claude` — Claude Code hooks: PreToolUse pre-commit gate, PostToolUse post-commit sync, Stop session summary
-- `--ci` — CI/CD workflows: PR freshness check, weekly audit, doc-index auto-update, per-PR release-notes fragment producer
+- `--ci` — CI/CD workflows: all 9 templates (see *CI sub-workflows installed* below), plus `doc-tools.sh` vendored into `.github/scripts/`
 
 **CI-specific flags:**
 - `--base-branch NAME` — Target branch (default: `main`)
@@ -562,9 +568,11 @@ it at `.github/scripts/doc-pr-release/`:
 - `commit-and-push.sh` — stages/commits/pushes the fragment
 
 It also installs `RELEASE-NOTES.next/README.md` (if missing) with the
-fragment-format spec — markers, SHA-256 hash from line 3+, Keep-a-Changelog
-closed set, ascending integer-N sort. Both PR A producer and the future PR B
-consumer adhere to this format.
+fragment-format spec — markers, SHA-256 hash from line 3+, the canonical
+Keep-a-Changelog section order (non-canonical `### ` headings are accepted and
+emitted after, in first-seen order), ascending integer-N sort. Both the
+`doc-pr-release.yml` producer and the `/doc-superpowers release` consumer
+(steps 5–9 above) adhere to this format.
 
 ### Spec Lifecycle Actions — `spec-generate` / `spec-inject` / `spec-verify`
 
