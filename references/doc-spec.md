@@ -212,7 +212,7 @@ Template for new specs. Copy to create `SPEC-{CAT}-NNN-{slug}.md`.
 <!-- Unresolved questions (remove when resolved) -->
 ```
 
-`Draft`, `In Review`, `Approved`, and `Implemented` form the ladder that `spec-inject` and `spec-verify` transition automatically. `Active` (continuously-evolving reference specs), `Deprecated`, and `Superseded` sit outside that ladder and are never transitioned by automation. See **Spec Status Model** in `references/spec-lifecycle-actions.md`.
+`Draft`, `In Review`, `Approved`, and `Implemented` form the ladder that `spec-inject` transitions automatically (`spec-verify` is read-only — it reports on `Status` and never writes it). `Active` (continuously-evolving reference specs), `Deprecated`, and `Superseded` sit outside that ladder and are never transitioned by automation. See **Spec Status Model** in `references/spec-lifecycle-actions.md`.
 
 ---
 

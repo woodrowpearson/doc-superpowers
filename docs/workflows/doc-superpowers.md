@@ -509,7 +509,7 @@ Two modes: **plan phase** (inject spec maintenance tasks into implementation pla
 
 1. Read the plan document and identify chunk boundaries (`## Chunk N:` or `### Task N:` headings)
 2. For each chunk, append a spec update task (update status, verify Implementation Notes, refine `code_refs`, run `update-index`)
-3. In the last chunk, also append a spec finalization task (advance only scope-covered target specs to `Implemented`, hold partially-covered ones at `In Review`, leave constraint references and exempt statuses untouched, fill Implementation Notes, final index update)
+3. In the last chunk, also append a spec finalization task (advance only scope-covered target specs to `Implemented`, hold partially-covered ones at `In Review` (never writing over a later status), leave constraint references and exempt statuses untouched, fill Implementation Notes, final index update)
 4. Output modified plan document
 
 ### Execute Phase
@@ -613,7 +613,7 @@ flowchart LR
     B --> C["Status check"]
     C --> D["Three-way coverage check"]
     D --> E{Verdict}
-    E -->|PASS| F["All specs implemented"]
+    E -->|PASS| F["Required specs implemented"]
     E -->|FAIL| G["Surface report to user"]
   end
   subgraph RM["Review Mode"]
