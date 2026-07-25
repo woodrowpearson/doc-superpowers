@@ -4,7 +4,7 @@
 
 **Goal:** Replace `spec-inject`'s unconditional spec `Status` writes with a single canonical, guarded, scope-aware transition model that every action cites, closing [issue #12](https://github.com/woodrowpearson/doc-superpowers/issues/12).
 
-**Architecture:** Add one authoritative "Spec Status Model" section to `references/spec-lifecycle-actions.md` defining vocabulary (ladder vs. open-world exempt), four transition rules, spec roles (target vs. constraint), and evaluation order. Rewrite the five call sites that currently restate transition rules so they cite the model instead. Pin the result with a new shell regression suite that asserts the guarded language is present and the unconditional phrasing is gone — the defect recurred across two releases because nothing guarded the template text.
+**Architecture:** Add one authoritative "Spec Status Model" section to `references/spec-lifecycle-actions.md` defining vocabulary (ladder vs. open-world exempt), four transition rules, spec roles (target vs. constraint), and evaluation order. Rewrite the six call sites that currently restate transition rules so they cite the model instead. Pin the result with a new shell regression suite that asserts the guarded language is present and the unconditional phrasing is gone — the defect recurred across two releases because nothing guarded the template text.
 
 **Tech Stack:** Markdown reference files, `bash` test suite using the repo's existing `scripts/test-helpers.sh` harness, `jq` for `evals/evals.json`, `scripts/doc-tools.sh` for version and index management.
 
@@ -24,10 +24,13 @@
 |---|---|---|
 | `scripts/test-spec-status-model.sh` | Create | Prose-consistency regression suite: asserts the model exists, the guarded language is present at every call site, and the unconditional phrasing is absent |
 | `references/spec-lifecycle-actions.md` | Modify | Canonical model section (new) + five call sites rewritten to cite it |
+| `references/agent-prompt-template.md` | Modify | Sixth call site — Spec-Aware Review table stops flagging deliberately-unadvanced specs as P1 |
+| `docs/codebase-guide.md` | Modify | Four lines restating the old ladder, one of which contradicts the revised `spec-verify` check |
 | `references/doc-spec.md` | Modify | Spec template `Status` vocabulary gains `Active` and `Deprecated`, plus a pointer note |
 | `references/spec-lifecycle-protocol.md` | Modify | Wrapper-author `--specs` contract documents the role suffix; output section states constraint specs are never written |
 | `evals/evals.json` | Modify | Eval 10's assertion currently asserts the bug — rewrite it; add a new eval reproducing issue #12 |
-| `RELEASE-NOTES.md` | Modify | v2.13.0 entry |
+| `RELEASE-NOTES.md` | Modify | v2.13.0 entry (hand-authored — `bump-version` does not touch this file) |
+| `package.json`, `claude-code.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.cursor-plugin/plugin.json`, `gemini-extension.json` | Modify | Version manifests, all rewritten by `doc-tools.sh bump-version` |
 | `CLAUDE.md` | Modify | Directory structure + Key Files table gain the new test script |
 | `docs/.doc-index.json` | Modify | Index entries for the new design doc and this plan |
 
@@ -221,14 +224,18 @@ assert_contains "$ACTIONS" "Advance implemented specs (scope-gated)" \
   "finalize step heading is scope-gated"
 assert_contains "$ACTIONS" "R2 — never regress" \
   "per-chunk template cites monotonicity"
+assert_contains "$ACTIONS" "Never write a status earlier than the current value (R2)" \
+  "finalize partial-coverage branch is R2-guarded"
 assert_contains "$ACTIONS" '`<path>:target` or `<path>:constraint`' \
   "plan-phase --specs input documents the role suffix"
 ```
 
+The R2-guard needle is the important one. Without it the partial-coverage branch reads as "write `In Review`", which drives issue #12's own headline spec (`SPEC-UI-032`, at `Implemented`, only partially covered because the plan just added regression guards around it) backward — reproducing failure mode 1 through the finalize door.
+
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `bash scripts/test-spec-status-model.sh`
-Expected: FAIL — 7 new failures (3 `expected NOT to contain`, 4 `expected to contain`). Task 1's 8 assertions still pass.
+Expected: FAIL — 8 new failures (3 `expected NOT to contain`, 5 `expected to contain`). Task 1's 8 assertions still pass.
 
 - [ ] **Step 3: Rewrite the three plan-phase sites**
 
@@ -256,7 +263,7 @@ with:
 ```markdown
    - [ ] **Step 1: Update spec status (guarded)**
    Read SPEC-{CAT}-NNN's current `Status` first, then apply the **Spec Status Model**:
-     - Resolved as **constraint** for this work → leave untouched, and skip Steps 2–4 as well.
+     - Resolved as **constraint** for this work (resolve role per **Spec Status Model → Spec roles**) → leave untouched, and skip Steps 2–4 as well.
      - `Draft` → set `In Review`.
      - `In Review` / `Approved` / `Implemented` → leave unchanged (R2 — never regress).
      - Any other status (`Active`, `Deprecated`, `Superseded`, …) → leave unchanged (R3).
@@ -281,7 +288,7 @@ with:
      - **constraint** (marked `:constraint`, or no intersection with `code_refs`) → leave `Status` unchanged and add no Implementation Notes. It was passed as a read-only reference, not an implementation target.
      - **target** at an exempt status (`Active`, `Deprecated`, `Superseded`, …) → leave unchanged (R3). `Active` reference specs sit outside the ladder and never transition.
      - **target**, fully covered by this plan → set `Implemented`.
-     - **target**, partially covered (the spec has surfaces this plan deferred) → leave at `In Review` and record the remaining scope in Implementation Notes.
+     - **target**, partially covered (the spec has surfaces this plan deferred) → do **not** advance to `Implemented`. Never write a status earlier than the current value (R2): if the spec is at `Draft` or `In Review`, hold it at `In Review`; if it is already at `Approved` or `Implemented`, leave it exactly as it is. Record the remaining scope in Implementation Notes either way.
    - [ ] **Step 2: Fill Implementation Notes**
    For each spec Step 1 advanced or left at `In Review`, ensure the Implementation Notes section has actual file paths, decisions made, and any deviations from the original design. Skip specs Step 1 left untouched.
    - [ ] **Step 3: Final index update**
@@ -291,7 +298,7 @@ with:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `bash scripts/test-spec-status-model.sh`
-Expected: PASS — `Results: 15 passed, 0 failed, 15 total`.
+Expected: PASS — `Results: 16 passed, 0 failed, 16 total`.
 
 - [ ] **Step 5: Commit**
 
@@ -323,22 +330,31 @@ EOF
 
 ---
 
-### Task 3: Align `spec-inject` execute phase and `spec-verify` with the model
+### Task 3: Align `spec-inject` execute phase, `spec-verify`, and the review-agent template with the model
 
 **Files:**
 - Modify: `references/spec-lifecycle-actions.md` (Execute Phase steps 2 and 3; `spec-verify` Post-Execute steps 3 and 5)
+- Modify: `references/agent-prompt-template.md` (Spec-Aware Review table)
 - Modify: `scripts/test-spec-status-model.sh` (append a test block)
 
 **Interfaces:**
 - Consumes: the `## Spec Status Model` section from Task 1.
 - Produces: no downstream dependency — this is the last edit to `spec-lifecycle-actions.md`.
 
-**Context.** Four sites still restate or assume transition rules independently:
+**Context.** Five sites still restate or assume transition rules independently:
 
 - Execute Phase step 2, "Aligned" branch: "Update the spec's `Status` field." — unqualified, no read, no exemption.
 - Execute Phase step 3: a standalone ladder restatement that omits `Approved`. This is the line issue #12 cites as contradicting the plan-phase template.
 - `spec-verify` Post-Execute step 3: "Are all governing specs in `Implemented` status?" — no role or exemption awareness.
 - `spec-verify` Post-Execute step 5: PASS/FAIL criteria that depend on step 3's wording.
+- **`references/agent-prompt-template.md:58-60`** — a sixth site, missed in the original survey. Marked **REQUIRED** for dispatched review agents at `skills/doc-superpowers/SKILL.md:40`, its Spec-Aware Review table independently restates spec `Status` semantics: "Spec has `Status: Draft` but code exists → Flag as P1". Before this change `spec-inject` drove everything to `Implemented`, so that rule rarely fired. After it, constraint references and exempt specs **deliberately** stay at `Draft`/`In Review` while code exists in their `code_refs` — so every audit and review pass would emit false P1 findings on exactly the specs this fix exists to protect.
+
+**Also in this task — reporting, as distinct from writing.** Two of the new rules suppress a *write*; neither should suppress *visibility*:
+
+- Role inference is circular. `code_refs` are best-effort (`spec-lifecycle-actions.md:49`) and get refined by the per-chunk Step 3, which the constraint branch skips. Wrong `code_refs` → inferred constraint → refinement never runs → `code_refs` stay wrong permanently, and a real target silently never advances. The same faulty inference then suppresses `spec-verify`'s check.
+- The open-world exemption swallows typos. A spec at `Implemenetd` is exempt forever, invisible to automation *and* verification.
+
+Both hazards are silent by construction — the precise harm issue #12 is about. `spec-verify` therefore gains two **non-blocking P3 informational** lines that never cause a FAIL.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -360,14 +376,26 @@ assert_not_contains "$ACTIONS" "**PASS:** All governing specs in \`Implemented\`
   "spec-verify verdict no longer requires all specs Implemented"
 assert_contains "$ACTIONS" "required to be \`Implemented\` by the Status check" \
   "spec-verify verdict scoped to specs the status check requires"
+assert_contains "$ACTIONS" '`Approved` is human-set' \
+  "ladder notes that automation never writes Approved"
+assert_contains "$ACTIONS" "treated as constraint references by inference" \
+  "spec-verify reports inferred constraints informationally"
+assert_contains "$ACTIONS" "at an unrecognized status" \
+  "spec-verify reports unrecognized statuses informationally"
+
+AGENTPROMPT="$(cat "$REPO_ROOT/references/agent-prompt-template.md")"
+assert_contains "$AGENTPROMPT" "Exempt specs sit outside the ladder by design" \
+  "review-agent template exempts non-ladder statuses from P1"
+assert_not_contains "$AGENTPROMPT" 'Spec has `Status: Draft` but code exists' \
+  "review-agent template no longer flags any Draft spec with code as P1"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `bash scripts/test-spec-status-model.sh`
-Expected: FAIL — 7 new failures. Tasks 1–2's 15 assertions still pass.
+Expected: FAIL — 12 new failures. Tasks 1–2's 16 assertions still pass.
 
-- [ ] **Step 3: Rewrite the four sites**
+- [ ] **Step 3: Rewrite the five sites**
 
 **3a — Execute Phase step 2, "Aligned" branch.** Replace:
 
@@ -390,7 +418,7 @@ with:
 with:
 
 ```markdown
-3. **Status transitions**: governed by the **Spec Status Model** — `Draft` → `In Review` (first implementation) → `Approved` → `Implemented` (verification passes). Monotonic (R2); exempt statuses and constraint specs never transition (R3, roles). Never write `Status` without reading the current value first (R1).
+3. **Status transitions**: governed by the **Spec Status Model** — `Draft` → `In Review` (first implementation) → `Approved` → `Implemented` (verification passes). Monotonic (R2); exempt statuses and constraint specs never transition (R3, roles). Never write `Status` without reading the current value first (R1). `Approved` is human-set — no action ever writes it; it appears on the ladder so R2 can protect specs that carry it.
 ```
 
 **3c — `spec-verify` Post-Execute step 3.** Replace:
@@ -406,6 +434,10 @@ with:
    - **target** at a ladder status → expect `Implemented`. Still at `Draft`, `In Review`, or `Approved` means implementation tasks were skipped or the plan didn't cover that spec's scope — report which of the two it is.
    - **target** at an exempt status (`Active`, `Deprecated`, `Superseded`, …) → **not a finding**. `Active` reference specs are continuously evolving and never reach `Implemented` by design.
    - **constraint** → **not a finding** at any status. The work was never expected to advance it.
+
+   Then emit two **P3 informational** lines. These are never findings and never cause a FAIL — they exist because the two suppressions above are otherwise silent in the failing direction:
+   - **Inferred constraints** — list specs treated as constraint references *by inference* rather than by an explicit `:constraint` marker: "N spec(s) treated as constraint references by inference — pass `:constraint` to confirm, or fix their `code_refs` if they were meant to be implementation targets." Role inference is circular: wrong `code_refs` produce a constraint verdict, the constraint branch skips the `code_refs` refinement step, so the `code_refs` stay wrong and the spec silently never advances. Specs marked `:constraint` explicitly are not listed — the caller already said so.
+   - **Unrecognized statuses** — list specs at an unrecognized status, i.e. one outside the documented vocabulary (a typo such as `Implemenetd`, or a value from a downstream vocabulary): "N spec(s) at an unrecognized status — automation will never transition these." R3 correctly declines to write them; reporting them is what keeps them from being invisible forever.
 ```
 
 **3d — `spec-verify` Post-Execute step 5, PASS/FAIL.** Replace:
@@ -421,18 +453,34 @@ with:
    - **PASS:** Every spec required to be `Implemented` by the Status check (step 3) is `Implemented` AND no unresolved deviations AND no "design intent without formal spec" findings AND CLAUDE.md and README.md are current
    - **FAIL:** Any spec required to be `Implemented` by the Status check (step 3) is not, OR any unresolved deviation, OR any "design intent without formal spec" finding, OR CLAUDE.md/README.md staleness detected
 
-   Specs the Status check exempts — constraint references, and specs at `Active` / `Deprecated` / `Superseded` — never contribute to a FAIL verdict.
+   Specs the Status check exempts — constraint references, and specs at `Active` / `Deprecated` / `Superseded` — never contribute to a FAIL verdict. Neither do the two P3 informational lines.
+```
+
+**3e — `references/agent-prompt-template.md`, Spec-Aware Review table.** Replace these two rows:
+
+```markdown
+| Spec has `Status: Draft` but code exists | Flag as P1 — spec wasn't updated during implementation |
+| Spec has `Status: Implemented` but code diverged | Flag as P0 — spec claims implementation matches but code has changed |
+```
+
+with:
+
+```markdown
+| Spec at a ladder status (`Draft` / `In Review` / `Approved`) but code exists in its `code_refs` | Flag as P1 — spec wasn't updated during implementation |
+| Spec has `Status: Implemented` but code diverged | Flag as P0 — spec claims implementation matches but code has changed |
+| Spec at an exempt status (`Active`, `Deprecated`, `Superseded`, or any status not on the ladder) | **Not a finding.** Exempt specs sit outside the ladder by design — see **Spec Status Model** in `references/spec-lifecycle-actions.md` |
+| Spec passed as a constraint reference (`:constraint`) for the work under review | **Not a finding** at any status. The work was never expected to advance it |
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `bash scripts/test-spec-status-model.sh`
-Expected: PASS — `Results: 22 passed, 0 failed, 22 total`.
+Expected: PASS — `Results: 28 passed, 0 failed, 28 total`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add references/spec-lifecycle-actions.md scripts/test-spec-status-model.sh
+git add references/spec-lifecycle-actions.md references/agent-prompt-template.md scripts/test-spec-status-model.sh
 git commit -m "$(cat <<'EOF'
 fix(spec-verify): scope status check to specs the work was meant to advance
 
@@ -442,9 +490,19 @@ not cover a listed spec's scope. It now exempts constraint references and
 non-ladder statuses (Active / Deprecated / Superseded), and the PASS/FAIL
 verdict follows.
 
+Adds two P3 informational lines so the new suppressions stay visible:
+specs treated as constraint by inference rather than an explicit marker,
+and specs at unrecognized statuses. Neither can cause a FAIL.
+
 spec-inject's execute phase now cites the Spec Status Model rather than
 restating the ladder, and its ladder line gains Approved, which the spec
 template has always allowed but no action modelled.
+
+Also fixes a sixth call site missed in the original survey:
+agent-prompt-template.md's Spec-Aware Review table flagged any Draft spec
+with code as P1. After this change constraint and exempt specs stay at
+Draft/In Review deliberately, so that rule would have emitted false P1
+findings on exactly the specs the new model protects.
 
 Refs #12
 
@@ -493,7 +551,7 @@ assert_contains "$PROTOCOL" "Constraint specs are never written" \
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `bash scripts/test-spec-status-model.sh`
-Expected: FAIL — 4 failures. The ADR-template assertion passes already (it is a guard against collateral damage, not a change). Tasks 1–3's 22 assertions still pass.
+Expected: FAIL — 4 failures. The ADR-template assertion passes already (it is a guard against collateral damage, not a change). Tasks 1–3's 28 assertions still pass.
 
 - [ ] **Step 3: Update both files**
 
@@ -543,22 +601,28 @@ with:
 - Modified plan document with spec maintenance tasks appended to each chunk. Injected tasks are status-aware and scope-aware: they read a spec's current `Status` before writing and resolve target vs. constraint at execution time. Constraint specs are never written.
 ```
 
-**3e — `references/spec-lifecycle-protocol.md`, execute-phase input.** Replace:
+**3e — `references/spec-lifecycle-protocol.md`, execute-phase input.** The string `- \`--specs=<paths>\` — Paths to governing specs` appears **twice** in this file (the `spec-inject` execute-phase block and the `spec-verify` post-execute block), so match on the preceding heading line to disambiguate. Replace:
 
 ```markdown
+**Input (execute phase):**
+- `--phase=execute`
 - `--specs=<paths>` — Paths to governing specs
 ```
 
-in the **`spec-inject` execute-phase** input block (not the `spec-verify` one) with:
+with:
 
 ```markdown
+**Input (execute phase):**
+- `--phase=execute`
 - `--specs=<paths>` — Paths to governing specs, each with an optional `:target` / `:constraint` role suffix
 ```
+
+Leave the `spec-verify` block's identical line untouched — `spec-verify` reads roles but does not take them as new input syntax beyond what it inherits from the caller.
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `bash scripts/test-spec-status-model.sh`
-Expected: PASS — `Results: 27 passed, 0 failed, 27 total`.
+Expected: PASS — `Results: 33 passed, 0 failed, 33 total`.
 
 - [ ] **Step 5: Commit**
 
@@ -611,14 +675,16 @@ assert_not_contains "$EVALS" "set all specs to Implemented" \
   "eval no longer asserts the unconditional finalize behaviour"
 assert_contains "$EVALS" "spec-inject-plan-mixed-statuses" \
   "issue #12 reproduction eval exists"
-assert_eq "0" "$(jq empty "$REPO_ROOT/evals/evals.json" >/dev/null 2>&1; echo $?)" \
-  "evals.json is valid JSON"
+assert_not_contains "$EVALS" "all should be Implemented" \
+  "eval 11 no longer asserts the unconditional spec-verify status rule"
+if jq empty "$REPO_ROOT/evals/evals.json" >/dev/null 2>&1; then JSON_OK=0; else JSON_OK=1; fi
+assert_eq "0" "$JSON_OK" "evals.json is valid JSON"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `bash scripts/test-spec-status-model.sh`
-Expected: FAIL — 2 failures (the JSON-validity assertion passes; it guards the hand-edit in Step 3). Tasks 1–4's 27 assertions still pass.
+Expected: FAIL — 3 failures (the JSON-validity assertion passes; it guards the hand-edit in Step 3). Tasks 1–4's 33 assertions still pass.
 
 - [ ] **Step 3: Update `evals/evals.json`**
 
@@ -646,14 +712,38 @@ with:
 Last chunk includes a scope-gated spec finalization task that advances only specs this plan implemented, leaving constraint references and exempt statuses untouched
 ```
 
-**3b — Append the reproduction eval.** Add this object as the last element of the `evals` array:
+**3b — Fix eval 11, a seventh call site.** Eval id 11 (`spec-verify-post-execute`) restates the old status rule twice and now contradicts Task 3's revised check. Replace in its `expected_output`:
+
+```
+check Status fields (all should be Implemented)
+```
+
+with:
+
+```
+check Status fields per the Spec Status Model (target specs at a ladder status should be Implemented; constraint references and specs at exempt statuses such as Active are not findings)
+```
+
+and replace its `checks-status-fields` assertion `description`:
+
+```
+Verifies all governing specs have Status: Implemented
+```
+
+with:
+
+```
+Verifies Status only where the model requires it — target specs at a ladder status must be Implemented; constraint references and exempt statuses are not findings
+```
+
+**3c — Append the reproduction eval.** Add this object as the last element of the `evals` array:
 
 ```json
 {
   "id": 13,
   "name": "spec-inject-plan-mixed-statuses",
   "prompt": "I'm about to write an implementation plan at docs/superpowers/plans/2026-07-24-collection-scope.md. Four specs govern it: docs/specs/SPEC-UI-032-collection-search.md is already Implemented (the plan only adds regression guards around it), docs/specs/SPEC-UI-010-collection-view.md is In Review and the plan touches one slice of it, docs/specs/SPEC-API-006-trusted-circle-backend.md is In Review and is a read-only backend constraint the plan makes zero functions/ changes against, and docs/specs/SPEC-ARCH-004-system-overview.md is Active as a continuously-evolving reference spec. Inject spec maintenance tasks. /doc-superpowers spec-inject --phase=plan --plan=docs/superpowers/plans/2026-07-24-collection-scope.md --specs=docs/specs/SPEC-UI-032-collection-search.md,docs/specs/SPEC-UI-010-collection-view.md,docs/specs/SPEC-API-006-trusted-circle-backend.md:constraint,docs/specs/SPEC-ARCH-004-system-overview.md",
-  "expected_output": "Injected tasks must be guarded, not unconditional. The per-chunk status step must instruct the executing agent to read each spec's current Status first: advance only Draft to In Review, leave In Review / Approved / Implemented unchanged (never regress SPEC-UI-032 from Implemented back to In Review), and leave Active unchanged (SPEC-ARCH-004 sits outside the ladder). The finalization step must be scope-gated: leave SPEC-API-006 untouched because it carries the :constraint marker, leave SPEC-ARCH-004 untouched because Active is exempt, and for SPEC-UI-010 distinguish full from partial coverage rather than setting it to Implemented outright. Should NOT modify any spec file — only the plan.",
+  "expected_output": "Injected tasks must be guarded, not unconditional. The per-chunk status step must instruct the executing agent to read each spec's current Status first: advance only Draft to In Review, leave In Review / Approved / Implemented unchanged (never regress SPEC-UI-032 from Implemented back to In Review), and leave Active unchanged (SPEC-ARCH-004 sits outside the ladder). The finalization step must be scope-gated AND still R2-guarded: leave SPEC-API-006 untouched because it carries the :constraint marker, leave SPEC-ARCH-004 untouched because Active is exempt, leave SPEC-UI-032 at Implemented (it is a partially-covered target, and the partial branch must never write In Review over a later status), and for SPEC-UI-010 distinguish full from partial coverage rather than setting it to Implemented outright. Should NOT modify any spec file — only the plan.",
   "files": [],
   "assertions": [
     {
@@ -679,7 +769,12 @@ Last chunk includes a scope-gated spec finalization task that advances only spec
     {
       "name": "finalization-distinguishes-coverage",
       "type": "content_check",
-      "description": "Injected finalization task distinguishes fully-covered specs (set Implemented) from partially-covered ones (leave In Review with remaining scope noted)"
+      "description": "Injected finalization task distinguishes fully-covered specs (set Implemented) from partially-covered ones (hold, do not advance), and its partial branch never writes a status earlier than the current value"
+    },
+    {
+      "name": "finalize-does-not-regress-implemented",
+      "type": "content_check",
+      "description": "Injected finalization task leaves SPEC-UI-032 at Implemented despite being only partially covered — the partial-coverage branch is R2-guarded, so failure mode 1 cannot recur through the finalize path"
     },
     {
       "name": "does-not-modify-specs",
@@ -693,7 +788,7 @@ Last chunk includes a scope-gated spec finalization task that advances only spec
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `bash scripts/test-spec-status-model.sh`
-Expected: PASS — `Results: 30 passed, 0 failed, 30 total`.
+Expected: PASS — `Results: 37 passed, 0 failed, 37 total`.
 
 Confirm the JSON parses and the array grew:
 
@@ -729,6 +824,7 @@ EOF
 
 **Files:**
 - Modify: `RELEASE-NOTES.md`, `package.json`, `claude-code.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.cursor-plugin/plugin.json`, `gemini-extension.json` (all via `doc-tools.sh bump-version`)
+- Modify: `docs/codebase-guide.md` (four stale ladder references)
 - Modify: `CLAUDE.md` (directory structure + Key Files table)
 - Modify: `docs/.doc-index.json` (entries for the new design doc and plan)
 
@@ -738,6 +834,12 @@ EOF
 
 - [ ] **Step 1: Run the full test suite to confirm nothing regressed**
 
+**Prerequisite:** `test-doc-pr-release.sh` needs PyYAML for its 9 YAML-substitution assertions. Without it that suite reports `1 failed` with `ModuleNotFoundError: No module named 'yaml'` — a environment gap, not a regression from this work. Install it first so the gate is meaningful:
+
+```bash
+python3 -c "import yaml" 2>/dev/null || uv pip install --system pyyaml
+```
+
 ```bash
 for t in scripts/test-doc-tools.sh scripts/test-hooks.sh scripts/test-merge-driver.sh scripts/test-doc-pr-release.sh scripts/test-spec-status-model.sh; do
   echo "### $t"
@@ -745,28 +847,43 @@ for t in scripts/test-doc-tools.sh scripts/test-hooks.sh scripts/test-merge-driv
 done
 ```
 
-Expected: every suite ends `0 failed`. `test-spec-status-model.sh` reports `30 passed, 0 failed, 30 total`.
+Expected: every suite ends `0 failed`. `test-spec-status-model.sh` reports `37 passed, 0 failed, 37 total`. If PyYAML could not be installed, `test-doc-pr-release.sh` will report `1 failed` on the YAML assertions only — confirm the failure text is the `ModuleNotFoundError` and no other assertion failed, then proceed.
 
 - [ ] **Step 2: Grep sweep for surviving unconditional phrasing**
 
-```bash
-rg -n "Status\` (from|to) \`" references/ ; rg -n "every governing spec|all specs to Implemented|Set all specs" references/ evals/
-```
-
-Expected: no output from either command. Any hit is an unconditional status-write phrasing that Tasks 2–4 missed — fix it before continuing.
-
-- [ ] **Step 3: Bump the version**
+Scope matters. `docs/codebase-guide.md` must be swept (Step 3 fixes it), but `docs/superpowers/` must **not** be — this plan and its design doc quote the defective text verbatim in order to describe it, and so do shipped historical plans. Sweeping them would direct you to edit your own plan.
 
 ```bash
-bash scripts/doc-tools.sh bump-version 2.13.0
-bash scripts/doc-tools.sh check-version
+rg -n 'Status` (from|to) `' references/ skills/ evals/ docs/codebase-guide.md
+rg -n "every governing spec|all specs to Implemented|Set all specs|all should be Implemented" references/ skills/ evals/ docs/codebase-guide.md
 ```
 
-Expected: `check-version` reports all manifests at `2.13.0`.
+Expected: no output from either command. Any hit is unconditional status-write phrasing that Tasks 2–5 missed — fix it before continuing.
+
+- [ ] **Step 3: Update `docs/codebase-guide.md`**
+
+Four lines restate the old ladder. `:321` directly contradicts the revised `spec-verify` status check, and `:162` already misattributes status transitions to `SKILL.md`, which contains none.
+
+| Line | Replace | With |
+|---|---|---|
+| `:162` | `| Spec status transitions | `skills/doc-superpowers/SKILL.md` `spec-inject` and `spec-verify` subsections (Draft -> In Review -> Implemented) |` | `| Spec status transitions | `references/spec-lifecycle-actions.md` **Spec Status Model** section — canonical ladder, exemptions, and roles |` |
+| `:313` | `  → Updates spec Status: Draft → In Review` | `  → Updates spec Status per the Spec Status Model (guarded: Draft → In Review only, never regresses)` |
+| `:321` | `  → Existence check, staleness check, status check (all should be Implemented)` | `  → Existence check, staleness check, status check (target specs at a ladder status should be Implemented; constraint refs and exempt statuses are not findings)` |
+| `:324` | `  → Status transition: In Review → Implemented (if aligned)` | `  → Status transition: In Review → Implemented (if aligned, and only for scope-covered target specs)` |
+
+Verify afterwards:
+
+```bash
+rg -n "all should be Implemented|Draft -> In Review -> Implemented" docs/codebase-guide.md
+```
+
+Expected: no output.
 
 - [ ] **Step 4: Write the release notes entry**
 
-`bump-version` inserts a version heading into `RELEASE-NOTES.md`. Fill the entry directly beneath `## v2.13.0` so it reads:
+**Order matters here.** `doc-tools.sh check-version` derives the *canonical* version by grepping the first `## vX.Y.Z` heading out of `RELEASE-NOTES.md` (`scripts/doc-tools.sh:949`), and `bump-version` does **not** touch `RELEASE-NOTES.md` — its `VERSION_FILES` array (`scripts/doc-tools.sh:896`) covers only the six JSON manifests. So the release-notes heading must be authored **by hand, before** the bump; running `check-version` first would compare six manifests at `2.13.0` against a canonical `2.12.3` and exit 1.
+
+Insert this immediately below the `# Release Notes` heading, above the existing `## v2.12.3` entry:
 
 ```markdown
 ## v2.13.0 (2026-07-24)
@@ -774,7 +891,7 @@ Expected: `check-version` reports all manifests at `2.13.0`.
 Replaces `spec-inject`'s unconditional spec `Status` writes with a canonical, guarded, scope-aware transition model that every spec action cites. Adds an optional `:target` / `:constraint` role suffix to `--specs`, and sanctions `Active` and `Deprecated` in the spec template vocabulary. Backward compatible — unsuffixed `--specs` paths keep working.
 
 ### Fixes
-- **`spec-inject --phase=plan` wrote spec `Status` unconditionally, regressing `Implemented` specs and falsely advancing untouched ones** (`references/spec-lifecycle-actions.md`) — The per-chunk injected task said "Update SPEC-{CAT}-NNN `Status` from `Draft` to `In Review`" with no read of the current status, so applying it to a spec already at `Implemented` drove it backward, falsely signalling that shipped, verified behaviour was unproven. The finalize task said "Update every governing spec's `Status` to `Implemented`" with no check that the plan touched that spec's surface, so a spec passed as a read-only constraint reference — a backend field allowlist the client work must respect but not implement — was marked `Implemented`, asserting work that was never written. Both failures were silent. Both contradicted contracts stated elsewhere in the same file: the execute phase asserts a monotonic ladder, and `spec-verify` explicitly treats "the plan didn't cover that spec's scope" as a legitimate reason a spec is not `Implemented` — a check the finalize step made vacuously pass by running before it. Root cause was structural: transition rules were restated independently at five call sites and had drifted apart. Fix: a single canonical **Spec Status Model** section defines the ladder (`Draft` → `In Review` → `Approved` → `Implemented`), an **open-world** exempt class (`Active`, `Deprecated`, `Superseded`, and any status not on the ladder), four rules (read-before-write, monotonic, exempt, scope-gated), target vs. constraint spec roles, and a fixed evaluation order; all five call sites now cite it instead of restating it. The exemption is deliberately open-world so a status added later cannot fall back to the unconditional write. Failure mode 1 had been independently observed twice, ~2 months apart, at v2.12.0 and v2.12.3; the documented downstream workaround was to skip `spec-inject --phase=plan` entirely on mature specs. New suite `scripts/test-spec-status-model.sh` (30 assertions) pins the wording so the phrasing cannot silently return. Closes #12.
+- **`spec-inject --phase=plan` wrote spec `Status` unconditionally, regressing `Implemented` specs and falsely advancing untouched ones** (`references/spec-lifecycle-actions.md`) — The per-chunk injected task said "Update SPEC-{CAT}-NNN `Status` from `Draft` to `In Review`" with no read of the current status, so applying it to a spec already at `Implemented` drove it backward, falsely signalling that shipped, verified behaviour was unproven. The finalize task said "Update every governing spec's `Status` to `Implemented`" with no check that the plan touched that spec's surface, so a spec passed as a read-only constraint reference — a backend field allowlist the client work must respect but not implement — was marked `Implemented`, asserting work that was never written. Both failures were silent. Both contradicted contracts stated elsewhere in the same file: the execute phase asserts a monotonic ladder, and `spec-verify` explicitly treats "the plan didn't cover that spec's scope" as a legitimate reason a spec is not `Implemented` — a check the finalize step made vacuously pass by running before it. Root cause was structural: transition rules were restated independently at six call sites — four in `spec-lifecycle-actions.md`, one assumed by `spec-verify`, and one in `references/agent-prompt-template.md`, which is marked REQUIRED for dispatched review agents — and had drifted apart. Fix: a single canonical **Spec Status Model** section defines the ladder (`Draft` → `In Review` → `Approved` → `Implemented`), an **open-world** exempt class (`Active`, `Deprecated`, `Superseded`, and any status not on the ladder), four rules (read-before-write, monotonic, exempt, scope-gated), target vs. constraint spec roles, and a fixed evaluation order; all six call sites now cite it instead of restating it. `spec-verify` also gains two non-blocking P3 informational lines — specs treated as constraint by *inference* rather than an explicit marker, and specs at unrecognized statuses — so the new write-suppressions do not become new silences. The exemption is deliberately open-world so a status added later cannot fall back to the unconditional write. Failure mode 1 had been independently observed twice, ~2 months apart, at v2.12.0 and v2.12.3; the documented downstream workaround was to skip `spec-inject --phase=plan` entirely on mature specs. New suite `scripts/test-spec-status-model.sh` (37 assertions) pins the wording so the phrasing cannot silently return. Closes #12.
 - **`evals/evals.json` asserted the defect** (`evals/evals.json`) — Eval 10's `injects-finalization-task` assertion read "Last chunk includes a spec finalization task to set all specs to Implemented", so a correct implementation would have failed it. Rewritten to describe scope-gated finalization. New eval 13 (`spec-inject-plan-mixed-statuses`) reproduces issue #12 directly with four governing specs at `Implemented` / `In Review` / `In Review`-as-constraint / `Active`.
 
 ### Features
@@ -782,7 +899,20 @@ Replaces `spec-inject`'s unconditional spec `Status` writes with a canonical, gu
 - **`Active` and `Deprecated` sanctioned in the spec template vocabulary** (`references/doc-spec.md`) — The spec template listed `Draft | In Review | Approved | Implemented | Superseded` and contained no `Active` at all; that value belonged only to the ADR template in the same file. Downstream projects nonetheless hold continuously-evolving reference specs (system overviews, schema inventories, cost models) at `Status: Active`. Both values are now legal on specs and documented as outside the automated ladder. Separately, `Approved` — present in the template since inception but never mentioned by any action — is now modelled.
 ```
 
-- [ ] **Step 5: Update `CLAUDE.md`**
+- [ ] **Step 5: Bump the version**
+
+```bash
+bash scripts/doc-tools.sh bump-version 2.13.0
+bash scripts/doc-tools.sh check-version
+```
+
+Expected: `bump-version` rewrites the six JSON manifests; `check-version` then reports all files at `2.13.0` and exits 0.
+
+Two things to know if it does not:
+- **A mismatch against `2.12.3` means the Step 4 heading was not written.** `check-version` takes the first `## vX.Y.Z` in `RELEASE-NOTES.md` as canonical, so without the new heading it compares six manifests at `2.13.0` against `2.12.3`.
+- **The manifests are already inconsistent before this task runs** — `package.json` and `.claude-plugin/plugin.json` are at `2.12.3` while `claude-code.json`, `.claude-plugin/marketplace.json`, `.cursor-plugin/plugin.json`, and `gemini-extension.json` are still at `2.12.2`. The v2.12.3 release left them behind. `bump-version 2.13.0` writes all six, so this task repairs the drift as a side effect. Do not treat the pre-existing state as something this work broke.
+
+- [ ] **Step 6: Update `CLAUDE.md`**
 
 In the directory-structure code block, add beneath `test-hooks.sh`:
 
@@ -796,7 +926,7 @@ In the Key Files table, add a row after the `scripts/test-hooks.sh` row:
 | `scripts/test-spec-status-model.sh` | Test suite pinning the canonical Spec Status Model wording and its call sites | Changing spec status transition rules, roles, or vocabulary |
 ```
 
-- [ ] **Step 6: Index the new docs**
+- [ ] **Step 7: Index the new docs**
 
 ```bash
 printf '%s\n' \
@@ -808,7 +938,7 @@ jq -r '.docs | keys[] | select(contains("2026-07-24"))' docs/.doc-index.json
 
 Expected: both new paths listed.
 
-- [ ] **Step 7: Re-run the full suite and commit**
+- [ ] **Step 8: Re-run the full suite and commit**
 
 ```bash
 for t in scripts/test-doc-tools.sh scripts/test-hooks.sh scripts/test-merge-driver.sh scripts/test-doc-pr-release.sh scripts/test-spec-status-model.sh; do
@@ -835,10 +965,14 @@ EOF
 
 ## Self-Review
 
-**Spec coverage.** Every design section maps to a task: model section → Task 1; call-site rewrites B → Tasks 2 (plan phase) and 3 (execute phase + spec-verify); supporting files C → Tasks 4 (`doc-spec.md`, `spec-lifecycle-protocol.md`) and 5 (`evals.json`); verification D → Task 6 steps 1–2; version E → Task 6 steps 3–4. The design's non-goals are respected — no `doc-tools.sh` logic changes, no downstream changes.
+**Spec coverage.** Every design section maps to a task: model section A → Task 1; reporting-vs-writing B2 → Task 3; call-site rewrites B → Tasks 2 (plan phase) and 3 (execute phase + spec-verify + `agent-prompt-template.md`); supporting files C → Tasks 4 (`doc-spec.md`, `spec-lifecycle-protocol.md`), 5 (`evals.json`), and 6 step 3 (`codebase-guide.md`); verification D → Task 6 steps 1–2; version E → Task 6 steps 4–5. The design's non-goals are respected — no `doc-tools.sh` logic changes, no downstream changes.
 
 **Placeholder scan.** Every edit step shows the exact before and after text. No "add appropriate X", no "similar to Task N", no TBDs.
 
-**Consistency.** Assertion counts are cumulative and consistent across tasks: 8 → 15 → 22 → 27 → 30. The `## Spec Status Model` heading, the `R1`–`R4` labels, the step headings `Update spec status (guarded)` and `Advance implemented specs (scope-gated)`, and the `:target` / `:constraint` suffix are spelled identically everywhere they appear in the plan and in the test needles.
+**Consistency.** Assertion counts are cumulative and consistent across tasks: 8 → 16 → 28 → 33 → 37.
+
+**Post-review revisions.** Two pre-execution review passes found and this plan now fixes: the finalize partial-coverage branch had no R2 guard, so it reproduced failure mode 1 on issue #12's own headline spec through the finalize door (Task 2); a sixth call site in `references/agent-prompt-template.md` was missed and would have emitted false P1 findings on exactly the specs the model protects (Task 3); `spec-verify` suppressed writes *and* reports, turning two loud failures into quiet ones (Task 3); Task 6 ran `check-version` before the `RELEASE-NOTES.md` heading it derives its canonical version from, and rested on a false claim that `bump-version` writes that heading — a deterministic hard failure (Task 6, now reordered); `docs/codebase-guide.md` restated the old ladder in four places, one contradicting the revised check (Task 6 step 3); one before-string was non-unique (Task 4); and one assertion misbehaved under `set -e` (Task 5). A second mechanical pass then found a *seventh* call site — `evals/evals.json` eval 11 asserts "all should be Implemented", contradicting the revised `spec-verify` check (Task 5) — and that Task 6's grep sweep was scoped to include `docs/superpowers/`, where this plan and its design doc quote the defective text deliberately, so the sweep would have directed the executor to edit its own plan (Task 6 step 2, now scoped to `references/ skills/ evals/ docs/codebase-guide.md`).
+
+**Known-stale environment, called out rather than assumed away.** PyYAML is absent on this host, so `test-doc-pr-release.sh` reports one failure unrelated to this work; Task 6 step 1 installs it and tells the executor how to recognize the benign case. The six version manifests are *already* split between `2.12.3` and `2.12.2` before this work starts — leftover from the v2.12.3 release — so `check-version` fails today; Task 6 step 5 says so explicitly, since an executor seeing that failure would otherwise assume they caused it. The `## Spec Status Model` heading, the `R1`–`R4` labels, the step headings `Update spec status (guarded)` and `Advance implemented specs (scope-gated)`, and the `:target` / `:constraint` suffix are spelled identically everywhere they appear in the plan and in the test needles.
 
 **Known brittleness, accepted.** The test suite matches literal prose, so reworded documentation will fail it. That is the intent — the defect recurred precisely because template text was unguarded — but a future editor who rewords deliberately must update the needles alongside. The suite's header comment says so.
