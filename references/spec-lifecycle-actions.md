@@ -202,9 +202,9 @@ Runs after each plan chunk completes (not after every individual task).
 
 1. **Check freshness** — Call `doc-tools.sh check-freshness` against the governing specs. This compares the spec's `content_hash` in `.doc-index.json` against the current `code_commit` for its `code_refs`.
 2. **Determine alignment vs. drift** — If code changed but spec wasn't updated (flagged stale), the agent reads three inputs: (a) the spec's relevant section content, (b) the code changes in files matching the spec's `code_refs`, (c) the plan task description that was just executed. The key question: "Does the implementation achieve what the spec describes, even if through a different mechanism?"
-   - **Aligned** (implementation achieves spec intent): Update the spec's `Status` field. Update the spec's Implementation Notes to reflect actual approach taken. Refine `code_refs` if actual file paths differ from initial estimates. Call `doc-tools.sh update-index` to refresh hashes. No human intervention.
+   - **Aligned** (implementation achieves spec intent): Update the spec's `Status` per the **Spec Status Model** — read the current status first, never regress, and leave exempt statuses and constraint specs untouched. Update the spec's Implementation Notes to reflect actual approach taken. Refine `code_refs` if actual file paths differ from initial estimates. Call `doc-tools.sh update-index` to refresh hashes. No human intervention.
    - **Drifted** (implementation contradicts spec intent, omits requirements, or introduces unspecified behavior): Flag for human review with a deviation note: what the spec says, what the code does, and why they diverge. Do not auto-update spec content.
-3. **Status transitions**: Draft → In Review (first implementation) → Implemented (verification passes).
+3. **Status transitions**: governed by the **Spec Status Model** — `Draft` → `In Review` (first implementation) → `Approved` → `Implemented` (verification passes). Monotonic (R2); exempt statuses and constraint specs never transition (R3, roles). Never write `Status` without reading the current value first (R1). `Approved` is human-set — no action ever writes it; it appears on the ladder so R2 can protect specs that carry it.
 4. **Output**: Updated spec files (if aligned) or deviation flags (if drifted).
 
 ---
@@ -222,7 +222,14 @@ Two modes: **post-execute** (final compliance check before merging) and **review
 
 1. **Existence check** — Run `doc-tools.sh check-freshness` across all specs in scope. If governing specs don't exist, that's a finding.
 2. **Staleness check** — Are any specs still flagged stale after all tasks completed? This catches specs that `spec-inject` (execute phase) flagged for review but were never addressed.
-3. **Status check** — Are all governing specs in `Implemented` status? Any still at `Draft` or `In Review` means implementation tasks were skipped or the plan didn't cover that spec's scope.
+3. **Status check** — For each governing spec, resolve its role and status class per the **Spec Status Model**, then check only what applies:
+   - **target** at a ladder status → expect `Implemented`. Still at `Draft`, `In Review`, or `Approved` means implementation tasks were skipped or the plan didn't cover that spec's scope — report which of the two it is.
+   - **target** at an exempt status (`Active`, `Deprecated`, `Superseded`, …) → **not a finding**. `Active` reference specs are continuously evolving and never reach `Implemented` by design.
+   - **constraint** → **not a finding** at any status. The work was never expected to advance it.
+
+   Then emit two **P3 informational** lines. These are never findings and never cause a FAIL — they exist because the two suppressions above are otherwise silent in the failing direction:
+   - **Inferred constraints** — list specs treated as constraint references *by inference* rather than by an explicit `:constraint` marker: "N spec(s) treated as constraint references by inference — pass `:constraint` to confirm, or fix their `code_refs` if they were meant to be implementation targets." Role inference is circular: wrong `code_refs` produce a constraint verdict, the constraint branch skips the `code_refs` refinement step, so the `code_refs` stay wrong and the spec silently never advances. Specs marked `:constraint` explicitly are not listed — the caller already said so.
+   - **Unrecognized statuses** — list specs at an unrecognized status, i.e. one outside the documented vocabulary (a typo such as `Implemenetd`, or a value from a downstream vocabulary): "N spec(s) at an unrecognized status — automation will never transition these." R3 correctly declines to write them; reporting them is what keeps them from being invisible forever.
 4. **Coverage check** — Five-way alignment across five artifact relationships:
 
    **Design doc → Specs:** Parse the design doc's major sections (identified by `##` headings that describe system behavior or architecture). For each section, check whether a governing spec exists whose `Source` field points to this design doc AND whose category and content correspond to that section's domain. Missing correspondence = "design intent without formal spec."
@@ -236,8 +243,10 @@ Two modes: **post-execute** (final compliance check before merging) and **review
    **README.md → Capabilities:** Check that README.md sections (feature list, action list, usage examples) accurately reflect the current project capabilities. Stale README.md sections = "public doc drift." This matters because README.md is the project's public documentation — outdated entries mislead users and contributors.
 
 5. **PASS/FAIL verdict:**
-   - **PASS:** All governing specs in `Implemented` status AND no unresolved deviations AND no "design intent without formal spec" findings AND CLAUDE.md and README.md are current
-   - **FAIL:** Any spec not in `Implemented` status, OR any unresolved deviation, OR any "design intent without formal spec" finding, OR CLAUDE.md/README.md staleness detected
+   - **PASS:** Every spec required to be `Implemented` by the Status check (step 3) is `Implemented` AND no unresolved deviations AND no "design intent without formal spec" findings AND CLAUDE.md and README.md are current
+   - **FAIL:** Any spec required to be `Implemented` by the Status check (step 3) is not, OR any unresolved deviation, OR any "design intent without formal spec" finding, OR CLAUDE.md/README.md staleness detected
+
+   Specs the Status check exempts — constraint references, and specs at `Active` / `Deprecated` / `Superseded` — never contribute to a FAIL verdict. Neither do the two P3 informational lines.
 
    **Recovery:** update per `references/doc-spec.md` CLAUDE.md / README.md update rules, then re-run `spec-verify`.
 

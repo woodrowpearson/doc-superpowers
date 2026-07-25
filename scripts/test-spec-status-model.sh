@@ -43,4 +43,32 @@ assert_contains "$ACTIONS" "Never write a status earlier than the current value 
 assert_contains "$ACTIONS" '`<path>:target` or `<path>:constraint`' \
   "plan-phase --specs input documents the role suffix"
 
+echo "--- execute phase and spec-verify ---"
+assert_contains "$ACTIONS" 'per the **Spec Status Model**' \
+  "execute-phase aligned branch cites the model"
+assert_contains "$ACTIONS" '`Approved` → `Implemented` (verification passes)' \
+  "execute-phase ladder includes Approved"
+assert_not_contains "$ACTIONS" "Are all governing specs in \`Implemented\` status?" \
+  "spec-verify status check no longer requires Implemented unconditionally"
+assert_contains "$ACTIONS" "**constraint** → **not a finding**" \
+  "spec-verify exempts constraint specs"
+assert_contains "$ACTIONS" "never reach \`Implemented\` by design" \
+  "spec-verify exempts Active reference specs"
+assert_not_contains "$ACTIONS" "**PASS:** All governing specs in \`Implemented\` status AND" \
+  "spec-verify verdict no longer requires all specs Implemented"
+assert_contains "$ACTIONS" "required to be \`Implemented\` by the Status check" \
+  "spec-verify verdict scoped to specs the status check requires"
+assert_contains "$ACTIONS" '`Approved` is human-set' \
+  "ladder notes that automation never writes Approved"
+assert_contains "$ACTIONS" "treated as constraint references by inference" \
+  "spec-verify reports inferred constraints informationally"
+assert_contains "$ACTIONS" "at an unrecognized status" \
+  "spec-verify reports unrecognized statuses informationally"
+
+AGENTPROMPT="$(cat "$REPO_ROOT/references/agent-prompt-template.md")"
+assert_contains "$AGENTPROMPT" "Exempt specs sit outside the ladder by design" \
+  "review-agent template exempts non-ladder statuses from P1"
+assert_not_contains "$AGENTPROMPT" 'Spec has `Status: Draft` but code exists' \
+  "review-agent template no longer flags any Draft spec with code as P1"
+
 print_summary
