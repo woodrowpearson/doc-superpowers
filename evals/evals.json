@@ -231,7 +231,7 @@
         {
           "name": "ci-workflows-created",
           "type": "file_exists",
-          "description": "Creates .github/workflows/ with 7 workflow files: doc-freshness-pr.yml, doc-freshness-schedule.yml, doc-index-update.yml, doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml"
+          "description": "Creates .github/workflows/ with 9 workflow files: doc-freshness-pr.yml, doc-freshness-schedule.yml, doc-index-update.yml, doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml"
         },
         {
           "name": "reports-install-counts",

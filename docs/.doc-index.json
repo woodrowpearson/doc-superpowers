@@ -1,40 +1,40 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-07-25T03:19:25Z",
+  "generated_at": "2026-07-25T04:00:38Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
-      "content_hash": "sha256:c819246ace2fb03d3c0e69d1ab60916ca54fc344e54a6eb64c717f1f89626ebb",
+      "content_hash": "sha256:af3df98af95d58d62fbad37587079f626ed426509943c4db217f03e0a978b50f",
       "code_refs": [
         "SKILL.md",
         "scripts/",
         "references/"
       ],
-      "code_commit": "feecd7e00ed62f17124aaa6c94e9e82a5bbd4284",
+      "code_commit": "5de9fe28d7cad9f214555a4e884cf048a0b747bb",
       "doc_type": "architecture",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-05-28T00:42:54Z",
+      "last_verified": "2026-07-25T03:57:21Z",
       "implementation": []
     },
     "docs/codebase-guide.md": {
-      "content_hash": "sha256:7de669e13ef13e5a00147b5671d1d6537800d46fecfdb958fcfb8a1fcf9161a3",
+      "content_hash": "sha256:ea12bb78a477fc8c47ce43e2e05e8477953d64c707ff0679598f9c0cf389428e",
       "code_refs": [
         "SKILL.md",
         "scripts/"
       ],
-      "code_commit": "4b9f7b67b8c2062385688afcc84f78f4022b28ab",
+      "code_commit": "5de9fe28d7cad9f214555a4e884cf048a0b747bb",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-25T03:19:25Z",
+      "last_verified": "2026-07-25T03:57:21Z",
       "implementation": []
     },
     "docs/conventions.md": {
-      "content_hash": "sha256:8599ebff66235770552f01fec8794173f6716a2f39131678fc2053fd6202d3e0",
+      "content_hash": "sha256:89a8780688694ecd93d3dbe0b697e0f69de9b927a978e1c304c9333a2dc9b1bc",
       "code_refs": [
         "SKILL.md",
         "references/doc-spec.md"
@@ -44,34 +44,35 @@
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-25T02:30:37Z",
+      "last_verified": "2026-07-25T03:57:21Z",
       "implementation": []
     },
     "docs/guides/getting-started.md": {
-      "content_hash": "sha256:2e5fd5eb3819e88f85a1c4acf62ddd96d3b042be526d93e6722f57a92626d2c4",
+      "content_hash": "sha256:bf7a5c5fef8d64d36a507c9568deae909b07c8ee84be059aaa05ec145363db56",
       "code_refs": [
         "README.md",
         "SKILL.md"
       ],
-      "code_commit": "abb3e64efd8c64d264a9943451a22257bc1ad398",
+      "code_commit": "d931c803980200b440bba870ee5a01d146b8aaea",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-05-17T03:36:49Z"
+      "last_verified": "2026-07-25T03:57:21Z",
+      "implementation": []
     },
     "docs/workflows/doc-superpowers.md": {
-      "content_hash": "sha256:adaa1cdce7468915149de969bf5e04af6d876cc5293a27731423e5c407a7feae",
+      "content_hash": "sha256:5adb0e30a4af7e98a10395d310c6f0dbfeee8317f115e5298aa42bd0cbf4953d",
       "code_refs": [
         "SKILL.md",
         "scripts/"
       ],
-      "code_commit": "4b9f7b67b8c2062385688afcc84f78f4022b28ab",
+      "code_commit": "5de9fe28d7cad9f214555a4e884cf048a0b747bb",
       "doc_type": "workflows",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-25T03:19:25Z",
+      "last_verified": "2026-07-25T03:57:21Z",
       "implementation": []
     },
     "docs/plans/2026-03-26-audit-report.md": {
@@ -388,6 +389,19 @@
       "replaces": null,
       "superseded_by": null,
       "last_verified": "2026-07-25T01:37:14Z"
+    },
+    "docs/plans/2026-07-24-audit-report.md": {
+      "content_hash": "sha256:9d8e94ba86fef2887f8b5a8b5cce8dec8596415ceb183ad61edb9e87167062f9",
+      "code_refs": [
+        ""
+      ],
+      "code_commit": null,
+      "doc_type": "plan",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-07-25T04:00:38Z",
+      "implementation": []
     }
   }
 }

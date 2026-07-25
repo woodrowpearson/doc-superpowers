@@ -8,6 +8,10 @@ Documentation orchestrator skill for Claude Code. Generates, audits, and maintai
 doc-superpowers/
 ├── .gitignore            # Git ignore rules
 ├── .worktrees/           # Parallel agent dispatch worktrees (gitignored)
+├── .claude/              # Self-installed Claude Code hook tier
+│   ├── settings.local.json   # Hook wiring (PreToolUse, PostToolUse, Stop)
+│   └── hooks/
+│       └── doc-superpowers/  # pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh
 ├── .claude-plugin/       # Claude Code plugin manifest + marketplace
 │   ├── plugin.json
 │   └── marketplace.json
@@ -16,6 +20,11 @@ doc-superpowers/
 │   └── INSTALL.md
 ├── .codex/               # Codex installation guide
 │   └── INSTALL.md
+├── .github/              # Self-installed CI tier — 3 of the 9 workflow templates
+│   └── workflows/
+│       ├── doc-freshness-pr.yml
+│       ├── doc-freshness-schedule.yml
+│       └── doc-index-update.yml
 ├── .opencode/            # OpenCode plugin + installation guide
 │   ├── INSTALL.md
 │   └── plugins/
@@ -25,10 +34,11 @@ doc-superpowers/
 │       └── SKILL.md      # Main skill definition — action routing, discovery, verification
 ├── AGENTS.md             # Cross-client agent instructions
 ├── GEMINI.md             # Gemini CLI context redirect
+├── claude-code.json      # Claude Code skill manifest (bump-version target)
 ├── gemini-extension.json # Gemini CLI extension manifest
 ├── package.json          # npm/OpenCode package metadata
 ├── scripts/
-│   ├── doc-tools.sh      # Bundled freshness tooling (build-index, check-freshness, update-index, add-entry, remove-entry, deprecate-entry, status, bump-version, check-version)
+│   ├── doc-tools.sh      # Bundled freshness tooling (build-index, check-freshness, update-index, add-entry, remove-entry, deprecate-entry, status, bump-version, check-version, implementation-status, set-implementation, fragments, tools)
 │   ├── test-doc-tools.sh # Test suite for doc-tools.sh
 │   ├── test-doc-pr-release.sh # Test suite for doc-pr-release helpers
 │   ├── test-helpers.sh   # Shared test utilities
@@ -38,6 +48,7 @@ doc-superpowers/
 │   ├── test-merge-driver.sh # Test suite for merge driver
 │   └── hooks/
 │       ├── install.sh        # Hook installer engine
+│       ├── state.sh          # Install-state tracking — .claude/doc-superpowers/installed.json
 │       ├── git/              # Git hook scripts
 │       ├── claude/           # Claude Code hook scripts
 │       └── ci/               # GitHub Actions workflow templates
@@ -81,7 +92,7 @@ doc-superpowers/
 │   ├── archive/          # Archived docs (created on demand by `update` when superseding)
 │   │   └── plans/              # Archived audit plans
 │   ├── codebase-guide.md # Directory map, key files, code flow
-│   ├── conventions.md    # Naming, versioning, skill structure
+│   └── conventions.md    # Naming, versioning, skill structure
 ├── evals/                # Evaluation test cases for skill testing
 │   └── evals.json        # Test prompts and assertions
 ├── README.md             # Installation, usage, examples
@@ -95,7 +106,7 @@ doc-superpowers/
 | File | Purpose | When to Modify |
 |------|---------|---------------|
 | `skills/doc-superpowers/SKILL.md` | Skill logic — discovery, action routing, agent prompts, verification | Adding actions, changing workflow |
-| `scripts/doc-tools.sh` | Bundled freshness tooling — 9 subcommands for index and version management | Changing staleness detection, index schema, version sync |
+| `scripts/doc-tools.sh` | Bundled freshness tooling — 13 subcommands for index management, version sync, ADR/SPEC implementation status, release-notes fragments, and CLI vendoring | Changing staleness detection, index schema, version sync, implementation status, fragment merge, or vendoring |
 | `scripts/test-doc-tools.sh` | Test suite for doc-tools.sh | Adding tests for new doc-tools features |
 | `scripts/test-hooks.sh` | Test suite for hooks installer and hook scripts | Adding tests for new hooks or installer features |
 | `scripts/test-spec-status-model.sh` | Test suite pinning the canonical Spec Status Model wording and its call sites | Changing spec status transition rules, roles, or vocabulary |
@@ -106,6 +117,7 @@ doc-superpowers/
 | `scripts/merge-doc-index.sh` | Custom git merge driver for .doc-index.json — auto-resolves timestamp/entry conflicts during merge/rebase | Changing merge conflict resolution logic |
 | `scripts/test-merge-driver.sh` | Test suite for merge-doc-index.sh | Adding tests for merge driver features |
 | `scripts/hooks/install.sh` | Hook installer — install/uninstall/status for all tiers (including merge driver registration) | Adding hook tiers, changing installer logic |
+| `scripts/hooks/state.sh` | Install-state tracking shared by install.sh — reads/writes `.claude/doc-superpowers/installed.json` (committed, so install choices persist across contributors) | Changing state schema, the known-workflow list, or state-respect rules |
 | `references/doc-spec.md` | Doc templates, Mermaid syntax, naming conventions, schema reference | Adding doc types, changing templates |
 | `references/agent-prompt-template.md` | Review agent prompt template + scope-specific focus areas | Changing agent review instructions or adding project signals |
 | `references/output-templates.md` | Audit report format + plan template | Changing report structure or plan format |
@@ -133,13 +145,15 @@ doc-superpowers/
 - `/doc-superpowers hooks uninstall` — Remove installed hooks
 - `/doc-superpowers release` — Draft release notes entry from git history
 - `/doc-superpowers spec-generate --design-doc=<path>` — Generate formal specs from design doc
-- `/doc-superpowers spec-inject --phase=plan|execute` — Inject spec tasks or track drift
-- `/doc-superpowers spec-verify --mode=post-execute|review` — Verify spec compliance
+- `/doc-superpowers spec-inject --phase=plan|execute --specs=<paths>` — Inject spec tasks or track drift
+- `/doc-superpowers spec-verify --mode=post-execute|review --specs=<paths>` — Verify spec compliance
+
+Each `--specs` path may carry an optional role suffix — `<path>:target` or `<path>:constraint`. Unsuffixed paths stay valid and are role-inferred at execution time.
 
 ## Conventions
 
-- **Versioning**: Semantic versioning (MAJOR.MINOR.PATCH) in RELEASE-NOTES.md
+- **Versioning**: Semantic versioning (MAJOR.MINOR.PATCH). RELEASE-NOTES.md is the canonical source — `check-version` reads it, `bump-version` never writes it. Run `scripts/doc-tools.sh bump-version X.Y.Z` to update the 6 manifest files, then `check-version` to verify. This step is **mandatory** — never manually edit version strings in individual files
 - **Skill structure**: Follows obra/superpowers SKILL.md conventions (YAML frontmatter with `name` + `description`)
 - **Templates**: All doc templates live in `references/doc-spec.md`, not inline in SKILL.md
 - **Diagrams**: Mermaid source in docs, PNGs committed for GitHub rendering
-- **Testing**: Test skill changes by running `/doc-superpowers init` on a sample project
+- **Testing**: Five shell suites gate changes — `test-doc-tools.sh` (148 assertions), `test-hooks.sh` (308), `test-spec-status-model.sh` (64), `test-doc-pr-release.sh` (32), `test-merge-driver.sh` (19), 571 total, all sharing the `test-helpers.sh` harness. Test skill changes by running `/doc-superpowers init` on a sample project
