@@ -89,4 +89,16 @@ assert_contains "$PROTOCOL" '`<path>:target` or `<path>:constraint`' \
 assert_contains "$PROTOCOL" "Constraint specs are never written" \
   "wrapper-author output contract states constraint specs are never written"
 
+echo "--- evals ---"
+EVALS="$(cat "$REPO_ROOT/evals/evals.json")"
+
+assert_not_contains "$EVALS" "set all specs to Implemented" \
+  "eval no longer asserts the unconditional finalize behaviour"
+assert_contains "$EVALS" "spec-inject-plan-mixed-statuses" \
+  "issue #12 reproduction eval exists"
+assert_not_contains "$EVALS" "all should be Implemented" \
+  "eval 11 no longer asserts the unconditional spec-verify status rule"
+if jq empty "$REPO_ROOT/evals/evals.json" >/dev/null 2>&1; then JSON_OK=0; else JSON_OK=1; fi
+assert_eq "0" "$JSON_OK" "evals.json is valid JSON"
+
 print_summary
