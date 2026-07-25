@@ -56,8 +56,10 @@ When the project has `docs/specs/` with formal specs, agents should also check:
 | Signal | Focus Areas |
 |--------|-------------|
 | `SPEC-{CAT}-NNN-*.md` files exist | Check spec `Status` field matches implementation state; verify `code_refs` point to real files |
-| Spec has `Status: Draft` but code exists | Flag as P1 — spec wasn't updated during implementation |
+| Spec at a ladder status (`Draft` / `In Review` / `Approved`) but code exists in its `code_refs` | Flag as P1 — spec wasn't updated during implementation |
 | Spec has `Status: Implemented` but code diverged | Flag as P0 — spec claims implementation matches but code has changed |
+| Spec at an exempt status (`Active`, `Deprecated`, `Superseded`, or any status not on the ladder) | **Not a finding.** Exempt specs sit outside the ladder by design — see **Spec Status Model** in `references/spec-lifecycle-actions.md` |
+| Spec passed as a constraint reference (`:constraint`) for the work under review | **Not a finding** at any status. The work was never expected to advance it |
 | Changed files not covered by any spec's `code_refs` | Flag as P2 — unspecified implementation |
 | `Source` field in spec points to design doc | Cross-check design doc intent against spec content |
 
