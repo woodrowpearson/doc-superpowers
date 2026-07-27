@@ -99,11 +99,11 @@ Scopes:  all | <auto-detected from docs/ structure>
 | Action | Purpose | When to Use |
 |--------|---------|-------------|
 | `init` | Generate full doc suite from scratch | New project or missing docs |
-| `audit` | Check all docs for staleness | Periodic health check |
-| `review-pr` | Check docs affected by PR changes | Before merging PRs |
+| `audit` | Check all docs, CLAUDE.md, README.md, and RELEASE-NOTES.md for staleness via parallel scope agents; writes a report to `docs/plans/` | Periodic health check |
+| `review-pr` | Check docs, CLAUDE.md, and README.md affected by PR changes | Before merging PRs |
 | `update` | Apply fixes from audit/review | After audit identifies stale docs |
 | `diagram` | Regenerate architecture diagrams | After structural changes |
-| `sync` | Sync doc index with filesystem | After adding/removing doc files |
+| `sync` | Sync doc index with filesystem, check CLAUDE.md and README.md currency | After adding/removing doc files |
 | `hooks` | Install workflow hooks (git, Claude Code, CI/CD) | Setting up automated freshness monitoring |
 | `release` | Draft release notes entry from git history | Cutting a new version |
 | `spec-generate` | Generate formal specs from design doc; scans overlapping specs for stale content | After brainstorming produces a design spec |
@@ -149,7 +149,12 @@ Scopes:  all | <auto-detected from docs/ structure>
 
 # Spec coverage check during review
 /doc-superpowers spec-verify --mode=review --changed-files=src/auth/oauth.py,src/auth/session.py
+
+# Declare spec roles explicitly (v2.13.0+) — a target is advanced, a constraint is never written
+/doc-superpowers spec-inject --phase=execute --specs=docs/specs/SPEC-UI-010-collection-view.md:target,docs/specs/SPEC-API-006-backend.md:constraint
 ```
+
+The `:target` / `:constraint` suffix is optional — unsuffixed paths remain valid and are role-inferred at execution time.
 
 For wrapper skill integration, see `references/spec-lifecycle-protocol.md`.
 
@@ -170,6 +175,12 @@ Install opt-in hooks for automated freshness monitoring:
 /doc-superpowers hooks install --ci --workflows=doc-pr-release,doc-index-update
 /doc-superpowers hooks install --ci --workflows=none   # only vendor doc-tools.sh
 /doc-superpowers hooks install --ci --force            # override "intentionally removed"
+
+# CI tuning flags
+/doc-superpowers hooks install --ci --base-branch develop   # target branch (default: main)
+/doc-superpowers hooks install --ci --cron "0 6 * * 1"      # weekly audit schedule (default: 0 9 * * 1)
+/doc-superpowers hooks install --ci --ci-strict             # PR check fails on stale docs instead of warning
+/doc-superpowers hooks install --ci --helpers=false         # skip the doc-pr-release helpers (default: true)
 
 # Standalone tool install (v2.12.0+) — doc-tools.sh only, no workflows
 $DOC_TOOLS tools install                       # → .github/scripts/doc-tools.sh
@@ -265,20 +276,33 @@ This skill is designed as a **documentation superset** of the [obra/superpowers]
 ```
 doc-superpowers/
 ├── .gitignore            # Git ignore rules
+├── .claude/              # Self-installed Claude Code hook tier
+│   ├── settings.local.json   # Hook wiring (PreToolUse, PostToolUse, Stop)
+│   └── hooks/
+│       └── doc-superpowers/  # pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh
 ├── .claude-plugin/       # Claude Code plugin manifest + marketplace
 │   ├── plugin.json
 │   └── marketplace.json
-├── .cursor-plugin/       # Cursor plugin manifest
-│   └── plugin.json
+├── .cursor-plugin/       # Cursor plugin manifest + installation guide
+│   ├── plugin.json
+│   └── INSTALL.md
 ├── .codex/               # Codex installation guide
 │   └── INSTALL.md
+├── .github/              # Self-installed CI tier — 3 of the 9 workflow templates
+│   └── workflows/
+│       ├── doc-freshness-pr.yml
+│       ├── doc-freshness-schedule.yml
+│       └── doc-index-update.yml
 ├── .opencode/            # OpenCode plugin + installation guide
 │   ├── INSTALL.md
 │   └── plugins/
 │       └── doc-superpowers.js
-├── SKILL.md              # Main skill definition
+├── skills/
+│   └── doc-superpowers/
+│       └── SKILL.md      # Main skill definition
 ├── AGENTS.md             # Cross-client agent instructions
 ├── GEMINI.md             # Gemini CLI context redirect
+├── claude-code.json      # Claude Code skill manifest
 ├── gemini-extension.json # Gemini CLI extension manifest
 ├── package.json          # npm/OpenCode package metadata
 ├── scripts/
@@ -286,8 +310,13 @@ doc-superpowers/
 │   ├── test-doc-tools.sh # Test suite for doc-tools.sh
 │   ├── test-helpers.sh   # Shared test utilities
 │   ├── test-hooks.sh     # Test suite for hooks installer
+│   ├── test-spec-status-model.sh # Test suite for the Spec Status Model + call sites
+│   ├── test-doc-pr-release.sh    # Test suite for doc-pr-release helpers
+│   ├── merge-doc-index.sh        # Custom git merge driver for .doc-index.json
+│   ├── test-merge-driver.sh      # Test suite for merge driver
 │   └── hooks/
 │       ├── install.sh        # Hook installer engine
+│       ├── state.sh          # Install-state tracking
 │       ├── git/              # Git hook scripts (pre-commit, post-merge, etc.)
 │       ├── claude/           # Claude Code hook scripts
 │       └── ci/               # GitHub Actions workflow templates
@@ -314,6 +343,7 @@ doc-superpowers/
 │   │   ├── specs/        # Design specs from brainstorming
 │   │   └── plans/        # Implementation plans from writing-plans
 │   ├── .doc-index.json   # Machine-readable freshness index
+│   ├── issues/           # Bug reports and enhancement requests
 │   ├── plans/            # Audit reports and update plans
 │   ├── archive/          # Archived docs
 │   ├── codebase-guide.md
@@ -326,7 +356,7 @@ doc-superpowers/
 
 ## Dependencies
 
-The skill itself (`SKILL.md` + `references/`) has zero dependencies. The bundled tooling in `scripts/` requires:
+The skill itself (`skills/doc-superpowers/SKILL.md` + `references/`) has zero dependencies. The bundled tooling in `scripts/` requires:
 
 | Dependency | Required | Notes |
 |-----------|----------|-------|
@@ -338,7 +368,7 @@ The skill itself (`SKILL.md` + `references/`) has zero dependencies. The bundled
 
 1. Fork the repository
 2. Create a feature branch
-3. Make changes to `SKILL.md` or `references/doc-spec.md`
+3. Make changes to `skills/doc-superpowers/SKILL.md` or `references/doc-spec.md`
 4. Test with `/doc-superpowers init` on a sample project
 5. Submit a PR
 

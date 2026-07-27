@@ -47,10 +47,12 @@ Follows [obra/superpowers](https://github.com/obra/superpowers) skill convention
 
 Version consistency is managed via `doc-tools.sh`:
 
-- **`bump-version VERSION`** — updates the version string in all 7 manifest files simultaneously
+- **`bump-version VERSION`** — updates the version string in all 6 manifest files simultaneously
 - **`check-version`** — verifies all manifest files contain the same version
 
-Manifest files managed: `package.json`, `claude-code.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.cursor-plugin/plugin.json`, `gemini-extension.json`, `RELEASE-NOTES.md`.
+Manifest files managed: `package.json`, `claude-code.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.cursor-plugin/plugin.json`, `gemini-extension.json`.
+
+`RELEASE-NOTES.md` is not one of them. It is the canonical version source that `check-version` reads and compares the manifests against, and its `## vX.Y.Z` heading is written by the `release` action — never by `bump-version`.
 
 **After bumping**, also check for stale version references in INSTALL.md files (`.codex/INSTALL.md`, `.opencode/INSTALL.md`) — these contain version-pinned install examples that `bump-version` does not update automatically.
 
@@ -77,6 +79,7 @@ chore: <maintenance task>
 
 - Keep PRs focused on a single change
 - Test skill changes by running `/doc-superpowers init` on a sample project before merging
+- Run the five shell test suites — `scripts/test-doc-tools.sh` (148 assertions), `scripts/test-hooks.sh` (308), `scripts/test-merge-driver.sh` (19), `scripts/test-doc-pr-release.sh` (32), `scripts/test-spec-status-model.sh` (64), 571 total — all must pass before merge. They share the `scripts/test-helpers.sh` harness (setup, teardown, assertions)
 - Include before/after examples for behavior changes
 
 ## Documentation Conventions
@@ -198,7 +201,7 @@ Hooks are organized into three tiers, each independently installable:
 |------|------|---------|
 | Git | `--git` | pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push |
 | Claude Code | `--claude` | pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh |
-| CI/CD | `--ci` | doc-freshness-pr.yml, doc-freshness-schedule.yml, doc-index-update.yml, doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml |
+| CI/CD | `--ci` | doc-freshness-pr.yml, doc-freshness-schedule.yml, doc-index-update.yml, doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml |
 
 Use `--all` to install all tiers at once.
 
@@ -229,7 +232,7 @@ When a target hook file already exists and was not installed by doc-superpowers,
 
 The Claude tier **copies** hook scripts to `.claude/hooks/doc-superpowers/` with placeholder substitution, rather than referencing source scripts by absolute path:
 
-- Scripts are copied with `__DOC_TOOLS_PATH__` and `__INSTALL_DATE__` resolved
+- Scripts are copied with `__DOC_TOOLS_PATH__`, `__DOC_TOOLS_PARENT__`, and `__INSTALL_DATE__` resolved — `__DOC_TOOLS_PARENT__` is what lets an installed hook resolve the newest plugin-cache version at run time rather than pinning the version present at install time
 - Hooks are registered in `.claude/settings.local.json` using **relative paths** (e.g., `.claude/hooks/doc-superpowers/pre-commit-gate.sh`)
 - Existing settings are deep-merged: other hook entries are preserved, and doc-superpowers entries are deduplicated
 - Uninstall removes both the settings entries and the copied scripts directory
@@ -241,6 +244,7 @@ The Claude tier **copies** hook scripts to `.claude/hooks/doc-superpowers/` with
 | `--base-branch NAME` | `main` | Target branch for PR checks |
 | `--cron EXPR` | `0 9 * * 1` | Schedule for weekly freshness audit |
 | `--ci-strict` | off | Fail PR check on stale docs (exit non-zero) |
+| `--helpers=<true\|false>` | `true` | Install the `doc-pr-release` helper scripts; no effect unless the `doc-pr-release` workflow is installed |
 
 ### Environment Variables
 
@@ -254,15 +258,20 @@ The Claude tier **copies** hook scripts to `.claude/hooks/doc-superpowers/` with
 
 ### Status Transitions
 
-Spec files use a `Status` field that follows a linear progression:
+Spec files use a `Status` field. Ladder statuses progress monotonically; exempt statuses sit outside the ladder and automation never transitions them. The canonical rules live in the **Spec Status Model** section of `references/spec-lifecycle-actions.md` — this table summarizes, it does not define.
 
-| Status | Meaning | Set By |
-|--------|---------|--------|
-| `Draft` | Spec generated, not yet implemented | `spec-generate` |
-| `In Review` | Implementation started, spec under active verification | `spec-inject --phase=execute` |
-| `Implemented` | Verification passed, spec matches code | `spec-verify --mode=post-execute` |
+| Status | Class | Meaning | Written by |
+|--------|-------|---------|-----------|
+| `Draft` | Ladder | Spec generated, not yet implemented | `spec-generate` |
+| `In Review` | Ladder | Implementation started, or a partially-covered target held pending deferred scope | `spec-inject` |
+| `Approved` | Ladder | Human-approved pre-implementation; automation never writes it | human only |
+| `Implemented` | Ladder | Scope-covered target, verification passed | `spec-inject` |
+| `Active` | Exempt | Continuously-evolving reference spec; never "completes" | human only |
+| `Deprecated` | Exempt | No longer governing | human only |
+| `Superseded` | Exempt | Replaced by another spec | human only — `spec-generate` writes the `Superseded by` field and the index entry, not this `Status` |
+| any other status | Exempt | Unrecognized vocabulary — anything not on the ladder above | nothing — `spec-verify` reports it informationally, and no action ever writes or corrects it |
 
-Transitions: `Draft` → `In Review` (first implementation chunk) → `Implemented` (verification passes).
+Transitions: `Draft` → `In Review` → `Approved` → `Implemented`, monotonic — never regress. `spec-verify` is read-only and writes no `Status`; the writes belong to `spec-inject`. Role gates before status: a path passed as a **constraint** reference is never written at all — no `Status`, no Implementation Notes, no `code_refs` refinement. For a **target**, coverage gates the top rung — Full coverage makes it eligible for `Implemented`, Partial coverage holds it at `In Review` with the remaining scope recorded in Implementation Notes. See the **Spec Status Model** section of `references/spec-lifecycle-actions.md` for roles, coverage classes, and evaluation order.
 
 ### Supersession Conventions
 
@@ -309,6 +318,8 @@ The `docs/.doc-index.json` file is the machine-readable freshness index. It foll
 
 ### Entry Schema
 
+The index carries a top-level `schema_version` field (currently `2`, renamed from `version` when the per-entry `implementation` array was added). Indexes built before that rename still carry `version: 1` — including this repo's own `docs/.doc-index.json`, which has been refreshed by `update-index` but not rebuilt since. `update-index` preserves the top-level shape it finds; only `build-index` writes the current one.
+
 Each entry in the index (keyed by relative doc path) contains:
 - `content_hash` — `sha256:<hex>` hash of doc file content
 - `code_refs` — list of directories/files this doc covers
@@ -318,3 +329,4 @@ Each entry in the index (keyed by relative doc path) contains:
 - `replaces` — path to doc this one supersedes (null if none)
 - `superseded_by` — path to doc that supersedes this one (null if none)
 - `last_verified` — ISO 8601 timestamp of last freshness check confirmation
+- `implementation` — array of bullet strings parsed from the doc's `Implementation:` (ADRs) or `Realized-by:` (specs) block, recording ADR/spec realization state; `[]` when neither block is present

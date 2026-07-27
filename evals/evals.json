@@ -231,7 +231,7 @@
         {
           "name": "ci-workflows-created",
           "type": "file_exists",
-          "description": "Creates .github/workflows/ with 7 workflow files: doc-freshness-pr.yml, doc-freshness-schedule.yml, doc-index-update.yml, doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml"
+          "description": "Creates .github/workflows/ with 9 workflow files: doc-freshness-pr.yml, doc-freshness-schedule.yml, doc-index-update.yml, doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml"
         },
         {
           "name": "reports-install-counts",
@@ -331,7 +331,7 @@
       "id": 10,
       "name": "spec-inject-plan",
       "prompt": "I have formal specs at docs/specs/SPEC-AUTH-001-oauth-flow.md and docs/specs/SPEC-DATA-001-user-schema.md, and my implementation plan is at docs/superpowers/plans/2026-03-15-auth-feature.md. Can you inject spec maintenance tasks into the plan? /doc-superpowers spec-inject --phase=plan --plan=docs/superpowers/plans/2026-03-15-auth-feature.md --specs=docs/specs/SPEC-AUTH-001-oauth-flow.md,docs/specs/SPEC-DATA-001-user-schema.md",
-      "expected_output": "Should read the plan, identify chunk boundaries, append spec update tasks at the end of each chunk, add a spec finalization task in the last chunk. Should NOT modify the specs themselves (only the plan). Tasks should use checkbox syntax.",
+      "expected_output": "Should read the plan, identify chunk boundaries, append spec update tasks at the end of each chunk, add a spec finalization task in the last chunk. Injected tasks must be status-aware: the per-chunk step reads the spec's current Status before writing and only advances Draft to In Review, and the finalization step resolves each spec's role and coverage rather than setting everything to Implemented. Should NOT modify the specs themselves (only the plan). Tasks should use checkbox syntax.",
       "files": [],
       "assertions": [
         {
@@ -347,7 +347,7 @@
         {
           "name": "injects-finalization-task",
           "type": "content_check",
-          "description": "Last chunk includes a spec finalization task to set all specs to Implemented"
+          "description": "Last chunk includes a scope-gated spec finalization task that advances only specs this plan implemented, leaving constraint references and exempt statuses untouched"
         },
         {
           "name": "preserves-existing-plan",
@@ -360,7 +360,7 @@
       "id": 11,
       "name": "spec-verify-post-execute",
       "prompt": "All implementation tasks are done for the auth feature. Before I merge, can you verify that the specs are all satisfied? /doc-superpowers spec-verify --mode=post-execute --specs=docs/specs/SPEC-AUTH-001-oauth-flow.md,docs/specs/SPEC-DATA-001-user-schema.md --design-doc=docs/superpowers/specs/2026-03-14-user-auth-design.md",
-      "expected_output": "Should run check-freshness on all specs, check Status fields (all should be Implemented), perform three-way coverage check (design doc → specs → code), produce a compliance report with PASS/FAIL verdict. Report should include summary stats, per-spec details, unresolved items, and a recommendation.",
+      "expected_output": "Should run check-freshness on all specs, check Status fields per the Spec Status Model (target specs at a ladder status should be Implemented; constraint references, specs at exempt statuses such as Active, and targets held at In Review with recorded remaining scope are not findings), perform five-way coverage check (design doc → specs → code → CLAUDE.md → README.md), produce a compliance report with PASS/FAIL verdict. Report should include summary stats, per-spec details, unresolved items, and a recommendation.",
       "files": [],
       "assertions": [
         {
@@ -371,12 +371,12 @@
         {
           "name": "checks-status-fields",
           "type": "output_check",
-          "description": "Verifies all governing specs have Status: Implemented"
+          "description": "Verifies Status only where the model requires it — target specs at a ladder status must be Implemented; constraint references, exempt statuses, and targets held at In Review with recorded remaining scope are not findings"
         },
         {
-          "name": "three-way-coverage",
+          "name": "five-way-coverage",
           "type": "output_check",
-          "description": "Performs design doc → specs → code coverage check and reports gaps"
+          "description": "Performs the five-way coverage check — design doc → specs → code → CLAUDE.md → README.md — and reports gaps"
         },
         {
           "name": "pass-fail-verdict",
@@ -436,6 +436,50 @@
           "name": "syncs-claude-readme",
           "type": "behavior_check",
           "description": "Updates CLAUDE.md and README.md if released commits changed commands, key files, or features"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "name": "spec-inject-plan-mixed-statuses",
+      "prompt": "I'm about to write an implementation plan at docs/superpowers/plans/2026-07-24-collection-scope.md. Four specs govern it: docs/specs/SPEC-UI-032-collection-search.md is already Implemented (the plan only adds regression guards around it), docs/specs/SPEC-UI-010-collection-view.md is In Review and the plan touches one slice of it, docs/specs/SPEC-API-006-trusted-circle-backend.md is In Review and is a read-only backend constraint the plan makes zero functions/ changes against, and docs/specs/SPEC-ARCH-004-system-overview.md is Active as a continuously-evolving reference spec. Inject spec maintenance tasks. /doc-superpowers spec-inject --phase=plan --plan=docs/superpowers/plans/2026-07-24-collection-scope.md --specs=docs/specs/SPEC-UI-032-collection-search.md,docs/specs/SPEC-UI-010-collection-view.md,docs/specs/SPEC-API-006-trusted-circle-backend.md:constraint,docs/specs/SPEC-ARCH-004-system-overview.md",
+      "expected_output": "Injected tasks must be guarded, not unconditional. The per-chunk status step must instruct the executing agent to read each spec's current Status first: advance only Draft to In Review, leave In Review / Approved / Implemented unchanged (never regress SPEC-UI-032 from Implemented back to In Review), and leave Active unchanged (SPEC-ARCH-004 sits outside the ladder). The finalization step must be scope-gated AND still R2-guarded: leave SPEC-API-006 untouched because it carries the :constraint marker, leave SPEC-ARCH-004 untouched because Active is exempt, leave SPEC-UI-032 at Implemented (it is a partially-covered target, and the partial branch must never write In Review over a later status), and for SPEC-UI-010 distinguish full from partial coverage rather than setting it to Implemented outright. Should NOT modify any spec file — only the plan.",
+      "files": [],
+      "assertions": [
+        {
+          "name": "per-chunk-step-reads-status-first",
+          "type": "content_check",
+          "description": "Injected per-chunk status step instructs reading the spec's current Status before writing, rather than an unconditional Draft to In Review assignment"
+        },
+        {
+          "name": "never-regresses-implemented-spec",
+          "type": "content_check",
+          "description": "Injected tasks explicitly leave Implemented specs unchanged, so SPEC-UI-032 is not driven back to In Review"
+        },
+        {
+          "name": "exempts-active-reference-spec",
+          "type": "content_check",
+          "description": "Injected tasks leave Active specs unchanged, so SPEC-ARCH-004 never enters the Draft to In Review to Implemented ladder"
+        },
+        {
+          "name": "honors-constraint-role-marker",
+          "type": "content_check",
+          "description": "Injected finalization task leaves SPEC-API-006 untouched because it was passed with the :constraint role suffix"
+        },
+        {
+          "name": "finalization-distinguishes-coverage",
+          "type": "content_check",
+          "description": "Injected finalization task distinguishes fully-covered specs (set Implemented) from partially-covered ones (hold, do not advance), and its partial branch never writes a status earlier than the current value"
+        },
+        {
+          "name": "finalize-does-not-regress-implemented",
+          "type": "content_check",
+          "description": "Injected finalization task leaves SPEC-UI-032 at Implemented despite being only partially covered — the partial-coverage branch is R2-guarded, so failure mode 1 cannot recur through the finalize path"
+        },
+        {
+          "name": "does-not-modify-specs",
+          "type": "content_check",
+          "description": "Only the plan document is modified; no spec file is written"
         }
       ]
     }
