@@ -4,6 +4,70 @@ Read this file when executing `spec-generate`, `spec-inject`, or `spec-verify`. 
 
 ---
 
+## Spec Status Model — Canonical Transition Rules
+
+**Every action in this file MUST follow this model. Do not restate these rules elsewhere — cite this section.**
+
+### Vocabulary
+
+| Class | Statuses | Automation behaviour |
+|---|---|---|
+| **Ladder** | `Draft` → `In Review` → `Approved` → `Implemented` | Participate in automated transitions |
+| **Exempt** | `Active`, `Deprecated`, `Superseded`, **and any status not listed in the ladder** | Never transitioned by any action |
+
+The exempt class is open-world. A spec carrying an unrecognized status is exempt — leave it alone. Do not treat it as a data-entry error to be corrected, and do not extend automation by enumerating exempt values.
+
+Match statuses case-insensitively and with surrounding whitespace trimmed, so `implemented` and `` `In Review` `` with a trailing space resolve to their ladder values rather than falling into the exempt class. A value that still does not match a ladder status after that normalization is genuinely exempt — and is reported by `spec-verify`'s unrecognized-status line, not silently corrected.
+
+### Rules
+
+- **R1 — Read before write.** Parse the spec's current `Status` before assigning any value. Never write `Status` without having read it first.
+- **R2 — Monotonic.** Transitions move forward along the ladder only. Never write a status earlier in the ladder than the current value. A regression is always a defect, never an intended outcome.
+- **R3 — Open-world exemption.** If the current `Status` is not a ladder value, make no transition, add no Implementation Notes, and make no `code_refs` write. Leave the spec untouched.
+- **R4 — Scope-gated advancement.** Advance a spec to `Implemented` only when this work implemented the spec's surface **and** that surface is fully covered.
+
+`Approved` needs no special-casing: it sits past `In Review` on the ladder, so R2 alone prevents a `Draft → In Review` step from regressing it.
+
+### Spec roles — implementation target vs. constraint reference
+
+A path passed via `--specs` is one of:
+
+- **target** — the work is expected to implement this spec's surface and advance its status.
+- **constraint** — the work must respect this spec (e.g. a field allowlist it must not violate) but must **not** advance it.
+
+Resolution, in precedence order:
+
+1. **Explicit marker.** `--specs=<path>:target` or `--specs=<path>:constraint`. An explicit marker always wins. The suffix is optional — unsuffixed paths remain valid.
+   ```
+   --specs=docs/specs/SPEC-UI-010-collection-view.md:target,docs/specs/SPEC-API-006-backend.md:constraint
+   ```
+2. **Inferred.** For an unsuffixed path, intersect the work's changed files (`git diff` against the branch base) with the spec's `code_refs` in `.doc-index.json`. Non-empty intersection → **target**. Empty intersection → **constraint**.
+
+A spec resolved as **constraint** is never written: no `Status` change, no Implementation Notes, no `code_refs` refinement, no `update-index` call.
+
+**Timing.** Role inference needs the changed-file set, which does not exist during `spec-inject --phase=plan` — nothing is implemented yet at plan-authoring time. So at injection time the explicit marker is the only role signal available, and injected tasks are written as instructions the executing agent evaluates against `git diff` **at execution time**. `spec-inject --phase=plan` never bakes a role decision into the plan text. At per-chunk execution the changed-file set reflects only the chunks run so far, so a spec whose surface lands in a later chunk infers as **constraint** in earlier ones and is skipped; this self-corrects at finalize, when the full range is visible, but it does make the inferred-constraints report noisier mid-plan.
+
+### Coverage completeness
+
+For a **target** spec, classify how much of its surface this work implemented:
+
+- **Full** — the whole surface is implemented → eligible for `Implemented`, subject to R2.
+- **Partial** — the spec has surfaces this work deliberately deferred → hold at `In Review` and record the remaining scope in Implementation Notes. Subject to R2: "hold at `In Review`" means *do not advance to `Implemented`* — never write `In Review` over a later status. A partially-covered spec already at `Approved` or `Implemented` stays exactly where it is.
+
+### Evaluation order
+
+Check in this order; the first rule that blocks a write wins:
+
+1. **Role** — resolved as constraint → stop, write nothing.
+2. **R3** — current status is exempt → stop, write nothing.
+3. **R4** — scope and coverage determine the target status.
+4. **R2** — target status is earlier on the ladder than the current status → stop, write nothing.
+5. Write.
+
+A constraint spec at `Draft` is left alone by step 1; a target spec at `Active` is left alone by step 2. Neither reaches R4.
+
+---
+
 ## `spec-generate` — Generate Formal Specs from Design Doc
 
 Use after brainstorming produces a design spec. Decomposes a narrative design document into formal `SPEC-{CAT}-NNN-{slug}.md` files with full metadata, indexing, and freshness tracking.
@@ -87,7 +151,7 @@ Two modes: **plan phase** (inject spec tasks into implementation plan) and **exe
 **Input:**
 - `--phase=plan`
 - `--plan=<path>` — Path to the implementation plan
-- `--specs=<paths>` — Comma-separated paths to governing specs (output of `spec-generate`)
+- `--specs=<paths>` — Comma-separated paths to governing specs (output of `spec-generate`). Each path may carry an optional role suffix — `<path>:target` or `<path>:constraint` — declaring whether the work is expected to advance that spec. Unsuffixed paths are resolved by inference at execution time. See **Spec Status Model → Spec roles**.
 
 1. **Read the plan document** and identify chunk boundaries. Plans produced by `superpowers:writing-plans` use `## Chunk N: <name>` headings (each chunk ≤1000 lines). If the plan doesn't use that convention, treat each `### Task N:` heading as a chunk boundary instead.
 2. **Per-chunk injection** — Append a spec update task at the end of each chunk:
@@ -97,8 +161,12 @@ Two modes: **plan phase** (inject spec tasks into implementation plan) and **exe
    **Files:**
    - Modify: {paths to governing specs relevant to this chunk}
 
-   - [ ] **Step 1: Update spec status**
-   Update SPEC-{CAT}-NNN `Status` from `Draft` to `In Review`.
+   - [ ] **Step 1: Update spec status (guarded)**
+   Read SPEC-{CAT}-NNN's current `Status` first, then apply the **Spec Status Model**:
+     - Resolved as **constraint** for this work (resolve role per **Spec Status Model → Spec roles**) → leave untouched, and skip Steps 2–4 as well.
+     - `Draft` → set `In Review`.
+     - `In Review` / `Approved` / `Implemented` → leave unchanged (R2 — never regress).
+     - Any other status (`Active`, `Deprecated`, `Superseded`, …) → leave unchanged (R3).
    - [ ] **Step 2: Verify implementation notes**
    Check that the spec's Implementation Notes section matches what was built in this chunk. Add notes for actual file paths created/modified.
    - [ ] **Step 3: Refine code_refs**
@@ -113,12 +181,16 @@ Two modes: **plan phase** (inject spec tasks into implementation plan) and **exe
    **Files:**
    - Modify: {all governing spec paths}
 
-   - [ ] **Step 1: Set all specs to Implemented**
-   Update every governing spec's `Status` to `Implemented`.
+   - [ ] **Step 1: Advance implemented specs (scope-gated)**
+   For each governing spec, resolve its role, then apply the **Spec Status Model**. Resolve role from the caller's explicit `:target` / `:constraint` marker if present; otherwise intersect this plan's changed files (`git diff` against the branch base) with the spec's `code_refs`.
+     - **constraint** (marked `:constraint`, or no intersection with `code_refs`) → leave `Status` unchanged and add no Implementation Notes. It was passed as a read-only reference, not an implementation target.
+     - **target** at an exempt status (`Active`, `Deprecated`, `Superseded`, …) → leave unchanged (R3). `Active` reference specs sit outside the ladder and never transition.
+     - **target**, fully covered by this plan → set `Implemented`.
+     - **target**, partially covered (the spec has surfaces this plan deferred) → do **not** advance to `Implemented`. Never write a status earlier than the current value (R2): if the spec is at `Draft` or `In Review`, hold it at `In Review`; if it is already at `Approved` or `Implemented`, leave it exactly as it is. Record the remaining scope in Implementation Notes either way.
    - [ ] **Step 2: Fill Implementation Notes**
-   For each spec, ensure the Implementation Notes section has actual file paths, decisions made, and any deviations from the original design.
+   For each spec Step 1 advanced or left at `In Review`, ensure the Implementation Notes section has actual file paths, decisions made, and any deviations from the original design. Skip specs Step 1 left untouched.
    - [ ] **Step 3: Final index update**
-   Run `doc-tools.sh update-index` for all governing specs.
+   Run `doc-tools.sh update-index` for each spec modified in Steps 1–2. Do not re-index untouched specs.
    ```
 4. **Output**: Modified plan document with spec maintenance tasks injected. Tasks follow the same checkbox syntax as other plan tasks.
 
@@ -132,9 +204,9 @@ Runs after each plan chunk completes (not after every individual task).
 
 1. **Check freshness** — Call `doc-tools.sh check-freshness` against the governing specs. This compares the spec's `content_hash` in `.doc-index.json` against the current `code_commit` for its `code_refs`.
 2. **Determine alignment vs. drift** — If code changed but spec wasn't updated (flagged stale), the agent reads three inputs: (a) the spec's relevant section content, (b) the code changes in files matching the spec's `code_refs`, (c) the plan task description that was just executed. The key question: "Does the implementation achieve what the spec describes, even if through a different mechanism?"
-   - **Aligned** (implementation achieves spec intent): Update the spec's `Status` field. Update the spec's Implementation Notes to reflect actual approach taken. Refine `code_refs` if actual file paths differ from initial estimates. Call `doc-tools.sh update-index` to refresh hashes. No human intervention.
+   - **Aligned** (implementation achieves spec intent): Update the spec's `Status` per the **Spec Status Model** — read the current status first, never regress, and leave exempt statuses and constraint specs untouched. Update the spec's Implementation Notes to reflect actual approach taken. Refine `code_refs` if actual file paths differ from initial estimates. Call `doc-tools.sh update-index` to refresh hashes. No human intervention.
    - **Drifted** (implementation contradicts spec intent, omits requirements, or introduces unspecified behavior): Flag for human review with a deviation note: what the spec says, what the code does, and why they diverge. Do not auto-update spec content.
-3. **Status transitions**: Draft → In Review (first implementation) → Implemented (verification passes).
+3. **Status transitions**: governed by the **Spec Status Model** — `Draft` → `In Review` (first implementation) → `Approved` → `Implemented` (verification passes). Monotonic (R2); exempt statuses and constraint specs never transition (R3, roles). Never write `Status` without reading the current value first (R1). `Approved` is human-set — no action ever writes it; it appears on the ladder so R2 can protect specs that carry it.
 4. **Output**: Updated spec files (if aligned) or deviation flags (if drifted).
 
 ---
@@ -148,16 +220,25 @@ Two modes: **post-execute** (final compliance check before merging) and **review
 **Input:**
 - `--mode=post-execute`
 - `--specs=<paths>` — Paths to governing specs
-- `--design-doc=<path>` — Path to original design doc (for three-way check)
+- `--design-doc=<path>` — Path to original design doc (for the five-way coverage check)
 
 1. **Existence check** — Run `doc-tools.sh check-freshness` across all specs in scope. If governing specs don't exist, that's a finding.
 2. **Staleness check** — Are any specs still flagged stale after all tasks completed? This catches specs that `spec-inject` (execute phase) flagged for review but were never addressed.
-3. **Status check** — Are all governing specs in `Implemented` status? Any still at `Draft` or `In Review` means implementation tasks were skipped or the plan didn't cover that spec's scope.
+3. **Status check** — For each governing spec, resolve its role and status class per the **Spec Status Model**, then check only what applies:
+   - **target** at a ladder status → expect `Implemented`. Still at `Draft`, `In Review`, or `Approved` means implementation tasks were skipped or the plan didn't cover that spec's scope — report which of the two it is.
+   - **target** held at `In Review` with the remaining scope recorded in Implementation Notes → **not a finding**. This is the Spec Status Model's sanctioned outcome for a partially-covered target (see **Coverage completeness**), not a skipped task. Report it as informational. Absent that recorded scope it falls under the branch above — the Implementation Notes are what distinguish a deliberate hold from a skipped task.
+   - **target** at an exempt status (`Active`, `Deprecated`, `Superseded`, …) → **not a finding**. `Active` reference specs are continuously evolving and never reach `Implemented` by design.
+   - **constraint** → **not a finding** at any status. The work was never expected to advance it.
+
+   Then emit three **P3 informational** lines. These are never findings and never cause a FAIL — they exist because the suppressions above are otherwise silent in the failing direction:
+   - **Inferred constraints** — list specs treated as constraint references *by inference* rather than by an explicit `:constraint` marker: "N spec(s) treated as constraint references by inference — pass `:constraint` to confirm, or fix their `code_refs` if they were meant to be implementation targets." Role inference is circular: wrong `code_refs` produce a constraint verdict, the constraint branch skips the `code_refs` refinement step, so the `code_refs` stay wrong and the spec silently never advances. Specs marked `:constraint` explicitly are not listed — the caller already said so.
+   - **Unrecognized statuses** — list specs at an unrecognized status, i.e. one outside the documented vocabulary (a typo such as `Implemenetd`, or a value from a downstream vocabulary): "N spec(s) at an unrecognized status — automation will never transition these." R3 correctly declines to write them; reporting them is what keeps them from being invisible forever.
+   - **Held at `In Review`** — list partially-covered targets held by design: "N spec(s) held at `In Review` by design — remaining scope recorded in Implementation Notes." Without this line a deliberate hold is indistinguishable from a skipped task in the report, which is the ambiguity the recorded scope exists to resolve.
 4. **Coverage check** — Five-way alignment across five artifact relationships:
 
    **Design doc → Specs:** Parse the design doc's major sections (identified by `##` headings that describe system behavior or architecture). For each section, check whether a governing spec exists whose `Source` field points to this design doc AND whose category and content correspond to that section's domain. Missing correspondence = "design intent without formal spec."
 
-   **Specs → Code:** For each governing spec, check whether its `code_refs` directories/files exist and contain implementation. A spec with empty or nonexistent `code_refs` targets = "spec without implementation." A spec whose `code_refs` exist but whose status is still `Draft` = "spec with untouched implementation."
+   **Specs → Code:** For each governing spec, check whether its `code_refs` directories/files exist and contain implementation. A spec with empty or nonexistent `code_refs` targets = "spec without implementation." A **target** spec whose `code_refs` exist but whose status is still `Draft` = "spec with untouched implementation." Constraint references and specs at exempt statuses are excluded — by design they hold populated `code_refs` and are never advanced, so an unadvanced status is not evidence of untouched implementation (see **Spec Status Model**).
 
    **Code → Specs:** For files changed during this implementation (identified via `git diff` against the branch base), check whether each changed file falls within any governing spec's `code_refs`. Changed files with no governing spec = "unspecified implementation."
 
@@ -166,8 +247,10 @@ Two modes: **post-execute** (final compliance check before merging) and **review
    **README.md → Capabilities:** Check that README.md sections (feature list, action list, usage examples) accurately reflect the current project capabilities. Stale README.md sections = "public doc drift." This matters because README.md is the project's public documentation — outdated entries mislead users and contributors.
 
 5. **PASS/FAIL verdict:**
-   - **PASS:** All governing specs in `Implemented` status AND no unresolved deviations AND no "design intent without formal spec" findings AND CLAUDE.md and README.md are current
-   - **FAIL:** Any spec not in `Implemented` status, OR any unresolved deviation, OR any "design intent without formal spec" finding, OR CLAUDE.md/README.md staleness detected
+   - **PASS:** Every spec required to be `Implemented` by the Status check (step 3) is `Implemented` AND no unresolved deviations AND no "design intent without formal spec" findings AND CLAUDE.md and README.md are current
+   - **FAIL:** Any spec required to be `Implemented` by the Status check (step 3) is not, OR any unresolved deviation, OR any "design intent without formal spec" finding, OR CLAUDE.md/README.md staleness detected
+
+   Specs the Status check exempts — constraint references, targets held at `In Review` with recorded remaining scope, and specs at `Active` / `Deprecated` / `Superseded` / any other non-ladder status — never contribute to a FAIL verdict. Neither do the three P3 informational lines.
 
    **Recovery:** update per `references/doc-spec.md` CLAUDE.md / README.md update rules, then re-run `spec-verify`.
 

@@ -93,20 +93,27 @@ Used by `spec-verify --mode=post-execute`. See `references/spec-lifecycle-action
 **Verdict:** PASS | FAIL
 
 ### Summary
-- Specs: N total, N implemented, N stale, N missing
+- Specs: N total, N implemented, N held at `In Review`, N exempt, N constraint refs, N stale, N missing
 - Deviations: N flagged during execution
 - CLAUDE.md: {current | stale — N sections drifted}
 - README.md: {current | stale — N sections drifted}
 
 ### Details
 
-| Spec | Status | Freshness | Notes |
-|------|--------|-----------|-------|
-| SPEC-AUTH-001 | Implemented | Current | — |
-| SPEC-DATA-001 | In Review | Stale | Deviation: uses push instead of polling |
+| Spec | Role | Status | Freshness | Notes |
+|------|------|--------|----------|-------|
+| SPEC-AUTH-001 | target | Implemented | Current | — |
+| SPEC-DATA-001 | target | In Review | Stale | Deviation: uses push instead of polling |
+| SPEC-API-006 | constraint | In Review | Current | Read-only reference — not advanced by this work |
 
 ### Unresolved
 - SPEC-DATA-001 section 3.2: implementation diverged, needs human review
+
+### Informational (P3)
+Non-blocking. Never contributes to a FAIL verdict.
+- Inferred constraints: N spec(s) treated as constraint references by inference — pass `:constraint` to confirm, or fix their `code_refs` if they were meant to be implementation targets
+- Unrecognized statuses: N spec(s) at an unrecognized status — automation will never transition these
+- Held at `In Review`: N partially-covered target(s) held by design, remaining scope recorded in Implementation Notes
 
 ### Recommendation
 [Fix before merging | Accept with noted gaps | Block merge]

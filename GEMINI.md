@@ -19,7 +19,7 @@ See the tool mappings loaded above. Key translations:
 
 ## Subagent Dispatch (Sequential Fallback)
 
-Gemini CLI does not support parallel subagent dispatch. Where the skill references `Agent` or `Task` tools (used by `init` and `audit` to dispatch up to 3 parallel agents), work through scopes sequentially instead:
+Gemini CLI does not support parallel subagent dispatch. Where the skill references `Agent` or `Task` tools (used by `init` to dispatch up to 3 parallel Explore agents, and by `audit`, `review-pr`, and `update` to dispatch one scope agent per affected scope), work through scopes sequentially instead:
 
 1. Run discovery to detect all scopes
 2. For each scope, perform the agent's work inline (gather, analyze, report/execute)
@@ -36,11 +36,11 @@ This is slower but functionally equivalent.
 | WebSearch / WebFetch | Full parity (`google_web_search`, `web_fetch`) |
 | Freshness tooling (`doc-tools.sh`) | Full parity |
 | Spec lifecycle (generate/inject/verify) | Full parity |
-| Parallel agent dispatch (init, audit) | Degraded — sequential only |
+| Parallel agent dispatch (init, audit, review-pr, update) | Degraded — sequential only |
 | Mermaid diagram generation | Degraded — Mermaid source only, no PNG (MCP not available) |
 | Git hooks (5) | Full parity |
 | Claude Code hooks (3) | Not available (requires `.claude/settings.local.json`) |
-| CI/CD workflows (7) | Full parity |
+| CI/CD workflows (9) | Full parity |
 
 ## Spec Lifecycle
 
