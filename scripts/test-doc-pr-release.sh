@@ -708,6 +708,32 @@ test_commit_push_rebase_on_nonff
 echo
 echo "=== workflow YAML placeholder substitution ==="
 
+# Name of an available YAML parser, or empty if there is none.
+#
+# PyYAML is present on the ubuntu runner but NOT on the macOS one, and the
+# original check ran `python3 -c 'import yaml; …' 2>/dev/null` — so a missing
+# module was indistinguishable from a malformed template and every one of the
+# nine reported "does not parse as YAML". Ruby's psych is stdlib and is present
+# on both runner images (verified against system ruby 2.6), so it is the
+# fallback; "no parser at all" is now its own loud failure rather than nine
+# phantom syntax errors.
+_yaml_parser() {
+  if python3 -c 'import yaml' >/dev/null 2>&1; then
+    echo python3
+  elif command -v ruby >/dev/null 2>&1 && ruby -ryaml -e 'exit 0' >/dev/null 2>&1; then
+    echo ruby
+  fi
+}
+
+# Parse $2 with parser $1; prints the parser's own error on failure.
+_yaml_parse() {
+  case "$1" in
+    python3) python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$2" 2>&1 ;;
+    ruby)    ruby -ryaml -e 'YAML.load_file(ARGV[0])' "$2" 2>&1 ;;
+    *)       echo "no YAML parser selected"; return 1 ;;
+  esac
+}
+
 test_workflow_yaml_placeholders() {
   echo "Test: installer substitutes __BASE_BRANCH__ + __VERSION__ in all AI workflow templates"
   local template_dir="$REPO_ROOT/scripts/hooks/ci"
@@ -715,6 +741,19 @@ test_workflow_yaml_placeholders() {
   tmp=$(mktemp -d); register_tmp "$tmp"
   local fail=0
   local f
+
+  local parser
+  parser=$(_yaml_parser)
+  if [ -z "$parser" ]; then
+    # Never silently degrade to placeholder-only checking: that is what let the
+    # YAML assertion evaporate on macOS while still reporting a result.
+    echo "  FAIL: no YAML parser available (need python3 with PyYAML, or ruby)"
+    echo "        the YAML validity of all $(ls "$template_dir"/doc-*.yml | wc -l | tr -d ' ') templates went unchecked"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  echo "  (YAML parser: $parser)"
+
   for f in "$template_dir"/doc-*.yml; do
     local name
     name=$(basename "$f")
@@ -723,8 +762,10 @@ test_workflow_yaml_placeholders() {
       echo "  FAIL: $name still contains an unsubstituted placeholder"
       fail=1
     fi
-    if ! python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$tmp/$name" 2>/dev/null; then
+    local parse_err
+    if ! parse_err=$(_yaml_parse "$parser" "$tmp/$name"); then
       echo "  FAIL: $name does not parse as YAML after substitution"
+      echo "        $parse_err"
       fail=1
     fi
   done
