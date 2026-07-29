@@ -2,10 +2,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOC_TOOLS="$SCRIPT_DIR/doc-tools.sh"
 
 # shellcheck source=scripts/test-helpers.sh
 source "$SCRIPT_DIR/test-helpers.sh"
+
+# Run doc-tools.sh under the interpreter this suite was launched with,
+# not whatever `#!/usr/bin/env bash` resolves to. See bash_bin_shim().
+DOC_TOOLS="$(bash_bin_shim "$SCRIPT_DIR/doc-tools.sh")"
 
 # --- Tests ---
 
@@ -358,6 +361,234 @@ test_check_freshness_untracked_docs() {
   assert_eq "1" "$found_untracked" "untracked-test.md appears in untracked_docs"
   # Clean up
   rm docs/untracked-test.md
+  teardown
+}
+
+# --- portability + scale regression guards ---
+#
+# Both guards below cover bugs that shipped in earlier releases and were only
+# caught once .github/workflows/tests.yml started running the suites on
+# ubuntu/bash-5.x AND macos/bash-3.2. Neither reproduced on a developer laptop
+# running the suites the usual way.
+
+test_build_index_accepts_entry_with_no_code_refs() {
+  # bash 3.2 regression: `IFS=',' read -ra refs <<< ""` leaves `refs` empty, and
+  # bash 3.2 treats an unguarded "${refs[@]}" on an empty array as an unbound
+  # variable under `set -u` — so a single ref-less mapping line aborted the whole
+  # of build-index with "refs[@]: unbound variable". bash 4+ expands it to
+  # nothing and never noticed.
+  echo "test: build-index accepts a mapping line with an empty code_refs field"
+  setup
+  set +e
+  echo "docs/architecture.md::architecture" | "$DOC_TOOLS" build-index 2>/tmp/.norefs-stderr
+  local rc=$?
+  set -e
+  local err
+  err=$(cat /tmp/.norefs-stderr 2>/dev/null || true)
+  rm -f /tmp/.norefs-stderr
+  assert_eq "0" "$rc" "build-index exits 0 with no code_refs (stderr: ${err:-none})"
+  assert_not_contains "$err" "unbound variable" "no bash 3.2 unbound-array abort"
+  assert_file_exists "docs/.doc-index.json" "index still written"
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/architecture.md"].code_commit' "null" "code_commit is null with no refs"
+  teardown
+}
+
+test_update_index_when_every_target_is_skipped() {
+  # bash 3.2 regression, same class: when every named doc is indexed but absent
+  # from disk, each is skipped and `refreshed` stays empty — and the unguarded
+  # summary loop over "${refreshed[@]}" aborted the command under bash 3.2.
+  echo "test: update-index survives every target being skipped"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  rm docs/architecture.md
+  set +e
+  local err
+  err=$("$DOC_TOOLS" update-index docs/architecture.md 2>&1 >/dev/null)
+  local rc=$?
+  set -e
+  assert_eq "0" "$rc" "update-index exits 0 when all targets are skipped"
+  assert_not_contains "$err" "unbound variable" "no bash 3.2 unbound-array abort"
+  assert_contains "$err" "Refreshed 0 entries" "reports zero refreshed entries"
+  teardown
+}
+
+test_scripts_are_free_of_bash4_only_constructs() {
+  # `local -A` (bash 4.0+) shipped in cmd_fragments_merge and aborted every
+  # doc-tools.sh invocation under macOS's /bin/bash 3.2 with
+  # "local: -A: invalid option". A behavioural test cannot catch the class on
+  # the Linux leg — there is no bash 3.2 there to run under — so this is a
+  # static scan of every shell script the plugin ships, and it runs everywhere.
+  #
+  # bash 3.2 is a deliberate support target: it is what macOS ships as
+  # /bin/bash, so it is the interpreter a consuming project's git hooks run
+  # under unless the user has installed a newer bash themselves.
+  echo "test: shipped scripts use no bash-4-only constructs (macOS /bin/bash is 3.2)"
+  local repo_root
+  repo_root="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+  # Explicit ship list rather than a glob-minus-tests: the patterns below appear
+  # verbatim in this very file, so any discovery rule loose enough to pick up a
+  # stray script in scripts/ will eventually match the test's own pattern
+  # strings and report a phantom violation. These are exactly the scripts the
+  # plugin installs into a consuming project.
+  local targets=()
+  local candidate
+  for candidate in \
+    "$repo_root"/scripts/doc-tools.sh \
+    "$repo_root"/scripts/merge-doc-index.sh \
+    "$repo_root"/scripts/hooks/*.sh \
+    "$repo_root"/scripts/hooks/claude/*.sh \
+    "$repo_root"/scripts/hooks/ci/doc-pr-release/*.sh \
+    "$repo_root"/scripts/hooks/git/*
+  do
+    [ -f "$candidate" ] && targets+=("$candidate")
+  done
+
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if [ ${#targets[@]} -eq 0 ]; then
+    FAIL=$((FAIL + 1))
+    # shellcheck disable=SC2059
+    printf "${RED}  FAIL${NC}: no shipped scripts found to scan — the glob is wrong\n"
+    return 0
+  fi
+  PASS=$((PASS + 1))
+  # shellcheck disable=SC2059
+  printf "${GREEN}  PASS${NC}: found %d shipped script(s) to scan\n" "${#targets[@]}"
+
+  # Each entry: <label>|<ERE>. Kept as a flat list rather than a map so this
+  # test does not itself need an associative array.
+  local patterns=(
+    'associative array declaration (declare/local/typeset -A) [bash 4.0+]|(declare|local|typeset)[[:space:]]+-[a-zA-Z]*A[a-zA-Z]*[[:space:]]'
+    'mapfile/readarray [bash 4.0+]|(^|[^[:alnum:]_-])(mapfile|readarray)[[:space:]]'
+    'case-modification expansion ${v^^} / ${v,,} [bash 4.0+]|\$\{[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?(\^\^|,,|\^|,)[^}]*\}'
+    'append-and-redirect &>> [bash 4.0+]|&>>'
+    'negative array index ${a[-1]} [bash 4.3+]|\$\{[A-Za-z_][A-Za-z0-9_]*\[-[0-9]'
+    'coproc [bash 4.0+]|(^|[^[:alnum:]_-])coproc[[:space:]]'
+    'wait -n [bash 4.3+]|(^|[^[:alnum:]_-])wait[[:space:]]+-n([[:space:]]|$)'
+  )
+
+  # Full-line comments are blanked (line numbering preserved) before matching:
+  # the fixes for these very bugs are documented in comments that name the
+  # offending construct, and a guard that trips on its own rationale is a guard
+  # someone disables. Inline code is left untouched, so a real construct is
+  # still caught wherever it can actually execute.
+  local scrubbed
+  scrubbed=$(mktemp -t bash4scan.XXXXXX)
+
+  local spec
+  for spec in "${patterns[@]}"; do
+    local label="${spec%%|*}"
+    local regex="${spec#*|}"
+    local hits=""
+    local target
+    for target in "${targets[@]}"; do
+      awk '{ if ($0 ~ /^[[:space:]]*#/) print ""; else print }' "$target" > "$scrubbed"
+      local file_hits
+      file_hits=$(grep -nE -- "$regex" "$scrubbed" 2>/dev/null || true)
+      if [ -n "$file_hits" ]; then
+        hits="${hits}$(printf '%s\n' "$file_hits" | sed "s|^|    ${target#"$repo_root/"}:|")"$'\n'
+      fi
+    done
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ -z "$hits" ]; then
+      PASS=$((PASS + 1))
+      # shellcheck disable=SC2059
+      printf "${GREEN}  PASS${NC}: no %s\n" "$label"
+    else
+      FAIL=$((FAIL + 1))
+      # shellcheck disable=SC2059
+      printf "${RED}  FAIL${NC}: %s\n%s" "$label" "$hits"
+    fi
+  done
+  rm -f "$scrubbed"
+}
+
+test_build_index_and_check_freshness_beyond_argv_limits() {
+  # Regression guard for "jq: Argument list too long" (exit 126), which killed
+  # build-index on Linux at a few hundred entries.
+  #
+  # The ceiling is a BYTE size on a single argv string, not a doc count: Linux
+  # caps one argument at MAX_ARG_STRLEN (32 pages = 131072 bytes) however large
+  # ARG_MAX is, while macOS has no per-argument cap and only the ~1 MB total
+  # ARG_MAX — which is exactly why this reproduced on the ubuntu leg, passed on
+  # the macOS leg, and never showed up in a local run.
+  #
+  # Reaching that byte threshold with realistically-sized entries would need
+  # ~3400 docs; measured, that is ~6 minutes of per-doc git/jq/hash work per
+  # leg, which the suite cannot carry. The failure is about bytes, so this test
+  # reaches the same threshold with fewer, larger entries and asserts on the
+  # serialized size directly. The target is >1.2 MB — comfortably past BOTH the
+  # Linux per-argument cap and the macOS total ARG_MAX, so it is a real guard on
+  # both legs rather than a Linux-only one.
+  echo "test: build-index + check-freshness handle a docs object larger than ARG_MAX"
+  setup
+  mkdir -p docs/synthetic
+
+  local doc_count=260
+  local pad
+  pad=$(printf 'synthetic-%.0s' $(seq 1 500))   # ~5000 chars per entry
+
+  local mapping_tmp
+  mapping_tmp=$(mktemp -t argmax.XXXXXX)
+  local i=0
+  while [ "$i" -lt "$doc_count" ]; do
+    printf '# doc %d\n' "$i" > "docs/synthetic/d$i.md"
+    # Third field is doc_type; it is stored verbatim in the entry, so it is the
+    # cheapest way to inflate the serialized index without 3400 files.
+    printf 'docs/synthetic/d%d.md:src/:%s\n' "$i" "$pad" >> "$mapping_tmp"
+    i=$((i + 1))
+  done
+  git add -A && git commit -m "synthetic docs" --quiet
+
+  set +e
+  "$DOC_TOOLS" build-index < "$mapping_tmp" 2>/tmp/.argmax-stderr
+  local build_rc=$?
+  set -e
+  rm -f "$mapping_tmp"
+
+  local build_err
+  build_err=$(cat /tmp/.argmax-stderr 2>/dev/null || true)
+  rm -f /tmp/.argmax-stderr
+  assert_eq "0" "$build_rc" "build-index exits 0 (stderr: ${build_err:-none})"
+  assert_not_contains "$build_err" "Argument list too long" "build-index does not hit the argv ceiling"
+
+  # The premise of the test: if this is not comfortably over the platform caps,
+  # the guard has quietly stopped guarding anything.
+  local docs_bytes
+  docs_bytes=$(jq -c '.docs' docs/.doc-index.json | wc -c | tr -d ' ')
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if [ "$docs_bytes" -gt 1200000 ]; then
+    PASS=$((PASS + 1))
+    # shellcheck disable=SC2059
+    printf "${GREEN}  PASS${NC}: docs object is %s bytes (>1.2 MB; Linux per-arg cap 131072, macOS ARG_MAX 1048576)\n" "$docs_bytes"
+  else
+    FAIL=$((FAIL + 1))
+    # shellcheck disable=SC2059
+    printf "${RED}  FAIL${NC}: docs object only %s bytes — too small to exercise the argv ceiling\n" "$docs_bytes"
+  fi
+
+  local entry_count
+  entry_count=$(jq '.docs | length' docs/.doc-index.json)
+  assert_eq "$doc_count" "$entry_count" "all $doc_count entries survive the merge"
+
+  # check-freshness passes the same oversized object to its final jq; assert it
+  # too, since it has its own argv-sized values (docs + untracked_docs).
+  echo "v2" > src/index.js
+  git add -A && git commit -m "stale all" --quiet
+
+  set +e
+  local fresh_out
+  fresh_out=$("$DOC_TOOLS" check-freshness 2>/tmp/.argmax-stderr2)
+  local fresh_rc=$?
+  set -e
+  local fresh_err
+  fresh_err=$(cat /tmp/.argmax-stderr2 2>/dev/null || true)
+  rm -f /tmp/.argmax-stderr2
+  assert_eq "0" "$fresh_rc" "check-freshness exits 0 (stderr: ${fresh_err:-none})"
+  assert_not_contains "$fresh_err" "Argument list too long" "check-freshness does not hit the argv ceiling"
+  assert_json_field "$fresh_out" ".summary.stale" "$doc_count" "all $doc_count entries reported stale"
   teardown
 }
 
@@ -1513,6 +1744,12 @@ run_tests() {
   test_update_index_updates_generated_at
   test_build_index_empty_stdin
   test_update_index_multiple_paths
+
+  # --- cross-platform regression guards (CI matrix: bash 5.x + bash 3.2) ---
+  test_scripts_are_free_of_bash4_only_constructs
+  test_build_index_accepts_entry_with_no_code_refs
+  test_update_index_when_every_target_is_skipped
+  test_build_index_and_check_freshness_beyond_argv_limits
   test_bump_version_updates_all_files
   test_bump_version_idempotent
   test_bump_version_validates_semver
