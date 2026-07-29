@@ -20,11 +20,12 @@ doc-superpowers/
 │   └── INSTALL.md
 ├── .codex/               # Codex installation guide
 │   └── INSTALL.md
-├── .github/              # Self-installed CI tier — 3 of the 9 workflow templates
-│   └── workflows/
+├── .github/              # Self-installed CI tier — 3 of the 9 workflow templates,
+│   └── workflows/        # plus tests.yml (this repo only, not a template)
 │       ├── doc-freshness-pr.yml
 │       ├── doc-freshness-schedule.yml
-│       └── doc-index-update.yml
+│       ├── doc-index-update.yml
+│       └── tests.yml     # Runs the five shell suites + check-version (bash 5.x / 3.2 matrix)
 ├── .opencode/            # OpenCode plugin + installation guide
 │   ├── INSTALL.md
 │   └── plugins/
@@ -156,4 +157,4 @@ Each `--specs` path may carry an optional role suffix — `<path>:target` or `<p
 - **Skill structure**: Follows obra/superpowers SKILL.md conventions (YAML frontmatter with `name` + `description`)
 - **Templates**: All doc templates live in `references/doc-spec.md`, not inline in SKILL.md
 - **Diagrams**: Mermaid source in docs, PNGs committed for GitHub rendering
-- **Testing**: Five shell suites gate changes — `test-doc-tools.sh` (148 assertions), `test-hooks.sh` (308), `test-spec-status-model.sh` (64), `test-doc-pr-release.sh` (32), `test-merge-driver.sh` (19), 571 total, all sharing the `test-helpers.sh` harness. Test skill changes by running `/doc-superpowers init` on a sample project
+- **Testing**: Five shell suites gate changes — `test-doc-tools.sh` (187 assertions), `test-hooks.sh` (308), `test-spec-status-model.sh` (68), `test-doc-pr-release.sh` (32), `test-merge-driver.sh` (19), 614 total, all sharing the `test-helpers.sh` harness. All five run in CI via `.github/workflows/tests.yml` on push to `main` and on every PR, matrixed over `ubuntu-latest` (bash 5.x) and `macos-latest` (`/bin/bash` 3.2.57) — the interpreter is passed explicitly, since the shebang would resolve to Homebrew's bash 5 on the macOS runner and cover 3.2 nowhere. Test skill changes by running `/doc-superpowers init` on a sample project

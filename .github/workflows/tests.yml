@@ -1,0 +1,131 @@
+# doc-superpowers workflow v1
+# Shell test suites — the five suites that gate changes to this repo.
+#
+# This workflow is for THIS repository only. It is deliberately not part of the
+# downstream CI template set in scripts/hooks/ci/ (which the hooks installer
+# copies into consuming projects) — those projects do not have these suites.
+
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A full matrix run takes a few minutes; superseded pushes to the same ref are
+# not worth the runner time. Never cancel on main — those runs are the record
+# of what landed.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  suites:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Report both interpreters independently — a bash-3.2-only failure is the
+      # signal this matrix exists to surface, and fail-fast would hide it behind
+      # an unrelated Linux failure.
+      fail-fast: false
+      matrix:
+        include:
+          # The interpreter downstream CI runs doc-tools.sh under.
+          - name: ubuntu / bash 5.x
+            os: ubuntu-latest
+            bash: bash
+            bash_major: "5"
+          # macOS's system bash — 3.2.57, frozen at the last GPLv2 release, and
+          # the interpreter this repo's own contributors run locally.
+          #
+          # The suites are `#!/usr/bin/env bash`, and GitHub's macOS image puts
+          # Homebrew's bash 5.x ahead of /bin/bash on PATH — so running them by
+          # shebang here would silently test bash 5 a second time and cover 3.2
+          # nowhere. The interpreter is therefore passed explicitly.
+          - name: macos / bash 3.2
+            os: macos-latest
+            bash: /bin/bash
+            bash_major: "3"
+
+    env:
+      BASH_BIN: ${{ matrix.bash }}
+      BASH_MAJOR: ${{ matrix.bash_major }}
+
+    steps:
+      # No suite reads this repo's history — they each build throwaway git
+      # fixtures in tempdirs — but a full clone is ~4 MB here and matches the
+      # sibling workflows, so it is not worth trading for a shallow-clone edge case.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      # doc-tools.sh requires GNU sed (gnu_sed() exits 2 when neither `gsed` nor
+      # a GNU `sed` is on PATH). macOS runners ship BSD sed and no gsed, and
+      # test-doc-tools.sh exercises `set-implementation`, which calls it.
+      - name: Install GNU sed (macOS)
+        if: runner.os == 'macOS'
+        run: brew install gnu-sed
+
+      # Fail loudly here rather than midway through a suite if an image change
+      # ever drops one of these. `jq` is the hard dependency; doc-tools.sh
+      # already falls back from sha256sum to shasum on its own.
+      - name: Verify toolchain
+        run: |
+          set -euo pipefail
+          for tool in jq git; do
+            command -v "$tool" >/dev/null 2>&1 || { echo "::error::$tool not found"; exit 1; }
+          done
+          if ! command -v gsed >/dev/null 2>&1 && ! sed --version 2>/dev/null | grep -q 'GNU sed'; then
+            echo "::error::GNU sed not found (doc-tools.sh gnu_sed() would exit 2)"
+            exit 1
+          fi
+          echo "jq:  $(jq --version)"
+          echo "sed: $(command -v gsed || command -v sed)"
+          "$BASH_BIN" --version | head -1
+
+      # Guard the premise of the matrix: if a future runner image changes what
+      # /bin/bash is, this leg would stop covering 3.2 while still reporting
+      # green. Assert the major version instead of discovering that silently.
+      - name: Assert bash major version
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2016  # intentional: BASH_VERSINFO must expand in
+          # the inner bash under test, not in this shell
+          actual=$("$BASH_BIN" -c 'echo "${BASH_VERSINFO[0]}"')
+          echo "$BASH_BIN major version: $actual (expected $BASH_MAJOR)"
+          if [ "$actual" != "$BASH_MAJOR" ]; then
+            echo "::error::$BASH_BIN is bash $actual, expected $BASH_MAJOR — this leg is no longer testing the interpreter it claims to."
+            exit 1
+          fi
+
+      # Run each suite as its own step so a failure names the suite directly.
+      - name: test-doc-tools.sh
+        run: |
+          "$BASH_BIN" scripts/test-doc-tools.sh
+
+      - name: test-hooks.sh
+        run: |
+          "$BASH_BIN" scripts/test-hooks.sh
+
+      - name: test-spec-status-model.sh
+        run: |
+          "$BASH_BIN" scripts/test-spec-status-model.sh
+
+      - name: test-doc-pr-release.sh
+        run: |
+          "$BASH_BIN" scripts/test-doc-pr-release.sh
+
+      - name: test-merge-driver.sh
+        run: |
+          "$BASH_BIN" scripts/test-merge-driver.sh
+
+      # Version strings drift silently otherwise: bump-version writes six
+      # manifests and RELEASE-NOTES.md is the canonical source check-version
+      # reads, so a hand-edited or half-applied bump only shows up here.
+      - name: check-version
+        run: |
+          "$BASH_BIN" scripts/doc-tools.sh check-version
