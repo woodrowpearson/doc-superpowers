@@ -83,8 +83,22 @@ jobs:
             echo "::error::GNU sed not found (doc-tools.sh gnu_sed() would exit 2)"
             exit 1
           fi
-          echo "jq:  $(jq --version)"
-          echo "sed: $(command -v gsed || command -v sed)"
+          # test-doc-pr-release.sh parses the nine CI templates to prove the
+          # placeholder substitution leaves valid YAML. PyYAML ships on the
+          # ubuntu image but not the macOS one, so ruby's stdlib psych is the
+          # accepted fallback — assert one of them here rather than letting the
+          # suite discover it nine failures in.
+          if python3 -c 'import yaml' >/dev/null 2>&1; then
+            yaml_parser="python3 + PyYAML"
+          elif command -v ruby >/dev/null 2>&1 && ruby -ryaml -e 'exit 0' >/dev/null 2>&1; then
+            yaml_parser="ruby (psych)"
+          else
+            echo "::error::no YAML parser (need python3 with PyYAML, or ruby) — the workflow-template YAML assertions would not run"
+            exit 1
+          fi
+          echo "jq:   $(jq --version)"
+          echo "sed:  $(command -v gsed || command -v sed)"
+          echo "yaml: $yaml_parser"
           "$BASH_BIN" --version | head -1
 
       # Guard the premise of the matrix: if a future runner image changes what
