@@ -2,6 +2,51 @@
 # Shared test helpers for doc-superpowers test suites
 # Source this file from test scripts after setting SCRIPT_DIR
 
+# --- Interpreter under test -------------------------------------------------
+#
+# Every script in this repo is `#!/usr/bin/env bash`, so launching one by its
+# shebang re-resolves bash from PATH and silently discards the interpreter the
+# suite itself was started with. On a CI leg whose entire purpose is to cover
+# bash 3.2 that turns the leg into a second bash-5 run — the exact false green
+# that let a `local -A` (bash 4+ only) ship to a release. Scripts under test are
+# therefore launched explicitly under $BASH_BIN via a shim, never by shebang.
+#
+# Defaults to the interpreter running this suite, so a bare
+# `./scripts/test-doc-tools.sh` behaves exactly as before; CI sets BASH_BIN per
+# matrix leg.
+BASH_BIN="${BASH_BIN:-${BASH:-bash}}"
+
+# Wrap a script in a shim that always execs it under $BASH_BIN, and echo the
+# shim path. A shim (rather than rewriting call sites to `"$BASH_BIN" "$X"`) is
+# required because some scripts under test — the git and Claude hooks — take a
+# doc-tools.sh PATH in $DOC_TOOLS and execute it themselves; only a shim reaches
+# that nested invocation.
+#
+# The shim directory is created HERE, at source time, rather than lazily inside
+# bash_bin_shim(): callers use `DOC_TOOLS="$(bash_bin_shim …)"`, so the function
+# body runs in a command-substitution subshell — an EXIT trap registered there
+# fires the instant that subshell ends and deletes the directory out from under
+# the suite. Registering it in the main shell is the only placement that works.
+#
+# No suite that sources this file registers its own EXIT trap (only
+# test-doc-pr-release.sh does, and it does not source these helpers).
+_SHIM_DIR=$(mktemp -d -t doc-sp-shim.XXXXXX) || {
+  echo "ERROR: mktemp -d failed for bash shim" >&2
+  exit 1
+}
+# shellcheck disable=SC2064  # expand now, not at trap time
+trap "rm -rf '$_SHIM_DIR'" EXIT INT TERM
+
+bash_bin_shim() {
+  local target="$1"
+  local shim="$_SHIM_DIR/$(basename "$target")"
+  # /bin/sh for the shim itself: it only execs, so its own interpreter is
+  # irrelevant, and using sh makes it obvious the bash choice is the exec'd one.
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$BASH_BIN" "$target" > "$shim"
+  chmod +x "$shim"
+  printf '%s' "$shim"
+}
+
 PASS=0
 FAIL=0
 TESTS_RUN=0

@@ -3,10 +3,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOKS_DIR="$SCRIPT_DIR/hooks"
-DOC_TOOLS="$SCRIPT_DIR/doc-tools.sh"
 
 # shellcheck source=scripts/test-helpers.sh
 source "$SCRIPT_DIR/test-helpers.sh"
+
+# Shimmed so that BOTH this suite's direct calls and the hooks' own
+# `"$DOC_TOOLS"` invocations run under $BASH_BIN. See bash_bin_shim().
+DOC_TOOLS="$(bash_bin_shim "$SCRIPT_DIR/doc-tools.sh")"
 
 # Build a doc-index for testing. Requires: docs/ and src/ exist with committed files.
 build_test_index() {
@@ -21,7 +24,7 @@ test_pre_commit_exits_0_no_index() {
   # No index built — hook should skip silently
   local output exit_code
   set +e
-  output=$(DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/pre-commit" 2>&1)
+  output=$(DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/git/pre-commit" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0 with no index"
@@ -37,7 +40,7 @@ test_pre_commit_exits_0_no_stale() {
   echo "unrelated" > unrelated.txt
   git add unrelated.txt
   set +e
-  output=$(DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/pre-commit" 2>&1)
+  output=$(DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/git/pre-commit" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0 with no stale docs"
@@ -55,7 +58,7 @@ test_pre_commit_warns_on_stale() {
   echo "changed again" > src/index.js
   git add src/index.js
   set +e
-  output=$(DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/pre-commit" 2>&1)
+  output=$(DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/git/pre-commit" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0 (warn mode)"
@@ -73,7 +76,7 @@ test_pre_commit_blocks_in_strict_mode() {
   echo "changed again" > src/index.js
   git add src/index.js
   set +e
-  output=$(DOC_SUPERPOWERS_STRICT=1 DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/pre-commit" 2>&1)
+  output=$(DOC_SUPERPOWERS_STRICT=1 DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/git/pre-commit" 2>&1)
   exit_code=$?
   set -e
   assert_eq "1" "$exit_code" "exits 1 in strict mode"
@@ -90,7 +93,7 @@ test_pre_commit_skip_env() {
   echo "changed again" > src/index.js
   git add src/index.js
   set +e
-  output=$(DOC_SUPERPOWERS_SKIP=1 DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/pre-commit" 2>&1)
+  output=$(DOC_SUPERPOWERS_SKIP=1 DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/git/pre-commit" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0 with SKIP"
@@ -107,7 +110,7 @@ test_pre_commit_quiet_mode() {
   echo "changed again" > src/index.js
   git add src/index.js
   set +e
-  output=$(DOC_SUPERPOWERS_QUIET=1 DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/pre-commit" 2>&1)
+  output=$(DOC_SUPERPOWERS_QUIET=1 DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/git/pre-commit" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0 in quiet mode"
@@ -122,7 +125,7 @@ test_pre_commit_exits_0_no_doc_tools() {
   echo "changed" > src/index.js
   git add src/index.js
   set +e
-  output=$(DOC_TOOLS="/nonexistent/doc-tools.sh" bash "$HOOKS_DIR/git/pre-commit" 2>&1)
+  output=$(DOC_TOOLS="/nonexistent/doc-tools.sh" "$BASH_BIN" "$HOOKS_DIR/git/pre-commit" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0 with missing doc-tools"
@@ -137,7 +140,7 @@ test_pre_commit_exits_0_corrupted_index() {
   echo "changed" > src/index.js
   git add src/index.js
   set +e
-  output=$(DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/pre-commit" 2>&1)
+  output=$(DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/git/pre-commit" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0 with corrupted index"
@@ -162,7 +165,7 @@ test_post_merge_silent_no_stale() {
   setup
   build_test_index
   set +e
-  output=$(DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/post-merge" 2>&1)
+  output=$(DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/git/post-merge" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "always exits 0"
@@ -184,7 +187,7 @@ test_post_merge_reports_stale() {
   git checkout "$base" --quiet
   git merge --no-ff feature -m "merge feature" --quiet
   set +e
-  output=$(DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/post-merge" 2>&1)
+  output=$(DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/git/post-merge" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "always exits 0"
@@ -205,7 +208,7 @@ test_post_merge_silent_when_merge_untouched_code() {
   git checkout "$base" --quiet
   git merge --no-ff feature -m "merge feature" --quiet
   set +e
-  output=$(DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/post-merge" 2>&1)
+  output=$(DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/git/post-merge" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -220,7 +223,7 @@ test_post_merge_skip_env() {
   echo "changed" > src/index.js
   git add src/index.js && git commit -m "change code" --quiet
   set +e
-  output=$(DOC_SUPERPOWERS_SKIP=1 DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/post-merge" 2>&1)
+  output=$(DOC_SUPERPOWERS_SKIP=1 DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/git/post-merge" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -245,7 +248,7 @@ test_post_checkout_skips_file_checkout() {
   git add src/index.js && git commit -m "change" --quiet
   set +e
   # $1=prev_head $2=new_head $3=flag (0=file, 1=branch)
-  output=$(DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/post-checkout" abc123 def456 0 2>&1)
+  output=$(DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/git/post-checkout" abc123 def456 0 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -264,7 +267,7 @@ test_post_checkout_reports_on_branch_switch() {
   git add src/index.js && git commit -m "change" --quiet
   new=$(git rev-parse HEAD)
   set +e
-  output=$(DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/post-checkout" "$prev" "$new" 1 2>&1)
+  output=$(DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/git/post-checkout" "$prev" "$new" 1 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "always exits 0"
@@ -277,7 +280,7 @@ test_post_checkout_silent_when_current() {
   setup
   build_test_index
   set +e
-  output=$(DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/post-checkout" abc123 def456 1 2>&1)
+  output=$(DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/git/post-checkout" abc123 def456 1 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -305,7 +308,7 @@ test_prepare_commit_msg_appends_stale() {
   local msg_file="$TEST_DIR/.git/COMMIT_EDITMSG"
   echo "my commit message" > "$msg_file"
   set +e
-  DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/prepare-commit-msg" "$msg_file" 2>/dev/null
+  DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/git/prepare-commit-msg" "$msg_file" 2>/dev/null
   exit_code=$?
   set -e
   local content
@@ -326,7 +329,7 @@ test_prepare_commit_msg_skips_when_current() {
   local msg_file="$TEST_DIR/.git/COMMIT_EDITMSG"
   echo "my commit message" > "$msg_file"
   set +e
-  DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/prepare-commit-msg" "$msg_file" 2>/dev/null
+  DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/git/prepare-commit-msg" "$msg_file" 2>/dev/null
   exit_code=$?
   set -e
   local content
@@ -342,7 +345,7 @@ test_prepare_commit_msg_skips_no_index() {
   local msg_file="$TEST_DIR/.git/COMMIT_EDITMSG"
   echo "my commit message" > "$msg_file"
   set +e
-  DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/git/prepare-commit-msg" "$msg_file" 2>/dev/null
+  DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/git/prepare-commit-msg" "$msg_file" 2>/dev/null
   exit_code=$?
   set -e
   local content
@@ -367,7 +370,7 @@ test_pre_push_silent_few_commits() {
   echo "change" > src/index.js
   git add src/index.js && git commit -m "one change" --quiet
   set +e
-  output=$(bash "$HOOKS_DIR/git/pre-push" 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/git/pre-push" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -384,7 +387,7 @@ test_pre_push_warns_many_commits() {
     git add src/index.js && git commit -m "change $i" --quiet
   done
   set +e
-  output=$(bash "$HOOKS_DIR/git/pre-push" 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/git/pre-push" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "always exits 0"
@@ -397,7 +400,7 @@ test_pre_push_silent_no_tags() {
   echo "test: pre-push silent when no tags exist"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/git/pre-push" 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/git/pre-push" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -414,7 +417,7 @@ test_pre_push_skip_env() {
     git add src/index.js && git commit -m "change $i" --quiet
   done
   set +e
-  output=$(DOC_SUPERPOWERS_SKIP=1 bash "$HOOKS_DIR/git/pre-push" 2>&1)
+  output=$(DOC_SUPERPOWERS_SKIP=1 "$BASH_BIN" "$HOOKS_DIR/git/pre-push" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0 with SKIP"
@@ -437,7 +440,7 @@ test_claude_gate_skips_non_commit() {
   build_test_index
   # Simulate tool input that is NOT a git commit
   set +e
-  output=$(DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"ls -la"}' bash "$HOOKS_DIR/claude/pre-commit-gate.sh" 2>&1)
+  output=$(DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"ls -la"}' "$BASH_BIN" "$HOOKS_DIR/claude/pre-commit-gate.sh" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0 for non-commit"
@@ -454,7 +457,7 @@ test_claude_gate_warns_on_stale_commit() {
   echo "changed again" > src/index.js
   git add src/index.js
   set +e
-  output=$(DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"git commit -m \"update\""}' bash "$HOOKS_DIR/claude/pre-commit-gate.sh" 2>&1)
+  output=$(DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"git commit -m \"update\""}' "$BASH_BIN" "$HOOKS_DIR/claude/pre-commit-gate.sh" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0 (warn mode)"
@@ -471,7 +474,7 @@ test_claude_gate_blocks_strict() {
   echo "changed again" > src/index.js
   git add src/index.js
   set +e
-  output=$(DOC_SUPERPOWERS_STRICT=1 DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"git commit -m \"update\""}' bash "$HOOKS_DIR/claude/pre-commit-gate.sh" 2>&1)
+  output=$(DOC_SUPERPOWERS_STRICT=1 DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"git commit -m \"update\""}' "$BASH_BIN" "$HOOKS_DIR/claude/pre-commit-gate.sh" 2>&1)
   exit_code=$?
   set -e
   assert_eq "2" "$exit_code" "exits 2 in strict mode"
@@ -482,7 +485,7 @@ test_claude_gate_skip_env() {
   echo "test: claude pre-commit-gate respects SKIP"
   setup
   set +e
-  output=$(DOC_SUPERPOWERS_SKIP=1 DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"git commit -m \"test\""}' bash "$HOOKS_DIR/claude/pre-commit-gate.sh" 2>&1)
+  output=$(DOC_SUPERPOWERS_SKIP=1 DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"git commit -m \"test\""}' "$BASH_BIN" "$HOOKS_DIR/claude/pre-commit-gate.sh" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -506,7 +509,7 @@ test_session_summary_reports_stale() {
   echo "changed" > src/index.js
   git add src/index.js && git commit -m "change" --quiet
   set +e
-  output=$(DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/claude/session-summary.sh" 2>&1)
+  output=$(DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/claude/session-summary.sh" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "always exits 0"
@@ -520,7 +523,7 @@ test_session_summary_silent_when_current() {
   setup
   build_test_index
   set +e
-  output=$(DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/claude/session-summary.sh" 2>&1)
+  output=$(DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/claude/session-summary.sh" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -532,7 +535,7 @@ test_session_summary_skip_env() {
   echo "test: session-summary respects SKIP"
   setup
   set +e
-  output=$(DOC_SUPERPOWERS_SKIP=1 DOC_TOOLS="$DOC_TOOLS" bash "$HOOKS_DIR/claude/session-summary.sh" 2>&1)
+  output=$(DOC_SUPERPOWERS_SKIP=1 DOC_TOOLS="$DOC_TOOLS" "$BASH_BIN" "$HOOKS_DIR/claude/session-summary.sh" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -553,7 +556,7 @@ test_post_commit_sync_skips_non_commit() {
   setup
   build_test_index
   set +e
-  output=$(DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"ls -la"}' bash "$HOOKS_DIR/claude/post-commit-sync.sh" 2>&1)
+  output=$(DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"ls -la"}' "$BASH_BIN" "$HOOKS_DIR/claude/post-commit-sync.sh" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0 for non-commit"
@@ -568,7 +571,7 @@ test_post_commit_sync_reports_stale_after_commit() {
   echo "changed" > src/index.js
   git add src/index.js && git commit -m "change code" --quiet
   set +e
-  output=$(DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"git commit -m \"update\""}' bash "$HOOKS_DIR/claude/post-commit-sync.sh" 2>&1)
+  output=$(DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"git commit -m \"update\""}' "$BASH_BIN" "$HOOKS_DIR/claude/post-commit-sync.sh" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "always exits 0"
@@ -582,7 +585,7 @@ test_post_commit_sync_silent_when_current() {
   setup
   build_test_index
   set +e
-  output=$(DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"git commit -m \"update\""}' bash "$HOOKS_DIR/claude/post-commit-sync.sh" 2>&1)
+  output=$(DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"git commit -m \"update\""}' "$BASH_BIN" "$HOOKS_DIR/claude/post-commit-sync.sh" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -595,7 +598,7 @@ test_post_commit_sync_skip_env() {
   echo "test: post-commit-sync respects SKIP"
   setup
   set +e
-  output=$(DOC_SUPERPOWERS_SKIP=1 DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"git commit -m \"test\""}' bash "$HOOKS_DIR/claude/post-commit-sync.sh" 2>&1)
+  output=$(DOC_SUPERPOWERS_SKIP=1 DOC_TOOLS="$DOC_TOOLS" TOOL_INPUT='{"command":"git commit -m \"test\""}' "$BASH_BIN" "$HOOKS_DIR/claude/post-commit-sync.sh" 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0 with SKIP"
@@ -616,7 +619,7 @@ test_install_git_creates_hooks() {
   echo "test: install --git creates hook files in .git/hooks/"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --git 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --git 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -643,7 +646,7 @@ test_install_git_preserves_existing_hook() {
   printf '#!/bin/bash\necho existing\n' > .git/hooks/pre-commit
   chmod +x .git/hooks/pre-commit
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --git 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --git 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -659,7 +662,7 @@ test_install_git_overwrites_own_hook() {
   printf '#!/bin/bash\n# doc-superpowers hook v1\necho old\n' > .git/hooks/pre-commit
   chmod +x .git/hooks/pre-commit
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --git 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --git 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -671,10 +674,10 @@ test_install_git_overwrites_own_hook() {
 test_uninstall_git_removes_hooks() {
   echo "test: uninstall --git removes doc-superpowers hooks"
   setup
-  bash "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
   assert_file_exists ".git/hooks/pre-commit" "hook exists before uninstall"
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" uninstall --git 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --git 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -688,9 +691,9 @@ test_uninstall_git_preserves_foreign_hooks() {
   setup
   printf '#!/bin/bash\necho foreign\n' > .git/hooks/post-merge
   chmod +x .git/hooks/post-merge
-  bash "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" uninstall --git 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --git 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -706,14 +709,14 @@ test_uninstall_git_removes_integrated_hooks() {
   printf '#!/bin/bash\necho "existing pre-commit"\nexit 0\n' > .git/hooks/pre-commit
   chmod +x .git/hooks/pre-commit
   # Install (auto-integrates into existing hook)
-  bash "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
   # Verify integration block exists
   assert_contains "$(cat .git/hooks/pre-commit)" "doc-superpowers:begin" "begin marker present"
   assert_contains "$(cat .git/hooks/pre-commit)" "doc-superpowers:end" "end marker present"
   assert_file_exists ".git/hooks/.doc-superpowers-pre-commit" "local hook copy exists"
   # Uninstall
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" uninstall --git 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --git 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -730,7 +733,7 @@ test_install_git_registers_merge_driver() {
   echo "test: install --git registers merge driver in git config and .gitattributes"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --git 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --git 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -754,11 +757,11 @@ test_install_git_registers_merge_driver() {
 test_uninstall_git_removes_merge_driver() {
   echo "test: uninstall --git removes merge driver from git config and .gitattributes"
   setup
-  bash "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
   # Verify installed first
   assert_contains "$(git config --local --get merge.doc-index.driver 2>/dev/null)" "merge-doc-index.sh" "driver present before uninstall"
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" uninstall --git 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --git 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -777,14 +780,14 @@ test_status_reports_merge_driver() {
   setup
   # Before install: not registered
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" status 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" status 2>&1)
   set -e
   assert_contains "$output" "merge-driver" "shows merge-driver line"
   assert_contains "$output" "not registered" "shows not registered before install"
   # After install: registered
-  bash "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" status 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" status 2>&1)
   set -e
   assert_contains "$output" "registered" "shows registered after install"
   assert_contains "$output" "configured" "shows .gitattributes configured"
@@ -794,11 +797,11 @@ test_status_reports_merge_driver() {
 test_status_warns_stale_merge_driver_path() {
   echo "test: status warns when merge driver script path is stale"
   setup
-  bash "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
   # Point git config at a non-existent path
   git config --local merge.doc-index.driver "/nonexistent/merge-doc-index.sh %O %A %B"
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" status 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" status 2>&1)
   set -e
   assert_contains "$output" "script missing" "warns about missing driver script"
   teardown
@@ -808,7 +811,7 @@ test_install_claude_creates_settings() {
   echo "test: install --claude creates settings and copies scripts"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --claude 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --claude 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -846,7 +849,7 @@ test_install_claude_preserves_existing() {
   mkdir -p .claude
   echo '{"permissions":{"allow":["Read"]}}' > .claude/settings.local.json
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --claude 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --claude 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -860,10 +863,10 @@ test_install_claude_preserves_existing() {
 test_uninstall_claude_removes_hooks() {
   echo "test: uninstall --claude removes hooks and copied scripts"
   setup
-  bash "$HOOKS_DIR/install.sh" install --claude >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --claude >/dev/null 2>&1
   assert_file_exists ".claude/hooks/doc-superpowers/pre-commit-gate.sh" "script exists before uninstall"
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" uninstall --claude 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --claude 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -881,7 +884,7 @@ test_install_ci_creates_workflows() {
   echo "test: install --ci creates workflow files"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -903,7 +906,7 @@ test_install_ci_with_custom_base_branch() {
   echo "test: install --ci --base-branch substitutes custom branch"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci --base-branch develop 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --base-branch develop 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -918,7 +921,7 @@ test_install_ci_with_custom_cron() {
   echo "test: install --ci --cron substitutes custom schedule"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci --cron '0 12 * * *' 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --cron '0 12 * * *' 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -933,7 +936,7 @@ test_install_ci_strict_enables_strict() {
   echo "test: install --ci --ci-strict sets strict mode in workflow"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci --ci-strict 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --ci-strict 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -948,7 +951,7 @@ test_install_ci_default_strict_disabled() {
   echo "test: install --ci without --ci-strict defaults to non-strict"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -962,7 +965,7 @@ test_install_ci_creates_claude_powered_workflows() {
   echo "test: install --ci creates Claude-powered workflow files"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1006,7 +1009,7 @@ test_install_ci_api_key_message() {
   echo "test: install --ci prints API key message for Claude-powered workflows"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1018,7 +1021,7 @@ test_install_ci_vendors_doc_tools() {
   echo "test: install --ci vendors doc-tools.sh into .github/scripts"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1037,10 +1040,10 @@ test_install_ci_vendors_doc_tools() {
 test_uninstall_ci_removes_claude_workflows() {
   echo "test: uninstall --ci removes Claude-powered workflows"
   setup
-  bash "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
   assert_file_exists ".github/workflows/doc-audit-update.yml" "installed first"
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" uninstall --ci 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1055,10 +1058,10 @@ test_uninstall_ci_removes_claude_workflows() {
 test_uninstall_ci_removes_vendored_doc_tools() {
   echo "test: uninstall --ci removes vendored doc-tools.sh"
   setup
-  bash "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
   assert_file_exists ".github/scripts/doc-tools.sh" "vendored first"
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" uninstall --ci 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1072,9 +1075,9 @@ test_uninstall_ci_removes_vendored_doc_tools() {
 test_uninstall_no_flags_non_tty_fails() {
   echo "test: uninstall without flags in non-TTY context exits 1"
   setup
-  bash "$HOOKS_DIR/install.sh" install --all >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --all >/dev/null 2>&1
   set +e
-  output=$(echo "" | bash "$HOOKS_DIR/install.sh" uninstall 2>&1)
+  output=$(echo "" | "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall 2>&1)
   exit_code=$?
   set -e
   assert_eq "1" "$exit_code" "exits 1 without tier flags"
@@ -1085,9 +1088,9 @@ test_uninstall_no_flags_non_tty_fails() {
 test_status_reports_installed() {
   echo "test: status reports installed hooks"
   setup
-  bash "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" status 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" status 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1100,7 +1103,7 @@ test_status_reports_not_installed() {
   echo "test: status reports when nothing installed"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" status 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" status 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1112,7 +1115,7 @@ test_install_all_installs_git_and_claude_and_ci() {
   echo "test: install --all installs all tiers"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --all 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --all 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1128,7 +1131,7 @@ test_install_no_git_dir() {
   tmpdir=$(mktemp -d)
   cd "$tmpdir"
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --git 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --git 2>&1)
   exit_code=$?
   set -e
   assert_eq "1" "$exit_code" "exits 1"
@@ -1141,7 +1144,7 @@ test_no_args_prints_usage() {
   echo "test: no args prints usage"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" 2>&1)
   exit_code=$?
   set -e
   assert_eq "1" "$exit_code" "exits 1"
@@ -1155,7 +1158,7 @@ test_install_git_core_hookspath() {
   mkdir -p .custom-hooks
   git config core.hooksPath .custom-hooks
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --git 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --git 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1170,7 +1173,7 @@ test_install_git_core_hookspath_creates_dir() {
   setup
   git config core.hooksPath .nonexistent-hooks
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --git 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --git 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1183,7 +1186,7 @@ test_install_git_githooks_dir() {
   setup
   mkdir -p .githooks
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --git 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --git 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1195,9 +1198,9 @@ test_install_git_githooks_dir() {
 test_install_git_idempotent() {
   echo "test: install --git twice is idempotent"
   setup
-  bash "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --git 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --git 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0 on reinstall"
@@ -1213,7 +1216,7 @@ test_integration_does_not_terminate_parent() {
   printf '#!/bin/bash\necho "before"\nexit 0\n' > .git/hooks/pre-commit
   chmod +x .git/hooks/pre-commit
   # Install (will integrate via bash subprocess)
-  bash "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1
   # Run the parent hook — code before exit 0 should still execute
   set +e
   output=$(bash .git/hooks/pre-commit 2>&1)
@@ -1228,7 +1231,7 @@ test_base_branch_missing_value() {
   echo "test: --base-branch without value gives clear error"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci --base-branch 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --base-branch 2>&1)
   exit_code=$?
   set -e
   assert_eq "1" "$exit_code" "exits 1"
@@ -1240,7 +1243,7 @@ test_cron_missing_value() {
   echo "test: --cron without value gives clear error"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci --cron 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --cron 2>&1)
   exit_code=$?
   set -e
   assert_eq "1" "$exit_code" "exits 1"
@@ -1254,7 +1257,7 @@ test_install_ci_workflows_csv_installs_subset_only() {
   echo "test: install --ci --workflows=csv installs ONLY the listed workflows"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci --workflows=doc-pr-release,doc-index-update 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-pr-release,doc-index-update 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1272,7 +1275,7 @@ test_install_ci_workflows_none_skips_all_but_vendors_tools() {
   echo "test: install --ci --workflows=none skips workflow files but vendors doc-tools.sh"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci --workflows=none 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=none 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1287,13 +1290,13 @@ test_uninstall_ci_workflows_none_keeps_workflows() {
   setup
   # Install everything first.
   set +e
-  bash "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
   set -e
   assert_file_exists ".github/workflows/doc-freshness-pr.yml" "precondition: installed"
   assert_file_exists ".github/workflows/doc-pr-release.yml" "precondition: installed"
 
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" uninstall --ci --workflows=none 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=none 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1313,7 +1316,7 @@ test_install_ci_workflows_bogus_errors_with_valid_set() {
   echo "test: install --ci --workflows=bogus errors with clear message listing valid names"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci --workflows=bogus 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=bogus 2>&1)
   exit_code=$?
   set -e
   assert_eq "1" "$exit_code" "exits 1"
@@ -1329,7 +1332,7 @@ test_install_ci_workflows_helpers_false_skips_helpers() {
   echo "test: install --ci --workflows=doc-pr-release --helpers=false skips helpers"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci --workflows=doc-pr-release --helpers=false 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-pr-release --helpers=false 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1343,7 +1346,7 @@ test_install_ci_writes_state_file_on_first_install() {
   echo "test: install --ci writes .claude/doc-superpowers/installed.json"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1357,7 +1360,7 @@ test_install_ci_writes_state_file_on_first_install() {
     local state
     state=$(jq -r --arg n "$n" '.tiers.ci.workflows[$n].state' .claude/doc-superpowers/installed.json)
     assert_eq "installed" "$state" "$n marked installed in state file"
-  done < <(SCRIPT_DIR="$HOOKS_DIR" bash -c "source '$HOOKS_DIR/state.sh' && state_known_workflows")
+  done < <(SCRIPT_DIR="$HOOKS_DIR" "$BASH_BIN" -c "source '$HOOKS_DIR/state.sh' && state_known_workflows")
   teardown
 }
 
@@ -1370,7 +1373,7 @@ test_install_ci_bootstraps_state_from_filesystem() {
       -e "s|__CRON_SCHEDULE__|0 9 * * 1|g" -e "s|__CI_STRICT__|0|g" \
       "$HOOKS_DIR/ci/doc-freshness-pr.yml" > .github/workflows/doc-freshness-pr.yml
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1388,7 +1391,7 @@ test_install_ci_malformed_state_file_falls_back_with_warn() {
   mkdir -p .claude/doc-superpowers
   echo "{not valid json" > .claude/doc-superpowers/installed.json
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0 (graceful fallback)"
@@ -1401,8 +1404,8 @@ test_install_ci_malformed_state_file_falls_back_with_warn() {
 test_uninstall_install_cycle_respects_intentional_uninstall() {
   echo "test: uninstall --ci then install --ci keeps intentionally-removed workflows uninstalled"
   setup
-  bash "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
-  bash "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release >/dev/null 2>&1
   assert_file_not_exists ".github/workflows/doc-release.yml" "uninstall removed doc-release"
   # State should say intentional.
   local intentional
@@ -1410,7 +1413,7 @@ test_uninstall_install_cycle_respects_intentional_uninstall() {
   assert_eq "true" "$intentional" "marked intentional"
   # Now re-install — doc-release should stay GONE.
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "install exits 0"
@@ -1425,13 +1428,13 @@ test_uninstall_install_cycle_respects_intentional_uninstall() {
 test_uninstall_transient_then_install_reinstalls() {
   echo "test: uninstall --ci --transient lets next install --ci re-install"
   setup
-  bash "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
-  bash "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release --transient >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release --transient >/dev/null 2>&1
   local intentional
   intentional=$(jq -r '.tiers.ci.workflows."doc-release".intentional' .claude/doc-superpowers/installed.json)
   assert_eq "false" "$intentional" "marked transient"
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1443,11 +1446,11 @@ test_uninstall_transient_then_install_reinstalls() {
 test_install_force_bypasses_intentional_uninstall() {
   echo "test: install --ci --force re-installs intentionally-uninstalled workflows"
   setup
-  bash "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
-  bash "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release >/dev/null 2>&1
   assert_file_not_exists ".github/workflows/doc-release.yml" "uninstall removed doc-release"
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci --force 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --force 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1459,11 +1462,11 @@ test_install_force_bypasses_intentional_uninstall() {
 test_install_explicit_workflows_overrides_state() {
   echo "test: install --ci --workflows=<name> beats state-respect (explicit > implicit)"
   setup
-  bash "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
-  bash "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release >/dev/null 2>&1
   # Explicit re-add — should NOT skip even though state says intentional:uninstalled.
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci --workflows=doc-release 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-release 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1475,7 +1478,7 @@ test_install_ci_helpers_invalid_value_errors() {
   echo "test: install --ci --helpers=garbage errors with clear message"
   setup
   set +e
-  output=$(bash "$HOOKS_DIR/install.sh" install --ci --helpers=garbage 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --helpers=garbage 2>&1)
   exit_code=$?
   set -e
   assert_eq "1" "$exit_code" "exits 1"

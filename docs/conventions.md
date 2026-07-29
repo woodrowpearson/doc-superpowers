@@ -320,6 +320,8 @@ The `docs/.doc-index.json` file is the machine-readable freshness index. It foll
 
 The index carries a top-level `schema_version` field (currently `2`, renamed from `version` when the per-entry `implementation` array was added). Indexes built before that rename still carry `version: 1` — including this repo's own `docs/.doc-index.json`, which has been refreshed by `update-index` but not rebuilt since. `update-index` preserves the top-level shape it finds; only `build-index` writes the current one.
 
+Keys are **relative to the repo root**, and the subcommands enforce it: an absolute in-tree path is normalized to that form, and a path outside the working tree is rejected with a non-zero exit rather than written as a key no other command can find. See the Doc-Index Schema Reference in `references/doc-spec.md`.
+
 Each entry in the index (keyed by relative doc path) contains:
 - `content_hash` — `sha256:<hex>` hash of doc file content
 - `code_refs` — list of directories/files this doc covers

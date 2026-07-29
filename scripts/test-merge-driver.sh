@@ -3,8 +3,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MERGE_DRIVER="$SCRIPT_DIR/merge-doc-index.sh"
 source "$SCRIPT_DIR/test-helpers.sh"
+
+# Run the driver under the interpreter this suite was launched with,
+# not whatever `#!/usr/bin/env bash` resolves to. See bash_bin_shim().
+MERGE_DRIVER="$(bash_bin_shim "$SCRIPT_DIR/merge-doc-index.sh")"
 
 echo "=== merge-doc-index.sh tests ==="
 

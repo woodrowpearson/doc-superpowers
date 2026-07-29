@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-07-25T04:19:12Z",
+  "generated_at": "2026-07-29T09:14:14Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -34,17 +34,17 @@
       "implementation": []
     },
     "docs/conventions.md": {
-      "content_hash": "sha256:89a8780688694ecd93d3dbe0b697e0f69de9b927a978e1c304c9333a2dc9b1bc",
+      "content_hash": "sha256:9a88070991048181941a539b2a04651f2a33a0ec5046b0cdee69c08d703ea7ac",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "references/doc-spec.md"
       ],
-      "code_commit": "b98a7e6fb7f613097794f5bca4c693bd1e62dfe6",
+      "code_commit": "76368a5cb434c5fd412c4e7c0d82ac259490461e",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-25T03:57:21Z",
+      "last_verified": "2026-07-29T09:14:14Z",
       "implementation": []
     },
     "docs/guides/getting-started.md": {
