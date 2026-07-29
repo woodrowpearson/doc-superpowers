@@ -1204,6 +1204,273 @@ test_tools_install_unknown_flag_errors() {
   teardown
 }
 
+# --- Doc-path key normalization (add-entry and siblings) ---
+#
+# The doc-index is keyed by working-tree-relative paths; every other consumer
+# (update-index, check-freshness, the coverage gate, the merge driver) looks
+# entries up by that key. A non-relative key can be written but never found, so
+# these commands must normalize it or refuse it — never write it silently.
+#
+# `$PWD` is used for the "absolute, inside the repo" cases on purpose: on macOS
+# mktemp -d returns a /var/... path that symlinks to /private/var/..., so these
+# also cover physical (symlink-resolving) path comparison.
+
+test_add_entry_accepts_relative_path() {
+  echo "test: add-entry accepts the documented relative form (control)"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  echo "# design" > docs/design.md
+  set +e
+  local output
+  output=$(echo "docs/design.md:src/:design" | "$DOC_TOOLS" add-entry 2>&1)
+  local exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0 for relative path"
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs | has("docs/design.md")' "true" "relative key stored verbatim"
+  assert_contains "$output" "Added 1 entry" "reports the add"
+  teardown
+}
+
+test_add_entry_normalizes_absolute_path_inside_repo() {
+  echo "test: add-entry rewrites an absolute in-tree path to a relative key"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  echo "# design" > docs/design.md
+  set +e
+  local output
+  output=$(echo "$PWD/docs/design.md:src/:design" | "$DOC_TOOLS" add-entry 2>&1)
+  local exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs | has("docs/design.md")' "true" "stored under the relative key"
+  local keys
+  keys=$(echo "$json" | jq -r '.docs | keys[]')
+  assert_not_contains "$keys" "$PWD" "no absolute key written"
+  assert_contains "$output" "docs/design.md" "reports the normalized path"
+  teardown
+}
+
+test_add_entry_rejects_path_outside_repo() {
+  echo "test: add-entry rejects an out-of-tree path loudly and writes nothing"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local before
+  before=$(jq -S '.docs' docs/.doc-index.json)
+  set +e
+  local output
+  output=$(echo "/etc/hosts:src/:design" | "$DOC_TOOLS" add-entry 2>&1)
+  local exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "exits non-zero"
+  assert_contains "$output" "outside the working directory" "explains why"
+  local after
+  after=$(jq -S '.docs' docs/.doc-index.json)
+  assert_eq "$before" "$after" "index docs unchanged"
+  teardown
+}
+
+test_add_entry_mixed_batch_applies_valid_and_fails() {
+  echo "test: add-entry applies valid lines, rejects invalid, still exits non-zero"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  echo "# design" > docs/design.md
+  set +e
+  local output
+  output=$(printf '%s\n%s\n' "/etc/hosts:src/:design" "docs/design.md:src/:design" \
+    | "$DOC_TOOLS" add-entry 2>&1)
+  local exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "exits non-zero because one line was invalid"
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs | has("docs/design.md")' "true" "valid line still applied"
+  assert_contains "$output" "Rejected 1 invalid path" "reports the rejection"
+  teardown
+}
+
+test_add_entry_reports_added_paths() {
+  echo "test: add-entry enumerates what it added (no dangling colon)"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  echo "# design" > docs/design.md
+  set +e
+  local output
+  output=$(echo "docs/design.md:src/:design" | "$DOC_TOOLS" add-entry 2>&1)
+  set -e
+  assert_contains "$output" "  docs/design.md" "lists the added path"
+  # Nothing added => no trailing colon promising a list that never comes.
+  set +e
+  local none
+  none=$(echo "/etc/hosts:src/:design" | "$DOC_TOOLS" add-entry 2>&1)
+  set -e
+  assert_contains "$none" "Added 0 entries" "reports a zero count"
+  assert_not_contains "$none" "Added 0 entries:" "no dangling colon when nothing added"
+  teardown
+}
+
+test_add_entry_normalizes_dot_segments() {
+  echo "test: add-entry collapses ./ and ../ segments into the canonical key"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  echo "# design" > docs/design.md
+  set +e
+  echo "./docs/design.md:src/:design" | "$DOC_TOOLS" add-entry >/dev/null 2>&1
+  local exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs | has("docs/design.md")' "true" "./ collapsed to canonical key"
+  assert_json_field "$json" '.docs | has("./docs/design.md")' "false" "no ./-prefixed duplicate key"
+  teardown
+}
+
+test_add_entry_preserves_dots_in_filenames() {
+  echo "test: add-entry does not mangle dots that are not path segments"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  mkdir -p docs/v1.2
+  echo "# notes" > docs/v1.2/notes.md
+  set +e
+  echo "docs/v1.2/notes.md:src/:design" | "$DOC_TOOLS" add-entry >/dev/null 2>&1
+  local exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs | has("docs/v1.2/notes.md")' "true" "dotted filename preserved"
+  teardown
+}
+
+test_build_index_rejects_path_outside_repo() {
+  echo "test: build-index aborts on an out-of-tree path without writing a partial index"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local before
+  before=$(cat docs/.doc-index.json)
+  set +e
+  local output
+  output=$(printf '%s\n%s\n' "docs/architecture.md:src/:architecture" "/etc/hosts:src/:design" \
+    | "$DOC_TOOLS" build-index 2>&1)
+  local exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "exits non-zero"
+  assert_contains "$output" "index NOT written" "says the index was left alone"
+  local after
+  after=$(cat docs/.doc-index.json)
+  assert_eq "$before" "$after" "pre-existing index untouched"
+  teardown
+}
+
+test_build_index_normalizes_absolute_path_inside_repo() {
+  echo "test: build-index rewrites an absolute in-tree path to a relative key"
+  setup
+  echo "$PWD/docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs | has("docs/architecture.md")' "true" "stored under the relative key"
+  local keys
+  keys=$(echo "$json" | jq -r '.docs | keys[]')
+  assert_not_contains "$keys" "$PWD" "no absolute key written"
+  teardown
+}
+
+test_update_index_accepts_absolute_path_inside_repo() {
+  echo "test: update-index resolves an absolute in-tree path to its entry"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  set +e
+  local output
+  output=$("$DOC_TOOLS" update-index "$PWD/docs/architecture.md" 2>&1)
+  local exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_contains "$output" "Refreshed 1 entry" "refreshed the entry"
+  teardown
+}
+
+test_remove_entry_accepts_absolute_path_inside_repo() {
+  echo "test: remove-entry removes via an absolute in-tree path (was a silent no-op)"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  set +e
+  local output
+  output=$("$DOC_TOOLS" remove-entry "$PWD/docs/architecture.md" 2>&1)
+  local exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_contains "$output" "Removed 1 entry" "actually removed it"
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs | has("docs/architecture.md")' "false" "entry gone"
+  teardown
+}
+
+test_remove_entry_rejects_path_outside_repo() {
+  echo "test: remove-entry rejects an out-of-tree path"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  set +e
+  "$DOC_TOOLS" remove-entry /etc/hosts >/dev/null 2>&1
+  local exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "exits non-zero"
+  teardown
+}
+
+test_remove_entry_missing_relative_path_still_skips() {
+  echo "test: remove-entry still SKIPs a valid-but-absent relative path (exit 0)"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  set +e
+  local output
+  output=$("$DOC_TOOLS" remove-entry docs/nope.md 2>&1)
+  local exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0 — unchanged behaviour"
+  assert_contains "$output" "SKIP" "reports the skip"
+  teardown
+}
+
+test_deprecate_entry_normalizes_paths_and_superseded_by() {
+  echo "test: deprecate-entry normalizes both the target and --superseded-by"
+  setup
+  echo "# design" > docs/design.md
+  printf '%s\n%s\n' "docs/architecture.md:src/:architecture" "docs/design.md:src/:design" \
+    | "$DOC_TOOLS" build-index
+  set +e
+  local exit_code
+  "$DOC_TOOLS" deprecate-entry --superseded-by "$PWD/docs/design.md" \
+    "$PWD/docs/architecture.md" >/dev/null 2>&1
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/architecture.md"].status' "deprecated" "target deprecated"
+  assert_json_field "$json" '.docs["docs/architecture.md"].superseded_by' "docs/design.md" \
+    "superseded_by stored as a relative key"
+  teardown
+}
+
+test_status_accepts_absolute_path_inside_repo() {
+  echo "test: status resolves an absolute in-tree path to its entry"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  set +e
+  local output
+  output=$("$DOC_TOOLS" status "$PWD/docs/architecture.md" 2>&1)
+  local exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_contains "$output" "docs/architecture.md" "reports the relative path"
+  teardown
+}
+
 # --- Runner ---
 
 run_tests() {
@@ -1283,6 +1550,23 @@ run_tests() {
   test_tools_status_installed_matches_plugin
   test_tools_status_reports_drift
   test_tools_install_unknown_flag_errors
+
+  # --- doc-path key normalization (add-entry + siblings) ---
+  test_add_entry_accepts_relative_path
+  test_add_entry_normalizes_absolute_path_inside_repo
+  test_add_entry_rejects_path_outside_repo
+  test_add_entry_mixed_batch_applies_valid_and_fails
+  test_add_entry_reports_added_paths
+  test_add_entry_normalizes_dot_segments
+  test_add_entry_preserves_dots_in_filenames
+  test_build_index_rejects_path_outside_repo
+  test_build_index_normalizes_absolute_path_inside_repo
+  test_update_index_accepts_absolute_path_inside_repo
+  test_remove_entry_accepts_absolute_path_inside_repo
+  test_remove_entry_rejects_path_outside_repo
+  test_remove_entry_missing_relative_path_still_skips
+  test_deprecate_entry_normalizes_paths_and_superseded_by
+  test_status_accepts_absolute_path_inside_repo
 
   print_summary
 }

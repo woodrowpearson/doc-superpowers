@@ -56,6 +56,105 @@ repo_head() {
   git rev-parse HEAD 2>/dev/null || echo "unknown"
 }
 
+# --- Doc-path normalization ---
+#
+# Every path this tool touches is interpreted relative to the working directory:
+# the index itself is read from the relative `docs/.doc-index.json`, `-f` tests
+# and git pathspecs resolve against $PWD, and the installed hooks all `cd` to the
+# git root before invoking us. The doc-index is therefore keyed by working-tree-
+# relative paths, and every lookup (`update-index`, `check-freshness`, the
+# coverage gate, the merge driver) assumes that form.
+#
+# An absolute key is consequently invisible to every other subcommand — it can be
+# written, but never found. These helpers reject or rewrite such a path at the
+# boundary instead of letting it reach the index.
+
+# True if the path contains a `.` or `..` *segment* (not merely a dot in a
+# filename — `docs/v1.2/x.md` has none). Sentinel slashes make leading/trailing
+# segments match the same pattern as interior ones.
+_has_dot_segment() {
+  case "/$1/" in
+    */./*|*/../*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Resolve a path to its physical (symlink-free) absolute form WITHOUT requiring
+# the leaf to exist — `add-entry` deliberately supports docs that are not yet on
+# disk (it stores a null content_hash for them). Walks up to the longest existing
+# ancestor directory, resolves that with `cd`+`pwd -P`, then re-appends the
+# remaining components. `cd` also collapses any `.`/`..` segments for us.
+#
+# Physical resolution is required, not cosmetic: on macOS `mktemp -d` hands back
+# /var/... which is a symlink to /private/var/..., so a purely lexical prefix
+# comparison against $PWD would wrongly report an in-tree path as outside.
+_physical_path() {
+  local p="$1" suffix="" parent
+  case "$p" in
+    /*) ;;
+    *) p="$PWD/$p" ;;
+  esac
+  while [ ! -d "$p" ]; do
+    parent=$(dirname "$p")
+    # Guard against a non-terminating walk if dirname ever stops shrinking.
+    [ "$parent" = "$p" ] && return 1
+    suffix="/$(basename "$p")$suffix"
+    p="$parent"
+  done
+  p=$(cd "$p" 2>/dev/null && pwd -P) || return 1
+  printf '%s%s' "$p" "$suffix"
+}
+
+# Normalize a doc path to the working-tree-relative form used as the index key.
+# Prints the normalized path on stdout; on failure prints an error to stderr and
+# returns 1 so callers can refuse to write.
+#
+# An ordinary relative path — the documented input, and the form that already
+# works — is passed through byte-identically and never touches the filesystem.
+normalize_doc_path() {
+  local raw="$1"
+  local ctx="${2:-doc path}"
+
+  if [ -z "$raw" ]; then
+    echo "ERROR: empty $ctx." >&2
+    return 1
+  fi
+
+  case "$raw" in
+    /*) ;;
+    *)
+      # Fast path: already in key form.
+      _has_dot_segment "$raw" || { printf '%s' "$raw"; return 0; }
+      ;;
+  esac
+
+  local base abs rel
+  base=$(pwd -P)
+
+  if ! abs=$(_physical_path "$raw"); then
+    echo "ERROR: cannot resolve $ctx '$raw'." >&2
+    return 1
+  fi
+
+  if [ "$abs" = "$base" ]; then
+    echo "ERROR: $ctx '$raw' resolves to the working directory itself, not a document." >&2
+    return 1
+  fi
+
+  case "$abs" in
+    "$base"/*)
+      rel="${abs#"$base"/}"
+      ;;
+    *)
+      echo "ERROR: $ctx '$raw' is outside the working directory ($base)." >&2
+      echo "       doc-index keys must be relative to the repo root; run doc-tools.sh from the repo root." >&2
+      return 1
+      ;;
+  esac
+
+  printf '%s' "$rel"
+}
+
 # Computes freshness for a single doc entry.
 # Args: doc_path entry_json
 # Outputs JSON with: status, doc_modified, commits_behind, and if stale: reason, code_refs_changed
@@ -162,6 +261,13 @@ Subcommands:
   tools status [--dest <path>]         Report whether doc-tools.sh is vendored, version,
                                        drift state, helper presence.
 
+Doc paths:
+  The doc-index is keyed by paths relative to the repo root, and every
+  subcommand resolves paths against the current working directory — so run
+  doc-tools.sh from the repo root. An absolute path inside the working tree is
+  rewritten to its relative form; a path outside it is rejected (non-zero exit)
+  rather than written as an unfindable key.
+
 Options:
   --help            Show this help message
 
@@ -183,6 +289,7 @@ cmd_build_index() {
 
   # Accumulate entries as a jq-compatible JSON object
   local docs_json="{}"
+  local invalid=0
 
   # Save stdin to fd 3, then redirect fd 0 to /dev/null so subprocesses
   # (e.g. git) don't consume lines from the input pipe
@@ -192,10 +299,19 @@ cmd_build_index() {
     [ -z "$line" ] && continue
 
     # Parse fields
-    local doc_path code_refs_raw doc_type
-    doc_path=$(echo "$line" | cut -d: -f1)
+    local doc_path raw_doc_path code_refs_raw doc_type
+    raw_doc_path=$(echo "$line" | cut -d: -f1)
     code_refs_raw=$(echo "$line" | cut -d: -f2)
     doc_type=$(echo "$line" | cut -d: -f3)
+
+    # A key that isn't working-tree-relative is unfindable by every other
+    # subcommand. Unlike add-entry (which is incremental and can keep the good
+    # lines), build-index REPLACES the whole index — writing a partial one would
+    # silently drop docs — so a single bad line aborts before any write.
+    if ! doc_path=$(normalize_doc_path "$raw_doc_path"); then
+      invalid=$((invalid + 1))
+      continue
+    fi
 
     # Compute content hash
     local content_hash_val
@@ -256,6 +372,11 @@ cmd_build_index() {
   done
 
   exec 3<&-
+
+  if [ "$invalid" -gt 0 ]; then
+    echo "ERROR: $invalid invalid $([ "$invalid" -eq 1 ] && echo path || echo paths) in build-index input; index NOT written." >&2
+    exit 1
+  fi
 
   # Build the final index
   # schema_version bumped 1 → 2 in Task 3.4 of
@@ -525,7 +646,11 @@ cmd_update_index() {
   now=$(iso_now)
   local refreshed=()
 
-  for doc_path in "$@"; do
+  local raw_doc_path
+  for raw_doc_path in "$@"; do
+    local doc_path
+    doc_path=$(normalize_doc_path "$raw_doc_path") || exit 1
+
     # Verify path exists in index
     local exists
     exists=$(echo "$index" | jq --arg p "$doc_path" '.docs | has($p)')
@@ -625,6 +750,8 @@ cmd_add_entry() {
   now=$(iso_now)
 
   local count=0
+  local invalid=0
+  local added=()
 
   # Save stdin to fd 3, redirect fd 0 so subprocesses don't consume input
   exec 3<&0 0</dev/null
@@ -632,10 +759,18 @@ cmd_add_entry() {
   while IFS= read -r line <&3 || [ -n "$line" ]; do
     [ -z "$line" ] && continue
 
-    local doc_path code_refs_raw doc_type
-    doc_path=$(echo "$line" | cut -d: -f1)
+    local doc_path raw_doc_path code_refs_raw doc_type
+    raw_doc_path=$(echo "$line" | cut -d: -f1)
     code_refs_raw=$(echo "$line" | cut -d: -f2)
     doc_type=$(echo "$line" | cut -d: -f3)
+
+    # Reject anything that can't be expressed as a working-tree-relative key.
+    # add-entry is incremental, so the valid lines are still applied — but the
+    # command exits non-zero so a bad path can never pass silently.
+    if ! doc_path=$(normalize_doc_path "$raw_doc_path"); then
+      invalid=$((invalid + 1))
+      continue
+    fi
 
     # Skip if already in index
     local exists
@@ -702,6 +837,7 @@ cmd_add_entry() {
     # Merge into index
     index=$(echo "$index" | jq --arg key "$doc_path" --argjson val "$entry_json" '.docs[$key] = $val')
     count=$((count + 1))
+    added+=("$doc_path")
   done
 
   exec 3<&-
@@ -711,7 +847,19 @@ cmd_add_entry() {
 
   echo "$index" > "$index_file"
 
-  echo "Added $count $([ "$count" -eq 1 ] && echo entry || echo entries):" >&2
+  # Report what actually happened. The trailing colon previously dangled with no
+  # list under it; the sibling commands (update-index, remove-entry,
+  # deprecate-entry) all enumerate the paths they touched, so match that.
+  echo "Added $count $([ "$count" -eq 1 ] && echo entry || echo entries)$([ "$count" -gt 0 ] && echo ':')" >&2
+  local p
+  for p in "${added[@]+"${added[@]}"}"; do
+    echo "  $p" >&2
+  done
+
+  if [ "$invalid" -gt 0 ]; then
+    echo "Rejected $invalid invalid $([ "$invalid" -eq 1 ] && echo path || echo paths)." >&2
+    exit 1
+  fi
 }
 
 cmd_remove_entry() {
@@ -732,8 +880,19 @@ cmd_remove_entry() {
   local now
   now=$(iso_now)
   local count=0
+  local targets=()
 
-  for doc_path in "$@"; do
+  # Normalize every path up front so an unusable one aborts before we mutate the
+  # index. Without this an absolute path merely reported "not found in index" and
+  # exited 0 — a silent no-op for a caller who asked to remove a real entry.
+  local raw_doc_path
+  for raw_doc_path in "$@"; do
+    local doc_path
+    doc_path=$(normalize_doc_path "$raw_doc_path") || exit 1
+    targets+=("$doc_path")
+  done
+
+  for doc_path in "${targets[@]+"${targets[@]}"}"; do
     local exists
     exists=$(echo "$index" | jq --arg p "$doc_path" '.docs | has($p)')
     if [ "$exists" != "true" ]; then
@@ -751,7 +910,7 @@ cmd_remove_entry() {
   echo "$index" > "$index_file"
 
   echo "Removed $count $([ "$count" -eq 1 ] && echo entry || echo entries):" >&2
-  for doc_path in "$@"; do
+  for doc_path in "${targets[@]+"${targets[@]}"}"; do
     echo "  $doc_path" >&2
   done
 }
@@ -778,7 +937,11 @@ cmd_deprecate_entry() {
       echo "ERROR: --superseded-by requires a path argument." >&2
       exit 1
     fi
-    superseded_by="\"$1\""
+    # This is stored in the index as a doc reference, so it is subject to the
+    # same key contract as the entries themselves.
+    local superseded_by_path
+    superseded_by_path=$(normalize_doc_path "$1" "--superseded-by path") || exit 1
+    superseded_by=$(printf '%s' "$superseded_by_path" | jq -R .)
     shift
   fi
 
@@ -792,8 +955,18 @@ cmd_deprecate_entry() {
   local now
   now=$(iso_now)
   local count=0
+  local targets=()
 
-  for doc_path in "$@"; do
+  # Normalize up front — same rationale as remove-entry: an absolute path used to
+  # report "not found" and exit 0, silently failing to deprecate a real entry.
+  local raw_doc_path
+  for raw_doc_path in "$@"; do
+    local doc_path
+    doc_path=$(normalize_doc_path "$raw_doc_path") || exit 1
+    targets+=("$doc_path")
+  done
+
+  for doc_path in "${targets[@]+"${targets[@]}"}"; do
     local exists
     exists=$(echo "$index" | jq --arg p "$doc_path" '.docs | has($p)')
     if [ "$exists" != "true" ]; then
@@ -817,7 +990,7 @@ cmd_deprecate_entry() {
   echo "$index" > "$index_file"
 
   echo "Deprecated $count $([ "$count" -eq 1 ] && echo entry || echo entries):" >&2
-  for doc_path in "$@"; do
+  for doc_path in "${targets[@]+"${targets[@]}"}"; do
     echo "  $doc_path" >&2
   done
 }
@@ -830,7 +1003,8 @@ cmd_status() {
     exit 1
   fi
 
-  local doc_path="$1"
+  local doc_path
+  doc_path=$(normalize_doc_path "$1") || exit 1
 
   if [ ! -f "$index_file" ]; then
     echo "ERROR: doc-index.json not found at $index_file. Run build-index first." >&2
