@@ -287,8 +287,23 @@ cmd_build_index() {
   local build_commit
   build_commit=$(repo_head)
 
-  # Accumulate entries as a jq-compatible JSON object
-  local docs_json="{}"
+  # Per-entry accumulator: one single-key JSON object per line, merged once at
+  # the end. Replaces the previous `docs_json=$(echo "$docs_json" | jq '. + …')`
+  # rebuild, which was both O(N^2) in bytes re-serialized and — because the
+  # merged object was ultimately handed to `jq -n --argjson docs "$docs_json"` —
+  # a hard ceiling on index size: Linux caps a SINGLE argv string at
+  # MAX_ARG_STRLEN (32 pages = 131072 bytes) no matter how large ARG_MAX is, so
+  # build-index died with "jq: Argument list too long" at ~420 entries. macOS
+  # has no per-argument cap (only the ~1 MB total ARG_MAX), which is why this
+  # only ever reproduced on Linux. Mirrors the accumulator cmd_check_freshness
+  # already uses.
+  local entries_tmp
+  entries_tmp=$(mktemp -t doc-tools-entries.XXXXXX) || { echo "ERROR: mktemp failed" >&2; exit 1; }
+  local docs_tmp
+  docs_tmp=$(mktemp -t doc-tools-docs.XXXXXX) || { echo "ERROR: mktemp failed" >&2; exit 1; }
+  # shellcheck disable=SC2064  # expand vars now, not at trap time
+  trap "rm -f \"$entries_tmp\" \"$docs_tmp\"" RETURN EXIT INT TERM
+
   local invalid=0
 
   # Save stdin to fd 3, then redirect fd 0 to /dev/null so subprocesses
@@ -326,20 +341,29 @@ cmd_build_index() {
     code_refs_json=$(echo "$code_refs_raw" | tr ',' '\n' | jq -R . | jq -s .)
 
     # Compute latest commit across all code refs (single git log call per spec)
+    #
+    # The count guard is load-bearing on bash 3.2: an entry with no code_refs
+    # (`docs/x.md::spec`) leaves `refs` empty, and bash 3.2 treats an unguarded
+    # "${refs[@]}" on an empty array as an unbound variable under `set -u`,
+    # aborting build-index outright. Same guard the sibling call sites use.
     local code_commit=""
     IFS=',' read -ra refs <<< "$code_refs_raw"
-    code_commit=$(git log -1 --format=%H -- "${refs[@]}" 2>/dev/null || true)
+    if [ ${#refs[@]} -gt 0 ]; then
+      code_commit=$(git log -1 --format=%H -- "${refs[@]}" 2>/dev/null || true)
+    fi
 
-    # Build the entry JSON
-    local entry_json
+    # Append the entry as a single-key object keyed by doc path. Emitting the
+    # key here (rather than merging into a growing object) is what keeps the
+    # accumulator flat.
     if [ -n "$code_commit" ]; then
-      entry_json=$(jq -n \
+      jq -nc \
+        --arg key "$doc_path" \
         --argjson content_hash "$content_hash_val" \
         --argjson code_refs "$code_refs_json" \
         --arg code_commit "$code_commit" \
         --arg doc_type "$doc_type" \
         --arg last_verified "$now" \
-        '{
+        '{($key): {
           content_hash: $content_hash,
           code_refs: $code_refs,
           code_commit: $code_commit,
@@ -348,14 +372,15 @@ cmd_build_index() {
           replaces: null,
           superseded_by: null,
           last_verified: $last_verified
-        }')
+        }}' >> "$entries_tmp"
     else
-      entry_json=$(jq -n \
+      jq -nc \
+        --arg key "$doc_path" \
         --argjson content_hash "$content_hash_val" \
         --argjson code_refs "$code_refs_json" \
         --arg doc_type "$doc_type" \
         --arg last_verified "$now" \
-        '{
+        '{($key): {
           content_hash: $content_hash,
           code_refs: $code_refs,
           code_commit: null,
@@ -364,11 +389,8 @@ cmd_build_index() {
           replaces: null,
           superseded_by: null,
           last_verified: $last_verified
-        }')
+        }}' >> "$entries_tmp"
     fi
-
-    # Merge entry into docs_json
-    docs_json=$(echo "$docs_json" | jq --arg key "$doc_path" --argjson val "$entry_json" '. + {($key): $val}')
   done
 
   exec 3<&-
@@ -378,28 +400,44 @@ cmd_build_index() {
     exit 1
   fi
 
+  # Collapse the per-entry accumulator into one object in a single jq call.
+  # Each row is a single-key object, so `. + $row` on disjoint keys is plain
+  # object merge — and a repeated key keeps the LAST occurrence, matching the
+  # previous `. + {($key): $val}` accumulation semantics.
+  if [ -s "$entries_tmp" ]; then
+    jq -cs 'reduce .[] as $row ({}; . + $row)' "$entries_tmp" > "$docs_tmp"
+  else
+    printf '{}\n' > "$docs_tmp"
+  fi
+
   # Build the final index
   # schema_version bumped 1 → 2 in Task 3.4 of
   # docs/plans/2026-05-16-adr-implementation-field-rollout.md to capture the
   # new per-entry `implementation` array. Renamed from `version` (only test
   # helpers read the field; live doc-index migrated in the same commit).
-  local index_json
-  index_json=$(jq -n \
+  #
+  # `docs` arrives via --slurpfile, NOT --argjson: it is the one unbounded
+  # value here, and passing it through argv is what capped the index at ~420
+  # entries on Linux (see the accumulator comment above).
+  mkdir -p "$docs_dir"
+  local index_tmp
+  index_tmp=$(mktemp -t doc-tools-index.XXXXXX) || { echo "ERROR: mktemp failed" >&2; exit 1; }
+  jq -n \
     --argjson schema_version 2 \
     --arg generated_by "doc-superpowers" \
     --arg generated_at "$now" \
     --arg build_commit "$build_commit" \
-    --argjson docs "$docs_json" \
+    --slurpfile docs "$docs_tmp" \
     '{
       schema_version: $schema_version,
       generated_by: $generated_by,
       generated_at: $generated_at,
       build_commit: $build_commit,
-      docs: $docs
-    }')
-
-  mkdir -p "$docs_dir"
-  echo "$index_json" > "$index_file"
+      docs: $docs[0]
+    }' > "$index_tmp" || { rm -f "$index_tmp"; echo "ERROR: failed to render index JSON" >&2; exit 1; }
+  # Move into place only once jq has succeeded — a redirect straight at
+  # $index_file would truncate a good index if the render failed.
+  mv "$index_tmp" "$index_file"
 }
 
 cmd_check_freshness() {
@@ -438,12 +476,18 @@ cmd_check_freshness() {
   # merged once at the end with `jq -s` instead of rebuilding via
   # `jq '. + {(p): v}'` per iteration. Eliminates O(N) jq spawns for
   # accumulator updates — the dominant cost on large indexes.
-  local jsonl_tmp idx_paths_tmp fs_paths_tmp
+  local jsonl_tmp idx_paths_tmp fs_paths_tmp docs_out_tmp untracked_tmp
   jsonl_tmp=$(mktemp -t doc-tools-fresh.XXXXXX) || { echo "ERROR: mktemp failed" >&2; exit 1; }
   idx_paths_tmp=$(mktemp -t doc-tools-idx.XXXXXX)
   fs_paths_tmp=$(mktemp -t doc-tools-fs.XXXXXX)
+  # Both of these hold values that scale with the corpus, so they are handed to
+  # the final `jq -n` via --slurpfile rather than --argjson: Linux caps a single
+  # argv string at MAX_ARG_STRLEN (131072 bytes) regardless of ARG_MAX, and the
+  # merged docs object passes that at a few hundred entries.
+  docs_out_tmp=$(mktemp -t doc-tools-docsout.XXXXXX)
+  untracked_tmp=$(mktemp -t doc-tools-untracked.XXXXXX)
   # shellcheck disable=SC2064  # expand vars now, not at trap time
-  trap "rm -f \"$jsonl_tmp\" \"$idx_paths_tmp\" \"$fs_paths_tmp\"" RETURN EXIT INT TERM
+  trap "rm -f \"$jsonl_tmp\" \"$idx_paths_tmp\" \"$fs_paths_tmp\" \"$docs_out_tmp\" \"$untracked_tmp\"" RETURN EXIT INT TERM
 
   # Single-pass field extraction: one `jq` call emits every entry's fields
   # in NUL-delimited records (tab-separated within each record). The body
@@ -587,11 +631,10 @@ cmd_check_freshness() {
   # instead of N. `reduce .[] as $row (...; . + $row)` works because each
   # row is a single-key object and the union operator on disjoint keys is
   # just object merge.
-  local docs_out
   if [ -s "$jsonl_tmp" ]; then
-    docs_out=$(jq -cs 'reduce .[] as $row ({}; . + $row)' "$jsonl_tmp")
+    jq -cs 'reduce .[] as $row ({}; . + $row)' "$jsonl_tmp" > "$docs_out_tmp"
   else
-    docs_out="{}"
+    printf '{}\n' > "$docs_out_tmp"
   fi
 
   # Untracked detection — set-difference between filesystem and index keys.
@@ -599,15 +642,16 @@ cmd_check_freshness() {
   # `jq keys` + `find` + `comm`.
   jq -r '.docs | keys[]' "$index_file" | sort > "$idx_paths_tmp"
   find docs -name '*.md' -not -path 'docs/archive/*' 2>/dev/null | sort > "$fs_paths_tmp"
-  local untracked_docs untracked_count
   if [ -s "$fs_paths_tmp" ]; then
-    untracked_docs=$(comm -23 "$fs_paths_tmp" "$idx_paths_tmp" | jq -R . | jq -cs .)
+    comm -23 "$fs_paths_tmp" "$idx_paths_tmp" | jq -R . | jq -cs . > "$untracked_tmp"
   else
-    untracked_docs="[]"
+    printf '[]\n' > "$untracked_tmp"
   fi
-  untracked_count=$(printf '%s' "$untracked_docs" | jq 'length')
+  local untracked_count
+  untracked_count=$(jq 'length' "$untracked_tmp")
 
-  # Build final output
+  # Build final output. `docs` and `untracked_docs` come in via --slurpfile
+  # (see the tempfile declarations above); only the bounded scalars use argv.
   jq -n \
     --arg checked_at "$checked_at" \
     --arg repo_head "$repo_head_val" \
@@ -616,14 +660,14 @@ cmd_check_freshness() {
     --argjson missing "$count_missing" \
     --argjson deprecated "$count_deprecated" \
     --argjson untracked "$untracked_count" \
-    --argjson untracked_docs "$untracked_docs" \
-    --argjson docs "$docs_out" \
+    --slurpfile untracked_docs "$untracked_tmp" \
+    --slurpfile docs "$docs_out_tmp" \
     '{
       checked_at: $checked_at,
       repo_head: $repo_head,
       summary: {current: $current, stale: $stale, missing: $missing, deprecated: $deprecated, untracked: $untracked},
-      untracked_docs: $untracked_docs,
-      docs: $docs
+      untracked_docs: $untracked_docs[0],
+      docs: $docs[0]
     }'
 }
 
@@ -731,7 +775,10 @@ cmd_update_index() {
   # Output refreshed entries to stderr (informational, keeps stdout clean)
   local count=${#refreshed[@]}
   echo "Refreshed $count $([ "$count" -eq 1 ] && echo entry || echo entries):" >&2
-  for doc_path in "${refreshed[@]}"; do
+  # Guarded: `refreshed` is empty when every named doc was skipped (indexed but
+  # deleted from disk), and bash 3.2 treats an unguarded "${arr[@]}" on an empty
+  # array as an unbound variable under `set -u`.
+  for doc_path in "${refreshed[@]+"${refreshed[@]}"}"; do
     echo "  $doc_path" >&2
   done
 }
@@ -792,10 +839,13 @@ cmd_add_entry() {
     local code_refs_json
     code_refs_json=$(echo "$code_refs_raw" | tr ',' '\n' | jq -R . | jq -s .)
 
-    # Compute latest commit across code refs
+    # Compute latest commit across code refs (count guard: see cmd_build_index —
+    # an empty code_refs list is unbound under bash 3.2 + `set -u`)
     local code_commit=""
     IFS=',' read -ra refs <<< "$code_refs_raw"
-    code_commit=$(git log -1 --format=%H -- "${refs[@]}" 2>/dev/null || true)
+    if [ ${#refs[@]} -gt 0 ]; then
+      code_commit=$(git log -1 --format=%H -- "${refs[@]}" 2>/dev/null || true)
+    fi
 
     # Build entry JSON
     local entry_json
@@ -1344,13 +1394,43 @@ cmd_fragments_merge() {
   # Section storage: any heading is accepted. Canonical Keep-a-Changelog
   # sections emit in a fixed order; non-canonical sections emit after, in
   # first-seen order.
+  #
+  # bash 3.2 — macOS's /bin/bash, frozen at the last GPLv2 release and the
+  # interpreter this repo supports — has no associative arrays at all, so
+  # `local -A` aborts the script outright ("local: -A: invalid option"). The
+  # section map is therefore two parallel indexed arrays with a linear lookup.
+  # Section counts are single-digit in practice (7 canonical plus the rare
+  # custom heading), so the O(n) scan is noise next to the per-fragment git
+  # calls above.
   local -a canonical_order=(Added Changed Deprecated Removed Fixed Security Dependencies)
-  local -A is_canonical=()
-  local s
-  for s in "${canonical_order[@]}"; do is_canonical["$s"]=1; done
-
-  local -A section_bodies=()
+  local -a section_names=()
+  local -a section_bodies=()
   local -a non_canonical_seen=()
+  local s
+
+  # True when $1 is one of the canonical Keep-a-Changelog headings.
+  _is_canonical_section() {
+    local want="$1" c
+    for c in "${canonical_order[@]}"; do
+      [ "$c" = "$want" ] && return 0
+    done
+    return 1
+  }
+
+  # Locate $1 in section_names, setting _section_idx to its index (or -1).
+  # Sets a variable instead of echoing so the per-line body loop below stays
+  # fork-free.
+  _section_find() {
+    local want="$1"
+    _section_idx=0
+    while [ "$_section_idx" -lt "${#section_names[@]}" ]; do
+      [ "${section_names[$_section_idx]}" = "$want" ] && return 0
+      _section_idx=$((_section_idx + 1))
+    done
+    _section_idx=-1
+    return 1
+  }
+  local _section_idx=-1
 
   for path in "${sorted[@]}"; do
     # Validate hash; include drifted fragments anyway (human edits authoritative)
@@ -1364,11 +1444,14 @@ cmd_fragments_merge() {
     while IFS= read -r line; do
       if [[ "$line" =~ ^###[[:space:]]+(.+)$ ]]; then
         current_section="${BASH_REMATCH[1]}"
-        # Track non-canonical headings in first-seen order.
-        if [[ -z "${is_canonical[$current_section]:-}" ]]; then
+        # Track non-canonical headings in first-seen order. The array is empty
+        # on the first such heading, and bash 3.2 treats an unguarded
+        # "${arr[@]}" on an empty array as an unbound variable under `set -u`
+        # — hence the "${arr[@]+…}" guard (same idiom as cmd_check_freshness).
+        if ! _is_canonical_section "$current_section"; then
           local already_seen=0
           local seen
-          for seen in "${non_canonical_seen[@]}"; do
+          for seen in "${non_canonical_seen[@]+"${non_canonical_seen[@]}"}"; do
             if [[ "$seen" = "$current_section" ]]; then
               already_seen=1
               break
@@ -1381,7 +1464,12 @@ cmd_fragments_merge() {
         continue
       fi
       if [[ -n "$current_section" ]] && [[ -n "$line" ]]; then
-        section_bodies[$current_section]+="${line}"$'\n'
+        if ! _section_find "$current_section"; then
+          section_names+=("$current_section")
+          section_bodies+=("")
+          _section_idx=$(( ${#section_names[@]} - 1 ))
+        fi
+        section_bodies[$_section_idx]+="${line}"$'\n'
       fi
     done < <(tail -n +3 "$path")
 
@@ -1394,7 +1482,10 @@ cmd_fragments_merge() {
   # Dedupe bullets within each section, preserving first-occurrence order.
   _emit_section() {
     local section="$1"
-    local body="${section_bodies[$section]:-}"
+    if ! _section_find "$section"; then
+      return 0
+    fi
+    local body="${section_bodies[$_section_idx]}"
     if [[ -z "$body" ]]; then
       return 0
     fi
@@ -1406,7 +1497,9 @@ cmd_fragments_merge() {
   for s in "${canonical_order[@]}"; do
     _emit_section "$s"
   done
-  for s in "${non_canonical_seen[@]}"; do
+  # Guarded: this array is empty whenever every heading was canonical, which is
+  # the common case — unguarded it aborts under bash 3.2 + `set -u`.
+  for s in "${non_canonical_seen[@]+"${non_canonical_seen[@]}"}"; do
     _emit_section "$s"
   done
 }
