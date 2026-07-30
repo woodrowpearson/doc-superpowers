@@ -1702,6 +1702,370 @@ test_status_accepts_absolute_path_inside_repo() {
   teardown
 }
 
+# --- move-entry: re-key without metadata loss ---------------------------------
+#
+# Two harness properties make the obvious assertions here VACUOUS, and both are
+# worked around deliberately below:
+#
+#   1. iso_now() has 1-second resolution, so two writes in the same second
+#      produce byte-identical last_verified / generated_at strings. An assertion
+#      that a stamp was "preserved" therefore passes against an implementation
+#      that re-stamps it, and an assertion that generated_at CHANGED fails
+#      spuriously without a sleep. (test_update_index_updates_generated_at
+#      already carries a sleep 1 for exactly this reason.)
+#   2. A pure `git mv` leaves file content — and so the content hash —
+#      unchanged, and a fixture with no second commit leaves code_commit
+#      unchanged. So "preserved" passes against re-derivation there too.
+#
+# Preservation is therefore asserted against injected SENTINEL values that no
+# re-deriving implementation could reproduce, and the hash assertion is made
+# after mutating the file so a recomputed hash necessarily differs.
+
+# Inject a code_commit / last_verified pair that cannot arise from re-derivation.
+# Writes through a temp file inside $TEST_DIR (never /tmp) so the two CI matrix
+# legs cannot race on a shared path.
+_mv_inject_sentinels() {
+  local key="$1"
+  jq --arg k "$key" \
+    '.docs[$k].code_commit = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+    | .docs[$k].last_verified = "2020-01-01T00:00:00Z"' \
+    docs/.doc-index.json > docs/.idx.tmp && mv docs/.idx.tmp docs/.doc-index.json
+}
+
+test_move_entry_preserves_all_metadata() {
+  echo "test: move-entry re-keys an entry and preserves code_refs/code_commit/last_verified"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  _mv_inject_sentinels "docs/architecture.md"
+  local old_hash
+  old_hash=$(jq -r '.docs["docs/architecture.md"].content_hash' docs/.doc-index.json)
+  # `implementation` is named in the issue's loss table as a field the
+  # remove-entry + add-entry path drops, so assert it explicitly rather than
+  # leaning on the generic unknown-field test.
+  jq '.docs["docs/architecture.md"].implementation = ["ADR-001 (shipped)"]' \
+    docs/.doc-index.json > docs/.idx.tmp && mv docs/.idx.tmp docs/.doc-index.json
+
+  git mv docs/architecture.md docs/arch-renamed.md
+  # Mutate content so a recomputed hash necessarily DIFFERS from the stored one.
+  echo "renamed and edited" >> docs/arch-renamed.md
+
+  local report
+  report=$("$DOC_TOOLS" move-entry docs/architecture.md docs/arch-renamed.md 2>&1)
+
+  local json
+  json=$(cat docs/.doc-index.json)
+  # `.docs["absent"]` is null, which is ALSO what a destroyed .docs map yields —
+  # so assert has()==false plus the surviving entry count.
+  assert_json_field "$json" '.docs | has("docs/architecture.md")' "false" "old key is gone"
+  assert_json_field "$json" '.docs | length' "1" "entry count unchanged (nothing else dropped)"
+  assert_json_field "$json" '.docs["docs/arch-renamed.md"].code_refs[0]' "src/" "code_refs preserved"
+  assert_json_field "$json" '.docs["docs/arch-renamed.md"].code_commit' \
+    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "code_commit preserved, not re-queried"
+  assert_json_field "$json" '.docs["docs/arch-renamed.md"].last_verified' \
+    "2020-01-01T00:00:00Z" "last_verified preserved, not re-stamped"
+  assert_json_field "$json" '.docs["docs/arch-renamed.md"].doc_type' "architecture" "doc_type preserved"
+  assert_json_field "$json" '.docs["docs/arch-renamed.md"].implementation[0]' "ADR-001 (shipped)" \
+    "implementation array preserved (the field add-entry drops entirely)"
+  assert_json_field "$json" '.docs["docs/arch-renamed.md"].content_hash' \
+    "sha256:$(hash_file docs/arch-renamed.md)" "content_hash recomputed at new path"
+  local new_hash
+  new_hash=$(echo "$json" | jq -r '.docs["docs/arch-renamed.md"].content_hash')
+  if [ "$new_hash" = "$old_hash" ]; then
+    assert_eq "differs" "identical" "recomputed hash actually differs from the stored one"
+  else
+    assert_eq "differs" "differs" "recomputed hash actually differs from the stored one"
+  fi
+  # The success report was otherwise unasserted — renaming it to anything left the
+  # suite green. Includes the `->` arrow, which is deliberately ASCII.
+  assert_contains "$report" "docs/architecture.md -> docs/arch-renamed.md" \
+    "reports the old -> new rename"
+  teardown
+}
+
+test_move_entry_preserves_unknown_fields() {
+  echo "test: move-entry carries a field the implementation has never heard of"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  jq '.docs["docs/architecture.md"].future_field = "keep-me"' docs/.doc-index.json \
+    > docs/.idx.tmp && mv docs/.idx.tmp docs/.doc-index.json
+  git mv docs/architecture.md docs/arch-renamed.md
+  "$DOC_TOOLS" move-entry docs/architecture.md docs/arch-renamed.md 2>/dev/null
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/arch-renamed.md"].future_field' "keep-me" \
+    "unknown field survives the move (entry carried wholesale, not field-by-field)"
+  teardown
+}
+
+test_move_entry_preserves_key_position() {
+  echo "test: move-entry re-keys in position rather than appending"
+  setup
+  echo "# W" > docs/workflows.md
+  echo "# G" > docs/guide.md
+  git add -A && git commit -m "more docs" --quiet
+  printf 'docs/architecture.md:src/:architecture\ndocs/workflows.md:src/:workflows\ndocs/guide.md:src/:guide\n' \
+    | "$DOC_TOOLS" build-index
+  git mv docs/workflows.md docs/flows.md
+  "$DOC_TOOLS" move-entry docs/workflows.md docs/flows.md 2>/dev/null
+  local second
+  second=$(jq -r '.docs | keys_unsorted | .[1]' docs/.doc-index.json)
+  assert_eq "docs/flows.md" "$second" "moved entry stays at index 1, not appended last"
+  teardown
+}
+
+test_move_entry_status_deprecated_survives() {
+  echo "test: move-entry preserves a deprecated status and superseded_by"
+  setup
+  echo "# W" > docs/workflows.md
+  git add -A && git commit -m "add workflows" --quiet
+  printf 'docs/architecture.md:src/:architecture\ndocs/workflows.md:src/:workflows\n' \
+    | "$DOC_TOOLS" build-index
+  "$DOC_TOOLS" deprecate-entry --superseded-by docs/workflows.md docs/architecture.md 2>/dev/null
+  git mv docs/architecture.md docs/arch-old.md
+  "$DOC_TOOLS" move-entry docs/architecture.md docs/arch-old.md 2>/dev/null
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/arch-old.md"].status' "deprecated" \
+    "status stays deprecated (not reset to current the way add-entry would)"
+  assert_json_field "$json" '.docs["docs/arch-old.md"].superseded_by' "docs/workflows.md" \
+    "superseded_by preserved"
+  teardown
+}
+
+test_move_entry_bumps_generated_at() {
+  echo "test: move-entry bumps top-level generated_at"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local before
+  before=$(jq -r '.generated_at' docs/.doc-index.json)
+  # Required, not defensive: iso_now() is 1-second resolution, so without this
+  # the two stamps are identical and the assertion fails spuriously.
+  sleep 1
+  git mv docs/architecture.md docs/arch-renamed.md
+  "$DOC_TOOLS" move-entry docs/architecture.md docs/arch-renamed.md 2>/dev/null
+  local after
+  after=$(jq -r '.generated_at' docs/.doc-index.json)
+  if [ "$before" = "$after" ]; then
+    assert_eq "bumped" "unchanged" "generated_at bumped"
+  else
+    assert_eq "bumped" "bumped" "generated_at bumped"
+  fi
+  teardown
+}
+
+test_move_entry_requires_two_args() {
+  echo "test: move-entry requires exactly two arguments"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local output exit_code
+  set +e
+  output=$("$DOC_TOOLS" move-entry 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "exits 1 with no arguments"
+  assert_contains "$output" "requires exactly two arguments" "stderr explains the arity"
+  set +e
+  output=$("$DOC_TOOLS" move-entry docs/architecture.md 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "exits 1 with one argument"
+  assert_contains "$output" "two arguments" "stderr explains the arity"
+  teardown
+}
+
+test_move_entry_unknown_old_path_errors() {
+  echo "test: move-entry errors when the old path is not in the index"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  cp docs/.doc-index.json docs/.idx.before
+  # Required for the cmp below to mean anything: iso_now() is 1-second
+  # resolution, so a verb that writes the index and THEN errors produces a
+  # byte-identical file within the same second and cmp passes anyway.
+  sleep 1
+  echo "# N" > docs/nope.md
+  local output exit_code
+  set +e
+  output=$("$DOC_TOOLS" move-entry docs/absent.md docs/nope.md 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "exits 1"
+  assert_contains "$output" "not found in index" "stderr explains why"
+  assert_exit_code 0 "index not mutated" cmp -s docs/.idx.before docs/.doc-index.json
+  teardown
+}
+
+test_move_entry_refuses_existing_target() {
+  echo "test: move-entry refuses to overwrite an existing index entry"
+  setup
+  echo "# W" > docs/workflows.md
+  git add -A && git commit -m "add workflows" --quiet
+  printf 'docs/architecture.md:src/:architecture\ndocs/workflows.md:src/:workflows\n' \
+    | "$DOC_TOOLS" build-index
+  cp docs/.doc-index.json docs/.idx.before
+  # Required for the cmp below to mean anything: iso_now() is 1-second
+  # resolution, so a verb that writes the index and THEN errors produces a
+  # byte-identical file within the same second and cmp passes anyway.
+  sleep 1
+  local output exit_code
+  set +e
+  output=$("$DOC_TOOLS" move-entry docs/architecture.md docs/workflows.md 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "exits 1"
+  assert_contains "$output" "already in the index" "stderr explains why"
+  assert_exit_code 0 "index not mutated" cmp -s docs/.idx.before docs/.doc-index.json
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs | length' "2" "both entries still present"
+  teardown
+}
+
+test_move_entry_requires_new_file_on_disk() {
+  echo "test: move-entry refuses a new path with no file on disk"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  cp docs/.doc-index.json docs/.idx.before
+  # Required for the cmp below to mean anything: iso_now() is 1-second
+  # resolution, so a verb that writes the index and THEN errors produces a
+  # byte-identical file within the same second and cmp passes anyway.
+  sleep 1
+  local output exit_code
+  set +e
+  output=$("$DOC_TOOLS" move-entry docs/architecture.md docs/typo-never-created.md 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "exits 1"
+  assert_contains "$output" "does not exist on disk" "stderr explains why"
+  assert_exit_code 0 "index not mutated" cmp -s docs/.idx.before docs/.doc-index.json
+  teardown
+}
+
+test_move_entry_same_path_is_noop() {
+  echo "test: move-entry with identical paths is a no-op and writes nothing"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  cp docs/.doc-index.json docs/.idx.before
+  sleep 1
+  local output exit_code
+  set +e
+  output=$("$DOC_TOOLS" move-entry docs/architecture.md docs/architecture.md 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0 (idempotent re-runs must not fail)"
+  assert_contains "$output" "SKIP" "reports a skip"
+  # Byte-identity is the load-bearing assertion: an implementation that bumps
+  # generated_at on a no-op passes the exit-code check and fails this.
+  assert_exit_code 0 "index file is byte-identical (not even a generated_at bump)" \
+    cmp -s docs/.idx.before docs/.doc-index.json
+  teardown
+}
+
+test_move_entry_warns_when_old_file_remains() {
+  echo "test: move-entry warns but proceeds when the old file is still on disk"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  cp docs/architecture.md docs/arch-copy.md
+  local output exit_code
+  set +e
+  output=$("$DOC_TOOLS" move-entry docs/architecture.md docs/arch-copy.md 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0 — a partially-staged git mv must not be refused"
+  assert_contains "$output" "still exists on disk" "warns about the orphaned file"
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs | has("docs/arch-copy.md")' "true" "the move still happened"
+  teardown
+}
+
+test_move_entry_normalizes_absolute_paths() {
+  echo "test: move-entry accepts absolute in-tree paths and rejects out-of-tree ones"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  git mv docs/architecture.md docs/arch-renamed.md
+  local exit_code
+  set +e
+  "$DOC_TOOLS" move-entry "$PWD/docs/architecture.md" "$PWD/docs/arch-renamed.md" >/dev/null 2>&1
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "absolute in-tree paths accepted"
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs | has("docs/arch-renamed.md")' "true" \
+    "stored under the relative key, not the absolute one"
+
+  local outside
+  outside=$(mktemp -d)
+  echo "# O" > "$outside/outside.md"
+  set +e
+  "$DOC_TOOLS" move-entry docs/arch-renamed.md "$outside/outside.md" >/dev/null 2>&1
+  exit_code=$?
+  set -e
+  rm -rf "$outside"
+  assert_eq "1" "$exit_code" "out-of-tree new path rejected"
+  teardown
+}
+
+test_move_entry_repoints_references() {
+  echo "test: move-entry repoints other entries' replaces/superseded_by"
+  setup
+  echo "# W" > docs/workflows.md
+  git add -A && git commit -m "add workflows" --quiet
+  printf 'docs/architecture.md:src/:architecture\ndocs/workflows.md:src/:workflows\n' \
+    | "$DOC_TOOLS" build-index
+  # superseded_by via the real verb; replaces has no writing verb, so set it directly.
+  "$DOC_TOOLS" deprecate-entry --superseded-by docs/architecture.md docs/workflows.md 2>/dev/null
+  jq '.docs["docs/workflows.md"].replaces = "docs/architecture.md"' docs/.doc-index.json \
+    > docs/.idx.tmp && mv docs/.idx.tmp docs/.doc-index.json
+  git mv docs/architecture.md docs/arch-renamed.md
+  "$DOC_TOOLS" move-entry docs/architecture.md docs/arch-renamed.md 2>/dev/null
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/workflows.md"].superseded_by' "docs/arch-renamed.md" \
+    "sibling superseded_by repointed (no dangling key)"
+  assert_json_field "$json" '.docs["docs/workflows.md"].replaces' "docs/arch-renamed.md" \
+    "sibling replaces repointed"
+  teardown
+}
+
+test_move_entry_usage_lists_move_entry() {
+  echo "test: usage text names move-entry"
+  setup
+  local output
+  set +e
+  output=$("$DOC_TOOLS" --help 2>&1)
+  set -e
+  # NOT a bare `assert_contains "$output" "move-entry"` — `remove-entry` contains
+  # "move-entry" as a substring, so that assertion passes even with the
+  # move-entry line deleted entirely (verified: it stayed green against a
+  # usage() with the verb renamed away). Anchor on the unambiguous strings.
+  assert_contains "$output" "Usage: move-entry <old_doc_path>" \
+    "usage heredoc documents the move-entry signature"
+  assert_contains "$output" "Re-key an entry after a doc moves" \
+    "usage heredoc describes what move-entry does"
+  teardown
+}
+
+test_empty_code_refs_field_yields_empty_array() {
+  # `[""]` is a phantom ref that is not a path. Behaviourally it matches [] —
+  # compute_freshness() filters empty strings — but it is a state no caller
+  # intended to write, and a consuming project had to normalize 1691 of them
+  # away. This asserts neither verb mints new ones.
+  echo "test: an omitted code_refs field yields [] not [\"\"]"
+  setup
+  echo "docs/architecture.md::architecture" | "$DOC_TOOLS" build-index
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/architecture.md"].code_refs | length' "0" \
+    "build-index writes no phantom empty ref"
+  echo "# W" > docs/workflows.md
+  echo "docs/workflows.md::workflows" | "$DOC_TOOLS" add-entry 2>/dev/null
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/workflows.md"].code_refs | length' "0" \
+    "add-entry writes no phantom empty ref"
+  teardown
+}
+
 # --- Runner ---
 
 run_tests() {
@@ -1804,6 +2168,23 @@ run_tests() {
   test_remove_entry_missing_relative_path_still_skips
   test_deprecate_entry_normalizes_paths_and_superseded_by
   test_status_accepts_absolute_path_inside_repo
+
+  # --- move-entry (re-key without metadata loss) ---
+  test_move_entry_preserves_all_metadata
+  test_move_entry_preserves_unknown_fields
+  test_move_entry_preserves_key_position
+  test_move_entry_status_deprecated_survives
+  test_move_entry_bumps_generated_at
+  test_move_entry_requires_two_args
+  test_move_entry_unknown_old_path_errors
+  test_move_entry_refuses_existing_target
+  test_move_entry_requires_new_file_on_disk
+  test_move_entry_same_path_is_noop
+  test_move_entry_warns_when_old_file_remains
+  test_move_entry_normalizes_absolute_paths
+  test_move_entry_repoints_references
+  test_move_entry_usage_lists_move_entry
+  test_empty_code_refs_field_yields_empty_array
 
   print_summary
 }
