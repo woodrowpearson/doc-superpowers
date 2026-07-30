@@ -1,6 +1,6 @@
 ---
 date: 2026-07-29
-status: Open
+status: Resolved
 priority: P1
 type: enhancement
 component: doc-index
@@ -217,22 +217,49 @@ today, so this only stops new ones being minted.
 
 ## Acceptance Criteria
 
-- [ ] `move-entry <old> <new>` re-keys the entry with `code_refs`,
+- [x] `move-entry <old> <new>` re-keys the entry with `code_refs`,
       `code_commit`, `last_verified`, `doc_type`, `status`, `replaces`,
       `superseded_by` and `implementation` byte-identical to before.
-- [ ] `content_hash` matches `sha256:` of the file at the new path.
-- [ ] A field not known to the implementation survives the move (proven with a
+- [x] `content_hash` matches `sha256:` of the file at the new path.
+- [x] A field not known to the implementation survives the move (proven with a
       synthetic extra key).
-- [ ] Each of the five failure modes above behaves exactly as tabulated, with
+- [x] Each of the five failure modes above behaves exactly as tabulated, with
       the documented exit code.
-- [ ] Another entry's `superseded_by` pointing at the old path is repointed.
-- [ ] Absolute in-tree paths are accepted for both arguments; out-of-tree paths
+- [x] Another entry's `superseded_by` pointing at the old path is repointed.
+- [x] Absolute in-tree paths are accepted for both arguments; out-of-tree paths
       are rejected non-zero.
-- [ ] `add-entry`/`build-index` with an empty refs field write `[]`, not `[""]`.
-- [ ] Every doc site listed above names `move-entry`, and no site still says
+- [x] `add-entry`/`build-index` with an empty refs field write `[]`, not `[""]`.
+- [x] Every doc site listed above names `move-entry`, and no site still says
       "13 subcommands".
-- [ ] All five shell suites green on bash 5.x **and** bash 3.2, and
+- [x] All five shell suites green on bash 5.x **and** bash 3.2, and
       `shellcheck -x scripts/doc-tools.sh` no worse than its 4-finding baseline.
+
+## Resolution
+
+Shipped in **v2.14.0**. Every criterion above was re-verified by execution
+against a throwaway git fixture before release, not inferred from the diff:
+metadata preservation and hash recompute, unknown-field survival (synthetic
+`zz_unknown_field` sentinel), sibling `superseded_by` repointing, absolute
+in-tree acceptance, out-of-tree / absent-old-key / occupied-new-key all exiting
+1, and the `[""]` → `[]` change measured against the pre-fix script.
+
+The contrast that motivates the verb was measured directly: after
+`remove-entry` + `add-entry` without re-supplied refs — the realistic path,
+since removal is what discards them — the entry carries `code_refs: []` and
+`code_commit: null` and `check-freshness` reported `current` across six
+successive commits to its former `code_refs` target. The same entry moved with
+`move-entry` reported `stale` / `code_changed` after one.
+
+Open question 1 was answered yes (the five hook scripts and `update-index`'s own
+WARNING now lead with `move-entry` for the rename case). Open question 2 (a
+batch `--from-stdin` form) remains out of scope and unfiled — raise it if a real
+directory reorganisation makes the per-invocation cost bite.
+
+Three pre-existing defects found while planning this change were recorded rather
+than folded in:
+[`merge-driver-reads-version-not-schema-version`](2026-07-29-merge-driver-reads-version-not-schema-version.md),
+[`usage-omits-implementation-verbs`](2026-07-29-usage-omits-implementation-verbs.md),
+[`index-write-is-not-atomic`](2026-07-29-index-write-is-not-atomic.md).
 
 ## Open Questions
 
