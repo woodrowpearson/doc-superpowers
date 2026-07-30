@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-07-29T09:14:14Z",
+  "generated_at": "2026-07-30T00:47:47Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -402,6 +402,31 @@
       "superseded_by": null,
       "last_verified": "2026-07-25T04:00:38Z",
       "implementation": []
+    },
+    "docs/issues/2026-07-29-doc-tools-has-no-move-entry-operation.md": {
+      "content_hash": "sha256:fb1e49dea74051bc91d4fecde392720d37d0de03080ca1392efd52e9fd62ce9d",
+      "code_refs": [
+        "scripts/doc-tools.sh"
+      ],
+      "code_commit": "cd5795dc7abfe464f080f103822a6e63e7e4751a",
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-07-30T00:47:47Z"
+    },
+    "docs/superpowers/plans/2026-07-29-doc-tools-move-entry.md": {
+      "content_hash": "sha256:0cfc20c1bd9dbfe3b096208769d13ca3b6325ebb4d7599a7631267bbe21101bd",
+      "code_refs": [
+        "scripts/doc-tools.sh",
+        "scripts/test-doc-tools.sh"
+      ],
+      "code_commit": "cd5795dc7abfe464f080f103822a6e63e7e4751a",
+      "doc_type": "plan",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-07-30T00:47:47Z"
     }
   }
 }
