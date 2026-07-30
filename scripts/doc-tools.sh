@@ -239,6 +239,12 @@ Subcommands:
   add-entry         Add new entries to existing docs/.doc-index.json
                     Stdin format: same as build-index — doc_path:code_refs_csv:doc_type
   remove-entry      Remove entries from docs/.doc-index.json by path
+  move-entry        Re-key an entry after a doc moves, preserving its metadata
+                    Usage: move-entry <old_doc_path> <new_doc_path>
+                    Preserves code_refs, code_commit, last_verified, doc_type,
+                    status and every other field; only content_hash is
+                    recomputed. Use this — not remove-entry + add-entry — for a
+                    rename, which would drop the freshness metadata.
   deprecate-entry   Mark entries as deprecated in docs/.doc-index.json
                     Usage: deprecate-entry [--superseded-by <path>] <doc_path> ...
   status <path>     Query freshness of a single doc (read-only)
@@ -336,9 +342,16 @@ cmd_build_index() {
       content_hash_val="null"
     fi
 
-    # Build code_refs JSON array from comma-separated list
+    # Build code_refs JSON array from comma-separated list.
+    #
+    # Empty strings are dropped so an omitted refs field yields [], not [""].
+    # A `""` ref is a phantom that is not a path: behaviourally it matches []
+    # (compute_freshness filters empty strings out of code_refs_arr), but it is
+    # a state no caller intended, and a consuming project had to normalize 1691
+    # such entries away. Only affects newly-written entries — existing [""]
+    # entries already behave as [], so no migration is needed.
     local code_refs_json
-    code_refs_json=$(echo "$code_refs_raw" | tr ',' '\n' | jq -R . | jq -s .)
+    code_refs_json=$(echo "$code_refs_raw" | tr ',' '\n' | jq -R . | jq -s 'map(select(. != ""))')
 
     # Compute latest commit across all code refs (single git log call per spec)
     #
@@ -705,7 +718,13 @@ cmd_update_index() {
 
     # Check file exists on disk — don't silently set current with null hash
     if [ ! -f "$doc_path" ]; then
-      echo "WARNING: '$doc_path' no longer exists on disk. Skipping. Use remove-entry or deprecate-entry to clean up." >&2
+      echo "WARNING: '$doc_path' no longer exists on disk. Skipping." >&2
+      # The path is quoted INSIDE the advice string: a doc path containing a
+      # space would otherwise paste as three arguments and trip move-entry's
+      # arity guard — misleading exactly the operator who follows the advice.
+      echo "         If it was RENAMED, use: move-entry \"$doc_path\" <new-path>" >&2
+      echo "         (remove-entry + add-entry would drop its code_refs, leaving an entry that can never go stale.)" >&2
+      echo "         If it was deleted, use remove-entry or deprecate-entry to clean up." >&2
       continue
     fi
 
@@ -835,9 +854,10 @@ cmd_add_entry() {
       content_hash_val="null"
     fi
 
-    # Build code_refs JSON array
+    # Build code_refs JSON array. Empty strings dropped — see cmd_build_index
+    # for why [""] must never be written.
     local code_refs_json
-    code_refs_json=$(echo "$code_refs_raw" | tr ',' '\n' | jq -R . | jq -s .)
+    code_refs_json=$(echo "$code_refs_raw" | tr ',' '\n' | jq -R . | jq -s 'map(select(. != ""))')
 
     # Compute latest commit across code refs (count guard: see cmd_build_index —
     # an empty code_refs list is unbound under bash 3.2 + `set -u`)
@@ -963,6 +983,113 @@ cmd_remove_entry() {
   for doc_path in "${targets[@]+"${targets[@]}"}"; do
     echo "  $doc_path" >&2
   done
+}
+
+cmd_move_entry() {
+  local index_file="docs/.doc-index.json"
+
+  if [ ! -f "$index_file" ]; then
+    echo "ERROR: doc-index.json not found at $index_file. Run build-index first." >&2
+    exit 1
+  fi
+
+  # A move is inherently PAIRED, so this takes exactly one pair. A varargs
+  # `move-entry old1 new1 old2 new2` form would silently mis-pair on an odd
+  # argument count, and the failure mode is an index full of wrong keys.
+  if [ $# -ne 2 ]; then
+    echo "ERROR: move-entry requires exactly two arguments." >&2
+    echo "Usage: move-entry <old_doc_path> <new_doc_path>" >&2
+    exit 1
+  fi
+
+  local old_path new_path
+  old_path=$(normalize_doc_path "$1" "old doc path") || exit 1
+  new_path=$(normalize_doc_path "$2" "new doc path") || exit 1
+
+  # Same-path is a no-op that writes NOTHING — not even a generated_at bump. A
+  # re-run of an operator script must not fail, and must not manufacture a
+  # doc-index diff (see docs/issues/2026-05-04-doc-index-metadata-rewrite-on-every-commit.md).
+  if [ "$old_path" = "$new_path" ]; then
+    echo "SKIP: '$old_path' — old and new path are the same; nothing to move." >&2
+    return 0
+  fi
+
+  local index
+  index=$(cat "$index_file")
+
+  local exists
+  exists=$(echo "$index" | jq --arg p "$old_path" '.docs | has($p)')
+  if [ "$exists" != "true" ]; then
+    echo "ERROR: '$old_path' not found in index. Nothing to move." >&2
+    exit 1
+  fi
+
+  # Refuse to clobber: overwriting the destination would discard ITS metadata,
+  # which is the precise loss move-entry exists to prevent.
+  local target_exists
+  target_exists=$(echo "$index" | jq --arg p "$new_path" '.docs | has($p)')
+  if [ "$target_exists" = "true" ]; then
+    echo "ERROR: '$new_path' is already in the index. Refusing to overwrite it." >&2
+    echo "       Remove it first (remove-entry) if it is genuinely obsolete." >&2
+    exit 1
+  fi
+
+  # Unlike add-entry — which tolerates a not-yet-written doc because it supports
+  # authoring — re-keying onto a path with no file on it is a typo, and it would
+  # mint an entry with a null hash: unfindable, and permanently "current"
+  # because there is nothing to hash-compare. Refuse.
+  if [ ! -f "$new_path" ]; then
+    echo "ERROR: '$new_path' does not exist on disk. Move the file first, then re-key." >&2
+    exit 1
+  fi
+
+  # The old file still being present is legitimate — a partially-staged `git mv`,
+  # or a deliberate copy-then-reindex — so warn rather than refuse. But do not
+  # stay silent: a copy-instead-of-move typo leaves an orphaned unindexed doc on
+  # disk that resurfaces later as an untracked file.
+  if [ -f "$old_path" ]; then
+    echo "WARNING: '$old_path' still exists on disk; it will be left unindexed." >&2
+  fi
+
+  local now content_hash_val
+  now=$(iso_now)
+  content_hash_val="\"sha256:$(hash_file "$new_path")\""
+
+  # The entry object is carried over WHOLESALE (`.value + {content_hash: …}`)
+  # rather than field-by-field, so a field this code has never heard of still
+  # survives a move. Only content_hash is adjusted: code_commit and
+  # last_verified are deliberately PRESERVED, because a move is not a
+  # verification — re-deriving either would make the entry assert a freshness
+  # nobody confirmed. Run update-index afterwards for a genuine re-verify.
+  #
+  # to_entries|map|from_entries re-keys IN POSITION, so the commit-time diff is a
+  # one-line key rename rather than the delete-plus-append that
+  # `.docs[$new] = .docs[$old] | del(.docs[$old])` would produce. (Only until the
+  # next merge: merge-doc-index.sh sorts .docs alphabetically.) from_entries
+  # cannot collide here — the duplicate-key case is refused above.
+  #
+  # The second stage repoints other entries' path-valued fields, which
+  # references/doc-spec.md holds to the same key contract as the keys themselves
+  # — without it a rename leaves a dangling superseded_by/replaces.
+  index=$(echo "$index" | jq \
+    --arg old "$old_path" \
+    --arg new "$new_path" \
+    --argjson content_hash "$content_hash_val" \
+    --arg generated_at "$now" \
+    '.docs |= (to_entries
+               | map(if .key == $old
+                     then {key: $new, value: (.value + {content_hash: $content_hash})}
+                     else . end)
+               | from_entries)
+    | .docs |= map_values(
+        (if .replaces == $old then .replaces = $new else . end)
+        | (if .superseded_by == $old then .superseded_by = $new else . end))
+    | .generated_at = $generated_at')
+
+  echo "$index" > "$index_file"
+
+  echo "Moved 1 entry:" >&2
+  echo "  $old_path -> $new_path" >&2
 }
 
 cmd_deprecate_entry() {
@@ -1848,6 +1975,7 @@ case "${1:-}" in
   update-index)     shift; cmd_update_index "$@" ;;
   add-entry)        shift; cmd_add_entry "$@" ;;
   remove-entry)     shift; cmd_remove_entry "$@" ;;
+  move-entry)       shift; cmd_move_entry "$@" ;;
   deprecate-entry)  shift; cmd_deprecate_entry "$@" ;;
   status)           shift; cmd_status "$@" ;;
   bump-version)     shift; cmd_bump_version "$@" ;;
