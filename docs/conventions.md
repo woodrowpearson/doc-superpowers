@@ -301,6 +301,7 @@ The `docs/.doc-index.json` file is the machine-readable freshness index. It foll
 
 - **`build-index`** creates the index from scratch (filesystem scan)
 - **`update-index`** modifies individual entries (targeted updates)
+- **`move-entry`** re-keys one entry when its doc moves — preserves every field but `content_hash`, and is the lossless alternative to `remove-entry` + `add-entry` for a rename
 - **`check-freshness`** is read-only (reports staleness without modifying)
 - **`status`** is read-only (summarizes current state)
 
