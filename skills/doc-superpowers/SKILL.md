@@ -119,6 +119,7 @@ ls scripts/*validate_docs* scripts/*validate_doc_references* scripts/*fix_doc_re
 | `doc-tools.sh update-index` | Bundled | Refresh existing index entries (skips missing files) |
 | `doc-tools.sh add-entry` | Bundled | Add new entries to existing index (stdin) |
 | `doc-tools.sh remove-entry` | Bundled | Remove entries from index by path |
+| `doc-tools.sh move-entry` | Bundled | Re-key an entry after a doc moves — preserves `code_refs`/`code_commit`/`last_verified`; use instead of `remove-entry` + `add-entry` for a rename |
 | `doc-tools.sh deprecate-entry` | Bundled | Mark entries as deprecated (`--superseded-by`) |
 | `doc-tools.sh status` | Bundled | Single-doc freshness query (read-only) |
 | `doc-tools.sh bump-version` | Bundled | Write a version string across the 6 manifest files |

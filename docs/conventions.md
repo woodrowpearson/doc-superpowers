@@ -79,7 +79,7 @@ chore: <maintenance task>
 
 - Keep PRs focused on a single change
 - Test skill changes by running `/doc-superpowers init` on a sample project before merging
-- Run the five shell test suites — `scripts/test-doc-tools.sh` (148 assertions), `scripts/test-hooks.sh` (308), `scripts/test-merge-driver.sh` (19), `scripts/test-doc-pr-release.sh` (32), `scripts/test-spec-status-model.sh` (64), 571 total — all must pass before merge. They share the `scripts/test-helpers.sh` harness (setup, teardown, assertions)
+- Run the five shell test suites — `scripts/test-doc-tools.sh` (253 assertions), `scripts/test-hooks.sh` (308), `scripts/test-merge-driver.sh` (19), `scripts/test-doc-pr-release.sh` (32), `scripts/test-spec-status-model.sh` (68), 680 total — all must pass before merge. They share the `scripts/test-helpers.sh` harness (setup, teardown, assertions)
 - Include before/after examples for behavior changes
 
 ## Documentation Conventions
@@ -301,6 +301,7 @@ The `docs/.doc-index.json` file is the machine-readable freshness index. It foll
 
 - **`build-index`** creates the index from scratch (filesystem scan)
 - **`update-index`** modifies individual entries (targeted updates)
+- **`move-entry`** re-keys one entry when its doc moves — preserves every field but `content_hash`, and is the lossless alternative to `remove-entry` + `add-entry` for a rename
 - **`check-freshness`** is read-only (reports staleness without modifying)
 - **`status`** is read-only (summarizes current state)
 

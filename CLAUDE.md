@@ -39,7 +39,7 @@ doc-superpowers/
 ├── gemini-extension.json # Gemini CLI extension manifest
 ├── package.json          # npm/OpenCode package metadata
 ├── scripts/
-│   ├── doc-tools.sh      # Bundled freshness tooling (build-index, check-freshness, update-index, add-entry, remove-entry, deprecate-entry, status, bump-version, check-version, implementation-status, set-implementation, fragments, tools)
+│   ├── doc-tools.sh      # Bundled freshness tooling (build-index, check-freshness, update-index, add-entry, remove-entry, move-entry, deprecate-entry, status, bump-version, check-version, implementation-status, set-implementation, fragments, tools)
 │   ├── test-doc-tools.sh # Test suite for doc-tools.sh
 │   ├── test-doc-pr-release.sh # Test suite for doc-pr-release helpers
 │   ├── test-helpers.sh   # Shared test utilities
@@ -107,7 +107,7 @@ doc-superpowers/
 | File | Purpose | When to Modify |
 |------|---------|---------------|
 | `skills/doc-superpowers/SKILL.md` | Skill logic — discovery, action routing, agent prompts, verification | Adding actions, changing workflow |
-| `scripts/doc-tools.sh` | Bundled freshness tooling — 13 subcommands for index management, version sync, ADR/SPEC implementation status, release-notes fragments, and CLI vendoring | Changing staleness detection, index schema, version sync, implementation status, fragment merge, or vendoring |
+| `scripts/doc-tools.sh` | Bundled freshness tooling — 14 subcommands for index management, version sync, ADR/SPEC implementation status, release-notes fragments, and CLI vendoring | Changing staleness detection, index schema, version sync, implementation status, fragment merge, or vendoring |
 | `scripts/test-doc-tools.sh` | Test suite for doc-tools.sh | Adding tests for new doc-tools features |
 | `scripts/test-hooks.sh` | Test suite for hooks installer and hook scripts | Adding tests for new hooks or installer features |
 | `scripts/test-spec-status-model.sh` | Test suite pinning the canonical Spec Status Model wording and its call sites | Changing spec status transition rules, roles, or vocabulary |
@@ -157,4 +157,4 @@ Each `--specs` path may carry an optional role suffix — `<path>:target` or `<p
 - **Skill structure**: Follows obra/superpowers SKILL.md conventions (YAML frontmatter with `name` + `description`)
 - **Templates**: All doc templates live in `references/doc-spec.md`, not inline in SKILL.md
 - **Diagrams**: Mermaid source in docs, PNGs committed for GitHub rendering
-- **Testing**: Five shell suites gate changes — `test-doc-tools.sh` (209 assertions), `test-hooks.sh` (308), `test-spec-status-model.sh` (68), `test-doc-pr-release.sh` (32), `test-merge-driver.sh` (19), 636 total, all sharing the `test-helpers.sh` harness. All five run in CI via `.github/workflows/tests.yml` on push to `main` and on every PR, matrixed over `ubuntu-latest` (bash 5.x) and `macos-latest` (`/bin/bash` 3.2.57). The interpreter is passed explicitly at both levels: CI runs each suite under `$BASH_BIN`, and `test-helpers.sh`'s `bash_bin_shim()` wraps every script under test so it `exec`s under the same interpreter instead of re-resolving bash from its own `#!/usr/bin/env bash`. Without the shim the 3.2 leg silently tests whatever bash the runner image puts first on `PATH` — bash 3.2 is a real support target (it is what macOS ships, so it is what a consuming project's git hooks run under), and `test-doc-tools.sh` carries a static guard that fails on any bash-4-only construct in the shipped scripts. Test skill changes by running `/doc-superpowers init` on a sample project
+- **Testing**: Five shell suites gate changes — `test-doc-tools.sh` (253 assertions), `test-hooks.sh` (308), `test-spec-status-model.sh` (68), `test-doc-pr-release.sh` (32), `test-merge-driver.sh` (19), 680 total, all sharing the `test-helpers.sh` harness. All five run in CI via `.github/workflows/tests.yml` on push to `main` and on every PR, matrixed over `ubuntu-latest` (bash 5.x) and `macos-latest` (`/bin/bash` 3.2.57). The interpreter is passed explicitly at both levels: CI runs each suite under `$BASH_BIN`, and `test-helpers.sh`'s `bash_bin_shim()` wraps every script under test so it `exec`s under the same interpreter instead of re-resolving bash from its own `#!/usr/bin/env bash`. Without the shim the 3.2 leg silently tests whatever bash the runner image puts first on `PATH` — bash 3.2 is a real support target (it is what macOS ships, so it is what a consuming project's git hooks run under), and `test-doc-tools.sh` carries a static guard that fails on any bash-4-only construct in the shipped scripts. Test skill changes by running `/doc-superpowers init` on a sample project

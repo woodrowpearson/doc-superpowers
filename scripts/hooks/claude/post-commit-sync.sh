@@ -61,7 +61,7 @@ if [[ "${DOC_SUPERPOWERS_QUIET:-}" != "1" ]]; then
       select(.value.status == "missing") |
       "  \(.key)"
     ' 2>/dev/null
-    echo "  Run 'doc-tools.sh remove-entry' or 'deprecate-entry' to clean up."
+    echo "  Run 'doc-tools.sh move-entry <old> <new>' if it was renamed, or 'remove-entry'/'deprecate-entry' to clean up."
   fi
 
   echo "  Run '/doc-superpowers update' to refresh stale documentation."

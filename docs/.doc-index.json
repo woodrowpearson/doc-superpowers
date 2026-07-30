@@ -1,50 +1,50 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-07-29T09:14:14Z",
+  "generated_at": "2026-07-30T01:57:17Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
-      "content_hash": "sha256:731b900ad92ce75cbd9c60ca4c80c6cfd475a2f718af9b00e02d230ea58c7c84",
+      "content_hash": "sha256:1a61399f803ef90dfd9752bdba47ce92c6eb5f3dae90203ec932c09553996a36",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/",
         "references/"
       ],
-      "code_commit": "2379fe98f04ee406b2b790098dff39894f5a8774",
+      "code_commit": "702edc513367f3941834982cbdd1b2d8b112a457",
       "doc_type": "architecture",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-25T04:19:12Z",
+      "last_verified": "2026-07-30T01:57:17Z",
       "implementation": []
     },
     "docs/codebase-guide.md": {
-      "content_hash": "sha256:ea12bb78a477fc8c47ce43e2e05e8477953d64c707ff0679598f9c0cf389428e",
+      "content_hash": "sha256:ffbebf26b61e50b53f1567315e74c55f0118421dce6f275b0b431537e727818f",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "5de9fe28d7cad9f214555a4e884cf048a0b747bb",
+      "code_commit": "702edc513367f3941834982cbdd1b2d8b112a457",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-25T03:57:21Z",
+      "last_verified": "2026-07-30T01:57:17Z",
       "implementation": []
     },
     "docs/conventions.md": {
-      "content_hash": "sha256:9a88070991048181941a539b2a04651f2a33a0ec5046b0cdee69c08d703ea7ac",
+      "content_hash": "sha256:ea2ca199b8de0fe593603647302730b69f45dfe968ad1ca0bee3701d07923adc",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "references/doc-spec.md"
       ],
-      "code_commit": "76368a5cb434c5fd412c4e7c0d82ac259490461e",
+      "code_commit": "702edc513367f3941834982cbdd1b2d8b112a457",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-29T09:14:14Z",
+      "last_verified": "2026-07-30T01:57:17Z",
       "implementation": []
     },
     "docs/guides/getting-started.md": {
@@ -402,6 +402,70 @@
       "superseded_by": null,
       "last_verified": "2026-07-25T04:00:38Z",
       "implementation": []
+    },
+    "docs/issues/2026-07-29-doc-tools-has-no-move-entry-operation.md": {
+      "content_hash": "sha256:f7578c87fad221f6ef73a6c11efb37d4057cfd2aef7649e27d2b8f1d1a26f9b1",
+      "code_refs": [
+        "scripts/doc-tools.sh"
+      ],
+      "code_commit": "76a4e6f4addcf50bfb922179a4914306c614148a",
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-07-30T01:57:17Z",
+      "implementation": []
+    },
+    "docs/superpowers/plans/2026-07-29-doc-tools-move-entry.md": {
+      "content_hash": "sha256:0cfc20c1bd9dbfe3b096208769d13ca3b6325ebb4d7599a7631267bbe21101bd",
+      "code_refs": [
+        "scripts/doc-tools.sh",
+        "scripts/test-doc-tools.sh"
+      ],
+      "code_commit": "76a4e6f4addcf50bfb922179a4914306c614148a",
+      "doc_type": "plan",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-07-30T01:57:17Z",
+      "implementation": []
+    },
+    "docs/issues/2026-07-29-merge-driver-reads-version-not-schema-version.md": {
+      "content_hash": "sha256:3faed919ffb6c46847767e09843dc52d1cad0bb32b6185e3b8d2ba80ebb9f7f8",
+      "code_refs": [
+        "scripts/merge-doc-index.sh",
+        "scripts/doc-tools.sh"
+      ],
+      "code_commit": "76a4e6f4addcf50bfb922179a4914306c614148a",
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-07-30T01:57:08Z"
+    },
+    "docs/issues/2026-07-29-usage-omits-implementation-verbs.md": {
+      "content_hash": "sha256:670e906f8818b46019c7881abdf213e56138ffd1b46b406403fe0d2ad8164d3e",
+      "code_refs": [
+        "scripts/doc-tools.sh"
+      ],
+      "code_commit": "76a4e6f4addcf50bfb922179a4914306c614148a",
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-07-30T01:57:08Z"
+    },
+    "docs/issues/2026-07-29-index-write-is-not-atomic.md": {
+      "content_hash": "sha256:c0fcb617844903fbe36169fc72fc5f2d7b98ff21370a439918b7f4b749d189be",
+      "code_refs": [
+        "scripts/doc-tools.sh"
+      ],
+      "code_commit": "76a4e6f4addcf50bfb922179a4914306c614148a",
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-07-30T01:57:08Z"
     }
   }
 }
