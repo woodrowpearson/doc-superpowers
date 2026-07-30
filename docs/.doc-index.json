@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-07-30T01:57:17Z",
+  "generated_at": "2026-07-30T10:19:03Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -466,6 +466,19 @@
       "replaces": null,
       "superseded_by": null,
       "last_verified": "2026-07-30T01:57:08Z"
+    },
+    "docs/issues/2026-07-30-no-batch-or-archive-aware-re-key-primitive.md": {
+      "content_hash": "sha256:d4394a57a24f48a49a42e9f491e147a48e169dded3fde1e4724a9cc93d6bb49a",
+      "code_refs": [
+        "scripts/doc-tools.sh"
+      ],
+      "code_commit": "76a4e6f4addcf50bfb922179a4914306c614148a",
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-07-30T10:19:03Z",
+      "implementation": []
     }
   }
 }
