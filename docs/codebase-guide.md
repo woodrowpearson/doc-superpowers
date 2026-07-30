@@ -36,7 +36,7 @@ doc-superpowers/
 ├── gemini-extension.json # Gemini CLI extension manifest
 ├── package.json          # npm/OpenCode package metadata
 ├── scripts/
-│   ├── doc-tools.sh      # Bundled freshness tooling (build-index, check-freshness, update-index, add-entry, remove-entry, deprecate-entry, status, bump-version, check-version, implementation-status, set-implementation, fragments {list, validate, merge}, tools {install, uninstall, status})
+│   ├── doc-tools.sh      # Bundled freshness tooling (build-index, check-freshness, update-index, add-entry, remove-entry, move-entry, deprecate-entry, status, bump-version, check-version, implementation-status, set-implementation, fragments {list, validate, merge}, tools {install, uninstall, status})
 │   ├── test-doc-tools.sh # Test suite for doc-tools.sh
 │   ├── test-doc-pr-release.sh # Test suite for the per-PR release-notes fragment producer workflow + helpers
 │   ├── test-spec-status-model.sh # Test suite for the canonical Spec Status Model + call sites

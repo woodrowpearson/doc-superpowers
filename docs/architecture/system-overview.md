@@ -115,7 +115,7 @@ C4Container
 | Output Templates | `references/output-templates.md` | Audit report format (including README.md Status and RELEASE-NOTES.md Status sections), plan template, spec compliance report format |
 | Integration Patterns | `references/integration-patterns.md` | Code review, commit review, and wrapper skill integration patterns |
 | Multi-Framework Support | `references/tool-mappings.md` | Cross-framework tool name translations, hooks compatibility matrix, and framework-specific notes for Cursor, Codex, OpenCode, and Gemini CLI |
-| Test Suites | `scripts/test-doc-tools.sh`, `scripts/test-hooks.sh`, `scripts/test-merge-driver.sh`, `scripts/test-doc-pr-release.sh`, `scripts/test-spec-status-model.sh`, `scripts/test-helpers.sh` | Shell test suites sharing one harness (`test-helpers.sh`) for bundled freshness tooling (148 assertions), hooks installer (308), merge driver (19), per-PR release-notes helpers (32), and Spec Status Model prose consistency (64) |
+| Test Suites | `scripts/test-doc-tools.sh`, `scripts/test-hooks.sh`, `scripts/test-merge-driver.sh`, `scripts/test-doc-pr-release.sh`, `scripts/test-spec-status-model.sh`, `scripts/test-helpers.sh` | Shell test suites sharing one harness (`test-helpers.sh`) for bundled freshness tooling (253 assertions), hooks installer (308), merge driver (19), per-PR release-notes helpers (32), and Spec Status Model prose consistency (68) |
 | Evaluation Suite | `evals/evals.json` | Skill behavior evaluation tests for measuring accuracy and triggering |
 
 ## Key Decisions
