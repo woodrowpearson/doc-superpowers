@@ -47,7 +47,7 @@ if [[ "${DOC_SUPERPOWERS_QUIET:-}" != "1" ]]; then
     echo ""
     echo "doc-superpowers: $missing_count indexed doc(s) missing from disk"
     echo "  $(echo "$missing_docs" | tr '\n' ', ' | sed 's/, $//')"
-    echo "  Run 'doc-tools.sh remove-entry' or 'deprecate-entry' to clean up."
+    echo "  Run 'doc-tools.sh move-entry <old> <new>' if it was renamed, or 'remove-entry'/'deprecate-entry' to clean up."
   fi
 
   echo ""
