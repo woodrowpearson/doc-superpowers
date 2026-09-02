@@ -154,7 +154,7 @@ Scopes:  all | <auto-detected from docs/ structure>
 /doc-superpowers spec-inject --phase=execute --specs=docs/specs/SPEC-UI-010-collection-view.md:target,docs/specs/SPEC-API-006-backend.md:constraint
 ```
 
-The `:target` / `:constraint` suffix is optional — unsuffixed paths remain valid and are role-inferred at execution time.
+The `:target` / `:constraint` / `:amends` suffix is optional — unsuffixed paths remain valid and are role-inferred at execution time (inference never yields `:amends`; an amendment is declared, never inferred). Pass `--plan=<path>` to `spec-verify` so an `:amends` spec's landed-check can verify the amendment cites the plan; without it the check degrades to block-present and warns.
 
 For wrapper skill integration, see `references/spec-lifecycle-protocol.md`.
 

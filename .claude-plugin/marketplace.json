@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Documentation orchestrator skill for Claude Code",
-    "version": "2.14.0"
+    "version": "2.15.0"
   },
   "plugins": [
     {
