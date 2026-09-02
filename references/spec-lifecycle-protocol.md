@@ -59,14 +59,16 @@ PR review ──→ spec-verify (review) ──→ freshness + coverage findings
 **Input (plan phase):**
 - `--phase=plan`
 - `--plan=<path>` — Path to the implementation plan
-- `--specs=<paths>` — Comma-separated paths to governing specs. Each path may carry an optional role suffix — `<path>:target` or `<path>:constraint` — declaring whether the work is expected to advance that spec. Unsuffixed paths are resolved by intersecting changed files with the spec's `code_refs` at execution time.
+- `--specs=<paths>` — Comma-separated paths to governing specs. Each path may carry an optional role suffix — `<path>:target` or `<path>:constraint`, or `<path>:amends` — declaring whether the work is expected to advance that spec, leave it untouched, or correct what it says. Unsuffixed paths are resolved by intersecting changed files with the spec's `code_refs` at execution time; that inference never yields the amendment role, which is explicit-only.
+- `--plan=<path>` — Path to the implementation plan. Also consumed by the amendment tasks it injects, which cite it so the landed-check can attribute a block to this plan.
 
 **Output (plan phase):**
-- Modified plan document with spec maintenance tasks appended to each chunk. Injected tasks are status-aware and scope-aware: they read a spec's current `Status` before writing and resolve target vs. constraint at execution time. Constraint specs are never written.
+- Modified plan document with spec maintenance tasks appended to each chunk. Injected tasks are status-aware and scope-aware: they read a spec's current `Status` before writing and resolve target vs. constraint at execution time. Constraint specs are never written. A spec passed `:amends` additionally gets a `Task N+1a` that verifies its dated `AMENDED` block landed and cites this plan; that task writes no `Status`, no Implementation Notes and no `code_refs` — amendment specs are never advanced.
 
 **Input (execute phase):**
 - `--phase=execute`
-- `--specs=<paths>` — Paths to governing specs, each with an optional `:target` / `:constraint` role suffix
+- `--specs=<paths>` — Paths to governing specs, each with an optional `:target` / `:constraint` / `:amends` role suffix
+- `--plan=<path>` — Optional. Enables the amendment landed-check to attribute a block to this plan; without it the check degrades to block-present and reports the citation as unverified.
 
 **Output (execute phase):**
 - Updated spec files (status, Implementation Notes, code_refs) if aligned

@@ -582,9 +582,10 @@ emitted after, in first-seen order), ascending integer-N sort. Both the
 **Quick routing:**
 - Post-brainstorm with design doc → `spec-generate --design-doc=<path>`
 - Writing implementation plan → `spec-inject --phase=plan --plan=<path> --specs=<paths>`
-- After each plan chunk → `spec-inject --phase=execute --specs=<paths>`
-- Before merging → `spec-verify --mode=post-execute --specs=<paths> --design-doc=<path>`
-- During code review → `spec-verify --mode=review --changed-files=<paths>`
+- After each plan chunk → `spec-inject --phase=execute --specs=<paths> [--plan=<path>]`
+- Before merging → `spec-verify --mode=post-execute --specs=<paths> --design-doc=<path> [--plan=<path>]`
+- During code review → `spec-verify --mode=review --changed-files=<paths> [--specs=<paths>] [--plan=<path>]`
+- Correcting what a spec **says** without building its surface → mark it `<path>:amends` in `--specs`. `spec-inject --phase=plan` appends a `Task N+1a` that verifies the dated `AMENDED` block landed and cites the plan; `spec-verify` re-runs that landed-check in both modes and FAILs when the block is absent or unattributed. The role never writes `Status`, Implementation Notes or `code_refs` — see **Spec Status Model → Spec roles**. Pass `--plan` for a full check; without it the citation half is skipped and reported as unverified.
 
 ---
 
