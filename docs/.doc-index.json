@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-02T05:52:32Z",
+  "generated_at": "2026-09-02T06:21:23Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -48,17 +48,17 @@
       "implementation": []
     },
     "docs/guides/getting-started.md": {
-      "content_hash": "sha256:bf7a5c5fef8d64d36a507c9568deae909b07c8ee84be059aaa05ec145363db56",
+      "content_hash": "sha256:5c2630f59f944a9b04abcb2974f343d4b242028bf51621bf588b3e9a3cf00c2f",
       "code_refs": [
         "README.md",
         "skills/doc-superpowers/SKILL.md"
       ],
-      "code_commit": "d931c803980200b440bba870ee5a01d146b8aaea",
+      "code_commit": "595b2c93e824e0ec9abf71bfb8a2a31790b0cf3e",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-25T03:57:21Z",
+      "last_verified": "2026-09-02T06:21:23Z",
       "implementation": []
     },
     "docs/workflows/doc-superpowers.md": {
