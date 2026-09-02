@@ -195,14 +195,22 @@ assert_contains "$ACTIONS" "status-neutral by construction" \
 assert_contains "$ACTIONS" \
   'A co-move of a value or line inside a spec the plan `implements` or `constrains` is not an amendment' \
   "boundary sentence present byte-verbatim"
-assert_contains "$ACTIONS" "Task N+1a: Land the spec amendment(s) for this chunk" \
-  "per-chunk amendment task template exists"
+assert_contains "$ACTIONS" "Task N+1a: Land the spec amendment for {spec-path}" \
+  "per-spec amendment task template exists, titled by spec path"
 assert_contains "$ACTIONS" "grep -n -A4 'AMENDED 20'" \
   "landed-check is the two-stage grep, not a bare block search"
 assert_contains "$ACTIONS" "passes vacuously on any spec some earlier work amended" \
   "template says why the citation filter is load-bearing"
-assert_contains "$ACTIONS" "amendment citation unverified (no \`--plan\`)" \
-  "no-plan degradation emits a WARN rather than a silent pass"
+assert_contains "$ACTIONS" "WARN: amendment citation unverified (no --plan)" \
+  "no-plan degradation emits the verbatim WARN rather than a silent pass"
+assert_not_contains "$ACTIONS" 'amendment citation unverified (no \`--plan\`)' \
+  "the backticked WARN variant is gone — one literal, both sides"
+assert_contains "$ACTIONS" "Status at plan time: {status}" \
+  "injector records the plan-time status in the emitted task"
+assert_contains "$ACTIONS" "single owner of that call" \
+  "update-index on an amendment spec has exactly one owner"
+assert_contains "$ACTIONS" "per \`:amends\` spec per chunk" \
+  "one amendment task per spec per chunk"
 assert_contains "$ACTIONS" "P1 Amendment not landed" \
   "review mode has an amendment finding"
 assert_contains "$PROTOCOL" ':amends' \

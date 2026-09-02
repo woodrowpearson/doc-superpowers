@@ -55,7 +55,7 @@ A spec resolved as **amendment** is **status-neutral by construction**: an amend
 
 `update-index <spec-path>` runs after the edit, because the spec's bytes changed even though its `Status` did not. Whole-doc supersession is a different operation and is unaffected: `Supersedes:` / `Superseded by:` replaces a document, an AMENDED block corrects a passage. Reach for one where the other belongs and the spec's history stops being readable.
 
-**Boundary.** *A co-move of a value or line inside a spec the plan `implements` or `constrains` is not an amendment; `amends` is for a spec whose stated behaviour the plan changes and whose surface the plan does not build.* The sentence is phrased in the role names a plan's own frontmatter uses — `implements` is a **target** here, `constrains` is a **constraint** — so a wrapper's contract and this one carry one byte-identical boundary test.
+**Boundary.** *A co-move of a value or line inside a spec the plan `implements` or `constrains` is not an amendment; `amends` is for a spec whose stated behaviour the plan changes and whose surface the plan does not build.* The sentence is phrased in the role names a wrapper's plan frontmatter may use — where such a wrapper maps `implements` onto **target** and `constrains` onto **constraint** — so that its contract and this one can carry one byte-identical boundary test.
 
 **Timing.** Role inference needs the changed-file set, which does not exist during `spec-inject --phase=plan` — nothing is implemented yet at plan-authoring time. So at injection time the explicit marker is the only role signal available, and injected tasks are written as instructions the executing agent evaluates against `git diff` **at execution time**. `spec-inject --phase=plan` never bakes a role decision into the plan text. At per-chunk execution the changed-file set reflects only the chunks run so far, so a spec whose surface lands in a later chunk infers as **constraint** in earlier ones and is skipped; this self-corrects at finalize, when the full range is visible, but it does make the inferred-constraints report noisier mid-plan. An **amendment** has no such timing problem: it is explicit-only, so its marker is available at injection time and is never re-resolved against a diff later.
 
@@ -178,7 +178,7 @@ Two modes: **plan phase** (inject spec tasks into implementation plan) and **exe
    - [ ] **Step 1: Update spec status (guarded)**
    Read SPEC-{CAT}-NNN's current `Status` first, then apply the **Spec Status Model**:
      - Resolved as **constraint** for this work (resolve role per **Spec Status Model → Spec roles**) → leave untouched, and skip Steps 2–4 as well.
-     - Resolved as **amendment** (marked `:amends`) → leave `Status`, Implementation Notes and `code_refs` untouched; skip Steps 2–3. Step 4's `update-index` still runs, because the spec's bytes changed. The amendment itself is verified by `Task N+1a`.
+     - Resolved as **amendment** (marked `:amends`) → leave `Status`, Implementation Notes and `code_refs` untouched, and skip Steps 2–4 as well, exactly like a constraint. `Task N+1a` owns an amendment spec end to end, including the single `update-index` its changed bytes need; running Step 4 here too would refresh the same edit twice.
      - `Draft` → set `In Review`.
      - `In Review` / `Approved` / `Implemented` → leave unchanged (R2 — never regress).
      - Any other status (`Active`, `Deprecated`, `Superseded`, …) → leave unchanged (R3).
@@ -189,22 +189,28 @@ Two modes: **plan phase** (inject spec tasks into implementation plan) and **exe
    - [ ] **Step 4: Update index**
    Run `doc-tools.sh update-index <spec-path>` to refresh content hash.
    ```
-3. **Amendment task injection** — For each `:amends` spec relevant to a chunk, append ONE further task after that chunk's spec update task. Substitute `{plan-path}` from this invocation's `--plan=` argument, so the check is about *this* plan:
+3. **Amendment task injection** — Append ONE further task **per `:amends` spec per chunk**, after that chunk's spec update task. Two amendment specs in one chunk therefore yield two tasks, kept distinguishable by the spec path in the title. The injector resolves every placeholder below at inject time and writes the resolved values into the emitted task, so the executing agent is never left to look one up:
+   - `{spec-path}` — the spec this task covers.
+   - `{plan-path}` — this invocation's `--plan=` argument, so the check is about *this* plan.
+   - `{status}` — the spec's current `**Status:**`, read now. This is the plan-time value the finalize task later compares against, and the emitted task is the only place it is recorded; nothing else captures it.
+   - `{N}` — the number of the plan task whose body quotes the `⚠️ **AMENDED` block for `{spec-path}`. Find it by scanning the plan for that block at inject time.
    ````markdown
-   ### Task N+1a: Land the spec amendment(s) for this chunk
+   ### Task N+1a: Land the spec amendment for {spec-path}
 
    **Files:**
-   - Modify: {paths to the `:amends` specs relevant to this chunk}
+   - Modify: {spec-path}
+
+   Status at plan time: {status}
 
    - [ ] **Step 1: Read what was promised**
-   Open the plan task that performs the amendment and the amended section of the spec. The amendment text that task quotes is the acceptance criterion — nothing else is.
+   Open the plan task whose body quotes the `⚠️ **AMENDED` block for {spec-path}: Task {N}. Read it alongside the amended section of {spec-path}. The amendment text that task quotes is the acceptance criterion — nothing else is.
    - [ ] **Step 2: Verify the block is present and cites this plan**
    ```bash
    grep -n -A4 'AMENDED 20' {spec-path} | grep -F '{plan-path}'
    ```
    PASS iff a dated `AMENDED` block exists in the named section **and** the block cites this plan. Both halves are load-bearing: a bare `grep 'AMENDED 20'` passes vacuously on any spec some earlier work amended, so the citation filter is what makes the check about this plan rather than about the file's history. No match → **FAIL**; the amendment did not land.
    - [ ] **Step 3: Update index**
-   Run `doc-tools.sh update-index <spec-path>` — the spec's bytes changed even though its `Status` did not.
+   Run `doc-tools.sh update-index {spec-path}` — the spec's bytes changed even though its `Status` did not. This task is the single owner of that call: `Task N+1` skips Steps 2–4 for an amendment spec precisely so the index is refreshed exactly once.
    - [ ] **Step 4: Write nothing else**
    No `Status` write, no Implementation Notes entry, no `code_refs` refinement (**Spec Status Model → Spec roles**). The amendment is the record.
    ````
@@ -218,7 +224,7 @@ Two modes: **plan phase** (inject spec tasks into implementation plan) and **exe
    - [ ] **Step 1: Advance implemented specs (scope-gated)**
    For each governing spec, resolve its role, then apply the **Spec Status Model**. Resolve role from the caller's explicit `:target` / `:constraint` marker if present; otherwise intersect this plan's changed files (`git diff` against the branch base) with the spec's `code_refs`.
      - **constraint** (marked `:constraint`, or no intersection with `code_refs`) → leave `Status` unchanged and add no Implementation Notes. It was passed as a read-only reference, not an implementation target.
-     - **amendment** (marked `:amends`) → leave `Status` unchanged and add no Implementation Notes. Assert two things instead: the dated `AMENDED` block is present and cites this plan (`grep -n -A4 'AMENDED 20' <spec-path> | grep -F '<plan-path>'`), and `Status` still equals the value read at plan time. No match, or a moved status, is a **FAIL** — the plan promised a correction and the spec does not carry it.
+     - **amendment** (marked `:amends`) → leave `Status` unchanged and add no Implementation Notes. Assert two things instead: the dated `AMENDED` block is present and cites this plan (`grep -n -A4 'AMENDED 20' <spec-path> | grep -F '<plan-path>'`), and `Status` still equals the `Status at plan time:` value recorded in that spec's `Task N+1a` (the plan-phase injector captured it; do not re-derive it here — a value read now would agree with itself no matter what moved). No match, or a status that has left that value, is a **FAIL** — the plan promised a correction and the spec does not carry it.
      - **target** at an exempt status (`Active`, `Deprecated`, `Superseded`, …) → leave unchanged (R3). `Active` reference specs sit outside the ladder and never transition.
      - **target**, fully covered by this plan → set `Implemented`.
      - **target**, partially covered (the spec has surfaces this plan deferred) → do **not** advance to `Implemented`. Never write a status earlier than the current value (R2): if the spec is at `Draft` or `In Review`, hold it at `In Review`; if it is already at `Approved` or `Implemented`, leave it exactly as it is. Record the remaining scope in Implementation Notes either way.
@@ -242,7 +248,7 @@ Runs after each plan chunk completes (not after every individual task).
 2. **Determine alignment vs. drift** — If code changed but spec wasn't updated (flagged stale), the agent reads three inputs: (a) the spec's relevant section content, (b) the code changes in files matching the spec's `code_refs`, (c) the plan task description that was just executed. The key question: "Does the implementation achieve what the spec describes, even if through a different mechanism?"
    - **Aligned** (implementation achieves spec intent): Update the spec's `Status` per the **Spec Status Model** — read the current status first, never regress, and leave exempt statuses and constraint specs untouched. Update the spec's Implementation Notes to reflect actual approach taken. Refine `code_refs` if actual file paths differ from initial estimates. Call `doc-tools.sh update-index` to refresh hashes. No human intervention.
    - **Drifted** (implementation contradicts spec intent, omits requirements, or introduces unspecified behavior): Flag for human review with a deviation note: what the spec says, what the code does, and why they diverge. Do not auto-update spec content.
-   - **Amendment** (`:amends`): this branch is not about code at all, so neither alignment nor drift applies — the spec's *text* was supposed to change, and a staleness flag on it is the expected outcome rather than a finding. Write no `Status`, no Implementation Notes, no `code_refs`. Verify instead that the dated `AMENDED` block landed and cites the plan (`grep -n -A4 'AMENDED 20' <spec-path> | grep -F '<plan-path>'`; with no `--plan` the citation half cannot be checked — report block-present and say the citation was unverified). Then call `doc-tools.sh update-index` to refresh the hash.
+   - **Amendment** (`:amends`): this branch is not about code at all, so neither alignment nor drift applies — the spec's *text* was supposed to change, and a staleness flag on it is the expected outcome rather than a finding. Write no `Status`, no Implementation Notes, no `code_refs`. Verify instead that the dated `AMENDED` block landed and cites the plan (`grep -n -A4 'AMENDED 20' <spec-path> | grep -F '<plan-path>'`; with no `--plan` the citation half cannot be checked — report block-present and emit `WARN: amendment citation unverified (no --plan)`). Then call `doc-tools.sh update-index` to refresh the hash.
 3. **Status transitions**: governed by the **Spec Status Model** — `Draft` → `In Review` (first implementation) → `Approved` → `Implemented` (verification passes). Monotonic (R2); exempt statuses, constraint specs and amendment specs never transition (R3, roles). Never write `Status` without reading the current value first (R1). `Approved` is human-set — no action ever writes it; it appears on the ladder so R2 can protect specs that carry it.
 4. **Output**: Updated spec files (if aligned) or deviation flags (if drifted).
 
@@ -272,7 +278,7 @@ Two modes: **post-execute** (final compliance check before merging) and **review
      grep -n -A4 'AMENDED 20' <spec-path> | grep -F '<plan-path>'
      ```
      A match is a PASS. No match is a **FAIL**: the plan promised a correction the spec does not carry. Both stages matter — the first finds a dated block, the second proves it belongs to this plan; a bare `grep 'AMENDED 20'` passes on any previously-amended spec and so verifies nothing about this work.
-     **Without `--plan`** the second stage cannot run. Degrade to block-present only and emit a WARN line: "amendment citation unverified (no `--plan`)". Never report a degraded check as a full pass — the whole point of the role is that a promised amendment is provable, and an unproven one must say so.
+     **Without `--plan`** the second stage cannot run. Degrade to block-present only and emit exactly this line, verbatim: `WARN: amendment citation unverified (no --plan)`. Never report a degraded check as a full pass — the whole point of the role is that a promised amendment is provable, and an unproven one must say so.
 
    Then emit three **P3 informational** lines. These are never findings and never cause a FAIL — they exist because the suppressions above are otherwise silent in the failing direction:
    - **Inferred constraints** — list specs treated as constraint references *by inference* rather than by an explicit `:constraint` marker: "N spec(s) treated as constraint references by inference — pass `:constraint` to confirm, or fix their `code_refs` if they were meant to be implementation targets." Role inference is circular: wrong `code_refs` produce a constraint verdict, the constraint branch skips the `code_refs` refinement step, so the `code_refs` stay wrong and the spec silently never advances. Specs marked `:constraint` explicitly are not listed — the caller already said so.
@@ -314,7 +320,7 @@ Two modes: **post-execute** (final compliance check before merging) and **review
 1. **Map changed files to governing specs** — Using `.doc-index.json` `code_refs`, identify which specs are affected by the changed files.
 2. **Run `check-freshness` on affected specs** — Are any stale relative to the changes?
 3. **Coverage gap detection** — Are there changed files that have no governing spec at all? Flag as "unspecified changes."
-3b. **Amendment landed-check** — For each spec passed with `:amends`, run the same two-stage check as post-execute mode (`grep -n -A4 'AMENDED 20' <spec-path> | grep -F '<plan-path>'`). No match → a **P1 Amendment not landed** finding. Without `--plan`, degrade to block-present and attach the WARN "amendment citation unverified (no `--plan`)"; do not report it as verified.
+3b. **Amendment landed-check** — For each spec passed with `:amends`, run the same two-stage check as post-execute mode (`grep -n -A4 'AMENDED 20' <spec-path> | grep -F '<plan-path>'`). No match → a **P1 Amendment not landed** finding. Without `--plan`, degrade to block-present and attach the same verbatim WARN line as post-execute mode — `WARN: amendment citation unverified (no --plan)` — and do not report it as verified.
 4. **Produce review findings** — Standard doc-superpowers severity format:
    - **P1 Stale**: Spec exists but hasn't been updated to reflect code changes
    - **P1 Amendment not landed**: A spec passed as `:amends` carries no dated `AMENDED` block attributed to this plan
