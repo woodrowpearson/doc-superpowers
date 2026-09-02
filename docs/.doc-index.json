@@ -1,22 +1,22 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-07-30T01:57:17Z",
+  "generated_at": "2026-09-02T05:52:32Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
-      "content_hash": "sha256:1a61399f803ef90dfd9752bdba47ce92c6eb5f3dae90203ec932c09553996a36",
+      "content_hash": "sha256:f30c0e4b8afeda82d7bd764c2a7e67ed69bb84591f83919b906a43bb5a86eae5",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/",
         "references/"
       ],
-      "code_commit": "702edc513367f3941834982cbdd1b2d8b112a457",
+      "code_commit": "f5808eabf056c86df489a682c6f50610e880eecd",
       "doc_type": "architecture",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-30T01:57:17Z",
+      "last_verified": "2026-09-02T05:52:32Z",
       "implementation": []
     },
     "docs/codebase-guide.md": {
@@ -25,12 +25,12 @@
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "702edc513367f3941834982cbdd1b2d8b112a457",
+      "code_commit": "f5808eabf056c86df489a682c6f50610e880eecd",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-30T01:57:17Z",
+      "last_verified": "2026-09-02T05:52:32Z",
       "implementation": []
     },
     "docs/conventions.md": {
