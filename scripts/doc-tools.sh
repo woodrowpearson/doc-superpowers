@@ -148,12 +148,19 @@ _git_last_commit() {
 }
 
 # Commits in <base>..HEAD touching the refs, into _BEHIND; "" (reported as
-# null) when the repository does not have <base> — a squash-merged branch
-# deleted, a shallow clone. It used to report 0 there, the same as "not
-# behind". Any other git failure dies. <base> must pass _is_oid. With --literal
-# first, the refs are literal paths (schema v3 entries); otherwise pathspecs.
+# null) when <base> is not reachable from HEAD: the repository does not have
+# it (a squash-merged branch deleted, a shallow clone), or it is not an
+# ancestor of HEAD (only the verify commit was cherry-picked, a branch that
+# never merged). `rev-list --count <base>..HEAD` answers 0 or a count of
+# unrelated commits there — a masked 0, the same as "not behind". Any other
+# git failure dies. <base> must pass _is_oid. With --literal first, the refs
+# are literal paths (schema v3 entries); otherwise pathspecs. The ancestry
+# answer is kept per commit (_ANCESTORS / _NOT_ANCESTORS), so docs sharing a
+# baseline cost one merge-base between them.
+_ANCESTORS=" "
+_NOT_ANCESTORS=" "
 _git_commits_behind() {
-  local literal=()
+  local literal=() rc=0
   if [ "$1" = --literal ]; then
     literal=(--literal-pathspecs)
     shift
@@ -164,12 +171,29 @@ _git_commits_behind() {
   [ $# -gt 0 ] || return 0
   _head_init
   [ -n "$_HEAD" ] || return 0
-  if ! _BEHIND=$(git ${literal[@]+"${literal[@]}"} rev-list --count "$base..$_HEAD" -- "$@" 2>/dev/null); then
-    if git cat-file -e "$base^{commit}" 2>/dev/null; then
-      _die "git rev-list --count $base..HEAD failed for code refs: $*"
-    fi
-    _BEHIND=""
-  fi
+  case "$_NOT_ANCESTORS" in
+    *" $base "*) _BEHIND=""; return 0 ;;
+  esac
+  case "$_ANCESTORS" in
+    *" $base "*) ;;
+    *)
+      git merge-base --is-ancestor "$base" "$_HEAD" 2>/dev/null || rc=$?
+      case "$rc" in
+        0) _ANCESTORS="$_ANCESTORS$base " ;;
+        1) _NOT_ANCESTORS="$_NOT_ANCESTORS$base "; _BEHIND=""; return 0 ;;
+        *)
+          if git cat-file -e "$base^{commit}" 2>/dev/null; then
+            _die "git merge-base --is-ancestor $base HEAD failed"
+          fi
+          _NOT_ANCESTORS="$_NOT_ANCESTORS$base "
+          _BEHIND=""
+          return 0
+          ;;
+      esac
+      ;;
+  esac
+  _BEHIND=$(git ${literal[@]+"${literal[@]}"} rev-list --count "$base..$_HEAD" -- "$@") \
+    || _die "git rev-list --count $base..HEAD failed for code refs: $*"
 }
 
 # --- Doc-path normalization ---
@@ -375,8 +399,9 @@ _targets_from_args() {
 #   - commits_behind and code_refs_changed are computed for stale docs only.
 #     code_refs_changed is exactly the refs whose object id differs;
 #     commits_behind is `git rev-list --count <code_commit>..HEAD -- <refs>`,
-#     one per distinct stale (code_commit, refs) pair, and null when this
-#     repository does not have that commit — never a masked 0.
+#     one per distinct stale (code_commit, refs) pair, and null when that
+#     commit is not an ancestor of HEAD here (absent, or on another line of
+#     history) — never a masked 0.
 #   - An entry without code_oids (written before v3) is judged by the old
 #     commit logic — its refs as git pathspecs, globs included — until a
 #     writer re-verifies it. The first write bumps schema_version to 3.
@@ -456,13 +481,40 @@ _oid_lookup() {
     *) _die "cannot read the code refs" ;;
   esac
   # batch-check answers "<id>" for a found object and "<name> missing" (or
-  # "ambiguous") otherwise; anything but a bare object id reads as missing.
-  # An empty line (a ".." ref) is answered " missing".
+  # "ambiguous") otherwise; anything but a bare object id reads as missing
+  # here, and is re-resolved below. An empty line (a ".." ref) is answered
+  # " missing".
   awk -v t="$tree" '{ if ($0 == "") print ""; else if ($0 == ".") print t ":"; else print t ":" $0 }' \
       "$out.paths" \
     | git cat-file --batch-check='%(objectname)' \
     | awk '{ if ((length($0) == 40 || length($0) == 64) && $0 !~ /[^0123456789abcdef]/) print; else print "missing" }' \
       > "$out" || _die "git cat-file --batch-check failed"
+
+  # A path batch-check could not resolve can still be an entry of <tree>
+  # whose object this repository does not hold: a submodule (gitlink) — its
+  # commit lives in the submodule's store, and git answers "missing" (newer
+  # git: "<id> submodule") — or an object a partial clone has not fetched. The
+  # entry's own id is its identity, so ONE `git ls-tree` over every such path
+  # resolves them (a submodule bump then reads stale, as it did before v3).
+  local miss="$out.miss" ls="$out.ls"
+  awk 'NR == FNR { p[FNR] = $0; next } $0 == "missing" && p[FNR] != "" && p[FNR] != "." { print p[FNR] }' \
+    "$out.paths" "$out" > "$miss" || _die "cannot list the unresolved code refs"
+  [ -s "$miss" ] || return 0
+  tr '\n' '\000' < "$miss" \
+    | xargs -0 git --literal-pathspecs ls-tree -z "$tree" -- \
+    | tr '\000' '\n' > "$ls" || _die "git ls-tree failed"
+  [ -s "$ls" ] || return 0
+  # ls-tree -z lines: "<mode> <type> <id>\t<path>" (a path may hold a tab).
+  awk 'FNR == 1 { f++ }
+    f == 1 { i = index($0, "\t")
+             if (i) { split(substr($0, 1, i - 1), m, " ")
+                      if ((length(m[3]) == 40 || length(m[3]) == 64) && m[3] !~ /[^0123456789abcdef]/)
+                        id[substr($0, i + 1)] = m[3] }
+             next }
+    f == 2 { p[FNR] = $0; next }
+    { if ($0 == "missing" && (p[FNR] in id)) print id[p[FNR]]; else print }' \
+    "$ls" "$out.paths" "$out" > "$out.tmp" && mv -f "$out.tmp" "$out" \
+    || _die "cannot resolve the code refs' tree entries"
 }
 
 # Re-stage the refs of _worktree_tree from the working tree into the private
@@ -495,6 +547,12 @@ _wt_stage() {
 # ref is re-staged from the working tree (_wt_stage), and the result written
 # as a tree. Paths outside the refs keep their index state; only the refs are
 # ever looked up in it.
+#
+# `add -A` stages untracked files too — new files under a ref are code the
+# verifier read — so an untracked file (not ignored) under a ref is part of
+# the verified content, and HEAD lacks it: the doc reads stale until it is
+# committed or ignored. One `git ls-files -o` over the refs names every such
+# path in a warning (the doc-index's own files aside).
 _WT_PRESENT=()
 _WT_ABSENT=()
 _WT_COVERS=0
@@ -516,6 +574,23 @@ _worktree_tree() {
       _WT_ABSENT+=("$p")
     fi
   done < "$paths"
+  if [ ${#_WT_PRESENT[@]} -gt 0 ]; then
+    local untracked="$_SCRATCH/worktree.untracked" names="" count=0
+    printf '%s\0' "${_WT_PRESENT[@]}" \
+      | xargs -0 git --literal-pathspecs ls-files -z -o --exclude-standard --directory -- \
+      | tr '\000' '\n' > "$untracked" || _die "git ls-files failed"
+    while IFS= read -r p; do
+      case "$p" in
+        ''|"$INDEX_FILE"*) continue ;;
+      esac
+      count=$((count + 1))
+      [ "$count" -gt 10 ] || names="${names:+$names, }$p"
+    done < "$untracked"
+    if [ "$count" -gt 0 ]; then
+      [ "$count" -le 10 ] || names="$names, … ($((count - 10)) more)"
+      echo "WARNING: code refs cover $count $([ "$count" -eq 1 ] && echo path || echo paths) git does not track: $names. Their content is recorded as verified and HEAD lacks it, so the doc reads stale until they are committed or ignored." >&2
+    fi
+  fi
   real=$(git rev-parse --git-path index) || _die "git rev-parse --git-path index failed"
   rm -f "$idx"
   if [ -f "$real" ]; then
@@ -619,8 +694,10 @@ _hash_list() {
 # Warn once per distinct ref (one per line of <refs-file>) that holds a glob
 # character — refs are literal paths, so it names only a path of exactly that
 # name — and, with <unmatched> 1, about each other ref that matches no file
-# git tracks: a typo'd ref records "missing", and HEAD agrees until that path
-# is committed, so the doc cannot go stale. One `git ls-files`, one awk.
+# git tracks and does not exist: a typo'd ref records "missing", and HEAD
+# agrees until that path is committed, so the doc cannot go stale. (One that
+# exists untracked is recorded, and named by _worktree_tree.) One `git
+# ls-files`, one awk.
 _warn_refs() {
   local list="$1" unmatched="$2" tracked="$_SCRATCH/tracked" out r kind
   [ -s "$list" ] || return 0
@@ -661,7 +738,13 @@ _warn_refs() {
     r="${r#*$'\t'}"
     case "$kind" in
       G) echo "WARNING: code ref '$r' contains a glob character (* ? [): code refs are literal paths, so it names only a path of exactly that name." >&2 ;;
-      U) echo "WARNING: code ref '$r' matches no file tracked by git (typo?); its content is recorded as missing, so the doc cannot go stale until that path is committed." >&2 ;;
+      U)
+        # An untracked file that exists is named by _worktree_tree instead:
+        # its content IS recorded.
+        if [ ! -e "$r" ] && [ ! -L "$r" ]; then
+          echo "WARNING: code ref '$r' matches no file tracked by git and does not exist (typo?); it is recorded as missing, so the doc cannot go stale until that path is committed." >&2
+        fi
+        ;;
     esac
   done <<<"$out"
 }
@@ -1587,9 +1670,11 @@ Mapping lines (stdin of build-index and add-entry, one doc per line):
   comma-separated; each is trimmed, and empty ones are dropped. A trailing
   CR (a CRLF file) is removed. A ref is a literal path — a file, a
   directory, or "." for the whole repository — never a glob: one containing
-  * ? or [ is warned about. A ref that matches no file tracked by git is
-  warned about too: a typo there is recorded as missing, which HEAD agrees
-  with, so the doc cannot go stale.
+  * ? or [ is warned about. A ref that does not exist and matches no file
+  tracked by git is warned about too: a typo there is recorded as missing,
+  which HEAD agrees with, so the doc cannot go stale. Untracked (not
+  ignored) files under a ref are part of what is verified: writers name
+  them, and the doc reads stale until they are committed or ignored.
 
 Doc paths:
   The doc-index is keyed by paths relative to the repo root, and every
@@ -1616,8 +1701,10 @@ Freshness (index schema v3):
   rebase-merges, cherry-picks and reverts to the verified bytes stay current,
   as does a doc verified in the same commit as its code. code_refs_changed
   lists exactly the refs that differ. commits_behind counts the commits
-  touching the refs since code_commit, and is null when this repository does
-  not have that commit (a deleted squash-merged branch, a shallow clone).
+  touching the refs since code_commit, and is null when that commit is not
+  an ancestor of HEAD here (a deleted squash-merged branch, a shallow clone,
+  a cherry-picked verification). A ref naming a submodule records its
+  commit, so a submodule bump reads stale.
   In a shallow clone writers record no code_commit (null, with a warning).
   The doc-index itself is never part of a ref's content.
 

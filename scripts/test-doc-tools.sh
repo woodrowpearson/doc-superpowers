@@ -3726,6 +3726,97 @@ test_i1_ref_without_code_oids_is_unverified() {
   teardown
 }
 
+# git add -A stages untracked (not ignored) files under a ref, so their content
+# is part of what is verified: HEAD lacks them, and the doc reads stale until
+# they are committed or ignored. Writers must say so, naming them — and not
+# claim the content is "recorded as missing".
+test_i1_untracked_files_under_a_ref_are_warned_about() {
+  echo "test: I-1: untracked files under a ref are named at write time (the doc reads stale until committed or ignored)"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  _i1_commit index
+  echo "// v2" >> src/index.js
+  echo "stray" > src/notes.tmp
+  echo "## v2" >> docs/architecture.md
+  local err
+  err=$("$DOC_TOOLS" update-index docs/architecture.md 2>&1 >/dev/null) || true
+  assert_contains "$err" "src/notes.tmp" "update-index names the untracked file under the ref"
+  assert_contains "$err" "committed or ignored" "…and says the doc reads stale until it is committed or ignored"
+  assert_not_contains "$err" "recorded as missing" "…and does not claim its content is recorded as missing"
+  git add src/index.js docs/
+  git commit -m "code + doc + index, not the stray file" --quiet
+  assert_eq "stale|1|src/" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" \
+    "the verified content included the untracked file, which HEAD lacks: stale, as warned"
+  echo '*.tmp' > .gitignore
+  _i1_commit "ignore *.tmp"
+  err=$("$DOC_TOOLS" update-index docs/architecture.md 2>&1 >/dev/null) || true
+  assert_not_contains "$err" "notes.tmp" "once ignored, the file is neither staged nor warned about"
+  _i1_commit reverify
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" "re-verified: current"
+  # A ref that names an untracked file draws the untracked warning; an absent
+  # ref draws the missing one.
+  echo "new" > src/new.js
+  echo "# w" > docs/workflows.md
+  err=$(echo "docs/workflows.md:src/new.js,src/gone.js:workflows" | "$DOC_TOOLS" add-entry 2>&1 >/dev/null) || true
+  assert_contains "$err" "src/new.js" "a ref naming an untracked file is named"
+  assert_not_contains "$err" "code ref 'src/new.js' matches no file" "…and not reported as matching nothing"
+  assert_contains "$err" "code ref 'src/gone.js' matches no file tracked by git" "an absent ref draws the missing warning"
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/workflows.md"].code_oids | "\(.["src/new.js"] != "missing") \(.["src/gone.js"])"' \
+    "true missing" "the untracked file's content is recorded; the absent ref is missing"
+  teardown
+}
+
+# A submodule ref resolves to its gitlink (the submodule's commit), which is
+# not in the superproject's object store: batch-check alone answers "missing"
+# (or "submodule" on newer git) on both sides, and a bump went unnoticed.
+test_i1_submodule_ref_goes_stale_on_a_bump() {
+  echo "test: I-1: a ref naming a submodule records its commit, and a submodule bump reads stale"
+  setup
+  local sub
+  sub=$(harness_mktemp_d i1-sub)
+  git -C "$sub" init -q -b main 2>/dev/null || { git -C "$sub" init -q && git -C "$sub" symbolic-ref HEAD refs/heads/main; }
+  echo "s1" > "$sub/s.txt"
+  git -C "$sub" add -A && git -C "$sub" commit -m s1 --quiet
+  git -c protocol.file.allow=always submodule add -q "file://$sub" libs/sub >/dev/null 2>&1
+  _i1_commit "add submodule"
+  echo "docs/architecture.md:libs/sub:architecture" | "$DOC_TOOLS" build-index 2>/dev/null
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/architecture.md"].code_oids["libs/sub"]' \
+    "$(git rev-parse HEAD:libs/sub)" "code_oids holds the submodule's commit (the gitlink), not missing"
+  _i1_commit index
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" "verified: current"
+  echo "s2" >> libs/sub/s.txt
+  git -C libs/sub commit -am s2 --quiet
+  git add libs/sub && git commit -m "bump submodule" --quiet
+  assert_eq "stale|1|libs/sub" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" \
+    "a submodule bump is stale"
+  teardown
+}
+
+# code_commit exists here but is not an ancestor of HEAD (only the verify
+# commit was cherry-picked, not the code): `rev-list --count <c>..HEAD` would
+# count 0 for a stale doc — a masked 0.
+test_i1_commits_behind_null_when_not_an_ancestor() {
+  echo "test: I-1: commits_behind is null when code_commit is not an ancestor of HEAD"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  _i1_commit index
+  git checkout -q -b feat
+  echo "// feat" >> src/index.js
+  _i1_commit "feat code"
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
+  _i1_commit verify
+  local verify cc
+  verify=$(git rev-parse HEAD)
+  git checkout -q main
+  git cherry-pick "$verify" >/dev/null
+  cc=$(jq -r '.docs["docs/architecture.md"].code_commit' docs/.doc-index.json)
+  assert_true "precondition: code_commit ($cc) exists here" git cat-file -e "$cc^{commit}"
+  assert_exit_code 1 "precondition: …but is not an ancestor of HEAD" git merge-base --is-ancestor "$cc" HEAD
+  assert_eq "stale|null|src/" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" \
+    "stale (the code was never picked), and commits_behind is null, not 0"
+  teardown
+}
+
 test_i1_move_entry_preserves_code_oids() {
   echo "test: I-1: move-entry carries code_oids over unchanged"
   setup
@@ -3801,11 +3892,11 @@ test_i1_check_freshness_scale() {
   # Whole seconds: <= 4 measured guarantees < 5 s real.
   assert_true "check-freshness took ${elapsed}s for $n docs x $h commits (< 5 s; build-index took ${build_s}s)" \
     test "$elapsed" -le 4
-  # Fixed git calls (repository check, HEAD, tree, one batch-check) plus one
-  # rev-list --count per stale (code_commit, refs) group — $k here — and none
-  # per current doc.
-  assert_true "check-freshness spawned $git_n git processes (budget 6 + $k stale groups)" \
-    test "$git_n" -le $((6 + k))
+  # Fixed git calls (repository check, HEAD, tree, one batch-check) plus, per
+  # stale (code_commit, refs) group — $k here, each with its own code_commit —
+  # one merge-base --is-ancestor and one rev-list --count; none per current doc.
+  assert_true "check-freshness spawned $git_n git processes (budget 6 + 2 x $k stale groups)" \
+    test "$git_n" -le $((6 + 2 * k))
   assert_true "check-freshness spawned $jq_n jq processes (budget 10)" test "$jq_n" -le 10
   teardown
 }
@@ -4039,6 +4130,9 @@ run_tests() {
   test_i1_glob_looking_refs_are_literal
   test_i1_index_file_is_not_part_of_a_ref
   test_i1_ref_without_code_oids_is_unverified
+  test_i1_untracked_files_under_a_ref_are_warned_about
+  test_i1_submodule_ref_goes_stale_on_a_bump
+  test_i1_commits_behind_null_when_not_an_ancestor
   test_i1_move_entry_preserves_code_oids
   test_i1_check_freshness_scale
   test_i1_writer_reports_are_linear
