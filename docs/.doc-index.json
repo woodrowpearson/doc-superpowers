@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-27T06:29:06Z",
+  "generated_at": "2026-09-27T06:30:54Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -600,14 +600,15 @@
       "last_verified": "2026-09-27T06:12:33Z"
     },
     "docs/issues/2026-09-27-sweep-05ea982-I11-skill-prompt-tool-contract.md": {
-      "content_hash": "sha256:b8a13c5c0eed8d95759d996972492772fcff7260e0bf15dba5aa9e4fe59177e3",
+      "content_hash": "sha256:90c70bba9bf94129a0c91ab72f6badcc80f48cda616afa6bf94e7141981ad6f5",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T06:12:33Z"
+      "last_verified": "2026-09-27T06:30:54Z",
+      "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I12-cross-client-packaging.md": {
       "content_hash": "sha256:029139978a9db445361c864657e9273a598efccd690baadbcce6ed737c3b1b1f",
