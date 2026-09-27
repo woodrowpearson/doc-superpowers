@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-27T12:23:15Z",
+  "generated_at": "2026-09-27T12:50:14Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -535,14 +535,14 @@
       "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I04-doc-tools-input-cli-robustness.md": {
-      "content_hash": "sha256:e59ce9e5b7607dd15d004e14b3ab554c68f2451c146b758332e5f7e624ea0cf7",
+      "content_hash": "sha256:7ed821a89d17b2c75696cbbfa509730e9ff578ac56ec1a5fa185ba390f354c41",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T12:23:15Z",
+      "last_verified": "2026-09-27T12:50:14Z",
       "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I05-merge-driver-not-three-way.md": {

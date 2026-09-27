@@ -130,11 +130,13 @@ Resolved by Task 3 of the fix plan. `scripts/doc-tools.sh` now has one path for 
   exits 2 and names it.
 - **One argument loop (`_parse_args`).** `--opt VALUE` and `--opt=VALUE` are the same and may
   appear anywhere; `--` ends the options. An option the verb does not take, an option missing its
-  value, or an argument to a verb that takes none exits 2 before anything is read or written.
+  value, or the wrong number of arguments exits 2 before anything is read or written.
   `deprecate-entry <old> --superseded-by <new>` deprecates only `<old>`.
 - **One mapping-line parser (`_entry_from_line`).** It uses `IFS=: read -r path refs type extra`
-  on the line minus its trailing CR, and rejects a bare path and a line with more than three
-  fields (so a path with `:` in it). Refs are split once, trimmed, and empty ones dropped; that one
+  on the line minus its trailing CR. It rejects a bare path, a line with more than three fields,
+  and a line whose first field is not a file while its first two or three fields joined by `:`
+  name one on disk. That last case is an ambiguous `:` path: `docs/a:b.md` used to be keyed
+  `docs/a` with ref `b.md`, rc 0. A `:` path whose file does not exist yet cannot be detected. Refs are split once, trimmed, and empty ones dropped; that one
   array is stored and handed to git. A ref that matches no tracked file draws a warning (one
   `git ls-files` per batch). A key listed twice keeps its first line, in both `build-index` and
   `add-entry`.
