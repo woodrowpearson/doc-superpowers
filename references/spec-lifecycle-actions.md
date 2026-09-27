@@ -244,7 +244,7 @@ Two modes: **plan phase** (inject spec tasks into implementation plan) and **exe
 
 Runs after each plan chunk completes (not after every individual task).
 
-1. **Check freshness** — Call `doc-tools.sh check-freshness` against the governing specs. This compares the spec's `content_hash` in `.doc-index.json` against the current `code_commit` for its `code_refs`.
+1. **Check freshness** — Call `doc-tools.sh check-freshness` against the governing specs. A spec reads stale when the content of one of its `code_refs` differs from the content recorded in `.doc-index.json` when it was last verified (`code_oids`); its own edits show as `doc_modified` (`content_hash`).
 2. **Determine alignment vs. drift** — If code changed but spec wasn't updated (flagged stale), the agent reads three inputs: (a) the spec's relevant section content, (b) the code changes in files matching the spec's `code_refs`, (c) the plan task description that was just executed. The key question: "Does the implementation achieve what the spec describes, even if through a different mechanism?"
    - **Aligned** (implementation achieves spec intent): Update the spec's `Status` per the **Spec Status Model** — read the current status first, never regress, and leave exempt statuses and constraint specs untouched. Update the spec's Implementation Notes to reflect actual approach taken. Refine `code_refs` if actual file paths differ from initial estimates. Call `doc-tools.sh update-index` to refresh hashes. No human intervention.
    - **Drifted** (implementation contradicts spec intent, omits requirements, or introduces unspecified behavior): Flag for human review with a deviation note: what the spec says, what the code does, and why they diverge. Do not auto-update spec content.

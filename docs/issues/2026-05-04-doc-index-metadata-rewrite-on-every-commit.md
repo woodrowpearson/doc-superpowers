@@ -189,6 +189,23 @@ the meaning of these fields. Less clean than splitting; not recommended.
    workflow?** Should test in a consumer repo before declaring victory —
    the workflow is belt-and-suspenders even after this lands.
 
+## Resolution (partial — sweep 05ea982 Task 4; T6 and T7 close the rest)
+
+Task 4 ([I-1](2026-09-27-sweep-05ea982-I01-freshness-identity-model.md)) removes most of the
+*content* churn from this conflict surface. It does not change the top-level metadata:
+
+- **Verification is content-addressed.** A doc's freshness is its refs' object ids (`code_oids`), not
+  the id of the last commit touching them. Two branches that verify the same bytes now write the same
+  `code_oids`. Squash merges, rebase-merges and cherry-picks no longer re-stale a doc that then needs a
+  fresh `update-index` (and a fresh index diff) on each branch.
+- **A no-op write is still byte-identical** (T2): nothing is written, and `generated_at` is not bumped.
+  The first real write stamps `schema_version: 3`.
+
+Left for the owning Tasks: the premise that a post-commit hook runs `update-index` on every commit was
+refuted (see I-6; T7 removes that dead call and moves pre-commit to `--tree`). The merge driver's
+three-way semantics are I-5 (T6). `last_verified` re-stamping belongs to T5. This issue stays open
+until those land.
+
 ## Workaround (current)
 
 Consumers can ship a GitHub Actions workflow that runs the merge driver

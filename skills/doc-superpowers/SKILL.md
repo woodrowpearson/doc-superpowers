@@ -117,13 +117,13 @@ ls scripts/*validate_docs* scripts/*validate_doc_references* scripts/*fix_doc_re
 | Script Pattern | Source | Purpose |
 |---|---|---|
 | `doc-tools.sh build-index` | Bundled | Build `docs/.doc-index.json` from scratch (stdin mapping lines). Only when no index exists: it refuses to replace one that has entries unless given `--force`, and refuses empty input |
-| `doc-tools.sh check-freshness` | Bundled | Hash-based staleness detection (read-only). `--code-refs <path>...` or `--code-refs-from <file\|->` scopes it to docs whose `code_refs` share a path segment with the list |
-| `doc-tools.sh update-index` | Bundled | Refresh existing index entries (skips missing files; a path not in the index is reported and skipped, and the run exits 1) |
+| `doc-tools.sh check-freshness` | Bundled | Content-based staleness detection (read-only): a doc is stale when a code ref's content differs from what was verified (`code_oids`). Compares HEAD, or `--tree <tree-ish>` (pre-commit: `--tree "$(git write-tree)"`, the staged tree). `--code-refs <path>...` or `--code-refs-from <file\|->` scopes it to docs whose `code_refs` share a path segment with the list |
+| `doc-tools.sh update-index` | Bundled | Re-verify existing index entries: records each code ref's content as the working tree holds it now (skips missing files; a path not in the index is reported and skipped, and the run exits 1) |
 | `doc-tools.sh add-entry` | Bundled | Add new entries to an existing index (stdin mapping lines) |
 | `doc-tools.sh remove-entry` | Bundled | Remove entries from index by path |
-| `doc-tools.sh move-entry` | Bundled | Re-key an entry after a doc moves — preserves `code_refs`/`code_commit`/`last_verified`; use instead of `remove-entry` + `add-entry` for a rename |
+| `doc-tools.sh move-entry` | Bundled | Re-key an entry after a doc moves — preserves `code_refs`/`code_oids`/`code_commit`/`last_verified`; use instead of `remove-entry` + `add-entry` for a rename |
 | `doc-tools.sh deprecate-entry` | Bundled | Mark entries as deprecated (`--superseded-by <path>`) |
-| `doc-tools.sh status` | Bundled | Single-doc freshness query (read-only) |
+| `doc-tools.sh status` | Bundled | Single-doc freshness query (read-only; takes `--tree` too) |
 | `doc-tools.sh bump-version` | Bundled | Write a version string across the 6 manifest files |
 | `doc-tools.sh check-version` | Bundled | Verify all manifests match RELEASE-NOTES.md's canonical version (read-only) |
 | `doc-tools.sh implementation-status` | Bundled | Report ADR/SPEC realization state from `Implementation:` blocks (read-only) |
@@ -140,7 +140,9 @@ ls scripts/*validate_docs* scripts/*validate_doc_references* scripts/*fix_doc_re
 
 **Command line.** Options may appear anywhere, and `--opt VALUE` equals `--opt=VALUE` (`deprecate-entry docs/old.md --superseded-by docs/new.md` deprecates `docs/old.md` only). `--help` on any subcommand prints its usage and exits 0; `doc-tools.sh --help` lists every subcommand. An option a subcommand does not take exits **2** and changes nothing, as do the wrong number of arguments and a repository subcommand run outside a git work tree. Exit 1 means the operation failed or was refused.
 
-**Mapping lines** (stdin of `build-index` and `add-entry`): `doc_path:code_refs_csv:doc_type`. `:` separates the fields, so a doc path must not contain one. A line is rejected when it is a bare path, has more than three fields, or names an existing `:`-containing file in its first two or three fields while its first field is not a file. A `:` path whose file does not exist yet cannot be detected, so it would be indexed under the wrong key. Refs are trimmed and empty ones dropped, a trailing CR is removed, and a ref that matches no file tracked by git draws a warning, because a doc indexed only with such refs can never go stale. Doc paths are normalized: `docs//a.md` becomes `docs/a.md`, a path starting with `-` is refused, and a path named twice counts once.
+**Mapping lines** (stdin of `build-index` and `add-entry`): `doc_path:code_refs_csv:doc_type`. `:` separates the fields, so a doc path must not contain one. A line is rejected when it is a bare path, has more than three fields, or names an existing `:`-containing file in its first two or three fields while its first field is not a file. A `:` path whose file does not exist yet cannot be detected, so it would be indexed under the wrong key. Refs are trimmed and empty ones dropped, and a trailing CR is removed. A ref is a literal path — a file, a directory, or `.` for the whole repository — never a glob: one containing `*`, `?` or `[` draws a warning, since it names only a path of exactly that name. A ref that matches no file tracked by git draws a warning too: its content is recorded as missing, which HEAD agrees with, so the doc cannot go stale until that path is committed. Doc paths are normalized: `docs//a.md` becomes `docs/a.md`, a path starting with `-` is refused, and a path named twice counts once.
+
+**Freshness is content, not commits.** A writer (`build-index`, `add-entry`, `update-index`) records per code ref the git object id of its content in the working tree — what the verifier read, committed or not — as `code_oids`. `check-freshness` reports a doc stale when one of those differs in HEAD (or in `--tree`), so squash merges, rebase-merges, cherry-picks, reverts to the verified bytes and a doc verified in the same commit as its code all stay current. `code_refs_changed` lists exactly the refs whose content differs. `commits_behind` counts the commits touching the refs since `code_commit`; it is `null` when this clone does not have that commit (a deleted squash-merged branch, a shallow clone), never a masked `0`. The doc-index itself is never part of a ref's content. Entries written before index schema 3 have no `code_oids` and keep the old commit comparison until `update-index` re-verifies them.
 
 **Scoping by changed files.** `--code-refs src/m1` matches refs `src/m1`, `src/m1/a.js` and `src/`, but never `src/m10`. For a changed-file list, pipe it rather than pass it as arguments, so no argv limit applies: `git -c core.quotePath=false diff --name-only --no-renames <range> | $DOC_TOOLS check-freshness --code-refs-from -`. `core.quotePath=false` keeps non-ASCII paths unquoted, so they can match.
 
@@ -279,7 +281,7 @@ flowchart TD
 Use when a project has no docs or needs a complete documentation suite generated.
 
 1. **Run discovery** to detect all scopes and existing docs.
-2. **Flat-to-structured migration check**: If old-structure files exist (e.g., `docs/architecture.md` from a previous init), detect them by checking for files with doc-superpowers freshness markers that map to a structured path. Offer to migrate instead of creating duplicates.
+2. **Flat-to-structured migration check**: If old-structure files exist (e.g., `docs/architecture.md` from a previous init), detect them by checking for files with the doc-superpowers marker (`<!-- Generated by doc-superpowers`) that map to a structured path. Offer to migrate instead of creating duplicates.
 3. **Dispatch Explore agents** (up to 3 parallel via `Agent` tool, `subagent_type: "Explore"`):
    - **Structure**: Directory tree, key files, entry points
    - **Tech Stack**: Languages, frameworks, dependencies
@@ -297,7 +299,7 @@ Use when a project has no docs or needs a complete documentation suite generated
 8. Update `CLAUDE.md` to reflect current project state (create if missing). **SEE** `references/doc-spec.md` for CLAUDE.md update rules.
 9. **Sync README.md** — If README.md exists, update feature list, action list, and usage examples to reflect current project state. **SEE** `references/doc-spec.md` for README.md update rules. Skip if no README.md exists.
 10. **Generate diagrams** per the `diagram` action using co-located paths.
-11. Add freshness marker as first line of each generated file: `<!-- Generated by doc-superpowers | YYYY-MM-DD | commit: SHORT_HASH -->`
+11. Add the marker as the first line of each generated file: `<!-- Generated by doc-superpowers -->`. It carries no date or commit: `docs/.doc-index.json` is the single freshness record.
 12. **Build doc-index**: Construct one mapping line per generated doc in the format `doc_path:code_refs_csv:doc_type` (e.g., `docs/architecture.md:SKILL.md,scripts/:architecture`). Include EVERY generated doc file — missing entries make docs invisible to freshness tooling. Pipe all lines to `doc-tools.sh build-index` via stdin. If `docs/.doc-index.json` already has entries, pipe them to `doc-tools.sh add-entry` instead: `build-index` refuses to replace a non-empty index without `--force`, and `--force` discards every existing entry's metadata.
 13. **Verification gate**: Run `doc-tools.sh check-freshness` to confirm all generated docs are indexed and current.
 14. **Suggest workflow hooks**: After successful init, suggest: "Documentation generated. To keep docs fresh automatically, run `/doc-superpowers hooks install` to set up workflow hooks."
@@ -338,7 +340,7 @@ Audit is **read-only**. It discovers what needs attention and produces a severit
 
 10. **Merge all scope agent reports** into unified report sorted by severity (include CLAUDE.md findings from step 6, README.md findings from step 7, and RELEASE-NOTES.md findings from step 8):
    - **P0 Critical**: Doc describes behavior code no longer implements
-   - **P1 Stale**: Code has changed, doc probably needs updating (includes CLAUDE.md structural drift, README.md feature drift)
+   - **P1 Stale**: The content of the doc's code changed since it was verified (`check-freshness` status `stale`: a code ref's content differs from its `code_oids`), so the doc probably needs updating (includes CLAUDE.md structural drift, README.md feature drift)
    - **P2 Incomplete**: Doc is missing sections for new functionality (includes CLAUDE.md missing entries, README.md missing actions, unreleased RELEASE-NOTES.md commits)
    - **P3 Style**: Formatting, broken links, outdated terminology
 11. When auditing `workflows/`, also compare agentic inventory against documented workflow sections.
@@ -374,7 +376,7 @@ Review-pr is an **orchestrator** like `audit`, but scoped to PR changes.
 Update is the **write counterpart** to audit's read-only analysis. It consumes an audit report and dispatches scope agents to make changes.
 
 1. **Locate audit report**: Check for the most recent `docs/plans/*-audit-report.md`. If none exists and no audit was run in this session, fall back to `doc-tools.sh check-freshness`. If check-freshness also shows no issues, exit with "Nothing to update."
-2. **Detect structural migration needs**: Scan `docs/` for flat-structure files with doc-superpowers freshness markers (e.g., `docs/architecture.md` instead of `docs/architecture/system-overview.md`). If detected:
+2. **Detect structural migration needs**: Scan `docs/` for flat-structure files carrying the doc-superpowers marker, `<!-- Generated by doc-superpowers` (e.g., `docs/architecture.md` instead of `docs/architecture/system-overview.md`). If detected:
    - Map flat files to their structured paths per the Generated Directory Structure
    - Create target directories if needed
    - Move files to structured paths (e.g., `docs/architecture.md` → `docs/architecture/system-overview.md`, `docs/getting-started.md` → `docs/guides/getting-started.md`)
@@ -396,7 +398,7 @@ Update is the **write counterpart** to audit's read-only analysis. It consumes a
    - Apply naming conventions (SPEC-{CAT}-NNN, ADR-NNN)
    - Set `replaces`/`superseded_by` for superseded docs
    - Move deleted docs to `docs/archive/{type}/`
-   - Update freshness markers
+   - Keep the `<!-- Generated by doc-superpowers -->` marker on generated files (an older one with a date and commit may stay as it is; freshness lives in the doc-index, not the marker)
 
    **DIAGRAM**: Regenerate affected diagrams in co-located directories.
 

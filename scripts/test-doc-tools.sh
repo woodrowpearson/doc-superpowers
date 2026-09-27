@@ -112,7 +112,7 @@ test_build_index_creates_index() {
   assert_file_exists "docs/.doc-index.json" "index file created"
   local json
   json=$(cat docs/.doc-index.json)
-  assert_json_field "$json" ".schema_version" "2" "schema_version is 2"
+  assert_json_field "$json" ".schema_version" "3" "schema_version is 3"
   assert_json_field "$json" ".generated_by" "doc-superpowers" "generated_by is doc-superpowers"
   teardown
 }
@@ -2262,13 +2262,15 @@ test_index_term_mid_build_index_keeps_previous_index() {
     printf 'docs/gen/d%d.md:src/:gen\n' "$i"
     i=$((i + 1))
   done > "$mapping"
-  # Held mid-build by a slow git, not by machine speed: since I-4 the run is
-  # mostly one `git rev-list … -- src/` per entry, cheap enough on Linux to
-  # finish before the kill. The shim sleeps after each call whose last
-  # argument is the ref "src/", so the TERM lands in the per-entry loop (stdin
-  # read, nothing written) and the precondition holds on any machine.
+  # Held mid-build by a slow git, not by machine speed: since I-1 the run is a
+  # handful of batched git calls, cheap enough to finish before the kill. The
+  # shim sleeps after each call whose last argument is the ref's path "src"
+  # (the batch's `git rev-list -1 … -- src` for code_commit and its `git add
+  # -A -- src` for code_oids), so the TERM lands while the entries' facts are
+  # gathered (stdin read, nothing written) and the precondition holds on any
+  # machine.
   local shim
-  shim=$(_i2_slow_shim git 'src/')
+  shim=$(_i2_slow_shim git 'src')
   PATH="$shim:$PATH" "$DOC_TOOLS" build-index --force < "$mapping" >/dev/null 2>&1 &
   harness_kill_after 1 TERM "$!" || rc=$?
   assert_eq "1" "$HARNESS_KILL_ALIVE" "precondition: build-index still running when signalled"
@@ -3239,8 +3241,10 @@ test_i4_hostile_names_and_stored_values() {
   assert_json_field "$out" '.docs["-"].doc_modified' "false" "the '-' key hashes the file named '-', not stdin"
   # A code_commit shaped like an option reached `git rev-list` as one (the old
   # script wrote a file "pwned..HEAD"). The "-" key goes first: in the old loop
-  # it drained the records before this entry was ever evaluated.
-  jq 'del(.docs["-"]) | .docs["docs/architecture.md"].code_commit = "--output=pwned"' \
+  # it drained the records before this entry was ever evaluated. Checked on a
+  # legacy entry (no code_oids: the commit logic, where it is the baseline)
+  # and on a stale v3 entry (where it only feeds commits_behind).
+  jq 'del(.docs["-"]) | .docs["docs/architecture.md"] |= (.code_commit = "--output=pwned" | del(.code_oids))' \
     docs/.doc-index.json > docs/.i4.tmp
   mv docs/.i4.tmp docs/.doc-index.json
   rc=0
@@ -3248,7 +3252,17 @@ test_i4_hostile_names_and_stored_values() {
   assert_eq "0" "$rc" "check-freshness exits 0 with an option-shaped code_commit"
   assert_eq "" "$(ls -a | grep '^pwned' || true)" "a code_commit of '--output=pwned' created no file"
   assert_json_field "$out" '.docs["docs/architecture.md"].status' "stale" \
-    "a stored code_commit that is not an object id reads as no baseline (stale)"
+    "legacy entry: a stored code_commit that is not an object id reads as no baseline (stale)"
+  echo "// v2" >> src/index.js
+  git add -A && git commit -m v2 --quiet
+  jq '.docs["docs/back\\slash.md"].code_commit = "--output=pwned"' docs/.doc-index.json > docs/.i4.tmp
+  mv docs/.i4.tmp docs/.doc-index.json
+  rc=0
+  out=$("$DOC_TOOLS" check-freshness) || rc=$?
+  assert_eq "0" "$rc" "check-freshness exits 0 with an option-shaped code_commit on a stale v3 entry"
+  assert_eq "" "$(ls -a | grep '^pwned' || true)" "…which created no file either"
+  assert_json_field "$out" '.docs["docs/back\\slash.md"] | "\(.status) \(.commits_behind)"' "stale null" \
+    "v3 entry: stale by content; commits_behind is null (no usable baseline commit)"
   teardown
 }
 
@@ -3291,6 +3305,561 @@ test_i4_arity_errors_exit_2() {
     assert_eq "2" "$rc" "'$cmd' exits 2 (stderr: ${out:0:160})"
   done
   assert_eq "$before" "$(hash_file docs/.doc-index.json)" "no arity error touched the index"
+  teardown
+}
+
+# --- Content identity: code_oids and --tree (sweep 05ea982 I-1) ----------------
+#
+# A doc is stale when the CONTENT of one of its code refs differs from what was
+# verified — not when the commit that last touched the refs has a different id.
+# Writers store each ref's blob/tree object id (code_oids), captured from the
+# working tree the verifier read; readers look the same refs up in HEAD, or in
+# any tree given with --tree (pre-commit: the staged tree from git write-tree),
+# in one `git cat-file --batch-check` pass. The fixtures below are the history
+# shapes that mint new commit ids for identical bytes, plus a shallow clone,
+# verifying in the same commit as the code, and a staged change.
+
+# "status|commits_behind|code_refs_changed" of doc $2 in a check-freshness
+# report (or of a status object, which has no .docs).
+_i1_verdict() {
+  jq -r --arg k "$2" '(if has("docs") then .docs[$k] else . end)
+    | "\(.status)|\(.commits_behind)|\(.code_refs_changed // [] | join(","))"' <<<"$1"
+}
+
+_i1_commit() {
+  git add -A && git commit -m "$1" --quiet
+}
+
+# The last commit touching $@ (what the pre-v3 model compared code_commit with).
+_i1_last() {
+  git rev-list -1 HEAD -- "$@"
+}
+
+# Counting shims for each named command: every spawn appends the command's name
+# to <dir>/spawns. Prints <dir>; prepend it to PATH.
+_i1_count_shims() {
+  local dir cmd real
+  dir=$(harness_mktemp_d spawn-count)
+  : > "$dir/spawns"
+  for cmd in "$@"; do
+    real=$(command -v "$cmd")
+    printf '#!/bin/sh\necho %s >> "%s"\nexec "%s" "$@"\n' "$cmd" "$dir/spawns" "$real" > "$dir/$cmd"
+    chmod +x "$dir/$cmd"
+  done
+  printf '%s' "$dir"
+}
+
+test_i1_writers_record_code_oids() {
+  echo "test: I-1: writers record code_oids from the working tree (schema_version 3), never touching git's index"
+  setup
+  printf 'a\n' > src/a.js
+  printf '*.log\n' > .gitignore
+  printf 'log\n' > src/x.log
+  mkdir -p src/empty
+  _i1_commit files
+  # Uncommitted: the verifier reads the working tree, so THIS is what is verified.
+  printf 'a-worktree\n' > src/a.js
+  local staged_before err json exp_src t
+  staged_before=$(git diff --cached --name-only)
+  err=$(echo "docs/architecture.md:src/,src/a.js,src/x.log,src/empty,src/nope.js:architecture" \
+          | "$DOC_TOOLS" build-index 2>&1) || true
+  json=$(cat docs/.doc-index.json)
+  t=$(harness_mktemp i1-idx)
+  rm -f "$t"
+  cp .git/index "$t"
+  GIT_INDEX_FILE="$t" git add -A src
+  exp_src=$(git rev-parse "$(GIT_INDEX_FILE="$t" git write-tree):src")
+  assert_json_field "$json" '.schema_version' "3" "build-index writes schema_version 3"
+  assert_json_field "$json" '.docs["docs/architecture.md"].code_oids["src/a.js"]' "$(git hash-object src/a.js)" \
+    "a file ref's OID is its working-tree blob, not HEAD's"
+  assert_json_field "$json" '.docs["docs/architecture.md"].code_oids["src/"]' "$exp_src" \
+    "a directory ref's OID is the tree of its working-tree content (key as stored, 'src/')"
+  assert_json_field "$json" '.docs["docs/architecture.md"].code_oids["src/x.log"]' "missing" "an ignored file is recorded as missing"
+  assert_json_field "$json" '.docs["docs/architecture.md"].code_oids["src/empty"]' "missing" "an empty directory is recorded as missing"
+  assert_json_field "$json" '.docs["docs/architecture.md"].code_oids["src/nope.js"]' "missing" "an absent path is recorded as missing"
+  assert_json_field "$json" '.docs["docs/architecture.md"].code_oids | keys | length' "5" "one code_oids key per ref"
+  assert_contains "$err" "src/nope.js" "the unmatched ref is still warned about"
+  assert_eq "$staged_before" "$(git diff --cached --name-only)" "build-index staged nothing in git's own index"
+  echo "# w" > docs/workflows.md
+  echo "docs/workflows.md:src/a.js:workflows" | "$DOC_TOOLS" add-entry 2>/dev/null
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/workflows.md"].code_oids["src/a.js"]' \
+    "$(git hash-object src/a.js)" "add-entry records code_oids"
+  rm src/a.js
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/architecture.md"].code_oids["src/a.js"]' "missing" \
+    "update-index re-captures: a file deleted from the working tree is missing"
+  assert_eq "$staged_before" "$(git diff --cached --name-only)" "update-index staged nothing in git's own index"
+  teardown
+}
+
+test_i1_squash_merge_is_current() {
+  echo "test: I-1: squash-merge of verified code is current (also in a fresh clone after the branch is deleted)"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  _i1_commit index
+  git checkout -q -b feat
+  echo "// feat" >> src/index.js
+  _i1_commit "feat code"
+  echo "more" >> docs/architecture.md
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
+  _i1_commit verify
+  git checkout -q main
+  git merge -q --squash feat
+  git commit -m squash --quiet
+  assert_true "precondition: the stored code_commit is not HEAD's last src/ commit (the old model's stale)" \
+    test "$(jq -r '.docs["docs/architecture.md"].code_commit' docs/.doc-index.json)" != "$(_i1_last src/)"
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" "squash-merged: current"
+  git branch -q -D feat
+  local clone
+  clone=$(harness_mktemp_d i1-clone)
+  git clone -q "file://$TEST_DIR" "$clone/r"
+  cd "$clone/r"
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" \
+    "fresh clone, feat branch gone (its commits absent): still current"
+  echo "// later" >> src/index.js
+  _i1_commit later
+  assert_eq "stale|null|src/" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" \
+    "a later change is stale; commits_behind is null (the verified commit is not in this clone), never 0"
+  cd "$TEST_DIR"
+  teardown
+}
+
+test_i1_rebase_merge_is_current() {
+  echo "test: I-1: a GitHub-style rebase-merge of verified code is current"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  _i1_commit index
+  git checkout -q -b feat
+  echo "// feat" >> src/index.js
+  _i1_commit "feat code"
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
+  _i1_commit verify
+  git checkout -q main
+  echo "other" > other.txt
+  _i1_commit "unrelated main work"
+  git checkout -q feat
+  git rebase -q main
+  git checkout -q main
+  git merge -q --ff-only feat
+  assert_true "precondition: rebase re-minted the code commit" \
+    test "$(jq -r '.docs["docs/architecture.md"].code_commit' docs/.doc-index.json)" != "$(_i1_last src/)"
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" "rebase-merged: current"
+  teardown
+}
+
+test_i1_cherry_pick_is_current() {
+  echo "test: I-1: cherry-picked code + verification is current"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  _i1_commit index
+  git checkout -q -b feat
+  echo "// feat" >> src/index.js
+  _i1_commit "feat code"
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
+  _i1_commit verify
+  local code verify
+  code=$(git rev-parse HEAD~1)
+  verify=$(git rev-parse HEAD)
+  git checkout -q main
+  # Diverge first: picked onto its own parent within the same second, a
+  # commit can come out byte-identical, with the same id.
+  echo "other" > other.txt
+  _i1_commit "unrelated main work"
+  git cherry-pick "$code" "$verify" >/dev/null
+  assert_true "precondition: cherry-pick re-minted the code commit" \
+    test "$(jq -r '.docs["docs/architecture.md"].code_commit' docs/.doc-index.json)" != "$(_i1_last src/)"
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" "cherry-picked: current"
+  teardown
+}
+
+test_i1_revert_to_verified_bytes_is_current() {
+  echo "test: I-1: reverting code back to the verified bytes makes the doc current again"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  _i1_commit index
+  echo "v2" > src/index.js
+  _i1_commit v2
+  assert_eq "stale|1|src/" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" "changed: stale, 1 commit behind"
+  git revert --no-edit HEAD >/dev/null
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" \
+    "reverted to the verified bytes: current"
+  teardown
+}
+
+test_i1_code_doc_and_update_index_in_one_commit() {
+  echo "test: I-1: code + doc + update-index committed together is current"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  _i1_commit index
+  echo "v2" > src/index.js
+  echo "## v2" >> docs/architecture.md
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
+  _i1_commit "code + doc + index"
+  local cf
+  cf=$("$DOC_TOOLS" check-freshness)
+  assert_eq "current|0|" "$(_i1_verdict "$cf" docs/architecture.md)" "verified in the same commit as the code: current"
+  assert_json_field "$cf" '.docs["docs/architecture.md"].doc_modified' "false" "…and the doc is unmodified"
+  teardown
+}
+
+test_i1_staged_change_seen_via_tree() {
+  echo "test: I-1: a staged invalidating change is stale under --tree \$(git write-tree), current at HEAD"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  _i1_commit index
+  echo "v2" > src/index.js
+  git add src/index.js
+  local staged rc out
+  staged=$(git write-tree)
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" "at HEAD: current"
+  assert_eq "stale|0|src/" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness --tree "$staged")" docs/architecture.md)" \
+    "--tree <staged tree>: stale (no commit yet, so 0 commits behind)"
+  assert_eq "stale|0|src/" "$(_i1_verdict "$("$DOC_TOOLS" status docs/architecture.md --tree="$staged")" docs/architecture.md)" \
+    "status --tree=<staged tree> agrees"
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness --tree HEAD)" docs/architecture.md)" \
+    "--tree HEAD is the default"
+  rc=0
+  out=$("$DOC_TOOLS" check-freshness --tree no-such-rev 2>&1 >/dev/null) || rc=$?
+  assert_eq "1" "$rc" "an unresolvable --tree exits 1"
+  assert_contains "$out" "no-such-rev" "…naming it"
+  rc=0
+  "$DOC_TOOLS" check-freshness --tree=-x >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "a --tree value starting with '-' is a usage error (exit 2)"
+  teardown
+}
+
+test_i1_shallow_clone() {
+  echo "test: I-1: a --depth 1 clone reads current; writers there record OIDs but no code_commit; commits_behind null"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  _i1_commit index
+  local i=0
+  while [ "$i" -lt 3 ]; do
+    echo "$i" >> other.txt
+    _i1_commit "other $i"
+    i=$((i + 1))
+  done
+  local clone err json
+  clone=$(harness_mktemp_d i1-shallow)
+  git clone -q --depth 1 "file://$TEST_DIR" "$clone/r"
+  cd "$clone/r"
+  assert_eq "true" "$(git rev-parse --is-shallow-repository)" "precondition: the clone is shallow"
+  assert_true "precondition: the shallow graft is src/'s last commit here (the old model's stale)" \
+    test "$(jq -r '.docs["docs/architecture.md"].code_commit' docs/.doc-index.json)" != "$(_i1_last src/)"
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" "depth-1 clone: current"
+  echo "// shallow change" >> src/index.js
+  _i1_commit "shallow change"
+  assert_eq "stale|null|src/" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" \
+    "stale; the verified commit is beyond the graft, so commits_behind is null, not 0"
+  err=$("$DOC_TOOLS" update-index docs/architecture.md 2>&1 >/dev/null) || true
+  json=$(cat docs/.doc-index.json)
+  assert_contains "$err" "shallow" "update-index in a shallow clone warns"
+  assert_json_field "$json" '.docs["docs/architecture.md"].code_commit' "null" "…and records no code_commit"
+  assert_json_field "$json" '.docs["docs/architecture.md"].code_oids["src/"]' "$(git rev-parse HEAD:src)" "…but does record code_oids"
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" "re-verified: current"
+  echo "// again" >> src/index.js
+  _i1_commit again
+  assert_eq "stale|null|src/" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" \
+    "no code_commit recorded: commits_behind is null"
+  cd "$TEST_DIR"
+  teardown
+}
+
+test_i1_code_refs_changed_is_exact() {
+  echo "test: I-1: code_refs_changed lists exactly the refs whose content changed"
+  setup
+  echo a > src/a.js
+  _i1_commit a
+  echo b > src/b.js
+  _i1_commit b
+  echo "docs/architecture.md:src/a.js,src/b.js:architecture" | "$DOC_TOOLS" build-index
+  _i1_commit index
+  echo b2 > src/b.js
+  _i1_commit b2
+  assert_eq "stale|1|src/b.js" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" \
+    "only src/b.js is listed (the commit model also listed the untouched src/a.js)"
+  echo b3 > src/b.js
+  _i1_commit b3
+  echo b4 > src/b.js
+  _i1_commit b4
+  assert_eq "stale|3|src/b.js" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" \
+    "commits_behind counts the commits touching the refs since code_commit"
+  teardown
+}
+
+test_i1_commits_behind_null_when_unreachable() {
+  echo "test: I-1: commits_behind is null (never a masked 0) when the verified commit is unknown"
+  setup
+  echo "# w" > docs/workflows.md
+  _i1_commit w
+  printf '%s\n' "docs/architecture.md:src/:architecture" "docs/workflows.md:src/:workflows" | "$DOC_TOOLS" build-index
+  # v3 entry whose commit object does not exist; legacy (v2) entry with none.
+  jq '.docs["docs/architecture.md"].code_commit = "0123456789abcdef0123456789abcdef01234567"
+      | .docs["docs/workflows.md"] |= (del(.code_oids) | .code_commit = null)' \
+    docs/.doc-index.json > docs/.i1.tmp
+  mv docs/.i1.tmp docs/.doc-index.json
+  _i1_commit index
+  echo v2 > src/index.js
+  _i1_commit v2
+  local cf
+  cf=$("$DOC_TOOLS" check-freshness)
+  assert_eq "stale|null|src/" "$(_i1_verdict "$cf" docs/architecture.md)" "v3 entry, absent commit: commits_behind null"
+  assert_eq "stale|null|src/" "$(_i1_verdict "$cf" docs/workflows.md)" \
+    "legacy entry, null code_commit: commits_behind null, and the refs with history are listed"
+  teardown
+}
+
+test_i1_mixed_v2_v3_index() {
+  echo "test: I-1: a mixed v2/v3 index: legacy entries keep the commit logic; the first write bumps schema_version to 3"
+  setup
+  echo "# w" > docs/workflows.md
+  _i1_commit w
+  printf '%s\n' "docs/architecture.md:src/:architecture" "docs/workflows.md:src/:workflows" | "$DOC_TOOLS" build-index
+  # architecture.md becomes a legacy entry in a v2 index.
+  jq '.schema_version = 2 | .docs["docs/architecture.md"] |= del(.code_oids)' docs/.doc-index.json > docs/.i1.tmp
+  mv docs/.i1.tmp docs/.doc-index.json
+  _i1_commit "v2 index"
+  echo v2 > src/index.js
+  _i1_commit v2
+  git revert --no-edit HEAD >/dev/null
+  local cf before wf
+  cf=$("$DOC_TOOLS" check-freshness)
+  assert_eq "stale|2|src/" "$(_i1_verdict "$cf" docs/architecture.md)" \
+    "legacy entry (no code_oids): the commit logic still applies (stale after a revert; 2 commits behind)"
+  assert_eq "current|0|" "$(_i1_verdict "$cf" docs/workflows.md)" "v3 entry in the same index: content logic (current)"
+  cp docs/.doc-index.json docs/.i1.before
+  "$DOC_TOOLS" remove-entry docs/nope.md >/dev/null 2>&1
+  assert_exit_code 0 "a no-op write leaves the v2 index byte-identical" cmp -s docs/.i1.before docs/.doc-index.json
+  wf=$(jq -c '.docs["docs/workflows.md"]' docs/.doc-index.json)
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.schema_version' "3" "the first write bumps schema_version to 3"
+  assert_json_field "$json" '.docs["docs/architecture.md"].code_oids["src/"]' "$(git rev-parse HEAD:src)" \
+    "the re-verified legacy entry now has code_oids"
+  assert_eq "$wf" "$(jq -c '.docs["docs/workflows.md"]' docs/.doc-index.json)" "the other entry is untouched"
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" "re-verified: current"
+  # A pre-v2 header ("version": 1) is replaced by schema_version on the first write.
+  jq '{version: 1} + del(.schema_version)' docs/.doc-index.json > docs/.i1.tmp
+  mv docs/.i1.tmp docs/.doc-index.json
+  echo "more" >> docs/workflows.md
+  "$DOC_TOOLS" update-index docs/workflows.md >/dev/null 2>&1
+  assert_json_field "$(cat docs/.doc-index.json)" 'keys_unsorted | .[0]' "schema_version" "a version-1 header gets schema_version first"
+  assert_json_field "$(cat docs/.doc-index.json)" 'has("version")' "false" "…and loses the legacy version key"
+  rm -f docs/.i1.before
+  teardown
+}
+
+test_i1_glob_looking_refs_are_literal() {
+  echo "test: I-1: code refs are literal paths: glob characters warn at write time and never glob in git"
+  setup
+  printf 'lit\n' > 'src/a*.js'
+  echo abc > src/abc.js
+  _i1_commit files
+  local lit_commit
+  lit_commit=$(git rev-parse HEAD)
+  echo "abc2" >> src/abc.js
+  _i1_commit "abc only"
+  local err json
+  err=$(echo "docs/architecture.md:src/a*.js:architecture" | "$DOC_TOOLS" build-index 2>&1) || true
+  json=$(cat docs/.doc-index.json)
+  assert_contains "$err" "glob" "build-index warns about a glob-looking ref"
+  assert_json_field "$json" '.docs["docs/architecture.md"].code_commit' "$lit_commit" \
+    "code_commit is the literal file's last commit (a glob would have matched src/abc.js)"
+  assert_json_field "$json" '.docs["docs/architecture.md"].code_oids["src/a*.js"]' "$(git rev-parse 'HEAD:src/a*.js')" \
+    "code_oids holds the literal file's blob"
+  _i1_commit index
+  echo "abc3" >> src/abc.js
+  _i1_commit "abc again"
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" \
+    "a change to src/abc.js does not touch the literal ref"
+  echo "lit2" >> 'src/a*.js'
+  _i1_commit "lit change"
+  assert_eq "stale|1|src/a*.js" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" \
+    "a change to the literal file is stale"
+  echo "# w" > docs/workflows.md
+  err=$(echo "docs/workflows.md:src/?.js:workflows" | "$DOC_TOOLS" add-entry 2>&1) || true
+  assert_contains "$err" "glob" "add-entry warns about a glob-looking ref"
+  err=$("$DOC_TOOLS" update-index docs/architecture.md 2>&1) || true
+  assert_contains "$err" "glob" "update-index warns about a glob-looking ref"
+  teardown
+}
+
+test_i1_index_file_is_not_part_of_a_ref() {
+  echo "test: I-1: refs covering docs/ or the repo root ignore the doc-index itself"
+  setup
+  echo "# w" > docs/workflows.md
+  _i1_commit w
+  printf '%s\n' "docs/architecture.md:.:architecture" "docs/workflows.md:docs/:workflows" | "$DOC_TOOLS" build-index
+  _i1_commit index
+  local cf
+  cf=$("$DOC_TOOLS" check-freshness)
+  assert_eq "current|0|" "$(_i1_verdict "$cf" docs/architecture.md)" "ref '.': current after committing the index"
+  assert_eq "current|0|" "$(_i1_verdict "$cf" docs/workflows.md)" "ref 'docs/': current after committing the index"
+  echo "## more" >> docs/architecture.md
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
+  _i1_commit "doc + index"
+  cf=$("$DOC_TOOLS" check-freshness)
+  assert_eq "current|0|" "$(_i1_verdict "$cf" docs/architecture.md)" "ref '.': re-verified under the lock, committed: current"
+  assert_eq "stale" "$(_i1_verdict "$cf" docs/workflows.md | cut -d'|' -f1)" \
+    "ref 'docs/': another doc in docs/ changed, so stale"
+  teardown
+}
+
+test_i1_ref_without_code_oids_is_unverified() {
+  echo "test: I-1: a ref that code_oids does not cover (added to code_refs by hand) is unverified: stale"
+  setup
+  echo a > src/a.js
+  _i1_commit a
+  echo "docs/architecture.md:src/index.js:architecture" | "$DOC_TOOLS" build-index
+  # Last in code_refs, so its (empty) stored id is the record's final field.
+  jq '.docs["docs/architecture.md"].code_refs += ["src/a.js"]' docs/.doc-index.json > docs/.i1.tmp
+  mv docs/.i1.tmp docs/.doc-index.json
+  _i1_commit index
+  local rc=0 out
+  out=$("$DOC_TOOLS" check-freshness 2>&1) || rc=$?
+  assert_eq "0" "$rc" "check-freshness exits 0 (stderr/stdout: ${out:0:200})"
+  assert_eq "stale|1|src/a.js" "$(_i1_verdict "$out" docs/architecture.md)" "only the unverified ref is listed"
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" \
+    "update-index records it: current"
+  teardown
+}
+
+test_i1_move_entry_preserves_code_oids() {
+  echo "test: I-1: move-entry carries code_oids over unchanged"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local oids
+  oids=$(jq -c '.docs["docs/architecture.md"].code_oids' docs/.doc-index.json)
+  git mv docs/architecture.md docs/arch.md 2>/dev/null || mv docs/architecture.md docs/arch.md
+  "$DOC_TOOLS" move-entry docs/architecture.md docs/arch.md >/dev/null 2>&1
+  assert_eq "$oids" "$(jq -c '.docs["docs/arch.md"].code_oids' docs/.doc-index.json)" "code_oids preserved"
+  assert_true "precondition: code_oids is a non-empty object" test "$oids" != "null"
+  teardown
+}
+
+# The sweep measured 117 s at N=4,000 / H=3,000: every doc paid its own
+# `git rev-list` walks. Content identity is one batch-check for the whole index,
+# plus one `git rev-list --count` per stale (code_commit, refs) group.
+test_i1_check_freshness_scale() {
+  local n=2000 h=500 k=3 dirs=100
+  echo "test: I-1: check-freshness over $n docs and $h commits: < 5 s, git spawns independent of N"
+  setup
+  # One fast-import: $dirs x 20 files, then $h commits touching one file each.
+  {
+    printf 'commit refs/heads/main\ncommitter T <t@t> 1600000000 +0000\ndata <<EOT\nfiles\nEOT\nfrom refs/heads/main^0\n'
+    local m=0 f c
+    while [ "$m" -lt "$dirs" ]; do
+      f=0
+      while [ "$f" -lt 20 ]; do
+        printf 'M 100644 inline src/m%d/f%d.js\ndata <<EOT\nv0\nEOT\n' "$m" "$f"
+        f=$((f + 1))
+      done
+      m=$((m + 1))
+    done
+    c=1
+    while [ "$c" -lt "$h" ]; do
+      printf 'commit refs/heads/main\ncommitter T <t@t> %d +0000\ndata <<EOT\nc%d\nEOT\n' $((1600000000 + c)) "$c"
+      printf 'M 100644 inline src/m%d/f%d.js\ndata <<EOT\nv%d\nEOT\n' $((c % dirs)) $((c % 20)) "$c"
+      c=$((c + 1))
+    done
+  } | git fast-import --quiet
+  git reset -q --hard
+  mkdir -p docs/s
+  local i=0 map
+  map=$(harness_mktemp i1-scale-map)
+  while [ "$i" -lt "$n" ]; do
+    printf '# d%d\n' "$i" > "docs/s/d$i.md"
+    printf 'docs/s/d%d.md:src/m%d/:guide\n' "$i" $((i % dirs))
+    i=$((i + 1))
+  done > "$map"
+  _i1_commit docs
+  local t0 build_s
+  t0=$(date +%s)
+  "$DOC_TOOLS" build-index < "$map" 2>/dev/null
+  build_s=$(( $(date +%s) - t0 ))
+  _i1_commit index
+  i=0
+  while [ "$i" -lt "$k" ]; do
+    echo "changed" >> "src/m$i/f0.js"
+    i=$((i + 1))
+  done
+  _i1_commit change
+  assert_true "precondition: history has >= $h commits ($(git rev-list --count HEAD))" \
+    test "$(git rev-list --count HEAD)" -ge "$h"
+  local shims out rc=0 elapsed git_n jq_n
+  shims=$(_i1_count_shims git jq)
+  t0=$(date +%s)
+  out=$(PATH="$shims:$PATH" "$DOC_TOOLS" check-freshness) || rc=$?
+  elapsed=$(( $(date +%s) - t0 ))
+  git_n=$(grep -c '^git$' "$shims/spawns" || true)
+  jq_n=$(grep -c '^jq$' "$shims/spawns" || true)
+  assert_eq "0" "$rc" "check-freshness exits 0"
+  assert_json_field "$out" '.summary | "\(.current) \(.stale)"' "$((n - k * n / dirs)) $((k * n / dirs))" \
+    "exactly the docs covering the $k changed directories are stale"
+  # Whole seconds: <= 4 measured guarantees < 5 s real.
+  assert_true "check-freshness took ${elapsed}s for $n docs x $h commits (< 5 s; build-index took ${build_s}s)" \
+    test "$elapsed" -le 4
+  # Fixed git calls (repository check, HEAD, tree, one batch-check) plus one
+  # rev-list --count per stale (code_commit, refs) group — $k here — and none
+  # per current doc.
+  assert_true "check-freshness spawned $git_n git processes (budget 6 + $k stale groups)" \
+    test "$git_n" -le $((6 + k))
+  assert_true "check-freshness spawned $jq_n jq processes (budget 10)" test "$jq_n" -le 10
+  teardown
+}
+
+# The writers' per-key work was quadratic in the number of keys: a
+# newline-framed `case` lookup per key in every report, and — under bash 3.2,
+# which copies the caller's "$@" on every function call — any loop calling a
+# function while "$@" held the paths. Every writer now reports from one
+# classification its own jq pass makes, and clears "$@" once it has the paths.
+# Measured at 4,000 keys under bash 3.2 (M-series laptop), before → after:
+# update-index 20 s → 4.4 s, deprecate-entry / remove-entry 14-15 s → 1.3 s,
+# add-entry (one git walk and one hash per key) 63 s → 6.2 s. The budgets are
+# about 3x the linear times, and below the quadratic ones on bash 3.2 (the
+# interpreter where the quadratic cost bites; under bash 5 the old code took
+# 6 / 4 / 4 / 52 s, so there only the add-entry budget discriminates).
+test_i1_writer_reports_are_linear() {
+  local k=4000
+  echo "test: I-1: add-entry / update-index / deprecate-entry / remove-entry of $k keys stay linear"
+  setup
+  mkdir -p docs/k
+  local i=0 map paths=()
+  map=$(harness_mktemp i1-wr-map)
+  while [ "$i" -lt "$k" ]; do
+    printf '# k%d\n' "$i" > "docs/k/k$i.md"
+    printf 'docs/k/k%d.md:src/:guide\n' "$i"
+    paths+=("docs/k/k$i.md")
+    i=$((i + 1))
+  done > "$map"
+  _i1_commit docs
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local t0 s_add s_upd s_dep s_rem out
+  t0=$(date +%s)
+  out=$("$DOC_TOOLS" add-entry < "$map" 2>&1) || true
+  s_add=$(( $(date +%s) - t0 ))
+  assert_contains "$out" "Added $k entries:" "add-entry reports $k added"
+  echo "v2" >> src/index.js
+  _i1_commit v2
+  t0=$(date +%s)
+  out=$("$DOC_TOOLS" update-index "${paths[@]}" 2>&1) || true
+  s_upd=$(( $(date +%s) - t0 ))
+  assert_contains "$out" "Refreshed $k entries:" "update-index reports $k refreshed"
+  t0=$(date +%s)
+  out=$("$DOC_TOOLS" deprecate-entry "${paths[@]}" docs/nope.md 2>&1) || true
+  s_dep=$(( $(date +%s) - t0 ))
+  assert_contains "$out" "Deprecated $k entries:" "deprecate-entry reports $k deprecated"
+  assert_contains "$out" "SKIP: 'docs/nope.md' not found in index." "…and the absent key as not found"
+  t0=$(date +%s)
+  out=$("$DOC_TOOLS" remove-entry "${paths[@]}" 2>&1) || true
+  s_rem=$(( $(date +%s) - t0 ))
+  assert_contains "$out" "Removed $k entries:" "remove-entry reports $k removed"
+  assert_true "add-entry of $k keys took ${s_add}s (budget 20 s)" test "$s_add" -le 20
+  assert_true "update-index of $k keys took ${s_upd}s (budget 14 s)" test "$s_upd" -le 14
+  assert_true "deprecate-entry of $k keys took ${s_dep}s (budget 5 s)" test "$s_dep" -le 5
+  assert_true "remove-entry of $k keys took ${s_rem}s (budget 5 s)" test "$s_rem" -le 5
   teardown
 }
 
@@ -3454,6 +4023,25 @@ run_tests() {
   test_i4_hostile_names_and_stored_values
   test_i4_option_spec_is_not_glob_expanded
   test_i4_arity_errors_exit_2
+
+  # --- Content identity: code_oids and --tree (sweep 05ea982 I-1) ---
+  test_i1_writers_record_code_oids
+  test_i1_squash_merge_is_current
+  test_i1_rebase_merge_is_current
+  test_i1_cherry_pick_is_current
+  test_i1_revert_to_verified_bytes_is_current
+  test_i1_code_doc_and_update_index_in_one_commit
+  test_i1_staged_change_seen_via_tree
+  test_i1_shallow_clone
+  test_i1_code_refs_changed_is_exact
+  test_i1_commits_behind_null_when_unreachable
+  test_i1_mixed_v2_v3_index
+  test_i1_glob_looking_refs_are_literal
+  test_i1_index_file_is_not_part_of_a_ref
+  test_i1_ref_without_code_oids_is_unverified
+  test_i1_move_entry_preserves_code_oids
+  test_i1_check_freshness_scale
+  test_i1_writer_reports_are_linear
 
   print_summary
 }
