@@ -138,8 +138,13 @@ Resolved by Task 5 of the fix plan. Writing an entry and verifying its doc are n
   cannot supersede itself.
 - **`set-code-refs <doc> --refs a,b`** (GH #18) edits `code_refs` in place.
   - The entry keeps its key position, its field order, and every other field.
+  - The same list of paths is a no-op (`src` is a stored `src/`).
   - `code_oids` is re-derived: a ref the entry already had keeps its recorded id, and a new ref is
-    recorded as `add-entry` records it.
+    recorded as `add-entry` records it. A pre-v3 entry's recorded id is the ref's content in the
+    stored `code_commit` (fix round 1).
+  - `code_commit` is re-derived as `add-entry` derives it once any ref is recorded from the doc's
+    last commit, so `commits_behind` can over-count but is never a masked 0. It is kept when refs
+    are only removed or re-spelled.
   - `--refs ''` clears the refs.
   - The `update-index` missing-file advice and `add-entry`'s SKIP now name it.
 - **`move-entry --stdin`** (PR #16 Option A) reads one `<old><TAB><new>` pair per line.

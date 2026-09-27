@@ -1783,13 +1783,16 @@ move-entry|cmd_move_entry|repo|stdin
   Every pair is checked first; one bad pair writes nothing (exit 1).
 set-code-refs|cmd_set_code_refs|repo|refs=
   <doc_path> --refs <ref>[,<ref>...]
-  Replace an indexed doc's code_refs in place (--refs '' leaves none). Not
-  a verification: the entry keeps its position and every other field
-  (last_verified, content_hash, code_commit, status, …). code_oids is
-  re-derived: a ref the entry already had keeps its recorded content; a
-  new one is recorded as add-entry records it (as of the doc's last
-  commit), so the doc reads stale if that code changed since, until
-  update-index verifies it. Refs are parsed like a mapping line's.
+  Replace an indexed doc's code_refs in place (--refs '' leaves none); the
+  same refs (compared as paths) write nothing. Not a verification: the
+  entry keeps its position and every other field (last_verified,
+  content_hash, status, …). code_oids is re-derived: a ref the entry
+  already had keeps its recorded content (for a pre-v3 entry, the content
+  in its code_commit); a new one is recorded as add-entry records it (as
+  of the doc's last commit), so the doc reads stale if that code changed
+  since, until update-index verifies it. code_commit is kept unless some
+  ref was recorded that way; then it is re-derived as add-entry derives
+  it. Refs are parsed like a mapping line's.
 deprecate-entry|cmd_deprecate_entry|repo|superseded-by=
   [--superseded-by <doc_path>] <doc_path>...
   Mark entries deprecated, optionally naming the doc that supersedes them;
@@ -3137,6 +3140,39 @@ cmd_set_code_refs() {
     exit 1
   fi
 
+  # What the entry has: its refs compared as paths ("src" is a stored
+  # "src/"; a legacy "" is no ref), whether it records code_oids (else it is
+  # a pre-v3 entry), and its code_commit — then one flag per new ref: 1 if
+  # the entry already had it. The same list is a no-op: nothing is written.
+  local plan="$_SCRATCH/set-code-refs.plan" verdict mode cc flag kept=() i=0
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  jq -r --arg k "$doc_path" --arg refs "$joined" "$_JQ_CODE_OIDS"'
+    def segs: split("/") | map(select(. != "" and . != "."));
+    def normref: segs | if length == 0 then "." else join("/") end;
+    .docs[$k] as $e
+    | ($refs | fields_list) as $R
+    | [($e.code_refs // []) | if type == "array" then .[] else empty end
+       | select(type == "string" and . != "") | normref] as $S
+    | (reduce $S[] as $s ({}; .[$s] = true)) as $has
+    | (if ($R | map(normref)) == $S then "noop" else "write" end),
+      (if ($e.code_oids | type) == "object" then "oids" else "legacy" end),
+      ($e.code_commit // "" | tostring | split("\n") | join(" ")),
+      ($R[] | if $has[normref] then "1" else "0" end)' < "$snap" > "$plan" \
+    || _die "cannot read '$doc_path' from $INDEX_FILE"
+  {
+    IFS= read -r verdict
+    IFS= read -r mode
+    IFS= read -r cc
+    while IFS= read -r flag; do
+      [ "$flag" != 1 ] || kept+=("${_E_REFS[$i]}")
+      i=$((i + 1))
+    done
+  } < "$plan"
+  if [ "$verdict" = noop ]; then
+    _report_keys "Unchanged" "(code_refs already as given; nothing written)" "$doc_path"
+    return 0
+  fi
+
   # A new ref is recorded as add-entry records one: as of the doc's own last
   # commit (the working tree for a doc git has never committed). The entry is
   # not re-verified, so nothing else about it changes.
@@ -3144,26 +3180,57 @@ cmd_set_code_refs() {
   _FACT_REFSETS=("$joined")
   _entry_facts 1 doc
 
+  # A ref the entry already had keeps its recorded content (it may have been
+  # verified): its code_oids id, or — for a pre-v3 entry, which records
+  # content only as code_commit (the newest commit touching the refs when it
+  # was verified) — its object id in that commit's tree, looked up the way
+  # every ref is (_oid_lookup). Without a usable code_commit (absent, not an
+  # object id, not in this repository) it is recorded like a new ref.
+  local lrefs="" loids="" lfile="$_SCRATCH/set-code-refs.kept" lout="$_SCRATCH/set-code-refs.kept.oids" x
+  if [ "$mode" = legacy ] && [ ${#kept[@]} -gt 0 ] && _is_oid "$cc" \
+      && git cat-file -e "$cc^{commit}" 2>/dev/null; then
+    printf '%s\n' "${kept[@]}" > "$lfile"
+    _oid_lookup "$cc" "$lfile" "$lout" 1
+    for x in "${kept[@]}"; do
+      lrefs="${lrefs:+$lrefs$'\x1f'}$x"
+    done
+    while IFS= read -r x; do
+      loids="${loids:+$loids$'\x1f'}$x"
+    done < "$lout"
+  fi
+
   # code_refs replaced in place (a `+=` merge keeps every field's position);
-  # code_oids re-derived: a ref the entry already had — compared as a path,
-  # so "src" matches a stored "src/" — keeps its recorded content (it may
-  # have been verified), and a new one takes the object id just derived.
+  # code_oids re-derived: a kept ref keeps its recorded content, and a new
+  # one takes the object id just derived from the doc's last commit.
+  # code_commit is kept while every ref's content is one the entry recorded
+  # (refs only removed or re-spelled). Once any ref is recorded from the
+  # doc's last commit (one was added, or had no recorded content), the
+  # stored code_commit may be newer than that baseline, and commits_behind
+  # counted from it would miss the commits since: a masked 0. It is then
+  # re-derived as add-entry derives it, which may over-count but never
+  # under-counts.
   local patch="$_SCRATCH/set-code-refs.jsonl"
   # shellcheck disable=SC2016  # jq program, not shell expansion
-  jq -c -n --arg k "$doc_path" --arg refs "$joined" --arg oids "${_FACT_OIDS[0]}" --slurpfile idx "$snap" \
+  jq -c -n --arg k "$doc_path" --arg refs "$joined" --arg oids "${_FACT_OIDS[0]}" \
+    --arg lrefs "$lrefs" --arg loids "$loids" --arg fc "${_FACT_COMMIT[0]}" --slurpfile idx "$snap" \
     "$_JQ_CODE_OIDS"'
     def segs: split("/") | map(select(. != "" and . != "."));
     def normref: segs | if length == 0 then "." else join("/") end;
     ($refs | fields_list) as $R
     | ($oids | fields_list) as $O
-    | ($idx[0].docs[$k].code_oids) as $old
-    | (if ($old | type) == "object"
-       then reduce ($old | to_entries[] | select((.value | type) == "string")) as $e
-              ({}; if has($e.key | normref) then . else .[$e.key | normref] = $e.value end)
-       else {} end) as $kept
-    | {key: $k, merge: {code_refs: $R,
-        code_oids: ([range(0; $R | length) as $j
-                     | {key: $R[$j], value: ($kept[$R[$j] | normref] // $O[$j])}] | from_entries)}}' \
+    | ($lrefs | fields_list) as $LR
+    | ($loids | fields_list) as $LO
+    | ($idx[0].docs[$k]) as $e
+    | (if ($e.code_oids | type) == "object"
+       then reduce ($e.code_oids | to_entries[] | select((.value | type) == "string")) as $x
+              ({}; if has($x.key | normref) then . else .[$x.key | normref] = $x.value end)
+       else reduce range(0; $LR | length) as $j ({}; .[$LR[$j] | normref] = $LO[$j]) end) as $kept
+    | [range(0; $R | length) as $j
+       | {key: $R[$j], kept: ($kept[$R[$j] | normref] // null), fresh: $O[$j]}] as $rows
+    | {key: $k, merge: ({code_refs: $R,
+        code_oids: ([$rows[] | {key: .key, value: (.kept // .fresh)}] | from_entries)}
+        + (if any($rows[]; .kept == null)
+           then {code_commit: (if $fc == "" then null else $fc end)} else {} end))}' \
     > "$patch" || _die "cannot assemble the update; $INDEX_FILE is unchanged."
   _index_apply --report "$_INDEX_PATCH" --slurpfile patch "$patch"
   case "${_INDEX_CLASSES:0:1}" in
