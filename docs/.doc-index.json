@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-27T06:43:37Z",
+  "generated_at": "2026-09-27T06:52:19Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -468,36 +468,36 @@
       "last_verified": "2026-07-30T01:57:08Z"
     },
     "docs/plans/2026-09-27-full-repo-05ea982-audit-findings.md": {
-      "content_hash": "sha256:9109a4fcabfc459b52c7bcc1e780e975b687ff0e619b80e0710ba37b34747033",
+      "content_hash": "sha256:c1009c2cf64ab4cd76a7c3b2426f0e959a3b46b85ffe3a1299a70fbc623c629a",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "plan",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T06:43:37Z",
+      "last_verified": "2026-09-27T06:52:19Z",
       "implementation": []
     },
     "docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md": {
-      "content_hash": "sha256:6035ebf91a16da33e1bbd27cd533f0ca715a4991ee09a49c2e9d0a22fcd31a4d",
+      "content_hash": "sha256:295e16b9d478e16fa6f1081335c446678ded50053e5370fdbb881a423b42dcc5",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "plan",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T06:43:37Z",
+      "last_verified": "2026-09-27T06:52:19Z",
       "implementation": []
     },
     "docs/plans/2026-09-27-full-repo-05ea982-jumping-off-point.md": {
-      "content_hash": "sha256:18cc5a926e5d15f2e2cfe457f8b70ca6f43ca22804d7f55a7085b80cec3f7251",
+      "content_hash": "sha256:f8ca568735fe64057e9c79a0627329562c87716cb565c6aa720f65e25a4343cd",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "plan",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T06:43:37Z",
+      "last_verified": "2026-09-27T06:52:19Z",
       "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I01-freshness-identity-model.md": {
@@ -521,14 +521,15 @@
       "last_verified": "2026-09-27T06:12:33Z"
     },
     "docs/issues/2026-09-27-sweep-05ea982-I03-index-semantics.md": {
-      "content_hash": "sha256:2b1aa0dde41934bb06730ffc7610b23e6a102a6af4306375acd5265f85e75245",
+      "content_hash": "sha256:65e09a13c47737d5fba8fe4c63bf5078ede335626951943d8170d4a63a98ff8b",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T06:12:33Z"
+      "last_verified": "2026-09-27T06:52:19Z",
+      "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I04-doc-tools-input-cli-robustness.md": {
       "content_hash": "sha256:62cf18fe63ab7053d414cc08445a598ed971982c720f8e14d573a54f2e3f4b90",
@@ -658,6 +659,16 @@
       "superseded_by": null,
       "last_verified": "2026-07-30T10:19:03Z",
       "implementation": []
+    },
+    "docs/plans/2026-09-27-full-repo-05ea982-evidence.md": {
+      "content_hash": "sha256:eafd362d26a61b172066c2d37e0c6c91581e58f6d4077483bc65c9e3f2329832",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "plan",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:52:19Z"
     }
   }
 }
