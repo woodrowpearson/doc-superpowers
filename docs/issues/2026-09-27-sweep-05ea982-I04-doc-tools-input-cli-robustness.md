@@ -1,6 +1,6 @@
 ---
 date: 2026-09-27
-status: Open
+status: Resolved
 priority: P1
 type: bug
 component: doc-tools
@@ -114,8 +114,75 @@ no history", and "the inline `check-freshness` copy equals `compute_freshness`".
 
 ## Acceptance criteria
 
-- [ ] Every Step-1 test in fix plan Task 3 passes.
-- [ ] `check-freshness` and `status` agree on every fixture.
-- [ ] `--help` exits 0 and lists every dispatchable verb.
-- [ ] `SKILL.md` tooling table and `references/doc-spec.md` describe the flag grammar, `--force` and
+- [x] Every Step-1 test in fix plan Task 3 passes.
+- [x] `check-freshness` and `status` agree on every fixture.
+- [x] `--help` exits 0 and lists every dispatchable verb.
+- [x] `SKILL.md` tooling table and `references/doc-spec.md` describe the flag grammar, `--force` and
   `--code-refs-from`.
+
+## Resolution (Task 3)
+
+Resolved by Task 3 of the fix plan. `scripts/doc-tools.sh` now has one path for each kind of input:
+
+- **One verb table (`_VERBS`).** The dispatcher (`_main`) and the usage text are both generated
+  from it, so a verb exists only if it has a row, and `--help` cannot omit one. `--help`, `-h` and
+  `help [<verb>]` exit 0 anywhere, and need neither jq nor git. No subcommand, or an unknown one,
+  exits 2 and names it.
+- **One argument loop (`_parse_args`).** `--opt VALUE` and `--opt=VALUE` are the same and may
+  appear anywhere; `--` ends the options. An option the verb does not take, an option missing its
+  value, or an argument to a verb that takes none exits 2 before anything is read or written.
+  `deprecate-entry <old> --superseded-by <new>` deprecates only `<old>`.
+- **One mapping-line parser (`_entry_from_line`).** It uses `IFS=: read -r path refs type extra`
+  on the line minus its trailing CR, and rejects a bare path and a line with more than three
+  fields (so a path with `:` in it). Refs are split once, trimmed, and empty ones dropped; that one
+  array is stored and handed to git. A ref that matches no tracked file draws a warning (one
+  `git ls-files` per batch). A key listed twice keeps its first line, in both `build-index` and
+  `add-entry`.
+- **`build-index`** exits 1 on zero mapping lines. It refuses to replace an index with entries
+  unless given `--force`. It checks this before reading stdin, and again under the lock. A
+  missing or malformed index is still rebuilt: that is the recovery path.
+- **One freshness evaluation (`_freshness_scan`)** serves `check-freshness` and `status`. One jq
+  pass extracts every entry as a NUL-terminated record whose fields are joined with
+  `\u001f` and read with `IFS=$'\x1f'`. bash evaluates each record (`_freshness_eval`, still the
+  commit-based model; T4 swaps in content identity), and one jq pass renders the verdicts. No jq
+  runs per entry: 3N + 4 jq spawns became 4.
+- **`--code-refs` matches by path segment:** equal, the ref above the path, or the path above the
+  ref, with `.` meaning the root. An empty list keeps nothing. `--code-refs-from <file|->` takes
+  the same list one path per line, with no argv limit, for hooks (T7) and CI (T9).
+- **git.** `_main` checks `git rev-parse --git-dir` once for repository verbs (exit 2 outside a
+  work tree). Every git call's exit status is checked. Plumbing replaces porcelain
+  (`git rev-list -1 <HEAD> -- <refs>`, `git rev-parse --verify -q HEAD^{commit}`), so
+  `log.showSignature` cannot leak into `code_commit`, and an unborn HEAD gives
+  `build_commit: null` and `repo_head: null`. A stored `code_commit` reaches git only if it is a
+  full hex object id.
+- **Paths.** `hash_file` hashes stdin, so a `\` in a name and a doc named `-` are safe.
+  `docs//x.md` normalizes to `docs/x.md`. A path starting with `-` is refused. Repeated targets
+  of `update-index`, `remove-entry` and `deprecate-entry` count once.
+- **`update-index`** reports an unknown key, applies the rest, then exits 1.
+
+Pinned by the `test_i4_*` tests in `scripts/test-doc-tools.sh`, plus the updated
+`test_no_args_prints_usage`, `test_unknown_subcommand_prints_usage`, `test_help_flag` and
+`test_build_index_empty_stdin`. RED against the pre-fix script: 122 of 167 assertions failed under
+bash 5.3 and /bin/bash 3.2.
+
+Behaviour changes that ship with this fix:
+
+- `--help` exits 0. No subcommand, an unknown subcommand, or an unknown option exits 2, as does a
+  repository verb run outside a git work tree. `fragments merge` already did.
+- `build-index` needs `--force` over a non-empty index, and fails on empty input.
+- `check-freshness` rejects positional arguments. A `--code-refs` value that is empty matches
+  nothing.
+- `update-index` no longer aborts the batch on an unknown key.
+- A deprecated entry's `check-freshness` result gains `last_verified`, matching `status`.
+- `untracked_docs` is sorted bytewise (`LC_ALL=C`).
+- The `add-entry` rejection line reads `Rejected N invalid mapping line(s)`.
+
+The prompt layer changed in the same Task:
+
+- `skills/doc-superpowers/SKILL.md`: the tooling table, plus the *Command line*, *Mapping
+  lines* and *Scoping by changed files* paragraphs; `init` step 12; `review-pr` steps 2–3; the
+  untracked-docs row.
+- `references/doc-spec.md`: *Writing entries*, *Command line*, and the `build_commit` row.
+- The `spec-generate` bootstrap and step 8 in `references/spec-lifecycle-actions.md`,
+  `references/spec-lifecycle-protocol.md` and `docs/workflows/doc-superpowers.md`.
+- The *Command line* section of `docs/codebase-guide.md`.

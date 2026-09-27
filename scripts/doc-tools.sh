@@ -52,12 +52,24 @@ check_deps() {
 
 # --- Utility functions ---
 
-hash_file() {
+# SHA-256 of a file's bytes into _HASH as "sha256:<hex>" — one process, no
+# subshell. The file is read on stdin, never named on the command line: as an
+# argument, a name containing "\" made GNU sha256sum / shasum prefix the digest
+# with "\" (invalid index JSON), and a doc named "-" hashed stdin itself — in
+# check-freshness that drained the record stream the loop was reading.
+_hash_one() {
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
+    _HASH=$(sha256sum < "$1") || _die "cannot hash $1"
   else
-    shasum -a 256 "$1" | awk '{print $1}'
+    _HASH=$(shasum -a 256 < "$1") || _die "cannot hash $1"
   fi
+  _HASH="sha256:${_HASH%% *}"
+}
+
+# The bare hex digest of a file (no "sha256:" prefix).
+hash_file() {
+  _hash_one "$1"
+  printf '%s\n' "${_HASH#sha256:}"
 }
 
 # Resolve a GNU-compatible sed binary.
@@ -79,8 +91,77 @@ iso_now() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
 
-repo_head() {
-  git rev-parse HEAD 2>/dev/null || echo "unknown"
+# Remove leading/trailing whitespace from $1 into _TRIMMED (no subshell).
+_trim() {
+  _TRIMMED="${1#"${1%%[![:space:]]*}"}"
+  _TRIMMED="${_TRIMMED%"${_TRIMMED##*[![:space:]]}"}"
+}
+
+# --- git ------------------------------------------------------------------------
+#
+# Every git call's exit status is checked: a failed call is an error, never "no
+# history". (Outside a repository, check-freshness used to report every doc
+# current with rc 0, because each `git log … || true` read as "never changed".)
+# The dispatcher refuses a repository verb outside a work tree up front, so the
+# one legitimate "no history" left is an unborn HEAD. Plumbing (rev-list,
+# rev-parse), never porcelain `git log`: porcelain honours user config such as
+# log.showSignature, which prefixed code_commit with "No signature\n".
+
+_HEAD=""        # this run's HEAD commit; "" on an unborn branch
+_HEAD_DONE=0
+
+# Resolve HEAD once per run, so every lookup in the run sees the same commit.
+_head_init() {
+  [ "$_HEAD_DONE" = 0 ] || return 0
+  local rc=0
+  _HEAD=$(git rev-parse --verify -q 'HEAD^{commit}') || rc=$?
+  case "$rc" in
+    0) ;;
+    1) _HEAD="" ;;   # unborn HEAD: no commits yet
+    *) _die "git rev-parse HEAD failed (rc=$rc)" ;;
+  esac
+  _HEAD_DONE=1
+}
+
+# True if $1 is a full hex object id (SHA-1 or SHA-256). A stored code_commit
+# is only ever handed to git after this check: an index value such as
+# "--output=x" otherwise reached `git rev-list` as an option and wrote a file.
+_is_oid() {
+  # An explicit list, not [0-9a-f]: bash 3.2 matches a bracket RANGE by the
+  # locale's collation order, so a-f could admit other letters.
+  case "$1" in
+    ''|*[!0123456789abcdef]*) return 1 ;;
+  esac
+  [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]
+}
+
+# The newest commit reachable from HEAD that touches any of the given
+# pathspecs, into _LAST ("" when none has, or HEAD is unborn). The refs follow
+# `--`, so none can be read as an option. Dies if git fails.
+_git_last_commit() {
+  _LAST=""
+  [ $# -gt 0 ] || return 0
+  _head_init
+  [ -n "$_HEAD" ] || return 0
+  _LAST=$(git rev-list -1 "$_HEAD" -- "$@") || _die "git rev-list failed for code refs: $*"
+}
+
+# Commits in <base>..HEAD touching the refs, into _BEHIND. <base> must pass
+# _is_oid. A base the repository no longer has (squash-merged away, shallow
+# clone) keeps the legacy value 0; any other git failure dies.
+_git_commits_behind() {
+  local base="$1"
+  shift
+  _BEHIND=0
+  [ $# -gt 0 ] || return 0
+  _head_init
+  [ -n "$_HEAD" ] || return 0
+  if ! _BEHIND=$(git rev-list --count "$base..$_HEAD" -- "$@" 2>/dev/null); then
+    if git cat-file -e "$base^{commit}" 2>/dev/null; then
+      _die "git rev-list --count $base..HEAD failed for code refs: $*"
+    fi
+    _BEHIND=0
+  fi
 }
 
 # --- Doc-path normalization ---
@@ -132,26 +213,42 @@ _physical_path() {
   printf '%s%s' "$p" "$suffix"
 }
 
-# Normalize a doc path to the working-tree-relative form used as the index key.
-# Prints the normalized path on stdout; on failure prints an error to stderr and
-# returns 1 so callers can refuse to write.
+# Normalize a doc path to the working-tree-relative form used as the index key,
+# into _NORM (no subshell). On failure prints an error to stderr and returns 1
+# so callers can refuse to write.
 #
-# An ordinary relative path — the documented input, and the form that already
-# works — is passed through byte-identically and never touches the filesystem.
-normalize_doc_path() {
+# A path may not start with "-" (it would read as an option to a later tool),
+# and "//" collapses to "/" (`docs//a.md` was stored as a second key for the
+# same file). Otherwise an ordinary relative path — the documented input — is
+# passed through byte-identically and never touches the filesystem.
+_norm_path() {
   local raw="$1"
   local ctx="${2:-doc path}"
+  _NORM=""
 
   if [ -z "$raw" ]; then
     echo "ERROR: empty $ctx." >&2
     return 1
   fi
+  case "$raw" in
+    -*)
+      echo "ERROR: $ctx '$raw' starts with '-'; index paths may not (it would read as an option)." >&2
+      return 1
+      ;;
+  esac
+  local dd='//' s='/'
+  while :; do
+    case "$raw" in
+      *//*) raw="${raw//$dd/$s}" ;;
+      *) break ;;
+    esac
+  done
 
   case "$raw" in
     /*) ;;
     *)
       # Fast path: already in key form.
-      _has_dot_segment "$raw" || { printf '%s' "$raw"; return 0; }
+      _has_dot_segment "$raw" || { _NORM="$raw"; return 0; }
       ;;
   esac
 
@@ -179,76 +276,198 @@ normalize_doc_path() {
       ;;
   esac
 
-  printf '%s' "$rel"
+  _NORM="$rel"
 }
 
-# Computes freshness for a single doc entry.
-# Args: doc_path entry_json
-# Outputs JSON with: status, doc_modified, commits_behind, and if stale: reason, code_refs_changed
-compute_freshness() {
-  local doc_path="$1"
-  local entry="$2"
+# Printing form of _norm_path: $(normalize_doc_path <path> [context]).
+normalize_doc_path() {
+  _norm_path "$@" || return 1
+  printf '%s' "$_NORM"
+}
 
-  local current_hash stored_hash doc_modified
-  current_hash="sha256:$(hash_file "$doc_path")"
-  stored_hash=$(echo "$entry" | jq -r '.content_hash')
-  [ "$current_hash" != "$stored_hash" ] && doc_modified=true || doc_modified=false
+# Print the entries of the argument list that occur more than once (byte
+# comparison), one per line; nothing when there are none. One sort, so a
+# repeat check stays O(n log n) — a newline-framed `case` membership test per
+# item is quadratic (4,000 keys: 34 s on bash 5, 109 s on bash 3.2).
+_repeated() {
+  [ $# -gt 1 ] || return 0
+  printf '%s\n' "$@" | LC_ALL=C sort | LC_ALL=C uniq -d
+}
 
-  local code_refs_arr=()
-  while IFS= read -r _ref; do
-    [[ -n "$_ref" ]] && code_refs_arr+=("$_ref")
-  done < <(echo "$entry" | jq -r '.code_refs[]' 2>/dev/null || true)
+# _first_occurrences <repeated-set> <item>… — the items minus every repeat of
+# an item listed in <repeated-set> (the output of _repeated), into _FIRST.
+_first_occurrences() {
+  local dups=$'\n'"$1"$'\n' seen=$'\n' item
+  shift
+  _FIRST=()
+  for item in "$@"; do
+    case "$dups" in
+      *$'\n'"$item"$'\n'*)
+        case "$seen" in
+          *$'\n'"$item"$'\n'*) continue ;;
+        esac
+        seen="$seen$item"$'\n'
+        ;;
+    esac
+    _FIRST+=("$item")
+  done
+}
 
-  local current_code_commit=""
-  if [ ${#code_refs_arr[@]} -gt 0 ]; then
-    current_code_commit=$(git log -1 --format=%H -- "${code_refs_arr[@]}" 2>/dev/null || true)
+# Normalize every path argument into _TARGETS, dying on the first bad one, and
+# drop repeats: `remove-entry a.md a.md` (or docs/a.md plus docs//a.md) names
+# ONE entry, and must be reported once.
+_targets_from_args() {
+  local raw norm=()
+  _TARGETS=()
+  for raw in "$@"; do
+    _norm_path "$raw" || exit 1
+    norm+=("$_NORM")
+  done
+  [ ${#norm[@]} -gt 0 ] || return 0
+  _first_occurrences "$(_repeated "${norm[@]}")" "${norm[@]}"
+  _TARGETS=("${_FIRST[@]}")
+}
+
+# --- Freshness: ONE implementation, shared by check-freshness and status ------
+#
+# check-freshness used to carry its own inline copy of the per-doc logic, and
+# the copy drifted: it split jq's @tsv records on tab, which bash treats as IFS
+# WHITESPACE, so an empty middle field (a null code_commit or content_hash, an
+# empty doc_type) collapsed and shifted every later column — stale docs read
+# as current; refs were re-split on "," and glob-expanded by the shell; a key
+# containing a tab was @tsv-escaped into a path that never existed. Both verbs
+# now run _freshness_scan, and the fields travel \x1f-separated (not
+# whitespace, so an empty field stays a field) in NUL-terminated records.
+#
+# The per-doc model is still commit-based: stale when the newest commit
+# touching the refs differs from the stored code_commit.
+
+# jq: every entry (or only $only) that passes the --code-refs filter, as
+#   key \x1f status \x1f doc_type \x1f last_verified \x1f content_hash
+#     \x1f code_commit \x1f <n refs> [\x1f ref]… \0
+# Refs are the stored strings minus empties (a legacy "" is not a path).
+#
+# Filter ($flt: the raw --code-refs list, one path per line, or null): an
+# entry is kept when a ref shares a path SEGMENT with a listed path: equal,
+# the ref a directory above the path, or the path a directory above the ref.
+# `src/m1` matches refs src/m1, src/m1/a.js and src/ — never src/m10 (the old
+# raw string prefix matched 260 of 400 docs where 40 were right). "." is the
+# repository root; an empty list keeps nothing. Sets, not a scan per pair.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_FRESH_EXTRACT='
+  def segs: split("/") | map(select(. != "" and . != "."));
+  def normref: segs | if length == 0 then "." else join("/") end;
+  def dirs: segs | . as $p | [range(1; ($p | length) + 1) as $i | $p[0:$i] | join("/")];
+  (if $flt == null then null
+   else ($flt | split("\n")
+         | map(if endswith("\r") then .[:-1] else . end | select(. != "") | normref)) as $F
+     | { empty: ($F | length == 0),
+         root: any($F[]; . == "."),
+         exact: (reduce $F[] as $f ({}; .[$f] = true)),
+         under: (reduce ($F[] | select(. != ".") | dirs[]) as $d ({}; .[$d] = true)) }
+   end) as $M
+  | def hit: normref as $n
+      | $M.root or $n == "." or ($M.under[$n] // false)
+        or any(($n | dirs[]); $M.exact[.] // false);
+  .docs
+  | (if $only == "" then to_entries[] else ({key: $only, value: .[$only]} | select(.value != null)) end)
+  | .key as $k
+  | .value as $v
+  | [($v.code_refs // []) | if type == "array" then .[] else empty end
+     | select(type == "string" and . != "")] as $refs
+  | select($M == null or (($M.empty | not) and any($refs[]; hit)))
+  | ([$k, ($v.status // "" | tostring), ($v.doc_type // "" | tostring),
+      ($v.last_verified // "" | tostring), ($v.content_hash // "" | tostring),
+      ($v.code_commit // "" | tostring), ($refs | length | tostring)] + $refs)
+  | join("\u001f") + "\u0000"'
+
+# jq (after $_JQ_REC_FIELDS): the _freshness_scan verdict stream — 8 fields per
+# doc: key status doc_type last_verified reason doc_modified commits_behind
+# changed-refs (\x1f-joined) — as def results: {key: result}. Field order is
+# the report's.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_FRESH_RESULTS='
+  def results:
+    rec_fields as $f
+    | [range(0; $f | length; 8) as $i
+       | {key: $f[$i], value: (
+           if $f[$i + 1] == "deprecated" then
+             {status: "deprecated", doc_type: $f[$i + 2], last_verified: $f[$i + 3]}
+           elif $f[$i + 1] == "missing" then
+             {status: "missing", doc_type: $f[$i + 2]}
+           else
+             {status: $f[$i + 1]}
+             + (if $f[$i + 1] == "stale" then {reason: $f[$i + 4]} else {} end)
+             + {doc_modified: ($f[$i + 5] == "true"), commits_behind: ($f[$i + 6] | tonumber)}
+             + (if $f[$i + 1] == "stale"
+                then {code_refs_changed: ($f[$i + 7] | if . == "" then [] else split("\u001f") end)}
+                else {} end)
+             + {doc_type: $f[$i + 2], last_verified: $f[$i + 3]}
+           end)}]
+    | from_entries;'
+
+# One entry's verdict into _F_STATUS (current|stale|missing|deprecated),
+# _F_REASON, _F_MOD (true|false), _F_BEHIND and _F_CHANGED (\x1f-joined refs).
+#   _freshness_eval <key> <stored status> <content_hash> <code_commit> [ref…]
+# A stored code_commit that is not an object id counts as no baseline (it is
+# never handed to git — see _is_oid).
+_freshness_eval() {
+  local key="$1" stored_status="$2" content_hash="$3" code_commit="$4"
+  shift 4
+  _F_REASON="" _F_MOD="" _F_BEHIND=0 _F_CHANGED=""
+  if [ "$stored_status" = "deprecated" ]; then
+    _F_STATUS=deprecated
+    return 0
   fi
-
-  local stored_code_commit
-  stored_code_commit=$(echo "$entry" | jq -r '.code_commit // empty')
-
-  local status reason
-  if [ -n "$current_code_commit" ] && [ "$current_code_commit" != "$stored_code_commit" ]; then
-    status="stale"
-    reason="code_changed"
+  if [ ! -f "$key" ]; then
+    _F_STATUS=missing
+    return 0
+  fi
+  _hash_one "$key"
+  if [ "$_HASH" = "$content_hash" ]; then _F_MOD=false; else _F_MOD=true; fi
+  _is_oid "$code_commit" || code_commit=""
+  _git_last_commit "$@"
+  if [ -n "$_LAST" ] && [ "$_LAST" != "$code_commit" ]; then
+    _F_STATUS=stale
+    _F_REASON=code_changed
   else
-    status="current"
-    reason=""
+    _F_STATUS=current
   fi
-
-  local commits_behind=0
-  if [ -n "$stored_code_commit" ] && [ ${#code_refs_arr[@]} -gt 0 ]; then
-    commits_behind=$(git rev-list --count "${stored_code_commit}..HEAD" -- "${code_refs_arr[@]}" 2>/dev/null || echo 0)
+  if [ -n "$code_commit" ]; then
+    _git_commits_behind "$code_commit" "$@"
+    _F_BEHIND="$_BEHIND"
   fi
-
-  local code_refs_changed_json="[]"
-  if [ "$status" = "stale" ] && [ -n "$stored_code_commit" ]; then
-    local changed_refs=()
-    for ref in "${code_refs_arr[@]}"; do
-      local ref_commit
-      ref_commit=$(git log -1 --format=%H -- "$ref" 2>/dev/null || true)
-      if [ -n "$ref_commit" ] && [ "$ref_commit" != "$stored_code_commit" ]; then
-        changed_refs+=("$ref")
+  if [ "$_F_STATUS" = stale ] && [ -n "$code_commit" ]; then
+    local ref
+    for ref in "$@"; do
+      _git_last_commit "$ref"
+      if [ -n "$_LAST" ] && [ "$_LAST" != "$code_commit" ]; then
+        _F_CHANGED="${_F_CHANGED:+$_F_CHANGED$'\x1f'}$ref"
       fi
     done
-    code_refs_changed_json=$(printf '%s\n' "${changed_refs[@]+"${changed_refs[@]}"}" | jq -R . | jq -s .)
   fi
+}
 
-  if [ -n "$reason" ]; then
-    jq -n \
-      --arg status "$status" \
-      --arg reason "$reason" \
-      --argjson doc_modified "$doc_modified" \
-      --argjson commits_behind "$commits_behind" \
-      --argjson code_refs_changed "$code_refs_changed_json" \
-      '{status: $status, reason: $reason, doc_modified: $doc_modified, commits_behind: $commits_behind, code_refs_changed: $code_refs_changed}'
-  else
-    jq -n \
-      --arg status "$status" \
-      --argjson doc_modified "$doc_modified" \
-      --argjson commits_behind "$commits_behind" \
-      '{status: $status, doc_modified: $doc_modified, commits_behind: $commits_behind}'
-  fi
+# _freshness_scan <snapshot> <only-key or ""> <filter-file or ""> <out-file>
+# The one freshness walk. ONE jq pass extracts the entries, bash evaluates
+# each with _freshness_eval, and the verdicts are written to <out-file> as a
+# _rec_put stream for $_JQ_FRESH_RESULTS. No jq runs per entry.
+_freshness_scan() {
+  local snap="$1" only="$2" filter="$3" out="$4"
+  local fields="$_SCRATCH/fresh.fields"
+  local flt=(--argjson flt null)
+  [ -z "$filter" ] || flt=(--rawfile flt "$filter")
+  jq -j --arg only "$only" "${flt[@]}" "$_JQ_FRESH_EXTRACT" < "$snap" > "$fields" \
+    || _die "cannot read the entries of $INDEX_FILE"
+  _head_init
+  local f
+  {
+    # fd 3, so nothing in the loop can read the records as its stdin.
+    while IFS=$'\x1f' read -r -d '' -a f <&3; do
+      _freshness_eval "${f[0]}" "${f[1]}" "${f[4]}" "${f[5]}" ${f[7]+"${f[@]:7}"}
+      _rec_put "${f[0]}" "$_F_STATUS" "${f[2]}" "${f[3]}" "$_F_REASON" "$_F_MOD" "$_F_BEHIND" "$_F_CHANGED"
+    done 3< "$fields"
+  } > "$out"
 }
 
 # Hash many files in ONE process — hash_file per doc was a fork+exec (two, with
@@ -343,23 +562,39 @@ _die() {
 # input (-R) is read with fgets/strlen, so a NUL-delimited stream could be
 # truncated there, while newline-terminated lines are safe on every supported
 # jq. Any bash string round-trips (bash strings cannot hold NUL).
+#
+# The newline count walks the value once per newline. It used to be
+# ${v//[!$'\n']/}, which bash 3.2 evaluates in time quadratic in the value's
+# length: about 8 s for one 5,000-character doc_type.
 _rec_put() {
-  local v nl
+  local v n rest
   for v in "$@"; do
-    nl="${v//[!$'\n']/}"
-    printf '%s\n%s\n' "$(( ${#nl} + 1 ))" "$v"
+    n=1
+    case "$v" in
+      *$'\n'*)
+        rest="$v"
+        while :; do
+          case "$rest" in
+            *$'\n'*) rest="${rest#*$'\n'}"; n=$((n + 1)) ;;
+            *) break ;;
+          esac
+        done
+        ;;
+    esac
+    printf '%s\n%s\n' "$n" "$v"
   done
 }
+# Linear in the stream: one small state per line (appending to a growing
+# array in a reduce, as this once did, is quadratic in jq — 40k fields took
+# 4 s — and check-freshness now sends every entry's verdict through here).
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_REC_FIELDS='def rec_fields:
-  reduce inputs as $line ({out: [], want: null, buf: []};
-    if .want == null then .want = ($line | tonumber) | .buf = []
-    else .buf += [$line]
-      | if (.buf | length) == .want
-        then .out += [.buf | join("\n")] | .want = null
-        else . end
-    end)
-  | .out;'
+  [foreach inputs as $line ({want: 0, buf: [], out: null};
+     if .want == 0 then {want: ($line | tonumber), buf: [], out: null}
+     else .buf += [$line] | .want -= 1
+       | if .want == 0 then .out = (.buf | join("\n")) else .out = null end
+     end;
+     if .want == 0 and .out != null then .out else empty end)];'
 
 
 # EXIT handler: remove whatever this run left in flight. Never calls exit, so
@@ -712,55 +947,145 @@ _report_keys() {
   done
 }
 
-# --- Usage ---
+# --- Command line ------------------------------------------------------------
+#
+# ONE verb table drives both the dispatcher and the usage text: a subcommand
+# exists only if it has a row here, so --help cannot drift from what actually
+# dispatches (it once omitted implementation-status and set-implementation).
+# A row is a header line followed by indented help lines:
+#
+#   <verb>|<handler>|<needs>|<options>   (a verb may be two words: "tools install")
+#     <synopsis: the arguments after the verb, or "-" for none>
+#     <description…>
+#
+# needs    repo  reads/writes the index or queries git: runs only inside a git
+#                work tree (checked once, before the handler)
+#          deps  needs jq (check_deps) but no repository
+#          none  pure bash (help)
+# options  the long options the verb takes, space-separated (see _parse_args):
+#          name    a flag                            → _OPT_name=1
+#          name=   one value                         → _OPT_name=<value>
+#          name=*  one value, repeatable             → _OPTV_name+=(<value>)
+#          name+   one or more values, up to the next --option → _OPTV_name+=(…)
+#          ("-" in a name becomes "_" in the variable.)
+_VERBS=""
+IFS= read -r -d '' _VERBS <<'VERBS' || true
+build-index|cmd_build_index|repo|force
+  [--force] < mapping-lines
+  Build docs/.doc-index.json from mapping lines on stdin (see "Mapping
+  lines"). Writes nothing and exits non-zero when stdin holds no mapping
+  line or any line is invalid. Refuses to replace an index that already
+  has entries unless --force is given; for incremental changes use
+  add-entry, update-index or remove-entry. A missing or malformed index is
+  rebuilt without --force: this is the recovery path.
+check-freshness|cmd_check_freshness|repo|code-refs+ code-refs-from=*
+  [--code-refs <path>...] [--code-refs-from <file|->]
+  Report which indexed docs are stale relative to their code (read-only,
+  JSON). --code-refs limits the report to docs whose code_refs share a path
+  segment with a listed path: src/m1 matches refs src/m1, src/m1/a.js and
+  src/, never src/m10. It takes every following argument up to the next
+  --option. --code-refs-from reads the same list from a file, one path per
+  line, or from stdin with "-" (no argv limit; use it from hooks and CI).
+  Produce either list with
+    git -c core.quotePath=false diff --name-only --no-renames
+update-index|cmd_update_index|repo|
+  <doc_path>...
+  Re-verify indexed docs: re-hash, re-read code_commit, set status current,
+  stamp last_verified. A doc whose file is gone is skipped with advice. A
+  path that is not indexed is reported and skipped; the others are still
+  applied, and the run exits 1.
+add-entry|cmd_add_entry|repo|
+  < mapping-lines
+  Add new entries from mapping lines on stdin (same format as build-index).
+  A key already indexed is skipped. An invalid line is rejected; the valid
+  lines are still applied, and the run exits 1.
+remove-entry|cmd_remove_entry|repo|
+  <doc_path>...
+  Remove entries from the index.
+move-entry|cmd_move_entry|repo|
+  <old_doc_path> <new_doc_path>
+  Re-key an entry after a doc moves, preserving its metadata: code_refs,
+  code_commit, last_verified, doc_type, status and every other field; only
+  content_hash is recomputed. Use this, not remove-entry + add-entry, for a
+  rename, which would drop the freshness metadata.
+deprecate-entry|cmd_deprecate_entry|repo|superseded-by=
+  [--superseded-by <doc_path>] <doc_path>...
+  Mark entries deprecated, optionally naming the doc that supersedes them.
+status|cmd_status|repo|
+  <doc_path>
+  Freshness of one doc (read-only, JSON): the same verdict check-freshness
+  reports for it, plus its path.
+bump-version|cmd_bump_version|deps|
+  <MAJOR.MINOR.PATCH>
+  Write the version into the 6 manifest files: package.json,
+  claude-code.json, .claude-plugin/plugin.json,
+  .claude-plugin/marketplace.json, .cursor-plugin/plugin.json,
+  gemini-extension.json. RELEASE-NOTES.md is the canonical version:
+  check-version reads it, and it is never written.
+check-version|cmd_check_version|deps|
+  -
+  Verify that every manifest carries RELEASE-NOTES.md's version.
+implementation-status|cmd_implementation_status|deps|filter=
+  [--filter <status>[,<status>...]] <path>...
+  Report ADR/SPEC realization state from each doc's Implementation: block.
+set-implementation|cmd_set_implementation|deps|ref= status= note=
+  <path> --ref <kind: ref> --status <status> [--note <note>]
+  Create, append or replace one realization entry in a doc's
+  Implementation: block. Status: complete, partial, in-progress,
+  not-started, reverted, superseded or blocked.
+fragments list|cmd_fragments_list|deps|
+  -
+  List per-PR release-notes fragments (RELEASE-NOTES.next/PR-*.md) with
+  their hash status, as JSON.
+fragments validate|cmd_fragments_validate|deps|
+  <path>
+  Exit 0 if the fragment's hash matches its body, 1 if it drifted.
+fragments merge|cmd_fragments_merge|repo|paths-out=
+  <range-start> <range-end> [--paths-out <file>]
+  Print the merged sections of the fragments introduced in the commit
+  range. --paths-out writes the consumed fragment paths, one per line.
+tools install|cmd_tools_install|deps|dest= with-helpers
+  [--dest <path>] [--with-helpers]
+  Vendor doc-tools.sh (and, with --with-helpers, the doc-pr-release helpers
+  and RELEASE-NOTES.next/README.md) into <path>, default .github/scripts.
+tools uninstall|cmd_tools_uninstall|deps|dest=
+  [--dest <path>]
+  Remove the vendored doc-tools.sh (and unmodified helpers) from <path>.
+tools status|cmd_tools_status|deps|dest=
+  [--dest <path>]
+  Report whether doc-tools.sh is vendored at <path>, its version and drift,
+  and helper presence.
+help|cmd_help|none|
+  [<subcommand>]
+  Print this usage, or one subcommand's.
+VERBS
 
-usage() {
-  cat >&2 <<'EOF'
-Usage: doc-tools.sh <subcommand> [options]
+# The sections of the full usage that follow the subcommand list.
+_USAGE_NOTES=""
+IFS= read -r -d '' _USAGE_NOTES <<'NOTES' || true
+Options:
+  --opt VALUE and --opt=VALUE are the same, and options may appear anywhere
+  on the line; "--" ends them. --help (-h) prints a subcommand's usage and
+  exits 0. An option a subcommand does not take is an error (exit 2), never
+  silently ignored.
 
-Subcommands:
-  build-index       Build docs/.doc-index.json from stdin mapping
-                    Stdin format: one line per doc — doc_path:code_refs_csv:doc_type
-                    Example: docs/architecture.md:SKILL.md,scripts/:architecture
-  check-freshness   Check if docs are stale relative to code changes
-  update-index      Update specific entries in docs/.doc-index.json
-  add-entry         Add new entries to existing docs/.doc-index.json
-                    Stdin format: same as build-index — doc_path:code_refs_csv:doc_type
-  remove-entry      Remove entries from docs/.doc-index.json by path
-  move-entry        Re-key an entry after a doc moves, preserving its metadata
-                    Usage: move-entry <old_doc_path> <new_doc_path>
-                    Preserves code_refs, code_commit, last_verified, doc_type,
-                    status and every other field; only content_hash is
-                    recomputed. Use this — not remove-entry + add-entry — for a
-                    rename, which would drop the freshness metadata.
-  deprecate-entry   Mark entries as deprecated in docs/.doc-index.json
-                    Usage: deprecate-entry [--superseded-by <path>] <doc_path> ...
-  status <path>     Query freshness of a single doc (read-only)
-  bump-version VER  Update version string in all manifest files
-                    Files: RELEASE-NOTES.md, package.json, claude-code.json,
-                    .claude-plugin/plugin.json, .claude-plugin/marketplace.json,
-                    .cursor-plugin/plugin.json, gemini-extension.json
-  check-version     Verify all manifest files have the same version
-  fragments list                       List per-PR release-notes fragments + hash status
-  fragments validate <path>            Exit 0 if fragment hash matches, 1 if drifted
-  fragments merge <start> <end> [--paths-out=<file>]
-                                       Print merged sections from fragments in commit range
-                                       (--paths-out writes consumed fragment paths, one per line)
-  tools install [--dest <path>] [--with-helpers]
-                                       Vendor doc-tools.sh (and optionally doc-pr-release
-                                       helpers + RELEASE-NOTES.next/README.md) into <path>.
-                                       Default --dest is .github/scripts.
-  tools uninstall [--dest <path>]      Remove vendored doc-tools.sh (and matching helpers)
-                                       from <path>. Default --dest is .github/scripts.
-  tools status [--dest <path>]         Report whether doc-tools.sh is vendored, version,
-                                       drift state, helper presence.
+Mapping lines (stdin of build-index and add-entry, one doc per line):
+  doc_path:code_refs_csv:doc_type
+  e.g. docs/architecture.md:SKILL.md,scripts/:architecture
+  At most three ':'-separated fields, so a path or ref may not contain ':';
+  a bare path (no ':') is rejected rather than guessed at. doc_type may be
+  empty or omitted. Refs are comma-separated; each is trimmed, and empty
+  ones are dropped. A trailing CR (a CRLF file) is removed. A ref that
+  matches no file tracked by git is warned about: a typo there leaves the
+  doc with no code history, so it can never go stale.
 
 Doc paths:
   The doc-index is keyed by paths relative to the repo root, and every
-  subcommand resolves paths against the current working directory — so run
-  doc-tools.sh from the repo root. An absolute path inside the working tree is
-  rewritten to its relative form; a path outside it is rejected (non-zero exit)
-  rather than written as an unfindable key.
+  subcommand resolves paths against the current working directory, so run
+  doc-tools.sh from the repo root. An absolute path inside the working tree
+  is rewritten to its relative form, "//" collapses to "/", and a path
+  outside the tree, or one starting with "-", is rejected (non-zero exit)
+  rather than written as an unfindable key. A path named twice counts once.
 
 Index writes:
   build-index, update-index, add-entry, remove-entry, move-entry and
@@ -771,412 +1096,633 @@ Index writes:
   the entries they actually changed. Every verb that reads the index refuses
   one that is empty or malformed; build-index rebuilds over it.
 
+Exit status:
+  0  success
+  1  the operation failed or was refused (an invalid mapping line, a path
+     outside the repo, a key not in the index, build-index over a non-empty
+     index without --force, …)
+  2  usage error: an unknown subcommand or option, an option without its
+     value, an argument to a subcommand that takes none, or a repository
+     subcommand run outside a git work tree
+
 Environment:
   DOC_TOOLS_LOCK_TIMEOUT  Seconds a writer waits for the index lock before
                           failing (default 30). A lock whose recorded owner
                           is no longer running is removed automatically.
+NOTES
 
-Options:
-  --help            Show this help message
-
-EOF
-  exit 1
+# Look up a verb row: sets _VERB_HANDLER, _VERB_NEEDS and _VERB_OPTS.
+_verb_lookup() {
+  local want="$1" line rest
+  while IFS= read -r line; do
+    case "$line" in
+      ''|' '*) continue ;;
+    esac
+    [ "${line%%|*}" = "$want" ] || continue
+    rest="${line#*|}"
+    _VERB_HANDLER="${rest%%|*}"
+    rest="${rest#*|}"
+    _VERB_NEEDS="${rest%%|*}"
+    _VERB_OPTS="${rest#*|}"
+    return 0
+  done <<<"$_VERBS"
+  return 1
 }
 
-# --- Subcommand stubs ---
+# True if $1 names a group of two-word verbs ("tools", "fragments").
+_verb_is_group() {
+  local line
+  case "$1" in
+    ''|*[!a-z-]*) return 1 ;;
+  esac
+  while IFS= read -r line; do
+    case "$line" in
+      "$1 "*'|'*) return 0 ;;
+    esac
+  done <<<"$_VERBS"
+  return 1
+}
 
-cmd_build_index() {
-  # Read stdin: one line per doc in format doc_path:comma_code_refs:doc_type
-  # Write docs/.doc-index.json (via _index_apply --replace — see "Index persistence")
-  local docs_dir="docs"
-  _scratch_init
-  _index_now
-  local now="$_INDEX_NOW"
-  local build_commit
-  build_commit=$(repo_head)
+# Print the rows whose verb is $1 — or, with $1 = "*", every row; with a
+# one-word group such as "tools", every "tools …" row. <indent> is the
+# description's extra indent.
+_verb_print() {
+  local want="$1" prefix="$2" indent="$3" line verb="" show=0 first=0
+  while IFS= read -r line; do
+    case "$line" in
+      '') continue ;;
+      ' '*)
+        [ "$show" = 1 ] || continue
+        line="${line#  }"
+        if [ "$first" = 1 ]; then
+          first=0
+          if [ "$line" = "-" ]; then
+            printf '%s%s\n' "$prefix" "$verb"
+          else
+            printf '%s%s %s\n' "$prefix" "$verb" "$line"
+          fi
+        else
+          printf '%s%s\n' "$indent" "$line"
+        fi
+        ;;
+      *)
+        verb="${line%%|*}"
+        show=0
+        case "$want" in
+          '*') show=1 ;;
+          "$verb") show=1 ;;
+          *) case "$verb" in "$want "*) show=1 ;; esac ;;
+        esac
+        first="$show"
+        ;;
+    esac
+  done <<<"$_VERBS"
+}
 
-  # Per-entry accumulator: one single-key JSON object per line, merged once at
-  # the end. Replaces the previous `docs_json=$(echo "$docs_json" | jq '. + …')`
-  # rebuild, which was both O(N^2) in bytes re-serialized and — because the
-  # merged object was ultimately handed to `jq -n --argjson docs "$docs_json"` —
-  # a hard ceiling on index size: Linux caps a SINGLE argv string at
-  # MAX_ARG_STRLEN (32 pages = 131072 bytes) no matter how large ARG_MAX is, so
-  # build-index died with "jq: Argument list too long" at ~420 entries. macOS
-  # has no per-argument cap (only the ~1 MB total ARG_MAX), which is why this
-  # only ever reproduced on Linux. Mirrors the accumulator cmd_check_freshness
-  # already uses. Both live in this run's scratch dir, removed by the EXIT trap.
-  local entries_tmp="$_SCRATCH/entries.jsonl"
-  local docs_tmp="$_SCRATCH/docs.json"
-  : > "$entries_tmp"
+# Full usage. Builtins only: --help must work without jq, and without git.
+usage() {
+  printf '%s\n' \
+    "Usage: doc-tools.sh <subcommand> [options] [args]" \
+    "       doc-tools.sh <subcommand> --help" \
+    "" \
+    "Subcommands:"
+  _verb_print '*' '  ' '      '
+  printf '\n%s' "$_USAGE_NOTES"
+}
 
-  local invalid=0
+# One subcommand's (or one group's) usage.
+_verb_usage() {
+  _verb_print "$1" 'Usage: doc-tools.sh ' '  '
+  printf '%s\n' "" "Options may appear anywhere; --opt VALUE and --opt=VALUE are the same." \
+    "See doc-tools.sh --help for mapping lines, doc paths and exit status."
+}
 
-  # Save stdin to fd 3, then redirect fd 0 to /dev/null so subprocesses
-  # (e.g. git) don't consume lines from the input pipe
-  exec 3<&0 0</dev/null
+cmd_help() {
+  if [ $# -eq 0 ]; then
+    usage
+    return 0
+  fi
+  if ! _verb_lookup "$*" && ! _verb_is_group "$*"; then
+    _usage_error help "unknown subcommand '$*'"
+  fi
+  _verb_usage "$*"
+}
 
-  while IFS= read -r line <&3 || [ -n "$line" ]; do
-    [ -z "$line" ] && continue
+# A command-line error: say what is wrong and where the usage is; exit 2.
+_usage_error() {
+  echo "ERROR: $1: $2" >&2
+  echo "       See: doc-tools.sh $1 --help" >&2
+  exit 2
+}
 
-    # Parse fields
-    local doc_path raw_doc_path code_refs_raw doc_type
-    raw_doc_path=$(echo "$line" | cut -d: -f1)
-    code_refs_raw=$(echo "$line" | cut -d: -f2)
-    doc_type=$(echo "$line" | cut -d: -f3)
+_is_long_opt() {
+  case "$1" in
+    --?*) return 0 ;;
+  esac
+  return 1
+}
 
-    # A key that isn't working-tree-relative is unfindable by every other
-    # subcommand. Unlike add-entry (which is incremental and can keep the good
-    # lines), build-index REPLACES the whole index — writing a partial one would
-    # silently drop docs — so a single bad line aborts before any write.
-    if ! doc_path=$(normalize_doc_path "$raw_doc_path"); then
-      invalid=$((invalid + 1))
-      continue
-    fi
+# True if option $1 was given on this command line.
+_opt_seen() {
+  local v="_OPTSEEN_${1//-/_}"
+  [ -n "${!v:-}" ]
+}
 
-    # Compute content hash
-    local content_hash_val
-    if [ -f "$doc_path" ]; then
-      content_hash_val="\"sha256:$(hash_file "$doc_path")\""
-    else
-      content_hash_val="null"
-    fi
-
-    # Build code_refs JSON array from comma-separated list.
-    #
-    # Empty strings are dropped so an omitted refs field yields [], not [""].
-    # A `""` ref is a phantom that is not a path: behaviourally it matches []
-    # (compute_freshness filters empty strings out of code_refs_arr), but it is
-    # a state no caller intended, and a consuming project had to normalize 1691
-    # such entries away. Only affects newly-written entries — existing [""]
-    # entries already behave as [], so no migration is needed.
-    local code_refs_json
-    code_refs_json=$(echo "$code_refs_raw" | tr ',' '\n' | jq -R . | jq -s 'map(select(. != ""))')
-
-    # Compute latest commit across all code refs (single git log call per spec)
-    #
-    # The count guard is load-bearing on bash 3.2: an entry with no code_refs
-    # (`docs/x.md::spec`) leaves `refs` empty, and bash 3.2 treats an unguarded
-    # "${refs[@]}" on an empty array as an unbound variable under `set -u`,
-    # aborting build-index outright. Same guard the sibling call sites use.
-    local code_commit=""
-    IFS=',' read -ra refs <<< "$code_refs_raw"
-    if [ ${#refs[@]} -gt 0 ]; then
-      code_commit=$(git log -1 --format=%H -- "${refs[@]}" 2>/dev/null || true)
-    fi
-
-    # Append the entry as a single-key object keyed by doc path. Emitting the
-    # key here (rather than merging into a growing object) is what keeps the
-    # accumulator flat.
-    if [ -n "$code_commit" ]; then
-      jq -nc \
-        --arg key "$doc_path" \
-        --argjson content_hash "$content_hash_val" \
-        --argjson code_refs "$code_refs_json" \
-        --arg code_commit "$code_commit" \
-        --arg doc_type "$doc_type" \
-        --arg last_verified "$now" \
-        '{($key): {
-          content_hash: $content_hash,
-          code_refs: $code_refs,
-          code_commit: $code_commit,
-          doc_type: $doc_type,
-          status: "current",
-          replaces: null,
-          superseded_by: null,
-          last_verified: $last_verified
-        }}' >> "$entries_tmp"
-    else
-      jq -nc \
-        --arg key "$doc_path" \
-        --argjson content_hash "$content_hash_val" \
-        --argjson code_refs "$code_refs_json" \
-        --arg doc_type "$doc_type" \
-        --arg last_verified "$now" \
-        '{($key): {
-          content_hash: $content_hash,
-          code_refs: $code_refs,
-          code_commit: null,
-          doc_type: $doc_type,
-          status: "current",
-          replaces: null,
-          superseded_by: null,
-          last_verified: $last_verified
-        }}' >> "$entries_tmp"
-    fi
+# _parse_args <verb> <options> [args…]
+#
+# The one argument loop every subcommand goes through (the verb table holds
+# each verb's <options>). --opt VALUE and --opt=VALUE are the same and may
+# appear anywhere; "--" ends the options; --help / -h prints the verb's usage
+# and exits 0; anything else starting with "-" that the verb does not take is
+# a usage error (exit 2) — it is never taken for a path, and never ignored.
+# Positional arguments land in _ARGS.
+_parse_args() {
+  local verb="$1" spec="$2"
+  shift 2
+  _ARGS=()
+  local s n
+  for s in $spec; do
+    n="${s%[=+]*}"
+    n="${n//-/_}"
+    printf -v "_OPT_$n" '%s' ""
+    printf -v "_OPTSEEN_$n" '%s' ""
+    eval "_OPTV_$n=()"
   done
 
-  exec 3<&-
+  local a name val has_val kind endopts=0
+  while [ $# -gt 0 ]; do
+    a="$1"
+    shift
+    if [ "$endopts" = 1 ]; then
+      _ARGS+=("$a")
+      continue
+    fi
+    case "$a" in
+      --) endopts=1; continue ;;
+      -h|--help) _verb_usage "$verb"; exit 0 ;;
+      --?*=*) name="${a%%=*}"; name="${name#--}"; val="${a#*=}"; has_val=1 ;;
+      --?*) name="${a#--}"; val=""; has_val=0 ;;
+      -?*) _usage_error "$verb" "Unknown option '$a'" ;;
+      *) _ARGS+=("$a"); continue ;;
+    esac
+    kind=""
+    for s in $spec; do
+      case "$s" in
+        "$name") kind=flag ;;
+        "$name=") kind=one ;;
+        "$name=*") kind=many ;;
+        "$name+") kind=list ;;
+      esac
+    done
+    n="${name//-/_}"
+    case "$kind" in
+      flag)
+        [ "$has_val" = 0 ] || _usage_error "$verb" "option --$name takes no value"
+        printf -v "_OPT_$n" '%s' 1
+        ;;
+      one|many)
+        if [ "$has_val" = 0 ]; then
+          if [ $# -eq 0 ] || _is_long_opt "$1"; then
+            _usage_error "$verb" "option --$name requires a value"
+          fi
+          val="$1"
+          shift
+        fi
+        if [ "$kind" = one ]; then
+          ! _opt_seen "$name" || _usage_error "$verb" "option --$name given more than once"
+          printf -v "_OPT_$n" '%s' "$val"
+        else
+          eval "_OPTV_$n+=(\"\$val\")"
+        fi
+        ;;
+      list)
+        if [ "$has_val" = 1 ]; then
+          eval "_OPTV_$n+=(\"\$val\")"
+        else
+          if [ $# -eq 0 ] || _is_long_opt "$1"; then
+            _usage_error "$verb" "option --$name requires at least one value"
+          fi
+          while [ $# -gt 0 ] && ! _is_long_opt "$1"; do
+            eval "_OPTV_$n+=(\"\$1\")"
+            shift
+          done
+        fi
+        ;;
+      *) _usage_error "$verb" "Unknown option '--$name'" ;;
+    esac
+    printf -v "_OPTSEEN_$n" '%s' 1
+  done
+}
 
-  if [ "$invalid" -gt 0 ]; then
-    echo "ERROR: $invalid invalid $([ "$invalid" -eq 1 ] && echo path || echo paths) in build-index input; index NOT written." >&2
+# Repository verbs run only inside a git work tree. Checked ONCE, up front:
+# per-call `2>/dev/null || true` used to turn "not a repository" into "no
+# history", and check-freshness reported every doc current, rc 0.
+_require_repo() {
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "ERROR: $1 must run inside a git repository (run doc-tools.sh from the repo root)." >&2
+    exit 2
+  fi
+}
+
+# Dispatch. --help / help needs nothing: it runs before check_deps.
+_main() {
+  case "${1:-}" in
+    '')
+      usage >&2
+      exit 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+  esac
+
+  local verb
+  if [ $# -ge 2 ] && _verb_lookup "$1 $2"; then
+    verb="$1 $2"
+    shift 2
+  elif _verb_lookup "$1"; then
+    verb="$1"
+    shift
+  elif _verb_is_group "$1"; then
+    # A group ("tools", "fragments") without a valid subcommand.
+    case "${2:-}" in
+      -h|--help) _verb_usage "$1"; exit 0 ;;
+      '') _usage_error "$1" "needs a subcommand" ;;
+      *) _usage_error "$1" "unknown subcommand '$1 $2'" ;;
+    esac
+  else
+    echo "ERROR: unknown subcommand '$1'." >&2
+    echo "" >&2
+    usage >&2
+    exit 2
+  fi
+
+  # --help anywhere before "--" wins, before any dependency is needed.
+  local a
+  for a in "$@"; do
+    case "$a" in
+      --) break ;;
+      -h|--help) _verb_usage "$verb"; exit 0 ;;
+    esac
+  done
+
+  _parse_args "$verb" "$_VERB_OPTS" "$@"
+  case "$_VERB_NEEDS" in
+    repo) check_deps || exit 1; _require_repo "$verb" ;;
+    deps) check_deps || exit 1 ;;
+  esac
+  _traps
+  "$_VERB_HANDLER" ${_ARGS[@]+"${_ARGS[@]}"}
+}
+
+# --- Mapping lines (stdin of build-index and add-entry) ------------------------
+#
+# ONE parser for `doc_path:code_refs_csv:doc_type` lines. The old one cut each
+# field with `cut -d:` and trusted the result: a bare path (no ':') came back
+# as the path, the refs AND the doc_type; "a, b" stored " b", a ref nothing
+# ever matches; a CRLF file kept "\r" in doc_type; a ':' inside a path
+# re-keyed the entry; and the refs handed to git were split separately from
+# the refs that were stored.
+
+_line_error() {
+  echo "ERROR: line $1: $3: '$2'" >&2
+}
+
+# _entry_from_line <line-no> <line>
+# Parse one mapping line into _E_PATH (the normalized key), _E_TYPE and
+# _E_REFS: trimmed, empty ones dropped, key-form normalized ("." is the repo
+# root). That ONE array is both stored as code_refs and handed to git. Returns
+# 1, having said why on stderr, for a line that breaks the format.
+_entry_from_line() {
+  local lineno="$1" line="${2%$'\r'}"
+  local path refs type extra r
+  _E_PATH="" _E_TYPE="" _E_REFS=()
+  case "$line" in
+    *:*:*:*)
+      _line_error "$lineno" "$line" "more than three ':'-separated fields (a doc path or ref may not contain ':')"
+      return 1
+      ;;
+    *:*) ;;
+    *)
+      _line_error "$lineno" "$line" "a bare path; expected doc_path:code_refs_csv:doc_type"
+      return 1
+      ;;
+  esac
+  case "$line" in
+    *$'\x1f'*)
+      _line_error "$lineno" "$line" "contains a 0x1f control character"
+      return 1
+      ;;
+  esac
+  IFS=: read -r path refs type extra <<<"$line"
+  if [ -n "$extra" ]; then
+    _line_error "$lineno" "$line" "more than three ':'-separated fields"
+    return 1
+  fi
+  _trim "$path"
+  if ! _norm_path "$_TRIMMED"; then
+    echo "       (line $lineno)" >&2
+    return 1
+  fi
+  _E_PATH="$_NORM"
+  _trim "$type"
+  _E_TYPE="$_TRIMMED"
+  local raw=()
+  IFS=, read -r -a raw <<<"$refs"
+  for r in ${raw[@]+"${raw[@]}"}; do
+    _trim "$r"
+    r="$_TRIMMED"
+    case "$r" in
+      '') continue ;;
+      .|./) r=. ;;
+      *)
+        if ! _norm_path "$r" "code ref"; then
+          echo "       (line $lineno)" >&2
+          return 1
+        fi
+        r="$_NORM"
+        ;;
+    esac
+    _E_REFS+=("$r")
+  done
+}
+
+# Warn about code refs that match no file git tracks: a typo'd ref gives its
+# doc a null code_commit, and a doc with no code history never goes stale,
+# whatever changes. One `git ls-files` for the whole batch; a ref matches a
+# tracked path equal to it or below it. Glob refs are left to git's pathspec
+# matching and not checked here. $1: a file with one ref per line.
+_warn_unmatched_refs() {
+  local list="$1" tracked="$_SCRATCH/tracked" missing r
+  [ -s "$list" ] || return 0
+  git -c core.quotePath=false ls-files > "$tracked" || _die "git ls-files failed"
+  missing=$(awk -v reffile="$list" '
+    function norm(r,   n, i, parts, out) {
+      n = split(r, parts, "/")
+      out = ""
+      for (i = 1; i <= n; i++)
+        if (parts[i] != "" && parts[i] != ".") out = (out == "" ? parts[i] : out "/" parts[i])
+      return out == "" ? "." : out
+    }
+    BEGIN {
+      while ((getline r < reffile) > 0) {
+        if (r ~ /[*?[]/) continue
+        k = norm(r)
+        if (!(k in want)) { want[k] = 1; orig[k] = r; order[++total] = k }
+      }
+    }
+    {
+      if ("." in want) found["."] = 1
+      p = $0
+      while (1) {
+        if (p in want) found[p] = 1
+        if (!match(p, /\/[^\/]*$/)) break
+        p = substr(p, 1, RSTART - 1)
+      }
+    }
+    END { for (i = 1; i <= total; i++) if (!(order[i] in found)) print orig[order[i]] }
+  ' "$tracked") || _die "cannot check code refs against the tracked files"
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    echo "WARNING: code ref '$r' matches no file tracked by git; a doc indexed with only such refs can never go stale (typo?)." >&2
+  done <<<"$missing"
+}
+
+# _read_mapping <verb> <out-file>
+# Read mapping lines from stdin with _entry_from_line. A key listed twice
+# keeps its FIRST line (the rest are warned about), in both build-index and
+# add-entry. Sets _M_KEYS (the kept keys, in input order) and _M_INVALID, and
+# writes one _rec_put record per kept entry to <out-file>:
+#   key  content_hash ("" if not on disk)  code_commit ("" if no history)
+#   doc_type  refs (\x1f-joined)
+_read_mapping() {
+  local verb="$1" out="$2"
+  local lineno=0 line keys=() types=() refsets=() joined r
+  local refs_list="$_SCRATCH/map-refs"
+  _M_KEYS=() _M_INVALID=0
+  : > "$refs_list"
+  : > "$out"
+  if [ -t 0 ]; then
+    echo "$verb: reading mapping lines from stdin (doc_path:code_refs_csv:doc_type); end with Ctrl-D." >&2
+  fi
+  # stdin → fd 3, fd 0 → /dev/null: no child process can eat mapping lines.
+  exec 3<&0 0</dev/null
+  while IFS= read -r line <&3 || [ -n "$line" ]; do
+    lineno=$((lineno + 1))
+    _trim "${line%$'\r'}"
+    [ -n "$_TRIMMED" ] || continue
+    if ! _entry_from_line "$lineno" "$line"; then
+      _M_INVALID=$((_M_INVALID + 1))
+      continue
+    fi
+    joined=""
+    for r in ${_E_REFS[@]+"${_E_REFS[@]}"}; do
+      joined="${joined:+$joined$'\x1f'}$r"
+      printf '%s\n' "$r" >> "$refs_list"
+    done
+    keys+=("$_E_PATH")
+    types+=("$_E_TYPE")
+    refsets+=("$joined")
+  done
+  exec 3<&-
+  [ ${#keys[@]} -gt 0 ] || return 0
+
+  local dups
+  dups=$(_repeated "${keys[@]}")
+  if [ -n "$dups" ]; then
+    while IFS= read -r r; do
+      echo "WARNING: '$r' is listed more than once; keeping its first line." >&2
+    done <<<"$dups"
+  fi
+  _warn_unmatched_refs "$refs_list"
+
+  local i=0 seen=$'\n' refs
+  _head_init
+  while [ "$i" -lt "${#keys[@]}" ]; do
+    if [ -n "$dups" ]; then
+      case $'\n'"$dups"$'\n' in
+        *$'\n'"${keys[$i]}"$'\n'*)
+          case "$seen" in
+            *$'\n'"${keys[$i]}"$'\n'*) i=$((i + 1)); continue ;;
+          esac
+          seen="$seen${keys[$i]}"$'\n'
+          ;;
+      esac
+    fi
+    _HASH=""
+    [ ! -f "${keys[$i]}" ] || _hash_one "${keys[$i]}"
+    refs=()
+    [ -z "${refsets[$i]}" ] || IFS=$'\x1f' read -r -a refs <<<"${refsets[$i]}"
+    _git_last_commit ${refs[@]+"${refs[@]}"}
+    _rec_put "${keys[$i]}" "$_HASH" "$_LAST" "${types[$i]}" "${refsets[$i]}" >> "$out"
+    _M_KEYS+=("${keys[$i]}")
+    i=$((i + 1))
+  done
+}
+
+# jq (after $_JQ_REC_FIELDS): the _read_mapping records as a {key: entry}
+# object of fresh entries (field order is the index's).
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_MAPPING_ENTRIES='
+  def mapping_entries:
+    rec_fields as $f
+    | [range(0; $f | length; 5) as $i
+       | {key: $f[$i], value: {
+           content_hash: (if $f[$i + 1] == "" then null else $f[$i + 1] end),
+           code_refs: ($f[$i + 4] | if . == "" then [] else split("\u001f") end),
+           code_commit: (if $f[$i + 2] == "" then null else $f[$i + 2] end),
+           doc_type: $f[$i + 3],
+           status: "current",
+           replaces: null,
+           superseded_by: null,
+           last_verified: $now}}]
+    | from_entries;'
+
+# --- Subcommands -----------------------------------------------------------------
+
+cmd_build_index() {
+  if [ $# -gt 0 ]; then
+    _usage_error build-index "takes no arguments; it reads mapping lines from stdin (got '$1')"
+  fi
+  _scratch_init
+  _index_now
+  local force="${_OPT_force:-}"
+
+  # build-index REPLACES the index: refuse up front, before stdin is read,
+  # when there is one with entries and --force was not given. (An agent's
+  # non-TTY shell hands it an empty stdin, and a one-line pipe used to leave
+  # a one-key index; either way every deprecation was reset.) A missing or
+  # invalid index is still rebuilt: that is how one recovers from it. The
+  # same check runs again under the lock (below), against the index actually
+  # being replaced.
+  if [ -z "$force" ] && [ -f "$INDEX_FILE" ]; then
+    local have
+    have=$(jq -s 'if length == 1 and (.[0] | type) == "object" and (.[0].docs | type) == "object"
+                  then .[0].docs | length else 0 end' "$INDEX_FILE" 2>/dev/null) || have=0
+    if [ "${have:-0}" -gt 0 ]; then
+      echo "ERROR: $INDEX_FILE already has $have $([ "$have" -eq 1 ] && echo entry || echo entries); build-index would replace them all." >&2
+      echo "       Use add-entry, update-index or remove-entry for incremental changes, or" >&2
+      echo "       build-index --force to rebuild from scratch (deprecations and other metadata are lost)." >&2
+      exit 1
+    fi
+  fi
+
+  local rec="$_SCRATCH/map.rec" docs_tmp="$_SCRATCH/docs.json"
+  _read_mapping build-index "$rec"
+
+  # One bad line aborts the whole build: it replaces the index, so writing
+  # the good lines alone would silently drop docs.
+  if [ "$_M_INVALID" -gt 0 ]; then
+    echo "ERROR: $_M_INVALID invalid mapping $([ "$_M_INVALID" -eq 1 ] && echo line || echo lines) in build-index input; index NOT written." >&2
+    exit 1
+  fi
+  if [ ${#_M_KEYS[@]} -eq 0 ]; then
+    echo "ERROR: build-index: no mapping lines on stdin (doc_path:code_refs_csv:doc_type); index NOT written." >&2
     exit 1
   fi
 
-  # Collapse the per-entry accumulator into one object in a single jq call.
-  # Each row is a single-key object, so `. + $row` on disjoint keys is plain
-  # object merge — and a repeated key keeps the LAST occurrence, matching the
-  # previous `. + {($key): $val}` accumulation semantics.
-  if [ -s "$entries_tmp" ]; then
-    jq -cs 'reduce .[] as $row ({}; . + $row)' "$entries_tmp" > "$docs_tmp"
-  else
-    printf '{}\n' > "$docs_tmp"
-  fi
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  jq -c -n -R --arg now "$_INDEX_NOW" "$_JQ_REC_FIELDS$_JQ_MAPPING_ENTRIES"'mapping_entries' \
+    < "$rec" > "$docs_tmp" || _die "cannot assemble the index entries; $INDEX_FILE is unchanged."
 
-  # Build the final index
   # schema_version bumped 1 → 2 in Task 3.4 of
   # docs/plans/2026-05-16-adr-implementation-field-rollout.md to capture the
   # new per-entry `implementation` array. Renamed from `version` (only test
   # helpers read the field; live doc-index migrated in the same commit).
   #
   # `docs` arrives via --slurpfile, NOT --argjson: it is the one unbounded
-  # value here, and passing it through argv is what capped the index at ~420
-  # entries on Linux (see the accumulator comment above).
+  # value here, and Linux caps a single argv string at MAX_ARG_STRLEN (131072
+  # bytes), which once capped the index at ~420 entries.
   #
-  # --replace: build-index is the recovery path, so a missing or invalid prior
-  # index is replaced rather than refused. generated_at is stamped by
-  # _index_apply ($now), and nothing is written if the result is identical.
-  mkdir -p "$docs_dir"
+  # --replace: a missing or invalid prior index is replaced rather than
+  # refused. generated_at is stamped by _index_apply ($now), and nothing is
+  # written if the result is identical. build_commit is null on an unborn
+  # HEAD (it used to be "HEAD\nunknown").
+  _head_init
+  mkdir -p "$(dirname "$INDEX_FILE")"
   # shellcheck disable=SC2016  # jq program, not shell expansion
-  _index_apply --replace '{
+  _index_apply --replace '
+    if ($force | not) and type == "object" and ((.docs // {}) | length) > 0
+    then error("doc-tools: refusing to replace a non-empty index without --force (it gained entries while build-index ran)")
+    else . end
+    | {
       schema_version: 2,
       generated_by: "doc-superpowers",
       generated_at: $now,
-      build_commit: $build_commit,
+      build_commit: (if $build_commit == "" then null else $build_commit end),
       docs: $docs[0]
     }' \
-    --arg build_commit "$build_commit" \
+    --argjson force "$([ -n "$force" ] && echo true || echo false)" \
+    --arg build_commit "$_HEAD" \
     --slurpfile docs "$docs_tmp"
   # Silent on success, as before: it replaces the whole index, so a per-key
   # report would only restate its input.
 }
 
-cmd_check_freshness() {
-  local filter_refs=()
-
-  # Parse optional --code-refs arguments
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --code-refs)
-        shift
-        while [[ $# -gt 0 && "$1" != --* ]]; do
-          filter_refs+=("$1")
-          shift
-        done
-        ;;
-      *) shift ;;
-    esac
+# Paths for --code-refs / --code-refs-from, one per line, into <file>. The
+# list is normalized in jq (_JQ_FRESH_EXTRACT): CR stripped, blank lines
+# dropped, "." and "//" segments folded. "-" reads stdin.
+_code_refs_list() {
+  local out="$1" p src
+  : > "$out"
+  for p in ${_OPTV_code_refs[@]+"${_OPTV_code_refs[@]}"}; do
+    printf '%s\n' "$p" >> "$out"
   done
+  for src in ${_OPTV_code_refs_from[@]+"${_OPTV_code_refs_from[@]}"}; do
+    if [ "$src" = "-" ]; then
+      cat >> "$out" || _die "cannot read the --code-refs-from list from stdin"
+    else
+      [ -f "$src" ] || _die "--code-refs-from: no such file '$src'"
+      cat "$src" >> "$out" || _die "cannot read --code-refs-from '$src'"
+    fi
+    printf '\n' >> "$out"
+  done
+}
 
-  # ONE validated snapshot serves both passes below (entry walk + untracked
-  # key set). Reading the live file twice let a concurrent writer land between
-  # them, so the summary and .docs could describe two different indexes.
+cmd_check_freshness() {
+  if [ $# -gt 0 ]; then
+    _usage_error check-freshness "takes no arguments (got '$1'); scope it with --code-refs <path>... or --code-refs-from <file|->"
+  fi
+  # ONE validated snapshot serves the entry walk and the untracked-key set:
+  # reading the live file twice let a concurrent writer land in between.
   _scratch_init
   local snap
   snap=$(_index_load) || exit 1
 
-  local checked_at repo_head_val
+  local filter=""
+  if _opt_seen code-refs || _opt_seen code-refs-from; then
+    filter="$_SCRATCH/code-refs"
+    _code_refs_list "$filter"
+  fi
+
+  local checked_at results="$_SCRATCH/fresh.rec" fs_paths="$_SCRATCH/fs-paths"
   checked_at=$(iso_now)
-  repo_head_val=$(repo_head)
+  _freshness_scan "$snap" "" "$filter" "$results"
 
-  local count_current=0
-  local count_stale=0
-  local count_missing=0
-  local count_deprecated=0
+  # Untracked: docs on disk with no index key. The key set comes from the
+  # same snapshot, read by the final jq.
+  find docs -name '*.md' -not -path 'docs/archive/*' 2>/dev/null | LC_ALL=C sort > "$fs_paths"
 
-  # Per-doc result accumulator: one JSON object per line (path -> result),
-  # merged once at the end with `jq -s` instead of rebuilding via
-  # `jq '. + {(p): v}'` per iteration. Eliminates O(N) jq spawns for
-  # accumulator updates — the dominant cost on large indexes.
-  # All in this run's scratch dir (removed by the EXIT trap).
-  local jsonl_tmp="$_SCRATCH/fresh.jsonl" idx_paths_tmp="$_SCRATCH/idx-paths"
-  local fs_paths_tmp="$_SCRATCH/fs-paths"
-  # Both of these hold values that scale with the corpus, so they are handed to
-  # the final `jq -n` via --slurpfile rather than --argjson: Linux caps a single
-  # argv string at MAX_ARG_STRLEN (131072 bytes) regardless of ARG_MAX, and the
-  # merged docs object passes that at a few hundred entries.
-  local docs_out_tmp="$_SCRATCH/docs-out.json" untracked_tmp="$_SCRATCH/untracked.json"
-  : > "$jsonl_tmp"
-
-  # Single-pass field extraction: one `jq` call emits every entry's fields
-  # in NUL-delimited records (tab-separated within each record). The body
-  # of the loop never re-invokes `jq` to read a field — replaces ~5 jq
-  # spawns per entry. Records are NUL-delimited to tolerate paths/values
-  # containing newlines; tabs in paths would corrupt parsing but are
-  # vanishingly rare in `docs/` (and `add-entry` already rejects colons).
-  while IFS=$'\t' read -r -d '' doc_path stored_status doc_type last_verified content_hash code_commit code_refs_csv; do
-    # Reconstruct code_refs array from CSV. Refs may contain spaces but
-    # not commas (commas are the build-index/add-entry CSV separator).
-    local code_refs_arr=()
-    if [[ -n "$code_refs_csv" ]]; then
-      local _IFS_SAVE="$IFS"
-      IFS=','
-      # shellcheck disable=SC2206
-      code_refs_arr=( $code_refs_csv )
-      IFS="$_IFS_SAVE"
-    fi
-
-    # Apply --code-refs filter if provided (bidirectional prefix match) —
-    # unchanged semantics from the per-jq-call path; just operates on the
-    # pre-extracted array.
-    if [ ${#filter_refs[@]} -gt 0 ]; then
-      local matched=0
-      for filter_ref in "${filter_refs[@]}"; do
-        for doc_ref in "${code_refs_arr[@]+"${code_refs_arr[@]}"}"; do
-          if [[ "$doc_ref" == "$filter_ref"* || "$filter_ref" == "$doc_ref"* ]]; then
-            matched=1
-            break 2
-          fi
-        done
-      done
-      [ "$matched" -eq 0 ] && continue
-    fi
-
-    # Deprecated: preserve status, no freshness fields.
-    if [ "$stored_status" = "deprecated" ]; then
-      count_deprecated=$((count_deprecated + 1))
-      jq -nc \
-        --arg p "$doc_path" \
-        --arg doc_type "$doc_type" \
-        '{($p): {status: "deprecated", doc_type: $doc_type}}' >> "$jsonl_tmp"
-      continue
-    fi
-
-    # Missing: doc file no longer exists.
-    if [ ! -f "$doc_path" ]; then
-      count_missing=$((count_missing + 1))
-      jq -nc \
-        --arg p "$doc_path" \
-        --arg doc_type "$doc_type" \
-        '{($p): {status: "missing", doc_type: $doc_type}}' >> "$jsonl_tmp"
-      continue
-    fi
-
-    # Compute freshness inline — same logic as `compute_freshness` but
-    # works on pre-extracted fields, avoiding 4 internal jq spawns
-    # (status/code_refs/hash/code_commit reads). `compute_freshness`
-    # itself stays unchanged for the `cmd_status` single-doc caller.
-    local current_hash doc_modified
-    current_hash="sha256:$(hash_file "$doc_path")"
-    [ "$current_hash" != "$content_hash" ] && doc_modified=true || doc_modified=false
-
-    local current_code_commit=""
-    if [ ${#code_refs_arr[@]} -gt 0 ]; then
-      current_code_commit=$(git log -1 --format=%H -- "${code_refs_arr[@]}" 2>/dev/null || true)
-    fi
-
-    local status reason
-    if [ -n "$current_code_commit" ] && [ "$current_code_commit" != "$code_commit" ]; then
-      status="stale"; reason="code_changed"
-    else
-      status="current"; reason=""
-    fi
-
-    local commits_behind=0
-    if [ -n "$code_commit" ] && [ ${#code_refs_arr[@]} -gt 0 ]; then
-      commits_behind=$(git rev-list --count "${code_commit}..HEAD" -- "${code_refs_arr[@]}" 2>/dev/null || echo 0)
-    fi
-
-    local code_refs_changed_json="[]"
-    if [ "$status" = "stale" ] && [ -n "$code_commit" ]; then
-      local changed_refs=()
-      for ref in "${code_refs_arr[@]+"${code_refs_arr[@]}"}"; do
-        local ref_commit
-        ref_commit=$(git log -1 --format=%H -- "$ref" 2>/dev/null || true)
-        if [ -n "$ref_commit" ] && [ "$ref_commit" != "$code_commit" ]; then
-          changed_refs+=("$ref")
-        fi
-      done
-      if [ ${#changed_refs[@]} -gt 0 ]; then
-        code_refs_changed_json=$(printf '%s\n' "${changed_refs[@]}" | jq -R . | jq -cs .)
-      fi
-    fi
-
-    if [ "$status" = "current" ]; then
-      count_current=$((count_current + 1))
-    else
-      count_stale=$((count_stale + 1))
-    fi
-
-    if [ -n "$reason" ]; then
-      jq -nc \
-        --arg p "$doc_path" \
-        --arg status "$status" \
-        --arg reason "$reason" \
-        --argjson doc_modified "$doc_modified" \
-        --argjson commits_behind "$commits_behind" \
-        --argjson code_refs_changed "$code_refs_changed_json" \
-        --arg doc_type "$doc_type" \
-        --arg last_verified "$last_verified" \
-        '{($p): {status: $status, reason: $reason, doc_modified: $doc_modified, commits_behind: $commits_behind, code_refs_changed: $code_refs_changed, doc_type: $doc_type, last_verified: $last_verified}}' \
-        >> "$jsonl_tmp"
-    else
-      jq -nc \
-        --arg p "$doc_path" \
-        --arg status "$status" \
-        --argjson doc_modified "$doc_modified" \
-        --argjson commits_behind "$commits_behind" \
-        --arg doc_type "$doc_type" \
-        --arg last_verified "$last_verified" \
-        '{($p): {status: $status, doc_modified: $doc_modified, commits_behind: $commits_behind, doc_type: $doc_type, last_verified: $last_verified}}' \
-        >> "$jsonl_tmp"
-    fi
-
-  done < <(jq -j '
-    .docs | to_entries[] | (
-      [
-        .key,
-        (.value.status // ""),
-        (.value.doc_type // ""),
-        (.value.last_verified // ""),
-        (.value.content_hash // ""),
-        (.value.code_commit // ""),
-        ((.value.code_refs // []) | join(","))
-      ] | @tsv
-    ) + "\u0000"
-  ' "$snap")
-
-  # Merge JSON-lines accumulator into a single object in ONE jq invocation
-  # instead of N. `reduce .[] as $row (...; . + $row)` works because each
-  # row is a single-key object and the union operator on disjoint keys is
-  # just object merge.
-  if [ -s "$jsonl_tmp" ]; then
-    jq -cs 'reduce .[] as $row ({}; . + $row)' "$jsonl_tmp" > "$docs_out_tmp"
-  else
-    printf '{}\n' > "$docs_out_tmp"
-  fi
-
-  # Untracked detection — set-difference between filesystem and index keys.
-  # Replaces N per-file `jq '.docs | has($p)'` queries with a single
-  # `jq keys` + `find` + `comm`. Raw keys, not the @tsv-escaped ones above.
-  jq -r '.docs | keys[]' "$snap" | sort > "$idx_paths_tmp"
-  find docs -name '*.md' -not -path 'docs/archive/*' 2>/dev/null | sort > "$fs_paths_tmp"
-  if [ -s "$fs_paths_tmp" ]; then
-    comm -23 "$fs_paths_tmp" "$idx_paths_tmp" | jq -R . | jq -cs . > "$untracked_tmp"
-  else
-    printf '[]\n' > "$untracked_tmp"
-  fi
-  local untracked_count
-  untracked_count=$(jq 'length' "$untracked_tmp")
-
-  # Build final output. `docs` and `untracked_docs` come in via --slurpfile
-  # (see the tempfile declarations above); only the bounded scalars use argv.
-  jq -n \
-    --arg checked_at "$checked_at" \
-    --arg repo_head "$repo_head_val" \
-    --argjson current "$count_current" \
-    --argjson stale "$count_stale" \
-    --argjson missing "$count_missing" \
-    --argjson deprecated "$count_deprecated" \
-    --argjson untracked "$untracked_count" \
-    --slurpfile untracked_docs "$untracked_tmp" \
-    --slurpfile docs "$docs_out_tmp" \
-    '{
+  # The report in ONE jq: per-doc results (a --slurpfile/--rawfile/stdin
+  # value each, never argv — Linux caps one argv string at 131072 bytes), the
+  # summary counted from them, so the two cannot disagree.
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  jq -n -R --arg checked_at "$checked_at" --arg repo_head "$_HEAD" \
+    --rawfile fs "$fs_paths" --slurpfile idx "$snap" \
+    "$_JQ_REC_FIELDS$_JQ_FRESH_RESULTS"'
+    results as $docs
+    | $idx[0].docs as $all
+    | [$fs | split("\n")[] | select(. != "") | . as $p | select($all | has($p) | not)] as $untracked
+    | def count($s): [$docs[] | select(.status == $s)] | length;
+    {
       checked_at: $checked_at,
-      repo_head: $repo_head,
-      summary: {current: $current, stale: $stale, missing: $missing, deprecated: $deprecated, untracked: $untracked},
-      untracked_docs: $untracked_docs[0],
-      docs: $docs[0]
-    }'
+      repo_head: (if $repo_head == "" then null else $repo_head end),
+      summary: {current: count("current"), stale: count("stale"), missing: count("missing"),
+                deprecated: count("deprecated"), untracked: ($untracked | length)},
+      untracked_docs: $untracked,
+      docs: $docs
+    }' < "$results"
 }
 
 cmd_update_index() {
@@ -1190,11 +1736,9 @@ cmd_update_index() {
     exit 1
   fi
 
-  local targets=() raw_doc_path doc_path
-  for raw_doc_path in "$@"; do
-    doc_path=$(normalize_doc_path "$raw_doc_path") || exit 1
-    targets+=("$doc_path")
-  done
+  local targets=() doc_path
+  _targets_from_args "$@"
+  targets=("${_TARGETS[@]}")
 
   _scratch_init
   _index_now
@@ -1218,11 +1762,12 @@ cmd_update_index() {
         | "1\u0000\($r | length)\u0000" + ([$r[] | . + "\u0000"] | add // "")
       else "0\u00000\u0000" end' --args "${targets[@]}" < "$snap" > "$info"
 
-  # Unknown key → abort the whole batch before anything is computed or written
-  # (unchanged contract). Refs are kept in one flat array with per-target
-  # offsets (bash 3.2 has no arrays of arrays).
-  local has n j ref idx=0
-  local ref_all=() ref_start=() ref_count=()
+  # An unknown key is reported and skipped; the rest of the batch is still
+  # applied, and the run exits 1 at the end. (It used to abort the whole
+  # batch, so one typo in a list of 20 re-verified nothing.) Refs are kept in
+  # one flat array with per-target offsets (bash 3.2 has no arrays of arrays).
+  local has n j ref idx=0 unknown=0
+  local ref_all=() ref_start=() ref_count=() indexed=()
   exec 3< "$info"
   while [ "$idx" -lt "${#targets[@]}" ]; do
     IFS= read -r -d '' has <&3
@@ -1235,10 +1780,10 @@ cmd_update_index() {
       ref_all+=("$ref")
       j=$((j + 1))
     done
+    indexed+=("$has")
     if [ "$has" != "1" ]; then
-      exec 3<&-
-      echo "ERROR: '${targets[$idx]}' not found in index. Use add-entry to add new docs." >&2
-      exit 1
+      echo "ERROR: '${targets[$idx]}' not found in index; skipped. Use add-entry to add new docs." >&2
+      unknown=$((unknown + 1))
     fi
     idx=$((idx + 1))
   done
@@ -1250,7 +1795,9 @@ cmd_update_index() {
   idx=0
   while [ "$idx" -lt "${#targets[@]}" ]; do
     doc_path="${targets[$idx]}"
-    if [ ! -f "$doc_path" ]; then
+    if [ "${indexed[$idx]}" != "1" ]; then
+      :
+    elif [ ! -f "$doc_path" ]; then
       echo "WARNING: '$doc_path' no longer exists on disk. Skipping." >&2
       # The path is quoted INSIDE the advice string: a doc path containing a
       # space would otherwise paste as three arguments and trip move-entry's
@@ -1302,7 +1849,7 @@ cmd_update_index() {
     done <<< "$tagged"
   fi
 
-  # code_commit: one git log per DISTINCT code_refs set — docs that share refs
+  # code_commit: one git rev-list per DISTINCT code_refs set — docs that share refs
   # (common: several docs covering src/) share the answer. Linear cache, no
   # associative arrays (bash 3.2). Written as a _rec_put record stream, turned
   # into the JSONL patch by ONE jq below.
@@ -1333,7 +1880,8 @@ cmd_update_index() {
       if [ "$c" -lt "${#cache_keys[@]}" ]; then
         code_commit="${cache_vals[$c]}"
       else
-        code_commit=$(git log -1 --format=%H -- "${code_refs_arr[@]}" 2>/dev/null || true)
+        _git_last_commit "${code_refs_arr[@]}"
+        code_commit="$_LAST"
         cache_keys+=("$ckey")
         cache_vals+=("$code_commit")
       fi
@@ -1375,9 +1923,16 @@ cmd_update_index() {
   if [ ${#unchanged[@]} -gt 0 ]; then
     _report_keys "Unchanged" "(already up to date)" "${unchanged[@]}"
   fi
+  if [ "$unknown" -gt 0 ]; then
+    echo "$unknown $([ "$unknown" -eq 1 ] && echo path was || echo paths were) not in the index (see above)." >&2
+    exit 1
+  fi
 }
 
 cmd_add_entry() {
+  if [ $# -gt 0 ]; then
+    _usage_error add-entry "takes no arguments; it reads mapping lines from stdin (got '$1')"
+  fi
   if [ ! -f "$INDEX_FILE" ]; then
     echo "ERROR: doc-index.json not found at $INDEX_FILE. Run build-index first." >&2
     exit 1
@@ -1386,95 +1941,34 @@ cmd_add_entry() {
   _scratch_init
   _index_now
 
-  local invalid=0
-  local requested=()
   # Facts about each doc (hash, code_commit) do not depend on the index, so
-  # they are gathered WITHOUT the lock — stdin may be slow — as a _rec_put
-  # record stream. The "add" patch rows only insert keys that are still absent
-  # when applied under the lock, so a concurrent writer cannot be clobbered.
-  local raw="$_SCRATCH/add-raw" patch="$_SCRATCH/add-patch.jsonl"
-  : > "$raw"
+  # they are gathered WITHOUT the lock — stdin may be slow. The "add" patch
+  # rows only insert keys that are still absent when applied under the lock,
+  # so a concurrent writer cannot be clobbered.
+  local rec="$_SCRATCH/add.rec" patch="$_SCRATCH/add-patch.jsonl"
+  _read_mapping add-entry "$rec"
 
-  # Save stdin to fd 3, redirect fd 0 so subprocesses don't consume input
-  exec 3<&0 0</dev/null
-
-  local line
-  while IFS= read -r line <&3 || [ -n "$line" ]; do
-    [ -z "$line" ] && continue
-
-    local doc_path raw_doc_path code_refs_raw doc_type
-    raw_doc_path=$(echo "$line" | cut -d: -f1)
-    code_refs_raw=$(echo "$line" | cut -d: -f2)
-    doc_type=$(echo "$line" | cut -d: -f3)
-
-    # Reject anything that can't be expressed as a working-tree-relative key.
-    # add-entry is incremental, so the valid lines are still applied — but the
-    # command exits non-zero so a bad path can never pass silently.
-    if ! doc_path=$(normalize_doc_path "$raw_doc_path"); then
-      invalid=$((invalid + 1))
-      continue
-    fi
-
-    # Compute content hash ("" → null: a not-yet-written doc is allowed)
-    local content_hash_val=""
-    if [ -f "$doc_path" ]; then
-      content_hash_val="sha256:$(hash_file "$doc_path")"
-    fi
-
-    # Compute latest commit across code refs (count guard: see cmd_build_index —
-    # an empty code_refs list is unbound under bash 3.2 + `set -u`)
-    local code_commit=""
-    local refs=()
-    IFS=',' read -ra refs <<< "$code_refs_raw"
-    if [ ${#refs[@]} -gt 0 ]; then
-      code_commit=$(git log -1 --format=%H -- "${refs[@]}" 2>/dev/null || true)
-    fi
-
-    _rec_put "$doc_path" "$content_hash_val" "$code_refs_raw" "$code_commit" "$doc_type" >> "$raw"
-    requested+=("$doc_path")
-  done
-
-  exec 3<&-
-
-  # code_refs: comma-split with empty strings dropped — see cmd_build_index for
-  # why [""] must never be written.
   # shellcheck disable=SC2016  # jq program, not shell expansion
-  jq -c -n -R --arg now "$_INDEX_NOW" "$_JQ_REC_FIELDS"'
-    rec_fields as $f
-    | range(0; $f | length; 5) as $i
-    | {key: $f[$i], add: {
-        content_hash: (if $f[$i + 1] == "" then null else $f[$i + 1] end),
-        code_refs: ($f[$i + 2] | split(",") | map(select(. != ""))),
-        code_commit: (if $f[$i + 3] == "" then null else $f[$i + 3] end),
-        doc_type: $f[$i + 4],
-        status: "current",
-        replaces: null,
-        superseded_by: null,
-        last_verified: $now}}
-  ' < "$raw" > "$patch"
+  jq -c -n -R --arg now "$_INDEX_NOW" "$_JQ_REC_FIELDS$_JQ_MAPPING_ENTRIES"'
+    mapping_entries | to_entries[] | {key: .key, add: .value}' < "$rec" > "$patch" \
+    || _die "cannot assemble the new entries; $INDEX_FILE is unchanged."
 
   _index_apply "$_INDEX_PATCH" --slurpfile patch "$patch"
 
-  # Report what actually happened, in input order. A key that was already
-  # indexed (or repeated within this batch) was not added.
-  local added=() seen=$'\n' p
-  for p in "${requested[@]+"${requested[@]}"}"; do
-    case "$seen" in
-      *$'\n'"$p"$'\n'*) ;;
-      *)
-        if _index_changed_has "$p"; then
-          added+=("$p")
-          seen="$seen$p"$'\n'
-          continue
-        fi
-        ;;
-    esac
-    echo "SKIP: '$p' already in index. Use update-index to refresh." >&2
+  # Report what actually happened, in input order: a key that was already
+  # indexed was not added.
+  local added=() p
+  for p in ${_M_KEYS[@]+"${_M_KEYS[@]}"}; do
+    if _index_changed_has "$p"; then
+      added+=("$p")
+    else
+      echo "SKIP: '$p' already in index. Use update-index to refresh." >&2
+    fi
   done
   _report_keys "Added" "" "${added[@]+"${added[@]}"}"
 
-  if [ "$invalid" -gt 0 ]; then
-    echo "Rejected $invalid invalid $([ "$invalid" -eq 1 ] && echo path || echo paths)." >&2
+  if [ "$_M_INVALID" -gt 0 ]; then
+    echo "Rejected $_M_INVALID invalid mapping $([ "$_M_INVALID" -eq 1 ] && echo line || echo lines)." >&2
     exit 1
   fi
 }
@@ -1493,11 +1987,10 @@ cmd_remove_entry() {
   # Normalize every path up front so an unusable one aborts before we mutate the
   # index. Without this an absolute path merely reported "not found in index" and
   # exited 0 — a silent no-op for a caller who asked to remove a real entry.
-  local targets=() raw_doc_path doc_path
-  for raw_doc_path in "$@"; do
-    doc_path=$(normalize_doc_path "$raw_doc_path") || exit 1
-    targets+=("$doc_path")
-  done
+  # Repeats (docs/a.md docs//a.md) are one target.
+  local targets=() doc_path
+  _targets_from_args "$@"
+  targets=("${_TARGETS[@]}")
 
   _scratch_init
   local patch="$_SCRATCH/remove-patch.jsonl"
@@ -1636,34 +2129,21 @@ cmd_deprecate_entry() {
     exit 1
   fi
 
-  # Parse optional --superseded-by flag
+  # --superseded-by may come anywhere on the line (_parse_args): given after
+  # the path it used to be taken for a second target, deprecating the
+  # successor. The value is stored as a doc reference, so it is held to the
+  # same key contract as the entries themselves.
   local superseded_by="null"
-  if [ "${1:-}" = "--superseded-by" ]; then
-    shift
-    if [ $# -eq 0 ]; then
-      echo "ERROR: --superseded-by requires a path argument." >&2
-      exit 1
-    fi
-    # This is stored in the index as a doc reference, so it is subject to the
-    # same key contract as the entries themselves.
-    local superseded_by_path
-    superseded_by_path=$(normalize_doc_path "$1" "--superseded-by path") || exit 1
-    superseded_by=$(printf '%s' "$superseded_by_path" | jq -R .)
-    shift
-  fi
-
-  if [ $# -eq 0 ]; then
-    echo "ERROR: no doc paths provided after flags." >&2
-    exit 1
+  if _opt_seen superseded-by; then
+    _norm_path "$_OPT_superseded_by" "--superseded-by path" || exit 1
+    superseded_by=$(printf '%s' "$_NORM" | jq -R .)
   fi
 
   # Normalize up front — same rationale as remove-entry: an absolute path used to
   # report "not found" and exit 0, silently failing to deprecate a real entry.
-  local targets=() raw_doc_path doc_path
-  for raw_doc_path in "$@"; do
-    doc_path=$(normalize_doc_path "$raw_doc_path") || exit 1
-    targets+=("$doc_path")
-  done
+  local targets=() doc_path
+  _targets_from_args "$@"
+  targets=("${_TARGETS[@]}")
 
   _scratch_init
   _index_now
@@ -1712,63 +2192,30 @@ cmd_status() {
     echo "ERROR: status requires a doc path argument." >&2
     exit 1
   fi
+  if [ $# -gt 1 ]; then
+    echo "ERROR: status takes exactly one doc path (got $#); check-freshness reports every doc." >&2
+    exit 1
+  fi
 
   local doc_path
   doc_path=$(normalize_doc_path "$1") || exit 1
 
   _scratch_init
-  local snap index
+  local snap results="$_SCRATCH/status.rec" out
   snap=$(_index_load) || exit 1
-  index=$(cat "$snap")
 
-  # Verify path exists in index
-  local exists
-  exists=$(echo "$index" | jq --arg p "$doc_path" '.docs | has($p)')
-  if [ "$exists" != "true" ]; then
+  # The same walk check-freshness runs, restricted to this one key, so the
+  # two can never disagree about a doc (the old inline copy did).
+  _freshness_scan "$snap" "$doc_path" "" "$results"
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  out=$(jq -n -R --arg p "$doc_path" "$_JQ_REC_FIELDS$_JQ_FRESH_RESULTS"'
+    results | if has($p) then {path: $p} + .[$p] else empty end' < "$results") \
+    || _die "cannot render the status of '$doc_path'"
+  if [ -z "$out" ]; then
     echo "ERROR: '$doc_path' not found in index." >&2
     exit 1
   fi
-
-  local entry
-  entry=$(echo "$index" | jq --arg p "$doc_path" '.docs[$p]')
-
-  local stored_status
-  stored_status=$(echo "$entry" | jq -r '.status')
-  local doc_type
-  doc_type=$(echo "$entry" | jq -r '.doc_type')
-  local last_verified
-  last_verified=$(echo "$entry" | jq -r '.last_verified // empty')
-
-  # Deprecated: short-circuit
-  if [ "$stored_status" = "deprecated" ]; then
-    jq -n \
-      --arg path "$doc_path" \
-      --arg doc_type "$doc_type" \
-      --arg status "deprecated" \
-      --arg last_verified "$last_verified" \
-      '{path: $path, doc_type: $doc_type, status: $status, last_verified: $last_verified}'
-    return 0
-  fi
-
-  # Missing
-  if [ ! -f "$doc_path" ]; then
-    jq -n \
-      --arg path "$doc_path" \
-      --arg doc_type "$doc_type" \
-      --arg status "missing" \
-      '{path: $path, doc_type: $doc_type, status: $status}'
-    return 0
-  fi
-
-  # Compute freshness via shared helper, add path/doc_type/last_verified
-  local freshness
-  freshness=$(compute_freshness "$doc_path" "$entry")
-
-  echo "$freshness" | jq \
-    --arg path "$doc_path" \
-    --arg doc_type "$doc_type" \
-    --arg last_verified "$last_verified" \
-    '{path: $path} + . + {doc_type: $doc_type, last_verified: $last_verified}'
+  printf '%s\n' "$out"
 }
 
 # --- Version management ---
@@ -1784,6 +2231,9 @@ VERSION_FILES=(
 )
 
 cmd_bump_version() {
+  if [ $# -gt 1 ]; then
+    _usage_error bump-version "takes one version (got $#: $*)"
+  fi
   local new_version="${1:-}"
   if [[ -z "$new_version" ]]; then
     echo "ERROR: bump-version requires a version argument (e.g., 2.5.0)" >&2
@@ -1825,6 +2275,9 @@ cmd_bump_version() {
 }
 
 cmd_check_version() {
+  if [ $# -gt 0 ]; then
+    _usage_error check-version "takes no arguments (got '$1')"
+  fi
   # Extract canonical version from RELEASE-NOTES.md
   local canonical
   canonical=$(grep -m 1 -o '## v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' RELEASE-NOTES.md 2>/dev/null | sed 's/## v//')
@@ -1921,6 +2374,9 @@ _fragment_section_names() {
 }
 
 cmd_fragments_list() {
+  if [ $# -gt 0 ]; then
+    _usage_error "fragments list" "takes no arguments (got '$1')"
+  fi
   local dir="RELEASE-NOTES.next"
   if [[ ! -d "$dir" ]]; then
     echo "[]"
@@ -1964,7 +2420,10 @@ cmd_fragments_list() {
 }
 
 cmd_fragments_validate() {
-  local path="$1"
+  local path="${1:-}"
+  if [ $# -gt 1 ]; then
+    _usage_error "fragments validate" "takes one fragment path (got $#)"
+  fi
   if [[ -z "$path" ]]; then
     echo "Usage: $0 fragments validate <path>" >&2
     return 2
@@ -1989,21 +2448,19 @@ cmd_fragments_validate() {
 }
 
 cmd_fragments_merge() {
-  local range_start="$1" range_end="$2"
-  local paths_out_file=""
-  # Optional --paths-out=<file>: write one consumed-fragment path per line.
+  local range_start="${1:-}" range_end="${2:-}"
+  local paths_out_file="${_OPT_paths_out:-}"
+  if [ $# -gt 2 ]; then
+    _usage_error "fragments merge" "takes <range-start> <range-end> (got $# arguments)"
+  fi
+  # Optional --paths-out <file>: write one consumed-fragment path per line.
   # Lets callers (e.g., SKILL.md step 9) `git rm` only the fragments that were
   # actually merged, instead of globbing PR-*.md unconditionally.
-  if [[ "${3:-}" == --paths-out=* ]]; then
-    paths_out_file="${3#--paths-out=}"
+  if [ -n "$paths_out_file" ]; then
     : > "$paths_out_file"
   fi
   if [[ -z "$range_start" ]] || [[ -z "$range_end" ]]; then
-    echo "Usage: $0 fragments merge <range-start> <range-end> [--paths-out=<file>]" >&2
-    return 2
-  fi
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "ERROR: fragments merge must be run inside a git repo" >&2
+    echo "Usage: doc-tools.sh fragments merge <range-start> <range-end> [--paths-out <file>]" >&2
     return 2
   fi
   local dir="RELEASE-NOTES.next"
@@ -2164,24 +2621,13 @@ cmd_fragments_merge() {
 cmd_set_implementation() {
     # Append/update a single Implementation: ref in a doc.
     # Usage: doc-tools.sh set-implementation <path> --ref <kind: ref> --status <status> [--note <note>]
-    local FILE="" REF="" STATUS="" NOTE=""
+    # Options (--ref/--status/--note, anywhere) come from _parse_args.
+    local FILE="${1:-}" REF="${_OPT_ref:-}" STATUS="${_OPT_status:-}" NOTE="${_OPT_note:-}"
     local VALID_STATUSES="complete partial in-progress not-started reverted superseded blocked"
 
-    if [[ $# -eq 0 ]]; then
-        echo "Usage: set-implementation <path> --ref <kind: ref> --status <status> [--note <note>]" >&2
-        exit 2
+    if [[ $# -gt 1 ]]; then
+        _usage_error set-implementation "takes one doc path (got $#)"
     fi
-
-    # Positional: path
-    FILE="$1"; shift
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --ref) REF="$2"; shift 2 ;;
-            --status) STATUS="$2"; shift 2 ;;
-            --note) NOTE="$2"; shift 2 ;;
-            *) echo "Unknown arg: $1" >&2; exit 2 ;;
-        esac
-    done
 
     if [[ -z "$FILE" || -z "$REF" || -z "$STATUS" ]]; then
         echo "Usage: set-implementation <path> --ref <kind: ref> --status <status> [--note <note>]" >&2
@@ -2241,13 +2687,8 @@ ${new_line}" "$FILE"
 cmd_implementation_status() {
     # Parse Implementation: YAML field from one or more docs.
     # Usage: doc-tools.sh implementation-status [--filter <status>[,<status>...]] <path> [<path>...]
-    local FILTER=""
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --filter) FILTER="$2"; shift 2 ;;
-            *) break ;;
-        esac
-    done
+    # --filter (anywhere) comes from _parse_args.
+    local FILTER="${_OPT_filter:-}"
 
     local path block filter_re
     for path in "$@"; do
@@ -2303,39 +2744,11 @@ _tools_plugin_helpers_dir() {
   [[ -d "$candidate" ]] && echo "$candidate" || echo ""
 }
 
-cmd_tools() {
-  local sub="${1:-}"
-  shift || true
-  case "$sub" in
-    install)   _tools_install "$@" ;;
-    uninstall) _tools_uninstall "$@" ;;
-    status)    _tools_status "$@" ;;
-    ""|--help) cat >&2 <<'EOF'
-Usage:
-  doc-tools.sh tools install   [--dest <path>] [--with-helpers]
-  doc-tools.sh tools uninstall [--dest <path>]
-  doc-tools.sh tools status    [--dest <path>]
-
---dest defaults to .github/scripts (project-relative).
---with-helpers also installs doc-pr-release/*.sh + RELEASE-NOTES.next/README.md
-EOF
-      exit 1 ;;
-    *) echo "Unknown tools sub-command: $sub" >&2; exit 2 ;;
-  esac
-}
-
-_tools_install() {
-  local dest=".github/scripts"
+cmd_tools_install() {
+  [ $# -eq 0 ] || _usage_error "tools install" "takes no arguments (got '$1')"
+  local dest="${_OPT_dest:-.github/scripts}"
   local with_helpers=false
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --dest)
-        [[ $# -lt 2 ]] && { echo "ERROR: --dest requires a value" >&2; exit 1; }
-        dest="$2"; shift 2 ;;
-      --with-helpers) with_helpers=true; shift ;;
-      *) echo "Unknown option: $1" >&2; exit 2 ;;
-    esac
-  done
+  [ -z "${_OPT_with_helpers:-}" ] || with_helpers=true
 
   local src
   src="$(_tools_plugin_source)"
@@ -2378,16 +2791,9 @@ _tools_install() {
   fi
 }
 
-_tools_uninstall() {
-  local dest=".github/scripts"
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --dest)
-        [[ $# -lt 2 ]] && { echo "ERROR: --dest requires a value" >&2; exit 1; }
-        dest="$2"; shift 2 ;;
-      *) echo "Unknown option: $1" >&2; exit 2 ;;
-    esac
-  done
+cmd_tools_uninstall() {
+  [ $# -eq 0 ] || _usage_error "tools uninstall" "takes no arguments (got '$1')"
+  local dest="${_OPT_dest:-.github/scripts}"
 
   local removed=0
   if [[ -f "$dest/doc-tools.sh" ]]; then
@@ -2430,16 +2836,9 @@ _tools_uninstall() {
   return 0
 }
 
-_tools_status() {
-  local dest=".github/scripts"
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --dest)
-        [[ $# -lt 2 ]] && { echo "ERROR: --dest requires a value" >&2; exit 1; }
-        dest="$2"; shift 2 ;;
-      *) echo "Unknown option: $1" >&2; exit 2 ;;
-    esac
-  done
+cmd_tools_status() {
+  [ $# -eq 0 ] || _usage_error "tools status" "takes no arguments (got '$1')"
+  local dest="${_OPT_dest:-.github/scripts}"
 
   local installed="$dest/doc-tools.sh"
   local plugin
@@ -2497,41 +2896,4 @@ _tools_extract_version() {
 
 # --- Main ---
 
-check_deps
-_traps
-
-case "${1:-}" in
-  build-index)      shift; cmd_build_index "$@" ;;
-  check-freshness)  shift; cmd_check_freshness "$@" ;;
-  update-index)     shift; cmd_update_index "$@" ;;
-  add-entry)        shift; cmd_add_entry "$@" ;;
-  remove-entry)     shift; cmd_remove_entry "$@" ;;
-  move-entry)       shift; cmd_move_entry "$@" ;;
-  deprecate-entry)  shift; cmd_deprecate_entry "$@" ;;
-  status)           shift; cmd_status "$@" ;;
-  bump-version)     shift; cmd_bump_version "$@" ;;
-  check-version)    shift; cmd_check_version "$@" ;;
-  implementation-status) shift; cmd_implementation_status "$@" ;;
-  set-implementation) shift; cmd_set_implementation "$@" ;;
-  fragments)
-    shift
-    case "${1:-}" in
-      list)
-        cmd_fragments_list
-        ;;
-      validate)
-        cmd_fragments_validate "${2:-}"
-        ;;
-      merge)
-        cmd_fragments_merge "${2:-}" "${3:-}" "${4:-}"
-        ;;
-      *)
-        echo "Usage: $0 fragments {list|validate <path>|merge <range-start> <range-end> [--paths-out=<file>]}" >&2
-        exit 2
-        ;;
-    esac
-    ;;
-  tools)            shift; cmd_tools "$@" ;;
-  --help|"")        usage ;;
-  *)                usage ;;
-esac
+_main "$@"

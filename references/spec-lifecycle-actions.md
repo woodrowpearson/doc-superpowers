@@ -89,7 +89,7 @@ Use after brainstorming produces a design spec. Decomposes a narrative design do
 **Input:** `--design-doc=<path>` — Path to the narrative design spec.
 
 1. **Run discovery** (if not already run in this session).
-2. **Bootstrap if needed**: If `docs/specs/` doesn't exist, create it with `template.md` and `README.md` from `references/doc-spec.md`. If `.doc-index.json` doesn't exist, run `doc-tools.sh build-index`.
+2. **Bootstrap if needed**: If `docs/specs/` doesn't exist, create it with `template.md` and `README.md` from `references/doc-spec.md`. If `.doc-index.json` doesn't exist, step 8 creates it. `build-index` refuses empty input, so there is no empty bootstrap.
 3. **Parse the design doc** — Read the narrative design spec and identify distinct specification domains using the 9 CAT codes (ARCH, AUTH, DATA, API, UI, PIPE, OPS, INFRA, TEST) as a classification lens.
 4. **Check for idempotency** — If the design doc already has a `## Generated Specs` section, read it to identify previously generated specs. Only generate specs for newly identified domains not already listed.
 5. **Check for overlapping existing specs** — For each identified domain, scan `docs/specs/` for existing specs in that category:
@@ -125,7 +125,7 @@ Use after brainstorming produces a design spec. Decomposes a narrative design do
    - `Source`: path to the design doc (Markdown-header only, NOT indexed in `.doc-index.json`)
    - Content: extracted and formalized from the relevant design doc sections
 7. **Populate `code_refs`** — For each spec, extract `code_refs` from the design doc's references to code paths (file paths, directory references, module names). If the design doc doesn't reference specific code paths, set `code_refs` to the project directories most likely affected by the spec's category based on project structure discovery. These initial `code_refs` are best-effort — they get refined during `spec-inject` (execute phase).
-8. **Update indexes** — Call `doc-tools.sh update-index` for each new spec (including populated `code_refs`). Update `docs/specs/README.md` index table.
+8. **Update indexes** — Index each new spec by piping its mapping line (`<spec-path>:<code_refs_csv>:spec`) to `doc-tools.sh add-entry`. If step 2 found no `.doc-index.json`, pipe the lines to `doc-tools.sh build-index` instead. `update-index` only refreshes entries that already exist: for a new spec it reports the path as not in the index and exits 1. Update `docs/specs/README.md` index table.
 9. **Link back to design doc** — Append a `## Generated Specs` section to the design doc listing all formal specs produced:
    ```markdown
    ## Generated Specs

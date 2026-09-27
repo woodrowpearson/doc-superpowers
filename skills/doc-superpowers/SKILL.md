@@ -93,7 +93,7 @@ DOC_TOOLS="$(printf '%s\n' ~/.claude/plugins/cache/doc-superpowers/doc-superpowe
 
 All `doc-tools.sh` references below assume `$DOC_TOOLS` has been resolved. Use `$DOC_TOOLS <subcommand>` for every call.
 
-**Prerequisites:** `doc-tools.sh` needs `git`, `jq` **≥ 1.6** (the index writers use `--args` / `$ARGS.positional`), and `sha256sum` or `shasum`. When one is missing, or `jq` is older than 1.6, every subcommand exits non-zero with a message naming what to install or upgrade.
+**Prerequisites:** `doc-tools.sh` needs `git`, `jq` **≥ 1.6** (the index writers use `--args` / `$ARGS.positional`), and `sha256sum` or `shasum`. When one is missing, or `jq` is older than 1.6, every subcommand except `--help` exits non-zero with a message naming what to install or upgrade.
 
 #### Path precedence (when multiple copies exist)
 
@@ -116,13 +116,13 @@ ls scripts/*validate_docs* scripts/*validate_doc_references* scripts/*fix_doc_re
 
 | Script Pattern | Source | Purpose |
 |---|---|---|
-| `doc-tools.sh build-index` | Bundled | Build `docs/.doc-index.json` from scratch (stdin) |
-| `doc-tools.sh check-freshness` | Bundled | Hash-based staleness detection (read-only) |
-| `doc-tools.sh update-index` | Bundled | Refresh existing index entries (skips missing files) |
-| `doc-tools.sh add-entry` | Bundled | Add new entries to existing index (stdin) |
+| `doc-tools.sh build-index` | Bundled | Build `docs/.doc-index.json` from scratch (stdin mapping lines). Only when no index exists: it refuses to replace one that has entries unless given `--force`, and refuses empty input |
+| `doc-tools.sh check-freshness` | Bundled | Hash-based staleness detection (read-only). `--code-refs <path>...` or `--code-refs-from <file\|->` scopes it to docs whose `code_refs` share a path segment with the list |
+| `doc-tools.sh update-index` | Bundled | Refresh existing index entries (skips missing files; a path not in the index is reported and skipped, and the run exits 1) |
+| `doc-tools.sh add-entry` | Bundled | Add new entries to an existing index (stdin mapping lines) |
 | `doc-tools.sh remove-entry` | Bundled | Remove entries from index by path |
 | `doc-tools.sh move-entry` | Bundled | Re-key an entry after a doc moves — preserves `code_refs`/`code_commit`/`last_verified`; use instead of `remove-entry` + `add-entry` for a rename |
-| `doc-tools.sh deprecate-entry` | Bundled | Mark entries as deprecated (`--superseded-by`) |
+| `doc-tools.sh deprecate-entry` | Bundled | Mark entries as deprecated (`--superseded-by <path>`) |
 | `doc-tools.sh status` | Bundled | Single-doc freshness query (read-only) |
 | `doc-tools.sh bump-version` | Bundled | Write a version string across the 6 manifest files |
 | `doc-tools.sh check-version` | Bundled | Verify all manifests match RELEASE-NOTES.md's canonical version (read-only) |
@@ -137,6 +137,12 @@ ls scripts/*validate_docs* scripts/*validate_doc_references* scripts/*fix_doc_re
 | `*map_documents*` | Optional, user-provided | Custom document mapping |
 
 **Index writers** (`build-index`, `update-index`, `add-entry`, `remove-entry`, `move-entry`, `deprecate-entry`) are safe to run concurrently: they serialize on `docs/.doc-index.json.lock` and replace the index atomically, so parallel agents may each call `update-index`. A run that changes nothing writes nothing (no `generated_at` bump). The incremental writers report only the entries they actually changed; an `Unchanged … (already up to date)` or `SKIP` line is not a failure. A 0-byte or malformed index makes every index verb exit non-zero — restore it from git or rebuild with `build-index`.
+
+**Command line.** Options may appear anywhere, and `--opt VALUE` equals `--opt=VALUE` (`deprecate-entry docs/old.md --superseded-by docs/new.md` deprecates `docs/old.md` only). `--help` on any subcommand prints its usage and exits 0; `doc-tools.sh --help` lists every subcommand. An option a subcommand does not take exits **2** and changes nothing, as does a repository subcommand run outside a git work tree. Exit 1 means the operation failed or was refused.
+
+**Mapping lines** (stdin of `build-index` and `add-entry`): `doc_path:code_refs_csv:doc_type`. A bare path or a path containing `:` is rejected. Refs are trimmed and empty ones dropped, a trailing CR is removed, and a ref that matches no file tracked by git draws a warning, because a doc indexed only with such refs can never go stale. Doc paths are normalized: `docs//a.md` becomes `docs/a.md`, a path starting with `-` is refused, and a path named twice counts once.
+
+**Scoping by changed files.** `--code-refs src/m1` matches refs `src/m1`, `src/m1/a.js` and `src/`, but never `src/m10`. For a changed-file list, pipe it rather than pass it as arguments, so no argv limit applies: `git -c core.quotePath=false diff --name-only --no-renames <range> | $DOC_TOOLS check-freshness --code-refs-from -`. `core.quotePath=false` keeps non-ASCII paths unquoted, so they can match.
 
 ### Detect Scopes
 
@@ -292,7 +298,7 @@ Use when a project has no docs or needs a complete documentation suite generated
 9. **Sync README.md** — If README.md exists, update feature list, action list, and usage examples to reflect current project state. **SEE** `references/doc-spec.md` for README.md update rules. Skip if no README.md exists.
 10. **Generate diagrams** per the `diagram` action using co-located paths.
 11. Add freshness marker as first line of each generated file: `<!-- Generated by doc-superpowers | YYYY-MM-DD | commit: SHORT_HASH -->`
-12. **Build doc-index**: Construct one mapping line per generated doc in the format `doc_path:code_refs_csv:doc_type` (e.g., `docs/architecture.md:SKILL.md,scripts/:architecture`). Include EVERY generated doc file — missing entries make docs invisible to freshness tooling. Pipe all lines to `doc-tools.sh build-index` via stdin.
+12. **Build doc-index**: Construct one mapping line per generated doc in the format `doc_path:code_refs_csv:doc_type` (e.g., `docs/architecture.md:SKILL.md,scripts/:architecture`). Include EVERY generated doc file — missing entries make docs invisible to freshness tooling. Pipe all lines to `doc-tools.sh build-index` via stdin. If `docs/.doc-index.json` already has entries, pipe them to `doc-tools.sh add-entry` instead: `build-index` refuses to replace a non-empty index without `--force`, and `--force` discards every existing entry's metadata.
 13. **Verification gate**: Run `doc-tools.sh check-freshness` to confirm all generated docs are indexed and current.
 14. **Suggest workflow hooks**: After successful init, suggest: "Documentation generated. To keep docs fresh automatically, run `/doc-superpowers hooks install` to set up workflow hooks."
 
@@ -348,9 +354,9 @@ Review-pr is an **orchestrator** like `audit`, but scoped to PR changes.
 2. **Identify changed files** from PR diff:
    ```bash
    BASE=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@refs/remotes/origin/@@' || echo "main")
-   git diff --name-only "$BASE"...HEAD
+   git -c core.quotePath=false diff --name-only --no-renames "$BASE"...HEAD
    ```
-3. **Call `doc-tools.sh check-freshness --code-refs <changed_paths>`** — scope check to PR.
+3. **Call `doc-tools.sh check-freshness --code-refs-from -`** with that list on stdin — scope check to PR (the path-segment match described under *Scoping by changed files*).
 4. **Map changed files to affected scopes**.
 5. **For each affected scope**, dispatch a scope agent per the read-only orchestrator pattern (same gather→analyze→report cycle as `audit`). **Isolation**: each agent receives context ONLY for its scope — no cross-scope context. The scope agent receives:
    - The scope name and its `code_refs`
@@ -645,7 +651,7 @@ Agent reports without specific evidence (exact doc text vs exact code text) are 
 | `jq` not installed, or older than 1.6 | `doc-tools.sh` exits non-zero naming the requirement (`jq >= 1.6`) and the version found |
 | Old flat-file structure detected | `update` migrates to structured dirs; `init` offers migration if creating new docs |
 | No audit report for `update` | Falls back to `doc-tools.sh check-freshness`; if nothing stale, exits with "Nothing to update" |
-| Untracked docs in `docs/` | `check-freshness` reports them in `untracked_docs` array; run `build-index` to add them |
+| Untracked docs in `docs/` | `check-freshness` reports them in `untracked_docs` array; pipe a mapping line per doc to `add-entry` (not `build-index`, which refuses to replace a non-empty index) |
 | No governing specs for `spec-inject`/`spec-verify` | Warning listing missing paths; suggest running `spec-generate` first |
 | Design doc has no `## Generated Specs` section for `spec-inject` | Suggest running `spec-generate --design-doc=<path>` first |
 | `spec-verify` FAIL verdict | Surface compliance report to user; do not block automatically |
