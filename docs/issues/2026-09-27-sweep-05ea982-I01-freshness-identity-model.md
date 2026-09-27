@@ -120,12 +120,16 @@ section of `scripts/doc-tools.sh`; index `schema_version` 3):
   id differs. The pre-commit hook can pass `--tree "$(git write-tree)"` (wired in T7).
 - **Stale docs only.** `code_refs_changed` is the exact set of refs whose id differs.
   `commits_behind` is `git rev-list --count <code_commit>..HEAD -- <refs>`, run once per distinct
-  stale (`code_commit`, refs) group. It is `null` when the repository lacks that commit (a deleted
-  squash-merged branch, a shallow clone), never a masked `0`.
+  stale (`code_commit`, refs) group. It is `null` when that commit is not an ancestor of HEAD here:
+  a deleted squash-merged branch, a shallow clone, or a cherry-picked verification. It is never a
+  masked `0`.
 - **Shallow clones.** Writers record `code_commit: null` there, with a warning; the object ids are
   exact there.
 - **Literal refs.** Refs reach git with `--literal-pathspecs`. A ref containing `*`, `?` or `[`
-  draws a warning when written. The doc-index family is dropped from the content of any ref that
+  draws a warning when written. A ref naming a submodule records its commit (the gitlink, resolved
+  with one `git ls-tree` for every ref batch-check cannot resolve), so a submodule bump reads stale.
+  Untracked (not ignored) files under a ref are part of the verified content: writers name them,
+  and the doc reads stale until they are committed or ignored. The doc-index family is dropped from the content of any ref that
   covers it (`.`, `docs/`), so an index write never makes such a doc stale.
 - **Legacy entries** without `code_oids` keep the old commit logic (refs as git pathspecs) until
   re-verified. A v2 index is read as it is; the first real write stamps `schema_version: 3` and
@@ -137,7 +141,8 @@ The writers' per-key reports now come from one classification made in the writer
 (`_index_apply --report`). Loops over many paths no longer call functions while `"$@"` holds the
 paths, which under bash 3.2 copies them on every call. Both costs were quadratic.
 
-Tests: `test_i1_*` in `scripts/test-doc-tools.sh` (17 tests). All of them were RED against the
+Tests: `test_i1_*` in `scripts/test-doc-tools.sh` (20 tests, three of them from review round 1:
+untracked files, submodule refs, a non-ancestor `code_commit`). All of them were RED against the
 pre-fix script. Measured on this branch (M-series laptop, before → after):
 
 - `check-freshness` over 2,000 docs and 503 commits, 60 of them stale: 43.0 s → 1.1 s on bash 5,

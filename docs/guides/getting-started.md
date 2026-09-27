@@ -55,7 +55,7 @@ No configuration required. The skill auto-detects everything it needs from the t
 |-------------|-----------|-----------------|
 | Mermaid MCP | Add to `.claude/mcp.json` | PNG diagram rendering instead of inline source |
 
-Bundled: `scripts/doc-tools.sh` provides freshness tracking out of the box — content hashing for docs, commit SHA comparison for code. No additional scripts needed.
+Bundled: `scripts/doc-tools.sh` provides freshness tracking out of the box — content hashing for docs, content identity for code (the git object id of each code ref, recorded when a doc is verified). No additional scripts needed.
 
 ## First Run
 
