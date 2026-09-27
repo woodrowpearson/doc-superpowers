@@ -44,21 +44,7 @@ jobs:
 
       - name: Check for unreleased commits
         id: precheck
-        run: |
-          last_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -z "$last_tag" ]; then
-            echo "No tags found — first release."
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          commit_count=$(git rev-list "${last_tag}..HEAD" --count)
-          if [ "$commit_count" -eq 0 ]; then
-            echo "No unreleased commits since $last_tag. Skipping."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "$commit_count commits since $last_tag."
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+        run: .github/scripts/doc-release/precheck.sh
 
       - name: Resolve Anthropic auth
         id: auth
@@ -66,18 +52,7 @@ jobs:
         env:
           OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          if [ -n "$OAUTH" ]; then
-            echo "use_oauth=true" >> "$GITHUB_OUTPUT"
-            if [ -n "$API_KEY" ]; then
-              echo "::notice::Both CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are set; using CLAUDE_CODE_OAUTH_TOKEN."
-            fi
-          elif [ -n "$API_KEY" ]; then
-            echo "use_oauth=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::Neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY is set as a repository secret. Add one under Settings > Secrets and variables > Actions." >&2
-            exit 1
-          fi
+        run: .github/scripts/doc-release/resolve-auth.sh
 
       - name: Draft release notes
         if: steps.precheck.outputs.skip != 'true'

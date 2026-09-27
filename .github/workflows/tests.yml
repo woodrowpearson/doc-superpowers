@@ -54,6 +54,10 @@ jobs:
     env:
       BASH_BIN: ${{ matrix.bash }}
       BASH_MAJOR: ${{ matrix.bash_major }}
+      # test-doc-pr-release.sh reports a missing YAML parser as a loud SKIP so a
+      # contributor without one can still run it locally. In CI that SKIP must
+      # never pass silently: this flag turns it into a counted FAIL.
+      DOC_SP_REQUIRE_YAML_PARSER: "1"
 
     steps:
       # No suite reads this repo's history — they each build throwaway git
@@ -84,10 +88,12 @@ jobs:
             exit 1
           fi
           # test-doc-pr-release.sh parses the nine CI templates to prove the
-          # placeholder substitution leaves valid YAML. PyYAML ships on the
-          # ubuntu image but not the macOS one, so ruby's stdlib psych is the
-          # accepted fallback — assert one of them here rather than letting the
-          # suite discover it nine failures in.
+          # placeholder substitution leaves valid YAML, and reads template
+          # structure (concurrency, job guards, run: wiring) through the same
+          # parser. PyYAML ships on the ubuntu image but not the macOS one, so
+          # ruby's stdlib psych is the accepted fallback. Fail here, up front;
+          # DOC_SP_REQUIRE_YAML_PARSER (job env) is the second lock inside the
+          # suite itself.
           if python3 -c 'import yaml' >/dev/null 2>&1; then
             yaml_parser="python3 + PyYAML"
           elif command -v ruby >/dev/null 2>&1 && ruby -ryaml -e 'exit 0' >/dev/null 2>&1; then

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-27T06:52:19Z",
+  "generated_at": "2026-09-27T08:24:18Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -20,7 +20,7 @@
       "implementation": []
     },
     "docs/codebase-guide.md": {
-      "content_hash": "sha256:ffbebf26b61e50b53f1567315e74c55f0118421dce6f275b0b431537e727818f",
+      "content_hash": "sha256:abcedd96d46295f3e8d2c3d5879effe569198bf1c16c0f4d44718097ed851198",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
@@ -30,21 +30,21 @@
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-02T05:52:32Z",
+      "last_verified": "2026-09-27T08:24:18Z",
       "implementation": []
     },
     "docs/conventions.md": {
-      "content_hash": "sha256:ea2ca199b8de0fe593603647302730b69f45dfe968ad1ca0bee3701d07923adc",
+      "content_hash": "sha256:4702c48b3a4a3463ee532f361c99c0aa56978b40693b8841a950d9c49bfd2b50",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "references/doc-spec.md"
       ],
-      "code_commit": "702edc513367f3941834982cbdd1b2d8b112a457",
+      "code_commit": "3180290a4752d7a3037111c4b7bed2204210fe59",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-30T01:57:17Z",
+      "last_verified": "2026-09-27T08:24:18Z",
       "implementation": []
     },
     "docs/guides/getting-started.md": {
@@ -62,17 +62,17 @@
       "implementation": []
     },
     "docs/workflows/doc-superpowers.md": {
-      "content_hash": "sha256:5adb0e30a4af7e98a10395d310c6f0dbfeee8317f115e5298aa42bd0cbf4953d",
+      "content_hash": "sha256:27ee519c5de7dc6ae3a0d1bc393d1656ab47398437af9e6811836e50eea4f70b",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "2379fe98f04ee406b2b790098dff39894f5a8774",
+      "code_commit": "f5808eabf056c86df489a682c6f50610e880eecd",
       "doc_type": "workflows",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-25T04:19:12Z",
+      "last_verified": "2026-09-27T08:24:18Z",
       "implementation": []
     },
     "docs/plans/2026-03-26-audit-report.md": {
@@ -626,14 +626,14 @@
       "last_verified": "2026-09-27T06:12:33Z"
     },
     "docs/issues/2026-09-27-sweep-05ea982-I13-test-suite-fidelity.md": {
-      "content_hash": "sha256:15309297a87539887c4abf65a089a92a290a720aab7058f926eea1937d527365",
+      "content_hash": "sha256:9b24b59c1344d823a65e6c09241ee49be71c8f41b2096fda0d5828cb4e572d7b",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T06:43:37Z",
+      "last_verified": "2026-09-27T08:24:18Z",
       "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I14-docs-and-self-dogfooding.md": {

@@ -1,6 +1,6 @@
 ---
 date: 2026-09-27
-status: Open
+status: Resolved
 priority: P1
 type: bug
 component: tests
@@ -147,7 +147,20 @@ The harness has its own defects:
 
 ## Acceptance criteria
 
-- [ ] A harness self-test proves `assert_not_contains` never false-PASSes on a 64 KB haystack.
-- [ ] With `GIT_CONFIG_GLOBAL` pointing at a hooksPath, the suite leaves that dir empty.
-- [ ] 60 consecutive runs of `test-spec-status-model.sh` show 0 flakes.
+- [x] A harness self-test proves `assert_not_contains` never false-PASSes on a 64 KB haystack.
+- [x] With `GIT_CONFIG_GLOBAL` pointing at a hooksPath, the suite leaves that dir empty.
+- [x] 60 consecutive runs of `test-spec-status-model.sh` show 0 flakes.
 - [ ] The CI Tests workflow actually executes (see I-14: it has not run since 2026-08-31).
+
+## Resolution (Task 1, harness half)
+
+Resolved by Task 1 of the fix plan: pipefail-safe asserts, isolated git environment and private
+scratch root in `test-helpers.sh`, counted failures (`assert_true`, perf guard, tolerant captures),
+a process-count perf guard, the bash-4 static guard extended to 19 patterns with planted samples,
+`test-doc-pr-release.sh` on the shared harness (loud SKIP locally, FAIL in CI), the INT trap, the
+real FU4 guard, and the V-FU1 fixtures (the `run:` bodies of `doc-pr-release.yml`/`doc-release.yml`
+are now tested helpers). The coverage half continues in each later Task's Step 1. Three fixtures
+expose bugs owned elsewhere and are reported as XFAIL until their Task fixes them: check-freshness
+jq spawns per entry (T4/I-1), base-branch commits in `new_commits` after "Update branch" and a
+pre-staged file swept into the sync commit (T10/I-9). The last criterion depends on I-14 (CI billing
+lock), not on the harness.

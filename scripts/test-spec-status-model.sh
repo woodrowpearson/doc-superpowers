@@ -203,7 +203,14 @@ assert_contains "$ACTIONS" "passes vacuously on any spec some earlier work amend
   "template says why the citation filter is load-bearing"
 assert_contains "$ACTIONS" "WARN: amendment citation unverified (no --plan)" \
   "no-plan degradation emits the verbatim WARN rather than a silent pass"
-assert_not_contains "$ACTIONS" 'amendment citation unverified (no \`--plan\`)' \
+# Single quotes keep the backticks literal. The old needle escaped them
+# ('…(no \`--plan\`)'), and inside single quotes a backslash is literal too, so
+# it searched for a string that can never occur and the guard passed on the
+# regressed text as well (FU4/V-FU4). The self-check pins the needle's shape.
+BACKTICKED_WARN='amendment citation unverified (no `--plan`)'
+assert_contains "$BACKTICKED_WARN" '(no `--plan`)' "guard needle carries literal backticks"
+assert_not_contains "$BACKTICKED_WARN" '\' "guard needle carries no literal backslash"
+assert_not_contains "$ACTIONS" "$BACKTICKED_WARN" \
   "the backticked WARN variant is gone — one literal, both sides"
 assert_contains "$ACTIONS" "Status at plan time: {status}" \
   "injector records the plan-time status in the emitted task"
