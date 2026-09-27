@@ -164,7 +164,7 @@ Use after brainstorming produces a design spec to track formal specifications th
 /doc-superpowers spec-verify --mode=review --changed-files=<paths>
 ```
 
-Each path in `--specs` takes an optional role suffix — `--specs=<path>:target` or `--specs=<path>:constraint`. An explicit marker always wins; unsuffixed paths stay valid and have their role inferred at execution time.
+Each path in `--specs` takes an optional role suffix — `--specs=<path>:target`, `--specs=<path>:constraint`, or `--specs=<path>:amends` (the plan corrects what the spec *says* without building its surface; status-neutral, verified as landed — pass `--plan=<path>` to `spec-verify` so the check can confirm the amendment cites the plan). An explicit marker always wins; unsuffixed paths stay valid and have their role inferred at execution time, and inference never yields `:amends`.
 
 For wrapper skill integration details, see `references/spec-lifecycle-protocol.md`.
 For code review and commit review integration, see `references/integration-patterns.md`.
