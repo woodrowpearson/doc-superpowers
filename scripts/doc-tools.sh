@@ -378,8 +378,8 @@ _targets_from_args() {
 # history walks (O(N·H): 117 s at N=4,000 docs, H=3,000 commits).
 #
 # Writers (build-index, add-entry, update-index) store per ref the git object
-# id of its content — a blob for a file, a tree for a directory, "missing"
-# when there is none — in code_oids, captured from the WORKING TREE, which is
+# id of its content — a blob for a file, a tree for a directory, the commit
+# for a submodule, "missing" when there is none — in code_oids, captured from the WORKING TREE, which is
 # what the verifier read, staged or not (through a private index: git's own is
 # never touched). Readers (check-freshness, status) look every ref up in HEAD,
 # or in the tree given with --tree (pre-commit passes the staged tree, `git
@@ -552,7 +552,9 @@ _wt_stage() {
 # verifier read — so an untracked file (not ignored) under a ref is part of
 # the verified content, and HEAD lacks it: the doc reads stale until it is
 # committed or ignored. One `git ls-files -o` over the refs names every such
-# path in a warning (the doc-index's own files aside).
+# path in a warning (the doc-index's own files aside). --no-empty-directory:
+# without it an empty directory, or one holding only ignored files, is listed
+# as dir/ too, although git stages nothing from it (it is recorded missing).
 _WT_PRESENT=()
 _WT_ABSENT=()
 _WT_COVERS=0
@@ -577,7 +579,7 @@ _worktree_tree() {
   if [ ${#_WT_PRESENT[@]} -gt 0 ]; then
     local untracked="$_SCRATCH/worktree.untracked" names="" count=0
     printf '%s\0' "${_WT_PRESENT[@]}" \
-      | xargs -0 git --literal-pathspecs ls-files -z -o --exclude-standard --directory -- \
+      | xargs -0 git --literal-pathspecs ls-files -z -o --exclude-standard --directory --no-empty-directory -- \
       | tr '\000' '\n' > "$untracked" || _die "git ls-files failed"
     while IFS= read -r p; do
       case "$p" in
@@ -693,13 +695,15 @@ _hash_list() {
 # _warn_refs <refs-file> <unmatched 0|1>
 # Warn once per distinct ref (one per line of <refs-file>) that holds a glob
 # character — refs are literal paths, so it names only a path of exactly that
-# name — and, with <unmatched> 1, about each other ref that matches no file
-# git tracks and does not exist: a typo'd ref records "missing", and HEAD
-# agrees until that path is committed, so the doc cannot go stale. (One that
-# exists untracked is recorded, and named by _worktree_tree.) One `git
-# ls-files`, one awk.
+# name. With <unmatched> 1, also list in $_SCRATCH/unmatched each other ref
+# that matches no file git tracks; _entry_facts warns about the ones then
+# recorded "missing" (a typo, an empty or all-ignored directory: HEAD agrees
+# until that path is committed, so the doc cannot go stale). One that holds
+# untracked content is recorded instead, and named by _worktree_tree. One
+# `git ls-files`, one awk.
 _warn_refs() {
   local list="$1" unmatched="$2" tracked="$_SCRATCH/tracked" out r kind
+  : > "$_SCRATCH/unmatched"
   [ -s "$list" ] || return 0
   : > "$tracked"
   if [ "$unmatched" = 1 ]; then
@@ -738,13 +742,7 @@ _warn_refs() {
     r="${r#*$'\t'}"
     case "$kind" in
       G) echo "WARNING: code ref '$r' contains a glob character (* ? [): code refs are literal paths, so it names only a path of exactly that name." >&2 ;;
-      U)
-        # An untracked file that exists is named by _worktree_tree instead:
-        # its content IS recorded.
-        if [ ! -e "$r" ] && [ ! -L "$r" ]; then
-          echo "WARNING: code ref '$r' matches no file tracked by git and does not exist (typo?); it is recorded as missing, so the doc cannot go stale until that path is committed." >&2
-        fi
-        ;;
+      U) printf '%s\n' "$r" >> "$_SCRATCH/unmatched" ;;
     esac
   done <<<"$out"
 }
@@ -783,6 +781,21 @@ _entry_facts() {
   if [ -s "$refs" ]; then
     _worktree_tree "$refs"
     _oid_lookup "$_WT_TREE" "$refs" "$oids" 0
+  fi
+  # A ref git tracks nothing under is warned about only if it was recorded
+  # missing: whether it exists does not decide it (an empty or all-ignored
+  # directory exists, yet git stages nothing from it), and one holding
+  # untracked content was recorded and named by _worktree_tree.
+  if [ -s "$_SCRATCH/unmatched" ]; then
+    local r
+    while IFS= read -r r; do
+      [ -n "$r" ] || continue
+      echo "WARNING: code ref '$r' matches no file tracked by git, and git would stage nothing from it (typo? empty or all ignored?); it is recorded as missing, so the doc cannot go stale until that path is committed." >&2
+    done < <(awk 'FNR == 1 { f++ }
+               f == 1 { u[$0] = 1; next }
+               f == 2 { o[FNR] = $0; next }
+               ($0 in u) && o[FNR] == "missing" && !($0 in done) { done[$0] = 1; print }' \
+               "$_SCRATCH/unmatched" "$oids" "$refs")
   fi
   awk -F $'\x1f' -v o="$oids" '
     { s = ""
@@ -1670,9 +1683,10 @@ Mapping lines (stdin of build-index and add-entry, one doc per line):
   comma-separated; each is trimmed, and empty ones are dropped. A trailing
   CR (a CRLF file) is removed. A ref is a literal path — a file, a
   directory, or "." for the whole repository — never a glob: one containing
-  * ? or [ is warned about. A ref that does not exist and matches no file
-  tracked by git is warned about too: a typo there is recorded as missing,
-  which HEAD agrees with, so the doc cannot go stale. Untracked (not
+  * ? or [ is warned about. A ref that matches no file tracked by git and
+  from which git would stage nothing (a typo, an empty or all-ignored
+  directory) is warned about too: it is recorded as missing, which HEAD
+  agrees with, so the doc cannot go stale. Untracked (not
   ignored) files under a ref are part of what is verified: writers name
   them, and the doc reads stale until they are committed or ignored.
 
@@ -1696,17 +1710,17 @@ Index writes:
 
 Freshness (index schema v3):
   A writer records, per code ref, the git object id of its content in the
-  working tree (code_oids: a blob, a tree, or "missing"). A doc is stale when
-  one differs in the compared tree (HEAD, or --tree). So squash merges,
-  rebase-merges, cherry-picks and reverts to the verified bytes stay current,
-  as does a doc verified in the same commit as its code. code_refs_changed
-  lists exactly the refs that differ. commits_behind counts the commits
-  touching the refs since code_commit, and is null when that commit is not
-  an ancestor of HEAD here (a deleted squash-merged branch, a shallow clone,
-  a cherry-picked verification). A ref naming a submodule records its
-  commit, so a submodule bump reads stale.
-  In a shallow clone writers record no code_commit (null, with a warning).
-  The doc-index itself is never part of a ref's content.
+  working tree (code_oids: a blob, a tree, a submodule's commit, or
+  "missing"). A doc is stale when one differs in the compared tree (HEAD,
+  or --tree). So squash merges, rebase-merges, cherry-picks and reverts to
+  the verified bytes stay current, as does a doc verified in the same
+  commit as its code; a submodule bump reads stale. code_refs_changed lists
+  exactly the refs that differ. commits_behind counts the commits touching
+  the refs since code_commit, and is null when that commit is not an
+  ancestor of HEAD here (a deleted squash-merged branch, a shallow clone, a
+  cherry-picked verification). In a shallow clone writers record no
+  code_commit (null, with a warning). The doc-index itself is never part of
+  a ref's content.
 
 Exit status:
   0  success
