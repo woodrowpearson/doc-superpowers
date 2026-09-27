@@ -180,7 +180,7 @@ Install opt-in hooks for automated freshness monitoring:
 /doc-superpowers hooks install --ci --base-branch develop   # target branch (default: main)
 /doc-superpowers hooks install --ci --cron "0 6 * * 1"      # weekly audit schedule (default: 0 9 * * 1)
 /doc-superpowers hooks install --ci --ci-strict             # PR check fails on stale docs instead of warning
-/doc-superpowers hooks install --ci --helpers=false         # skip the doc-pr-release helpers (default: true)
+/doc-superpowers hooks install --ci --helpers=false         # skip the workflow step helpers (default: true)
 
 # Standalone tool install (v2.12.0+) — doc-tools.sh only, no workflows
 $DOC_TOOLS tools install                       # → .github/scripts/doc-tools.sh

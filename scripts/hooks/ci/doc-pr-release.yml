@@ -56,6 +56,10 @@ jobs:
           PR_FROM_EVENT: ${{ github.event.pull_request.number }}
           PR_FROM_INPUT: ${{ inputs.pr_number }}
           HEAD_REF_FROM_EVENT: ${{ github.event.pull_request.head.ref }}
+        # Stays inline: this step runs BEFORE actions/checkout (checkout needs
+        # the head ref it resolves), so no helper script is on disk yet. Its
+        # body is exercised straight from this template by
+        # scripts/test-doc-pr-release.sh.
         run: |
           if [ -n "${PR_FROM_EVENT}" ]; then
             number="${PR_FROM_EVENT}"
@@ -98,14 +102,7 @@ jobs:
       # bot's commit, paths-ignore wouldn't catch it but this will.
       - name: Skip if head is a doc-superpowers sentinel commit
         id: sentinel
-        run: |
-          subject=$(git log -1 --format=%s)
-          if printf '%s' "$subject" | grep -qE '^\[doc-superpowers\] sync PR-[0-9]+ release notes'; then
-            echo "Head commit is a doc-superpowers sentinel — nothing to do."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+        run: .github/scripts/doc-pr-release/sentinel-check.sh
 
       - name: Extract context
         if: steps.sentinel.outputs.skip != 'true'
@@ -114,11 +111,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           BASE_REF: ${{ github.event.pull_request.base.ref || '__BASE_BRANCH__' }}
-        run: |
-          mkdir -p .doc-pr-release
-          .github/scripts/doc-pr-release/extract-context.sh > .doc-pr-release/context.json
-          new_len=$(jq '.new_commits | length' .doc-pr-release/context.json)
-          echo "new_commits_len=$new_len" >> "$GITHUB_OUTPUT"
+        run: .github/scripts/doc-pr-release/write-context.sh
 
       - name: Skip if no new commits since last fragment update
         if: steps.context.outputs.new_commits_len == '0'
@@ -130,18 +123,7 @@ jobs:
         env:
           OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          if [ -n "$OAUTH" ]; then
-            echo "use_oauth=true" >> "$GITHUB_OUTPUT"
-            if [ -n "$API_KEY" ]; then
-              echo "::notice::Both CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are set; using CLAUDE_CODE_OAUTH_TOKEN."
-            fi
-          elif [ -n "$API_KEY" ]; then
-            echo "use_oauth=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::Neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY is set as a repository secret. Add one under Settings > Secrets and variables > Actions." >&2
-            exit 1
-          fi
+        run: .github/scripts/doc-pr-release/resolve-auth.sh
 
       - name: Draft fragment + PR body update
         if: steps.context.outputs.new_commits_len != '0'
@@ -283,23 +265,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           BASE_REF: ${{ github.event.pull_request.base.ref || '__BASE_BRANCH__' }}
-        run: |
-          set -euo pipefail
-          fragment="RELEASE-NOTES.next/PR-${PR_NUMBER}.md"
-          head_subject=$(git log -1 --format=%s)
-          if printf '%s' "$head_subject" | grep -qE '^\[doc-superpowers\] sync PR-[0-9]+ release notes'; then
-            echo "::notice::doc-pr-release: fragment commit created — $head_subject"
-            if [ ! -f "$fragment" ]; then
-              echo "::error::Sync commit present but $fragment is missing on disk." >&2
-              exit 1
-            fi
-            exit 0
-          fi
-          # No new sync commit. Acceptable cases:
-          #   (a) Fragment already current (hash matches existing); agent no-op'd.
-          #   (b) Human-edit detected; agent posted a PR comment instead.
-          if [ ! -f "$fragment" ]; then
-            echo "::error::No fragment at $fragment and no sync commit produced. The agent appears to have silently skipped writing the fragment." >&2
-            exit 1
-          fi
-          echo "::notice::doc-pr-release: no new fragment commit (fragment unchanged or human-edited)."
+        run: .github/scripts/doc-pr-release/verify-fragment.sh

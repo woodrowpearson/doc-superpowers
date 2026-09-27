@@ -10,6 +10,56 @@ source "$SCRIPT_DIR/test-helpers.sh"
 # not whatever `#!/usr/bin/env bash` resolves to. See bash_bin_shim().
 DOC_TOOLS="$(bash_bin_shim "$SCRIPT_DIR/doc-tools.sh")"
 
+# --- Harness self-tests ---
+
+# `echo "$h" | grep -q` under `set -o pipefail` is a race: grep exits on the
+# first match, echo then takes SIGPIPE (141), and pipefail reports the pipeline
+# as failed. assert_not_contains read that as "needle absent" — a false PASS
+# with the forbidden string present — and assert_contains as a false FAIL.
+# Once the haystack outgrows the pipe buffer (64 KiB) and the needle is near
+# the top, the race is lost almost every time, so a bounded loop is a reliable
+# probe. Each probe runs in a command-substitution subshell so its PASS/FAIL
+# bookkeeping never reaches the suite's own counters.
+test_harness_asserts_are_pipefail_safe() {
+  echo "test: harness: assert_contains / assert_not_contains are pipefail-safe on a >=64 KiB haystack"
+  local needle='FORBIDDEN-NEEDLE' line hay="" i=0
+  line=$(printf '%0120d' 0)
+  while [ "$i" -lt 500 ]; do
+    hay="${hay}${line} ${needle}"$'\n'
+    i=$((i + 1))
+  done
+  local runs=500 k=0 false_pass=0 false_fail=0 probe
+  while [ "$k" -lt "$runs" ]; do
+    probe=$(set -o pipefail; FAIL=0; assert_not_contains "$hay" "$needle" "probe" >/dev/null; echo "$FAIL")
+    [ "$probe" = "1" ] || false_pass=$((false_pass + 1))
+    probe=$(set -o pipefail; FAIL=0; assert_contains "$hay" "$needle" "probe" >/dev/null; echo "$FAIL")
+    [ "$probe" = "0" ] || false_fail=$((false_fail + 1))
+    k=$((k + 1))
+  done
+  assert_eq "0" "$false_pass" "assert_not_contains: 0 false PASS in $runs runs (${#hay}-byte haystack, needle x500)"
+  assert_eq "0" "$false_fail" "assert_contains: 0 false FAIL in $runs runs (${#hay}-byte haystack, needle x500)"
+}
+
+# An interrupted suite must stop, not return from the INT handler into the
+# next test with its scratch root already deleted.
+test_harness_int_stops_suite_and_cleans_up() {
+  echo "test: harness: SIGINT ends the suite (rc 130) and removes its scratch root"
+  local probe out rc=0
+  probe=$(harness_mktemp int-probe)
+  cat > "$probe" <<EOF
+source "$SCRIPT_DIR/test-helpers.sh"
+echo "root=\$_HARNESS_TMP"
+kill -INT \$\$
+echo "STILL-RUNNING"
+EOF
+  out=$("$BASH_BIN" "$probe" 2>&1) || rc=$?
+  local root
+  root=$(sed -n 's/^root=//p' <<<"$out")
+  assert_eq "130" "$rc" "suite exits 130 on SIGINT"
+  assert_not_contains "$out" "STILL-RUNNING" "no test code runs after SIGINT"
+  assert_true "scratch root removed on SIGINT ($root)" test -n "$root" -a ! -e "$root"
+}
+
 # --- Tests ---
 
 test_no_args_prints_usage() {
@@ -271,7 +321,7 @@ test_update_index_refreshes_entry() {
   echo "console.log('changed')" > src/index.js
   git add -A && git commit -m "change code" --quiet
   echo "# Updated Overview" > docs/architecture.md
-  "$DOC_TOOLS" update-index docs/architecture.md
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
   local json
   json=$(cat docs/.doc-index.json)
   local new_hash
@@ -289,7 +339,7 @@ test_update_index_preserves_build_commit() {
   orig_build_commit=$(jq -r '.build_commit' docs/.doc-index.json)
   echo "console.log('changed')" > src/index.js
   git add -A && git commit -m "change code" --quiet
-  "$DOC_TOOLS" update-index docs/architecture.md
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
   local new_build_commit
   new_build_commit=$(jq -r '.build_commit' docs/.doc-index.json)
   assert_eq "$orig_build_commit" "$new_build_commit" "build_commit unchanged"
@@ -304,7 +354,7 @@ test_update_index_preserves_replaces() {
   local updated
   updated=$(jq '.docs["docs/architecture.md"].replaces = "docs/old-arch.md"' "$index_file")
   echo "$updated" > "$index_file"
-  "$DOC_TOOLS" update-index docs/architecture.md
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
   local replaces
   replaces=$(jq -r '.docs["docs/architecture.md"].replaces' docs/.doc-index.json)
   assert_eq "docs/old-arch.md" "$replaces" "replaces preserved"
@@ -379,13 +429,14 @@ test_build_index_accepts_entry_with_no_code_refs() {
   # nothing and never noticed.
   echo "test: build-index accepts a mapping line with an empty code_refs field"
   setup
+  local err_file
+  err_file=$(harness_mktemp norefs-stderr)
   set +e
-  echo "docs/architecture.md::architecture" | "$DOC_TOOLS" build-index 2>/tmp/.norefs-stderr
+  echo "docs/architecture.md::architecture" | "$DOC_TOOLS" build-index 2>"$err_file"
   local rc=$?
   set -e
   local err
-  err=$(cat /tmp/.norefs-stderr 2>/dev/null || true)
-  rm -f /tmp/.norefs-stderr
+  err=$(cat "$err_file" 2>/dev/null || true)
   assert_eq "0" "$rc" "build-index exits 0 with no code_refs (stderr: ${err:-none})"
   assert_not_contains "$err" "unbound variable" "no bash 3.2 unbound-array abort"
   assert_file_exists "docs/.doc-index.json" "index still written"
@@ -441,6 +492,7 @@ test_scripts_are_free_of_bash4_only_constructs() {
     "$repo_root"/scripts/hooks/*.sh \
     "$repo_root"/scripts/hooks/claude/*.sh \
     "$repo_root"/scripts/hooks/ci/doc-pr-release/*.sh \
+    "$repo_root"/scripts/hooks/ci/doc-release/*.sh \
     "$repo_root"/scripts/hooks/git/*
   do
     [ -f "$candidate" ] && targets+=("$candidate")
@@ -457,8 +509,14 @@ test_scripts_are_free_of_bash4_only_constructs() {
   # shellcheck disable=SC2059
   printf "${GREEN}  PASS${NC}: found %d shipped script(s) to scan\n" "${#targets[@]}"
 
-  # Each entry: <label>|<ERE>. Kept as a flat list rather than a map so this
-  # test does not itself need an associative array.
+  # Each entry: <label>|<ERE> (the label must not contain a pipe: the first
+  # one separates the two). Kept as a flat list rather than a map so this
+  # test does not itself need an associative array. `samples` is index-aligned:
+  # one planted line per pattern that the pattern MUST match. The sweep planted
+  # 12 bash-4 forms that the original 7 patterns all missed; a pattern that
+  # stops matching its own planted form is reported as a FAIL, never silently.
+  # Bracket expressions ([|], [$], [{], [(]) keep each ERE portable across GNU
+  # and BSD grep, which disagree on backslash-escaped metacharacters.
   local patterns=(
     'associative array declaration (declare/local/typeset -A) [bash 4.0+]|(declare|local|typeset)[[:space:]]+-[a-zA-Z]*A[a-zA-Z]*[[:space:]]'
     'mapfile/readarray [bash 4.0+]|(^|[^[:alnum:]_-])(mapfile|readarray)[[:space:]]'
@@ -467,7 +525,61 @@ test_scripts_are_free_of_bash4_only_constructs() {
     'negative array index ${a[-1]} [bash 4.3+]|\$\{[A-Za-z_][A-Za-z0-9_]*\[-[0-9]'
     'coproc [bash 4.0+]|(^|[^[:alnum:]_-])coproc[[:space:]]'
     'wait -n [bash 4.3+]|(^|[^[:alnum:]_-])wait[[:space:]]+-n([[:space:]]|$)'
+    'nameref (local/declare -n) [bash 4.3+]|(declare|local|typeset)[[:space:]]+-[a-zA-Z]*n[a-zA-Z]*[[:space:]]'
+    'declare -g / -l / -u attributes [bash 4.0-4.2+]|(declare|local|typeset)[[:space:]]+-[a-zA-Z]*[glu][a-zA-Z]*[[:space:]]'
+    'variable-set test [[ -v x ]] [bash 4.2+]|(\[\[|\[|(^|[^[:alnum:]_-])test)[[:space:]]+-v[[:space:]]'
+    'pipe-stderr shorthand (pipe-ampersand) [bash 4.0+]|(^|[^|])[|]&'
+    'negative substring length ${x:0:-1} [bash 4.2+]|[$][{][A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?:[^}:]*:[[:space:]]*-[0-9]'
+    'transformation expansion ${x@Q} [bash 4.4+]|[$][{][A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?@[QEPAaKkUuL][}]'
+    'named file-descriptor redirection {fd}> [bash 4.1+]|(^|[[:space:]])[{][A-Za-z_][A-Za-z0-9_]*[}](>>|<>|>&|<&|>|<)'
+    "printf time format %(...)T [bash 4.2+]|printf[[:space:]].*%[-0-9]*[(]"
+    'EPOCHSECONDS / EPOCHREALTIME [bash 5.0+]|EPOCH(SECONDS|REALTIME)'
+    'shopt globstar [bash 4.0+]|(^|[^[:alnum:]_])globstar([^[:alnum:]_]|$)'
+    'case fall-through ;;& / ;& [bash 4.0+]|;;&|(^|[^;]);&'
+    'read -N [bash 4.1+]|(^|[^[:alnum:]_-])read[[:space:]]([^;|&]*[[:space:]])?-[a-zA-Z]*N'
   )
+  local samples=(
+    'local -A seen=()'
+    'mapfile -t lines < "$f"'
+    'echo "${v^^}"'
+    'cmd &>> "$log"'
+    'last="${a[-1]}"'
+    'coproc worker { cat; }'
+    'wait -n'
+    'local -n ref="$1"'
+    'declare -g COUNT=0'
+    'if [[ -v CONFIG ]]; then :; fi'
+    'make 2>&1 |& tee log'
+    'trimmed="${x:0:-1}"'
+    'quoted="${x@Q}"'
+    'exec {lock_fd}>"$lock"'
+    "printf '%(%Y-%m-%d)T' -1"
+    'now=$EPOCHSECONDS'
+    'shopt -s globstar'
+    '  a) echo a ;;&'
+    'IFS= read -r -N 4 buf'
+  )
+
+  local idx=0 spec
+  TESTS_RUN=$((TESTS_RUN + 1))
+  local unmatched="" sample_rc
+  while [ "$idx" -lt "${#patterns[@]}" ]; do
+    spec="${patterns[$idx]}"
+    sample_rc=0
+    grep -qE -- "${spec#*|}" <<<"${samples[$idx]}" 2>/dev/null || sample_rc=$?
+    [ "$sample_rc" -eq 0 ] || unmatched="${unmatched}    ${spec%%|*}: rc=$sample_rc on planted '${samples[$idx]}'"$'\n'
+    idx=$((idx + 1))
+  done
+  if [ -z "$unmatched" ] && [ "${#patterns[@]}" -eq "${#samples[@]}" ]; then
+    PASS=$((PASS + 1))
+    # shellcheck disable=SC2059
+    printf "${GREEN}  PASS${NC}: every one of %d bash-4 patterns catches its planted form\n" "${#patterns[@]}"
+  else
+    FAIL=$((FAIL + 1))
+    # shellcheck disable=SC2059
+    printf "${RED}  FAIL${NC}: bash-4 pattern(s) miss their planted form (%d patterns, %d samples)\n%s" \
+      "${#patterns[@]}" "${#samples[@]}" "$unmatched"
+  fi
 
   # Full-line comments are blanked (line numbering preserved) before matching:
   # the fixes for these very bugs are documented in comments that name the
@@ -475,9 +587,8 @@ test_scripts_are_free_of_bash4_only_constructs() {
   # someone disables. Inline code is left untouched, so a real construct is
   # still caught wherever it can actually execute.
   local scrubbed
-  scrubbed=$(mktemp -t bash4scan.XXXXXX)
+  scrubbed=$(harness_mktemp bash4scan)
 
-  local spec
   for spec in "${patterns[@]}"; do
     local label="${spec%%|*}"
     local regex="${spec#*|}"
@@ -485,9 +596,13 @@ test_scripts_are_free_of_bash4_only_constructs() {
     local target
     for target in "${targets[@]}"; do
       awk '{ if ($0 ~ /^[[:space:]]*#/) print ""; else print }' "$target" > "$scrubbed"
-      local file_hits
-      file_hits=$(grep -nE -- "$regex" "$scrubbed" 2>/dev/null || true)
-      if [ -n "$file_hits" ]; then
+      local file_hits grep_rc=0
+      file_hits=$(grep -nE -- "$regex" "$scrubbed" 2>&1) || grep_rc=$?
+      # rc 1 = no match; rc >= 2 = the ERE itself is broken on this grep. A
+      # broken pattern used to be swallowed by `|| true` and read as "clean".
+      if [ "$grep_rc" -ge 2 ]; then
+        hits="${hits}    ${target#"$repo_root/"}: grep rc=$grep_rc (pattern error): ${file_hits}"$'\n'
+      elif [ "$grep_rc" -eq 0 ] && [ -n "$file_hits" ]; then
         hits="${hits}$(printf '%s\n' "$file_hits" | sed "s|^|    ${target#"$repo_root/"}:|")"$'\n'
       fi
     done
@@ -531,7 +646,7 @@ test_build_index_and_check_freshness_beyond_argv_limits() {
   pad=$(printf 'synthetic-%.0s' $(seq 1 500))   # ~5000 chars per entry
 
   local mapping_tmp
-  mapping_tmp=$(mktemp -t argmax.XXXXXX)
+  mapping_tmp=$(harness_mktemp argmax)
   local i=0
   while [ "$i" -lt "$doc_count" ]; do
     printf '# doc %d\n' "$i" > "docs/synthetic/d$i.md"
@@ -542,15 +657,16 @@ test_build_index_and_check_freshness_beyond_argv_limits() {
   done
   git add -A && git commit -m "synthetic docs" --quiet
 
+  local err_file
+  err_file=$(harness_mktemp argmax-stderr)
   set +e
-  "$DOC_TOOLS" build-index < "$mapping_tmp" 2>/tmp/.argmax-stderr
+  "$DOC_TOOLS" build-index < "$mapping_tmp" 2>"$err_file"
   local build_rc=$?
   set -e
   rm -f "$mapping_tmp"
 
   local build_err
-  build_err=$(cat /tmp/.argmax-stderr 2>/dev/null || true)
-  rm -f /tmp/.argmax-stderr
+  build_err=$(cat "$err_file" 2>/dev/null || true)
   assert_eq "0" "$build_rc" "build-index exits 0 (stderr: ${build_err:-none})"
   assert_not_contains "$build_err" "Argument list too long" "build-index does not hit the argv ceiling"
 
@@ -580,12 +696,11 @@ test_build_index_and_check_freshness_beyond_argv_limits() {
 
   set +e
   local fresh_out
-  fresh_out=$("$DOC_TOOLS" check-freshness 2>/tmp/.argmax-stderr2)
+  fresh_out=$("$DOC_TOOLS" check-freshness 2>"$err_file")
   local fresh_rc=$?
   set -e
   local fresh_err
-  fresh_err=$(cat /tmp/.argmax-stderr2 2>/dev/null || true)
-  rm -f /tmp/.argmax-stderr2
+  fresh_err=$(cat "$err_file" 2>/dev/null || true)
   assert_eq "0" "$fresh_rc" "check-freshness exits 0 (stderr: ${fresh_err:-none})"
   assert_not_contains "$fresh_err" "Argument list too long" "check-freshness does not hit the argv ceiling"
   assert_json_field "$fresh_out" ".summary.stale" "$doc_count" "all $doc_count entries reported stale"
@@ -597,15 +712,27 @@ test_check_freshness_scales_to_large_index() {
   # spawns made the full walk hit a ~10 min wall-clock ceiling at ~2000
   # entries). With the streaming-extraction + JSON-lines accumulator,
   # 500 entries should complete in well under 60 s on a developer laptop.
-  echo "test: check-freshness scales to ~500 entries within 60s"
+  #
+  # Wall-clock alone is too blunt: a 4-jq-per-entry regression still finished
+  # inside the budget on a fast machine. The primary guard therefore COUNTS jq
+  # spawns through a logging shim on PATH. Target: N + c (at most one jq per
+  # entry). Today the loop still spends 1 jq per entry plus 2 more per stale
+  # entry (3N on this all-stale fixture) — a known defect owned by T4 (I-1,
+  # batch-check rewrite), recorded as XFAIL. Until then 3N + c is enforced, so
+  # the 4-per-entry regression class is caught now. No guard aborts the suite.
+  #
+  # The wall-clock budget is a coarse backstop only; it includes the counting
+  # shim's own per-spawn fork+exec (~+40% here), hence 120 s rather than 60 s.
+  local doc_count=500 spawn_slack=20
+  echo "test: check-freshness scales to ~$doc_count entries (bounded jq spawns, within 120s)"
   setup
   # Build a synthetic index with 500 docs pointing at a single tracked
   # code dir, plus a deliberate stale ref to exercise compute_freshness.
   mkdir -p docs/synthetic
   local mapping_tmp
-  mapping_tmp=$(mktemp -t synth.XXXXXX)
+  mapping_tmp=$(harness_mktemp synth)
   local i=0
-  while [ "$i" -lt 500 ]; do
+  while [ "$i" -lt "$doc_count" ]; do
     printf '# doc %d\n' "$i" > "docs/synthetic/d$i.md"
     printf 'docs/synthetic/d%d.md:src/:synthetic\n' "$i" >> "$mapping_tmp"
     i=$((i + 1))
@@ -618,23 +745,36 @@ test_check_freshness_scales_to_large_index() {
   echo "v2" > src/index.js
   git add -A && git commit -m "stale all" --quiet
 
-  local start_ts end_ts elapsed output
+  # Counting jq shim: appends one line per spawn, then execs the real jq.
+  local real_jq shim_dir spawn_log
+  real_jq=$(command -v jq)
+  shim_dir=$(harness_mktemp_d jq-count)
+  spawn_log="$shim_dir/spawns"
+  : > "$spawn_log"
+  printf '#!/bin/sh\necho x >> "%s"\nexec "%s" "$@"\n' "$spawn_log" "$real_jq" > "$shim_dir/jq"
+  chmod +x "$shim_dir/jq"
+
+  local start_ts end_ts elapsed output rc=0
   start_ts=$(date +%s)
-  output=$("$DOC_TOOLS" check-freshness)
+  output=$(PATH="$shim_dir:$PATH" "$DOC_TOOLS" check-freshness) || rc=$?
   end_ts=$(date +%s)
   elapsed=$((end_ts - start_ts))
+  local spawns
+  spawns=$(wc -l < "$spawn_log" | tr -d ' ')
 
-  local stale_count
-  stale_count=$(echo "$output" | jq '.summary.stale')
-  assert_eq "500" "$stale_count" "all 500 synthetic docs reported stale"
+  assert_eq "0" "$rc" "check-freshness exits 0 on a $doc_count-entry index"
+  assert_json_field "$output" ".summary.stale" "$doc_count" "all $doc_count synthetic docs reported stale"
 
-  # Soft budget: 60 s is generous (real-world failures hit ~600 s SIGKILL).
-  # A regression here would mean the per-entry jq spawn pattern crept back in.
-  if [ "$elapsed" -gt 60 ]; then
-    echo "    FAIL: check-freshness took ${elapsed}s for 500 docs (budget: 60s)" >&2
-    return 1
-  fi
-  echo "    elapsed: ${elapsed}s for 500 docs (budget: 60s)"
+  local spawn_budget=$((doc_count + spawn_slack)) spawn_ceiling=$((3 * doc_count + spawn_slack))
+  assert_true "check-freshness spawned $spawns jq processes for $doc_count stale entries (ceiling 3N+c = $spawn_ceiling)" \
+    test "$spawns" -le "$spawn_ceiling"
+  assert_true_known_bug "T4/I-1" \
+    "check-freshness spawned $spawns jq processes for $doc_count entries (target N+c = $spawn_budget)" \
+    test "$spawns" -le "$spawn_budget"
+
+  # Real-world failures hit a ~600 s SIGKILL; 120 s still separates the classes.
+  assert_true "check-freshness took ${elapsed}s for $doc_count docs (budget: 120s)" \
+    test "$elapsed" -le 120
   teardown
 }
 
@@ -751,7 +891,7 @@ test_update_index_preserves_superseded_by() {
   local updated
   updated=$(jq '.docs["docs/architecture.md"].superseded_by = "docs/new-arch.md"' "$index_file")
   echo "$updated" > "$index_file"
-  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
   local superseded_by
   superseded_by=$(jq -r '.docs["docs/architecture.md"].superseded_by' docs/.doc-index.json)
   assert_eq "docs/new-arch.md" "$superseded_by" "superseded_by preserved"
@@ -765,7 +905,7 @@ test_update_index_updates_generated_at() {
   local orig_generated_at
   orig_generated_at=$(jq -r '.generated_at' docs/.doc-index.json)
   sleep 1
-  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
   local new_generated_at
   new_generated_at=$(jq -r '.generated_at' docs/.doc-index.json)
   if [ "$orig_generated_at" != "$new_generated_at" ]; then
@@ -796,7 +936,7 @@ test_update_index_multiple_paths() {
   # Modify code to make both stale
   echo "// changed" >> src/index.js
   git add -A && git commit -m "change code" --quiet
-  "$DOC_TOOLS" update-index docs/architecture.md docs/workflows.md >/dev/null
+  "$DOC_TOOLS" update-index docs/architecture.md docs/workflows.md >/dev/null 2>&1
   local result
   result=$("$DOC_TOOLS" check-freshness)
   local current_count
@@ -973,11 +1113,11 @@ EOF
 
   # Use the empty tree as the half-open range start so the PR-7 commit (the
   # root commit) is included.
-  local empty_tree out stderr_out
+  local empty_tree out stderr_out err_file rc=0
+  err_file=$(harness_mktemp merge-stderr)
   empty_tree=$(git hash-object -t tree --stdin </dev/null)
-  out=$("$DOC_TOOLS" fragments merge "$empty_tree" HEAD 2>/tmp/.merge-stderr || true)
-  stderr_out=$(cat /tmp/.merge-stderr || true)
-  rm -f /tmp/.merge-stderr
+  out=$("$DOC_TOOLS" fragments merge "$empty_tree" HEAD 2>"$err_file") || rc=$?
+  stderr_out=$(cat "$err_file" 2>/dev/null || true)
 
   assert_contains "$out" "drifted bullet" "drifted fragment content is merged"
   assert_contains "$stderr_out" "drifted" "WARN about drift on stderr"
@@ -991,8 +1131,8 @@ test_fragments_merge_preserves_non_canonical_sections() {
   _write_fragment RELEASE-NOTES.next/PR-5.md 5 $'### Notes\n- non-canonical note\n### Breaking Changes\n- multi-word heading\n'
   git add RELEASE-NOTES.next/PR-5.md
   git commit -q -m "PR-5"
-  local out
-  out=$("$DOC_TOOLS" fragments merge "$(git hash-object -t tree --stdin </dev/null)" HEAD)
+  local out rc=0
+  out=$("$DOC_TOOLS" fragments merge "$(git hash-object -t tree --stdin </dev/null)" HEAD) || rc=$?
   assert_contains "$out" "non-canonical note" "non-canonical bullet survives merge"
   assert_contains "$out" "multi-word heading" "multi-word heading bullet survives"
   assert_contains "$out" "### Notes" "Notes heading emitted"
@@ -1008,9 +1148,9 @@ test_fragments_merge_dedupes_bullets() {
   _write_fragment RELEASE-NOTES.next/PR-2.md 2 $'### Added\n- same bullet\n'
   git add RELEASE-NOTES.next/PR-1.md RELEASE-NOTES.next/PR-2.md
   git commit -q -m "PRs"
-  local out count
-  out=$("$DOC_TOOLS" fragments merge "$(git hash-object -t tree --stdin </dev/null)" HEAD)
-  count=$(printf '%s\n' "$out" | grep -c -- "- same bullet" || true)
+  local out count rc=0
+  out=$("$DOC_TOOLS" fragments merge "$(git hash-object -t tree --stdin </dev/null)" HEAD) || rc=$?
+  count=$(grep -c -- "- same bullet" <<<"$out" || true)
   assert_eq "1" "$count" "duplicate bullet appears exactly once"
   teardown
 }
@@ -1052,15 +1192,12 @@ test_fragments_merge_paths_out() {
   git add RELEASE-NOTES.next/PR-4.md
   git commit -q -m "PR-4"
 
-  local out paths_file=/tmp/test-paths-out.txt
-  out=$("$DOC_TOOLS" fragments merge "$before_tag" HEAD --paths-out="$paths_file")
+  local out paths_file
+  paths_file=$(harness_mktemp paths-out)
+  local rc=0
+  out=$("$DOC_TOOLS" fragments merge "$before_tag" HEAD --paths-out="$paths_file") || rc=$?
   assert_contains "$out" "after-tag" "PR-4 (post-tag) is consumed"
-  # shellcheck disable=SC2059
-  if printf '%s' "$out" | grep -q "in-range"; then
-    FAIL=$((FAIL + 1))
-    TESTS_RUN=$((TESTS_RUN + 1))
-    printf "${RED}  FAIL${NC}: PR-3 (pre-tag) should NOT be in merged output (%s)\n" "$out"
-  fi
+  assert_not_contains "$out" "in-range" "PR-3 (pre-tag) is NOT in merged output"
   # paths-out should contain PR-4.md only.
   if grep -q "PR-4.md" "$paths_file" && ! grep -q "PR-3.md" "$paths_file"; then
     PASS=$((PASS + 1))
@@ -1080,14 +1217,15 @@ test_fragments_merge_paths_out() {
 test_fragments_merge_errors_outside_git_repo() {
   echo "test: merge errors gracefully outside a git repo"
   local tmp
-  tmp=$(mktemp -d)
+  tmp=$(harness_mktemp_d not-a-repo)
+  local err_file
+  err_file=$(harness_mktemp merge-stderr)
   set +e
-  ( cd "$tmp" && "$DOC_TOOLS" fragments merge HEAD~1 HEAD >/dev/null 2>/tmp/.merge-stderr )
+  ( cd "$tmp" && "$DOC_TOOLS" fragments merge HEAD~1 HEAD >/dev/null 2>"$err_file" )
   local rc=$?
   set -e
   local stderr_out
-  stderr_out=$(cat /tmp/.merge-stderr 2>/dev/null || true)
-  rm -f /tmp/.merge-stderr
+  stderr_out=$(cat "$err_file" 2>/dev/null || true)
   rm -rf "$tmp"
   assert_eq "2" "$rc" "merge exits 2 outside git repo"
   assert_contains "$stderr_out" "git repo" "stderr explains the problem"
@@ -1110,10 +1248,10 @@ test_fragments_merge_orders_by_n() {
   git add RELEASE-NOTES.next/PR-99.md
   git commit -q -m "PR-99"
 
-  local out pos_99 pos_101
-  out=$("$DOC_TOOLS" fragments merge "$base" HEAD)
-  pos_99=$(printf '%s' "$out" | grep -n "smaller N" | head -1 | cut -d: -f1)
-  pos_101=$(printf '%s' "$out" | grep -n "larger N" | head -1 | cut -d: -f1)
+  local out pos_99 pos_101 rc=0
+  out=$("$DOC_TOOLS" fragments merge "$base" HEAD) || rc=$?
+  pos_99=$(grep -n "smaller N" <<<"$out" | sed -n '1s/:.*//p' || true)
+  pos_101=$(grep -n "larger N" <<<"$out" | sed -n '1s/:.*//p' || true)
 
   TESTS_RUN=$((TESTS_RUN + 1))
   if [ -n "$pos_99" ] && [ -n "$pos_101" ] && [ "$pos_99" -lt "$pos_101" ]; then
@@ -1178,14 +1316,7 @@ EOF
   local content
   content=$(cat test-adr.md)
   assert_contains "$content" "  - PR: #100 — complete" "ref status updated"
-  if echo "$content" | grep -q "in-progress"; then
-    FAIL=$((FAIL + 1))
-    printf "${RED}  FAIL${NC}: stale 'in-progress' status still present\n"
-  else
-    PASS=$((PASS + 1))
-    printf "${GREEN}  PASS${NC}: old status replaced\n"
-  fi
-  TESTS_RUN=$((TESTS_RUN + 1))
+  assert_not_contains "$content" "in-progress" "old status replaced (no stale 'in-progress')"
   teardown
 }
 
@@ -1253,7 +1384,7 @@ Implementation:
 EOF
   local mapping="docs/adr/ADR-X.md::adr"
   echo "$mapping" | "$DOC_TOOLS" build-index
-  "$DOC_TOOLS" update-index docs/adr/ADR-X.md 2>/dev/null
+  "$DOC_TOOLS" update-index docs/adr/ADR-X.md >/dev/null 2>&1
   local impl_count
   impl_count=$(jq '.docs["docs/adr/ADR-X.md"].implementation | length' docs/.doc-index.json)
   assert_eq "2" "$impl_count" "implementation array has 2 entries"
@@ -1275,8 +1406,7 @@ test_tools_install_vendors_doc_tools_default_dest() {
   set -e
   assert_eq "0" "$exit_code" "exits 0"
   assert_file_exists ".github/scripts/doc-tools.sh" "doc-tools.sh vendored at default dest"
-  [[ -x ".github/scripts/doc-tools.sh" ]]
-  assert_eq "0" "$?" "vendored copy is executable"
+  assert_true "vendored copy is executable" test -x ".github/scripts/doc-tools.sh"
   assert_contains "$output" "Installed doc-tools.sh" "install message"
   teardown
 }
@@ -1319,8 +1449,7 @@ test_tools_install_without_helpers_default() {
   "$DOC_TOOLS" tools install >/dev/null 2>&1
   set -e
   assert_file_exists ".github/scripts/doc-tools.sh" "doc-tools.sh vendored"
-  [[ ! -d ".github/scripts/doc-pr-release" ]]
-  assert_eq "0" "$?" "helpers dir NOT created"
+  assert_true "helpers dir NOT created" test ! -d ".github/scripts/doc-pr-release"
   assert_file_not_exists "RELEASE-NOTES.next/README.md" "fragment spec NOT created"
   teardown
 }
@@ -1349,8 +1478,7 @@ test_tools_uninstall_removes_unmodified_helpers() {
   set +e
   "$DOC_TOOLS" tools uninstall >/dev/null 2>&1
   set -e
-  [[ ! -d ".github/scripts/doc-pr-release" ]]
-  assert_eq "0" "$?" "helpers dir removed (no local edits)"
+  assert_true "helpers dir removed (no local edits)" test ! -d ".github/scripts/doc-pr-release"
   teardown
 }
 
@@ -1995,7 +2123,7 @@ test_move_entry_normalizes_absolute_paths() {
     "stored under the relative key, not the absolute one"
 
   local outside
-  outside=$(mktemp -d)
+  outside=$(harness_mktemp_d outside)
   echo "# O" > "$outside/outside.md"
   set +e
   "$DOC_TOOLS" move-entry docs/arch-renamed.md "$outside/outside.md" >/dev/null 2>&1
@@ -2071,6 +2199,10 @@ test_empty_code_refs_field_yields_empty_array() {
 run_tests() {
   echo "=== doc-tools.sh test suite ==="
   echo ""
+  # --- harness self-tests (run first: every later result depends on them) ---
+  test_harness_asserts_are_pipefail_safe
+  test_harness_int_stops_suite_and_cleans_up
+
   test_no_args_prints_usage
   test_unknown_subcommand_prints_usage
   test_help_flag

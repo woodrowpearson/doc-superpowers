@@ -519,7 +519,7 @@ Routes to `scripts/hooks/install.sh <subcommand> [flags]`.
   - `all` (default): install every template (legacy behavior).
   - `none`: skip workflow files entirely but still vendor `doc-tools.sh`. Equivalent to `tools install` (preferred for "I only want the bundled CLI" cases).
   - CSV (e.g. `--workflows=doc-pr-release,doc-index-update`): install ONLY the listed workflows. Names are workflow basenames without `.yml`. Unknown names error out with the full valid set listed.
-- `--helpers=<true|false>` (v2.12.0+) — Whether to install the `doc-pr-release` shell helpers + `RELEASE-NOTES.next/README.md` spec. Default `true`. No effect if `doc-pr-release` is not in the install set.
+- `--helpers=<true|false>` (v2.12.0+) — Whether to install the workflow step helpers: `doc-pr-release` shell helpers + `RELEASE-NOTES.next/README.md` spec, and the `doc-release` helpers (`.github/scripts/doc-release/`). Default `true`. No effect for a workflow that is not in the install set.
 - `--force` (v2.12.0+) — Bypass state-respect; re-install workflows that were previously uninstalled with `intentional:true`.
 
 **Uninstall-specific flags:**
@@ -562,11 +562,17 @@ workflow already exists at that path):
 | `doc-pr-full-cycle.yml` | PR open | Superset of review-pr — runs review + update + diagram + sync |
 | `doc-pr-release.yml` | PR open/sync/reopen | Drafts/maintains `RELEASE-NOTES.next/PR-<N>.md` fragments and the managed `<!-- doc-superpowers:start/end -->` section of the PR body |
 
-The `doc-pr-release.yml` workflow uses three shell helpers installed alongside
+The `doc-pr-release.yml` workflow uses shell helpers installed alongside
 it at `.github/scripts/doc-pr-release/`:
 - `extract-context.sh` — emits JSON context (PR body, fragment, commit ranges)
 - `update-pr-body.sh` — idempotent marker-based PR body merge
 - `commit-and-push.sh` — stages/commits/pushes the fragment
+- `sentinel-check.sh`, `write-context.sh`, `resolve-auth.sh`, `verify-fragment.sh` —
+  the workflow's own `run:` steps (sentinel skip, context extraction, auth
+  selection, post-agent verification), extracted so they are testable
+
+`doc-release.yml` likewise runs `precheck.sh` and `resolve-auth.sh` from
+`.github/scripts/doc-release/`, installed with it.
 
 It also installs `RELEASE-NOTES.next/README.md` (if missing) with the
 fragment-format spec — markers, SHA-256 hash from line 3+, the canonical

@@ -613,6 +613,31 @@ test_post_commit_sync_reports_stale_after_commit
 test_post_commit_sync_silent_when_current
 test_post_commit_sync_skip_env
 
+# --- Harness self-test: fixtures must not inherit the caller's git config ---
+
+# A contributor with a global `core.hooksPath` used to have this suite install
+# doc-superpowers hooks into that real, machine-wide directory: every fixture
+# inherited the caller's global config, and `install --git` resolves
+# core.hooksPath first. setup() now pins GIT_CONFIG_GLOBAL=/dev/null and a
+# private HOME, so the planted global dir must stay empty.
+test_harness_ignores_global_hooks_path() {
+  echo "test: harness: fixtures ignore a global core.hooksPath (suite never writes outside \$TEST_DIR)"
+  local scratch
+  scratch=$(harness_mktemp_d globalcfg)
+  mkdir -p "$scratch/global"
+  printf '[core]\n\thooksPath = %s\n' "$scratch/global" > "$scratch/gitconfig"
+  (
+    export GIT_CONFIG_GLOBAL="$scratch/gitconfig"
+    setup
+    "$BASH_BIN" "$HOOKS_DIR/install.sh" install --git >/dev/null 2>&1 || true
+    teardown
+  ) || true
+  local planted
+  planted=$(ls -A "$scratch/global")
+  assert_eq "" "$planted" "planted global hooks dir left empty after setup + install --git"
+  rm -rf "$scratch"
+}
+
 # --- Installer tests ---
 
 test_install_git_creates_hooks() {
@@ -1028,8 +1053,7 @@ test_install_ci_vendors_doc_tools() {
   assert_file_exists ".github/scripts/doc-tools.sh" "doc-tools.sh vendored"
   assert_contains "$output" "Vendored doc-tools.sh" "vendor message shown"
   # Verify the vendored file is executable
-  [[ -x ".github/scripts/doc-tools.sh" ]]
-  assert_eq "0" "$?" "doc-tools.sh is executable"
+  assert_true "doc-tools.sh is executable" test -x ".github/scripts/doc-tools.sh"
   # Verify workflows reference the local copy
   assert_contains "$(cat .github/workflows/doc-freshness-pr.yml)" ".github/scripts/doc-tools.sh" "PR workflow uses local script"
   assert_contains "$(cat .github/workflows/doc-freshness-schedule.yml)" ".github/scripts/doc-tools.sh" "schedule workflow uses local script"
@@ -1067,8 +1091,7 @@ test_uninstall_ci_removes_vendored_doc_tools() {
   assert_eq "0" "$exit_code" "exits 0"
   assert_file_not_exists ".github/scripts/doc-tools.sh" "doc-tools.sh removed"
   # .github/scripts/ dir should be cleaned up if empty
-  [[ ! -d ".github/scripts" ]]
-  assert_eq "0" "$?" "scripts dir cleaned up"
+  assert_true "scripts dir cleaned up" test ! -d ".github/scripts"
   teardown
 }
 
@@ -1128,7 +1151,7 @@ test_install_all_installs_git_and_claude_and_ci() {
 test_install_no_git_dir() {
   echo "test: install --git fails when not a git repo"
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(harness_mktemp_d not-a-repo)
   cd "$tmpdir"
   set +e
   output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --git 2>&1)
@@ -1337,8 +1360,47 @@ test_install_ci_workflows_helpers_false_skips_helpers() {
   set -e
   assert_eq "0" "$exit_code" "exits 0"
   assert_file_exists ".github/workflows/doc-pr-release.yml" "workflow installed"
-  [[ ! -d ".github/scripts/doc-pr-release" ]]
-  assert_eq "0" "$?" "helpers dir NOT created"
+  assert_true "helpers dir NOT created" test ! -d ".github/scripts/doc-pr-release"
+  teardown
+}
+
+test_install_ci_ships_doc_release_helpers() {
+  echo "test: install --ci --workflows=doc-release ships its step helpers; uninstall removes them"
+  setup
+  local output exit_code=0
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-release 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "install exits 0"
+  assert_contains "$output" "doc-release helpers in .github/scripts/doc-release/" "reports the helper install"
+  assert_true "precheck.sh installed executable" test -x ".github/scripts/doc-release/precheck.sh"
+  assert_true "resolve-auth.sh installed executable" test -x ".github/scripts/doc-release/resolve-auth.sh"
+  assert_true "doc-pr-release helpers NOT installed for doc-release alone" test ! -d ".github/scripts/doc-pr-release"
+  exit_code=0
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "uninstall exits 0"
+  assert_true "doc-release helpers removed with the workflow" test ! -d ".github/scripts/doc-release"
+  teardown
+}
+
+test_install_ci_every_referenced_helper_is_installed() {
+  # Installer output, not templates: after a default `install --ci`, every
+  # `.github/scripts/...` path an installed workflow runs must exist and be
+  # executable, and no placeholder may survive.
+  echo "test: install --ci — every helper an installed workflow runs is on disk"
+  setup
+  local exit_code=0
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1 || exit_code=$?
+  assert_eq "0" "$exit_code" "install --ci exits 0"
+  local refs missing="" ref
+  refs=$(grep -hoE '\.github/scripts/[A-Za-z0-9_./-]+\.sh' .github/workflows/doc-*.yml | sort -u)
+  assert_contains "$refs" ".github/scripts/doc-release/precheck.sh" "doc-release.yml runs its precheck helper"
+  assert_contains "$refs" ".github/scripts/doc-pr-release/verify-fragment.sh" "doc-pr-release.yml runs its verify helper"
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    [ -x "$ref" ] || missing="${missing} ${ref}"
+  done <<<"$refs"
+  assert_eq "" "$missing" "every referenced helper is installed and executable"
+  assert_eq "" "$(grep -lE '__(BASE_BRANCH|VERSION|CRON_SCHEDULE|CI_STRICT)__' .github/workflows/doc-*.yml || true)" \
+    "no placeholder survives in installed workflows"
   teardown
 }
 
@@ -1488,6 +1550,7 @@ test_install_ci_helpers_invalid_value_errors() {
 
 echo ""
 echo "=== Installer ==="
+test_harness_ignores_global_hooks_path
 test_install_git_creates_hooks
 test_install_git_preserves_existing_hook
 test_install_git_overwrites_own_hook
@@ -1534,6 +1597,8 @@ test_install_ci_workflows_none_skips_all_but_vendors_tools
 test_uninstall_ci_workflows_none_keeps_workflows
 test_install_ci_workflows_bogus_errors_with_valid_set
 test_install_ci_workflows_helpers_false_skips_helpers
+test_install_ci_ships_doc_release_helpers
+test_install_ci_every_referenced_helper_is_installed
 test_install_ci_writes_state_file_on_first_install
 test_install_ci_bootstraps_state_from_filesystem
 test_install_ci_malformed_state_file_falls_back_with_warn

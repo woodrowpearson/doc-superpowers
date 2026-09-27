@@ -40,10 +40,11 @@ write_index() {
   printf '{"version":1,"generated_by":"doc-superpowers","generated_at":"%s","build_commit":"%s","docs":%s}' "$ga" "$bc" "$docs" > "$file"
 }
 
-# Temp files for each test (unique to avoid parallel-run collisions)
-B=$(mktemp /tmp/mdm-base.XXXXXX.json)
-O=$(mktemp /tmp/mdm-ours.XXXXXX.json)
-T=$(mktemp /tmp/mdm-theirs.XXXXXX.json)
+# Temp files for each test, under the harness's private suite root (never a
+# fixed /tmp path, so parallel runs cannot collide; removed on exit/INT/TERM).
+B="$SUITE_TMP/mdm-base.json"
+O="$SUITE_TMP/mdm-ours.json"
+T="$SUITE_TMP/mdm-theirs.json"
 
 # ===================================================================
 # Test 1: Timestamp conflict — takes newer entry, regenerates metadata
@@ -51,7 +52,7 @@ T=$(mktemp /tmp/mdm-theirs.XXXXXX.json)
 echo ""
 echo "--- Test: timestamp conflict resolution ---"
 
-TEST_DIR=$(mktemp -d)
+TEST_DIR=$(harness_mktemp_d test)
 cd "$TEST_DIR"
 git init --quiet && git config user.email "t@t" && git config user.name "T"
 echo x > f && git add -A && git commit -m "init" --quiet
@@ -81,7 +82,7 @@ cd / && rm -rf "$TEST_DIR"
 echo ""
 echo "--- Test: union merge of new entries ---"
 
-TEST_DIR=$(mktemp -d)
+TEST_DIR=$(harness_mktemp_d test)
 cd "$TEST_DIR"
 git init --quiet && git config user.email "t@t" && git config user.name "T"
 echo x > f && git add -A && git commit -m "init" --quiet
@@ -110,7 +111,7 @@ cd / && rm -rf "$TEST_DIR"
 echo ""
 echo "--- Test: deletion wins over preservation ---"
 
-TEST_DIR=$(mktemp -d)
+TEST_DIR=$(harness_mktemp_d test)
 cd "$TEST_DIR"
 git init --quiet && git config user.email "t@t" && git config user.name "T"
 echo x > f && git add -A && git commit -m "init" --quiet
@@ -138,7 +139,7 @@ cd / && rm -rf "$TEST_DIR"
 echo ""
 echo "--- Test: both sides add same path — newer wins ---"
 
-TEST_DIR=$(mktemp -d)
+TEST_DIR=$(harness_mktemp_d test)
 cd "$TEST_DIR"
 git init --quiet && git config user.email "t@t" && git config user.name "T"
 echo x > f && git add -A && git commit -m "init" --quiet
@@ -162,7 +163,7 @@ cd / && rm -rf "$TEST_DIR"
 echo ""
 echo "--- Test: output keys sorted alphabetically ---"
 
-TEST_DIR=$(mktemp -d)
+TEST_DIR=$(harness_mktemp_d test)
 cd "$TEST_DIR"
 git init --quiet && git config user.email "t@t" && git config user.name "T"
 echo x > f && git add -A && git commit -m "init" --quiet
@@ -212,7 +213,7 @@ fi
 echo ""
 echo "--- Test: empty base produces union ---"
 
-TEST_DIR=$(mktemp -d)
+TEST_DIR=$(harness_mktemp_d test)
 cd "$TEST_DIR"
 git init --quiet && git config user.email "t@t" && git config user.name "T"
 echo x > f && git add -A && git commit -m "init" --quiet
@@ -236,7 +237,7 @@ cd / && rm -rf "$TEST_DIR"
 echo ""
 echo "--- Test: version takes maximum ---"
 
-TEST_DIR=$(mktemp -d)
+TEST_DIR=$(harness_mktemp_d test)
 cd "$TEST_DIR"
 git init --quiet && git config user.email "t@t" && git config user.name "T"
 echo x > f && git add -A && git commit -m "init" --quiet
@@ -258,7 +259,7 @@ cd / && rm -rf "$TEST_DIR"
 echo ""
 echo "--- Test: real git merge uses driver automatically ---"
 
-TEST_DIR=$(mktemp -d)
+TEST_DIR=$(harness_mktemp_d test)
 cd "$TEST_DIR"
 git init --quiet && git config user.email "t@t" && git config user.name "T"
 
@@ -290,7 +291,7 @@ git add -A && git commit -m "branch-b adds entry" --quiet
 
 # Merge — should auto-resolve via custom driver
 set +e
-git merge branch-a -m "merge test" 2>/dev/null
+git merge branch-a -m "merge test" >/dev/null 2>&1
 MERGE_EXIT=$?
 set -e
 
