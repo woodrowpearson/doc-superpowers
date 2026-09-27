@@ -36,7 +36,7 @@ doc-superpowers/
 ├── gemini-extension.json # Gemini CLI extension manifest
 ├── package.json          # npm/OpenCode package metadata
 ├── scripts/
-│   ├── doc-tools.sh      # Bundled freshness tooling (build-index, check-freshness, update-index, add-entry, remove-entry, move-entry, deprecate-entry, status, bump-version, check-version, implementation-status, set-implementation, fragments {list, validate, merge}, tools {install, uninstall, status})
+│   ├── doc-tools.sh      # Bundled freshness tooling (build-index, check-freshness, update-index, add-entry, remove-entry, move-entry, set-code-refs, deprecate-entry, status, bump-version, check-version, implementation-status, set-implementation, fragments {list, validate, merge}, tools {install, uninstall, status})
 │   ├── test-doc-tools.sh # Test suite for doc-tools.sh
 │   ├── test-doc-pr-release.sh # Test suite for the per-PR release-notes fragment producer workflow + helpers
 │   ├── test-spec-status-model.sh # Test suite for the canonical Spec Status Model + call sites
@@ -115,7 +115,7 @@ doc-superpowers/
 | File | Purpose | When to Modify |
 |------|---------|---------------|
 | `skills/doc-superpowers/SKILL.md` | Core skill logic: discovery phase, 11 action handlers (init, audit, review-pr, update, diagram, sync, hooks, release, spec-generate, spec-inject, spec-verify), agent prompt templates, verification gates, error handling | Adding/changing actions, modifying agent behavior, updating discovery logic |
-| `scripts/doc-tools.sh` | Bundled freshness tooling with 14 subcommands: `build-index`, `check-freshness`, `update-index`, `add-entry`, `remove-entry`, `move-entry` (re-key an entry after a doc moves, preserving `code_refs`/`code_oids`/`code_commit`/`last_verified` — the lossless alternative to `remove-entry` + `add-entry`), `deprecate-entry`, `status`, `bump-version`, `check-version`, `implementation-status`, `set-implementation`, `fragments {list, validate, merge}`, `tools {install, uninstall, status}` (vendors doc-tools.sh + per-PR release-notes helpers into a consumer repo). Content hashing for docs, content identity for code (each code ref's git object id, `code_oids`, compared with one `git cat-file --batch-check`), SHA-256 hashing for per-PR release-notes fragments. Every write to `docs/.doc-index.json` goes through one locked, atomic writer (`_index_apply`; see Code Flow → "Index write path") | Changing staleness detection, index schema, version sync, fragment parsing, adding subcommands, changing how the index is persisted |
+| `scripts/doc-tools.sh` | Bundled freshness tooling with 15 subcommands: `build-index`, `check-freshness`, `update-index` (the one verb that attests: the only writer of `last_verified`), `add-entry`, `remove-entry`, `move-entry` (re-key an entry after a doc moves, preserving `code_refs`/`code_oids`/`code_commit`/`last_verified` — the lossless alternative to `remove-entry` + `add-entry`; `--stdin` for a batch), `set-code-refs` (change an entry's `code_refs` in place), `deprecate-entry` (also sets the successor's `replaces`), `status`, `bump-version`, `check-version`, `implementation-status`, `set-implementation`, `fragments {list, validate, merge}`, `tools {install, uninstall, status}` (vendors doc-tools.sh + per-PR release-notes helpers into a consumer repo). Content hashing for docs, content identity for code (each code ref's git object id, `code_oids`, compared with one `git cat-file --batch-check`), SHA-256 hashing for per-PR release-notes fragments. Every write to `docs/.doc-index.json` goes through one locked, atomic writer (`_index_apply`; see Code Flow → "Index write path") | Changing staleness detection, index schema, version sync, fragment parsing, adding subcommands, changing how the index is persisted |
 | `scripts/test-doc-tools.sh` | Comprehensive test suite for doc-tools.sh — tests all subcommands (including `fragments`), edge cases, error handling | Adding tests for new doc-tools features |
 | `scripts/test-doc-pr-release.sh` | Test suite for the CI workflow helpers (on the shared `test-helpers.sh` harness) — covers `extract-context.sh`, `update-pr-body.sh`, `commit-and-push.sh`, the extracted `run:` step scripts in `doc-superpowers-steps/`, workflow YAML placeholder substitution, and template structure/wiring (missing YAML parser = loud SKIP locally, FAIL in CI) | Adding tests for the fragment producer workflow or its helpers |
 | `scripts/test-spec-status-model.sh` | Test suite pinning the canonical Spec Status Model wording and its call sites | Changing spec status transition rules, roles, or vocabulary |
@@ -238,13 +238,15 @@ User invokes /doc-superpowers audit
 
 ### Index write path (every verb that writes `docs/.doc-index.json`)
 
-`build-index`, `update-index`, `add-entry`, `remove-entry`, `move-entry` and `deprecate-entry` all persist through one primitive in `scripts/doc-tools.sh`. The skill's `update` action runs one agent per stale doc, each calling `update-index`, so these writers run concurrently.
+`build-index`, `update-index`, `add-entry`, `remove-entry`, `move-entry`, `set-code-refs` and `deprecate-entry` all persist through one primitive in `scripts/doc-tools.sh`. The skill's `update` action runs one agent per stale doc, each calling `update-index`, so these writers run concurrently.
 
 ```
 verb parses its arguments / stdin
-  → gathers per-doc facts (_entry_facts: hashes in one batch; code_oids from the working tree
-    through a private git index and one batch-check; one `git rev-list` per distinct code_refs
-    set for code_commit; Implementation:/Realized-by: bullets in one awk pass)
+  → gathers per-doc facts (_entry_facts: hashes in one batch; code_oids in one batch-check,
+    against the working tree through a private git index for update-index — the one verb that
+    attests — or against each doc's own last commit (one `git log --stdin` walk) for build-index,
+    add-entry and set-code-refs; one `git rev-list` per distinct (start, code_refs) for
+    code_commit; Implementation:/Realized-by: bullets in one awk pass)
   → builds a per-key patch list (JSONL: {key, add|merge|del})
   → _index_apply <jq-program> [jq args…]
       → _index_lock      mkdir spin-lock docs/.doc-index.json.lock (portable; flock(1) is not on macOS)
@@ -255,12 +257,13 @@ verb parses its arguments / stdin
       → ONE jq pass      old index → new index (shared _INDEX_PATCH interpreter, or move-entry's re-key)
       → unchanged?       write nothing — no generated_at bump
       → _index_install   tmp beside the target → chmod to the prior mode (0644 when new) → mv
-      → changed?         stamp generated_at and schema_version 3
+      → changed?         stamp generated_at and schema_version 3; drop any legacy stored
+                         status "current"/"stale" (only "deprecated" is stored)
   → incremental writers report only the keys that actually changed (_index_apply --report
     classifies each patch row in the same pass); build-index stays silent
 ```
 
-Verbs whose patch depends on the current entries (`update-index` reads `code_refs`; `move-entry` checks presence) take the lock before reading, so nothing can change between the read and the write. `build-index` uses `_index_apply --replace`: it is the recovery path, so it rebuilds over a missing or invalid index. Readers (`check-freshness`, `status`) use one validated snapshot per run. Traps (`_traps`): `EXIT` cleans up the scratch dir, the in-flight tmp and the lock; `INT` exits 130, `TERM` exits 143 — an interrupted run leaves the previous index byte-identical. Taking the lock (and the stale-lock breaker's mutex) runs with signals deferred (`_signals_defer` / `_signals_restore`): bash runs a trap only after the foreground `mkdir` exits, so without the deferral a TERM landing during a successful `mkdir` would exit before the lock was recorded as held, leaving an ownerless lock behind. Release checks that the recorded owner is still this process, and renames the lock aside before deleting it. Data passes from bash to jq as a line-count-framed record stream (`_rec_put` / `rec_fields`), never NUL-delimited raw input, which jq 1.6 reads with `fgets`/`strlen`. `check_deps` refuses a jq older than 1.6 (the floor set by `--args` / `$ARGS.positional`).
+Verbs whose patch depends on the current entries (`update-index` reads `code_refs`; `move-entry` checks presence; `set-code-refs` keeps recorded `code_oids`; `deprecate-entry --superseded-by` reads the successor's `replaces`) take the lock before reading, so nothing can change between the read and the write. `build-index` uses `_index_apply --replace`: it is the recovery path, so it rebuilds over a missing or invalid index. Readers (`check-freshness`, `status`) use one validated snapshot per run. Traps (`_traps`): `EXIT` (`_on_exit`) cleans up the scratch dir, the in-flight tmp and the lock, and turns a claimed 0 from a run that did not finish (bash 3.2 reports a fatal `set -u` error to the trap as 0) into 1; `INT` exits 130, `TERM` exits 143 — an interrupted run leaves the previous index byte-identical. Taking the lock (and the stale-lock breaker's mutex) runs with signals deferred (`_signals_defer` / `_signals_restore`): bash runs a trap only after the foreground `mkdir` exits, so without the deferral a TERM landing during a successful `mkdir` would exit before the lock was recorded as held, leaving an ownerless lock behind. Release checks that the recorded owner is still this process, and renames the lock aside before deleting it. Data passes from bash to jq as a line-count-framed record stream (`_rec_put` / `rec_fields`), never NUL-delimited raw input, which jq 1.6 reads with `fgets`/`strlen`. `check_deps` refuses a jq older than 1.6 (the floor set by `--args` / `$ARGS.positional`).
 
 ### Typical `release` flow
 
