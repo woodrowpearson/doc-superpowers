@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-27T10:06:39Z",
+  "generated_at": "2026-09-27T10:42:08Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -20,17 +20,17 @@
       "implementation": []
     },
     "docs/codebase-guide.md": {
-      "content_hash": "sha256:d50c8339823fdd826b783e5a9954eba09169025051720a055a0fd2f066e020dd",
+      "content_hash": "sha256:cf08593abed15838df95243fdec7a54b297ed2fa7f5f99eaf13cf3b56e812156",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "184daa7388a8f058775664f74e9fab6692e87a19",
+      "code_commit": "c74f5780b5dbd01c328649c8797963b538844e49",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T10:06:39Z",
+      "last_verified": "2026-09-27T10:42:08Z",
       "implementation": []
     },
     "docs/conventions.md": {
@@ -48,17 +48,17 @@
       "implementation": []
     },
     "docs/guides/getting-started.md": {
-      "content_hash": "sha256:5c2630f59f944a9b04abcb2974f343d4b242028bf51621bf588b3e9a3cf00c2f",
+      "content_hash": "sha256:d77292683904d020b330667d36b1db2dbe35773264533c2f10ace720eaaeed2d",
       "code_refs": [
         "README.md",
         "skills/doc-superpowers/SKILL.md"
       ],
-      "code_commit": "595b2c93e824e0ec9abf71bfb8a2a31790b0cf3e",
+      "code_commit": "c74f5780b5dbd01c328649c8797963b538844e49",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-02T06:21:23Z",
+      "last_verified": "2026-09-27T10:42:08Z",
       "implementation": []
     },
     "docs/workflows/doc-superpowers.md": {
@@ -512,14 +512,14 @@
       "last_verified": "2026-09-27T06:12:33Z"
     },
     "docs/issues/2026-09-27-sweep-05ea982-I02-index-persistence-layer.md": {
-      "content_hash": "sha256:1ff5ea5b0e7aec5cccdcf50b7fc79e20a7ad8e5874cc9defb5712585159ea0df",
+      "content_hash": "sha256:7c0131fb650ab5a3d1cce28fadfcdf79df35814c48a7cffd65ea0eee5fbad84a",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T10:06:39Z",
+      "last_verified": "2026-09-27T10:42:08Z",
       "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I03-index-semantics.md": {

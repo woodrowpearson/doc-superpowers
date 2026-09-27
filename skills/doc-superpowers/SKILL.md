@@ -93,6 +93,8 @@ DOC_TOOLS="$(printf '%s\n' ~/.claude/plugins/cache/doc-superpowers/doc-superpowe
 
 All `doc-tools.sh` references below assume `$DOC_TOOLS` has been resolved. Use `$DOC_TOOLS <subcommand>` for every call.
 
+**Prerequisites:** `doc-tools.sh` needs `git`, `jq` **≥ 1.6** (the index writers use `--args` / `$ARGS.positional`), and `sha256sum` or `shasum`. When one is missing, or `jq` is older than 1.6, every subcommand exits non-zero with a message naming what to install or upgrade.
+
 #### Path precedence (when multiple copies exist)
 
 With the `tools install` subcommand (v2.12.0+), projects can vendor `doc-tools.sh` into their own tree. Three valid paths can coexist:
@@ -640,7 +642,7 @@ Agent reports without specific evidence (exact doc text vs exact code text) are 
 | Agent timeout | Report partial results, continue with other agents |
 | Mermaid MCP unavailable | Output Mermaid source text instead of PNG |
 | No stale docs found | Report "All documentation is fresh" and exit |
-| `jq` not installed | `doc-tools.sh` exits with install instructions |
+| `jq` not installed, or older than 1.6 | `doc-tools.sh` exits non-zero naming the requirement (`jq >= 1.6`) and the version found |
 | Old flat-file structure detected | `update` migrates to structured dirs; `init` offers migration if creating new docs |
 | No audit report for `update` | Falls back to `doc-tools.sh check-freshness`; if nothing stale, exits with "Nothing to update" |
 | Untracked docs in `docs/` | `check-freshness` reports them in `untracked_docs` array; run `build-index` to add them |

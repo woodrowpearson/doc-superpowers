@@ -119,6 +119,15 @@ Behaviour changes that ship with this fix:
 - `move-entry` adds `Repointed N entries` when it rewrote other entries' `replaces`/`superseded_by`.
 - A 0-byte or malformed index is refused by every reading verb.
 
+Review round 1 hardened two more edges:
+
+- **Lock acquisition and the breaker's mutex run with signals deferred.** A TERM that landed during
+  a successful lock `mkdir` used to orphan an ownerless lock that wedged every later writer. Release
+  now checks ownership before removing the lock.
+- **jq is gated at 1.6.** jq 1.6 is the floor set by `--args` / `$ARGS.positional`, and
+  `doc-tools.sh` refuses anything older. Bash→jq data is line-framed rather than fed to jq as
+  NUL-delimited raw input, which jq 1.6 reads with `fgets`/`strlen`.
+
 The stored fields (`code_commit`, `last_verified`, `status`) are written exactly as before. Identity
 (T4) and stored-status semantics (T5) are out of scope.
 
