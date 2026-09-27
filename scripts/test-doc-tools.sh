@@ -4158,7 +4158,7 @@ test_i3_deprecate_entry_sets_replaces_not_last_verified() {
 }
 
 test_i3_set_code_refs_edits_in_place() {
-  echo "test: I-3: set-code-refs replaces code_refs in place (GH #18): position and every other field kept, code_oids re-derived"
+  echo "test: I-3: set-code-refs replaces code_refs in place (GH #18): position and every other field kept, code_oids (and, for an added ref, code_commit) re-derived"
   setup
   local k files_commit sentinel=1111111111111111111111111111111111111111
   mkdir -p lib
@@ -4196,13 +4196,15 @@ test_i3_set_code_refs_edits_in_place() {
   assert_json_field "$json" '.docs["docs/mid.md"].code_oids | keys | length' "2" "a dropped ref leaves code_oids"
   assert_eq "$keys_before" "$(jq -c '.docs | keys_unsorted' <<<"$json")" "the entry keeps its key position"
   assert_eq "$fields_before" "$(jq -c '.docs["docs/mid.md"] | keys_unsorted' <<<"$json")" "…and its field order"
-  assert_eq "$(jq -c 'del(.code_refs, .code_oids)' <<<"$before")" \
-    "$(jq -c '.docs["docs/mid.md"] | del(.code_refs, .code_oids)' <<<"$json")" \
-    "every other field is preserved (content_hash, code_commit, last_verified, implementation, replaces, unknown)"
+  assert_eq "$(jq -c 'del(.code_refs, .code_oids, .code_commit)' <<<"$before")" \
+    "$(jq -c '.docs["docs/mid.md"] | del(.code_refs, .code_oids, .code_commit)' <<<"$json")" \
+    "every other field is preserved (content_hash, last_verified, implementation, replaces, unknown)"
+  assert_json_field "$json" '.docs["docs/mid.md"].code_commit' "$files_commit" \
+    "a ref was added, so code_commit is re-derived from the doc's last commit (the kept one could mask commits_behind)"
   assert_eq "$first_before" "$(jq -c '.docs["docs/first.md"], .docs["docs/last.md"]' <<<"$json")" \
     "the other entries are untouched"
-  assert_eq "stale|null|src/a.js,lib/" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/mid.md)" \
-    "the refs nobody verified the doc against read stale until update-index (code_commit kept: the sentinel)"
+  assert_eq "stale|1|src/a.js,lib/" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/mid.md)" \
+    "the refs nobody verified the doc against read stale until update-index (commits_behind counted from the doc's last commit)"
   # A no-op writes nothing.
   cp docs/.doc-index.json docs/.idx.before
   out=$("$DOC_TOOLS" set-code-refs docs/mid.md --refs=src/a.js,lib/ 2>&1) || true
@@ -4220,6 +4222,104 @@ test_i3_set_code_refs_edits_in_place() {
   assert_contains "$out" "not found in index" "…and says why"
   assert_exit_code 0 "…and writes nothing" cmp -s docs/.idx.before docs/.doc-index.json
   rm -f docs/.idx.before
+  teardown
+}
+
+# A pre-v3 entry records its content only as code_commit, the newest commit
+# touching its refs when it was verified. set-code-refs used to re-baseline
+# every ref of such an entry to the doc's last commit: the same refs wrote
+# the index, and a doc verified since read stale.
+test_i3_set_code_refs_on_a_legacy_entry() {
+  echo "test: I-3: set-code-refs on a pre-v3 entry: the same refs write nothing; a kept ref keeps what code_commit recorded"
+  setup
+  local k docs_commit out json
+  printf 'a1\n' > src/a.js
+  printf 'b1\n' > src/b.js
+  for k in d e f g; do echo "# $k" > "docs/$k.md"; done
+  _i1_commit "docs written"
+  docs_commit=$(git rev-parse HEAD)
+  printf 'b2\n' > src/b.js
+  _i1_commit b2
+  printf 'a2\n' > src/a.js
+  _i1_commit a2
+  printf '%s\n' docs/d.md:src/a.js:guide docs/e.md:src/a.js,src/b.js:guide docs/f.md:src/:guide \
+    docs/g.md:src/a.js:guide | "$DOC_TOOLS" build-index 2>/dev/null
+  # Schema-2 entries verified at HEAD: code_commit, no code_oids (g has none).
+  # shellcheck disable=SC2016  # jq program
+  _i3_edit --arg a "$(git rev-list -1 HEAD -- src/a.js)" --arg ab "$(git rev-list -1 HEAD -- src/a.js src/b.js)" \
+    --arg s "$(git rev-list -1 HEAD -- src/)" '.schema_version = 2
+    | .docs |= map_values(del(.code_oids) | .last_verified = "2026-01-01T00:00:00Z")
+    | .docs["docs/d.md"].code_commit = $a | .docs["docs/e.md"].code_commit = $ab
+    | .docs["docs/f.md"].code_commit = $s | .docs["docs/g.md"].code_commit = null'
+  _i1_commit "legacy index"
+  local cf
+  cf=$("$DOC_TOOLS" check-freshness)
+  assert_eq "current current current" \
+    "$(jq -r '[.docs["docs/d.md"], .docs["docs/e.md"], .docs["docs/f.md"]] | map(.status) | join(" ")' <<<"$cf")" \
+    "precondition: the legacy entries read current"
+  # (a) The same refs, however spelled, write nothing.
+  cp docs/.doc-index.json docs/.idx.before
+  out=$("$DOC_TOOLS" set-code-refs docs/d.md --refs src/a.js 2>&1) || true
+  assert_exit_code 0 "the same refs on a legacy entry write nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  assert_contains "$out" "Unchanged" "…and say so"
+  "$DOC_TOOLS" set-code-refs docs/f.md --refs ./src >/dev/null 2>&1 || true
+  assert_exit_code 0 "a re-spelled ref ('./src' for a stored 'src/') writes nothing" \
+    cmp -s docs/.idx.before docs/.doc-index.json
+  # (b) A kept ref keeps the content its code_commit recorded.
+  "$DOC_TOOLS" set-code-refs docs/d.md --refs src/a.js,src/b.js >/dev/null 2>&1 || true
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/d.md"].code_oids["src/a.js"]' "$(git rev-parse HEAD:src/a.js)" \
+    "a kept ref's id is its content in code_commit's tree, not the doc's last commit"
+  assert_eq "stale|2|src/b.js" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/d.md)" \
+    "only the added ref reads changed (commits_behind counted from the doc's last commit)"
+  "$DOC_TOOLS" set-code-refs docs/e.md --refs src/a.js >/dev/null 2>&1 || true
+  json=$(cat docs/.doc-index.json)
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/e.md)" \
+    "a ref removed from a verified legacy entry leaves it current"
+  assert_json_field "$json" '.docs["docs/e.md"].code_commit' "$(git rev-list -1 HEAD -- src/a.js src/b.js)" \
+    "…and its code_commit is kept"
+  # Without a usable code_commit a kept ref is recorded like a new one.
+  "$DOC_TOOLS" set-code-refs docs/g.md --refs src/a.js,src/index.js >/dev/null 2>&1 || true
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/g.md"].code_oids["src/a.js"]' "$(git rev-parse "$docs_commit:src/a.js")" \
+    "no code_commit: the kept ref is recorded as of the doc's last commit"
+  assert_json_field "$json" '.docs["docs/g.md"].code_commit' "$docs_commit" \
+    "…and code_commit is derived from there"
+  rm -f docs/.idx.before
+  teardown
+}
+
+# Keeping code_commit when a ref is added could mask commits_behind: the
+# stored commit can be newer than the new ref's baseline (the doc's last
+# commit), so the commits between were not counted.
+test_i3_set_code_refs_added_ref_never_masks_commits_behind() {
+  echo "test: I-3: set-code-refs re-derives code_commit when it adds a ref (never a masked 0), keeps it when refs only go"
+  setup
+  local doc_commit cc
+  printf 'a1\n' > src/a.js
+  printf 'b1\n' > src/b.js
+  echo "# d" > docs/d.md
+  _i1_commit "doc written"
+  doc_commit=$(git rev-parse HEAD)
+  printf 'b2\n' > src/b.js
+  _i1_commit b2
+  printf 'a2\n' > src/a.js
+  _i1_commit a2
+  echo "docs/d.md:src/a.js:guide" | "$DOC_TOOLS" build-index 2>/dev/null
+  "$DOC_TOOLS" update-index docs/d.md >/dev/null 2>&1
+  _i1_commit index
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/d.md)" "precondition: verified at a2"
+  "$DOC_TOOLS" set-code-refs docs/d.md --refs src/a.js,src/b.js >/dev/null 2>&1 || true
+  assert_eq "stale|2|src/b.js" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/d.md)" \
+    "an added ref that changed after the doc was written: stale, commits_behind 2 (it was a masked 0)"
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/d.md"].code_commit' "$doc_commit" \
+    "code_commit is re-derived as add-entry derives it"
+  "$DOC_TOOLS" update-index docs/d.md >/dev/null 2>&1
+  cc=$(jq -r '.docs["docs/d.md"].code_commit' docs/.doc-index.json)
+  "$DOC_TOOLS" set-code-refs docs/d.md --refs src/b.js >/dev/null 2>&1 || true
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/d.md"].code_commit' "$cc" \
+    "refs only removed: code_commit is kept"
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/d.md)" "…and the doc stays current"
   teardown
 }
 
@@ -4648,6 +4748,8 @@ run_tests() {
   test_i3_add_entry_baselines_to_the_docs_last_commit
   test_i3_deprecate_entry_sets_replaces_not_last_verified
   test_i3_set_code_refs_edits_in_place
+  test_i3_set_code_refs_on_a_legacy_entry
+  test_i3_set_code_refs_added_ref_never_masks_commits_behind
   test_i3_advice_names_set_code_refs
   test_i3_move_entry_batch
   test_i3_record_docs_are_never_stale
