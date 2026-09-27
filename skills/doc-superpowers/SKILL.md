@@ -522,8 +522,9 @@ Routes to `scripts/hooks/install.sh <subcommand> [flags]`.
 **IMPORTANT:** ALWAYS use the installer script. NEVER manually add hook entries to `.claude/settings.json` or `.claude/settings.local.json` — the installer handles template processing, path resolution, and deep-merge with existing settings. Manual entries will contain unresolved `__DOC_TOOLS_PATH__` placeholders and break.
 
 **Tier options:**
-- `--git` — Git hooks: pre-commit (freshness gate), post-merge (stale alert), post-checkout (branch check), prepare-commit-msg (inject comments), pre-push (release reminder). Also registers the `docs/.doc-index.json` custom merge driver (`scripts/merge-doc-index.sh`) via `git config` + `.gitattributes`
-- `--claude` — Claude Code hooks: PreToolUse pre-commit gate, PostToolUse post-commit sync, Stop session summary
+- `--git` — Git hooks: pre-commit (freshness gate on the staged tree, so it reports the commit being made), post-merge (stale alert), post-checkout (branch check), prepare-commit-msg ("already stale" comments, editor commits only), pre-push (release reminder for the pushed refs). Also registers the `docs/.doc-index.json` custom merge driver (`scripts/merge-doc-index.sh`) via `git config` + `.gitattributes`
+- `--claude` — Claude Code hooks: PreToolUse pre-commit gate, PostToolUse post-commit sync, Stop session summary. They read the event JSON on stdin and answer with `additionalContext` (for Claude) and `systemMessage` (for the user). Under `DOC_SUPERPOWERS_STRICT=1` the gate exits 2 with the reason on stderr. It defers `git add … && git commit` and `commit -a` to the git pre-commit hook, which sees the real index. Stop fires after every response, so the summary covers only working-tree changes.
+- No hook runs `update-index` or writes the index: attesting a doc stays a reviewer's step. A hook whose check fails (jq missing from PATH, a corrupt index) prints one line and blocks only under STRICT; absent tooling is silent.
 - `--ci` — CI/CD workflows: all 9 templates (see *CI sub-workflows installed* below), plus `doc-tools.sh` vendored into `.github/scripts/`
 
 **CI-specific flags:**

@@ -1,68 +1,89 @@
 #!/usr/bin/env bash
 # doc-superpowers hook v1 — installed __INSTALL_DATE__
 # DO NOT EDIT — managed by doc-superpowers hooks installer
+#
+# Reports the docs this commit leaves stale. The check runs on the staged tree
+# (`git write-tree`: exactly what is being committed, also for `commit -a` and
+# a pathspec commit, whose temporary index git hands the hook), scoped to the
+# staged paths — both sides of a rename.
+# DOC_SUPERPOWERS_STRICT=1 blocks the commit instead of warning;
+# DOC_SUPERPOWERS_QUIET=1 silences the output, never the exit code;
+# DOC_SUPERPOWERS_SKIP=1 bypasses the hook.
+# The skill or the doc-index being absent is silent. The check failing (jq
+# missing from PATH, a corrupt index) prints one line on stderr, and blocks
+# only under STRICT.
+
+[[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
 
 # --- Path resolution (DOC_TOOLS is replaced at install time) ---
 # When running from test harness or directly, DOC_TOOLS env var overrides.
 DOC_TOOLS="${DOC_TOOLS:-$(printf '%s\n' __DOC_TOOLS_PARENT__/*/scripts/doc-tools.sh | sort -V | tail -1)}"
-DOC_INDEX="${DOC_INDEX:-docs/.doc-index.json}"
 
-# --- Graceful degradation ---
-[[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
+# --- Graceful degradation: tooling absent ---
 [[ -f "$DOC_TOOLS" ]] || exit 0
-[[ -f "$DOC_INDEX" ]] || exit 0
+[[ -f docs/.doc-index.json ]] || exit 0
 
-# --- Get staged files ---
-staged=$(git diff --cached --name-only 2>/dev/null)
+_quiet() { [[ "${DOC_SUPERPOWERS_QUIET:-}" == "1" ]]; }
+_strict() { [[ "${DOC_SUPERPOWERS_STRICT:-}" == "1" ]]; }
+
+# --- Tooling failing: one line; blocks only under STRICT ---
+_fail() {
+  if _strict; then
+    _quiet || echo "doc-superpowers: pre-commit: cannot check doc freshness: $1 — commit blocked (DOC_SUPERPOWERS_STRICT=1; DOC_SUPERPOWERS_SKIP=1 bypasses)" >&2
+    exit 1
+  fi
+  _quiet || echo "doc-superpowers: pre-commit: cannot check doc freshness: $1 — check skipped" >&2
+  exit 0
+}
+
+# --- The staged paths and the staged tree ---
+staged=$(git -c core.quotePath=false diff --cached --name-only --no-renames 2>/dev/null) \
+  || _fail "git diff --cached failed"
 [[ -z "$staged" ]] && exit 0
+tree=$(git write-tree 2>/dev/null) || _fail "git write-tree failed"
 
-# --- Check freshness scoped to staged files ---
-# Convert newlines to space-separated args for --code-refs
-code_refs_args=()
-while IFS= read -r f; do
-  [[ -n "$f" ]] && code_refs_args+=("$f")
-done <<< "$staged"
+# --- Check freshness in the staged tree, scoped to the staged paths ---
+_check() { printf '%s\n' "$staged" | "$DOC_TOOLS" check-freshness --tree "$tree" --code-refs-from -; }
+if ! result=$(_check 2>/dev/null); then
+  why=$(_check 2>&1 >/dev/null | awk 'NF { print; exit }')
+  why="${why#ERROR: }"
+  why="${why%.}"
+  _fail "${why:-doc-tools.sh check-freshness failed}"
+fi
 
-result=$("$DOC_TOOLS" check-freshness --code-refs "${code_refs_args[@]}" 2>/dev/null) || exit 0
+# --- Parse results (line 1: "<stale> <missing>", then the report) ---
+report=$(jq -r --arg move "  Run 'doc-tools.sh move-entry <old> <new>' if it was renamed, or 'remove-entry'/'deprecate-entry' to clean up." '
+  [.docs | to_entries[] | select(.value.status == "stale")] as $s
+  | [.docs | to_entries[] | select(.value.status == "missing")] as $m
+  | "\($s | length) \($m | length)",
+    (if ($s | length) > 0 then
+       "doc-superpowers: \($s | length) stale doc(s) in this commit",
+       ($s[] | "  \(.key) — \(.value.reason // "stale")"
+         + (if ((.value.code_refs_changed // []) | length) > 0 then ": \(.value.code_refs_changed | join(", "))" else "" end)
+         + (if ((.value.commits_behind // 0) > 0) then " (\(.value.commits_behind) commits behind)" else "" end))
+     else empty end),
+    (if ($m | length) > 0 then
+       "doc-superpowers: \($m | length) indexed doc(s) missing from disk",
+       ($m[] | "  \(.key)"),
+       $move
+     else empty end)
+' <<<"$result" 2>/dev/null) || _fail "cannot read the freshness report"
 
-# --- Parse results ---
-stale_count=$(echo "$result" | jq -r '.summary.stale // 0' 2>/dev/null) || exit 0
-missing_count=$(echo "$result" | jq -r '.summary.missing // 0' 2>/dev/null) || missing_count=0
-[[ "$stale_count" -eq 0 && "$missing_count" -eq 0 ]] && exit 0
+counts=${report%%$'\n'*}
+[[ "$counts" == "0 0" ]] && exit 0
 
 # --- Report issues ---
-if [[ "${DOC_SUPERPOWERS_QUIET:-}" != "1" ]]; then
+if ! _quiet; then
   echo ""
-
-  if [[ "$stale_count" -gt 0 ]]; then
-    echo "doc-superpowers: $stale_count stale doc(s) detected"
-    echo "$result" | jq -r '
-      .docs | to_entries[] |
-      select(.value.status == "stale") |
-      "  \(.key) — \(.value.reason // "unknown")\(
-        if .value.commits_behind and .value.commits_behind > 0
-        then " (\(.value.commits_behind) commits behind)"
-        else "" end
-      )"
-    ' 2>/dev/null
+  printf '%s\n' "${report#*$'\n'}"
+  if _strict; then
+    echo "  Commit blocked (DOC_SUPERPOWERS_STRICT=1). Run '/doc-superpowers update' to refresh, or DOC_SUPERPOWERS_SKIP=1 to bypass."
+  else
+    echo "  Run '/doc-superpowers update' to refresh, or DOC_SUPERPOWERS_SKIP=1 to bypass."
   fi
-
-  if [[ "$missing_count" -gt 0 ]]; then
-    echo "doc-superpowers: $missing_count indexed doc(s) missing from disk"
-    echo "$result" | jq -r '
-      .docs | to_entries[] |
-      select(.value.status == "missing") |
-      "  \(.key)"
-    ' 2>/dev/null
-    echo "  Run 'doc-tools.sh move-entry <old> <new>' if it was renamed, or 'remove-entry'/'deprecate-entry' to clean up."
-  fi
-
-  echo "  Run '/doc-superpowers update' to refresh, or DOC_SUPERPOWERS_SKIP=1 to bypass."
   echo ""
 fi
 
 # --- Exit code ---
-if [[ "${DOC_SUPERPOWERS_STRICT:-}" == "1" ]]; then
-  exit 1
-fi
+_strict && exit 1
 exit 0

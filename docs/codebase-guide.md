@@ -48,15 +48,15 @@ doc-superpowers/
 │       ├── install.sh        # Hook installer engine (install/uninstall/status for all tiers; granular --workflows + state-respect)
 │       ├── state.sh          # Install-state tracking module — atomic jq writes to .claude/doc-superpowers/installed.json, filesystem-inferred bootstrap, canonical workflow list derived from ci/*.yml
 │       ├── git/              # Git hook scripts
-│       │   ├── pre-commit          # Freshness gate — warns/blocks on stale docs
-│       │   ├── post-merge          # Stale alert after merge
+│       │   ├── pre-commit          # Freshness gate on the staged tree (`--tree "$(git write-tree)"`) — warns/blocks on docs this commit leaves stale
+│       │   ├── post-merge          # Stale/missing alert for the files a merge brought in
 │       │   ├── post-checkout       # Branch switch check
-│       │   ├── prepare-commit-msg  # Injects freshness comments
-│       │   └── pre-push            # Release reminder — warns when >5 unreleased commits since last tag
-│       ├── claude/           # Claude Code hook scripts
-│       │   ├── pre-commit-gate.sh  # PreToolUse pre-commit gate
-│       │   ├── post-commit-sync.sh # PostToolUse hook — auto-runs update-index after git commits, reports stale docs
-│       │   └── session-summary.sh  # Stop session summary reminder (includes auto index-update with 1-second timeout guard)
+│       │   ├── prepare-commit-msg  # "Already stale" comment lines, editor commits only ($2 empty or template)
+│       │   └── pre-push            # Release reminder — reads the pushed refs on stdin; warns when >5 commits since the last tag
+│       ├── claude/           # Claude Code hook scripts (event JSON on stdin, JSON output)
+│       │   ├── pre-commit-gate.sh  # PreToolUse gate on the staged tree; defers staging commands to the git pre-commit hook; STRICT = exit 2 + stderr reason
+│       │   ├── post-commit-sync.sh # PostToolUse report of the docs a commit left stale (report only, never update-index)
+│       │   └── session-summary.sh  # Stop (every response) — docs citing working-tree changes; 2 s budget, process-group watchdog
 │       └── ci/               # GitHub Actions workflow templates — 9 total (6 AI-powered, 3 shell-based); all actions SHA-pinned
 │           ├── doc-freshness-pr.yml       # PR freshness check (shell-based, uses vendored doc-tools.sh)
 │           ├── doc-freshness-schedule.yml # Weekly scheduled audit (shell-based, uses vendored doc-tools.sh)

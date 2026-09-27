@@ -1,6 +1,6 @@
 ---
 date: 2026-05-04
-status: Open
+status: Resolved
 priority: P2
 type: enhancement
 component: doc-index
@@ -202,7 +202,7 @@ the meaning of these fields. Less clean than splitting; not recommended.
    workflow?** Should test in a consumer repo before declaring victory —
    the workflow is belt-and-suspenders even after this lands.
 
-## Resolution (partial — sweep 05ea982 Tasks 4 and 6; T7 closes the rest)
+## Resolution (sweep 05ea982 Tasks 4, 6 and 7)
 
 Task 4 ([I-1](2026-09-27-sweep-05ea982-I01-freshness-identity-model.md)) removes most of the
 *content* churn from this conflict surface. It does not change the top-level metadata:
@@ -241,6 +241,50 @@ a base-aware, per-key three-way merge.
   a malformed side, leaves conflict markers and exit 1 instead of a silent guess.
 - **The server-side half is unchanged.** GitHub's mergeability check and merge buttons still do
   not run custom drivers. That remains open with T7 and the workaround below.
+
+### Task 7 ([I-6](2026-09-27-sweep-05ea982-I06-claude-hook-tier-and-hook-semantics.md))
+
+This issue blamed a post-commit hook that runs `update-index` after every commit. That premise
+was wrong:
+
+- **No git hook ever ran it.** The call was in the Claude Code hooks, `post-commit-sync.sh` and
+  `session-summary.sh`, as `update-index` with no arguments.
+- **The call always failed.** With no arguments, `update-index` exits 1 and writes nothing.
+- **It never fired anyway.** The hooks read a `$TOOL_INPUT` variable Claude Code never sets, so
+  the sync hook never got that far.
+
+Task 7 **deletes** the call instead of repairing it. A working version would stamp every doc
+verified without anyone reading it. It also pins what the issue needed:
+
+- **No hook writes `docs/.doc-index.json`.** A test runs every hook through its real caller and
+  checks the index is byte-identical afterwards: the Claude gate, sync and Stop hooks, and git
+  commit, checkout, merge and push.
+- **A wrapper that logs every doc-tools subcommand** the Claude hooks run records only
+  `check-freshness`.
+
+What remains of the conflict surface:
+
+- The index changes only when someone runs a writer. Doc-free PRs no longer diverge on
+  `docs/.doc-index.json` through hooks.
+- A no-op write is byte-identical, and `generated_at` / `build_commit` move only on a real write
+  (T2).
+- Verification is content-addressed (T4), so branches that verify the same bytes agree.
+- The local driver merges three-way (T6).
+
+**Acceptance criteria, as closed:**
+
+- (1) Met for every writer except `update-index` itself, which by design re-stamps
+  `last_verified`: it is the attestation (T5's model). There is no `--all` refresh, because it
+  would attest unread docs.
+- (2) Met: no hook or doc-free workflow step writes the index.
+- (3) Met (T6).
+- (4) Superseded: only `update-index` writes `last_verified`, and a re-verification is recorded
+  on purpose.
+- (5) Migration is the v3.0.0 release note (T14).
+
+GitHub's server-side mergeability check still runs no custom driver. A PR that *does* change the
+index can still show a conflict there. A resolver workflow like the one below stays a consumer
+choice (out of scope, fix plan).
 
 ## Workaround (current)
 

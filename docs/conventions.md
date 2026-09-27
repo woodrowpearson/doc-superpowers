@@ -258,9 +258,11 @@ The Claude tier **copies** hook scripts to `.claude/hooks/doc-superpowers/` with
 
 | Variable | Effect |
 |----------|--------|
-| `DOC_SUPERPOWERS_STRICT=1` | Pre-commit blocks instead of warns |
-| `DOC_SUPERPOWERS_QUIET=1` | Suppress hook output while still enforcing |
+| `DOC_SUPERPOWERS_STRICT=1` | The git pre-commit hook (exit 1) and the Claude pre-commit gate (exit 2, reason on stderr) block instead of warn — also when the check itself cannot run |
+| `DOC_SUPERPOWERS_QUIET=1` | Suppress hook output while still enforcing (exit codes unchanged) |
 | `DOC_SUPERPOWERS_SKIP=1` | Bypass all hooks temporarily |
+
+`DOC_TOOLS` overrides the path of `doc-tools.sh` a hook runs (tests use it). The index path is fixed: `docs/.doc-index.json`.
 
 ## Spec Lifecycle Conventions
 

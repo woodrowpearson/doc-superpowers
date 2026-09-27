@@ -1,56 +1,59 @@
 #!/usr/bin/env bash
 # doc-superpowers hook v1 — installed __INSTALL_DATE__
 # DO NOT EDIT — managed by doc-superpowers hooks installer
-
-DOC_TOOLS="${DOC_TOOLS:-$(printf '%s\n' __DOC_TOOLS_PARENT__/*/scripts/doc-tools.sh | sort -V | tail -1)}"
-DOC_INDEX="${DOC_INDEX:-docs/.doc-index.json}"
+#
+# On a branch switch, reports the docs stale or missing on the new branch,
+# scoped to the files that differ between the two revisions ($1, $2; both
+# sides of a rename). File checkouts ($3=0) and unknown revisions (a clone's
+# null previous HEAD) are silent, as is the skill or the doc-index being
+# absent; the check failing prints one line on stderr. Never blocks.
+# DOC_SUPERPOWERS_QUIET=1 silences it; DOC_SUPERPOWERS_SKIP=1 turns it off.
 
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
+[[ "${DOC_SUPERPOWERS_QUIET:-}" == "1" ]] && exit 0
 
 # Only fire on branch switches ($3=1), not file checkouts ($3=0)
-# Also fires during git clone with $3=1 — index guard handles gracefully
 [[ "${3:-1}" == "0" ]] && exit 0
 
+DOC_TOOLS="${DOC_TOOLS:-$(printf '%s\n' __DOC_TOOLS_PARENT__/*/scripts/doc-tools.sh | sort -V | tail -1)}"
 [[ -f "$DOC_TOOLS" ]] || exit 0
-[[ -f "$DOC_INDEX" ]] || exit 0
+[[ -f docs/.doc-index.json ]] || exit 0
 
-# Scope the freshness check to files that changed between the two checked-out
-# revisions ($1=prev HEAD, $2=new HEAD). Running the full-index walk
-# synchronously here freezes the terminal on large indices. Mirror the
-# pre-commit hook's --code-refs scoping. If the changed-file set can't be
-# determined (e.g. unknown revisions), skip silently rather than full-walk.
-changed=$(git diff --name-only "${1:-}" "${2:-}" 2>/dev/null)
+_fail() {
+  echo "doc-superpowers: post-checkout: cannot check doc freshness: $1 — check skipped" >&2
+  exit 0
+}
+
+# Scope the check to the files that differ between the two revisions: a
+# full-index walk here would freeze the terminal on a large index.
+changed=$(git -c core.quotePath=false diff --name-only --no-renames "${1:-}" "${2:-}" 2>/dev/null)
 [[ -z "$changed" ]] && exit 0
 
-code_refs_args=()
-while IFS= read -r f; do
-  [[ -n "$f" ]] && code_refs_args+=("$f")
-done <<< "$changed"
-
-result=$("$DOC_TOOLS" check-freshness --code-refs "${code_refs_args[@]}" 2>/dev/null) || exit 0
-
-stale_count=$(echo "$result" | jq -r '.summary.stale // 0' 2>/dev/null) || exit 0
-missing_count=$(echo "$result" | jq -r '.summary.missing // 0' 2>/dev/null) || missing_count=0
-[[ "$stale_count" -eq 0 && "$missing_count" -eq 0 ]] && exit 0
-
-if [[ "${DOC_SUPERPOWERS_QUIET:-}" != "1" ]]; then
-  if [[ "$stale_count" -gt 0 ]]; then
-    stale_docs=$(echo "$result" | jq -r '.docs | to_entries[] | select(.value.status == "stale") | .key' 2>/dev/null)
-    echo ""
-    echo "doc-superpowers: $stale_count stale doc(s) on this branch"
-    echo "  $(echo "$stale_docs" | tr '\n' ', ' | sed 's/, $//')"
-    echo "  Run '/doc-superpowers audit' to review."
-  fi
-
-  if [[ "$missing_count" -gt 0 ]]; then
-    missing_docs=$(echo "$result" | jq -r '.docs | to_entries[] | select(.value.status == "missing") | .key' 2>/dev/null)
-    echo ""
-    echo "doc-superpowers: $missing_count indexed doc(s) missing from disk"
-    echo "  $(echo "$missing_docs" | tr '\n' ', ' | sed 's/, $//')"
-    echo "  Run 'doc-tools.sh move-entry <old> <new>' if it was renamed, or 'remove-entry'/'deprecate-entry' to clean up."
-  fi
-
-  echo ""
+_check() { printf '%s\n' "$changed" | "$DOC_TOOLS" check-freshness --code-refs-from -; }
+if ! result=$(_check 2>/dev/null); then
+  why=$(_check 2>&1 >/dev/null | awk 'NF { print; exit }')
+  why="${why#ERROR: }"
+  why="${why%.}"
+  _fail "${why:-doc-tools.sh check-freshness failed}"
 fi
 
+report=$(jq -r --arg move "  Run 'doc-tools.sh move-entry <old> <new>' if it was renamed, or 'remove-entry'/'deprecate-entry' to clean up." '
+  [.docs | to_entries[] | select(.value.status == "stale") | .key] as $s
+  | [.docs | to_entries[] | select(.value.status == "missing") | .key] as $m
+  | (if ($s | length) > 0 then
+       "doc-superpowers: \($s | length) stale doc(s) on this branch",
+       "  \($s | join(", "))",
+       "  Run '\''/doc-superpowers audit'\'' to review."
+     else empty end),
+    (if ($m | length) > 0 then
+       "doc-superpowers: \($m | length) indexed doc(s) missing from disk",
+       "  \($m | join(", "))",
+       $move
+     else empty end)
+' <<<"$result" 2>/dev/null) || _fail "cannot read the freshness report"
+[[ -z "$report" ]] && exit 0
+
+echo ""
+printf '%s\n' "$report"
+echo ""
 exit 0

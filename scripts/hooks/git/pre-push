@@ -1,22 +1,37 @@
 #!/usr/bin/env bash
 # doc-superpowers hook v1 — installed __INSTALL_DATE__ — release reminder
 # DO NOT EDIT — managed by doc-superpowers hooks installer
+#
+# git feeds this hook one "<local ref> <local oid> <remote ref> <remote oid>"
+# line per ref being pushed. For each branch pushed (not a tag, not a
+# deletion), counts the commits since the newest tag it contains, and past 5
+# suggests drafting release notes. Never blocks.
+# The skill being absent is silent. DOC_SUPERPOWERS_QUIET=1 silences it;
+# DOC_SUPERPOWERS_SKIP=1 turns it off.
 
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
+[[ "${DOC_SUPERPOWERS_QUIET:-}" == "1" ]] && exit 0
 
-# Find the most recent git tag
-latest_tag=$(git describe --tags --abbrev=0 2>/dev/null) || exit 0
-[[ -z "$latest_tag" ]] && exit 0
+DOC_TOOLS="${DOC_TOOLS:-$(printf '%s\n' __DOC_TOOLS_PARENT__/*/scripts/doc-tools.sh | sort -V | tail -1)}"
+[[ -f "$DOC_TOOLS" ]] || exit 0
 
-# Count commits since that tag
-commit_count=$(git rev-list "${latest_tag}..HEAD" --count 2>/dev/null) || exit 0
-[[ "$commit_count" -le 5 ]] && exit 0
-
-if [[ "${DOC_SUPERPOWERS_QUIET:-}" != "1" ]]; then
+while read -r local_ref local_oid remote_ref _ || [[ -n "${local_ref:-}" ]]; do
+  case "$local_ref" in
+    refs/tags/*) continue ;;
+  esac
+  # A deletion pushes the null object id (all zeros).
+  case "$local_oid" in
+    *[!0]*) ;;
+    *) continue ;;
+  esac
+  latest_tag=$(git describe --tags --abbrev=0 "$local_oid" 2>/dev/null) || continue
+  [[ -n "$latest_tag" ]] || continue
+  commit_count=$(git rev-list --count "${latest_tag}..${local_oid}" 2>/dev/null) || continue
+  [[ "$commit_count" -le 5 ]] && continue
   echo ""
-  echo "doc-superpowers: $commit_count commits since $latest_tag"
+  echo "doc-superpowers: $commit_count commits since $latest_tag on ${remote_ref#refs/heads/}"
   echo "  Consider running '/doc-superpowers release' to draft release notes."
   echo ""
-fi
+done
 
 exit 0
