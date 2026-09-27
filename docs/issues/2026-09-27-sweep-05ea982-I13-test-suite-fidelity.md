@@ -103,6 +103,36 @@ The harness has its own defects:
   "one literal, both sides" guard is therefore vacuous. It has also never run in CI (see I-14).
 
 
+- [P2, FU1/V-FU1, measured] `test-doc-pr-release.sh:278-366`: the only extract-context fixture is a
+  linear history. It never models "Update branch", a human edit to a fragment, or a wrong line 1.
+  These mutants survive at 32/32:
+  - dropping `--no-merges`;
+  - deleting the line-1 PR-number check;
+  - dropping the minimum-lines check.
+
+  This contradicts S9b's "Clean" line, and it is why I-9's base-range P1 passes.
+- [P2, FU1/V-FU1, measured] `test-doc-pr-release.sh:521-701,720-779`: `commit-and-push` is tested
+  only on the non-fast-forward path, and the workflows only for whether the YAML parses. These
+  mutants survive:
+  - `git add -A`;
+  - removing the no-op check;
+  - the Verify step's `exit 1` changed to `exit 0`;
+  - `cancel-in-progress: true`;
+  - the `doc-release.yml` `if:` changed to `true`.
+- [P3, FU1/V-FU1, measured] `test-doc-tools.sh:909-1125`: the fragment tests do not pin current
+  behaviour. These mutants survive:
+  - reversing the canonical order;
+  - an unsorted `list`;
+  - `validate` accepting a missing hash;
+  - removing the numeric skip;
+  - newest-touch;
+  - the correct last-line fix.
+- [P3, FU1/V-FU1, measured] `test-doc-pr-release.sh` (captures without `|| rc=`) and
+  `test-doc-tools.sh:995,1012`: under `set -euo pipefail`, a failing helper aborts the whole suite
+  with no FAIL line and no Results line. Measured: rc 126 from the size-cap mutant; rc 2 once refs
+  are validated.
+
+
 ## Proposed fix (fix plan Task 1)
 
 - Pipefail-safe asserts (`grep -qF -- "$n" <<<"$h"`).
