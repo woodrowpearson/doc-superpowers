@@ -1351,16 +1351,33 @@ test_install_ci_workflows_bogus_errors_with_valid_set() {
   teardown
 }
 
-test_install_ci_workflows_helpers_false_skips_helpers() {
-  echo "test: install --ci --workflows=doc-pr-release --helpers=false skips helpers"
+# Everything install could write in a fixture: work tree (minus the harness's
+# own home/ and xdg/), git hooks dir, and local git config.
+_fixture_snapshot() {
+  find . -path ./.git -prune -o -path ./home -prune -o -path ./xdg -prune -o -print | sort
+  ls -A .git/hooks
+  git config --local --list
+}
+
+test_install_ci_helpers_false_refuses_doc_pr_release() {
+  # doc-pr-release.yml runs update-pr-body.sh / commit-and-push.sh directly and
+  # its context step runs extract-context.sh — all three are the --helpers-gated
+  # producer helpers. --helpers=false with doc-pr-release selected would install
+  # a workflow that fails at runtime, so install refuses before writing anything.
+  echo "test: install --helpers=false refuses when doc-pr-release is selected (non-zero, clear error, nothing written)"
   setup
-  set +e
-  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-pr-release --helpers=false 2>&1)
-  exit_code=$?
-  set -e
-  assert_eq "0" "$exit_code" "exits 0"
-  assert_file_exists ".github/workflows/doc-pr-release.yml" "workflow installed"
-  assert_true "helpers dir NOT created" test ! -d ".github/scripts/doc-pr-release"
+  local before after output exit_code args
+  before=$(_fixture_snapshot)
+  for args in "--ci --workflows=doc-pr-release" "--ci --workflows=doc-release,doc-pr-release" "--ci" "--all"; do
+    exit_code=0
+    # shellcheck disable=SC2086  # intentional word-splitting of the flag set
+    output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install $args --helpers=false 2>&1 >/dev/null) || exit_code=$?
+    assert_eq "1" "$exit_code" "install $args --helpers=false exits 1"
+    assert_contains "$output" "doc-pr-release" "install $args --helpers=false: stderr names the workflow"
+    assert_contains "$output" "drop --helpers=false or deselect doc-pr-release" "install $args --helpers=false: stderr names the fix"
+    after=$(_fixture_snapshot)
+    assert_eq "$before" "$after" "install $args --helpers=false: nothing written"
+  done
   teardown
 }
 
@@ -1420,20 +1437,24 @@ test_install_ci_every_referenced_helper_is_installed() {
 }
 
 test_install_ci_helpers_false_still_wires_steps() {
-  # --helpers=false is the "bring your own doc-pr-release helpers" switch. It
-  # must never leave a workflow whose own run: steps are missing.
-  echo "test: install --ci --helpers=false — step scripts still installed, only producer helpers skipped"
-  setup
-  local exit_code=0
-  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-release --helpers=false >/dev/null 2>&1 || exit_code=$?
-  assert_eq "0" "$exit_code" "install --workflows=doc-release --helpers=false exits 0"
-  _assert_installed_workflows_wired "doc-release --helpers=false"
-  exit_code=0
-  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-pr-release --helpers=false >/dev/null 2>&1 || exit_code=$?
-  assert_eq "0" "$exit_code" "install --workflows=doc-pr-release --helpers=false exits 0"
-  assert_true "step scripts present for doc-pr-release.yml" test -x ".github/scripts/doc-superpowers-steps/verify-fragment.sh"
-  assert_true "producer helpers skipped (bring your own)" test ! -d ".github/scripts/doc-pr-release"
-  teardown
+  # Every --helpers=false install that is allowed (no doc-pr-release selected)
+  # must leave every installed workflow with all the scripts it runs.
+  echo "test: install --ci --helpers=false without doc-pr-release — every installed workflow is fully wired"
+  local others="" wf exit_code
+  for wf in "$HOOKS_DIR"/ci/doc-*.yml; do
+    wf=$(basename "$wf" .yml)
+    [ "$wf" = "doc-pr-release" ] && continue
+    others="${others:+$others,}$wf"
+  done
+  for wf in doc-release "$others"; do
+    setup
+    exit_code=0
+    "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows="$wf" --helpers=false >/dev/null 2>&1 || exit_code=$?
+    assert_eq "0" "$exit_code" "install --workflows=$wf --helpers=false exits 0"
+    _assert_installed_workflows_wired "--workflows=$wf --helpers=false"
+    assert_true "--workflows=$wf --helpers=false: producer helpers not installed" test ! -d ".github/scripts/doc-pr-release"
+    teardown
+  done
 }
 
 test_install_ci_writes_state_file_on_first_install() {
@@ -1628,7 +1649,7 @@ test_install_ci_workflows_csv_installs_subset_only
 test_install_ci_workflows_none_skips_all_but_vendors_tools
 test_uninstall_ci_workflows_none_keeps_workflows
 test_install_ci_workflows_bogus_errors_with_valid_set
-test_install_ci_workflows_helpers_false_skips_helpers
+test_install_ci_helpers_false_refuses_doc_pr_release
 test_install_ci_ships_step_scripts_with_workflow
 test_install_ci_every_referenced_helper_is_installed
 test_install_ci_helpers_false_still_wires_steps
