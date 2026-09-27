@@ -7,6 +7,7 @@ run-id: 05ea982
 related-files:
   - docs/plans/2026-09-27-full-repo-05ea982-audit-findings.md
   - docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md
+  - docs/plans/2026-09-27-full-repo-05ea982-evidence.md
 ---
 
 # doc-superpowers sweep `05ea982` — Jumping-off point
@@ -19,11 +20,17 @@ related-files:
 ```text
 Execute the doc-superpowers sweep fix plan, run-id 05ea982.
 
+The sweep artifacts were committed on branch `claude/affectionate-turing-tu1o9x`. Start from that
+branch, or from `main` once that branch has been merged. If `docs/plans/2026-09-27-full-repo-05ea982-*`
+is missing, you are on the wrong base.
+
 Read first, in order:
   1. docs/plans/2026-09-27-full-repo-05ea982-jumping-off-point.md   (this file: priorities + gotchas)
   2. docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md            (Tasks T1–T14, TDD steps)
   3. docs/plans/2026-09-27-full-repo-05ea982-audit-findings.md       (evidence, by surface)
   4. The cluster issue named by the Task you are starting (docs/issues/2026-09-27-sweep-05ea982-I*.md)
+  5. docs/plans/2026-09-27-full-repo-05ea982-evidence.md — verifier reports + prototypes, when you need
+     the exact reproduction behind a finding
 
 Use superpowers:subagent-driven-development: one fresh implementer per Task, review between Tasks.
 Order: T1 → T2 → T3 → T4 → T5 strictly in sequence; then T6/T7/T8/T10/T11 in parallel worktrees;
@@ -49,12 +56,12 @@ no Task's bash-3.2 claim can be checked.
 | # | Do | Why now | Cluster / Task |
 |---|---|---|---|
 | 0 | **Owner action: get GitHub Actions executing again**, then require the Tests jobs on `main` | Since 2026-08-31 every job fails in 2–6 s with no logs, so v2.15.0 merged untested. Every later Task depends on the bash-3.2 leg | I-14 (settings, not code) |
-| 1 | Merge **PR #16** (after resolving its index-only conflict) | It is an issue record that T5 closes. Merging first keeps its history and avoids a later conflict | I-3 / T5 |
+| 1 | ~~Merge **PR #16**~~ **Done**: merged `ae05f65` (2026-09-27) | Its issue record `docs/issues/2026-07-30-no-batch-or-archive-aware-re-key-primitive.md` is now on `main`; T5 closes it | I-3 / T5 |
 | 2 | T1 harness | Until this lands, a green run can be a false PASS, and the suite can write into a contributor's global hooks dir | I-13 |
 | 3 | T2 persistence primitive | Every writer, the lock and the signal handling are built on it | I-2 |
 | 4 | T3 CLI/input | One parser for args and one for stdin lines; the tab-collapse false-current bug | I-4 |
 | 5 | T4 content identity | The biggest win: squash/rebase/shallow correctness and O(N·H) → one batch-check | I-1 |
-| 6 | T5 honest state | Closes GH #18 and PR #16's issue; stops un-deprecation | I-3 |
+| 6 | T5 honest state | Closes GH #18 and the PR #16 issue record; stops un-deprecation | I-3 |
 | 7 | T6 three-way merge driver | The only **P0** | I-5 |
 | 8 | T7 hooks → T8 installer → T9 CI | Makes the hook and CI tiers real; T9 closes GH #5 | I-6, I-7, I-8 |
 | 9 | T10 fragments, T11 verbs | Lossy consumer; set-implementation injection; drops GNU sed and rg | I-9, I-10 |
@@ -73,7 +80,7 @@ and the scaling cliff.
   - Dedup key in frontmatter: `cluster-key: sweep-skill:full-repo:I-N`.
   - They are local issue records only. Nothing was filed on GitHub.
 - Open GitHub items the plan closes: **GH #5** (T9, via `github_token`, not `id-token: write`),
-  **GH #18** (T5, `set-code-refs`), **PR #16**'s issue (T5, batch `move-entry`).
+  **GH #18** (T5, `set-code-refs`), and `docs/issues/2026-07-30-no-batch-or-archive-aware-re-key-primitive.md`, filed by PR #16 and merged (T5, batch `move-entry`).
 - Older local issues the plan closes:
   - `2026-07-29-index-write-is-not-atomic` (T2);
   - `2026-07-29-usage-omits-implementation-verbs` (T3);
@@ -116,7 +123,8 @@ and the scaling cliff.
 12. **The "obvious" one-pass fragment consumer is wrong as written.**
     `git log --diff-filter=A <s>..<e> -- RELEASE-NOTES.next/` misses renamed fragments (it reports
     them as `R`) and fragments added in merge commits. Use `--no-renames`, and decide the
-    merge-commit policy explicitly; V-FU1 has a fixture table.
+    merge-commit policy explicitly. The fixture table is in V-FU1 in the
+    [evidence appendix](2026-09-27-full-repo-05ea982-evidence.md).
 13. **Changing extract-context payloads:** Linux's limit is per argument (128 KiB), not only total.
     Anything index- or PR-sized goes through stdin or files, never argv or a single env var. The same
     rule underlies I-8's E2BIG.

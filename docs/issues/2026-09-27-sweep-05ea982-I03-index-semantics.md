@@ -14,6 +14,7 @@ related-files:
   - docs/conventions.md
   - skills/doc-superpowers/SKILL.md
   - docs/.doc-index.json
+  - docs/issues/2026-07-30-no-batch-or-archive-aware-re-key-primitive.md
 screenshots: null
 axiom-agent: null
 branch: null
@@ -26,7 +27,7 @@ report: docs/plans/2026-09-27-full-repo-05ea982-audit-findings.md
 > Cluster **I-3** of sweep run `05ea982`, ranked #8 of 14. Evidence lives in the
 > [findings index](../plans/2026-09-27-full-repo-05ea982-audit-findings.md) (S1, S11, X). The fix is
 > **Task 5** of the [fix plan](../plans/2026-09-27-full-repo-05ea982-fix-plan.md). It also closes
-> **GH #18** and the issue recorded by **PR #16**.
+> **GH #18** and the issue record `2026-07-30-no-batch-or-archive-aware-re-key-primitive.md` (filed by PR #16, merged `ae05f65`).
 
 ## Summary
 
@@ -73,7 +74,8 @@ The stored `current`/`stale` value is also dead data: no writer ever stores `sta
 - `replaces` has no writer. `deprecate-entry --superseded-by X` never sets `X.replaces`.
 - **GH #18**: no verb edits an existing entry's `code_refs`. The only route is `remove-entry` +
   `add-entry`, which drops metadata.
-- **PR #16** (issue record): there is no batch or archive re-key primitive.
+- **PR #16** (issue record, now merged as `docs/issues/2026-07-30-no-batch-or-archive-aware-re-key-primitive.md`): there is no batch or archive re-key
+  primitive.
 
 ## Proposed fix (fix plan Task 5, built on I-2's `_index_apply`)
 
@@ -107,6 +109,6 @@ The stored `current`/`stale` value is also dead data: no writer ever stores `sta
 
 ## Related
 
-- GH #18 and PR #16. Recommendation: merge PR #16, the issue record, before starting this Task.
+- GH #18, and `docs/issues/2026-07-30-no-batch-or-archive-aware-re-key-primitive.md` (PR #16, merged `ae05f65`). Set it Resolved when this cluster closes.
 - I-11 fixes the prompt routing that sends agents to the wrong writer.
 - I-14 migrates this repo's own record entries to empty `code_refs`.

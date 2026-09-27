@@ -13,6 +13,7 @@ planes: [shell-tooling, ci-workflows, skill-prompt, cross-client-packaging, test
 related-files:
   - docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md
   - docs/plans/2026-09-27-full-repo-05ea982-jumping-off-point.md
+  - docs/plans/2026-09-27-full-repo-05ea982-evidence.md
   - docs/issues/2026-09-27-sweep-05ea982-I01-freshness-identity-model.md
   - docs/issues/2026-09-27-sweep-05ea982-I02-index-persistence-layer.md
   - docs/issues/2026-09-27-sweep-05ea982-I03-index-semantics.md
@@ -38,6 +39,8 @@ related-files:
 > 3 per-surface adversarial verify → 4 completeness critic → 5 consolidate → 6 emit), applied with a
 > **first-principles** brief: every finding names the *incorrect assumption* that produced it, fixes
 > must be dependency-free, and new capability is proposed only where a demonstrated need exists.
+> Verifier reports, surface map and prototypes are preserved in the
+> [evidence appendix](2026-09-27-full-repo-05ea982-evidence.md).
 > Evidence base: 21 Phase-2 leaf-auditor dispatches, 12 Phase-3 verifier dispatches, 1 completeness
 > critic; scratch-repo reproductions, mutation testing of the suites, and reads of pinned upstream
 > sources (claude-code-action `1eddb334`, OpenCode, Codex, Gemini CLI, Claude Code hooks docs).
@@ -119,7 +122,7 @@ security), `skill-prompt` (≈ `adk-agent`: contract + prompt-injection security
 | **S11** project docs + `docs/.doc-index.json` | docs | 51 | DOCS-DRIFT (+ gate-script `check-freshness`, measured) |
 | X (cross-surface) | — | — | CONCURRENCY · DATAFLOW (force-run) · SECURITY (all shipped shell) |
 
-- **All 113 tracked paths resolved to a surface:** yes (surface map kept with the run artifacts).
+- **All 113 tracked paths resolved to a surface:** yes (the surface map is in the [evidence appendix](2026-09-27-full-repo-05ea982-evidence.md#surface-map)).
 - **Fell to the `other` catch-all (listed by name):** `.gitignore` (reviewed: lacks
   `.claude/settings.local.json` — see I-6/I-14), `LICENSE` (MIT — Clean).
 - **Shared / rippling roots:** `scripts/doc-tools.sh` → consumed by every hook, every CI template,
@@ -362,7 +365,7 @@ callers; or rewrite with `grep`) · the dead `__DOC_TOOLS_PATH__` substitution �
 |---|---|---|---|
 | **GH #5** AI templates lack `id-token: write` | **No** | The proposed fix is the wrong shape: it swaps in a Claude App token not bounded by `permissions:` and makes bot pushes re-trigger workflows. Pass `github_token: ${{ github.token }}` instead. Even then the templates are inert without `plugins`/`claude_args`. | I-8 |
 | **GH #18** no verb edits an entry's `code_refs` | **No** | Also no writer for `replaces`. Should be built on the shared `_index_apply` primitive (I-2) so it is atomic, in-position, batchable. | I-3 |
-| **PR #16** issue record: no batch/archive re-key primitive | Open, conflict only in the generated index | Claims verified. The same `_index_apply` primitive makes Option A (stdin batch `move-entry`) trivial. Option B (`archived_at` verb) conflicts with `docs/conventions.md`'s archive rule (deprecate in place) — decide the archive model first. | I-3 |
+| **PR #16** issue record: no batch/archive re-key primitive | Merged after the audit (`ae05f65`, 2026-09-27; the index-only conflict was resolved by structural merge). Its record `docs/issues/2026-07-30-no-batch-or-archive-aware-re-key-primitive.md` stays **Open** until T5 | Claims verified. The same `_index_apply` primitive makes Option A (stdin batch `move-entry`) trivial. Option B (`archived_at` verb) conflicts with `docs/conventions.md`'s archive rule (deprecate in place) — decide the archive model first. | I-3 |
 | `2026-07-29-index-write-is-not-atomic` | No | Two **new root causes**: the INT/TERM trap resumes (so tmp+mv alone does not protect `build-index`), and concurrent writers corrupt/lose updates with no crash at all (needs a lock). Its per-commit exposure premise (post-commit hook runs `update-index`) is false. The proposed beside-target `mktemp` still yields mode 0600. | I-2 |
 | `2026-07-29-merge-driver-reads-version-not-schema-version` | No | Subsumed by the **P0**: the driver is not three-way at all; the fix (start from ours; per-key base comparison) removes the version bug as a side effect. | I-5 |
 | `2026-07-29-usage-omits-implementation-verbs` | No | Part of the CLI surface rework (dispatcher + usage generated from one list). | I-4 |

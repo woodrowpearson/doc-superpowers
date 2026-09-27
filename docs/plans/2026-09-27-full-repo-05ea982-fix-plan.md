@@ -12,6 +12,8 @@ governing_specs:
 related-files:
   - docs/plans/2026-09-27-full-repo-05ea982-audit-findings.md
   - docs/plans/2026-09-27-full-repo-05ea982-jumping-off-point.md
+  - docs/plans/2026-09-27-full-repo-05ea982-evidence.md
+  - docs/issues/2026-07-30-no-batch-or-archive-aware-re-key-primitive.md
   - docs/issues/2026-09-27-sweep-05ea982-I01-freshness-identity-model.md
   - docs/issues/2026-09-27-sweep-05ea982-I02-index-persistence-layer.md
   - docs/issues/2026-09-27-sweep-05ea982-I03-index-semantics.md
@@ -262,7 +264,9 @@ delete the stored commit object is absent in fresh clones, so the object IDs **m
   commit", and a staged invalidating change seen via `--tree $(git write-tree)`; each asserts the
   correct verdict. Add a scale test: N=2,000 docs, H≥500 commits, `check-freshness` < 5 s (and a
   process-count bound from T1).
-- [ ] **Step 2 — Edit** per the interface above. Prototype references from the sweep: one-walk and
+- [ ] **Step 2 — Edit** per the interface above. Prototype references from the sweep (in the
+  [evidence appendix](2026-09-27-full-repo-05ea982-evidence.md#prototypes): `repro/proto.sh` is the T4 design, and `s1perf/onewalk.sh` /
+  `s1perf/oidcheck.sh` are the one-walk and
   OID batch-check scripts (0.79 s for 4,000 docs at H=3k; 0.46 s at H=30k; identical stale set).
 - [ ] **Step 3 — Lockstep:** `references/doc-spec.md` schema table (`schema_version` 3, `code_oids`,
   `implementation`), `docs/conventions.md` freshness model, `SKILL.md` audit wording ("stale =
@@ -274,7 +278,7 @@ delete the stored commit object is absent in fresh clones, so the object IDs **m
 # Task 5: I-3 — honest stored state (what is stored, who may attest)
 
 > **Closes:** [I-3](../issues/2026-09-27-sweep-05ea982-I03-index-semantics.md), **GH #18**, and the
-> issue recorded by **PR #16** (merge that PR first; see the jumping-off point).
+> issue record `docs/issues/2026-07-30-no-batch-or-archive-aware-re-key-primitive.md` (filed by PR #16, merged `ae05f65`; set it Resolved at close-out).
 
 **Root cause:** A2 — "writing an entry == verifying the doc"; "status is a stored lifecycle";
 "every indexed doc describes current code".
@@ -611,7 +615,7 @@ grants; every changed `docs/` path is an indexed doc; two commits of history are
   Every verified P0/P1 in the findings index is named in its cluster's Task.
 - **Existing issue records closed here:** index-write-not-atomic (T2), usage-omits-implementation-verbs
   (T3), merge-driver-reads-version (T6), metadata-rewrite-on-every-commit (T4 + T6 remove its real
-  causes; T7 removes the hook it wrongly blamed), GH #18 (T5), PR #16's issue (T5), GH #5 (T9).
+  causes; T7 removes the hook it wrongly blamed), GH #18 (T5), `docs/issues/2026-07-30-no-batch-or-archive-aware-re-key-primitive.md` (T5; filed by PR #16), GH #5 (T9).
 - **Out of scope (deliberately):** a new `archive-entry` verb / `archived_at` field (not needed once
   batch `move-entry` exists — PR #16 Option B); an `update-index --all`/refresh-all mode (would mark
   unread docs verified); server-side GitHub merge of the index (content identity + no-op writes
