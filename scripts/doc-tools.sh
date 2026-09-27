@@ -3077,8 +3077,8 @@ cmd_move_entry() {
   #
   # to_entries|map|from_entries re-keys IN POSITION, so the commit-time diff is a
   # one-line key rename rather than the delete-plus-append that
-  # `.docs[$new] = .docs[$old] | del(.docs[$old])` would produce. (Only until the
-  # next merge: merge-doc-index.sh sorts .docs alphabetically.) from_entries
+  # `.docs[$new] = .docs[$old] | del(.docs[$old])` would produce. (The merge
+  # driver keeps ours' key order too, so a merge does not undo it.) from_entries
   # cannot collide here — every target is unindexed or vacated (checked above).
   #
   # The second stage repoints other entries' path-valued fields, which

@@ -1,6 +1,6 @@
 ---
 date: 2026-09-27
-status: Open
+status: Resolved
 priority: P0
 type: bug
 component: doc-index
@@ -91,7 +91,7 @@ Other changes:
 
 ## Acceptance criteria
 
-- [ ] Fixtures built with the real verbs and merged with real `git merge`, `git rebase` and
+- [x] Fixtures built with the real verbs and merged with real `git merge`, `git rebase` and
   `git revert` in both directions. Each gives the same, correct result for:
   - deprecate vs update-index;
   - repoint vs add;
@@ -100,10 +100,64 @@ Other changes:
   - delete on ours;
   - a tie;
   - an older one-sided change.
-- [ ] Degenerate sides make the driver exit non-zero with markers in `%A`.
-- [ ] `schema_version` survives a merge.
-- [ ] Docs no longer claim three-way behaviour the driver lacks, and no longer recommend rebase as
+- [x] Degenerate sides make the driver exit non-zero with markers in `%A`.
+- [x] `schema_version` survives a merge.
+- [x] Docs no longer claim three-way behaviour the driver lacks, and no longer recommend rebase as
   silent resolution.
+
+## Resolution (Task 6)
+
+Resolved by Task 6 of the fix plan. `scripts/merge-doc-index.sh` is now a base-aware, per-key
+three-way merge. Its header comment is the specification.
+
+- **Per docs key**, with `b/o/t` = base/ours/theirs (absent = no entry): `o==t → o`, `o==b → t`,
+  `t==b → o`. So a change that only one side made always survives, including a deletion. Before
+  comparing, a legacy stored `current`/`stale` status reads as absent.
+- **Both sides changed an entry**: it is merged field by field. The side that changed a field wins.
+  When both changed the same field differently, the entry with the newer `last_verified` wins it.
+  - A non-null `last_verified` beats null. When the two are equal, or both null, ours wins. That
+    case is the only one where the result depends on direction: both sides changed the same field
+    to different values and neither is newer.
+  - `content_hash`, `code_oids`, `code_commit` and `last_verified` are **one** field. `update-index`
+    writes them as a unit. Mixing one side's doc hash with the other side's code ids would attest a
+    doc/code pair that nobody verified. The driver takes the newer record whole.
+  - **Deprecated wins**: if both sides changed `status`, it resolves to `deprecated` when either
+    side has it. `superseded_by` goes with the status the merge kept. Reverting a deprecation still
+    removes it, because the revert removes it and the other side left it alone.
+- **One side deleted a key and the other changed it**: this is a conflict, never a silent drop.
+- **Any side that is not exactly one object with a `.docs` object** is a conflict: 0 bytes,
+  `null`, `{}`, two documents, or invalid JSON. The check is
+  `jq -e -s 'length==1 and (.[0].docs|type=="object")'`, on the base too unless the base is empty.
+  An empty base is the add/add case.
+- **On conflict**, `%A` gets markers from `git merge-file -L ours -L base -L theirs`, and the
+  driver exits 1. If the line merge comes out clean (a side that only appended a second document),
+  the driver redoes it against an empty base, so markers are always present.
+- **The top level starts from ours.** `schema_version` (or a legacy `version`), `build_commit`,
+  `generated_at` and unknown fields survive. A field only theirs changed is taken from theirs, so
+  one side's upgrade from `version` to `schema_version` is kept. Key order is ours' at every level,
+  with theirs-only keys appended. There is no re-sort and no merge-time metadata.
+- **No lock.** The driver writes only `%A`, a temporary file git creates for the merge and reads
+  back. Git writes the working-tree index file itself, under its own lock.
+- **Registration** (`install.sh`). The command is quoted, and it resolves the driver when the merge
+  runs.
+  - A plugin-cache install (the skill dir's name is a version) runs the newest version-named
+    sibling, in numeric order. Other siblings are never run. A plugin update therefore reaches
+    existing installs without re-installing, and a pruned version dir is not fatal.
+  - A checkout install runs its own copy.
+  - If no driver is found, `%A` gets conflict markers (merge-file against an empty base) and the
+    merge stops.
+  - `status` reports which driver a merge would run, or flags a pre-3.0 pinned registration for
+    re-install. The old `awk '{print $1}'` parse is gone.
+  - Existing installs pick this up the next time `install --git` runs (T8 re-registers).
+- **Tests**: `scripts/test-merge-driver.sh` was rewritten. It has 394 assertions, up from 19, and
+  they are stated against the base.
+  - Fixtures are built with `build-index`, `add-entry`, `update-index`, `deprecate-entry`,
+    `move-entry`, `remove-entry` and `set-code-refs`, on a controlled clock.
+  - Each fixture is merged four ways: merge and rebase, in both directions. There are also two
+    `git revert` cases.
+  - The direct cases cover each rule.
+  - The registration cases cover a path with a space, a version bump without re-install, numeric
+    version order, a pruned dir, no driver at all, and legacy status.
 
 ## Related
 

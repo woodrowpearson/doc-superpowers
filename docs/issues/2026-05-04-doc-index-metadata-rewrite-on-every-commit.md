@@ -71,6 +71,12 @@ The merge driver works perfectly **locally**: 3-way jq merge, union by key,
 newer `last_verified` wins, regenerates `generated_at`/`build_commit` to
 current. But:
 
+> **Correction (sweep 05ea982, I-5):** that driver was not three-way and did
+> not work perfectly. It used the base only to detect additions, and let the
+> entry with the newer `last_verified` carry the whole key. A change only one
+> side made was lost whenever the other side's timestamp was newer, and a
+> deletion won over a modification. See the Task 6 resolution below.
+
 - GitHub's server-side mergeability check uses `git`'s default text merge
   with no driver registration — it always reports a conflict on this file
   whenever the top-level lines diverge.
@@ -89,7 +95,12 @@ PR UI until a human rebases locally and pushes the resolved version.
 3. Merge PR A.
 4. Observe: PR B now shows "this branch has conflicts" — solely because of
    the top-level metadata divergence in `docs/.doc-index.json`.
-5. Rebase PR B locally → driver resolves silently → push.
+5. Rebase PR B locally → driver resolves silently → push. *(Corrected by
+   I-5: before Task 6 this silent resolution was lossy, and a rebase lost
+   different changes from a merge because it replays in the other direction.
+   Do not treat rebase as the safe path. Since Task 6 a rebase gives the same
+   docs as a merge, and anything the driver cannot decide stops with conflict
+   markers.)*
 6. Repeat for the next PR that lands while another is open.
 
 **Frequency:** every PR that overlaps in time with another commit to `main`.
@@ -116,7 +127,9 @@ guaranteeing a conflict surface for every PR.
     even unchanged docs)
 - The merge driver (`scripts/merge-doc-index.sh`) already handles these
   fields correctly during local merge — see `newer_entry` jq function and
-  the regenerated top-level metadata in the merge output.
+  the regenerated top-level metadata in the merge output. *(Superseded by
+  Task 6: `newer_entry` and the regenerated metadata were the I-5 defect.
+  The driver now merges three-way and keeps ours' top level.)*
 
 ## Proposed Solution
 
@@ -189,7 +202,7 @@ the meaning of these fields. Less clean than splitting; not recommended.
    workflow?** Should test in a consumer repo before declaring victory —
    the workflow is belt-and-suspenders even after this lands.
 
-## Resolution (partial — sweep 05ea982 Task 4; T6 and T7 close the rest)
+## Resolution (partial — sweep 05ea982 Tasks 4 and 6; T7 closes the rest)
 
 Task 4 ([I-1](2026-09-27-sweep-05ea982-I01-freshness-identity-model.md)) removes most of the
 *content* churn from this conflict surface. It does not change the top-level metadata:
@@ -205,6 +218,25 @@ Left for the owning Tasks: the premise that a post-commit hook runs `update-inde
 refuted (see I-6; T7 removes that dead call and moves pre-commit to `--tree`). The merge driver's
 three-way semantics are I-5 (T6). `last_verified` re-stamping belongs to T5. This issue stays open
 until those land.
+
+### Task 6 ([I-5](2026-09-27-sweep-05ea982-I05-merge-driver-not-three-way.md))
+
+The local half of this issue rested on the driver, and the driver was lossy. Task 6 replaces it with
+a base-aware, per-key three-way merge.
+
+- **A change only one side made always survives.** This holds for a deprecation, a repoint, a
+  re-verification, a hand edit and a deletion, in every direction: `git merge` either way,
+  `git rebase` either way, and `git revert`.
+- **The same docs either way.** Rebase is no longer a riskier path than merge: both give the same
+  docs. The one exception is two different values for the same field with the same
+  `last_verified`, where the checked-out side wins.
+- **A merge adds no metadata churn of its own.** The top level starts from ours, so
+  `generated_at` and `build_commit` are no longer rewritten to merge time and HEAD, and the key
+  order is kept rather than re-sorted.
+- **Undecidable changes stop the merge.** An entry deleted on one side and changed on the other, or
+  a malformed side, leaves conflict markers and exit 1 instead of a silent guess.
+- **The server-side half is unchanged.** GitHub's mergeability check and merge buttons still do
+  not run custom drivers. That remains open with T7 and the workaround below.
 
 ## Workaround (current)
 
