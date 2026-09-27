@@ -19,7 +19,7 @@ doc-superpowers is a Claude Code skill that treats documentation as a first-clas
 - **Tracks specifications** through implementation with formal spec lifecycle (`spec-generate`, `spec-inject`, `spec-verify`)
 - **Drafts release notes** from git history with agent-assisted diff review (`release`)
 - **Syncs CLAUDE.md and README.md** automatically across all write actions to prevent drift
-- **Tracks freshness** via bundled `scripts/doc-tools.sh` — content hashing for docs, commit SHA comparison for code
+- **Tracks freshness** via bundled `scripts/doc-tools.sh` — content hashing for docs, content identity (git object ids per code ref) for code
 
 ## Installation
 

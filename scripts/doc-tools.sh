@@ -137,7 +137,8 @@ _is_oid() {
 
 # The newest commit reachable from HEAD that touches any of the given
 # pathspecs, into _LAST ("" when none has, or HEAD is unborn). The refs follow
-# `--`, so none can be read as an option. Dies if git fails.
+# `--`, so none can be read as an option. Dies if git fails. Pre-v3 (legacy)
+# entries only: their refs are git pathspecs, glob characters included.
 _git_last_commit() {
   _LAST=""
   [ $# -gt 0 ] || return 0
@@ -146,21 +147,28 @@ _git_last_commit() {
   _LAST=$(git rev-list -1 "$_HEAD" -- "$@") || _die "git rev-list failed for code refs: $*"
 }
 
-# Commits in <base>..HEAD touching the refs, into _BEHIND. <base> must pass
-# _is_oid. A base the repository no longer has (squash-merged away, shallow
-# clone) keeps the legacy value 0; any other git failure dies.
+# Commits in <base>..HEAD touching the refs, into _BEHIND; "" (reported as
+# null) when the repository does not have <base> — a squash-merged branch
+# deleted, a shallow clone. It used to report 0 there, the same as "not
+# behind". Any other git failure dies. <base> must pass _is_oid. With --literal
+# first, the refs are literal paths (schema v3 entries); otherwise pathspecs.
 _git_commits_behind() {
+  local literal=()
+  if [ "$1" = --literal ]; then
+    literal=(--literal-pathspecs)
+    shift
+  fi
   local base="$1"
   shift
   _BEHIND=0
   [ $# -gt 0 ] || return 0
   _head_init
   [ -n "$_HEAD" ] || return 0
-  if ! _BEHIND=$(git rev-list --count "$base..$_HEAD" -- "$@" 2>/dev/null); then
+  if ! _BEHIND=$(git ${literal[@]+"${literal[@]}"} rev-list --count "$base..$_HEAD" -- "$@" 2>/dev/null); then
     if git cat-file -e "$base^{commit}" 2>/dev/null; then
       _die "git rev-list --count $base..HEAD failed for code refs: $*"
     fi
-    _BEHIND=0
+    _BEHIND=""
   fi
 }
 
@@ -316,16 +324,430 @@ _first_occurrences() {
 # Normalize every path argument into _TARGETS, dying on the first bad one, and
 # drop repeats: `remove-entry a.md a.md` (or docs/a.md plus docs//a.md) names
 # ONE entry, and must be reported once.
+#
+# bash 3.2 copies the CALLER's positional parameters on every function call,
+# so a loop that calls a function while "$@" holds k paths is O(k²): 4,000
+# paths took 2.4 s here, against 0.05 s once "$@" is moved into an array and
+# cleared. Verbs taking many paths do the same (set -- once _TARGETS is set).
 _targets_from_args() {
-  local raw norm=()
+  local raw norm=() args=("$@")
+  set --
   _TARGETS=()
-  for raw in "$@"; do
+  for raw in ${args[@]+"${args[@]}"}; do
     _norm_path "$raw" || exit 1
     norm+=("$_NORM")
   done
   [ ${#norm[@]} -gt 0 ] || return 0
   _first_occurrences "$(_repeated "${norm[@]}")" "${norm[@]}"
   _TARGETS=("${_FIRST[@]}")
+}
+
+# --- Content identity (index schema v3) ----------------------------------------
+#
+# A doc is stale when the CONTENT of one of its code refs differs from what was
+# verified. Before schema v3 it was stale when the newest commit touching the
+# refs had a different id from the stored code_commit — and a commit id is a
+# poor proxy for content: squash merges, rebase-merges, cherry-picks and
+# reverts mint new ids for identical bytes; a shallow clone's graft poses as
+# the last commit; a commit cannot contain its own id, so verifying a doc in
+# the same commit as the code never matched; and every doc paid its own
+# history walks (O(N·H): 117 s at N=4,000 docs, H=3,000 commits).
+#
+# Writers (build-index, add-entry, update-index) store per ref the git object
+# id of its content — a blob for a file, a tree for a directory, "missing"
+# when there is none — in code_oids, captured from the WORKING TREE, which is
+# what the verifier read, staged or not (through a private index: git's own is
+# never touched). Readers (check-freshness, status) look every ref up in HEAD,
+# or in the tree given with --tree (pre-commit passes the staged tree, `git
+# write-tree`), with ONE `git cat-file --batch-check` for the whole index:
+# stale ⇔ some ref's object id differs.
+#
+#   - Refs are literal paths: a file, a directory, or "." (the repository
+#     root). Git sees them with --literal-pathspecs; a ref containing * ? or [
+#     is warned about when written, and names only a path of exactly that name.
+#   - The doc-index itself (docs/.doc-index.json, its lock and tmp files) is
+#     not part of any ref's content: a ref covering docs/ or "." would
+#     otherwise change with every index write, and could never read current.
+#   - code_commit (the newest commit touching the refs) is still written, for
+#     display, for commits_behind and for older readers — but not in a shallow
+#     clone, whose truncated history names the graft (null + a warning; the
+#     object ids are exact there).
+#   - commits_behind and code_refs_changed are computed for stale docs only.
+#     code_refs_changed is exactly the refs whose object id differs;
+#     commits_behind is `git rev-list --count <code_commit>..HEAD -- <refs>`,
+#     one per distinct stale (code_commit, refs) pair, and null when this
+#     repository does not have that commit — never a masked 0.
+#   - An entry without code_oids (written before v3) is judged by the old
+#     commit logic — its refs as git pathspecs, globs included — until a
+#     writer re-verifies it. The first write bumps schema_version to 3.
+
+_SCHEMA_VERSION=3
+
+# awk functions shared by every step that turns a stored ref into a path git
+# sees, so writers and readers cannot disagree on one:
+#   refpath(r)  "" and "." segments dropped (so "//", "./" and a trailing "/"
+#               fold away), "." for the root, and "" for a ref with a ".."
+#               segment, which must reach no lookup (git cat-file
+#               --batch-check dies on a path outside the repository)
+#   covers(p)   whether path p contains the doc-index (-v ix=): the root or a
+#               directory above it
+# shellcheck disable=SC2016  # awk program, not shell expansion
+_AWK_REFPATH='
+  function refpath(r,   n, i, s, out) {
+    n = split(r, s, "/")
+    out = ""
+    for (i = 1; i <= n; i++) {
+      if (s[i] == "" || s[i] == ".") continue
+      if (s[i] == "..") return ""
+      out = (out == "" ? s[i] : out "/" s[i])
+    }
+    return out == "" ? "." : out
+  }
+  function covers(p) { return p == "." || index(ix "/", p "/") == 1 }
+'
+
+# Whether this is a shallow clone, into _SHALLOW (true|false); once per run.
+_SHALLOW=""
+_shallow_init() {
+  [ -z "$_SHALLOW" ] || return 0
+  _SHALLOW=$(git rev-parse --is-shallow-repository) || _die "git rev-parse --is-shallow-repository failed"
+}
+
+# Drop docs/.doc-index.json, its lock directory and its tmp files from the
+# private index $1. Glob pathspecs, on purpose: the tmp names are random.
+_drop_index_family() {
+  GIT_INDEX_FILE="$1" git rm -r -f -q --cached --ignore-unmatch -- \
+    ":(glob)$INDEX_FILE*" ":(glob)$INDEX_FILE*/**" >/dev/null \
+    || _die "cannot drop $INDEX_FILE from a private index"
+}
+
+# Tree $1 without the doc-index family, into _SAN_TREE (a private index).
+_sanitized_tree() {
+  local idx="$_SCRATCH/sanitize.index"
+  rm -f "$idx"
+  GIT_INDEX_FILE="$idx" git read-tree "$1" || _die "git read-tree $1 failed"
+  _drop_index_family "$idx"
+  _SAN_TREE=$(GIT_INDEX_FILE="$idx" git write-tree) || _die "git write-tree failed"
+}
+
+# _oid_lookup <tree> <refs-file> <out-file> <sanitize 0|1>
+# The object id of each ref (one per line of <refs-file>, as stored) in
+# <tree>, one line each in <out-file>: "missing" where the tree has no such
+# path. ONE git cat-file --batch-check for all of them. With <sanitize> 1 and
+# a ref covering the doc-index, the lookup is in <tree> minus the index family
+# (writers' trees are captured without it already). The normalized paths are
+# left line-aligned in <out-file>.paths.
+_oid_lookup() {
+  local tree="$1" in="$2" out="$3" sanitize="$4" rc=0
+  : > "$out"
+  : > "$out.paths"
+  [ -s "$in" ] || return 0
+  awk -v ix="$INDEX_FILE" "$_AWK_REFPATH"'
+    { p = refpath($0); print p; if (covers(p)) c = 1 }
+    END { exit c ? 3 : 0 }' "$in" > "$out.paths" || rc=$?
+  case "$rc" in
+    0) ;;
+    3)
+      if [ "$sanitize" = 1 ]; then
+        _sanitized_tree "$tree"
+        tree="$_SAN_TREE"
+      fi
+      ;;
+    *) _die "cannot read the code refs" ;;
+  esac
+  # batch-check answers "<id>" for a found object and "<name> missing" (or
+  # "ambiguous") otherwise; anything but a bare object id reads as missing.
+  # An empty line (a ".." ref) is answered " missing".
+  awk -v t="$tree" '{ if ($0 == "") print ""; else if ($0 == ".") print t ":"; else print t ":" $0 }' \
+      "$out.paths" \
+    | git cat-file --batch-check='%(objectname)' \
+    | awk '{ if ((length($0) == 40 || length($0) == 64) && $0 !~ /[^0123456789abcdef]/) print; else print "missing" }' \
+      > "$out" || _die "git cat-file --batch-check failed"
+}
+
+# Re-stage the refs of _worktree_tree from the working tree into the private
+# index $1: add the paths that exist (one batch; if git refuses one — ignored,
+# unreadable — each is added alone and a refused one is dropped and warned
+# about), drop the ones that do not, and drop the doc-index family when a ref
+# covers it. xargs keeps any number of refs under the argv limit.
+_wt_stage() {
+  local idx="$1" p out
+  if [ ${#_WT_PRESENT[@]} -gt 0 ] && ! printf '%s\0' "${_WT_PRESENT[@]}" \
+      | GIT_INDEX_FILE="$idx" xargs -0 git --literal-pathspecs add -A -- >/dev/null 2>&1; then
+    for p in "${_WT_PRESENT[@]}"; do
+      if ! out=$(GIT_INDEX_FILE="$idx" git --literal-pathspecs add -A -- "$p" 2>&1); then
+        echo "WARNING: git cannot stage code ref '$p' (${out%%$'\n'*}); its content is recorded as missing." >&2
+        GIT_INDEX_FILE="$idx" git --literal-pathspecs rm -r -f -q --cached --ignore-unmatch -- "$p" >/dev/null \
+          || _die "cannot drop '$p' from a private index"
+      fi
+    done
+  fi
+  if [ ${#_WT_ABSENT[@]} -gt 0 ]; then
+    printf '%s\0' "${_WT_ABSENT[@]}" \
+      | GIT_INDEX_FILE="$idx" xargs -0 git --literal-pathspecs rm -r -f -q --cached --ignore-unmatch -- >/dev/null \
+      || _die "cannot drop the absent code refs from a private index"
+  fi
+  [ "$_WT_COVERS" = 0 ] || _drop_index_family "$idx"
+}
+
+# The tree of what the working tree holds at the given refs (one per line of
+# $1, as stored), into _WT_TREE: git's index is copied to a private one, every
+# ref is re-staged from the working tree (_wt_stage), and the result written
+# as a tree. Paths outside the refs keep their index state; only the refs are
+# ever looked up in it.
+_WT_PRESENT=()
+_WT_ABSENT=()
+_WT_COVERS=0
+_worktree_tree() {
+  local in="$1" paths="$_SCRATCH/worktree.paths" idx="$_SCRATCH/worktree.index" real p rc=0
+  _WT_PRESENT=() _WT_ABSENT=() _WT_COVERS=0 _WT_TREE=""
+  awk -v ix="$INDEX_FILE" "$_AWK_REFPATH"'
+    { p = refpath($0); if (p != "" && !(p in seen)) { seen[p] = 1; print p; if (covers(p)) c = 1 } }
+    END { exit c ? 3 : 0 }' "$in" > "$paths" || rc=$?
+  case "$rc" in
+    0) ;;
+    3) _WT_COVERS=1 ;;
+    *) _die "cannot read the code refs" ;;
+  esac
+  while IFS= read -r p; do
+    if [ -e "$p" ] || [ -L "$p" ]; then
+      _WT_PRESENT+=("$p")
+    else
+      _WT_ABSENT+=("$p")
+    fi
+  done < "$paths"
+  real=$(git rev-parse --git-path index) || _die "git rev-parse --git-path index failed"
+  rm -f "$idx"
+  if [ -f "$real" ]; then
+    cp "$real" "$idx" || _die "cannot copy $real"
+  fi
+  _wt_stage "$idx"
+  if ! _WT_TREE=$(GIT_INDEX_FILE="$idx" git write-tree 2>/dev/null); then
+    # git's index holds unmerged entries (a merge in progress): start from
+    # HEAD's tree instead — the refs are re-staged from the working tree anyway.
+    rm -f "$idx"
+    _head_init
+    if [ -n "$_HEAD" ]; then
+      GIT_INDEX_FILE="$idx" git read-tree "$_HEAD" || _die "git read-tree HEAD failed"
+    fi
+    _wt_stage "$idx"
+    _WT_TREE=$(GIT_INDEX_FILE="$idx" git write-tree) \
+      || _die "cannot capture the code refs from the working tree (git write-tree failed)"
+  fi
+}
+
+# _last_commits <refsets-file> <out-file>
+# code_commit for each line of <refsets-file> (one entry's refs, \x1f-joined):
+# the newest commit reachable from HEAD touching any of them, or "" — no refs,
+# no such commit, an unborn HEAD, or a shallow clone (warned once). One `git
+# rev-list -1` per DISTINCT set: docs that share refs share the walk, and
+# matching them up is two awk passes, not a lookup per doc.
+_last_commits() {
+  local in="$1" out="$2" ids="$_SCRATCH/lc.ids" sets="$_SCRATCH/lc.sets" res="$_SCRATCH/lc.res"
+  local set c refs=()
+  : > "$out"
+  [ -s "$in" ] || return 0
+  : > "$sets"
+  awk -F $'\x1f' -v ix="$INDEX_FILE" -v sets="$sets" "$_AWK_REFPATH"'
+    { k = ""
+      for (i = 1; i <= NF; i++) { p = refpath($i); if (p != "") k = (k == "" ? p : k FS p) }
+      if (!(k in id)) { id[k] = ++n; print k > sets }
+      print id[k] }' "$in" > "$ids" || _die "cannot read the code refs"
+  _head_init
+  _shallow_init
+  if [ "$_SHALLOW" = true ]; then
+    echo "WARNING: shallow clone: code_commit is not recorded (the truncated history cannot name the last commit touching the refs); code_oids are." >&2
+  fi
+  while IFS= read -r set; do
+    c=""
+    if [ -n "$set" ] && [ -n "$_HEAD" ] && [ "$_SHALLOW" != true ]; then
+      IFS=$'\x1f' read -r -a refs <<<"$set"
+      c=$(git --literal-pathspecs rev-list -1 "$_HEAD" -- "${refs[@]}") \
+        || _die "git rev-list failed for code refs: ${refs[*]}"
+    fi
+    printf '%s\n' "$c"
+  done < "$sets" > "$res"
+  awk 'NR == FNR { c[FNR] = $0; next } { print c[$0] }' "$res" "$ids" > "$out" \
+    || _die "cannot match code_commit to the entries"
+}
+
+# _hash_list <names-file> <out-file>
+# "sha256:<hex>" for each NUL-terminated file name in <names-file>, one line
+# each, in order — in as few processes as argv allows (xargs); a hash per doc
+# was a fork+exec per file. Names reach the hasher as ./<name>, so a doc named
+# "-" is never read as stdin. If the batch does not line up one to one (an
+# unreadable file drops its line), each file is hashed on its own, so a hash
+# can never land on the wrong doc — and an unreadable one dies.
+_hash_list() {
+  local in="$1" out="$2" list="$_SCRATCH/hash.names" raw="$_SCRATCH/hash.raw"
+  local f n=0 m=0 line h
+  : > "$out"
+  [ -s "$in" ] || return 0
+  while IFS= read -r -d '' f; do
+    case "$f" in
+      /*) ;;
+      *) f="./$f" ;;
+    esac
+    printf '%s\0' "$f"
+    n=$((n + 1))
+  done < "$in" > "$list"
+  if command -v sha256sum >/dev/null 2>&1; then
+    xargs -0 sha256sum -- < "$list" > "$raw" 2>/dev/null || true
+  else
+    xargs -0 shasum -a 256 -- < "$list" > "$raw" 2>/dev/null || true
+  fi
+  while IFS= read -r line; do
+    h="${line%% *}"
+    # GNU sha256sum and shasum prefix the line with "\" when the name needed
+    # escaping.
+    h="${h#\\}"
+    case "$h" in
+      *[!0123456789abcdef]*) m=-1; break ;;
+    esac
+    [ "${#h}" -eq 64 ] || { m=-1; break; }
+    printf 'sha256:%s\n' "$h"
+    m=$((m + 1))
+  done < "$raw" > "$out"
+  [ "$m" -ne "$n" ] || return 0
+  while IFS= read -r -d '' f; do
+    _hash_one "$f"
+    printf '%s\n' "$_HASH"
+  done < "$in" > "$out"
+}
+
+# _warn_refs <refs-file> <unmatched 0|1>
+# Warn once per distinct ref (one per line of <refs-file>) that holds a glob
+# character — refs are literal paths, so it names only a path of exactly that
+# name — and, with <unmatched> 1, about each other ref that matches no file
+# git tracks: a typo'd ref records "missing", and HEAD agrees until that path
+# is committed, so the doc cannot go stale. One `git ls-files`, one awk.
+_warn_refs() {
+  local list="$1" unmatched="$2" tracked="$_SCRATCH/tracked" out r kind
+  [ -s "$list" ] || return 0
+  : > "$tracked"
+  if [ "$unmatched" = 1 ]; then
+    git -c core.quotePath=false ls-files > "$tracked" || _die "git ls-files failed"
+  fi
+  out=$(awk -v reffile="$list" -v unmatched="$unmatched" '
+    function norm(r,   n, i, parts, out) {
+      n = split(r, parts, "/")
+      out = ""
+      for (i = 1; i <= n; i++)
+        if (parts[i] != "" && parts[i] != ".") out = (out == "" ? parts[i] : out "/" parts[i])
+      return out == "" ? "." : out
+    }
+    BEGIN {
+      while ((getline r < reffile) > 0) {
+        if (r in glob) continue
+        if (r ~ /[*?[]/) { glob[r] = 1; print "G\t" r; continue }
+        k = norm(r)
+        if (!(k in want)) { want[k] = 1; orig[k] = r; order[++total] = k }
+      }
+    }
+    {
+      if ("." in want) found["."] = 1
+      p = $0
+      while (1) {
+        if (p in want) found[p] = 1
+        if (!match(p, /\/[^\/]*$/)) break
+        p = substr(p, 1, RSTART - 1)
+      }
+    }
+    END { if (unmatched) for (i = 1; i <= total; i++) if (!(order[i] in found)) print "U\t" orig[order[i]] }
+  ' "$tracked") || _die "cannot check the code refs"
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    kind="${r%%$'\t'*}"
+    r="${r#*$'\t'}"
+    case "$kind" in
+      G) echo "WARNING: code ref '$r' contains a glob character (* ? [): code refs are literal paths, so it names only a path of exactly that name." >&2 ;;
+      U) echo "WARNING: code ref '$r' matches no file tracked by git (typo?); its content is recorded as missing, so the doc cannot go stale until that path is committed." >&2 ;;
+    esac
+  done <<<"$out"
+}
+
+# _entry_facts <unmatched 0|1>
+# What a writer records for each entry of _FACT_KEYS / _FACT_REFSETS (its
+# refs, \x1f-joined), each fact gathered in ONE batch for the whole run:
+#   _FACT_HASH[i]    "sha256:<hex>" of the doc, "" when it is not a file
+#   _FACT_COMMIT[i]  code_commit (_last_commits), "" when none
+#   _FACT_OIDS[i]    the refs' object ids in the working tree (_worktree_tree),
+#                    \x1f-joined in ref order
+# Warns about glob-looking refs, and with <unmatched> 1 about untracked ones.
+_entry_facts() {
+  local unmatched="$1" n=${#_FACT_KEYS[@]} i=0 x isfile=()
+  local docs="$_SCRATCH/facts.docs" hashes="$_SCRATCH/facts.hashes" sets="$_SCRATCH/facts.sets"
+  local refs="$_SCRATCH/facts.refs" commits="$_SCRATCH/facts.commits" oids="$_SCRATCH/facts.oids"
+  local oidsets="$_SCRATCH/facts.oidsets"
+  _FACT_HASH=() _FACT_COMMIT=() _FACT_OIDS=()
+  [ "$n" -gt 0 ] || return 0
+  while [ "$i" -lt "$n" ]; do
+    if [ -f "${_FACT_KEYS[$i]}" ]; then
+      isfile+=(1)
+      printf '%s\0' "${_FACT_KEYS[$i]}" >&3
+    else
+      isfile+=(0)
+    fi
+    printf '%s\n' "${_FACT_REFSETS[$i]}" >&4
+    i=$((i + 1))
+  done 3> "$docs" 4> "$sets"
+  awk -F $'\x1f' '{ for (i = 1; i <= NF; i++) print $i }' "$sets" > "$refs" \
+    || _die "cannot read the code refs"
+  _warn_refs "$refs" "$unmatched"
+  _hash_list "$docs" "$hashes"
+  _last_commits "$sets" "$commits"
+  : > "$oids"
+  if [ -s "$refs" ]; then
+    _worktree_tree "$refs"
+    _oid_lookup "$_WT_TREE" "$refs" "$oids" 0
+  fi
+  awk -F $'\x1f' -v o="$oids" '
+    { s = ""
+      for (i = 1; i <= NF; i++) { if ((getline x < o) <= 0) exit 1; s = (i == 1 ? x : s FS x) }
+      print s }' "$sets" > "$oidsets" || _die "cannot match code_oids to the entries"
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    x=""
+    if [ "${isfile[$i]}" = 1 ]; then
+      IFS= read -r x <&5 || _die "cannot read the doc hashes"
+    fi
+    _FACT_HASH+=("$x")
+    IFS= read -r x <&6 || _die "cannot read code_commit"
+    _FACT_COMMIT+=("$x")
+    IFS= read -r x <&7 || _die "cannot read code_oids"
+    _FACT_OIDS+=("$x")
+    i=$((i + 1))
+  done 5< "$hashes" 6< "$commits" 7< "$oidsets"
+}
+
+# The tree readers compare against, into _TREE: --tree <tree-ish> when given
+# (checked by the verb: it cannot start with "-"), else HEAD's — or the empty
+# tree on an unborn HEAD.
+_TREE=""
+_tree_init() {
+  [ -z "$_TREE" ] || return 0
+  if _opt_seen tree; then
+    if ! _TREE=$(git rev-parse --verify -q "$_OPT_tree^{tree}"); then
+      echo "ERROR: --tree '$_OPT_tree' does not name a tree (give a commit, a tree or a tag, e.g. HEAD or the output of git write-tree)." >&2
+      exit 1
+    fi
+    return 0
+  fi
+  _head_init
+  if [ -n "$_HEAD" ]; then
+    _TREE=$(git rev-parse --verify -q "$_HEAD^{tree}") || _die "cannot read HEAD's tree"
+  else
+    _TREE=$(git hash-object -t tree /dev/null) || _die "cannot name the empty tree"
+  fi
+}
+
+# A --tree value is a revision; one starting with "-" would read as an option.
+_check_tree_opt() {
+  if _opt_seen tree; then
+    case "$_OPT_tree" in
+      ''|-*) _usage_error "$1" "--tree needs a tree-ish, such as HEAD or \$(git write-tree) (got '$_OPT_tree')" ;;
+    esac
+  fi
 }
 
 # --- Freshness: ONE implementation, shared by check-freshness and status ------
@@ -338,13 +760,12 @@ _targets_from_args() {
 # containing a tab was @tsv-escaped into a path that never existed. Both verbs
 # now run _freshness_scan, and the fields travel \x1f-separated (not
 # whitespace, so an empty field stays a field) in NUL-terminated records.
-#
-# The per-doc model is still commit-based: stale when the newest commit
-# touching the refs differs from the stored code_commit.
 
 # jq: every entry (or only $only) that passes the --code-refs filter, as
 #   key \x1f status \x1f doc_type \x1f last_verified \x1f content_hash
-#     \x1f code_commit \x1f <n refs> [\x1f ref]… \0
+#     \x1f code_commit \x1f mode \x1f <n refs> [\x1f ref]… [\x1f oid]… \0
+# mode is "oids" when the entry has code_oids (then the stored object id of
+# each ref follows the refs, "" for a ref code_oids lacks), else "legacy".
 # Refs are the stored strings minus empties (a legacy "" is not a path).
 #
 # Filter ($flt: the raw --code-refs list, one path per line, or null): an
@@ -376,20 +797,32 @@ _JQ_FRESH_EXTRACT='
   | [($v.code_refs // []) | if type == "array" then .[] else empty end
      | select(type == "string" and . != "")] as $refs
   | select($M == null or (($M.empty | not) and any($refs[]; hit)))
+  | (if ($v.code_oids | type) == "object" then "oids" else "legacy" end) as $mode
   | ([$k, ($v.status // "" | tostring), ($v.doc_type // "" | tostring),
       ($v.last_verified // "" | tostring), ($v.content_hash // "" | tostring),
-      ($v.code_commit // "" | tostring), ($refs | length | tostring)] + $refs)
+      ($v.code_commit // "" | tostring), $mode, ($refs | length | tostring)] + $refs
+     + (if $mode == "oids"
+        then [$refs[] as $r | $v.code_oids[$r] | if type == "string" then . else "" end]
+        else [] end))
   | join("\u001f") + "\u0000"'
 
-# jq (after $_JQ_REC_FIELDS): the _freshness_scan verdict stream — 8 fields per
-# doc: key status doc_type last_verified reason doc_modified commits_behind
-# changed-refs (\x1f-joined) — as def results: {key: result}. Field order is
-# the report's.
+# jq (after $_JQ_REC_FIELDS): the _freshness_scan stream as def results:
+# {key: result}. The stream opens with the commits_behind of each distinct
+# stale (code_commit, refs) group — <G>, then G pairs <group> <count or "">
+# — and then holds 8 fields per doc: key status doc_type last_verified reason
+# doc_modified commits_behind changed-refs (\x1f-joined). commits_behind is a
+# count, "" (null) or "?<group>". Field order is the report's.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_FRESH_RESULTS='
   def results:
     rec_fields as $f
-    | [range(0; $f | length; 8) as $i
+    | ($f[0] | tonumber) as $g
+    | (reduce range(0; $g) as $j ({}; .[$f[1 + 2 * $j]] = $f[2 + 2 * $j])) as $B
+    | def behind:
+        if . == "" then null
+        elif startswith("?") then ($B[.[1:]] // "" | if . == "" then null else tonumber end)
+        else tonumber end;
+    [range(1 + 2 * $g; $f | length; 8) as $i
        | {key: $f[$i], value: (
            if $f[$i + 1] == "deprecated" then
              {status: "deprecated", doc_type: $f[$i + 2], last_verified: $f[$i + 3]}
@@ -398,7 +831,7 @@ _JQ_FRESH_RESULTS='
            else
              {status: $f[$i + 1]}
              + (if $f[$i + 1] == "stale" then {reason: $f[$i + 4]} else {} end)
-             + {doc_modified: ($f[$i + 5] == "true"), commits_behind: ($f[$i + 6] | tonumber)}
+             + {doc_modified: ($f[$i + 5] == "true"), commits_behind: ($f[$i + 6] | behind)}
              + (if $f[$i + 1] == "stale"
                 then {code_refs_changed: ($f[$i + 7] | if . == "" then [] else split("\u001f") end)}
                 else {} end)
@@ -406,98 +839,148 @@ _JQ_FRESH_RESULTS='
            end)}]
     | from_entries;'
 
-# One entry's verdict into _F_STATUS (current|stale|missing|deprecated),
-# _F_REASON, _F_MOD (true|false), _F_BEHIND and _F_CHANGED (\x1f-joined refs).
-#   _freshness_eval <key> <stored status> <content_hash> <code_commit> [ref…]
-# A stored code_commit that is not an object id counts as no baseline (it is
-# never handed to git — see _is_oid).
-_freshness_eval() {
-  local key="$1" stored_status="$2" content_hash="$3" code_commit="$4"
-  shift 4
-  _F_REASON="" _F_MOD="" _F_BEHIND=0 _F_CHANGED=""
-  if [ "$stored_status" = "deprecated" ]; then
-    _F_STATUS=deprecated
-    return 0
-  fi
-  if [ ! -f "$key" ]; then
-    _F_STATUS=missing
-    return 0
-  fi
-  _hash_one "$key"
-  if [ "$_HASH" = "$content_hash" ]; then _F_MOD=false; else _F_MOD=true; fi
+# The pre-v3 verdict of an entry without code_oids: stale when the newest
+# commit touching the refs (git pathspecs, as before v3) is not the stored
+# code_commit. Into _F_STATUS, _F_REASON, _F_BEHIND ("" = null) and
+# _F_CHANGED (\x1f-joined refs). A stored code_commit that is not an object id
+# counts as no baseline, and is never handed to git (see _is_oid).
+#   _freshness_legacy <code_commit> [ref…]
+_freshness_legacy() {
+  local code_commit="$1" ref
+  shift
+  _F_STATUS=current _F_REASON="" _F_BEHIND=0 _F_CHANGED=""
   _is_oid "$code_commit" || code_commit=""
   _git_last_commit "$@"
-  if [ -n "$_LAST" ] && [ "$_LAST" != "$code_commit" ]; then
-    _F_STATUS=stale
-    _F_REASON=code_changed
-  else
-    _F_STATUS=current
-  fi
+  [ -n "$_LAST" ] && [ "$_LAST" != "$code_commit" ] || return 0
+  _F_STATUS=stale
+  _F_REASON=code_changed
+  _F_BEHIND=""
   if [ -n "$code_commit" ]; then
     _git_commits_behind "$code_commit" "$@"
     _F_BEHIND="$_BEHIND"
   fi
-  if [ "$_F_STATUS" = stale ] && [ -n "$code_commit" ]; then
-    local ref
-    for ref in "$@"; do
-      _git_last_commit "$ref"
-      if [ -n "$_LAST" ] && [ "$_LAST" != "$code_commit" ]; then
-        _F_CHANGED="${_F_CHANGED:+$_F_CHANGED$'\x1f'}$ref"
-      fi
-    done
-  fi
+  # With no baseline, every ref with any history counts as changed.
+  for ref in "$@"; do
+    _git_last_commit "$ref"
+    if [ -n "$_LAST" ] && [ "$_LAST" != "$code_commit" ]; then
+      _F_CHANGED="${_F_CHANGED:+$_F_CHANGED$'\x1f'}$ref"
+    fi
+  done
 }
 
 # _freshness_scan <snapshot> <only-key or ""> <filter-file or ""> <out-file>
-# The one freshness walk. ONE jq pass extracts the entries, bash evaluates
-# each with _freshness_eval, and the verdicts are written to <out-file> as a
-# _rec_put stream for $_JQ_FRESH_RESULTS. No jq runs per entry.
+# The one freshness walk. ONE jq pass extracts the entries. Pass 1 sorts them
+# (deprecated / missing / live) and lists what to look up; then every live
+# doc is hashed in one batch and every ref of every live v3 entry is looked up
+# in the compared tree (_TREE) in one batch-check. Pass 2 compares; a legacy
+# entry takes the pre-v3 commit logic. Then one `git rev-list --count` per
+# distinct stale (code_commit, refs) group. The verdicts go to <out-file> as a
+# _rec_put stream for $_JQ_FRESH_RESULTS. No jq or git runs per current doc.
 _freshness_scan() {
   local snap="$1" only="$2" filter="$3" out="$4"
-  local fields="$_SCRATCH/fresh.fields"
+  local fields="$_SCRATCH/fresh.fields" docs="$_SCRATCH/fresh.docs" hashes="$_SCRATCH/fresh.hashes"
+  local refs="$_SCRATCH/fresh.refs" cur="$_SCRATCH/fresh.cur" groups="$_SCRATCH/fresh.groups"
+  local pairs="$_SCRATCH/fresh.pairs" recs="$_SCRATCH/fresh.recs"
   local flt=(--argjson flt null)
   [ -z "$filter" ] || flt=(--rawfile flt "$filter")
   jq -j --arg only "$only" "${flt[@]}" "$_JQ_FRESH_EXTRACT" < "$snap" > "$fields" \
     || _die "cannot read the entries of $INDEX_FILE"
   _head_init
-  local f
-  {
-    # fd 3, so nothing in the loop can read the records as its stdin.
-    while IFS=$'\x1f' read -r -d '' -a f <&3; do
-      _freshness_eval "${f[0]}" "${f[1]}" "${f[4]}" "${f[5]}" ${f[7]+"${f[@]:7}"}
-      _rec_put "${f[0]}" "$_F_STATUS" "${f[2]}" "${f[3]}" "$_F_REASON" "$_F_MOD" "$_F_BEHIND" "$_F_CHANGED"
-    done 3< "$fields"
-  } > "$out"
-}
 
-# Hash many files in ONE process — hash_file per doc was a fork+exec (two, with
-# the awk) per file. Prints "sha256:<hex>" per file, in argument order. If the
-# batch output does not line up one-to-one (an unreadable file drops its line),
-# falls back to hash_file per file so a hash can never land on the wrong doc.
-_hash_files() {
-  [ $# -gt 0 ] || return 0
-  local out="" line hashes=() h
-  if command -v sha256sum >/dev/null 2>&1; then
-    out=$(sha256sum -- "$@" 2>/dev/null) || out=""
-  else
-    out=$(shasum -a 256 -- "$@" 2>/dev/null) || out=""
-  fi
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    h="${line%% *}"
-    # GNU/shasum prefix the line with "\" when the filename needed escaping.
-    hashes+=("${h#\\}")
-  done <<< "$out"
-  if [ "${#hashes[@]}" -eq $# ]; then
-    for h in "${hashes[@]}"; do
-      printf 'sha256:%s\n' "$h"
-    done
-  else
-    local f
-    for f in "$@"; do
-      printf 'sha256:%s\n' "$(hash_file "$f")"
-    done
-  fi
+  # Pass 1. fd 3 carries the records, so nothing in the loop can read them as
+  # its stdin. A ref holding a newline (only a hand-edited index has one)
+  # cannot be one line of the lookup: ".." makes it unaddressable ("missing").
+  local f cls=() n j r
+  while IFS=$'\x1f' read -r -d '' -a f <&3; do
+    if [ "${f[1]}" = deprecated ]; then
+      cls+=(d)
+    elif [ ! -f "${f[0]}" ]; then
+      cls+=(m)
+    else
+      cls+=(l)
+      printf '%s\0' "${f[0]}" >&4
+      if [ "${f[6]}" = oids ]; then
+        n="${f[7]}"
+        j=0
+        while [ "$j" -lt "$n" ]; do
+          r="${f[$((8 + j))]}"
+          case "$r" in
+            *$'\n'*) r=.. ;;
+          esac
+          printf '%s\n' "$r" >&5
+          j=$((j + 1))
+        done
+      fi
+    fi
+  done 3< "$fields" 4> "$docs" 5> "$refs"
+
+  _hash_list "$docs" "$hashes"
+  _tree_init
+  _oid_lookup "$_TREE" "$refs" "$cur" 1
+
+  # Pass 2: fd 4 the hashes (one per live doc), fd 5 the looked-up object ids
+  # and fd 6 their normalized paths (one per ref of a live v3 entry), fd 7 the
+  # stale groups needing commits_behind.
+  local k=0 hash mod st reason behind changed stored now path gpaths
+  {
+    while IFS=$'\x1f' read -r -d '' -a f <&3; do
+      case "${cls[$k]}" in
+        d) _rec_put "${f[0]}" deprecated "${f[2]}" "${f[3]}" "" "" "" "" ;;
+        m) _rec_put "${f[0]}" missing "${f[2]}" "${f[3]}" "" "" "" "" ;;
+        *)
+          IFS= read -r hash <&4 || _die "cannot read the doc hashes"
+          if [ "$hash" = "${f[4]}" ]; then mod=false; else mod=true; fi
+          n="${f[7]}"
+          if [ "${f[6]}" = oids ]; then
+            changed="" gpaths=""
+            j=0
+            while [ "$j" -lt "$n" ]; do
+              IFS= read -r now <&5 || _die "cannot read the looked-up object ids"
+              IFS= read -r path <&6 || _die "cannot read the looked-up paths"
+              # :- because read -a drops a trailing empty field (the last
+              # ref's stored id is "" when code_oids lacks it).
+              stored="${f[$((8 + n + j))]:-}"
+              if [ "$stored" != "$now" ]; then
+                changed="${changed:+$changed$'\x1f'}${f[$((8 + j))]}"
+              fi
+              [ -z "$path" ] || gpaths="$gpaths"$'\x1f'"$path"
+              j=$((j + 1))
+            done
+            if [ -z "$changed" ]; then
+              st=current reason="" behind=0
+            else
+              st=stale reason=code_changed behind=""
+              if _is_oid "${f[5]}" && [ -n "$_HEAD" ] && [ -n "$gpaths" ]; then
+                behind="?${f[5]}$gpaths"
+                printf '%s\n' "${f[5]}$gpaths" >&7
+              fi
+            fi
+          else
+            _freshness_legacy "${f[5]}" ${f[8]+"${f[@]:8:$n}"}
+            st="$_F_STATUS" reason="$_F_REASON" behind="$_F_BEHIND" changed="$_F_CHANGED"
+          fi
+          _rec_put "${f[0]}" "$st" "${f[2]}" "${f[3]}" "$reason" "$mod" "$behind" "$changed"
+          ;;
+      esac
+      k=$((k + 1))
+    done 3< "$fields" 4< "$hashes" 5< "$cur" 6< "$cur.paths" 7> "$groups"
+  } > "$recs"
+
+  # commits_behind once per distinct stale (code_commit, refs) group: every
+  # doc sharing refs and a baseline shares the answer.
+  local g=0 gkey base grefs=()
+  awk '!seen[$0]++' "$groups" > "$groups.u" || _die "cannot group the stale docs"
+  while IFS= read -r gkey; do
+    base="${gkey%%$'\x1f'*}"
+    IFS=$'\x1f' read -r -a grefs <<<"${gkey#*$'\x1f'}"
+    _git_commits_behind --literal "$base" "${grefs[@]}"
+    _rec_put "$gkey" "$_BEHIND"
+    g=$((g + 1))
+  done < "$groups.u" > "$pairs"
+  {
+    _rec_put "$g"
+    cat "$pairs" "$recs" || _die "cannot assemble the freshness report"
+  } > "$out"
 }
 
 # --- Index persistence ---------------------------------------------------------
@@ -524,8 +1007,12 @@ _hash_files() {
 # _INDEX_CHANGED lists the docs keys whose entries actually changed, so writers
 # report what they did rather than what they were asked. Writers build a
 # per-key patch list (JSONL) first and apply it in that one pass: O(N + k), not
-# a whole-index re-parse per path. Signals terminate (_traps): an interrupted
-# writer leaves the previous index byte-identical, never a partial one.
+# a whole-index re-parse per path; with --report the same pass classifies each
+# patch row, so a writer's report is one walk over its rows (a newline-framed
+# `case` lookup per key made the reports quadratic: 4,000 keys took 34 s on
+# bash 5, 109 s on bash 3.2). Any write stamps schema_version 3 (and drops the
+# pre-v2 "version" key). Signals terminate (_traps): an interrupted writer
+# leaves the previous index byte-identical, never a partial one.
 
 INDEX_FILE="docs/.doc-index.json"
 INDEX_LOCK="$INDEX_FILE.lock"
@@ -535,7 +1022,7 @@ _INDEX_LOCK_HELD=0
 _INDEX_BREAKING=0
 _INDEX_NOW=""        # one timestamp per run: last_verified and generated_at agree
 _INDEX_CHANGED=()
-_INDEX_CHANGED_SET=$'\n'   # the same keys, newline-framed, for O(1)-call lookups
+_INDEX_CLASSES=""    # with --report: one class per patch row (see _index_apply)
 _INDEX_WROTE=0
 
 # Shared patch interpreter for _index_apply. Each $patch row is one of
@@ -808,23 +1295,29 @@ _index_install() {
   _INDEX_TMP=""
 }
 
-# _index_apply [--replace] <jq-program> [jq args…]
+# _index_apply [--replace | --report] <jq-program> [jq args…]
 #
 # Lock → snapshot → ONE jq pass → tmp beside the target → chmod → mv. The
 # program gets the current index as `.` and must yield exactly one whole new
 # index. `$now` (this run's timestamp) is bound for it — do not pass --arg now.
 # It must not stamp generated_at: that is set here, and only if something
-# changed. --replace (build-index only) tolerates a missing or invalid prior
-# index — `.` is then null — because rebuilding is how one recovers from it.
+# changed — as is schema_version (3; a pre-v2 "version" key is dropped), so a
+# v2 index is read as it is and upgraded by its first real write. --replace
+# (build-index only) tolerates a missing or invalid prior index — `.` is then
+# null — because rebuilding is how one recovers from it. --report (the patch
+# writers, which pass --slurpfile patch) also classifies every $patch row, in
+# row order, into _INDEX_CLASSES — one character each:
+#   c  the row's key changed          u  unchanged, and it was indexed before
+#   a  unchanged, and it was not indexed before
 #
 # Sets _INDEX_WROTE (0/1) and _INDEX_CHANGED (sorted docs keys whose entry was
 # added, removed or modified). Releases the lock before returning.
 _index_apply() {
-  local replace=0
-  if [ "${1:-}" = "--replace" ]; then
-    replace=1
-    shift
-  fi
+  local replace=0 report=0
+  case "${1:-}" in
+    --replace) replace=1; shift ;;
+    --report) report=1; shift ;;
+  esac
   local program="$1"
   shift
   _scratch_init
@@ -849,9 +1342,16 @@ _index_apply() {
   # jq's OUTPUT on every supported version (raw strings are written with
   # fwrite and their byte length since 1.6); it is jq's raw INPUT that is not
   # NUL-safe there — see _rec_put.
-  #   same\0                                  nothing changed — write nothing
-  #   write\0<n>\0<key>\0…(n keys)<index>\n  the changed keys, then the index
+  #   same\0 | write\0                     whether anything changed
+  #   <n>\0<key>\0…(n keys)                (write) the changed keys
+  #   <classes>\0                          (--report) one class per $patch row
+  #   <index>\n                            (write) the new index
   # The index is emitted pretty-printed, byte-for-byte what `jq .` writes.
+  local classes='empty'
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  [ "$report" = 0 ] || classes='(reduce $__ch[] as $k ({}; .[$k] = true)) as $__cs
+      | ([$patch[] | .key as $k
+          | if $__cs[$k] then "c" elif ($__od | has($k)) then "u" else "a" end] | join("")) + "\u0000"'
   # shellcheck disable=SC2016  # jq program, not shell expansion
   local wrapped='. as $__old
     | [ '"$program"' ] as $__out
@@ -862,15 +1362,20 @@ _index_apply() {
     | if (type != "object") or ((.docs | type) != "object")
       then error("doc-tools: index program yielded an invalid index") else . end
     | (if ($__old | type) == "object" then $__old.docs else {} end) as $__od
-    | if (if ($__old | type) == "object" then ($__old | del(.generated_at)) else null end)
-         == del(.generated_at)
-      then "same\u0000"
-      else
-        [ (($__od | keys) + ($__new.docs | keys) | unique)[] as $k
-          | select($__od[$k] != $__new.docs[$k]) | $k ] as $__ch
-        | "write\u0000", "\($__ch | length)\u0000", ($__ch[] | . + "\u0000"),
-          (.generated_at = $now), "\n"
-      end'
+    | ((if ($__old | type) == "object" then ($__old | del(.generated_at)) else null end)
+       == ($__new | del(.generated_at))) as $__same
+    | (if $__same then []
+       else [ (($__od | keys) + ($__new.docs | keys) | unique)[] as $k
+              | select($__od[$k] != $__new.docs[$k]) | $k ] end) as $__ch
+    | (if $__same then "same\u0000" else "write\u0000" end),
+      (if $__same then empty else "\($__ch | length)\u0000", ($__ch[] | . + "\u0000") end),
+      ('"$classes"'),
+      (if $__same then empty
+       else ($__new
+             | .generated_at = $now
+             | if has("schema_version") then .schema_version = '"$_SCHEMA_VERSION"' | del(.version)
+               else {schema_version: '"$_SCHEMA_VERSION"'} + del(.version) end),
+            "\n" end)'
 
   local out
   out=$(mktemp "$_SCRATCH/apply.XXXXXX") || _die "mktemp failed"
@@ -881,7 +1386,7 @@ _index_apply() {
   fi
 
   _INDEX_CHANGED=()
-  _INDEX_CHANGED_SET=$'\n'
+  _INDEX_CLASSES=""
   _INDEX_WROTE=0
   local verdict="" n=0 i=0 key
   _INDEX_TMP=$(mktemp "$INDEX_FILE.tmp.XXXXXX") || _die "cannot create a temp file beside $INDEX_FILE"
@@ -892,9 +1397,13 @@ _index_apply() {
       while [ "$i" -lt "$n" ]; do
         IFS= read -r -d '' key
         _INDEX_CHANGED+=("$key")
-        _INDEX_CHANGED_SET="$_INDEX_CHANGED_SET$key"$'\n'
         i=$((i + 1))
       done
+    fi
+    if [ "$report" = 1 ]; then
+      IFS= read -r -d '' _INDEX_CLASSES || _die "unexpected index-apply output; $INDEX_FILE is unchanged."
+    fi
+    if [ "$verdict" = write ]; then
       cat > "$_INDEX_TMP" || _die "cannot write $_INDEX_TMP"
     fi
   } < "$out"
@@ -912,16 +1421,6 @@ _index_apply() {
     *) _die "unexpected index-apply output; $INDEX_FILE is unchanged." ;;
   esac
   _index_unlock
-}
-
-# True if $1 is among the keys the last _index_apply changed. One glob match
-# on a newline-framed string, not a scan per call: reports call this per key.
-# "$1" is quoted in the pattern, so glob characters in a path match literally.
-_index_changed_has() {
-  case "$_INDEX_CHANGED_SET" in
-    *$'\n'"$1"$'\n'*) return 0 ;;
-  esac
-  return 1
 }
 
 # One pass over snapshot $1: print 1 or 0 per remaining argument, one per line,
@@ -978,10 +1477,15 @@ build-index|cmd_build_index|repo|force
   has entries unless --force is given; for incremental changes use
   add-entry, update-index or remove-entry. A missing or malformed index is
   rebuilt without --force: this is the recovery path.
-check-freshness|cmd_check_freshness|repo|code-refs+ code-refs-from=*
-  [--code-refs <path>...] [--code-refs-from <file|->]
+check-freshness|cmd_check_freshness|repo|code-refs+ code-refs-from=* tree=
+  [--tree <tree-ish>] [--code-refs <path>...] [--code-refs-from <file|->]
   Report which indexed docs are stale relative to their code (read-only,
-  JSON). --code-refs limits the report to docs whose code_refs share a path
+  JSON). A doc is stale when the content of one of its code_refs differs
+  from what was verified (code_oids). Refs are compared in HEAD, or in
+  --tree <tree-ish>; a pre-commit check wants the staged tree,
+  --tree "$(git write-tree)". An entry without code_oids (pre-v3) keeps
+  the old commit comparison, at HEAD, until update-index re-verifies it.
+  --code-refs limits the report to docs whose code_refs share a path
   segment with a listed path: src/m1 matches refs src/m1, src/m1/a.js and
   src/, never src/m10. It takes every following argument up to the next
   --option. --code-refs-from reads the same list from a file, one path per
@@ -990,31 +1494,33 @@ check-freshness|cmd_check_freshness|repo|code-refs+ code-refs-from=*
     git -c core.quotePath=false diff --name-only --no-renames
 update-index|cmd_update_index|repo|
   <doc_path>...
-  Re-verify indexed docs: re-hash, re-read code_commit, set status current,
-  stamp last_verified. A doc whose file is gone is skipped with advice. A
-  path that is not indexed is reported and skipped; the others are still
+  Re-verify indexed docs: re-hash, record code_oids (each code ref's
+  content in the working tree) and code_commit, set status current, stamp
+  last_verified. A doc whose file is gone is skipped with advice. A path
+  that is not indexed is reported and skipped; the others are still
   applied, and the run exits 1.
 add-entry|cmd_add_entry|repo|
   < mapping-lines
-  Add new entries from mapping lines on stdin (same format as build-index).
-  A key already indexed is skipped. An invalid line is rejected; the valid
-  lines are still applied, and the run exits 1.
+  Add new entries from mapping lines on stdin (same format as build-index),
+  verified as the working tree holds them now. A key already indexed is
+  skipped. An invalid line is rejected; the valid lines are still applied,
+  and the run exits 1.
 remove-entry|cmd_remove_entry|repo|
   <doc_path>...
   Remove entries from the index.
 move-entry|cmd_move_entry|repo|
   <old_doc_path> <new_doc_path>
   Re-key an entry after a doc moves, preserving its metadata: code_refs,
-  code_commit, last_verified, doc_type, status and every other field; only
-  content_hash is recomputed. Use this, not remove-entry + add-entry, for a
+  code_oids, code_commit, last_verified, doc_type, status and every other
+  field; only content_hash is recomputed. Use this, not remove-entry + add-entry, for a
   rename, which would drop the freshness metadata.
 deprecate-entry|cmd_deprecate_entry|repo|superseded-by=
   [--superseded-by <doc_path>] <doc_path>...
   Mark entries deprecated, optionally naming the doc that supersedes them.
-status|cmd_status|repo|
-  <doc_path>
+status|cmd_status|repo|tree=
+  [--tree <tree-ish>] <doc_path>
   Freshness of one doc (read-only, JSON): the same verdict check-freshness
-  reports for it, plus its path.
+  reports for it (with the same --tree), plus its path.
 bump-version|cmd_bump_version|deps|
   <MAJOR.MINOR.PATCH>
   Write the version into the 6 manifest files: package.json,
@@ -1079,9 +1585,11 @@ Mapping lines (stdin of build-index and add-entry, one doc per line):
   be indexed under the wrong key. (A ':' path whose file does not exist yet
   cannot be detected.) doc_type may be empty or omitted. Refs are
   comma-separated; each is trimmed, and empty ones are dropped. A trailing
-  CR (a CRLF file) is removed. A ref that matches no file tracked by git is
-  warned about: a typo there leaves the doc with no code history, so it can
-  never go stale.
+  CR (a CRLF file) is removed. A ref is a literal path — a file, a
+  directory, or "." for the whole repository — never a glob: one containing
+  * ? or [ is warned about. A ref that matches no file tracked by git is
+  warned about too: a typo there is recorded as missing, which HEAD agrees
+  with, so the doc cannot go stale.
 
 Doc paths:
   The doc-index is keyed by paths relative to the repo root, and every
@@ -1098,7 +1606,20 @@ Index writes:
   run leaves the previous index intact. A run that changes nothing writes
   nothing (generated_at is not bumped). The incremental writers report only
   the entries they actually changed. Every verb that reads the index refuses
-  one that is empty or malformed; build-index rebuilds over it.
+  one that is empty or malformed; build-index rebuilds over it. Writes stamp
+  schema_version 3; a v2 index is read as it is.
+
+Freshness (index schema v3):
+  A writer records, per code ref, the git object id of its content in the
+  working tree (code_oids: a blob, a tree, or "missing"). A doc is stale when
+  one differs in the compared tree (HEAD, or --tree). So squash merges,
+  rebase-merges, cherry-picks and reverts to the verified bytes stay current,
+  as does a doc verified in the same commit as its code. code_refs_changed
+  lists exactly the refs that differ. commits_behind counts the commits
+  touching the refs since code_commit, and is null when this repository does
+  not have that commit (a deleted squash-merged branch, a shallow clone).
+  In a shallow clone writers record no code_commit (null, with a warning).
+  The doc-index itself is never part of a ref's content.
 
 Exit status:
   0  success
@@ -1311,7 +1832,12 @@ _parse_args() {
           if [ $# -eq 0 ] || _is_long_opt "$1"; then
             _usage_error "$verb" "option --$name requires at least one value"
           fi
-          while [ $# -gt 0 ] && ! _is_long_opt "$1"; do
+          # Inline, not _is_long_opt per value: bash 3.2 copies "$@" on every
+          # function call (see _targets_from_args), so a long list was O(k²).
+          while [ $# -gt 0 ]; do
+            case "$1" in
+              --?*) break ;;
+            esac
             eval "_OPTV_$n+=(\"\$1\")"
             shift
           done
@@ -1471,60 +1997,18 @@ _entry_from_line() {
   done
 }
 
-# Warn about code refs that match no file git tracks: a typo'd ref gives its
-# doc a null code_commit, and a doc with no code history never goes stale,
-# whatever changes. One `git ls-files` for the whole batch; a ref matches a
-# tracked path equal to it or below it. Glob refs are left to git's pathspec
-# matching and not checked here. $1: a file with one ref per line.
-_warn_unmatched_refs() {
-  local list="$1" tracked="$_SCRATCH/tracked" missing r
-  [ -s "$list" ] || return 0
-  git -c core.quotePath=false ls-files > "$tracked" || _die "git ls-files failed"
-  missing=$(awk -v reffile="$list" '
-    function norm(r,   n, i, parts, out) {
-      n = split(r, parts, "/")
-      out = ""
-      for (i = 1; i <= n; i++)
-        if (parts[i] != "" && parts[i] != ".") out = (out == "" ? parts[i] : out "/" parts[i])
-      return out == "" ? "." : out
-    }
-    BEGIN {
-      while ((getline r < reffile) > 0) {
-        if (r ~ /[*?[]/) continue
-        k = norm(r)
-        if (!(k in want)) { want[k] = 1; orig[k] = r; order[++total] = k }
-      }
-    }
-    {
-      if ("." in want) found["."] = 1
-      p = $0
-      while (1) {
-        if (p in want) found[p] = 1
-        if (!match(p, /\/[^\/]*$/)) break
-        p = substr(p, 1, RSTART - 1)
-      }
-    }
-    END { for (i = 1; i <= total; i++) if (!(order[i] in found)) print orig[order[i]] }
-  ' "$tracked") || _die "cannot check code refs against the tracked files"
-  while IFS= read -r r; do
-    [ -n "$r" ] || continue
-    echo "WARNING: code ref '$r' matches no file tracked by git; a doc indexed with only such refs can never go stale (typo?)." >&2
-  done <<<"$missing"
-}
-
 # _read_mapping <verb> <out-file>
 # Read mapping lines from stdin with _entry_from_line. A key listed twice
 # keeps its FIRST line (the rest are warned about), in both build-index and
 # add-entry. Sets _M_KEYS (the kept keys, in input order) and _M_INVALID, and
-# writes one _rec_put record per kept entry to <out-file>:
-#   key  content_hash ("" if not on disk)  code_commit ("" if no history)
-#   doc_type  refs (\x1f-joined)
+# writes one _rec_put record per kept entry to <out-file> (_entry_facts
+# gathers the facts, each in one batch):
+#   key  content_hash ("" if not on disk)  code_commit ("" if none)
+#   doc_type  refs (\x1f-joined)  code_oids (\x1f-joined, in ref order)
 _read_mapping() {
   local verb="$1" out="$2"
   local lineno=0 line keys=() types=() refsets=() joined r
-  local refs_list="$_SCRATCH/map-refs"
   _M_KEYS=() _M_INVALID=0
-  : > "$refs_list"
   : > "$out"
   if [ -t 0 ]; then
     echo "$verb: reading mapping lines from stdin (doc_path:code_refs_csv:doc_type); end with Ctrl-D." >&2
@@ -1542,7 +2026,6 @@ _read_mapping() {
     joined=""
     for r in ${_E_REFS[@]+"${_E_REFS[@]}"}; do
       joined="${joined:+$joined$'\x1f'}$r"
-      printf '%s\n' "$r" >> "$refs_list"
     done
     keys+=("$_E_PATH")
     types+=("$_E_TYPE")
@@ -1558,10 +2041,9 @@ _read_mapping() {
       echo "WARNING: '$r' is listed more than once; keeping its first line." >&2
     done <<<"$dups"
   fi
-  _warn_unmatched_refs "$refs_list"
 
-  local i=0 seen=$'\n' refs
-  _head_init
+  local i=0 seen=$'\n' kept_types=()
+  _FACT_KEYS=() _FACT_REFSETS=()
   while [ "$i" -lt "${#keys[@]}" ]; do
     if [ -n "$dups" ]; then
       case $'\n'"$dups"$'\n' in
@@ -1573,27 +2055,40 @@ _read_mapping() {
           ;;
       esac
     fi
-    _HASH=""
-    [ ! -f "${keys[$i]}" ] || _hash_one "${keys[$i]}"
-    refs=()
-    [ -z "${refsets[$i]}" ] || IFS=$'\x1f' read -r -a refs <<<"${refsets[$i]}"
-    _git_last_commit ${refs[@]+"${refs[@]}"}
-    _rec_put "${keys[$i]}" "$_HASH" "$_LAST" "${types[$i]}" "${refsets[$i]}" >> "$out"
-    _M_KEYS+=("${keys[$i]}")
+    _FACT_KEYS+=("${keys[$i]}")
+    _FACT_REFSETS+=("${refsets[$i]}")
+    kept_types+=("${types[$i]}")
     i=$((i + 1))
   done
+  _M_KEYS=("${_FACT_KEYS[@]}")
+  _entry_facts 1
+  i=0
+  while [ "$i" -lt "${#_M_KEYS[@]}" ]; do
+    _rec_put "${_M_KEYS[$i]}" "${_FACT_HASH[$i]}" "${_FACT_COMMIT[$i]}" "${kept_types[$i]}" \
+      "${_FACT_REFSETS[$i]}" "${_FACT_OIDS[$i]}"
+    i=$((i + 1))
+  done > "$out"
 }
 
-# jq (after $_JQ_REC_FIELDS): the _read_mapping records as a {key: entry}
-# object of fresh entries (field order is the index's).
+# jq: code_oids from a record's \x1f-joined refs and object ids (same order).
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CODE_OIDS='
+  def code_oids($refs; $oids):
+    [range(0; $refs | length) as $j | {key: $refs[$j], value: $oids[$j]}] | from_entries;
+  def fields_list: if . == "" then [] else split("\u001f") end;'
+
+# jq (after $_JQ_REC_FIELDS and $_JQ_CODE_OIDS): the _read_mapping records as
+# a {key: entry} object of fresh entries (field order is the index's).
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_MAPPING_ENTRIES='
   def mapping_entries:
     rec_fields as $f
-    | [range(0; $f | length; 5) as $i
+    | [range(0; $f | length; 6) as $i
+       | ($f[$i + 4] | fields_list) as $refs
        | {key: $f[$i], value: {
            content_hash: (if $f[$i + 1] == "" then null else $f[$i + 1] end),
-           code_refs: ($f[$i + 4] | if . == "" then [] else split("\u001f") end),
+           code_refs: $refs,
+           code_oids: code_oids($refs; $f[$i + 5] | fields_list),
            code_commit: (if $f[$i + 2] == "" then null else $f[$i + 2] end),
            doc_type: $f[$i + 3],
            status: "current",
@@ -1646,13 +2141,12 @@ cmd_build_index() {
   fi
 
   # shellcheck disable=SC2016  # jq program, not shell expansion
-  jq -c -n -R --arg now "$_INDEX_NOW" "$_JQ_REC_FIELDS$_JQ_MAPPING_ENTRIES"'mapping_entries' \
+  jq -c -n -R --arg now "$_INDEX_NOW" "$_JQ_REC_FIELDS$_JQ_CODE_OIDS$_JQ_MAPPING_ENTRIES"'mapping_entries' \
     < "$rec" > "$docs_tmp" || _die "cannot assemble the index entries; $INDEX_FILE is unchanged."
 
-  # schema_version bumped 1 → 2 in Task 3.4 of
-  # docs/plans/2026-05-16-adr-implementation-field-rollout.md to capture the
-  # new per-entry `implementation` array. Renamed from `version` (only test
-  # helpers read the field; live doc-index migrated in the same commit).
+  # schema_version: 2 added the per-entry `implementation` array (Task 3.4 of
+  # docs/plans/2026-05-16-adr-implementation-field-rollout.md; renamed from
+  # `version`); 3 added code_oids (sweep 05ea982 I-1 — see "Content identity").
   #
   # `docs` arrives via --slurpfile, NOT --argjson: it is the one unbounded
   # value here, and Linux caps a single argv string at MAX_ARG_STRLEN (131072
@@ -1670,7 +2164,7 @@ cmd_build_index() {
     then error("doc-tools: refusing to replace a non-empty index without --force (it gained entries while build-index ran)")
     else . end
     | {
-      schema_version: 2,
+      schema_version: '"$_SCHEMA_VERSION"',
       generated_by: "doc-superpowers",
       generated_at: $now,
       build_commit: (if $build_commit == "" then null else $build_commit end),
@@ -1707,6 +2201,7 @@ cmd_check_freshness() {
   if [ $# -gt 0 ]; then
     _usage_error check-freshness "takes no arguments (got '$1'); scope it with --code-refs <path>... or --code-refs-from <file|->"
   fi
+  _check_tree_opt check-freshness
   # ONE validated snapshot serves the entry walk and the untracked-key set:
   # reading the live file twice let a concurrent writer land in between.
   _scratch_init
@@ -1759,6 +2254,7 @@ cmd_update_index() {
   local targets=() doc_path
   _targets_from_args "$@"
   targets=("${_TARGETS[@]}")
+  set --   # see _targets_from_args: keep function calls O(1) under bash 3.2
 
   _scratch_init
   _index_now
@@ -1832,11 +2328,6 @@ cmd_update_index() {
     idx=$((idx + 1))
   done
 
-  local hashes=() h
-  while IFS= read -r h; do
-    hashes+=("$h")
-  done < <(_hash_files "${live[@]+"${live[@]}"}")
-
   # Implementation: (ADRs) / Realized-by: (SPECs) bullets, for every live doc
   # in ONE awk pass (a fork+exec per doc dominated the batch). Per file this is
   # exactly the old single-file program — the `exit` that ended it at the
@@ -1869,75 +2360,74 @@ cmd_update_index() {
     done <<< "$tagged"
   fi
 
-  # code_commit: one git rev-list per DISTINCT code_refs set — docs that share refs
-  # (common: several docs covering src/) share the answer. Linear cache, no
-  # associative arrays (bash 3.2). Written as a _rec_put record stream, turned
-  # into the JSONL patch by ONE jq below.
+  # What is recorded for each live doc — its hash, code_commit and code_oids
+  # (the refs as the working tree holds them) — each gathered in ONE batch
+  # (_entry_facts). The refs stay as stored for the code_oids keys; a ref
+  # holding a newline (only a hand-edited index has one) cannot be one line
+  # of a lookup, and is given to git as ".." (unaddressable: "missing").
   local raw="$_SCRATCH/update-raw" patch="$_SCRATCH/update-patch.jsonl"
-  : > "$raw"
-  local k=0 c code_commit start count code_refs_arr ckey
-  local cache_keys=() cache_vals=()
+  local k=0 start count set fset stored_sets=()
+  _FACT_KEYS=() _FACT_REFSETS=()
   while [ "$k" -lt "${#live[@]}" ]; do
-    doc_path="${live[$k]}"
     idx="${live_idx[$k]}"
     start="${ref_start[$idx]}"
     count="${ref_count[$idx]}"
-    code_refs_arr=()
-    ckey=""
+    set="" fset=""
     j=0
     while [ "$j" -lt "$count" ]; do
       ref="${ref_all[$((start + j))]}"
-      code_refs_arr+=("$ref")
-      ckey="$ckey$ref"$'\037'
+      set="${set:+$set$'\x1f'}$ref"
+      case "$ref" in
+        *$'\n'*) ref=.. ;;
+      esac
+      fset="${fset:+$fset$'\x1f'}$ref"
       j=$((j + 1))
     done
-    code_commit=""
-    if [ ${#code_refs_arr[@]} -gt 0 ]; then
-      c=0
-      while [ "$c" -lt "${#cache_keys[@]}" ] && [ "${cache_keys[$c]}" != "$ckey" ]; do
-        c=$((c + 1))
-      done
-      if [ "$c" -lt "${#cache_keys[@]}" ]; then
-        code_commit="${cache_vals[$c]}"
-      else
-        _git_last_commit "${code_refs_arr[@]}"
-        code_commit="$_LAST"
-        cache_keys+=("$ckey")
-        cache_vals+=("$code_commit")
-      fi
-    fi
-    _rec_put "$doc_path" "${hashes[$k]}" "$code_commit" "${impl[$k]:-}" >> "$raw"
+    _FACT_KEYS+=("${live[$k]}")
+    _FACT_REFSETS+=("$fset")
+    stored_sets+=("$set")
     k=$((k + 1))
   done
+  _entry_facts 0
+  k=0
+  while [ "$k" -lt "${#live[@]}" ]; do
+    _rec_put "${live[$k]}" "${_FACT_HASH[$k]}" "${_FACT_COMMIT[$k]}" "${impl[$k]:-}" \
+      "${stored_sets[$k]}" "${_FACT_OIDS[$k]}"
+    k=$((k + 1))
+  done > "$raw"
 
-  # Refresh: re-hash, re-query code_commit, set status=current, stamp
-  # last_verified, capture implementation (bullets with a leading "  - "
-  # stripped). Preserved: replaces, superseded_by, doc_type, code_refs, and the
-  # top-level build_commit.
+  # Refresh: re-hash, re-read code_commit and code_oids, set status=current,
+  # stamp last_verified, capture implementation (bullets with a leading
+  # "  - " stripped). Preserved: replaces, superseded_by, doc_type,
+  # code_refs, and the top-level build_commit.
   # shellcheck disable=SC2016  # jq program, not shell expansion
-  jq -c -n -R --arg now "$_INDEX_NOW" "$_JQ_REC_FIELDS"'
+  jq -c -n -R --arg now "$_INDEX_NOW" "$_JQ_REC_FIELDS$_JQ_CODE_OIDS"'
     rec_fields as $f
-    | range(0; $f | length; 4) as $i
+    | range(0; $f | length; 6) as $i
     | {key: $f[$i], merge: {
         content_hash: $f[$i + 1],
         code_commit: (if $f[$i + 2] == "" then null else $f[$i + 2] end),
+        code_oids: code_oids($f[$i + 4] | fields_list; $f[$i + 5] | fields_list),
         status: "current",
         last_verified: $now,
         implementation: (if $f[$i + 3] == "" then []
                          else ($f[$i + 3] | split("\n") | map(ltrimstr("  - "))) end)}}
-  ' < "$raw" > "$patch"
+  ' < "$raw" > "$patch" || _die "cannot assemble the update; $INDEX_FILE is unchanged."
 
-  _index_apply "$_INDEX_PATCH" --slurpfile patch "$patch"
+  _index_apply --report "$_INDEX_PATCH" --slurpfile patch "$patch"
 
-  # Report what actually changed. A doc re-verified within the same second
-  # with nothing to update changes nothing, and is listed as unchanged.
+  # Report what actually changed (the patch rows are the live docs, in
+  # order). A doc re-verified within the same second with nothing to update
+  # changes nothing, and is listed as unchanged.
   local refreshed=() unchanged=()
-  for doc_path in "${live[@]+"${live[@]}"}"; do
-    if _index_changed_has "$doc_path"; then
-      refreshed+=("$doc_path")
+  k=0
+  while [ "$k" -lt "${#live[@]}" ]; do
+    if [ "${_INDEX_CLASSES:$k:1}" = c ]; then
+      refreshed+=("${live[$k]}")
     else
-      unchanged+=("$doc_path")
+      unchanged+=("${live[$k]}")
     fi
+    k=$((k + 1))
   done
   _report_keys "Refreshed" "" "${refreshed[@]+"${refreshed[@]}"}"
   if [ ${#unchanged[@]} -gt 0 ]; then
@@ -1969,21 +2459,22 @@ cmd_add_entry() {
   _read_mapping add-entry "$rec"
 
   # shellcheck disable=SC2016  # jq program, not shell expansion
-  jq -c -n -R --arg now "$_INDEX_NOW" "$_JQ_REC_FIELDS$_JQ_MAPPING_ENTRIES"'
+  jq -c -n -R --arg now "$_INDEX_NOW" "$_JQ_REC_FIELDS$_JQ_CODE_OIDS$_JQ_MAPPING_ENTRIES"'
     mapping_entries | to_entries[] | {key: .key, add: .value}' < "$rec" > "$patch" \
     || _die "cannot assemble the new entries; $INDEX_FILE is unchanged."
 
-  _index_apply "$_INDEX_PATCH" --slurpfile patch "$patch"
+  _index_apply --report "$_INDEX_PATCH" --slurpfile patch "$patch"
 
-  # Report what actually happened, in input order: a key that was already
-  # indexed was not added.
-  local added=() p
-  for p in ${_M_KEYS[@]+"${_M_KEYS[@]}"}; do
-    if _index_changed_has "$p"; then
-      added+=("$p")
+  # Report what actually happened, in input order (the patch rows are
+  # _M_KEYS, in order): a key that was already indexed was not added.
+  local added=() i=0
+  while [ "$i" -lt "${#_M_KEYS[@]}" ]; do
+    if [ "${_INDEX_CLASSES:$i:1}" = c ]; then
+      added+=("${_M_KEYS[$i]}")
     else
-      echo "SKIP: '$p' already in index. Use update-index to refresh." >&2
+      echo "SKIP: '${_M_KEYS[$i]}' already in index. Use update-index to refresh." >&2
     fi
+    i=$((i + 1))
   done
   _report_keys "Added" "" "${added[@]+"${added[@]}"}"
 
@@ -2008,20 +2499,22 @@ cmd_remove_entry() {
   local targets=() doc_path
   _targets_from_args "$@"
   targets=("${_TARGETS[@]}")
+  set --   # see _targets_from_args: keep function calls O(1) under bash 3.2
 
   _scratch_init
   local patch="$_SCRATCH/remove-patch.jsonl"
   jq -nc '$ARGS.positional[] | {key: ., del: true}' --args "${targets[@]}" > "$patch"
-  _index_apply "$_INDEX_PATCH" --slurpfile patch "$patch"
+  _index_apply --report "$_INDEX_PATCH" --slurpfile patch "$patch"
 
   # A present key is always removed, so "not changed" means "not indexed".
-  local removed=()
-  for doc_path in "${targets[@]}"; do
-    if _index_changed_has "$doc_path"; then
-      removed+=("$doc_path")
+  local removed=() i=0
+  while [ "$i" -lt "${#targets[@]}" ]; do
+    if [ "${_INDEX_CLASSES:$i:1}" = c ]; then
+      removed+=("${targets[$i]}")
     else
-      echo "SKIP: '$doc_path' not found in index." >&2
+      echo "SKIP: '${targets[$i]}' not found in index." >&2
     fi
+    i=$((i + 1))
   done
   _report_keys "Removed" "" "${removed[@]+"${removed[@]}"}"
 }
@@ -2153,42 +2646,28 @@ cmd_deprecate_entry() {
   local targets=() doc_path
   _targets_from_args "$@"
   targets=("${_TARGETS[@]}")
+  set --   # see _targets_from_args: keep function calls O(1) under bash 3.2
 
   _scratch_init
   _index_now
-  # Presence is read under the lock so "not found" and "already deprecated"
-  # (a no-op) can be told apart in the report.
-  _index_lock
-  local snap
-  snap=$(_index_load) || exit 1
-  local absent=() present_flag i=0
-  while IFS= read -r present_flag; do
-    [ "$present_flag" = "1" ] || absent+=("${targets[$i]}")
-    i=$((i + 1))
-  done < <(_index_present "$snap" "${targets[@]}")
-
   local patch="$_SCRATCH/deprecate-patch.jsonl"
   # shellcheck disable=SC2016  # jq program, not shell expansion
   jq -nc --argjson superseded_by "$superseded_by" --arg now "$_INDEX_NOW" \
     '$ARGS.positional[] | {key: ., merge: {status: "deprecated", superseded_by: $superseded_by, last_verified: $now}}' \
     --args "${targets[@]}" > "$patch"
-  _index_apply "$_INDEX_PATCH" --slurpfile patch "$patch"
+  _index_apply --report "$_INDEX_PATCH" --slurpfile patch "$patch"
 
-  local deprecated=() unchanged=() p
-  for doc_path in "${targets[@]}"; do
-    if _index_changed_has "$doc_path"; then
-      deprecated+=("$doc_path")
-      continue
-    fi
-    local is_absent=0
-    for p in "${absent[@]+"${absent[@]}"}"; do
-      [ "$p" = "$doc_path" ] && is_absent=1
-    done
-    if [ "$is_absent" = 1 ]; then
-      echo "SKIP: '$doc_path' not found in index." >&2
-    else
-      unchanged+=("$doc_path")
-    fi
+  # The classes come from the same locked pass as the write, so "not found"
+  # and "already deprecated" (a no-op) are told apart against the index that
+  # was actually updated.
+  local deprecated=() unchanged=() i=0
+  while [ "$i" -lt "${#targets[@]}" ]; do
+    case "${_INDEX_CLASSES:$i:1}" in
+      c) deprecated+=("${targets[$i]}") ;;
+      u) unchanged+=("${targets[$i]}") ;;
+      *) echo "SKIP: '${targets[$i]}' not found in index." >&2 ;;
+    esac
+    i=$((i + 1))
   done
   _report_keys "Deprecated" "" "${deprecated[@]+"${deprecated[@]}"}"
   if [ ${#unchanged[@]} -gt 0 ]; then
@@ -2199,6 +2678,7 @@ cmd_deprecate_entry() {
 cmd_status() {
   [ $# -gt 0 ] || _usage_error status "requires a doc path argument"
   [ $# -eq 1 ] || _usage_error status "takes exactly one doc path (got $#); check-freshness reports every doc"
+  _check_tree_opt status
 
   local doc_path
   doc_path=$(normalize_doc_path "$1") || exit 1
