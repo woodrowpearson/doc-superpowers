@@ -1,6 +1,6 @@
 ---
 date: 2026-09-27
-status: Open
+status: Resolved
 priority: P1
 type: bug
 component: doc-index
@@ -97,14 +97,14 @@ The stored `current`/`stale` value is also dead data: no writer ever stores `sta
 
 ## Acceptance criteria
 
-- [ ] `update-index` on a deprecated entry keeps it deprecated.
-- [ ] `build-index --force` preserves deprecations.
-- [ ] `add-entry` never claims verification for an unread doc.
-- [ ] `deprecate-entry --superseded-by X` sets `X.replaces`.
-- [ ] `set-code-refs` edits in place with all other fields preserved.
-- [ ] Batch `move-entry` is all-or-nothing and preserves the same metadata as the single form.
-- [ ] Record docs are never reported stale.
-- [ ] `docs/conventions.md` status table, `references/doc-spec.md` transitions and the `SKILL.md`
+- [x] `update-index` on a deprecated entry keeps it deprecated.
+- [x] `build-index --force` preserves deprecations.
+- [x] `add-entry` never claims verification for an unread doc.
+- [x] `deprecate-entry --superseded-by X` sets `X.replaces`.
+- [x] `set-code-refs` edits in place with all other fields preserved.
+- [x] Batch `move-entry` is all-or-nothing and preserves the same metadata as the single form.
+- [x] Record docs are never reported stale.
+- [x] `docs/conventions.md` status table, `references/doc-spec.md` transitions and the `SKILL.md`
   tooling table are updated in the same change.
 
 ## Related
@@ -112,3 +112,56 @@ The stored `current`/`stale` value is also dead data: no writer ever stores `sta
 - GH #18, and `docs/issues/2026-07-30-no-batch-or-archive-aware-re-key-primitive.md` (PR #16, merged `ae05f65`). Set it Resolved when this cluster closes.
 - I-11 fixes the prompt routing that sends agents to the wrong writer.
 - I-14 migrates this repo's own record entries to empty `code_refs`.
+
+## Resolution (Task 5)
+
+Resolved by Task 5 of the fix plan. Writing an entry and verifying its doc are now separate events.
+
+- **Only `update-index` attests.** It is the only writer of `last_verified`.
+  - `build-index` and `add-entry` write `last_verified: null`, and store no status.
+  - `deprecate-entry`, `move-entry` and the new `set-code-refs` leave `last_verified` as it is.
+  - `update-index` reports a re-attestation of an unchanged doc as `Re-verified`, which is a real
+    write, and no longer as `Unchanged`.
+- **Stored `status` is `deprecated` or absent.**
+  - `current`, `stale` and `missing` are computed by `check-freshness` and `status`.
+  - A legacy stored `current`/`stale` reads as absent, and the next write that changes the index
+    drops it.
+  - `update-index`, `move-entry`, `set-code-refs` and `build-index --force` all keep a deprecation.
+    `--force` also carries `superseded_by` and `replaces` for every key it re-indexes.
+- **Non-attesting writers baseline to the doc's own last commit, never HEAD.**
+  - `build-index` and `add-entry` record each ref's content (`code_oids`) and `code_commit` as of
+    the newest commit that touched the doc, found with one `git log --stdin` walk for all docs. So
+    an old doc indexed today reads stale if its code moved on.
+  - A doc git has never committed is being written now, so its baseline is the working tree.
+- **`deprecate-entry --superseded-by X` sets `X.replaces`** when it is empty. It holds one path, so
+  an existing value is kept, with a warning. An unindexed successor is named in a warning, and a doc
+  cannot supersede itself.
+- **`set-code-refs <doc> --refs a,b`** (GH #18) edits `code_refs` in place.
+  - The entry keeps its key position, its field order, and every other field.
+  - `code_oids` is re-derived: a ref the entry already had keeps its recorded id, and a new ref is
+    recorded as `add-entry` records it.
+  - `--refs ''` clears the refs.
+  - The `update-index` missing-file advice and `add-entry`'s SKIP now name it.
+- **`move-entry --stdin`** (PR #16 Option A) reads one `<old><TAB><new>` pair per line.
+  - Every pair is validated before anything is written, and one bad pair writes nothing.
+  - The pairs are one simultaneous rename, so a path one pair vacates may be another's target.
+  - The single form runs through the same code, so both forms carry the same metadata. A test
+    compares the whole resulting index for both forms.
+- **Record docs are never stale.** A record doc is one whose `doc_type` is plan, issue, audit or
+  design-spec, or whose path is under `docs/archive/`.
+  - They are reported `current` with `"record": true` and `commits_behind: null`, and their refs
+    are never looked up.
+  - No new status value was added, since hooks and CI count `stale`.
+- **Archive model:** `git mv` into `docs/archive/<type>/`, then `move-entry`, then
+  `deprecate-entry`. There is no `archived_at` field. This is recorded in `docs/conventions.md`.
+- **Also fixed (a T4 carry-over):** under `/bin/bash` 3.2, a fatal `set -u` error exited 0,
+  because the EXIT trap saw `$? = 0`. Such an abort now exits 1 on both interpreters, and the lock
+  and scratch dir are still cleaned up.
+
+**Measured on this repo** (`check-freshness`, index unchanged): stale fell from 31 to 10, and 44
+entries now read as records. The 10 are:
+- 4 living docs: `system-overview`, `codebase-guide`, `getting-started`, `workflows/doc-superpowers`;
+- the 6 `docs/superpowers/specs/*` design specs, which this repo's index types `spec` rather than
+  `design-spec`, so they are still compared.
+
+I-14 retypes them and empties record docs' `code_refs` with `set-code-refs`.

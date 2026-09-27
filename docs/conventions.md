@@ -128,7 +128,15 @@ Superseded and deleted docs are moved to `docs/archive/{type}/`:
 | `docs/archive/plans/` | Completed or superseded plan files |
 | `docs/archive/architecture/` | Superseded architecture docs |
 
-Archived docs retain their original filenames. Their `.doc-index.json` entries are updated to `status: "deprecated"`.
+Archived docs retain their original filenames. Their `.doc-index.json` entries are re-keyed and deprecated.
+
+**Archive model (decided in sweep 05ea982 I-3).** Archival is three steps, all through `doc-tools.sh`:
+
+1. `git mv docs/<type>/<name>.md docs/archive/<type>/<name>.md`
+2. `doc-tools.sh move-entry <old> <new>` re-keys the entry, preserving all of its metadata. For a batch, use `move-entry --stdin` with one `<old><TAB><new>` line per doc: one index write, and nothing written if any pair is bad.
+3. `doc-tools.sh deprecate-entry <new> [--superseded-by <successor>]`
+
+There is no `archived_at` field. The `docs/archive/` path and the `deprecated` status already record the archival, and git holds its date. PR #16's Option B, an `archive-entry` verb that stamps `archived_at`, was not needed once batch `move-entry` existed. A consumer's `*archive_doc*` script keeps its own policy (what is eligible, where it moves) and uses these verbs for the index. An archived doc is a record doc, so it is never reported stale.
 
 ## Project-Specific Patterns
 
@@ -280,7 +288,7 @@ When a new design doc replaces an existing spec's scope:
 1. New spec is created with `Supersedes: <path-to-old>` in metadata
 2. Old spec's `Superseded by: <path-to-new>` field is updated
 3. Old spec is moved to `docs/archive/specs/`
-4. Old spec's `.doc-index.json` entry is set to `status: "deprecated"`
+4. Old spec's `.doc-index.json` entry is re-keyed with `move-entry` and deprecated with `deprecate-entry <old> --superseded-by <new>`, which also sets the new spec's `replaces`. The new spec must already be indexed for that link.
 
 The `replaces` and `superseded_by` fields in `.doc-index.json` track the chain:
 
@@ -299,9 +307,12 @@ The `docs/.doc-index.json` file is the machine-readable freshness index. It foll
 
 ### Read/Write Separation
 
-- **`build-index`** creates the index from scratch (filesystem scan)
-- **`update-index`** modifies individual entries (targeted updates)
-- **`move-entry`** re-keys one entry when its doc moves — preserves every field but `content_hash`, and is the lossless alternative to `remove-entry` + `add-entry` for a rename
+- **`build-index`** creates the index from scratch (from mapping lines); `--force` keeps deprecations
+- **`add-entry`** adds entries. Like `build-index`, it records them **unverified**: `last_verified: null`, and each ref as of the doc's own last commit
+- **`update-index`** verifies individual entries. It is the **only** writer of `last_verified`: the one verb that attests someone checked the doc against its code
+- **`set-code-refs`** changes one entry's `code_refs` in place (GH #18). It keeps every other field and is not a verification
+- **`move-entry`** re-keys an entry when its doc moves (`--stdin` for a batch). It preserves every field but `content_hash`, and is the lossless alternative to `remove-entry` + `add-entry` for a rename
+- **`deprecate-entry`** stores `status: "deprecated"` (and `--superseded-by`, which also sets the successor's `replaces`). It does not touch `last_verified`
 - **`check-freshness`** is read-only (reports staleness without modifying)
 - **`status`** is read-only (summarizes current state)
 
@@ -309,22 +320,30 @@ The `docs/.doc-index.json` file is the machine-readable freshness index. It foll
 
 A doc is **stale when the content of its code changed since it was verified**. It is not judged by which commit last touched that code.
 
-- **Writers record content.** `build-index`, `add-entry` and `update-index` store `code_oids`: for each code ref, the git object id of its content as the working tree holds it (a blob, a tree, a submodule's commit, or `missing`). The working tree is what the verifier read. The capture goes through a private git index, so the user's staging is never touched.
+- **Writers record content.** Every entry stores `code_oids`: for each code ref, the git object id of its content (a blob, a tree, a submodule's commit, or `missing`).
+  - `update-index` records it as the working tree holds it, because that is what the verifier read. The capture goes through a private git index, so the user's staging is never touched.
+  - `build-index` and `add-entry` verify nothing. They record it as of the doc's own last commit, the code the doc was written against, so code that changed since reads stale until `update-index`. A doc git has never committed is baselined to the working tree it is being written in.
 - **Readers compare content.** `check-freshness` and `status` look every ref up in HEAD, or in `--tree <tree-ish>`, with one `git cat-file --batch-check` for the whole index. A doc is stale if any ref's id differs. A pre-commit check passes `--tree "$(git write-tree)"` so it sees the staged change.
 - **So history shape does not matter.** A squash merge, a rebase-merge, a cherry-pick, a revert to the verified bytes, a shallow clone, and a doc verified in the same commit as its code all read `current` when the bytes match.
 - **Refs are literal paths.** A ref is a file, a directory, a submodule (its commit is recorded, so a bump reads stale), or `.`; git sees it with `--literal-pathspecs`. A ref containing `*`, `?` or `[` is warned about when written. Untracked (not ignored) files under a ref are part of the verified content: writers name them, and the doc reads stale until they are committed or ignored. The doc-index file itself is never part of a ref's content.
 - **`code_commit` is still written,** as the newest commit touching the refs. It is used for display, as the `commits_behind` baseline, and by older readers. In a shallow clone it is null, with a warning, because the truncated history would name the graft. `commits_behind` is null when that commit is not an ancestor of HEAD (absent, or on another line of history), and is never a masked `0`.
 - **Legacy entries.** An entry without `code_oids` (index schema 2 or older) is judged by the old commit comparison until a writer re-verifies it. The first write stamps `schema_version: 3`.
+- **Record docs are never stale.** Plans, issues, audits, design specs and anything archived describe a point in time. An entry is a record doc when its `doc_type` is `plan`, `issue`, `audit` or `design-spec`, or its path is under `docs/archive/`.
+  - `check-freshness` and `status` report a record doc `current`, with `"record": true` and `commits_behind: null`, and never compare its refs.
+  - We chose not to add a separate `record` status. Every hook and CI template counts `stale` (and `missing`), so a new status value would change nothing for them, but it would break consumers that enumerate the four statuses. The flag carries the distinction instead.
 
 ### Status Transitions
 
+Only `deprecated` is **stored**. `current`, `stale` and `missing` are **computed** by `check-freshness` and `status` on every run, and never written. A `current` or `stale` stored by an older release is read as absent, and the next write that changes the index drops it.
+
 | From | To | Trigger |
 |------|----|---------|
-| (new) | `current` | `build-index` creates entry with matching hashes |
-| `current` | `stale` | `check-freshness` finds a code ref whose content differs from `code_oids` (legacy entries: a newer commit touching the refs) |
-| `stale` | `current` | `update-index` after doc is updated |
-| `current` | `deprecated` | Human-set only (edit index directly), or spec supersession via `spec-generate` |
-| `deprecated` | — | Terminal state for automated tools |
+| (new) | no stored status, `last_verified: null` | `build-index` / `add-entry` record the entry unverified, against the doc's own last commit. It computes `current` if the code has not changed since the doc was written, `stale` if it has |
+| `current` | `stale` (computed) | A code ref's content differs from `code_oids` (legacy entries: a newer commit touching the refs) |
+| `stale` | `current` (computed) | `update-index` after the doc is checked against its code: records the working tree's content and stamps `last_verified` |
+| any | `current` (computed, `"record": true`) | Record docs (`plan`, `issue`, `audit`, `design-spec`, `docs/archive/`) are never compared |
+| any | `deprecated` (stored) | `deprecate-entry`: a human decision, or spec supersession via `spec-generate` (`--superseded-by` also sets the successor's `replaces`) |
+| `deprecated` | — | Terminal for automated tools: `update-index`, `move-entry`, `set-code-refs` and `build-index --force` all keep it |
 
 `deprecated` is a terminal state for automated tools.
 
@@ -337,11 +356,11 @@ Keys are **relative to the repo root**, and the subcommands enforce it: an absol
 Each entry in the index (keyed by relative doc path) contains:
 - `content_hash` — `sha256:<hex>` hash of doc file content
 - `code_refs` — list of literal paths (directories/files, `.` for the repo root) this doc covers
-- `code_oids` — per ref, the git object id of its content when the doc was verified (blob, tree or `missing`); freshness is judged against it
-- `code_commit` — newest commit touching any `code_refs` when the doc was verified (null in a shallow clone); display and `commits_behind` baseline only
+- `code_oids` — per ref, the git object id of its content in the entry's baseline: the working tree when `update-index` verified the doc, or the doc's last commit when `build-index` / `add-entry` indexed it (blob, tree or `missing`); freshness is judged against it
+- `code_commit` — newest commit touching any `code_refs` as of that baseline (null in a shallow clone); display and `commits_behind` baseline only
 - `doc_type` — template type: `architecture`, `workflows`, `api-contracts`, `spec`, `adr`, etc.
-- `status` — as stored, `current` or `deprecated` (`stale` is computed by `check-freshness`, never written)
+- `status` — stored only as `deprecated`, otherwise absent (`current` / `stale` are computed by `check-freshness`, never written)
 - `replaces` — path to doc this one supersedes (null if none)
 - `superseded_by` — path to doc that supersedes this one (null if none)
-- `last_verified` — ISO 8601 timestamp of the last write that recorded the entry
-- `implementation` — array of bullet strings parsed from the doc's `Implementation:` (ADRs) or `Realized-by:` (specs) block, recording ADR/spec realization state; `[]` when neither block is present
+- `last_verified` — ISO 8601 timestamp of the last `update-index`, the only writer that attests a doc was checked against its code; `null` for an entry nobody has verified
+- `implementation` — array of bullet strings parsed from the doc's `Implementation:` (ADRs) or `Realized-by:` (specs) block, recording ADR/spec realization state; `[]` when neither block is present. Written by `update-index` only, so it is absent until a doc is first verified

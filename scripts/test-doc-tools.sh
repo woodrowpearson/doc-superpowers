@@ -150,6 +150,9 @@ test_build_index_multiple_code_refs() {
   setup
   mkdir -p lib
   echo "module" > lib/util.js
+  # The doc is written with lib/ (build-index records the code as of the
+  # doc's last commit).
+  echo "## lib" >> docs/architecture.md
   git add -A && git commit -m "add lib" --quiet
   echo "docs/architecture.md:src/,lib/:architecture" | "$DOC_TOOLS" build-index
   local json
@@ -179,15 +182,20 @@ test_build_index_multiple_docs() {
   teardown
 }
 
-test_build_index_sets_status_current() {
-  echo "test: build-index sets status to current"
+# Sweep 05ea982 I-3: status is stored only as "deprecated" (current / stale
+# are computed), and only update-index attests (writes last_verified).
+test_build_index_stores_no_status_and_no_verification() {
+  echo "test: build-index stores no status and a null last_verified; check-freshness reports current"
   setup
   echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
   local json
   json=$(cat docs/.doc-index.json)
-  assert_json_field "$json" '.docs["docs/architecture.md"].status' "current" "status is current"
+  assert_json_field "$json" '.docs["docs/architecture.md"] | has("status")' "false" "no status is stored"
+  assert_json_field "$json" '.docs["docs/architecture.md"].last_verified' "null" "last_verified is null (never verified)"
   assert_json_field "$json" '.docs["docs/architecture.md"].replaces' "null" "replaces is null"
   assert_json_field "$json" '.docs["docs/architecture.md"].superseded_by' "null" "superseded_by is null"
+  assert_json_field "$("$DOC_TOOLS" check-freshness)" '.docs["docs/architecture.md"].status' "current" \
+    "check-freshness computes current"
   teardown
 }
 
@@ -201,7 +209,8 @@ test_build_index_null_code_commit_for_untracked() {
   local json
   json=$(cat docs/.doc-index.json)
   assert_json_field "$json" '.docs["docs/architecture.md"].code_commit' "null" "code_commit is null for untracked path"
-  assert_json_field "$json" '.docs["docs/architecture.md"].status' "current" "status still current"
+  assert_json_field "$("$DOC_TOOLS" check-freshness)" '.docs["docs/architecture.md"].status' "current" \
+    "status still computes current"
   teardown
 }
 
@@ -321,7 +330,7 @@ test_check_freshness_code_refs_filter() {
 # --- update-index tests ---
 
 test_update_index_refreshes_entry() {
-  echo "test: update-index refreshes hash and code_commit, sets status=current"
+  echo "test: update-index refreshes hash and code_commit; the doc then computes current (no status stored)"
   setup
   echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
   echo "console.log('changed')" > src/index.js
@@ -332,7 +341,9 @@ test_update_index_refreshes_entry() {
   json=$(cat docs/.doc-index.json)
   local new_hash
   new_hash="sha256:$(hash_file docs/architecture.md)"
-  assert_json_field "$json" '.docs["docs/architecture.md"].status' "current" "status=current after update"
+  assert_json_field "$json" '.docs["docs/architecture.md"] | has("status")' "false" "no status stored after update"
+  assert_json_field "$("$DOC_TOOLS" check-freshness)" '.docs["docs/architecture.md"].status' "current" \
+    "status computes current after update"
   assert_json_field "$json" '.docs["docs/architecture.md"].content_hash' "$new_hash" "content_hash updated"
   teardown
 }
@@ -852,14 +863,18 @@ test_check_freshness_current_includes_doc_type() {
 }
 
 test_check_freshness_current_includes_last_verified() {
-  echo "test: check-freshness current entry includes last_verified"
+  echo "test: check-freshness current entry includes last_verified (null until update-index verifies the doc)"
   setup
   echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
   local output
   output=$("$DOC_TOOLS" check-freshness)
+  assert_json_field "$output" '.docs["docs/architecture.md"] | has("last_verified")' "true" "the key is present"
+  assert_json_field "$output" '.docs["docs/architecture.md"].last_verified' "null" "null: build-index verified nothing"
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
+  output=$("$DOC_TOOLS" check-freshness)
   local last_verified
   last_verified=$(echo "$output" | jq -r '.docs["docs/architecture.md"].last_verified')
-  assert_eq "false" "$([ "$last_verified" = "null" ] || [ -z "$last_verified" ] && echo true || echo false)" "last_verified present in current entry"
+  assert_eq "false" "$([ "$last_verified" = "null" ] || [ -z "$last_verified" ] && echo true || echo false)" "last_verified present in current entry after update-index"
   teardown
 }
 
@@ -2857,7 +2872,7 @@ test_i4_flags_anywhere_and_unknown_flags_exit_2() {
   json=$(cat docs/.doc-index.json)
   assert_json_field "$json" '.docs["docs/architecture.md"].status' "deprecated" "<old> is deprecated"
   assert_json_field "$json" '.docs["docs/architecture.md"].superseded_by' "docs/design.md" "<old>.superseded_by is <new>"
-  assert_json_field "$json" '.docs["docs/design.md"].status' "current" "<new>, the successor, is NOT deprecated"
+  assert_json_field "$json" '.docs["docs/design.md"].status // "absent"' "absent" "<new>, the successor, is NOT deprecated"
   rc=0
   "$DOC_TOOLS" deprecate-entry --superseded-by=docs/design.md docs/old.md >/dev/null 2>&1 || rc=$?
   assert_eq "0" "$rc" "--superseded-by=<path> exits 0"
@@ -3298,6 +3313,8 @@ test_i4_arity_errors_exit_2() {
       "fragments merge HEAD" "fragments merge HEAD~1 HEAD extra" "implementation-status" \
       "set-implementation" "set-implementation docs/architecture.md" \
       "set-implementation docs/architecture.md docs/x.md --ref PR:1 --status complete" \
+      "set-code-refs" "set-code-refs docs/architecture.md" "set-code-refs --refs src/" \
+      "set-code-refs docs/architecture.md docs/x.md --refs src/" "move-entry --stdin docs/architecture.md" \
       "check-version extra" "fragments list extra" "tools status extra" "help status extra"; do
     rc=0
     # shellcheck disable=SC2086  # $cmd is a fixed word list
@@ -3350,7 +3367,7 @@ _i1_count_shims() {
 }
 
 test_i1_writers_record_code_oids() {
-  echo "test: I-1: writers record code_oids from the working tree (schema_version 3), never touching git's index"
+  echo "test: I-1: update-index (and a never-committed doc's build-index / add-entry) record code_oids from the working tree, never touching git's index"
   setup
   printf 'a\n' > src/a.js
   printf '*.log\n' > .gitignore
@@ -3361,7 +3378,10 @@ test_i1_writers_record_code_oids() {
   printf 'a-worktree\n' > src/a.js
   local staged_before err json exp_src t
   staged_before=$(git diff --cached --name-only)
-  err=$(echo "docs/architecture.md:src/,src/a.js,src/x.log,src/empty,src/nope.js:architecture" \
+  # A doc git has never committed is baselined to the working tree it is
+  # written in (sweep 05ea982 I-3); a committed one to its last commit.
+  echo "# wt" > docs/wt.md
+  err=$(echo "docs/wt.md:src/,src/a.js,src/x.log,src/empty,src/nope.js:architecture" \
           | "$DOC_TOOLS" build-index 2>&1) || true
   json=$(cat docs/.doc-index.json)
   t=$(harness_mktemp i1-idx)
@@ -3370,14 +3390,14 @@ test_i1_writers_record_code_oids() {
   GIT_INDEX_FILE="$t" git add -A src
   exp_src=$(git rev-parse "$(GIT_INDEX_FILE="$t" git write-tree):src")
   assert_json_field "$json" '.schema_version' "3" "build-index writes schema_version 3"
-  assert_json_field "$json" '.docs["docs/architecture.md"].code_oids["src/a.js"]' "$(git hash-object src/a.js)" \
+  assert_json_field "$json" '.docs["docs/wt.md"].code_oids["src/a.js"]' "$(git hash-object src/a.js)" \
     "a file ref's OID is its working-tree blob, not HEAD's"
-  assert_json_field "$json" '.docs["docs/architecture.md"].code_oids["src/"]' "$exp_src" \
+  assert_json_field "$json" '.docs["docs/wt.md"].code_oids["src/"]' "$exp_src" \
     "a directory ref's OID is the tree of its working-tree content (key as stored, 'src/')"
-  assert_json_field "$json" '.docs["docs/architecture.md"].code_oids["src/x.log"]' "missing" "an ignored file is recorded as missing"
-  assert_json_field "$json" '.docs["docs/architecture.md"].code_oids["src/empty"]' "missing" "an empty directory is recorded as missing"
-  assert_json_field "$json" '.docs["docs/architecture.md"].code_oids["src/nope.js"]' "missing" "an absent path is recorded as missing"
-  assert_json_field "$json" '.docs["docs/architecture.md"].code_oids | keys | length' "5" "one code_oids key per ref"
+  assert_json_field "$json" '.docs["docs/wt.md"].code_oids["src/x.log"]' "missing" "an ignored file is recorded as missing"
+  assert_json_field "$json" '.docs["docs/wt.md"].code_oids["src/empty"]' "missing" "an empty directory is recorded as missing"
+  assert_json_field "$json" '.docs["docs/wt.md"].code_oids["src/nope.js"]' "missing" "an absent path is recorded as missing"
+  assert_json_field "$json" '.docs["docs/wt.md"].code_oids | keys | length' "5" "one code_oids key per ref"
   assert_contains "$err" "src/nope.js" "the unmatched ref is still warned about"
   assert_eq "$staged_before" "$(git diff --cached --name-only)" "build-index staged nothing in git's own index"
   echo "# w" > docs/workflows.md
@@ -3385,8 +3405,8 @@ test_i1_writers_record_code_oids() {
   assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/workflows.md"].code_oids["src/a.js"]' \
     "$(git hash-object src/a.js)" "add-entry records code_oids"
   rm src/a.js
-  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
-  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/architecture.md"].code_oids["src/a.js"]' "missing" \
+  "$DOC_TOOLS" update-index docs/wt.md >/dev/null 2>&1
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/wt.md"].code_oids["src/a.js"]' "missing" \
     "update-index re-captures: a file deleted from the working tree is missing"
   assert_eq "$staged_before" "$(git diff --cached --name-only)" "update-index staged nothing in git's own index"
   teardown
@@ -3571,7 +3591,8 @@ test_i1_code_refs_changed_is_exact() {
   echo a > src/a.js
   _i1_commit a
   echo b > src/b.js
-  _i1_commit b
+  echo "## a and b" >> docs/architecture.md
+  _i1_commit "b, and the doc"
   echo "docs/architecture.md:src/a.js,src/b.js:architecture" | "$DOC_TOOLS" build-index
   _i1_commit index
   echo b2 > src/b.js
@@ -3655,6 +3676,7 @@ test_i1_glob_looking_refs_are_literal() {
   setup
   printf 'lit\n' > 'src/a*.js'
   echo abc > src/abc.js
+  echo "## a*.js" >> docs/architecture.md
   _i1_commit files
   local lit_commit
   lit_commit=$(git rev-parse HEAD)
@@ -3689,6 +3711,7 @@ test_i1_index_file_is_not_part_of_a_ref() {
   echo "test: I-1: refs covering docs/ or the repo root ignore the doc-index itself"
   setup
   echo "# w" > docs/workflows.md
+  echo "## w" >> docs/architecture.md
   _i1_commit w
   printf '%s\n' "docs/architecture.md:.:architecture" "docs/workflows.md:docs/:workflows" | "$DOC_TOOLS" build-index
   _i1_commit index
@@ -3811,6 +3834,7 @@ test_i1_submodule_ref_goes_stale_on_a_bump() {
   echo "s1" > "$sub/s.txt"
   git -C "$sub" add -A && git -C "$sub" commit -m s1 --quiet
   git -c protocol.file.allow=always submodule add -q "file://$sub" libs/sub >/dev/null 2>&1
+  echo "## sub" >> docs/architecture.md
   _i1_commit "add submodule"
   echo "docs/architecture.md:libs/sub:architecture" | "$DOC_TOOLS" build-index 2>/dev/null
   assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/architecture.md"].code_oids["libs/sub"]' \
@@ -3987,6 +4011,453 @@ test_i1_writer_reports_are_linear() {
   teardown
 }
 
+# --- Honest stored state: what is stored, who may attest (sweep 05ea982 I-3) ---
+#
+# Writing an entry is not verifying its doc. update-index is the one verb that
+# attests (writes last_verified). The stored status is "deprecated" or absent:
+# current / stale are computed, a legacy stored current / stale reads as absent,
+# and the first real write drops it. build-index and add-entry record a new
+# entry's code as of the DOC'S OWN LAST COMMIT (a doc git has never committed:
+# the working tree it is being written in), never HEAD, and claim no
+# verification. deprecate-entry sets the successor's replaces. set-code-refs
+# edits code_refs in place (GH #18); move-entry --stdin re-keys a batch (PR #16
+# Option A). Record docs (doc_type plan / issue / audit / design-spec, or any
+# key under docs/archive/) are never reported stale.
+
+# Rewrite the index through jq ([options] program) — a fixture edit, never a tool path.
+_i3_edit() {
+  jq "$@" docs/.doc-index.json > docs/.idx.tmp && mv docs/.idx.tmp docs/.doc-index.json
+}
+
+test_i3_update_index_keeps_deprecation() {
+  echo "test: I-3: update-index re-verifies a deprecated entry without undeprecating it"
+  setup
+  echo "# new" > docs/new.md
+  _i1_commit new
+  printf '%s\n' "docs/architecture.md:src/:architecture" "docs/new.md:src/:architecture" \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  "$DOC_TOOLS" deprecate-entry docs/architecture.md --superseded-by docs/new.md >/dev/null 2>&1
+  echo "// v2" >> src/index.js
+  _i1_commit v2
+  local rc=0 json
+  "$DOC_TOOLS" update-index docs/architecture.md docs/new.md >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "update-index exits 0"
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/architecture.md"].status' "deprecated" \
+    "the deprecated entry stays deprecated (update-index used to write status current)"
+  assert_json_field "$json" '.docs["docs/architecture.md"].superseded_by' "docs/new.md" "…and keeps superseded_by"
+  assert_json_field "$json" '.docs["docs/new.md"] | has("status")' "false" "a live entry stores no status"
+  assert_json_field "$("$DOC_TOOLS" check-freshness)" '.docs["docs/architecture.md"].status' "deprecated" \
+    "check-freshness reports it deprecated"
+  teardown
+}
+
+test_i3_build_index_force_preserves_deprecations() {
+  echo "test: I-3: build-index --force keeps deprecations (status, superseded_by, the successor's replaces)"
+  setup
+  echo "# new" > docs/new.md
+  _i1_commit new
+  local map rc=0 json
+  map=$(harness_mktemp i3-map)
+  printf '%s\n' "docs/architecture.md:src/:architecture" "docs/new.md:src/:architecture" > "$map"
+  "$DOC_TOOLS" build-index < "$map" 2>/dev/null
+  "$DOC_TOOLS" deprecate-entry docs/architecture.md --superseded-by docs/new.md >/dev/null 2>&1
+  "$DOC_TOOLS" build-index --force < "$map" >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "build-index --force exits 0"
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/architecture.md"].status' "deprecated" "the deprecation survives the rebuild"
+  assert_json_field "$json" '.docs["docs/architecture.md"].superseded_by' "docs/new.md" "…with superseded_by"
+  assert_json_field "$json" '.docs["docs/new.md"].replaces' "docs/architecture.md" "…and the successor's replaces"
+  assert_json_field "$json" '.docs["docs/new.md"] | has("status")' "false" "a live entry stores no status"
+  teardown
+}
+
+test_i3_add_entry_baselines_to_the_docs_last_commit() {
+  echo "test: I-3: add-entry / build-index record the code as of the doc's last commit and claim no verification"
+  setup
+  printf 'v1\n' > src/a.js
+  echo "# old doc" > docs/old.md
+  _i1_commit "doc written against v1"
+  local c1 v1
+  c1=$(git rev-parse HEAD)
+  v1=$(git rev-parse HEAD:src/a.js)
+  printf 'v2\n' > src/a.js
+  _i1_commit "code moves on"
+  printf 'v3-uncommitted\n' > src/a.js
+  echo "docs/architecture.md:src/index.js:architecture" | "$DOC_TOOLS" build-index 2>/dev/null
+  echo "docs/old.md:src/a.js:guide" | "$DOC_TOOLS" add-entry >/dev/null 2>&1
+  local json cf
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/old.md"].last_verified' "null" "add-entry claims no verification"
+  assert_json_field "$json" '.docs["docs/architecture.md"].last_verified' "null" "build-index claims none either"
+  assert_json_field "$json" '.docs["docs/old.md"].code_oids["src/a.js"]' "$v1" \
+    "the baseline is the ref's content in the doc's last commit (not HEAD, not the working tree)"
+  assert_json_field "$json" '.docs["docs/old.md"].code_commit' "$c1" \
+    "code_commit is the newest commit touching the refs as of the doc's last commit"
+  assert_json_field "$json" '[.docs[] | has("status")] | any' "false" "neither writer stores a status"
+  cf=$("$DOC_TOOLS" check-freshness)
+  assert_eq "stale|1|src/a.js" "$(_i1_verdict "$cf" docs/old.md)" \
+    "code that changed after the doc was written reads stale (commits_behind 1)"
+  assert_json_field "$cf" '.docs["docs/old.md"].last_verified' "null" "check-freshness reports last_verified null"
+  # A doc git has never committed is baselined to the working tree it is written in.
+  echo "# brand new" > docs/fresh.md
+  echo "docs/fresh.md:src/a.js:guide" | "$DOC_TOOLS" add-entry >/dev/null 2>&1
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/fresh.md"].code_oids["src/a.js"]' "$(git hash-object src/a.js)" \
+    "a never-committed doc's baseline is the working tree"
+  assert_json_field "$json" '.docs["docs/fresh.md"].last_verified' "null" "…and it is still unverified"
+  # update-index is the attestation.
+  git checkout -q -- src/a.js
+  "$DOC_TOOLS" update-index docs/old.md >/dev/null 2>&1
+  assert_true "update-index stamps last_verified" \
+    test "$(jq -r '.docs["docs/old.md"].last_verified' docs/.doc-index.json)" != "null"
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/old.md)" \
+    "the verified doc reads current"
+  teardown
+}
+
+test_i3_deprecate_entry_sets_replaces_not_last_verified() {
+  echo "test: I-3: deprecate-entry sets the successor's replaces and never touches last_verified"
+  setup
+  local k out rc json
+  for k in new other; do echo "# $k" > "docs/$k.md"; done
+  _i1_commit docs
+  printf '%s\n' docs/architecture.md:src/:architecture docs/new.md:src/:architecture docs/other.md:src/:guide \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  _mv_inject_sentinels docs/architecture.md
+  _mv_inject_sentinels docs/new.md
+  out=$("$DOC_TOOLS" deprecate-entry docs/architecture.md --superseded-by docs/new.md 2>&1) || true
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/architecture.md"].status' "deprecated" "the doc is deprecated"
+  assert_json_field "$json" '.docs["docs/architecture.md"].last_verified' "2020-01-01T00:00:00Z" \
+    "deprecating is not verifying: last_verified untouched"
+  assert_json_field "$json" '.docs["docs/new.md"].replaces' "docs/architecture.md" \
+    "the successor's replaces names the deprecated doc"
+  assert_json_field "$json" '.docs["docs/new.md"].last_verified' "2020-01-01T00:00:00Z" \
+    "…and the successor's last_verified is untouched too"
+  assert_contains "$out" "docs/new.md" "the report names the successor it changed"
+  # replaces holds one path: an existing one is kept, and that is said.
+  out=$("$DOC_TOOLS" deprecate-entry docs/other.md --superseded-by docs/new.md 2>&1) || true
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/other.md"].status' "deprecated" "a second doc is deprecated"
+  assert_json_field "$json" '.docs["docs/new.md"].replaces' "docs/architecture.md" \
+    "an existing replaces is not overwritten"
+  assert_contains "$out" "already replaces" "…and the kept replaces is reported"
+  # An unindexed successor is named, never invented.
+  out=$("$DOC_TOOLS" deprecate-entry docs/new.md --superseded-by docs/nope.md 2>&1) || true
+  assert_contains "$out" "'docs/nope.md' is not in the index" "an unindexed successor is named in a warning"
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs | has("docs/nope.md")' "false" "…and no entry is made for it"
+  # A doc cannot supersede itself.
+  cp docs/.doc-index.json docs/.idx.before
+  rc=0
+  out=$("$DOC_TOOLS" deprecate-entry docs/other.md --superseded-by docs/other.md 2>&1) || rc=$?
+  assert_eq "1" "$rc" "deprecate-entry X --superseded-by X exits 1"
+  assert_exit_code 0 "…and writes nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  rm -f docs/.idx.before
+  teardown
+}
+
+test_i3_set_code_refs_edits_in_place() {
+  echo "test: I-3: set-code-refs replaces code_refs in place (GH #18): position and every other field kept, code_oids re-derived"
+  setup
+  local k files_commit sentinel=1111111111111111111111111111111111111111
+  mkdir -p lib
+  printf 'a\n' > src/a.js
+  printf 'l\n' > lib/l.js
+  for k in first mid last; do echo "# $k" > "docs/$k.md"; done
+  _i1_commit files
+  files_commit=$(git rev-parse HEAD)
+  printf '%s\n' docs/first.md:src/:guide docs/mid.md:src/,src/a.js:guide docs/last.md:src/:guide \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  "$DOC_TOOLS" update-index docs/first.md docs/mid.md docs/last.md >/dev/null 2>&1
+  # Values no re-derivation could produce, and a field this code never heard of.
+  # shellcheck disable=SC2016  # jq program
+  _i3_edit --arg s "$sentinel" '.docs["docs/mid.md"] += {code_commit: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+      last_verified: "2020-01-01T00:00:00Z", implementation: ["ADR-1 (shipped)"], replaces: "docs/older.md",
+      future_field: "keep-me"}
+    | .docs["docs/mid.md"].code_oids["src/a.js"] = $s'
+  printf 'l2\n' > lib/l.js
+  _i1_commit "lib moves on after the doc was written"
+  local before keys_before fields_before first_before out rc json
+  before=$(jq -c '.docs["docs/mid.md"]' docs/.doc-index.json)
+  keys_before=$(jq -c '.docs | keys_unsorted' docs/.doc-index.json)
+  fields_before=$(jq -c '.docs["docs/mid.md"] | keys_unsorted' docs/.doc-index.json)
+  first_before=$(jq -c '.docs["docs/first.md"], .docs["docs/last.md"]' docs/.doc-index.json)
+  rc=0
+  out=$("$DOC_TOOLS" set-code-refs docs/mid.md --refs "src/a.js, lib/" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "set-code-refs exits 0 (output: ${out:0:300})"
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/mid.md"].code_refs | join(",")' "src/a.js,lib/" \
+    "code_refs replaced (parsed like a mapping line: trimmed)"
+  assert_json_field "$json" '.docs["docs/mid.md"].code_oids["src/a.js"]' "$sentinel" \
+    "a ref the entry already had keeps its recorded content"
+  assert_json_field "$json" '.docs["docs/mid.md"].code_oids["lib/"]' "$(git rev-parse "$files_commit:lib")" \
+    "a new ref is recorded as of the doc's last commit, as add-entry records one"
+  assert_json_field "$json" '.docs["docs/mid.md"].code_oids | keys | length' "2" "a dropped ref leaves code_oids"
+  assert_eq "$keys_before" "$(jq -c '.docs | keys_unsorted' <<<"$json")" "the entry keeps its key position"
+  assert_eq "$fields_before" "$(jq -c '.docs["docs/mid.md"] | keys_unsorted' <<<"$json")" "…and its field order"
+  assert_eq "$(jq -c 'del(.code_refs, .code_oids)' <<<"$before")" \
+    "$(jq -c '.docs["docs/mid.md"] | del(.code_refs, .code_oids)' <<<"$json")" \
+    "every other field is preserved (content_hash, code_commit, last_verified, implementation, replaces, unknown)"
+  assert_eq "$first_before" "$(jq -c '.docs["docs/first.md"], .docs["docs/last.md"]' <<<"$json")" \
+    "the other entries are untouched"
+  assert_eq "stale|null|src/a.js,lib/" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/mid.md)" \
+    "the refs nobody verified the doc against read stale until update-index (code_commit kept: the sentinel)"
+  # A no-op writes nothing.
+  cp docs/.doc-index.json docs/.idx.before
+  out=$("$DOC_TOOLS" set-code-refs docs/mid.md --refs=src/a.js,lib/ 2>&1) || true
+  assert_exit_code 0 "setting the same refs again writes nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  # --refs '' clears them (a record doc covers no code).
+  "$DOC_TOOLS" set-code-refs docs/last.md --refs '' >/dev/null 2>&1 || true
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/last.md"] | "\(.code_refs | length) \(.code_oids | length)"' "0 0" \
+    "--refs '' leaves empty code_refs and code_oids"
+  # A path that is not indexed is refused, and nothing is written.
+  cp docs/.doc-index.json docs/.idx.before
+  rc=0
+  out=$("$DOC_TOOLS" set-code-refs docs/nope.md --refs src/ 2>&1) || rc=$?
+  assert_eq "1" "$rc" "an unindexed path exits 1"
+  assert_contains "$out" "not found in index" "…and says why"
+  assert_exit_code 0 "…and writes nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  rm -f docs/.idx.before
+  teardown
+}
+
+test_i3_advice_names_set_code_refs() {
+  echo "test: I-3: the lossy remove-entry + add-entry advice names set-code-refs (GH #18)"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index 2>/dev/null
+  local out
+  out=$(echo "docs/architecture.md:lib/:architecture" | "$DOC_TOOLS" add-entry 2>&1) || true
+  assert_contains "$out" "set-code-refs" "add-entry's SKIP of an indexed doc names set-code-refs"
+  rm docs/architecture.md
+  out=$("$DOC_TOOLS" update-index docs/architecture.md 2>&1) || true
+  assert_contains "$out" "set-code-refs" "update-index's missing-file advice names set-code-refs"
+  assert_not_contains "$out" "remove-entry + add-entry would drop its code_refs, leaving" \
+    "…instead of the dead-end warning"
+  teardown
+}
+
+test_i3_move_entry_batch() {
+  echo "test: I-3: move-entry --stdin re-keys a batch (PR #16 Option A): all-or-nothing, same metadata as the single form"
+  setup
+  local k
+  for k in a b c keep; do echo "# $k" > "docs/$k.md"; done
+  _i1_commit docs
+  printf '%s\n' docs/architecture.md:src/:architecture docs/a.md:src/:plan docs/b.md:src/:guide \
+    docs/c.md:src/:guide docs/keep.md:src/:guide | "$DOC_TOOLS" build-index 2>/dev/null
+  "$DOC_TOOLS" update-index docs/a.md >/dev/null 2>&1
+  "$DOC_TOOLS" deprecate-entry docs/b.md --superseded-by docs/c.md >/dev/null 2>&1
+  _i3_edit '.docs["docs/a.md"] += {implementation: ["x"], future_field: "keep-me"}
+    | .docs["docs/keep.md"].superseded_by = "docs/a.md"'
+  _i1_commit index
+  # The same moves, once one at a time and once as a batch, from one fixture.
+  local single
+  single=$(harness_mktemp_d i3-single)
+  cp -R . "$single/repo"
+  mkdir -p docs/archive/plans "$single/repo/docs/archive/plans"
+  git mv docs/a.md docs/archive/plans/a.md
+  git mv docs/b.md docs/archive/b.md
+  echo "edited on the way" >> docs/archive/b.md
+  (
+    cd "$single/repo" || exit 1
+    git mv docs/a.md docs/archive/plans/a.md
+    git mv docs/b.md docs/archive/b.md
+    echo "edited on the way" >> docs/archive/b.md
+    "$DOC_TOOLS" move-entry docs/a.md docs/archive/plans/a.md >/dev/null 2>&1
+    "$DOC_TOOLS" move-entry docs/b.md docs/archive/b.md >/dev/null 2>&1
+  )
+  local out rc=0 json
+  out=$(printf 'docs/a.md\tdocs/archive/plans/a.md\r\n\ndocs/b.md\tdocs/archive/b.md\n' \
+          | "$DOC_TOOLS" move-entry --stdin 2>&1) || rc=$?
+  assert_eq "0" "$rc" "move-entry --stdin exits 0 (output: ${out:0:300})"
+  assert_contains "$out" "Moved 2 entries:" "reports the batch"
+  assert_contains "$out" "  docs/b.md -> docs/archive/b.md" "…pair by pair"
+  json=$(cat docs/.doc-index.json)
+  assert_eq "$(jq -c '.docs' "$single/repo/docs/.doc-index.json")" "$(jq -c '.docs' <<<"$json")" \
+    "the batch leaves exactly the index the single form leaves (keys, positions, every field, repointing)"
+  assert_json_field "$json" '.docs["docs/c.md"].replaces' "docs/archive/b.md" "a successor's replaces is repointed"
+  assert_json_field "$json" '.docs["docs/keep.md"].superseded_by' "docs/archive/plans/a.md" "superseded_by is repointed"
+  assert_json_field "$json" '.docs["docs/archive/plans/a.md"].future_field' "keep-me" "an unknown field is carried"
+  # All or nothing: every bad pair is reported, and nothing is written.
+  cp docs/.doc-index.json docs/.idx.before
+  echo "# d" > docs/d.md
+  rc=0
+  out=$(printf 'docs/c.md\tdocs/d.md\ndocs/absent.md\tdocs/x.md\ndocs/keep.md\tdocs/typo.md\n%s\ndocs/archive/b.md\tdocs/architecture.md\n' \
+          "docs/architecture.md docs/no-tab.md" \
+          | "$DOC_TOOLS" move-entry --stdin 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a batch with bad pairs exits 1"
+  assert_exit_code 0 "…and writes nothing, not even its good pair" cmp -s docs/.idx.before docs/.doc-index.json
+  assert_contains "$out" "'docs/absent.md' not found in index" "an unindexed source is reported"
+  assert_contains "$out" "'docs/typo.md' does not exist on disk" "a target with no file is reported"
+  assert_contains "$out" "line 4" "a line without a TAB is reported by number"
+  assert_contains "$out" "'docs/architecture.md' is already in the index" "a target that stays indexed is reported"
+  # A target vacated by another pair of the same batch is free: one simultaneous rename.
+  git mv docs/c.md docs/e.md
+  git mv docs/keep.md docs/c.md
+  local c_before keep_before
+  c_before=$(jq -c '.docs["docs/c.md"] | del(.content_hash)' docs/.doc-index.json)
+  keep_before=$(jq -c '.docs["docs/keep.md"] | del(.content_hash)' docs/.doc-index.json)
+  rc=0
+  out=$(printf 'docs/c.md\tdocs/e.md\ndocs/keep.md\tdocs/c.md\n' | "$DOC_TOOLS" move-entry --stdin 2>&1) || rc=$?
+  assert_eq "0" "$rc" "a chain within one batch exits 0 (output: ${out:0:300})"
+  json=$(cat docs/.doc-index.json)
+  assert_eq "$c_before" "$(jq -c '.docs["docs/e.md"] | del(.content_hash)' <<<"$json")" "c's entry moved to e"
+  assert_eq "$keep_before" "$(jq -c '.docs["docs/c.md"] | del(.content_hash)' <<<"$json")" "keep's entry moved into c's vacated key"
+  # An empty batch is a no-op, and --stdin takes no paths.
+  cp docs/.doc-index.json docs/.idx.before
+  rc=0
+  out=$("$DOC_TOOLS" move-entry --stdin </dev/null 2>&1) || rc=$?
+  assert_eq "0" "$rc" "an empty batch exits 0"
+  assert_exit_code 0 "…and writes nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  rc=0
+  "$DOC_TOOLS" move-entry --stdin docs/a.md </dev/null >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "--stdin with a path argument is a usage error"
+  rm -f docs/.idx.before
+  teardown
+}
+
+test_i3_record_docs_are_never_stale() {
+  echo "test: I-3: record docs (plan/issue/audit/design-spec, docs/archive/) are never stale; status agrees"
+  setup
+  local k cf st a b mismatches=""
+  mkdir -p docs/archive/specs
+  for k in plan issue audit design living spec dep gone; do echo "# $k" > "docs/$k.md"; done
+  echo "# archived" > docs/archive/specs/old.md
+  _i1_commit docs
+  printf '%s\n' docs/plan.md:src/:plan docs/issue.md:src/:issue docs/audit.md:src/:audit \
+    docs/design.md:src/:design-spec docs/archive/specs/old.md:src/:spec docs/living.md:src/:guide \
+    docs/spec.md:src/:spec docs/dep.md:src/:plan docs/gone.md:src/:issue | "$DOC_TOOLS" build-index 2>/dev/null
+  "$DOC_TOOLS" deprecate-entry docs/dep.md >/dev/null 2>&1
+  rm docs/gone.md
+  echo "edited record" >> docs/plan.md
+  echo "// v2" >> src/index.js
+  _i1_commit v2
+  cf=$("$DOC_TOOLS" check-freshness)
+  for k in docs/plan.md docs/issue.md docs/audit.md docs/design.md docs/archive/specs/old.md; do
+    assert_json_field "$cf" ".docs[\"$k\"] | \"\(.status) \(.record) \(.commits_behind)\"" "current true null" \
+      "$k is a record: current, marked record, commits_behind not evaluated"
+  done
+  assert_json_field "$cf" '.docs["docs/plan.md"].doc_modified' "true" "a record still reports doc_modified"
+  assert_json_field "$cf" '.docs["docs/living.md"] | "\(.status) \(has("record"))"' "stale false" "a living doc goes stale"
+  assert_json_field "$cf" '.docs["docs/spec.md"].status' "stale" "a spec is a living doc"
+  assert_json_field "$cf" '.docs["docs/dep.md"].status' "deprecated" "a deprecated record is deprecated"
+  assert_json_field "$cf" '.docs["docs/gone.md"].status' "missing" "a record whose file is gone is missing"
+  assert_json_field "$cf" '.summary | "\(.current) \(.stale) \(.missing) \(.deprecated)"' "5 2 1 1" \
+    "summary: records count as current"
+  while IFS= read -r k; do
+    st=$("$DOC_TOOLS" status "$k" 2>&1) || true
+    a=$(jq -S -c 'del(.path)' <<<"$st" 2>/dev/null || printf 'invalid: %s' "$st")
+    b=$(jq -S -c --arg k "$k" '.docs[$k]' <<<"$cf")
+    [ "$a" = "$b" ] || mismatches="${mismatches}  ${k}: status=${a} check-freshness=${b}"$'\n'
+  done < <(jq -r '.docs | keys[]' docs/.doc-index.json)
+  assert_eq "" "$mismatches" "status and check-freshness report the same object for every entry"
+  teardown
+}
+
+test_i3_stored_status_is_deprecated_or_absent() {
+  echo "test: I-3: a legacy stored current/stale reads as absent, the first write drops it, and no writer stores current"
+  setup
+  local k cf json
+  for k in s d n; do echo "# $k" > "docs/$k.md"; done
+  _i1_commit docs
+  printf '%s\n' docs/architecture.md:src/:architecture docs/s.md:src/:guide docs/d.md:src/:guide docs/n.md:src/:guide \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  "$DOC_TOOLS" update-index docs/architecture.md docs/s.md docs/d.md docs/n.md >/dev/null 2>&1
+  _i3_edit '.docs["docs/architecture.md"].status = "current" | .docs["docs/s.md"].status = "stale"
+    | .docs["docs/d.md"].status = "deprecated" | .docs["docs/n.md"] |= del(.status)'
+  cp docs/.doc-index.json docs/.idx.legacy
+  cf=$("$DOC_TOOLS" check-freshness)
+  assert_json_field "$cf" '.docs["docs/s.md"].status' "current" "a stored 'stale' on an unchanged doc reads current"
+  assert_json_field "$cf" '.docs["docs/architecture.md"].status' "current" "a stored 'current' is read as absent"
+  assert_json_field "$cf" '.docs["docs/d.md"].status' "deprecated" "a stored 'deprecated' is kept"
+  "$DOC_TOOLS" remove-entry docs/nope.md >/dev/null 2>&1
+  assert_exit_code 0 "a no-op write leaves the legacy index byte-identical" cmp -s docs/.idx.legacy docs/.doc-index.json
+  echo "more" >> docs/n.md
+  "$DOC_TOOLS" update-index docs/n.md >/dev/null 2>&1
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '[.docs[] | .status // "absent"] | join(",")' "absent,absent,deprecated,absent" \
+    "the first real write drops every legacy current/stale, and keeps deprecated"
+  echo "// v2" >> src/index.js
+  _i1_commit v2
+  "$DOC_TOOLS" update-index docs/d.md docs/s.md >/dev/null 2>&1
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '[.docs[] | .status // "absent"] | join(",")' "absent,absent,deprecated,absent" \
+    "update-index writes no status (deprecated stays, live stays absent)"
+  rm -f docs/.idx.legacy
+  teardown
+}
+
+test_i3_update_index_report_is_honest() {
+  echo "test: I-3: update-index reports a re-attestation as Re-verified (a real write), not Unchanged"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index 2>/dev/null
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
+  local lv1 lv2 out
+  lv1=$(jq -r '.docs["docs/architecture.md"].last_verified' docs/.doc-index.json)
+  sleep 1
+  out=$("$DOC_TOOLS" update-index docs/architecture.md 2>&1) || true
+  lv2=$(jq -r '.docs["docs/architecture.md"].last_verified' docs/.doc-index.json)
+  assert_true "the re-run stamped a new last_verified ($lv1 -> $lv2)" test "$lv1" != "$lv2"
+  assert_contains "$out" "Re-verified 1 entry" "re-attesting an unchanged doc is reported as Re-verified"
+  assert_contains "$out" "Refreshed 0 entries" "…and nothing as refreshed"
+  assert_not_contains "$out" "Unchanged" "…never as Unchanged: last_verified was written"
+  echo "// v2" >> src/index.js
+  _i1_commit v2
+  sleep 1
+  out=$("$DOC_TOOLS" update-index docs/architecture.md 2>&1) || true
+  assert_contains "$out" "Refreshed 1 entry:" "a doc whose recorded content changed is Refreshed"
+  assert_not_contains "$out" "Re-verified" "…and not also Re-verified"
+  teardown
+}
+
+# A copy of doc-tools.sh with `: "$<never set>"` inserted after the first line
+# equal to $2 that follows a line equal to $1 — a fatal `set -u` error at a
+# real point of a real verb. $3 names the copy (the shim is named after it).
+_i3_inject_unbound() {
+  local after_fn="$1" after_line="$2" name="$3" dir
+  dir=$(harness_mktemp_d i3-inject)
+  awk -v fn="$after_fn" -v ln="$after_line" '
+    { print }
+    $0 == fn { in_fn = 1; next }
+    in_fn && !done && $0 == ln { print "  : \"$_I3_NEVER_SET_PROBE\""; done = 1 }
+  ' "$SCRIPT_DIR/doc-tools.sh" > "$dir/$name"
+  bash_bin_shim "$dir/$name"
+}
+
+# bash 3.2 exits 0 from a fatal `set -u` error when an EXIT trap is set (the
+# trap sees $? = 0), so a crash read as success on the primary macOS target.
+test_i3_fatal_error_exits_nonzero() {
+  echo "test: I-3: a fatal set -u error exits non-zero (bash 3.2 too) and cleanup still runs"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index 2>/dev/null
+  local writer reader tmp rc out before
+  writer=$(_i3_inject_unbound "_index_apply() {" "  _index_lock" dt-unbound-writer.sh)
+  reader=$(_i3_inject_unbound "cmd_status() {" '  [ $# -gt 0 ] || _usage_error status "requires a doc path argument"' \
+             dt-unbound-reader.sh)
+  assert_true "precondition: the probe was injected into the writer" grep -q _I3_NEVER_SET_PROBE "$(sed -n 's/^exec "[^"]*" "\([^"]*\)".*/\1/p' "$writer")"
+  before=$(hash_file docs/.doc-index.json)
+  tmp=$(harness_mktemp_d i3-tmpdir)
+  rc=0
+  out=$(TMPDIR="$tmp" "$writer" update-index docs/architecture.md 2>&1) || rc=$?
+  assert_true "a writer's fatal error exits non-zero (rc=$rc)" test "$rc" -ne 0
+  assert_contains "$out" "unbound variable" "precondition: the abort was the injected unbound variable"
+  assert_true "…the lock is released" test ! -e docs/.doc-index.json.lock
+  assert_eq "$before" "$(hash_file docs/.doc-index.json)" "…the index is untouched"
+  assert_eq "" "$(ls -A "$tmp")" "…and the scratch dir is removed"
+  rc=0
+  out=$(TMPDIR="$tmp" "$reader" status docs/architecture.md 2>/dev/null) || rc=$?
+  assert_true "a reader's fatal error exits non-zero (rc=$rc)" test "$rc" -ne 0
+  assert_eq "" "$out" "…and prints no report"
+  rc=0
+  "$writer" --help >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "an intended exit 0 (--help) still exits 0"
+  rc=0
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "a successful run still exits 0"
+  teardown
+}
+
 # --- Runner ---
 
 run_tests() {
@@ -4004,7 +4475,7 @@ run_tests() {
   test_build_index_stores_code_commit
   test_build_index_multiple_code_refs
   test_build_index_multiple_docs
-  test_build_index_sets_status_current
+  test_build_index_stores_no_status_and_no_verification
   test_build_index_null_code_commit_for_untracked
   test_check_freshness_requires_index
   test_check_freshness_current
@@ -4170,6 +4641,19 @@ run_tests() {
   test_i1_move_entry_preserves_code_oids
   test_i1_check_freshness_scale
   test_i1_writer_reports_are_linear
+
+  # --- Honest stored state: what is stored, who may attest (sweep 05ea982 I-3) ---
+  test_i3_update_index_keeps_deprecation
+  test_i3_build_index_force_preserves_deprecations
+  test_i3_add_entry_baselines_to_the_docs_last_commit
+  test_i3_deprecate_entry_sets_replaces_not_last_verified
+  test_i3_set_code_refs_edits_in_place
+  test_i3_advice_names_set_code_refs
+  test_i3_move_entry_batch
+  test_i3_record_docs_are_never_stale
+  test_i3_stored_status_is_deprecated_or_absent
+  test_i3_update_index_report_is_honest
+  test_i3_fatal_error_exits_nonzero
 
   print_summary
 }
