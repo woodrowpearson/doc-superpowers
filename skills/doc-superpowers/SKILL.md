@@ -134,6 +134,8 @@ ls scripts/*validate_docs* scripts/*validate_doc_references* scripts/*fix_doc_re
 | `*archive_doc*` | Optional, user-provided | Doc archival |
 | `*map_documents*` | Optional, user-provided | Custom document mapping |
 
+**Index writers** (`build-index`, `update-index`, `add-entry`, `remove-entry`, `move-entry`, `deprecate-entry`) are safe to run concurrently: they serialize on `docs/.doc-index.json.lock` and replace the index atomically, so parallel agents may each call `update-index`. A run that changes nothing writes nothing (no `generated_at` bump). The incremental writers report only the entries they actually changed; an `Unchanged … (already up to date)` or `SKIP` line is not a failure. A 0-byte or malformed index makes every index verb exit non-zero — restore it from git or rebuild with `build-index`.
+
 ### Detect Scopes
 
 Scopes are **structural categories**, not platform or language identifiers. The skill detects *what kind of thing exists*. Explore agents determine specific technology during analysis.
@@ -390,7 +392,7 @@ Update is the **write counterpart** to audit's read-only analysis. It consumes a
 
    **DIAGRAM**: Regenerate affected diagrams in co-located directories.
 
-   **SYNC**: Call `doc-tools.sh update-index` for each changed doc. Update `docs/specs/README.md` and `docs/adr/README.md` indexes if applicable.
+   **SYNC**: Call `doc-tools.sh update-index` for each changed doc (parallel agents may call it concurrently — writers serialize on the index lock). Update `docs/specs/README.md` and `docs/adr/README.md` indexes if applicable.
 
 4. **Sync CLAUDE.md** — After all doc changes are applied, update CLAUDE.md to reflect current project state. **SEE** `references/doc-spec.md` for CLAUDE.md update rules. This catches structural changes from this update cycle: new/removed docs, renamed directories, new commands or key files. Skip only if no directory structure, key files, or commands changed.
 5. **Sync README.md** — If README.md exists, update feature list, action list, and usage examples to reflect current project state. **SEE** `references/doc-spec.md` for README.md update rules. This catches capability changes from this update cycle. Skip only if no actions, features, or capabilities changed.

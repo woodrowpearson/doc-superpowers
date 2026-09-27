@@ -62,6 +62,31 @@ harness_mktemp_d() {
   mktemp -d "$SUITE_TMP/${1:-tmp}.XXXXXX"
 }
 
+# Signal a background job after a delay, then reap it and return its exit code.
+# The portable stand-in for `timeout -s SIG`: stock macOS ships neither
+# `timeout` nor `gtimeout`, so interruption tests use a background job + sleep
+# + kill instead. Start the job yourself (so `$!` is the process to signal —
+# for a background pipeline that is its LAST command), then:
+#   "$DOC_TOOLS" build-index < "$map" >/dev/null 2>&1 &
+#   rc=0; harness_kill_after 1 TERM "$!" || rc=$?
+# HARNESS_KILL_ALIVE is 1 if the job was still running when signalled, 0 if it
+# had already exited — assert it, or a fast machine turns the test vacuous.
+# Background jobs of a non-interactive shell ignore SIGINT/SIGQUIT (POSIX), so
+# INT cannot be delivered this way; use TERM.
+HARNESS_KILL_ALIVE=0
+harness_kill_after() {
+  local secs="$1" sig="$2" pid="$3" rc=0
+  sleep "$secs"
+  if kill -0 "$pid" 2>/dev/null; then
+    HARNESS_KILL_ALIVE=1
+    kill "-$sig" "$pid" 2>/dev/null || true
+  else
+    HARNESS_KILL_ALIVE=0
+  fi
+  wait "$pid" || rc=$?
+  return "$rc"
+}
+
 # --- Git / environment isolation --------------------------------------------
 #
 # A fixture must never see the contributor's git configuration: a global

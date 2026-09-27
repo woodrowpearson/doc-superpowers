@@ -224,6 +224,385 @@ compute_freshness() {
   fi
 }
 
+# Hash many files in ONE process — hash_file per doc was a fork+exec (two, with
+# the awk) per file. Prints "sha256:<hex>" per file, in argument order. If the
+# batch output does not line up one-to-one (an unreadable file drops its line),
+# falls back to hash_file per file so a hash can never land on the wrong doc.
+_hash_files() {
+  [ $# -gt 0 ] || return 0
+  local out="" line hashes=() h
+  if command -v sha256sum >/dev/null 2>&1; then
+    out=$(sha256sum -- "$@" 2>/dev/null) || out=""
+  else
+    out=$(shasum -a 256 -- "$@" 2>/dev/null) || out=""
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    h="${line%% *}"
+    # GNU/shasum prefix the line with "\" when the filename needed escaping.
+    hashes+=("${h#\\}")
+  done <<< "$out"
+  if [ "${#hashes[@]}" -eq $# ]; then
+    for h in "${hashes[@]}"; do
+      printf 'sha256:%s\n' "$h"
+    done
+  else
+    local f
+    for f in "$@"; do
+      printf 'sha256:%s\n' "$(hash_file "$f")"
+    done
+  fi
+}
+
+# --- Index persistence ---------------------------------------------------------
+#
+# docs/.doc-index.json is shared, long-lived state. The skill's `update` action
+# dispatches one agent per stale doc and each calls update-index, so writers
+# run CONCURRENTLY, and any of them can be interrupted (Ctrl-C, a CI job
+# cancel, an agent's Bash timeout). Every write therefore goes through one path:
+#
+#   _index_apply <jq-program> [jq args…]
+#     _index_lock     mkdir spin-lock docs/.doc-index.json.lock (flock(1) is not
+#                     on macOS); the owner pid is recorded, a dead owner's lock
+#                     is broken, a live one is waited on then reported
+#     _index_load     a private snapshot, shape-validated: exactly one JSON
+#                     object whose .docs is an object (a 0-byte file is NOT an
+#                     empty index)
+#     one jq pass     <program> maps the old index to the new one
+#     _index_install  tmp file BESIDE the target (same filesystem, so mv is an
+#                     atomic rename — a tmp in $TMPDIR would make mv degrade to
+#                     copy-then-unlink) → chmod to the prior mode (644 when
+#                     new) → mv. The only place the index file is replaced.
+#
+# A run that changes nothing writes nothing (no generated_at bump), and
+# _INDEX_CHANGED lists the docs keys whose entries actually changed, so writers
+# report what they did rather than what they were asked. Writers build a
+# per-key patch list (JSONL) first and apply it in that one pass: O(N + k), not
+# a whole-index re-parse per path. Signals terminate (_traps): an interrupted
+# writer leaves the previous index byte-identical, never a partial one.
+
+INDEX_FILE="docs/.doc-index.json"
+INDEX_LOCK="$INDEX_FILE.lock"
+_SCRATCH=""          # private scratch dir (snapshots, patches); removed on exit
+_INDEX_TMP=""        # in-flight tmp beside the index; removed on exit
+_INDEX_LOCK_HELD=0
+_INDEX_BREAKING=0
+_INDEX_NOW=""        # one timestamp per run: last_verified and generated_at agree
+_INDEX_CHANGED=()
+_INDEX_CHANGED_SET=$'\n'   # the same keys, newline-framed, for O(1)-call lookups
+_INDEX_WROTE=0
+
+# Shared patch interpreter for _index_apply. Each $patch row is one of
+#   {"key": k, "add":   {...}}   insert the entry unless k is already indexed
+#   {"key": k, "merge": {...}}   merge fields into an existing entry (else skip)
+#   {"key": k, "del":   true}    delete the entry (absent: no-op)
+# `+=` keeps existing field positions and appends new fields, so a merge
+# serializes exactly as the old field-by-field assignments did.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_INDEX_PATCH='reduce $patch[] as $x (.;
+  if ($x | has("del")) then del(.docs[$x.key])
+  elif ($x | has("add")) then (if (.docs | has($x.key)) then . else .docs[$x.key] = $x.add end)
+  elif ($x | has("merge")) then (if (.docs | has($x.key)) then .docs[$x.key] += $x.merge else . end)
+  else error("doc-tools: unknown index patch row: \($x | tojson)") end)'
+
+_die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+# EXIT handler: remove whatever this run left in flight. Never calls exit, so
+# the status of the `exit` that got us here (130/143 from a signal) stands.
+cleanup() {
+  if [ -n "$_INDEX_TMP" ]; then rm -f "$_INDEX_TMP"; fi
+  _index_unlock
+  if [ "$_INDEX_BREAKING" = 1 ]; then rmdir "$INDEX_LOCK.break" 2>/dev/null || true; fi
+  if [ -n "$_SCRATCH" ]; then rm -rf "$_SCRATCH"; fi
+  return 0
+}
+
+# INT/TERM END the run; EXIT cleans up. The previous traps cleaned up and then
+# RESUMED: a TERM'd build-index ran on and installed a truncated index with
+# rc 0, and one blocked on stdin treated the interrupted read as EOF and
+# installed an EMPTY one. Never RETURN: it fires on every function return.
+_traps() {
+  trap 'cleanup' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+
+# Create this run's scratch dir. Call in the main shell (never inside $(…)):
+# the path must outlive the call so cleanup can remove it.
+_scratch_init() {
+  [ -z "$_SCRATCH" ] || return 0
+  _SCRATCH=$(mktemp -d -t doc-tools.XXXXXX) || _die "mktemp -d failed"
+}
+
+_index_now() {
+  [ -n "$_INDEX_NOW" ] || _INDEX_NOW=$(iso_now)
+}
+
+# Octal permission bits of $1 (e.g. 644). GNU stat spells it -c %a, BSD stat
+# -f %Lp; each rejects the other's flag, so try both and validate the result.
+_file_mode() {
+  local m=""
+  m=$(stat -c '%a' "$1" 2>/dev/null) || m=$(stat -f '%Lp' "$1" 2>/dev/null) || m=""
+  case "$m" in
+    [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) printf '%s' "$m" ;;
+    *) return 1 ;;
+  esac
+}
+
+_index_invalid() {
+  if [ ! -s "$1" ]; then
+    echo "ERROR: $INDEX_FILE is empty (0 bytes) — not a valid doc-index." >&2
+  else
+    echo "ERROR: $INDEX_FILE is not a valid doc-index (expected one JSON object with a \"docs\" object)." >&2
+  fi
+  echo "       Restore it (git checkout -- $INDEX_FILE) or rebuild it with build-index." >&2
+}
+
+# Print the path of a private, shape-validated copy of the index. Readers work
+# on the copy, so one run sees one version even while a writer replaces the
+# file (mv swaps the directory entry; cp read a single inode). Dies unless the
+# file holds exactly one JSON object whose .docs is an object. Needs
+# _scratch_init first; call as: snap=$(_index_load) || exit 1
+_index_load() {
+  if [ ! -f "$INDEX_FILE" ]; then
+    echo "ERROR: doc-index.json not found at $INDEX_FILE. Run build-index first." >&2
+    exit 1
+  fi
+  local snap
+  snap=$(mktemp "$_SCRATCH/index.XXXXXX") || _die "mktemp failed"
+  cp "$INDEX_FILE" "$snap" || _die "cannot read $INDEX_FILE"
+  if ! jq -e -s 'length == 1 and (.[0] | type) == "object" and (.[0].docs | type) == "object"' \
+      "$snap" >/dev/null 2>&1; then
+    _index_invalid "$snap"
+    exit 1
+  fi
+  printf '%s\n' "$snap"
+}
+
+# Break a lock whose recorded owner ($1) is no longer running. Serialized by a
+# second mkdir mutex, and the owner is re-read under it: without both, two
+# waiters that saw the same dead pid could each remove the lock — the second
+# removing the one the first had just taken. Returns 0 if it broke the lock.
+_index_break_stale() {
+  local dead="$1" now_owner broke=1
+  mkdir "$INDEX_LOCK.break" 2>/dev/null || return 1
+  _INDEX_BREAKING=1
+  now_owner=$(cat "$INDEX_LOCK/pid" 2>/dev/null || true)
+  if [ "$now_owner" = "$dead" ]; then
+    rm -rf "$INDEX_LOCK"
+    echo "WARNING: removed stale lock $INDEX_LOCK (owner pid $dead is no longer running)." >&2
+    broke=0
+  fi
+  rmdir "$INDEX_LOCK.break" 2>/dev/null || true
+  _INDEX_BREAKING=0
+  return "$broke"
+}
+
+# Take the writer lock (re-entrant within a run). mkdir is atomic everywhere
+# and needs nothing beyond POSIX. Waits up to DOC_TOOLS_LOCK_TIMEOUT seconds
+# (default 30), then fails naming the owner. Main shell only: it records $$
+# and sets the held flag the EXIT trap releases.
+_index_lock() {
+  [ "$_INDEX_LOCK_HELD" = 0 ] || return 0
+  local timeout="${DOC_TOOLS_LOCK_TIMEOUT:-30}"
+  case "$timeout" in
+    ''|*[!0-9]*) _die "DOC_TOOLS_LOCK_TIMEOUT must be a whole number of seconds (got '$timeout')." ;;
+  esac
+  local polls=0 max=$((timeout * 10)) owner err
+  while :; do
+    if err=$(mkdir "$INDEX_LOCK" 2>&1); then
+      _INDEX_LOCK_HELD=1
+      printf '%s\n' "$$" > "$INDEX_LOCK/pid"
+      return 0
+    fi
+    if [ ! -d "$INDEX_LOCK" ]; then
+      # No lock in place: either its holder released it between our mkdir and
+      # this check (retry at once), or mkdir cannot work here at all — missing
+      # or read-only docs/ — where waiting would only end in a misleading
+      # timeout.
+      local parent
+      parent=$(dirname "$INDEX_LOCK")
+      polls=$((polls + 1))
+      if [ -d "$parent" ] && [ -w "$parent" ] && [ "$polls" -lt "$max" ]; then
+        continue
+      fi
+      _die "cannot create lock $INDEX_LOCK: $err"
+    fi
+    owner=$(cat "$INDEX_LOCK/pid" 2>/dev/null || true)
+    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+      _index_break_stale "$owner" && continue
+    fi
+    if [ "$polls" -ge "$max" ]; then
+      echo "ERROR: timed out after ${timeout}s waiting for the doc-index lock $INDEX_LOCK" >&2
+      if [ -n "$owner" ]; then
+        echo "       (held by running pid $owner). Retry when it finishes, or raise DOC_TOOLS_LOCK_TIMEOUT." >&2
+      else
+        echo "       (no owner pid recorded). If no doc-tools.sh is running, remove it: rm -rf '$INDEX_LOCK'" >&2
+      fi
+      exit 1
+    fi
+    polls=$((polls + 1))
+    sleep 0.1
+  done
+}
+
+_index_unlock() {
+  if [ "$_INDEX_LOCK_HELD" = 1 ]; then
+    rm -rf "$INDEX_LOCK"
+    _INDEX_LOCK_HELD=0
+  fi
+  return 0
+}
+
+# The ONE place the index file is replaced. $1 must be a tmp beside the index
+# (_index_apply creates it) and the caller must hold the lock. The mode is the
+# prior file's (so a deliberate 0664 survives), or 0644 for a new index —
+# never mktemp's 0600, which git does not even carry.
+_index_install() {
+  local tmp="$1" mode
+  mode=$(_file_mode "$INDEX_FILE") || mode=644
+  chmod "$mode" "$tmp" || _die "cannot chmod $mode $tmp"
+  mv -f "$tmp" "$INDEX_FILE" || _die "cannot install $INDEX_FILE"
+  _INDEX_TMP=""
+}
+
+# _index_apply [--replace] <jq-program> [jq args…]
+#
+# Lock → snapshot → ONE jq pass → tmp beside the target → chmod → mv. The
+# program gets the current index as `.` and must yield exactly one whole new
+# index. `$now` (this run's timestamp) is bound for it — do not pass --arg now.
+# It must not stamp generated_at: that is set here, and only if something
+# changed. --replace (build-index only) tolerates a missing or invalid prior
+# index — `.` is then null — because rebuilding is how one recovers from it.
+#
+# Sets _INDEX_WROTE (0/1) and _INDEX_CHANGED (sorted docs keys whose entry was
+# added, removed or modified). Releases the lock before returning.
+_index_apply() {
+  local replace=0
+  if [ "${1:-}" = "--replace" ]; then
+    replace=1
+    shift
+  fi
+  local program="$1"
+  shift
+  _scratch_init
+  _index_now
+  _index_lock
+
+  local snap
+  if [ "$replace" = 1 ] && [ ! -f "$INDEX_FILE" ]; then
+    snap="$_SCRATCH/null.json"
+    printf 'null\n' > "$snap"
+  elif [ "$replace" = 1 ]; then
+    if ! snap=$(_index_load 2>/dev/null); then
+      echo "WARNING: replacing invalid $INDEX_FILE." >&2
+      snap="$_SCRATCH/null.json"
+      printf 'null\n' > "$snap"
+    fi
+  else
+    snap=$(_index_load) || exit 1
+  fi
+
+  # Output protocol (NUL-delimited, so any key round-trips):
+  #   same\0                                  nothing changed — write nothing
+  #   write\0<n>\0<key>\0…(n keys)<index>\n  the changed keys, then the index
+  # The index is emitted pretty-printed, byte-for-byte what `jq .` writes.
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  local wrapped='. as $__old
+    | [ '"$program"' ] as $__out
+    | if ($__out | length) != 1
+      then error("doc-tools: index program yielded \($__out | length) results, expected 1")
+      else $__out[0] end
+    | . as $__new
+    | if (type != "object") or ((.docs | type) != "object")
+      then error("doc-tools: index program yielded an invalid index") else . end
+    | (if ($__old | type) == "object" then $__old.docs else {} end) as $__od
+    | if (if ($__old | type) == "object" then ($__old | del(.generated_at)) else null end)
+         == del(.generated_at)
+      then "same\u0000"
+      else
+        [ (($__od | keys) + ($__new.docs | keys) | unique)[] as $k
+          | select($__od[$k] != $__new.docs[$k]) | $k ] as $__ch
+        | "write\u0000", "\($__ch | length)\u0000", ($__ch[] | . + "\u0000"),
+          (.generated_at = $now), "\n"
+      end'
+
+  local out
+  out=$(mktemp "$_SCRATCH/apply.XXXXXX") || _die "mktemp failed"
+  if ! jq -j --arg now "$_INDEX_NOW" "$wrapped" "$@" < "$snap" > "$out"; then
+    _die "failed to apply the index update; $INDEX_FILE is unchanged."
+  fi
+
+  _INDEX_CHANGED=()
+  _INDEX_CHANGED_SET=$'\n'
+  _INDEX_WROTE=0
+  local verdict="" n=0 i=0 key
+  _INDEX_TMP=$(mktemp "$INDEX_FILE.tmp.XXXXXX") || _die "cannot create a temp file beside $INDEX_FILE"
+  {
+    IFS= read -r -d '' verdict || true
+    if [ "$verdict" = write ]; then
+      IFS= read -r -d '' n
+      while [ "$i" -lt "$n" ]; do
+        IFS= read -r -d '' key
+        _INDEX_CHANGED+=("$key")
+        _INDEX_CHANGED_SET="$_INDEX_CHANGED_SET$key"$'\n'
+        i=$((i + 1))
+      done
+      cat > "$_INDEX_TMP" || _die "cannot write $_INDEX_TMP"
+    fi
+  } < "$out"
+
+  case "$verdict" in
+    write)
+      [ -s "$_INDEX_TMP" ] || _die "rendered index is empty; $INDEX_FILE is unchanged."
+      _index_install "$_INDEX_TMP"
+      _INDEX_WROTE=1
+      ;;
+    same)
+      rm -f "$_INDEX_TMP"
+      _INDEX_TMP=""
+      ;;
+    *) _die "unexpected index-apply output; $INDEX_FILE is unchanged." ;;
+  esac
+  _index_unlock
+}
+
+# True if $1 is among the keys the last _index_apply changed. One glob match
+# on a newline-framed string, not a scan per call: reports call this per key.
+# "$1" is quoted in the pattern, so glob characters in a path match literally.
+_index_changed_has() {
+  case "$_INDEX_CHANGED_SET" in
+    *$'\n'"$1"$'\n'*) return 0 ;;
+  esac
+  return 1
+}
+
+# One pass over snapshot $1: print 1 or 0 per remaining argument, one per line,
+# for whether that key is indexed.
+_index_present() {
+  local snap="$1"
+  shift
+  jq -r '.docs as $d | $ARGS.positional[] as $p | if ($d | has($p)) then 1 else 0 end' \
+    --args "$@" < "$snap"
+}
+
+# Print a report section to stderr — "<verb> N entry|entries[ <note>]" and the
+# listed keys, the colon only when a list follows:
+#   _report_keys <verb> <note-or-""> [key…]
+_report_keys() {
+  local verb="$1" note="$2"
+  shift 2
+  local count=$#
+  echo "$verb $count $([ "$count" -eq 1 ] && echo entry || echo entries)${note:+ $note}$([ "$count" -gt 0 ] && echo ':')" >&2
+  local p
+  for p in "$@"; do
+    echo "  $p" >&2
+  done
+}
+
 # --- Usage ---
 
 usage() {
@@ -274,6 +653,20 @@ Doc paths:
   rewritten to its relative form; a path outside it is rejected (non-zero exit)
   rather than written as an unfindable key.
 
+Index writes:
+  build-index, update-index, add-entry, remove-entry, move-entry and
+  deprecate-entry take the lock docs/.doc-index.json.lock and replace the
+  index atomically, so they are safe to run concurrently and an interrupted
+  run leaves the previous index intact. A run that changes nothing writes
+  nothing (generated_at is not bumped). The incremental writers report only
+  the entries they actually changed. Every verb that reads the index refuses
+  one that is empty or malformed; build-index rebuilds over it.
+
+Environment:
+  DOC_TOOLS_LOCK_TIMEOUT  Seconds a writer waits for the index lock before
+                          failing (default 30). A lock whose recorded owner
+                          is no longer running is removed automatically.
+
 Options:
   --help            Show this help message
 
@@ -285,11 +678,11 @@ EOF
 
 cmd_build_index() {
   # Read stdin: one line per doc in format doc_path:comma_code_refs:doc_type
-  # Write docs/.doc-index.json
+  # Write docs/.doc-index.json (via _index_apply --replace — see "Index persistence")
   local docs_dir="docs"
-  local index_file="$docs_dir/.doc-index.json"
-  local now
-  now=$(iso_now)
+  _scratch_init
+  _index_now
+  local now="$_INDEX_NOW"
   local build_commit
   build_commit=$(repo_head)
 
@@ -302,13 +695,10 @@ cmd_build_index() {
   # build-index died with "jq: Argument list too long" at ~420 entries. macOS
   # has no per-argument cap (only the ~1 MB total ARG_MAX), which is why this
   # only ever reproduced on Linux. Mirrors the accumulator cmd_check_freshness
-  # already uses.
-  local entries_tmp
-  entries_tmp=$(mktemp -t doc-tools-entries.XXXXXX) || { echo "ERROR: mktemp failed" >&2; exit 1; }
-  local docs_tmp
-  docs_tmp=$(mktemp -t doc-tools-docs.XXXXXX) || { echo "ERROR: mktemp failed" >&2; exit 1; }
-  # shellcheck disable=SC2064  # expand vars now, not at trap time
-  trap "rm -f \"$entries_tmp\" \"$docs_tmp\"" RETURN EXIT INT TERM
+  # already uses. Both live in this run's scratch dir, removed by the EXIT trap.
+  local entries_tmp="$_SCRATCH/entries.jsonl"
+  local docs_tmp="$_SCRATCH/docs.json"
+  : > "$entries_tmp"
 
   local invalid=0
 
@@ -432,29 +822,26 @@ cmd_build_index() {
   # `docs` arrives via --slurpfile, NOT --argjson: it is the one unbounded
   # value here, and passing it through argv is what capped the index at ~420
   # entries on Linux (see the accumulator comment above).
+  #
+  # --replace: build-index is the recovery path, so a missing or invalid prior
+  # index is replaced rather than refused. generated_at is stamped by
+  # _index_apply ($now), and nothing is written if the result is identical.
   mkdir -p "$docs_dir"
-  local index_tmp
-  index_tmp=$(mktemp -t doc-tools-index.XXXXXX) || { echo "ERROR: mktemp failed" >&2; exit 1; }
-  jq -n \
-    --argjson schema_version 2 \
-    --arg generated_by "doc-superpowers" \
-    --arg generated_at "$now" \
-    --arg build_commit "$build_commit" \
-    --slurpfile docs "$docs_tmp" \
-    '{
-      schema_version: $schema_version,
-      generated_by: $generated_by,
-      generated_at: $generated_at,
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  _index_apply --replace '{
+      schema_version: 2,
+      generated_by: "doc-superpowers",
+      generated_at: $now,
       build_commit: $build_commit,
       docs: $docs[0]
-    }' > "$index_tmp" || { rm -f "$index_tmp"; echo "ERROR: failed to render index JSON" >&2; exit 1; }
-  # Move into place only once jq has succeeded — a redirect straight at
-  # $index_file would truncate a good index if the render failed.
-  mv "$index_tmp" "$index_file"
+    }' \
+    --arg build_commit "$build_commit" \
+    --slurpfile docs "$docs_tmp"
+  # Silent on success, as before: it replaces the whole index, so a per-key
+  # report would only restate its input.
 }
 
 cmd_check_freshness() {
-  local index_file="docs/.doc-index.json"
   local filter_refs=()
 
   # Parse optional --code-refs arguments
@@ -471,10 +858,12 @@ cmd_check_freshness() {
     esac
   done
 
-  if [ ! -f "$index_file" ]; then
-    echo "ERROR: doc-index.json not found at $index_file. Run build-index first." >&2
-    exit 1
-  fi
+  # ONE validated snapshot serves both passes below (entry walk + untracked
+  # key set). Reading the live file twice let a concurrent writer land between
+  # them, so the summary and .docs could describe two different indexes.
+  _scratch_init
+  local snap
+  snap=$(_index_load) || exit 1
 
   local checked_at repo_head_val
   checked_at=$(iso_now)
@@ -489,18 +878,15 @@ cmd_check_freshness() {
   # merged once at the end with `jq -s` instead of rebuilding via
   # `jq '. + {(p): v}'` per iteration. Eliminates O(N) jq spawns for
   # accumulator updates — the dominant cost on large indexes.
-  local jsonl_tmp idx_paths_tmp fs_paths_tmp docs_out_tmp untracked_tmp
-  jsonl_tmp=$(mktemp -t doc-tools-fresh.XXXXXX) || { echo "ERROR: mktemp failed" >&2; exit 1; }
-  idx_paths_tmp=$(mktemp -t doc-tools-idx.XXXXXX)
-  fs_paths_tmp=$(mktemp -t doc-tools-fs.XXXXXX)
+  # All in this run's scratch dir (removed by the EXIT trap).
+  local jsonl_tmp="$_SCRATCH/fresh.jsonl" idx_paths_tmp="$_SCRATCH/idx-paths"
+  local fs_paths_tmp="$_SCRATCH/fs-paths"
   # Both of these hold values that scale with the corpus, so they are handed to
   # the final `jq -n` via --slurpfile rather than --argjson: Linux caps a single
   # argv string at MAX_ARG_STRLEN (131072 bytes) regardless of ARG_MAX, and the
   # merged docs object passes that at a few hundred entries.
-  docs_out_tmp=$(mktemp -t doc-tools-docsout.XXXXXX)
-  untracked_tmp=$(mktemp -t doc-tools-untracked.XXXXXX)
-  # shellcheck disable=SC2064  # expand vars now, not at trap time
-  trap "rm -f \"$jsonl_tmp\" \"$idx_paths_tmp\" \"$fs_paths_tmp\" \"$docs_out_tmp\" \"$untracked_tmp\"" RETURN EXIT INT TERM
+  local docs_out_tmp="$_SCRATCH/docs-out.json" untracked_tmp="$_SCRATCH/untracked.json"
+  : > "$jsonl_tmp"
 
   # Single-pass field extraction: one `jq` call emits every entry's fields
   # in NUL-delimited records (tab-separated within each record). The body
@@ -638,7 +1024,7 @@ cmd_check_freshness() {
         ((.value.code_refs // []) | join(","))
       ] | @tsv
     ) + "\u0000"
-  ' "$index_file")
+  ' "$snap")
 
   # Merge JSON-lines accumulator into a single object in ONE jq invocation
   # instead of N. `reduce .[] as $row (...; . + $row)` works because each
@@ -652,8 +1038,8 @@ cmd_check_freshness() {
 
   # Untracked detection — set-difference between filesystem and index keys.
   # Replaces N per-file `jq '.docs | has($p)'` queries with a single
-  # `jq keys` + `find` + `comm`.
-  jq -r '.docs | keys[]' "$index_file" | sort > "$idx_paths_tmp"
+  # `jq keys` + `find` + `comm`. Raw keys, not the @tsv-escaped ones above.
+  jq -r '.docs | keys[]' "$snap" | sort > "$idx_paths_tmp"
   find docs -name '*.md' -not -path 'docs/archive/*' 2>/dev/null | sort > "$fs_paths_tmp"
   if [ -s "$fs_paths_tmp" ]; then
     comm -23 "$fs_paths_tmp" "$idx_paths_tmp" | jq -R . | jq -cs . > "$untracked_tmp"
@@ -685,10 +1071,8 @@ cmd_check_freshness() {
 }
 
 cmd_update_index() {
-  local index_file="docs/.doc-index.json"
-
-  if [ ! -f "$index_file" ]; then
-    echo "ERROR: doc-index.json not found at $index_file. Run build-index first." >&2
+  if [ ! -f "$INDEX_FILE" ]; then
+    echo "ERROR: doc-index.json not found at $INDEX_FILE. Run build-index first." >&2
     exit 1
   fi
 
@@ -697,26 +1081,66 @@ cmd_update_index() {
     exit 1
   fi
 
-  local index
-  index=$(cat "$index_file")
-  local now
-  now=$(iso_now)
-  local refreshed=()
-
-  local raw_doc_path
+  local targets=() raw_doc_path doc_path
   for raw_doc_path in "$@"; do
-    local doc_path
     doc_path=$(normalize_doc_path "$raw_doc_path") || exit 1
+    targets+=("$doc_path")
+  done
 
-    # Verify path exists in index
-    local exists
-    exists=$(echo "$index" | jq --arg p "$doc_path" '.docs | has($p)')
-    if [ "$exists" != "true" ]; then
-      echo "ERROR: '$doc_path' not found in index. Use add-entry to add new docs." >&2
+  _scratch_init
+  _index_now
+  # The patch is derived from each entry's code_refs, so they are read under
+  # the lock: no concurrent writer can change an entry between this read and
+  # the write below.
+  _index_lock
+  local snap
+  snap=$(_index_load) || exit 1
+
+  # ONE pass over the index for every target (the previous per-path loop
+  # re-parsed the whole index three times per doc: O(k·N)). NUL-delimited
+  # records, one per target in argument order: <has 0|1> <n> <ref>… — the refs
+  # as `.code_refs[]` yielded them, minus empty strings.
+  local info="$_SCRATCH/update-info"
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  jq -j '.docs as $d | $ARGS.positional[] as $p
+    | if ($d | has($p)) then
+        (($d[$p].code_refs | if type == "array" then . else [] end)
+          | map(tostring | select(. != ""))) as $r
+        | "1\u0000\($r | length)\u0000" + ([$r[] | . + "\u0000"] | add // "")
+      else "0\u00000\u0000" end' --args "${targets[@]}" < "$snap" > "$info"
+
+  # Unknown key → abort the whole batch before anything is computed or written
+  # (unchanged contract). Refs are kept in one flat array with per-target
+  # offsets (bash 3.2 has no arrays of arrays).
+  local has n j ref idx=0
+  local ref_all=() ref_start=() ref_count=()
+  exec 3< "$info"
+  while [ "$idx" -lt "${#targets[@]}" ]; do
+    IFS= read -r -d '' has <&3
+    IFS= read -r -d '' n <&3
+    ref_start+=("${#ref_all[@]}")
+    ref_count+=("$n")
+    j=0
+    while [ "$j" -lt "$n" ]; do
+      IFS= read -r -d '' ref <&3
+      ref_all+=("$ref")
+      j=$((j + 1))
+    done
+    if [ "$has" != "1" ]; then
+      exec 3<&-
+      echo "ERROR: '${targets[$idx]}' not found in index. Use add-entry to add new docs." >&2
       exit 1
     fi
+    idx=$((idx + 1))
+  done
+  exec 3<&-
 
-    # Check file exists on disk — don't silently set current with null hash
+  # Targets whose file is gone are skipped (with rename advice); the rest are
+  # hashed in one batch.
+  local live=() live_idx=()
+  idx=0
+  while [ "$idx" -lt "${#targets[@]}" ]; do
+    doc_path="${targets[$idx]}"
     if [ ! -f "$doc_path" ]; then
       echo "WARNING: '$doc_path' no longer exists on disk. Skipping." >&2
       # The path is quoted INSIDE the advice string: a doc path containing a
@@ -725,103 +1149,147 @@ cmd_update_index() {
       echo "         If it was RENAMED, use: move-entry \"$doc_path\" <new-path>" >&2
       echo "         (remove-entry + add-entry would drop its code_refs, leaving an entry that can never go stale.)" >&2
       echo "         If it was deleted, use remove-entry or deprecate-entry to clean up." >&2
-      continue
+    else
+      live+=("$doc_path")
+      live_idx+=("$idx")
     fi
+    idx=$((idx + 1))
+  done
 
-    # Re-hash the doc
-    local content_hash_val
-    content_hash_val="\"sha256:$(hash_file "$doc_path")\""
+  local hashes=() h
+  while IFS= read -r h; do
+    hashes+=("$h")
+  done < <(_hash_files "${live[@]+"${live[@]}"}")
 
-    # Re-query code_commit from code_refs (bash 3.2 compatible)
-    local code_refs_arr=()
-    while IFS= read -r _ref; do
-      [[ -n "$_ref" ]] && code_refs_arr+=("$_ref")
-    done < <(echo "$index" | jq -r --arg p "$doc_path" '.docs[$p].code_refs[]' 2>/dev/null || true)
+  # Implementation: (ADRs) / Realized-by: (SPECs) bullets, for every live doc
+  # in ONE awk pass (a fork+exec per doc dominated the batch). Per file this is
+  # exactly the old single-file program — the `exit` that ended it at the
+  # first blank or unindented line is now a per-file `done` — and each
+  # captured line is tagged with its ARGV index. Empty files never reach
+  # FNR == 1, so argi catches up by name. Both fields are stored under the
+  # single JSON key "implementation" to keep downstream consumers simple
+  # (validate_docs.py, doc-audit routine) — see Task 3.4 of
+  # docs/plans/2026-05-16-adr-implementation-field-rollout.md.
+  local impl=() tagged ai line
+  if [ ${#live[@]} -gt 0 ]; then
+    tagged=$(awk '
+        FNR == 1 {
+          argi++
+          while (argi < ARGC && ARGV[argi] != FILENAME) argi++
+          capture = 0; done = 0
+        }
+        done { next }
+        /^Implementation:[[:space:]]*$|^Realized-by:[[:space:]]*$/ { capture = 1; next }
+        capture && /^[[:space:]]+-/ { print argi "\t" $0; next }
+        capture && /^[[:space:]]*$|^[^[:space:]]/ { done = 1 }
+    ' "${live[@]}")
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      # Split by hand: `IFS=$'\t' read` would also trim a tab-indented bullet.
+      ai="${line%%$'\t'*}"
+      line="${line#*$'\t'}"
+      ai=$((ai - 1))
+      impl[$ai]="${impl[$ai]:+${impl[$ai]}$'\n'}$line"
+    done <<< "$tagged"
+  fi
 
-    local code_commit=""
+  # code_commit: one git log per DISTINCT code_refs set — docs that share refs
+  # (common: several docs covering src/) share the answer. Linear cache, no
+  # associative arrays (bash 3.2). Written as NUL-delimited raw records, turned
+  # into the JSONL patch by ONE jq below.
+  local raw="$_SCRATCH/update-raw" patch="$_SCRATCH/update-patch.jsonl"
+  : > "$raw"
+  local k=0 c code_commit start count code_refs_arr ckey
+  local cache_keys=() cache_vals=()
+  while [ "$k" -lt "${#live[@]}" ]; do
+    doc_path="${live[$k]}"
+    idx="${live_idx[$k]}"
+    start="${ref_start[$idx]}"
+    count="${ref_count[$idx]}"
+    code_refs_arr=()
+    ckey=""
+    j=0
+    while [ "$j" -lt "$count" ]; do
+      ref="${ref_all[$((start + j))]}"
+      code_refs_arr+=("$ref")
+      ckey="$ckey$ref"$'\037'
+      j=$((j + 1))
+    done
+    code_commit=""
     if [ ${#code_refs_arr[@]} -gt 0 ]; then
-      code_commit=$(git log -1 --format=%H -- "${code_refs_arr[@]}" 2>/dev/null || true)
+      c=0
+      while [ "$c" -lt "${#cache_keys[@]}" ] && [ "${cache_keys[$c]}" != "$ckey" ]; do
+        c=$((c + 1))
+      done
+      if [ "$c" -lt "${#cache_keys[@]}" ]; then
+        code_commit="${cache_vals[$c]}"
+      else
+        code_commit=$(git log -1 --format=%H -- "${code_refs_arr[@]}" 2>/dev/null || true)
+        cache_keys+=("$ckey")
+        cache_vals+=("$code_commit")
+      fi
     fi
-
-    local code_commit_json
-    if [ -n "$code_commit" ]; then
-      code_commit_json="\"$code_commit\""
-    else
-      code_commit_json="null"
-    fi
-
-    # Capture Implementation: (ADRs) or Realized-by: (SPECs) field as a list
-    # of bullet strings (leading "  - " stripped). Both fields are stored under
-    # the single JSON key "implementation" to keep downstream consumers simple
-    # (validate_docs.py, doc-audit routine) — see Task 3.4 of
-    # docs/plans/2026-05-16-adr-implementation-field-rollout.md.
-    local impl_block impl_json
-    impl_block=$(awk '
-        /^Implementation:[[:space:]]*$|^Realized-by:[[:space:]]*$/ { capture=1; next }
-        capture && /^[[:space:]]+-/ { print; next }
-        capture && /^[[:space:]]*$|^[^[:space:]]/ { exit 0 }
-    ' "$doc_path")
-
-    if [[ -n "$impl_block" ]]; then
-      impl_json=$(printf '%s\n' "$impl_block" | sed 's/^  - //' | jq -R . | jq -s .)
-    else
-      impl_json="[]"
-    fi
-
-    # Update the entry: re-hash, re-query code_commit, set status=current, update last_verified,
-    # capture implementation array.
-    # Preserve: replaces, superseded_by, doc_type, build_commit (top-level), code_refs
-    index=$(echo "$index" | jq \
-      --arg p "$doc_path" \
-      --argjson content_hash "$content_hash_val" \
-      --argjson code_commit "$code_commit_json" \
-      --arg status "current" \
-      --arg last_verified "$now" \
-      --argjson implementation "$impl_json" \
-      '.docs[$p].content_hash = $content_hash
-      | .docs[$p].code_commit = $code_commit
-      | .docs[$p].status = $status
-      | .docs[$p].last_verified = $last_verified
-      | .docs[$p].implementation = $implementation')
-    refreshed+=("$doc_path")
+    printf '%s\0%s\0%s\0%s\0' "$doc_path" "${hashes[$k]}" "$code_commit" "${impl[$k]:-}" >> "$raw"
+    k=$((k + 1))
   done
 
-  # Update generated_at (but NOT build_commit)
-  index=$(echo "$index" | jq --arg generated_at "$now" '.generated_at = $generated_at')
+  # Refresh: re-hash, re-query code_commit, set status=current, stamp
+  # last_verified, capture implementation (bullets with a leading "  - "
+  # stripped). Preserved: replaces, superseded_by, doc_type, code_refs, and the
+  # top-level build_commit.
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  jq -c -Rs --arg now "$_INDEX_NOW" '
+    split("\u0000") | .[:-1] as $f
+    | range(0; $f | length; 4) as $i
+    | {key: $f[$i], merge: {
+        content_hash: $f[$i + 1],
+        code_commit: (if $f[$i + 2] == "" then null else $f[$i + 2] end),
+        status: "current",
+        last_verified: $now,
+        implementation: (if $f[$i + 3] == "" then []
+                         else ($f[$i + 3] | split("\n") | map(ltrimstr("  - "))) end)}}
+  ' < "$raw" > "$patch"
 
-  echo "$index" > "$index_file"
+  _index_apply "$_INDEX_PATCH" --slurpfile patch "$patch"
 
-  # Output refreshed entries to stderr (informational, keeps stdout clean)
-  local count=${#refreshed[@]}
-  echo "Refreshed $count $([ "$count" -eq 1 ] && echo entry || echo entries):" >&2
-  # Guarded: `refreshed` is empty when every named doc was skipped (indexed but
-  # deleted from disk), and bash 3.2 treats an unguarded "${arr[@]}" on an empty
-  # array as an unbound variable under `set -u`.
-  for doc_path in "${refreshed[@]+"${refreshed[@]}"}"; do
-    echo "  $doc_path" >&2
+  # Report what actually changed. A doc re-verified within the same second
+  # with nothing to update changes nothing, and is listed as unchanged.
+  local refreshed=() unchanged=()
+  for doc_path in "${live[@]+"${live[@]}"}"; do
+    if _index_changed_has "$doc_path"; then
+      refreshed+=("$doc_path")
+    else
+      unchanged+=("$doc_path")
+    fi
   done
+  _report_keys "Refreshed" "" "${refreshed[@]+"${refreshed[@]}"}"
+  if [ ${#unchanged[@]} -gt 0 ]; then
+    _report_keys "Unchanged" "(already up to date)" "${unchanged[@]}"
+  fi
 }
 
 cmd_add_entry() {
-  local index_file="docs/.doc-index.json"
-
-  if [ ! -f "$index_file" ]; then
-    echo "ERROR: doc-index.json not found at $index_file. Run build-index first." >&2
+  if [ ! -f "$INDEX_FILE" ]; then
+    echo "ERROR: doc-index.json not found at $INDEX_FILE. Run build-index first." >&2
     exit 1
   fi
 
-  local index
-  index=$(cat "$index_file")
-  local now
-  now=$(iso_now)
+  _scratch_init
+  _index_now
 
-  local count=0
   local invalid=0
-  local added=()
+  local requested=()
+  # Facts about each doc (hash, code_commit) do not depend on the index, so
+  # they are gathered WITHOUT the lock — stdin may be slow — as NUL-delimited
+  # raw records. The "add" patch rows only insert keys that are still absent
+  # when applied under the lock, so a concurrent writer cannot be clobbered.
+  local raw="$_SCRATCH/add-raw" patch="$_SCRATCH/add-patch.jsonl"
+  : > "$raw"
 
   # Save stdin to fd 3, redirect fd 0 so subprocesses don't consume input
   exec 3<&0 0</dev/null
 
+  local line
   while IFS= read -r line <&3 || [ -n "$line" ]; do
     [ -z "$line" ] && continue
 
@@ -838,93 +1306,64 @@ cmd_add_entry() {
       continue
     fi
 
-    # Skip if already in index
-    local exists
-    exists=$(echo "$index" | jq --arg p "$doc_path" '.docs | has($p)')
-    if [ "$exists" = "true" ]; then
-      echo "SKIP: '$doc_path' already in index. Use update-index to refresh." >&2
-      continue
-    fi
-
-    # Compute content hash
-    local content_hash_val
+    # Compute content hash ("" → null: a not-yet-written doc is allowed)
+    local content_hash_val=""
     if [ -f "$doc_path" ]; then
-      content_hash_val="\"sha256:$(hash_file "$doc_path")\""
-    else
-      content_hash_val="null"
+      content_hash_val="sha256:$(hash_file "$doc_path")"
     fi
-
-    # Build code_refs JSON array. Empty strings dropped — see cmd_build_index
-    # for why [""] must never be written.
-    local code_refs_json
-    code_refs_json=$(echo "$code_refs_raw" | tr ',' '\n' | jq -R . | jq -s 'map(select(. != ""))')
 
     # Compute latest commit across code refs (count guard: see cmd_build_index —
     # an empty code_refs list is unbound under bash 3.2 + `set -u`)
     local code_commit=""
+    local refs=()
     IFS=',' read -ra refs <<< "$code_refs_raw"
     if [ ${#refs[@]} -gt 0 ]; then
       code_commit=$(git log -1 --format=%H -- "${refs[@]}" 2>/dev/null || true)
     fi
 
-    # Build entry JSON
-    local entry_json
-    if [ -n "$code_commit" ]; then
-      entry_json=$(jq -n \
-        --argjson content_hash "$content_hash_val" \
-        --argjson code_refs "$code_refs_json" \
-        --arg code_commit "$code_commit" \
-        --arg doc_type "$doc_type" \
-        --arg last_verified "$now" \
-        '{
-          content_hash: $content_hash,
-          code_refs: $code_refs,
-          code_commit: $code_commit,
-          doc_type: $doc_type,
-          status: "current",
-          replaces: null,
-          superseded_by: null,
-          last_verified: $last_verified
-        }')
-    else
-      entry_json=$(jq -n \
-        --argjson content_hash "$content_hash_val" \
-        --argjson code_refs "$code_refs_json" \
-        --arg doc_type "$doc_type" \
-        --arg last_verified "$now" \
-        '{
-          content_hash: $content_hash,
-          code_refs: $code_refs,
-          code_commit: null,
-          doc_type: $doc_type,
-          status: "current",
-          replaces: null,
-          superseded_by: null,
-          last_verified: $last_verified
-        }')
-    fi
-
-    # Merge into index
-    index=$(echo "$index" | jq --arg key "$doc_path" --argjson val "$entry_json" '.docs[$key] = $val')
-    count=$((count + 1))
-    added+=("$doc_path")
+    printf '%s\0%s\0%s\0%s\0%s\0' "$doc_path" "$content_hash_val" "$code_refs_raw" \
+      "$code_commit" "$doc_type" >> "$raw"
+    requested+=("$doc_path")
   done
 
   exec 3<&-
 
-  # Update generated_at
-  index=$(echo "$index" | jq --arg generated_at "$now" '.generated_at = $generated_at')
+  # code_refs: comma-split with empty strings dropped — see cmd_build_index for
+  # why [""] must never be written.
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  jq -c -Rs --arg now "$_INDEX_NOW" '
+    split("\u0000") | .[:-1] as $f
+    | range(0; $f | length; 5) as $i
+    | {key: $f[$i], add: {
+        content_hash: (if $f[$i + 1] == "" then null else $f[$i + 1] end),
+        code_refs: ($f[$i + 2] | split(",") | map(select(. != ""))),
+        code_commit: (if $f[$i + 3] == "" then null else $f[$i + 3] end),
+        doc_type: $f[$i + 4],
+        status: "current",
+        replaces: null,
+        superseded_by: null,
+        last_verified: $now}}
+  ' < "$raw" > "$patch"
 
-  echo "$index" > "$index_file"
+  _index_apply "$_INDEX_PATCH" --slurpfile patch "$patch"
 
-  # Report what actually happened. The trailing colon previously dangled with no
-  # list under it; the sibling commands (update-index, remove-entry,
-  # deprecate-entry) all enumerate the paths they touched, so match that.
-  echo "Added $count $([ "$count" -eq 1 ] && echo entry || echo entries)$([ "$count" -gt 0 ] && echo ':')" >&2
-  local p
-  for p in "${added[@]+"${added[@]}"}"; do
-    echo "  $p" >&2
+  # Report what actually happened, in input order. A key that was already
+  # indexed (or repeated within this batch) was not added.
+  local added=() seen=$'\n' p
+  for p in "${requested[@]+"${requested[@]}"}"; do
+    case "$seen" in
+      *$'\n'"$p"$'\n'*) ;;
+      *)
+        if _index_changed_has "$p"; then
+          added+=("$p")
+          seen="$seen$p"$'\n'
+          continue
+        fi
+        ;;
+    esac
+    echo "SKIP: '$p' already in index. Use update-index to refresh." >&2
   done
+  _report_keys "Added" "" "${added[@]+"${added[@]}"}"
 
   if [ "$invalid" -gt 0 ]; then
     echo "Rejected $invalid invalid $([ "$invalid" -eq 1 ] && echo path || echo paths)." >&2
@@ -933,10 +1372,8 @@ cmd_add_entry() {
 }
 
 cmd_remove_entry() {
-  local index_file="docs/.doc-index.json"
-
-  if [ ! -f "$index_file" ]; then
-    echo "ERROR: doc-index.json not found at $index_file. Run build-index first." >&2
+  if [ ! -f "$INDEX_FILE" ]; then
+    echo "ERROR: doc-index.json not found at $INDEX_FILE. Run build-index first." >&2
     exit 1
   fi
 
@@ -945,51 +1382,35 @@ cmd_remove_entry() {
     exit 1
   fi
 
-  local index
-  index=$(cat "$index_file")
-  local now
-  now=$(iso_now)
-  local count=0
-  local targets=()
-
   # Normalize every path up front so an unusable one aborts before we mutate the
   # index. Without this an absolute path merely reported "not found in index" and
   # exited 0 — a silent no-op for a caller who asked to remove a real entry.
-  local raw_doc_path
+  local targets=() raw_doc_path doc_path
   for raw_doc_path in "$@"; do
-    local doc_path
     doc_path=$(normalize_doc_path "$raw_doc_path") || exit 1
     targets+=("$doc_path")
   done
 
-  for doc_path in "${targets[@]+"${targets[@]}"}"; do
-    local exists
-    exists=$(echo "$index" | jq --arg p "$doc_path" '.docs | has($p)')
-    if [ "$exists" != "true" ]; then
+  _scratch_init
+  local patch="$_SCRATCH/remove-patch.jsonl"
+  jq -nc '$ARGS.positional[] | {key: ., del: true}' --args "${targets[@]}" > "$patch"
+  _index_apply "$_INDEX_PATCH" --slurpfile patch "$patch"
+
+  # A present key is always removed, so "not changed" means "not indexed".
+  local removed=()
+  for doc_path in "${targets[@]}"; do
+    if _index_changed_has "$doc_path"; then
+      removed+=("$doc_path")
+    else
       echo "SKIP: '$doc_path' not found in index." >&2
-      continue
     fi
-
-    index=$(echo "$index" | jq --arg p "$doc_path" 'del(.docs[$p])')
-    count=$((count + 1))
   done
-
-  # Update generated_at
-  index=$(echo "$index" | jq --arg generated_at "$now" '.generated_at = $generated_at')
-
-  echo "$index" > "$index_file"
-
-  echo "Removed $count $([ "$count" -eq 1 ] && echo entry || echo entries):" >&2
-  for doc_path in "${targets[@]+"${targets[@]}"}"; do
-    echo "  $doc_path" >&2
-  done
+  _report_keys "Removed" "" "${removed[@]+"${removed[@]}"}"
 }
 
 cmd_move_entry() {
-  local index_file="docs/.doc-index.json"
-
-  if [ ! -f "$index_file" ]; then
-    echo "ERROR: doc-index.json not found at $index_file. Run build-index first." >&2
+  if [ ! -f "$INDEX_FILE" ]; then
+    echo "ERROR: doc-index.json not found at $INDEX_FILE. Run build-index first." >&2
     exit 1
   fi
 
@@ -1014,21 +1435,22 @@ cmd_move_entry() {
     return 0
   fi
 
-  local index
-  index=$(cat "$index_file")
+  _scratch_init
+  # The existence checks below and the write must see the same index, so both
+  # happen under the lock.
+  _index_lock
+  local snap has_old has_new
+  snap=$(_index_load) || exit 1
+  { read -r has_old; read -r has_new; } < <(_index_present "$snap" "$old_path" "$new_path")
 
-  local exists
-  exists=$(echo "$index" | jq --arg p "$old_path" '.docs | has($p)')
-  if [ "$exists" != "true" ]; then
+  if [ "$has_old" != "1" ]; then
     echo "ERROR: '$old_path' not found in index. Nothing to move." >&2
     exit 1
   fi
 
   # Refuse to clobber: overwriting the destination would discard ITS metadata,
   # which is the precise loss move-entry exists to prevent.
-  local target_exists
-  target_exists=$(echo "$index" | jq --arg p "$new_path" '.docs | has($p)')
-  if [ "$target_exists" = "true" ]; then
+  if [ "$has_new" = "1" ]; then
     echo "ERROR: '$new_path' is already in the index. Refusing to overwrite it." >&2
     echo "       Remove it first (remove-entry) if it is genuinely obsolete." >&2
     exit 1
@@ -1051,9 +1473,8 @@ cmd_move_entry() {
     echo "WARNING: '$old_path' still exists on disk; it will be left unindexed." >&2
   fi
 
-  local now content_hash_val
-  now=$(iso_now)
-  content_hash_val="\"sha256:$(hash_file "$new_path")\""
+  local content_hash
+  content_hash="sha256:$(hash_file "$new_path")"
 
   # The entry object is carried over WHOLESALE (`.value + {content_hash: …}`)
   # rather than field-by-field, so a field this code has never heard of still
@@ -1071,32 +1492,33 @@ cmd_move_entry() {
   # The second stage repoints other entries' path-valued fields, which
   # references/doc-spec.md holds to the same key contract as the keys themselves
   # — without it a rename leaves a dangling superseded_by/replaces.
-  index=$(echo "$index" | jq \
-    --arg old "$old_path" \
-    --arg new "$new_path" \
-    --argjson content_hash "$content_hash_val" \
-    --arg generated_at "$now" \
-    '.docs |= (to_entries
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  _index_apply '.docs |= (to_entries
                | map(if .key == $old
                      then {key: $new, value: (.value + {content_hash: $content_hash})}
                      else . end)
                | from_entries)
     | .docs |= map_values(
         (if .replaces == $old then .replaces = $new else . end)
-        | (if .superseded_by == $old then .superseded_by = $new else . end))
-    | .generated_at = $generated_at')
-
-  echo "$index" > "$index_file"
+        | (if .superseded_by == $old then .superseded_by = $new else . end))' \
+    --arg old "$old_path" \
+    --arg new "$new_path" \
+    --arg content_hash "$content_hash"
 
   echo "Moved 1 entry:" >&2
   echo "  $old_path -> $new_path" >&2
+  local repointed=() k
+  for k in "${_INDEX_CHANGED[@]+"${_INDEX_CHANGED[@]}"}"; do
+    [ "$k" = "$old_path" ] || [ "$k" = "$new_path" ] || repointed+=("$k")
+  done
+  if [ ${#repointed[@]} -gt 0 ]; then
+    _report_keys "Repointed" "(replaces/superseded_by now name the new path)" "${repointed[@]}"
+  fi
 }
 
 cmd_deprecate_entry() {
-  local index_file="docs/.doc-index.json"
-
-  if [ ! -f "$index_file" ]; then
-    echo "ERROR: doc-index.json not found at $index_file. Run build-index first." >&2
+  if [ ! -f "$INDEX_FILE" ]; then
+    echo "ERROR: doc-index.json not found at $INDEX_FILE. Run build-index first." >&2
     exit 1
   fi
 
@@ -1127,54 +1549,57 @@ cmd_deprecate_entry() {
     exit 1
   fi
 
-  local index
-  index=$(cat "$index_file")
-  local now
-  now=$(iso_now)
-  local count=0
-  local targets=()
-
   # Normalize up front — same rationale as remove-entry: an absolute path used to
   # report "not found" and exit 0, silently failing to deprecate a real entry.
-  local raw_doc_path
+  local targets=() raw_doc_path doc_path
   for raw_doc_path in "$@"; do
-    local doc_path
     doc_path=$(normalize_doc_path "$raw_doc_path") || exit 1
     targets+=("$doc_path")
   done
 
-  for doc_path in "${targets[@]+"${targets[@]}"}"; do
-    local exists
-    exists=$(echo "$index" | jq --arg p "$doc_path" '.docs | has($p)')
-    if [ "$exists" != "true" ]; then
-      echo "SKIP: '$doc_path' not found in index." >&2
+  _scratch_init
+  _index_now
+  # Presence is read under the lock so "not found" and "already deprecated"
+  # (a no-op) can be told apart in the report.
+  _index_lock
+  local snap
+  snap=$(_index_load) || exit 1
+  local absent=() present_flag i=0
+  while IFS= read -r present_flag; do
+    [ "$present_flag" = "1" ] || absent+=("${targets[$i]}")
+    i=$((i + 1))
+  done < <(_index_present "$snap" "${targets[@]}")
+
+  local patch="$_SCRATCH/deprecate-patch.jsonl"
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  jq -nc --argjson superseded_by "$superseded_by" --arg now "$_INDEX_NOW" \
+    '$ARGS.positional[] | {key: ., merge: {status: "deprecated", superseded_by: $superseded_by, last_verified: $now}}' \
+    --args "${targets[@]}" > "$patch"
+  _index_apply "$_INDEX_PATCH" --slurpfile patch "$patch"
+
+  local deprecated=() unchanged=() p
+  for doc_path in "${targets[@]}"; do
+    if _index_changed_has "$doc_path"; then
+      deprecated+=("$doc_path")
       continue
     fi
-
-    index=$(echo "$index" | jq \
-      --arg p "$doc_path" \
-      --argjson superseded_by "$superseded_by" \
-      --arg last_verified "$now" \
-      '.docs[$p].status = "deprecated"
-      | .docs[$p].superseded_by = $superseded_by
-      | .docs[$p].last_verified = $last_verified')
-    count=$((count + 1))
+    local is_absent=0
+    for p in "${absent[@]+"${absent[@]}"}"; do
+      [ "$p" = "$doc_path" ] && is_absent=1
+    done
+    if [ "$is_absent" = 1 ]; then
+      echo "SKIP: '$doc_path' not found in index." >&2
+    else
+      unchanged+=("$doc_path")
+    fi
   done
-
-  # Update generated_at
-  index=$(echo "$index" | jq --arg generated_at "$now" '.generated_at = $generated_at')
-
-  echo "$index" > "$index_file"
-
-  echo "Deprecated $count $([ "$count" -eq 1 ] && echo entry || echo entries):" >&2
-  for doc_path in "${targets[@]+"${targets[@]}"}"; do
-    echo "  $doc_path" >&2
-  done
+  _report_keys "Deprecated" "" "${deprecated[@]+"${deprecated[@]}"}"
+  if [ ${#unchanged[@]} -gt 0 ]; then
+    _report_keys "Unchanged" "(already deprecated)" "${unchanged[@]}"
+  fi
 }
 
 cmd_status() {
-  local index_file="docs/.doc-index.json"
-
   if [ $# -eq 0 ]; then
     echo "ERROR: status requires a doc path argument." >&2
     exit 1
@@ -1183,13 +1608,10 @@ cmd_status() {
   local doc_path
   doc_path=$(normalize_doc_path "$1") || exit 1
 
-  if [ ! -f "$index_file" ]; then
-    echo "ERROR: doc-index.json not found at $index_file. Run build-index first." >&2
-    exit 1
-  fi
-
-  local index
-  index=$(cat "$index_file")
+  _scratch_init
+  local snap index
+  snap=$(_index_load) || exit 1
+  index=$(cat "$snap")
 
   # Verify path exists in index
   local exists
@@ -1968,6 +2390,7 @@ _tools_extract_version() {
 # --- Main ---
 
 check_deps
+_traps
 
 case "${1:-}" in
   build-index)      shift; cmd_build_index "$@" ;;
