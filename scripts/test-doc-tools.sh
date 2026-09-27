@@ -829,7 +829,7 @@ test_status_unknown_path() {
 }
 
 test_status_requires_path_arg() {
-  echo "test: status exits 1 with no path argument"
+  echo "test: status exits 2 (usage error) with no path argument"
   setup
   echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
   set +e
@@ -837,7 +837,7 @@ test_status_requires_path_arg() {
   "$DOC_TOOLS" status >/dev/null 2>&1
   exit_code=$?
   set -e
-  assert_eq "1" "$exit_code" "exits 1 with no arg"
+  assert_eq "2" "$exit_code" "exits 2 with no arg"
   teardown
 }
 
@@ -1024,7 +1024,7 @@ test_bump_version_requires_arg() {
   output=$("$DOC_TOOLS" bump-version 2>&1)
   exit_code=$?
   set -e
-  assert_eq "1" "$exit_code" "exits 1"
+  assert_eq "2" "$exit_code" "exits 2 (usage error)"
   assert_contains "$output" "requires a version" "error message"
   teardown
 }
@@ -2010,13 +2010,13 @@ test_move_entry_requires_two_args() {
   output=$("$DOC_TOOLS" move-entry 2>&1)
   exit_code=$?
   set -e
-  assert_eq "1" "$exit_code" "exits 1 with no arguments"
+  assert_eq "2" "$exit_code" "exits 2 (usage error) with no arguments"
   assert_contains "$output" "requires exactly two arguments" "stderr explains the arity"
   set +e
   output=$("$DOC_TOOLS" move-entry docs/architecture.md 2>&1)
   exit_code=$?
   set -e
-  assert_eq "1" "$exit_code" "exits 1 with one argument"
+  assert_eq "2" "$exit_code" "exits 2 (usage error) with one argument"
   assert_contains "$output" "two arguments" "stderr explains the arity"
   teardown
 }
@@ -2262,7 +2262,14 @@ test_index_term_mid_build_index_keeps_previous_index() {
     printf 'docs/gen/d%d.md:src/:gen\n' "$i"
     i=$((i + 1))
   done > "$mapping"
-  "$DOC_TOOLS" build-index --force < "$mapping" >/dev/null 2>&1 &
+  # Held mid-build by a slow git, not by machine speed: since I-4 the run is
+  # mostly one `git rev-list … -- src/` per entry, cheap enough on Linux to
+  # finish before the kill. The shim sleeps after each call whose last
+  # argument is the ref "src/", so the TERM lands in the per-entry loop (stdin
+  # read, nothing written) and the precondition holds on any machine.
+  local shim
+  shim=$(_i2_slow_shim git 'src/')
+  PATH="$shim:$PATH" "$DOC_TOOLS" build-index --force < "$mapping" >/dev/null 2>&1 &
   harness_kill_after 1 TERM "$!" || rc=$?
   assert_eq "1" "$HARNESS_KILL_ALIVE" "precondition: build-index still running when signalled"
   assert_eq "143" "$rc" "build-index exits 143 on SIGTERM"
@@ -2948,10 +2955,25 @@ test_i4_mapping_line_parser() {
     "a path containing ':' is rejected, never re-keyed as docs/a"
   assert_contains "$out" "srcc/" "a ref that matches no tracked path is warned about"
   assert_json_field "$json" '.docs["docs/typo.md"].code_refs | join(",")' "srcc/" "…but the entry is still added"
+  # The short forms: one ':' in the path and no doc_type, or no doc_type field
+  # at all. Both used to key the entry docs/a with ref b.md, rc 0.
+  local form
+  for form in "docs/a:b.md" "docs/a:b.md:src/"; do
+    rc=0
+    out=$(printf '%s\n' "$form" | "$DOC_TOOLS" add-entry 2>&1) || rc=$?
+    json=$(cat docs/.doc-index.json)
+    assert_true "add-entry '$form' exits non-zero (rc=$rc)" test "$rc" -ne 0
+    assert_json_field "$json" '.docs | has("docs/a")' "false" "'$form' is not keyed as docs/a"
+    assert_contains "$out" "ambiguous" "'$form' is rejected as ambiguous"
+  done
   # build-index replaces the whole index, so one bad line aborts all of it.
   rc=0
   printf '%s\n' "docs/crlf.md:src/:guide" "docs/bare.md" | "$DOC_TOOLS" build-index --force >/dev/null 2>&1 || rc=$?
   assert_true "build-index --force refuses input with a bare-path line (rc=$rc)" test "$rc" -ne 0
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs | has("docs/spaced.md")' "true" "…and leaves the index as it was"
+  rc=0
+  printf '%s\n' "docs/crlf.md:src/:guide" "docs/a:b.md:src/" | "$DOC_TOOLS" build-index --force >/dev/null 2>&1 || rc=$?
+  assert_true "build-index --force refuses an ambiguous ':' path line (rc=$rc)" test "$rc" -ne 0
   assert_json_field "$(cat docs/.doc-index.json)" '.docs | has("docs/spaced.md")' "true" "…and leaves the index as it was"
   teardown
 }
@@ -3230,6 +3252,48 @@ test_i4_hostile_names_and_stored_values() {
   teardown
 }
 
+# The option specs in the verb table contain "*" (code-refs-from=*). Split
+# unquoted, a spec underwent pathname expansion: a file named
+# "code-refs-from=zz" in the working directory made --code-refs-from unknown.
+test_i4_option_spec_is_not_glob_expanded() {
+  echo "test: I-4: a file named like an option spec does not change which options a verb takes"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  : > "code-refs-from=zz"
+  local out rc=0
+  out=$(printf 'src/index.js\n' | "$DOC_TOOLS" check-freshness --code-refs-from - 2>&1) || rc=$?
+  assert_eq "0" "$rc" "--code-refs-from - still works with 'code-refs-from=zz' in the cwd (output: ${out:0:200})"
+  assert_json_field "$out" '.docs | keys | join(",")' "docs/architecture.md" "…and still scopes the report"
+  rm -f "code-refs-from=zz"
+  teardown
+}
+
+# Every wrong-number-of-arguments error is a usage error: exit 2, index
+# untouched (status used to exit 1 for two paths, bump-version 2 for two
+# versions; missing paths exited 1 everywhere).
+test_i4_arity_errors_exit_2() {
+  echo "test: I-4: every wrong-number-of-arguments error exits 2 and writes nothing"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local before cmd rc out
+  before=$(hash_file docs/.doc-index.json)
+  for cmd in "status" "status docs/architecture.md docs/x.md" "update-index" "remove-entry" \
+      "deprecate-entry" "deprecate-entry --superseded-by docs/architecture.md" "move-entry" \
+      "move-entry docs/architecture.md" "move-entry docs/a.md docs/b.md docs/c.md" \
+      "bump-version" "bump-version 1.0.0 2.0.0" "fragments validate" "fragments validate a.md b.md" \
+      "fragments merge HEAD" "fragments merge HEAD~1 HEAD extra" "implementation-status" \
+      "set-implementation" "set-implementation docs/architecture.md" \
+      "set-implementation docs/architecture.md docs/x.md --ref PR:1 --status complete" \
+      "check-version extra" "fragments list extra" "tools status extra" "help status extra"; do
+    rc=0
+    # shellcheck disable=SC2086  # $cmd is a fixed word list
+    out=$("$DOC_TOOLS" $cmd </dev/null 2>&1 >/dev/null) || rc=$?
+    assert_eq "2" "$rc" "'$cmd' exits 2 (stderr: ${out:0:160})"
+  done
+  assert_eq "$before" "$(hash_file docs/.doc-index.json)" "no arity error touched the index"
+  teardown
+}
+
 # --- Runner ---
 
 run_tests() {
@@ -3388,6 +3452,8 @@ run_tests() {
   test_i4_unborn_head
   test_i4_update_index_unknown_key_applies_the_rest
   test_i4_hostile_names_and_stored_values
+  test_i4_option_spec_is_not_glob_expanded
+  test_i4_arity_errors_exit_2
 
   print_summary
 }

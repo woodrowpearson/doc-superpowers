@@ -1072,12 +1072,16 @@ Options:
 Mapping lines (stdin of build-index and add-entry, one doc per line):
   doc_path:code_refs_csv:doc_type
   e.g. docs/architecture.md:SKILL.md,scripts/:architecture
-  At most three ':'-separated fields, so a path or ref may not contain ':';
-  a bare path (no ':') is rejected rather than guessed at. doc_type may be
-  empty or omitted. Refs are comma-separated; each is trimmed, and empty
-  ones are dropped. A trailing CR (a CRLF file) is removed. A ref that
-  matches no file tracked by git is warned about: a typo there leaves the
-  doc with no code history, so it can never go stale.
+  ':' separates the fields, so a doc path or ref may not contain one. A
+  line is rejected when it is a bare path (no ':'), when it has more than
+  three fields, or when its first field is not a file but its first two or
+  three fields joined by ':' name one: an existing ':' file would otherwise
+  be indexed under the wrong key. (A ':' path whose file does not exist yet
+  cannot be detected.) doc_type may be empty or omitted. Refs are
+  comma-separated; each is trimmed, and empty ones are dropped. A trailing
+  CR (a CRLF file) is removed. A ref that matches no file tracked by git is
+  warned about: a typo there leaves the doc with no code history, so it can
+  never go stale.
 
 Doc paths:
   The doc-index is keyed by paths relative to the repo root, and every
@@ -1102,8 +1106,9 @@ Exit status:
      outside the repo, a key not in the index, build-index over a non-empty
      index without --force, …)
   2  usage error: an unknown subcommand or option, an option without its
-     value, an argument to a subcommand that takes none, or a repository
-     subcommand run outside a git work tree
+     value, the wrong number of arguments (including one given to a
+     subcommand that takes none), or a repository subcommand run outside a
+     git work tree. A malformed argument value (bump-version abc) is 1.
 
 Environment:
   DOC_TOOLS_LOCK_TIMEOUT  Seconds a writer waits for the index lock before
@@ -1240,8 +1245,12 @@ _parse_args() {
   local verb="$1" spec="$2"
   shift 2
   _ARGS=()
-  local s n
-  for s in $spec; do
+  # Split the spec with read, never by an unquoted expansion: "name=*" would
+  # undergo pathname expansion (a file "code-refs-from=zz" in the working
+  # directory made --code-refs-from an unknown option).
+  local specs=() s n
+  read -r -a specs <<<"$spec"
+  for s in ${specs[@]+"${specs[@]}"}; do
     n="${s%[=+]*}"
     n="${n//-/_}"
     printf -v "_OPT_$n" '%s' ""
@@ -1266,7 +1275,7 @@ _parse_args() {
       *) _ARGS+=("$a"); continue ;;
     esac
     kind=""
-    for s in $spec; do
+    for s in ${specs[@]+"${specs[@]}"}; do
       case "$s" in
         "$name") kind=flag ;;
         "$name=") kind=one ;;
@@ -1367,12 +1376,14 @@ _main() {
     esac
   done
 
+  # Terminating traps before anything that can block (the repository check
+  # runs git), so a signal at any point from here ends the run through cleanup.
+  _traps
   _parse_args "$verb" "$_VERB_OPTS" "$@"
   case "$_VERB_NEEDS" in
     repo) check_deps || exit 1; _require_repo "$verb" ;;
     deps) check_deps || exit 1 ;;
   esac
-  _traps
   "$_VERB_HANDLER" ${_ARGS[@]+"${_ARGS[@]}"}
 }
 
@@ -1419,6 +1430,18 @@ _entry_from_line() {
   if [ -n "$extra" ]; then
     _line_error "$lineno" "$line" "more than three ':'-separated fields"
     return 1
+  fi
+  # A ':' inside a doc path cannot be told from the field separator:
+  # `docs/a:b.md` reads as path docs/a with ref b.md (and with doc_type
+  # omitted, which is allowed, a three-field line parses cleanly too). When the
+  # first field names no file but the first two or three fields joined by ':'
+  # do, the line is ambiguous: refuse it rather than index the wrong key. (A
+  # ':'-path whose file does not exist yet cannot be detected.)
+  if [ ! -f "$path" ]; then
+    if [ -e "$path:$refs" ] || { case "$line" in *:*:*) [ -e "$path:$refs:$type" ] ;; *) false ;; esac; }; then
+      _line_error "$lineno" "$line" "ambiguous: a file named with ':' exists, but ':' separates the fields (a doc path may not contain ':')"
+      return 1
+    fi
   fi
   _trim "$path"
   if ! _norm_path "$_TRIMMED"; then
@@ -1731,10 +1754,7 @@ cmd_update_index() {
     exit 1
   fi
 
-  if [ $# -eq 0 ]; then
-    echo "ERROR: update-index requires at least one doc path argument." >&2
-    exit 1
-  fi
+  [ $# -gt 0 ] || _usage_error update-index "requires at least one doc path argument"
 
   local targets=() doc_path
   _targets_from_args "$@"
@@ -1979,10 +1999,7 @@ cmd_remove_entry() {
     exit 1
   fi
 
-  if [ $# -eq 0 ]; then
-    echo "ERROR: remove-entry requires at least one doc path argument." >&2
-    exit 1
-  fi
+  [ $# -gt 0 ] || _usage_error remove-entry "requires at least one doc path argument"
 
   # Normalize every path up front so an unusable one aborts before we mutate the
   # index. Without this an absolute path merely reported "not found in index" and
@@ -2018,11 +2035,7 @@ cmd_move_entry() {
   # A move is inherently PAIRED, so this takes exactly one pair. A varargs
   # `move-entry old1 new1 old2 new2` form would silently mis-pair on an odd
   # argument count, and the failure mode is an index full of wrong keys.
-  if [ $# -ne 2 ]; then
-    echo "ERROR: move-entry requires exactly two arguments." >&2
-    echo "Usage: move-entry <old_doc_path> <new_doc_path>" >&2
-    exit 1
-  fi
+  [ $# -eq 2 ] || _usage_error move-entry "requires exactly two arguments: <old_doc_path> <new_doc_path> (got $#)"
 
   local old_path new_path
   old_path=$(normalize_doc_path "$1" "old doc path") || exit 1
@@ -2123,11 +2136,7 @@ cmd_deprecate_entry() {
     exit 1
   fi
 
-  if [ $# -eq 0 ]; then
-    echo "ERROR: deprecate-entry requires at least one doc path argument." >&2
-    echo "Usage: deprecate-entry [--superseded-by <path>] <doc_path> [doc_path ...]" >&2
-    exit 1
-  fi
+  [ $# -gt 0 ] || _usage_error deprecate-entry "requires at least one doc path argument"
 
   # --superseded-by may come anywhere on the line (_parse_args): given after
   # the path it used to be taken for a second target, deprecating the
@@ -2188,14 +2197,8 @@ cmd_deprecate_entry() {
 }
 
 cmd_status() {
-  if [ $# -eq 0 ]; then
-    echo "ERROR: status requires a doc path argument." >&2
-    exit 1
-  fi
-  if [ $# -gt 1 ]; then
-    echo "ERROR: status takes exactly one doc path (got $#); check-freshness reports every doc." >&2
-    exit 1
-  fi
+  [ $# -gt 0 ] || _usage_error status "requires a doc path argument"
+  [ $# -eq 1 ] || _usage_error status "takes exactly one doc path (got $#); check-freshness reports every doc"
 
   local doc_path
   doc_path=$(normalize_doc_path "$1") || exit 1
@@ -2235,10 +2238,9 @@ cmd_bump_version() {
     _usage_error bump-version "takes one version (got $#: $*)"
   fi
   local new_version="${1:-}"
-  if [[ -z "$new_version" ]]; then
-    echo "ERROR: bump-version requires a version argument (e.g., 2.5.0)" >&2
-    exit 1
-  fi
+  # A malformed version (below) is a bad value, exit 1; a missing one is a
+  # usage error.
+  [ -n "$new_version" ] || _usage_error bump-version "requires a version argument (e.g., 2.5.0)"
 
   # Validate semver format
   if ! [[ "$new_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -2424,10 +2426,7 @@ cmd_fragments_validate() {
   if [ $# -gt 1 ]; then
     _usage_error "fragments validate" "takes one fragment path (got $#)"
   fi
-  if [[ -z "$path" ]]; then
-    echo "Usage: $0 fragments validate <path>" >&2
-    return 2
-  fi
+  [ -n "$path" ] || _usage_error "fragments validate" "requires a fragment path"
   if [[ ! -f "$path" ]]; then
     echo "ERROR: fragment not found: $path" >&2
     return 2
@@ -2450,18 +2449,14 @@ cmd_fragments_validate() {
 cmd_fragments_merge() {
   local range_start="${1:-}" range_end="${2:-}"
   local paths_out_file="${_OPT_paths_out:-}"
-  if [ $# -gt 2 ]; then
-    _usage_error "fragments merge" "takes <range-start> <range-end> (got $# arguments)"
+  if [ $# -ne 2 ] || [ -z "$range_start" ] || [ -z "$range_end" ]; then
+    _usage_error "fragments merge" "requires exactly <range-start> <range-end> (got $# arguments)"
   fi
   # Optional --paths-out <file>: write one consumed-fragment path per line.
   # Lets callers (e.g., SKILL.md step 9) `git rm` only the fragments that were
   # actually merged, instead of globbing PR-*.md unconditionally.
   if [ -n "$paths_out_file" ]; then
     : > "$paths_out_file"
-  fi
-  if [[ -z "$range_start" ]] || [[ -z "$range_end" ]]; then
-    echo "Usage: doc-tools.sh fragments merge <range-start> <range-end> [--paths-out <file>]" >&2
-    return 2
   fi
   local dir="RELEASE-NOTES.next"
   if [[ ! -d "$dir" ]]; then
@@ -2630,8 +2625,7 @@ cmd_set_implementation() {
     fi
 
     if [[ -z "$FILE" || -z "$REF" || -z "$STATUS" ]]; then
-        echo "Usage: set-implementation <path> --ref <kind: ref> --status <status> [--note <note>]" >&2
-        exit 2
+        _usage_error set-implementation "requires <path> --ref <kind: ref> --status <status>"
     fi
     if [[ ! -f "$FILE" ]]; then
         echo "ERROR: file not found: $FILE" >&2
@@ -2689,6 +2683,7 @@ cmd_implementation_status() {
     # Usage: doc-tools.sh implementation-status [--filter <status>[,<status>...]] <path> [<path>...]
     # --filter (anywhere) comes from _parse_args.
     local FILTER="${_OPT_filter:-}"
+    [ $# -gt 0 ] || _usage_error implementation-status "requires at least one doc path"
 
     local path block filter_re
     for path in "$@"; do
