@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-27T10:42:08Z",
+  "generated_at": "2026-09-27T12:23:15Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -20,17 +20,17 @@
       "implementation": []
     },
     "docs/codebase-guide.md": {
-      "content_hash": "sha256:cf08593abed15838df95243fdec7a54b297ed2fa7f5f99eaf13cf3b56e812156",
+      "content_hash": "sha256:2ab2634b4fb4e1bf6fb9c7dc7b9ff5e40d6b2ade8c8b0b6d8c6d43e475469444",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "c74f5780b5dbd01c328649c8797963b538844e49",
+      "code_commit": "1d295c6ca13d2433c5b8be935b44e9ce4d79805a",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T10:42:08Z",
+      "last_verified": "2026-09-27T12:23:15Z",
       "implementation": []
     },
     "docs/conventions.md": {
@@ -62,17 +62,17 @@
       "implementation": []
     },
     "docs/workflows/doc-superpowers.md": {
-      "content_hash": "sha256:a111449a7c3e7e2ec5de1089b347c4f38a7a9e12476f17c6e5175c9a1819eef6",
+      "content_hash": "sha256:5e4456f0f03e7d14f4d8dc0b3e104dbc4440eca750064e0d58ac9d79f8802cbf",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "3bccb8abc9ae692999e52de2c08f178fdb0ab535",
+      "code_commit": "1d295c6ca13d2433c5b8be935b44e9ce4d79805a",
       "doc_type": "workflows",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T09:00:47Z",
+      "last_verified": "2026-09-27T12:23:15Z",
       "implementation": []
     },
     "docs/plans/2026-03-26-audit-report.md": {
@@ -444,16 +444,17 @@
       "last_verified": "2026-07-30T01:57:08Z"
     },
     "docs/issues/2026-07-29-usage-omits-implementation-verbs.md": {
-      "content_hash": "sha256:670e906f8818b46019c7881abdf213e56138ffd1b46b406403fe0d2ad8164d3e",
+      "content_hash": "sha256:813e22eff2231ed26d99b5739c31d0f9b912cc6f54ea790cde19fb5dd4ec3b4b",
       "code_refs": [
         "scripts/doc-tools.sh"
       ],
-      "code_commit": "76a4e6f4addcf50bfb922179a4914306c614148a",
+      "code_commit": "1d295c6ca13d2433c5b8be935b44e9ce4d79805a",
       "doc_type": "issue",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-30T01:57:08Z"
+      "last_verified": "2026-09-27T12:23:15Z",
+      "implementation": []
     },
     "docs/issues/2026-07-29-index-write-is-not-atomic.md": {
       "content_hash": "sha256:e67aaba89a3f6416ca902ac24aa2e1af2d3d32bff367cb42be915d6dadb7251a",
@@ -534,14 +535,15 @@
       "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I04-doc-tools-input-cli-robustness.md": {
-      "content_hash": "sha256:62cf18fe63ab7053d414cc08445a598ed971982c720f8e14d573a54f2e3f4b90",
+      "content_hash": "sha256:e59ce9e5b7607dd15d004e14b3ab554c68f2451c146b758332e5f7e624ea0cf7",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T06:12:33Z"
+      "last_verified": "2026-09-27T12:23:15Z",
+      "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I05-merge-driver-not-three-way.md": {
       "content_hash": "sha256:14c4beaacb99256bad6a6334b270fe15cfc42887da9add802629db1e3f1d4d33",

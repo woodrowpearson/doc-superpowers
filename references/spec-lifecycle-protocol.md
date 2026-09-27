@@ -50,7 +50,7 @@ PR review ──→ spec-verify (review) ──→ freshness + coverage findings
 **Error handling:**
 - Missing design doc → error with path suggestion
 - No `docs/specs/` directory → bootstrap it (mkdir + create template + README)
-- No `.doc-index.json` → run `doc-tools.sh build-index` first
+- No `.doc-index.json` → created from the new specs' mapping lines by `doc-tools.sh build-index` (it refuses empty input)
 
 ---
 

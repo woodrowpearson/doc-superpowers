@@ -1,6 +1,6 @@
 ---
 date: 2026-07-29
-status: Open
+status: Resolved
 priority: P2
 type: bug
 component: doc-tools
@@ -118,3 +118,20 @@ documented as writing a file it does not write.
    would have caught this in v2.11.0. Deriving both lists from one array is the
    stronger fix but is a larger refactor of the dispatcher; the test is the
    cheap guard that makes the omission impossible to ship again either way.
+
+## Resolution
+
+Resolved by Task 3 of the sweep 05ea982 fix plan (I-4), with the stronger of the two proposed
+fixes. `scripts/doc-tools.sh` now has one verb table (`_VERBS`), and both the dispatcher and
+`--help` are generated from it, so no verb can dispatch without being listed. `--help` now lists
+`implementation-status`, `set-implementation`, and each `fragments` and `tools` subcommand.
+
+`bump-version`'s entry names the six `VERSION_FILES` and states that `RELEASE-NOTES.md` is read
+by `check-version` and never written.
+
+`test_i4_help_lists_every_dispatchable_verb` checks the class, not one instance:
+
+- every table row appears in `--help` and dispatches (`<verb> --help` exits 0);
+- every `cmd_*` handler has a row;
+- every verb in SKILL.md's tooling table appears in `--help`;
+- `bump-version --help` names every `VERSION_FILES` entry.

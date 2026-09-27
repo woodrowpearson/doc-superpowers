@@ -62,41 +62,44 @@ EOF
 
 # --- Tests ---
 
+# Exit 2 is the command-line-error status (sweep 05ea982 I-4): no subcommand
+# and an unknown one are both usage errors; --help is a successful request.
 test_no_args_prints_usage() {
-  echo "test: no args prints usage and exits 1"
+  echo "test: no args prints usage and exits 2"
   setup
   set +e
   local output
   output=$("$DOC_TOOLS" 2>&1)
   local exit_code=$?
   set -e
-  assert_eq "1" "$exit_code" "exits 1 with no args"
+  assert_eq "2" "$exit_code" "exits 2 with no args"
   assert_contains "$output" "Usage" "prints usage"
   teardown
 }
 
 test_unknown_subcommand_prints_usage() {
-  echo "test: unknown subcommand prints usage and exits 1"
+  echo "test: unknown subcommand is named, prints usage and exits 2"
   setup
   set +e
   local output
   output=$("$DOC_TOOLS" unknown 2>&1)
   local exit_code=$?
   set -e
-  assert_eq "1" "$exit_code" "exits 1 with unknown subcommand"
+  assert_eq "2" "$exit_code" "exits 2 with unknown subcommand"
+  assert_contains "$output" "unknown subcommand 'unknown'" "names the unknown subcommand"
   assert_contains "$output" "Usage" "prints usage for unknown subcommand"
   teardown
 }
 
 test_help_flag() {
-  echo "test: --help prints usage and exits 1"
+  echo "test: --help prints usage and exits 0"
   setup
   set +e
   local output
   output=$("$DOC_TOOLS" --help 2>&1)
   local exit_code=$?
   set -e
-  assert_eq "1" "$exit_code" "exits 1 with --help"
+  assert_eq "0" "$exit_code" "exits 0 with --help"
   assert_contains "$output" "Usage" "prints usage for --help"
   teardown
 }
@@ -191,7 +194,10 @@ test_build_index_sets_status_current() {
 test_build_index_null_code_commit_for_untracked() {
   echo "test: build-index sets null code_commit for never-committed paths"
   setup
-  echo "docs/architecture.md:nonexistent/:architecture" | "$DOC_TOOLS" build-index
+  local err
+  err=$(echo "docs/architecture.md:nonexistent/:architecture" | "$DOC_TOOLS" build-index 2>&1)
+  assert_contains "$err" "code ref 'nonexistent/' matches no file tracked by git" \
+    "the never-committed ref is warned about (such a doc can never go stale)"
   local json
   json=$(cat docs/.doc-index.json)
   assert_json_field "$json" '.docs["docs/architecture.md"].code_commit' "null" "code_commit is null for untracked path"
@@ -659,15 +665,23 @@ test_build_index_and_check_freshness_beyond_argv_limits() {
 
   local err_file
   err_file=$(harness_mktemp argmax-stderr)
+  local build_start build_elapsed
+  build_start=$(date +%s)
   set +e
   "$DOC_TOOLS" build-index < "$mapping_tmp" 2>"$err_file"
   local build_rc=$?
   set -e
+  build_elapsed=$(( $(date +%s) - build_start ))
   rm -f "$mapping_tmp"
 
   local build_err
   build_err=$(cat "$err_file" 2>/dev/null || true)
   assert_eq "0" "$build_rc" "build-index exits 0 (stderr: ${build_err:-none})"
+  # These 5,000-character fields once cost ~8 s EACH under bash 3.2 (a
+  # quadratic newline count in _rec_put): this build ran for over half an
+  # hour there, and nothing failed — the suite just never finished.
+  assert_true "build-index of $doc_count wide entries took ${build_elapsed}s (budget 60s)" \
+    test "$build_elapsed" -le 60
   assert_not_contains "$build_err" "Argument list too long" "build-index does not hit the argv ceiling"
 
   # The premise of the test: if this is not comfortably over the platform caps,
@@ -715,16 +729,16 @@ test_check_freshness_scales_to_large_index() {
   #
   # Wall-clock alone is too blunt: a 4-jq-per-entry regression still finished
   # inside the budget on a fast machine. The primary guard therefore COUNTS jq
-  # spawns through a logging shim on PATH. Target: N + c (at most one jq per
-  # entry). Today the loop still spends 1 jq per entry plus 2 more per stale
-  # entry (3N on this all-stale fixture) — a known defect owned by T4 (I-1,
-  # batch-check rewrite), recorded as XFAIL. Until then 3N + c is enforced, so
-  # the 4-per-entry regression class is caught now. No guard aborts the suite.
+  # spawns through a logging shim on PATH. Since I-4 (sweep 05ea982) no jq
+  # runs per entry — one pass extracts the entries, the verdicts go back as
+  # one record stream — so the budget is a constant, independent of N. (The
+  # loop used to spend 1 jq per entry plus 2 per stale entry: 3N here.) The
+  # git work per entry is still T4's (I-1: content identity, batch-check).
   #
   # The wall-clock budget is a coarse backstop only; it includes the counting
-  # shim's own per-spawn fork+exec (~+40% here), hence 120 s rather than 60 s.
-  local doc_count=500 spawn_slack=20
-  echo "test: check-freshness scales to ~$doc_count entries (bounded jq spawns, within 120s)"
+  # shim's own per-spawn fork+exec, hence 120 s rather than 60 s.
+  local doc_count=500 spawn_budget=10
+  echo "test: check-freshness scales to ~$doc_count entries (constant jq spawns, within 120s)"
   setup
   # Build a synthetic index with 500 docs pointing at a single tracked
   # code dir, plus a deliberate stale ref to exercise compute_freshness.
@@ -765,11 +779,7 @@ test_check_freshness_scales_to_large_index() {
   assert_eq "0" "$rc" "check-freshness exits 0 on a $doc_count-entry index"
   assert_json_field "$output" ".summary.stale" "$doc_count" "all $doc_count synthetic docs reported stale"
 
-  local spawn_budget=$((doc_count + spawn_slack)) spawn_ceiling=$((3 * doc_count + spawn_slack))
-  assert_true "check-freshness spawned $spawns jq processes for $doc_count stale entries (ceiling 3N+c = $spawn_ceiling)" \
-    test "$spawns" -le "$spawn_ceiling"
-  assert_true_known_bug "T4/I-1" \
-    "check-freshness spawned $spawns jq processes for $doc_count entries (target N+c = $spawn_budget)" \
+  assert_true "check-freshness spawned $spawns jq processes for $doc_count stale entries (budget $spawn_budget, independent of N)" \
     test "$spawns" -le "$spawn_budget"
 
   # Real-world failures hit a ~600 s SIGKILL; 120 s still separates the classes.
@@ -916,14 +926,17 @@ test_update_index_updates_generated_at() {
   teardown
 }
 
+# An empty stdin is the default in an agent's non-TTY shell, so it used to
+# write an EMPTY index with rc 0 (sweep 05ea982 I-4). Zero mapping lines is
+# now an error, and nothing is written.
 test_build_index_empty_stdin() {
-  echo "test: build-index with empty stdin produces valid empty index"
+  echo "test: build-index with empty stdin exits non-zero and writes no index"
   setup
-  echo "" | "$DOC_TOOLS" build-index
-  assert_file_exists "docs/.doc-index.json" "index created"
-  local doc_count
-  doc_count=$(jq '.docs | length' docs/.doc-index.json)
-  assert_eq "0" "$doc_count" "zero docs in index"
+  local rc=0 err
+  err=$(echo "" | "$DOC_TOOLS" build-index 2>&1) || rc=$?
+  assert_true "build-index with empty stdin exits non-zero (rc=$rc)" test "$rc" -ne 0
+  assert_contains "$err" "no mapping lines" "says there was nothing to index"
+  assert_file_not_exists "docs/.doc-index.json" "no empty index is written"
   teardown
 }
 
@@ -1652,7 +1665,7 @@ test_add_entry_mixed_batch_applies_valid_and_fails() {
   local json
   json=$(cat docs/.doc-index.json)
   assert_json_field "$json" '.docs | has("docs/design.md")' "true" "valid line still applied"
-  assert_contains "$output" "Rejected 1 invalid path" "reports the rejection"
+  assert_contains "$output" "Rejected 1 invalid mapping line" "reports the rejection"
   teardown
 }
 
@@ -1718,8 +1731,10 @@ test_build_index_rejects_path_outside_repo() {
   before=$(cat docs/.doc-index.json)
   set +e
   local output
+  # --force: the index exists, and without it build-index refuses before it
+  # ever reads a line; this test is about the invalid line.
   output=$(printf '%s\n%s\n' "docs/architecture.md:src/:architecture" "/etc/hosts:src/:design" \
-    | "$DOC_TOOLS" build-index 2>&1)
+    | "$DOC_TOOLS" build-index --force 2>&1)
   local exit_code=$?
   set -e
   assert_eq "1" "$exit_code" "exits non-zero"
@@ -2172,8 +2187,8 @@ test_move_entry_usage_lists_move_entry() {
   # "move-entry" as a substring, so that assertion passes even with the
   # move-entry line deleted entirely (verified: it stayed green against a
   # usage() with the verb renamed away). Anchor on the unambiguous strings.
-  assert_contains "$output" "Usage: move-entry <old_doc_path>" \
-    "usage heredoc documents the move-entry signature"
+  assert_contains "$output" "  move-entry <old_doc_path> <new_doc_path>" \
+    "usage documents the move-entry signature"
   assert_contains "$output" "Re-key an entry after a doc moves" \
     "usage heredoc describes what move-entry does"
   teardown
@@ -2247,7 +2262,7 @@ test_index_term_mid_build_index_keeps_previous_index() {
     printf 'docs/gen/d%d.md:src/:gen\n' "$i"
     i=$((i + 1))
   done > "$mapping"
-  "$DOC_TOOLS" build-index < "$mapping" >/dev/null 2>&1 &
+  "$DOC_TOOLS" build-index --force < "$mapping" >/dev/null 2>&1 &
   harness_kill_after 1 TERM "$!" || rc=$?
   assert_eq "1" "$HARNESS_KILL_ALIVE" "precondition: build-index still running when signalled"
   assert_eq "143" "$rc" "build-index exits 143 on SIGTERM"
@@ -2264,7 +2279,7 @@ test_index_term_while_build_index_blocked_on_stdin() {
   echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
   local before rc=0
   before=$(hash_file docs/.doc-index.json)
-  { sleep 3; } | "$DOC_TOOLS" build-index >/dev/null 2>&1 &
+  { sleep 3; } | "$DOC_TOOLS" build-index --force >/dev/null 2>&1 &
   harness_kill_after 1 TERM "$!" || rc=$?
   assert_eq "1" "$HARNESS_KILL_ALIVE" "precondition: build-index still waiting when signalled"
   assert_true "build-index exits non-zero (rc=$rc)" test "$rc" -ne 0
@@ -2274,14 +2289,18 @@ test_index_term_while_build_index_blocked_on_stdin() {
 }
 
 # check-freshness after TERM used to resume and print a summary that
-# disagreed with its own .docs. It must stop and print nothing.
+# disagreed with its own .docs. It must stop and print nothing. The walk over
+# these 400 (missing) docs takes milliseconds since I-4, so a slow `find` (the
+# untracked-docs scan, which runs before the report is printed) holds it
+# mid-run long enough to be signalled.
 test_index_term_mid_check_freshness_prints_nothing() {
   echo "test: I-2: SIGTERM mid-check-freshness exits 143 with no report"
   setup
   _i2_synthetic_index 400
-  local out rc=0
+  local out rc=0 shim
   out=$(harness_mktemp i2-cf)
-  "$DOC_TOOLS" check-freshness > "$out" 2>/dev/null &
+  shim=$(_i2_slow_shim find '*')
+  PATH="$shim:$PATH" "$DOC_TOOLS" check-freshness > "$out" 2>/dev/null &
   harness_kill_after 0.5 TERM "$!" || rc=$?
   assert_eq "1" "$HARNESS_KILL_ALIVE" "precondition: check-freshness still running when signalled"
   assert_eq "143" "$rc" "check-freshness exits 143 on SIGTERM"
@@ -2716,6 +2735,501 @@ test_index_single_write_path_static() {
   assert_contains "$restore" 'exit "$_INDEX_SIG"' "_signals_restore exits with a deferred signal's status"
 }
 
+# --- CLI and input robustness (sweep 05ea982 I-4) ------------------------------
+#
+# Most callers are LLM agents, so doc-tools.sh cannot trust its command line or
+# its stdin. These pin: flags anywhere in either spelling (--flag X, --flag=X);
+# unknown options refused with exit 2 before anything is read or written; one
+# validated mapping-line parser; one freshness path shared by check-freshness
+# and status; path-segment --code-refs matching; and no git failure read as
+# "no history".
+
+# The rows (verb|handler|needs|options) of doc-tools.sh's verb table, read from
+# the source. The dispatcher and usage() are both generated from this table.
+_i4_table_rows() {
+  grep -E '^[a-z][a-z-]*( [a-z][a-z-]*)?[|]cmd_[a-z_]+[|](repo|deps|none)[|]' \
+    "$SCRIPT_DIR/doc-tools.sh" || true
+}
+
+# SHA-256 of a file's bytes, read from stdin: the harness hash_file passes the
+# name as an argument, so a backslash in it prefixes the digest with "\".
+_i4_sha() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum < "$1" | awk '{print $1}'
+  else
+    shasum -a 256 < "$1" | awk '{print $1}'
+  fi
+}
+
+# A 40- or 64-hex object id and nothing else (a newline is not hex).
+_i4_is_sha() {
+  case "$1" in
+    ''|*[!0-9a-f]*) return 1 ;;
+  esac
+  [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]
+}
+
+# Sorted, comma-joined .docs keys of a check-freshness report.
+_i4_keys() {
+  jq -r '.docs | keys | join(",")' <<<"$1"
+}
+
+test_i4_help_lists_every_dispatchable_verb() {
+  echo "test: I-4: --help exits 0 (anywhere, without jq or git) and lists every dispatchable verb"
+  local nogit bare out rc arg
+  nogit=$(harness_mktemp_d i4-nogit)
+  bare=$(harness_mktemp_d i4-path)
+  ln -s "$(command -v dirname)" "$bare/dirname"
+  for arg in --help -h help; do
+    rc=0
+    out=$(cd "$nogit" && GIT_CEILING_DIRECTORIES="$SUITE_TMP" PATH="$bare" "$DOC_TOOLS" "$arg" 2>&1) || rc=$?
+    assert_eq "0" "$rc" "'$arg' exits 0 outside a git repo with neither jq nor git on PATH"
+    assert_contains "$out" "Usage: doc-tools.sh" "'$arg' prints the usage"
+  done
+
+  local help rows row verb count=0 unlisted="" undispatched=""
+  help=$("$DOC_TOOLS" --help 2>&1) || true
+  rows=$(_i4_table_rows)
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    count=$((count + 1))
+    verb="${row%%|*}"
+    grep -qE "^  ${verb}( |\$)" <<<"$help" || unlisted="$unlisted '$verb'"
+    rc=0
+    # shellcheck disable=SC2086  # a two-word verb ("fragments merge") is two arguments
+    out=$(cd "$nogit" && GIT_CEILING_DIRECTORIES="$SUITE_TMP" "$DOC_TOOLS" $verb --help 2>&1) || rc=$?
+    { [ "$rc" = 0 ] && grep -qF "doc-tools.sh $verb" <<<"$out"; } || undispatched="$undispatched '$verb'(rc=$rc)"
+  done <<<"$rows"
+  assert_true "the verb table has a row per subcommand ($count found)" test "$count" -ge 19
+  assert_eq "" "$unlisted" "--help lists every verb in the table"
+  assert_eq "" "$undispatched" "every table verb dispatches: '<verb> --help' exits 0 anywhere"
+
+  # No second dispatch list: every cmd_* handler is reached through the table.
+  local handler orphans=""
+  while IFS= read -r handler; do
+    [ -n "$handler" ] || continue
+    grep -qE "[|]${handler}[|]" <<<"$rows" || orphans="$orphans $handler"
+  done < <(grep -oE '^cmd_[a-z_]+\(\)' "$SCRIPT_DIR/doc-tools.sh" | sed 's/()$//' | sort -u)
+  assert_eq "" "$orphans" "every cmd_* handler has a table row (no dispatch path outside the table)"
+
+  # Independent of the table: every verb SKILL.md's tooling table names.
+  local missing_skill=""
+  while IFS= read -r verb; do
+    [ -n "$verb" ] || continue
+    grep -qE "^  ${verb}( |\$)" <<<"$help" || missing_skill="$missing_skill $verb"
+  done < <(grep -oE '^[|] `doc-tools\.sh [a-z-]+`' "$SCRIPT_DIR/../skills/doc-superpowers/SKILL.md" \
+             | sed -E 's/.*doc-tools\.sh ([a-z-]+)`$/\1/' | sort -u)
+  assert_eq "" "$missing_skill" "--help lists every verb in SKILL.md's tooling table"
+
+  # bump-version's help names exactly the files it writes (VERSION_FILES).
+  local bump f wrong=""
+  bump=$("$DOC_TOOLS" bump-version --help 2>&1) || true
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    grep -qF -- "$f" <<<"$bump" || wrong="$wrong $f"
+  done < <(sed -n '/^VERSION_FILES=(/,/^)/p' "$SCRIPT_DIR/doc-tools.sh" | sed -n 's/^ *"\([^:]*\):.*/\1/p')
+  assert_eq "" "$wrong" "bump-version --help names every VERSION_FILES entry"
+  assert_contains "$bump" "never written" "bump-version --help says RELEASE-NOTES.md is never written"
+}
+
+test_i4_flags_anywhere_and_unknown_flags_exit_2() {
+  echo "test: I-4: --flag X / --flag=X anywhere; unknown options exit 2 and touch nothing"
+  setup
+  echo "# design" > docs/design.md
+  echo "# old" > docs/old.md
+  git add -A && git commit -m docs --quiet
+  printf '%s\n' "docs/architecture.md:src/:architecture" "docs/design.md:src/:design" \
+    "docs/old.md:src/:design" | "$DOC_TOOLS" build-index
+  local rc json
+  # The flag AFTER the path used to deprecate the successor, rc 0.
+  rc=0
+  "$DOC_TOOLS" deprecate-entry docs/architecture.md --superseded-by docs/design.md >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "deprecate-entry <old> --superseded-by <new> exits 0"
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/architecture.md"].status' "deprecated" "<old> is deprecated"
+  assert_json_field "$json" '.docs["docs/architecture.md"].superseded_by' "docs/design.md" "<old>.superseded_by is <new>"
+  assert_json_field "$json" '.docs["docs/design.md"].status' "current" "<new>, the successor, is NOT deprecated"
+  rc=0
+  "$DOC_TOOLS" deprecate-entry --superseded-by=docs/design.md docs/old.md >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "--superseded-by=<path> exits 0"
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/old.md"].superseded_by' "docs/design.md" \
+    "--superseded-by=<path> is honoured"
+
+  local before cmd out
+  before=$(hash_file docs/.doc-index.json)
+  for cmd in "check-freshness --bogus" "check-freshness --code-refs" "check-freshness docs/design.md" \
+      "build-index --bogus" "add-entry --bogus" "add-entry docs/design.md" \
+      "update-index --bogus docs/design.md" "update-index docs/design.md -x" \
+      "remove-entry --bogus docs/design.md" "deprecate-entry docs/design.md --bogus" \
+      "deprecate-entry docs/design.md --superseded-by" "move-entry --bogus docs/design.md docs/x.md" \
+      "status docs/design.md --bogus" "check-version --bogus" "fragments list --bogus"; do
+    rc=0
+    # shellcheck disable=SC2086  # $cmd is a fixed word list
+    out=$(echo "docs/design.md:src/:design" | "$DOC_TOOLS" $cmd 2>&1 >/dev/null) || rc=$?
+    assert_eq "2" "$rc" "'$cmd' exits 2 (stderr: $out)"
+    assert_eq "$before" "$(hash_file docs/.doc-index.json)" "'$cmd' leaves the index byte-identical"
+  done
+
+  # --help on a writer prints its usage; it used to run remove-entry on "--help".
+  rc=0
+  out=$("$DOC_TOOLS" remove-entry --help 2>&1) || rc=$?
+  assert_eq "0" "$rc" "remove-entry --help exits 0"
+  assert_contains "$out" "doc-tools.sh remove-entry" "remove-entry --help prints remove-entry's usage"
+  assert_eq "$before" "$(hash_file docs/.doc-index.json)" "remove-entry --help writes nothing"
+
+  # --code-refs=<path> used to be ignored (a full report came back).
+  echo "// v2" >> src/index.js
+  git add -A && git commit -m code --quiet
+  out=$("$DOC_TOOLS" check-freshness --code-refs=lib/) || true
+  assert_json_field "$out" '.docs | length' "0" "--code-refs=<path> is honoured (no doc covers lib/)"
+  teardown
+}
+
+test_i4_build_index_refuses_empty_input_and_existing_index() {
+  echo "test: I-4: build-index refuses empty stdin, and a non-empty index without --force"
+  setup
+  local rc before
+  rc=0
+  "$DOC_TOOLS" build-index </dev/null >/dev/null 2>&1 || rc=$?
+  assert_true "build-index </dev/null with no index exits non-zero (rc=$rc)" test "$rc" -ne 0
+  assert_file_not_exists docs/.doc-index.json "no empty index is created"
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  jq '.docs["docs/architecture.md"].status = "deprecated"' docs/.doc-index.json > docs/.i4.tmp
+  mv docs/.i4.tmp docs/.doc-index.json
+  before=$(hash_file docs/.doc-index.json)
+  rc=0
+  "$DOC_TOOLS" build-index </dev/null >/dev/null 2>&1 || rc=$?
+  assert_true "build-index </dev/null over an existing index exits non-zero (rc=$rc)" test "$rc" -ne 0
+  assert_eq "$before" "$(hash_file docs/.doc-index.json)" "…and leaves it byte-identical"
+  echo "# w" > docs/workflows.md
+  local err
+  rc=0
+  err=$(echo "docs/workflows.md:src/:workflows" | "$DOC_TOOLS" build-index 2>&1 >/dev/null) || rc=$?
+  assert_true "build-index over a non-empty index without --force exits non-zero (rc=$rc)" test "$rc" -ne 0
+  assert_contains "$err" "--force" "…and says --force is how to rebuild"
+  assert_eq "$before" "$(hash_file docs/.doc-index.json)" "…and leaves it byte-identical (the deprecation survives)"
+  rc=0
+  "$DOC_TOOLS" build-index --help </dev/null >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "build-index --help </dev/null exits 0"
+  assert_eq "$before" "$(hash_file docs/.doc-index.json)" "…and writes nothing"
+  rc=0
+  echo "docs/workflows.md:src/:workflows" | "$DOC_TOOLS" build-index --force >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "build-index --force rebuilds a non-empty index"
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs | keys | join(",")' "docs/workflows.md" "--force replaced the index"
+  rc=0
+  "$DOC_TOOLS" build-index --force </dev/null >/dev/null 2>&1 || rc=$?
+  assert_true "build-index --force with empty stdin still exits non-zero (rc=$rc)" test "$rc" -ne 0
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs | length' "1" "…and does not empty the index"
+  teardown
+}
+
+test_i4_mapping_line_parser() {
+  echo "test: I-4: mapping lines — bare path, CRLF, 'a, b', ':' in a path, a typo'd ref"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local d
+  for d in bare crlf spaced typo; do echo "# $d" > "docs/$d.md"; done
+  echo "# ab" > "docs/a:b.md"
+  git add -A && git commit -m docs --quiet
+  local out rc=0 json
+  out=$(printf '%s\n' "docs/bare.md" "docs/crlf.md:src/:guide"$'\r' "docs/spaced.md:src/index.js, src/ :guide" \
+          "docs/a:b.md:src/:guide" "docs/typo.md:srcc/:guide" | "$DOC_TOOLS" add-entry 2>&1) || rc=$?
+  json=$(cat docs/.doc-index.json)
+  assert_true "add-entry exits non-zero when a line is rejected (rc=$rc)" test "$rc" -ne 0
+  assert_json_field "$json" '.docs | has("docs/bare.md")' "false" \
+    "a bare path is rejected, not split into refs + doc_type"
+  assert_contains "$out" "docs/bare.md" "the rejection names the bare-path line"
+  assert_json_field "$json" '.docs["docs/crlf.md"].doc_type' "guide" "CRLF: doc_type has no trailing CR"
+  assert_json_field "$json" '.docs["docs/spaced.md"].code_refs | join("|")' "src/index.js|src/" \
+    "'a, b' refs are trimmed"
+  assert_json_field "$json" '.docs["docs/spaced.md"].code_commit | type' "string" \
+    "…and the same trimmed refs reach git (code_commit is set)"
+  assert_json_field "$json" '[.docs | keys[] | select(startswith("docs/a"))] | join(",")' "docs/architecture.md" \
+    "a path containing ':' is rejected, never re-keyed as docs/a"
+  assert_contains "$out" "srcc/" "a ref that matches no tracked path is warned about"
+  assert_json_field "$json" '.docs["docs/typo.md"].code_refs | join(",")' "srcc/" "…but the entry is still added"
+  # build-index replaces the whole index, so one bad line aborts all of it.
+  rc=0
+  printf '%s\n' "docs/crlf.md:src/:guide" "docs/bare.md" | "$DOC_TOOLS" build-index --force >/dev/null 2>&1 || rc=$?
+  assert_true "build-index --force refuses input with a bare-path line (rc=$rc)" test "$rc" -ne 0
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs | has("docs/spaced.md")' "true" "…and leaves the index as it was"
+  teardown
+}
+
+test_i4_check_freshness_and_status_agree() {
+  echo "test: I-4: check-freshness and status agree (null code_commit/content_hash, empty doc_type, ',,' and ',' refs, globs, TAB key)"
+  setup
+  printf 'c\n' > src/c.txt
+  printf 'd\n' > src/d.txt
+  printf 'ab\n' > 'src/a,b.txt'
+  printf 'x\n' > src/x.js
+  local tabkey="docs/tab"$'\t'"key.md" k
+  for k in null-commit null-hash empty-type phantom glob comma dep; do echo "# $k" > "docs/$k.md"; done
+  echo "# tab" > "$tabkey"
+  git add -A && git commit -m "docs + code" --quiet
+  local old head_src
+  old=$(git rev-parse HEAD)
+  printf 'c2\n' > src/c.txt
+  printf 'ab2\n' > 'src/a,b.txt'
+  git rm -q src/x.js
+  echo "// v2" >> src/index.js
+  git add -A && git commit -m "code change" --quiet
+  head_src=$(git rev-list -1 HEAD -- src/)
+  # shellcheck disable=SC2016  # jq program
+  jq -n --arg old "$old" --arg head "$head_src" --arg tab "$tabkey" \
+    --arg h_nc "sha256:$(_i4_sha docs/null-commit.md)" --arg h_et "sha256:$(_i4_sha docs/empty-type.md)" \
+    --arg h_ph "sha256:$(_i4_sha docs/phantom.md)" --arg h_gl "sha256:$(_i4_sha docs/glob.md)" \
+    --arg h_co "sha256:$(_i4_sha docs/comma.md)" --arg h_tb "sha256:$(_i4_sha "$tabkey")" \
+    'def e($h; $refs; $c; $t): {content_hash: $h, code_refs: $refs, code_commit: $c, doc_type: $t,
+       status: "current", replaces: null, superseded_by: null, last_verified: "2026-01-01T00:00:00Z"};
+    {schema_version: 2, generated_by: "doc-superpowers", generated_at: "2026-01-01T00:00:00Z", build_commit: $old,
+     docs: {
+       "docs/null-commit.md": e($h_nc; ["src/"]; null; "guide"),
+       "docs/null-hash.md": e(null; ["src/"]; $head; "guide"),
+       "docs/empty-type.md": (e($h_et; ["src/"]; $old; "") | del(.last_verified)),
+       "docs/phantom.md": e($h_ph; ["src/c.txt", "", "src/d.txt"]; $old; "guide"),
+       "docs/glob.md": e($h_gl; ["src/*.js"]; $old; "guide"),
+       "docs/comma.md": e($h_co; ["src/a,b.txt"]; $old; "guide"),
+       "docs/dep.md": (e(null; ["src/"]; $old; "guide") | .status = "deprecated"),
+       "docs/gone.md": e(null; ["src/"]; $old; "guide"),
+       ($tab): e($h_tb; ["src/"]; $head; "guide")
+     }}' > docs/.doc-index.json
+  local cf rc=0
+  cf=$("$DOC_TOOLS" check-freshness) || rc=$?
+  assert_eq "0" "$rc" "check-freshness exits 0"
+  local key st a b mismatches=""
+  while IFS= read -r key; do
+    st=$("$DOC_TOOLS" status "$key" 2>&1) || true
+    a=$(jq -S -c 'del(.path)' <<<"$st" 2>/dev/null || printf 'invalid: %s' "$st")
+    b=$(jq -S -c --arg k "$key" '.docs[$k]' <<<"$cf")
+    [ "$a" = "$b" ] || mismatches="${mismatches}  ${key}: status=${a} check-freshness=${b}"$'\n'
+  done < <(jq -r '.docs | keys[]' docs/.doc-index.json)
+  assert_eq "" "$mismatches" "status and check-freshness report the same object for every entry"
+  assert_json_field "$cf" '.docs["docs/null-commit.md"].status' "stale" "a null code_commit with code present is stale"
+  assert_json_field "$cf" '.docs["docs/null-hash.md"].status' "current" "a null content_hash does not shift the columns"
+  assert_json_field "$cf" '.docs["docs/null-hash.md"].doc_modified' "true" "…and reads as doc_modified"
+  assert_json_field "$cf" '.docs["docs/empty-type.md"].status' "stale" "an empty doc_type / no last_verified: stale code still stale"
+  assert_json_field "$cf" '.docs["docs/phantom.md"].status' "stale" "a phantom '' ref (',,') does not hide the change"
+  assert_json_field "$cf" '.docs["docs/phantom.md"].code_refs_changed | join(",")' "src/c.txt" "…and only the changed ref is listed"
+  assert_json_field "$cf" '.docs["docs/comma.md"].status' "stale" "a ref containing ',' is one ref"
+  assert_json_field "$cf" '.docs["docs/glob.md"].code_refs_changed | join(",")' "src/*.js" \
+    "a glob ref reaches git verbatim, never shell-expanded"
+  assert_json_field "$cf" '.docs["docs/tab\tkey.md"].status' "current" "a TAB in a key is not @tsv-escaped into a missing doc"
+  assert_json_field "$cf" '.docs["docs/dep.md"].status' "deprecated" "deprecated is preserved"
+  assert_json_field "$cf" '.docs["docs/gone.md"].status' "missing" "a doc not on disk is missing"
+  assert_json_field "$cf" '.summary | "\(.current) \(.stale) \(.missing) \(.deprecated)"' "2 5 1 1" \
+    "summary counts match the entries"
+  teardown
+}
+
+test_i4_code_refs_match_by_path_segment() {
+  echo "test: I-4: --code-refs matches by path segment; --code-refs-from <file|-> takes the same list"
+  setup
+  mkdir -p src/m1 src/m10
+  echo a > src/m1/a.js
+  echo x > src/m10/x.js
+  local d
+  for d in m1 m10 src; do echo "# $d" > "docs/$d.md"; done
+  git add -A && git commit -m tree --quiet
+  printf '%s\n' "docs/m1.md:src/m1:guide" "docs/m10.md:src/m10/x.js:guide" "docs/src.md:src/:guide" \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  local out list
+  out=$("$DOC_TOOLS" check-freshness --code-refs src/m1) || true
+  assert_eq "docs/m1.md,docs/src.md" "$(_i4_keys "$out")" "src/m1 matches src/m1 and its parent src/, never src/m10/x.js"
+  out=$("$DOC_TOOLS" check-freshness --code-refs src/m1/a.js) || true
+  assert_eq "docs/m1.md,docs/src.md" "$(_i4_keys "$out")" "a file under a ref matches that ref"
+  out=$("$DOC_TOOLS" check-freshness --code-refs=src/m10/) || true
+  assert_eq "docs/m10.md,docs/src.md" "$(_i4_keys "$out")" "--code-refs=<dir>/ matches the refs below it"
+  out=$("$DOC_TOOLS" check-freshness --code-refs src/m1/a.js src/m10/x.js) || true
+  assert_eq "docs/m1.md,docs/m10.md,docs/src.md" "$(_i4_keys "$out")" "--code-refs takes several paths (the hooks' form)"
+  out=$("$DOC_TOOLS" check-freshness --code-refs '') || true
+  assert_eq "" "$(_i4_keys "$out")" "an empty --code-refs value matches nothing (it used to match everything)"
+  list=$(harness_mktemp i4-list)
+  printf 'src/m1/a.js\r\n\nsrc/m10/x.js\r\n' > "$list"
+  out=$("$DOC_TOOLS" check-freshness --code-refs-from "$list") || true
+  assert_eq "docs/m1.md,docs/m10.md,docs/src.md" "$(_i4_keys "$out")" "--code-refs-from <file> (CRLF, blank line) scopes like --code-refs"
+  out=$(printf 'src/m10/x.js\n' | "$DOC_TOOLS" check-freshness --code-refs-from -) || true
+  assert_eq "docs/m10.md,docs/src.md" "$(_i4_keys "$out")" "--code-refs-from - reads the list from stdin"
+  out=$(: | "$DOC_TOOLS" check-freshness --code-refs-from -) || true
+  assert_eq "" "$(_i4_keys "$out")" "an empty list scopes to no docs"
+  teardown
+}
+
+test_i4_doc_paths_normalized_and_targets_deduped() {
+  echo "test: I-4: docs//x.md is docs/x.md; a repeated target counts once; a '-' path is refused"
+  setup
+  echo "# x" > docs/x.md
+  echo "# y" > docs/y.md
+  git add -A && git commit -m docs --quiet
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  printf '%s\n' "docs//x.md:src/:guide" "docs/y.md:src/:guide" | "$DOC_TOOLS" add-entry 2>/dev/null
+  local json out rc
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs | has("docs/x.md")' "true" "docs//x.md is stored as docs/x.md"
+  assert_json_field "$json" '.docs | has("docs//x.md")' "false" "…not as a separate docs//x.md key"
+  echo "more" >> docs/x.md
+  out=$("$DOC_TOOLS" update-index docs/x.md docs//x.md 2>&1) || true
+  assert_contains "$out" "Refreshed 1 entry:" "update-index docs/x.md docs//x.md refreshes one entry"
+  out=$("$DOC_TOOLS" deprecate-entry docs/y.md docs/y.md 2>&1) || true
+  assert_contains "$out" "Deprecated 1 entry:" "deprecate-entry counts a repeated target once"
+  assert_eq "1" "$(grep -c '^  docs/y.md$' <<<"$out")" "…and lists it once"
+  out=$("$DOC_TOOLS" remove-entry docs/x.md docs//x.md docs/x.md 2>&1) || true
+  assert_contains "$out" "Removed 1 entry:" "remove-entry counts a repeated target once"
+  assert_eq "1" "$(grep -c '^  docs/x.md$' <<<"$out")" "…and lists it once"
+  assert_not_contains "$out" "SKIP" "…and does not report the repeat as not found"
+  rc=0
+  out=$("$DOC_TOOLS" update-index -- -x.md 2>&1) || rc=$?
+  assert_true "a doc path starting with '-' is refused (rc=$rc)" test "$rc" -ne 0
+  assert_contains "$out" "'-x.md'" "…naming the path"
+  teardown
+}
+
+test_i4_outside_a_git_repo() {
+  echo "test: I-4: outside a git repo every index/git verb exits non-zero; help still exits 0"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local nogit cmd rc out before
+  nogit=$(harness_mktemp_d i4-nogit)
+  mkdir -p "$nogit/docs"
+  cp docs/.doc-index.json docs/architecture.md "$nogit/docs/"
+  cd "$nogit"
+  before=$(hash_file docs/.doc-index.json)
+  for cmd in "check-freshness" "status docs/architecture.md" "update-index docs/architecture.md" \
+      "remove-entry docs/architecture.md" "deprecate-entry docs/architecture.md" \
+      "move-entry docs/architecture.md docs/b.md" "add-entry" "build-index --force" \
+      "fragments merge HEAD~1 HEAD"; do
+    rc=0
+    # shellcheck disable=SC2086  # $cmd is a fixed word list
+    out=$(echo "docs/architecture.md:src/:architecture" \
+            | GIT_CEILING_DIRECTORIES="$SUITE_TMP" "$DOC_TOOLS" $cmd 2>&1 >/dev/null) || rc=$?
+    assert_true "'$cmd' exits non-zero outside a git repo (rc=$rc)" test "$rc" -ne 0
+    assert_contains "$out" "git repository" "'$cmd' says it needs a git repository"
+  done
+  assert_eq "$before" "$(hash_file docs/.doc-index.json)" "no verb touched the index"
+  for cmd in "--help" "help" "status --help" "help status"; do
+    rc=0
+    # shellcheck disable=SC2086
+    GIT_CEILING_DIRECTORIES="$SUITE_TMP" "$DOC_TOOLS" $cmd >/dev/null 2>&1 || rc=$?
+    assert_eq "0" "$rc" "'$cmd' exits 0 outside a git repo"
+  done
+  cd "$TEST_DIR"
+  teardown
+}
+
+test_i4_show_signature_does_not_leak_into_code_commit() {
+  echo "test: I-4: with log.showSignature=true on a signed history, code_commit is a bare SHA"
+  setup
+  if ! command -v ssh-keygen >/dev/null 2>&1; then
+    record_skip "I-4 log.showSignature: ssh-keygen not available to sign a fixture commit"
+    teardown
+    return 0
+  fi
+  ssh-keygen -q -t ed25519 -N '' -f "$HOME/sign" -C test
+  git config gpg.format ssh
+  git config user.signingkey "$HOME/sign.pub"
+  echo "// signed" >> src/index.js
+  git add -A && git commit -S -m signed --quiet
+  git config log.showSignature true
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index 2>/dev/null
+  local cc rc
+  cc=$(jq -r '.docs["docs/architecture.md"].code_commit' docs/.doc-index.json)
+  assert_true "build-index writes a bare SHA (got: $cc)" _i4_is_sha "$cc"
+  echo "# w" > docs/workflows.md
+  echo "docs/workflows.md:src/:workflows" | "$DOC_TOOLS" add-entry 2>/dev/null
+  cc=$(jq -r '.docs["docs/workflows.md"].code_commit' docs/.doc-index.json)
+  assert_true "add-entry writes a bare SHA (got: $cc)" _i4_is_sha "$cc"
+  echo "more" >> docs/architecture.md
+  rc=0
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "update-index exits 0"
+  cc=$(jq -r '.docs["docs/architecture.md"].code_commit' docs/.doc-index.json)
+  assert_true "update-index writes a bare SHA (got: $cc)" _i4_is_sha "$cc"
+  assert_json_field "$("$DOC_TOOLS" check-freshness)" '.summary.stale' "0" "…and nothing reads as stale"
+  teardown
+}
+
+test_i4_unborn_head() {
+  echo "test: I-4: on an unborn HEAD build_commit and repo_head are null (not \"HEAD\\nunknown\")"
+  setup
+  local unborn rc out
+  unborn=$(harness_mktemp_d i4-unborn)
+  cd "$unborn"
+  git init -q -b main 2>/dev/null || { git init -q && git symbolic-ref HEAD refs/heads/main; }
+  mkdir docs
+  echo "# a" > docs/a.md
+  rc=0
+  echo "docs/a.md:src/:guide" | "$DOC_TOOLS" build-index 2>/dev/null || rc=$?
+  assert_eq "0" "$rc" "build-index exits 0 on an unborn HEAD"
+  assert_json_field "$(cat docs/.doc-index.json)" '.build_commit' "null" "build_commit is null"
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/a.md"].code_commit' "null" "code_commit is null"
+  rc=0
+  out=$("$DOC_TOOLS" check-freshness 2>/dev/null) || rc=$?
+  assert_eq "0" "$rc" "check-freshness exits 0 on an unborn HEAD"
+  assert_json_field "$out" '.repo_head' "null" "repo_head is null"
+  assert_json_field "$out" '.docs["docs/a.md"].status' "current" "the doc reads as current"
+  cd "$TEST_DIR"
+  teardown
+}
+
+test_i4_update_index_unknown_key_applies_the_rest() {
+  echo "test: I-4: update-index with an unknown key refreshes the known ones, then exits 1"
+  setup
+  echo "# w" > docs/workflows.md
+  git add -A && git commit -m w --quiet
+  printf '%s\n' "docs/architecture.md:src/:architecture" "docs/workflows.md:src/:workflows" \
+    | "$DOC_TOOLS" build-index
+  echo "// v2" >> src/index.js
+  git add -A && git commit -m code --quiet
+  local out rc=0
+  out=$("$DOC_TOOLS" update-index docs/architecture.md docs/nope.md docs/workflows.md 2>&1) || rc=$?
+  assert_eq "1" "$rc" "exits 1 because one key is not indexed"
+  assert_contains "$out" "docs/nope.md" "names the unknown key"
+  assert_contains "$out" "add-entry" "points at add-entry"
+  assert_contains "$out" "Refreshed 2 entries:" "the indexed keys are still refreshed"
+  assert_json_field "$("$DOC_TOOLS" check-freshness)" '.summary.stale' "0" "…so neither is stale"
+  teardown
+}
+
+test_i4_hostile_names_and_stored_values() {
+  echo "test: I-4: '\\' and '-' doc names hash their own bytes; a stored code_commit never reaches git as an option"
+  setup
+  printf '# back\n' > 'docs/back\slash.md'
+  printf '# dash\n' > ./-
+  git add -A && git commit -m names --quiet
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  printf '%s\n' 'docs/back\slash.md:src/:guide' | "$DOC_TOOLS" add-entry 2>/dev/null
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/back\\slash.md"].content_hash' \
+    "sha256:$(_i4_sha 'docs/back\slash.md')" "a '\\' in the name: content_hash is the file's own hash"
+  # An index key "-" (hand-edited: writers refuse it) must hash the FILE "-",
+  # not drain stdin — in the old loop, stdin was the record stream itself.
+  local head
+  head=$(git rev-list -1 HEAD -- src/)
+  # shellcheck disable=SC2016  # jq program
+  jq --arg h "sha256:$(_i4_sha ./-)" --arg c "$head" \
+    '.docs = ({"-": {content_hash: $h, code_refs: ["src/"], code_commit: $c, doc_type: "guide",
+        status: "current", replaces: null, superseded_by: null, last_verified: "2026-01-01T00:00:00Z"}} + .docs)' \
+    docs/.doc-index.json > docs/.i4.tmp
+  mv docs/.i4.tmp docs/.doc-index.json
+  local out rc=0
+  out=$(printf 'stdin bytes\n' | "$DOC_TOOLS" check-freshness) || rc=$?
+  assert_eq "0" "$rc" "check-freshness exits 0 with a '-' key"
+  assert_json_field "$out" '.docs | length' "3" "every entry is reported (the '-' key did not drain the record stream)"
+  assert_json_field "$out" '.docs["-"].doc_modified' "false" "the '-' key hashes the file named '-', not stdin"
+  # A code_commit shaped like an option reached `git rev-list` as one (the old
+  # script wrote a file "pwned..HEAD"). The "-" key goes first: in the old loop
+  # it drained the records before this entry was ever evaluated.
+  jq 'del(.docs["-"]) | .docs["docs/architecture.md"].code_commit = "--output=pwned"' \
+    docs/.doc-index.json > docs/.i4.tmp
+  mv docs/.i4.tmp docs/.doc-index.json
+  rc=0
+  out=$("$DOC_TOOLS" check-freshness) || rc=$?
+  assert_eq "0" "$rc" "check-freshness exits 0 with an option-shaped code_commit"
+  assert_eq "" "$(ls -a | grep '^pwned' || true)" "a code_commit of '--output=pwned' created no file"
+  assert_json_field "$out" '.docs["docs/architecture.md"].status' "stale" \
+    "a stored code_commit that is not an object id reads as no baseline (stale)"
+  teardown
+}
+
 # --- Runner ---
 
 run_tests() {
@@ -2860,6 +3374,20 @@ run_tests() {
   test_index_term_while_holding_the_lock
   test_jq_version_gate
   test_update_index_is_one_batch_pass
+
+  # --- CLI and input robustness (sweep 05ea982 I-4) ---
+  test_i4_help_lists_every_dispatchable_verb
+  test_i4_flags_anywhere_and_unknown_flags_exit_2
+  test_i4_build_index_refuses_empty_input_and_existing_index
+  test_i4_mapping_line_parser
+  test_i4_check_freshness_and_status_agree
+  test_i4_code_refs_match_by_path_segment
+  test_i4_doc_paths_normalized_and_targets_deduped
+  test_i4_outside_a_git_repo
+  test_i4_show_signature_does_not_leak_into_code_commit
+  test_i4_unborn_head
+  test_i4_update_index_unknown_key_applies_the_rest
+  test_i4_hostile_names_and_stored_values
 
   print_summary
 }

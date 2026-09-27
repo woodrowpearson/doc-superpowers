@@ -232,13 +232,17 @@ User invokes /doc-superpowers audit
   → Suggest /doc-superpowers update
 ```
 
+### Command line (every verb)
+
+`scripts/doc-tools.sh` has one verb table (`_VERBS`), and both the dispatcher (`_main`) and the usage text are generated from it. A subcommand exists only if it has a row, so `--help` cannot omit a verb that dispatches. Each row names the handler, what the verb needs (`repo`, `deps` or `none`), and the long options it takes. `_main` handles `--help` before any dependency check. It then runs the verb's arguments through `_parse_args`, the one argument loop: `--opt VALUE` equals `--opt=VALUE` anywhere on the line, and an option the verb does not take exits 2. Next come `check_deps`, and then, for repository verbs, one `git rev-parse --git-dir` check (also exit 2). Stdin mapping lines go through one parser, `_entry_from_line`. `check-freshness` and `status` share one evaluation, `_freshness_scan`: a single jq pass extracts every entry as a `\x1f`-separated record, bash evaluates each one with plumbing git (`rev-list`, never porcelain `git log`), and one jq pass renders the verdicts. No jq runs per entry.
+
 ### Index write path (every verb that writes `docs/.doc-index.json`)
 
 `build-index`, `update-index`, `add-entry`, `remove-entry`, `move-entry` and `deprecate-entry` all persist through one primitive in `scripts/doc-tools.sh`. The skill's `update` action runs one agent per stale doc, each calling `update-index`, so these writers run concurrently.
 
 ```
 verb parses its arguments / stdin
-  → gathers per-doc facts (hashes in one batch, one `git log` per distinct code_refs set,
+  → gathers per-doc facts (hashes in one batch, one `git rev-list` per distinct code_refs set,
     Implementation:/Realized-by: bullets in one awk pass)
   → builds a per-key patch list (JSONL: {key, add|merge|del})
   → _index_apply <jq-program> [jq args…]
