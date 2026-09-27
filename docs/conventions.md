@@ -79,7 +79,7 @@ chore: <maintenance task>
 
 - Keep PRs focused on a single change
 - Test skill changes by running `/doc-superpowers init` on a sample project before merging
-- Run the five shell test suites — `scripts/test-doc-tools.sh` (281 assertions), `scripts/test-hooks.sh` (345), `scripts/test-merge-driver.sh` (19), `scripts/test-doc-pr-release.sh` (109), `scripts/test-spec-status-model.sh` (86), 840 total (3 XFAIL known bugs) — all must pass before merge, under both bash 5.x and `/bin/bash` 3.2. They share the `scripts/test-helpers.sh` harness (isolated git environment, private scratch root, pipefail-safe asserts, SKIP/XFAIL reporting)
+- Run the five shell test suites — `scripts/test-doc-tools.sh` (281 assertions), `scripts/test-hooks.sh` (345), `scripts/test-merge-driver.sh` (394), `scripts/test-doc-pr-release.sh` (109), `scripts/test-spec-status-model.sh` (86), 1215 total (3 XFAIL known bugs) — all must pass before merge, under both bash 5.x and `/bin/bash` 3.2. They share the `scripts/test-helpers.sh` harness (isolated git environment, private scratch root, pipefail-safe asserts, SKIP/XFAIL reporting)
 - Include before/after examples for behavior changes
 
 ## Documentation Conventions

@@ -1,6 +1,6 @@
 ---
 date: 2026-07-29
-status: Open
+status: Resolved
 priority: P2
 type: bug
 component: doc-index
@@ -118,3 +118,22 @@ rather than `0`. Add a `test-merge-driver.sh` fixture built by the current
 Consider also whether `build-index` should keep writing `version` alongside
 `schema_version` for one release as a compatibility bridge — that is the
 decision this issue exists to force, not to pre-empt.
+
+## Resolution (sweep 05ea982 Task 6)
+
+This was resolved as a side effect of
+[I-5](2026-09-27-sweep-05ea982-I05-merge-driver-not-three-way.md), the three-way merge driver.
+
+- The driver no longer rebuilds the top level from a fixed field list. It starts from ours, so
+  whichever schema field the index carries (`schema_version`, or a legacy `version`) is re-emitted
+  as it was. Nothing is ever invented: a field no side has stays absent, and there is no `// 0`.
+- A top-level field that only theirs changed is taken from theirs, with the same three-way rule as
+  the entries. If one side upgraded a legacy `version: 1` index (a doc-tools write stamps
+  `schema_version: 3` and drops `version`) and the other side did not touch that field, the merge
+  keeps the upgrade and does not re-add `version`.
+- The bridge question in the last paragraph was settled by Task 4 (I-1): every writer stamps
+  `schema_version` and drops `version`, and there is no compatibility bridge.
+- `scripts/test-merge-driver.sh` now builds its fixtures with the current `build-index`. The
+  "schema_version survives, no invented version" case merges it four ways (merge and rebase, in
+  both directions). A direct case covers legacy `version` against `schema_version` in both
+  directions.

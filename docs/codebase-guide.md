@@ -123,8 +123,8 @@ doc-superpowers/
 | `scripts/hooks/install.sh` | Hook installer engine — install/uninstall/status for git, Claude Code, and CI tiers. Registers 3 Claude Code hooks (PreToolUse, PostToolUse, Stop) and 5 git hooks. The `--git` tier also registers a custom merge driver for `.doc-index.json` conflict resolution. CI tier supports granular install via `--workflows=<csv\|all\|none>`, `--helpers=<bool>`, `--force` (bypass state-respect), and `--transient` (uninstall without marking intentional). Routes to hook scripts in git/, claude/, ci/ subdirectories. Sources `state.sh` for install-state tracking | Adding hook tiers, changing installer logic, adding new hook scripts, changing install-state semantics |
 | `scripts/hooks/state.sh` | Install-state tracking module — atomic jq writes to `.claude/doc-superpowers/installed.json`, filesystem-inferred bootstrap on first run, malformed-state graceful fallback. Canonical workflow list derived from `scripts/hooks/ci/*.yml` (with hardcoded fallback when SCRIPT_DIR is unset). Single-writer concurrency contract — concurrent installer invocations may lose intermediate state-marks | Changing install-state schema, bootstrap logic, or workflow-name resolution |
 | `scripts/test-hooks.sh` | Test suite for hooks installer and all hook scripts — covers install, uninstall, status, and per-hook behavior | Adding tests for new hooks or installer features |
-| `scripts/merge-doc-index.sh` | Custom git merge driver for `.doc-index.json` — auto-resolves timestamp/entry conflicts during merge/rebase using jq three-way merge | Changing merge conflict resolution logic |
-| `scripts/test-merge-driver.sh` | Test suite for `merge-doc-index.sh` | Adding tests for merge driver features |
+| `scripts/merge-doc-index.sh` | Custom git merge driver for `.doc-index.json` — a base-aware, per-key three-way merge in jq during merge/rebase/cherry-pick/revert. An entry both sides changed is merged field by field; the verification record is one unit; deprecated wins. Delete-vs-modify and malformed sides get `git merge-file` conflict markers and exit 1. Ours' top level and key order are kept. The header comment is the specification | Changing merge conflict resolution logic |
+| `scripts/test-merge-driver.sh` | Test suite for `merge-doc-index.sh` and its registration. Fixtures are built with the real doc-tools verbs on a controlled clock, merged with real `git merge`/`git rebase` in both directions (plus `git revert`), and asserted against the base. It also has direct per-rule cases, and install.sh registration cases: a path with a space, a version bump without re-install, and no driver | Adding tests for merge driver features |
 | `references/doc-spec.md` | Templates for doc types + agentic workflow extension + Mermaid diagram syntax + CLAUDE.md rules + naming conventions + doc-index schema | Adding new doc types, changing template structure, updating Mermaid syntax |
 | `references/agent-prompt-template.md` | Review agent prompt template + scope-specific focus areas dispatched to each review agent | Changing agent review instructions, adding scope focus areas |
 | `references/output-templates.md` | Audit report format + plan template used for generating reports and update plans | Changing report structure or plan format |
@@ -183,7 +183,7 @@ doc-superpowers/
 | Multi-framework agent support | `AGENTS.md`, `.claude-plugin/`, `.cursor-plugin/`, `.codex/`, `.opencode/`, `GEMINI.md`, `gemini-extension.json` |
 | Cross-framework tool mappings | `references/tool-mappings.md` — tool name translations across frameworks |
 | Doc-index write path | `scripts/doc-tools.sh` "Index persistence" section — `_index_apply` / `_index_lock` / `_index_load` / `_index_install`, `_traps`, the shared `_INDEX_PATCH` interpreter |
-| Doc-index merge driver | `scripts/merge-doc-index.sh` — jq three-way merge for `.doc-index.json` conflicts |
+| Doc-index merge driver | `scripts/merge-doc-index.sh` — base-aware per-key three-way merge for `.doc-index.json`; registration in `scripts/hooks/install.sh` (`merge_driver_cmd`) |
 | Merge driver tests | `scripts/test-merge-driver.sh` |
 | OpenCode plugin | `.opencode/plugins/doc-superpowers.js` — ESM plugin for OpenCode |
 | Package metadata | `package.json` — npm/OpenCode package metadata |
@@ -320,7 +320,7 @@ User invokes /doc-superpowers hooks install --all
         → Otherwise: copy hook with __DOC_TOOLS_PATH__, __DOC_TOOLS_PARENT__, and __INSTALL_DATE__ substituted
       → Make hooks executable
       → Register custom merge driver for .doc-index.json:
-        → `git config --local merge.doc-index.driver` → points to scripts/merge-doc-index.sh
+        → `git config --local merge.doc-index.driver` → a quoted command that resolves the driver at merge time: the newest version-named plugin-cache sibling's scripts/merge-doc-index.sh (a checkout install: its own copy); none found → conflict markers, exit 1
         → Adds `.gitattributes` entry: `docs/.doc-index.json merge=doc-index`
     → For --claude tier:
       → Copy hook scripts to .claude/hooks/doc-superpowers/ with __DOC_TOOLS_PATH__, __DOC_TOOLS_PARENT__, and __INSTALL_DATE__ placeholder substitution

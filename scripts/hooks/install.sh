@@ -107,6 +107,54 @@ is_doc_superpowers_workflow() {
 
 # --- Git tier ---
 
+# --- Merge driver registration (merge.doc-index.driver) ---
+#
+# Git runs the registered value with sh, after replacing %O %A %B with its
+# temp file names (and %% with %). The value resolves the driver when the
+# merge RUNS, not at install time, so a plugin update reaches existing
+# installs without re-registration and a pruned version dir is not fatal:
+#   - plugin-cache install (basename of SKILL_DIR is a version, e.g.
+#     …/doc-superpowers/3.0.0): the newest version-named sibling that has
+#     scripts/merge-doc-index.sh, in numeric order (10.0.0 > 9.0.0); any other
+#     sibling is never run;
+#   - any other install (a git checkout): SKILL_DIR's own driver, pinned (a
+#     `git pull` updates it in place).
+# No driver found → conflict markers via git merge-file, exit 1 — never a
+# silent ours-only result. (Against an EMPTY base: against the real one a
+# line merge of two JSON edits can come out clean, i.e. unchecked and without
+# markers.) The path is single-quoted for sh and its % doubled
+# for git. POSIX sh and tools only (no sort -V: GNU-only).
+# (T8/I-7 reworks the installer's placement and ownership; the git hooks'
+# DOC_TOOLS resolution should converge on this same rule there.)
+# shellcheck disable=SC2016  # sh programs for git to run, not bash expansions
+_MD_RESOLVE='if [ -d "$t" ]; then v=$(for d in "$t"/*/; do d=$(basename "$d"); [ -f "$t/$d/scripts/merge-doc-index.sh" ] && echo "$d"; done | grep -Ex "[0-9]+[.][0-9]+[.][0-9]+" | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1); if [ -n "$v" ]; then t=$t/$v/scripts/merge-doc-index.sh; fi; fi'
+# shellcheck disable=SC2016
+_MD_RUN='if [ -f "$t" ]; then exec bash "$t" "$@"; fi; echo "doc-superpowers: merge driver not found ($t); leaving conflict markers" >&2; git merge-file -L ours -L base -L theirs "$2" /dev/null "$3"; exit 1'
+
+# What the registration names: the version-dir parent, or the pinned script.
+merge_driver_target() {
+  local re='^[0-9]+\.[0-9]+\.[0-9]+$' base
+  base=$(basename "$SKILL_DIR")
+  if [[ "$base" =~ $re ]]; then
+    printf '%s' "$DOC_TOOLS_PARENT"
+  else
+    printf '%s' "$SKILL_DIR/scripts/merge-doc-index.sh"
+  fi
+}
+
+# The exact merge.doc-index.driver value this install registers.
+merge_driver_cmd() {
+  local q
+  q=$(merge_driver_target | sed -e "s/'/'\\\\''/g" -e 's/%/%%/g')
+  printf "t='%s'; set -- %%O %%A %%B; %s; %s" "$q" "$_MD_RESOLVE" "$_MD_RUN"
+}
+
+# The driver a merge would run now for this install ("" if none).
+merge_driver_resolved() {
+  # shellcheck disable=SC2016  # sh program, not bash expansion
+  sh -c 't=$1; '"$_MD_RESOLVE"'; if [ -f "$t" ]; then echo "$t"; fi' doc-index-merge "$(merge_driver_target)" 2>/dev/null || true
+}
+
 # Resolve the hooks directory: core.hooksPath > .githooks/ > .git/hooks/
 resolve_hooks_dir() {
   local custom_path
@@ -188,11 +236,13 @@ INTEGRATION_EOF
     installed=$((installed + 1))
   done
 
-  # Register custom merge driver for doc-index.json (auto-resolves timestamp conflicts)
+  # Register the three-way merge driver for docs/.doc-index.json (see
+  # merge_driver_cmd: resolved at merge time, path quoted). Re-running install
+  # replaces an older, pinned registration.
   local merge_driver="$SKILL_DIR/scripts/merge-doc-index.sh"
   if [[ -f "$merge_driver" ]]; then
     git config --local merge.doc-index.name "doc-superpowers index merger"
-    git config --local merge.doc-index.driver "$merge_driver %O %A %B"
+    git config --local merge.doc-index.driver "$(merge_driver_cmd)"
 
     # Add .gitattributes entry if not already present
     local gitattributes=".gitattributes"
@@ -205,7 +255,7 @@ INTEGRATION_EOF
       echo "docs/.doc-index.json merge=doc-index" >> "$gitattributes"
       echo "  Added merge driver to .gitattributes"
     fi
-    echo "  Registered merge driver: doc-index"
+    echo "  Registered merge driver: doc-index (a merge runs: $(merge_driver_resolved))"
   fi
 
   echo "Git hooks: $installed installed, $skipped skipped (existing)"
@@ -274,14 +324,29 @@ status_git() {
     fi
   done
 
-  # Merge driver status
-  if git config --local --get merge.doc-index.driver &>/dev/null; then
-    local driver_path
-    driver_path=$(git config --local --get merge.doc-index.driver | awk '{print $1}')
-    if [[ -f "$driver_path" ]]; then
-      printf "  ✓ %-22s registered\n" "merge-driver"
+  # Merge driver status. The registration is compared with the one this
+  # install would write rather than parsed: the path is quoted and resolved at
+  # merge time. A pre-3.0 registration is "<unquoted path> %O %A %B"; its path
+  # is everything before that suffix (it may contain spaces).
+  local registered
+  if registered=$(git config --local --get merge.doc-index.driver 2>/dev/null); then
+    local resolved legacy
+    if [[ "$registered" == "$(merge_driver_cmd)" ]]; then
+      resolved=$(merge_driver_resolved)
+      if [[ -n "$resolved" ]]; then
+        printf "  ✓ %-22s registered (a merge runs %s)\n" "merge-driver" "$resolved"
+      else
+        printf "  ⚠ %-22s registered but script missing: %s\n" "merge-driver" "$(merge_driver_target)"
+      fi
+    elif [[ "$registered" == *" %O %A %B" && "$registered" != "t='"* ]]; then
+      legacy="${registered% %O %A %B}"
+      if [[ -f "$legacy" ]]; then
+        printf "  ⚠ %-22s registered at a pinned path (%s); re-run install --git\n" "merge-driver" "$legacy"
+      else
+        printf "  ⚠ %-22s registered but script missing: %s\n" "merge-driver" "$legacy"
+      fi
     else
-      printf "  ⚠ %-22s registered but script missing: %s\n" "merge-driver" "$driver_path"
+      printf "  ⚠ %-22s registered by another install; re-run install --git\n" "merge-driver"
     fi
   else
     printf "  ✗ %-22s not registered\n" "merge-driver"
