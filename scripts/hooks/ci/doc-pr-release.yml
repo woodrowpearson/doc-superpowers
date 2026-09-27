@@ -102,7 +102,7 @@ jobs:
       # bot's commit, paths-ignore wouldn't catch it but this will.
       - name: Skip if head is a doc-superpowers sentinel commit
         id: sentinel
-        run: .github/scripts/doc-pr-release/sentinel-check.sh
+        run: .github/scripts/doc-superpowers-steps/sentinel-check.sh
 
       - name: Extract context
         if: steps.sentinel.outputs.skip != 'true'
@@ -111,7 +111,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           BASE_REF: ${{ github.event.pull_request.base.ref || '__BASE_BRANCH__' }}
-        run: .github/scripts/doc-pr-release/write-context.sh
+        run: .github/scripts/doc-superpowers-steps/write-context.sh
 
       - name: Skip if no new commits since last fragment update
         if: steps.context.outputs.new_commits_len == '0'
@@ -123,7 +123,7 @@ jobs:
         env:
           OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: .github/scripts/doc-pr-release/resolve-auth.sh
+        run: .github/scripts/doc-superpowers-steps/resolve-auth.sh
 
       - name: Draft fragment + PR body update
         if: steps.context.outputs.new_commits_len != '0'
@@ -265,4 +265,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           BASE_REF: ${{ github.event.pull_request.base.ref || '__BASE_BRANCH__' }}
-        run: .github/scripts/doc-pr-release/verify-fragment.sh
+        run: .github/scripts/doc-superpowers-steps/verify-fragment.sh

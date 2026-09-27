@@ -12,16 +12,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEMPLATE_DIR="$REPO_ROOT/scripts/hooks/ci"
 HELPERS_DIR="$TEMPLATE_DIR/doc-pr-release"
-RELEASE_HELPERS_DIR="$TEMPLATE_DIR/doc-release"
+STEPS_DIR="$TEMPLATE_DIR/doc-superpowers-steps"
 
 # shellcheck source=scripts/test-helpers.sh
 source "$SCRIPT_DIR/test-helpers.sh"
 
 for _h in "$HELPERS_DIR"/update-pr-body.sh "$HELPERS_DIR"/extract-context.sh \
-          "$HELPERS_DIR"/commit-and-push.sh "$HELPERS_DIR"/sentinel-check.sh \
-          "$HELPERS_DIR"/write-context.sh "$HELPERS_DIR"/resolve-auth.sh \
-          "$HELPERS_DIR"/verify-fragment.sh "$RELEASE_HELPERS_DIR"/precheck.sh \
-          "$RELEASE_HELPERS_DIR"/resolve-auth.sh; do
+          "$HELPERS_DIR"/commit-and-push.sh "$STEPS_DIR"/sentinel-check.sh \
+          "$STEPS_DIR"/write-context.sh "$STEPS_DIR"/resolve-auth.sh \
+          "$STEPS_DIR"/verify-fragment.sh "$STEPS_DIR"/precheck.sh; do
   [ -x "$_h" ] || { echo "FAIL: $_h not found or not executable" >&2; exit 1; }
 done
 command -v jq >/dev/null || { echo "FAIL: jq required for tests" >&2; exit 1; }
@@ -31,11 +30,11 @@ command -v jq >/dev/null || { echo "FAIL: jq required for tests" >&2; exit 1; }
 UPDATE_SCRIPT="$(bash_bin_shim "$HELPERS_DIR/update-pr-body.sh")"
 EXTRACT_SCRIPT="$(bash_bin_shim "$HELPERS_DIR/extract-context.sh")"
 COMMIT_SCRIPT="$(bash_bin_shim "$HELPERS_DIR/commit-and-push.sh")"
-SENTINEL_SCRIPT="$(bash_bin_shim "$HELPERS_DIR/sentinel-check.sh")"
-WRITE_CONTEXT_SCRIPT="$(bash_bin_shim "$HELPERS_DIR/write-context.sh")"
-AUTH_SCRIPT="$(bash_bin_shim "$HELPERS_DIR/resolve-auth.sh")"
-VERIFY_SCRIPT="$(bash_bin_shim "$HELPERS_DIR/verify-fragment.sh")"
-PRECHECK_SCRIPT="$(bash_bin_shim "$RELEASE_HELPERS_DIR/precheck.sh")"
+SENTINEL_SCRIPT="$(bash_bin_shim "$STEPS_DIR/sentinel-check.sh")"
+WRITE_CONTEXT_SCRIPT="$(bash_bin_shim "$STEPS_DIR/write-context.sh")"
+AUTH_SCRIPT="$(bash_bin_shim "$STEPS_DIR/resolve-auth.sh")"
+VERIFY_SCRIPT="$(bash_bin_shim "$STEPS_DIR/verify-fragment.sh")"
+PRECHECK_SCRIPT="$(bash_bin_shim "$STEPS_DIR/precheck.sh")"
 
 SENTINEL_SUBJECT_RE='^\[doc-superpowers\] sync PR-[0-9]+ release notes'
 
@@ -383,7 +382,7 @@ test_extract_context_update_branch() {
   assert_eq "0" "$rc" "extract-context exits 0 after a second Update-branch merge"
   assert_not_contains "$(subjects "$out" new_commits)" "Merge branch" \
     "new_commits never carries the Update-branch merge commit"
-  assert_eq_known_bug "T10/I-9" "fix: add b" "$(subjects "$out" new_commits)" \
+  assert_eq_known_bug "T10/I-9" "fix: add b" "chore: main-only 2|fix: add b" "$(subjects "$out" new_commits)" \
     "new_commits after a fragment sync = PR work only (base commit merged in later excluded)"
 }
 
@@ -651,7 +650,7 @@ test_commit_prestaged_file_excluded() {
   write_fragment_file "$dir/clone" 6 thing
   ( cd "$dir/clone" && GITHUB_HEAD_REF=feature "$COMMIT_SCRIPT" 6 >/dev/null 2>&1 ) || rc=$?
   assert_eq "0" "$rc" "commit-and-push exits 0 with a pre-staged file"
-  assert_eq_known_bug "T10/I-9" "RELEASE-NOTES.next/PR-6.md" \
+  assert_eq_known_bug "T10/I-9" "RELEASE-NOTES.next/PR-6.md" "RELEASE-NOTES.next/PR-6.md staged.txt" \
     "$(git -C "$dir/clone" show --name-only --format= HEAD | tr '\n' ' ' | sed 's/ $//')" \
     "the sync commit contains only the fragment even when the index holds other changes"
 }
@@ -777,14 +776,6 @@ test_resolve_auth() {
   assert_contains "$(cat "$out.log")" "::error::Neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY" \
     "neither set → ::error:: annotation"
   assert_eq "" "$(cat "$out")" "neither set → no output written"
-
-  # doc-release ships its own copy (each workflow's helper dir installs on its
-  # own); the two must never drift.
-  assert_true "doc-release/resolve-auth.sh is byte-identical to doc-pr-release/resolve-auth.sh" \
-    cmp -s "$HELPERS_DIR/resolve-auth.sh" "$RELEASE_HELPERS_DIR/resolve-auth.sh"
-  rc=0
-  OAUTH= API_KEY=key run_step "$out" "$BASH_BIN" "$RELEASE_HELPERS_DIR/resolve-auth.sh" || rc=$?
-  assert_eq "use_oauth=false" "$(cat "$out")" "doc-release copy runs (API key only → use_oauth=false)"
 }
 
 test_verify_fragment() {
@@ -815,7 +806,7 @@ test_verify_fragment() {
 }
 
 test_release_precheck() {
-  echo "Test: doc-release precheck.sh — skip only when nothing is unreleased"
+  echo "Test: precheck.sh (doc-release) — skip only when nothing is unreleased"
   local work out rc
   work=$(new_repo)
   out="$work/gh-output"

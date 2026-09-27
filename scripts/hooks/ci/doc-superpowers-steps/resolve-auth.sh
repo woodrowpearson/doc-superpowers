@@ -17,8 +17,8 @@
 #
 # Extracted verbatim from the workflows' inline `run:` body so it can be
 # tested; runs under `set -e`, the runner's default for an unannotated `run:`.
-# doc-release/resolve-auth.sh is a byte-identical copy (a test enforces it):
-# each workflow's helper directory ships on its own.
+# One shared copy: the installer ships doc-superpowers-steps/ with either
+# workflow.
 set -e
 
 if [ -n "$OAUTH" ]; then

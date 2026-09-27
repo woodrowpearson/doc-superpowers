@@ -44,7 +44,7 @@ jobs:
 
       - name: Check for unreleased commits
         id: precheck
-        run: .github/scripts/doc-release/precheck.sh
+        run: .github/scripts/doc-superpowers-steps/precheck.sh
 
       - name: Resolve Anthropic auth
         id: auth
@@ -52,7 +52,7 @@ jobs:
         env:
           OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: .github/scripts/doc-release/resolve-auth.sh
+        run: .github/scripts/doc-superpowers-steps/resolve-auth.sh
 
       - name: Draft release notes
         if: steps.precheck.outputs.skip != 'true'

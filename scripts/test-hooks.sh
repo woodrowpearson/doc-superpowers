@@ -1364,43 +1364,75 @@ test_install_ci_workflows_helpers_false_skips_helpers() {
   teardown
 }
 
-test_install_ci_ships_doc_release_helpers() {
-  echo "test: install --ci --workflows=doc-release ships its step helpers; uninstall removes them"
+test_install_ci_ships_step_scripts_with_workflow() {
+  # The step scripts are the templates' run: bodies. They follow the workflow,
+  # never --helpers, and stay while either consumer workflow remains.
+  echo "test: install --ci ships .github/scripts/doc-superpowers-steps/ with its workflows; uninstall follows"
   setup
-  local output exit_code=0
+  local output exit_code=0 steps=".github/scripts/doc-superpowers-steps"
   output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-release 2>&1) || exit_code=$?
-  assert_eq "0" "$exit_code" "install exits 0"
-  assert_contains "$output" "doc-release helpers in .github/scripts/doc-release/" "reports the helper install"
-  assert_true "precheck.sh installed executable" test -x ".github/scripts/doc-release/precheck.sh"
-  assert_true "resolve-auth.sh installed executable" test -x ".github/scripts/doc-release/resolve-auth.sh"
-  assert_true "doc-pr-release helpers NOT installed for doc-release alone" test ! -d ".github/scripts/doc-pr-release"
+  assert_eq "0" "$exit_code" "install doc-release exits 0"
+  assert_contains "$output" "workflow step scripts in $steps/" "reports the step-script install"
+  assert_true "precheck.sh installed executable" test -x "$steps/precheck.sh"
+  assert_true "resolve-auth.sh installed executable" test -x "$steps/resolve-auth.sh"
+  assert_true "doc-pr-release producer helpers NOT installed for doc-release alone" test ! -d ".github/scripts/doc-pr-release"
   exit_code=0
-  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release 2>&1) || exit_code=$?
-  assert_eq "0" "$exit_code" "uninstall exits 0"
-  assert_true "doc-release helpers removed with the workflow" test ! -d ".github/scripts/doc-release"
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-pr-release >/dev/null 2>&1 || exit_code=$?
+  assert_eq "0" "$exit_code" "install doc-pr-release exits 0"
+  exit_code=0
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release >/dev/null 2>&1 || exit_code=$?
+  assert_eq "0" "$exit_code" "uninstall doc-release exits 0"
+  assert_true "step scripts kept while doc-pr-release.yml remains" test -x "$steps/sentinel-check.sh"
+  exit_code=0
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-pr-release >/dev/null 2>&1 || exit_code=$?
+  assert_eq "0" "$exit_code" "uninstall doc-pr-release exits 0"
+  assert_true "step scripts removed with the last workflow that runs them" test ! -d "$steps"
   teardown
 }
 
-test_install_ci_every_referenced_helper_is_installed() {
-  # Installer output, not templates: after a default `install --ci`, every
-  # `.github/scripts/...` path an installed workflow runs must exist and be
-  # executable, and no placeholder may survive.
-  echo "test: install --ci — every helper an installed workflow runs is on disk"
-  setup
-  local exit_code=0
-  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1 || exit_code=$?
-  assert_eq "0" "$exit_code" "install --ci exits 0"
-  local refs missing="" ref
+# _assert_installed_workflows_wired <label> — every `.github/scripts/...` path an
+# installed workflow runs exists and is executable; no placeholder survives.
+_assert_installed_workflows_wired() {
+  local label="$1" refs missing="" ref
   refs=$(grep -hoE '\.github/scripts/[A-Za-z0-9_./-]+\.sh' .github/workflows/doc-*.yml | sort -u)
-  assert_contains "$refs" ".github/scripts/doc-release/precheck.sh" "doc-release.yml runs its precheck helper"
-  assert_contains "$refs" ".github/scripts/doc-pr-release/verify-fragment.sh" "doc-pr-release.yml runs its verify helper"
   while IFS= read -r ref; do
     [ -n "$ref" ] || continue
     [ -x "$ref" ] || missing="${missing} ${ref}"
   done <<<"$refs"
-  assert_eq "" "$missing" "every referenced helper is installed and executable"
+  assert_eq "" "$missing" "$label: every script an installed workflow runs is installed and executable"
   assert_eq "" "$(grep -lE '__(BASE_BRANCH|VERSION|CRON_SCHEDULE|CI_STRICT)__' .github/workflows/doc-*.yml || true)" \
-    "no placeholder survives in installed workflows"
+    "$label: no placeholder survives in installed workflows"
+}
+
+test_install_ci_every_referenced_helper_is_installed() {
+  # Installer output, not templates: after a default `install --ci`, every
+  # `.github/scripts/...` path an installed workflow runs must exist.
+  echo "test: install --ci — every script an installed workflow runs is on disk"
+  setup
+  local exit_code=0 refs
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1 || exit_code=$?
+  assert_eq "0" "$exit_code" "install --ci exits 0"
+  refs=$(grep -hoE '\.github/scripts/[A-Za-z0-9_./-]+\.sh' .github/workflows/doc-*.yml | sort -u)
+  assert_contains "$refs" ".github/scripts/doc-superpowers-steps/precheck.sh" "doc-release.yml runs its precheck step"
+  assert_contains "$refs" ".github/scripts/doc-superpowers-steps/verify-fragment.sh" "doc-pr-release.yml runs its verify step"
+  _assert_installed_workflows_wired "install --ci"
+  teardown
+}
+
+test_install_ci_helpers_false_still_wires_steps() {
+  # --helpers=false is the "bring your own doc-pr-release helpers" switch. It
+  # must never leave a workflow whose own run: steps are missing.
+  echo "test: install --ci --helpers=false — step scripts still installed, only producer helpers skipped"
+  setup
+  local exit_code=0
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-release --helpers=false >/dev/null 2>&1 || exit_code=$?
+  assert_eq "0" "$exit_code" "install --workflows=doc-release --helpers=false exits 0"
+  _assert_installed_workflows_wired "doc-release --helpers=false"
+  exit_code=0
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-pr-release --helpers=false >/dev/null 2>&1 || exit_code=$?
+  assert_eq "0" "$exit_code" "install --workflows=doc-pr-release --helpers=false exits 0"
+  assert_true "step scripts present for doc-pr-release.yml" test -x ".github/scripts/doc-superpowers-steps/verify-fragment.sh"
+  assert_true "producer helpers skipped (bring your own)" test ! -d ".github/scripts/doc-pr-release"
   teardown
 }
 
@@ -1597,8 +1629,9 @@ test_install_ci_workflows_none_skips_all_but_vendors_tools
 test_uninstall_ci_workflows_none_keeps_workflows
 test_install_ci_workflows_bogus_errors_with_valid_set
 test_install_ci_workflows_helpers_false_skips_helpers
-test_install_ci_ships_doc_release_helpers
+test_install_ci_ships_step_scripts_with_workflow
 test_install_ci_every_referenced_helper_is_installed
+test_install_ci_helpers_false_still_wires_steps
 test_install_ci_writes_state_file_on_first_install
 test_install_ci_bootstraps_state_from_filesystem
 test_install_ci_malformed_state_file_falls_back_with_warn

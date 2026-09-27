@@ -492,7 +492,7 @@ test_scripts_are_free_of_bash4_only_constructs() {
     "$repo_root"/scripts/hooks/*.sh \
     "$repo_root"/scripts/hooks/claude/*.sh \
     "$repo_root"/scripts/hooks/ci/doc-pr-release/*.sh \
-    "$repo_root"/scripts/hooks/ci/doc-release/*.sh \
+    "$repo_root"/scripts/hooks/ci/doc-superpowers-steps/*.sh \
     "$repo_root"/scripts/hooks/git/*
   do
     [ -f "$candidate" ] && targets+=("$candidate")
@@ -1118,6 +1118,7 @@ EOF
   empty_tree=$(git hash-object -t tree --stdin </dev/null)
   out=$("$DOC_TOOLS" fragments merge "$empty_tree" HEAD 2>"$err_file") || rc=$?
   stderr_out=$(cat "$err_file" 2>/dev/null || true)
+  assert_eq "0" "$rc" "merge exits 0 with a drifted fragment (stderr: ${stderr_out:-none})"
 
   assert_contains "$out" "drifted bullet" "drifted fragment content is merged"
   assert_contains "$stderr_out" "drifted" "WARN about drift on stderr"
@@ -1133,6 +1134,7 @@ test_fragments_merge_preserves_non_canonical_sections() {
   git commit -q -m "PR-5"
   local out rc=0
   out=$("$DOC_TOOLS" fragments merge "$(git hash-object -t tree --stdin </dev/null)" HEAD) || rc=$?
+  assert_eq "0" "$rc" "merge exits 0 on non-canonical headings"
   assert_contains "$out" "non-canonical note" "non-canonical bullet survives merge"
   assert_contains "$out" "multi-word heading" "multi-word heading bullet survives"
   assert_contains "$out" "### Notes" "Notes heading emitted"
@@ -1150,6 +1152,7 @@ test_fragments_merge_dedupes_bullets() {
   git commit -q -m "PRs"
   local out count rc=0
   out=$("$DOC_TOOLS" fragments merge "$(git hash-object -t tree --stdin </dev/null)" HEAD) || rc=$?
+  assert_eq "0" "$rc" "merge exits 0 on duplicate bullets"
   count=$(grep -c -- "- same bullet" <<<"$out" || true)
   assert_eq "1" "$count" "duplicate bullet appears exactly once"
   teardown
@@ -1196,6 +1199,7 @@ test_fragments_merge_paths_out() {
   paths_file=$(harness_mktemp paths-out)
   local rc=0
   out=$("$DOC_TOOLS" fragments merge "$before_tag" HEAD --paths-out="$paths_file") || rc=$?
+  assert_eq "0" "$rc" "merge exits 0 with --paths-out"
   assert_contains "$out" "after-tag" "PR-4 (post-tag) is consumed"
   assert_not_contains "$out" "in-range" "PR-3 (pre-tag) is NOT in merged output"
   # paths-out should contain PR-4.md only.
@@ -1250,6 +1254,7 @@ test_fragments_merge_orders_by_n() {
 
   local out pos_99 pos_101 rc=0
   out=$("$DOC_TOOLS" fragments merge "$base" HEAD) || rc=$?
+  assert_eq "0" "$rc" "merge exits 0 on a two-fragment range"
   pos_99=$(grep -n "smaller N" <<<"$out" | sed -n '1s/:.*//p' || true)
   pos_101=$(grep -n "larger N" <<<"$out" | sed -n '1s/:.*//p' || true)
 

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-27T08:24:18Z",
+  "generated_at": "2026-09-27T08:48:32Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -20,31 +20,31 @@
       "implementation": []
     },
     "docs/codebase-guide.md": {
-      "content_hash": "sha256:abcedd96d46295f3e8d2c3d5879effe569198bf1c16c0f4d44718097ed851198",
+      "content_hash": "sha256:485cbb7fce26f5d7aba70f2af86425c2790f4077f8aaa6872038a5be6f28cba6",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "f5808eabf056c86df489a682c6f50610e880eecd",
+      "code_commit": "8630c5b2b069e71a648989b48542fb27bf87580a",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T08:24:18Z",
+      "last_verified": "2026-09-27T08:48:32Z",
       "implementation": []
     },
     "docs/conventions.md": {
-      "content_hash": "sha256:4702c48b3a4a3463ee532f361c99c0aa56978b40693b8841a950d9c49bfd2b50",
+      "content_hash": "sha256:19e7d1572045f6560471a5cc63580d089f31a65609227b9b15dc642677deb4e1",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "references/doc-spec.md"
       ],
-      "code_commit": "3180290a4752d7a3037111c4b7bed2204210fe59",
+      "code_commit": "8630c5b2b069e71a648989b48542fb27bf87580a",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T08:24:18Z",
+      "last_verified": "2026-09-27T08:48:32Z",
       "implementation": []
     },
     "docs/guides/getting-started.md": {
@@ -62,17 +62,17 @@
       "implementation": []
     },
     "docs/workflows/doc-superpowers.md": {
-      "content_hash": "sha256:27ee519c5de7dc6ae3a0d1bc393d1656ab47398437af9e6811836e50eea4f70b",
+      "content_hash": "sha256:9170e699fd44c9b8d42cd14b1ca41742ef6637765ff92cce65cb1bfd1c2ed4db",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "f5808eabf056c86df489a682c6f50610e880eecd",
+      "code_commit": "8630c5b2b069e71a648989b48542fb27bf87580a",
       "doc_type": "workflows",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T08:24:18Z",
+      "last_verified": "2026-09-27T08:48:32Z",
       "implementation": []
     },
     "docs/plans/2026-03-26-audit-report.md": {
@@ -626,14 +626,14 @@
       "last_verified": "2026-09-27T06:12:33Z"
     },
     "docs/issues/2026-09-27-sweep-05ea982-I13-test-suite-fidelity.md": {
-      "content_hash": "sha256:9b24b59c1344d823a65e6c09241ee49be71c8f41b2096fda0d5828cb4e572d7b",
+      "content_hash": "sha256:7ba8ecab2f72c13036a70c302f90ef7a218eb3b00b9862de917de4df21caef1e",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T08:24:18Z",
+      "last_verified": "2026-09-27T08:48:32Z",
       "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I14-docs-and-self-dogfooding.md": {
