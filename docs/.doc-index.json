@@ -1,47 +1,47 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-27T19:23:32Z",
+  "generated_at": "2026-09-27T21:31:23Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
-      "content_hash": "sha256:1bf90c349fe8aabef1784b10910c970ba40059b6fb11160b531f22798e166b91",
+      "content_hash": "sha256:ea57c4be6224334f22531d001ef54bc02cb15edd67d2bcccdbcbaf14f5678139",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/",
         "references/"
       ],
-      "code_commit": "16050ba10244fae423a42a495ddde4febb5109c5",
+      "code_commit": "63fd1c508dc9d1b4c1f5ef192b409d16d27cd389",
       "doc_type": "architecture",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T19:23:32Z",
+      "last_verified": "2026-09-27T21:31:23Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "fa750a5f17b0035a5a86f12dac279feb85a2ac0d",
-        "scripts/": "cd56dc61c9d0ca1e1fbda9b0223a3b84cede48a0",
+        "scripts/": "71bf14f9cc8da384648af535020ebcb51ac9f049",
         "references/": "78f6f21e8f3f692251c68bb9632d3985c7bd09aa"
       }
     },
     "docs/codebase-guide.md": {
-      "content_hash": "sha256:abb8729cbb0f80f13a2735006ad6484d562bb3cfdc071248ec963728e00f0937",
+      "content_hash": "sha256:78323b16041492cca68798d720232014adb4cf55c18ec3d2b869b242804f22d1",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "16050ba10244fae423a42a495ddde4febb5109c5",
+      "code_commit": "63fd1c508dc9d1b4c1f5ef192b409d16d27cd389",
       "doc_type": "guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T19:23:32Z",
+      "last_verified": "2026-09-27T21:31:23Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "fa750a5f17b0035a5a86f12dac279feb85a2ac0d",
-        "scripts/": "cd56dc61c9d0ca1e1fbda9b0223a3b84cede48a0"
+        "scripts/": "71bf14f9cc8da384648af535020ebcb51ac9f049"
       }
     },
     "docs/conventions.md": {
-      "content_hash": "sha256:09009b05bf47b16d281a58d0d5060ca780ceb8ef31f9757e4738b2f0c9aa0f67",
+      "content_hash": "sha256:2823d50e4cdfc7f40de1e5f651e0f789da289bf539d5a9c55d6a817d91a6290d",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "references/doc-spec.md"
@@ -50,7 +50,7 @@
       "doc_type": "guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T19:23:32Z",
+      "last_verified": "2026-09-27T21:31:23Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "fa750a5f17b0035a5a86f12dac279feb85a2ac0d",
@@ -75,20 +75,20 @@
       }
     },
     "docs/workflows/doc-superpowers.md": {
-      "content_hash": "sha256:7030b6ac0eacfa80b05603014992bb1c62a4cd1e9be508c3f1957e811a868624",
+      "content_hash": "sha256:15d51660dd19b6b9d02f38a3816974af83d988dbc3a6ea8635b1589247176d9f",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "16050ba10244fae423a42a495ddde4febb5109c5",
+      "code_commit": "63fd1c508dc9d1b4c1f5ef192b409d16d27cd389",
       "doc_type": "workflows",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T19:23:32Z",
+      "last_verified": "2026-09-27T21:31:23Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "fa750a5f17b0035a5a86f12dac279feb85a2ac0d",
-        "scripts/": "cd56dc61c9d0ca1e1fbda9b0223a3b84cede48a0"
+        "scripts/": "71bf14f9cc8da384648af535020ebcb51ac9f049"
       }
     },
     "docs/plans/2026-03-26-audit-report.md": {
@@ -322,17 +322,17 @@
       "last_verified": "2026-04-07T06:46:43Z"
     },
     "docs/issues/2026-05-04-doc-index-metadata-rewrite-on-every-commit.md": {
-      "content_hash": "sha256:79ad8a217996a73754ea336caaf3743c2b8611b597789f5c74a55f0f6d1612cd",
+      "content_hash": "sha256:adac25256fc7e86d234036e985a65af443c0921b7e8f581aa70e5cd3226b598c",
       "code_refs": [
         "scripts/doc-tools.sh"
       ],
-      "code_commit": "16050ba10244fae423a42a495ddde4febb5109c5",
+      "code_commit": "63fd1c508dc9d1b4c1f5ef192b409d16d27cd389",
       "doc_type": "plan",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T19:23:32Z",
+      "last_verified": "2026-09-27T21:31:23Z",
       "code_oids": {
-        "scripts/doc-tools.sh": "81b55d5fd2945176b2022dc97bc4593c6e3cd316"
+        "scripts/doc-tools.sh": "06ae490099207f8c85fa19d18977e8b52c4429cd"
       },
       "implementation": []
     },
@@ -536,13 +536,13 @@
       "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I05-merge-driver-not-three-way.md": {
-      "content_hash": "sha256:6f754717e1a1802a9c602071f6b4984cdf9748de47e2001c5cf566bf7e0dcced",
+      "content_hash": "sha256:0f61ebbde1b8f642fabdd18c6d4e9f622306b76f7345aa7aa103f7004bfcbec4",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T19:23:32Z",
+      "last_verified": "2026-09-27T21:31:23Z",
       "code_oids": {},
       "implementation": []
     },
