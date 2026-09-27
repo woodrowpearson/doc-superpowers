@@ -519,7 +519,7 @@ Routes to `scripts/hooks/install.sh <subcommand> [flags]`.
   - `all` (default): install every template (legacy behavior).
   - `none`: skip workflow files entirely but still vendor `doc-tools.sh`. Equivalent to `tools install` (preferred for "I only want the bundled CLI" cases).
   - CSV (e.g. `--workflows=doc-pr-release,doc-index-update`): install ONLY the listed workflows. Names are workflow basenames without `.yml`. Unknown names error out with the full valid set listed.
-- `--helpers=<true|false>` (v2.12.0+) — Whether to install the `doc-pr-release` shell helpers + `RELEASE-NOTES.next/README.md` spec. Default `true`. No effect if `doc-pr-release` is not in the install set. The workflows' own `run:` step scripts (`.github/scripts/doc-superpowers-steps/`) are not gated by this flag: they always ship with `doc-pr-release.yml` or `doc-release.yml`.
+- `--helpers=<true|false>` (v2.12.0+) — Whether to install the `doc-pr-release` shell helpers + `RELEASE-NOTES.next/README.md` spec. Default `true`. Install refuses `--helpers=false` while `doc-pr-release` is selected (non-zero exit, nothing written): the workflow runs those helpers, so drop `--helpers=false` or deselect `doc-pr-release`. The workflows' own `run:` step scripts (`.github/scripts/doc-superpowers-steps/`) are not gated by this flag: they always ship with `doc-pr-release.yml` or `doc-release.yml`.
 - `--force` (v2.12.0+) — Bypass state-respect; re-install workflows that were previously uninstalled with `intentional:true`.
 
 **Uninstall-specific flags:**

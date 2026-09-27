@@ -72,7 +72,9 @@ CI options (used with --ci):
                            vendors doc-tools.sh; a CSV picks specific workflows
                            by basename (no .yml). Unknown names error out.
   --helpers=<true|false>   Install doc-pr-release helpers (default: true).
-                           No effect if doc-pr-release workflow isn't installed.
+                           doc-pr-release.yml runs those helpers, so install
+                           refuses --helpers=false while doc-pr-release is
+                           selected (deselect it, or drop --helpers=false).
                            (The workflows' own step scripts in
                            .github/scripts/doc-superpowers-steps/ always ship
                            with doc-pr-release / doc-release.)
@@ -521,6 +523,29 @@ ci_sync_step_scripts() {
   return 0
 }
 
+# --helpers=false skips the doc-pr-release producer helpers (extract-context,
+# update-pr-body, commit-and-push), but doc-pr-release.yml runs all three. A
+# selected doc-pr-release with --helpers=false would therefore install a
+# workflow that fails at runtime: refuse it up front, before any tier writes.
+# Unknown --workflows names are left to install_ci's own validation.
+ci_refuse_helpers_false_conflict() {
+  [[ "$HELPERS_FLAG" == "false" ]] || return 0
+  local name
+  while IFS= read -r name; do
+    if [[ "$name" == "doc-pr-release" ]]; then
+      {
+        echo "ERROR: --helpers=false cannot be combined with the doc-pr-release workflow:"
+        echo "  doc-pr-release.yml runs .github/scripts/doc-pr-release/{extract-context,update-pr-body,commit-and-push}.sh,"
+        echo "  which --helpers=false skips, so the installed workflow would fail at runtime."
+        echo "  Fix: drop --helpers=false or deselect doc-pr-release (e.g. --workflows=<list without doc-pr-release>)."
+        echo "Nothing was installed."
+      } >&2
+      exit 1
+    fi
+  done < <(ci_resolve_workflow_set 2>/dev/null)
+  return 0
+}
+
 install_ci() {
   # Validate WORKFLOWS_FILTER UP FRONT so a bogus name aborts before we
   # touch the filesystem. The validation must happen here (not in a subshell)
@@ -601,10 +626,9 @@ install_ci() {
   fi
 
   # Install doc-pr-release helper scripts (alongside the workflow), gated on
-  # --helpers=true AND (doc-pr-release in install_set OR no --workflows filter).
-  # Rationale: helpers are useless without the workflow, but a user passing
-  # --workflows=doc-pr-release with --helpers=false is a valid "bring your own
-  # helpers" case.
+  # --helpers=true AND doc-pr-release in install_set. (--helpers=false with
+  # doc-pr-release selected is refused up front by
+  # ci_refuse_helpers_false_conflict: the workflow runs these helpers.)
   local should_install_helpers=false
   if [[ "$HELPERS_FLAG" == "true" ]] && [[ ${#install_set[@]} -gt 0 ]] \
      && printf '%s\n' "${install_set[@]}" | grep -qx 'doc-pr-release'; then
@@ -874,6 +898,8 @@ case "$COMMAND" in
         usage
       fi
     fi
+
+    $DO_CI && ci_refuse_helpers_false_conflict
 
     echo ""
     echo "Installing doc-superpowers hooks..."

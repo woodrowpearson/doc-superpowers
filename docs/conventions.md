@@ -79,7 +79,7 @@ chore: <maintenance task>
 
 - Keep PRs focused on a single change
 - Test skill changes by running `/doc-superpowers init` on a sample project before merging
-- Run the five shell test suites — `scripts/test-doc-tools.sh` (281 assertions), `scripts/test-hooks.sh` (330), `scripts/test-merge-driver.sh` (19), `scripts/test-doc-pr-release.sh` (109), `scripts/test-spec-status-model.sh` (86), 825 total (3 XFAIL known bugs) — all must pass before merge, under both bash 5.x and `/bin/bash` 3.2. They share the `scripts/test-helpers.sh` harness (isolated git environment, private scratch root, pipefail-safe asserts, SKIP/XFAIL reporting)
+- Run the five shell test suites — `scripts/test-doc-tools.sh` (281 assertions), `scripts/test-hooks.sh` (345), `scripts/test-merge-driver.sh` (19), `scripts/test-doc-pr-release.sh` (109), `scripts/test-spec-status-model.sh` (86), 840 total (3 XFAIL known bugs) — all must pass before merge, under both bash 5.x and `/bin/bash` 3.2. They share the `scripts/test-helpers.sh` harness (isolated git environment, private scratch root, pipefail-safe asserts, SKIP/XFAIL reporting)
 - Include before/after examples for behavior changes
 
 ## Documentation Conventions
@@ -244,7 +244,7 @@ The Claude tier **copies** hook scripts to `.claude/hooks/doc-superpowers/` with
 | `--base-branch NAME` | `main` | Target branch for PR checks |
 | `--cron EXPR` | `0 9 * * 1` | Schedule for weekly freshness audit |
 | `--ci-strict` | off | Fail PR check on stale docs (exit non-zero) |
-| `--helpers=<true\|false>` | `true` | Install the `doc-pr-release` helper scripts; no effect unless the `doc-pr-release` workflow is installed. Never gates the workflows' own step scripts (`.github/scripts/doc-superpowers-steps/`) |
+| `--helpers=<true\|false>` | `true` | Install the `doc-pr-release` helper scripts; `--helpers=false` is refused while `doc-pr-release` is selected (the workflow runs them). Never gates the workflows' own step scripts (`.github/scripts/doc-superpowers-steps/`) |
 
 ### Environment Variables
 

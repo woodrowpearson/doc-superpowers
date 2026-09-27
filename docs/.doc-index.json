@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-27T08:48:32Z",
+  "generated_at": "2026-09-27T09:00:47Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -34,17 +34,17 @@
       "implementation": []
     },
     "docs/conventions.md": {
-      "content_hash": "sha256:19e7d1572045f6560471a5cc63580d089f31a65609227b9b15dc642677deb4e1",
+      "content_hash": "sha256:e01d650340ddb8cd5f259fdd2e86de198e4842b4232fdf41cf626e94340d0aa0",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "references/doc-spec.md"
       ],
-      "code_commit": "8630c5b2b069e71a648989b48542fb27bf87580a",
+      "code_commit": "3bccb8abc9ae692999e52de2c08f178fdb0ab535",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T08:48:32Z",
+      "last_verified": "2026-09-27T09:00:47Z",
       "implementation": []
     },
     "docs/guides/getting-started.md": {
@@ -62,17 +62,17 @@
       "implementation": []
     },
     "docs/workflows/doc-superpowers.md": {
-      "content_hash": "sha256:9170e699fd44c9b8d42cd14b1ca41742ef6637765ff92cce65cb1bfd1c2ed4db",
+      "content_hash": "sha256:a111449a7c3e7e2ec5de1089b347c4f38a7a9e12476f17c6e5175c9a1819eef6",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "8630c5b2b069e71a648989b48542fb27bf87580a",
+      "code_commit": "3bccb8abc9ae692999e52de2c08f178fdb0ab535",
       "doc_type": "workflows",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T08:48:32Z",
+      "last_verified": "2026-09-27T09:00:47Z",
       "implementation": []
     },
     "docs/plans/2026-03-26-audit-report.md": {
