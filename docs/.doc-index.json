@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-02T06:21:23Z",
+  "generated_at": "2026-09-27T06:14:24Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -466,6 +466,178 @@
       "replaces": null,
       "superseded_by": null,
       "last_verified": "2026-07-30T01:57:08Z"
+    },
+    "docs/plans/2026-09-27-full-repo-05ea982-audit-findings.md": {
+      "content_hash": "sha256:38a099a1d4da4d9c67e9a78697fd25253b572b28e5d4badf2d1e4136509b96ba",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "plan",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:14:24Z",
+      "implementation": []
+    },
+    "docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md": {
+      "content_hash": "sha256:e40fb107e20f995371cb48d78001d4213671c973a02c9be53347f694770b5095",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "plan",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:12:33Z"
+    },
+    "docs/plans/2026-09-27-full-repo-05ea982-jumping-off-point.md": {
+      "content_hash": "sha256:ac7d362a394f0db138e40e3c677c02b0c257c4efa1ee181e04ecc856da012a04",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "plan",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:12:33Z"
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I01-freshness-identity-model.md": {
+      "content_hash": "sha256:f541806f15faa0cb7733037d0c1c8f93d13a625296bc73a95764a08b037a9350",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:12:33Z"
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I02-index-persistence-layer.md": {
+      "content_hash": "sha256:47fd31e1bb8ee3654895918754b4eb42f6dabe37fefde122f33c2a457b643127",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:12:33Z"
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I03-index-semantics.md": {
+      "content_hash": "sha256:2b1aa0dde41934bb06730ffc7610b23e6a102a6af4306375acd5265f85e75245",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:12:33Z"
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I04-doc-tools-input-cli-robustness.md": {
+      "content_hash": "sha256:62cf18fe63ab7053d414cc08445a598ed971982c720f8e14d573a54f2e3f4b90",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:12:33Z"
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I05-merge-driver-not-three-way.md": {
+      "content_hash": "sha256:14c4beaacb99256bad6a6334b270fe15cfc42887da9add802629db1e3f1d4d33",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:12:33Z"
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I06-claude-hook-tier-and-hook-semantics.md": {
+      "content_hash": "sha256:25368988f7f0516c60ac7433697799936f009a56e5da1eda29eed5c37ef9eaf4",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:12:33Z"
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I07-installer-ownership-placement-state.md": {
+      "content_hash": "sha256:c6c66e4f2697a5e8c4310ee3ca23e4e27239e0fdf6cd829b71d0e4087d21fc1b",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:12:33Z"
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I08-ci-templates.md": {
+      "content_hash": "sha256:4edf5765210ff74be2cfb2b521c943d51aa78d9779c70ed8017cbf9b55f68e37",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:12:33Z"
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I09-release-fragment-pipeline.md": {
+      "content_hash": "sha256:ef816cd8c194a14705feb28b02a0abe82e0e3655e152d645caa88167c21d422e",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:12:33Z"
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I10-implementation-version-vendoring-verbs.md": {
+      "content_hash": "sha256:aa09ce99efc4c2bdd56c49bb2e989a22f38fba9268c67faea3cbb39badc6221a",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:12:33Z"
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I11-skill-prompt-tool-contract.md": {
+      "content_hash": "sha256:b8a13c5c0eed8d95759d996972492772fcff7260e0bf15dba5aa9e4fe59177e3",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:12:33Z"
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I12-cross-client-packaging.md": {
+      "content_hash": "sha256:029139978a9db445361c864657e9273a598efccd690baadbcce6ed737c3b1b1f",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:12:33Z"
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I13-test-suite-fidelity.md": {
+      "content_hash": "sha256:bd0b25d54e08edf426839eb1390e535706b9b8fe428bc8a7b9905f8049621d8b",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:12:33Z"
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I14-docs-and-self-dogfooding.md": {
+      "content_hash": "sha256:2b86891c0a5581c121f76932757e28cec265c6344f1c2565db90aecc4831407b",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "status": "current",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:14:24Z",
+      "implementation": []
     }
   }
 }
