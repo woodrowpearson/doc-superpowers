@@ -228,12 +228,16 @@ a base-aware, per-key three-way merge.
   re-verification, a hand edit and a deletion, in every direction: `git merge` either way,
   `git rebase` either way, and `git revert`.
 - **The same docs either way.** Rebase is no longer a riskier path than merge: both give the same
-  docs. The one exception is two different values for the same field with the same
-  `last_verified`, where the checked-out side wins.
+  docs, with no exception. When both sides changed one field to different values and
+  `last_verified` does not say which is newer, the merge stops with markers naming the key and
+  field in every direction. Only `update-index` writes `last_verified`, so this is the usual case
+  for two edits of one field, for example two `set-code-refs` runs or a repoint against a
+  re-deprecation.
 - **A merge adds no metadata churn of its own.** The top level starts from ours, so
   `generated_at` and `build_commit` are no longer rewritten to merge time and HEAD, and the key
   order is kept rather than re-sorted.
-- **Undecidable changes stop the merge.** An entry deleted on one side and changed on the other, or
+- **Undecidable changes stop the merge.** The same field changed on both sides with no newer
+  `last_verified`, an entry deleted on one side and changed on the other, or
   a malformed side, leaves conflict markers and exit 1 instead of a silent guess.
 - **The server-side half is unchanged.** GitHub's mergeability check and merge buttons still do
   not run custom drivers. That remains open with T7 and the workaround below.

@@ -115,15 +115,22 @@ three-way merge. Its header comment is the specification.
   comparing, a legacy stored `current`/`stale` status reads as absent.
 - **Both sides changed an entry**: it is merged field by field. The side that changed a field wins.
   When both changed the same field differently, the entry with the newer `last_verified` wins it.
-  - A non-null `last_verified` beats null. When the two are equal, or both null, ours wins. That
-    case is the only one where the result depends on direction: both sides changed the same field
-    to different values and neither is newer.
+  - A non-null `last_verified` beats null.
+  - When `last_verified` does not order the two (equal, or both null), nothing decides. The merge
+    is a **conflict**: markers, exit 1, and stderr names the doc key and the field. This is the
+    common case, not a same-second rarity: only `update-index` writes `last_verified`, so two
+    `set-code-refs`, `deprecate-entry --superseded-by`, `move-entry` repoints, `set-implementation`
+    calls or hand edits of one field always tie. (Fix round 1 replaced the first version's "a tie
+    keeps ours", which silently kept one branch's value depending on direction.)
   - `content_hash`, `code_oids`, `code_commit` and `last_verified` are **one** field. `update-index`
     writes them as a unit. Mixing one side's doc hash with the other side's code ids would attest a
-    doc/code pair that nobody verified. The driver takes the newer record whole.
+    doc/code pair that nobody verified. The driver takes the newer record whole. Two different
+    records with the same `last_verified` are a conflict; two equal records are not.
   - **Deprecated wins**: if both sides changed `status`, it resolves to `deprecated` when either
     side has it. `superseded_by` goes with the status the merge kept. Reverting a deprecation still
-    removes it, because the revert removes it and the other side left it alone.
+    removes it, because the revert removes it and the other side left it alone. When both sides
+    have the same status, `superseded_by` follows the `last_verified` rule, so a repoint against a
+    re-deprecation conflicts.
 - **One side deleted a key and the other changed it**: this is a conflict, never a silent drop.
 - **Any side that is not exactly one object with a `.docs` object** is a conflict: 0 bytes,
   `null`, `{}`, two documents, or invalid JSON. The check is
@@ -149,12 +156,19 @@ three-way merge. Its header comment is the specification.
   - `status` reports which driver a merge would run, or flags a pre-3.0 pinned registration for
     re-install. The old `awk '{print $1}'` parse is gone.
   - Existing installs pick this up the next time `install --git` runs (T8 re-registers).
-- **Tests**: `scripts/test-merge-driver.sh` was rewritten. It has 394 assertions, up from 19, and
+- **Signals**: an INT/TERM/HUP, even mid-write, restores `%A` from ours and leaves markers. `%A` is
+  never left half-written.
+- **Tests**: `scripts/test-merge-driver.sh` was rewritten. It has 486 assertions, up from 19, and
   they are stated against the base.
   - Fixtures are built with `build-index`, `add-entry`, `update-index`, `deprecate-entry`,
     `move-entry`, `remove-entry` and `set-code-refs`, on a controlled clock.
   - Each fixture is merged four ways: merge and rebase, in both directions. There are also two
     `git revert` cases.
+  - Unordered same-field changes conflict in all four ways: `set-code-refs` on both sides, a
+    `move-entry` repoint against `deprecate-entry --superseded-by`, and same-second `update-index`
+    runs with different results. Same-second runs with the same result do not conflict.
+  - Degenerate sides are tested through git in both directions, and so is a signal during the
+    `%A` write.
   - The direct cases cover each rule.
   - The registration cases cover a path with a space, a version bump without re-install, numeric
     version order, a pruned dir, no driver at all, and legacy status.

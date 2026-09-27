@@ -326,6 +326,68 @@ assert_ways_same_docs "null last_verified tie"
 teardown
 
 echo ""
+echo "--- same field, no newer last_verified: set-code-refs on both sides is a conflict ---"
+base_repo
+git checkout -q -b A
+dt "$T2" set-code-refs docs/c.md --refs src/c.js,src/a.js
+commit_all "A: c + a.js"
+git checkout -q -b B main
+dt "$T3" set-code-refs docs/c.md --refs src/c.js,src/b.js
+commit_all "B: c + b.js"
+run_ways
+assert_ways_conflict "docs/c.md: both sides changed code_refs" "set-code-refs vs set-code-refs"
+teardown
+
+echo ""
+echo "--- same field, no newer last_verified: move-entry repoint vs deprecate --superseded-by ---"
+base_repo
+dt "$T2" deprecate-entry --superseded-by docs/b.md docs/a.md
+commit_all "a superseded by b"
+git checkout -q -b A
+git mv docs/b.md docs/b2.md
+git commit -qm "A: move b"
+dt "$T3" move-entry docs/b.md docs/b2.md
+commit_all "A: move-entry repoints a"
+git checkout -q -b B main
+dt "$T3" deprecate-entry --superseded-by docs/c.md docs/a.md
+commit_all "B: a superseded by c"
+run_ways
+assert_ways_conflict "docs/a.md: both sides changed superseded_by" "repoint vs re-deprecate"
+teardown
+
+echo ""
+echo "--- same-second update-index on both sides, different results: a conflict ---"
+base_repo
+git checkout -q -b A
+echo "// a changed" > src/a.js
+git add -A && git commit -qm "A: code"
+dt "$T3" update-index docs/a.md
+commit_all "A: re-verify a (new code)"
+git checkout -q -b B main
+echo "# a, revised" > docs/a.md
+git add -A && git commit -qm "B: doc"
+dt "$T3" update-index docs/a.md
+commit_all "B: re-verify a (new doc)"
+run_ways
+assert_ways_conflict "docs/a.md: both sides changed the verification record" "same-second re-verifies"
+teardown
+
+echo ""
+echo "--- same-second update-index on both sides, same result: no conflict ---"
+base_repo
+git checkout -q -b A
+dt "$T3" update-index docs/a.md
+commit_all "A: re-verify a"
+git checkout -q -b B main
+dt "$T3" update-index docs/a.md
+hand_edit '.docs["docs/a.md"].doc_type = "adr"'
+commit_all "B: re-verify a, retype"
+run_ways
+assert_ways '.docs["docs/a.md"] | "\(.last_verified) \(.doc_type)"' "$T3 adr" "identical records merge, the other field is kept"
+assert_ways_same_docs "same-second identical re-verifies"
+teardown
+
+echo ""
 echo "--- one-sided change with an OLDER last_verified (a reverted re-verify) ---"
 base_repo
 echo "// a changed" > src/a.js
@@ -465,11 +527,18 @@ for bad in empty null object two-docs; do
               mv docs/.doc-index.json.new docs/.doc-index.json ;;
   esac
   commit_all "B: $bad index"
-  rc=0
-  git merge --no-edit A > "$SUITE_TMP/merge.log" 2>&1 || rc=$?
-  assert_true "theirs-degenerate ($bad) side: merge exits non-zero" test "$rc" -ne 0
-  assert_contains "$(cat docs/.doc-index.json)" "<<<<<<< ours" "degenerate ($bad) side: markers in the index"
-  assert_contains "$(git ls-files -u docs/.doc-index.json)" ".doc-index.json" "degenerate ($bad) side: index left unmerged"
+  # B holds the degenerate index: checked out it is ours, merged in theirs.
+  for side in ours theirs; do
+    if [ "$side" = ours ]; then head=B other=A; else head=A other=B; fi
+    git checkout -q -f "$head"
+    rc=0
+    git merge --no-edit "$other" > "$SUITE_TMP/merge.log" 2>&1 || rc=$?
+    assert_true "$side-degenerate ($bad): merge exits non-zero" test "$rc" -ne 0
+    assert_contains "$(cat docs/.doc-index.json)" "<<<<<<< ours" "$side-degenerate ($bad): markers in the index"
+    assert_contains "$(git ls-files -u docs/.doc-index.json)" ".doc-index.json" "$side-degenerate ($bad): index left unmerged"
+    git merge --abort > /dev/null 2>&1 || true
+    git reset -q --hard
+  done
   teardown
 done
 
@@ -556,7 +625,7 @@ assert_json_field "$DRV_OUT" '.docs["docs/a.md"] | [.content_hash, .code_oids["s
   "sha256:h-ours oid0 c-ours 2026-01-01T00:00:03Z" "newer verification taken whole (swapped)"
 
 echo ""
-echo "--- both changed one field: newer last_verified; non-null beats null; tie keeps ours ---"
+echo "--- both changed one field: newer last_verified wins; non-null beats null; unordered is a conflict ---"
 derive "$O" '.docs["docs/a.md"] += {doc_type: "guide", last_verified: "2026-01-01T00:00:02Z"}'
 derive "$T" '.docs["docs/a.md"] += {doc_type: "adr", last_verified: "2026-01-01T00:00:03Z"}'
 drive
@@ -571,18 +640,35 @@ drive
 assert_json_field "$DRV_OUT" '.docs["docs/a.md"].doc_type' "adr" "non-null last_verified beats null"
 drive_swapped
 assert_json_field "$DRV_OUT" '.docs["docs/a.md"].doc_type' "adr" "non-null last_verified beats null (swapped)"
-# both null: ours
+# both null: nothing orders them -> conflict, in both directions
 derive "$T" '.docs["docs/a.md"] += {doc_type: "adr"}'
-drive
-assert_json_field "$DRV_OUT" '.docs["docs/a.md"].doc_type' "guide" "both null: ours"
-drive_swapped
-assert_json_field "$DRV_OUT" '.docs["docs/a.md"].doc_type' "adr" "both null: ours (swapped)"
+for way in drive drive_swapped; do
+  "$way"
+  assert_eq "1" "$DRV_RC" "both null, same field ($way): exit 1"
+  assert_contains "$DRV_OUT" "<<<<<<< ours" "both null, same field ($way): markers"
+  assert_contains "$DRV_ERR" "docs/a.md: both sides changed doc_type" "both null, same field ($way): key and field named"
+done
 write_index "$B" "{\"docs/a.md\": $ENTRY}"
-# equal: ours
+# equal: nothing orders them -> conflict, in both directions
 derive "$O" '.docs["docs/a.md"] += {doc_type: "guide"}'
 derive "$T" '.docs["docs/a.md"] += {doc_type: "adr"}'
+for way in drive drive_swapped; do
+  "$way"
+  assert_eq "1" "$DRV_RC" "equal last_verified, same field ($way): exit 1"
+  assert_contains "$DRV_ERR" "docs/a.md: both sides changed doc_type" "equal last_verified, same field ($way): key and field named"
+done
+# equal last_verified, different verification records -> conflict
+derive "$O" '.docs["docs/a.md"] += {content_hash: "sha256:h-ours"}'
+derive "$T" '.docs["docs/a.md"] += {code_oids: {"src/a.js": "oid-theirs"}}'
 drive
-assert_json_field "$DRV_OUT" '.docs["docs/a.md"].doc_type' "guide" "equal last_verified: ours"
+assert_eq "1" "$DRV_RC" "equal last_verified, different records: exit 1"
+assert_contains "$DRV_ERR" "the verification record" "equal last_verified, different records: named"
+# equal records (both sides wrote the same one) are no conflict
+derive "$O" '.docs["docs/a.md"] += {content_hash: "sha256:h2", doc_type: "guide"}'
+derive "$T" '.docs["docs/a.md"] += {content_hash: "sha256:h2", code_refs: ["src/"]}'
+drive
+assert_eq "0" "$DRV_RC" "equal records: exit 0"
+assert_json_field "$DRV_OUT" '.docs["docs/a.md"] | "\(.content_hash) \(.doc_type) \(.code_refs[0])"' "sha256:h2 guide src/" "equal records: kept, other fields merged"
 
 echo ""
 echo "--- deprecated wins; superseded_by travels with the status ---"
@@ -646,6 +732,43 @@ derive "$T" '.docs["docs/a.md"] += {owner: "them", code_refs: ["src/"]}'
 drive
 assert_json_field "$DRV_OUT" '.docs["docs/a.md"] | keys_unsorted | join(",")' \
   "implementation,content_hash,code_refs,code_oids,code_commit,doc_type,replaces,superseded_by,last_verified,owner" "field order: ours', then theirs-only"
+
+echo ""
+echo "--- a signal during the %A write leaves markers, never a partial result ---"
+# A `cat` on the driver's PATH that writes part of the result, stalls, then
+# writes the rest: the driver's first cat is its write of %A. The signal lands
+# while that write is in progress.
+_REAL_CAT="$(command -v cat)"
+_SLOW_DIR="$SUITE_TMP/slow-cat"
+SLOW_FLAG="$SUITE_TMP/slow-cat.flag"
+mkdir -p "$_SLOW_DIR"
+cat > "$_SLOW_DIR/cat" <<EOF
+#!/bin/sh
+if [ -f "$SLOW_FLAG" ]; then
+  rm -f "$SLOW_FLAG"
+  head -c 40 "\$1"
+  sleep 3
+  tail -c +41 "\$1"
+  exit 0
+fi
+exec "$_REAL_CAT" "\$@"
+EOF
+chmod +x "$_SLOW_DIR/cat"
+derive "$O" '.docs["docs/a.md"].doc_type = "guide"'
+derive "$T" '.docs["docs/a.md"].code_refs = ["src/"]'
+for sig in TERM HUP; do
+  cp "$O" "$RES"
+  : > "$SLOW_FLAG"
+  PATH="$_SLOW_DIR:$PATH" "$MERGE_DRIVER" "$B" "$RES" "$T" 2> "$DRV_ERRF" &
+  rc=0
+  harness_kill_after 1 "$sig" "$!" || rc=$?
+  assert_eq "1" "$HARNESS_KILL_ALIVE" "$sig: the driver was mid-write when signalled"
+  assert_true "$sig during the write: exit non-zero" test "$rc" -ne 0
+  assert_contains "$(cat "$RES")" "<<<<<<< ours" "$sig during the write: markers in %A"
+  assert_contains "$(cat "$RES")" '"doc_type": "guide"' "$sig during the write: rebuilt from ours"
+  assert_contains "$(cat "$DRV_ERRF")" "interrupted" "$sig during the write: says why"
+done
+rm -f "$SLOW_FLAG"
 
 # ===================================================================
 # Registration: install.sh --git (quoted path, newest driver at merge time)

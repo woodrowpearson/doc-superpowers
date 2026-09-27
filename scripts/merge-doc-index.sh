@@ -20,17 +20,25 @@
 #   otherwise, both changed it:
 #     - one side deleted the entry, the other changed it -> conflict (exit 1)
 #     - both kept it -> merged field by field, the same rule per field: the
-#       side that changed a field wins; when both changed it differently, the
-#       entry whose last_verified is newer wins (a non-null last_verified beats
-#       null; equal, or both null, keeps ours). Two refinements:
+#       side that changed a field wins. When both changed a field to
+#       different values, last_verified decides: the entry whose
+#       last_verified is newer wins it (a non-null value beats null). When
+#       last_verified does not order the sides (equal, or both null) nothing
+#       decides, and the merge is a conflict (exit 1) naming the key and
+#       field. That is not a rare same-second case: only update-index writes
+#       last_verified, so two set-code-refs, deprecate-entry --superseded-by,
+#       move-entry repoints, set-implementation calls or hand edits of one
+#       field always tie. Two refinements:
 #       * the verification record (content_hash, code_oids, code_commit,
 #         last_verified) is ONE field: update-index writes it as a unit, and a
 #         doc hash from one side beside code ids from the other would attest a
-#         doc/code pair nobody verified;
+#         doc/code pair nobody verified. Two different records with the same
+#         last_verified are a conflict; two equal ones are not;
 #       * deprecated wins: a status both sides changed resolves to
 #         "deprecated" if either side has it, and superseded_by (when both
 #         changed it) goes with the status the merge kept — so a revert that
-#         removes a deprecation still removes it.
+#         removes a deprecation still removes it. When both sides have the same
+#         status, superseded_by follows the last_verified rule above.
 # Before comparing, a stored status "current"/"stale" (legacy: status is
 # derived now; only "deprecated" is stored) reads as absent, so it is never a
 # conflict; an entry merged field by field is written without it, the way any
@@ -38,13 +46,15 @@
 #
 # The top level starts from ours: every field survives (schema_version or a
 # legacy version, build_commit, generated_at, unknown fields); a field only
-# theirs changed is taken from theirs, and when both changed it ours wins. Key
+# theirs changed is taken from theirs, and when both changed it ours wins
+# (generated_at always differs: it is write-time metadata, not content). Key
 # order is ours' — in .docs and in each entry — with theirs-only keys
 # appended, so a merge is not a whole-file reorder.
 #
 # Any input that is not exactly one JSON object whose .docs is an object
 # (0 bytes, `null`, `{}`, two documents, invalid JSON) is a conflict, not an
-# empty index. Needs bash 3.2+, git and jq >= 1.6.
+# empty index. So is an INT/TERM/HUP: %A is restored from ours and given
+# markers, never left half-written. Needs bash 3.2+, git and jq >= 1.6.
 #
 # No lock: the doc-tools index lock guards docs/.doc-index.json in the working
 # tree. This driver never touches that file; it writes only %A, a temporary
@@ -74,7 +84,14 @@ cleanup() {
   return 0
 }
 trap cleanup EXIT
-trap 'exit 1' INT TERM HUP
+# A signal is a conflict like any other failure: conflict() restores %A from
+# the pristine copy of ours and writes markers. (bash runs the trap once the
+# foreground command in progress returns, so a signal landing mid-write still
+# ends with %A rebuilt, never half-written.) Defined below; set here so no
+# window exists before it.
+# shellcheck disable=SC2329  # run by the INT/TERM/HUP traps
+on_signal() { conflict "interrupted by a signal; the merge result was not kept"; }
+trap on_signal INT TERM HUP
 
 # Scratch files live in TMPDIR, never beside %A: %A sits in the work tree's
 # top directory, and a scratch file left there would show up as untracked.
@@ -92,7 +109,9 @@ cat_nl() {
 # so the two sides conflict as a whole. Should merge-file itself fail (e.g. a
 # binary side), whole-file markers are written directly.
 conflict() {
-  echo "merge-doc-index: $1" >&2
+  # Writing the markers must not itself be interrupted half-way.
+  trap '' INT TERM HUP
+  printf '%s\n' "$1" | sed -e 's/^/merge-doc-index: /' >&2
   echo "merge-doc-index: leaving conflict markers in the index; resolve them, then re-run doc-tools.sh update-index for the docs involved" >&2
   if [ -n "$KEEP" ]; then
     cp "$KEEP" "$OURS" 2>/dev/null || true
@@ -160,51 +179,64 @@ def ukeys($o; $t): ($o | keys_unsorted) + [($t | keys_unsorted)[] | select(. as 
 def pick3($b; $o; $t): if $o == $t then $o elif $o == $b then $t elif $t == $b then $o else null end;
 # A stored "current"/"stale" is legacy (status is derived): it reads as absent.
 def norm: if type == "object" and (.status == "current" or .status == "stale") then del(.status) else . end;
-# Theirs wins a both-changed field when its last_verified is newer. A non-null
-# value beats null; equal, or both null, keeps ours.
-def theirs_newer($o; $t):
+# Which side last_verified says is newer: "t" or "o"; null when it does not
+# order them (equal, or both null). A non-null value beats null.
+def order($o; $t):
   ($o.last_verified) as $x | ($t.last_verified) as $y
-  | if $y == null then false elif $x == null then true else $y > $x end;
+  | if $x == $y then null
+    elif $y == null then "o" elif $x == null then "t"
+    elif $y > $x then "t" else "o" end;
 # The verification record, compared and taken as one unit.
 def VERIFY: {content_hash: 0, code_oids: 1, code_commit: 2, last_verified: 3};
 def vrec($e): [w($e; "content_hash"), w($e; "code_oids"), w($e; "code_commit"), w($e; "last_verified")];
 
+# Returns {e: merged entry, c: [fields nothing decides]}.
 def merge_fields($b; $o; $t):
-  theirs_newer($o; $t) as $tn
-  | (pick3(vrec($b); vrec($o); vrec($t)) // (if $tn then vrec($t) else vrec($o) end)) as $ver
+  order($o; $t) as $ord
+  # A field both sides changed to different values: the newer side, or null.
+  | def newer($x; $y): if $ord == "t" then $y elif $ord == "o" then $x else null end;
+  (pick3(vrec($b); vrec($o); vrec($t)) // newer(vrec($o); vrec($t))) as $ver
   | w($o; "status") as $so | w($t; "status") as $st
   | (pick3(w($b; "status"); $so; $st)
      // (if $so == ["deprecated"] or $st == ["deprecated"] then ["deprecated"]
-         elif $tn then $st else $so end)) as $status
+         else newer($so; $st) end)) as $status
   | (pick3(w($b; "superseded_by"); w($o; "superseded_by"); w($t; "superseded_by"))
-     // (if $so != $st then (if $status == $so then w($o; "superseded_by") else w($t; "superseded_by") end)
-         elif $tn then w($t; "superseded_by") else w($o; "superseded_by") end)) as $sup
-  | reduce ukeys($o; $t)[] as $f ({};
-      (if $f == "status" then $status
-       elif $f == "superseded_by" then $sup
-       elif (VERIFY | .[$f]) != null then $ver[(VERIFY | .[$f])]
-       else (pick3(w($b; $f); w($o; $f); w($t; $f)) // (if $tn then w($t; $f) else w($o; $f) end))
-       end) as $v
-      | if $v == [] then . else . + {($f): $v[0]} end);
+     // (if $status != null and $so != $st
+         then (if $status == $so then w($o; "superseded_by") else w($t; "superseded_by") end)
+         else newer(w($o; "superseded_by"); w($t; "superseded_by")) end)) as $sup
+  | reduce ukeys($o; $t)[] as $f ({e: {}, c: []};
+      (VERIFY | .[$f]) as $vi
+      | (if $f == "status" then $status
+         elif $f == "superseded_by" then $sup
+         elif $vi != null then (if $ver == null then [] else $ver[$vi] end)
+         else (pick3(w($b; $f); w($o; $f); w($t; $f)) // newer(w($o; $f); w($t; $f)))
+         end) as $v
+      | if $v == null then .c += [$f]
+        elif $v == [] then .
+        else .e += {($f): $v[0]} end)
+  | if $ver == null
+    then .c += ["the verification record (content_hash, code_oids, code_commit, last_verified)"]
+    else . end;
 
-# One docs key. Wrapped entries in, {v: wrapped result} or {c: true} out.
+# One docs key. Wrapped entries in, {v: wrapped result} or {c: why} out.
 def merge_entry($b; $o; $t):
   ($b | map(norm)) as $nb | ($o | map(norm)) as $no | ($t | map(norm)) as $nt
   | if $no == $nt then {v: $o}
     elif $no == $nb then {v: $t}
     elif $nt == $nb then {v: $o}
-    elif $o == [] or $t == [] then {c: true}
+    elif $o == [] or $t == [] then {c: "deleted on one side, changed on the other"}
     elif ([$nb[], $no[], $nt[]] | all(type == "object"))
-      then {v: [merge_fields($nb[0] // {}; $no[0]; $nt[0])]}
-    else {c: true} end;
+      then merge_fields($nb[0] // {}; $no[0]; $nt[0]) as $m
+        | if ($m.c | length) > 0
+          then {c: "both sides changed \($m.c | join(", ")), and last_verified does not say which is newer"}
+          else {v: [$m.e]} end
+    else {c: "not an object on every side"} end;
 
 ($B[0] // {}) as $base | $O[0] as $ours | $T[0] as $theirs
 | ($base.docs // {}) as $bd | $ours.docs as $od | $theirs.docs as $td
 | [ukeys($od; $td)[] as $k | merge_entry(w($bd; $k); w($od; $k); w($td; $k)) + {k: $k}] as $rows
-| [$rows[] | select(.c) | .k] as $conflicts
-| if ($conflicts | length) > 0
-  then error("changed on one side, deleted on the other (or not an object): \($conflicts | join(", "))")
-  else . end
+| [$rows[] | select(.c) | "\(.k): \(.c)"] as $conflicts
+| if ($conflicts | length) > 0 then error($conflicts | join("\n")) else . end
 | (reduce ($rows[] | select(.v != [])) as $r ({}; . + {($r.k): $r.v[0]})) as $docs
 | reduce ukeys($ours; $theirs)[] as $k ({};
     if $k == "docs" then . + {docs: $docs}
