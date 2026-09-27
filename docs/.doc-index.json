@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-27T06:14:24Z",
+  "generated_at": "2026-09-27T06:29:06Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -559,14 +559,15 @@
       "last_verified": "2026-09-27T06:12:33Z"
     },
     "docs/issues/2026-09-27-sweep-05ea982-I07-installer-ownership-placement-state.md": {
-      "content_hash": "sha256:c6c66e4f2697a5e8c4310ee3ca23e4e27239e0fdf6cd829b71d0e4087d21fc1b",
+      "content_hash": "sha256:54b3007bf93e179e97638b881c4bc6c71d2cd918d3e9fa3825e4b9d2fa41ddf8",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T06:12:33Z"
+      "last_verified": "2026-09-27T06:29:06Z",
+      "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I08-ci-templates.md": {
       "content_hash": "sha256:4edf5765210ff74be2cfb2b521c943d51aa78d9779c70ed8017cbf9b55f68e37",

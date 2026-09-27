@@ -109,6 +109,63 @@ The installer works out *what it owns*, *where to write* and *what was installed
   - `v1` markers are matched as exact strings;
   - uninstall leaves a 0-byte `.gitattributes`.
 
+## Follow-up pass FU2 (L-PERF + L-DEADCODE-SIMPLIFY, verified by V-FU2)
+
+The Phase-4 critic found that no pass had covered S4 × L-PERF or S4 × L-DEADCODE. The follow-up pass
+added the items below. Measured unless noted. Five of the finder's items were dropped on
+verification: the Claude-tier jq cost, `--workflows=all`, the secrets NOTE, the env-overrides line,
+and the menu (a duplicate).
+
+- [P2] `state.sh:31,179-182,196-199,214-217`; `install.sh:521-524`: a malformed `installed.json`,
+  such as the merge conflict produced by the installer's own `installed_at` churn, loses every
+  `intentional` record.
+  - `install --ci` rebuilds the file from disk, so workflows that were removed on purpose come back.
+    Measured through a real two-branch merge: 3 conflict hunks, then "9 installed".
+  - `uninstall` resets the file to a skeleton.
+  - The rewritten file is valid JSON, so `git add` "resolves" the conflict with the resurrected state.
+  - Fix: refuse to write over an unparsable state file (or move it aside and install nothing new).
+    Stop rewriting timestamps on no-op marks. `test-hooks.sh:1388-1401` pins the current behaviour.
+- [P3] `state.sh:146-233`; `install.sh:538-557,…`: every state mark is a full transaction.
+  - `install --ci` = 53 jq and 12 whole-file rewrites; about 300 ms of its ~390 ms is state
+    bookkeeping.
+  - Fix: `state_load` once, then `state_flush` once, but flush or mark **before** deleting files, so
+    an interrupted uninstall cannot resurrect workflows.
+- [P3] `state.sh:51-77`; `install.sh:447,495-517`: the workflow list is re-derived for every
+  membership test, so cost is O(k·W). A 9-name CSV = 338 execve, 174 of them `basename`.
+- [P3] `install.sh:715-731,757`: `status` has two defects.
+  - On a file that is valid JSON but the wrong shape, it aborts with rc 5 and no message.
+  - On a malformed file, it prints the WARN twice.
+- [P3] Dead or write-only code:
+  - `state_dump_ci` has zero callers.
+  - `.tiers.ci.tools`, `.helpers`, `.dest`, the timestamps and `schema_version` are written but never
+    read. After `tools uninstall`, the state still says "installed".
+  - The `found` counter is never read.
+  - The CSV validation is duplicated (`:424` is dead).
+  - The hardcoded fallback workflow list and its unreachable `return 1`; `docs/codebase-guide.md:123`
+    documents the fallback.
+  - Guards that never apply, and the unset `DOC_SP_STATE_FILE` knob.
+  - The `VERSION` computation feeds only the dead `DOC_SUPERPOWERS_VERSION`.
+  - The sed render is copy-pasted 3×.
+- [P3] `install.sh:559-606,676-703` vs `doc-tools.sh:1797-1935`: vendoring is implemented twice and
+  the copies have drifted. `uninstall --ci` deletes locally edited helpers, while `tools uninstall`
+  keeps them. Delegate to `tools …` only **after** I-10 fixes `tools uninstall`.
+- [P3] `install.sh:781-884`: flags outside a command's scope are silently ignored, all rc 0:
+  - `status --ci` prints all tiers;
+  - `uninstall --ci --helpers=false` still deletes the helpers;
+  - `status --workflows=bogus`.
+- [P3, new at verification] `install.sh:633-636`: `uninstall --ci` returns "nothing to uninstall"
+  when `.github/workflows/` is absent. The vendored tool, the helpers and the state are left behind.
+- [P3, new at verification] `install.sh:538-547,722`: the state and the disk are never reconciled.
+  A workflow marked intentionally-uninstalled that is back on disk is never refreshed, and `status`
+  shows "✓ installed".
+- [P3, new at verification] `install.sh:442-515`: duplicate CSV names give "2 installed".
+- Clean (verified):
+  - nothing scales with repo size (20,000-file repo: `install --all` 418 ms, no reads under the
+    source tree);
+  - every substituted placeholder has a template sink, except the known `__DOC_TOOLS_PATH__`;
+  - 15/15 `install.sh` and 11/12 `state.sh` functions have callers;
+  - `install.sh` 731-778 and 853-890 and `state.sh` 1-40 and 199-249 have no further defects.
+
 ## Proposed fix (fix plan Task 8)
 
 - **Placement:** use git plumbing (`--show-toplevel`, `--git-path hooks`). Refuse a global
