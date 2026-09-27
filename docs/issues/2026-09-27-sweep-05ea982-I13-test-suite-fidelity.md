@@ -164,3 +164,9 @@ expose bugs owned elsewhere and are reported as XFAIL until their Task fixes the
 jq spawns per entry (T4/I-1), base-branch commits in `new_commits` after "Update branch" and a
 pre-staged file swept into the sync commit (T10/I-9). The last criterion depends on I-14 (CI billing
 lock), not on the harness.
+
+Owner of the surviving `test-doc-tools.sh` fragment mutants from V-FU1 (S-reg-canonical-order,
+L-reg-list-nosort, VAL-reg-missing-hash-valid, N-reg-merge-no-numeric-skip, F-newest-touch,
+A-fix-lastline, U-reg-drop-dup-check): **T10 (I-9)**, in its Step 1 fragment-consumer fixtures.
+Task 1 made their captures record a FAIL instead of aborting the suite; it did not add those
+fixtures.

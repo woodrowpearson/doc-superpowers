@@ -252,25 +252,33 @@ record_skip() {
   printf "${YELLOW}  SKIP${NC}: %s\n" "$msg"
 }
 
-# A fixture that exposes a verified bug owned by a later fix Task. It is
-# reported on every run as XFAIL (not counted as a pass). If the bug is fixed
-# the assertion starts passing and is reported as a FAIL ("XPASS"), so the
-# owning Task has to turn it into an ordinary assertion — it cannot silently
-# linger as a stale marker.
-#   assert_eq_known_bug "<owner, e.g. T10/I-9>" expected actual msg
+# A fixture that exposes a verified bug owned by a later fix Task. Both the
+# correct value AND the observed wrong value are pinned:
+#   actual == expected   → FAIL ("XPASS"): the bug is fixed, so the owning Task
+#                          must turn this into an ordinary assertion;
+#   actual == known_bad  → XFAIL (reported every run, not counted as a pass);
+#   anything else        → FAIL: a new regression must never hide behind the
+#                          known-bug marker.
+#   assert_eq_known_bug "<owner, e.g. T10/I-9>" expected known_bad actual msg
 assert_eq_known_bug() {
-  local owner="$1" expected="$2" actual="$3" msg="${4:-}"
+  local owner="$1" expected="$2" known_bad="$3" actual="$4" msg="${5:-}"
   TESTS_RUN=$((TESTS_RUN + 1))
   if [ "$expected" = "$actual" ]; then
     FAIL=$((FAIL + 1))
     printf "${RED}  FAIL${NC}: %s\n    XPASS: known bug (%s) no longer reproduces — make this an ordinary assertion\n" "$msg" "$owner"
-  else
+  elif [ "$known_bad" = "$actual" ]; then
     XFAIL=$((XFAIL + 1))
     printf "${YELLOW}  XFAIL${NC}: %s [known bug, owner %s]\n    expected: %s\n    actual:   %s\n" "$msg" "$owner" "$expected" "$actual"
+  else
+    FAIL=$((FAIL + 1))
+    printf "${RED}  FAIL${NC}: %s [known bug %s, but the value changed]\n    expected:  %s\n    known bad: %s\n    actual:    %s\n" \
+      "$msg" "$owner" "$expected" "$known_bad" "$actual"
   fi
 }
 
-# Condition form of assert_eq_known_bug:
+# Condition form of assert_eq_known_bug. It pins no known-bad value, so only
+# use it where an ordinary assert bounds the wrong side (e.g. the perf guard's
+# 3N+c ceiling next to its N+c target):
 #   assert_true_known_bug "<owner>" "msg" test "$n" -le 10
 assert_true_known_bug() {
   local owner="$1" msg="$2"

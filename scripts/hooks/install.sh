@@ -71,10 +71,11 @@ CI options (used with --ci):
                            every template; "none" skips workflows but still
                            vendors doc-tools.sh; a CSV picks specific workflows
                            by basename (no .yml). Unknown names error out.
-  --helpers=<true|false>   Install the helper scripts the doc-pr-release and
-                           doc-release workflows call, into
-                           .github/scripts/<workflow>/ (default: true). No
-                           effect for a workflow that isn't installed.
+  --helpers=<true|false>   Install doc-pr-release helpers (default: true).
+                           No effect if doc-pr-release workflow isn't installed.
+                           (The workflows' own step scripts in
+                           .github/scripts/doc-superpowers-steps/ always ship
+                           with doc-pr-release / doc-release.)
   --force                  Bypass state-respect — re-install workflows that were
                            previously uninstalled with intentional:true.
 
@@ -490,6 +491,36 @@ ci_copy_workflow_template() {
   return 0
 }
 
+# The doc-pr-release and doc-release templates run their steps from
+# .github/scripts/doc-superpowers-steps/. Those scripts ARE the step bodies, not
+# optional helpers, so --helpers never gates them: they are present exactly
+# while a doc-superpowers-managed doc-pr-release.yml or doc-release.yml is on
+# disk. Called after every install and uninstall.
+ci_sync_step_scripts() {
+  local src="$SCRIPT_DIR/ci/doc-superpowers-steps" dest=".github/scripts/doc-superpowers-steps"
+  local wf needed=false
+  for wf in doc-pr-release doc-release; do
+    if is_doc_superpowers_workflow ".github/workflows/${wf}.yml" 2>/dev/null; then
+      needed=true
+    fi
+  done
+  if [[ "$needed" == "true" ]] && [[ -d "$src" ]]; then
+    mkdir -p "$dest"
+    local step n=0
+    for step in "$src"/*.sh; do
+      [[ -f "$step" ]] || continue
+      cp "$step" "$dest/$(basename "$step")"
+      chmod +x "$dest/$(basename "$step")"
+      n=$((n + 1))
+    done
+    echo "  Installed $n workflow step scripts in $dest/"
+  elif [[ "$needed" == "false" ]] && [[ -d "$dest" ]]; then
+    rm -rf "$dest"
+    echo "  Removed $dest/"
+  fi
+  return 0
+}
+
 install_ci() {
   # Validate WORKFLOWS_FILTER UP FRONT so a bogus name aborts before we
   # touch the filesystem. The validation must happen here (not in a subshell)
@@ -607,22 +638,7 @@ install_ci() {
     fi
   fi
 
-  # doc-release.yml calls its own step helpers (.github/scripts/doc-release/);
-  # same gating as the doc-pr-release helpers above: --helpers=true AND
-  # doc-release in install_set.
-  if [[ "$HELPERS_FLAG" == "true" ]] && [[ ${#install_set[@]} -gt 0 ]] \
-     && printf '%s\n' "${install_set[@]}" | grep -qx 'doc-release' \
-     && [[ -d "$SCRIPT_DIR/ci/doc-release" ]]; then
-    mkdir -p .github/scripts/doc-release
-    local release_helpers=0 release_helper
-    for release_helper in "$SCRIPT_DIR/ci/doc-release/"*.sh; do
-      [[ -f "$release_helper" ]] || continue
-      cp "$release_helper" ".github/scripts/doc-release/$(basename "$release_helper")"
-      chmod +x ".github/scripts/doc-release/$(basename "$release_helper")"
-      release_helpers=$((release_helpers + 1))
-    done
-    echo "  Installed $release_helpers doc-release helpers in .github/scripts/doc-release/"
-  fi
+  ci_sync_step_scripts
 
   echo "CI/CD workflows: $installed installed, $skipped_existing skipped (existing non-managed), $skipped_intentional skipped (intentionally uninstalled)"
   if [[ "$skipped_intentional" -gt 0 ]]; then
@@ -707,19 +723,7 @@ uninstall_ci() {
     echo "  Removed .github/scripts/doc-pr-release/"
     state_mark_component helpers uninstalled
   fi
-  # doc-release helpers follow the doc-release workflow the same way.
-  local should_remove_release_helpers=false
-  if [[ -z "$WORKFLOWS_FILTER" || "$WORKFLOWS_FILTER" == "all" ]]; then
-    should_remove_release_helpers=true
-  elif [[ ${#uninstall_set[@]} -gt 0 ]] \
-       && printf '%s\n' "${uninstall_set[@]}" | grep -qx 'doc-release'; then
-    should_remove_release_helpers=true
-  fi
-  if [[ "$should_remove_release_helpers" == "true" ]] \
-     && [[ -d ".github/scripts/doc-release" ]]; then
-    rm -rf .github/scripts/doc-release
-    echo "  Removed .github/scripts/doc-release/"
-  fi
+  ci_sync_step_scripts
   # Note: RELEASE-NOTES.next/README.md is NOT auto-removed — it may have
   # accumulated user-authored fragment edits via PR-<N>.md siblings, and
   # nuking the directory would lose unmerged release notes. Leave it.
@@ -783,10 +787,10 @@ status_ci() {
     helper_count=$(find .github/scripts/doc-pr-release -maxdepth 1 -name '*.sh' | wc -l | tr -d ' ')
     echo "  doc-pr-release helpers: $helper_count installed"
   fi
-  if [[ -d ".github/scripts/doc-release" ]]; then
-    local release_helper_count
-    release_helper_count=$(find .github/scripts/doc-release -maxdepth 1 -name '*.sh' | wc -l | tr -d ' ')
-    echo "  doc-release helpers: $release_helper_count installed"
+  if [[ -d ".github/scripts/doc-superpowers-steps" ]]; then
+    local step_count
+    step_count=$(find .github/scripts/doc-superpowers-steps -maxdepth 1 -name '*.sh' | wc -l | tr -d ' ')
+    echo "  workflow step scripts: $step_count installed"
   fi
   if [[ -f ".github/scripts/doc-tools.sh" ]]; then
     echo "  doc-tools.sh: vendored at .github/scripts/doc-tools.sh"
