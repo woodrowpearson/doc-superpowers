@@ -148,7 +148,10 @@ Resolved by Task 5 of the fix plan. Writing an entry and verifying its doc are n
     - it is derived as `add-entry` derives it when every ref's content comes from the doc's last
       commit;
     - with both, it is the older baseline, `git merge-base` of the stored and derived commits, or
-      null when either is unusable or they share no ancestor.
+      null when there is no derived one, when they share no ancestor, or when the stored one is
+      absent, not an object id, not a commit of this repository, or not an ancestor of HEAD. The
+      last condition was added in fix round 3: a stored commit off HEAD's line, where only the
+      verify commit was cherry-picked, used to turn a reader's null into a masked 0.
     - So `commits_behind` may over-count but is never a masked 0. Round 1's "re-derive when a ref is
       added" could record a commit newer than a kept ref's content: the reviewer's
       `stale|1` → `stale|0`.

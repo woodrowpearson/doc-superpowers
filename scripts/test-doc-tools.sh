@@ -4158,7 +4158,7 @@ test_i3_deprecate_entry_sets_replaces_not_last_verified() {
 }
 
 test_i3_set_code_refs_edits_in_place() {
-  echo "test: I-3: set-code-refs replaces code_refs in place (GH #18): position and every other field kept, code_oids (and, for an added ref, code_commit) re-derived"
+  echo "test: I-3: set-code-refs replaces code_refs in place (GH #18): position and every other field kept, code_oids re-derived, code_commit null (kept and new refs, unusable stored one)"
   setup
   local k files_commit sentinel=1111111111111111111111111111111111111111
   mkdir -p lib
@@ -4313,7 +4313,7 @@ test_i3_set_code_refs_added_ref_never_masks_commits_behind() {
   assert_eq "stale|2|src/b.js" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/d.md)" \
     "an added ref that changed after the doc was written: stale, commits_behind 2 (it was a masked 0)"
   assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/d.md"].code_commit' "$doc_commit" \
-    "code_commit is re-derived as add-entry derives it"
+    "code_commit is the older baseline: merge-base(stored a2 commit, derived doc commit) = the doc commit"
   "$DOC_TOOLS" update-index docs/d.md >/dev/null 2>&1
   cc=$(jq -r '.docs["docs/d.md"].code_commit' docs/.doc-index.json)
   "$DOC_TOOLS" set-code-refs docs/d.md --refs src/b.js >/dev/null 2>&1 || true
@@ -4386,6 +4386,78 @@ test_i3_set_code_refs_mixed_baselines_legacy_entry() {
     "legacy: adding a ref keeps commits_behind 1, not a masked 0"
   assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/d.md"].code_commit' "$c1" \
     "…code_commit is merge-base(C1, C2) = C1"
+  teardown
+}
+
+# Round 3: a stored code_commit that exists here but is not an ancestor of
+# HEAD — only the verify commit was cherry-picked — makes readers answer
+# commits_behind null. merge-base with it turned that null into a number,
+# and the number could be a masked 0. It is only usable on HEAD's line.
+test_i3_set_code_refs_off_line_code_commit_is_not_usable() {
+  echo "test: I-3: set-code-refs with mixed refs and a stored code_commit off HEAD's line (cherry-picked verify) records null"
+  setup
+  printf 'a1\n' > src/a.js
+  printf 'b1\n' > src/b.js
+  echo "# d" > docs/d.md
+  _i1_commit C0
+  echo "docs/d.md:src/a.js:guide" | "$DOC_TOOLS" build-index 2>/dev/null
+  _i1_commit index
+  # Verified on feat, where a changed; only the index commit reaches main.
+  git checkout -q -b feat
+  printf 'a2\n' > src/a.js
+  _i1_commit F1
+  "$DOC_TOOLS" update-index docs/d.md >/dev/null 2>&1
+  _i1_commit verify
+  local verify
+  verify=$(git rev-parse HEAD)
+  git checkout -q main
+  git cherry-pick "$verify" >/dev/null 2>&1
+  assert_eq "stale|null|src/a.js" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/d.md)" \
+    "precondition: main has a1, and code_commit F1 is not on its line (null)"
+  echo "edited on main" >> docs/d.md
+  _i1_commit C3
+  "$DOC_TOOLS" set-code-refs docs/d.md --refs src/a.js,src/b.js >/dev/null 2>&1 || true
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/d.md"].code_commit' "null" \
+    "v3: a stored code_commit off HEAD's line is not usable: null"
+  assert_eq "stale|null|src/a.js" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/d.md)" \
+    "…so commits_behind stays null (merge-base(F1, C0) read a masked 0)"
+  teardown
+}
+
+test_i3_set_code_refs_off_line_code_commit_legacy_entry() {
+  echo "test: I-3: the same for a pre-v3 entry: a stored code_commit off HEAD's line records null"
+  setup
+  local c0 f1 verify
+  printf 'a1\n' > src/a.js
+  printf 'b1\n' > src/b.js
+  echo "# d" > docs/d.md
+  _i1_commit C0
+  c0=$(git rev-parse HEAD)
+  echo "docs/d.md:src/a.js:guide" | "$DOC_TOOLS" build-index 2>/dev/null
+  # shellcheck disable=SC2016  # jq program
+  _i3_edit --arg c "$c0" '.schema_version = 2 | .docs["docs/d.md"] |= (del(.code_oids) | .code_commit = $c)'
+  _i1_commit "legacy index"
+  git checkout -q -b feat
+  printf 'a2\n' > src/a.js
+  _i1_commit F1
+  f1=$(git rev-parse HEAD)
+  # shellcheck disable=SC2016  # jq program
+  _i3_edit --arg c "$f1" '.docs["docs/d.md"].code_commit = $c'
+  _i1_commit "legacy verify"
+  verify=$(git rev-parse HEAD)
+  git checkout -q main
+  git cherry-pick "$verify" >/dev/null 2>&1
+  assert_eq "stale|null|src/a.js" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/d.md)" \
+    "precondition: the legacy entry reads stale, commits_behind null"
+  echo "edited on main" >> docs/d.md
+  _i1_commit C3
+  "$DOC_TOOLS" set-code-refs docs/d.md --refs src/a.js,src/b.js >/dev/null 2>&1 || true
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/d.md"].code_commit' "null" \
+    "legacy: a stored code_commit off HEAD's line is not usable: null"
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/d.md"].code_oids["src/a.js"]' "$(git rev-parse "$f1:src/a.js")" \
+    "…while the kept ref still keeps the content that commit recorded"
+  assert_eq "stale|null|src/a.js" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/d.md)" \
+    "…so commits_behind stays null, not a masked 0"
   teardown
 }
 
@@ -4818,6 +4890,8 @@ run_tests() {
   test_i3_set_code_refs_added_ref_never_masks_commits_behind
   test_i3_set_code_refs_mixed_baselines_record_the_older_commit
   test_i3_set_code_refs_mixed_baselines_legacy_entry
+  test_i3_set_code_refs_off_line_code_commit_is_not_usable
+  test_i3_set_code_refs_off_line_code_commit_legacy_entry
   test_i3_advice_names_set_code_refs
   test_i3_move_entry_batch
   test_i3_record_docs_are_never_stale

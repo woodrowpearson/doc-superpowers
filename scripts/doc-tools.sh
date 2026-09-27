@@ -1792,9 +1792,12 @@ set-code-refs|cmd_set_code_refs|repo|refs=
   of the doc's last commit), so the doc reads stale if that code changed
   since, until update-index verifies it. code_commit (the commits_behind
   baseline) stays when every ref is kept; is derived as add-entry derives
-  it when every ref is new; and with both is the older baseline — git
-  merge-base of the stored and derived commits, or null when either is
-  unusable — so commits_behind may over-count but is never a masked 0.
+  it when every ref's content comes from the doc's last commit; and with
+  both is the older baseline — git merge-base of the stored and derived
+  commits, or null when there is no derived one or the stored one is
+  absent, not an object id, not a commit of this repository, or not an
+  ancestor of HEAD — so commits_behind may over-count but is never a
+  masked 0.
   Refs are parsed like a mapping line's; their order is kept.
 deprecate-entry|cmd_deprecate_entry|repo|superseded-by=
   [--superseded-by <doc_path>] <doc_path>...
@@ -3239,17 +3242,26 @@ cmd_set_code_refs() {
   # code_commit, new ones as of the doc's last commit (whose code_commit
   # _entry_facts derived, _FACT_COMMIT) — the OLDER baseline is recorded:
   #   keep   every ref kept: the stored code_commit stands
-  #   fresh  every ref re-derived: the derived one, as add-entry records it
+  #   fresh  every ref's content from the doc's last commit: the derived
+  #          one, as add-entry records it
   #   mixed  git merge-base <stored> <derived> (the newest commit no newer
   #          than either; it may over-count, never under-count), or null —
-  #          no usable stored one, no derived one, no common ancestor — so
-  #          that commits_behind reads null, never a guess
+  #          so that commits_behind reads null, never a guess — when the
+  #          stored one is not usable, there is no derived one, or they
+  #          share no ancestor. Usable: an object id naming a commit of
+  #          this repository that is an ancestor of HEAD. One off HEAD's
+  #          line (only the verify commit was cherry-picked) already reads
+  #          null; its merge-base with the derived one would count from a
+  #          commit before changes it never saw — a masked 0.
+  _head_init
   case "$ccmode" in
     keep) printf '%s\n' "$row" > "$patch" ;;
     fresh|mixed)
       if [ "$ccmode" = fresh ]; then
         newcc="${_FACT_COMMIT[0]}"
-      elif [ -n "${_FACT_COMMIT[0]}" ] && _is_oid "$cc" && git cat-file -e "$cc^{commit}" 2>/dev/null; then
+      elif [ -n "${_FACT_COMMIT[0]}" ] && [ -n "$_HEAD" ] && _is_oid "$cc" \
+          && git cat-file -e "$cc^{commit}" 2>/dev/null \
+          && git merge-base --is-ancestor "$cc" "$_HEAD" 2>/dev/null; then
         newcc=$(git merge-base "$cc" "${_FACT_COMMIT[0]}" 2>/dev/null) || newcc=""
         _is_oid "$newcc" || newcc=""
       fi
