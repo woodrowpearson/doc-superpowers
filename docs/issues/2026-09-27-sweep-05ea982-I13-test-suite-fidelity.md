@@ -97,6 +97,12 @@ The harness has its own defects:
   - 6× `sleep 1` and duplicate corpora;
   - version edge cases are missing.
 
+- [P3, new: FU4/V-FU4, measured] `test-spec-status-model.sh:206`:
+  `` assert_not_contains "$ACTIONS" 'amendment citation unverified (no \`--plan\`)' ``. Inside single
+  quotes the backslashes are literal, so the needle can never match the regressed text. The v2.15.0
+  "one literal, both sides" guard is therefore vacuous. It has also never run in CI (see I-14).
+
+
 ## Proposed fix (fix plan Task 1)
 
 - Pipefail-safe asserts (`grep -qF -- "$n" <<<"$h"`).

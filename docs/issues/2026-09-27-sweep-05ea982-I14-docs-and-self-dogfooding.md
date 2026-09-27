@@ -33,8 +33,10 @@ report: docs/plans/2026-09-27-full-repo-05ea982-audit-findings.md
 
 # I-14 — Self-dogfooding gap and living-doc drift
 
-> Cluster **I-14** of sweep run `05ea982`, ranked #14 of 14 by finding weight. Priority is raised
-> to **P1** by the CI-execution finding below, which was confirmed after Phase 4. Evidence:
+> Cluster **I-14** of sweep run `05ea982`, ranked #14 of 14 by finding weight. Its priority is P1
+> because of the S6 item below: the self-installed workflows have never run doc-tools. The
+> CI-execution finding is only P3 on the verifier's evidence, but restoring CI is still the first owner
+> action, because it gates every later fix. Evidence:
 > [findings index](../plans/2026-09-27-full-repo-05ea982-audit-findings.md) (S11, S5, S6, Phase 4).
 > Fix: **Task 14** of the [fix plan](../plans/2026-09-27-full-repo-05ea982-fix-plan.md), except the
 > CI-execution item, which is a repository-settings action for the owner and is **not** a code
@@ -63,7 +65,12 @@ living docs also describe features that do not work, and repeat counts that have
 
 ## Verified evidence
 
-- **[P1, new after Phase 4; measured via the GitHub API]** Actions jobs are not executing.
+- **[P3, verifier-authoritative (V-FU4); controller proposed P1; measured via the GitHub API]** Actions
+  jobs are not executing.
+  - Realized risk today is low. Since the last green bash-3.2 run (PR #16 head 6e2bc76,
+    2026-07-30), the only change under `scripts/` is `test-spec-status-model.sh` (+36 lines), and
+    one of those lines is a vacuous assertion (I-13).
+  - Every future change, however, merges ungated.
   - Every workflow run from 2026-08-31 onward concluded `failure` within 2–6 s:
     - Tests runs 8–11, both the `ubuntu / bash 5.x` and `macos / bash 3.2` jobs;
     - Doc Index Update runs 19–20;
@@ -118,6 +125,38 @@ living docs also describe features that do not work, and repeat counts that have
   - lying code comments at `doc-tools.sh:284,428,429,510`.
 - [P3, unverified carry-over] `tests.yml` has no step that diffs the self-installed workflows and
   the vendored tool against their templates. That missing guard is why this drift went unnoticed.
+
+### Follow-up pass FU4, spec drift (verified by V-FU4)
+
+The Phase-4 critic found that the five governing design specs had never been read. The verifier
+dropped 25 of the finder's spec items as superseded history (a later RELEASE-NOTES entry or spec
+records the change) or as duplicates. What survives:
+
+- [P3] `docs/superpowers/specs/*`: the Status headers misstate the lifecycle in 5 of 6 specs.
+  - 2026-03-12 says "11 subcommands"; there are 14.
+  - 2026-03-13 says "in flight"; it shipped in v2.12.0.
+  - 2026-03-14 says "Approved"; it shipped in v2.2.0, and its transitions were replaced by
+    2026-07-24 with no back-pointer.
+  - 2026-03-25 has no Status.
+  - 2026-07-24 says "Approved, Target 2.13.0"; it shipped in v2.13.0.
+
+  Nothing updates a spec's Status or its supersession pointer when it ships. All 6 report stale.
+  Five of them are the fix plan's `governing_specs`.
+- [P3] `workflow-hooks-harness-design.md:220,287,321,650-651,288,324`: the spec prescribes four
+  mechanisms that measurably fail, and the code implements them exactly as written. It is the spec
+  side of I-6, so amend it in lockstep with T7.
+  - The `#` block "excluded from commit".
+  - The no-argument `update-index` refresh.
+  - The root-commit `diff-tree` fallback.
+  - The 1 s session-summary budget (re-measured 8.8 s on the macOS fallback path).
+- [P4] Mechanism samples that disagree with the code:
+  - hooks spec `:74/:241` (local copy name), `:101` (`core.hooksPath` existence; the code is right),
+    `:150/:223/:310` (the hooks drop `code_refs_changed`), `:179` (build-index hint);
+  - tooling spec `:343` (build-index hint), `:123-129` ("must use writing-plans", relaxed without a
+    note);
+  - release spec `:128` ("step 7"; it is step 10);
+  - pages spec `:104,109` (duplicate `nav` key).
+
 
 ## Proposed fix
 

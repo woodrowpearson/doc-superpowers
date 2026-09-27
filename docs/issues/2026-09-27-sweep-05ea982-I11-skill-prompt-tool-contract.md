@@ -164,6 +164,16 @@ V-S2 and V-S8, plus two refuted.
   - the evaluation order matches design §A;
   - the protocol's 5 interception points and 3 actions match.
 
+- [P3, new: FU4/V-FU4, structural] `references/doc-spec.md:857-869`: the **live** index schema table
+  is wrong in three ways.
+  - It still documents `version` "(currently 1)"; `build-index` writes `schema_version: 2`.
+  - It has no per-entry `implementation`.
+  - It lists `stale` as a stored status.
+
+  `docs/conventions.md:322` has it right, so the two live references disagree. T4 Step 3 rewrites
+  this table for schema v3 anyway.
+
+
 ## Proposed fix (fix plan Task 12)
 
 - **Tool resolution:** `ROOT=<skill base dir>/../..`, with the plugin cache only as a fallback. Stop
