@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-27T06:30:54Z",
+  "generated_at": "2026-09-27T06:41:26Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -549,24 +549,25 @@
       "last_verified": "2026-09-27T06:12:33Z"
     },
     "docs/issues/2026-09-27-sweep-05ea982-I06-claude-hook-tier-and-hook-semantics.md": {
-      "content_hash": "sha256:25368988f7f0516c60ac7433697799936f009a56e5da1eda29eed5c37ef9eaf4",
+      "content_hash": "sha256:5e3e35ad1c47a64bc73246ee428043897fcf648dfa846237d714875cd7709b4a",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T06:12:33Z"
+      "last_verified": "2026-09-27T06:41:26Z",
+      "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I07-installer-ownership-placement-state.md": {
-      "content_hash": "sha256:54b3007bf93e179e97638b881c4bc6c71d2cd918d3e9fa3825e4b9d2fa41ddf8",
+      "content_hash": "sha256:af456fbf36b86068fdf025b3acb8c8ad0094b4893e29db6313ba93daf9ca4cea",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T06:29:06Z",
+      "last_verified": "2026-09-27T06:41:26Z",
       "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I08-ci-templates.md": {
@@ -600,14 +601,14 @@
       "last_verified": "2026-09-27T06:12:33Z"
     },
     "docs/issues/2026-09-27-sweep-05ea982-I11-skill-prompt-tool-contract.md": {
-      "content_hash": "sha256:90c70bba9bf94129a0c91ab72f6badcc80f48cda616afa6bf94e7141981ad6f5",
+      "content_hash": "sha256:36251e62026340b1992b3df9615bccbe22dbf8c2eefcfcc38206b420387c8aac",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T06:30:54Z",
+      "last_verified": "2026-09-27T06:41:26Z",
       "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I12-cross-client-packaging.md": {
@@ -621,24 +622,25 @@
       "last_verified": "2026-09-27T06:12:33Z"
     },
     "docs/issues/2026-09-27-sweep-05ea982-I13-test-suite-fidelity.md": {
-      "content_hash": "sha256:bd0b25d54e08edf426839eb1390e535706b9b8fe428bc8a7b9905f8049621d8b",
+      "content_hash": "sha256:d59b5463b2477231d86101a8e6e9d9c24b987cfe506ab71d02f641ecda6a655e",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T06:12:33Z"
+      "last_verified": "2026-09-27T06:41:26Z",
+      "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I14-docs-and-self-dogfooding.md": {
-      "content_hash": "sha256:2b86891c0a5581c121f76932757e28cec265c6344f1c2565db90aecc4831407b",
+      "content_hash": "sha256:0ca8e88ef1790e9a31c673f5a469c532bf11cf7ca43cbf072ba0a82f5955b1fe",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T06:14:24Z",
+      "last_verified": "2026-09-27T06:41:26Z",
       "implementation": []
     }
   }

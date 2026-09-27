@@ -166,6 +166,16 @@ and the menu (a duplicate).
   - 15/15 `install.sh` and 11/12 `state.sh` functions have callers;
   - `install.sh` 731-778 and 853-890 and `state.sh` 1-40 and 199-249 have no further defects.
 
+- [P3, FU4/V-FU4, measured] `install.sh:157-168`: the integration block is inserted before
+  **every** column-0 line starting `exit 0`, not only the final one as the hooks spec promises
+  (`:243,:505`). A host hook with an early unindented `exit 0` got 2 copies, so the doc hook also
+  runs on the host's early-exit path.
+- [P4, FU4/V-FU4] `install.sh:457`: `"${names[@]}"` is unguarded. Under bash 3.2 this prints only a
+  stderr line, because its exit status is discarded. `--workflows=,` is silently accepted as
+  "install none" while still vendoring doc-tools and bootstrapping state. It should error, as an
+  unknown name does.
+
+
 ## Proposed fix (fix plan Task 8)
 
 - **Placement:** use git plumbing (`--show-toplevel`, `--git-path hooks`). Refuse a global

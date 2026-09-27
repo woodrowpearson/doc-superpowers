@@ -93,6 +93,25 @@ freshness at HEAD reflects the commit being made."
   - The gate and sync hooks spawn ≈8 processes (≈17 ms) on *every* Bash tool call before deciding
     "not a commit". Carried from Phase 2, not re-verified in Phase 3.
 
+- [P3, new: FU4/V-FU4, measured] `claude/pre-commit-gate.sh:29-30`: PreToolUse derives scope from
+  `git diff --cached` *before* the command runs. A typical agent `git add … && git commit -m …` or
+  `git commit -am …` therefore sees an empty index. Under STRICT, both return rc 0 and print
+  nothing; the same change pre-staged gives rc 2. This is latent behind the `TOOL_INPUT` P1 and
+  survives that fix. The fix is to parse `-a`/pathspecs, or to rely on the git `pre-commit` hook,
+  which sees the real index.
+- [P3, FU4/V-FU4, structural] On macOS ≤14, GUI git clients run hooks with the launchd PATH
+  (`/usr/bin:/bin:…`), so Homebrew `jq` is invisible. `check_deps` then exits 1, and `|| exit 0`
+  silently removes the gate, STRICT included. The silent part is this issue's "failing == absent"
+  class; the PATH trigger is new. macOS 15 ships `/usr/bin/jq`.
+- [P4, FU4/V-FU4, measured] `claude/post-commit-sync.sh:31`: the "initial commit" fallback
+  `git diff-tree --no-commit-id --name-only -r HEAD` prints nothing without `--root`. The tier is
+  currently dead anyway.
+- Clean (FU4/V-FU4): the git and Claude hooks contain no bash-4 syntax and no `set -u` empty-array
+  risk. The static bash-4 guard covers all 15 shell files under `scripts/hooks/`, but checks syntax
+  only, not GNU-only commands. `\b`/`\s` in `grep -E` work on GNU and macOS grep, and OpenBSD is not
+  a stated target. All portability verdicts are structural.
+
+
 ## Proposed fix (fix plan Task 7)
 
 **Claude hooks:**
