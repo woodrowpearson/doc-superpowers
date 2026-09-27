@@ -1,41 +1,73 @@
 #!/usr/bin/env bash
 # doc-superpowers hook v1 — installed __INSTALL_DATE__
 # DO NOT EDIT — managed by doc-superpowers hooks installer
+#
+# For a commit whose message is written in the editor, lists the docs already
+# stale in this commit as comment lines, which git strips from the message.
+# Only then: with -m, -F, -C/-c, --amend --no-edit, a merge or a squash ($2 is
+# message, commit, merge or squash) git keeps comment lines, so they would be
+# committed. The check is pre-commit's (staged tree, staged paths); if it
+# cannot run, one comment line says so. DOC_SUPERPOWERS_QUIET=1 or SKIP=1:
+# nothing is added.
 
-DOC_TOOLS="${DOC_TOOLS:-$(printf '%s\n' __DOC_TOOLS_PARENT__/*/scripts/doc-tools.sh | sort -V | tail -1)}"
-DOC_INDEX="${DOC_INDEX:-docs/.doc-index.json}"
 COMMIT_MSG_FILE="${1:-}"
+COMMIT_SOURCE="${2:-}"
 
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
+[[ "${DOC_SUPERPOWERS_QUIET:-}" == "1" ]] && exit 0
 [[ -n "$COMMIT_MSG_FILE" ]] || exit 0
+case "$COMMIT_SOURCE" in
+  ''|template) ;;
+  *) exit 0 ;;
+esac
+
+# Comment lines are stripped only under the default cleanup, and git must
+# recognize them: an unknown ("auto") comment character leaves nothing to add.
+cleanup=$(git config commit.cleanup 2>/dev/null)
+case "${cleanup:-default}" in
+  default|strip) ;;
+  *) exit 0 ;;
+esac
+cc=$(git config core.commentString 2>/dev/null || git config core.commentChar 2>/dev/null)
+case "${cc:-#}" in
+  auto) exit 0 ;;
+esac
+cc="${cc:-#}"
+
+DOC_TOOLS="${DOC_TOOLS:-$(printf '%s\n' __DOC_TOOLS_PARENT__/*/scripts/doc-tools.sh | sort -V | tail -1)}"
 [[ -f "$DOC_TOOLS" ]] || exit 0
-[[ -f "$DOC_INDEX" ]] || exit 0
+[[ -f docs/.doc-index.json ]] || exit 0
 
-# Scope to staged files (consistent with pre-commit)
-staged=$(git diff --cached --name-only 2>/dev/null)
+_fail() {
+  printf '\n%s doc-superpowers: cannot check doc freshness: %s\n' "$cc" "$1" >> "$COMMIT_MSG_FILE"
+  exit 0
+}
+
+staged=$(git -c core.quotePath=false diff --cached --name-only --no-renames 2>/dev/null) \
+  || _fail "git diff --cached failed"
 [[ -z "$staged" ]] && exit 0
+tree=$(git write-tree 2>/dev/null) || _fail "git write-tree failed"
 
-code_refs_args=()
-while IFS= read -r f; do
-  [[ -n "$f" ]] && code_refs_args+=("$f")
-done <<< "$staged"
+_check() { printf '%s\n' "$staged" | "$DOC_TOOLS" check-freshness --tree "$tree" --code-refs-from -; }
+if ! result=$(_check 2>/dev/null); then
+  why=$(_check 2>&1 >/dev/null | awk 'NF { print; exit }')
+  why="${why#ERROR: }"
+  why="${why%.}"
+  _fail "${why:-doc-tools.sh check-freshness failed}"
+fi
 
-result=$("$DOC_TOOLS" check-freshness --code-refs "${code_refs_args[@]}" 2>/dev/null) || exit 0
+block=$(jq -r --arg cc "$cc" '
+  [.docs | to_entries[] | select(.value.status == "stale")] as $s
+  | if ($s | length) == 0 then empty else
+      "\($cc) Doc freshness: \($s | length) doc(s) already stale in this commit (their code changed since they were verified):",
+      ($s[] | "\($cc)   \(.key)"
+        + (if .value.reason then " (\(.value.reason)"
+             + (if ((.value.code_refs_changed // []) | length) > 0 then ": \(.value.code_refs_changed | join(", "))" else "" end)
+             + ")" else "" end)),
+      "\($cc) Update them with /doc-superpowers update, then re-verify each (doc-tools.sh update-index <doc>)."
+    end
+' <<<"$result" 2>/dev/null) || _fail "cannot read the freshness report"
+[[ -z "$block" ]] && exit 0
 
-stale_count=$(echo "$result" | jq -r '.summary.stale // 0' 2>/dev/null) || exit 0
-[[ "$stale_count" -eq 0 ]] && exit 0
-
-# Append freshness comment block
-{
-  echo ""
-  echo "# Doc freshness: $stale_count stale doc(s) related to this commit"
-  echo "$result" | jq -r '
-    .docs | to_entries[] |
-    select(.value.status == "stale") |
-    "#   stale: \(.key)\(
-      if .value.reason then " (\(.value.reason))" else "" end
-    )"
-  ' 2>/dev/null
-} >> "$COMMIT_MSG_FILE"
-
+printf '\n%s\n' "$block" >> "$COMMIT_MSG_FILE"
 exit 0

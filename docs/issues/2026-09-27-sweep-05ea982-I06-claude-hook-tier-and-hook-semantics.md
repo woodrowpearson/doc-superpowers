@@ -1,6 +1,6 @@
 ---
 date: 2026-09-27
-status: Open
+status: Resolved
 priority: P1
 type: bug
 component: hooks
@@ -133,15 +133,98 @@ freshness at HEAD reflects the commit being made."
 
 ## Acceptance criteria
 
-- [ ] Tests drive the **installed** hook through its **registered** command string, with
+- [x] Tests drive the **installed** hook through its **registered** command string, with
   `TOOL_INPUT` unset and the real PreToolUse JSON on stdin.
-- [ ] The gate reports. STRICT exits 2 with the reason on stderr.
-- [ ] The index is byte-identical after every hook.
-- [ ] `git commit -m x` never gains `#` lines.
-- [ ] A staged invalidating change is reported in *that* commit.
-- [ ] `git mv` of a code file puts the doc citing the old path in scope.
-- [ ] README hook table, `docs/workflows/doc-superpowers.md` and `docs/codebase-guide.md` no longer
+- [x] The gate reports. STRICT exits 2 with the reason on stderr.
+- [x] The index is byte-identical after every hook.
+- [x] `git commit -m x` never gains `#` lines.
+- [x] A staged invalidating change is reported in *that* commit.
+- [x] `git mv` of a code file puts the doc citing the old path in scope.
+- [x] README hook table, `docs/workflows/doc-superpowers.md` and `docs/codebase-guide.md` no longer
   claim the hooks "auto-run update-index".
+
+## Resolution (Task 7)
+
+Resolved by Task 7 of the fix plan. The hooks are written against the harness contracts as
+documented, and every test drives the **installed** copy the way its caller does. The git hooks
+run under real `git commit` / `merge` / `checkout`. The Claude hooks run through the command
+string the installer registered: `sh -c <command>`, the event JSON on stdin, `TOOL_INPUT` unset.
+The `TOOL_INPUT` tests were converted, not kept. Of the new assertions, 68 failed against the old
+hooks.
+
+**Claude Code hooks**
+
+- **Input.** Each hook reads the event on stdin, and the command is
+  `jq -r '.tool_input.command // empty'`. A `*commit*` pattern test needs no process, and the POSIX
+  regex `git([[:space:]]+-[Cc][[:space:]]+[^[:space:]]+)*[[:space:]]+commit([[:space:]]|$)`
+  (bash `=~`) runs *before* `doc-tools.sh` is resolved. A non-commit Bash call starts at most one
+  process, `jq`. A test with a `sort` probe pins the order. `git -C <dir> commit` and
+  `git -c k=v commit` match; `git commit-graph` does not.
+- **Output.**
+  - The advisory is ONE JSON object: `hookSpecificOutput.additionalContext` for Claude and
+    `systemMessage` for the user.
+  - Under STRICT the gate exits 2 with the report and the bypass on stderr.
+  - QUIET still silences the output, never the exit code (README:206).
+- **Commands that stage (V-FU4).** These are `git add … && git commit`, `commit -a/-am`, a `--`
+  pathspec, another index-changing git command, and `update-index` before the commit. The gate
+  **defers** them to the git `pre-commit` hook, which runs on the real index. Its
+  `additionalContext` says so and never reports "current". When no doc-superpowers git pre-commit
+  hook is installed, it says that nothing checks the commit, and under STRICT it tells the user
+  too. The installed git hook then blocks `git add -A && git commit` and `commit -am` under
+  STRICT (tested end to end).
+- **`update-index` is deleted** from `post-commit-sync.sh` and `session-summary.sh`, not repaired.
+  A wrapper that logs every doc-tools subcommand the three hooks run records `check-freshness`
+  only.
+- **Stop, not SessionEnd.** Current Claude Code docs say Stop fires whenever Claude finishes
+  responding. SessionEnd hooks share a 1.5 s budget and their output reaches no one. So the
+  reminder stays on Stop, scoped to what is in progress:
+  - The scope is `git diff --name-only --no-renames HEAD` plus untracked files.
+  - The paths are judged **as the working tree holds them**: a private copy of git's index,
+    `add -A`, then `write-tree`. A doc re-verified with `update-index` in the working tree reads
+    current; judged at HEAD it would read stale.
+  - A clean tree costs two git calls and prints nothing. The "session ending" wording is gone.
+  - The check has a 2 s budget, in its own process group (`set -m`) with a watchdog that kills the
+    group. Both jobs write to a `mktemp -d` directory, so the hook's stdout is never held open. A
+    timeout leaves a one-line `systemMessage`.
+  - There is one implementation, with no `timeout`/`gtimeout` branches, so the tested path is the
+    shipped path on every platform.
+- **Root commit.** `post-commit-sync` falls back to `git diff-tree --root` (V-FU4 P4).
+
+**Git hooks**
+
+- **`pre-commit`** runs `check-freshness --tree "$(git write-tree)" --code-refs-from -` on the
+  staged paths. Git hands the hook the commit's own index, also for `-a` and pathspec commits. A
+  staged invalidating change is reported (or blocked) in *that* commit, and code + doc +
+  `update-index` in one commit passes under STRICT.
+- **`prepare-commit-msg`** acts only when `$2` is empty or `template`. It stays silent under a
+  non-strip `commit.cleanup` and under `core.commentChar=auto`, and uses a custom comment string
+  when one is set. Its block says the docs are **already stale** in this commit. `-m`, `-F` and
+  `--amend --no-edit` commits carry no `#` lines (tested; an editor commit shows the note and git
+  strips it).
+- **Diffs.** Every `git diff --name-only` is `git -c core.quotePath=false diff --name-only
+  --no-renames`, so a `git mv` puts the doc citing the old path in scope, in `pre-commit` and in
+  `post-merge`.
+- **`post-merge`** no longer reports the whole index's `untracked` docs.
+- **`post-checkout`** prints its list without a trailing comma.
+- **`pre-push`** reads the pushed refs from stdin, skipping tags and deletions. It counts per pushed
+  branch, not HEAD, and has the DOC_TOOLS guard.
+- **`DOC_INDEX` is gone.** The index is `docs/.doc-index.json`.
+
+**All hooks: absent vs failing.** When the skill or `docs/.doc-index.json` is absent, the hooks stay
+silent. When the check fails, the hook prints one line naming the cause: a corrupt index, or jq
+missing from PATH, as under the launchd PATH of macOS ≤ 14 GUI clients (tested with a PATH without
+jq). That covers the jq-floor message from T2 too. Claude hooks also send the line as a
+`systemMessage`, because Claude Code shows no one the stderr of an exit-0 hook. The failure
+blocks only under STRICT. The `prepare-commit-msg` hook writes it as one comment line instead, so
+an editor commit does not print it twice.
+
+**Left for other Tasks**
+
+- `install.sh` still registers commands that `cd` to the current toplevel and run a relative path.
+  `$CLAUDE_PROJECT_DIR` is T8. The `sort -V` DOC_TOOLS resolution is also T8.
+- This repo's own `.claude/hooks/doc-superpowers/` copies and `.git/hooks` are re-rendered by T14
+  (dogfooding).
+- The O(N·F·R) scope filter (P3) is unchanged.
 
 ## Related
 
