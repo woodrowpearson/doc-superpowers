@@ -142,9 +142,16 @@ Resolved by Task 5 of the fix plan. Writing an entry and verifying its doc are n
   - `code_oids` is re-derived: a ref the entry already had keeps its recorded id, and a new ref is
     recorded as `add-entry` records it. A pre-v3 entry's recorded id is the ref's content in the
     stored `code_commit` (fix round 1).
-  - `code_commit` is re-derived as `add-entry` derives it once any ref is recorded from the doc's
-    last commit, so `commits_behind` can over-count but is never a masked 0. It is kept when refs
-    are only removed or re-spelled.
+  - `code_commit`, the `commits_behind` baseline, is never newer than any ref's recorded content
+    (fix round 2):
+    - it stays when every ref is kept (removed, re-spelled or reordered);
+    - it is derived as `add-entry` derives it when every ref's content comes from the doc's last
+      commit;
+    - with both, it is the older baseline, `git merge-base` of the stored and derived commits, or
+      null when either is unusable or they share no ancestor.
+    - So `commits_behind` may over-count but is never a masked 0. Round 1's "re-derive when a ref is
+      added" could record a commit newer than a kept ref's content: the reviewer's
+      `stale|1` → `stale|0`.
   - `--refs ''` clears the refs.
   - The `update-index` missing-file advice and `add-entry`'s SKIP now name it.
 - **`move-entry --stdin`** (PR #16 Option A) reads one `<old><TAB><new>` pair per line.

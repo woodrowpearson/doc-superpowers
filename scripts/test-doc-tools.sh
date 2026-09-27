@@ -4199,12 +4199,12 @@ test_i3_set_code_refs_edits_in_place() {
   assert_eq "$(jq -c 'del(.code_refs, .code_oids, .code_commit)' <<<"$before")" \
     "$(jq -c '.docs["docs/mid.md"] | del(.code_refs, .code_oids, .code_commit)' <<<"$json")" \
     "every other field is preserved (content_hash, last_verified, implementation, replaces, unknown)"
-  assert_json_field "$json" '.docs["docs/mid.md"].code_commit' "$files_commit" \
-    "a ref was added, so code_commit is re-derived from the doc's last commit (the kept one could mask commits_behind)"
+  assert_json_field "$json" '.docs["docs/mid.md"].code_commit' "null" \
+    "a ref was added beside a kept one, and the stored code_commit (a sentinel) is unusable: null, not a guess"
   assert_eq "$first_before" "$(jq -c '.docs["docs/first.md"], .docs["docs/last.md"]' <<<"$json")" \
     "the other entries are untouched"
-  assert_eq "stale|1|src/a.js,lib/" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/mid.md)" \
-    "the refs nobody verified the doc against read stale until update-index (commits_behind counted from the doc's last commit)"
+  assert_eq "stale|null|src/a.js,lib/" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/mid.md)" \
+    "the refs nobody verified the doc against read stale until update-index (commits_behind null, never a masked 0)"
   # A no-op writes nothing.
   cp docs/.doc-index.json docs/.idx.before
   out=$("$DOC_TOOLS" set-code-refs docs/mid.md --refs=src/a.js,lib/ 2>&1) || true
@@ -4320,6 +4320,72 @@ test_i3_set_code_refs_added_ref_never_masks_commits_behind() {
   assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/d.md"].code_commit' "$cc" \
     "refs only removed: code_commit is kept"
   assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/d.md)" "…and the doc stays current"
+  teardown
+}
+
+# Round 2 of the same finding: code_commit re-derived from the doc's last
+# commit can be NEWER than the stored one, and a kept ref's recorded content
+# dates from the stored one — so a change to it in between went uncounted.
+# With refs on mixed baselines the OLDER one is recorded (their merge-base).
+test_i3_set_code_refs_mixed_baselines_record_the_older_commit() {
+  echo "test: I-3: set-code-refs with kept and new refs records the older baseline (merge-base), never a masked 0"
+  setup
+  local c1 json
+  # v3: verified at C1; a changes at C2; the doc is edited at C3 without update-index.
+  printf 'a1\n' > src/a.js
+  printf 'b1\n' > src/b.js
+  echo "# d" > docs/d.md
+  _i1_commit C1
+  c1=$(git rev-parse HEAD)
+  echo "docs/d.md:src/a.js:guide" | "$DOC_TOOLS" build-index 2>/dev/null
+  "$DOC_TOOLS" update-index docs/d.md >/dev/null 2>&1
+  _i1_commit index
+  printf 'a2\n' > src/a.js
+  _i1_commit C2
+  assert_eq "stale|1|src/a.js" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/d.md)" "precondition: stale by one commit"
+  echo "edited, not re-verified" >> docs/d.md
+  _i1_commit C3
+  "$DOC_TOOLS" set-code-refs docs/d.md --refs src/a.js,src/b.js >/dev/null 2>&1 || true
+  assert_eq "stale|1|src/a.js" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/d.md)" \
+    "v3: adding a ref keeps commits_behind 1 (the re-derived commit alone read a masked 0)"
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/d.md"].code_commit' "$c1" \
+    "…code_commit is the older baseline: merge-base(stored, re-derived) = C1"
+  # A usable stored code_commit is needed for that: without one, and a kept
+  # ref still on its recorded content, code_commit is null (commits_behind
+  # null), never a guess.
+  _i3_edit '.docs["docs/d.md"].code_commit = null'
+  "$DOC_TOOLS" set-code-refs docs/d.md --refs src/a.js,src/b.js,src/index.js >/dev/null 2>&1 || true
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/d.md"].code_commit' "null" \
+    "an unusable stored code_commit with kept refs records null"
+  assert_eq "stale|null|src/a.js" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/d.md)" \
+    "…so commits_behind reads null, not 0"
+  teardown
+}
+
+test_i3_set_code_refs_mixed_baselines_legacy_entry() {
+  echo "test: I-3: set-code-refs on a pre-v3 entry with kept and new refs records the older baseline"
+  setup
+  local c1
+  printf 'a1\n' > src/a.js
+  printf 'b1\n' > src/b.js
+  echo "# d" > docs/d.md
+  _i1_commit C1
+  c1=$(git rev-parse HEAD)
+  echo "docs/d.md:src/a.js:guide" | "$DOC_TOOLS" build-index 2>/dev/null
+  # shellcheck disable=SC2016  # jq program
+  _i3_edit --arg c "$c1" '.schema_version = 2 | .docs["docs/d.md"] |= (del(.code_oids) | .code_commit = $c)'
+  _i1_commit "legacy index"
+  printf 'a2\n' > src/a.js
+  echo "edited with the code" >> docs/d.md
+  _i1_commit "C2: code and doc together"
+  assert_eq "stale|1|src/a.js" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/d.md)" \
+    "precondition: the legacy entry is stale by one commit"
+  "$DOC_TOOLS" set-code-refs docs/d.md --refs src/a.js,src/b.js >/dev/null 2>&1 || true
+  assert_eq "stale|1|src/a.js" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/d.md)" \
+    "legacy: adding a ref keeps commits_behind 1, not a masked 0"
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/d.md"].code_commit' "$c1" \
+    "…code_commit is merge-base(C1, C2) = C1"
   teardown
 }
 
@@ -4750,6 +4816,8 @@ run_tests() {
   test_i3_set_code_refs_edits_in_place
   test_i3_set_code_refs_on_a_legacy_entry
   test_i3_set_code_refs_added_ref_never_masks_commits_behind
+  test_i3_set_code_refs_mixed_baselines_record_the_older_commit
+  test_i3_set_code_refs_mixed_baselines_legacy_entry
   test_i3_advice_names_set_code_refs
   test_i3_move_entry_batch
   test_i3_record_docs_are_never_stale

@@ -310,7 +310,7 @@ The `docs/.doc-index.json` file is the machine-readable freshness index. It foll
 - **`build-index`** creates the index from scratch (from mapping lines); `--force` keeps deprecations
 - **`add-entry`** adds entries. Like `build-index`, it records them **unverified**: `last_verified: null`, and each ref as of the doc's own last commit
 - **`update-index`** verifies individual entries. It is the **only** writer of `last_verified`: the one verb that attests someone checked the doc against its code
-- **`set-code-refs`** changes one entry's `code_refs` in place (GH #18). It keeps every other field except `code_oids` and, when it adds a ref, `code_commit` (see Freshness Model). It is not a verification
+- **`set-code-refs`** changes one entry's `code_refs` in place (GH #18), in the order given (a reorder writes the new order). It keeps every other field except `code_oids` and, when any ref's content comes from the doc's last commit (a ref was added, or a kept ref has no usable record), `code_commit` (see Entry Schema). It is not a verification
 - **`move-entry`** re-keys an entry when its doc moves (`--stdin` for a batch). It preserves every field but `content_hash`, and is the lossless alternative to `remove-entry` + `add-entry` for a rename
 - **`deprecate-entry`** stores `status: "deprecated"` (and `--superseded-by`, which also sets the successor's `replaces`). It does not touch `last_verified`
 - **`check-freshness`** is read-only (reports staleness without modifying)
@@ -326,7 +326,7 @@ A doc is **stale when the content of its code changed since it was verified**. I
   - `set-code-refs` verifies nothing either, and gives an entry a mixed baseline:
     - a ref the entry already had keeps its recorded content: its `code_oids` id, or, for a pre-v3 entry, its id in the stored `code_commit`'s tree;
     - a new ref, or a kept one with no usable record, is recorded as of the doc's last commit, as `add-entry` records it;
-    - the same list of paths (`src` is a stored `src/`) writes nothing.
+    - the same list of paths, in the same order (`src` is a stored `src/`), writes nothing; ref order is significant, so a reorder writes the new order.
 - **Readers compare content.** `check-freshness` and `status` look every ref up in HEAD, or in `--tree <tree-ish>`, with one `git cat-file --batch-check` for the whole index. A doc is stale if any ref's id differs. A pre-commit check passes `--tree "$(git write-tree)"` so it sees the staged change.
 - **So history shape does not matter.** A squash merge, a rebase-merge, a cherry-pick, a revert to the verified bytes, a shallow clone, and a doc verified in the same commit as its code all read `current` when the bytes match.
 - **Refs are literal paths.** A ref is a file, a directory, a submodule (its commit is recorded, so a bump reads stale), or `.`; git sees it with `--literal-pathspecs`. A ref containing `*`, `?` or `[` is warned about when written. Untracked (not ignored) files under a ref are part of the verified content: writers name them, and the doc reads stale until they are committed or ignored. The doc-index file itself is never part of a ref's content.
@@ -361,7 +361,7 @@ Each entry in the index (keyed by relative doc path) contains:
 - `content_hash` — `sha256:<hex>` hash of doc file content
 - `code_refs` — list of literal paths (directories/files, `.` for the repo root) this doc covers
 - `code_oids` — per ref, the git object id of its content in the entry's baseline: the working tree when `update-index` verified the doc, or the doc's last commit when `build-index` / `add-entry` indexed it (blob, tree or `missing`); freshness is judged against it
-- `code_commit` — newest commit touching any `code_refs` as of the entry's baseline: HEAD for `update-index`, the doc's last commit for `build-index` / `add-entry`. `move-entry` keeps it. `set-code-refs` keeps it while every ref's content is one the entry recorded (refs only removed or re-spelled), and re-derives it as `add-entry` does once it records a ref as of the doc's last commit. That value may over-count `commits_behind` but never under-counts it, where the kept one could mask it as `0`. It is null in a shallow clone. Display and `commits_behind` baseline only
+- `code_commit` — newest commit touching any `code_refs` as of the entry's baseline: HEAD for `update-index`, the doc's last commit for `build-index` / `add-entry`. `move-entry` keeps it. `set-code-refs` keeps it when every ref is kept (refs only removed, re-spelled or reordered), and derives it as `add-entry` does when every ref's content comes from the doc's last commit. With both, it records the older baseline: `git merge-base` of the stored and the derived commit, or null when the stored one is unusable (absent, not an object id, or not in this repository), when there is no derived one, or when they share no ancestor. So `commits_behind` may over-count, but is never a masked `0`. It is null in a shallow clone. Display and `commits_behind` baseline only
 - `doc_type` — template type: `architecture`, `workflows`, `api-contracts`, `spec`, `adr`, etc.
 - `status` — stored only as `deprecated`, otherwise absent (`current` / `stale` are computed by `check-freshness`, never written)
 - `replaces` — path to doc this one supersedes (null if none)
