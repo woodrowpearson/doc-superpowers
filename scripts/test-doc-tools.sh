@@ -3766,6 +3766,39 @@ test_i1_untracked_files_under_a_ref_are_warned_about() {
   teardown
 }
 
+# A path that exists but from which git would stage nothing — an empty
+# directory, or one holding only ignored files — is recorded as missing, so
+# the doc cannot go stale: it must draw the missing warning, never the
+# untracked one ("reads stale until committed"), whether it is the ref itself
+# or nested under a wider ref. (`ls-files -o --directory` lists both as dir/
+# unless --no-empty-directory is given.)
+test_i1_empty_or_all_ignored_dirs_are_not_untracked() {
+  echo "test: I-1: an empty or all-ignored directory is recorded missing and warned as such, not as untracked"
+  setup
+  echo '*.log' > .gitignore
+  _i1_commit ignore
+  mkdir -p src/empty src/out
+  echo "log" > src/out/a.log
+  local err d
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index 2>/dev/null
+  _i1_commit index
+  for d in empty out; do
+    echo "# $d" > "docs/$d.md"
+    err=$(echo "docs/$d.md:src/$d:guide" | "$DOC_TOOLS" add-entry 2>&1 >/dev/null) || true
+    assert_contains "$err" "code ref 'src/$d' matches no file tracked by git" "ref src/$d itself: the missing warning"
+    assert_not_contains "$err" "committed or ignored" "ref src/$d itself: no untracked warning"
+    assert_json_field "$(cat docs/.doc-index.json)" ".docs[\"docs/$d.md\"].code_oids[\"src/$d\"]" "missing" \
+      "ref src/$d itself: recorded as missing"
+  done
+  echo "## more" >> docs/architecture.md
+  err=$("$DOC_TOOLS" update-index docs/architecture.md 2>&1 >/dev/null) || true
+  assert_not_contains "$err" "committed or ignored" "nested under ref src/: no untracked warning for src/empty/ or src/out/"
+  _i1_commit "doc + index"
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" \
+    "…and after the commit the doc is current, as the (absent) warning implied"
+  teardown
+}
+
 # A submodule ref resolves to its gitlink (the submodule's commit), which is
 # not in the superproject's object store: batch-check alone answers "missing"
 # (or "submodule" on newer git) on both sides, and a bump went unnoticed.
@@ -4131,6 +4164,7 @@ run_tests() {
   test_i1_index_file_is_not_part_of_a_ref
   test_i1_ref_without_code_oids_is_unverified
   test_i1_untracked_files_under_a_ref_are_warned_about
+  test_i1_empty_or_all_ignored_dirs_are_not_untracked
   test_i1_submodule_ref_goes_stale_on_a_bump
   test_i1_commits_behind_null_when_not_an_ancestor
   test_i1_move_entry_preserves_code_oids
