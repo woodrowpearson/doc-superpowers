@@ -113,6 +113,13 @@ and the scaling cliff.
    not a regression.
 10. **Versioning:** RELEASE-NOTES.md is canonical. Use `bump-version` then `check-version`; never
     edit manifest versions by hand. Suggested: T2–T5 + T8 defaults + T9 removal ship as **v3.0.0**.
+12. **The "obvious" one-pass fragment consumer is wrong as written.**
+    `git log --diff-filter=A <s>..<e> -- RELEASE-NOTES.next/` misses renamed fragments (it reports
+    them as `R`) and fragments added in merge commits. Use `--no-renames`, and decide the
+    merge-commit policy explicitly; V-FU1 has a fixture table.
+13. **Changing extract-context payloads:** Linux's limit is per argument (128 KiB), not only total.
+    Anything index- or PR-sized goes through stdin or files, never argv or a single env var. The same
+    rule underlies I-8's E2BIG.
 11. **Coverage caveats carried forward** (Phase-4 attestation):
     - portability verdicts are structural until the macOS leg runs;
     - the provisional P1s need one real run before their cluster closes: the AI templates being

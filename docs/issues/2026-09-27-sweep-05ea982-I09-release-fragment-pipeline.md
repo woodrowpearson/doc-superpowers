@@ -100,8 +100,73 @@ branch was cut is therefore neither released nor deleted.
   - the consumed-list path is a fixed `/tmp` path;
   - the fragment reader follows symlinks;
   - `PR_NUMBER` is unvalidated.
-- [P3, unverified carry-over] `fragments merge` walks full history once per fragment
-  (`git log --reverse`).
+
+## Follow-up pass FU1 (L-PERF, L-TESTS mutation, L-CONTRACT vs the design plan; verified by V-FU1)
+
+The Phase-4 critic found that three things were missing from the earlier passes:
+- no L-PERF pass on this surface;
+- no mapping from the verified fragment P1s to test gaps;
+- no comparison with the design plan `docs/plans/2026-05-12-pr-release-fragment-producer-and-consumer.md`.
+
+The follow-up closes all three. The verifier dropped seven items as duplicates or as having no
+observable effect.
+
+- [P2] `extract-context.sh:136-147` (+`:72-80`) passes every payload to `jq` as a single argv
+  string.
+  - Linux caps a single argument at 128 KiB (`MAX_ARG_STRLEN`), so any larger payload makes jq
+    fail with E2BIG: rc 126 and an empty `context.json`.
+  - This also makes the 1 MiB "oversized → corrupt" cap dead code.
+  - Measured triggers:
+    - 400 commits with bodies (139 KB);
+    - 850 subject-only commits;
+    - a 132,945 B fragment;
+    - a 50,000-character CJK PR body.
+  - In CI the step goes red on every push to that PR and later steps are skipped. The failure is
+    loud and corrupts nothing.
+  - `update-pr-body.sh:137` already avoids argv for this reason. Pass the payloads on stdin.
+- [P3, downgraded from P2] `doc-tools.sh:1486-1507`: `fragments merge` is O(F×H). Each fragment
+  gets its own full-history `git log --reverse`, two `is-ancestor` calls and a `validate`.
+  - Measured: 10.46 s at H=5k, F=200; the one-pass `log` alone takes 14 ms.
+  - **Fix-shape correction:** the one-pass
+    `git log --diff-filter=A <s>..<e> -- RELEASE-NOTES.next/` is **not** equivalent as written.
+    - It misses renamed fragments. Add `--no-renames`.
+    - It misses fragments added in merge commits. That needs a merge policy:
+      `--diff-merges=first-parent` also re-adds fragments that a back-merge brings in.
+  - This replaces the earlier unverified carry-over.
+- [P3, downgraded] `doc-release.yml:7-10` + `SKILL.md:441,478-490`: consumption runs on
+  `release/**`, and nothing requires the release commit to reach `main`. If it doesn't, `main` keeps
+  the fragment and lacks the release entry, and the next release **consumes it again** (measured).
+  Needs-runtime, because exposure depends on how the release commit reaches `main`.
+- [P3] `doc-release.yml:48-61`: the precheck takes the nearest tag *of any name* as "last release".
+  For example, a `deploy-marker` tag at HEAD skips the job. Use `--match 'v[0-9]*'`, consistent
+  with `SKILL.md:441`.
+- [P3] `doc-tools.sh:1486-1504`: candidates come from the worktree and the walk is rooted at HEAD,
+  but membership is tested against `<range-end>`. This is latent while every caller passes HEAD.
+- [P3] `extract-context.sh:112-134`: `full_commits` includes the bot's own `[doc-superpowers] sync`
+  commits. This only adds noise to the agent's context.
+- [P3] `RELEASE-NOTES.next.README.md:44-45`; `SKILL.md:470-475`: the advice "pass `--from=<tag>~1`"
+  re-releases a fragment that the tagged release already consumed.
+- [P3, new at verification] `SKILL.md:441,459-461`: a first release, with no tag, has no valid
+  `<range-start>`.
+  - The date fallback is not a ref.
+  - The tests pass the empty-tree hash, which only works because invalid refs are swallowed.
+  - Fixing "validate both refs" therefore breaks 3 tests. Needs a root sentinel.
+- [P3] Design plan vs code:
+  - The plan's `git log --all` ancestry test and its force-push "sharp edge" were never shipped.
+    The code is right; with `--all`, a squash-merged fragment would be skipped.
+  - The plan contradicts itself, and its text is stale.
+- Test gaps are recorded in I-13: 16 of 17 spot-checked mutants survive. The one other was killed
+  only by a crash (rc 126, no Results line).
+- Clean (verified):
+  - fragments sort by N;
+  - hash payload;
+  - inclusion of drifted fragments;
+  - `update-pr-body` marker checks;
+  - `concurrency` is `false`;
+  - deletion is scoped to `--paths-out`.
+  - The plan's other alternatives (glob deletion, `cancel-in-progress: true`) would have been worse
+    than the code.
+
 
 ## Proposed fix (fix plan Task 10)
 

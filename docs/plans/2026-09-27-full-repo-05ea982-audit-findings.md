@@ -48,6 +48,8 @@ related-files:
 (which dropped or downgraded roughly a third of Phase-2 claims — every P0 but one was re-severitied
 on evidence), the verified set is **1 P0 · 51 P1 · 93 P2 · 88 P3 finding lines** (counted per
 surface before cross-surface de-duplication), consolidated into **14 root-cause clusters (I-1 … I-14)**.
+The Phase-4 critic found coverage gaps. Four verified follow-up passes closed them and added
+**0 P1 · 8 P2 · 53 P3 · 5 P4** (see Phase 4).
 
 **What is broken for users today** (all measured unless noted):
 
@@ -69,7 +71,9 @@ surface before cross-surface de-duplication), consolidated into **14 root-cause 
    workflows call `.github/scripts/doc-tools.sh`, which was never committed; the freshness gate
    fails *open* (`stale_count=0`, even with `STRICT=1`) and the index-update workflow has failed on
    every docs push since at least 2026-05-28. The six AI templates cannot do their jobs even after
-   GH #5 is fixed (no skill, no tool grants). (I-8, I-14)
+   GH #5 is fixed (no skill, no tool grants). Since 2026-08-31 **no Actions job has executed at all**
+   (each fails in 2–6 s with no runner and no logs), so v2.15.0 merged with its Tests workflow red and
+   never run. The cause needs an owner check of Actions billing/settings. (I-8, I-14)
 5. **The skill tells agents to call tools in ways that damage the index.** `build-index` (which
    *replaces* the index, and wipes it on empty stdin — the default in an agent's non-TTY shell) is
    the documented remedy for untracked docs; new docs are routed to `update-index` (which rejects
@@ -492,4 +496,28 @@ gated on I-5.
 
 ### Follow-up results (FU1–FU4)
 
-_Pending: the four follow-up passes and their adversarial verify are running. Results will be appended here._
+The critic's gaps were closed by four follow-up finder passes (FU1–FU4). Each had its own
+adversarial verifier (V-FU1–V-FU4). As in Phases 2–3, the verifier's severity is authoritative.
+**No follow-up finding survived at P1 or above.** Every proposed P1 was downgraded on evidence.
+
+**Totals:** 8 P2 · 53 P3 · 5 P4 (trivia) kept. The verifiers dropped 48 finder items, as duplicates
+of Phase-2/3 findings, superseded history, or refuted.
+
+| Pass | Scope | Kept (P2 / P3 / P4) | Dropped | Headline verified items | Folded into |
+|---|---|---|---|---|---|
+| **FU1 → V-FU1** | S7 fragment pipeline: L-PERF, L-TESTS (44 mutants), L-CONTRACT vs the 2026-05-12 design plan | 3 / 10 / 0 | 7 | `extract-context.sh:136-147` passes payloads through argv, so the 128 KiB per-argument cap hits (rc 126); the 1 MiB cap is dead code · `fragments merge` O(F×H), 10.46 s at H=5k/F=200 · the proposed one-pass fix is **not** equivalent (renames, merge commits) · release-branch consumption can re-release · first release has no range start · 16 of 17 spot-checked mutants survive | I-9, I-13 |
+| **FU2 → V-FU2** | S4 installer: L-PERF, L-DEADCODE-SIMPLIFY | 1 / 17 / 0 | 5 | malformed `installed.json` (the installer's own merge conflict) resurrects intentionally removed workflows · 53 jq / 12 rewrites per `install --ci` (~300 ms of ~390 ms) · write-only state fields, dead `state_dump_ci` · drifted duplicate vendoring · out-of-scope flags ignored · nothing scales with repo size | I-7 |
+| **FU3 → V-FU3** | `init` output contract (doc-spec templates, SKILL.md 49-74 / 193-260), Spec Status Model vs its design | 4 / 18 / 0 | 11 | per-chunk Task N+1 still writes exempt-status targets (R3) · no template has a Mermaid-source slot, so `diagram` cannot find generated docs · `init`'s own commit makes its docs stale (and `.` can never stay current) · disagreeing api-contracts/ERD predicates · all 11 Mermaid blocks render | I-11 |
+| **FU4 → V-FU4** | S5 hook portability (bash 3.2 / BSD), governing-spec drift | 0 / 8 / 5 | 25 | no bash-4 syntax or empty-array risk in any hook (structural) · the Claude gate misses `git add && git commit` / `commit -am` under STRICT · integration block inserted before every column-0 `exit 0` · `test-spec-status-model.sh:206` vacuous · live schema table says version 1 · 5 of 6 design specs misstate their Status · CI not executing re-severitied **P1 → P3** (only +36 test lines unrun since the last green run) | I-6, I-7, I-11, I-13, I-14 |
+
+**Items still open after the follow-ups:**
+- Every portability verdict remains structural until the repo's macOS leg executes again (D6).
+- The provisional P1s (D8) still need one real Actions/client run each.
+- Plans and issues under `docs/` remain aggregate-only by design.
+
+**Attestation, final: PASS-WITH-GAPS.**
+- The gaps are declared in D6 and D8.
+- No surface × lens is silently skipped.
+- The critic named 6 P1 root causes that the draft cluster map left unnamed; each is now named in
+  its cluster issue.
+- The single P0 is owned.

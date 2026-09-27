@@ -141,6 +141,17 @@ bash scripts/doc-tools.sh check-version
   - Make `test-doc-pr-release.sh` source `test-helpers.sh` (shared asserts + `bash_bin_shim`), and
     make a missing YAML parser a loud `SKIP` (CI still enforces a parser in `tests.yml`).
   - INT trap: `trap 'cleanup; exit 130' INT`.
+- [ ] **Step 2b — Follow-up additions (V-FU1, V-FU4):**
+  - Make `test-spec-status-model.sh:206` a real guard. Inside single quotes the backslash-escaped backticks are literal, so the needle never matches.
+  - Make every assertion capture tolerate failure (`out=$(…) || rc=$?`) in `test-doc-pr-release.sh`
+    and at `test-doc-tools.sh:995,1012`, so a crashing helper records FAIL instead of aborting.
+  - Add the missing fixtures:
+    - extract-context: "Update branch", a human fragment edit, a wrong line 1;
+    - `commit-and-push`: stages only its own path; the no-op path;
+    - the inline `run:` bodies of `doc-pr-release.yml` and `doc-release.yml`, extracted into
+      testable helpers.
+
+    Each must kill the surviving mutants listed in I-13.
 - [ ] **Step 3 — Verify:** all five suites green; run `test-spec-status-model.sh` 60× and expect 0
   flaky runs (baseline was 1–2/60).
 - [ ] **Step 4 — Commit** `test(harness): pipefail-safe asserts, isolated git env, counted failures (sweep 05ea982 I-13)`.
@@ -348,6 +359,13 @@ visible stdout, Stop == session end) and the git hooks against HEAD-time freshne
     and has the DOC_TOOLS guard; drop the undocumented `DOC_INDEX` knob.
   - Distinguish "tooling absent" (silent) from "tooling failing" (one stderr line, still exit 0 unless
     STRICT).
+- [ ] **Step 2b — Follow-up additions (V-FU4):**
+  - The Claude gate must handle `git add … && git commit …` and `git commit -a/-am`. Either parse
+    `-a` and the pathspecs, or defer the verdict to the git `pre-commit` hook, which sees the real
+    index.
+  - When `jq` is missing on a hook's PATH (the macOS GUI-client launchd PATH), print one stderr line
+    instead of silently passing.
+  - `post-commit-sync` root-commit fallback: `git diff-tree --root`.
 - [ ] **Step 3 — Lockstep:** README hook table, `docs/workflows/doc-superpowers.md`,
   `docs/codebase-guide.md` (remove "auto-runs update-index").
 - [ ] **Step 4 — Verify; Step 5 — Commit** `fix(hooks): stdin hook input, visible output, staged-tree pre-commit (sweep 05ea982 I-6)`.
@@ -388,6 +406,20 @@ state to reproduce an install".
     scripts — pick one and document it; hook commands use `$CLAUDE_PROJECT_DIR`.
   - Default `--ci` = the three shell workflows; AI templates opt-in by name; help/menu list every
     hook and workflow.
+- [ ] **Step 2b — Follow-up additions (V-FU2, V-FU4):**
+  - Refuse to write over an unparsable `installed.json`. Tell the user to resolve it, or move it to
+    `installed.json.corrupt` and install nothing that is absent on disk.
+  - Stop rewriting timestamps on no-op marks. They are the merge-conflict source.
+  - Batch state writes: `state_load` once, then `state_flush` once, flushed **before** deleting any
+    file.
+  - Delete write-only state fields, `state_dump_ci`, the fallback workflow list, and the dead guards
+    and knobs.
+  - Add a per-command flag allow-list (exit 2 on out-of-scope flags).
+  - Drop the `uninstall --ci` early return when `.github/workflows/` is absent.
+  - Reconcile state with disk (a managed file on disk is installed).
+  - De-duplicate CSV names; reject `--workflows=,`; guard `install.sh:457`.
+  - Insert the integration block only before the **final** `exit 0`.
+  - Delegate vendoring to `doc-tools.sh tools …` only after T11 fixes `tools uninstall`.
 - [ ] **Step 3 — Lockstep:** SKILL.md `hooks` section (consent text lists permissions and commit
   behaviour of each workflow; never pass `--force` unless asked), README install section.
 - [ ] **Step 4 — Verify; Step 5 — Commit** `fix(installer): git-plumbing placement, symlink-safe writes, exact ownership, recorded choices (sweep 05ea982 I-7)`.
@@ -446,6 +478,18 @@ grants; every changed `docs/` path is an indexed doc; two commits of history are
   verify ancestry, else exit and let the next run regenerate); `doc-release.yml` skips only on the
   exact bot subject; one section vocabulary with a mapping table in the README; document re-sealing
   (`tail -n +3 f | sha256sum`) and an explicit "no notes" state.
+- [ ] **Step 2b — Follow-up additions (V-FU1):**
+  - `extract-context.sh` passes payloads on stdin or via `--rawfile`, never argv (the 128 KiB
+    per-argument cap). Then the 1 MiB cap is reachable.
+  - Consumer: one `git log --no-renames --diff-filter=A` pass with an explicit merge-commit policy.
+    The naive one-pass form misses renames and merge-added fragments, so write a fixture for each.
+  - `doc-release.yml` precheck uses `git describe --match 'v[0-9]*'`.
+  - State and enforce that the release commit reaches `main` (merge or cherry-pick). Otherwise the
+    next release re-consumes the same fragments.
+  - A root sentinel gives a first release with no tag a valid range start.
+  - Correct the `--from=<tag>~1` advice.
+  - Filter the bot's own sync commits out of `full_commits`.
+  - Mark the 2026-05-12 plan's `git log --all` design as superseded.
 - [ ] **Step 3 — Lockstep:** SKILL.md `release` steps: run `fragments merge` *before* dispatching the
   drafting agent; remove step 5's duplicate filter; add the commit step before `git tag`; `mktemp`
   for the consumed list, filtered to `^RELEASE-NOTES\.next/PR-[0-9]+\.md$`.
@@ -504,6 +548,17 @@ grants; every changed `docs/` path is an indexed doc; two commits of history are
   - Context cost: discovery pipes `check-freshness` through a `{summary, stale, untracked}` jq filter;
     move the `release` and `hooks` bodies into `references/release.md` / `references/hooks.md` behind
     REQUIRED pointers.
+- [ ] **Step 2b — Follow-up additions (V-FU3, V-FU4):**
+  - In per-chunk Task N+1, an exempt-status target skips Steps 2–4 entirely: no Implementation Notes,
+    no `code_refs` rewrite, no `update-index`. Pin this with a status-model test.
+  - spec-verify's carve-out covers an **Approved** partially covered target (design `:147`).
+  - Every diagram template gains a `<details><summary>Mermaid source</summary>` slot under its PNG,
+    matching this repo's convention, so `diagram` can find generated docs.
+  - `init` gets a `code_refs` rule: never cite a path that contains the index or files `init` itself
+    writes (`.`, `docs/`, README when synced). Run the freshness gate after the `init` commit.
+  - One predicate set decides `api-contracts.md` and the ERD.
+  - Correct the live schema table in `references/doc-spec.md:857-869` (as part of T4 Step 3).
+  - Fix the P3 template/routing/naming items listed in I-11's FU3 section.
 - [ ] **Step 3 — Verify; Step 4 — Commit** `fix(skill): tool routing, portable tool resolution, trust boundary (sweep 05ea982 I-11)`.
 
 # Task 13: I-12 — cross-client packaging
@@ -540,6 +595,10 @@ grants; every changed `docs/` path is an indexed doc; two commits of history are
 - [ ] **Step 4 — Governing specs:** amend only drifted mechanism sentences in the five
   `governing_specs` (no status transitions — these are reference design specs); `update-index` each
   edited spec.
+- [ ] **Step 4b — Follow-up additions (V-FU4):**
+  - Correct the Status headers of the design specs (5 of 6 are wrong).
+  - Add supersession pointers (2026-03-14 → 2026-07-24).
+  - Amend the hooks spec's four failing mechanisms in lockstep with T7.
 - [ ] **Step 5 — Verify** (all suites + `check-freshness` on this repo: only genuinely living docs
   may be stale) **and Commit** `docs: dogfood the fixed tiers, single-source counts, index hygiene (sweep 05ea982 I-14)`.
 
