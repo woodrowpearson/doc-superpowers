@@ -1,6 +1,6 @@
 ---
 date: 2026-09-27
-status: Open
+status: Resolved
 priority: P1
 type: bug
 component: doc-index
@@ -77,13 +77,50 @@ O(N + k).
 
 ## Acceptance criteria
 
-- [ ] `kill -TERM` mid-`build-index` leaves the previous index byte-identical, rc ≠ 0.
-- [ ] `{ sleep 3; } | timeout 1 build-index` leaves the index unchanged.
-- [ ] 10 parallel `update-index` runs on 10 stale docs leave 0 stale.
-- [ ] A writer racing a reader for 10 s: the index always parses.
-- [ ] A 0-byte index makes every verb exit non-zero with a clear message.
-- [ ] The resulting index is mode 0644 under umask 022.
-- [ ] `update-index` of 50 docs on a 4,000-entry index takes < 1 s (was ≈10 s).
+- [x] `kill -TERM` mid-`build-index` leaves the previous index byte-identical, rc ≠ 0.
+- [x] `{ sleep 3; } | timeout 1 build-index` leaves the index unchanged.
+- [x] 10 parallel `update-index` runs on 10 stale docs leave 0 stale.
+- [x] A writer racing a reader for 10 s: the index always parses.
+- [x] A 0-byte index makes every verb exit non-zero with a clear message.
+- [x] The resulting index is mode 0644 under umask 022.
+- [x] `update-index` of 50 docs on a 4,000-entry index takes < 1 s (was ≈10 s).
+
+## Resolution (Task 2)
+
+Resolved by Task 2 of the fix plan. Every writer — `build-index`, `update-index`, `add-entry`,
+`remove-entry`, `move-entry`, `deprecate-entry` — now persists through one primitive in
+`scripts/doc-tools.sh` ("Index persistence"):
+
+- `_index_apply <jq-program>`: `_index_lock` (portable `mkdir` lock, owner pid recorded, a dead
+  owner's lock broken, a live one waited on for `DOC_TOOLS_LOCK_TIMEOUT` s, default 30, then a
+  named-owner error) → `_index_load` (validated snapshot) → one jq pass → `_index_install` (tmp beside
+  the target → `chmod` to the prior mode, 0644 when new → `mv`). `build-index` uses `--replace`, so it
+  still rebuilds over a missing or broken index.
+- `_traps`: `EXIT` → cleanup; `INT` → exit 130; `TERM` → exit 143. No `RETURN`, no resume.
+- Writers build a per-key JSONL patch list and apply it in that one pass. A no-op writes nothing (no
+  `generated_at` bump), and writers report only the keys that actually changed.
+- `check-freshness` and `status` read one validated snapshot per run.
+
+Every criterion is pinned by a test in `scripts/test-doc-tools.sh` (`test_index_*`,
+`test_update_index_is_one_batch_pass`); all were RED against the pre-fix script. Measured on this
+branch:
+
+- 10 parallel `update-index` runs lost 9 → 0 updates.
+- The racing reader saw 55 of 214 unparsable reads → 0.
+- The 0-byte index went from rc 0 to rc 1 with a message.
+- The installed index went from `-rw-------` to `-rw-r--r--`.
+- `update-index` of 50 docs on a 4,000-entry index took 9.2–10.5 s (bash 5) / 13.1–18.5 s (bash 3.2)
+  → 0.32–0.41 s. It spawns 5 jq processes whatever k is (was 3 per doc).
+
+Behaviour changes that ship with this fix:
+
+- `remove-entry` and `deprecate-entry` list only the keys they changed.
+- `update-index` and `deprecate-entry` add an `Unchanged N entries (…)` section.
+- `move-entry` adds `Repointed N entries` when it rewrote other entries' `replaces`/`superseded_by`.
+- A 0-byte or malformed index is refused by every reading verb.
+
+The stored fields (`code_commit`, `last_verified`, `status`) are written exactly as before. Identity
+(T4) and stored-status semantics (T5) are out of scope.
 
 ## Related
 

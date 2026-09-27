@@ -2199,6 +2199,386 @@ test_empty_code_refs_field_yields_empty_array() {
   teardown
 }
 
+# --- Index persistence: one locked atomic writer (sweep 05ea982 I-2) ----------
+#
+# docs/.doc-index.json has exactly one write path in doc-tools.sh: mkdir lock →
+# shape-validated snapshot → one jq pass → tmp file beside the target → chmod
+# to the prior mode → mv. Signals terminate (INT 130, TERM 143) instead of
+# cleaning up and resuming. These tests pin the failures the sweep measured:
+# a resumed trap installing a truncated or empty index with rc 0, lost updates
+# from parallel writers, readers catching a half-written file, a 0-byte index
+# read as a valid empty one, and the index installed 0600.
+
+# Leftover in-flight files next to the index: "" when clean.
+_i2_residue() {
+  (cd docs && ls -a) | grep -E '^\.doc-index\.json\.' | tr '\n' ' ' || true
+}
+
+# Permission string of a file via `ls -l` (stat -c / stat -f differ GNU vs BSD).
+_i2_mode() {
+  ls -l "$1" | cut -c1-10
+}
+
+# Write an N-entry index directly (no per-entry cost): keys
+# docs/synthetic/dI.md, refs ["src/"], code_commit HEAD. The docs need not exist.
+_i2_synthetic_index() {
+  local n="$1" head
+  head=$(git rev-parse HEAD)
+  jq -n --argjson n "$n" --arg c "$head" '{
+    schema_version: 2, generated_by: "doc-superpowers",
+    generated_at: "2020-01-01T00:00:00Z", build_commit: $c,
+    docs: ([range(0; $n) | {key: "docs/synthetic/d\(.).md", value: {
+      content_hash: null, code_refs: ["src/"], code_commit: $c,
+      doc_type: "synthetic", status: "current", replaces: null,
+      superseded_by: null, last_verified: "2020-01-01T00:00:00Z"}}] | from_entries)
+  }' > docs/.doc-index.json
+}
+
+# (a) The old INT/TERM trap deleted its accumulators and RESUMED: the verb ran
+# on and installed a truncated index with rc 0.
+test_index_term_mid_build_index_keeps_previous_index() {
+  echo "test: I-2: SIGTERM mid-build-index leaves the previous index byte-identical, rc != 0"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local before mapping i=0 rc=0
+  before=$(hash_file docs/.doc-index.json)
+  mapping=$(harness_mktemp i2-map)
+  while [ "$i" -lt 400 ]; do
+    printf 'docs/gen/d%d.md:src/:gen\n' "$i"
+    i=$((i + 1))
+  done > "$mapping"
+  "$DOC_TOOLS" build-index < "$mapping" >/dev/null 2>&1 &
+  harness_kill_after 1 TERM "$!" || rc=$?
+  assert_eq "1" "$HARNESS_KILL_ALIVE" "precondition: build-index still running when signalled"
+  assert_eq "143" "$rc" "build-index exits 143 on SIGTERM"
+  assert_eq "$before" "$(hash_file docs/.doc-index.json)" "previous index byte-identical"
+  assert_eq "" "$(_i2_residue)" "no tmp file or lock left beside the index"
+  teardown
+}
+
+# (b) Blocked on stdin, the old trap swallowed TERM, ran to EOF and installed an
+# EMPTY index. `{ sleep 3; } | timeout 1 build-index`, without `timeout`.
+test_index_term_while_build_index_blocked_on_stdin() {
+  echo "test: I-2: SIGTERM while build-index waits on stdin leaves the index unchanged"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local before rc=0
+  before=$(hash_file docs/.doc-index.json)
+  { sleep 3; } | "$DOC_TOOLS" build-index >/dev/null 2>&1 &
+  harness_kill_after 1 TERM "$!" || rc=$?
+  assert_eq "1" "$HARNESS_KILL_ALIVE" "precondition: build-index still waiting when signalled"
+  assert_true "build-index exits non-zero (rc=$rc)" test "$rc" -ne 0
+  assert_eq "$before" "$(hash_file docs/.doc-index.json)" "index unchanged"
+  assert_eq "" "$(_i2_residue)" "no tmp file or lock left beside the index"
+  teardown
+}
+
+# check-freshness after TERM used to resume and print a summary that
+# disagreed with its own .docs. It must stop and print nothing.
+test_index_term_mid_check_freshness_prints_nothing() {
+  echo "test: I-2: SIGTERM mid-check-freshness exits 143 with no report"
+  setup
+  _i2_synthetic_index 400
+  local out rc=0
+  out=$(harness_mktemp i2-cf)
+  "$DOC_TOOLS" check-freshness > "$out" 2>/dev/null &
+  harness_kill_after 0.5 TERM "$!" || rc=$?
+  assert_eq "1" "$HARNESS_KILL_ALIVE" "precondition: check-freshness still running when signalled"
+  assert_eq "143" "$rc" "check-freshness exits 143 on SIGTERM"
+  assert_eq "0" "$(wc -c < "$out" | tr -d ' ')" "no (partial) report on stdout"
+  teardown
+}
+
+# (c) Ten concurrent writers each did an unlocked read-modify-write: 9 of 10
+# updates were lost, all with rc 0. The skill's `update` action dispatches
+# exactly this — one agent per stale doc, each calling update-index.
+test_index_parallel_update_index_loses_nothing() {
+  echo "test: I-2: 10 parallel update-index runs on 10 stale docs leave 0 stale"
+  setup
+  local i=0 mapping="" pids="" pid fails=0
+  while [ "$i" -lt 10 ]; do
+    echo "# doc $i" > "docs/p$i.md"
+    mapping="${mapping}docs/p$i.md:src/:guide"$'\n'
+    i=$((i + 1))
+  done
+  git add -A && git commit -m "docs" --quiet
+  printf '%s' "$mapping" | "$DOC_TOOLS" build-index
+  echo "// v2" >> src/index.js
+  git add -A && git commit -m "code change" --quiet
+  assert_json_field "$("$DOC_TOOLS" check-freshness)" ".summary.stale" "10" "precondition: 10 stale"
+  i=0
+  while [ "$i" -lt 10 ]; do
+    "$DOC_TOOLS" update-index "docs/p$i.md" >/dev/null 2>&1 &
+    pids="$pids $!"
+    i=$((i + 1))
+  done
+  for pid in $pids; do
+    wait "$pid" || fails=$((fails + 1))
+  done
+  assert_eq "0" "$fails" "every parallel update-index exits 0"
+  local result
+  result=$("$DOC_TOOLS" check-freshness)
+  assert_json_field "$result" ".summary.stale" "0" "0 stale after the parallel run"
+  assert_json_field "$result" ".summary.current" "10" "all 10 current"
+  assert_eq "" "$(_i2_residue)" "no tmp file or lock left beside the index"
+  teardown
+}
+
+# (d) `echo "$index" > "$index_file"` truncates before writing: a reader in that
+# window sees an empty or half-written file. Writer + reader race, bounded.
+test_index_reader_never_sees_a_partial_write() {
+  local secs=6
+  echo "test: I-2: a reader racing a writer for ${secs}s always parses the index"
+  setup
+  _i2_synthetic_index 3000
+  echo "# race" > docs/race.md
+  git add -A && git commit -m "race doc" --quiet
+  echo "docs/race.md:src/:guide" | "$DOC_TOOLS" add-entry 2>/dev/null
+  local wlog wcount
+  wlog=$(harness_mktemp i2-wlog)
+  wcount=$(harness_mktemp i2-wcount)
+  (
+    end=$((SECONDS + secs)); n=0
+    while [ "$SECONDS" -lt "$end" ]; do
+      echo "$n" >> docs/race.md
+      "$DOC_TOOLS" update-index docs/race.md >/dev/null 2>&1 || echo "rc=$?" >> "$wlog"
+      n=$((n + 1))
+    done
+    echo "$n" > "$wcount"
+  ) &
+  local wpid=$! reads=0 bad=0
+  while kill -0 "$wpid" 2>/dev/null; do
+    jq -e '(.docs | type) == "object"' docs/.doc-index.json >/dev/null 2>&1 || bad=$((bad + 1))
+    reads=$((reads + 1))
+  done
+  wait "$wpid" || true
+  assert_true "precondition: the writer made several writes ($(cat "$wcount") in ${secs}s)" \
+    test "$(cat "$wcount")" -ge 2
+  assert_true "precondition: the reader read repeatedly ($reads reads)" test "$reads" -ge 10
+  assert_eq "0" "$bad" "0 of $reads reads saw an unparsable index"
+  assert_eq "" "$(cat "$wlog")" "every write exited 0"
+  teardown
+}
+
+# (e) A 0-byte index read as a valid EMPTY one: check-freshness rc 0 with every
+# doc untracked, add-entry "Added 1 entry" into a 1-byte file.
+test_index_zero_byte_index_rejected_by_every_verb() {
+  echo "test: I-2: a 0-byte index makes every index verb exit non-zero with a clear message"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  echo "# new" > docs/new.md
+  : > docs/.doc-index.json
+  local verb out rc
+  for verb in check-freshness status update-index add-entry remove-entry move-entry deprecate-entry; do
+    rc=0
+    case "$verb" in
+      check-freshness) out=$("$DOC_TOOLS" check-freshness 2>&1 >/dev/null) || rc=$? ;;
+      add-entry) out=$(echo "docs/new.md:src/:guide" | "$DOC_TOOLS" add-entry 2>&1 >/dev/null) || rc=$? ;;
+      move-entry) out=$("$DOC_TOOLS" move-entry docs/architecture.md docs/new.md 2>&1 >/dev/null) || rc=$? ;;
+      *) out=$("$DOC_TOOLS" "$verb" docs/architecture.md 2>&1 >/dev/null) || rc=$? ;;
+    esac
+    assert_true "$verb exits non-zero on a 0-byte index (rc=$rc)" test "$rc" -ne 0
+    assert_contains "$out" "not a valid doc-index" "$verb says why"
+    assert_eq "0" "$(wc -c < docs/.doc-index.json | tr -d ' ')" "$verb left the 0-byte file alone"
+  done
+  teardown
+}
+
+test_index_malformed_shapes_rejected() {
+  echo "test: I-2: non-object / non-object .docs / concatenated / truncated indexes are rejected"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local shape out rc
+  for shape in '[]' 'null' '{}' '{"docs":[]}' '{"docs":{}}{"docs":{}}' '{"docs": {'; do
+    printf '%s\n' "$shape" > docs/.doc-index.json
+    rc=0
+    out=$("$DOC_TOOLS" check-freshness 2>&1 >/dev/null) || rc=$?
+    assert_true "check-freshness rejects $shape (rc=$rc)" test "$rc" -ne 0
+    assert_contains "$out" "not a valid doc-index" "check-freshness explains $shape"
+    rc=0
+    out=$("$DOC_TOOLS" remove-entry docs/architecture.md 2>&1 >/dev/null) || rc=$?
+    assert_true "remove-entry rejects $shape (rc=$rc)" test "$rc" -ne 0
+    assert_eq "$shape" "$(cat docs/.doc-index.json)" "remove-entry left $shape untouched"
+  done
+  teardown
+}
+
+# build-index is the recovery path, so it must NOT refuse a broken index.
+test_index_build_index_recovers_a_zero_byte_index() {
+  echo "test: I-2: build-index rebuilds over a 0-byte index"
+  setup
+  : > docs/.doc-index.json
+  local rc=0
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index 2>/dev/null || rc=$?
+  assert_eq "0" "$rc" "build-index exits 0"
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs | has("docs/architecture.md")' "true" "rebuilt index has the entry"
+  teardown
+}
+
+# (f) mktemp + mv installed the index 0600.
+test_index_mode_is_0644_and_prior_mode_is_kept() {
+  echo "test: I-2: index is written 0644 under umask 022, and a writer keeps the prior mode"
+  setup
+  (umask 022 && echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index)
+  assert_eq "-rw-r--r--" "$(_i2_mode docs/.doc-index.json)" "build-index writes 0644"
+  echo "more" >> docs/architecture.md
+  (umask 022 && "$DOC_TOOLS" update-index docs/architecture.md 2>/dev/null)
+  assert_eq "-rw-r--r--" "$(_i2_mode docs/.doc-index.json)" "update-index keeps 0644"
+  chmod 664 docs/.doc-index.json
+  echo "again" >> docs/architecture.md
+  (umask 077 && "$DOC_TOOLS" update-index docs/architecture.md 2>/dev/null)
+  assert_eq "-rw-rw-r--" "$(_i2_mode docs/.doc-index.json)" "update-index keeps a prior 0664 (umask ignored)"
+  teardown
+}
+
+# A no-op run writes nothing: not even a generated_at bump.
+test_index_noop_writers_leave_the_file_byte_identical() {
+  echo "test: I-2: no-op remove/add/deprecate/update runs leave the index byte-identical"
+  setup
+  echo "# design" > docs/design.md
+  printf '%s\n%s\n' "docs/architecture.md:src/:architecture" "docs/design.md:src/:design" \
+    | "$DOC_TOOLS" build-index
+  cp docs/.doc-index.json docs/.idx.before
+  # Any generated_at / last_verified re-stamp would now differ.
+  sleep 1
+  "$DOC_TOOLS" remove-entry docs/nope.md >/dev/null 2>&1
+  assert_exit_code 0 "remove-entry of an absent key writes nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" add-entry >/dev/null 2>&1
+  assert_exit_code 0 "add-entry of an existing key writes nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  "$DOC_TOOLS" deprecate-entry docs/nope.md >/dev/null 2>&1
+  assert_exit_code 0 "deprecate-entry of an absent key writes nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  rm docs/design.md
+  "$DOC_TOOLS" update-index docs/design.md >/dev/null 2>&1
+  assert_exit_code 0 "update-index with every target skipped writes nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  rm -f docs/.idx.before
+  teardown
+}
+
+# remove-entry / deprecate-entry listed every REQUESTED path as removed or
+# deprecated, including ones they had just reported as SKIP.
+test_index_writers_report_only_changed_keys() {
+  echo "test: I-2: remove-entry / deprecate-entry report only the keys they changed"
+  setup
+  echo "# design" > docs/design.md
+  printf '%s\n%s\n' "docs/architecture.md:src/:architecture" "docs/design.md:src/:design" \
+    | "$DOC_TOOLS" build-index
+  local out
+  out=$("$DOC_TOOLS" deprecate-entry docs/design.md docs/nope.md 2>&1)
+  assert_contains "$out" "Deprecated 1 entry:" "deprecate-entry counts only the changed key"
+  assert_contains "$out" "  docs/design.md" "lists the deprecated key"
+  assert_not_contains "$out" "  docs/nope.md" "does not list the skipped key"
+  out=$("$DOC_TOOLS" remove-entry docs/architecture.md docs/nope.md 2>&1)
+  assert_contains "$out" "Removed 1 entry:" "remove-entry counts only the removed key"
+  assert_contains "$out" "  docs/architecture.md" "lists the removed key"
+  assert_not_contains "$out" "  docs/nope.md" "does not list the skipped key"
+  teardown
+}
+
+# The skill dispatches parallel writers, so a crashed one must not wedge the
+# rest: a lock whose recorded owner is dead is broken.
+test_index_stale_lock_from_dead_owner_is_broken() {
+  echo "test: I-2: a lock left by a dead process does not wedge the next writer"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local dead rc=0 err
+  sh -c 'exit 0' &
+  dead=$!
+  wait "$dead" || true
+  mkdir docs/.doc-index.json.lock
+  echo "$dead" > docs/.doc-index.json.lock/pid
+  echo "more" >> docs/architecture.md
+  err=$(DOC_TOOLS_LOCK_TIMEOUT=5 "$DOC_TOOLS" update-index docs/architecture.md 2>&1 >/dev/null) || rc=$?
+  assert_eq "0" "$rc" "update-index succeeds past a dead owner's lock (stderr: $err)"
+  assert_contains "$err" "stale lock" "says it broke a stale lock"
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/architecture.md"].content_hash' \
+    "sha256:$(hash_file docs/architecture.md)" "the write landed"
+  assert_eq "" "$(_i2_residue)" "no lock left behind"
+  teardown
+}
+
+test_index_live_lock_times_out_with_clear_error() {
+  echo "test: I-2: a lock held by a live process times out with a clear error, index untouched"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local holder rc=0 err before
+  sleep 30 &
+  holder=$!
+  mkdir docs/.doc-index.json.lock
+  echo "$holder" > docs/.doc-index.json.lock/pid
+  before=$(hash_file docs/.doc-index.json)
+  echo "more" >> docs/architecture.md
+  err=$(DOC_TOOLS_LOCK_TIMEOUT=1 "$DOC_TOOLS" update-index docs/architecture.md 2>&1 >/dev/null) || rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  assert_true "update-index exits non-zero (rc=$rc)" test "$rc" -ne 0
+  assert_contains "$err" "docs/.doc-index.json.lock" "names the lock"
+  assert_contains "$err" "pid $holder" "names the owner"
+  assert_eq "$before" "$(hash_file docs/.doc-index.json)" "index untouched"
+  assert_true "the live owner's lock was not removed" test -d docs/.doc-index.json.lock
+  rm -rf docs/.doc-index.json.lock
+  teardown
+}
+
+# Each writer was a per-path loop re-parsing the whole index (O(k·N)): 5 jq
+# spawns per doc for update-index. A batch run is a constant number of index
+# passes, whatever k is.
+test_update_index_is_one_batch_pass() {
+  local k=20 budget=10
+  echo "test: I-2: update-index of $k docs spawns a constant number of jq processes (<= $budget)"
+  setup
+  _i2_synthetic_index 1000
+  mkdir -p docs/real
+  local i=0 mapping="" paths=""
+  while [ "$i" -lt "$k" ]; do
+    echo "# real $i" > "docs/real/r$i.md"
+    mapping="${mapping}docs/real/r$i.md:src/:guide"$'\n'
+    paths="$paths docs/real/r$i.md"
+    i=$((i + 1))
+  done
+  git add -A && git commit -m "real docs" --quiet
+  printf '%s' "$mapping" | "$DOC_TOOLS" add-entry 2>/dev/null
+  echo "// v2" >> src/index.js
+  git add -A && git commit -m "code change" --quiet
+  local real_jq shim_dir spawn_log rc=0
+  real_jq=$(command -v jq)
+  shim_dir=$(harness_mktemp_d jq-count)
+  spawn_log="$shim_dir/spawns"
+  : > "$spawn_log"
+  printf '#!/bin/sh\necho x >> "%s"\nexec "%s" "$@"\n' "$spawn_log" "$real_jq" > "$shim_dir/jq"
+  chmod +x "$shim_dir/jq"
+  # shellcheck disable=SC2086  # $paths is a space-separated list of fixed names
+  PATH="$shim_dir:$PATH" "$DOC_TOOLS" update-index $paths >/dev/null 2>&1 || rc=$?
+  local spawns
+  spawns=$(wc -l < "$spawn_log" | tr -d ' ')
+  assert_eq "0" "$rc" "update-index exits 0"
+  assert_true "update-index of $k docs spawned $spawns jq processes (budget $budget, independent of k)" \
+    test "$spawns" -le "$budget"
+  local head_src
+  head_src=$(git log -1 --format=%H -- src/)
+  assert_json_field "$(cat docs/.doc-index.json)" \
+    "[.docs | to_entries[] | select(.key | startswith(\"docs/real/\")) | .value.code_commit == \"$head_src\"] | unique | map(tostring) | join(\",\")" \
+    "true" "all $k refreshed entries carry the new code_commit"
+  teardown
+}
+
+# Structural guard, cheaper and more durable than racing: the index has one
+# write path, and no trap resumes after INT/TERM.
+test_index_single_write_path_static() {
+  echo "test: I-2: doc-tools.sh has one index write path and terminating traps"
+  local src scrubbed hits
+  src="$SCRIPT_DIR/doc-tools.sh"
+  scrubbed=$(harness_mktemp i2-scan)
+  awk '{ if ($0 ~ /^[[:space:]]*#/) print ""; else print }' "$src" > "$scrubbed"
+  hits=$(grep -nE '>[[:space:]]*"?[$][{]?(index_file|INDEX_FILE)' "$scrubbed" || true)
+  assert_eq "" "$hits" "no redirection straight into the index file"
+  hits=$(grep -cE '(^|[^[:alnum:]_])mv[[:space:]].*"[$][{]?INDEX_FILE[}]?"' "$scrubbed" || true)
+  assert_eq "1" "$hits" "exactly one mv installs the index"
+  hits=$(grep -nE '(^|[[:space:]])trap[[:space:]].*RETURN' "$scrubbed" || true)
+  assert_eq "" "$hits" "no RETURN trap"
+  hits=$(grep -nE '(^|[[:space:]])trap[[:space:]].*(INT|TERM)' "$scrubbed" | grep -vE "trap 'exit 1(30|43)' (INT|TERM)" || true)
+  assert_eq "" "$hits" "every INT/TERM trap terminates (exit 130 / 143)"
+}
+
 # --- Runner ---
 
 run_tests() {
@@ -2322,6 +2702,23 @@ run_tests() {
   test_move_entry_repoints_references
   test_move_entry_usage_lists_move_entry
   test_empty_code_refs_field_yields_empty_array
+
+  # --- index persistence: one locked atomic writer (sweep 05ea982 I-2) ---
+  test_index_single_write_path_static
+  test_index_term_mid_build_index_keeps_previous_index
+  test_index_term_while_build_index_blocked_on_stdin
+  test_index_term_mid_check_freshness_prints_nothing
+  test_index_parallel_update_index_loses_nothing
+  test_index_reader_never_sees_a_partial_write
+  test_index_zero_byte_index_rejected_by_every_verb
+  test_index_malformed_shapes_rejected
+  test_index_build_index_recovers_a_zero_byte_index
+  test_index_mode_is_0644_and_prior_mode_is_kept
+  test_index_noop_writers_leave_the_file_byte_identical
+  test_index_writers_report_only_changed_keys
+  test_index_stale_lock_from_dead_owner_is_broken
+  test_index_live_lock_times_out_with_clear_error
+  test_update_index_is_one_batch_pass
 
   print_summary
 }

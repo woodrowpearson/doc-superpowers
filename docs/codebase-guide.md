@@ -115,7 +115,7 @@ doc-superpowers/
 | File | Purpose | When to Modify |
 |------|---------|---------------|
 | `skills/doc-superpowers/SKILL.md` | Core skill logic: discovery phase, 11 action handlers (init, audit, review-pr, update, diagram, sync, hooks, release, spec-generate, spec-inject, spec-verify), agent prompt templates, verification gates, error handling | Adding/changing actions, modifying agent behavior, updating discovery logic |
-| `scripts/doc-tools.sh` | Bundled freshness tooling with 14 subcommands: `build-index`, `check-freshness`, `update-index`, `add-entry`, `remove-entry`, `move-entry` (re-key an entry after a doc moves, preserving `code_refs`/`code_commit`/`last_verified` — the lossless alternative to `remove-entry` + `add-entry`), `deprecate-entry`, `status`, `bump-version`, `check-version`, `implementation-status`, `set-implementation`, `fragments {list, validate, merge}`, `tools {install, uninstall, status}` (vendors doc-tools.sh + per-PR release-notes helpers into a consumer repo). Content hashing for docs, commit SHA for code, SHA-256 hashing for per-PR release-notes fragments | Changing staleness detection, index schema, version sync, fragment parsing, adding subcommands |
+| `scripts/doc-tools.sh` | Bundled freshness tooling with 14 subcommands: `build-index`, `check-freshness`, `update-index`, `add-entry`, `remove-entry`, `move-entry` (re-key an entry after a doc moves, preserving `code_refs`/`code_commit`/`last_verified` — the lossless alternative to `remove-entry` + `add-entry`), `deprecate-entry`, `status`, `bump-version`, `check-version`, `implementation-status`, `set-implementation`, `fragments {list, validate, merge}`, `tools {install, uninstall, status}` (vendors doc-tools.sh + per-PR release-notes helpers into a consumer repo). Content hashing for docs, commit SHA for code, SHA-256 hashing for per-PR release-notes fragments. Every write to `docs/.doc-index.json` goes through one locked, atomic writer (`_index_apply`; see Code Flow → "Index write path") | Changing staleness detection, index schema, version sync, fragment parsing, adding subcommands, changing how the index is persisted |
 | `scripts/test-doc-tools.sh` | Comprehensive test suite for doc-tools.sh — tests all subcommands (including `fragments`), edge cases, error handling | Adding tests for new doc-tools features |
 | `scripts/test-doc-pr-release.sh` | Test suite for the CI workflow helpers (on the shared `test-helpers.sh` harness) — covers `extract-context.sh`, `update-pr-body.sh`, `commit-and-push.sh`, the extracted `run:` step scripts in `doc-superpowers-steps/`, workflow YAML placeholder substitution, and template structure/wiring (missing YAML parser = loud SKIP locally, FAIL in CI) | Adding tests for the fragment producer workflow or its helpers |
 | `scripts/test-spec-status-model.sh` | Test suite pinning the canonical Spec Status Model wording and its call sites | Changing spec status transition rules, roles, or vocabulary |
@@ -182,6 +182,7 @@ doc-superpowers/
 | Design docs and plans | `docs/superpowers/specs/` and `docs/superpowers/plans/` |
 | Multi-framework agent support | `AGENTS.md`, `.claude-plugin/`, `.cursor-plugin/`, `.codex/`, `.opencode/`, `GEMINI.md`, `gemini-extension.json` |
 | Cross-framework tool mappings | `references/tool-mappings.md` — tool name translations across frameworks |
+| Doc-index write path | `scripts/doc-tools.sh` "Index persistence" section — `_index_apply` / `_index_lock` / `_index_load` / `_index_install`, `_traps`, the shared `_INDEX_PATCH` interpreter |
 | Doc-index merge driver | `scripts/merge-doc-index.sh` — jq three-way merge for `.doc-index.json` conflicts |
 | Merge driver tests | `scripts/test-merge-driver.sh` |
 | OpenCode plugin | `.opencode/plugins/doc-superpowers.js` — ESM plugin for OpenCode |
@@ -230,6 +231,30 @@ User invokes /doc-superpowers audit
   → Write audit report to docs/plans/YYYY-MM-DD-audit-report.md
   → Suggest /doc-superpowers update
 ```
+
+### Index write path (every verb that writes `docs/.doc-index.json`)
+
+`build-index`, `update-index`, `add-entry`, `remove-entry`, `move-entry` and `deprecate-entry` all persist through one primitive in `scripts/doc-tools.sh`. The skill's `update` action runs one agent per stale doc, each calling `update-index`, so these writers run concurrently.
+
+```
+verb parses its arguments / stdin
+  → gathers per-doc facts (hashes in one batch, one `git log` per distinct code_refs set,
+    Implementation:/Realized-by: bullets in one awk pass)
+  → builds a per-key patch list (JSONL: {key, add|merge|del})
+  → _index_apply <jq-program> [jq args…]
+      → _index_lock      mkdir spin-lock docs/.doc-index.json.lock (portable; flock(1) is not on macOS)
+                         owner pid recorded; a dead owner's lock is broken; a live one is waited on
+                         for DOC_TOOLS_LOCK_TIMEOUT seconds (default 30), then a named-owner error
+      → _index_load      private snapshot, validated: exactly one JSON object whose .docs is an object
+                         (a 0-byte or malformed index is refused, never read as empty)
+      → ONE jq pass      old index → new index (shared _INDEX_PATCH interpreter, or move-entry's re-key)
+      → unchanged?       write nothing — no generated_at bump
+      → _index_install   tmp beside the target → chmod to the prior mode (0644 when new) → mv
+  → incremental writers report only the keys that actually changed (_INDEX_CHANGED);
+    build-index stays silent
+```
+
+Verbs whose patch depends on the current entries (`update-index` reads `code_refs`; `move-entry` and `deprecate-entry` check presence) take the lock before reading, so nothing can change between the read and the write. `build-index` uses `_index_apply --replace`: it is the recovery path, so it rebuilds over a missing or invalid index. Readers (`check-freshness`, `status`) use one validated snapshot per run. Traps (`_traps`): `EXIT` cleans up the scratch dir, the in-flight tmp and the lock; `INT` exits 130, `TERM` exits 143 — an interrupted run leaves the previous index byte-identical.
 
 ### Typical `release` flow
 

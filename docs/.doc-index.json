@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-27T09:00:47Z",
+  "generated_at": "2026-09-27T10:06:39Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -20,17 +20,17 @@
       "implementation": []
     },
     "docs/codebase-guide.md": {
-      "content_hash": "sha256:485cbb7fce26f5d7aba70f2af86425c2790f4077f8aaa6872038a5be6f28cba6",
+      "content_hash": "sha256:d50c8339823fdd826b783e5a9954eba09169025051720a055a0fd2f066e020dd",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "8630c5b2b069e71a648989b48542fb27bf87580a",
+      "code_commit": "184daa7388a8f058775664f74e9fab6692e87a19",
       "doc_type": "guide",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T08:48:32Z",
+      "last_verified": "2026-09-27T10:06:39Z",
       "implementation": []
     },
     "docs/conventions.md": {
@@ -456,7 +456,7 @@
       "last_verified": "2026-07-30T01:57:08Z"
     },
     "docs/issues/2026-07-29-index-write-is-not-atomic.md": {
-      "content_hash": "sha256:c0fcb617844903fbe36169fc72fc5f2d7b98ff21370a439918b7f4b749d189be",
+      "content_hash": "sha256:e67aaba89a3f6416ca902ac24aa2e1af2d3d32bff367cb42be915d6dadb7251a",
       "code_refs": [
         "scripts/doc-tools.sh"
       ],
@@ -465,7 +465,8 @@
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-30T01:57:08Z"
+      "last_verified": "2026-09-27T10:06:39Z",
+      "implementation": []
     },
     "docs/plans/2026-09-27-full-repo-05ea982-audit-findings.md": {
       "content_hash": "sha256:c1009c2cf64ab4cd76a7c3b2426f0e959a3b46b85ffe3a1299a70fbc623c629a",
@@ -511,14 +512,15 @@
       "last_verified": "2026-09-27T06:12:33Z"
     },
     "docs/issues/2026-09-27-sweep-05ea982-I02-index-persistence-layer.md": {
-      "content_hash": "sha256:47fd31e1bb8ee3654895918754b4eb42f6dabe37fefde122f33c2a457b643127",
+      "content_hash": "sha256:1ff5ea5b0e7aec5cccdcf50b7fc79e20a7ad8e5874cc9defb5712585159ea0df",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T06:12:33Z"
+      "last_verified": "2026-09-27T10:06:39Z",
+      "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I03-index-semantics.md": {
       "content_hash": "sha256:65e09a13c47737d5fba8fe4c63bf5078ede335626951943d8170d4a63a98ff8b",
