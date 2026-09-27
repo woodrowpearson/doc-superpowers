@@ -1790,9 +1790,12 @@ set-code-refs|cmd_set_code_refs|repo|refs=
   already had keeps its recorded content (for a pre-v3 entry, the content
   in its code_commit); a new one is recorded as add-entry records it (as
   of the doc's last commit), so the doc reads stale if that code changed
-  since, until update-index verifies it. code_commit is kept unless some
-  ref was recorded that way; then it is re-derived as add-entry derives
-  it. Refs are parsed like a mapping line's.
+  since, until update-index verifies it. code_commit (the commits_behind
+  baseline) stays when every ref is kept; is derived as add-entry derives
+  it when every ref is new; and with both is the older baseline — git
+  merge-base of the stored and derived commits, or null when either is
+  unusable — so commits_behind may over-count but is never a masked 0.
+  Refs are parsed like a mapping line's; their order is kept.
 deprecate-entry|cmd_deprecate_entry|repo|superseded-by=
   [--superseded-by <doc_path>] <doc_path>...
   Mark entries deprecated, optionally naming the doc that supersedes them;
@@ -3201,18 +3204,14 @@ cmd_set_code_refs() {
 
   # code_refs replaced in place (a `+=` merge keeps every field's position);
   # code_oids re-derived: a kept ref keeps its recorded content, and a new
-  # one takes the object id just derived from the doc's last commit.
-  # code_commit is kept while every ref's content is one the entry recorded
-  # (refs only removed or re-spelled). Once any ref is recorded from the
-  # doc's last commit (one was added, or had no recorded content), the
-  # stored code_commit may be newer than that baseline, and commits_behind
-  # counted from it would miss the commits since: a masked 0. It is then
-  # re-derived as add-entry derives it, which may over-count but never
-  # under-counts.
-  local patch="$_SCRATCH/set-code-refs.jsonl"
+  # one takes the object id just derived from the doc's last commit. The jq
+  # pass prints where the refs' contents now come from — keep (all recorded:
+  # refs only removed, re-spelled or reordered), fresh (all from the doc's
+  # last commit) or mixed — then the patch row.
+  local plan2="$_SCRATCH/set-code-refs.rows" patch="$_SCRATCH/set-code-refs.jsonl" ccmode row newcc=""
   # shellcheck disable=SC2016  # jq program, not shell expansion
-  jq -c -n --arg k "$doc_path" --arg refs "$joined" --arg oids "${_FACT_OIDS[0]}" \
-    --arg lrefs "$lrefs" --arg loids "$loids" --arg fc "${_FACT_COMMIT[0]}" --slurpfile idx "$snap" \
+  jq -r -n --arg k "$doc_path" --arg refs "$joined" --arg oids "${_FACT_OIDS[0]}" \
+    --arg lrefs "$lrefs" --arg loids "$loids" --slurpfile idx "$snap" \
     "$_JQ_CODE_OIDS"'
     def segs: split("/") | map(select(. != "" and . != "."));
     def normref: segs | if length == 0 then "." else join("/") end;
@@ -3227,11 +3226,39 @@ cmd_set_code_refs() {
        else reduce range(0; $LR | length) as $j ({}; .[$LR[$j] | normref] = $LO[$j]) end) as $kept
     | [range(0; $R | length) as $j
        | {key: $R[$j], kept: ($kept[$R[$j] | normref] // null), fresh: $O[$j]}] as $rows
-    | {key: $k, merge: ({code_refs: $R,
-        code_oids: ([$rows[] | {key: .key, value: (.kept // .fresh)}] | from_entries)}
-        + (if any($rows[]; .kept == null)
-           then {code_commit: (if $fc == "" then null else $fc end)} else {} end))}' \
-    > "$patch" || _die "cannot assemble the update; $INDEX_FILE is unchanged."
+    | (if all($rows[]; .kept != null) then "keep"
+       elif all($rows[]; .kept == null) then "fresh" else "mixed" end),
+      ({key: $k, merge: {code_refs: $R,
+          code_oids: ([$rows[] | {key: .key, value: (.kept // .fresh)}] | from_entries)}} | tojson)' \
+    > "$plan2" || _die "cannot assemble the update; $INDEX_FILE is unchanged."
+  { IFS= read -r ccmode; IFS= read -r row; } < "$plan2"
+
+  # code_commit is the commits_behind baseline, so it must be no newer than
+  # the content of ANY ref, or a change in between goes uncounted: a masked
+  # 0. With refs on two baselines — kept ones recorded as of the stored
+  # code_commit, new ones as of the doc's last commit (whose code_commit
+  # _entry_facts derived, _FACT_COMMIT) — the OLDER baseline is recorded:
+  #   keep   every ref kept: the stored code_commit stands
+  #   fresh  every ref re-derived: the derived one, as add-entry records it
+  #   mixed  git merge-base <stored> <derived> (the newest commit no newer
+  #          than either; it may over-count, never under-count), or null —
+  #          no usable stored one, no derived one, no common ancestor — so
+  #          that commits_behind reads null, never a guess
+  case "$ccmode" in
+    keep) printf '%s\n' "$row" > "$patch" ;;
+    fresh|mixed)
+      if [ "$ccmode" = fresh ]; then
+        newcc="${_FACT_COMMIT[0]}"
+      elif [ -n "${_FACT_COMMIT[0]}" ] && _is_oid "$cc" && git cat-file -e "$cc^{commit}" 2>/dev/null; then
+        newcc=$(git merge-base "$cc" "${_FACT_COMMIT[0]}" 2>/dev/null) || newcc=""
+        _is_oid "$newcc" || newcc=""
+      fi
+      # shellcheck disable=SC2016  # jq program, not shell expansion
+      jq -c --arg cc "$newcc" '.merge += {code_commit: (if $cc == "" then null else $cc end)}' \
+        <<<"$row" > "$patch" || _die "cannot assemble the update; $INDEX_FILE is unchanged."
+      ;;
+    *) _die "cannot assemble the update; $INDEX_FILE is unchanged." ;;
+  esac
   _index_apply --report "$_INDEX_PATCH" --slurpfile patch "$patch"
   case "${_INDEX_CLASSES:0:1}" in
     c) _report_keys "Set code_refs of" "" "$doc_path" ;;
