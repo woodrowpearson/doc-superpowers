@@ -2519,6 +2519,132 @@ test_index_live_lock_times_out_with_clear_error() {
   teardown
 }
 
+# Poll (<= 10 s) until a path exists; the signal tests below use it to hit a
+# writer inside a window a shim holds open.
+_i2_wait_for() {
+  local n=0
+  while [ ! -e "$1" ] && [ "$n" -lt 100 ]; do
+    sleep 0.1
+    n=$((n + 1))
+  done
+  [ -e "$1" ]
+}
+
+# A shim for $1 (mkdir/git/…) that runs the real command, then sleeps 2 s when
+# the LAST argument matches the glob $2 — holding a window open so a signal
+# lands inside it. Prints the shim directory (prepend it to PATH).
+_i2_slow_shim() {
+  local cmd="$1" glob="$2" real dir
+  real=$(command -v "$cmd")
+  dir=$(harness_mktemp_d "slow-$cmd")
+  cat > "$dir/$cmd" <<EOF
+#!/bin/sh
+last=""
+for a; do last=\$a; done
+"$real" "\$@" || exit \$?
+case "\$last" in $glob) sleep 2 ;; esac
+EOF
+  chmod +x "$dir/$cmd"
+  printf '%s' "$dir"
+}
+
+# bash runs a trap only once the foreground child exits. A TERM that lands
+# while the lock's `mkdir` is running used to exit (143) right after it
+# SUCCEEDED but before the shell recorded holding the lock, so cleanup left
+# docs/.doc-index.json.lock behind with no pid — wedging every later writer.
+test_index_term_during_lock_acquire_leaves_no_lock() {
+  echo "test: I-2: SIGTERM while a writer acquires the lock leaves no lock behind"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local shim before pid rc=0 err
+  shim=$(_i2_slow_shim mkdir '*.doc-index.json.lock')
+  before=$(hash_file docs/.doc-index.json)
+  echo "more" >> docs/architecture.md
+  PATH="$shim:$PATH" "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1 &
+  pid=$!
+  assert_true "precondition: the writer reached the lock's mkdir" _i2_wait_for docs/.doc-index.json.lock
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" || rc=$?
+  assert_eq "143" "$rc" "writer exits 143"
+  assert_eq "" "$(_i2_residue)" "no lock (or tmp) left behind"
+  assert_eq "$before" "$(hash_file docs/.doc-index.json)" "index unchanged"
+  rc=0
+  err=$(DOC_TOOLS_LOCK_TIMEOUT=2 "$DOC_TOOLS" update-index docs/architecture.md 2>&1 >/dev/null) || rc=$?
+  assert_eq "0" "$rc" "the next writer is not wedged (stderr: $err)"
+  teardown
+}
+
+# Same window on the stale-lock breaker's mutex (docs/.doc-index.json.lock.break).
+test_index_term_while_breaking_a_stale_lock_leaves_no_mutex() {
+  echo "test: I-2: SIGTERM while breaking a stale lock leaves neither the lock nor its mutex"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local shim dead pid rc=0
+  sh -c 'exit 0' &
+  dead=$!
+  wait "$dead" || true
+  mkdir docs/.doc-index.json.lock
+  echo "$dead" > docs/.doc-index.json.lock/pid
+  shim=$(_i2_slow_shim mkdir '*.doc-index.json.lock.break')
+  PATH="$shim:$PATH" "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1 &
+  pid=$!
+  assert_true "precondition: the writer reached the breaker's mkdir" _i2_wait_for docs/.doc-index.json.lock.break
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" || rc=$?
+  assert_eq "143" "$rc" "writer exits 143"
+  assert_eq "" "$(_i2_residue)" "no lock, mutex or tmp left behind"
+  teardown
+}
+
+# TERM while the writer HOLDS the lock (mid-work: its git log is held open).
+# Neither build-index (locks only at the end) nor check-freshness (never
+# locks) covers this.
+test_index_term_while_holding_the_lock() {
+  echo "test: I-2: SIGTERM while a writer holds the lock releases it and leaves the index intact"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local shim before pid rc=0
+  shim=$(_i2_slow_shim git '*')
+  before=$(hash_file docs/.doc-index.json)
+  echo "more" >> docs/architecture.md
+  PATH="$shim:$PATH" "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1 &
+  pid=$!
+  assert_true "precondition: the writer holds the lock" _i2_wait_for docs/.doc-index.json.lock/pid
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" || rc=$?
+  assert_eq "143" "$rc" "writer exits 143"
+  assert_eq "" "$(_i2_residue)" "lock released, no tmp left"
+  assert_eq "$before" "$(hash_file docs/.doc-index.json)" "index unchanged"
+  teardown
+}
+
+# jq >= 1.6 is required (--args / $ARGS.positional). An older jq must fail
+# fast with a clear message, not deep inside a writer with a jq usage error.
+test_jq_version_gate() {
+  echo "test: I-2: doc-tools.sh refuses a jq older than 1.6, accepts 1.6+ and unrecognised builds"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  local real_jq shim_dir v out rc
+  real_jq=$(command -v jq)
+  shim_dir=$(harness_mktemp_d jq-old)
+  printf '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "$FAKE_JQ_VERSION"; exit 0; fi\nexec "%s" "$@"\n' \
+    "$real_jq" > "$shim_dir/jq"
+  chmod +x "$shim_dir/jq"
+  for v in "jq-1.5" "jq-1.5-1-a5b5cbe" "jq version 1.3"; do
+    rc=0
+    out=$(FAKE_JQ_VERSION="$v" PATH="$shim_dir:$PATH" "$DOC_TOOLS" status docs/architecture.md 2>&1 >/dev/null) || rc=$?
+    assert_true "'$v' is refused (rc=$rc)" test "$rc" -ne 0
+    assert_contains "$out" "jq >= 1.6" "'$v': message names the floor"
+    assert_contains "$out" "$v" "'$v': message names the version found"
+  done
+  for v in "jq-1.6" "jq-1.7.1-apple" "jq-1.8.1" "jq-master-1a2b3c"; do
+    rc=0
+    out=$(FAKE_JQ_VERSION="$v" PATH="$shim_dir:$PATH" "$DOC_TOOLS" status docs/architecture.md 2>&1 >/dev/null) || rc=$?
+    assert_eq "0" "$rc" "'$v' is accepted (stderr: $out)"
+  done
+  teardown
+}
+
 # Each writer was a per-path loop re-parsing the whole index (O(k·N)): 5 jq
 # spawns per doc for update-index. A batch run is a constant number of index
 # passes, whatever k is.
@@ -2575,8 +2701,19 @@ test_index_single_write_path_static() {
   assert_eq "1" "$hits" "exactly one mv installs the index"
   hits=$(grep -nE '(^|[[:space:]])trap[[:space:]].*RETURN' "$scrubbed" || true)
   assert_eq "" "$hits" "no RETURN trap"
-  hits=$(grep -nE '(^|[[:space:]])trap[[:space:]].*(INT|TERM)' "$scrubbed" | grep -vE "trap 'exit 1(30|43)' (INT|TERM)" || true)
-  assert_eq "" "$hits" "every INT/TERM trap terminates (exit 130 / 143)"
+  # The only non-exiting form allowed is the critical-section deferral pair,
+  # which records the signal and is always followed by _signals_restore —
+  # itself required to re-arm the exiting traps and exit with the recorded
+  # status.
+  hits=$(grep -nE '(^|[[:space:]])trap[[:space:]].*(INT|TERM)' "$scrubbed" \
+    | grep -vE "trap 'exit 1(30|43)' (INT|TERM)" \
+    | grep -vE "trap '_INDEX_SIG=1(30|43)' (INT|TERM)" || true)
+  assert_eq "" "$hits" "every INT/TERM trap terminates (exit 130 / 143) or is the deferral pair"
+  local restore
+  restore=$(sed -n '/^_signals_restore() {/,/^}/p' "$scrubbed")
+  assert_contains "$restore" "trap 'exit 130' INT" "_signals_restore re-arms the INT exit trap"
+  assert_contains "$restore" "trap 'exit 143' TERM" "_signals_restore re-arms the TERM exit trap"
+  assert_contains "$restore" 'exit "$_INDEX_SIG"' "_signals_restore exits with a deferred signal's status"
 }
 
 # --- Runner ---
@@ -2718,6 +2855,10 @@ run_tests() {
   test_index_writers_report_only_changed_keys
   test_index_stale_lock_from_dead_owner_is_broken
   test_index_live_lock_times_out_with_clear_error
+  test_index_term_during_lock_acquire_leaves_no_lock
+  test_index_term_while_breaking_a_stale_lock_leaves_no_mutex
+  test_index_term_while_holding_the_lock
+  test_jq_version_gate
   test_update_index_is_one_batch_pass
 
   print_summary

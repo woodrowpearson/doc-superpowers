@@ -6,7 +6,7 @@
 
 - [ ] [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - [ ] Git installed
-- [ ] `jq` installed (`brew install jq` / `apt install jq`) — required by bundled freshness tooling
+- [ ] `jq` **1.6 or newer** installed (`brew install jq` / `apt install jq`) — required by bundled freshness tooling, which refuses an older jq
 - [ ] A project to document (any language, any framework)
 
 Optional:

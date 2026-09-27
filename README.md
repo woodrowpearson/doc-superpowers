@@ -361,7 +361,7 @@ The skill itself (`skills/doc-superpowers/SKILL.md` + `references/`) has zero de
 | Dependency | Required | Notes |
 |-----------|----------|-------|
 | `git` | Yes | Already required by doc-superpowers |
-| `jq` | Yes | `brew install jq` / `apt install jq` |
+| `jq` | Yes, **≥ 1.6** | `brew install jq` / `apt install jq`. 1.6 is the floor: the index writers use `--args` / `$ARGS.positional`. `doc-tools.sh` refuses an older jq with a clear error |
 | `sha256sum` or `shasum` | Yes | Standard on Linux/macOS respectively |
 
 ## Contributing

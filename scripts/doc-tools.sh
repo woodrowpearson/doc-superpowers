@@ -8,6 +8,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Dependency checks ---
 
+# jq >= 1.6: the index writers pass keys with `--args` / `$ARGS.positional`,
+# which jq 1.5 does not have (it would fail deep inside a writer with a jq usage
+# error). Accepts the version strings jq has printed: "jq-1.6", "jq-1.7.1",
+# "jq-1.7.1-apple", "jq-1.5-1-a5b5cbe" (Debian), "jq version 1.3". A string
+# with no parsable version (a dev build such as "jq-master-…") is not blocked.
+_jq_version_ok() {
+  local v="$1" major minor
+  v="${v#jq-}"
+  v="${v#jq version }"
+  case "$v" in
+    [0-9]*.[0-9]*) ;;
+    *) return 0 ;;
+  esac
+  major="${v%%.*}"
+  minor="${v#*.}"
+  minor="${minor%%[!0-9]*}"
+  [ "$major" -gt 1 ] || { [ "$major" -eq 1 ] && [ "${minor:-0}" -ge 6 ]; }
+}
+
 check_deps() {
   local missing=0
   for cmd in git jq; do
@@ -16,6 +35,14 @@ check_deps() {
       missing=1
     fi
   done
+  if command -v jq >/dev/null 2>&1; then
+    local jq_version
+    jq_version=$(jq --version 2>/dev/null || true)
+    if ! _jq_version_ok "$jq_version"; then
+      echo "ERROR: jq >= 1.6 required (found: ${jq_version:-unknown}). Upgrade jq: brew upgrade jq / apt install jq." >&2
+      missing=1
+    fi
+  fi
   if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
     echo "ERROR: required command not found: sha256sum or shasum" >&2
     missing=1
@@ -310,12 +337,40 @@ _die() {
   exit 1
 }
 
+# Record streams from bash to jq. Each field is written as "<n>\n" followed by
+# the value's n lines (n = its newline count + 1, so "" is one empty line), and
+# read back by the jq def rec_fields. Line-framed on purpose: up to jq 1.6 raw
+# input (-R) is read with fgets/strlen, so a NUL-delimited stream could be
+# truncated there, while newline-terminated lines are safe on every supported
+# jq. Any bash string round-trips (bash strings cannot hold NUL).
+_rec_put() {
+  local v nl
+  for v in "$@"; do
+    nl="${v//[!$'\n']/}"
+    printf '%s\n%s\n' "$(( ${#nl} + 1 ))" "$v"
+  done
+}
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_REC_FIELDS='def rec_fields:
+  reduce inputs as $line ({out: [], want: null, buf: []};
+    if .want == null then .want = ($line | tonumber) | .buf = []
+    else .buf += [$line]
+      | if (.buf | length) == .want
+        then .out += [.buf | join("\n")] | .want = null
+        else . end
+    end)
+  | .out;'
+
+
 # EXIT handler: remove whatever this run left in flight. Never calls exit, so
 # the status of the `exit` that got us here (130/143 from a signal) stands.
 cleanup() {
   if [ -n "$_INDEX_TMP" ]; then rm -f "$_INDEX_TMP"; fi
   _index_unlock
   if [ "$_INDEX_BREAKING" = 1 ]; then rmdir "$INDEX_LOCK.break" 2>/dev/null || true; fi
+  # A lock renamed aside for deletion (see _index_unlock / _index_break_stale)
+  # whose rm was cut short. Named by our pid, so it is ours to remove.
+  if [ -e "$INDEX_LOCK.gone.$$" ]; then rm -rf "$INDEX_LOCK.gone.$$"; fi
   if [ -n "$_SCRATCH" ]; then rm -rf "$_SCRATCH"; fi
   return 0
 }
@@ -328,6 +383,25 @@ _traps() {
   trap 'cleanup' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+}
+
+# Critical sections that must not be split between an external command
+# succeeding and the shell recording that it did. bash runs a trap only once
+# the foreground child exits, so a TERM during a successful `mkdir` of the lock
+# would otherwise exit before _INDEX_LOCK_HELD=1 — and cleanup, seeing the lock
+# as not ours, would leave it behind with no owner pid, wedging every later
+# writer. Inside a deferred section a signal is only recorded; _signals_restore
+# puts the terminating traps back and THEN exits with the recorded status.
+_INDEX_SIG=""
+_signals_defer() {
+  _INDEX_SIG=""
+  trap '_INDEX_SIG=130' INT
+  trap '_INDEX_SIG=143' TERM
+}
+_signals_restore() {
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if [ -n "$_INDEX_SIG" ]; then exit "$_INDEX_SIG"; fi
 }
 
 # Create this run's scratch dir. Call in the main shell (never inside $(…)):
@@ -385,19 +459,26 @@ _index_load() {
 # Break a lock whose recorded owner ($1) is no longer running. Serialized by a
 # second mkdir mutex, and the owner is re-read under it: without both, two
 # waiters that saw the same dead pid could each remove the lock — the second
-# removing the one the first had just taken. Returns 0 if it broke the lock.
+# removing the one the first had just taken. The whole section runs with
+# signals deferred (see _signals_defer), so the mutex can never be orphaned by
+# a TERM landing during its mkdir. The dead lock is renamed aside before it is
+# deleted: one rename(2), so no signal can leave a half-removed, pid-less lock.
+# Returns 0 if it broke the lock.
 _index_break_stale() {
   local dead="$1" now_owner broke=1
-  mkdir "$INDEX_LOCK.break" 2>/dev/null || return 1
-  _INDEX_BREAKING=1
-  now_owner=$(cat "$INDEX_LOCK/pid" 2>/dev/null || true)
-  if [ "$now_owner" = "$dead" ]; then
-    rm -rf "$INDEX_LOCK"
-    echo "WARNING: removed stale lock $INDEX_LOCK (owner pid $dead is no longer running)." >&2
-    broke=0
+  _signals_defer
+  if mkdir "$INDEX_LOCK.break" 2>/dev/null; then
+    _INDEX_BREAKING=1
+    now_owner=$(cat "$INDEX_LOCK/pid" 2>/dev/null || true)
+    if [ "$now_owner" = "$dead" ] && mv "$INDEX_LOCK" "$INDEX_LOCK.gone.$$" 2>/dev/null; then
+      rm -rf "$INDEX_LOCK.gone.$$"
+      echo "WARNING: removed stale lock $INDEX_LOCK (owner pid $dead is no longer running)." >&2
+      broke=0
+    fi
+    rmdir "$INDEX_LOCK.break" 2>/dev/null || true
+    _INDEX_BREAKING=0
   fi
-  rmdir "$INDEX_LOCK.break" 2>/dev/null || true
-  _INDEX_BREAKING=0
+  _signals_restore
   return "$broke"
 }
 
@@ -411,13 +492,26 @@ _index_lock() {
   case "$timeout" in
     ''|*[!0-9]*) _die "DOC_TOOLS_LOCK_TIMEOUT must be a whole number of seconds (got '$timeout')." ;;
   esac
-  local polls=0 max=$((timeout * 10)) owner err
+  local polls=0 max=$((timeout * 10)) owner err acquired
   while :; do
-    if err=$(mkdir "$INDEX_LOCK" 2>&1); then
+    # mkdir + held flag + owner pid form one signal-deferred section (see
+    # _signals_defer): a signal landing in it is acted on only once the lock
+    # is recorded as ours, so cleanup releases it instead of orphaning it.
+    acquired=0
+    _signals_defer
+    if mkdir "$INDEX_LOCK" 2>/dev/null; then
       _INDEX_LOCK_HELD=1
-      printf '%s\n' "$$" > "$INDEX_LOCK/pid"
-      return 0
+      if printf '%s\n' "$$" > "$INDEX_LOCK/pid"; then
+        acquired=1
+      else
+        rm -rf "$INDEX_LOCK"
+        _INDEX_LOCK_HELD=0
+        _signals_restore
+        _die "cannot record the owner of lock $INDEX_LOCK"
+      fi
     fi
+    _signals_restore
+    [ "$acquired" = 0 ] || return 0
     if [ ! -d "$INDEX_LOCK" ]; then
       # No lock in place: either its holder released it between our mkdir and
       # this check (retry at once), or mkdir cannot work here at all — missing
@@ -429,7 +523,8 @@ _index_lock() {
       if [ -d "$parent" ] && [ -w "$parent" ] && [ "$polls" -lt "$max" ]; then
         continue
       fi
-      _die "cannot create lock $INDEX_LOCK: $err"
+      err=$(mkdir "$INDEX_LOCK" 2>&1 && rmdir "$INDEX_LOCK") || true
+      _die "cannot create lock $INDEX_LOCK${err:+: $err}"
     fi
     owner=$(cat "$INDEX_LOCK/pid" 2>/dev/null || true)
     if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
@@ -449,9 +544,18 @@ _index_lock() {
   done
 }
 
+# Release the lock — only if it is still ours. A TERM landing during the rm
+# below runs cleanup, which calls this again with the flag still set; by then
+# another writer may already hold a fresh lock, so the owner pid is checked
+# rather than trusting the flag. The lock is renamed aside first (one atomic
+# rename), so a signal can never leave a half-removed, pid-less lock in place.
 _index_unlock() {
   if [ "$_INDEX_LOCK_HELD" = 1 ]; then
-    rm -rf "$INDEX_LOCK"
+    local owner
+    owner=$(cat "$INDEX_LOCK/pid" 2>/dev/null || true)
+    if [ "$owner" = "$$" ] && mv "$INDEX_LOCK" "$INDEX_LOCK.gone.$$" 2>/dev/null; then
+      rm -rf "$INDEX_LOCK.gone.$$"
+    fi
     _INDEX_LOCK_HELD=0
   fi
   return 0
@@ -506,7 +610,10 @@ _index_apply() {
     snap=$(_index_load) || exit 1
   fi
 
-  # Output protocol (NUL-delimited, so any key round-trips):
+  # Output protocol (NUL-delimited, so any key round-trips). NUL is safe in
+  # jq's OUTPUT on every supported version (raw strings are written with
+  # fwrite and their byte length since 1.6); it is jq's raw INPUT that is not
+  # NUL-safe there — see _rec_put.
   #   same\0                                  nothing changed — write nothing
   #   write\0<n>\0<key>\0…(n keys)<index>\n  the changed keys, then the index
   # The index is emitted pretty-printed, byte-for-byte what `jq .` writes.
@@ -532,7 +639,9 @@ _index_apply() {
 
   local out
   out=$(mktemp "$_SCRATCH/apply.XXXXXX") || _die "mktemp failed"
-  if ! jq -j --arg now "$_INDEX_NOW" "$wrapped" "$@" < "$snap" > "$out"; then
+  # Caller options go BEFORE the program: the documented `jq [options] filter`
+  # order (jq 1.6 is the floor — see check_deps).
+  if ! jq -j --arg now "$_INDEX_NOW" "$@" "$wrapped" < "$snap" > "$out"; then
     _die "failed to apply the index update; $INDEX_FILE is unchanged."
   fi
 
@@ -1195,7 +1304,7 @@ cmd_update_index() {
 
   # code_commit: one git log per DISTINCT code_refs set — docs that share refs
   # (common: several docs covering src/) share the answer. Linear cache, no
-  # associative arrays (bash 3.2). Written as NUL-delimited raw records, turned
+  # associative arrays (bash 3.2). Written as a _rec_put record stream, turned
   # into the JSONL patch by ONE jq below.
   local raw="$_SCRATCH/update-raw" patch="$_SCRATCH/update-patch.jsonl"
   : > "$raw"
@@ -1229,7 +1338,7 @@ cmd_update_index() {
         cache_vals+=("$code_commit")
       fi
     fi
-    printf '%s\0%s\0%s\0%s\0' "$doc_path" "${hashes[$k]}" "$code_commit" "${impl[$k]:-}" >> "$raw"
+    _rec_put "$doc_path" "${hashes[$k]}" "$code_commit" "${impl[$k]:-}" >> "$raw"
     k=$((k + 1))
   done
 
@@ -1238,8 +1347,8 @@ cmd_update_index() {
   # stripped). Preserved: replaces, superseded_by, doc_type, code_refs, and the
   # top-level build_commit.
   # shellcheck disable=SC2016  # jq program, not shell expansion
-  jq -c -Rs --arg now "$_INDEX_NOW" '
-    split("\u0000") | .[:-1] as $f
+  jq -c -n -R --arg now "$_INDEX_NOW" "$_JQ_REC_FIELDS"'
+    rec_fields as $f
     | range(0; $f | length; 4) as $i
     | {key: $f[$i], merge: {
         content_hash: $f[$i + 1],
@@ -1280,8 +1389,8 @@ cmd_add_entry() {
   local invalid=0
   local requested=()
   # Facts about each doc (hash, code_commit) do not depend on the index, so
-  # they are gathered WITHOUT the lock — stdin may be slow — as NUL-delimited
-  # raw records. The "add" patch rows only insert keys that are still absent
+  # they are gathered WITHOUT the lock — stdin may be slow — as a _rec_put
+  # record stream. The "add" patch rows only insert keys that are still absent
   # when applied under the lock, so a concurrent writer cannot be clobbered.
   local raw="$_SCRATCH/add-raw" patch="$_SCRATCH/add-patch.jsonl"
   : > "$raw"
@@ -1321,8 +1430,7 @@ cmd_add_entry() {
       code_commit=$(git log -1 --format=%H -- "${refs[@]}" 2>/dev/null || true)
     fi
 
-    printf '%s\0%s\0%s\0%s\0%s\0' "$doc_path" "$content_hash_val" "$code_refs_raw" \
-      "$code_commit" "$doc_type" >> "$raw"
+    _rec_put "$doc_path" "$content_hash_val" "$code_refs_raw" "$code_commit" "$doc_type" >> "$raw"
     requested+=("$doc_path")
   done
 
@@ -1331,8 +1439,8 @@ cmd_add_entry() {
   # code_refs: comma-split with empty strings dropped — see cmd_build_index for
   # why [""] must never be written.
   # shellcheck disable=SC2016  # jq program, not shell expansion
-  jq -c -Rs --arg now "$_INDEX_NOW" '
-    split("\u0000") | .[:-1] as $f
+  jq -c -n -R --arg now "$_INDEX_NOW" "$_JQ_REC_FIELDS"'
+    rec_fields as $f
     | range(0; $f | length; 5) as $i
     | {key: $f[$i], add: {
         content_hash: (if $f[$i + 1] == "" then null else $f[$i + 1] end),
