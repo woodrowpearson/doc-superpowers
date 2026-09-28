@@ -1,7 +1,8 @@
 # Spec Lifecycle Protocol — Design Spec
 
 **Date:** 2026-03-14
-**Status:** Approved (spec review passed, iteration 3)
+**Status:** Implemented (v2.2.0, 2026-03-14). Its spec `Status` transition rules are **superseded** by `docs/superpowers/specs/2026-07-24-spec-status-transition-model-design.md` (v2.13.0: guarded, role-aware transitions — the canonical **Spec Status Model** in `references/spec-lifecycle-actions.md`), and the spec roles gained `:amends` in v2.15.0. Mechanisms that later work replaced carry dated **AMENDED** notes; this is a design record, and `references/spec-lifecycle-actions.md` / `references/spec-lifecycle-protocol.md` describe current behaviour.
+**Superseded in part by:** `docs/superpowers/specs/2026-07-24-spec-status-transition-model-design.md` (Status transitions)
 **Author:** Claude (brainstorming with @woodrowpearson)
 
 ## Problem
@@ -129,6 +130,8 @@ The design follows doc-superpowers' existing pattern: actions are independently 
 
 8. **Update indexes** — Call `doc-tools.sh update-index` for each new spec (including populated `code_refs`). Update `docs/specs/README.md` index table.
 
+> ⚠️ **AMENDED 2026-09-28 — a new spec is indexed with `add-entry`.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the prompt changed in Tasks 3 and 12). `update-index` refreshes indexed docs and never creates one (a path it does not know is reported and skipped, exit 1), so a new spec's mapping line `<spec>:<refs>:spec` goes to `add-entry` (to `build-index` only when no index exists). Refining `code_refs` later is `set-code-refs`, not an edit of the index.
+
 9. **Link back to design doc** — Append a `Generated Specs` section to the design doc listing all formal specs produced with their paths.
 
 10. **Sync CLAUDE.md** — If any new files or directories were created (spec files, `docs/specs/` bootstrap, new category dirs), update CLAUDE.md to reflect the new paths and any new commands. See `references/doc-spec.md` for CLAUDE.md update rules. This ensures Claude sessions see the new spec infrastructure immediately.
@@ -168,6 +171,8 @@ Read the plan document and identify chunk boundaries. Plan documents produced by
 - **Per-chunk:** Add a spec update task at the end of each chunk — "Update SPEC-{CAT}-NNN status from Draft to In Review, verify implementation notes match what was built in this chunk, refine `code_refs` in `.doc-index.json` to reflect actual file paths created/modified"
 - **Final chunk:** Add a spec finalization task — "Update all governing specs to Implemented status, fill in Implementation Notes sections with actual file paths and decisions made"
 
+> ⚠️ **AMENDED 2026-09-28 — superseded: status writes are guarded.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14. The unconditional writes above ("from Draft to In Review", "all governing specs to Implemented") corrupted governing specs — they regressed later statuses and advanced constraint references and partially covered targets. `docs/superpowers/specs/2026-07-24-spec-status-transition-model-design.md` (v2.13.0) replaced them: the injected tasks read the current `Status` and apply the Spec Status Model (role, then R3, R4, R2), so only a scope-covered **target** advances, never backwards. v2.15.0 added the **amendment** role (`:amends`): status-neutral, with an injected task that verifies the dated `AMENDED` block landed and cites the plan.
+
 Injected tasks follow the same format as other plan tasks (checkbox syntax, file paths, clear acceptance criteria). They are appended to chunk ends, never restructuring the existing plan.
 
 If the plan document does not follow the `## Chunk N:` convention, treat each `### Task N:` heading as a chunk boundary instead.
@@ -186,6 +191,8 @@ Runs after each plan chunk completes (not after every individual task — that w
 
 1. Call `doc-tools.sh check-freshness` against the governing specs. This compares the spec's `content_hash` in `.doc-index.json` against the current `code_commit` for its `code_refs`.
 
+   > ⚠️ **AMENDED 2026-09-28 — what `check-freshness` compares.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the code changed in Tasks 3–5). A spec is stale when the content of one of its `code_refs` — its git object id, recorded as `code_oids` when the spec was last verified — differs from HEAD's; `content_hash` separately says whether the spec itself was edited (`doc_modified`). No `content_hash`-against-`code_commit` comparison exists.
+
 2. If code changed but spec didn't (flagged stale), determine alignment vs. drift:
 
    **How to determine aligned vs. drifted:** The agent reads three inputs — (a) the spec's relevant section content, (b) the code changes in files matching the spec's `code_refs`, and (c) the plan task description that was just executed. It then answers: "Does the implementation achieve what the spec describes, even if through a different mechanism?" The key question is intent compliance, not literal matching.
@@ -194,6 +201,8 @@ Runs after each plan chunk completes (not after every individual task — that w
    - **Drifted** (implementation contradicts spec intent, omits spec requirements, or introduces unspecified behavior): Flag for human review with a deviation note: what the spec says, what the code does, and why they diverge. Do not auto-update spec content — that's a human decision about whether to update the spec or the code.
 
 3. Status transitions: Draft → In Review → Implemented, driven by `check-freshness` results.
+
+> ⚠️ **AMENDED 2026-09-28 — superseded.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14. Transitions follow the Spec Status Model of `docs/superpowers/specs/2026-07-24-spec-status-transition-model-design.md`: the ladder `Draft` → `In Review` → `Approved` → `Implemented`, monotonic, only for target specs; the execute phase itself writes only `Draft` → `In Review`.
 
 **Output:** Updated spec files (if aligned) or deviation flags (if drifted).
 
@@ -217,6 +226,8 @@ Runs after each plan chunk completes (not after every individual task — that w
 2. **Staleness check** — Any specs still flagged stale after all tasks completed? Catches specs that `spec-inject` (execute phase) flagged for review but were never addressed.
 
 3. **Status check** — Are all governing specs in `Implemented` status? Any still at `Draft` or `In Review` means implementation tasks were skipped or the plan didn't cover that spec's scope.
+
+> ⚠️ **AMENDED 2026-09-28 — superseded.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14. `spec-verify` expects `Implemented` only where the Spec Status Model requires it (`docs/superpowers/specs/2026-07-24-spec-status-transition-model-design.md`): constraint references, exempt statuses and targets held short of `Implemented` with recorded remaining scope are not findings, and an `:amends` spec gets the amendment landed-check instead (pass `--plan` for the full check). PASS and FAIL below follow the same rule.
 
 4. **Coverage check** — Five-way alignment across five artifact relationships:
 

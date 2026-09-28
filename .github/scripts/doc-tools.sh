@@ -2700,9 +2700,9 @@ cmd_build_index() {
   jq -c -n -R --arg now "$_INDEX_NOW" "$_JQ_REC_FIELDS$_JQ_CODE_OIDS$_JQ_MAPPING_ENTRIES"'mapping_entries' \
     < "$rec" > "$docs_tmp" || _die "cannot assemble the index entries; $INDEX_FILE is unchanged."
 
-  # schema_version: 2 added the per-entry `implementation` array (Task 3.4 of
-  # docs/plans/2026-05-16-adr-implementation-field-rollout.md; renamed from
-  # `version`); 3 added code_oids (sweep 05ea982 I-1 — see "Content identity").
+  # schema_version: 2 added the per-entry `implementation` array and renamed
+  # `version` (v2.11.0); 3 added code_oids (sweep 05ea982 I-1 — see "Content
+  # identity").
   #
   # `docs` arrives via --slurpfile, NOT --argjson: it is the one unbounded
   # value here, and Linux caps a single argv string at MAX_ARG_STRLEN (131072
@@ -2911,9 +2911,8 @@ cmd_update_index() {
   # set-implementation use, and the entry accumulator (blk_collect) that
   # implementation-status uses; each entry is tagged with its ARGV index. Empty
   # files never reach FNR == 1, so argi catches up by name. Both fields are
-  # stored under the single JSON key "implementation" to keep downstream
-  # consumers simple (validate_docs.py, doc-audit routine) — see Task 3.4 of
-  # docs/plans/2026-05-16-adr-implementation-field-rollout.md.
+  # stored under the single JSON key "implementation" (v2.11.0), so a consumer
+  # reads realization state from one key whatever the doc type.
   local impl=() tagged ai line p awk_files=()
   if [ ${#live[@]} -gt 0 ]; then
     # "./" keeps a doc named like "x=1.md" from being an awk assignment.
