@@ -4418,9 +4418,15 @@ test_i1_move_entry_preserves_code_oids() {
 # The sweep measured 117 s at N=4,000 / H=3,000: every doc paid its own
 # `git rev-list` walks. Content identity is one batch-check for the whole index,
 # plus one `git rev-list --count` per stale (code_commit, refs) group.
+# At this test's size (N=2,000, H=500) the per-doc code took 43 s (bash 5) /
+# 61 s (bash 3.2) and content identity takes 1-2 s. The spawn counts below are
+# the exact guard (independent of load); the wall-clock bound is a backstop
+# for a per-doc cost that spawns nothing, set at 20 s: under half the per-doc
+# time, and far enough above 1-2 s that a loaded machine does not trip it
+# (a 5 s bound did, under parallel suites).
 test_i1_check_freshness_scale() {
   local n=2000 h=500 k=3 dirs=100
-  echo "test: I-1: check-freshness over $n docs and $h commits: < 5 s, git spawns independent of N"
+  echo "test: I-1: check-freshness over $n docs and $h commits: git/jq spawns independent of N, <= 20 s"
   setup
   # One fast-import: $dirs x 20 files, then $h commits touching one file each.
   {
@@ -4474,9 +4480,8 @@ test_i1_check_freshness_scale() {
   assert_eq "0" "$rc" "check-freshness exits 0"
   assert_json_field "$out" '.summary | "\(.current) \(.stale)"' "$((n - k * n / dirs)) $((k * n / dirs))" \
     "exactly the docs covering the $k changed directories are stale"
-  # Whole seconds: <= 4 measured guarantees < 5 s real.
-  assert_true "check-freshness took ${elapsed}s for $n docs x $h commits (< 5 s; build-index took ${build_s}s)" \
-    test "$elapsed" -le 4
+  assert_true "check-freshness took ${elapsed}s for $n docs x $h commits (budget 20 s; build-index took ${build_s}s)" \
+    test "$elapsed" -le 20
   # Fixed git calls (repository check, HEAD, tree, one batch-check) plus, per
   # stale (code_commit, refs) group — $k here, each with its own code_commit —
   # one merge-base --is-ancestor and one rev-list --count; none per current doc.
@@ -4493,10 +4498,13 @@ test_i1_check_freshness_scale() {
 # classification its own jq pass makes, and clears "$@" once it has the paths.
 # Measured at 4,000 keys under bash 3.2 (M-series laptop), before → after:
 # update-index 20 s → 4.4 s, deprecate-entry / remove-entry 14-15 s → 1.3 s,
-# add-entry (one git walk and one hash per key) 63 s → 6.2 s. The budgets are
-# about 3x the linear times, and below the quadratic ones on bash 3.2 (the
-# interpreter where the quadratic cost bites; under bash 5 the old code took
-# 6 / 4 / 4 / 52 s, so there only the add-entry budget discriminates).
+# add-entry (one git walk and one hash per key) 63 s → 6.2 s. The budgets sit
+# below the quadratic times on bash 3.2 (the interpreter where the quadratic
+# cost bites; under bash 5 the old code took 6 / 4 / 4 / 52 s, so there only
+# the add-entry budget discriminates) and as far above the linear ones as
+# that allows: deprecate-entry / remove-entry 10 s (7x; a 5 s budget left a
+# loaded machine too little room), update-index 14 s (3x: the quadratic 20 s
+# allows no more), add-entry 20 s (3x).
 test_i1_writer_reports_are_linear() {
   local k=4000
   echo "test: I-1: add-entry / update-index / deprecate-entry / remove-entry of $k keys stay linear"
@@ -4534,8 +4542,8 @@ test_i1_writer_reports_are_linear() {
   assert_contains "$out" "Removed $k entries:" "remove-entry reports $k removed"
   assert_true "add-entry of $k keys took ${s_add}s (budget 20 s)" test "$s_add" -le 20
   assert_true "update-index of $k keys took ${s_upd}s (budget 14 s)" test "$s_upd" -le 14
-  assert_true "deprecate-entry of $k keys took ${s_dep}s (budget 5 s)" test "$s_dep" -le 5
-  assert_true "remove-entry of $k keys took ${s_rem}s (budget 5 s)" test "$s_rem" -le 5
+  assert_true "deprecate-entry of $k keys took ${s_dep}s (budget 10 s)" test "$s_dep" -le 10
+  assert_true "remove-entry of $k keys took ${s_rem}s (budget 10 s)" test "$s_rem" -le 10
   teardown
 }
 
