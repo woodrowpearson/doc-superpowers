@@ -69,6 +69,12 @@ fi
 command -v gh >/dev/null || { echo "gh CLI required" >&2; exit 2; }
 command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
 
+lib="$(dirname "$0")/fragment-lib.sh"
+[ -f "$lib" ] || { echo "$lib is missing (re-run the doc-superpowers installer: install --ci)" >&2; exit 1; }
+# The fragment line rules: frag_marker, frag_lines, frag_is_hash_line, frag_stored, frag_sha256.
+# shellcheck source=scripts/hooks/ci/doc-pr-release/fragment-lib.sh
+. "$lib"
+
 T=$(mktemp -d "${TMPDIR:-/tmp}/doc-sp-context.XXXXXX") || { echo "mktemp -d failed" >&2; exit 1; }
 trap 'rm -rf "$T"' EXIT
 
@@ -84,26 +90,6 @@ else
   BASE_TIP="$BASE_REF"
 fi
 BASE_SHA=$(git merge-base "$BASE_TIP" HEAD)
-
-sha256() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum
-  else
-    shasum -a 256
-  fi
-}
-
-# A marker line less a trailing CR and blanks.
-trimmed() {
-  local l="${1%$'\r'}"
-  while :; do
-    case "$l" in
-      *[' '$'\t']) l="${l%?}" ;;
-      *) break ;;
-    esac
-  done
-  printf '%s' "$l"
-}
 
 FRAGMENT_PATH="RELEASE-NOTES.next/PR-${PR_NUMBER}.md"
 # Never read into memory past this: 1 MiB is ~5000 lines of release notes.
@@ -124,29 +110,20 @@ elif [ -f "$FRAGMENT_PATH" ]; then
   else
     HAS_FRAGMENT=true
     FRAGMENT_FILE="$FRAGMENT_PATH"
-    l1="" l2=""
-    { IFS= read -r l1 || true; IFS= read -r l2 || true; } < "$FRAGMENT_PATH"
-    l1=$(trimmed "$l1")
-    l2=$(trimmed "$l2")
-    stored="" re='^<!-- doc-superpowers:hash ([0-9a-f]+) -->$'
-    if [[ $l2 =~ $re ]]; then
-      stored="${BASH_REMATCH[1]}"
-    fi
+    # The notes start after a hash line, else after line 1 (a hand edit).
+    frag_notes "$FRAGMENT_PATH" "$T/notes"
+    l1="$FRAG_L1"
+    stored=$(frag_stored "$FRAG_L2")
     tail -n +3 "$FRAGMENT_PATH" > "$T/payload"
-    actual=$(sha256 < "$T/payload")
-    if [ -n "$stored" ] && [ "$stored" = "${actual%% *}" ]; then
+    actual=$(frag_sha256 < "$T/payload")
+    if [ -n "$stored" ] && [ "$stored" = "$actual" ]; then
       HASH_VALID=true
     fi
-    # The notes start after a hash marker, else after line 1 (a hand edit).
-    case "$l2" in
-      '<!-- doc-superpowers:hash'*'-->') cp "$T/payload" "$T/notes" ;;
-      *) tail -n +2 "$FRAGMENT_PATH" > "$T/notes" ;;
-    esac
     if awk '{ sub(/\r$/, "") } /^[ \t]*$/ { next } { n++ } /^[ \t]*<!-- doc-superpowers:no-notes -->[ \t]*$/ { m++ }
             END { exit !(n == 1 && m == 1) }' "$T/notes"; then
       NO_NOTES=true
     fi
-    if [ "$l1" != "<!-- doc-superpowers:fragment PR-${PR_NUMBER} -->" ] || [ -z "$stored" ] \
+    if [ "$l1" != "$(frag_marker "$PR_NUMBER")" ] || [ -z "$stored" ] \
        || ! grep -q . "$T/payload"; then
       CORRUPT=true
     fi

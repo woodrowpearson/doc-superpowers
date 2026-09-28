@@ -68,6 +68,7 @@ doc-superpowers/
 │           └── doc-pr-release/            # Colocated shell helpers for doc-pr-release.yml
 │               ├── extract-context.sh         # Emits JSON context blob (PR body, existing fragment + its hash state, the PR's own commits since the last recorded sync)
 │               ├── update-pr-body.sh          # Idempotently merges a managed section into the PR body
+│               ├── fragment-lib.sh            # Sourced by commit-and-push, extract-context and verify-fragment: the fragment line rules (markers, hash line, sha256)
 │               ├── commit-and-push.sh         # Seals the fragment, commits only it ([doc-superpowers] prefix + Drafted-From trailer), pushes only while the branch is at the checkout (a workflow step, never the agent)
 │               └── RELEASE-NOTES.next.README.md # Fragment-format spec dropped into consuming repos (only if missing)
 │           └── doc-superpowers-steps/     # run: step bodies of every template — freshness-check (freshness gate/audit, AI scope gate), resolve-auth, prepare-agent (pinned plugin), commit-changes (checked commit), pr-guard (same-repo), sentinel-check, write-context, verify-fragment, precheck; installed with any workflow
@@ -165,7 +166,7 @@ doc-superpowers/
 | Git hook scripts | `scripts/hooks/git/` — pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push |
 | Claude Code hook scripts | `scripts/hooks/claude/` — pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh |
 | CI workflow templates | `scripts/hooks/ci/` — 8 templates total (2 shell-based, 6 AI-powered; `doc-index-update.yml` was retired in v3.0.0). Shell: doc-freshness-pr.yml, doc-freshness-schedule.yml (run the vendored `.github/scripts/doc-tools.sh` through `doc-superpowers-steps/freshness-check.sh`). AI: doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml (per-PR release-notes fragment producer, with colocated helpers under `doc-pr-release/`). All actions SHA-pinned. This repo self-installs only the 2 shell-based workflows into its own `.github/workflows/` — the 6 AI ones need Anthropic credentials configured as repository secrets, so the 2-of-8 gap here is deliberate, not drift |
-| Per-PR release-notes fragment helpers | `scripts/hooks/ci/doc-pr-release/` — `extract-context.sh`, `update-pr-body.sh`, `commit-and-push.sh`, and `RELEASE-NOTES.next.README.md` (fragment-format spec installed into consuming repos). The `run:` step bodies of `doc-pr-release.yml` and `doc-release.yml` live in `scripts/hooks/ci/doc-superpowers-steps/` |
+| Per-PR release-notes fragment helpers | `scripts/hooks/ci/doc-pr-release/` — `extract-context.sh`, `update-pr-body.sh`, `commit-and-push.sh`, the library they share `fragment-lib.sh` (doc-tools.sh keeps byte-identical copies of its hash-line constants and update-pr-body's fence parser; test-doc-pr-release.sh pins both), and `RELEASE-NOTES.next.README.md` (fragment-format spec installed into consuming repos). The `run:` step bodies of `doc-pr-release.yml` and `doc-release.yml` live in `scripts/hooks/ci/doc-superpowers-steps/` |
 | Release-notes fragment parsing | `scripts/doc-tools.sh fragments` — one grammar (`_FRAG_AWK`) for `list` (JSON: hash state, sections, no-notes, the problem that keeps a fragment from being consumed), `validate <path>` (exit 0/1/2), and `merge <start|ROOT> <end> [--paths-out <file>] [--remove]` (markdown sections for insertion under a `## vX.Y.Z` header, from every fragment present at `<end>`; lossless or skipped with a warning; refuses when an earlier release's commit has not reached `<end>`) |
 | Hook test suite | `scripts/test-hooks.sh` |
 | Hooks action routing | `skills/doc-superpowers/SKILL.md` Section 1 "`hooks`" subsection |
@@ -284,7 +285,7 @@ User invokes /doc-superpowers release [--from=<ref>]
     → Merge per-PR release-notes fragments, before drafting
       → `doc-tools.sh fragments merge <start|ROOT> HEAD`: every RELEASE-NOTES.next/PR-*.md present at HEAD (unreleased until a release deletes it)
         → Each merged losslessly or skipped (named on stderr, left for the next release); drifted (hand-edited) ones merged with a warning; no-notes ones consumed silently
-        → Refuses (exit 1) when a release consumed fragments still present here — its release commit never reached this branch — and the action stops
+        → Refuses (exit 3) when a release consumed fragments still present here — its release commit never reached this branch — and the action stops
     → Dispatch single general-purpose drafting agent with:
       → Commit list, full git diff, previous entry as format exemplar, merged fragment sections (if any)
       → Instructions: use RELEASE-NOTES.md's own headings; map the fragment sections (Added … Dependencies) onto them with the table in RELEASE-NOTES.next/README.md

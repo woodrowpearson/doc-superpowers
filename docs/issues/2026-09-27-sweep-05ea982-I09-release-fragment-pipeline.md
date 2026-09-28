@@ -213,7 +213,11 @@ Resolved by Task 10 of the fix plan. Every lossy case is now either merged lossl
   before the first `###` heading, a `#`/`##` heading, an unclosed code fence, no notes, a
   non-`PR-<number>.md` name, a symbolic link, an empty file. Trailing `\r` and blanks are
   dropped; a last line without a newline is kept.
-- Dedupe per unit (a column-0 line plus its indented/blank lines and whole fences), per section.
+- Dedupe per unit, per section. A unit starts at a list item or at a column-0 line after a blank
+  line, and takes every line up to the next such start (indented lines, wrapped column-0 lines,
+  whole fences); a paragraph unit is printed with blank lines around it (fix round 1: every
+  column-0 line used to start a unit, so a shared prose line was dropped from the second
+  fragment).
   One section vocabulary (`Added` … `Dependencies`; `Features`, `Changes`, `Fixes`, `Bug Fixes`
   fold onto it, case-insensitive), with the mapping table in `RELEASE-NOTES.next/README.md`.
 - Explicit "no notes" state: a body of only `<!-- doc-superpowers:no-notes -->` is consumed and
@@ -221,7 +225,7 @@ Resolved by Task 10 of the fix plan. Every lossy case is now either merged lossl
 - Both refs validated (exit 2); `ROOT` is the first release's `<range-start>`;
   `--paths-out F` / `--paths-out=F` (the shared parser) — emptied first, written only on success.
   New `--remove` (`<range-end>` = HEAD) `git rm`s exactly the consumed fragments.
-- "The release commit reaches `main`" is enforced here: `merge` refuses (exit 1, naming the
+- "The release commit reaches `main`" is enforced here: `merge` refuses (exit 3 — its own code since fix round 1; 1 is any other failure — naming the
   fragments and the release) when a fragment present at `<range-end>` was deleted at
   `<range-start>`, or at a `v*` tag cut from `<range-end>`'s history after `<range-start>` that
   `<range-end>` does not contain, and nothing in `S..<range-end>` added it back. That is one
@@ -268,8 +272,26 @@ duplicate filter, removes via `--remove` (the `xargs … /tmp` form is gone), co
 tag, and states that the release commit must reach `main`. The `--from=<tag>~1` advice is gone.
 The 2026-05-12 plan's `git log --all` / ancestry design is marked superseded.
 
-**Tests:** `test-doc-tools.sh` `test_i9_*` (10) plus four reworked fragment tests;
-`test-doc-pr-release.sh` `test_i9_*` (12) plus reworked step-helper tests. Both of its XFAIL
+**Fix round 1:**
+- `update-pr-body.sh` refuses (exit 1) when there is no section and the body ends inside an
+  unclosed code fence — appending would land inside the code block and add one section per run;
+  a section found before an unclosed fence is still replaced (idempotent).
+- Units start only at a list item or at a column-0 line after a blank line, so prose lines and
+  wrapped (unindented) bullet lines stay with their note; paragraphs print with blank lines
+  around them.
+- One sourced library, `scripts/hooks/ci/doc-pr-release/fragment-lib.sh`, holds the line rules
+  (marker, trimming, sha256, the hash-line regex) for commit-and-push, extract-context and
+  verify-fragment. doc-tools.sh (vendored as one file) keeps byte-identical copies of the two
+  regex constants and of update-pr-body's fence parser, with cross-reference comments; tests diff
+  them and feed both the same fixtures. The consumer's line-2 test now uses that regex (it
+  disagreed with the helpers on a line 2 containing `>`).
+- `fragments merge`'s refusal has its own exit status, 3 (1 stays "any other failure");
+  doc-release's precheck and SKILL.md match on 3.
+- The rejected-push path of `commit-and-push.sh` has fixtures (origin's pre-receive hook deletes
+  or moves the branch, or only rejects).
+
+**Tests:** `test-doc-tools.sh` `test_i9_*` (11) plus four reworked fragment tests;
+`test-doc-pr-release.sh` `test_i9_*` (17) plus reworked step-helper tests. Both of its XFAIL
 assertions are ordinary assertions now.
 
 ## Related

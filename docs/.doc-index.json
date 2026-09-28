@@ -1,43 +1,43 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-28T10:55:45Z",
+  "generated_at": "2026-09-28T12:10:23Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
-      "content_hash": "sha256:0952fae4f6ea704de5e769a8e87869126a484940351a8ca9742682ddb62e4d8a",
+      "content_hash": "sha256:7aa0adf3554c4d465fe272d218d1718e104afd498fff28398bde0c80ab769913",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/",
         "references/"
       ],
-      "code_commit": "5d5f8aa0018e9792310fa638ded36479cbd7daf4",
+      "code_commit": "a917d6acc8d771487ce0cb7b8615f1a5a1e2cf4f",
       "doc_type": "architecture",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-28T10:55:45Z",
+      "last_verified": "2026-09-28T12:10:23Z",
       "implementation": [],
       "code_oids": {
-        "skills/doc-superpowers/SKILL.md": "3487d023b16d58c54d90aa1c79561b543b77f50d",
-        "scripts/": "756596dcdb6dd1f055b623b5a046999ccecf881d",
+        "skills/doc-superpowers/SKILL.md": "cbe62cd2bb535c8d0c51c39ae083181c29deb8a6",
+        "scripts/": "6b41029e486425d4b5e6afda4c71522840be22b3",
         "references/": "e83f1f61d54ea91f2238495832048b8a9255be0a"
       }
     },
     "docs/codebase-guide.md": {
-      "content_hash": "sha256:f0e2f5950ba951dcc2bc81a42431a71320f92afc5fa69dd020a0e946616cf198",
+      "content_hash": "sha256:7c96b886d849d1e6e85380fb76868ee0fe6a710cbabbbce00b01bbd11e4b5fb1",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "5d5f8aa0018e9792310fa638ded36479cbd7daf4",
+      "code_commit": "a917d6acc8d771487ce0cb7b8615f1a5a1e2cf4f",
       "doc_type": "guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-28T10:55:45Z",
+      "last_verified": "2026-09-28T12:10:23Z",
       "implementation": [],
       "code_oids": {
-        "skills/doc-superpowers/SKILL.md": "3487d023b16d58c54d90aa1c79561b543b77f50d",
-        "scripts/": "756596dcdb6dd1f055b623b5a046999ccecf881d"
+        "skills/doc-superpowers/SKILL.md": "cbe62cd2bb535c8d0c51c39ae083181c29deb8a6",
+        "scripts/": "6b41029e486425d4b5e6afda4c71522840be22b3"
       }
     },
     "docs/conventions.md": {
@@ -75,20 +75,20 @@
       }
     },
     "docs/workflows/doc-superpowers.md": {
-      "content_hash": "sha256:85851fd18a9f41a6f6e280bf1bb8bbade71fe493dd605507bc809a46a474f485",
+      "content_hash": "sha256:b9f367c0dbd9d5a694004eb3884dd6b62f3ac99192acac64de1e7932ef732a6a",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "5d5f8aa0018e9792310fa638ded36479cbd7daf4",
+      "code_commit": "a917d6acc8d771487ce0cb7b8615f1a5a1e2cf4f",
       "doc_type": "workflows",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-28T10:55:45Z",
+      "last_verified": "2026-09-28T12:10:23Z",
       "implementation": [],
       "code_oids": {
-        "skills/doc-superpowers/SKILL.md": "3487d023b16d58c54d90aa1c79561b543b77f50d",
-        "scripts/": "756596dcdb6dd1f055b623b5a046999ccecf881d"
+        "skills/doc-superpowers/SKILL.md": "cbe62cd2bb535c8d0c51c39ae083181c29deb8a6",
+        "scripts/": "6b41029e486425d4b5e6afda4c71522840be22b3"
       }
     },
     "docs/plans/2026-03-26-audit-report.md": {
@@ -587,13 +587,13 @@
       "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I09-release-fragment-pipeline.md": {
-      "content_hash": "sha256:2277f685ef3baa7a5aff5afe8eb2841762d24bfb19e926aca6b80700dd65a3d3",
+      "content_hash": "sha256:6c2648de9ee92c572fd22d6ab76a6b307c6a0449f7f15d10bc68c43533a731ce",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-28T10:55:45Z",
+      "last_verified": "2026-09-28T12:10:23Z",
       "implementation": [],
       "code_oids": {}
     },

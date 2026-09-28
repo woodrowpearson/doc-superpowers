@@ -54,11 +54,19 @@ EXISTING_BODY="${EXISTING_BODY//$'\r'/}"
 # any indent): a fenced example of the markers is prose, left as it is, and
 # never the section. Inside the section only its END marker is looked for.
 # Refused (exit 1, the body untouched): a marker inside a line (outside a
-# fence), a second START or END, an END before the START, or a START
-# without an END. Passes NEW_SECTION via ENVIRON (avoids -v multiline issues
-# on BSD awk).
+# fence), a second START or END, an END before the START, a START without
+# an END, or no section and a body that ends inside an unclosed fence (an
+# appended section would be code, never found again). A section found
+# before an unclosed fence is replaced as usual. Passes NEW_SECTION via
+# ENVIRON (avoids -v multiline issues on BSD awk).
 # shellcheck disable=SC2016
 FENCED_AWK='
+# --- fence parser (the same text in scripts/doc-tools.sh _FRAG_AWK and
+# --- scripts/hooks/ci/doc-pr-release/update-pr-body.sh FENCED_AWK; keep them
+# --- identical: scripts/test-doc-pr-release.sh diffs them and feeds both the
+# --- same fence fixtures)
+# A code fence opens with 3+ backticks or tildes (any indent) and closes with
+# at least as many of the same character and nothing else.
 function fence_open(l,   t, c, k) {
   t = l; sub(/^[ \t]+/, "", t)
   c = substr(t, 1, 1)
@@ -75,6 +83,7 @@ function fence_close(l,   t, k) {
   if (k < fl) return 0
   return (substr(t, k + 1) ~ /^[ \t]*$/)
 }
+# --- end fence parser
 BEGIN { state = "out"; found = 0; err = 0 }
 {
   if (state == "fence") { out = out $0 "\n"; if (fence_close($0)) state = "out"; next }
@@ -97,6 +106,9 @@ BEGIN { state = "out"; found = 0; err = 0 }
 END {
   if (err) exit err
   if (state == "block") exit 5
+  # Appending after an unclosed fence would land inside the code block:
+  # never found again, one more section per run.
+  if (!found && state == "fence") exit 8
   if (!found) exit 7
   printf "%s", out
 }'
@@ -130,6 +142,7 @@ ${END_MARKER}"
   4) echo "ERROR: duplicate doc-superpowers markers in PR body" >&2; exit 1 ;;
   5) echo "ERROR: unmatched doc-superpowers markers (a start marker with no end marker after it)" >&2; exit 1 ;;
   6) echo "ERROR: the doc-superpowers end marker comes before the start marker — refusing to edit" >&2; exit 1 ;;
+  8) echo "ERROR: the PR body ends inside an unclosed code fence, so a doc-superpowers section appended after it would be part of the code block — refusing to edit (close the fence)" >&2; exit 1 ;;
   *) echo "ERROR: parsing the PR body failed (awk exit $rc)" >&2; exit 1 ;;
 esac
 
