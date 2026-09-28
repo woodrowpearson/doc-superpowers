@@ -29,7 +29,7 @@ esac
 # `git [-C <dir> | -c <key=value>]… commit` where the shell would run it, as
 # a POSIX ERE (bash =~): at the start, or after a newline, ; & | ( { ` $( or
 # then/do/else, past VAR=value assignments and a /path/to/ prefix. So
-# `echo git commit`, `rg "git commit -m" .` and `legit commit` are not
+# `echo git commit`, `grep "git commit -m" .` and `legit commit` are not
 # commits. Kept byte-identical in pre-commit-gate.sh and post-commit-sync.sh
 # (test-hooks.sh pins it); `;` stays last in the bracket (a bash-4 guard
 # pattern matches the two bytes semicolon-ampersand).

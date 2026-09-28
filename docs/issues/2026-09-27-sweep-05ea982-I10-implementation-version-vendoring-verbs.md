@@ -1,6 +1,6 @@
 ---
 date: 2026-09-27
-status: Open
+status: Resolved
 priority: P1
 type: bug
 component: doc-tools
@@ -97,5 +97,71 @@ The version verbs succeed on zero files. The vendoring verbs delete user files.
 ## Acceptance criteria
 
 See fix plan Task 11, Step 1. Additionally:
-- [ ] `grep -n 'gsed\|gnu_sed\|\brg\b' scripts/` returns nothing.
-- [ ] The README dependency table lists bash, git and jq only (plus POSIX tools).
+- [x] `grep -n 'gsed\|gnu_sed\|\brg\b' scripts/` returns nothing.
+- [x] The README dependency table lists bash, git and jq only (plus POSIX tools).
+
+## Resolution (Task 11)
+
+Resolved by Task 11 of the fix plan. GNU sed and ripgrep are no longer dependencies:
+`gnu_sed()`, the `rg` call and the `brew install gnu-sed` CI step are gone, and the README
+dependency table lists bash (≥ 3.2), git, jq and a SHA-256 tool, plus the POSIX userland.
+
+- **One block grammar** (`_AWK_IMPL_BLOCK` in `doc-tools.sh`, documented in
+  `references/doc-spec.md` "Header style and the realization block" and in `--help`), shared by
+  `set-implementation`, `implementation-status` and `update-index`:
+  - the header is `Implementation:` or `Realized-by:` at a line start, outside ```` ``` ```` /
+    `~~~` fences; the first one is the block, and `<key>: []` is explicitly empty;
+  - entries are `- ` bullets at any indent;
+  - an indented line after an entry wraps it (readers join with one space);
+  - a blank line, an unindented line or a fence line ends the block.
+  - `update-index` now records `Realized-by:` entries, 4-space and wrapped entries, and nothing
+    from a fenced example; the stored text is the entry without indent and `- `.
+- **`set-implementation`** is one awk pass over the doc (values via `ENVIRON`, matched with
+  `index()`, never regex or program text), written to a tmp beside the doc and moved into place,
+  keeping its mode. An unchanged result writes nothing.
+  - The entry whose text starts with `<ref> —` is replaced in place, with its wrapped lines, only
+    inside the block. Otherwise one is appended at the block's indent; `<key>: []` becomes a list.
+  - With no block, one is created after the paragraph holding the first `**Date**:`, `**Date:**`
+    (→ `Implementation:`), `**Created**:` or `**Created:**` (→ `Realized-by:`) line outside fences.
+    With none of those it exits 1 and writes nothing.
+  - `R&D`, `a|b`, `(squash)`, backslashes, `PR: #N` and `commit: <sha>` refs are written
+    literally. `--status` is matched whole against the enum (`.*` and `complete partial` are
+    refused).
+  - **Decision:** a line break (LF or CR) in `--ref` or `--note` is refused with exit 2 and
+    nothing written, rather than written as a second line: an entry is one bullet line, and a
+    raw newline would end the block (the old code let it inject sed `e`/`w` commands). The test
+    also proves no command runs and no file is written.
+  - A symlinked doc is refused (exit 1), not replaced by a regular file.
+- **`implementation-status --filter` is removed** (it never worked and needed `rg`; it had no
+  callers). It is now an unknown option (exit 2).
+- **Version verbs.** One `_release_notes_version` parser: the first line-anchored `## v…`
+  heading outside code fences must be exactly `vMAJOR.MINOR.PATCH` followed by the end of the line
+  or a space. A pre-release first heading is an error, not skipped. A missing file or no heading
+  is an error with a message; before, the run aborted silently with rc 2.
+  - `bump-version` reads and renders every manifest before replacing any. One that is not valid
+    JSON writes nothing (exit 1). Finding none is exit 1. Each file keeps its mode.
+  - `check-version` exits 1 on zero manifests, where it used to PASS on 0 files. A manifest that
+    is not valid JSON is reported INVALID, not a silent abort.
+  - The installer (`install.sh:22`) reads its version through the new `tools version`, the same
+    parser. A plugin without a readable `RELEASE-NOTES.md` installs with version `unknown`,
+    where the pipeline used to abort silently under `pipefail`.
+- **Vendoring verbs** (the plugin copy is recognised by `skills/doc-superpowers/SKILL.md` above
+  `scripts/` and by `scripts/hooks/ci/`):
+  - `tools install --with-helpers` ships every helper the CI templates run: `doc-pr-release/`
+    and `doc-superpowers-steps/`. Files go through a tmp beside the destination.
+  - `tools uninstall` deletes a file only when it is byte-identical to the plugin's copy.
+    A drifted `doc-tools.sh`, an edited helper, a copy from another plugin version and any file
+    the user added are kept, and so is their directory; all of them are reported.
+  - From a vendored copy: `tools install` onto itself is a no-op (`-ef`), not `cp: same file`.
+    `--with-helpers` and `tools uninstall` exit 1 without touching anything. `tools status`
+    reports presence only, never "matches plugin" or the consuming repo's version. The git-toplevel
+    version lookup is gone.
+  - `tools version` (new) prints the plugin's version and exits 1 from a vendored copy.
+- **Tests:** 12 new tests in `scripts/test-doc-tools.sh` (`test_i10_*`), plus
+  `test_install_ci_version_comes_from_doc_tools` in `scripts/test-hooks.sh`.
+
+**Not in this Task:** the `fragments` items in this issue (`fragments list` silent abort,
+O(F²) list rebuild, dead fragment-helper branches) belong to the fragment code that Task 10 (I-9)
+rewrites. The `state.sh` tracking of the step-script helpers stays with Task 8, which will delegate
+its vendoring to `tools install` / `tools uninstall`.
+

@@ -184,8 +184,9 @@ Install opt-in hooks for automated freshness monitoring:
 
 # Standalone tool install (v2.12.0+) — doc-tools.sh only, no workflows
 $DOC_TOOLS tools install                       # → .github/scripts/doc-tools.sh
-$DOC_TOOLS tools install --with-helpers        # +doc-pr-release helpers
-$DOC_TOOLS tools status
+$DOC_TOOLS tools install --with-helpers        # + every helper the CI templates run
+$DOC_TOOLS tools status                        # present? matches the plugin? which version?
+$DOC_TOOLS tools uninstall                     # removes only files identical to the plugin's
 
 # Check what's installed
 /doc-superpowers hooks status
@@ -360,9 +361,12 @@ The skill itself (`skills/doc-superpowers/SKILL.md` + `references/`) has zero de
 
 | Dependency | Required | Notes |
 |-----------|----------|-------|
+| `bash` | Yes, **≥ 3.2** | macOS's `/bin/bash` (3.2) is supported; nothing needs bash 4 |
 | `git` | Yes | Already required by doc-superpowers |
 | `jq` | Yes, **≥ 1.6** | `brew install jq` / `apt install jq`. 1.6 is the floor: the index writers use `--args` / `$ARGS.positional`. `doc-tools.sh` refuses an older jq with a clear error |
 | `sha256sum` or `shasum` | Yes | Standard on Linux/macOS respectively |
+
+Everything else is the POSIX userland (`awk`, `sed`, `grep`, `mktemp`, …) as stock macOS and Linux ship it: no GNU-only tool (GNU sed, ripgrep) is needed.
 
 ## Contributing
 

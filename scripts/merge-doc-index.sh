@@ -27,8 +27,8 @@
 #       decides, and the merge is a conflict (exit 1) naming the key and
 #       field. That is not a rare same-second case: only update-index writes
 #       last_verified, so two set-code-refs, deprecate-entry --superseded-by,
-#       move-entry repoints, set-implementation calls or hand edits of one
-#       field always tie. Two refinements:
+#       move-entry repoints or hand edits of one field always tie.
+#       (set-implementation edits a doc, never the index.) Two refinements:
 #       * the verification record (content_hash, code_oids, code_commit,
 #         last_verified) is ONE field: update-index writes it as a unit, and a
 #         doc hash from one side beside code ids from the other would attest a

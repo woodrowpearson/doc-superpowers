@@ -67,13 +67,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # doc-tools.sh requires GNU sed (gnu_sed() exits 2 when neither `gsed` nor
-      # a GNU `sed` is on PATH). macOS runners ship BSD sed and no gsed, and
-      # test-doc-tools.sh exercises `set-implementation`, which calls it.
-      - name: Install GNU sed (macOS)
-        if: runner.os == 'macOS'
-        run: brew install gnu-sed
-
       # Fail loudly here rather than midway through a suite if an image change
       # ever drops one of these. `jq` is the hard dependency; doc-tools.sh
       # already falls back from sha256sum to shasum on its own.
@@ -83,10 +76,6 @@ jobs:
           for tool in jq git; do
             command -v "$tool" >/dev/null 2>&1 || { echo "::error::$tool not found"; exit 1; }
           done
-          if ! command -v gsed >/dev/null 2>&1 && ! sed --version 2>/dev/null | grep -q 'GNU sed'; then
-            echo "::error::GNU sed not found (doc-tools.sh gnu_sed() would exit 2)"
-            exit 1
-          fi
           # test-doc-pr-release.sh parses the nine CI templates to prove the
           # placeholder substitution leaves valid YAML, and reads template
           # structure (concurrency, job guards, run: wiring) through the same
@@ -103,7 +92,6 @@ jobs:
             exit 1
           fi
           echo "jq:   $(jq --version)"
-          echo "sed:  $(command -v gsed || command -v sed)"
           echo "yaml: $yaml_parser"
           "$BASH_BIN" --version | head -1
 
