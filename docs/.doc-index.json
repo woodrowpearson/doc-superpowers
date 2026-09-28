@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-28T19:38:47Z",
+  "generated_at": "2026-09-28T21:12:48Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -620,13 +620,15 @@
       "code_oids": {}
     },
     "docs/issues/2026-09-27-sweep-05ea982-I12-cross-client-packaging.md": {
-      "content_hash": "sha256:029139978a9db445361c864657e9273a598efccd690baadbcce6ed737c3b1b1f",
+      "content_hash": "sha256:c990855c0288f891622c9ce7d0fe3b8eb4c7fcdeb228cc303e0f9bded0a46749",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T06:12:33Z"
+      "last_verified": "2026-09-28T21:12:48Z",
+      "code_oids": {},
+      "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I13-test-suite-fidelity.md": {
       "content_hash": "sha256:7ba8ecab2f72c13036a70c302f90ef7a218eb3b00b9862de917de4df21caef1e",

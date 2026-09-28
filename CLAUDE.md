@@ -34,7 +34,6 @@ doc-superpowers/
 │       └── SKILL.md      # Main skill definition — action routing, discovery, verification
 ├── AGENTS.md             # Cross-client agent instructions
 ├── GEMINI.md             # Gemini CLI context redirect
-├── claude-code.json      # Claude Code skill manifest (bump-version target)
 ├── gemini-extension.json # Gemini CLI extension manifest
 ├── package.json          # npm/OpenCode package metadata
 ├── scripts/
@@ -76,7 +75,7 @@ doc-superpowers/
 │   ├── spec-lifecycle-actions.md  # Detailed procedures for spec-generate/inject/verify
 │   ├── spec-lifecycle-protocol.md  # Wrapper author integration guide
 │   ├── integration-patterns.md    # How other skills integrate with doc-superpowers
-│   └── tool-mappings.md           # Cross-framework tool name mappings + tool resolution ($ROOT)
+│   └── tool-mappings.md           # The one capability matrix: per-client tool names + capabilities, tool resolution ($ROOT)
 ├── docs/                 # Documentation about this skill itself
 │   ├── architecture/
 │   │   ├── system-overview.md  # C4 diagrams, tech stack, key decisions
@@ -133,7 +132,7 @@ doc-superpowers/
 | `references/integration-patterns.md` | How other skills integrate with doc-superpowers (code review, commit review, wrapper skills) | Adding integration patterns |
 | `docs/codebase-guide.md` | Directory map, key files, code flow for this skill | Structural changes to the skill |
 | `docs/conventions.md` | Naming, versioning, skill structure conventions | Convention changes |
-| `references/tool-mappings.md` | Cross-framework tool name translations | Adding framework support, tool name changes |
+| `references/tool-mappings.md` | The one capability matrix — per-client tool names and capabilities (INSTALL files, AGENTS.md and GEMINI.md link here), tool resolution | Adding framework support, tool name or capability changes |
 | `AGENTS.md` | Cross-client agent instructions | Adding commands, changing project orientation |
 | `.opencode/plugins/doc-superpowers.js` | OpenCode ESM plugin | Changing skill registration or tool mapping injection |
 | `RELEASE-NOTES.md` | Version history | Every release |
@@ -159,7 +158,7 @@ Each `--specs` path may carry an optional role suffix — `<path>:target` or `<p
 
 ## Conventions
 
-- **Versioning**: Semantic versioning (MAJOR.MINOR.PATCH). RELEASE-NOTES.md is the canonical source — `check-version` reads it, `bump-version` never writes it. Run `scripts/doc-tools.sh bump-version X.Y.Z` to update the 6 manifest files, then `check-version` to verify. This step is **mandatory** — never manually edit version strings in individual files
+- **Versioning**: Semantic versioning (MAJOR.MINOR.PATCH). RELEASE-NOTES.md is the canonical source — `check-version` reads it, `bump-version` never writes it. Run `scripts/doc-tools.sh bump-version X.Y.Z` to update the 5 manifest files, then `check-version` to verify. This step is **mandatory** — never manually edit version strings in individual files
 - **Skill structure**: Follows obra/superpowers SKILL.md conventions (YAML frontmatter with `name` + `description`)
 - **Templates**: All doc templates live in `references/doc-spec.md`, not inline in SKILL.md
 - **Diagrams**: Mermaid source in docs, PNGs committed for GitHub rendering

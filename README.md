@@ -23,31 +23,29 @@ doc-superpowers is a Claude Code skill that treats documentation as a first-clas
 
 ## Installation
 
-### Claude Code (Skill)
+### Claude Code
 
-Copy or symlink into your Claude Code skills directory:
+Add this repository as a plugin marketplace, then install the plugin from it (both are named `doc-superpowers` in `.claude-plugin/marketplace.json`):
+
+```
+/plugin marketplace add woodrowpearson/doc-superpowers
+/plugin install doc-superpowers@doc-superpowers
+```
+
+**From a checkout** (to follow `main` or edit the skill) — symlink the whole repository into your skills directory; Claude Code loads it as the plugin `doc-superpowers@skills-dir`:
 
 ```bash
-# Clone
 git clone git@github.com:woodrowpearson/doc-superpowers.git ~/code/doc-superpowers
-
-# Symlink into Claude Code skills
 ln -s ~/code/doc-superpowers ~/.claude/skills/doc-superpowers
 ```
 
 ### Manual
 
-Copy `skills/doc-superpowers/SKILL.md` and `references/` into `.claude/skills/doc-superpowers/` in any project.
+Copy the whole repository into `.claude/skills/doc-superpowers/` in any project. Copy all of it, not only `skills/doc-superpowers/SKILL.md` and `references/`: the skill runs `scripts/doc-tools.sh` and reads `references/` from two directories above its `SKILL.md`.
 
 ### Cursor
 
-Use Cursor's plugin system:
-
-```
-/add-plugin doc-superpowers
-```
-
-Or clone and point `.cursor-plugin/plugin.json` at the repo.
+Not in the Cursor marketplace yet: install it as a local plugin in `~/.cursor/plugins/local/doc-superpowers`. See `.cursor-plugin/INSTALL.md`.
 
 ### Codex
 
@@ -84,6 +82,8 @@ npx skills add woodrowpearson/doc-superpowers
 ```
 
 Works with 40+ supported agents. See [skills.sh](https://skills.sh) for details.
+
+In a client other than Claude Code, [`references/tool-mappings.md`](references/tool-mappings.md) maps the skill's tool names to the client's and says which hook tiers and features it supports.
 
 ## Usage
 
@@ -306,7 +306,6 @@ doc-superpowers/
 │       └── SKILL.md      # Main skill definition
 ├── AGENTS.md             # Cross-client agent instructions
 ├── GEMINI.md             # Gemini CLI context redirect
-├── claude-code.json      # Claude Code skill manifest
 ├── gemini-extension.json # Gemini CLI extension manifest
 ├── package.json          # npm/OpenCode package metadata
 ├── scripts/

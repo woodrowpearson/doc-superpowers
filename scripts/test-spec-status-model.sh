@@ -860,4 +860,254 @@ for _e in $_required; do
   assert_eq "" "$_vac" "eval $_e: file assertions are not vacuous against the fixture"
 done
 
+
+# =============================================================================
+# I-12 (sweep 05ea982, Task 13) — cross-client packaging.
+#
+# The non-Claude clients were packaged on two assumptions: that every client
+# shares one naming scheme, and that capability tables copied into six files
+# stay in sync. These guards pin the packaging contracts instead: the OpenCode
+# plugin is EXECUTED under node against its documented hook shape
+# (`experimental.chat.system.transform` gets `output.system: string[]` and must
+# mutate it in place); the manifests are read with jq; and the client-specific
+# tool names live in exactly one file, references/tool-mappings.md, which the
+# INSTALL files, AGENTS.md and GEMINI.md link to.
+# =============================================================================
+echo "--- I-12: cross-client packaging ---"
+
+# Live files that describe the clients or instruct an agent. Records (plans,
+# issues, archive, design specs, RELEASE-NOTES.md) are history: not scanned.
+_I12_LIVE="AGENTS.md GEMINI.md README.md CLAUDE.md .cursor-plugin/INSTALL.md .codex/INSTALL.md .opencode/INSTALL.md skills/doc-superpowers/SKILL.md docs/guides/getting-started.md docs/codebase-guide.md docs/conventions.md docs/architecture/system-overview.md docs/workflows/doc-superpowers.md"
+for _f in "$REPO_ROOT"/references/*.md; do
+  [ "$(basename "$_f")" = tool-mappings.md ] || _I12_LIVE="$_I12_LIVE references/$(basename "$_f")"
+done
+# _i12_grep <ERE>: every live-file line matching <ERE>, as file:line:text.
+_i12_grep() {
+  local _g
+  for _g in $_I12_LIVE; do
+    grep -nHE -- "$1" "$REPO_ROOT/$_g" 2>/dev/null | sed "s|^$REPO_ROOT/||" || true
+  done
+}
+
+# --- OpenCode: the system-prompt hook (node simulation) ---
+# node is a test-time tool only (the plugin it runs is the shipped JS). No node
+# → a loud, counted SKIP locally; CI sets DOC_SP_REQUIRE_NODE=1 (tests.yml),
+# which turns the SKIP into a FAIL so it can never pass silently there.
+node_unavailable() {
+  command -v node >/dev/null 2>&1 && return 1
+  if [ "${DOC_SP_REQUIRE_NODE:-0}" = "1" ]; then
+    TESTS_RUN=$((TESTS_RUN + 1))
+    FAIL=$((FAIL + 1))
+    # shellcheck disable=SC2059
+    printf "${RED}  FAIL${NC}: %s — node not found and DOC_SP_REQUIRE_NODE=1\n" "$1"
+  else
+    record_skip "$1 — node not found (install Node.js to run it)"
+  fi
+  return 0
+}
+
+if ! node_unavailable "OpenCode plugin simulation"; then
+  # A copy of the plugin's package layout: the plugin resolves its root two
+  # levels up and reads references/tool-mappings.md from there; package.json's
+  # "type": "module" is what makes the .js an ES module.
+  _oc=$(harness_mktemp_d opencode)
+  mkdir -p "$_oc/.opencode/plugins" "$_oc/references"
+  cp "$REPO_ROOT/.opencode/plugins/doc-superpowers.js" "$_oc/.opencode/plugins/"
+  cp "$REPO_ROOT/package.json" "$_oc/"
+  _oc_real=$(cd "$_oc" && pwd -P)
+  cat > "$_oc/sim.mjs" <<'JS'
+// Drives the plugin the way OpenCode does (anomalyco/opencode
+// packages/plugin/src/index.ts, Hooks): the exported factory runs once when the
+// plugin loads; "experimental.chat.system.transform" then runs on every LLM
+// request with output = { system: string[] } and must mutate it in place.
+import { pathToFileURL } from "node:url";
+import { readFileSync, rmSync } from "node:fs";
+const [plugin, mappings, mode] = process.argv.slice(2);
+const expected = readFileSync(mappings, "utf-8");
+const mod = await import(pathToFileURL(plugin).href);
+const factory = Object.values(mod).find((v) => typeof v === "function");
+const hooks = await factory({ directory: process.cwd(), worktree: process.cwd() });
+// read-once: after load the hook must not need the file any more.
+if (mode === "read-once") rmSync(mappings);
+const r = { error: null };
+const config = {};
+await hooks.config(config);
+r.skillsPaths = config.skills && config.skills.paths;
+const output = { system: ["You are OpenCode."] };
+const original = output.system;
+const transform = hooks["experimental.chat.system.transform"];
+try {
+  await transform({ sessionID: "s1", model: {} }, output);
+  r.isArray = Array.isArray(output.system);
+  r.sameArray = output.system === original;
+  // Another plugin that pushes, running after this one.
+  try { output.system.push("later plugin"); r.laterPush = true; } catch { r.laterPush = false; }
+  // The same request's array handed in again gains no second copy.
+  await transform({ sessionID: "s1", model: {} }, output);
+  r.system = Array.isArray(output.system)
+    ? output.system.map((s) => (s === expected ? "<mappings>" : s))
+    : typeof output.system;
+} catch (e) {
+  r.error = String((e && e.message) || e);
+}
+console.log(JSON.stringify(r));
+JS
+  for _mode in load read-once; do
+    cp "$REPO_ROOT/references/tool-mappings.md" "$_oc/references/"
+    _rc=0
+    _js=$(cd "$_oc" && node sim.mjs "$_oc/.opencode/plugins/doc-superpowers.js" "$_oc/references/tool-mappings.md" "$_mode" 2>&1) || _rc=$?
+    _msg="opencode ($_mode): the plugin loads and its hooks run under node"
+    [ "$_rc" -eq 0 ] || _msg="$_msg — $(tail -n 3 <<<"$_js" | tr '\n' ' ')"
+    assert_eq "0" "$_rc" "$_msg"
+    _js=$(tail -n 1 <<<"$_js")
+    assert_json_field "$_js" '.error' "null" "opencode ($_mode): system.transform does not throw"
+    assert_json_field "$_js" '.isArray' "true" "opencode ($_mode): output.system stays a string[] (the documented shape)"
+    assert_json_field "$_js" '.sameArray' "true" "opencode ($_mode): …the same array, mutated in place (never replaced)"
+    assert_json_field "$_js" '.laterPush' "true" "opencode ($_mode): …so a push-style plugin running after it still works"
+    assert_json_field "$_js" '.system | tojson' '["You are OpenCode.","<mappings>","later plugin"]' \
+      "opencode ($_mode): the array keeps its entries and gains the mappings once"
+  done
+  assert_json_field "$_js" '.skillsPaths | tojson' "[\"$_oc_real\"]" "opencode: the config hook registers the plugin root as a skills path"
+fi
+
+# --- Cursor: manifest and install path ---
+_json_ok() { jq -e . "$1" >/dev/null 2>&1; }
+_cp="$REPO_ROOT/.cursor-plugin/plugin.json"
+assert_true ".cursor-plugin/plugin.json is valid JSON" _json_ok "$_cp"
+# Cursor reads `skills` as path(s) to skill directories (cursor.com/docs/reference/plugins);
+# omitted, it scans the plugin's skills/ directory.
+_skills=$(jq -r 'if has("skills") then ([.skills] | flatten | map(sub("^\\./"; "") | sub("/+$"; "")) | join(",")) else "skills" end' "$_cp" 2>&1) || true
+assert_eq "skills" "$_skills" ".cursor-plugin/plugin.json: skills points at ./skills/ (or is omitted: Cursor's default)"
+assert_file_exists "$REPO_ROOT/$_skills/doc-superpowers/SKILL.md" "…where the skill is"
+_cursor="$(_read "$REPO_ROOT/.cursor-plugin/INSTALL.md")"
+assert_contains "$_cursor" "~/.cursor/plugins/local/doc-superpowers" \
+  "Cursor INSTALL: the manual install goes to Cursor's local-plugin folder"
+assert_eq "" "$(_i12_grep '\.cursor/plugins/doc-superpowers')" \
+  "…and no live doc installs into ~/.cursor/plugins/<name> (Cursor loads only plugins/local/)"
+assert_no_line_matches "$_cursor" 'ln -s' "…as a real directory: Cursor skips a symlink whose target is outside plugins/local"
+
+# --- Gemini CLI: the skill is loaded on demand, not imported ---
+_gem="$(_read "$REPO_ROOT/GEMINI.md")"
+assert_no_line_matches "$_gem" '^@.*SKILL\.md' \
+  "GEMINI.md does not @-import SKILL.md (the extension's skills/ exposes it on demand)"
+assert_line_matches "$_gem" '^@\./references/tool-mappings\.md[[:space:]]*$' \
+  "GEMINI.md @-imports the tool mapping (how the mapping reaches Gemini)"
+_bad=""
+while IFS= read -r _imp; do
+  [ -n "$_imp" ] || continue
+  _p="${_imp#@}"
+  [ -f "$REPO_ROOT/${_p#./}" ] || _bad="$_bad $_imp"
+done < <(grep -E '^@' <<<"$_gem" || true)
+assert_eq "" "$_bad" "GEMINI.md: every @ import resolves to a file"
+assert_contains "$_gem" "skills/doc-superpowers/" "GEMINI.md points Gemini at the skill's directory"
+_gx="$REPO_ROOT/gemini-extension.json"
+assert_eq "GEMINI.md" "$(jq -r '.contextFileName // ""' "$_gx" 2>&1)" "gemini-extension.json loads GEMINI.md as its context file"
+
+# --- One capability matrix ---
+# Client-specific tool names appear in references/tool-mappings.md and nowhere
+# else live (copied tables drifted in five files).
+_names='run_shell_command|write_todos|activate_skill|google_web_search|web_fetch|grep_search|ask_user|invoke_agent|spawn_agent|wait_agent|update_plan|exec_command|apply_patch|request_user_input|todowrite|websearch|webfetch'
+assert_eq "" "$(_i12_grep "(^|[^A-Za-z0-9_])($_names)([^A-Za-z0-9_]|\$)")" \
+  "client tool names appear only in references/tool-mappings.md"
+assert_eq "" "$(_i12_grep '^\|[[:space:]]*(Hook Tier|Capability|Feature)[[:space:]]*\|')" \
+  "no capability / hook-tier / feature-parity table outside references/tool-mappings.md"
+assert_eq "" "$(_i12_grep '[Ff]ull (feature )?parity|Anthropic-ecosystem|[Ss]ame (tool )?(names )?as Claude Code')" \
+  "no parity claims: each client's support is stated once, in the matrix"
+for _f in .cursor-plugin/INSTALL.md .codex/INSTALL.md .opencode/INSTALL.md AGENTS.md; do
+  assert_contains "$(_read "$REPO_ROOT/$_f")" "references/tool-mappings.md" "$_f links to the capability matrix"
+done
+
+# _cell <table text> <row key> <column header>: the trimmed cell of the first
+# pipe table in <table text> whose first cell is <row key>.
+_cell() {
+  awk -F'|' -v key="$2" -v col="$3" '
+    function trim(s) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
+    !hdr && /^\|/ { for (i = 2; i < NF; i++) if (trim($i) == col) c = i; hdr = 1; next }
+    hdr && !/^\|/ { exit }
+    hdr && c && trim($2) == key { print trim($c); exit }' <<<"$1"
+}
+_tools=$(_section "$MAPPINGS" "## Tool names")
+assert_line_matches "$_tools" '^\| *Claude Code *\| *Cursor *\| *Codex *\| *OpenCode *\| *Gemini CLI *\|' \
+  "tool-mappings: one Tool names table, a column per client"
+# row|column|token the cell must hold (documented names; sources in the file).
+while IFS='|' read -r _row _col _tok; do
+  [ -n "$_row" ] || continue
+  assert_contains "$(_cell "$_tools" "\`$_row\`" "$_col")" "\`$_tok\`" "tool-mappings: $_row in $_col is \`$_tok\`"
+done <<'ROWS'
+Read|OpenCode|read
+Read|Gemini CLI|read_file
+Write|OpenCode|write
+Edit|OpenCode|edit
+Edit|Codex|apply_patch
+Edit|Gemini CLI|replace
+Bash|OpenCode|bash
+Bash|Codex|exec_command
+Bash|Gemini CLI|run_shell_command
+Grep|OpenCode|grep
+Grep|Gemini CLI|grep_search
+Glob|OpenCode|glob
+Agent|OpenCode|task
+Agent|Codex|spawn_agent
+Agent|Gemini CLI|invoke_agent
+Skill|OpenCode|skill
+Skill|Gemini CLI|activate_skill
+AskUserQuestion|OpenCode|question
+AskUserQuestion|Codex|request_user_input
+AskUserQuestion|Gemini CLI|ask_user
+TodoWrite|OpenCode|todowrite
+TodoWrite|Codex|update_plan
+TodoWrite|Gemini CLI|write_todos
+WebSearch|OpenCode|websearch
+WebSearch|Gemini CLI|google_web_search
+WebFetch|OpenCode|webfetch
+WebFetch|Gemini CLI|web_fetch
+ROWS
+assert_no_line_matches "$_tools" '[Ss]ame (names )?as Claude Code|@mention' \
+  "tool-mappings: no Cursor 'same names' claim, no OpenCode @mention dispatch"
+_caps=$(_section "$MAPPINGS" "## Capabilities")
+_ch=$(_cell "$_caps" 'Claude hook tier (`--claude`)' "Cursor")
+assert_contains "$_ch" "settings.local.json" "capabilities: the Cursor Claude-hook cell names the file the tier writes"
+assert_contains "$_ch" "unverified" "…and says Cursor loading it is unverified (its docs name only .claude/settings.json)"
+assert_contains "$MAPPINGS" "## Tool resolution" "tool-mappings keeps the Tool resolution section (T12)"
+
+# --- Codex: multi_agent is a [features] key ---
+# A top-level `multi_agent` is ignored; the key is features.multi_agent
+# (Codex config reference: stable, on by default).
+_codex="$(_read "$REPO_ROOT/.codex/INSTALL.md")"
+_ma=$(awk '/^```toml/ { t = 1; sect = "top-level"; next }
+           t && /^```/ { t = 0; next }
+           t && /^\[/ { sect = $0; sub(/[[:space:]]*(#.*)?$/, "", sect); next }
+           t && /^[[:space:]]*multi_agent[[:space:]]*=/ { print sect }' <<<"$_codex")
+assert_eq "[features]" "$_ma" "Codex INSTALL: multi_agent sits under [features] (a top-level key is ignored)"
+
+# --- Install pins and the Claude Code marketplace ---
+_pins=""
+for _f in .opencode/INSTALL.md .codex/INSTALL.md .cursor-plugin/INSTALL.md README.md GEMINI.md AGENTS.md; do
+  _pins="$_pins$(grep -nHE '#v[0-9]+\.[0-9]+\.[0-9]+' "$REPO_ROOT/$_f" 2>/dev/null || true)"
+done
+assert_eq "" "$_pins" "install examples pin with a #vX.Y.Z placeholder, never a concrete version that goes stale"
+assert_contains "$(_read "$REPO_ROOT/.opencode/INSTALL.md")" "#vX.Y.Z" "…the OpenCode pin example uses the placeholder"
+_readme="$(_read "$REPO_ROOT/README.md")"
+_mkt=$(jq -r '.name // ""' "$REPO_ROOT/.claude-plugin/marketplace.json" 2>&1) || true
+_plg=$(jq -r '[.plugins[] | select(.source == "./") | .name][0] // ""' "$REPO_ROOT/.claude-plugin/marketplace.json" 2>&1) || true
+assert_eq "doc-superpowers@doc-superpowers" "$_plg@$_mkt" "marketplace.json: plugin doc-superpowers in marketplace doc-superpowers (source ./)"
+assert_eq "$_plg" "$(jq -r '.name // ""' "$REPO_ROOT/.claude-plugin/plugin.json" 2>&1)" "…the plugin the repo root's .claude-plugin/plugin.json declares"
+assert_contains "$_readme" "/plugin marketplace add woodrowpearson/doc-superpowers" "README: Claude Code adds the marketplace by owner/repo"
+assert_contains "$_readme" "/plugin install $_plg@$_mkt" "README: …and installs <plugin>@<marketplace>"
+
+# --- claude-code.json: no consumer (R9), so no file ---
+assert_file_not_exists "$REPO_ROOT/claude-code.json" "claude-code.json is gone (no client reads it; the R9 search is in the Task 13 report)"
+_ccj=""
+for _f in $_I12_LIVE scripts/doc-tools.sh scripts/hooks/ci/doc-release.yml .github/workflows/tests.yml package.json; do
+  _ccj="$_ccj$(grep -nH 'claude-code\.json' "$REPO_ROOT/$_f" 2>/dev/null || true)"
+done
+assert_eq "" "$_ccj" "no live file names claude-code.json"
+_six=$(_i12_grep '(6|six) manifest')
+assert_eq "" "$_six" "no live doc counts six manifests"
+# The shipped manifests all parse, and each path they name exists.
+for _f in package.json gemini-extension.json .claude-plugin/plugin.json .claude-plugin/marketplace.json .cursor-plugin/plugin.json; do
+  assert_true "$_f is valid JSON" _json_ok "$REPO_ROOT/$_f"
+done
+assert_file_exists "$REPO_ROOT/$(jq -r '.main // "-"' "$REPO_ROOT/package.json")" "package.json main (the OpenCode plugin) exists"
+
 print_summary

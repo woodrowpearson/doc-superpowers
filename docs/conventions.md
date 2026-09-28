@@ -47,14 +47,14 @@ Follows [obra/superpowers](https://github.com/obra/superpowers) skill convention
 
 Version consistency is managed via `doc-tools.sh`:
 
-- **`bump-version VERSION`** — updates the version string in all 6 manifest files simultaneously
+- **`bump-version VERSION`** — updates the version string in all 5 manifest files simultaneously
 - **`check-version`** — verifies all manifest files contain the same version
 
-Manifest files managed: `package.json`, `claude-code.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.cursor-plugin/plugin.json`, `gemini-extension.json`.
+Manifest files managed: `package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.cursor-plugin/plugin.json`, `gemini-extension.json`.
 
 `RELEASE-NOTES.md` is not one of them. It is the canonical version source that `check-version` reads and compares the manifests against, and its `## vX.Y.Z` heading is written by the `release` action — never by `bump-version`.
 
-**After bumping**, also check for stale version references in INSTALL.md files (`.codex/INSTALL.md`, `.opencode/INSTALL.md`) — these contain version-pinned install examples that `bump-version` does not update automatically.
+**INSTALL pins** use a `#vX.Y.Z` placeholder (`.opencode/INSTALL.md`), never a concrete version, so a bump leaves nothing in them to update; `scripts/test-spec-status-model.sh` fails on a concrete `#vN.N.N` pin in an INSTALL file, README.md, AGENTS.md or GEMINI.md.
 
 ## Git Conventions
 

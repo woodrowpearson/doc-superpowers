@@ -1982,14 +1982,13 @@ status|cmd_status|repo|tree=
   its path.
 bump-version|cmd_bump_version|deps|
   <MAJOR.MINOR.PATCH>
-  Write the version into the 6 manifest files: package.json,
-  claude-code.json, .claude-plugin/plugin.json,
-  .claude-plugin/marketplace.json, .cursor-plugin/plugin.json,
-  gemini-extension.json. RELEASE-NOTES.md is the canonical version:
-  check-version reads it, and it is never written. All or nothing: every
-  manifest found is read first, and one that is not valid JSON writes
-  nothing (exit 1); so does finding none (run it from the repo root). Each
-  file keeps its mode.
+  Write the version into the 5 manifest files: package.json,
+  .claude-plugin/plugin.json, .claude-plugin/marketplace.json,
+  .cursor-plugin/plugin.json, gemini-extension.json. RELEASE-NOTES.md is
+  the canonical version: check-version reads it, and it is never written.
+  All or nothing: every manifest found is read first, and one that is not
+  valid JSON writes nothing (exit 1); so does finding none (run it from the
+  repo root). Each file keeps its mode.
 check-version|cmd_check_version|deps|
   -
   Verify that every manifest carries RELEASE-NOTES.md's version: its first
@@ -3696,7 +3695,6 @@ _release_notes_version() {
 # All files that carry a version string, with their jq path
 VERSION_FILES=(
   "package.json:.version"
-  "claude-code.json:.version"
   ".claude-plugin/plugin.json:.version"
   ".claude-plugin/marketplace.json:.metadata.version"
   ".cursor-plugin/plugin.json:.version"

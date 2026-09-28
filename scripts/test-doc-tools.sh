@@ -975,10 +975,10 @@ test_update_index_multiple_paths() {
 
 # --- Version management tests ---
 
-# Helper: create minimal version manifest files in test dir
+# Helper: create minimal version manifest files in test dir — the five
+# VERSION_FILES entries (claude-code.json is not one: no client reads it, I-12).
 setup_version_files() {
   echo '{"name":"test","version":"1.0.0"}' > package.json
-  echo '{"name":"test","version":"1.0.0"}' > claude-code.json
   mkdir -p .claude-plugin .cursor-plugin
   echo '{"name":"test","version":"1.0.0"}' > .claude-plugin/plugin.json
   echo '{"name":"test","metadata":{"version":"1.0.0"},"plugins":[]}' > .claude-plugin/marketplace.json
@@ -988,7 +988,7 @@ setup_version_files() {
 }
 
 test_bump_version_updates_all_files() {
-  echo "test: bump-version updates all 6 manifest files"
+  echo "test: bump-version updates all 5 manifest files"
   setup
   setup_version_files
   set +e
@@ -996,9 +996,8 @@ test_bump_version_updates_all_files() {
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
-  assert_contains "$output" "Updated 6 file(s)" "reports 6 files updated"
+  assert_contains "$output" "Updated 5 file(s)" "reports 5 files updated"
   assert_eq "2.0.0" "$(jq -r .version package.json)" "package.json bumped"
-  assert_eq "2.0.0" "$(jq -r .version claude-code.json)" "claude-code.json bumped"
   assert_eq "2.0.0" "$(jq -r .version .claude-plugin/plugin.json)" "plugin.json bumped"
   assert_eq "2.0.0" "$(jq -r .metadata.version .claude-plugin/marketplace.json)" "marketplace.json bumped"
   assert_eq "2.0.0" "$(jq -r .version .cursor-plugin/plugin.json)" "cursor plugin.json bumped"
@@ -5697,7 +5696,7 @@ test_i10_bump_version_is_all_or_nothing_and_keeps_modes() {
   setup
   setup_version_files
   chmod 644 package.json
-  chmod 664 claude-code.json
+  chmod 664 .cursor-plugin/plugin.json
   chmod 600 .claude-plugin/plugin.json
   chmod 755 gemini-extension.json
   local rc out
@@ -5705,7 +5704,7 @@ test_i10_bump_version_is_all_or_nothing_and_keeps_modes() {
   out=$("$DOC_TOOLS" bump-version 2.0.0 2>&1) || rc=$?
   assert_eq "0" "$rc" "bump exits 0"
   assert_eq "644" "$(_file_mode_of package.json)" "package.json keeps 644"
-  assert_eq "664" "$(_file_mode_of claude-code.json)" "claude-code.json keeps 664"
+  assert_eq "664" "$(_file_mode_of .cursor-plugin/plugin.json)" "cursor plugin.json keeps 664"
   assert_eq "600" "$(_file_mode_of .claude-plugin/plugin.json)" "plugin.json keeps 600"
   assert_eq "755" "$(_file_mode_of gemini-extension.json)" "gemini-extension.json keeps 755"
   assert_eq "" "$(find . -name '*.XXXXXX' -o -name '.*.json.*' 2>/dev/null)" "no temp file is left behind"
@@ -5713,7 +5712,7 @@ test_i10_bump_version_is_all_or_nothing_and_keeps_modes() {
   # One malformed manifest (sorted last): nothing is written, and it is named.
   echo '{"name":"test","version":' > gemini-extension.json
   local before
-  before=$(cat package.json claude-code.json .claude-plugin/plugin.json .claude-plugin/marketplace.json .cursor-plugin/plugin.json | hash_stdin)
+  before=$(cat package.json .claude-plugin/plugin.json .claude-plugin/marketplace.json .cursor-plugin/plugin.json | hash_stdin)
   rc=0
   out=$("$DOC_TOOLS" bump-version 3.0.0 2>&1) || rc=$?
   assert_eq "1" "$rc" "a malformed manifest: exit 1"
@@ -5721,13 +5720,48 @@ test_i10_bump_version_is_all_or_nothing_and_keeps_modes() {
   assert_contains "$out" "nothing was written" "…and saying nothing was written"
   assert_eq "" "$(find . -name '*.XXXXXX' -o -name '.*.json.*' 2>/dev/null)" \
     "…and no temp file is left behind on the failure path (every rendered manifest is removed)"
-  assert_eq "$before" "$(cat package.json claude-code.json .claude-plugin/plugin.json .claude-plugin/marketplace.json .cursor-plugin/plugin.json | hash_stdin)" \
+  assert_eq "$before" "$(cat package.json .claude-plugin/plugin.json .claude-plugin/marketplace.json .cursor-plugin/plugin.json | hash_stdin)" \
     "…and every valid manifest is untouched (no partial bump)"
   rc=0
   out=$("$DOC_TOOLS" check-version 2>&1) || rc=$?
   assert_eq "1" "$rc" "check-version on a malformed manifest: exit 1"
   assert_contains "$out" "gemini-extension.json" "…naming it, never a silent abort"
   teardown
+}
+
+# I-12: claude-code.json is not a manifest. No client reads it (Claude Code
+# reads .claude-plugin/plugin.json), so bump-version must not write it and
+# check-version must not judge it — a project that keeps one bumps it itself.
+test_i12_claude_code_json_is_not_a_version_file() {
+  echo "test: I-12: bump-version / check-version leave claude-code.json alone"
+  setup
+  setup_version_files
+  echo '{"name":"test","version":"1.0.0"}' > claude-code.json
+  local rc out
+  rc=0
+  out=$("$DOC_TOOLS" bump-version 2.0.0 2>&1) || rc=$?
+  assert_eq "0" "$rc" "bump exits 0"
+  assert_contains "$out" "Updated 5 file(s)" "…writing the five manifests"
+  assert_eq "1.0.0" "$(jq -r .version claude-code.json)" "…and not claude-code.json"
+  printf '%s\n' '# Release Notes' '' '## v2.0.0 (2026-01-01)' > RELEASE-NOTES.md
+  echo '{"name":"test","version":"9.9.9"}' > claude-code.json
+  rc=0
+  out=$("$DOC_TOOLS" check-version 2>&1) || rc=$?
+  assert_eq "0" "$rc" "check-version passes although claude-code.json names another version"
+  assert_not_contains "$out" "claude-code.json" "…and does not mention it"
+  teardown
+}
+
+# The doc-release commit step may commit exactly the manifests bump-version
+# writes: its --allow list duplicates VERSION_FILES, so pin them in lockstep.
+test_i12_doc_release_allows_exactly_the_version_files() {
+  echo "test: I-12: doc-release's commit step allows exactly VERSION_FILES (+ the release files)"
+  local yml="$SCRIPT_DIR/hooks/ci/doc-release.yml" want got
+  want=$(sed -n '/^VERSION_FILES=(/,/^)/p' "$SCRIPT_DIR/doc-tools.sh" | sed -n 's/^ *"\([^:]*\):.*/\1/p' | sort)
+  got=$(grep -F 'commit-changes.sh' "$yml" | grep -oE -- '--allow [^ ]+' | sed 's/^--allow //' |
+    grep -vxE 'RELEASE-NOTES\.md|RELEASE-NOTES\.next/|CLAUDE\.md|README\.md' | sort) || true
+  assert_true "VERSION_FILES is not empty" test -n "$want"
+  assert_eq "$want" "$got" "doc-release --allow manifests == VERSION_FILES"
 }
 
 # Octal permission bits of a file (GNU or BSD stat).
@@ -6138,6 +6172,8 @@ run_tests() {
   test_i10_check_version_reads_the_first_release_heading
   test_i10_version_verbs_need_a_manifest
   test_i10_bump_version_is_all_or_nothing_and_keeps_modes
+  test_i12_claude_code_json_is_not_a_version_file
+  test_i12_doc_release_allows_exactly_the_version_files
   test_i10_tools_with_helpers_ships_every_helper_the_templates_run
   test_i10_tools_uninstall_keeps_what_it_did_not_install
   test_i10_tools_reinstall_restores_the_exec_bit
