@@ -183,9 +183,15 @@ asserted as YAML and by running the vendored step scripts the way a step runs th
 Review fix round 1: the commit step stages deletions too (`git update-index --add --remove`,
 so a `git rm`'d fragment commits); it runs from `prepare-agent.sh`'s pre-agent snapshot under
 `$RUNNER_TEMP` with git hooks and fsmonitor off (pr-release's `commit-and-push.sh` step gets the
-same through `GIT_CONFIG_*`); `--ignore` means a directory; the write group queues pending runs
-in order (`queue: max`, with a note for GHES), and a queued run whose checkout is no longer the
-branch tip exits 0 as superseded instead of failing its push.
+same through `GIT_CONFIG_*`) — an integrity check against agent mistakes, not a sandbox (the
+security ceiling is the job token's `permissions:`); `--ignore` means a directory; the write
+group queues pending runs in order (`queue: max`, with a note for GHES).
+
+Review fix round 2: the three writers check out the branch (doc-audit-update now too), so a
+queued run starts from the tip the earlier runs left; `commit-changes.sh` calls a run superseded
+(exit 0, nothing committed, a notice naming the range) only when the branch received a commit
+whose subject does not start with `[doc-superpowers]`; a branch moved only by doc-superpowers
+commits, or behind the checkout, is an `::error::`.
 
 Left for later tasks: I-9 (T10) owns `doc-release.yml`'s `contains(…)` skip and the fragment
 pipeline; the runtime criterion above waits for CI.

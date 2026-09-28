@@ -1102,6 +1102,22 @@ _ai_steps() {
 _JQ_TOOLS='def tools: (.with.claude_args // "") | [capture("--allowedTools[ =]\"(?<t>[^\"]*)\"").t] | (.[0] // "")
   | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""));'
 
+test_i8_writers_check_out_the_branch() {
+  echo "Test: every template that commits to a branch checks out the branch (a queued run starts from its tip), not the event commit"
+  yaml_unavailable "i8_writers_check_out_the_branch" && return 0
+  _need_all_repo "i8_writers_check_out_the_branch" || return 0
+  local wf ref
+  for wf in doc-audit-update doc-pr-full-cycle doc-pr-release; do
+    ref=$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq -r \
+      '[.jobs[].steps[]? | select((.uses // "") | startswith("actions/checkout@")) | .with.ref // ""] | first // ""')
+    case "$ref" in
+      *github.ref_name* | *github.head_ref* | *steps.pr.outputs.head_ref*)
+        assert_true "$wf: checkout ref is the branch ($ref)" true ;;
+      *) assert_true "$wf: checkout ref is the branch (got '$ref')" false ;;
+    esac
+  done
+}
+
 test_i8_installed_no_placeholder() {
   echo "Test: install --all --workflows=all — no __PLACEHOLDER__ survives in a workflow or a shipped helper"
   _need_all_repo "i8_installed_no_placeholder" || return 0
@@ -1332,7 +1348,9 @@ test_i8_commit_is_a_deterministic_step() {
     | select($ai != null)
     | ([$s | to_entries[] | select((.value.run // "") | startswith($cc + " --check-only")) | .key] | first) as $chk
     | ([$s | to_entries[] | select((.value.run // "") | startswith(".github/scripts/doc-pr-release/commit-and-push.sh")) | .key] | first) as $cp
+    | ([$s | to_entries[] | select((.value.run // "") | startswith(".github/scripts/doc-superpowers-steps/prepare-agent.sh")) | .key] | first) as $prep
     | if $chk == null or $cp == null or $chk < $ai or $cp < $chk then "    doc-pr-release / \($job): want the AI step, then the snapshot commit-changes.sh --check-only, then commit-and-push.sh"
+      elif $prep == null or $prep > $chk then "    doc-pr-release / \($job): prepare-agent.sh (the checker snapshot) does not run before the --check-only step"
       elif (($s[$ai].with.prompt // "") | contains("commit-and-push.sh")) then "    doc-pr-release / \($job): the prompt still has the agent run commit-and-push.sh"
       elif ($s[$cp].env // {}) as $e | ($e.GIT_CONFIG_COUNT != "2" or $e.GIT_CONFIG_KEY_0 != "core.hooksPath" or $e.GIT_CONFIG_VALUE_0 != "/dev/null"
             or $e.GIT_CONFIG_KEY_1 != "core.fsmonitor" or $e.GIT_CONFIG_VALUE_1 != "false")
@@ -1344,6 +1362,7 @@ test_i8_commit_is_a_deterministic_step() {
 }
 
 test_i8_installed_no_placeholder
+test_i8_writers_check_out_the_branch
 test_i8_ai_steps_runnable_and_scoped
 test_i8_every_job_has_a_timeout
 test_i8_pins_carry_exact_versions
@@ -1751,28 +1770,85 @@ test_i8_commit_changes() {
   rm -f "$clone"/.git/hooks/pre-commit "$clone"/.git/hooks/commit-msg "$clone"/.git/hooks/post-commit "$clone"/.git/hooks/pre-push
   _cc_reset "$dir"
 
-  # FIFO-queued runs: an earlier writer pushed, so this run's checkout is no
-  # longer the tip. That is not a failure: a newer run covers the new tip.
-  head=$(git -C "$clone" rev-parse HEAD)
-  (
-    cd "$dir/seed" || exit 1
-    git pull -q origin feature 2>/dev/null
-    echo human > human.txt
-    git add human.txt
-    git -c commit.gpgsign=false commit -q -m "human push"
-    git push -q origin feature
-  ) >/dev/null 2>&1
+  # The branch moved during the run. Superseded (exit 0, nothing committed)
+  # only when someone other than doc-superpowers pushed: a queued run of the
+  # write group starts from the branch tip, so doc-superpowers' own commits
+  # moving it mid-run are never a reason to drop this run's work.
+  _seed_push() { # <file> <subject>
+    (
+      cd "$dir/seed" || exit 1
+      git fetch -q origin 2>/dev/null
+      git reset -q --hard origin/feature
+      echo "$1" > "$1.txt"
+      git add "$1.txt"
+      git -c commit.gpgsign=false commit -q -m "$2"
+      git push -q origin HEAD:feature
+    ) >/dev/null 2>&1
+  }
   local tip
+  head=$(git -C "$clone" rev-parse HEAD)
+  _seed_push human "human push"
   tip=$(git -C "$dir/origin.git" rev-parse feature)
   echo '# D5' > "$clone/docs/d.md"
   rc=0
   run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
   assert_eq "0|true|false|true" "$rc|$(_out "$out" changed)|$(_out "$out" committed)|$(_out "$out" superseded)" \
-    "the branch moved past the checkout: superseded, exits 0, no commit"
-  assert_contains "$(cat "$out.log")" "superseded: feature moved past" "…with a notice that says so"
+    "someone pushed to the branch during the run: superseded, exits 0, no commit"
+  assert_contains "$(cat "$out.log")" "superseded: feature received new commits during this run (${head:0:12}..${tip:0:12})" \
+    "…with a notice that says what happened"
+  assert_not_contains "$(cat "$out.log")" "newer run" "…and claims no newer run (doc-pr-full-cycle has none)"
   assert_not_contains "$(cat "$out.log")" "::error::" "…and no error"
   assert_eq "$tip|$head" "$(git -C "$dir/origin.git" rev-parse feature)|$(git -C "$clone" rev-parse HEAD)" \
     "…the newer tip is kept, nothing committed or pushed"
+  _cc_reset "$dir"
+
+  head=$(git -C "$clone" rev-parse HEAD)
+  _seed_push bot1 "[doc-superpowers] sync PR-7 release notes (abc1234)"
+  _seed_push bot2 "[doc-superpowers] update stale docs"
+  tip=$(git -C "$dir/origin.git" rev-parse feature)
+  echo '# D5b' > "$clone/docs/d.md"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
+  assert_eq "1|" "$rc|$(_out "$out" superseded)" \
+    "the branch moved only by [doc-superpowers] commits: a visible failure (exit 1), not a green discard"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error:: annotation"
+  assert_eq "$tip|$head" "$(git -C "$dir/origin.git" rev-parse feature)|$(git -C "$clone" rev-parse HEAD)" \
+    "…nothing committed or pushed"
+  _cc_reset "$dir"
+
+  head=$(git -C "$clone" rev-parse HEAD)
+  _seed_push bot3 "[doc-superpowers] sync PR-8 release notes (def5678)"
+  _seed_push human2 "fix: a human change"
+  echo '# D5c' > "$clone/docs/d.md"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
+  assert_eq "0|true" "$rc|$(_out "$out" superseded)" "a doc-superpowers commit and a human one in the range: superseded"
+  _cc_reset "$dir"
+
+  # A branch reset behind the checkout: no commit in head..tip says who moved
+  # it, so that is a failure too.
+  head=$(git -C "$clone" rev-parse HEAD)
+  git -C "$dir/origin.git" update-ref refs/heads/feature "$(git -C "$clone" rev-parse HEAD~1)"
+  echo '# D5d' > "$clone/docs/d.md"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
+  assert_eq "1|" "$rc|$(_out "$out" superseded)" "the branch moved behind the checkout (head..tip empty): exits 1, not superseded"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error::"
+  git -C "$dir/origin.git" update-ref refs/heads/feature "$head"
+  _cc_reset "$dir"
+
+  # origin cannot be asked: the ::error:: annotation reaches the log (it was
+  # swallowed by the command substitution that called err).
+  head=$(git -C "$clone" rev-parse HEAD)
+  local url
+  url=$(git -C "$clone" remote get-url origin)
+  git -C "$clone" remote set-url origin "$dir/no-such-origin.git"
+  echo '# D5e' > "$clone/docs/d.md"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
+  assert_eq "1" "$rc" "origin cannot be asked for the branch: exits 1"
+  assert_contains "$(cat "$out.log")" "::error::doc-superpowers: cannot ask origin for feature" "…and the ::error:: annotation is printed"
+  git -C "$clone" remote set-url origin "$url"
   _cc_reset "$dir"
 
   # A push that fails for another reason is a failure.
