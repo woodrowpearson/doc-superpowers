@@ -13,14 +13,16 @@ related-files:
 # doc-superpowers sweep `05ea982` — Jumping-off point
 
 > The resume sheet for the session that **executes** the sweep's fix plan. The audit itself is done.
-> **Execution is in progress. T1–T7 are done.** See [Execution status](#execution-status-paused-2026-09-27) below.
+> **Execution is in progress. T1–T14 are done and reviewed. The final-review fix wave is paused
+> after its first area (core tools).** See [Execution status](#execution-status-paused-2026-09-28).
 
-## Execution status (paused 2026-09-27)
+## Execution status (paused 2026-09-28)
 
-Branch: `claude/resume-plan-execution-03646c` (pushed). It was branched from
-`claude/affectionate-turing-tu1o9x` @ `b59375f`. Every Task went through
-`superpowers:subagent-driven-development`: one implementer, then a spec + quality review, then
-fix rounds until the re-review was clean. Each Task's step 1 was a failing test (TDD).
+- **Branch:** `claude/resume-plan-execution-03646c`, branched from `b59375f`.
+  - It is **not pushed** past `1070fb1`: this pause stays on the same host.
+  - HEAD is the handoff commit (docs only) on top of `34a3841`.
+- **Worktree:** `/Volumes/abundance-worktrees/abundance-mvp/doc-superpowers/resume-plan-execution-03646c`, on the external volume. Its git common dir is `/Users/w/code/doc-superpowers/.git`.
+- **Process:** every Task went through `superpowers:subagent-driven-development`: one implementer, a spec + quality review, then fix rounds until the re-review was clean. Each Task's Step 1 was a failing test.
 
 | Task | Cluster | Commits | Review |
 |---|---|---|---|
@@ -29,84 +31,86 @@ fix rounds until the re-review was clean. Each Task's step 1 was a failing test 
 | T3 CLI/input | I-4 | `37be531`..`15b3109` | clean after 1 |
 | T4 content identity | I-1 | `c3cf36c`..`eb7a3ce` | clean after 2 |
 | T5 honest state (closes #18) | I-3 | `f770ade`..`16050ba` | clean after 3 |
-| T6 three-way merge driver (P0) | I-5 | `63fd1c5`..`e0a6526` | clean after 1 |
+| T6 three-way merge driver | I-5 | `63fd1c5`..`e0a6526` | clean after 1 |
 | T7 hook tier | I-6 | `f68c978`..`0c31a8e` | clean after 1 |
+| T11 implementation/version/vendoring verbs | I-10 | `1070fb1`..`71eceb2` | clean after 1 |
+| T8 installer | I-7 | `71eceb2`..`1ab0557` | approved, 0 rounds |
+| T9 CI templates (closes #5) | I-8 | `1ab0557`..`5d5f8aa` | clean after 2 |
+| T10 release fragments | I-9 | `5d5f8aa`..`888dfd7` | clean after 1 |
+| T12 skill prompt ↔ tool contract | I-11 | `888dfd7`..`fa8384a` | clean after 1 |
+| T13 cross-client packaging | I-12 | `fa8384a`..`8e9d4f6` | approved, 0 rounds |
+| T14 dogfood + living docs | I-14 | `8e9d4f6`..`cfabc56` | approved, 0 rounds |
 
-**Tests:** 2052 assertions per interpreter, 0 fail, 2 known XFAILs owned by T10. Verified locally
-under bash 5.3 and `/bin/bash` 3.2.57, and under a BSD-only PATH. CI is still down because of the
-GitHub account billing lock (Gotcha 1).
+**Final whole-branch review.** It ran at `cfabc56` as five area seats in parallel, because the diff is about 2.4 MB: core tools, installer + hooks, CI, prompt layer, and living docs. Every seat returned "With fixes": 0 Critical, 14 Important, about 30 Minor.
+- **Fix wave:** ONE wave, specified in `final-fix-wave.md` with rulings F1–F10.
+- **Area 1 (core tools) is done:** `34a3841`.
+- **Remaining areas:** installer + hooks, then CI, then prompt layer, then living docs + the follow-up issue.
 
-**Next:** T11 → T8 → T9 → T10 → T12 → T13 → T14, strictly in that order. There are no parallel
-worktrees: T10 and T11 share doc-tools.sh, and T6 and T8 share install.sh. T11 runs before T8 so
-that T8 can delegate vendoring to the fixed `tools` verbs. After T14 come, in order:
-1. the final whole-branch review, with one fix wave;
-2. `/doc-superpowers audit`, then `update`, then `diagram` (the owner's directive);
-3. the release flow: draft notes, `bump-version 3.0.0`, `check-version`.
+**Tests at `34a3841`:** 3447/3447 under both bash 5.3 and `/bin/bash` 3.2.57, with 0 XFAIL:
+- doc-tools 1279
+- hooks 844
+- spec-status-model 432
+- doc-pr-release 406
+- merge-driver 486
 
-**Ledger:** [`2026-09-27-full-repo-05ea982-execution-ledger.md`](2026-09-27-full-repo-05ea982-execution-ledger.md)
-is a committed copy of the controller ledger. It holds:
-- every ruling, with its cost if wrong;
-- every deferred minor, most of them routed to a later Task;
-- items carried into later Tasks' dispatches.
-Read it before dispatching T11.
+The BSD-PATH legs are green and `check-version` passes. CI is still down (billing lock, Gotcha 1).
 
-**Carry-forwards the next session must not drop:**
-- **Deferred-important for the final wave:** readers can still show a masked `commits_behind: 0`
-  after `update-index` captured uncommitted content. The suggested fix is `stale && count==0 → null`.
-- **T8:**
-  - the integration block drops `"$@"`, stdin, stderr and the exit code;
-  - `$CLAUDE_PROJECT_DIR` command strings;
-  - the `--helpers=false` refusal is not state-aware;
-  - hooks installed into a quoted path break via `sed`;
-  - re-register the merge driver for existing installs.
-- **T10:** the 7 V-FU1 fragment mutants from I-13; the 2 XFAILs (extract-context base-commit leak;
-  commit-and-push sweeping pre-staged files); porcelain `git log` in `fragments merge`.
-- **T14:**
-  - retype the 6 design specs typed `spec` as `design-spec`;
-  - three legacy non-ancestor `code_commit`s (`abb3e64`, `c2496da`, `f063b04`);
-  - this repo's own `.git/hooks` and `.claude/hooks` are still the old copies. The old
-    prepare-commit-msg injects `# stale:` lines into `-m` messages, so commit with
-    `git commit --cleanup=strip` until T14 re-installs;
-  - the stale suite counts in docs.
-- **Commit messages:** T1's three commits carry injected `# stale:` body lines. They were
-  deliberately not rewritten, because rewriting would orphan the `code_commit`s recorded in the
-  index.
+**Host-local state.** All of this is git-ignored and exists only in this worktree, under `.superpowers/sdd/2026-09-27-full-repo-05ea982-fix-plan/`:
+- `progress.md`: the live ledger. It is authoritative. The committed copy is [`2026-09-27-full-repo-05ea982-execution-ledger.md`](2026-09-27-full-repo-05ea982-execution-ledger.md).
+- `final-fix-wave.md`: the fix wave's requirements and binding rulings F1–F10.
+- `final-review-findings-seat{1..5}-*.md`: every finding, with evidence and file:line.
+- `final-fix-wave-report.md`: its `## Paused` section lists every item ID as DONE (with its commit) or remaining (with what is left).
+- `final-fix-wave-drafts/`: unapplied drafts, for example the "Upgrading from 2.x" section and the follow-up issue.
+- `task-*-brief.md`, `task-*-report.md`, `task-*-carry.md`: per-Task records. Each report has a "v3.0.0 release-note behaviour changes" section.
+
+**Next, in order:**
+1. **Resume the fix wave.** Dispatch a fresh implementer (opus) on `final-fix-wave.md` plus the report's `## Paused` section.
+   - Go area by area: installer + hooks, then CI, then prompt layer, then living docs + the follow-up issue doc (F10).
+   - Five living docs read stale after `34a3841`: system-overview, codebase-guide, conventions, getting-started, and workflows/doc-superpowers. The docs area reads them, fixes them, and runs `update-index`.
+2. **Run ONE scoped re-review of `cfabc56..HEAD`** against `final-fix-wave.md`, then adjudicate the residuals. There is no second fix wave.
+3. **Run `/doc-superpowers audit`, then `update`, then `diagram`** (the owner's directive), using this branch's tools. Also re-render the system-overview PNG, which still says "15 subcommands".
+4. **Release flow.**
+   - Draft the v3.0.0 notes with `/doc-superpowers release`. Collect each Task report's v3.0.0 section, the fix-wave report's, and the "Upgrading from 2.x" section.
+   - Run `bump-version 3.0.0`, then `check-version`.
+   - Tag and push `v3.0.0`: the AI templates install the plugin from tag `v<version>`.
+5. **Finish.**
+   - List every `Ruling:` line from the ledger for the owner.
+   - Delete the plan workspace only after the release.
+   - Then run `superpowers:finishing-a-development-branch`.
+
+**Owner follow-ups after merge.** These are for the owner, not agent tasks:
+- **Shared git hooks point here.** T14's dogfood install wrote the hooks and merge-driver config shared by every checkout in `/Users/w/code/doc-superpowers/.git`, and they point at this worktree's `scripts/`. If the volume is missing they degrade safely: pre-commit skips, and the merge driver leaves conflict markers. After merging, run `scripts/hooks/install.sh install --git --claude` from the main checkout.
+- **The main checkout's Claude files will be deleted.** Merging removes its tracked `.claude/settings.local.json` (21 permission rules) and `.claude/hooks/doc-superpowers/*.sh`. Restore the settings with `git show ORIG_HEAD:.claude/settings.local.json > .claude/settings.local.json`, then run `install --claude`.
+- **One item is deferred by F8 and could still be pulled in.** In one worktree, `uninstall --claude` removes the `info/exclude` block that every worktree shares, so the other worktrees' per-user `.claude` files show as untracked.
 
 ## Resume prompt (paste into a fresh session)
 
 ```text
-Execute the doc-superpowers sweep fix plan, run-id 05ea982.
-
-Execution is IN PROGRESS on branch `claude/resume-plan-execution-03646c` (T1–T7 done). Continue
-on that branch. Read the "Execution status" section of the jumping-off point and the execution ledger
-(docs/plans/2026-09-27-full-repo-05ea982-execution-ledger.md) first, and resume at T11.
-Do not re-run completed Tasks.
+Resume the doc-superpowers sweep 05ea982 execution in THIS worktree (branch
+claude/resume-plan-execution-03646c). T1–T14 are complete and reviewed — do NOT re-dispatch them.
+The final whole-branch review is done; its ONE fix wave is PAUSED after area 1 (core tools,
+commit 34a3841).
 
 Read first, in order:
-  1. docs/plans/2026-09-27-full-repo-05ea982-jumping-off-point.md   (this file: priorities + gotchas)
-  2. docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md            (Tasks T1–T14, TDD steps)
-  3. docs/plans/2026-09-27-full-repo-05ea982-audit-findings.md       (evidence, by surface)
-  4. The cluster issue named by the Task you are starting (docs/issues/2026-09-27-sweep-05ea982-I*.md)
-  5. docs/plans/2026-09-27-full-repo-05ea982-evidence.md — verifier reports + prototypes, when you need
-     the exact reproduction behind a finding
+  1. docs/plans/2026-09-27-full-repo-05ea982-jumping-off-point.md — "Execution status (paused 2026-09-28)"
+  2. .superpowers/sdd/2026-09-27-full-repo-05ea982-fix-plan/progress.md — the live ledger (tail first)
+  3. .superpowers/sdd/2026-09-27-full-repo-05ea982-fix-plan/final-fix-wave.md — fix-wave requirements + rulings F1–F10
+  4. .superpowers/sdd/2026-09-27-full-repo-05ea982-fix-plan/final-fix-wave-report.md — "## Paused" (done vs remaining per item)
 
-Use superpowers:subagent-driven-development: one fresh implementer per Task, review between Tasks.
-Order: T1 → T2 → T3 → T4 → T5 strictly in sequence; then T6/T7/T8/T10/T11 in parallel worktrees;
-T9 after T7+T8; T12 after T3–T11; T13 after T12's tool-resolution decision; T14 last.
+Use superpowers:subagent-driven-development as the controller:
+  - Dispatch ONE fresh implementer (opus) to finish the fix wave from final-fix-wave.md + the
+    report's "## Paused" section: installer+hooks → CI → prompt layer → living docs + follow-up
+    issue (F10). It appends to final-fix-wave-report.md and commits per area.
+  - Then ONE scoped re-review of cfabc56..HEAD (skill's re-review-prompt.md) against
+    final-fix-wave.md; adjudicate residuals (park with rulings); no second fix wave.
+  - Then /doc-superpowers audit → update → diagram (owner directive), then the release flow
+    (v3.0.0 notes, bump-version 3.0.0, check-version). Ask the owner before any push or tag push.
+  - Record every decision in the ledger as "Ruling: … — why — cost if wrong".
 
-Constraints:
-- zero new dependencies (bash 3.2 + BSD userland + git + jq + POSIX);
-- tool ↔ prompt lockstep in the same Task;
-- tests never run tools with the real repo as cwd;
-- every Task's Step 1 is a failing test first.
-
-Close-out per Task:
-- set the cluster issue to `status: Resolved`;
-- run `scripts/doc-tools.sh update-index` for each doc edited;
-- commit as `<type>(<scope>): … (sweep 05ea982 I-N)`.
-
-Before T1: confirm GitHub Actions is executing again in this repo (see Gotcha 1). Without CI,
-no Task's bash-3.2 claim can be checked.
+Constraints: zero new dependencies (bash 3.2 + BSD userland + git + jq + POSIX); tool ↔ prompt
+lockstep; tests never run tools with the real repo as cwd; both interpreters
+(/opt/homebrew/bin/bash and /bin/bash) + BSD-PATH legs before each commit; never launch suites
+with `&`; commit with `git commit --cleanup=strip`; never push without the owner; no `git stash`.
 ```
 
 ## Priority order (by weight: severity × blast radius × how cheap the foundation is)
