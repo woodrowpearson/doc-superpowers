@@ -1,0 +1,20 @@
+{
+  "schema_version": 2,
+  "tiers": {
+    "ci": {
+      "base_branch": "main",
+      "cron": "0 9 * * 1",
+      "ci_strict": true,
+      "workflows": {
+        "doc-freshness-pr": {
+          "state": "installed",
+          "installed_at": "2026-09-28T21:26:26Z"
+        },
+        "doc-freshness-schedule": {
+          "state": "installed",
+          "installed_at": "2026-09-28T21:26:26Z"
+        }
+      }
+    }
+  }
+}

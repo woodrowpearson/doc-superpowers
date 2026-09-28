@@ -1,9 +1,12 @@
-# doc-superpowers workflow v1
-# Shell test suites — the five suites that gate changes to this repo.
+# Shell test suites — the five suites that gate changes to this repo — and the
+# check that this repo's own self-installed CI tier is what the installer
+# would write today.
 #
 # This workflow is for THIS repository only. It is deliberately not part of the
 # downstream CI template set in scripts/hooks/ci/ (which the hooks installer
 # copies into consuming projects) — those projects do not have these suites.
+# (So it carries no "doc-superpowers workflow" marker: the installer does not
+# own it.)
 
 name: Tests
 
@@ -80,7 +83,7 @@ jobs:
           for tool in jq git; do
             command -v "$tool" >/dev/null 2>&1 || { echo "::error::$tool not found"; exit 1; }
           done
-          # test-doc-pr-release.sh parses the nine CI templates to prove the
+          # test-doc-pr-release.sh parses the eight CI templates to prove the
           # placeholder substitution leaves valid YAML, and reads template
           # structure (concurrency, job guards, run: wiring) through the same
           # parser. PyYAML ships on the ubuntu image but not the macOS one, so
@@ -139,6 +142,79 @@ jobs:
       - name: test-merge-driver.sh
         run: |
           "$BASH_BIN" scripts/test-merge-driver.sh
+
+      # This repository installs its own CI tier (scripts/hooks/install.sh
+      # install --ci), and nothing else notices those copies going stale: for
+      # months its freshness workflows called a .github/scripts/doc-tools.sh
+      # that was never committed. So every self-installed file must be exactly
+      # what the installer writes today: each workflow that
+      # .claude/doc-superpowers/installed.json records as installed, rendered
+      # from its template with the recorded choices (install.sh's
+      # render_workflow substitutions), and byte copies of doc-tools.sh and of
+      # the helpers — with every script a workflow runs present and executable.
+      # After changing a template, doc-tools.sh or a CI helper script, run
+      # `bash scripts/hooks/install.sh install --ci` and commit the result.
+      - name: Self-installed CI tier matches its templates
+        run: |
+          set -euo pipefail
+          state=.claude/doc-superpowers/installed.json
+          fail=0
+          drift() { echo "::error file=$1::$2"; fail=1; }
+          esc() { printf '%s' "$1" | sed -e 's/[\\|&]/\\&/g'; }
+          [ -f "$state" ] || { echo "::error::$state is missing"; exit 1; }
+          base=$(esc "$(jq -r '.tiers.ci.base_branch' "$state")")
+          cron=$(esc "$(jq -r '.tiers.ci.cron' "$state")")
+          strict=$(jq -r 'if .tiers.ci.ci_strict == true then 1 else 0 end' "$state")
+          installed=$(jq -r '.tiers.ci.workflows // {} | to_entries[] | select(.value.state == "installed") | .key' "$state")
+          [ -n "$installed" ] || drift "$state" "records no installed workflow"
+          version=""
+          for t in scripts/hooks/ci/*.yml; do
+            w=$(basename "$t" .yml)
+            f=.github/workflows/$w.yml
+            if ! printf '%s\n' "$installed" | grep -qxF "$w"; then
+              [ ! -e "$f" ] || drift "$f" "exists but $state does not record $w as installed"
+              continue
+            fi
+            if [ -z "$version" ] && grep -q '__VERSION__' "$t"; then
+              version=$(esc "v$("$BASH_BIN" scripts/doc-tools.sh tools version)")
+            fi
+            sed -e "s|__BASE_BRANCH__|$base|g" -e "s|__VERSION__|$version|g" \
+              -e "s|__CRON_SCHEDULE__|$cron|g" -e "s|__CI_STRICT__|$strict|g" \
+              "$t" > "$RUNNER_TEMP/$w.rendered.yml"
+            diff -u "$RUNNER_TEMP/$w.rendered.yml" "$f" \
+              || drift "$f" "differs from $t rendered with the choices in $state"
+            for p in $(grep -oE '\.github/scripts/[A-Za-z0-9._/-]+\.sh' "$f" | sort -u || true); do
+              [ -x "$p" ] || drift "$f" "runs $p, which is not vendored (or not executable)"
+            done
+          done
+          cmp scripts/doc-tools.sh .github/scripts/doc-tools.sh \
+            || drift .github/scripts/doc-tools.sh "differs from scripts/doc-tools.sh"
+          [ -x .github/scripts/doc-tools.sh ] || drift .github/scripts/doc-tools.sh "is not executable"
+          for d in .github/scripts/*/; do
+            [ -d "$d" ] || continue
+            d=$(basename "$d")
+            for f in ".github/scripts/$d"/*; do
+              p="scripts/hooks/ci/$d/$(basename "$f")"
+              if [ ! -f "$p" ]; then
+                drift "$f" "is not a plugin helper (no $p)"
+                continue
+              fi
+              cmp "$p" "$f" || drift "$f" "differs from $p"
+              [ -x "$f" ] || drift "$f" "is not executable"
+            done
+            for p in "scripts/hooks/ci/$d"/*.sh; do
+              [ -e ".github/scripts/$d/$(basename "$p")" ] \
+                || drift ".github/scripts/$d" "lacks $(basename "$p") (a partial helper install)"
+            done
+          done
+          # The git tier's one committed piece: the index merge-driver attribute.
+          [ "$(git check-attr merge -- docs/.doc-index.json)" = "docs/.doc-index.json: merge: doc-index" ] \
+            || drift .gitattributes "does not route docs/.doc-index.json to the doc-index merge driver"
+          if [ "$fail" != 0 ]; then
+            echo "::error::the self-installed CI tier drifted: run bash scripts/hooks/install.sh install --ci and commit the result"
+            exit 1
+          fi
+          echo "Self-installed CI tier matches its templates:" $installed
 
       # Version strings drift silently otherwise: bump-version writes five
       # manifests and RELEASE-NOTES.md is the canonical source check-version
