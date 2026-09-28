@@ -2027,24 +2027,29 @@ fragments merge|cmd_fragments_merge|repo|paths-out=
   <range-start> <range-end> [--paths-out <file>]
   Print the merged sections of the fragments introduced in the commit
   range. --paths-out writes the consumed fragment paths, one per line.
-tools install|cmd_tools_install|deps|dest= with-helpers
-  [--dest <path>] [--with-helpers]
+tools install|cmd_tools_install|deps|dest= with-helpers helper=*
+  [--dest <path>] [--with-helpers | --helper <dir>...]
   Vendor doc-tools.sh into <path> (default .github/scripts); with
   --with-helpers also every helper the CI templates run
-  (<path>/doc-pr-release/ and <path>/doc-superpowers-steps/) and
-  RELEASE-NOTES.next/README.md (only if absent). Files are replaced
-  atomically; an existing file keeps its mode, and every script ends up
-  executable (the templates run them directly). Run from a vendored copy
-  it can only copy itself (onto itself it only makes sure the copy is
-  executable); --with-helpers then exits 1, writing nothing.
-tools uninstall|cmd_tools_uninstall|deps|dest=
-  [--dest <path>]
+  (<path>/doc-pr-release/ and <path>/doc-superpowers-steps/), with
+  --helper <dir> (repeatable) only those helper directories; shipping
+  doc-pr-release also creates RELEASE-NOTES.next/README.md (only if
+  absent). Files are replaced atomically; an existing file keeps its mode,
+  and every script ends up executable (the templates run them directly).
+  A symbolic link at a destination or at a directory on its way is refused
+  before anything is written. Run from a vendored copy it can only copy
+  itself (onto itself it only makes sure the copy is executable); a helper
+  request then exits 1, writing nothing.
+tools uninstall|cmd_tools_uninstall|deps|dest= helper=*
+  [--dest <path>] [--helper <dir>...]
   Remove from <path> each vendored file that is byte-identical to the
   plugin's copy; a file with local edits (or from another plugin
   version) and a file you added are kept and reported, and so is a helper
-  directory that still holds them. RELEASE-NOTES.next/README.md is never
-  removed. Must run from the plugin's doc-tools.sh (exit 1 from a
-  vendored copy, which has nothing to compare against).
+  directory that still holds them. With --helper <dir> (repeatable), only
+  those helper directories (doc-tools.sh stays). A symbolic link on the
+  way is refused. RELEASE-NOTES.next/README.md is never removed. Must run
+  from the plugin's doc-tools.sh (exit 1 from a vendored copy, which has
+  nothing to compare against).
 tools status|cmd_tools_status|deps|dest=
   [--dest <path>]
   Report whether doc-tools.sh is vendored at <path>, whether it matches the
@@ -4418,6 +4423,7 @@ _TOOLS_HELPER_DIRS="doc-pr-release doc-superpowers-steps"
 # _TOOLS_SAME=1 and copies nothing when both name the same file (which is
 # still made executable under [exec]).
 _tools_copy() {
+  _tools_no_link "$2"
   _TOOLS_SAME=0
   if [ -e "$2" ] && [ "$1" -ef "$2" ]; then
     _TOOLS_SAME=1
@@ -4431,22 +4437,69 @@ _tools_copy() {
   _replace_file "$_TMP" "$2" "$3" "${4:-0}"
 }
 
+# The helper directories a tools install/uninstall acts on: every one for
+# --with-helpers, the --helper ones (validated) otherwise; "" for none.
+_tools_helper_selection() {
+  local d sel=""
+  if [ -n "${_OPT_with_helpers:-}" ]; then
+    [ "${#_OPTV_helper[@]}" -eq 0 ] || _usage_error "$1" "--with-helpers and --helper are exclusive"
+    printf '%s' "$_TOOLS_HELPER_DIRS"
+    return 0
+  fi
+  for d in ${_OPTV_helper[@]+"${_OPTV_helper[@]}"}; do
+    case " $_TOOLS_HELPER_DIRS " in
+      *" $d "*) ;;
+      *) _usage_error "$1" "unknown helper directory '$d' (one of: $_TOOLS_HELPER_DIRS)" ;;
+    esac
+    case " $sel " in
+      *" $d "*) ;;
+      *) sel="${sel:+$sel }$d" ;;
+    esac
+  done
+  printf '%s' "$sel"
+}
+
+# _tools_no_link <path>: refuse (before anything is written) when <path> or a
+# directory on its way is a symbolic link — a committed .github/scripts link
+# would send the copy (or the removal) anywhere. A relative path is checked
+# component by component; an absolute one with its own directory.
+_tools_no_link() {
+  local p="$1" stop=""
+  case "$p" in
+    /*) stop="${p%/*}"; stop="${stop%/*}" ;;
+  esac
+  while [ -n "$p" ] && [ "$p" != "$stop" ] && [ "$p" != "." ] && [ "$p" != "/" ]; do
+    [ ! -L "$p" ] || _die "$p is a symbolic link (on the way to $1): not writing or removing through it. Nothing was changed."
+    case "$p" in
+      */*) p="${p%/*}" ;;
+      *) p="" ;;
+    esac
+  done
+}
+
 cmd_tools_install() {
   [ $# -eq 0 ] || _usage_error "tools install" "takes no arguments (got '$1')"
-  local dest="${_OPT_dest:-.github/scripts}" with_helpers=0 d f n
-  [ -z "${_OPT_with_helpers:-}" ] || with_helpers=1
+  local dest="${_OPT_dest:-.github/scripts}" helpers d f n
+  helpers=$(_tools_helper_selection "tools install")
   local src="$SCRIPT_DIR/doc-tools.sh"
 
   # Everything a helper install needs is checked before anything is written.
-  if [ "$with_helpers" = 1 ]; then
+  if [ -n "$helpers" ]; then
     if ! _tools_is_plugin; then
-      echo "ERROR: --with-helpers ships the plugin's CI helpers, and $src is a vendored copy, which has none. Run the plugin's doc-tools.sh. Nothing was installed." >&2
+      echo "ERROR: --with-helpers / --helper ship the plugin's CI helpers, and $src is a vendored copy, which has none. Run the plugin's doc-tools.sh. Nothing was installed." >&2
       exit 1
     fi
-    for d in $_TOOLS_HELPER_DIRS; do
+    for d in $helpers; do
       [ -d "$SCRIPT_DIR/hooks/ci/$d" ] || _die "the plugin's helper directory $SCRIPT_DIR/hooks/ci/$d is missing. Nothing was installed."
+      for f in "$SCRIPT_DIR/hooks/ci/$d"/*.sh; do
+        _tools_no_link "$dest/$d/${f##*/}"
+      done
     done
+    case " $helpers " in
+      *" doc-pr-release "*) _tools_no_link "RELEASE-NOTES.next/README.md" ;;
+    esac
   fi
+  _tools_no_link "$dest/doc-tools.sh"
 
   mkdir -p "$dest" || _die "cannot create $dest"
   _tools_copy "$src" "$dest/doc-tools.sh" 755 1
@@ -4455,9 +4508,9 @@ cmd_tools_install() {
   else
     echo "Installed doc-tools.sh → $dest/doc-tools.sh"
   fi
-  [ "$with_helpers" = 1 ] || return 0
+  [ -n "$helpers" ] || return 0
 
-  for d in $_TOOLS_HELPER_DIRS; do
+  for d in $helpers; do
     mkdir -p "$dest/$d" || _die "cannot create $dest/$d"
     n=0
     for f in "$SCRIPT_DIR/hooks/ci/$d"/*.sh; do
@@ -4468,7 +4521,12 @@ cmd_tools_install() {
     echo "Installed $n $d helpers → $dest/$d/"
   done
 
-  # RELEASE-NOTES.next/README.md — never overwrite (user may have edits).
+  # RELEASE-NOTES.next/README.md (with the doc-pr-release helpers: the
+  # fragment format they write) — never overwrite (user may have edits).
+  case " $helpers " in
+    *" doc-pr-release "*) ;;
+    *) return 0 ;;
+  esac
   f="$SCRIPT_DIR/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md"
   if [ -f "$f" ] && [ ! -e "RELEASE-NOTES.next/README.md" ]; then
     mkdir -p RELEASE-NOTES.next || _die "cannot create RELEASE-NOTES.next"
@@ -4479,7 +4537,8 @@ cmd_tools_install() {
 
 cmd_tools_uninstall() {
   [ $# -eq 0 ] || _usage_error "tools uninstall" "takes no arguments (got '$1')"
-  local dest="${_OPT_dest:-.github/scripts}"
+  local dest="${_OPT_dest:-.github/scripts}" only
+  only=$(_tools_helper_selection "tools uninstall")
   local src="$SCRIPT_DIR/doc-tools.sh"
   if ! _tools_is_plugin; then
     echo "ERROR: tools uninstall deletes only files identical to the plugin's copies, and $src is a vendored copy with nothing to compare them with. Run the plugin's doc-tools.sh. Nothing was removed." >&2
@@ -4492,8 +4551,12 @@ cmd_tools_uninstall() {
   # and reported. RELEASE-NOTES.next/README.md is never removed: it may carry
   # edits.
   local removed=0 kept=0 d f p n
+  _tools_no_link "$dest/doc-tools.sh"
+  for d in $_TOOLS_HELPER_DIRS; do
+    _tools_no_link "$dest/$d/x"
+  done
   f="$dest/doc-tools.sh"
-  if [ -f "$f" ]; then
+  if [ -z "$only" ] && [ -f "$f" ]; then
     if [ "$src" -ef "$f" ]; then
       echo "Kept $f (it is the plugin's own copy)"
       kept=$((kept + 1))
@@ -4507,7 +4570,7 @@ cmd_tools_uninstall() {
     fi
   fi
 
-  for d in $_TOOLS_HELPER_DIRS; do
+  for d in ${only:-$_TOOLS_HELPER_DIRS}; do
     [ -d "$dest/$d" ] || continue
     n=0
     for p in "$SCRIPT_DIR/hooks/ci/$d"/*.sh; do

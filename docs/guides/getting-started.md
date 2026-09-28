@@ -87,16 +87,17 @@ After `init` completes, set up automated freshness monitoring:
 
 # Or pick specific tiers
 /doc-superpowers hooks install --git           # Git hooks only
-/doc-superpowers hooks install --claude        # Claude Code hooks only
-/doc-superpowers hooks install --ci            # GitHub Actions only
+/doc-superpowers hooks install --claude        # Claude Code hooks only (per-user)
+/doc-superpowers hooks install --ci            # GitHub Actions: the 3 shell workflows
 
-# Granular CI install — only the workflows you want
+# Claude-powered workflows are opt-in by name
 /doc-superpowers hooks install --ci --workflows=doc-freshness-pr,doc-release
 /doc-superpowers hooks install --ci --workflows=none                 # vendor doc-tools.sh only
-/doc-superpowers hooks install --ci --workflows=doc-pr-release --helpers=false  # bring-your-own helpers
 ```
 
-The CI tier persists install choices in `.claude/doc-superpowers/installed.json`. A workflow you uninstalled with `/doc-superpowers hooks uninstall --ci --workflows=doc-release` is NOT re-added on the next no-flag `install --ci` — re-add it with `--workflows=doc-release` (explicit beats state) or `--force` (bypass state-respect). Use `--transient` on uninstall to mark "remove for now but re-add automatically next time."
+The installer acts on the repository's top level from any subdirectory, puts git hooks where git runs them, keeps a hook of yours (a marked block after its `#!` line runs ours), and refuses — writing nothing — a symbolic link on a path it would write or a global `core.hooksPath`. The Claude tier is per-user: `.claude/settings.local.json` and `.claude/hooks/doc-superpowers/` are excluded from git through `.git/info/exclude`.
+
+The CI tier records its choices — the workflow set, `--base-branch`, `--cron`, `--ci-strict` — in `.claude/doc-superpowers/installed.json` (commit it); a plain `install --ci` reproduces them. A workflow you uninstalled with `/doc-superpowers hooks uninstall --ci --workflows=doc-release` is NOT re-added on the next no-flag `install --ci` — re-add it with `--workflows=doc-release` (explicit beats state) or `--force` (bypass state-respect). Use `--transient` on uninstall to mark "remove for now but re-add automatically next time."
 
 Independent of hooks, you can vendor `doc-tools.sh` itself into a consumer repo. Resolve `$DOC_TOOLS` first — the path depends on how the skill was installed:
 
@@ -179,8 +180,8 @@ For code review and commit review integration, see `references/integration-patte
 | `/doc-superpowers update` | Execute doc updates from audit |
 | `/doc-superpowers diagram` | Regenerate architecture and workflow diagrams |
 | `/doc-superpowers sync` | Sync doc index with filesystem |
-| `/doc-superpowers hooks install [--git] [--claude] [--ci] [--all] [--workflows=<csv\|all\|none>] [--helpers=<bool>] [--force] [--base-branch NAME] [--cron EXPR] [--ci-strict]` | Install workflow hooks (granular CI selection + state-respect) |
-| `/doc-superpowers hooks status` | Show installed hooks |
+| `/doc-superpowers hooks install [--git] [--claude] [--ci] [--all] [--workflows=<csv\|all\|none>] [--helpers=<bool>] [--force] [--base-branch NAME] [--cron EXPR] [--ci-strict[=true\|false]]` | Install workflow hooks (CI: the shell workflows by default, AI ones by name; choices recorded) |
+| `/doc-superpowers hooks status [--git] [--claude] [--ci]` | Show installed hooks |
 | `/doc-superpowers hooks uninstall [--git] [--claude] [--ci] [--all] [--workflows=<csv\|all\|none>] [--transient]` | Remove installed hooks (granular CI uninstall; `--transient` keeps state non-intentional) |
 | `/doc-superpowers spec-generate --design-doc=<path>` | Generate formal specs from design doc |
 | `/doc-superpowers spec-inject --phase=plan\|execute` | Inject spec tasks or track drift |

@@ -167,28 +167,30 @@ Install opt-in hooks for automated freshness monitoring:
 /doc-superpowers hooks install --all
 
 # Or pick specific tiers
-/doc-superpowers hooks install --git           # Git hooks
-/doc-superpowers hooks install --claude        # Claude Code hooks
-/doc-superpowers hooks install --ci            # GitHub Actions (all 9 workflows)
+/doc-superpowers hooks install --git           # Git hooks (where git runs them)
+/doc-superpowers hooks install --claude        # Claude Code hooks (per-user)
+/doc-superpowers hooks install --ci            # GitHub Actions: the 3 shell workflows
 
-# Granular CI install (v2.12.0+) — pick specific workflows
-/doc-superpowers hooks install --ci --workflows=doc-pr-release,doc-index-update
+# Claude-powered workflows are opt-in by name
+/doc-superpowers hooks install --ci --workflows=doc-pr-release,doc-review-pr
+/doc-superpowers hooks install --ci --workflows=all    # every template
 /doc-superpowers hooks install --ci --workflows=none   # only vendor doc-tools.sh
-/doc-superpowers hooks install --ci --force            # override "intentionally removed"
+/doc-superpowers hooks install --ci --force            # also re-add workflows you removed on purpose
 
-# CI tuning flags
+# CI tuning flags (recorded: a plain `install --ci` later reproduces them)
 /doc-superpowers hooks install --ci --base-branch develop   # target branch (default: main)
 /doc-superpowers hooks install --ci --cron "0 6 * * 1"      # weekly audit schedule (default: 0 9 * * 1)
-/doc-superpowers hooks install --ci --ci-strict             # PR check fails on stale docs instead of warning
-/doc-superpowers hooks install --ci --workflows=doc-release --helpers=false  # skip the doc-pr-release helpers (default: true; refused while doc-pr-release is selected)
+/doc-superpowers hooks install --ci --ci-strict             # PR check fails on stale docs (--ci-strict=false undoes it)
+/doc-superpowers hooks install --ci --workflows=doc-release --helpers=false  # skip the doc-pr-release helpers (default: true; refused while doc-pr-release is selected or installed)
 
 # Standalone tool install (v2.12.0+) — doc-tools.sh only, no workflows
 $DOC_TOOLS tools install                       # → .github/scripts/doc-tools.sh
 $DOC_TOOLS tools install --with-helpers        # + every helper the CI templates run
+$DOC_TOOLS tools install --helper doc-superpowers-steps  # + only the named helper dir(s)
 $DOC_TOOLS tools status                        # present? matches the plugin? which version?
 $DOC_TOOLS tools uninstall                     # removes only files identical to the plugin's
 
-# Check what's installed
+# Check what's installed (optionally one tier: --git / --claude / --ci)
 /doc-superpowers hooks status
 
 # Remove hooks
@@ -196,13 +198,15 @@ $DOC_TOOLS tools uninstall                     # removes only files identical to
 /doc-superpowers hooks uninstall --ci --workflows=doc-release  # remove ONE workflow
 ```
 
-**State tracking (v2.12.0+):** install choices persist via `.claude/doc-superpowers/installed.json` (committed to the repo). A subsequent `install --ci` respects prior intentional uninstalls; pass `--workflows=<name>` to override, `--force` to ignore state, or `uninstall --ci --transient` so the next install re-installs.
+The installer works from anywhere in the repository (it acts on the top level; a linked worktree or submodule is its own top level) and puts git hooks where git runs them (`git rev-parse --git-path hooks`). It refuses, writing nothing, when `core.hooksPath` comes from your global/system git config, or when a file it would write — or a directory on the way — is a symbolic link. It owns only what it marks: a hook of yours is kept, with a marked POSIX block after its `#!` line that runs ours (skipped if the hook is not a shell script); its `.gitattributes` and `info/exclude` entries are marked blocks; in `.claude/settings.local.json` it touches only the entries that run its own scripts. `uninstall` puts all of that back as it was. The Claude tier is **per-user**: its settings file and scripts are excluded from git through `.git/info/exclude`, and its commands run `"$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/…`.
+
+**State tracking:** the CI tier's choices — the workflow set, base branch, cron, strict — persist in `.claude/doc-superpowers/installed.json` (commit it). A plain `install --ci` reproduces them and respects intentional uninstalls; pass `--workflows=<name>` to add one back, `--force` to re-add all, or `uninstall --ci --transient` so the next install re-installs. An unreadable state file (e.g. a merge conflict) is never overwritten: resolve it, or move it to `installed.json.corrupt` and the next install rebuilds it from disk without adding anything. Uninstall keeps a vendored helper you edited and says so (`Kept …`).
 
 **Git hooks (5):** Pre-commit checks the staged tree, so it reports the docs *this* commit leaves stale (renames included). Post-merge and post-checkout report the docs a merge or branch switch left stale or missing. Prepare-commit-msg lists the stale docs as comment lines, only for a message written in the editor (git strips them; with `-m`/`-F` it adds nothing). Pre-push reminds about unreleased commits on the branches being pushed.
 
 **Claude Code hooks (3):** They read the event JSON on stdin and answer through Claude Code's JSON output (`additionalContext` for Claude, `systemMessage` for you). The pre-commit gate (PreToolUse) checks the staged tree of a `git commit`; a command that stages as it commits (`git add … && git commit`, `commit -a`) is left to the git pre-commit hook, which sees the real index, and the gate says so. Post-commit sync (PostToolUse) reports the docs a commit left stale. Session summary (Stop, which fires after every response) reports docs citing code changed in the working tree; a clean tree costs nothing. No hook runs `update-index`: only a reviewer attests a doc.
 
-**CI/CD (9 workflows — 3 shell-based, 6 Claude-powered):** PR freshness check comments on PRs. Weekly cron detects drift. Post-merge workflow keeps the doc index in sync. Claude-powered workflows provide AI audit+update on feature branches, AI PR doc review with @claude interactive support, AI release notes drafting on release branches, AI spec compliance checks on PRs, AI PR full-cycle orchestration (review, update, diagram, sync), and AI per-PR release-notes fragment producer (drafts `RELEASE-NOTES.next/PR-<N>.md` on every push, consumed by the release workflow at release time). Claude-powered workflows require one of `CLAUDE_CODE_OAUTH_TOKEN` (preferred) or `ANTHROPIC_API_KEY` as a GitHub Actions secret; if both are set, `CLAUDE_CODE_OAUTH_TOKEN` takes precedence.
+**CI/CD (9 workflows — 3 shell-based, installed by default; 6 Claude-powered, opt-in by name):** PR freshness check comments on PRs. Weekly cron detects drift. Post-merge workflow keeps the doc index in sync. Claude-powered workflows provide AI audit+update on feature branches, AI PR doc review with @claude interactive support, AI release notes drafting on release branches, AI spec compliance checks on PRs, AI PR full-cycle orchestration (review, update, diagram, sync), and AI per-PR release-notes fragment producer (drafts `RELEASE-NOTES.next/PR-<N>.md` on every push, consumed by the release workflow at release time). Claude-powered workflows require one of `CLAUDE_CODE_OAUTH_TOKEN` (preferred) or `ANTHROPIC_API_KEY` as a GitHub Actions secret; if both are set, `CLAUDE_CODE_OAUTH_TOKEN` takes precedence.
 
 Set `DOC_SUPERPOWERS_STRICT=1` to make the git pre-commit hook and the Claude pre-commit gate block instead of warn (the gate exits 2 with the reason on stderr). Set `DOC_SUPERPOWERS_QUIET=1` to suppress hook output while still enforcing checks (the Claude gate still gives Claude its block reason). Set `DOC_SUPERPOWERS_SKIP=1` to bypass all hooks temporarily. A hook whose tooling is absent (no skill, no `docs/.doc-index.json`) stays silent; one whose check fails (jq missing from PATH, a corrupt index) prints one line saying so and, under STRICT, blocks.
 

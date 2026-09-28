@@ -57,7 +57,7 @@ fi
 [[ $command_str =~ $re_commit ]] || exit 0
 
 cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || exit 0
-DOC_TOOLS="${DOC_TOOLS:-$(printf '%s\n' __DOC_TOOLS_PARENT__/*/scripts/doc-tools.sh | sort -V | tail -1)}"
+[[ -n "${DOC_TOOLS:-}" ]] || DOC_TOOLS=$(__DOC_TOOLS_RESOLVE__)
 [[ -f "$DOC_TOOLS" ]] || exit 0
 [[ -f docs/.doc-index.json ]] || exit 0
 
@@ -96,7 +96,14 @@ _fail() {
 if [[ $command_str =~ $re_stages || $command_str =~ $re_commit_stages ]]; then
   _quiet && exit 0
   note="doc-superpowers: this command stages changes as it commits (git add … && git commit, commit -a, a pathspec), so the tree it will commit does not exist yet and this gate cannot judge it."
-  if grep -q 'doc-superpowers' "$(git rev-parse --git-path hooks 2>/dev/null)/pre-commit" 2>/dev/null; then
+  # The git pre-commit checks this commit only when git runs it (executable,
+  # where --git-path puts it) and it is the doc-superpowers hook, or holds the
+  # current integration block (the pre-3.0 one dropped the exit code) with
+  # the local copy it runs. A mere mention of doc-superpowers is not a check.
+  hk="$(git rev-parse --git-path hooks 2>/dev/null)/pre-commit"
+  if [[ -x "$hk" ]] && { head -5 "$hk" 2>/dev/null | grep -q 'doc-superpowers hook v[0-9]' \
+    || { grep -qxF 'if [ -f "$DOC_SP_HOOK" ]; then bash "$DOC_SP_HOOK" "$@" || exit $?; fi' "$hk" \
+      && [[ -f "${hk%/*}/.doc-superpowers-pre-commit" ]]; }; }; then
     _emit "" "$note The doc-superpowers git pre-commit hook checks the staged tree when git runs it."
   else
     note="$note And no doc-superpowers git pre-commit hook is installed, so nothing checks this commit's docs (install the git tier: /doc-superpowers hooks install --git)."

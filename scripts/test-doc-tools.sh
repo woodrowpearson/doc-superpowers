@@ -1583,6 +1583,61 @@ test_tools_status_reports_drift() {
   teardown
 }
 
+test_tools_helper_selects_directories() {
+  # install.sh (install --ci) ships a helper directory only while an installed
+  # workflow runs it: --helper <dir> is that selection, for install and uninstall.
+  echo "test: tools install/uninstall --helper <dir> act on the named helper directories only"
+  setup
+  local output exit_code
+  exit_code=0
+  output=$("$DOC_TOOLS" tools install --helper doc-superpowers-steps 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "install --helper doc-superpowers-steps exits 0"
+  assert_true "step scripts installed, executable" test -x .github/scripts/doc-superpowers-steps/precheck.sh
+  assert_true "producer helpers NOT installed" test ! -d .github/scripts/doc-pr-release
+  assert_file_not_exists "RELEASE-NOTES.next/README.md" "no fragment spec without the doc-pr-release helpers"
+  exit_code=0
+  "$DOC_TOOLS" tools install --helper doc-pr-release --helper doc-superpowers-steps >/dev/null 2>&1 || exit_code=$?
+  assert_eq "0" "$exit_code" "install --helper x2 exits 0"
+  assert_true "producer helpers installed" test -x .github/scripts/doc-pr-release/extract-context.sh
+  assert_file_exists "RELEASE-NOTES.next/README.md" "the fragment spec comes with the doc-pr-release helpers"
+  exit_code=0
+  "$DOC_TOOLS" tools uninstall --helper doc-pr-release >/dev/null 2>&1 || exit_code=$?
+  assert_eq "0" "$exit_code" "uninstall --helper doc-pr-release exits 0"
+  assert_true "producer helpers removed" test ! -d .github/scripts/doc-pr-release
+  assert_true "step scripts kept" test -x .github/scripts/doc-superpowers-steps/precheck.sh
+  assert_file_exists ".github/scripts/doc-tools.sh" "doc-tools.sh kept"
+  exit_code=0
+  output=$("$DOC_TOOLS" tools install --helper bogus 2>&1) || exit_code=$?
+  assert_eq "2" "$exit_code" "an unknown helper directory is a usage error"
+  exit_code=0
+  output=$("$DOC_TOOLS" tools install --with-helpers --helper doc-pr-release 2>&1) || exit_code=$?
+  assert_eq "2" "$exit_code" "--with-helpers and --helper are exclusive"
+  teardown
+}
+
+test_tools_refuses_symlinked_parent() {
+  # _tmp_beside refused a symlinked target; a symlinked directory on the way
+  # (a committed .github/scripts -> elsewhere) sent the copy, or the removal,
+  # through the link.
+  echo "test: tools install/uninstall refuse a symlinked directory on the way (nothing written or removed through it)"
+  setup
+  local outside exit_code output
+  outside=$(mktemp -d "$SUITE_TMP/outside.XXXXXX")
+  mkdir -p .github
+  ln -s "$outside" .github/scripts
+  exit_code=0
+  output=$("$DOC_TOOLS" tools install --with-helpers 2>&1) || exit_code=$?
+  assert_eq "1" "$exit_code" "install exits 1"
+  assert_contains "$output" "symbolic link" "says why"
+  assert_eq "" "$(ls -A "$outside")" "nothing written through the link"
+  cp "$SCRIPT_DIR/doc-tools.sh" "$outside/doc-tools.sh"
+  exit_code=0
+  output=$("$DOC_TOOLS" tools uninstall 2>&1) || exit_code=$?
+  assert_eq "1" "$exit_code" "uninstall exits 1"
+  assert_file_exists "$outside/doc-tools.sh" "nothing removed through the link"
+  teardown
+}
+
 test_tools_install_unknown_flag_errors() {
   echo "test: tools install --bogus errors"
   setup
@@ -5571,6 +5626,8 @@ run_tests() {
   test_tools_status_installed_matches_plugin
   test_tools_status_reports_drift
   test_tools_install_unknown_flag_errors
+  test_tools_helper_selects_directories
+  test_tools_refuses_symlinked_parent
 
   # --- doc-path key normalization (add-entry + siblings) ---
   test_add_entry_accepts_relative_path
