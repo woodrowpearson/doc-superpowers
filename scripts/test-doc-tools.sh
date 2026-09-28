@@ -4800,6 +4800,524 @@ test_i3_fatal_error_exits_nonzero() {
   teardown
 }
 
+# --- Implementation / version / vendoring verbs (sweep 05ea982 I-10) ---------
+#
+# set-implementation, implementation-status and update-index read and write ONE
+# grammar for a doc's Implementation: (ADR) / Realized-by: (SPEC) block; the
+# version verbs read ONE canonical heading and write all-or-nothing; the tools
+# verbs never delete a file they did not install unchanged.
+
+# The items implementation-status reports for a doc, one per line.
+_i10_status_items() {
+  "$DOC_TOOLS" implementation-status "$1" 2>/dev/null | sed -n 's/^    - //p'
+}
+
+# The items update-index records for a doc, one per line (indexes it first).
+_i10_index_items() {
+  local doc="$1"
+  if [ ! -f docs/.doc-index.json ]; then
+    printf '%s::adr\n' "$doc" | "$DOC_TOOLS" build-index >/dev/null 2>&1 || true
+  elif ! jq -e --arg k "$doc" '.docs | has($k)' docs/.doc-index.json >/dev/null 2>&1; then
+    printf '%s::adr\n' "$doc" | "$DOC_TOOLS" add-entry >/dev/null 2>&1 || true
+  fi
+  "$DOC_TOOLS" update-index "$doc" >/dev/null 2>&1 || true
+  jq -r --arg k "$doc" '.docs[$k].implementation // [] | .[]' docs/.doc-index.json 2>&1
+}
+
+# Both readers must report exactly <expected> (items joined by newlines).
+_i10_readers_agree() {
+  local doc="$1" expected="$2" label="$3"
+  assert_eq "$expected" "$(_i10_status_items "$doc")" "$label: implementation-status reads the block"
+  assert_eq "$expected" "$(_i10_index_items "$doc")" "$label: update-index records the same items"
+}
+
+test_i10_set_implementation_writes_values_literally() {
+  echo "test: set-implementation writes --ref/--note literally, only inside the block, executing nothing"
+  setup
+  mkdir -p docs/adr
+  cat > docs/adr/ADR-001.md <<'EOF'
+# ADR-001: Test
+
+**Status**: Active
+**Date**: 2026-05-16
+
+Implementation:
+  - PR: #1 — in-progress
+
+## Rollout log
+
+  - PR: #1 — in-progress
+EOF
+  local ref note rc out n
+  note='x & y | z \1 \\ \n (grp) $HOME `id`'
+  for ref in 'R&D' 'a|b' '(squash)' 'C:\temp\new' 'PR: #2' 'commit: abc1234' '.*'; do
+    rc=0
+    "$DOC_TOOLS" set-implementation docs/adr/ADR-001.md --ref "$ref" --status complete --note "$note" >/dev/null 2>&1 || rc=$?
+    assert_eq "0" "$rc" "'$ref': exits 0"
+    n=$(grep -cxF -- "  - $ref — complete — $note" docs/adr/ADR-001.md || true)
+    assert_eq "1" "$n" "'$ref': the entry is written literally, once"
+    rc=0
+    "$DOC_TOOLS" set-implementation docs/adr/ADR-001.md --ref "$ref" --status partial >/dev/null 2>&1 || rc=$?
+    assert_eq "0" "$rc" "'$ref': re-setting exits 0"
+    n=$(grep -cxF -- "  - $ref — partial" docs/adr/ADR-001.md || true)
+    assert_eq "1" "$n" "'$ref': re-setting replaces the entry in place"
+    n=$(grep -cF -- "  - $ref — complete" docs/adr/ADR-001.md || true)
+    assert_eq "0" "$n" "'$ref': the old entry is gone"
+  done
+  n=$(grep -cxF -- "  - PR: #1 — in-progress" docs/adr/ADR-001.md || true)
+  assert_eq "2" "$n" "PR: #1 survives every other ref's write (in the block and in the log)"
+  "$DOC_TOOLS" set-implementation docs/adr/ADR-001.md --ref 'PR: #1' --status complete >/dev/null 2>&1 || true
+  assert_eq "  - PR: #1 — in-progress" "$(tail -n 1 docs/adr/ADR-001.md)" \
+    "a same-looking bullet outside the block is never rewritten (replacement is block-local)"
+  assert_contains "$(_i10_status_items docs/adr/ADR-001.md)" "PR: #1 — complete" "…the block's own entry is"
+
+  # A line break cannot be part of one bullet: refused, nothing written, and
+  # nothing a sed script could have run (e = execute, w = write a file).
+  cp docs/adr/ADR-001.md "$TEST_DIR/before.md"
+  for note in $'first\ne touch pwned-e' $'first\nw pwned-w' $'first\r'; do
+    rc=0
+    out=$("$DOC_TOOLS" set-implementation docs/adr/ADR-001.md --ref 'PR: #9' --status complete --note "$note" 2>&1) || rc=$?
+    assert_eq "2" "$rc" "a --note with a line break is refused (exit 2)"
+    assert_contains "$out" "one line" "…saying why"
+    assert_true "…and the doc is byte-identical" cmp -s "$TEST_DIR/before.md" docs/adr/ADR-001.md
+  done
+  rc=0
+  "$DOC_TOOLS" set-implementation docs/adr/ADR-001.md --ref $'PR: #9\ne touch pwned-r' --status complete >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "a --ref with a line break is refused (exit 2)"
+  assert_true "no command ran" test ! -e pwned-e
+  assert_true "no command ran from --ref" test ! -e pwned-r
+  assert_true "no file was written by a w command" test ! -e pwned-w
+  assert_true "the doc is still byte-identical" cmp -s "$TEST_DIR/before.md" docs/adr/ADR-001.md
+
+  # --status is an enum, matched whole: not a regex, not a list.
+  for note in '.*' 'complete partial' 'complet'; do
+    rc=0
+    "$DOC_TOOLS" set-implementation docs/adr/ADR-001.md --ref 'PR: #9' --status "$note" >/dev/null 2>&1 || rc=$?
+    assert_eq "2" "$rc" "--status '$note' is refused"
+  done
+
+  # GNU sed is not a dependency: a PATH on which sed, and Homebrew's name for
+  # GNU sed, both fail still works.
+  local fake
+  fake=$(harness_mktemp_d fakesed)
+  printf '#!/bin/sh\nexit 99\n' > "$fake/sed"
+  cp "$fake/sed" "$fake/g""sed"
+  chmod +x "$fake"/*
+  rc=0
+  PATH="$fake:$PATH" "$DOC_TOOLS" set-implementation docs/adr/ADR-001.md --ref 'PR: #10' --status blocked >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "set-implementation needs no sed (every sed on PATH fails)"
+  assert_contains "$(_i10_status_items docs/adr/ADR-001.md)" "PR: #10 — blocked" "…and still writes the entry"
+  teardown
+}
+
+test_i10_set_implementation_create_anchors() {
+  echo "test: set-implementation creates the block after the **Date**: / **Date:** / **Created**: paragraph, or fails"
+  setup
+  mkdir -p docs/adr docs/specs
+  local rc out
+  # The shipped ADR template's header style.
+  cat > docs/adr/ADR-002.md <<'EOF'
+# ADR-002: T
+
+**Status**: Proposed
+**Date**: 2026-05-16
+**Supersedes**: none
+**Superseded by**: none
+
+## Context
+EOF
+  rc=0
+  "$DOC_TOOLS" set-implementation docs/adr/ADR-002.md --ref 'PR: #5' --status complete >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "**Date**: (the ADR template): exits 0"
+  assert_eq "$(printf '%s\n' '# ADR-002: T' '' '**Status**: Proposed' '**Date**: 2026-05-16' \
+    '**Supersedes**: none' '**Superseded by**: none' '' 'Implementation:' '  - PR: #5 — complete' '' '## Context')" \
+    "$(cat docs/adr/ADR-002.md)" "**Date**: — an Implementation: block after the header paragraph"
+
+  printf '%s\n' '# ADR-003: T' '' '**Date:** 2026-05-16' > docs/adr/ADR-003.md
+  rc=0
+  "$DOC_TOOLS" set-implementation docs/adr/ADR-003.md --ref 'PR: #6' --status partial >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "**Date:** (bold colon) at end of file: exits 0"
+  assert_eq "$(printf '%s\n' '# ADR-003: T' '' '**Date:** 2026-05-16' '' 'Implementation:' '  - PR: #6 — partial')" \
+    "$(cat docs/adr/ADR-003.md)" "**Date:** — the block is appended"
+
+  # The shipped SPEC template's header style; a SPEC's block is Realized-by:.
+  cat > docs/specs/SPEC-API-001-x.md <<'EOF'
+# SPEC-API-001: X
+
+**Status**: Draft
+**Category**: API
+**Created**: 2026-05-16
+**Author**: me
+
+## Summary
+EOF
+  rc=0
+  "$DOC_TOOLS" set-implementation docs/specs/SPEC-API-001-x.md --ref 'PR: #7' --status not-started >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "**Created**: (the SPEC template): exits 0"
+  assert_eq "$(printf '%s\n' '# SPEC-API-001: X' '' '**Status**: Draft' '**Category**: API' '**Created**: 2026-05-16' \
+    '**Author**: me' '' 'Realized-by:' '  - PR: #7 — not-started' '' '## Summary')" \
+    "$(cat docs/specs/SPEC-API-001-x.md)" "**Created**: — a Realized-by: block after the header paragraph"
+  _i10_readers_agree docs/specs/SPEC-API-001-x.md "PR: #7 — not-started" "created Realized-by:"
+
+  # Two date lines: one block.
+  printf '%s\n' '**Date:** 2026-01-01' '' 'text' '' '**Date:** 2026-02-02' > docs/adr/ADR-004.md
+  "$DOC_TOOLS" set-implementation docs/adr/ADR-004.md --ref 'PR: #8' --status complete >/dev/null 2>&1 || true
+  assert_eq "1" "$(grep -c '^Implementation:' docs/adr/ADR-004.md || true)" "two **Date:** lines: exactly one block is created"
+
+  # No anchor (and one that exists only inside a code fence): refused, unchanged.
+  printf '%s\n' '# Note' '' 'Date: 2026-05-16' '' '```md' '**Date**: 2026-05-16' '```' > docs/adr/ADR-005.md
+  cp docs/adr/ADR-005.md "$TEST_DIR/before.md"
+  rc=0
+  out=$("$DOC_TOOLS" set-implementation docs/adr/ADR-005.md --ref 'PR: #9' --status complete 2>&1) || rc=$?
+  assert_eq "1" "$rc" "no anchor outside a fence: exits 1"
+  assert_contains "$out" "**Date**:" "…naming the anchors it looks for"
+  assert_true "…and the doc is byte-identical" cmp -s "$TEST_DIR/before.md" docs/adr/ADR-005.md
+  teardown
+}
+
+test_i10_set_implementation_replaces_the_doc_atomically() {
+  echo "test: set-implementation replaces the doc through a tmp beside it: mode kept, nothing left, a symlink refused"
+  setup
+  mkdir -p docs/adr
+  printf '%s\n' '# ADR' '' 'Implementation:' '  - PR: #1 — partial' > docs/adr/h.md
+  chmod 664 docs/adr/h.md
+  local rc out
+  rc=0
+  "$DOC_TOOLS" set-implementation docs/adr/h.md --ref 'PR: #1' --status complete >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "exits 0"
+  assert_eq "664" "$(_file_mode_of docs/adr/h.md)" "the doc keeps its mode (mktemp alone would make it 0600)"
+  assert_eq "" "$(ls -A docs/adr | grep -v '^h\.md$' || true)" "no temp file is left beside it"
+  # Nothing to change: nothing is written (the mtime-free check: same inode).
+  local ino_before ino_after
+  ino_before=$(ls -i docs/adr/h.md | awk '{print $1}')
+  "$DOC_TOOLS" set-implementation docs/adr/h.md --ref 'PR: #1' --status complete >/dev/null 2>&1 || true
+  ino_after=$(ls -i docs/adr/h.md | awk '{print $1}')
+  assert_eq "$ino_before" "$ino_after" "an unchanged result leaves the doc in place"
+  # A symlinked doc: refused, the link and its target untouched.
+  cp docs/adr/h.md "$TEST_DIR/target-before.md"
+  ln -s h.md docs/adr/link.md
+  rc=0
+  out=$("$DOC_TOOLS" set-implementation docs/adr/link.md --ref 'PR: #2' --status complete 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a symlinked doc is refused (exit 1)"
+  assert_contains "$out" "symbolic link" "…saying why"
+  assert_true "…the link is still a link" test -L docs/adr/link.md
+  assert_true "…and its target is byte-identical" cmp -s "$TEST_DIR/target-before.md" docs/adr/h.md
+  teardown
+}
+
+test_i10_one_block_grammar_in_all_three_verbs() {
+  echo "test: Realized-by:, Implementation: [], fences, 4-space bullets and wrapped entries: one grammar in all three verbs"
+  setup
+  mkdir -p docs/adr
+  local d
+
+  # (a) A SPEC's Realized-by: block is read by both readers and written in place.
+  d=docs/adr/a.md
+  printf '%s\n' '# SPEC' '' '**Created**: 2026-05-16' '' 'Realized-by:' '  - PR: #1 — complete' '  - PR: #2 — partial' '' '## Body' > "$d"
+  _i10_readers_agree "$d" "$(printf '%s\n' 'PR: #1 — complete' 'PR: #2 — partial')" "(a) Realized-by:"
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #3' --status blocked >/dev/null 2>&1 || true
+  assert_eq "0" "$(grep -c '^Implementation:' "$d" || true)" "(a) the append goes into Realized-by:, no second block"
+  _i10_readers_agree "$d" "$(printf '%s\n' 'PR: #1 — complete' 'PR: #2 — partial' 'PR: #3 — blocked')" "(a) after append"
+
+  # (b) Implementation: [] is explicitly empty; the first entry replaces the [].
+  d=docs/adr/b.md
+  printf '%s\n' '# ADR' '' '**Date**: 2026-05-16' '' 'Implementation: []' '' '## Body' > "$d"
+  assert_contains "$("$DOC_TOOLS" implementation-status "$d")" "Implementation: [] (intentionally empty)" "(b) [] is reported as intentionally empty"
+  _i10_readers_agree "$d" "" "(b) Implementation: []"
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #4' --status complete >/dev/null 2>&1 || true
+  assert_eq "0" "$(grep -cF 'Implementation: []' "$d" || true)" "(b) the [] marker is replaced"
+  _i10_readers_agree "$d" "PR: #4 — complete" "(b) after the first entry"
+
+  # (c) Fenced examples are not blocks: not before the real one, not after it.
+  d=docs/adr/c.md
+  cat > "$d" <<'EOF'
+# ADR
+
+**Date**: 2026-05-16
+
+Example:
+
+```yaml
+Implementation:
+  - PR: #90 — complete
+```
+
+Implementation:
+  - PR: #1 — complete
+
+~~~~md
+Implementation:
+  - PR: #91 — complete
+~~~~
+EOF
+  _i10_readers_agree "$d" "PR: #1 — complete" "(c) fenced examples"
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #90' --status reverted >/dev/null 2>&1 || true
+  _i10_readers_agree "$d" "$(printf '%s\n' 'PR: #1 — complete' 'PR: #90 — reverted')" "(c) after appending a ref the fence also names"
+  assert_eq "1" "$(grep -cxF '  - PR: #90 — complete' "$d" || true)" "(c) the fenced example is untouched"
+  assert_eq "  - PR: #90 — reverted" "$(sed -n '/^  - PR: #1 — complete$/{n;p;}' "$d")" "(c) the entry is appended to the real block"
+  # Only a fenced example and a date: the block is created, not appended in the fence.
+  d=docs/adr/c2.md
+  printf '%s\n' '# ADR' '' '**Date**: 2026-05-16' '' '```yaml' 'Implementation:' '  - PR: #90 — complete' '```' > "$d"
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #2' --status complete >/dev/null 2>&1 || true
+  _i10_readers_agree "$d" "PR: #2 — complete" "(c2) only a fenced example: a real block is created"
+  assert_eq "$(printf '%s\n' '```yaml' 'Implementation:' '  - PR: #90 — complete' '```')" "$(tail -n 4 "$d")" "(c2) the fence is untouched"
+
+  # (d) 4-space bullets: replaced in place, appended at the same indent.
+  d=docs/adr/d.md
+  printf '%s\n' '# ADR' '' 'Implementation:' '    - PR: #1 — in-progress' '    - PR: #2 — complete' '' '## Body' > "$d"
+  _i10_readers_agree "$d" "$(printf '%s\n' 'PR: #1 — in-progress' 'PR: #2 — complete')" "(d) 4-space bullets"
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #1' --status complete >/dev/null 2>&1 || true
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #3' --status partial >/dev/null 2>&1 || true
+  assert_eq "$(printf '%s\n' '# ADR' '' 'Implementation:' '    - PR: #1 — complete' '    - PR: #2 — complete' '    - PR: #3 — partial' '' '## Body')" \
+    "$(cat "$d")" "(d) replaced in place, no duplicate, appended at the block's indent"
+
+  # (e) A wrapped entry is one entry; replacing it replaces all of its lines.
+  d=docs/adr/e.md
+  printf '%s\n' '---' 'Implementation:' '  - PR: #1 — partial — phase 1 landed;' '    phase 2 pending' '  - PR: #2 — complete' '---' '# ADR' > "$d"
+  _i10_readers_agree "$d" "$(printf '%s\n' 'PR: #1 — partial — phase 1 landed; phase 2 pending' 'PR: #2 — complete')" "(e) a wrapped entry in front matter"
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #1' --status complete >/dev/null 2>&1 || true
+  assert_eq "$(printf '%s\n' '---' 'Implementation:' '  - PR: #1 — complete' '  - PR: #2 — complete' '---' '# ADR')" \
+    "$(cat "$d")" "(e) the wrapped entry's continuation line goes with it"
+
+  # (f) The first block counts; a later one is prose to every verb.
+  d=docs/adr/f.md
+  printf '%s\n' 'Implementation:' '  - PR: #1 — complete' '' 'Implementation:' '  - PR: #2 — complete' > "$d"
+  _i10_readers_agree "$d" "PR: #1 — complete" "(f) the first block wins"
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #2' --status reverted >/dev/null 2>&1 || true
+  assert_eq "  - PR: #2 — complete" "$(tail -n 1 "$d")" "(f) the second block is not written"
+
+  # No block at all.
+  d=docs/adr/g.md
+  printf '%s\n' '# ADR' '' '## Body' > "$d"
+  assert_contains "$("$DOC_TOOLS" implementation-status "$d")" "no Implementation field" "(g) no block is reported as such"
+  _i10_readers_agree "$d" "" "(g) no block"
+  teardown
+}
+
+test_i10_implementation_status_filter_is_gone() {
+  echo "test: implementation-status --filter (broken, ripgrep-dependent, no callers) is removed: an unknown option"
+  setup
+  printf '%s\n' 'Implementation:' '  - PR: #1 — complete' > adr.md
+  local rc=0 out
+  out=$("$DOC_TOOLS" implementation-status --filter complete adr.md 2>&1) || rc=$?
+  assert_eq "2" "$rc" "--filter is an unknown option (exit 2)"
+  assert_contains "$out" "Unknown option '--filter'" "…named as such"
+  assert_not_contains "$("$DOC_TOOLS" implementation-status --help 2>&1)" "--filter" "--help no longer offers it"
+  teardown
+}
+
+test_i10_check_version_reads_the_first_release_heading() {
+  echo "test: check-version reads the first line-anchored '## vX.Y.Z' heading outside code fences; a pre-release is refused"
+  setup
+  setup_version_files
+  local rc out
+  printf '%s\n' '# Release Notes' '' 'Upgrade note: see ## v8.8.8 below.' '' '```md' '## v9.9.9 (example)' '```' '' \
+    '## v1.0.0 (2026-01-01)' '' '## v0.9.0 (2025-01-01)' > RELEASE-NOTES.md
+  rc=0
+  out=$("$DOC_TOOLS" check-version 2>&1) || rc=$?
+  assert_eq "0" "$rc" "the first heading outside a fence and at a line start is v1.0.0: PASS"
+  assert_contains "$out" "Canonical version (RELEASE-NOTES.md): v1.0.0" "…and it is the one reported"
+
+  printf '%s\n' '# Release Notes' '' '## v1.1.0-rc.1 (2026-02-01)' '' '## v1.0.0 (2026-01-01)' > RELEASE-NOTES.md
+  rc=0
+  out=$("$DOC_TOOLS" check-version 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a pre-release first heading is refused (not skipped)"
+  assert_contains "$out" "## v1.1.0-rc.1" "…naming the heading"
+
+  rm RELEASE-NOTES.md
+  rc=0
+  out=$("$DOC_TOOLS" check-version 2>&1) || rc=$?
+  assert_eq "1" "$rc" "no RELEASE-NOTES.md: exit 1"
+  assert_contains "$out" "RELEASE-NOTES.md" "…with a message, never a silent abort"
+
+  printf '%s\n' '# Release Notes' '' 'Nothing yet.' > RELEASE-NOTES.md
+  rc=0
+  out=$("$DOC_TOOLS" check-version 2>&1) || rc=$?
+  assert_eq "1" "$rc" "no release heading: exit 1"
+  assert_contains "$out" "release heading" "…with a message"
+  teardown
+}
+
+test_i10_version_verbs_need_a_manifest() {
+  echo "test: bump-version / check-version fail when no manifest is found (run outside the repo root)"
+  setup
+  printf '%s\n' '# Release Notes' '' '## v1.0.0 (2026-01-01)' > RELEASE-NOTES.md
+  local rc out
+  rc=0
+  out=$("$DOC_TOOLS" bump-version 1.2.3 2>&1) || rc=$?
+  assert_eq "1" "$rc" "bump-version with 0 manifests: exit 1"
+  assert_contains "$out" "no manifest" "…saying so"
+  rc=0
+  out=$("$DOC_TOOLS" check-version 2>&1) || rc=$?
+  assert_eq "1" "$rc" "check-version with 0 manifests: exit 1 (never a vacuous PASS)"
+  assert_contains "$out" "no manifest" "…saying so"
+  assert_not_contains "$out" "PASS" "…and no PASS line"
+  teardown
+}
+
+test_i10_bump_version_is_all_or_nothing_and_keeps_modes() {
+  echo "test: bump-version validates every manifest before writing any, and keeps file modes"
+  setup
+  setup_version_files
+  chmod 644 package.json
+  chmod 664 claude-code.json
+  chmod 600 .claude-plugin/plugin.json
+  chmod 755 gemini-extension.json
+  local rc out
+  rc=0
+  out=$("$DOC_TOOLS" bump-version 2.0.0 2>&1) || rc=$?
+  assert_eq "0" "$rc" "bump exits 0"
+  assert_eq "644" "$(_file_mode_of package.json)" "package.json keeps 644"
+  assert_eq "664" "$(_file_mode_of claude-code.json)" "claude-code.json keeps 664"
+  assert_eq "600" "$(_file_mode_of .claude-plugin/plugin.json)" "plugin.json keeps 600"
+  assert_eq "755" "$(_file_mode_of gemini-extension.json)" "gemini-extension.json keeps 755"
+  assert_eq "" "$(find . -name '*.XXXXXX' -o -name '.*.json.*' 2>/dev/null)" "no temp file is left behind"
+
+  # One malformed manifest (sorted last): nothing is written, and it is named.
+  echo '{"name":"test","version":' > gemini-extension.json
+  local before
+  before=$(cat package.json claude-code.json .claude-plugin/plugin.json .claude-plugin/marketplace.json .cursor-plugin/plugin.json | hash_stdin)
+  rc=0
+  out=$("$DOC_TOOLS" bump-version 3.0.0 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a malformed manifest: exit 1"
+  assert_contains "$out" "gemini-extension.json" "…naming it"
+  assert_contains "$out" "nothing was written" "…and saying nothing was written"
+  assert_eq "$before" "$(cat package.json claude-code.json .claude-plugin/plugin.json .claude-plugin/marketplace.json .cursor-plugin/plugin.json | hash_stdin)" \
+    "…and every valid manifest is untouched (no partial bump)"
+  rc=0
+  out=$("$DOC_TOOLS" check-version 2>&1) || rc=$?
+  assert_eq "1" "$rc" "check-version on a malformed manifest: exit 1"
+  assert_contains "$out" "gemini-extension.json" "…naming it, never a silent abort"
+  teardown
+}
+
+# Octal permission bits of a file (GNU or BSD stat).
+_file_mode_of() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
+
+hash_stdin() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    shasum -a 256 | awk '{print $1}'
+  fi
+}
+
+test_i10_tools_with_helpers_ships_every_helper_the_templates_run() {
+  echo "test: tools install --with-helpers ships every .github/scripts helper the CI templates run"
+  setup
+  local rc=0 out ref missing=""
+  out=$("$DOC_TOOLS" tools install --with-helpers 2>&1) || rc=$?
+  assert_eq "0" "$rc" "exits 0"
+  for ref in $(grep -ho '\.github/scripts/[A-Za-z0-9_./-]*\.sh' "$SCRIPT_DIR"/hooks/ci/*.yml | sort -u); do
+    [ -x "$ref" ] || missing="$missing $ref"
+  done
+  assert_eq "" "$missing" "every helper a template runs is vendored and executable"
+  assert_true "the step scripts reach extract-context.sh the way write-context.sh calls it" \
+    test -x ".github/scripts/doc-superpowers-steps/../doc-pr-release/extract-context.sh"
+  assert_contains "$out" "doc-superpowers-steps" "…and the report names the step scripts"
+  teardown
+}
+
+test_i10_tools_uninstall_keeps_what_it_did_not_install() {
+  echo "test: tools uninstall removes only unmodified plugin files; user-edited and user-added files stay"
+  setup
+  "$DOC_TOOLS" tools install --with-helpers >/dev/null 2>&1
+  echo "# local fix" >> .github/scripts/doc-tools.sh
+  # (guarded: a tools install that ships no step scripts must fail the
+  # assertions below, not abort the suite here)
+  { echo "# local fix" >> .github/scripts/doc-superpowers-steps/precheck.sh; } 2>/dev/null || true
+  echo "notes" > .github/scripts/doc-pr-release/NOTES.txt
+  printf '#!/bin/sh\n' > .github/scripts/doc-pr-release/my-helper.sh
+  local rc=0 out
+  out=$("$DOC_TOOLS" tools uninstall 2>&1) || rc=$?
+  assert_eq "0" "$rc" "exits 0"
+  assert_file_exists ".github/scripts/doc-tools.sh" "a drifted vendored doc-tools.sh is kept"
+  assert_file_exists ".github/scripts/doc-superpowers-steps/precheck.sh" "an edited step script is kept"
+  assert_file_exists ".github/scripts/doc-pr-release/NOTES.txt" "a user-added non-.sh file is kept"
+  assert_file_exists ".github/scripts/doc-pr-release/my-helper.sh" "a user-added .sh file is kept"
+  assert_file_not_exists ".github/scripts/doc-pr-release/extract-context.sh" "an unmodified helper is removed"
+  assert_file_not_exists ".github/scripts/doc-superpowers-steps/resolve-auth.sh" "an unmodified step script is removed"
+  assert_contains "$out" "Kept .github/scripts/doc-tools.sh" "the kept doc-tools.sh is reported"
+  assert_contains "$out" "Kept .github/scripts/doc-pr-release/" "the kept helper dir is reported"
+  # Nothing modified: everything goes, directories included.
+  rm -rf .github
+  "$DOC_TOOLS" tools install --with-helpers >/dev/null 2>&1
+  rc=0
+  "$DOC_TOOLS" tools uninstall >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "an unmodified install uninstalls cleanly"
+  assert_true "…leaving no .github/scripts" test ! -e .github/scripts
+  assert_file_exists "RELEASE-NOTES.next/README.md" "…but RELEASE-NOTES.next/README.md stays (it may carry edits)"
+  teardown
+}
+
+test_i10_tools_from_the_vendored_copy() {
+  echo "test: tools install / status / uninstall run from the vendored copy behave sensibly"
+  setup
+  printf '%s\n' '# Release Notes' '' '## v7.7.7 (2026-01-01)' > RELEASE-NOTES.md
+  git add RELEASE-NOTES.md && git commit -qm notes
+  "$DOC_TOOLS" tools install >/dev/null 2>&1
+  local vendored=".github/scripts/doc-tools.sh" rc out before plugin_version
+  before=$(hash_file "$vendored")
+  plugin_version=$(awk '/^## v[0-9]/ { sub(/^## v/, ""); sub(/[[:space:]].*/, ""); print; exit }' "$SCRIPT_DIR/../RELEASE-NOTES.md")
+
+  rc=0
+  out=$("$BASH_BIN" "$vendored" tools install 2>&1) || rc=$?
+  assert_eq "0" "$rc" "install from the vendored copy onto itself: exit 0 (no 'cp: same file')"
+  assert_contains "$out" "already" "…reporting it is already there"
+  assert_eq "$before" "$(hash_file "$vendored")" "…and the copy is unchanged"
+
+  rc=0
+  out=$("$BASH_BIN" "$vendored" tools status 2>&1) || rc=$?
+  assert_eq "0" "$rc" "status from the vendored copy: exit 0"
+  assert_not_contains "$out" "matches plugin" "…never claims to match the plugin (it compared itself)"
+  assert_not_contains "$out" "7.7.7" "…and never reports the consuming repo's version as the plugin's"
+
+  rc=0
+  out=$("$DOC_TOOLS" tools status 2>&1) || rc=$?
+  assert_contains "$out" "matches plugin v$plugin_version" "status from the plugin reports the plugin's own version"
+  assert_not_contains "$out" "7.7.7" "…not the consuming repo's"
+
+  rc=0
+  out=$("$BASH_BIN" "$vendored" tools install --with-helpers --dest vendor2 2>&1) || rc=$?
+  assert_eq "1" "$rc" "--with-helpers from the vendored copy (no helpers to ship): exit 1"
+  assert_true "…writing nothing" test ! -e vendor2
+
+  rc=0
+  out=$("$BASH_BIN" "$vendored" tools uninstall 2>&1) || rc=$?
+  assert_eq "1" "$rc" "uninstall from the vendored copy (nothing to compare with): exit 1"
+  assert_file_exists "$vendored" "…removing nothing"
+
+  rc=0
+  out=$("$DOC_TOOLS" tools version 2>&1) || rc=$?
+  assert_eq "0" "$rc" "tools version from the plugin: exit 0"
+  assert_eq "$plugin_version" "$out" "…printing the plugin's version"
+  rc=0
+  out=$("$BASH_BIN" "$vendored" tools version 2>/dev/null) || rc=$?
+  assert_eq "1" "$rc" "tools version from the vendored copy: exit 1 (its version is unknown)"
+  assert_eq "" "$out" "…printing no version"
+  teardown
+}
+
+test_i10_no_hidden_sed_or_ripgrep_dependency() {
+  echo "test: no shipped script needs GNU sed or ripgrep; CI installs no GNU sed"
+  local repo_root f hits=""
+  repo_root="$(cd "$SCRIPT_DIR/.." && pwd)"
+  for f in "$repo_root"/scripts/doc-tools.sh "$repo_root"/scripts/merge-doc-index.sh \
+    "$repo_root"/scripts/hooks/*.sh "$repo_root"/scripts/hooks/claude/*.sh \
+    "$repo_root"/scripts/hooks/git/* "$repo_root"/scripts/hooks/ci/*/*.sh \
+    "$repo_root"/scripts/hooks/ci/*.yml "$repo_root"/.github/workflows/*.yml; do
+    [ -f "$f" ] || continue
+    # (bracketed letters, so this file passes the issue's own acceptance
+    # grep over scripts/ too)
+    if grep -nE '(^|[^[:alnum:]_-])(g[s]ed|gnu[_]sed|gnu[-]sed|[r]g)([^[:alnum:]_-]|$)' "$f" >/dev/null 2>&1; then
+      hits="$hits ${f#"$repo_root/"}"
+    fi
+  done
+  assert_eq "" "$hits" "no GNU sed or ripgrep name in shipped scripts or workflows"
+}
+
 # --- Runner ---
 
 run_tests() {
@@ -5006,6 +5524,20 @@ run_tests() {
   test_i3_stored_status_is_deprecated_or_absent
   test_i3_update_index_report_is_honest
   test_i3_fatal_error_exits_nonzero
+
+  # --- Implementation / version / vendoring verbs (sweep 05ea982 I-10) ---
+  test_i10_set_implementation_writes_values_literally
+  test_i10_set_implementation_create_anchors
+  test_i10_set_implementation_replaces_the_doc_atomically
+  test_i10_one_block_grammar_in_all_three_verbs
+  test_i10_implementation_status_filter_is_gone
+  test_i10_check_version_reads_the_first_release_heading
+  test_i10_version_verbs_need_a_manifest
+  test_i10_bump_version_is_all_or_nothing_and_keeps_modes
+  test_i10_tools_with_helpers_ships_every_helper_the_templates_run
+  test_i10_tools_uninstall_keeps_what_it_did_not_install
+  test_i10_tools_from_the_vendored_copy
+  test_i10_no_hidden_sed_or_ripgrep_dependency
 
   print_summary
 }

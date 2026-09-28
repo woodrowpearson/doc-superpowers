@@ -18,11 +18,13 @@ MARKER="doc-superpowers hook v1"
 WORKFLOW_MARKER="doc-superpowers workflow v1"
 DATE=$(date +%Y-%m-%d)
 
-# Detect version from RELEASE-NOTES.md
-VERSION=$(grep -m 1 -o '## v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' "$SKILL_DIR/RELEASE-NOTES.md" | sed 's/## v//')
-if [[ -z "$VERSION" || ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  VERSION="2.0.0"
-fi
+# The plugin's version, parsed by doc-tools.sh (the first release heading of
+# RELEASE-NOTES.md, line-anchored and outside code fences — the one parser
+# check-version uses too). Run under this installer's own bash. A missing or
+# malformed RELEASE-NOTES.md must not abort the install (under pipefail the old
+# grep | sed did, silently): the reason goes to stderr and the version is
+# "unknown".
+VERSION=$("$BASH" "$DOC_TOOLS" tools version) || VERSION="unknown"
 
 # Default CI parameters
 BASE_BRANCH="main"

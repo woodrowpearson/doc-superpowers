@@ -125,12 +125,12 @@ ls scripts/*validate_docs* scripts/*validate_doc_references* scripts/*fix_doc_re
 | `doc-tools.sh set-code-refs` | Bundled | `set-code-refs <doc> --refs a,b` — change which code an indexed doc covers, in place (key position and every other field kept; `--refs ''` for none). The same paths write nothing. A ref it had keeps its recorded content (a pre-v3 entry's: its content in `code_commit`); a new one is recorded as `add-entry` records it. `code_commit` becomes the older of the two baselines: their merge-base, or null when the stored one is absent, not a commit of this repository, or not an ancestor of HEAD. So `commits_behind` is never a masked 0. Not a verification: run `update-index` after reading the doc against the new refs |
 | `doc-tools.sh deprecate-entry` | Bundled | Mark entries as deprecated (`--superseded-by <path>`, which also sets that successor's `replaces` when it has none). Does not touch `last_verified` |
 | `doc-tools.sh status` | Bundled | Single-doc freshness query (read-only; takes `--tree` too) |
-| `doc-tools.sh bump-version` | Bundled | Write a version string across the 6 manifest files |
-| `doc-tools.sh check-version` | Bundled | Verify all manifests match RELEASE-NOTES.md's canonical version (read-only) |
-| `doc-tools.sh implementation-status` | Bundled | Report ADR/SPEC realization state from `Implementation:` blocks (read-only) |
-| `doc-tools.sh set-implementation` | Bundled | Create/append/replace a realization entry on an ADR or SPEC |
+| `doc-tools.sh bump-version` | Bundled | Write a version string across the 6 manifest files — all or nothing (one malformed manifest writes none; none found is an error), keeping file modes |
+| `doc-tools.sh check-version` | Bundled | Verify all manifests match RELEASE-NOTES.md's canonical version: its first `## vMAJOR.MINOR.PATCH` heading at a line start, outside code fences; a pre-release first heading is an error (read-only) |
+| `doc-tools.sh implementation-status` | Bundled | Report ADR/SPEC realization state from each doc's `Implementation:` (ADR) / `Realized-by:` (SPEC) block (read-only; grammar in `references/doc-spec.md`, "Header style and the realization block") |
+| `doc-tools.sh set-implementation` | Bundled | `set-implementation <doc> --ref "<kind: ref>" --status <status> [--note …]` — replace that ref's entry in the doc's block, or append one; a doc with no block gets one after its `**Date**:` / `**Created**:` paragraph, and with neither the command exits 1, writing nothing. Values are literal; `--ref`/`--note` must be one line |
 | `doc-tools.sh fragments` | Bundled | `list` / `validate` / `merge` per-PR release-notes fragments |
-| `doc-tools.sh tools` | Bundled | `install` / `uninstall` / `status` — vendor `doc-tools.sh` into a consumer repo |
+| `doc-tools.sh tools` | Bundled | `install` / `uninstall` / `status` / `version` — vendor `doc-tools.sh` into a consumer repo; print the plugin's version |
 | `*validate_docs*` | Optional, user-provided | Doc validation (links, structure) |
 | `*validate_doc_references*` | Optional, user-provided | Code reference validation |
 | `*fix_doc_references*` | Optional, user-provided | Broken reference repair |
@@ -555,9 +555,10 @@ For projects that want only `doc-tools.sh` (and optionally the `doc-pr-release` 
 $DOC_TOOLS tools install [--dest <path>] [--with-helpers]
 $DOC_TOOLS tools uninstall [--dest <path>]
 $DOC_TOOLS tools status    [--dest <path>]
+$DOC_TOOLS tools version
 ```
 
-`--dest` defaults to `.github/scripts`. `--with-helpers` ALSO installs `doc-pr-release/*.sh` + `RELEASE-NOTES.next/README.md` (the bits `install --ci` bundles). Use this when the user wants to wire `doc-tools.sh` into their own (non-doc-superpowers) workflows.
+`--dest` defaults to `.github/scripts`. `--with-helpers` ALSO installs every helper the CI templates run — `doc-pr-release/*.sh` and `doc-superpowers-steps/*.sh` — and `RELEASE-NOTES.next/README.md` if absent (the bits `install --ci` bundles). Use this when the user wants to wire `doc-tools.sh` into their own (non-doc-superpowers) workflows. `tools uninstall` removes only files byte-identical to the plugin's copies: an edited or user-added file (and a copy from another plugin version) is kept and reported — tell the user, never delete it for them. Run these from the plugin's `doc-tools.sh` (`$DOC_TOOLS`): a vendored copy cannot uninstall, cannot ship helpers, and `tools status` from it reports presence only (no drift, no version).
 
 When no tier flags are provided via SKILL.md routing, present options to the user and pass the appropriate flags. The installer's interactive menu is for direct terminal invocation only.
 

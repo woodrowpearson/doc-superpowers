@@ -369,4 +369,4 @@ Each entry in the index (keyed by relative doc path) contains:
 - `replaces` — path to doc this one supersedes (null if none)
 - `superseded_by` — path to doc that supersedes this one (null if none)
 - `last_verified` — ISO 8601 timestamp of the last `update-index`, the only writer that attests a doc was checked against its code; `null` for an entry nobody has verified
-- `implementation` — array of bullet strings parsed from the doc's `Implementation:` (ADRs) or `Realized-by:` (specs) block, recording ADR/spec realization state; `[]` when neither block is present. Written by `update-index` only, so it is absent until a doc is first verified
+- `implementation` — array of entry texts parsed from the doc's `Implementation:` (ADRs) or `Realized-by:` (specs) block (without indent and `- `, wrapped lines joined), recording ADR/spec realization state; `[]` when the doc has no block or an empty one. The block grammar — shared with `set-implementation` and `implementation-status` — is in `references/doc-spec.md` ("Header style and the realization block"). Written by `update-index` only, so it is absent until a doc is first verified

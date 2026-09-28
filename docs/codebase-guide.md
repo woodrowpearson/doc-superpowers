@@ -163,7 +163,7 @@ doc-superpowers/
 | Hook installer logic | `scripts/hooks/install.sh` — tier routing, file copying, status reporting, granular `--workflows`/`--helpers`/`--force`/`--transient` flags |
 | Install-state tracking | `scripts/hooks/state.sh` — `.claude/doc-superpowers/installed.json` schema, atomic writes, bootstrap, state-respect query API |
 | Granular CI install flags | `skills/doc-superpowers/SKILL.md` `hooks` subsection — `--workflows=<csv\|all\|none>`, `--helpers=<bool>`, `--force`, `--transient` |
-| Tools subcommand | `scripts/doc-tools.sh` `cmd_tools` — `tools install [--dest <path>] [--with-helpers]`, `tools uninstall`, `tools status` |
+| Tools subcommand | `scripts/doc-tools.sh` `cmd_tools_*` — `tools install [--dest <path>] [--with-helpers]`, `tools uninstall` (removes only files byte-identical to the plugin's), `tools status`, `tools version` |
 | Git hook scripts | `scripts/hooks/git/` — pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push |
 | Claude Code hook scripts | `scripts/hooks/claude/` — pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh |
 | CI workflow templates | `scripts/hooks/ci/` — 9 templates total (3 shell-based, 6 AI-powered). Shell: doc-freshness-pr.yml, doc-freshness-schedule.yml, doc-index-update.yml (use vendored `.github/scripts/doc-tools.sh`). AI: doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml (per-PR release-notes fragment producer, with colocated helpers under `doc-pr-release/`). All actions SHA-pinned. This repo self-installs only the 3 shell-based workflows into its own `.github/workflows/` — the 6 AI ones need Anthropic credentials configured as repository secrets, so the 3-of-9 gap here is deliberate, not drift |
@@ -246,7 +246,8 @@ verb parses its arguments / stdin
     against the working tree through a private git index for update-index — the one verb that
     attests — or against each doc's own last commit (one `git log --stdin` walk) for build-index,
     add-entry and set-code-refs; one `git rev-list` per distinct (start, code_refs) for
-    code_commit; Implementation:/Realized-by: bullets in one awk pass)
+    code_commit; Implementation:/Realized-by: entries in one awk pass, with the block grammar
+    set-implementation and implementation-status share, _AWK_IMPL_BLOCK)
   → builds a per-key patch list (JSONL: {key, add|merge|del})
   → _index_apply <jq-program> [jq args…]
       → _index_lock      mkdir spin-lock docs/.doc-index.json.lock (portable; flock(1) is not on macOS)

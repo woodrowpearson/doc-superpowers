@@ -122,7 +122,7 @@ make_nojq_path() {
   local dir t p
   dir=$(harness_mktemp_d nojq)
   ln -s "$(type -P "$BASH_BIN" || printf '%s' "$BASH_BIN")" "$dir/bash"
-  for t in sh env git awk sed gsed tr sort tail head cat cut wc grep mktemp rm cp mv \
+  for t in sh env git awk sed tr sort tail head cat cut wc grep mktemp rm cp mv \
     mkdir ln date dirname basename xargs shasum sha256sum uname sleep ls readlink chmod \
     find expr tee touch kill; do
     p=$(type -P "$t" 2>/dev/null) || continue
@@ -758,7 +758,7 @@ test_claude_gate_ignores_commit_text_that_is_not_a_command() {
   stage_stale_change
   local c
   for c in 'echo git commit' 'echo "git commit -m x"' 'legit commit' \
-    'gh pr create --body "run git commit -m first"' 'rg "git commit -m" .'; do
+    'gh pr create --body "run git commit -m first"' 'grep "git commit -m" .'; do
     run_claude_hook PreToolUse pre-commit-gate "$(pretool_json "$c")" DOC_SUPERPOWERS_STRICT=1
     assert_eq "0" "$RUN_RC" "'$c': not gated, even under STRICT with a stale change staged"
     assert_eq "" "$RUN_OUT$RUN_ERR" "'$c': silent"
@@ -2117,6 +2117,35 @@ test_install_ci_every_referenced_helper_is_installed() {
   teardown
 }
 
+test_install_ci_version_comes_from_doc_tools() {
+  # install.sh:22 took the first "## vX.Y.Z" SUBSTRING of RELEASE-NOTES.md,
+  # and under pipefail a file without one aborted the installer silently, so
+  # its "unknown version" fallback was unreachable. The version is now
+  # doc-tools.sh's one parse (tools version): the first release heading,
+  # line-anchored and outside code fences.
+  echo "test: install --ci — the substituted version is doc-tools.sh's; no RELEASE-NOTES.md falls back, never aborts"
+  setup
+  local root exit_code out
+  root=$(harness_mktemp_d plugin)
+  mkdir -p "$root/skills/doc-superpowers"
+  cp "$SCRIPT_DIR/../skills/doc-superpowers/SKILL.md" "$root/skills/doc-superpowers/"
+  cp -R "$SCRIPT_DIR" "$root/scripts"
+  printf '%s\n' '# Release Notes' '' 'See ## v8.8.8 below.' '' '```md' '## v9.9.9 (example)' '```' '' \
+    '## v1.2.3 (2026-01-01)' > "$root/RELEASE-NOTES.md"
+  exit_code=0
+  out=$("$BASH_BIN" "$root/scripts/hooks/install.sh" install --ci --workflows=doc-release 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "install exits 0"
+  assert_contains "$(cat .github/workflows/doc-release.yml 2>/dev/null)" 'DOC_SUPERPOWERS_VERSION: "v1.2.3"' \
+    "the version is the first release heading at a line start, outside a fence"
+  rm -rf .github .claude "$root/RELEASE-NOTES.md"
+  exit_code=0
+  out=$("$BASH_BIN" "$root/scripts/hooks/install.sh" install --ci --workflows=doc-release 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "a plugin without RELEASE-NOTES.md still installs (the fallback is reachable)"
+  assert_contains "$(cat .github/workflows/doc-release.yml 2>/dev/null)" 'DOC_SUPERPOWERS_VERSION: "vunknown"' \
+    "…with the version unknown"
+  teardown
+}
+
 test_install_ci_helpers_false_still_wires_steps() {
   # Every --helpers=false install that is allowed (no doc-pr-release selected)
   # must leave every installed workflow with all the scripts it runs.
@@ -2334,6 +2363,7 @@ test_install_ci_helpers_false_refuses_doc_pr_release
 test_install_ci_ships_step_scripts_with_workflow
 test_install_ci_every_referenced_helper_is_installed
 test_install_ci_helpers_false_still_wires_steps
+test_install_ci_version_comes_from_doc_tools
 test_install_ci_writes_state_file_on_first_install
 test_install_ci_bootstraps_state_from_filesystem
 test_install_ci_malformed_state_file_falls_back_with_warn

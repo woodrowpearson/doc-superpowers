@@ -111,8 +111,8 @@ DOC_TOOLS=~/.claude/skills/doc-superpowers/scripts/doc-tools.sh
 
 ```bash
 $DOC_TOOLS tools install                          # → .github/scripts/doc-tools.sh
-$DOC_TOOLS tools install --dest bin --with-helpers # → bin/doc-tools.sh + bin/doc-pr-release/
-$DOC_TOOLS tools status                            # shows location + version
+$DOC_TOOLS tools install --dest bin --with-helpers # → bin/doc-tools.sh + bin/doc-pr-release/ + bin/doc-superpowers-steps/
+$DOC_TOOLS tools status                            # shows location, drift + the plugin's version
 ```
 
 ### Audit existing docs

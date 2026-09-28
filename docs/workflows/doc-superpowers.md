@@ -442,12 +442,13 @@ Independent of the hooks installer, `scripts/doc-tools.sh` exposes a `tools` sub
 $DOC_TOOLS tools install   [--dest <path>] [--with-helpers]
 $DOC_TOOLS tools uninstall [--dest <path>]
 $DOC_TOOLS tools status    [--dest <path>]
+$DOC_TOOLS tools version
 ```
 
 - `--dest <path>` — Destination directory (default `.github/scripts`).
-- `--with-helpers` — Also copy the `doc-pr-release/` helpers and the `RELEASE-NOTES.next/README.md` fragment-format spec (only created if missing).
+- `--with-helpers` — Also copy every helper the CI templates run (`doc-pr-release/` and `doc-superpowers-steps/`) and the `RELEASE-NOTES.next/README.md` fragment-format spec (only created if missing).
 
-`tools status` reports the vendored copy's location and compares its version against the plugin's `RELEASE-NOTES.md` (resolved via `git rev-parse --show-toplevel` if not in the canonical plugin layout). `tools uninstall` removes the vendored copy and, for helpers, only deletes files that match the plugin's byte-for-byte — user-modified helpers are preserved.
+Each file is written to a temp file beside its destination and moved into place. `tools status` reports whether the vendored copy is present, whether it is byte-identical to the plugin's copy, and the plugin's version (the first release heading of the plugin's own `RELEASE-NOTES.md`; `tools version` prints just that). `tools uninstall` deletes a file only when it is byte-identical to the plugin's copy: a drifted `doc-tools.sh`, an edited helper and any file the user added stay, and are reported. The plugin's copy is the reference, so these run from the plugin's `doc-tools.sh`: from a vendored copy, `tools install` can only copy itself (onto itself it is a no-op), `--with-helpers` and `tools uninstall` exit 1 without touching anything, and `tools status` / `tools version` report no version.
 
 ## Process: `release` — Draft Release Notes Entry
 

@@ -66,21 +66,6 @@ _hash_one() {
   _HASH="sha256:${_HASH%% *}"
 }
 
-# Resolve a GNU-compatible sed binary.
-# macOS Homebrew ships GNU sed as `gsed`; on Linux/CI it's just `sed`.
-# BSD sed (macOS default `sed`) differs on `-i` syntax + extended regex flags,
-# so we require GNU sed. Exits with a clear error if neither is available.
-gnu_sed() {
-  if command -v gsed >/dev/null 2>&1; then
-    printf '%s' gsed
-  elif sed --version 2>/dev/null | grep -q 'GNU sed'; then
-    printf '%s' sed
-  else
-    echo "ERROR: GNU sed required (install via 'brew install gnu-sed' on macOS, or use the system sed on Linux)" >&2
-    exit 2
-  fi
-}
-
 iso_now() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
@@ -1355,6 +1340,7 @@ INDEX_FILE="docs/.doc-index.json"
 INDEX_LOCK="$INDEX_FILE.lock"
 _SCRATCH=""          # private scratch dir (snapshots, patches); removed on exit
 _INDEX_TMP=""        # in-flight tmp beside the index; removed on exit
+_TMP_PATHS=()        # in-flight tmps beside other files (_tmp_beside); removed on exit
 _INDEX_LOCK_HELD=0
 _INDEX_BREAKING=0
 _INDEX_NOW=""        # one timestamp per run: last_verified and generated_at agree
@@ -1426,6 +1412,8 @@ _JQ_REC_FIELDS='def rec_fields:
 # (130/143 from a signal) stands.
 cleanup() {
   if [ -n "$_INDEX_TMP" ]; then rm -f "$_INDEX_TMP"; fi
+  local p
+  for p in ${_TMP_PATHS[@]+"${_TMP_PATHS[@]}"}; do rm -f "$p"; done
   _index_unlock
   if [ "$_INDEX_BREAKING" = 1 ]; then rmdir "$INDEX_LOCK.break" 2>/dev/null || true; fi
   # A lock renamed aside for deletion (see _index_unlock / _index_break_stale)
@@ -1506,6 +1494,36 @@ _file_mode() {
     [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) printf '%s' "$m" ;;
     *) return 1 ;;
   esac
+}
+
+# The index's write discipline (a tmp beside the target, then mv, so a reader
+# or an interrupted run never sees a partial file) for any other file this
+# tool rewrites: a doc (set-implementation), the manifests (bump-version), a
+# vendored copy (tools install).
+#
+# _tmp_beside <target>: create an empty temp file in <target>'s directory into
+# _TMP, registered for removal on exit. Call it in the main shell, never inside
+# $(…), or the registration is lost. A hidden name, so a watcher or a glob in
+# that directory does not pick it up as a doc. A <target> that is a symbolic
+# link is refused (before anything is written): the mv would replace the link
+# with a regular file, and its mode would be the link's own.
+_tmp_beside() {
+  local dir base
+  [ ! -L "$1" ] || _die "$1 is a symbolic link: not replacing it (edit the file it points to). Nothing was written."
+  dir=$(dirname "$1")
+  base=$(basename "$1")
+  _TMP=$(mktemp "$dir/.$base.XXXXXX") || _die "cannot create a temp file beside $1"
+  _TMP_PATHS+=("$_TMP")
+}
+
+# _replace_file <tmp> <target> [mode]: install <tmp> as <target>, keeping
+# <target>'s permission bits (mktemp creates 0600) — or [mode] (default 644)
+# when <target> does not exist yet.
+_replace_file() {
+  local tmp="$1" target="$2" mode
+  mode=$(_file_mode "$target" 2>/dev/null) || mode="${3:-644}"
+  chmod "$mode" "$tmp" || _die "cannot chmod $mode $tmp"
+  mv -f "$tmp" "$target" || _die "cannot replace $target"
 }
 
 _index_invalid() {
@@ -1963,18 +1981,35 @@ bump-version|cmd_bump_version|deps|
   claude-code.json, .claude-plugin/plugin.json,
   .claude-plugin/marketplace.json, .cursor-plugin/plugin.json,
   gemini-extension.json. RELEASE-NOTES.md is the canonical version:
-  check-version reads it, and it is never written.
+  check-version reads it, and it is never written. All or nothing: every
+  manifest found is read first, and one that is not valid JSON writes
+  nothing (exit 1); so does finding none (run it from the repo root). Each
+  file keeps its mode.
 check-version|cmd_check_version|deps|
   -
-  Verify that every manifest carries RELEASE-NOTES.md's version.
-implementation-status|cmd_implementation_status|deps|filter=
-  [--filter <status>[,<status>...]] <path>...
-  Report ADR/SPEC realization state from each doc's Implementation: block.
+  Verify that every manifest carries RELEASE-NOTES.md's version: its first
+  release heading, a line "## vMAJOR.MINOR.PATCH …" outside code fences (a
+  pre-release suffix is refused, not skipped). Exits 1 on a mismatch, a
+  manifest that is not valid JSON, or no manifest found.
+implementation-status|cmd_implementation_status|deps|
+  <path>...
+  Report ADR/SPEC realization state (read-only): each doc's
+  Implementation: (ADR) or Realized-by: (SPEC) entries, or that it has
+  none, or that it is explicitly empty ("Implementation: []"). The block
+  grammar is the one set-implementation writes and update-index records;
+  see "Realization blocks".
 set-implementation|cmd_set_implementation|deps|ref= status= note=
   <path> --ref <kind: ref> --status <status> [--note <note>]
-  Create, append or replace one realization entry in a doc's
-  Implementation: block. Status: complete, partial, in-progress,
-  not-started, reverted, superseded or blocked.
+  Set one realization entry, "<ref> — <status>[ — <note>]", in a doc's
+  Implementation: / Realized-by: block: the entry whose text starts with
+  "<ref> —" is replaced in place (with its wrapped lines); otherwise one
+  is appended at the block's indent ("<key>: []" becomes a list). A doc
+  with no block gets one after the paragraph holding its first
+  **Date**: / **Date:** (Implementation:) or **Created**: / **Created:**
+  (Realized-by:) line; with neither it exits 1 and writes nothing. Values
+  are written literally; --ref and --note must each be one line. Status:
+  complete, partial, in-progress, not-started, reverted, superseded or
+  blocked. The doc is replaced atomically, keeping its mode.
 fragments list|cmd_fragments_list|deps|
   -
   List per-PR release-notes fragments (RELEASE-NOTES.next/PR-*.md) with
@@ -1988,15 +2023,30 @@ fragments merge|cmd_fragments_merge|repo|paths-out=
   range. --paths-out writes the consumed fragment paths, one per line.
 tools install|cmd_tools_install|deps|dest= with-helpers
   [--dest <path>] [--with-helpers]
-  Vendor doc-tools.sh (and, with --with-helpers, the doc-pr-release helpers
-  and RELEASE-NOTES.next/README.md) into <path>, default .github/scripts.
+  Vendor doc-tools.sh into <path> (default .github/scripts); with
+  --with-helpers also every helper the CI templates run
+  (<path>/doc-pr-release/ and <path>/doc-superpowers-steps/) and
+  RELEASE-NOTES.next/README.md (only if absent). Files are replaced
+  atomically. Run from a vendored copy it can only copy itself (onto
+  itself it does nothing); --with-helpers then exits 1, writing nothing.
 tools uninstall|cmd_tools_uninstall|deps|dest=
   [--dest <path>]
-  Remove the vendored doc-tools.sh (and unmodified helpers) from <path>.
+  Remove from <path> each vendored file that is byte-identical to the
+  plugin's copy; a file with local edits (or from another plugin
+  version) and a file you added are kept and reported, and so is a helper
+  directory that still holds them. RELEASE-NOTES.next/README.md is never
+  removed. Must run from the plugin's doc-tools.sh (exit 1 from a
+  vendored copy, which has nothing to compare against).
 tools status|cmd_tools_status|deps|dest=
   [--dest <path>]
-  Report whether doc-tools.sh is vendored at <path>, its version and drift,
-  and helper presence.
+  Report whether doc-tools.sh is vendored at <path>, whether it matches the
+  plugin's copy (and the plugin's version), and the helpers present. Run
+  from a vendored copy it reports presence only: no plugin to compare with.
+tools version|cmd_tools_version|none|
+  -
+  Print the doc-superpowers version this doc-tools.sh belongs to: the
+  first release heading of the plugin's RELEASE-NOTES.md (as check-version
+  reads it). Exits 1 from a vendored copy, whose version is unknown.
 help|cmd_help|none|
   [<subcommand>]
   Print this usage, or one subcommand's.
@@ -2029,6 +2079,14 @@ Mapping lines (stdin of build-index and add-entry, one doc per line):
   agrees with, so the doc cannot go stale. Untracked (not
   ignored) files under a ref are part of what is verified: writers name
   them, and the doc reads stale until they are committed or ignored.
+
+Realization blocks (set-implementation, implementation-status, update-index):
+  A line "Implementation:" (ADRs) or "Realized-by:" (SPECs) at the start of
+  a line, outside code fences, followed by "- <text>" entries at any
+  indent; an indented line after an entry wraps it (joined with a space).
+  A blank line, an unindented line or a fence line ends the block. The
+  first such block is the doc's; "Implementation: []" is explicitly empty.
+  update-index records the entries' text as the entry's implementation.
 
 Doc paths:
   The doc-index is keyed by paths relative to the repo root, and every
@@ -2818,28 +2876,41 @@ cmd_update_index() {
     idx=$((idx + 1))
   done
 
-  # Implementation: (ADRs) / Realized-by: (SPECs) bullets, for every live doc
-  # in ONE awk pass (a fork+exec per doc dominated the batch). Per file this is
-  # exactly the old single-file program — the `exit` that ended it at the
-  # first blank or unindented line is now a per-file `done` — and each
-  # captured line is tagged with its ARGV index. Empty files never reach
-  # FNR == 1, so argi catches up by name. Both fields are stored under the
-  # single JSON key "implementation" to keep downstream consumers simple
-  # (validate_docs.py, doc-audit routine) — see Task 3.4 of
+  # Implementation: (ADRs) / Realized-by: (SPECs) entries, for every live doc
+  # in ONE awk pass (a fork+exec per doc dominated the batch), read with the
+  # one block grammar (_AWK_IMPL_BLOCK) that implementation-status and
+  # set-implementation use; each entry is tagged with its ARGV index. Empty
+  # files never reach FNR == 1, so argi catches up by name. Both fields are
+  # stored under the single JSON key "implementation" to keep downstream
+  # consumers simple (validate_docs.py, doc-audit routine) — see Task 3.4 of
   # docs/plans/2026-05-16-adr-implementation-field-rollout.md.
-  local impl=() tagged ai line
+  local impl=() tagged ai line p awk_files=()
   if [ ${#live[@]} -gt 0 ]; then
-    tagged=$(awk '
+    # "./" keeps a doc named like "x=1.md" from being an awk assignment.
+    for p in "${live[@]}"; do
+      case "$p" in
+        /*) awk_files+=("$p") ;;
+        *) awk_files+=("./$p") ;;
+      esac
+    done
+    # shellcheck disable=SC2016  # awk program, not shell expansion
+    tagged=$(awk "$_AWK_IMPL_BLOCK"'
+        function flush() { if (pend && cur != "") print argi "\t" cur; pend = 0; cur = "" }
         FNR == 1 {
+          flush()
           argi++
           while (argi < ARGC && ARGV[argi] != FILENAME) argi++
-          capture = 0; done = 0
+          blk_reset()
         }
-        done { next }
-        /^Implementation:[[:space:]]*$|^Realized-by:[[:space:]]*$/ { capture = 1; next }
-        capture && /^[[:space:]]+-/ { print argi "\t" $0; next }
-        capture && /^[[:space:]]*$|^[^[:space:]]/ { done = 1 }
-    ' "${live[@]}")
+        blk == 2 { next }
+        {
+          c = blk_line($0)
+          if (BLK_END) flush()
+          else if (c == "item") { flush(); pend = 1; cur = BTEXT }
+          else if (c == "wrap") cur = (cur == "" ? BTEXT : cur " " BTEXT)
+        }
+        END { flush() }
+    ' "${awk_files[@]}")
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       # Split by hand: `IFS=$'\t' read` would also trim a tab-indented bullet.
@@ -2888,9 +2959,10 @@ cmd_update_index() {
 
   # Verify: re-hash, re-read code_commit and code_oids, stamp last_verified
   # (update-index is the ONE verb that attests), capture implementation
-  # (bullets with a leading "  - " stripped). Preserved: status (a deprecated
-  # entry stays deprecated; no other status is stored), replaces,
-  # superseded_by, doc_type, code_refs, and the top-level build_commit.
+  # (each entry's text: no indent, no "- ", wrapped lines joined).
+  # Preserved: status (a deprecated entry stays deprecated; no other status
+  # is stored), replaces, superseded_by, doc_type, code_refs, and the
+  # top-level build_commit.
   # shellcheck disable=SC2016  # jq program, not shell expansion
   jq -c -n -R --arg now "$_INDEX_NOW" "$_JQ_REC_FIELDS$_JQ_CODE_OIDS"'
     rec_fields as $f
@@ -2900,8 +2972,7 @@ cmd_update_index() {
         code_commit: (if $f[$i + 2] == "" then null else $f[$i + 2] end),
         code_oids: code_oids($f[$i + 4] | fields_list; $f[$i + 5] | fields_list),
         last_verified: $now,
-        implementation: (if $f[$i + 3] == "" then []
-                         else ($f[$i + 3] | split("\n") | map(ltrimstr("  - "))) end)}}
+        implementation: (if $f[$i + 3] == "" then [] else ($f[$i + 3] | split("\n")) end)}}
   ' < "$raw" > "$patch" || _die "cannot assemble the update; $INDEX_FILE is unchanged."
 
   _index_apply --report "$_INDEX_PATCH" --slurpfile patch "$patch"
@@ -3560,6 +3631,43 @@ cmd_status() {
 
 # --- Version management ---
 
+# The version of a RELEASE-NOTES.md: its first release heading — the first
+# line, outside code fences, that starts "## v" and a digit. That heading must
+# be exactly "## vMAJOR.MINOR.PATCH", then the end of the line or a space
+# ("## v2.15.0 (2026-09-01)"): a pre-release ("## v3.0.0-rc.1") or any other
+# suffix is refused, never skipped — skipping would silently compare against
+# an older release. (It used to be the first "## vX.Y.Z" SUBSTRING anywhere,
+# prose and code blocks included, with its suffix cut off.) The one parser for
+# check-version, tools version / tools status, and the installer (through
+# tools version). Prints the version without the "v"; on failure prints the
+# reason on stderr and returns 1.
+_release_notes_version() {
+  local file="$1" heading ver
+  if [ ! -f "$file" ]; then
+    echo "ERROR: $file not found: it holds the canonical version." >&2
+    return 1
+  fi
+  # shellcheck disable=SC2016  # awk program, not shell expansion
+  heading=$(awk "$_AWK_FENCE"'
+    blk_fence($0) || fence_c != "" { next }
+    /^## v[0-9]/ { print; exit }' < "$file") || {
+    echo "ERROR: cannot read $file" >&2
+    return 1
+  }
+  if [ -z "$heading" ]; then
+    echo "ERROR: $file has no release heading (a line \"## vMAJOR.MINOR.PATCH …\" outside code fences)." >&2
+    return 1
+  fi
+  ver="${heading#'## v'}"
+  ver="${ver%%[[:space:]]*}"
+  if ! [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "ERROR: $file: the first release heading is not a MAJOR.MINOR.PATCH release: '$heading'" >&2
+    echo "       (a pre-release or suffixed version is not a release; the manifests carry MAJOR.MINOR.PATCH)" >&2
+    return 1
+  fi
+  printf '%s\n' "$ver"
+}
+
 # All files that carry a version string, with their jq path
 VERSION_FILES=(
   "package.json:.version"
@@ -3569,6 +3677,11 @@ VERSION_FILES=(
   ".cursor-plugin/plugin.json:.version"
   "gemini-extension.json:.version"
 )
+
+_no_manifest_error() {
+  echo "ERROR: no manifest found (none of: ${VERSION_FILES[*]%%:*}) — run $1 from the repository root." >&2
+  exit 1
+}
 
 cmd_bump_version() {
   if [ $# -gt 1 ]; then
@@ -3585,29 +3698,55 @@ cmd_bump_version() {
     exit 1
   fi
 
-  local updated=0
-
+  # All or nothing: every manifest is read and its new content rendered into a
+  # tmp beside it BEFORE any is replaced, so a malformed one (it used to abort
+  # the run midway, rc 5, half the files bumped) writes nothing at all. The
+  # replacements keep each file's mode (a bare mktemp + mv made them 0600).
+  local entry file jq_path current found=0 bad="" i=0
+  local what=() tmps=() currents=()
   for entry in "${VERSION_FILES[@]}"; do
-    local file="${entry%%:*}"
-    local jq_path="${entry#*:}"
-
-    if [[ ! -f "$file" ]]; then
-      echo "  skip: $file (not found)"
-      continue
+    file="${entry%%:*}"
+    jq_path="${entry#*:}"
+    what[$i]=skip tmps[$i]="" currents[$i]=""
+    if [ -f "$file" ]; then
+      found=$((found + 1))
+      if ! current=$(jq -r "$jq_path // empty" "$file" 2>/dev/null); then
+        what[$i]=bad
+        bad="$bad $file"
+      elif [ "$current" = "$new_version" ]; then
+        what[$i]=ok
+      else
+        _tmp_beside "$file"
+        if jq --arg v "$new_version" "$jq_path = \$v" "$file" > "$_TMP" 2>/dev/null; then
+          what[$i]=bump tmps[$i]="$_TMP" currents[$i]="$current"
+        else
+          what[$i]=bad
+          bad="$bad $file"
+        fi
+      fi
     fi
+    i=$((i + 1))
+  done
+  [ "$found" -gt 0 ] || _no_manifest_error bump-version
+  if [ -n "$bad" ]; then
+    echo "ERROR: cannot read the version of:$bad (not valid JSON); nothing was written." >&2
+    exit 1
+  fi
 
-    local current
-    current=$(jq -r "$jq_path // empty" "$file" 2>/dev/null)
-    if [[ "$current" == "$new_version" ]]; then
-      echo "  ok:   $file (already $new_version)"
-      continue
-    fi
-
-    local tmp
-    tmp=$(mktemp)
-    jq "$jq_path = \"$new_version\"" "$file" > "$tmp" && mv "$tmp" "$file"
-    echo "  bump: $file ($current → $new_version)"
-    updated=$((updated + 1))
+  local updated=0
+  i=0
+  for entry in "${VERSION_FILES[@]}"; do
+    file="${entry%%:*}"
+    case "${what[$i]}" in
+      skip) echo "  skip: $file (not found)" ;;
+      ok) echo "  ok:   $file (already $new_version)" ;;
+      bump)
+        _replace_file "${tmps[$i]}" "$file"
+        echo "  bump: $file (${currents[$i]} → $new_version)"
+        updated=$((updated + 1))
+        ;;
+    esac
+    i=$((i + 1))
   done
 
   echo "Updated $updated file(s) to v$new_version"
@@ -3617,38 +3756,34 @@ cmd_check_version() {
   if [ $# -gt 0 ]; then
     _usage_error check-version "takes no arguments (got '$1')"
   fi
-  # Extract canonical version from RELEASE-NOTES.md
   local canonical
-  canonical=$(grep -m 1 -o '## v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' RELEASE-NOTES.md 2>/dev/null | sed 's/## v//')
-  if [[ -z "$canonical" ]]; then
-    echo "ERROR: could not extract version from RELEASE-NOTES.md" >&2
-    exit 1
-  fi
+  canonical=$(_release_notes_version RELEASE-NOTES.md) || exit 1
 
-  local mismatched=0
-  local checked=0
+  local entry file jq_path actual mismatched=0 checked=0
 
   echo "Canonical version (RELEASE-NOTES.md): v$canonical"
 
   for entry in "${VERSION_FILES[@]}"; do
-    local file="${entry%%:*}"
-    local jq_path="${entry#*:}"
+    file="${entry%%:*}"
+    jq_path="${entry#*:}"
 
     if [[ ! -f "$file" ]]; then
       continue
     fi
-
-    local actual
-    actual=$(jq -r "$jq_path // empty" "$file" 2>/dev/null)
     checked=$((checked + 1))
 
-    if [[ "$actual" != "$canonical" ]]; then
-      echo "  MISMATCH: $file has $actual (expected $canonical)"
+    if ! actual=$(jq -r "$jq_path // empty" "$file" 2>/dev/null); then
+      echo "  INVALID:  $file is not valid JSON"
+      mismatched=$((mismatched + 1))
+    elif [[ "$actual" != "$canonical" ]]; then
+      echo "  MISMATCH: $file has ${actual:-no version} (expected $canonical)"
       mismatched=$((mismatched + 1))
     else
       echo "  ok:       $file"
     fi
   done
+
+  [ "$checked" -gt 0 ] || _no_manifest_error check-version
 
   if [[ "$mismatched" -gt 0 ]]; then
     echo "FAIL: $mismatched/$checked file(s) have mismatched versions"
@@ -3950,219 +4085,397 @@ cmd_fragments_merge() {
   done
 }
 
+# --- Implementation: / Realized-by: blocks ------------------------------------
+#
+# ONE grammar for a doc's realization block, shared by the verb that writes it
+# (set-implementation) and the two that read it (implementation-status, and
+# update-index, which records it as the entry's `implementation`). Three
+# hand-written parsers used to disagree: the writer anchored on one header
+# style, appended inside later code fences and replaced matching lines
+# anywhere in the file; the readers dropped wrapped lines differently.
+#
+#   header   "Implementation:" (ADRs) or "Realized-by:" (SPECs), at the start
+#            of a line, outside code fences; the FIRST one is the block (a
+#            later one is prose). "Implementation: []" is an explicitly empty
+#            block.
+#   item     "- <text>" at any indent (2-space, 4-space, none): one entry.
+#   wrap     an indented, non-blank line after an item continues it; readers
+#            join the pieces with one space, and the writer replaces the item
+#            with all of its lines.
+#   end      a blank line, an unindented line or a fence line ends the block.
+#   fences   ``` / ~~~ (up to 3 spaces of indent; closed by the same character,
+#            at least as long): nothing inside one is a header or an anchor.
+#
+# An entry's text is "<ref> — <status>[ — <note>]". The awk text below is only
+# function definitions; each verb appends its own rules. Values reach awk
+# through ENVIRON, never -v (which expands backslash escapes) and never program
+# text, and are compared with index(), never as a regex.
+
+# blk_fence(s): is s a fence line? Opens or closes the fence (fence_c/fence_n)
+# as a side effect. Shared by _release_notes_version.
+# shellcheck disable=SC2016  # awk program, not shell expansion
+_AWK_FENCE='
+function blk_fence(s,    t, c, n) {
+  t = s
+  sub(/^ ? ? ?/, "", t)
+  c = substr(t, 1, 1)
+  if (c != "`" && c != "~") return 0
+  n = 0
+  while (substr(t, n + 1, 1) == c) n++
+  if (n < 3) return 0
+  if (fence_c == "") {
+    if (c == "`" && index(substr(t, n + 1), "`")) return 0
+    fence_c = c; fence_n = n
+    return 1
+  }
+  if (c == fence_c && n >= fence_n && substr(t, n + 1) ~ /^[[:space:]]*$/) {
+    fence_c = ""; fence_n = 0
+    return 1
+  }
+  return 0
+}
+function blk_fence_like(s,    t) {
+  t = s
+  sub(/^ ? ? ?/, "", t)
+  return (t ~ /^(```|~~~)/)
+}
+'
+# blk_line(s) classifies the next line of a file (call blk_reset() first) and
+# returns one of
+#   head   the block header          BKEY = Implementation | Realized-by
+#   empty  the header "<key>: []"    BKEY
+#   item   an entry of the block     BTEXT = its text, BIND = its indent
+#   wrap   a continuation line       BTEXT = the line, trimmed
+#   inner  an indented line in the block before its first item
+#   fence  a fence line   code  a line inside a fence   text  anything else
+# BLK_END is 1 when the block ended just BEFORE this line (the line itself is
+# then classified as fence / code / text). blk is 0 before the header, 1
+# inside the block, 2 after it.
+# shellcheck disable=SC2016  # awk program, not shell expansion
+_AWK_IMPL_BLOCK="$_AWK_FENCE"'
+function blk_reset() { fence_c = ""; fence_n = 0; blk = 0; blk_items = 0; BLK_END = 0 }
+function blk_line(s,    t) {
+  BLK_END = 0
+  if (blk == 1) {
+    if (s ~ /^[[:space:]]*-$/ || s ~ /^[[:space:]]*-[[:space:]]/) {
+      BIND = s; sub(/-.*$/, "", BIND)
+      t = s; sub(/^[[:space:]]*-[[:space:]]*/, "", t); sub(/[[:space:]]+$/, "", t)
+      BTEXT = t; blk_items++
+      return "item"
+    }
+    if (s ~ /^[[:space:]]+[^[:space:]]/ && !blk_fence_like(s)) {
+      t = s; sub(/^[[:space:]]+/, "", t); sub(/[[:space:]]+$/, "", t)
+      BTEXT = t
+      return (blk_items ? "wrap" : "inner")
+    }
+    blk = 2; BLK_END = 1
+  }
+  if (blk_fence(s)) return "fence"
+  if (fence_c != "") return "code"
+  if (blk == 0 && s ~ /^(Implementation|Realized-by):[[:space:]]*$/) {
+    BKEY = s; sub(/:.*$/, "", BKEY); blk = 1; blk_items = 0
+    return "head"
+  }
+  if (blk == 0 && s ~ /^(Implementation|Realized-by):[[:space:]]*[[][]][[:space:]]*$/) {
+    BKEY = s; sub(/:.*$/, "", BKEY); blk = 2
+    return "empty"
+  }
+  return "text"
+}
+'
+
+# The entries of the block, one "<tag>\t…" line each, for a reader:
+#   H\t<key>   the header           E\t<key>   an explicitly empty block
+#   I\t<text>  an entry (wrapped lines joined with one space; empty ones dropped)
+# Nothing at all: the doc has no block. Reads the doc on stdin.
+# shellcheck disable=SC2016  # awk program, not shell expansion
+_AWK_IMPL_READ="$_AWK_IMPL_BLOCK"'
+function flush() { if (pend && cur != "") print "I\t" cur; pend = 0; cur = "" }
+BEGIN { blk_reset() }
+{
+  c = blk_line($0)
+  if (BLK_END) { flush(); exit }
+  if (c == "head") print "H\t" BKEY
+  else if (c == "empty") { print "E\t" BKEY; exit }
+  else if (c == "item") { flush(); pend = 1; cur = BTEXT }
+  else if (c == "wrap") cur = (cur == "" ? BTEXT : cur " " BTEXT)
+}
+END { flush() }
+'
+
 cmd_set_implementation() {
-    # Append/update a single Implementation: ref in a doc.
-    # Usage: doc-tools.sh set-implementation <path> --ref <kind: ref> --status <status> [--note <note>]
-    # Options (--ref/--status/--note, anywhere) come from _parse_args.
-    local FILE="${1:-}" REF="${_OPT_ref:-}" STATUS="${_OPT_status:-}" NOTE="${_OPT_note:-}"
-    local VALID_STATUSES="complete partial in-progress not-started reverted superseded blocked"
+  # Options (--ref/--status/--note, anywhere) come from _parse_args.
+  local file="${1:-}" ref="${_OPT_ref:-}" status="${_OPT_status:-}" note="${_OPT_note:-}"
 
-    if [[ $# -gt 1 ]]; then
-        _usage_error set-implementation "takes one doc path (got $#)"
-    fi
+  [ $# -le 1 ] || _usage_error set-implementation "takes one doc path (got $#)"
+  # An entry is one bullet line: a line break in a value would end the block
+  # (and once injected sed commands). Refused, never folded or trimmed away.
+  case "$ref$note" in
+    *$'\n'*|*$'\r'*)
+      echo "ERROR: set-implementation: --ref and --note must each be one line (an entry is one bullet line)." >&2
+      exit 2
+      ;;
+  esac
+  _trim "$ref"; ref="$_TRIMMED"
+  _trim "$note"; note="$_TRIMMED"
+  if [ -z "$file" ] || [ -z "$ref" ] || [ -z "$status" ]; then
+    _usage_error set-implementation "requires <path> --ref <kind: ref> --status <status>"
+  fi
+  if [ ! -f "$file" ]; then
+    echo "ERROR: file not found: $file" >&2
+    exit 2
+  fi
+  case "$status" in
+    complete|partial|in-progress|not-started|reverted|superseded|blocked) ;;
+    *)
+      echo "ERROR: invalid status: $status (allowed: complete partial in-progress not-started reverted superseded blocked)" >&2
+      exit 2
+      ;;
+  esac
 
-    if [[ -z "$FILE" || -z "$REF" || -z "$STATUS" ]]; then
-        _usage_error set-implementation "requires <path> --ref <kind: ref> --status <status>"
-    fi
-    if [[ ! -f "$FILE" ]]; then
-        echo "ERROR: file not found: $FILE" >&2
-        exit 2
-    fi
-    # Validate status enum
-    if ! echo " $VALID_STATUSES " | grep -q " $STATUS "; then
-        echo "invalid status: $STATUS (allowed: $VALID_STATUSES)" >&2
-        exit 2
-    fi
+  local entry="$ref — $status"
+  [ -z "$note" ] || entry="$entry — $note"
 
-    # Build the new line
-    local new_line
-    if [[ -n "$NOTE" ]]; then
-        new_line="  - ${REF} — ${STATUS} — ${NOTE}"
-    else
-        new_line="  - ${REF} — ${STATUS}"
-    fi
-
-    # Resolve a GNU-compatible sed (macOS: gsed; Linux: sed).
-    local SED
-    SED=$(gnu_sed)
-
-    # If the ref already exists in the file's Implementation block, replace its line.
-    # Escape regex metachars in REF for grep/sed safety.
-    local ref_escaped
-    ref_escaped=$(printf '%s' "$REF" | sed 's/[][\/.^$*]/\\&/g')
-    if grep -qE "^  - ${ref_escaped} —" "$FILE"; then
-        "$SED" -i "s|^  - ${ref_escaped} —.*$|${new_line}|" "$FILE"
-    else
-        # Append after last existing Implementation block line, OR
-        # create new Implementation: block if absent.
-        if grep -q "^Implementation:" "$FILE"; then
-            local last_bullet
-            last_bullet=$(awk '
-                /^Implementation:/ { in_block=1; last_line=NR; next }
-                in_block && /^  -/ { last_line=NR; next }
-                in_block && /^[^[:space:]]|^$/ { in_block=0 }
-                END { print last_line }
-            ' "$FILE")
-            "$SED" -i "${last_bullet}a\\
-${new_line}" "$FILE"
-        else
-            # Append a new Implementation: block after the Date: line
-            "$SED" -i "/^\*\*Date:\*\*/a\\
-\\
-Implementation:\\
-${new_line}" "$FILE"
-        fi
-    fi
+  # ONE awk pass writes the whole new doc to a tmp beside it:
+  #   - the ref has an entry in the block: that entry (all of its lines) is
+  #     replaced, in place, at its own indent — every such entry, and nothing
+  #     outside the block;
+  #   - otherwise the entry is appended to the block, at its last item's
+  #     indent (2 spaces for an empty block); "<key>: []" becomes "<key>:";
+  #   - no block: one is created after the paragraph holding the first
+  #     **Date**: / **Date:** / **Created**: / **Created:** line —
+  #     Implementation: after a date (ADR), Realized-by: after Created (SPEC);
+  #   - neither: exit 3, nothing written.
+  # The doc is read on stdin: an operand such as "x=1.md" would be an awk
+  # variable assignment.
+  local rc=0
+  _tmp_beside "$file"
+  # shellcheck disable=SC2016  # awk program, not shell expansion
+  DT_REF="$ref" DT_ENTRY="$entry" awk "$_AWK_IMPL_BLOCK"'
+    function is_mine(t) { return t == ref || index(t, ref " —") == 1 }
+    { L[++n] = $0 }
+    END {
+      ref = ENVIRON["DT_REF"]; entry = ENVIRON["DT_ENTRY"]
+      blk_reset(); has = 0; anchor = 0
+      for (i = 1; i <= n; i++) {
+        c = blk_line(L[i])
+        if (c == "head" || c == "empty") { has = 1; break }
+        if (!anchor && c == "text" && L[i] ~ /^[*][*](Date[*][*]:|Date:[*][*]|Created[*][*]:|Created:[*][*])/) {
+          anchor = i
+          key = (L[i] ~ /^[*][*]Created/) ? "Realized-by" : "Implementation"
+        }
+      }
+      if (!has && !anchor) exit 3
+      if (!has) {
+        for (j = anchor + 1; j <= n; j++)
+          if (L[j] ~ /^[[:space:]]*$/ || L[j] ~ /^#+([[:space:]]|$)/ || blk_fence_like(L[j])) break
+        for (i = 1; i < j; i++) print L[i]
+        print ""; print key ":"; print "  - " entry
+        if (j <= n && L[j] !~ /^[[:space:]]*$/) print ""
+        for (i = j; i <= n; i++) print L[i]
+        exit 0
+      }
+      blk_reset(); done = 0; ind = "  "; drop = 0
+      for (i = 1; i <= n; i++) {
+        c = blk_line(L[i])
+        if (BLK_END && !done) { print ind "- " entry; done = 1 }
+        if (c == "empty") { print BKEY ":"; print "  - " entry; done = 1; continue }
+        if (c == "item") {
+          ind = BIND; drop = 0
+          if (is_mine(BTEXT)) { print BIND "- " entry; done = 1; drop = 1; continue }
+        }
+        if (c == "wrap" && drop) continue
+        print L[i]
+      }
+      if (!done) print ind "- " entry
+    }' < "$file" > "$_TMP" || rc=$?
+  case "$rc" in
+    0) ;;
+    3)
+      echo "ERROR: $file has no Implementation: / Realized-by: block, and no **Date**:, **Date:**, **Created**: or **Created:** line (outside code fences) to add one after. Add the block by hand; nothing was written." >&2
+      exit 1
+      ;;
+    *) _die "cannot rewrite $file; it is unchanged." ;;
+  esac
+  if cmp -s "$_TMP" "$file"; then
+    rm -f "$_TMP"
+  else
+    _replace_file "$_TMP" "$file"
+  fi
 }
 
 cmd_implementation_status() {
-    # Parse Implementation: YAML field from one or more docs.
-    # Usage: doc-tools.sh implementation-status [--filter <status>[,<status>...]] <path> [<path>...]
-    # --filter (anywhere) comes from _parse_args.
-    local FILTER="${_OPT_filter:-}"
-    [ $# -gt 0 ] || _usage_error implementation-status "requires at least one doc path"
+  [ $# -gt 0 ] || _usage_error implementation-status "requires at least one doc path"
 
-    local path block filter_re
-    for path in "$@"; do
-        if [[ ! -f "$path" ]]; then
-            echo "$path: not found" >&2
-            continue
-        fi
-        # Find the Implementation: block — from the line matching '^Implementation:' to the next blank line or non-indented line
-        block=$(awk '
-            /^Implementation:[[:space:]]*\[\][[:space:]]*$/ { print "(empty)"; exit 0 }
-            /^Implementation:[[:space:]]*$/ { capture=1; next }
-            capture && /^[[:space:]]+-/ { print; next }
-            capture && /^[[:space:]]*$/ { exit 0 }
-            capture && /^[^[:space:]]/ { exit 0 }
-        ' "$path")
-
-        if [[ -z "$block" ]]; then
-            echo "$path: no Implementation field"
-            continue
-        fi
-        if [[ "$block" == "(empty)" ]]; then
-            echo "$path: Implementation: [] (intentionally empty)"
-            continue
-        fi
-
-        echo "$path:"
-        if [[ -n "$FILTER" ]]; then
-            # Filter to refs whose status matches one of FILTER's comma-separated values
-            filter_re=$(echo "$FILTER" | sed 's/,/|/g')
-            echo "$block" | rg -- " (${filter_re}) " | sed 's/^/  /'
-        else
-            echo "$block" | sed 's/^/  /'
-        fi
-    done
+  local path out line key items
+  for path in "$@"; do
+    if [[ ! -f "$path" ]]; then
+      echo "$path: not found" >&2
+      continue
+    fi
+    out=$(awk "$_AWK_IMPL_READ" < "$path") || _die "cannot read $path"
+    key="" items=""
+    while IFS= read -r line; do
+      case "$line" in
+        H$'\t'*) key="${line#??}" ;;
+        E$'\t'*) key="${line#??}"; items="[]" ;;
+        I$'\t'*) items="${items:+$items$'\n'}    - ${line#??}" ;;
+      esac
+    done <<< "$out"
+    if [ -z "$key" ]; then
+      echo "$path: no Implementation field"
+    elif [ "$items" = "[]" ]; then
+      echo "$path: $key: [] (intentionally empty)"
+    elif [ -z "$items" ]; then
+      echo "$path: $key: (no entries)"
+    else
+      echo "$path:"
+      printf '%s\n' "$items"
+    fi
+  done
 }
 
 # --- `tools` subcommand: vendor/uninstall/status doc-tools.sh itself ---
+#
+# The copy being run is either the PLUGIN's (scripts/doc-tools.sh in the
+# doc-superpowers plugin: a skills/doc-superpowers/SKILL.md above it, the CI
+# helpers under scripts/hooks/ci/) or a VENDORED one (.github/scripts/ in a
+# consuming repo, put there by tools install or install --ci). Only the plugin
+# has helpers to ship, a version (its RELEASE-NOTES.md) and copies to compare
+# a vendored file against, so:
+#   install    from a vendored copy: itself only (onto itself: a no-op);
+#              --with-helpers is refused, writing nothing
+#   uninstall  deletes only files byte-identical to the plugin's copies — a
+#              vendored copy has nothing to compare against, so it is refused
+#   status     from a vendored copy: presence only, no drift, no version
+# (The version used to be looked up at the git toplevel too, which reported
+# the CONSUMING repo's RELEASE-NOTES.md as the plugin's.)
+_TOOLS_ROOT="$(dirname "$SCRIPT_DIR")"
 
-# Source of truth: SCRIPT_DIR points at the directory containing the running
-# script. Use that as the "plugin copy" — when this script lives in a plugin
-# cache, the plugin copy is the one being executed; when it lives in
-# .github/scripts/ (already-vendored), `tools install` becomes a no-op
-# self-copy which is still valid.
-_tools_plugin_source() {
-  echo "$SCRIPT_DIR/doc-tools.sh"
+_tools_is_plugin() {
+  [ -f "$_TOOLS_ROOT/skills/doc-superpowers/SKILL.md" ] && [ -d "$SCRIPT_DIR/hooks/ci" ]
 }
 
-_tools_plugin_helpers_dir() {
-  # Helpers live under scripts/hooks/ci/doc-pr-release/ in the plugin source
-  # tree. When the script has been vendored to .github/scripts/, there are no
-  # helpers next to it — return empty so callers can skip gracefully.
-  local candidate="$SCRIPT_DIR/hooks/ci/doc-pr-release"
-  [[ -d "$candidate" ]] && echo "$candidate" || echo ""
+# The helper directories the CI templates run as .github/scripts/<dir>/*.sh,
+# laid out in the plugin as scripts/hooks/ci/<dir>/. doc-superpowers-steps
+# holds the step scripts doc-pr-release.yml and doc-release.yml run.
+_TOOLS_HELPER_DIRS="doc-pr-release doc-superpowers-steps"
+
+# _tools_copy <src> <dest> <mode for a new dest>: copy through a tmp beside
+# <dest> (never cp over a file a running CI job may be reading). Sets
+# _TOOLS_SAME=1 and copies nothing when both name the same file.
+_tools_copy() {
+  _TOOLS_SAME=0
+  if [ -e "$2" ] && [ "$1" -ef "$2" ]; then
+    _TOOLS_SAME=1
+    return 0
+  fi
+  _tmp_beside "$2"
+  cp "$1" "$_TMP" || _die "cannot copy $1 to $2"
+  _replace_file "$_TMP" "$2" "$3"
 }
 
 cmd_tools_install() {
   [ $# -eq 0 ] || _usage_error "tools install" "takes no arguments (got '$1')"
-  local dest="${_OPT_dest:-.github/scripts}"
-  local with_helpers=false
-  [ -z "${_OPT_with_helpers:-}" ] || with_helpers=true
+  local dest="${_OPT_dest:-.github/scripts}" with_helpers=0 d f n
+  [ -z "${_OPT_with_helpers:-}" ] || with_helpers=1
+  local src="$SCRIPT_DIR/doc-tools.sh"
 
-  local src
-  src="$(_tools_plugin_source)"
-  if [[ ! -f "$src" ]]; then
-    echo "ERROR: source doc-tools.sh not found at $src" >&2
-    exit 1
+  # Everything a helper install needs is checked before anything is written.
+  if [ "$with_helpers" = 1 ]; then
+    if ! _tools_is_plugin; then
+      echo "ERROR: --with-helpers ships the plugin's CI helpers, and $src is a vendored copy, which has none. Run the plugin's doc-tools.sh. Nothing was installed." >&2
+      exit 1
+    fi
+    for d in $_TOOLS_HELPER_DIRS; do
+      [ -d "$SCRIPT_DIR/hooks/ci/$d" ] || _die "the plugin's helper directory $SCRIPT_DIR/hooks/ci/$d is missing. Nothing was installed."
+    done
   fi
 
-  mkdir -p "$dest"
-  cp "$src" "$dest/doc-tools.sh"
-  chmod +x "$dest/doc-tools.sh"
-  echo "Installed doc-tools.sh → $dest/doc-tools.sh"
+  mkdir -p "$dest" || _die "cannot create $dest"
+  _tools_copy "$src" "$dest/doc-tools.sh" 755
+  if [ "$_TOOLS_SAME" = 1 ]; then
+    echo "doc-tools.sh is already at $dest/doc-tools.sh (it is the copy being run)"
+  else
+    echo "Installed doc-tools.sh → $dest/doc-tools.sh"
+  fi
+  [ "$with_helpers" = 1 ] || return 0
 
-  if [[ "$with_helpers" == "true" ]]; then
-    local helpers_src
-    helpers_src="$(_tools_plugin_helpers_dir)"
-    if [[ -z "$helpers_src" ]]; then
-      echo "WARN: --with-helpers requested but plugin helpers dir not found." >&2
-      echo "      (Are you running from a vendored copy? Re-run from plugin source.)" >&2
-    else
-      mkdir -p "$dest/doc-pr-release"
-      local helpers_installed=0
-      for helper in "$helpers_src"/*.sh; do
-        [[ -f "$helper" ]] || continue
-        cp "$helper" "$dest/doc-pr-release/$(basename "$helper")"
-        chmod +x "$dest/doc-pr-release/$(basename "$helper")"
-        helpers_installed=$((helpers_installed + 1))
-      done
-      echo "Installed $helpers_installed doc-pr-release helpers → $dest/doc-pr-release/"
+  for d in $_TOOLS_HELPER_DIRS; do
+    mkdir -p "$dest/$d" || _die "cannot create $dest/$d"
+    n=0
+    for f in "$SCRIPT_DIR/hooks/ci/$d"/*.sh; do
+      [ -f "$f" ] || continue
+      _tools_copy "$f" "$dest/$d/$(basename "$f")" 755
+      n=$((n + 1))
+    done
+    echo "Installed $n $d helpers → $dest/$d/"
+  done
 
-      # RELEASE-NOTES.next/README.md — never overwrite (user may have edits).
-      if [[ -f "$helpers_src/RELEASE-NOTES.next.README.md" ]] \
-         && [[ ! -f "RELEASE-NOTES.next/README.md" ]]; then
-        mkdir -p RELEASE-NOTES.next
-        cp "$helpers_src/RELEASE-NOTES.next.README.md" \
-           "RELEASE-NOTES.next/README.md"
-        echo "Created RELEASE-NOTES.next/README.md (fragment format spec)"
-      fi
-    fi
+  # RELEASE-NOTES.next/README.md — never overwrite (user may have edits).
+  f="$SCRIPT_DIR/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md"
+  if [ -f "$f" ] && [ ! -e "RELEASE-NOTES.next/README.md" ]; then
+    mkdir -p RELEASE-NOTES.next || _die "cannot create RELEASE-NOTES.next"
+    _tools_copy "$f" "RELEASE-NOTES.next/README.md" 644
+    echo "Created RELEASE-NOTES.next/README.md (fragment format spec)"
   fi
 }
 
 cmd_tools_uninstall() {
   [ $# -eq 0 ] || _usage_error "tools uninstall" "takes no arguments (got '$1')"
   local dest="${_OPT_dest:-.github/scripts}"
-
-  local removed=0
-  if [[ -f "$dest/doc-tools.sh" ]]; then
-    rm "$dest/doc-tools.sh"
-    echo "Removed $dest/doc-tools.sh"
-    removed=$((removed + 1))
+  local src="$SCRIPT_DIR/doc-tools.sh"
+  if ! _tools_is_plugin; then
+    echo "ERROR: tools uninstall deletes only files identical to the plugin's copies, and $src is a vendored copy with nothing to compare them with. Run the plugin's doc-tools.sh. Nothing was removed." >&2
+    exit 1
   fi
 
-  # Best-effort helper cleanup: only remove if files match the plugin copy
-  # byte-for-byte (no local edits). The `RELEASE-NOTES.next/README.md` is
-  # intentionally NOT removed — it may have user-authored fragment edits.
-  local helpers_src
-  helpers_src="$(_tools_plugin_helpers_dir)"
-  if [[ -d "$dest/doc-pr-release" ]] && [[ -n "$helpers_src" ]]; then
-    local has_local_edits=false
-    for installed in "$dest/doc-pr-release"/*.sh; do
-      [[ -f "$installed" ]] || continue
-      local plugin_copy="$helpers_src/$(basename "$installed")"
-      if [[ ! -f "$plugin_copy" ]] \
-         || ! cmp -s "$plugin_copy" "$installed"; then
-        has_local_edits=true
-        break
-      fi
-    done
-    if [[ "$has_local_edits" == "true" ]]; then
-      echo "Kept $dest/doc-pr-release/ (contains local edits or unknown files)"
-    else
-      rm -rf "$dest/doc-pr-release"
-      echo "Removed $dest/doc-pr-release/"
+  # A file is removed only when it is byte-identical to the plugin's copy of
+  # it (and is not that copy). Anything else — a locally edited or drifted
+  # file, one from another plugin version, a file the user added — is kept
+  # and reported. RELEASE-NOTES.next/README.md is never removed: it may carry
+  # edits.
+  local removed=0 kept=0 d f p n
+  f="$dest/doc-tools.sh"
+  if [ -f "$f" ]; then
+    if [ "$src" -ef "$f" ]; then
+      echo "Kept $f (it is the plugin's own copy)"
+      kept=$((kept + 1))
+    elif cmp -s "$src" "$f"; then
+      rm -f "$f" || _die "cannot remove $f"
+      echo "Removed $f"
       removed=$((removed + 1))
+    else
+      echo "Kept $f (it differs from the plugin's copy: local edits or another version; delete it by hand if it is not needed)"
+      kept=$((kept + 1))
     fi
   fi
 
-  # Clean up empty parent dir.
+  for d in $_TOOLS_HELPER_DIRS; do
+    [ -d "$dest/$d" ] || continue
+    n=0
+    for p in "$SCRIPT_DIR/hooks/ci/$d"/*.sh; do
+      [ -f "$p" ] || continue
+      f="$dest/$d/$(basename "$p")"
+      if [ -f "$f" ] && ! [ "$p" -ef "$f" ] && cmp -s "$p" "$f"; then
+        rm -f "$f" || _die "cannot remove $f"
+        n=$((n + 1))
+      fi
+    done
+    [ "$n" -eq 0 ] || echo "Removed $n $d helpers from $dest/$d/"
+    removed=$((removed + n))
+    if rmdir "$dest/$d" 2>/dev/null; then
+      :
+    else
+      echo "Kept $dest/$d/ (it holds files that are not unmodified plugin helpers: local edits or your own)"
+      kept=$((kept + 1))
+    fi
+  done
+
+  # Clean up an empty destination directory.
   rmdir "$dest" 2>/dev/null || true
 
-  if [[ "$removed" -eq 0 ]]; then
+  if [ "$removed" -eq 0 ] && [ "$kept" -eq 0 ]; then
     echo "Nothing to uninstall at $dest"
   fi
   return 0
@@ -4171,30 +4484,53 @@ cmd_tools_uninstall() {
 cmd_tools_status() {
   [ $# -eq 0 ] || _usage_error "tools status" "takes no arguments (got '$1')"
   local dest="${_OPT_dest:-.github/scripts}"
-
-  local installed="$dest/doc-tools.sh"
-  local plugin
-  plugin="$(_tools_plugin_source)"
+  local installed="$dest/doc-tools.sh" src="$SCRIPT_DIR/doc-tools.sh"
+  local plugin=0 ver="unknown"
+  if _tools_is_plugin; then
+    plugin=1
+    ver=$(_release_notes_version "$_TOOLS_ROOT/RELEASE-NOTES.md" 2>/dev/null) || ver="unknown"
+  fi
 
   if [[ ! -f "$installed" ]]; then
     echo "doc-tools.sh: not installed at $dest"
     return 0
   fi
 
-  if cmp -s "$plugin" "$installed"; then
-    echo "doc-tools.sh: installed at $dest (matches plugin v$( _tools_extract_version ))"
+  if [ "$src" -ef "$installed" ]; then
+    if [ "$plugin" = 1 ]; then
+      echo "doc-tools.sh: $installed is the plugin's own copy (v$ver), not a vendored one"
+    else
+      echo "doc-tools.sh: installed at $dest (this is the copy being run: run tools status from the plugin's doc-tools.sh to check it for drift)"
+    fi
+  elif [ "$plugin" = 0 ]; then
+    echo "doc-tools.sh: installed at $dest (not compared: $src is a vendored copy, not the plugin's)"
+  elif cmp -s "$src" "$installed"; then
+    echo "doc-tools.sh: installed at $dest (matches plugin v$ver)"
   else
-    echo "doc-tools.sh: installed at $dest (DRIFTED from plugin source)"
+    echo "doc-tools.sh: installed at $dest (DRIFTED from plugin v$ver)"
   fi
 
-  # Helper-presence summary.
-  if [[ -d "$dest/doc-pr-release" ]]; then
-    local helper_count
-    helper_count=$(find "$dest/doc-pr-release" -maxdepth 1 -name '*.sh' 2>/dev/null | wc -l | tr -d ' ')
-    echo "doc-pr-release helpers: $helper_count installed at $dest/doc-pr-release/"
-  else
-    echo "doc-pr-release helpers: not installed at $dest"
-  fi
+  # Helper-presence summary (and drift, when there is a plugin to compare).
+  local d f n drift
+  for d in $_TOOLS_HELPER_DIRS; do
+    if [ -d "$dest/$d" ]; then
+      n=0 drift=0
+      for f in "$dest/$d"/*.sh; do
+        [ -f "$f" ] || continue
+        n=$((n + 1))
+        if [ "$plugin" = 1 ] && ! cmp -s "$SCRIPT_DIR/hooks/ci/$d/$(basename "$f")" "$f"; then
+          drift=$((drift + 1))
+        fi
+      done
+      if [ "$drift" -gt 0 ]; then
+        echo "$d helpers: $n installed at $dest/$d/ ($drift differ from the plugin's)"
+      else
+        echo "$d helpers: $n installed at $dest/$d/"
+      fi
+    else
+      echo "$d helpers: not installed at $dest"
+    fi
+  done
   if [[ -f "RELEASE-NOTES.next/README.md" ]]; then
     echo "RELEASE-NOTES.next/README.md: present"
   else
@@ -4202,28 +4538,13 @@ cmd_tools_status() {
   fi
 }
 
-# Best-effort: parse version from RELEASE-NOTES.md.
-# Looks in two places, in order:
-#   1. $SCRIPT_DIR/../RELEASE-NOTES.md (canonical plugin layout: scripts/doc-tools.sh
-#      + RELEASE-NOTES.md at repo root).
-#   2. <git-toplevel>/RELEASE-NOTES.md (vendored case: .github/scripts/doc-tools.sh
-#      within a consuming repo — only useful if that repo also versions its docs
-#      with the same convention; otherwise falls through to "unknown").
-# Prints "unknown" if neither resolves.
-_tools_extract_version() {
-  local candidate version
-  for candidate in \
-    "$(dirname "$SCRIPT_DIR")/RELEASE-NOTES.md" \
-    "$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)/RELEASE-NOTES.md"; do
-    [[ -f "$candidate" ]] || continue
-    version=$(grep -m 1 -o '## v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' "$candidate" \
-              | sed 's/## v//')
-    if [[ -n "$version" ]]; then
-      echo "$version"
-      return
-    fi
-  done
-  echo "unknown"
+cmd_tools_version() {
+  [ $# -eq 0 ] || _usage_error "tools version" "takes no arguments (got '$1')"
+  if ! _tools_is_plugin; then
+    echo "ERROR: $SCRIPT_DIR/doc-tools.sh is a vendored copy: its version is unknown (tools version reads the plugin's RELEASE-NOTES.md)." >&2
+    exit 1
+  fi
+  _release_notes_version "$_TOOLS_ROOT/RELEASE-NOTES.md" || exit 1
 }
 
 # --- Main ---
