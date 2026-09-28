@@ -56,8 +56,10 @@ Wrapper skills integrate doc-superpowers spec lifecycle actions at pipeline inte
 Post-brainstorm → spec-generate --design-doc=<path>
                   (spec-generate syncs CLAUDE.md if new dirs bootstrapped)
 During plan    → spec-inject --phase=plan --plan=<path> --specs=<paths>
-After chunk    → spec-inject --phase=execute --specs=<paths>
-Pre-finish     → spec-verify --mode=post-execute --specs=<paths> --design-doc=<path>
+After chunk    → spec-inject --phase=execute --specs=<paths> --plan=<path>
+Pre-finish     → spec-verify --mode=post-execute --specs=<paths> --design-doc=<path> --plan=<path>
                   (spec-verify checks CLAUDE.md currency as part of compliance)
-During review  → spec-verify --mode=review --changed-files=<paths>
+During review  → spec-verify --mode=review --changed-files=<paths> --specs=<paths> --plan=<path>
 ```
+
+`--specs` paths may carry a role suffix (`:target`, `:constraint`, `:amends`); pass the same list at every point, and `--plan` wherever the work has a plan — it is what lets an `:amends` spec's landed-check attribute the block to this plan.

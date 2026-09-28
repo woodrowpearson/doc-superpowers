@@ -8,7 +8,7 @@ Reference for wrapper skill authors integrating doc-superpowers spec lifecycle a
 
 | Pipeline Point | When | Action | Mode |
 |---|---|---|---|
-| Post-brainstorm | Design doc written and committed | `spec-generate` | — |
+| Post-brainstorm | Design doc written | `spec-generate` | — |
 | During plan | Implementation plan being written | `spec-inject` | `plan` |
 | During execute | After each plan chunk completes | `spec-inject` | `execute` |
 | Pre-finish | All tasks done, before merging | `spec-verify` | `post-execute` |
@@ -43,14 +43,14 @@ PR review ──→ spec-verify (review) ──→ freshness + coverage findings
 - List of generated spec paths (for downstream `--specs` parameters)
 
 **Prerequisites:**
-- Design doc must exist and be committed
-- `docs/specs/` directory must exist (bootstrapped if missing)
+- Design doc must exist (committed or not: it is read, never indexed)
+- `docs/specs/` is bootstrapped when missing (mkdir + template + README)
 - `references/doc-spec.md` must be accessible (for spec template)
 
 **Error handling:**
 - Missing design doc → error with path suggestion
 - No `docs/specs/` directory → bootstrap it (mkdir + create template + README)
-- No `.doc-index.json` → created from the new specs' mapping lines by `doc-tools.sh build-index` (it refuses empty input)
+- No `.doc-index.json` → created from the new specs' mapping lines by `doc-tools.sh build-index` (only when no index exists; it refuses empty input). An existing index gets them through `add-entry`.
 
 ---
 
@@ -59,19 +59,20 @@ PR review ──→ spec-verify (review) ──→ freshness + coverage findings
 **Input (plan phase):**
 - `--phase=plan`
 - `--plan=<path>` — Path to the implementation plan
-- `--specs=<paths>` — Comma-separated paths to governing specs. Each path may carry an optional role suffix — `<path>:target` or `<path>:constraint`, or `<path>:amends` — declaring whether the work is expected to advance that spec, leave it untouched, or correct what it says. Unsuffixed paths are resolved by intersecting changed files with the spec's `code_refs` at execution time; that inference never yields the amendment role, which is explicit-only.
-- `--plan=<path>` — Path to the implementation plan. Also consumed by the amendment tasks it injects, which cite it so the landed-check can attribute a block to this plan.
+- `--specs=<paths>` — Comma-separated paths to governing specs. Each path may carry an optional role suffix — `<path>:target` or `<path>:constraint`, or `<path>:amends` — declaring whether the work is expected to advance that spec, leave it untouched, or correct what it says. The injected tasks carry each explicit marker verbatim; unsuffixed paths are recorded `infer` and resolved by intersecting changed files with the spec's `code_refs` at execution time. That inference never yields the amendment role, which is explicit-only.
+
+The plan-phase `--plan` is also consumed by the amendment tasks it injects, which cite it so the landed-check can attribute a block to this plan.
 
 **Output (plan phase):**
-- Modified plan document with spec maintenance tasks appended to each chunk. Injected tasks are status-aware and scope-aware: they read a spec's current `Status` before writing and resolve target vs. constraint at execution time. Constraint specs are never written. A spec passed `:amends` additionally gets a `Task N+1a` that verifies its dated `AMENDED` block landed and cites this plan; that task writes no `Status`, no Implementation Notes and no `code_refs` — amendment specs are never advanced.
+- Modified plan document with spec maintenance tasks appended to each chunk. Injected tasks are status-aware and scope-aware: they read a spec's current `Status` before writing, carry the caller's explicit role markers, and resolve an unmarked spec as target vs. constraint at execution time. Constraint specs are never written, and neither are exempt-status specs. A spec passed `:amends` additionally gets one `Task N+1a`, in the chunk whose task writes its dated `AMENDED` block, that verifies the block landed in its section and cites this plan; that task writes no `Status`, no Implementation Notes and no `code_refs` — amendment specs are never advanced.
 
 **Input (execute phase):**
 - `--phase=execute`
 - `--specs=<paths>` — Paths to governing specs, each with an optional `:target` / `:constraint` / `:amends` role suffix
-- `--plan=<path>` — Optional. Enables the amendment landed-check to attribute a block to this plan; without it the check degrades to block-present and reports the citation as unverified.
+- `--plan=<path>` — Optional. Tells the phase whether the plan carries injected spec tasks — then they are the chunk's one writer and this phase only reports — and enables the amendment landed-check to attribute a block to this plan; without it the check degrades to block-present and reports the citation as unverified.
 
 **Output (execute phase):**
-- Updated spec files (status, Implementation Notes, code_refs) if aligned
+- Updated spec files (status `Draft` → `In Review` only, Implementation Notes, `code_refs` via `set-code-refs`) if aligned and this phase is the chunk's writer
 - Deviation flags if drifted (what spec says vs. what code does)
 
 **Prerequisites:**
@@ -82,7 +83,7 @@ PR review ──→ spec-verify (review) ──→ freshness + coverage findings
 
 **Error handling:**
 - Missing governing specs → warning listing missing paths
-- No `.doc-index.json` → error suggesting `doc-tools.sh build-index`
+- No `.doc-index.json` → error: no index exists — run `spec-generate` (it creates one from the new specs), or `doc-tools.sh build-index` for existing docs
 - Plan without chunk boundaries → fall back to `### Task N:` headings
 
 ---
@@ -91,18 +92,21 @@ PR review ──→ spec-verify (review) ──→ freshness + coverage findings
 
 **Input (post-execute mode):**
 - `--mode=post-execute`
-- `--specs=<paths>` — Paths to governing specs
+- `--specs=<paths>` — Paths to governing specs, each with an optional `:target` / `:constraint` / `:amends` role suffix
 - `--design-doc=<path>` — Path to original design doc
+- `--plan=<path>` — Optional. Required for a full amendment check (the block must cite this plan); without it the check degrades to block-present with `WARN: amendment citation unverified (no --plan)`
 
 **Output (post-execute mode):**
-- Structured compliance report with PASS/FAIL verdict (includes CLAUDE.md and README.md currency check)
+- Structured compliance report with PASS/FAIL verdict (includes CLAUDE.md and README.md currency check, and every `:amends` spec's landed-check)
 
 **Input (review mode):**
 - `--mode=review`
 - `--changed-files=<paths>` — Files changed in the PR/branch
+- `--specs=<paths>` — Optional. Governing specs with their role suffixes; needed for the amendment finding
+- `--plan=<path>` — Optional. Lets the amendment check attribute a block to this plan
 
 **Output (review mode):**
-- Review findings in standard doc-superpowers severity format
+- Review findings in standard doc-superpowers severity format — no verdict; an amendment that did not land is a **P1 Amendment not landed** finding
 
 **Prerequisites:**
 - `.doc-index.json` must exist with `code_refs` populated
@@ -110,7 +114,7 @@ PR review ──→ spec-verify (review) ──→ freshness + coverage findings
 - For review: changed files list must be provided
 
 **Error handling:**
-- Missing `.doc-index.json` → error suggesting `doc-tools.sh build-index`
+- Missing `.doc-index.json` → error: no index exists — suggest `init`, or `doc-tools.sh build-index` for existing docs
 - No governing specs found → finding: "No formal specs govern this implementation"
 - No changed files match any `code_refs` → report: "No spec-governed files changed"
 
@@ -135,17 +139,17 @@ During plan:
 
 During execute:
   After each plan chunk completes →
-    invoke doc-superpowers spec-inject --phase=execute --specs=<paths>
+    invoke doc-superpowers spec-inject --phase=execute --specs=<paths> --plan=<path>
     If deviation flags returned → surface to user
 
 Pre-finish:
   After all tasks, before finishing →
-    invoke doc-superpowers spec-verify --mode=post-execute --specs=<paths> --design-doc=<path>
+    invoke doc-superpowers spec-verify --mode=post-execute --specs=<paths> --design-doc=<path> --plan=<path>
     If FAIL → surface report to user, let them decide
 
 During review:
   Alongside other review participants →
-    invoke doc-superpowers spec-verify --mode=review --changed-files=<paths>
+    invoke doc-superpowers spec-verify --mode=review --changed-files=<paths> --specs=<paths> --plan=<path>
     Merge findings into review report
 ```
 
@@ -158,11 +162,13 @@ All actions are user-invocable outside wrapper skills:
 
 /doc-superpowers spec-inject --phase=plan --plan=docs/superpowers/plans/2026-03-14-feature.md --specs=docs/specs/SPEC-AUTH-001-oauth-flow.md
 
-/doc-superpowers spec-inject --phase=execute --specs=docs/specs/SPEC-AUTH-001-oauth-flow.md
+/doc-superpowers spec-inject --phase=execute --specs=docs/specs/SPEC-AUTH-001-oauth-flow.md --plan=docs/superpowers/plans/2026-03-14-feature.md
 
-/doc-superpowers spec-verify --mode=post-execute --specs=docs/specs/SPEC-AUTH-001-oauth-flow.md --design-doc=docs/superpowers/specs/2026-03-14-feature-design.md
+/doc-superpowers spec-verify --mode=post-execute --specs=docs/specs/SPEC-AUTH-001-oauth-flow.md --design-doc=docs/superpowers/specs/2026-03-14-feature-design.md --plan=docs/superpowers/plans/2026-03-14-feature.md
 
 /doc-superpowers spec-verify --mode=review --changed-files=src/auth/oauth.py,src/auth/session.py
+
+/doc-superpowers spec-verify --mode=review --changed-files=src/ui/recents.js --specs=docs/specs/SPEC-UI-041-recents.md:amends --plan=docs/superpowers/plans/2026-03-14-feature.md
 ```
 
 ## Host Project Assumptions
@@ -174,5 +180,5 @@ doc-superpowers expects these to exist (or bootstraps them):
 | `docs/specs/` directory | `init` action | `spec-generate` (mkdir + template + README) |
 | `docs/specs/template.md` | `init` action | `spec-generate` |
 | `docs/specs/README.md` | `init` action | `spec-generate` |
-| `docs/.doc-index.json` | `doc-tools.sh build-index` | `spec-generate` |
+| `docs/.doc-index.json` | `init` (`doc-tools.sh build-index`, only when no index exists) | `spec-generate` (same) |
 | Spec template in `references/doc-spec.md` | Bundled with skill | (always available) |

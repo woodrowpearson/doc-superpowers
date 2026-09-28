@@ -70,11 +70,13 @@ doc-superpowers/
 ├── references/
 │   ├── doc-spec.md       # Templates for generated docs (C4, ERD, workflows, agentic, specs, ADRs)
 │   ├── agent-prompt-template.md   # Review agent prompt template + scope focus areas
-│   ├── output-templates.md        # Audit report format + plan template
+│   ├── output-templates.md        # Audit report format (+ its Update Tasks) + spec compliance report
+│   ├── release.md                 # `release` action steps 1–12 (REQUIRED pointer from SKILL.md)
+│   ├── hooks.md                   # `hooks` action: tiers, consent table, CI templates (REQUIRED pointer from SKILL.md)
 │   ├── spec-lifecycle-actions.md  # Detailed procedures for spec-generate/inject/verify
 │   ├── spec-lifecycle-protocol.md  # Wrapper author integration guide
 │   ├── integration-patterns.md    # How other skills integrate with doc-superpowers
-│   └── tool-mappings.md           # Cross-framework tool name mappings
+│   └── tool-mappings.md           # Cross-framework tool name mappings + tool resolution ($ROOT)
 ├── docs/                 # Documentation about this skill itself
 │   ├── architecture/
 │   │   ├── system-overview.md  # C4 diagrams, tech stack, key decisions
@@ -95,7 +97,8 @@ doc-superpowers/
 │   ├── codebase-guide.md # Directory map, key files, code flow
 │   └── conventions.md    # Naming, versioning, skill structure
 ├── evals/                # Evaluation test cases for skill testing
-│   └── evals.json        # Test prompts and assertions
+│   ├── evals.json        # Test prompts and machine-checkable assertions (path / pattern / command)
+│   └── fixtures/         # lib.sh + <eval>/setup.sh — builds each eval's scenario in an empty dir, self-checked
 ├── README.md             # Installation, usage, examples
 ├── LICENSE               # MIT
 ├── RELEASE-NOTES.md      # Semantic versioned changelog
@@ -110,7 +113,7 @@ doc-superpowers/
 | `scripts/doc-tools.sh` | Bundled freshness tooling — 15 subcommands for index management, version sync, ADR/SPEC implementation status, release-notes fragments, and CLI vendoring | Changing staleness detection, index schema, version sync, implementation status, fragment merge, or vendoring |
 | `scripts/test-doc-tools.sh` | Test suite for doc-tools.sh | Adding tests for new doc-tools features |
 | `scripts/test-hooks.sh` | Test suite for hooks installer and hook scripts | Adding tests for new hooks or installer features |
-| `scripts/test-spec-status-model.sh` | Test suite pinning the canonical Spec Status Model wording and its call sites | Changing spec status transition rules, roles, or vocabulary |
+| `scripts/test-spec-status-model.sh` | Test suite pinning the canonical Spec Status Model wording and its call sites, and the skill prompt ↔ tool contract: tool resolution, index-write routing, review-pr base, safety rules, templates, the prompts' `--allowedTools`, and `evals/evals.json` (fields, regexes, fixtures run) | Changing spec status transition rules, roles, or vocabulary; changing what SKILL.md / references tell an agent to run; adding an eval |
 | `scripts/test-doc-pr-release.sh` | Test suite for the CI workflow helpers (extract-context, update-pr-body, commit-and-push, the `run:` step scripts in doc-superpowers-steps/) + YAML placeholder substitution, template structure/wiring, and the installed templates' fail-closed / least-privilege properties | Adding tests for fragment-producer, CI-step or template features |
 | `scripts/hooks/ci/doc-pr-release.yml` | AI per-PR release-notes fragment producer — drafts `RELEASE-NOTES.next/PR-<N>.md` on every push | Changing the producer workflow, prompt, or post-Claude verification |
 | `scripts/hooks/ci/doc-pr-release/*.sh`, `scripts/hooks/ci/doc-superpowers-steps/*.sh` | Producer helpers (extract-context, update-pr-body, commit-and-push; `--helpers`-gated) and every template's `run:` step bodies (shipped to `.github/scripts/doc-superpowers-steps/` while any workflow is installed) | Changing fragment context schema, PR-body editing, push logic, or any workflow step body |
@@ -124,6 +127,9 @@ doc-superpowers/
 | `references/output-templates.md` | Audit report format + plan template | Changing report structure or plan format |
 | `references/spec-lifecycle-actions.md` | Detailed procedures for spec-generate (incl. Step 5b stale content scan), spec-inject, spec-verify; defines the canonical **Spec Status Model** (ladder, exempt class, rules R1-R4, evaluation order) | Changing spec action steps or adding new spec actions; changing status transition rules, roles, or vocabulary |
 | `references/spec-lifecycle-protocol.md` | Wrapper author integration guide — input/output contracts, integration patterns | Adding integration patterns, changing action contracts |
+| `references/release.md` | `release` action procedure (steps 1–12); its `$DOC_TOOLS fragments merge … --remove` forms are pinned to `doc-release.yml`'s `--allowedTools` | Changing the release flow (change the template and its test in the same commit) |
+| `references/hooks.md` | `hooks` action: installer routing, per-user Claude tier, `--ci` consent table, CI templates and helpers | Changing installer flags, tiers, or workflow templates |
+| `evals/evals.json`, `evals/fixtures/` | Skill evals with machine-checkable fields; per-eval `setup.sh` fixtures | Adding or changing an eval (the spec-status-model suite validates both) |
 | `references/integration-patterns.md` | How other skills integrate with doc-superpowers (code review, commit review, wrapper skills) | Adding integration patterns |
 | `docs/codebase-guide.md` | Directory map, key files, code flow for this skill | Structural changes to the skill |
 | `docs/conventions.md` | Naming, versioning, skill structure conventions | Convention changes |

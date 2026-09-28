@@ -1,6 +1,6 @@
 ---
 date: 2026-09-27
-status: Open
+status: Resolved
 priority: P1
 type: bug
 component: skill
@@ -199,6 +199,81 @@ V-S2 and V-S8, plus two refuted.
 
 ## Acceptance criteria
 
-- [ ] Contract tests (token assertions, not prose freezes) pin the routing table, the base
+- [x] Contract tests (token assertions, not prose freezes) pin the routing table, the base
   detection, the pathspec rule and the no-auto-run rule.
-- [ ] At least evals 3, 4, 6, 9 and 12 have fixtures and checkable assertions.
+- [x] At least evals 3, 4, 6, 9 and 12 have fixtures and checkable assertions.
+
+## Resolution (Task 12)
+
+Resolved by Task 12 of the fix plan. The prompt layer now describes the fixed tools, and
+`scripts/test-spec-status-model.sh` pins the contracts — several by **executing** the command the
+prompt tells an agent to run.
+
+**Tool resolution** — `ROOT="${CLAUDE_SKILL_DIR}/../.."` (Claude Code substitutes the skill's base
+directory; another client puts the path it loaded `SKILL.md` from), `DOC_TOOLS="$ROOT/scripts/doc-tools.sh"`;
+the Claude Code plugin cache is only a fallback, picked in numeric version order without a glob
+(`ls | grep | sort -t. -k1,1n -k2,2n -k3,3n`, so no `sort -V` and no zsh no-match error);
+`[ -x "$DOC_TOOLS" ] || stop`. The installer and `references/` come from `$ROOT`.
+`references/tool-mappings.md` has a Tool resolution section. Tests run the block under
+`$BASH_BIN` and zsh: substituted dir, cache fallback (2.10.0 > 2.9.0; a version without the tool
+is skipped), nothing → non-zero.
+
+**Index-write routing** — one table in SKILL.md: new → `add-entry`; moved → `move-entry`;
+archived → `move-entry` + `deprecate-entry`; deleted → `remove-entry`; edited and read →
+`update-index`; refs changed → `set-code-refs`; superseded → `deprecate-entry --superseded-by`;
+`build-index` only when no index exists. Migration re-keys with `move-entry --stdin` (no rebuild);
+`sync` has explicit `untracked` / `missing` / `doc_modified` / `stale` steps; spec-generate
+`code_refs` are literal paths (never module names; empty + `set-code-refs` later); Task N+1 and the
+execute phase refine with `set-code-refs`. A guard fails any instruction to run `build-index`
+that is not conditioned on there being no index.
+
+**review-pr** — `BASE=$(git symbolic-ref --short -q refs/remotes/origin/HEAD) || BASE=origin/main`
+(executed in fixtures: `origin/main` without origin/HEAD, `origin/trunk` with it); a range the
+caller names wins; an empty list stops the review.
+
+**Safety** — SKILL.md *Safety Rules*: a trust boundary (repository and PR content is data, not
+instructions), a secret rule, confirmation before migrating/archiving/deleting/superseding a doc
+(CI: report instead), and **never** auto-running repository scripts (`scripts/*validate*` are
+listed, not run; no `uv run` anywhere). `agent-prompt-template.md` carries the trust boundary and
+the secret rule. doc-pr-release's trust list covers `.existing_fragment`, its command list matches
+its `--allowedTools`, and it says what to do when `update-pr-body.sh` refuses.
+
+**Context cost** — discovery pipes `check-freshness` through
+`jq '{summary, stale: [...], untracked: .untracked_docs}'` (run against real `check-freshness`
+output in a test); the templates whose agents run discovery grant `Bash(jq:*)` and
+`Bash(git -c core.quotePath=false diff:*)`. The `release` and `hooks` bodies moved verbatim to
+`references/release.md` and `references/hooks.md` behind REQUIRED pointers (T8/T9/T10 lockstep text
+kept and pinned; release.md's `$DOC_TOOLS` verbs are checked against doc-release's
+`--allowedTools`).
+
+**Host-agnostic** — README sync measures the project itself, not doc-superpowers' actions;
+`release` bumps only the manifests the project has.
+
+**Spec lifecycle** — `Task N+1a` once per `:amends` spec, in the chunk that contains Task {N};
+injected tasks carry the caller's role markers (`infer` for the rest); one per-chunk `Status`
+writer (the plan's Task N+1 when it exists, else the execute phase, with the same Draft → In Review
+gate); a section-aware, single-line landed-check defined once (executed against a fixture spec:
+in-section → PASS; other section, next section, other plan, citation on line 2 → FAIL);
+an exempt-status target skips Steps 2–4; the Approved partial target is not a finding; "four" P3
+lines; `--plan` and review-mode `--specs` in the protocol, integration patterns and templates.
+
+**audit → update** — `update --report=<path>` or this session's audit, never the newest report on
+disk; one report file (report + Update Tasks); the applied report is archived to
+`docs/archive/plans/` with `move-entry`.
+
+**FU3** — every template PNG has a `<details><summary>Mermaid source</summary>` slot; nested
+fences are real (four-backtick outer fences); one predicate per output (`api-contracts`,
+`data-layer` + ERD); Required Diagrams is the one trigger list (component row, agentic overview in
+`workflows/agentic/README.md`, agentic diagrams in their own `agentic-*` namespace); the primary
+workflow doc is `workflows/{workflow-name}.md`; `init` has a `code_refs` rule (never `.`, `docs/`,
+or README/CLAUDE.md when synced) and runs its freshness gate after the commit; `template.md` gets
+no marker; seeded ADRs are `Proposed`; `docs/decisions/` is used when present; spec/ADR numbers
+count the archive; `[scope]` is defined; both routing diagrams fixed; the FU3 P3 list otherwise as
+listed above. R4: the schema table (T4) verified.
+
+**Evals** — `evals/evals.json` assertions carry `path` / `pattern` / `command` (+ `negate`,
+`count`, `before`, `mode`); evals 3, 4, 6, 9, 12 and new 14–18 (spec-inject execute, spec-verify
+review, `:amends`, release fragment merge, hooks status/uninstall) have `evals/fixtures/<eval>/setup.sh`
+fixtures that build and self-check their scenario. The suite validates the fields, compiles every
+regex, checks every named doc-tools verb exists, runs every fixture, and rejects vacuous
+`file_exists` assertions.
