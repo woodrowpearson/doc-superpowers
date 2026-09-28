@@ -252,8 +252,9 @@ kept and pinned; release.md's `$DOC_TOOLS` verbs are checked against doc-release
 **Spec lifecycle** — `Task N+1a` once per `:amends` spec, in the chunk that contains Task {N};
 injected tasks carry the caller's role markers (`infer` for the rest); one per-chunk `Status`
 writer (the plan's Task N+1 when it exists, else the execute phase, with the same Draft → In Review
-gate); a section-aware, single-line landed-check defined once (executed against a fixture spec:
-in-section → PASS; other section, next section, other plan, citation on line 2 → FAIL);
+gate); a section-aware, block-aware landed-check defined once (executed against a fixture spec:
+in-section → PASS; other section, next section, other plan → FAIL; see fix round 1 for the
+accepted citation positions);
 an exempt-status target skips Steps 2–4; the Approved partial target is not a finding; "four" P3
 lines; `--plan` and review-mode `--specs` in the protocol, integration patterns and templates.
 
@@ -277,3 +278,23 @@ review, `:amends`, release fragment merge, hooks status/uninstall) have `evals/f
 fixtures that build and self-check their scenario. The suite validates the fields, compiles every
 regex, checks every named doc-tools verb exists, runs every fixture, and rejects vacuous
 `file_exists` assertions.
+
+### Fix round 1
+
+- **Accepted AMENDED-block forms.** The landed-check reads the whole block: the dated
+  `> ⚠️ **AMENDED YYYY-MM-DD — ….**` line and the `> ` lines that follow it, joined. New blocks put
+  ``Landed by `<plan path>` Task <N>`` on the first line; a block in the earlier layout (citation on
+  its last line, or any later line) still passes, so plans in flight and wrappers that mirror the
+  contract keep working. A citation outside the block (a following paragraph) or a block in
+  another section does not count. Stated in `spec-lifecycle-protocol.md` (Amendment blocks) and
+  pinned by executed cases; every copy of the command is byte-identical.
+- **Archiving the applied report** works in every layout: `git mv` only when git tracks the report,
+  else `mv`; `move-entry` only when the index lists it; a CI workflow leaves it in place and says
+  so. Safety Rules name this as the one no-confirmation move. Executed for a tracked+indexed and an
+  untracked+unindexed report; new eval 19 (`update-from-session-report`) with fixture.
+- review-pr stops when its base does not exist (it used to read the failed diff as "no changes");
+  tool resolution runs for every action; audit is "edits no doc", not "read-only"; README status
+  rows and the release commit's `git add` are host-agnostic; sync skips the installer in CI; the
+  CI grant is narrowed to `Bash(git -c core.quotePath=false diff --name-only:*)`; a guard checks
+  every `doc-tools.sh <verb>` the prompt layer names against doc-tools.sh's verb table; the release
+  evals' merge check is order-sensitive (`precedes`).

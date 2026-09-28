@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-28T19:17:20Z",
+  "generated_at": "2026-09-28T19:38:47Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -609,13 +609,13 @@
       "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I11-skill-prompt-tool-contract.md": {
-      "content_hash": "sha256:0c8c9ddaefb07e3823e2e5bd43d9bbcb1c02dee36d294821aec72fe481cf6f94",
+      "content_hash": "sha256:a2b949d6da84298cb37c2b1a557f2eeaa9204bd39657a84d92d379608e8ad145",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-28T19:17:20Z",
+      "last_verified": "2026-09-28T19:38:47Z",
       "implementation": [],
       "code_oids": {}
     },

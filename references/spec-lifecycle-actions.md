@@ -53,15 +53,15 @@ A spec resolved as **amendment** is **status-neutral by construction**: an amend
 > section used to assert, what is true now, and why>.
 ```
 
-The block's **first line** carries both the date and the citation (`**AMENDED YYYY-MM-DD` and ``Landed by `<plan path>` ``): that one line is what the landed-check reads.
+Write the citation on the block's **first line**, next to the date (`**AMENDED YYYY-MM-DD` and ``Landed by `<plan path>` ``). The landed-check reads the **whole block** — its dated first line and the `> ` lines that follow it — so a block in the earlier layout, citation on its last line, passes too. A citation outside the block (a following paragraph) does not count.
 
 **The landed-check** is one command. `{section-heading}` is the full heading line of the section the block amends (e.g. `## Design`); `{spec-path}` is the spec; `{plan-path}` is the plan that promised the amendment:
 
 ```bash
-awk -v h='{section-heading}' '/^(```|~~~)/ { f = !f } !f && /^#+ / { n = index($0, " ") - 1; if (s && n <= l) s = 0; if ($0 == h) { s = 1; l = n } } s' '{spec-path}' | grep -E '^> .*\*\*AMENDED [0-9]{4}-[0-9]{2}-[0-9]{2} ' | grep -F '{plan-path}'
+awk -v h='{section-heading}' '/^(```|~~~)/ { f = !f } !f && /^#+ / { n = index($0, " ") - 1; if (s && n <= l) s = 0; if ($0 == h) { s = 1; l = n } } s && !f && /^> .*\*\*AMENDED [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] / { if (b != "") print b; b = $0; next } b != "" && /^>/ { b = b " " $0; next } b != "" { print b; b = "" } END { if (b != "") print b }' '{spec-path}' | grep -F '{plan-path}'
 ```
 
-It prints the block's first line → **PASS**; it prints nothing → **FAIL**. Both stages are load-bearing. The `awk` and the first `grep` find a dated block in that section (its subsections included; a `#` line inside a code fence is not a heading). The `grep -F` proves the block cites this plan: a bare `grep 'AMENDED 20'` passes vacuously on any spec some earlier work amended, so the citation filter is what makes the check about this plan rather than about the file's history. A block in another section, or one whose citation is not on its first line, is not this amendment. The placeholders sit inside single quotes: a heading or path containing `'` cannot be checked this way — report that instead of running a broken command.
+It prints the matching block (its lines joined into one) → **PASS**; it prints nothing → **FAIL**. Both stages are load-bearing. The `awk` finds each dated block in that section (its subsections included; a `#` line inside a code fence is not a heading) and joins the block's `> ` lines. The `grep -F` proves the block cites this plan: a bare `grep 'AMENDED 20'` passes vacuously on any spec some earlier work amended, so the citation filter is what makes the check about this plan rather than about the file's history. A block in another section, or a citation outside the block, is not this amendment. The placeholders sit inside single quotes: a heading or path containing `'` cannot be checked this way — report that instead of running a broken command.
 
 `update-index <spec-path>` runs after the edit, because the spec's bytes changed even though its `Status` did not. Whole-doc supersession is a different operation and is unaffected: `Supersedes:` / `Superseded by:` replaces a document, an AMENDED block corrects a passage. Reach for one where the other belongs and the spec's history stops being readable.
 
@@ -219,9 +219,9 @@ Two modes: **plan phase** (inject spec tasks into implementation plan) and **exe
    Open the plan task whose body quotes the `⚠️ **AMENDED` block for {spec-path}: Task {N}. Read it alongside the section `{section-heading}` of {spec-path}. The amendment text that task quotes is the acceptance criterion — nothing else is.
    - [ ] **Step 2: Verify the block is present and cites this plan** (the landed-check, **Spec Status Model → Spec roles**)
    ```bash
-   awk -v h='{section-heading}' '/^(```|~~~)/ { f = !f } !f && /^#+ / { n = index($0, " ") - 1; if (s && n <= l) s = 0; if ($0 == h) { s = 1; l = n } } s' '{spec-path}' | grep -E '^> .*\*\*AMENDED [0-9]{4}-[0-9]{2}-[0-9]{2} ' | grep -F '{plan-path}'
+   awk -v h='{section-heading}' '/^(```|~~~)/ { f = !f } !f && /^#+ / { n = index($0, " ") - 1; if (s && n <= l) s = 0; if ($0 == h) { s = 1; l = n } } s && !f && /^> .*\*\*AMENDED [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] / { if (b != "") print b; b = $0; next } b != "" && /^>/ { b = b " " $0; next } b != "" { print b; b = "" } END { if (b != "") print b }' '{spec-path}' | grep -F '{plan-path}'
    ```
-   PASS iff a dated `AMENDED` block exists in the named section **and** its first line cites this plan. Both halves are load-bearing: a bare `grep 'AMENDED 20'` passes vacuously on any spec some earlier work amended, so the citation filter is what makes the check about this plan rather than about the file's history. No match → **FAIL**; the amendment did not land.
+   PASS iff a dated `AMENDED` block exists in the named section **and** the block (any of its `> ` lines) cites this plan. Both halves are load-bearing: a bare `grep 'AMENDED 20'` passes vacuously on any spec some earlier work amended, so the citation filter is what makes the check about this plan rather than about the file's history. No match → **FAIL**; the amendment did not land.
    - [ ] **Step 3: Update index**
    Run `doc-tools.sh update-index {spec-path}` — the spec's bytes changed even though its `Status` did not. This task is the single owner of that call: `Task N+1` skips Steps 2–4 for an amendment spec precisely so the index is refreshed exactly once.
    - [ ] **Step 4: Write nothing else**

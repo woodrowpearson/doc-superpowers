@@ -35,7 +35,7 @@
 
 ### README.md Status
 - [ ] Feature list: {current | stale — list discrepancies}
-- [ ] Action list: {current | stale — list discrepancies}
+- [ ] Command / API list: {current | stale — list discrepancies}
 - [ ] Usage examples: {current | stale — list discrepancies}
 
 ### RELEASE-NOTES.md Status
