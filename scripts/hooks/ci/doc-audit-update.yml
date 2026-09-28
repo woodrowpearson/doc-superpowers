@@ -81,7 +81,7 @@ jobs:
           plugins: doc-superpowers@doc-superpowers
           claude_args: |
             --max-turns 80
-            --allowedTools "Skill,Read,Glob,Grep,Edit,Write,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(.github/scripts/doc-tools.sh:*)"
+            --allowedTools "Skill,Read,Glob,Grep,Edit,Write,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(git -c core.quotePath=false diff:*),Bash(jq:*),Bash(.github/scripts/doc-tools.sh:*)"
           prompt: |
             This is an unattended GitHub Actions run of the doc-superpowers plugin.
             - Use `.github/scripts/doc-tools.sh` as `$DOC_TOOLS` (this plugin
