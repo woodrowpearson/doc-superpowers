@@ -1516,13 +1516,18 @@ _tmp_beside() {
   _TMP_PATHS+=("$_TMP")
 }
 
-# _replace_file <tmp> <target> [mode]: install <tmp> as <target>, keeping
-# <target>'s permission bits (mktemp creates 0600) — or [mode] (default 644)
-# when <target> does not exist yet.
+# _replace_file <tmp> <target> [mode] [exec]: install <tmp> as <target>,
+# keeping <target>'s permission bits (mktemp creates 0600) — or [mode]
+# (default 644) when <target> does not exist yet. [exec] = 1 also sets the
+# execute bits (a+x, i.e. OR 0111) on whichever mode that is: a script a CI
+# job runs directly must stay executable, whatever mode the old copy had.
 _replace_file() {
   local tmp="$1" target="$2" mode
   mode=$(_file_mode "$target" 2>/dev/null) || mode="${3:-644}"
   chmod "$mode" "$tmp" || _die "cannot chmod $mode $tmp"
+  if [ "${4:-0}" = 1 ]; then
+    chmod a+x "$tmp" || _die "cannot chmod a+x $tmp"
+  fi
   mv -f "$tmp" "$target" || _die "cannot replace $target"
 }
 
@@ -2001,9 +2006,10 @@ implementation-status|cmd_implementation_status|deps|
 set-implementation|cmd_set_implementation|deps|ref= status= note=
   <path> --ref <kind: ref> --status <status> [--note <note>]
   Set one realization entry, "<ref> — <status>[ — <note>]", in a doc's
-  Implementation: / Realized-by: block: the entry whose text starts with
-  "<ref> —" is replaced in place (with its wrapped lines); otherwise one
-  is appended at the block's indent ("<key>: []" becomes a list). A doc
+  Implementation: / Realized-by: block: the first entry whose text is
+  "<ref>" or starts with "<ref> —" is replaced in place (with its wrapped
+  lines), and a later duplicate of it is dropped; otherwise one is
+  appended at the block's indent ("<key>: []" becomes a list). A doc
   with no block gets one after the paragraph holding its first
   **Date**: / **Date:** (Implementation:) or **Created**: / **Created:**
   (Realized-by:) line; with neither it exits 1 and writes nothing. Values
@@ -2027,8 +2033,10 @@ tools install|cmd_tools_install|deps|dest= with-helpers
   --with-helpers also every helper the CI templates run
   (<path>/doc-pr-release/ and <path>/doc-superpowers-steps/) and
   RELEASE-NOTES.next/README.md (only if absent). Files are replaced
-  atomically. Run from a vendored copy it can only copy itself (onto
-  itself it does nothing); --with-helpers then exits 1, writing nothing.
+  atomically; an existing file keeps its mode, and every script ends up
+  executable (the templates run them directly). Run from a vendored copy
+  it can only copy itself (onto itself it only makes sure the copy is
+  executable); --with-helpers then exits 1, writing nothing.
 tools uninstall|cmd_tools_uninstall|deps|dest=
   [--dest <path>]
   Remove from <path> each vendored file that is byte-identical to the
@@ -2040,8 +2048,10 @@ tools uninstall|cmd_tools_uninstall|deps|dest=
 tools status|cmd_tools_status|deps|dest=
   [--dest <path>]
   Report whether doc-tools.sh is vendored at <path>, whether it matches the
-  plugin's copy (and the plugin's version), and the helpers present. Run
-  from a vendored copy it reports presence only: no plugin to compare with.
+  plugin's copy (and the plugin's version), and the helpers present: how
+  many differ from the plugin's copies, and how many the plugin does not
+  ship (added locally). Run from a vendored copy it reports presence only:
+  no plugin to compare with.
 tools version|cmd_tools_version|none|
   -
   Print the doc-superpowers version this doc-tools.sh belongs to: the
@@ -2083,9 +2093,11 @@ Mapping lines (stdin of build-index and add-entry, one doc per line):
 Realization blocks (set-implementation, implementation-status, update-index):
   A line "Implementation:" (ADRs) or "Realized-by:" (SPECs) at the start of
   a line, outside code fences, followed by "- <text>" entries at any
-  indent; an indented line after an entry wraps it (joined with a space).
-  A blank line, an unindented line or a fence line ends the block. The
-  first such block is the doc's; "Implementation: []" is explicitly empty.
+  indent, column 0 included; an indented line after an entry wraps it
+  (joined with a space). Any other line ends the block: a blank line, a
+  fence line, or an unindented line that is not a "- " entry. The first
+  such block is the doc's; "Implementation: []" (or "[ ]") is explicitly
+  empty.
   update-index records the entries' text as the entry's implementation.
 
 Doc paths:
@@ -2879,7 +2891,8 @@ cmd_update_index() {
   # Implementation: (ADRs) / Realized-by: (SPECs) entries, for every live doc
   # in ONE awk pass (a fork+exec per doc dominated the batch), read with the
   # one block grammar (_AWK_IMPL_BLOCK) that implementation-status and
-  # set-implementation use; each entry is tagged with its ARGV index. Empty
+  # set-implementation use, and the entry accumulator (blk_collect) that
+  # implementation-status uses; each entry is tagged with its ARGV index. Empty
   # files never reach FNR == 1, so argi catches up by name. Both fields are
   # stored under the single JSON key "implementation" to keep downstream
   # consumers simple (validate_docs.py, doc-audit routine) — see Task 3.4 of
@@ -2895,22 +2908,16 @@ cmd_update_index() {
     done
     # shellcheck disable=SC2016  # awk program, not shell expansion
     tagged=$(awk "$_AWK_IMPL_BLOCK"'
-        function flush() { if (pend && cur != "") print argi "\t" cur; pend = 0; cur = "" }
         FNR == 1 {
-          flush()
+          blk_flush(argi)
           argi++
           while (argi < ARGC && ARGV[argi] != FILENAME) argi++
           blk_reset()
         }
         blk == 2 { next }
-        {
-          c = blk_line($0)
-          if (BLK_END) flush()
-          else if (c == "item") { flush(); pend = 1; cur = BTEXT }
-          else if (c == "wrap") cur = (cur == "" ? BTEXT : cur " " BTEXT)
-        }
-        END { flush() }
-    ' "${awk_files[@]}")
+        { blk_collect(blk_line($0), argi) }
+        END { blk_flush(argi) }
+    ' "${awk_files[@]}") || _die "cannot read the Implementation: / Realized-by: blocks"
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       # Split by hand: `IFS=$'\t' read` would also trim a tab-indented bullet.
@@ -4097,12 +4104,14 @@ cmd_fragments_merge() {
 #   header   "Implementation:" (ADRs) or "Realized-by:" (SPECs), at the start
 #            of a line, outside code fences; the FIRST one is the block (a
 #            later one is prose). "Implementation: []" is an explicitly empty
-#            block.
-#   item     "- <text>" at any indent (2-space, 4-space, none): one entry.
+#            block (blanks inside the brackets allowed: "[ ]").
+#   item     "- <text>" at any indent (none, 2-space, 4-space): one entry.
 #   wrap     an indented, non-blank line after an item continues it; readers
 #            join the pieces with one space, and the writer replaces the item
 #            with all of its lines.
-#   end      a blank line, an unindented line or a fence line ends the block.
+#   end      any other line ends the block: a blank line, a fence line, or
+#            an unindented line that is not a "- " item (a column-0 "- "
+#            bullet is an item, not the end).
 #   fences   ``` / ~~~ (up to 3 spaces of indent; closed by the same character,
 #            at least as long): nothing inside one is a header or an anchor.
 #
@@ -4110,14 +4119,26 @@ cmd_fragments_merge() {
 # function definitions; each verb appends its own rules. Values reach awk
 # through ENVIRON, never -v (which expands backslash escapes) and never program
 # text, and are compared with index(), never as a regex.
+#
+# Portability (POSIX awk, BWK awk, gawk, mawk): no regex interval ({m,n}:
+# older BWK awk and mawk builds lack it; the fence indent is a 3-step loop), no
+# literal "[" or "]" in a bracket expression (the escaping rules differ; "[]"
+# is matched as text; POSIX classes such as [:space:] are fine), no "?" chain
+# and no anchor inside a group ("^#+([[:space:]]|$)" is two regexes); literal
+# text is compared with index() / == or substr(). Every exit status a caller
+# checks comes from an explicit "exit N" or from awk failing: set-implementation
+# exits 3 from END (no block and no anchor) and 0 otherwise; the readers exit 0.
 
 # blk_fence(s): is s a fence line? Opens or closes the fence (fence_c/fence_n)
 # as a side effect. Shared by _release_notes_version.
 # shellcheck disable=SC2016  # awk program, not shell expansion
 _AWK_FENCE='
+function blk_dedent3(s,    k) {
+  for (k = 0; k < 3 && substr(s, 1, 1) == " "; k++) s = substr(s, 2)
+  return s
+}
 function blk_fence(s,    t, c, n) {
-  t = s
-  sub(/^ ? ? ?/, "", t)
+  t = blk_dedent3(s)
   c = substr(t, 1, 1)
   if (c != "`" && c != "~") return 0
   n = 0
@@ -4135,9 +4156,8 @@ function blk_fence(s,    t, c, n) {
   return 0
 }
 function blk_fence_like(s,    t) {
-  t = s
-  sub(/^ ? ? ?/, "", t)
-  return (t ~ /^(```|~~~)/)
+  t = blk_dedent3(s)
+  return (substr(t, 1, 3) == "```" || substr(t, 1, 3) == "~~~")
 }
 '
 # blk_line(s) classifies the next line of a file (call blk_reset() first) and
@@ -4151,10 +4171,19 @@ function blk_fence_like(s,    t) {
 # BLK_END is 1 when the block ended just BEFORE this line (the line itself is
 # then classified as fence / code / text). blk is 0 before the header, 1
 # inside the block, 2 after it.
+#
+# blk_collect(c, tag) is the one entry accumulator of the readers: fed every
+# line's class, it prints each complete entry as "<tag>\t<text>" (an item's
+# text, its wrapped lines joined with one space; an entry left empty is
+# dropped). blk_flush(tag) prints the pending one: call it at the end of a
+# file, before the next blk_reset().
 # shellcheck disable=SC2016  # awk program, not shell expansion
 _AWK_IMPL_BLOCK="$_AWK_FENCE"'
-function blk_reset() { fence_c = ""; fence_n = 0; blk = 0; blk_items = 0; BLK_END = 0 }
-function blk_line(s,    t) {
+function blk_reset() {
+  fence_c = ""; fence_n = 0; blk = 0; blk_items = 0; BLK_END = 0
+  blk_pend = 0; blk_cur = ""
+}
+function blk_line(s,    t, k) {
   BLK_END = 0
   if (blk == 1) {
     if (s ~ /^[[:space:]]*-$/ || s ~ /^[[:space:]]*-[[:space:]]/) {
@@ -4172,35 +4201,46 @@ function blk_line(s,    t) {
   }
   if (blk_fence(s)) return "fence"
   if (fence_c != "") return "code"
-  if (blk == 0 && s ~ /^(Implementation|Realized-by):[[:space:]]*$/) {
-    BKEY = s; sub(/:.*$/, "", BKEY); blk = 1; blk_items = 0
-    return "head"
-  }
-  if (blk == 0 && s ~ /^(Implementation|Realized-by):[[:space:]]*[[][]][[:space:]]*$/) {
-    BKEY = s; sub(/:.*$/, "", BKEY); blk = 2
-    return "empty"
+  if (blk == 0 && s ~ /^(Implementation|Realized-by):/) {
+    k = index(s, ":")
+    t = substr(s, k + 1); gsub(/[[:space:]]/, "", t)
+    if (t == "") {
+      BKEY = substr(s, 1, k - 1); blk = 1; blk_items = 0
+      return "head"
+    }
+    if (t == "[]") {
+      BKEY = substr(s, 1, k - 1); blk = 2
+      return "empty"
+    }
   }
   return "text"
+}
+function blk_flush(tag) {
+  if (blk_pend && blk_cur != "") print tag "\t" blk_cur
+  blk_pend = 0; blk_cur = ""
+}
+function blk_collect(c, tag) {
+  if (BLK_END) blk_flush(tag)
+  else if (c == "item") { blk_flush(tag); blk_pend = 1; blk_cur = BTEXT }
+  else if (c == "wrap") blk_cur = (blk_cur == "" ? BTEXT : blk_cur " " BTEXT)
 }
 '
 
 # The entries of the block, one "<tag>\t…" line each, for a reader:
 #   H\t<key>   the header           E\t<key>   an explicitly empty block
-#   I\t<text>  an entry (wrapped lines joined with one space; empty ones dropped)
+#   I\t<text>  an entry (blk_collect)
 # Nothing at all: the doc has no block. Reads the doc on stdin.
 # shellcheck disable=SC2016  # awk program, not shell expansion
 _AWK_IMPL_READ="$_AWK_IMPL_BLOCK"'
-function flush() { if (pend && cur != "") print "I\t" cur; pend = 0; cur = "" }
 BEGIN { blk_reset() }
 {
   c = blk_line($0)
-  if (BLK_END) { flush(); exit }
+  blk_collect(c, "I")
+  if (BLK_END) exit
   if (c == "head") print "H\t" BKEY
   else if (c == "empty") { print "E\t" BKEY; exit }
-  else if (c == "item") { flush(); pend = 1; cur = BTEXT }
-  else if (c == "wrap") cur = (cur == "" ? BTEXT : cur " " BTEXT)
 }
-END { flush() }
+END { blk_flush("I") }
 '
 
 cmd_set_implementation() {
@@ -4237,9 +4277,10 @@ cmd_set_implementation() {
   [ -z "$note" ] || entry="$entry — $note"
 
   # ONE awk pass writes the whole new doc to a tmp beside it:
-  #   - the ref has an entry in the block: that entry (all of its lines) is
-  #     replaced, in place, at its own indent — every such entry, and nothing
-  #     outside the block;
+  #   - the ref has an entry in the block: its first entry (all of its lines)
+  #     is replaced, in place, at its own indent, and any later entry of the
+  #     same ref is dropped (one entry per ref); nothing outside the block is
+  #     touched;
   #   - otherwise the entry is appended to the block, at its last item's
   #     indent (2 spaces for an empty block); "<key>: []" becomes "<key>:";
   #   - no block: one is created after the paragraph holding the first
@@ -4268,7 +4309,7 @@ cmd_set_implementation() {
       if (!has && !anchor) exit 3
       if (!has) {
         for (j = anchor + 1; j <= n; j++)
-          if (L[j] ~ /^[[:space:]]*$/ || L[j] ~ /^#+([[:space:]]|$)/ || blk_fence_like(L[j])) break
+          if (L[j] ~ /^[[:space:]]*$/ || L[j] ~ /^#+$/ || L[j] ~ /^#+[[:space:]]/ || blk_fence_like(L[j])) break
         for (i = 1; i < j; i++) print L[i]
         print ""; print key ":"; print "  - " entry
         if (j <= n && L[j] !~ /^[[:space:]]*$/) print ""
@@ -4282,7 +4323,12 @@ cmd_set_implementation() {
         if (c == "empty") { print BKEY ":"; print "  - " entry; done = 1; continue }
         if (c == "item") {
           ind = BIND; drop = 0
-          if (is_mine(BTEXT)) { print BIND "- " entry; done = 1; drop = 1; continue }
+          if (is_mine(BTEXT)) {
+            # The first entry of the ref is replaced in place; a later one
+            # (a duplicate) is dropped, wrapped lines and all.
+            if (!done) print BIND "- " entry
+            done = 1; drop = 1; continue
+          }
         }
         if (c == "wrap" && drop) continue
         print L[i]
@@ -4343,14 +4389,18 @@ cmd_implementation_status() {
 # consuming repo, put there by tools install or install --ci). Only the plugin
 # has helpers to ship, a version (its RELEASE-NOTES.md) and copies to compare
 # a vendored file against, so:
-#   install    from a vendored copy: itself only (onto itself: a no-op);
+#   install    from a vendored copy: itself only (onto itself: only +x);
 #              --with-helpers is refused, writing nothing
 #   uninstall  deletes only files byte-identical to the plugin's copies — a
 #              vendored copy has nothing to compare against, so it is refused
 #   status     from a vendored copy: presence only, no drift, no version
 # (The version used to be looked up at the git toplevel too, which reported
 # the CONSUMING repo's RELEASE-NOTES.md as the plugin's.)
-_TOOLS_ROOT="$(dirname "$SCRIPT_DIR")"
+# (A parameter expansion, not $(dirname …): this runs at load, on every call
+# of every verb, hooks included. SCRIPT_DIR is absolute with no trailing
+# slash, so this is its parent — "" for a script in "/<dir>", which still
+# yields "/…" paths below.)
+_TOOLS_ROOT="${SCRIPT_DIR%/*}"
 
 _tools_is_plugin() {
   [ -f "$_TOOLS_ROOT/skills/doc-superpowers/SKILL.md" ] && [ -d "$SCRIPT_DIR/hooks/ci" ]
@@ -4361,18 +4411,24 @@ _tools_is_plugin() {
 # holds the step scripts doc-pr-release.yml and doc-release.yml run.
 _TOOLS_HELPER_DIRS="doc-pr-release doc-superpowers-steps"
 
-# _tools_copy <src> <dest> <mode for a new dest>: copy through a tmp beside
-# <dest> (never cp over a file a running CI job may be reading). Sets
-# _TOOLS_SAME=1 and copies nothing when both name the same file.
+# _tools_copy <src> <dest> <mode for a new dest> [exec]: copy through a tmp
+# beside <dest> (never cp over a file a running CI job may be reading). An
+# existing <dest> keeps its mode; [exec] = 1 (a script the CI templates run
+# directly) makes the result executable whatever that mode was. Sets
+# _TOOLS_SAME=1 and copies nothing when both name the same file (which is
+# still made executable under [exec]).
 _tools_copy() {
   _TOOLS_SAME=0
   if [ -e "$2" ] && [ "$1" -ef "$2" ]; then
     _TOOLS_SAME=1
+    if [ "${4:-0}" = 1 ]; then
+      chmod a+x "$2" || _die "cannot chmod a+x $2"
+    fi
     return 0
   fi
   _tmp_beside "$2"
   cp "$1" "$_TMP" || _die "cannot copy $1 to $2"
-  _replace_file "$_TMP" "$2" "$3"
+  _replace_file "$_TMP" "$2" "$3" "${4:-0}"
 }
 
 cmd_tools_install() {
@@ -4393,7 +4449,7 @@ cmd_tools_install() {
   fi
 
   mkdir -p "$dest" || _die "cannot create $dest"
-  _tools_copy "$src" "$dest/doc-tools.sh" 755
+  _tools_copy "$src" "$dest/doc-tools.sh" 755 1
   if [ "$_TOOLS_SAME" = 1 ]; then
     echo "doc-tools.sh is already at $dest/doc-tools.sh (it is the copy being run)"
   else
@@ -4406,7 +4462,7 @@ cmd_tools_install() {
     n=0
     for f in "$SCRIPT_DIR/hooks/ci/$d"/*.sh; do
       [ -f "$f" ] || continue
-      _tools_copy "$f" "$dest/$d/$(basename "$f")" 755
+      _tools_copy "$f" "$dest/$d/$(basename "$f")" 755 1
       n=$((n + 1))
     done
     echo "Installed $n $d helpers → $dest/$d/"
@@ -4510,23 +4566,28 @@ cmd_tools_status() {
     echo "doc-tools.sh: installed at $dest (DRIFTED from plugin v$ver)"
   fi
 
-  # Helper-presence summary (and drift, when there is a plugin to compare).
-  local d f n drift
+  # Helper-presence summary (and, when there is a plugin to compare, how many
+  # differ from the plugin's copy and how many the plugin does not ship at
+  # all — a file the user added is not drift).
+  local d f p n drift added note
   for d in $_TOOLS_HELPER_DIRS; do
     if [ -d "$dest/$d" ]; then
-      n=0 drift=0
+      n=0 drift=0 added=0
       for f in "$dest/$d"/*.sh; do
         [ -f "$f" ] || continue
         n=$((n + 1))
-        if [ "$plugin" = 1 ] && ! cmp -s "$SCRIPT_DIR/hooks/ci/$d/$(basename "$f")" "$f"; then
+        [ "$plugin" = 1 ] || continue
+        p="$SCRIPT_DIR/hooks/ci/$d/${f##*/}"
+        if [ ! -f "$p" ]; then
+          added=$((added + 1))
+        elif ! cmp -s "$p" "$f"; then
           drift=$((drift + 1))
         fi
       done
-      if [ "$drift" -gt 0 ]; then
-        echo "$d helpers: $n installed at $dest/$d/ ($drift differ from the plugin's)"
-      else
-        echo "$d helpers: $n installed at $dest/$d/"
-      fi
+      note=""
+      [ "$drift" -eq 0 ] || note="$drift differ from the plugin's"
+      [ "$added" -eq 0 ] || note="${note:+$note, }$added not shipped by the plugin"
+      echo "$d helpers: $n installed at $dest/$d/${note:+ ($note)}"
     else
       echo "$d helpers: not installed at $dest"
     fi

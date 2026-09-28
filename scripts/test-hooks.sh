@@ -2143,6 +2143,25 @@ test_install_ci_version_comes_from_doc_tools() {
   assert_eq "0" "$exit_code" "a plugin without RELEASE-NOTES.md still installs (the fallback is reachable)"
   assert_contains "$(cat .github/workflows/doc-release.yml 2>/dev/null)" 'DOC_SUPERPOWERS_VERSION: "vunknown"' \
     "…with the version unknown"
+  assert_not_contains "$out" "ERROR" "…and no ERROR line in an install that succeeds"
+  assert_eq "1" "$(grep -c 'WARN.*version' <<<"$out" || true)" "…one WARN about the version, where it is used"
+
+  # Only rendering a template needs the version: status, uninstall and usage
+  # never start doc-tools.sh for it (a log of every doc-tools.sh call proves
+  # it), and so never warn about it.
+  local log="$TEST_DIR/doc-tools-calls.log"
+  mv "$root/scripts/doc-tools.sh" "$root/scripts/doc-tools.real.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\nexec "%s" "%s" "$@"\n' \
+    "$log" "$BASH_BIN" "$root/scripts/doc-tools.real.sh" > "$root/scripts/doc-tools.sh"
+  : > "$log"
+  out=$("$BASH_BIN" "$root/scripts/hooks/install.sh" status 2>&1) || true
+  out="$out$("$BASH_BIN" "$root/scripts/hooks/install.sh" uninstall --ci 2>&1)" || true
+  out="$out$("$BASH_BIN" "$root/scripts/hooks/install.sh" help 2>&1)" || true
+  assert_eq "" "$(grep 'tools version' "$log" || true)" "status / uninstall / usage never look the version up"
+  assert_not_contains "$out" "RELEASE-NOTES" "…and say nothing about it"
+  exit_code=0
+  "$BASH_BIN" "$root/scripts/hooks/install.sh" install --ci --workflows=doc-release >/dev/null 2>&1 || exit_code=$?
+  assert_eq "1" "$(grep -c '^tools version$' "$log" || true)" "a CI install looks it up once (precondition: the log sees the call)"
   teardown
 }
 

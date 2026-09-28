@@ -20,11 +20,19 @@ DATE=$(date +%Y-%m-%d)
 
 # The plugin's version, parsed by doc-tools.sh (the first release heading of
 # RELEASE-NOTES.md, line-anchored and outside code fences — the one parser
-# check-version uses too). Run under this installer's own bash. A missing or
-# malformed RELEASE-NOTES.md must not abort the install (under pipefail the old
-# grep | sed did, silently): the reason goes to stderr and the version is
-# "unknown".
-VERSION=$("$BASH" "$DOC_TOOLS" tools version) || VERSION="unknown"
+# check-version uses too), run under this installer's own bash. Only rendering
+# a CI template uses it, so it is looked up there, once (ci_version), never on
+# status / uninstall / usage. A missing or malformed RELEASE-NOTES.md must not
+# abort the install (under pipefail the old grep | sed did, silently): the
+# version is "unknown", with one WARN.
+VERSION=""
+ci_version() {
+  [[ -z "$VERSION" ]] || return 0
+  if ! VERSION=$("$BASH" "$DOC_TOOLS" tools version 2>/dev/null) || [[ -z "$VERSION" ]]; then
+    VERSION="unknown"
+    echo "  WARN: cannot read the plugin version from $SKILL_DIR/RELEASE-NOTES.md (doc-tools.sh tools version); workflows get DOC_SUPERPOWERS_VERSION \"vunknown\"" >&2
+  fi
+}
 
 # Default CI parameters
 BASE_BRANCH="main"
@@ -550,6 +558,7 @@ ci_copy_workflow_template() {
   local ci_strict_value="0"
   [[ "$CI_STRICT" == "true" ]] && ci_strict_value="1"
 
+  ci_version
   sed \
     -e "s|__BASE_BRANCH__|$BASE_BRANCH|g" \
     -e "s|__VERSION__|v$VERSION|g" \

@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-28T02:34:27Z",
+  "generated_at": "2026-09-28T04:09:47Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -75,20 +75,20 @@
       }
     },
     "docs/workflows/doc-superpowers.md": {
-      "content_hash": "sha256:f2b9afecf51d6229faec2803acefed825f503cb2bb7c45d7404d3c3240febdc8",
+      "content_hash": "sha256:b7218b51bf3d43e37432b9d79008a0d06db243392e4903b52ad1c0d887540694",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "0c31a8ec73e030b36ea02cdac617fbb2f2d6b08d",
+      "code_commit": "a9a1e8a543db9e36c0a5c5c22962f08438e19f1a",
       "doc_type": "workflows",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-28T02:34:27Z",
+      "last_verified": "2026-09-28T04:09:47Z",
       "implementation": [],
       "code_oids": {
-        "skills/doc-superpowers/SKILL.md": "2eeb541d4a5cff7452b19b2473c5abd13adb9312",
-        "scripts/": "1eb96c28b13bcfbf4a186a4c12deee2eef632241"
+        "skills/doc-superpowers/SKILL.md": "a4d19f47798a2ac8cae777f769502acdad9ac8be",
+        "scripts/": "7f9f38d8d8140c817a29c70f7c84c2a7591e5cf5"
       }
     },
     "docs/plans/2026-03-26-audit-report.md": {
@@ -588,13 +588,13 @@
       "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I10-implementation-version-vendoring-verbs.md": {
-      "content_hash": "sha256:7ae652287d7806ebf2bf57831ae1152dcbb790ecba55fae139ff1dcd686a5826",
+      "content_hash": "sha256:377c333f09ec97de9f550bb18b2773cfbe741a47280ad8f14125639ec9e8ad8a",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-28T02:34:27Z",
+      "last_verified": "2026-09-28T04:09:47Z",
       "code_oids": {},
       "implementation": []
     },

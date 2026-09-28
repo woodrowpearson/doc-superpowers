@@ -255,12 +255,12 @@ Implementation: []
 
 Both templates write their metadata one way: `**Key**: value`, the colon outside the bold. Keep it: `set-implementation` looks for the `**Date**:` (ADR) or `**Created**:` (spec) line when it has to create a realization block (it also accepts `**Date:**` / `**Created:**`, and exits 1, writing nothing, when there is neither).
 
-The realization block records how a decision or spec is realized in code, separately from its `Status` (the decision lifecycle). ADRs call it `Implementation:`, specs `Realized-by:`; `[]` means no entry yet (or none needed). One grammar is shared by `set-implementation` (writes it), `implementation-status` (reports it) and `update-index` (records its entries as the entry's `implementation`):
+The realization block records how a decision or spec is realized in code, separately from its `Status` (the decision lifecycle). ADRs call it `Implementation:`, specs `Realized-by:`; `[]` means no entry yet (or none needed); blanks inside the brackets (`[ ]`) change nothing. One grammar is shared by `set-implementation` (writes it), `implementation-status` (reports it) and `update-index` (records its entries as the entry's `implementation`):
 
 - the header is `Implementation:` or `Realized-by:` at the start of a line, outside code fences; the **first** one is the block (a fenced example, or a second block, is prose);
-- each entry is a `- ` bullet at any indent: `<kind: ref> — <status>[ — <note>]`, status one of `complete`, `partial`, `in-progress`, `not-started`, `reverted`, `superseded`, `blocked`;
+- each entry is a `- ` bullet at any indent, column 0 included: `<kind: ref> — <status>[ — <note>]`, status one of `complete`, `partial`, `in-progress`, `not-started`, `reverted`, `superseded`, `blocked`;
 - an indented line after an entry wraps it (readers join the pieces with one space);
-- a blank line, an unindented line or a fence line ends the block.
+- any other line ends the block: a blank line, a fence line, or an unindented line that is not a `- ` bullet.
 
 ```markdown
 Implementation:
@@ -268,7 +268,7 @@ Implementation:
   - commit: abc1234 — partial — phase 1; phase 2 tracked in #57
 ```
 
-`set-implementation <doc> --ref "PR: #42" --status complete [--note …]` replaces the entry whose text starts with `PR: #42 —` (every line of it), or appends one at the block's indent (turning `[]` into a list). Values are written literally; `--ref` and `--note` must each be one line.
+`set-implementation <doc> --ref "PR: #42" --status complete [--note …]` replaces the first entry that is `PR: #42` or starts with `PR: #42 —` (every line of it) and drops any later duplicate of it — one entry per ref; `PR: #420` is a different ref — or appends one at the block's indent (turning `[]` into a list). Values are written literally; `--ref` and `--note` must each be one line.
 
 ---
 
