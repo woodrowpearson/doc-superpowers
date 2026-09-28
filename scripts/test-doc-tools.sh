@@ -1139,12 +1139,10 @@ EOF
   git add RELEASE-NOTES.next/PR-7.md
   git commit -q -m "PR-7 drifted"
 
-  # Use the empty tree as the half-open range start so the PR-7 commit (the
-  # root commit) is included.
-  local empty_tree out stderr_out err_file rc=0
+  # ROOT: the range start of a first release (no earlier release to exclude).
+  local out stderr_out err_file rc=0
   err_file=$(harness_mktemp merge-stderr)
-  empty_tree=$(git hash-object -t tree --stdin </dev/null)
-  out=$("$DOC_TOOLS" fragments merge "$empty_tree" HEAD 2>"$err_file") || rc=$?
+  out=$("$DOC_TOOLS" fragments merge ROOT HEAD 2>"$err_file") || rc=$?
   stderr_out=$(cat "$err_file" 2>/dev/null || true)
   assert_eq "0" "$rc" "merge exits 0 with a drifted fragment (stderr: ${stderr_out:-none})"
 
@@ -1161,7 +1159,7 @@ test_fragments_merge_preserves_non_canonical_sections() {
   git add RELEASE-NOTES.next/PR-5.md
   git commit -q -m "PR-5"
   local out rc=0
-  out=$("$DOC_TOOLS" fragments merge "$(git hash-object -t tree --stdin </dev/null)" HEAD) || rc=$?
+  out=$("$DOC_TOOLS" fragments merge ROOT HEAD) || rc=$?
   assert_eq "0" "$rc" "merge exits 0 on non-canonical headings"
   assert_contains "$out" "non-canonical note" "non-canonical bullet survives merge"
   assert_contains "$out" "multi-word heading" "multi-word heading bullet survives"
@@ -1179,7 +1177,7 @@ test_fragments_merge_dedupes_bullets() {
   git add RELEASE-NOTES.next/PR-1.md RELEASE-NOTES.next/PR-2.md
   git commit -q -m "PRs"
   local out count rc=0
-  out=$("$DOC_TOOLS" fragments merge "$(git hash-object -t tree --stdin </dev/null)" HEAD) || rc=$?
+  out=$("$DOC_TOOLS" fragments merge ROOT HEAD) || rc=$?
   assert_eq "0" "$rc" "merge exits 0 on duplicate bullets"
   count=$(grep -c -- "- same bullet" <<<"$out" || true)
   assert_eq "1" "$count" "duplicate bullet appears exactly once"
@@ -1210,39 +1208,32 @@ EOF
 }
 
 test_fragments_merge_paths_out() {
-  echo "test: merge --paths-out writes only consumed fragment paths"
+  # A fragment is unreleased while it is present: the release that consumes it
+  # deletes it in the release commit, and the tag carries that commit. (Until
+  # I-9 the rule was "introduced before <range-start> = released", which never
+  # released a fragment merged after a release branch was cut.)
+  echo "test: merge --paths-out writes only the consumed fragment paths"
   setup
   mkdir -p RELEASE-NOTES.next
-  _write_fragment RELEASE-NOTES.next/PR-3.md 3 $'### Added\n- in-range\n'
+  _write_fragment RELEASE-NOTES.next/PR-3.md 3 $'### Added\n- released-in-v1\n'
   git add RELEASE-NOTES.next/PR-3.md
   git commit -q -m "PR-3"
-  local before_tag
-  before_tag=$(git rev-parse HEAD)
-  # Fragment introduced AFTER the tag — should be the only consumed one.
+  # The v1 release commit consumes PR-3 (deletes it); the tag is on it.
+  git rm -q RELEASE-NOTES.next/PR-3.md
+  git commit -q -m "release: v1.0.0"
+  git tag v1.0.0
+  mkdir -p RELEASE-NOTES.next
   _write_fragment RELEASE-NOTES.next/PR-4.md 4 $'### Added\n- after-tag\n'
   git add RELEASE-NOTES.next/PR-4.md
   git commit -q -m "PR-4"
 
-  local out paths_file
+  local out paths_file rc=0
   paths_file=$(harness_mktemp paths-out)
-  local rc=0
-  out=$("$DOC_TOOLS" fragments merge "$before_tag" HEAD --paths-out="$paths_file") || rc=$?
+  out=$("$DOC_TOOLS" fragments merge v1.0.0 HEAD --paths-out="$paths_file") || rc=$?
   assert_eq "0" "$rc" "merge exits 0 with --paths-out"
-  assert_contains "$out" "after-tag" "PR-4 (post-tag) is consumed"
-  assert_not_contains "$out" "in-range" "PR-3 (pre-tag) is NOT in merged output"
-  # paths-out should contain PR-4.md only.
-  if grep -q "PR-4.md" "$paths_file" && ! grep -q "PR-3.md" "$paths_file"; then
-    PASS=$((PASS + 1))
-    TESTS_RUN=$((TESTS_RUN + 1))
-    # shellcheck disable=SC2059
-    printf "${GREEN}  PASS${NC}: paths-out contains only %s\n" "PR-4.md"
-  else
-    FAIL=$((FAIL + 1))
-    TESTS_RUN=$((TESTS_RUN + 1))
-    # shellcheck disable=SC2059
-    printf "${RED}  FAIL${NC}: paths-out content unexpected: %s\n" "$(cat "$paths_file")"
-  fi
-  rm -f "$paths_file"
+  assert_contains "$out" "after-tag" "PR-4 (after the tag) is merged"
+  assert_not_contains "$out" "released-in-v1" "PR-3 (consumed by v1.0.0) is not"
+  assert_eq "RELEASE-NOTES.next/PR-4.md" "$(cat "$paths_file")" "paths-out holds exactly PR-4.md"
   teardown
 }
 
@@ -1294,6 +1285,357 @@ test_fragments_merge_orders_by_n() {
     FAIL=$((FAIL + 1))
     printf "${RED}  FAIL${NC}: expected PR-99 before PR-101, got pos_99=%s pos_101=%s\n    output: %s\n" "$pos_99" "$pos_101" "$out"
   fi
+  teardown
+}
+
+# --- I-9: the release-notes fragment consumer --------------------------------
+
+# _frag_sha <payload>: the hash line-2 records for <payload> (bytes from line 3).
+_frag_sha() {
+  printf '%s' "$1" | { command -v sha256sum >/dev/null 2>&1 && sha256sum || shasum -a 256; } | awk '{print $1}'
+}
+
+# _count_lines <needle> <haystack>: how many lines of <haystack> equal <needle>.
+_count_lines() {
+  { grep -cxF -- "$1" <<<"$2" || true; } | tr -d ' '
+}
+
+test_i9_merge_lossless_or_excluded() {
+  echo "test: I-9 fragments merge — each fragment is merged losslessly or excluded and listed, never cut"
+  setup
+  local d=RELEASE-NOTES.next out err paths rc=0 p
+  mkdir -p "$d"
+  # PR-10: its hash line deleted by hand — merged as written (a hand edit).
+  printf '<!-- doc-superpowers:fragment PR-10 -->\n### Fixed\n- fix ten\n' > "$d/PR-10.md"
+  # PR-11: no markers at all — line 1 is the consumer's delete key: excluded.
+  printf '### Security\n- sec eleven\n' > "$d/PR-11.md"
+  # PR-12: text before the first ### heading has no section: excluded.
+  _write_fragment "$d/PR-12.md" 12 $'stray intro twelve\n### Added\n- item-twelve\n'
+  # PR-13: no trailing newline — the last line is kept.
+  _write_fragment "$d/PR-13.md" 13 $'### Added\n- thirteen last'
+  # PR-14: CRLF throughout (hash of the CRLF bytes) — CRs dropped, valid.
+  p=$'### Changed\r\n- fourteen\r\n'
+  printf '<!-- doc-superpowers:fragment PR-14 -->\r\n<!-- doc-superpowers:hash %s -->\r\n%s' "$(_frag_sha "$p")" "$p" > "$d/PR-14.md"
+  # PR-15: trailing blanks after a heading — the same section.
+  _write_fragment "$d/PR-15.md" 15 $'### Added   \n- fifteen\n\n\n'
+  # PR-16/17 share a sub-bullet: both blocks keep it. PR-18 repeats PR-16's
+  # whole block: deduped as a unit.
+  _write_fragment "$d/PR-16.md" 16 $'### Added\n- a sixteen\n  - shared sub\n'
+  _write_fragment "$d/PR-17.md" 17 $'### Added\n- b seventeen\n  - shared sub\n'
+  _write_fragment "$d/PR-18.md" 18 $'### Added\n- a sixteen\n  - shared sub\n'
+  # PR-19: line 1 names PR-91 — excluded.
+  _write_fragment "$d/PR-19.md" 91 $'### Added\n- item-nineteen\n'
+  # PR-20: a ## heading would land as a version heading — excluded.
+  _write_fragment "$d/PR-20.md" 20 $'### Added\n- item-xx-twenty\n## v9.9.9\n'
+  # PR-21: an unclosed code fence would swallow the rest of the notes — excluded.
+  _write_fragment "$d/PR-21.md" 21 $'### Added\n- item-xx-twentyone\n  ```\n  code\n'
+  # PR-22: the explicit no-notes state — consumed, nothing emitted.
+  _write_fragment "$d/PR-22.md" 22 $'<!-- doc-superpowers:no-notes -->\n'
+  # PR-23: the markers and nothing else — excluded (not a decision).
+  _write_fragment "$d/PR-23.md" 23 $'\n'
+  # PR-24: a symbolic link is never read — excluded.
+  ln -s ../docs/architecture.md "$d/PR-24.md"
+  # PR-25: a "### " line inside a code fence is not a heading.
+  _write_fragment "$d/PR-25.md" 25 $'### Fixed\n- item-twenty-five\n  ```md\n  ### not a heading\n  ```\n'
+  # Not a PR-<N>.md name — listed, excluded. README.md is not a fragment at all.
+  _write_fragment "$d/PR-junk.md" 0 $'### Added\n- junk\n'
+  echo "# spec" > "$d/README.md"
+  git add -A && git commit -q -m "fragments"
+
+  paths=$(harness_mktemp paths-out)
+  err=$(harness_mktemp merge-err)
+  out=$("$DOC_TOOLS" fragments merge ROOT HEAD --paths-out "$paths" 2>"$err") || rc=$?
+  assert_eq "0" "$rc" "merge exits 0 (stderr: $(head -c 300 "$err"))"
+  assert_eq "PR-10 PR-13 PR-14 PR-15 PR-16 PR-17 PR-18 PR-22 PR-25" \
+    "$(sed 's|^RELEASE-NOTES.next/||; s|\.md$||' "$paths" | tr '\n' ' ' | sed 's/ $//')" \
+    "paths-out = exactly the merged fragments and the no-notes one, in PR order"
+  for p in "- fix ten" "- thirteen last" "- fourteen" "- fifteen" "- a sixteen" "- b seventeen" "- item-twenty-five" "  ### not a heading"; do
+    assert_eq "1" "$(_count_lines "$p" "$out")" "merged once: '$p'"
+  done
+  assert_eq "2" "$(_count_lines "  - shared sub" "$out")" "a sub-bullet two blocks share is kept under both"
+  for p in "sec eleven" "item-twelve" "stray intro" "item-nineteen" "item-xx-twenty" "item-xx-twentyone" "junk" "## v9.9.9"; do
+    assert_not_contains "$out" "$p" "not merged: '$p'"
+  done
+  assert_not_contains "$out" $'\r' "no carriage return reaches the notes"
+  assert_eq "1" "$(_count_lines "### Added" "$out")" "one ### Added section (trailing blanks trimmed)"
+  assert_eq "1" "$(_count_lines "### Changed" "$out")" "one ### Changed section (CRLF heading)"
+  assert_eq "1" "$(_count_lines "### Fixed" "$out")" "one ### Fixed section"
+  assert_eq "0" "$(_count_lines "### not a heading" "$out")" "a fenced ### line never becomes a section"
+  for p in PR-11 PR-12 PR-19 PR-20 PR-21 PR-23 PR-24 PR-junk PR-10; do
+    assert_contains "$(cat "$err")" "RELEASE-NOTES.next/$p.md" "stderr names $p.md"
+  done
+  assert_not_contains "$(cat "$err")" "README.md" "README.md is not a fragment (no warning)"
+  teardown
+}
+
+test_i9_merge_refs_and_paths_out_forms() {
+  echo "test: I-9 fragments merge — both refs are validated (ROOT starts a first release); --paths-out F and --paths-out=F"
+  setup
+  mkdir -p RELEASE-NOTES.next
+  _write_fragment RELEASE-NOTES.next/PR-1.md 1 $'### Added\n- one\n'
+  git add -A && git commit -q -m "PR-1"
+  local rc out f1 f2
+  rc=0; out=$("$DOC_TOOLS" fragments merge nosuchref HEAD 2>&1 >/dev/null) || rc=$?
+  assert_eq "2" "$rc" "an unknown <range-start> exits 2"
+  assert_contains "$out" "nosuchref" "…naming it"
+  rc=0; out=$("$DOC_TOOLS" fragments merge ROOT nosuchref 2>&1 >/dev/null) || rc=$?
+  assert_eq "2" "$rc" "an unknown <range-end> exits 2"
+  rc=0; "$DOC_TOOLS" fragments merge ROOT ROOT >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "ROOT is only a range start"
+  rc=0; "$DOC_TOOLS" fragments merge "$(git hash-object -t tree /dev/null)" HEAD >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "a tree is not a commit (use ROOT for a first release)"
+  f1=$(harness_mktemp po1)
+  f2=$(harness_mktemp po2)
+  rc=0; "$DOC_TOOLS" fragments merge ROOT HEAD --paths-out "$f1" >/dev/null 2>&1 || rc=$?
+  assert_eq "0|RELEASE-NOTES.next/PR-1.md" "$rc|$(cat "$f1")" "--paths-out F (two words)"
+  rc=0; "$DOC_TOOLS" fragments merge --paths-out="$f2" ROOT HEAD >/dev/null 2>&1 || rc=$?
+  assert_eq "0|RELEASE-NOTES.next/PR-1.md" "$rc|$(cat "$f2")" "--paths-out=F (anywhere on the line)"
+  echo stale > "$f1"
+  rc=0; "$DOC_TOOLS" fragments merge nosuchref HEAD --paths-out "$f1" >/dev/null 2>&1 || rc=$?
+  assert_eq "2|" "$rc|$(cat "$f1")" "a failed merge leaves --paths-out empty (nothing to delete)"
+  teardown
+}
+
+test_i9_merge_presence_is_unreleased() {
+  # Main gets PR-2 after release/1.0 was cut; the release is merged back and
+  # tagged on main. PR-2 is still present at the tag: it was never released.
+  echo "test: I-9 fragments merge — a fragment merged after the release branch was cut is released next time"
+  setup
+  mkdir -p RELEASE-NOTES.next
+  _write_fragment RELEASE-NOTES.next/PR-1.md 1 $'### Added\n- one\n'
+  git add -A && git commit -q -m "PR-1"
+  git branch release/1.0
+  _write_fragment RELEASE-NOTES.next/PR-2.md 2 $'### Added\n- two, merged after the cut\n'
+  git add -A && git commit -q -m "PR-2"
+  git checkout -q release/1.0
+  git rm -q RELEASE-NOTES.next/PR-1.md
+  echo "## v1.0.0" > RELEASE-NOTES.md
+  git add RELEASE-NOTES.md && git commit -q -m "release: v1.0.0"
+  git checkout -q main
+  git merge -q --no-ff --no-edit -m "Merge release/1.0" release/1.0
+  git tag v1.0.0
+  _write_fragment RELEASE-NOTES.next/PR-3.md 3 $'### Added\n- three\n'
+  git add -A && git commit -q -m "PR-3"
+  local out paths rc=0
+  paths=$(harness_mktemp po)
+  out=$("$DOC_TOOLS" fragments merge v1.0.0 HEAD --paths-out "$paths" 2>/dev/null) || rc=$?
+  assert_eq "0" "$rc" "merge exits 0"
+  assert_eq "RELEASE-NOTES.next/PR-2.md RELEASE-NOTES.next/PR-3.md" "$(tr '\n' ' ' < "$paths" | sed 's/ $//')" \
+    "PR-2 (present at the tag, never consumed) and PR-3 are released"
+  assert_not_contains "$out" "- one" "PR-1 (consumed by v1.0.0) is not"
+  teardown
+}
+
+test_i9_merge_one_pass_finds_renamed_and_merge_added() {
+  # The one git-log pass over <range-start>..<range-end> must see a fragment
+  # renamed in the range (--no-renames) and one added by a merge commit (a
+  # merge's diff is taken against its first parent), or it would take them for
+  # fragments an earlier release consumed.
+  echo "test: I-9 fragments merge — renamed, merge-added, side-branch and squashed fragments are found"
+  setup
+  git tag v1.0.0
+  mkdir -p RELEASE-NOTES.next
+  _write_fragment RELEASE-NOTES.next/PR-50.md 51 $'### Added\n- fifty-one (renumbered)\n'
+  git add -A && git commit -q -m "PR-50 fragment"
+  git mv RELEASE-NOTES.next/PR-50.md RELEASE-NOTES.next/PR-51.md
+  git commit -q -m "renumber: PR-51"
+  # A fragment added by the merge commit itself.
+  git checkout -q -b s1
+  echo s1 > s1.txt && git add s1.txt && git commit -q -m "s1"
+  git checkout -q main
+  git merge -q --no-ff --no-commit s1
+  _write_fragment RELEASE-NOTES.next/PR-77.md 77 $'### Added\n- seventy-seven\n'
+  git add -A && git commit -q -m "Merge s1 (adds PR-77)"
+  # A fragment added on a side branch, merged with a merge commit.
+  git checkout -q -b s2
+  _write_fragment RELEASE-NOTES.next/PR-78.md 78 $'### Added\n- seventy-eight\n'
+  git add -A && git commit -q -m "PR-78"
+  git checkout -q main
+  git merge -q --no-ff --no-edit -m "Merge s2" s2
+  # A squash merge.
+  git checkout -q -b s3
+  _write_fragment RELEASE-NOTES.next/PR-80.md 80 $'### Added\n- eighty\n'
+  echo s3 > s3.txt
+  git add -A && git commit -q -m "PR-80"
+  git checkout -q main
+  git merge -q --squash s3 >/dev/null
+  git commit -q -m "PR-80 (squash)"
+  local out paths rc=0 err
+  paths=$(harness_mktemp po)
+  err=$(harness_mktemp err)
+  out=$("$DOC_TOOLS" fragments merge v1.0.0 HEAD --paths-out "$paths" 2>"$err") || rc=$?
+  assert_eq "0" "$rc" "merge exits 0 (stderr: $(head -c 300 "$err"))"
+  local n
+  for n in 51 77 78 80; do
+    assert_true "PR-$n.md is consumed" grep -qx "RELEASE-NOTES.next/PR-$n.md" "$paths"
+  done
+  assert_eq "4" "$(grep -c . "$paths" || true)" "…and nothing else"
+  teardown
+}
+
+test_i9_merge_refuses_a_release_that_never_reached_the_branch() {
+  # v1.0.0 was released from release/1.0 (its release commit deleted PR-1),
+  # but that commit never reached main: main still has PR-1, and its
+  # RELEASE-NOTES.md still ends at v0.9.0.
+  echo "test: I-9 fragments merge — refuses to re-consume what an unmerged release consumed (merge or cherry-pick it first)"
+  setup
+  git tag v0.9.0
+  mkdir -p RELEASE-NOTES.next
+  _write_fragment RELEASE-NOTES.next/PR-1.md 1 $'### Added\n- one\n'
+  git add -A && git commit -q -m "PR-1"
+  git checkout -q -b release/1.0
+  git rm -q RELEASE-NOTES.next/PR-1.md
+  echo "## v1.0.0" > RELEASE-NOTES.md
+  git add RELEASE-NOTES.md && git commit -q -m "release: v1.0.0"
+  git tag v1.0.0
+  git checkout -q main
+  _write_fragment RELEASE-NOTES.next/PR-2.md 2 $'### Added\n- two\n'
+  git add -A && git commit -q -m "PR-2"
+  local out err paths rc start
+  paths=$(harness_mktemp po)
+  err=$(harness_mktemp err)
+  for start in v0.9.0 ROOT v1.0.0; do
+    echo stale > "$paths"
+    rc=0
+    out=$("$DOC_TOOLS" fragments merge "$start" HEAD --paths-out "$paths" 2>"$err") || rc=$?
+    assert_eq "1||" "$rc|$out|$(cat "$paths")" "from $start: refused (exit 1), nothing merged, nothing to delete"
+    assert_contains "$(cat "$err")" "RELEASE-NOTES.next/PR-1.md" "from $start: names the fragment …"
+    assert_contains "$(cat "$err")" "v1.0.0" "…and the release that consumed it"
+  done
+  # Cherry-picking the release commit carries the deletion: nothing to refuse.
+  git cherry-pick release/1.0 >/dev/null
+  rc=0
+  out=$("$DOC_TOOLS" fragments merge v0.9.0 HEAD --paths-out "$paths" 2>"$err") || rc=$?
+  assert_eq "0|RELEASE-NOTES.next/PR-2.md" "$rc|$(cat "$paths")" "after a cherry-pick of the release commit: PR-2 only"
+  git reset -q --hard HEAD~1
+  git merge -q --no-ff --no-edit -m "Merge release/1.0" release/1.0
+  rc=0
+  out=$("$DOC_TOOLS" fragments merge v1.0.0 HEAD --paths-out "$paths" 2>"$err") || rc=$?
+  assert_eq "0|RELEASE-NOTES.next/PR-2.md" "$rc|$(cat "$paths")" "after merging the release branch: PR-2 only"
+  teardown
+}
+
+test_i9_merge_ignores_other_release_lines() {
+  # A maintenance line forked from v1.2.0 before main released v2.0.0: that
+  # release consumed main's PR-5, which the maintenance line never had.
+  echo "test: I-9 fragments merge — a release on a line forked before <range-start> is not this branch's"
+  setup
+  git tag v1.2.0
+  mkdir -p RELEASE-NOTES.next
+  _write_fragment RELEASE-NOTES.next/PR-5.md 5 $'### Added\n- five\n'
+  git add -A && git commit -q -m "PR-5"
+  git rm -q RELEASE-NOTES.next/PR-5.md
+  git commit -q -m "release: v2.0.0"
+  git tag v2.0.0
+  git checkout -q -b maint/1.2 v1.2.0
+  mkdir -p RELEASE-NOTES.next
+  _write_fragment RELEASE-NOTES.next/PR-6.md 6 $'### Fixed\n- six (backport)\n'
+  git add -A && git commit -q -m "PR-6"
+  local paths rc=0
+  paths=$(harness_mktemp po)
+  "$DOC_TOOLS" fragments merge v1.2.0 HEAD --paths-out "$paths" >/dev/null 2>&1 || rc=$?
+  assert_eq "0|RELEASE-NOTES.next/PR-6.md" "$rc|$(cat "$paths")" "the maintenance release consumes PR-6"
+  teardown
+}
+
+test_i9_merge_remove() {
+  echo "test: I-9 fragments merge --remove — git rm's exactly the consumed fragments"
+  setup
+  mkdir -p RELEASE-NOTES.next
+  _write_fragment RELEASE-NOTES.next/PR-1.md 1 $'### Added\n- one\n'
+  _write_fragment RELEASE-NOTES.next/PR-2.md 2 $'<!-- doc-superpowers:no-notes -->\n'
+  _write_fragment RELEASE-NOTES.next/PR-3.md 33 $'### Added\n- wrong marker\n'
+  git add -A && git commit -q -m "fragments"
+  local rc out
+  rc=0; "$DOC_TOOLS" fragments merge ROOT HEAD~1 --remove >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "--remove needs <range-end> = HEAD (it edits the checkout)"
+  echo "- local edit" >> RELEASE-NOTES.next/PR-1.md
+  rc=0; "$DOC_TOOLS" fragments merge ROOT HEAD --remove >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "a consumed fragment with uncommitted edits: refused (the edit is not in the notes)"
+  assert_eq "" "$(git status --porcelain -- RELEASE-NOTES.next | grep -v '^ M' || true)" "…and nothing removed"
+  git checkout -q -- RELEASE-NOTES.next/PR-1.md
+  rc=0; out=$("$DOC_TOOLS" fragments merge ROOT HEAD --remove 2>/dev/null) || rc=$?
+  assert_eq "0" "$rc" "--remove exits 0"
+  assert_contains "$out" "- one" "…and still prints the merged notes"
+  assert_eq "D  RELEASE-NOTES.next/PR-1.md|D  RELEASE-NOTES.next/PR-2.md" \
+    "$(git status --porcelain -- RELEASE-NOTES.next | LC_ALL=C sort | tr '\n' '|' | sed 's/|$//')" \
+    "PR-1 and PR-2 (no notes) staged for deletion; PR-3 (excluded) kept"
+  assert_file_exists RELEASE-NOTES.next/PR-3.md "the excluded fragment stays for the next release"
+  teardown
+}
+
+test_i9_merge_folds_the_section_vocabulary() {
+  echo "test: I-9 fragments merge — one section vocabulary (aliases fold onto it, case-insensitively)"
+  setup
+  mkdir -p RELEASE-NOTES.next
+  _write_fragment RELEASE-NOTES.next/PR-1.md 1 $'### Features\n- feat one\n'
+  _write_fragment RELEASE-NOTES.next/PR-2.md 2 $'### Added\n- added two\n'
+  _write_fragment RELEASE-NOTES.next/PR-3.md 3 $'### bug fixes\n- fix three\n'
+  _write_fragment RELEASE-NOTES.next/PR-4.md 4 $'### fixed\n- fix four\n### Breaking Changes\n- kept as written\n'
+  git add -A && git commit -q -m "fragments"
+  local out rc=0
+  out=$("$DOC_TOOLS" fragments merge ROOT HEAD 2>/dev/null) || rc=$?
+  assert_eq "0" "$rc" "merge exits 0"
+  assert_eq $'### Added\n- feat one\n- added two\n\n### Fixed\n- fix three\n- fix four\n\n### Breaking Changes\n- kept as written' \
+    "$out" "Features → Added, bug fixes / fixed → Fixed; other headings verbatim, after the vocabulary"
+  teardown
+}
+
+# A PATH shim that logs every call of <tool> to <log> (one line per call) and
+# runs the real one.
+_counting_shim() {
+  local tool="$1" log="$2" dir real
+  real=$(command -v "$tool")
+  dir=$(harness_mktemp_d "count-$tool")
+  printf '#!/bin/sh\nprintf "%%s" "$*" | tr "\\n" " " >> "%s"\necho >> "%s"\nexec "%s" "$@"\n' "$log" "$log" "$real" > "$dir/$tool"
+  chmod +x "$dir/$tool"
+  printf '%s' "$dir"
+}
+
+test_i9_fragments_list_is_loud_and_linear() {
+  echo "test: I-9 fragments list — never aborts silently; one jq call for any number of fragments"
+  setup
+  local d=RELEASE-NOTES.next out rc=0 err log shim
+  mkdir -p "$d"
+  _write_fragment "$d/PR-1.md" 1 $'### Added\n- one\n'
+  printf '<!-- doc-superpowers:fragment PR-2 -->\n### Fixed\n- no hash line\n' > "$d/PR-2.md"
+  _write_fragment "$d/PR-3.md" 3 $'<!-- doc-superpowers:no-notes -->\n'
+  _write_fragment "$d/PR-4.md" 44 $'### Added\n- wrong marker\n'
+  _write_fragment "$d/PR-5.md" 5 $'### Added\n- five\n'
+  _write_fragment "$d/PR-6.md" 6 $'### Added\n- six\n'
+  ln -s PR-1.md "$d/PR-7.md"
+  err=$(harness_mktemp list-err)
+  log=$(harness_mktemp jq-log)
+  shim=$(_counting_shim jq "$log")
+  out=$(PATH="$shim:$PATH" "$DOC_TOOLS" fragments list 2>"$err") || rc=$?
+  assert_eq "0" "$rc" "list exits 0 with a fragment that has no hash line (stderr: $(head -c 200 "$err"))"
+  assert_json_field "$out" 'map(.pr_number) | join(",")' "1,2,3,4,5,6" "every regular PR-<N>.md, in order (the symlink skipped)"
+  assert_contains "$(cat "$err")" "PR-7.md" "…and the skipped symlink is named"
+  assert_json_field "$out" '.[1] | "\(.hash_valid)|\(.hash_stored)"' "false|" "no hash line: hash_valid false, hash_stored empty"
+  assert_json_field "$out" '.[0] | "\(.hash_valid)|\(.problem)|\(.no_notes)|\(.sections | join(","))"' "true|null|false|Added" \
+    "a sealed fragment: valid, no problem, its sections"
+  assert_json_field "$out" '.[2] | "\(.no_notes)|\(.problem)"' "true|null" "the no-notes fragment"
+  assert_json_field "$out" '.[3].problem | test("line 1")' "true" "a wrong line-1 marker is the fragment's problem"
+  # (check_deps' own `jq --version` aside.)
+  assert_eq "1" "$(grep -vc '^--version' "$log" || true)" "one jq call for 6 fragments"
+  teardown
+}
+
+test_i9_merge_is_one_history_pass() {
+  echo "test: I-9 fragments merge — one git log pass, whatever the number of fragments"
+  setup
+  git tag v1.0.0
+  mkdir -p RELEASE-NOTES.next
+  local n log shim rc=0
+  for n in 1 2 3 4 5 6; do
+    _write_fragment "RELEASE-NOTES.next/PR-$n.md" "$n" "$(printf '### Added\n- item %s\n' "$n")"
+    git add -A && git commit -q -m "PR-$n"
+  done
+  log=$(harness_mktemp git-log)
+  shim=$(_counting_shim git "$log")
+  PATH="$shim:$PATH" "$DOC_TOOLS" fragments merge v1.0.0 HEAD >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "merge exits 0"
+  assert_eq "1" "$(grep -cE '(^| )log( |$)' "$log" || true)" "one git log call for 6 fragments"
   teardown
 }
 
@@ -5605,6 +5947,16 @@ run_tests() {
   test_fragments_list_skips_non_numeric
   test_fragments_merge_paths_out
   test_fragments_merge_errors_outside_git_repo
+  test_i9_merge_lossless_or_excluded
+  test_i9_merge_refs_and_paths_out_forms
+  test_i9_merge_presence_is_unreleased
+  test_i9_merge_one_pass_finds_renamed_and_merge_added
+  test_i9_merge_refuses_a_release_that_never_reached_the_branch
+  test_i9_merge_ignores_other_release_lines
+  test_i9_merge_remove
+  test_i9_merge_folds_the_section_vocabulary
+  test_i9_fragments_list_is_loud_and_linear
+  test_i9_merge_is_one_history_pass
   test_set_implementation_creates_block
   test_set_implementation_appends_to_existing
   test_set_implementation_replaces_existing_ref

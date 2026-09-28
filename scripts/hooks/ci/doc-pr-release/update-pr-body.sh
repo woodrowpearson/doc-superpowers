@@ -49,73 +49,89 @@ fi
 # Normalize line endings to LF (handles bodies edited via Windows web UI).
 EXISTING_BODY="${EXISTING_BODY//$'\r'/}"
 
-# Validate marker pairing. We count lines where the marker is the ENTIRE line
-# (`grep -cFx`), matching the awk replace below which uses `$0 == start`. An
-# `grep -oF | wc -l` (any-substring) count would over-accept: a stray
-# mid-line `<!-- doc-superpowers:start -->` in user prose would pass validation
-# but awk would not replace it, leaving an orphan marker after fresh-append.
-# `grep -c` exits 1 on zero matches; with `pipefail` set we allow that.
-start_count=$( { printf '%s\n' "$EXISTING_BODY" | grep -cFx "$START_MARKER" || true; } | tr -d ' \n')
-end_count=$( { printf '%s\n' "$EXISTING_BODY" | grep -cFx "$END_MARKER" || true; } | tr -d ' \n')
-# Belt-and-suspenders: catch ANY occurrence (including same-line dupes or stray
-# mid-line markers). A non-line-anchored hit means a malformed body.
-any_start=$( { printf '%s\n' "$EXISTING_BODY" | grep -oF "$START_MARKER" || true; } | wc -l | tr -d ' ')
-any_end=$( { printf '%s\n' "$EXISTING_BODY" | grep -oF "$END_MARKER" || true; } | wc -l | tr -d ' ')
-if [ "$any_start" -ne "$start_count" ] || [ "$any_end" -ne "$end_count" ]; then
-  echo "ERROR: doc-superpowers marker found outside of a line on its own — refusing to edit" >&2
-  exit 1
-fi
-if [ "$start_count" -gt 1 ] || [ "$end_count" -gt 1 ]; then
-  echo "ERROR: duplicate doc-superpowers markers in PR body" >&2
-  exit 1
-fi
-if [ "$start_count" -ne "$end_count" ]; then
-  echo "ERROR: unmatched doc-superpowers markers (start=$start_count, end=$end_count)" >&2
-  exit 1
-fi
+# One pass over the body finds the managed section and checks its markers.
+# A marker counts only as a line on its own outside a code fence (``` or ~~~,
+# any indent): a fenced example of the markers is prose, left as it is, and
+# never the section. Inside the section only its END marker is looked for.
+# Refused (exit 1, the body untouched): a marker inside a line (outside a
+# fence), a second START or END, an END before the START, or a START
+# without an END. Passes NEW_SECTION via ENVIRON (avoids -v multiline issues
+# on BSD awk).
+# shellcheck disable=SC2016
+FENCED_AWK='
+function fence_open(l,   t, c, k) {
+  t = l; sub(/^[ \t]+/, "", t)
+  c = substr(t, 1, 1)
+  if (c != "`" && c != "~") return 0
+  k = 0; while (substr(t, k + 1, 1) == c) k++
+  if (k < 3) return 0
+  if (c == "`" && index(substr(t, k + 1), "`") > 0) return 0
+  fc = c; fl = k
+  return 1
+}
+function fence_close(l,   t, k) {
+  t = l; sub(/^[ \t]+/, "", t)
+  k = 0; while (substr(t, k + 1, 1) == fc) k++
+  if (k < fl) return 0
+  return (substr(t, k + 1) ~ /^[ \t]*$/)
+}
+BEGIN { state = "out"; found = 0; err = 0 }
+{
+  if (state == "fence") { out = out $0 "\n"; if (fence_close($0)) state = "out"; next }
+  if (state == "block") {
+    if ($0 == end) { state = "out"; next }
+    if ($0 == start) { err = 4; exit }
+    next
+  }
+  if ($0 == start) {
+    if (found) { err = 4; exit }
+    found = 1; state = "block"
+    out = out start "\n" ENVIRON["NEW_SECTION"] "\n" end "\n"
+    next
+  }
+  if ($0 == end) { err = (found ? 4 : 6); exit }
+  if (index($0, start) || index($0, end)) { err = 3; exit }
+  if (fence_open($0)) state = "fence"
+  out = out $0 "\n"
+}
+END {
+  if (err) exit err
+  if (state == "block") exit 5
+  if (!found) exit 7
+  printf "%s", out
+}'
 
-# Build the new body.
-if [ "$start_count" -eq 0 ]; then
-  # No managed section yet — append.
-  if [ -z "$EXISTING_BODY" ]; then
-    NEW_BODY="${START_MARKER}
+rc=0
+NEW_BODY=$(NEW_SECTION="$NEW_SECTION" awk -v start="$START_MARKER" -v end="$END_MARKER" "$FENCED_AWK" <<<"$EXISTING_BODY") || rc=$?
+case "$rc" in
+  0) ;;
+  7)
+    # No managed section yet — append.
+    if [ -z "$EXISTING_BODY" ]; then
+      NEW_BODY="${START_MARKER}
 ${NEW_SECTION}
 ${END_MARKER}"
-  else
-    # Strip any trailing newlines from the existing body before adding the
-    # blank-line separator, so we don't end up with 3+ blank lines if the
-    # body already ended with whitespace.
-    existing_stripped="${EXISTING_BODY}"
-    while [ "${existing_stripped: -1}" = $'\n' ]; do
-      existing_stripped="${existing_stripped%$'\n'}"
-    done
-    NEW_BODY="${existing_stripped}
+    else
+      # Strip any trailing newlines from the existing body before adding the
+      # blank-line separator, so we don't end up with 3+ blank lines if the
+      # body already ended with whitespace.
+      existing_stripped="${EXISTING_BODY}"
+      while [ "${existing_stripped: -1}" = $'\n' ]; do
+        existing_stripped="${existing_stripped%$'\n'}"
+      done
+      NEW_BODY="${existing_stripped}
 
 ${START_MARKER}
 ${NEW_SECTION}
 ${END_MARKER}"
-  fi
-else
-  # Replace existing section. Pass NEW_SECTION via ENVIRON (avoids -v multiline issues on BSD awk).
-  # shellcheck disable=SC2016
-  NEW_BODY=$(NEW_SECTION="$NEW_SECTION" awk -v start="$START_MARKER" -v end="$END_MARKER" '
-    BEGIN { in_block = 0 }
-    {
-      if ($0 == start) {
-        print start
-        print ENVIRON["NEW_SECTION"]
-        print end
-        in_block = 1
-        next
-      }
-      if ($0 == end) {
-        in_block = 0
-        next
-      }
-      if (!in_block) print $0
-    }
-  ' <<<"$EXISTING_BODY")
-fi
+    fi
+    ;;
+  3) echo "ERROR: doc-superpowers marker found outside of a line on its own — refusing to edit" >&2; exit 1 ;;
+  4) echo "ERROR: duplicate doc-superpowers markers in PR body" >&2; exit 1 ;;
+  5) echo "ERROR: unmatched doc-superpowers markers (a start marker with no end marker after it)" >&2; exit 1 ;;
+  6) echo "ERROR: the doc-superpowers end marker comes before the start marker — refusing to edit" >&2; exit 1 ;;
+  *) echo "ERROR: parsing the PR body failed (awk exit $rc)" >&2; exit 1 ;;
+esac
 
 # No-op check. Normalize trailing newlines on both sides: `gh pr view --jq` may
 # emit a trailing \n that `$()` strips, while the awk-built NEW_BODY does not.

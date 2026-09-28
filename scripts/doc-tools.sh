@@ -2018,15 +2018,25 @@ set-implementation|cmd_set_implementation|deps|ref= status= note=
   blocked. The doc is replaced atomically, keeping its mode.
 fragments list|cmd_fragments_list|deps|
   -
-  List per-PR release-notes fragments (RELEASE-NOTES.next/PR-*.md) with
-  their hash status, as JSON.
+  List the per-PR release-notes fragments (RELEASE-NOTES.next/PR-<N>.md in
+  the working tree) as JSON: hash status, sections, the no-notes state,
+  and the problem that keeps `fragments merge` from consuming one (null
+  when there is none). Symbolic links and non-numeric names are skipped
+  with a warning.
 fragments validate|cmd_fragments_validate|deps|
   <path>
   Exit 0 if the fragment's hash matches its body, 1 if it drifted.
-fragments merge|cmd_fragments_merge|repo|paths-out=
-  <range-start> <range-end> [--paths-out <file>]
-  Print the merged sections of the fragments introduced in the commit
-  range. --paths-out writes the consumed fragment paths, one per line.
+fragments merge|cmd_fragments_merge|repo|paths-out= remove
+  <range-start> <range-end> [--paths-out <file>] [--remove]
+  Print the merged sections of every fragment present at <range-end>: a
+  fragment is unreleased until a release deletes it. <range-start> is the
+  previous release (its tag), or ROOT for the first one. Each fragment is
+  merged losslessly or skipped with a warning (it stays for the next
+  release). --paths-out writes the consumed paths, one per line; --remove
+  (<range-end> must be HEAD) git-rm's exactly those. Refuses (exit 1,
+  naming them) when a fragment here was already consumed by <range-start>,
+  or by a v* release tag cut from this history after it, whose release
+  commit has not reached <range-end>.
 tools install|cmd_tools_install|deps|dest= with-helpers helper=*
   [--dest <path>] [--with-helpers | --helper <dir>...]
   Vendor doc-tools.sh into <path> (default .github/scripts); with
@@ -3806,103 +3816,286 @@ cmd_check_version() {
   echo "PASS: all $checked file(s) match v$canonical"
 }
 
-# --- Fragments subcommand ---
+# --- Fragments: RELEASE-NOTES.next/PR-<N>.md ----------------------------------
+#
+# ONE grammar for the per-PR release-notes fragments, shared by `fragments
+# list` and `fragments merge` (_FRAG_AWK). The format and its rules are the
+# spec the installer ships as RELEASE-NOTES.next/README.md
+# (scripts/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md):
+#
+#   line 1  <!-- doc-superpowers:fragment PR-<N> -->   N = the file's number
+#   line 2  <!-- doc-superpowers:hash <sha256> -->      of the bytes from line 3
+#   line 3+ ### <Section> headings, each holding its notes
+#
+# A fragment is merged losslessly or not at all: one the consumer cannot
+# place (a wrong line 1, text before the first ### heading, a # / ##
+# heading, an unclosed code fence, no notes) is skipped with a warning and
+# left for the next release — never consumed. A missing or drifted hash is
+# a hand edit: merged as written, with a warning. Trailing CR and blanks are
+# dropped. Notes are units — a line that starts at column 0 plus the
+# indented and blank lines (and whole code fences) under it — so a
+# sub-bullet two notes share is never cut from the second, and identical
+# units in one section are merged once. Sections fold onto one vocabulary
+# (case-insensitive; Features → Added, Changes → Changed, Fixes / Bug Fixes
+# → Fixed) and print in its order; other headings follow as written, in
+# first-seen order. A body that is only <!-- doc-superpowers:no-notes -->
+# is the explicit "no release notes" state: consumed, nothing printed.
+#
+# Operands: n=<N> p=<path> <file>, per fragment, in PR order.
+# -v mode=merge: the merged sections on stdout; per fragment one status line
+#   ok|nonotes|skip \037 <path> [\037 <reason>]
+# -v mode=list: per fragment one line
+#   F \037 <path> \037 <problem or ""> \037 <1 if no-notes> \037 <sections \036-joined>
+# shellcheck disable=SC2016  # awk program, not shell expansion
+_FRAG_AWK='
+function rtrim(s) { sub(/[ \t]+$/, "", s); return s }
+function fail(r) { if (bad == "") bad = r }
+function fold(s,   l) {
+  l = tolower(s)
+  if (l == "added" || l == "features") return "Added"
+  if (l == "changed" || l == "changes") return "Changed"
+  if (l == "deprecated") return "Deprecated"
+  if (l == "removed") return "Removed"
+  if (l == "fixed" || l == "fixes" || l == "bug fixes") return "Fixed"
+  if (l == "security") return "Security"
+  if (l == "dependencies") return "Dependencies"
+  return s
+}
+# A code fence opens with 3+ backticks or tildes (any indent) and closes with
+# at least as many of the same character and nothing else.
+function fence_open(l,   t, c, k) {
+  t = l; sub(/^[ \t]+/, "", t)
+  c = substr(t, 1, 1)
+  if (c != "`" && c != "~") return 0
+  k = 0; while (substr(t, k + 1, 1) == c) k++
+  if (k < 3) return 0
+  if (c == "`" && index(substr(t, k + 1), "`") > 0) return 0
+  fc = c; fl = k
+  return 1
+}
+function fence_close(l,   t, k) {
+  t = l; sub(/^[ \t]+/, "", t)
+  k = 0; while (substr(t, k + 1, 1) == fc) k++
+  if (k < fl) return 0
+  return (substr(t, k + 1) ~ /^[ \t]*$/)
+}
+# The p= / n= operands of the NEXT file are already applied when end_file()
+# runs for this one, so the path is kept here.
+function begin_file() {
+  fp = p; bad = ""; nonotes = 0; section = ""; nu = 0; cur = 0; pb = 0; infence = 0
+  nsf = 0; split("", fseen)
+}
+function unit_new(l) { nu++; usec[nu] = section; utext[nu] = l; cur = nu; pb = 0 }
+function unit_add(l,   k) {
+  for (k = 0; k < pb; k++) utext[cur] = utext[cur] "\n"
+  utext[cur] = utext[cur] "\n" l; pb = 0
+}
+function end_file(   i, s, key, secs) {
+  if (infence) fail("an unclosed code fence")
+  if (nonotes && nu > 0) fail("the no-notes marker together with notes")
+  if (!nonotes && nu == 0) fail("no notes (write them, or the no-notes marker)")
+  if (mode == "list") {
+    secs = ""
+    for (i = 1; i <= nsf; i++) secs = secs (i > 1 ? "\036" : "") fsec[i]
+    printf "F\037%s\037%s\037%d\037%s\n", fp, bad, (nonotes && nu == 0), secs > status
+    return
+  }
+  if (bad != "") { printf "skip\037%s\037%s\n", fp, bad > status; return }
+  if (nonotes) { printf "nonotes\037%s\n", fp > status; return }
+  printf "ok\037%s\n", fp > status
+  for (i = 1; i <= nu; i++) {
+    s = usec[i]
+    if (!(s in secn)) { nsec++; secname[nsec] = s; secn[s] = 0 }
+    key = s SUBSEP utext[i]
+    if (key in seen) continue
+    seen[key] = 1
+    secn[s]++
+    sect[s, secn[s]] = utext[i]
+  }
+}
+function emit(s,   j) {
+  if (!(s in secn) || secn[s] == 0) return
+  if (!first) printf "\n"
+  first = 0
+  printf "### %s\n", s
+  for (j = 1; j <= secn[s]; j++) printf "%s\n", sect[s, j]
+}
+FNR == 1 {
+  if (NR > 1) end_file()
+  begin_file()
+  l = $0; sub(/\r$/, "", l)
+  if (rtrim(l) != "<!-- doc-superpowers:fragment PR-" n " -->")
+    fail("line 1 is not <!-- doc-superpowers:fragment PR-" n " -->")
+  next
+}
+{
+  l = $0; sub(/\r$/, "", l)
+  if (FNR == 2 && rtrim(l) ~ /^<!-- doc-superpowers:hash[^>]*-->$/) next
+  if (infence) {
+    if (cur) unit_add(l)
+    if (fence_close(l)) infence = 0
+    next
+  }
+  if (l ~ /^[ \t]*$/) { if (cur) pb++; next }
+  if (rtrim(l) == "<!-- doc-superpowers:no-notes -->") { nonotes = 1; next }
+  if (l ~ /^###[ \t]*$/) { fail("an empty ### heading"); next }
+  if (l ~ /^###[ \t]/) {
+    name = l; sub(/^###[ \t]+/, "", name)
+    section = fold(rtrim(name)); cur = 0; pb = 0
+    if (!(section in fseen)) { fseen[section] = 1; nsf++; fsec[nsf] = section }
+    next
+  }
+  if (l ~ /^##?[ \t]/ || l ~ /^##?$/) { fail("a # or ## heading (the release adds the version heading)"); next }
+  if (section == "") { fail("text before the first ### heading"); next }
+  if (l ~ /^[ \t]/ && cur) unit_add(l)
+  else unit_new(l)
+  if (fence_open(l)) infence = 1
+}
+END {
+  if (NR > 0) end_file()
+  if (mode != "merge") exit
+  ncan = split("Added Changed Deprecated Removed Fixed Security Dependencies", canon, " ")
+  for (i = 1; i <= ncan; i++) iscanon[canon[i]] = 1
+  first = 1
+  for (i = 1; i <= ncan; i++) emit(canon[i])
+  for (i = 1; i <= nsec; i++) if (!(secname[i] in iscanon)) emit(secname[i])
+}'
 
-# Compute SHA-256 of bytes from line 3 onwards of a fragment file.
-_fragment_payload_sha256() {
-  local path="$1"
-  if [[ ! -f "$path" ]]; then
-    echo ""
-    return 0
+_FRAG_DIR="RELEASE-NOTES.next"
+
+# _frag_n <path>: set _FRAG_N to the <N> of ".../PR-<N>.md"; return 1 when the
+# name is not PR-<digits>.md.
+_frag_n() {
+  local base="${1##*/}"
+  _FRAG_N=""
+  case "$base" in
+    PR-*.md) base="${base#PR-}"; base="${base%.md}" ;;
+    *) return 1 ;;
+  esac
+  case "$base" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  _FRAG_N="$base"
+}
+
+# _frag_stored_hash <file>: set _FRAG_STORED to the hash on line 2 ("" when
+# line 2 is not a hash marker). A trailing CR and blanks are ignored.
+_frag_stored_hash() {
+  local l1="" l2="" re='^<!-- doc-superpowers:hash ([0-9a-f]+) -->$'
+  _FRAG_STORED=""
+  { IFS= read -r l1 || true; IFS= read -r l2 || true; } < "$1"
+  l2="${l2%$'\r'}"
+  while :; do
+    case "$l2" in
+      *[' '$'\t']) l2="${l2%?}" ;;
+      *) break ;;
+    esac
+  done
+  if [[ $l2 =~ $re ]]; then
+    _FRAG_STORED="${BASH_REMATCH[1]}"
   fi
+}
+
+# _frag_hashes <file>...: set _FRAG_HASH[i] to the sha256 of file i's bytes
+# from line 3 on — what its line 2 should record — with one hashing process
+# for all of them. Needs _scratch_init.
+_frag_hashes() {
+  _FRAG_HASH=()
+  [ $# -gt 0 ] || return 0
+  local tool=() f i=0 payloads=() line
   if command -v sha256sum >/dev/null 2>&1; then
-    tail -n +3 "$path" | sha256sum | awk '{print $1}'
+    tool=(sha256sum)
   elif command -v shasum >/dev/null 2>&1; then
-    tail -n +3 "$path" | shasum -a 256 | awk '{print $1}'
+    tool=(shasum -a 256)
   else
-    echo "no sha256 tool available" >&2
-    return 1
+    _die "fragments: neither sha256sum nor shasum is installed"
   fi
+  for f in "$@"; do
+    tail -n +3 "$f" > "$_SCRATCH/payload.$i" || _die "fragments: cannot read $f"
+    payloads+=("$_SCRATCH/payload.$i")
+    i=$((i + 1))
+  done
+  i=0
+  while IFS= read -r line; do
+    _FRAG_HASH[$i]="${line%% *}"
+    i=$((i + 1))
+  done < <("${tool[@]}" "${payloads[@]}")
+  [ "$i" -eq $# ] || _die "fragments: ${tool[*]} hashed $i of $# fragments"
 }
 
-# Extract the line-2 hash from a fragment file (returns empty if missing).
-_fragment_stored_hash() {
-  local path="$1"
-  sed -n '2p' "$path" \
-    | grep -oE '^<!-- doc-superpowers:hash [a-f0-9]+ -->$' \
-    | awk '{print $3}'
-}
-
-# Extract the integer N from a fragment filename "PR-<N>.md".
-# Returns empty string if filename is not "PR-<digits>.md".
-_fragment_pr_number() {
-  local path="$1"
-  local base
-  base=$(basename "$path" .md)
-  if [[ "$base" =~ ^PR-([0-9]+)$ ]]; then
-    echo "${BASH_REMATCH[1]}"
-  else
-    echo ""
-  fi
-}
-
-# Parse section headings from a fragment body (line 3 onwards).
-# Emits one heading per line, with the leading "### " stripped (full heading text).
-# Accepts any heading text (single or multi-word).
-_fragment_section_headings() {
-  local path="$1"
-  tail -n +3 "$path" | grep -E '^###[[:space:]]+.+' | sed -E 's/^###[[:space:]]+//'
-}
-
-# Backward-compat shim used by cmd_fragments_list — emits unique section headings.
-_fragment_section_names() {
-  _fragment_section_headings "$1" | sort -u
+# A fragment left for the next release, and why.
+_frag_skip() {
+  echo "WARN: $1: not merged and not consumed: $2. It stays for the next release; fix it (and commit) to include it." >&2
 }
 
 cmd_fragments_list() {
   if [ $# -gt 0 ]; then
     _usage_error "fragments list" "takes no arguments (got '$1')"
   fi
-  local dir="RELEASE-NOTES.next"
-  if [[ ! -d "$dir" ]]; then
+  if [ ! -d "$_FRAG_DIR" ]; then
     echo "[]"
     return 0
   fi
-  local out="[]"
-  local found=0
-  for path in "$dir"/PR-*.md; do
-    [[ -f "$path" ]] || continue
-    local n hash_stored hash_actual hash_valid sections_json
-    n=$(_fragment_pr_number "$path")
-    if [[ -z "$n" ]]; then
+  local path files=() ns=() awkargs=() i
+  for path in "$_FRAG_DIR"/PR-*.md; do
+    if [ -L "$path" ]; then
+      echo "WARN: skipping $path: a symbolic link (never read)" >&2
+      continue
+    fi
+    [ -f "$path" ] || continue
+    if ! _frag_n "$path"; then
       echo "WARN: skipping non-numeric fragment filename: $path" >&2
       continue
     fi
-    found=1
-    hash_stored=$(_fragment_stored_hash "$path")
-    hash_actual=$(_fragment_payload_sha256 "$path")
-    if [[ "$hash_stored" = "$hash_actual" ]] && [[ -n "$hash_stored" ]]; then
-      hash_valid="true"
-    else
-      hash_valid="false"
-    fi
-    sections_json=$(_fragment_section_names "$path" \
-      | jq -R -s 'split("\n") | map(select(length > 0))')
-    out=$(printf '%s' "$out" | jq \
-      --argjson n "$n" \
-      --arg path "$path" \
-      --arg hash_stored "$hash_stored" \
-      --arg hash_actual "$hash_actual" \
-      --arg hash_valid "$hash_valid" \
-      --argjson sections "$sections_json" \
-      '. += [{pr_number: $n, path: $path, hash_stored: $hash_stored, hash_actual: $hash_actual, hash_valid: ($hash_valid == "true"), sections: $sections}]'
-    )
+    files+=("$path")
+    ns+=("$_FRAG_N")
   done
-  if [[ "$found" -eq 0 ]]; then
+  if [ "${#files[@]}" -eq 0 ]; then
     echo "[]"
     return 0
   fi
-  printf '%s\n' "$out" | jq 'sort_by(.pr_number)'
+  _scratch_init
+  _frag_hashes "${files[@]}"
+  local status="$_SCRATCH/list.status"
+  : > "$status"
+  for i in "${!files[@]}"; do
+    if [ -s "${files[$i]}" ]; then
+      awkargs+=("n=${ns[$i]}" "p=${files[$i]}" "${files[$i]}")
+    fi
+  done
+  if [ "${#awkargs[@]}" -gt 0 ]; then
+    LC_ALL=C awk -v mode=list -v status="$status" "$_FRAG_AWK" "${awkargs[@]}" \
+      || _die "fragments list: parsing the fragments failed"
+  fi
+  # The status lines come in the order of the non-empty files.
+  local problems=() nonotes=() secs=() tag p pr nn ss j=0
+  while IFS=$'\037' read -r tag p pr nn ss; do
+    problems+=("$pr")
+    nonotes+=("$nn")
+    secs+=("$ss")
+  done < "$status"
+  local out
+  out=$(
+    for i in "${!files[@]}"; do
+      if [ -s "${files[$i]}" ]; then
+        pr="${problems[$j]}" nn="${nonotes[$j]}" ss="${secs[$j]}"
+        j=$((j + 1))
+      else
+        pr="an empty file" nn=0 ss=""
+      fi
+      _frag_stored_hash "${files[$i]}"
+      _rec_put "${ns[$i]}" "${files[$i]}" "$_FRAG_STORED" "${_FRAG_HASH[$i]}" "$pr" "$nn" "$ss"
+    done | jq -n -R "$_JQ_REC_FIELDS"'rec_fields as $f
+      | [range(0; $f | length; 7) as $i
+         | {pr_number: ($f[$i] | tonumber), path: $f[$i + 1],
+            hash_stored: $f[$i + 2], hash_actual: $f[$i + 3],
+            hash_valid: ($f[$i + 2] != "" and $f[$i + 2] == $f[$i + 3]),
+            sections: ($f[$i + 6] | if . == "" then [] else split("\u001e") | unique end),
+            no_notes: ($f[$i + 5] == "1"),
+            problem: (if $f[$i + 4] == "" then null else $f[$i + 4] end)}]
+      | sort_by(.pr_number)'
+  ) || _die "fragments list: building the JSON failed"
+  printf '%s\n' "$out"
 }
 
 cmd_fragments_validate() {
@@ -3911,190 +4104,209 @@ cmd_fragments_validate() {
     _usage_error "fragments validate" "takes one fragment path (got $#)"
   fi
   [ -n "$path" ] || _usage_error "fragments validate" "requires a fragment path"
-  if [[ ! -f "$path" ]]; then
-    echo "ERROR: fragment not found: $path" >&2
+  if [ -L "$path" ] || [ ! -f "$path" ]; then
+    echo "ERROR: fragment not found (or not a regular file): $path" >&2
     return 2
   fi
-  local stored actual
-  stored=$(_fragment_stored_hash "$path")
-  actual=$(_fragment_payload_sha256 "$path")
-  if [[ -z "$stored" ]]; then
+  _scratch_init
+  _frag_stored_hash "$path"
+  _frag_hashes "$path"
+  if [ -z "$_FRAG_STORED" ]; then
     echo "ERROR: no hash marker on line 2 of $path" >&2
     return 1
   fi
-  if [[ "$stored" = "$actual" ]]; then
+  if [ "$_FRAG_STORED" = "${_FRAG_HASH[0]}" ]; then
     echo "valid: $path"
     return 0
   fi
-  echo "drifted: $path (stored=$stored, actual=$actual)" >&2
+  echo "drifted: $path (stored=$_FRAG_STORED, actual=${_FRAG_HASH[0]})" >&2
   return 1
+}
+
+# _frag_commit <ref>: the commit <ref> names (never an option).
+_frag_commit() {
+  case "$1" in
+    -*) return 1 ;;
+  esac
+  git rev-parse --verify --quiet "$1^{commit}"
+}
+
+# The fragment paths <to>'s history gained after <from>: one pass. --no-renames,
+# so a fragment renamed in the range counts as added (rename detection shows
+# it as R); a merge commit's diff is taken against its first parent (-m
+# --first-parent, and log.diffMerges pinned for git >= 2.31), so a fragment
+# a merge brings in — or adds itself — counts as added by that merge.
+_frag_added() {
+  git -c log.diffMerges=first-parent log -m --first-parent --no-renames --diff-filter=A \
+    --format= --name-only "$1..$2" -- ":(top)$_FRAG_DIR/"
 }
 
 cmd_fragments_merge() {
   local range_start="${1:-}" range_end="${2:-}"
-  local paths_out_file="${_OPT_paths_out:-}"
+  local paths_out="${_OPT_paths_out:-}" remove="${_OPT_remove:-}"
   if [ $# -ne 2 ] || [ -z "$range_start" ] || [ -z "$range_end" ]; then
     _usage_error "fragments merge" "requires exactly <range-start> <range-end> (got $# arguments)"
   fi
-  # Optional --paths-out <file>: write one consumed-fragment path per line.
-  # Lets callers (e.g., SKILL.md step 9) `git rm` only the fragments that were
-  # actually merged, instead of globbing PR-*.md unconditionally.
-  if [ -n "$paths_out_file" ]; then
-    : > "$paths_out_file"
+  # Emptied first: a run that fails or refuses never leaves a list to delete.
+  if [ -n "$paths_out" ]; then
+    : > "$paths_out" || _die "fragments merge: cannot write --paths-out $paths_out"
   fi
-  local dir="RELEASE-NOTES.next"
-  if [[ ! -d "$dir" ]]; then
-    return 0  # Empty output is valid (no fragments)
+  local start_sha="" end_sha head_sha
+  if [ "$range_start" != ROOT ]; then
+    start_sha=$(_frag_commit "$range_start") \
+      || _usage_error "fragments merge" "<range-start> '$range_start' does not name a commit (a first release, with no earlier release, starts at ROOT)"
   fi
+  [ "$range_end" != ROOT ] || _usage_error "fragments merge" "ROOT is only a <range-start> (the first release)"
+  end_sha=$(_frag_commit "$range_end") \
+    || _usage_error "fragments merge" "<range-end> '$range_end' does not name a commit"
+  if [ -n "$remove" ]; then
+    head_sha=$(_frag_commit HEAD) || head_sha=""
+    [ "$end_sha" = "$head_sha" ] \
+      || _usage_error "fragments merge" "--remove edits the checkout, so <range-end> must be HEAD (got '$range_end')"
+  fi
+  _scratch_init
 
-  # Collect fragments whose introducing commit is in the range.
-  local -a included_paths=()
-  for path in "$dir"/PR-*.md; do
-    [[ -f "$path" ]] || continue
-    # Skip non-numeric PR filenames (defensive — see cmd_fragments_list).
-    local n
-    n=$(_fragment_pr_number "$path")
-    if [[ -z "$n" ]]; then
-      echo "WARN: skipping non-numeric fragment filename: $path" >&2
-      continue
+  # Unreleased = present at <range-end>: a release consumes a fragment by
+  # deleting it in its release commit, which the release's tag carries.
+  local entry meta path mode type oid NL=$'\n'
+  local cand_n=() cand_p=() cand_o=() order=() i
+  git ls-tree --full-tree -z "$end_sha" -- "$_FRAG_DIR/" > "$_SCRATCH/end.tree" \
+    || _die "fragments merge: cannot list $_FRAG_DIR/ at $range_end"
+  while IFS= read -r -d '' entry; do
+    meta="${entry%%$'\t'*}"
+    path="${entry#*$'\t'}"
+    case "${path##*/}" in
+      PR-*.md) ;;
+      *) continue ;;
+    esac
+    mode="${meta%% *}"
+    oid="${meta##* }"
+    type="${meta#* }"
+    type="${type%% *}"
+    if ! _frag_n "$path"; then
+      _frag_skip "$path" "not a PR-<number>.md name"
+    elif [ "$mode" = 120000 ]; then
+      _frag_skip "$path" "a symbolic link (never read)"
+    elif [ "$type" != blob ]; then
+      _frag_skip "$path" "not a file"
+    else
+      cand_n+=("$_FRAG_N")
+      cand_p+=("$path")
+      cand_o+=("$oid")
     fi
-    # Find the commit that introduced this fragment (oldest commit touching it).
-    local introduced
-    introduced=$(git log --format="%H" --reverse -- "$path" 2>/dev/null | head -n 1)
-    if [[ -z "$introduced" ]]; then
-      # Untracked; skip with a warning.
-      echo "WARN: $path is not tracked; skipping" >&2
-      continue
-    fi
-    # Check if `introduced` is in `range_start..range_end` (exclusive of range_start).
-    if git merge-base --is-ancestor "$introduced" "$range_end" 2>/dev/null \
-       && ! git merge-base --is-ancestor "$introduced" "$range_start" 2>/dev/null; then
-      included_paths+=("$path")
-    fi
-  done
-
-  if [[ "${#included_paths[@]}" -eq 0 ]]; then
+  done < "$_SCRATCH/end.tree"
+  if [ "${#cand_p[@]}" -eq 0 ]; then
     return 0
   fi
+  while IFS= read -r i; do
+    order+=("${i#*$'\t'}")
+  done < <(for i in "${!cand_n[@]}"; do printf '%s\t%s\n' "${cand_n[$i]}" "$i"; done | sort -n -k1,1)
 
-  # Sort by integer PR number.
-  local -a sorted
-  # shellcheck disable=SC2207
-  sorted=($(for p in "${included_paths[@]}"; do
-    printf "%s\t%s\n" "$(_fragment_pr_number "$p")" "$p"
-  done | sort -n -k1,1 | awk -F'\t' '{print $2}'))
-
-  # Section storage: any heading is accepted. Canonical Keep-a-Changelog
-  # sections emit in a fixed order; non-canonical sections emit after, in
-  # first-seen order.
-  #
-  # bash 3.2 — macOS's /bin/bash, frozen at the last GPLv2 release and the
-  # interpreter this repo supports — has no associative arrays at all, so
-  # `local -A` aborts the script outright ("local: -A: invalid option"). The
-  # section map is therefore two parallel indexed arrays with a linear lookup.
-  # Section counts are single-digit in practice (7 canonical plus the rare
-  # custom heading), so the O(n) scan is noise next to the per-fragment git
-  # calls above.
-  local -a canonical_order=(Added Changed Deprecated Removed Fixed Security Dependencies)
-  local -a section_names=()
-  local -a section_bodies=()
-  local -a non_canonical_seen=()
-  local s
-
-  # True when $1 is one of the canonical Keep-a-Changelog headings.
-  _is_canonical_section() {
-    local want="$1" c
-    for c in "${canonical_order[@]}"; do
-      [ "$c" = "$want" ] && return 0
+  # A release consumed a fragment that is still here when its release point
+  # S no longer has it and nothing in S..<range-end> added it back: S's
+  # release commit has not reached <range-end>, and merging would release it
+  # twice. S is <range-start>, and every v* release tag <range-end> does not
+  # contain that was cut from its history after <range-start> — the release
+  # an earlier <range-start> choice would miss when its commit never came back.
+  local s_name=() s_sha=() ref tsha mb
+  if [ -n "$start_sha" ]; then
+    s_name+=("$range_start")
+    s_sha+=("$start_sha")
+  fi
+  while IFS= read -r ref; do
+    tsha=$(git rev-parse --verify --quiet "$ref^{commit}") || continue
+    [ "$tsha" != "$start_sha" ] || continue
+    mb=$(git merge-base "$tsha" "$end_sha") || continue
+    if [ -n "$start_sha" ] && git merge-base --is-ancestor "$mb" "$start_sha"; then
+      continue
+    fi
+    s_name+=("${ref#refs/tags/}")
+    s_sha+=("$tsha")
+  done < <(git for-each-ref --format='%(refname)' --no-merged="$end_sha" 'refs/tags/v[0-9]*')
+  local k present added refused="" c
+  for k in "${!s_sha[@]}"; do
+    present=$(git ls-tree --full-tree --name-only "${s_sha[$k]}" -- "$_FRAG_DIR/") \
+      || _die "fragments merge: cannot list $_FRAG_DIR/ at ${s_name[$k]}"
+    added=$(_frag_added "${s_sha[$k]}" "$end_sha") \
+      || _die "fragments merge: git log ${s_name[$k]}..$range_end failed"
+    for i in "${order[@]}"; do
+      c="${cand_p[$i]}"
+      case "$NL$present$NL$added$NL" in
+        *"$NL$c$NL"*) continue ;;
+      esac
+      case "$refused" in
+        *"  $c "*) ;;
+        *) refused="$refused  $c (deleted by ${s_name[$k]}, ${s_sha[$k]:0:12})$NL" ;;
+      esac
     done
-    return 1
-  }
+  done
+  if [ -n "$refused" ]; then
+    {
+      echo "ERROR: fragments merge: refused. A release already consumed (deleted) these fragments, but its release commit has not reached $range_end, so they are still here:"
+      printf '%s' "$refused"
+      echo "Merge that release's branch into this one (or cherry-pick its release commit), then run again: merging now would release them twice."
+    } >&2
+    exit 1
+  fi
 
-  # Locate $1 in section_names, setting _section_idx to its index (or -1).
-  # Sets a variable instead of echoing so the per-line body loop below stays
-  # fork-free.
-  _section_find() {
-    local want="$1"
-    _section_idx=0
-    while [ "$_section_idx" -lt "${#section_names[@]}" ]; do
-      [ "${section_names[$_section_idx]}" = "$want" ] && return 0
-      _section_idx=$((_section_idx + 1))
+  local files=() fpaths=() f
+  for i in "${order[@]}"; do
+    f="$_SCRATCH/fragment.$i"
+    git cat-file blob "${cand_o[$i]}" > "$f" || _die "fragments merge: cannot read ${cand_p[$i]} at $range_end"
+    if [ ! -s "$f" ]; then
+      _frag_skip "${cand_p[$i]}" "an empty file"
+      continue
+    fi
+    files+=("$f")
+    fpaths+=("${cand_p[$i]}")
+  done
+  local consumed=() status="$_SCRATCH/merge.status" awkargs=() j tag p reason
+  : > "$status"
+  : > "$_SCRATCH/merged"
+  if [ "${#files[@]}" -gt 0 ]; then
+    _frag_hashes "${files[@]}"
+    for j in "${!files[@]}"; do
+      _frag_n "${fpaths[$j]}"
+      awkargs+=("n=$_FRAG_N" "p=${fpaths[$j]}" "${files[$j]}")
     done
-    _section_idx=-1
-    return 1
-  }
-  local _section_idx=-1
-
-  for path in "${sorted[@]}"; do
-    # Validate hash; include drifted fragments anyway (human edits authoritative)
-    # but warn on stderr.
-    if ! cmd_fragments_validate "$path" >/dev/null 2>&1; then
-      echo "WARN: including drifted fragment $path (human edits are authoritative)" >&2
-    fi
-    # Parse sections out of the fragment body (line 3 onwards). Accept any
-    # heading text after "### " (single or multi-word).
-    local current_section=""
-    while IFS= read -r line; do
-      if [[ "$line" =~ ^###[[:space:]]+(.+)$ ]]; then
-        current_section="${BASH_REMATCH[1]}"
-        # Track non-canonical headings in first-seen order. The array is empty
-        # on the first such heading, and bash 3.2 treats an unguarded
-        # "${arr[@]}" on an empty array as an unbound variable under `set -u`
-        # — hence the "${arr[@]+…}" guard (same idiom as cmd_check_freshness).
-        if ! _is_canonical_section "$current_section"; then
-          local already_seen=0
-          local seen
-          for seen in "${non_canonical_seen[@]+"${non_canonical_seen[@]}"}"; do
-            if [[ "$seen" = "$current_section" ]]; then
-              already_seen=1
-              break
-            fi
-          done
-          if [[ "$already_seen" -eq 0 ]]; then
-            non_canonical_seen+=("$current_section")
-          fi
+    LC_ALL=C awk -v mode=merge -v status="$status" "$_FRAG_AWK" "${awkargs[@]}" > "$_SCRATCH/merged" \
+      || _die "fragments merge: parsing the fragments failed"
+  fi
+  j=0
+  while IFS=$'\037' read -r tag p reason; do
+    case "$tag" in
+      ok)
+        _frag_stored_hash "${files[$j]}"
+        if [ -z "$_FRAG_STORED" ]; then
+          echo "WARN: $p: hand-edited (line 2 is not a valid hash marker); merged as written" >&2
+        elif [ "$_FRAG_STORED" != "${_FRAG_HASH[$j]}" ]; then
+          echo "WARN: $p: hand-edited (drifted: its hash does not match its text); merged as written" >&2
         fi
-        continue
-      fi
-      if [[ -n "$current_section" ]] && [[ -n "$line" ]]; then
-        if ! _section_find "$current_section"; then
-          section_names+=("$current_section")
-          section_bodies+=("")
-          _section_idx=$(( ${#section_names[@]} - 1 ))
-        fi
-        section_bodies[$_section_idx]+="${line}"$'\n'
-      fi
-    done < <(tail -n +3 "$path")
+        consumed+=("$p")
+        ;;
+      nonotes)
+        echo "NOTE: $p: no release notes (the no-notes marker); consumed" >&2
+        consumed+=("$p")
+        ;;
+      *) _frag_skip "$p" "$reason" ;;
+    esac
+    j=$((j + 1))
+  done < "$status"
 
-    if [[ -n "$paths_out_file" ]]; then
-      printf '%s\n' "$path" >> "$paths_out_file"
+  if [ -n "$remove" ] && [ "${#consumed[@]}" -gt 0 ]; then
+    local rm_args=()
+    for c in "${consumed[@]}"; do
+      rm_args+=(":(top,literal)$c")
+    done
+    if ! git rm -q -- "${rm_args[@]}"; then
+      echo "ERROR: fragments merge --remove: git rm failed (above), so nothing was removed. A fragment with uncommitted edits is not what was merged: commit or discard the edits, then run again." >&2
+      exit 1
     fi
-  done
-
-  # Emit canonical sections first (fixed order), then non-canonical (first-seen).
-  # Dedupe bullets within each section, preserving first-occurrence order.
-  _emit_section() {
-    local section="$1"
-    if ! _section_find "$section"; then
-      return 0
-    fi
-    local body="${section_bodies[$_section_idx]}"
-    if [[ -z "$body" ]]; then
-      return 0
-    fi
-    local deduped
-    deduped=$(printf '%s' "$body" | awk '!seen[$0]++')
-    printf '### %s\n%s\n' "$section" "$deduped"
-  }
-
-  for s in "${canonical_order[@]}"; do
-    _emit_section "$s"
-  done
-  # Guarded: this array is empty whenever every heading was canonical, which is
-  # the common case — unguarded it aborts under bash 3.2 + `set -u`.
-  for s in "${non_canonical_seen[@]+"${non_canonical_seen[@]}"}"; do
-    _emit_section "$s"
-  done
+  fi
+  cat "$_SCRATCH/merged"
+  if [ -n "$paths_out" ] && [ "${#consumed[@]}" -gt 0 ]; then
+    printf '%s\n' "${consumed[@]}" > "$paths_out" || _die "fragments merge: cannot write --paths-out $paths_out"
+  fi
 }
 
 # --- Implementation: / Realized-by: blocks ------------------------------------

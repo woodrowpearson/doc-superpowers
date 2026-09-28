@@ -450,64 +450,33 @@ Update is the **write counterpart** to audit's read-only analysis. It consumes a
 
 ### `release` — Draft Release Notes Entry
 
-Use when cutting a new version. Analyzes commits since the last release, drafts a RELEASE-NOTES.md entry with agent-assisted diff review, and optionally creates a git tag.
+Use when cutting a new version. Analyzes commits since the last release, merges the per-PR release-notes fragments, drafts a RELEASE-NOTES.md entry with agent-assisted diff review, commits the release, and optionally creates a git tag.
 
 **Trigger:** `/doc-superpowers release` with optional `--from=<ref>` to override the starting commit.
 
-1. **Parse RELEASE-NOTES.md** — Extract the latest version number (e.g., `v2.2.0`), date, and section types used. This establishes the format to match. If RELEASE-NOTES.md doesn't exist, create one with a `# Release Notes` header.
-2. **Determine commit range** — Check for a git tag matching the latest version (`git tag -l "vX.Y.Z"`). If found, use `git log <tag>..HEAD`. If not, fall back to `git log --after=<last-release-date>`. Respect `--from=<ref>` override. If no commits found, exit with "No unreleased commits."
-3. **Auto-suggest version bump** — Parse conventional commit prefixes across the range: `feat:` maps to MINOR, `fix:` maps to PATCH, `docs:` maps to PATCH, `!` suffix or `BREAKING CHANGE` footer maps to MAJOR. Unmapped prefixes (`chore:`, `refactor:`, `test:`, etc.) default to PATCH. Highest wins. Present suggestion with commit evidence (e.g., "Found 2 feat: and 3 fix: commits — suggesting MINOR bump to v2.3.0"). User confirms or overrides.
-4. **Dispatch drafting agent** — Single `general-purpose` agent receives:
+1. **Parse RELEASE-NOTES.md** — Extract the latest version number (e.g., `v2.2.0`), date, and the section headings it uses. This establishes the format to match. If RELEASE-NOTES.md doesn't exist, create one with a `# Release Notes` header.
+2. **Determine the range start** — `--from=<ref>` if given. Otherwise the tag of the latest version in RELEASE-NOTES.md (`git tag -l "vX.Y.Z"`); if that tag does not exist, the nearest release tag behind HEAD (`git describe --tags --abbrev=0 --match 'v[0-9]*'` — another tag, such as a deploy marker, is not a release); with no release tag at all (the first release), `ROOT`. List the commits: `git log <start>..HEAD` (`git log HEAD` for `ROOT`). If none, exit with "No unreleased commits."
+3. **Merge the PR fragments — before drafting** — Run `$DOC_TOOLS fragments merge <start> HEAD` (`<start>` is `ROOT` for a first release). Keep its output: the merged `RELEASE-NOTES.next/PR-*.md` sections the drafting agent gets in step 5. It takes every fragment still present at HEAD (a fragment is unreleased until a release deletes it — also one merged after an earlier release branch was cut), and merges each one losslessly or not at all:
+   - every fragment it skips is named on stderr with the reason (wrong line-1 marker, text before the first `###` heading, a `#`/`##` heading, an unclosed code fence, no notes, a symbolic link, …) and stays for the next release — show that list to the user;
+   - a hand-edited fragment (drifted hash) is merged as written, with a warning — human edits are authoritative;
+   - a no-notes fragment (`<!-- doc-superpowers:no-notes -->`) is consumed and prints nothing.
+
+   **Exit 1 = refused:** a release already consumed fragments that are still here, because its release commit never reached this branch — merging now would release them twice. Stop without drafting; tell the user to merge that release's branch into this one (or cherry-pick its release commit), then run `release` again.
+4. **Auto-suggest version bump** — Parse conventional commit prefixes across the range: `feat:` maps to MINOR, `fix:` maps to PATCH, `docs:` maps to PATCH, `!` suffix or `BREAKING CHANGE` footer maps to MAJOR. Unmapped prefixes (`chore:`, `refactor:`, `test:`, etc.) default to PATCH. Highest wins. Present suggestion with commit evidence (e.g., "Found 2 feat: and 3 fix: commits — suggesting MINOR bump to v2.3.0"). User confirms or overrides.
+5. **Dispatch drafting agent** — Single `general-purpose` agent receives:
+   - The merged fragment sections from step 3 — they take priority (human-curated, PR-scoped); commit-derived content only fills what they miss
    - The commit list with messages
    - The full `git diff` for the range (or per-commit diffs if range is large)
    - The project's `docs/conventions.md` bump table (if it exists) for cross-referencing
    - The previous RELEASE-NOTES.md entry as a format exemplar
-   - Instructions: group changes into Features / Fixes / Breaking Changes / Dependencies sections using the existing bold-title-colon-description format. Flag anything that looks like a breaking change. Omit sections with no entries.
-5. **Collect PR fragments** — Glob `RELEASE-NOTES.next/PR-*.md` to find any
-   in-flight per-PR release-notes drafts produced by `doc-pr-release.yml`. For
-   each fragment file:
-   - Run `doc-tools.sh fragments validate <path>` to check the SHA-256 hash on
-     line 2 against the actual file payload from line 3 onwards.
-   - If validation FAILS (drifted hash = human edit), warn the user but
-     **include the fragment anyway** — human edits are authoritative.
-   - If the fragment's introducing commit (via `git log --format=%H --reverse
-     -- <path> | head -n 1`) is not in the range being released, SKIP the
-     fragment (it belongs to a still-open PR).
-6. **Merge fragment sections into the draft** — Run `doc-tools.sh fragments
-   merge <last-tag> HEAD --paths-out=/tmp/doc-superpowers-consumed.txt` (or
-   `<from-ref> HEAD …` if `--from` was provided). The command emits
-   Keep-a-Changelog sections (`### Added`, `### Changed`, …) in canonical order
-   first, then any non-canonical sections in first-seen order; bullets within
-   each section are deduped; fragments are processed in ascending integer-N
-   order. The `--paths-out` flag writes the list of fragment paths that were
-   actually consumed (one per line) — keep this file for step 9. The drafting
-   agent integrates this output WITH the commit-derived draft: bullets from
-   fragments take priority (they're human-curated and PR-scoped); the agent
-   uses commit-derived content only to fill gaps the fragments missed.
-
-   **Range semantics:** the range is half-open like `git log A..B` — fragments
-   whose introducing commit equals `<range-start>` are EXCLUDED (they were part
-   of the previous release), fragments at `<range-end>` or any ancestor are
-   included. If the previous release tag points exactly at a fragment-introducing
-   commit, that fragment will not be picked up; pass `--from=<tag>~1` to include it.
-7. **Present draft to user** — Show the drafted entry in full. User edits or approves.
-8. **Prepend to RELEASE-NOTES.md** — Insert new version entry after the `# Release Notes` header, before the previous version entry.
-9. **Delete consumed fragments** — Delete ONLY the fragments listed in the
-   `--paths-out` file from step 6. Do NOT glob `RELEASE-NOTES.next/PR-*.md`
-   unconditionally — fragments whose introducing commit was outside the release
-   range belong to still-open PRs and must be preserved.
-   ```bash
-   if [[ -s /tmp/doc-superpowers-consumed.txt ]]; then
-     xargs -r git rm < /tmp/doc-superpowers-consumed.txt
-   fi
-   rm -f /tmp/doc-superpowers-consumed.txt
-   ```
-   These deletions land in the SAME commit as the RELEASE-NOTES.md update. Do
-   not stage fragment deletions separately — that's a class of bug where the
-   release lands but the fragments persist and double-up on the next release.
-10. **Bump version in all manifests** — Run `doc-tools.sh bump-version X.Y.Z` to deterministically update version strings across all manifest files (package.json, claude-code.json, plugin.json, marketplace.json, gemini-extension.json, cursor plugin.json). Then run `doc-tools.sh check-version` to verify all files match. This step is **mandatory** — never manually edit version strings in individual files.
-11. **Sync CLAUDE.md and README.md** — If unreleased commits changed commands, key files, directory structure, actions, or features, update CLAUDE.md and README.md per `references/doc-spec.md` rules. This catches drift that accumulated across the commits being released.
-12. **Offer git tag** — Prompt: "Create git tag `vX.Y.Z`?" If yes, run `git tag vX.Y.Z`. If the project has older untagged versions (entries in RELEASE-NOTES.md with no matching tag), mention them and offer to backfill.
+   - Instructions: write the sections under the headings RELEASE-NOTES.md already uses (step 1), mapping the fragment sections (`### Added`, `### Changed`, `### Deprecated`, `### Removed`, `### Fixed`, `### Security`, `### Dependencies`) onto them with the table in `RELEASE-NOTES.next/README.md` (e.g. Added → Features, Fixed → Fixes); a new RELEASE-NOTES.md uses the fragment vocabulary itself. Use the existing bold-title-colon-description format. Flag anything that looks like a breaking change. Omit sections with no entries.
+6. **Present draft to user** — Show the drafted entry in full. User edits or approves.
+7. **Prepend to RELEASE-NOTES.md** — Insert new version entry after the `# Release Notes` header, before the previous version entry.
+8. **Remove the consumed fragments** — `$DOC_TOOLS fragments merge <start> HEAD --remove`, with step 3's arguments (HEAD unchanged; ignore the notes it prints again): it `git rm`s exactly the fragments step 3 merged or consumed, never one it skipped (those belong in a later release). Never glob `RELEASE-NOTES.next/PR-*.md`. If it refuses because a consumed fragment has uncommitted edits, those edits are not in the notes: commit (and redo from step 3) or discard them. A script that needs the list itself uses `--paths-out=<file>` on a `mktemp` file, filtered to `^RELEASE-NOTES\.next/PR-[0-9]+\.md$` (see `RELEASE-NOTES.next/README.md`).
+9. **Bump version in all manifests** — Run `doc-tools.sh bump-version X.Y.Z` to deterministically update version strings across all manifest files (package.json, claude-code.json, plugin.json, marketplace.json, gemini-extension.json, cursor plugin.json). Then run `doc-tools.sh check-version` to verify all files match. This step is **mandatory** — never manually edit version strings in individual files.
+10. **Sync CLAUDE.md and README.md** — If unreleased commits changed commands, key files, directory structure, actions, or features, update CLAUDE.md and README.md per `references/doc-spec.md` rules. This catches drift that accumulated across the commits being released.
+11. **Commit the release** — ONE commit holds the RELEASE-NOTES.md entry, the fragment deletions (already staged by step 8), the manifests and CLAUDE.md/README.md: `git add RELEASE-NOTES.md <the bumped manifests> CLAUDE.md README.md && git commit -m "release: vX.Y.Z"`. Fragment deletions in a separate commit are a bug: a release that lands without them releases the fragments again. (In a doc-superpowers CI workflow, skip this and the tag: the workflow commits the same files and opens a pull request against the release branch.)
+12. **Offer git tag** — Prompt: "Create git tag `vX.Y.Z`?" If yes, run `git tag vX.Y.Z` on the release commit. If the project has older untagged versions (entries in RELEASE-NOTES.md with no matching tag), mention them and offer to backfill. Then tell the user: **the release commit must reach `main`** — merge the release branch into `main`, or cherry-pick the release commit. Until it does, `main` still holds the fragments this release consumed, and the next release refuses (step 3; `doc-release.yml`'s precheck fails) rather than release them twice.
 
 ### `hooks` — Install Workflow Hooks
 
@@ -615,9 +584,9 @@ others install only when named:
 
 The `doc-pr-release.yml` workflow uses shell helpers installed alongside
 it at `.github/scripts/doc-pr-release/`:
-- `extract-context.sh` — emits JSON context (PR body, fragment, commit ranges)
-- `update-pr-body.sh` — idempotent marker-based PR body merge
-- `commit-and-push.sh` — stages/commits/pushes the fragment
+- `extract-context.sh` — emits JSON context: PR body, the fragment and its computed hash state, and the PR's own commits (never base-branch or bot commits) since the checkout the last sync recorded
+- `update-pr-body.sh` — idempotent marker-based PR body merge (markers inside code fences are ignored; an END before the START is refused)
+- `commit-and-push.sh` — seals the fragment (writes its line-2 hash), commits only that file, and pushes it only while the branch is still at the checkout (`--force-with-lease` on the checkout: someone else's push → superseded, exit 0; a force-push or reset → exit 1, never undone); never overwrites a hand-edited fragment
 
 Every template's `run:` steps are scripts in
 `.github/scripts/doc-superpowers-steps/` (the freshness check and the AI
@@ -630,11 +599,15 @@ fragment commit itself is `commit-and-push.sh`, run as a workflow step after
 the agent, never by it.
 
 It also installs `RELEASE-NOTES.next/README.md` (if missing) with the
-fragment-format spec — markers, SHA-256 hash from line 3+, the canonical
-Keep-a-Changelog section order (non-canonical `### ` headings are accepted and
-emitted after, in first-seen order), ascending integer-N sort. Both the
-`doc-pr-release.yml` producer and the `/doc-superpowers release` consumer
-(steps 5–9 above) adhere to this format.
+fragment-format spec — markers, SHA-256 hash from line 3+ and how to re-seal
+a hand edit, the one section vocabulary (`### Added`, `### Changed`,
+`### Deprecated`, `### Removed`, `### Fixed`, `### Security`,
+`### Dependencies`; aliases fold onto it, other `### ` headings are kept after
+it) with its mapping onto a Features/Fixes-style RELEASE-NOTES.md, the
+lossless-or-skipped merge rules, the no-notes state, and why the release
+commit must reach `main`. Both the `doc-pr-release.yml` producer and the
+`/doc-superpowers release` consumer (steps 3 and 8 above) adhere to this
+format.
 
 ### Spec Lifecycle Actions — `spec-generate` / `spec-inject` / `spec-verify`
 
