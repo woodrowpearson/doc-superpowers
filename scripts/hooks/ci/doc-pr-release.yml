@@ -263,10 +263,11 @@ jobs:
 
       # The agent cannot commit (its tools grant neither commit nor push):
       # first check it changed nothing but this PR's fragment (the
-      # .doc-pr-release/ context is the workflow's own scratch) — with the
-      # checker as it was before the agent ran (prepare-agent.sh's snapshot),
-      # which also means no helper below was edited — then commit and push
-      # the fragment with the deterministic helper.
+      # .doc-pr-release/ context is the workflow's own scratch; an edited
+      # helper would show up as a change) with prepare-agent.sh's pre-agent
+      # copy of the checker, then commit and push the fragment with the
+      # deterministic helper. An integrity check against agent mistakes, not a
+      # sandbox: the security ceiling is the job token's permissions:.
       - name: Check the agent changed only the fragment
         if: steps.context.outputs.new_commits_len != '0'
         env:
@@ -282,7 +283,7 @@ jobs:
           # For pull_request events this is set automatically; for workflow_dispatch
           # we resolve it from the PR record above.
           GITHUB_HEAD_REF: ${{ steps.pr.outputs.head_ref }}
-          # git runs no hook or fsmonitor the agent could have planted in .git.
+          # git runs no stray hook or fsmonitor from .git (integrity, not a sandbox).
           GIT_CONFIG_COUNT: "2"
           GIT_CONFIG_KEY_0: core.hooksPath
           GIT_CONFIG_VALUE_0: /dev/null

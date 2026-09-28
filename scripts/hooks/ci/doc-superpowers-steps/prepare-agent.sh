@@ -14,11 +14,14 @@
 #   DOC_SUPERPOWERS_MARKETPLACE_URL  default https://github.com/woodrowpearson/doc-superpowers.git
 #   RUNNER_TEMP, GITHUB_OUTPUT       set by the runner
 #
-# The agent can edit files in the checkout, the checker's own copy
-# (.github/scripts/doc-superpowers-steps/commit-changes.sh) included. So this
-# step copies the checker, as it is before the agent runs, to
+# The agent edits files in the checkout, and a mistake could reach the
+# checker's own copy (.github/scripts/doc-superpowers-steps/commit-changes.sh).
+# So this step copies the checker, as it is before the agent runs, to
 # $RUNNER_TEMP/doc-superpowers-steps/commit-changes.sh (read-only, outside the
-# workspace), and the commit step runs that copy.
+# workspace), and the commit step runs that copy. It is an integrity check
+# against agent mistakes, not a sandbox: an agent with Edit/Write and
+# doc-tools.sh can run arbitrary code; the security ceiling is the job
+# token's `permissions:`.
 #
 # Outputs: marketplace=<absolute directory>; head=<the checkout's HEAD> (the
 # commit step checks the agent left it there); checker=<the checker snapshot>.

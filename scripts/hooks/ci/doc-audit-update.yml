@@ -18,8 +18,10 @@ on:
 
 # One writer per branch across the doc-superpowers workflows that commit to
 # it (doc-audit-update, doc-pr-full-cycle, doc-pr-release). Never cancelled:
-# a cancel between commit and push would strand the commit. A queued run that
-# finds the branch moved on exits 0 as superseded (commit-changes.sh).
+# a cancel between commit and push would strand the commit. Each checks out
+# the branch, so a queued run starts from the tip the earlier runs left; one
+# whose branch still received someone else's commits mid-run exits 0 as
+# superseded (commit-changes.sh), committing nothing.
 concurrency:
   group: doc-superpowers-write-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: false
@@ -42,8 +44,11 @@ jobs:
       contents: write
 
     steps:
+      # The branch, not the pushed commit: a run queued in the write group
+      # starts from the tip the earlier runs left.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          ref: ${{ github.ref_name }}
           fetch-depth: 0
 
       - name: Scope — docs this branch leaves stale or missing
@@ -97,5 +102,6 @@ jobs:
         env:
           EXPECTED_HEAD: ${{ steps.plugin.outputs.head }}
           PUSH_TO: ${{ github.ref_name }}
-        # The checker as it was before the agent ran (prepare-agent.sh's snapshot).
+        # prepare-agent.sh's pre-agent copy of the checker: an integrity check
+        # against agent mistakes, not a sandbox (the token's permissions: are).
         run: '"$RUNNER_TEMP"/doc-superpowers-steps/commit-changes.sh --allow docs/ --allow-index-keys --message "[doc-superpowers] update stale docs" --push-to "$PUSH_TO"'

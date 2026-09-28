@@ -4,12 +4,14 @@
 # checks what changed and commits it.
 #
 # The workflows run the copy prepare-agent.sh took under $RUNNER_TEMP before
-# the agent step (the agent can edit the checkout's copy), and every git call
-# here runs with core.hooksPath=/dev/null and core.fsmonitor=false, so no
-# hook or fsmonitor the agent could have planted in .git runs.
+# the agent step, and every git call here runs with core.hooksPath=/dev/null
+# and core.fsmonitor=false. That is an integrity check against an agent's
+# mistakes (an edited checker, a stray hook), not a sandbox: an agent with
+# Edit/Write and doc-tools.sh can run arbitrary code, and the security ceiling
+# is the job token's `permissions:`.
 #
 # Usage:
-#   commit-changes.sh [--allow <path>|<dir/>]... [--allow-index-keys] [--ignore <dir/>]...
+#   commit-changes.sh [--allow <path>|<dir/>]... [--allow-index-keys] [--ignore <dir>]...
 #                     (--check-only | --message <subject> --push-to <branch> [--open-pr <base>])
 #
 #   --allow <path>       a path the change may touch; <dir/> (a trailing /)
@@ -23,12 +25,17 @@
 #   --check-only         check only; the caller commits (doc-pr-release.yml
 #                        runs doc-pr-release/commit-and-push.sh next)
 #   --message <subject>  the commit subject
-#   --push-to <branch>   push HEAD to that existing branch, never forced. When
-#                        the branch moved past the checkout (the runs of the
-#                        shared write group queue in order, and an earlier one
-#                        pushed), this run is superseded: exit 0, no commit, no
-#                        push — the run the newer push started covers it. A
-#                        branch deleted meanwhile is not recreated (exit 0).
+#   --push-to <branch>   push HEAD to that existing branch, never forced. The
+#                        workflows check out the branch, so a run queued in the
+#                        shared write group starts from the tip earlier runs
+#                        left. When the branch still moved during this run:
+#                        someone pushed (a commit in <checkout>..<tip> whose
+#                        subject does not start with [doc-superpowers]) → this
+#                        run is superseded: exit 0, nothing committed or
+#                        pushed; moved only by [doc-superpowers] commits, or in
+#                        a way the range cannot show (reset behind the
+#                        checkout) → exit 1, never a silent discard. A branch
+#                        deleted meanwhile is not recreated (exit 0).
 #   --open-pr <base>     with --push-to <new branch>: create that branch (it
 #                        must not exist) and open a pull request → <base> (gh,
 #                        GH_TOKEN)
@@ -51,7 +58,7 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 [--allow <path>|<dir/>]... [--allow-index-keys] [--ignore <dir/>]... (--check-only | --message <subject> --push-to <branch> [--open-pr <base>])" >&2
+  echo "Usage: $0 [--allow <path>|<dir/>]... [--allow-index-keys] [--ignore <dir>]... (--check-only | --message <subject> --push-to <branch> [--open-pr <base>])" >&2
   exit 2
 }
 
@@ -181,22 +188,44 @@ if [ "$CHECK_ONLY" = 1 ]; then
   exit 0
 fi
 
-# The branch's tip at origin ("" when it does not exist).
+# The branch's tip at origin ("" when it does not exist); non-zero when origin
+# cannot be asked. (Callers err: an err inside $(…) would be swallowed.)
 remote_tip() {
   local line
-  line=$(g ls-remote --heads origin "refs/heads/$PUSH_TO") || err "cannot ask origin for $PUSH_TO (git ls-remote failed)"
+  line=$(g ls-remote --heads origin "refs/heads/$PUSH_TO") || return 1
   printf '%s' "${line%%[[:space:]]*}"
 }
-# superseded <what was done>: the branch moved past the checkout — not a failure.
-superseded() {
-  out changed true
-  out committed false
-  out superseded true
-  echo "::notice::doc-superpowers: superseded: $PUSH_TO moved past ${head:0:12} since the checkout; a newer run covers it. $1"
-  exit 0
+
+# moved <what was done>: the branch is no longer at the checkout. Superseded
+# (exit 0) when someone other than doc-superpowers pushed during the run — a
+# commit in head..tip whose subject does not start with [doc-superpowers];
+# otherwise (only doc-superpowers commits, or no commit in the range: a reset
+# behind the checkout, or a range that cannot be read) a visible failure.
+moved() {
+  local new subjects s
+  if ! g fetch --quiet --no-tags origin "refs/heads/$PUSH_TO" \
+    || ! new=$(g rev-parse --verify --quiet "FETCH_HEAD^{commit}") \
+    || ! subjects=$(g log --format=%s "$head..$new"); then
+    err "$PUSH_TO moved during this run and its new commits cannot be read. $1"
+  fi
+  [ -n "$subjects" ] \
+    || err "$PUSH_TO moved during this run to ${new:0:12}, which adds no commit to ${head:0:12} (reset behind the checkout?). $1"
+  while IFS= read -r s; do
+    case "$s" in
+      "[doc-superpowers]"*) ;;
+      *)
+        out changed true
+        out committed false
+        out superseded true
+        echo "::notice::doc-superpowers: superseded: $PUSH_TO received new commits during this run (${head:0:12}..${new:0:12}). $1"
+        exit 0
+        ;;
+    esac
+  done <<<"$subjects"
+  err "$PUSH_TO moved during this run (${head:0:12}..${new:0:12}) only by doc-superpowers commits: nobody else's work supersedes this run's changes. $1 Re-run the workflow to apply them."
 }
 
-tip=$(remote_tip)
+tip=$(remote_tip) || err "cannot ask origin for $PUSH_TO (git ls-remote failed). Nothing was committed or pushed."
 if [ -n "$OPEN_PR" ]; then
   [ -z "$tip" ] || err "$PUSH_TO already exists at origin; --open-pr only creates a new branch. Nothing was committed or pushed."
 elif [ -z "$tip" ]; then
@@ -205,7 +234,7 @@ elif [ -z "$tip" ]; then
   echo "::notice::doc-superpowers: $PUSH_TO no longer exists at origin (deleted since the checkout); it is not recreated. Nothing was committed or pushed."
   exit 0
 elif [ "$tip" != "$head" ]; then
-  superseded "Nothing was committed or pushed."
+  moved "Nothing was committed or pushed."
 fi
 
 # Stage exactly the checked paths — edits, additions, and deletions whether
@@ -217,9 +246,9 @@ g --literal-pathspecs -c "user.name=$GIT_USER_NAME" -c "user.email=$GIT_USER_EMA
   commit -q -m "$MESSAGE" --pathspec-from-file="$TMP/paths" --pathspec-file-nul || err "git commit failed"
 sha=$(g rev-parse HEAD)
 if ! g push origin "HEAD:refs/heads/$PUSH_TO"; then
-  tip=$(remote_tip)
+  tip=$(remote_tip) || err "the push to $PUSH_TO failed and origin cannot be asked why (git ls-remote failed). Nothing was pushed."
   if [ -z "$OPEN_PR" ] && [ -n "$tip" ] && [ "$tip" != "$head" ]; then
-    superseded "Nothing was pushed."
+    moved "Nothing was pushed."
   fi
   err "the push to $PUSH_TO failed while the branch was still at the checkout (see git's message above). Nothing was forced."
 fi
