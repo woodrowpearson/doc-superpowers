@@ -50,7 +50,7 @@ tree=$(git write-tree 2>/dev/null) || _fail "git write-tree failed"
 
 _check() { printf '%s\n' "$staged" | "$DOC_TOOLS" check-freshness --tree "$tree" --code-refs-from -; }
 if ! result=$(_check 2>/dev/null); then
-  why=$(_check 2>&1 >/dev/null | awk 'NF { print; exit }')
+  why=$(_check 2>&1 >/dev/null | awk '/^ERROR: / { print; e = 1; exit } NF && !/^NOTE: / && o == "" { o = $0 } END { if (!e) print o }')
   why="${why#ERROR: }"
   why="${why%.}"
   _fail "${why:-doc-tools.sh check-freshness failed}"

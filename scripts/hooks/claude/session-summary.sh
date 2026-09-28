@@ -18,8 +18,9 @@
 
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
 
-# The Stop event on stdin is not needed; read it so the writer never blocks.
-IFS= read -r -d '' _ || true
+# The Stop event on stdin is not needed; drain it so the writer never blocks
+# (cat, not a byte-at-a-time bash read). A terminal on stdin is not waited on.
+[ -t 0 ] || cat >/dev/null 2>&1
 
 BUDGET=2
 
@@ -29,14 +30,8 @@ DOC_TOOLS="${DOC_TOOLS:-$(printf '%s\n' __DOC_TOOLS_PARENT__/*/scripts/doc-tools
 [[ -f docs/.doc-index.json ]] || exit 0
 
 [[ "${DOC_SUPERPOWERS_QUIET:-}" == "1" ]] && exit 0
-
-# What changed in the working tree: both sides of a rename, and untracked
-# files (not ignored). Nothing yet committed (no HEAD): nothing to compare.
-changed=$({
-  git -c core.quotePath=false diff --name-only --no-renames HEAD \
-    && git -c core.quotePath=false ls-files --others --exclude-standard
-} 2>/dev/null) || exit 0
-[[ -z "$changed" ]] && exit 0
+# Nothing yet committed (no HEAD): nothing to compare.
+git rev-parse -q --verify HEAD >/dev/null 2>&1 || exit 0
 
 have_jq=1
 command -v jq >/dev/null 2>&1 || have_jq=0
@@ -60,41 +55,58 @@ _fail() {
   exit 0
 }
 
-[[ "$have_jq" == 1 ]] || _fail "jq not found on PATH"
-
 work=$(mktemp -d "${TMPDIR:-/tmp}/doc-sp-stop.XXXXXX") || _fail "mktemp failed"
 trap 'rm -rf "$work"' EXIT
 
-# The working tree as a tree object: git's index copied to a private one
-# (git's own is never touched), every change staged into it with add -A. Like
-# git stash, this writes objects for new content; nothing references them.
+# Every git call below reads a private copy of git's index, never git's own:
+# porcelain `git diff` refreshes the stat info of the index it reads, and on a
+# stat-dirty entry that would rewrite git's index (and take index.lock) after
+# every response.
+idx="$work/index"
+real=$(git rev-parse --git-path index 2>/dev/null) || _fail "git rev-parse --git-path index failed"
+if [[ -f "$real" ]]; then
+  cp "$real" "$idx" 2>/dev/null || _fail "cannot copy git's index"
+fi
+
+# What changed in the working tree: both sides of a rename, and untracked
+# files (not ignored).
+changed=$({
+  GIT_INDEX_FILE="$idx" git -c core.quotePath=false diff --name-only --no-renames HEAD \
+    && GIT_INDEX_FILE="$idx" git -c core.quotePath=false ls-files --others --exclude-standard
+} 2>/dev/null) || _fail "cannot list the working tree's changes"
+[[ -z "$changed" ]] && exit 0
+
+[[ "$have_jq" == 1 ]] || _fail "jq not found on PATH"
+
+# The working tree as a tree object: every change staged into the private
+# index with add -A. Like git stash, this writes objects for new content;
+# nothing references them.
 _check() {
-  local idx="$work/index" real tree
-  real=$(git rev-parse --git-path index) || return 1
-  if [[ -f "$real" ]]; then
-    cp "$real" "$idx" || return 1
-  fi
+  local tree
   GIT_INDEX_FILE="$idx" git add -A >/dev/null 2>&1 || { echo "ERROR: cannot stage the working tree into a private index" >&2; return 1; }
   tree=$(GIT_INDEX_FILE="$idx" git write-tree) || return 1
   printf '%s\n' "$changed" | "$DOC_TOOLS" check-freshness --tree "$tree" --code-refs-from -
 }
 
-# Run _check in its own process group with a watchdog that kills the whole
-# group after BUDGET seconds. Neither job keeps this hook's stdout open.
-# Returns _check's status, or 124 when the watchdog fired.
+# Run _check in its own process group with a watchdog that, after BUDGET
+# seconds, first leaves a marker and then kills the whole group. Neither job
+# keeps this hook's stdout open. The watchdog is always killed and reaped
+# before the verdict: whether it fired is read from the marker, never from
+# whether it is still alive (it can be alive between its kill and its exit).
+# Returns _check's status, or 124 when the check was cut short.
 _bounded() {
   local pid wd rc=0
   set -m
   _check >"$work/out" 2>"$work/err" </dev/null &
   pid=$!
-  ( sleep "$BUDGET"; kill -TERM -- "-$pid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
+  ( sleep "$BUDGET"; : > "$work/timedout"; kill -TERM -- "-$pid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
   wd=$!
   set +m
   wait "$pid" 2>/dev/null || rc=$?
-  if kill -0 "$wd" 2>/dev/null; then
-    kill -TERM -- "-$wd" 2>/dev/null
-    wait "$wd" 2>/dev/null
-  elif [[ "$rc" -gt 128 ]]; then
+  kill -TERM -- "-$wd" 2>/dev/null
+  wait "$wd" 2>/dev/null
+  # A check that finished cleanly is used even if the watchdog fired after it.
+  if [[ "$rc" != 0 && -e "$work/timedout" ]]; then
     rc=124
   fi
   return "$rc"
@@ -107,7 +119,7 @@ if [[ "$rc" == 124 ]]; then
   exit 0
 fi
 if [[ "$rc" != 0 ]]; then
-  why=$(awk 'NF { print; exit }' "$work/err")
+  why=$(awk '/^ERROR: / { print; e = 1; exit } NF && !/^NOTE: / && o == "" { o = $0 } END { if (!e) print o }' "$work/err")
   why="${why#ERROR: }"
   why="${why%.}"
   _fail "${why:-doc-tools.sh check-freshness failed}"

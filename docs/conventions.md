@@ -259,7 +259,7 @@ The Claude tier **copies** hook scripts to `.claude/hooks/doc-superpowers/` with
 | Variable | Effect |
 |----------|--------|
 | `DOC_SUPERPOWERS_STRICT=1` | The git pre-commit hook (exit 1) and the Claude pre-commit gate (exit 2, reason on stderr) block instead of warn — also when the check itself cannot run |
-| `DOC_SUPERPOWERS_QUIET=1` | Suppress hook output while still enforcing (exit codes unchanged) |
+| `DOC_SUPERPOWERS_QUIET=1` | Suppress hook output while still enforcing (exit codes unchanged). The Claude gate's block reason (stderr on exit 2, Claude's feedback) is never suppressed |
 | `DOC_SUPERPOWERS_SKIP=1` | Bypass all hooks temporarily |
 
 `DOC_TOOLS` overrides the path of `doc-tools.sh` a hook runs (tests use it). The index path is fixed: `docs/.doc-index.json`.
@@ -329,7 +329,7 @@ A doc is **stale when the content of its code changed since it was verified**. I
     - a ref the entry already had keeps its recorded content: its `code_oids` id, or, for a pre-v3 entry, its id in the stored `code_commit`'s tree;
     - a new ref, or a kept one with no usable record, is recorded as of the doc's last commit, as `add-entry` records it;
     - the same list of paths, in the same order (`src` is a stored `src/`), writes nothing; ref order is significant, so a reorder writes the new order.
-- **Readers compare content.** `check-freshness` and `status` look every ref up in HEAD, or in `--tree <tree-ish>`, with one `git cat-file --batch-check` for the whole index. A doc is stale if any ref's id differs. A pre-commit check passes `--tree "$(git write-tree)"` so it sees the staged change.
+- **Readers compare content.** `check-freshness` and `status` look every ref up in HEAD, or in `--tree <tree-ish>`, with one `git cat-file --batch-check` for the whole index. A doc is stale if any ref's id differs. A pre-commit check passes `--tree "$(git write-tree)"` so it sees the staged change. With `--tree`, the index and the docs are read from that tree as well, so the check is one snapshot of the commit, never the working copy's index against the staged refs. A tree without the index falls back to the working copy, with a note on stderr.
 - **So history shape does not matter.** A squash merge, a rebase-merge, a cherry-pick, a revert to the verified bytes, a shallow clone, and a doc verified in the same commit as its code all read `current` when the bytes match.
 - **Refs are literal paths.** A ref is a file, a directory, a submodule (its commit is recorded, so a bump reads stale), or `.`; git sees it with `--literal-pathspecs`. A ref containing `*`, `?` or `[` is warned about when written. Untracked (not ignored) files under a ref are part of the verified content: writers name them, and the doc reads stale until they are committed or ignored. The doc-index file itself is never part of a ref's content.
 - **`code_commit` is still written,** as a baseline commit no newer than any ref's recorded content. Usually it is the newest commit touching the refs as of the entry's baseline; after a `set-code-refs` that mixes baselines, it is their merge-base (see Entry Schema). It is used for display, as the `commits_behind` baseline, and by older readers. In a shallow clone it is null, with a warning, because the truncated history would name the graft. `commits_behind` is null when that commit is not an ancestor of HEAD (absent, or on another line of history), and is never a masked `0`.

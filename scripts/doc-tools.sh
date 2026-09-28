@@ -378,7 +378,9 @@ _targets_from_args() {
 # never touched). Readers (check-freshness, status) look every ref up in HEAD,
 # or in the tree given with --tree (pre-commit passes the staged tree, `git
 # write-tree`), with ONE `git cat-file --batch-check` for the whole index:
-# stale ⇔ some ref's object id differs.
+# stale ⇔ some ref's object id differs. With --tree the index and the docs are
+# read from that tree too (_reader_snapshot): one snapshot, never the working
+# copy's index against the staged refs.
 #
 #   - Refs are literal paths: a file, a directory, or "." (the repository
 #     root). Git sees them with --literal-pathspecs; a ref containing * ? or [
@@ -764,6 +766,90 @@ _hash_list() {
   done < "$in" > "$out"
 }
 
+# _tree_presence <names-file> <out-file>
+# For each NUL-terminated doc path in <names-file>, one line in <out-file>:
+# the blob id _DOCS_TREE holds at that path, or "missing" (no file there).
+# ONE git cat-file --batch-check. A path holding a newline cannot be one line
+# of the query; it reads as missing (as a ref with one does).
+_tree_presence() {
+  local in="$1" out="$2" q="$_SCRATCH/tdocs.query" f
+  : > "$out"
+  while IFS= read -r -d '' f; do
+    case "$f" in
+      *$'\n'*) printf '\n' ;;
+      *) printf '%s:%s\n' "$_DOCS_TREE" "$f" ;;
+    esac
+  done < "$in" > "$q"
+  [ -s "$q" ] || return 0
+  git cat-file --batch-check='%(objecttype) %(objectname)' < "$q" \
+    | awk '{ if ($1 == "blob" && (length($2) == 40 || length($2) == 64) && $2 !~ /[^0123456789abcdef]/) print $2
+             else print "missing" }' > "$out" \
+    || _die "git cat-file --batch-check failed"
+}
+
+# _tree_hash_list <names-file> <blob-ids-file> <out-file>
+# _hash_list for docs as _DOCS_TREE holds them (<blob-ids-file>: each doc's
+# blob there, one per line, aligned with the NUL-terminated names). A doc
+# whose working copy git would store as that very blob (one `git hash-object
+# --stdin-paths` for all of them) has the working copy's bytes, hashed in one
+# _hash_list batch. Any other doc (edited, deleted or never written in the
+# working copy) is read from its blob, with the filters a checkout applies,
+# and hashed alone. That is rare, and never one process per unchanged doc.
+_tree_hash_list() {
+  local in="$1" ids="$2" out="$3"
+  local flags="$_SCRATCH/th.flags" ondisk="$_SCRATCH/th.ondisk" wt="$_SCRATCH/th.wt"
+  local plan="$_SCRATCH/th.plan" same="$_SCRATCH/th.same" samehash="$_SCRATCH/th.samehash"
+  local blob="$_SCRATCH/th.blob" f o w p h
+  : > "$out"
+  [ -s "$in" ] || return 0
+  # Each doc once: is it a file in the working copy (1) or not (0)?
+  while IFS= read -r -d '' f; do
+    case "$f" in
+      *$'\n'*) echo 0; continue ;;
+    esac
+    if [ -f "$f" ]; then
+      printf '%s\n' "$f" >&3
+      echo 1
+    else
+      echo 0
+    fi
+  done < "$in" > "$flags" 3> "$ondisk"
+  : > "$wt"
+  if [ -s "$ondisk" ]; then
+    git hash-object --stdin-paths < "$ondisk" > "$wt" || _die "git hash-object failed"
+  fi
+  : > "$same"
+  while IFS= read -r -d '' f <&3; do
+    IFS= read -r o <&4 || _die "cannot read the docs' blob ids"
+    IFS= read -r p <&5 || _die "cannot read the doc list"
+    w=""
+    if [ "$p" = 1 ]; then
+      IFS= read -r w <&6 || _die "cannot read the working copy's blob ids"
+    fi
+    if [ -n "$w" ] && [ "$w" = "$o" ]; then
+      printf '%s\0' "$f" >&7
+      echo s
+    else
+      echo t
+    fi
+  done 3< "$in" 4< "$ids" 5< "$flags" 6< "$wt" 7> "$same" > "$plan"
+  _hash_list "$same" "$samehash"
+  while IFS= read -r -d '' f <&3; do
+    IFS= read -r o <&4 || _die "cannot read the docs' blob ids"
+    IFS= read -r p <&5 || _die "cannot read the hash plan"
+    if [ "$p" = s ]; then
+      IFS= read -r h <&6 || _die "cannot read the doc hashes"
+      printf '%s\n' "$h"
+    else
+      git cat-file --filters --path="$f" "$o" > "$blob" 2>/dev/null \
+        || git cat-file blob "$o" > "$blob" \
+        || _die "cannot read '$f' from the tree"
+      _hash_one "$blob"
+      printf '%s\n' "$_HASH"
+    fi
+  done 3< "$in" 4< "$ids" 5< "$plan" 6< "$samehash" > "$out"
+}
+
 # _warn_refs <refs-file> <unmatched 0|1>
 # Warn once per distinct ref (one per line of <refs-file>) that holds a glob
 # character — refs are literal paths, so it names only a path of exactly that
@@ -1107,21 +1193,40 @@ _freshness_scan() {
     || _die "cannot read the entries of $INDEX_FILE"
   _head_init
 
+  # A doc's presence and bytes: in the working copy, or (--tree with an
+  # index) as _DOCS_TREE holds them — one batch-check over every key, in
+  # record order, read alongside the records in pass 1.
+  local keys="$_SCRATCH/fresh.keys" present="$_SCRATCH/fresh.present" ids="$_SCRATCH/fresh.ids" f
+  : > "$present"
+  if [ -n "$_DOCS_TREE" ]; then
+    while IFS=$'\x1f' read -r -d '' -a f; do
+      printf '%s\0' "${f[0]}"
+    done < "$fields" > "$keys"
+    _tree_presence "$keys" "$present"
+  fi
+
   # Pass 1. fd 3 carries the records, so nothing in the loop can read them as
   # its stdin. A ref holding a newline (only a hand-edited index has one)
   # cannot be one line of the lookup: ".." makes it unaddressable ("missing").
-  local f cls=() n j r
+  # fd 6: the doc's blob in _DOCS_TREE (tree mode), fd 7: those of the docs
+  # listed on fd 4, for their hashes.
+  local f cls=() n j r id=""
   while IFS=$'\x1f' read -r -d '' -a f <&3; do
+    if [ -n "$_DOCS_TREE" ]; then
+      IFS= read -r id <&6 || _die "cannot read the docs' presence in the tree"
+    fi
     if [ "${f[1]}" = deprecated ]; then
       cls+=(d)
-    elif [ ! -f "${f[0]}" ]; then
+    elif { [ -n "$_DOCS_TREE" ] && [ "$id" = missing ]; } || { [ -z "$_DOCS_TREE" ] && [ ! -f "${f[0]}" ]; }; then
       cls+=(m)
     elif [ "${f[6]}" = record ]; then
       cls+=(r)
       printf '%s\0' "${f[0]}" >&4
+      [ -z "$_DOCS_TREE" ] || printf '%s\n' "$id" >&7
     else
       cls+=(l)
       printf '%s\0' "${f[0]}" >&4
+      [ -z "$_DOCS_TREE" ] || printf '%s\n' "$id" >&7
       if [ "${f[6]}" = oids ]; then
         n="${f[7]}"
         j=0
@@ -1135,9 +1240,13 @@ _freshness_scan() {
         done
       fi
     fi
-  done 3< "$fields" 4> "$docs" 5> "$refs"
+  done 3< "$fields" 4> "$docs" 5> "$refs" 6< "$present" 7> "$ids"
 
-  _hash_list "$docs" "$hashes"
+  if [ -n "$_DOCS_TREE" ]; then
+    _tree_hash_list "$docs" "$ids" "$hashes"
+  else
+    _hash_list "$docs" "$hashes"
+  fi
   _tree_init
   _oid_lookup "$_TREE" "$refs" "$cur" 1
 
@@ -1427,6 +1536,39 @@ _index_load() {
     exit 1
   fi
   printf '%s\n' "$snap"
+}
+
+# The snapshot a reader (check-freshness, status) judges: the index, into
+# _SNAP, and the tree its docs are read from, into _DOCS_TREE. With --tree T,
+# the index and the docs come from T, like the code refs, so the verdict is
+# one consistent snapshot. A pre-commit check then judges the commit being
+# made even when the working copy's index or a doc differs from what is
+# staged. Otherwise _DOCS_TREE is "" and the working copy's index and docs are
+# read, as before, against HEAD's refs. A T that holds no index (it was never
+# committed or staged) falls back to the working copy's index and docs, with
+# one note on stderr. An invalid index in T is an error. Call in the main
+# shell, never in $( ): it sets globals.
+_SNAP=""
+_DOCS_TREE=""
+_reader_snapshot() {
+  _SNAP="" _DOCS_TREE=""
+  if _opt_seen tree; then
+    _tree_init
+    if [ "$(git cat-file -t "$_TREE:$INDEX_FILE" 2>/dev/null)" = blob ]; then
+      _SNAP=$(mktemp "$_SCRATCH/index.XXXXXX") || _die "mktemp failed"
+      git cat-file blob "$_TREE:$INDEX_FILE" > "$_SNAP" \
+        || _die "cannot read $INDEX_FILE from --tree $_OPT_tree"
+      if ! jq -e -s 'length == 1 and (.[0] | type) == "object" and (.[0].docs | type) == "object"' \
+          "$_SNAP" >/dev/null 2>&1; then
+        echo "ERROR: $INDEX_FILE in --tree $_OPT_tree is not a valid doc-index (expected one JSON object with a \"docs\" object)." >&2
+        exit 1
+      fi
+      _DOCS_TREE="$_TREE"
+      return 0
+    fi
+    echo "NOTE: --tree $_OPT_tree holds no $INDEX_FILE; the working copy's index and docs are judged (code refs are still read from the tree)." >&2
+  fi
+  _SNAP=$(_index_load) || exit 1
 }
 
 # Break a lock whose recorded owner ($1) is no longer running. Serialized by a
@@ -1736,10 +1878,15 @@ check-freshness|cmd_check_freshness|repo|code-refs+ code-refs-from=* tree=
   [--tree <tree-ish>] [--code-refs <path>...] [--code-refs-from <file|->]
   Report which indexed docs are stale relative to their code (read-only,
   JSON). A doc is stale when the content of one of its code_refs differs
-  from what was verified (code_oids). Refs are compared in HEAD, or in
-  --tree <tree-ish>; a pre-commit check wants the staged tree,
-  --tree "$(git write-tree)". An entry without code_oids (pre-v3) keeps
-  the old commit comparison, at HEAD, until update-index re-verifies it.
+  from what was verified (code_oids). Without --tree, the working copy's
+  index and docs are judged against the refs in HEAD. --tree <tree-ish>
+  judges one snapshot: the index, the docs (present or missing, and
+  doc_modified) and the refs all as that tree holds them. A pre-commit check
+  wants the staged tree, --tree "$(git write-tree)", so an update-index
+  whose index is not staged does not count. A tree without the index falls
+  back to the working copy's index and docs, with a note on stderr. An
+  entry without code_oids (pre-v3) keeps the old commit comparison, at
+  HEAD, until update-index re-verifies it.
   --code-refs limits the report to docs whose code_refs share a path
   segment with a listed path: src/m1 matches refs src/m1, src/m1/a.js and
   src/, never src/m10. It takes every following argument up to the next
@@ -1808,7 +1955,8 @@ deprecate-entry|cmd_deprecate_entry|repo|superseded-by=
 status|cmd_status|repo|tree=
   [--tree <tree-ish>] <doc_path>
   Freshness of one doc (read-only, JSON): the same verdict check-freshness
-  reports for it (with the same --tree), plus its path.
+  reports for it (with the same --tree, read from that one snapshot), plus
+  its path.
 bump-version|cmd_bump_version|deps|
   <MAJOR.MINOR.PATCH>
   Write the version into the 6 manifest files: package.json,
@@ -1907,7 +2055,8 @@ Freshness (index schema v3):
   build-index, add-entry and set-code-refs as of the doc's own last commit
   (the code it was written against; the working tree for a doc git has
   never committed). A doc is stale when one differs in the compared tree
-  (HEAD, or --tree). So squash merges, rebase-merges, cherry-picks and reverts to
+  (HEAD, or --tree, which also supplies the index and the docs). So squash
+  merges, rebase-merges, cherry-picks and reverts to
   the verified bytes stay current, as does a doc verified in the same
   commit as its code; a submodule bump reads stale. code_refs_changed lists
   exactly the refs that differ. commits_behind counts the commits touching
@@ -2536,10 +2685,12 @@ cmd_check_freshness() {
   fi
   _check_tree_opt check-freshness
   # ONE validated snapshot serves the entry walk and the untracked-key set:
-  # reading the live file twice let a concurrent writer land in between.
+  # reading the live file twice let a concurrent writer land in between. With
+  # --tree it is the tree's index (see _reader_snapshot).
   _scratch_init
   local snap
-  snap=$(_index_load) || exit 1
+  _reader_snapshot
+  snap="$_SNAP"
 
   local filter=""
   if _opt_seen code-refs || _opt_seen code-refs-from; then
@@ -2551,9 +2702,14 @@ cmd_check_freshness() {
   checked_at=$(iso_now)
   _freshness_scan "$snap" "" "$filter" "$results"
 
-  # Untracked: docs on disk with no index key. The key set comes from the
-  # same snapshot, read by the final jq.
-  find docs -name '*.md' -not -path 'docs/archive/*' 2>/dev/null | LC_ALL=C sort > "$fs_paths"
+  # Untracked: docs with no index key, on disk or (tree mode) in the tree.
+  # The key set comes from the same snapshot, read by the final jq.
+  if [ -n "$_DOCS_TREE" ]; then
+    git ls-tree -r -z --name-only "$_DOCS_TREE" -- docs 2>/dev/null | tr '\000' '\n' \
+      | awk '/\.md$/ && !/^docs\/archive\//' | LC_ALL=C sort > "$fs_paths"
+  else
+    find docs -name '*.md' -not -path 'docs/archive/*' 2>/dev/null | LC_ALL=C sort > "$fs_paths"
+  fi
 
   # The report in ONE jq: per-doc results (a --slurpfile/--rawfile/stdin
   # value each, never argv — Linux caps one argv string at 131072 bytes), the
@@ -3385,7 +3541,8 @@ cmd_status() {
 
   _scratch_init
   local snap results="$_SCRATCH/status.rec" out
-  snap=$(_index_load) || exit 1
+  _reader_snapshot
+  snap="$_SNAP"
 
   # The same walk check-freshness runs, restricted to this one key, so the
   # two can never disagree about a doc (the old inline copy did).

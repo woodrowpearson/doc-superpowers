@@ -263,6 +263,10 @@ test_pre_commit_exits_0_corrupted_index() {
   assert_eq "0" "$exit_code" "exits 0 with corrupted index"
   assert_eq "1" "$(line_count "$(cat "$errf")")" "one stderr line: tooling failing is not tooling absent"
   assert_contains "$(cat "$errf")" "doc-superpowers" "the line names its source"
+  # The index was never committed, so doc-tools notes its fallback first; the
+  # line must carry the error, not that note.
+  assert_contains "$(cat "$errf")" "not a valid doc-index" "…and the cause (the error, not the fallback note)"
+  assert_not_contains "$(cat "$errf")" "NOTE:" "…not the fallback note"
   teardown
 }
 
@@ -748,6 +752,80 @@ test_claude_gate_tests_command_before_resolving_doc_tools() {
   teardown
 }
 
+test_claude_gate_ignores_commit_text_that_is_not_a_command() {
+  echo "test: claude pre-commit-gate ignores 'git commit' that is not in command position"
+  hooked_fixture
+  stage_stale_change
+  local c
+  for c in 'echo git commit' 'echo "git commit -m x"' 'legit commit' \
+    'gh pr create --body "run git commit -m first"' 'rg "git commit -m" .'; do
+    run_claude_hook PreToolUse pre-commit-gate "$(pretool_json "$c")" DOC_SUPERPOWERS_STRICT=1
+    assert_eq "0" "$RUN_RC" "'$c': not gated, even under STRICT with a stale change staged"
+    assert_eq "" "$RUN_OUT$RUN_ERR" "'$c': silent"
+    run_claude_hook PostToolUse post-commit-sync "$(posttool_json "$c")"
+    assert_eq "" "$RUN_OUT$RUN_ERR" "'$c': post-commit-sync silent too"
+  done
+  teardown
+}
+
+test_claude_gate_matches_commit_in_command_position() {
+  echo "test: claude pre-commit-gate gates 'git commit' wherever the shell would run it"
+  hooked_fixture
+  stage_stale_change
+  local c
+  for c in 'GIT_AUTHOR_NAME=t git commit -m x' '/usr/bin/git commit -m x' \
+    'if true; then git commit -m x; fi' '(git commit -m x)' '{ git commit -m x; }' \
+    "ls"$'\n'"git commit -m x" 'x=$(git commit -m x)' \
+    "git commit -m \"\$(cat <<'EOF'"$'\n'"subject"$'\n'"EOF"$'\n'")\""; do
+    run_claude_hook PreToolUse pre-commit-gate "$(pretool_json "$c")" DOC_SUPERPOWERS_STRICT=1
+    assert_eq "2" "$RUN_RC" "'$c': gated (exit 2 under STRICT)"
+  done
+  teardown
+}
+
+test_claude_hooks_share_one_commit_regex() {
+  echo "test: the gate and post-commit-sync define the same commit regex"
+  local a b
+  a=$(grep '^re_commit=' "$HOOKS_DIR/claude/pre-commit-gate.sh")
+  b=$(grep '^re_commit=' "$HOOKS_DIR/claude/post-commit-sync.sh")
+  assert_true "the gate defines re_commit" test -n "$a"
+  assert_eq "$a" "$b" "one definition, byte for byte"
+}
+
+test_claude_gate_quiet_strict_still_gives_the_reason() {
+  echo "test: under QUIET, a STRICT block still gives Claude its reason on stderr"
+  hooked_fixture
+  stage_stale_change
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m x')" DOC_SUPERPOWERS_STRICT=1 DOC_SUPERPOWERS_QUIET=1
+  assert_eq "2" "$RUN_RC" "blocked"
+  assert_contains "$RUN_ERR" "docs/architecture.md" "stderr (Claude's feedback) names the doc"
+  assert_eq "" "$RUN_OUT" "nothing on stdout"
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m x')" DOC_SUPERPOWERS_QUIET=1
+  assert_eq "0" "$RUN_RC" "not STRICT: exits 0"
+  assert_eq "" "$RUN_OUT$RUN_ERR" "not STRICT: QUIET silences the advisory"
+  teardown
+}
+
+test_claude_gate_judges_the_staged_index() {
+  echo "test: the gate and git pre-commit judge the staged doc-index, not the working copy's (update-index without git add)"
+  hooked_fixture
+  stage_stale_change
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1   # not staged
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m x')" DOC_SUPERPOWERS_STRICT=1
+  assert_eq "2" "$RUN_RC" "gate: the commit would record the old index, so it is blocked"
+  assert_contains "$RUN_ERR" "docs/architecture.md" "gate: names the doc"
+  local head
+  head=$(git rev-parse HEAD)
+  run_hooked DOC_SUPERPOWERS_STRICT=1 -- git commit -qm x
+  assert_eq "1" "$RUN_RC" "git pre-commit: blocked"
+  assert_eq "$head" "$(git rev-parse HEAD)" "git pre-commit: nothing committed"
+  git add docs/.doc-index.json
+  run_hooked DOC_SUPERPOWERS_STRICT=1 -- git commit -qm x
+  assert_eq "0" "$RUN_RC" "with the re-verified index staged: committed"
+  assert_eq "current" "$("$DOC_TOOLS" check-freshness | jq -r '.docs["docs/architecture.md"].status')" "…and HEAD reads current"
+  teardown
+}
+
 echo ""
 echo "=== Claude Code Hook: pre-commit-gate ==="
 test_claude_gate_skips_non_commit
@@ -760,6 +838,11 @@ test_claude_gate_defers_commands_that_stage
 test_claude_gate_defer_without_git_tier
 test_claude_gate_jq_missing
 test_claude_gate_tests_command_before_resolving_doc_tools
+test_claude_gate_ignores_commit_text_that_is_not_a_command
+test_claude_gate_matches_commit_in_command_position
+test_claude_hooks_share_one_commit_regex
+test_claude_gate_quiet_strict_still_gives_the_reason
+test_claude_gate_judges_the_staged_index
 
 # --- Claude Code Hook: session-summary (Stop) ---
 #
@@ -934,6 +1017,27 @@ test_post_commit_sync_root_commit() {
   teardown
 }
 
+test_post_commit_sync_stdin_edge_cases() {
+  echo "test: post-commit-sync with empty stdin exits at once; with a 1 MB tool_response it still reports"
+  hooked_fixture
+  echo "changed" > src/index.js
+  DOC_SUPERPOWERS_SKIP=1 git commit -qam "code"
+  local cmd big
+  cmd=$(registered_cmd PostToolUse post-commit-sync)
+  run_hooked CLAUDE_PROJECT_DIR="$TEST_DIR" -- sh -c "$cmd"
+  assert_eq "0" "$RUN_RC" "empty stdin: exits 0"
+  assert_eq "" "$RUN_OUT$RUN_ERR" "empty stdin: silent"
+  big=$(harness_mktemp big)
+  awk 'BEGIN { s = "0123456789abcdef"; for (i = 0; i < 16; i++) s = s s; print s }' > "$big.out"
+  jq -cn --rawfile o "$big.out" '{tool_name: "Bash", tool_input: {command: "git commit -am code"},
+    tool_response: {stdout: $o, stderr: "", interrupted: false}}' > "$big"
+  RUN_STDIN="$big"
+  run_hooked CLAUDE_PROJECT_DIR="$TEST_DIR" -- sh -c "$cmd"
+  RUN_STDIN=/dev/null
+  assert_contains "$(out_field .hookSpecificOutput.additionalContext)" "docs/architecture.md" "1 MB payload: the stale doc is reported"
+  teardown
+}
+
 echo ""
 echo "=== Claude Code Hook: post-commit-sync ==="
 test_post_commit_sync_skips_non_commit
@@ -941,6 +1045,7 @@ test_post_commit_sync_reports_stale_after_commit
 test_post_commit_sync_silent_when_current
 test_post_commit_sync_skip_env
 test_post_commit_sync_root_commit
+test_post_commit_sync_stdin_edge_cases
 
 # --- Every hook: no attestation, no index writes, visible failures ---
 
@@ -969,18 +1074,32 @@ test_claude_hooks_never_run_update_index() {
 test_hooks_leave_the_index_byte_identical() {
   echo "test: every hook leaves docs/.doc-index.json byte-identical"
   hooked_fixture
-  local h0
+  local h0 g0
   h0=$(hash_file docs/.doc-index.json)
+  # git's own index too, around the Claude hooks (outside any git command):
+  # with a stat-dirty entry, porcelain `git diff` would refresh and rewrite it.
+  touch -t 202001010000 src/util.js
   stage_stale_change 1
+  g0=$(hash_file .git/index)
   run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m x')"
   assert_eq "$h0" "$(hash_file docs/.doc-index.json)" "after pre-commit-gate"
+  assert_eq "$g0" "$(hash_file .git/index)" "after pre-commit-gate: git's index untouched"
   run_hooked -- git commit -qm x
   assert_eq "$h0" "$(hash_file docs/.doc-index.json)" "after git commit (pre-commit, prepare-commit-msg)"
+  touch -t 202001010000 src/util.js
+  g0=$(hash_file .git/index)
   run_claude_hook PostToolUse post-commit-sync "$(posttool_json 'git commit -m x')"
   assert_eq "$h0" "$(hash_file docs/.doc-index.json)" "after post-commit-sync"
+  assert_eq "$g0" "$(hash_file .git/index)" "after post-commit-sync: git's index untouched"
   echo "changed 2" > src/index.js
+  touch -t 202001010000 src/util.js
+  g0=$(hash_file .git/index)
+  local s0
+  s0=$(git ls-files -s --debug)
   run_claude_hook Stop session-summary "$STOP_JSON"
   assert_eq "$h0" "$(hash_file docs/.doc-index.json)" "after session-summary"
+  assert_eq "$g0" "$(hash_file .git/index)" "after session-summary: git's index untouched (no stat refresh)"
+  assert_eq "$s0" "$(git ls-files -s --debug)" "after session-summary: ls-files -s --debug unchanged"
   git checkout -q -- src/index.js
   run_hooked -- git checkout -q -b feature
   stage_stale_change 3
@@ -1087,7 +1206,10 @@ test_git_mv_puts_the_old_path_in_scope() {
 test_pre_commit_failing_tooling_is_one_line() {
   echo "test: a corrupted index makes pre-commit print one stderr line, not pass silently"
   hooked_fixture
+  # Staged: pre-commit judges the index the commit carries (the working copy's
+  # would not be read while the staged tree holds a valid one).
   echo "NOT VALID JSON{{{" > docs/.doc-index.json
+  git add docs/.doc-index.json
   stage_stale_change 1
   run_hooked -- git commit -qm x
   assert_eq "0" "$RUN_RC" "warn mode: the commit goes through"
