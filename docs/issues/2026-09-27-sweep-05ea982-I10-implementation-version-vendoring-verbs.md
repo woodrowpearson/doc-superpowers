@@ -110,17 +110,19 @@ dependency table lists bash (≥ 3.2), git, jq and a SHA-256 tool, plus the POSI
   `references/doc-spec.md` "Header style and the realization block" and in `--help`), shared by
   `set-implementation`, `implementation-status` and `update-index`:
   - the header is `Implementation:` or `Realized-by:` at a line start, outside ```` ``` ```` /
-    `~~~` fences; the first one is the block, and `<key>: []` is explicitly empty;
-  - entries are `- ` bullets at any indent;
+    `~~~` fences; the first one is the block, and `<key>: []` (or `[ ]`) is explicitly empty;
+  - entries are `- ` bullets at any indent, column 0 included;
   - an indented line after an entry wraps it (readers join with one space);
-  - a blank line, an unindented line or a fence line ends the block.
+  - any other line ends the block: a blank line, a fence line, or an unindented line that is
+    not a `- ` bullet.
   - `update-index` now records `Realized-by:` entries, 4-space and wrapped entries, and nothing
     from a fenced example; the stored text is the entry without indent and `- `.
 - **`set-implementation`** is one awk pass over the doc (values via `ENVIRON`, matched with
   `index()`, never regex or program text), written to a tmp beside the doc and moved into place,
   keeping its mode. An unchanged result writes nothing.
-  - The entry whose text starts with `<ref> —` is replaced in place, with its wrapped lines, only
-    inside the block. Otherwise one is appended at the block's indent; `<key>: []` becomes a list.
+  - The first entry whose text is `<ref>` or starts with `<ref> —` is replaced in place, with its
+    wrapped lines, only inside the block; a later duplicate of it is dropped (fix round 1).
+    Otherwise one is appended at the block's indent; `<key>: []` becomes a list.
   - With no block, one is created after the paragraph holding the first `**Date**:`, `**Date:**`
     (→ `Implementation:`), `**Created**:` or `**Created:**` (→ `Realized-by:`) line outside fences.
     With none of those it exits 1 and writes nothing.
@@ -144,20 +146,29 @@ dependency table lists bash (≥ 3.2), git, jq and a SHA-256 tool, plus the POSI
     is not valid JSON is reported INVALID, not a silent abort.
   - The installer (`install.sh:22`) reads its version through the new `tools version`, the same
     parser. A plugin without a readable `RELEASE-NOTES.md` installs with version `unknown`,
-    where the pipeline used to abort silently under `pipefail`.
+    where the pipeline used to abort silently under `pipefail`. It is looked up only when a CI
+    template is rendered, once per run: `status`, `uninstall` and usage never start doc-tools.sh
+    for it, and an unreadable version is one `WARN` line, never an `ERROR` (fix round 1).
 - **Vendoring verbs** (the plugin copy is recognised by `skills/doc-superpowers/SKILL.md` above
   `scripts/` and by `scripts/hooks/ci/`):
   - `tools install --with-helpers` ships every helper the CI templates run: `doc-pr-release/`
-    and `doc-superpowers-steps/`. Files go through a tmp beside the destination.
+    and `doc-superpowers-steps/`. Files go through a tmp beside the destination. An existing file
+    keeps its mode, and every script (`doc-tools.sh`, each helper) ends up executable whatever
+    mode the old copy had: the templates run them directly (fix round 1).
   - `tools uninstall` deletes a file only when it is byte-identical to the plugin's copy.
     A drifted `doc-tools.sh`, an edited helper, a copy from another plugin version and any file
     the user added are kept, and so is their directory; all of them are reported.
-  - From a vendored copy: `tools install` onto itself is a no-op (`-ef`), not `cp: same file`.
+  - `tools status` counts helpers that differ from the plugin's copy apart from helpers the
+    plugin does not ship: a file the user added is not drift (fix round 1).
+  - From a vendored copy: `tools install` onto itself copies nothing (`-ef`), not `cp: same
+    file`; it only makes sure the copy is executable.
     `--with-helpers` and `tools uninstall` exit 1 without touching anything. `tools status`
     reports presence only, never "matches plugin" or the consuming repo's version. The git-toplevel
     version lookup is gone.
   - `tools version` (new) prints the plugin's version and exits 1 from a vendored copy.
-- **Tests:** 12 new tests in `scripts/test-doc-tools.sh` (`test_i10_*`), plus
+- **Tests:** 16 tests in `scripts/test-doc-tools.sh` (`test_i10_*`; 4 of them from fix round 1:
+  one entry per ref and exact ref matching, fence indent and paragraph end, the exec bit on
+  reinstall, user-added helpers in `tools status`), plus
   `test_install_ci_version_comes_from_doc_tools` in `scripts/test-hooks.sh`.
 
 **Not in this Task:** the `fragments` items in this issue (`fragments list` silent abort,

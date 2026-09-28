@@ -5091,6 +5091,118 @@ EOF
   printf '%s\n' '# ADR' '' '## Body' > "$d"
   assert_contains "$("$DOC_TOOLS" implementation-status "$d")" "no Implementation field" "(g) no block is reported as such"
   _i10_readers_agree "$d" "" "(g) no block"
+
+  # (h) "[ ]" — whitespace inside the brackets — is the same explicitly empty
+  # block as "[]": reported as such, and the first entry replaces it (never a
+  # second block).
+  d=docs/adr/h.md
+  printf '%s\n' '# ADR' '' '**Date**: 2026-05-16' '' 'Implementation: [ ]' '' '## Body' > "$d"
+  assert_contains "$("$DOC_TOOLS" implementation-status "$d")" "Implementation: [] (intentionally empty)" "(h) '[ ]' is reported as intentionally empty"
+  _i10_readers_agree "$d" "" "(h) Implementation: [ ]"
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #4' --status complete >/dev/null 2>&1 || true
+  assert_eq "$(printf '%s\n' '# ADR' '' '**Date**: 2026-05-16' '' 'Implementation:' '  - PR: #4 — complete' '' '## Body')" \
+    "$(cat "$d")" "(h) the '[ ]' marker is replaced by the first entry, no second block"
+  d=docs/adr/h2.md
+  printf '%s\n' '# SPEC' '' '**Created**: 2026-05-16' '' "Realized-by:  [ $(printf '\t') ]  " > "$d"
+  assert_contains "$("$DOC_TOOLS" implementation-status "$d")" "Realized-by: [] (intentionally empty)" "(h2) '[ <tab> ]' with trailing blanks is intentionally empty"
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #5' --status partial >/dev/null 2>&1 || true
+  assert_eq "$(printf '%s\n' '# SPEC' '' '**Created**: 2026-05-16' '' 'Realized-by:' '  - PR: #5 — partial')" \
+    "$(cat "$d")" "(h2) replaced by the first entry, no second block"
+
+  # (i) The documented end rule: a column-0 "- " bullet is an entry; the
+  # first unindented line that is not one ends the block.
+  d=docs/adr/i.md
+  printf '%s\n' 'Implementation:' '- PR: #1 — complete' '- PR: #2 — partial' 'Prose right after.' '- PR: #3 — complete' > "$d"
+  _i10_readers_agree "$d" "$(printf '%s\n' 'PR: #1 — complete' 'PR: #2 — partial')" "(i) column-0 bullets, ended by an unindented line"
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #4' --status blocked >/dev/null 2>&1 || true
+  assert_eq "$(printf '%s\n' 'Implementation:' '- PR: #1 — complete' '- PR: #2 — partial' '- PR: #4 — blocked' 'Prose right after.' '- PR: #3 — complete')" \
+    "$(cat "$d")" "(i) appended at column 0, before the line that ended the block"
+  teardown
+}
+
+test_i10_set_implementation_replaces_one_entry_per_ref() {
+  echo "test: set-implementation leaves one entry per ref (duplicates dropped) and matches a ref exactly, never as a prefix"
+  setup
+  mkdir -p docs/adr
+  local d=docs/adr/dup.md
+  # PR: #1 twice (the second one wrapped); PR: #10 first, so a prefix match
+  # of "PR: #1" would hit it before the real entry.
+  printf '%s\n' '# ADR' '' 'Implementation:' '  - PR: #10 — partial' '  - PR: #1 — partial' '  - PR: #2 — complete' \
+    '  - PR: #1 — in-progress — a second copy,' '    wrapped' '' '## Body' > "$d"
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #1' --status complete >/dev/null 2>&1 || true
+  assert_eq "$(printf '%s\n' '# ADR' '' 'Implementation:' '  - PR: #10 — partial' '  - PR: #1 — complete' '  - PR: #2 — complete' '' '## Body')" \
+    "$(cat "$d")" "the first PR: #1 entry is replaced in place, the later copy (and its wrapped line) dropped; PR: #10 untouched"
+  _i10_readers_agree "$d" "$(printf '%s\n' 'PR: #10 — partial' 'PR: #1 — complete' 'PR: #2 — complete')" "after the replace"
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #10' --status reverted >/dev/null 2>&1 || true
+  _i10_readers_agree "$d" "$(printf '%s\n' 'PR: #10 — reverted' 'PR: #1 — complete' 'PR: #2 — complete')" \
+    "PR: #10 replaces only PR: #10 (PR: #1 is not a prefix match of it either)"
+  # A bare ref (no " — status") is the ref's entry too.
+  printf '%s\n' 'Implementation:' '  - PR: #3' '  - PR: #3' > "$d"
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #3' --status blocked >/dev/null 2>&1 || true
+  assert_eq "$(printf '%s\n' 'Implementation:' '  - PR: #3 — blocked')" "$(cat "$d")" "two bare 'PR: #3' entries become one"
+  teardown
+}
+
+# The awk forms that read differently across awks were rewritten (fix round 1):
+# the fence indent ("sub(/^ ? ? ?/)" → a 3-step loop), the fence-like test (a
+# regex → substr), the create path's ATX heading ("([[:space:]]|$)" → two
+# regexes) and "[]" (a bracket expression → a whitespace-free compare, tested
+# by (h) above). These pin what the rewritten forms must mean.
+test_i10_fence_indent_and_paragraph_end() {
+  echo "test: fences indented up to 3 spaces hide a block (4 do not); an indented fence line ends a block; the create path's paragraph end"
+  setup
+  mkdir -p docs/adr
+  local d
+
+  # (j) A fence indented 1-3 spaces is a fence: its example is not the block.
+  d=docs/adr/j.md
+  printf '%s\n' '# ADR' '' '   ```yaml' 'Implementation:' '  - PR: #90 — complete' '   ```' '' \
+    ' ~~~' 'Implementation:' '  - PR: #91 — complete' ' ~~~' '' 'Implementation:' '  - PR: #1 — complete' > "$d"
+  _i10_readers_agree "$d" "PR: #1 — complete" "(j) fences indented 3 and 1 spaces"
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #90' --status reverted >/dev/null 2>&1 || true
+  assert_eq "$(printf '%s\n' 'Implementation:' '  - PR: #1 — complete' '  - PR: #90 — reverted')" "$(tail -n 3 "$d")" \
+    "(j) the write goes to the real block"
+  assert_eq "1" "$(grep -cxF '  - PR: #90 — complete' "$d" || true)" "(j) the indented fenced example is untouched"
+
+  # (k) Four spaces of indent is not a fence (CommonMark: indented code), so
+  # it hides nothing.
+  d=docs/adr/k.md
+  printf '%s\n' 'Notes:' '' '    ```' 'Implementation:' '  - PR: #1 — complete' > "$d"
+  _i10_readers_agree "$d" "PR: #1 — complete" "(k) a 4-space '\`\`\`' is not a fence"
+
+  # (l) An indented fence line right after an entry ends the block: it is not
+  # a wrapped line of that entry, and an append goes before it.
+  d=docs/adr/l.md
+  printf '%s\n' 'Implementation:' '  - PR: #1 — complete' '  ```text' '  - PR: #2 — complete' '  ```' > "$d"
+  _i10_readers_agree "$d" "PR: #1 — complete" "(l) an indented fence line ends the block"
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #3' --status partial >/dev/null 2>&1 || true
+  assert_eq "$(printf '%s\n' 'Implementation:' '  - PR: #1 — complete' '  - PR: #3 — partial' '  ```text' '  - PR: #2 — complete' '  ```')" \
+    "$(cat "$d")" "(l) appended before the fence line, the fenced bullet untouched"
+
+  # (m) Creating a block: the anchor's paragraph ends at an ATX heading ("#"
+  # alone or "#" + blank), never at "#tag", and at an indented fence line.
+  d=docs/adr/m1.md
+  printf '%s\n' '# ADR' '' '**Date**: 2026-05-16' '## Context' > "$d"
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #1' --status complete >/dev/null 2>&1 || true
+  assert_eq "$(printf '%s\n' '# ADR' '' '**Date**: 2026-05-16' '' 'Implementation:' '  - PR: #1 — complete' '' '## Context')" \
+    "$(cat "$d")" "(m) a '## ' heading right after the anchor ends its paragraph"
+  d=docs/adr/m2.md
+  printf '%s\n' '**Date**: 2026-05-16' '#tag is prose' '#' 'x' > "$d"
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #2' --status complete >/dev/null 2>&1 || true
+  assert_eq "$(printf '%s\n' '**Date**: 2026-05-16' '#tag is prose' '' 'Implementation:' '  - PR: #2 — complete' '' '#' 'x')" \
+    "$(cat "$d")" "(m) '#tag' continues the paragraph; a bare '#' heading ends it"
+  d=docs/adr/m3.md
+  printf '%s\n' '**Date**: 2026-05-16' '  ~~~' 'x' '  ~~~' > "$d"
+  "$DOC_TOOLS" set-implementation "$d" --ref 'PR: #3' --status complete >/dev/null 2>&1 || true
+  assert_eq "$(printf '%s\n' '**Date**: 2026-05-16' '' 'Implementation:' '  - PR: #3 — complete' '' '  ~~~' 'x' '  ~~~')" \
+    "$(cat "$d")" "(m) an indented fence line ends the anchor's paragraph"
+
+  # (n) The version parser shares the fence rule: a heading in an indented
+  # fence is an example, not the release.
+  setup_version_files
+  printf '%s\n' '# Release Notes' '' '  ```md' '## v9.9.9 (example)' '  ```' '' '## v1.0.0 (2026-01-01)' > RELEASE-NOTES.md
+  assert_contains "$("$DOC_TOOLS" check-version 2>&1)" "Canonical version (RELEASE-NOTES.md): v1.0.0" \
+    "(n) check-version skips a heading inside an indented fence"
   teardown
 }
 
@@ -5182,6 +5294,8 @@ test_i10_bump_version_is_all_or_nothing_and_keeps_modes() {
   assert_eq "1" "$rc" "a malformed manifest: exit 1"
   assert_contains "$out" "gemini-extension.json" "…naming it"
   assert_contains "$out" "nothing was written" "…and saying nothing was written"
+  assert_eq "" "$(find . -name '*.XXXXXX' -o -name '.*.json.*' 2>/dev/null)" \
+    "…and no temp file is left behind on the failure path (every rendered manifest is removed)"
   assert_eq "$before" "$(cat package.json claude-code.json .claude-plugin/plugin.json .claude-plugin/marketplace.json .cursor-plugin/plugin.json | hash_stdin)" \
     "…and every valid manifest is untouched (no partial bump)"
   rc=0
@@ -5249,6 +5363,56 @@ test_i10_tools_uninstall_keeps_what_it_did_not_install() {
   assert_eq "0" "$rc" "an unmodified install uninstalls cleanly"
   assert_true "…leaving no .github/scripts" test ! -e .github/scripts
   assert_file_exists "RELEASE-NOTES.next/README.md" "…but RELEASE-NOTES.next/README.md stays (it may carry edits)"
+  teardown
+}
+
+test_i10_tools_reinstall_restores_the_exec_bit() {
+  echo "test: tools install leaves every vendored script executable, whatever mode it had (the CI templates run them directly)"
+  setup
+  "$DOC_TOOLS" tools install --with-helpers >/dev/null 2>&1
+  chmod 644 .github/scripts/doc-tools.sh .github/scripts/doc-pr-release/extract-context.sh
+  { chmod 664 .github/scripts/doc-superpowers-steps/resolve-auth.sh; } 2>/dev/null || true
+  local rc=0 f nonexec=""
+  "$DOC_TOOLS" tools install --with-helpers >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "reinstall exits 0"
+  assert_eq "755" "$(_file_mode_of .github/scripts/doc-tools.sh)" "a 644 doc-tools.sh is executable again (755)"
+  assert_eq "755" "$(_file_mode_of .github/scripts/doc-pr-release/extract-context.sh)" "a 644 helper is executable again (755)"
+  assert_eq "775" "$(_file_mode_of .github/scripts/doc-superpowers-steps/resolve-auth.sh 2>/dev/null)" \
+    "a 664 step script gains the execute bits and keeps the rest of its mode (775)"
+  for f in .github/scripts/doc-tools.sh .github/scripts/*/*.sh; do
+    [ -x "$f" ] || nonexec="$nonexec $f"
+  done
+  assert_eq "" "$nonexec" "every vendored script is executable after the reinstall"
+  # Onto itself (the vendored copy run with bash, so its mode never mattered
+  # to the run): the copy is not rewritten, but it is left executable.
+  chmod 644 .github/scripts/doc-tools.sh
+  rc=0
+  "$BASH_BIN" .github/scripts/doc-tools.sh tools install >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "install from the vendored copy onto itself exits 0"
+  assert_eq "755" "$(_file_mode_of .github/scripts/doc-tools.sh)" "…and leaves it executable (755)"
+  teardown
+}
+
+test_i10_tools_status_counts_user_added_helpers_apart() {
+  echo "test: tools status counts an edited helper as drifted and a user-added one as not the plugin's — never both as drift"
+  setup
+  "$DOC_TOOLS" tools install --with-helpers >/dev/null 2>&1
+  echo "# local fix" >> .github/scripts/doc-pr-release/extract-context.sh
+  printf '#!/bin/sh\n' > .github/scripts/doc-pr-release/my-helper.sh
+  local out n steps
+  n=$(ls .github/scripts/doc-pr-release/*.sh | wc -l | tr -d ' ')
+  steps=$(ls .github/scripts/doc-superpowers-steps/*.sh 2>/dev/null | wc -l | tr -d ' ')
+  out=$("$DOC_TOOLS" tools status 2>&1) || true
+  assert_eq "1" "$(grep -cxF -- "doc-pr-release helpers: $n installed at .github/scripts/doc-pr-release/ (1 differ from the plugin's, 1 not shipped by the plugin)" <<<"$out" || true)" \
+    "one edited helper differs; the user-added one is counted apart"
+  assert_eq "1" "$(grep -cxF -- "doc-superpowers-steps helpers: $steps installed at .github/scripts/doc-superpowers-steps/" <<<"$out" || true)" \
+    "an untouched helper dir has no note"
+  # Only a user-added file: no drift at all.
+  "$DOC_TOOLS" tools install --with-helpers >/dev/null 2>&1
+  out=$("$DOC_TOOLS" tools status 2>&1) || true
+  assert_eq "1" "$(grep -cxF -- "doc-pr-release helpers: $n installed at .github/scripts/doc-pr-release/ (1 not shipped by the plugin)" <<<"$out" || true)" \
+    "a user-added helper alone is never reported as drift"
+  assert_not_contains "$out" "differ from the plugin" "…and nothing is said to differ"
   teardown
 }
 
@@ -5530,12 +5694,16 @@ run_tests() {
   test_i10_set_implementation_create_anchors
   test_i10_set_implementation_replaces_the_doc_atomically
   test_i10_one_block_grammar_in_all_three_verbs
+  test_i10_set_implementation_replaces_one_entry_per_ref
+  test_i10_fence_indent_and_paragraph_end
   test_i10_implementation_status_filter_is_gone
   test_i10_check_version_reads_the_first_release_heading
   test_i10_version_verbs_need_a_manifest
   test_i10_bump_version_is_all_or_nothing_and_keeps_modes
   test_i10_tools_with_helpers_ships_every_helper_the_templates_run
   test_i10_tools_uninstall_keeps_what_it_did_not_install
+  test_i10_tools_reinstall_restores_the_exec_bit
+  test_i10_tools_status_counts_user_added_helpers_apart
   test_i10_tools_from_the_vendored_copy
   test_i10_no_hidden_sed_or_ripgrep_dependency
 
