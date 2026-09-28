@@ -21,10 +21,15 @@ on:
 
 # One writer per branch across the doc-superpowers workflows that commit to
 # it (doc-audit-update, doc-pr-full-cycle, doc-pr-release). Never cancelled:
-# a cancel between commit and push would strand the commit.
+# a cancel between commit and push would strand the commit. A queued run that
+# finds the branch moved on exits 0 as superseded (commit-changes.sh).
 concurrency:
   group: doc-superpowers-write-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: false
+  # Queue pending runs in order (up to 100) instead of letting a newer one of
+  # any of the three cancel them.
+  # GHES versions without concurrency `queue` support: delete this key.
+  queue: max
 
 env:
   DOC_SUPERPOWERS_VERSION: "__VERSION__"
@@ -110,4 +115,5 @@ jobs:
         env:
           EXPECTED_HEAD: ${{ steps.plugin.outputs.head }}
           PUSH_TO: ${{ github.head_ref }}
-        run: '.github/scripts/doc-superpowers-steps/commit-changes.sh --allow docs/ --allow-index-keys --message "[doc-superpowers] pr docs: review, update, diagrams, sync" --push-to "$PUSH_TO"'
+        # The checker as it was before the agent ran (prepare-agent.sh's snapshot).
+        run: '"$RUNNER_TEMP"/doc-superpowers-steps/commit-changes.sh --allow docs/ --allow-index-keys --message "[doc-superpowers] pr docs: review, update, diagrams, sync" --push-to "$PUSH_TO"'

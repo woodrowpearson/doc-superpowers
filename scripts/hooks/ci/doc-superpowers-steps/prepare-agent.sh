@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The AI templates' step before the agent: the doc-superpowers plugin
-# marketplace checked out at exactly the version the installer rendered, and
-# the HEAD the agent starts from.
+# marketplace checked out at exactly the version the installer rendered, the
+# HEAD the agent starts from, and a snapshot of the commit checker.
 #
 # claude-code-action's plugin_marketplaces input takes a local path as it is
 # (a Git URL must end in .git, so it cannot name a tag); the workflow hands it
@@ -14,8 +14,14 @@
 #   DOC_SUPERPOWERS_MARKETPLACE_URL  default https://github.com/woodrowpearson/doc-superpowers.git
 #   RUNNER_TEMP, GITHUB_OUTPUT       set by the runner
 #
+# The agent can edit files in the checkout, the checker's own copy
+# (.github/scripts/doc-superpowers-steps/commit-changes.sh) included. So this
+# step copies the checker, as it is before the agent runs, to
+# $RUNNER_TEMP/doc-superpowers-steps/commit-changes.sh (read-only, outside the
+# workspace), and the commit step runs that copy.
+#
 # Outputs: marketplace=<absolute directory>; head=<the checkout's HEAD> (the
-# commit step checks the agent left it there).
+# commit step checks the agent left it there); checker=<the checker snapshot>.
 #
 # Exit codes: 0; 1 (with an ::error::) when the version is not a release, its
 # tag cannot be fetched, or the manifests at the tag name another version.
@@ -51,5 +57,15 @@ fi
 found=$(jq -r '.version // ""' "$mp/.claude-plugin/plugin.json" 2>/dev/null) || found=""
 [ "v$found" = "$VERSION" ] || err "$URL at tag $VERSION holds plugin version '${found:-none}', not ${VERSION#v}"
 
-printf 'marketplace=%s\nhead=%s\n' "$mp" "$head" >> "$GITHUB_OUTPUT"
+src="$(dirname "$0")/commit-changes.sh"
+checker="$RUNNER_TEMP/doc-superpowers-steps/commit-changes.sh"
+case "$checker" in
+  /*) ;;
+  *) checker="$PWD/$checker" ;;
+esac
+[ -f "$src" ] || err "the commit checker $src is missing (re-run the doc-superpowers installer: install --ci)"
+mkdir -p "${checker%/*}" && rm -f "$checker" && cp "$src" "$checker" && chmod 0555 "$checker" \
+  || err "cannot snapshot the commit checker to $checker"
+
+printf 'marketplace=%s\nhead=%s\nchecker=%s\n' "$mp" "$head" "$checker" >> "$GITHUB_OUTPUT"
 echo "doc-superpowers $VERSION marketplace at $mp; the agent starts from $head."

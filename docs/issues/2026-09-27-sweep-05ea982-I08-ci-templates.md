@@ -180,6 +180,13 @@ asserted as YAML and by running the vendored step scripts the way a step runs th
   which had no PR context; `DOC_SUPERPOWERS_VERSION` is read (the plugin pin); audit-update's
   unused `pull-requests: write` is dropped (`__BASE_BRANCH__` was validated in I-7).
 
+Review fix round 1: the commit step stages deletions too (`git update-index --add --remove`,
+so a `git rm`'d fragment commits); it runs from `prepare-agent.sh`'s pre-agent snapshot under
+`$RUNNER_TEMP` with git hooks and fsmonitor off (pr-release's `commit-and-push.sh` step gets the
+same through `GIT_CONFIG_*`); `--ignore` means a directory; the write group queues pending runs
+in order (`queue: max`, with a note for GHES), and a queued run whose checkout is no longer the
+branch tip exits 0 as superseded instead of failing its push.
+
 Left for later tasks: I-9 (T10) owns `doc-release.yml`'s `contains(…)` skip and the fragment
 pipeline; the runtime criterion above waits for CI.
 

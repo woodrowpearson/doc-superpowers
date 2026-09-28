@@ -966,6 +966,11 @@ test_workflow_helper_wiring() {
       step=$(jq -r '.step' <<<"$line")
       run=$(jq -r '.run' <<<"$line")
       cmd=${run%%[[:space:]]*}
+      # prepare-agent.sh's pre-agent snapshot of a step script runs as
+      # "$RUNNER_TEMP"/doc-superpowers-steps/<name>.sh.
+      case "$cmd" in
+        '"$RUNNER_TEMP"/doc-superpowers-steps/'*.sh) cmd=".github/scripts/${cmd#'"$RUNNER_TEMP"/'}" ;;
+      esac
       case "$cmd" in
         .github/scripts/*/*.sh)
           dir=${cmd#.github/scripts/}
@@ -1262,6 +1267,10 @@ test_i8_one_write_group_per_branch() {
     g=$(jq -r '.concurrency.group // ""' <<<"$json")
     assert_eq "false" "$(jq -r '.concurrency["cancel-in-progress"] | tostring' <<<"$json")" "$wf: cancel-in-progress false"
     assert_contains "$g" "doc-superpowers-write-" "$wf: the shared write group ($g)"
+    assert_eq "max" "$(jq -r '.concurrency.queue // ""' <<<"$json")" \
+      "$wf: queue: max (pending runs of the three wait in order instead of cancelling each other)"
+    assert_true "$wf: a comment tells GHES users without concurrency queue support to drop the key" \
+      grep -qE '^[[:space:]]*#.*(GHES|GitHub Enterprise Server).*queue' "$ALL_REPO/.github/workflows/$wf.yml"
     groups="$groups$g"$'\n'
   done
   assert_eq "1" "$(printf '%s' "$groups" | sort -u | grep -c .)" "one group expression for all three"
@@ -1295,29 +1304,39 @@ test_i8_no_code_path_filters() {
   assert_eq "" "$bad" "the doc-scoped AI jobs run only when the change touches an indexed doc or its code"
 }
 
+# How a template runs prepare-agent.sh's pre-agent snapshot of the checker
+# (the agent can edit the checkout's copy; it runs before the commit step).
+CHECKER_RUN='"$RUNNER_TEMP"/doc-superpowers-steps/commit-changes.sh'
+
 test_i8_commit_is_a_deterministic_step() {
   echo "Test: the writing templates commit in a deterministic step after the agent that asserts the diff paths"
   yaml_unavailable "i8_commit_is_a_deterministic_step" && return 0
   _need_all_repo "i8_commit_is_a_deterministic_step" || return 0
   local wf out bad=""
   for wf in doc-audit-update doc-pr-full-cycle doc-release; do
-    out=$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq -r --arg wf "$wf" --arg u "$AI_USES" '
+    out=$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq -r --arg wf "$wf" --arg u "$AI_USES" --arg cc "$CHECKER_RUN" '
       .jobs | to_entries[] | .key as $job | .value.steps as $s
       | ([$s | to_entries[] | select((.value.uses // "") | startswith($u)) | .key] | first) as $ai
       | select($ai != null)
+      | ([$s | to_entries[] | select((.value.run // "") | startswith(".github/scripts/doc-superpowers-steps/prepare-agent.sh")) | .key] | first) as $prep
       | ([$s | to_entries[] | select(.key > $ai) | .value.run // ""
-          | select(startswith(".github/scripts/doc-superpowers-steps/commit-changes.sh ")) | select(contains("--check-only") | not)] | length) as $n
-      | if $n == 1 then empty else "    \($wf) / \($job): \($n) commit-changes.sh step(s) after the AI step (want 1)" end')
+          | select(startswith($cc + " ")) | select(contains("--check-only") | not)] | length) as $n
+      | if $n != 1 then "    \($wf) / \($job): \($n) snapshot commit-changes.sh step(s) after the AI step (want 1)"
+        elif $prep == null or $prep > $ai then "    \($wf) / \($job): no prepare-agent.sh (the checker snapshot) before the AI step"
+        else empty end')
     [ -z "$out" ] || bad="$bad$out"$'\n'
   done
-  out=$(_yaml_json "$ALL_REPO/.github/workflows/doc-pr-release.yml" | jq -r --arg u "$AI_USES" '
+  out=$(_yaml_json "$ALL_REPO/.github/workflows/doc-pr-release.yml" | jq -r --arg u "$AI_USES" --arg cc "$CHECKER_RUN" '
     .jobs | to_entries[] | .key as $job | .value.steps as $s
     | ([$s | to_entries[] | select((.value.uses // "") | startswith($u)) | .key] | first) as $ai
     | select($ai != null)
-    | ([$s | to_entries[] | select((.value.run // "") | startswith(".github/scripts/doc-superpowers-steps/commit-changes.sh --check-only")) | .key] | first) as $chk
+    | ([$s | to_entries[] | select((.value.run // "") | startswith($cc + " --check-only")) | .key] | first) as $chk
     | ([$s | to_entries[] | select((.value.run // "") | startswith(".github/scripts/doc-pr-release/commit-and-push.sh")) | .key] | first) as $cp
-    | if $chk == null or $cp == null or $chk < $ai or $cp < $chk then "    doc-pr-release / \($job): want the AI step, then commit-changes.sh --check-only, then commit-and-push.sh"
+    | if $chk == null or $cp == null or $chk < $ai or $cp < $chk then "    doc-pr-release / \($job): want the AI step, then the snapshot commit-changes.sh --check-only, then commit-and-push.sh"
       elif (($s[$ai].with.prompt // "") | contains("commit-and-push.sh")) then "    doc-pr-release / \($job): the prompt still has the agent run commit-and-push.sh"
+      elif ($s[$cp].env // {}) as $e | ($e.GIT_CONFIG_COUNT != "2" or $e.GIT_CONFIG_KEY_0 != "core.hooksPath" or $e.GIT_CONFIG_VALUE_0 != "/dev/null"
+            or $e.GIT_CONFIG_KEY_1 != "core.fsmonitor" or $e.GIT_CONFIG_VALUE_1 != "false")
+        then "    doc-pr-release / \($job): commit-and-push.sh runs git with the hooks and fsmonitor the agent could have planted"
       else empty end')
   [ -z "$out" ] || bad="$bad$out"$'\n'
   [ -z "$bad" ] || printf '%s' "$bad"
@@ -1574,6 +1593,10 @@ test_i8_prepare_agent() {
   assert_file_exists "$mp/.claude-plugin/marketplace.json" "…holding the marketplace manifest"
   assert_eq "1.2.3" "$(jq -r .version "$mp/.claude-plugin/plugin.json" 2>/dev/null)" "…at the pinned version"
   assert_eq "$(git -C "$repo" rev-parse HEAD)" "$(_out "$out" head)" "head = the checkout's HEAD before the agent runs"
+  assert_eq "$out.tmp/doc-superpowers-steps/commit-changes.sh" "$(_out "$out" checker)" \
+    "checker = the commit checker snapshotted under \$RUNNER_TEMP before the agent runs"
+  assert_true "…a byte copy of commit-changes.sh" cmp -s "$STEPS_DIR/commit-changes.sh" "$out.tmp/doc-superpowers-steps/commit-changes.sh"
+  assert_true "…executable" test -x "$out.tmp/doc-superpowers-steps/commit-changes.sh"
   for v in vunknown v1.2 ""; do
     rc=0
     run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION="$v" DOC_SUPERPOWERS_MARKETPLACE_URL="$url" -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
@@ -1590,7 +1613,7 @@ test_i8_prepare_agent() {
 }
 
 # cc_fixture: origin_and_clone plus, on feature (pushed), an index whose keys
-# are docs/d.md and README.md. Echoes the parent dir.
+# are docs/d.md, docs/e.md, docs/f.md and README.md. Echoes the parent dir.
 cc_fixture() {
   local dir
   dir=$(origin_and_clone)
@@ -1598,13 +1621,22 @@ cc_fixture() {
     cd "$dir/clone" || exit 1
     mkdir -p docs src
     echo '# D' > docs/d.md
+    echo '# E' > docs/e.md
+    echo '# F' > docs/f.md
     echo '# R' > README.md
     echo 'x' > src/x.js
-    printf '{"version": 3, "docs": {"docs/d.md": {"code_refs": ["src/"]}, "README.md": {"code_refs": []}}}\n' > docs/.doc-index.json
+    printf '{"version": 3, "docs": {"docs/d.md": {"code_refs": ["src/"]}, "docs/e.md": {"code_refs": []}, "docs/f.md": {"code_refs": []}, "README.md": {"code_refs": []}}}\n' > docs/.doc-index.json
     git add -A && git -c commit.gpgsign=false commit -q -m docs
     git push -q origin feature
   ) >/dev/null 2>&1 || return 1
   printf '%s' "$dir"
+}
+
+# _cc_reset <dir>: the clone back at origin's feature, clean (for the next case).
+_cc_reset() {
+  git -C "$1/clone" fetch -q origin 2>/dev/null
+  git -C "$1/clone" reset -q --hard origin/feature
+  git -C "$1/clone" clean -qfdx
 }
 
 test_i8_commit_changes() {
@@ -1631,6 +1663,24 @@ test_i8_commit_changes() {
   assert_eq "README.md docs/d.md docs/new.md" \
     "$(git -C "$dir/origin.git" show --name-only --format= feature | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')" "…exactly those paths"
 
+  # Deletions: one the agent staged (git rm — doc-release's consumed
+  # fragments), one only in the work tree; a staged file of the workflow's
+  # scratch (ignored) stays out of the commit.
+  head=$(git -C "$clone" rev-parse HEAD)
+  git -C "$clone" rm -q docs/e.md
+  rm -f "$clone/docs/f.md"
+  mkdir -p "$clone/.scratch"
+  echo '{}' > "$clone/.scratch/context.json"
+  git -C "$clone" add -f .scratch/context.json
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" --ignore .scratch/ || rc=$?
+  assert_eq "0|true" "$rc|$(_out "$out" committed)" "a staged (git rm) and a work-tree deletion: committed"
+  assert_eq "D	docs/e.md D	docs/f.md" \
+    "$(git -C "$dir/origin.git" show --name-status --format= feature | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')" \
+    "…exactly the two deletions (the staged scratch file is not in the commit)"
+  assert_eq "A  .scratch/context.json" "$(git -C "$clone" status --porcelain -- .scratch)" "…and stays staged, uncommitted"
+  _cc_reset "$dir"
+
   head=$(git -C "$clone" rev-parse HEAD)
   echo 'y' > "$clone/src/x.js"
   echo '# D3' > "$clone/docs/d.md"
@@ -1640,37 +1690,70 @@ test_i8_commit_changes() {
   assert_contains "$(cat "$out.log")" "::error::" "…with an ::error:: …"
   assert_contains "$(cat "$out.log")" "src/x.js" "…naming the path"
   assert_eq "$head|$head" "$(git -C "$clone" rev-parse HEAD)|$(git -C "$dir/origin.git" rev-parse feature)" "…nothing committed or pushed"
-  git -C "$clone" checkout -q -- src/x.js
+  _cc_reset "$dir"
 
-  mkdir -p "$clone/src"
   echo 'y' > "$clone/src/y.md"
   jq '.docs["src/y.md"] = {code_refs: []}' "$clone/docs/.doc-index.json" > "$clone/docs/.doc-index.json.new" \
     && mv "$clone/docs/.doc-index.json.new" "$clone/docs/.doc-index.json"
   rc=0
   run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
   assert_eq "1" "$rc" "a key the agent added to the index does not authorize its path (only HEAD's keys count)"
-  git -C "$clone" checkout -q -- docs/.doc-index.json docs/d.md
-  rm -f "$clone/src/y.md"
+  _cc_reset "$dir"
 
   ( cd "$clone" && echo z > z.txt && git add z.txt && git -c commit.gpgsign=false commit -q -m "agent commit" )
   rc=0
   run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
   assert_eq "1" "$rc" "HEAD moved (the agent committed): exits 1"
   assert_contains "$(cat "$out.log")" "::error::" "…with an ::error::"
-  git -C "$clone" reset -q --hard "$head"
+  _cc_reset "$dir"
 
-  mkdir -p "$clone/.scratch"
+  mkdir -p "$clone/.scratch" "$clone/.scratch-x"
   echo '{}' > "$clone/.scratch/context.json"
   rc=0
-  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" --check-only --allow docs/d.md --ignore .scratch/ || rc=$?
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" --check-only --allow docs/d.md --ignore .scratch || rc=$?
   assert_eq "0|false" "$rc|$(_out "$out" changed)" "--check-only, only ignored scratch: nothing changed"
+  echo 'x' > "$clone/.scratch-x/other"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" --check-only --allow docs/d.md --ignore .scratch || rc=$?
+  assert_eq "1" "$rc" "--ignore .scratch is the directory .scratch/, not every path starting .scratch (.scratch-x/ is a violation)"
+  rm -rf "$clone/.scratch-x"
   echo '# D4' > "$clone/docs/d.md"
   rc=0
   run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" --check-only --allow docs/d.md --ignore .scratch/ || rc=$?
   assert_eq "0|true" "$rc|$(_out "$out" changed)" "--check-only, an allowed change: exits 0, changed=true …"
   assert_eq "$head" "$(git -C "$clone" rev-parse HEAD)" "…and commits nothing"
-  rm -rf "$clone/.scratch"
+  _cc_reset "$dir"
 
+  # Hooks and an fsmonitor the agent could plant in .git never run.
+  local marks="$dir/marks" evil="$dir/evil-hooks"
+  mkdir -p "$marks" "$evil"
+  for h in pre-commit commit-msg post-commit pre-push; do
+    printf '#!/bin/sh\ntouch "%s/%s"\nexit 1\n' "$marks" "$h" > "$clone/.git/hooks/$h"
+    chmod +x "$clone/.git/hooks/$h"
+  done
+  printf '#!/bin/sh\ntouch "%s/fsmonitor"\nexit 1\n' "$marks" > "$dir/fsmon"
+  chmod +x "$dir/fsmon"
+  git -C "$clone" config core.fsmonitor "$dir/fsmon"
+  echo '# D6' > "$clone/docs/d.md"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
+  assert_eq "0|true" "$rc|$(_out "$out" committed)" "planted .git hooks (exit 1) and core.fsmonitor: the commit still goes through"
+  assert_eq "" "$(ls "$marks")" "…and none of them ran"
+  git -C "$clone" config core.hooksPath "$evil"
+  cp "$clone/.git/hooks/pre-commit" "$evil/pre-commit"
+  head=$(git -C "$clone" rev-parse HEAD)
+  echo '# D7' > "$clone/docs/d.md"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
+  assert_eq "0|" "$rc|$(ls "$marks")" "a planted core.hooksPath is overridden too"
+  git -C "$clone" config --unset core.hooksPath
+  git -C "$clone" config --unset core.fsmonitor
+  rm -f "$clone"/.git/hooks/pre-commit "$clone"/.git/hooks/commit-msg "$clone"/.git/hooks/post-commit "$clone"/.git/hooks/pre-push
+  _cc_reset "$dir"
+
+  # FIFO-queued runs: an earlier writer pushed, so this run's checkout is no
+  # longer the tip. That is not a failure: a newer run covers the new tip.
+  head=$(git -C "$clone" rev-parse HEAD)
   (
     cd "$dir/seed" || exit 1
     git pull -q origin feature 2>/dev/null
@@ -1681,23 +1764,54 @@ test_i8_commit_changes() {
   ) >/dev/null 2>&1
   local tip
   tip=$(git -C "$dir/origin.git" rev-parse feature)
+  echo '# D5' > "$clone/docs/d.md"
   rc=0
   run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
-  assert_eq "1" "$rc" "the branch moved since checkout: the push is rejected, exits 1"
-  assert_eq "$tip" "$(git -C "$dir/origin.git" rev-parse feature)" "…the human's commit is kept (no force)"
-  git -C "$clone" reset -q --hard "$head"
+  assert_eq "0|true|false|true" "$rc|$(_out "$out" changed)|$(_out "$out" committed)|$(_out "$out" superseded)" \
+    "the branch moved past the checkout: superseded, exits 0, no commit"
+  assert_contains "$(cat "$out.log")" "superseded: feature moved past" "…with a notice that says so"
+  assert_not_contains "$(cat "$out.log")" "::error::" "…and no error"
+  assert_eq "$tip|$head" "$(git -C "$dir/origin.git" rev-parse feature)|$(git -C "$clone" rev-parse HEAD)" \
+    "…the newer tip is kept, nothing committed or pushed"
+  _cc_reset "$dir"
+
+  # A push that fails for another reason is a failure.
+  head=$(git -C "$clone" rev-parse HEAD)
+  git -C "$clone" remote set-url --push origin "$dir/no-such-remote.git"
+  echo '# D8' > "$clone/docs/d.md"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
+  assert_eq "1|" "$rc|$(_out "$out" superseded)" "a push that fails while the branch is still at the checkout: exits 1, not 'superseded'"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error::"
+  git -C "$clone" remote set-url --delete --push origin "$dir/no-such-remote.git"
+  _cc_reset "$dir"
 
   local shim
   shim=$(harness_mktemp_d gh-pr)
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/calls"\necho https://github.com/o/r/pull/9\n' "$shim" > "$shim/gh"
   chmod +x "$shim/gh"
-  echo '# D5' > "$clone/docs/d.md"
+  echo '# D9' > "$clone/docs/d.md"
   rc=0
   run_installed "$clone" "$out" EXPECTED_HEAD="$head" PATH="$shim:$BASH_PATH" -- "$cc" --allow docs/ \
     --message "[doc-superpowers] draft release notes" --push-to doc-superpowers/release-notes-1 --open-pr feature || rc=$?
   assert_eq "0|true" "$rc|$(_out "$out" committed)" "--open-pr: committed to a new branch …"
   assert_eq "[doc-superpowers] draft release notes" "$(git -C "$dir/origin.git" log -1 --format=%s doc-superpowers/release-notes-1 2>/dev/null)" "…pushed"
   assert_contains "$(cat "$shim/calls" 2>/dev/null)" "pr create --base feature --head doc-superpowers/release-notes-1" "…and a PR opened against the base"
+  _cc_reset "$dir"
+  echo '# D10' > "$clone/docs/d.md"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" PATH="$shim:$BASH_PATH" -- "$cc" --allow docs/ \
+    --message "[doc-superpowers] draft release notes" --push-to doc-superpowers/release-notes-1 --open-pr feature || rc=$?
+  assert_eq "1" "$rc" "--open-pr onto a branch that already exists: exits 1 (it only ever creates one)"
+  _cc_reset "$dir"
+
+  # The branch was deleted (the PR merged) while the run waited: nothing to recreate.
+  git -C "$dir/origin.git" update-ref -d refs/heads/feature
+  echo '# D11' > "$clone/docs/d.md"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
+  assert_eq "0|false" "$rc|$(_out "$out" committed)" "the target branch is gone: exits 0, commits nothing …"
+  assert_eq "" "$(git -C "$dir/origin.git" for-each-ref refs/heads/feature)" "…and does not recreate it"
 }
 
 test_i8_pr_guard() {
