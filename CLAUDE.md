@@ -6,12 +6,13 @@ Documentation orchestrator skill for Claude Code. Generates, audits, and maintai
 
 ```
 doc-superpowers/
-├── .gitignore            # Git ignore rules
+├── .gitignore            # Git ignore rules (incl. the per-user Claude tier and index lock/temp files)
+├── .gitattributes        # Self-installed git tier: docs/.doc-index.json → the doc-index merge driver
 ├── .worktrees/           # Parallel agent dispatch worktrees (gitignored)
-├── .claude/              # Self-installed Claude Code hook tier
-│   ├── settings.local.json   # Hook wiring (PreToolUse, PostToolUse, Stop)
-│   └── hooks/
-│       └── doc-superpowers/  # pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh
+├── .claude/
+│   └── doc-superpowers/
+│       └── installed.json    # The self-installed CI tier's record (committed): workflow set, base branch, cron, strict
+│                             # (the Claude tier — settings.local.json, hooks/doc-superpowers/ — is per-user and gitignored)
 ├── .claude-plugin/       # Claude Code plugin manifest + marketplace
 │   ├── plugin.json
 │   └── marketplace.json
@@ -20,11 +21,12 @@ doc-superpowers/
 │   └── INSTALL.md
 ├── .codex/               # Codex installation guide
 │   └── INSTALL.md
-├── .github/              # Self-installed CI tier — the 2 default workflow templates,
-│   └── workflows/        # plus tests.yml (this repo only, not a template)
-│       ├── doc-freshness-pr.yml
+├── .github/              # Self-installed CI tier (install.sh install --ci: installer output, never hand-edited)
+│   ├── scripts/          # Vendored byte copies: doc-tools.sh + doc-superpowers-steps/ (the step scripts the workflows run)
+│   └── workflows/
+│       ├── doc-freshness-pr.yml       # The 2 default templates, rendered with the recorded choices
 │       ├── doc-freshness-schedule.yml
-│       └── tests.yml     # Runs the five shell suites + check-version (bash 5.x / 3.2 matrix)
+│       └── tests.yml     # This repo only (not a template): the five suites (bash 5.x / 3.2 matrix), check-version, self-install drift check
 ├── .opencode/            # OpenCode plugin + installation guide
 │   ├── INSTALL.md
 │   └── plugins/
@@ -59,12 +61,12 @@ doc-superpowers/
 │           ├── doc-spec-verify.yml       # AI spec compliance on PRs
 │           ├── doc-pr-full-cycle.yml     # AI PR full cycle: review, update, diagram, sync
 │           ├── doc-pr-release.yml        # AI per-PR release-notes fragment producer
-│           └── doc-pr-release/           # Helper scripts + fragment-format spec
-│               ├── extract-context.sh    # Build context.json for the agent
-│               ├── update-pr-body.sh     # Idempotent PR-body managed-section editor
-│               ├── commit-and-push.sh    # Seal + commit the fragment; push only while the branch is at the checkout
-│               ├── fragment-lib.sh       # Sourced fragment line rules (markers, hash line, sha256) the helpers share
-│               └── RELEASE-NOTES.next.README.md # Fragment-format spec (producer/consumer contract)
+│           ├── doc-pr-release/           # Helper scripts + fragment-format spec
+│           │   ├── extract-context.sh    # Build context.json for the agent
+│           │   ├── update-pr-body.sh     # Idempotent PR-body managed-section editor
+│           │   ├── commit-and-push.sh    # Seal + commit the fragment; push only while the branch is at the checkout
+│           │   ├── fragment-lib.sh       # Sourced fragment line rules (markers, hash line, sha256) the helpers share
+│           │   └── RELEASE-NOTES.next.README.md # Fragment-format spec (producer/consumer contract)
 │           └── doc-superpowers-steps/    # run: step bodies of every template (freshness-check, resolve-auth, prepare-agent, commit-changes, pr-guard, sentinel-check, write-context, verify-fragment, precheck)
 ├── references/
 │   ├── doc-spec.md       # Templates for generated docs (C4, ERD, workflows, agentic, specs, ADRs)
@@ -109,13 +111,13 @@ doc-superpowers/
 | File | Purpose | When to Modify |
 |------|---------|---------------|
 | `skills/doc-superpowers/SKILL.md` | Skill logic — discovery, action routing, agent prompts, verification | Adding actions, changing workflow |
-| `scripts/doc-tools.sh` | Bundled freshness tooling — 15 subcommands for index management, version sync, ADR/SPEC implementation status, release-notes fragments, and CLI vendoring | Changing staleness detection, index schema, version sync, implementation status, fragment merge, or vendoring |
+| `scripts/doc-tools.sh` | Bundled freshness tooling — 15 subcommands (`fragments list\|validate\|merge` and `tools install\|uninstall\|status\|version` take sub-verbs; `--help` lists them all) for index management, version sync, ADR/SPEC implementation status, release-notes fragments, and CLI vendoring | Changing staleness detection, index schema, version sync, implementation status, fragment merge, or vendoring |
 | `scripts/test-doc-tools.sh` | Test suite for doc-tools.sh | Adding tests for new doc-tools features |
 | `scripts/test-hooks.sh` | Test suite for hooks installer and hook scripts | Adding tests for new hooks or installer features |
-| `scripts/test-spec-status-model.sh` | Test suite pinning the canonical Spec Status Model wording and its call sites, and the skill prompt ↔ tool contract: tool resolution, index-write routing, review-pr base, safety rules, templates, the prompts' `--allowedTools`, and `evals/evals.json` (fields, regexes, fixtures run) | Changing spec status transition rules, roles, or vocabulary; changing what SKILL.md / references tell an agent to run; adding an eval |
+| `scripts/test-spec-status-model.sh` | Test suite pinning the canonical Spec Status Model wording and its call sites, and the skill prompt ↔ tool contract: tool resolution, index-write routing, review-pr base, safety rules, templates, the prompts' `--allowedTools`, and `evals/evals.json` (fields, regexes, fixtures run); also the cross-client packaging (manifests, INSTALL pins) and the OpenCode plugin, run under `node` (a loud SKIP without node locally; `DOC_SP_REQUIRE_NODE=1`, set by tests.yml, makes it a FAIL) | Changing spec status transition rules, roles, or vocabulary; changing what SKILL.md / references tell an agent to run; adding an eval; changing a manifest or the OpenCode plugin |
 | `scripts/test-doc-pr-release.sh` | Test suite for the CI workflow helpers (extract-context, update-pr-body, commit-and-push, the `run:` step scripts in doc-superpowers-steps/) + YAML placeholder substitution, template structure/wiring, and the installed templates' fail-closed / least-privilege properties | Adding tests for fragment-producer, CI-step or template features |
 | `scripts/hooks/ci/doc-pr-release.yml` | AI per-PR release-notes fragment producer — drafts `RELEASE-NOTES.next/PR-<N>.md` on every push | Changing the producer workflow, prompt, or post-Claude verification |
-| `scripts/hooks/ci/doc-pr-release/*.sh`, `scripts/hooks/ci/doc-superpowers-steps/*.sh` | Producer helpers (extract-context, update-pr-body, commit-and-push; `--helpers`-gated) and every template's `run:` step bodies (shipped to `.github/scripts/doc-superpowers-steps/` while any workflow is installed) | Changing fragment context schema, PR-body editing, push logic, or any workflow step body |
+| `scripts/hooks/ci/doc-pr-release/*.sh`, `scripts/hooks/ci/doc-superpowers-steps/*.sh` | Producer helpers (extract-context, update-pr-body, commit-and-push, and `fragment-lib.sh`, the fragment line rules they source; `--helpers`-gated) and every template's `run:` step bodies (shipped to `.github/scripts/doc-superpowers-steps/` while any workflow is installed) | Changing fragment context schema, PR-body editing, push logic, or any workflow step body |
 | `scripts/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md` | Fragment-format spec — producer/consumer contract for `RELEASE-NOTES.next/PR-*.md` | Changing fragment markers, hash protocol, or consumer rules |
 | `scripts/merge-doc-index.sh` | Custom git merge driver for .doc-index.json — base-aware per-key three-way merge during merge/rebase/revert; conflict markers + exit 1 when it cannot decide | Changing merge conflict resolution logic |
 | `scripts/test-merge-driver.sh` | Test suite for merge-doc-index.sh | Adding tests for merge driver features |
@@ -123,7 +125,7 @@ doc-superpowers/
 | `scripts/hooks/state.sh` | Install-state tracking shared by install.sh — reads/writes `.claude/doc-superpowers/installed.json` (committed, so install choices persist across contributors) | Changing state schema, the known-workflow list, or state-respect rules |
 | `references/doc-spec.md` | Doc templates, Mermaid syntax, naming conventions, schema reference | Adding doc types, changing templates |
 | `references/agent-prompt-template.md` | Review agent prompt template + scope-specific focus areas | Changing agent review instructions or adding project signals |
-| `references/output-templates.md` | Audit report format + plan template | Changing report structure or plan format |
+| `references/output-templates.md` | Audit report format (with its Update Tasks, the handoff to `update`) + spec compliance report | Changing report structure |
 | `references/spec-lifecycle-actions.md` | Detailed procedures for spec-generate (incl. Step 5b stale content scan), spec-inject, spec-verify; defines the canonical **Spec Status Model** (ladder, exempt class, rules R1-R4, evaluation order) | Changing spec action steps or adding new spec actions; changing status transition rules, roles, or vocabulary |
 | `references/spec-lifecycle-protocol.md` | Wrapper author integration guide — input/output contracts, integration patterns | Adding integration patterns, changing action contracts |
 | `references/release.md` | `release` action procedure (steps 1–12); its `$DOC_TOOLS fragments merge … --remove` forms are pinned to `doc-release.yml`'s `--allowedTools` | Changing the release flow (change the template and its test in the same commit) |
@@ -135,6 +137,8 @@ doc-superpowers/
 | `references/tool-mappings.md` | The one capability matrix — per-client tool names and capabilities (INSTALL files, AGENTS.md and GEMINI.md link here), tool resolution | Adding framework support, tool name or capability changes |
 | `AGENTS.md` | Cross-client agent instructions | Adding commands, changing project orientation |
 | `.opencode/plugins/doc-superpowers.js` | OpenCode ESM plugin | Changing skill registration or tool mapping injection |
+| `.github/workflows/tests.yml` | This repo's CI: the five suites under bash 5.x (ubuntu) and `/bin/bash` 3.2 (macOS), `check-version`, and the self-install drift check | Adding a suite, a CI requirement, or a self-installed tier |
+| `.github/workflows/doc-freshness-*.yml`, `.github/scripts/`, `.claude/doc-superpowers/installed.json`, `.gitattributes` | This repo's own installed tiers (CI; the git tier's merge-driver attribute) — installer output | Never by hand: after changing a CI template, `doc-tools.sh` or a CI helper script, run `bash scripts/hooks/install.sh install --ci` and commit what it writes (tests.yml fails on drift) |
 | `RELEASE-NOTES.md` | Version history | Every release |
 | `README.md` | User-facing docs | Feature changes |
 
@@ -151,10 +155,10 @@ doc-superpowers/
 - `/doc-superpowers hooks uninstall` — Remove installed hooks
 - `/doc-superpowers release` — Draft release notes entry from git history
 - `/doc-superpowers spec-generate --design-doc=<path>` — Generate formal specs from design doc
-- `/doc-superpowers spec-inject --phase=plan|execute --specs=<paths>` — Inject spec tasks or track drift
-- `/doc-superpowers spec-verify --mode=post-execute|review --specs=<paths>` — Verify spec compliance
+- `/doc-superpowers spec-inject --phase=plan|execute --specs=<paths> [--plan=<path>]` — Inject spec tasks into the plan (`--plan` required) or track drift after a chunk
+- `/doc-superpowers spec-verify --mode=post-execute|review --specs=<paths> [--plan=<path>]` — Verify spec compliance
 
-Each `--specs` path may carry an optional role suffix — `<path>:target` or `<path>:constraint`. Unsuffixed paths stay valid and are role-inferred at execution time.
+Each `--specs` path may carry an optional role suffix — `<path>:target`, `<path>:constraint` or `<path>:amends`. Unsuffixed paths stay valid and are role-inferred at execution time; inference never yields `:amends` (an amendment corrects what a spec *says* without building its surface: it writes no `Status`, and is verified as landed). Pass `--plan=<path>` to `spec-verify` so an `:amends` spec's landed-check can confirm the `AMENDED` block cites that plan; without it the check degrades to block-present and warns.
 
 ## Conventions
 
@@ -162,4 +166,5 @@ Each `--specs` path may carry an optional role suffix — `<path>:target` or `<p
 - **Skill structure**: Follows obra/superpowers SKILL.md conventions (YAML frontmatter with `name` + `description`)
 - **Templates**: All doc templates live in `references/doc-spec.md`, not inline in SKILL.md
 - **Diagrams**: Mermaid source in docs, PNGs committed for GitHub rendering
-- **Testing**: Five shell suites gate changes — `test-doc-tools.sh` (281 assertions), `test-hooks.sh` (345), `test-spec-status-model.sh` (86), `test-doc-pr-release.sh` (109), `test-merge-driver.sh` (486), 1307 total (no XFAIL left: the harness's known-bug markers, reported on every run and turned into a FAIL the moment the bug is fixed, have all been resolved), all sharing the `test-helpers.sh` harness. The harness isolates every fixture from the contributor's git config (`GIT_CONFIG_GLOBAL=/dev/null`, private `HOME`), keeps all scratch files under one private root removed on EXIT/INT/TERM, and never runs with the checkout as cwd. All five run in CI via `.github/workflows/tests.yml` on push to `main` and on every PR, matrixed over `ubuntu-latest` (bash 5.x) and `macos-latest` (`/bin/bash` 3.2.57). The interpreter is passed explicitly at both levels: CI runs each suite under `$BASH_BIN`, and `test-helpers.sh`'s `bash_bin_shim()` wraps every script under test so it `exec`s under the same interpreter instead of re-resolving bash from its own `#!/usr/bin/env bash`. Without the shim the 3.2 leg silently tests whatever bash the runner image puts first on `PATH` — bash 3.2 is a real support target (it is what macOS ships, so it is what a consuming project's git hooks run under), and `test-doc-tools.sh` carries a static guard that fails on any bash-4-only construct in the shipped scripts. Test skill changes by running `/doc-superpowers init` on a sample project
+- **Testing**: Five shell suites gate changes — `test-doc-tools.sh` (1192 assertions), `test-hooks.sh` (844), `test-spec-status-model.sh` (432), `test-doc-pr-release.sh` (406), `test-merge-driver.sh` (486), 3360 total (no XFAIL left: the harness's known-bug markers, reported on every run and turned into a FAIL the moment the bug is fixed, have all been resolved), all sharing the `test-helpers.sh` harness. These counts are kept **only here** — every other doc links to this section. Before a PR, run all five under both interpreters: `for B in bash /bin/bash; do for s in doc-tools hooks spec-status-model doc-pr-release merge-driver; do BASH_BIN=$B $B scripts/test-$s.sh || echo "FAIL: $B $s"; done; done`. The harness isolates every fixture from the contributor's git config (`GIT_CONFIG_GLOBAL=/dev/null`, private `HOME`), keeps all scratch files under one private root removed on EXIT/INT/TERM, and never runs with the checkout as cwd. All five run in CI via `.github/workflows/tests.yml` on push to `main` and on every PR, matrixed over `ubuntu-latest` (bash 5.x) and `macos-latest` (`/bin/bash` 3.2.57). The interpreter is passed explicitly at both levels: CI runs each suite under `$BASH_BIN`, and `test-helpers.sh`'s `bash_bin_shim()` wraps every script under test so it `exec`s under the same interpreter instead of re-resolving bash from its own `#!/usr/bin/env bash`. Without the shim the 3.2 leg silently tests whatever bash the runner image puts first on `PATH` — bash 3.2 is a real support target (it is what macOS ships, so it is what a consuming project's git hooks run under), and `test-doc-tools.sh` carries a static guard that fails on any bash-4-only construct in the shipped scripts. Locally, a missing YAML parser (PyYAML or ruby's psych) or `node` turns the cases that need it into a loud SKIP; CI sets `DOC_SP_REQUIRE_YAML_PARSER=1` and `DOC_SP_REQUIRE_NODE=1`, which make them FAILs. Test skill changes by running `/doc-superpowers init` on a sample project
+- **Self-installed tiers (dogfood)**: this repo runs its own tiers. The CI tier is committed: `.github/workflows/doc-freshness-{pr,schedule}.yml` rendered with the choices recorded in `.claude/doc-superpowers/installed.json` (strict), and `.github/scripts/` vendored. The git tier's merge-driver attribute is in `.gitattributes`; its hooks and the Claude tier are per-clone / per-user (`bash scripts/hooks/install.sh install --git --claude`; the Claude tier's files are gitignored). After changing a CI template, `scripts/doc-tools.sh` or a CI helper script, run `bash scripts/hooks/install.sh install --ci` and commit what it writes: tests.yml's *Self-installed CI tier matches its templates* step fails on any drift

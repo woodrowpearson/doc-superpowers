@@ -1,10 +1,10 @@
 # Design: Guarded, Scope-Aware Spec Status Transitions
 
 **Date:** 2026-07-24
-**Status:** Approved
+**Status:** Implemented (v2.13.0, 2026-07-24) and since extended: v2.15.0 added a third spec role, the **amendment** (`:amends`), and v3.0.0 made the per-chunk writer single and the amendment landed-check section-aware. The canonical, current text is the **Spec Status Model** section of `references/spec-lifecycle-actions.md`. This design supersedes the Status transition rules of `docs/superpowers/specs/2026-03-14-spec-lifecycle-protocol-design.md`.
 **Author:** woodrow pearson
 **Issue:** [#12](https://github.com/woodrowpearson/doc-superpowers/issues/12)
-**Target version:** 2.13.0
+**Target version:** 2.13.0 (shipped)
 
 ## Problem
 
@@ -108,6 +108,13 @@ not advance it). Resolution, in precedence order:
 
 A spec resolved as **constraint** is never written: no `Status` change, no Implementation
 Notes, no `code_refs` refinement, no `update-index` call.
+
+> ⚠️ **AMENDED 2026-09-28 — three roles, not two.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14. v2.15.0 added the
+> **amendment** role, explicit-only (`--specs=<path>:amends`; inference never yields it): the
+> plan corrects what the spec *says* without building its surface. It is status-neutral like a
+> constraint, but the spec is written — a dated `AMENDED` block in the corrected section that
+> cites the plan — and `spec-inject` / `spec-verify` check that block landed (`spec-verify
+> --plan=<path>` for the citation half). See `references/spec-lifecycle-actions.md`, *Spec roles*.
 
 **Timing constraint (important).** Role inference requires the changed-file set, which does
 not exist at plan-authoring time — nothing is implemented yet when `spec-inject --phase=plan`

@@ -79,7 +79,8 @@ chore: <maintenance task>
 
 - Keep PRs focused on a single change
 - Test skill changes by running `/doc-superpowers init` on a sample project before merging
-- Run the five shell test suites — `scripts/test-doc-tools.sh` (281 assertions), `scripts/test-hooks.sh` (345), `scripts/test-merge-driver.sh` (486), `scripts/test-doc-pr-release.sh` (109), `scripts/test-spec-status-model.sh` (86), 1307 total (3 XFAIL known bugs) — all must pass before merge, under both bash 5.x and `/bin/bash` 3.2. They share the `scripts/test-helpers.sh` harness (isolated git environment, private scratch root, pipefail-safe asserts, SKIP/XFAIL reporting)
+- Run the five shell test suites — `scripts/test-doc-tools.sh`, `scripts/test-hooks.sh`, `scripts/test-merge-driver.sh`, `scripts/test-doc-pr-release.sh`, `scripts/test-spec-status-model.sh` — all must pass before merge, under both bash 5.x and `/bin/bash` 3.2. Their assertion counts and the command that runs the matrix are in [CLAUDE.md → Conventions](../CLAUDE.md#conventions), the one place they are kept. They share the `scripts/test-helpers.sh` harness (isolated git environment, private scratch root, pipefail-safe asserts, SKIP/XFAIL reporting)
+- A change to a CI template, `scripts/doc-tools.sh` or a CI helper script also re-runs `bash scripts/hooks/install.sh install --ci` and commits what it writes: this repository installs its own CI tier, and `.github/workflows/tests.yml` fails when the installed copies drift from their sources
 - Include before/after examples for behavior changes
 
 ## Documentation Conventions
@@ -107,7 +108,7 @@ The marker identifies a generated doc and carries no date or commit. Freshness i
 - Every finding requires evidence (exact doc quote vs exact code quote)
 - No "looks stale" without specific discrepancies
 - Includes RELEASE-NOTES.md currency findings (unreleased commits since last version entry)
-- See `references/output-templates.md` for the full report format and plan template
+- See `references/output-templates.md` for the full report format (with its Update Tasks, the handoff to `update`) and the spec compliance report
 
 ### CLAUDE.md Cross-Cutting Sync
 
@@ -158,7 +159,7 @@ Missing tools trigger fallbacks, never failures:
 |---------|----------|
 | Mermaid MCP | Inline Mermaid source |
 | Doc-index (first run) | `check-freshness` reports missing — run `init` to build |
-| `jq` | `doc-tools.sh` exits with install instructions |
+| `jq`, or a `jq` older than 1.6 | `doc-tools.sh` exits non-zero naming the requirement (`jq >= 1.6`: the index writers use `--args` / `$ARGS.positional`) and the version found |
 | User-provided scripts | Bundled tooling handles core operations; optional scripts supplement |
 
 ### Evidence-Based Verification
@@ -190,7 +191,7 @@ Generated documentation follows strict naming conventions for consistency and ma
 | `docs/workflows/` | Process flows, CI/CD | `docs/workflows/diagrams/` |
 | `docs/workflows/agentic/` | Agentic workflow docs | `docs/workflows/diagrams/` |
 | `docs/guides/` | Getting started, onboarding | n/a |
-| `docs/plans/` | Implementation plans | n/a |
+| `docs/plans/` | Audit reports and plans | n/a |
 | `docs/archive/` | Superseded/deleted docs by type | n/a |
 
 ### Diagram Co-location
@@ -296,7 +297,7 @@ Spec files use a `Status` field. Ladder statuses progress monotonically; exempt 
 | `Superseded` | Exempt | Replaced by another spec | human only — `spec-generate` writes the `Superseded by` field and the index entry, not this `Status` |
 | any other status | Exempt | Unrecognized vocabulary — anything not on the ladder above | nothing — `spec-verify` reports it informationally, and no action ever writes or corrects it |
 
-Transitions: `Draft` → `In Review` → `Approved` → `Implemented`, monotonic — never regress. `spec-verify` is read-only and writes no `Status`; the writes belong to `spec-inject`. Role gates before status: a path passed as a **constraint** reference is never written at all — no `Status`, no Implementation Notes, no `code_refs` refinement. For a **target**, coverage gates the top rung — Full coverage makes it eligible for `Implemented`, Partial coverage holds it at `In Review` with the remaining scope recorded in Implementation Notes. See the **Spec Status Model** section of `references/spec-lifecycle-actions.md` for roles, coverage classes, and evaluation order.
+Transitions: `Draft` → `In Review` → `Approved` → `Implemented`, monotonic — never regress. `spec-verify` is read-only and writes no `Status`; the writes belong to `spec-inject`. Role gates before status: a path passed as a **constraint** reference is never written at all — no `Status`, no Implementation Notes, no `code_refs` refinement. A path passed as an **amendment** (`--specs=<path>:amends`, never inferred) is status-neutral too: the plan corrects what the spec *says* without building its surface, so `spec-inject --phase=plan` injects one task that verifies the dated `AMENDED` block landed and cites the plan, and `spec-verify` re-runs that landed-check (post-execute FAILs, review reports **P1 Amendment not landed** when it is absent or unattributed). Pass `spec-verify --plan=<path>` for the full check; without it the citation half is skipped and reported as unverified. For a **target**, coverage gates the top rung — Full coverage makes it eligible for `Implemented`, Partial coverage holds it at `In Review` (or leaves it at `Approved`, never regressing) with the remaining scope recorded in Implementation Notes. See the **Spec Status Model** section of `references/spec-lifecycle-actions.md` for roles, coverage classes, and evaluation order.
 
 ### Supersession Conventions
 
@@ -362,7 +363,8 @@ Only `deprecated` is **stored**. `current`, `stale` and `missing` are **computed
 | (new) | no stored status, `last_verified: null` | `build-index` / `add-entry` record the entry unverified, against the doc's own last commit. It computes `current` if the code has not changed since the doc was written, `stale` if it has |
 | `current` | `stale` (computed) | A code ref's content differs from `code_oids` (legacy entries: a newer commit touching the refs) |
 | `stale` | `current` (computed) | `update-index` after the doc is checked against its code: records the working tree's content and stamps `last_verified` |
-| any | `current` (computed, `"record": true`) | Record docs (`plan`, `issue`, `audit`, `design-spec`, `docs/archive/`) are never compared |
+| any but `deprecated` | `missing` (computed) | The doc's file is gone (with `--tree`: absent from that tree) — record docs included |
+| any but `deprecated` / `missing` | `current` (computed, `"record": true`) | Record docs (`plan`, `issue`, `audit`, `design-spec`, `docs/archive/`) are never compared |
 | any | `deprecated` (stored) | `deprecate-entry`: a human decision, or spec supersession via `spec-generate` (`--superseded-by` also sets the successor's `replaces`) |
 | `deprecated` | — | Terminal for automated tools: `update-index`, `move-entry`, `set-code-refs` and `build-index --force` all keep it |
 
@@ -377,9 +379,9 @@ Keys are **relative to the repo root**, and the subcommands enforce it: an absol
 Each entry in the index (keyed by relative doc path) contains:
 - `content_hash` — `sha256:<hex>` hash of doc file content
 - `code_refs` — list of literal paths (directories/files, `.` for the repo root) this doc covers
-- `code_oids` — per ref, the git object id of its content in the entry's baseline: the working tree when `update-index` verified the doc, or the doc's last commit when `build-index` / `add-entry` indexed it (blob, tree or `missing`); freshness is judged against it
+- `code_oids` — per ref, the git object id of its content in the entry's baseline: the working tree when `update-index` verified the doc, or the doc's last commit when `build-index` / `add-entry` indexed it (a blob for a file, a tree for a directory, the submodule's commit for a submodule — read from its gitlink with `git ls-tree` — or `missing`); freshness is judged against it
 - `code_commit` — a baseline commit no newer than any ref's recorded content: the newest commit touching any `code_refs` as of HEAD for `update-index`, or as of the doc's last commit for `build-index` / `add-entry`. `move-entry` keeps it. `set-code-refs` keeps it when every ref is kept (refs only removed, re-spelled or reordered), and derives it as `add-entry` does when every ref's content comes from the doc's last commit. With both, it records the older baseline: `git merge-base` of the stored and the derived commit, or null when the stored one is unusable (absent, not an object id, not a commit of this repository, or not an ancestor of HEAD), when there is no derived one, or when they share no ancestor. So `commits_behind` may over-count, but is never a masked `0`. It is null in a shallow clone. Display and `commits_behind` baseline only
-- `doc_type` — template type: `architecture`, `workflows`, `api-contracts`, `spec`, `adr`, etc.
+- `doc_type` — template type: `architecture`, `workflows`, `guide`, `api-contracts`, `spec`, `adr`, etc.; `plan`, `issue`, `audit` and `design-spec` mark a record doc (never stale)
 - `status` — stored only as `deprecated`, otherwise absent (`current` / `stale` are computed by `check-freshness`, never written)
 - `replaces` — path to doc this one supersedes (null if none)
 - `superseded_by` — path to doc that supersedes this one (null if none)

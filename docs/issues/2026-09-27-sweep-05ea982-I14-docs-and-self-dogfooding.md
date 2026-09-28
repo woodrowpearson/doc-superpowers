@@ -1,6 +1,6 @@
 ---
 date: 2026-09-27
-status: Open
+status: Resolved
 priority: P1
 type: bug
 component: docs
@@ -184,3 +184,95 @@ find why jobs stop before starting. Then:
 - [ ] The self-installed freshness workflows run doc-tools and fail closed.
 - [ ] `check-freshness` on this repo reports only genuinely living docs as stale.
 - [ ] No doc claims a hook behaviour the hook lacks.
+
+## Resolution (Task 14)
+
+Resolved by Task 14 of the fix plan, in commits `8121b14` (dogfood) and the one that carries
+this section (tests, docs, index). The CI-execution item stays an **owner action** — not a code
+change, and not done: Actions is still blocked by the account's billing lock, so none of this has
+run in GitHub Actions yet.
+
+**Dogfood.** The fixed installer was run from this checkout onto this checkout, once per tier:
+- **CI tier** (`install --ci`): the two freshness workflows re-rendered from the current
+  templates with the choices read back from the old copies (base `main`, cron `0 9 * * 1`,
+  strict `true`) and recorded in `.claude/doc-superpowers/installed.json`;
+  `.github/scripts/doc-tools.sh` and `.github/scripts/doc-superpowers-steps/` vendored. All of
+  it is committed, so the workflows now run the tool they call, and they fail closed.
+- **Claude tier** (`install --claude`): per-user, as R8 decided. `.claude/settings.local.json`
+  and `.claude/hooks/doc-superpowers/` are untracked and git-ignored: the rendered hooks name the
+  installing machine's plugin path, which is what left the tier dead on every other clone.
+- **Git tier** (`install --git`): the shared `.git/hooks` copies were the 2026-03-29 v1 hooks
+  (including the prepare-commit-msg that wrote `# stale:` lines into `-m` messages). They are
+  replaced, the three-way merge driver is registered, and its `.gitattributes` block is
+  committed.
+- **Drift guard:** `tests.yml` gained *Self-installed CI tier matches its templates*, run on
+  both matrix legs. It re-renders every workflow the state file records with the recorded
+  choices and `diff`s it against the installed copy, `cmp`s the vendored `doc-tools.sh` and every
+  vendored helper against the plugin's, requires each script a workflow runs to be present and
+  executable, and checks the index's merge-driver attribute. Locally it passed on the installed
+  tree and failed on an edited workflow, an edited vendored tool, and a helper without its exec
+  bit (Task 14 report).
+
+**Index hygiene** (through `doc-tools.sh` verbs only). Record docs' `code_refs` are emptied
+(`set-code-refs --refs ''`). The two older issues are retyped `issue`, the six design specs
+`design-spec`, and the five `[""]` entries are now `[]`. No verb changes `doc_type`, and
+`set-code-refs` treats `[""]` as `[]` (no write) and keeps a stored `code_commit`, so those
+entries were re-indexed with `remove-entry` + `add-entry`, unverified (`last_verified: null`).
+That also dropped the last `code_commit`s reachable only from tag v2.12.0 (`f063b04` on two
+entries and `abb3e64`; the third, `c2496da`, was already gone). The archived plans
+are deprecated.
+
+**Living docs.** Suite counts live only in CLAUDE.md, and the other docs link to it. `:amends`
+and `spec-verify --plan` are now in CLAUDE.md, the workflows doc, the codebase guide and the
+conventions. Also fixed:
+- the status table (a `missing` row; record docs are `current` only when present);
+- the dependency lines (`jq` ≥ 1.6, bash ≥ 3.2, no GNU tools);
+- the Mermaid MCP location (`claude mcp add`, `.mcp.json`);
+- the directory trees (`tests.yml`, `.github/scripts/`, the per-user Claude tier);
+- README *Contributing* (run the five suites; re-install the CI tier);
+- the workflows doc's discovery, `update` and `sync` steps, which still ran project scripts and
+  rebuilt the index.
+
+The C4, primary, discovery, init and hooks PNGs are re-rendered, with the C4 descriptions cut
+back to fit. `__DOC_TOOLS_PARENT__` / `__DOC_TOOLS_PATH__` no longer appear in any living doc.
+The two `doc-tools.sh` comments that cited a plan this repo never had are corrected.
+
+**Governing specs.** The Status headers are corrected in the five governing specs, and the pages
+spec's `Approved` stands. 2026-03-14 points to 2026-07-24, which supersedes its transitions.
+Dated **AMENDED** blocks (the repo's spec-amendment form, citing the fix plan's Task 14) now sit
+at each drifted mechanism:
+- **the hooks spec**, in lockstep with Tasks 6–9:
+  - the four failing mechanisms (the `#` block, the no-argument `update-index`, the root-commit
+    `diff-tree`, the 1 s budget);
+  - the placeholder, local copy and hooks-dir samples;
+  - the untracked hint and the integration point;
+  - the retired `doc-index-update.yml`;
+  - a superseded pointer on the newest-wins merge driver;
+- **the tooling spec**: content identity, schema 3, the `add-entry` hint, the relaxed
+  writing-plans rule, and the version floors;
+- **the protocol spec**: `add-entry`, the guarded transitions, and what `check-freshness`
+  compares;
+- **the release spec**: the current flow, step 9, and five manifests;
+- **the transition-model spec**: the third role, `:amends`.
+
+**Test noise.** Three wall-clock guards were made load-robust, and each still guards what it
+did:
+- the check-freshness scale bound is 20 s, still under half the per-doc cost, next to its exact
+  spawn counts;
+- the deprecate/remove budgets are 10 s, still below the quadratic time;
+- the session-summary output guard stretches the watchdog's sleep to 60 s with a `sleep` shim,
+  so a held output costs a minute instead of racing a 2 s budget. It was mutation-tested.
+
+**Acceptance criteria.**
+- The Tests workflow executing on `main` and required by branch protection is an owner action,
+  **open**.
+- The self-installed freshness workflows run the committed doc-tools and fail closed. This is
+  **done in code**; one real Actions run is still pending the billing lock.
+- `check-freshness` on this repo reports only genuinely living docs as stale. **Done**: none are
+  stale after this Task's verification.
+- No doc claims a hook behaviour the hook lacks. **Done**: the hooks spec's claims are amended,
+  and the living docs were rechecked.
+
+**Left for the release flow:** the RELEASE-NOTES v2.14.0 `[""]` explanation. RELEASE-NOTES.md is
+the release's file.
+

@@ -6,10 +6,10 @@
 
 ```
 doc-superpowers/
-├── .claude/              # Self-installed Claude Code hook tier
-│   ├── settings.local.json   # Hook wiring (PreToolUse, PostToolUse, Stop)
-│   └── hooks/
-│       └── doc-superpowers/  # pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh
+├── .claude/
+│   └── doc-superpowers/
+│       └── installed.json    # This repo's own CI tier record (committed); the Claude tier (settings.local.json,
+│                             # hooks/doc-superpowers/) is per-user: install it yourself, gitignored
 ├── .claude-plugin/       # Claude Code plugin manifest + marketplace
 │   ├── plugin.json
 │   └── marketplace.json
@@ -18,10 +18,12 @@ doc-superpowers/
 │   └── INSTALL.md
 ├── .codex/               # Codex installation guide
 │   └── INSTALL.md
-├── .github/
-│   └── workflows/        # This repo's own installed CI — the 2 default shell-based workflows
-│       ├── doc-freshness-pr.yml
-│       └── doc-freshness-schedule.yml
+├── .github/              # This repo's own installed CI tier (install.sh install --ci) + tests.yml
+│   ├── scripts/          # Vendored by the installer: doc-tools.sh + doc-superpowers-steps/ (byte copies)
+│   └── workflows/
+│       ├── doc-freshness-pr.yml       # The 2 default shell-based workflows, rendered with the recorded choices
+│       ├── doc-freshness-schedule.yml
+│       └── tests.yml     # This repo only: the five suites under bash 5.x and /bin/bash 3.2, check-version, and the self-install drift check
 ├── .opencode/            # OpenCode plugin + installation guide
 │   ├── INSTALL.md
 │   └── plugins/
@@ -34,7 +36,7 @@ doc-superpowers/
 ├── gemini-extension.json # Gemini CLI extension manifest
 ├── package.json          # npm/OpenCode package metadata
 ├── scripts/
-│   ├── doc-tools.sh      # Bundled freshness tooling (build-index, check-freshness, update-index, add-entry, remove-entry, move-entry, set-code-refs, deprecate-entry, status, bump-version, check-version, implementation-status, set-implementation, fragments {list, validate, merge}, tools {install, uninstall, status})
+│   ├── doc-tools.sh      # Bundled freshness tooling (build-index, check-freshness, update-index, add-entry, remove-entry, move-entry, set-code-refs, deprecate-entry, status, bump-version, check-version, implementation-status, set-implementation, fragments {list, validate, merge}, tools {install, uninstall, status, version})
 │   ├── test-doc-tools.sh # Test suite for doc-tools.sh
 │   ├── test-doc-pr-release.sh # Test suite for the per-PR release-notes fragment producer workflow + helpers
 │   ├── test-spec-status-model.sh # Test suite for the canonical Spec Status Model + call sites
@@ -64,21 +66,23 @@ doc-superpowers/
 │           ├── doc-spec-verify.yml        # AI spec compliance on PRs (scope-gated on indexed specs)
 │           ├── doc-pr-full-cycle.yml      # AI PR full cycle: review, update, diagram, sync (scope-gated; checked commit step; shared write group)
 │           ├── doc-pr-release.yml         # AI per-PR release-notes fragment producer — drafts/maintains RELEASE-NOTES.next/PR-<N>.md and syncs a managed section in the PR body
-│           └── doc-pr-release/            # Colocated shell helpers for doc-pr-release.yml
-│               ├── extract-context.sh         # Emits JSON context blob (PR body, existing fragment + its hash state, the PR's own commits since the last recorded sync)
-│               ├── update-pr-body.sh          # Idempotently merges a managed section into the PR body
-│               ├── fragment-lib.sh            # Sourced by commit-and-push, extract-context and verify-fragment: the fragment line rules (markers, hash line, sha256)
-│               ├── commit-and-push.sh         # Seals the fragment, commits only it ([doc-superpowers] prefix + Drafted-From trailer), pushes only while the branch is at the checkout (a workflow step, never the agent)
-│               └── RELEASE-NOTES.next.README.md # Fragment-format spec dropped into consuming repos (only if missing)
+│           ├── doc-pr-release/            # Colocated shell helpers for doc-pr-release.yml
+│           │   ├── extract-context.sh         # Emits JSON context blob (PR body, existing fragment + its hash state, the PR's own commits since the last recorded sync)
+│           │   ├── update-pr-body.sh          # Idempotently merges a managed section into the PR body
+│           │   ├── fragment-lib.sh            # Sourced by commit-and-push, extract-context and verify-fragment: the fragment line rules (markers, hash line, sha256)
+│           │   ├── commit-and-push.sh         # Seals the fragment, commits only it ([doc-superpowers] prefix + Drafted-From trailer), pushes only while the branch is at the checkout (a workflow step, never the agent)
+│           │   └── RELEASE-NOTES.next.README.md # Fragment-format spec dropped into consuming repos (only if missing)
 │           └── doc-superpowers-steps/     # run: step bodies of every template — freshness-check (freshness gate/audit, AI scope gate), resolve-auth, prepare-agent (pinned plugin), commit-changes (checked commit), pr-guard (same-repo), sentinel-check, write-context, verify-fragment, precheck; installed with any workflow
 ├── references/
 │   ├── doc-spec.md       # Templates for all generated doc types + Mermaid syntax + naming conventions
 │   ├── agent-prompt-template.md   # Review agent prompt template + scope focus areas
-│   ├── output-templates.md        # Audit report format + plan template
-│   ├── spec-lifecycle-actions.md  # Detailed procedures for spec-generate/inject/verify
+│   ├── output-templates.md        # Audit report format (with its Update Tasks) + spec compliance report
+│   ├── release.md                 # `release` action steps 1–12 (SKILL.md points here: REQUIRED)
+│   ├── hooks.md                   # `hooks` action: installer routing, consent table, CI templates (REQUIRED)
+│   ├── spec-lifecycle-actions.md  # Detailed procedures for spec-generate/inject/verify + the Spec Status Model
 │   ├── integration-patterns.md  # Code review, commit review, wrapper skill integration
 │   ├── spec-lifecycle-protocol.md  # Wrapper author integration guide — input/output contracts
-│   └── tool-mappings.md           # Cross-framework tool name mappings
+│   └── tool-mappings.md           # The one capability matrix: per-client tool names + capabilities, tool resolution
 ├── docs/                 # Documentation about this skill (you are here)
 │   ├── architecture/
 │   │   ├── system-overview.md  # C4 diagrams, tech stack, key decisions
@@ -103,29 +107,33 @@ doc-superpowers/
 ├── LICENSE               # MIT License
 ├── RELEASE-NOTES.md      # Semantic versioned changelog
 ├── evals/
-│   └── evals.json        # Skill behavior evaluation tests
+│   ├── evals.json        # Skill behavior evaluations with machine-checkable fields (path / pattern / command)
+│   └── fixtures/         # lib.sh + <eval>/setup.sh — each eval's scenario, built in an empty dir
 ├── .worktrees/           # Git worktrees for parallel agent dispatch (gitignored)
-└── .gitignore            # OS files, editor configs, worktrees
+├── .gitattributes        # This repo's own git tier: docs/.doc-index.json → the doc-index merge driver
+└── .gitignore            # OS files, editor configs, worktrees, the per-user Claude tier, index lock/temp files
 ```
 
 ## Key Files
 
 | File | Purpose | When to Modify |
 |------|---------|---------------|
-| `skills/doc-superpowers/SKILL.md` | Core skill logic: discovery phase, 11 action handlers (init, audit, review-pr, update, diagram, sync, hooks, release, spec-generate, spec-inject, spec-verify), agent prompt templates, verification gates, error handling | Adding/changing actions, modifying agent behavior, updating discovery logic |
-| `scripts/doc-tools.sh` | Bundled freshness tooling with 15 subcommands: `build-index`, `check-freshness`, `update-index` (the one verb that attests: the only writer of `last_verified`), `add-entry`, `remove-entry`, `move-entry` (re-key an entry after a doc moves, preserving `code_refs`/`code_oids`/`code_commit`/`last_verified` — the lossless alternative to `remove-entry` + `add-entry`; `--stdin` for a batch), `set-code-refs` (change an entry's `code_refs` in place), `deprecate-entry` (also sets the successor's `replaces`), `status`, `bump-version`, `check-version`, `implementation-status`, `set-implementation`, `fragments {list, validate, merge}`, `tools {install, uninstall, status}` (vendors doc-tools.sh + per-PR release-notes helpers into a consumer repo). Content hashing for docs, content identity for code (each code ref's git object id, `code_oids`, compared with one `git cat-file --batch-check`), SHA-256 hashing for per-PR release-notes fragments. Every write to `docs/.doc-index.json` goes through one locked, atomic writer (`_index_apply`; see Code Flow → "Index write path") | Changing staleness detection, index schema, version sync, fragment parsing, adding subcommands, changing how the index is persisted |
+| `skills/doc-superpowers/SKILL.md` | Core skill logic: Quick Reference (actions + references), Safety Rules (trust boundary, secrets, confirm before moving docs, never auto-run repository scripts), discovery phase (tool resolution through `${CLAUDE_SKILL_DIR}/../..`, the index-write routing table, scopes, agentic inventory), 11 action handlers (init, audit, review-pr, update, diagram, sync, hooks, release, spec-generate, spec-inject, spec-verify — `release`, `hooks` and the spec actions hand their procedures to REQUIRED references), verification gates, error handling, common mistakes | Adding/changing actions, modifying agent behavior, updating discovery logic |
+| `scripts/doc-tools.sh` | Bundled freshness tooling with 15 subcommands: `build-index`, `check-freshness`, `update-index` (the one verb that attests: the only writer of `last_verified`), `add-entry`, `remove-entry`, `move-entry` (re-key an entry after a doc moves, preserving `code_refs`/`code_oids`/`code_commit`/`last_verified` — the lossless alternative to `remove-entry` + `add-entry`; `--stdin` for a batch), `set-code-refs` (change an entry's `code_refs` in place), `deprecate-entry` (also sets the successor's `replaces`), `status`, `bump-version`, `check-version`, `implementation-status`, `set-implementation`, `fragments {list, validate, merge}`, `tools {install, uninstall, status, version}` (vendors doc-tools.sh + the CI helpers into a consumer repo; prints the plugin's version). Content hashing for docs, content identity for code (each code ref's git object id, `code_oids`, compared with one `git cat-file --batch-check`), SHA-256 hashing for per-PR release-notes fragments. Every write to `docs/.doc-index.json` goes through one locked, atomic writer (`_index_apply`; see Code Flow → "Index write path") | Changing staleness detection, index schema, version sync, fragment parsing, adding subcommands, changing how the index is persisted |
 | `scripts/test-doc-tools.sh` | Comprehensive test suite for doc-tools.sh — tests all subcommands (including `fragments`), edge cases, error handling | Adding tests for new doc-tools features |
 | `scripts/test-doc-pr-release.sh` | Test suite for the CI workflow helpers (on the shared `test-helpers.sh` harness) — covers `extract-context.sh`, `update-pr-body.sh`, `commit-and-push.sh`, the `run:` step scripts in `doc-superpowers-steps/` (run as a workflow step runs them, from an installed fixture), workflow YAML placeholder substitution, template structure/wiring, and the installed templates' rules (fail closed, scalar outputs, timeouts, pins, AI token/plugin/tools, same-repo guard, write group, checked commit) (missing YAML parser = loud SKIP locally, FAIL in CI) | Adding tests for the fragment producer workflow or its helpers |
-| `scripts/test-spec-status-model.sh` | Test suite pinning the canonical Spec Status Model wording and its call sites | Changing spec status transition rules, roles, or vocabulary |
+| `scripts/test-spec-status-model.sh` | Test suite pinning the canonical Spec Status Model wording and its call sites, the skill prompt ↔ tool contract (commands extracted from SKILL.md and the references and run against fixtures), `evals/evals.json`, the cross-client packaging, and the OpenCode plugin run under `node` | Changing spec status transition rules, roles, or vocabulary; what SKILL.md / references tell an agent to run; an eval; a manifest |
 | `scripts/test-helpers.sh` | Shared test harness sourced by every suite: private scratch root cleaned on EXIT/INT/TERM, isolated git environment (`GIT_CONFIG_GLOBAL=/dev/null`, private `HOME`), pipefail-safe asserts, `assert_true`, SKIP and known-bug (XFAIL) reporting | Adding shared test utilities or assertions |
-| `scripts/hooks/install.sh` | Hook installer engine — install/uninstall/status for git, Claude Code, and CI tiers. Registers 3 Claude Code hooks (PreToolUse, PostToolUse, Stop) and 5 git hooks. The `--git` tier also registers a custom merge driver for `.doc-index.json` conflict resolution. CI tier: the 3 shell workflows by default, the AI ones by name via `--workflows=<csv\|all\|none>`, plus `--helpers=<bool>`, `--force` (bypass state-respect), `--transient` (uninstall without marking intentional); vendoring through `doc-tools.sh tools install\|uninstall --helper`. Places everything with git plumbing (`--show-toplevel`, `--git-path hooks`), refuses symlinked write targets and a non-local `core.hooksPath`, owns only marked blocks / its own settings entries, and runs every check before the first write. Sources `state.sh` for install-state tracking | Adding hook tiers, changing installer logic, adding new hook scripts, changing install-state semantics |
+| `scripts/hooks/install.sh` | Hook installer engine — install/uninstall/status for git, Claude Code, and CI tiers. Registers 3 Claude Code hooks (PreToolUse, PostToolUse, Stop) and 5 git hooks. The `--git` tier also registers a custom merge driver for `.doc-index.json` conflict resolution. CI tier: the 2 shell workflows by default, the AI ones by name via `--workflows=<csv\|all\|none>`, plus `--helpers=<bool>`, `--force` (bypass state-respect), `--transient` (uninstall without marking intentional); vendoring through `doc-tools.sh tools install\|uninstall --helper`. Places everything with git plumbing (`--show-toplevel`, `--git-path hooks`), refuses symlinked write targets and a non-local `core.hooksPath`, owns only marked blocks / its own settings entries, and runs every check before the first write. Sources `state.sh` for install-state tracking | Adding hook tiers, changing installer logic, adding new hook scripts, changing install-state semantics |
 | `scripts/hooks/state.sh` | CI-tier install state — `.claude/doc-superpowers/installed.json` (schema 2): the workflow set and the choices (`base_branch`, `cron`, `ci_strict`) a plain `install --ci` reproduces. One `state_load`, in-memory marks, one `state_flush` (only when the content changed; before any deletion); an unreadable file is refused, never overwritten (`installed.json.corrupt` is the recovery path). Single-writer | Changing install-state schema, bootstrap logic, or workflow-name resolution |
 | `scripts/test-hooks.sh` | Test suite for hooks installer and all hook scripts — covers install, uninstall, status, and per-hook behavior | Adding tests for new hooks or installer features |
 | `scripts/merge-doc-index.sh` | Custom git merge driver for `.doc-index.json` — a base-aware, per-key three-way merge in jq during merge/rebase/cherry-pick/revert. An entry both sides changed is merged field by field; the verification record is one unit; deprecated wins. A same-field change that `last_verified` does not order, delete vs modify, a malformed side and a signal each get `git merge-file` conflict markers and exit 1, with the key and field named. Ours' top level and key order are kept. The header comment is the specification | Changing merge conflict resolution logic |
 | `scripts/test-merge-driver.sh` | Test suite for `merge-doc-index.sh` and its registration. Fixtures are built with the real doc-tools verbs on a controlled clock, merged with real `git merge`/`git rebase` in both directions (plus `git revert`), and asserted against the base. It also has direct per-rule cases, and install.sh registration cases: a path with a space, a version bump without re-install, and no driver | Adding tests for merge driver features |
 | `references/doc-spec.md` | Templates for doc types + agentic workflow extension + Mermaid diagram syntax + CLAUDE.md rules + naming conventions + doc-index schema | Adding new doc types, changing template structure, updating Mermaid syntax |
 | `references/agent-prompt-template.md` | Review agent prompt template + scope-specific focus areas dispatched to each review agent | Changing agent review instructions, adding scope focus areas |
-| `references/output-templates.md` | Audit report format + plan template used for generating reports and update plans | Changing report structure or plan format |
+| `references/output-templates.md` | Audit report format (with its Update Tasks, the handoff `update --report=<path>` applies) + spec compliance report | Changing report structure |
+| `references/release.md` | The `release` action's steps 1–12 (SKILL.md keeps a summary and a REQUIRED pointer) | Changing the release flow |
+| `references/hooks.md` | The `hooks` action: installer routing, the per-user Claude tier, the `--ci` consent table, CI templates and helpers, install state | Changing installer flags, tiers, or workflow templates |
 | `references/spec-lifecycle-actions.md` | Detailed procedures for spec-generate, spec-inject, spec-verify actions | Changing spec action steps or adding new spec actions |
 | `references/spec-lifecycle-protocol.md` | Wrapper author integration guide — input/output contracts for spec-generate, spec-inject, spec-verify; integration patterns for calling skills | Adding integration patterns, changing action contracts |
 | `references/tool-mappings.md` | The one capability matrix — per-client tool names and capabilities (INSTALL files, AGENTS.md and GEMINI.md link here), tool resolution | Adding framework support, tool name or capability changes |
@@ -136,6 +144,9 @@ doc-superpowers/
 | `README.md` | User-facing documentation: installation, usage examples, feature descriptions | After feature additions, new actions, changed behavior |
 | `CLAUDE.md` | Quick-reference for AI sessions: directory structure, commands, conventions | After structural changes, new conventions |
 | `RELEASE-NOTES.md` | Version history with features, fixes, lineage | Every release |
+| `.github/workflows/tests.yml` | This repo's CI: the five suites under bash 5.x and `/bin/bash` 3.2, `check-version`, and the step that fails when a self-installed file drifts from its template | Adding a suite or a CI requirement |
+| `.github/workflows/doc-freshness-*.yml`, `.github/scripts/`, `.claude/doc-superpowers/installed.json`, `.gitattributes` | This repo's own installed tiers — installer output | Never by hand: re-run `bash scripts/hooks/install.sh install --ci` after changing a CI template, `doc-tools.sh` or a CI helper, and commit the result |
+| `evals/evals.json`, `evals/fixtures/` | Skill evals with machine-checkable fields; each eval's scenario built by `fixtures/<eval>/setup.sh` | Adding or changing an eval (`test-spec-status-model.sh` validates both) |
 
 ## Where to Find Things
 
@@ -145,7 +156,10 @@ doc-superpowers/
 | Discovery phase logic | `skills/doc-superpowers/SKILL.md` Section 0 "Discovery Phase" |
 | Agent prompt template | `references/agent-prompt-template.md` |
 | Verification gate | `skills/doc-superpowers/SKILL.md` Section 2 "Verification" |
-| Audit report format + plan template | `references/output-templates.md` |
+| Audit report format (+ its Update Tasks) and spec compliance report | `references/output-templates.md` |
+| Safety rules (trust boundary, secrets, confirm before moving docs, never auto-run repository scripts) | `skills/doc-superpowers/SKILL.md` "Safety Rules" (repeated in `references/agent-prompt-template.md` for dispatched agents) |
+| Tool resolution (`$ROOT`, `$DOC_TOOLS`) | `skills/doc-superpowers/SKILL.md` Section 0 "Detect Bundled Tooling"; other clients: `references/tool-mappings.md` |
+| Which verb makes which index change | `skills/doc-superpowers/SKILL.md` Section 0 "Index-write routing" table |
 | Integration with other skills | `references/integration-patterns.md` |
 | Error handling | `skills/doc-superpowers/SKILL.md` Section 3 "Error Handling" |
 | Common mistakes | `skills/doc-superpowers/SKILL.md` Section 4 "Common Mistakes" |
@@ -160,23 +174,24 @@ doc-superpowers/
 | Version history | `RELEASE-NOTES.md` |
 | Hook installer logic | `scripts/hooks/install.sh` — placement (`enter_repo`), `safe_dest` + preflight, marked blocks, integration block, tier routing, status, per-command flag allow-list |
 | Install-state tracking | `scripts/hooks/state.sh` — `.claude/doc-superpowers/installed.json` schema 2, `state_load` / marks / `state_flush` |
-| Granular CI install flags | `skills/doc-superpowers/SKILL.md` `hooks` subsection — `--workflows=<csv\|all\|none>`, `--helpers=<bool>`, `--force`, `--transient` |
+| Granular CI install flags | `references/hooks.md` — `--workflows=<csv\|all\|none>`, `--helpers=<bool>`, `--force`, `--transient`, the consent table |
 | Tools subcommand | `scripts/doc-tools.sh` `cmd_tools_*` — `tools install [--dest <path>] [--with-helpers \| --helper <dir>...]`, `tools uninstall [--helper <dir>...]` (removes only files byte-identical to the plugin's; refuses symlinked paths), `tools status`, `tools version` |
 | Git hook scripts | `scripts/hooks/git/` — pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push |
 | Claude Code hook scripts | `scripts/hooks/claude/` — pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh |
-| CI workflow templates | `scripts/hooks/ci/` — 8 templates total (2 shell-based, 6 AI-powered; `doc-index-update.yml` was retired in v3.0.0). Shell: doc-freshness-pr.yml, doc-freshness-schedule.yml (run the vendored `.github/scripts/doc-tools.sh` through `doc-superpowers-steps/freshness-check.sh`). AI: doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml (per-PR release-notes fragment producer, with colocated helpers under `doc-pr-release/`). All actions SHA-pinned. This repo self-installs only the 2 shell-based workflows into its own `.github/workflows/` — the 6 AI ones need Anthropic credentials configured as repository secrets, so the 2-of-8 gap here is deliberate, not drift |
+| CI workflow templates | `scripts/hooks/ci/` — 8 templates total (2 shell-based, 6 AI-powered; `doc-index-update.yml` was retired in v3.0.0). Shell: doc-freshness-pr.yml, doc-freshness-schedule.yml (run the vendored `.github/scripts/doc-tools.sh` through `doc-superpowers-steps/freshness-check.sh`). AI: doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml (per-PR release-notes fragment producer, with colocated helpers under `doc-pr-release/`). All actions SHA-pinned. This repo self-installs only the 2 shell-based workflows into its own `.github/workflows/` (with the vendored `.github/scripts/` they run, and the choices in `.claude/doc-superpowers/installed.json`) — the 6 AI ones need Anthropic credentials configured as repository secrets, so the 2-of-8 gap here is deliberate, not drift. `tests.yml` fails when a self-installed file differs from its template |
 | Per-PR release-notes fragment helpers | `scripts/hooks/ci/doc-pr-release/` — `extract-context.sh`, `update-pr-body.sh`, `commit-and-push.sh`, the library they share `fragment-lib.sh` (doc-tools.sh keeps byte-identical copies of its hash-line constants and update-pr-body's fence parser; test-doc-pr-release.sh pins both), and `RELEASE-NOTES.next.README.md` (fragment-format spec installed into consuming repos). The `run:` step bodies of `doc-pr-release.yml` and `doc-release.yml` live in `scripts/hooks/ci/doc-superpowers-steps/` |
 | Release-notes fragment parsing | `scripts/doc-tools.sh fragments` — one grammar (`_FRAG_AWK`) for `list` (JSON: hash state, sections, no-notes, the problem that keeps a fragment from being consumed), `validate <path>` (exit 0/1/2), and `merge <start|ROOT> <end> [--paths-out <file>] [--remove]` (markdown sections for insertion under a `## vX.Y.Z` header, from every fragment present at `<end>`; lossless or skipped with a warning; refuses when an earlier release's commit has not reached `<end>`) |
 | Hook test suite | `scripts/test-hooks.sh` |
-| Hooks action routing | `skills/doc-superpowers/SKILL.md` Section 1 "`hooks`" subsection |
-| Spec lifecycle routing | `skills/doc-superpowers/SKILL.md` Section 1 "Spec Lifecycle Routing" + `spec-generate`, `spec-inject`, `spec-verify` subsections |
+| Hooks action routing | `skills/doc-superpowers/SKILL.md` Section 1 "`hooks`" (the non-negotiables) → `references/hooks.md` (the procedure) |
+| This repo's own installed tiers, and the check that they match their templates | `.github/workflows/` + `.github/scripts/` + `.claude/doc-superpowers/installed.json` + `.gitattributes`; `.github/workflows/tests.yml` step "Self-installed CI tier matches its templates" |
+| Spec lifecycle routing | `skills/doc-superpowers/SKILL.md` "Spec Lifecycle Routing" diagram + Section 1 "Spec Lifecycle Actions" (quick routing, the `:amends` role, `--plan`) → `references/spec-lifecycle-actions.md` (the procedures) |
 | Spec lifecycle integration guide | `references/spec-lifecycle-protocol.md` — wrapper author contracts, integration patterns |
 | Spec status transitions | `references/spec-lifecycle-actions.md` **Spec Status Model** section — canonical ladder, exemptions, and roles |
-| Spec supersession logic | `skills/doc-superpowers/SKILL.md` `spec-generate` subsection — replaces/superseded_by handling |
-| Release action routing | `skills/doc-superpowers/SKILL.md` Section 1 "`release`" subsection — commit range, semver bump, drafting agent, RELEASE-NOTES.md prepend |
+| Spec supersession logic | `references/spec-lifecycle-actions.md` `spec-generate` overlap check — `deprecate-entry <old> --superseded-by <new>` writes `superseded_by` and the successor's `replaces` |
+| Release action routing | `skills/doc-superpowers/SKILL.md` Section 1 "`release`" (summary) → `references/release.md` steps 1–12 — range start, fragment merge, semver bump, drafting agent, RELEASE-NOTES.md prepend, one release commit |
 | RELEASE-NOTES.md auditing | `skills/doc-superpowers/SKILL.md` audit step 8 — parse latest version date, detect unreleased commits, emit P2 Incomplete |
 | Release common mistakes | `skills/doc-superpowers/SKILL.md` Section 4 "Common Mistakes" — cutting a release without `/doc-superpowers release`, not syncing CLAUDE.md/README.md |
-| Archive conventions | `skills/doc-superpowers/SKILL.md` Section 1 `init` and `update` — `docs/archive/{type}/` |
+| Archive conventions | `skills/doc-superpowers/SKILL.md` "Index-write routing" and `update` — `git mv` into `docs/archive/{type}/`, `move-entry`, `deprecate-entry` (with the user's yes) |
 | Design docs and plans | `docs/superpowers/specs/` and `docs/superpowers/plans/` |
 | Multi-framework agent support | `AGENTS.md`, `.claude-plugin/`, `.cursor-plugin/`, `.codex/`, `.opencode/`, `GEMINI.md`, `gemini-extension.json` |
 | Cross-framework tool mappings | `references/tool-mappings.md` — the one capability matrix: per-client tool names and capabilities |
@@ -201,16 +216,16 @@ User invokes /doc-superpowers init
   → Section 1: Action Router → init
     → Dispatch up to 3 parallel Explore agents (7 topics: structure, tech stack, APIs, data layer, workflows, conventions, existing docs)
     → For each skill in inventory: dispatch Explore agent
+    → Create directory structure (docs/plans/ and docs/archive/… only when something is first written there)
     → Load templates from references/doc-spec.md
-    → Generate docs/ files from templates + agent findings
-    → Generate Mermaid diagrams
-    → Create directory structure (including docs/archive/{adr,specs,plans,architecture}/)
-    → Update CLAUDE.md per doc-spec.md rules
-    → Add freshness markers
+    → Generate docs/ files from templates + agent findings (never overwriting an existing doc)
+    → Update CLAUDE.md and README.md per doc-spec.md rules
+    → Generate Mermaid diagrams (PNG + the source in a <details> block under it)
+    → Add the <!-- Generated by doc-superpowers --> marker (no date or commit)
+    → Index every generated doc: build-index (no index yet) or add-entry, then update-index to attest them
+  → Verification gate — after the commit
+    → check-freshness: every generated doc indexed and current (a gate on the uncommitted tree proves nothing)
     → Suggest hooks installation as follow-up
-  → Section 2: Verification
-    → Check freshness markers present
-    → Confirm docs align with code
   → Human review of git diff
 ```
 
@@ -226,13 +241,13 @@ User invokes /doc-superpowers audit
     → Merge agent results → sort by severity (P0 > P1 > P2 > P3)
     → Compare agentic inventory vs workflows/doc-superpowers.md sections
   → Output unified report
-  → Write audit report to docs/plans/YYYY-MM-DD-audit-report.md
-  → Suggest /doc-superpowers update
+  → Write audit report to docs/plans/YYYY-MM-DD-audit-report.md (name taken: -<short HEAD sha>), with its Update Tasks
+  → Suggest /doc-superpowers update --report=<that path>
 ```
 
 ### Command line (every verb)
 
-`scripts/doc-tools.sh` has one verb table (`_VERBS`), and both the dispatcher (`_main`) and the usage text are generated from it. A subcommand exists only if it has a row, so `--help` cannot omit a verb that dispatches. Each row names the handler, what the verb needs (`repo`, `deps` or `none`), and the long options it takes. `_main` handles `--help` before any dependency check. It then runs the verb's arguments through `_parse_args`, the one argument loop: `--opt VALUE` equals `--opt=VALUE` anywhere on the line, and an option the verb does not take exits 2. Next come `check_deps`, and then, for repository verbs, one `git rev-parse --git-dir` check (also exit 2). Stdin mapping lines go through one parser, `_entry_from_line`. `check-freshness` and `status` share one evaluation, `_freshness_scan`. A single jq pass extracts every entry as a `\x1f`-separated record. Every live doc is hashed in one batch, and every code ref is looked up in HEAD (or `--tree`) in one `git cat-file --batch-check`. With `--tree`, `_reader_snapshot` also reads the index from that tree, and the docs' presence and hashes come from it (`_tree_presence`, `_tree_hash_list`), so the verdict is one snapshot: a doc is stale when a ref's object id differs from its `code_oids`. One `git rev-list --count` runs per distinct stale (`code_commit`, refs) group, for `commits_behind`. Only entries written before index schema 3, which have no `code_oids`, still get the per-entry commit comparison (plumbing `rev-list`, never porcelain `git log`). One jq pass renders the verdicts. No jq or git process runs per current doc. The shared content-identity helpers (`_worktree_tree`, `_oid_lookup`, `_last_commits`, `_entry_facts`) sit above it in the script.
+`scripts/doc-tools.sh` has one verb table (`_VERBS`), and both the dispatcher (`_main`) and the usage text are generated from it. A subcommand exists only if it has a row, so `--help` cannot omit a verb that dispatches. Each row names the handler, what the verb needs (`repo`, `deps` or `none`), and the long options it takes. `_main` handles `--help` before any dependency check. It then runs the verb's arguments through `_parse_args`, the one argument loop: `--opt VALUE` equals `--opt=VALUE` anywhere on the line, and an option the verb does not take exits 2. Next come `check_deps`, and then, for repository verbs, one `git rev-parse --git-dir` check (also exit 2). Stdin mapping lines go through one parser, `_entry_from_line`. `check-freshness` and `status` share one evaluation, `_freshness_scan`. A single jq pass extracts every entry as a `\x1f`-separated record. Every live doc is hashed in one batch, and every code ref is looked up in HEAD (or `--tree`) in one `git cat-file --batch-check`. With `--tree`, `_reader_snapshot` also reads the index from that tree, and the docs' presence and hashes come from it (`_tree_presence`, `_tree_hash_list`), so the verdict is one snapshot: a doc is stale when a ref's object id differs from its `code_oids`. A ref whose object this repository does not hold — a submodule's gitlink, whose commit lives in the submodule — is resolved with one `git ls-tree` per distinct tree, so a submodule bump reads stale. For `commits_behind`, each distinct stale (`code_commit`, refs) group costs one `git merge-base --is-ancestor` (a `code_commit` that is not an ancestor of HEAD gives `null`, never a masked `0`; the answer is cached per commit) and one `git rev-list --count`. Only entries written before index schema 3, which have no `code_oids`, still get the per-entry commit comparison (plumbing `rev-list`, never porcelain `git log`). One jq pass renders the verdicts. No jq or git process runs per current doc. The shared content-identity helpers (`_worktree_tree`, `_oid_lookup`, `_last_commits`, `_entry_facts`) sit above it in the script.
 
 ### Index write path (every verb that writes `docs/.doc-index.json`)
 
@@ -271,12 +286,13 @@ User invokes /doc-superpowers release [--from=<ref>]
   → skills/doc-superpowers/SKILL.md loaded by Claude Code
   → No discovery phase (parses RELEASE-NOTES.md and commits directly)
   → Action Router → release
-    → Parse RELEASE-NOTES.md — extract latest version, date, section format
-    → Determine commit range:
-      → Check for git tag matching latest version (git tag -l "vX.Y.Z")
-      → If tag found: git log <tag>..HEAD
-      → If no tag: git log --after=<last-release-date>
-      → Respect --from=<ref> override
+    → Reads references/release.md first (REQUIRED: steps 1–12)
+    → Parse RELEASE-NOTES.md — extract latest version, date, section headings
+    → Determine the range start:
+      → --from=<ref> if given
+      → else the tag of the latest version (git tag -l "vX.Y.Z")
+      → else the nearest release tag behind HEAD (git describe --tags --abbrev=0 --match 'v[0-9]*')
+      → else ROOT (the first release)
       → If no commits found: exit "No unreleased commits."
     → Auto-suggest semver bump from conventional commit prefixes
       → feat: → MINOR, fix:/docs: → PATCH, BREAKING CHANGE → MAJOR
@@ -291,8 +307,8 @@ User invokes /doc-superpowers release [--from=<ref>]
     → Present draft to user — user edits or approves
     → Prepend new version entry to RELEASE-NOTES.md (after header, before previous entry)
     → `doc-tools.sh fragments merge <start|ROOT> HEAD --remove`: `git rm` exactly the consumed fragments (never a glob)
-    → Bump version in all manifests — mandatory, never hand-edit individual version strings
-      → `doc-tools.sh bump-version X.Y.Z`, then `doc-tools.sh check-version` to confirm every manifest matches
+    → Bump version in the manifests the project has — never hand-edit individual version strings
+      → `doc-tools.sh bump-version X.Y.Z`, then `doc-tools.sh check-version` to confirm every manifest matches (skipped when the project has none of the five)
     → Sync CLAUDE.md and README.md per references/doc-spec.md rules
       → Catches drift accumulated across the released commits
     → Commit the release: entry + fragment deletions + manifests + CLAUDE.md/README.md in ONE commit
@@ -349,15 +365,15 @@ User invokes /doc-superpowers spec-generate --design-doc=<path>
     → Identify spec domains from design doc sections
     → Check idempotency (existing ## Generated Specs section)
     → Check for overlapping existing specs per category
-      → Supersede (replaces/superseded_by) or extend as appropriate
-      → Move superseded specs to docs/archive/specs/
+      → Supersede (deprecate-entry --superseded-by) or extend as appropriate
+      → Move superseded specs to docs/archive/specs/ — only with the user's yes (in CI: report it)
     → Step 5b: stale content scan across the overlapping specs that stayed active
       → Extract removal keywords from the design doc (Delete / Remove / Drop / Deprecate / Replace headings)
       → Grep each overlapping spec for them, count matches, classify severity: HIGH (>5 matches), MEDIUM (1–5)
       → Report a stale-refs table, then offer to prepend dated deprecation-notice blockquotes to the affected sections
     → Generate SPEC-{CAT}-NNN-{slug}.md files from template
     → Set Status: Draft on all new specs
-    → Register in .doc-index.json with code_refs (best-effort)
+    → Index each new spec: its mapping line to add-entry (build-index when no index exists), code_refs best-effort
     → Append ## Generated Specs section to design doc
     → Output list of spec paths for downstream spec-inject/spec-verify
 ```
@@ -369,20 +385,26 @@ Wrapper skill calls /doc-superpowers spec-inject --phase=plan --plan=<path> --sp
   → Reads governing specs, injects spec compliance tasks into plan
   → Injects a guarded, role-aware spec update task — the executing agent evaluates it against `git diff` at execution time via the Spec Status Model (Role → R3 → R4 → R2)
   → Writes no spec Status itself; the plan phase never bakes a role decision into the plan text
+  → For each <path>:amends spec (an amendment: the plan corrects what the spec says; never inferred):
+    one Task N+1a, in the chunk whose task writes the dated AMENDED block, that verifies the block
+    landed and cites this plan — status-neutral: no Status, Implementation Notes or code_refs write
 
-Wrapper skill calls /doc-superpowers spec-inject --phase=execute --specs=<paths>
+Wrapper skill calls /doc-superpowers spec-inject --phase=execute --specs=<paths> [--plan=<path>]
   → Runs freshness check on governing specs
-  → Refines code_refs to actual file paths created/modified
+  → Aligned target: refines code_refs to the paths actually created/modified (set-code-refs), then update-index
   → Flags drift for human review if detected
+  → With --plan naming a plan that carries injected spec tasks, those tasks are the chunk's one writer
 
-Wrapper skill calls /doc-superpowers spec-verify --mode=post-execute --specs=<paths>
-  → Existence check, staleness check, status check (target specs at a ladder status should be Implemented; constraint refs, exempt statuses, and targets held at In Review with recorded remaining scope are not findings)
+Wrapper skill calls /doc-superpowers spec-verify --mode=post-execute --specs=<paths> --design-doc=<path> [--plan=<path>]
+  → Existence check, staleness check, status check (target specs at a ladder status should be Implemented; constraint refs, exempt statuses, and targets held at In Review with recorded remaining scope are not findings — nor are targets R2 left at Approved with that scope recorded)
+  → Amendment landed-check for each :amends spec: FAIL when the dated AMENDED block is absent or does not cite this plan (without --plan: block-present only, with a WARN)
   → Five-way coverage check: design doc ↔ specs ↔ code ↔ CLAUDE.md ↔ README.md
   → Output: PASS/FAIL verdict with compliance report
   → Reports status only — spec-verify is read-only; the In Review → Implemented write belongs to spec-inject, and only for scope-covered target specs
 
-During review: /doc-superpowers spec-verify --mode=review --changed-files=<paths>
+During review: /doc-superpowers spec-verify --mode=review --changed-files=<paths> [--specs=<paths>] [--plan=<path>]
   → Map changed files to governing specs via code_refs
   → Check if changes align with or contradict spec intent
+  → Amendment landed-check for :amends specs → P1 Amendment not landed
   → Output: coverage report per changed file
 ```

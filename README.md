@@ -32,7 +32,7 @@ Add this repository as a plugin marketplace, then install the plugin from it (bo
 /plugin install doc-superpowers@doc-superpowers
 ```
 
-**From a checkout** (to follow `main` or edit the skill) — symlink the whole repository into your skills directory; Claude Code loads it as the plugin `doc-superpowers@skills-dir`:
+**From a checkout** (to follow `main` or edit the skill) — symlink the whole repository into your personal skills directory. Claude Code follows a symlinked skill folder there, and a skill folder holding `.claude-plugin/plugin.json` (the repository root does) loads as the plugin `<name>@skills-dir` — here `doc-superpowers@skills-dir` (Claude Code docs, [*Skills → Choose where skills load*](https://code.claude.com/docs/en/skills)):
 
 ```bash
 git clone git@github.com:woodrowpearson/doc-superpowers.git ~/code/doc-superpowers
@@ -206,7 +206,7 @@ The installer works from anywhere in the repository (it acts on the top level; a
 
 **Claude Code hooks (3):** They read the event JSON on stdin and answer through Claude Code's JSON output (`additionalContext` for Claude, `systemMessage` for you). The pre-commit gate (PreToolUse) checks the staged tree of a `git commit`; a command that stages as it commits (`git add … && git commit`, `commit -a`) is left to the git pre-commit hook, which sees the real index, and the gate says so. Post-commit sync (PostToolUse) reports the docs a commit left stale. Session summary (Stop, which fires after every response) reports docs citing code changed in the working tree; a clean tree costs nothing. No hook runs `update-index`: only a reviewer attests a doc.
 
-**CI/CD (8 workflows — 2 shell-based, installed by default; 6 Claude-powered, opt-in by name):** The PR freshness check keeps one comment listing the docs the PR leaves stale or missing (`--ci-strict` fails the check). The weekly cron keeps one drift issue open while docs are stale and closes it after a clean check. Both fail closed: a check that cannot run is never reported as "all current". Which docs a change touches comes from the doc index, not from path filters. (The post-merge `doc-index-update` workflow was retired in v3.0.0: it recorded docs as verified that nobody had read. `install --ci` removes an installed copy it owns.) Claude-powered workflows provide AI audit+update on feature branches, AI PR doc review with @claude interactive support, AI release notes drafting on release branches, AI spec compliance checks on PRs, AI PR full-cycle orchestration (review, update, diagram, sync), and AI per-PR release-notes fragment producer (drafts `RELEASE-NOTES.next/PR-<N>.md` on every push, consumed by the release workflow at release time). Claude-powered workflows require one of `CLAUDE_CODE_OAUTH_TOKEN` (preferred) or `ANTHROPIC_API_KEY` as a GitHub Actions secret; if both are set, `CLAUDE_CODE_OAUTH_TOKEN` takes precedence. They run with the job's own `GITHUB_TOKEN` (so `permissions:` bounds them, and their pushes trigger no other workflow), install this plugin from its GitHub tag for the installed version, run only for same-repository PRs, and give the agent a scoped tool list and a turn cap. The agent never commits: a later step checks which paths changed (only docs, or only the release files) and commits them without force. `doc-release` opens its PR with that token, which needs the repository setting *Allow GitHub Actions to create and approve pull requests*.
+**CI/CD (8 workflows — 2 shell-based, installed by default; 6 Claude-powered, opt-in by name):** The PR freshness check keeps one comment listing the docs the PR leaves stale or missing (`--ci-strict` fails the check). The weekly cron keeps one drift issue open while docs are stale and closes it after a clean check. Both fail closed: a check that cannot run is never reported as "all current". Which docs a change touches comes from the doc index, not from path filters. (The post-merge `doc-index-update` workflow was retired in v3.0.0: it recorded docs as verified that nobody had read. `install --ci` removes an installed copy it owns.) Claude-powered workflows provide AI audit+update on feature branches, AI PR doc review with @claude interactive support, AI release notes drafting on release branches, AI spec compliance checks on PRs, AI PR full-cycle orchestration (review, update, diagram, sync), and AI per-PR release-notes fragment producer (drafts `RELEASE-NOTES.next/PR-<N>.md` on every push, consumed by the release workflow at release time; the release commit, which deletes the consumed fragments, must then reach `main` — until it does, the next release refuses rather than release them twice). Claude-powered workflows require one of `CLAUDE_CODE_OAUTH_TOKEN` (preferred) or `ANTHROPIC_API_KEY` as a GitHub Actions secret; if both are set, `CLAUDE_CODE_OAUTH_TOKEN` takes precedence. They run with the job's own `GITHUB_TOKEN` (so `permissions:` bounds them, and their pushes trigger no other workflow), install this plugin from its GitHub tag for the installed version, run only for same-repository PRs, and give the agent a scoped tool list and a turn cap. The agent never commits: a later step checks which paths changed (only docs, or only the release files) and commits them without force. `doc-release` opens its PR with that token, which needs the repository setting *Allow GitHub Actions to create and approve pull requests*.
 
 Set `DOC_SUPERPOWERS_STRICT=1` to make the git pre-commit hook and the Claude pre-commit gate block instead of warn (the gate exits 2 with the reason on stderr). Set `DOC_SUPERPOWERS_QUIET=1` to suppress hook output while still enforcing checks (the Claude gate still gives Claude its block reason). Set `DOC_SUPERPOWERS_SKIP=1` to bypass all hooks temporarily. A hook whose tooling is absent (no skill, no `docs/.doc-index.json`) stays silent; one whose check fails (jq missing from PATH, a corrupt index) prints one line saying so and, under STRICT, blocks.
 
@@ -281,10 +281,10 @@ This skill is designed as a **documentation superset** of the [obra/superpowers]
 ```
 doc-superpowers/
 ├── .gitignore            # Git ignore rules
-├── .claude/              # Self-installed Claude Code hook tier
-│   ├── settings.local.json   # Hook wiring (PreToolUse, PostToolUse, Stop)
-│   └── hooks/
-│       └── doc-superpowers/  # pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh
+├── .gitattributes        # This repo's own git tier: the doc-index merge driver
+├── .claude/
+│   └── doc-superpowers/
+│       └── installed.json    # This repo's own CI tier record (the Claude tier is per-user, gitignored)
 ├── .claude-plugin/       # Claude Code plugin manifest + marketplace
 │   ├── plugin.json
 │   └── marketplace.json
@@ -293,10 +293,12 @@ doc-superpowers/
 │   └── INSTALL.md
 ├── .codex/               # Codex installation guide
 │   └── INSTALL.md
-├── .github/              # Self-installed CI tier — the 2 default workflow templates
+├── .github/              # This repo's own CI tier (installer output) + its test workflow
+│   ├── scripts/          # Vendored doc-tools.sh + doc-superpowers-steps/
 │   └── workflows/
 │       ├── doc-freshness-pr.yml
-│       └── doc-freshness-schedule.yml
+│       ├── doc-freshness-schedule.yml
+│       └── tests.yml     # This repo only: the five test suites (bash 5.x + 3.2), check-version, self-install check
 ├── .opencode/            # OpenCode plugin + installation guide
 │   ├── INSTALL.md
 │   └── plugins/
@@ -326,13 +328,16 @@ doc-superpowers/
 ├── references/
 │   ├── doc-spec.md       # Templates and conventions
 │   ├── agent-prompt-template.md   # Review agent prompt template + scope focus areas
-│   ├── output-templates.md        # Audit report format + plan template
+│   ├── output-templates.md        # Audit report format + spec compliance report
+│   ├── release.md                 # `release` action steps
+│   ├── hooks.md                   # `hooks` action: tiers, consent table, CI templates
 │   ├── spec-lifecycle-actions.md  # Detailed procedures for spec lifecycle actions
 │   ├── spec-lifecycle-protocol.md # Spec lifecycle integration guide
 │   ├── integration-patterns.md    # Code review, commit review, wrapper skill integration
-│   └── tool-mappings.md           # Cross-framework tool name mappings
+│   └── tool-mappings.md           # Per-client tool names and capabilities
 ├── evals/                # Evaluation test cases
-│   └── evals.json        # Test prompts and assertions
+│   ├── evals.json        # Test prompts and machine-checkable assertions
+│   └── fixtures/         # Per-eval scenario setup scripts
 ├── docs/                 # Documentation about this skill
 │   ├── architecture/
 │   │   ├── system-overview.md
@@ -374,9 +379,11 @@ Everything else is the POSIX userland (`awk`, `sed`, `grep`, `mktemp`, …) as s
 
 1. Fork the repository
 2. Create a feature branch
-3. Make changes to `skills/doc-superpowers/SKILL.md` or `references/doc-spec.md`
-4. Test with `/doc-superpowers init` on a sample project
-5. Submit a PR
+3. Make your changes — the skill is `skills/doc-superpowers/SKILL.md` and `references/`, the tooling `scripts/`
+4. Run the five test suites under both bash 5.x and macOS's `/bin/bash` 3.2 (the loop and the suite list are in [CLAUDE.md → Conventions](CLAUDE.md#conventions)); all must pass. CI runs the same matrix
+5. If you changed a CI template, `scripts/doc-tools.sh` or a CI helper script, re-run `bash scripts/hooks/install.sh install --ci` and commit what it writes: this repository installs its own CI tier, and CI fails when the installed copies drift from their sources
+6. For a change to the skill's behaviour, also try it with `/doc-superpowers init` (or the action you changed) on a sample project
+7. Submit a PR
 
 ## License
 
