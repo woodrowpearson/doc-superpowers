@@ -461,7 +461,7 @@ Use when cutting a new version. Analyzes commits since the last release, merges 
    - a hand-edited fragment (drifted hash) is merged as written, with a warning — human edits are authoritative;
    - a no-notes fragment (`<!-- doc-superpowers:no-notes -->`) is consumed and prints nothing.
 
-   **Exit 1 = refused:** a release already consumed fragments that are still here, because its release commit never reached this branch — merging now would release them twice. Stop without drafting; tell the user to merge that release's branch into this one (or cherry-pick its release commit), then run `release` again.
+   **Exit 3 = refused:** a release already consumed fragments that are still here, because its release commit never reached this branch — merging now would release them twice. Stop without drafting; tell the user to merge that release's branch into this one (or cherry-pick its release commit), then run `release` again. Any other non-zero exit (1, 2) is a failure whose message says what went wrong — stop and report it; it is not this case.
 4. **Auto-suggest version bump** — Parse conventional commit prefixes across the range: `feat:` maps to MINOR, `fix:` maps to PATCH, `docs:` maps to PATCH, `!` suffix or `BREAKING CHANGE` footer maps to MAJOR. Unmapped prefixes (`chore:`, `refactor:`, `test:`, etc.) default to PATCH. Highest wins. Present suggestion with commit evidence (e.g., "Found 2 feat: and 3 fix: commits — suggesting MINOR bump to v2.3.0"). User confirms or overrides.
 5. **Dispatch drafting agent** — Single `general-purpose` agent receives:
    - The merged fragment sections from step 3 — they take priority (human-curated, PR-scoped); commit-derived content only fills what they miss
@@ -585,7 +585,8 @@ others install only when named:
 The `doc-pr-release.yml` workflow uses shell helpers installed alongside
 it at `.github/scripts/doc-pr-release/`:
 - `extract-context.sh` — emits JSON context: PR body, the fragment and its computed hash state, and the PR's own commits (never base-branch or bot commits) since the checkout the last sync recorded
-- `update-pr-body.sh` — idempotent marker-based PR body merge (markers inside code fences are ignored; an END before the START is refused)
+- `update-pr-body.sh` — idempotent marker-based PR body merge (markers inside code fences are ignored; an END before the START, or no section and a body ending inside an unclosed fence, is refused)
+- `fragment-lib.sh` — the fragment line rules (markers, hash line, sha256) the helpers source
 - `commit-and-push.sh` — seals the fragment (writes its line-2 hash), commits only that file, and pushes it only while the branch is still at the checkout (`--force-with-lease` on the checkout: someone else's push → superseded, exit 0; a force-push or reset → exit 1, never undone); never overwrites a hand-edited fragment
 
 Every template's `run:` steps are scripts in

@@ -1393,6 +1393,11 @@ test_i9_merge_refs_and_paths_out_forms() {
   echo stale > "$f1"
   rc=0; "$DOC_TOOLS" fragments merge nosuchref HEAD --paths-out "$f1" >/dev/null 2>&1 || rc=$?
   assert_eq "2|" "$rc|$(cat "$f1")" "a failed merge leaves --paths-out empty (nothing to delete)"
+  # Any failure that is not the refusal is 1, never the refusal's 3.
+  mkdir -p "$f1.dir"
+  rc=0; out=$("$DOC_TOOLS" fragments merge ROOT HEAD --paths-out "$f1.dir" 2>&1 >/dev/null) || rc=$?
+  assert_eq "1" "$rc" "an unwritable --paths-out: exit 1 (a failure, not the exit-3 refusal)"
+  assert_not_contains "$out" "refused" "…and not reported as a refusal"
   teardown
 }
 
@@ -1477,7 +1482,7 @@ test_i9_merge_refuses_a_release_that_never_reached_the_branch() {
   # v1.0.0 was released from release/1.0 (its release commit deleted PR-1),
   # but that commit never reached main: main still has PR-1, and its
   # RELEASE-NOTES.md still ends at v0.9.0.
-  echo "test: I-9 fragments merge — refuses to re-consume what an unmerged release consumed (merge or cherry-pick it first)"
+  echo "test: I-9 fragments merge — refuses (exit 3) to re-consume what an unmerged release consumed (merge or cherry-pick it first)"
   setup
   git tag v0.9.0
   mkdir -p RELEASE-NOTES.next
@@ -1498,7 +1503,7 @@ test_i9_merge_refuses_a_release_that_never_reached_the_branch() {
     echo stale > "$paths"
     rc=0
     out=$("$DOC_TOOLS" fragments merge "$start" HEAD --paths-out "$paths" 2>"$err") || rc=$?
-    assert_eq "1||" "$rc|$out|$(cat "$paths")" "from $start: refused (exit 1), nothing merged, nothing to delete"
+    assert_eq "3||" "$rc|$out|$(cat "$paths")" "from $start: refused (exit 3), nothing merged, nothing to delete"
     assert_contains "$(cat "$err")" "RELEASE-NOTES.next/PR-1.md" "from $start: names the fragment …"
     assert_contains "$(cat "$err")" "v1.0.0" "…and the release that consumed it"
   done
@@ -1561,6 +1566,29 @@ test_i9_merge_remove() {
     "$(git status --porcelain -- RELEASE-NOTES.next | LC_ALL=C sort | tr '\n' '|' | sed 's/|$//')" \
     "PR-1 and PR-2 (no notes) staged for deletion; PR-3 (excluded) kept"
   assert_file_exists RELEASE-NOTES.next/PR-3.md "the excluded fragment stays for the next release"
+  teardown
+}
+
+test_i9_merge_keeps_prose_and_wrapped_lines() {
+  # Fix round 1: every column-0 line used to start a unit, so a prose line
+  # or a wrapped bullet line two fragments shared was deduped out of the
+  # second one — and both were consumed.
+  echo "test: I-9 fragments merge — prose and wrapped (unindented) lines stay with their note"
+  setup
+  mkdir -p RELEASE-NOTES.next
+  _write_fragment RELEASE-NOTES.next/PR-1.md 1 $'### Changed\nThe config format changed.\nSee the migration guide.\n'
+  _write_fragment RELEASE-NOTES.next/PR-2.md 2 $'### Changed\nThe CLI flags changed.\nSee the migration guide.\n'
+  _write_fragment RELEASE-NOTES.next/PR-3.md 3 $'### Added\n- a bullet\ncontinued at column 0\n- next bullet\n'
+  _write_fragment RELEASE-NOTES.next/PR-4.md 4 $'### Added\n- another bullet\ncontinued at column 0\n'
+  _write_fragment RELEASE-NOTES.next/PR-5.md 5 $'### Removed\nThe old flags are gone.\n\n- `--x`: removed\n- `--y`: removed\n'
+  git add -A && git commit -q -m "fragments"
+  local out rc=0 paths
+  paths=$(harness_mktemp po)
+  out=$("$DOC_TOOLS" fragments merge ROOT HEAD --paths-out "$paths" 2>/dev/null) || rc=$?
+  assert_eq "0" "$rc" "merge exits 0"
+  assert_eq $'### Added\n- a bullet\ncontinued at column 0\n- next bullet\n- another bullet\ncontinued at column 0\n\n### Changed\nThe config format changed.\nSee the migration guide.\n\nThe CLI flags changed.\nSee the migration guide.\n\n### Removed\nThe old flags are gone.\n\n- `--x`: removed\n- `--y`: removed' \
+    "$out" "every line kept with its own note; paragraphs set off by blank lines, list items tight"
+  assert_eq "5" "$(grep -c . "$paths" || true)" "all five consumed — and none lost a line"
   teardown
 }
 
@@ -5954,6 +5982,7 @@ run_tests() {
   test_i9_merge_refuses_a_release_that_never_reached_the_branch
   test_i9_merge_ignores_other_release_lines
   test_i9_merge_remove
+  test_i9_merge_keeps_prose_and_wrapped_lines
   test_i9_merge_folds_the_section_vocabulary
   test_i9_fragments_list_is_loud_and_linear
   test_i9_merge_is_one_history_pass

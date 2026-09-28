@@ -941,6 +941,22 @@ test_release_precheck_needs_the_last_release_merged() {
   rc=0
   ( cd "$work" && DOC_TOOLS="$DOC_TOOLS_SCRIPT" run_step "$out" "$PRECHECK_SCRIPT" ) || rc=$?
   assert_eq "0|skip=false" "$rc|$(cat "$out")" "once the release branch is merged: exits 0"
+  # Fix round 1: only the refusal (exit 3) is diagnosed as an unmerged
+  # release; any other failure of the tool is reported as a failure.
+  local stub
+  stub=$(harness_mktemp_d stub)
+  printf '#!/bin/sh\necho "stub: some other failure" >&2\nexit 1\n' > "$stub/dt1"
+  printf '#!/bin/sh\necho "stub: refused" >&2\nexit 3\n' > "$stub/dt3"
+  chmod +x "$stub/dt1" "$stub/dt3"
+  rc=0
+  ( cd "$work" && DOC_TOOLS="$stub/dt1" run_step "$out" "$PRECHECK_SCRIPT" ) || rc=$?
+  assert_eq "1" "$rc" "fragments merge fails (exit 1): exits 1 …"
+  assert_contains "$(cat "$out.log")" "fragments merge failed (exit 1" "…reporting the failure"
+  assert_not_contains "$(cat "$out.log")" "earlier release" "…not as an unmerged release"
+  rc=0
+  ( cd "$work" && DOC_TOOLS="$stub/dt3" run_step "$out" "$PRECHECK_SCRIPT" ) || rc=$?
+  assert_eq "1" "$rc" "fragments merge refuses (exit 3): exits 1 …"
+  assert_contains "$(cat "$out.log")" "an earlier release has not reached this branch" "…naming the cause"
 }
 
 test_sentinel_check
@@ -2373,5 +2389,165 @@ test_i9_commit_never_overwrites_a_hand_edit
 test_i9_commit_refuses_a_malformed_fragment
 test_i9_pr_release_queued_behind_itself
 test_i9_update_pr_body_order_and_fences
+
+test_i9_update_pr_body_unclosed_fence() {
+  # Fix round 1: a body ending inside an unclosed fence hid the markers, so
+  # every run appended one more section (inside the code block).
+  echo "Test: I-9 update-pr-body — an unclosed fence: refused rather than appended; a section before it is still replaced"
+  local body out rc=0 again
+  body=$'Repro:\n```\nstack trace line 1\nstack trace line 2'
+  out=$(printf 'managed' | DOC_SUPERPOWERS_DRY_RUN=1 DOC_SUPERPOWERS_EXISTING_BODY="$body" "$UPDATE_SCRIPT" 1 2>&1) || rc=$?
+  assert_eq "1" "$rc" "no section and an unclosed fence: exits 1 (nothing appended)"
+  assert_contains "$out" "unclosed code fence" "…saying why"
+  body=$'<!-- doc-superpowers:start -->\nold\n<!-- doc-superpowers:end -->\nRepro:\n```\nstack trace'
+  rc=0
+  out=$(printf 'new' | DOC_SUPERPOWERS_DRY_RUN=1 DOC_SUPERPOWERS_EXISTING_BODY="$body" "$UPDATE_SCRIPT" 1 2>&1) || rc=$?
+  assert_eq $'0|<!-- doc-superpowers:start -->\nnew\n<!-- doc-superpowers:end -->\nRepro:\n```\nstack trace' "$rc|$out" \
+    "a section before the unclosed fence is replaced in place"
+  rc=0
+  again=$(printf 'new' | DOC_SUPERPOWERS_DRY_RUN=1 DOC_SUPERPOWERS_EXISTING_BODY="$out" "$UPDATE_SCRIPT" 1 2>&1) || rc=$?
+  assert_eq "0|$out" "$rc|$again" "…and a second run changes nothing (one section, idempotent)"
+}
+
+test_i9_fence_parser_is_one_parser() {
+  # doc-tools.sh is vendored as one self-contained file, so it keeps its own
+  # copy of update-pr-body.sh's fence parser: the same text, and the same
+  # verdicts on the same fixtures.
+  echo "Test: I-9 the fence parser of doc-tools.sh and update-pr-body.sh — identical text, identical verdicts"
+  local a b fx opener closer fenced closes dir list secs problem body out rc dt_fenced dt_closes ub_fenced ub_closes
+  a=$(sed -n '/^# --- fence parser (/,/^# --- end fence parser$/p' "$REPO_ROOT/scripts/doc-tools.sh" 2>/dev/null) || a=""
+  b=$(sed -n '/^# --- fence parser (/,/^# --- end fence parser$/p' "$HELPERS_DIR/update-pr-body.sh" 2>/dev/null) || b=""
+  assert_true "doc-tools.sh carries the marked fence parser" test -n "$a"
+  assert_eq "$a" "$b" "update-pr-body.sh carries it byte for byte"
+  # <opener>|<closer>|<is the line after the opener fenced>|<does the closer close it>
+  for fx in '```|```|y|y' '~~~|~~~|y|y' '````|```|y|n' '```|````|y|y' '```js|```|y|y' '  ```|```|y|y' \
+            '~~~|```|y|n' '```|``` x|y|n' '``` `x`|```|n|-'; do
+    opener=${fx%%|*}; fx=${fx#*|}; closer=${fx%%|*}; fx=${fx#*|}; fenced=${fx%%|*}; closes=${fx#*|}
+    dir=$(harness_mktemp_d fence)
+    mkdir -p "$dir/RELEASE-NOTES.next"
+    printf '<!-- doc-superpowers:fragment PR-1 -->\n<!-- doc-superpowers:hash -->\n### Added\n- a\n%s\n### Inside\n%s\n' \
+      "$opener" "$closer" > "$dir/RELEASE-NOTES.next/PR-1.md"
+    list=$(cd "$dir" && "$DOC_TOOLS_SCRIPT" fragments list 2>/dev/null) || list="[]"
+    secs=$(jq -r '.[0].sections | join(",")' <<<"$list")
+    problem=$(jq -r '.[0].problem // ""' <<<"$list")
+    dt_fenced=y; [ "$secs" = "Added" ] || dt_fenced=n
+    dt_closes=y; [ "$problem" != "an unclosed code fence" ] || dt_closes=n
+    body=$(printf 'intro\n%s\n<!-- doc-superpowers:start -->\nold\n<!-- doc-superpowers:end -->\n%s' "$opener" "$closer")
+    rc=0
+    out=$(printf 'new' | DOC_SUPERPOWERS_DRY_RUN=1 DOC_SUPERPOWERS_EXISTING_BODY="$body" "$UPDATE_SCRIPT" 1 2>&1) || rc=$?
+    ub_fenced=n; ub_closes=y
+    case "$out" in *$'\nold\n'*) ub_fenced=y ;; esac
+    if [ "$rc" -ne 0 ]; then ub_fenced=y; ub_closes=n; fi
+    assert_eq "$fenced|$fenced" "$dt_fenced|$ub_fenced" "'$opener' … '$closer': both see the next line as fenced=$fenced"
+    if [ "$closes" != "-" ]; then
+      assert_eq "$closes|$closes" "$dt_closes|$ub_closes" "'$opener' … '$closer': both see it closed=$closes"
+    fi
+  done
+}
+
+test_i9_hash_line_rule_is_one_rule() {
+  echo "Test: I-9 the line-2 hash-line rule — one form in fragment-lib.sh and doc-tools.sh, same verdicts"
+  local lib="$HELPERS_DIR/fragment-lib.sh" n v1 v2 fx line want lib_says dt_says dir list
+  for n in HASH_LINE_RE HASH_RE; do
+    v1=$(sed -n "s/^FRAG_${n}=//p" "$lib" 2>/dev/null) || v1=""
+    v2=$(sed -n "s/^_FRAG_${n}=//p" "$REPO_ROOT/scripts/doc-tools.sh" 2>/dev/null) || v2=""
+    assert_true "fragment-lib.sh defines FRAG_$n" test -n "$v1"
+    assert_eq "$v1" "$v2" "doc-tools.sh's _FRAG_$n is byte-identical"
+  done
+  # <line 2>|<is it a hash line>
+  for fx in '<!-- doc-superpowers:hash -->|y' '<!-- doc-superpowers:hash abc123 -->|y' \
+            '<!-- doc-superpowers:hash a>b -->|y' '<!-- doc-superpowers:hash abc -->  |y' \
+            '<!-- doc-superpowers:hash x y -->|n' '<!-- doc-superpowers:hash-->|n' \
+            '<!-- doc-superpowers:hashes abc -->|n' '<!-- doc-superpowers:hash abc --> x|n'; do
+    line=${fx%|*}; want=${fx##*|}
+    lib_says=$("$BASH_BIN" -c '. "$1"; if frag_is_hash_line "$(frag_trimmed "$2")"; then echo y; else echo n; fi' _ "$lib" "$line" 2>/dev/null) \
+      || lib_says="<fragment-lib.sh failed>"
+    dir=$(harness_mktemp_d hashline)
+    mkdir -p "$dir/RELEASE-NOTES.next"
+    printf '<!-- doc-superpowers:fragment PR-1 -->\n%s\n### Added\n- x\n' "$line" > "$dir/RELEASE-NOTES.next/PR-1.md"
+    list=$(cd "$dir" && "$DOC_TOOLS_SCRIPT" fragments list 2>/dev/null) || list="[]"
+    # Not a hash line: it is the first line of the notes — text before the first heading.
+    dt_says=y; [ "$(jq -r '.[0].problem // ""' <<<"$list")" != "text before the first ### heading" ] || dt_says=n
+    assert_eq "$want|$want" "$lib_says|$dt_says" "line 2 '$line': a hash line=$want for the helpers and the consumer"
+  done
+}
+
+test_i9_fragment_lib_ships_with_the_helpers() {
+  echo "Test: I-9 fragment-lib.sh ships wherever the doc-pr-release helpers do, and the installed helpers find it"
+  local repo rc out
+  repo=$(new_repo)
+  rc=0
+  ( cd "$repo" && "$DOC_TOOLS_SCRIPT" tools install --helper doc-pr-release >/dev/null 2>&1 ) || rc=$?
+  assert_eq "0" "$rc" "tools install --helper doc-pr-release exits 0"
+  assert_file_exists "$repo/.github/scripts/doc-pr-release/fragment-lib.sh" "…and ships fragment-lib.sh"
+  _need_all_repo "i9_fragment_lib_ships_with_the_helpers" || return 0
+  assert_file_exists "$ALL_REPO/.github/scripts/doc-pr-release/fragment-lib.sh" "install --ci (doc-pr-release) ships fragment-lib.sh"
+  out="$(harness_mktemp_d step)/out"
+  rc=0
+  run_installed "$ALL_REPO" "$out" PR_NUMBER=5 -- .github/scripts/doc-superpowers-steps/verify-fragment.sh || rc=$?
+  assert_eq "1" "$rc" "the installed verify-fragment.sh runs (no fragment: exit 1) …"
+  assert_contains "$(cat "$out.log")" "silently skipped" "…for the right reason, having sourced ../doc-pr-release/fragment-lib.sh"
+  rc=0
+  run_installed "$ALL_REPO" "$out" -- .github/scripts/doc-pr-release/commit-and-push.sh 5 || rc=$?
+  assert_eq "0" "$rc" "the installed commit-and-push.sh runs (no fragment: exit 0) …"
+  assert_contains "$(cat "$out.log")" "No fragment" "…having sourced both of its libraries"
+}
+
+test_i9_commit_rejected_push() {
+  # Fix round 1: the path after origin rejects the push. A pre-receive hook
+  # on origin does what a concurrent writer would (move or delete the
+  # branch) and rejects this push.
+  echo "Test: I-9 commit-and-push — a rejected push: branch deleted → 0; moved by someone → superseded; by the bot → 1; unchanged → 1"
+  local dir out rc head human bot c
+  dir=$(origin_and_clone)
+  out="$dir/gh-output"
+  (
+    cd "$dir/seed" || exit 1
+    git fetch -q origin && git reset -q --hard origin/feature
+    echo h > h.txt && git add h.txt && git -c commit.gpgsign=false commit -q -m "fix: a human push"
+    git push -q origin HEAD:refs/heads/human-side
+    git reset -q --hard HEAD~1
+    echo b > b.txt && git add b.txt && git -c commit.gpgsign=false commit -q -m "[doc-superpowers] update stale docs"
+    git push -q origin HEAD:refs/heads/bot-side
+  ) >/dev/null 2>&1
+  human=$(git -C "$dir/origin.git" rev-parse human-side)
+  bot=$(git -C "$dir/origin.git" rev-parse bot-side)
+  head=$(git -C "$dir/clone" rev-parse HEAD)
+  printf '#!/bin/sh\nunset GIT_QUARANTINE_PATH GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES\ncase "$(cat "%s/hook-action" 2>/dev/null)" in\n  delete) git update-ref -d refs/heads/feature ;;\n  human) git update-ref refs/heads/feature %s ;;\n  bot) git update-ref refs/heads/feature %s ;;\nesac\necho "pre-receive: rejected by the test" >&2\nexit 1\n' \
+    "$dir" "$human" "$bot" > "$dir/origin.git/hooks/pre-receive"
+  chmod +x "$dir/origin.git/hooks/pre-receive"
+  for c in delete human bot none; do
+    git -C "$dir/origin.git" update-ref refs/heads/feature "$head"
+    git -C "$dir/clone" reset -q --hard "$head"
+    git -C "$dir/clone" clean -qfd
+    echo "$c" > "$dir/hook-action"
+    write_fragment_file "$dir/clone" 21 thing
+    rc=0
+    cp_run "$dir/clone" "$out" 21 || rc=$?
+    case "$c" in
+      delete)
+        assert_eq "0|committed=false|" "$rc|$(grep '^committed=' "$out" | tail -n 1)|$(git -C "$dir/origin.git" for-each-ref refs/heads/feature)" \
+          "rejected, the branch deleted meanwhile: exit 0, nothing pushed, not recreated"
+        assert_contains "$(cat "$out.log")" "was deleted at origin during this run" "…with a notice" ;;
+      human)
+        assert_eq "0|superseded=true|$human" "$rc|$(grep '^superseded=' "$out" | tail -n 1)|$(git -C "$dir/origin.git" rev-parse feature)" \
+          "rejected, someone pushed meanwhile: superseded, exit 0, their tip kept" ;;
+      bot)
+        assert_eq "1|$bot" "$rc|$(git -C "$dir/origin.git" rev-parse feature)" \
+          "rejected, moved only by a [doc-superpowers] commit: exit 1"
+        assert_contains "$(cat "$out.log")" "::error::" "…with an ::error::" ;;
+      none)
+        assert_eq "1|$head" "$rc|$(git -C "$dir/origin.git" rev-parse feature)" \
+          "rejected while the branch is still at the checkout: exit 1, nothing forced"
+        assert_contains "$(cat "$out.log")" "failed while the branch was still at the checkout" "…saying so" ;;
+    esac
+  done
+}
+
+test_i9_update_pr_body_unclosed_fence
+test_i9_fence_parser_is_one_parser
+test_i9_hash_line_rule_is_one_rule
+test_i9_fragment_lib_ships_with_the_helpers
+test_i9_commit_rejected_push
 
 print_summary

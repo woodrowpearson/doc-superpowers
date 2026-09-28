@@ -14,17 +14,18 @@
 # release tag at all.
 #
 # Before `skip=false` it runs `doc-tools.sh fragments merge <last release |
-# ROOT> HEAD`, which refuses (exit 1) when a release consumed fragments that
+# ROOT> HEAD`, which refuses (exit 3) when a release consumed fragments that
 # are still here — that release's commit never reached this branch, and
 # drafting now would release them twice. This step then fails with an
-# ::error:: (merge the release branch into this one, or cherry-pick its
-# release commit, then push again).
+# ::error:: saying so (merge the release branch into this one, or
+# cherry-pick its release commit, then push again); any other non-zero exit
+# of the tool fails it with the tool's own message.
 #
 # Env:
 #   GITHUB_OUTPUT  step-output file (set by the runner)
 #   DOC_TOOLS      default .github/scripts/doc-tools.sh (the vendored copy)
 #
-# Exit codes: 0; 1 when the check above refuses (or git fails).
+# Exit codes: 0; 1 when the check above refuses or fails (or git fails).
 #
 # Runs under `set -e`, the runner's default for an unannotated `run:`.
 set -e
@@ -58,7 +59,7 @@ if [ ! -x "$DOC_TOOLS" ]; then
 fi
 rc=0
 "$DOC_TOOLS" fragments merge "${last_tag:-ROOT}" HEAD > /dev/null || rc=$?
-if [ "$rc" -eq 1 ]; then
+if [ "$rc" -eq 3 ]; then
   echo "::error::doc-superpowers: an earlier release has not reached this branch (fragments merge refused, above). Merge that release's branch into this one, or cherry-pick its release commit, then push again."
   exit 1
 elif [ "$rc" -ne 0 ]; then

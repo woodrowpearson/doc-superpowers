@@ -44,8 +44,8 @@ adjustment to make on `<range-start>`: pass the previous release's tag.
 commit (or a later commit of the release branch), then merge the release
 branch into `main` — or cherry-pick the release commit. Until then `main`
 still holds the fragments that release consumed, and `fragments merge`
-refuses (exit 1, naming them and the release) rather than release them a
-second time: it checks `<range-start>`, and every `v*` tag cut from this
+refuses — exit 3, naming them and the release (1 is any other failure) —
+rather than release them a second time: it checks `<range-start>`, and every `v*` tag cut from this
 history after `<range-start>` that `<range-end>` does not contain.
 `doc-release.yml`'s precheck runs the same check, so the release job fails
 before drafting.
@@ -105,10 +105,14 @@ It is merged **losslessly or not at all**:
   commit; the next release takes it.
 - Trailing `\r` (CRLF files) and trailing blanks are dropped; a file without a
   final newline keeps its last line.
-- Notes are merged as **units**: a line starting at column 0 together with the
-  indented and blank lines under it (sub-bullets, continuation paragraphs, whole
-  code fences). A unit identical to one already in the same section is merged
-  once; a sub-bullet two different notes share stays under both.
+- Notes are merged as **units**. A unit starts at a list item (`-`, `*`, `+`
+  or `1.` at column 0) or at a column-0 line after a blank line (a paragraph),
+  and takes every line up to the next such start: indented lines (sub-bullets,
+  continuation paragraphs, code fences), and a column-0 line that follows
+  without a blank line (a wrapped sentence). A unit identical to one already
+  in the same section is merged once; a sub-bullet or sentence two different
+  notes share stays in both. List items print as a tight list; a paragraph
+  gets a blank line on each side.
 - Fragments are processed in ascending integer order of `<N>` (PR-99 before
   PR-101).
 

@@ -2033,10 +2033,11 @@ fragments merge|cmd_fragments_merge|repo|paths-out= remove
   previous release (its tag), or ROOT for the first one. Each fragment is
   merged losslessly or skipped with a warning (it stays for the next
   release). --paths-out writes the consumed paths, one per line; --remove
-  (<range-end> must be HEAD) git-rm's exactly those. Refuses (exit 1,
-  naming them) when a fragment here was already consumed by <range-start>,
-  or by a v* release tag cut from this history after it, whose release
-  commit has not reached <range-end>.
+  (<range-end> must be HEAD) git-rm's exactly those. Exits 3, naming them,
+  when a fragment here was already consumed by <range-start>, or by a v*
+  release tag cut from this history after it, whose release commit has not
+  reached <range-end> (merge or cherry-pick it first); 1 on any other
+  failure.
 tools install|cmd_tools_install|deps|dest= with-helpers helper=*
   [--dest <path>] [--with-helpers | --helper <dir>...]
   Vendor doc-tools.sh into <path> (default .github/scripts); with
@@ -2172,6 +2173,8 @@ Exit status:
      value, the wrong number of arguments (including one given to a
      subcommand that takes none), or a repository subcommand run outside a
      git work tree. A malformed argument value (bump-version abc) is 1.
+  3  fragments merge refused: a release consumed fragments that are still
+     present, because its release commit has not reached <range-end>
 
 Environment:
   DOC_TOOLS_LOCK_TIMEOUT  Seconds a writer waits for the index lock before
@@ -3832,10 +3835,14 @@ cmd_check_version() {
 # heading, an unclosed code fence, no notes) is skipped with a warning and
 # left for the next release — never consumed. A missing or drifted hash is
 # a hand edit: merged as written, with a warning. Trailing CR and blanks are
-# dropped. Notes are units — a line that starts at column 0 plus the
-# indented and blank lines (and whole code fences) under it — so a
-# sub-bullet two notes share is never cut from the second, and identical
-# units in one section are merged once. Sections fold onto one vocabulary
+# dropped. Notes are units: a unit starts at a list item (-, *, + or 1. at
+# column 0) or at a column-0 line after a blank line (a paragraph), and takes
+# every following line up to the next such start — indented lines, lazy
+# continuation lines, blank lines followed by indented text, whole code
+# fences. So a sub-bullet or a sentence two notes share is never cut from
+# the second, identical units in one section are merged once, and a
+# paragraph unit is printed with a blank line on each side (list items stay
+# a tight list). Sections fold onto one vocabulary
 # (case-insensitive; Features → Added, Changes → Changed, Fixes / Bug Fixes
 # → Fixed) and print in its order; other headings follow as written, in
 # first-seen order. A body that is only <!-- doc-superpowers:no-notes -->
@@ -3861,6 +3868,10 @@ function fold(s,   l) {
   if (l == "dependencies") return "Dependencies"
   return s
 }
+# --- fence parser (the same text in scripts/doc-tools.sh _FRAG_AWK and
+# --- scripts/hooks/ci/doc-pr-release/update-pr-body.sh FENCED_AWK; keep them
+# --- identical: scripts/test-doc-pr-release.sh diffs them and feeds both the
+# --- same fence fixtures)
 # A code fence opens with 3+ backticks or tildes (any indent) and closes with
 # at least as many of the same character and nothing else.
 function fence_open(l,   t, c, k) {
@@ -3879,13 +3890,18 @@ function fence_close(l,   t, k) {
   if (k < fl) return 0
   return (substr(t, k + 1) ~ /^[ \t]*$/)
 }
+# --- end fence parser
+# A list item at column 0: -, * or +, or 1. / 1), then a blank or the end.
+function is_item(l) {
+  return (l ~ /^[-*+][ \t]/ || l ~ /^[-*+]$/ || l ~ /^[0-9]+[.)][ \t]/ || l ~ /^[0-9]+[.)]$/)
+}
 # The p= / n= operands of the NEXT file are already applied when end_file()
 # runs for this one, so the path is kept here.
 function begin_file() {
   fp = p; bad = ""; nonotes = 0; section = ""; nu = 0; cur = 0; pb = 0; infence = 0
   nsf = 0; split("", fseen)
 }
-function unit_new(l) { nu++; usec[nu] = section; utext[nu] = l; cur = nu; pb = 0 }
+function unit_new(l) { nu++; usec[nu] = section; utext[nu] = l; ulist[nu] = is_item(l); cur = nu; pb = 0 }
 function unit_add(l,   k) {
   for (k = 0; k < pb; k++) utext[cur] = utext[cur] "\n"
   utext[cur] = utext[cur] "\n" l; pb = 0
@@ -3911,6 +3927,7 @@ function end_file(   i, s, key, secs) {
     seen[key] = 1
     secn[s]++
     sect[s, secn[s]] = utext[i]
+    sectl[s, secn[s]] = ulist[i]
   }
 }
 function emit(s,   j) {
@@ -3918,7 +3935,12 @@ function emit(s,   j) {
   if (!first) printf "\n"
   first = 0
   printf "### %s\n", s
-  for (j = 1; j <= secn[s]; j++) printf "%s\n", sect[s, j]
+  for (j = 1; j <= secn[s]; j++) {
+    # A paragraph needs a blank line on each side (else it runs into its
+    # neighbour, or into the list item above as a lazy continuation).
+    if (j > 1 && !(sectl[s, j] && sectl[s, j - 1])) printf "\n"
+    printf "%s\n", sect[s, j]
+  }
 }
 FNR == 1 {
   if (NR > 1) end_file()
@@ -3930,7 +3952,7 @@ FNR == 1 {
 }
 {
   l = $0; sub(/\r$/, "", l)
-  if (FNR == 2 && rtrim(l) ~ /^<!-- doc-superpowers:hash[^>]*-->$/) next
+  if (FNR == 2 && rtrim(l) ~ hashline) next
   if (infence) {
     if (cur) unit_add(l)
     if (fence_close(l)) infence = 0
@@ -3947,7 +3969,9 @@ FNR == 1 {
   }
   if (l ~ /^##?[ \t]/ || l ~ /^##?$/) { fail("a # or ## heading (the release adds the version heading)"); next }
   if (section == "") { fail("text before the first ### heading"); next }
-  if (l ~ /^[ \t]/ && cur) unit_add(l)
+  # A new unit only at a list item or after a blank line; anything else
+  # (indented, or a lazy continuation line) belongs to the current one.
+  if (cur && (l ~ /^[ \t]/ || (pb == 0 && !is_item(l)))) unit_add(l)
   else unit_new(l)
   if (fence_open(l)) infence = 1
 }
@@ -3962,6 +3986,13 @@ END {
 }'
 
 _FRAG_DIR="RELEASE-NOTES.next"
+
+# Line 2 of a fragment: a hash line (the notes start on line 3; else on line
+# 2), and a sealed one's captured hash. Byte-identical to FRAG_HASH_LINE_RE /
+# FRAG_HASH_RE in scripts/hooks/ci/doc-pr-release/fragment-lib.sh, the
+# producer helpers' copy (scripts/test-doc-pr-release.sh pins the two).
+_FRAG_HASH_LINE_RE='^<!-- doc-superpowers:hash( [^ ]*)? -->$'
+_FRAG_HASH_RE='^<!-- doc-superpowers:hash ([0-9a-f]+) -->$'
 
 # _frag_n <path>: set _FRAG_N to the <N> of ".../PR-<N>.md"; return 1 when the
 # name is not PR-<digits>.md.
@@ -3981,7 +4012,7 @@ _frag_n() {
 # _frag_stored_hash <file>: set _FRAG_STORED to the hash on line 2 ("" when
 # line 2 is not a hash marker). A trailing CR and blanks are ignored.
 _frag_stored_hash() {
-  local l1="" l2="" re='^<!-- doc-superpowers:hash ([0-9a-f]+) -->$'
+  local l1="" l2="" re="$_FRAG_HASH_RE"
   _FRAG_STORED=""
   { IFS= read -r l1 || true; IFS= read -r l2 || true; } < "$1"
   l2="${l2%$'\r'}"
@@ -4064,7 +4095,7 @@ cmd_fragments_list() {
     fi
   done
   if [ "${#awkargs[@]}" -gt 0 ]; then
-    LC_ALL=C awk -v mode=list -v status="$status" "$_FRAG_AWK" "${awkargs[@]}" \
+    LC_ALL=C awk -v mode=list -v status="$status" -v hashline="$_FRAG_HASH_LINE_RE" "$_FRAG_AWK" "${awkargs[@]}" \
       || _die "fragments list: parsing the fragments failed"
   fi
   # The status lines come in the order of the non-empty files.
@@ -4246,7 +4277,8 @@ cmd_fragments_merge() {
       printf '%s' "$refused"
       echo "Merge that release's branch into this one (or cherry-pick its release commit), then run again: merging now would release them twice."
     } >&2
-    exit 1
+    # Its own exit status: 1 is any other failure (_die), 2 a usage error.
+    exit 3
   fi
 
   local files=() fpaths=() f
@@ -4269,7 +4301,7 @@ cmd_fragments_merge() {
       _frag_n "${fpaths[$j]}"
       awkargs+=("n=$_FRAG_N" "p=${fpaths[$j]}" "${files[$j]}")
     done
-    LC_ALL=C awk -v mode=merge -v status="$status" "$_FRAG_AWK" "${awkargs[@]}" > "$_SCRATCH/merged" \
+    LC_ALL=C awk -v mode=merge -v status="$status" -v hashline="$_FRAG_HASH_LINE_RE" "$_FRAG_AWK" "${awkargs[@]}" > "$_SCRATCH/merged" \
       || _die "fragments merge: parsing the fragments failed"
   fi
   j=0

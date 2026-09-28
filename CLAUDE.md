@@ -64,6 +64,7 @@ doc-superpowers/
 │               ├── extract-context.sh    # Build context.json for the agent
 │               ├── update-pr-body.sh     # Idempotent PR-body managed-section editor
 │               ├── commit-and-push.sh    # Seal + commit the fragment; push only while the branch is at the checkout
+│               ├── fragment-lib.sh       # Sourced fragment line rules (markers, hash line, sha256) the helpers share
 │               └── RELEASE-NOTES.next.README.md # Fragment-format spec (producer/consumer contract)
 │           └── doc-superpowers-steps/    # run: step bodies of every template (freshness-check, resolve-auth, prepare-agent, commit-changes, pr-guard, sentinel-check, write-context, verify-fragment, precheck)
 ├── references/
