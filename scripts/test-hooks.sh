@@ -981,12 +981,26 @@ test_session_summary_releases_output_promptly() {
   echo "test: session-summary does not hold its output open for the timeout watchdog"
   hooked_fixture
   echo "changed" > src/index.js
-  local start elapsed
+  # The watchdog sleeps the hook's BUDGET. A shim `sleep` stretches exactly
+  # that sleep to 60 s (any other sleep runs as asked), so a watchdog left
+  # holding the hook's stdout would keep the caller waiting a minute — a gap
+  # no machine load closes — while the check itself is never cut short. (The
+  # old bound, "< 2 s" of wall time against the 2 s budget, failed on a
+  # loaded machine.)
+  local budget shim real start elapsed
+  budget=$(sed -n 's/^BUDGET=//p' .claude/hooks/doc-superpowers/session-summary.sh)
+  assert_true "precondition: the installed hook has a numeric BUDGET ($budget)" \
+    grep -qxE '[0-9]+' <<<"$budget"
+  shim=$(harness_mktemp_d sleep-shim)
+  real=$(command -v sleep)
+  printf '#!/bin/sh\nif [ "$1" = "%s" ]; then exec "%s" 60; fi\nexec "%s" "$@"\n' "$budget" "$real" "$real" > "$shim/sleep"
+  chmod +x "$shim/sleep"
   start=$SECONDS
-  run_claude_hook Stop session-summary "$STOP_JSON"
+  run_claude_hook Stop session-summary "$STOP_JSON" PATH="$shim:$REAL_PATH"
   elapsed=$((SECONDS - start))
   assert_contains "$(out_field .systemMessage)" "docs/architecture.md" "the check completed"
-  assert_true "done well inside the budget (took ${elapsed}s)" test "$elapsed" -lt 2
+  assert_true "returned without waiting out the watchdog's sleep (took ${elapsed}s; a held output takes >= 60 s)" \
+    test "$elapsed" -lt 30
   teardown
 }
 
