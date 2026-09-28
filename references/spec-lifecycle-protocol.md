@@ -63,6 +63,8 @@ PR review ──→ spec-verify (review) ──→ freshness + coverage findings
 
 The plan-phase `--plan` is also consumed by the amendment tasks it injects, which cite it so the landed-check can attribute a block to this plan.
 
+**Amendment blocks** (the contract a wrapper's plan and the spec share): a dated blockquote in the amended section, `> ⚠️ **AMENDED YYYY-MM-DD — <what changed>.** …`, whose `> ` lines include ``Landed by `<plan path>` Task <N>``. Put the citation on the block's first line (the current layout); a citation on any later line of the same block — the earlier layout put it last — is accepted too. A citation outside the block (a following paragraph), or a block in another section, does not count. The landed-check that enforces this is defined once in `spec-lifecycle-actions.md` (**Spec Status Model → Spec roles**).
+
 **Output (plan phase):**
 - Modified plan document with spec maintenance tasks appended to each chunk. Injected tasks are status-aware and scope-aware: they read a spec's current `Status` before writing, carry the caller's explicit role markers, and resolve an unmarked spec as target vs. constraint at execution time. Constraint specs are never written, and neither are exempt-status specs. A spec passed `:amends` additionally gets one `Task N+1a`, in the chunk whose task writes its dated `AMENDED` block, that verifies the block landed in its section and cites this plan; that task writes no `Status`, no Implementation Notes and no `code_refs` — amendment specs are never advanced.
 

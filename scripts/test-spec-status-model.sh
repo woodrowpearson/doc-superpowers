@@ -287,10 +287,15 @@ _section() {
     s' <<<"$1"
 }
 
-# _bash_block_after <text> <heading prefix>: the body of the first ```bash
-# block after that heading.
+# _bash_block_after <text> <line prefix>: the body of the first ```bash block
+# after the line starting with <prefix>, its indent (a block inside a numbered
+# step) stripped.
 _bash_block_after() {
-  awk -v h="$2" '!s && index($0, h) == 1 { s = 1; next } s && !b && /^```bash/ { b = 1; next } b && /^```/ { exit } b' <<<"$1"
+  awk -v h="$2" '
+    !s && index($0, h) == 1 { s = 1; next }
+    s && !b && /^[[:space:]]*```bash/ { b = 1; match($0, /^[[:space:]]*/); ind = RLENGTH; next }
+    b && /^[[:space:]]*```[[:space:]]*$/ { exit }
+    b { print substr($0, ind + 1) }' <<<"$1"
 }
 
 _read() { cat "$1" 2>/dev/null || true; }
@@ -415,31 +420,62 @@ assert_contains "$SKILLMD" 'BASE=$(git symbolic-ref --short -q refs/remotes/orig
 assert_not_contains "$SKILLMD" '|| echo "main"' "review-pr: the '|| echo main' that bound to sed (BASE=\"\") is gone"
 _review=$(_section "$SKILLMD" '### `review-pr`')
 assert_contains "$_review" '[ -s "$CHANGED" ] ||' "review-pr: an empty diff stops the review"
-assert_contains "$_review" "caller names" "review-pr: a range the caller names (a CI prompt does) wins"
-_base_line=$(grep -E '^[[:space:]]*BASE=\$\(git symbolic-ref' <<<"$SKILLMD" | head -1 | sed 's/^[[:space:]]*//' || true)
+# The range a CI prompt names (its base and head SHAs) is the form review-pr
+# takes from the caller.
+assert_contains "$_review" '<base-sha>...<head-sha>' "review-pr takes the caller's <base-sha>...<head-sha> range"
+assert_contains "$(cat "$CI/doc-review-pr.yml")" 'base.sha }}...${{ github.event.pull_request.head.sha }}' \
+  "…which is the form doc-review-pr's prompt passes"
+# Execute review-pr's changed-file block the way an agent would, in four layouts.
+_review_block=$(_bash_block_after "$_review" '2. **Identify changed files.**')
+assert_contains "$_review_block" 'BASE=$(git symbolic-ref' "the first bash block of review-pr step 2 is the changed-file block"
+_rp() { # <repo> → _rp_out, _rp_rc
+  local tmp
+  tmp=$(harness_mktemp_d rp-tmp)
+  _rp_rc=0
+  _rp_out=$(cd "$1" && TMPDIR="$tmp" "$BASH_BIN" -c "$_review_block" 2>&1) || _rp_rc=$?
+}
 _bt=$(harness_mktemp_d base)
 (
   cd "$_bt" || exit 1
   git init -q -b main 2>/dev/null || { git init -q && git symbolic-ref HEAD refs/heads/main; }
   git -c user.name=t -c user.email=t@t commit -q --allow-empty -m one
   git update-ref refs/remotes/origin/main HEAD
+  mkdir -p src && echo x > src/x.js && git add src/x.js
+  git -c user.name=t -c user.email=t@t commit -q -m two
 ) >/dev/null 2>&1
-_b=$(cd "$_bt" && eval "$_base_line" && printf '%s' "${BASE:-}") || true
-assert_eq "origin/main" "$_b" "review-pr base without origin/HEAD (actions/checkout) is origin/main, never empty"
-(cd "$_bt" && git update-ref refs/remotes/origin/trunk HEAD && git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/trunk) >/dev/null 2>&1
-_b=$(cd "$_bt" && eval "$_base_line" && printf '%s' "${BASE:-}") || true
-assert_eq "origin/trunk" "$_b" "review-pr base follows origin/HEAD when it is set"
+_rp "$_bt"
+assert_contains "$_rp_out" "BASE=origin/main " "review-pr base without origin/HEAD (actions/checkout) is origin/main, never empty"
+_rp_changed=$(sed -n 's/.* CHANGED=//p' <<<"$_rp_out" | head -1)
+assert_eq "0|src/x.js" "$_rp_rc|$(cat "$_rp_changed" 2>/dev/null)" "…and lists the PR's changed files"
+(cd "$_bt" && git update-ref refs/remotes/origin/trunk HEAD~1 && git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/trunk) >/dev/null 2>&1
+_rp "$_bt"
+assert_contains "$_rp_out" "BASE=origin/trunk " "review-pr base follows origin/HEAD when it is set"
+(cd "$_bt" && git update-ref refs/remotes/origin/trunk HEAD) >/dev/null 2>&1
+_rp "$_bt"
+assert_contains "$_rp_out" "no changes against origin/trunk" "review-pr: an empty diff ends the review…"
+assert_not_contains "$_rp_out" "CHANGED=" "…before any scoped check (no changed-file list handed on)"
+_bn=$(harness_mktemp_d nobase)
+(
+  cd "$_bn" || exit 1
+  git init -q -b main 2>/dev/null || { git init -q && git symbolic-ref HEAD refs/heads/main; }
+  git -c user.name=t -c user.email=t@t commit -q --allow-empty -m one
+) >/dev/null 2>&1
+_rp "$_bn"
+assert_true "review-pr with no base ref stops non-zero (rc $_rp_rc)…" test "$_rp_rc" -ne 0
+assert_contains "$_rp_out" "not found" "…saying the base was not found, never 'nothing to review'"
+assert_not_contains "$_rp_out" "no changes against" "…and never reports an empty review"
 
 echo "--- I-11: code_refs are pathspecs; init's own output is never a ref ---"
 assert_not_contains "$ACTIONS" "module names" "spec-generate no longer allows module names as code_refs"
-assert_contains "$ACTIONS" "never a module" "spec-generate: code_refs are literal repository paths"
+assert_line_matches "$ACTIONS" '^7\. \*\*Populate `code_refs`\*\*.*`<spec-path>::spec`.*set-code-refs' \
+  "spec-generate: no path yet → empty refs (the tool's '<doc>::spec' line), set later with set-code-refs"
 _init=$(_section "$SKILLMD" '### `init`')
 assert_contains "$_init" '**`code_refs` rule**' "init has a code_refs rule"
 assert_contains "$_init" 'not `.`, not `docs/`' "…never a path holding the index or init's own output"
-assert_contains "$_init" "after the commit" "init's freshness gate runs after the init commit"
-assert_contains "$_init" 'except `template.md`' "init does not stamp the marker on template.md (copies would inherit it)"
+assert_line_matches "$_init" '^13\. .*commit.*check-freshness' "init's freshness gate (check-freshness) comes after the init commit"
+assert_line_matches "$_init" '^11\. .*`template\.md`.*Generated by doc-superpowers' "init's marker step excludes template.md"
 assert_contains "$_init" '`**Status**: Proposed`' "seeded ADRs get a Status rule"
-assert_contains "$_init" 'instead of creating `docs/adr/`' "an existing docs/decisions/ is used, not a second ADR log"
+assert_line_matches "$_init" '^5\. .*`docs/decisions/`.*`docs/adr/`' "init's directory step uses an existing docs/decisions/ over docs/adr/"
 assert_not_contains "$_init" 'docs/architecture.md:SKILL.md' "init's mapping example is a structured path, not the flat one"
 
 echo "--- I-11: safety ---"
@@ -522,8 +558,8 @@ for _wf in doc-audit-update doc-pr-full-cycle doc-review-pr doc-spec-verify; do
   _tl=$(grep -F -- '--allowedTools' "$CI/$_wf.yml" || true)
   _n=$(grep -c . <<<"$_tl")
   _jq=$(grep -cF 'Bash(jq:*)' <<<"$_tl" || true)
-  _gd=$(grep -cF 'Bash(git -c core.quotePath=false diff:*)' <<<"$_tl" || true)
-  assert_eq "$_n/$_n" "$_jq/$_gd" "$_wf: every AI step grants Bash(jq:*) and Bash(git -c core.quotePath=false diff:*) (discovery)"
+  _gd=$(grep -cF 'Bash(git -c core.quotePath=false diff --name-only:*)' <<<"$_tl" || true)
+  assert_eq "$_n/$_n" "$_jq/$_gd" "$_wf: every AI step grants Bash(jq:*) and Bash(git -c core.quotePath=false diff --name-only:*) (discovery)"
 done
 
 echo "--- I-11: spec lifecycle ---"
@@ -535,9 +571,10 @@ assert_contains "$ACTIONS" "**One per-chunk writer.**" "one per-chunk Status wri
 assert_contains "$ACTIONS" "four **P3 informational** lines" "four P3 informational lines, as listed"
 assert_not_contains "$ACTIONS" "three **P3 informational** lines" "…not three"
 assert_contains "$ACTIONS" 'held short of `Implemented`' "spec-verify carve-out keys on the recorded remaining scope…"
-assert_contains "$ACTIONS" 'or at `Approved`' "…so an Approved partial target is not a finding either"
+assert_line_matches "$ACTIONS" '\*\*target\*\* held .*`In Review`.*`Approved`.*\*\*not a finding\*\*' "…so an Approved partial target is not a finding either"
 assert_line_matches "$AGENTPROMPT" '^\| Spec held .*`Approved`.*Not a finding' "review-agent table: an Approved partial target is not a finding"
-assert_contains "$ACTIONS" "sanctioned exempt values" "the unrecognized-status line skips the sanctioned Active/Deprecated/Superseded"
+assert_line_matches "$(_section "$ACTIONS" '### Vocabulary')" '`Active`, `Deprecated` and `Superseded`.*unrecognized-status line' \
+  "the unrecognized-status line skips the sanctioned Active/Deprecated/Superseded"
 assert_contains "$(_section "$ACTIONS" '### Execute Phase')" '$DOC_TOOLS status' "execute phase queries specs with status (check-freshness takes no doc argument)"
 assert_not_contains "$SKILLMD" "in both modes and FAILs" "review mode reports a P1 finding; only post-execute has a FAIL verdict"
 assert_not_contains "$PROTOCOL" "must exist and be committed" "protocol: no uncalled-for 'committed' prerequisite"
@@ -582,6 +619,14 @@ Text.
 > ⚠️ **AMENDED 2026-09-05 — wrapped.** The citation is on the
 > second line. Landed by `docs/plans/w.md` Task 1.
 
+> ⚠️ **AMENDED 2026-09-06 — earlier layout.** The section used to say X;
+> it says Y now, because Z.
+> Landed by `docs/plans/old.md` Task 2.
+
+> ⚠️ **AMENDED 2026-09-07 — no citation.** This block names no plan.
+
+Landed by `docs/plans/out.md` Task 9 — but outside the block.
+
 ## Testing
 
 > ⚠️ **AMENDED 2026-09-04 — test.** Landed by `docs/plans/r.md` Task 1.
@@ -599,7 +644,15 @@ assert_eq "PASS" "$(_landed '## Design' docs/plans/q.md)" "landed-check: a subse
 assert_eq "FAIL" "$(_landed '## Design' docs/plans/other.md)" "landed-check: a block in another section → FAIL"
 assert_eq "FAIL" "$(_landed '## Design' docs/plans/r.md)" "landed-check: the next section is outside → FAIL"
 assert_eq "FAIL" "$(_landed '## Design' docs/plans/nope.md)" "landed-check: a block citing another plan → FAIL"
-assert_eq "FAIL" "$(_landed '## Design' docs/plans/w.md)" "landed-check: the citation must be on the block's first line"
+assert_eq "PASS" "$(_landed '## Design' docs/plans/w.md)" "landed-check: a citation on a later line of the block counts (block-aware)"
+assert_eq "PASS" "$(_landed '## Design' docs/plans/old.md)" "landed-check: the earlier layout (citation on the block's last line) still passes"
+assert_eq "FAIL" "$(_landed '## Design' docs/plans/out.md)" "landed-check: a citation outside the block (the next paragraph) → FAIL"
+# One landed-check: every copy the reference carries is the same command.
+_lc_all=$(grep -E "^[[:space:]]*awk -v h='\{section-heading\}'" <<<"$ACTIONS" | sed 's/^[[:space:]]*//' || true)
+assert_true "the landed-check appears in the canonical definition and the Task N+1a template ($(grep -c . <<<"$_lc_all") copies)" \
+  test "$(grep -c . <<<"$_lc_all")" -ge 2
+assert_eq "1" "$(sort -u <<<"$_lc_all" | grep -c .)" "every copy of the landed-check is byte-identical"
+assert_contains "$PROTOCOL" 'Landed by `<plan path>` Task <N>' "the wrapper contract states where the citation may go"
 
 echo "--- I-11: generated-doc templates (FU3) ---"
 _noslot=$(awk '
@@ -648,6 +701,67 @@ assert_contains "$_upd" '`--report=<path>`' "update takes an explicit --report"
 assert_not_contains "$_upd" "most recent \`docs/plans/*-audit-report.md\`" "update never picks up the newest report on its own"
 assert_contains "$_upd" "docs/archive/plans/" "update archives the report it applied"
 
+echo "--- I-11 fix round 1: archive, tool resolution, wording, verbs ---"
+# The applied report is archived whether or not git tracks it or the index
+# lists it (audit writes it untracked and unindexed); CI leaves it in place.
+_upd=$(_section "$SKILLMD" '### `update`')
+_arch_block=$(_bash_block_after "$_upd" '7. **Archive the applied report**')
+assert_contains "$_arch_block" 'git ls-files --error-unmatch' "archive: git mv only when git tracks the report…"
+assert_line_matches "$_upd" '^7\. \*\*Archive the applied report\*\*.*CI workflow' "…and a CI workflow leaves it in place"
+assert_line_matches "$SKILLMD" '^- \*\*Confirm before moving docs\*\*.*`update`.*audit report' "Safety Rules name the one exception: update archiving its applied audit report"
+_ar() { # <repo> <report path> → _ar_rc, _ar_out
+  local cmd="$_arch_block"
+  cmd=${cmd//docs\/plans\/YYYY-MM-DD-audit-report.md/$2}
+  _ar_rc=0
+  _ar_out=$(cd "$1" && DOC_TOOLS="$_dt" "$BASH_BIN" -c "$cmd" 2>&1) || _ar_rc=$?
+}
+for _layout in tracked untracked; do
+  _at=$(harness_mktemp_d "archive-$_layout")
+  (
+    cd "$_at" || exit 1
+    git init -q -b main 2>/dev/null || { git init -q && git symbolic-ref HEAD refs/heads/main; }
+    mkdir -p docs/plans && echo "# guide" > docs/guide.md
+    git add -A && git -c user.name=t -c user.email=t@t commit -qm one
+    printf 'docs/guide.md::guide\n' | "$_dt" build-index
+    echo "## Documentation Freshness Audit" > docs/plans/2026-09-01-audit-report.md
+    if [ "$_layout" = tracked ]; then
+      printf 'docs/plans/2026-09-01-audit-report.md::plan\n' | "$_dt" add-entry
+      git add -A && git -c user.name=t -c user.email=t@t commit -qm report
+    fi
+  ) >/dev/null 2>&1
+  _ar "$_at" docs/plans/2026-09-01-audit-report.md
+  assert_eq "0" "$_ar_rc" "archive ($_layout report) exits 0${_ar_out:+ — $(tr '\n' ' ' <<<"$_ar_out")}"
+  assert_true "archive ($_layout): the report is in docs/archive/plans/" test -f "$_at/docs/archive/plans/2026-09-01-audit-report.md"
+  assert_true "archive ($_layout): and gone from docs/plans/" test ! -e "$_at/docs/plans/2026-09-01-audit-report.md"
+  _keys=$(jq -c '.docs | keys' "$_at/docs/.doc-index.json" 2>&1)
+  if [ "$_layout" = tracked ]; then
+    assert_eq '["docs/archive/plans/2026-09-01-audit-report.md","docs/guide.md"]' "$_keys" "archive (tracked): the index entry is re-keyed with move-entry"
+    assert_contains "$(git -C "$_at" status --porcelain)" "R  docs/plans/2026-09-01-audit-report.md -> docs/archive/plans/2026-09-01-audit-report.md" \
+      "archive (tracked): moved with git mv (a staged rename)"
+  else
+    assert_eq '["docs/guide.md"]' "$_keys" "archive (untracked): the index is left alone (the report was never indexed)"
+  fi
+done
+
+# Tool resolution runs for every action (hooks and release need $ROOT).
+assert_line_matches "$SKILLMD" '^\*\*Discovery is universal\*\*.*Detect Bundled Tooling' "tool resolution runs for every action, hooks and release included"
+assert_no_line_matches "$SKILLMD" "audit's read-only|Audit is read-only" "audit is 'edits no doc', not 'read-only' (it writes its report)"
+assert_not_contains "$TEMPLATES" "Action list" "the README status rows are the project's own (no 'Action list')"
+assert_contains "$RELREF" '$(ls CLAUDE.md README.md 2>/dev/null)' "release commit adds CLAUDE.md / README.md only when they exist"
+assert_not_contains "$RELREF" "CLAUDE.md README.md && git commit" "…never a git add of a file the project lacks"
+assert_line_matches "$_sync" 'CI workflow.*install\.sh" status' "sync skips the installer's status in a CI workflow"
+# Every doc-tools verb the prompt layer names exists: the verb list comes from
+# doc-tools.sh's own verb table (the dispatcher), never a list kept here.
+_verbs=$(grep -E '^[a-z][a-z-]*( [a-z][a-z-]*)?[|]cmd_[a-z_]+[|](repo|deps|none)[|]' "$REPO_ROOT/scripts/doc-tools.sh" | cut -d'|' -f1 | cut -d' ' -f1 | sort -u || true)
+assert_true "the verb table yields verbs ($(grep -c . <<<"$_verbs"))" test "$(grep -c . <<<"$_verbs")" -ge 15
+_named=$(cat "$REPO_ROOT/skills/doc-superpowers/SKILL.md" "$REPO_ROOT"/references/*.md | grep -oE '(\$DOC_TOOLS"?|doc-tools\.sh) [a-z][a-z-]*' | sed -E 's/.* //' | sort -u || true)
+assert_true "the prompt layer names doc-tools verbs ($(grep -c . <<<"$_named"))" test "$(grep -c . <<<"$_named")" -ge 10
+assert_eq "" "$(comm -23 <(printf '%s\n' "$_named") <(printf '%s\n' "$_verbs") | tr '\n' ' ')" "every doc-tools verb named in SKILL.md and references/ is a real verb"
+# The narrowed grant covers every quotePath diff the prompt layer runs.
+_qp=$(cat "$REPO_ROOT/skills/doc-superpowers/SKILL.md" "$REPO_ROOT"/references/*.md "$CI"/*.yml | grep -oE 'git -c core\.quotePath=false diff[^`|]*' || true)
+assert_true "the prompt layer runs quotePath diffs ($(grep -c . <<<"$_qp"))" test "$(grep -c . <<<"$_qp")" -ge 4
+assert_eq "" "$(grep -v '^git -c core\.quotePath=false diff --name-only' <<<"$_qp" || true)" "every quotePath diff is a --name-only one (what the CI grant allows)"
+
 echo "--- I-11: evals are machine-checkable ---"
 EVALS_JSON="$REPO_ROOT/evals/evals.json"
 assert_eq "true" "$(jq '[.evals[].id] | (length == (unique | length)) and all(type == "number")' "$EVALS_JSON")" "eval ids are unique integers"
@@ -667,6 +781,7 @@ _schema_bad=$(jq -r '
       if has("negate") and (.negate | type) != "boolean" then "negate is not a boolean" else empty end,
       if has("count") and ((.count | type) != "number" or $t != "content_check") then "count is a number, on content_check only" else empty end,
       if has("before") and ((.before | IN("present","absent")) | not) then "before is present|absent" else empty end,
+      if has("precedes") and ($t != "tool_call_check" or ((.precedes | type) != "string")) then "precedes is a string, on tool_call_check only" else empty end,
       if [.path // empty] | flatten | any(test("\\*\\*")) then "** in path (bash 3.2 has no globstar)" else empty end
     ) | "    \($e) / \($a): \(.)"' "$EVALS_JSON" 2>&1)
 assert_eq "" "$_schema_bad" "every assertion carries the machine fields its type needs"
@@ -676,7 +791,7 @@ while IFS= read -r _re; do
   [ -n "$_re" ] || continue
   _rc=0; grep -E -- "$_re" </dev/null >/dev/null 2>&1 || _rc=$?
   [ "$_rc" -le 1 ] || _bad_re="$_bad_re $_re"
-done < <(jq -r '.evals[].assertions[] | (.pattern // empty | if type == "array" then .[] else . end), (.command // empty)' "$EVALS_JSON")
+done < <(jq -r '.evals[].assertions[] | (.pattern // empty | if type == "array" then .[] else . end), (.command // empty), (.precedes // empty)' "$EVALS_JSON")
 assert_eq "" "$_bad_re" "every pattern and command is a valid ERE"
 # A command naming a doc-tools verb names one that exists.
 _bad_verb=""
@@ -690,8 +805,23 @@ assert_eq "true" "$(jq '[.evals[] | select(.name == "spec-generate-from-design")
   "eval 4 routes new specs to add-entry"
 assert_eq "true" "$(jq '[.evals[] | select(.name == "sync-index") | .assertions[] | select(.type == "tool_call_check" and .negate == true) | .command] | any(test("build-index"))' "$EVALS_JSON")" \
   "eval 9 forbids build-index on an existing index"
+# The release evals' merge check tells step 3 (merge before drafting) from
+# step 8 (--remove): a pattern that also matched the removal checked nothing.
+_rm_cmd='/w/.github/scripts/doc-tools.sh fragments merge v1.2.0 HEAD --remove'
+_mg_cmd='/w/.github/scripts/doc-tools.sh fragments merge v1.2.0 HEAD 2>merge.err'
+_bad_mg=""
+while IFS= read -r _re; do
+  [ -n "$_re" ] || continue
+  { grep -qE -- "$_re" <<<"$_mg_cmd" && ! grep -qE -- "$_re" <<<"$_rm_cmd"; } || _bad_mg="$_bad_mg [$_re]"
+done < <(jq -r '.evals[] | select(.name | IN("release-draft","release-fragment-merge")) | .assertions[]
+                | select(.type == "tool_call_check" and ((.command // "") | contains("fragments merge")) and ((.command // "") | contains("remove") | not)) | .command' "$EVALS_JSON")
+assert_eq "" "$_bad_mg" "the release evals' step-3 merge check matches the merge and not the --remove call"
+assert_eq "true" "$(jq --arg rm "$_rm_cmd" '[.evals[] | select(.name == "release-fragment-merge") | .assertions[] | select(.precedes) | .precedes] | length > 0' "$EVALS_JSON")" \
+  "release-fragment-merge orders the merge before the --remove call (precedes)"
+_pr=$(jq -r '.evals[] | select(.name == "release-fragment-merge") | .assertions[] | select(.precedes) | .precedes' "$EVALS_JSON" | head -1)
+assert_true "…and its precedes pattern matches the --remove call" grep -qE -- "${_pr:-^$}" <<<"$_rm_cmd"
 # Required cases: fixtures that build the scenario, runnable here.
-_required="update-from-audit spec-generate-from-design hooks-install-all sync-index release-draft spec-inject-execute spec-verify-review spec-inject-amends release-fragment-merge hooks-status-uninstall"
+_required="update-from-audit update-from-session-report spec-generate-from-design hooks-install-all sync-index release-draft spec-inject-execute spec-verify-review spec-inject-amends release-fragment-merge hooks-status-uninstall"
 for _e in $_required; do
   _setup=$(jq -r --arg e "$_e" '.evals[] | select(.name == $e) | .setup // ""' "$EVALS_JSON")
   if [ -z "$_setup" ]; then

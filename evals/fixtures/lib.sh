@@ -20,18 +20,25 @@ fx_die() {
   exit 1
 }
 
-# fx_init <setup script path>: resolve the plugin, refuse unsafe targets,
-# pin a clean git identity and create the repository.
-fx_init() {
+# fx_attach <setup script path>: resolve the plugin and pin a clean git
+# identity, for a setup that extends another fixture's repository (it runs the
+# other setup first, in the same empty directory).
+fx_attach() {
   FX_ROOT=${DOC_SUPERPOWERS_ROOT:-$(cd "$(dirname "$1")/../../.." && pwd -P)}
   FX_BASH=${BASH_BIN:-bash}
   [ -f "$FX_ROOT/scripts/doc-tools.sh" ] || fx_die "no scripts/doc-tools.sh under $FX_ROOT"
   [ "$(pwd -P)" != "$(cd "$FX_ROOT" && pwd -P)" ] || fx_die "refusing to build a fixture inside the plugin checkout"
-  [ -z "$(ls -A . 2>/dev/null)" ] || fx_die "run from an empty directory ($(pwd -P) is not empty)"
   unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
   export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
   export GIT_AUTHOR_NAME=eval GIT_AUTHOR_EMAIL=eval@example.com \
     GIT_COMMITTER_NAME=eval GIT_COMMITTER_EMAIL=eval@example.com
+}
+
+# fx_init <setup script path>: fx_attach, refuse a non-empty directory, and
+# create the repository.
+fx_init() {
+  fx_attach "$1"
+  [ -z "$(ls -A . 2>/dev/null)" ] || fx_die "run from an empty directory ($(pwd -P) is not empty)"
   git init -q -b main 2>/dev/null || { git init -q && git symbolic-ref HEAD refs/heads/main; }
 }
 
