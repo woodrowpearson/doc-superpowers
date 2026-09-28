@@ -58,6 +58,10 @@ jobs:
       # contributor without one can still run it locally. In CI that SKIP must
       # never pass silently: this flag turns it into a counted FAIL.
       DOC_SP_REQUIRE_YAML_PARSER: "1"
+      # test-spec-status-model.sh runs the OpenCode plugin under node (a
+      # test-time tool only; the plugin is shipped JS). Without node that case
+      # is a loud SKIP locally; here this flag makes it a counted FAIL.
+      DOC_SP_REQUIRE_NODE: "1"
 
     steps:
       # No suite reads this repo's history — they each build throwaway git
@@ -91,8 +95,13 @@ jobs:
             echo "::error::no YAML parser (need python3 with PyYAML, or ruby) — the workflow-template YAML assertions would not run"
             exit 1
           fi
+          # test-spec-status-model.sh drives .opencode/plugins/doc-superpowers.js
+          # under node; both runner images ship Node.js. DOC_SP_REQUIRE_NODE
+          # (job env) is the second lock inside the suite.
+          command -v node >/dev/null 2>&1 || { echo "::error::node not found — the OpenCode plugin simulation would not run"; exit 1; }
           echo "jq:   $(jq --version)"
           echo "yaml: $yaml_parser"
+          echo "node: $(node --version)"
           "$BASH_BIN" --version | head -1
 
       # Guard the premise of the matrix: if a future runner image changes what
@@ -131,7 +140,7 @@ jobs:
         run: |
           "$BASH_BIN" scripts/test-merge-driver.sh
 
-      # Version strings drift silently otherwise: bump-version writes six
+      # Version strings drift silently otherwise: bump-version writes five
       # manifests and RELEASE-NOTES.md is the canonical source check-version
       # reads, so a hand-edited or half-applied bump only shows up here.
       - name: check-version

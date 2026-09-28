@@ -31,7 +31,6 @@ doc-superpowers/
 │       └── SKILL.md      # Main skill definition — discovery, routing, agents, verification
 ├── AGENTS.md             # Cross-client agent instructions
 ├── GEMINI.md             # Gemini CLI context redirect
-├── claude-code.json      # Claude Code manifest — a bump-version target
 ├── gemini-extension.json # Gemini CLI extension manifest
 ├── package.json          # npm/OpenCode package metadata
 ├── scripts/
@@ -129,7 +128,7 @@ doc-superpowers/
 | `references/output-templates.md` | Audit report format + plan template used for generating reports and update plans | Changing report structure or plan format |
 | `references/spec-lifecycle-actions.md` | Detailed procedures for spec-generate, spec-inject, spec-verify actions | Changing spec action steps or adding new spec actions |
 | `references/spec-lifecycle-protocol.md` | Wrapper author integration guide — input/output contracts for spec-generate, spec-inject, spec-verify; integration patterns for calling skills | Adding integration patterns, changing action contracts |
-| `references/tool-mappings.md` | Cross-framework tool name translations | Adding framework support, tool name changes |
+| `references/tool-mappings.md` | The one capability matrix — per-client tool names and capabilities (INSTALL files, AGENTS.md and GEMINI.md link here), tool resolution | Adding framework support, tool name or capability changes |
 | `AGENTS.md` | Cross-client agent instructions | Adding commands, changing project orientation |
 | `.opencode/plugins/doc-superpowers.js` | OpenCode ESM plugin | Changing skill registration or tool mapping injection |
 | `package.json` | npm/OpenCode package metadata | Version bumps, dependency changes |
@@ -180,7 +179,7 @@ doc-superpowers/
 | Archive conventions | `skills/doc-superpowers/SKILL.md` Section 1 `init` and `update` — `docs/archive/{type}/` |
 | Design docs and plans | `docs/superpowers/specs/` and `docs/superpowers/plans/` |
 | Multi-framework agent support | `AGENTS.md`, `.claude-plugin/`, `.cursor-plugin/`, `.codex/`, `.opencode/`, `GEMINI.md`, `gemini-extension.json` |
-| Cross-framework tool mappings | `references/tool-mappings.md` — tool name translations across frameworks |
+| Cross-framework tool mappings | `references/tool-mappings.md` — the one capability matrix: per-client tool names and capabilities |
 | Doc-index write path | `scripts/doc-tools.sh` "Index persistence" section — `_index_apply` / `_index_lock` / `_index_load` / `_index_install`, `_traps`, the shared `_INDEX_PATCH` interpreter |
 | Doc-index merge driver | `scripts/merge-doc-index.sh` — base-aware per-key three-way merge for `.doc-index.json`; registration in `scripts/hooks/install.sh` (`merge_driver_cmd`) |
 | Merge driver tests | `scripts/test-merge-driver.sh` |

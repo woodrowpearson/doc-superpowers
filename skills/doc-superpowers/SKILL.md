@@ -44,7 +44,7 @@ flowchart TD
 | `references/hooks.md` | **REQUIRED** for `hooks` — installer routing, consent table, CI templates |
 | `references/spec-lifecycle-actions.md` | **REQUIRED** for `spec-generate` / `spec-inject` / `spec-verify` — procedures and the Spec Status Model |
 | `references/integration-patterns.md` | How code review, commit review, and wrapper skills call doc-superpowers |
-| `references/tool-mappings.md` | Tool names in clients other than Claude Code, and how each resolves `$ROOT` |
+| `references/tool-mappings.md` | **Read it in any client other than Claude Code** — that client's tool for each tool named here, what it supports, and how it resolves `$ROOT` |
 
 **When NOT to use:**
 - Project-specific conventions belong in CLAUDE.md, not generated docs
@@ -151,7 +151,7 @@ find scripts -maxdepth 1 \( -name '*validate_docs*' -o -name '*validate_doc_refe
 | `doc-tools.sh set-code-refs` | Bundled | `set-code-refs <doc> --refs a,b` — change which code an indexed doc covers, in place (key position and every other field kept; `--refs ''` for none). The same paths write nothing. A ref it had keeps its recorded content (a pre-v3 entry's: its content in `code_commit`); a new one is recorded as `add-entry` records it. `code_commit` becomes the older of the two baselines: their merge-base, or null when the stored one is absent, not a commit of this repository, or not an ancestor of HEAD. So `commits_behind` is never a masked 0. Not a verification: run `update-index` after reading the doc against the new refs |
 | `doc-tools.sh deprecate-entry` | Bundled | Mark entries as deprecated (`--superseded-by <path>`, which also sets that successor's `replaces` when it has none). Does not touch `last_verified` |
 | `doc-tools.sh status` | Bundled | Single-doc freshness query (read-only; takes `--tree` too) |
-| `doc-tools.sh bump-version` | Bundled | Write a version string across the 6 manifest files — all or nothing (one malformed manifest writes none; none found is an error), keeping file modes |
+| `doc-tools.sh bump-version` | Bundled | Write a version string across the 5 manifest files — all or nothing (one malformed manifest writes none; none found is an error), keeping file modes |
 | `doc-tools.sh check-version` | Bundled | Verify all manifests match RELEASE-NOTES.md's canonical version: its first `## vMAJOR.MINOR.PATCH` heading at a line start, outside code fences; a pre-release first heading is an error (read-only) |
 | `doc-tools.sh implementation-status` | Bundled | Report ADR/SPEC realization state from each doc's `Implementation:` (ADR) / `Realized-by:` (SPEC) block (read-only; grammar in `references/doc-spec.md`, "Header style and the realization block") |
 | `doc-tools.sh set-implementation` | Bundled | `set-implementation <doc> --ref "<kind: ref>" --status <status> [--note …]` — replace that ref's entry in the doc's block (a duplicate entry of the ref is dropped), or append one; a doc with no block gets one after its `**Date**:` / `**Created**:` paragraph, and with neither the command exits 1, writing nothing. Values are literal; `--ref`/`--note` must be one line |
