@@ -306,7 +306,7 @@ When a new design doc replaces an existing spec's scope:
 1. New spec is created with `Supersedes: <path-to-old>` in metadata
 2. Old spec's `Superseded by: <path-to-new>` field is updated
 3. Old spec is moved to `docs/archive/specs/`
-4. Old spec's `.doc-index.json` entry is re-keyed with `move-entry` and deprecated with `deprecate-entry <old> --superseded-by <new>`, which also sets the new spec's `replaces`. The new spec must already be indexed for that link.
+4. Old spec's `.doc-index.json` entry is re-keyed with `move-entry` and deprecated with `deprecate-entry <archived path> --superseded-by <new>`, which also sets the new spec's `replaces`. The new spec must already be indexed for that link. After the move the old key is gone: `deprecate-entry <old>` exits 1, deprecating nothing.
 
 The `replaces` and `superseded_by` fields in `.doc-index.json` track the chain:
 
@@ -381,7 +381,7 @@ Each entry in the index (keyed by relative doc path) contains:
 - `code_refs` — list of literal paths (directories/files, `.` for the repo root) this doc covers
 - `code_oids` — per ref, the git object id of its content in the entry's baseline: the working tree when `update-index` verified the doc, or the doc's last commit when `build-index` / `add-entry` indexed it (a blob for a file, a tree for a directory, the submodule's commit for a submodule — read from its gitlink with `git ls-tree` — or `missing`); freshness is judged against it
 - `code_commit` — a baseline commit no newer than any ref's recorded content: the newest commit touching any `code_refs` as of HEAD for `update-index`, or as of the doc's last commit for `build-index` / `add-entry`. `move-entry` keeps it. `set-code-refs` keeps it when every ref is kept (refs only removed, re-spelled or reordered), and derives it as `add-entry` does when every ref's content comes from the doc's last commit. With both, it records the older baseline: `git merge-base` of the stored and the derived commit, or null when the stored one is unusable (absent, not an object id, not a commit of this repository, or not an ancestor of HEAD), when there is no derived one, or when they share no ancestor. So `commits_behind` may over-count, but is never a masked `0`. It is null in a shallow clone. Display and `commits_behind` baseline only
-- `doc_type` — template type: `architecture`, `workflows`, `guide`, `api-contracts`, `spec`, `adr`, etc.; `plan`, `issue`, `audit` and `design-spec` mark a record doc (never stale)
+- `doc_type` — template type: `architecture`, `api-contracts`, `data-layer`, `infra`, `ci-cd`, `workflows`, `agentic`, `guide`, `codebase-guide`, `conventions`, `spec`, `adr`; `plan`, `issue`, `audit` and `design-spec` mark a record doc (never stale). A project may add its own. Change it in place with `set-doc-type <doc> <type>`, which accepts these and any type the index already uses, so a typo is refused
 - `status` — stored only as `deprecated`, otherwise absent (`current` / `stale` are computed by `check-freshness`, never written)
 - `replaces` — path to doc this one supersedes (null if none)
 - `superseded_by` — path to doc that supersedes this one (null if none)

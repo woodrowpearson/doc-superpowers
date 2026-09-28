@@ -39,7 +39,7 @@ doc-superpowers/
 ├── gemini-extension.json # Gemini CLI extension manifest
 ├── package.json          # npm/OpenCode package metadata
 ├── scripts/
-│   ├── doc-tools.sh      # Bundled freshness tooling (build-index, check-freshness, update-index, add-entry, remove-entry, move-entry, set-code-refs, deprecate-entry, status, bump-version, check-version, implementation-status, set-implementation, fragments, tools)
+│   ├── doc-tools.sh      # Bundled freshness tooling (build-index, check-freshness, update-index, add-entry, remove-entry, move-entry, set-code-refs, set-doc-type, deprecate-entry, status, bump-version, check-version, implementation-status, set-implementation, fragments, tools)
 │   ├── test-doc-tools.sh # Test suite for doc-tools.sh
 │   ├── test-doc-pr-release.sh # Test suite for doc-pr-release helpers
 │   ├── test-helpers.sh   # Shared test utilities
@@ -111,7 +111,7 @@ doc-superpowers/
 | File | Purpose | When to Modify |
 |------|---------|---------------|
 | `skills/doc-superpowers/SKILL.md` | Skill logic — discovery, action routing, agent prompts, verification | Adding actions, changing workflow |
-| `scripts/doc-tools.sh` | Bundled freshness tooling — 15 subcommands (`fragments list\|validate\|merge` and `tools install\|uninstall\|status\|version` take sub-verbs; `--help` lists them all) for index management, version sync, ADR/SPEC implementation status, release-notes fragments, and CLI vendoring | Changing staleness detection, index schema, version sync, implementation status, fragment merge, or vendoring |
+| `scripts/doc-tools.sh` | Bundled freshness tooling — 16 subcommands (`fragments list\|validate\|merge` and `tools install\|uninstall\|status\|version` take sub-verbs; `--help` lists them all) for index management, version sync, ADR/SPEC implementation status, release-notes fragments, and CLI vendoring | Changing staleness detection, index schema, version sync, implementation status, fragment merge, or vendoring |
 | `scripts/test-doc-tools.sh` | Test suite for doc-tools.sh | Adding tests for new doc-tools features |
 | `scripts/test-hooks.sh` | Test suite for hooks installer and hook scripts | Adding tests for new hooks or installer features |
 | `scripts/test-spec-status-model.sh` | Test suite pinning the canonical Spec Status Model wording and its call sites, and the skill prompt ↔ tool contract: tool resolution, index-write routing, review-pr base, safety rules, templates, the prompts' `--allowedTools`, and `evals/evals.json` (fields, regexes, fixtures run); also the cross-client packaging (manifests, INSTALL pins) and the OpenCode plugin, run under `node` (a loud SKIP without node locally; `DOC_SP_REQUIRE_NODE=1`, set by tests.yml, makes it a FAIL) | Changing spec status transition rules, roles, or vocabulary; changing what SKILL.md / references tell an agent to run; adding an eval; changing a manifest or the OpenCode plugin |

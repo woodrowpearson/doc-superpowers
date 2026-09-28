@@ -45,6 +45,14 @@ test_harness_asserts_are_pipefail_safe() {
 test_harness_int_stops_suite_and_cleans_up() {
   echo "test: harness: SIGINT ends the suite (rc 130) and removes its scratch root"
   local probe out rc=0
+  # A suite launched with '&' from a non-interactive shell inherits SIGINT
+  # ignored (POSIX), and a signal ignored on entry can be neither trapped nor
+  # reset: the probe below would survive its own kill -INT and read as a
+  # broken harness. Detect that disposition and skip loudly instead.
+  if [ "$("$BASH_BIN" -c 'kill -INT $$; echo ALIVE' 2>/dev/null)" = ALIVE ]; then
+    record_skip "harness SIGINT self-test: SIGINT is ignored in this run (the suite was started in the background with '&'), so it cannot be delivered — run the suite in the foreground to cover it"
+    return 0
+  fi
   probe=$(harness_mktemp int-probe)
   cat > "$probe" <<EOF
 source "$SCRIPT_DIR/test-helpers.sh"
@@ -514,6 +522,32 @@ test_scripts_are_free_of_bash4_only_constructs() {
   do
     [ -f "$candidate" ] && targets+=("$candidate")
   done
+  # The inline `run: |` bodies of the templates run under bash too (one step
+  # stays inline: it runs before the checkout brings the helpers). Each is
+  # extracted to a scratch file named after its template and scanned alike.
+  local yml runs n=0 runfile
+  runs=$(harness_mktemp_d yml-runs)
+  for yml in "$repo_root"/scripts/hooks/ci/*.yml; do
+    [ -f "$yml" ] || continue
+    awk -v dir="$runs" -v base="${yml##*/}" '
+      in_run {
+        if ($0 ~ /^[[:space:]]*$/) { print "" > f; next }
+        match($0, /^[[:space:]]*/)
+        if (RLENGTH > ind) { print > f; next }
+        in_run = 0; close(f)
+      }
+      /^[[:space:]]*run:[[:space:]]*[|>][-+]?[[:space:]]*$/ {
+        match($0, /^[[:space:]]*/); ind = RLENGTH; in_run = 1; n++
+        f = dir "/" base ".run" n ".sh"; printf "" > f
+      }' "$yml" || { echo "  cannot extract the run: blocks of $yml" >&2; FAIL=$((FAIL + 1)); }
+  done
+  n=0
+  for runfile in "$runs"/*.sh; do
+    [ -f "$runfile" ] || continue
+    targets+=("$runfile")
+    n=$((n + 1))
+  done
+  assert_true "the templates' inline run: blocks are scanned too ($n found)" test "$n" -ge 1
 
   TESTS_RUN=$((TESTS_RUN + 1))
   if [ ${#targets[@]} -eq 0 ]; then
@@ -554,6 +588,11 @@ test_scripts_are_free_of_bash4_only_constructs() {
     'shopt globstar [bash 4.0+]|(^|[^[:alnum:]_])globstar([^[:alnum:]_]|$)'
     'case fall-through ;;& / ;& [bash 4.0+]|;;&|(^|[^;]);&'
     'read -N [bash 4.1+]|(^|[^[:alnum:]_-])read[[:space:]]([^;|&]*[[:space:]])?-[a-zA-Z]*N'
+    "ANSI-C \\u / \\U escape \$'\\u…' [bash 4.2+]|[$]'[^']*[\\][uU][0-9A-Fa-f]"
+    'shopt lastpipe / inherit_errexit [bash 4.2+ / 4.4+]|(^|[^[:alnum:]_])(lastpipe|inherit_errexit)([^[:alnum:]_]|$)'
+    'BASHPID [bash 4.0+]|(^|[^[:alnum:]_])BASHPID([^[:alnum:]_]|$)'
+    'SRANDOM [bash 5.1+]|(^|[^[:alnum:]_])SRANDOM([^[:alnum:]_]|$)'
+    'fractional read -t timeout [bash 4.0+]|(^|[^[:alnum:]_-])read[[:space:]]([^;|&]*[[:space:]])?-[a-zA-Z]*t[[:space:]]*[0-9]*[.][0-9]'
   )
   local samples=(
     'local -A seen=()'
@@ -575,6 +614,11 @@ test_scripts_are_free_of_bash4_only_constructs() {
     'shopt -s globstar'
     '  a) echo a ;;&'
     'IFS= read -r -N 4 buf'
+    "sep=\$'\\u2014'"
+    'shopt -s lastpipe'
+    'echo "$BASHPID"'
+    'n=$SRANDOM'
+    'IFS= read -r -t 0.5 line'
   )
 
   local idx=0 spec
@@ -620,6 +664,79 @@ test_scripts_are_free_of_bash4_only_constructs() {
       if [ "$grep_rc" -ge 2 ]; then
         hits="${hits}    ${target#"$repo_root/"}: grep rc=$grep_rc (pattern error): ${file_hits}"$'\n'
       elif [ "$grep_rc" -eq 0 ] && [ -n "$file_hits" ]; then
+        hits="${hits}$(printf '%s\n' "$file_hits" | sed "s|^|    ${target#"$repo_root/"}:|")"$'\n'
+      fi
+    done
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ -z "$hits" ]; then
+      PASS=$((PASS + 1))
+      # shellcheck disable=SC2059
+      printf "${GREEN}  PASS${NC}: no %s\n" "$label"
+    else
+      FAIL=$((FAIL + 1))
+      # shellcheck disable=SC2059
+      printf "${RED}  FAIL${NC}: %s\n%s" "$label" "$hits"
+    fi
+  done
+
+  # GNU-only flags and tools: the BSD userland of macOS (and busybox) lacks
+  # them, and this Mac's gnubin PATH would hide the break from a local run.
+  # Same scan, same planted-sample self-check. `stat -c` is allowed only on a
+  # line that falls back to BSD's `stat -f` (the one sanctioned form).
+  local gnu_patterns=(
+    'sed -i (GNU and BSD in-place syntax differ)|(^|[^[:alnum:]_-])sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*i'
+    'sort -V (GNU)|(^|[^[:alnum:]_-])sort[[:space:]]([^|;&]*[[:space:]])?-[a-zA-Z]*V'
+    'readlink -f (GNU)|(^|[^[:alnum:]_-])readlink[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*f'
+    'date -d (GNU)|(^|[^[:alnum:]_-])date[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-d'
+    'stat -c without a stat -f fallback (GNU)|(^|[^[:alnum:]_-])stat[[:space:]]+-c'
+    'timeout(1) (GNU coreutils; not on macOS)|(^|[;&|({]|then|do)[[:space:]]*timeout[[:space:]]+-?[0-9]'
+    'grep -P (GNU)|(^|[^[:alnum:]_-])grep[[:space:]]([^|;&]*[[:space:]])?-[a-zA-Z]*P'
+    'find -printf (GNU)|(^|[^[:alnum:]_-])find[[:space:]].*[[:space:]]-printf([[:space:]]|$)'
+    'tac (GNU)|(^|[;&|({]|then|do)[[:space:]]*tac([[:space:]]|$)'
+  )
+  local gnu_samples=(
+    'sed -i "s/a/b/" f'
+    'ls | sort -V'
+    'p=$(readlink -f "$0")'
+    'date -d yesterday +%s'
+    'm=$(stat -c %a "$f")'
+    'timeout 5 git fetch'
+    'grep -P "\\d+" f'
+    'find . -name x -printf "%p\\n"'
+    'git log | tac'
+  )
+  idx=0
+  unmatched=""
+  TESTS_RUN=$((TESTS_RUN + 1))
+  while [ "$idx" -lt "${#gnu_patterns[@]}" ]; do
+    spec="${gnu_patterns[$idx]}"
+    sample_rc=0
+    grep -qE -- "${spec#*|}" <<<"${gnu_samples[$idx]}" 2>/dev/null || sample_rc=$?
+    [ "$sample_rc" -eq 0 ] || unmatched="${unmatched}    ${spec%%|*}: rc=$sample_rc on planted '${gnu_samples[$idx]}'"$'\n'
+    idx=$((idx + 1))
+  done
+  if [ -z "$unmatched" ] && [ "${#gnu_patterns[@]}" -eq "${#gnu_samples[@]}" ]; then
+    PASS=$((PASS + 1))
+    # shellcheck disable=SC2059
+    printf "${GREEN}  PASS${NC}: every one of %d GNU-only patterns catches its planted form\n" "${#gnu_patterns[@]}"
+  else
+    FAIL=$((FAIL + 1))
+    # shellcheck disable=SC2059
+    printf "${RED}  FAIL${NC}: GNU-only pattern(s) miss their planted form\n%s" "$unmatched"
+  fi
+  for spec in "${gnu_patterns[@]}"; do
+    local label="${spec%%|*}" regex="${spec#*|}" hits="" target
+    for target in "${targets[@]}"; do
+      awk '{ if ($0 ~ /^[[:space:]]*#/) print ""; else print }' "$target" > "$scrubbed"
+      local file_hits grep_rc=0
+      file_hits=$(grep -nE -- "$regex" "$scrubbed" 2>&1) || grep_rc=$?
+      if [ "$grep_rc" -eq 0 ]; then
+        # The sanctioned fallback: `stat -c … || stat -f …` on one line.
+        file_hits=$(printf '%s\n' "$file_hits" | grep -vE 'stat[[:space:]]+-c.*[|][|].*stat[[:space:]]+-f' || true)
+      fi
+      if [ "$grep_rc" -ge 2 ]; then
+        hits="${hits}    ${target#"$repo_root/"}: grep rc=$grep_rc (pattern error): ${file_hits}"$'\n'
+      elif [ -n "$file_hits" ]; then
         hits="${hits}$(printf '%s\n' "$file_hits" | sed "s|^|    ${target#"$repo_root/"}:|")"$'\n'
       fi
     done
@@ -1899,14 +2016,15 @@ test_tools_uninstall_keeps_modified_helpers() {
 }
 
 test_tools_uninstall_preserves_release_notes_next_readme() {
-  echo "test: tools uninstall does NOT remove RELEASE-NOTES.next/README.md (may have edits)"
+  echo "test: tools uninstall keeps an edited RELEASE-NOTES.next/README.md (only the plugin's own, alone, goes)"
   setup
   "$DOC_TOOLS" tools install --with-helpers >/dev/null 2>&1
   assert_file_exists "RELEASE-NOTES.next/README.md" "installed"
+  echo "our release conventions" >> RELEASE-NOTES.next/README.md
   set +e
   "$DOC_TOOLS" tools uninstall >/dev/null 2>&1
   set -e
-  assert_file_exists "RELEASE-NOTES.next/README.md" "README preserved on uninstall"
+  assert_file_exists "RELEASE-NOTES.next/README.md" "an edited README is preserved on uninstall"
   teardown
 }
 
@@ -2912,7 +3030,9 @@ test_index_noop_writers_leave_the_file_byte_identical() {
   assert_exit_code 0 "remove-entry of an absent key writes nothing" cmp -s docs/.idx.before docs/.doc-index.json
   echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" add-entry >/dev/null 2>&1
   assert_exit_code 0 "add-entry of an existing key writes nothing" cmp -s docs/.idx.before docs/.doc-index.json
-  "$DOC_TOOLS" deprecate-entry docs/nope.md >/dev/null 2>&1
+  local rc=0
+  "$DOC_TOOLS" deprecate-entry docs/nope.md >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "deprecate-entry of an absent key exits 1 (final review F5)"
   assert_exit_code 0 "deprecate-entry of an absent key writes nothing" cmp -s docs/.idx.before docs/.doc-index.json
   rm docs/design.md
   "$DOC_TOOLS" update-index docs/design.md >/dev/null 2>&1
@@ -2930,7 +3050,7 @@ test_index_writers_report_only_changed_keys() {
   printf '%s\n%s\n' "docs/architecture.md:src/:architecture" "docs/design.md:src/:design" \
     | "$DOC_TOOLS" build-index
   local out
-  out=$("$DOC_TOOLS" deprecate-entry docs/design.md docs/nope.md 2>&1)
+  out=$("$DOC_TOOLS" deprecate-entry docs/design.md docs/nope.md 2>&1) || true
   assert_contains "$out" "Deprecated 1 entry:" "deprecate-entry counts only the changed key"
   assert_contains "$out" "  docs/design.md" "lists the deprecated key"
   assert_not_contains "$out" "  docs/nope.md" "does not list the skipped key"
@@ -4502,9 +4622,10 @@ test_i1_check_freshness_scale() {
 # below the quadratic times on bash 3.2 (the interpreter where the quadratic
 # cost bites; under bash 5 the old code took 6 / 4 / 4 / 52 s, so there only
 # the add-entry budget discriminates) and as far above the linear ones as
-# that allows: deprecate-entry / remove-entry 10 s (7x; a 5 s budget left a
-# loaded machine too little room), update-index 14 s (3x: the quadratic 20 s
-# allows no more), add-entry 20 s (3x).
+# that allows: deprecate-entry / remove-entry 7 s (5x the linear 1.3 s, and
+# 2x below the quadratic 14-15 s — at 10 s the margin below quadratic was only
+# 1.4x; a 5 s budget left a loaded machine too little room), update-index 14 s
+# (3x: the quadratic 20 s allows no more), add-entry 20 s (3x).
 test_i1_writer_reports_are_linear() {
   local k=4000
   echo "test: I-1: add-entry / update-index / deprecate-entry / remove-entry of $k keys stay linear"
@@ -4535,15 +4656,15 @@ test_i1_writer_reports_are_linear() {
   out=$("$DOC_TOOLS" deprecate-entry "${paths[@]}" docs/nope.md 2>&1) || true
   s_dep=$(( $(date +%s) - t0 ))
   assert_contains "$out" "Deprecated $k entries:" "deprecate-entry reports $k deprecated"
-  assert_contains "$out" "SKIP: 'docs/nope.md' not found in index." "…and the absent key as not found"
+  assert_contains "$out" "'docs/nope.md' not found in index; skipped" "…and the absent key as not found"
   t0=$(date +%s)
   out=$("$DOC_TOOLS" remove-entry "${paths[@]}" 2>&1) || true
   s_rem=$(( $(date +%s) - t0 ))
   assert_contains "$out" "Removed $k entries:" "remove-entry reports $k removed"
   assert_true "add-entry of $k keys took ${s_add}s (budget 20 s)" test "$s_add" -le 20
   assert_true "update-index of $k keys took ${s_upd}s (budget 14 s)" test "$s_upd" -le 14
-  assert_true "deprecate-entry of $k keys took ${s_dep}s (budget 10 s)" test "$s_dep" -le 10
-  assert_true "remove-entry of $k keys took ${s_rem}s (budget 10 s)" test "$s_rem" -le 10
+  assert_true "deprecate-entry of $k keys took ${s_dep}s (budget 7 s)" test "$s_dep" -le 7
+  assert_true "remove-entry of $k keys took ${s_rem}s (budget 7 s)" test "$s_rem" -le 7
   teardown
 }
 
@@ -5829,7 +5950,7 @@ test_i10_tools_uninstall_keeps_what_it_did_not_install() {
   "$DOC_TOOLS" tools uninstall >/dev/null 2>&1 || rc=$?
   assert_eq "0" "$rc" "an unmodified install uninstalls cleanly"
   assert_true "…leaving no .github/scripts" test ! -e .github/scripts
-  assert_file_exists "RELEASE-NOTES.next/README.md" "…but RELEASE-NOTES.next/README.md stays (it may carry edits)"
+  assert_true "…and the unmodified RELEASE-NOTES.next/README.md, alone there, goes too (no residue)" test ! -e RELEASE-NOTES.next
   teardown
 }
 
@@ -5947,6 +6068,338 @@ test_i10_no_hidden_sed_or_ripgrep_dependency() {
     fi
   done
   assert_eq "" "$hits" "no GNU sed or ripgrep name in shipped scripts or workflows"
+}
+
+# --- Final whole-branch review fixes (sweep 05ea982 final review) ---
+#
+# set-doc-type (retype an entry in place: record status depends on doc_type);
+# deprecate-entry exits 1 for an unknown key (remove-entry stays idempotent);
+# repository verbs refuse a subdirectory; _doc_commits takes the doc's last
+# commit on its own simplified history; an index symlink is refused; a lock
+# owned by another user's live process is never broken; tracked names git
+# would quote are matched; --code-refs-from takes NUL-separated lists; the
+# fragment-format README is reported when outdated and removed on uninstall
+# when it is the plugin's and alone.
+
+test_fw_set_doc_type_retypes_in_place() {
+  echo "test: final review: set-doc-type changes doc_type in place and keeps every other field"
+  setup
+  printf '# spec\n' > docs/spec.md
+  printf '# other\n' > docs/other.md
+  _i1_commit docs
+  printf '%s\n' "docs/spec.md:src/:spec" "docs/other.md:src/:runbook" "docs/architecture.md:src/:architecture" \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  "$DOC_TOOLS" update-index docs/spec.md >/dev/null 2>&1
+  "$DOC_TOOLS" deprecate-entry docs/architecture.md --superseded-by docs/spec.md >/dev/null 2>&1
+  local before after rc out keys_before
+  before=$(jq -c '.docs["docs/spec.md"]' docs/.doc-index.json)
+  keys_before=$(jq -c '.docs | keys_unsorted' docs/.doc-index.json)
+  rc=0
+  out=$("$DOC_TOOLS" set-doc-type docs/spec.md design-spec 2>&1) || rc=$?
+  assert_eq "0" "$rc" "exits 0"
+  assert_contains "$out" "Set doc_type of 1 entry" "reports the entry it retyped"
+  after=$(jq -c '.docs["docs/spec.md"]' docs/.doc-index.json)
+  assert_eq "design-spec" "$(jq -r '.doc_type' <<<"$after")" "doc_type is the new type"
+  assert_eq "$(jq -c 'del(.doc_type)' <<<"$before")" "$(jq -c 'del(.doc_type)' <<<"$after")" \
+    "every other field is kept (last_verified, code_oids, code_commit, replaces, …)"
+  assert_eq "$(jq -c 'keys_unsorted' <<<"$before")" "$(jq -c 'keys_unsorted' <<<"$after")" "field order is kept"
+  assert_eq "$keys_before" "$(jq -c '.docs | keys_unsorted' docs/.doc-index.json)" "the entry keeps its key position"
+  assert_contains "$out" "record doc" "says the doc became a record doc"
+  assert_json_field "$("$DOC_TOOLS" status docs/spec.md 2>/dev/null)" '.record' "true" "status reads it as a record now"
+
+  # The same type writes nothing.
+  local gen
+  gen=$(jq -r '.generated_at' docs/.doc-index.json)
+  sleep 1
+  rc=0
+  out=$("$DOC_TOOLS" set-doc-type docs/spec.md design-spec 2>&1) || rc=$?
+  assert_eq "0" "$rc" "the same type: exits 0"
+  assert_contains "$out" "Unchanged 1 entry" "…reported as unchanged"
+  assert_eq "$gen" "$(jq -r '.generated_at' docs/.doc-index.json)" "…and nothing is written"
+
+  # A project's own type (one the index already uses) is known.
+  rc=0
+  "$DOC_TOOLS" set-doc-type docs/spec.md runbook >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "a type another entry already uses is accepted"
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/spec.md"].doc_type' "runbook" "…and written"
+  teardown
+}
+
+test_fw_set_doc_type_refusals() {
+  echo "test: final review: set-doc-type refuses an unknown type, an unindexed doc and bad usage, writing nothing"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index 2>/dev/null
+  local sum rc out
+  sum=$(hash_file docs/.doc-index.json)
+  rc=0
+  out=$("$DOC_TOOLS" set-doc-type docs/architecture.md design_spec 2>&1) || rc=$?
+  assert_eq "1" "$rc" "an unknown type (a typo): exit 1"
+  assert_contains "$out" "unknown doc_type 'design_spec'" "…naming it"
+  assert_contains "$out" "design-spec" "…and listing the known types"
+  rc=0
+  "$DOC_TOOLS" set-doc-type docs/architecture.md '' >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "an empty type: exit 1"
+  rc=0
+  out=$("$DOC_TOOLS" set-doc-type docs/nope.md plan 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a doc not in the index: exit 1"
+  assert_contains "$out" "not found in index" "…saying why"
+  rc=0
+  "$DOC_TOOLS" set-doc-type docs/architecture.md >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "one argument: exit 2 (usage)"
+  rc=0
+  "$DOC_TOOLS" set-doc-type docs/architecture.md plan extra >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "three arguments: exit 2 (usage)"
+  assert_eq "$sum" "$(hash_file docs/.doc-index.json)" "no refusal wrote the index"
+  out=$("$DOC_TOOLS" --help 2>&1) || true
+  assert_contains "$out" "set-doc-type <doc_path> <doc_type>" "--help lists set-doc-type"
+  teardown
+}
+
+test_fw_deprecate_entry_unknown_key_exits_1() {
+  echo "test: final review: deprecate-entry applies every known key, then exits 1 for an unknown one; remove-entry stays idempotent"
+  setup
+  printf '# b\n' > docs/b.md
+  printf '%s\n' "docs/architecture.md:src/:architecture" "docs/b.md:src/:guide" | "$DOC_TOOLS" build-index 2>/dev/null
+  local rc out
+  rc=0
+  out=$("$DOC_TOOLS" deprecate-entry docs/architecture.md docs/old-name.md 2>&1) || rc=$?
+  assert_eq "1" "$rc" "an unknown key: exit 1"
+  assert_contains "$out" "'docs/old-name.md' not found in index" "…naming it"
+  assert_contains "$out" "Deprecated 1 entry" "…after deprecating the known one"
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/architecture.md"].status' "deprecated" "the known key is deprecated"
+  rc=0
+  "$DOC_TOOLS" deprecate-entry docs/b.md >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "only known keys: exit 0"
+  rc=0
+  out=$("$DOC_TOOLS" remove-entry docs/b.md docs/never-indexed.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "remove-entry of an absent key: exit 0 (the absent entry is the end state asked for)"
+  assert_contains "$out" "SKIP: 'docs/never-indexed.md' not found in index." "…with a SKIP line"
+  teardown
+}
+
+test_fw_repo_verbs_refuse_a_subdirectory() {
+  echo "test: final review: a repository verb run below the top level exits 2 and writes nothing there"
+  setup
+  mkdir -p sub
+  local rc out
+  rc=0
+  out=$(cd sub && echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index 2>&1) || rc=$?
+  assert_eq "2" "$rc" "build-index from sub/: exit 2"
+  assert_contains "$out" "top level" "…saying it must run from the top level"
+  assert_true "no stray sub/docs/.doc-index.json" test ! -e sub/docs
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index 2>/dev/null
+  rc=0
+  (cd sub && "$DOC_TOOLS" check-freshness >/dev/null 2>&1) || rc=$?
+  assert_eq "2" "$rc" "check-freshness from sub/: exit 2"
+  rc=0
+  (cd src && "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1) || rc=$?
+  assert_eq "2" "$rc" "update-index from src/: exit 2"
+  rc=0
+  (cd sub && "$DOC_TOOLS" check-freshness --help >/dev/null 2>&1) || rc=$?
+  assert_eq "0" "$rc" "--help works anywhere"
+  rc=0
+  (cd sub && "$DOC_TOOLS" fragments list >/dev/null 2>&1) || rc=$?
+  assert_eq "0" "$rc" "a verb that needs no repository still runs from a subdirectory"
+  rc=0
+  "$DOC_TOOLS" check-freshness >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "from the top level: exit 0"
+  teardown
+}
+
+test_fw_doc_commits_follow_the_docs_own_history() {
+  echo "test: final review: add-entry baselines a doc at its own last commit, not at a side commit a merge discarded"
+  setup
+  printf 'v1\n' > docs/a.md
+  printf 'b1\n' > docs/b.md
+  printf 'code1\n' > src/x.js
+  _i1_commit base
+  git checkout -q -b side
+  printf 'v3\n' > docs/a.md
+  printf 'code-side\n' > src/x.js
+  GIT_COMMITTER_DATE="2030-01-02T00:00:00" GIT_AUTHOR_DATE="2030-01-02T00:00:00" git commit -qam "X1: side edits a"
+  printf 'b2\n' > docs/b.md
+  GIT_COMMITTER_DATE="2030-01-03T00:00:00" GIT_AUTHOR_DATE="2030-01-03T00:00:00" git commit -qam "X2: side edits b"
+  git checkout -q main
+  printf 'v2\n' > docs/a.md
+  printf 'code-main\n' > src/x.js
+  GIT_COMMITTER_DATE="2030-01-01T00:00:00" GIT_AUTHOR_DATE="2030-01-01T00:00:00" git commit -qam "C0: main edits a"
+  local c0
+  c0=$(git rev-parse HEAD)
+  # Merge side, keeping main's docs/a.md and src/x.js but side's docs/b.md: not
+  # TREESAME to either parent over {a, b}, TREESAME to main for docs/a.md.
+  git merge -q --no-ff --no-commit side >/dev/null 2>&1 || true
+  git checkout -q "$c0" -- docs/a.md src/x.js
+  git checkout -q side -- docs/b.md
+  GIT_COMMITTER_DATE="2030-01-04T00:00:00" GIT_AUTHOR_DATE="2030-01-04T00:00:00" git commit -qm "M: merge side"
+  assert_eq "$c0" "$(git rev-list -1 HEAD -- docs/a.md)" "fixture: git's own last commit of docs/a.md is C0"
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index 2>/dev/null
+  printf '%s\n' "docs/a.md:src/x.js:guide" "docs/b.md:src/x.js:guide" | "$DOC_TOOLS" add-entry >/dev/null 2>&1
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/a.md"].code_oids["src/x.js"]' "$(git rev-parse "$c0:src/x.js")" \
+    "docs/a.md's ref is recorded as of C0 (not the discarded side commit)"
+  assert_json_field "$json" '.docs["docs/a.md"].code_commit' "$c0" "…and code_commit is C0"
+  assert_json_field "$("$DOC_TOOLS" status docs/a.md 2>/dev/null)" '.status' "current" "…so it reads current"
+  teardown
+}
+
+test_fw_index_symlink_is_refused() {
+  echo "test: final review: a writer refuses a docs/.doc-index.json that is a symbolic link, writing nothing"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index 2>/dev/null
+  mkdir -p elsewhere
+  mv docs/.doc-index.json elsewhere/index.json
+  ln -s ../elsewhere/index.json docs/.doc-index.json
+  local sum rc out
+  sum=$(hash_file elsewhere/index.json)
+  echo "v2" >> src/index.js
+  rc=0
+  out=$("$DOC_TOOLS" update-index docs/architecture.md 2>&1) || rc=$?
+  assert_eq "1" "$rc" "update-index: exit 1"
+  assert_contains "$out" "symbolic link" "…saying why"
+  assert_true "the link is still a link" test -L docs/.doc-index.json
+  assert_eq "$sum" "$(hash_file elsewhere/index.json)" "…and its target is unchanged"
+  rc=0
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index --force >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "build-index --force: exit 1"
+  assert_true "…the link is still a link" test -L docs/.doc-index.json
+  rc=0
+  "$DOC_TOOLS" check-freshness >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "a reader still reads through it"
+  teardown
+}
+
+test_fw_lock_owned_by_another_users_process_is_not_broken() {
+  echo "test: final review: a lock whose owner pid is alive but not ours to signal (EPERM) is waited on, never broken"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index 2>/dev/null
+  if [ "$(id -u)" = 0 ]; then
+    record_skip "running as root: kill -0 1 succeeds, so no EPERM can be probed"
+    teardown
+    return 0
+  fi
+  mkdir docs/.doc-index.json.lock
+  echo 1 > docs/.doc-index.json.lock/pid
+  local rc out
+  rc=0
+  out=$(DOC_TOOLS_LOCK_TIMEOUT=1 "$DOC_TOOLS" update-index docs/architecture.md 2>&1) || rc=$?
+  assert_eq "1" "$rc" "the writer times out (exit 1)"
+  assert_not_contains "$out" "removed stale lock" "…and never breaks pid 1's lock"
+  assert_contains "$out" "held by running pid 1" "…naming the owner"
+  assert_true "the lock is still there" test -d docs/.doc-index.json.lock
+  rm -rf docs/.doc-index.json.lock
+  teardown
+}
+
+test_fw_tracked_names_git_would_quote_are_matched() {
+  echo "test: final review: a ref naming a tracked file with a quote, backslash or tab draws no 'matches no file' warning"
+  setup
+  printf 'q\n' > 'src/a"b.js'
+  printf 't\n' > "src/t$(printf '\t')b.js"
+  _i1_commit odd
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index 2>/dev/null
+  local out
+  out=$(printf '%s\n' "docs/guide.md:src/a\"b.js,src/t$(printf '\t')b.js:guide" | {
+    printf '# g\n' > docs/guide.md
+    "$DOC_TOOLS" add-entry 2>&1
+  }) || true
+  assert_contains "$out" "Added 1 entry" "the entry is added"
+  assert_not_contains "$out" "matches no file" "no false 'matches no file tracked by git' warning"
+  teardown
+}
+
+test_fw_code_refs_from_takes_nul_separated_lists() {
+  echo "test: final review: --code-refs-from reads a NUL-separated list (git diff -z), so no name is quoted"
+  setup
+  printf 'q\n' > 'src/a"b.js'
+  printf 'x\n' > src/plain.js
+  _i1_commit odd
+  printf '# g\n' > docs/guide.md
+  _i1_commit guide
+  printf '%s\n' "docs/architecture.md:src/plain.js:architecture" "docs/guide.md:src/a\"b.js:guide" \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  local out
+  out=$(printf 'src/a"b.js\0' | "$DOC_TOOLS" check-freshness --code-refs-from - 2>/dev/null) || true
+  assert_json_field "$out" '.docs | keys | join(",")' "docs/guide.md" "the NUL-separated name scopes to its doc"
+  out=$(printf 'src/plain.js\0src/a"b.js\0' | "$DOC_TOOLS" check-freshness --code-refs-from - 2>/dev/null) || true
+  assert_json_field "$out" '.docs | keys | join(",")' "docs/architecture.md,docs/guide.md" "…every name of the list"
+  out=$(printf 'src/plain.js\n' | "$DOC_TOOLS" check-freshness --code-refs-from - 2>/dev/null) || true
+  assert_json_field "$out" '.docs | keys | join(",")' "docs/architecture.md" "a newline-separated list still works"
+  teardown
+}
+
+test_fw_tools_release_notes_readme_status_and_uninstall() {
+  echo "test: final review: tools status reports an outdated RELEASE-NOTES.next/README.md; uninstall removes it only when it is the plugin's and alone"
+  setup
+  "$DOC_TOOLS" tools install --helper doc-pr-release >/dev/null 2>&1
+  local out
+  out=$("$DOC_TOOLS" tools status 2>&1) || true
+  assert_contains "$out" "RELEASE-NOTES.next/README.md: present (matches the plugin's fragment-format spec)" "an untouched README is reported as current"
+  echo "old advice" >> RELEASE-NOTES.next/README.md
+  out=$("$DOC_TOOLS" tools status 2>&1) || true
+  assert_contains "$out" "RELEASE-NOTES.next/README.md: present (differs from the plugin's fragment-format spec" "an outdated or edited README is reported"
+  # Edited: kept by uninstall.
+  "$DOC_TOOLS" tools uninstall --helper doc-pr-release >/dev/null 2>&1 || true
+  assert_file_exists RELEASE-NOTES.next/README.md "an edited README is kept"
+  # The plugin's own, alone: removed with the doc-pr-release helpers.
+  "$DOC_TOOLS" tools install --helper doc-pr-release >/dev/null 2>&1
+  cp "$SCRIPT_DIR/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md" RELEASE-NOTES.next/README.md
+  out=$("$DOC_TOOLS" tools uninstall --helper doc-pr-release 2>&1) || true
+  assert_true "the plugin's README, alone, is removed" test ! -e RELEASE-NOTES.next
+  assert_contains "$out" "Removed RELEASE-NOTES.next/README.md" "…and the removal is reported"
+  # Beside a fragment: kept (the directory is in use).
+  "$DOC_TOOLS" tools install --helper doc-pr-release >/dev/null 2>&1
+  printf 'x\n' > RELEASE-NOTES.next/PR-1.md
+  "$DOC_TOOLS" tools uninstall >/dev/null 2>&1 || true
+  assert_file_exists RELEASE-NOTES.next/README.md "a README beside a fragment is kept"
+  teardown
+}
+
+test_fw_fragments_merge_ignores_log_show_signature() {
+  echo "test: final review: fragments merge reads the fragment list with log.showSignature pinned off"
+  setup
+  mkdir -p RELEASE-NOTES.next
+  _write_fragment RELEASE-NOTES.next/PR-1.md 1 $'### Added\n- one\n'
+  git add RELEASE-NOTES.next
+  # A commit carrying a (fake) signature. With a user's log.showSignature=true
+  # git verifies it on every log: here gpg is not installed, as on many CI
+  # runners, and git says so on stderr (with a real gpg, its verdict lines
+  # land in the path list itself).
+  local tree parent commit out rc
+  tree=$(git write-tree)
+  parent=$(git rev-parse HEAD)
+  printf 'tree %s\nparent %s\nauthor Test <test@test.com> 1700000000 +0000\ncommitter Test <test@test.com> 1700000000 +0000\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n iQFAKE\n -----END PGP SIGNATURE-----\n\nfeat: signed fragment\n' \
+    "$tree" "$parent" > "$TEST_DIR/commit.txt"
+  commit=$(git hash-object -t commit -w "$TEST_DIR/commit.txt")
+  git update-ref refs/heads/main "$commit"
+  git reset -q --hard
+  git config gpg.program "$TEST_DIR/no-such-gpg"
+  git config log.showSignature true
+  rc=0
+  out=$("$DOC_TOOLS" fragments merge "$parent" HEAD --paths-out "$TEST_DIR/paths" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "exits 0"
+  assert_eq "RELEASE-NOTES.next/PR-1.md" "$(cat "$TEST_DIR/paths")" "the consumed list is exactly the fragment"
+  assert_not_contains "$out" "no-such-gpg" "git never runs gpg for the fragment list (no signature check, no noise)"
+  assert_contains "$out" "- one" "the fragment is merged"
+  teardown
+}
+
+test_fw_harness_int_self_test_skips_when_sigint_is_ignored() {
+  echo "test: final review: the SIGINT self-test skips loudly (never fails) when the suite inherited an ignored SIGINT"
+  local runner out rc=0
+  runner=$(harness_mktemp int-bg)
+  # A non-interactive shell's background job ignores SIGINT; the self-test runs
+  # inside one here, as it would in a suite launched with '&'.
+  cat > "$runner" <<EOF
+SCRIPT_DIR="$SCRIPT_DIR"
+source "$SCRIPT_DIR/test-helpers.sh"
+$(declare -f test_harness_int_stops_suite_and_cleans_up)
+test_harness_int_stops_suite_and_cleans_up
+echo "counts FAIL=\$FAIL SKIP=\$SKIP"
+EOF
+  out=$("$BASH_BIN" -c '"$1" "$2" & wait $!' _ "$BASH_BIN" "$runner" 2>&1) || rc=$?
+  assert_contains "$out" "counts FAIL=0 SKIP=1" "an inherited-ignored SIGINT is a counted SKIP, not a FAIL"
+  assert_contains "$out" "SIGINT is ignored" "…said loudly"
 }
 
 # --- Runner ---
@@ -6188,6 +6641,20 @@ run_tests() {
   test_i10_tools_status_counts_user_added_helpers_apart
   test_i10_tools_from_the_vendored_copy
   test_i10_no_hidden_sed_or_ripgrep_dependency
+
+  # --- Final whole-branch review fixes (sweep 05ea982 final review) ---
+  test_fw_set_doc_type_retypes_in_place
+  test_fw_set_doc_type_refusals
+  test_fw_deprecate_entry_unknown_key_exits_1
+  test_fw_repo_verbs_refuse_a_subdirectory
+  test_fw_doc_commits_follow_the_docs_own_history
+  test_fw_index_symlink_is_refused
+  test_fw_lock_owned_by_another_users_process_is_not_broken
+  test_fw_tracked_names_git_would_quote_are_matched
+  test_fw_code_refs_from_takes_nul_separated_lists
+  test_fw_tools_release_notes_readme_status_and_uninstall
+  test_fw_fragments_merge_ignores_log_show_signature
+  test_fw_harness_int_self_test_skips_when_sigint_is_ignored
 
   print_summary
 }

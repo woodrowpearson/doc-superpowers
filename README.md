@@ -373,7 +373,7 @@ The skill itself (`skills/doc-superpowers/SKILL.md` + `references/`) has zero de
 | `jq` | Yes, **≥ 1.6** | `brew install jq` / `apt install jq`. 1.6 is the floor: the index writers use `--args` / `$ARGS.positional`. `doc-tools.sh` refuses an older jq with a clear error |
 | `sha256sum` or `shasum` | Yes | Standard on Linux/macOS respectively |
 
-Everything else is the POSIX userland (`awk`, `sed`, `grep`, `mktemp`, …) as stock macOS and Linux ship it: no GNU-only tool (GNU sed, ripgrep) is needed.
+Everything else is the POSIX userland (`awk`, `sed`, `grep`, `mktemp`, …) as stock macOS and Linux ship it: no GNU-only tool (GNU sed, ripgrep) is needed. Where `awk` is mawk (Debian, Ubuntu), it must be 1.3.4 or newer: older mawk lacks the POSIX character classes (`[[:space:]]`) the tools use.
 
 ## Contributing
 

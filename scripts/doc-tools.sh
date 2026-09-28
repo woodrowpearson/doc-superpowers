@@ -673,16 +673,25 @@ _last_commits() {
 
 # _doc_commits <out-file>
 # For each doc of _FACT_KEYS, the newest commit reachable from HEAD that
-# touched it, one line each in order: "" for a doc git has never committed
-# (and on an unborn HEAD). ONE `git log` walk for them all: the paths go on
-# its stdin (--stdin: no argv limit), and each doc takes the first (newest)
-# commit that lists it. A path holding a newline is not looked up ("").
+# touched it — what `git rev-list -1 HEAD -- <doc>` names — one line each in
+# order: "" for a doc git has never committed (and on an unborn HEAD). A path
+# holding a newline is not looked up ("").
+#
+# ONE `git log` walk for them all (the paths on its stdin: no argv limit),
+# each doc taking the first (newest) commit that lists it, read by an awk that
+# stops the walk once every doc is found. The walk's history simplification
+# is over ALL the paths, so a merge that kept one parent's version of a doc
+# but another's of some other doc is TREESAME to neither parent, and both
+# sides are walked: a side-branch commit to the doc that the merge discarded
+# is newer than the one it kept, and was taken as the doc's last commit (a
+# baseline newer than the doc's content, which can hide staleness). So each
+# hit is checked: the doc's blob at the hit must be HEAD's (one batch-check
+# for all of them); a doc that fails it gets its own `rev-list -1`.
 _doc_commits() {
-  local out="$1" list="$_SCRATCH/dc.list" names="$_SCRATCH/dc.names" raw="$_SCRATCH/dc.raw" p
+  local out="$1" list="$_SCRATCH/dc.list" names="$_SCRATCH/dc.names" hits="$_SCRATCH/dc.hits" p
   : > "$out"
   [ ${#_FACT_KEYS[@]} -gt 0 ] || return 0
   _head_init
-  : > "$raw"
   for p in "${_FACT_KEYS[@]}"; do
     case "$p" in
       *$'\n'*) p="" ;;
@@ -691,19 +700,57 @@ _doc_commits() {
   done > "$names"
   awk 'NF' "$names" > "$list.paths" || _die "cannot list the docs"
   # No path at all would make git log list every file of every commit.
-  if [ -n "$_HEAD" ] && [ -s "$list.paths" ]; then
-    { printf '%s\n--\n' "$_HEAD"; cat "$list.paths"; } > "$list" || _die "cannot list the docs"
-    # -z output: "\001<commit>\0", then "\n<path>\0" for its first path and
-    # "<path>\0" for the rest. Commit lines start with \001; paths are the
-    # other non-empty lines.
-    git --literal-pathspecs -c core.quotePath=false log --no-renames --format='%x01%H' --name-only -z --stdin \
-        < "$list" | tr '\000' '\n' > "$raw" || _die "git log failed while finding the docs' last commits"
+  if [ -z "$_HEAD" ] || [ ! -s "$list.paths" ]; then
+    awk '{ print "" }' "$names" > "$out" || _die "cannot list the docs"
+    return 0
   fi
-  awk -v raw="$raw" '
-    FILENAME == raw { if (substr($0, 1, 1) == "\001") c = substr($0, 2)
-                      else if ($0 != "" && !($0 in at)) at[$0] = c
-                      next }
-    { print ($0 != "" && ($0 in at)) ? at[$0] : "" }' "$raw" "$names" > "$out" \
+  { printf '%s\n--\n' "$_HEAD"; cat "$list.paths"; } > "$list" || _die "cannot list the docs"
+  # -z output: "\001<commit>\0", then "\n<path>\0" for its first path and
+  # "<path>\0" for the rest. Commit lines start with \001; paths are the
+  # other non-empty lines. The awk exits once every doc has its commit, so
+  # git (and tr) may end on SIGPIPE: their statuses are checked apart, in a
+  # subshell without pipefail — an early stop is fine, a failed walk is not.
+  local rcs
+  rcs=$(
+    set +e +o pipefail
+    git --literal-pathspecs -c core.quotePath=false -c log.showSignature=false \
+        log --no-renames --format='%x01%H' --name-only -z --stdin < "$list" \
+      | tr '\000' '\n' \
+      | awk -v want="$list.paths" '
+          BEGIN { while ((getline p < want) > 0) if (!(p in w)) { w[p] = 1; left++ } }
+          substr($0, 1, 1) == "\001" { c = substr($0, 2); next }
+          $0 != "" && ($0 in w) && !($0 in at) { at[$0] = c; print $0 "\t" c; if (--left == 0) exit }' \
+        > "$hits"
+    echo "${PIPESTATUS[*]}"
+  )
+  local grc trc arc
+  read -r grc trc arc <<<"$rcs"
+  case "$arc:$grc:$trc" in
+    0:0:0|0:141:0|0:141:141|0:0:141) ;;
+    *) _die "git log failed while finding the docs' last commits" ;;
+  esac
+  # Each hit's blob of the doc against HEAD's (one batch-check): the same
+  # blob — or both absent, a doc deleted at its hit — keeps the hit.
+  local checks="$_SCRATCH/dc.checks" verdict="$_SCRATCH/dc.verdict" fixed="$_SCRATCH/dc.fixed" d c
+  awk -F '\t' -v head="$_HEAD" '{ c = $NF; d = substr($0, 1, length($0) - length(c) - 1)
+                                   print c ":" d; print head ":" d }' "$hits" \
+    | git cat-file --batch-check='%(objectname)' \
+    | awk '{ id = ((length($0) == 40 || length($0) == 64) && $0 !~ /[^0123456789abcdef]/) ? $0 : "missing"
+             if (NR % 2) a = id; else print (a == id ? "ok" : "check") }' > "$verdict" \
+    || _die "git cat-file --batch-check failed while checking the docs' last commits"
+  : > "$fixed"
+  while IFS= read -r p <&3 && IFS= read -r c <&4; do
+    [ "$c" = check ] || continue
+    d="${p%$'\t'*}"
+    c=$(git --literal-pathspecs rev-list -1 "$_HEAD" -- "$d") \
+      || _die "git rev-list failed for '$d'"
+    printf '%s\t%s\n' "$d" "$c" >> "$fixed"
+  done 3< "$hits" 4< "$verdict"
+  awk -v hits="$hits" -v fixed="$fixed" '
+    function load(f,   l, i) { while ((getline l < f) > 0) { i = length(l); while (i > 0 && substr(l, i, 1) != "\t") i--
+                                                             at[substr(l, 1, i - 1)] = substr(l, i + 1) } }
+    BEGIN { load(hits); load(fixed) }
+    { print ($0 != "" && ($0 in at)) ? at[$0] : "" }' "$names" > "$out" \
     || _die "cannot match the docs to their last commits"
 }
 
@@ -863,7 +910,9 @@ _warn_refs() {
     BEGIN {
       while ((getline r < reffile) > 0) {
         if (r in glob) continue
-        if (r ~ /[*?[]/) { glob[r] = 1; print "G\t" r; continue }
+        # index(), not /[*?[]/: a literal "[" inside a bracket expression
+        # is read differently by mawk (see the awk portability note below).
+        if (index(r, "*") || index(r, "?") || index(r, "[")) { glob[r] = 1; print "G\t" r; continue }
         k = norm(r)
         if (!(k in want)) { want[k] = 1; orig[k] = r; order[++total] = k }
       }
@@ -1325,9 +1374,8 @@ _freshness_scan() {
 #                     copy-then-unlink) → chmod to the prior mode (644 when
 #                     new) → mv. The only place the index file is replaced.
 #
-# A run that changes nothing writes nothing (no generated_at bump), and
-# _INDEX_CHANGED lists the docs keys whose entries actually changed, so writers
-# report what they did rather than what they were asked. Writers build a
+# A run that changes nothing writes nothing (no generated_at bump). Writers
+# report what they did rather than what they were asked: they build a
 # per-key patch list (JSONL) first and apply it in that one pass: O(N + k), not
 # a whole-index re-parse per path; with --report the same pass classifies each
 # patch row, so a writer's report is one walk over its rows (a newline-framed
@@ -1344,7 +1392,6 @@ _TMP_PATHS=()        # in-flight tmps beside other files (_tmp_beside); removed 
 _INDEX_LOCK_HELD=0
 _INDEX_BREAKING=0
 _INDEX_NOW=""        # one timestamp per run: last_verified and generated_at agree
-_INDEX_CHANGED=()
 _INDEX_CLASSES=""    # with --report: one class per patch row (see _index_apply)
 _INDEX_WROTE=0
 
@@ -1620,6 +1667,18 @@ _index_break_stale() {
   return "$broke"
 }
 
+# Whether process $1 is running. kill -0 fails with EPERM for a live process
+# of another user (a shared checkout, a CI runner's other account) — which
+# read as dead and got its lock broken — so a failed kill -0 is confirmed
+# with ps -p (POSIX). Where ps cannot tell, the process counts as gone, as
+# before.
+_pid_alive() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$1" 2>/dev/null || ps -p "$1" >/dev/null 2>&1
+}
+
 # Take the writer lock (re-entrant within a run). mkdir is atomic everywhere
 # and needs nothing beyond POSIX. Waits up to DOC_TOOLS_LOCK_TIMEOUT seconds
 # (default 30), then fails naming the owner. Main shell only: it records $$
@@ -1665,7 +1724,7 @@ _index_lock() {
       _die "cannot create lock $INDEX_LOCK${err:+: $err}"
     fi
     owner=$(cat "$INDEX_LOCK/pid" 2>/dev/null || true)
-    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+    if [ -n "$owner" ] && ! _pid_alive "$owner"; then
       _index_break_stale "$owner" && continue
     fi
     if [ "$polls" -ge "$max" ]; then
@@ -1732,8 +1791,10 @@ _index_install() {
 # by check-freshness), and a legacy value is read as absent until then. A run
 # that changes nothing leaves such values, like everything else, untouched.
 #
-# Sets _INDEX_WROTE (0/1) and _INDEX_CHANGED (sorted docs keys whose entry was
-# added, removed or modified). Releases the lock before returning.
+# Sets _INDEX_WROTE (0/1). Releases the lock before returning. An index that
+# is a symbolic link is refused before anything is read or written (as
+# _tmp_beside refuses one for every other file): the mv would replace the
+# link with a regular file.
 _index_apply() {
   local replace=0 report=0
   case "${1:-}" in
@@ -1742,6 +1803,7 @@ _index_apply() {
   esac
   local program="$1"
   shift
+  [ ! -L "$INDEX_FILE" ] || _die "$INDEX_FILE is a symbolic link: not replacing it (the write would turn it into a regular file; point the tools at the file itself). Nothing was written."
   _scratch_init
   _index_now
   _index_lock
@@ -1765,7 +1827,6 @@ _index_apply() {
   # fwrite and their byte length since 1.6); it is jq's raw INPUT that is not
   # NUL-safe there — see _rec_put.
   #   same\0 | write\0                     whether anything changed
-  #   <n>\0<key>\0…(n keys)                (write) the changed keys
   #   <classes>\0                          (--report) one class per $patch row
   #   <index>\n                            (write) the new index
   # The index is emitted pretty-printed, byte-for-byte what `jq .` writes.
@@ -1792,7 +1853,6 @@ _index_apply() {
        else [ (($__od | keys) + ($__new.docs | keys) | unique)[] as $k
               | select($__od[$k] != $__new.docs[$k]) | $k ] end) as $__ch
     | (if $__same then "same\u0000" else "write\u0000" end),
-      (if $__same then empty else "\($__ch | length)\u0000", ($__ch[] | . + "\u0000") end),
       ('"$classes"'),
       (if $__same then empty
        else ($__new
@@ -1811,21 +1871,12 @@ _index_apply() {
     _die "failed to apply the index update; $INDEX_FILE is unchanged."
   fi
 
-  _INDEX_CHANGED=()
   _INDEX_CLASSES=""
   _INDEX_WROTE=0
-  local verdict="" n=0 i=0 key
+  local verdict=""
   _INDEX_TMP=$(mktemp "$INDEX_FILE.tmp.XXXXXX") || _die "cannot create a temp file beside $INDEX_FILE"
   {
     IFS= read -r -d '' verdict || true
-    if [ "$verdict" = write ]; then
-      IFS= read -r -d '' n
-      while [ "$i" -lt "$n" ]; do
-        IFS= read -r -d '' key
-        _INDEX_CHANGED+=("$key")
-        i=$((i + 1))
-      done
-    fi
     if [ "$report" = 1 ]; then
       IFS= read -r -d '' _INDEX_CLASSES || _die "unexpected index-apply output; $INDEX_FILE is unchanged."
     fi
@@ -1913,10 +1964,12 @@ check-freshness|cmd_check_freshness|repo|code-refs+ code-refs-from=* tree=
   --code-refs limits the report to docs whose code_refs share a path
   segment with a listed path: src/m1 matches refs src/m1, src/m1/a.js and
   src/, never src/m10. It takes every following argument up to the next
-  --option. --code-refs-from reads the same list from a file, one path per
-  line, or from stdin with "-" (no argv limit; use it from hooks and CI).
-  Produce either list with
-    git -c core.quotePath=false diff --name-only --no-renames
+  --option. --code-refs-from reads the same list from a file, or from
+  stdin with "-" (no argv limit; use it from hooks and CI): one path per
+  line, or NUL-separated. Produce it NUL-separated, so git quotes no name
+  (it quotes one holding '"', a backslash or a tab even with
+  core.quotePath=false):
+    git diff -z --name-only --no-renames <range>
 update-index|cmd_update_index|repo|
   <doc_path>...
   Verify indexed docs — the one subcommand that attests a doc matches its
@@ -1939,7 +1992,9 @@ add-entry|cmd_add_entry|repo|
   lines are still applied, and the run exits 1.
 remove-entry|cmd_remove_entry|repo|
   <doc_path>...
-  Remove entries from the index.
+  Remove entries from the index. A path that is not indexed is reported
+  (SKIP) and the run still exits 0: the entry being absent is the end
+  state asked for, so removing twice is safe.
 move-entry|cmd_move_entry|repo|stdin
   <old_doc_path> <new_doc_path> | --stdin < <old><TAB><new> lines
   Re-key an entry after a doc moves, preserving its metadata: code_refs,
@@ -1969,12 +2024,27 @@ set-code-refs|cmd_set_code_refs|repo|refs=
   ancestor of HEAD — so commits_behind may over-count but is never a
   masked 0.
   Refs are parsed like a mapping line's; their order is kept.
+set-doc-type|cmd_set_doc_type|repo|
+  <doc_path> <doc_type>
+  Change an indexed doc's doc_type in place: the entry keeps its key
+  position and every other field (last_verified, code_oids, status, …);
+  the same type writes nothing. Not a verification. doc_type decides
+  whether a doc is a record (plan, issue, audit, design-spec: never
+  reported stale) or a living doc compared with its code, so <doc_type>
+  must be a known type — architecture, api-contracts, data-layer, infra,
+  ci-cd, workflows, agentic, guide, codebase-guide, conventions, spec,
+  adr, plan, issue, audit or design-spec — or one this index already
+  uses (a project's own vocabulary); anything else (a typo) exits 1,
+  writing nothing. Use it, not remove-entry + add-entry, which would drop
+  the entry's verification, deprecation and links.
 deprecate-entry|cmd_deprecate_entry|repo|superseded-by=
   [--superseded-by <doc_path>] <doc_path>...
   Mark entries deprecated, optionally naming the doc that supersedes them;
   that successor's replaces is set to the (first) deprecated doc unless it
   already names one. last_verified is not touched: deprecating is not
-  verifying.
+  verifying. A path that is not indexed is reported and skipped; the
+  others are still applied, and the run exits 1 (so an archive step that
+  names the old path after move-entry, deprecating nothing, fails).
 status|cmd_status|repo|tree=
   [--tree <tree-ish>] <doc_path>
   Freshness of one doc (read-only, JSON): the same verdict check-freshness
@@ -2014,7 +2084,9 @@ set-implementation|cmd_set_implementation|deps|ref= status= note=
   (Realized-by:) line; with neither it exits 1 and writes nothing. Values
   are written literally; --ref and --note must each be one line. Status:
   complete, partial, in-progress, not-started, reverted, superseded or
-  blocked. The doc is replaced atomically, keeping its mode.
+  blocked. The doc is replaced atomically, keeping its mode. Exits 2 (not
+  1) for an invalid --status, a missing <path> or a multi-line --ref /
+  --note: they are checked with the command line, before anything is read.
 fragments list|cmd_fragments_list|deps|
   -
   List the per-PR release-notes fragments (RELEASE-NOTES.next/PR-<N>.md in
@@ -2024,7 +2096,8 @@ fragments list|cmd_fragments_list|deps|
   with a warning.
 fragments validate|cmd_fragments_validate|deps|
   <path>
-  Exit 0 if the fragment's hash matches its body, 1 if it drifted.
+  Exit 0 if the fragment's hash matches its body, 1 if it drifted (or has
+  no hash marker), 2 if <path> is not a regular file.
 fragments merge|cmd_fragments_merge|repo|paths-out= remove
   <range-start> <range-end> [--paths-out <file>] [--remove]
   Print the merged sections of every fragment present at <range-end>: a
@@ -2057,16 +2130,20 @@ tools uninstall|cmd_tools_uninstall|deps|dest= helper=*
   version) and a file you added are kept and reported, and so is a helper
   directory that still holds them. With --helper <dir> (repeatable), only
   those helper directories (doc-tools.sh stays). A symbolic link on the
-  way is refused. RELEASE-NOTES.next/README.md is never removed. Must run
-  from the plugin's doc-tools.sh (exit 1 from a vendored copy, which has
-  nothing to compare against).
+  way is refused. With the doc-pr-release helpers it also removes
+  RELEASE-NOTES.next/README.md when it is byte-identical to the plugin's
+  fragment-format spec and the only file there (an edited one, or one
+  beside fragments, is kept). Must run from the plugin's doc-tools.sh
+  (exit 1 from a vendored copy, which has nothing to compare against).
 tools status|cmd_tools_status|deps|dest=
   [--dest <path>]
   Report whether doc-tools.sh is vendored at <path>, whether it matches the
   plugin's copy (and the plugin's version), and the helpers present: how
   many differ from the plugin's copies, and how many the plugin does not
-  ship (added locally). Run from a vendored copy it reports presence only:
-  no plugin to compare with.
+  ship (added locally) — and whether RELEASE-NOTES.next/README.md matches
+  the plugin's fragment-format spec (an older copy gives outdated advice:
+  replace it with the plugin's). Run from a vendored copy it reports
+  presence only: no plugin to compare with.
 tools version|cmd_tools_version|none|
   -
   Print the doc-superpowers version this doc-tools.sh belongs to: the
@@ -2118,16 +2195,19 @@ Realization blocks (set-implementation, implementation-status, update-index):
 Doc paths:
   The doc-index is keyed by paths relative to the repo root, and every
   subcommand resolves paths against the current working directory, so run
-  doc-tools.sh from the repo root. An absolute path inside the working tree
+  doc-tools.sh from the repo root: a repository subcommand run from a
+  subdirectory exits 2, writing nothing. An absolute path inside the working tree
   is rewritten to its relative form, "//" collapses to "/", and a path
   outside the tree, or one starting with "-", is rejected (non-zero exit)
   rather than written as an unfindable key. A path named twice counts once.
 
 Index writes:
   build-index, update-index, add-entry, remove-entry, move-entry,
-  set-code-refs and deprecate-entry take the lock docs/.doc-index.json.lock
-  and replace the index atomically, so they are safe to run concurrently and an interrupted
-  run leaves the previous index intact. A run that changes nothing writes
+  set-code-refs, set-doc-type and deprecate-entry take the lock
+  docs/.doc-index.json.lock and replace the index atomically, so they are
+  safe to run concurrently and an interrupted run leaves the previous index
+  intact. An index that is a symbolic link is refused, writing nothing: the
+  replacement would turn the link into a regular file. A run that changes nothing writes
   nothing (generated_at is not bumped). The incremental writers report only
   the entries they actually changed. Every verb that reads the index refuses
   one that is empty or malformed; build-index rebuilds over it. Writes stamp
@@ -2160,18 +2240,26 @@ Stored state (who may attest):
   doc — doc_type plan, issue, audit or design-spec, or any path under
   docs/archive/ — describes a point in time, so it is never reported
   stale: check-freshness reports it current with "record": true (and
-  commits_behind null: not evaluated). Archiving a doc is git mv into
-  docs/archive/<type>/, then move-entry, then deprecate-entry.
+  commits_behind null: not evaluated). set-doc-type retypes an entry in
+  place (an index written before v3 typed design specs "spec": retype them
+  design-spec). Archiving a doc is git mv into docs/archive/<type>/, then
+  move-entry, then deprecate-entry.
 
 Exit status:
   0  success
   1  the operation failed or was refused (an invalid mapping line, a path
-     outside the repo, a key not in the index, build-index over a non-empty
-     index without --force, …)
+     outside the repo, a key not in the index, an unknown doc_type,
+     build-index over a non-empty index without --force, …). A verb given
+     several paths applies the rest and exits 1 at the end. The one
+     exception: remove-entry exits 0 for a key not in the index (SKIP),
+     since the absent entry is the end state asked for.
   2  usage error: an unknown subcommand or option, an option without its
      value, the wrong number of arguments (including one given to a
      subcommand that takes none), or a repository subcommand run outside a
-     git work tree. A malformed argument value (bump-version abc) is 1.
+     git work tree or below its top level. A malformed argument value
+     (bump-version abc) is 1 — except that set-implementation exits 2 for
+     an invalid --status, a missing <path> or a multi-line --ref / --note,
+     and fragments validate exits 2 for a <path> that is not a regular file.
   3  fragments merge refused: a release consumed fragments that are still
      present, because its release commit has not reached <range-end>
 
@@ -2393,12 +2481,21 @@ _parse_args() {
   done
 }
 
-# Repository verbs run only inside a git work tree. Checked ONCE, up front:
-# per-call `2>/dev/null || true` used to turn "not a repository" into "no
-# history", and check-freshness reported every doc current, rc 0.
+# Repository verbs run only inside a git work tree, at its top level. Checked
+# ONCE, up front: per-call `2>/dev/null || true` used to turn "not a
+# repository" into "no history", and check-freshness reported every doc
+# current, rc 0. Paths are keyed relative to the top level and resolved
+# against the cwd, so from a subdirectory build-index wrote a stray
+# sub/docs/.doc-index.json with keys of mixed bases.
 _require_repo() {
+  local prefix
   if ! git rev-parse --git-dir >/dev/null 2>&1; then
     echo "ERROR: $1 must run inside a git repository (run doc-tools.sh from the repo root)." >&2
+    exit 2
+  fi
+  prefix=$(git rev-parse --show-prefix 2>/dev/null) || prefix=""
+  if [ -n "$prefix" ]; then
+    echo "ERROR: $1 must run from the repository's top level, not from ${prefix%/}/ (doc paths are keyed from the root). Run: cd \"\$(git rev-parse --show-toplevel)\"" >&2
     exit 2
   fi
 }
@@ -2755,12 +2852,14 @@ _code_refs_list() {
   for p in ${_OPTV_code_refs[@]+"${_OPTV_code_refs[@]}"}; do
     printf '%s\n' "$p" >> "$out"
   done
+  # One path per line, or NUL-separated (git diff -z: no name is quoted); a
+  # path holds no NUL, so NUL is only ever a separator.
   for src in ${_OPTV_code_refs_from[@]+"${_OPTV_code_refs_from[@]}"}; do
     if [ "$src" = "-" ]; then
-      cat >> "$out" || _die "cannot read the --code-refs-from list from stdin"
+      tr '\000' '\n' >> "$out" || _die "cannot read the --code-refs-from list from stdin"
     else
       [ -f "$src" ] || _die "--code-refs-from: no such file '$src'"
-      cat "$src" >> "$out" || _die "cannot read --code-refs-from '$src'"
+      tr '\000' '\n' < "$src" >> "$out" || _die "cannot read --code-refs-from '$src'"
     fi
     printf '\n' >> "$out"
   done
@@ -3099,6 +3198,9 @@ cmd_remove_entry() {
   _index_apply --report "$_INDEX_PATCH" --slurpfile patch "$patch"
 
   # A present key is always removed, so "not changed" means "not indexed".
+  # That is a SKIP, not a failure (exit 0): the entry being absent is the end
+  # state asked for — the one documented exception to "a key not in the
+  # index exits 1".
   local removed=() i=0
   while [ "$i" -lt "${#targets[@]}" ]; do
     if [ "${_INDEX_CLASSES:$i:1}" = c ]; then
@@ -3530,6 +3632,78 @@ cmd_set_code_refs() {
   esac
 }
 
+# The documented doc_type vocabulary: one living type per doc-spec.md
+# template, and the record types (never reported stale — the same four
+# _JQ_FRESH_EXTRACT tests). set-doc-type also accepts a type the index
+# already uses: a project may keep its own vocabulary.
+_DOC_TYPES_LIVING="architecture api-contracts data-layer infra ci-cd workflows agentic guide codebase-guide conventions spec adr"
+_DOC_TYPES_RECORD="plan issue audit design-spec"
+
+# set-doc-type <doc> <type>: one "merge" patch row, {doc_type: <type>}, so the
+# entry keeps its key position and every other field. doc_type decides
+# whether a doc is a record (see _JQ_FRESH_EXTRACT): the only other way to
+# change it was remove-entry + add-entry, which drops the entry's
+# verification, deprecation and links.
+cmd_set_doc_type() {
+  [ $# -eq 2 ] || _usage_error set-doc-type "takes exactly <doc_path> <doc_type> (got $# arguments)"
+  if [ ! -f "$INDEX_FILE" ]; then
+    echo "ERROR: doc-index.json not found at $INDEX_FILE. Run build-index first." >&2
+    exit 1
+  fi
+  local doc_path type="$2"
+  doc_path=$(normalize_doc_path "$1") || exit 1
+
+  _scratch_init
+  _index_now
+  # What the entry holds and which types this index uses are read under the
+  # lock the write then takes (re-entrant): nothing changes in between.
+  _index_lock
+  local snap facts="$_SCRATCH/set-doc-type" has old known
+  snap=$(_index_load) || exit 1
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  jq -j --arg k "$doc_path" --arg t "$type" --arg vocab "$_DOC_TYPES_LIVING $_DOC_TYPES_RECORD" '
+    .docs as $d
+    | (if ($d | has($k)) then "1" else "0" end) + "\u0000"
+      + (if ($d | has($k)) and ($d[$k] | type) == "object" then ($d[$k].doc_type // "" | tostring) else "" end) + "\u0000"
+      + (if $t != "" and (($vocab | split(" ") | any(.[]; . == $t))
+                          or any($d[]; type == "object" and .doc_type == $t))
+         then "1" else "0" end) + "\u0000"' < "$snap" > "$facts" || _die "cannot read $INDEX_FILE"
+  { IFS= read -r -d '' has; IFS= read -r -d '' old; IFS= read -r -d '' known; } < "$facts"
+  if [ "$has" != 1 ]; then
+    echo "ERROR: '$doc_path' not found in index. Use add-entry to index it." >&2
+    exit 1
+  fi
+  if [ "$known" != 1 ]; then
+    echo "ERROR: unknown doc_type '$type' for '$doc_path'. Known: $_DOC_TYPES_LIVING (living docs), $_DOC_TYPES_RECORD (record docs, never reported stale) — or a type this index already uses. Nothing was written." >&2
+    exit 1
+  fi
+  if [ "$old" = "$type" ]; then
+    _report_keys "Unchanged" "(doc_type already '$type'; nothing written)" "$doc_path"
+    return 0
+  fi
+
+  local patch="$_SCRATCH/set-doc-type.jsonl"
+  jq -nc --arg k "$doc_path" --arg t "$type" '{key: $k, merge: {doc_type: $t}}' > "$patch" \
+    || _die "cannot assemble the update; $INDEX_FILE is unchanged."
+  _index_apply --report "$_INDEX_PATCH" --slurpfile patch "$patch"
+  case "${_INDEX_CLASSES:0:1}" in
+    c) _report_keys "Set doc_type of" "(${old:-none} → $type)" "$doc_path" ;;
+    *) _report_keys "Unchanged" "(doc_type already '$type'; nothing written)" "$doc_path"; return 0 ;;
+  esac
+  # Whether it is a record changes what check-freshness says about it.
+  case "$doc_path" in
+    docs/archive/*) return 0 ;;
+  esac
+  local was=0 now=0
+  case " $_DOC_TYPES_RECORD " in *" $old "*) was=1 ;; esac
+  case " $_DOC_TYPES_RECORD " in *" $type "*) now=1 ;; esac
+  if [ "$was" = 0 ] && [ "$now" = 1 ]; then
+    echo "NOTE: '$doc_path' is now a record doc: check-freshness reports it current and never compares it with its code." >&2
+  elif [ "$was" = 1 ] && [ "$now" = 0 ]; then
+    echo "NOTE: '$doc_path' is now a living doc: check-freshness compares it with its code again (update-index it once you have read it against that code)." >&2
+  fi
+}
+
 cmd_deprecate_entry() {
   if [ ! -f "$INDEX_FILE" ]; then
     echo "ERROR: doc-index.json not found at $INDEX_FILE. Run build-index first." >&2
@@ -3600,13 +3774,18 @@ cmd_deprecate_entry() {
 
   # The classes come from the same locked pass as the write, so "not found"
   # and "already deprecated" (a no-op) are told apart against the index that
-  # was actually updated.
-  local deprecated=() unchanged=() i=0
+  # was actually updated. An unknown key is reported and the rest applied;
+  # the run exits 1 at the end (like update-index): an archive step that
+  # named the old path after move-entry used to deprecate nothing, exit 0.
+  local deprecated=() unchanged=() i=0 unknown=0
   while [ "$i" -lt "${#targets[@]}" ]; do
     case "${_INDEX_CLASSES:$i:1}" in
       c) deprecated+=("${targets[$i]}") ;;
       u) unchanged+=("${targets[$i]}") ;;
-      *) echo "SKIP: '${targets[$i]}' not found in index." >&2 ;;
+      *)
+        echo "ERROR: '${targets[$i]}' not found in index; skipped (after a move-entry, name the new path)." >&2
+        unknown=$((unknown + 1))
+        ;;
     esac
     i=$((i + 1))
   done
@@ -3622,6 +3801,10 @@ cmd_deprecate_entry() {
     elif [ -n "$pred" ] && [ "$succ_replaces" != "$pred" ]; then
       echo "WARNING: '$succ' already replaces '$succ_replaces'; replaces holds one path, so it is left as it is." >&2
     fi
+  fi
+  if [ "$unknown" -gt 0 ]; then
+    echo "$unknown $([ "$unknown" -eq 1 ] && echo path was || echo paths were) not in the index (see above)." >&2
+    exit 1
   fi
 }
 
@@ -4164,8 +4347,10 @@ _frag_commit() {
 # it as R); a merge commit's diff is taken against its first parent (-m
 # --first-parent, and log.diffMerges pinned for git >= 2.31), so a fragment
 # a merge brings in — or adds itself — counts as added by that merge.
+# log.showSignature is pinned off: a user's `true` would put gpg's verdict
+# lines into the path list.
 _frag_added() {
-  git -c log.diffMerges=first-parent log -m --first-parent --no-renames --diff-filter=A \
+  git -c log.diffMerges=first-parent -c log.showSignature=false log -m --first-parent --no-renames --diff-filter=A \
     --format= --name-only "$1..$2" -- ":(top)$_FRAG_DIR/"
 }
 
@@ -4369,7 +4554,9 @@ cmd_fragments_merge() {
 # Portability (POSIX awk, BWK awk, gawk, mawk): no regex interval ({m,n}:
 # older BWK awk and mawk builds lack it; the fence indent is a 3-step loop), no
 # literal "[" or "]" in a bracket expression (the escaping rules differ; "[]"
-# is matched as text; POSIX classes such as [:space:] are fine), no "?" chain
+# is matched as text; POSIX classes such as [:space:] are fine in every awk
+# but mawk before 1.3.4, which lacks them: mawk >= 1.3.4 is required — what
+# Debian and Ubuntu ship today), no "?" chain
 # and no anchor inside a group ("^#+([[:space:]]|$)" is two regexes); literal
 # text is compared with index() / == or substr(). Every exit status a caller
 # checks comes from an explicit "exit N" or from awk failing: set-implementation
@@ -4790,8 +4977,9 @@ cmd_tools_uninstall() {
   # A file is removed only when it is byte-identical to the plugin's copy of
   # it (and is not that copy). Anything else — a locally edited or drifted
   # file, one from another plugin version, a file the user added — is kept
-  # and reported. RELEASE-NOTES.next/README.md is never removed: it may carry
-  # edits.
+  # and reported. RELEASE-NOTES.next/README.md goes with the doc-pr-release
+  # helpers only when it is the plugin's own spec and alone there: an edited
+  # one, or one beside fragments, is kept.
   local removed=0 kept=0 d f p n
   _tools_no_link "$dest/doc-tools.sh"
   for d in $_TOOLS_HELPER_DIRS; do
@@ -4835,6 +5023,24 @@ cmd_tools_uninstall() {
 
   # Clean up an empty destination directory.
   rmdir "$dest" 2>/dev/null || true
+
+  case " ${only:-$_TOOLS_HELPER_DIRS} " in
+    *" doc-pr-release "*)
+      f="RELEASE-NOTES.next/README.md"
+      p="$SCRIPT_DIR/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md"
+      if [ -f "$f" ] && [ ! -L "$f" ] && [ -f "$p" ] && cmp -s "$p" "$f"; then
+        _tools_no_link "$f"
+        local others
+        others=$(cd RELEASE-NOTES.next && ls -A | grep -vxF README.md) || others=""
+        if [ -z "$others" ]; then
+          rm -f "$f" || _die "cannot remove $f"
+          rmdir RELEASE-NOTES.next 2>/dev/null || true
+          echo "Removed $f (the plugin's fragment-format spec; nothing else was there)"
+          removed=$((removed + 1))
+        fi
+      fi
+      ;;
+  esac
 
   if [ "$removed" -eq 0 ] && [ "$kept" -eq 0 ]; then
     echo "Nothing to uninstall at $dest"
@@ -4897,8 +5103,17 @@ cmd_tools_status() {
       echo "$d helpers: not installed at $dest"
     fi
   done
+  # An upgrade keeps an existing README (tools install never overwrites it),
+  # so an older copy keeps giving the advice of its version: say so.
   if [[ -f "RELEASE-NOTES.next/README.md" ]]; then
-    echo "RELEASE-NOTES.next/README.md: present"
+    p="$SCRIPT_DIR/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md"
+    if [ "$plugin" = 0 ] || [ ! -f "$p" ]; then
+      echo "RELEASE-NOTES.next/README.md: present"
+    elif cmp -s "$p" "RELEASE-NOTES.next/README.md"; then
+      echo "RELEASE-NOTES.next/README.md: present (matches the plugin's fragment-format spec)"
+    else
+      echo "RELEASE-NOTES.next/README.md: present (differs from the plugin's fragment-format spec: an older copy, or local edits — compare it with $p, and replace an older copy with it)"
+    fi
   else
     echo "RELEASE-NOTES.next/README.md: not present"
   fi
