@@ -54,7 +54,7 @@ fi
 [[ $command_str =~ $re_commit ]] || exit 0
 
 cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || exit 0
-DOC_TOOLS="${DOC_TOOLS:-$(printf '%s\n' __DOC_TOOLS_PARENT__/*/scripts/doc-tools.sh | sort -V | tail -1)}"
+[[ -n "${DOC_TOOLS:-}" ]] || DOC_TOOLS=$(__DOC_TOOLS_RESOLVE__)
 [[ -f "$DOC_TOOLS" ]] || exit 0
 [[ -f docs/.doc-index.json ]] || exit 0
 

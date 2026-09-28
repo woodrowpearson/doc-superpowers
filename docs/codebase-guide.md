@@ -46,7 +46,7 @@ doc-superpowers/
 │   ├── test-hooks.sh     # Test suite for hooks installer and hook scripts
 │   └── hooks/
 │       ├── install.sh        # Hook installer engine (install/uninstall/status for all tiers; granular --workflows + state-respect)
-│       ├── state.sh          # Install-state tracking module — atomic jq writes to .claude/doc-superpowers/installed.json, filesystem-inferred bootstrap, canonical workflow list derived from ci/*.yml
+│       ├── state.sh          # CI-tier install state — .claude/doc-superpowers/installed.json (workflow set + choices), one read, one write per run
 │       ├── git/              # Git hook scripts
 │       │   ├── pre-commit          # Freshness gate on the staged tree (`--tree "$(git write-tree)"`) — warns/blocks on docs this commit leaves stale
 │       │   ├── post-merge          # Stale/missing alert for the files a merge brought in
@@ -120,8 +120,8 @@ doc-superpowers/
 | `scripts/test-doc-pr-release.sh` | Test suite for the CI workflow helpers (on the shared `test-helpers.sh` harness) — covers `extract-context.sh`, `update-pr-body.sh`, `commit-and-push.sh`, the extracted `run:` step scripts in `doc-superpowers-steps/`, workflow YAML placeholder substitution, and template structure/wiring (missing YAML parser = loud SKIP locally, FAIL in CI) | Adding tests for the fragment producer workflow or its helpers |
 | `scripts/test-spec-status-model.sh` | Test suite pinning the canonical Spec Status Model wording and its call sites | Changing spec status transition rules, roles, or vocabulary |
 | `scripts/test-helpers.sh` | Shared test harness sourced by every suite: private scratch root cleaned on EXIT/INT/TERM, isolated git environment (`GIT_CONFIG_GLOBAL=/dev/null`, private `HOME`), pipefail-safe asserts, `assert_true`, SKIP and known-bug (XFAIL) reporting | Adding shared test utilities or assertions |
-| `scripts/hooks/install.sh` | Hook installer engine — install/uninstall/status for git, Claude Code, and CI tiers. Registers 3 Claude Code hooks (PreToolUse, PostToolUse, Stop) and 5 git hooks. The `--git` tier also registers a custom merge driver for `.doc-index.json` conflict resolution. CI tier supports granular install via `--workflows=<csv\|all\|none>`, `--helpers=<bool>`, `--force` (bypass state-respect), and `--transient` (uninstall without marking intentional). Routes to hook scripts in git/, claude/, ci/ subdirectories. Sources `state.sh` for install-state tracking | Adding hook tiers, changing installer logic, adding new hook scripts, changing install-state semantics |
-| `scripts/hooks/state.sh` | Install-state tracking module — atomic jq writes to `.claude/doc-superpowers/installed.json`, filesystem-inferred bootstrap on first run, malformed-state graceful fallback. Canonical workflow list derived from `scripts/hooks/ci/*.yml` (with hardcoded fallback when SCRIPT_DIR is unset). Single-writer concurrency contract — concurrent installer invocations may lose intermediate state-marks | Changing install-state schema, bootstrap logic, or workflow-name resolution |
+| `scripts/hooks/install.sh` | Hook installer engine — install/uninstall/status for git, Claude Code, and CI tiers. Registers 3 Claude Code hooks (PreToolUse, PostToolUse, Stop) and 5 git hooks. The `--git` tier also registers a custom merge driver for `.doc-index.json` conflict resolution. CI tier: the 3 shell workflows by default, the AI ones by name via `--workflows=<csv\|all\|none>`, plus `--helpers=<bool>`, `--force` (bypass state-respect), `--transient` (uninstall without marking intentional); vendoring through `doc-tools.sh tools install\|uninstall --helper`. Places everything with git plumbing (`--show-toplevel`, `--git-path hooks`), refuses symlinked write targets and a non-local `core.hooksPath`, owns only marked blocks / its own settings entries, and runs every check before the first write. Sources `state.sh` for install-state tracking | Adding hook tiers, changing installer logic, adding new hook scripts, changing install-state semantics |
+| `scripts/hooks/state.sh` | CI-tier install state — `.claude/doc-superpowers/installed.json` (schema 2): the workflow set and the choices (`base_branch`, `cron`, `ci_strict`) a plain `install --ci` reproduces. One `state_load`, in-memory marks, one `state_flush` (only when the content changed; before any deletion); an unreadable file is refused, never overwritten (`installed.json.corrupt` is the recovery path). Single-writer | Changing install-state schema, bootstrap logic, or workflow-name resolution |
 | `scripts/test-hooks.sh` | Test suite for hooks installer and all hook scripts — covers install, uninstall, status, and per-hook behavior | Adding tests for new hooks or installer features |
 | `scripts/merge-doc-index.sh` | Custom git merge driver for `.doc-index.json` — a base-aware, per-key three-way merge in jq during merge/rebase/cherry-pick/revert. An entry both sides changed is merged field by field; the verification record is one unit; deprecated wins. A same-field change that `last_verified` does not order, delete vs modify, a malformed side and a signal each get `git merge-file` conflict markers and exit 1, with the key and field named. Ours' top level and key order are kept. The header comment is the specification | Changing merge conflict resolution logic |
 | `scripts/test-merge-driver.sh` | Test suite for `merge-doc-index.sh` and its registration. Fixtures are built with the real doc-tools verbs on a controlled clock, merged with real `git merge`/`git rebase` in both directions (plus `git revert`), and asserted against the base. It also has direct per-rule cases, and install.sh registration cases: a path with a space, a version bump without re-install, and no driver | Adding tests for merge driver features |
@@ -160,10 +160,10 @@ doc-superpowers/
 | Scope-specific focus areas | `references/agent-prompt-template.md` |
 | Installation instructions | `README.md` "Installation" |
 | Version history | `RELEASE-NOTES.md` |
-| Hook installer logic | `scripts/hooks/install.sh` — tier routing, file copying, status reporting, granular `--workflows`/`--helpers`/`--force`/`--transient` flags |
-| Install-state tracking | `scripts/hooks/state.sh` — `.claude/doc-superpowers/installed.json` schema, atomic writes, bootstrap, state-respect query API |
+| Hook installer logic | `scripts/hooks/install.sh` — placement (`enter_repo`), `safe_dest` + preflight, marked blocks, integration block, tier routing, status, per-command flag allow-list |
+| Install-state tracking | `scripts/hooks/state.sh` — `.claude/doc-superpowers/installed.json` schema 2, `state_load` / marks / `state_flush` |
 | Granular CI install flags | `skills/doc-superpowers/SKILL.md` `hooks` subsection — `--workflows=<csv\|all\|none>`, `--helpers=<bool>`, `--force`, `--transient` |
-| Tools subcommand | `scripts/doc-tools.sh` `cmd_tools_*` — `tools install [--dest <path>] [--with-helpers]`, `tools uninstall` (removes only files byte-identical to the plugin's), `tools status`, `tools version` |
+| Tools subcommand | `scripts/doc-tools.sh` `cmd_tools_*` — `tools install [--dest <path>] [--with-helpers \| --helper <dir>...]`, `tools uninstall [--helper <dir>...]` (removes only files byte-identical to the plugin's; refuses symlinked paths), `tools status`, `tools version` |
 | Git hook scripts | `scripts/hooks/git/` — pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push |
 | Claude Code hook scripts | `scripts/hooks/claude/` — pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh |
 | CI workflow templates | `scripts/hooks/ci/` — 9 templates total (3 shell-based, 6 AI-powered). Shell: doc-freshness-pr.yml, doc-freshness-schedule.yml, doc-index-update.yml (use vendored `.github/scripts/doc-tools.sh`). AI: doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml (per-PR release-notes fragment producer, with colocated helpers under `doc-pr-release/`). All actions SHA-pinned. This repo self-installs only the 3 shell-based workflows into its own `.github/workflows/` — the 6 AI ones need Anthropic credentials configured as repository secrets, so the 3-of-9 gap here is deliberate, not drift |
@@ -311,29 +311,32 @@ User invokes /doc-superpowers hooks install --all
   → skills/doc-superpowers/SKILL.md loaded by Claude Code
   → Action Router → hooks (no discovery phase needed)
     → Route to scripts/hooks/install.sh install --all
-    → Installer detects target project root
+    → Installer cds to `git rev-parse --show-toplevel` (worktree / submodule: its own top)
+    → Preflight, before any write: symlinked targets, non-local core.hooksPath, settings / state readability, CI values
     → For --git tier:
-      → Resolve hooks directory: core.hooksPath > .githooks/ > .git/hooks/
+      → Hooks directory: `git rev-parse --git-path hooks` (where git runs them)
       → For each hook script in scripts/hooks/git/:
-        → If target hook already exists (non-doc-superpowers):
-          → Auto-integrate via local copy to `.doc-superpowers-{name}` with begin/end markers (`# doc-superpowers:begin`/`# doc-superpowers:end`), uses `dirname $0` for portability
-          → Insert before `exit 0` if present, otherwise append
-        → Otherwise: copy hook with __DOC_TOOLS_PATH__, __DOC_TOOLS_PARENT__, and __INSTALL_DATE__ substituted
+        → If target hook already exists (non-doc-superpowers, a shell script):
+          → Render to a local `.doc-superpowers-{name}`; insert one marked POSIX block after the `#!` line that runs it with "$@" (pre-commit: `|| exit $?`)
+        → A non-shell hook of yours: skipped
+        → Otherwise: write the hook with __DOC_TOOLS_RESOLVE__ and __INSTALL_DATE__ substituted
       → Make hooks executable
       → Register custom merge driver for .doc-index.json:
         → `git config --local merge.doc-index.driver` → a quoted command that resolves the driver at merge time: the newest version-named plugin-cache sibling's scripts/merge-doc-index.sh (a checkout install: its own copy); none found → conflict markers, exit 1
-        → Adds `.gitattributes` entry: `docs/.doc-index.json merge=doc-index`
-    → For --claude tier:
-      → Copy hook scripts to .claude/hooks/doc-superpowers/ with __DOC_TOOLS_PATH__, __DOC_TOOLS_PARENT__, and __INSTALL_DATE__ placeholder substitution
-        → __DOC_TOOLS_PARENT__ lets the installed hook resolve the newest plugin-cache version at run time
-      → Register hooks in .claude/settings.local.json using relative paths
-      → PreToolUse: .claude/hooks/doc-superpowers/pre-commit-gate.sh (Bash matcher)
-      → PostToolUse: .claude/hooks/doc-superpowers/post-commit-sync.sh (Bash matcher)
-      → Stop: .claude/hooks/doc-superpowers/session-summary.sh
-      → Deep-merge into existing settings (preserves other hook entries, deduplicates doc-superpowers entries)
+        → Adds a marked `.gitattributes` block: `docs/.doc-index.json merge=doc-index`
+    → For --claude tier (per-user):
+      → Copy hook scripts to .claude/hooks/doc-superpowers/ with __DOC_TOOLS_RESOLVE__ and __INSTALL_DATE__ substituted
+        → __DOC_TOOLS_RESOLVE__: the merge driver's rule (newest version-named plugin-cache sibling, or the checkout's own path)
+      → Register hooks in .claude/settings.local.json as `bash "$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/<hook>.sh`
+      → PreToolUse: pre-commit-gate.sh (Bash matcher) · PostToolUse: post-commit-sync.sh (Bash matcher) · Stop: session-summary.sh
+      → Merge per entry (only entries running these scripts are the installer's)
+      → Exclude settings.local.json and the scripts dir through a marked block in git's info/exclude
     → For --ci tier:
+      → Plan: the named workflows, or the recorded set (first install: the 3 shell ones), + every managed one on disk
       → Generate workflow files from scripts/hooks/ci/ templates to .github/workflows/
-      → Substitute __BASE_BRANCH__, __VERSION__, __CRON_SCHEDULE__, __CI_STRICT__ placeholders
+      → Substitute __BASE_BRANCH__, __VERSION__, __CRON_SCHEDULE__, __CI_STRICT__ (validated, sed-escaped)
+      → Vendor via `doc-tools.sh tools install --helper <dir>` for the helper dirs the installed workflows run
+      → Record the set and the choices in .claude/doc-superpowers/installed.json
     → Report installed hooks
 ```
 

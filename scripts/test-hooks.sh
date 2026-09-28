@@ -45,14 +45,18 @@ install_tiers() {
 
 # A fixture whose doc cites <refs> (default src/), verified and committed, so
 # the tree is clean and the doc current; src/util.js exists for file refs.
-# Then the git and Claude tiers are installed.
-hooked_fixture() {
+indexed_fixture() {
   setup
   echo "util" > src/util.js
   git add src/util.js && git commit -qm "util"
   echo "docs/architecture.md:${1:-src/}:architecture" | "$DOC_TOOLS" build-index >/dev/null 2>&1
   "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
   git add docs/.doc-index.json && git commit -qm "index"
+}
+
+# indexed_fixture, then the git and Claude tiers installed.
+hooked_fixture() {
+  indexed_fixture "$@"
   install_tiers
 }
 
@@ -129,6 +133,46 @@ make_nojq_path() {
     [ -e "$dir/$t" ] || ln -s "$p" "$dir/$t"
   done
   printf '%s' "$dir"
+}
+
+# A copy of the plugin at <dir> (scripts/, SKILL.md, RELEASE-NOTES.md): a
+# plugin-cache version dir when <dir> is named like 1.2.3, a checkout otherwise.
+plugin_copy() {
+  mkdir -p "$1/skills/doc-superpowers"
+  cp -R "$SCRIPT_DIR" "$1/scripts"
+  cp "$SCRIPT_DIR/../skills/doc-superpowers/SKILL.md" "$1/skills/doc-superpowers/"
+  cp "$SCRIPT_DIR/../RELEASE-NOTES.md" "$1/"
+}
+
+# inst [--from <install.sh>] <args…>: run the installer from the cwd.
+# Sets IRC and IOUT (stdout + stderr).
+inst() {
+  local sh="$HOOKS_DIR/install.sh"
+  if [ "${1:-}" = "--from" ]; then
+    sh="$2"
+    shift 2
+  fi
+  IRC=0
+  IOUT=$(PATH="$REAL_PATH" "$BASH_BIN" "$sh" "$@" 2>&1) || IRC=$?
+}
+
+# Everything an install could touch, content included: the work tree (minus
+# the harness's home/ and xdg/), git's hooks/ and info/, the local config.
+_tree_state() {
+  local f
+  {
+    find . -path ./.git -prune -o -path ./home -prune -o -path ./xdg -prune -o -print
+    find .git/hooks .git/info 2>/dev/null || true
+  } | LC_ALL=C sort | while IFS= read -r f; do
+    if [ -L "$f" ]; then
+      printf '%s -> %s\n' "$f" "$(readlink "$f")"
+    elif [ -f "$f" ]; then
+      printf '%s %s\n' "$f" "$(cksum < "$f")"
+    else
+      printf '%s/\n' "$f"
+    fi
+  done
+  git config --local --list 2>/dev/null || true
 }
 
 # --- pre-commit hook tests ---
@@ -740,7 +784,12 @@ test_claude_gate_jq_missing() {
 test_claude_gate_tests_command_before_resolving_doc_tools() {
   echo "test: claude pre-commit-gate decides 'not a commit' before resolving doc-tools.sh"
   hooked_fixture
-  local probe log
+  # Resolution is observable (a sort) only for a plugin-cache install: a
+  # checkout install names its own doc-tools.sh (no process to watch).
+  local probe log cache
+  cache="$(harness_mktemp_d cache)/doc-superpowers"
+  plugin_copy "$cache/1.0.0"
+  PATH="$REAL_PATH" "$BASH_BIN" "$cache/1.0.0/scripts/hooks/install.sh" install --claude >/dev/null 2>&1
   probe=$(harness_mktemp_d probe)
   log="$probe/sort.log"
   printf '#!/bin/sh\necho called >> "%s"\nexec "%s" "$@"\n' "$log" "$(type -P sort)" > "$probe/sort"
@@ -1340,9 +1389,12 @@ test_install_git_creates_hooks() {
   assert_not_contains "$(cat .git/hooks/pre-commit)" "__DOC_TOOLS_PATH__" "path substituted"
   assert_not_contains "$(cat .git/hooks/pre-commit)" "__DOC_TOOLS_PARENT__" "parent substituted"
   assert_contains "$(cat .git/hooks/pre-commit)" "doc-tools.sh" "has real path"
-  # v2.12.2: hook resolves the latest plugin-cache version at runtime instead of
-  # pinning the install-time version. Check the resolver fragment is present.
-  assert_contains "$(cat .git/hooks/pre-commit)" "sort -V | tail -1" "uses runtime version resolver"
+  # The hook resolves doc-tools.sh by the merge driver's rule: newest
+  # version-named sibling in numeric order (plugin cache) or the pinned path
+  # (a checkout) — never GNU `sort -V`, never any sibling directory.
+  assert_contains "$(cat .git/hooks/pre-commit)" "sort -t. -k1,1n -k2,2n -k3,3n" "uses the numeric version resolver"
+  assert_not_contains "$(cat .git/hooks/pre-commit)" "sort -V" "no GNU sort -V"
+  assert_not_contains "$(cat .git/hooks/pre-commit)" "__DOC_TOOLS_RESOLVE__" "resolver substituted"
   teardown
 }
 
@@ -1537,15 +1589,15 @@ test_install_claude_creates_settings() {
   assert_contains "$settings" '"hooks"' "uses hooks array format"
   assert_contains "$settings" '"type"' "has type field"
   assert_contains "$settings" '"matcher"' "has matcher field"
-  # Verify relative paths (not absolute)
-  assert_contains "$settings" ".claude/hooks/doc-superpowers/" "uses relative path"
-  assert_not_contains "$settings" "/Users/" "no absolute home path"
+  # Commands name the scripts through $CLAUDE_PROJECT_DIR (not the cwd, not an
+  # absolute path of this machine).
+  assert_contains "$settings" '\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/doc-superpowers/' "commands run the scripts under \$CLAUDE_PROJECT_DIR"
+  assert_not_contains "$settings" "$TEST_DIR" "no absolute path of this machine"
   # Verify placeholder substitution in copied scripts
-  assert_not_contains "$(cat .claude/hooks/doc-superpowers/pre-commit-gate.sh)" "__DOC_TOOLS_PATH__" "DOC_TOOLS path substituted"
-  assert_not_contains "$(cat .claude/hooks/doc-superpowers/pre-commit-gate.sh)" "__DOC_TOOLS_PARENT__" "DOC_TOOLS parent substituted"
+  assert_not_contains "$(cat .claude/hooks/doc-superpowers/pre-commit-gate.sh)" "__DOC_TOOLS_RESOLVE__" "DOC_TOOLS resolver substituted"
   assert_not_contains "$(cat .claude/hooks/doc-superpowers/pre-commit-gate.sh)" "__INSTALL_DATE__" "install date substituted"
-  # v2.12.2: claude-side hook also resolves the latest plugin-cache version at runtime
-  assert_contains "$(cat .claude/hooks/doc-superpowers/pre-commit-gate.sh)" "sort -V | tail -1" "uses runtime version resolver"
+  assert_contains "$(cat .claude/hooks/doc-superpowers/pre-commit-gate.sh)" "sort -t. -k1,1n -k2,2n -k3,3n" "uses the numeric version resolver"
+  assert_not_contains "$(cat .claude/hooks/doc-superpowers/pre-commit-gate.sh)" "sort -V" "no GNU sort -V"
   teardown
 }
 
@@ -1576,10 +1628,8 @@ test_uninstall_claude_removes_hooks() {
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
-  local settings
-  settings=$(cat .claude/settings.local.json)
-  assert_not_contains "$settings" "pre-commit-gate" "hooks removed from settings"
-  assert_not_contains "$settings" "PostToolUse" "PostToolUse removed from settings"
+  # The install created the settings file and held nothing else in it: no residue.
+  assert_file_not_exists ".claude/settings.local.json" "settings file the install created is removed"
   assert_file_not_exists ".claude/hooks/doc-superpowers/pre-commit-gate.sh" "script removed"
   assert_file_not_exists ".claude/hooks/doc-superpowers/post-commit-sync.sh" "script removed"
   assert_file_not_exists ".claude/hooks/doc-superpowers/session-summary.sh" "script removed"
@@ -1668,10 +1718,10 @@ test_install_ci_default_strict_disabled() {
 }
 
 test_install_ci_creates_claude_powered_workflows() {
-  echo "test: install --ci creates Claude-powered workflow files"
+  echo "test: install --ci --workflows=all creates the Claude-powered workflow files (opt-in by name)"
   setup
   set +e
-  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=all 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1715,7 +1765,7 @@ test_install_ci_api_key_message() {
   echo "test: install --ci prints API key message for Claude-powered workflows"
   setup
   set +e
-  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-release 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
@@ -1732,7 +1782,7 @@ test_install_ci_vendors_doc_tools() {
   set -e
   assert_eq "0" "$exit_code" "exits 0"
   assert_file_exists ".github/scripts/doc-tools.sh" "doc-tools.sh vendored"
-  assert_contains "$output" "Vendored doc-tools.sh" "vendor message shown"
+  assert_contains "$output" "doc-tools.sh → .github/scripts/doc-tools.sh" "vendor message shown (doc-tools.sh tools install)"
   # Verify the vendored file is executable
   assert_true "doc-tools.sh is executable" test -x ".github/scripts/doc-tools.sh"
   # Verify workflows reference the local copy
@@ -1745,7 +1795,7 @@ test_install_ci_vendors_doc_tools() {
 test_uninstall_ci_removes_claude_workflows() {
   echo "test: uninstall --ci removes Claude-powered workflows"
   setup
-  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=all >/dev/null 2>&1
   assert_file_exists ".github/workflows/doc-audit-update.yml" "installed first"
   set +e
   output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci 2>&1)
@@ -1886,7 +1936,9 @@ test_install_git_core_hookspath_creates_dir() {
 }
 
 test_install_git_githooks_dir() {
-  echo "test: install --git uses .githooks/ when present"
+  # git runs hooks from `git rev-parse --git-path hooks`; a .githooks/ that no
+  # core.hooksPath names is never run, so a hook there was a false "installed".
+  echo "test: install --git ignores a .githooks/ that core.hooksPath does not name (installs where git runs hooks)"
   setup
   mkdir -p .githooks
   set +e
@@ -1894,8 +1946,8 @@ test_install_git_githooks_dir() {
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
-  assert_file_exists ".githooks/pre-commit" "hook in .githooks"
-  assert_contains "$output" ".githooks" "reports .githooks dir"
+  assert_file_exists ".git/hooks/pre-commit" "hook in .git/hooks, where git runs it"
+  assert_file_not_exists ".githooks/pre-commit" "nothing in the unconfigured .githooks/"
   teardown
 }
 
@@ -1994,7 +2046,7 @@ test_uninstall_ci_workflows_none_keeps_workflows() {
   setup
   # Install everything first.
   set +e
-  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=all >/dev/null 2>&1
   set -e
   assert_file_exists ".github/workflows/doc-freshness-pr.yml" "precondition: installed"
   assert_file_exists ".github/workflows/doc-pr-release.yml" "precondition: installed"
@@ -2049,7 +2101,7 @@ test_install_ci_helpers_false_refuses_doc_pr_release() {
   setup
   local before after output exit_code args
   before=$(_fixture_snapshot)
-  for args in "--ci --workflows=doc-pr-release" "--ci --workflows=doc-release,doc-pr-release" "--ci" "--all"; do
+  for args in "--ci --workflows=doc-pr-release" "--ci --workflows=doc-release,doc-pr-release" "--ci --workflows=all" "--all --workflows=all"; do
     exit_code=0
     # shellcheck disable=SC2086  # intentional word-splitting of the flag set
     output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install $args --helpers=false 2>&1 >/dev/null) || exit_code=$?
@@ -2070,7 +2122,7 @@ test_install_ci_ships_step_scripts_with_workflow() {
   local output exit_code=0 steps=".github/scripts/doc-superpowers-steps"
   output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-release 2>&1) || exit_code=$?
   assert_eq "0" "$exit_code" "install doc-release exits 0"
-  assert_contains "$output" "workflow step scripts in $steps/" "reports the step-script install"
+  assert_contains "$output" "doc-superpowers-steps helpers → $steps/" "reports the step-script install (doc-tools.sh tools install)"
   assert_true "precheck.sh installed executable" test -x "$steps/precheck.sh"
   assert_true "resolve-auth.sh installed executable" test -x "$steps/resolve-auth.sh"
   assert_true "doc-pr-release producer helpers NOT installed for doc-release alone" test ! -d ".github/scripts/doc-pr-release"
@@ -2105,15 +2157,15 @@ _assert_installed_workflows_wired() {
 test_install_ci_every_referenced_helper_is_installed() {
   # Installer output, not templates: after a default `install --ci`, every
   # `.github/scripts/...` path an installed workflow runs must exist.
-  echo "test: install --ci — every script an installed workflow runs is on disk"
+  echo "test: install --ci --workflows=all — every script an installed workflow runs is on disk"
   setup
   local exit_code=0 refs
-  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1 || exit_code=$?
-  assert_eq "0" "$exit_code" "install --ci exits 0"
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=all >/dev/null 2>&1 || exit_code=$?
+  assert_eq "0" "$exit_code" "install --ci --workflows=all exits 0"
   refs=$(grep -hoE '\.github/scripts/[A-Za-z0-9_./-]+\.sh' .github/workflows/doc-*.yml | sort -u)
   assert_contains "$refs" ".github/scripts/doc-superpowers-steps/precheck.sh" "doc-release.yml runs its precheck step"
   assert_contains "$refs" ".github/scripts/doc-superpowers-steps/verify-fragment.sh" "doc-pr-release.yml runs its verify step"
-  _assert_installed_workflows_wired "install --ci"
+  _assert_installed_workflows_wired "install --ci --workflows=all"
   teardown
 }
 
@@ -2187,7 +2239,7 @@ test_install_ci_helpers_false_still_wires_steps() {
 }
 
 test_install_ci_writes_state_file_on_first_install() {
-  echo "test: install --ci writes .claude/doc-superpowers/installed.json"
+  echo "test: install --ci writes .claude/doc-superpowers/installed.json (the default set + the choices)"
   setup
   set +e
   output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci 2>&1)
@@ -2195,16 +2247,12 @@ test_install_ci_writes_state_file_on_first_install() {
   set -e
   assert_eq "0" "$exit_code" "exits 0"
   assert_file_exists ".claude/doc-superpowers/installed.json" "state file created"
-  # Every workflow listed by state_known_workflows should be marked installed.
-  # Source state.sh in a subshell so we get the canonical list rather than
-  # duplicating it here (drift risk).
-  local n
-  while IFS= read -r n; do
-    [[ -z "$n" ]] && continue
-    local state
-    state=$(jq -r --arg n "$n" '.tiers.ci.workflows[$n].state' .claude/doc-superpowers/installed.json)
-    assert_eq "installed" "$state" "$n marked installed in state file"
-  done < <(SCRIPT_DIR="$HOOKS_DIR" "$BASH_BIN" -c "source '$HOOKS_DIR/state.sh' && state_known_workflows")
+  local f=.claude/doc-superpowers/installed.json
+  assert_eq "doc-freshness-pr doc-freshness-schedule doc-index-update" \
+    "$(jq -r '[.tiers.ci.workflows | to_entries[] | select(.value.state == "installed") | .key] | sort | join(" ")' "$f")" \
+    "the three shell workflows (the default set) are recorded installed, nothing else"
+  assert_eq "main|0 9 * * 1|false" "$(jq -r '.tiers.ci | "\(.base_branch)|\(.cron)|\(.ci_strict)"' "$f")" "the choices are recorded"
+  assert_eq "null|null" "$(jq -r '.tiers.ci | "\(.tools)|\(.helpers)"' "$f")" "no write-only tools/helpers records"
   teardown
 }
 
@@ -2230,18 +2278,22 @@ test_install_ci_bootstraps_state_from_filesystem() {
 }
 
 test_install_ci_malformed_state_file_falls_back_with_warn() {
-  echo "test: install --ci with malformed state file warns + falls back to filesystem"
+  # The old fallback rebuilt the file from disk, so a merge-conflicted state
+  # lost every "removed on purpose" record and the workflows came back.
+  echo "test: install --ci refuses to overwrite an unparsable state file (nothing written)"
   setup
   mkdir -p .claude/doc-superpowers
   echo "{not valid json" > .claude/doc-superpowers/installed.json
+  local before
+  before=$(_fixture_snapshot)
   set +e
   output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci 2>&1)
   exit_code=$?
   set -e
-  assert_eq "0" "$exit_code" "exits 0 (graceful fallback)"
-  assert_contains "$output" "malformed" "WARN emitted"
-  # And the install still ran.
-  assert_file_exists ".github/workflows/doc-freshness-pr.yml" "install proceeded"
+  assert_eq "1" "$exit_code" "exits 1"
+  assert_contains "$output" "installed.json.corrupt" "says how to recover (move it aside)"
+  assert_eq "{not valid json" "$(cat .claude/doc-superpowers/installed.json)" "the state file is untouched"
+  assert_eq "$before" "$(_fixture_snapshot)" "nothing written"
   teardown
 }
 
@@ -2249,21 +2301,21 @@ test_uninstall_install_cycle_respects_intentional_uninstall() {
   echo "test: uninstall --ci then install --ci keeps intentionally-removed workflows uninstalled"
   setup
   "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
-  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release >/dev/null 2>&1
-  assert_file_not_exists ".github/workflows/doc-release.yml" "uninstall removed doc-release"
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-freshness-schedule >/dev/null 2>&1
+  assert_file_not_exists ".github/workflows/doc-freshness-schedule.yml" "uninstall removed doc-freshness-schedule"
   # State should say intentional.
   local intentional
-  intentional=$(jq -r '.tiers.ci.workflows."doc-release".intentional' .claude/doc-superpowers/installed.json)
+  intentional=$(jq -r '.tiers.ci.workflows."doc-freshness-schedule".intentional' .claude/doc-superpowers/installed.json)
   assert_eq "true" "$intentional" "marked intentional"
-  # Now re-install — doc-release should stay GONE.
+  # Now re-install — doc-freshness-schedule should stay GONE.
   set +e
   output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "install exits 0"
-  assert_file_not_exists ".github/workflows/doc-release.yml" "doc-release stays uninstalled"
-  assert_contains "$output" "skipping doc-release.yml" "skip message shown"
-  assert_contains "$output" "--workflows=doc-release" "override hint shown"
+  assert_file_not_exists ".github/workflows/doc-freshness-schedule.yml" "doc-freshness-schedule stays uninstalled"
+  assert_contains "$output" "skipping doc-freshness-schedule.yml" "skip message shown"
+  assert_contains "$output" "--workflows=doc-freshness-schedule" "override hint shown"
   # Other workflows should be re-installed.
   assert_file_exists ".github/workflows/doc-freshness-pr.yml" "other workflows present"
   teardown
@@ -2273,17 +2325,17 @@ test_uninstall_transient_then_install_reinstalls() {
   echo "test: uninstall --ci --transient lets next install --ci re-install"
   setup
   "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
-  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release --transient >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-freshness-schedule --transient >/dev/null 2>&1
   local intentional
-  intentional=$(jq -r '.tiers.ci.workflows."doc-release".intentional' .claude/doc-superpowers/installed.json)
+  intentional=$(jq -r '.tiers.ci.workflows."doc-freshness-schedule".intentional' .claude/doc-superpowers/installed.json)
   assert_eq "false" "$intentional" "marked transient"
   set +e
   output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
-  assert_file_exists ".github/workflows/doc-release.yml" "doc-release re-installed"
-  assert_not_contains "$output" "skipping doc-release.yml" "no skip message"
+  assert_file_exists ".github/workflows/doc-freshness-schedule.yml" "doc-freshness-schedule re-installed"
+  assert_not_contains "$output" "skipping doc-freshness-schedule.yml" "no skip message"
   teardown
 }
 
@@ -2291,15 +2343,15 @@ test_install_force_bypasses_intentional_uninstall() {
   echo "test: install --ci --force re-installs intentionally-uninstalled workflows"
   setup
   "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
-  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release >/dev/null 2>&1
-  assert_file_not_exists ".github/workflows/doc-release.yml" "uninstall removed doc-release"
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-freshness-schedule >/dev/null 2>&1
+  assert_file_not_exists ".github/workflows/doc-freshness-schedule.yml" "uninstall removed doc-freshness-schedule"
   set +e
   output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --force 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
-  assert_file_exists ".github/workflows/doc-release.yml" "doc-release re-installed via --force"
-  assert_not_contains "$output" "skipping doc-release.yml" "no skip message with --force"
+  assert_file_exists ".github/workflows/doc-freshness-schedule.yml" "doc-freshness-schedule re-installed via --force"
+  assert_not_contains "$output" "skipping doc-freshness-schedule.yml" "no skip message with --force"
   teardown
 }
 
@@ -2307,14 +2359,14 @@ test_install_explicit_workflows_overrides_state() {
   echo "test: install --ci --workflows=<name> beats state-respect (explicit > implicit)"
   setup
   "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci >/dev/null 2>&1
-  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-release >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-freshness-schedule >/dev/null 2>&1
   # Explicit re-add — should NOT skip even though state says intentional:uninstalled.
   set +e
-  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-release 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-freshness-schedule 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
-  assert_file_exists ".github/workflows/doc-release.yml" "doc-release re-installed via explicit --workflows"
+  assert_file_exists ".github/workflows/doc-freshness-schedule.yml" "doc-freshness-schedule re-installed via explicit --workflows"
   teardown
 }
 
@@ -2327,6 +2379,732 @@ test_install_ci_helpers_invalid_value_errors() {
   set -e
   assert_eq "1" "$exit_code" "exits 1"
   assert_contains "$output" "--helpers must be" "clear error"
+  teardown
+}
+
+# --- I-7: installer ownership, placement, integration, state -----------------
+#
+# The installer used to guess: any settings group mentioning "doc-superpowers"
+# was its own; cwd was the top and .git a directory; the host hook was bash;
+# every sibling of the skill dir was a plugin version; writes followed links;
+# "installed" was all the state. Each test below pins the real rule.
+
+# The Claude gate's entries in .claude/settings.local.json.
+_gate_entries() {
+  jq '[.hooks.PreToolUse[]?.hooks[]? | select((.command // "") | contains(".claude/hooks/doc-superpowers/pre-commit-gate.sh"))] | length' \
+    .claude/settings.local.json
+}
+
+test_i7_claude_user_groups_survive() {
+  echo "test: I-7 install/uninstall --claude own hook ENTRIES by exact path: user groups mentioning doc-superpowers survive byte-for-byte"
+  setup
+  local f=.claude/settings.local.json orig
+  orig=$(harness_mktemp settings)
+  mkdir -p .claude
+  jq -n '{
+    permissions: {allow: ["Read"]},
+    hooks: {
+      PreToolUse: [
+        {matcher: "Bash", hooks: [{type: "command", command: "echo doc-superpowers-lint"}]},
+        {matcher: "Edit", hooks: [{type: "prompt", prompt: "check the doc-superpowers docs"}]}
+      ],
+      Stop: [{matcher: "", hooks: [{type: "command", command: "notify \"doc-superpowers done\""}]}]
+    }
+  }' > "$f"
+  cp "$f" "$orig"
+  inst install --claude
+  assert_eq "0" "$IRC" "install exits 0 (a type:prompt hook no longer crashes the merge)"
+  assert_eq "$(jq -c '.hooks.PreToolUse[0:2]' "$orig")" "$(jq -c '.hooks.PreToolUse[0:2]' "$f")" "install: your PreToolUse groups are intact"
+  assert_eq "$(jq -c '.hooks.Stop[0]' "$orig")" "$(jq -c '.hooks.Stop[0]' "$f")" "install: your Stop group is intact"
+  assert_eq "1" "$(_gate_entries)" "install: one gate entry"
+  inst install --claude
+  assert_eq "1" "$(_gate_entries)" "re-install: still one gate entry"
+  assert_eq "$(jq -c '.hooks.PreToolUse[0:2]' "$orig")" "$(jq -c '.hooks.PreToolUse[0:2]' "$f")" "re-install: your groups are intact"
+  inst uninstall --claude
+  assert_eq "0" "$IRC" "uninstall exits 0"
+  assert_true "uninstall: the settings file is byte-identical to before the install" cmp -s "$orig" "$f"
+  # An entry of yours put into the group the installer created is yours.
+  inst install --claude
+  jq '.hooks.PreToolUse |= map(if any(.hooks[]; (.command // "") | contains("doc-superpowers/pre-commit-gate.sh"))
+        then .hooks += [{type: "command", command: "echo mine"}] else . end)' "$f" > "$f.new"
+  mv "$f.new" "$f"
+  inst uninstall --claude
+  assert_contains "$(cat "$f")" "echo mine" "your entry inside the installer's group survives uninstall"
+  assert_not_contains "$(cat "$f")" "doc-superpowers/pre-commit-gate.sh" "…while the installer's entries are gone"
+  teardown
+}
+
+test_i7_claude_settings_edge_files() {
+  echo "test: I-7 install --claude: a 0-byte settings file gets the hooks; an unreadable one is refused, nothing written"
+  setup
+  mkdir -p .claude
+  : > .claude/settings.local.json
+  inst install --claude
+  assert_eq "0" "$IRC" "0-byte settings: exits 0"
+  assert_eq "1" "$(_gate_entries 2>/dev/null || echo none)" "0-byte settings: the gate is registered (not an 'install' into an empty file)"
+  teardown
+  local body before
+  for body in '{"hooks": ' '{"hooks": {"PreToolUse": {"not": "an array"}}}' '[1, 2]'; do
+    setup
+    mkdir -p .claude
+    printf '%s\n' "$body" > .claude/settings.local.json
+    before=$(_tree_state)
+    inst install --claude
+    assert_eq "1" "$IRC" "settings '$body': exits 1"
+    assert_contains "$IOUT" "settings.local.json" "settings '$body': names the file"
+    assert_eq "$before" "$(_tree_state)" "settings '$body': nothing written (no scripts, no exclude entry)"
+    teardown
+  done
+}
+
+test_i7_symlinked_write_targets_refused() {
+  echo "test: I-7 a committed symlink at a write target (file, dangling, parent dir) makes install refuse; nothing written, nothing through the link"
+  local spec link kind tier outside before seen t
+  for spec in \
+    ".claude|dir|--claude" \
+    ".claude/hooks|dir|--claude" \
+    ".claude/settings.local.json|file|--claude" \
+    ".github|dir|--ci" \
+    ".github/workflows|dir|--ci" \
+    ".github/workflows/doc-freshness-pr.yml|file|--ci" \
+    ".github/scripts/doc-tools.sh|dangling|--ci" \
+    ".claude/doc-superpowers/installed.json|file|--ci" \
+    ".gitattributes|file|--git" \
+    ".githooks/pre-commit|file|--git"; do
+    IFS='|' read -r link kind tier <<<"$spec"
+    setup
+    outside=$(harness_mktemp_d outside)
+    mkdir -p "$outside/d"
+    echo keep > "$outside/d/keep"
+    echo "export PS1=mine" > "$outside/f"
+    mkdir -p "$(dirname "$link")"
+    case "$kind" in
+      dir) ln -s "$outside/d" "$link" ;;
+      file) ln -s "$outside/f" "$link" ;;
+      dangling) ln -s "$outside/missing" "$link" ;;
+    esac
+    if [ "$link" = ".githooks/pre-commit" ]; then
+      git config core.hooksPath .githooks
+    fi
+    git add -A && git commit -qm "a committed link"
+    before=$(_tree_state)
+    seen=$(find "$outside" | LC_ALL=C sort; cat "$outside/f" "$outside/d/keep")
+    for t in "$tier" --all; do
+      inst install "$t"
+      assert_eq "1" "$IRC" "$link ($kind): install $t exits 1"
+      assert_contains "$IOUT" "symbolic link" "$link ($kind): install $t says why"
+      assert_eq "$before" "$(_tree_state)" "$link ($kind): install $t writes nothing in the repository"
+      assert_eq "$seen" "$(find "$outside" | LC_ALL=C sort; cat "$outside/f" "$outside/d/keep")" \
+        "$link ($kind): install $t writes nothing through the link"
+    done
+    teardown
+  done
+}
+
+test_i7_uninstall_never_deletes_through_links() {
+  echo "test: I-7 uninstall --ci refuses a symlinked .github/scripts (it would delete the link target's files)"
+  setup
+  inst install --ci
+  local outside
+  outside=$(harness_mktemp_d outside)
+  cp .github/scripts/doc-tools.sh "$outside/doc-tools.sh"
+  rm -rf .github/scripts
+  ln -s "$outside" .github/scripts
+  inst uninstall --ci
+  assert_eq "1" "$IRC" "exits 1"
+  assert_contains "$IOUT" "symbolic link" "says why"
+  assert_file_exists "$outside/doc-tools.sh" "the file behind the link is not deleted"
+  teardown
+}
+
+test_i7_integration_posix_host() {
+  echo "test: I-7 integration into a #!/bin/sh hook: ours runs with git's arguments; its STRICT exit code stops the commit; yours still runs"
+  local shell
+  for shell in /bin/sh /bin/dash; do
+    if [ ! -x "$shell" ]; then
+      record_skip "integration under $shell (not installed)"
+      continue
+    fi
+    indexed_fixture
+    printf '#!%s\necho "host ran" >> "$(git rev-parse --git-dir)/host.log"\nexit 0\n' "$shell" > .git/hooks/pre-commit
+    printf '#!%s\necho "host:$1:$2" >> "$(git rev-parse --git-dir)/host-msg.log"\n' "$shell" > .git/hooks/prepare-commit-msg
+    chmod +x .git/hooks/pre-commit .git/hooks/prepare-commit-msg
+    install_tiers --git
+    # Ours, replaced by a probe that logs what the block hands it.
+    printf '#!/bin/sh\necho "ours:$1:$2" >> "$(git rev-parse --git-dir)/ours-msg.log"\n' > .git/hooks/.doc-superpowers-prepare-commit-msg
+    stage_stale_change
+    run_hooked DOC_SUPERPOWERS_STRICT=1 -- git commit -qm x
+    assert_eq "1" "$RUN_RC" "$shell host: the STRICT stale commit is blocked (our exit code propagates)"
+    assert_contains "$RUN_ERR" "docs/architecture.md" "$shell host: our report reaches you (stderr kept)"
+    assert_not_contains "$RUN_ERR" "not found" "$shell host: no bash-only syntax in the block"
+    run_hooked -- git commit -qm y
+    assert_eq "0" "$RUN_RC" "$shell host: the advisory commit goes through"
+    assert_contains "$(cat .git/host.log 2>/dev/null)" "host ran" "$shell host: your pre-commit still runs"
+    assert_contains "$(cat .git/ours-msg.log 2>/dev/null)" "COMMIT_EDITMSG:message" "$shell host: ours gets git's arguments"
+    assert_contains "$(cat .git/host-msg.log 2>/dev/null)" "COMMIT_EDITMSG:message" "$shell host: yours still gets them"
+    teardown
+  done
+}
+
+test_i7_integration_exec_host() {
+  echo "test: I-7 integration into a hook that ends in exec (the pre-commit framework's shape): ours runs first"
+  indexed_fixture
+  printf '#!/usr/bin/env bash\n# generated by a hook framework\nexec true "$@"\n' > .git/hooks/pre-commit
+  chmod +x .git/hooks/pre-commit
+  install_tiers --git
+  stage_stale_change
+  run_hooked DOC_SUPERPOWERS_STRICT=1 -- git commit -qm x
+  assert_eq "1" "$RUN_RC" "the STRICT stale commit is blocked: the block runs before the exec"
+  teardown
+}
+
+test_i7_integration_pre_push_stdin() {
+  echo "test: I-7 integration into pre-push: ours and yours both get git's arguments and the ref lines on stdin"
+  setup
+  printf '#!/bin/sh\n{ echo "args:$1:$2"; cat; } > "$(git rev-parse --git-dir)/host-push.log"\n' > .git/hooks/pre-push
+  chmod +x .git/hooks/pre-push
+  install_tiers --git
+  printf '#!/bin/sh\n{ echo "args:$1:$2"; cat; } > "$(git rev-parse --git-dir)/ours-push.log"\n' > .git/hooks/.doc-superpowers-pre-push
+  local refs="refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 0000000000000000000000000000000000000000"
+  printf '%s\n' "$refs" | PATH="$REAL_PATH" sh .git/hooks/pre-push origin /srv/remote.git >/dev/null 2>&1 || true
+  assert_eq "args:origin:/srv/remote.git
+$refs" "$(cat .git/ours-push.log 2>/dev/null)" "ours: the arguments and the ref lines"
+  assert_eq "args:origin:/srv/remote.git
+$refs" "$(cat .git/host-push.log 2>/dev/null)" "yours: the arguments and the same ref lines"
+  teardown
+}
+
+test_i7_integration_once_and_exact_inverse() {
+  echo "test: I-7 one block after the #! line (an early exit 0 gets none); re-install refreshes our copy; uninstall restores your hook byte-for-byte"
+  setup
+  local orig
+  orig=$(harness_mktemp host)
+  printf '#!/bin/sh\n[ -n "$SKIP_ME" ] && exit 0\necho host\nexit 0\n' > .git/hooks/post-merge
+  chmod 750 .git/hooks/post-merge
+  cp -p .git/hooks/post-merge "$orig"
+  inst install --git
+  assert_eq "1" "$(grep -c '^# doc-superpowers:begin' .git/hooks/post-merge)" "exactly one block"
+  assert_eq "#!/bin/sh" "$(sed -n 1p .git/hooks/post-merge)" "your #! line stays first"
+  assert_contains "$(sed -n 2p .git/hooks/post-merge)" "# doc-superpowers:begin" "the block comes right after it"
+  echo "# tampered" >> .git/hooks/.doc-superpowers-post-merge
+  inst install --git
+  assert_eq "1" "$(grep -c '^# doc-superpowers:begin' .git/hooks/post-merge)" "re-install: still one block"
+  assert_not_contains "$(cat .git/hooks/.doc-superpowers-post-merge)" "# tampered" "re-install refreshes our local copy"
+  assert_contains "$(head -3 .git/hooks/.doc-superpowers-post-merge)" "doc-superpowers hook v1" "…with the current hook"
+  inst uninstall --git
+  assert_true "uninstall restores your hook byte-for-byte" cmp -s "$orig" .git/hooks/post-merge
+  assert_eq "$(ls -l "$orig" | cut -c1-10)" "$(ls -l .git/hooks/post-merge | cut -c1-10)" "…and its mode"
+  assert_file_not_exists ".git/hooks/.doc-superpowers-post-merge" "our local copy is removed"
+  teardown
+}
+
+test_i7_integration_skips_non_shell_host() {
+  echo "test: I-7 a hook of yours in another language is left alone (a shell block would break it)"
+  setup
+  local orig
+  orig=$(harness_mktemp host)
+  printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > .git/hooks/pre-commit
+  chmod +x .git/hooks/pre-commit
+  cp .git/hooks/pre-commit "$orig"
+  inst install --git
+  assert_eq "0" "$IRC" "exits 0"
+  assert_true "your python hook is byte-identical" cmp -s "$orig" .git/hooks/pre-commit
+  assert_contains "$IOUT" "not a shell script" "says why it was skipped"
+  assert_file_not_exists ".git/hooks/.doc-superpowers-pre-commit" "no orphan local copy"
+  teardown
+}
+
+test_i7_integration_upgrades_legacy_block() {
+  echo "test: I-7 re-install replaces the pre-3.0 block (it dropped args and the exit code); uninstall leaves your original hook"
+  setup
+  local orig
+  orig=$(harness_mktemp host)
+  printf '#!/bin/bash\necho "existing"\nexit 0\n' > "$orig"
+  # What the pre-3.0 installer made of it: its block before `exit 0`, and a blank line.
+  printf '#!/bin/bash\necho "existing"\n# doc-superpowers:begin\nDOC_SP_HOOK="$(dirname "$0")/.doc-superpowers-pre-commit"\nif [[ -f "$DOC_SP_HOOK" ]]; then\n    bash "$DOC_SP_HOOK" 2>/dev/null || true\nfi\n# doc-superpowers:end\n\nexit 0\n' > .git/hooks/pre-commit
+  chmod +x .git/hooks/pre-commit
+  echo "old copy" > .git/hooks/.doc-superpowers-pre-commit
+  inst install --git
+  assert_eq "0" "$IRC" "exits 0"
+  assert_eq "1" "$(grep -c '^# doc-superpowers:begin' .git/hooks/pre-commit)" "one block"
+  assert_not_contains "$(cat .git/hooks/pre-commit)" '2>/dev/null || true' "the old block is gone"
+  assert_contains "$(cat .git/hooks/pre-commit)" 'bash "$DOC_SP_HOOK" "$@" || exit $?' "the current block is in"
+  assert_not_contains "$(cat .git/hooks/.doc-superpowers-pre-commit)" "old copy" "the local copy is refreshed"
+  inst uninstall --git
+  assert_true "uninstall leaves your hook as it was before any doc-superpowers install" cmp -s "$orig" .git/hooks/pre-commit
+  teardown
+}
+
+test_i7_placement_linked_worktree() {
+  echo "test: I-7 install from a linked worktree: hooks where git runs them (the common dir), files at the worktree's top"
+  indexed_fixture
+  git worktree add -q -b wt "$TEST_DIR/wt" >/dev/null 2>&1
+  echo "wt/" >> .git/info/exclude
+  cd "$TEST_DIR/wt" || return 1
+  inst install --git --ci
+  assert_eq "0" "$IRC" "exits 0"
+  assert_file_exists "$TEST_DIR/.git/hooks/pre-commit" "pre-commit in the common hooks dir"
+  assert_file_exists "$TEST_DIR/wt/.github/workflows/doc-freshness-pr.yml" "workflows at the worktree's top"
+  assert_file_not_exists "$TEST_DIR/.github/workflows/doc-freshness-pr.yml" "…not in the main work tree"
+  printf '.github/\n.gitattributes\n.claude/\n' >> "$TEST_DIR/.git/info/exclude"
+  stage_stale_change
+  run_hooked DOC_SUPERPOWERS_STRICT=1 -- git commit -qm x
+  assert_eq "1" "$RUN_RC" "a commit in the worktree runs the installed hook (STRICT blocks it)"
+  cd "$TEST_DIR" || return 1
+  teardown
+}
+
+test_i7_placement_submodule() {
+  echo "test: I-7 install from a submodule: hooks in its git dir (the superproject's .git/modules/<name>/hooks)"
+  setup
+  local src hd
+  src=$(harness_mktemp_d subsrc)
+  (cd "$src" && git init -q -b main && echo x > f && git add f && git commit -qm s) >/dev/null 2>&1
+  git -c protocol.file.allow=always submodule add -q "$src" sub >/dev/null 2>&1
+  git commit -qm "add sub"
+  cd sub || return 1
+  inst install --git
+  assert_eq "0" "$IRC" "exits 0"
+  hd=$(git rev-parse --git-path hooks)
+  assert_file_exists "$hd/pre-commit" "pre-commit where git runs the submodule's hooks"
+  assert_contains "$hd" "modules/sub" "…the superproject's .git/modules/sub/hooks"
+  cd "$TEST_DIR" || return 1
+  teardown
+}
+
+test_i7_placement_subdirectory() {
+  echo "test: I-7 install --all from a subdirectory writes at the repository top"
+  setup
+  cd src || return 1
+  inst install --all
+  cd "$TEST_DIR" || return 1
+  assert_eq "0" "$IRC" "exits 0"
+  assert_file_exists ".github/workflows/doc-freshness-pr.yml" "workflows at the top"
+  assert_file_exists ".claude/settings.local.json" "Claude settings at the top"
+  assert_file_exists ".git/hooks/pre-commit" "git hooks where git runs them"
+  assert_true "nothing written under src/" test ! -e src/.github -a ! -e src/.claude -a ! -e src/.gitattributes
+  teardown
+}
+
+test_i7_hooks_path_scope() {
+  echo "test: I-7 a global core.hooksPath is refused (it is every repository's hooks dir); a local '~/…' one is expanded"
+  setup
+  local g before
+  g=$(harness_mktemp_d global)
+  mkdir -p "$g/hooks"
+  printf '[core]\n\thooksPath = %s\n' "$g/hooks" > "$g/config"
+  before=$(_tree_state)
+  export GIT_CONFIG_GLOBAL="$g/config"
+  inst install --git
+  local rc="$IRC" out="$IOUT"
+  inst status
+  local status_out="$IOUT"
+  export GIT_CONFIG_GLOBAL=/dev/null
+  assert_eq "1" "$rc" "install --git exits 1"
+  assert_contains "$out" "core.hooksPath" "names core.hooksPath"
+  assert_contains "$out" "global" "…and its scope"
+  assert_eq "" "$(ls -A "$g/hooks")" "the global hooks dir stays empty"
+  assert_eq "$before" "$(_tree_state)" "nothing written (no .gitattributes, no merge driver)"
+  assert_contains "$status_out" "global" "status says the hooks dir is a global one"
+  git config core.hooksPath '~/myhooks'
+  inst install --git
+  assert_eq "0" "$IRC" "local '~/myhooks': exits 0"
+  assert_file_exists "$HOME/myhooks/pre-commit" "…installed in \$HOME/myhooks, where git runs it"
+  assert_true "…no literal '~' directory" test ! -e "./~"
+  teardown
+}
+
+test_i7_doc_tools_resolution_plugin_cache() {
+  echo "test: I-7 hooks of a plugin-cache install (path with a space) run the newest version-named sibling's doc-tools.sh, never another sibling"
+  indexed_fixture
+  local cache sent v
+  cache="$(harness_mktemp_d cache)/plugin cache/doc-superpowers"
+  plugin_copy "$cache/1.0.0"
+  sent=$(harness_mktemp sentinel)
+  mkdir -p "$cache/zzz/scripts"
+  printf '#!/bin/sh\necho zzz >> "%s"\nexit 0\n' "$sent" > "$cache/zzz/scripts/doc-tools.sh"
+  chmod +x "$cache/zzz/scripts/doc-tools.sh"
+  inst --from "$cache/1.0.0/scripts/hooks/install.sh" install --git
+  assert_eq "0" "$IRC" "install exits 0"
+  printf '.gitattributes\n' >> .git/info/exclude
+  stage_stale_change
+  run_hooked DOC_TOOLS= DOC_SUPERPOWERS_STRICT=1 -- git commit -qm x
+  assert_eq "1" "$RUN_RC" "the hook found 1.0.0's doc-tools.sh (a path with spaces) and blocked the stale commit"
+  assert_eq "" "$(cat "$sent")" "the non-version sibling 'zzz' never ran"
+  for v in 1.9.0 1.10.0; do
+    mkdir -p "$cache/$v/scripts"
+    printf '#!/bin/sh\necho %s >> "%s"\nexit 0\n' "$v" "$sent" > "$cache/$v/scripts/doc-tools.sh"
+    chmod +x "$cache/$v/scripts/doc-tools.sh"
+  done
+  run_hooked DOC_TOOLS= -- git commit -qm y
+  assert_eq "1.10.0" "$(cat "$sent")" "a plugin update is picked up in numeric order (1.10.0 > 1.9.0), no re-install"
+  teardown
+}
+
+test_i7_doc_tools_resolution_checkout() {
+  echo "test: I-7 hooks of a checkout install run its own doc-tools.sh (path quoted), never a version-named sibling"
+  indexed_fixture
+  local root sent
+  root="$(harness_mktemp_d co)/my checkout"
+  plugin_copy "$root/doc superpowers"
+  sent=$(harness_mktemp sentinel)
+  mkdir -p "$root/9.9.9/scripts"
+  printf '#!/bin/sh\necho 9.9.9 >> "%s"\nexit 0\n' "$sent" > "$root/9.9.9/scripts/doc-tools.sh"
+  chmod +x "$root/9.9.9/scripts/doc-tools.sh"
+  inst --from "$root/doc superpowers/scripts/hooks/install.sh" install --git
+  assert_eq "0" "$IRC" "install exits 0"
+  printf '.gitattributes\n' >> .git/info/exclude
+  stage_stale_change
+  run_hooked DOC_TOOLS= DOC_SUPERPOWERS_STRICT=1 -- git commit -qm x
+  assert_eq "1" "$RUN_RC" "the pinned path (with spaces) resolves and the stale commit is blocked"
+  assert_eq "" "$(cat "$sent")" "the sibling 9.9.9 never ran"
+  teardown
+}
+
+test_i7_ci_values_validated() {
+  echo "test: I-7 install --ci rejects a --base-branch / --cron that would corrupt a workflow; nothing written"
+  setup
+  local before
+  before=$(_tree_state)
+  _bad_ci() {
+    inst install --ci "$@"
+    assert_eq "1" "$IRC" "install --ci $*: exits 1"
+    assert_eq "$before" "$(_tree_state)" "install --ci $*: nothing written"
+  }
+  _bad_ci --base-branch 'a|b'
+  _bad_ci --base-branch "a'b"
+  _bad_ci --base-branch 'a..b'
+  _bad_ci --base-branch 'x]'
+  _bad_ci --cron '0|9 * * * *'
+  _bad_ci --cron '0 9 * *'
+  _bad_ci --cron "0 9 * * 1'"
+  assert_contains "$IOUT" "--cron" "the message names the option"
+  teardown
+}
+
+# The rendered workflows and the state file, by content.
+_ci_snapshot() {
+  local f
+  for f in .github/workflows/*.yml .claude/doc-superpowers/installed.json; do
+    [ -f "$f" ] && printf '%s %s\n' "$f" "$(cksum < "$f")"
+  done
+}
+
+test_i7_plain_reinstall_reproduces_choices() {
+  echo "test: I-7 a plain 'install --ci' reproduces the recorded choices (strict, branch, cron, workflow set); no file churn"
+  setup
+  inst install --ci --ci-strict --base-branch develop --cron '0 6 * * 1' --workflows=doc-freshness-pr,doc-freshness-schedule,doc-release
+  assert_eq "0" "$IRC" "first install exits 0"
+  local snap
+  snap=$(_ci_snapshot)
+  inst install --ci
+  assert_eq "0" "$IRC" "plain re-install exits 0"
+  assert_contains "$(cat .github/workflows/doc-freshness-pr.yml)" 'DOC_SUPERPOWERS_STRICT: "1"' "strict kept"
+  assert_contains "$(cat .github/workflows/doc-freshness-pr.yml)" "branches: [develop]" "base branch kept"
+  assert_contains "$(cat .github/workflows/doc-freshness-schedule.yml)" "0 6 * * 1" "cron kept"
+  assert_file_exists ".github/workflows/doc-release.yml" "the opted-in AI workflow is kept"
+  assert_file_not_exists ".github/workflows/doc-index-update.yml" "no default added to a recorded set"
+  assert_eq "$snap" "$(_ci_snapshot)" "workflows and state file byte-identical (no timestamp rewrite)"
+  local f=.claude/doc-superpowers/installed.json
+  assert_eq "develop|0 6 * * 1|true" "$(jq -r '.tiers.ci | "\(.base_branch)|\(.cron)|\(.ci_strict)"' "$f")" "the choices are recorded"
+  inst install --ci --ci-strict=false
+  assert_contains "$(cat .github/workflows/doc-freshness-pr.yml)" 'DOC_SUPERPOWERS_STRICT: "0"' "--ci-strict=false changes the recorded choice"
+  teardown
+}
+
+test_i7_legacy_install_choices_inferred() {
+  echo "test: I-7 upgrading a pre-3.0 install (state without choices): the rendered workflows' choices are kept"
+  setup
+  mkdir -p .github/workflows .claude/doc-superpowers
+  sed -e 's|__BASE_BRANCH__|develop|g' -e 's|__CI_STRICT__|1|g' "$HOOKS_DIR/ci/doc-freshness-pr.yml" > .github/workflows/doc-freshness-pr.yml
+  sed -e "s|__CRON_SCHEDULE__|0 5 * * 2|g" "$HOOKS_DIR/ci/doc-freshness-schedule.yml" > .github/workflows/doc-freshness-schedule.yml
+  printf '%s\n' '{"schema_version": 1, "tiers": {"ci": {"workflows": {"doc-freshness-pr": {"state": "installed", "installed_at": "2025-01-01T00:00:00Z"}, "doc-freshness-schedule": {"state": "installed", "installed_at": "2025-01-01T00:00:00Z"}}, "tools": {"state": "installed"}}}}' \
+    > .claude/doc-superpowers/installed.json
+  inst install --ci
+  assert_eq "0" "$IRC" "exits 0"
+  assert_contains "$(cat .github/workflows/doc-freshness-pr.yml)" 'DOC_SUPERPOWERS_STRICT: "1"' "strict kept (read from the installed workflow)"
+  assert_contains "$(cat .github/workflows/doc-freshness-pr.yml)" "branches: [develop]" "base branch kept"
+  assert_contains "$(cat .github/workflows/doc-freshness-schedule.yml)" "0 5 * * 2" "cron kept"
+  assert_file_not_exists ".github/workflows/doc-index-update.yml" "the installed set is kept"
+  local f=.claude/doc-superpowers/installed.json
+  assert_eq "develop|0 5 * * 2|true|2025-01-01T00:00:00Z|null" \
+    "$(jq -r '.tiers.ci | "\(.base_branch)|\(.cron)|\(.ci_strict)|\(.workflows["doc-freshness-pr"].installed_at)|\(.tools)"' "$f")" \
+    "the choices are now recorded; installed_at kept; the write-only tools record dropped"
+  teardown
+}
+
+test_i7_uninstall_unknown_workflow_fails() {
+  echo "test: I-7 uninstall --ci --workflows=<typo> exits non-zero and changes nothing"
+  setup
+  inst install --ci
+  local before
+  before=$(_tree_state)
+  inst uninstall --ci --workflows=doc-freshnes-pr
+  assert_eq "1" "$IRC" "exits 1"
+  assert_contains "$IOUT" "unknown workflow name: doc-freshnes-pr" "names the typo"
+  assert_eq "$before" "$(_tree_state)" "nothing changed"
+  teardown
+}
+
+test_i7_install_uninstall_leaves_no_residue() {
+  echo "test: I-7 install --all then uninstall --all leaves nothing behind but the state file"
+  setup
+  local before after
+  before=$(_tree_state)
+  inst install --all
+  assert_eq "0" "$IRC" "install --all exits 0"
+  inst uninstall --all
+  assert_eq "0" "$IRC" "uninstall --all exits 0"
+  after=$(_tree_state | grep -v -e '^\./\.claude/$' -e '^\./\.claude/doc-superpowers/$' -e '^\./\.claude/doc-superpowers/installed\.json ')
+  assert_eq "$before" "$after" "work tree, hooks, info/exclude and git config are as before"
+  assert_file_exists ".claude/doc-superpowers/installed.json" "the state file stays (it records the removal)"
+  teardown
+}
+
+test_i7_default_ci_set_and_help() {
+  echo "test: I-7 install --ci defaults to the three shell workflows; help lists every hook and workflow"
+  setup
+  inst install --ci
+  assert_eq "0" "$IRC" "exits 0"
+  assert_eq "doc-freshness-pr.yml doc-freshness-schedule.yml doc-index-update.yml" \
+    "$(cd .github/workflows && printf '%s ' *.yml | sed 's/ $//')" "the three shell workflows, no AI template"
+  inst help
+  assert_eq "0" "$IRC" "help exits 0"
+  local n
+  for n in pre-commit post-merge post-checkout prepare-commit-msg pre-push pre-commit-gate post-commit-sync session-summary \
+    $(cd "$HOOKS_DIR/ci" && for w in *.yml; do printf '%s ' "${w%.yml}"; done); do
+    assert_contains "$IOUT" "$n" "help lists $n"
+  done
+  teardown
+}
+
+test_i7_flags_outside_scope_exit_2() {
+  echo "test: I-7 a flag outside the command's scope exits 2 and changes nothing"
+  setup
+  inst install --ci
+  local before args
+  before=$(_tree_state)
+  for args in "status --ci --workflows=bogus" "status --force" "uninstall --ci --helpers=false" "uninstall --ci --force" \
+    "uninstall --git --transient" "install --git --transient" "install --git --base-branch=dev" "install --claude --ci-strict"; do
+    # shellcheck disable=SC2086  # intentional word-splitting of the flag set
+    inst $args
+    assert_eq "2" "$IRC" "$args: exits 2"
+    assert_eq "$before" "$(_tree_state)" "$args: nothing changed"
+  done
+  teardown
+}
+
+test_i7_workflows_csv_edges() {
+  echo "test: I-7 --workflows=, and --workflows= are errors; a repeated name installs once"
+  setup
+  local before
+  before=$(_tree_state)
+  inst install --ci --workflows=,
+  assert_eq "1" "$IRC" "--workflows=, exits 1"
+  assert_contains "$IOUT" "names no workflow" "…and says so"
+  inst install --ci --workflows=
+  assert_eq "1" "$IRC" "--workflows= exits 1"
+  assert_eq "$before" "$(_tree_state)" "nothing written"
+  inst install --ci --workflows=doc-freshness-pr,doc-freshness-pr
+  assert_eq "0" "$IRC" "a repeated name: exits 0"
+  assert_contains "$IOUT" "1 installed" "…and installs it once"
+  teardown
+}
+
+test_i7_unreadable_state_refused_and_recovery() {
+  echo "test: I-7 an unreadable state file is never overwritten; status warns once; moved aside, nothing absent on disk is installed"
+  setup
+  inst install --ci --workflows=doc-freshness-pr
+  local f=.claude/doc-superpowers/installed.json before
+  printf '<<<<<<< ours\n{}\n=======\n{"x": 1}\n>>>>>>> theirs\n' > "$f"
+  before=$(_tree_state)
+  inst install --ci
+  assert_eq "1" "$IRC" "install: exits 1"
+  inst uninstall --ci
+  assert_eq "1" "$IRC" "uninstall: exits 1"
+  assert_eq "$before" "$(_tree_state)" "install / uninstall wrote nothing"
+  inst status
+  assert_eq "0" "$IRC" "status exits 0"
+  assert_eq "1" "$(grep -c 'installed.json' <<<"$IOUT")" "status warns once"
+  printf '{"tiers": 5}\n' > "$f"
+  inst install --ci
+  assert_eq "1" "$IRC" "valid JSON of the wrong shape: install exits 1"
+  inst status
+  assert_eq "0" "$IRC" "…status still exits 0"
+  mv "$f" "$f.corrupt"
+  inst install --ci
+  assert_eq "0" "$IRC" "moved aside: install exits 0"
+  assert_file_exists ".github/workflows/doc-freshness-pr.yml" "…the workflow on disk is refreshed"
+  assert_file_not_exists ".github/workflows/doc-freshness-schedule.yml" "…nothing absent on disk is installed"
+  assert_eq "installed" "$(jq -r '.tiers.ci.workflows["doc-freshness-pr"].state' "$f")" "…the state is rebuilt from disk"
+  teardown
+}
+
+test_i7_uninstall_without_workflows_dir() {
+  echo "test: I-7 uninstall --ci with no .github/workflows/ still removes the vendored tool"
+  setup
+  inst install --ci --workflows=none
+  rm -rf .github/workflows
+  inst uninstall --ci
+  assert_eq "0" "$IRC" "exits 0"
+  assert_file_not_exists ".github/scripts/doc-tools.sh" "the vendored doc-tools.sh is removed"
+  teardown
+}
+
+test_i7_state_reconciled_with_disk() {
+  echo "test: I-7 a managed workflow on disk is installed, whatever the state says: status shows it, a plain install refreshes it"
+  setup
+  inst install --ci --ci-strict
+  inst uninstall --ci --workflows=doc-freshness-pr
+  sed -e 's|__BASE_BRANCH__|main|g' -e 's|__CI_STRICT__|0|g' "$HOOKS_DIR/ci/doc-freshness-pr.yml" > .github/workflows/doc-freshness-pr.yml
+  inst status
+  assert_contains "$(grep 'doc-freshness-pr.yml' <<<"$IOUT")" "installed" "status: installed"
+  assert_not_contains "$(grep 'doc-freshness-pr.yml' <<<"$IOUT")" "uninstalled" "…not 'uninstalled'"
+  inst install --ci
+  assert_eq "0" "$IRC" "install exits 0"
+  assert_contains "$(cat .github/workflows/doc-freshness-pr.yml)" 'DOC_SUPERPOWERS_STRICT: "1"' "refreshed with the recorded choices"
+  assert_eq "installed" "$(jq -r '.tiers.ci.workflows["doc-freshness-pr"].state' .claude/doc-superpowers/installed.json)" "state reconciled"
+  teardown
+}
+
+test_i7_claude_tier_is_per_user() {
+  echo "test: I-7 the Claude tier is per-user: its files are git-excluded (info/exclude), its commands use \$CLAUDE_PROJECT_DIR"
+  setup
+  local orig
+  orig=$(harness_mktemp exclude)
+  cp .git/info/exclude "$orig"
+  inst install --claude
+  assert_eq "0" "$IRC" "exits 0"
+  assert_contains "$(cat .git/info/exclude)" ".claude/settings.local.json" "settings.local.json is excluded"
+  assert_contains "$(cat .git/info/exclude)" ".claude/hooks/doc-superpowers/" "the hook scripts are excluded"
+  assert_eq "" "$(git status --porcelain --untracked-files=all -- .claude)" "nothing under .claude/ is offered to git add"
+  assert_contains "$(registered_cmd PreToolUse pre-commit-gate)" '"$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/pre-commit-gate.sh' "commands use \$CLAUDE_PROJECT_DIR"
+  inst uninstall --claude
+  assert_true "uninstall restores info/exclude byte-for-byte" cmp -s "$orig" .git/info/exclude
+  # An exclude entry cannot hide a tracked file: the installer says so.
+  mkdir -p .claude
+  echo '{}' > .claude/settings.local.json
+  git add .claude/settings.local.json && git commit -qm "tracked settings"
+  inst install --claude
+  assert_contains "$IOUT" "is tracked by git" "a tracked settings.local.json is reported (untrack it to stay per-user)"
+  teardown
+}
+
+test_i7_claude_hooks_run_from_path_with_spaces() {
+  echo "test: I-7 the registered Claude commands work in a project whose path has spaces"
+  setup
+  local p="$TEST_DIR/my project"
+  mkdir -p "$p/docs" "$p/src"
+  cd "$p" || return 1
+  git init -q -b main
+  echo "# A" > docs/architecture.md
+  echo "x" > src/index.js
+  git add -A && git commit -qm init
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index >/dev/null 2>&1
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
+  git add docs/.doc-index.json && git commit -qm index
+  inst install --claude
+  assert_eq "0" "$IRC" "install exits 0"
+  stage_stale_change
+  local cmd
+  cmd=$(registered_cmd PreToolUse pre-commit-gate)
+  RUN_STDIN=$(harness_mktemp payload)
+  pretool_json 'git commit -m x' > "$RUN_STDIN"
+  run_hooked CLAUDE_PROJECT_DIR="$p" DOC_SUPERPOWERS_STRICT=1 -- sh -c "$cmd"
+  RUN_STDIN=/dev/null
+  assert_eq "2" "$RUN_RC" "the gate ran from '$p' and blocked the stale commit"
+  cd "$TEST_DIR" || return 1
+  teardown
+}
+
+test_i7_gate_probe_agrees_with_integration_block() {
+  echo "test: I-7 the Claude gate counts the git pre-commit as checking only when it is ours or holds the current block + its copy"
+  hooked_fixture
+  echo "changed" > src/index.js
+  local ours ctx
+  ours=$(harness_mktemp ours)
+  mv .git/hooks/pre-commit "$ours"
+  printf '#!/bin/sh\n# see the doc-superpowers docs\nexit 0\n' > .git/hooks/pre-commit
+  chmod +x .git/hooks/pre-commit
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -am x')"
+  assert_contains "$(out_field .hookSpecificOutput.additionalContext)" "no doc-superpowers git pre-commit hook" "a hook that only mentions doc-superpowers checks nothing"
+  printf '#!/bin/bash\n# doc-superpowers:begin\nDOC_SP_HOOK="$(dirname "$0")/.doc-superpowers-pre-commit"\nif [[ -f "$DOC_SP_HOOK" ]]; then\n    bash "$DOC_SP_HOOK" 2>/dev/null || true\nfi\n# doc-superpowers:end\nexit 0\n' > .git/hooks/pre-commit
+  cp "$ours" .git/hooks/.doc-superpowers-pre-commit
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -am x')"
+  assert_contains "$(out_field .hookSpecificOutput.additionalContext)" "no doc-superpowers git pre-commit hook" "the pre-3.0 block (it dropped the exit code) does not count"
+  printf '#!/bin/sh\nexit 0\n' > .git/hooks/pre-commit
+  rm -f .git/hooks/.doc-superpowers-pre-commit
+  inst install --git
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -am x')"
+  ctx=$(out_field .hookSpecificOutput.additionalContext)
+  assert_contains "$ctx" "The doc-superpowers git pre-commit hook checks the staged tree" "the current block counts"
+  teardown
+}
+
+test_i7_ci_vendoring_through_tools() {
+  echo "test: I-7 install --ci vendors through doc-tools.sh tools (exec bits restored); uninstall keeps an edited helper and says so"
+  setup
+  inst install --ci --workflows=doc-release
+  chmod -x .github/scripts/doc-tools.sh .github/scripts/doc-superpowers-steps/precheck.sh
+  inst install --ci
+  assert_true "doc-tools.sh is executable again" test -x .github/scripts/doc-tools.sh
+  assert_true "precheck.sh is executable again" test -x .github/scripts/doc-superpowers-steps/precheck.sh
+  echo "# a local edit" >> .github/scripts/doc-superpowers-steps/precheck.sh
+  inst uninstall --ci
+  assert_eq "0" "$IRC" "uninstall exits 0"
+  assert_contains "$IOUT" "Kept" "it reports the file it kept"
+  assert_file_exists ".github/scripts/doc-superpowers-steps/precheck.sh" "the edited helper is kept"
+  assert_file_not_exists ".github/scripts/doc-tools.sh" "the unmodified tool is removed"
+  teardown
+}
+
+test_i7_gitattributes_owned_block() {
+  echo "test: I-7 .gitattributes: only the marked block is the installer's (your own merge=doc-index line survives uninstall)"
+  setup
+  local orig
+  orig=$(harness_mktemp attrs)
+  printf '*.png binary\ndocs/.doc-index.json merge=doc-index\n' > .gitattributes
+  cp .gitattributes "$orig"
+  inst install --git
+  assert_eq "1" "$(grep -c '^# doc-superpowers:begin' .gitattributes)" "the marked block is added"
+  inst uninstall --git
+  assert_true "uninstall leaves your .gitattributes byte-for-byte" cmp -s "$orig" .gitattributes
+  printf '*.png binary\n\n# doc-superpowers: auto-resolve doc-index.json merge conflicts\ndocs/.doc-index.json merge=doc-index\n' > .gitattributes
+  inst install --git
+  assert_eq "1" "$(grep -c '^# doc-superpowers:begin' .gitattributes)" "the pre-3.0 lines become the marked block"
+  assert_not_contains "$(cat .gitattributes)" "auto-resolve doc-index.json" "…the old comment is gone"
+  inst uninstall --git
+  assert_eq "*.png binary" "$(cat .gitattributes)" "uninstall leaves only your line"
+  teardown
+}
+
+test_i7_reinstall_reregisters_merge_driver() {
+  echo "test: I-7 re-install --git replaces a pre-3.0 merge-driver registration; uninstall leaves no config section"
+  setup
+  inst install --git
+  git config --local merge.doc-index.driver "/old/pinned/merge-doc-index.sh %O %A %B"
+  inst install --git
+  assert_contains "$(git config --local --get merge.doc-index.driver)" "t='" "re-registered in the resolve-at-merge-time form"
+  inst uninstall --git
+  assert_eq "0" "$(grep -c 'doc-index' .git/config)" "no merge.doc-index section left in .git/config"
+  teardown
+}
+
+test_i7_helpers_false_is_state_aware() {
+  echo "test: I-7 --helpers=false is refused while doc-pr-release is (or stays) installed, allowed once it was removed on purpose"
+  setup
+  inst install --ci --workflows=doc-pr-release
+  local before
+  before=$(_tree_state)
+  inst install --ci --workflows=doc-release --helpers=false
+  assert_eq "1" "$IRC" "doc-pr-release on disk: exits 1"
+  assert_contains "$IOUT" "doc-pr-release" "…names it"
+  assert_eq "$before" "$(_tree_state)" "…nothing written"
+  inst uninstall --ci --workflows=doc-pr-release
+  inst install --ci --workflows=all --helpers=false
+  assert_eq "0" "$IRC" "doc-pr-release removed on purpose: --workflows=all --helpers=false exits 0"
+  assert_file_not_exists ".github/workflows/doc-pr-release.yml" "…doc-pr-release stays removed"
+  assert_true "…and its producer helpers are not installed" test ! -d .github/scripts/doc-pr-release
   teardown
 }
 
@@ -2391,5 +3169,42 @@ test_uninstall_transient_then_install_reinstalls
 test_install_force_bypasses_intentional_uninstall
 test_install_explicit_workflows_overrides_state
 test_install_ci_helpers_invalid_value_errors
+
+echo ""
+echo "=== Installer: ownership, placement, integration, state (I-7) ==="
+test_i7_claude_user_groups_survive
+test_i7_claude_settings_edge_files
+test_i7_symlinked_write_targets_refused
+test_i7_uninstall_never_deletes_through_links
+test_i7_integration_posix_host
+test_i7_integration_exec_host
+test_i7_integration_pre_push_stdin
+test_i7_integration_once_and_exact_inverse
+test_i7_integration_skips_non_shell_host
+test_i7_integration_upgrades_legacy_block
+test_i7_placement_linked_worktree
+test_i7_placement_submodule
+test_i7_placement_subdirectory
+test_i7_hooks_path_scope
+test_i7_doc_tools_resolution_plugin_cache
+test_i7_doc_tools_resolution_checkout
+test_i7_ci_values_validated
+test_i7_plain_reinstall_reproduces_choices
+test_i7_legacy_install_choices_inferred
+test_i7_uninstall_unknown_workflow_fails
+test_i7_install_uninstall_leaves_no_residue
+test_i7_default_ci_set_and_help
+test_i7_flags_outside_scope_exit_2
+test_i7_workflows_csv_edges
+test_i7_unreadable_state_refused_and_recovery
+test_i7_uninstall_without_workflows_dir
+test_i7_state_reconciled_with_disk
+test_i7_claude_tier_is_per_user
+test_i7_claude_hooks_run_from_path_with_spaces
+test_i7_gate_probe_agrees_with_integration_block
+test_i7_ci_vendoring_through_tools
+test_i7_gitattributes_owned_block
+test_i7_reinstall_reregisters_merge_driver
+test_i7_helpers_false_is_state_aware
 
 print_summary

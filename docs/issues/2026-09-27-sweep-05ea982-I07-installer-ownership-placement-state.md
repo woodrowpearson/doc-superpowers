@@ -1,6 +1,6 @@
 ---
 date: 2026-09-27
-status: Open
+status: Resolved
 priority: P1
 type: bug
 component: hooks
@@ -10,8 +10,11 @@ run-id: 05ea982
 related-files:
   - scripts/hooks/install.sh
   - scripts/hooks/state.sh
+  - scripts/hooks/git/pre-commit
+  - scripts/hooks/claude/pre-commit-gate.sh
   - scripts/doc-tools.sh
   - scripts/test-hooks.sh
+  - scripts/test-doc-tools.sh
   - skills/doc-superpowers/SKILL.md
   - README.md
 screenshots: null
@@ -194,13 +197,13 @@ and the menu (a duplicate).
 ## Acceptance criteria
 
 See fix plan Task 8, Step 1. Key cases:
-- [ ] User hook groups survive install and uninstall byte-for-byte.
-- [ ] A committed symlink at any write target makes the installer refuse.
-- [ ] A `#!/bin/sh` host hook runs the integrated block with its arguments.
-- [ ] Worktree, submodule and subdirectory installs land where git runs hooks.
-- [ ] A sibling `…/zzz/scripts/doc-tools.sh` is never executed.
-- [ ] A plain re-install reproduces the prior choices.
-- [ ] Install then uninstall leaves no residue except the state file.
+- [x] User hook groups survive install and uninstall byte-for-byte.
+- [x] A committed symlink at any write target makes the installer refuse.
+- [x] A `#!/bin/sh` host hook runs the integrated block with its arguments.
+- [x] Worktree, submodule and subdirectory installs land where git runs hooks.
+- [x] A sibling `…/zzz/scripts/doc-tools.sh` is never executed.
+- [x] A plain re-install reproduces the prior choices.
+- [x] Install then uninstall leaves no residue except the state file.
 
 ## Related
 
@@ -209,3 +212,87 @@ See fix plan Task 8, Step 1. Key cases:
 - I-8: the default workflow set.
 - I-10: `tools install`/`uninstall`.
 - The `sort -V` removal is part of the dependency audit.
+
+
+## Resolution (Task 8)
+
+Resolved by Task 8 of the fix plan. `install.sh` and `state.sh` are rewritten around four rules —
+place with git plumbing, never write through a link, own only what is marked, record the choices —
+and every check runs before the first write, so a refused run writes nothing. 34 new tests in
+`test-hooks.sh` (297 assertions) and 2 in `test-doc-tools.sh` pin the cases below; the RED run
+failed 220 hooks assertions and 13 doc-tools ones.
+
+**Placement.** Every command `cd`s to `git rev-parse --show-toplevel`; git hooks go to
+`git rev-parse --git-path hooks` (a local `core.hooksPath` with `~` expanded, a linked worktree's
+common dir, a submodule's `.git/modules/<name>/hooks`). A `core.hooksPath` whose
+`git config --show-scope` is not `local` (or unset) is refused. A `.githooks/` no config names is
+no longer used. Worktree, submodule and subdirectory installs are tested end to end (a commit in
+the worktree runs the hook).
+
+**Writes.** `safe_dest` refuses a symbolic link at the target or at any directory between the
+repository top (or git's common dir) and it; every file goes through a temp file beside it and
+`mv`; the preflight checks every target of every selected tier first. Tested for `.claude`,
+`.claude/hooks`, `settings.local.json`, `.github`, `.github/workflows`, a workflow, a dangling
+`.github/scripts/doc-tools.sh`, the state file, `.gitattributes` and a `.githooks/pre-commit`
+link, each for its tier and `--all`: exit 1, nothing written in the repository or through the
+link. Uninstall refuses a linked `.github/scripts`. `doc-tools.sh tools install|uninstall` got the
+same parent-directory check (`_tools_no_link`), since the installer now delegates vendoring to them.
+
+**Ownership.** Settings are merged per hook *entry*: only an entry whose command runs
+`.claude/hooks/doc-superpowers/{pre-commit-gate,post-commit-sync,session-summary}.sh` is the
+installer's, a group is dropped only when it held nothing else, a `type:"prompt"` hook no longer
+crashes the merge, a 0-byte file is `{}`, and a file that is not one JSON object is refused. A
+user's groups mentioning "doc-superpowers" survive install + uninstall byte-for-byte.
+`.gitattributes` and `info/exclude` edits are `# doc-superpowers:begin`/`:end` blocks (the
+pre-3.0 two-line `.gitattributes` entry is migrated); a user's own `merge=doc-index` line
+survives; a file left empty is removed. Markers are matched as `v<N>`, not the exact `v1` string.
+
+**Integration.** One POSIX block right after the host's `#!` line:
+`if [ -f "$DOC_SP_HOOK" ]; then bash "$DOC_SP_HOOK" "$@" || exit $?; fi` for pre-commit,
+`|| true` for the others, and for pre-push a temp copy of stdin so both hooks read the ref lines.
+It runs before any early `exit 0` or a framework's `exec`, exactly once (so the V-FU4 "before the
+final `exit 0`" item is met by placement: there is no copy on an early-exit path). Only shell
+hosts are integrated (`#!/bin/sh`, dash, bash, zsh, … or no `#!`); a python hook is skipped with a
+message. Re-install refreshes the local copy and replaces a pre-3.0 block; uninstall restores the
+host byte-for-byte, mode included. The Claude gate's deferral probe now counts the git pre-commit
+only when it is ours or holds this exact block plus its copy.
+
+**Tool resolution.** The hooks' `__DOC_TOOLS_PARENT__/*/…| sort -V` line is replaced by
+`__DOC_TOOLS_RESOLVE__`, rendered from the merge driver's rule (T6): for a plugin-cache install the
+newest version-named sibling in numeric order (`sort -t. -k1,1n -k2,2n -k3,3n`), never another
+sibling; for a checkout its own path, single-quoted. Every substituted value is sed-escaped
+(`\ & |`); `--base-branch` must pass `git check-ref-format` and `^[A-Za-z0-9][A-Za-z0-9._/-]*$`,
+`--cron` must be 5 fields. The dead `__DOC_TOOLS_PATH__` substitution is gone.
+
+**State (schema 2).** `.tiers.ci` records `base_branch`, `cron`, `ci_strict` and the workflow set
+(`installed` + `installed_at`, or `uninstalled` + `intentional`). A plain `install --ci` reproduces
+them and adds nothing; flags override and are recorded (`--ci-strict=false` undoes strict). A
+pre-3.0 install's choices are read back from its rendered workflows. One `state_load`, in-memory
+marks, one `state_flush` only when the content changed (no timestamp churn), flushed before any
+uninstall deletes a file. An unparsable or wrongly shaped file (or a newer schema) is refused
+(exit 1, never overwritten, `status` warns once); moved to `installed.json.corrupt`, the next
+install rebuilds it from disk and installs nothing absent on disk. A managed workflow on disk is
+installed whatever the state says. The write-only `tools`/`helpers`/`dest`/`uninstalled_at`
+fields, `state_dump_ci`, the fallback workflow list, the `DOC_SP_STATE_FILE` knob and the
+bootstrap guard are deleted. Only the CI tier is recorded (the git and Claude tiers are per clone
+/ per user).
+
+**Defaults, flags, vendoring.** `--ci` installs the three shell workflows; the AI templates are
+opt-in by name; `help` (exit 0) and the menu list every hook and workflow. A flag outside a
+command's scope exits 2 (CI options need `--ci`); `--workflows=,` and `--workflows=` are errors;
+repeated names count once; `uninstall --workflows=<typo>` exits 1; the `uninstall --ci` early
+return is gone. `--helpers=false` is refused when doc-pr-release is selected *or installed*, and
+allowed when it was uninstalled on purpose (state-aware). Vendoring goes through
+`doc-tools.sh tools install|uninstall`, with a new `--helper <dir>` selection so helper dirs ship
+exactly while an installed workflow runs them; uninstall reports `Kept …` files.
+
+**Claude tier: per-user** (ruling R8). `.claude/settings.local.json` and
+`.claude/hooks/doc-superpowers/` are appended (as a marked block) to
+`$(git rev-parse --git-path info/exclude)`; commands are
+`bash "$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/<hook>.sh`.
+
+Install then uninstall of `--all` leaves the work tree, hooks, `info/exclude` and git config as
+they were, except the state file. Lockstep: SKILL.md `hooks` section (consent table with each
+workflow's permissions and commit behaviour; never `--force` unless asked), README, the workflows
+doc, conventions, codebase guide, system overview, getting-started guide.
+

@@ -215,44 +215,46 @@ Use `--all` to install all tiers at once.
 
 ### Installation Rules
 
-- Hook entries **must always be installed via the installer script** (`scripts/hooks/install.sh`), never manually edited into settings files or hook directories. Manual entries will contain unresolved `__DOC_TOOLS_PATH__` placeholders and will not function correctly.
+- Hook entries **must always be installed via the installer script** (`scripts/hooks/install.sh`), never manually edited into settings files or hook directories. The templates carry a `__DOC_TOOLS_RESOLVE__` placeholder that only the installer renders.
+- Every subcommand acts on `git rev-parse --show-toplevel` (a linked worktree or a submodule is its own top level), so it runs from any subdirectory.
+- **Nothing is written through a symbolic link.** A link at a write target, or at a directory between the repository top (or git's common dir) and it, makes the installer refuse; every check runs before the first write, so a refusal writes nothing. Every write is a temp file beside the target, then `mv`.
+- **Ownership is exact**: a hook or workflow by its marker (`doc-superpowers hook v<N>`, `doc-superpowers workflow v<N>`), a `# doc-superpowers:begin` … `:end` block in a user's hook, `.gitattributes` or `info/exclude`, a settings hook *entry* by the path of the script it runs. Never a substring match.
+- Flags outside a subcommand's scope exit 2; CI options need `--ci` (or `--all`).
 
-### Git Hooks Directory Resolution
+### Git Hooks Directory
 
-The installer resolves the git hooks directory using a priority chain:
-
-| Priority | Source | Example |
-|----------|--------|---------|
-| 1 (highest) | `core.hooksPath` git config | Custom path configured via `git config core.hooksPath <dir>` |
-| 2 | `.githooks/` directory | Repo-local convention directory (if it exists) |
-| 3 (default) | `.git/hooks/` | Standard git hooks directory |
+The installer writes where git runs hooks: `git rev-parse --git-path hooks`. That is a repository-local `core.hooksPath` (`~` expanded) when one is set, a linked worktree's common `.git/hooks`, a submodule's `.git/modules/<name>/hooks`, or `.git/hooks`. A `.githooks/` directory that no `core.hooksPath` names is not used (git never runs it). A `core.hooksPath` from the global or system config is refused: it is every repository's hooks directory.
 
 ### Auto-Integration for Existing Git Hooks
 
 When a target hook file already exists and was not installed by doc-superpowers, the installer **auto-integrates** rather than overwriting:
 
-- Copies hook to a local `.doc-superpowers-{name}` file with begin/end markers (`# doc-superpowers:begin`/`# doc-superpowers:end`), uses `dirname $0` for portability
-- If the existing hook has a trailing `exit 0`, the source block is inserted before it
-- Otherwise, the block is appended to the end of the file
-- Uninstall cleanly removes only the integrated lines
+- The rendered hook goes to a local `.doc-superpowers-{name}` beside it (refreshed on every re-install).
+- A marked POSIX block (`# doc-superpowers:begin` … `# doc-superpowers:end`) goes **right after the `#!` line**, once, so it runs before the hook can `exit` or `exec` (hook frameworks end in `exec`). It runs the copy with `"$@"`; pre-commit passes the exit code on (`|| exit $?`, so STRICT blocks), the others never stop the user's hook, and pre-push hands both hooks the same ref lines on stdin.
+- Only shell hooks (`sh`, `bash`, `dash`, `zsh`, `ksh`, … or no `#!`) are integrated; a hook in another language is skipped with a message.
+- Re-install replaces an older block (the pre-3.0 one dropped the arguments, stdin and exit code). Uninstall removes the block and the copy: the user's hook comes back byte-for-byte, mode included.
 
 ### Claude Tier Script Copying
 
-The Claude tier **copies** hook scripts to `.claude/hooks/doc-superpowers/` with placeholder substitution, rather than referencing source scripts by absolute path:
+The Claude tier is **per-user**. It **copies** hook scripts to `.claude/hooks/doc-superpowers/` with placeholder substitution, rather than referencing source scripts by absolute path:
 
-- Scripts are copied with `__DOC_TOOLS_PATH__`, `__DOC_TOOLS_PARENT__`, and `__INSTALL_DATE__` resolved — `__DOC_TOOLS_PARENT__` is what lets an installed hook resolve the newest plugin-cache version at run time rather than pinning the version present at install time
-- Hooks are registered in `.claude/settings.local.json` using **relative paths** (e.g., `.claude/hooks/doc-superpowers/pre-commit-gate.sh`)
-- Existing settings are deep-merged: other hook entries are preserved, and doc-superpowers entries are deduplicated
-- Uninstall removes both the settings entries and the copied scripts directory
+- `__DOC_TOOLS_RESOLVE__` becomes the program that finds `doc-tools.sh` at run time — the merge driver's rule: for a plugin-cache install the newest version-named sibling in numeric order (never another sibling, no GNU `sort -V`), for a checkout its own pinned path, single-quoted — and `__INSTALL_DATE__` the date.
+- Hooks are registered in `.claude/settings.local.json` as `bash "$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/<hook>.sh`, and both that file and the scripts directory are excluded from git through a marked block in `$(git rev-parse --git-path info/exclude)`.
+- Existing settings are merged per entry: the installer's entries (by script path) are replaced, every other entry and group is kept byte-for-byte; a settings file that is not one JSON object is refused.
+- Uninstall removes the installer's entries (a group only when nothing else is left in it), the three scripts and the exclude block; a settings file left empty is removed.
 
 ### CI-Specific Flags
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `--base-branch NAME` | `main` | Target branch for PR checks |
-| `--cron EXPR` | `0 9 * * 1` | Schedule for weekly freshness audit |
-| `--ci-strict` | off | Fail PR check on stale docs (exit non-zero) |
-| `--helpers=<true\|false>` | `true` | Install the `doc-pr-release` helper scripts; `--helpers=false` is refused while `doc-pr-release` is selected (the workflow runs them). Never gates the workflows' own step scripts (`.github/scripts/doc-superpowers-steps/`) |
+| `--workflows=<csv\|all\|none>` | the recorded set; first install: the 3 shell workflows | Which workflows; the Claude-powered ones are opt-in by name |
+| `--base-branch NAME` | `main` | Target branch for PR checks (validated: git ref name of `A-Za-z0-9._/-`) |
+| `--cron EXPR` | `0 9 * * 1` | Schedule for weekly freshness audit (5 fields) |
+| `--ci-strict[=true\|false]` | `false` | Fail PR check on stale docs (exit non-zero) |
+| `--helpers=<true\|false>` | `true` | Install the `doc-pr-release` helper scripts; `--helpers=false` is refused while `doc-pr-release` is selected or installed (the workflow runs them). Never gates the workflows' own step scripts (`.github/scripts/doc-superpowers-steps/`) |
+| `--force` | off | Also re-install workflows uninstalled on purpose |
+
+The choices are recorded in `.claude/doc-superpowers/installed.json` (schema 2: `.tiers.ci.{base_branch,cron,ci_strict,workflows}`); a plain `install --ci` reproduces them. Vendoring goes through `doc-tools.sh tools install|uninstall --helper <dir>`, per installed workflow.
 
 ### Environment Variables
 

@@ -15,9 +15,11 @@
 
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
 
-# --- Path resolution (DOC_TOOLS is replaced at install time) ---
-# When running from test harness or directly, DOC_TOOLS env var overrides.
-DOC_TOOLS="${DOC_TOOLS:-$(printf '%s\n' __DOC_TOOLS_PARENT__/*/scripts/doc-tools.sh | sort -V | tail -1)}"
+# --- Path resolution ---
+# $DOC_TOOLS overrides. Otherwise the program install.sh substituted runs: the
+# newest version-named sibling's doc-tools.sh (plugin cache, numeric order), or
+# the pinned path of a checkout install — the merge driver's rule.
+[[ -n "${DOC_TOOLS:-}" ]] || DOC_TOOLS=$(__DOC_TOOLS_RESOLVE__)
 
 # --- Graceful degradation: tooling absent ---
 [[ -f "$DOC_TOOLS" ]] || exit 0

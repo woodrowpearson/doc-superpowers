@@ -513,59 +513,87 @@ Scaffolding command — installs opt-in hooks into the target project for automa
 
 ```
 /doc-superpowers hooks install [--git] [--claude] [--ci] [--all]
-/doc-superpowers hooks status
+/doc-superpowers hooks status [--git] [--claude] [--ci]
 /doc-superpowers hooks uninstall [--git] [--claude] [--ci] [--all]
 ```
 
-Routes to `scripts/hooks/install.sh <subcommand> [flags]`.
+Routes to `scripts/hooks/install.sh <subcommand> [flags]` (`install.sh help` lists every hook and workflow). A flag the subcommand does not take exits 2; CI options (`--workflows`, `--base-branch`, `--cron`, `--ci-strict`, `--helpers`, `--force`, `--transient`) need `--ci` or `--all`.
 
-**IMPORTANT:** ALWAYS use the installer script. NEVER manually add hook entries to `.claude/settings.json` or `.claude/settings.local.json` — the installer handles template processing, path resolution, and deep-merge with existing settings. Manual entries will contain unresolved `__DOC_TOOLS_PATH__` placeholders and break.
+**IMPORTANT:** ALWAYS use the installer script. NEVER manually add hook entries to `.claude/settings.json` or `.claude/settings.local.json`, and never copy hook templates by hand — the installer renders the templates (the `__DOC_TOOLS_RESOLVE__` placeholder becomes the program that finds `doc-tools.sh`), merges settings per entry, and refuses unsafe targets. Hand-made entries break.
+
+**Where it writes.** Every subcommand acts on the repository holding the current directory, at its top level (`git rev-parse --show-toplevel`; a linked worktree or a submodule is its own top level), so it can run from a subdirectory. Git hooks go where git runs them (`git rev-parse --git-path hooks`: a repository-local `core.hooksPath`, a worktree's common dir, a submodule's `.git/modules/<name>/hooks`). It refuses — writing nothing — when:
+- `core.hooksPath` comes from the user's global or system git config (every repository's hooks dir): tell the user to set a repository-local one or unset it;
+- a write target, or a directory on the way to it, is a symbolic link (a committed link could point at `~/.bashrc` or `~/.claude`): tell the user which path, never work around it;
+- `.claude/settings.local.json` is not one JSON object, or `.claude/doc-superpowers/installed.json` cannot be read (see *State*).
+
+**What it owns.** Only what it can name exactly: a hook whose first lines carry `doc-superpowers hook v<N>`; the `# doc-superpowers:begin` … `:end` block in a hook of the user's, in `.gitattributes` and in git's `info/exclude`; the `merge.doc-index.*` git config; each settings hook *entry* whose command runs `.claude/hooks/doc-superpowers/{pre-commit-gate,post-commit-sync,session-summary}.sh` (other entries and groups — even ones mentioning doc-superpowers — are the user's and survive install and uninstall byte-for-byte); a workflow whose first lines carry `doc-superpowers workflow v<N>`. Uninstall is the inverse of install: an integrated hook of the user's comes back byte-for-byte, a `.gitattributes` or settings file the installer created is removed, and only the state file stays.
 
 **Tier options:**
-- `--git` — Git hooks: pre-commit (freshness gate on the staged tree, so it reports the commit being made), post-merge (stale alert), post-checkout (branch check), prepare-commit-msg ("already stale" comments, editor commits only), pre-push (release reminder for the pushed refs). Also registers the `docs/.doc-index.json` custom merge driver (`scripts/merge-doc-index.sh`) via `git config` + `.gitattributes`
-- `--claude` — Claude Code hooks: PreToolUse pre-commit gate, PostToolUse post-commit sync, Stop session summary. They read the event JSON on stdin and answer with `additionalContext` (for Claude) and `systemMessage` (for the user). Under `DOC_SUPERPOWERS_STRICT=1` the gate exits 2 with the reason on stderr, even under `DOC_SUPERPOWERS_QUIET=1`, because that is Claude's feedback. It gates `git … commit` only in command position, so `echo git commit` is not a commit. It defers `git add … && git commit` and `commit -a` to the git pre-commit hook, which sees the real index. Stop fires after every response, so the summary covers only working-tree changes.
-- No hook runs `update-index` or writes the index: attesting a doc stays a reviewer's step. A hook whose check fails (jq missing from PATH, a corrupt index) prints one line and blocks only under STRICT; absent tooling is silent.
-- `--ci` — CI/CD workflows: all 9 templates (see *CI sub-workflows installed* below), plus `doc-tools.sh` vendored into `.github/scripts/`
+- `--git` — Git hooks: pre-commit (freshness gate on the staged tree, so it reports the commit being made), post-merge (stale alert), post-checkout (branch check), prepare-commit-msg ("already stale" comments, editor commits only), pre-push (release reminder for the pushed refs). Also registers the `docs/.doc-index.json` custom merge driver (`scripts/merge-doc-index.sh`) via `git config` + a marked `.gitattributes` block; re-running `install --git` re-registers a pre-3.0 (pinned) registration. When the user already has a hook, it is kept: if it is a shell script (`sh`, `bash`, `dash`, `zsh`, … or no `#!` line), a marked POSIX block goes right after its `#!` line and runs our copy (`.doc-superpowers-<hook>` beside it) with git's arguments — pre-commit passes our exit code on, so `DOC_SUPERPOWERS_STRICT=1` blocks; pre-push hands both hooks the same ref lines on stdin. A hook in another language is skipped with a message. Re-install refreshes the copy and replaces an older block.
+- `--claude` — Claude Code hooks, **per-user**: registered in `.claude/settings.local.json` with commands `bash "$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/<hook>.sh`, and both that file and `.claude/hooks/doc-superpowers/` are excluded from git through git's `info/exclude` (they hold this machine's paths; each contributor installs their own). PreToolUse pre-commit gate, PostToolUse post-commit sync, Stop session summary. They read the event JSON on stdin and answer with `additionalContext` (for Claude) and `systemMessage` (for the user). Under `DOC_SUPERPOWERS_STRICT=1` the gate exits 2 with the reason on stderr, even under `DOC_SUPERPOWERS_QUIET=1`, because that is Claude's feedback. It gates `git … commit` only in command position, so `echo git commit` is not a commit. It defers `git add … && git commit` and `commit -a` to the git pre-commit hook, which sees the real index — and counts that hook only when it is the doc-superpowers one or holds the current integration block. Stop fires after every response, so the summary covers only working-tree changes.
+- No hook runs `update-index` or writes the index: attesting a doc stays a reviewer's step. A hook whose check fails (jq missing from PATH, a corrupt index) prints one line and blocks only under STRICT; absent tooling is silent. Installed hooks find `doc-tools.sh` by the merge driver's rule: for a plugin-cache install, the newest version-named sibling in numeric order (a plugin update needs no re-install; other sibling directories never run); for a checkout, its own pinned path.
+- `--ci` — CI/CD workflows. **Default: the three shell workflows** (`doc-freshness-pr`, `doc-freshness-schedule`, `doc-index-update`); the Claude-powered templates are opt-in by name (`--workflows=…`). Plus `doc-tools.sh` vendored into `.github/scripts/` through `doc-tools.sh tools install`, with the helper directories exactly while an installed workflow runs them.
+
+**Consent before `--ci`.** Before installing workflows, show the user what each one may do in their repository and get a yes — permissions come from the workflow's `permissions:` block:
+
+| Workflow | Runs on | Permissions | Commits / writes |
+|---|---|---|---|
+| `doc-freshness-pr` (default) | PR open/sync | contents: read, pull-requests: write | PR comment only |
+| `doc-freshness-schedule` (default) | weekly cron | contents: read, issues: write | opens/updates an audit issue |
+| `doc-index-update` (default) | push to the base branch touching `docs/` | contents + pull-requests: write | commits the re-synced index to a new branch and opens a PR |
+| `doc-audit-update` (AI) | push to a non-base branch | contents + pull-requests: write | **commits to that branch** |
+| `doc-review-pr` (AI) | PR open, `@claude` comments | contents: read, pull-requests + issues: write | PR comments only |
+| `doc-release` (AI) | push to `release/**` | contents + pull-requests: write | commits release notes, opens a PR |
+| `doc-spec-verify` (AI) | PR open/sync | contents: read, pull-requests: write | PR comment only |
+| `doc-pr-full-cycle` (AI) | PR open | contents + pull-requests: write | **commits to the PR branch** |
+| `doc-pr-release` (AI) | PR pushes | contents + pull-requests: write | **commits a fragment to the PR branch**, edits the PR body |
+
+AI workflows need a `CLAUDE_CODE_OAUTH_TOKEN` (preferred) or `ANTHROPIC_API_KEY` repository secret. Do not combine `doc-review-pr` and `doc-pr-full-cycle` (both review every PR). Name only the workflows the user agreed to in `--workflows=`.
 
 **CI-specific flags:**
-- `--base-branch NAME` — Target branch (default: `main`)
-- `--cron EXPR` — Schedule expression (default: `0 9 * * 1`)
-- `--ci-strict` — Fail PR check on stale docs (exit non-zero)
-- `--workflows=<csv|all|none>` (v2.12.0+) — Granular workflow selection.
-  - `all` (default): install every template (legacy behavior).
-  - `none`: skip workflow files entirely but still vendor `doc-tools.sh`. Equivalent to `tools install` (preferred for "I only want the bundled CLI" cases).
-  - CSV (e.g. `--workflows=doc-pr-release,doc-index-update`): install ONLY the listed workflows. Names are workflow basenames without `.yml`. Unknown names error out with the full valid set listed.
-- `--helpers=<true|false>` (v2.12.0+) — Whether to install the `doc-pr-release` shell helpers + `RELEASE-NOTES.next/README.md` spec. Default `true`. Install refuses `--helpers=false` while `doc-pr-release` is selected (non-zero exit, nothing written): the workflow runs those helpers, so drop `--helpers=false` or deselect `doc-pr-release`. The workflows' own `run:` step scripts (`.github/scripts/doc-superpowers-steps/`) are not gated by this flag: they always ship with `doc-pr-release.yml` or `doc-release.yml`.
-- `--force` (v2.12.0+) — Bypass state-respect; re-install workflows that were previously uninstalled with `intentional:true`.
+- `--workflows=<csv|all|none>` — Workflow selection.
+  - omitted: the recorded set (see *State*); a first install gets the three shell workflows.
+  - CSV (e.g. `--workflows=doc-pr-release,doc-index-update`): install the listed workflows (names are basenames without `.yml`, repeats count once; an unknown name or an empty list errors out). An explicit name overrides an earlier intentional uninstall.
+  - `all`: every template, except those uninstalled on purpose.
+  - `none`: no workflow, only the vendored `doc-tools.sh` (prefer `tools install` for that).
+- `--base-branch NAME` — Target branch (default: `main`); a name git accepts, of letters, digits and `. _ / -` only (anything else could corrupt a workflow line).
+- `--cron EXPR` — Schedule, 5 fields (default: `0 9 * * 1`).
+- `--ci-strict[=true|false]` — Fail the PR check on stale docs (default false).
+- `--helpers=<true|false>` — Ship the `doc-pr-release` producer helpers (default `true`). Refused (non-zero, nothing written) while `doc-pr-release` is selected or already installed, since it runs them; a `doc-pr-release` uninstalled on purpose does not count. The workflows' step scripts (`.github/scripts/doc-superpowers-steps/`) are not gated by this flag: they ship with `doc-pr-release.yml` or `doc-release.yml`.
+- `--force` — Also re-install workflows uninstalled on purpose. **Never pass `--force` unless the user asked for exactly that.**
 
 **Uninstall-specific flags:**
-- `--transient` (v2.12.0+) — Mark the uninstall as `intentional:false` so the next plain `install --ci` re-installs them. Without this flag, `uninstall` marks `intentional:true` (the default — "I really mean to remove this").
+- `--workflows=<csv|all|none>` — Which workflows (default: all, plus the vendored files). An unknown name exits non-zero.
+- `--transient` — Record the removal as temporary (`intentional:false`) so the next plain `install --ci` puts them back. Without it the removal is intentional.
 
-**State tracking (v2.12.0+):**
-- Install state is committed to `.claude/doc-superpowers/installed.json` (per-workflow + tools + helpers).
-- First install on a repo with no state file → inferred from filesystem.
-- Subsequent installs (no `--workflows=` flag) respect prior uninstall decisions; pass `--workflows=<name>` or `--force` to override.
-- Malformed state file → graceful fallback + one-line WARN.
+Vendored files are removed through `doc-tools.sh tools uninstall`: a file with local edits (or from another plugin version) is kept and reported as `Kept …` — relay those lines to the user; the uninstall is not "clean" then. `RELEASE-NOTES.next/` is never removed (fragments may live there).
+
+**State** (`.claude/doc-superpowers/installed.json`, committed — tell the user to commit it with the workflows):
+- It records the CI tier only (the git and Claude tiers are per-clone / per-user): the workflow set (`installed`, or `uninstalled` with `intentional`), `base_branch`, `cron`, `ci_strict`, and each workflow's `installed_at` (set once, never rewritten on a refresh).
+- A plain `install --ci` reproduces the recorded choices and refreshes exactly the recorded workflows (it adds no default); flags override a choice and are recorded. Upgrading a pre-3.0 install keeps the choices found in its rendered workflows.
+- A doc-superpowers workflow on disk counts as installed whatever the state says, and is refreshed.
+- An unreadable state file (a merge conflict, the wrong shape) is never overwritten: install and uninstall exit 1 and `status` warns. Have the user resolve the conflict, or move the file to `installed.json.corrupt` — the next install then rebuilds it from disk and installs nothing that is not already there.
 
 **Standalone `tools` subcommand (v2.12.0+):**
 
-For projects that want only `doc-tools.sh` (and optionally the `doc-pr-release` helpers) without the full 9-workflow CI install, route to `$DOC_TOOLS tools …` directly instead of `hooks install --ci`:
+For projects that want only `doc-tools.sh` (and optionally the CI helpers) without workflows, route to `$DOC_TOOLS tools …` directly instead of `hooks install --ci`:
 
 ```bash
-$DOC_TOOLS tools install [--dest <path>] [--with-helpers]
-$DOC_TOOLS tools uninstall [--dest <path>]
+$DOC_TOOLS tools install [--dest <path>] [--with-helpers | --helper <dir>...]
+$DOC_TOOLS tools uninstall [--dest <path>] [--helper <dir>...]
 $DOC_TOOLS tools status    [--dest <path>]
 $DOC_TOOLS tools version
 ```
 
-`--dest` defaults to `.github/scripts`. `--with-helpers` ALSO installs every helper the CI templates run — `doc-pr-release/*.sh` and `doc-superpowers-steps/*.sh` — and `RELEASE-NOTES.next/README.md` if absent (the bits `install --ci` bundles). Use this when the user wants to wire `doc-tools.sh` into their own (non-doc-superpowers) workflows. `tools uninstall` removes only files byte-identical to the plugin's copies: an edited or user-added file (and a copy from another plugin version) is kept and reported — tell the user, never delete it for them. Run these from the plugin's `doc-tools.sh` (`$DOC_TOOLS`): a vendored copy cannot uninstall, cannot ship helpers, and `tools status` from it reports presence only (no drift, no version).
+`--dest` defaults to `.github/scripts`. `--with-helpers` ALSO installs every helper the CI templates run — `doc-pr-release/*.sh` and `doc-superpowers-steps/*.sh` — and `RELEASE-NOTES.next/README.md` if absent; `--helper <dir>` (repeatable: `doc-pr-release`, `doc-superpowers-steps`) only those directories (the README comes with `doc-pr-release`). `install --ci` uses exactly this, per installed workflow. Use it when the user wants to wire `doc-tools.sh` into their own (non-doc-superpowers) workflows. `tools uninstall` removes only files byte-identical to the plugin's copies (with `--helper`, only in those directories, keeping `doc-tools.sh`): an edited or user-added file (and a copy from another plugin version) is kept and reported — tell the user, never delete it for them. Both refuse a symbolic link at a destination or on the way to it. Run these from the plugin's `doc-tools.sh` (`$DOC_TOOLS`): a vendored copy cannot uninstall, cannot ship helpers, and `tools status` from it reports presence only (no drift, no version).
 
-When no tier flags are provided via SKILL.md routing, present options to the user and pass the appropriate flags. The installer's interactive menu is for direct terminal invocation only.
+When no tier flags are provided via SKILL.md routing, present the options to the user (with the consent table for `--ci`) and pass the appropriate flags. The installer's interactive menu is for direct terminal invocation only.
 
-#### CI sub-workflows installed
+#### CI sub-workflows
 
-The `--ci` tier installs these workflows (skipped if a non-doc-superpowers
-workflow already exists at that path):
+The `--ci` tier's templates (a path holding a workflow that is not a
+doc-superpowers one is skipped). The first three are the default set; the
+others install only when named:
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
