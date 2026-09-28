@@ -1364,7 +1364,9 @@ uninstall_ci() {
   else
     vendor_sync uninstall
   fi
-  # RELEASE-NOTES.next/README.md stays: fragments and edits may live there.
+  # RELEASE-NOTES.next/README.md went with the doc-pr-release helpers if it
+  # was the plugin's own and alone (tools uninstall); an edited one, or one
+  # beside fragments, stays.
   remove_dir_if_empty .github/workflows
   remove_dir_if_empty .github
   echo "CI/CD workflows: $removed removed"
