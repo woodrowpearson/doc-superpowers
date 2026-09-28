@@ -34,6 +34,10 @@ on:
 concurrency:
   group: doc-superpowers-write-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: false
+  # Queue pending runs in order (up to 100) instead of letting a newer one of
+  # any of the three cancel them.
+  # GHES versions without concurrency `queue` support: delete this key.
+  queue: max
 
 env:
   DOC_SUPERPOWERS_VERSION: "__VERSION__"
@@ -259,14 +263,16 @@ jobs:
 
       # The agent cannot commit (its tools grant neither commit nor push):
       # first check it changed nothing but this PR's fragment (the
-      # .doc-pr-release/ context is the workflow's own scratch), then commit
-      # and push the fragment with the deterministic helper.
+      # .doc-pr-release/ context is the workflow's own scratch) — with the
+      # checker as it was before the agent ran (prepare-agent.sh's snapshot),
+      # which also means no helper below was edited — then commit and push
+      # the fragment with the deterministic helper.
       - name: Check the agent changed only the fragment
         if: steps.context.outputs.new_commits_len != '0'
         env:
           EXPECTED_HEAD: ${{ steps.plugin.outputs.head }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
-        run: .github/scripts/doc-superpowers-steps/commit-changes.sh --check-only --allow "RELEASE-NOTES.next/PR-${PR_NUMBER}.md" --ignore .doc-pr-release/
+        run: '"$RUNNER_TEMP"/doc-superpowers-steps/commit-changes.sh --check-only --allow "RELEASE-NOTES.next/PR-${PR_NUMBER}.md" --ignore .doc-pr-release/'
 
       - name: Commit and push the fragment
         if: steps.context.outputs.new_commits_len != '0'
@@ -276,6 +282,12 @@ jobs:
           # For pull_request events this is set automatically; for workflow_dispatch
           # we resolve it from the PR record above.
           GITHUB_HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          # git runs no hook or fsmonitor the agent could have planted in .git.
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: core.hooksPath
+          GIT_CONFIG_VALUE_0: /dev/null
+          GIT_CONFIG_KEY_1: core.fsmonitor
+          GIT_CONFIG_VALUE_1: "false"
         run: .github/scripts/doc-pr-release/commit-and-push.sh "$PR_NUMBER"
 
       # Defense against agent silent-skip: after the commit step, assert that

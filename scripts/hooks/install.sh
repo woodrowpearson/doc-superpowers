@@ -1088,16 +1088,8 @@ preflight_ci() {
   valid_cron "$CI_CRON" || die "the recorded cron '$CI_CRON' is not 5 cron fields; pass --cron. Nothing was changed."
 
   CI_DISK=$(disk_workflows)
-  # Retired workflows on disk: removed when the installer owns them (the
-  # workflow marker, as for every managed workflow), else kept and reported.
-  CI_RETIRE="" CI_RETIRED_KEPT=""
-  for w in $RETIRED_WORKFLOWS; do
-    if is_managed_workflow ".github/workflows/$w.yml"; then
-      CI_RETIRE="${CI_RETIRE:+$CI_RETIRE }$w"
-    elif [ -e ".github/workflows/$w.yml" ]; then
-      CI_RETIRED_KEPT="${CI_RETIRED_KEPT:+$CI_RETIRED_KEPT }$w"
-    fi
-  done
+  # Every install --ci retires every retired workflow.
+  plan_retired "$RETIRED_WORKFLOWS"
   case "$WF_MODE" in
     csv) new="$CSV_NAMES" ;;
     none) ;;
@@ -1214,19 +1206,34 @@ needed_helpers() {
   printf '%s' "$need"
 }
 
-# Remove the managed copies of retired workflows (CI_RETIRE_NOW), drop every
-# named retired workflow from the state, report the unmanaged files kept.
-# $1: the retired names in play; the caller sets CI_RETIRE_NOW / _KEPT.
+# plan_retired <names>: the retired workflows this run retires (preflight;
+# nothing is written). RETIRE_NAMES are dropped from the state; of their
+# files, RETIRE_OWNED carry the workflow marker (the ownership rule of every
+# managed workflow) and are removed, RETIRE_KEPT do not and are kept.
+plan_retired() {
+  local w
+  RETIRE_NAMES="$1" RETIRE_OWNED="" RETIRE_KEPT=""
+  for w in $RETIRE_NAMES; do
+    if is_managed_workflow ".github/workflows/$w.yml"; then
+      RETIRE_OWNED="${RETIRE_OWNED:+$RETIRE_OWNED }$w"
+    elif [ -e ".github/workflows/$w.yml" ]; then
+      RETIRE_KEPT="${RETIRE_KEPT:+$RETIRE_KEPT }$w"
+    fi
+  done
+}
+
+# retire_workflows: carry out plan_retired's plan — drop the state entries,
+# remove the owned files, report the kept ones.
 retire_workflows() {
   local w
-  for w in $1; do
+  for w in $RETIRE_NAMES; do
     state_wf_drop "$w"
   done
-  for w in $CI_RETIRE_NOW; do
+  for w in $RETIRE_OWNED; do
     remove_file ".github/workflows/$w.yml"
     echo "  Removed .github/workflows/$w.yml: the $w workflow was retired (see RELEASE-NOTES v3.0.0)."
   done
-  for w in $CI_RETIRE_KEPT; do
+  for w in $RETIRE_KEPT; do
     echo "  Kept .github/workflows/$w.yml: named like the retired doc-superpowers $w workflow but without its marker, so not provably the installer's. Remove it yourself if it is the old one."
   done
 }
@@ -1268,8 +1275,7 @@ install_ci() {
   for w in $CI_FOREIGN; do
     echo "  Existing $w.yml found (not doc-superpowers-managed), skipping."
   done
-  CI_RETIRE_NOW="$CI_RETIRE" CI_RETIRE_KEPT="$CI_RETIRED_KEPT"
-  retire_workflows "$RETIRED_WORKFLOWS"
+  retire_workflows
   state_set_choices "$CI_BASE" "$CI_CRON" "$CI_STRICT"
   vendor_sync install
   state_flush
@@ -1309,25 +1315,18 @@ preflight_uninstall_ci() {
     none) CI_TARGETS="" CI_FULL=0 ;;
   esac
   # Retired names (every one on a full uninstall, else the listed ones) are
-  # dropped from the state, not marked; their managed copies removed.
-  local t=""
-  CI_UN_RETIRED=""
-  [ "$CI_FULL" = 0 ] || CI_UN_RETIRED="$RETIRED_WORKFLOWS"
+  # retired, not marked.
+  local t="" retired=""
+  [ "$CI_FULL" = 0 ] || retired="$RETIRED_WORKFLOWS"
   for w in $CI_TARGETS; do
     if in_list "$w" "$RETIRED_WORKFLOWS"; then
-      in_list "$w" "$CI_UN_RETIRED" || CI_UN_RETIRED="${CI_UN_RETIRED:+$CI_UN_RETIRED }$w"
+      in_list "$w" "$retired" || retired="${retired:+$retired }$w"
     else
       t="${t:+$t }$w"
     fi
   done
-  CI_TARGETS="$t" CI_RETIRE_NOW="" CI_RETIRE_KEPT=""
-  for w in $CI_UN_RETIRED; do
-    if is_managed_workflow ".github/workflows/$w.yml"; then
-      CI_RETIRE_NOW="${CI_RETIRE_NOW:+$CI_RETIRE_NOW }$w"
-    elif [ -e ".github/workflows/$w.yml" ]; then
-      CI_RETIRE_KEPT="${CI_RETIRE_KEPT:+$CI_RETIRE_KEPT }$w"
-    fi
-  done
+  CI_TARGETS="$t"
+  plan_retired "$retired"
   # Marked: a listed name always (an explicit choice); on a full uninstall,
   # what is installed (on disk or recorded) — earlier removals keep their mark.
   CI_MARK=""
@@ -1346,8 +1345,11 @@ uninstall_ci() {
   for w in $CI_MARK; do
     state_mark_uninstalled "$w" "$intentional"
   done
-  for w in $CI_UN_RETIRED; do
-    state_wf_drop "$w"
+  # A retired file removed before the record is harmless: the next install
+  # or uninstall retires whatever is left.
+  retire_workflows
+  for w in $RETIRE_OWNED; do
+    removed=$((removed + 1))
   done
   # Recorded first: an interrupted run then cannot bring a workflow back.
   state_flush
@@ -1357,10 +1359,6 @@ uninstall_ci() {
       removed=$((removed + 1))
     fi
   done
-  for w in $CI_RETIRE_NOW; do
-    removed=$((removed + 1))
-  done
-  retire_workflows ""
   if [ "$CI_FULL" = 1 ]; then
     run_tools tools uninstall --dest "$VENDOR_DEST"
   else

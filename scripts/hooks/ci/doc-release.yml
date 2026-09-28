@@ -105,4 +105,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BASE: ${{ github.ref_name }}
           BRANCH: doc-superpowers/release-notes-${{ github.run_id }}
-        run: .github/scripts/doc-superpowers-steps/commit-changes.sh --allow RELEASE-NOTES.md --allow RELEASE-NOTES.next/ --allow CLAUDE.md --allow README.md --allow package.json --allow claude-code.json --allow .claude-plugin/plugin.json --allow .claude-plugin/marketplace.json --allow .cursor-plugin/plugin.json --allow gemini-extension.json --message "[doc-superpowers] draft release notes" --push-to "$BRANCH" --open-pr "$BASE"
+        # The checker as it was before the agent ran (prepare-agent.sh's snapshot).
+        run: '"$RUNNER_TEMP"/doc-superpowers-steps/commit-changes.sh --allow RELEASE-NOTES.md --allow RELEASE-NOTES.next/ --allow CLAUDE.md --allow README.md --allow package.json --allow claude-code.json --allow .claude-plugin/plugin.json --allow .claude-plugin/marketplace.json --allow .cursor-plugin/plugin.json --allow gemini-extension.json --message "[doc-superpowers] draft release notes" --push-to "$BRANCH" --open-pr "$BASE"'
