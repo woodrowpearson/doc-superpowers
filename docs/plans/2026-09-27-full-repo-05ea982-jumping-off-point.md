@@ -13,16 +13,74 @@ related-files:
 # doc-superpowers sweep `05ea982` — Jumping-off point
 
 > The resume sheet for the session that **executes** the sweep's fix plan. The audit itself is done.
-> Nothing below has been implemented yet.
+> **Execution is in progress. T1–T7 are done.** See [Execution status](#execution-status-paused-2026-09-27) below.
+
+## Execution status (paused 2026-09-27)
+
+Branch: `claude/resume-plan-execution-03646c` (pushed). It was branched from
+`claude/affectionate-turing-tu1o9x` @ `b59375f`. Every Task went through
+`superpowers:subagent-driven-development`: one implementer, then a spec + quality review, then
+fix rounds until the re-review was clean. Each Task's step 1 was a failing test (TDD).
+
+| Task | Cluster | Commits | Review |
+|---|---|---|---|
+| T1 harness | I-13 | `8630c5b`..`184daa7` | clean after 2 fix rounds |
+| T2 persistence | I-2 | `c74f578`..`1d295c6` | clean after 1 |
+| T3 CLI/input | I-4 | `37be531`..`15b3109` | clean after 1 |
+| T4 content identity | I-1 | `c3cf36c`..`eb7a3ce` | clean after 2 |
+| T5 honest state (closes #18) | I-3 | `f770ade`..`16050ba` | clean after 3 |
+| T6 three-way merge driver (P0) | I-5 | `63fd1c5`..`e0a6526` | clean after 1 |
+| T7 hook tier | I-6 | `f68c978`..`0c31a8e` | clean after 1 |
+
+**Tests:** 2052 assertions per interpreter, 0 fail, 2 known XFAILs owned by T10. Verified locally
+under bash 5.3 and `/bin/bash` 3.2.57, and under a BSD-only PATH. CI is still down because of the
+GitHub account billing lock (Gotcha 1).
+
+**Next:** T11 → T8 → T9 → T10 → T12 → T13 → T14, strictly in that order. There are no parallel
+worktrees: T10 and T11 share doc-tools.sh, and T6 and T8 share install.sh. T11 runs before T8 so
+that T8 can delegate vendoring to the fixed `tools` verbs. After T14 come, in order:
+1. the final whole-branch review, with one fix wave;
+2. `/doc-superpowers audit`, then `update`, then `diagram` (the owner's directive);
+3. the release flow: draft notes, `bump-version 3.0.0`, `check-version`.
+
+**Ledger:** [`2026-09-27-full-repo-05ea982-execution-ledger.md`](2026-09-27-full-repo-05ea982-execution-ledger.md)
+is a committed copy of the controller ledger. It holds:
+- every ruling, with its cost if wrong;
+- every deferred minor, most of them routed to a later Task;
+- items carried into later Tasks' dispatches.
+Read it before dispatching T11.
+
+**Carry-forwards the next session must not drop:**
+- **Deferred-important for the final wave:** readers can still show a masked `commits_behind: 0`
+  after `update-index` captured uncommitted content. The suggested fix is `stale && count==0 → null`.
+- **T8:**
+  - the integration block drops `"$@"`, stdin, stderr and the exit code;
+  - `$CLAUDE_PROJECT_DIR` command strings;
+  - the `--helpers=false` refusal is not state-aware;
+  - hooks installed into a quoted path break via `sed`;
+  - re-register the merge driver for existing installs.
+- **T10:** the 7 V-FU1 fragment mutants from I-13; the 2 XFAILs (extract-context base-commit leak;
+  commit-and-push sweeping pre-staged files); porcelain `git log` in `fragments merge`.
+- **T14:**
+  - retype the 6 design specs typed `spec` as `design-spec`;
+  - three legacy non-ancestor `code_commit`s (`abb3e64`, `c2496da`, `f063b04`);
+  - this repo's own `.git/hooks` and `.claude/hooks` are still the old copies. The old
+    prepare-commit-msg injects `# stale:` lines into `-m` messages, so commit with
+    `git commit --cleanup=strip` until T14 re-installs;
+  - the stale suite counts in docs.
+- **Commit messages:** T1's three commits carry injected `# stale:` body lines. They were
+  deliberately not rewritten, because rewriting would orphan the `code_commit`s recorded in the
+  index.
 
 ## Resume prompt (paste into a fresh session)
 
 ```text
 Execute the doc-superpowers sweep fix plan, run-id 05ea982.
 
-The sweep artifacts were committed on branch `claude/affectionate-turing-tu1o9x`. Start from that
-branch, or from `main` once that branch has been merged. If `docs/plans/2026-09-27-full-repo-05ea982-*`
-is missing, you are on the wrong base.
+Execution is IN PROGRESS on branch `claude/resume-plan-execution-03646c` (T1–T7 done). Continue
+on that branch. Read the "Execution status" section of the jumping-off point and the execution ledger
+(docs/plans/2026-09-27-full-repo-05ea982-execution-ledger.md) first, and resume at T11.
+Do not re-run completed Tasks.
 
 Read first, in order:
   1. docs/plans/2026-09-27-full-repo-05ea982-jumping-off-point.md   (this file: priorities + gotchas)
