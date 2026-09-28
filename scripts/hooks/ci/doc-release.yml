@@ -7,6 +7,13 @@
 # branch and opens a PR against the release branch. (Opening it needs the
 # repository setting "Allow GitHub Actions to create and approve pull
 # requests"; the step says so when it is off.)
+#
+# That PR's commit is the release commit: it adds the RELEASE-NOTES.md entry
+# and deletes the fragments it consumed. After merging it, tag the release
+# on it (or a later commit of the release branch) and bring it to main —
+# merge the release branch into main, or cherry-pick the release commit.
+# Until it reaches main, main still holds those fragments, and the next
+# release's precheck fails rather than release them a second time.
 
 name: Doc Release Notes (AI)
 
@@ -37,8 +44,12 @@ env:
 
 jobs:
   release-notes:
+    # Not on the bot's own release-notes commit (its exact subject; a
+    # squash or merge commit of that PR is caught by the precheck). A
+    # substring match also skipped a release branch cut at a squash commit
+    # that merely listed the bot's "[doc-superpowers] sync …" commits.
     if: >-
-      !contains(github.event.head_commit.message, '[doc-superpowers]')
+      !startsWith(github.event.head_commit.message, '[doc-superpowers] draft release notes')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -50,6 +61,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Skips when HEAD is the last release (the nearest v* tag) or the bot's
+      # own release-notes commit; fails when an earlier release's commit has
+      # not reached this branch (its fragments would be released twice).
       - name: Check for unreleased commits
         id: precheck
         run: .github/scripts/doc-superpowers-steps/precheck.sh
@@ -78,7 +92,7 @@ jobs:
           plugins: doc-superpowers@doc-superpowers
           claude_args: |
             --max-turns 50
-            --allowedTools "Skill,Read,Glob,Grep,Edit,Write,Bash(git log:*),Bash(git describe:*),Bash(git tag -l:*),Bash(git show:*),Bash(git diff:*),Bash(git status:*),Bash(git rm:*),Bash(.github/scripts/doc-tools.sh fragments:*),Bash(.github/scripts/doc-tools.sh bump-version:*),Bash(.github/scripts/doc-tools.sh check-version:*)"
+            --allowedTools "Skill,Read,Glob,Grep,Edit,Write,Bash(git log:*),Bash(git describe:*),Bash(git tag -l:*),Bash(git show:*),Bash(git diff:*),Bash(git status:*),Bash(.github/scripts/doc-tools.sh fragments:*),Bash(.github/scripts/doc-tools.sh bump-version:*),Bash(.github/scripts/doc-tools.sh check-version:*)"
           prompt: |
             This is an unattended GitHub Actions run of the doc-superpowers plugin.
             - Use `.github/scripts/doc-tools.sh` as `$DOC_TOOLS` (this plugin

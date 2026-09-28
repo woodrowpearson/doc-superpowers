@@ -142,7 +142,7 @@ Maps your changed files to affected documentation and reports what needs updatin
 /doc-superpowers release --from=v2.2.0
 ```
 
-Scans git history (from the last release tag or a specified `--from` ref) and drafts a semantic-versioned entry for `RELEASE-NOTES.md`. If `RELEASE-NOTES.next/PR-*.md` fragments are present (produced by the `doc-pr-release.yml` CI workflow on each open PR), the action validates their SHA-256 hashes, merges sections in Keep-a-Changelog canonical order into the new entry, and `git rm`s only the fragments whose commits fall inside the release range — fragments for still-open PRs are left untouched. Human-edited (drifted) fragments are merged with a warning rather than silently overwritten.
+Scans git history (from the last release tag or a specified `--from` ref) and drafts a semantic-versioned entry for `RELEASE-NOTES.md`. If `RELEASE-NOTES.next/PR-*.md` fragments are present (produced by the `doc-pr-release.yml` CI workflow on each open PR), the action merges every one still present into the new entry — losslessly, or it skips the fragment with a warning and keeps it for the next release — and deletes exactly the ones it consumed in the release commit. Human-edited (drifted) fragments are merged as written, with a warning. The release commit must then reach `main` (merge the release branch, or cherry-pick it): until it does, the next release refuses rather than release the same fragments twice. The fragment format, including how to re-seal a hand edit and the explicit no-notes state, is `RELEASE-NOTES.next/README.md`.
 
 ### Spec lifecycle commands
 

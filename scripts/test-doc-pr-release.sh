@@ -35,6 +35,7 @@ WRITE_CONTEXT_SCRIPT="$(bash_bin_shim "$STEPS_DIR/write-context.sh")"
 AUTH_SCRIPT="$(bash_bin_shim "$STEPS_DIR/resolve-auth.sh")"
 VERIFY_SCRIPT="$(bash_bin_shim "$STEPS_DIR/verify-fragment.sh")"
 PRECHECK_SCRIPT="$(bash_bin_shim "$STEPS_DIR/precheck.sh")"
+DOC_TOOLS_SCRIPT="$(bash_bin_shim "$REPO_ROOT/scripts/doc-tools.sh")"
 
 SENTINEL_SUBJECT_RE='^\[doc-superpowers\] sync PR-[0-9]+ release notes'
 
@@ -92,6 +93,28 @@ run_extract() {
   local rc=0
   ( cd "$1" && PATH="$2:$PATH" PR_NUMBER="$3" BASE_REF=main "$EXTRACT_SCRIPT" > "$4" 2>"$4.err" ) || rc=$?
   return "$rc"
+}
+
+# _payload_sha <file>: sha256 of the file's bytes from line 3 on (the line-2 hash).
+_payload_sha() {
+  tail -n +3 "$1" | { command -v sha256sum >/dev/null 2>&1 && sha256sum || shasum -a 256; } | awk '{print $1}'
+}
+
+# sealed_fragment <file> <pr> <payload>: a fragment whose hash matches.
+sealed_fragment() {
+  local hash
+  mkdir -p "$(dirname "$1")"
+  hash=$(printf '%s' "$3" | { command -v sha256sum >/dev/null 2>&1 && sha256sum || shasum -a 256; } | awk '{print $1}')
+  printf '<!-- doc-superpowers:fragment PR-%s -->\n<!-- doc-superpowers:hash %s -->\n%s' "$2" "$hash" "$3" > "$1"
+}
+
+# gh_shim_file <json-file>: a `gh pr view` shim answering with the file.
+gh_shim_file() {
+  local dir
+  dir=$(harness_mktemp_d gh-file)
+  printf '#!/bin/sh\n[ "$1" = pr ] && [ "$2" = view ] && exec cat "%s"\necho "mock gh: $*" >&2\nexit 1\n' "$1" > "$dir/gh"
+  chmod +x "$dir/gh"
+  printf '%s' "$dir"
 }
 
 # The subjects of a commits array, '|'-joined, from a context JSON file.
@@ -359,9 +382,9 @@ test_extract_context_update_branch() {
     "new_commits = PR work only before any fragment exists"
 
   # Fragment synced, then the base moves and is merged in again, then more PR
-  # work. The watermark is the last commit touching the fragment, so a base
-  # commit merged in after it leaks into new_commits — the known I-9 base-range
-  # defect (T10: "extract-context excludes base-branch commits").
+  # work. A base commit merged in after the sync is not this PR's work: it
+  # stays out of new_commits (I-9: extract-context excludes base-branch
+  # commits).
   (
     cd "$work"
     mkdir -p RELEASE-NOTES.next
@@ -382,7 +405,7 @@ test_extract_context_update_branch() {
   assert_eq "0" "$rc" "extract-context exits 0 after a second Update-branch merge"
   assert_not_contains "$(subjects "$out" new_commits)" "Merge branch" \
     "new_commits never carries the Update-branch merge commit"
-  assert_eq_known_bug "T10/I-9" "fix: add b" "chore: main-only 2|fix: add b" "$(subjects "$out" new_commits)" \
+  assert_eq "fix: add b" "$(subjects "$out" new_commits)" \
     "new_commits after a fragment sync = PR work only (base commit merged in later excluded)"
 }
 
@@ -592,11 +615,15 @@ write_fragment_file() {
     "$2" "$3" > "$1/RELEASE-NOTES.next/PR-$2.md"
 }
 
-test_commit_push_rebase_on_nonff() {
-  echo "Test: non-fast-forward push triggers fetch+rebase, succeeds on retry"
-  local dir rc=0
+test_commit_superseded_by_a_human_push() {
+  # A push to the branch during the run starts a newer run of this workflow
+  # (the write group queues it); this run's fragment is stale. I-9: no rebase
+  # — nothing is committed or pushed, and the step exits 0 (superseded), like
+  # commit-changes.sh.
+  echo "Test: someone pushed during the run → superseded: exit 0, nothing pushed (no rebase)"
+  local dir rc=0 out tip
   dir=$(origin_and_clone)
-  # Meanwhile a human pushes another commit to feature from the seed clone.
+  out="$dir/gh-output"
   (
     cd "$dir/seed"
     echo human > human.txt
@@ -604,13 +631,13 @@ test_commit_push_rebase_on_nonff() {
     git -c commit.gpgsign=false commit -q -m "human push"
     git push -q origin feature
   )
+  tip=$(git -C "$dir/origin.git" rev-parse feature)
   write_fragment_file "$dir/clone" 3 thing
-  ( cd "$dir/clone" && GITHUB_HEAD_REF=feature "$COMMIT_SCRIPT" 3 >/dev/null 2>&1 ) || rc=$?
-  assert_eq "0" "$rc" "push_rebase_on_nonff exits 0"
-  local logged
-  logged=$(git -C "$dir/origin.git" log feature --format=%s)
-  assert_true "origin has the fragment sync commit" grep -qE "$SENTINEL_SUBJECT_RE" <<<"$logged"
-  assert_true "origin keeps the human's concurrent commit" grep -qx 'human push' <<<"$logged"
+  ( cd "$dir/clone" && GITHUB_OUTPUT="$out" GITHUB_HEAD_REF=feature "$COMMIT_SCRIPT" 3 > "$out.log" 2>&1 ) || rc=$?
+  assert_eq "0" "$rc" "exits 0"
+  assert_eq "$tip" "$(git -C "$dir/origin.git" rev-parse feature)" "origin keeps the human's tip; no sync commit pushed"
+  assert_contains "$(cat "$out")" "superseded=true" "superseded=true in GITHUB_OUTPUT"
+  assert_contains "$(cat "$out.log")" "superseded" "…and a notice says so"
 }
 
 test_commit_stages_only_fragment() {
@@ -640,9 +667,8 @@ test_commit_stages_only_fragment() {
 }
 
 test_commit_prestaged_file_excluded() {
-  # A file already in the index when the helper runs is swept into the bot's
-  # commit: `git commit` without a pathspec commits the whole index. T10
-  # (I-9) owns "commits only the fragment path".
+  # A file already in the index when the helper runs stays out of the bot's
+  # commit (I-9: commit-and-push commits only the fragment path).
   echo "Test: a pre-staged unrelated file is not swept into the sync commit"
   local dir rc=0
   dir=$(origin_and_clone)
@@ -650,9 +676,10 @@ test_commit_prestaged_file_excluded() {
   write_fragment_file "$dir/clone" 6 thing
   ( cd "$dir/clone" && GITHUB_HEAD_REF=feature "$COMMIT_SCRIPT" 6 >/dev/null 2>&1 ) || rc=$?
   assert_eq "0" "$rc" "commit-and-push exits 0 with a pre-staged file"
-  assert_eq_known_bug "T10/I-9" "RELEASE-NOTES.next/PR-6.md" "RELEASE-NOTES.next/PR-6.md staged.txt" \
+  assert_eq "RELEASE-NOTES.next/PR-6.md" \
     "$(git -C "$dir/clone" show --name-only --format= HEAD | tr '\n' ' ' | sed 's/ $//')" \
     "the sync commit contains only the fragment even when the index holds other changes"
+  assert_eq "A  staged.txt" "$(git -C "$dir/clone" status --porcelain -- staged.txt)" "…and the other file stays staged"
 }
 
 test_commit_noop_unchanged_fragment() {
@@ -678,7 +705,7 @@ test_commit_nonnumeric
 test_commit_zero_rejected
 test_commit_no_fragment_rc0
 test_commit_unset_head_ref_rc1
-test_commit_push_rebase_on_nonff
+test_commit_superseded_by_a_human_push
 test_commit_stages_only_fragment
 test_commit_prestaged_file_excluded
 test_commit_noop_unchanged_fragment
@@ -737,14 +764,38 @@ test_write_context() {
   out="$work/gh-output"
   ( cd "$work" && PATH="$shim:$PATH" PR_NUMBER=21 BASE_REF=main run_step "$out" "$WRITE_CONTEXT_SCRIPT" ) || rc=$?
   assert_eq "0" "$rc" "exits 0"
-  assert_eq "new_commits_len=2" "$(cat "$out")" "new_commits_len (2 since the fragment sync, of 4) written to GITHUB_OUTPUT"
+  assert_eq $'new_commits_len=2\nrun=true' "$(cat "$out")" "new_commits_len (2 since the fragment sync, of 4) and run=true written to GITHUB_OUTPUT"
   assert_json_field "$(cat "$work/.doc-pr-release/context.json" 2>/dev/null)" '.pr_number' "21" \
     "context.json written under .doc-pr-release/"
 
   rc=0
   ( cd "$work" && PATH="$shim:$PATH" PR_NUMBER=0 BASE_REF=main run_step "$out" "$WRITE_CONTEXT_SCRIPT" ) || rc=$?
   assert_true "extract-context failure fails the step (rc=$rc)" test "$rc" -ne 0
-  assert_eq "" "$(cat "$out")" "no new_commits_len written when extraction fails"
+  assert_eq "" "$(cat "$out")" "no output written when extraction fails (so no later step runs)"
+
+  # Nothing new since the last sync: run=false.
+  commit_file "$work" RELEASE-NOTES.next/PR-21.md "$(printf '%s\n' '<!-- doc-superpowers:fragment PR-21 -->' \
+    '<!-- doc-superpowers:hash deadbeef -->' '### Added' '- a, b, c')" "[doc-superpowers] sync PR-21 release notes"
+  rc=0
+  ( cd "$work" && PATH="$shim:$PATH" PR_NUMBER=21 BASE_REF=main run_step "$out" "$WRITE_CONTEXT_SCRIPT" ) || rc=$?
+  assert_eq $'0|new_commits_len=0\nrun=false' "$rc|$(cat "$out")" "no new commits: run=false"
+
+  # I-9: a no-notes fragment a human wrote (not sealed) opts the PR out.
+  commit_file "$work" d.txt d "feat: d"
+  commit_file "$work" RELEASE-NOTES.next/PR-21.md "$(printf '%s\n' '<!-- doc-superpowers:fragment PR-21 -->' \
+    '<!-- doc-superpowers:no-notes -->')" "docs: no release notes for this PR"
+  commit_file "$work" e.txt e "feat: e"
+  rc=0
+  ( cd "$work" && PATH="$shim:$PATH" PR_NUMBER=21 BASE_REF=main run_step "$out" "$WRITE_CONTEXT_SCRIPT" ) || rc=$?
+  assert_eq "0|run=false" "$rc|$(sed -n 's/^\(run=.*\)/\1/p' "$out")" "a hand-written no-notes fragment: run=false (opted out)"
+  assert_contains "$(cat "$out.log")" "no-notes" "…and the log says why"
+  # The bot's own (sealed) no-notes fragment does not opt out: new work may need notes.
+  sealed_fragment "$work/RELEASE-NOTES.next/PR-21.md" 21 $'<!-- doc-superpowers:no-notes -->\n'
+  git -C "$work" add RELEASE-NOTES.next && git -C "$work" commit -q -m "[doc-superpowers] sync PR-21 release notes"
+  commit_file "$work" f.txt f "feat: f"
+  rc=0
+  ( cd "$work" && PATH="$shim:$PATH" PR_NUMBER=21 BASE_REF=main run_step "$out" "$WRITE_CONTEXT_SCRIPT" ) || rc=$?
+  assert_eq "0|run=true" "$rc|$(sed -n 's/^\(run=.*\)/\1/p' "$out")" "a sealed no-notes fragment + new work: run=true"
 }
 
 test_resolve_auth() {
@@ -789,7 +840,11 @@ test_verify_fragment() {
   assert_eq "1" "$rc" "no sync commit and no fragment → exits 1"
   assert_contains "$(cat "$out.log")" "silently skipped" "no-fragment case explains itself"
 
-  write_fragment_file "$work" 31 thing
+  rc=0
+  ( cd "$work" && PR_NUMBER=31 SUPERSEDED=true run_step "$out" "$VERIFY_SCRIPT" ) || rc=$?
+  assert_eq "0" "$rc" "superseded (someone pushed during the run; nothing committed) → exits 0"
+
+  sealed_fragment "$work/RELEASE-NOTES.next/PR-31.md" 31 $'### Added\n- thing\n'
   rc=0
   ( cd "$work" && PR_NUMBER=31 run_step "$out" "$VERIFY_SCRIPT" ) || rc=$?
   assert_eq "0" "$rc" "existing fragment, no sync commit (agent no-op / human edit) → exits 0"
@@ -797,7 +852,14 @@ test_verify_fragment() {
   ( cd "$work" && git add RELEASE-NOTES.next && git commit -q -m "[doc-superpowers] sync PR-31 release notes (abc1234)" )
   rc=0
   ( cd "$work" && PR_NUMBER=31 run_step "$out" "$VERIFY_SCRIPT" ) || rc=$?
-  assert_eq "0" "$rc" "sync commit with its fragment → exits 0"
+  assert_eq "0" "$rc" "sync commit with its sealed fragment → exits 0"
+
+  # I-9: the sync commit's fragment must carry a matching hash.
+  write_fragment_file "$work" 31 "wrong hash"
+  ( cd "$work" && git add RELEASE-NOTES.next && git commit -q -m "[doc-superpowers] sync PR-31 release notes (bad0000)" )
+  rc=0
+  ( cd "$work" && PR_NUMBER=31 run_step "$out" "$VERIFY_SCRIPT" ) || rc=$?
+  assert_eq "1" "$rc" "sync commit whose fragment hash does not match → exits 1"
 
   ( cd "$work" && git rm -q RELEASE-NOTES.next/PR-31.md && git commit -q -m "[doc-superpowers] sync PR-31 release notes (def5678)" )
   rc=0
@@ -808,6 +870,8 @@ test_verify_fragment() {
 test_release_precheck() {
   echo "Test: precheck.sh (doc-release) — skip only when nothing is unreleased"
   local work out rc
+  local DOC_TOOLS="$DOC_TOOLS_SCRIPT"
+  export DOC_TOOLS
   work=$(new_repo)
   out="$work/gh-output"
 
@@ -827,6 +891,56 @@ test_release_precheck() {
   ( cd "$work" && run_step "$out" "$PRECHECK_SCRIPT" ) || rc=$?
   assert_eq "skip=false" "$(cat "$out")" "commits after the tag → skip=false"
   assert_contains "$(cat "$out.log")" "2 commits since v1.0.0" "reports the unreleased count"
+
+  # I-9: only a release tag (v[0-9]*) is the last release, not any tag.
+  git -C "$work" tag deploy-marker
+  rc=0
+  ( cd "$work" && run_step "$out" "$PRECHECK_SCRIPT" ) || rc=$?
+  assert_eq "0|skip=false" "$rc|$(cat "$out")" "a non-release tag at HEAD does not skip"
+  assert_contains "$(cat "$out.log")" "2 commits since v1.0.0" "…the last release is still v1.0.0"
+
+  # I-9: skip on the exact subject of the bot's own release-notes commit
+  # (rebase-, squash- or merge-merged), and only on it.
+  local subj
+  for subj in "[doc-superpowers] draft release notes" "[doc-superpowers] draft release notes (#12)" \
+      "Merge pull request #12 from octo/doc-superpowers/release-notes-9876"; do
+    git -C "$work" commit -q --allow-empty -m "$subj"
+    rc=0
+    ( cd "$work" && run_step "$out" "$PRECHECK_SCRIPT" ) || rc=$?
+    assert_eq "0|skip=true" "$rc|$(cat "$out")" "HEAD '$subj' → skip=true"
+  done
+  git -C "$work" commit -q --allow-empty -m "feat: squash of PR 5 (#5)" -m $'* feat: x\n* [doc-superpowers] sync PR-5 release notes (abc1234)'
+  rc=0
+  ( cd "$work" && run_step "$out" "$PRECHECK_SCRIPT" ) || rc=$?
+  assert_eq "0|skip=false" "$rc|$(cat "$out")" "a squash commit whose body lists the bot's sync commits → skip=false"
+}
+
+test_release_precheck_needs_the_last_release_merged() {
+  # I-9: consumption is recorded by deleting fragments in the release commit;
+  # a release whose commit never reached this branch would be re-consumed.
+  echo "Test: precheck.sh (doc-release) — refuses while an earlier release's commit has not reached the branch"
+  local work out rc
+  work=$(new_repo)
+  out="$work/gh-output"
+  git -C "$work" tag v0.9.0
+  sealed_fragment "$work/RELEASE-NOTES.next/PR-1.md" 1 $'### Added\n- one\n'
+  git -C "$work" add -A && git -C "$work" commit -q -m "PR-1"
+  git -C "$work" checkout -q -b release/1.0
+  git -C "$work" rm -q RELEASE-NOTES.next/PR-1.md
+  git -C "$work" commit -q -m "release: v1.0.0"
+  git -C "$work" tag v1.0.0
+  git -C "$work" checkout -q main
+  commit_file "$work" a.txt a "feat: a"
+  rc=0
+  ( cd "$work" && DOC_TOOLS="$DOC_TOOLS_SCRIPT" run_step "$out" "$PRECHECK_SCRIPT" ) || rc=$?
+  assert_eq "1" "$rc" "the v1.0.0 release commit is not on this branch: exits 1"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error::"
+  assert_contains "$(cat "$out.log")" "v1.0.0" "…naming the release"
+  git -C "$work" merge -q --no-ff --no-edit -m "Merge release/1.0" release/1.0
+  commit_file "$work" b.txt b "feat: b"
+  rc=0
+  ( cd "$work" && DOC_TOOLS="$DOC_TOOLS_SCRIPT" run_step "$out" "$PRECHECK_SCRIPT" ) || rc=$?
+  assert_eq "0|skip=false" "$rc|$(cat "$out")" "once the release branch is merged: exits 0"
 }
 
 test_sentinel_check
@@ -834,6 +948,7 @@ test_write_context
 test_resolve_auth
 test_verify_fragment
 test_release_precheck
+test_release_precheck_needs_the_last_release_merged
 
 # ============================================================================
 # Workflow templates: YAML validity, structure, and wiring
@@ -949,11 +1064,15 @@ test_workflow_structure_guards() {
   # orphan local commit (see the template comment); must stay false.
   assert_eq "false" "$(_yaml_get "$TEMPLATE_DIR/doc-pr-release.yml" concurrency.cancel-in-progress)" \
     "doc-pr-release.yml: concurrency.cancel-in-progress is false"
-  # The job-level guard is what stops the bot's own release-notes commit from
-  # re-running the release job.
-  assert_contains "$(_yaml_get "$TEMPLATE_DIR/doc-release.yml" jobs.release-notes.if)" \
-    "!contains(github.event.head_commit.message, '[doc-superpowers]')" \
-    "doc-release.yml: release-notes job skips the bot's own commits"
+  # The job-level guard stops the bot's own release-notes commit from
+  # re-running the release job — by its exact subject: a `contains` over the
+  # whole message also skipped a release branch cut at a squash commit that
+  # merely lists the bot's sync commits (I-9).
+  local rif
+  rif=$(_yaml_get "$TEMPLATE_DIR/doc-release.yml" jobs.release-notes.if)
+  assert_contains "$rif" "!startsWith(github.event.head_commit.message, '[doc-superpowers] draft release notes')" \
+    "doc-release.yml: release-notes job skips the bot's own release-notes commit"
+  assert_not_contains "$rif" "contains(" "doc-release.yml: …and only that commit (no substring match)"
 }
 
 test_workflow_helper_wiring() {
@@ -980,10 +1099,10 @@ test_workflow_helper_wiring() {
           esac
           ;;
         *)
-          # Two sanctioned inline steps: the pre-checkout resolver (tested
-          # below straight from the template) and a one-line echo.
+          # One sanctioned inline step: the pre-checkout resolver (tested
+          # below straight from the template).
           case "$name / $step" in
-            "doc-pr-release.yml / Resolve PR number and head ref" | "doc-pr-release.yml / Skip if no new commits since last fragment update") ;;
+            "doc-pr-release.yml / Resolve PR number and head ref") ;;
             *) bad="${bad}    $name / $step: inline run: body (extract it into a tested helper)"$'\n' ;;
           esac
           ;;
@@ -1920,5 +2039,339 @@ test_i8_freshness_scope
 test_i8_prepare_agent
 test_i8_commit_changes
 test_i8_pr_guard
+
+# ============================================================================
+# I-9: the fragment producer (extract-context, commit-and-push, update-pr-body)
+# ============================================================================
+echo
+echo "=== I-9 fragment producer ==="
+
+test_i9_extract_context_watermark_is_the_recorded_checkout() {
+  # The old rebase-retry left sentinels on top of commits pushed mid-run; the
+  # sentinel records the checkout it was drafted from, and that — not the
+  # last commit touching the fragment — is where "new" starts.
+  echo "Test: I-9 extract-context — new_commits start at the checkout the last sentinel recorded; bot commits are not PR work"
+  local work shim out rc s form
+  for form in trailer subject; do
+    work=$(new_repo)
+    git -C "$work" checkout -q -b feature/x
+    commit_file "$work" a.txt a "feat: a"
+    commit_file "$work" b.txt b "feat: b"
+    s=$(git -C "$work" rev-parse HEAD)
+    commit_file "$work" c.txt c "feat: mid-run push"
+    sealed_fragment "$work/RELEASE-NOTES.next/PR-42.md" 42 $'### Added\n- a, b\n'
+    git -C "$work" add RELEASE-NOTES.next
+    if [ "$form" = trailer ]; then
+      git -C "$work" commit -q -m "[doc-superpowers] sync PR-42 release notes (${s:0:7})" -m "Doc-Superpowers-Drafted-From: $s"
+    else
+      git -C "$work" commit -q -m "[doc-superpowers] sync PR-42 release notes (${s:0:7})"
+    fi
+    commit_file "$work" d.txt d "feat: d"
+    shim=$(gh_shim '{"number": 42, "body": "", "headRefName": "feature/x", "baseRefName": "main"}')
+    out="$work/ctx.json"
+    rc=0
+    run_extract "$work" "$shim" 42 "$out" || rc=$?
+    assert_eq "0" "$rc" "($form) exits 0"
+    assert_eq "feat: mid-run push|feat: d" "$(subjects "$out" new_commits)" \
+      "($form) new_commits = everything after the recorded checkout (the mid-run push included)"
+    assert_eq "feat: a|feat: b|feat: mid-run push|feat: d" "$(subjects "$out" full_commits)" \
+      "($form) full_commits leaves out the bot's sync commit"
+  done
+}
+
+test_i9_extract_context_hash_state() {
+  echo "Test: I-9 extract-context — existing_fragment_hash_valid and existing_fragment_no_notes are computed, not left to the agent"
+  local work
+  work=$(new_repo)
+  git -C "$work" checkout -q -b feat/x
+  sealed_fragment "$work/RELEASE-NOTES.next/PR-9.md" 9 $'### Added\n- nine\n'
+  local shim out rc=0
+  shim=$(gh_shim '{"number": 9, "body": "", "headRefName": "feat/x", "baseRefName": "main"}')
+  out="$work/ctx.json"
+  run_extract "$work" "$shim" 9 "$out" || rc=$?
+  assert_eq "0|true|false|false" \
+    "$rc|$(jq -r '.existing_fragment_hash_valid' "$out" 2>/dev/null)|$(jq -r '.existing_fragment_no_notes' "$out" 2>/dev/null)|$(jq -r '.existing_fragment_corrupt' "$out" 2>/dev/null)" \
+    "a sealed fragment: hash valid, not no-notes, not corrupt"
+  printf '<!-- doc-superpowers:fragment PR-9 -->\n<!-- doc-superpowers:hash deadbeef -->\n### Added\n- nine\n' > "$work/RELEASE-NOTES.next/PR-9.md"
+  rc=0
+  run_extract "$work" "$shim" 9 "$out" || rc=$?
+  assert_eq "0|false" "$rc|$(jq -r '.existing_fragment_hash_valid' "$out" 2>/dev/null)" "a hand-edited fragment: hash not valid"
+  sealed_fragment "$work/RELEASE-NOTES.next/PR-9.md" 9 $'<!-- doc-superpowers:no-notes -->\n'
+  rc=0
+  run_extract "$work" "$shim" 9 "$out" || rc=$?
+  assert_eq "0|true|true" "$rc|$(jq -r '.existing_fragment_no_notes' "$out" 2>/dev/null)|$(jq -r '.existing_fragment_hash_valid' "$out" 2>/dev/null)" \
+    "the no-notes marker: no_notes true"
+  rm -f "$work/RELEASE-NOTES.next/PR-9.md"
+  rc=0
+  run_extract "$work" "$shim" 9 "$out" || rc=$?
+  assert_eq "0|false|false" "$rc|$(jq -r '.existing_fragment_hash_valid' "$out" 2>/dev/null)|$(jq -r '.existing_fragment_no_notes' "$out" 2>/dev/null)" \
+    "no fragment: both false"
+}
+
+test_i9_extract_context_never_reads_a_symlink() {
+  echo "Test: I-9 extract-context — a fragment that is a symbolic link is corrupt and never read"
+  local work shim out rc=0
+  work=$(new_repo)
+  git -C "$work" checkout -q -b feat/x
+  printf 'TOP-SECRET-TOKEN\n' > "$work/secret.txt"
+  mkdir -p "$work/RELEASE-NOTES.next"
+  ln -s ../secret.txt "$work/RELEASE-NOTES.next/PR-5.md"
+  shim=$(gh_shim '{"number": 5, "body": "", "headRefName": "feat/x", "baseRefName": "main"}')
+  out="$work/ctx.json"
+  run_extract "$work" "$shim" 5 "$out" || rc=$?
+  assert_eq "0|true|null" "$rc|$(jq -r '.existing_fragment_corrupt' "$out" 2>/dev/null)|$(jq -r '.existing_fragment' "$out" 2>/dev/null)" \
+    "exits 0; corrupt, not read"
+  assert_not_contains "$(cat "$out")" "TOP-SECRET" "the link target never reaches context.json"
+}
+
+test_i9_extract_context_large_payloads() {
+  # Payloads go to jq through files, never argv: one argument is capped at
+  # 128 KiB on Linux and argv+env at ~1 MiB on macOS.
+  echo "Test: I-9 extract-context — a 1.2 MB PR body and a 600 KB fragment (E2BIG through argv)"
+  local work json shim out rc=0 big
+  work=$(new_repo)
+  git -C "$work" checkout -q -b feat/x
+  commit_file "$work" a.txt a "feat: a"
+  json=$(harness_mktemp big-pr)
+  big=$(harness_mktemp big-body)
+  head -c 1200000 /dev/zero | tr '\0' 'x' > "$big"
+  jq -n --rawfile b "$big" '{number: 7, body: $b, headRefName: "feat/x", baseRefName: "main"}' > "$json"
+  sealed_fragment "$work/RELEASE-NOTES.next/PR-7.md" 7 "$(printf '### Added\n'; head -c 600000 /dev/zero | tr '\0' 'y'; printf '\n')"
+  shim=$(gh_shim_file "$json")
+  out="$work/ctx.json"
+  run_extract "$work" "$shim" 7 "$out" || rc=$?
+  assert_eq "0" "$rc" "exits 0 (stderr: $(head -c 200 "$out.err" 2>/dev/null))"
+  assert_eq "1200000|false|true" \
+    "$(jq -r '.pr_body | length' "$out" 2>/dev/null)|$(jq -r '.existing_fragment_corrupt' "$out" 2>/dev/null)|$(jq -r '.existing_fragment_hash_valid' "$out" 2>/dev/null)" \
+    "the whole body and the fragment reach context.json"
+}
+
+# cp_run <clone> <out> <pr> [VAR=value…]: commit-and-push.sh as the step runs it.
+cp_run() {
+  local clone="$1" out="$2" pr="$3" rc=0
+  shift 3
+  : > "$out"
+  ( cd "$clone" && env GITHUB_OUTPUT="$out" GITHUB_HEAD_REF=feature "$@" "$COMMIT_SCRIPT" "$pr" ) > "$out.log" 2>&1 || rc=$?
+  return "$rc"
+}
+
+test_i9_commit_never_restores_a_force_push() {
+  # The P1: a human force-pushes away a commit (here one that leaked a
+  # secret) while the run drafts. The old fast-forward push and its rebase
+  # retry both put it back.
+  echo "Test: I-9 commit-and-push — a force-push during the run is never undone"
+  local dir out rc tip
+  dir=$(origin_and_clone)
+  out="$dir/gh-output"
+  ( cd "$dir/seed" && echo leak > secret.txt && git add secret.txt && git -c commit.gpgsign=false commit -q -m "oops: secret" && git push -q origin feature )
+  git -C "$dir/clone" pull -q origin feature
+  # Removed: the branch is reset behind the checkout.
+  git -C "$dir/origin.git" update-ref refs/heads/feature "$(git -C "$dir/clone" rev-parse HEAD~1)"
+  tip=$(git -C "$dir/origin.git" rev-parse feature)
+  write_fragment_file "$dir/clone" 11 thing
+  rc=0
+  cp_run "$dir/clone" "$out" 11 || rc=$?
+  assert_eq "1" "$rc" "the branch was reset behind the checkout: exits 1 (a visible refusal)"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error::"
+  assert_eq "$tip" "$(git -C "$dir/origin.git" rev-parse feature)" "…and the removed commit is not pushed back"
+  # Rewritten: the secret commit replaced by an amended one.
+  (
+    cd "$dir/seed" && git fetch -q origin && git reset -q --hard origin/feature
+    echo fixed > fixed.txt && git add fixed.txt && git -c commit.gpgsign=false commit -q -m "fix: without the secret"
+    git push -q origin HEAD:feature
+  )
+  tip=$(git -C "$dir/origin.git" rev-parse feature)
+  rc=0
+  cp_run "$dir/clone" "$out" 11 || rc=$?
+  assert_eq "0" "$rc" "the branch was rewritten with new work: superseded, exits 0"
+  assert_contains "$(cat "$out")" "superseded=true" "…superseded=true"
+  assert_eq "$tip" "$(git -C "$dir/origin.git" rev-parse feature)" "…and nothing is pushed on top of it"
+  assert_true "…the secret never returns to the branch" test -z "$(git -C "$dir/origin.git" log --format=%s feature | grep -x 'oops: secret' || true)"
+}
+
+test_i9_commit_moved_only_by_the_bot() {
+  echo "Test: I-9 commit-and-push — the branch moved only by [doc-superpowers] commits: exit 1 (commit-changes.sh's rule)"
+  local dir out rc=0
+  dir=$(origin_and_clone)
+  out="$dir/gh-output"
+  ( cd "$dir/seed" && echo x > x.txt && git add x.txt && git -c commit.gpgsign=false commit -q -m "[doc-superpowers] update stale docs" && git push -q origin feature )
+  write_fragment_file "$dir/clone" 12 thing
+  cp_run "$dir/clone" "$out" 12 || rc=$?
+  assert_eq "1|" "$rc|$(sed -n 's/^superseded=//p' "$out")" "exits 1, not superseded"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error::"
+}
+
+test_i9_commit_seals_the_fragment() {
+  echo "Test: I-9 commit-and-push — writes the line-2 hash itself and records the checkout in the sentinel"
+  local dir out rc=0 head f
+  dir=$(origin_and_clone)
+  out="$dir/gh-output"
+  head=$(git -C "$dir/clone" rev-parse HEAD)
+  f="$dir/clone/RELEASE-NOTES.next/PR-13.md"
+  mkdir -p "$(dirname "$f")"
+  printf '<!-- doc-superpowers:fragment PR-13 -->\n<!-- doc-superpowers:hash -->\n### Added\n- thirteen\n' > "$f"
+  cp_run "$dir/clone" "$out" 13 || rc=$?
+  assert_eq "0" "$rc" "exits 0 (log: $(head -c 300 "$out.log"))"
+  git -C "$dir/origin.git" show feature:RELEASE-NOTES.next/PR-13.md > "$dir/pushed.md" 2>/dev/null || true
+  assert_eq "<!-- doc-superpowers:hash $(_payload_sha "$dir/pushed.md") -->" "$(sed -n 2p "$dir/pushed.md")" \
+    "the pushed fragment's line 2 is the hash of lines 3+"
+  assert_eq $'<!-- doc-superpowers:fragment PR-13 -->\n### Added\n- thirteen' "$(sed 2d "$dir/pushed.md")" "…and the rest is as written"
+  assert_true "the sync subject is the sentinel form" grep -qE "$SENTINEL_SUBJECT_RE" <<<"$(git -C "$dir/origin.git" log -1 --format=%s feature)"
+  assert_contains "$(git -C "$dir/origin.git" log -1 --format=%B feature)" "Doc-Superpowers-Drafted-From: $head" \
+    "…and records the checkout it was drafted from"
+  assert_contains "$(cat "$out")" "committed=true" "committed=true in GITHUB_OUTPUT"
+  # Line 2 left out altogether: inserted.
+  printf '<!-- doc-superpowers:fragment PR-13 -->\n### Added\n- thirteen, reworded\n' > "$f"
+  rc=0
+  cp_run "$dir/clone" "$out" 13 || rc=$?
+  git -C "$dir/origin.git" show feature:RELEASE-NOTES.next/PR-13.md > "$dir/pushed.md" 2>/dev/null || true
+  assert_eq "0|<!-- doc-superpowers:hash $(_payload_sha "$dir/pushed.md") -->|- thirteen, reworded" \
+    "$rc|$(sed -n 2p "$dir/pushed.md")|$(sed -n 4p "$dir/pushed.md")" "no hash line written: one is inserted"
+}
+
+test_i9_commit_never_overwrites_a_hand_edit() {
+  echo "Test: I-9 commit-and-push — never overwrites a fragment a human edited (its hash no longer matches)"
+  local dir out rc head before
+  dir=$(origin_and_clone)
+  out="$dir/gh-output"
+  (
+    cd "$dir/clone" || exit 1
+    mkdir -p RELEASE-NOTES.next
+    printf '<!-- doc-superpowers:fragment PR-14 -->\n<!-- doc-superpowers:hash 0000 -->\n### Added\n- worded by a human\n' > RELEASE-NOTES.next/PR-14.md
+    git add RELEASE-NOTES.next && git -c commit.gpgsign=false commit -q -m "docs: my own wording" && git push -q origin feature
+  )
+  head=$(git -C "$dir/clone" rev-parse HEAD)
+  before=$(hash_file "$dir/clone/RELEASE-NOTES.next/PR-14.md")
+  rc=0
+  cp_run "$dir/clone" "$out" 14 || rc=$?
+  assert_eq "0|$before" "$rc|$(hash_file "$dir/clone/RELEASE-NOTES.next/PR-14.md")" \
+    "left alone: exits 0 and the file is not re-sealed"
+  printf '<!-- doc-superpowers:fragment PR-14 -->\n<!-- doc-superpowers:hash -->\n### Added\n- the bot rewrote it\n' > "$dir/clone/RELEASE-NOTES.next/PR-14.md"
+  rc=0
+  cp_run "$dir/clone" "$out" 14 || rc=$?
+  assert_eq "1" "$rc" "rewritten by the agent: refused (exit 1)"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error::"
+  assert_eq "$head|$head" "$(git -C "$dir/clone" rev-parse HEAD)|$(git -C "$dir/origin.git" rev-parse feature)" "…nothing committed or pushed"
+}
+
+test_i9_commit_refuses_a_malformed_fragment() {
+  echo "Test: I-9 commit-and-push — a wrong line-1 marker, an empty body or a symbolic link is refused"
+  local dir out rc head f
+  dir=$(origin_and_clone)
+  out="$dir/gh-output"
+  head=$(git -C "$dir/clone" rev-parse HEAD)
+  f="$dir/clone/RELEASE-NOTES.next/PR-15.md"
+  mkdir -p "$(dirname "$f")"
+  printf '<!-- doc-superpowers:fragment PR-51 -->\n<!-- doc-superpowers:hash -->\n### Added\n- x\n' > "$f"
+  rc=0; cp_run "$dir/clone" "$out" 15 || rc=$?
+  assert_eq "1" "$rc" "line 1 names another PR: exits 1"
+  printf '<!-- doc-superpowers:fragment PR-15 -->\n<!-- doc-superpowers:hash -->\n\n' > "$f"
+  rc=0; cp_run "$dir/clone" "$out" 15 || rc=$?
+  assert_eq "1" "$rc" "no notes under the markers: exits 1"
+  rm -f "$f"
+  ln -s ../seed.txt "$f"
+  rc=0; cp_run "$dir/clone" "$out" 15 || rc=$?
+  assert_eq "1" "$rc" "a symbolic link: exits 1"
+  assert_eq "$head" "$(git -C "$dir/origin.git" rev-parse feature)" "nothing pushed"
+}
+
+test_i9_pr_release_queued_behind_itself() {
+  # T9 hand-off: run(P1) checked out before P2 landed. It used to rebase its
+  # fragment onto P2 and push, so run(P2) found a sentinel at HEAD and skipped
+  # — the fragment never saw P2. Now run(P1) is superseded and run(P2)
+  # drafts from the tip.
+  echo "Test: I-9 two queued pr-release runs — the fragment ends up drafted from the final tip"
+  local dir out rc p2 shim clone2
+  dir=$(origin_and_clone)
+  out="$dir/gh-output"
+  shim=$(gh_shim '{"number": 3, "body": "", "headRefName": "feature", "baseRefName": "main"}')
+  ( cd "$dir/seed" && echo b > b.txt && git add b.txt && git -c commit.gpgsign=false commit -q -m "feat: b (P2)" && git push -q origin feature )
+  p2=$(git -C "$dir/origin.git" rev-parse feature)
+  # run(P1): its checkout predates P2.
+  write_fragment_file "$dir/clone" 3 "a only"
+  rc=0; cp_run "$dir/clone" "$out" 3 || rc=$?
+  assert_eq "0|$p2" "$rc|$(git -C "$dir/origin.git" rev-parse feature)" "run(P1): superseded, pushes nothing"
+  # run(P2): checks out the tip.
+  clone2="$dir/clone2"
+  git clone -q --branch feature "$dir/origin.git" "$clone2"
+  git -C "$clone2" config user.email t@t.com
+  git -C "$clone2" config user.name t
+  rc=0; ( cd "$clone2" && run_step "$out" "$SENTINEL_SCRIPT" ) || rc=$?
+  assert_eq "skip=false" "$(cat "$out")" "run(P2): HEAD is P2, not a sentinel — it drafts"
+  rc=0; run_extract "$clone2" "$shim" 3 "$dir/ctx.json" || rc=$?
+  assert_eq "0|feat: a|feat: b (P2)" "$rc|$(subjects "$dir/ctx.json" new_commits)" "run(P2): new_commits carry P2"
+  write_fragment_file "$clone2" 3 "a and b"
+  rc=0; cp_run "$clone2" "$out" 3 || rc=$?
+  assert_eq "0" "$rc" "run(P2): commits and pushes"
+  assert_contains "$(git -C "$dir/origin.git" log -1 --format=%B feature)" "Doc-Superpowers-Drafted-From: $p2" "the pushed fragment was drafted from P2"
+  assert_eq "$p2" "$(git -C "$dir/origin.git" rev-parse feature~1)" "…and sits directly on P2"
+  # A later push: the watermark is P2, so only the new commit is new.
+  ( cd "$dir/seed" && git fetch -q origin && git reset -q --hard origin/feature && echo c > c.txt && git add c.txt && git -c commit.gpgsign=false commit -q -m "feat: c (P3)" && git push -q origin HEAD:feature )
+  git -C "$clone2" pull -q origin feature
+  rc=0; run_extract "$clone2" "$shim" 3 "$dir/ctx.json" || rc=$?
+  assert_eq "0|feat: c (P3)" "$rc|$(subjects "$dir/ctx.json" new_commits)" "the next run: only P3 is new"
+}
+
+test_i9_update_pr_body_order_and_fences() {
+  echo "Test: I-9 update-pr-body — END before START is refused; markers inside code fences are ignored"
+  local body out rc=0
+  body=$'intro\n<!-- doc-superpowers:end -->\nmiddle\n<!-- doc-superpowers:start -->\noutro'
+  out=$(printf 'x' | DOC_SUPERPOWERS_DRY_RUN=1 DOC_SUPERPOWERS_EXISTING_BODY="$body" "$UPDATE_SCRIPT" 1 2>&1) || rc=$?
+  assert_eq "1" "$rc" "END before START: exits 1"
+  assert_contains "$out" "before" "…saying the markers are out of order"
+  body=$'How to use it:\n```\n<!-- doc-superpowers:start -->\nexample\n<!-- doc-superpowers:end -->\n```\nend of prose'
+  rc=0
+  out=$(printf 'managed' | DOC_SUPERPOWERS_DRY_RUN=1 DOC_SUPERPOWERS_EXISTING_BODY="$body" "$UPDATE_SCRIPT" 1 2>&1) || rc=$?
+  assert_eq "0" "$rc" "only fenced markers: exits 0"
+  assert_eq "$body"$'\n\n<!-- doc-superpowers:start -->\nmanaged\n<!-- doc-superpowers:end -->' "$out" \
+    "…the fenced example is left intact and a new section is appended"
+  body=$'~~~\necho "<!-- doc-superpowers:start -->"\n~~~\n<!-- doc-superpowers:start -->\nold\n<!-- doc-superpowers:end -->'
+  rc=0
+  out=$(printf 'new' | DOC_SUPERPOWERS_DRY_RUN=1 DOC_SUPERPOWERS_EXISTING_BODY="$body" "$UPDATE_SCRIPT" 1 2>&1) || rc=$?
+  assert_eq "0" "$rc" "a fenced mid-line marker is not an error"
+  assert_eq $'~~~\necho "<!-- doc-superpowers:start -->"\n~~~\n<!-- doc-superpowers:start -->\nnew\n<!-- doc-superpowers:end -->' "$out" \
+    "…and only the real section is replaced"
+}
+
+test_i9_pr_release_template() {
+  echo "Test: I-9 doc-pr-release.yml — gated on run == 'true'; the agent computes no hash; verify knows 'superseded'"
+  yaml_unavailable "i9_pr_release_template" && return 0
+  local json gates ai tools prompt verify_env
+  json=$(_yaml_json "$TEMPLATE_DIR/doc-pr-release.yml")
+  assert_eq "" "$(jq -r '[.jobs[].steps[] | .if // empty | select(contains("new_commits_len"))] | join(" ; ")' <<<"$json")" \
+    "no step gates on new_commits_len (a skipped context step left it '', and '' != '0' ran the agent)"
+  gates=$(jq -r '[.jobs[].steps[] | select(.id != "pr" and .id != "sentinel" and .id != "context")
+    | select((.uses // "") | startswith("actions/checkout@") | not) | (.if // "none")] | unique | join(" ; ")' <<<"$json")
+  assert_eq "steps.context.outputs.run == 'true'" "$gates" "every step after the context step runs only when run == 'true'"
+  ai=$(jq -c --arg u "$AI_USES" '[.jobs[].steps[] | select((.uses // "") | startswith($u))][0]' <<<"$json")
+  tools=$(jq -r "$_JQ_TOOLS"' tools | join(",")' <<<"$ai")
+  prompt=$(jq -r '.with.prompt' <<<"$ai")
+  for t in sha256sum shasum tail openssl; do
+    assert_not_contains "$tools" "Bash($t" "the agent is not given $t (commit-and-push.sh seals the fragment)"
+  done
+  for t in sha256sum shasum "tail -n" openssl; do
+    assert_not_contains "$prompt" "$t" "the prompt does not ask for $t"
+  done
+  assert_contains "$prompt" ".existing_fragment_hash_valid" "the prompt reads the computed hash state"
+  assert_contains "$prompt" "doc-superpowers:no-notes" "the prompt knows the explicit no-notes state"
+  assert_eq "commit" "$(jq -r '.jobs[].steps[] | select((.run // "") | startswith(".github/scripts/doc-pr-release/commit-and-push.sh")) | .id' <<<"$json")" \
+    "the commit step has id: commit"
+  verify_env=$(jq -r '.jobs[].steps[] | select((.run // "") | startswith(".github/scripts/doc-superpowers-steps/verify-fragment.sh")) | .env.SUPERSEDED // ""' <<<"$json")
+  assert_eq '${{ steps.commit.outputs.superseded }}' "$verify_env" "verify-fragment gets the commit step's superseded output"
+}
+
+test_i9_pr_release_template
+
+test_i9_extract_context_watermark_is_the_recorded_checkout
+test_i9_extract_context_hash_state
+test_i9_extract_context_never_reads_a_symlink
+test_i9_extract_context_large_payloads
+test_i9_commit_never_restores_a_force_push
+test_i9_commit_moved_only_by_the_bot
+test_i9_commit_seals_the_fragment
+test_i9_commit_never_overwrites_a_hand_edit
+test_i9_commit_refuses_a_malformed_fragment
+test_i9_pr_release_queued_behind_itself
+test_i9_update_pr_body_order_and_fences
 
 print_summary

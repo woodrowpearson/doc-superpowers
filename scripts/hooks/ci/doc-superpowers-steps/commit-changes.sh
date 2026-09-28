@@ -55,7 +55,68 @@
 # on a refusal); 2 bad usage.
 #
 # Needs git >= 2.25 (--pathspec-from-file).
+#
+# doc-pr-release/commit-and-push.sh sources this file for the functions
+# before the "Sourced" line (err, out, g, remote_tip, moved): the one
+# implementation of "the branch moved during the run" for every writer.
 set -euo pipefail
+
+err() {
+  echo "::error::doc-superpowers: $*"
+  exit 1
+}
+out() {
+  printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"
+}
+
+# git without any hook or fsmonitor .git may name (planted during the agent step).
+g() {
+  git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
+}
+
+# The tip of $PUSH_TO at origin ("" when it does not exist); non-zero when
+# origin cannot be asked. (Callers err: an err inside $(…) would be swallowed.)
+remote_tip() {
+  local line
+  line=$(g ls-remote --heads origin "refs/heads/$PUSH_TO") || return 1
+  printf '%s' "${line%%[[:space:]]*}"
+}
+
+# moved <what was done>: $PUSH_TO is no longer at the checkout ($head).
+# Superseded (exit 0) when someone other than doc-superpowers pushed during
+# the run — a commit in head..tip whose subject does not start with
+# [doc-superpowers]; otherwise (only doc-superpowers commits, or no commit in
+# the range: a reset or force-push behind the checkout, or a range that
+# cannot be read) a visible failure. Never a push: what someone else did to
+# the branch stands.
+moved() {
+  local new subjects s
+  if ! g fetch --quiet --no-tags origin "refs/heads/$PUSH_TO" \
+    || ! new=$(g rev-parse --verify --quiet "FETCH_HEAD^{commit}") \
+    || ! subjects=$(g log --format=%s "$head..$new"); then
+    err "$PUSH_TO moved during this run and its new commits cannot be read. $1"
+  fi
+  [ -n "$subjects" ] \
+    || err "$PUSH_TO moved during this run to ${new:0:12}, which adds no commit to ${head:0:12} (reset behind the checkout?). $1"
+  while IFS= read -r s; do
+    case "$s" in
+      "[doc-superpowers]"*) ;;
+      *)
+        out changed true
+        out committed false
+        out superseded true
+        echo "::notice::doc-superpowers: superseded: $PUSH_TO received new commits during this run (${head:0:12}..${new:0:12}). $1"
+        exit 0
+        ;;
+    esac
+  done <<<"$subjects"
+  err "$PUSH_TO moved during this run (${head:0:12}..${new:0:12}) only by doc-superpowers commits: nobody else's work supersedes this run's changes. $1 Re-run the workflow to apply them."
+}
+
+# Sourced (commit-and-push.sh): the functions above only.
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  return 0
+fi
 
 usage() {
   echo "Usage: $0 [--allow <path>|<dir/>]... [--allow-index-keys] [--ignore <dir>]... (--check-only | --message <subject> --push-to <branch> [--open-pr <base>])" >&2
@@ -97,19 +158,6 @@ fi
 [ -n "${EXPECTED_HEAD:-}" ] || { echo "EXPECTED_HEAD is not set (prepare-agent.sh's head output)" >&2; exit 2; }
 GIT_USER_NAME="${GIT_USER_NAME:-github-actions[bot]}"
 GIT_USER_EMAIL="${GIT_USER_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}"
-
-err() {
-  echo "::error::doc-superpowers: $*"
-  exit 1
-}
-out() {
-  printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"
-}
-
-# git without any hook or fsmonitor .git may name (planted during the agent step).
-g() {
-  git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
-}
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/doc-sp-commit.XXXXXX") || err "cannot create a temporary directory"
 trap 'rm -rf "$TMP"' EXIT
@@ -187,43 +235,6 @@ if [ "$CHECK_ONLY" = 1 ]; then
   out committed false
   exit 0
 fi
-
-# The branch's tip at origin ("" when it does not exist); non-zero when origin
-# cannot be asked. (Callers err: an err inside $(…) would be swallowed.)
-remote_tip() {
-  local line
-  line=$(g ls-remote --heads origin "refs/heads/$PUSH_TO") || return 1
-  printf '%s' "${line%%[[:space:]]*}"
-}
-
-# moved <what was done>: the branch is no longer at the checkout. Superseded
-# (exit 0) when someone other than doc-superpowers pushed during the run — a
-# commit in head..tip whose subject does not start with [doc-superpowers];
-# otherwise (only doc-superpowers commits, or no commit in the range: a reset
-# behind the checkout, or a range that cannot be read) a visible failure.
-moved() {
-  local new subjects s
-  if ! g fetch --quiet --no-tags origin "refs/heads/$PUSH_TO" \
-    || ! new=$(g rev-parse --verify --quiet "FETCH_HEAD^{commit}") \
-    || ! subjects=$(g log --format=%s "$head..$new"); then
-    err "$PUSH_TO moved during this run and its new commits cannot be read. $1"
-  fi
-  [ -n "$subjects" ] \
-    || err "$PUSH_TO moved during this run to ${new:0:12}, which adds no commit to ${head:0:12} (reset behind the checkout?). $1"
-  while IFS= read -r s; do
-    case "$s" in
-      "[doc-superpowers]"*) ;;
-      *)
-        out changed true
-        out committed false
-        out superseded true
-        echo "::notice::doc-superpowers: superseded: $PUSH_TO received new commits during this run (${head:0:12}..${new:0:12}). $1"
-        exit 0
-        ;;
-    esac
-  done <<<"$subjects"
-  err "$PUSH_TO moved during this run (${head:0:12}..${new:0:12}) only by doc-superpowers commits: nobody else's work supersedes this run's changes. $1 Re-run the workflow to apply them."
-}
 
 tip=$(remote_tip) || err "cannot ask origin for $PUSH_TO (git ls-remote failed). Nothing was committed or pushed."
 if [ -n "$OPEN_PR" ]; then

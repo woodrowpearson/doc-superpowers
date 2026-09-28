@@ -66,9 +66,9 @@ doc-superpowers/
 │           ├── doc-pr-full-cycle.yml      # AI PR full cycle: review, update, diagram, sync (scope-gated; checked commit step; shared write group)
 │           ├── doc-pr-release.yml         # AI per-PR release-notes fragment producer — drafts/maintains RELEASE-NOTES.next/PR-<N>.md and syncs a managed section in the PR body
 │           └── doc-pr-release/            # Colocated shell helpers for doc-pr-release.yml
-│               ├── extract-context.sh         # Emits JSON context blob (PR body, existing fragment, commit ranges)
+│               ├── extract-context.sh         # Emits JSON context blob (PR body, existing fragment + its hash state, the PR's own commits since the last recorded sync)
 │               ├── update-pr-body.sh          # Idempotently merges a managed section into the PR body
-│               ├── commit-and-push.sh         # Stages, commits ([doc-superpowers] prefix), and pushes the fragment back to the PR branch (a workflow step, never the agent)
+│               ├── commit-and-push.sh         # Seals the fragment, commits only it ([doc-superpowers] prefix + Drafted-From trailer), pushes only while the branch is at the checkout (a workflow step, never the agent)
 │               └── RELEASE-NOTES.next.README.md # Fragment-format spec dropped into consuming repos (only if missing)
 │           └── doc-superpowers-steps/     # run: step bodies of every template — freshness-check (freshness gate/audit, AI scope gate), resolve-auth, prepare-agent (pinned plugin), commit-changes (checked commit), pr-guard (same-repo), sentinel-check, write-context, verify-fragment, precheck; installed with any workflow
 ├── references/
@@ -166,7 +166,7 @@ doc-superpowers/
 | Claude Code hook scripts | `scripts/hooks/claude/` — pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh |
 | CI workflow templates | `scripts/hooks/ci/` — 8 templates total (2 shell-based, 6 AI-powered; `doc-index-update.yml` was retired in v3.0.0). Shell: doc-freshness-pr.yml, doc-freshness-schedule.yml (run the vendored `.github/scripts/doc-tools.sh` through `doc-superpowers-steps/freshness-check.sh`). AI: doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml (per-PR release-notes fragment producer, with colocated helpers under `doc-pr-release/`). All actions SHA-pinned. This repo self-installs only the 2 shell-based workflows into its own `.github/workflows/` — the 6 AI ones need Anthropic credentials configured as repository secrets, so the 2-of-8 gap here is deliberate, not drift |
 | Per-PR release-notes fragment helpers | `scripts/hooks/ci/doc-pr-release/` — `extract-context.sh`, `update-pr-body.sh`, `commit-and-push.sh`, and `RELEASE-NOTES.next.README.md` (fragment-format spec installed into consuming repos). The `run:` step bodies of `doc-pr-release.yml` and `doc-release.yml` live in `scripts/hooks/ci/doc-superpowers-steps/` |
-| Release-notes fragment parsing | `scripts/doc-tools.sh fragments` — `list` (JSON enumeration + hash validity), `validate <path>` (exit 0/1/2), `merge <start> <end> [--paths-out=<file>]` (markdown sections for insertion under a `## vX.Y.Z` header) |
+| Release-notes fragment parsing | `scripts/doc-tools.sh fragments` — one grammar (`_FRAG_AWK`) for `list` (JSON: hash state, sections, no-notes, the problem that keeps a fragment from being consumed), `validate <path>` (exit 0/1/2), and `merge <start|ROOT> <end> [--paths-out <file>] [--remove]` (markdown sections for insertion under a `## vX.Y.Z` header, from every fragment present at `<end>`; lossless or skipped with a warning; refuses when an earlier release's commit has not reached `<end>`) |
 | Hook test suite | `scripts/test-hooks.sh` |
 | Hooks action routing | `skills/doc-superpowers/SKILL.md` Section 1 "`hooks`" subsection |
 | Spec lifecycle routing | `skills/doc-superpowers/SKILL.md` Section 1 "Spec Lifecycle Routing" + `spec-generate`, `spec-inject`, `spec-verify` subsections |
@@ -281,25 +281,24 @@ User invokes /doc-superpowers release [--from=<ref>]
     → Auto-suggest semver bump from conventional commit prefixes
       → feat: → MINOR, fix:/docs: → PATCH, BREAKING CHANGE → MAJOR
       → Present suggestion with commit evidence, user confirms or overrides
-    → Merge per-PR release-notes fragments (if any)
-      → Glob RELEASE-NOTES.next/PR-*.md
-      → Validate each fragment's SHA-256 hash via `doc-tools.sh fragments validate`
-        → Drifted (human-edited) fragments emit a warning but are still merged — human edits are authoritative
-      → Skip fragments whose introducing commit is outside the release range (git merge-base --is-ancestor)
-      → Run `doc-tools.sh fragments merge <start> <end> --paths-out=<tmp>` to produce sections in Keep-a-Changelog canonical order, dedupe bullets, preserve non-canonical headings
-      → Record consumed fragment paths so the release commit can `git rm` only those, never destroying fragments for still-open PRs
+    → Merge per-PR release-notes fragments, before drafting
+      → `doc-tools.sh fragments merge <start|ROOT> HEAD`: every RELEASE-NOTES.next/PR-*.md present at HEAD (unreleased until a release deletes it)
+        → Each merged losslessly or skipped (named on stderr, left for the next release); drifted (hand-edited) ones merged with a warning; no-notes ones consumed silently
+        → Refuses (exit 1) when a release consumed fragments still present here — its release commit never reached this branch — and the action stops
     → Dispatch single general-purpose drafting agent with:
       → Commit list, full git diff, previous entry as format exemplar, merged fragment sections (if any)
-      → Instructions: group into Features / Fixes / Breaking Changes / Dependencies; fold merged fragment sections into the same headings
+      → Instructions: use RELEASE-NOTES.md's own headings; map the fragment sections (Added … Dependencies) onto them with the table in RELEASE-NOTES.next/README.md
     → Present draft to user — user edits or approves
     → Prepend new version entry to RELEASE-NOTES.md (after header, before previous entry)
-    → `git rm` consumed fragment files in the same commit as the new version entry
+    → `doc-tools.sh fragments merge <start|ROOT> HEAD --remove`: `git rm` exactly the consumed fragments (never a glob)
     → Bump version in all manifests — mandatory, never hand-edit individual version strings
       → `doc-tools.sh bump-version X.Y.Z`, then `doc-tools.sh check-version` to confirm every manifest matches
     → Sync CLAUDE.md and README.md per references/doc-spec.md rules
       → Catches drift accumulated across the released commits
-    → Offer git tag — prompt "Create git tag vX.Y.Z?"
+    → Commit the release: entry + fragment deletions + manifests + CLAUDE.md/README.md in ONE commit
+    → Offer git tag on the release commit — prompt "Create git tag vX.Y.Z?"
       → If older untagged versions exist, offer to backfill
+      → The release commit must reach main (merge the release branch, or cherry-pick it); until then the next release refuses
 ```
 
 ### Typical `hooks install` flow

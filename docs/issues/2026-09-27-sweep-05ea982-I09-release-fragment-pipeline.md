@@ -1,6 +1,6 @@
 ---
 date: 2026-09-27
-status: Open
+status: Resolved
 priority: P1
 type: bug
 component: release
@@ -196,6 +196,81 @@ observable effect.
 
 See fix plan Task 10, Step 1. Every lossy case is either merged losslessly or excluded from deletion
 with a warning. A force-pushed branch is never restored.
+
+## Resolution (Task 10)
+
+Resolved by Task 10 of the fix plan. Every lossy case is now either merged losslessly or skipped
+(named on stderr, kept, never consumed); a force-pushed branch is never restored.
+
+**Consumer (`doc-tools.sh fragments`)** — one grammar (`_FRAG_AWK`) shared by `list` and `merge`:
+- "Unreleased" = present at `<range-end>`: the candidates are the fragments in `<range-end>`'s
+  tree (not the worktree glob, not an introducing-commit test), read from their blobs (symlinks
+  never read). A fragment merged after a release branch was cut is released next time.
+- Line 1 must be `<!-- doc-superpowers:fragment PR-<N> -->` for the file's own `<N>`; line 2 is
+  the hash line when it looks like one (else the notes start on line 2). A missing or drifted
+  hash is a hand edit: merged as written, with a warning.
+- Skipped with a warning (not in `--paths-out`, not removed): a wrong or missing line 1, text
+  before the first `###` heading, a `#`/`##` heading, an unclosed code fence, no notes, a
+  non-`PR-<number>.md` name, a symbolic link, an empty file. Trailing `\r` and blanks are
+  dropped; a last line without a newline is kept.
+- Dedupe per unit (a column-0 line plus its indented/blank lines and whole fences), per section.
+  One section vocabulary (`Added` … `Dependencies`; `Features`, `Changes`, `Fixes`, `Bug Fixes`
+  fold onto it, case-insensitive), with the mapping table in `RELEASE-NOTES.next/README.md`.
+- Explicit "no notes" state: a body of only `<!-- doc-superpowers:no-notes -->` is consumed and
+  prints nothing.
+- Both refs validated (exit 2); `ROOT` is the first release's `<range-start>`;
+  `--paths-out F` / `--paths-out=F` (the shared parser) — emptied first, written only on success.
+  New `--remove` (`<range-end>` = HEAD) `git rm`s exactly the consumed fragments.
+- "The release commit reaches `main`" is enforced here: `merge` refuses (exit 1, naming the
+  fragments and the release) when a fragment present at `<range-end>` was deleted at
+  `<range-start>`, or at a `v*` tag cut from `<range-end>`'s history after `<range-start>` that
+  `<range-end>` does not contain, and nothing in `S..<range-end>` added it back. That is one
+  `git -c log.diffMerges=first-parent log -m --first-parent --no-renames --diff-filter=A` pass per
+  release point (merge policy: a merge's diff against its first parent), with fixtures for a
+  rename, an evil merge, a side-branch merge and a squash. `doc-release.yml`'s precheck runs the
+  same check before the agent.
+- `fragments list` never aborts silently (an unmatched line 2 no longer kills it under
+  `pipefail`), is linear (one awk, one sha256 process, one jq for all fragments), and reports
+  `no_notes` and `problem`. The dead helpers (`_fragment_section_names` shim,
+  `_fragment_section_headings`, the missing-file branch of the hash helper, the `found` flag) are
+  gone.
+
+**Producer:**
+- `commit-and-push.sh` writes the line-2 hash itself; commits only the fragment path
+  (`git commit -- <fragment>`); refuses a wrong line 1, an empty body, a symlink, an oversized
+  file, and any change over a hand-edited (unsealed) HEAD fragment (which it also never
+  re-seals). Compare-and-swap: before writing, and after a rejected push, a branch that moved
+  follows `commit-changes.sh`'s `moved()` (sourced — one implementation): someone else's push →
+  superseded, exit 0; only `[doc-superpowers]` commits, or reset / force-pushed behind the
+  checkout → exit 1. The push is `--force-with-lease=refs/heads/<branch>:<checkout>`, so it lands
+  only while the branch is exactly the checkout (a fast-forward of it). The sync commit records
+  `Doc-Superpowers-Drafted-From: <checkout>`.
+- `extract-context.sh` passes every payload to jq through files (`--slurpfile` / `--rawfile`),
+  so the 128 KiB per-argument cap no longer applies and the 1 MiB fragment cap is reachable;
+  excludes base-branch commits (`^origin/<base>`), merges, fragment-only commits and every
+  `[doc-superpowers]` commit from both commit lists; uses the checkout recorded by the newest
+  sync commit (trailer, else the short SHA in its subject, else its parent) as the watermark;
+  emits `existing_fragment_hash_valid`, `existing_fragment_no_notes` and `new_since`; never reads
+  a symlinked fragment.
+- `update-pr-body.sh` ignores markers inside code fences and refuses END-before-START.
+- `write-context.sh` emits `run=true|false`; every later step gates on `run == 'true'` (the
+  skipped-sentinel `'' != '0'` bug). A hand-written no-notes fragment is a deterministic opt-out.
+- `verify-fragment.sh` accepts a superseded run and requires a sealed fragment at a sync commit.
+- The agent's prompt no longer computes hashes (`sha256sum`/`shasum`/`tail` removed from its
+  tools) and reads the computed hash state.
+
+**Workflows:** `doc-release.yml` skips on the exact bot subject (job `if:` `startsWith`, plus the
+precheck's exact rebase/squash/merge-commit forms); the precheck uses
+`git describe --match 'v[0-9]*'`.
+
+**Docs and prompt:** SKILL.md `release` runs `fragments merge` before drafting, drops the
+duplicate filter, removes via `--remove` (the `xargs … /tmp` form is gone), commits before the
+tag, and states that the release commit must reach `main`. The `--from=<tag>~1` advice is gone.
+The 2026-05-12 plan's `git log --all` / ancestry design is marked superseded.
+
+**Tests:** `test-doc-tools.sh` `test_i9_*` (10) plus four reworked fragment tests;
+`test-doc-pr-release.sh` `test_i9_*` (12) plus reworked step-helper tests. Both of its XFAIL
+assertions are ordinary assertions now.
 
 ## Related
 

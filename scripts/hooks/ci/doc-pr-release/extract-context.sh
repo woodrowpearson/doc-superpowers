@@ -17,17 +17,34 @@
 #   "head_sha":          string,
 #   "base_sha":          string,
 #   "pr_body":           string,
-#   "existing_fragment":         string | null,
-#   "existing_fragment_corrupt": bool,
-#   "fragment_path":             string,
-#   "new_commits":               [{"sha": str, "subject": str, "body": str}],
-#   "full_commits":              [{"sha": str, "subject": str, "body": str}]
+#   "existing_fragment":            string | null,
+#   "existing_fragment_corrupt":    bool,
+#   "existing_fragment_hash_valid": bool,
+#   "existing_fragment_no_notes":   bool,
+#   "fragment_path":                string,
+#   "new_since":                    string,
+#   "new_commits":                  [{"sha": str, "subject": str, "body": str}],
+#   "full_commits":                 [{"sha": str, "subject": str, "body": str}]
 # }
 #
-# `existing_fragment_corrupt` is true when a fragment file exists but does not
-# parse as a well-formed doc-superpowers fragment (missing markers, truncated
-# to <3 lines, or oversized). The agent treats this case as "do not auto-edit;
-# post a PR comment requesting reconciliation."
+# existing_fragment_corrupt: a fragment file exists but is not one to
+#   auto-edit — a symbolic link or over 1 MiB (neither is read:
+#   existing_fragment stays null), a wrong line-1 marker, no hash marker on
+#   line 2, or nothing after it. The agent posts a PR comment instead.
+# existing_fragment_hash_valid: line 2's hash is the sha256 of the bytes from
+#   line 3 on. False = a human edited it (or it is corrupt): never overwritten.
+# existing_fragment_no_notes: its notes are only <!-- doc-superpowers:no-notes -->.
+#   A hand-written one (hash not valid) opts the PR out (write-context.sh).
+# new_since: the commit new_commits start after — the checkout the newest
+#   sync commit recorded (its Doc-Superpowers-Drafted-From: trailer, or the
+#   short SHA in its subject), else that commit's parent, else base_sha.
+# new_commits / full_commits: the PR's own work since new_since / the base,
+#   oldest first — never a base-branch commit (merged in by "Update branch"),
+#   a merge commit, a commit that only touches RELEASE-NOTES.next/, or one of
+#   doc-superpowers' own [doc-superpowers] commits.
+#
+# Every payload reaches jq through a file, never argv: one argument is capped
+# at 128 KiB on Linux (argv + env at ~1 MiB on macOS).
 set -euo pipefail
 
 # Resolve PR number / base ref from env or event payload.
@@ -52,86 +69,131 @@ fi
 command -v gh >/dev/null || { echo "gh CLI required" >&2; exit 2; }
 command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
 
-PR_JSON=$(gh pr view "$PR_NUMBER" --json number,body,headRefName,baseRefName)
-PR_BODY=$(printf '%s' "$PR_JSON" | jq -r '.body // ""')
-HEAD_REF=$(printf '%s' "$PR_JSON" | jq -r '.headRefName')
+T=$(mktemp -d "${TMPDIR:-/tmp}/doc-sp-context.XXXXXX") || { echo "mktemp -d failed" >&2; exit 1; }
+trap 'rm -rf "$T"' EXIT
+
+gh pr view "$PR_NUMBER" --json number,body,headRefName,baseRefName > "$T/pr.json"
+HEAD_REF=$(jq -r '.headRefName // ""' "$T/pr.json")
 
 HEAD_SHA=$(git rev-parse HEAD)
-# Use merge-base so we get the divergence point, not a stale base tip.
-# `origin/$BASE_REF` is preferred; in CI it's populated by `fetch-depth: 0`.
-# The bare-name fallback handles non-Actions environments (manual runs).
-if git rev-parse --verify "origin/$BASE_REF" >/dev/null 2>&1; then
-  BASE_SHA=$(git merge-base "origin/$BASE_REF" HEAD)
+# The base branch's tip — `origin/$BASE_REF` in CI (fetch-depth: 0), the bare
+# name in a manual run. Everything it reaches is the base's, not this PR's.
+if git rev-parse --verify --quiet "origin/$BASE_REF^{commit}" >/dev/null; then
+  BASE_TIP="origin/$BASE_REF"
 else
-  BASE_SHA=$(git merge-base "$BASE_REF" HEAD)
+  BASE_TIP="$BASE_REF"
 fi
+BASE_SHA=$(git merge-base "$BASE_TIP" HEAD)
+
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum
+  else
+    shasum -a 256
+  fi
+}
+
+# A marker line less a trailing CR and blanks.
+trimmed() {
+  local l="${1%$'\r'}"
+  while :; do
+    case "$l" in
+      *[' '$'\t']) l="${l%?}" ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$l"
+}
 
 FRAGMENT_PATH="RELEASE-NOTES.next/PR-${PR_NUMBER}.md"
-EXISTING_FRAGMENT_JSON="null"
-EXISTING_FRAGMENT_CORRUPT="false"
-# Cap on fragment size to read into memory; a malicious mega-fragment would
-# otherwise OOM the runner. 1 MiB is ~5000 lines of release notes — far
-# beyond any plausible legitimate use.
+# Never read into memory past this: 1 MiB is ~5000 lines of release notes.
 FRAGMENT_MAX_BYTES=1048576
-if [ -f "$FRAGMENT_PATH" ]; then
+HAS_FRAGMENT=false
+CORRUPT=false
+HASH_VALID=false
+NO_NOTES=false
+FRAGMENT_FILE=/dev/null
+if [ -L "$FRAGMENT_PATH" ]; then
+  echo "Existing fragment $FRAGMENT_PATH is a symbolic link; not read, marking corrupt." >&2
+  CORRUPT=true
+elif [ -f "$FRAGMENT_PATH" ]; then
   frag_bytes=$(wc -c <"$FRAGMENT_PATH" | tr -d ' ')
   if [ "$frag_bytes" -gt "$FRAGMENT_MAX_BYTES" ]; then
     echo "Existing fragment is ${frag_bytes} bytes (>${FRAGMENT_MAX_BYTES}); marking corrupt." >&2
-    EXISTING_FRAGMENT_CORRUPT="true"
+    CORRUPT=true
   else
-    EXISTING_FRAGMENT_JSON=$(jq -Rs '.' <"$FRAGMENT_PATH")
-    # Sanity-check: the fragment must have at least 3 lines (two markers + at
-    # least one content line) AND line 1 must be the fragment marker AND
-    # line 2 must be the hash marker. Anything else is a corrupted fragment
-    # we should not auto-edit.
-    frag_lines=$(wc -l <"$FRAGMENT_PATH" | tr -d ' ')
-    line1=$(sed -n '1p' "$FRAGMENT_PATH")
-    line2=$(sed -n '2p' "$FRAGMENT_PATH")
-    expected_line1="<!-- doc-superpowers:fragment PR-${PR_NUMBER} -->"
-    if [ "$frag_lines" -lt 3 ] \
-       || [ "$line1" != "$expected_line1" ] \
-       || ! printf '%s' "$line2" | grep -qE '^<!-- doc-superpowers:hash [0-9a-f]+ -->$'; then
-      EXISTING_FRAGMENT_CORRUPT="true"
+    HAS_FRAGMENT=true
+    FRAGMENT_FILE="$FRAGMENT_PATH"
+    l1="" l2=""
+    { IFS= read -r l1 || true; IFS= read -r l2 || true; } < "$FRAGMENT_PATH"
+    l1=$(trimmed "$l1")
+    l2=$(trimmed "$l2")
+    stored="" re='^<!-- doc-superpowers:hash ([0-9a-f]+) -->$'
+    if [[ $l2 =~ $re ]]; then
+      stored="${BASH_REMATCH[1]}"
+    fi
+    tail -n +3 "$FRAGMENT_PATH" > "$T/payload"
+    actual=$(sha256 < "$T/payload")
+    if [ -n "$stored" ] && [ "$stored" = "${actual%% *}" ]; then
+      HASH_VALID=true
+    fi
+    # The notes start after a hash marker, else after line 1 (a hand edit).
+    case "$l2" in
+      '<!-- doc-superpowers:hash'*'-->') cp "$T/payload" "$T/notes" ;;
+      *) tail -n +2 "$FRAGMENT_PATH" > "$T/notes" ;;
+    esac
+    if awk '{ sub(/\r$/, "") } /^[ \t]*$/ { next } { n++ } /^[ \t]*<!-- doc-superpowers:no-notes -->[ \t]*$/ { m++ }
+            END { exit !(n == 1 && m == 1) }' "$T/notes"; then
+      NO_NOTES=true
+    fi
+    if [ "$l1" != "<!-- doc-superpowers:fragment PR-${PR_NUMBER} -->" ] || [ -z "$stored" ] \
+       || ! grep -q . "$T/payload"; then
+      CORRUPT=true
     fi
   fi
 fi
 
-# Find the last commit on this branch that touched the fragment file.
-# That commit's children (i.e., everything strictly after it) is the "new" range.
-LAST_FRAG_COMMIT=""
-if [ -f "$FRAGMENT_PATH" ]; then
-  LAST_FRAG_COMMIT=$(git log -n 1 --format="%H" -- "$FRAGMENT_PATH")
-fi
-NEW_RANGE_START="${LAST_FRAG_COMMIT:-$BASE_SHA}"
-
-# Emit commits in $1..HEAD range as a JSON array. Each element is
-# {sha, subject, body}. Uses git log --format='%H%x1F%s%x1F%b%x1E' so we
-# get Unit-Separator-separated fields and Record-Separator-separated records,
-# then slurps the stream through jq for robust JSON encoding (handles any
-# unicode, embedded newlines in body, etc.).
-emit_commits_json() {
-  local range="$1"
-  # If range is empty (e.g., HEAD..HEAD), emit []
-  local count
-  count=$(git rev-list --count "$range")
-  if [ "$count" -eq 0 ]; then
-    echo "[]"
-    return 0
+# The watermark: the checkout the newest sync commit of this PR recorded.
+NEW_SINCE="$BASE_SHA"
+sync_re="^\\[doc-superpowers\\] sync PR-${PR_NUMBER} release notes( \\(([0-9a-f]{7,64})\\))?\$"
+trailer_re='^Doc-Superpowers-Drafted-From: ([0-9a-f]{40,64})$'
+while IFS=$'\037' read -r sync_sha subject; do
+  [[ $subject =~ $sync_re ]] || continue
+  recorded="${BASH_REMATCH[2]}"
+  while IFS= read -r line; do
+    if [[ $line =~ $trailer_re ]]; then
+      recorded="${BASH_REMATCH[1]}"
+    fi
+  done < <(git log -1 --format=%b "$sync_sha")
+  NEW_SINCE=""
+  if [ -n "$recorded" ] && full=$(git rev-parse --verify --quiet "$recorded^{commit}") \
+     && git merge-base --is-ancestor "$full" HEAD; then
+    NEW_SINCE="$full"
   fi
-  git log --reverse --no-merges --format=$'%H\x1F%s\x1F%b\x1E' "$range" \
+  # No usable record (a rewritten branch): what came before the sync commit.
+  [ -n "$NEW_SINCE" ] || NEW_SINCE=$(git rev-parse --verify --quiet "$sync_sha^1") || NEW_SINCE="$BASE_SHA"
+  break
+done < <(git log -E --grep="^\\[doc-superpowers\\] sync PR-${PR_NUMBER} release notes" \
+           --format='%H%x1f%s' HEAD "^$BASE_TIP")
+
+# emit_commits <out-file> <revision args…>: the PR's own commits, oldest first.
+emit_commits() {
+  local out="$1"
+  shift
+  git log --reverse --no-merges --full-history --format='%H%x1f%s%x1f%b%x1e' "$@" \
+    -- ':/' ':(top,exclude)RELEASE-NOTES.next/' \
     | jq -Rs '
-        split("")
-        | map(ltrimstr("
-"))
-        | map(select(length > 0 and contains("")))
-        | map(split(""))
-        | map({sha: .[0], subject: .[1], body: (.[2] // "")})
-        | map(.body |= rtrimstr("\n"))
-      '
+        split("\u001e")
+        | map(ltrimstr("\n"))
+        | map(select(length > 0 and contains("\u001f")))
+        | map(split("\u001f"))
+        | map({sha: .[0], subject: .[1], body: ((.[2] // "") | rtrimstr("\n"))})
+        | map(select(.subject | startswith("[doc-superpowers]") | not))
+      ' > "$out"
 }
 
-NEW_COMMITS_JSON=$(emit_commits_json "${NEW_RANGE_START}..${HEAD_SHA}")
-FULL_COMMITS_JSON=$(emit_commits_json "${BASE_SHA}..${HEAD_SHA}")
+emit_commits "$T/new.json" HEAD "^$NEW_SINCE" "^$BASE_TIP"
+emit_commits "$T/full.json" HEAD "^$BASE_TIP"
 
 jq -n \
   --argjson pr_number "$PR_NUMBER" \
@@ -139,22 +201,29 @@ jq -n \
   --arg base_ref "$BASE_REF" \
   --arg head_sha "$HEAD_SHA" \
   --arg base_sha "$BASE_SHA" \
-  --arg pr_body "$PR_BODY" \
-  --argjson existing_fragment "$EXISTING_FRAGMENT_JSON" \
-  --argjson existing_fragment_corrupt "$EXISTING_FRAGMENT_CORRUPT" \
+  --slurpfile pr "$T/pr.json" \
+  --rawfile fragment "$FRAGMENT_FILE" \
+  --argjson has_fragment "$HAS_FRAGMENT" \
+  --argjson corrupt "$CORRUPT" \
+  --argjson hash_valid "$HASH_VALID" \
+  --argjson no_notes "$NO_NOTES" \
   --arg fragment_path "$FRAGMENT_PATH" \
-  --argjson new_commits "$NEW_COMMITS_JSON" \
-  --argjson full_commits "$FULL_COMMITS_JSON" \
+  --arg new_since "$NEW_SINCE" \
+  --slurpfile new_commits "$T/new.json" \
+  --slurpfile full_commits "$T/full.json" \
   '{
     pr_number: $pr_number,
     head_ref: $head_ref,
     base_ref: $base_ref,
     head_sha: $head_sha,
     base_sha: $base_sha,
-    pr_body: $pr_body,
-    existing_fragment: $existing_fragment,
-    existing_fragment_corrupt: $existing_fragment_corrupt,
+    pr_body: ($pr[0].body // ""),
+    existing_fragment: (if $has_fragment then $fragment else null end),
+    existing_fragment_corrupt: $corrupt,
+    existing_fragment_hash_valid: $hash_valid,
+    existing_fragment_no_notes: $no_notes,
     fragment_path: $fragment_path,
-    new_commits: $new_commits,
-    full_commits: $full_commits
+    new_since: $new_since,
+    new_commits: $new_commits[0],
+    full_commits: $full_commits[0]
   }'
