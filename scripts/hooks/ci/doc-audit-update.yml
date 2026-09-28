@@ -1,24 +1,27 @@
 # doc-superpowers workflow v1
 # AI-powered documentation audit and update on feature branches
 # Installed by doc-superpowers hooks installer
+#
+# Runs when a push to a non-base branch leaves an indexed doc stale or
+# missing (the branch against __BASE_BRANCH__, judged by check-freshness from
+# the doc index — no hard-coded paths). The agent edits docs but cannot
+# commit or push; the "Commit doc updates" step commits only docs/ and the
+# docs the index lists, and pushes them with the job's GITHUB_TOKEN, whose
+# pushes start no workflow run.
 
 name: Doc Audit & Update (AI)
 
 on:
   push:
     branches-ignore: [__BASE_BRANCH__]
-    paths:
-      - 'docs/**'
-      - 'src/**'
-      - 'scripts/**'
-      - 'SKILL.md'
-      - 'CLAUDE.md'
-      - 'README.md'
   workflow_dispatch:
 
+# One writer per branch across the doc-superpowers workflows that commit to
+# it (doc-audit-update, doc-pr-full-cycle, doc-pr-release). Never cancelled:
+# a cancel between commit and push would strand the commit.
 concurrency:
-  group: doc-audit-${{ github.ref }}
-  cancel-in-progress: true
+  group: doc-superpowers-write-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: false
 
 env:
   DOC_SUPERPOWERS_VERSION: "__VERSION__"
@@ -29,54 +32,64 @@ jobs:
       !contains(github.event.head_commit.message, '[doc-superpowers]') &&
       !contains(github.event.head_commit.message, '[skip ci]')
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: write
-      pull-requests: write
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
 
-      - name: Check for doc index
-        id: precheck
-        run: |
-          if [ ! -f "docs/.doc-index.json" ]; then
-            echo "No doc-index found — init has not run. Skipping."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Scope — docs this branch leaves stale or missing
+        id: scope
+        env:
+          RANGE: origin/__BASE_BRANCH__...HEAD
+        run: .github/scripts/doc-superpowers-steps/freshness-check.sh scope
 
       - name: Resolve Anthropic auth
         id: auth
-        if: steps.precheck.outputs.skip != 'true'
+        if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.count != '0'
         env:
           OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          if [ -n "$OAUTH" ]; then
-            echo "use_oauth=true" >> "$GITHUB_OUTPUT"
-            if [ -n "$API_KEY" ]; then
-              echo "::notice::Both CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are set; using CLAUDE_CODE_OAUTH_TOKEN."
-            fi
-          elif [ -n "$API_KEY" ]; then
-            echo "use_oauth=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::Neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY is set as a repository secret. Add one under Settings > Secrets and variables > Actions." >&2
-            exit 1
-          fi
+        run: .github/scripts/doc-superpowers-steps/resolve-auth.sh
+
+      - name: Fetch the doc-superpowers plugin (the installed version)
+        id: plugin
+        if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.count != '0'
+        run: .github/scripts/doc-superpowers-steps/prepare-agent.sh
 
       - name: Audit and update docs
-        if: steps.precheck.outputs.skip != 'true'
-        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1
+        if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.count != '0'
+        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88
         with:
+          github_token: ${{ github.token }}
           claude_code_oauth_token: ${{ steps.auth.outputs.use_oauth == 'true' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           anthropic_api_key: ${{ steps.auth.outputs.use_oauth == 'false' && secrets.ANTHROPIC_API_KEY || '' }}
+          plugin_marketplaces: ${{ steps.plugin.outputs.marketplace }}
+          plugins: doc-superpowers@doc-superpowers
+          claude_args: |
+            --max-turns 80
+            --allowedTools "Skill,Read,Glob,Grep,Edit,Write,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(.github/scripts/doc-tools.sh:*)"
           prompt: |
-            Run /doc-superpowers audit to check documentation freshness against
-            the recent changes on this branch. Then run /doc-superpowers update
-            to fix any stale docs found.
+            This is an unattended GitHub Actions run of the doc-superpowers plugin.
+            - Use `.github/scripts/doc-tools.sh` as `$DOC_TOOLS` (this plugin
+              version's vendored copy) and call it by that path: your tools allow
+              exactly that command.
+            - Nobody can answer questions: take the recommended option instead.
+            - Do not commit, push, tag or open pull requests. After you finish, the
+              workflow commits what you changed under docs/ and in the docs the
+              index lists; a change anywhere else fails the run.
 
-            Commit the changes with a "[doc-superpowers] update stale docs" message.
-            Do not create a pull request — commit directly to this branch.
+            Run /doc-superpowers audit to check documentation freshness against this
+            branch's changes (`git diff origin/__BASE_BRANCH__...HEAD`). Then run
+            /doc-superpowers update to fix the stale and missing docs it finds. Run
+            update-index only on a doc you have checked against its code.
+
+      - name: Commit doc updates
+        if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.count != '0'
+        env:
+          EXPECTED_HEAD: ${{ steps.plugin.outputs.head }}
+          PUSH_TO: ${{ github.ref_name }}
+        run: .github/scripts/doc-superpowers-steps/commit-changes.sh --allow docs/ --allow-index-keys --message "[doc-superpowers] update stale docs" --push-to "$PUSH_TO"

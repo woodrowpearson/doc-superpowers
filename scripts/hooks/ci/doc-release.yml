@@ -1,6 +1,12 @@
 # doc-superpowers workflow v1
 # AI-powered release notes drafting
 # Installed by doc-superpowers hooks installer
+#
+# The agent drafts the release-notes entry but cannot commit, push, tag or
+# open a pull request; the last step commits only the release files to a new
+# branch and opens a PR against the release branch. (Opening it needs the
+# repository setting "Allow GitHub Actions to create and approve pull
+# requests"; the step says so when it is off.)
 
 name: Doc Release Notes (AI)
 
@@ -21,9 +27,10 @@ on:
         type: choice
         options: ['auto', 'major', 'minor', 'patch']
 
+# Never cancelled: a cancel between push and PR creation would strand a branch.
 concurrency:
   group: doc-release-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   DOC_SUPERPOWERS_VERSION: "__VERSION__"
@@ -33,12 +40,13 @@ jobs:
     if: >-
       !contains(github.event.head_commit.message, '[doc-superpowers]')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
       pull-requests: write
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
 
@@ -54,19 +62,47 @@ jobs:
           API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: .github/scripts/doc-superpowers-steps/resolve-auth.sh
 
+      - name: Fetch the doc-superpowers plugin (the installed version)
+        id: plugin
+        if: steps.precheck.outputs.skip != 'true'
+        run: .github/scripts/doc-superpowers-steps/prepare-agent.sh
+
       - name: Draft release notes
         if: steps.precheck.outputs.skip != 'true'
-        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1
+        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88
         with:
+          github_token: ${{ github.token }}
           claude_code_oauth_token: ${{ steps.auth.outputs.use_oauth == 'true' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           anthropic_api_key: ${{ steps.auth.outputs.use_oauth == 'false' && secrets.ANTHROPIC_API_KEY || '' }}
+          plugin_marketplaces: ${{ steps.plugin.outputs.marketplace }}
+          plugins: doc-superpowers@doc-superpowers
+          claude_args: |
+            --max-turns 50
+            --allowedTools "Skill,Read,Glob,Grep,Edit,Write,Bash(git log:*),Bash(git describe:*),Bash(git tag -l:*),Bash(git show:*),Bash(git diff:*),Bash(git status:*),Bash(git rm:*),Bash(.github/scripts/doc-tools.sh fragments:*),Bash(.github/scripts/doc-tools.sh bump-version:*),Bash(.github/scripts/doc-tools.sh check-version:*)"
           prompt: |
+            This is an unattended GitHub Actions run of the doc-superpowers plugin.
+            - Use `.github/scripts/doc-tools.sh` as `$DOC_TOOLS` (this plugin
+              version's vendored copy) and call it by that path: your tools allow
+              exactly that command.
+            - Nobody can answer questions: take the suggested version bump (unless
+              one is given below) and approve your own draft.
+            - Do not commit, push, tag or open pull requests. After you finish, the
+              workflow commits RELEASE-NOTES.md, RELEASE-NOTES.next/, the version
+              manifests, CLAUDE.md and README.md to a new branch and opens a pull
+              request; a change anywhere else fails the run.
+
             Run /doc-superpowers release to draft release notes from git history.
             ${{ inputs.from_ref && format('Use commits since {0} as the starting point.', inputs.from_ref) || '' }}
             ${{ inputs.version_bump && inputs.version_bump != 'auto' && format('Use a {0} version bump.', inputs.version_bump) || '' }}
 
-            Analyze commits since the last release, suggest a version bump,
-            and draft the RELEASE-NOTES.md entry. Create a pull request with
-            the changes. Do NOT create git tags — leave that for the maintainer.
+            Analyze the commits since the last release, choose the version bump,
+            and draft the RELEASE-NOTES.md entry.
 
-            Use "[doc-superpowers] draft release notes" as the commit message.
+      - name: Commit and open the release-notes pull request
+        if: steps.precheck.outputs.skip != 'true'
+        env:
+          EXPECTED_HEAD: ${{ steps.plugin.outputs.head }}
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.ref_name }}
+          BRANCH: doc-superpowers/release-notes-${{ github.run_id }}
+        run: .github/scripts/doc-superpowers-steps/commit-changes.sh --allow RELEASE-NOTES.md --allow RELEASE-NOTES.next/ --allow CLAUDE.md --allow README.md --allow package.json --allow claude-code.json --allow .claude-plugin/plugin.json --allow .claude-plugin/marketplace.json --allow .cursor-plugin/plugin.json --allow gemini-extension.json --message "[doc-superpowers] draft release notes" --push-to "$BRANCH" --open-pr "$BASE"

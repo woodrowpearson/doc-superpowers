@@ -209,7 +209,7 @@ Hooks are organized into three tiers, each independently installable:
 |------|------|---------|
 | Git | `--git` | pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push |
 | Claude Code | `--claude` | pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh |
-| CI/CD | `--ci` | doc-freshness-pr.yml, doc-freshness-schedule.yml, doc-index-update.yml, doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml |
+| CI/CD | `--ci` | doc-freshness-pr.yml, doc-freshness-schedule.yml (the default set); doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml (by name) |
 
 Use `--all` to install all tiers at once.
 
@@ -247,7 +247,7 @@ The Claude tier is **per-user**. It **copies** hook scripts to `.claude/hooks/do
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `--workflows=<csv\|all\|none>` | the recorded set; first install: the 3 shell workflows | Which workflows; the Claude-powered ones are opt-in by name |
+| `--workflows=<csv\|all\|none>` | the recorded set; first install: the 2 shell workflows | Which workflows; the Claude-powered ones are opt-in by name |
 | `--base-branch NAME` | `main` | Target branch for PR checks (validated: git ref name of `A-Za-z0-9._/-`) |
 | `--cron EXPR` | `0 9 * * 1` | Schedule for weekly freshness audit (5 fields) |
 | `--ci-strict[=true\|false]` | `false` | Fail PR check on stale docs (exit non-zero) |
@@ -255,6 +255,19 @@ The Claude tier is **per-user**. It **copies** hook scripts to `.claude/hooks/do
 | `--force` | off | Also re-install workflows uninstalled on purpose |
 
 The choices are recorded in `.claude/doc-superpowers/installed.json` (schema 2: `.tiers.ci.{base_branch,cron,ci_strict,workflows}`); a plain `install --ci` reproduces them. Vendoring goes through `doc-tools.sh tools install|uninstall --helper <dir>`, per installed workflow.
+
+**Retired workflows.** `doc-index-update` was retired in v3.0.0 (it recorded every doc edited on the base branch as verified, unread, and failed every run). It is in `install.sh`'s `RETIRED_WORKFLOWS`: any `install --ci` (and a full `uninstall --ci`, or `uninstall --ci --workflows=doc-index-update`) removes a copy that carries the workflow marker and drops its state entry; a file of that name without the marker is kept and reported. `install --ci --workflows=doc-index-update` is an error.
+
+### CI Template Rules
+
+Every template in `scripts/hooks/ci/` follows these rules; `test-doc-pr-release.sh` checks them on the installer's output.
+
+- **Step bodies are helpers.** Every `run:` is one call of a script in `doc-superpowers-steps/` (or `doc-pr-release/`), tested on its own; the only inline steps are `doc-pr-release.yml`'s pre-checkout PR resolver and a one-line echo. The step scripts ship with any installed workflow.
+- **Fail closed.** A check that cannot run is never "0 stale": `freshness-check.sh` writes `status=failed` and no count (a `::warning::`; an `::error::` and exit 1 under STRICT, in the schedule run, and in the AI jobs' scope gate). The schedule closes its issue only after `status == 'ok'` with nothing stale or missing. Missing docs count with stale ones.
+- **Nothing index- or PR-sized in `$GITHUB_OUTPUT` or an env var** (Linux caps one string at 128 KiB): results stay in `$RUNNER_TEMP` files (`freshness.json`, `freshness-report.json`), read by `github-script` with `fs.readFileSync`; step outputs carry scalars only.
+- **No hard-coded code paths.** Which docs a change touches comes from the index: the AI jobs' scope step runs `check-freshness --code-refs-from` on the change's paths and gates the agent on the result.
+- **Every job has `timeout-minutes`;** every action is SHA-pinned with its exact version comment (`# v4.3.1`, `# v7.1.0`, `# v1.0.88`).
+- **AI steps:** `github_token: ${{ github.token }}` (never `id-token: write`: `permissions:` must bound the token, and its pushes must start no workflow run); the plugin from `prepare-agent.sh`'s checkout of tag `v<installed version>` (`plugin_marketplaces` + `plugins: doc-superpowers@doc-superpowers`); `claude_args` with `--max-turns` and a scoped `--allowedTools` (no bare `Bash`, no `git commit`/`git push`); same-repository PRs only (a job `if:`, or `pr-guard.sh` for comment events). The agent never commits: `commit-changes.sh` checks HEAD did not move and every changed path is allowed, then commits and pushes without force. Templates that commit to a branch share the `doc-superpowers-write-<branch>` concurrency group with `cancel-in-progress: false`.
 
 ### Environment Variables
 

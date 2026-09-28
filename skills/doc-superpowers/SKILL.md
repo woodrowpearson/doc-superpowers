@@ -107,6 +107,8 @@ With the `tools install` subcommand (v2.12.0+), projects can vendor `doc-tools.s
 
 **Recommended precedence for `$DOC_TOOLS` resolution:** prefer path #1 (plugin cache) for local sessions; let CI workflows reference path #2 directly via `.github/scripts/doc-tools.sh`. Don't mix — never use path #2 from a local session (it may be stale relative to the installed plugin version; use `tools status` to confirm).
 
+**In a doc-superpowers CI workflow** (a GitHub Actions run of one of the `hooks install --ci` templates, which install this plugin at the version that rendered them): use path #2 and call it by its literal path, `.github/scripts/doc-tools.sh <subcommand>` — the workflow's `--allowedTools` grants exactly that command, so the plugin-cache resolution above would be refused. Nobody answers questions there: take the recommended option. Never commit, push, tag or open a pull request — a workflow step after you checks which paths changed, then commits them.
+
 For user-provided optional scripts, detect dynamically:
 
 ```bash
@@ -532,38 +534,43 @@ Routes to `scripts/hooks/install.sh <subcommand> [flags]` (`install.sh help` lis
 - `--git` — Git hooks: pre-commit (freshness gate on the staged tree, so it reports the commit being made), post-merge (stale alert), post-checkout (branch check), prepare-commit-msg ("already stale" comments, editor commits only), pre-push (release reminder for the pushed refs). Also registers the `docs/.doc-index.json` custom merge driver (`scripts/merge-doc-index.sh`) via `git config` + a marked `.gitattributes` block; re-running `install --git` re-registers a pre-3.0 (pinned) registration. When the user already has a hook, it is kept: if it is a shell script (`sh`, `bash`, `dash`, `zsh`, … or no `#!` line), a marked POSIX block goes right after its `#!` line and runs our copy (`.doc-superpowers-<hook>` beside it) with git's arguments — pre-commit passes our exit code on, so `DOC_SUPERPOWERS_STRICT=1` blocks; pre-push hands both hooks the same ref lines on stdin. A hook in another language is skipped with a message. Re-install refreshes the copy and replaces an older block.
 - `--claude` — Claude Code hooks, **per-user**: registered in `.claude/settings.local.json` with commands `bash "$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/<hook>.sh`, and both that file and `.claude/hooks/doc-superpowers/` are excluded from git through git's `info/exclude` (they hold this machine's paths; each contributor installs their own). PreToolUse pre-commit gate, PostToolUse post-commit sync, Stop session summary. They read the event JSON on stdin and answer with `additionalContext` (for Claude) and `systemMessage` (for the user). Under `DOC_SUPERPOWERS_STRICT=1` the gate exits 2 with the reason on stderr, even under `DOC_SUPERPOWERS_QUIET=1`, because that is Claude's feedback. It gates `git … commit` only in command position, so `echo git commit` is not a commit. It defers `git add … && git commit` and `commit -a` to the git pre-commit hook, which sees the real index — and counts that hook only when it is the doc-superpowers one or holds the current integration block. Stop fires after every response, so the summary covers only working-tree changes.
 - No hook runs `update-index` or writes the index: attesting a doc stays a reviewer's step. A hook whose check fails (jq missing from PATH, a corrupt index) prints one line and blocks only under STRICT; absent tooling is silent. Installed hooks find `doc-tools.sh` by the merge driver's rule: for a plugin-cache install, the newest version-named sibling in numeric order (a plugin update needs no re-install; other sibling directories never run); for a checkout, its own pinned path.
-- `--ci` — CI/CD workflows. **Default: the three shell workflows** (`doc-freshness-pr`, `doc-freshness-schedule`, `doc-index-update`); the Claude-powered templates are opt-in by name (`--workflows=…`). Plus `doc-tools.sh` vendored into `.github/scripts/` through `doc-tools.sh tools install`, with the helper directories exactly while an installed workflow runs them.
+- `--ci` — CI/CD workflows. **Default: the two shell workflows** (`doc-freshness-pr`, `doc-freshness-schedule`); the Claude-powered templates are opt-in by name (`--workflows=…`). Plus `doc-tools.sh` vendored into `.github/scripts/` through `doc-tools.sh tools install`, with the helper directories exactly while an installed workflow runs them (every workflow runs step scripts from `.github/scripts/doc-superpowers-steps/`). `doc-index-update` was **retired in v3.0.0** (it recorded every doc edited on the base branch as verified, unread, and failed every run): any `install --ci` removes an installed copy the installer owns (its `doc-superpowers workflow v<N>` marker) and drops its state entry; a file of that name without the marker is kept and reported (`Kept …`) — relay it, never delete it for the user.
 
 **Consent before `--ci`.** Before installing workflows, show the user what each one may do in their repository and get a yes — permissions come from the workflow's `permissions:` block:
 
 | Workflow | Runs on | Permissions | Commits / writes |
 |---|---|---|---|
-| `doc-freshness-pr` (default) | PR open/sync | contents: read, pull-requests: write | PR comment only |
-| `doc-freshness-schedule` (default) | weekly cron | contents: read, issues: write | opens/updates an audit issue |
-| `doc-index-update` (default) | push to the base branch touching `docs/` | contents + pull-requests: write | commits the re-synced index to a new branch and opens a PR |
-| `doc-audit-update` (AI) | push to a non-base branch | contents + pull-requests: write | **commits to that branch** |
-| `doc-review-pr` (AI) | PR open, `@claude` comments | contents: read, pull-requests + issues: write | PR comments only |
-| `doc-release` (AI) | push to `release/**` | contents + pull-requests: write | commits release notes, opens a PR |
-| `doc-spec-verify` (AI) | PR open/sync | contents: read, pull-requests: write | PR comment only |
-| `doc-pr-full-cycle` (AI) | PR open | contents + pull-requests: write | **commits to the PR branch** |
-| `doc-pr-release` (AI) | PR pushes | contents + pull-requests: write | **commits a fragment to the PR branch**, edits the PR body |
+| `doc-freshness-pr` (default) | PR open/sync | contents: read, pull-requests: write | one PR comment (updated each push); `--ci-strict` fails the check |
+| `doc-freshness-schedule` (default) | weekly cron | contents: read, issues: write | opens/updates/closes an audit issue |
+| `doc-audit-update` (AI) | push to a non-base branch that leaves indexed docs stale or missing | contents: write | **a checked step commits `docs/` and indexed docs to that branch** |
+| `doc-review-pr` (AI) | PR open/sync touching indexed docs or their code; `@claude` PR comments by members | contents: read, pull-requests + issues: write | PR comments only |
+| `doc-release` (AI) | push to `release/**` | contents + pull-requests: write | a checked step commits the release files to a new branch and opens a PR |
+| `doc-spec-verify` (AI) | PR open/sync touching indexed specs or their code | contents: read, pull-requests: write | PR comment only |
+| `doc-pr-full-cycle` (AI) | PR open touching indexed docs or their code | contents + pull-requests: write | **a checked step commits `docs/` and indexed docs to the PR branch** |
+| `doc-pr-release` (AI) | PR pushes | contents + pull-requests: write | **a checked step commits the PR's fragment to the PR branch**, edits the PR body |
+
+How every workflow behaves (tell the user when they ask what they agree to):
+- A check that cannot run is never "all current": the freshness PR check warns (fails under `--ci-strict`), the schedule run fails and never closes the issue, and the AI jobs' scope step fails the job. Results stay in files; only counts reach step outputs.
+- Which docs and code a change touches comes from the doc index (`check-freshness --code-refs-from`), not from path filters in the workflow.
+- AI workflows use the job's own `GITHUB_TOKEN` (`github_token: ${{ github.token }}`; no `id-token: write`), so `permissions:` bounds them and their pushes start no other workflow run. They install this plugin from its GitHub tag `v<the installed version>`, run only for same-repository PRs (never forks or Dependabot), grant the agent a scoped `--allowedTools` list with `--max-turns`, and have `timeout-minutes`. The agent never commits: a later step refuses any changed path outside the workflow's set, then commits and pushes without force. The three that commit to a branch share one concurrency group per branch and are never cancelled mid-run.
+- `doc-release` opens its PR with the job's token: the repository setting *Allow GitHub Actions to create and approve pull requests* must be on (the step says so when it is off).
 
 AI workflows need a `CLAUDE_CODE_OAUTH_TOKEN` (preferred) or `ANTHROPIC_API_KEY` repository secret. Do not combine `doc-review-pr` and `doc-pr-full-cycle` (both review every PR). Name only the workflows the user agreed to in `--workflows=`.
 
 **CI-specific flags:**
 - `--workflows=<csv|all|none>` — Workflow selection.
-  - omitted: the recorded set (see *State*); a first install gets the three shell workflows.
-  - CSV (e.g. `--workflows=doc-pr-release,doc-index-update`): install the listed workflows (names are basenames without `.yml`, repeats count once; an unknown name or an empty list errors out). An explicit name overrides an earlier intentional uninstall.
+  - omitted: the recorded set (see *State*); a first install gets the two shell workflows.
+  - CSV (e.g. `--workflows=doc-pr-release,doc-freshness-schedule`): install the listed workflows (names are basenames without `.yml`, repeats count once; an unknown name, a retired one — `doc-index-update` — or an empty list errors out). An explicit name overrides an earlier intentional uninstall.
   - `all`: every template, except those uninstalled on purpose.
   - `none`: no workflow, only the vendored `doc-tools.sh` (prefer `tools install` for that).
 - `--base-branch NAME` — Target branch (default: `main`); a name git accepts, of letters, digits and `. _ / -` only (anything else could corrupt a workflow line).
 - `--cron EXPR` — Schedule, 5 fields (default: `0 9 * * 1`).
 - `--ci-strict[=true|false]` — Fail the PR check on stale docs (default false).
-- `--helpers=<true|false>` — Ship the `doc-pr-release` producer helpers (default `true`). Refused (non-zero, nothing written) while `doc-pr-release` is selected or already installed, since it runs them; a `doc-pr-release` uninstalled on purpose does not count. The workflows' step scripts (`.github/scripts/doc-superpowers-steps/`) are not gated by this flag: they ship with `doc-pr-release.yml` or `doc-release.yml`.
+- `--helpers=<true|false>` — Ship the `doc-pr-release` producer helpers (default `true`). Refused (non-zero, nothing written) while `doc-pr-release` is selected or already installed, since it runs them; a `doc-pr-release` uninstalled on purpose does not count. The workflows' step scripts (`.github/scripts/doc-superpowers-steps/`) are not gated by this flag: every workflow runs them, so they ship with any installed workflow.
 - `--force` — Also re-install workflows uninstalled on purpose. **Never pass `--force` unless the user asked for exactly that.**
 
 **Uninstall-specific flags:**
-- `--workflows=<csv|all|none>` — Which workflows (default: all, plus the vendored files). An unknown name exits non-zero.
+- `--workflows=<csv|all|none>` — Which workflows (default: all, plus the vendored files and a retired `doc-index-update.yml` the installer owns). An unknown name exits non-zero; `doc-index-update` is accepted here (it removes an owned copy).
 - `--transient` — Record the removal as temporary (`intentional:false`) so the next plain `install --ci` puts them back. Without it the removal is intentional.
 
 Vendored files are removed through `doc-tools.sh tools uninstall`: a file with local edits (or from another plugin version) is kept and reported as `Kept …` — relay those lines to the user; the uninstall is not "clean" then. `RELEASE-NOTES.next/` is never removed (fragments may live there).
@@ -592,19 +599,18 @@ When no tier flags are provided via SKILL.md routing, present the options to the
 #### CI sub-workflows
 
 The `--ci` tier's templates (a path holding a workflow that is not a
-doc-superpowers one is skipped). The first three are the default set; the
+doc-superpowers one is skipped). The first two are the default set; the
 others install only when named:
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
-| `doc-freshness-pr.yml` | PR open/sync | Comments on PRs when docs touched by the diff are stale |
-| `doc-freshness-schedule.yml` | Weekly cron | Posts an audit report as an issue |
-| `doc-index-update.yml` | Push to main | Re-syncs `docs/.doc-index.json` after merges |
-| `doc-audit-update.yml` | Push to non-main | AI-powered audit + update on feature branches |
-| `doc-review-pr.yml` | PR open + `@claude` comment | AI-powered PR doc review |
-| `doc-release.yml` | Push to `release/**` | AI-powered release-notes drafting |
-| `doc-spec-verify.yml` | PR open/sync | Verifies spec compliance against changed code |
-| `doc-pr-full-cycle.yml` | PR open | Superset of review-pr — runs review + update + diagram + sync |
+| `doc-freshness-pr.yml` | PR open/sync | One PR comment listing the docs the diff leaves stale or missing (updated every push; STRICT fails the check) |
+| `doc-freshness-schedule.yml` | Weekly cron | Keeps one audit issue open while docs are stale or missing; closes it after a clean check |
+| `doc-audit-update.yml` | Push to non-main leaving indexed docs stale | AI-powered audit + update on feature branches |
+| `doc-review-pr.yml` | PR open/sync touching indexed docs; `@claude` PR comment | AI-powered PR doc review (a fixed-prompt job), and tag mode for `@claude` |
+| `doc-release.yml` | Push to `release/**` | AI-powered release-notes drafting, opened as a PR |
+| `doc-spec-verify.yml` | PR open/sync touching indexed specs | Verifies spec compliance against changed code |
+| `doc-pr-full-cycle.yml` | PR open touching indexed docs | Superset of review-pr — runs review + update + diagram + sync |
 | `doc-pr-release.yml` | PR open/sync/reopen | Drafts/maintains `RELEASE-NOTES.next/PR-<N>.md` fragments and the managed `<!-- doc-superpowers:start/end -->` section of the PR body |
 
 The `doc-pr-release.yml` workflow uses shell helpers installed alongside
@@ -613,10 +619,15 @@ it at `.github/scripts/doc-pr-release/`:
 - `update-pr-body.sh` — idempotent marker-based PR body merge
 - `commit-and-push.sh` — stages/commits/pushes the fragment
 
-Its own `run:` steps (sentinel skip, context extraction, auth selection,
-post-agent verification) and `doc-release.yml`'s (unreleased-commit precheck,
-auth selection) are scripts in `.github/scripts/doc-superpowers-steps/`,
-installed whenever either workflow is and removed with the last of them.
+Every template's `run:` steps are scripts in
+`.github/scripts/doc-superpowers-steps/` (the freshness check and the AI
+jobs' scope gate `freshness-check.sh`, auth selection, the pinned plugin
+fetch `prepare-agent.sh`, the checked commit `commit-changes.sh`, the fork
+guard `pr-guard.sh`, and `doc-pr-release.yml`'s sentinel skip, context
+extraction and post-agent verification, `doc-release.yml`'s precheck),
+installed with the first workflow and removed with the last of them. The
+fragment commit itself is `commit-and-push.sh`, run as a workflow step after
+the agent, never by it.
 
 It also installs `RELEASE-NOTES.next/README.md` (if missing) with the
 fragment-format spec — markers, SHA-256 hash from line 3+, the canonical

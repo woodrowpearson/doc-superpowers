@@ -210,7 +210,7 @@
       "id": 6,
       "name": "hooks-install-all",
       "prompt": "I want to set up automated doc freshness monitoring. Install all the hooks for me. /doc-superpowers hooks install --all",
-      "expected_output": "Should install git hooks to .git/hooks/ (pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push), add Claude Code hook entries to .claude/settings.local.json (PreToolUse + PostToolUse + Stop), and generate GitHub Actions workflows to .github/workflows/ (7 YAML files — 3 shell-based + 4 Claude-powered). Should report counts of installed hooks per tier.",
+      "expected_output": "Should install git hooks to .git/hooks/ (pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push), add Claude Code hook entries to .claude/settings.local.json (PreToolUse + PostToolUse + Stop), and generate GitHub Actions workflows to .github/workflows/ (the 2 default shell-based ones; the 6 Claude-powered templates install only when named with --workflows=). Should report counts of installed hooks per tier.",
       "files": [],
       "assertions": [
         {
@@ -231,7 +231,7 @@
         {
           "name": "ci-workflows-created",
           "type": "file_exists",
-          "description": "Creates .github/workflows/ with 9 workflow files: doc-freshness-pr.yml, doc-freshness-schedule.yml, doc-index-update.yml, doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml"
+          "description": "Creates .github/workflows/ with the 2 default workflow files: doc-freshness-pr.yml and doc-freshness-schedule.yml (no doc-index-update.yml: retired in v3.0.0; no Claude-powered workflow unless named with --workflows=)"
         },
         {
           "name": "reports-install-counts",

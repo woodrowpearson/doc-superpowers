@@ -4413,7 +4413,8 @@ _tools_is_plugin() {
 
 # The helper directories the CI templates run as .github/scripts/<dir>/*.sh,
 # laid out in the plugin as scripts/hooks/ci/<dir>/. doc-superpowers-steps
-# holds the step scripts doc-pr-release.yml and doc-release.yml run.
+# holds the step scripts every template runs; doc-pr-release the producer
+# helpers of doc-pr-release.yml.
 _TOOLS_HELPER_DIRS="doc-pr-release doc-superpowers-steps"
 
 # _tools_copy <src> <dest> <mode for a new dest> [exec]: copy through a tmp

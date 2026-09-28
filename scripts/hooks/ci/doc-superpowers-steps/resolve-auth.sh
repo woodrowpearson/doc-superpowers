@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# "Resolve Anthropic auth" step shared by the AI workflow templates
-# (doc-pr-release.yml, doc-release.yml).
+# "Resolve Anthropic auth" step shared by every AI workflow template.
 #
 # Writes `use_oauth=true` when CLAUDE_CODE_OAUTH_TOKEN is set (it wins when
 # both are), `use_oauth=false` when only ANTHROPIC_API_KEY is set, and fails
@@ -17,8 +16,8 @@
 #
 # Extracted verbatim from the workflows' inline `run:` body so it can be
 # tested; runs under `set -e`, the runner's default for an unannotated `run:`.
-# One shared copy: the installer ships doc-superpowers-steps/ with either
-# workflow.
+# One shared copy: the installer ships doc-superpowers-steps/ with every
+# workflow that runs a step script.
 set -e
 
 if [ -n "$OAUTH" ]; then

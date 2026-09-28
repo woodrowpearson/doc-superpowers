@@ -1646,7 +1646,7 @@ test_install_ci_creates_workflows() {
   assert_eq "0" "$exit_code" "exits 0"
   assert_file_exists ".github/workflows/doc-freshness-pr.yml" "PR workflow"
   assert_file_exists ".github/workflows/doc-freshness-schedule.yml" "schedule workflow"
-  assert_file_exists ".github/workflows/doc-index-update.yml" "index workflow"
+  assert_file_not_exists ".github/workflows/doc-index-update.yml" "no index workflow (retired in v3.0.0)"
   assert_file_exists ".github/scripts/doc-tools.sh" "vendored doc-tools.sh"
   # Verify placeholders were substituted
   assert_not_contains "$(cat .github/workflows/doc-freshness-pr.yml)" "__BASE_BRANCH__" "base branch substituted"
@@ -1654,7 +1654,6 @@ test_install_ci_creates_workflows() {
   # Verify no remote curl in shell-based workflows
   assert_not_contains "$(cat .github/workflows/doc-freshness-pr.yml)" "curl" "no remote fetch in PR workflow"
   assert_not_contains "$(cat .github/workflows/doc-freshness-schedule.yml)" "curl" "no remote fetch in schedule workflow"
-  assert_not_contains "$(cat .github/workflows/doc-index-update.yml)" "curl" "no remote fetch in index workflow"
   teardown
 }
 
@@ -1785,10 +1784,10 @@ test_install_ci_vendors_doc_tools() {
   assert_contains "$output" "doc-tools.sh → .github/scripts/doc-tools.sh" "vendor message shown (doc-tools.sh tools install)"
   # Verify the vendored file is executable
   assert_true "doc-tools.sh is executable" test -x ".github/scripts/doc-tools.sh"
-  # Verify workflows reference the local copy
-  assert_contains "$(cat .github/workflows/doc-freshness-pr.yml)" ".github/scripts/doc-tools.sh" "PR workflow uses local script"
-  assert_contains "$(cat .github/workflows/doc-freshness-schedule.yml)" ".github/scripts/doc-tools.sh" "schedule workflow uses local script"
-  assert_contains "$(cat .github/workflows/doc-index-update.yml)" ".github/scripts/doc-tools.sh" "index workflow uses local script"
+  # Verify workflows run the local copy (through the vendored step script)
+  assert_contains "$(cat .github/workflows/doc-freshness-pr.yml)" ".github/scripts/doc-superpowers-steps/freshness-check.sh" "PR workflow runs the vendored step script"
+  assert_contains "$(cat .github/workflows/doc-freshness-schedule.yml)" ".github/scripts/doc-superpowers-steps/freshness-check.sh" "schedule workflow runs the vendored step script"
+  assert_contains "$(cat .github/scripts/doc-superpowers-steps/freshness-check.sh 2>/dev/null)" 'DOC_TOOLS="${DOC_TOOLS:-.github/scripts/doc-tools.sh}"' "…which runs the vendored doc-tools.sh"
   teardown
 }
 
@@ -2013,12 +2012,12 @@ test_install_ci_workflows_csv_installs_subset_only() {
   echo "test: install --ci --workflows=csv installs ONLY the listed workflows"
   setup
   set +e
-  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-pr-release,doc-index-update 2>&1)
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-pr-release,doc-freshness-schedule 2>&1)
   exit_code=$?
   set -e
   assert_eq "0" "$exit_code" "exits 0"
   assert_file_exists ".github/workflows/doc-pr-release.yml" "doc-pr-release installed"
-  assert_file_exists ".github/workflows/doc-index-update.yml" "doc-index-update installed"
+  assert_file_exists ".github/workflows/doc-freshness-schedule.yml" "doc-freshness-schedule installed"
   assert_file_not_exists ".github/workflows/doc-freshness-pr.yml" "doc-freshness-pr NOT installed"
   assert_file_not_exists ".github/workflows/doc-audit-update.yml" "doc-audit-update NOT installed"
   assert_file_not_exists ".github/workflows/doc-release.yml" "doc-release NOT installed"
@@ -2150,7 +2149,7 @@ _assert_installed_workflows_wired() {
     [ -x "$ref" ] || missing="${missing} ${ref}"
   done <<<"$refs"
   assert_eq "" "$missing" "$label: every script an installed workflow runs is installed and executable"
-  assert_eq "" "$(grep -lE '__(BASE_BRANCH|VERSION|CRON_SCHEDULE|CI_STRICT)__' .github/workflows/doc-*.yml || true)" \
+  assert_eq "" "$(grep -lE '__[A-Z][A-Z0-9_]*__' .github/workflows/doc-*.yml || true)" \
     "$label: no placeholder survives in installed workflows"
 }
 
@@ -2248,9 +2247,9 @@ test_install_ci_writes_state_file_on_first_install() {
   assert_eq "0" "$exit_code" "exits 0"
   assert_file_exists ".claude/doc-superpowers/installed.json" "state file created"
   local f=.claude/doc-superpowers/installed.json
-  assert_eq "doc-freshness-pr doc-freshness-schedule doc-index-update" \
+  assert_eq "doc-freshness-pr doc-freshness-schedule" \
     "$(jq -r '[.tiers.ci.workflows | to_entries[] | select(.value.state == "installed") | .key] | sort | join(" ")' "$f")" \
-    "the three shell workflows (the default set) are recorded installed, nothing else"
+    "the two shell workflows (the default set) are recorded installed, nothing else"
   assert_eq "main|0 9 * * 1|false" "$(jq -r '.tiers.ci | "\(.base_branch)|\(.cron)|\(.ci_strict)"' "$f")" "the choices are recorded"
   assert_eq "null|null" "$(jq -r '.tiers.ci | "\(.tools)|\(.helpers)"' "$f")" "no write-only tools/helpers records"
   teardown
@@ -2803,7 +2802,8 @@ test_i7_plain_reinstall_reproduces_choices() {
   assert_contains "$(cat .github/workflows/doc-freshness-pr.yml)" "branches: [develop]" "base branch kept"
   assert_contains "$(cat .github/workflows/doc-freshness-schedule.yml)" "0 6 * * 1" "cron kept"
   assert_file_exists ".github/workflows/doc-release.yml" "the opted-in AI workflow is kept"
-  assert_file_not_exists ".github/workflows/doc-index-update.yml" "no default added to a recorded set"
+  assert_eq "doc-freshness-pr.yml doc-freshness-schedule.yml doc-release.yml" \
+    "$(cd .github/workflows && printf '%s ' *.yml | sed 's/ $//')" "exactly the recorded set (nothing added)"
   assert_eq "$snap" "$(_ci_snapshot)" "workflows and state file byte-identical (no timestamp rewrite)"
   local f=.claude/doc-superpowers/installed.json
   assert_eq "develop|0 6 * * 1|true" "$(jq -r '.tiers.ci | "\(.base_branch)|\(.cron)|\(.ci_strict)"' "$f")" "the choices are recorded"
@@ -2825,7 +2825,8 @@ test_i7_legacy_install_choices_inferred() {
   assert_contains "$(cat .github/workflows/doc-freshness-pr.yml)" 'DOC_SUPERPOWERS_STRICT: "1"' "strict kept (read from the installed workflow)"
   assert_contains "$(cat .github/workflows/doc-freshness-pr.yml)" "branches: [develop]" "base branch kept"
   assert_contains "$(cat .github/workflows/doc-freshness-schedule.yml)" "0 5 * * 2" "cron kept"
-  assert_file_not_exists ".github/workflows/doc-index-update.yml" "the installed set is kept"
+  assert_eq "doc-freshness-pr.yml doc-freshness-schedule.yml" \
+    "$(cd .github/workflows && printf '%s ' *.yml | sed 's/ $//')" "the installed set is kept"
   local f=.claude/doc-superpowers/installed.json
   assert_eq "develop|0 5 * * 2|true|2025-01-01T00:00:00Z|null" \
     "$(jq -r '.tiers.ci | "\(.base_branch)|\(.cron)|\(.ci_strict)|\(.workflows["doc-freshness-pr"].installed_at)|\(.tools)"' "$f")" \
@@ -2862,12 +2863,12 @@ test_i7_install_uninstall_leaves_no_residue() {
 }
 
 test_i7_default_ci_set_and_help() {
-  echo "test: I-7 install --ci defaults to the three shell workflows; help lists every hook and workflow"
+  echo "test: I-7 install --ci defaults to the two shell workflows; help lists every hook and workflow"
   setup
   inst install --ci
   assert_eq "0" "$IRC" "exits 0"
-  assert_eq "doc-freshness-pr.yml doc-freshness-schedule.yml doc-index-update.yml" \
-    "$(cd .github/workflows && printf '%s ' *.yml | sed 's/ $//')" "the three shell workflows, no AI template"
+  assert_eq "doc-freshness-pr.yml doc-freshness-schedule.yml" \
+    "$(cd .github/workflows && printf '%s ' *.yml | sed 's/ $//')" "the two shell workflows, no AI template"
   inst help
   assert_eq "0" "$IRC" "help exits 0"
   local n
@@ -3206,5 +3207,142 @@ test_i7_ci_vendoring_through_tools
 test_i7_gitattributes_owned_block
 test_i7_reinstall_reregisters_merge_driver
 test_i7_helpers_false_is_state_aware
+
+
+# --- I-8: CI templates — the retired doc-index-update, step scripts ----------
+#
+# doc-index-update.yml re-verified every doc edited on the base branch without
+# anyone reading it, and failed every run. It is retired: no template, no
+# default, no --workflows name; an install the installer owns is removed on
+# upgrade (ownership = the workflow marker, the rule for every managed
+# workflow); one it cannot show it owns is kept and reported.
+
+# A pre-3.0 install's doc-index-update.yml (its marker makes it ours) and its
+# state entry, next to the current install.
+_plant_retired_index_update() {
+  printf '%s\n' '# doc-superpowers workflow v1' '# Auto-update doc index after docs change on main' \
+    '# Installed by doc-superpowers hooks installer' '' 'name: Doc Index Update' 'on:' '  push:' '    branches: [main]' \
+    > .github/workflows/doc-index-update.yml
+  local f=.claude/doc-superpowers/installed.json tmp
+  tmp=$(jq '.tiers.ci.workflows["doc-index-update"] = {state: "installed", installed_at: "2025-01-01T00:00:00Z"}' "$f")
+  printf '%s\n' "$tmp" > "$f"
+}
+
+test_i8_doc_index_update_retired() {
+  echo "test: I-8 doc-index-update is retired: no template, not in the default set, the help or --workflows"
+  setup
+  assert_file_not_exists "$HOOKS_DIR/ci/doc-index-update.yml" "the template is gone"
+  inst install --ci
+  assert_eq "0" "$IRC" "install --ci exits 0"
+  assert_eq "doc-freshness-pr.yml doc-freshness-schedule.yml" \
+    "$(cd .github/workflows && printf '%s ' *.yml | sed 's/ $//')" "the default set is the two shell workflows"
+  inst install --ci --workflows=doc-index-update
+  assert_eq "1" "$IRC" "install --workflows=doc-index-update exits 1"
+  assert_contains "$IOUT" "retired" "…and says the workflow was retired"
+  assert_file_not_exists ".github/workflows/doc-index-update.yml" "…writing no such workflow"
+  inst help
+  assert_not_contains "$IOUT" "doc-index-update" "help does not offer it"
+  teardown
+}
+
+test_i8_retired_workflow_removed_on_upgrade() {
+  echo "test: I-8 an install --ci removes a doc-index-update.yml the installer owns (marker) and drops its state entry"
+  setup
+  inst install --ci
+  _plant_retired_index_update
+  inst install --ci
+  assert_eq "0" "$IRC" "install --ci exits 0"
+  assert_file_not_exists ".github/workflows/doc-index-update.yml" "the retired workflow is removed"
+  assert_contains "$IOUT" "doc-index-update.yml" "the removal is reported"
+  local f=.claude/doc-superpowers/installed.json
+  assert_eq "null" "$(jq -c '.tiers.ci.workflows["doc-index-update"]' "$f")" "its state entry is dropped"
+  assert_eq "installed installed" \
+    "$(jq -r '[.tiers.ci.workflows["doc-freshness-pr"].state, .tiers.ci.workflows["doc-freshness-schedule"].state] | join(" ")' "$f")" \
+    "the other workflows' state is untouched"
+  # Any install --ci is an upgrade, --workflows=none included.
+  _plant_retired_index_update
+  inst install --ci --workflows=none
+  assert_eq "0" "$IRC" "install --ci --workflows=none exits 0"
+  assert_file_not_exists ".github/workflows/doc-index-update.yml" "--workflows=none also removes it"
+  assert_eq "null" "$(jq -c '.tiers.ci.workflows["doc-index-update"]' "$f")" "…and drops its entry"
+  teardown
+}
+
+test_i8_retired_foreign_file_kept() {
+  echo "test: I-8 a doc-index-update.yml without the marker (not provably ours) is kept and reported, never deleted"
+  setup
+  inst install --ci
+  printf 'name: my own index job\n' > .github/workflows/doc-index-update.yml
+  inst install --ci
+  assert_eq "0" "$IRC" "install --ci exits 0"
+  assert_eq "name: my own index job" "$(cat .github/workflows/doc-index-update.yml)" "kept byte-for-byte"
+  assert_contains "$IOUT" "Kept .github/workflows/doc-index-update.yml" "…and reported"
+  inst uninstall --ci
+  assert_eq "0" "$IRC" "uninstall --ci exits 0"
+  assert_eq "name: my own index job" "$(cat .github/workflows/doc-index-update.yml)" "a full uninstall keeps it too"
+  teardown
+}
+
+test_i8_retired_status_and_uninstall() {
+  echo "test: I-8 status names an owned retired workflow; uninstall (full or by name) removes it and its entry"
+  setup
+  inst install --ci
+  _plant_retired_index_update
+  inst status
+  assert_eq "0" "$IRC" "status exits 0"
+  assert_contains "$(grep 'doc-index-update' <<<"$IOUT" || true)" "retired" "status marks it retired"
+  local f=.claude/doc-superpowers/installed.json
+  inst uninstall --ci --workflows=doc-index-update
+  assert_eq "0" "$IRC" "uninstall --workflows=doc-index-update exits 0"
+  assert_file_not_exists ".github/workflows/doc-index-update.yml" "removed by name"
+  assert_eq "null" "$(jq -c '.tiers.ci.workflows["doc-index-update"]' "$f")" "…its entry dropped"
+  assert_file_exists ".github/workflows/doc-freshness-pr.yml" "…the others kept"
+  _plant_retired_index_update
+  inst uninstall --ci
+  assert_eq "0" "$IRC" "a full uninstall exits 0"
+  assert_file_not_exists ".github/workflows/doc-index-update.yml" "a full uninstall removes it (no residue)"
+  assert_eq "null" "$(jq -c '.tiers.ci.workflows["doc-index-update"]' "$f")" "…and drops its entry"
+  teardown
+}
+
+test_i8_no_placeholder_survives_install_all() {
+  echo "test: I-8 install --all --workflows=all leaves no __PLACEHOLDER__ in a workflow, a hook or a shipped helper"
+  setup
+  inst install --all --workflows=all
+  assert_eq "0" "$IRC" "install --all --workflows=all exits 0"
+  local files=() f hits
+  for f in .github/workflows/*.yml .github/scripts/doc-superpowers-steps/*.sh .github/scripts/doc-pr-release/*.sh \
+    .git/hooks/pre-commit .git/hooks/post-merge .git/hooks/post-checkout .git/hooks/prepare-commit-msg .git/hooks/pre-push \
+    .claude/hooks/doc-superpowers/*.sh; do
+    [ -f "$f" ] && files+=("$f")
+  done
+  assert_true "installed files found (${#files[@]})" test "${#files[@]}" -ge 20
+  hits=$(grep -lE '__[A-Z][A-Z0-9_]*__' ${files[@]+"${files[@]}"} || true)
+  assert_eq "" "$hits" "no placeholder survives"
+  _assert_installed_workflows_wired "install --all --workflows=all"
+  teardown
+}
+
+test_i8_default_set_ships_its_step_scripts() {
+  echo "test: I-8 the default set's workflows run step scripts, so install --ci ships them (and only the producer helpers with doc-pr-release)"
+  setup
+  inst install --ci
+  assert_eq "0" "$IRC" "install --ci exits 0"
+  assert_true "freshness-check.sh is vendored executable" test -x .github/scripts/doc-superpowers-steps/freshness-check.sh
+  assert_true "no producer helpers without doc-pr-release" test ! -d .github/scripts/doc-pr-release
+  _assert_installed_workflows_wired "install --ci (default set)"
+  inst uninstall --ci
+  assert_true "uninstall removes the step scripts with the last workflow" test ! -d .github/scripts/doc-superpowers-steps
+  teardown
+}
+
+echo ""
+echo "=== CI templates: retired doc-index-update, step scripts (I-8) ==="
+test_i8_doc_index_update_retired
+test_i8_retired_workflow_removed_on_upgrade
+test_i8_retired_foreign_file_kept
+test_i8_retired_status_and_uninstall
+test_i8_no_placeholder_survives_install_all
+test_i8_default_set_ships_its_step_scripts
 
 print_summary

@@ -1,94 +1,94 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-28T05:49:32Z",
+  "generated_at": "2026-09-28T07:17:27Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
-      "content_hash": "sha256:06a9886bcf351da5ea6ad5777c2f495803e34d5c869c6b22ff279d837089b6fa",
+      "content_hash": "sha256:ab8bc96d9b7946e3a55d13fbc6cf2a85731c749386932a3eef9834e62ea4f2d9",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/",
         "references/"
       ],
-      "code_commit": "71eceb2daffff5241ef8c17e61edb6c2ba3cdf42",
+      "code_commit": "1ab0557a01b86249160444cf8a312e276deae0b5",
       "doc_type": "architecture",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-28T05:49:32Z",
+      "last_verified": "2026-09-28T07:17:27Z",
       "implementation": [],
       "code_oids": {
-        "skills/doc-superpowers/SKILL.md": "866a1ea3b1fa6474474b3d37bdf9912a261b33aa",
-        "scripts/": "4ad8db1c4cc7e6111c721734befefa3bc0c8cde9",
+        "skills/doc-superpowers/SKILL.md": "78c4da5dd9e444a1a120ad059ccffce230e1b5d5",
+        "scripts/": "e0552a2a373495cfa5a4c889276942ec99c5fa9b",
         "references/": "e83f1f61d54ea91f2238495832048b8a9255be0a"
       }
     },
     "docs/codebase-guide.md": {
-      "content_hash": "sha256:5625d57262c51bb5eb6b8a2beb865e15a4bef10ab95a7bf044eb8c1796c716cf",
+      "content_hash": "sha256:4b9f7d0147d11248b942dc9a30b7b200acd442247b3a3cac328a4e65ae253b83",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "71eceb2daffff5241ef8c17e61edb6c2ba3cdf42",
+      "code_commit": "1ab0557a01b86249160444cf8a312e276deae0b5",
       "doc_type": "guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-28T05:49:32Z",
+      "last_verified": "2026-09-28T07:17:27Z",
       "implementation": [],
       "code_oids": {
-        "skills/doc-superpowers/SKILL.md": "866a1ea3b1fa6474474b3d37bdf9912a261b33aa",
-        "scripts/": "4ad8db1c4cc7e6111c721734befefa3bc0c8cde9"
+        "skills/doc-superpowers/SKILL.md": "78c4da5dd9e444a1a120ad059ccffce230e1b5d5",
+        "scripts/": "e0552a2a373495cfa5a4c889276942ec99c5fa9b"
       }
     },
     "docs/conventions.md": {
-      "content_hash": "sha256:c42711068184dcedcd5ffb17f8b22724220ab691bbee9406667e19f732bb2845",
+      "content_hash": "sha256:0037d56c7b21cbce783a22513d7e2b94678e6edd95640d3e3833cfd6df5d1418",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "references/doc-spec.md"
       ],
-      "code_commit": "71eceb2daffff5241ef8c17e61edb6c2ba3cdf42",
+      "code_commit": "1ab0557a01b86249160444cf8a312e276deae0b5",
       "doc_type": "guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-28T05:49:32Z",
+      "last_verified": "2026-09-28T07:17:27Z",
       "implementation": [],
       "code_oids": {
-        "skills/doc-superpowers/SKILL.md": "866a1ea3b1fa6474474b3d37bdf9912a261b33aa",
+        "skills/doc-superpowers/SKILL.md": "78c4da5dd9e444a1a120ad059ccffce230e1b5d5",
         "references/doc-spec.md": "7d8e6c23516825b5611dba07a358900bc2c182f3"
       }
     },
     "docs/guides/getting-started.md": {
-      "content_hash": "sha256:28f71f3fce73a9753bf4d70849991a59ae2ff2c33914dde3b8e37613e242625a",
+      "content_hash": "sha256:5484e3481501e7ee5de1507e03d52aeecb6b034e038bb90dc7b9bc5280713968",
       "code_refs": [
         "README.md",
         "skills/doc-superpowers/SKILL.md"
       ],
-      "code_commit": "71eceb2daffff5241ef8c17e61edb6c2ba3cdf42",
+      "code_commit": "1ab0557a01b86249160444cf8a312e276deae0b5",
       "doc_type": "guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-28T05:49:32Z",
+      "last_verified": "2026-09-28T07:17:27Z",
       "implementation": [],
       "code_oids": {
-        "README.md": "25a89eee4a9fecf49d74bef5388f7409a3eb93fb",
-        "skills/doc-superpowers/SKILL.md": "866a1ea3b1fa6474474b3d37bdf9912a261b33aa"
+        "README.md": "b29cde802a0b3a5ffc75d54ad25404787d6448c4",
+        "skills/doc-superpowers/SKILL.md": "78c4da5dd9e444a1a120ad059ccffce230e1b5d5"
       }
     },
     "docs/workflows/doc-superpowers.md": {
-      "content_hash": "sha256:514b25bb9ae4f5c296a3903862d42067f48667218cc52c3cbbfdb4eefaf4c53a",
+      "content_hash": "sha256:811c492bc258dc2b8d3217cda3605338e83ca974d91b94e2deadbe744b328a5a",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "71eceb2daffff5241ef8c17e61edb6c2ba3cdf42",
+      "code_commit": "1ab0557a01b86249160444cf8a312e276deae0b5",
       "doc_type": "workflows",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-28T05:49:32Z",
+      "last_verified": "2026-09-28T07:17:27Z",
       "implementation": [],
       "code_oids": {
-        "skills/doc-superpowers/SKILL.md": "866a1ea3b1fa6474474b3d37bdf9912a261b33aa",
-        "scripts/": "4ad8db1c4cc7e6111c721734befefa3bc0c8cde9"
+        "skills/doc-superpowers/SKILL.md": "78c4da5dd9e444a1a120ad059ccffce230e1b5d5",
+        "scripts/": "e0552a2a373495cfa5a4c889276942ec99c5fa9b"
       }
     },
     "docs/plans/2026-03-26-audit-report.md": {
@@ -570,13 +570,15 @@
       "code_oids": {}
     },
     "docs/issues/2026-09-27-sweep-05ea982-I08-ci-templates.md": {
-      "content_hash": "sha256:4edf5765210ff74be2cfb2b521c943d51aa78d9779c70ed8017cbf9b55f68e37",
+      "content_hash": "sha256:e1fa0c6c9b840e9ca8fe7f511be863de1d99cb343b6c776babe7667ead783399",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "issue",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-27T06:12:33Z"
+      "last_verified": "2026-09-28T07:17:27Z",
+      "code_oids": {},
+      "implementation": []
     },
     "docs/issues/2026-09-27-sweep-05ea982-I09-release-fragment-pipeline.md": {
       "content_hash": "sha256:d76c7918602fff770f1ea1a38fa809d5dca80764e51fb2bd2781f1a99aaf8d60",

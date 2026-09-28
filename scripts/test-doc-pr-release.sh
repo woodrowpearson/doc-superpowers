@@ -957,32 +957,36 @@ test_workflow_structure_guards() {
 }
 
 test_workflow_helper_wiring() {
-  echo "Test: every run: step is a shipped helper call (no untested inline body)"
+  echo "Test: every run: step of every template is one shipped helper call (no untested inline body)"
   yaml_unavailable "workflow_helper_wiring" && return 0
-  local tpl line step run dir helper bad=""
-  for tpl in doc-pr-release.yml doc-release.yml; do
+  local tpl name line step run cmd dir bad=""
+  for tpl in "$TEMPLATE_DIR"/doc-*.yml; do
+    name=$(basename "$tpl")
     while IFS= read -r line; do
       step=$(jq -r '.step' <<<"$line")
       run=$(jq -r '.run' <<<"$line")
-      case "$run" in
+      cmd=${run%%[[:space:]]*}
+      case "$cmd" in
         .github/scripts/*/*.sh)
-          dir=${run#.github/scripts/}
-          helper="$TEMPLATE_DIR/$dir"
-          [ -x "$helper" ] || bad="${bad}    $tpl / $step: $run has no executable source at scripts/hooks/ci/$dir"$'\n'
+          dir=${cmd#.github/scripts/}
+          [ -x "$TEMPLATE_DIR/$dir" ] || bad="${bad}    $name / $step: $cmd has no executable source at scripts/hooks/ci/$dir"$'\n'
+          case "$run" in
+            *$'\n'?* | *'&&'* | *';'* | *'|'*) bad="${bad}    $name / $step: more than one command around the helper call"$'\n' ;;
+          esac
           ;;
         *)
           # Two sanctioned inline steps: the pre-checkout resolver (tested
           # below straight from the template) and a one-line echo.
-          case "$step" in
-            "Resolve PR number and head ref"|"Skip if no new commits since last fragment update") ;;
-            *) bad="${bad}    $tpl / $step: inline run: body (extract it into a tested helper)"$'\n' ;;
+          case "$name / $step" in
+            "doc-pr-release.yml / Resolve PR number and head ref" | "doc-pr-release.yml / Skip if no new commits since last fragment update") ;;
+            *) bad="${bad}    $name / $step: inline run: body (extract it into a tested helper)"$'\n' ;;
           esac
           ;;
       esac
-    done < <(_yaml_runs "$TEMPLATE_DIR/$tpl")
+    done < <(_yaml_runs "$tpl")
   done
   [ -z "$bad" ] || printf '%s' "$bad"
-  assert_eq "" "$bad" "doc-pr-release.yml + doc-release.yml run: steps all resolve to shipped helpers"
+  assert_eq "" "$bad" "every template's run: steps resolve to shipped helpers"
 }
 
 test_resolve_pr_inline_step() {
@@ -1031,5 +1035,700 @@ test_workflow_yaml_placeholders
 test_workflow_structure_guards
 test_workflow_helper_wiring
 test_resolve_pr_inline_step
+
+# ============================================================================
+# CI templates as the installer renders them (I-8)
+# ============================================================================
+echo
+echo "=== CI templates as installed (I-8) ==="
+
+INSTALLER="$REPO_ROOT/scripts/hooks/install.sh"
+# A PATH whose `bash` is $BASH_BIN: the installed helpers and the vendored
+# doc-tools.sh start `bash` by name (#!/usr/bin/env bash).
+_BASH_PATH_DIR=$(harness_mktemp_d bashpath)
+ln -s "$(type -P "$BASH_BIN" || printf '%s' "$BASH_BIN")" "$_BASH_PATH_DIR/bash"
+BASH_PATH="$_BASH_PATH_DIR:$PATH"
+
+# installed_repo <install args…>: new_repo with the installer run in it;
+# echoes its path. Returns 1 (the installer's output on stderr) on failure.
+installed_repo() {
+  local dir log rc=0
+  dir=$(new_repo)
+  log=$(harness_mktemp install-log)
+  ( cd "$dir" && PATH="$BASH_PATH" "$BASH_BIN" "$INSTALLER" install "$@" ) > "$log" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    { echo "  installed_repo: install $* exited $rc:"; sed 's/^/    /' "$log"; } >&2
+    return 1
+  fi
+  printf '%s' "$dir"
+}
+
+# _yaml_json <file> — the whole document as JSON. YAML 1.1 reads the `on:`
+# key as `true`, so triggers are (.on // .true).
+_yaml_json() {
+  case "$YAML_PARSER" in
+    python3) HOME="$_HARNESS_REAL_HOME" python3 -c 'import json, sys, yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))' "$1" ;;
+    ruby) ruby -ryaml -rjson -e 'puts YAML.load_file(ARGV[0]).to_json' "$1" ;;
+  esac
+}
+
+AI_WORKFLOWS="doc-audit-update doc-review-pr doc-release doc-spec-verify doc-pr-full-cycle doc-pr-release"
+AI_USES="anthropics/claude-code-action@"
+ALL_REPO=$(installed_repo --all --workflows=all) || ALL_REPO=""
+
+# _need_all_repo <label>: a FAIL, and 1, when the install --all fixture failed.
+_need_all_repo() {
+  [ -n "$ALL_REPO" ] && return 0
+  assert_true "$1: install --all --workflows=all succeeded" false
+  return 1
+}
+
+# The claude-code-action steps of <workflow file>, one JSON object per line:
+# {wf, job, step, if, with}.
+_ai_steps() {
+  _yaml_json "$1" | jq -c --arg wf "$(basename "$1" .yml)" --arg u "$AI_USES" '
+    .jobs | to_entries[] | .key as $job | .value.steps[]?
+    | select((.uses // "") | startswith($u))
+    | {wf: $wf, job: $job, step: (.name // ""), if: (.if // ""), with: (.with // {})}'
+}
+
+# jq: the entries of claude_args' --allowedTools "<csv>" ([] when absent).
+# shellcheck disable=SC2016  # jq program
+_JQ_TOOLS='def tools: (.with.claude_args // "") | [capture("--allowedTools[ =]\"(?<t>[^\"]*)\"").t] | (.[0] // "")
+  | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""));'
+
+test_i8_installed_no_placeholder() {
+  echo "Test: install --all --workflows=all — no __PLACEHOLDER__ survives in a workflow or a shipped helper"
+  _need_all_repo "i8_installed_no_placeholder" || return 0
+  local hits
+  hits=$(grep -rlE '__[A-Z][A-Z0-9_]*__' "$ALL_REPO/.github/workflows" "$ALL_REPO/.github/scripts/doc-superpowers-steps" \
+    "$ALL_REPO/.github/scripts/doc-pr-release" 2>/dev/null || true)
+  assert_eq "" "$hits" "no placeholder in the installed workflows or helpers"
+}
+
+test_i8_ai_steps_runnable_and_scoped() {
+  echo "Test: every installed AI step passes github_token, the pinned plugin, a scoped --allowedTools and --max-turns (GH #5)"
+  yaml_unavailable "i8_ai_steps_runnable_and_scoped" && return 0
+  _need_all_repo "i8_ai_steps_runnable_and_scoped" || return 0
+  local wf line out bad="" n=0
+  for wf in $AI_WORKFLOWS; do
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      n=$((n + 1))
+      # shellcheck disable=SC2016  # jq program
+      out=$(jq -r "$_JQ_TOOLS"'
+        "\(.wf) / \(.job) / \(.step)" as $id
+        | ( (if .with.github_token != "${{ github.token }}" then "github_token is not ${{ github.token }}" else empty end),
+            (if ((.with.plugins // "") | split("\n") | map(gsub("^\\s+|\\s+$"; "")) | any(. == "doc-superpowers@doc-superpowers")) | not
+             then "plugins does not install doc-superpowers@doc-superpowers" else empty end),
+            (if ((.with.plugin_marketplaces // "") | test("^\\$\\{\\{ *steps\\.[A-Za-z0-9_-]+\\.outputs\\.marketplace *\\}\\}$")) | not
+             then "plugin_marketplaces is not the pinned checkout (steps.<id>.outputs.marketplace)" else empty end),
+            (if ((.with.claude_args // "") | test("--max-turns[ =][0-9]+")) | not then "claude_args has no --max-turns" else empty end),
+            (if (tools | length) == 0 then "claude_args has no --allowedTools \"…\" list" else empty end),
+            (tools[] | select(. == "Bash" or . == "*" or test("^Bash\\((\\*|:\\*)?\\)$") or test("git (commit|push)") or test("commit-and-push"))
+             | "unscoped or committing tool: \(.)")
+          ) | "    \($id): \(.)"' <<<"$line")
+      [ -z "$out" ] || bad="$bad$out"$'\n'
+    done < <(_ai_steps "$ALL_REPO/.github/workflows/$wf.yml")
+  done
+  [ -z "$bad" ] || printf '%s' "$bad"
+  assert_eq "" "$bad" "AI steps can run (token, pinned plugin) and are least-privilege (scoped tools, turn cap)"
+  assert_eq "7" "$n" "7 AI steps checked (6 templates; doc-review-pr has a PR job and a comment job)"
+  assert_eq "" "$(grep -l 'id-token' "$ALL_REPO"/.github/workflows/*.yml || true)" "no workflow asks for id-token (GH #5 is fixed with github_token)"
+  assert_eq "" "$(grep -L 'DOC_SUPERPOWERS_VERSION: "v' $(for wf in $AI_WORKFLOWS; do printf '%s ' "$ALL_REPO/.github/workflows/$wf.yml"; done) || true)" \
+    "every AI workflow carries the installed version its plugin step pins"
+}
+
+test_i8_every_job_has_a_timeout() {
+  echo "Test: every job of every installed workflow has timeout-minutes"
+  yaml_unavailable "i8_every_job_has_a_timeout" && return 0
+  _need_all_repo "i8_every_job_has_a_timeout" || return 0
+  local f out bad="" n=0
+  for f in "$ALL_REPO"/.github/workflows/doc-*.yml; do
+    n=$((n + 1))
+    out=$(_yaml_json "$f" | jq -r --arg wf "$(basename "$f")" \
+      '.jobs | to_entries[] | select((.value["timeout-minutes"] | type) != "number") | "    \($wf) / \(.key)"')
+    [ -z "$out" ] || bad="$bad$out"$'\n'
+  done
+  [ -z "$bad" ] || printf '%s' "$bad"
+  assert_eq "" "$bad" "no job without timeout-minutes"
+  assert_eq "8" "$n" "8 installed workflows checked"
+}
+
+test_i8_pins_carry_exact_versions() {
+  echo "Test: every uses: is a SHA pin with its exact version comment"
+  _need_all_repo "i8_pins_carry_exact_versions" || return 0
+  local f l bad=""
+  for f in "$ALL_REPO"/.github/workflows/doc-*.yml; do
+    while IFS= read -r l; do
+      case "$l" in
+        *"uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1") ;;
+        *"uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0") ;;
+        *"uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88") ;;
+        *) bad="${bad}    $(basename "$f"):$l"$'\n' ;;
+      esac
+    done < <(grep -E '^[[:space:]]*(-[[:space:]]+)?uses:' "$f")
+  done
+  [ -z "$bad" ] || printf '%s' "$bad"
+  assert_eq "" "$bad" "checkout # v4.3.1, github-script # v7.1.0, claude-code-action # v1.0.88"
+}
+
+test_i8_freshness_workflows_read_the_report_file() {
+  echo "Test: the freshness workflows pass only scalars through step outputs; github-script reads the report from a file"
+  yaml_unavailable "i8_freshness_workflows_read_the_report_file" && return 0
+  _need_all_repo "i8_freshness_workflows_read_the_report_file" || return 0
+  local wf json envs scripts runs
+  for wf in doc-freshness-pr doc-freshness-schedule; do
+    json=$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml")
+    envs=$(jq -r '[.jobs[].steps[] | (.env // {}) | to_entries[] | .value | tostring] | join("\n")' <<<"$json")
+    assert_not_contains "$envs" "outputs.result" "$wf: no step reads an index-sized outputs.result"
+    assert_not_contains "$envs" "outputs.files" "$wf: no step reads a PR-sized outputs.files"
+    scripts=$(jq -r '[.jobs[].steps[] | select((.uses // "") | startswith("actions/github-script@")) | .with.script] | join("\n")' <<<"$json")
+    assert_contains "$scripts" "fs.readFileSync(process.env.REPORT" "$wf: github-script reads the report file"
+    assert_contains "$scripts" "github.paginate(" "$wf: github-script reads every page"
+    assert_contains "$scripts" "github-actions[bot]" "$wf: github-script only touches the bot's own comment/issue"
+    runs=$(jq -r '[.jobs[].steps[] | .run // empty] | join("\n")' <<<"$json")
+    assert_contains "$runs" ".github/scripts/doc-superpowers-steps/freshness-check.sh" "$wf: the check is the tested helper"
+    assert_not_contains "$runs" "GITHUB_OUTPUT" "$wf: no inline body writes step outputs"
+  done
+  json=$(_yaml_json "$ALL_REPO/.github/workflows/doc-freshness-pr.yml")
+  local cif
+  cif=$(jq -r '.jobs[].steps[] | select((.uses // "") | startswith("actions/github-script@")) | .if' <<<"$json")
+  assert_contains "$cif" "!cancelled()" "doc-freshness-pr: the comment is upserted even when STRICT failed the check step"
+  assert_contains "$cif" "github.event.pull_request.head.repo.full_name == github.repository" \
+    "doc-freshness-pr: no comment attempt on a fork PR (read-only token)"
+  assert_contains "$(jq -r '[.jobs[].steps[] | .with.script // empty] | join("\n")' <<<"$json")" "doc-superpowers:freshness-report" \
+    "doc-freshness-pr: the comment is found by its hidden marker"
+}
+
+test_i8_schedule_closes_only_after_a_good_check() {
+  echo "Test: doc-freshness-schedule creates/closes the issue only after a successful check"
+  yaml_unavailable "i8_schedule_closes_only_after_a_good_check" && return 0
+  _need_all_repo "i8_schedule_closes_only_after_a_good_check" || return 0
+  local json close_if create_if
+  json=$(_yaml_json "$ALL_REPO/.github/workflows/doc-freshness-schedule.yml")
+  close_if=$(jq -r '.jobs[].steps[] | select(.name == "Close issue if all clear") | .if' <<<"$json")
+  create_if=$(jq -r '.jobs[].steps[] | select(.name == "Create or update issue") | .if' <<<"$json")
+  assert_contains "$close_if" "steps.freshness.outputs.status == 'ok'" "close: gated on a successful check"
+  assert_contains "$close_if" "steps.freshness.outputs.count == '0'" "close: …and nothing stale or missing"
+  assert_contains "$create_if" "steps.freshness.outputs.status == 'ok'" "create/update: gated on a successful check"
+}
+
+test_i8_review_pr_split() {
+  echo "Test: doc-review-pr — a fixed-prompt pull_request job and a tag-mode job for @claude PR comments"
+  yaml_unavailable "i8_review_pr_split" && return 0
+  _need_all_repo "i8_review_pr_split" || return 0
+  local json
+  json=$(_yaml_json "$ALL_REPO/.github/workflows/doc-review-pr.yml")
+  assert_eq "1" "$(jq --arg c "github.event_name == 'pull_request'" --arg u "$AI_USES" \
+    '[.jobs[] | select((.if // "") | contains($c)) | .steps[]? | select((.uses // "") | startswith($u)) | select((.with.prompt // "") != "")] | length' <<<"$json")" \
+    "one job, gated on pull_request events, runs a fixed prompt"
+  assert_eq "1" "$(jq --arg at "'@claude'" --arg u "$AI_USES" \
+    '[.jobs[] | select((.if // "") | contains("github.event.issue.pull_request") and contains($at))
+      | .steps[]? | select((.uses // "") | startswith($u)) | select(.with | has("prompt") | not)] | length' <<<"$json")" \
+    "one job, gated on a PR comment mentioning @claude, runs tag mode (no prompt:)"
+  assert_eq "true" "$(jq '(.on // .true) | has("issue_comment")' <<<"$json")" "issue_comment still triggers it"
+}
+
+test_i8_same_repo_guard() {
+  echo "Test: every PR-triggered AI job runs only for same-repository PRs"
+  yaml_unavailable "i8_same_repo_guard" && return 0
+  _need_all_repo "i8_same_repo_guard" || return 0
+  local wf out bad=""
+  for wf in doc-review-pr doc-spec-verify doc-pr-full-cycle doc-pr-release; do
+    out=$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq -r --arg wf "$wf" --arg u "$AI_USES" \
+      --arg g "github.event.pull_request.head.repo.full_name == github.repository" --arg sr "same_repo == 'true'" '
+      .jobs | to_entries[] | .key as $job | .value as $j
+      | select([$j.steps[]? | (.uses // "") | startswith($u)] | any)
+      | if (($j.if // "") | contains("github.event.issue.pull_request")) then
+          if ([$j.steps[] | (.run // "") | startswith(".github/scripts/doc-superpowers-steps/pr-guard.sh")] | any)
+             and ([$j.steps[] | select((.uses // "") | startswith($u)) | (.if // "") | contains($sr)] | all)
+          then empty else "    \($wf) / \($job): comment job without the pr-guard.sh same-repository check" end
+        elif (($j.if // "") | contains($g)) then empty
+        else "    \($wf) / \($job): no same-repository guard in the job if:" end')
+    [ -z "$out" ] || bad="$bad$out"$'\n'
+  done
+  [ -z "$bad" ] || printf '%s' "$bad"
+  assert_eq "" "$bad" "fork PRs never reach an AI step (no secrets, no push)"
+}
+
+test_i8_one_write_group_per_branch() {
+  echo "Test: the templates that commit to a branch share one non-cancelling concurrency group per branch"
+  yaml_unavailable "i8_one_write_group_per_branch" && return 0
+  _need_all_repo "i8_one_write_group_per_branch" || return 0
+  local wf json g groups=""
+  for wf in doc-audit-update doc-pr-full-cycle doc-pr-release; do
+    json=$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml")
+    g=$(jq -r '.concurrency.group // ""' <<<"$json")
+    assert_eq "false" "$(jq -r '.concurrency["cancel-in-progress"] | tostring' <<<"$json")" "$wf: cancel-in-progress false"
+    assert_contains "$g" "doc-superpowers-write-" "$wf: the shared write group ($g)"
+    groups="$groups$g"$'\n'
+  done
+  assert_eq "1" "$(printf '%s' "$groups" | sort -u | grep -c .)" "one group expression for all three"
+}
+
+test_i8_no_code_path_filters() {
+  echo "Test: no AI template hard-codes code paths; the doc-scoped ones gate in the job on check-freshness --code-refs-from"
+  yaml_unavailable "i8_no_code_path_filters" && return 0
+  _need_all_repo "i8_no_code_path_filters" || return 0
+  local wf json out bad=""
+  for wf in $AI_WORKFLOWS; do
+    json=$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml")
+    assert_eq "[]" "$(jq -c '[(.on // .true) | .. | objects | select(has("paths")) | .paths] | add // []' <<<"$json")" "$wf: no paths: trigger filter"
+    assert_eq "[]" "$(jq -c '[(.on // .true) | .. | objects | select(has("paths-ignore")) | .["paths-ignore"][]] | map(select(startswith("RELEASE-NOTES") | not))' <<<"$json")" \
+      "$wf: paths-ignore names only the release-notes files"
+  done
+  for wf in doc-audit-update doc-review-pr doc-spec-verify doc-pr-full-cycle; do
+    out=$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq -r --arg wf "$wf" --arg u "$AI_USES" '
+      .jobs | to_entries[]
+      | select((.value.if // "") | contains("github.event.issue.pull_request") | not)
+      | .key as $job | .value.steps as $s
+      | ([$s | to_entries[] | select((.value.uses // "") | startswith($u)) | .key] | first) as $ai
+      | select($ai != null)
+      | ([$s | to_entries[] | select((.value.run // "") | startswith(".github/scripts/doc-superpowers-steps/freshness-check.sh scope")) | .key] | first) as $sc
+      | if $sc == null or $sc > $ai then "    \($wf) / \($job): no freshness-check.sh scope step before the AI step"
+        elif (($s[$ai].if // "") | contains("steps.\($s[$sc].id).outputs.")) | not then "    \($wf) / \($job): the AI step is not gated on the scope step"
+        else empty end')
+    [ -z "$out" ] || bad="$bad$out"$'\n'
+  done
+  [ -z "$bad" ] || printf '%s' "$bad"
+  assert_eq "" "$bad" "the doc-scoped AI jobs run only when the change touches an indexed doc or its code"
+}
+
+test_i8_commit_is_a_deterministic_step() {
+  echo "Test: the writing templates commit in a deterministic step after the agent that asserts the diff paths"
+  yaml_unavailable "i8_commit_is_a_deterministic_step" && return 0
+  _need_all_repo "i8_commit_is_a_deterministic_step" || return 0
+  local wf out bad=""
+  for wf in doc-audit-update doc-pr-full-cycle doc-release; do
+    out=$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq -r --arg wf "$wf" --arg u "$AI_USES" '
+      .jobs | to_entries[] | .key as $job | .value.steps as $s
+      | ([$s | to_entries[] | select((.value.uses // "") | startswith($u)) | .key] | first) as $ai
+      | select($ai != null)
+      | ([$s | to_entries[] | select(.key > $ai) | .value.run // ""
+          | select(startswith(".github/scripts/doc-superpowers-steps/commit-changes.sh ")) | select(contains("--check-only") | not)] | length) as $n
+      | if $n == 1 then empty else "    \($wf) / \($job): \($n) commit-changes.sh step(s) after the AI step (want 1)" end')
+    [ -z "$out" ] || bad="$bad$out"$'\n'
+  done
+  out=$(_yaml_json "$ALL_REPO/.github/workflows/doc-pr-release.yml" | jq -r --arg u "$AI_USES" '
+    .jobs | to_entries[] | .key as $job | .value.steps as $s
+    | ([$s | to_entries[] | select((.value.uses // "") | startswith($u)) | .key] | first) as $ai
+    | select($ai != null)
+    | ([$s | to_entries[] | select((.value.run // "") | startswith(".github/scripts/doc-superpowers-steps/commit-changes.sh --check-only")) | .key] | first) as $chk
+    | ([$s | to_entries[] | select((.value.run // "") | startswith(".github/scripts/doc-pr-release/commit-and-push.sh")) | .key] | first) as $cp
+    | if $chk == null or $cp == null or $chk < $ai or $cp < $chk then "    doc-pr-release / \($job): want the AI step, then commit-changes.sh --check-only, then commit-and-push.sh"
+      elif (($s[$ai].with.prompt // "") | contains("commit-and-push.sh")) then "    doc-pr-release / \($job): the prompt still has the agent run commit-and-push.sh"
+      else empty end')
+  [ -z "$out" ] || bad="$bad$out"$'\n'
+  [ -z "$bad" ] || printf '%s' "$bad"
+  assert_eq "" "$bad" "no agent commits or pushes; a checked step does"
+}
+
+test_i8_installed_no_placeholder
+test_i8_ai_steps_runnable_and_scoped
+test_i8_every_job_has_a_timeout
+test_i8_pins_carry_exact_versions
+test_i8_freshness_workflows_read_the_report_file
+test_i8_schedule_closes_only_after_a_good_check
+test_i8_review_pr_split
+test_i8_same_repo_guard
+test_i8_one_write_group_per_branch
+test_i8_no_code_path_filters
+test_i8_commit_is_a_deterministic_step
+
+# ============================================================================
+# I-8 step helpers, run as a workflow step runs them
+# ============================================================================
+echo
+echo "=== I-8 step helpers ==="
+
+# run_installed <repo> <out> [VAR=value…] -- <script> [args…]: run <script>
+# the way a workflow step does: cwd the checkout, `bash` on PATH is
+# $BASH_BIN, a fresh $GITHUB_OUTPUT (<out>) and $RUNNER_TEMP (<out>.tmp);
+# stdout+stderr land in <out>.log. Returns the step's exit code.
+run_installed() {
+  local repo="$1" out="$2" envs=() rc=0
+  shift 2
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    envs+=("$1")
+    shift
+  done
+  [ "$#" -gt 0 ] && shift
+  : > "$out"
+  rm -rf "$out.tmp"
+  mkdir -p "$out.tmp"
+  ( cd "$repo" && env PATH="$BASH_PATH" GITHUB_OUTPUT="$out" RUNNER_TEMP="$out.tmp" ${envs[@]+"${envs[@]}"} "$BASH_BIN" "$@" ) \
+    > "$out.log" 2>&1 || rc=$?
+  return "$rc"
+}
+
+# _out <GITHUB_OUTPUT file> <key>: the last value written for <key>.
+_out() {
+  sed -n "s/^$2=//p" "$1" | tail -n 1
+}
+
+FRESHNESS=.github/scripts/doc-superpowers-steps/freshness-check.sh
+
+# freshness_repo: the CI tier installed; docs/a.md cites src/, docs/b.md
+# cites lib/, both verified at the base commit; the head commit changes
+# src/a.js and deletes docs/b.md (its index entry left behind). Echoes the
+# path; the two SHAs are in .git/fx-base and .git/fx-head.
+freshness_repo() {
+  local dir
+  dir=$(installed_repo --ci) || return 1
+  (
+    cd "$dir" || exit 1
+    mkdir -p docs src lib
+    echo a > src/a.js
+    echo b > lib/b.js
+    echo '# A' > docs/a.md
+    echo '# B' > docs/b.md
+    git add -A && git commit -q -m "base files"
+    printf 'docs/a.md:src/:arch\ndocs/b.md:lib/:arch\n' | PATH="$BASH_PATH" .github/scripts/doc-tools.sh build-index >/dev/null 2>&1
+    PATH="$BASH_PATH" .github/scripts/doc-tools.sh update-index docs/a.md docs/b.md >/dev/null 2>&1
+    git add -A && git commit -q -m "base"
+    git rev-parse HEAD > .git/fx-base
+    echo a2 > src/a.js
+    git rm -q docs/b.md
+    git commit -q -a -m "head"
+    git rev-parse HEAD > .git/fx-head
+  ) || return 1
+  printf '%s' "$dir"
+}
+
+test_i8_freshness_gate() {
+  echo "Test: freshness-check.sh gate — stale AND missing counted for the PR's changes; a tool failure is never '0 stale'"
+  local repo out rng rc report
+  repo=$(freshness_repo) || { assert_true "freshness fixture" false; return 0; }
+  out="$(harness_mktemp_d step)/out"
+  rng="$(cat "$repo/.git/fx-base")...$(cat "$repo/.git/fx-head")"
+
+  rc=0
+  run_installed "$repo" "$out" RANGE="$rng" DOC_SUPERPOWERS_STRICT=0 -- "$FRESHNESS" gate || rc=$?
+  assert_eq "0" "$rc" "not STRICT: exits 0"
+  assert_eq "ok|1|1|2" "$(_out "$out" status)|$(_out "$out" stale)|$(_out "$out" missing)|$(_out "$out" count)" \
+    "status ok; the stale doc (its code changed) and the missing one (deleted by the change) both count"
+  report=$(_out "$out" report)
+  assert_eq "docs/a.md=stale docs/b.md=missing" \
+    "$(jq -r '[.docs | to_entries[] | "\(.key)=\(.value.status)"] | join(" ")' "$report" 2>/dev/null)" \
+    "the report file holds exactly the stale and missing docs"
+  assert_eq "$out.tmp/freshness.json" "$(ls "$out.tmp/freshness.json" 2>/dev/null)" "the raw result is \$RUNNER_TEMP/freshness.json"
+  assert_eq "" "$(grep -vE '^[a-z_]+=[^[:space:]]*$' "$out" || true)" "every step output is one key=value line (no heredoc, nothing index-sized)"
+
+  rc=0
+  run_installed "$repo" "$out" RANGE="$rng" DOC_SUPERPOWERS_STRICT=1 -- "$FRESHNESS" gate || rc=$?
+  assert_eq "1" "$rc" "STRICT: 2 docs out of date fail the step"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error:: annotation"
+  assert_eq "ok|2" "$(_out "$out" status)|$(_out "$out" count)" "…after writing the outputs (the PR comment still runs)"
+
+  rc=0
+  run_installed "$repo" "$out" RANGE="$(cat "$repo/.git/fx-base")...$(cat "$repo/.git/fx-base")" DOC_SUPERPOWERS_STRICT=1 -- "$FRESHNESS" gate || rc=$?
+  assert_eq "0|ok|0" "$rc|$(_out "$out" status)|$(_out "$out" count)" "STRICT, a change that touches no indexed doc or code: passes with count 0"
+
+  echo '{broken' > "$repo/docs/.doc-index.json"
+  rc=0
+  run_installed "$repo" "$out" RANGE="$rng" DOC_SUPERPOWERS_STRICT=0 -- "$FRESHNESS" gate || rc=$?
+  assert_eq "0" "$rc" "tool failure, not STRICT: exits 0 …"
+  assert_contains "$(cat "$out.log")" "::warning::" "…with a ::warning::"
+  assert_eq "failed|" "$(_out "$out" status)|$(_out "$out" count)" "…status failed and NO count (never '0 stale')"
+  rc=0
+  run_installed "$repo" "$out" RANGE="$rng" DOC_SUPERPOWERS_STRICT=1 -- "$FRESHNESS" gate || rc=$?
+  assert_eq "1" "$rc" "tool failure, STRICT: exits 1 …"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error::"
+  assert_eq "failed|" "$(_out "$out" status)|$(_out "$out" count)" "…status failed, no count"
+  git -C "$repo" checkout -q -- docs/.doc-index.json
+
+  mv "$repo/.github/scripts/doc-tools.sh" "$repo/.github/scripts/doc-tools.sh.off"
+  rc=0
+  run_installed "$repo" "$out" RANGE="$rng" DOC_SUPERPOWERS_STRICT=1 -- "$FRESHNESS" gate || rc=$?
+  assert_eq "1|failed" "$rc|$(_out "$out" status)" "STRICT, the vendored doc-tools.sh missing: a failure, not a pass"
+  mv "$repo/.github/scripts/doc-tools.sh.off" "$repo/.github/scripts/doc-tools.sh"
+
+  ( cd "$repo" && git rm -q docs/.doc-index.json && git commit -q -m "drop the index" )
+  rc=0
+  run_installed "$repo" "$out" RANGE="$(cat "$repo/.git/fx-base")...$(git -C "$repo" rev-parse HEAD)" DOC_SUPERPOWERS_STRICT=1 -- "$FRESHNESS" gate || rc=$?
+  assert_eq "1|failed" "$rc|$(_out "$out" status)" "STRICT, a change that deletes the index: a failure, not 'no index'"
+
+  local bare
+  bare=$(installed_repo --ci) || { assert_true "bare fixture" false; return 0; }
+  rc=0
+  run_installed "$bare" "$out" DOC_SUPERPOWERS_STRICT=1 -- "$FRESHNESS" gate || rc=$?
+  assert_eq "0|no-index" "$rc|$(_out "$out" status)" "a repository that never ran init: status no-index, exits 0"
+}
+
+test_i8_freshness_output_is_bounded() {
+  echo "Test: freshness-check.sh — the step outputs stay a few scalars however large the report (the E2BIG fix)"
+  local repo out rc i map
+  repo=$(installed_repo --ci) || { assert_true "fixture" false; return 0; }
+  (
+    cd "$repo" || exit 1
+    mkdir -p docs src
+    echo a > src/a.js
+    map=""
+    i=1
+    while [ "$i" -le 60 ]; do
+      printf '# Doc %s\n' "$i" > "docs/doc-with-a-long-descriptive-name-$i.md"
+      map="${map}docs/doc-with-a-long-descriptive-name-$i.md:src/:architecture"$'\n'
+      i=$((i + 1))
+    done
+    git add -A && git commit -q -m base
+    printf '%s' "$map" | PATH="$BASH_PATH" .github/scripts/doc-tools.sh build-index >/dev/null 2>&1
+    # shellcheck disable=SC2046  # the doc list
+    PATH="$BASH_PATH" .github/scripts/doc-tools.sh update-index $(cd docs && ls doc-*.md | sed 's|^|docs/|') >/dev/null 2>&1
+    git add -A && git commit -q -m index
+    git rev-parse HEAD > .git/fx-base
+    echo a2 > src/a.js
+    git commit -q -a -m change
+  ) || { assert_true "fixture" false; return 0; }
+  out="$(harness_mktemp_d step)/out"
+  rc=0
+  run_installed "$repo" "$out" RANGE="$(cat "$repo/.git/fx-base")...HEAD" DOC_SUPERPOWERS_STRICT=0 -- "$FRESHNESS" gate || rc=$?
+  assert_eq "0|60" "$rc|$(_out "$out" stale)" "60 stale docs found"
+  assert_true "the report file is large ($(wc -c < "$(_out "$out" report)" 2>/dev/null) bytes)" \
+    test "$(wc -c < "$(_out "$out" report)" 2>/dev/null || echo 0)" -gt 6000
+  assert_true "\$GITHUB_OUTPUT stays small ($(wc -c < "$out") bytes, ≤ 400)" test "$(wc -c < "$out")" -le 400
+}
+
+test_i8_freshness_audit() {
+  echo "Test: freshness-check.sh audit — the whole index; a tool failure always fails the run (the issue is never closed on it)"
+  local repo out rc
+  repo=$(freshness_repo) || { assert_true "freshness fixture" false; return 0; }
+  out="$(harness_mktemp_d step)/out"
+  rc=0
+  run_installed "$repo" "$out" -- "$FRESHNESS" audit || rc=$?
+  assert_eq "0|ok|1|1|2" "$rc|$(_out "$out" status)|$(_out "$out" stale)|$(_out "$out" missing)|$(_out "$out" count)" \
+    "the whole index: 1 stale + 1 missing"
+  echo '{broken' > "$repo/docs/.doc-index.json"
+  rc=0
+  run_installed "$repo" "$out" -- "$FRESHNESS" audit || rc=$?
+  assert_eq "1|failed|" "$rc|$(_out "$out" status)|$(_out "$out" count)" "a tool failure: exits 1, status failed, no count"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error::"
+}
+
+test_i8_freshness_scope() {
+  echo "Test: freshness-check.sh scope — the AI jobs' gate: docs the change touches (by code ref or by path); fails closed"
+  local repo out rc rng
+  repo=$(freshness_repo) || { assert_true "freshness fixture" false; return 0; }
+  out="$(harness_mktemp_d step)/out"
+  rng="$(cat "$repo/.git/fx-base")...$(cat "$repo/.git/fx-head")"
+  rc=0
+  run_installed "$repo" "$out" RANGE="$rng" -- "$FRESHNESS" scope || rc=$?
+  assert_eq "0|ok|2" "$rc|$(_out "$out" status)|$(_out "$out" affected)" "docs/a.md (cites changed code) and docs/b.md (changed itself) are affected"
+  rc=0
+  run_installed "$repo" "$out" RANGE="$rng" SCOPE_DOCS='^docs/specs/(.*/)?SPEC-[^/]*\.md$' -- "$FRESHNESS" scope || rc=$?
+  assert_eq "0|0" "$rc|$(_out "$out" affected)" "SCOPE_DOCS narrows it: no spec is affected"
+  assert_contains "$(cat "$out.log")" "::notice::" "…and the skip is announced"
+  rc=0
+  run_installed "$repo" "$out" RANGE="$(cat "$repo/.git/fx-base")...$(cat "$repo/.git/fx-base")" -- "$FRESHNESS" scope || rc=$?
+  assert_eq "0|0" "$rc|$(_out "$out" affected)" "an empty change affects nothing"
+  rc=0
+  run_installed "$repo" "$out" RANGE="...$(cat "$repo/.git/fx-head")" -- "$FRESHNESS" scope || rc=$?
+  assert_eq "0|2" "$rc|$(_out "$out" affected)" "no base (a manual run): the whole index is in scope"
+  rc=0
+  run_installed "$repo" "$out" RANGE="nosuchref...$(cat "$repo/.git/fx-head")" -- "$FRESHNESS" scope || rc=$?
+  assert_eq "1|failed|" "$rc|$(_out "$out" status)|$(_out "$out" affected)" "an unresolvable range fails closed (no affected output)"
+  echo '{broken' > "$repo/docs/.doc-index.json"
+  rc=0
+  run_installed "$repo" "$out" RANGE="$rng" -- "$FRESHNESS" scope || rc=$?
+  assert_eq "1|failed|" "$rc|$(_out "$out" status)|$(_out "$out" affected)" "a tool failure fails closed (the AI step never runs on a guess)"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error::"
+}
+
+# marketplace_remote <version>: a bare repository (a file:// URL) holding the
+# plugin's manifests at <version>, tagged v<version> — plus v9.0.0 on the same
+# commit, whose manifests do not say 9.0.0. Echoes the URL.
+marketplace_remote() {
+  local dir
+  dir=$(harness_mktemp_d market)
+  (
+    git init -q -b main "$dir/src" 2>/dev/null || { git init -q "$dir/src" && git -C "$dir/src" symbolic-ref HEAD refs/heads/main; }
+    cd "$dir/src" || exit 1
+    git config user.email t@t.com
+    git config user.name t
+    mkdir -p .claude-plugin
+    printf '{"name": "doc-superpowers", "plugins": [{"name": "doc-superpowers", "source": "./"}]}\n' > .claude-plugin/marketplace.json
+    printf '{"name": "doc-superpowers", "version": "%s"}\n' "$1" > .claude-plugin/plugin.json
+    git add -A && git -c commit.gpgsign=false commit -q -m plugin
+    git tag "v$1"
+    git tag v9.0.0
+    git init -q --bare "$dir/market.git"
+    git push -q "$dir/market.git" main --tags
+  ) >/dev/null 2>&1 || return 1
+  printf 'file://%s' "$dir/market.git"
+}
+
+test_i8_prepare_agent() {
+  echo "Test: prepare-agent.sh — the plugin marketplace at exactly the installed version's tag, and the checkout's head"
+  local url repo out rc mp v
+  url=$(marketplace_remote 1.2.3) || { assert_true "marketplace fixture" false; return 0; }
+  repo=$(new_repo)
+  out="$(harness_mktemp_d step)/out"
+  rc=0
+  run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION=v1.2.3 DOC_SUPERPOWERS_MARKETPLACE_URL="$url" -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
+  assert_eq "0" "$rc" "the installed version's tag → exits 0"
+  mp=$(_out "$out" marketplace)
+  case "$mp" in
+    "$out.tmp"/*) assert_true "the marketplace is an absolute path under \$RUNNER_TEMP" true ;;
+    *) assert_true "the marketplace is an absolute path under \$RUNNER_TEMP (got '$mp')" false ;;
+  esac
+  assert_file_exists "$mp/.claude-plugin/marketplace.json" "…holding the marketplace manifest"
+  assert_eq "1.2.3" "$(jq -r .version "$mp/.claude-plugin/plugin.json" 2>/dev/null)" "…at the pinned version"
+  assert_eq "$(git -C "$repo" rev-parse HEAD)" "$(_out "$out" head)" "head = the checkout's HEAD before the agent runs"
+  for v in vunknown v1.2 ""; do
+    rc=0
+    run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION="$v" DOC_SUPERPOWERS_MARKETPLACE_URL="$url" -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
+    assert_eq "1|" "$rc|$(_out "$out" marketplace)" "version '$v' is not a release: exits 1, no marketplace"
+    assert_contains "$(cat "$out.log")" "::error::" "version '$v': an ::error:: says why"
+  done
+  rc=0
+  run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION=v2.0.0 DOC_SUPERPOWERS_MARKETPLACE_URL="$url" -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
+  assert_eq "1|" "$rc|$(_out "$out" marketplace)" "no such tag: exits 1, no marketplace"
+  rc=0
+  run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION=v9.0.0 DOC_SUPERPOWERS_MARKETPLACE_URL="$url" -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
+  assert_eq "1|" "$rc|$(_out "$out" marketplace)" "a tag whose manifests name another version: exits 1"
+  assert_contains "$(cat "$out.log")" "1.2.3" "…naming the version found"
+}
+
+# cc_fixture: origin_and_clone plus, on feature (pushed), an index whose keys
+# are docs/d.md and README.md. Echoes the parent dir.
+cc_fixture() {
+  local dir
+  dir=$(origin_and_clone)
+  (
+    cd "$dir/clone" || exit 1
+    mkdir -p docs src
+    echo '# D' > docs/d.md
+    echo '# R' > README.md
+    echo 'x' > src/x.js
+    printf '{"version": 3, "docs": {"docs/d.md": {"code_refs": ["src/"]}, "README.md": {"code_refs": []}}}\n' > docs/.doc-index.json
+    git add -A && git -c commit.gpgsign=false commit -q -m docs
+    git push -q origin feature
+  ) >/dev/null 2>&1 || return 1
+  printf '%s' "$dir"
+}
+
+test_i8_commit_changes() {
+  echo "Test: commit-changes.sh — commits and pushes only allowed paths; refuses an agent commit or any other path"
+  local dir clone out rc head cc="$STEPS_DIR/commit-changes.sh"
+  local args=(--allow docs/ --allow-index-keys --message "[doc-superpowers] update stale docs" --push-to feature)
+  dir=$(cc_fixture) || { assert_true "fixture" false; return 0; }
+  clone="$dir/clone"
+  out="$(harness_mktemp_d step)/out"
+  head=$(git -C "$clone" rev-parse HEAD)
+
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
+  assert_eq "0|false|false" "$rc|$(_out "$out" changed)|$(_out "$out" committed)" "nothing changed: exits 0, no commit"
+  assert_eq "$head" "$(git -C "$dir/origin.git" rev-parse feature)" "…nothing pushed"
+
+  echo '# D2' > "$clone/docs/d.md"
+  echo '# R2' > "$clone/README.md"
+  echo '# N' > "$clone/docs/new.md"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
+  assert_eq "0|true|true" "$rc|$(_out "$out" changed)|$(_out "$out" committed)" "docs/ and an indexed doc: committed"
+  assert_eq "[doc-superpowers] update stale docs" "$(git -C "$dir/origin.git" log -1 --format=%s feature)" "…and pushed with the given subject"
+  assert_eq "README.md docs/d.md docs/new.md" \
+    "$(git -C "$dir/origin.git" show --name-only --format= feature | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')" "…exactly those paths"
+
+  head=$(git -C "$clone" rev-parse HEAD)
+  echo 'y' > "$clone/src/x.js"
+  echo '# D3' > "$clone/docs/d.md"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
+  assert_eq "1" "$rc" "a change outside the allowed paths: exits 1"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error:: …"
+  assert_contains "$(cat "$out.log")" "src/x.js" "…naming the path"
+  assert_eq "$head|$head" "$(git -C "$clone" rev-parse HEAD)|$(git -C "$dir/origin.git" rev-parse feature)" "…nothing committed or pushed"
+  git -C "$clone" checkout -q -- src/x.js
+
+  mkdir -p "$clone/src"
+  echo 'y' > "$clone/src/y.md"
+  jq '.docs["src/y.md"] = {code_refs: []}' "$clone/docs/.doc-index.json" > "$clone/docs/.doc-index.json.new" \
+    && mv "$clone/docs/.doc-index.json.new" "$clone/docs/.doc-index.json"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
+  assert_eq "1" "$rc" "a key the agent added to the index does not authorize its path (only HEAD's keys count)"
+  git -C "$clone" checkout -q -- docs/.doc-index.json docs/d.md
+  rm -f "$clone/src/y.md"
+
+  ( cd "$clone" && echo z > z.txt && git add z.txt && git -c commit.gpgsign=false commit -q -m "agent commit" )
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
+  assert_eq "1" "$rc" "HEAD moved (the agent committed): exits 1"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error::"
+  git -C "$clone" reset -q --hard "$head"
+
+  mkdir -p "$clone/.scratch"
+  echo '{}' > "$clone/.scratch/context.json"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" --check-only --allow docs/d.md --ignore .scratch/ || rc=$?
+  assert_eq "0|false" "$rc|$(_out "$out" changed)" "--check-only, only ignored scratch: nothing changed"
+  echo '# D4' > "$clone/docs/d.md"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" --check-only --allow docs/d.md --ignore .scratch/ || rc=$?
+  assert_eq "0|true" "$rc|$(_out "$out" changed)" "--check-only, an allowed change: exits 0, changed=true …"
+  assert_eq "$head" "$(git -C "$clone" rev-parse HEAD)" "…and commits nothing"
+  rm -rf "$clone/.scratch"
+
+  (
+    cd "$dir/seed" || exit 1
+    git pull -q origin feature 2>/dev/null
+    echo human > human.txt
+    git add human.txt
+    git -c commit.gpgsign=false commit -q -m "human push"
+    git push -q origin feature
+  ) >/dev/null 2>&1
+  local tip
+  tip=$(git -C "$dir/origin.git" rev-parse feature)
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
+  assert_eq "1" "$rc" "the branch moved since checkout: the push is rejected, exits 1"
+  assert_eq "$tip" "$(git -C "$dir/origin.git" rev-parse feature)" "…the human's commit is kept (no force)"
+  git -C "$clone" reset -q --hard "$head"
+
+  local shim
+  shim=$(harness_mktemp_d gh-pr)
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/calls"\necho https://github.com/o/r/pull/9\n' "$shim" > "$shim/gh"
+  chmod +x "$shim/gh"
+  echo '# D5' > "$clone/docs/d.md"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" PATH="$shim:$BASH_PATH" -- "$cc" --allow docs/ \
+    --message "[doc-superpowers] draft release notes" --push-to doc-superpowers/release-notes-1 --open-pr feature || rc=$?
+  assert_eq "0|true" "$rc|$(_out "$out" committed)" "--open-pr: committed to a new branch …"
+  assert_eq "[doc-superpowers] draft release notes" "$(git -C "$dir/origin.git" log -1 --format=%s doc-superpowers/release-notes-1 2>/dev/null)" "…pushed"
+  assert_contains "$(cat "$shim/calls" 2>/dev/null)" "pr create --base feature --head doc-superpowers/release-notes-1" "…and a PR opened against the base"
+}
+
+test_i8_pr_guard() {
+  echo "Test: pr-guard.sh — a PR comment runs the agent only for a same-repository PR"
+  local repo out rc shim
+  repo=$(new_repo)
+  out="$(harness_mktemp_d step)/out"
+  shim=$(harness_mktemp_d gh-guard)
+  printf '#!/usr/bin/env bash\n[ "${FAKE_GH_RC:-0}" = 0 ] || exit "$FAKE_GH_RC"\nprintf "%%s\\n" "$FAKE_HEAD_REPO"\n' > "$shim/gh"
+  chmod +x "$shim/gh"
+  rc=0
+  run_installed "$repo" "$out" PATH="$shim:$BASH_PATH" GITHUB_REPOSITORY=o/r PR_NUMBER=5 FAKE_HEAD_REPO=o/r -- "$STEPS_DIR/pr-guard.sh" || rc=$?
+  assert_eq "0|true" "$rc|$(_out "$out" same_repo)" "same repository: same_repo=true"
+  rc=0
+  run_installed "$repo" "$out" PATH="$shim:$BASH_PATH" GITHUB_REPOSITORY=o/r PR_NUMBER=5 FAKE_HEAD_REPO=fork/r -- "$STEPS_DIR/pr-guard.sh" || rc=$?
+  assert_eq "0|false" "$rc|$(_out "$out" same_repo)" "a fork: same_repo=false …"
+  assert_contains "$(cat "$out.log")" "::notice::" "…announced"
+  rc=0
+  run_installed "$repo" "$out" PATH="$shim:$BASH_PATH" GITHUB_REPOSITORY=o/r PR_NUMBER=5 FAKE_GH_RC=1 -- "$STEPS_DIR/pr-guard.sh" || rc=$?
+  assert_eq "1|" "$rc|$(_out "$out" same_repo)" "gh fails: exits 1, no answer"
+  rc=0
+  run_installed "$repo" "$out" PATH="$shim:$BASH_PATH" GITHUB_REPOSITORY=o/r PR_NUMBER=abc FAKE_HEAD_REPO=o/r -- "$STEPS_DIR/pr-guard.sh" || rc=$?
+  assert_eq "1|" "$rc|$(_out "$out" same_repo)" "a non-numeric PR number: exits 1"
+}
+
+test_i8_freshness_gate
+test_i8_freshness_output_is_bounded
+test_i8_freshness_audit
+test_i8_freshness_scope
+test_i8_prepare_agent
+test_i8_commit_changes
+test_i8_pr_guard
 
 print_summary

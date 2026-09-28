@@ -23,6 +23,8 @@
 #     }
 #   }
 # }
+# A retired workflow (install.sh RETIRED_WORKFLOWS) has no entry: the
+# install or uninstall that removes it drops its record.
 # installed_at is set when a workflow goes from not installed to installed,
 # never on a refresh (a rewritten timestamp on every install was the file's
 # merge-conflict source). Vendored files are not recorded: which helpers are
@@ -150,6 +152,25 @@ _state_wf_put() {
     STATE_DIRTY=1
   fi
   STATE_WF="$out"
+}
+
+# Drop <name>'s record altogether (a retired workflow: no longer a template).
+state_wf_drop() {
+  local l out="" found=0
+  [ -n "$STATE_WF" ] || return 0
+  while IFS= read -r l; do
+    case "$l" in
+      "$1$_SEP"*)
+        found=1
+        continue
+        ;;
+    esac
+    out="${out:+$out$'\n'}$l"
+  done <<<"$STATE_WF"
+  if [ "$found" = 1 ]; then
+    STATE_WF="$out"
+    STATE_DIRTY=1
+  fi
 }
 
 # Installed: keeps installed_at when it already was (a refresh is no change).
