@@ -3548,6 +3548,110 @@ test_i1_staged_change_seen_via_tree() {
   teardown
 }
 
+# --- --tree reads ONE snapshot (sweep 05ea982 I-6, fix round 1) ---------------
+#
+# With --tree T, the index and the docs come from T as well as the code refs:
+# a pre-commit check then judges exactly the commit being made. Reading the
+# working copy's index against the staged refs let `update-index` without
+# `git add docs/.doc-index.json` pass a STRICT commit whose HEAD reads stale.
+
+test_i6_tree_reads_the_index_from_the_tree() {
+  echo "test: I-6: --tree judges the index the tree holds, not the working copy's (reviewer's repro)"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index >/dev/null 2>&1
+  _i1_commit index
+  echo "v2" > src/index.js
+  git add src/index.js
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1   # the working copy's index only
+  local staged err
+  staged=$(git write-tree)
+  err=$(harness_mktemp err)
+  assert_eq "stale|0|src/" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness --tree "$staged" 2>"$err")" docs/architecture.md)" \
+    "--tree <staged>: the staged index still records v1, so the commit leaves the doc stale"
+  assert_eq "" "$(cat "$err")" "…with no note (the tree holds the index)"
+  assert_eq "stale|0|src/" "$(_i1_verdict "$("$DOC_TOOLS" status docs/architecture.md --tree "$staged")" docs/architecture.md)" \
+    "status --tree agrees"
+  git add docs/.doc-index.json
+  staged=$(git write-tree)
+  assert_eq "current|0|" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness --tree "$staged")" docs/architecture.md)" \
+    "once the re-verified index is staged: current"
+  git commit -qm "code + index"
+  "$DOC_TOOLS" update-index docs/architecture.md >/dev/null 2>&1
+  echo "v3" > src/index.js
+  git add src/index.js
+  git commit -qm "code only"
+  # HEAD's index verified v2 with code_commit = init (2 src/ commits since);
+  # the working copy's re-verification moved code_commit to "code + index" (1).
+  assert_eq "stale|2|src/" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness --tree HEAD)" docs/architecture.md)" \
+    "--tree HEAD judges HEAD's index"
+  assert_eq "stale|1|src/" "$(_i1_verdict "$("$DOC_TOOLS" check-freshness)" docs/architecture.md)" \
+    "without --tree: the working copy's index against HEAD (unchanged; CI's use)"
+  teardown
+}
+
+test_i6_tree_reads_the_docs_from_the_tree() {
+  echo "test: I-6: --tree judges a doc's presence and content as the tree holds them"
+  setup
+  echo "# Guide" > docs/guide.md
+  git add docs/guide.md && git commit -qm guide
+  printf 'docs/architecture.md:src/:architecture\ndocs/guide.md:src/:guide\n' | "$DOC_TOOLS" build-index >/dev/null 2>&1
+  "$DOC_TOOLS" update-index docs/architecture.md docs/guide.md >/dev/null 2>&1
+  _i1_commit index
+  echo "## unstaged edit" >> docs/architecture.md
+  rm docs/guide.md
+  local cf
+  cf=$("$DOC_TOOLS" check-freshness --tree HEAD)
+  assert_json_field "$cf" '.docs["docs/architecture.md"].doc_modified' "false" "a doc edited only in the working copy is unmodified in the tree"
+  assert_json_field "$cf" '.docs["docs/guide.md"].status' "current" "a doc deleted only in the working copy is present in the tree"
+  cf=$("$DOC_TOOLS" check-freshness)
+  assert_json_field "$cf" '.docs["docs/architecture.md"].doc_modified' "true" "without --tree: the working copy's edit shows"
+  assert_json_field "$cf" '.docs["docs/guide.md"].status' "missing" "without --tree: the working copy's deletion shows"
+  git checkout -q -- docs/
+  # A doc indexed and staged in the index, but not itself staged: the commit
+  # would carry an entry for a doc it does not hold.
+  echo "# New" > docs/new.md
+  echo "docs/new.md:src/:guide" | "$DOC_TOOLS" add-entry >/dev/null 2>&1
+  git add docs/.doc-index.json
+  echo "# Orphan" > docs/orphan.md
+  cf=$("$DOC_TOOLS" check-freshness --tree "$(git write-tree)")
+  assert_json_field "$cf" '.docs["docs/new.md"].status' "missing" "--tree <staged>: an unstaged doc is missing from the commit"
+  assert_json_field "$cf" '.untracked_docs | length' "0" "--tree: untracked docs are the tree's (docs/orphan.md is not in it)"
+  assert_json_field "$("$DOC_TOOLS" check-freshness)" '.untracked_docs | join(",")' "docs/orphan.md" "without --tree: the working copy's"
+  teardown
+}
+
+test_i6_tree_without_the_index_falls_back() {
+  echo "test: I-6: a --tree that holds no index falls back to the working copy, with one note"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index >/dev/null 2>&1   # never committed
+  echo "v2" > src/index.js
+  git add src/index.js
+  local err out
+  err=$(harness_mktemp err)
+  out=$("$DOC_TOOLS" check-freshness --tree "$(git write-tree)" 2>"$err")
+  assert_eq "stale|0|src/" "$(_i1_verdict "$out" docs/architecture.md)" "the working copy's index against the staged refs"
+  assert_eq "1" "$(awk 'NF { n++ } END { print n + 0 }' "$err")" "one stderr note"
+  assert_contains "$(cat "$err")" "docs/.doc-index.json" "…naming the index"
+  teardown
+}
+
+test_i6_tree_with_an_invalid_index() {
+  echo "test: I-6: an invalid index in the --tree is an error (exit 1), never the working copy's"
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index >/dev/null 2>&1
+  _i1_commit index
+  cp docs/.doc-index.json "$TEST_DIR/good.json"
+  echo "NOT JSON{{" > docs/.doc-index.json
+  git add docs/.doc-index.json
+  local staged rc=0 err
+  staged=$(git write-tree)
+  cp "$TEST_DIR/good.json" docs/.doc-index.json
+  err=$("$DOC_TOOLS" check-freshness --tree "$staged" 2>&1 >/dev/null) || rc=$?
+  assert_eq "1" "$rc" "exit 1"
+  assert_contains "$err" "not a valid doc-index" "…saying why"
+  teardown
+}
+
 test_i1_shallow_clone() {
   echo "test: I-1: a --depth 1 clone reads current; writers there record OIDs but no code_commit; commits_behind null"
   setup
@@ -4865,6 +4969,10 @@ run_tests() {
   test_i1_revert_to_verified_bytes_is_current
   test_i1_code_doc_and_update_index_in_one_commit
   test_i1_staged_change_seen_via_tree
+  test_i6_tree_reads_the_index_from_the_tree
+  test_i6_tree_reads_the_docs_from_the_tree
+  test_i6_tree_without_the_index_falls_back
+  test_i6_tree_with_an_invalid_index
   test_i1_shallow_clone
   test_i1_code_refs_changed_is_exact
   test_i1_commits_behind_null_when_unreachable

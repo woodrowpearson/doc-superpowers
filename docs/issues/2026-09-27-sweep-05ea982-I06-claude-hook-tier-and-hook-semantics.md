@@ -218,6 +218,28 @@ jq). That covers the jq-floor message from T2 too. Claude hooks also send the li
 blocks only under STRICT. The `prepare-commit-msg` hook writes it as one comment line instead, so
 an editor commit does not print it twice.
 
+**Fix round 1 (review of Task 7)**
+
+- **The commit regex is anchored to command position.** The brief's regex matched `echo git
+  commit`, `legit commit`, `rg "git commit -m" .` and `gh pr create --body "…git commit…"`. Under
+  STRICT, with a stale change staged, each was blocked with exit 2. It is replaced by the
+  reviewer's verified ERE, kept byte-identical in both Claude hooks and pinned by a test. `git`
+  must start the command or follow a newline, `;`, `&`, `|`, `(`, `{`, a backtick, `$(` or
+  `then`/`do`/`else`. It may come after `VAR=value` assignments and a `/path/to/` prefix.
+- **`check-freshness --tree T` judges one snapshot** (doc-tools). The index is read as
+  `T:docs/.doc-index.json`, and the docs' presence and hashes come from T, as the code refs do.
+  Before this, `update-index` without `git add docs/.doc-index.json` let a STRICT commit through
+  whose HEAD read stale.
+  - A T without the index falls back to the working copy, with one note on stderr.
+  - Without `--tree` (CI's use), nothing changed.
+- **The Stop hook's timeout is decided by a marker.** The watchdog writes the marker before it
+  kills, and it is always reaped. Before this, a watchdog caught between its kill and its exit
+  made 2 of 10 timeouts under bash 5 read as tooling failures.
+- **Git's own index is never rewritten by a Claude hook.** The Stop hook's scope diff and the
+  gate's `write-tree` read private copies.
+- **QUIET no longer silences a STRICT block's reason**, which is Claude's feedback.
+- **post-commit-sync reads stdin with `cat`**, which is linear in the payload size.
+
 **Left for other Tasks**
 
 - `install.sh` still registers commands that `cd` to the current toplevel and run a relative path.

@@ -14,15 +14,28 @@
 
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
 
-# Most Bash calls are not commits: decide that before starting any process.
-IFS= read -r -d '' input || true
+# The event carries the command's whole output (tool_response), so read it
+# with cat, not bash's byte-at-a-time `read` (about 0.5 s per MB). A terminal
+# on stdin (a hand run) is not waited on. Most Bash calls are not commits:
+# decide that before anything else runs.
+if [ -t 0 ]; then
+  input=""
+else
+  input=$(cat)
+fi
 case "$input" in
   *commit*) ;;
   *) exit 0 ;;
 esac
 
-# `git [-C <dir> | -c <key=value>]… commit`, as a POSIX ERE.
-re_commit='git([[:space:]]+-[Cc][[:space:]]+[^[:space:]]+)*[[:space:]]+commit([[:space:]]|$)'
+# `git [-C <dir> | -c <key=value>]… commit` where the shell would run it, as
+# a POSIX ERE (bash =~): at the start, or after a newline, ; & | ( { ` $( or
+# then/do/else, past VAR=value assignments and a /path/to/ prefix. So
+# `echo git commit`, `rg "git commit -m" .` and `legit commit` are not
+# commits. Kept byte-identical in pre-commit-gate.sh and post-commit-sync.sh
+# (test-hooks.sh pins it); `;` stays last in the bracket (a bash-4 guard
+# pattern matches the two bytes semicolon-ampersand).
+re_commit='(^|[&|({`'$'\n'';]|\$\(|(then|do|else)[[:space:]])[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*([^[:space:]&|;]*/)?git([[:space:]]+-[Cc][[:space:]]+[^[:space:]]+)*[[:space:]]+commit([[:space:]]|$)'
 
 have_jq=1
 command -v jq >/dev/null 2>&1 || have_jq=0
@@ -30,8 +43,13 @@ if [[ "$have_jq" == 1 ]]; then
   command_str=$(jq -r '.tool_input.command // empty' <<<"$input" 2>/dev/null) || exit 0
 else
   # Without jq the event cannot be parsed, but its raw text still holds the
-  # command.
-  command_str="$input"
+  # command: take everything after "command":", with \n escapes unfolded.
+  command_str=""
+  re_field='"command"[[:space:]]*:[[:space:]]*"(.*)'
+  if [[ $input =~ $re_field ]]; then
+    command_str="${BASH_REMATCH[1]}"
+    command_str="${command_str//\\n/$'\n'}"
+  fi
 fi
 [[ $command_str =~ $re_commit ]] || exit 0
 
@@ -74,7 +92,7 @@ committed=$(git -c core.quotePath=false diff --name-only --no-renames HEAD~1 HEA
 
 _check() { printf '%s\n' "$committed" | "$DOC_TOOLS" check-freshness --code-refs-from -; }
 if ! result=$(_check 2>/dev/null); then
-  why=$(_check 2>&1 >/dev/null | awk 'NF { print; exit }')
+  why=$(_check 2>&1 >/dev/null | awk '/^ERROR: / { print; e = 1; exit } NF && !/^NOTE: / && o == "" { o = $0 } END { if (!e) print o }')
   why="${why#ERROR: }"
   why="${why%.}"
   _fail "${why:-doc-tools.sh check-freshness failed}"
