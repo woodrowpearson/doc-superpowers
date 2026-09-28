@@ -88,7 +88,7 @@ After `init` completes, set up automated freshness monitoring:
 # Or pick specific tiers
 /doc-superpowers hooks install --git           # Git hooks only
 /doc-superpowers hooks install --claude        # Claude Code hooks only (per-user)
-/doc-superpowers hooks install --ci            # GitHub Actions: the 3 shell workflows
+/doc-superpowers hooks install --ci            # GitHub Actions: the 2 shell workflows
 
 # Claude-powered workflows are opt-in by name
 /doc-superpowers hooks install --ci --workflows=doc-freshness-pr,doc-release

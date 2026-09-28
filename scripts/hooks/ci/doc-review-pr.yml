@@ -1,27 +1,28 @@
 # doc-superpowers workflow v1
 # AI-powered PR documentation review with @claude interactive support
 # Installed by doc-superpowers hooks installer
+#
+# Two jobs:
+#   review-docs  a pull_request push that touches an indexed doc or its code
+#                (judged by check-freshness from the doc index — no
+#                hard-coded paths): a fixed-prompt, read-only review posted as
+#                a PR comment.
+#   respond      a PR comment mentioning @claude by a repository member: tag
+#                mode (no prompt: — the comment is the request), on the PR
+#                branch, read-only tools.
+# Both run only for same-repository PRs (a fork's code never runs under this
+# repository's secrets).
 
 name: Doc Review (AI)
 
 on:
   pull_request:
     branches: [__BASE_BRANCH__]
-    types: [opened, synchronize]
-    paths:
-      - 'docs/**'
-      - 'src/**'
-      - 'scripts/**'
-      - '*.md'
+    types: [opened, synchronize, reopened, ready_for_review]
   issue_comment:
     types: [created]
   pull_request_review_comment:
     types: [created]
-  workflow_dispatch:
-
-concurrency:
-  group: doc-review-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
-  cancel-in-progress: true
 
 env:
   DOC_SUPERPOWERS_VERSION: "__VERSION__"
@@ -29,46 +30,122 @@ env:
 jobs:
   review-docs:
     if: >-
-      github.event_name != 'issue_comment' ||
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # A newer push supersedes the review in flight (read-only: nothing to strand).
+    concurrency:
+      group: doc-review-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Scope — indexed docs this PR touches
+        id: scope
+        env:
+          RANGE: ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}
+        run: .github/scripts/doc-superpowers-steps/freshness-check.sh scope
+
+      - name: Resolve Anthropic auth
+        id: auth
+        if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.affected != '0'
+        env:
+          OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: .github/scripts/doc-superpowers-steps/resolve-auth.sh
+
+      - name: Fetch the doc-superpowers plugin (the installed version)
+        id: plugin
+        if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.affected != '0'
+        run: .github/scripts/doc-superpowers-steps/prepare-agent.sh
+
+      - name: Review PR documentation
+        if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.affected != '0'
+        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          github_token: ${{ github.token }}
+          claude_code_oauth_token: ${{ steps.auth.outputs.use_oauth == 'true' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
+          anthropic_api_key: ${{ steps.auth.outputs.use_oauth == 'false' && secrets.ANTHROPIC_API_KEY || '' }}
+          plugin_marketplaces: ${{ steps.plugin.outputs.marketplace }}
+          plugins: doc-superpowers@doc-superpowers
+          claude_args: |
+            --max-turns 40
+            --allowedTools "Skill,Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(.github/scripts/doc-tools.sh check-freshness:*),Bash(.github/scripts/doc-tools.sh status:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*)"
+          prompt: |
+            This is an unattended, read-only GitHub Actions run of the doc-superpowers
+            plugin.
+            - Use `.github/scripts/doc-tools.sh` as `$DOC_TOOLS` (this plugin
+              version's vendored copy) and call it by that path: your tools allow
+              exactly that command.
+            - Nobody can answer questions: take the recommended option instead.
+            - Do not modify any file.
+
+            Run /doc-superpowers review-pr for pull request
+            #${{ github.event.pull_request.number }}. Its changes are
+            `git diff ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}`.
+            Post the findings, with severity ratings (P0-P3), as one PR comment:
+            `gh pr comment ${{ github.event.pull_request.number }} --body "<findings>"`.
+
+  respond:
+    if: >-
+      ((github.event_name == 'issue_comment' && github.event.issue.pull_request) ||
+       github.event_name == 'pull_request_review_comment') &&
+      contains(github.event.comment.body, '@claude') &&
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
       issues: write
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
 
+      - name: Same-repository pull requests only
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+        run: .github/scripts/doc-superpowers-steps/pr-guard.sh
+
       - name: Resolve Anthropic auth
         id: auth
+        if: steps.guard.outputs.same_repo == 'true'
         env:
           OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          if [ -n "$OAUTH" ]; then
-            echo "use_oauth=true" >> "$GITHUB_OUTPUT"
-            if [ -n "$API_KEY" ]; then
-              echo "::notice::Both CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are set; using CLAUDE_CODE_OAUTH_TOKEN."
-            fi
-          elif [ -n "$API_KEY" ]; then
-            echo "use_oauth=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::Neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY is set as a repository secret. Add one under Settings > Secrets and variables > Actions." >&2
-            exit 1
-          fi
+        run: .github/scripts/doc-superpowers-steps/resolve-auth.sh
 
-      - name: Review PR documentation
-        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1
+      - name: Fetch the doc-superpowers plugin (the installed version)
+        id: plugin
+        if: steps.guard.outputs.same_repo == 'true'
+        run: .github/scripts/doc-superpowers-steps/prepare-agent.sh
+
+      # Tag mode: no prompt:, so the action answers the comment itself (on the
+      # PR branch, in its own tracking comment).
+      - name: Answer @claude
+        if: steps.guard.outputs.same_repo == 'true'
+        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88
         with:
+          github_token: ${{ github.token }}
+          trigger_phrase: "@claude"
           claude_code_oauth_token: ${{ steps.auth.outputs.use_oauth == 'true' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           anthropic_api_key: ${{ steps.auth.outputs.use_oauth == 'false' && secrets.ANTHROPIC_API_KEY || '' }}
-          trigger_phrase: "@claude"
-          prompt: |
-            Run /doc-superpowers review-pr to analyze the documentation impact
-            of this pull request. Post findings as a PR comment with severity
-            ratings (P0-P3).
-
-            This is a read-only review — do not modify any files.
+          plugin_marketplaces: ${{ steps.plugin.outputs.marketplace }}
+          plugins: doc-superpowers@doc-superpowers
+          claude_args: |
+            --max-turns 30
+            --allowedTools "Skill,Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(.github/scripts/doc-tools.sh check-freshness:*),Bash(.github/scripts/doc-tools.sh status:*),Bash(gh pr view:*),Bash(gh pr diff:*)"

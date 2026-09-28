@@ -19,10 +19,9 @@ doc-superpowers/
 ├── .codex/               # Codex installation guide
 │   └── INSTALL.md
 ├── .github/
-│   └── workflows/        # This repo's own installed CI — the 3 shell-based workflows
+│   └── workflows/        # This repo's own installed CI — the 2 default shell-based workflows
 │       ├── doc-freshness-pr.yml
-│       ├── doc-freshness-schedule.yml
-│       └── doc-index-update.yml
+│       └── doc-freshness-schedule.yml
 ├── .opencode/            # OpenCode plugin + installation guide
 │   ├── INSTALL.md
 │   └── plugins/
@@ -57,22 +56,21 @@ doc-superpowers/
 │       │   ├── pre-commit-gate.sh  # PreToolUse gate on the staged tree; defers staging commands to the git pre-commit hook; STRICT = exit 2 + stderr reason
 │       │   ├── post-commit-sync.sh # PostToolUse report of the docs a commit left stale (report only, never update-index)
 │       │   └── session-summary.sh  # Stop (every response) — docs citing working-tree changes; 2 s budget, process-group watchdog
-│       └── ci/               # GitHub Actions workflow templates — 9 total (6 AI-powered, 3 shell-based); all actions SHA-pinned
-│           ├── doc-freshness-pr.yml       # PR freshness check (shell-based, uses vendored doc-tools.sh)
-│           ├── doc-freshness-schedule.yml # Weekly scheduled audit (shell-based, uses vendored doc-tools.sh)
-│           ├── doc-index-update.yml       # Post-merge index sync (shell-based, uses vendored doc-tools.sh)
-│           ├── doc-audit-update.yml       # AI audit+update on feature branches (concurrency group)
-│           ├── doc-review-pr.yml          # AI PR doc review + @claude interactive (author gate + concurrency)
-│           ├── doc-release.yml            # AI release notes drafting (concurrency group)
-│           ├── doc-spec-verify.yml        # AI spec compliance on PRs (concurrency group)
-│           ├── doc-pr-full-cycle.yml      # AI PR full cycle: review, update, diagram, sync (concurrency group)
+│       └── ci/               # GitHub Actions workflow templates — 8 total (6 AI-powered, 2 shell-based); all actions SHA-pinned with exact version comments; every job has timeout-minutes
+│           ├── doc-freshness-pr.yml       # PR freshness check (shell-based, fails closed; one marker comment)
+│           ├── doc-freshness-schedule.yml # Weekly scheduled audit (shell-based; closes its issue only after a clean check)
+│           ├── doc-audit-update.yml       # AI audit+update on feature branches (scope-gated; checked commit step; shared write group)
+│           ├── doc-review-pr.yml          # AI PR doc review (fixed-prompt PR job) + @claude tag-mode comment job
+│           ├── doc-release.yml            # AI release notes drafting (checked commit step opens a PR)
+│           ├── doc-spec-verify.yml        # AI spec compliance on PRs (scope-gated on indexed specs)
+│           ├── doc-pr-full-cycle.yml      # AI PR full cycle: review, update, diagram, sync (scope-gated; checked commit step; shared write group)
 │           ├── doc-pr-release.yml         # AI per-PR release-notes fragment producer — drafts/maintains RELEASE-NOTES.next/PR-<N>.md and syncs a managed section in the PR body
 │           └── doc-pr-release/            # Colocated shell helpers for doc-pr-release.yml
 │               ├── extract-context.sh         # Emits JSON context blob (PR body, existing fragment, commit ranges)
 │               ├── update-pr-body.sh          # Idempotently merges a managed section into the PR body
-│               ├── commit-and-push.sh         # Stages, commits ([doc-superpowers] prefix), and pushes the fragment back to the PR branch
+│               ├── commit-and-push.sh         # Stages, commits ([doc-superpowers] prefix), and pushes the fragment back to the PR branch (a workflow step, never the agent)
 │               └── RELEASE-NOTES.next.README.md # Fragment-format spec dropped into consuming repos (only if missing)
-│           └── doc-superpowers-steps/     # run: step bodies of doc-pr-release.yml + doc-release.yml (sentinel-check, write-context, resolve-auth, verify-fragment, precheck); always installed with either workflow
+│           └── doc-superpowers-steps/     # run: step bodies of every template — freshness-check (freshness gate/audit, AI scope gate), resolve-auth, prepare-agent (pinned plugin), commit-changes (checked commit), pr-guard (same-repo), sentinel-check, write-context, verify-fragment, precheck; installed with any workflow
 ├── references/
 │   ├── doc-spec.md       # Templates for all generated doc types + Mermaid syntax + naming conventions
 │   ├── agent-prompt-template.md   # Review agent prompt template + scope focus areas
@@ -117,7 +115,7 @@ doc-superpowers/
 | `skills/doc-superpowers/SKILL.md` | Core skill logic: discovery phase, 11 action handlers (init, audit, review-pr, update, diagram, sync, hooks, release, spec-generate, spec-inject, spec-verify), agent prompt templates, verification gates, error handling | Adding/changing actions, modifying agent behavior, updating discovery logic |
 | `scripts/doc-tools.sh` | Bundled freshness tooling with 15 subcommands: `build-index`, `check-freshness`, `update-index` (the one verb that attests: the only writer of `last_verified`), `add-entry`, `remove-entry`, `move-entry` (re-key an entry after a doc moves, preserving `code_refs`/`code_oids`/`code_commit`/`last_verified` — the lossless alternative to `remove-entry` + `add-entry`; `--stdin` for a batch), `set-code-refs` (change an entry's `code_refs` in place), `deprecate-entry` (also sets the successor's `replaces`), `status`, `bump-version`, `check-version`, `implementation-status`, `set-implementation`, `fragments {list, validate, merge}`, `tools {install, uninstall, status}` (vendors doc-tools.sh + per-PR release-notes helpers into a consumer repo). Content hashing for docs, content identity for code (each code ref's git object id, `code_oids`, compared with one `git cat-file --batch-check`), SHA-256 hashing for per-PR release-notes fragments. Every write to `docs/.doc-index.json` goes through one locked, atomic writer (`_index_apply`; see Code Flow → "Index write path") | Changing staleness detection, index schema, version sync, fragment parsing, adding subcommands, changing how the index is persisted |
 | `scripts/test-doc-tools.sh` | Comprehensive test suite for doc-tools.sh — tests all subcommands (including `fragments`), edge cases, error handling | Adding tests for new doc-tools features |
-| `scripts/test-doc-pr-release.sh` | Test suite for the CI workflow helpers (on the shared `test-helpers.sh` harness) — covers `extract-context.sh`, `update-pr-body.sh`, `commit-and-push.sh`, the extracted `run:` step scripts in `doc-superpowers-steps/`, workflow YAML placeholder substitution, and template structure/wiring (missing YAML parser = loud SKIP locally, FAIL in CI) | Adding tests for the fragment producer workflow or its helpers |
+| `scripts/test-doc-pr-release.sh` | Test suite for the CI workflow helpers (on the shared `test-helpers.sh` harness) — covers `extract-context.sh`, `update-pr-body.sh`, `commit-and-push.sh`, the `run:` step scripts in `doc-superpowers-steps/` (run as a workflow step runs them, from an installed fixture), workflow YAML placeholder substitution, template structure/wiring, and the installed templates' rules (fail closed, scalar outputs, timeouts, pins, AI token/plugin/tools, same-repo guard, write group, checked commit) (missing YAML parser = loud SKIP locally, FAIL in CI) | Adding tests for the fragment producer workflow or its helpers |
 | `scripts/test-spec-status-model.sh` | Test suite pinning the canonical Spec Status Model wording and its call sites | Changing spec status transition rules, roles, or vocabulary |
 | `scripts/test-helpers.sh` | Shared test harness sourced by every suite: private scratch root cleaned on EXIT/INT/TERM, isolated git environment (`GIT_CONFIG_GLOBAL=/dev/null`, private `HOME`), pipefail-safe asserts, `assert_true`, SKIP and known-bug (XFAIL) reporting | Adding shared test utilities or assertions |
 | `scripts/hooks/install.sh` | Hook installer engine — install/uninstall/status for git, Claude Code, and CI tiers. Registers 3 Claude Code hooks (PreToolUse, PostToolUse, Stop) and 5 git hooks. The `--git` tier also registers a custom merge driver for `.doc-index.json` conflict resolution. CI tier: the 3 shell workflows by default, the AI ones by name via `--workflows=<csv\|all\|none>`, plus `--helpers=<bool>`, `--force` (bypass state-respect), `--transient` (uninstall without marking intentional); vendoring through `doc-tools.sh tools install\|uninstall --helper`. Places everything with git plumbing (`--show-toplevel`, `--git-path hooks`), refuses symlinked write targets and a non-local `core.hooksPath`, owns only marked blocks / its own settings entries, and runs every check before the first write. Sources `state.sh` for install-state tracking | Adding hook tiers, changing installer logic, adding new hook scripts, changing install-state semantics |
@@ -166,7 +164,7 @@ doc-superpowers/
 | Tools subcommand | `scripts/doc-tools.sh` `cmd_tools_*` — `tools install [--dest <path>] [--with-helpers \| --helper <dir>...]`, `tools uninstall [--helper <dir>...]` (removes only files byte-identical to the plugin's; refuses symlinked paths), `tools status`, `tools version` |
 | Git hook scripts | `scripts/hooks/git/` — pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push |
 | Claude Code hook scripts | `scripts/hooks/claude/` — pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh |
-| CI workflow templates | `scripts/hooks/ci/` — 9 templates total (3 shell-based, 6 AI-powered). Shell: doc-freshness-pr.yml, doc-freshness-schedule.yml, doc-index-update.yml (use vendored `.github/scripts/doc-tools.sh`). AI: doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml (per-PR release-notes fragment producer, with colocated helpers under `doc-pr-release/`). All actions SHA-pinned. This repo self-installs only the 3 shell-based workflows into its own `.github/workflows/` — the 6 AI ones need Anthropic credentials configured as repository secrets, so the 3-of-9 gap here is deliberate, not drift |
+| CI workflow templates | `scripts/hooks/ci/` — 8 templates total (2 shell-based, 6 AI-powered; `doc-index-update.yml` was retired in v3.0.0). Shell: doc-freshness-pr.yml, doc-freshness-schedule.yml (run the vendored `.github/scripts/doc-tools.sh` through `doc-superpowers-steps/freshness-check.sh`). AI: doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml (per-PR release-notes fragment producer, with colocated helpers under `doc-pr-release/`). All actions SHA-pinned. This repo self-installs only the 2 shell-based workflows into its own `.github/workflows/` — the 6 AI ones need Anthropic credentials configured as repository secrets, so the 2-of-8 gap here is deliberate, not drift |
 | Per-PR release-notes fragment helpers | `scripts/hooks/ci/doc-pr-release/` — `extract-context.sh`, `update-pr-body.sh`, `commit-and-push.sh`, and `RELEASE-NOTES.next.README.md` (fragment-format spec installed into consuming repos). The `run:` step bodies of `doc-pr-release.yml` and `doc-release.yml` live in `scripts/hooks/ci/doc-superpowers-steps/` |
 | Release-notes fragment parsing | `scripts/doc-tools.sh fragments` — `list` (JSON enumeration + hash validity), `validate <path>` (exit 0/1/2), `merge <start> <end> [--paths-out=<file>]` (markdown sections for insertion under a `## vX.Y.Z` header) |
 | Hook test suite | `scripts/test-hooks.sh` |
@@ -332,7 +330,8 @@ User invokes /doc-superpowers hooks install --all
       → Merge per entry (only entries running these scripts are the installer's)
       → Exclude settings.local.json and the scripts dir through a marked block in git's info/exclude
     → For --ci tier:
-      → Plan: the named workflows, or the recorded set (first install: the 3 shell ones), + every managed one on disk
+      → Plan: the named workflows, or the recorded set (first install: the 2 shell ones), + every managed one on disk
+      → Remove a retired workflow the installer owns (doc-index-update.yml with its marker) and drop its state entry; keep and report one without the marker
       → Generate workflow files from scripts/hooks/ci/ templates to .github/workflows/
       → Substitute __BASE_BRANCH__, __VERSION__, __CRON_SCHEDULE__, __CI_STRICT__ (validated, sed-escaped)
       → Vendor via `doc-tools.sh tools install --helper <dir>` for the helper dirs the installed workflows run

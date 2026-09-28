@@ -25,7 +25,8 @@ set -euo pipefail
 #   - in .claude/settings.local.json, each hook ENTRY whose command runs one of
 #     .claude/hooks/doc-superpowers/{pre-commit-gate,post-commit-sync,session-summary}.sh
 #     (a group is removed only when it held nothing else);
-#   - a workflow whose first lines carry "doc-superpowers workflow v<N>";
+#   - a workflow whose first lines carry "doc-superpowers workflow v<N>" —
+#     a RETIRED one too (doc-index-update.yml): any install --ci removes it;
 #   - vendored files: `doc-tools.sh tools install|uninstall` decide (uninstall
 #     removes only files identical to the plugin's copies, and says what it kept).
 #
@@ -44,8 +45,14 @@ GIT_HOOKS="pre-commit post-merge post-checkout prepare-commit-msg pre-push"
 CLAUDE_HOOKS="pre-commit-gate post-commit-sync session-summary"
 CLAUDE_HOOKS_DIR=".claude/hooks/doc-superpowers"
 SETTINGS_FILE=".claude/settings.local.json"
-SHELL_WORKFLOWS="doc-freshness-pr doc-freshness-schedule doc-index-update"
+SHELL_WORKFLOWS="doc-freshness-pr doc-freshness-schedule"
 CI_DEFAULT_WORKFLOWS="$SHELL_WORKFLOWS"
+# Workflows an earlier version installed and this one no longer ships. A
+# managed copy (the workflow marker) is removed by any install --ci and by a
+# full uninstall, and its state entry dropped; a file without the marker is
+# kept and reported. doc-index-update (retired in v3.0.0) recorded every doc
+# edited on the base branch as verified, unread, and failed every run.
+RETIRED_WORKFLOWS="doc-index-update"
 VENDOR_DEST=".github/scripts"
 BLOCK_BEGIN="# doc-superpowers:begin"
 BLOCK_END="# doc-superpowers:end"
@@ -61,16 +68,20 @@ KNOWN_WORKFLOWS="${KNOWN_WORKFLOWS# }"
 
 # The plugin's version, parsed by doc-tools.sh (the first release heading of
 # RELEASE-NOTES.md, line-anchored and outside code fences — the one parser
-# check-version uses too), run under this installer's own bash. Only rendering
-# a CI template that holds __VERSION__ uses it, so it is looked up there, once,
-# never on status / uninstall / help. A missing or malformed RELEASE-NOTES.md
-# does not abort the install: the version is "unknown", with one WARN.
+# check-version uses too), run under this installer's own bash. The AI
+# templates carry it as DOC_SUPERPOWERS_VERSION, and their plugin step
+# (doc-superpowers-steps/prepare-agent.sh) installs the plugin from the tag
+# v<version>. Only rendering a template that holds __VERSION__ uses it, so it
+# is looked up there, once, never on status / uninstall / help. A missing or
+# malformed RELEASE-NOTES.md does not abort the install: the version is
+# "unknown", with one WARN — and that workflow's plugin step then fails with
+# an ::error:: until it is re-installed from a released plugin.
 VERSION=""
 ci_version() {
   [[ -z "$VERSION" ]] || return 0
   if ! VERSION=$("$BASH" "$DOC_TOOLS" tools version 2>/dev/null) || [[ -z "$VERSION" ]]; then
     VERSION="unknown"
-    echo "  WARN: cannot read the plugin version from $SKILL_DIR/RELEASE-NOTES.md (doc-tools.sh tools version); workflows get DOC_SUPERPOWERS_VERSION \"vunknown\"" >&2
+    echo "  WARN: cannot read the plugin version from $SKILL_DIR/RELEASE-NOTES.md (doc-tools.sh tools version); workflows get DOC_SUPERPOWERS_VERSION \"vunknown\", and their plugin step fails until you re-install from a released plugin" >&2
   fi
 }
 
@@ -81,15 +92,14 @@ source "$SCRIPT_DIR/state.sh"
 
 workflow_desc() {
   case "$1" in
-    doc-freshness-pr) echo "PR opened/updated: comments with the docs the diff leaves stale (contents: read, pull-requests: write)" ;;
-    doc-freshness-schedule) echo "weekly cron: opens/updates an audit issue (contents: read, issues: write)" ;;
-    doc-index-update) echo "push to the base branch: commits the re-synced index to a branch and opens a PR (contents + pull-requests: write)" ;;
-    doc-audit-update) echo "push to a non-base branch: AI audit + update, commits to that branch (contents + pull-requests: write)" ;;
-    doc-review-pr) echo "PR opened / @claude comment: AI doc review as PR comments (contents: read, pull-requests + issues: write)" ;;
-    doc-release) echo "push to release/**: AI release-notes draft, opens a PR (contents + pull-requests: write)" ;;
-    doc-spec-verify) echo "PR opened/updated: AI spec-compliance comment (contents: read, pull-requests: write)" ;;
-    doc-pr-full-cycle) echo "PR opened: AI review + update + diagram + sync, commits to the PR branch (contents + pull-requests: write)" ;;
-    doc-pr-release) echo "PR pushes: AI release-notes fragment committed to the PR branch, PR body edited (contents + pull-requests: write)" ;;
+    doc-freshness-pr) echo "PR opened/updated: one comment with the docs the diff leaves stale or missing; STRICT fails the check (contents: read, pull-requests: write)" ;;
+    doc-freshness-schedule) echo "weekly cron: opens/updates/closes an audit issue (contents: read, issues: write)" ;;
+    doc-audit-update) echo "push to a non-base branch leaving docs stale: AI audit + update, a checked step commits docs to that branch (contents: write)" ;;
+    doc-review-pr) echo "PR opened/updated touching indexed docs: AI review comment; @claude PR comments: tag mode (contents: read, pull-requests + issues: write)" ;;
+    doc-release) echo "push to release/**: AI release-notes draft, a checked step commits it to a new branch and opens a PR (contents + pull-requests: write)" ;;
+    doc-spec-verify) echo "PR opened/updated touching indexed specs: AI spec-compliance comment (contents: read, pull-requests: write)" ;;
+    doc-pr-full-cycle) echo "PR opened touching indexed docs: AI review + update + diagram + sync, a checked step commits docs to the PR branch (contents + pull-requests: write)" ;;
+    doc-pr-release) echo "PR pushes: AI release-notes fragment, a checked step commits it to the PR branch; PR body edited (contents + pull-requests: write)" ;;
     *) echo "(no description)" ;;
   esac
 }
@@ -975,7 +985,11 @@ parse_workflow_csv() {
     n="${n#"${n%%[![:space:]]*}"}"
     n="${n%"${n##*[![:space:]]}"}"
     [ -n "$n" ] || continue
-    if ! in_list "$n" "$KNOWN_WORKFLOWS"; then
+    if in_list "$n" "$RETIRED_WORKFLOWS"; then
+      # Uninstall takes the name (removes an owned copy); install never
+      # installs it.
+      [ "$COMMAND" = uninstall ] || die "$n was retired in v3.0.0 (it recorded docs as verified that nobody had read) and is no longer installed; install --ci removes an installed copy."
+    elif ! in_list "$n" "$KNOWN_WORKFLOWS"; then
       {
         echo "ERROR: unknown workflow name: $n"
         echo "Valid names:"
@@ -1000,7 +1014,8 @@ disk_workflows() {
 }
 
 # A choice the state does not record (a pre-3.0 install) read back from the
-# rendered workflows, so an upgrade does not silently change it.
+# rendered workflows, so an upgrade does not silently change it. (A retired
+# doc-index-update.yml still counts: it is read before the upgrade removes it.)
 infer_choice() {
   local f line v
   case "$1" in
@@ -1044,7 +1059,7 @@ state_refuse() {
 check_ci_paths() {
   local w d
   safe_dest .github/workflows
-  for w in $KNOWN_WORKFLOWS; do
+  for w in $KNOWN_WORKFLOWS $RETIRED_WORKFLOWS; do
     safe_dest ".github/workflows/$w.yml"
   done
   safe_dest "$VENDOR_DEST/doc-tools.sh"
@@ -1073,6 +1088,16 @@ preflight_ci() {
   valid_cron "$CI_CRON" || die "the recorded cron '$CI_CRON' is not 5 cron fields; pass --cron. Nothing was changed."
 
   CI_DISK=$(disk_workflows)
+  # Retired workflows on disk: removed when the installer owns them (the
+  # workflow marker, as for every managed workflow), else kept and reported.
+  CI_RETIRE="" CI_RETIRED_KEPT=""
+  for w in $RETIRED_WORKFLOWS; do
+    if is_managed_workflow ".github/workflows/$w.yml"; then
+      CI_RETIRE="${CI_RETIRE:+$CI_RETIRE }$w"
+    elif [ -e ".github/workflows/$w.yml" ]; then
+      CI_RETIRED_KEPT="${CI_RETIRED_KEPT:+$CI_RETIRED_KEPT }$w"
+    fi
+  done
   case "$WF_MODE" in
     csv) new="$CSV_NAMES" ;;
     none) ;;
@@ -1172,16 +1197,38 @@ run_tools() {
   [ -z "$out" ] || printf '%s\n' "$out" | sed 's/^/  /'
 }
 
-# The helper dirs the managed workflows on disk run: doc-pr-release.yml runs
-# the producer helpers and the step scripts, doc-release.yml the step scripts.
+# The helper dirs the managed workflows on disk run — a workflow that names
+# .github/scripts/<dir>/ runs it: every template runs step scripts
+# (doc-superpowers-steps), doc-pr-release.yml also the producer helpers.
 needed_helpers() {
-  local need=""
-  if is_managed_workflow .github/workflows/doc-pr-release.yml; then
-    need="doc-pr-release doc-superpowers-steps"
-  elif is_managed_workflow .github/workflows/doc-release.yml; then
-    need="doc-superpowers-steps"
-  fi
+  local need="" d w
+  for d in doc-pr-release doc-superpowers-steps; do
+    for w in $KNOWN_WORKFLOWS; do
+      is_managed_workflow ".github/workflows/$w.yml" || continue
+      if grep -q "\.github/scripts/$d/" ".github/workflows/$w.yml"; then
+        need="${need:+$need }$d"
+        break
+      fi
+    done
+  done
   printf '%s' "$need"
+}
+
+# Remove the managed copies of retired workflows (CI_RETIRE_NOW), drop every
+# named retired workflow from the state, report the unmanaged files kept.
+# $1: the retired names in play; the caller sets CI_RETIRE_NOW / _KEPT.
+retire_workflows() {
+  local w
+  for w in $1; do
+    state_wf_drop "$w"
+  done
+  for w in $CI_RETIRE_NOW; do
+    remove_file ".github/workflows/$w.yml"
+    echo "  Removed .github/workflows/$w.yml: the $w workflow was retired (see RELEASE-NOTES v3.0.0)."
+  done
+  for w in $CI_RETIRE_KEPT; do
+    echo "  Kept .github/workflows/$w.yml: named like the retired doc-superpowers $w workflow but without its marker, so not provably the installer's. Remove it yourself if it is the old one."
+  done
 }
 
 # Vendored files follow the installed workflows: needed helper dirs are
@@ -1221,6 +1268,8 @@ install_ci() {
   for w in $CI_FOREIGN; do
     echo "  Existing $w.yml found (not doc-superpowers-managed), skipping."
   done
+  CI_RETIRE_NOW="$CI_RETIRE" CI_RETIRE_KEPT="$CI_RETIRED_KEPT"
+  retire_workflows "$RETIRED_WORKFLOWS"
   state_set_choices "$CI_BASE" "$CI_CRON" "$CI_STRICT"
   vendor_sync install
   state_flush
@@ -1259,6 +1308,26 @@ preflight_uninstall_ci() {
     csv) CI_TARGETS="$CSV_NAMES" CI_FULL=0 ;;
     none) CI_TARGETS="" CI_FULL=0 ;;
   esac
+  # Retired names (every one on a full uninstall, else the listed ones) are
+  # dropped from the state, not marked; their managed copies removed.
+  local t=""
+  CI_UN_RETIRED=""
+  [ "$CI_FULL" = 0 ] || CI_UN_RETIRED="$RETIRED_WORKFLOWS"
+  for w in $CI_TARGETS; do
+    if in_list "$w" "$RETIRED_WORKFLOWS"; then
+      in_list "$w" "$CI_UN_RETIRED" || CI_UN_RETIRED="${CI_UN_RETIRED:+$CI_UN_RETIRED }$w"
+    else
+      t="${t:+$t }$w"
+    fi
+  done
+  CI_TARGETS="$t" CI_RETIRE_NOW="" CI_RETIRE_KEPT=""
+  for w in $CI_UN_RETIRED; do
+    if is_managed_workflow ".github/workflows/$w.yml"; then
+      CI_RETIRE_NOW="${CI_RETIRE_NOW:+$CI_RETIRE_NOW }$w"
+    elif [ -e ".github/workflows/$w.yml" ]; then
+      CI_RETIRE_KEPT="${CI_RETIRE_KEPT:+$CI_RETIRE_KEPT }$w"
+    fi
+  done
   # Marked: a listed name always (an explicit choice); on a full uninstall,
   # what is installed (on disk or recorded) — earlier removals keep their mark.
   CI_MARK=""
@@ -1277,6 +1346,9 @@ uninstall_ci() {
   for w in $CI_MARK; do
     state_mark_uninstalled "$w" "$intentional"
   done
+  for w in $CI_UN_RETIRED; do
+    state_wf_drop "$w"
+  done
   # Recorded first: an interrupted run then cannot bring a workflow back.
   state_flush
   for w in $CI_TARGETS; do
@@ -1285,6 +1357,10 @@ uninstall_ci() {
       removed=$((removed + 1))
     fi
   done
+  for w in $CI_RETIRE_NOW; do
+    removed=$((removed + 1))
+  done
+  retire_workflows ""
   if [ "$CI_FULL" = 1 ]; then
     run_tools tools uninstall --dest "$VENDOR_DEST"
   else
@@ -1321,6 +1397,11 @@ status_ci() {
       printf "  ⚠ %-26s recorded installed but missing: the next install --ci restores it\n" "$w.yml"
     else
       printf "  ✗ %-26s not installed\n" "$w.yml"
+    fi
+  done
+  for w in $RETIRED_WORKFLOWS; do
+    if is_managed_workflow ".github/workflows/$w.yml"; then
+      printf "  ⚠ %-26s retired: the next install --ci (or uninstall --ci) removes it\n" "$w.yml"
     fi
   done
   if [ "$state_ok" = 1 ] && [ "$STATE_HAS_CI" = 1 ]; then

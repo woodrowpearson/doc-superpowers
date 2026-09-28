@@ -1,6 +1,6 @@
 ---
 date: 2026-09-27
-status: Open
+status: Resolved
 priority: P1
 type: bug
 component: ci
@@ -127,12 +127,61 @@ The six AI templates run `claude-code-action` in agent mode with no `plugins` an
 
 ## Acceptance criteria
 
-- [ ] No placeholder survives `install --all`.
-- [ ] Every AI template passes `github_token`, `plugins` and a scoped `--allowedTools`.
-- [ ] Every job has `timeout-minutes`.
-- [ ] No index-sized data goes through `$GITHUB_OUTPUT`.
-- [ ] The schedule's close step is gated on a successful check.
+- [x] No placeholder survives `install --all`.
+- [x] Every AI template passes `github_token`, `plugins` and a scoped `--allowedTools`.
+- [x] Every job has `timeout-minutes`.
+- [x] No index-sized data goes through `$GITHUB_OUTPUT`.
+- [x] The schedule's close step is gated on a successful check.
 - [ ] One real Actions run per template is recorded before the cluster closes (needs-runtime).
+  Still open: Actions does not run on this repository (billing lock since 2026-08-31). The
+  templates are proven on the installer's output instead (see Resolution); record one run per
+  template when CI returns.
+
+## Resolution
+
+Fixed by Task 9 of the fix plan (commit `fix(ci)!: … (sweep 05ea982 I-8; closes #5)`, which
+closes GH #5). Proven on the installer's output — `install --all --workflows=all` in a fixture,
+asserted as YAML and by running the vendored step scripts the way a step runs them
+(`scripts/test-doc-pr-release.sh`, "CI templates as installed" and "I-8 step helpers";
+`scripts/test-hooks.sh`, "retired doc-index-update, step scripts").
+
+- **`doc-index-update.yml` removed**: the template, the installer's default set and
+  known-workflow list, and this repository's copy. `install.sh` keeps it in
+  `RETIRED_WORKFLOWS`: any `install --ci` (and a full `uninstall --ci`) removes a copy that
+  carries the workflow marker — the ownership rule for every managed workflow — and drops its
+  state entry (`state_wf_drop`); a file of that name without the marker is kept and reported.
+  `install --workflows=doc-index-update` is an error.
+- **Freshness templates fail closed.** Their steps are `doc-superpowers-steps/freshness-check.sh
+  gate|audit`: the result goes to `$RUNNER_TEMP/freshness.json`, is filtered with jq to
+  `freshness-report.json` (`{summary, docs}`: stale + missing only), and only scalars reach
+  `$GITHUB_OUTPUT`; `github-script` reads the report with `fs.readFileSync`. The PR gate scopes
+  with `check-freshness --code-refs-from <file>` (no argv list, no word splitting) and also
+  counts indexed docs the PR deletes. A check that cannot run writes `status=failed` and no
+  count: `::warning::`, or `::error::` + exit 1 under STRICT; the schedule run always fails and
+  its create/close steps need `status == 'ok'`. One PR comment, found by a hidden marker and the
+  bot author across every page, is updated each push (to "none" too); the schedule's issue is
+  found the same way.
+- **AI templates can run and are bounded:** `github_token: ${{ github.token }}` (no
+  `id-token: write`); the plugin from `prepare-agent.sh`'s checkout of tag
+  `v<installed version>` (`plugin_marketplaces` takes a local path; a Git URL there cannot name
+  a tag) with `plugins: doc-superpowers@doc-superpowers`; `--max-turns` and a per-template
+  `--allowedTools` list; `timeout-minutes`; a same-repository guard (job `if:`, or
+  `pr-guard.sh` for comment events); no trigger path filters — a `freshness-check.sh scope` step
+  gates the agent on the docs (or specs) the change touches; the agent never commits —
+  `commit-changes.sh` checks HEAD and every changed path, then commits and pushes without
+  force; one `doc-superpowers-write-<branch>` concurrency group, never cancelled, for the three
+  that commit to a branch.
+- **`doc-review-pr.yml` split** into a fixed-prompt `pull_request` job and a tag-mode `respond`
+  job (no `prompt:`) gated on a member's PR comment containing `@claude`.
+- Pins carry their exact version comments (`# v4.3.1`, `# v7.1.0`, `# v1.0.88`).
+- P3s: the `paths-ignore` comment now gives the real reason (GITHUB_TOKEN pushes start no run);
+  the changed-file list is a file (no word splitting, globbing or "empty means everything");
+  `workflow_dispatch` is gone from the PR-only templates (review-pr, spec-verify, full-cycle),
+  which had no PR context; `DOC_SUPERPOWERS_VERSION` is read (the plugin pin); audit-update's
+  unused `pull-requests: write` is dropped (`__BASE_BRANCH__` was validated in I-7).
+
+Left for later tasks: I-9 (T10) owns `doc-release.yml`'s `contains(…)` skip and the fragment
+pipeline; the runtime criterion above waits for CI.
 
 ## Related
 

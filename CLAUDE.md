@@ -20,11 +20,10 @@ doc-superpowers/
 │   └── INSTALL.md
 ├── .codex/               # Codex installation guide
 │   └── INSTALL.md
-├── .github/              # Self-installed CI tier — 3 of the 9 workflow templates,
+├── .github/              # Self-installed CI tier — the 2 default workflow templates,
 │   └── workflows/        # plus tests.yml (this repo only, not a template)
 │       ├── doc-freshness-pr.yml
 │       ├── doc-freshness-schedule.yml
-│       ├── doc-index-update.yml
 │       └── tests.yml     # Runs the five shell suites + check-version (bash 5.x / 3.2 matrix)
 ├── .opencode/            # OpenCode plugin + installation guide
 │   ├── INSTALL.md
@@ -53,9 +52,8 @@ doc-superpowers/
 │       ├── git/              # Git hook scripts
 │       ├── claude/           # Claude Code hook scripts
 │       └── ci/               # GitHub Actions workflow templates
-│           ├── doc-freshness-pr.yml      # PR freshness check (shell-based)
-│           ├── doc-freshness-schedule.yml # Weekly audit cron (shell-based)
-│           ├── doc-index-update.yml      # Auto-index update on push (shell-based)
+│           ├── doc-freshness-pr.yml      # PR freshness check (shell-based; fails closed)
+│           ├── doc-freshness-schedule.yml # Weekly audit cron (shell-based; fails closed)
 │           ├── doc-audit-update.yml      # AI audit+update on feature branches
 │           ├── doc-review-pr.yml         # AI PR doc review + @claude interactive
 │           ├── doc-release.yml           # AI release notes drafting (consumer)
@@ -67,7 +65,7 @@ doc-superpowers/
 │               ├── update-pr-body.sh     # Idempotent PR-body managed-section editor
 │               ├── commit-and-push.sh    # FF-safe fragment commit + push (rebase retry)
 │               └── RELEASE-NOTES.next.README.md # Fragment-format spec (producer/consumer contract)
-│           └── doc-superpowers-steps/    # run: step bodies of doc-pr-release.yml + doc-release.yml (sentinel-check, write-context, resolve-auth, verify-fragment, precheck)
+│           └── doc-superpowers-steps/    # run: step bodies of every template (freshness-check, resolve-auth, prepare-agent, commit-changes, pr-guard, sentinel-check, write-context, verify-fragment, precheck)
 ├── references/
 │   ├── doc-spec.md       # Templates for generated docs (C4, ERD, workflows, agentic, specs, ADRs)
 │   ├── agent-prompt-template.md   # Review agent prompt template + scope focus areas
@@ -112,9 +110,9 @@ doc-superpowers/
 | `scripts/test-doc-tools.sh` | Test suite for doc-tools.sh | Adding tests for new doc-tools features |
 | `scripts/test-hooks.sh` | Test suite for hooks installer and hook scripts | Adding tests for new hooks or installer features |
 | `scripts/test-spec-status-model.sh` | Test suite pinning the canonical Spec Status Model wording and its call sites | Changing spec status transition rules, roles, or vocabulary |
-| `scripts/test-doc-pr-release.sh` | Test suite for the CI workflow helpers (extract-context, update-pr-body, commit-and-push, the extracted `run:` step scripts in doc-superpowers-steps/) + YAML placeholder substitution and template structure/wiring | Adding tests for fragment-producer or CI-step features |
+| `scripts/test-doc-pr-release.sh` | Test suite for the CI workflow helpers (extract-context, update-pr-body, commit-and-push, the `run:` step scripts in doc-superpowers-steps/) + YAML placeholder substitution, template structure/wiring, and the installed templates' fail-closed / least-privilege properties | Adding tests for fragment-producer, CI-step or template features |
 | `scripts/hooks/ci/doc-pr-release.yml` | AI per-PR release-notes fragment producer — drafts `RELEASE-NOTES.next/PR-<N>.md` on every push | Changing the producer workflow, prompt, or post-Claude verification |
-| `scripts/hooks/ci/doc-pr-release/*.sh`, `scripts/hooks/ci/doc-superpowers-steps/*.sh` | Producer helpers (extract-context, update-pr-body, commit-and-push; `--helpers`-gated) and the two AI release templates' extracted `run:` step bodies (always shipped to `.github/scripts/doc-superpowers-steps/` while doc-pr-release.yml or doc-release.yml is installed) | Changing fragment context schema, PR-body editing, push logic, or any workflow step body |
+| `scripts/hooks/ci/doc-pr-release/*.sh`, `scripts/hooks/ci/doc-superpowers-steps/*.sh` | Producer helpers (extract-context, update-pr-body, commit-and-push; `--helpers`-gated) and every template's `run:` step bodies (shipped to `.github/scripts/doc-superpowers-steps/` while any workflow is installed) | Changing fragment context schema, PR-body editing, push logic, or any workflow step body |
 | `scripts/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md` | Fragment-format spec — producer/consumer contract for `RELEASE-NOTES.next/PR-*.md` | Changing fragment markers, hash protocol, or consumer rules |
 | `scripts/merge-doc-index.sh` | Custom git merge driver for .doc-index.json — base-aware per-key three-way merge during merge/rebase/revert; conflict markers + exit 1 when it cannot decide | Changing merge conflict resolution logic |
 | `scripts/test-merge-driver.sh` | Test suite for merge-doc-index.sh | Adding tests for merge driver features |
