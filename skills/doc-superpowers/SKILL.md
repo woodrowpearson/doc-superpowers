@@ -520,6 +520,7 @@ Update is the **write counterpart** to audit's analysis (audit edits no doc; its
 - The Claude tier is per-user (`.claude/settings.local.json`, excluded through git's `info/exclude`).
 - Before `--ci`, show the user the consent table (each workflow's permissions and what it commits) and get a yes; name only the workflows they agreed to.
 - Never pass `--force` unless the user asked for exactly that.
+- An install another version made (2.x included) reads `⚠ … outdated` in `install.sh status`: re-run that tier, and walk the user through `$ROOT/README.md` → *Upgrading from 2.x* (v2's AI workflows, the per-user Claude tier, hooks in unconfigured directories, retyping design specs).
 
 ### Spec Lifecycle Actions — `spec-generate` / `spec-inject` / `spec-verify`
 

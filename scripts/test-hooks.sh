@@ -2873,6 +2873,15 @@ test_i7_install_uninstall_leaves_no_residue() {
   after=$(_tree_state | grep -v -e '^\./\.claude/$' -e '^\./\.claude/doc-superpowers/$' -e '^\./\.claude/doc-superpowers/installed\.json ')
   assert_eq "$before" "$after" "work tree, hooks, info/exclude and git config are as before"
   assert_file_exists ".claude/doc-superpowers/installed.json" "the state file stays (it records the removal)"
+  # doc-pr-release ships RELEASE-NOTES.next/README.md with its helpers; an
+  # unmodified one, alone there, goes with them.
+  inst install --all --workflows=doc-pr-release
+  assert_eq "0" "$IRC" "install --all --workflows=doc-pr-release exits 0"
+  assert_file_exists "RELEASE-NOTES.next/README.md" "…ships RELEASE-NOTES.next/README.md"
+  inst uninstall --all
+  assert_eq "0" "$IRC" "uninstall --all exits 0"
+  after=$(_tree_state | grep -v -e '^\./\.claude/$' -e '^\./\.claude/doc-superpowers/$' -e '^\./\.claude/doc-superpowers/installed\.json ')
+  assert_eq "$before" "$after" "with doc-pr-release too: nothing left but the state file (RELEASE-NOTES.next/ included)"
   teardown
 }
 
@@ -3001,7 +3010,8 @@ test_i7_claude_tier_is_per_user() {
   echo '{}' > .claude/settings.local.json
   git add .claude/settings.local.json && git commit -qm "tracked settings"
   inst install --claude
-  assert_contains "$IOUT" "is tracked by git" "a tracked settings.local.json is reported (untrack it to stay per-user)"
+  assert_contains "$IOUT" "tracked by git" "a tracked settings.local.json is reported (untrack it to stay per-user)"
+  assert_contains "$IOUT" "git rm -r --cached" "…with the command that untracks it"
   teardown
 }
 
@@ -3358,5 +3368,204 @@ test_i8_retired_foreign_file_kept
 test_i8_retired_status_and_uninstall
 test_i8_no_placeholder_survives_install_all
 test_i8_default_set_ships_its_step_scripts
+
+
+# --- Final review fix wave: installer + hooks ---------------------------------
+
+# The status line of <name> in $IOUT.
+_status_line() {
+  grep -E "^  [^ ]+ $1 " <<<"$IOUT" || true
+}
+
+test_fw_status_flags_outdated_installs() {
+  echo "test: FW H-I1 status flags an install another version made (the hook marker is the same): hooks, local copies, Claude scripts, settings commands"
+  setup
+  # A shell hook of the user's, so post-merge is integrated (our local copy runs from it).
+  printf '#!/bin/sh\necho mine\n' > .git/hooks/post-merge
+  chmod +x .git/hooks/post-merge
+  inst install --git --claude
+  assert_eq "0" "$IRC" "install --git --claude exits 0"
+  inst status
+  assert_not_contains "$IOUT" "outdated" "a fresh install: nothing outdated"
+  assert_contains "$(_status_line pre-commit)" "✓" "…pre-commit ✓"
+  assert_contains "$(_status_line post-merge)" "✓" "…integrated post-merge ✓"
+  assert_contains "$(_status_line pre-commit-gate)" "✓" "…pre-commit-gate ✓"
+  # Line 2 is the install date: another date is the same install.
+  sed '2s/.*/# doc-superpowers hook v1 — installed 1999-01-01/' .git/hooks/pre-commit > .git/hooks/pc.tmp
+  cat .git/hooks/pc.tmp > .git/hooks/pre-commit
+  rm -f .git/hooks/pc.tmp
+  inst status
+  assert_contains "$(_status_line pre-commit)" "✓" "a different install date (line 2) stays ✓"
+  # Anything else that differs is another version's hook.
+  echo "# v2 body" >> .git/hooks/pre-commit
+  echo "# v2 body" >> .git/hooks/.doc-superpowers-post-merge
+  echo "# v2 body" >> .claude/hooks/doc-superpowers/session-summary.sh
+  # The command the v2 installer registered: a relative path under bash -c.
+  local f=.claude/settings.local.json tmp v2cmd
+  # shellcheck disable=SC2016  # the v2 installer's literal command
+  v2cmd='bash -c '\''cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null && exec .claude/hooks/doc-superpowers/pre-commit-gate.sh'\'
+  tmp=$(jq --arg c "$v2cmd" '(.hooks.PreToolUse[].hooks[] | select(.command | contains("pre-commit-gate")) | .command) = $c' "$f")
+  printf '%s\n' "$tmp" > "$f"
+  inst status
+  assert_eq "0" "$IRC" "status exits 0"
+  assert_contains "$(_status_line pre-commit)" "outdated" "an edited pre-commit: outdated"
+  assert_contains "$(_status_line pre-commit)" "re-run install --git" "…re-run install --git"
+  assert_contains "$(_status_line post-merge)" "outdated" "an edited local copy of an integrated hook: outdated"
+  assert_contains "$(_status_line post-merge)" "re-run install --git" "…re-run install --git"
+  assert_contains "$(_status_line session-summary)" "outdated" "an edited Claude script: outdated"
+  assert_contains "$(_status_line session-summary)" "re-run install --claude" "…re-run install --claude"
+  assert_contains "$(_status_line pre-commit-gate)" "outdated" "a v2 settings command (relative path, bash -c): outdated"
+  assert_contains "$(_status_line pre-commit-gate)" "re-run install --claude" "…re-run install --claude"
+  assert_contains "$(_status_line post-commit-sync)" "✓" "the untouched ones stay ✓"
+  inst install --git --claude
+  inst status
+  assert_not_contains "$IOUT" "outdated" "re-installing clears every outdated line"
+  teardown
+}
+
+test_fw_unstaged_indexed_doc_is_not_in_this_commit() {
+  echo "test: FW H-I2 a doc the staged index lists but the commit leaves out (on disk, not staged) is 'not in this commit' (git add), never remove-entry advice"
+  hooked_fixture
+  echo "# New" > docs/new.md
+  echo "docs/new.md:src/:guide" | "$DOC_TOOLS" add-entry >/dev/null 2>&1
+  git add docs/.doc-index.json
+  stage_stale_change
+  local head
+  head=$(git rev-parse HEAD)
+  run_hooked DOC_SUPERPOWERS_STRICT=1 -- git commit -qm x
+  assert_eq "1" "$RUN_RC" "git pre-commit (STRICT): blocked"
+  assert_eq "$head" "$(git rev-parse HEAD)" "…nothing committed"
+  assert_contains "$RUN_OUT$RUN_ERR" "not in this commit" "git pre-commit: 'not in this commit'"
+  assert_contains "$RUN_OUT$RUN_ERR" "git add" "…with git add advice"
+  assert_contains "$RUN_OUT$RUN_ERR" "docs/new.md" "…naming the doc"
+  assert_not_contains "$RUN_OUT$RUN_ERR" "remove-entry" "…never remove-entry advice"
+  assert_not_contains "$RUN_OUT$RUN_ERR" "missing from disk" "…never 'missing from disk'"
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m x')" DOC_SUPERPOWERS_STRICT=1
+  assert_eq "2" "$RUN_RC" "gate (STRICT): blocked"
+  assert_contains "$RUN_ERR" "not in this commit" "gate: 'not in this commit' (Claude's feedback)"
+  assert_contains "$RUN_ERR" "git add" "gate: git add advice"
+  assert_not_contains "$RUN_ERR" "remove-entry" "gate: never remove-entry advice"
+  assert_not_contains "$RUN_ERR" "missing from disk" "gate: never 'missing from disk'"
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m x')"
+  assert_contains "$(out_field .systemMessage)" "not in this commit" "gate (advisory): the summary says so too"
+  teardown
+}
+
+test_fw_index_only_commit_judges_its_new_keys() {
+  echo "test: FW 227 a commit staging only the index with a new entry judges that entry (the scope by code refs never reached it)"
+  hooked_fixture
+  echo "# New" > docs/new.md
+  echo "docs/new.md:src/util.js:guide" | "$DOC_TOOLS" add-entry >/dev/null 2>&1
+  git add docs/.doc-index.json
+  local head
+  head=$(git rev-parse HEAD)
+  run_hooked DOC_SUPERPOWERS_STRICT=1 -- git commit -qm idx
+  assert_eq "1" "$RUN_RC" "git pre-commit (STRICT): the index-only commit is blocked"
+  assert_eq "$head" "$(git rev-parse HEAD)" "…nothing committed"
+  assert_contains "$RUN_OUT$RUN_ERR" "docs/new.md" "…naming the new entry's doc"
+  assert_contains "$RUN_OUT$RUN_ERR" "not in this commit" "…as not in this commit"
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m idx')" DOC_SUPERPOWERS_STRICT=1
+  assert_eq "2" "$RUN_RC" "gate (STRICT): blocked"
+  assert_contains "$RUN_ERR" "docs/new.md" "gate: names the doc"
+  git add docs/new.md
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m idx')" DOC_SUPERPOWERS_STRICT=1
+  assert_eq "0" "$RUN_RC" "gate: with the doc staged, nothing to report"
+  run_hooked DOC_SUPERPOWERS_STRICT=1 -- git commit -qm idx
+  assert_eq "0" "$RUN_RC" "git pre-commit: with the doc staged, committed"
+  # An index change that adds no key keeps the scoped check.
+  "$DOC_TOOLS" set-doc-type docs/new.md workflows >/dev/null 2>&1
+  git add docs/.doc-index.json
+  run_hooked DOC_SUPERPOWERS_STRICT=1 -- git commit -qm retype
+  assert_eq "0" "$RUN_RC" "an index change that adds no key: committed"
+  teardown
+}
+
+test_fw_removed_doc_keeps_move_advice() {
+  echo "test: FW H-I2 a doc gone from disk too (git rm, git mv) still gets 'missing from disk' with move-entry advice"
+  hooked_fixture
+  git rm -q docs/architecture.md
+  stage_stale_change
+  run_hooked -- git commit -qm rm
+  assert_contains "$RUN_OUT$RUN_ERR" "missing from disk" "git rm: 'missing from disk'"
+  assert_contains "$RUN_OUT$RUN_ERR" "move-entry" "…move-entry advice"
+  assert_not_contains "$RUN_OUT$RUN_ERR" "not in this commit" "…not 'not in this commit'"
+  teardown
+  hooked_fixture
+  git mv docs/architecture.md docs/arch.md
+  stage_stale_change
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m mv')" DOC_SUPERPOWERS_STRICT=1
+  assert_eq "2" "$RUN_RC" "gate (STRICT): blocked"
+  assert_contains "$RUN_ERR" "missing from disk" "git mv, gate: 'missing from disk'"
+  assert_contains "$RUN_ERR" "move-entry" "…move-entry advice"
+  teardown
+}
+
+test_fw_claude_note_names_every_tracked_per_user_file() {
+  echo "test: FW H-I3 the tracked-file NOTE covers the hook scripts too, untracks both, and warns that pulling deletes them for teammates"
+  setup
+  mkdir -p .claude/hooks/doc-superpowers
+  echo "old" > .claude/hooks/doc-superpowers/pre-commit-gate.sh
+  git add .claude && git commit -qm "tracked hook scripts"
+  inst install --claude
+  assert_eq "0" "$IRC" "exits 0"
+  assert_contains "$IOUT" "tracked by git" "NOTE: tracked per-user files"
+  assert_contains "$IOUT" ".claude/hooks/doc-superpowers/pre-commit-gate.sh" "…names the tracked hook script"
+  assert_contains "$IOUT" "git rm -r --cached" "…untracks with git rm -r --cached"
+  assert_contains "$IOUT" "re-run" "…tells teammates to re-run install --claude"
+  assert_contains "$IOUT" "install --claude" "…names install --claude"
+  assert_contains "$IOUT" "ORIG_HEAD" "…and how to restore a lost allowlist"
+  inst uninstall --claude
+  git rm -rq --cached .claude
+  git commit -qm untrack
+  inst install --claude
+  assert_not_contains "$IOUT" "tracked by git" "nothing tracked: no NOTE"
+  teardown
+}
+
+test_fw_hooks_path_scope_worktree_and_uninstall_wording() {
+  echo "test: FW H-M4 a worktree-scoped core.hooksPath is this repository's; a global one is refused by uninstall in uninstall's words"
+  setup
+  git config extensions.worktreeConfig true
+  git config --worktree core.hooksPath .wthooks
+  inst install --git
+  assert_eq "0" "$IRC" "worktree-scoped core.hooksPath: install --git exits 0"
+  assert_file_exists ".wthooks/pre-commit" "…installed where git runs hooks"
+  inst status
+  assert_not_contains "$IOUT" "not this repository's" "…status does not call it another repository's"
+  inst uninstall --git
+  assert_eq "0" "$IRC" "…uninstall --git exits 0"
+  assert_file_not_exists ".wthooks/pre-commit" "…and removes it"
+  git config --worktree --unset core.hooksPath
+  local g
+  g=$(harness_mktemp_d global)
+  mkdir -p "$g/hooks"
+  printf '[core]\n\thooksPath = %s\n' "$g/hooks" > "$g/config"
+  export GIT_CONFIG_GLOBAL="$g/config"
+  inst uninstall --git
+  export GIT_CONFIG_GLOBAL=/dev/null
+  assert_eq "1" "$IRC" "global core.hooksPath: uninstall --git exits 1"
+  assert_contains "$IOUT" "uninstall --git does not touch it" "…in uninstall's words"
+  assert_not_contains "$IOUT" "installing into it" "…not install's"
+  teardown
+}
+
+test_fw_helpers_help_is_true() {
+  echo "test: FW P-M9/H-M5 the --helpers help says what it does: deprecated, inert but for refusing doc-pr-release"
+  setup
+  inst help
+  assert_contains "$IOUT" "deprecated" "--helpers is deprecated"
+  assert_not_contains "$IOUT" "ship the doc-pr-release producer helpers" "no claim that --helpers=true ships anything"
+  teardown
+}
+
+echo ""
+echo "=== Final review fix wave: installer + hooks ==="
+test_fw_status_flags_outdated_installs
+test_fw_unstaged_indexed_doc_is_not_in_this_commit
+test_fw_index_only_commit_judges_its_new_keys
+test_fw_removed_doc_keeps_move_advice
+test_fw_claude_note_names_every_tracked_per_user_file
+test_fw_hooks_path_scope_worktree_and_uninstall_wording
+test_fw_helpers_help_is_true
 
 print_summary

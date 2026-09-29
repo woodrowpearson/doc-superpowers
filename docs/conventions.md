@@ -252,7 +252,7 @@ The Claude tier is **per-user**. It **copies** hook scripts to `.claude/hooks/do
 | `--base-branch NAME` | `main` | Target branch for PR checks (validated: git ref name of `A-Za-z0-9._/-`) |
 | `--cron EXPR` | `0 9 * * 1` | Schedule for weekly freshness audit (5 fields) |
 | `--ci-strict[=true\|false]` | `false` | Fail PR check on stale docs (exit non-zero) |
-| `--helpers=<true\|false>` | `true` | Install the `doc-pr-release` helper scripts; `--helpers=false` is refused while `doc-pr-release` is selected or installed (the workflow runs them). Never gates the workflows' own step scripts (`.github/scripts/doc-superpowers-steps/`) |
+| `--helpers=<true\|false>` | `true` | Deprecated, and inert: the helper directories ship exactly while an installed workflow runs them. Its only effect: `--helpers=false` is refused while `doc-pr-release` is selected or installed (the workflow runs the producer helpers) |
 | `--force` | off | Also re-install workflows uninstalled on purpose |
 
 The choices are recorded in `.claude/doc-superpowers/installed.json` (schema 2: `.tiers.ci.{base_branch,cron,ci_strict,workflows}`); a plain `install --ci` reproduces them. Vendoring goes through `doc-tools.sh tools install|uninstall --helper <dir>`, per installed workflow.
