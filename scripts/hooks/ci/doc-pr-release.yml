@@ -13,7 +13,10 @@ on:
     # A push that only touches fragments (a human editing theirs) or the
     # canonical release notes (a release-time edit) needs no redraft. The
     # bot's own fragment push cannot retrigger this workflow in any case: it
-    # is made with the job's GITHUB_TOKEN, whose pushes start no workflow run.
+    # is made with the job's GITHUB_TOKEN, whose pushes start no workflow run
+    # — no run of any workflow, so the PR's head (the fragment commit, pushed
+    # last) has no check runs and required checks wait at "Expected" until
+    # the author pushes again (or closes and reopens the PR).
     paths-ignore:
       - 'RELEASE-NOTES.next/**'
       - 'RELEASE-NOTES.md'
@@ -83,7 +86,17 @@ jobs:
           if [ -n "${HEAD_REF_FROM_EVENT}" ]; then
             head_ref="${HEAD_REF_FROM_EVENT}"
           else
-            head_ref=$(gh pr view "${number}" --repo "${GITHUB_REPOSITORY}" --json headRefName --jq '.headRefName')
+            # workflow_dispatch: a fork's PR has no branch here (a same-named
+            # branch of this repository is someone else's): refuse it.
+            pr=$(gh pr view "${number}" --repo "${GITHUB_REPOSITORY}" --json headRefName,isCrossRepository --jq '"\(.isCrossRepository) \(.headRefName)"')
+            case "${pr}" in
+              "false "?*) head_ref="${pr#false }" ;;
+              "true "*)
+                echo "PR #${number} comes from a fork: its branch is not in this repository, so no fragment is drafted for it." >&2
+                exit 1
+                ;;
+              *) head_ref="" ;;
+            esac
           fi
           if [ -z "${head_ref}" ]; then
             echo "Could not resolve head ref for PR #${number}" >&2
@@ -93,11 +106,12 @@ jobs:
 
       # Checkout with the default GITHUB_TOKEN: commits pushed with this token
       # do NOT retrigger workflows on this repo (GitHub's built-in recursion
-      # guard), which is the desired behavior here. If a maintainer ever swaps
-      # this for a PAT for "convenience," the push made by commit-and-push.sh
-      # below WILL retrigger this workflow and create an infinite loop. The
-      # `paths-ignore` + `github.actor` check above are a backstop, not a
-      # license to switch tokens.
+      # guard), which is the desired behavior here — and why the fragment
+      # commit has no check runs (see paths-ignore above). If a maintainer ever
+      # swaps this for a PAT for "convenience," the push made by
+      # commit-and-push.sh below WILL retrigger this workflow and create an
+      # infinite loop. The `paths-ignore` + `github.actor` check above are a
+      # backstop, not a license to switch tokens.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
@@ -205,8 +219,8 @@ jobs:
 
             ## Step 1 — Draft / update the fragment
 
-            If `.existing_fragment` is non-null and `.existing_fragment_corrupt`
-            is true or `.existing_fragment_hash_valid` is false, a human edited
+            If `.existing_fragment_corrupt` is true, or `.existing_fragment` is
+            non-null and `.existing_fragment_hash_valid` is false, a human edited
             the fragment (or it is malformed): do NOT change it. Post a PR
             comment via `gh pr comment` like: "🚧 doc-pr-release: the fragment
             at <path> has been manually edited; please reconcile it with the
@@ -281,7 +295,8 @@ jobs:
       # helper would show up as a change) with prepare-agent.sh's pre-agent
       # copy of the checker, then commit and push the fragment with the
       # deterministic helper. An integrity check against agent mistakes, not a
-      # sandbox: the security ceiling is the job token's permissions:.
+      # sandbox: a steered agent reaches the job's secrets and its token's
+      # permissions, repository-wide (the doc-superpowers references/hooks.md).
       - name: Check the agent changed only the fragment
         if: steps.context.outputs.run == 'true'
         env:
@@ -294,7 +309,8 @@ jobs:
       # the run → superseded (exit 0, nothing pushed; their push starts the
       # run that drafts from the new tip); a force-push or reset behind the
       # checkout → exit 1, never undone. A hand-edited fragment is never
-      # overwritten.
+      # overwritten, and one the release would skip (text before the first
+      # ###, a #/## heading, an unclosed fence) is refused, exit 1.
       - name: Commit and push the fragment
         if: steps.context.outputs.run == 'true'
         id: commit

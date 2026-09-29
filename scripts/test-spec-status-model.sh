@@ -545,6 +545,22 @@ assert_contains "$HOOKSREF" 'bash "$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superp
 assert_contains "$HOOKSREF" "an integrity check against agent mistakes, not a sandbox" "hooks.md: the checker is not a sandbox (T9)"
 assert_contains "$HOOKSREF" "ends green as superseded" "hooks.md: the superseded wording (T9)"
 assert_not_contains "$HOOKSREF" "a newer run covers it" "hooks.md: no 'a newer run covers it' (T9)"
+# Final review fix wave (F1, F2, S-I2, P-M10): what the consent text owes the user.
+assert_contains "$HOOKSREF" "**What an AI job's agent can reach**" "hooks.md: what a steered agent can reach (F1)"
+assert_contains "$HOOKSREF" "approvals by GitHub Actions must not count" "hooks.md: protect the base branch and release/** with human review (F1)"
+assert_contains "$HOOKSREF" "**protect the base branch and \`release/**\`**" "…both named (F1)"
+assert_contains "$HOOKSREF" "also lets **any** workflow job with \`pull-requests: write\` approve pull requests" "hooks.md: the approve-PRs side effect of doc-release's setting (F1)"
+assert_contains "$HOOKSREF" 'CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"' "hooks.md: the env scrub, documented as recommended hardening (F1)"
+assert_contains "$HOOKSREF" "start no workflow run" "hooks.md: GITHUB_TOKEN commits and PRs start no workflow run (S-I2)"
+assert_contains "$HOOKSREF" '"Expected"' "…so required checks wait at Expected (S-I2)"
+assert_contains "$HOOKSREF" "its superseded run fails" "hooks.md: doc-pr-full-cycle's superseded run fails (F2)"
+assert_contains "$HOOKSREF" "the audit report itself" "hooks.md: doc-audit-update's consent row says it commits its audit report (P-M10)"
+_ceiling=$(grep -lF 'security ceiling' "$REPO_ROOT/references/hooks.md" "$CI"/*.yml "$CI"/*/*.sh 2>/dev/null || true)
+assert_eq "" "$_ceiling" "no file claims the job token's permissions: are the security ceiling (F1)"
+assert_eq "" "$(grep -lF 'CLAUDE_CODE_SUBPROCESS_ENV_SCRUB' "$CI"/*.yml 2>/dev/null || true)" "…and no template sets the scrub (F1: gh auth unconfirmed)"
+assert_contains "$SKILLMD" 'In a doc-superpowers CI workflow, do not edit it' "update step 4: CLAUDE.md is reported, not edited, in CI (F3)"
+assert_contains "$SKILLMD" 'In a doc-superpowers CI workflow, report what it needs instead of editing it' "sync step 5: likewise (F3)"
+assert_contains "$SKILLMD" '`update` and `sync` edit no CLAUDE.md or README.md there' "the CI paragraph says so (F3)"
 # Every doc-tools verb release.md runs is one doc-release's agent may run.
 _rel_tools=$(grep -F -- '--allowedTools' "$CI/doc-release.yml" || true)
 _rel_verbs=$(grep -oE '\$DOC_TOOLS [a-z-]+' <<<"$RELREF" | sed 's/.* //' | sort -u || true)
@@ -552,15 +568,22 @@ assert_true "release.md runs doc-tools verbs (found: $(printf '%s ' $_rel_verbs)
 for _v in $_rel_verbs; do
   assert_contains "$_rel_tools" "Bash(.github/scripts/doc-tools.sh $_v:*)" "doc-release's --allowedTools grants the release verb '$_v'"
 done
-# A template whose agent runs discovery (it pipes check-freshness through jq,
-# and lists changed files with `git -c core.quotePath=false diff`) grants both.
+# A template whose agent runs discovery pipes check-freshness through jq, so
+# each of its AI steps grants Bash(jq:*) — except doc-review-pr's @claude
+# tag-mode job (F1): no prompt tells it to run jq (the comment is the
+# request), and `jq -n env` would print the job's secrets. None grants the
+# quotePath diff any more (S-M1): the prompt layer lists changed files with
+# `git diff -z`, which Bash(git diff:*) covers.
 for _wf in doc-audit-update doc-pr-full-cycle doc-review-pr doc-spec-verify; do
-  _tl=$(grep -F -- '--allowedTools' "$CI/$_wf.yml" || true)
+  _tl=$(awk '/^  respond:/ { r = 1; next } /^  [a-z][a-z-]*:$/ { r = 0 } !r && /--allowedTools/' "$CI/$_wf.yml")
   _n=$(grep -c . <<<"$_tl")
   _jq=$(grep -cF 'Bash(jq:*)' <<<"$_tl" || true)
-  _gd=$(grep -cF 'Bash(git -c core.quotePath=false diff --name-only:*)' <<<"$_tl" || true)
-  assert_eq "$_n/$_n" "$_jq/$_gd" "$_wf: every AI step grants Bash(jq:*) and Bash(git -c core.quotePath=false diff --name-only:*) (discovery)"
+  assert_eq "$_n/$_n" "$_jq/$_n" "$_wf: every AI step (but the tag-mode respond) grants Bash(jq:*) (discovery)"
+  assert_eq "" "$(grep -F 'quotePath' "$CI/$_wf.yml" || true)" "$_wf: no quotePath grant or prompt (S-M1: git diff -z)"
 done
+_resp=$(awk '/^  respond:/ { r = 1; next } /^  [a-z][a-z-]*:$/ { r = 0 } r && /--allowedTools/' "$CI/doc-review-pr.yml")
+assert_true "doc-review-pr's respond job has one --allowedTools line" test "$(grep -c . <<<"$_resp")" -eq 1
+assert_not_contains "$_resp" 'Bash(jq:' "doc-review-pr's tag-mode respond job is not granted jq (F1)"
 
 echo "--- I-11: spec lifecycle ---"
 _plan=$(_section "$ACTIONS" '### Plan Phase')
@@ -757,10 +780,14 @@ assert_true "the verb table yields verbs ($(grep -c . <<<"$_verbs"))" test "$(gr
 _named=$(cat "$REPO_ROOT/skills/doc-superpowers/SKILL.md" "$REPO_ROOT"/references/*.md | grep -oE '(\$DOC_TOOLS"?|doc-tools\.sh) [a-z][a-z-]*' | sed -E 's/.* //' | sort -u || true)
 assert_true "the prompt layer names doc-tools verbs ($(grep -c . <<<"$_named"))" test "$(grep -c . <<<"$_named")" -ge 10
 assert_eq "" "$(comm -23 <(printf '%s\n' "$_named") <(printf '%s\n' "$_verbs") | tr '\n' ' ')" "every doc-tools verb named in SKILL.md and references/ is a real verb"
-# The narrowed grant covers every quotePath diff the prompt layer runs.
+# S-M1: git quotes a name holding `"`, a backslash or a tab even with
+# core.quotePath=false, and a quoted name matches no ref. The prompt layer
+# lists changed files for check-freshness NUL-separated (Bash(git diff:*)
+# covers it), and runs no quotePath diff (no CI grant allows one).
 _qp=$(cat "$REPO_ROOT/skills/doc-superpowers/SKILL.md" "$REPO_ROOT"/references/*.md "$CI"/*.yml | grep -oE 'git -c core\.quotePath=false diff[^`|]*' || true)
-assert_true "the prompt layer runs quotePath diffs ($(grep -c . <<<"$_qp"))" test "$(grep -c . <<<"$_qp")" -ge 4
-assert_eq "" "$(grep -v '^git -c core\.quotePath=false diff --name-only' <<<"$_qp" || true)" "every quotePath diff is a --name-only one (what the CI grant allows)"
+assert_eq "" "$_qp" "the prompt layer runs no quotePath diff"
+assert_contains "$SKILLMD" 'git diff -z --name-only --no-renames <range> | $DOC_TOOLS check-freshness --code-refs-from -' "Scoping: the changed-file list is piped NUL-separated"
+assert_contains "$SKILLMD" 'git diff -z --name-only --no-renames "$BASE"...HEAD > "$CHANGED"' "review-pr step 2: likewise"
 
 echo "--- I-11: evals are machine-checkable ---"
 EVALS_JSON="$REPO_ROOT/evals/evals.json"

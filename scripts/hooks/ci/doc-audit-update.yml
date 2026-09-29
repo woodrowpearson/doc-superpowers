@@ -7,7 +7,10 @@
 # the doc index — no hard-coded paths). The agent edits docs but cannot
 # commit or push; the "Commit doc updates" step commits only docs/ and the
 # docs the index lists, and pushes them with the job's GITHUB_TOKEN, whose
-# pushes start no workflow run.
+# pushes start no workflow run: that commit gets no check runs, so a PR's
+# required checks wait at "Expected" until someone pushes a commit (or closes
+# and reopens the PR). In CI, `update` commits its audit report (docs/plans/)
+# with the doc updates.
 
 name: Doc Audit & Update (AI)
 
@@ -21,7 +24,8 @@ on:
 # a cancel between commit and push would strand the commit. Each checks out
 # the branch, so a queued run starts from the tip the earlier runs left; one
 # whose branch still received someone else's commits mid-run exits 0 as
-# superseded (commit-changes.sh), committing nothing.
+# superseded (commit-changes.sh), committing nothing: that push starts a new
+# run of this workflow.
 concurrency:
   group: doc-superpowers-write-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: false
@@ -35,8 +39,12 @@ env:
 
 jobs:
   audit-update:
+    # Not on doc-superpowers' own commits (by their subject: a squash commit
+    # that merely lists them is work like any other), nor on Dependabot's
+    # pushes (no secrets).
     if: >-
-      !contains(github.event.head_commit.message, '[doc-superpowers]') &&
+      github.actor != 'dependabot[bot]' &&
+      !startsWith(github.event.head_commit.message, '[doc-superpowers]') &&
       !contains(github.event.head_commit.message, '[skip ci]')
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -81,7 +89,7 @@ jobs:
           plugins: doc-superpowers@doc-superpowers
           claude_args: |
             --max-turns 80
-            --allowedTools "Skill,Read,Glob,Grep,Edit,Write,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(git -c core.quotePath=false diff --name-only:*),Bash(jq:*),Bash(.github/scripts/doc-tools.sh:*)"
+            --allowedTools "Skill,Read,Glob,Grep,Edit,Write,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(jq:*),Bash(.github/scripts/doc-tools.sh:*)"
           prompt: |
             This is an unattended GitHub Actions run of the doc-superpowers plugin.
             - Use `.github/scripts/doc-tools.sh` as `$DOC_TOOLS` (this plugin
@@ -103,5 +111,6 @@ jobs:
           EXPECTED_HEAD: ${{ steps.plugin.outputs.head }}
           PUSH_TO: ${{ github.ref_name }}
         # prepare-agent.sh's pre-agent copy of the checker: an integrity check
-        # against agent mistakes, not a sandbox (the token's permissions: are).
+        # against agent mistakes, not a sandbox (a steered agent reaches the
+        # job's secrets and its token's permissions — references/hooks.md).
         run: '"$RUNNER_TEMP"/doc-superpowers-steps/commit-changes.sh --allow docs/ --allow-index-keys --message "[doc-superpowers] update stale docs" --push-to "$PUSH_TO"'

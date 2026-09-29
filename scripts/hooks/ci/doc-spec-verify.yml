@@ -69,7 +69,7 @@ jobs:
           plugins: doc-superpowers@doc-superpowers
           claude_args: |
             --max-turns 40
-            --allowedTools "Skill,Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(git -c core.quotePath=false diff --name-only:*),Bash(jq:*),Bash(.github/scripts/doc-tools.sh check-freshness:*),Bash(.github/scripts/doc-tools.sh status:*),Bash(.github/scripts/doc-tools.sh implementation-status:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*)"
+            --allowedTools "Skill,Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(jq:*),Bash(.github/scripts/doc-tools.sh check-freshness:*),Bash(.github/scripts/doc-tools.sh status:*),Bash(.github/scripts/doc-tools.sh implementation-status:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*)"
           prompt: |
             This is an unattended, read-only GitHub Actions run of the doc-superpowers
             plugin.
@@ -82,7 +82,8 @@ jobs:
             Run /doc-superpowers spec-verify --mode=review for pull request
             #${{ github.event.pull_request.number }}, against the specs in docs/specs/
             that govern its changes. Its --changed-files are the files
-            `git -c core.quotePath=false diff --name-only --no-renames ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}`
-            lists.
+            `git diff --name-only --no-renames ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}`
+            lists (git prints a name holding a non-ASCII byte, `"`, `\` or a tab
+            in double quotes with C escapes: pass it unquoted).
             Post the compliance findings as one PR comment:
             `gh pr comment ${{ github.event.pull_request.number }} --body "<findings>"`.

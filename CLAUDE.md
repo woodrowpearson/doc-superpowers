@@ -138,7 +138,8 @@ doc-superpowers/
 | `AGENTS.md` | Cross-client agent instructions | Adding commands, changing project orientation |
 | `.opencode/plugins/doc-superpowers.js` | OpenCode ESM plugin | Changing skill registration or tool mapping injection |
 | `.github/workflows/tests.yml` | This repo's CI: the five suites under bash 5.x (ubuntu) and `/bin/bash` 3.2 (macOS), `check-version`, and the self-install drift check | Adding a suite, a CI requirement, or a self-installed tier |
-| `.github/workflows/doc-freshness-*.yml`, `.github/scripts/`, `.claude/doc-superpowers/installed.json`, `.gitattributes` | This repo's own installed tiers (CI; the git tier's merge-driver attribute) — installer output | Never by hand: after changing a CI template, `doc-tools.sh` or a CI helper script, run `bash scripts/hooks/install.sh install --ci` and commit what it writes (tests.yml fails on drift) |
+| `.github/workflows/doc-freshness-*.yml`, `.github/scripts/`, `.claude/doc-superpowers/installed.json` | This repo's own installed CI tier — installer output | Never by hand: after changing a CI template, `doc-tools.sh` or a CI helper script, run `bash scripts/hooks/install.sh install --ci` and commit what it writes (tests.yml fails on drift) |
+| `.gitattributes` | The git tier's one committed piece: the `docs/.doc-index.json` merge-driver block — installer output | Never by hand: `bash scripts/hooks/install.sh install --git` writes it (tests.yml's drift step fails without it, and names `install --git`) |
 | `RELEASE-NOTES.md` | Version history | Every release |
 | `README.md` | User-facing docs | Feature changes |
 

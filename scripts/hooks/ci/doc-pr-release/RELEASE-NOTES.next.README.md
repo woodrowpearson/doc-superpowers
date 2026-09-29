@@ -21,11 +21,18 @@ RELEASE-NOTES.next/PR-107.md  ----/
    the PR branch is still at the commit the run checked out. Someone else's
    push during the run supersedes it (nothing is pushed; that push starts a
    newer run); a force-push is never undone. A fragment a human edited is
-   never overwritten.
+   never overwritten, and one the release would skip (text before the first
+   `###`, a `#`/`##` heading, an unclosed code fence) is refused, so the run
+   fails at PR time instead. The fragment commit is pushed with the job's
+   `GITHUB_TOKEN`, which starts no workflow run: it has no check runs, so the
+   PR's required checks wait at "Expected" until the author pushes again (or
+   closes and reopens the PR).
 2. **Consumer (`/doc-superpowers release`)**: when the maintainer cuts a release
    (pushes to `release/**`, or runs the action), it
    - runs `doc-tools.sh fragments merge <range-start> HEAD` **before** drafting.
-     `<range-start>` is the previous release's tag, or `ROOT` for the first
+     `<range-start>` is the previous release: its tag, else the commit that
+     added its `## vX.Y.Z` heading to RELEASE-NOTES.md (an untagged release);
+     with no version entry, the nearest `v*` tag, or `ROOT` for the first
      release. The output is the merged sections; every fragment it could not
      merge is named on stderr, with the reason, and stays for the next release;
    - folds that output into the new `## vX.Y.Z` entry;

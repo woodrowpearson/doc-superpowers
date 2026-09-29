@@ -1140,8 +1140,9 @@ test_resolve_pr_inline_step() {
   assert_contains "$(cat "$body")" 'echo "number=${number}" >> "$GITHUB_OUTPUT"' "inline body extracted from the template"
   out="$dir/gh-output"
   shim=$(gh_shim '{"headRefName": "feat/from-gh"}')
-  # gh --jq is applied by the real gh; the shim answers with the bare value.
-  printf '#!/usr/bin/env bash\necho feat/from-gh\n' > "$shim/gh"
+  # gh --jq is applied by the real gh; the shim answers with its result:
+  # "<isCrossRepository> <headRefName>".
+  printf '#!/usr/bin/env bash\necho "false feat/from-gh"\n' > "$shim/gh"
 
   rc=0
   PR_FROM_EVENT=5 PR_FROM_INPUT= HEAD_REF_FROM_EVENT=feat/ev run_step "$out" "$BASH_BIN" -e "$body" || rc=$?
@@ -1169,6 +1170,17 @@ test_resolve_pr_inline_step() {
     run_step "$out" "$BASH_BIN" -e "$body" || rc=$?
   assert_eq "1" "$rc" "gh resolves no head ref → exits 1"
   assert_contains "$(cat "$out.log")" "Could not resolve head ref for PR #7" "empty head ref → explains"
+
+  # FW S-M3: a fork's PR number (workflow_dispatch): its branch name would
+  # check out and push to this repository's unrelated same-named branch.
+  printf '#!/usr/bin/env bash\necho "true main"\n' > "$shim/gh"
+  rc=0
+  PATH="$shim:$PATH" GITHUB_REPOSITORY=o/r PR_FROM_EVENT= PR_FROM_INPUT=8 HEAD_REF_FROM_EVENT= \
+    run_step "$out" "$BASH_BIN" -e "$body" || rc=$?
+  assert_eq "1" "$rc" "workflow_dispatch with a fork's PR → exits 1"
+  assert_contains "$(cat "$out.log")" "comes from a fork" "…saying why"
+  assert_not_contains "$(cat "$out")" "head_ref=" "…and resolves no head ref"
+  assert_contains "$(cat "$body")" "isCrossRepository" "the step asks gh whether the PR is cross-repository"
 }
 
 test_workflow_yaml_placeholders
@@ -2549,5 +2561,197 @@ test_i9_fence_parser_is_one_parser
 test_i9_hash_line_rule_is_one_rule
 test_i9_fragment_lib_ships_with_the_helpers
 test_i9_commit_rejected_push
+
+
+# --- Final review fix wave (CI) ----------------------------------------------
+
+test_fw_superseded_fails_for_full_cycle() {
+  # F2: superseded ends green only where the superseding push runs the
+  # workflow again (doc-audit-update on push, doc-pr-release on synchronize).
+  # doc-pr-full-cycle runs only when the PR is opened: its superseded run fails.
+  echo "Test: FW S-I3 commit-changes.sh --superseded-fails: someone's push during the run fails it (re-run), nothing committed"
+  local dir clone out rc head tip cc="$STEPS_DIR/commit-changes.sh"
+  local args=(--allow docs/ --allow-index-keys --message "[doc-superpowers] pr docs: review, update, diagrams, sync" --push-to feature)
+  dir=$(cc_fixture) || { assert_true "fixture" false; return 0; }
+  clone="$dir/clone"
+  out="$(harness_mktemp_d step)/out"
+  head=$(git -C "$clone" rev-parse HEAD)
+  (
+    cd "$dir/seed" || exit 1
+    git fetch -q origin 2>/dev/null
+    git reset -q --hard origin/feature
+    echo human > human.txt
+    git add human.txt
+    git -c commit.gpgsign=false commit -q -m "human push"
+    git push -q origin HEAD:feature
+  ) >/dev/null 2>&1
+  tip=$(git -C "$dir/origin.git" rev-parse feature)
+  echo '# D9' > "$clone/docs/d.md"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" --superseded-fails || rc=$?
+  assert_eq "1|true|false|true" "$rc|$(_out "$out" changed)|$(_out "$out" committed)|$(_out "$out" superseded)" \
+    "--superseded-fails: someone pushed during the run → exits 1 (superseded=true, no commit)"
+  assert_contains "$(cat "$out.log")" "::error::doc-superpowers: superseded: feature received new commits during this run (${head:0:12}..${tip:0:12}); nothing was committed" \
+    "…an ::error:: that says what happened"
+  assert_contains "$(cat "$out.log")" "Re-run this workflow" "…and asks for a re-run"
+  assert_eq "$tip|$head" "$(git -C "$dir/origin.git" rev-parse feature)|$(git -C "$clone" rev-parse HEAD)" \
+    "…the newer tip is kept, nothing committed or pushed"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" || rc=$?
+  assert_eq "0|true" "$rc|$(_out "$out" superseded)" "without the flag: superseded ends green (exit 0), as before"
+  _cc_reset "$dir"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" --allow docs/ --check-only --superseded-fails || rc=$?
+  assert_eq "2" "$rc" "--superseded-fails with --check-only: a usage error (exit 2)"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" --allow docs/ --message m --push-to new-branch --open-pr feature --superseded-fails || rc=$?
+  assert_eq "2" "$rc" "--superseded-fails with --open-pr (a new branch cannot be superseded): exit 2"
+}
+
+test_fw_templates_superseded_policy() {
+  echo "Test: FW S-I3 only doc-pr-full-cycle (runs on 'opened' only) passes --superseded-fails"
+  local wf run
+  for wf in doc-audit-update doc-pr-full-cycle doc-release; do
+    run=$(grep -E '^[[:space:]]*run: .*commit-changes\.sh' "$TEMPLATE_DIR/$wf.yml" || true)
+    assert_true "$wf: its commit step runs commit-changes.sh" test -n "$run"
+    case "$wf" in
+      doc-pr-full-cycle) assert_contains "$run" "--superseded-fails" "$wf: a superseded run fails (nothing re-runs it)" ;;
+      *) assert_not_contains "$run" "--superseded-fails" "$wf: a superseded run ends green (the push re-runs it, or none can supersede)" ;;
+    esac
+  done
+  assert_true "doc-pr-full-cycle triggers on opened only" grep -qE '^[[:space:]]*types: \[opened\]$' "$TEMPLATE_DIR/doc-pr-full-cycle.yml"
+  # S-M5: a corrupt fragment (a symlink, >1 MiB: existing_fragment is null)
+  # is left alone too, not overwritten under "Otherwise write".
+  assert_true "doc-pr-release's Step 1 keys the hands-off branch on existing_fragment_corrupt alone" \
+    grep -qF 'If `.existing_fragment_corrupt` is true, or `.existing_fragment` is' "$TEMPLATE_DIR/doc-pr-release.yml"
+  # S-M2: doc-audit-update skips Dependabot (no secrets) and its own commits by
+  # subject prefix (a squash commit listing them is work like any other).
+  assert_true "doc-audit-update skips Dependabot's pushes" grep -qF "github.actor != 'dependabot[bot]'" "$TEMPLATE_DIR/doc-audit-update.yml"
+  assert_true "…and matches its own commits by prefix" grep -qF "!startsWith(github.event.head_commit.message, '[doc-superpowers]')" "$TEMPLATE_DIR/doc-audit-update.yml"
+  assert_true "…never by substring" test -z "$(grep -F "contains(github.event.head_commit.message, '[doc-superpowers]')" "$TEMPLATE_DIR/doc-audit-update.yml" || true)"
+}
+
+test_fw_commit_refuses_what_the_release_would_skip() {
+  echo "Test: FW S-M6 commit-and-push — a fragment the release would skip (text before ###, a ## heading, an unclosed fence) is refused before sealing"
+  local dir out rc head f case_body
+  dir=$(origin_and_clone)
+  out="$dir/gh-output"
+  head=$(git -C "$dir/clone" rev-parse HEAD)
+  f="$dir/clone/RELEASE-NOTES.next/PR-16.md"
+  mkdir -p "$(dirname "$f")"
+  for case_body in $'Intro text.\n### Added\n- x\n' $'## Notes\n### Added\n- x\n' $'### Fixed\n- y\n```\nopen fence\n'; do
+    printf '<!-- doc-superpowers:fragment PR-16 -->\n<!-- doc-superpowers:hash -->\n%s' "$case_body" > "$f"
+    rc=0
+    cp_run "$dir/clone" "$out" 16 || rc=$?
+    assert_eq "1" "$rc" "'$(head -n 1 <<<"$case_body")…': refused (exit 1)"
+    assert_contains "$(cat "$out.log")" "would be skipped by the release" "…saying the release would skip it"
+    assert_eq "$head|$head" "$(git -C "$dir/clone" rev-parse HEAD)|$(git -C "$dir/origin.git" rev-parse feature)" "…nothing committed or pushed"
+    assert_eq "" "$(sed -n 2p "$f" | sed -n '/hash [0-9a-f]\{64\}/p')" "…and the file is not sealed"
+  done
+  printf '<!-- doc-superpowers:fragment PR-16 -->\n<!-- doc-superpowers:hash -->\n### Added\n- fine\n' > "$f"
+  rc=0
+  cp_run "$dir/clone" "$out" 16 || rc=$?
+  assert_eq "0" "$rc" "a well-formed fragment: committed (log: $(head -c 300 "$out.log"))"
+  printf '<!-- doc-superpowers:fragment PR-16 -->\n<!-- doc-superpowers:hash -->\n<!-- doc-superpowers:no-notes -->\n' > "$f"
+  rc=0
+  cp_run "$dir/clone" "$out" 16 || rc=$?
+  assert_eq "0" "$rc" "a no-notes fragment: committed"
+}
+
+test_fw_precheck_untagged_release() {
+  # P-I2: the latest version in RELEASE-NOTES.md without its tag. The nearest
+  # tag (v1.0.0) took the untagged v1.1.0 release's commits for unreleased.
+  echo "Test: FW P-I2 precheck.sh — an untagged release is still the last release (the commit that added its heading)"
+  local work out rc stub rel
+  work=$(new_repo)
+  out="$work/gh-output"
+  stub=$(harness_mktemp_d dtstub)
+  printf '#!/bin/sh\necho "$*" >> "%s/args"\n' "$stub" > "$stub/dt"
+  chmod +x "$stub/dt"
+  commit_file "$work" RELEASE-NOTES.md $'# Release Notes\n\n## v1.0.0 (2026-01-01)\n\n- first' "release: v1.0.0"
+  git -C "$work" tag v1.0.0
+  commit_file "$work" a.txt a "feat!: drop the old API"
+  commit_file "$work" RELEASE-NOTES.md $'# Release Notes\n\n## v1.1.0 (2026-02-01)\n\n- second\n\n## v1.0.0 (2026-01-01)\n\n- first' "release: v1.1.0"
+  rel=$(git -C "$work" rev-parse HEAD)
+  rc=0
+  ( cd "$work" && DOC_TOOLS="$stub/dt" run_step "$out" "$PRECHECK_SCRIPT" ) || rc=$?
+  assert_eq "0|skip=true" "$rc|$(cat "$out")" "HEAD is the untagged v1.1.0 release commit → skip=true"
+  assert_contains "$(cat "$out.log")" "v1.1.0" "…naming the release"
+  commit_file "$work" b.txt b "fix: b"
+  : > "$stub/args"
+  rc=0
+  ( cd "$work" && DOC_TOOLS="$stub/dt" run_step "$out" "$PRECHECK_SCRIPT" ) || rc=$?
+  assert_eq "0|skip=false" "$rc|$(cat "$out")" "one commit after it → skip=false"
+  assert_contains "$(cat "$out.log")" "1 commits since v1.1.0" "…one unreleased commit, not the feat! before the release"
+  assert_eq "fragments merge $rel HEAD" "$(cat "$stub/args")" "…and fragments merge starts at the release commit (never v1.0.0 or ROOT)"
+  # Tagged: the tag wins.
+  git -C "$work" tag v1.1.0 "$rel"
+  : > "$stub/args"
+  ( cd "$work" && DOC_TOOLS="$stub/dt" run_step "$out" "$PRECHECK_SCRIPT" ) || true
+  assert_eq "fragments merge v1.1.0 HEAD" "$(cat "$stub/args")" "once tagged, the range starts at the tag"
+  # A version heading inside a code fence is not an entry.
+  work=$(new_repo)
+  commit_file "$work" RELEASE-NOTES.md $'# Release Notes\n\n```\n## v9.9.9\n```' "docs: example"
+  commit_file "$work" c.txt c "feat: c"
+  : > "$stub/args"
+  rc=0
+  ( cd "$work" && DOC_TOOLS="$stub/dt" run_step "$out" "$PRECHECK_SCRIPT" ) || rc=$?
+  assert_eq "0|skip=false|fragments merge ROOT HEAD" "$rc|$(cat "$out")|$(cat "$stub/args")" \
+    "no version entry (a fenced heading is none) and no tag: the first release, from ROOT"
+}
+
+test_fw_release_branch_per_attempt() {
+  echo "Test: FW 318 doc-release names its branch per run attempt, and the precheck skips a merge of either form"
+  local work out rc subj
+  assert_true "BRANCH carries github.run_attempt" \
+    grep -qF 'BRANCH: doc-superpowers/release-notes-${{ github.run_id }}-${{ github.run_attempt }}' "$TEMPLATE_DIR/doc-release.yml"
+  work=$(new_repo)
+  out="$work/gh-output"
+  for subj in "Merge pull request #12 from octo/doc-superpowers/release-notes-9876-2" \
+      "Merge pull request #12 from octo/doc-superpowers/release-notes-9876"; do
+    git -C "$work" commit -q --allow-empty -m "$subj"
+    rc=0
+    ( cd "$work" && DOC_TOOLS="$DOC_TOOLS_SCRIPT" run_step "$out" "$PRECHECK_SCRIPT" ) || rc=$?
+    assert_eq "0|skip=true" "$rc|$(cat "$out")" "HEAD '$subj' → skip=true"
+  done
+}
+
+test_fw_freshness_scope_quoted_names() {
+  # S-M1: git quotes a name holding '"', a backslash or a tab even with
+  # core.quotePath=false, and a quoted name matches no ref: the doc citing
+  # it went unjudged. The scope step lists the change with `git diff -z`.
+  echo "Test: FW S-M1 freshness-check.sh scope — a changed file whose name git quotes still reaches the doc citing it"
+  local dir out rc base head
+  dir=$(installed_repo --ci) || { assert_true "freshness fixture" false; return 0; }
+  (
+    cd "$dir" || exit 1
+    mkdir -p docs src
+    echo a > src/a.js
+    echo '# A' > docs/a.md
+    git add -A && git commit -q -m "base files"
+    printf 'docs/a.md:src/:arch\n' | PATH="$BASH_PATH" .github/scripts/doc-tools.sh build-index >/dev/null 2>&1
+    PATH="$BASH_PATH" .github/scripts/doc-tools.sh update-index docs/a.md >/dev/null 2>&1
+    git add -A && git commit -q -m "base"
+    git rev-parse HEAD > .git/fx-base
+    echo q > 'src/we"ird.js'
+    git add -A && git commit -q -m "head"
+    git rev-parse HEAD > .git/fx-head
+  ) || { assert_true "freshness fixture commits" false; return 0; }
+  base=$(cat "$dir/.git/fx-base")
+  head=$(cat "$dir/.git/fx-head")
+  out="$(harness_mktemp_d step)/out"
+  rc=0
+  run_installed "$dir" "$out" RANGE="$base...$head" -- "$FRESHNESS" scope || rc=$?
+  assert_eq "0|ok|1" "$rc|$(_out "$out" status)|$(_out "$out" affected)" "src/we\"ird.js changed: docs/a.md (cites src/) is affected"
+}
+
+echo
+echo "=== Final review fix wave (CI) ==="
+test_fw_superseded_fails_for_full_cycle
+test_fw_templates_superseded_policy
+test_fw_commit_refuses_what_the_release_would_skip
+test_fw_precheck_untagged_release
+test_fw_release_branch_per_attempt
+test_fw_freshness_scope_quoted_names
 
 print_summary

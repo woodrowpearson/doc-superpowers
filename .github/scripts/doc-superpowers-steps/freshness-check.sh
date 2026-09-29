@@ -114,7 +114,9 @@ all="$RUNNER_TEMP/freshness-all.json"
 report="$RUNNER_TEMP/freshness-report.json"
 : > "$changed"
 if [ -n "$base" ]; then
-  git -c core.quotePath=false diff --name-only --no-renames "$base...$head" > "$changed" \
+  # -z: git quotes no name (it quotes one holding '"', a backslash or a tab
+  # even with core.quotePath=false, and a quoted name matches no ref).
+  git diff -z --name-only --no-renames "$base...$head" | tr '\000' '\n' > "$changed" \
     || fail "git diff $base...$head failed"
   "$DOC_TOOLS" check-freshness --code-refs-from "$changed" > "$raw" \
     || fail "doc-tools.sh check-freshness exited non-zero (its message is above)"
