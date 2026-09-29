@@ -118,7 +118,7 @@ echo "ROOT=$ROOT"; echo "DOC_TOOLS=$DOC_TOOLS"
 
 If it prints the error instead of the two paths, **stop**: the tooling is not where this skill is installed, so no index verb can run — tell the user. Shell variables do not survive between tool calls in most clients, so use the two printed paths literally from here on: `$DOC_TOOLS <subcommand>` below means that path, the references are in `$ROOT/references/`, and the installer is `"$ROOT/scripts/hooks/install.sh"`. Run every `$DOC_TOOLS` command from the repository's top level (`cd "$(git rev-parse --show-toplevel)"` first): the index is keyed by paths from the root, and a repository subcommand run from a subdirectory exits 2, writing nothing.
 
-**Prerequisites:** `doc-tools.sh` needs `git`, `jq` **≥ 1.6** (the index writers use `--args` / `$ARGS.positional`), and `sha256sum` or `shasum`. When one is missing, or `jq` is older than 1.6, every subcommand except `--help` exits non-zero with a message naming what to install or upgrade.
+**Prerequisites:** `doc-tools.sh` needs `git`, `jq` **≥ 1.6** (the index writers use `--args` / `$ARGS.positional`), and `sha256sum` or `shasum`. When one is missing, or `jq` is older than 1.6, every subcommand except `--help` / `help` and `tools version` (which need neither jq nor git) exits non-zero with a message naming what to install or upgrade.
 
 #### Path precedence (when multiple copies exist)
 
@@ -132,7 +132,7 @@ With the `tools install` subcommand (v2.12.0+), projects can vendor `doc-tools.s
 
 Don't mix — never use path #2 from a local session (it may be stale relative to the installed plugin version; use `tools status` to confirm).
 
-**In a doc-superpowers CI workflow** (a GitHub Actions run of one of the `hooks install --ci` templates, which install this plugin at the version that rendered them): use path #2 and call it by its literal path, `.github/scripts/doc-tools.sh <subcommand>` — the workflow's `--allowedTools` grants exactly that command, so skip the resolution block above (it would be refused). Read the references with your file-reading tool from `${CLAUDE_SKILL_DIR}/../../references/`. Nobody answers questions there: take the recommended option. Never commit, push, tag or open a pull request — a workflow step after you checks which paths changed, then commits them. `update` and `sync` edit no CLAUDE.md or README.md there: the commit step accepts only `docs/` and the indexed docs, and one other path fails the whole run, so they report in their output the change those files need (as `release` step 9 does for a version file it cannot bump).
+**In a doc-superpowers CI workflow** (a GitHub Actions run of one of the `hooks install --ci` templates, which install this plugin at the version that rendered them): use path #2 and call it by its literal path, `.github/scripts/doc-tools.sh <subcommand>` — the workflow's `--allowedTools` grants exactly that command, so skip the resolution block above (it would be refused). Read the references with your file-reading tool from `${CLAUDE_SKILL_DIR}/../../references/`. Nobody answers questions there: take the recommended option. Never commit, push, tag or open a pull request — a workflow step after you checks which paths changed, then commits them. `update` and `sync` edit no CLAUDE.md or README.md there: the commit step accepts only `docs/` and the indexed docs, and one other path fails the whole run, so they report in their output the change those files need (as `release` step 9 does for a version file it cannot bump). Some commands below are not granted there: find files with your Glob and Grep tools instead of `find` or `grep -r` (*Optional project scripts*, *Detect Agentic Workflows*, `diagram` step 1), and scope a check to the range the workflow names by piping the list straight in — `git diff -z --name-only --no-renames <range> | .github/scripts/doc-tools.sh check-freshness --code-refs-from -` — never through a temporary file, as `review-pr` steps 2–3 do locally (`mktemp` and a `<` redirect are not granted).
 
 **Optional project scripts** — list them, never run them (*Safety Rules*):
 
@@ -142,7 +142,7 @@ find scripts -maxdepth 1 \( -name '*validate_docs*' -o -name '*validate_doc_refe
 
 | Script Pattern | Source | Purpose |
 |---|---|---|
-| `doc-tools.sh build-index` | Bundled | Build `docs/.doc-index.json` from scratch (stdin mapping lines); entries are recorded unverified, as by `add-entry`. Only when no index exists: it refuses to replace one that has entries unless given `--force` (which keeps each re-indexed key's deprecation), and refuses empty input |
+| `doc-tools.sh build-index` | Bundled | Build `docs/.doc-index.json` from scratch (stdin mapping lines); entries are recorded unverified, as by `add-entry`. Only when no index exists: it refuses to replace one that has entries unless given `--force`, which re-records every entry unverified (its `last_verified` and baselines are lost), keeps each re-indexed key's deprecation (`status`, `superseded_by`, `replaces`) and drops every key not piped; it refuses empty input |
 | `doc-tools.sh check-freshness` | Bundled | Content-based staleness detection (read-only): a doc is stale when a code ref's content differs from what was verified (`code_oids`). Compares HEAD, or `--tree <tree-ish>` (pre-commit: `--tree "$(git write-tree)"`, the staged tree), which then also supplies the index and the docs: one snapshot, so an `update-index` whose index is not staged does not count. `--code-refs <path>...` or `--code-refs-from <file\|->` scopes it to docs whose `code_refs` share a path segment with the list |
 | `doc-tools.sh update-index` | Bundled | **The one verb that attests a doc was checked against its code**: records each code ref's content as the working tree holds it now and stamps `last_verified`; a deprecated entry stays deprecated (skips missing files; a path not in the index is reported and skipped, and the run exits 1) |
 | `doc-tools.sh add-entry` | Bundled | Add new entries to an existing index (stdin mapping lines). Not a verification: `last_verified` is null, and each ref is recorded as of the doc's own last commit (the working tree for a doc never committed), so code that changed since the doc was written reads stale until `update-index` |
@@ -170,7 +170,7 @@ Every change to `docs/.doc-index.json` goes through exactly one verb. Never hand
 
 | Change | Verb | Never |
 |---|---|---|
-| New doc (on disk, not in the index: `untracked`) | `add-entry` — pipe its mapping line `<doc>:<refs>:<type>` | `update-index` (reports it not indexed, exit 1) · `build-index` (refuses a non-empty index; `--force` discards every entry's metadata) |
+| New doc (on disk, not in the index: `untracked`) | `add-entry` — pipe its mapping line `<doc>:<refs>:<type>` | `update-index` (reports it not indexed, exit 1) · `build-index` (refuses a non-empty index; `--force` re-records every entry unverified, keeping only deprecations) |
 | Doc moved or renamed | `git mv`, then `move-entry <old> <new>` (`move-entry --stdin` for many) | `remove-entry` + `add-entry` (drops its verification, deprecation and links) |
 | Doc archived | `git mv` into `docs/archive/<type>/`, then `move-entry <old> <new>`, then `deprecate-entry <new>` | leaving the old key `missing` · `deprecate-entry <old>` after the move (exits 1: the old key is gone) |
 | Doc deleted | `git rm`, then `remove-entry <doc>` | leaving the old key `missing` |
@@ -217,10 +217,10 @@ Scopes are **structural categories**, not platform or language identifiers. The 
 
 ```bash
 # Bundled tooling: the summary and only the docs that need attention (a full report is ~300 bytes per indexed doc)
-"$DOC_TOOLS" check-freshness | jq '{summary, stale: [.docs | to_entries[] | select(.value.status == "stale" or .value.status == "missing" or .value.doc_modified) | {doc: .key} + .value], untracked: .untracked_docs}'
+"$DOC_TOOLS" check-freshness | jq '{summary, stale: [.docs | to_entries[] | select(.value.status == "stale" or .value.status == "missing" or (.value.doc_modified and (.value.record | not))) | {doc: .key} + .value], untracked: .untracked_docs}'
 ```
 
-`stale` lists every stale, missing or edited (`doc_modified`) doc with its entry (`code_refs_changed` says which refs moved); `untracked` lists docs on disk the index lacks. For one doc's full entry run `"$DOC_TOOLS" status <doc>`. No project script runs here (*Safety Rules*).
+`stale` lists every stale, missing or edited (`doc_modified`) doc with its entry (`code_refs_changed` says which refs moved) — an edited record doc (a plan, an issue, an audit report, a design spec, anything archived) is not work for `update`, so it is left out; `untracked` lists docs on disk the index lacks. For one doc's full entry run `"$DOC_TOOLS" status <doc>`. No project script runs here (*Safety Rules*).
 
 If no doc-index exists (first run), `check-freshness` exits 1 with "doc-index.json not found" — this is expected. `init` builds the index after generating docs.
 
@@ -350,7 +350,7 @@ Use when a project has no docs or needs a complete documentation suite generated
 11. Add the marker as the first line of each generated doc, except `template.md` files (a spec or ADR copied from a template would inherit a false "Generated by" line): `<!-- Generated by doc-superpowers -->`. It carries no date or commit: `docs/.doc-index.json` is the single freshness record.
 12. **Build doc-index**: Construct one mapping line per generated doc in the format `doc_path:code_refs_csv:doc_type` (e.g., `docs/architecture/system-overview.md:src/,package.json:architecture`). Include EVERY generated doc file — missing entries make docs invisible to freshness tooling.
     - **`code_refs` rule**: each ref is a literal path — a file or directory of the code the doc describes, never a glob, a module name or a symbol. Never a path that contains `docs/.doc-index.json` or a file `init` itself writes: not `.`, not `docs/`, not `README.md` or `CLAUDE.md` when steps 8–9 sync them. Committing `init`'s own output would otherwise make that doc stale at once.
-    - When no index exists, pipe all lines to `$DOC_TOOLS build-index` via stdin. When `docs/.doc-index.json` already has entries, pipe them to `$DOC_TOOLS add-entry` instead: `build-index` refuses to replace a non-empty index without `--force`, and `--force` discards every existing entry's metadata except its deprecation. Both record the entries unverified (`last_verified: null`); each doc was just written from the code, so then attest them with `$DOC_TOOLS update-index <doc>...`.
+    - When no index exists, pipe all lines to `$DOC_TOOLS build-index` via stdin. When `docs/.doc-index.json` already has entries, pipe them to `$DOC_TOOLS add-entry` instead: `build-index` refuses to replace a non-empty index without `--force`, and `--force` re-records every entry unverified, keeping only each re-indexed key's deprecation. Both record the entries unverified (`last_verified: null`); each doc was just written from the code, so then attest them with `$DOC_TOOLS update-index <doc>...`.
 13. **Verification gate — after the commit**: offer to commit the generated docs, the index and the CLAUDE.md / README.md changes (in a CI workflow, the workflow commits). Then run `$DOC_TOOLS check-freshness`: every generated doc must be indexed and read `current`. A gate on the uncommitted tree proves nothing, because the commit changes what a broad ref covers. A doc stale right after the commit cites a path `init` wrote: narrow its refs with `set-code-refs`, read it, and `update-index` it. If the user does not commit now, say the gate is still open.
 14. **Suggest workflow hooks**: After successful init, suggest: "Documentation generated. To keep docs fresh automatically, run `/doc-superpowers hooks install` to set up workflow hooks."
 
@@ -467,12 +467,14 @@ Update is the **write counterpart** to audit's analysis (audit edits no doc; its
 6. **Verification gate**: Run `doc-tools.sh check-freshness` to confirm all updated docs are current.
 7. **Archive the applied report** (when the input was a report file), so no later `update` applies it again — the *Safety Rules* exception, no confirmation needed. In a doc-superpowers CI workflow, skip this step (neither `mv` nor `git mv` is granted there) and say in the output that the report stays in `docs/plans/`. Otherwise — the report may be tracked and indexed, or (written by `audit` in this session) neither:
    ```bash
+   DOC_TOOLS='<the DOC_TOOLS path Detect Bundled Tooling printed>'
+   [ -x "$DOC_TOOLS" ] || { echo "archive: set DOC_TOOLS to the printed path first" >&2; exit 1; }
    R=docs/plans/YYYY-MM-DD-audit-report.md; A=docs/archive/plans/${R##*/}
    mkdir -p docs/archive/plans
    if git ls-files --error-unmatch "$R" >/dev/null 2>&1; then git mv "$R" "$A"; else mv "$R" "$A"; fi
    if "$DOC_TOOLS" status "$R" >/dev/null 2>&1; then "$DOC_TOOLS" move-entry "$R" "$A"; fi
    ```
-   `git mv` only when git tracks it, `move-entry` only when the index lists it (`status` exits 1 for a doc the index lacks).
+   `git mv` only when git tracks it, `move-entry` only when the index lists it (`status` exits 1 for a doc the index lacks). Shell variables do not survive between tool calls, so the block sets `DOC_TOOLS` itself: left unset, the `status` probe would fail silently and leave the entry `missing`.
 8. Human reviews diffs before committing. In a doc-superpowers CI workflow, the workflow's checked commit step commits instead (its consent row in `references/hooks.md` says what it may commit).
 
 ### `diagram` — Regenerate Architecture Diagrams
@@ -500,7 +502,7 @@ Update is the **write counterpart** to audit's analysis (audit edits no doc; its
 1. Run discovery's filtered `check-freshness`.
 2. Reconcile each doc it lists, per the **Index-write routing** table:
    - **`untracked`** (a doc on disk the index lacks): choose its `code_refs` (literal paths of the code it describes) and `doc_type`, and pipe `<doc>:<refs>:<type>` to `$DOC_TOOLS add-entry` — never to `build-index`, which refuses a non-empty index.
-   - **`missing`** (an indexed doc whose file is gone): find out what happened (`git log --diff-filter=DR --name-status -- <doc>`, or an `untracked` doc with the same name or content). Moved or renamed → `move-entry <old> <new>`; archived → `move-entry` + `deprecate-entry <new>`; deleted → `remove-entry <doc>`.
+   - **`missing`** (an indexed doc whose file is gone): find out what happened. `git log -1 --format=%H --diff-filter=D -- <doc>` names the commit that removed it, and `git show -M --name-status --format= <that commit>` says whether that commit renamed it (`R<score> <doc> <new path>`, tab-separated) or deleted it (`D <doc>`) — a `git log` limited to the old path never pairs the rename, so it shows a deletion. No such commit: the change is not committed yet, so look for an `untracked` doc with the same name or content. Moved or renamed → `move-entry <old> <new>`; archived → `move-entry` + `deprecate-entry <new>`; deleted → `remove-entry <doc>`.
    - **`doc_modified`** (edited since it was verified): read it against its code refs; if it is accurate, `update-index` it; if not, list it for `update`.
    - **`stale`**: its code moved on. Content fixes belong to `update`: list it, and never `update-index` a doc you did not read against its code.
 3. Call `doc-tools.sh update-index` for the docs you verified, and only those.
@@ -511,7 +513,7 @@ Update is the **write counterpart** to audit's analysis (audit edits no doc; its
 
 ### `release` — Draft Release Notes Entry
 
-**REQUIRED:** Read `$ROOT/references/release.md` before any step — it holds steps 1–12. In short: parse RELEASE-NOTES.md; find the range start (the latest version's tag, else the nearest `v*` tag, else `ROOT`); merge the `RELEASE-NOTES.next/PR-*.md` fragments **before** drafting (`$DOC_TOOLS fragments merge <start> HEAD`; exit 3 = an earlier release never reached this branch → stop); suggest the version bump; dispatch the drafting agent; show the draft; prepend it; remove exactly the consumed fragments (`… --remove`, never a glob); bump the manifests the project has; commit the release in ONE commit; offer the tag. The release commit must reach `main`.
+**REQUIRED:** Read `$ROOT/references/release.md` before any step — it holds steps 1–12. In short: parse RELEASE-NOTES.md; find the range start (the latest version's tag; else the commit that added its `## vX.Y.Z` heading — an untagged release is still a release; with no version entry, the nearest `v*` tag, else `ROOT`); merge the `RELEASE-NOTES.next/PR-*.md` fragments **before** drafting (`$DOC_TOOLS fragments merge <start> HEAD`; exit 3 = an earlier release never reached this branch → stop); suggest the version bump; dispatch the drafting agent; show the draft; prepend it; remove exactly the consumed fragments (`… --remove`, never a glob); bump the manifests the project has; commit the release in ONE commit; offer the tag. The release commit must reach `main`.
 
 ### `hooks` — Install Workflow Hooks
 
@@ -545,7 +547,7 @@ After the `update` or `init` action writes changes, verify before claiming done.
 ```
 1. IDENTIFY: What proves the doc update is correct?
 2. RUN:
-   - Freshness check (script or git heuristic) — confirm doc is now fresh
+   - Freshness check (`$DOC_TOOLS check-freshness`) — confirm doc is now fresh
    - `git diff` on updated doc — confirm changes are coherent
    - Read updated doc + its code_refs — confirm alignment
 3. READ: Full output

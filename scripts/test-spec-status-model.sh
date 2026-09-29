@@ -410,6 +410,22 @@ assert_contains "$_sync" 'add-entry' "…with add-entry"
 assert_contains "$_sync" '`missing`' "sync: handles missing docs…"
 assert_contains "$_sync" 'remove-entry' "…deleted → remove-entry"
 assert_contains "$_sync" 'move-entry' "…moved → move-entry"
+assert_contains "$_sync" 'git log -1 --format=%H --diff-filter=D -- <doc>' "sync: missing → the commit that removed the doc (P-I1)…"
+assert_contains "$_sync" 'git show -M --name-status --format= <that commit>' "…whose rename git show pairs"
+assert_not_contains "$_sync" 'diff-filter=DR --name-status -- <doc>' "…never a log limited to the old path (it shows a rename as D)"
+# Run the route as written on a committed rename: it must say R, not D.
+_rn=$(harness_mktemp_d rename)
+(
+  cd "$_rn" || exit 1
+  git init -q -b main 2>/dev/null || { git init -q && git symbolic-ref HEAD refs/heads/main; }
+  mkdir -p docs && printf '# Getting started\n\nRun it.\n' > docs/old.md
+  git add -A && git -c user.name=t -c user.email=t@t commit -qm one
+  git mv docs/old.md docs/new.md && git -c user.name=t -c user.email=t@t commit -qm rename
+) >/dev/null 2>&1
+_rm=$(git -C "$_rn" log -1 --format=%H --diff-filter=D -- docs/old.md 2>/dev/null || true)
+assert_true "the route's first command finds the renaming commit" test -n "$_rm"
+assert_true "…and its second reports the rename (R<score> old new)" \
+  grep -qE '^R[0-9]+[[:space:]]+docs/old\.md[[:space:]]+docs/new\.md$' <<<"$(git -C "$_rn" show -M --name-status --format= "${_rm:-HEAD}" 2>/dev/null)"
 assert_contains "$_sync" "N/8 ci" "sync's hook summary counts the 8 CI templates"
 assert_contains "$(_section "$ACTIONS" '### Plan Phase')" 'set-code-refs' "Task N+1 refines code_refs with set-code-refs"
 assert_contains "$(_section "$ACTIONS" '### Execute Phase')" 'set-code-refs' "execute phase refines code_refs with set-code-refs"
@@ -532,6 +548,9 @@ assert_not_contains "$SKILLMD" '| `doc-pr-full-cycle` (AI) |' "the consent table
 assert_not_contains "$SKILLMD" "**Offer git tag**" "the release steps moved out of SKILL.md (one copy)"
 # The moved text keeps every earlier Task's lockstep edit (T8, T9, T10).
 assert_contains "$RELREF" '$DOC_TOOLS fragments merge <start> HEAD`' "release.md: merge before drafting (T10)"
+assert_contains "$RELREF" "git log -1 --format=%H -S '## vX.Y.Z' -- RELEASE-NOTES.md" "release.md: an untagged latest release starts the range at its heading's commit (P-I2)"
+assert_contains "$RELREF" "Only when RELEASE-NOTES.md has no version entry: the nearest release tag" "…the nearest tag only without a version entry (P-I2)"
+assert_contains "$SKILLMD" "else the commit that added its \`## vX.Y.Z\` heading" "SKILL.md's release summary says so too (P-I2)"
 assert_contains "$RELREF" '$DOC_TOOLS fragments merge <start> HEAD --remove' "release.md: removal pinned to doc-release's allowedTools (T10)"
 assert_contains "$RELREF" '**Exit 3 = refused:**' "release.md: the exit-3 refusal (T10)"
 assert_contains "$RELREF" 'git commit -m "release: vX.Y.Z"' "release.md: one release commit before the tag (T10)"
@@ -732,11 +751,16 @@ _arch_block=$(_bash_block_after "$_upd" '7. **Archive the applied report**')
 assert_contains "$_arch_block" 'git ls-files --error-unmatch' "archive: git mv only when git tracks the report…"
 assert_line_matches "$_upd" '^7\. \*\*Archive the applied report\*\*.*CI workflow' "…and a CI workflow leaves it in place"
 assert_line_matches "$SKILLMD" '^- \*\*Confirm before moving docs\*\*.*`update`.*audit report' "Safety Rules name the one exception: update archiving its applied audit report"
-_ar() { # <repo> <report path> → _ar_rc, _ar_out
+# The block runs as written in a fresh shell (shell variables do not survive
+# between an agent's tool calls): DOC_TOOLS unset, its placeholder replaced by
+# the path Detect Bundled Tooling prints (P-M4).
+assert_contains "$_arch_block" "DOC_TOOLS='<the DOC_TOOLS path Detect Bundled Tooling printed>'" "archive: the block sets DOC_TOOLS itself (P-M4)"
+_ar() { # <repo> <report path> [<doc-tools path>] → _ar_rc, _ar_out
   local cmd="$_arch_block"
   cmd=${cmd//docs\/plans\/YYYY-MM-DD-audit-report.md/$2}
+  cmd=${cmd//<the DOC_TOOLS path Detect Bundled Tooling printed>/${3-$_dt}}
   _ar_rc=0
-  _ar_out=$(cd "$1" && DOC_TOOLS="$_dt" "$BASH_BIN" -c "$cmd" 2>&1) || _ar_rc=$?
+  _ar_out=$(cd "$1" && env -u DOC_TOOLS "$BASH_BIN" -c "$cmd" 2>&1) || _ar_rc=$?
 }
 for _layout in tracked untracked; do
   _at=$(harness_mktemp_d "archive-$_layout")
@@ -765,6 +789,17 @@ for _layout in tracked untracked; do
     assert_eq '["docs/guide.md"]' "$_keys" "archive (untracked): the index is left alone (the report was never indexed)"
   fi
 done
+# DOC_TOOLS not set to a tool: the block stops before moving anything, never
+# silently leaving the index entry missing.
+_at=$(harness_mktemp_d archive-unset)
+(
+  cd "$_at" || exit 1
+  git init -q -b main 2>/dev/null || { git init -q && git symbolic-ref HEAD refs/heads/main; }
+  mkdir -p docs/plans && echo "## Documentation Freshness Audit" > docs/plans/2026-09-01-audit-report.md
+) >/dev/null 2>&1
+_ar "$_at" docs/plans/2026-09-01-audit-report.md ""
+assert_eq "1" "$_ar_rc" "archive with DOC_TOOLS unresolved: exits 1"
+assert_true "…and moves nothing" test -f "$_at/docs/plans/2026-09-01-audit-report.md"
 
 # Tool resolution runs for every action (hooks and release need $ROOT).
 assert_line_matches "$SKILLMD" '^\*\*Discovery is universal\*\*.*Detect Bundled Tooling' "tool resolution runs for every action, hooks and release included"
@@ -832,23 +867,43 @@ assert_eq "true" "$(jq '[.evals[] | select(.name == "spec-generate-from-design")
   "eval 4 routes new specs to add-entry"
 assert_eq "true" "$(jq '[.evals[] | select(.name == "sync-index") | .assertions[] | select(.type == "tool_call_check" and .negate == true) | .command] | any(test("build-index"))' "$EVALS_JSON")" \
   "eval 9 forbids build-index on an existing index"
+# A command pattern naming doc-tools.sh or install.sh must match both the
+# bare and the quoted invocation ("$DOC_TOOLS" expands to a quoted path):
+# `doc-tools\.sh"? <verb>`. Without the `"?`, a negated check passed
+# vacuously and a positive one failed falsely (P-I3).
+_unq=$(jq -r '.evals[] | .name as $e | .assertions[] | .name as $a | (.command // empty), (.precedes // empty)
+  | select(test("(doc-tools|install)\\\\\\.sh ")) | "\($e)/\($a): \(.)"' "$EVALS_JSON")
+assert_eq "" "$_unq" "every doc-tools.sh / install.sh command pattern allows the closing quote (\"?)"
+for _q in '"/w/scripts/doc-tools.sh" check-freshness' '/w/scripts/doc-tools.sh check-freshness'; do
+  assert_true "eval 2's check-freshness pattern matches: $_q" \
+    grep -qE -- "$(jq -r '.evals[] | select(.name == "audit-stale-docs") | .assertions[] | select(.name == "runs-check-freshness") | .command' "$EVALS_JSON")" <<<"$_q"
+done
 # The release evals' merge check tells step 3 (merge before drafting) from
 # step 8 (--remove): a pattern that also matched the removal checked nothing.
-_rm_cmd='/w/.github/scripts/doc-tools.sh fragments merge v1.2.0 HEAD --remove'
-_mg_cmd='/w/.github/scripts/doc-tools.sh fragments merge v1.2.0 HEAD 2>merge.err'
+# Both invocation forms: bare, and the quoted path "$DOC_TOOLS" expands to.
 _bad_mg=""
-while IFS= read -r _re; do
-  [ -n "$_re" ] || continue
-  { grep -qE -- "$_re" <<<"$_mg_cmd" && ! grep -qE -- "$_re" <<<"$_rm_cmd"; } || _bad_mg="$_bad_mg [$_re]"
-done < <(jq -r '.evals[] | select(.name | IN("release-draft","release-fragment-merge")) | .assertions[]
-                | select(.type == "tool_call_check" and ((.command // "") | contains("fragments merge")) and ((.command // "") | contains("remove") | not)) | .command' "$EVALS_JSON")
-assert_eq "" "$_bad_mg" "the release evals' step-3 merge check matches the merge and not the --remove call"
+for _dtq in '/w/.github/scripts/doc-tools.sh' '"/w/.github/scripts/doc-tools.sh"'; do
+  _rm_cmd="$_dtq fragments merge v1.2.0 HEAD --remove"
+  _mg_cmd="$_dtq fragments merge v1.2.0 HEAD 2>merge.err"
+  while IFS= read -r _re; do
+    [ -n "$_re" ] || continue
+    { grep -qE -- "$_re" <<<"$_mg_cmd" && ! grep -qE -- "$_re" <<<"$_rm_cmd"; } || _bad_mg="$_bad_mg [$_dtq: $_re]"
+  done < <(jq -r '.evals[] | select(.name | IN("release-draft","release-fragment-merge")) | .assertions[]
+                  | select(.type == "tool_call_check" and ((.command // "") | contains("fragments merge")) and ((.command // "") | contains("remove") | not)) | .command' "$EVALS_JSON")
+done
+assert_eq "" "$_bad_mg" "the release evals' step-3 merge check matches the merge and not the --remove call, quoted or not"
 assert_eq "true" "$(jq --arg rm "$_rm_cmd" '[.evals[] | select(.name == "release-fragment-merge") | .assertions[] | select(.precedes) | .precedes] | length > 0' "$EVALS_JSON")" \
   "release-fragment-merge orders the merge before the --remove call (precedes)"
 _pr=$(jq -r '.evals[] | select(.name == "release-fragment-merge") | .assertions[] | select(.precedes) | .precedes' "$EVALS_JSON" | head -1)
-assert_true "…and its precedes pattern matches the --remove call" grep -qE -- "${_pr:-^$}" <<<"$_rm_cmd"
+assert_true "…and its precedes pattern matches the --remove call (quoted)" grep -qE -- "${_pr:-^$}" <<<"$_rm_cmd"
+assert_true "…and bare" grep -qE -- "${_pr:-^$}" <<<"/w/.github/scripts/doc-tools.sh fragments merge v1.2.0 HEAD --remove"
+# P-I2: the untagged-release eval merges from a commit, never from the older tag.
+_ut=$(jq -r '.evals[] | select(.name == "release-draft-untagged") | .assertions[] | select(.name == "merges-from-the-release-commit") | .command' "$EVALS_JSON")
+assert_true "release-draft-untagged: the merge check matches a commit id" grep -qE -- "${_ut:-^$}" <<<'"/w/scripts/doc-tools.sh" fragments merge 0123abcd HEAD'
+assert_false_re() { ! grep -qE -- "$1" <<<"$2"; }
+assert_true "…and not the older tag" assert_false_re "${_ut:-^$}" '"/w/scripts/doc-tools.sh" fragments merge v1.1.0 HEAD'
 # Required cases: fixtures that build the scenario, runnable here.
-_required="update-from-audit update-from-session-report spec-generate-from-design hooks-install-all sync-index release-draft spec-inject-execute spec-verify-review spec-inject-amends release-fragment-merge hooks-status-uninstall"
+_required="update-from-audit update-from-session-report spec-generate-from-design hooks-install-all sync-index release-draft release-draft-untagged spec-inject-execute spec-verify-review spec-inject-amends release-fragment-merge hooks-status-uninstall"
 for _e in $_required; do
   _setup=$(jq -r --arg e "$_e" '.evals[] | select(.name == $e) | .setup // ""' "$EVALS_JSON")
   if [ -z "$_setup" ]; then

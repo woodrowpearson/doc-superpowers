@@ -21,7 +21,7 @@ When a code review skill completes, it should check if doc updates are needed:
 
 ```
 After code review completes, check:
-  1. Run freshness check (script or git heuristic)
+  1. Run the freshness check (`doc-tools.sh check-freshness`; with no doc-tools.sh, stop and say so)
   2. If stale docs detected:
      - Print: "Documentation may need updating. Run /doc-superpowers review-pr"
      - Include the list of stale docs in the review output

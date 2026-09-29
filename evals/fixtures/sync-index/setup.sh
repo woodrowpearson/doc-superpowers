@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Fixture for eval "sync-index": two docs added by hand (on disk, not in the
-# index), one indexed doc deleted, and two repository doc scripts that are
-# tripwires — sync must list them, never run them (they would write
-# .validate-ran).
+# index), one indexed doc deleted, one renamed in a commit (git mv — a log of
+# the old path alone shows it deleted; the commit shows the rename), and two
+# repository doc scripts that are tripwires — sync must list them, never run
+# them (they would write .validate-ran).
 . "$(dirname "$0")/../lib.sh"
 fx_init "$0"
 
@@ -46,8 +47,9 @@ printf '%s\n' \
 dt update-index docs/architecture/system-overview.md docs/guides/getting-started.md docs/old-notes.md >/dev/null
 fx_commit "docs: index"
 
-# By hand: two docs added, one removed.
+# By hand: two docs added, one removed, one renamed.
 git rm -q docs/old-notes.md
+git mv docs/guides/getting-started.md docs/guides/quickstart.md
 fx_write docs/guides/new-guide.md <<'EOF'
 # Operating the cache
 
@@ -58,8 +60,13 @@ fx_write docs/architecture/cache.md <<'EOF'
 
 `src/cache.js` holds one process-wide `Map`.
 EOF
-fx_commit "docs: add a guide and the cache doc, drop old notes"
+fx_commit "docs: add a guide and the cache doc, drop old notes, rename getting-started"
 
-fx_expect "two docs are untracked by the index" test "$(fx_fresh '.summary.untracked')" = 2
-fx_expect "one indexed doc is missing" test "$(fx_fresh '.docs["docs/old-notes.md"].status')" = missing
+fx_expect "three docs are untracked by the index" test "$(fx_fresh '.summary.untracked')" = 3
+fx_expect "the deleted doc is missing" test "$(fx_fresh '.docs["docs/old-notes.md"].status')" = missing
+fx_expect "the renamed doc is missing under its old key" test "$(fx_fresh '.docs["docs/guides/getting-started.md"].status')" = missing
+rm_commit=$(git log -1 --format=%H --diff-filter=D -- docs/guides/getting-started.md)
+fx_expect "a log of the old path alone shows a deletion" test -n "$rm_commit"
+fx_expect "the commit that removed it shows the rename" \
+  sh -c 'git show -M --name-status --format= "$1" | grep -qE "^R[0-9]+[[:space:]]+docs/guides/getting-started\.md[[:space:]]+docs/guides/quickstart\.md$"' sh "$rm_commit"
 fx_expect "the tripwire has not fired" test ! -e .validate-ran
