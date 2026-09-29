@@ -18,7 +18,7 @@ doc-superpowers is a Claude Code skill that treats documentation as a first-clas
 - **Installs** opt-in workflow hooks for automated freshness monitoring (`hooks`)
 - **Tracks specifications** through implementation with formal spec lifecycle (`spec-generate`, `spec-inject`, `spec-verify`)
 - **Drafts release notes** from git history with agent-assisted diff review (`release`)
-- **Syncs CLAUDE.md and README.md** automatically across all write actions to prevent drift
+- **Syncs CLAUDE.md and README.md** automatically in the actions that write docs (`init`, `update`, `sync`, `release`, `spec-generate`) to prevent drift; in a CI workflow `update` and `sync` report the change instead of editing them
 - **Tracks freshness** via bundled `scripts/doc-tools.sh` — content hashing for docs, content identity (git object ids per code ref) for code
 
 ## Installation
@@ -41,7 +41,7 @@ ln -s ~/code/doc-superpowers ~/.claude/skills/doc-superpowers
 
 ### Manual
 
-Copy the whole repository into `.claude/skills/doc-superpowers/` in any project. Copy all of it, not only `skills/doc-superpowers/SKILL.md` and `references/`: the skill runs `scripts/doc-tools.sh` and reads `references/` from two directories above its `SKILL.md`.
+Copy the whole repository into `.claude/skills/doc-superpowers/` in any project. Copy all of it, not only `skills/doc-superpowers/SKILL.md` and `references/`: the skill runs `scripts/doc-tools.sh` and reads `references/` from two directories above its `SKILL.md`. The copy holds `.claude-plugin/plugin.json`, so Claude Code loads it as the plugin `doc-superpowers@skills-dir`, and in a project's `.claude/skills/` that requires accepting the workspace trust dialog first.
 
 ### Cursor
 
@@ -75,13 +75,9 @@ See `.opencode/INSTALL.md` for details.
 gemini extensions install https://github.com/woodrowpearson/doc-superpowers
 ```
 
-### skills.sh (Any Agent)
+### skills.sh (`npx skills add`)
 
-```bash
-npx skills add woodrowpearson/doc-superpowers
-```
-
-Works with 40+ supported agents. See [skills.sh](https://skills.sh) for details.
+Not supported. `npx skills add woodrowpearson/doc-superpowers` copies only the skill folder, `skills/doc-superpowers/` (its `SKILL.md`), and the skill needs `scripts/` and `references/` from two directories above it. A skills.sh install has neither, so the skill stops at its *Detect Bundled Tooling* step. Use one of the installs above.
 
 In a client other than Claude Code, [`references/tool-mappings.md`](references/tool-mappings.md) maps the skill's tool names to the client's and says which hook tiers and features it supports.
 
@@ -91,7 +87,7 @@ v3.0.0 changes what the installer writes, the doc-index schema and a few verbs' 
 
 1. **Re-run every tier you use**, from the upgraded plugin: `install.sh install --git`, `install --claude`, `install --ci`. Re-installing is idempotent, and it is what replaces the v2 hooks, the pinned merge-driver registration and the vendored `.github/scripts/` copies.
 2. **Re-install before you uninstall.** `uninstall` removes only files byte-identical to the plugin's copies, so the v2 copies an old install vendored are kept (and reported) by a v3 `uninstall`.
-3. **CI tier.** v2's default `--ci` installed every AI workflow, and a plain re-install keeps the recorded set: remove the ones you did not choose with `install.sh uninstall --ci --workflows=<names>`. `doc-index-update` is retired — any `install --ci` removes a copy the installer owns (a file of that name without its marker is kept and reported). An existing `RELEASE-NOTES.next/README.md` is never overwritten, so a v2 copy keeps giving v2 advice: `doc-tools.sh tools status` reports when it differs from the plugin's; replace it with `scripts/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md`. `--helpers` is deprecated and inert (the helpers ship exactly while a workflow runs them). Before keeping an AI workflow, read `references/hooks.md` → *What an AI job's agent can reach*, and protect the base branch and `release/**` with required human review.
+3. **CI tier.** v2's default `--ci` installed every AI workflow, and a plain re-install keeps the recorded set: remove the ones you did not choose with `install.sh uninstall --ci --workflows=<names>`. `doc-index-update` is retired — any `install --ci` removes a copy the installer owns (a file of that name without its marker is kept and reported). An existing `RELEASE-NOTES.next/README.md` is never overwritten, so a v2 copy keeps giving v2 advice: `doc-tools.sh tools status` reports when it differs from the plugin's; replace it with `scripts/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md`. `--helpers` is deprecated and inert (the helpers ship exactly while a workflow runs them); its one effect is that `--helpers=false` is refused, exit 1 with nothing written, while `doc-pr-release` is selected or already installed. Before keeping an AI workflow, read `references/hooks.md` → *What an AI job's agent can reach*, and protect the base branch and `release/**` with required human review.
 4. **Claude tier: per-user now.** Its files hold this machine's paths and live in git's `info/exclude`. If your repository tracks `.claude/settings.local.json` or `.claude/hooks/doc-superpowers/`, untrack them (`git rm -r --cached --ignore-unmatch -- .claude/settings.local.json .claude/hooks/doc-superpowers`) and commit. **Pulling that commit deletes those files from every other clone**: tell each teammate to re-run `install.sh install --claude` after pulling, and to restore a permission allowlist they kept in that file with `git show ORIG_HEAD:.claude/settings.local.json`.
 5. **Git hooks in the wrong place.** v2 could install into a `.githooks/` directory git was not configured to run, or into a global `core.hooksPath`. v3 installs only where git runs hooks and refuses a global `core.hooksPath`, so it never touches those copies: delete them by hand (their first lines say `doc-superpowers hook v1`).
 6. **The doc-index.** Schema v3 records each code ref's content (`code_oids`); a v2 index is read as it is and upgraded by its next write, and a v2 entry keeps the old commit comparison until `update-index` re-verifies it. Plans, issues, audits and design specs are record docs now, never reported stale, decided by `doc_type`: v2 indexes often typed design specs `spec` — retype them with `doc-tools.sh set-doc-type <doc> design-spec` (never `remove-entry` + `add-entry`, which drops the entry's verification and links).
@@ -104,8 +100,10 @@ v3.0.0 changes what the installer writes, the doc-index schema and a few verbs' 
 /doc-superpowers <action> [scope]
 
 Actions: init | audit | review-pr | update | diagram | sync | hooks | release | spec-generate | spec-inject | spec-verify
-Scopes:  all | <auto-detected from docs/ structure>
+Scopes:  all | one scope from Detect Scopes (application, api-contracts, data-layer, …)
 ```
+
+`[scope]` applies to `audit`, `update` and `diagram` only: it limits their scope agents to that one scope (default `all`), and every other action ignores it. Scopes are structural categories the skill detects from the project itself (`application`, `api-contracts`, `data-layer`, `infrastructure`, `ci-cd`, `testing`, `agentic`, `adr`, `spec`, `monorepo`), not from the layout of `docs/`.
 
 ### Actions
 
@@ -114,7 +112,7 @@ Scopes:  all | <auto-detected from docs/ structure>
 | `init` | Generate full doc suite from scratch | New project or missing docs |
 | `audit` | Check all docs, CLAUDE.md, README.md, and RELEASE-NOTES.md for staleness via parallel scope agents; writes a report to `docs/plans/` | Periodic health check |
 | `review-pr` | Check docs, CLAUDE.md, and README.md affected by PR changes | Before merging PRs |
-| `update` | Apply fixes from audit/review | After audit identifies stale docs |
+| `update` | Apply fixes from an audit report (`--report=<path>`; else this session's audit, else the freshness check), then archive the applied report | After audit identifies stale docs |
 | `diagram` | Regenerate architecture diagrams | After structural changes |
 | `sync` | Sync doc index with filesystem, check CLAUDE.md and README.md currency | After adding/removing doc files |
 | `hooks` | Install workflow hooks (git, Claude Code, CI/CD) | Setting up automated freshness monitoring |
@@ -131,6 +129,9 @@ Scopes:  all | <auto-detected from docs/ structure>
 
 # Audit all documentation (writes report to docs/plans/)
 /doc-superpowers audit
+
+# Apply that report's findings (audit suggests this exact command)
+/doc-superpowers update --report=docs/plans/<date>-audit-report.md
 
 # Check docs before merging a PR
 /doc-superpowers review-pr
@@ -196,6 +197,7 @@ Install opt-in hooks for automated freshness monitoring:
 /doc-superpowers hooks install --ci --ci-strict             # PR check fails on stale docs (--ci-strict=false undoes it)
 
 # Standalone tool install (v2.12.0+) — doc-tools.sh only, no workflows
+# ($DOC_TOOLS is the plugin's scripts/doc-tools.sh: see docs/guides/getting-started.md, "Independent of hooks")
 $DOC_TOOLS tools install                       # → .github/scripts/doc-tools.sh
 $DOC_TOOLS tools install --with-helpers        # + every helper the CI templates run
 $DOC_TOOLS tools install --helper doc-superpowers-steps  # + only the named helper dir(s)
@@ -229,28 +231,31 @@ The `init` action generates a structured documentation suite in `docs/`:
 
 | Directory/File | Content | When Generated |
 |----------------|---------|---------------|
-| `architecture/system-overview.md` | System overview, C4 diagrams, tech stack | Always |
+| `architecture/system-overview.md` | System overview, C4 diagrams, tech stack (plus a `## Packages` section with `monorepo`) | Always |
 | `architecture/{component}.md` | Per major component/domain | `application` scope |
-| `architecture/diagrams/` | C4, component, ERD diagrams | Always |
+| `architecture/diagrams/` | C4 and component diagrams | Always |
+| `architecture/diagrams/erd.png` | ERD | `data-layer` scope |
 | `specs/README.md` + `template.md` | Spec index and template | Always |
 | `adr/README.md` + `template.md` | ADR log and template | Always |
-| `workflows/{name}.md` | Process flows, CI/CD | Always |
-| `workflows/agentic/{skill}.md` | Agentic workflow docs | `agentic` scope |
+| `workflows/{name}.md` | Process flows: the primary workflow always | Always |
+| `workflows/deployment.md` | Deployment flow | `ci-cd` scope |
+| `workflows/agentic/README.md` | Agentic workflow index + overview flowchart | `agentic` scope |
+| `workflows/agentic/{skill}.md` | One agentic workflow doc per skill | `agentic` scope |
 | `workflows/diagrams/` | Workflow, sequence, state diagrams | Always |
 | `guides/getting-started.md` | Prerequisites, installation, verification | Always |
 | `api-contracts.md` | Endpoints, schemas, request/response | `api-contracts` scope |
 | `data-layer.md` | Data models, ERD, storage | `data-layer` scope |
 | `ci-cd.md` | Pipeline overview, triggers, environments | `ci-cd` scope |
 | `infra.md` | Infrastructure topology, components | `infrastructure` scope |
-| `codebase-guide.md` | Directory map, key files, code flow | Always |
-| `conventions.md` | Code style, naming, git conventions | Always |
+| `codebase-guide.md` | Directory map, key files, code flow (plus a `## Packages` section with `monorepo`) | Always |
+| `conventions.md` | Code style, naming, git conventions (plus a `## Testing` section with `testing`) | Always |
 | `.doc-index.json` | Machine-readable freshness index | Always |
 
 ## Agentic Workflow Discovery
 
 doc-superpowers automatically discovers Claude Code artifacts that define agentic pipelines:
 
-- **Skills** (`.claude/skills/*/SKILL.md`) — sub-agents, scripts, user gates
+- **Skills** (`.claude/skills/*/SKILL.md` and `skills/*/SKILL.md`) — sub-agents, scripts, user gates
 - **Commands** (`.claude/commands/*.md`) — which skills they invoke
 - **MCP tools** (MCP config files) — server names and tool purposes
 - **Scripts** (`scripts/`) — roles in pipelines (dispatch, validate, merge)
@@ -295,7 +300,7 @@ This skill is designed as a **documentation superset** of the [obra/superpowers]
 doc-superpowers/
 ├── .gitignore            # Git ignore rules
 ├── .gitattributes        # This repo's own git tier: the doc-index merge driver
-├── .worktrees/           # Parallel agent dispatch worktrees (gitignored)
+├── .worktrees/           # Parallel-agent worktree location (gitignored; not created by the skill)
 ├── .claude/
 │   └── doc-superpowers/
 │       └── installed.json    # This repo's own CI tier record (the Claude tier is per-user, gitignored)
@@ -378,7 +383,7 @@ doc-superpowers/
 
 ## Dependencies
 
-The skill itself (`skills/doc-superpowers/SKILL.md` + `references/`) has zero dependencies. The bundled tooling in `scripts/` requires:
+The skill runs the bundled tooling in `scripts/` and reads `references/` from its plugin root, so it needs the whole repository (see *Manual* under Installation) and:
 
 | Dependency | Required | Notes |
 |-----------|----------|-------|
