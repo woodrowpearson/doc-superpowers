@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-29T06:48:00Z",
+  "generated_at": "2026-09-29T07:14:31Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -303,13 +303,13 @@
       "implementation": []
     },
     "docs/plans/2026-09-27-full-repo-05ea982-jumping-off-point.md": {
-      "content_hash": "sha256:3978514fe58ea74caf5fc9f936182a33a191836e04e839579f3b7529d7996b23",
+      "content_hash": "sha256:358ff2bc307186338958cadcad59d6258c943f7f5d82c030ea945c4219afd4eb",
       "code_refs": [],
       "code_commit": null,
       "doc_type": "plan",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-28T23:55:32Z",
+      "last_verified": "2026-09-29T07:14:31Z",
       "implementation": [],
       "code_oids": {}
     },
@@ -474,14 +474,14 @@
       "last_verified": "2026-09-27T06:52:19Z"
     },
     "docs/plans/2026-09-27-full-repo-05ea982-execution-ledger.md": {
-      "content_hash": "sha256:3bc187f9918def628f9c53ddf368a3dd502fa35e62f61a4101b539b920b5319d",
+      "content_hash": "sha256:8b7e7fd4b6e9da33e2b6d0b42355c64501e83d7fa9594ec51a6768601b0e4f7b",
       "code_refs": [],
       "code_oids": {},
       "code_commit": null,
       "doc_type": "plan",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-28T23:55:32Z",
+      "last_verified": "2026-09-29T07:14:31Z",
       "implementation": []
     },
     "docs/superpowers/plans/2026-03-12-bundled-doc-tooling.md": {

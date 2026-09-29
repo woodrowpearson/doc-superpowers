@@ -13,8 +13,35 @@ related-files:
 # doc-superpowers sweep `05ea982` — Jumping-off point
 
 > The resume sheet for the session that **executes** the sweep's fix plan. The audit itself is done.
-> **Execution is in progress. T1–T14 are done and reviewed. The final-review fix wave is paused
-> after its first area (core tools).** See [Execution status](#execution-status-paused-2026-09-28).
+> **Execution is complete: released as v3.0.0.** See [Execution complete](#execution-complete-2026-09-28).
+> The "paused" section below is kept as the record of the earlier handoff.
+
+## Execution complete (2026-09-28)
+
+The work moved to branch `claude/2026-09-27-repo-handoff-4b960b` (fast-forwarded from `8c3c405`, the
+paused head of `claude/resume-plan-execution-03646c`), and finished there:
+
+| Step | Commits |
+|---|---|
+| Final fix wave: installer + hooks, CI, prompt layer, docs + follow-ups issue (F1–F10) | `95be346`, `f0d2433`, `f4eaf81`, `4cf2b18` |
+| Scoped re-review (four area seats), then ONE targeted residual fix (rulings R-RR1/R-RR2) and its re-review | `132a987` |
+| `/doc-superpowers audit` (0 P0, 10 P1, 17 P2, 41 P3) | `d3c611f` |
+| `update` (four agents on disjoint files; report archived to `docs/archive/plans/`) | `936dfef` |
+| `diagram` (7 of 12 PNGs whose Mermaid changed) | `eea82fe` |
+| Follow-ups issue: residual and diagram-pass items | `ea5a30c` |
+| `release: v3.0.0` (entry, `bump-version 3.0.0`, `check-version` PASS) | `29b0432` |
+
+**Tests at `132a987`:** 3657/3657, 0 XFAIL, under `/opt/homebrew/bin/bash` 5.3 and `/bin/bash` 3.2.57.
+Both were re-run at `29b0432` before the push. CI has still never run (Gotcha 1).
+
+**What is left** is in [`docs/issues/2026-09-28-sweep-05ea982-followups.md`](../issues/2026-09-28-sweep-05ea982-followups.md):
+- CI-return checks;
+- real-client checks (Cursor, Codex, Gemini);
+- fix-later code and docs;
+- the owner's after-merge step: `scripts/hooks/install.sh install --git` from the main checkout. This
+  repository's shared `.git/hooks` and its merge-driver registration still resolve a worktree's `scripts/`.
+
+Every ruling is in the committed [execution ledger](2026-09-27-full-repo-05ea982-execution-ledger.md).
 
 ## Execution status (paused 2026-09-28)
 
