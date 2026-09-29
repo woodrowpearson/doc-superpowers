@@ -3475,6 +3475,9 @@ test_i4_build_index_refuses_empty_input_and_existing_index() {
   err=$(echo "docs/workflows.md:src/:workflows" | "$DOC_TOOLS" build-index 2>&1 >/dev/null) || rc=$?
   assert_true "build-index over a non-empty index without --force exits non-zero (rc=$rc)" test "$rc" -ne 0
   assert_contains "$err" "--force" "…and says --force is how to rebuild"
+  # P-M5: one description of --force everywhere (SKILL.md, --help, this refusal).
+  assert_contains "$err" "build-index --force to rebuild from scratch (every entry is re-recorded unverified; only each re-indexed key's deprecation is kept)." \
+    "…saying what --force keeps: only each re-indexed key's deprecation (P-M5)"
   assert_eq "$before" "$(hash_file docs/.doc-index.json)" "…and leaves it byte-identical (the deprecation survives)"
   rc=0
   "$DOC_TOOLS" build-index --help </dev/null >/dev/null 2>&1 || rc=$?
@@ -6402,6 +6405,78 @@ EOF
   assert_contains "$out" "SIGINT is ignored" "…said loudly"
 }
 
+# --- Residual fix after the fix-wave re-review (sweep 05ea982) ---
+
+# Deferred 129: _warn_refs listed the tracked files with a plain `git
+# ls-files`, which quotes a name holding `"`, a backslash or a tab even with
+# core.quotePath=false, so such a ref "matched no tracked file". The warning
+# fires for a ref also recorded missing: one committed after the doc's own
+# last commit (build-index baselines each doc there). src/plain.js is the
+# control — the same history, and never warned about.
+test_rf_tracked_quoted_name_postdating_the_doc_is_not_unmatched() {
+  echo "test: residual: build-index draws no 'matches no file tracked by git' warning for a tracked name git would quote, committed after the doc"
+  setup
+  printf '# g\n' > docs/guide.md
+  printf '# p\n' > docs/plain.md
+  _i1_commit docs
+  printf 'q\n' > 'src/a"b.js'
+  printf 'x\n' > src/plain.js
+  _i1_commit code
+  local out rc=0
+  out=$(printf '%s\n' 'docs/guide.md:src/a"b.js:guide' 'docs/plain.md:src/plain.js:guide' \
+    | "$DOC_TOOLS" build-index 2>&1) || rc=$?
+  assert_eq "0" "$rc" "build-index exits 0"
+  assert_not_contains "$out" "matches no file tracked by git" "no 'matches no file tracked by git' warning for the tracked src/a\"b.js (nor src/plain.js)"
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/guide.md"].code_oids["src/a\"b.js"]' "missing" \
+    "…the ref is still recorded missing at the doc's own last commit, as src/plain.js is"
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/plain.md"].code_oids["src/plain.js"]' "missing" "…(the control)"
+  teardown
+}
+
+# Re-review seat A: _doc_commits ends its git log once every doc has its
+# commit. With SIGPIPE inherited as ignored (a supervisor, a CI runner, `trap
+# '' PIPE`), tr takes EPIPE instead of the signal and exits 1 — GNU tr at once
+# (git then ends 141), BSD tr after reading all of git's output (git ends 0)
+# — and build-index read that early stop as a failed walk. The doc's long
+# path makes each logged commit ~250 bytes, so $n commits outgrow every pipe
+# buffer on the way (64 KiB each on Linux) and the stop is early everywhere.
+test_rf_doc_commits_early_stop_with_sigpipe_ignored() {
+  local n=1000
+  echo "test: residual: build-index succeeds when SIGPIPE is inherited ignored and its doc-history walk stops early ($n commits)"
+  setup
+  local seg doc c st
+  seg=$(printf '%0100d' 0)
+  doc="docs/$seg/$seg.md"
+  mkdir -p "docs/$seg"
+  printf '# g\n' > "$doc"
+  _i1_commit doc
+  {
+    c=1
+    while [ "$c" -le "$n" ]; do
+      printf 'commit refs/heads/main\ncommitter T <t@t> %d +0000\ndata <<EOT\nc%d\nEOT\n' $((1600000000 + c)) "$c"
+      if [ "$c" -eq 1 ]; then printf 'from refs/heads/main^0\n'; fi
+      printf 'M 100644 inline %s\ndata <<EOT\nv%d\nEOT\n' "$doc" "$c"
+      c=$((c + 1))
+    done
+  } | git fast-import --quiet
+  git reset -q --hard
+  assert_true "fixture: the doc is in more than $n commits" test "$(git rev-list --count HEAD -- "$doc")" -gt "$n"
+  # The walk as _doc_commits runs it, stopped where it stops: tr must be left
+  # an EPIPE, or this fixture would not reach the early stop.
+  st=$( (trap '' PIPE; set +o pipefail
+         printf '%s\n--\n%s\n' HEAD "$doc" | git log --no-renames --format='%x01%H' --name-only -z --stdin 2>/dev/null \
+           | tr '\000' '\n' 2>/dev/null | awk 'NR == 3 { exit }'
+         echo "${PIPESTATUS[*]}") )
+  assert_true "fixture: with SIGPIPE ignored the early stop leaves tr an EPIPE (git tr awk: ${st#* })" test "$(echo "$st" | cut -d' ' -f3)" != 0
+  local out rc=0
+  out=$( (trap '' PIPE; printf '%s\n' "$doc:src/index.js:guide" | "$DOC_TOOLS" build-index 2>&1 >/dev/null) ) || rc=$?
+  assert_eq "0" "$rc" "build-index exits 0 with SIGPIPE ignored"
+  assert_not_contains "$out" "git log failed" "…never reading the early stop as a failed walk"
+  assert_not_contains "$out" "Broken pipe" "…nor passing tr's EPIPE complaint on"
+  assert_json_field "$("$DOC_TOOLS" status "$doc" 2>/dev/null)" '.status' "current" "…and the doc is indexed, current"
+  teardown
+}
+
 # --- Runner ---
 
 run_tests() {
@@ -6655,6 +6730,10 @@ run_tests() {
   test_fw_tools_release_notes_readme_status_and_uninstall
   test_fw_fragments_merge_ignores_log_show_signature
   test_fw_harness_int_self_test_skips_when_sigint_is_ignored
+
+  # --- Residual fix after the fix-wave re-review ---
+  test_rf_tracked_quoted_name_postdating_the_doc_is_not_unmatched
+  test_rf_doc_commits_early_stop_with_sigpipe_ignored
 
   print_summary
 }

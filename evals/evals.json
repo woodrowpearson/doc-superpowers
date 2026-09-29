@@ -524,8 +524,8 @@
         {
           "name": "identifies-changed-files",
           "type": "tool_call_check",
-          "description": "Runs git diff --name-only to identify PR changed files",
-          "command": "git (-c core\\.quotePath=false )?diff --name-only"
+          "description": "Runs git diff -z --name-only (review-pr step 2) to identify PR changed files",
+          "command": "git (-c core\\.quotePath=false )?diff (-z )?--name-only"
         },
         {
           "name": "scoped-freshness-check",

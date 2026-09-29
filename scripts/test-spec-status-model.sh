@@ -526,21 +526,30 @@ _fresh=$(
   {
     git init -q -b main 2>/dev/null || { git init -q && git symbolic-ref HEAD refs/heads/main; }
     mkdir -p docs src
-    for d in cur stale gone edited; do echo "# $d" > "docs/$d.md"; done
+    for d in cur stale gone edited rec-edited rec-gone; do echo "# $d" > "docs/$d.md"; done
     echo a > src/a.js; echo b > src/b.js
     git add -A && git -c user.name=t -c user.email=t@t commit -qm one
     printf '%s\n' docs/cur.md:src/a.js:guide docs/stale.md:src/b.js:guide docs/gone.md:src/a.js:guide docs/edited.md:src/a.js:guide \
+      docs/rec-edited.md:src/b.js:plan docs/rec-gone.md:src/b.js:issue \
       | "$_dt" build-index
     git add -A && git -c user.name=t -c user.email=t@t commit -qm index
-    echo b2 > src/b.js; rm docs/gone.md; echo more >> docs/edited.md; echo "# new" > docs/new.md
+    echo b2 > src/b.js; rm docs/gone.md docs/rec-gone.md; echo more >> docs/edited.md; echo more >> docs/rec-edited.md; echo "# new" > docs/new.md
     git add -A && git -c user.name=t -c user.email=t@t commit -qm two
   } >/dev/null 2>&1
   "$_dt" check-freshness 2>/dev/null
 ) || true
 _filtered=$(jq -c "$_jqprog" <<<"$_fresh" 2>&1) || true
 assert_eq '["stale","summary","untracked"]' "$(jq -c 'keys' <<<"$_filtered" 2>&1)" "the filter keeps only {summary, stale, untracked}"
-assert_eq '["docs/edited.md","docs/gone.md","docs/stale.md"]' "$(jq -c '[.stale[].doc] | sort' <<<"$_filtered" 2>&1)" \
+assert_eq '["docs/edited.md","docs/gone.md","docs/rec-gone.md","docs/stale.md"]' "$(jq -c '[.stale[].doc] | sort' <<<"$_filtered" 2>&1)" \
   "…stale lists stale, missing and edited docs, never current ones"
+# C-M9: an edited record doc (a plan, an issue: never compared) is no work for
+# the write actions, so the filter drops it; an edited living doc stays, and a
+# record doc whose file is gone is still listed (missing).
+assert_eq "true" "$(jq '.docs["docs/rec-edited.md"] | .record == true and .doc_modified == true' <<<"$_fresh" 2>&1)" \
+  "fixture: check-freshness reports the edited plan as a modified record doc"
+assert_eq "false" "$(jq '[.stale[].doc] | any(. == "docs/rec-edited.md")' <<<"$_filtered" 2>&1)" "…the filter drops a modified record doc (C-M9)"
+assert_eq "true" "$(jq '[.stale[].doc] | any(. == "docs/edited.md")' <<<"$_filtered" 2>&1)" "…keeps a modified living doc"
+assert_eq "true" "$(jq '[.stale[] | select(.doc == "docs/rec-gone.md") | .status] == ["missing"]' <<<"$_filtered" 2>&1)" "…and still lists a missing record doc"
 assert_eq '["docs/new.md"]' "$(jq -c '.untracked' <<<"$_filtered" 2>&1)" "…untracked lists the docs the index lacks"
 assert_contains "$SKILLMD" '**REQUIRED:** Read `$ROOT/references/release.md`' "release body lives behind a REQUIRED pointer"
 assert_contains "$SKILLMD" '**REQUIRED:** Read `$ROOT/references/hooks.md`' "hooks body lives behind a REQUIRED pointer"
@@ -902,6 +911,56 @@ _ut=$(jq -r '.evals[] | select(.name == "release-draft-untagged") | .assertions[
 assert_true "release-draft-untagged: the merge check matches a commit id" grep -qE -- "${_ut:-^$}" <<<'"/w/scripts/doc-tools.sh" fragments merge 0123abcd HEAD'
 assert_false_re() { ! grep -qE -- "$1" <<<"$2"; }
 assert_true "…and not the older tag" assert_false_re "${_ut:-^$}" '"/w/scripts/doc-tools.sh" fragments merge v1.1.0 HEAD'
+# Re-review A1: an eval that scores a command SKILL.md prescribes must match
+# that command as SKILL.md writes it. Eval 7 still wanted `git diff
+# --name-only` after review-pr moved to `git diff -z --name-only` (S-M1), so a
+# run that followed SKILL.md failed its check. The commands are read from
+# SKILL.md, never copied here: each named section's ```bash lines and its
+# `$DOC_TOOLS …`, `doc-tools.sh …` and `git …` spans, $DOC_TOOLS replaced by
+# the path an agent substitutes. Every eval assertion that scores a SKILL.md
+# command is listed with its section (<eval>|<assertion>|<section heading>),
+# and each listed eval's negated checks must match none of those commands.
+_skill_cmds() {
+  _section "$SKILLMD" "$1" | awk '
+    /^[[:space:]]*```/ { if (f) f = 0; else { f = 1; b = ($0 ~ /^[[:space:]]*```bash/) }; next }
+    f { if (b) { sub(/^[[:space:]]+/, ""); if ($0 != "" && substr($0, 1, 1) != "#") print }; next }
+    { s = $0
+      while (match(s, /`[^`]+`/)) {
+        c = substr(s, RSTART + 1, RLENGTH - 2); s = substr(s, RSTART + RLENGTH)
+        if (c ~ /^("?\$DOC_TOOLS"?|doc-tools\.sh|git) /) print c
+      } }' | sed 's|\$DOC_TOOLS|/w/scripts/doc-tools.sh|g'
+}
+_scored='review-pr-scoped|identifies-changed-files|### `review-pr`
+review-pr-scoped|base-from-origin-head|### `review-pr`
+review-pr-scoped|scoped-freshness-check|### `review-pr`
+diagram-regenerate|finds-mermaid-blocks|### `diagram`
+audit-stale-docs|runs-check-freshness|### Run Baseline Checks
+update-from-audit|runs-verification-gate|### `update`
+update-from-audit|re-keys-with-move-entry|### `update`
+sync-index|runs-check-freshness|### Run Baseline Checks
+sync-index|adds-untracked|### `sync`'
+while IFS='|' read -r _e _a _h <&3; do
+  _cmds=$(_skill_cmds "$_h")
+  assert_true "SKILL.md's $_h section prescribes commands" test -n "$_cmds"
+  _re=$(jq -r --arg e "$_e" --arg a "$_a" '.evals[] | select(.name == $e) | .assertions[]
+          | select(.name == $a and .type == "tool_call_check" and (.negate // false | not)) | .command' "$EVALS_JSON")
+  assert_true "eval $_e has the positive tool_call_check $_a" test -n "$_re"
+  assert_line_matches "$_cmds" "${_re:-^$}" "eval $_e / $_a matches the command SKILL.md's $_h section prescribes"
+done 3<<<"$_scored"
+# …and eval 7's check matches the very command review-pr step 2 lists the
+# changed files with (the one line that writes $CHANGED).
+_cl=$(_skill_cmds '### `review-pr`' | grep -F '> "$CHANGED"' || true)
+assert_eq "1" "$(grep -c . <<<"$_cl")" "review-pr step 2 has one command that writes \$CHANGED: $_cl"
+assert_line_matches "${_cl:-<none>}" \
+  "$(jq -r '.evals[] | select(.name == "review-pr-scoped") | .assertions[] | select(.name == "identifies-changed-files") | .command' "$EVALS_JSON")" \
+  "eval 7 / identifies-changed-files matches review-pr step 2's own command"
+for _e in $(cut -d'|' -f1 <<<"$_scored" | sort -u); do
+  _cmds=$(grep -F "$_e|" <<<"$_scored" | cut -d'|' -f3 | sort -u | while IFS= read -r _h; do _skill_cmds "$_h"; done)
+  while IFS= read -r _re <&3; do
+    [ -n "$_re" ] || continue
+    assert_no_line_matches "$_cmds" "$_re" "eval $_e: no command SKILL.md prescribes for it trips its negated check $_re"
+  done 3< <(jq -r --arg e "$_e" '.evals[] | select(.name == $e) | .assertions[] | select(.type == "tool_call_check" and .negate == true) | .command' "$EVALS_JSON")
+done
 # Required cases: fixtures that build the scenario, runnable here.
 _required="update-from-audit update-from-session-report spec-generate-from-design hooks-install-all sync-index release-draft release-draft-untagged spec-inject-execute spec-verify-review spec-inject-amends release-fragment-merge hooks-status-uninstall"
 for _e in $_required; do

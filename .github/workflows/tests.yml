@@ -155,8 +155,10 @@ jobs:
       # After changing a template, doc-tools.sh or a CI helper script, run
       # `bash scripts/hooks/install.sh install --ci` and commit the result.
       # It runs even when a suite failed: a suite failure must not hide drift.
+      # Not on a cancelled run (cancel-in-progress): its workspace may be half
+      # set up, and the step would report spurious drift.
       - name: Self-installed CI tier matches its templates
-        if: always()
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           state=.claude/doc-superpowers/installed.json
