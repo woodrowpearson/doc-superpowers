@@ -45,10 +45,10 @@ doc-superpowers/
 │   ├── test-merge-driver.sh # Test suite for merge driver
 │   ├── test-hooks.sh     # Test suite for hooks installer and hook scripts
 │   └── hooks/
-│       ├── install.sh        # Hook installer engine (install/uninstall/status for all tiers; granular --workflows + state-respect)
+│       ├── install.sh        # Hook installer engine (install/uninstall/status for all tiers; granular --workflows + state-respect; status flags another version's install as outdated)
 │       ├── state.sh          # CI-tier install state — .claude/doc-superpowers/installed.json (workflow set + choices), one read, one write per run
 │       ├── git/              # Git hook scripts
-│       │   ├── pre-commit          # Freshness gate on the staged tree (`--tree "$(git write-tree)"`) — warns/blocks on docs this commit leaves stale
+│       │   ├── pre-commit          # Freshness gate on the staged tree (`--tree "$(git write-tree)"`) — warns/blocks on docs this commit leaves stale, left out ("not in this commit") or missing, the staged index's new entries included
 │       │   ├── post-merge          # Stale/missing alert for the files a merge brought in
 │       │   ├── post-checkout       # Branch switch check
 │       │   ├── prepare-commit-msg  # "Already stale" comment lines, editor commits only ($2 empty or template)
@@ -70,7 +70,7 @@ doc-superpowers/
 │           │   ├── extract-context.sh         # Emits JSON context blob (PR body, existing fragment + its hash state, the PR's own commits since the last recorded sync)
 │           │   ├── update-pr-body.sh          # Idempotently merges a managed section into the PR body
 │           │   ├── fragment-lib.sh            # Sourced by commit-and-push, extract-context and verify-fragment: the fragment line rules (markers, hash line, sha256)
-│           │   ├── commit-and-push.sh         # Seals the fragment, commits only it ([doc-superpowers] prefix + Drafted-From trailer), pushes only while the branch is at the checkout (a workflow step, never the agent)
+│           │   ├── commit-and-push.sh         # Seals the fragment, refuses one the release would skip (fragments list), commits only it ([doc-superpowers] prefix + Drafted-From trailer), pushes only while the branch is at the checkout (a workflow step, never the agent)
 │           │   └── RELEASE-NOTES.next.README.md # Fragment-format spec dropped into consuming repos (only if missing)
 │           └── doc-superpowers-steps/     # run: step bodies of every template — freshness-check (freshness gate/audit, AI scope gate), resolve-auth, prepare-agent (pinned plugin), commit-changes (checked commit), pr-guard (same-repo), sentinel-check, write-context, verify-fragment, precheck; installed with any workflow
 ├── references/
@@ -124,7 +124,7 @@ doc-superpowers/
 | `scripts/test-doc-pr-release.sh` | Test suite for the CI workflow helpers (on the shared `test-helpers.sh` harness) — covers `extract-context.sh`, `update-pr-body.sh`, `commit-and-push.sh`, the `run:` step scripts in `doc-superpowers-steps/` (run as a workflow step runs them, from an installed fixture), workflow YAML placeholder substitution, template structure/wiring, and the installed templates' rules (fail closed, scalar outputs, timeouts, pins, AI token/plugin/tools, same-repo guard, write group, checked commit) (missing YAML parser = loud SKIP locally, FAIL in CI) | Adding tests for the fragment producer workflow or its helpers |
 | `scripts/test-spec-status-model.sh` | Test suite pinning the canonical Spec Status Model wording and its call sites, the skill prompt ↔ tool contract (commands extracted from SKILL.md and the references and run against fixtures), `evals/evals.json`, the cross-client packaging, and the OpenCode plugin run under `node` | Changing spec status transition rules, roles, or vocabulary; what SKILL.md / references tell an agent to run; an eval; a manifest |
 | `scripts/test-helpers.sh` | Shared test harness sourced by every suite: private scratch root cleaned on EXIT/INT/TERM, isolated git environment (`GIT_CONFIG_GLOBAL=/dev/null`, private `HOME`), pipefail-safe asserts, `assert_true`, SKIP and known-bug (XFAIL) reporting | Adding shared test utilities or assertions |
-| `scripts/hooks/install.sh` | Hook installer engine — install/uninstall/status for git, Claude Code, and CI tiers. Registers 3 Claude Code hooks (PreToolUse, PostToolUse, Stop) and 5 git hooks. The `--git` tier also registers a custom merge driver for `.doc-index.json` conflict resolution. CI tier: the 2 shell workflows by default, the AI ones by name via `--workflows=<csv\|all\|none>`, plus `--helpers=<bool>`, `--force` (bypass state-respect), `--transient` (uninstall without marking intentional); vendoring through `doc-tools.sh tools install\|uninstall --helper`. Places everything with git plumbing (`--show-toplevel`, `--git-path hooks`), refuses symlinked write targets and a non-local `core.hooksPath`, owns only marked blocks / its own settings entries, and runs every check before the first write. Sources `state.sh` for install-state tracking | Adding hook tiers, changing installer logic, adding new hook scripts, changing install-state semantics |
+| `scripts/hooks/install.sh` | Hook installer engine — install/uninstall/status for git, Claude Code, and CI tiers. Registers 3 Claude Code hooks (PreToolUse, PostToolUse, Stop) and 5 git hooks. The `--git` tier also registers a custom merge driver for `.doc-index.json` conflict resolution. CI tier: the 2 shell workflows by default, the AI ones by name via `--workflows=<csv\|all\|none>`, plus `--force` (bypass state-respect), `--transient` (uninstall without marking intentional) and the deprecated, inert `--helpers=<bool>`; vendoring through `doc-tools.sh tools install\|uninstall --helper`. `status` flags an install another version made (outdated hooks, local copies, Claude scripts or settings commands). Places everything with git plumbing (`--show-toplevel`, `--git-path hooks`), refuses symlinked write targets and a `core.hooksPath` that is not this repository's (a global or system one; a worktree's own is fine), owns only marked blocks / its own settings entries, and runs every check before the first write. Sources `state.sh` for install-state tracking | Adding hook tiers, changing installer logic, adding new hook scripts, changing install-state semantics |
 | `scripts/hooks/state.sh` | CI-tier install state — `.claude/doc-superpowers/installed.json` (schema 2): the workflow set and the choices (`base_branch`, `cron`, `ci_strict`) a plain `install --ci` reproduces. One `state_load`, in-memory marks, one `state_flush` (only when the content changed; before any deletion); an unreadable file is refused, never overwritten (`installed.json.corrupt` is the recovery path). Single-writer | Changing install-state schema, bootstrap logic, or workflow-name resolution |
 | `scripts/test-hooks.sh` | Test suite for hooks installer and all hook scripts — covers install, uninstall, status, and per-hook behavior | Adding tests for new hooks or installer features |
 | `scripts/merge-doc-index.sh` | Custom git merge driver for `.doc-index.json` — a base-aware, per-key three-way merge in jq during merge/rebase/cherry-pick/revert. An entry both sides changed is merged field by field; the verification record is one unit; deprecated wins. A same-field change that `last_verified` does not order, delete vs modify, a malformed side and a signal each get `git merge-file` conflict markers and exit 1, with the key and field named. Ours' top level and key order are kept. The header comment is the specification | Changing merge conflict resolution logic |
@@ -174,7 +174,7 @@ doc-superpowers/
 | Version history | `RELEASE-NOTES.md` |
 | Hook installer logic | `scripts/hooks/install.sh` — placement (`enter_repo`), `safe_dest` + preflight, marked blocks, integration block, tier routing, status, per-command flag allow-list |
 | Install-state tracking | `scripts/hooks/state.sh` — `.claude/doc-superpowers/installed.json` schema 2, `state_load` / marks / `state_flush` |
-| Granular CI install flags | `references/hooks.md` — `--workflows=<csv\|all\|none>`, `--helpers=<bool>`, `--force`, `--transient`, the consent table |
+| Granular CI install flags | `references/hooks.md` — `--workflows=<csv\|all\|none>`, `--force`, `--transient`, the deprecated `--helpers=<bool>`, the consent table and what an AI job's agent can reach |
 | Tools subcommand | `scripts/doc-tools.sh` `cmd_tools_*` — `tools install [--dest <path>] [--with-helpers \| --helper <dir>...]`, `tools uninstall [--helper <dir>...]` (removes only files byte-identical to the plugin's; refuses symlinked paths), `tools status`, `tools version` |
 | Git hook scripts | `scripts/hooks/git/` — pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push |
 | Claude Code hook scripts | `scripts/hooks/claude/` — pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh |
@@ -326,7 +326,7 @@ User invokes /doc-superpowers hooks install --all
   → Action Router → hooks (no discovery phase needed)
     → Route to scripts/hooks/install.sh install --all
     → Installer cds to `git rev-parse --show-toplevel` (worktree / submodule: its own top)
-    → Preflight, before any write: symlinked targets, non-local core.hooksPath, settings / state readability, CI values
+    → Preflight, before any write: symlinked targets, a global/system core.hooksPath, settings / state readability, CI values
     → For --git tier:
       → Hooks directory: `git rev-parse --git-path hooks` (where git runs them)
       → For each hook script in scripts/hooks/git/:
