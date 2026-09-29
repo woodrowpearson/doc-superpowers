@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-29T06:28:57Z",
+  "generated_at": "2026-09-29T06:32:03Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -642,14 +642,14 @@
       "implementation": []
     },
     "docs/issues/2026-09-28-sweep-05ea982-followups.md": {
-      "content_hash": "sha256:af178e060640806fd3cf710a4d8c49317780c38130641dd216ea14c57ddfa674",
+      "content_hash": "sha256:4aa2da31dc61f37b42f162439fea5d62a8bc50e52568d726d7f57b822a7a56de",
       "code_refs": [],
       "code_oids": {},
       "code_commit": null,
       "doc_type": "issue",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-29T05:48:33Z",
+      "last_verified": "2026-09-29T06:32:03Z",
       "implementation": []
     },
     "docs/archive/plans/2026-09-28-audit-report.md": {
