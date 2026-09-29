@@ -1,484 +1,666 @@
 {
-  "version": 1,
+  "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-09-02T06:21:23Z",
+  "generated_at": "2026-09-29T07:14:31Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
-      "content_hash": "sha256:f30c0e4b8afeda82d7bd764c2a7e67ed69bb84591f83919b906a43bb5a86eae5",
+      "content_hash": "sha256:b91ae914d188656ae9e177716c34664bb6e3bf93f818a25f28463b2d759a3063",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/",
         "references/"
       ],
-      "code_commit": "f5808eabf056c86df489a682c6f50610e880eecd",
+      "code_commit": "132a987dc15934f27a010f48b68d1014f4ef5a6c",
       "doc_type": "architecture",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-02T05:52:32Z",
-      "implementation": []
+      "last_verified": "2026-09-29T06:24:21Z",
+      "implementation": [],
+      "code_oids": {
+        "skills/doc-superpowers/SKILL.md": "354aeb376f8cee42432acbd0386c09d8fe87be6e",
+        "scripts/": "6eb15ebcd362f44112fd1b73bf17766d29ef2cf8",
+        "references/": "042c25b075928689a0c440c41bdbc4ef3e985fb1"
+      }
     },
     "docs/codebase-guide.md": {
-      "content_hash": "sha256:ffbebf26b61e50b53f1567315e74c55f0118421dce6f275b0b431537e727818f",
+      "content_hash": "sha256:89e0c16fe19858a89143ad1bd932ad5c666f1e73e9f219932e04d92c0cce8cf8",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "f5808eabf056c86df489a682c6f50610e880eecd",
-      "doc_type": "guide",
-      "status": "current",
+      "code_commit": "132a987dc15934f27a010f48b68d1014f4ef5a6c",
+      "doc_type": "codebase-guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-02T05:52:32Z",
-      "implementation": []
+      "last_verified": "2026-09-29T06:24:20Z",
+      "implementation": [],
+      "code_oids": {
+        "skills/doc-superpowers/SKILL.md": "354aeb376f8cee42432acbd0386c09d8fe87be6e",
+        "scripts/": "6eb15ebcd362f44112fd1b73bf17766d29ef2cf8"
+      }
     },
     "docs/conventions.md": {
-      "content_hash": "sha256:ea2ca199b8de0fe593603647302730b69f45dfe968ad1ca0bee3701d07923adc",
+      "content_hash": "sha256:b0262f0976d597198207b11722373747479b6ebc2ce7927ac82a0faa4855140b",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
-        "references/doc-spec.md"
+        "references/doc-spec.md",
+        "references/spec-lifecycle-actions.md",
+        "scripts/doc-tools.sh",
+        "scripts/hooks"
       ],
-      "code_commit": "702edc513367f3941834982cbdd1b2d8b112a457",
-      "doc_type": "guide",
-      "status": "current",
+      "code_commit": "132a987dc15934f27a010f48b68d1014f4ef5a6c",
+      "doc_type": "conventions",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-30T01:57:17Z",
-      "implementation": []
+      "last_verified": "2026-09-29T06:24:20Z",
+      "implementation": [],
+      "code_oids": {
+        "skills/doc-superpowers/SKILL.md": "354aeb376f8cee42432acbd0386c09d8fe87be6e",
+        "references/doc-spec.md": "d2fd1f1e44782c51f58a158c6b0b2309987187ae",
+        "references/spec-lifecycle-actions.md": "287704f1a4f23fda730e552173d0200dd1607d60",
+        "scripts/doc-tools.sh": "4bca3f1d2186df742c9053ff0363cfc339a0c958",
+        "scripts/hooks": "2b10dbfbcd4310ffed94da880a13d3cdb54aabd7"
+      }
     },
     "docs/guides/getting-started.md": {
-      "content_hash": "sha256:5c2630f59f944a9b04abcb2974f343d4b242028bf51621bf588b3e9a3cf00c2f",
+      "content_hash": "sha256:4878722d9c0647292ae0720b235fe5d65ff225d42c56b310f54a9edf4c41bd7a",
       "code_refs": [
         "README.md",
-        "skills/doc-superpowers/SKILL.md"
+        "skills/doc-superpowers/SKILL.md",
+        "scripts/hooks/install.sh",
+        "scripts/doc-tools.sh"
       ],
-      "code_commit": "595b2c93e824e0ec9abf71bfb8a2a31790b0cf3e",
+      "code_commit": "132a987dc15934f27a010f48b68d1014f4ef5a6c",
       "doc_type": "guide",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-02T06:21:23Z",
-      "implementation": []
+      "last_verified": "2026-09-29T06:25:53Z",
+      "implementation": [],
+      "code_oids": {
+        "README.md": "f9eeba7bf24fd8612dd9fdf5256a4676e90dc1e8",
+        "skills/doc-superpowers/SKILL.md": "354aeb376f8cee42432acbd0386c09d8fe87be6e",
+        "scripts/hooks/install.sh": "7e6a0ed4ca23c9f8d4863654d47df0dd4ebaf31e",
+        "scripts/doc-tools.sh": "4bca3f1d2186df742c9053ff0363cfc339a0c958"
+      }
     },
     "docs/workflows/doc-superpowers.md": {
-      "content_hash": "sha256:5adb0e30a4af7e98a10395d310c6f0dbfeee8317f115e5298aa42bd0cbf4953d",
+      "content_hash": "sha256:5587c4ec956a15998b217506e1bd41da9fbec7588a287b4b09de91dc12edd87a",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
-        "scripts/"
+        "scripts/",
+        "references/"
       ],
-      "code_commit": "2379fe98f04ee406b2b790098dff39894f5a8774",
+      "code_commit": "132a987dc15934f27a010f48b68d1014f4ef5a6c",
       "doc_type": "workflows",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-25T04:19:12Z",
-      "implementation": []
+      "last_verified": "2026-09-29T06:28:12Z",
+      "implementation": [],
+      "code_oids": {
+        "skills/doc-superpowers/SKILL.md": "354aeb376f8cee42432acbd0386c09d8fe87be6e",
+        "scripts/": "6eb15ebcd362f44112fd1b73bf17766d29ef2cf8",
+        "references/": "042c25b075928689a0c440c41bdbc4ef3e985fb1"
+      }
     },
     "docs/plans/2026-03-26-audit-report.md": {
       "content_hash": "sha256:330e4350a91ef66501f4b0286111860289135f4158f2abdb9f5fc27e628a59bd",
-      "code_refs": [
-        "skills/doc-superpowers/SKILL.md"
-      ],
+      "code_refs": [],
       "code_commit": "25401a5be961ac927872a0d4f1d2623d4067f01e",
       "doc_type": "plan",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-05T08:33:36Z"
+      "last_verified": "2026-04-05T08:33:36Z",
+      "code_oids": {}
     },
     "docs/plans/2026-03-27-audit-report.md": {
       "content_hash": "sha256:4f5be7284798fd335dd1a4428844b2cb7e8b3210636037410d50343aea4b5185",
-      "code_refs": [
-        "skills/doc-superpowers/SKILL.md"
-      ],
+      "code_refs": [],
       "code_commit": "25401a5be961ac927872a0d4f1d2623d4067f01e",
       "doc_type": "plan",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-05T08:33:36Z"
-    },
-    "docs/superpowers/plans/2026-03-12-bundled-doc-tooling.md": {
-      "content_hash": "sha256:1be79726aae4be094b346253148047000a370376859a0bc29dd79c11249d45ca",
-      "code_refs": [
-        "skills/doc-superpowers/SKILL.md",
-        "scripts/doc-tools.sh"
-      ],
-      "code_commit": "f063b04f7adc9276220ff168e24dd94db2cf7166",
-      "doc_type": "plan",
-      "status": "current",
-      "replaces": null,
-      "superseded_by": null,
-      "last_verified": "2026-05-17T03:36:49Z"
+      "last_verified": "2026-04-05T08:33:36Z",
+      "code_oids": {}
     },
     "docs/superpowers/plans/2026-03-13-workflow-hooks-harness.md": {
       "content_hash": "sha256:cc9f15799b3c79a684c6e489159d86ad80794efb7e195aeb16162a04b1f62f4f",
-      "code_refs": [
-        "skills/doc-superpowers/SKILL.md",
-        "scripts/hooks/"
-      ],
+      "code_refs": [],
       "code_commit": "feecd7e00ed62f17124aaa6c94e9e82a5bbd4284",
       "doc_type": "plan",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
       "last_verified": "2026-05-28T00:42:54Z",
-      "implementation": []
+      "implementation": [],
+      "code_oids": {}
     },
     "docs/superpowers/plans/2026-03-14-spec-lifecycle-protocol.md": {
       "content_hash": "sha256:449c9b33ce9872f09044e50f23ab5756f82e45173391afb6c2a111a8ddabd178",
-      "code_refs": [
-        "skills/doc-superpowers/SKILL.md",
-        "references/spec-lifecycle-actions.md",
-        "references/spec-lifecycle-protocol.md"
-      ],
+      "code_refs": [],
       "code_commit": "f8578e508e7934111c5dc13f8e773b8cd878c394",
       "doc_type": "plan",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-05T08:33:36Z"
+      "last_verified": "2026-04-05T08:33:36Z",
+      "code_oids": {}
     },
     "docs/superpowers/plans/2026-03-25-release-notes-readme-sync.md": {
       "content_hash": "sha256:6119db66c5b6f0731dcbbe22edaf818b8ab050e966a4749df29148661722b189",
-      "code_refs": [
-        "skills/doc-superpowers/SKILL.md",
-        "references/"
-      ],
+      "code_refs": [],
       "code_commit": "796758cc0399f8d3c6d1e8548c027a6a65f947c3",
       "doc_type": "plan",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-05T10:31:02Z"
+      "last_verified": "2026-04-05T10:31:02Z",
+      "code_oids": {}
     },
     "docs/superpowers/plans/2026-03-26-multi-framework-support.md": {
       "content_hash": "sha256:c41d37930b6338308887719a45005083a72dd81edcf3bd8670c5bbe92adea137",
-      "code_refs": [
-        "skills/doc-superpowers/SKILL.md",
-        "references/tool-mappings.md"
-      ],
+      "code_refs": [],
       "code_commit": "796758cc0399f8d3c6d1e8548c027a6a65f947c3",
       "doc_type": "plan",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-05T10:30:56Z"
-    },
-    "docs/superpowers/specs/2026-03-12-bundled-doc-tooling-design.md": {
-      "content_hash": "sha256:d50ea4c3fdc04a69ad0d4a7b2868366da6ab65be329a8399d54876e0d6071678",
-      "code_refs": [
-        "scripts/doc-tools.sh"
-      ],
-      "code_commit": "f063b04f7adc9276220ff168e24dd94db2cf7166",
-      "doc_type": "spec",
-      "status": "current",
-      "replaces": null,
-      "superseded_by": null,
-      "last_verified": "2026-05-17T03:36:49Z"
-    },
-    "docs/superpowers/specs/2026-03-13-workflow-hooks-harness-design.md": {
-      "content_hash": "sha256:192b2547b74c32daf7f73d361fe23fd435499261b968044ba9d4db283491b1fc",
-      "code_refs": [
-        "scripts/hooks/"
-      ],
-      "code_commit": "feecd7e00ed62f17124aaa6c94e9e82a5bbd4284",
-      "doc_type": "spec",
-      "status": "current",
-      "replaces": null,
-      "superseded_by": null,
-      "last_verified": "2026-05-28T00:42:54Z",
-      "implementation": []
-    },
-    "docs/superpowers/specs/2026-03-14-spec-lifecycle-protocol-design.md": {
-      "content_hash": "sha256:acf3d090a48f4efe2a34180cac359ced230ea6375327cdbfefe49f2518c1097a",
-      "code_refs": [
-        "references/spec-lifecycle-actions.md",
-        "references/spec-lifecycle-protocol.md"
-      ],
-      "code_commit": "f8578e508e7934111c5dc13f8e773b8cd878c394",
-      "doc_type": "spec",
-      "status": "current",
-      "replaces": null,
-      "superseded_by": null,
-      "last_verified": "2026-04-05T08:33:36Z"
-    },
-    "docs/superpowers/specs/2026-03-25-release-notes-action-design.md": {
-      "content_hash": "sha256:e58a57d92370f61f5d81567e1c0a2399beadfe7b654ad018ea9dfa1a71f8af05",
-      "code_refs": [
-        "skills/doc-superpowers/SKILL.md",
-        "references/"
-      ],
-      "code_commit": "796758cc0399f8d3c6d1e8548c027a6a65f947c3",
-      "doc_type": "spec",
-      "status": "current",
-      "replaces": null,
-      "superseded_by": null,
-      "last_verified": "2026-04-05T10:30:56Z"
+      "last_verified": "2026-04-05T10:30:56Z",
+      "code_oids": {}
     },
     "docs/archive/plans/2026-03-15-audit-report.md": {
       "content_hash": "sha256:0e5834ae0d9dc4f82ed716747692392db5a04beb673b26fc9e8dff90747d6e5b",
-      "code_refs": [
-        "skills/doc-superpowers/SKILL.md"
-      ],
+      "code_refs": [],
       "code_commit": "25401a5be961ac927872a0d4f1d2623d4067f01e",
       "doc_type": "plan",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-05T08:33:36Z"
+      "last_verified": "2026-04-05T08:33:36Z",
+      "code_oids": {},
+      "status": "deprecated"
     },
     "docs/archive/plans/2026-03-25-audit-report.md": {
       "content_hash": "sha256:c88c7fbe8e35d05422c628d707f11184b6bb3dfa6d910dea672a524623ad66ae",
-      "code_refs": [
-        "skills/doc-superpowers/SKILL.md"
-      ],
+      "code_refs": [],
       "code_commit": "25401a5be961ac927872a0d4f1d2623d4067f01e",
       "doc_type": "plan",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-05T08:33:36Z"
+      "last_verified": "2026-04-05T08:33:36Z",
+      "code_oids": {},
+      "status": "deprecated"
     },
     "docs/superpowers/plans/2026-03-29-github-pages-site.md": {
       "content_hash": "sha256:af8aba1f32eb220efd7c41c97010f570b089d2523c3dcea69ddde2a4d042d4ee",
-      "code_refs": [
-        "skills/doc-superpowers/SKILL.md"
-      ],
+      "code_refs": [],
       "code_commit": "25401a5be961ac927872a0d4f1d2623d4067f01e",
       "doc_type": "plan",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-05T08:33:36Z"
-    },
-    "docs/superpowers/specs/2026-03-29-github-pages-site-design.md": {
-      "content_hash": "sha256:16b8d19ed3d8b818acdf52ae37732e10128772e506c28a85b7a3e0edb65c3602",
-      "code_refs": [
-        "skills/doc-superpowers/SKILL.md"
-      ],
-      "code_commit": "25401a5be961ac927872a0d4f1d2623d4067f01e",
-      "doc_type": "spec",
-      "status": "current",
-      "replaces": null,
-      "superseded_by": null,
-      "last_verified": "2026-04-05T08:33:36Z"
+      "last_verified": "2026-04-05T08:33:36Z",
+      "code_oids": {}
     },
     "docs/plans/2026-04-05-audit-report.md": {
       "content_hash": "sha256:8d952a48790aedcf2928def2864cf51360cfc87392bd239927416d70486d836c",
-      "code_refs": [
-        "skills/doc-superpowers/SKILL.md"
-      ],
+      "code_refs": [],
       "code_commit": "25401a5be961ac927872a0d4f1d2623d4067f01e",
       "doc_type": "plan",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-04-05T08:33:36Z"
-    },
-    "docs/issues/2026-04-05-spec-generate-missing-stale-content-updates.md": {
-      "content_hash": "sha256:2356522a1dece9ca94d615fb53798a5135b37ecc34865c04511baaa43522250c",
-      "code_refs": [
-        "skills/doc-superpowers/SKILL.md"
-      ],
-      "code_commit": "25401a5be961ac927872a0d4f1d2623d4067f01e",
-      "doc_type": "plan",
-      "status": "current",
-      "replaces": null,
-      "superseded_by": null,
-      "last_verified": "2026-04-05T08:33:36Z"
-    },
-    "docs/plans/2026-04-05-audit-report-38cd9df.md": {
-      "content_hash": "sha256:a550054409e8aec156a0316c734fcb4d15550282aed9476f03caa05a04188318",
-      "code_refs": [
-        ""
-      ],
-      "code_commit": "38cd9df585771f8c8326e250c1ea334468248439",
-      "doc_type": "plan",
-      "status": "current",
-      "replaces": null,
-      "superseded_by": null,
-      "last_verified": "2026-04-05T10:31:19Z"
-    },
-    "docs/plans/2026-04-05-audit-report-301e7a4.md": {
-      "content_hash": "sha256:3c954da325f179421ff298347cefbbf57da48526a374df38054c9b26c926fc87",
-      "code_refs": [
-        ""
-      ],
-      "code_commit": "f9cd81b97668d3ba931c5b4e29a47460901ebb67",
-      "doc_type": "plan",
-      "status": "current",
-      "replaces": null,
-      "superseded_by": null,
-      "last_verified": "2026-04-07T06:46:39Z"
-    },
-    "docs/plans/2026-04-06-audit-report.md": {
-      "content_hash": "sha256:478f5f23aa17948bdb6c5b575e9a3945551214ec5eef5942652706d893e9617a",
-      "code_refs": [
-        ""
-      ],
-      "code_commit": "f9cd81b97668d3ba931c5b4e29a47460901ebb67",
-      "doc_type": "plan",
-      "status": "current",
-      "replaces": null,
-      "superseded_by": null,
-      "last_verified": "2026-04-07T06:46:43Z"
-    },
-    "docs/issues/2026-05-04-doc-index-metadata-rewrite-on-every-commit.md": {
-      "content_hash": "sha256:6b28e4dbcd91ae2b5b0f30c1d96bddf4cad6873b7dfb17abdd619ce64bf71995",
-      "code_refs": [
-        "scripts/doc-tools.sh"
-      ],
-      "code_commit": "f063b04f7adc9276220ff168e24dd94db2cf7166",
-      "doc_type": "plan",
-      "status": "current",
-      "replaces": null,
-      "superseded_by": null,
-      "last_verified": "2026-05-17T03:36:49Z"
+      "last_verified": "2026-04-05T08:33:36Z",
+      "code_oids": {}
     },
     "docs/plans/2026-05-12-pr-release-fragment-producer-and-consumer.md": {
-      "content_hash": "sha256:c1271496883aecaeec74cd0a0e7a9da2eebedfd8853775ae5aaa26aa56af5f08",
-      "code_refs": [
-        "scripts/hooks/ci/doc-pr-release.yml",
-        "scripts/hooks/ci/doc-pr-release/",
-        "scripts/hooks/install.sh"
-      ],
-      "code_commit": "c2496da18d67bedf11d7d6f9721914e0503b2f59",
+      "content_hash": "sha256:0763c664f6d6648e0de94eb5fac0f35d9328e9d051651596f139added223872c",
+      "code_refs": [],
+      "code_commit": "5d5f8aa0018e9792310fa638ded36479cbd7daf4",
       "doc_type": "plan",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-05-17T03:36:49Z"
-    },
-    "docs/plans/2026-05-16-audit-report.md": {
-      "content_hash": "sha256:f7034cc7b41d622b728d057c9fda611a1ff85a5ba971d2baa0b89f161cf67faf",
-      "code_refs": [
-        ""
-      ],
-      "code_commit": "abb3e64efd8c64d264a9943451a22257bc1ad398",
-      "doc_type": "plan",
-      "status": "current",
-      "replaces": null,
-      "superseded_by": null,
-      "last_verified": "2026-05-17T03:36:56Z"
-    },
-    "docs/superpowers/specs/2026-07-24-spec-status-transition-model-design.md": {
-      "content_hash": "sha256:5c54a8a3ff4fc4c3bcba8184cb76c43c5c2522c6b012e42bc42acf6a196eb1d9",
-      "code_refs": [
-        "references/",
-        "skills/"
-      ],
-      "code_commit": "db9cede6bd335c0572ec4c52f6564558c8a7b860",
-      "doc_type": "spec",
-      "status": "current",
-      "replaces": null,
-      "superseded_by": null,
-      "last_verified": "2026-07-25T01:37:14Z"
+      "last_verified": "2026-09-28T10:55:45Z",
+      "code_oids": {},
+      "implementation": []
     },
     "docs/superpowers/plans/2026-07-24-spec-status-transition-model.md": {
       "content_hash": "sha256:35a990bbea9ab58cc58784a0fec6d71635ee2cf873037dd16f8baa62c1bcb565",
-      "code_refs": [
-        "references/",
-        "scripts/",
-        "evals/"
-      ],
+      "code_refs": [],
       "code_commit": "54f545748a0c319b45043e197e70ffa7fd7a9b18",
       "doc_type": "plan",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-25T01:37:14Z"
-    },
-    "docs/plans/2026-07-24-audit-report.md": {
-      "content_hash": "sha256:9d8e94ba86fef2887f8b5a8b5cce8dec8596415ceb183ad61edb9e87167062f9",
-      "code_refs": [
-        ""
-      ],
-      "code_commit": null,
-      "doc_type": "plan",
-      "status": "current",
-      "replaces": null,
-      "superseded_by": null,
-      "last_verified": "2026-07-25T04:00:38Z",
-      "implementation": []
+      "last_verified": "2026-07-25T01:37:14Z",
+      "code_oids": {}
     },
     "docs/issues/2026-07-29-doc-tools-has-no-move-entry-operation.md": {
       "content_hash": "sha256:f7578c87fad221f6ef73a6c11efb37d4057cfd2aef7649e27d2b8f1d1a26f9b1",
-      "code_refs": [
-        "scripts/doc-tools.sh"
-      ],
+      "code_refs": [],
       "code_commit": "76a4e6f4addcf50bfb922179a4914306c614148a",
       "doc_type": "issue",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
       "last_verified": "2026-07-30T01:57:17Z",
-      "implementation": []
+      "implementation": [],
+      "code_oids": {}
     },
     "docs/superpowers/plans/2026-07-29-doc-tools-move-entry.md": {
       "content_hash": "sha256:0cfc20c1bd9dbfe3b096208769d13ca3b6325ebb4d7599a7631267bbe21101bd",
-      "code_refs": [
-        "scripts/doc-tools.sh",
-        "scripts/test-doc-tools.sh"
-      ],
+      "code_refs": [],
       "code_commit": "76a4e6f4addcf50bfb922179a4914306c614148a",
       "doc_type": "plan",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
       "last_verified": "2026-07-30T01:57:17Z",
-      "implementation": []
+      "implementation": [],
+      "code_oids": {}
     },
     "docs/issues/2026-07-29-merge-driver-reads-version-not-schema-version.md": {
-      "content_hash": "sha256:3faed919ffb6c46847767e09843dc52d1cad0bb32b6185e3b8d2ba80ebb9f7f8",
-      "code_refs": [
-        "scripts/merge-doc-index.sh",
-        "scripts/doc-tools.sh"
-      ],
-      "code_commit": "76a4e6f4addcf50bfb922179a4914306c614148a",
+      "content_hash": "sha256:f2eb308d0f0d0cb1d68c761aff0b80a5f3a564d01264484115411d73a6008b3f",
+      "code_refs": [],
+      "code_commit": "16050ba10244fae423a42a495ddde4febb5109c5",
       "doc_type": "issue",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-30T01:57:08Z"
+      "last_verified": "2026-09-27T19:23:32Z",
+      "code_oids": {},
+      "implementation": []
     },
     "docs/issues/2026-07-29-usage-omits-implementation-verbs.md": {
-      "content_hash": "sha256:670e906f8818b46019c7881abdf213e56138ffd1b46b406403fe0d2ad8164d3e",
-      "code_refs": [
-        "scripts/doc-tools.sh"
-      ],
-      "code_commit": "76a4e6f4addcf50bfb922179a4914306c614148a",
+      "content_hash": "sha256:813e22eff2231ed26d99b5739c31d0f9b912cc6f54ea790cde19fb5dd4ec3b4b",
+      "code_refs": [],
+      "code_commit": "1d295c6ca13d2433c5b8be935b44e9ce4d79805a",
       "doc_type": "issue",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-30T01:57:08Z"
+      "last_verified": "2026-09-27T12:23:15Z",
+      "implementation": [],
+      "code_oids": {}
     },
     "docs/issues/2026-07-29-index-write-is-not-atomic.md": {
-      "content_hash": "sha256:c0fcb617844903fbe36169fc72fc5f2d7b98ff21370a439918b7f4b749d189be",
-      "code_refs": [
-        "scripts/doc-tools.sh"
-      ],
+      "content_hash": "sha256:e67aaba89a3f6416ca902ac24aa2e1af2d3d32bff367cb42be915d6dadb7251a",
+      "code_refs": [],
       "code_commit": "76a4e6f4addcf50bfb922179a4914306c614148a",
       "doc_type": "issue",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-30T01:57:08Z"
+      "last_verified": "2026-09-27T10:06:39Z",
+      "implementation": [],
+      "code_oids": {}
+    },
+    "docs/plans/2026-09-27-full-repo-05ea982-audit-findings.md": {
+      "content_hash": "sha256:c1009c2cf64ab4cd76a7c3b2426f0e959a3b46b85ffe3a1299a70fbc623c629a",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:52:19Z",
+      "implementation": []
+    },
+    "docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md": {
+      "content_hash": "sha256:295e16b9d478e16fa6f1081335c446678ded50053e5370fdbb881a423b42dcc5",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:52:19Z",
+      "implementation": []
+    },
+    "docs/plans/2026-09-27-full-repo-05ea982-jumping-off-point.md": {
+      "content_hash": "sha256:358ff2bc307186338958cadcad59d6258c943f7f5d82c030ea945c4219afd4eb",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-29T07:14:31Z",
+      "implementation": [],
+      "code_oids": {}
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I01-freshness-identity-model.md": {
+      "content_hash": "sha256:17dece095a980d26c3b1c4b67f999f068d462f7bc8d3f9fdfb2ce2ad80afd273",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T15:06:06Z",
+      "code_oids": {},
+      "implementation": []
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I02-index-persistence-layer.md": {
+      "content_hash": "sha256:7c0131fb650ab5a3d1cce28fadfcdf79df35814c48a7cffd65ea0eee5fbad84a",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T10:42:08Z",
+      "implementation": []
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I03-index-semantics.md": {
+      "content_hash": "sha256:ad1c81a1511c2c9ba49b1186bd9ab55565b036ff6582d8f1890be52adf422a59",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T18:15:38Z",
+      "implementation": [],
+      "code_oids": {}
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I04-doc-tools-input-cli-robustness.md": {
+      "content_hash": "sha256:7ed821a89d17b2c75696cbbfa509730e9ff578ac56ec1a5fa185ba390f354c41",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T12:50:14Z",
+      "implementation": []
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I05-merge-driver-not-three-way.md": {
+      "content_hash": "sha256:0f61ebbde1b8f642fabdd18c6d4e9f622306b76f7345aa7aa103f7004bfcbec4",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T21:31:23Z",
+      "code_oids": {},
+      "implementation": []
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I06-claude-hook-tier-and-hook-semantics.md": {
+      "content_hash": "sha256:72ad7fd14221923b104e05ea0b2b0085c7ec9fdb99f1d72c1b902a66eda692c2",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T23:40:11Z",
+      "implementation": [],
+      "code_oids": {}
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I07-installer-ownership-placement-state.md": {
+      "content_hash": "sha256:82e3bc1b513998b4383e48437b04eac145fa7989d6437122c3983b6d7cbf0d33",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-28T05:49:32Z",
+      "implementation": [],
+      "code_oids": {}
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I08-ci-templates.md": {
+      "content_hash": "sha256:e39a1954bb65448050c1419c88db334206bac79a5b291748e94fcc2725b72b8f",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-28T09:12:25Z",
+      "code_oids": {},
+      "implementation": []
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I09-release-fragment-pipeline.md": {
+      "content_hash": "sha256:6c2648de9ee92c572fd22d6ab76a6b307c6a0449f7f15d10bc68c43533a731ce",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-28T12:10:23Z",
+      "implementation": [],
+      "code_oids": {}
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I10-implementation-version-vendoring-verbs.md": {
+      "content_hash": "sha256:377c333f09ec97de9f550bb18b2773cfbe741a47280ad8f14125639ec9e8ad8a",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-28T04:09:47Z",
+      "code_oids": {},
+      "implementation": []
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I11-skill-prompt-tool-contract.md": {
+      "content_hash": "sha256:a2b949d6da84298cb37c2b1a557f2eeaa9204bd39657a84d92d379608e8ad145",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-28T19:38:47Z",
+      "implementation": [],
+      "code_oids": {}
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I12-cross-client-packaging.md": {
+      "content_hash": "sha256:c990855c0288f891622c9ce7d0fe3b8eb4c7fcdeb228cc303e0f9bded0a46749",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-28T21:12:48Z",
+      "code_oids": {},
+      "implementation": []
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I13-test-suite-fidelity.md": {
+      "content_hash": "sha256:7ba8ecab2f72c13036a70c302f90ef7a218eb3b00b9862de917de4df21caef1e",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "issue",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T08:48:32Z",
+      "implementation": []
     },
     "docs/issues/2026-07-30-no-batch-or-archive-aware-re-key-primitive.md": {
-      "content_hash": "sha256:d4394a57a24f48a49a42e9f491e147a48e169dded3fde1e4724a9cc93d6bb49a",
-      "code_refs": [
-        "scripts/doc-tools.sh"
-      ],
-      "code_commit": "76a4e6f4addcf50bfb922179a4914306c614148a",
+      "content_hash": "sha256:e9776f4b87cc0af86910ed56130f6c2b8df45e25e8fce4ca82f63b0df5af7e81",
+      "code_refs": [],
+      "code_commit": "f770adee8bddc03af1199b9ae038c61907b4b617",
       "doc_type": "issue",
-      "status": "current",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-07-30T10:19:03Z",
+      "last_verified": "2026-09-27T16:32:37Z",
+      "implementation": [],
+      "code_oids": {}
+    },
+    "docs/plans/2026-09-27-full-repo-05ea982-evidence.md": {
+      "content_hash": "sha256:eafd362d26a61b172066c2d37e0c6c91581e58f6d4077483bc65c9e3f2329832",
+      "code_refs": [],
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-27T06:52:19Z"
+    },
+    "docs/plans/2026-09-27-full-repo-05ea982-execution-ledger.md": {
+      "content_hash": "sha256:8b7e7fd4b6e9da33e2b6d0b42355c64501e83d7fa9594ec51a6768601b0e4f7b",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-29T07:14:31Z",
       "implementation": []
+    },
+    "docs/superpowers/plans/2026-03-12-bundled-doc-tooling.md": {
+      "content_hash": "sha256:1be79726aae4be094b346253148047000a370376859a0bc29dd79c11249d45ca",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/issues/2026-04-05-spec-generate-missing-stale-content-updates.md": {
+      "content_hash": "sha256:2356522a1dece9ca94d615fb53798a5135b37ecc34865c04511baaa43522250c",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "issue",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/issues/2026-05-04-doc-index-metadata-rewrite-on-every-commit.md": {
+      "content_hash": "sha256:0cb5c8bb7d7d678a69d7932c572a6de496209c0ed0507509471daf54ab088590",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "issue",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/plans/2026-04-05-audit-report-38cd9df.md": {
+      "content_hash": "sha256:a550054409e8aec156a0316c734fcb4d15550282aed9476f03caa05a04188318",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/plans/2026-04-05-audit-report-301e7a4.md": {
+      "content_hash": "sha256:3c954da325f179421ff298347cefbbf57da48526a374df38054c9b26c926fc87",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/plans/2026-04-06-audit-report.md": {
+      "content_hash": "sha256:478f5f23aa17948bdb6c5b575e9a3945551214ec5eef5942652706d893e9617a",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/plans/2026-05-16-audit-report.md": {
+      "content_hash": "sha256:f7034cc7b41d622b728d057c9fda611a1ff85a5ba971d2baa0b89f161cf67faf",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/plans/2026-07-24-audit-report.md": {
+      "content_hash": "sha256:9d8e94ba86fef2887f8b5a8b5cce8dec8596415ceb183ad61edb9e87167062f9",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/superpowers/specs/2026-03-12-bundled-doc-tooling-design.md": {
+      "content_hash": "sha256:09652a6323abd83cea6b3275937d09793335ff1b448ce02dc8357917bc3122fa",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "design-spec",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-29T03:53:29Z",
+      "implementation": []
+    },
+    "docs/superpowers/specs/2026-03-13-workflow-hooks-harness-design.md": {
+      "content_hash": "sha256:1779961b077ebdbbcce4f4dfd3e28c825d16f3bfa077bb9d85f0d0687f0fae49",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "design-spec",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-29T03:53:29Z",
+      "implementation": []
+    },
+    "docs/superpowers/specs/2026-03-14-spec-lifecycle-protocol-design.md": {
+      "content_hash": "sha256:fef63f81b5aa2d3a96cb9a303e9494eeb95a0223d2ab3eda8975a0b834c527f4",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "design-spec",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-29T03:53:29Z",
+      "implementation": []
+    },
+    "docs/superpowers/specs/2026-03-25-release-notes-action-design.md": {
+      "content_hash": "sha256:1c0668d32f2ebf43f817b72bf19e7bc49a389f0d50574fb54113e37a324aa305",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "design-spec",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-29T03:53:29Z",
+      "implementation": []
+    },
+    "docs/superpowers/specs/2026-03-29-github-pages-site-design.md": {
+      "content_hash": "sha256:81f01c8d0de9cc295692b8f27dd126f17603f3664429721f60797903409b5836",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "design-spec",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-29T03:53:29Z",
+      "implementation": []
+    },
+    "docs/superpowers/specs/2026-07-24-spec-status-transition-model-design.md": {
+      "content_hash": "sha256:616ef441f536944f9f91e9e304dc9803dbb12bb31d57074e38c700e53dcb7a68",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "design-spec",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-29T03:53:29Z",
+      "implementation": []
+    },
+    "docs/issues/2026-09-27-sweep-05ea982-I14-docs-and-self-dogfooding.md": {
+      "content_hash": "sha256:ec6181536600fe02392ae5c8fbd9c0dc8557308be8b14a43e808d24ba54a7ad4",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "issue",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-29T03:53:29Z",
+      "implementation": []
+    },
+    "docs/issues/2026-09-28-sweep-05ea982-followups.md": {
+      "content_hash": "sha256:94580fc560a13b37866fcc674107e454583382465cac5e346dd7abe7257935a9",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "issue",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-09-29T06:48:00Z",
+      "implementation": []
+    },
+    "docs/archive/plans/2026-09-28-audit-report.md": {
+      "content_hash": "sha256:3ceeb28988ef6d3ecfef9c5544d2e44bdb40dcbf03355f15f114979056653cf9",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "audit",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
     }
   }
 }

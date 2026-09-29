@@ -26,29 +26,17 @@ The main skill definition is `skills/doc-superpowers/SKILL.md`. Activate it when
 
 ## Platform Setup
 
-| Platform | Setup Guide | Tool Translation |
-|----------|-------------|------------------|
-| Claude Code | `.claude-plugin/plugin.json` (auto-discovered) | Native — no translation |
-| Cursor | `.cursor-plugin/INSTALL.md` | Native — same as Claude Code |
-| Codex | `.codex/INSTALL.md` | `references/tool-mappings.md` |
-| OpenCode | `.opencode/INSTALL.md` | Auto-injected by plugin |
-| Gemini CLI | `GEMINI.md` (loaded via `gemini-extension.json`) | `references/tool-mappings.md` |
+| Platform | Setup |
+|----------|-------|
+| Claude Code | `/plugin marketplace add woodrowpearson/doc-superpowers`, then `/plugin install doc-superpowers@doc-superpowers` (manifest: `.claude-plugin/plugin.json`) — see `README.md` |
+| Cursor | `.cursor-plugin/INSTALL.md` |
+| Codex | `.codex/INSTALL.md` |
+| OpenCode | `.opencode/INSTALL.md` |
+| Gemini CLI | `gemini extensions install https://github.com/woodrowpearson/doc-superpowers` (`gemini-extension.json` loads `GEMINI.md`) |
 
-## Capability Matrix
+## Tool Mapping and Capabilities
 
-| Capability | Claude Code | Cursor | Codex | OpenCode | Gemini CLI |
-|------------|------------|--------|-------|----------|------------|
-| All 11 commands | Yes | Yes | Yes | Yes | Yes |
-| Parallel agent dispatch | Yes | Yes | Yes (needs config) | Yes (`@mention`) | No (sequential) |
-| Git hooks | Yes | Yes | Partial (sandbox) | Yes | Yes |
-| Claude Code hooks | Yes | Yes | No | No | No |
-| CI/CD workflows | Yes | Yes | Yes | Yes | Yes |
-| WebSearch / WebFetch | Yes | Yes | No | No | Yes |
-| Mermaid MCP diagrams | Yes | Yes | If configured | If configured | No (source only) |
-
-## Tool Mapping
-
-This skill was written for Claude Code. If your agent uses different tool names, see `references/tool-mappings.md` for the translation table.
+This skill is written with Claude Code's tool names. `references/tool-mappings.md` is the one capability matrix: each client's tool for every Claude Code tool the skill names, and which hook tiers, subagent and diagram features each client supports. Read it when your client is not Claude Code; it is not repeated here.
 
 ## Directory Structure
 

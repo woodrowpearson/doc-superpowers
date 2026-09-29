@@ -1,60 +1,56 @@
 #!/usr/bin/env bash
 # doc-superpowers hook v1 — installed __INSTALL_DATE__
 # DO NOT EDIT — managed by doc-superpowers hooks installer
-
-DOC_TOOLS="${DOC_TOOLS:-$(printf '%s\n' __DOC_TOOLS_PARENT__/*/scripts/doc-tools.sh | sort -V | tail -1)}"
-DOC_INDEX="${DOC_INDEX:-docs/.doc-index.json}"
+#
+# Reports the docs a merge (or pull) left stale or missing, scoped to the files
+# it changed (ORIG_HEAD..HEAD, both sides of a rename). Never blocks.
+# The skill or the doc-index being absent, or no ORIG_HEAD, is silent; the
+# check failing prints one line on stderr. DOC_SUPERPOWERS_QUIET=1 silences it;
+# DOC_SUPERPOWERS_SKIP=1 turns it off.
 
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
-[[ -f "$DOC_TOOLS" ]] || exit 0
-[[ -f "$DOC_INDEX" ]] || exit 0
+[[ "${DOC_SUPERPOWERS_QUIET:-}" == "1" ]] && exit 0
 
-# Scope the freshness check to the files this merge brought in. Running the
-# full-index walk synchronously here freezes the terminal on large indices
-# (a 2000+ entry walk is ~minutes even after the v2.12.1 streaming-jq fix).
-# Mirror the pre-commit hook's --code-refs scoping. If the changed-file set
-# can't be determined (e.g. ORIG_HEAD unset), skip silently rather than fall
-# back to the slow full walk.
-changed=$(git diff --name-only ORIG_HEAD HEAD 2>/dev/null)
+[[ -n "${DOC_TOOLS:-}" ]] || DOC_TOOLS=$(__DOC_TOOLS_RESOLVE__)
+[[ -f "$DOC_TOOLS" ]] || exit 0
+[[ -f docs/.doc-index.json ]] || exit 0
+
+_fail() {
+  echo "doc-superpowers: post-merge: cannot check doc freshness: $1 — check skipped" >&2
+  exit 0
+}
+
+# Scope the check to the files this merge brought in: a full-index walk here
+# would freeze the terminal on a large index.
+changed=$(git -c core.quotePath=false diff --name-only --no-renames ORIG_HEAD HEAD 2>/dev/null)
 [[ -z "$changed" ]] && exit 0
 
-code_refs_args=()
-while IFS= read -r f; do
-  [[ -n "$f" ]] && code_refs_args+=("$f")
-done <<< "$changed"
-
-result=$("$DOC_TOOLS" check-freshness --code-refs "${code_refs_args[@]}" 2>/dev/null) || exit 0
-
-stale_count=$(echo "$result" | jq -r '.summary.stale // 0' 2>/dev/null) || stale_count=0
-missing_count=$(echo "$result" | jq -r '.summary.missing // 0' 2>/dev/null) || missing_count=0
-untracked_count=$(echo "$result" | jq -r '.summary.untracked // 0' 2>/dev/null) || untracked_count=0
-
-[[ "$stale_count" -eq 0 && "$missing_count" -eq 0 && "$untracked_count" -eq 0 ]] && exit 0
-
-if [[ "${DOC_SUPERPOWERS_QUIET:-}" != "1" ]]; then
-  if [[ "$stale_count" -gt 0 ]]; then
-    stale_list=$(echo "$result" | jq -r '[.docs | to_entries[] | select(.value.status == "stale") | .key] | join(", ")' 2>/dev/null)
-    echo ""
-    echo "doc-superpowers: $stale_count doc(s) became stale after merge"
-    echo "  $stale_list"
-    echo "  Run '/doc-superpowers audit' to review."
-  fi
-
-  if [[ "$missing_count" -gt 0 ]]; then
-    missing_list=$(echo "$result" | jq -r '[.docs | to_entries[] | select(.value.status == "missing") | .key] | join(", ")' 2>/dev/null)
-    echo ""
-    echo "doc-superpowers: $missing_count indexed doc(s) missing from disk"
-    echo "  $missing_list"
-    echo "  Run 'doc-tools.sh move-entry <old> <new>' if it was renamed, or 'remove-entry'/'deprecate-entry' to clean up."
-  fi
-
-  if [[ "$untracked_count" -gt 0 ]]; then
-    echo ""
-    echo "doc-superpowers: $untracked_count untracked doc(s) not in index"
-    echo "  Run '/doc-superpowers sync' or 'doc-tools.sh add-entry' to add them."
-  fi
-
-  echo ""
+_check() { printf '%s\n' "$changed" | "$DOC_TOOLS" check-freshness --code-refs-from -; }
+if ! result=$(_check 2>/dev/null); then
+  why=$(_check 2>&1 >/dev/null | awk '/^ERROR: / { print; e = 1; exit } NF && !/^NOTE: / && o == "" { o = $0 } END { if (!e) print o }')
+  why="${why#ERROR: }"
+  why="${why%.}"
+  _fail "${why:-doc-tools.sh check-freshness failed}"
 fi
 
+report=$(jq -r --arg move "  Run 'doc-tools.sh move-entry <old> <new>' if it was renamed, or 'remove-entry'/'deprecate-entry' to clean up." '
+  [.docs | to_entries[] | select(.value.status == "stale")] as $s
+  | [.docs | to_entries[] | select(.value.status == "missing")] as $m
+  | (if ($s | length) > 0 then
+       "doc-superpowers: \($s | length) doc(s) became stale after merge",
+       ($s[] | "  \(.key) — \(.value.reason // "stale")"
+         + (if ((.value.code_refs_changed // []) | length) > 0 then ": \(.value.code_refs_changed | join(", "))" else "" end)),
+       "  Run '\''/doc-superpowers audit'\'' to review."
+     else empty end),
+    (if ($m | length) > 0 then
+       "doc-superpowers: \($m | length) indexed doc(s) missing from disk",
+       ($m[] | "  \(.key)"),
+       $move
+     else empty end)
+' <<<"$result" 2>/dev/null) || _fail "cannot read the freshness report"
+[[ -z "$report" ]] && exit 0
+
+echo ""
+printf '%s\n' "$report"
+echo ""
 exit 0

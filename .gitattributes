@@ -1,0 +1,3 @@
+# doc-superpowers:begin — the doc-index merge driver (install.sh --git; uninstall --git removes this block)
+docs/.doc-index.json merge=doc-index
+# doc-superpowers:end

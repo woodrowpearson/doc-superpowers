@@ -1,20 +1,59 @@
 #!/usr/bin/env bash
-# Stage the per-PR fragment, commit (if changes exist), and push to the PR
-# branch. Designed to be safe to run multiple times in the same workflow run.
+# doc-pr-release.yml's commit step, after the agent (never run by it): seal
+# this PR's fragment, commit it — only that path — and push it to the PR
+# branch only while the branch is still at the checkout.
+#
+#   1. The fragment as the agent wrote it (the line rules: fragment-lib.sh,
+#      shared with extract-context.sh and verify-fragment.sh): line 1 must be
+#      this PR's marker and notes must follow. Line 2 may be a hash marker (with any value, or
+#      none) or be left out: this step writes the hash itself, the sha256 of
+#      the bytes from line 3 on (RELEASE-NOTES.next/README.md).
+#   2. The same notes as HEAD's fragment (byte for byte, from the line after
+#      the markers): nothing to commit, and the file is left alone — so a
+#      fragment a human edited is never re-sealed.
+#   3. HEAD's fragment edited by hand (its hash no longer matches, or its
+#      markers are broken) while the agent changed it: refused, exit 1. The
+#      workflow never overwrites a human's edit; the agent posts a comment.
+#   4. Compare-and-swap. The branch at origin is no longer the checkout:
+#      commit-changes.sh's moved() decides (sourced — one implementation):
+#      someone else pushed → superseded, exit 0, nothing committed or pushed
+#      (their push starts a newer run, which drafts from the new tip); moved
+#      only by doc-superpowers commits, or reset / force-pushed behind the
+#      checkout → exit 1. What someone else did to the branch always stands.
+#   5. The release's own rules: the sealed fragment, copied alone into a
+#      scratch RELEASE-NOTES.next/, goes through the vendored `doc-tools.sh
+#      fragments list`; a problem it reports (text before the first ###, a
+#      #/## heading, an unclosed code fence …) would make the release skip
+#      it, so it is refused now, exit 1, while the author can still fix it.
+#   6. Commit only the fragment (`git commit -- <fragment>`: anything else
+#      staged stays staged), as "[doc-superpowers] sync PR-<N> release notes
+#      (<short checkout>)" with the trailer "Doc-Superpowers-Drafted-From:
+#      <checkout>", which extract-context.sh reads as its watermark.
+#   7. Push with --force-with-lease=refs/heads/<branch>:<checkout>: it lands
+#      only while origin's branch is exactly the checkout, and what lands is
+#      the checkout plus this one commit — a fast-forward, never a rewrite. A
+#      rejected push goes back to step 4's rule.
 #
 # Args:
-#   $1  PR number (used in commit message)
+#   $1  PR number
 #
 # Env:
-#   FRAGMENT_PATH   Path to the fragment file (default: RELEASE-NOTES.next/PR-<N>.md)
-#   GIT_USER_NAME   Override commit author name  (default: github-actions[bot])
-#   GIT_USER_EMAIL  Override commit author email (default: 41898282+github-actions[bot]@users.noreply.github.com)
-#   DOC_PR_RELEASE_PUSH_RETRIES  Number of rebase-and-retry attempts on
-#                                non-fast-forward push rejection (default: 2).
+#   GITHUB_HEAD_REF  the PR branch (required once there is a fragment)
+#   GITHUB_OUTPUT    step outputs (default: none): committed=true|false,
+#                    sha=<commit> when pushed, superseded=true
+#   FRAGMENT_PATH    default RELEASE-NOTES.next/PR-<N>.md
+#   DOC_TOOLS        default the vendored ../doc-tools.sh beside this helper's
+#                    directory (.github/scripts/doc-tools.sh), else the
+#                    plugin's scripts/doc-tools.sh (this file in the plugin)
+#   GIT_USER_NAME    commit author name  (default: github-actions[bot])
+#   GIT_USER_EMAIL   commit author email (default: 41898282+github-actions[bot]@users.noreply.github.com)
 #
 # Exit codes:
-#   0  committed and pushed, OR no changes staged (no-op)
-#   1  git error (including push rejected after all retries)
+#   0  committed and pushed; nothing to commit (no fragment, or unchanged);
+#      superseded; or the branch is gone
+#   1  refused (a malformed fragment, one the release would skip, a
+#      hand-edited one, the branch moved in a way that is not someone else's
+#      push) or git failed
 #   2  bad arguments
 set -euo pipefail
 
@@ -23,7 +62,6 @@ if [ -z "$PR_NUMBER" ]; then
   echo "Usage: $0 <pr-number>" >&2
   exit 2
 fi
-
 if ! [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
   echo "PR_NUMBER must be a positive integer, got: $PR_NUMBER" >&2
   exit 2
@@ -32,62 +70,118 @@ fi
 FRAGMENT_PATH="${FRAGMENT_PATH:-RELEASE-NOTES.next/PR-${PR_NUMBER}.md}"
 GIT_USER_NAME="${GIT_USER_NAME:-github-actions[bot]}"
 GIT_USER_EMAIL="${GIT_USER_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}"
+GITHUB_OUTPUT="${GITHUB_OUTPUT:-/dev/null}"
+FRAGMENT_MAX_BYTES=1048576
 
-if [ ! -f "$FRAGMENT_PATH" ]; then
+here=$(cd "$(dirname "$0")" && pwd) || { echo "::error::doc-superpowers: cannot find $0's directory"; exit 1; }
+if [ -z "${DOC_TOOLS:-}" ]; then
+  DOC_TOOLS="$here/../doc-tools.sh"
+  [ -f "$DOC_TOOLS" ] || DOC_TOOLS="$here/../../../doc-tools.sh"
+fi
+for lib in "$here/fragment-lib.sh" "$here/../doc-superpowers-steps/commit-changes.sh" "$DOC_TOOLS"; do
+  if [ ! -f "$lib" ]; then
+    echo "::error::doc-superpowers: $lib is missing (re-run the doc-superpowers installer: install --ci)"
+    exit 1
+  fi
+done
+# The fragment line rules: frag_marker, frag_lines, frag_notes, frag_stored, frag_sha256.
+# shellcheck source=scripts/hooks/ci/doc-pr-release/fragment-lib.sh
+. "$here/fragment-lib.sh"
+# err, out, g, remote_tip, moved.
+# shellcheck source=scripts/hooks/ci/doc-superpowers-steps/commit-changes.sh
+. "$here/../doc-superpowers-steps/commit-changes.sh"
+DOC_TOOLS=$(cd "$(dirname "$DOC_TOOLS")" && pwd)/$(basename "$DOC_TOOLS") || err "cannot resolve $DOC_TOOLS"
+
+if [ ! -e "$FRAGMENT_PATH" ] && [ ! -L "$FRAGMENT_PATH" ]; then
   echo "No fragment at $FRAGMENT_PATH — nothing to commit."
+  out committed false
   exit 0
 fi
 
-git add "$FRAGMENT_PATH"
-
-if git diff --cached --quiet -- "$FRAGMENT_PATH"; then
-  echo "Fragment unchanged — no commit."
-  exit 0
-fi
-
-SHORT_SHA=$(git rev-parse --short HEAD)
-git \
-  -c "user.name=${GIT_USER_NAME}" \
-  -c "user.email=${GIT_USER_EMAIL}" \
-  commit -m "[doc-superpowers] sync PR-${PR_NUMBER} release notes (${SHORT_SHA})"
-
-# Push to the PR branch. GITHUB_HEAD_REF is set by pull_request events.
 BRANCH="${GITHUB_HEAD_REF:-}"
 if [ -z "$BRANCH" ]; then
   echo "GITHUB_HEAD_REF is unset; refusing to guess the push target." >&2
   echo "Set GITHUB_HEAD_REF to the PR branch name (the workflow does this automatically for pull_request events)." >&2
   exit 1
 fi
+PUSH_TO="$BRANCH"
 
-# Push with retry on non-fast-forward rejection. A human (or another workflow)
-# may have pushed to the PR branch between checkout and now. Rebase our single
-# fragment commit onto the new tip and retry. We deliberately do NOT use
-# `--force-with-lease`: the goal is to preserve the human's work, not overwrite
-# it. If the rebase itself conflicts (extremely unlikely — we only touch one
-# fragment file the bot exclusively manages), we fail loudly rather than
-# guessing how to resolve.
-PUSH_RETRIES="${DOC_PR_RELEASE_PUSH_RETRIES:-2}"
-attempt=0
-while :; do
-  if git push origin "HEAD:${BRANCH}"; then
-    break
+[ ! -L "$FRAGMENT_PATH" ] || err "$FRAGMENT_PATH is a symbolic link; it is never read or committed. Nothing was committed or pushed."
+[ -f "$FRAGMENT_PATH" ] || err "$FRAGMENT_PATH is not a regular file. Nothing was committed or pushed."
+bytes=$(wc -c < "$FRAGMENT_PATH" | tr -d ' ')
+[ "$bytes" -le "$FRAGMENT_MAX_BYTES" ] \
+  || err "$FRAGMENT_PATH is $bytes bytes (over $FRAGMENT_MAX_BYTES). Nothing was committed or pushed."
+
+head=$(g rev-parse --verify HEAD 2>/dev/null) || err "no checkout here (git rev-parse HEAD failed)"
+MARKER=$(frag_marker "$PR_NUMBER")
+
+T=$(mktemp -d "${TMPDIR:-/tmp}/doc-sp-fragment.XXXXXX") || err "cannot create a temporary directory"
+trap 'rm -rf "$T"' EXIT
+
+frag_notes "$FRAGMENT_PATH" "$T/body"
+[ "$FRAG_L1" = "$MARKER" ] \
+  || err "line 1 of $FRAGMENT_PATH must be $MARKER (it is '$FRAG_L1'). Nothing was committed or pushed."
+grep -q '[^[:space:]]' "$T/body" \
+  || err "$FRAGMENT_PATH holds no notes under its markers (a PR with nothing to announce says <!-- doc-superpowers:no-notes -->). Nothing was committed or pushed."
+
+if g cat-file -e "HEAD:$FRAGMENT_PATH" 2>/dev/null; then
+  g cat-file blob "HEAD:$FRAGMENT_PATH" > "$T/head.md" || err "cannot read $FRAGMENT_PATH at HEAD"
+  frag_notes "$T/head.md" "$T/head.body"
+  if cmp -s "$T/body" "$T/head.body"; then
+    echo "Fragment unchanged — no commit."
+    out committed false
+    exit 0
   fi
-  attempt=$((attempt + 1))
-  if [ "$attempt" -gt "$PUSH_RETRIES" ]; then
-    echo "Push to origin/${BRANCH} rejected after ${PUSH_RETRIES} retries." >&2
-    exit 1
+  if [ "$FRAG_L1" != "$MARKER" ] || ! frag_sealed "$T/head.md"; then
+    err "$FRAGMENT_PATH at HEAD was edited by hand (its line-2 hash does not match its notes, or its markers are broken); the workflow never overwrites it. Nothing was committed or pushed — reconcile it by hand, then re-seal it (RELEASE-NOTES.next/README.md)."
   fi
-  echo "Push rejected (non-fast-forward?); fetching and rebasing attempt ${attempt}/${PUSH_RETRIES}." >&2
-  if ! git fetch origin "$BRANCH"; then
-    echo "git fetch origin ${BRANCH} failed." >&2
-    exit 1
+fi
+
+# Compare-and-swap, before anything is written.
+tip=$(remote_tip) || err "cannot ask origin for $PUSH_TO (git ls-remote failed). Nothing was committed or pushed."
+if [ -z "$tip" ]; then
+  out committed false
+  echo "::notice::doc-superpowers: $PUSH_TO no longer exists at origin (deleted since the checkout); it is not recreated. Nothing was committed or pushed."
+  exit 0
+elif [ "$tip" != "$head" ]; then
+  moved "Nothing was committed or pushed."
+fi
+
+hash=$(frag_sha256 < "$T/body") || err "cannot hash $FRAGMENT_PATH"
+{
+  printf '%s\n' "$MARKER"
+  printf '<!-- doc-superpowers:hash %s -->\n' "$hash"
+  cat "$T/body"
+} > "$T/sealed" || err "cannot write the sealed fragment"
+
+# The release's own rules, before anything is written: a fragment
+# `fragments merge` would skip is refused now (step 5 above).
+mkdir -p "$T/check/RELEASE-NOTES.next" || err "cannot create a scratch directory"
+cp "$T/sealed" "$T/check/RELEASE-NOTES.next/PR-${PR_NUMBER}.md" || err "cannot copy the sealed fragment"
+problem=$(cd "$T/check" && "$BASH" "$DOC_TOOLS" fragments list 2>/dev/null | jq -r '.[0].problem // empty') \
+  || err "cannot check $FRAGMENT_PATH with doc-tools.sh fragments list. Nothing was committed or pushed."
+[ -z "$problem" ] \
+  || err "$FRAGMENT_PATH would be skipped by the release ($problem; RELEASE-NOTES.next/README.md has the rules). Fix it, then push again. Nothing was committed or pushed."
+
+cat "$T/sealed" > "$FRAGMENT_PATH" || err "cannot write $FRAGMENT_PATH"
+
+g --literal-pathspecs add -- "$FRAGMENT_PATH" || err "git add $FRAGMENT_PATH failed"
+g --literal-pathspecs -c "user.name=${GIT_USER_NAME}" -c "user.email=${GIT_USER_EMAIL}" \
+  commit -q -m "[doc-superpowers] sync PR-${PR_NUMBER} release notes (${head:0:7})" \
+  -m "Doc-Superpowers-Drafted-From: $head" -- "$FRAGMENT_PATH" || err "git commit failed"
+sha=$(g rev-parse HEAD)
+
+if ! g push --force-with-lease="refs/heads/$PUSH_TO:$head" origin "HEAD:refs/heads/$PUSH_TO"; then
+  tip=$(remote_tip) || err "the push to $PUSH_TO failed and origin cannot be asked why (git ls-remote failed). Nothing was pushed."
+  if [ -z "$tip" ]; then
+    out committed false
+    echo "::notice::doc-superpowers: $PUSH_TO was deleted at origin during this run; it is not recreated. Nothing was pushed."
+    exit 0
+  elif [ "$tip" != "$head" ]; then
+    moved "Nothing was pushed."
   fi
-  if ! git \
-    -c "user.name=${GIT_USER_NAME}" \
-    -c "user.email=${GIT_USER_EMAIL}" \
-    rebase "origin/${BRANCH}"; then
-    echo "Rebase onto origin/${BRANCH} failed (conflict in fragment?); aborting." >&2
-    git rebase --abort 2>/dev/null || true
-    exit 1
-  fi
-done
+  err "the push to $PUSH_TO failed while the branch was still at the checkout (see git's message above). Nothing was forced."
+fi
+out committed true
+out sha "$sha"
+echo "Committed and pushed $sha (PR-${PR_NUMBER} release notes) to $PUSH_TO."

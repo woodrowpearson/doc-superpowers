@@ -13,6 +13,18 @@ Thumbs.db
 .worktrees/
 .claude/worktrees/
 
+# The Claude Code hook tier is per-user (install.sh --claude): the settings
+# file holds each contributor's own hook wiring and permissions, and the
+# installed hook scripts name that machine's plugin path. The CI tier's
+# record, .claude/doc-superpowers/installed.json, IS committed.
+.claude/settings.local.json
+.claude/hooks/doc-superpowers/
+
+# doc-tools.sh's index-write lock directories and temp file (left behind only
+# by a killed writer; the next writer clears a dead owner's lock)
+docs/.doc-index.json.lock*
+docs/.doc-index.json.tmp.*
+
 # Dependencies
 node_modules/
 

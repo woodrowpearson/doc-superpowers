@@ -106,7 +106,6 @@ export default defineConfig({
     socialLinks: [
       { icon: 'github', link: 'https://github.com/woodrowpearson/doc-superpowers' }
     ],
-    nav: [/* 6 section items + Releases external link */],
     search: { provider: 'local' },
     darkModeSwitchLabel: 'Theme',
   }

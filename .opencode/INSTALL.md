@@ -10,15 +10,13 @@ Add to your project's `opencode.json`:
 }
 ```
 
-Or pin to a specific version:
+Or pin to a release — replace `vX.Y.Z` with a tag from `RELEASE-NOTES.md`:
 
 ```json
 {
-  "plugin": ["doc-superpowers@git+https://github.com/woodrowpearson/doc-superpowers.git#v2.8.0"]
+  "plugin": ["doc-superpowers@git+https://github.com/woodrowpearson/doc-superpowers.git#vX.Y.Z"]
 }
 ```
-
-> **Tip:** Check `RELEASE-NOTES.md` for the latest version before pinning.
 
 ## Alternative: Local Install
 
@@ -26,15 +24,15 @@ Or pin to a specific version:
 git clone https://github.com/woodrowpearson/doc-superpowers.git ~/.config/opencode/plugins/doc-superpowers
 ```
 
-Then add to `opencode.json`:
+Then load the clone's plugin by file URL in `opencode.json` (use your absolute home path); the plugin registers the skill path itself:
 
 ```json
 {
-  "skills": {
-    "paths": ["~/.config/opencode/plugins/doc-superpowers"]
-  }
+  "plugin": ["file:///ABSOLUTE/HOME/.config/opencode/plugins/doc-superpowers/.opencode/plugins/doc-superpowers.js"]
 }
 ```
+
+Registering only the skill — `"skills": { "paths": ["~/.config/opencode/plugins/doc-superpowers"] }` — also works, but then nothing puts the tool mapping into the system prompt: point the agent at [`references/tool-mappings.md`](../references/tool-mappings.md) yourself.
 
 ## Verify
 
@@ -62,38 +60,14 @@ audit my project's documentation
 | `spec-inject` | Inject spec tasks or track drift |
 | `spec-verify` | Verify spec compliance |
 
-## Tool Differences
+## Tool names and capabilities
 
-The plugin at `.opencode/plugins/doc-superpowers.js` handles tool translation automatically. It registers the skill path and injects `references/tool-mappings.md` into the system prompt — you do not need to do anything manually.
+The plugin at `.opencode/plugins/doc-superpowers.js` registers the skill path and adds `references/tool-mappings.md` to the system prompt — one more entry in OpenCode's system-prompt list, read once when the plugin loads. That file is the one capability matrix: OpenCode's tool for each Claude Code tool the skill names, and which hook tiers, subagent and diagram features work here. See [`references/tool-mappings.md`](../references/tool-mappings.md).
 
-Key differences from Claude Code:
+## Hooks
 
-| Claude Code | OpenCode |
-|-------------|----------|
-| `Task` / `Agent` (subagent dispatch) | `@mention` syntax |
-| `TodoWrite` | `todowrite` |
-| `Bash` | `shell` |
-| `Skill` | `skill` |
-
-## Subagent Dispatch
-
-OpenCode uses `@mention` syntax for subagent dispatch rather than explicit `Task`/`Agent` tool calls. The skill's `init` and `audit` commands reference parallel agent dispatch — in OpenCode, mention the relevant agent to dispatch work.
-
-## Hooks Support
-
-| Hook Tier | Supported | Notes |
-|-----------|-----------|-------|
-| Git hooks (5) | Yes | Installed via `scripts/hooks/install.sh` |
-| Claude Code hooks (3) | No | These use `.claude/settings.local.json` which OpenCode does not support |
-| CI/CD workflows (7) | Yes | Framework-agnostic GitHub Actions templates |
-
-Install hooks with: `hooks install --git --ci`
+Install the tiers that work outside Claude Code with `hooks install --git --ci`. The Claude hook tier needs Claude Code; see the matrix.
 
 ## Spec Lifecycle
 
-The spec lifecycle actions (`spec-generate`, `spec-inject`, `spec-verify`) are harness-agnostic — they read/write files and run shell commands, all of which work identically in OpenCode. See `references/spec-lifecycle-actions.md` for detailed procedures.
-
-## Known Limitations
-
-- **WebSearch / WebFetch**: Not available in OpenCode. The skill's core workflows do not depend on these tools.
-- **Mermaid MCP**: Available if you configure MCP in your OpenCode environment. Without it, the `diagram` action outputs Mermaid source text instead of PNGs.
+The spec lifecycle actions (`spec-generate`, `spec-inject`, `spec-verify`) read and write files and run shell commands, so they work in OpenCode as in Claude Code. See `references/spec-lifecycle-actions.md` for detailed procedures.

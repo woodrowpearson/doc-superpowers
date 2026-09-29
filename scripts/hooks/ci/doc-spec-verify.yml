@@ -1,6 +1,10 @@
 # doc-superpowers workflow v1
 # AI-powered spec compliance check on pull requests
 # Installed by doc-superpowers hooks installer
+#
+# Runs when a same-repository PR touches an indexed spec (docs/specs/**/SPEC-*.md)
+# or code one cites — judged by check-freshness from the doc index, no
+# hard-coded paths. Read-only: findings go to one PR comment.
 
 name: Spec Compliance Check (AI)
 
@@ -8,15 +12,9 @@ on:
   pull_request:
     branches: [__BASE_BRANCH__]
     types: [opened, synchronize, ready_for_review]
-    paths:
-      - 'src/**'
-      - 'scripts/**'
-      - 'lib/**'
-      - 'app/**'
-  workflow_dispatch:
 
 concurrency:
-  group: doc-spec-verify-${{ github.event.pull_request.number || github.run_id }}
+  group: doc-spec-verify-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 env:
@@ -24,61 +22,68 @@ env:
 
 jobs:
   spec-verify:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
 
-      - name: Check for specs directory
-        id: precheck
-        run: |
-          if [ ! -d "docs/specs" ]; then
-            echo "No docs/specs/ directory found. Skipping spec verification."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            spec_count=$(find docs/specs -name 'SPEC-*.md' 2>/dev/null | wc -l | tr -d ' ')
-            if [ "$spec_count" -eq 0 ]; then
-              echo "No spec files found in docs/specs/. Skipping."
-              echo "skip=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "$spec_count spec file(s) found."
-              echo "skip=false" >> "$GITHUB_OUTPUT"
-            fi
-          fi
+      - name: Scope — indexed specs this PR touches
+        id: scope
+        env:
+          RANGE: ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}
+          SCOPE_DOCS: '^docs/specs/(.*/)?SPEC-[^/]*\.md$'
+        run: .github/scripts/doc-superpowers-steps/freshness-check.sh scope
 
       - name: Resolve Anthropic auth
         id: auth
-        if: steps.precheck.outputs.skip != 'true'
+        if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.affected != '0'
         env:
           OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          if [ -n "$OAUTH" ]; then
-            echo "use_oauth=true" >> "$GITHUB_OUTPUT"
-            if [ -n "$API_KEY" ]; then
-              echo "::notice::Both CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are set; using CLAUDE_CODE_OAUTH_TOKEN."
-            fi
-          elif [ -n "$API_KEY" ]; then
-            echo "use_oauth=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::Neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY is set as a repository secret. Add one under Settings > Secrets and variables > Actions." >&2
-            exit 1
-          fi
+        run: .github/scripts/doc-superpowers-steps/resolve-auth.sh
+
+      - name: Fetch the doc-superpowers plugin (the installed version)
+        id: plugin
+        if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.affected != '0'
+        run: .github/scripts/doc-superpowers-steps/prepare-agent.sh
 
       - name: Verify spec compliance
-        if: steps.precheck.outputs.skip != 'true'
-        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1
+        if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.affected != '0'
+        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
+          github_token: ${{ github.token }}
           claude_code_oauth_token: ${{ steps.auth.outputs.use_oauth == 'true' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           anthropic_api_key: ${{ steps.auth.outputs.use_oauth == 'false' && secrets.ANTHROPIC_API_KEY || '' }}
+          plugin_marketplaces: ${{ steps.plugin.outputs.marketplace }}
+          plugins: doc-superpowers@doc-superpowers
+          claude_args: |
+            --max-turns 40
+            --allowedTools "Skill,Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(jq:*),Bash(.github/scripts/doc-tools.sh check-freshness:*),Bash(.github/scripts/doc-tools.sh status:*),Bash(.github/scripts/doc-tools.sh implementation-status:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*)"
           prompt: |
-            Run /doc-superpowers spec-verify --mode=review to check this PR
-            against governing specifications in docs/specs/.
+            This is an unattended, read-only GitHub Actions run of the doc-superpowers
+            plugin.
+            - Use `.github/scripts/doc-tools.sh` as `$DOC_TOOLS` (this plugin
+              version's vendored copy) and call it by that path: your tools allow
+              exactly that command.
+            - Nobody can answer questions: take the recommended option instead.
+            - Do not modify any file.
 
-            Post compliance findings as a PR comment. This is a read-only
-            check — do not modify any files.
+            Run /doc-superpowers spec-verify --mode=review for pull request
+            #${{ github.event.pull_request.number }}, against the specs in docs/specs/
+            that govern its changes. Its --changed-files are the files
+            `git diff --name-only --no-renames ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}`
+            lists (git prints a name holding a non-ASCII byte, `"`, `\` or a tab
+            in double quotes with C escapes: pass it unquoted).
+            Post the compliance findings as one PR comment:
+            `gh pr comment ${{ github.event.pull_request.number }} --body "<findings>"`.
