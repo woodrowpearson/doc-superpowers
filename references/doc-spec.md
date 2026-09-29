@@ -837,7 +837,7 @@ project/
 
 CLAUDE.md is loaded at the start of every Claude session. Stale entries mean every future session starts with incorrect context about the project. This makes CLAUDE.md sync a critical step — not just for `init`, but for every write action that changes project structure.
 
-**When to apply these rules**: After ANY doc-superpowers write action that changes directory structure, adds/removes files, or modifies commands. This includes `init`, `update`, `spec-generate`, `sync`, and `release`. The `audit` and `review-pr` actions detect CLAUDE.md staleness and report it; the write actions fix it.
+**When to apply these rules**: After ANY doc-superpowers write action that changes directory structure, adds/removes files, or modifies commands. This includes `init`, `update`, `spec-generate`, `sync`, and `release`. The `audit` and `review-pr` actions detect CLAUDE.md staleness and report it; the write actions fix it — except `update` and `sync` in a doc-superpowers CI workflow, which report the change instead (its commit step accepts only `docs/` and the indexed docs).
 
 **If CLAUDE.md exists**: Read it first. Only update sections that are factually stale:
 - **Directory Structure**: Sync the tree with actual filesystem (new dirs, removed dirs, renamed paths)
@@ -890,7 +890,7 @@ Keep it concise — CLAUDE.md should be a quick-reference entry point, not a com
 
 README.md is the project's public documentation — if it lists outdated features or missing actions, users and contributors don't know what the tool can do. Like CLAUDE.md, README.md sync is a cross-cutting concern for every write action.
 
-**When to apply these rules**: After ANY doc-superpowers write action that changes capabilities, actions, features, or project structure. This includes `init`, `update`, `sync`, `release`, and `spec-generate`. The `audit` and `review-pr` actions detect README.md staleness and report it; the write actions fix it.
+**When to apply these rules**: After ANY doc-superpowers write action that changes capabilities, actions, features, or project structure. This includes `init`, `update`, `sync`, `release`, and `spec-generate`. The `audit` and `review-pr` actions detect README.md staleness and report it; the write actions fix it — except `update` and `sync` in a doc-superpowers CI workflow, which report the change instead, as for CLAUDE.md.
 
 **If README.md exists**: Read it first. Only update sections that are factually stale, measured against **the project itself** — its code, commands and interfaces (never against doc-superpowers' own actions, unless the project is doc-superpowers):
 - **Feature list**: Sync with what the project actually does now
@@ -1025,7 +1025,7 @@ Doc paths given anywhere are normalized to the key form: `//` becomes `/`, a pat
 | `docs.<path>.status` | string, optional | Stored only as `"deprecated"` (by `deprecate-entry`, kept by every other writer, including `update-index` and `build-index --force`); otherwise absent. `current`, `stale` and `missing` are computed by `check-freshness`, which never writes. A `current` or `stale` stored by an older release is read as absent, and the next write that changes the index drops it |
 | `docs.<path>.replaces` | string\|null | Path to the doc this one supersedes: set by `deprecate-entry <old> --superseded-by <this>` when empty (it holds one path; an existing one is kept, with a warning), repointed by `move-entry` |
 | `docs.<path>.superseded_by` | string\|null | Path to superseding doc |
-| `docs.<path>.last_verified` | ISO 8601\|null | When the doc was last verified against its code. **Only `update-index` writes it**: it is the one verb that attests. `build-index` and `add-entry` write `null` (never verified); `deprecate-entry`, `set-code-refs` and `move-entry` leave it as it is |
+| `docs.<path>.last_verified` | ISO 8601\|null | When the doc was last verified against its code. **Only `update-index` writes it**: it is the one verb that attests. `build-index` and `add-entry` write `null` (never verified); `deprecate-entry`, `set-code-refs`, `set-doc-type` and `move-entry` leave it as it is |
 | `docs.<path>.implementation` | string[] | Written by `update-index` only: the entries of an ADR's `Implementation:` or a SPEC's `Realized-by:` block — each entry's text, without its indent and `- `, wrapped lines joined with one space; `[]` when the doc has no block or an empty one (`Implementation: []`) (grammar: [Header style and the realization block](#header-style-and-the-realization-block-adrs-and-specs); see `implementation-status`) |
 
 ### Status Transitions
@@ -1037,4 +1037,4 @@ Only `deprecated` is stored. `current`, `stale` and `missing` are verdicts that 
 - `stale` → `current` (computed): after `update-index` records the working tree's content and stamps `last_verified`, the attestation that someone checked the doc against that code
 - record docs (`doc_type` `plan` / `issue` / `audit` / `design-spec`, or a path under `docs/archive/`): always `current`, marked `"record": true`; they are never compared
 - → `deprecated` (stored): `deprecate-entry` only (a human decision, or spec supersession via `spec-generate`); `--superseded-by X` also sets `X.replaces` when it is empty
-- `deprecated` is terminal for automated tools: `update-index`, `move-entry`, `set-code-refs` and `build-index --force` all keep it
+- `deprecated` is terminal for automated tools: `update-index`, `move-entry`, `set-code-refs`, `set-doc-type` and `build-index --force` all keep it

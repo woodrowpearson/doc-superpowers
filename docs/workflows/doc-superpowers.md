@@ -273,8 +273,8 @@ Update is the **write counterpart** to audit's read-only analysis. It consumes a
 1. **Input**: the report named by `--report=<path>`; else the report `audit` wrote earlier in this session; else none — then work from discovery's `check-freshness` list. It never picks up an older `docs/plans/*-audit-report.md` on its own (it may come from another branch, or have been applied already). If nothing is stale or missing, exit with "Nothing to update."
 2. **Detect structural migration needs**: scan `docs/` for flat-structure files carrying the doc-superpowers marker. With the user's yes, `git mv` them to the structured paths and re-key the index in one write with `move-entry --stdin` — never a rebuild. Without a yes (or in CI), leave them and report the migration.
 3. For each stale doc, dispatch a scope agent that runs: **gather** → **plan** → **execute** → **diagram** → **sync**. EXECUTE preserves manually-added content, keeps the marker, and routes every index change through SKILL.md's **Index-write routing** table (`add-entry` for a new doc, `move-entry` + `deprecate-entry` for an archived one (archiving with the user's yes), `deprecate-entry --superseded-by` for a superseded one). SYNC runs `update-index` only for the docs the agent read against their code (`set-code-refs` first when a doc now covers different code).
-4. Sync CLAUDE.md — after all doc changes, update to reflect current project state (catches structural changes from this update cycle)
-5. Sync README.md — update feature list, action list, and usage examples if README.md exists (catches capability changes from this update cycle)
+4. Sync CLAUDE.md — after all doc changes, update to reflect current project state (catches structural changes from this update cycle). In a doc-superpowers CI workflow, report the change CLAUDE.md needs instead of editing it (the commit step accepts only `docs/` and the indexed docs)
+5. Sync README.md — update feature list, action list, and usage examples if README.md exists (catches capability changes from this update cycle). In a doc-superpowers CI workflow, report it instead, as for CLAUDE.md
 6. **Verification gate**: Run `doc-tools.sh check-freshness` to confirm all updated docs are current
 7. **Archive the applied report** (when the input was a report file) into `docs/archive/plans/`, so no later `update` applies it again (`git mv` when git tracks it, `move-entry` when the index lists it); skipped in a doc-superpowers CI workflow
 8. Human reviews diffs before committing (in a CI workflow, its checked commit step commits)
@@ -298,15 +298,15 @@ Update is the **write counterpart** to audit's read-only analysis. It consumes a
 ### Steps
 
 1. Run discovery's filtered `check-freshness`
-2. Reconcile each doc it lists through SKILL.md's **Index-write routing** table:
-   - **`untracked`** (on disk, not indexed) → pipe its mapping line to `add-entry` (never `build-index`, which refuses a non-empty index)
+2. Reconcile each doc it lists through SKILL.md's **Index-write routing** table — the `missing` docs first, since a renamed doc's new path is also listed `untracked`:
    - **`missing`** (indexed, file gone) → find out what happened: the commit that removed it (`git log -1 --format=%H --diff-filter=D -- <doc>`), then whether that commit renamed or deleted it (`git show -M --name-status --format= <commit>`; a log limited to the old path shows a rename as a deletion); no such commit → an uncommitted change, matched against the `untracked` docs. Moved → `move-entry`; archived → `move-entry` + `deprecate-entry`; deleted → `remove-entry`
+   - **`untracked`** (on disk, not indexed — but not a `missing` doc's new path, which its `move-entry` indexes) → pipe its mapping line to `add-entry` (never `build-index`, which refuses a non-empty index)
    - **`doc_modified`** (edited since verified) → read it against its code refs; accurate → `update-index`, otherwise list it for `update`
    - **`stale`** → list it for `update`; never `update-index` a doc nobody read against its code
 3. Run `doc-tools.sh update-index` for the docs verified in step 2, and only those. No project script runs (*Safety Rules*)
 4. Update `docs/specs/README.md` and `docs/adr/README.md` indexes
-5. Check CLAUDE.md currency — compare sections against actual filesystem; update if stale per `references/doc-spec.md` rules
-6. Check README.md currency — compare feature list, action list, and usage examples against actual SKILL.md actions; update if stale per `references/doc-spec.md` rules
+5. Check CLAUDE.md currency — compare sections against actual filesystem; update if stale per `references/doc-spec.md` rules. In a doc-superpowers CI workflow, report what it needs instead of editing it
+6. Check README.md currency — compare feature list, action list, and usage examples against actual SKILL.md actions; update if stale per `references/doc-spec.md` rules. In a doc-superpowers CI workflow, report it instead, as for CLAUDE.md
 7. Unless this is a doc-superpowers CI workflow (the installer is neither shipped nor granted there), run `"$ROOT/scripts/hooks/install.sh" status` and append a one-line summary: `Hooks: N/5 git, N/3 claude, N/8 ci`
 
 ## Process: `hooks` — Install Workflow Hooks

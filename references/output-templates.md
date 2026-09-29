@@ -44,8 +44,8 @@
 ### Actions
 - Run `/doc-superpowers update --report=<this file>` to apply the Update Tasks below
 - Run `doc-tools.sh update-index <doc>` after manual review
-- If CLAUDE.md flagged stale above, update it per `references/doc-spec.md` CLAUDE.md update rules
-- If README.md flagged stale above, update it per `references/doc-spec.md` README.md update rules
+- If CLAUDE.md flagged stale above, update it per `references/doc-spec.md` CLAUDE.md update rules (in a doc-superpowers CI workflow, `update` reports the change instead)
+- If README.md flagged stale above, update it per `references/doc-spec.md` README.md update rules (in a doc-superpowers CI workflow, `update` reports the change instead)
 - If RELEASE-NOTES.md flagged stale above, run `/doc-superpowers release` to draft a new version entry
 ```
 

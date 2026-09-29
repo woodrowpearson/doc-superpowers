@@ -15,11 +15,15 @@ related-files:
   - scripts/hooks/git/pre-commit
   - scripts/hooks/claude/pre-commit-gate.sh
   - scripts/hooks/ci/doc-pr-release/commit-and-push.sh
+  - scripts/hooks/ci/doc-pr-release/update-pr-body.sh
+  - scripts/hooks/ci/doc-superpowers-steps/precheck.sh
   - scripts/hooks/ci/doc-superpowers-steps/commit-changes.sh
   - scripts/hooks/ci/doc-pr-release.yml
+  - scripts/test-spec-status-model.sh
   - .github/workflows/tests.yml
   - references/doc-spec.md
   - references/hooks.md
+  - references/release.md
 screenshots: null
 axiom-agent: null
 branch: claude/resume-plan-execution-03646c
@@ -38,7 +42,9 @@ F8) are listed here, one line each with its source, so none of them is lost with
 the sweep's git-ignored ledger. Sources: `deferred N` is the line number in the
 sweep ledger's deferred list; `seat N` the review seat (1 core tools, 2
 installer + hooks, 3 CI, 4 prompt + packaging, 5 living docs); `F8` the
-controller's deferral ruling.
+controller's deferral ruling; `re-review seat A/B/C/D` the scoped re-review of the fix
+wave (A core + installer, B CI, C prompt layer, D living docs), whose parked items
+(ruling R-RR2) are listed here too.
 
 ## CI-return (needs a real Actions run)
 
@@ -48,7 +54,7 @@ controller's deferral ruling.
 - Agent Bash permission matching for `fragments merge … --remove`, and the exact `head_commit.message` forms GitHub produces for squash and merge commits. (deferred 334, 344; seats 3, 4)
 - `--force-with-lease` against GitHub in `commit-and-push.sh`. (deferred 344; seat 3)
 - Prefix matching of piped commands (`git diff -z … | .github/scripts/doc-tools.sh check-freshness --code-refs-from -`, `… | jq`) and `${CLAUDE_SKILL_DIR}` substitution for an action-installed plugin. (deferred 370; seats 3, 4)
-- The fix wave's CI changes have run only locally: the `tests.yml` drift step (`if: always()`, the retired-workflow check, the `install --git` summary) by extracting and running its body; `doc-pr-release`'s dispatch refusal of a fork PR (`gh pr view --json isCrossRepository`) and `commit-and-push.sh`'s `fragments list` pre-check through shims and fixtures. (final fix wave; seat 3)
+- The fix wave's CI changes have run only locally: the `tests.yml` drift step (`if: ${{ !cancelled() }}`, the retired-workflow check, the `install --git` summary) by extracting and running its body; `doc-pr-release`'s dispatch refusal of a fork PR (`gh pr view --json isCrossRepository`) and `commit-and-push.sh`'s `fragments list` pre-check through shims and fixtures. (final fix wave; seat 3)
 - `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"` on the action steps (documented as recommended hardening in `references/hooks.md`, not set in the templates): confirm `gh` still authenticates under it before setting it by default. (ruling F1; seat 3 S-I1)
 - The release flow: the AI templates install the plugin from tag `v<version>`, so tag `v3.0.0` must exist on GitHub when v3.0.0 ships. (deferred 297; seat 3)
 
@@ -97,6 +103,14 @@ controller's deferral ruling.
 - `doc-release.yml`'s `--allow` manifest list duplicates doc-tools.sh's `VERSION_FILES` (it matches today; drift fails closed). (deferred 305; seats 3, 4)
 - `fragments merge` ignores uncommitted fragment edits (it reads the `<range-end>` blobs), which surfaces only at `--remove` after drafting: warn at merge time. (deferred 342; seats 1, 3)
 - The consumer's `is_item` treats any `N.` / `N)` line as a list item (CommonMark: only `1.` interrupts a paragraph), so a paragraph line starting "10. …" can be split and deduped. (deferred 351; seat 3)
+- `set-code-refs --refs a,a` stores the ref twice (`["src/a.txt","src/a.txt"]`): dedupe the list as the doc paths are. (deferred 167; seat 1, re-review seat D)
+- `move-entry`'s `Repointed` report reads `done < <(jq …)` without checking jq's exit (`cmd_move_entry`, doc-tools.sh ~:3426), so a jq failure there drops report lines silently. (deferred 167; seat 1, re-review seat D)
+- `precheck.sh` parses RELEASE-NOTES.md headings with its own awk, which diverges from `_release_notes_version`: it skips a pre-release heading, and a `~~~` line inside a backtick fence ends its fence, exposing a fenced heading. Worst case a wasted AI run; a shared parser verb is a design change. (re-review seat B; ruling R-RR2)
+- `commit-and-push.sh`: the `fragments list` pre-check (:161) sends its stderr to /dev/null, and the refusal's "Fix it, then push again" (:164) is wrong for a draft the agent has not committed. (re-review seat B; ruling R-RR2)
+- `update-pr-body.sh`'s exit-code header says less than the script does: exit 1 also refuses a new section that contains a marker, and there are more malformed-marker cases than it names. (re-review seat B; ruling R-RR2)
+- `tools uninstall` checks for a symlinked `RELEASE-NOTES.next` only after it has removed the helpers. (re-review seat A; ruling R-RR2)
+- `_required` in `test-spec-status-model.sh` (the evals whose fixtures must build) is a hand-kept list: derive it from `.evals[] | select(.setup)`. (re-review seat C; ruling R-RR2)
+- `set-doc-type` accepts, besides the documented types, any type the index already uses — so a typo already in the index is accepted. Deliberate (a project's own vocabulary; `add-entry` accepts any type); recorded so it is not re-reported. (re-review seat A; ruling R-RR2)
 - The git and Claude hooks still list changed paths with `git -c core.quotePath=false diff --name-only` (git quotes a name holding `"`, a backslash or a tab even so, and a quoted name matches no ref); the CI scope step and the prompt layer switched to `git diff -z` in the fix wave, and `check-freshness --code-refs-from` takes a NUL-separated list, so the hooks can follow (a bash variable cannot hold NUL: pipe it). (final fix wave, S-M1 follow-on)
 
 ## Fix-later: docs
@@ -105,9 +119,14 @@ controller's deferral ruling.
 - `doc-spec.md`: `content_hash` is null after `build-index` too, not only for a missing doc. (deferred 148; seat 4)
 - The block-grammar end rule "any other line ends the block" is false for an indented line between the header and the first entry (doc-spec.md, doc-tools.sh `--help`, the I-10 issue). (deferred 262; seats 1, 4)
 - `references/hooks.md`: the corrupt-state recovery advice is unqualified (it works only for a plain install). (deferred 284; seat 4)
-- The architecture and workflow diagrams (PNGs) were not regenerated in the fix wave: their Mermaid sources changed (the C4 label's subcommand count 15 → 16, `set-doc-type`); regenerate with `/doc-superpowers diagram`. (final fix wave)
+- The C4 container diagram's PNG (`docs/architecture/diagrams/c4-container.png`) was not regenerated in the fix wave: only its Mermaid label changed (the subcommand count 15 → 16, `set-doc-type`). No workflow Mermaid block changed, so the workflow PNGs need nothing. Regenerate with `/doc-superpowers diagram`. (final fix wave; re-review seat D)
+- `references/release.md` step 2 has no rule for when `git log -1 -S '## vX.Y.Z'` finds no commit (a shallow or grafted history): say what the range start is then. (re-review seat C; ruling R-RR2)
 - The upgrade notes name v3.0.0, but RELEASE-NOTES.md and the manifests are still at v2.15.0: the v3.0.0 entry (incl. the `check-freshness` abort in deferred 130 and README *Upgrading from 2.x*) and `bump-version 3.0.0` belong to the release flow. (final fix wave; ruling R5)
+
+## After merge (owner)
+
+- This repository's shared `.git/hooks` and its `merge.doc-index.driver` registration (in the shared `.git/config`) still resolve another worktree's `scripts/`: the git tier was installed from a worktree during T14. After merging, run `scripts/hooks/install.sh install --git` from the main checkout. (deferred 396)
 
 ## Pulled into the final fix wave
 
-Resolved there, listed so the ledger's numbers stay traceable: deferred 98 (lock owner EPERM), 122 (`log.showSignature` in `fragments merge`), 166 (= C-M3), 167 (= C-M5), 189 (folded into README *Upgrading from 2.x*), 225 (= H-I2), 227 (its scope part: the entries a staged index adds), 264 (mawk ≥ 1.3.4), 281 (= H-M5 / P-M9), 318 (release branch per run attempt + the precheck regex), 352 (`update-pr-body.sh` header), 354 (= S-M6), 361 (= S-I1: no `jq` for the tag-mode job), 399 (SIGINT self-test), 405/406/407 (tests.yml drift step), 409 (writer timing budgets). Deferred 129 (`ls-files` without `-z`) was dropped: at HEAD the "matches no file" warning fires only for a ref also recorded missing, so a quoted name never produces it.
+Resolved there, listed so the ledger's numbers stay traceable: deferred 98 (lock owner EPERM), 122 (`log.showSignature` in `fragments merge`), 129 (`_warn_refs` reads `git ls-files -z`: fixed in the residual fix after the re-review), 166 (= C-M3), 167 (its `_INDEX_CHANGED` part, = C-M5; the other two parts are listed above), 189 (folded into README *Upgrading from 2.x*), 225 (= H-I2), 227 (its scope part: the entries a staged index adds), 264 (mawk ≥ 1.3.4), 281 (= H-M5 / P-M9), 318 (release branch per run attempt + the precheck regex), 352 (`update-pr-body.sh` header), 354 (= S-M6), 361 (= S-I1: no `jq` for the tag-mode job), 399 (SIGINT self-test), 405/406/407 (tests.yml drift step), 409 (writer timing budgets).

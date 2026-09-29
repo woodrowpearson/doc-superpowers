@@ -710,12 +710,17 @@ _doc_commits() {
   # other non-empty lines. The awk exits once every doc has its commit, so
   # git (and tr) may end on SIGPIPE: their statuses are checked apart, in a
   # subshell without pipefail — an early stop is fine, a failed walk is not.
+  # With SIGPIPE inherited as ignored, tr gets EPIPE instead and exits 1 (GNU
+  # tr at once, and git then ends 141; BSD tr after reading all of git's
+  # output, and git ends 0), saying so on stderr. tr only writes to a pipe,
+  # so a reader that stopped is its one way to fail: with awk at 0 and git
+  # at 0 or 141, tr's status is not checked, and its stderr is discarded.
   local rcs
   rcs=$(
     set +e +o pipefail
     git --literal-pathspecs -c core.quotePath=false -c log.showSignature=false \
         log --no-renames --format='%x01%H' --name-only -z --stdin < "$list" \
-      | tr '\000' '\n' \
+      | tr '\000' '\n' 2>/dev/null \
       | awk -v want="$list.paths" '
           BEGIN { while ((getline p < want) > 0) if (!(p in w)) { w[p] = 1; left++ } }
           substr($0, 1, 1) == "\001" { c = substr($0, 2); next }
@@ -726,7 +731,7 @@ _doc_commits() {
   local grc trc arc
   read -r grc trc arc <<<"$rcs"
   case "$arc:$grc:$trc" in
-    0:0:0|0:141:0|0:141:141|0:0:141) ;;
+    0:0:*|0:141:*) ;;
     *) _die "git log failed while finding the docs' last commits" ;;
   esac
   # Each hit's blob of the doc against HEAD's (one batch-check): the same
@@ -890,14 +895,16 @@ _tree_hash_list() {
 # recorded "missing" (a typo, an empty or all-ignored directory: HEAD agrees
 # until that path is committed, so the doc cannot go stale). One that holds
 # untracked content is recorded instead, and named by _worktree_tree. One
-# `git ls-files`, one awk.
+# `git ls-files`, one awk. The list is read NUL-separated: git quotes a name
+# holding `"`, a backslash or a tab even with core.quotePath=false, and a
+# quoted name would match no ref.
 _warn_refs() {
   local list="$1" unmatched="$2" tracked="$_SCRATCH/tracked" out r kind
   : > "$_SCRATCH/unmatched"
   [ -s "$list" ] || return 0
   : > "$tracked"
   if [ "$unmatched" = 1 ]; then
-    git -c core.quotePath=false ls-files > "$tracked" || _die "git ls-files failed"
+    git ls-files -z | tr '\000' '\n' > "$tracked" || _die "git ls-files failed"
   fi
   out=$(awk -v reffile="$list" -v unmatched="$unmatched" '
     function norm(r,   n, i, parts, out) {
@@ -2102,14 +2109,15 @@ fragments merge|cmd_fragments_merge|repo|paths-out= remove
   <range-start> <range-end> [--paths-out <file>] [--remove]
   Print the merged sections of every fragment present at <range-end>: a
   fragment is unreleased until a release deletes it. <range-start> is the
-  previous release (its tag), or ROOT for the first one. Each fragment is
-  merged losslessly or skipped with a warning (it stays for the next
-  release). --paths-out writes the consumed paths, one per line; --remove
-  (<range-end> must be HEAD) git-rm's exactly those. Exits 3, naming them,
-  when a fragment here was already consumed by <range-start>, or by a v*
-  release tag cut from this history after it, whose release commit has not
-  reached <range-end> (merge or cherry-pick it first); 1 on any other
-  failure.
+  latest release: its version's tag, else the commit that added its
+  RELEASE-NOTES.md heading (an untagged release); ROOT for the first one.
+  Each fragment is merged losslessly or skipped with a warning (it stays
+  for the next release). --paths-out writes the consumed paths, one per
+  line; --remove (<range-end> must be HEAD) git-rm's exactly those. Exits
+  3, naming them, when a fragment here was already consumed by
+  <range-start>, or by a v* release tag cut from this history after it,
+  whose release commit has not reached <range-end> (merge or cherry-pick
+  it first); 1 on any other failure.
 tools install|cmd_tools_install|deps|dest= with-helpers helper=*
   [--dest <path>] [--with-helpers | --helper <dir>...]
   Vendor doc-tools.sh into <path> (default .github/scripts); with
@@ -2249,10 +2257,11 @@ Exit status:
   0  success
   1  the operation failed or was refused (an invalid mapping line, a path
      outside the repo, a key not in the index, an unknown doc_type,
-     build-index over a non-empty index without --force, …). A verb given
-     several paths applies the rest and exits 1 at the end. The one
-     exception: remove-entry exits 0 for a key not in the index (SKIP),
-     since the absent entry is the end state asked for.
+     build-index over a non-empty index without --force, …).
+     update-index and deprecate-entry report and skip a path not in the
+     index, apply the rest, then exit 1. The one exception: remove-entry
+     exits 0 for a key not in the index (SKIP), since the absent entry is
+     the end state asked for.
   2  usage error: an unknown subcommand or option, an option without its
      value, the wrong number of arguments (including one given to a
      subcommand that takes none), or a repository subcommand run outside a

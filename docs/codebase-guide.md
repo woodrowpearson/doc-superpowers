@@ -145,7 +145,8 @@ doc-superpowers/
 | `CLAUDE.md` | Quick-reference for AI sessions: directory structure, commands, conventions | After structural changes, new conventions |
 | `RELEASE-NOTES.md` | Version history with features, fixes, lineage | Every release |
 | `.github/workflows/tests.yml` | This repo's CI: the five suites under bash 5.x and `/bin/bash` 3.2, `check-version`, and the step that fails when a self-installed file drifts from its template | Adding a suite or a CI requirement |
-| `.github/workflows/doc-freshness-*.yml`, `.github/scripts/`, `.claude/doc-superpowers/installed.json`, `.gitattributes` | This repo's own installed tiers — installer output | Never by hand: re-run `bash scripts/hooks/install.sh install --ci` after changing a CI template, `doc-tools.sh` or a CI helper, and commit the result |
+| `.github/workflows/doc-freshness-*.yml`, `.github/scripts/`, `.claude/doc-superpowers/installed.json` | This repo's own installed CI tier — installer output | Never by hand: re-run `bash scripts/hooks/install.sh install --ci` after changing a CI template, `doc-tools.sh` or a CI helper, and commit the result (tests.yml fails on drift) |
+| `.gitattributes` | The git tier's one committed piece: the `docs/.doc-index.json` merge-driver block — installer output | Never by hand: `bash scripts/hooks/install.sh install --git` writes it (tests.yml's drift step fails without it, and names `install --git`) |
 | `evals/evals.json`, `evals/fixtures/` | Skill evals with machine-checkable fields; each eval's scenario built by `fixtures/<eval>/setup.sh` | Adding or changing an eval (`test-spec-status-model.sh` validates both) |
 
 ## Where to Find Things
@@ -251,7 +252,7 @@ User invokes /doc-superpowers audit
 
 ### Index write path (every verb that writes `docs/.doc-index.json`)
 
-`build-index`, `update-index`, `add-entry`, `remove-entry`, `move-entry`, `set-code-refs` and `deprecate-entry` all persist through one primitive in `scripts/doc-tools.sh`. The skill's `update` action runs one agent per stale doc, each calling `update-index`, so these writers run concurrently.
+`build-index`, `update-index`, `add-entry`, `remove-entry`, `move-entry`, `set-code-refs`, `set-doc-type` and `deprecate-entry` all persist through one primitive in `scripts/doc-tools.sh`. The skill's `update` action runs one agent per stale doc, each calling `update-index`, so these writers run concurrently.
 
 ```
 verb parses its arguments / stdin

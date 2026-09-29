@@ -112,11 +112,11 @@ The marker identifies a generated doc and carries no date or commit. Freshness i
 
 ### CLAUDE.md Cross-Cutting Sync
 
-Every write action (`init`, `update`, `sync`, `release`, `spec-generate`) must sync CLAUDE.md to reflect the current project state after changes are applied. This includes the Directory Structure tree, Key Files table, Commands section, and any scope-specific entries. See `references/doc-spec.md` for CLAUDE.md update rules.
+Every write action (`init`, `update`, `sync`, `release`, `spec-generate`) must sync CLAUDE.md to reflect the current project state after changes are applied. This includes the Directory Structure tree, Key Files table, Commands section, and any scope-specific entries. See `references/doc-spec.md` for CLAUDE.md update rules. In a doc-superpowers CI workflow, `update` and `sync` report the change instead of making it (the commit step accepts only `docs/` and the indexed docs).
 
 ### README.md Cross-Cutting Sync
 
-Every write action (`init`, `update`, `sync`, `release`, `spec-generate`) must sync README.md to reflect the current project state after changes are applied. This includes the feature list, action list, and usage examples. See `references/doc-spec.md` for README.md update rules. Skip if no README.md exists.
+Every write action (`init`, `update`, `sync`, `release`, `spec-generate`) must sync README.md to reflect the current project state after changes are applied. This includes the feature list, action list, and usage examples. See `references/doc-spec.md` for README.md update rules. Skip if no README.md exists. In a doc-superpowers CI workflow, `update` and `sync` report the change instead, as for CLAUDE.md.
 
 ### Archive Conventions
 
@@ -366,7 +366,7 @@ Only `deprecated` is **stored**. `current`, `stale` and `missing` are **computed
 | any but `deprecated` | `missing` (computed) | The doc's file is gone (with `--tree`: absent from that tree) — record docs included |
 | any but `deprecated` / `missing` | `current` (computed, `"record": true`) | Record docs (`plan`, `issue`, `audit`, `design-spec`, `docs/archive/`) are never compared |
 | any | `deprecated` (stored) | `deprecate-entry`: a human decision, or spec supersession via `spec-generate` (`--superseded-by` also sets the successor's `replaces`) |
-| `deprecated` | — | Terminal for automated tools: `update-index`, `move-entry`, `set-code-refs` and `build-index --force` all keep it |
+| `deprecated` | — | Terminal for automated tools: `update-index`, `move-entry`, `set-code-refs`, `set-doc-type` and `build-index --force` all keep it |
 
 `deprecated` is a terminal state for automated tools.
 
