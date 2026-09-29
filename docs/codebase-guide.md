@@ -291,7 +291,8 @@ User invokes /doc-superpowers release [--from=<ref>]
     → Determine the range start:
       → --from=<ref> if given
       → else the tag of the latest version (git tag -l "vX.Y.Z")
-      → else the nearest release tag behind HEAD (git describe --tags --abbrev=0 --match 'v[0-9]*')
+      → else the commit that added its heading (git log -1 --format=%H -S '## vX.Y.Z' -- RELEASE-NOTES.md)
+      → with no version entry: the nearest release tag behind HEAD (git describe --tags --abbrev=0 --match 'v[0-9]*')
       → else ROOT (the first release)
       → If no commits found: exit "No unreleased commits."
     → Auto-suggest semver bump from conventional commit prefixes

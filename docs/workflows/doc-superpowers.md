@@ -257,7 +257,7 @@ Same read-only gather-analyze-report pattern as audit, but scoped to PR-affected
 
 1. Identify the changed files — the caller's range or base when it names one (a CI prompt does), otherwise `origin/HEAD`, falling back to `origin/main`. A base that does not exist stops the review (ask the user for it — never read a failed diff as "no changes"), and an empty list ends it: "No changes against <base> — nothing to review". The review is read-only and runs no repository script: the checkout is the PR author's code
 2. Run discovery to map changed files to documentation scopes (via doc-index `code_refs`, directory heuristics, or skill/command file changes)
-3. Pipe the changed files (`git -c core.quotePath=false diff --name-only --no-renames`) to `doc-tools.sh check-freshness --code-refs-from -` — scope freshness check to PR (docs whose `code_refs` share a path segment with a changed file)
+3. Pipe the changed files (`git diff -z --name-only --no-renames`: NUL-separated, so git quotes no name) to `doc-tools.sh check-freshness --code-refs-from -` — scope freshness check to PR (docs whose `code_refs` share a path segment with a changed file)
 4. Dispatch scope agents only for affected scopes (same read-only gather→analyze→report cycle as audit). **Isolation constraint**: each scope agent receives context ONLY for its scope — no cross-scope context
 5. Check CLAUDE.md impact — if PR changes affect directory structure, scripts, commands, or key files listed in CLAUDE.md, flag as P1 (removed/renamed paths) or P2 (new paths to add)
 6. Check README.md impact — if PR changes affect actions, features, or capabilities described in README.md, flag as P1 (removed/changed features) or P2 (new features to add)
@@ -300,7 +300,7 @@ Update is the **write counterpart** to audit's read-only analysis. It consumes a
 1. Run discovery's filtered `check-freshness`
 2. Reconcile each doc it lists through SKILL.md's **Index-write routing** table:
    - **`untracked`** (on disk, not indexed) → pipe its mapping line to `add-entry` (never `build-index`, which refuses a non-empty index)
-   - **`missing`** (indexed, file gone) → find out what happened (`git log --diff-filter=DR --name-status -- <doc>`): moved → `move-entry`; archived → `move-entry` + `deprecate-entry`; deleted → `remove-entry`
+   - **`missing`** (indexed, file gone) → find out what happened: the commit that removed it (`git log -1 --format=%H --diff-filter=D -- <doc>`), then whether that commit renamed or deleted it (`git show -M --name-status --format= <commit>`; a log limited to the old path shows a rename as a deletion); no such commit → an uncommitted change, matched against the `untracked` docs. Moved → `move-entry`; archived → `move-entry` + `deprecate-entry`; deleted → `remove-entry`
    - **`doc_modified`** (edited since verified) → read it against its code refs; accurate → `update-index`, otherwise list it for `update`
    - **`stale`** → list it for `update`; never `update-index` a doc nobody read against its code
 3. Run `doc-tools.sh update-index` for the docs verified in step 2, and only those. No project script runs (*Safety Rules*)
@@ -475,7 +475,7 @@ Analyzes commits since the last release, merges per-PR release-notes fragments p
 ### Steps
 
 1. Parse RELEASE-NOTES.md to extract latest version, date, and section headings
-2. Determine the range start: `--from=<ref>`, else the tag of RELEASE-NOTES.md's latest version, else the nearest `v*` release tag behind HEAD, else `ROOT` (the first release)
+2. Determine the range start: `--from=<ref>`, else the tag of RELEASE-NOTES.md's latest version, else the commit that added that version's heading (`git log -1 --format=%H -S '## vX.Y.Z' -- RELEASE-NOTES.md`: an untagged release is still a release); only with no version entry, the nearest `v*` release tag behind HEAD, else `ROOT` (the first release)
 3. **Merge the PR fragments before drafting** — `doc-tools.sh fragments merge <start> HEAD` takes every `RELEASE-NOTES.next/PR-*.md` still present at HEAD (a fragment is unreleased until a release deletes it, also one merged after an earlier release branch was cut). Each is merged losslessly or skipped — named on stderr with the reason and left for the next release (wrong line-1 marker, text before the first `###` heading, a `#`/`##` heading, an unclosed fence, no notes, a symlink). Hand-edited (drifted) fragments are merged as written, with a warning; a `<!-- doc-superpowers:no-notes -->` fragment is consumed silently. Notes are deduped as units (a list item, or a paragraph after a blank line, with every line up to the next one — sub-bullets, wrapped lines, fences), sections fold onto one vocabulary (`Added`…`Dependencies`) in its order. It refuses (exit 3; 1 is any other failure) when a release consumed fragments that are still here — its release commit never reached this branch — and the action stops
 4. Auto-suggest version bump from conventional commit prefixes (feat→MINOR, fix→PATCH, BREAKING→MAJOR)
 5. Dispatch a single general-purpose agent with the merged fragment sections (priority), commit list, diffs, and format exemplar; it maps the fragment sections onto the headings RELEASE-NOTES.md uses (table in `RELEASE-NOTES.next/README.md`)

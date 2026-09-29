@@ -107,7 +107,7 @@
           "name": "runs-check-freshness",
           "type": "tool_call_check",
           "description": "Calls doc-tools.sh check-freshness as part of the audit",
-          "command": "doc-tools\\.sh check-freshness"
+          "command": "doc-tools\\.sh\"? check-freshness"
         },
         {
           "name": "read-only",
@@ -154,7 +154,7 @@
         {
           "name": "no-repo-scripts",
           "type": "tool_call_check",
-          "command": "(uv run|python3?) scripts/",
+          "command": "(uv run |python3? |bash |sh |\\./)scripts/",
           "negate": true,
           "description": "Discovery never runs a repository script"
         }
@@ -195,20 +195,20 @@
         {
           "name": "calls-update-index",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh update-index .*docs/",
+          "command": "doc-tools\\.sh\"? update-index .*docs/",
           "description": "Calls doc-tools.sh update-index for each updated doc"
         },
         {
           "name": "never-build-index",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh build-index",
+          "command": "doc-tools\\.sh\"? build-index",
           "negate": true,
           "description": "Never rebuilds (replaces) the existing index"
         },
         {
           "name": "runs-verification-gate",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh check-freshness",
+          "command": "doc-tools\\.sh\"? check-freshness",
           "description": "Runs doc-tools.sh check-freshness after updates to verify all docs are current"
         },
         {
@@ -249,6 +249,19 @@
           "path": "docs/.doc-index.json",
           "pattern": "\"docs/archive/plans/2026-09-01-audit-report\\.md\"",
           "description": "The indexed report is re-keyed to its archive path with move-entry (never remove-entry + add-entry)"
+        },
+        {
+          "name": "re-keys-with-move-entry",
+          "type": "tool_call_check",
+          "command": "move-entry",
+          "description": "The archive block re-keys the report with move-entry (it runs \"$DOC_TOOLS\" move-entry, so match the verb, not the path)"
+        },
+        {
+          "name": "no-remove-of-report",
+          "type": "tool_call_check",
+          "command": "remove-entry[^|;&]*audit-report",
+          "negate": true,
+          "description": "…never remove-entry + add-entry of the report (that drops its verification and links)"
         },
         {
           "name": "old-report-key-gone",
@@ -293,20 +306,20 @@
         {
           "name": "indexes-new-specs",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh add-entry",
+          "command": "doc-tools\\.sh\"? add-entry",
           "description": "Indexes the new specs with doc-tools.sh add-entry (the index already exists)"
         },
         {
           "name": "no-update-index-for-new-specs",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh update-index[^|;&]*SPEC-",
+          "command": "doc-tools\\.sh\"? update-index[^|;&]*SPEC-",
           "negate": true,
           "description": "Never routes a new spec to update-index (it reports it not indexed and exits 1)"
         },
         {
           "name": "no-build-index",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh build-index",
+          "command": "doc-tools\\.sh\"? build-index",
           "negate": true,
           "description": "Never rebuilds the existing index"
         },
@@ -472,13 +485,13 @@
         {
           "name": "uses-installer",
           "type": "tool_call_check",
-          "command": "install\\.sh install .*--all",
+          "command": "install\\.sh\"? install .*--all",
           "description": "Routes to the installer; never hand-edits settings or copies templates"
         },
         {
           "name": "never-force",
           "type": "tool_call_check",
-          "command": "install\\.sh [^|;&]*--force",
+          "command": "install\\.sh\"? [^|;&]*--force",
           "negate": true,
           "description": "Never passes --force unasked"
         },
@@ -518,7 +531,7 @@
           "name": "scoped-freshness-check",
           "type": "tool_call_check",
           "description": "Calls doc-tools.sh check-freshness scoped to changed paths (not full project)",
-          "command": "doc-tools\\.sh check-freshness --code-refs-from"
+          "command": "doc-tools\\.sh\"? check-freshness --code-refs-from"
         },
         {
           "name": "read-only",
@@ -546,7 +559,7 @@
         {
           "name": "no-repo-scripts",
           "type": "tool_call_check",
-          "command": "(uv run|python3?) scripts/",
+          "command": "(uv run |python3? |bash |sh |\\./)scripts/",
           "negate": true,
           "description": "Runs no repository script: the checkout is the PR author's code"
         }
@@ -596,7 +609,7 @@
       "id": 9,
       "name": "sync-index",
       "prompt": "I manually added a few doc files and removed one. Can you sync the doc index? /doc-superpowers sync",
-      "expected_output": "Should run check-freshness (through the discovery jq filter), add the two hand-added docs with add-entry (choosing literal-path code_refs), remove the deleted docs/old-notes.md entry with remove-entry, never run build-index (it refuses a non-empty index), call update-index only for docs it read against their code, and never run the repository's scripts/validate_*.py (they are listed, not executed). Then update specs/adr README indexes if present, check CLAUDE.md/README.md currency, and summarise the hooks status.",
+      "expected_output": "Should run check-freshness (through the discovery jq filter), add the two hand-added docs with add-entry (choosing literal-path code_refs), find from history that docs/guides/getting-started.md was renamed to docs/guides/quickstart.md (git log -1 --diff-filter=D on the old path, then git show -M --name-status on that commit) and re-key it with move-entry, remove the deleted docs/old-notes.md entry with remove-entry, never run build-index (it refuses a non-empty index), call update-index only for docs it read against their code, and never run the repository's scripts/validate_*.py (they are listed, not executed). Then update specs/adr README indexes if present, check CLAUDE.md/README.md currency, and summarise the hooks status.",
       "files": [
         "evals/fixtures/sync-index/setup.sh",
         "evals/fixtures/lib.sh"
@@ -605,27 +618,40 @@
         {
           "name": "runs-check-freshness",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh check-freshness",
+          "command": "doc-tools\\.sh\"? check-freshness",
           "description": "Calls doc-tools.sh check-freshness to detect drift"
         },
         {
           "name": "adds-untracked",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh add-entry",
+          "command": "doc-tools\\.sh\"? add-entry",
           "description": "Indexes the hand-added docs with add-entry"
         },
         {
           "name": "removes-missing",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh remove-entry .*docs/old-notes\\.md",
+          "command": "doc-tools\\.sh\"? remove-entry .*docs/old-notes\\.md",
           "description": "Removes the deleted doc's entry with remove-entry"
+        },
+        {
+          "name": "moves-renamed",
+          "type": "tool_call_check",
+          "command": "doc-tools\\.sh\"? move-entry .*docs/guides/getting-started\\.md.*docs/guides/quickstart\\.md",
+          "description": "Re-keys the doc renamed in a commit with move-entry (its verification and links survive)"
+        },
+        {
+          "name": "never-removes-renamed",
+          "type": "tool_call_check",
+          "command": "remove-entry[^|;&]*getting-started",
+          "negate": true,
+          "description": "…never remove-entry + add-entry for it"
         },
         {
           "name": "never-build-index",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh build-index",
+          "command": "doc-tools\\.sh\"? build-index",
           "negate": true,
-          "description": "Never runs build-index on the existing index (it refuses a non-empty index; --force discards every entry's metadata)"
+          "description": "Never runs build-index on the existing index (it refuses a non-empty index; --force re-records every entry unverified)"
         },
         {
           "name": "index-has-new-docs",
@@ -633,7 +659,8 @@
           "path": "docs/.doc-index.json",
           "pattern": [
             "\"docs/guides/new-guide\\.md\"",
-            "\"docs/architecture/cache\\.md\""
+            "\"docs/architecture/cache\\.md\"",
+            "\"docs/guides/quickstart\\.md\""
           ],
           "description": "The index ends up with both new docs"
         },
@@ -644,6 +671,14 @@
           "pattern": "\"docs/old-notes\\.md\"",
           "negate": true,
           "description": "…and without the deleted one"
+        },
+        {
+          "name": "index-drops-renamed-key",
+          "type": "content_check",
+          "path": "docs/.doc-index.json",
+          "pattern": "\"docs/guides/getting-started\\.md\"",
+          "negate": true,
+          "description": "…nor the renamed doc's old key"
         },
         {
           "name": "no-repo-scripts-run",
@@ -718,7 +753,7 @@
           "name": "checks-freshness",
           "type": "tool_call_check",
           "description": "Runs doc-tools.sh check-freshness against governing specs",
-          "command": "doc-tools\\.sh (check-freshness|status)"
+          "command": "doc-tools\\.sh\"? (check-freshness|status)"
         },
         {
           "name": "checks-status-fields",
@@ -768,7 +803,7 @@
         {
           "name": "runs-fragments-merge",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh fragments merge v1\\.2\\.0 HEAD( [^-].*)?$",
+          "command": "doc-tools\\.sh\"? fragments merge v1\\.2\\.0 HEAD( [^-].*)?$",
           "description": "Runs `fragments merge v1.2.0 HEAD` without --remove (step 3; the --remove call of step 8 does not match)"
         },
         {
@@ -810,7 +845,7 @@
         {
           "name": "uses-bump-version",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh bump-version 1\\.3\\.0",
+          "command": "doc-tools\\.sh\"? bump-version 1\\.3\\.0",
           "description": "Bumps with doc-tools.sh bump-version, never by hand"
         },
         {
@@ -907,7 +942,7 @@
         {
           "name": "checks-spec-freshness",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh (status|check-freshness)",
+          "command": "doc-tools\\.sh\"? (status|check-freshness)",
           "description": "Queries the governing specs' freshness (status per spec, or one check-freshness)"
         },
         {
@@ -935,7 +970,7 @@
         {
           "name": "target-reindexed",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh update-index[^|;&]*SPEC-AUTH-001",
+          "command": "doc-tools\\.sh\"? update-index[^|;&]*SPEC-AUTH-001",
           "description": "update-index on the target after reading it"
         },
         {
@@ -948,7 +983,7 @@
         {
           "name": "constraint-not-written",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh (update-index|set-code-refs)[^|;&]*SPEC-API-006",
+          "command": "doc-tools\\.sh\"? (update-index|set-code-refs)[^|;&]*SPEC-API-006",
           "negate": true,
           "description": "No index write for the constraint spec"
         },
@@ -962,7 +997,7 @@
         {
           "name": "exempt-not-written",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh (update-index|set-code-refs)[^|;&]*SPEC-ARCH-004",
+          "command": "doc-tools\\.sh\"? (update-index|set-code-refs)[^|;&]*SPEC-ARCH-004",
           "negate": true,
           "description": "An exempt spec gets no code_refs change and no update-index (R3: write nothing)"
         },
@@ -994,7 +1029,7 @@
         {
           "name": "maps-changed-files",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh check-freshness --code-refs-from",
+          "command": "doc-tools\\.sh\"? check-freshness --code-refs-from",
           "description": "Maps changed files to specs through the index's path-segment match"
         },
         {
@@ -1118,9 +1153,9 @@
         {
           "name": "merge-precedes-remove",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh fragments merge v1\\.2\\.0 HEAD( [^-].*)?$",
+          "command": "doc-tools\\.sh\"? fragments merge v1\\.2\\.0 HEAD( [^-].*)?$",
           "description": "`fragments merge v1.2.0 HEAD` (no --remove) runs, and before the step-8 --remove call",
-          "precedes": "doc-tools\\.sh fragments merge v1\\.2\\.0 HEAD --remove"
+          "precedes": "doc-tools\\.sh\"? fragments merge v1\\.2\\.0 HEAD --remove"
         },
         {
           "name": "merges-before-drafting",
@@ -1130,7 +1165,7 @@
         {
           "name": "removes-with-remove",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh fragments merge v1\\.2\\.0 HEAD --remove",
+          "command": "doc-tools\\.sh\"? fragments merge v1\\.2\\.0 HEAD --remove",
           "description": "Removes the consumed fragments with --remove (same arguments)"
         },
         {
@@ -1196,19 +1231,19 @@
         {
           "name": "runs-status",
           "type": "tool_call_check",
-          "command": "install\\.sh status",
+          "command": "install\\.sh\"? status",
           "description": "Reports installed hooks through the installer"
         },
         {
           "name": "uninstalls-claude-tier",
           "type": "tool_call_check",
-          "command": "install\\.sh uninstall --claude",
+          "command": "install\\.sh\"? uninstall --claude",
           "description": "Uninstalls only the Claude tier"
         },
         {
           "name": "keeps-git-tier",
           "type": "tool_call_check",
-          "command": "install\\.sh uninstall[^|;&]*(--git|--all)",
+          "command": "install\\.sh\"? uninstall[^|;&]*(--git|--all)",
           "negate": true,
           "description": "Never uninstalls the git tier"
         },
@@ -1270,13 +1305,13 @@
         {
           "name": "calls-update-index",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh update-index .*docs/",
+          "command": "doc-tools\\.sh\"? update-index .*docs/",
           "description": "Calls doc-tools.sh update-index for each updated doc"
         },
         {
           "name": "never-build-index",
           "type": "tool_call_check",
-          "command": "doc-tools\\.sh build-index",
+          "command": "doc-tools\\.sh\"? build-index",
           "negate": true,
           "description": "Never rebuilds the index"
         },
@@ -1307,6 +1342,72 @@
           "description": "Archives its own applied report without a confirmation prompt (the Safety Rules exception) and says where it went"
         }
       ]
+    },
+    {
+      "id": 20,
+      "name": "release-draft-untagged",
+      "prompt": "We've landed a feature, a fix and a docs change since the last release. Let's cut a new version. /doc-superpowers release",
+      "expected_output": "Should read references/release.md and parse RELEASE-NOTES.md (v1.2.0). v1.2.0 has no tag, so the range starts at the commit that added its heading (git log -1 --format=%H -S '## v1.2.0' -- RELEASE-NOTES.md) — never at the older v1.1.0 tag or ROOT, which would pull in the breaking change v1.2.0 already released. Runs `fragments merge <that commit> HEAD` before drafting, suggests MINOR (v1.3.0) from the feat, fix and docs commits with evidence, bumps package.json with bump-version, commits the release in ONE commit, and offers the tag (mentioning that v1.2.0 was never tagged).",
+      "files": [
+        "evals/fixtures/release-draft-untagged/setup.sh",
+        "evals/fixtures/lib.sh"
+      ],
+      "assertions": [
+        {
+          "name": "parses-latest-version",
+          "type": "file_read",
+          "path": "RELEASE-NOTES.md",
+          "description": "Reads RELEASE-NOTES.md to extract the latest version (v1.2.0)"
+        },
+        {
+          "name": "finds-the-release-commit",
+          "type": "tool_call_check",
+          "command": "git log[^|;&]*-S[^|;&]*## v1\\.2\\.0",
+          "description": "No v1.2.0 tag: finds the commit that added the v1.2.0 heading with git log -S"
+        },
+        {
+          "name": "merges-from-the-release-commit",
+          "type": "tool_call_check",
+          "command": "doc-tools\\.sh\"? fragments merge [0-9a-f]{7,40} HEAD( [^-].*)?$",
+          "description": "Runs `fragments merge <release commit> HEAD` (without --remove) before drafting"
+        },
+        {
+          "name": "never-from-an-older-release",
+          "type": "tool_call_check",
+          "command": "(fragments merge (v1\\.1\\.0|ROOT) |git log[^|;&]*v1\\.1\\.0\\.\\.HEAD)",
+          "negate": true,
+          "description": "Never takes the range from the older v1.1.0 tag or ROOT"
+        },
+        {
+          "name": "suggests-minor",
+          "type": "output_check",
+          "pattern": "v1\\.3\\.0",
+          "description": "Suggests MINOR (v1.3.0): the breaking change is in the released v1.2.0, not in the range"
+        },
+        {
+          "name": "prepends-to-release-notes",
+          "type": "content_check",
+          "path": "RELEASE-NOTES.md",
+          "pattern": "^## v1\\.3\\.0",
+          "count": 1,
+          "description": "The v1.3.0 entry is inserted after the header, before v1.2.0"
+        },
+        {
+          "name": "no-major-entry",
+          "type": "content_check",
+          "path": "RELEASE-NOTES.md",
+          "pattern": "^## v2\\.",
+          "negate": true,
+          "description": "No MAJOR bump from the already-released breaking change"
+        },
+        {
+          "name": "uses-bump-version",
+          "type": "tool_call_check",
+          "command": "doc-tools\\.sh\"? bump-version 1\\.3\\.0",
+          "description": "Bumps with doc-tools.sh bump-version, never by hand"
+        }
+      ],
+      "setup": "evals/fixtures/release-draft-untagged/setup.sh"
     }
   ],
   "assertion_fields": {

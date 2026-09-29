@@ -731,7 +731,7 @@ _doc_commits() {
   esac
   # Each hit's blob of the doc against HEAD's (one batch-check): the same
   # blob — or both absent, a doc deleted at its hit — keeps the hit.
-  local checks="$_SCRATCH/dc.checks" verdict="$_SCRATCH/dc.verdict" fixed="$_SCRATCH/dc.fixed" d c
+  local verdict="$_SCRATCH/dc.verdict" fixed="$_SCRATCH/dc.fixed" d c
   awk -F '\t' -v head="$_HEAD" '{ c = $NF; d = substr($0, 1, length($0) - length(c) - 1)
                                    print c ":" d; print head ":" d }' "$hits" \
     | git cat-file --batch-check='%(objectname)' \
@@ -2774,7 +2774,7 @@ cmd_build_index() {
     if [ "${have:-0}" -gt 0 ]; then
       echo "ERROR: $INDEX_FILE already has $have $([ "$have" -eq 1 ] && echo entry || echo entries); build-index would replace them all." >&2
       echo "       Use add-entry, update-index or remove-entry for incremental changes, or" >&2
-      echo "       build-index --force to rebuild from scratch (deprecations and other metadata are lost)." >&2
+      echo "       build-index --force to rebuild from scratch (every entry is re-recorded unverified; only each re-indexed key's deprecation is kept)." >&2
       exit 1
     fi
   fi
