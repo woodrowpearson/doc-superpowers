@@ -21,7 +21,7 @@ When a code review skill completes, it should check if doc updates are needed:
 
 ```
 After code review completes, check:
-  1. Run freshness check (script or git heuristic)
+  1. Run the freshness check (`doc-tools.sh check-freshness`; with no doc-tools.sh, stop and say so)
   2. If stale docs detected:
      - Print: "Documentation may need updating. Run /doc-superpowers review-pr"
      - Include the list of stale docs in the review output
@@ -56,8 +56,10 @@ Wrapper skills integrate doc-superpowers spec lifecycle actions at pipeline inte
 Post-brainstorm → spec-generate --design-doc=<path>
                   (spec-generate syncs CLAUDE.md if new dirs bootstrapped)
 During plan    → spec-inject --phase=plan --plan=<path> --specs=<paths>
-After chunk    → spec-inject --phase=execute --specs=<paths>
-Pre-finish     → spec-verify --mode=post-execute --specs=<paths> --design-doc=<path>
+After chunk    → spec-inject --phase=execute --specs=<paths> --plan=<path>
+Pre-finish     → spec-verify --mode=post-execute --specs=<paths> --design-doc=<path> --plan=<path>
                   (spec-verify checks CLAUDE.md currency as part of compliance)
-During review  → spec-verify --mode=review --changed-files=<paths>
+During review  → spec-verify --mode=review --changed-files=<paths> --specs=<paths> --plan=<path>
 ```
+
+`--specs` paths may carry a role suffix (`:target`, `:constraint`, `:amends`); pass the same list at every point, and `--plan` wherever the work has a plan — it is what lets an `:amends` spec's landed-check attribute the block to this plan.

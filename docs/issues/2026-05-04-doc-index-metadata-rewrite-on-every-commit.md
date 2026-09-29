@@ -1,6 +1,6 @@
 ---
 date: 2026-05-04
-status: Open
+status: Resolved
 priority: P2
 type: enhancement
 component: doc-index
@@ -71,6 +71,12 @@ The merge driver works perfectly **locally**: 3-way jq merge, union by key,
 newer `last_verified` wins, regenerates `generated_at`/`build_commit` to
 current. But:
 
+> **Correction (sweep 05ea982, I-5):** that driver was not three-way and did
+> not work perfectly. It used the base only to detect additions, and let the
+> entry with the newer `last_verified` carry the whole key. A change only one
+> side made was lost whenever the other side's timestamp was newer, and a
+> deletion won over a modification. See the Task 6 resolution below.
+
 - GitHub's server-side mergeability check uses `git`'s default text merge
   with no driver registration — it always reports a conflict on this file
   whenever the top-level lines diverge.
@@ -89,7 +95,12 @@ PR UI until a human rebases locally and pushes the resolved version.
 3. Merge PR A.
 4. Observe: PR B now shows "this branch has conflicts" — solely because of
    the top-level metadata divergence in `docs/.doc-index.json`.
-5. Rebase PR B locally → driver resolves silently → push.
+5. Rebase PR B locally → driver resolves silently → push. *(Corrected by
+   I-5: before Task 6 this silent resolution was lossy, and a rebase lost
+   different changes from a merge because it replays in the other direction.
+   Do not treat rebase as the safe path. Since Task 6 a rebase gives the same
+   docs as a merge, and anything the driver cannot decide stops with conflict
+   markers.)*
 6. Repeat for the next PR that lands while another is open.
 
 **Frequency:** every PR that overlaps in time with another commit to `main`.
@@ -116,7 +127,9 @@ guaranteeing a conflict surface for every PR.
     even unchanged docs)
 - The merge driver (`scripts/merge-doc-index.sh`) already handles these
   fields correctly during local merge — see `newer_entry` jq function and
-  the regenerated top-level metadata in the merge output.
+  the regenerated top-level metadata in the merge output. *(Superseded by
+  Task 6: `newer_entry` and the regenerated metadata were the I-5 defect.
+  The driver now merges three-way and keeps ours' top level.)*
 
 ## Proposed Solution
 
@@ -188,6 +201,90 @@ the meaning of these fields. Less clean than splitting; not recommended.
 3. **Does GitHub-side mergeability check now pass without the per-PR
    workflow?** Should test in a consumer repo before declaring victory —
    the workflow is belt-and-suspenders even after this lands.
+
+## Resolution (sweep 05ea982 Tasks 4, 6 and 7)
+
+Task 4 ([I-1](2026-09-27-sweep-05ea982-I01-freshness-identity-model.md)) removes most of the
+*content* churn from this conflict surface. It does not change the top-level metadata:
+
+- **Verification is content-addressed.** A doc's freshness is its refs' object ids (`code_oids`), not
+  the id of the last commit touching them. Two branches that verify the same bytes now write the same
+  `code_oids`. Squash merges, rebase-merges and cherry-picks no longer re-stale a doc that then needs a
+  fresh `update-index` (and a fresh index diff) on each branch.
+- **A no-op write is still byte-identical** (T2): nothing is written, and `generated_at` is not bumped.
+  The first real write stamps `schema_version: 3`.
+
+Left for the owning Tasks: the premise that a post-commit hook runs `update-index` on every commit was
+refuted (see I-6; T7 removes that dead call and moves pre-commit to `--tree`). The merge driver's
+three-way semantics are I-5 (T6). `last_verified` re-stamping belongs to T5. This issue stays open
+until those land.
+
+### Task 6 ([I-5](2026-09-27-sweep-05ea982-I05-merge-driver-not-three-way.md))
+
+The local half of this issue rested on the driver, and the driver was lossy. Task 6 replaces it with
+a base-aware, per-key three-way merge.
+
+- **A change only one side made always survives.** This holds for a deprecation, a repoint, a
+  re-verification, a hand edit and a deletion, in every direction: `git merge` either way,
+  `git rebase` either way, and `git revert`.
+- **The same docs either way.** Rebase is no longer a riskier path than merge: both give the same
+  docs, with no exception. When both sides changed one field to different values and
+  `last_verified` does not say which is newer, the merge stops with markers naming the key and
+  field in every direction. Only `update-index` writes `last_verified`, so this is the usual case
+  for two edits of one field, for example two `set-code-refs` runs or a repoint against a
+  re-deprecation.
+- **A merge adds no metadata churn of its own.** The top level starts from ours, so
+  `generated_at` and `build_commit` are no longer rewritten to merge time and HEAD, and the key
+  order is kept rather than re-sorted.
+- **Undecidable changes stop the merge.** The same field changed on both sides with no newer
+  `last_verified`, an entry deleted on one side and changed on the other, or
+  a malformed side, leaves conflict markers and exit 1 instead of a silent guess.
+- **The server-side half is unchanged.** GitHub's mergeability check and merge buttons still do
+  not run custom drivers. That remains open with T7 and the workaround below.
+
+### Task 7 ([I-6](2026-09-27-sweep-05ea982-I06-claude-hook-tier-and-hook-semantics.md))
+
+This issue blamed a post-commit hook that runs `update-index` after every commit. That premise
+was wrong:
+
+- **No git hook ever ran it.** The call was in the Claude Code hooks, `post-commit-sync.sh` and
+  `session-summary.sh`, as `update-index` with no arguments.
+- **The call always failed.** With no arguments, `update-index` exits 1 and writes nothing.
+- **It never fired anyway.** The hooks read a `$TOOL_INPUT` variable Claude Code never sets, so
+  the sync hook never got that far.
+
+Task 7 **deletes** the call instead of repairing it. A working version would stamp every doc
+verified without anyone reading it. It also pins what the issue needed:
+
+- **No hook writes `docs/.doc-index.json`.** A test runs every hook through its real caller and
+  checks the index is byte-identical afterwards: the Claude gate, sync and Stop hooks, and git
+  commit, checkout, merge and push.
+- **A wrapper that logs every doc-tools subcommand** the Claude hooks run records only
+  `check-freshness`.
+
+What remains of the conflict surface:
+
+- The index changes only when someone runs a writer. Doc-free PRs no longer diverge on
+  `docs/.doc-index.json` through hooks.
+- A no-op write is byte-identical, and `generated_at` / `build_commit` move only on a real write
+  (T2).
+- Verification is content-addressed (T4), so branches that verify the same bytes agree.
+- The local driver merges three-way (T6).
+
+**Acceptance criteria, as closed:**
+
+- (1) Met for every writer except `update-index` itself, which by design re-stamps
+  `last_verified`: it is the attestation (T5's model). There is no `--all` refresh, because it
+  would attest unread docs.
+- (2) Met: no hook or doc-free workflow step writes the index.
+- (3) Met (T6).
+- (4) Superseded: only `update-index` writes `last_verified`, and a re-verification is recorded
+  on purpose.
+- (5) Migration is the v3.0.0 release note (T14).
+
+GitHub's server-side mergeability check still runs no custom driver. A PR that *does* change the
+index can still show a conflict there. A resolver workflow like the one below stays a consumer
+choice (out of scope, fix plan).
 
 ## Workaround (current)
 

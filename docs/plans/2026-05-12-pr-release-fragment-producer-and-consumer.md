@@ -2,6 +2,8 @@
 
 > **Status:** Completed in v2.10.0 (merged 2026-05-12 via [PR #2](https://github.com/woodrowpearson/doc-superpowers/pull/2) — landed as a single PR combining both halves rather than separate PRs A and B). All tasks A1–A9 (producer) and B1–B5 (consumer) shipped. The consumer half was reviewed independently as [PR #3](https://github.com/woodrowpearson/doc-superpowers/pull/3) and folded into PR #2 at merge time; review feedback addressed in commit `33aebdf` (non-canonical section preservation, non-numeric filename handling, paths-out scoping for deletion). Preserved as historical context.
 
+> **Superseded (sweep 05ea982 I-9, Task 10):** the "already released" rule in this plan — the `git log --all -- RELEASE-NOTES.next/PR-N.md` ancestry test (Consumer, below) and the per-fragment introducing-commit `git merge-base --is-ancestor` test with its "one sharp edge" (Notes) — no longer describes the consumer. The `--all` test was never shipped, and would have skipped squash-merged fragments; the introducing-commit test that did ship never released a fragment merged after a release branch was cut. The current rule: a fragment is unreleased while it is present at `<range-end>` (a release consumes it by deleting it in its release commit); `fragments merge` takes one first-parent `git log --no-renames --diff-filter=A` pass per release point to refuse re-consuming what an unmerged release consumed. The contract is `scripts/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md` and the I-9 issue (`docs/issues/2026-09-27-sweep-05ea982-I09-release-fragment-pipeline.md`). The producer's rebase-and-retry push, the agent-computed hash and the line-per-line dedupe described here are superseded the same way.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Bring the doc-pr-release workflow upstream into the doc-superpowers plugin. Adds a CI workflow that drafts/maintains `RELEASE-NOTES.next/PR-<N>.md` fragments on every PR push, AND extends the `release` action to glob/validate/merge/delete those fragments at release time. End state: a complete two-sided fragment lifecycle, opt-in via the existing `--ci` installer flag.
@@ -127,6 +129,7 @@ RELEASE-NOTES.next/PR-107.md  ----/
    - Deletes the consumed fragment files in the same commit
    - Skips fragments whose PR has not landed in the commit range being released
      (detect via `git log --all -- RELEASE-NOTES.next/PR-N.md` ancestry)
+     *[Superseded by I-9: never shipped; a fragment is unreleased while present — see the Status note above.]*
 
 ## Fragment Format
 
@@ -2003,7 +2006,7 @@ EOF
 
 - **Test boundaries.** PR A adds `scripts/test-doc-pr-release.sh` (24 assertions across 3 helpers). PR B adds 4 assertions to `scripts/test-doc-tools.sh`. Neither test harness depends on the other.
 
-- **One sharp edge.** PR B's `cmd_fragments_merge` uses `git merge-base --is-ancestor` to determine whether a fragment's introducing commit is in the release range. This requires the fragment to actually be committed to the branch being released — fragments staged but not yet on the branch are correctly skipped. If a maintainer rebases or force-pushes the release branch in a way that orphans the introducing commit, the fragment would be skipped silently. This is acceptable behavior (a fragment for an unmerged PR shouldn't be released) but worth documenting in the release action's "Common Mistakes" table once both PRs land.
+- **One sharp edge** *(superseded by I-9 — see the Status note above)*. PR B's `cmd_fragments_merge` uses `git merge-base --is-ancestor` to determine whether a fragment's introducing commit is in the release range. This requires the fragment to actually be committed to the branch being released — fragments staged but not yet on the branch are correctly skipped. If a maintainer rebases or force-pushes the release branch in a way that orphans the introducing commit, the fragment would be skipped silently. This is acceptable behavior (a fragment for an unmerged PR shouldn't be released) but worth documenting in the release action's "Common Mistakes" table once both PRs land.
 
 - **What's NOT in scope for either PR:**
   - Migrating the plugin's pre-existing sibling templates (`doc-release.yml`, `doc-pr-full-cycle.yml`, `doc-review-pr.yml`, `doc-audit-update.yml`, `doc-spec-verify.yml`) from `ANTHROPIC_API_KEY` → `CLAUDE_CODE_OAUTH_TOKEN`. PR A's new template uses the OAuth form; the others should follow in a focused follow-up PR titled e.g. `feat(ci): migrate Claude-powered workflows to CLAUDE_CODE_OAUTH_TOKEN`.

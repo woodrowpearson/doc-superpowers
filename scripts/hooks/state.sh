@@ -1,248 +1,231 @@
 #!/usr/bin/env bash
-# doc-superpowers state tracking — shared by install.sh
+# doc-superpowers install state — sourced by install.sh (and only by it: it
+# uses install.sh's tmp_beside / commit_tmp write discipline).
 #
-# State file: .claude/doc-superpowers/installed.json (project-relative,
-# COMMITTED to the repo so install choices persist across contributors).
+# File: .claude/doc-superpowers/installed.json, relative to the repository top
+# and COMMITTED, so the CI tier's choices are the team's. Only the CI tier is
+# recorded: the git tier lives in .git (per clone) and the Claude tier in
+# .claude/settings.local.json (per user), so a committed record of either
+# would be wrong for every other contributor.
 #
-# Schema:
+# Schema (schema_version 2):
 # {
-#   "schema_version": 1,
+#   "schema_version": 2,
 #   "tiers": {
 #     "ci": {
-#       "workflows": {
-#         "doc-freshness-pr": { "state": "installed",   "installed_at": "..." },
-#         "doc-freshness-schedule": { "state": "uninstalled",
-#                                     "uninstalled_at": "...",
-#                                     "intentional": true }
-#       },
-#       "tools":   { "state": "installed", "dest": ".github/scripts", "installed_at": "..." },
-#       "helpers": { "state": "installed", "installed_at": "..." }
+#       "base_branch": "main",          ← the choices a plain `install --ci`
+#       "cron": "0 9 * * 1",               reproduces (flags override them,
+#       "ci_strict": false,                and are then recorded)
+#       "workflows": {                  ← the workflow set
+#         "doc-freshness-pr":       {"state": "installed", "installed_at": "…"},
+#         "doc-freshness-schedule": {"state": "uninstalled", "intentional": true}
+#       }
 #     }
 #   }
 # }
+# A retired workflow (install.sh RETIRED_WORKFLOWS) has no entry: the
+# install or uninstall that removes it drops its record.
+# installed_at is set when a workflow goes from not installed to installed,
+# never on a refresh (a rewritten timestamp on every install was the file's
+# merge-conflict source). Vendored files are not recorded: which helpers are
+# needed follows from the installed workflows, and disk is the truth for them.
+# Version 1 files (installed_at/uninstalled_at per workflow, tools/helpers
+# records, no choices) are read as they are and rewritten as version 2; a file
+# written by a newer installer (schema_version > 2) is refused.
 #
-# Behavior contract:
-#   - First install on a repo with no state file → infer from filesystem.
-#   - Subsequent install with no --workflows flag → SKIP workflows whose
-#     state is "uninstalled" with intentional:true.
-#   - uninstall --ci → marks as intentional:true.
-#   - uninstall --ci --transient → marks as intentional:false.
-#   - --force on install → bypass the state-respect check.
-#   - Malformed state file → fall back to filesystem inference + warn.
-#
-# Concurrency contract:
-#   - Single-writer assumed. Atomic writes (state_atomic_write) guarantee
-#     readers never see a partially-written file, but two concurrent
-#     install/uninstall invocations will race: last writer wins, and
-#     intermediate state-marks made by the loser are lost. Wrap parallel
-#     invocations in `flock` if your runner needs this.
+# One read (state_load), in-memory marks, one write (state_flush) per run, and
+# only when the content changed. An unreadable file (a merge conflict, the
+# wrong shape) is never overwritten: state_load fails and the caller refuses.
+# Moving it aside to installed.json.corrupt is the recovery path: the next
+# install then installs nothing that is absent on disk (STATE_RECOVERY=1).
 
-# shellcheck disable=SC2034
 STATE_FILE=".claude/doc-superpowers/installed.json"
-STATE_SCHEMA_VERSION=1
+STATE_CORRUPT="$STATE_FILE.corrupt"
+STATE_SCHEMA=2
+_SEP=$'\037'
 
-# Canonical list of workflow names (without .yml extension). Single source
-# of truth — referenced by install_ci, uninstall_ci, and state code.
-#
-# Derived from scripts/hooks/ci/*.yml so that adding a new workflow template
-# is picked up automatically. SCRIPT_DIR is set by install.sh (the only
-# script that sources state.sh). If unset (e.g. unit-testing state.sh in
-# isolation), falls back to a hardcoded list to avoid silent breakage.
-state_known_workflows() {
-  if [[ -n "${SCRIPT_DIR:-}" && -d "$SCRIPT_DIR/ci" ]]; then
-    local f
-    for f in "$SCRIPT_DIR"/ci/*.yml; do
-      [[ -f "$f" ]] || continue
-      basename "$f" .yml
-    done | sort
-    return
+STATE_PRESENT=0   # the file exists and was read
+STATE_RECOVERY=0  # no file, but installed.json.corrupt is there
+STATE_DIRTY=0     # a mark or choice changed something since state_load
+STATE_ERROR=""    # why state_load failed
+STATE_HAS_CI=0    # .tiers.ci is recorded
+STATE_BASE=""     # recorded choices ("" = not recorded)
+STATE_CRON=""
+STATE_STRICT=""
+STATE_WF=""       # one line per workflow: name US state US intentional US installed_at
+
+# One jq pass: validate the shape, then emit the choices line and one line
+# per workflow, fields separated by US (\037), which no value may contain.
+# shellcheck disable=SC2016  # jq program, not shell expansions
+_STATE_READ_JQ='
+  def s: tostring | gsub("[\u0000-\u001f]"; "");
+  if type != "object" then error("the top level is not a JSON object")
+  elif (.schema_version // 1 | type) != "number" then error(".schema_version is not a number")
+  elif (.schema_version // 1) > ($max | tonumber) then error("schema_version \(.schema_version) was written by a newer doc-superpowers installer; upgrade the plugin")
+  elif (.tiers // {} | type) != "object" then error(".tiers is not an object")
+  elif (.tiers.ci // {} | type) != "object" then error(".tiers.ci is not an object")
+  elif (.tiers.ci.workflows // {} | type) != "object" then error(".tiers.ci.workflows is not an object")
+  elif ([(.tiers.ci.workflows // {})[] | type] | any(. != "object")) then error("a .tiers.ci.workflows entry is not an object")
+  else
+    .tiers.ci as $ci
+    | ([ (if $ci == null then "0" else "1" end),
+         ($ci.base_branch // "" | s), ($ci.cron // "" | s),
+         (if $ci == null or ($ci | has("ci_strict") | not) then "" else ($ci.ci_strict | s) end)
+       ] | join("\u001f")),
+      (($ci.workflows // {}) | to_entries[]
+       | [ (.key | s), (.value.state // "" | s), (.value.intentional // false | s), (.value.installed_at // "" | s) ]
+       | join("\u001f"))
+  end'
+
+# state_load: read the state file once. Returns 1 (STATE_ERROR says why) when
+# it exists but cannot be used; the caller must then write nothing.
+state_load() {
+  STATE_PRESENT=0 STATE_RECOVERY=0 STATE_DIRTY=0 STATE_ERROR="" STATE_HAS_CI=0
+  STATE_BASE="" STATE_CRON="" STATE_STRICT="" STATE_WF=""
+  if [ ! -e "$STATE_FILE" ] && [ ! -L "$STATE_FILE" ]; then
+    if [ -e "$STATE_CORRUPT" ]; then
+      STATE_RECOVERY=1
+    fi
+    return 0
   fi
-  cat <<'EOF'
-doc-audit-update
-doc-freshness-pr
-doc-freshness-schedule
-doc-index-update
-doc-pr-full-cycle
-doc-pr-release
-doc-release
-doc-review-pr
-doc-spec-verify
-EOF
-}
-
-# True iff the named workflow exists in the canonical list.
-state_is_known_workflow() {
-  local name="$1"
-  state_known_workflows | grep -qx -- "$name"
-}
-
-# Emit ISO-8601 UTC timestamp.
-state_now() {
-  date -u +"%Y-%m-%dT%H:%M:%SZ"
-}
-
-# Echo state file path (kept centralized so tests can override).
-state_file_path() {
-  echo "${DOC_SP_STATE_FILE:-$STATE_FILE}"
-}
-
-# True iff state file exists AND parses as JSON.
-# Side-effect: emits a one-line warning on stderr if file exists but is malformed.
-state_is_valid() {
-  local f
-  f="$(state_file_path)"
-  [[ -f "$f" ]] || return 1
-  if ! jq -e '.' "$f" >/dev/null 2>&1; then
-    echo "WARN: $f is malformed; falling back to filesystem inference" >&2
+  local out first
+  if ! out=$(jq -r --arg max "$STATE_SCHEMA" "$_STATE_READ_JQ" "$STATE_FILE" 2>&1); then
+    STATE_ERROR=$(printf '%s\n' "$out" | sed -n '1{s/^jq: error ([^)]*): //;s/^jq: error: //;p;}')
+    STATE_ERROR="${STATE_ERROR:-not valid JSON}"
     return 1
   fi
+  if [ -z "$out" ]; then
+    STATE_ERROR="the file is empty"
+    return 1
+  fi
+  STATE_PRESENT=1
+  first="${out%%$'\n'*}"
+  IFS="$_SEP" read -r STATE_HAS_CI STATE_BASE STATE_CRON STATE_STRICT <<<"$first"
+  case "$out" in
+    *$'\n'*) STATE_WF="${out#*$'\n'}" ;;
+  esac
   return 0
 }
 
-# Bootstrap: create the state file by inferring from filesystem.
-# Any workflow file that is doc-superpowers-managed (per WORKFLOW_MARKER) at
-# .github/workflows/<name>.yml → marked "installed". Anything else → omitted
-# (treated as "never-installed").
-#
-# Requires: is_doc_superpowers_workflow() to be defined by caller (install.sh).
-state_bootstrap() {
-  if ! declare -F is_doc_superpowers_workflow >/dev/null 2>&1; then
-    echo "INTERNAL: state_bootstrap requires caller to define is_doc_superpowers_workflow()" >&2
-    return 1
-  fi
-  local f
-  f="$(state_file_path)"
-  mkdir -p "$(dirname "$f")"
-  local now
-  now="$(state_now)"
-
-  local state_json
-  state_json=$(jq -n --arg sv "$STATE_SCHEMA_VERSION" \
-    '{schema_version: ($sv|tonumber), tiers: {ci: {workflows: {}}}}')
-
-  local name dest
-  while IFS= read -r name; do
-    dest=".github/workflows/${name}.yml"
-    if is_doc_superpowers_workflow "$dest" 2>/dev/null; then
-      state_json=$(echo "$state_json" | jq --arg n "$name" --arg t "$now" \
-        '.tiers.ci.workflows[$n] = {state:"installed", installed_at:$t}')
-    fi
-  done < <(state_known_workflows)
-
-  # Tools + helpers presence.
-  if [[ -f ".github/scripts/doc-tools.sh" ]]; then
-    state_json=$(echo "$state_json" | jq --arg t "$now" \
-      '.tiers.ci.tools = {state:"installed", dest:".github/scripts", installed_at:$t}')
-  fi
-  if [[ -d ".github/scripts/doc-pr-release" ]]; then
-    state_json=$(echo "$state_json" | jq --arg t "$now" \
-      '.tiers.ci.helpers = {state:"installed", installed_at:$t}')
-  fi
-
-  state_atomic_write "$state_json"
+# state_wf_get <name>: WF_STATE, WF_INTENT, WF_AT of <name> ("" if unrecorded).
+state_wf_get() {
+  local l
+  WF_STATE="" WF_INTENT="" WF_AT=""
+  [ -n "$STATE_WF" ] || return 1
+  while IFS= read -r l; do
+    case "$l" in
+      "$1$_SEP"*)
+        IFS="$_SEP" read -r _ WF_STATE WF_INTENT WF_AT <<<"$l"
+        return 0
+        ;;
+    esac
+  done <<<"$STATE_WF"
+  return 1
 }
 
-# Atomic write via tmp + mv.
-state_atomic_write() {
-  local payload="$1"
-  local f tmp
-  f="$(state_file_path)"
-  mkdir -p "$(dirname "$f")"
-  tmp="$(mktemp "${f}.XXXXXX")"
-  echo "$payload" | jq '.' > "$tmp"
-  mv "$tmp" "$f"
+# The recorded workflow names, one per line, in file order.
+state_wf_names() {
+  local l
+  [ -n "$STATE_WF" ] || return 0
+  while IFS= read -r l; do
+    printf '%s\n' "${l%%"$_SEP"*}"
+  done <<<"$STATE_WF"
 }
 
-# Query: should this workflow be skipped on a no-flag install?
-# Returns 0 (yes-skip) if state.tiers.ci.workflows[name].state == "uninstalled"
-# AND intentional == true. Otherwise 1.
-#
-# If state file is absent/malformed, returns 1 (don't skip — i.e. install).
-state_should_skip_workflow() {
-  local name="$1"
-  state_is_valid || return 1
-  local f
-  f="$(state_file_path)"
-  local result
-  result=$(jq -r --arg n "$name" '
-    .tiers.ci.workflows[$n] // {} |
-    if (.state == "uninstalled") and (.intentional == true) then "skip" else "go" end
-  ' "$f")
-  [[ "$result" == "skip" ]]
-}
-
-# Mark a workflow installed (with installed_at timestamp).
-state_mark_workflow_installed() {
-  local name="$1"
-  local f
-  f="$(state_file_path)"
-  if ! state_is_valid; then
-    state_atomic_write "$(jq -n --arg sv "$STATE_SCHEMA_VERSION" \
-      '{schema_version: ($sv|tonumber), tiers: {ci: {workflows: {}}}}')"
+# _state_wf_put <name> <state> <intentional> <installed_at>: replace or append.
+_state_wf_put() {
+  local new="$1$_SEP$2$_SEP$3$_SEP$4" l out="" found=0
+  if [ -n "$STATE_WF" ]; then
+    while IFS= read -r l; do
+      case "$l" in
+        "$1$_SEP"*)
+          [ "$l" = "$new" ] || STATE_DIRTY=1
+          l="$new"
+          found=1
+          ;;
+      esac
+      out="${out:+$out$'\n'}$l"
+    done <<<"$STATE_WF"
   fi
-  local now state_json
-  now="$(state_now)"
-  state_json=$(jq --arg n "$name" --arg t "$now" \
-    '.tiers.ci.workflows[$n] = {state:"installed", installed_at:$t}' "$f")
-  state_atomic_write "$state_json"
+  if [ "$found" = 0 ]; then
+    out="${out:+$out$'\n'}$new"
+    STATE_DIRTY=1
+  fi
+  STATE_WF="$out"
 }
 
-# Mark a workflow uninstalled. $2 is "true" or "false" for intentional flag.
-state_mark_workflow_uninstalled() {
-  local name="$1"
-  local intentional="$2"  # "true" or "false"
-  local f
-  f="$(state_file_path)"
-  if ! state_is_valid; then
-    state_atomic_write "$(jq -n --arg sv "$STATE_SCHEMA_VERSION" \
-      '{schema_version: ($sv|tonumber), tiers: {ci: {workflows: {}}}}')"
+# Drop <name>'s record altogether (a retired workflow: no longer a template).
+state_wf_drop() {
+  local l out="" found=0
+  [ -n "$STATE_WF" ] || return 0
+  while IFS= read -r l; do
+    case "$l" in
+      "$1$_SEP"*)
+        found=1
+        continue
+        ;;
+    esac
+    out="${out:+$out$'\n'}$l"
+  done <<<"$STATE_WF"
+  if [ "$found" = 1 ]; then
+    STATE_WF="$out"
+    STATE_DIRTY=1
   fi
-  local now state_json
-  now="$(state_now)"
-  state_json=$(jq --arg n "$name" --arg t "$now" --argjson i "$intentional" \
-    '.tiers.ci.workflows[$n] = {state:"uninstalled", uninstalled_at:$t, intentional:$i}' "$f")
-  state_atomic_write "$state_json"
 }
 
-# Mark tools / helpers state. $1: "tools" or "helpers". $2: "installed" or "uninstalled". $3: optional dest for tools.
-state_mark_component() {
-  local component="$1"   # "tools" or "helpers"
-  local action="$2"      # "installed" or "uninstalled"
-  local dest="${3:-}"    # optional, only meaningful for tools
-  local f
-  f="$(state_file_path)"
-  if ! state_is_valid; then
-    state_atomic_write "$(jq -n --arg sv "$STATE_SCHEMA_VERSION" \
-      '{schema_version: ($sv|tonumber), tiers: {ci: {workflows: {}}}}')"
-  fi
-  local now state_json
-  now="$(state_now)"
-  if [[ "$action" == "installed" ]]; then
-    if [[ -n "$dest" ]]; then
-      state_json=$(jq --arg c "$component" --arg d "$dest" --arg t "$now" \
-        '.tiers.ci[$c] = {state:"installed", dest:$d, installed_at:$t}' "$f")
-    else
-      state_json=$(jq --arg c "$component" --arg t "$now" \
-        '.tiers.ci[$c] = {state:"installed", installed_at:$t}' "$f")
-    fi
+# Installed: keeps installed_at when it already was (a refresh is no change).
+state_mark_installed() {
+  state_wf_get "$1" || true
+  if [ "$WF_STATE" = "installed" ]; then
+    _state_wf_put "$1" installed false "$WF_AT"
   else
-    state_json=$(jq --arg c "$component" --arg t "$now" \
-      '.tiers.ci[$c] = {state:"uninstalled", uninstalled_at:$t}' "$f")
+    _state_wf_put "$1" installed false "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   fi
-  state_atomic_write "$state_json"
 }
 
-# Dump state to stdout in a human-readable form (for `status --ci` + `tools status` extension).
-state_dump_ci() {
-  if ! state_is_valid; then
-    echo "  (no state file — install state is filesystem-inferred only)"
-    return 0
+# Uninstalled; $2 = "true" (on purpose: a plain install skips it) or "false".
+state_mark_uninstalled() {
+  _state_wf_put "$1" uninstalled "$2" ""
+}
+
+# state_set_choices <base_branch> <cron> <true|false>
+state_set_choices() {
+  if [ "$STATE_HAS_CI" != 1 ] || [ "$1" != "$STATE_BASE" ] || [ "$2" != "$STATE_CRON" ] || [ "$3" != "$STATE_STRICT" ]; then
+    STATE_DIRTY=1
   fi
-  local f
-  f="$(state_file_path)"
-  jq -r '
-    .tiers.ci.workflows // {} | to_entries[] |
-    "  \(.key): \(.value.state)" +
-      (if .value.intentional == true then " (intentional)" else "" end)
-  ' "$f"
+  STATE_HAS_CI=1 STATE_BASE="$1" STATE_CRON="$2" STATE_STRICT="$3"
+}
+
+# shellcheck disable=SC2016  # jq program
+_STATE_WRITE_JQ='
+  .schema_version = ($schema | tonumber)
+  | .tiers = (.tiers // {})
+  | .tiers.ci = ((.tiers.ci // {}) | del(.tools, .helpers)
+      | (if $b != "" then .base_branch = $b else . end)
+      | (if $c != "" then .cron = $c else . end)
+      | (if $s != "" then .ci_strict = ($s == "true") else . end)
+      | .workflows = (reduce ($wf | split("\n")[] | select(length > 0) | split("\u001f")) as $r ({};
+          .[$r[0]] = (if $r[1] == "installed"
+                      then {state: "installed"} + (if ($r[3] // "") != "" then {installed_at: $r[3]} else {} end)
+                      else {state: "uninstalled", intentional: ($r[2] == "true")} end))))'
+
+# state_flush: write the state once, and only when something changed (the
+# first write of a version 1 file migrates it). Callers flush BEFORE they
+# delete a workflow, so an interrupted uninstall leaves the removal recorded.
+state_flush() {
+  [ "$STATE_DIRTY" = 1 ] || [ "$STATE_PRESENT" = 1 ] || return 0
+  local new src="$STATE_FILE"
+  [ "$STATE_PRESENT" = 1 ] || src=/dev/null
+  if [ "$STATE_PRESENT" = 1 ]; then
+    new=$(jq --arg schema "$STATE_SCHEMA" --arg b "$STATE_BASE" --arg c "$STATE_CRON" --arg s "$STATE_STRICT" \
+      --arg wf "$STATE_WF" "$_STATE_WRITE_JQ" "$src") || die "cannot update $STATE_FILE"
+    [ "$new" != "$(cat "$STATE_FILE")" ] || return 0
+  else
+    new=$(jq -n --arg schema "$STATE_SCHEMA" --arg b "$STATE_BASE" --arg c "$STATE_CRON" --arg s "$STATE_STRICT" \
+      --arg wf "$STATE_WF" "{} | $_STATE_WRITE_JQ") || die "cannot build $STATE_FILE"
+  fi
+  tmp_beside "$STATE_FILE"
+  printf '%s\n' "$new" > "$_TMP"
+  commit_tmp "$STATE_FILE" 644
+  STATE_PRESENT=1 STATE_DIRTY=0
 }

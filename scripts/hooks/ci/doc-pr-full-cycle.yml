@@ -5,6 +5,14 @@
 # NOTE: This workflow overlaps with doc-review-pr.yml (both trigger on PR open).
 # Install one or the other, not both. This workflow is a superset — it runs
 # review-pr AND also applies fixes, regenerates diagrams, and syncs the index.
+#
+# Runs when a same-repository PR, on opening, touches an indexed doc or its
+# code (judged by check-freshness from the doc index — no hard-coded paths).
+# The agent edits docs but cannot commit or push; the "Commit doc updates"
+# step commits only docs/ and the docs the index lists, and pushes them to the
+# PR branch with the job's GITHUB_TOKEN, whose pushes start no workflow run:
+# that commit gets no check runs, so required checks wait at "Expected" until
+# someone pushes a commit (or closes and reopens the PR).
 
 name: Doc PR Full Cycle (AI)
 
@@ -12,16 +20,22 @@ on:
   pull_request:
     branches: [__BASE_BRANCH__]
     types: [opened]
-    paths:
-      - 'docs/**'
-      - 'src/**'
-      - 'scripts/**'
-      - '*.md'
-  workflow_dispatch:
 
+# One writer per branch across the doc-superpowers workflows that commit to
+# it (doc-audit-update, doc-pr-full-cycle, doc-pr-release). Never cancelled:
+# a cancel between commit and push would strand the commit. Each checks out
+# the branch, so a queued run starts from the tip the earlier runs left. This
+# workflow runs only when the PR is opened, so a run whose branch still
+# received someone else's commits mid-run FAILS, committing nothing, and asks
+# for a re-run (commit-changes.sh --superseded-fails): no later run would
+# apply its changes.
 concurrency:
-  group: doc-pr-full-cycle-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
+  group: doc-superpowers-write-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: false
+  # Queue pending runs in order (up to 100) instead of letting a newer one of
+  # any of the three cancel them.
+  # GHES versions without concurrency `queue` support: delete this key.
+  queue: max
 
 env:
   DOC_SUPERPOWERS_VERSION: "__VERSION__"
@@ -29,67 +43,85 @@ env:
 jobs:
   pr-full-cycle:
     if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]' &&
       !contains(github.event.pull_request.title, '[doc-superpowers]')
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: write
       pull-requests: write
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ github.head_ref }}
           fetch-depth: 0
 
-      - name: Check for doc index
-        id: precheck
-        run: |
-          if [ ! -f "docs/.doc-index.json" ]; then
-            echo "No doc-index found — init has not run. Skipping."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Scope — indexed docs this PR touches
+        id: scope
+        env:
+          RANGE: ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}
+        run: .github/scripts/doc-superpowers-steps/freshness-check.sh scope
 
       - name: Resolve Anthropic auth
         id: auth
-        if: steps.precheck.outputs.skip != 'true'
+        if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.affected != '0'
         env:
           OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          if [ -n "$OAUTH" ]; then
-            echo "use_oauth=true" >> "$GITHUB_OUTPUT"
-            if [ -n "$API_KEY" ]; then
-              echo "::notice::Both CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are set; using CLAUDE_CODE_OAUTH_TOKEN."
-            fi
-          elif [ -n "$API_KEY" ]; then
-            echo "use_oauth=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::Neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY is set as a repository secret. Add one under Settings > Secrets and variables > Actions." >&2
-            exit 1
-          fi
+        run: .github/scripts/doc-superpowers-steps/resolve-auth.sh
+
+      - name: Fetch the doc-superpowers plugin (the installed version)
+        id: plugin
+        if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.affected != '0'
+        run: .github/scripts/doc-superpowers-steps/prepare-agent.sh
 
       - name: Review, update, diagram, and sync docs
-        if: steps.precheck.outputs.skip != 'true'
-        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1
+        if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.affected != '0'
+        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
+          github_token: ${{ github.token }}
           claude_code_oauth_token: ${{ steps.auth.outputs.use_oauth == 'true' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           anthropic_api_key: ${{ steps.auth.outputs.use_oauth == 'false' && secrets.ANTHROPIC_API_KEY || '' }}
+          plugin_marketplaces: ${{ steps.plugin.outputs.marketplace }}
+          plugins: doc-superpowers@doc-superpowers
+          claude_args: |
+            --max-turns 100
+            --allowedTools "Skill,Read,Glob,Grep,Edit,Write,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(jq:*),Bash(.github/scripts/doc-tools.sh:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*)"
           prompt: |
-            Run the following doc-superpowers actions in order on this pull request:
+            This is an unattended GitHub Actions run of the doc-superpowers plugin.
+            - Use `.github/scripts/doc-tools.sh` as `$DOC_TOOLS` (this plugin
+              version's vendored copy) and call it by that path: your tools allow
+              exactly that command.
+            - Nobody can answer questions: take the recommended option instead.
+            - Do not commit, push, tag or open pull requests. After you finish, the
+              workflow commits what you changed under docs/ and in the docs the
+              index lists to this PR's branch; a change anywhere else fails the run.
 
-            1. Run /doc-superpowers review-pr to analyze documentation impact and
-               identify stale or missing docs. Save findings for the next step.
+            Run these doc-superpowers actions, in order, on pull request
+            #${{ github.event.pull_request.number }} (its changes:
+            `git diff ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}`):
 
-            2. Run /doc-superpowers update to fix any stale docs found by the review.
+            1. /doc-superpowers review-pr — the documentation impact; stale or
+               missing docs.
+            2. /doc-superpowers update — fix the stale docs the review found. Run
+               update-index only on a doc you have checked against its code.
+            3. /doc-superpowers diagram — regenerate the affected Mermaid diagrams.
+            4. /doc-superpowers sync — reconcile the doc index with the filesystem.
 
-            3. Run /doc-superpowers diagram to regenerate any affected Mermaid diagrams.
+            Then post one PR comment summarizing the review and what you changed
+            (or that the docs are current):
+            `gh pr comment ${{ github.event.pull_request.number }} --body "<summary>"`.
 
-            4. Run /doc-superpowers sync to reconcile the doc index with the filesystem.
-
-            If any files were created or modified by steps 2-4, commit all changes
-            with the message "[doc-superpowers] pr docs: review, update, diagrams, sync".
-            Do not create a new pull request — commit directly to this PR branch.
-
-            If no files changed, post a PR comment confirming docs are current.
+      - name: Commit doc updates
+        if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.affected != '0'
+        env:
+          EXPECTED_HEAD: ${{ steps.plugin.outputs.head }}
+          PUSH_TO: ${{ github.head_ref }}
+        # prepare-agent.sh's pre-agent copy of the checker: an integrity check
+        # against agent mistakes, not a sandbox (a steered agent reaches the
+        # job's secrets and its token's permissions — references/hooks.md).
+        run: '"$RUNNER_TEMP"/doc-superpowers-steps/commit-changes.sh --allow docs/ --allow-index-keys --message "[doc-superpowers] pr docs: review, update, diagrams, sync" --push-to "$PUSH_TO" --superseded-fails'

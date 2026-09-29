@@ -2,7 +2,7 @@
 # Bundled Documentation Tooling for doc-superpowers
 
 **Date**: 2026-03-12
-**Status**: Implemented (substantially extended — current surface includes 11 subcommands; see `docs/superpowers/plans/2026-03-12-bundled-doc-tooling.md` status note)
+**Status**: Implemented (v2.0.0, 2026-03-12) and substantially extended since — `scripts/doc-tools.sh --help` lists the current subcommands (a count written here went stale twice). Mechanisms this design prescribed that later work replaced carry dated **AMENDED** notes where they are described; this is a design record, and `references/doc-spec.md` (*Doc-Index Schema Reference*) and `docs/conventions.md` describe current behaviour.
 **Scope**: Add `scripts/doc-tools.sh`, define init/audit boundaries, standardize doc directory structure and naming conventions
 
 ## Problem
@@ -128,6 +128,8 @@ Each scope agent **must** use `superpowers:writing-plans` before executing chang
 
 Plan documents are saved to `docs/plans/YYYY-MM-DD-{scope}-doc-update-plan.md` and indexed by the orchestrator.
 
+> ⚠️ **AMENDED 2026-09-28 — plans are for non-trivial changes, and no skill is required.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14. The shipped `update` action never invoked `superpowers:writing-plans`: its scope agents reason in a PLAN step and save `docs/plans/YYYY-MM-DD-{scope}-doc-update-plan.md` only for non-trivial changes (new sections, restructuring). The relaxation was never recorded until now.
+
 ### Scope Agent Context
 
 Each scope agent receives **fresh context** with:
@@ -230,6 +232,8 @@ Informed by Google g3doc (owner + reviewed date), Kubernetes KEPs (status + stag
 - `current` → `deprecated`: human-set only (edit the index directly), never overridden by tooling
 - `deprecated` is a terminal state for automated tools
 
+> ⚠️ **AMENDED 2026-09-28 — the stored fields and who writes them (index schema 3).** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the code changed in Tasks 4–5). `version` became `schema_version` (2 in v2.11.0, 3 now). Each entry adds `code_oids` — per code ref, the git object id of its content when the doc was verified — and freshness is judged against it, not `code_commit`, which stays as the `commits_behind` baseline. Only `deprecated` is stored in `status`; `current`, `stale` and `missing` are computed on every read. Only `update-index` writes `last_verified`: it is the one verb that attests a doc was read against its code. `deprecate-entry` sets `deprecated` (nobody edits the index by hand), and no automated verb clears it. Plans, issues, audits, design specs and archived docs are record docs, never reported stale.
+
 **Read/write separation**: `check-freshness` and `status` are read-only — they report staleness via stdout JSON but never modify the index file. Only `build-index` and `update-index` write to the index. This follows the Unix principle of separating query from mutation.
 
 ## Script Design: `scripts/doc-tools.sh`
@@ -285,6 +289,8 @@ When `--code-refs` is provided, only index entries whose `code_refs` overlap wit
    - If status is `deprecated`: preserve, report as `{"status": "deprecated"}` with no freshness fields
    - `doc_modified` is orthogonal to `status` — it is true whenever the doc's content hash has changed, regardless of whether code also changed. A doc can be `current` with `doc_modified: true` (someone edited the doc, code didn't change).
 2. Count `commits_behind` via `git rev-list --count <stored_commit>..HEAD -- <code_refs>`
+
+> ⚠️ **AMENDED 2026-09-28 — freshness is content identity.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the code changed in Tasks 3–5). A commit id changes when identical bytes are squash-merged, rebased, cherry-picked or reverted, so comparing `git log -1` against `code_commit` reported current docs stale and let stale ones read current. `check-freshness` now looks every ref of the index up in HEAD (or `--tree <tree-ish>`, which also supplies the index and the docs) in one `git cat-file --batch-check`, and a doc is stale when a ref's object id differs from its `code_oids`; the commit comparison survives only for entries written before schema 3. `commits_behind` is `null` when `code_commit` is not an ancestor of HEAD, never a masked `0`. `--code-refs` matches by path segment (`src/m1` matches `src/m1/a.js` and `src/`, never `src/m10`), not by string prefix, and `--code-refs-from <file|->` takes the list without an argv limit.
 
 **Output** (JSON to stdout):
 ```json
@@ -342,6 +348,8 @@ Called by `update` action after regenerating specific docs.
 
 If a doc path isn't in the index, exits with error suggesting `build-index`. `update-index` refreshes, it doesn't create.
 
+> ⚠️ **AMENDED 2026-09-28 — a new doc goes in through `add-entry`.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14. `build-index` refuses to replace an index that has entries (its `--force` re-records every entry unverified, keeping only each re-indexed key's deprecation), so it was never the way to add one doc: `update-index` reports a path that is not indexed and skips it, applying the others and exiting 1, and the doc goes in through `add-entry`. `update-index` records each ref's content as the working tree holds it (`code_oids`), and it keeps a deprecated entry deprecated.
+
 ### Subcommand: `status <path>`
 
 Single-doc query for agent use during review. **Read-only** — never modifies the index file.
@@ -373,6 +381,8 @@ Single-doc query for agent use during review. **Read-only** — never modifies t
 | `jq` | Yes | Required for reliable JSON assembly and parsing. Widely available (`brew install jq`, `apt install jq`). The script checks for `jq` availability on first run and exits with a clear install instruction if missing. **Note**: this changes the project's "zero dependencies" claim in `docs/architecture.md` — the skill itself remains zero-dependency (SKILL.md + references/), but the bundled tooling in `scripts/` requires `jq`. Update architecture docs to reflect this distinction. |
 | `date` | Yes | Standard unix |
 | `printf`, `awk` | Yes | Standard unix |
+
+> ⚠️ **AMENDED 2026-09-28 — version floors.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the code changed in Tasks 2 and 11). `jq` must be 1.6 or newer (the index writers use `--args` / `$ARGS.positional`); the script refuses an older one by name. bash 3.2 (macOS's `/bin/bash`) is a supported interpreter, and the tooling needs nothing beyond the POSIX userland stock macOS and Linux ship (no GNU sed, no ripgrep).
 
 ## Generated Directory Structure
 

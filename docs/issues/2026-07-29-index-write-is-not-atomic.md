@@ -1,6 +1,6 @@
 ---
 date: 2026-07-29
-status: Open
+status: Resolved
 priority: P2
 type: bug
 component: doc-index
@@ -109,3 +109,31 @@ partial or empty `docs/.doc-index.json`.
 3. Add a static assertion to `scripts/test-doc-tools.sh` that the only
    redirection into the index path lives in that helper — the same guard shape
    as the existing bash-4-construct scan.
+
+## Resolution
+
+Superseded and resolved by **Task 2 of the sweep 05ea982 fix plan**
+([I-2](2026-09-27-sweep-05ea982-I02-index-persistence-layer.md),
+`docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md`). The fix goes further than
+the `write_index` helper proposed above, because the sweep found two root causes
+that tmp + `mv` alone would not have addressed:
+
+- **Resuming traps.** The INT/TERM traps cleaned up and then *resumed*, so an
+  interrupted `build-index` installed a truncated (or, blocked on stdin, an
+  empty) index with rc 0. Traps now terminate: `EXIT` cleans up, `INT` exits
+  130, `TERM` exits 143.
+- **Concurrent writers.** The skill's `update` action runs one agent per stale
+  doc, each calling `update-index`. Ten parallel runs lost nine updates. Writers
+  now serialize on a portable `mkdir` lock (`docs/.doc-index.json.lock`).
+
+All six writers, including `build-index`, now persist through one primitive,
+`_index_apply` in `scripts/doc-tools.sh`: lock → shape-validated snapshot → one
+jq pass → tmp file **beside** the target (as this issue required) → `chmod` to
+the prior mode (0644 when new; the old `mktemp` + `mv` installed 0600) → `mv`.
+The static assertion proposed here exists as
+`test_index_single_write_path_static` in `scripts/test-doc-tools.sh`: no
+redirection into the index, exactly one `mv` installs it, and no trap resumes.
+
+This issue's exposure premise, that `post-commit-sync` runs `update-index` after
+every commit, was false: that call is dead (see I-6).
+

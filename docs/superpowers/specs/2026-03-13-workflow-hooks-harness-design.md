@@ -2,7 +2,7 @@
 # Workflow Hooks Harness — Design Spec
 
 **Date:** 2026-03-13
-**Status:** Implemented and extended. Original 3-tier surface (git/claude/ci) is live. CI tier has since grown from 3 templates to 9 (added `doc-audit-update.yml`, `doc-review-pr.yml`, `doc-release.yml`, `doc-spec-verify.yml`, `doc-pr-full-cycle.yml`, `doc-pr-release.yml`). Git tier registers a custom merge driver for `docs/.doc-index.json`. v2.10.0 added the per-PR release-notes fragment producer workflow + 3 colocated shell helpers. v2.12.0 (in flight on `feat/granular-install`) adds granular CI install via `--workflows=<csv|all|none>`, `--helpers=<bool>`, `--force`, `--transient`, and a `scripts/hooks/state.sh` install-state tracking module backed by `.claude/doc-superpowers/installed.json`. See `docs/workflows/doc-superpowers.md` for current behaviour.
+**Status:** Implemented (v2.1.0, 2026-03-13) and since extended. The 3-tier surface (git/claude/ci) is live. The CI tier added six Claude-powered templates (`doc-audit-update.yml`, `doc-review-pr.yml`, `doc-release.yml`, `doc-spec-verify.yml`, `doc-pr-full-cycle.yml`, `doc-pr-release.yml`) and retired `doc-index-update.yml` (v3.0.0), so it ships 8. The git tier registers a custom merge driver for `docs/.doc-index.json`. v2.10.0 added the per-PR release-notes fragment producer and its helpers; v2.12.0 (shipped 2026-05-16) added granular CI install (`--workflows=<csv|all|none>`, `--helpers=<bool>`, `--force`, `--transient`) and `scripts/hooks/state.sh`, backed by `.claude/doc-superpowers/installed.json`. Mechanisms this design prescribed that measurably failed, or that later work replaced, carry dated **AMENDED** notes where they are described. This is a design record: `docs/workflows/doc-superpowers.md` and `references/hooks.md` describe current behaviour.
 **Author:** Claude (brainstorming with @woodrowpearson)
 
 ## Problem
@@ -73,6 +73,8 @@ Every hook script resolves `doc-tools.sh` via a `DOC_TOOLS` variable with an env
 
 For git hooks, the hook scripts are **copied** locally as `.doc-superpowers-{name}` alongside the hook file in the hooks directory, and sourced via `$(dirname "$0")` relative path. This avoids hardcoded absolute paths to the skill directory. For Claude hooks, the scripts are **copied** to `.claude/hooks/doc-superpowers/` and registered with **relative paths** in settings (avoiding breakage on skill reinstall). For CI, `doc-tools.sh` is **vendored** into `.github/scripts/doc-tools.sh` at install time and referenced locally by workflow templates.
 
+> ⚠️ **AMENDED 2026-09-28 — how a hook finds doc-tools.sh, and what gets copied.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the code changed in Tasks 7–8). The placeholder is `__DOC_TOOLS_RESOLVE__`, not `__DOC_TOOLS_PATH__`: the installer substitutes a program that finds `doc-tools.sh` when the hook runs — for a plugin-cache install the newest version-named sibling of the installing version, in numeric order; for a checkout, that checkout's own path. Either way the hook embeds an absolute path; none is relative. A git hook the installer owns is written as `<hooks dir>/<name>`; only a hook of the user's gets a local copy, `.doc-superpowers-<name>`, which a marked block runs as a subprocess with git's arguments (never `source`). Claude hooks are registered as `bash "$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/<hook>.sh` and are per-user (excluded through git's `info/exclude`), because the copies hold that machine's path. `DOC_TOOLS` in the environment still overrides.
+
 ```bash
 #!/usr/bin/env bash
 # doc-superpowers hook v1 — installed YYYY-MM-DD
@@ -101,6 +103,8 @@ The installer (`install.sh`) resolves four paths at install time:
    - `git config core.hooksPath` — if set and the directory exists, use it (supports monorepos and custom hook layouts)
    - `.githooks/` — if the directory exists at project root (common convention for committed hooks)
    - `.git/hooks/` — default fallback
+
+> ⚠️ **AMENDED 2026-09-28 — where hooks go.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the code changed in Task 8). The installer asks git: `git rev-parse --git-path hooks`, which is a repository-local `core.hooksPath` whenever one is set (git consults it whether or not the directory exists, so the installer creates it), a linked worktree's common dir, or a submodule's `.git/modules/<name>/hooks`. A `.githooks/` directory that no `core.hooksPath` names is not used — git never runs it — and a `core.hooksPath` from the global or system config is refused, since it is every repository's hooks directory (a worktree's own, with `extensions.worktreeConfig`, is this repository's). The project root is `git rev-parse --show-toplevel`, not the cwd.
 4. **Validation**: The installer verifies `SKILL_DIR/scripts/doc-tools.sh` exists before installing any hooks.
 
 ### Version Detection
@@ -144,6 +148,8 @@ The primary value hook. Catches stale docs before code ships without doc updates
 5. If no doc-index exists: exit 0 silently
 6. If doc-tools.sh not found: exit 0 silently
 
+> ⚠️ **AMENDED 2026-09-28 — what pre-commit checks.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the code changed in Tasks 3–5 and 7). Listing the staged files and checking them against the working copy judged the wrong snapshot: pre-commit now runs `check-freshness --tree "$(git write-tree)"`, which reads the code refs, the doc-index and the docs from the tree the commit will record, scoped with `--code-refs-from -` to the staged paths (both sides of a rename), plus every entry the staged index adds (the final review fix wave). An indexed doc the commit leaves out is "not in this commit" (`git add` it) when it is on disk, and "missing from disk" only when it is gone. The scope match is by path segment (`src/m1` matches `src/m1`, `src/m1/a.js` and `src/`, never `src/m10`), not a string prefix. A check that cannot run (jq missing from a GUI client's `PATH`, a corrupt index) is no longer silent: it prints one line, and blocks under `DOC_SUPERPOWERS_STRICT=1`; only absent tooling stays silent.
+
 **Output format:**
 ```
 doc-superpowers: 2 stale doc(s) detected
@@ -178,6 +184,8 @@ doc-superpowers: 3 doc(s) became stale after merge
 doc-superpowers: 2 untracked doc(s) not in index
   Run '/doc-superpowers sync' or 'doc-tools.sh build-index' to add them.
 ```
+
+> ⚠️ **AMENDED 2026-09-28 — post-merge's report.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the code changed in Task 7). `build-index` refuses an index that has entries, so it was never the way to add a doc: an untracked doc goes in through `add-entry` (or `/doc-superpowers sync`). post-merge now reports the docs the merge left stale — with the refs whose content changed — and the indexed docs the merge deleted (`missing`, with `move-entry` / `remove-entry` advice), scoped to the files the merge brought in.
 
 ### post-checkout
 
@@ -218,6 +226,8 @@ Optional traceability — injects freshness status into commit message template.
 1. Extract staged files: `git diff --cached --name-only`
 2. Run `doc-tools.sh check-freshness --code-refs <staged files>` (scoped to staged files, consistent with pre-commit)
 3. Append as comment block (excluded from commit unless un-commented):
+
+   > ⚠️ **AMENDED 2026-09-28 — comment lines are stripped only from an edited message.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the code changed in Task 7). With `-m`, `-F`, `-C`, `--amend --no-edit`, a merge or a squash, git's default cleanup keeps `#` lines, so the block was committed (this repository's own history carries them). The hook now acts only when `$2` is empty or `template` — a message written in the editor, where git strips comment lines — and adds nothing otherwise.
    ```
    # Doc freshness: 2 stale docs related to this commit
    #   stale: docs/architecture.md (code_changed: src/api/)
@@ -241,6 +251,8 @@ If `.git/hooks/<name>` (or equivalent hooks dir) already exists and is NOT a doc
   The hook script is copied locally as `.doc-superpowers-{name}` alongside the existing hook (using `$(dirname "$0")` for relative resolution), rather than sourced from the skill's install path. This avoids breakage if the skill directory moves or is removed.
 - The `-f` guard is bash 3.2 safe under `set -e` (avoids the `[[ -f ]] && source` short-circuit pitfall)
 - If the existing hook contains `exit 0`, the block is inserted **before** the final `exit 0` line (preserving the hook's exit behavior)
+
+> ⚠️ **AMENDED 2026-09-28 — where the integration block goes and how it runs.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the code changed in Task 8). "Before the final `exit 0`" was implemented as "before every column-0 `exit 0`", and a hook that ends in `exec` (hook frameworks do) never reached the block. The block now goes once, right after the hook's `#!` line, into shell hooks only (a hook in another language is skipped with a message). It runs the local copy as a subprocess with `"$@"` — pre-commit passes the exit code on (`|| exit $?`, so STRICT blocks), pre-push hands both hooks the same ref lines on stdin — and a re-install replaces an older block instead of skipping a hook that mentions doc-superpowers.
 - If the existing hook already contains `doc-superpowers` references, the hook is skipped (no duplicate integration)
 
 If it IS a doc-superpowers hook (has `# doc-superpowers hook` marker): overwrite (update).
@@ -262,6 +274,8 @@ Catches Claude-initiated commits that bypass git hooks.
 4. Run `doc-tools.sh check-freshness --code-refs <staged files>`
 5. If stale: output warning (Claude sees this and can decide to update docs first)
 6. Exit 0 (warn) by default, exit 2 (block) if `DOC_SUPERPOWERS_STRICT=1`
+
+> ⚠️ **AMENDED 2026-09-28 — the gate's input and scope.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the code changed in Task 7). Claude Code passes the event as JSON on stdin (the command is `.tool_input.command`), never in a `TOOL_INPUT` variable, so the gate never fired. It now reads stdin, matches `git … commit` only in command position, and judges the staged tree like the git pre-commit hook. A command that stages as it commits (`git add … && git commit`, `commit -a`) has no staged tree before it runs, so the gate defers it to the git pre-commit hook and says so. It answers through Claude Code's JSON output (`additionalContext`, `systemMessage`); under STRICT it exits 2 with the reason on stderr.
 
 **Matcher configuration:**
 ```json
@@ -286,6 +300,8 @@ Auto-syncs the doc index after Claude-initiated git commits and reports stale do
 2. If not a commit command: exit 0 (pass through)
 3. Run `doc-tools.sh update-index` to refresh the index with the new commit
 4. Extract just-committed files: `git diff --name-only HEAD~1..HEAD` (with `git diff-tree` fallback for initial commits)
+
+> ⚠️ **AMENDED 2026-09-28 — no hook attests, and the root-commit fallback needs `--root`.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the code changed in Task 7). `update-index` with no argument never worked (it requires a doc path and exits 1), and a working version would record every doc as verified without anyone reading it: `update-index` attests, so no hook runs it or writes the index. For a root commit, `git diff-tree` without `--root` prints nothing; the fallback is `git diff-tree --root -r --no-commit-id --name-only --no-renames HEAD`. The hook reads the PostToolUse event on stdin and reports the docs the commit left stale.
 5. Run `doc-tools.sh check-freshness --code-refs <committed files>`
 6. If stale or missing docs found: output summary with paths and reasons
 7. Always exit 0 (informational only)
@@ -322,6 +338,8 @@ Reminds developer about stale docs before leaving a Claude session and auto-refr
 3. If stale docs found: output summary
 4. If all current: silent
 5. Must complete in <1s (on exit path) — enforced via `timeout 1` / `gtimeout 1` wrapper with manual background+kill fallback for vanilla macOS
+
+> ⚠️ **AMENDED 2026-09-28 — what the Stop hook does, and its budget.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the code changed in Task 7). It runs no `update-index` (see post-commit-sync), and a full-scope check did not fit 1 s: measured 8.8 s on the macOS fallback path, reporting 400 stale while listing 350. `Stop` fires after every response, not at session end, so the check is scoped to what is in progress — the paths changed in the working tree, judged as the working tree holds them through a private copy of git's index (git's own index is never rewritten). A clean tree costs almost nothing. The check has a 2 s budget, runs in its own process group, and a watchdog kills the whole group and leaves a one-line note; no GNU `timeout` is needed.
 
 **Output format:**
 ```
@@ -460,6 +478,8 @@ Run `/doc-superpowers update` to refresh these docs.
 
 **Branch protection note:** This workflow uses a PR-based approach rather than direct push to `main`. This is compatible with branch protection rules (required reviews, status checks). The PR can be auto-merged if the repo allows it, or reviewed manually. Repos without branch protection can optionally switch to direct push by modifying the workflow.
 
+> ⚠️ **AMENDED 2026-09-28 — `doc-index-update.yml` is retired (v3.0.0).** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the code changed in Task 9). Running `update-index` on every doc a push touched recorded docs as verified that nobody had read, it failed on every run (the index itself was among the changed paths), and `fetch-depth: 2` stored a shallow graft as `code_commit`. The workflow is gone from the templates, and any `install --ci` removes an installed copy that carries the workflow marker.
+
 ---
 
 ## Installer
@@ -504,6 +524,8 @@ Select (comma-separated, e.g. 1,2):
    - If `<hooks_dir>/<name>` exists without marker but already has `doc-superpowers` reference → skip (already integrated)
    - If `<hooks_dir>/<name>` exists without marker → auto-integrate (append guarded source block; insert before `exit 0` if present)
    - If absent → install (copy with `DOC_TOOLS` path substituted via `sed`)
+
+> ⚠️ **AMENDED 2026-09-28 — install logic.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the code changed in Task 8). The hooks directory is `git rev-parse --git-path hooks` (see *Path Discovery*); the integration block goes right after the `#!` line of a shell hook, not before `exit 0`, and runs a local copy (see *Existing Hook Handling*); `__DOC_TOOLS_RESOLVE__` and `__INSTALL_DATE__` are substituted, and every write goes through a temp file beside the target, never through a symbolic link.
 4. `chmod +x` all installed/integrated hooks
 5. Print summary with install and skip counts
 
@@ -650,6 +672,8 @@ Test each hook script:
 - Claude post-commit-sync: mock tool input with git commit pattern, verify update-index is called, verify freshness check scoped to committed files, verify non-commit commands are ignored
 - Claude session-summary: mock stale results, verify output format, verify update-index runs with timeout guard
 
+> ⚠️ **AMENDED 2026-09-28 — what the Claude hook tests assert.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the code changed in Task 7). The tests feed the event JSON on stdin (the real contract), and assert that no hook runs `update-index` or writes the index — the opposite of the two `update-index` checks above.
+
 ### Graceful Degradation Matrix
 
 | Condition | Behavior |
@@ -658,6 +682,8 @@ Test each hook script:
 | `doc-tools.sh` not found | Exit 0 silently |
 | `docs/.doc-index.json` missing | Exit 0 silently (project hasn't run init) |
 | `docs/.doc-index.json` corrupted/conflicted | Exit 0 silently (jq parse failure caught) |
+
+> ⚠️ **AMENDED 2026-09-28 — failing is not absent.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the code changed in Task 7). Absent tooling (no skill, no `docs/.doc-index.json`) stays silent. A check that fails — `jq` missing from the `PATH` a GUI git client gives hooks, a corrupt or conflicted index — prints one line saying so (a Claude hook also as a `systemMessage`), and blocks under STRICT: a silent exit 0 had removed the gate exactly when it could not run.
 | `jq` not installed | Exit 0 silently (doc-tools.sh handles this) |
 | `git` not available | Exit 0 silently (shouldn't happen in git hooks, but defensive) |
 | No staged files (pre-commit) | Exit 0 silently (nothing to check) |
@@ -726,3 +752,5 @@ A fifth Claude-powered CI workflow `doc-pr-full-cycle.yml` was added, orchestrat
 ### Custom Merge Driver for doc-index.json (commit d0fa416)
 
 A custom git merge driver (`scripts/merge-doc-index.sh`, 89 lines) was added to auto-resolve conflicts in `docs/.doc-index.json` during merge/rebase. Uses jq three-way merge: regenerates metadata timestamps, takes the entry with newer `last_verified` for dual-side changes, unions new entries, and lets deletions win. A dedicated test suite (`scripts/test-merge-driver.sh`, 314 lines) covers timestamp conflicts, added/deleted entries, and invalid JSON handling. The merge driver is registered as part of the `--git` tier install via `git config --local merge.doc-index.driver` and `.gitattributes`.
+
+> ⚠️ **AMENDED 2026-09-28 — superseded: the driver is now a base-aware per-key three-way merge.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14 (the design changed in Task 6, sweep 05ea982 I-5). The driver described above never read the merge base: "newer `last_verified` wins" dropped one side's changes, and a deletion beat a concurrent edit. It now merges per key against the base: an entry only one side changed takes that side; one both changed is merged field by field, the verification record (`content_hash`, `code_oids`, `code_commit`, `last_verified`) moving as one unit and `deprecated` winning; a same-field change `last_verified` cannot order, a delete-vs-modify, a malformed side and a signal leave `git merge-file` conflict markers and exit 1, naming the key and field. The registration resolves the driver at merge time rather than pinning a path. Current behaviour: `docs/architecture/system-overview.md` (*Custom merge driver for doc-index*) and the header of `scripts/merge-doc-index.sh`.

@@ -1,6 +1,6 @@
 ---
 date: 2026-07-30
-status: Open
+status: Resolved
 priority: P2
 type: enhancement
 component: doc-index
@@ -122,3 +122,23 @@ used at bulk scale.
 
 Related: [`2026-07-29-doc-tools-has-no-move-entry-operation.md`](2026-07-29-doc-tools-has-no-move-entry-operation.md)
 (the single-doc gap this follows from).
+
+## Resolution
+
+Resolved by Task 5 of the sweep 05ea982 fix plan
+([I-3](2026-09-27-sweep-05ea982-I03-index-semantics.md)), which took **Option A**.
+
+- `move-entry --stdin` reads one `<old><TAB><new>` pair per line and moves the whole batch in one
+  locked index write.
+- Every pair is validated before anything is written: an unindexed source, a target that stays
+  indexed or has no file on disk, a malformed line, or a path used by two pairs. One bad pair writes
+  nothing (exit 1), and every problem is reported.
+- The single two-argument form is unchanged and runs through the same code. A test checks that both
+  forms leave the same index: keys, positions, every field, and repointed
+  `replaces`/`superseded_by`.
+
+**Option B (`archived_at`) is not needed.** Archival is `git mv` into `docs/archive/<type>/`, then
+`move-entry` (or `--stdin`), then `deprecate-entry`. The archive path and the `deprecated` status
+record it, and an archived doc is a record doc, which is never reported stale. The decision is
+recorded under "Archive Conventions" in `docs/conventions.md`. A consumer's `*archive_doc*` keeps
+its eligibility policy and its file moves, and uses these verbs for the index.

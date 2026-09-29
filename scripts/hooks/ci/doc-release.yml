@@ -1,6 +1,23 @@
 # doc-superpowers workflow v1
 # AI-powered release notes drafting
 # Installed by doc-superpowers hooks installer
+#
+# The agent drafts the release-notes entry but cannot commit, push, tag or
+# open a pull request; the last step commits only the release files to a new
+# branch and opens a PR against the release branch. (Opening it needs the
+# repository setting "Allow GitHub Actions to create and approve pull
+# requests"; the step says so when it is off. That setting also lets any
+# workflow job with pull-requests: write APPROVE pull requests: require a
+# human's review on the release branches and main.) The PR is opened with the
+# job's GITHUB_TOKEN, so it starts no workflow run: its required checks wait
+# at "Expected" until someone pushes a commit to it (or closes and reopens it).
+#
+# That PR's commit is the release commit: it adds the RELEASE-NOTES.md entry
+# and deletes the fragments it consumed. After merging it, tag the release
+# on it (or a later commit of the release branch) and bring it to main —
+# merge the release branch into main, or cherry-pick the release commit.
+# Until it reaches main, main still holds those fragments, and the next
+# release's precheck fails rather than release them a second time.
 
 name: Doc Release Notes (AI)
 
@@ -21,44 +38,41 @@ on:
         type: choice
         options: ['auto', 'major', 'minor', 'patch']
 
+# Never cancelled: a cancel between push and PR creation would strand a branch.
 concurrency:
   group: doc-release-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   DOC_SUPERPOWERS_VERSION: "__VERSION__"
 
 jobs:
   release-notes:
+    # Not on the bot's own release-notes commit (its exact subject; a
+    # squash or merge commit of that PR is caught by the precheck). A
+    # substring match also skipped a release branch cut at a squash commit
+    # that merely listed the bot's "[doc-superpowers] sync …" commits.
     if: >-
-      !contains(github.event.head_commit.message, '[doc-superpowers]')
+      !startsWith(github.event.head_commit.message, '[doc-superpowers] draft release notes')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
       pull-requests: write
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
 
+      # Skips when HEAD is the last release (the latest RELEASE-NOTES.md
+      # version's tag, else the commit that added its heading; with no version
+      # entry, the nearest v* tag) or the bot's own release-notes commit; fails
+      # when an earlier release's commit has not reached this branch (its
+      # fragments would be released twice).
       - name: Check for unreleased commits
         id: precheck
-        run: |
-          last_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -z "$last_tag" ]; then
-            echo "No tags found — first release."
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          commit_count=$(git rev-list "${last_tag}..HEAD" --count)
-          if [ "$commit_count" -eq 0 ]; then
-            echo "No unreleased commits since $last_tag. Skipping."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "$commit_count commits since $last_tag."
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+        run: .github/scripts/doc-superpowers-steps/precheck.sh
 
       - name: Resolve Anthropic auth
         id: auth
@@ -66,32 +80,54 @@ jobs:
         env:
           OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          if [ -n "$OAUTH" ]; then
-            echo "use_oauth=true" >> "$GITHUB_OUTPUT"
-            if [ -n "$API_KEY" ]; then
-              echo "::notice::Both CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are set; using CLAUDE_CODE_OAUTH_TOKEN."
-            fi
-          elif [ -n "$API_KEY" ]; then
-            echo "use_oauth=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::Neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY is set as a repository secret. Add one under Settings > Secrets and variables > Actions." >&2
-            exit 1
-          fi
+        run: .github/scripts/doc-superpowers-steps/resolve-auth.sh
+
+      - name: Fetch the doc-superpowers plugin (the installed version)
+        id: plugin
+        if: steps.precheck.outputs.skip != 'true'
+        run: .github/scripts/doc-superpowers-steps/prepare-agent.sh
 
       - name: Draft release notes
         if: steps.precheck.outputs.skip != 'true'
-        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1
+        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88
         with:
+          github_token: ${{ github.token }}
           claude_code_oauth_token: ${{ steps.auth.outputs.use_oauth == 'true' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           anthropic_api_key: ${{ steps.auth.outputs.use_oauth == 'false' && secrets.ANTHROPIC_API_KEY || '' }}
+          plugin_marketplaces: ${{ steps.plugin.outputs.marketplace }}
+          plugins: doc-superpowers@doc-superpowers
+          claude_args: |
+            --max-turns 50
+            --allowedTools "Skill,Read,Glob,Grep,Edit,Write,Bash(git log:*),Bash(git describe:*),Bash(git tag -l:*),Bash(git show:*),Bash(git diff:*),Bash(git status:*),Bash(.github/scripts/doc-tools.sh fragments:*),Bash(.github/scripts/doc-tools.sh bump-version:*),Bash(.github/scripts/doc-tools.sh check-version:*)"
           prompt: |
+            This is an unattended GitHub Actions run of the doc-superpowers plugin.
+            - Use `.github/scripts/doc-tools.sh` as `$DOC_TOOLS` (this plugin
+              version's vendored copy) and call it by that path: your tools allow
+              exactly that command.
+            - Nobody can answer questions: take the suggested version bump (unless
+              one is given below) and approve your own draft.
+            - Do not commit, push, tag or open pull requests. After you finish, the
+              workflow commits RELEASE-NOTES.md, RELEASE-NOTES.next/, the version
+              manifests, CLAUDE.md and README.md to a new branch and opens a pull
+              request; a change anywhere else fails the run.
+
             Run /doc-superpowers release to draft release notes from git history.
             ${{ inputs.from_ref && format('Use commits since {0} as the starting point.', inputs.from_ref) || '' }}
             ${{ inputs.version_bump && inputs.version_bump != 'auto' && format('Use a {0} version bump.', inputs.version_bump) || '' }}
 
-            Analyze commits since the last release, suggest a version bump,
-            and draft the RELEASE-NOTES.md entry. Create a pull request with
-            the changes. Do NOT create git tags — leave that for the maintainer.
+            Analyze the commits since the last release, choose the version bump,
+            and draft the RELEASE-NOTES.md entry.
 
-            Use "[doc-superpowers] draft release notes" as the commit message.
+      - name: Commit and open the release-notes pull request
+        if: steps.precheck.outputs.skip != 'true'
+        env:
+          EXPECTED_HEAD: ${{ steps.plugin.outputs.head }}
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.ref_name }}
+          # A re-run (a new attempt) gets its own branch: the first attempt's
+          # may already exist.
+          BRANCH: doc-superpowers/release-notes-${{ github.run_id }}-${{ github.run_attempt }}
+        # prepare-agent.sh's pre-agent copy of the checker: an integrity check
+        # against agent mistakes, not a sandbox (a steered agent reaches the
+        # job's secrets and its token's permissions — references/hooks.md).
+        run: '"$RUNNER_TEMP"/doc-superpowers-steps/commit-changes.sh --allow RELEASE-NOTES.md --allow RELEASE-NOTES.next/ --allow CLAUDE.md --allow README.md --allow package.json --allow .claude-plugin/plugin.json --allow .claude-plugin/marketplace.json --allow .cursor-plugin/plugin.json --allow gemini-extension.json --message "[doc-superpowers] draft release notes" --push-to "$BRANCH" --open-pr "$BASE"'
