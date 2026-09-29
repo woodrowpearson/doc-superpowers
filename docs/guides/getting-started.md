@@ -154,7 +154,7 @@ Maps your changed files to affected documentation and reports what needs updatin
 /doc-superpowers release --from=v2.2.0
 ```
 
-Scans git history (from the last release tag or a specified `--from` ref) and drafts a semantic-versioned entry for `RELEASE-NOTES.md`. If `RELEASE-NOTES.next/PR-*.md` fragments are present (produced by the `doc-pr-release.yml` CI workflow on each open PR), the action merges every one still present into the new entry — losslessly, or it skips the fragment with a warning and keeps it for the next release — and deletes exactly the ones it consumed in the release commit. Human-edited (drifted) fragments are merged as written, with a warning. The release commit must then reach `main` (merge the release branch, or cherry-pick it): until it does, the next release refuses rather than release the same fragments twice. The fragment format, including how to re-seal a hand edit and the explicit no-notes state, is `RELEASE-NOTES.next/README.md`.
+Scans git history (from the last release — its tag, or the commit that added its `RELEASE-NOTES.md` heading when it was never tagged — or a specified `--from` ref) and drafts a semantic-versioned entry for `RELEASE-NOTES.md`. If `RELEASE-NOTES.next/PR-*.md` fragments are present (produced by the `doc-pr-release.yml` CI workflow on each open PR), the action merges every one still present into the new entry — losslessly, or it skips the fragment with a warning and keeps it for the next release — and deletes exactly the ones it consumed in the release commit. Human-edited (drifted) fragments are merged as written, with a warning. The release commit must then reach `main` (merge the release branch, or cherry-pick it): until it does, the next release refuses rather than release the same fragments twice. The fragment format, including how to re-seal a hand edit and the explicit no-notes state, is `RELEASE-NOTES.next/README.md`.
 
 ### Spec lifecycle commands
 
@@ -192,7 +192,7 @@ For code review and commit review integration, see `references/integration-patte
 | `/doc-superpowers update` | Execute doc updates from audit |
 | `/doc-superpowers diagram` | Regenerate architecture and workflow diagrams |
 | `/doc-superpowers sync` | Sync doc index with filesystem |
-| `/doc-superpowers hooks install [--git] [--claude] [--ci] [--all] [--workflows=<csv\|all\|none>] [--helpers=<bool>] [--force] [--base-branch NAME] [--cron EXPR] [--ci-strict[=true\|false]]` | Install workflow hooks (CI: the shell workflows by default, AI ones by name; choices recorded) |
+| `/doc-superpowers hooks install [--git] [--claude] [--ci] [--all] [--workflows=<csv\|all\|none>] [--force] [--base-branch NAME] [--cron EXPR] [--ci-strict[=true\|false]]` | Install workflow hooks (CI: the shell workflows by default, AI ones by name; choices recorded) |
 | `/doc-superpowers hooks status [--git] [--claude] [--ci]` | Show installed hooks |
 | `/doc-superpowers hooks uninstall [--git] [--claude] [--ci] [--all] [--workflows=<csv\|all\|none>] [--transient]` | Remove installed hooks (granular CI uninstall; `--transient` keeps state non-intentional) |
 | `/doc-superpowers spec-generate --design-doc=<path>` | Generate formal specs from design doc |

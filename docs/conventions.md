@@ -224,7 +224,7 @@ Use `--all` to install all tiers at once.
 
 ### Git Hooks Directory
 
-The installer writes where git runs hooks: `git rev-parse --git-path hooks`. That is a repository-local `core.hooksPath` (`~` expanded) when one is set, a linked worktree's common `.git/hooks`, a submodule's `.git/modules/<name>/hooks`, or `.git/hooks`. A `.githooks/` directory that no `core.hooksPath` names is not used (git never runs it). A `core.hooksPath` from the global or system config is refused: it is every repository's hooks directory.
+The installer writes where git runs hooks: `git rev-parse --git-path hooks`. That is a repository-local `core.hooksPath` (`~` expanded) when one is set, a linked worktree's common `.git/hooks`, a submodule's `.git/modules/<name>/hooks`, or `.git/hooks`. A `.githooks/` directory that no `core.hooksPath` names is not used (git never runs it). A `core.hooksPath` from the global or system config is refused — by `uninstall --git` too — since it is every repository's hooks directory; a worktree's own (`extensions.worktreeConfig`) is this repository's. `status` compares each installed hook and the local copy an integrated hook runs with what this install renders (line 2, the install date, aside): a hook of another doc-superpowers version carries the same marker, so a difference reads `outdated: re-run install --git`.
 
 ### Auto-Integration for Existing Git Hooks
 
@@ -240,7 +240,7 @@ When a target hook file already exists and was not installed by doc-superpowers,
 The Claude tier is **per-user**. It **copies** hook scripts to `.claude/hooks/doc-superpowers/` with placeholder substitution, rather than referencing source scripts by absolute path:
 
 - `__DOC_TOOLS_RESOLVE__` becomes the program that finds `doc-tools.sh` at run time — the merge driver's rule: for a plugin-cache install the newest version-named sibling in numeric order (never another sibling, no GNU `sort -V`), for a checkout its own pinned path, single-quoted — and `__INSTALL_DATE__` the date.
-- Hooks are registered in `.claude/settings.local.json` as `bash "$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/<hook>.sh`, and both that file and the scripts directory are excluded from git through a marked block in `$(git rev-parse --git-path info/exclude)`.
+- Hooks are registered in `.claude/settings.local.json` as `bash "$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/<hook>.sh`, and both that file and the scripts directory are excluded from git through a marked block in `$(git rev-parse --git-path info/exclude)`. An exclude cannot hide a tracked file: when the repository tracks either, install prints `git rm -r --cached --ignore-unmatch -- .claude/settings.local.json .claude/hooks/doc-superpowers` and warns that pulling that commit deletes them from every other clone (each teammate re-runs `install --claude`). `status` flags a script or settings command another version installed as `outdated: re-run install --claude`.
 - Existing settings are merged per entry: the installer's entries (by script path) are replaced, every other entry and group is kept byte-for-byte; a settings file that is not one JSON object is refused.
 - Uninstall removes the installer's entries (a group only when nothing else is left in it), the three scripts and the exclude block; a settings file left empty is removed.
 

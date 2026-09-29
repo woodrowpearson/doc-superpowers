@@ -276,3 +276,10 @@ did:
 **Left for the release flow:** the RELEASE-NOTES v2.14.0 `[""]` explanation. RELEASE-NOTES.md is
 the release's file.
 
+**Later (the final review fix wave).** `set-doc-type` now retypes an entry in place, keeping its
+other fields, so the next retype needs no `remove-entry` + `add-entry` (the seven `last_verified`
+values lost here stay lost; this issue and the six design specs were re-attested after reading).
+The deprecate/remove budgets are now 7 s. `tests.yml`'s drift step also runs after a failing
+suite, flags a retired doc-superpowers workflow, and names `install --git` for `.gitattributes`
+drift. What the wave deferred is listed in `docs/issues/2026-09-28-sweep-05ea982-followups.md`.
+

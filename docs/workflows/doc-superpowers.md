@@ -317,7 +317,7 @@ Scaffolding command that installs opt-in hooks into the target project for autom
 
 ```
 /doc-superpowers hooks install   [--git] [--claude] [--ci] [--all]
-                                 [--workflows=<csv|all|none>] [--helpers=<true|false>]
+                                 [--workflows=<csv|all|none>]
                                  [--force] [--base-branch NAME] [--cron EXPR] [--ci-strict[=true|false]]
 /doc-superpowers hooks status    [--git] [--claude] [--ci]
 /doc-superpowers hooks uninstall [--git] [--claude] [--ci] [--all]

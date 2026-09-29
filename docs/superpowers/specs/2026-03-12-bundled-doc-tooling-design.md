@@ -348,7 +348,7 @@ Called by `update` action after regenerating specific docs.
 
 If a doc path isn't in the index, exits with error suggesting `build-index`. `update-index` refreshes, it doesn't create.
 
-> ⚠️ **AMENDED 2026-09-28 — a new doc goes in through `add-entry`.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14. `build-index` refuses to replace an index that has entries (its `--force` discards every entry's metadata), so it was never the way to add one doc: `update-index` reports a path that is not indexed and skips it, applying the others and exiting 1, and the doc goes in through `add-entry`. `update-index` records each ref's content as the working tree holds it (`code_oids`), and it keeps a deprecated entry deprecated.
+> ⚠️ **AMENDED 2026-09-28 — a new doc goes in through `add-entry`.** Landed by `docs/plans/2026-09-27-full-repo-05ea982-fix-plan.md` Task 14. `build-index` refuses to replace an index that has entries (its `--force` re-records every entry unverified, keeping only each re-indexed key's deprecation), so it was never the way to add one doc: `update-index` reports a path that is not indexed and skips it, applying the others and exiting 1, and the doc goes in through `add-entry`. `update-index` records each ref's content as the working tree holds it (`code_oids`), and it keeps a deprecated entry deprecated.
 
 ### Subcommand: `status <path>`
 
