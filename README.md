@@ -85,6 +85,19 @@ Works with 40+ supported agents. See [skills.sh](https://skills.sh) for details.
 
 In a client other than Claude Code, [`references/tool-mappings.md`](references/tool-mappings.md) maps the skill's tool names to the client's and says which hook tiers and features it supports.
 
+## Upgrading from 2.x
+
+v3.0.0 changes what the installer writes, the doc-index schema and a few verbs' contracts. An install made by 2.x keeps working badly rather than failing: its hooks carry the same marker, and the v2 Claude gate read an environment variable nothing sets, so it never gated. `install.sh status` now says so (`⚠ … outdated: re-run install --git` / `--claude`). In each repository that has doc-superpowers installed:
+
+1. **Re-run every tier you use**, from the upgraded plugin: `install.sh install --git`, `install --claude`, `install --ci`. Re-installing is idempotent, and it is what replaces the v2 hooks, the pinned merge-driver registration and the vendored `.github/scripts/` copies.
+2. **Re-install before you uninstall.** `uninstall` removes only files byte-identical to the plugin's copies, so the v2 copies an old install vendored are kept (and reported) by a v3 `uninstall`.
+3. **CI tier.** v2's default `--ci` installed every AI workflow, and a plain re-install keeps the recorded set: remove the ones you did not choose with `install.sh uninstall --ci --workflows=<names>`. `doc-index-update` is retired — any `install --ci` removes a copy the installer owns (a file of that name without its marker is kept and reported). An existing `RELEASE-NOTES.next/README.md` is never overwritten, so a v2 copy keeps giving v2 advice: `doc-tools.sh tools status` reports when it differs from the plugin's; replace it with `scripts/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md`.
+4. **Claude tier: per-user now.** Its files hold this machine's paths and live in git's `info/exclude`. If your repository tracks `.claude/settings.local.json` or `.claude/hooks/doc-superpowers/`, untrack them (`git rm -r --cached --ignore-unmatch -- .claude/settings.local.json .claude/hooks/doc-superpowers`) and commit. **Pulling that commit deletes those files from every other clone**: tell each teammate to re-run `install.sh install --claude` after pulling, and to restore a permission allowlist they kept in that file with `git show ORIG_HEAD:.claude/settings.local.json`.
+5. **Git hooks in the wrong place.** v2 could install into a `.githooks/` directory git was not configured to run, or into a global `core.hooksPath`. v3 installs only where git runs hooks and refuses a global `core.hooksPath`, so it never touches those copies: delete them by hand (their first lines say `doc-superpowers hook v1`).
+6. **The doc-index.** Schema v3 records each code ref's content (`code_oids`); a v2 index is read as it is and upgraded by its next write, and a v2 entry keeps the old commit comparison until `update-index` re-verifies it. Plans, issues, audits and design specs are record docs now, never reported stale, decided by `doc_type`: v2 indexes often typed design specs `spec` — retype them with `doc-tools.sh set-doc-type <doc> design-spec` (never `remove-entry` + `add-entry`, which drops the entry's verification and links).
+7. **Verb contracts that can break a script.** `deprecate-entry` exits 1 for a path not in the index (after applying the rest; `remove-entry` stays idempotent, exit 0). Every repository verb exits 2 when run from a subdirectory: run `doc-tools.sh` from the repository root. `claude-code.json` is gone (nothing read it), and `bump-version` / `check-version` no longer look for it.
+8. **Spec amendments.** The `AMENDED`-block landed-check reads the whole block, so blocks written with the citation on their last line (the 2.x layout) still pass.
+
 ## Usage
 
 ```
@@ -181,7 +194,6 @@ Install opt-in hooks for automated freshness monitoring:
 /doc-superpowers hooks install --ci --base-branch develop   # target branch (default: main)
 /doc-superpowers hooks install --ci --cron "0 6 * * 1"      # weekly audit schedule (default: 0 9 * * 1)
 /doc-superpowers hooks install --ci --ci-strict             # PR check fails on stale docs (--ci-strict=false undoes it)
-/doc-superpowers hooks install --ci --workflows=doc-release --helpers=false  # skip the doc-pr-release helpers (default: true; refused while doc-pr-release is selected or installed)
 
 # Standalone tool install (v2.12.0+) — doc-tools.sh only, no workflows
 $DOC_TOOLS tools install                       # → .github/scripts/doc-tools.sh
@@ -190,7 +202,8 @@ $DOC_TOOLS tools install --helper doc-superpowers-steps  # + only the named help
 $DOC_TOOLS tools status                        # present? matches the plugin? which version?
 $DOC_TOOLS tools uninstall                     # removes only files identical to the plugin's
 
-# Check what's installed (optionally one tier: --git / --claude / --ci)
+# Check what's installed (optionally one tier: --git / --claude / --ci);
+# "⚠ … outdated: re-run install --git|--claude" marks another version's install
 /doc-superpowers hooks status
 
 # Remove hooks
@@ -202,7 +215,7 @@ The installer works from anywhere in the repository (it acts on the top level; a
 
 **State tracking:** the CI tier's choices — the workflow set, base branch, cron, strict — persist in `.claude/doc-superpowers/installed.json` (commit it). A plain `install --ci` reproduces them and respects intentional uninstalls; pass `--workflows=<name>` to add one back, `--force` to re-add all, or `uninstall --ci --transient` so the next install re-installs. An unreadable state file (e.g. a merge conflict) is never overwritten: resolve it, or move it to `installed.json.corrupt` and the next install rebuilds it from disk without adding anything. Uninstall keeps a vendored helper you edited and says so (`Kept …`).
 
-**Git hooks (5):** Pre-commit checks the staged tree, so it reports the docs *this* commit leaves stale (renames included). Post-merge and post-checkout report the docs a merge or branch switch left stale or missing. Prepare-commit-msg lists the stale docs as comment lines, only for a message written in the editor (git strips them; with `-m`/`-F` it adds nothing). Pre-push reminds about unreleased commits on the branches being pushed.
+**Git hooks (5):** Pre-commit checks the staged tree, so it reports the docs *this* commit leaves stale (renames included), and every entry the staged index adds. An indexed doc the commit leaves out is "not in this commit" when it is on disk (`git add` it), "missing from disk" when it is gone. Post-merge and post-checkout report the docs a merge or branch switch left stale or missing. Prepare-commit-msg lists the stale docs as comment lines, only for a message written in the editor (git strips them; with `-m`/`-F` it adds nothing). Pre-push reminds about unreleased commits on the branches being pushed.
 
 **Claude Code hooks (3):** They read the event JSON on stdin and answer through Claude Code's JSON output (`additionalContext` for Claude, `systemMessage` for you). The pre-commit gate (PreToolUse) checks the staged tree of a `git commit`; a command that stages as it commits (`git add … && git commit`, `commit -a`) is left to the git pre-commit hook, which sees the real index, and the gate says so. Post-commit sync (PostToolUse) reports the docs a commit left stale. Session summary (Stop, which fires after every response) reports docs citing code changed in the working tree; a clean tree costs nothing. No hook runs `update-index`: only a reviewer attests a doc.
 

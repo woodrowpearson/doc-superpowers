@@ -1098,10 +1098,16 @@ assert_contains "$_readme" "/plugin install $_plg@$_mkt" "README: …and install
 # --- claude-code.json: no consumer (R9), so no file ---
 assert_file_not_exists "$REPO_ROOT/claude-code.json" "claude-code.json is gone (no client reads it; the R9 search is in the Task 13 report)"
 _ccj=""
+# README's *Upgrading from 2.x* is the one place that names it: it tells an
+# upgrader the file is gone.
 for _f in $_I12_LIVE scripts/doc-tools.sh scripts/hooks/ci/doc-release.yml .github/workflows/tests.yml package.json; do
-  _ccj="$_ccj$(grep -nH 'claude-code\.json' "$REPO_ROOT/$_f" 2>/dev/null || true)"
+  _ccj="$_ccj$(awk -v f="$_f" '
+    f == "README.md" && /^## / { up = ($0 ~ /^## Upgrading from 2\.x/) }
+    !up && /claude-code\.json/ { print f ":" FNR ":" $0 }' "$REPO_ROOT/$_f" 2>/dev/null || true)"
 done
-assert_eq "" "$_ccj" "no live file names claude-code.json"
+assert_eq "" "$_ccj" "no live file names claude-code.json (but README's upgrade notes)"
+assert_contains "$(awk '/^## / { up = ($0 ~ /^## Upgrading from 2\.x/) } up' "$REPO_ROOT/README.md")" \
+  '`claude-code.json` is gone' "README's upgrade notes say claude-code.json is gone (F7)"
 _six=$(_i12_grep '(6|six) manifest')
 assert_eq "" "$_six" "no live doc counts six manifests"
 # The shipped manifests all parse, and each path they name exists.

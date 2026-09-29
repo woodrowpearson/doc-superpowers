@@ -8,8 +8,10 @@
 #     is read by Claude, systemMessage is shown to the user;
 #   - DOC_SUPERPOWERS_STRICT=1: exit 2 with the reason on stderr, which Claude
 #     Code hands to Claude and the commit does not run.
-# The check runs on the staged tree, the commit's content. A command that
-# stages as it commits (`git add … && git commit`, `commit -a`, a pathspec) has
+# The check runs on the staged tree, the commit's content, scoped to the staged
+# paths plus every entry the staged doc-index adds; an indexed doc the commit
+# leaves out is "not in this commit" when it is on disk (git add it), "missing
+# from disk" when it is gone. A command that stages as it commits (`git add … && git commit`, `commit -a`, a pathspec) has
 # no such tree yet: the gate defers to the git pre-commit hook, which runs on
 # the real one, and says so.
 # The skill or the doc-index being absent is silent. The check failing (jq
@@ -130,19 +132,51 @@ tree=$(GIT_INDEX_FILE="$idx" git write-tree 2>/dev/null) \
   || _fail "git write-tree failed"
 
 _check() { printf '%s\n' "$staged" | "$DOC_TOOLS" check-freshness --tree "$tree" --code-refs-from -; }
-if ! result=$(_check 2>/dev/null); then
-  why=$(_check 2>&1 >/dev/null | awk '/^ERROR: / { print; e = 1; exit } NF && !/^NOTE: / && o == "" { o = $0 } END { if (!e) print o }')
+_why() {
+  why=$("$@" 2>&1 >/dev/null | awk '/^ERROR: / { print; e = 1; exit } NF && !/^NOTE: / && o == "" { o = $0 } END { if (!e) print o }')
   why="${why#ERROR: }"
   why="${why%.}"
   _fail "${why:-doc-tools.sh check-freshness failed}"
+}
+result=$(_check 2>/dev/null) || _why _check
+
+# The scope reaches a doc through its code refs only, so the entries the
+# staged index adds (its keys minus HEAD's) are judged unscoped, and their
+# verdicts join the scoped ones — the git pre-commit hook's rule.
+if grep -qxF docs/.doc-index.json <<<"$staged"; then
+  added=$( { git cat-file blob "$tree:docs/.doc-index.json" \
+    && { git cat-file blob HEAD:docs/.doc-index.json 2>/dev/null || echo '{}'; }; } 2>/dev/null \
+    | jq -cs '((.[0].docs // {}) | keys) - ((.[1].docs // {}) | keys)' 2>/dev/null) || added='[]'
+  if [[ -n "$added" && "$added" != "[]" ]]; then
+    _wide() { "$DOC_TOOLS" check-freshness --tree "$tree"; }
+    wide=$(_wide 2>/dev/null) || _why _wide
+    result=$(printf '%s\n%s\n%s\n' "$added" "$result" "$wide" | jq -cs '
+      (reduce .[0][] as $k ({}; .[$k] = true)) as $a
+      | .[2].docs as $w
+      | .[1] | .docs += ($w | with_entries(select($a[.key])))' 2>/dev/null) \
+      || _fail "cannot read the freshness report"
+  fi
 fi
 
-# Line 1: "<stale> <missing>"; line 2: the one-line summary; then the report.
-report=$(jq -r --arg move "  Run 'doc-tools.sh move-entry <old> <new>' if it was renamed, or 'remove-entry'/'deprecate-entry' to clean up." '
-  [.docs | to_entries[] | select(.value.status == "stale")] as $s
-  | [.docs | to_entries[] | select(.value.status == "missing")] as $m
-  | "\($s | length) \($m | length)",
+# The docs the commit leaves out: on disk (unstaged) or gone. (A JSON list on
+# stdin, never argv: it can be index-sized.)
+ondisk=""
+while IFS= read -r doc; do
+  [[ -n "$doc" && -e "$doc" ]] && ondisk+="$doc"$'\n'
+done < <(jq -r '.docs | to_entries[] | select(.value.status == "missing") | .key' <<<"$result" 2>/dev/null)
+ondisk=$(jq -Rsc 'split("\n") | map(select(. != ""))' <<<"$ondisk" 2>/dev/null) || _fail "cannot read the freshness report"
+
+# Line 1: "<stale> <unstaged> <gone>"; line 2: the one-line summary; then the report.
+report=$(printf '%s\n%s\n' "$result" "$ondisk" | jq -rs --arg move "  Run 'doc-tools.sh move-entry <old> <new>' if it was renamed, or 'remove-entry'/'deprecate-entry' to clean up." \
+  --arg add "  The index this commit records lists them: stage each with 'git add <doc>'." '
+  (reduce .[1][] as $k ({}; .[$k] = true)) as $d
+  | .[0]
+  | [.docs | to_entries[] | select(.value.status == "stale")] as $s
+  | [.docs | to_entries[] | select(.value.status == "missing" and $d[.key])] as $u
+  | [.docs | to_entries[] | select(.value.status == "missing" and ($d[.key] | not))] as $m
+  | "\($s | length) \($u | length) \($m | length)",
     ([if ($s | length) > 0 then "\($s | length) stale doc(s) in this commit: \([$s[].key] | join(", "))" else empty end,
+      if ($u | length) > 0 then "\($u | length) indexed doc(s) not in this commit: \([$u[].key] | join(", "))" else empty end,
       if ($m | length) > 0 then "\($m | length) indexed doc(s) missing from disk: \([$m[].key] | join(", "))" else empty end]
      | "doc-superpowers: " + join("; ")),
     (if ($s | length) > 0 then
@@ -151,15 +185,20 @@ report=$(jq -r --arg move "  Run 'doc-tools.sh move-entry <old> <new>' if it was
          + (if ((.value.code_refs_changed // []) | length) > 0 then ": \(.value.code_refs_changed | join(", "))" else "" end)
          + (if ((.value.commits_behind // 0) > 0) then " (\(.value.commits_behind) commits behind)" else "" end))
      else empty end),
+    (if ($u | length) > 0 then
+       "doc-superpowers: \($u | length) indexed doc(s) not in this commit (on disk, but not staged)",
+       ($u[] | "  \(.key)"),
+       $add
+     else empty end),
     (if ($m | length) > 0 then
        "doc-superpowers: \($m | length) indexed doc(s) missing from disk",
        ($m[] | "  \(.key)"),
        $move
      else empty end)
-' <<<"$result" 2>/dev/null) || _fail "cannot read the freshness report"
+' 2>/dev/null) || _fail "cannot read the freshness report"
 
 counts=${report%%$'\n'*}
-[[ "$counts" == "0 0" ]] && exit 0
+[[ "$counts" == "0 0 0" ]] && exit 0
 report=${report#*$'\n'}
 summary=${report%%$'\n'*}
 report=${report#*$'\n'}

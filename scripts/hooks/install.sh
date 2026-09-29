@@ -151,9 +151,10 @@ CI options (install --ci / --all):
   --base-branch NAME        target branch (default: main)
   --cron EXPR               schedule, 5 fields (default: 0 9 * * 1)
   --ci-strict[=true|false]  the PR check fails on stale docs (default: false)
-  --helpers=<true|false>    ship the doc-pr-release producer helpers (default:
-                            true); refused while doc-pr-release is selected or
-                            installed, since it runs them
+  --helpers=<true|false>    deprecated, and inert: the helpers ship exactly
+                            while an installed workflow runs them.
+                            --helpers=false only refuses doc-pr-release
+                            (selected, or already installed)
   --force                   also re-install workflows removed on purpose
   The choices are recorded (.claude/doc-superpowers/installed.json, commit it):
   a plain 'install --ci' reproduces the recorded set, branch, cron and strict.
@@ -523,13 +524,23 @@ hooks_path_scope() {
   esac
 }
 
+# A core.hooksPath of this repository — its own config, or (extensions.
+# worktreeConfig) this worktree's — is where install and uninstall act. One
+# from any other scope (global, system, a command-line -c) serves every
+# repository: install would add our hooks to all of them, uninstall remove
+# hooks they all use. Both refuse, each saying what it would have done.
 check_hooks_path_scope() {
-  local scope
+  local scope what
   scope=$(hooks_path_scope)
   case "$scope" in
-    "" | local) ;;
+    "" | local | worktree) ;;
     *)
-      echo "ERROR: core.hooksPath is set in your $scope git config ($(git config --get core.hooksPath)). Git runs every repository's hooks from there, so installing into it would add doc-superpowers hooks to all of them. Set a repository-local one (git config --local core.hooksPath <dir>) or unset the $scope one, then re-run. Nothing was changed." >&2
+      if [ "$COMMAND" = uninstall ]; then
+        what="uninstall --git does not touch it: those hooks serve every repository. If an older doc-superpowers installer put hooks there (a hook whose first lines say 'doc-superpowers hook v1'), remove them by hand"
+      else
+        what="installing into it would add doc-superpowers hooks to all of them. Set a repository-local one (git config --local core.hooksPath <dir>) or unset the $scope one, then re-run"
+      fi
+      echo "ERROR: core.hooksPath is set in your $scope git config ($(git config --get core.hooksPath)). Git runs every repository's hooks from there, so $what. Nothing was changed." >&2
       exit 1
       ;;
   esac
@@ -606,6 +617,17 @@ integrate_hook() {
       printf '%s\n' "$blk"
     fi
   }
+}
+
+# Whether <file> is what this install renders from <template>, line 2 (the
+# install date) aside. A hook of another doc-superpowers version carries the
+# same marker, so presence alone cannot tell a v2 hook (whose gate read
+# $TOOL_INPUT, which nothing sets: it never gated) from a current one.
+render_matches() {
+  local rendered
+  [ -f "$1" ] || return 1
+  rendered=$(render_hook "$2" | sed 2d) || return 1
+  [ "$(sed 2d "$1")" = "$rendered" ]
 }
 
 # The integration state of <hook> in HOOKS_DIR: ours | current | outdated | none.
@@ -731,7 +753,7 @@ uninstall_git() {
 status_git() {
   local hook dest scope st install_date
   scope=$(hooks_path_scope)
-  if [ -n "$scope" ] && [ "$scope" != local ]; then
+  if [ -n "$scope" ] && [ "$scope" != local ] && [ "$scope" != worktree ]; then
     echo "Git Hooks (dir: $HOOKS_DIR — from your $scope core.hooksPath: not this repository's; install --git refuses it):"
   else
     echo "Git Hooks (dir: $HOOKS_DIR):"
@@ -742,13 +764,21 @@ status_git() {
     case "$st" in
       ours)
         install_date=$(head -3 "$dest" | sed -n 's/.*installed \([0-9-]*\).*/\1/p')
-        if [ -x "$dest" ]; then
-          printf "  ✓ %-22s installed %s\n" "$hook" "${install_date:-unknown}"
-        else
+        if [ ! -x "$dest" ]; then
           printf "  ⚠ %-22s installed but not executable (git skips it): chmod +x %s\n" "$hook" "$dest"
+        elif ! render_matches "$dest" "$SCRIPT_DIR/git/$hook"; then
+          printf "  ⚠ %-22s outdated (installed %s by another doc-superpowers version or install): re-run install --git\n" "$hook" "${install_date:-unknown}"
+        else
+          printf "  ✓ %-22s installed %s\n" "$hook" "${install_date:-unknown}"
         fi
         ;;
-      current) printf "  ✓ %-22s integrated (a block in your hook runs ours)\n" "$hook" ;;
+      current)
+        if render_matches "$HOOKS_DIR/.doc-superpowers-$hook" "$SCRIPT_DIR/git/$hook"; then
+          printf "  ✓ %-22s integrated (a block in your hook runs ours)\n" "$hook"
+        else
+          printf "  ⚠ %-22s integrated, but the copy it runs (.doc-superpowers-%s) is outdated: re-run install --git\n" "$hook" "$hook"
+        fi
+        ;;
       outdated) printf "  ⚠ %-22s integrated with an outdated block (or its copy is missing): re-run install --git\n" "$hook" ;;
       *) printf "  ✗ %-22s not installed\n" "$hook" ;;
     esac
@@ -890,10 +920,18 @@ install_claude() {
   upsert_block "$EXCLUDE_FILE" "$EXCLUDE_BLOCK" 644
   echo "Claude Code hooks: 3 installed (pre-commit-gate, post-commit-sync, session-summary)"
   echo "  Scripts in $CLAUDE_HOOKS_DIR/, registered in $SETTINGS_FILE — per-user: both are excluded from git ($EXCLUDE_FILE)"
-  # An exclude entry cannot hide a file git already tracks.
-  if git ls-files --error-unmatch -- "$SETTINGS_FILE" >/dev/null 2>&1; then
-    echo "  NOTE: $SETTINGS_FILE is tracked by git, so this machine's hook wiring would be committed for everyone."
-    echo "        Untrack it (git rm --cached $SETTINGS_FILE) to keep the tier per-user."
+  # An exclude entry cannot hide a file git already tracks — the settings or
+  # the rendered scripts (both hold this machine's paths).
+  local tracked
+  tracked=$(git ls-files -- "$SETTINGS_FILE" "$CLAUDE_HOOKS_DIR" 2>/dev/null) || tracked=""
+  if [ -n "$tracked" ]; then
+    echo "  NOTE: these per-user files are tracked by git, so this machine's hook wiring would be committed for everyone:"
+    printf '%s\n' "$tracked" | sed 's/^/          /'
+    echo "        Untrack them to keep the tier per-user (your copies stay on disk):"
+    echo "          git rm -r --cached --ignore-unmatch -- $SETTINGS_FILE $CLAUDE_HOOKS_DIR"
+    echo "        Pulling that commit DELETES these files from every other clone: tell each teammate to re-run"
+    echo "        'install.sh install --claude' after pulling (a permission allowlist they kept in $SETTINGS_FILE"
+    echo "        comes back with: git show ORIG_HEAD:$SETTINGS_FILE)."
   fi
 }
 
@@ -932,11 +970,17 @@ uninstall_claude() {
 status_claude() {
   local h reg="" ev
   echo "Claude Code Hooks (per-user: $SETTINGS_FILE):"
+  # Each registered entry of ours: "<event> <hook> <cmd>", cmd "ok" when its
+  # command is the one this install writes (an older one — v2 ran the script
+  # by a relative path — is outdated).
   if [ -e "$SETTINGS_FILE" ]; then
-    reg=$(jq -r "$_CLAUDE_JQ_DEFS"'
-      [(.hooks // {}) | to_entries[] | select(.value | type == "array") | .key as $e
+    reg=$(jq -r --arg g "$(claude_cmd pre-commit-gate)" --arg p "$(claude_cmd post-commit-sync)" \
+      --arg s "$(claude_cmd session-summary)" "$_CLAUDE_JQ_DEFS"'
+      {"pre-commit-gate": $g, "post-commit-sync": $p, "session-summary": $s} as $want
+      | [(.hooks // {}) | to_entries[] | select(.value | type == "array") | .key as $e
        | .value[] | select(type == "object" and ((.hooks | type) == "array")) | .hooks[] | select(ours)
-       | "\($e) \(.command | capture("doc-superpowers/(?<n>[a-z-]+)\\.sh").n)"] | .[]' "$SETTINGS_FILE" 2>/dev/null) \
+       | (.command | capture("doc-superpowers/(?<n>[a-z-]+)\\.sh").n) as $n
+       | "\($e) \($n) \(if .command == $want[$n] then "ok" else "old" end)"] | .[]' "$SETTINGS_FILE" 2>/dev/null) \
       || echo "  ⚠ $SETTINGS_FILE cannot be read as JSON"
   fi
   for h in $CLAUDE_HOOKS; do
@@ -945,11 +989,15 @@ status_claude() {
       post-commit-sync) ev=PostToolUse ;;
       *) ev=Stop ;;
     esac
-    if grep -qxF "$ev $h" <<<"$reg"; then
-      if [ -f "$CLAUDE_HOOKS_DIR/$h.sh" ]; then
-        printf "  ✓ %-22s active (%s: script + settings)\n" "$h" "$ev"
-      else
+    if grep -q "^$ev $h " <<<"$reg"; then
+      if [ ! -f "$CLAUDE_HOOKS_DIR/$h.sh" ]; then
         printf "  ⚠ %-22s in settings but script missing from %s/\n" "$h" "$CLAUDE_HOOKS_DIR"
+      elif ! grep -qxF "$ev $h ok" <<<"$reg"; then
+        printf "  ⚠ %-22s outdated (registered with another version's command, not %s): re-run install --claude\n" "$h" "$(claude_cmd "$h")"
+      elif ! render_matches "$CLAUDE_HOOKS_DIR/$h.sh" "$SCRIPT_DIR/claude/$h.sh"; then
+        printf "  ⚠ %-22s outdated (its script is another doc-superpowers version's or install's): re-run install --claude\n" "$h"
+      else
+        printf "  ✓ %-22s active (%s: script + settings)\n" "$h" "$ev"
       fi
     else
       printf "  ✗ %-22s not installed\n" "$h"
