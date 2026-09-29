@@ -80,7 +80,7 @@ jobs:
           plugins: doc-superpowers@doc-superpowers
           claude_args: |
             --max-turns 40
-            --allowedTools "Skill,Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(git -c core.quotePath=false diff --name-only:*),Bash(jq:*),Bash(.github/scripts/doc-tools.sh check-freshness:*),Bash(.github/scripts/doc-tools.sh status:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*)"
+            --allowedTools "Skill,Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(jq:*),Bash(.github/scripts/doc-tools.sh check-freshness:*),Bash(.github/scripts/doc-tools.sh status:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*)"
           prompt: |
             This is an unattended, read-only GitHub Actions run of the doc-superpowers
             plugin.
@@ -135,7 +135,8 @@ jobs:
         run: .github/scripts/doc-superpowers-steps/prepare-agent.sh
 
       # Tag mode: no prompt:, so the action answers the comment itself (on the
-      # PR branch, in its own tracking comment).
+      # PR branch, in its own tracking comment). The comment is the request,
+      # so no jq: `jq -n env` would print the job's secrets.
       - name: Answer @claude
         if: steps.guard.outputs.same_repo == 'true'
         uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88
@@ -148,4 +149,4 @@ jobs:
           plugins: doc-superpowers@doc-superpowers
           claude_args: |
             --max-turns 30
-            --allowedTools "Skill,Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(git -c core.quotePath=false diff --name-only:*),Bash(jq:*),Bash(.github/scripts/doc-tools.sh check-freshness:*),Bash(.github/scripts/doc-tools.sh status:*),Bash(gh pr view:*),Bash(gh pr diff:*)"
+            --allowedTools "Skill,Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(.github/scripts/doc-tools.sh check-freshness:*),Bash(.github/scripts/doc-tools.sh status:*),Bash(gh pr view:*),Bash(gh pr diff:*)"

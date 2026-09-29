@@ -12,7 +12,9 @@
 #
 # Exit codes:
 #   0  success (edit applied, or no-op because content unchanged)
-#   1  malformed markers in existing body
+#   1  refused, the PR body unchanged: malformed markers in the existing body
+#      (an END before the START), or no section yet and a body that ends
+#      inside an unclosed code fence
 #   2  bad arguments / missing dependencies
 set -euo pipefail
 

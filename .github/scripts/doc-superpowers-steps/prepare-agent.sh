@@ -19,9 +19,10 @@
 # So this step copies the checker, as it is before the agent runs, to
 # $RUNNER_TEMP/doc-superpowers-steps/commit-changes.sh (read-only, outside the
 # workspace), and the commit step runs that copy. It is an integrity check
-# against agent mistakes, not a sandbox: an agent with Edit/Write and
-# doc-tools.sh can run arbitrary code; the security ceiling is the job
-# token's `permissions:`.
+# against agent mistakes, not a sandbox: a steered agent can run code through
+# its granted tools, read the job's secrets from its environment, and use the
+# job token with every permission `permissions:` grants, repository-wide (the
+# doc-superpowers references/hooks.md, "What an AI job's agent can reach").
 #
 # Outputs: marketplace=<absolute directory>; head=<the checkout's HEAD> (the
 # commit step checks the agent left it there); checker=<the checker snapshot>.

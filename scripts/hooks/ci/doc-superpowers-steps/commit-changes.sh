@@ -6,13 +6,19 @@
 # The workflows run the copy prepare-agent.sh took under $RUNNER_TEMP before
 # the agent step, and every git call here runs with core.hooksPath=/dev/null
 # and core.fsmonitor=false. That is an integrity check against an agent's
-# mistakes (an edited checker, a stray hook), not a sandbox: an agent with
-# Edit/Write and doc-tools.sh can run arbitrary code, and the security ceiling
-# is the job token's `permissions:`.
+# mistakes (an edited checker, a stray hook), not a sandbox. A steered agent
+# (a PR, a commit message or a comment can carry instructions) can run code
+# through its granted tools, read the job's secrets (the Anthropic credential,
+# the job token) from its environment and publish them, and use the token with
+# every permission the job's `permissions:` grants, repository-wide — pushing
+# to any unprotected branch or tag, or changing the step scripts later jobs run
+# with those secrets. The doc-superpowers references/hooks.md, "What an AI
+# job's agent can reach", says what to protect.
 #
 # Usage:
 #   commit-changes.sh [--allow <path>|<dir/>]... [--allow-index-keys] [--ignore <dir>]...
-#                     (--check-only | --message <subject> --push-to <branch> [--open-pr <base>])
+#                     (--check-only | --message <subject> --push-to <branch>
+#                      [--open-pr <base> | --superseded-fails])
 #
 #   --allow <path>       a path the change may touch; <dir/> (a trailing /)
 #                        allows everything under it
@@ -32,13 +38,20 @@
 #                        someone pushed (a commit in <checkout>..<tip> whose
 #                        subject does not start with [doc-superpowers]) → this
 #                        run is superseded: exit 0, nothing committed or
-#                        pushed; moved only by [doc-superpowers] commits, or in
+#                        pushed (exit 1 with --superseded-fails); moved
+#                        only by [doc-superpowers] commits, or in
 #                        a way the range cannot show (reset behind the
 #                        checkout) → exit 1, never a silent discard. A branch
 #                        deleted meanwhile is not recreated (exit 0).
 #   --open-pr <base>     with --push-to <new branch>: create that branch (it
 #                        must not exist) and open a pull request → <base> (gh,
 #                        GH_TOKEN)
+#   --superseded-fails   a superseded run fails (exit 1: "re-run this
+#                        workflow") instead of ending green. Only for a
+#                        workflow the superseding push does not run again
+#                        (doc-pr-full-cycle runs only when the PR is opened);
+#                        doc-audit-update (push) and doc-pr-release
+#                        (synchronize) are re-run by that push, and leave it off.
 #
 # Env:
 #   EXPECTED_HEAD   the HEAD the agent started from (prepare-agent.sh's head)
@@ -50,9 +63,10 @@
 # was pushed, superseded=true when the branch moved past the checkout.
 #
 # Exit codes: 0 nothing changed, committed (and pushed), --check-only passed,
-# superseded, or the branch is gone; 1 HEAD moved during the agent step, a
-# path outside the allowed set changed, or git/gh failed (nothing is committed
-# on a refusal); 2 bad usage.
+# superseded (without --superseded-fails), or the branch is gone; 1 HEAD
+# moved during the agent step, a path outside the allowed set changed, a
+# superseded run under --superseded-fails, or git/gh failed (nothing is
+# committed on a refusal); 2 bad usage.
 #
 # Needs git >= 2.25 (--pathspec-from-file).
 #
@@ -83,12 +97,13 @@ remote_tip() {
 }
 
 # moved <what was done>: $PUSH_TO is no longer at the checkout ($head).
-# Superseded (exit 0) when someone other than doc-superpowers pushed during
-# the run — a commit in head..tip whose subject does not start with
-# [doc-superpowers]; otherwise (only doc-superpowers commits, or no commit in
-# the range: a reset or force-push behind the checkout, or a range that
-# cannot be read) a visible failure. Never a push: what someone else did to
-# the branch stands.
+# Superseded (exit 0; exit 1 when SUPERSEDED_FAILS=1, --superseded-fails:
+# nothing re-runs that workflow) when someone other than doc-superpowers
+# pushed during the run — a commit in head..tip whose subject does not start
+# with [doc-superpowers]; otherwise (only doc-superpowers commits, or no
+# commit in the range: a reset or force-push behind the checkout, or a range
+# that cannot be read) a visible failure. Never a push: what someone else did
+# to the branch stands.
 moved() {
   local new subjects s
   if ! g fetch --quiet --no-tags origin "refs/heads/$PUSH_TO" \
@@ -105,6 +120,9 @@ moved() {
         out changed true
         out committed false
         out superseded true
+        if [ "${SUPERSEDED_FAILS:-0}" = 1 ]; then
+          err "superseded: $PUSH_TO received new commits during this run (${head:0:12}..${new:0:12}); nothing was committed to it. Re-run this workflow: it runs only when the pull request is opened, so no later run applies these changes."
+        fi
         echo "::notice::doc-superpowers: superseded: $PUSH_TO received new commits during this run (${head:0:12}..${new:0:12}). $1"
         exit 0
         ;;
@@ -119,11 +137,11 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
 fi
 
 usage() {
-  echo "Usage: $0 [--allow <path>|<dir/>]... [--allow-index-keys] [--ignore <dir>]... (--check-only | --message <subject> --push-to <branch> [--open-pr <base>])" >&2
+  echo "Usage: $0 [--allow <path>|<dir/>]... [--allow-index-keys] [--ignore <dir>]... (--check-only | --message <subject> --push-to <branch> [--open-pr <base> | --superseded-fails])" >&2
   exit 2
 }
 
-ALLOW=() IGNORE=() INDEX_KEYS=0 CHECK_ONLY=0 MESSAGE="" PUSH_TO="" OPEN_PR=""
+ALLOW=() IGNORE=() INDEX_KEYS=0 CHECK_ONLY=0 MESSAGE="" PUSH_TO="" OPEN_PR="" SUPERSEDED_FAILS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --allow | --ignore | --message | --push-to | --open-pr)
@@ -145,13 +163,18 @@ while [ $# -gt 0 ]; do
       CHECK_ONLY=1
       shift
       ;;
+    --superseded-fails)
+      SUPERSEDED_FAILS=1
+      shift
+      ;;
     *) usage ;;
   esac
 done
 if [ "$CHECK_ONLY" = 1 ]; then
-  [ -z "$MESSAGE$PUSH_TO$OPEN_PR" ] || usage
+  { [ -z "$MESSAGE$PUSH_TO$OPEN_PR" ] && [ "$SUPERSEDED_FAILS" = 0 ]; } || usage
 else
   { [ -n "$MESSAGE" ] && [ -n "$PUSH_TO" ]; } || usage
+  { [ -z "$OPEN_PR" ] || [ "$SUPERSEDED_FAILS" = 0 ]; } || usage
   git check-ref-format "refs/heads/$PUSH_TO" || { echo "--push-to '$PUSH_TO' is not a branch name" >&2; exit 2; }
 fi
 [ -n "${GITHUB_OUTPUT:-}" ] || { echo "GITHUB_OUTPUT is not set (this runs as a GitHub Actions step)" >&2; exit 2; }

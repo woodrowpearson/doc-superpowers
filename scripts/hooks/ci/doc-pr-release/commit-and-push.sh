@@ -20,11 +20,16 @@
 #      (their push starts a newer run, which drafts from the new tip); moved
 #      only by doc-superpowers commits, or reset / force-pushed behind the
 #      checkout → exit 1. What someone else did to the branch always stands.
-#   5. Commit only the fragment (`git commit -- <fragment>`: anything else
+#   5. The release's own rules: the sealed fragment, copied alone into a
+#      scratch RELEASE-NOTES.next/, goes through the vendored `doc-tools.sh
+#      fragments list`; a problem it reports (text before the first ###, a
+#      #/## heading, an unclosed code fence …) would make the release skip
+#      it, so it is refused now, exit 1, while the author can still fix it.
+#   6. Commit only the fragment (`git commit -- <fragment>`: anything else
 #      staged stays staged), as "[doc-superpowers] sync PR-<N> release notes
 #      (<short checkout>)" with the trailer "Doc-Superpowers-Drafted-From:
 #      <checkout>", which extract-context.sh reads as its watermark.
-#   6. Push with --force-with-lease=refs/heads/<branch>:<checkout>: it lands
+#   7. Push with --force-with-lease=refs/heads/<branch>:<checkout>: it lands
 #      only while origin's branch is exactly the checkout, and what lands is
 #      the checkout plus this one commit — a fast-forward, never a rewrite. A
 #      rejected push goes back to step 4's rule.
@@ -37,14 +42,18 @@
 #   GITHUB_OUTPUT    step outputs (default: none): committed=true|false,
 #                    sha=<commit> when pushed, superseded=true
 #   FRAGMENT_PATH    default RELEASE-NOTES.next/PR-<N>.md
+#   DOC_TOOLS        default the vendored ../doc-tools.sh beside this helper's
+#                    directory (.github/scripts/doc-tools.sh), else the
+#                    plugin's scripts/doc-tools.sh (this file in the plugin)
 #   GIT_USER_NAME    commit author name  (default: github-actions[bot])
 #   GIT_USER_EMAIL   commit author email (default: 41898282+github-actions[bot]@users.noreply.github.com)
 #
 # Exit codes:
 #   0  committed and pushed; nothing to commit (no fragment, or unchanged);
 #      superseded; or the branch is gone
-#   1  refused (a malformed fragment, a hand-edited one, the branch moved in
-#      a way that is not someone else's push) or git failed
+#   1  refused (a malformed fragment, one the release would skip, a
+#      hand-edited one, the branch moved in a way that is not someone else's
+#      push) or git failed
 #   2  bad arguments
 set -euo pipefail
 
@@ -64,7 +73,12 @@ GIT_USER_EMAIL="${GIT_USER_EMAIL:-41898282+github-actions[bot]@users.noreply.git
 GITHUB_OUTPUT="${GITHUB_OUTPUT:-/dev/null}"
 FRAGMENT_MAX_BYTES=1048576
 
-for lib in "$(dirname "$0")/fragment-lib.sh" "$(dirname "$0")/../doc-superpowers-steps/commit-changes.sh"; do
+here=$(cd "$(dirname "$0")" && pwd) || { echo "::error::doc-superpowers: cannot find $0's directory"; exit 1; }
+if [ -z "${DOC_TOOLS:-}" ]; then
+  DOC_TOOLS="$here/../doc-tools.sh"
+  [ -f "$DOC_TOOLS" ] || DOC_TOOLS="$here/../../../doc-tools.sh"
+fi
+for lib in "$here/fragment-lib.sh" "$here/../doc-superpowers-steps/commit-changes.sh" "$DOC_TOOLS"; do
   if [ ! -f "$lib" ]; then
     echo "::error::doc-superpowers: $lib is missing (re-run the doc-superpowers installer: install --ci)"
     exit 1
@@ -72,10 +86,11 @@ for lib in "$(dirname "$0")/fragment-lib.sh" "$(dirname "$0")/../doc-superpowers
 done
 # The fragment line rules: frag_marker, frag_lines, frag_notes, frag_stored, frag_sha256.
 # shellcheck source=scripts/hooks/ci/doc-pr-release/fragment-lib.sh
-. "$(dirname "$0")/fragment-lib.sh"
+. "$here/fragment-lib.sh"
 # err, out, g, remote_tip, moved.
 # shellcheck source=scripts/hooks/ci/doc-superpowers-steps/commit-changes.sh
-. "$(dirname "$0")/../doc-superpowers-steps/commit-changes.sh"
+. "$here/../doc-superpowers-steps/commit-changes.sh"
+DOC_TOOLS=$(cd "$(dirname "$DOC_TOOLS")" && pwd)/$(basename "$DOC_TOOLS") || err "cannot resolve $DOC_TOOLS"
 
 if [ ! -e "$FRAGMENT_PATH" ] && [ ! -L "$FRAGMENT_PATH" ]; then
   echo "No fragment at $FRAGMENT_PATH — nothing to commit."
@@ -138,6 +153,16 @@ hash=$(frag_sha256 < "$T/body") || err "cannot hash $FRAGMENT_PATH"
   printf '<!-- doc-superpowers:hash %s -->\n' "$hash"
   cat "$T/body"
 } > "$T/sealed" || err "cannot write the sealed fragment"
+
+# The release's own rules, before anything is written: a fragment
+# `fragments merge` would skip is refused now (step 5 above).
+mkdir -p "$T/check/RELEASE-NOTES.next" || err "cannot create a scratch directory"
+cp "$T/sealed" "$T/check/RELEASE-NOTES.next/PR-${PR_NUMBER}.md" || err "cannot copy the sealed fragment"
+problem=$(cd "$T/check" && "$BASH" "$DOC_TOOLS" fragments list 2>/dev/null | jq -r '.[0].problem // empty') \
+  || err "cannot check $FRAGMENT_PATH with doc-tools.sh fragments list. Nothing was committed or pushed."
+[ -z "$problem" ] \
+  || err "$FRAGMENT_PATH would be skipped by the release ($problem; RELEASE-NOTES.next/README.md has the rules). Fix it, then push again. Nothing was committed or pushed."
+
 cat "$T/sealed" > "$FRAGMENT_PATH" || err "cannot write $FRAGMENT_PATH"
 
 g --literal-pathspecs add -- "$FRAGMENT_PATH" || err "git add $FRAGMENT_PATH failed"

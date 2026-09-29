@@ -70,7 +70,7 @@ jobs:
       # No suite reads this repo's history — they each build throwaway git
       # fixtures in tempdirs — but a full clone is ~4 MB here and matches the
       # sibling workflows, so it is not worth trading for a shallow-clone edge case.
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
 
@@ -154,11 +154,13 @@ jobs:
       # the helpers — with every script a workflow runs present and executable.
       # After changing a template, doc-tools.sh or a CI helper script, run
       # `bash scripts/hooks/install.sh install --ci` and commit the result.
+      # It runs even when a suite failed: a suite failure must not hide drift.
       - name: Self-installed CI tier matches its templates
+        if: always()
         run: |
           set -euo pipefail
           state=.claude/doc-superpowers/installed.json
-          fail=0
+          fail=0 git_fail=0
           drift() { echo "::error file=$1::$2"; fail=1; }
           esc() { printf '%s' "$1" | sed -e 's/[\\|&]/\\&/g'; }
           [ -f "$state" ] || { echo "::error::$state is missing"; exit 1; }
@@ -187,6 +189,19 @@ jobs:
               [ -x "$p" ] || drift "$f" "runs $p, which is not vendored (or not executable)"
             done
           done
+          # A doc-superpowers workflow with no template (a retired one, such as
+          # doc-index-update) is drift too, on disk or recorded in the state.
+          for f in .github/workflows/*.yml; do
+            [ -f "$f" ] || continue
+            w=$(basename "$f" .yml)
+            [ ! -f "scripts/hooks/ci/$w.yml" ] || continue
+            # (awk, not head | grep -q: pipefail would read a SIGPIPE as no match)
+            ! awk 'NR <= 5 && /doc-superpowers workflow v[0-9]/ { m = 1 } END { exit !m }' "$f" \
+              || drift "$f" "is a doc-superpowers workflow with no template (retired): install --ci removes it"
+          done
+          for w in $installed; do
+            [ -f "scripts/hooks/ci/$w.yml" ] || drift "$state" "records $w as installed, but it has no template (retired)"
+          done
           cmp scripts/doc-tools.sh .github/scripts/doc-tools.sh \
             || drift .github/scripts/doc-tools.sh "differs from scripts/doc-tools.sh"
           [ -x .github/scripts/doc-tools.sh ] || drift .github/scripts/doc-tools.sh "is not executable"
@@ -208,12 +223,15 @@ jobs:
             done
           done
           # The git tier's one committed piece: the index merge-driver attribute.
-          [ "$(git check-attr merge -- docs/.doc-index.json)" = "docs/.doc-index.json: merge: doc-index" ] \
-            || drift .gitattributes "does not route docs/.doc-index.json to the doc-index merge driver"
-          if [ "$fail" != 0 ]; then
-            echo "::error::the self-installed CI tier drifted: run bash scripts/hooks/install.sh install --ci and commit the result"
-            exit 1
+          if [ "$(git check-attr merge -- docs/.doc-index.json)" != "docs/.doc-index.json: merge: doc-index" ]; then
+            echo "::error file=.gitattributes::does not route docs/.doc-index.json to the doc-index merge driver"
+            git_fail=1
           fi
+          [ "$fail" = 0 ] \
+            || echo "::error::the self-installed CI tier drifted: run bash scripts/hooks/install.sh install --ci and commit the result"
+          [ "$git_fail" = 0 ] \
+            || echo "::error::the .gitattributes merge-driver block is missing: run bash scripts/hooks/install.sh install --git and commit .gitattributes"
+          [ "$fail" = 0 ] && [ "$git_fail" = 0 ] || exit 1
           echo "Self-installed CI tier matches its templates:" $installed
 
       # Version strings drift silently otherwise: bump-version writes five

@@ -132,7 +132,7 @@ With the `tools install` subcommand (v2.12.0+), projects can vendor `doc-tools.s
 
 Don't mix — never use path #2 from a local session (it may be stale relative to the installed plugin version; use `tools status` to confirm).
 
-**In a doc-superpowers CI workflow** (a GitHub Actions run of one of the `hooks install --ci` templates, which install this plugin at the version that rendered them): use path #2 and call it by its literal path, `.github/scripts/doc-tools.sh <subcommand>` — the workflow's `--allowedTools` grants exactly that command, so skip the resolution block above (it would be refused). Read the references with your file-reading tool from `${CLAUDE_SKILL_DIR}/../../references/`. Nobody answers questions there: take the recommended option. Never commit, push, tag or open a pull request — a workflow step after you checks which paths changed, then commits them.
+**In a doc-superpowers CI workflow** (a GitHub Actions run of one of the `hooks install --ci` templates, which install this plugin at the version that rendered them): use path #2 and call it by its literal path, `.github/scripts/doc-tools.sh <subcommand>` — the workflow's `--allowedTools` grants exactly that command, so skip the resolution block above (it would be refused). Read the references with your file-reading tool from `${CLAUDE_SKILL_DIR}/../../references/`. Nobody answers questions there: take the recommended option. Never commit, push, tag or open a pull request — a workflow step after you checks which paths changed, then commits them. `update` and `sync` edit no CLAUDE.md or README.md there: the commit step accepts only `docs/` and the indexed docs, and one other path fails the whole run, so they report in their output the change those files need (as `release` step 9 does for a version file it cannot bump).
 
 **Optional project scripts** — list them, never run them (*Safety Rules*):
 
@@ -192,7 +192,7 @@ Moving, archiving, deleting and superseding a doc need the user's yes first (*Sa
 
 **Freshness is content, not commits.** Every entry records per code ref the git object id of its content as `code_oids`: `update-index` from the working tree — what the verifier read, committed or not — and `build-index`, `add-entry` and `set-code-refs` (for a new ref) as of the doc's own last commit, the code it was written against. `check-freshness` reports a doc stale when one of those differs in HEAD (or in `--tree`), so squash merges, rebase-merges, cherry-picks, reverts to the verified bytes and a doc verified in the same commit as its code all stay current. `code_refs_changed` lists exactly the refs whose content differs. A ref naming a submodule records the submodule's commit, so a submodule bump reads stale. `commits_behind` counts the commits touching the refs since `code_commit`; it is `null` when that commit is not an ancestor of HEAD here (a deleted squash-merged branch, a shallow clone, a cherry-picked verification), never a masked `0`. The doc-index itself is never part of a ref's content. Entries written before index schema 3 have no `code_oids` and keep the old commit comparison until `update-index` re-verifies them.
 
-**Scoping by changed files.** `--code-refs src/m1` matches refs `src/m1`, `src/m1/a.js` and `src/`, but never `src/m10`. For a changed-file list, pipe it rather than pass it as arguments, so no argv limit applies: `git -c core.quotePath=false diff --name-only --no-renames <range> | $DOC_TOOLS check-freshness --code-refs-from -`. `core.quotePath=false` keeps non-ASCII paths unquoted, so they can match.
+**Scoping by changed files.** `--code-refs src/m1` matches refs `src/m1`, `src/m1/a.js` and `src/`, but never `src/m10`. For a changed-file list, pipe it rather than pass it as arguments, so no argv limit applies: `git diff -z --name-only --no-renames <range> | $DOC_TOOLS check-freshness --code-refs-from -`. `-z` separates the names with NUL, so git quotes none of them (it quotes a name holding `"`, a backslash or a tab even with `core.quotePath=false`, and a quoted name matches no ref); `--code-refs-from` reads a NUL-separated list as it reads one path per line.
 
 ### Detect Scopes
 
@@ -408,7 +408,7 @@ Review-pr is an **orchestrator** like `audit`, scoped to PR changes, and read-on
    BASE=$(git symbolic-ref --short -q refs/remotes/origin/HEAD) || BASE=origin/main
    git rev-parse --verify -q "$BASE^{commit}" >/dev/null || { echo "review-pr: base $BASE not found — ask the user for the base" >&2; exit 1; }
    CHANGED=$(mktemp)
-   git -c core.quotePath=false diff --name-only --no-renames "$BASE"...HEAD > "$CHANGED"
+   git diff -z --name-only --no-renames "$BASE"...HEAD > "$CHANGED"
    [ -s "$CHANGED" ] || { echo "review-pr: no changes against $BASE — nothing to review"; exit 0; }
    echo "BASE=$BASE CHANGED=$CHANGED"
    ```
@@ -462,8 +462,8 @@ Update is the **write counterpart** to audit's analysis (audit edits no doc; its
 
    **SYNC**: Call `doc-tools.sh update-index` for each doc the agent read against its code (parallel agents may call it concurrently — writers serialize on the index lock); run `set-code-refs` first when the doc now covers different code. Update `docs/specs/README.md` and `docs/adr/README.md` indexes if applicable.
 
-4. **Sync CLAUDE.md** — After all doc changes are applied, update CLAUDE.md to reflect current project state. **SEE** `references/doc-spec.md` for CLAUDE.md update rules. This catches structural changes from this update cycle: new/removed docs, renamed directories, new commands or key files. Skip only if no directory structure, key files, or commands changed.
-5. **Sync README.md** — If README.md exists, update what it says about the project's own features, commands and usage. **SEE** `references/doc-spec.md` for README.md update rules. Skip only if no features, commands or capabilities changed.
+4. **Sync CLAUDE.md** — After all doc changes are applied, update CLAUDE.md to reflect current project state. **SEE** `references/doc-spec.md` for CLAUDE.md update rules. This catches structural changes from this update cycle: new/removed docs, renamed directories, new commands or key files. Skip only if no directory structure, key files, or commands changed. In a doc-superpowers CI workflow, do not edit it — its commit step would refuse the whole run — and say in your output what CLAUDE.md needs instead.
+5. **Sync README.md** — If README.md exists, update what it says about the project's own features, commands and usage. **SEE** `references/doc-spec.md` for README.md update rules. Skip only if no features, commands or capabilities changed. In a doc-superpowers CI workflow, report the change instead of making it, as for CLAUDE.md.
 6. **Verification gate**: Run `doc-tools.sh check-freshness` to confirm all updated docs are current.
 7. **Archive the applied report** (when the input was a report file), so no later `update` applies it again — the *Safety Rules* exception, no confirmation needed. In a doc-superpowers CI workflow, skip this step (neither `mv` nor `git mv` is granted there) and say in the output that the report stays in `docs/plans/`. Otherwise — the report may be tracked and indexed, or (written by `audit` in this session) neither:
    ```bash
@@ -505,8 +505,8 @@ Update is the **write counterpart** to audit's analysis (audit edits no doc; its
    - **`stale`**: its code moved on. Content fixes belong to `update`: list it, and never `update-index` a doc you did not read against its code.
 3. Call `doc-tools.sh update-index` for the docs you verified, and only those.
 4. Update `docs/specs/README.md` and `docs/adr/README.md` indexes.
-5. **Check CLAUDE.md currency** — Compare CLAUDE.md sections against actual filesystem. If stale, update per `references/doc-spec.md` CLAUDE.md update rules. Sync is the natural place to catch CLAUDE.md drift that accumulated across multiple doc changes.
-6. **Check README.md currency** — Compare what README.md says the project does (features, commands, usage examples) against the project itself. If stale, update per `references/doc-spec.md` README.md update rules. Sync is the natural place to catch README.md drift alongside CLAUDE.md.
+5. **Check CLAUDE.md currency** — Compare CLAUDE.md sections against actual filesystem. If stale, update per `references/doc-spec.md` CLAUDE.md update rules. Sync is the natural place to catch CLAUDE.md drift that accumulated across multiple doc changes. In a doc-superpowers CI workflow, report what it needs instead of editing it (the commit step accepts only `docs/` and the indexed docs).
+6. **Check README.md currency** — Compare what README.md says the project does (features, commands, usage examples) against the project itself. If stale, update per `references/doc-spec.md` README.md update rules. Sync is the natural place to catch README.md drift alongside CLAUDE.md. In a doc-superpowers CI workflow, report it instead, as for CLAUDE.md.
 7. Unless this is a doc-superpowers CI workflow (the installer is neither shipped nor granted there — skip this step), run `"$ROOT/scripts/hooks/install.sh" status` and append a one-line summary: `Hooks: N/5 git, N/3 claude, N/8 ci`
 
 ### `release` — Draft Release Notes Entry
@@ -518,7 +518,7 @@ Update is the **write counterpart** to audit's analysis (audit edits no doc; its
 **REQUIRED:** Read `$ROOT/references/hooks.md` before running the installer — it holds the tier options, the consent table for `--ci`, the CI templates and the installer's placement and refusal rules. The non-negotiables:
 - ALWAYS route to the installer, `"$ROOT/scripts/hooks/install.sh" <install|status|uninstall> [flags]`. NEVER add hook entries to `.claude/settings.json` / `.claude/settings.local.json` or copy templates by hand.
 - The Claude tier is per-user (`.claude/settings.local.json`, excluded through git's `info/exclude`).
-- Before `--ci`, show the user the consent table (each workflow's permissions and what it commits) and get a yes; name only the workflows they agreed to.
+- Before `--ci`, show the user the consent table (each workflow's permissions and what it commits) and what an AI job's agent can reach, recommend protecting the base branch and `release/**` with required human review, and get a yes; name only the workflows they agreed to.
 - Never pass `--force` unless the user asked for exactly that.
 - An install another version made (2.x included) reads `⚠ … outdated` in `install.sh status`: re-run that tier, and walk the user through `$ROOT/README.md` → *Upgrading from 2.x* (v2's AI workflows, the per-user Claude tier, hooks in unconfigured directories, retyping design specs).
 
