@@ -23,7 +23,7 @@ This release adds two index operations that consumer repositories adopting v3 ha
 ### Documentation
 - `references/doc-spec.md`: the **Renames** paragraph and the `code_oids` schema row describe the repoint, and a new **Auditing merges** paragraph covers `audit-merges`.
 - `skills/doc-superpowers/SKILL.md` (tool table), `docs/conventions.md` (Read/Write Separation and the archive model), `docs/codebase-guide.md`, `docs/workflows/doc-superpowers.md`, `docs/architecture/system-overview.md` and `CLAUDE.md` name the new behaviour and the 17th subcommand.
-- The C4 container diagram's label still reads "16 subcommands": regenerating its PNG is left to the next `diagram` pass.
+- The C4 container diagram (`docs/architecture/diagrams/c4-container.png`) is re-rendered for its new label (mmdc 11.6.0, headless system Chrome, `c4.wrap: false`, width 1248, scale 2).
 
 ### Other
 - `scripts/test-doc-tools.sh` gains 27 assertions (1290 → 1317). They cover the repoint (verdict kept after a pure rename, no duplicate, the new path's own id wins, the chain, a pre-v3 entry) and `audit-merges` (a keep-ours merge reported with the parent it kept, a clean driver merge, a refusal, the arguments). 24 of the new assertions fail against v3.0.0.
