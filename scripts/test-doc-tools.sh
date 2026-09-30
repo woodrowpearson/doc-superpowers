@@ -9,6 +9,7 @@ source "$SCRIPT_DIR/test-helpers.sh"
 # Run doc-tools.sh under the interpreter this suite was launched with,
 # not whatever `#!/usr/bin/env bash` resolves to. See bash_bin_shim().
 DOC_TOOLS="$(bash_bin_shim "$SCRIPT_DIR/doc-tools.sh")"
+MERGE_DRIVER_FOR_AM="$(bash_bin_shim "$SCRIPT_DIR/merge-doc-index.sh")"
 
 # --- Harness self-tests ---
 
@@ -2730,6 +2731,446 @@ test_move_entry_repoints_references() {
     "sibling superseded_by repointed (no dangling key)"
   assert_json_field "$json" '.docs["docs/workflows.md"].replaces' "docs/arch-renamed.md" \
     "sibling replaces repointed"
+  teardown
+}
+
+# GH #22: a rename must also repoint every OTHER entry's code_refs that named the
+# moved doc, carrying its code_oids key (a rename keeps the blob), so the citing
+# doc neither dangles nor changes verdict.
+test_move_entry_repoints_code_refs() {
+  echo "test: move-entry repoints other entries' code_refs + code_oids and keeps their verdict (GH #22)"
+  setup
+  echo "# W" > docs/workflows.md
+  git add -A && git commit -m "add workflows" --quiet
+  printf 'docs/architecture.md:src/:architecture\ndocs/workflows.md:docs/architecture.md,src/:workflows\n' \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  "$DOC_TOOLS" update-index docs/workflows.md >/dev/null 2>&1
+  local oid before
+  oid=$(jq -r '.docs["docs/workflows.md"].code_oids["docs/architecture.md"]' docs/.doc-index.json)
+  before=$("$DOC_TOOLS" status docs/workflows.md 2>/dev/null | jq -r '.status')
+  git mv docs/architecture.md docs/arch-renamed.md
+  git commit -m "rename" --quiet
+  local report
+  report=$("$DOC_TOOLS" move-entry docs/architecture.md docs/arch-renamed.md 2>&1)
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/workflows.md"].code_refs | join(",")' \
+    "docs/arch-renamed.md,src/" "code_refs repointed in place (order kept)"
+  assert_json_field "$json" '.docs["docs/workflows.md"].code_oids | has("docs/architecture.md")' \
+    "false" "the old code_oids key is gone"
+  assert_json_field "$json" '.docs["docs/workflows.md"].code_oids["docs/arch-renamed.md"]' \
+    "$oid" "the moved ref keeps its recorded object id"
+  assert_contains "$report" "code_refs/code_oids now name the new path" "reports the code_refs repoint"
+  assert_contains "$report" "docs/workflows.md" "names the repointed entry"
+  assert_eq "current" "$before" "fixture: the citing doc read current before the move"
+  assert_json_field "$("$DOC_TOOLS" status docs/workflows.md 2>/dev/null)" '.status' "current" \
+    "the citing doc still reads current after a pure rename (no dangling, missing ref)"
+  teardown
+}
+
+test_move_entry_code_refs_no_duplicate() {
+  echo "test: move-entry does not duplicate a code_ref already naming the new path; that ref's own id wins (GH #22)"
+  setup
+  echo "# W" > docs/workflows.md
+  echo "# N" > docs/arch-renamed.md
+  git add -A && git commit -m "add" --quiet
+  printf 'docs/architecture.md:src/:architecture\ndocs/workflows.md:docs/architecture.md,src/,docs/arch-renamed.md:workflows\n' \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  jq '.docs["docs/workflows.md"].code_oids["docs/architecture.md"] = "1111111111111111111111111111111111111111"
+      | .docs["docs/workflows.md"].code_oids["docs/arch-renamed.md"] = "2222222222222222222222222222222222222222"' \
+    docs/.doc-index.json > docs/.idx.tmp && mv docs/.idx.tmp docs/.doc-index.json
+  rm docs/arch-renamed.md
+  git mv docs/architecture.md docs/arch-renamed.md
+  "$DOC_TOOLS" move-entry docs/architecture.md docs/arch-renamed.md >/dev/null 2>&1
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/workflows.md"].code_refs | join(",")' \
+    "src/,docs/arch-renamed.md" "the moved ref collapses into the list's own copy of the new path"
+  assert_json_field "$json" '.docs["docs/workflows.md"].code_oids["docs/arch-renamed.md"]' \
+    "2222222222222222222222222222222222222222" "the entry's own id for the new path wins"
+  assert_json_field "$json" '.docs["docs/workflows.md"].code_oids | keys | length' "2" \
+    "code_oids holds exactly the two remaining refs"
+  teardown
+}
+
+test_move_entry_code_oids_own_id_wins_in_either_order() {
+  echo "test: move-entry keeps the entry's own id for the new path whichever code_oids key comes first (GH #22)"
+  setup
+  echo "# W" > docs/workflows.md
+  echo "# N" > docs/arch-renamed.md
+  git add -A && git commit -m "add" --quiet
+  printf 'docs/architecture.md:src/:architecture\ndocs/workflows.md:docs/arch-renamed.md,docs/architecture.md:workflows\n' \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  # The new path's own key first, the moved one second: the reverse of the
+  # order test_move_entry_code_refs_no_duplicate builds.
+  jq '.docs["docs/workflows.md"].code_oids = {"docs/arch-renamed.md": "2222222222222222222222222222222222222222",
+                                              "docs/architecture.md": "1111111111111111111111111111111111111111"}' \
+    docs/.doc-index.json > docs/.idx.tmp && mv docs/.idx.tmp docs/.doc-index.json
+  rm docs/arch-renamed.md
+  git mv docs/architecture.md docs/arch-renamed.md
+  "$DOC_TOOLS" move-entry docs/architecture.md docs/arch-renamed.md >/dev/null 2>&1
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/workflows.md"].code_refs | join(",")' \
+    "docs/arch-renamed.md" "one copy of the new path"
+  assert_json_field "$json" '.docs["docs/workflows.md"].code_oids | to_entries | map("\(.key)=\(.value)") | join(",")' \
+    "docs/arch-renamed.md=2222222222222222222222222222222222222222" "the own id wins, no stray key"
+  teardown
+}
+
+test_move_entry_code_refs_keeps_an_existing_duplicate() {
+  echo "test: move-entry leaves a duplicate of a ref it did not move alone (GH #22)"
+  setup
+  echo "# W" > docs/workflows.md
+  git add -A && git commit -m "add" --quiet
+  printf 'docs/architecture.md:src/:architecture\ndocs/workflows.md:docs/architecture.md:workflows\n' \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  jq '.docs["docs/workflows.md"].code_refs = ["src/", "src/", "docs/architecture.md"]' \
+    docs/.doc-index.json > docs/.idx.tmp && mv docs/.idx.tmp docs/.doc-index.json
+  git mv docs/architecture.md docs/arch-renamed.md
+  "$DOC_TOOLS" move-entry docs/architecture.md docs/arch-renamed.md >/dev/null 2>&1
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/workflows.md"].code_refs | join(",")' \
+    "src/,src/,docs/arch-renamed.md" "only the moved ref changes"
+  teardown
+}
+
+test_move_entry_stdin_reports_code_refs_repoint() {
+  echo "test: move-entry --stdin reports each entry whose code_refs or code_oids it repointed (GH #22)"
+  setup
+  echo "# W" > docs/workflows.md
+  echo "# G" > docs/guide.md
+  git add -A && git commit -m "add" --quiet
+  printf 'docs/architecture.md:src/:architecture\ndocs/workflows.md:docs/architecture.md:workflows\ndocs/guide.md:src/:guide\n' \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  # guide.md holds a code_oids key for the moved path without citing it: the
+  # key still moves, and the entry is still reported.
+  jq '.docs["docs/guide.md"].code_oids["docs/architecture.md"] = "3333333333333333333333333333333333333333"' \
+    docs/.doc-index.json > docs/.idx.tmp && mv docs/.idx.tmp docs/.doc-index.json
+  git mv docs/architecture.md docs/arch-renamed.md
+  local report
+  report=$(printf 'docs/architecture.md\tdocs/arch-renamed.md\n' | "$DOC_TOOLS" move-entry --stdin 2>&1)
+  assert_contains "$report" "code_refs/code_oids now name the new path" "reports the repoint"
+  assert_contains "$report" "docs/workflows.md" "names the entry citing the moved path"
+  assert_contains "$report" "docs/guide.md" "names the entry holding only a code_oids key for it"
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/guide.md"].code_oids | has("docs/arch-renamed.md")' \
+    "true" "that key moved"
+  teardown
+}
+
+test_move_entry_stdin_chain_repoints_code_refs_once() {
+  echo "test: move-entry --stdin chain a->b, b->c maps each cited path once (GH #22)"
+  setup
+  echo "# B" > docs/b.md
+  echo "# W" > docs/workflows.md
+  git add -A && git commit -m "add" --quiet
+  printf 'docs/architecture.md:src/:architecture\ndocs/b.md:src/:guide\ndocs/workflows.md:docs/architecture.md,docs/b.md:workflows\n' \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  jq '.docs["docs/workflows.md"].code_oids["docs/architecture.md"] = "aaaa000000000000000000000000000000000000"
+      | .docs["docs/workflows.md"].code_oids["docs/b.md"] = "bbbb000000000000000000000000000000000000"' \
+    docs/.doc-index.json > docs/.idx.tmp && mv docs/.idx.tmp docs/.doc-index.json
+  git mv docs/b.md docs/c.md
+  git mv docs/architecture.md docs/b.md
+  printf 'docs/architecture.md\tdocs/b.md\ndocs/b.md\tdocs/c.md\n' | "$DOC_TOOLS" move-entry --stdin >/dev/null 2>&1
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/workflows.md"].code_refs | join(",")' "docs/b.md,docs/c.md" \
+    "a -> b and b -> c, each once"
+  assert_json_field "$json" '.docs["docs/workflows.md"].code_oids["docs/b.md"]' \
+    "aaaa000000000000000000000000000000000000" "a's id travels to b"
+  assert_json_field "$json" '.docs["docs/workflows.md"].code_oids["docs/c.md"]' \
+    "bbbb000000000000000000000000000000000000" "b's id travels to c"
+  teardown
+}
+
+test_move_entry_repoints_legacy_code_refs() {
+  echo "test: move-entry repoints a pre-v3 entry's code_refs without inventing code_oids (GH #22)"
+  setup
+  echo "# W" > docs/workflows.md
+  git add -A && git commit -m "add" --quiet
+  printf 'docs/architecture.md:src/:architecture\ndocs/workflows.md:docs/architecture.md:workflows\n' \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  jq 'del(.docs["docs/workflows.md"].code_oids)' docs/.doc-index.json > docs/.idx.tmp && mv docs/.idx.tmp docs/.doc-index.json
+  git mv docs/architecture.md docs/arch-renamed.md
+  "$DOC_TOOLS" move-entry docs/architecture.md docs/arch-renamed.md >/dev/null 2>&1
+  local json
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/workflows.md"].code_refs | join(",")' "docs/arch-renamed.md" "legacy code_refs repointed"
+  assert_json_field "$json" '.docs["docs/workflows.md"] | has("code_oids")' "false" "no code_oids invented"
+  teardown
+}
+
+# --- audit-merges: replay index merges through the driver as an oracle ---------
+
+# A fixture with two indexed docs, the index merge attribute, and a side branch
+# that retyped workflows.md while main deprecated architecture.md: two
+# independent, last_verified-neutral changes a base-aware merge keeps both of.
+_am_fixture() {
+  echo "# W" > docs/workflows.md
+  git add -A && git commit -m "add workflows" --quiet
+  printf 'docs/architecture.md:src/:architecture\ndocs/workflows.md:src/:workflows\n' \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  printf 'docs/.doc-index.json merge=doc-index\n' > .gitattributes
+  git add -A && git commit -m "index" --quiet
+  AM_SINCE=$(git rev-parse HEAD)
+  git checkout -q -b side
+  "$DOC_TOOLS" set-doc-type docs/workflows.md guide >/dev/null 2>&1
+  git commit -qam "side: retype workflows"
+  git checkout -q main
+  "$DOC_TOOLS" deprecate-entry docs/architecture.md >/dev/null 2>&1
+  git commit -qam "main: deprecate architecture"
+  git checkout -q side
+}
+
+test_audit_merges_finds_a_silent_revert() {
+  echo "test: audit-merges reports a merge that kept one parent's entry where the three-way merge keeps the other's"
+  setup
+  _am_fixture
+  # A driver that keeps ours (`true` leaves %A as it is): the shape of a
+  # non-base-aware driver losing a last_verified tie.
+  git -c merge.doc-index.driver=true merge -q --no-edit main 2>/dev/null
+  local bad out rc=0
+  bad=$(git rev-parse HEAD)
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/architecture.md"].status // "none"' "none" \
+    "fixture: the keep-ours merge reverted main's deprecation"
+  out=$("$DOC_TOOLS" audit-merges "$AM_SINCE" 2>/dev/null) || rc=$?
+  assert_eq "1" "$rc" "exits 1 on a finding"
+  assert_json_field "$out" '.merges_checked' "1" "one merge replayed"
+  assert_json_field "$out" '.findings | length' "1" "exactly one finding (the branch's own retype is not one)"
+  assert_json_field "$out" '.findings[0].merge' "$bad" "names the merge"
+  assert_json_field "$out" '.findings[0].key' "docs/architecture.md" "names the reverted entry"
+  assert_json_field "$out" '.findings[0].kept' "parent 1" "says which parent's entry the merge kept"
+  teardown
+}
+
+test_audit_merges_clean_through_the_driver() {
+  echo "test: audit-merges finds nothing in a merge the driver made"
+  setup
+  _am_fixture
+  git -c merge.doc-index.driver="'$MERGE_DRIVER_FOR_AM' %O %A %B" merge -q --no-edit main 2>/dev/null
+  assert_json_field "$(cat docs/.doc-index.json)" '.docs["docs/architecture.md"].status' "deprecated" \
+    "fixture: the driver kept main's deprecation"
+  local out rc=0
+  out=$("$DOC_TOOLS" audit-merges "$AM_SINCE" 2>/dev/null) || rc=$?
+  assert_eq "0" "$rc" "exits 0 with no finding"
+  assert_json_field "$out" '.merges_checked' "1" "the merge was replayed"
+  assert_json_field "$out" '.findings | length' "0" "no finding"
+  teardown
+}
+
+test_audit_merges_reports_a_refusal() {
+  echo "test: audit-merges reports a merge the driver would refuse"
+  setup
+  _am_fixture
+  "$DOC_TOOLS" set-code-refs docs/architecture.md --refs src/,docs/ >/dev/null 2>&1
+  git commit -qam "side: refs"
+  git checkout -q main
+  "$DOC_TOOLS" set-code-refs docs/architecture.md --refs docs/workflows.md >/dev/null 2>&1
+  git commit -qam "main: refs"
+  git checkout -q side
+  git -c merge.doc-index.driver=true merge -q --no-edit main 2>/dev/null
+  local out rc=0
+  out=$("$DOC_TOOLS" audit-merges "$AM_SINCE" 2>/dev/null) || rc=$?
+  assert_eq "1" "$rc" "exits 1"
+  assert_json_field "$out" '[.findings[] | select(.refused == true)] | length' "1" "the merge is reported refused"
+  teardown
+}
+
+test_audit_merges_arguments() {
+  echo "test: audit-merges requires <since> and rejects a non-commit"
+  setup
+  local rc=0
+  local err
+  err=$("$DOC_TOOLS" audit-merges 2>&1 >/dev/null) || rc=$?
+  assert_eq "2" "$rc" "no argument is a usage error (exit 2)"
+  assert_contains "$err" "requires <since>" "the usage error names <since>"
+  rc=0
+  "$DOC_TOOLS" audit-merges no-such-rev >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "a revision that is not a commit exits 1"
+  teardown
+}
+
+# A merge whose recorded index is rewritten after the fact: amend the merge
+# commit with <jq filter> applied to its index.
+_am_amend_merge() {
+  jq "$1" docs/.doc-index.json > docs/.idx.tmp && mv docs/.idx.tmp docs/.doc-index.json
+  git commit -q --amend --no-edit -a
+}
+
+test_audit_merges_classifies_parent_2_and_neither() {
+  echo "test: audit-merges says 'parent 2' for a keep-theirs merge and 'neither' for a hand edit"
+  setup
+  _am_fixture
+  # Keep theirs: the side's own retype is lost to main's copy of the entry.
+  git -c merge.doc-index.driver='cp %B %A' merge -q --no-edit main 2>/dev/null
+  local out rc=0
+  out=$("$DOC_TOOLS" audit-merges "$AM_SINCE" 2>/dev/null) || rc=$?
+  assert_eq "1" "$rc" "keep-theirs: exits 1"
+  assert_json_field "$out" '[.findings[] | select(.key == "docs/workflows.md")][0].kept' "parent 2" \
+    "keep-theirs: the lost retype reads as parent 2's entry kept"
+  teardown
+
+  setup
+  _am_fixture
+  git -c merge.doc-index.driver="'$MERGE_DRIVER_FOR_AM' %O %A %B" merge -q --no-edit main 2>/dev/null
+  _am_amend_merge '.docs["docs/workflows.md"].doc_type = "hand-edited"'
+  rc=0
+  out=$("$DOC_TOOLS" audit-merges "$AM_SINCE" 2>/dev/null) || rc=$?
+  assert_eq "1" "$rc" "hand edit: exits 1"
+  assert_json_field "$out" '.findings[0].key + " " + .findings[0].kept' "docs/workflows.md neither" \
+    "hand edit: the rewritten entry reads as neither parent's"
+  teardown
+}
+
+test_audit_merges_unreadable_and_derived_status() {
+  echo "test: audit-merges reports an unreadable recorded index, and ignores a current/stale-only difference"
+  setup
+  _am_fixture
+  git -c merge.doc-index.driver="'$MERGE_DRIVER_FOR_AM' %O %A %B" merge -q --no-edit main 2>/dev/null
+  _am_amend_merge '(.docs["docs/workflows.md"].status = (if .docs["docs/workflows.md"].status == "stale" then "current" else "stale" end))'
+  local out rc=0
+  out=$("$DOC_TOOLS" audit-merges "$AM_SINCE" 2>/dev/null) || rc=$?
+  assert_eq "0" "$rc" "a stored current/stale difference is no finding"
+  assert_json_field "$out" '.findings | length' "0" "no finding for derived freshness"
+  printf '{"version": 1, "docs": {}}\n{"version": 1, "docs": {}}\n' > docs/.doc-index.json
+  git commit -q --amend --no-edit -a
+  rc=0
+  out=$("$DOC_TOOLS" audit-merges "$AM_SINCE" 2>/dev/null) || rc=$?
+  assert_eq "1" "$rc" "two documents: exits 1"
+  assert_json_field "$out" '[.findings[] | select(.unreadable == "recorded")] | length' "1" "reported unreadable (the recorded index)"
+  teardown
+}
+
+test_audit_merges_range_and_parent_filter() {
+  echo "test: audit-merges honours <until>, and skips a merge whose parents' indexes agree"
+  setup
+  _am_fixture
+  git -c merge.doc-index.driver=true merge -q --no-edit main 2>/dev/null
+  local bad out rc=0
+  bad=$(git rev-parse HEAD)
+  out=$("$DOC_TOOLS" audit-merges "$AM_SINCE" "$bad^1" 2>/dev/null) || rc=$?
+  assert_eq "0" "$rc" "<until> before the merge: exits 0"
+  assert_json_field "$out" '.merges_checked' "0" "<until> before the merge: nothing replayed"
+  rc=0
+  out=$("$DOC_TOOLS" audit-merges "$AM_SINCE" "$bad" 2>/dev/null) || rc=$?
+  assert_eq "1" "$rc" "<until> at the merge: exits 1"
+  # A later merge that touches no index: both parents carry the same index.
+  git checkout -q -b plain
+  echo "x" > src/other.js && git add -A && git commit -qm "plain: code only"
+  git checkout -q side
+  git merge -q --no-edit plain 2>/dev/null
+  rc=0
+  out=$("$DOC_TOOLS" audit-merges "$bad" 2>/dev/null) || rc=$?
+  assert_eq "0" "$rc" "an index-neutral merge: exits 0"
+  assert_json_field "$out" '.merges_checked' "0" "an index-neutral merge is not replayed"
+  teardown
+}
+
+test_audit_merges_one_sided_index() {
+  echo "test: audit-merges applies git's file-level rule when only one side has the index"
+  setup
+  printf 'docs/.doc-index.json merge=doc-index\n' > .gitattributes
+  git add -A && git commit -m "attrs" --quiet
+  local since
+  since=$(git rev-parse HEAD)
+  git checkout -q -b early
+  echo "e" > src/early.js && git add -A && git commit -qm "early: code only"
+  git checkout -q main
+  printf 'docs/architecture.md:src/:architecture\n' | "$DOC_TOOLS" build-index 2>/dev/null
+  git add -A && git commit -qm "main: index"
+  git checkout -q -b m-into-early early
+  git -c merge.doc-index.driver="'$MERGE_DRIVER_FOR_AM' %O %A %B" merge -q --no-edit main 2>/dev/null
+  git checkout -q main
+  git -c merge.doc-index.driver="'$MERGE_DRIVER_FOR_AM' %O %A %B" merge -q --no-edit early 2>/dev/null
+  git merge -q --no-edit m-into-early 2>/dev/null
+  local out rc=0
+  out=$("$DOC_TOOLS" audit-merges "$since" 2>/dev/null) || rc=$?
+  assert_eq "0" "$rc" "both directions: exits 0"
+  assert_json_field "$out" '.findings | length' "0" "no false 'refused' or 'unreadable' when one side lacks the index"
+  teardown
+}
+
+test_audit_merges_unreadable_parent_index() {
+  echo "test: audit-merges survives an unreadable parent index, and reports a changed side it cannot read"
+  setup
+  printf 'docs/.doc-index.json merge=doc-index\n' > .gitattributes
+  printf 'docs/architecture.md:src/:architecture\n' | "$DOC_TOOLS" build-index 2>/dev/null
+  git add -A && git commit -qm "index"
+  local since good
+  since=$(git rev-parse HEAD)
+  good=$(cat docs/.doc-index.json)
+  # Conflict markers committed on main, repaired on a branch cut from there,
+  # and the repair merged while main moved on in code only.
+  { echo "<<<<<<< ours"; echo "$good"; echo "======="; echo "$good"; echo ">>>>>>> theirs"; } > docs/.doc-index.json
+  git commit -qam "oops: markers committed"
+  git checkout -q -b fix
+  printf '%s\n' "$good" > docs/.doc-index.json && git commit -qam "fix the index"
+  git checkout -q main
+  echo "x" > src/other.js && git add -A && git commit -qm "main: code only"
+  git -c merge.doc-index.driver="'$MERGE_DRIVER_FOR_AM' %O %A %B" merge -q --no-ff --no-edit fix 2>/dev/null
+  local out rc=0
+  out=$("$DOC_TOOLS" audit-merges "$since" 2>/dev/null) || rc=$?
+  assert_eq "0" "$rc" "a merge that took the repair: exits 0"
+  assert_json_field "$out" '.merges_checked' "1" "the merge was checked (JSON rendered, not aborted)"
+  assert_json_field "$out" '.merges_replayed' "0" "one side changed the index, so no driver ran"
+  # The same merge dropping the entry: the unreadable parent 1 is not credited
+  # with the drop (an emptied index would match a missing entry).
+  _am_amend_merge 'del(.docs["docs/architecture.md"])'
+  rc=0
+  out=$("$DOC_TOOLS" audit-merges "$since" 2>/dev/null) || rc=$?
+  assert_eq "1" "$rc" "a merge that dropped an entry: exits 1"
+  assert_json_field "$out" '.findings[0].key + " " + .findings[0].kept' "docs/architecture.md neither" \
+    "the drop reads as neither parent's, not the unreadable parent 1's"
+  git reset -q --hard 'HEAD@{1}'
+  # Now the reverse: the side that changed the index broke it, and the merge
+  # recorded a hand repair: nothing can say what the merge should have kept.
+  local mark
+  mark=$(git rev-parse HEAD)
+  git checkout -q -b broken
+  { echo "<<<<<<< ours"; echo "$good"; echo "======="; echo "$good"; echo ">>>>>>> theirs"; } > docs/.doc-index.json
+  git commit -qam "broken: markers"
+  git checkout -q main
+  git -c merge.doc-index.driver="'$MERGE_DRIVER_FOR_AM' %O %A %B" merge -q --no-ff --no-edit broken 2>/dev/null
+  printf '%s\n' "$good" > docs/.doc-index.json && git commit -q --amend --no-edit -a
+  rc=0
+  out=$("$DOC_TOOLS" audit-merges "$mark" 2>/dev/null) || rc=$?
+  assert_eq "1" "$rc" "an unreadable changed side: exits 1"
+  assert_json_field "$out" '[.findings[] | select(.unreadable == "parent 2")] | length' "1" "reported as the unreadable parent 2"
+  teardown
+}
+
+test_audit_merges_skips_an_octopus() {
+  echo "test: audit-merges lists an octopus merge under skipped, not as a finding"
+  setup
+  _am_fixture
+  # Two code-only branches off the fork point (git's octopus strategy only
+  # makes merges needing no file-level resolution).
+  local b
+  for b in t1 t2; do
+    git checkout -q -b "$b" "$AM_SINCE"
+    echo "$b" > "src/$b.js" && git add -A && git commit -qm "$b: code only"
+  done
+  git checkout -q side
+  git merge -q --no-edit t1 t2 >/dev/null 2>&1
+  local oct out rc=0
+  oct=$(git rev-parse HEAD)
+  assert_eq "4" "$(git rev-list --parents -n 1 HEAD | wc -w | tr -d ' ')" "fixture: a three-parent merge (the commit + 3 parents)"
+  out=$("$DOC_TOOLS" audit-merges "$AM_SINCE" 2>/dev/null) || rc=$?
+  assert_eq "0" "$rc" "exits 0"
+  assert_json_field "$out" '.skipped[0].merge' "$oct" "names the octopus merge"
+  assert_json_field "$out" '.skipped[0].octopus' "true" "marks it octopus"
+  assert_json_field "$out" '.merges_checked' "0" "not replayed"
+  teardown
+}
+
+test_audit_merges_needs_the_plugin_driver() {
+  echo "test: audit-merges from a vendored doc-tools.sh (no merge driver beside it) exits 1 and says why"
+  setup
+  _am_fixture
+  mkdir -p vendor && cp "$SCRIPT_DIR/doc-tools.sh" vendor/doc-tools.sh
+  local err rc=0
+  err=$("$BASH_BIN" vendor/doc-tools.sh audit-merges "$AM_SINCE" 2>&1 >/dev/null) || rc=$?
+  assert_eq "1" "$rc" "exits 1"
+  assert_contains "$err" "merge driver beside doc-tools.sh" "names the missing driver"
   teardown
 }
 
@@ -6611,6 +7052,24 @@ run_tests() {
   test_move_entry_warns_when_old_file_remains
   test_move_entry_normalizes_absolute_paths
   test_move_entry_repoints_references
+  test_move_entry_repoints_code_refs
+  test_move_entry_code_refs_no_duplicate
+  test_move_entry_code_oids_own_id_wins_in_either_order
+  test_move_entry_code_refs_keeps_an_existing_duplicate
+  test_move_entry_stdin_reports_code_refs_repoint
+  test_move_entry_stdin_chain_repoints_code_refs_once
+  test_move_entry_repoints_legacy_code_refs
+  test_audit_merges_finds_a_silent_revert
+  test_audit_merges_clean_through_the_driver
+  test_audit_merges_reports_a_refusal
+  test_audit_merges_arguments
+  test_audit_merges_classifies_parent_2_and_neither
+  test_audit_merges_unreadable_and_derived_status
+  test_audit_merges_range_and_parent_filter
+  test_audit_merges_one_sided_index
+  test_audit_merges_unreadable_parent_index
+  test_audit_merges_skips_an_octopus
+  test_audit_merges_needs_the_plugin_driver
   test_move_entry_usage_lists_move_entry
   test_empty_code_refs_field_yields_empty_array
 
