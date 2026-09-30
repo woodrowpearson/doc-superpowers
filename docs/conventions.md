@@ -218,7 +218,7 @@ Hooks are organized into three tiers, each independently installable:
 | Tier | Flag | Scripts |
 |------|------|---------|
 | Git | `--git` | pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push |
-| Claude Code | `--claude` | pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh |
+| Claude Code | `--claude` | pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh (and hook-lib.sh, which all three source) |
 | CI/CD | `--ci` | doc-freshness-pr.yml, doc-freshness-schedule.yml (the default set); doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml (by name) |
 
 Use `--all` to install all tiers at once.
@@ -251,7 +251,8 @@ The Claude tier is **per-user**. It **copies** hook scripts to `.claude/hooks/do
 - `__DOC_TOOLS_RESOLVE__` becomes the program that finds `doc-tools.sh` at run time — the merge driver's rule: for a plugin-cache install the newest version-named sibling in numeric order (never another sibling, no GNU `sort -V`), for a checkout its own pinned path, single-quoted — and `__INSTALL_DATE__` the date.
 - Hooks are registered in `.claude/settings.local.json` as `bash "$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/<hook>.sh`, and both that file and the scripts directory are excluded from git through a marked block in `$(git rev-parse --git-path info/exclude)`. An exclude cannot hide a tracked file: when the repository tracks either, install prints `git rm -r --cached --ignore-unmatch -- .claude/settings.local.json .claude/hooks/doc-superpowers` and warns that pulling that commit deletes them from every other clone (each teammate re-runs `install --claude`). `status` flags a script or settings command another version installed as `outdated: re-run install --claude`.
 - Existing settings are merged per entry: the installer's entries (by script path) are replaced, every other entry and group is kept byte-for-byte; a settings file that is not one JSON object is refused.
-- Uninstall removes the installer's entries (a group only when nothing else is left in it), the three scripts and the exclude block; a settings file left empty is removed.
+- The three scripts source `hook-lib.sh`, copied beside them and never registered: one copy of the output bounds (every emitted string under Claude Code's 10,000-character hook-output limit) and of the check watchdog. `status` flags a hook whose `hook-lib.sh` is missing or another version's; a hook that cannot source it says so (and the gate blocks under STRICT).
+- Uninstall removes the installer's entries (a group only when nothing else is left in it), the three scripts, `hook-lib.sh` and the exclude block; a settings file left empty is removed.
 
 ### CI-Specific Flags
 

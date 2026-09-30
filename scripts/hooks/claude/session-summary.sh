@@ -12,7 +12,9 @@
 # It only reports: it never runs update-index, which would record docs as
 # verified that nobody read.
 # The check gets BUDGET seconds; past that it is killed (with everything it
-# started) and a one-line note says so. The skill or the doc-index being absent
+# started) and a one-line note says so. Every list is capped and the message
+# held under Claude Code's 10,000-char hook-output limit (hook-lib.sh, sourced
+# from beside this script). The skill or the doc-index being absent
 # is silent; the check failing (jq missing, a corrupt index) is said in one
 # line. DOC_SUPERPOWERS_QUIET=1 silences it; DOC_SUPERPOWERS_SKIP=1 turns it off.
 
@@ -22,7 +24,15 @@
 # (cat, not a byte-at-a-time bash read). A terminal on stdin is not waited on.
 [ -t 0 ] || cat >/dev/null 2>&1
 
+HOOK_EVENT=Stop
 BUDGET=2
+# The shared library beside this script, as an absolute path: the cd below
+# would break a relative one.
+case "${BASH_SOURCE[0]}" in
+  /*) _lib="${BASH_SOURCE[0]%/*}/hook-lib.sh" ;;
+  */*) _lib="$PWD/${BASH_SOURCE[0]%/*}/hook-lib.sh" ;;
+  *) _lib="$PWD/hook-lib.sh" ;;
+esac
 
 cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || exit 0
 [[ -n "${DOC_TOOLS:-}" ]] || DOC_TOOLS=$(__DOC_TOOLS_RESOLVE__)
@@ -30,21 +40,18 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || exit 0
 [[ -f docs/.doc-index.json ]] || exit 0
 
 [[ "${DOC_SUPERPOWERS_QUIET:-}" == "1" ]] && exit 0
+
+# Without the library nothing can be reported but that.
+# shellcheck source=scripts/hooks/claude/hook-lib.sh
+if ! . "$_lib" 2>/dev/null; then
+  printf '%s\n' '{"systemMessage":"doc-superpowers: hook-lib.sh is missing beside the session-summary hook, so it cannot report; re-run install.sh install --claude"}'
+  exit 0
+fi
 # Nothing yet committed (no HEAD): nothing to compare.
 git rev-parse -q --verify HEAD >/dev/null 2>&1 || exit 0
 
 have_jq=1
 command -v jq >/dev/null 2>&1 || have_jq=0
-
-# _emit <systemMessage>
-_emit() {
-  if [[ "$have_jq" == 1 ]]; then
-    jq -cn --arg m "$1" '{systemMessage: $m}'
-  else
-    # Only this hook's own fixed text (no quote or backslash) comes here.
-    printf '{"systemMessage":"%s"}\n' "$1"
-  fi
-}
 
 # The check could not run: one line, on stderr and (as Claude Code shows an
 # exit-0 hook's stderr to no one) as a systemMessage.
@@ -81,6 +88,7 @@ changed=$({
 # The working tree as a tree object: every change staged into the private
 # index with add -A. Like git stash, this writes objects for new content;
 # nothing references them.
+# shellcheck disable=SC2329  # run by _bounded
 _check() {
   local tree
   GIT_INDEX_FILE="$idx" git add -A >/dev/null 2>&1 || { echo "ERROR: cannot stage the working tree into a private index" >&2; return 1; }
@@ -88,50 +96,27 @@ _check() {
   printf '%s\n' "$changed" | "$DOC_TOOLS" check-freshness --tree "$tree" --code-refs-from -
 }
 
-# Run _check in its own process group with a watchdog that, after BUDGET
-# seconds, first leaves a marker and then kills the whole group. Neither job
-# keeps this hook's stdout open. The watchdog is always killed and reaped
-# before the verdict: whether it fired is read from the marker, never from
-# whether it is still alive (it can be alive between its kill and its exit).
-# Returns _check's status, or 124 when the check was cut short.
-_bounded() {
-  local pid wd rc=0
-  set -m
-  _check >"$work/out" 2>"$work/err" </dev/null &
-  pid=$!
-  ( sleep "$BUDGET"; : > "$work/timedout"; kill -TERM -- "-$pid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
-  wd=$!
-  set +m
-  wait "$pid" 2>/dev/null || rc=$?
-  kill -TERM -- "-$wd" 2>/dev/null
-  wait "$wd" 2>/dev/null
-  # A check that finished cleanly is used even if the watchdog fired after it.
-  if [[ "$rc" != 0 && -e "$work/timedout" ]]; then
-    rc=124
-  fi
-  return "$rc"
-}
-
+# _check under the watchdog (hook-lib.sh: _bounded); 124 when it ran out of time.
 rc=0
-_bounded || rc=$?
+_bounded _check || rc=$?
 if [[ "$rc" == 124 ]]; then
-  _emit "doc-superpowers: doc freshness summary skipped — the check took longer than ${BUDGET}s (run 'doc-tools.sh check-freshness' to see it)."
+  _emit "$(_budget_line)"
   exit 0
 fi
 if [[ "$rc" != 0 ]]; then
-  why=$(awk '/^ERROR: / { print; e = 1; exit } NF && !/^NOTE: / && o == "" { o = $0 } END { if (!e) print o }' "$work/err")
-  why="${why#ERROR: }"
-  why="${why%.}"
+  why=$(_why)
   _fail "${why:-doc-tools.sh check-freshness failed}"
 fi
 
-summary=$(jq -r '
+# Every list is capped (hook-lib.sh: dsp_list).
+# shellcheck disable=SC2016  # jq program, not shell expansion
+summary=$(_report_jq '
   [.docs | to_entries[] | select(.value.status == "stale") | .key] as $s
   | [.docs | to_entries[] | select(.value.status == "missing") | .key] as $m
-  | [if ($s | length) > 0 then "\($s | length) doc(s) cite code changed in the working tree and are not re-verified: \($s | join(", "))" else empty end,
-     if ($m | length) > 0 then "\($m | length) indexed doc(s) missing from disk: \($m | join(", "))" else empty end]
+  | [if ($s | length) > 0 then "\($s | length) doc(s) cite code changed in the working tree and are not re-verified: \($s | dsp_list | join(", "))" else empty end,
+     if ($m | length) > 0 then "\($m | length) indexed doc(s) missing from disk: \($m | dsp_list | join(", "))" else empty end]
   | if length > 0 then "doc-superpowers: " + join("; ") + ". Update them (/doc-superpowers update) and re-verify each one you reviewed (doc-tools.sh update-index <doc>)." else "" end
-' "$work/out" 2>/dev/null) || _fail "cannot read the freshness report"
+' -r < "$work/out" 2>/dev/null) || _fail "cannot read the freshness report"
 
 [[ -z "$summary" ]] && exit 0
 _emit "$summary"

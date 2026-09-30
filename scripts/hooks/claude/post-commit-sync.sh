@@ -8,6 +8,10 @@
 # Claude, systemMessage for the user); always exits 0, the commit is made.
 # It only reports: it never runs update-index, which would record docs as
 # verified that nobody read.
+# Every list is capped and every string held under Claude Code's 10,000-char
+# hook-output limit (hook-lib.sh, sourced from beside this script). The check
+# gets BUDGET seconds, under the 10 s the installer registers; past that it is
+# killed (with everything it started) and a one-line note says so.
 # The skill or the doc-index being absent is silent; the check failing (jq
 # missing, a corrupt index) is said in one line.
 # DOC_SUPERPOWERS_QUIET=1 silences it; DOC_SUPERPOWERS_SKIP=1 turns it off.
@@ -53,6 +57,16 @@ else
 fi
 [[ $command_str =~ $re_commit ]] || exit 0
 
+HOOK_EVENT=PostToolUse
+BUDGET=7
+# The shared library beside this script, as an absolute path: the cd below
+# would break a relative one.
+case "${BASH_SOURCE[0]}" in
+  /*) _lib="${BASH_SOURCE[0]%/*}/hook-lib.sh" ;;
+  */*) _lib="$PWD/${BASH_SOURCE[0]%/*}/hook-lib.sh" ;;
+  *) _lib="$PWD/hook-lib.sh" ;;
+esac
+
 cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || exit 0
 [[ -n "${DOC_TOOLS:-}" ]] || DOC_TOOLS=$(__DOC_TOOLS_RESOLVE__)
 [[ -f "$DOC_TOOLS" ]] || exit 0
@@ -60,17 +74,12 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || exit 0
 
 [[ "${DOC_SUPERPOWERS_QUIET:-}" == "1" ]] && exit 0
 
-# _emit <systemMessage> <additionalContext> — either may be empty.
-_emit() {
-  if [[ "$have_jq" == 1 ]]; then
-    jq -cn --arg m "$1" --arg c "$2" '
-      (if $m != "" then {systemMessage: $m} else {} end)
-      + (if $c != "" then {hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $c}} else {} end)'
-  else
-    # Only this hook's own fixed text (no quote or backslash) comes here.
-    printf '{"systemMessage":"%s"}\n' "$1"
-  fi
-}
+# Without the library nothing can be reported but that.
+# shellcheck source=scripts/hooks/claude/hook-lib.sh
+if ! . "$_lib" 2>/dev/null; then
+  printf '%s\n' '{"systemMessage":"doc-superpowers: hook-lib.sh is missing beside the post-commit-sync hook, so it cannot report; re-run install.sh install --claude"}'
+  exit 0
+fi
 
 # The check could not run: one line, on stderr and (as Claude Code shows an
 # exit-0 hook's stderr to no one) as a systemMessage.
@@ -90,39 +99,50 @@ committed=$(git -c core.quotePath=false diff --name-only --no-renames HEAD~1 HEA
   || exit 0
 [[ -z "$committed" ]] && exit 0
 
+work=$(mktemp -d "${TMPDIR:-/tmp}/doc-sp-sync.XXXXXX") || _fail "mktemp failed"
+trap 'rm -rf "$work"' EXIT
+
+# shellcheck disable=SC2329  # run by _bounded
 _check() { printf '%s\n' "$committed" | "$DOC_TOOLS" check-freshness --code-refs-from -; }
-if ! result=$(_check 2>/dev/null); then
-  why=$(_check 2>&1 >/dev/null | awk '/^ERROR: / { print; e = 1; exit } NF && !/^NOTE: / && o == "" { o = $0 } END { if (!e) print o }')
-  why="${why#ERROR: }"
-  why="${why%.}"
+rc=0
+_bounded _check || rc=$?
+if [[ "$rc" == 124 ]]; then
+  line=$(_budget_line)
+  echo "$line" >&2
+  _emit "$line" ""
+  exit 0
+fi
+if [[ "$rc" != 0 ]]; then
+  why=$(_why)
   _fail "${why:-doc-tools.sh check-freshness failed}"
 fi
 
 # Line 1: "<stale> <missing>"; line 2: the one-line summary; then the report.
-report=$(jq -r --arg move "  Run 'doc-tools.sh move-entry <old> <new>' if it was renamed, or 'remove-entry'/'deprecate-entry' to clean up." '
+# Every list is capped (hook-lib.sh: dsp_list, dsp_lines, dsp_refs).
+# shellcheck disable=SC2016  # jq program, not shell expansion
+report=$(_report_jq '
   [.docs | to_entries[] | select(.value.status == "stale")] as $s
   | [.docs | to_entries[] | select(.value.status == "missing")] as $m
   | "\($s | length) \($m | length)",
-    ([if ($s | length) > 0 then "this commit left \($s | length) doc(s) stale: \([$s[].key] | join(", "))" else empty end,
-      if ($m | length) > 0 then "\($m | length) indexed doc(s) missing from disk: \([$m[].key] | join(", "))" else empty end]
+    ([if ($s | length) > 0 then "this commit left \($s | length) doc(s) stale: \([$s[].key] | dsp_list | join(", "))" else empty end,
+      if ($m | length) > 0 then "\($m | length) indexed doc(s) missing from disk: \([$m[].key] | dsp_list | join(", "))" else empty end]
      | "doc-superpowers: " + join("; ")),
     (if ($s | length) > 0 then
        "doc-superpowers: \($s | length) doc(s) affected by this commit are stale (their code changed since they were verified)",
-       ($s[] | "  \(.key) — \(.value.reason // "stale")"
-         + (if ((.value.code_refs_changed // []) | length) > 0 then ": \(.value.code_refs_changed | join(", "))" else "" end))
+       ($s | dsp_lines("  \(.key) — \(.value.reason // "stale")" + dsp_refs))
      else empty end),
     (if ($m | length) > 0 then
        "doc-superpowers: \($m | length) indexed doc(s) missing from disk",
-       ($m[] | "  \(.key)"),
+       ($m | dsp_lines("  \(.key)")),
        $move
      else empty end)
-' <<<"$result" 2>/dev/null) || _fail "cannot read the freshness report"
+' -r --arg move "  Run 'doc-tools.sh move-entry <old> <new>' if it was renamed, or 'remove-entry'/'deprecate-entry' to clean up." \
+  < "$work/out" 2>/dev/null) || _fail "cannot read the freshness report"
 
-counts=${report%%$'\n'*}
+# Split with read, not ${report%%…}: bash's pattern removal is quadratic on
+# a long string.
+{ IFS= read -r counts; IFS= read -r summary; report=$(cat); } <<<"$report"
 [[ "$counts" == "0 0" ]] && exit 0
-report=${report#*$'\n'}
-summary=${report%%$'\n'*}
-report=${report#*$'\n'}
 
 _emit "$summary" "$report
   Run '/doc-superpowers update' to refresh stale documentation, then re-verify each doc you reviewed (doc-tools.sh update-index <doc>)."
