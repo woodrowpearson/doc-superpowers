@@ -338,6 +338,99 @@ run_ways
 assert_ways_conflict "docs/c.md: both sides changed code_refs" "set-code-refs vs set-code-refs"
 teardown
 
+# GH #22: move-entry repoints the code_refs / code_oids of every entry citing
+# the moved doc, so two branches that each move a different doc cited by ONE
+# entry both change that entry while last_verified ties. The driver merges those
+# as in-place substitutions (code_refs) and key by key (code_oids); an edit that
+# the substitutions cannot be applied to still conflicts — never a silent loss.
+cite_repo() {
+  base_repo
+  echo "# d" > docs/d.md
+  git add -A && git commit -qm "d"
+  printf 'docs/d.md:docs/a.md,docs/b.md,src/c.js:guide\n' | dt "$T1" add-entry
+  dt "$T1" update-index docs/d.md
+  commit_all "d cites a and b"
+  A_ID=$(jq -r '.docs["docs/d.md"].code_oids["docs/a.md"]' docs/.doc-index.json)
+  B_ID=$(jq -r '.docs["docs/d.md"].code_oids["docs/b.md"]' docs/.doc-index.json)
+}
+
+echo ""
+echo "--- parallel move-entry repoints of one citing entry merge cleanly (GH #22) ---"
+cite_repo
+git checkout -q -b A
+git mv docs/a.md docs/a2.md && git commit -qm "A: move a"
+dt "$T2" move-entry docs/a.md docs/a2.md
+commit_all "A: re-key a"
+git checkout -q -b B main
+git mv docs/b.md docs/b2.md && git commit -qm "B: move b"
+dt "$T3" move-entry docs/b.md docs/b2.md
+commit_all "B: re-key b"
+run_ways
+assert_ways '.docs["docs/d.md"].code_refs | join(",")' "docs/a2.md,docs/b2.md,src/c.js" "both repoints kept, in place"
+assert_ways '.docs["docs/d.md"].code_oids["docs/a2.md"]' "$A_ID" "a's recorded id under a2"
+assert_ways '.docs["docs/d.md"].code_oids["docs/b2.md"]' "$B_ID" "b's recorded id under b2"
+assert_ways '.docs["docs/d.md"].code_oids | keys | length' "3" "no stale key left"
+assert_ways_same_docs "parallel repoints"
+teardown
+
+echo ""
+echo "--- a move-entry repoint vs a set-code-refs that adds a ref: both kept (GH #22) ---"
+cite_repo
+git checkout -q -b A
+git mv docs/a.md docs/a2.md && git commit -qm "A: move a"
+dt "$T2" move-entry docs/a.md docs/a2.md
+commit_all "A: re-key a"
+git checkout -q -b B main
+dt "$T3" set-code-refs docs/d.md --refs docs/a.md,docs/b.md,src/c.js,src/b.js
+commit_all "B: d also covers b.js"
+run_ways
+assert_ways '.docs["docs/d.md"].code_refs | join(",")' "docs/a2.md,docs/b.md,src/c.js,src/b.js" "repoint applied to the widened list"
+assert_ways '.docs["docs/d.md"].code_oids | has("docs/a2.md") and has("src/b.js") and (has("docs/a.md") | not)' "true" "code_oids carries both changes"
+assert_ways_same_docs "repoint vs added ref"
+teardown
+
+echo ""
+echo "--- a move-entry repoint vs a set-code-refs that drops the moved ref: a conflict (GH #22) ---"
+cite_repo
+git checkout -q -b A
+git mv docs/a.md docs/a2.md && git commit -qm "A: move a"
+dt "$T2" move-entry docs/a.md docs/a2.md
+commit_all "A: re-key a"
+git checkout -q -b B main
+dt "$T3" set-code-refs docs/d.md --refs docs/b.md,src/c.js
+commit_all "B: d stops citing a"
+run_ways
+assert_ways_conflict "docs/d.md: both sides changed code_refs" "repoint vs a drop of the moved ref"
+teardown
+
+echo ""
+echo "--- two same-length set-code-refs edits (a remove plus an add at one position): a conflict (GH #22) ---"
+cite_repo
+git checkout -q -b A
+dt "$T2" set-code-refs docs/d.md --refs docs/a.md,src/c.js,src/d.js
+commit_all "A: d drops b, gains d.js"
+git checkout -q -b B main
+dt "$T3" set-code-refs docs/d.md --refs docs/a.md,docs/b.md,src/d.js
+commit_all "B: d drops c.js, gains d.js"
+run_ways
+assert_ways_conflict "docs/d.md: both sides changed code_refs" "remove + add on both sides is not a substitution"
+teardown
+
+echo ""
+echo "--- A moves a citing doc while B moves a doc it cites: a conflict, documented under Renames ---"
+cite_repo
+git checkout -q -b A
+git mv docs/d.md docs/d2.md && git commit -qm "A: move d"
+dt "$T2" move-entry docs/d.md docs/d2.md
+commit_all "A: re-key d"
+git checkout -q -b B main
+git mv docs/a.md docs/a2.md && git commit -qm "B: move a"
+dt "$T3" move-entry docs/a.md docs/a2.md
+commit_all "B: re-key a (repoints d)"
+run_ways
+assert_ways_conflict "docs/d.md: deleted on one side, changed on the other" "a re-key against a repoint of the re-keyed entry"
+teardown
+
 echo ""
 echo "--- same field, no newer last_verified: move-entry repoint vs deprecate --superseded-by ---"
 base_repo
@@ -689,6 +782,66 @@ drive
 assert_json_field "$DRV_OUT" '.docs["docs/a.md"] | "\(.status) \(.superseded_by)"' "null null" "un-deprecation beats a repoint"
 drive_swapped
 assert_json_field "$DRV_OUT" '.docs["docs/a.md"] | "\(.status) \(.superseded_by)"' "null null" "un-deprecation beats a repoint (swapped)"
+write_index "$B" "{\"docs/a.md\": $ENTRY}"
+
+echo ""
+echo "--- code_refs substitutions collapse as move-entry would, and dedupe nothing else (GH #22) ---"
+# Theirs repoints x -> y (keeps the base length); ours widened the list to cite
+# y too. move-entry on ours' list would drop the moved ref into its own y.
+derive "$B" '.docs["docs/a.md"].code_refs = ["docs/x.md", "src/a.js"]'
+derive "$O" '.docs["docs/a.md"].code_refs = ["docs/x.md", "src/a.js", "docs/y.md"]'
+derive "$T" '.docs["docs/a.md"].code_refs = ["docs/y.md", "src/a.js"]'
+drive
+assert_eq "0" "$DRV_RC" "repoint vs a list already citing the new path: exit 0"
+assert_json_field "$DRV_OUT" '.docs["docs/a.md"].code_refs | join(",")' "src/a.js,docs/y.md" "the moved ref collapses into ours' own copy"
+drive_swapped
+assert_json_field "$DRV_OUT" '.docs["docs/a.md"].code_refs | join(",")' "src/a.js,docs/y.md" "the moved ref collapses (swapped)"
+# A duplicate neither side's substitution made is left alone.
+derive "$B" '.docs["docs/a.md"].code_refs = ["src/a.js", "src/a.js", "docs/x.md"]'
+derive "$O" '.docs["docs/a.md"].code_refs = ["src/a.js", "src/a.js", "docs/x.md", "src/z.js"]'
+derive "$T" '.docs["docs/a.md"].code_refs = ["src/a.js", "src/a.js", "docs/y.md"]'
+drive
+assert_json_field "$DRV_OUT" '.docs["docs/a.md"].code_refs | join(",")' "src/a.js,src/a.js,docs/y.md,src/z.js" "an existing duplicate survives"
+# Same-length lists that are not substitutions: a duplicate neither side had,
+# and a duplicated base ref, both conflict rather than lose or invent a ref.
+derive "$B" '.docs["docs/a.md"].code_refs = ["src/a.js", "src/b.js"]'
+derive "$O" '.docs["docs/a.md"].code_refs = ["src/c.js", "src/b.js"]'
+derive "$T" '.docs["docs/a.md"].code_refs = ["src/a.js", "src/c.js"]'
+drive
+assert_eq "1" "$DRV_RC" "a merge that would duplicate a ref: exit 1"
+derive "$B" '.docs["docs/a.md"].code_refs = ["src/a.js", "src/a.js"]'
+derive "$O" '.docs["docs/a.md"].code_refs = ["src/a.js", "src/a.js", "src/e.js"]'
+derive "$T" '.docs["docs/a.md"].code_refs = ["src/c.js", "src/d.js"]'
+drive
+assert_eq "1" "$DRV_RC" "a duplicated base ref: exit 1 (was a silent loss of src/c.js)"
+write_index "$B" "{\"docs/a.md\": $ENTRY}"
+
+echo ""
+echo "--- two same-second re-verifications that differ only in code_oids: a conflict ---"
+# update-index on each side with a different uncommitted code change: the
+# same content_hash, code_commit and last_verified, different code_oids.
+derive "$B" '.docs["docs/a.md"] += {code_refs: ["src/a.js", "src/b.js"], code_oids: {"src/a.js": "oidA0", "src/b.js": "oidB0"}}'
+derive "$O" '.docs["docs/a.md"] += {code_oids: {"src/a.js": "oidA1", "src/b.js": "oidB0"}, last_verified: "2026-01-01T00:00:05Z"}'
+derive "$T" '.docs["docs/a.md"] += {code_oids: {"src/a.js": "oidA0", "src/b.js": "oidB1"}, last_verified: "2026-01-01T00:00:05Z"}'
+drive
+assert_eq "1" "$DRV_RC" "tied re-verifications: exit 1 (never a pair nobody verified)"
+assert_contains "$DRV_ERR" "the verification record" "tied re-verifications: the record is named"
+drive_swapped
+assert_eq "1" "$DRV_RC" "tied re-verifications (swapped): exit 1"
+write_index "$B" "{\"docs/a.md\": $ENTRY}"
+
+echo ""
+echo "--- a re-verified side's code_refs win whole over the other side's repoint (documented under Renames) ---"
+derive "$B" '.docs["docs/a.md"] += {code_refs: ["docs/x.md", "src/a.js"], code_oids: {"docs/x.md": "oidX", "src/a.js": "oid0"}}'
+derive "$O" '.docs["docs/a.md"] += {code_refs: ["docs/x2.md", "src/a.js"], code_oids: {"docs/x2.md": "oidX", "src/a.js": "oid0"}, content_hash: "sha256:h9", last_verified: "2026-01-01T00:00:05Z"}'
+derive "$T" '.docs["docs/a.md"] += {code_refs: ["docs/x.md", "src/b.js"], code_oids: {"docs/x.md": "oidX", "src/b.js": "oidB"}}'
+drive
+assert_eq "0" "$DRV_RC" "re-verified side vs a repoint: exit 0"
+assert_json_field "$DRV_OUT" '.docs["docs/a.md"] | (.code_refs | join(",")) + " " + .last_verified' \
+  "docs/x2.md,src/a.js 2026-01-01T00:00:05Z" "the re-verified side's list and record win whole"
+drive_swapped
+assert_json_field "$DRV_OUT" '.docs["docs/a.md"].code_refs | join(",")' "docs/x2.md,src/a.js" "the same (swapped)"
+write_index "$B" "{\"docs/a.md\": $ENTRY}"
 write_index "$B" "{\"docs/a.md\": $ENTRY}"
 
 echo ""

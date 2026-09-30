@@ -28,12 +28,29 @@
 #       field. That is not a rare same-second case: only update-index writes
 #       last_verified, so two set-code-refs, deprecate-entry --superseded-by,
 #       move-entry repoints or hand edits of one field always tie.
-#       (set-implementation edits a doc, never the index.) Two refinements:
+#       (set-implementation edits a doc, never the index.) Three refinements:
 #       * the verification record (content_hash, code_oids, code_commit,
 #         last_verified) is ONE field: update-index writes it as a unit, and a
 #         doc hash from one side beside code ids from the other would attest a
 #         doc/code pair nobody verified. Two different records with the same
-#         last_verified are a conflict; two equal ones are not;
+#         last_verified are a conflict; two equal ones are not — except that
+#         when neither side re-verified the entry (last_verified is still the
+#         BASE's: update-index is its only writer), the two sides agree on
+#         content_hash and code_commit, and they differ only in code_oids —
+#         refs moved by move-entry repoints or added by set-code-refs —
+#         code_oids is merged key by key, three-way. Two re-verifications
+#         that tie are still a conflict;
+#       * code_refs that both sides changed, when last_verified ties, merge as
+#         in-place substitutions: position by position when both kept the
+#         base's length, or one side's substitutions (a move-entry repoint)
+#         applied to the other side's list when only that side kept it — but
+#         only when the result holds exactly the refs a three-way set merge
+#         keeps and makes no duplicate neither side had. So two branches that
+#         each move a different doc cited by one entry merge cleanly
+#         (GH #22), while a remove plus an add at one position, or two
+#         set-code-refs edits whose result is not the set merge, still
+#         conflicts. When last_verified does order the sides (one
+#         re-verified), the newer side's whole list wins, as for any field;
 #       * deprecated wins: a status both sides changed resolves to
 #         "deprecated" if either side has it, and superseded_by (when both
 #         changed it) goes with the status the merge kept — so a revert that
@@ -189,13 +206,76 @@ def order($o; $t):
 # The verification record, compared and taken as one unit.
 def VERIFY: {content_hash: 0, code_oids: 1, code_commit: 2, last_verified: 3};
 def vrec($e): [w($e; "content_hash"), w($e; "code_oids"), w($e; "code_commit"), w($e; "last_verified")];
+# Neither side re-verified (last_verified still equals the base value; update-index is
+# its only writer), and the sides agree on content_hash and code_commit, so a
+# code_oids difference is refs moved or added (move-entry, set-code-refs).
+def vsame($b; $o; $t):
+  w($o; "content_hash") == w($t; "content_hash") and w($o; "code_commit") == w($t; "code_commit")
+  and w($o; "last_verified") == w($t; "last_verified") and w($o; "last_verified") == w($b; "last_verified");
+# code_oids merged key by key (wrapped values in, [merged] or null out). An
+# absent base code_oids (an entry written before schema 3) is empty.
+def oids3($b; $o; $t):
+  (if $b == [] then {} elif ($b[0] | type) == "object" then $b[0] else null end) as $bo
+  | if $bo == null or ($o | length) != 1 or ($t | length) != 1
+       or ($o[0] | type) != "object" or ($t[0] | type) != "object" then null
+    else [ukeys($o[0]; $t[0])[] as $k | {k: $k, v: pick3(w($bo; $k); w($o[0]; $k); w($t[0]; $k))}] as $r
+      | if any($r[]; .v == null) then null
+        else [reduce ($r[] | select(.v != [])) as $x ({}; . + {($x.k): $x.v[0]})] end
+    end;
+# code_refs as in-place substitutions (plain lists in, merged list or null out).
+def strs: type == "array" and all(.[]; type == "string");
+# The substitutions that turn $b into $x ({old: new}), when $x kept the base length.
+def subs($b; $x):
+  if ($x | length) == ($b | length)
+  then reduce range(0; $b | length) as $i ({}; if $b[$i] != $x[$i] then . + {($b[$i]): $x[$i]} else . end)
+  else null end;
+# Apply them to $l the way move-entry would: a substituted value the list also
+# holds unsubstituted, or already gained, is dropped; nothing else is deduplicated.
+def apply_subs($m; $l):
+  reduce $l[] as $e ([]; ($m[$e] // $e) as $n
+    | if ($m | has($e))
+         and (index([$n]) != null or any($l[]; . as $x | $x == $n and (($m | has($x)) | not)))
+      then . else . + [$n] end);
+# Every substituted value still in $l unchanged (else the sides disagree).
+def subs_apply($m; $l): all($m | keys[]; . as $k | $l | index([$k]) != null);
+def subs3($b; $o; $t):
+  if ([$b, $o, $t] | all(strs)) | not then null
+  elif ($o | length) == ($b | length) and ($t | length) == ($b | length)
+    then [range(0; $b | length) as $i | pick3([$b[$i]]; [$o[$i]]; [$t[$i]])] as $p
+      | if any($p[]; . == null) then null else [$p[][0]] end
+  elif subs($b; $t) != null
+    then subs($b; $t) as $m | if subs_apply($m; $o) then apply_subs($m; $o) else null end
+  elif subs($b; $o) != null
+    then subs($b; $o) as $m | if subs_apply($m; $t) then apply_subs($m; $t) else null end
+  else null end;
+# The lists merged as sets: each ref kept or dropped as the side that changed
+# its membership says.
+def members3($b; $o; $t):
+  [($b + $o + $t | unique)[] as $x
+   | ($b | index([$x]) != null) as $ib | ($o | index([$x]) != null) as $io | ($t | index([$x]) != null) as $it
+   | select(if $io == $it then $io elif $io == $ib then $it else $io end) | $x];
+def dups($l): [$l | group_by(.)[] | select(length > 1) | .[0]];
+# A substitution merge is taken only when it holds exactly the refs the set
+# merge keeps and makes no duplicate neither side had: a remove plus an add
+# at one position, or a duplicated base ref, is not a substitution.
+def refs3($b; $o; $t):
+  subs3($b; $o; $t) as $r
+  | if $r == null then null
+    elif ($r | unique) != members3($b; $o; $t) then null
+    elif any(dups($r)[]; . as $d | (dups($o) + dups($t)) | index([$d]) == null) then null
+    else $r end;
 
 # Returns {e: merged entry, c: [fields nothing decides]}.
 def merge_fields($b; $o; $t):
   order($o; $t) as $ord
   # A field both sides changed to different values: the newer side, or null.
   | def newer($x; $y): if $ord == "t" then $y elif $ord == "o" then $x else null end;
-  (pick3(vrec($b); vrec($o); vrec($t)) // newer(vrec($o); vrec($t))) as $ver
+  (pick3(vrec($b); vrec($o); vrec($t)) // newer(vrec($o); vrec($t))
+   // (if $ord == null and vsame($b; $o; $t)
+       then (oids3(w($b; "code_oids"); w($o; "code_oids"); w($t; "code_oids")) as $oi
+             | if $oi == null then null
+               else [w($o; "content_hash"), $oi, w($o; "code_commit"), w($o; "last_verified")] end)
+       else null end)) as $ver
   | w($o; "status") as $so | w($t; "status") as $st
   | (pick3(w($b; "status"); $so; $st)
      // (if $so == ["deprecated"] or $st == ["deprecated"] then ["deprecated"]
@@ -209,6 +289,11 @@ def merge_fields($b; $o; $t):
       | (if $f == "status" then $status
          elif $f == "superseded_by" then $sup
          elif $vi != null then (if $ver == null then [] else $ver[$vi] end)
+         elif $f == "code_refs"
+           then (pick3(w($b; $f); w($o; $f); w($t; $f)) // newer(w($o; $f); w($t; $f))
+                 // (if $ord == null and ($b | has($f)) and ($o | has($f)) and ($t | has($f))
+                     then (refs3($b[$f]; $o[$f]; $t[$f]) | if . == null then null else [.] end)
+                     else null end))
          else (pick3(w($b; $f); w($o; $f); w($t; $f)) // newer(w($o; $f); w($t; $f)))
          end) as $v
       | if $v == null then .c += [$f]
