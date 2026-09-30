@@ -829,6 +829,19 @@ assert_contains "$DRV_ERR" "the verification record" "tied re-verifications: the
 drive_swapped
 assert_eq "1" "$DRV_RC" "tied re-verifications (swapped): exit 1"
 write_index "$B" "{\"docs/a.md\": $ENTRY}"
+
+echo ""
+echo "--- a re-verified side's code_refs win whole over the other side's repoint (documented under Renames) ---"
+derive "$B" '.docs["docs/a.md"] += {code_refs: ["docs/x.md", "src/a.js"], code_oids: {"docs/x.md": "oidX", "src/a.js": "oid0"}}'
+derive "$O" '.docs["docs/a.md"] += {code_refs: ["docs/x2.md", "src/a.js"], code_oids: {"docs/x2.md": "oidX", "src/a.js": "oid0"}, content_hash: "sha256:h9", last_verified: "2026-01-01T00:00:05Z"}'
+derive "$T" '.docs["docs/a.md"] += {code_refs: ["docs/x.md", "src/b.js"], code_oids: {"docs/x.md": "oidX", "src/b.js": "oidB"}}'
+drive
+assert_eq "0" "$DRV_RC" "re-verified side vs a repoint: exit 0"
+assert_json_field "$DRV_OUT" '.docs["docs/a.md"] | (.code_refs | join(",")) + " " + .last_verified' \
+  "docs/x2.md,src/a.js 2026-01-01T00:00:05Z" "the re-verified side's list and record win whole"
+drive_swapped
+assert_json_field "$DRV_OUT" '.docs["docs/a.md"].code_refs | join(",")' "docs/x2.md,src/a.js" "the same (swapped)"
+write_index "$B" "{\"docs/a.md\": $ENTRY}"
 write_index "$B" "{\"docs/a.md\": $ENTRY}"
 
 echo ""

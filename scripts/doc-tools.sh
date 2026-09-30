@@ -3500,8 +3500,9 @@ cmd_move_entry() {
   # — without it a rename leaves a dangling superseded_by/replaces, and every
   # doc citing the moved one in code_refs points at a path that is gone
   # (GH #22). A code_refs list is rewritten in place; a moved ref whose new
-  # path the list already names (unmoved) is dropped, so the move adds no
-  # duplicate, and a duplicate the move did not create is left as it is. Its code_oids
+  # path the list already names (unmoved) or has just gained is dropped, so
+  # [old, old] becomes [new], and a duplicate of a ref the move did not touch
+  # stays. Its code_oids
   # key moves with it and keeps its recorded id: a rename keeps the blob, so the
   # citing doc's verdict is unchanged, and a rename-plus-edit reads stale, as it
   # should. When an entry also records the new path as a ref of its own, that
@@ -3526,7 +3527,7 @@ cmd_move_entry() {
                     then $m[$r].new as $n
                       # a moved ref collapses only into a copy of its new path
                       # the list already holds (unmoved) or just gained; a
-                      # duplicate the move did not create is left alone
+                      # duplicate of a ref the move did not touch stays
                       | if any($orig[]; . == $n and ((type != "string") or $m[.] == null))
                            or any(.[]; . == $n)
                         then . else . + [$n] end
@@ -4003,12 +4004,14 @@ cmd_audit_merges() {
       continue
     fi
     # The parents only name which one a recorded entry matches; an unreadable
-    # one (conflict markers the other side repaired) names none.
-    _am_index_at "$p1" "$dir/p1"; _am_ok "$dir/p1" || : > "$dir/p1"
-    _am_index_at "$p2" "$dir/p2"; _am_ok "$dir/p2" || : > "$dir/p2"
+    # one (conflict markers the other side repaired) names none — not even
+    # for an entry the merge dropped, which an empty index would match.
+    local ux=false uy=false
+    _am_index_at "$p1" "$dir/p1"; _am_ok "$dir/p1" || { : > "$dir/p1"; ux=true; }
+    _am_index_at "$p2" "$dir/p2"; _am_ok "$dir/p2" || { : > "$dir/p2"; uy=true; }
     # shellcheck disable=SC2016  # jq program, not shell expansion
     jq -cn --arg m "$m" --slurpfile a "$dir/out" --slurpfile b "$dir/rec" \
-        --slurpfile x "$dir/p1" --slurpfile y "$dir/p2" '
+        --slurpfile x "$dir/p1" --slurpfile y "$dir/p2" --argjson ux "$ux" --argjson uy "$uy" '
       def norm: if type == "object" and (.status == "current" or .status == "stale")
                  then del(.status) else . end;
       def docs($f): if ($f | length) > 0 and ($f[0] | type) == "object" then ($f[0].docs // {}) else {} end;
@@ -4017,8 +4020,8 @@ cmd_audit_merges() {
       | ($A[$k] | norm) as $va | ($B[$k] | norm) as $vb
       | select($va != $vb)
       | {merge: $m, key: $k,
-         kept: (if $vb == ($X[$k] | norm) then "parent 1"
-                elif $vb == ($Y[$k] | norm) then "parent 2" else "neither" end)}' \
+         kept: (if ($ux | not) and $vb == ($X[$k] | norm) then "parent 1"
+                elif ($uy | not) and $vb == ($Y[$k] | norm) then "parent 2" else "neither" end)}' \
       >> "$found" || _die "cannot compare merge $m with its expected index"
   done < "$list"
 

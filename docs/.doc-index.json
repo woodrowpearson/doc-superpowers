@@ -5,22 +5,22 @@
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
-      "content_hash": "sha256:7286eb156a2eb3376587ad34259acd75b87ee8971153a77f139dff6b3e46e64d",
+      "content_hash": "sha256:7bb704dc52a872b2765bd9b714f601e0dc96ee61882a09e0d1bf736e5a05e302",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/",
         "references/"
       ],
-      "code_commit": "43771cf288373e12c8781bda7b51295bbc604032",
+      "code_commit": "65f244ac55b246ef094b35d86e372f6da30ca369",
       "doc_type": "architecture",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-30T04:52:51Z",
+      "last_verified": "2026-09-30T05:33:28Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "9541099bdb5043e5b20350c8d9981a4b27eefaac",
-        "scripts/": "0fabebd15411f88b3396c29d2bc94e4d75dad18f",
-        "references/": "be4b56adbc556665481c89ed1a1be35c086d45e7"
+        "scripts/": "27999576c825421978bdccbd797a9f0a57bef857",
+        "references/": "84a52c6b95dc7a94fa004bb44dad1002b566359c"
       }
     },
     "docs/codebase-guide.md": {
@@ -29,15 +29,15 @@
         "skills/doc-superpowers/SKILL.md",
         "scripts/"
       ],
-      "code_commit": "43771cf288373e12c8781bda7b51295bbc604032",
+      "code_commit": "65f244ac55b246ef094b35d86e372f6da30ca369",
       "doc_type": "codebase-guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-30T04:52:51Z",
+      "last_verified": "2026-09-30T05:33:28Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "9541099bdb5043e5b20350c8d9981a4b27eefaac",
-        "scripts/": "0fabebd15411f88b3396c29d2bc94e4d75dad18f"
+        "scripts/": "27999576c825421978bdccbd797a9f0a57bef857"
       }
     },
     "docs/conventions.md": {
@@ -49,17 +49,17 @@
         "scripts/doc-tools.sh",
         "scripts/hooks"
       ],
-      "code_commit": "43771cf288373e12c8781bda7b51295bbc604032",
+      "code_commit": "65f244ac55b246ef094b35d86e372f6da30ca369",
       "doc_type": "conventions",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-30T04:52:51Z",
+      "last_verified": "2026-09-30T05:33:28Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "9541099bdb5043e5b20350c8d9981a4b27eefaac",
-        "references/doc-spec.md": "869cbe6bfdc789f3343cb83bf7e7dcc689a0a1fd",
+        "references/doc-spec.md": "fb5d408f45460d73706e9a2a4b2ac5b9e28784d8",
         "references/spec-lifecycle-actions.md": "287704f1a4f23fda730e552173d0200dd1607d60",
-        "scripts/doc-tools.sh": "b5858b68f4719f8e89074779bb097808b469bf2a",
+        "scripts/doc-tools.sh": "1d9e76a736b5f2b687fe1212a79b8ce7eab6301a",
         "scripts/hooks": "2b10dbfbcd4310ffed94da880a13d3cdb54aabd7"
       }
     },
@@ -71,17 +71,17 @@
         "scripts/hooks/install.sh",
         "scripts/doc-tools.sh"
       ],
-      "code_commit": "43771cf288373e12c8781bda7b51295bbc604032",
+      "code_commit": "65f244ac55b246ef094b35d86e372f6da30ca369",
       "doc_type": "guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-30T04:52:51Z",
+      "last_verified": "2026-09-30T05:33:28Z",
       "implementation": [],
       "code_oids": {
         "README.md": "f9eeba7bf24fd8612dd9fdf5256a4676e90dc1e8",
         "skills/doc-superpowers/SKILL.md": "9541099bdb5043e5b20350c8d9981a4b27eefaac",
         "scripts/hooks/install.sh": "7e6a0ed4ca23c9f8d4863654d47df0dd4ebaf31e",
-        "scripts/doc-tools.sh": "b5858b68f4719f8e89074779bb097808b469bf2a"
+        "scripts/doc-tools.sh": "1d9e76a736b5f2b687fe1212a79b8ce7eab6301a"
       }
     },
     "docs/workflows/doc-superpowers.md": {
@@ -91,16 +91,16 @@
         "scripts/",
         "references/"
       ],
-      "code_commit": "43771cf288373e12c8781bda7b51295bbc604032",
+      "code_commit": "65f244ac55b246ef094b35d86e372f6da30ca369",
       "doc_type": "workflows",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-09-30T04:52:51Z",
+      "last_verified": "2026-09-30T05:33:28Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "9541099bdb5043e5b20350c8d9981a4b27eefaac",
-        "scripts/": "0fabebd15411f88b3396c29d2bc94e4d75dad18f",
-        "references/": "be4b56adbc556665481c89ed1a1be35c086d45e7"
+        "scripts/": "27999576c825421978bdccbd797a9f0a57bef857",
+        "references/": "84a52c6b95dc7a94fa004bb44dad1002b566359c"
       }
     },
     "docs/plans/2026-03-26-audit-report.md": {
