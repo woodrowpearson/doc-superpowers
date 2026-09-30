@@ -34,12 +34,12 @@
 #         doc hash from one side beside code ids from the other would attest a
 #         doc/code pair nobody verified. Two different records with the same
 #         last_verified are a conflict; two equal ones are not — except that
-#         when both still carry the BASE's verification (content_hash,
-#         code_commit and last_verified unchanged: neither side ran
-#         update-index on the entry) and differ only in code_oids — refs
-#         moved by move-entry repoints or added by set-code-refs — code_oids
-#         is merged key by key, three-way. Two re-verifications that tie are
-#         still a conflict;
+#         when neither side re-verified the entry (last_verified is still the
+#         BASE's: update-index is its only writer), the two sides agree on
+#         content_hash and code_commit, and they differ only in code_oids —
+#         refs moved by move-entry repoints or added by set-code-refs —
+#         code_oids is merged key by key, three-way. Two re-verifications
+#         that tie are still a conflict;
 #       * code_refs that both sides changed, when last_verified ties, merge as
 #         in-place substitutions: position by position when both kept the
 #         base's length, or one side's substitutions (a move-entry repoint)
@@ -47,8 +47,10 @@
 #         only when the result holds exactly the refs a three-way set merge
 #         keeps and makes no duplicate neither side had. So two branches that
 #         each move a different doc cited by one entry merge cleanly
-#         (GH #22), while a remove plus an add at one position, or any other
-#         pair of set-code-refs edits, still conflicts;
+#         (GH #22), while a remove plus an add at one position, or two
+#         set-code-refs edits whose result is not the set merge, still
+#         conflicts. When last_verified does order the sides (one
+#         re-verified), the newer side's whole list wins, as for any field;
 #       * deprecated wins: a status both sides changed resolves to
 #         "deprecated" if either side has it, and superseded_by (when both
 #         changed it) goes with the status the merge kept — so a revert that
@@ -204,8 +206,8 @@ def order($o; $t):
 # The verification record, compared and taken as one unit.
 def VERIFY: {content_hash: 0, code_oids: 1, code_commit: 2, last_verified: 3};
 def vrec($e): [w($e; "content_hash"), w($e; "code_oids"), w($e; "code_commit"), w($e; "last_verified")];
-# The verification of the base on both sides, only code_oids differing: neither
-# side re-verified (update-index is the only writer of last_verified), so a
+# Neither side re-verified (last_verified still equals the base value; update-index is
+# its only writer), and the sides agree on content_hash and code_commit, so a
 # code_oids difference is refs moved or added (move-entry, set-code-refs).
 def vsame($b; $o; $t):
   w($o; "content_hash") == w($t; "content_hash") and w($o; "code_commit") == w($t; "code_commit")

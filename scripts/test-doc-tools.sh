@@ -2819,7 +2819,7 @@ test_move_entry_code_oids_own_id_wins_in_either_order() {
 }
 
 test_move_entry_code_refs_keeps_an_existing_duplicate() {
-  echo "test: move-entry leaves a duplicate the move did not create alone (GH #22)"
+  echo "test: move-entry leaves a duplicate of a ref it did not move alone (GH #22)"
   setup
   echo "# W" > docs/workflows.md
   git add -A && git commit -m "add" --quiet
@@ -3112,6 +3112,15 @@ test_audit_merges_unreadable_parent_index() {
   assert_eq "0" "$rc" "a merge that took the repair: exits 0"
   assert_json_field "$out" '.merges_checked' "1" "the merge was checked (JSON rendered, not aborted)"
   assert_json_field "$out" '.merges_replayed' "0" "one side changed the index, so no driver ran"
+  # The same merge dropping the entry: the unreadable parent 1 is not credited
+  # with the drop (an emptied index would match a missing entry).
+  _am_amend_merge 'del(.docs["docs/architecture.md"])'
+  rc=0
+  out=$("$DOC_TOOLS" audit-merges "$since" 2>/dev/null) || rc=$?
+  assert_eq "1" "$rc" "a merge that dropped an entry: exits 1"
+  assert_json_field "$out" '.findings[0].key + " " + .findings[0].kept' "docs/architecture.md neither" \
+    "the drop reads as neither parent's, not the unreadable parent 1's"
+  git reset -q --hard 'HEAD@{1}'
   # Now the reverse: the side that changed the index broke it, and the merge
   # recorded a hand repair: nothing can say what the merge should have kept.
   local mark
