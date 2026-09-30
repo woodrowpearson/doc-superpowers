@@ -34,15 +34,21 @@
 #         doc hash from one side beside code ids from the other would attest a
 #         doc/code pair nobody verified. Two different records with the same
 #         last_verified are a conflict; two equal ones are not — except that
-#         when the two differ ONLY in code_oids (the same verification, its
-#         refs renamed or added by move-entry repoints / set-code-refs on each
-#         side), code_oids is merged key by key, three-way;
+#         when both still carry the BASE's verification (content_hash,
+#         code_commit and last_verified unchanged: neither side ran
+#         update-index on the entry) and differ only in code_oids — refs
+#         moved by move-entry repoints or added by set-code-refs — code_oids
+#         is merged key by key, three-way. Two re-verifications that tie are
+#         still a conflict;
 #       * code_refs that both sides changed, when last_verified ties, merge as
 #         in-place substitutions: position by position when both kept the
 #         base's length, or one side's substitutions (a move-entry repoint)
-#         applied to the other side's list when only that side kept it. So two
-#         branches that each move a different doc cited by one entry merge
-#         cleanly (GH #22); two unrelated edits of the list still conflict;
+#         applied to the other side's list when only that side kept it — but
+#         only when the result holds exactly the refs a three-way set merge
+#         keeps and makes no duplicate neither side had. So two branches that
+#         each move a different doc cited by one entry merge cleanly
+#         (GH #22), while a remove plus an add at one position, or any other
+#         pair of set-code-refs edits, still conflicts;
 #       * deprecated wins: a status both sides changed resolves to
 #         "deprecated" if either side has it, and superseded_by (when both
 #         changed it) goes with the status the merge kept — so a revert that
@@ -198,10 +204,12 @@ def order($o; $t):
 # The verification record, compared and taken as one unit.
 def VERIFY: {content_hash: 0, code_oids: 1, code_commit: 2, last_verified: 3};
 def vrec($e): [w($e; "content_hash"), w($e; "code_oids"), w($e; "code_commit"), w($e; "last_verified")];
-# The same verification on both sides: only code_oids may differ.
-def vsame($o; $t):
+# The verification of the base on both sides, only code_oids differing: neither
+# side re-verified (update-index is the only writer of last_verified), so a
+# code_oids difference is refs moved or added (move-entry, set-code-refs).
+def vsame($b; $o; $t):
   w($o; "content_hash") == w($t; "content_hash") and w($o; "code_commit") == w($t; "code_commit")
-  and w($o; "last_verified") == w($t; "last_verified");
+  and w($o; "last_verified") == w($t; "last_verified") and w($o; "last_verified") == w($b; "last_verified");
 # code_oids merged key by key (wrapped values in, [merged] or null out). An
 # absent base code_oids (an entry written before schema 3) is empty.
 def oids3($b; $o; $t):
@@ -228,7 +236,7 @@ def apply_subs($m; $l):
       then . else . + [$n] end);
 # Every substituted value still in $l unchanged (else the sides disagree).
 def subs_apply($m; $l): all($m | keys[]; . as $k | $l | index([$k]) != null);
-def refs3($b; $o; $t):
+def subs3($b; $o; $t):
   if ([$b, $o, $t] | all(strs)) | not then null
   elif ($o | length) == ($b | length) and ($t | length) == ($b | length)
     then [range(0; $b | length) as $i | pick3([$b[$i]]; [$o[$i]]; [$t[$i]])] as $p
@@ -238,6 +246,22 @@ def refs3($b; $o; $t):
   elif subs($b; $o) != null
     then subs($b; $o) as $m | if subs_apply($m; $t) then apply_subs($m; $t) else null end
   else null end;
+# The lists merged as sets: each ref kept or dropped as the side that changed
+# its membership says.
+def members3($b; $o; $t):
+  [($b + $o + $t | unique)[] as $x
+   | ($b | index([$x]) != null) as $ib | ($o | index([$x]) != null) as $io | ($t | index([$x]) != null) as $it
+   | select(if $io == $it then $io elif $io == $ib then $it else $io end) | $x];
+def dups($l): [$l | group_by(.)[] | select(length > 1) | .[0]];
+# A substitution merge is taken only when it holds exactly the refs the set
+# merge keeps and makes no duplicate neither side had: a remove plus an add
+# at one position, or a duplicated base ref, is not a substitution.
+def refs3($b; $o; $t):
+  subs3($b; $o; $t) as $r
+  | if $r == null then null
+    elif ($r | unique) != members3($b; $o; $t) then null
+    elif any(dups($r)[]; . as $d | (dups($o) + dups($t)) | index([$d]) == null) then null
+    else $r end;
 
 # Returns {e: merged entry, c: [fields nothing decides]}.
 def merge_fields($b; $o; $t):
@@ -245,7 +269,7 @@ def merge_fields($b; $o; $t):
   # A field both sides changed to different values: the newer side, or null.
   | def newer($x; $y): if $ord == "t" then $y elif $ord == "o" then $x else null end;
   (pick3(vrec($b); vrec($o); vrec($t)) // newer(vrec($o); vrec($t))
-   // (if $ord == null and vsame($o; $t)
+   // (if $ord == null and vsame($b; $o; $t)
        then (oids3(w($b; "code_oids"); w($o; "code_oids"); w($t; "code_oids")) as $oi
              | if $oi == null then null
                else [w($o; "content_hash"), $oi, w($o; "code_commit"), w($o; "last_verified")] end)

@@ -2008,12 +2008,13 @@ move-entry|cmd_move_entry|repo|stdin
   code_oids, code_commit, last_verified, doc_type, status and every other
   field; only content_hash is recomputed. Every entry that names the old
   path is repointed: its replaces / superseded_by, and its code_refs (in
-  place; a moved ref that would duplicate a path the list already holds is
-  dropped) with the matching code_oids key, whose recorded object id is
-  kept: a rename keeps the content, so once the tree judged holds the
-  rename (after the commit) a doc citing the moved one reads as it did; an
-  entry without code_oids, written before schema 3, reads stale until
-  update-index re-verifies it. Use this, not
+  place; a moved ref is dropped when the list already holds its new path
+  or has just gained it, so [old, old] becomes [new]; a duplicate of a ref
+  the move did not touch stays) with the matching code_oids key, whose
+  recorded object id is kept: a rename keeps the content, so once the
+  tree judged holds the rename (after the commit) a doc citing the moved
+  one reads as it did; an entry without code_oids, written before schema
+  3, reads stale from that commit until update-index re-verifies it. Use this, not
   remove-entry + add-entry, for a rename, which would drop the freshness
   metadata. --stdin moves a batch in one index write: one "<old><TAB><new>"
   pair per line (blank lines skipped, a trailing CR removed), taken as one
@@ -2079,8 +2080,11 @@ audit-merges|cmd_audit_merges|repo|
   itself rewrote it (a hand resolution or a re-verification: review it).
   "refused": the merge needed a resolution the driver would not make (it
   stays reported after a correct hand resolution, and its other entries
-  are not compared); "unreadable": the recorded index is not exactly one
-  index object. A stored status "current"/"stale" is not compared
+  are not compared); "unreadable": "recorded" when the merge's own index
+  is not exactly one index object, "parent 1" / "parent 2" when the one
+  side that changed the index, whose index the merge was to take, is not.
+  "merges_checked" counts the merges whose parents' indexes differ,
+  "merges_replayed" those that needed the driver. A stored status "current"/"stale" is not compared
   (freshness is derived), nor are top-level fields. An octopus merge is
   listed under "skipped", not replayed. The replay uses one merge base, so
   a criss-cross merge is approximated; in a squash-merge repository only
@@ -3930,6 +3934,8 @@ _am_index_at() { git show "$1:$INDEX_FILE" > "$2" 2>/dev/null || : > "$2"; }
 # The index's blob id at <commit>, or "" when that commit has none. Blob ids,
 # not `git diff`: a textconv on the index path can make two blobs compare equal.
 _am_blob() { git rev-parse -q --verify "$1:$INDEX_FILE" 2>/dev/null || true; }
+# Whether <file> holds exactly one index object (an empty file does not).
+_am_ok() { jq -e -s 'length == 1 and (.[0] | type) == "object" and (.[0].docs | type) == "object"' "$1" >/dev/null 2>&1; }
 
 cmd_audit_merges() {
   [ $# -ge 1 ] && [ $# -le 2 ] || _usage_error audit-merges "requires <since> [<until>] (got $# arguments)"
@@ -3949,12 +3955,12 @@ cmd_audit_merges() {
   # Pinned: a user's log.showSignature=true would print gpg lines among the ids.
   git -c log.showSignature=false log --merges --format='%H %P' "$since..$until" > "$list" \
     || _die "cannot list the merges in $since..$until"
-  local total m parents p1 p2 extra base b1 b2 bb checked=0 seen=0
+  local total m p1 p2 extra base b1 b2 bb side checked=0 replayed=0 seen=0
   total=$(grep -c . "$list" || true)
   while read -r m p1 p2 extra; do
     [ -n "$m" ] || continue
     seen=$((seen + 1))
-    [ $((seen % 25)) -eq 0 ] && echo "audit-merges: $seen/$total merges read, $checked replayed" >&2
+    [ $((seen % 25)) -eq 0 ] && echo "audit-merges: $seen/$total merges read, $checked checked" >&2
     if [ -n "${extra:-}" ]; then
       jq -cn --arg m "$m" '{merge: $m, octopus: true}' >> "$skipped"
       continue
@@ -3969,11 +3975,13 @@ cmd_audit_merges() {
     # only one side changed the index, that side's version is the result and
     # no driver runs (a branch cut before the index existed, a one-sided
     # deletion). Otherwise the driver decides.
+    side=""
     if [ "$b1" = "$bb" ]; then
-      _am_index_at "$p2" "$dir/out"
+      side="parent 2"; _am_index_at "$p2" "$dir/out"
     elif [ "$b2" = "$bb" ]; then
-      _am_index_at "$p1" "$dir/out"
+      side="parent 1"; _am_index_at "$p1" "$dir/out"
     else
+      replayed=$((replayed + 1))
       if [ -n "$base" ]; then _am_index_at "$base" "$dir/base"; else : > "$dir/base"; fi
       _am_index_at "$p1" "$dir/out"
       _am_index_at "$p2" "$dir/p2"
@@ -3983,14 +3991,21 @@ cmd_audit_merges() {
       fi
     fi
     # An absent index where one is expected, or two documents, is unreadable;
-    # absent where absent is expected agrees.
+    # absent where absent is expected agrees. So is a changed side's index the
+    # merge was to take: nothing can be compared with it.
     if [ ! -s "$dir/rec" ] && [ ! -s "$dir/out" ]; then continue; fi
-    if ! jq -e -s 'length == 1 and (.[0] | type) == "object" and (.[0].docs | type) == "object"' "$dir/rec" >/dev/null 2>&1; then
-      jq -cn --arg m "$m" '{merge: $m, unreadable: true}' >> "$found"
+    if ! _am_ok "$dir/rec"; then
+      jq -cn --arg m "$m" '{merge: $m, unreadable: "recorded"}' >> "$found"
       continue
     fi
-    _am_index_at "$p1" "$dir/p1"
-    _am_index_at "$p2" "$dir/p2"
+    if [ -n "$side" ] && [ -s "$dir/out" ] && ! _am_ok "$dir/out"; then
+      jq -cn --arg m "$m" --arg s "$side" '{merge: $m, unreadable: $s}' >> "$found"
+      continue
+    fi
+    # The parents only name which one a recorded entry matches; an unreadable
+    # one (conflict markers the other side repaired) names none.
+    _am_index_at "$p1" "$dir/p1"; _am_ok "$dir/p1" || : > "$dir/p1"
+    _am_index_at "$p2" "$dir/p2"; _am_ok "$dir/p2" || : > "$dir/p2"
     # shellcheck disable=SC2016  # jq program, not shell expansion
     jq -cn --arg m "$m" --slurpfile a "$dir/out" --slurpfile b "$dir/rec" \
         --slurpfile x "$dir/p1" --slurpfile y "$dir/p2" '
@@ -4009,10 +4024,10 @@ cmd_audit_merges() {
 
   local count
   count=$(grep -c . "$found" || true)
-  jq -n --arg r "$since..$until" --argjson n "$checked" \
+  jq -n --arg r "$since..$until" --argjson n "$checked" --argjson d "$replayed" \
       --slurpfile f "$found" --slurpfile s "$skipped" \
-    '{range: $r, merges_checked: $n, findings: $f, skipped: $s}' || _die "cannot render the findings"
-  echo "audit-merges: $checked merge(s) replayed, $count finding(s)$([ -s "$skipped" ] && echo ", $(grep -c . "$skipped") skipped (octopus)")" >&2
+    '{range: $r, merges_checked: $n, merges_replayed: $d, findings: $f, skipped: $s}' || _die "cannot render the findings"
+  echo "audit-merges: $checked merge(s) checked ($replayed through the driver), $count finding(s)$([ -s "$skipped" ] && echo ", $(grep -c . "$skipped") skipped (octopus)")" >&2
   [ "$count" -eq 0 ] || exit 1
 }
 

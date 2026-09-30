@@ -3036,7 +3036,7 @@ test_audit_merges_unreadable_and_derived_status() {
   rc=0
   out=$("$DOC_TOOLS" audit-merges "$AM_SINCE" 2>/dev/null) || rc=$?
   assert_eq "1" "$rc" "two documents: exits 1"
-  assert_json_field "$out" '[.findings[] | select(.unreadable == true)] | length' "1" "reported unreadable"
+  assert_json_field "$out" '[.findings[] | select(.unreadable == "recorded")] | length' "1" "reported unreadable (the recorded index)"
   teardown
 }
 
@@ -3086,6 +3086,46 @@ test_audit_merges_one_sided_index() {
   out=$("$DOC_TOOLS" audit-merges "$since" 2>/dev/null) || rc=$?
   assert_eq "0" "$rc" "both directions: exits 0"
   assert_json_field "$out" '.findings | length' "0" "no false 'refused' or 'unreadable' when one side lacks the index"
+  teardown
+}
+
+test_audit_merges_unreadable_parent_index() {
+  echo "test: audit-merges survives an unreadable parent index, and reports a changed side it cannot read"
+  setup
+  printf 'docs/.doc-index.json merge=doc-index\n' > .gitattributes
+  printf 'docs/architecture.md:src/:architecture\n' | "$DOC_TOOLS" build-index 2>/dev/null
+  git add -A && git commit -qm "index"
+  local since good
+  since=$(git rev-parse HEAD)
+  good=$(cat docs/.doc-index.json)
+  # Conflict markers committed on main, repaired on a branch cut from there,
+  # and the repair merged while main moved on in code only.
+  { echo "<<<<<<< ours"; echo "$good"; echo "======="; echo "$good"; echo ">>>>>>> theirs"; } > docs/.doc-index.json
+  git commit -qam "oops: markers committed"
+  git checkout -q -b fix
+  printf '%s\n' "$good" > docs/.doc-index.json && git commit -qam "fix the index"
+  git checkout -q main
+  echo "x" > src/other.js && git add -A && git commit -qm "main: code only"
+  git -c merge.doc-index.driver="'$MERGE_DRIVER_FOR_AM' %O %A %B" merge -q --no-ff --no-edit fix 2>/dev/null
+  local out rc=0
+  out=$("$DOC_TOOLS" audit-merges "$since" 2>/dev/null) || rc=$?
+  assert_eq "0" "$rc" "a merge that took the repair: exits 0"
+  assert_json_field "$out" '.merges_checked' "1" "the merge was checked (JSON rendered, not aborted)"
+  assert_json_field "$out" '.merges_replayed' "0" "one side changed the index, so no driver ran"
+  # Now the reverse: the side that changed the index broke it, and the merge
+  # recorded a hand repair: nothing can say what the merge should have kept.
+  local mark
+  mark=$(git rev-parse HEAD)
+  git checkout -q -b broken
+  { echo "<<<<<<< ours"; echo "$good"; echo "======="; echo "$good"; echo ">>>>>>> theirs"; } > docs/.doc-index.json
+  git commit -qam "broken: markers"
+  git checkout -q main
+  git -c merge.doc-index.driver="'$MERGE_DRIVER_FOR_AM' %O %A %B" merge -q --no-ff --no-edit broken 2>/dev/null
+  printf '%s\n' "$good" > docs/.doc-index.json && git commit -q --amend --no-edit -a
+  rc=0
+  out=$("$DOC_TOOLS" audit-merges "$mark" 2>/dev/null) || rc=$?
+  assert_eq "1" "$rc" "an unreadable changed side: exits 1"
+  assert_json_field "$out" '[.findings[] | select(.unreadable == "parent 2")] | length' "1" "reported as the unreadable parent 2"
   teardown
 }
 
@@ -7018,6 +7058,7 @@ run_tests() {
   test_audit_merges_unreadable_and_derived_status
   test_audit_merges_range_and_parent_filter
   test_audit_merges_one_sided_index
+  test_audit_merges_unreadable_parent_index
   test_audit_merges_skips_an_octopus
   test_audit_merges_needs_the_plugin_driver
   test_move_entry_usage_lists_move_entry
