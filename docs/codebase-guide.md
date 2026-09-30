@@ -54,9 +54,10 @@ doc-superpowers/
 │       │   ├── prepare-commit-msg  # "Already stale" comment lines, editor commits only ($2 empty or template)
 │       │   └── pre-push            # Release reminder — reads the pushed refs on stdin; warns when >5 commits since the last tag
 │       ├── claude/           # Claude Code hook scripts (event JSON on stdin, JSON output)
-│       │   ├── pre-commit-gate.sh  # PreToolUse gate on the staged tree; defers staging commands to the git pre-commit hook; STRICT = exit 2 + stderr reason
-│       │   ├── post-commit-sync.sh # PostToolUse report of the docs a commit left stale (report only, never update-index)
-│       │   └── session-summary.sh  # Stop (every response) — docs citing working-tree changes; 2 s budget, process-group watchdog
+│       │   ├── hook-lib.sh         # Sourced by all three: _emit, capped lists (first N + "…and M more"), every string < 10,000 chars, the process-group watchdog
+│       │   ├── pre-commit-gate.sh  # PreToolUse gate on the staged tree; defers staging commands to the git pre-commit hook; STRICT = exit 2 + stderr reason; 7 s budget (STRICT blocks past it)
+│       │   ├── post-commit-sync.sh # PostToolUse report of the docs a commit left stale (report only, never update-index); 7 s budget
+│       │   └── session-summary.sh  # Stop (every response) — docs citing working-tree changes; 2 s budget
 │       └── ci/               # GitHub Actions workflow templates — 8 total (6 AI-powered, 2 shell-based); all actions SHA-pinned with exact version comments; every job has timeout-minutes
 │           ├── doc-freshness-pr.yml       # PR freshness check (shell-based; a check that cannot run is never reported as 0 stale — a warning, or a failure under `--ci-strict`; one marker comment)
 │           ├── doc-freshness-schedule.yml # Weekly scheduled audit (shell-based; closes its issue only after a clean check)
