@@ -2006,8 +2006,12 @@ move-entry|cmd_move_entry|repo|stdin
   <old_doc_path> <new_doc_path> | --stdin < <old><TAB><new> lines
   Re-key an entry after a doc moves, preserving its metadata: code_refs,
   code_oids, code_commit, last_verified, doc_type, status and every other
-  field; only content_hash is recomputed, and other entries' replaces /
-  superseded_by naming the old path are repointed. Use this, not
+  field; only content_hash is recomputed. Every entry that names the old
+  path is repointed: its replaces / superseded_by, and its code_refs (in
+  place, no duplicate made) with the matching code_oids key, whose recorded
+  object id is kept (a rename keeps the content, so a doc citing the moved
+  one stays as fresh as it was; an entry without code_oids, written before
+  schema 3, keeps the commit comparison until update-index). Use this, not
   remove-entry + add-entry, for a rename, which would drop the freshness
   metadata. --stdin moves a batch in one index write: one "<old><TAB><new>"
   pair per line (blank lines skipped, a trailing CR removed), taken as one
@@ -2057,6 +2061,22 @@ status|cmd_status|repo|tree=
   Freshness of one doc (read-only, JSON): the same verdict check-freshness
   reports for it (with the same --tree, read from that one snapshot), plus
   its path.
+audit-merges|cmd_audit_merges|repo|
+  <since> [<until>]
+  Find merges that silently lost an index change (read-only, JSON). Every
+  merge commit in <since>..<until> (until: HEAD) whose parents' indexes
+  differ is replayed through this plugin's merge driver, as an oracle, and
+  its result compared with the index the merge recorded, entry by entry.
+  A finding is an entry whose recorded value differs: "kept": "parent 1"
+  or "parent 2" means the merge kept that parent's whole entry where the
+  three-way merge keeps the other parent's change (a silent revert, e.g.
+  by a driver that is not base-aware on a last_verified tie); "neither"
+  means the merge commit itself rewrote it (a hand resolution or a
+  re-verification: review it). "refused": the driver would leave the merge
+  in conflict; "unreadable": the recorded index is not valid. A stored
+  status "current"/"stale" is not compared (freshness is derived), nor are
+  top-level fields. Exits 1 on any finding. Repair a revert with the verb
+  that made the lost change.
 bump-version|cmd_bump_version|deps|
   <MAJOR.MINOR.PATCH>
   Write the version into the 5 manifest files: package.json,
@@ -3418,8 +3438,9 @@ cmd_move_entry() {
     | from_entries' < "$recs" > "$map" || _die "cannot assemble the moves; $INDEX_FILE is unchanged."
 
   # The entries other than the moved ones whose replaces / superseded_by name
-  # a moved path, for the report (the same snapshot the write sees).
-  local repointed=() k
+  # a moved path, and the entries (moved ones included, under their new key)
+  # whose code_refs name one, for the report (the same snapshot the write sees).
+  local repointed=() refs_repointed=() k
   # shellcheck disable=SC2016  # jq program, not shell expansion
   while IFS= read -r -d '' k; do
     repointed+=("$k")
@@ -3428,6 +3449,13 @@ cmd_move_entry() {
       | select(((.value.replaces | type) == "string" and $m[.value.replaces] != null)
                or ((.value.superseded_by | type) == "string" and $m[.value.superseded_by] != null))
       | .key + "\u0000"' < "$snap")
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  while IFS= read -r -d '' k; do
+    refs_repointed+=("$k")
+  done < <(jq -j --slurpfile mv "$map" '$mv[0] as $m | .docs | to_entries[]
+      | select((.value | type) == "object" and (.value.code_refs | type) == "array")
+      | select(any(.value.code_refs[]; type == "string" and $m[.] != null))
+      | (if $m[.key] != null then $m[.key].new else .key end) + "\u0000"' < "$snap")
 
   # Each entry object is carried over WHOLESALE (`.value + {content_hash: …}`)
   # rather than field-by-field, so a field this code has never heard of still
@@ -3446,7 +3474,15 @@ cmd_move_entry() {
   #
   # The second stage repoints other entries' path-valued fields, which
   # references/doc-spec.md holds to the same key contract as the keys themselves
-  # — without it a rename leaves a dangling superseded_by/replaces.
+  # — without it a rename leaves a dangling superseded_by/replaces, and every
+  # doc citing the moved one in code_refs points at a path that is gone
+  # (GH #22). A code_refs list is rewritten in place, first occurrence kept, so
+  # a list that already named the new path gains no duplicate. Its code_oids
+  # key moves with it and keeps its recorded id: a rename keeps the blob, so the
+  # citing doc's verdict is unchanged, and a rename-plus-edit reads stale, as it
+  # should. When an entry also records the new path as a ref of its own, that
+  # ref's id wins over the moved one's. The batch is one simultaneous rename, so
+  # a chain a→b, b→c maps every old path through $m once, never twice.
   # shellcheck disable=SC2016  # jq program, not shell expansion
   _index_apply '$mv[0] as $m
     | .docs |= (to_entries
@@ -3459,6 +3495,20 @@ cmd_move_entry() {
               then .replaces = $m[.replaces].new else . end)
           | (if (.superseded_by | type) == "string" and $m[.superseded_by] != null
              then .superseded_by = $m[.superseded_by].new else . end)
+          | (if (.code_refs | type) == "array"
+                and any(.code_refs[]; type == "string" and $m[.] != null)
+             then .code_refs |= reduce .[] as $r ([];
+                    ($r | if type == "string" and $m[.] != null then $m[.].new else . end) as $n
+                    | if any(.[]; . == $n) then . else . + [$n] end)
+             else . end)
+          | (if (.code_oids | type) == "object"
+                and any(.code_oids | keys[]; $m[.] != null)
+             then .code_oids |= ([to_entries[]
+                    | {k: (if $m[.key] != null then $m[.key].new else .key end),
+                       v: .value, moved: ($m[.key] != null)}] as $p
+                  | reduce $p[] as $e ({};
+                      if has($e.k) and $e.moved then . else .[$e.k] = $e.v end))
+             else . end)
         end)' \
     --slurpfile mv "$map"
 
@@ -3470,6 +3520,9 @@ cmd_move_entry() {
   done
   if [ ${#repointed[@]} -gt 0 ]; then
     _report_keys "Repointed" "(replaces/superseded_by now name the new path)" "${repointed[@]}"
+  fi
+  if [ ${#refs_repointed[@]} -gt 0 ]; then
+    _report_keys "Repointed" "(code_refs/code_oids now name the new path)" "${refs_repointed[@]}"
   fi
 }
 
@@ -3842,6 +3895,72 @@ cmd_status() {
     exit 1
   fi
   printf '%s\n' "$out"
+}
+
+# audit-merges: replay index merges through the driver as an oracle. Read-only:
+# every file it writes is under $_SCRATCH.
+_am_index_at() { git show "$1:$INDEX_FILE" > "$2" 2>/dev/null || : > "$2"; }
+
+cmd_audit_merges() {
+  [ $# -ge 1 ] && [ $# -le 2 ] || _usage_error audit-merges "requires <since> [<until>] (got $# arguments)"
+  local since="$1" until="${2:-HEAD}" r
+  for r in "$since" "$until"; do
+    git rev-parse --verify --quiet "$r^{commit}" >/dev/null \
+      || { echo "ERROR: '$r' is not a commit." >&2; exit 1; }
+  done
+  local driver="$SCRIPT_DIR/merge-doc-index.sh"
+  [ -f "$driver" ] || _die "the merge driver is not beside doc-tools.sh ($driver)"
+
+  _scratch_init
+  local dir="$_SCRATCH/audit-merges" found="$_SCRATCH/audit-merges.jsonl"
+  mkdir -p "$dir" || _die "cannot create a scratch directory"
+  : > "$found"
+  local m p1 p2 base checked=0
+  while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    p1=$(git rev-parse "$m^1") || continue
+    p2=$(git rev-parse --verify --quiet "$m^2") || continue
+    # Only a merge whose parents' indexes differ ran the driver. (Not
+    # `git log -- $INDEX_FILE`: history simplification hides exactly the merge
+    # that kept one parent's index whole.)
+    git diff --quiet "$p1" "$p2" -- "$INDEX_FILE" 2>/dev/null && continue
+    checked=$((checked + 1))
+    base=$(git merge-base "$p1" "$p2" 2>/dev/null) || base=""
+    if [ -n "$base" ]; then _am_index_at "$base" "$dir/base"; else : > "$dir/base"; fi
+    _am_index_at "$p1" "$dir/p1"
+    _am_index_at "$p2" "$dir/p2"
+    _am_index_at "$m" "$dir/rec"
+    cp "$dir/p1" "$dir/out"
+    if ! "$BASH" "$driver" "$dir/base" "$dir/out" "$dir/p2" >/dev/null 2>&1; then
+      jq -cn --arg m "$m" '{merge: $m, refused: true}' >> "$found"
+      continue
+    fi
+    if ! jq -e '.docs | type == "object"' "$dir/rec" >/dev/null 2>&1; then
+      jq -cn --arg m "$m" '{merge: $m, unreadable: true}' >> "$found"
+      continue
+    fi
+    # shellcheck disable=SC2016  # jq program, not shell expansion
+    jq -cn --arg m "$m" --slurpfile a "$dir/out" --slurpfile b "$dir/rec" \
+        --slurpfile x "$dir/p1" --slurpfile y "$dir/p2" '
+      def norm: if type == "object" and (.status == "current" or .status == "stale")
+                 then del(.status) else . end;
+      def docs($f): if ($f | length) > 0 and ($f[0] | type) == "object" then ($f[0].docs // {}) else {} end;
+      docs($a) as $A | docs($b) as $B | docs($x) as $X | docs($y) as $Y
+      | ([$A, $B] | map(keys) | add | unique)[] as $k
+      | ($A[$k] | norm) as $va | ($B[$k] | norm) as $vb
+      | select($va != $vb)
+      | {merge: $m, key: $k,
+         kept: (if $vb == ($X[$k] | norm) then "parent 1"
+                elif $vb == ($Y[$k] | norm) then "parent 2" else "neither" end)}' \
+      >> "$found" || _die "cannot compare merge $m with the driver's result"
+  done < <(git log --merges --format=%H "$since..$until")
+
+  local count
+  count=$(grep -c . "$found" || true)
+  jq -s --arg r "$since..$until" --argjson n "$checked" \
+    '{range: $r, merges_checked: $n, findings: .}' "$found" || _die "cannot render the findings"
+  echo "audit-merges: $checked merge(s) replayed, $count finding(s)" >&2
+  [ "$count" -eq 0 ] || exit 1
 }
 
 # --- Version management ---
