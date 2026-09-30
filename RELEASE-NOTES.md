@@ -1,5 +1,33 @@
 # Release Notes
 
+## v3.1.0 (2026-09-29)
+
+This release adds two index operations that consumer repositories adopting v3 had to write for themselves. `move-entry` now repoints every entry that cites the moved doc (#22), and the new read-only `audit-merges` finds merges that silently lost an index change (#25). Both came out of abundance-mvp's v3 adoption, which had to carry local scripts for each: the hand-rolled copy of plugin logic this release makes unnecessary.
+
+### Features
+- **`move-entry` repoints other entries' `code_refs` and `code_oids`** (`scripts/doc-tools.sh`, #22). Before this, `move-entry` repointed only `replaces` / `superseded_by`. Every doc citing the moved one in `code_refs` kept pointing at a path that no longer exists. The only fix was a `set-code-refs` per citing entry, which recorded the new ref as `missing` (it did not exist at the doc's baseline) and left the doc stale until someone re-verified it.
+  - A citing entry's `code_refs` is now rewritten in place, in order. A list that already named the new path gains no duplicate.
+  - Its `code_oids` key moves with the ref and keeps its recorded object id. A rename keeps the blob, so the citing doc keeps its verdict; a rename plus an edit reads stale, as it should.
+  - When an entry also records the new path as a ref of its own, that ref's id wins.
+  - The batch form is one simultaneous rename, so a chain `a→b, b→c` maps each cited path once.
+  - An entry written before schema 3 (no `code_oids`) gets its refs repointed and keeps the commit comparison until `update-index`.
+  - The report lists the repointed entries.
+- **`audit-merges <since> [<until>]`, a read-only replay of index merges** (`scripts/doc-tools.sh`, #25). It replays every merge commit in the range whose parents' indexes differ through the plugin's own merge driver, used as an oracle, and compares the result with the index the merge recorded, entry by entry. A stored `current` / `stale` status and the top-level fields are not compared. It reports, as JSON:
+  - `"kept": "parent 1"` or `"parent 2"`: the merge kept one parent's whole entry where the three-way merge keeps the other parent's change. That is a silent revert, the shape a driver that is not base-aware (v2's) produces on a `last_verified` tie.
+  - `"neither"`: the merge commit itself rewrote the entry, usually a re-verification while resolving.
+  - `refused`: a merge the driver would leave in conflict.
+  - `unreadable`: the recorded index is not valid.
+
+  It exits 1 on any finding. Run over the last 283 merges on abundance-mvp's `main`, it found 11 reverted entries (a v2-driver `git fixmerge` undoing `main`'s `code_refs: [""] → []` normalisation), 36 merge-commit rewrites and 1 merge v3 would refuse.
+
+### Documentation
+- `references/doc-spec.md`: the **Renames** paragraph and the `code_oids` schema row describe the repoint, and a new **Auditing merges** paragraph covers `audit-merges`.
+- `skills/doc-superpowers/SKILL.md` (tool table), `docs/conventions.md` (Read/Write Separation and the archive model), `docs/codebase-guide.md`, `docs/workflows/doc-superpowers.md`, `docs/architecture/system-overview.md` and `CLAUDE.md` name the new behaviour and the 17th subcommand.
+- The C4 container diagram's label still reads "16 subcommands": regenerating its PNG is left to the next `diagram` pass.
+
+### Other
+- `scripts/test-doc-tools.sh` gains 27 assertions (1290 → 1317). They cover the repoint (verdict kept after a pure rename, no duplicate, the new path's own id wins, the chain, a pre-v3 entry) and `audit-merges` (a keep-ours merge reported with the parent it kept, a clean driver merge, a refusal, the arguments). 24 of the new assertions fail against v3.0.0.
+
 ## v3.0.1 (2026-09-29)
 
 A patch release that keeps the Claude Code hooks' reports readable at any size, and stops a slow check from silently switching the gate off. Claude Code keeps each hook string (`systemMessage`, `additionalContext`, the stderr of a blocking exit 2) inline only up to 10,000 characters; past that, Claude gets a 2,000-character preview of a saved file (https://code.claude.com/docs/en/hooks). In v3.0.0 every list the three Claude hooks built was unbounded, so a commit that staled about 140 docs lost most of its report. Reported from abundance-mvp (`docs/issues/2026-09-29-doc-superpowers-hook-output-uncapped-10k-limit.md`).
