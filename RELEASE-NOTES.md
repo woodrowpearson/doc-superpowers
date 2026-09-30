@@ -6,27 +6,31 @@ This release adds two index operations that consumer repositories adopting v3 ha
 
 ### Features
 - **`move-entry` repoints other entries' `code_refs` and `code_oids`** (`scripts/doc-tools.sh`, #22). Before this, `move-entry` repointed only `replaces` / `superseded_by`. Every doc citing the moved one in `code_refs` kept pointing at a path that no longer exists. The only fix was a `set-code-refs` per citing entry, which recorded the new ref as `missing` (it did not exist at the doc's baseline) and left the doc stale until someone re-verified it.
-  - A citing entry's `code_refs` is now rewritten in place, in order. A list that already named the new path gains no duplicate.
-  - Its `code_oids` key moves with the ref and keeps its recorded object id. A rename keeps the blob, so the citing doc keeps its verdict; a rename plus an edit reads stale, as it should.
+  - A citing entry's `code_refs` is now rewritten in place, in order. A moved ref whose new path the list already names is dropped, so the move adds no duplicate; a duplicate the move did not make is left alone.
+  - Its `code_oids` key moves with the ref and keeps its recorded object id. A rename keeps the blob, so once the judged tree holds the rename, the citing doc reads as it did; a rename plus an edit reads stale, as it should.
   - When an entry also records the new path as a ref of its own, that ref's id wins.
   - The batch form is one simultaneous rename, so a chain `a→b, b→c` maps each cited path once.
-  - An entry written before schema 3 (no `code_oids`) gets its refs repointed and keeps the commit comparison until `update-index`.
-  - The report lists the repointed entries.
-- **`audit-merges <since> [<until>]`, a read-only replay of index merges** (`scripts/doc-tools.sh`, #25). It replays every merge commit in the range whose parents' indexes differ through the plugin's own merge driver, used as an oracle, and compares the result with the index the merge recorded, entry by entry. A stored `current` / `stale` status and the top-level fields are not compared. It reports, as JSON:
+  - An entry written before schema 3 (no `code_oids`) gets its refs repointed and reads stale until `update-index` re-verifies it.
+  - The report lists the repointed entries: each entry whose `code_refs` or `code_oids` named a moved path.
+- **Parallel moves merge cleanly** (`scripts/merge-doc-index.sh`, #22). The repoint makes two branches that each move a different doc cited by one entry change that entry while `last_verified` ties, which the per-field rule turned into a conflict. The driver now merges both-sides `code_refs` changes as in-place substitutions: position by position when both sides kept the base's length, or one side's substitutions (a repoint) applied to the other side's list, collapsing as `move-entry` would. It merges `code_oids` key by key, three-way, when the rest of the verification record (`content_hash`, `code_commit`, `last_verified`) is equal on both sides. A list edit the substitutions cannot be applied to, such as dropping the moved ref, still conflicts.
+- **`audit-merges <since> [<until>]`, a read-only replay of index merges** (`scripts/doc-tools.sh`, #25). For every two-parent merge commit in the range whose parents' indexes differ, it works out what the merge should have recorded — the changed side's index when only one side changed it (git's file-level rule), otherwise the plugin's own merge driver run as an oracle — and compares that with the index the merge recorded, entry by entry. A stored `current` / `stale` status and the top-level fields are not compared. It reports, as JSON:
   - `"kept": "parent 1"` or `"parent 2"`: the merge kept one parent's whole entry where the three-way merge keeps the other parent's change. That is a silent revert, the shape a driver that is not base-aware (v2's) produces on a `last_verified` tie.
   - `"neither"`: the merge commit itself rewrote the entry, usually a re-verification while resolving.
-  - `refused`: a merge the driver would leave in conflict.
-  - `unreadable`: the recorded index is not valid.
+  - `refused`: a merge that needed a resolution the driver would not make. It stays reported after a correct hand resolution.
+  - `unreadable`: the recorded index is not exactly one index object.
 
-  It exits 1 on any finding. Run over the last 283 merges on abundance-mvp's `main`, it found 11 reverted entries (a v2-driver `git fixmerge` undoing `main`'s `code_refs: [""] → []` normalisation), 36 merge-commit rewrites and 1 merge v3 would refuse.
+  An octopus merge is listed under `skipped`. The replay uses one merge base, so a criss-cross merge is approximated. It needs `merge-doc-index.sh` beside it, so a vendored `doc-tools.sh` exits 1.
+
+  It exits 1 on any finding. Run over the 312 merges on abundance-mvp's `main` since 2026-09-09 (275 of them with differing parent indexes), it found 11 reverted entries (a v2-driver `git fixmerge` undoing `main`'s `code_refs: [""] → []` normalisation), 38 merge-commit rewrites and 1 merge the driver would refuse (a doc deleted on one side and changed on the other).
 
 ### Documentation
-- `references/doc-spec.md`: the **Renames** paragraph and the `code_oids` schema row describe the repoint, and a new **Auditing merges** paragraph covers `audit-merges`.
-- `skills/doc-superpowers/SKILL.md` (tool table), `docs/conventions.md` (Read/Write Separation and the archive model), `docs/codebase-guide.md`, `docs/workflows/doc-superpowers.md`, `docs/architecture/system-overview.md` and `CLAUDE.md` name the new behaviour and the 17th subcommand.
-- The C4 container diagram (`docs/architecture/diagrams/c4-container.png`) is re-rendered for its new label (mmdc 11.6.0, headless system Chrome, `c4.wrap: false`, width 1248, scale 2).
+- `references/doc-spec.md`: the **Renames** paragraph and the `code_refs` / `code_oids` schema rows describe the repoint and how parallel moves merge, and a new **Auditing merges** paragraph covers `audit-merges`.
+- `skills/doc-superpowers/SKILL.md` (tool table), `docs/conventions.md` (Read/Write Separation and the archive model), `docs/codebase-guide.md`, `docs/workflows/doc-superpowers.md`, `docs/architecture/system-overview.md` and `CLAUDE.md` name the new behaviour and the 17th subcommand; `system-overview.md` and `codebase-guide.md` also describe the two ties the merge driver now merges.
+- The C4 container diagram (`docs/architecture/diagrams/c4-container.png`) is re-rendered for its new label and the `audit-merges` → merge driver relation (mmdc 11.6.0, headless system Chrome, `c4.wrap: false`, width 1248, scale 2).
 
 ### Other
-- `scripts/test-doc-tools.sh` gains 27 assertions (1290 → 1317). They cover the repoint (verdict kept after a pure rename, no duplicate, the new path's own id wins, the chain, a pre-v3 entry) and `audit-merges` (a keep-ours merge reported with the parent it kept, a clean driver merge, a refusal, the arguments). 24 of the new assertions fail against v3.0.0.
+- `scripts/test-doc-tools.sh` gains 60 assertions (1290 → 1350). They cover the repoint (verdict kept after a pure rename, the collapse into an existing copy of the new path and an older duplicate left alone, the new path's own id winning in either key order, the chain, a pre-v3 entry, the `--stdin` report) and `audit-merges` (keep-ours and keep-theirs merges reported with the parent they kept, a hand edit as `neither`, a clean driver merge, a refusal, an unreadable recorded index, a `current`/`stale`-only difference ignored, `<until>`, an index-neutral merge skipped, a one-sided index in both directions, an octopus merge, a vendored copy, the arguments). 51 of them fail against v3.0.0.
+- `scripts/test-merge-driver.sh` gains 74 assertions (486 → 560): parallel repoints of one citing entry, a repoint beside an added ref, a repoint against a drop of the moved ref (a conflict), and direct-driver cases for the collapse rule. 40 of them fail against v3.0.0's driver.
 
 ## v3.0.1 (2026-09-29)
 
