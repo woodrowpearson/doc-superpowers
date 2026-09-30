@@ -134,7 +134,7 @@ Archived docs retain their original filenames. Their `.doc-index.json` entries a
 **Archive model (decided in sweep 05ea982 I-3).** Archival needs the user's yes first (see [Safety Rules](#safety-rules); in a CI run nobody answers, so the move is reported instead). Then it is three steps, all through `doc-tools.sh`:
 
 1. `git mv docs/<type>/<name>.md docs/archive/<type>/<name>.md`
-2. `doc-tools.sh move-entry <old> <new>` re-keys the entry, preserving all of its metadata. For a batch, use `move-entry --stdin` with one `<old><TAB><new>` line per doc: one index write, and nothing written if any pair is bad.
+2. `doc-tools.sh move-entry <old> <new>` re-keys the entry, preserving all of its metadata, and repoints the other entries that cite it. For a batch, use `move-entry --stdin` with one `<old><TAB><new>` line per doc: one index write, and nothing written if any pair is bad.
 3. `doc-tools.sh deprecate-entry <new> [--superseded-by <successor>]`
 
 There is no `archived_at` field. The `docs/archive/` path and the `deprecated` status already record the archival, and git holds its date. PR #16's Option B, an `archive-entry` verb that stamps `archived_at`, was not needed once batch `move-entry` existed. A consumer's `*archive_doc*` script keeps its own policy (what is eligible, where it moves) and uses these verbs for the index. An archived doc is a record doc, so it is never reported stale.
@@ -340,12 +340,13 @@ The `docs/.doc-index.json` file is the machine-readable freshness index. It foll
 - **`add-entry`** adds entries. Like `build-index`, it records them **unverified**: `last_verified: null`, and each ref as of the doc's own last commit
 - **`update-index`** verifies individual entries. It is the **only** writer of `last_verified`: the one verb that attests someone checked the doc against its code
 - **`set-code-refs`** changes one entry's `code_refs` in place (GH #18), in the order given (a reorder writes the new order). It keeps every other field except `code_oids` and, when any ref's content comes from the doc's last commit (a ref was added, or a kept ref has no usable record), `code_commit` (see Entry Schema). It is not a verification
-- **`move-entry`** re-keys an entry when its doc moves (`--stdin` for a batch). It preserves every field but `content_hash`, and is the lossless alternative to `remove-entry` + `add-entry` for a rename
+- **`move-entry`** re-keys an entry when its doc moves (`--stdin` for a batch). It preserves every field but `content_hash`, and is the lossless alternative to `remove-entry` + `add-entry` for a rename. It also repoints every other entry that names the old path — `replaces`, `superseded_by`, and `code_refs` with the matching `code_oids` key, whose recorded id it keeps (GH #22) — so a doc citing the moved one neither dangles nor changes verdict
 - **`set-doc-type`** changes one entry's `doc_type` in place. It keeps the entry's position and every other field, and writing the same type writes nothing. It is not a verification. The type decides whether a doc is a record (never stale) or a living doc, so it must be a known type or one the index already uses
 - **`remove-entry`** deletes entries by path. A path that is not indexed is a `SKIP` with exit 0: the entry being absent is the end state asked for, so removing twice is safe
 - **`deprecate-entry`** stores `status: "deprecated"` (and `--superseded-by`, which also sets the successor's `replaces`). It does not touch `last_verified`
 - **`check-freshness`** is read-only (reports staleness without modifying)
 - **`status`** reports one doc's freshness (read-only): the verdict `check-freshness` gives for it
+- **`audit-merges`** replays a range's index merges through the merge driver, as an oracle, and reports the entries a recorded merge got differently (read-only, GH #25)
 
 Those eight writers (`build-index`, `add-entry`, `update-index`, `set-code-refs`, `set-doc-type`, `move-entry`, `remove-entry`, `deprecate-entry`) are the only ones that write the index. They take its lock and replace it atomically. `implementation-status` and `fragments list|validate` read without writing, and `set-implementation` edits one doc's realization block, not the index.
 
