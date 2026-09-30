@@ -24,7 +24,8 @@ set -euo pipefail
 #   - the merge.doc-index.* git config keys;
 #   - in .claude/settings.local.json, each hook ENTRY whose command runs one of
 #     .claude/hooks/doc-superpowers/{pre-commit-gate,post-commit-sync,session-summary}.sh
-#     (a group is removed only when it held nothing else);
+#     (a group is removed only when it held nothing else), and those scripts'
+#     shared library, hook-lib.sh, beside them;
 #   - a workflow whose first lines carry "doc-superpowers workflow v<N>" —
 #     a RETIRED one too (doc-index-update.yml): any install --ci removes it;
 #   - vendored files: `doc-tools.sh tools install|uninstall` decide (uninstall
@@ -43,6 +44,8 @@ DATE=$(date +%Y-%m-%d)
 
 GIT_HOOKS="pre-commit post-merge post-checkout prepare-commit-msg pre-push"
 CLAUDE_HOOKS="pre-commit-gate post-commit-sync session-summary"
+# Sourced by every Claude hook, installed beside them (never registered).
+CLAUDE_LIB="hook-lib"
 CLAUDE_HOOKS_DIR=".claude/hooks/doc-superpowers"
 SETTINGS_FILE=".claude/settings.local.json"
 SHELL_WORKFLOWS="doc-freshness-pr doc-freshness-schedule"
@@ -872,7 +875,7 @@ preflight_claude() {
     | .hooks.PreToolUse = ((.hooks.PreToolUse // []) | strip) + [$pte]
     | .hooks.PostToolUse = ((.hooks.PostToolUse // []) | strip) + [$pote]
     | .hooks.Stop = ((.hooks.Stop // []) | strip) + [$se]' <<<"$cur" 2>&1) || settings_refuse "$SETTINGS_NEW"
-  for h in $CLAUDE_HOOKS; do
+  for h in $CLAUDE_HOOKS $CLAUDE_LIB; do
     [ -f "$SCRIPT_DIR/claude/$h.sh" ] || die "the plugin's $SCRIPT_DIR/claude/$h.sh is missing. Nothing was changed."
   done
 }
@@ -899,7 +902,7 @@ preflight_uninstall_claude() {
 ensure_safe_claude_paths() {
   local h
   safe_dest "$SETTINGS_FILE"
-  for h in $CLAUDE_HOOKS; do
+  for h in $CLAUDE_HOOKS $CLAUDE_LIB; do
     safe_dest "$CLAUDE_HOOKS_DIR/$h.sh"
   done
   safe_dest "$EXCLUDE_FILE"
@@ -909,6 +912,10 @@ ensure_safe_claude_paths() {
 install_claude() {
   local h
   ensure_dir "$CLAUDE_HOOKS_DIR"
+  # The library first: a hook never runs without the copy it sources.
+  tmp_beside "$CLAUDE_HOOKS_DIR/$CLAUDE_LIB.sh"
+  render_hook "$SCRIPT_DIR/claude/$CLAUDE_LIB.sh" > "$_TMP"
+  commit_tmp "$CLAUDE_HOOKS_DIR/$CLAUDE_LIB.sh" 644
   for h in $CLAUDE_HOOKS; do
     tmp_beside "$CLAUDE_HOOKS_DIR/$h.sh"
     render_hook "$SCRIPT_DIR/claude/$h.sh" > "$_TMP"
@@ -918,7 +925,7 @@ install_claude() {
   printf '%s\n' "$SETTINGS_NEW" | jq . > "$_TMP"
   commit_tmp "$SETTINGS_FILE" 644
   upsert_block "$EXCLUDE_FILE" "$EXCLUDE_BLOCK" 644
-  echo "Claude Code hooks: 3 installed (pre-commit-gate, post-commit-sync, session-summary)"
+  echo "Claude Code hooks: 3 installed (pre-commit-gate, post-commit-sync, session-summary; their shared $CLAUDE_LIB.sh beside them)"
   echo "  Scripts in $CLAUDE_HOOKS_DIR/, registered in $SETTINGS_FILE — per-user: both are excluded from git ($EXCLUDE_FILE)"
   # An exclude entry cannot hide a file git already tracks — the settings or
   # the rendered scripts (both hold this machine's paths).
@@ -947,7 +954,7 @@ uninstall_claude() {
     fi
     any=1
   fi
-  for h in $CLAUDE_HOOKS; do
+  for h in $CLAUDE_HOOKS $CLAUDE_LIB; do
     if [ -f "$CLAUDE_HOOKS_DIR/$h.sh" ]; then
       remove_file "$CLAUDE_HOOKS_DIR/$h.sh"
       any=1
@@ -996,6 +1003,10 @@ status_claude() {
         printf "  ⚠ %-22s outdated (registered with another version's command, not %s): re-run install --claude\n" "$h" "$(claude_cmd "$h")"
       elif ! render_matches "$CLAUDE_HOOKS_DIR/$h.sh" "$SCRIPT_DIR/claude/$h.sh"; then
         printf "  ⚠ %-22s outdated (its script is another doc-superpowers version's or install's): re-run install --claude\n" "$h"
+      elif [ ! -f "$CLAUDE_HOOKS_DIR/$CLAUDE_LIB.sh" ]; then
+        printf "  ⚠ %-22s its shared library %s.sh is missing from %s/: re-run install --claude\n" "$h" "$CLAUDE_LIB" "$CLAUDE_HOOKS_DIR"
+      elif ! render_matches "$CLAUDE_HOOKS_DIR/$CLAUDE_LIB.sh" "$SCRIPT_DIR/claude/$CLAUDE_LIB.sh"; then
+        printf "  ⚠ %-22s outdated (its shared library %s.sh is another version's or install's): re-run install --claude\n" "$h" "$CLAUDE_LIB"
       else
         printf "  ✓ %-22s active (%s: script + settings)\n" "$h" "$ev"
       fi

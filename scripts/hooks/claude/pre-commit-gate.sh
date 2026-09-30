@@ -14,8 +14,13 @@
 # from disk" when it is gone. A command that stages as it commits (`git add … && git commit`, `commit -a`, a pathspec) has
 # no such tree yet: the gate defers to the git pre-commit hook, which runs on
 # the real one, and says so.
+# Every list is capped and every string held under Claude Code's 10,000-char
+# hook-output limit (hook-lib.sh, sourced from beside this script). The check
+# gets BUDGET seconds, under the 10 s the installer registers (a hook that runs
+# past it is killed and gates nothing): past that it is killed (with everything
+# it started) and says so — "check skipped (budget)", or a block under STRICT.
 # The skill or the doc-index being absent is silent. The check failing (jq
-# missing, a corrupt index) is said, and blocks only under STRICT.
+# missing, a corrupt index, the budget) is said, and blocks only under STRICT.
 # DOC_SUPERPOWERS_QUIET=1 silences the advisory output, never a block's
 # reason or the exit code; DOC_SUPERPOWERS_SKIP=1 turns the hook off.
 
@@ -58,6 +63,16 @@ else
 fi
 [[ $command_str =~ $re_commit ]] || exit 0
 
+HOOK_EVENT=PreToolUse
+BUDGET=7
+# The shared library beside this script, as an absolute path: the cd below
+# would break a relative one.
+case "${BASH_SOURCE[0]}" in
+  /*) _lib="${BASH_SOURCE[0]%/*}/hook-lib.sh" ;;
+  */*) _lib="$PWD/${BASH_SOURCE[0]%/*}/hook-lib.sh" ;;
+  *) _lib="$PWD/hook-lib.sh" ;;
+esac
+
 cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || exit 0
 [[ -n "${DOC_TOOLS:-}" ]] || DOC_TOOLS=$(__DOC_TOOLS_RESOLVE__)
 [[ -f "$DOC_TOOLS" ]] || exit 0
@@ -66,17 +81,20 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || exit 0
 _quiet() { [[ "${DOC_SUPERPOWERS_QUIET:-}" == "1" ]]; }
 _strict() { [[ "${DOC_SUPERPOWERS_STRICT:-}" == "1" ]]; }
 
-# _emit <systemMessage> <additionalContext> — either may be empty.
-_emit() {
-  if [[ "$have_jq" == 1 ]]; then
-    jq -cn --arg m "$1" --arg c "$2" '
-      (if $m != "" then {systemMessage: $m} else {} end)
-      + (if $c != "" then {hookSpecificOutput: {hookEventName: "PreToolUse", additionalContext: $c}} else {} end)'
-  else
-    # Only this hook's own fixed text (no quote or backslash) comes here.
-    printf '{"systemMessage":"%s"}\n' "$1"
+# Without the library the check cannot run: said, and a block under STRICT.
+# shellcheck source=scripts/hooks/claude/hook-lib.sh
+if ! . "$_lib" 2>/dev/null; then
+  _m="doc-superpowers: hook-lib.sh is missing beside the pre-commit-gate hook, so it cannot check this commit; re-run install.sh install --claude"
+  if _strict; then
+    echo "$_m — blocked by DOC_SUPERPOWERS_STRICT=1 (DOC_SUPERPOWERS_SKIP=1 bypasses)" >&2
+    exit 2
   fi
-}
+  _quiet && exit 0
+  printf '{"systemMessage":"%s"}\n' "$_m"
+  exit 0
+fi
+# The full list is the staged tree's.
+HOOK_FULL_LIST="run 'doc-tools.sh check-freshness --tree \$(git write-tree)' for the full list"
 
 # The check could not run. Claude Code shows an exit-0 hook's stderr to no one,
 # so the line also goes out as a systemMessage. STRICT blocks, and a block's
@@ -124,39 +142,58 @@ staged=$(git -c core.quotePath=false diff --cached --name-only --no-renames 2>/d
 # The staged tree, written from a private copy of git's index: outside a git
 # command, `git write-tree` would rewrite git's own (its cache-tree). A split
 # index cannot be copied alone; then git's own index is used.
-idx=$(mktemp "${TMPDIR:-/tmp}/doc-sp-gate.XXXXXX") || _fail "mktemp failed"
-trap 'rm -f "$idx"' EXIT
+work=$(mktemp -d "${TMPDIR:-/tmp}/doc-sp-gate.XXXXXX") || _fail "mktemp failed"
+trap 'rm -rf "$work"' EXIT
+idx="$work/index"
 cp "$(git rev-parse --git-path index)" "$idx" 2>/dev/null || _fail "cannot copy git's index"
 tree=$(GIT_INDEX_FILE="$idx" git write-tree 2>/dev/null) \
   || tree=$(git write-tree 2>/dev/null) \
   || _fail "git write-tree failed"
 
-_check() { printf '%s\n' "$staged" | "$DOC_TOOLS" check-freshness --tree "$tree" --code-refs-from -; }
-_why() {
-  why=$("$@" 2>&1 >/dev/null | awk '/^ERROR: / { print; e = 1; exit } NF && !/^NOTE: / && o == "" { o = $0 } END { if (!e) print o }')
-  why="${why#ERROR: }"
-  why="${why%.}"
-  _fail "${why:-doc-tools.sh check-freshness failed}"
-}
-result=$(_check 2>/dev/null) || _why _check
-
-# The scope reaches a doc through its code refs only, so the entries the
-# staged index adds (its keys minus HEAD's) are judged unscoped, and their
-# verdicts join the scoped ones — the git pre-commit hook's rule.
-if grep -qxF docs/.doc-index.json <<<"$staged"; then
-  added=$( { git cat-file blob "$tree:docs/.doc-index.json" \
-    && { git cat-file blob HEAD:docs/.doc-index.json 2>/dev/null || echo '{}'; }; } 2>/dev/null \
-    | jq -cs '((.[0].docs // {}) | keys) - ((.[1].docs // {}) | keys)' 2>/dev/null) || added='[]'
-  if [[ -n "$added" && "$added" != "[]" ]]; then
-    _wide() { "$DOC_TOOLS" check-freshness --tree "$tree"; }
-    wide=$(_wide 2>/dev/null) || _why _wide
-    result=$(printf '%s\n%s\n%s\n' "$added" "$result" "$wide" | jq -cs '
-      (reduce .[0][] as $k ({}; .[$k] = true)) as $a
-      | .[2].docs as $w
-      | .[1] | .docs += ($w | with_entries(select($a[.key])))' 2>/dev/null) \
-      || _fail "cannot read the freshness report"
+# The whole check, run under the watchdog (hook-lib.sh: _bounded): the report
+# on stdout, a failure's reason on stderr.
+# shellcheck disable=SC2329  # run by _bounded
+_check() {
+  local result added wide
+  # Each run's stderr is passed on only when that run fails, so the reason
+  # _why reads is the failing run's.
+  result=$(printf '%s\n' "$staged" | "$DOC_TOOLS" check-freshness --tree "$tree" --code-refs-from - 2>"$work/err.scoped") \
+    || { cat "$work/err.scoped" >&2; return 1; }
+  # The scope reaches a doc through its code refs only, so the entries the
+  # staged index adds (its keys minus HEAD's) are judged unscoped, and their
+  # verdicts join the scoped ones — the git pre-commit hook's rule.
+  if grep -qxF docs/.doc-index.json <<<"$staged"; then
+    added=$( { git cat-file blob "$tree:docs/.doc-index.json" \
+      && { git cat-file blob HEAD:docs/.doc-index.json 2>/dev/null || echo '{}'; }; } 2>/dev/null \
+      | jq -cs '((.[0].docs // {}) | keys) - ((.[1].docs // {}) | keys)' 2>/dev/null) || added='[]'
+    if [[ -n "$added" && "$added" != "[]" ]]; then
+      wide=$("$DOC_TOOLS" check-freshness --tree "$tree" 2>"$work/err.wide") \
+        || { cat "$work/err.wide" >&2; return 1; }
+      result=$(printf '%s\n%s\n%s\n' "$added" "$result" "$wide" | jq -cs '
+        (reduce .[0][] as $k ({}; .[$k] = true)) as $a
+        | .[2].docs as $w
+        | .[1] | .docs += ($w | with_entries(select($a[.key])))' 2>/dev/null) \
+        || { echo "ERROR: cannot read the freshness report" >&2; return 1; }
+    fi
   fi
+  printf '%s\n' "$result"
+}
+rc=0
+_bounded _check || rc=$?
+if [[ "$rc" == 124 ]]; then
+  # Under STRICT a check that cannot finish blocks, as one that cannot run.
+  _strict && _fail "the check took longer than its ${BUDGET}s budget"
+  _quiet && exit 0
+  line=$(_budget_line)
+  echo "$line" >&2
+  _emit "$line" "$line"
+  exit 0
 fi
+if [[ "$rc" != 0 ]]; then
+  why=$(_why)
+  _fail "${why:-doc-tools.sh check-freshness failed}"
+fi
+result=$(cat "$work/out")
 
 # The docs the commit leaves out: on disk (unstaged) or gone. (A JSON list on
 # stdin, never argv: it can be index-sized.)
@@ -167,45 +204,46 @@ done < <(jq -r '.docs | to_entries[] | select(.value.status == "missing") | .key
 ondisk=$(jq -Rsc 'split("\n") | map(select(. != ""))' <<<"$ondisk" 2>/dev/null) || _fail "cannot read the freshness report"
 
 # Line 1: "<stale> <unstaged> <gone>"; line 2: the one-line summary; then the report.
-report=$(printf '%s\n%s\n' "$result" "$ondisk" | jq -rs --arg move "  Run 'doc-tools.sh move-entry <old> <new>' if it was renamed, or 'remove-entry'/'deprecate-entry' to clean up." \
-  --arg add "  The index this commit records lists them: stage each with 'git add <doc>'." '
+# Every list is capped (hook-lib.sh: dsp_list, dsp_lines, dsp_refs).
+# shellcheck disable=SC2016  # jq program, not shell expansion
+report=$(printf '%s\n%s\n' "$result" "$ondisk" | _report_jq '
   (reduce .[1][] as $k ({}; .[$k] = true)) as $d
   | .[0]
   | [.docs | to_entries[] | select(.value.status == "stale")] as $s
   | [.docs | to_entries[] | select(.value.status == "missing" and $d[.key])] as $u
   | [.docs | to_entries[] | select(.value.status == "missing" and ($d[.key] | not))] as $m
   | "\($s | length) \($u | length) \($m | length)",
-    ([if ($s | length) > 0 then "\($s | length) stale doc(s) in this commit: \([$s[].key] | join(", "))" else empty end,
-      if ($u | length) > 0 then "\($u | length) indexed doc(s) not in this commit: \([$u[].key] | join(", "))" else empty end,
-      if ($m | length) > 0 then "\($m | length) indexed doc(s) missing from disk: \([$m[].key] | join(", "))" else empty end]
+    ([if ($s | length) > 0 then "\($s | length) stale doc(s) in this commit: \([$s[].key] | dsp_list | join(", "))" else empty end,
+      if ($u | length) > 0 then "\($u | length) indexed doc(s) not in this commit: \([$u[].key] | dsp_list | join(", "))" else empty end,
+      if ($m | length) > 0 then "\($m | length) indexed doc(s) missing from disk: \([$m[].key] | dsp_list | join(", "))" else empty end]
      | "doc-superpowers: " + join("; ")),
     (if ($s | length) > 0 then
        "doc-superpowers: \($s | length) stale doc(s) in this commit (their code changed since they were verified)",
-       ($s[] | "  \(.key) — \(.value.reason // "stale")"
-         + (if ((.value.code_refs_changed // []) | length) > 0 then ": \(.value.code_refs_changed | join(", "))" else "" end)
-         + (if ((.value.commits_behind // 0) > 0) then " (\(.value.commits_behind) commits behind)" else "" end))
+       ($s | dsp_lines("  \(.key) — \(.value.reason // "stale")" + dsp_refs
+         + (if ((.value.commits_behind // 0) > 0) then " (\(.value.commits_behind) commits behind)" else "" end)))
      else empty end),
     (if ($u | length) > 0 then
        "doc-superpowers: \($u | length) indexed doc(s) not in this commit (on disk, but not staged)",
-       ($u[] | "  \(.key)"),
+       ($u | dsp_lines("  \(.key)")),
        $add
      else empty end),
     (if ($m | length) > 0 then
        "doc-superpowers: \($m | length) indexed doc(s) missing from disk",
-       ($m[] | "  \(.key)"),
+       ($m | dsp_lines("  \(.key)")),
        $move
      else empty end)
-' 2>/dev/null) || _fail "cannot read the freshness report"
+' -rs --arg move "  Run 'doc-tools.sh move-entry <old> <new>' if it was renamed, or 'remove-entry'/'deprecate-entry' to clean up." \
+  --arg add "  The index this commit records lists them: stage each with 'git add <doc>'." 2>/dev/null) || _fail "cannot read the freshness report"
 
-counts=${report%%$'\n'*}
+# Split with read, not ${report%%…}: bash's pattern removal is quadratic on
+# a long string.
+{ IFS= read -r counts; IFS= read -r summary; report=$(cat); } <<<"$report"
 [[ "$counts" == "0 0 0" ]] && exit 0
-report=${report#*$'\n'}
-summary=${report%%$'\n'*}
-report=${report#*$'\n'}
 
 # A block's stderr is Claude's feedback: QUIET silences the advisory only.
+# The report is held under the limit with room for that last line.
 if _strict; then
-  printf '%s\n' "$report" >&2
+  _clip "$report" $((HOOK_MAX_CHARS - 400)) >&2
   echo "  Commit blocked by DOC_SUPERPOWERS_STRICT=1: update the docs ('/doc-superpowers update') and re-verify them (doc-tools.sh update-index <doc>), or set DOC_SUPERPOWERS_SKIP=1 to bypass." >&2
   exit 2
 fi

@@ -91,6 +91,9 @@ registered_cmd() {
 }
 
 # run_claude_hook <event> <script> <payload-json> [VAR=value ...]
+# Every run is also held to the contract Claude Code relies on (see
+# _claude_hook_contract): a violation is a FAIL of the test that ran it.
+CLAUDE_HOOK_RUNS=0 CLAUDE_HOOK_BREACHES=0
 run_claude_hook() {
   local event="$1" script="$2" payload="$3" cmd
   shift 3
@@ -104,6 +107,35 @@ run_claude_hook() {
   run_hooked CLAUDE_PROJECT_DIR="$TEST_DIR" ${1+"$@"} -- sh -c "$cmd"
   rm -f "$RUN_STDIN"
   RUN_STDIN=/dev/null
+  _claude_hook_contract "$script" ${1+"$@"}
+}
+
+# One JSON object, or nothing, on stdout.
+stdout_is_one_json_object() {
+  [ -z "$RUN_OUT" ] || [ "$(jq -cs 'length == 1 and (.[0] | type == "object")' <<<"$RUN_OUT" 2>/dev/null)" = "true" ]
+}
+
+# _claude_hook_contract <script> [VAR=value ...]: the exit code is 0, or 2
+# (a block) only when DOC_SUPERPOWERS_STRICT=1 was set — a syntax error also
+# exits 2, and a PreToolUse hook's exit 2 blocks the commit, so a broken hook
+# must never pass as a block — and stdout is one JSON object or nothing (stray
+# output breaks the JSON Claude Code parses). Silent when held, so the
+# assertion counts stay fixed; test_claude_hook_contract_held reports the tally.
+_claude_hook_contract() {
+  local script="$1" strict=0 a
+  shift
+  for a in "$@"; do
+    [ "$a" = DOC_SUPERPOWERS_STRICT=1 ] && strict=1
+  done
+  CLAUDE_HOOK_RUNS=$((CLAUDE_HOOK_RUNS + 1))
+  if ! { [ "$RUN_RC" = 0 ] || { [ "$RUN_RC" = 2 ] && [ "$strict" = 1 ]; }; }; then
+    CLAUDE_HOOK_BREACHES=$((CLAUDE_HOOK_BREACHES + 1))
+    assert_eq "0$([ "$strict" = 1 ] && echo ' or 2')" "$RUN_RC" "$script: contract: exit code (stderr: $(head -c 300 <<<"$RUN_ERR"))"
+  fi
+  if ! stdout_is_one_json_object; then
+    CLAUDE_HOOK_BREACHES=$((CLAUDE_HOOK_BREACHES + 1))
+    assert_eq "one JSON object or nothing" "$(head -c 300 <<<"$RUN_OUT")" "$script: contract: stdout"
+  fi
 }
 
 pretool_json() {
@@ -1110,6 +1142,303 @@ test_post_commit_sync_skip_env
 test_post_commit_sync_root_commit
 test_post_commit_sync_stdin_edge_cases
 
+# --- Claude Code hooks: bounded output, time budget, shared library ---
+#
+# Claude Code keeps each hook string (systemMessage, additionalContext, the
+# stderr of a blocking exit 2) inline only up to 10,000 characters; past that
+# the model gets a 2,000-character preview (code.claude.com/docs/en/hooks). So
+# these tests measure what the INSTALLED hooks emit, run the way Claude Code
+# runs them — never a source file.
+
+# big_report <file>: a check-freshness report of BIG_STALE stale docs (long
+# paths, 40 changed refs each) and BIG_MISSING missing ones.
+BIG_STALE=1000 BIG_MISSING=300 BIG_ONDISK=150
+big_report() {
+  jq -n --argjson ns "$BIG_STALE" --argjson nm "$BIG_MISSING" '
+    "docs/reference/deeply/nested/section/with/a/rather/long/directory/name/and/then/some/more" as $d
+    | "src/very/long/module/path/segment/that/keeps/going/and/going/for/the/sake/of/length" as $s
+    | {checked_at: "2026-09-29T00:00:00Z", repo_head: null,
+       summary: {current: 0, stale: $ns, missing: $nm, deprecated: 0, untracked: 0},
+       untracked_docs: [],
+       docs: (([range($ns) | {key: "\($d)/stale-document-with-a-long-descriptive-name-\(.).md",
+                 value: {status: "stale", reason: "code_changed", commits_behind: 3,
+                   code_refs_changed: [range(40) as $r | "\($s)/component_with_a_long_name_\($r).ts"]}}]
+             + [range($nm) | {key: "\($d)/missing-document-with-a-long-descriptive-name-\(.).md",
+                 value: {status: "missing"}}]) | from_entries)}' > "$1"
+}
+
+# hooked_fixture whose doc-tools.sh (BIG_DT) is a stub printing big_report's
+# report: a real check of 1,000 docs takes far longer than a hook's budget,
+# and what is under test is the hook's own report. The first BIG_ONDISK
+# missing docs are put on disk, untracked (for the gate: "not in this commit").
+big_report_fixture() {
+  hooked_fixture
+  local d f
+  d=$(harness_mktemp_d big)
+  big_report "$d/report.json"
+  printf '#!/bin/sh\ncat >/dev/null\ncat "%s"\n' "$d/report.json" > "$d/doc-tools.sh"
+  chmod +x "$d/doc-tools.sh"
+  BIG_DT="$d/doc-tools.sh"
+  jq -r --argjson n "$BIG_ONDISK" '[.docs | to_entries[] | select(.value.status == "missing") | .key][:$n][]' \
+    "$d/report.json" > "$d/ondisk"
+  while IFS= read -r f; do
+    mkdir -p "${f%/*}"
+    echo "on disk" > "$f"
+  done < "$d/ondisk"
+}
+
+# assert_bounded <label> <text> <needle>...: <text> is emitted, under
+# 10,000 characters, and holds every <needle>. (Its own check, not
+# assert_contains: a failure must not print a 100 KB haystack.)
+_BOUNDED_TEXT=""
+_bounded_has() { grep -qF -- "$1" <<<"$_BOUNDED_TEXT"; }
+assert_bounded() {
+  local label="$1" n
+  _BOUNDED_TEXT="$2"
+  shift 2
+  assert_true "$label: emitted (${#_BOUNDED_TEXT} chars)" test "${#_BOUNDED_TEXT}" -gt 0
+  assert_true "$label: under Claude Code's 10,000-char inline limit (${#_BOUNDED_TEXT} chars)" \
+    test "${#_BOUNDED_TEXT}" -lt 10000
+  for n in "$@"; do
+    assert_true "$label: holds '$n'" _bounded_has "$n"
+  done
+}
+
+HOOK_FULL_LIST_CMD="doc-tools.sh check-freshness"
+
+test_claude_hooks_bound_a_huge_report() {
+  echo "test: each Claude hook holds every string it emits under 10,000 chars on a 1,000-stale-doc report, with the counts and the full-list pointer"
+  big_report_fixture
+  echo "changed" > src/index.js
+  DOC_SUPERPOWERS_SKIP=1 git commit -qam "code"
+  run_claude_hook PostToolUse post-commit-sync "$(posttool_json 'git commit -am code')" DOC_TOOLS="$BIG_DT"
+  assert_eq "0" "$RUN_RC" "post-commit-sync: exits 0"
+  assert_true "post-commit-sync: stdout is one JSON object" stdout_is_one_json_object
+  assert_bounded "post-commit-sync systemMessage" "$(out_field .systemMessage)" \
+    "left 1000 doc(s) stale" "300 indexed doc(s) missing" "more" "$HOOK_FULL_LIST_CMD"
+  assert_bounded "post-commit-sync additionalContext" "$(out_field .hookSpecificOutput.additionalContext)" \
+    "1000 doc(s) affected by this commit" "300 indexed doc(s) missing" "more" "$HOOK_FULL_LIST_CMD" "/doc-superpowers update"
+
+  stage_stale_change
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m x')" DOC_TOOLS="$BIG_DT"
+  assert_eq "0" "$RUN_RC" "pre-commit-gate: exits 0 (advisory)"
+  assert_true "pre-commit-gate: stdout is one JSON object" stdout_is_one_json_object
+  assert_bounded "pre-commit-gate systemMessage" "$(out_field .systemMessage)" \
+    "1000 stale doc(s)" "$BIG_ONDISK indexed doc(s) not in this commit" "$BIG_ONDISK indexed doc(s) missing from disk" "$HOOK_FULL_LIST_CMD"
+  assert_bounded "pre-commit-gate additionalContext" "$(out_field .hookSpecificOutput.additionalContext)" \
+    "1000 stale doc(s)" "$BIG_ONDISK indexed doc(s) not in this commit" "$BIG_ONDISK indexed doc(s) missing from disk" \
+    "$HOOK_FULL_LIST_CMD" "Consider running"
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m x')" DOC_TOOLS="$BIG_DT" DOC_SUPERPOWERS_STRICT=1
+  assert_eq "2" "$RUN_RC" "pre-commit-gate STRICT: blocks"
+  assert_true "pre-commit-gate STRICT: stdout is one JSON object or nothing" stdout_is_one_json_object
+  assert_bounded "pre-commit-gate STRICT stderr" "$RUN_ERR" \
+    "1000 stale doc(s)" "$BIG_ONDISK indexed doc(s) not in this commit" "$BIG_ONDISK indexed doc(s) missing from disk" \
+    "$HOOK_FULL_LIST_CMD" "Commit blocked by DOC_SUPERPOWERS_STRICT=1"
+
+  run_claude_hook Stop session-summary "$STOP_JSON" DOC_TOOLS="$BIG_DT"
+  assert_eq "0" "$RUN_RC" "session-summary: exits 0"
+  assert_true "session-summary: stdout is one JSON object" stdout_is_one_json_object
+  assert_bounded "session-summary systemMessage" "$(out_field .systemMessage)" \
+    "1000 doc(s) cite code changed" "300 indexed doc(s) missing" "$HOOK_FULL_LIST_CMD"
+  teardown
+}
+
+test_claude_hooks_cap_lists_with_real_doc_tools() {
+  echo "test: with the real doc-tools.sh, a commit staling 41 docs is reported as the first few plus '…and N more'"
+  hooked_fixture
+  # 40 more docs verified like docs/architecture.md (same content, same refs):
+  # its index entry, copied under long keys.
+  local dir="docs/reference/a/section/whose/directory/names/are/long/enough/to/matter" i keys=""
+  mkdir -p "$dir"
+  for i in $(seq 1 40); do
+    cp docs/architecture.md "$dir/document-number-$i-with-a-descriptive-name.md"
+    keys="$keys$dir/document-number-$i-with-a-descriptive-name.md"$'\n'
+  done
+  jq --rawfile k <(printf '%s' "$keys") \
+    '.docs["docs/architecture.md"] as $t | .docs += ([$k | split("\n")[] | select(. != "") | {key: ., value: $t}] | from_entries)' \
+    docs/.doc-index.json > docs/.doc-index.json.new && mv docs/.doc-index.json.new docs/.doc-index.json
+  git add -A && DOC_SUPERPOWERS_SKIP=1 git commit -qm "41 docs"
+  assert_eq "41" "$("$DOC_TOOLS" check-freshness | jq '[.docs[] | select(.status == "current")] | length')" "precondition: 41 current docs"
+  echo "changed" > src/index.js
+  DOC_SUPERPOWERS_SKIP=1 git commit -qam "code"
+  run_claude_hook PostToolUse post-commit-sync "$(posttool_json 'git commit -am code')"
+  assert_eq "0" "$RUN_RC" "exits 0"
+  assert_contains "$(out_field .systemMessage)" "left 41 doc(s) stale" "systemMessage: the count"
+  assert_contains "$(out_field .systemMessage)" "…and 31 more" "systemMessage: the first 10, then '…and 31 more'"
+  assert_contains "$(out_field .hookSpecificOutput.additionalContext)" "…and 26 more" "additionalContext: the first 15, then '…and 26 more'"
+  assert_contains "$(out_field .hookSpecificOutput.additionalContext)" "$HOOK_FULL_LIST_CMD" "additionalContext: where the full list is"
+  teardown
+}
+
+# A doc-tools.sh that never finishes: it starts a 30 s child and waits for it
+# (the child's pid in <dir>/child.pid).
+slow_doc_tools() {
+  printf '#!/bin/sh\ncat >/dev/null\nsleep 30 &\necho $! > "%s/child.pid"\nwait\n' "$1" > "$1/doc-tools.sh"
+  chmod +x "$1/doc-tools.sh"
+}
+
+# The timeout the installer registered for <event>'s <script>.
+registered_timeout() {
+  jq -r --arg e "$1" --arg s "$2" \
+    '[.hooks[$e][]?.hooks[]? | select(.command | contains($s)) | .timeout][0] // empty' \
+    .claude/settings.local.json
+}
+
+# assert_child_gone <dir>: the slow check's child was killed with its group.
+assert_child_gone() {
+  local pid gone=no i
+  pid=$(cat "$1/child.pid" 2>/dev/null || echo "")
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then gone=yes; break; fi
+    sleep 0.2
+  done
+  [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+  assert_eq "yes" "$gone" "$2: the check's own children are killed too (process group)"
+}
+
+test_claude_gate_and_sync_budget() {
+  echo "test: pre-commit-gate and post-commit-sync give up within their budget, before the registered timeout, and say so"
+  hooked_fixture
+  local stub start elapsed limit h ev budget
+  for h in pre-commit-gate post-commit-sync session-summary; do
+    case "$h" in
+      pre-commit-gate) ev=PreToolUse ;;
+      post-commit-sync) ev=PostToolUse ;;
+      *) ev=Stop ;;
+    esac
+    budget=$(sed -n 's/^BUDGET=//p' ".claude/hooks/doc-superpowers/$h.sh")
+    limit=$(registered_timeout "$ev" "$h")
+    assert_true "$h: a numeric BUDGET ($budget) under its registered timeout (${limit}s), with room for the report" \
+      test -n "$budget" -a -n "$limit" -a "${budget:-99}" -le $(( ${limit:-0} - 2 ))
+  done
+
+  echo "changed" > src/index.js
+  DOC_SUPERPOWERS_SKIP=1 git commit -qam "code"
+  stub=$(harness_mktemp_d slow-sync)
+  slow_doc_tools "$stub"
+  limit=$(registered_timeout PostToolUse post-commit-sync)
+  start=$SECONDS
+  run_claude_hook PostToolUse post-commit-sync "$(posttool_json 'git commit -am code')" DOC_TOOLS="$stub/doc-tools.sh"
+  elapsed=$((SECONDS - start))
+  assert_eq "0" "$RUN_RC" "post-commit-sync: exits 0"
+  assert_true "post-commit-sync: returns before its registered ${limit}s timeout (took ${elapsed}s)" test "$elapsed" -lt "${limit:-10}"
+  assert_contains "$(out_field .systemMessage)" "check skipped (budget)" "post-commit-sync: the user is told the check was skipped"
+  assert_eq "1" "$(line_count "$(out_field .systemMessage)")" "post-commit-sync: in one line"
+  assert_child_gone "$stub" "post-commit-sync"
+
+  stage_stale_change
+  stub=$(harness_mktemp_d slow-gate)
+  slow_doc_tools "$stub"
+  limit=$(registered_timeout PreToolUse pre-commit-gate)
+  start=$SECONDS
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m x')" DOC_TOOLS="$stub/doc-tools.sh"
+  elapsed=$((SECONDS - start))
+  assert_eq "0" "$RUN_RC" "pre-commit-gate: exits 0 (advisory)"
+  assert_true "pre-commit-gate: returns before its registered ${limit}s timeout (took ${elapsed}s)" test "$elapsed" -lt "${limit:-10}"
+  assert_contains "$(out_field .systemMessage)" "check skipped (budget)" "pre-commit-gate: the user is told the check was skipped"
+  assert_contains "$(out_field .hookSpecificOutput.additionalContext)" "check skipped (budget)" "pre-commit-gate: and Claude"
+  assert_child_gone "$stub" "pre-commit-gate"
+
+  stub=$(harness_mktemp_d slow-strict)
+  slow_doc_tools "$stub"
+  start=$SECONDS
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m x')" DOC_TOOLS="$stub/doc-tools.sh" DOC_SUPERPOWERS_STRICT=1
+  elapsed=$((SECONDS - start))
+  assert_eq "2" "$RUN_RC" "pre-commit-gate STRICT: a check that ran out of time blocks (a timed-out hook would let the commit through)"
+  assert_true "pre-commit-gate STRICT: blocks before its registered ${limit}s timeout (took ${elapsed}s)" test "$elapsed" -lt "${limit:-10}"
+  assert_contains "$RUN_ERR" "budget" "pre-commit-gate STRICT: the reason names the budget"
+  assert_contains "$RUN_ERR" "DOC_SUPERPOWERS_SKIP=1" "pre-commit-gate STRICT: and the bypass"
+  assert_child_gone "$stub" "pre-commit-gate STRICT"
+  teardown
+}
+
+test_claude_gate_and_sync_release_output_promptly() {
+  echo "test: pre-commit-gate and post-commit-sync do not hold their output open for the watchdog"
+  hooked_fixture
+  local h budget shim real start elapsed
+  shim=$(harness_mktemp_d sleep-shim)
+  real=$(command -v sleep)
+  echo "changed" > src/index.js
+  DOC_SUPERPOWERS_SKIP=1 git commit -qam "code"
+  stage_stale_change
+  for h in pre-commit-gate post-commit-sync; do
+    budget=$(sed -n 's/^BUDGET=//p' ".claude/hooks/doc-superpowers/$h.sh")
+    # As in test_session_summary_releases_output_promptly: only the
+    # watchdog's own sleep is stretched to 60 s.
+    printf '#!/bin/sh\nif [ "$1" = "%s" ]; then exec "%s" 60; fi\nexec "%s" "$@"\n' "$budget" "$real" "$real" > "$shim/sleep"
+    chmod +x "$shim/sleep"
+    start=$SECONDS
+    if [ "$h" = pre-commit-gate ]; then
+      run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m x')" PATH="$shim:$REAL_PATH"
+    else
+      run_claude_hook PostToolUse post-commit-sync "$(posttool_json 'git commit -am code')" PATH="$shim:$REAL_PATH"
+    fi
+    elapsed=$((SECONDS - start))
+    assert_contains "$(out_field .hookSpecificOutput.additionalContext)" "docs/architecture.md" "$h: the check completed"
+    assert_true "$h: returned without waiting out the watchdog's sleep (took ${elapsed}s; a held output takes >= 60 s)" \
+      test "$elapsed" -lt 30
+  done
+  teardown
+}
+
+test_claude_hooks_share_one_library() {
+  echo "test: the three Claude hooks source one installed hook-lib.sh; without it they say so in valid JSON"
+  local h
+  for h in pre-commit-gate post-commit-sync session-summary; do
+    assert_true "$h: defines no _emit of its own" test -z "$(grep -n '^_emit()' "$HOOKS_DIR/claude/$h.sh")"
+    assert_true "$h: sources hook-lib.sh" grep -q 'hook-lib\.sh' "$HOOKS_DIR/claude/$h.sh"
+  done
+  assert_true "hook-lib.sh defines _emit" grep -q '^_emit()' "$HOOKS_DIR/claude/hook-lib.sh"
+  hooked_fixture
+  assert_file_exists ".claude/hooks/doc-superpowers/hook-lib.sh" "installed beside the hooks"
+  # Line 2 is the install date, as in the hooks: an install made another day
+  # is the same install.
+  local lib=.claude/hooks/doc-superpowers/hook-lib.sh
+  assert_contains "$(sed -n 2p "$lib")" "doc-superpowers hook v1 — installed" "the install date is on line 2"
+  sed '2s/.*/# doc-superpowers hook v1 — installed 1999-01-01 — shared by the Claude Code hooks/' "$lib" > "$lib.tmp"
+  cat "$lib.tmp" > "$lib"
+  rm -f "$lib.tmp"
+  PATH="$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/install.sh" status > "$TEST_DIR/status.out" 2>&1 || true
+  assert_contains "$(grep 'pre-commit-gate' "$TEST_DIR/status.out")" "✓" "a library installed another day: status stays ✓"
+  echo "# edited" >> "$lib"
+  PATH="$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/install.sh" status > "$TEST_DIR/status.out" 2>&1 || true
+  assert_contains "$(grep 'pre-commit-gate' "$TEST_DIR/status.out")" "outdated" "an edited library: outdated"
+  rm -f "$lib"
+  echo "changed" > src/index.js
+  DOC_SUPERPOWERS_SKIP=1 git commit -qam "code"
+  run_claude_hook PostToolUse post-commit-sync "$(posttool_json 'git commit -am code')"
+  assert_eq "0" "$RUN_RC" "library missing: post-commit-sync exits 0"
+  assert_contains "$(out_field .systemMessage)" "install --claude" "library missing: post-commit-sync says to reinstall"
+  stage_stale_change
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m x')" DOC_SUPERPOWERS_STRICT=1
+  assert_eq "2" "$RUN_RC" "library missing: the STRICT gate blocks (the check cannot run)"
+  assert_contains "$RUN_ERR" "install --claude" "library missing: the STRICT gate says to reinstall"
+  run_claude_hook Stop session-summary "$STOP_JSON"
+  assert_eq "0" "$RUN_RC" "library missing: session-summary exits 0"
+  assert_contains "$(out_field .systemMessage)" "install --claude" "library missing: session-summary says to reinstall"
+  # QUIET and an absent doc-index still silence it (never the STRICT block's reason).
+  run_claude_hook Stop session-summary "$STOP_JSON" DOC_SUPERPOWERS_QUIET=1
+  assert_eq "" "$RUN_OUT$RUN_ERR" "library missing, QUIET: session-summary is silent"
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m x')" DOC_SUPERPOWERS_QUIET=1
+  assert_eq "" "$RUN_OUT$RUN_ERR" "library missing, QUIET: the advisory gate is silent"
+  mv docs/.doc-index.json docs/index-elsewhere.json
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m x')" DOC_SUPERPOWERS_STRICT=1
+  assert_eq "0" "$RUN_RC" "library missing, no doc-index: the STRICT gate does not block"
+  assert_eq "" "$RUN_OUT$RUN_ERR" "library missing, no doc-index: silent"
+  mv docs/index-elsewhere.json docs/.doc-index.json
+  PATH="$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/install.sh" status > "$TEST_DIR/status.out" 2>&1 || true
+  assert_contains "$(grep 'pre-commit-gate' "$TEST_DIR/status.out")" "hook-lib.sh" "status names the missing library"
+  teardown
+}
+
+echo ""
+echo "=== Claude Code hooks: bounded output, time budget, shared library ==="
+test_claude_hooks_bound_a_huge_report
+test_claude_hooks_cap_lists_with_real_doc_tools
+test_claude_gate_and_sync_budget
+test_claude_gate_and_sync_release_output_promptly
+test_claude_hooks_share_one_library
+
 # --- Every hook: no attestation, no index writes, visible failures ---
 
 test_claude_hooks_never_run_update_index() {
@@ -1591,8 +1920,11 @@ test_install_claude_creates_settings() {
   assert_file_exists ".claude/hooks/doc-superpowers/pre-commit-gate.sh" "pre-commit-gate script copied"
   assert_file_exists ".claude/hooks/doc-superpowers/post-commit-sync.sh" "post-commit-sync script copied"
   assert_file_exists ".claude/hooks/doc-superpowers/session-summary.sh" "session-summary script copied"
+  assert_file_exists ".claude/hooks/doc-superpowers/hook-lib.sh" "their shared hook-lib.sh copied"
+  assert_not_contains "$(cat .claude/hooks/doc-superpowers/hook-lib.sh)" "__INSTALL_DATE__" "hook-lib.sh: install date substituted"
   local settings
   settings=$(cat .claude/settings.local.json)
+  assert_not_contains "$settings" "hook-lib" "the library is sourced, never registered"
   assert_contains "$settings" "PreToolUse" "has PreToolUse hook"
   assert_contains "$settings" "PostToolUse" "has PostToolUse hook"
   assert_contains "$settings" "Stop" "has Stop hook"
@@ -1647,6 +1979,8 @@ test_uninstall_claude_removes_hooks() {
   assert_file_not_exists ".claude/hooks/doc-superpowers/pre-commit-gate.sh" "script removed"
   assert_file_not_exists ".claude/hooks/doc-superpowers/post-commit-sync.sh" "script removed"
   assert_file_not_exists ".claude/hooks/doc-superpowers/session-summary.sh" "script removed"
+  assert_file_not_exists ".claude/hooks/doc-superpowers/hook-lib.sh" "shared library removed"
+  assert_true "no directory left behind" test ! -e .claude/hooks/doc-superpowers
   teardown
 }
 
@@ -3567,5 +3901,15 @@ test_fw_removed_doc_keeps_move_advice
 test_fw_claude_note_names_every_tracked_per_user_file
 test_fw_hooks_path_scope_worktree_and_uninstall_wording
 test_fw_helpers_help_is_true
+
+test_claude_hook_contract_held() {
+  echo "test: every Claude hook run above held the contract (exit 0, or 2 only under STRICT; stdout one JSON object or nothing)"
+  assert_true "Claude hook runs checked: $CLAUDE_HOOK_RUNS (the suite makes over 50)" test "$CLAUDE_HOOK_RUNS" -ge 50
+  assert_eq "0" "$CLAUDE_HOOK_BREACHES" "contract breaches (each one is also a FAIL where it ran)"
+}
+
+echo ""
+echo "=== Every Claude hook run: the exit-code and JSON contract ==="
+test_claude_hook_contract_held
 
 print_summary
