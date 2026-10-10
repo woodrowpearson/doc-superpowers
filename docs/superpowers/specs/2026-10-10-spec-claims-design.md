@@ -1,7 +1,7 @@
 # Design: Spec Claims — Executable Spec Statements, Recorded Lifecycle Gates, and a Direction Protocol
 
 **Date:** 2026-10-10
-**Status:** Draft — awaiting owner review
+**Status:** Draft — reviewed with its host-project adoption design (three consult rounds on the combined design, then a review of this split); awaiting owner review
 **Author:** woodrow pearson (with Claude)
 **Issue:** none yet
 **Target version:** 3.2.0 — additive and opt-in: a project with no `docs/spec-claims/` directory sees no behaviour change.
@@ -79,6 +79,7 @@ A claim record:
   "nonvacuity": {"mutant": {"file": "src/auth/token.py", "find": "TTL_SECONDS = 900", "replace": "TTL_SECONDS = 1800"}},
   "promotion": {"at": "<sha>", "verdict_sha256": "<digest>"},
   "tracker": null,
+  "frozen_at": null,
   "restates": [],
   "rulings": [{"date": "2026-10-10", "direction": "DOC-STALE", "by": "<principal>", "record": "<path>"}]
 }
@@ -96,13 +97,15 @@ A claim record:
 | `unbuilt` | planned, not implemented | any failure, or no check yet | an open tracker |
 | `retired` | the doc no longer asserts it | none | a `RETIRE` / `DOC-STALE` ruling; no live occurrence of the quote |
 
+**Kinds** (`kind`): `behaviour`, `interface`, `config` — plus any host kinds declared in `config.json` `kinds` (e.g. an evaluation-parity kind). **Frozen claims:** `frozen_at: <sha>` marks a claim that was true of a concluded record (e.g. a finished evaluation); it is validated structurally and excluded from `run`.
+
 **Enforcement tiers** (`enforced_by`, ranked `test > lint > log > judge`): `test` (a host test that binds itself to the claim id, run through a runner adapter); `lint` (a static pattern with `expect: present|absent` and a `selftest: {violates, clean}` pair, so a vacuous pattern fails validation); `log` (a host-defined production query, scheduled runs only); `judge` (no mechanical check is feasible — carries `why_not_mechanical` and is sampled by a reviewer).
 
 **Non-vacuity.** A `built`/`gated` `test` claim proves its test can fail on the behaviour it claims: `observed_red: <sha>` (at that SHA the bound test failed with an **assertion** failure, re-verified against that SHA's subject files) or `mutant: {file, find, replace}` (`find` matches exactly once; under the mutation the test fails with an assertion failure). `promote` is the only path into `built`/`gated` (§C).
 
 **Configuration-faithful checks.** When a claim's subject reads configuration whose recorded production value differs from its code default, the claim must pin that value in `when:`, or declare `config_independent: <reason>` (requires the config adapter, §D).
 
-**The doc shows its own status.** A doc with a sidecar carries a generated `## Claim status` section immediately before its second `##` heading, listing its non-`built` claims with trackers — no dates, SHAs or live values. It changes only when a status changes, so it adds no churn; the human who reviews docs sees the gap in the doc they read.
+**The doc shows its own status.** A doc with a sidecar carries a generated `## Claim status` section, delimited by `<!-- spec-claims:status:begin -->` / `<!-- spec-claims:status:end -->` markers (idempotent re-render; the marked span is excluded from V2/V8), inserted on first render immediately before the doc's second `##` heading and found by its markers thereafter. It lists every non-`built` claim with its tracker — `gated` claims name their condition — and, when every claim is `built`, renders one line (`Claims: N built`) so a reader knows the doc is claim-checked. No dates, SHAs or live values; it changes only when a status changes, so it adds no churn; the human who reviews docs sees the gap in the doc they read.
 
 ### C. `doc-tools.sh claims` — the checker
 
@@ -111,7 +114,7 @@ New subcommand group, bash 3.2 + `jq` ≥ 1.6, like the rest of `doc-tools.sh`. 
 | Command | Does |
 |---|---|
 | `claims validate --staged \| --all \| --config KEY=VALUE` | structural checks below; executes no test |
-| `claims run --claims <ids> \| --planes-of <range> \| --all` | executes `test` claims through runner adapters and re-runs `lint`; `--planes-of` runs every claim of each runner whose paths the range touched |
+| `claims run --claims <ids> \| --planes-of <range> \| --all` | executes `test` claims through runner adapters, `log` claims through the log adapter (scheduled runs only), and re-runs `lint`; `--planes-of` runs every claim of each runner whose paths the range touched; frozen claims are skipped |
 | `claims promote <id>` | runs the test green (under `when:`), verifies the non-vacuity proof in a throwaway worktree, stores the verdict, writes `promotion` |
 | `claims render [--check]` | writes / checks the status blocks |
 | `claims gate --plan <p> --chunk <n>` · `claims attest --plan <p> [--final] [--deep]` · `claims rulings --range <a>..<b>` | §E |
@@ -122,19 +125,19 @@ New subcommand group, bash 3.2 + `jq` ≥ 1.6, like the rest of `doc-tools.sh`. 
 |---|---|
 | V1 schema | malformed record; id not `<DOC-ID>#<slug>`; duplicate id; doc not governing; a `when:` key the config adapter does not know |
 | V2 anchor | quote not uniquely live; a `retired` claim's quote still live; an `AMENDED` block re-quoting a claimed sentence without `quote_occurrence` or a ruling |
-| V3 binding | `test` claim whose node the runner adapter does not report as bound to this id (§D); `built`/`gated` without non-vacuity + `promotion`; a `mutant.find` not unique; a configuration-reading subject without `when:` or `config_independent` |
+| V3 binding | `test` claim whose node the runner adapter's static `list` does not report as bound to this id (§D); a bound node reported outside the host's normal test gate (`in_gate: false`) or importing its subject at module level (`subject_imports_ok: false` — an unbuilt subject would be a collection error no expected-failure can absorb); `built`/`gated` without non-vacuity + `promotion`; a `mutant.find` not unique; a configuration-reading subject without `when:` or `config_independent`; a `when:` the adapter reports the test does not establish |
 | V4 lint | selftest `violates` passes or `clean` fails; the pattern contradicts the status |
 | V5 status | `gated`/`diverged`/`unbuilt` without an existing tracker; `diverged`/`retired` without the required ruling; `judge` without `why_not_mechanical` |
-| V6 ratchet | vs merge-base: `states` changed, status moved off `built`, status moved into `built`/`gated` without a stored-verdict `promotion`, `enforced_by` lowered, a claim deleted, or a re-anchor that changed any token — without a new ruling (§F). A re-anchor equal after normalisation (a reflow or move) needs none. A ruling's `record` must exist and must not be the doc or its sidecar. |
+| V6 ratchet | vs merge-base: `states` changed, status moved off `built`, status moved into `built`/`gated` without a stored-verdict `promotion` (a promotion whose verdict is in another clone's local store reports `unverifiable-here`, advisory; the scheduled run re-verifies it), `enforced_by` lowered, a claim deleted, or a re-anchor that changed any token — without a new ruling (§F). A re-anchor equal after normalisation (a reflow or move) needs none. A ruling's `record` must exist and must not be the doc or its sidecar. |
 | V7 restates | a claim restating another whose `states` changed after this claim's last ruling (sibling sweep) |
 | V8 coverage | a staged hunk adds or changes normative text no claim covers. Structural keys: an ADR's `## Decision`; spec sections whose headings match the template's normative sections (requirements, invariants, interfaces, inputs/outputs, decisions, phase/stage contracts) plus host-configured headings; the resolved column of an `## Open questions` table |
 | V8n descriptive | a descriptive-section line asserting conformance without a claim id or `(unverified)`; citing a normative section is exempt |
 | V9 claim-bound test edit | a staged change inside a test bound to a claim (reported by the runner adapter) — listed for adjudication: `states` still holds, or a ruling is owed |
 | V10 configuration | a staged change to a configuration surface the config adapter declares re-classifies claims whose `when:` or subject names a changed key: a `gated` claim now satisfied → promote; a `built` claim no longer satisfied → a ruling is owed; a `diverged` claim whose `when:` is being switched on → finding. `--config KEY=VALUE` runs the same check before a configuration change that is published outside git. |
 | V11 status block | the block differs from `render` output (only when that doc's sidecar is staged) |
-| V12 plan structure | a new (or gate-carrying) plan with governing specs whose chunks do not end with a claims-gate task or which does not close with the final gate; a plan moving to `Completed` without a final-gate record that `attest --final` accepts |
+| V12 plan structure | for a new (or gate-carrying) plan with governing specs: a chunk without a claims-gate task placed **before** its spec-update task (the gate's verdicts are what the Implementation Notes cite), or no final gate before the finalize tasks; **decomposition:** an `unbuilt` claim of a target spec named by no task, a task touching the host's configured code roots with no `**Claims:**` line, or a `**Claims:** none` task that links an issue or design as the source of its behaviour (the decision must be promoted into a governing doc first); a plan moving to `Completed` without a final-gate record that `attest --final` accepts |
 
-**Exit codes:** `0` everything as expected · `1` findings (a `built`/`gated` claim failing, a `diverged`/`unbuilt` claim passing, a structural violation) · `2` could not run — indeterminate, never reported as pass · `3` usage. Precedence `1 > 2 > 0`. Output is one verdict JSON on stdout.
+**Exit codes:** `0` everything as expected · `1` findings (a `built`/`gated` claim failing, a `diverged`/`unbuilt` claim passing, a structural violation) · `2` could not run — an adapter reported `indeterminate` (or exited non-zero), never reported as pass · `3` usage. Precedence `1 > 2 > 0`. Output is one verdict JSON on stdout.
 
 ### D. Host adapter contracts
 
@@ -144,16 +147,20 @@ doc-superpowers stays language- and platform-agnostic; a host supplies small exe
 
 | Call | Returns |
 |---|---|
-| `<adapter> list` | JSON lines `{"id": "<claim id>", "node": "<test node>", "file": "<path>", "subject_imports_ok": true\|false}` for every test that binds itself to a claim id (pytest marker, jest helper, …). This is the binding V3 checks — a test self-declares its claim, and the adapter reports it. |
-| `<adapter> run --root <dir> <node>…` | JSON lines `{"node": "…", "outcome": "pass"\|"assert-fail"\|"error"\|"not-found"}`. `assert-fail` is distinguished from `error` so an import or typo error is never an expected red. `--root` lets the adapter run inside a throwaway worktree (how it reuses environments is the host's business). |
-| `<adapter> edited-bound-tests <range>` | the claim ids whose bound test bodies changed (V9) |
+| `<adapter> list [<file>…]` | JSON lines `{"id", "node", "file", "in_gate": bool, "subject_imports_ok": bool, "when": {…}\|null}` for every test in the given files (all test files when none given) that binds itself to a claim id (pytest marker, jest helper, …). **Must be static and cheap** — a syntax scan of the files, never a test collection — because pre-commit calls it with the staged and claim-bound files under a blocking time budget. This is the binding V3 checks: a test self-declares its claim, and the adapter reports it. |
+| `<adapter> run --root <dir> <node>…` | JSON lines `{"node", "outcome": "pass"\|"assert-fail"\|"error"\|"not-found"\|"indeterminate", "reason"}`. `assert-fail` is distinguished from `error` so an import or typo error is never an expected red. `indeterminate` (with a reason such as `env-missing` or `owed-on-host` — a runner that cannot execute on this machine) maps to exit 2, never to a finding; a non-zero exit of the adapter itself makes every requested node indeterminate. `--root` lets the adapter run inside a throwaway worktree (how it reuses environments is the host's business). |
+| `<adapter> edited-bound-tests --staged \| <range>` | the claim ids whose bound test bodies changed (V9) |
+
+**Who establishes `when:`.** The bound test establishes its own conditions (an environment variable, a configuration mock — however the host's configuration works); the claim declares them, and `list` reports the conditions the test sets so V3 can compare. The checker never injects configuration.
+
+**Log adapter** (optional, for `log` claims): `<adapter> run <claim-id>` → `{"outcome": "pass"\|"fail"\|"indeterminate", "evidence"}`, read-only, called only by scheduled runs.
 
 **Config adapter** (optional):
 
 | Call | Returns |
 |---|---|
 | `<adapter> surfaces` | the files that carry production configuration |
-| `<adapter> recorded [--override KEY=VALUE]` | JSON `{key: recorded production value}` — from the host's own records, never a live read |
+| `<adapter> recorded [--rev <rev> \| --staged] [--override KEY=VALUE]` | JSON `{key: {"recorded": …, "default": …}}` — the recorded production value and the code default, read from the host's own records at that revision (or the index for `--staged`), never a live read. V10 compares the merge-base with the staged state. |
 | `<adapter> readers <path>…` | the keys read by code in those paths |
 
 Without a config adapter, V10 and the configuration-faithfulness half of V3 are skipped and `gated` claims are not available.
@@ -167,12 +174,12 @@ The five interception points stay; three become **gates with recorded verdicts**
 | Point | Today | With claims |
 |---|---|---|
 | Post-brainstorm — `spec-generate` | writes specs | also writes claim stubs (`unbuilt`, tracker = the design doc) for each requirement / decision it generates |
-| During plan — `spec-inject --phase=plan` | appends spec maintenance tasks per chunk | also appends a **Claims gate (chunk N)** task as each chunk's last task and a **Final claims gate** task; each implementation task carries `**Claims:** <ids>` or `**Claims:** none — <reason>`. Because the gate is a plan task, it runs on every execute path, including chains that never re-enter a wrapper's execute step (F4). |
+| During plan — `spec-inject --phase=plan` | appends spec maintenance tasks per chunk | also inserts a **Claims gate (chunk N)** task in each chunk **before** its spec-update task (so the Implementation Notes it writes cite the gate's verdicts) and a **Final claims gate** task before the finalize tasks; each implementation task carries `**Claims:** <ids>` or `**Claims:** none — <reason>`. Because the gate is a plan task, it runs on every execute path, including chains that never re-enter a wrapper's execute step (F4). |
 | After each chunk — the **chunk gate** | `spec-inject --phase=execute`: stale-gated agent judgement | `claims gate`: run the chunk's claims and `--planes-of` the chunk's range; V8, V8n and V9 over the chunk's hunks, mandatory here. **Every red claim is reconciled before the next chunk starts** — fix the code, or rule `DOC-STALE` and amend (dated `AMENDED` block + `states` + ruling), or defer as `diverged` with a tracker. A still-`unbuilt` claim the chunk was meant to build is reconciled the same way. The record `chunk-<n>.json` carries the gated commits' **patch-ids** and tree, each verdict, each reconciliation and its ruling. The task text states that the **orchestrating agent** executes the gate (reconciliation may need a judge it dispatches), not a delegated implementer. Implementation Notes then cite these verdicts (V8n). |
 | Pre-finish — the **final gate** | `spec-verify --mode=post-execute`: bookkeeping | `claims attest --final`: (1) every chunk has a record, matched to `merge-base..HEAD` **by patch-id** so a rebase does not orphan it (unmatched → re-verified by step 2 and marked `rebased: re-verified`); (2) every claim the plan names re-run at HEAD — `built`/`gated` passing, or `diverged` with ruling and tracker; (3) cross-check: every ruling, promotion and status change in the sidecars over the range appears in a record, and every record's reconciliation exists at HEAD (a ruling with no gate record is a silent reconciliation); (4) `claims rulings --range` emits the **amendment batch** — every `DOC-STALE`/`RETIRE` with the approved text, the new text and the reason — for the human who reviews docs; (5) `render --check`. `spec-verify --mode=post-execute` reports this verdict. `--deep` re-runs each chunk at its recorded tree. Records are self-reported; attest proves their consistency with the tree, not that an agent ran them. |
 | During review — `spec-verify --mode=review` | freshness + coverage | adds the claims verdict for claims whose subject or runner the change touched, and the V9 items |
 
-**Spec Status Model — new rule R5.** A target spec advances to `Implemented` only when every claim the plan names for it is `built` or `gated` with a passing verdict at the final gate. `:amends` specs remain exempt from Status writes but **not** from claim checks (F3).
+**Spec Status Model — new rule R5.** A target spec advances to `Implemented` only when every claim the plan names for it is `built` or `gated` with a passing verdict at the final gate. `Implemented` means the code implements the spec; whether production runs it is the claim status's job, so a doc with `gated` claims always lists them, with their conditions, in its status block. `:amends` specs remain exempt from Status writes but **not** from claim checks (F3).
 
 ### F. The direction protocol
 
@@ -219,6 +226,8 @@ The `by` field names a principal; doc-superpowers records it and checks the `rec
 - **New suite `scripts/test-spec-claims.sh`** on the existing harness, in CI under bash 5.x and `/bin/bash` 3.2: a passing/failing fixture per check; normalisation (reflow passes, struck text and the status block ignored, an `AMENDED` re-quote fires); the merge-base ratchet (a branch behind a ruled trunk change does not fail); token-changing re-anchor, self-referential `record`, hand-edited `built` all refused; `run` exit codes and precedence with stub adapters; `assert-fail` vs `error`; `promote` with a mutant that stays green refused; gate/attest on a fixture plan, including a rebased branch matched by patch-id and a sidecar ruling with no gate record.
 - **Replay fixtures** for the four drift shapes and the planted drifts above, each caught by its named check at its named point.
 - `test-spec-status-model.sh` pins R5; `test-doc-tools.sh`'s bash-4 guard covers the new code; `check-version` for the bump.
+- The sixth suite is wired in the same release: `CLAUDE.md`'s suite list and counts, the one-line run loop, and `.github/workflows/tests.yml`'s matrix.
+- Implementation notes for bash 3.2: quote normalisation with `jq -Rs` and `gsub` (including a lazy multi-line `~~…~~`); V8's structural keys with awk heading-tracking over `git diff -U0`; patch-id joins with `git patch-id --stable` plus `sort`/`join` or `jq` (no associative arrays); mutant substitution with a literal-safe replace (`index`-based in `jq`/awk), never a glob-interpreting `${s/…}`.
 - Dogfood: this repo's next plan carries Claims lines and gate tasks.
 
 ## Version
