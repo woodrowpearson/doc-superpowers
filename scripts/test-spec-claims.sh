@@ -946,6 +946,323 @@ test_v1_staged_reads_index_sidecars() {
   teardown
 }
 
+# --- V2 anchor and quote normalisation -----------------------------------------
+
+DOC=docs/specs/SPEC-AUTH-001-token.md
+# The fixture doc's claimed line.
+TTL_LINE="- Access tokens expire after 15 minutes."
+
+# doc_edit <file> <exact line> <replacement> [after]: rewrite <file> with each
+# line equal to <exact line> replaced by <replacement> (which may hold
+# newlines), or, with a fourth argument, followed by it. ENVIRON, not -v, so
+# awk applies no escape processing to either text.
+doc_edit() {
+  local tmp
+  tmp=$(harness_mktemp doc-edit)
+  OLD="$2" NEW="$3" MODE="${4:-replace}" awk '
+    $0 == ENVIRON["OLD"] {
+      if (ENVIRON["MODE"] == "after") print
+      print ENVIRON["NEW"]
+      next
+    }
+    { print }' "$1" > "$tmp"
+  cat "$tmp" > "$1"
+  rm -f "$tmp"
+}
+
+# The last `cl`'s V2 finding messages, one per line.
+v2_messages() {
+  jq -r '.findings[]? | select(.check == "V2") | .message' <<<"$CL_OUT" 2>/dev/null || true
+}
+
+# assert_v2 <substring> <what>: the last `cl` exited 1 with a V2 finding whose
+# message contains <substring>.
+assert_v2() {
+  assert_eq "1" "$CL_RC" "$2: exits 1"
+  assert_contains "$(v2_messages)" "$1" "$2: a V2 finding names '$1'"
+}
+
+# assert_v2_ok <what>: the last `cl` exited 0 with no V2 finding.
+assert_v2_ok() {
+  assert_eq "0" "$CL_RC" "$1: exits 0"
+  assert_eq "0" "$(v2_count)" "$1: no V2 finding"
+}
+
+# The AMENDED block a DOC-STALE amendment adds under Requirements.
+AMENDED_LINE='> ⚠️ **AMENDED 2026-10-10 — ttl.** Access tokens expire after 15 minutes.'
+add_amended_requote() {
+  doc_edit "$DOC" "- Refresh tokens are single-use." $'\n'"$AMENDED_LINE" after
+}
+
+# _JQ_CLAIMS_NORM, read out of doc-tools.sh (a single-quoted bash string, so it
+# holds no single quote), for the tests that check its output directly. awk,
+# not ${src#*…}: bash's prefix strip is quadratic on a file this size.
+claims_norm_defs() {
+  awk '!f && sub(/^_JQ_CLAIMS_NORM=\047/, "") { f = 1 }
+       f { if (sub(/\047$/, "")) { print; exit } print }' "$SCRIPT_DIR/doc-tools.sh"
+}
+
+test_v2_unique_live_quote_passes() {
+  echo "test: V2 — a quote with exactly one live occurrence"
+  claims_fixture
+  cl validate --all
+  assert_v2_ok "the fixture's quote"
+  teardown
+}
+
+test_v2_quote_missing() {
+  echo "test: V2 — a quote that is not in the doc"
+  claims_fixture
+  doc_edit "$DOC" "$TTL_LINE" "- Access tokens expire after 30 minutes."
+  cl validate --all
+  assert_v2 "not found" "the doc says 30, the quote 15"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V2")][0].claim' "SPEC-AUTH-001#token-ttl" "…the finding names the claim"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V2")][0].doc' "$DOC" "…and its doc"
+  teardown
+}
+
+test_v2_staged_reads_index() {
+  echo "test: V2 under --staged reads the doc from the index"
+  claims_fixture
+  doc_edit "$DOC" "$TTL_LINE" "- Access tokens expire after 30 minutes."
+  echo "# change" >> src/auth/token.py
+  git add src/auth/token.py
+  cl validate --staged
+  assert_v2_ok "--staged, the doc edit unstaged"
+  git add "$DOC"
+  cl validate --staged
+  assert_v2 "not found" "--staged, the doc edit staged"
+  teardown
+}
+
+test_v2_quote_twice_needs_occurrence() {
+  echo "test: V2 — two live occurrences need quote_occurrence"
+  claims_fixture
+  doc_edit "$DOC" "How long issued tokens stay valid." $'\n'"Access tokens expire after 15 minutes." after
+  cl validate --all
+  assert_v2 "2 live occurrences" "the sentence copied under Summary"
+  jset "$SIDECAR" '.claims[0].quote_occurrence = 1'
+  cl validate --all
+  assert_v2_ok "quote_occurrence 1"
+  jset "$SIDECAR" '.claims[0].quote_occurrence = 2'
+  cl validate --all
+  assert_v2_ok "quote_occurrence 2"
+  jset "$SIDECAR" '.claims[0].quote_occurrence = 3'
+  cl validate --all
+  assert_v2 "quote_occurrence 3" "quote_occurrence 3 of 2"
+  teardown
+}
+
+test_v2_reflow_passes() {
+  echo "test: V2 — a reflowed sentence still anchors"
+  claims_fixture
+  doc_edit "$DOC" "$TTL_LINE" $'- Access tokens   expire\n      after 15\tminutes.'
+  cl validate --all
+  assert_v2_ok "the sentence wrapped over two lines"
+  teardown
+}
+
+test_v2_emphasis_stripped() {
+  echo "test: V2 — emphasis is stripped before matching"
+  claims_fixture
+  doc_edit "$DOC" "$TTL_LINE" '- **Access** tokens expire after _15_ `minutes`.'
+  cl validate --all
+  assert_v2_ok "emphasis inside the sentence"
+  teardown
+}
+
+test_v2_struck_text_not_live() {
+  echo "test: V2 — struck text is not live"
+  claims_fixture
+  doc_edit "$DOC" "$TTL_LINE" "- ~~Access tokens expire after 15 minutes.~~"$'\n'"$TTL_LINE"
+  cl validate --all
+  assert_v2_ok "the struck copy is not counted"
+  # Struck alone, the quote has no live occurrence.
+  doc_edit "$DOC" "$TTL_LINE" "- Refresh tokens rotate."
+  cl validate --all
+  assert_v2 "not found" "only the struck copy remains"
+  teardown
+}
+
+test_v2_multiline_struck_lazy() {
+  echo "test: V2 — the strike match is lazy across lines"
+  claims_fixture
+  doc_edit "$DOC" "$TTL_LINE" "~~Old rule one.~~"$'\n'"$TTL_LINE"$'\n'"~~Old rule"$'\n'"two.~~"
+  cl validate --all
+  assert_v2_ok "two struck spans around the quote"
+  teardown
+}
+
+test_v2_status_block_not_live() {
+  echo "test: V2 — the generated status block is not live"
+  claims_fixture
+  doc_edit "$DOC" "## Requirements" $'<!-- spec-claims:status:begin -->\n## Claim status\n\nAccess tokens expire after 15 minutes.\n\n<!-- spec-claims:status:end -->\n\n## Requirements'
+  cl validate --all
+  assert_v2_ok "the quote copied inside the status markers"
+  teardown
+}
+
+test_v2_retired_quote_still_live() {
+  echo "test: V2 — a retired claim's quote must not be live"
+  claims_fixture
+  jset "$SIDECAR" ".claims[0].status = \"retired\" | .claims[0].rulings = [$_CL_RETIRE]"
+  cl validate --all
+  assert_v2 "retired" "a retired claim whose sentence is not struck"
+  doc_edit "$DOC" "$TTL_LINE" "- ~~Access tokens expire after 15 minutes.~~"
+  cl validate --all
+  assert_v2_ok "the retired claim's sentence struck"
+  teardown
+}
+
+test_v2_amended_requote_fires() {
+  echo "test: V2 — an AMENDED block re-quoting a claimed sentence"
+  claims_fixture
+  add_amended_requote
+  cl validate --all
+  assert_v2 "AMENDED block re-quotes" "the AMENDED re-quote without quote_occurrence"
+  assert_contains "$(v2_messages)" "set quote_occurrence to the live occurrence" "…telling the author what to set"
+  teardown
+}
+
+test_v2_amended_requote_with_occurrence_ok() {
+  echo "test: V2 — an AMENDED re-quote anchored by quote_occurrence"
+  claims_fixture
+  add_amended_requote
+  jset "$SIDECAR" '.claims[0].quote_occurrence = 2'
+  cl validate --all
+  assert_v2_ok "quote_occurrence 2 (the amended occurrence)"
+  # The re-quote wrapping inside the blockquote: its ">" markers are stripped.
+  doc_edit "$DOC" "$AMENDED_LINE" $'> ⚠️ **AMENDED 2026-10-10 — ttl.** Access tokens\n> expire after 15 minutes.'
+  cl validate --all
+  assert_v2_ok "quote_occurrence 2, the amended re-quote wrapped across '>' lines"
+  teardown
+}
+
+test_v2_amended_requote_ruling_alone_fails() {
+  echo "test: V2 — a ruling alone does not anchor an AMENDED re-quote"
+  claims_fixture
+  add_amended_requote
+  jset "$SIDECAR" '.claims[0].rulings = [{"date":"2026-10-10","direction":"DOC-STALE","by":"doc-owner","record":"docs/issues/token-ttl.md","reason":"The TTL was renegotiated."}]'
+  cl validate --all
+  assert_v2 "a ruling alone does not anchor it" "a DOC-STALE ruling without quote_occurrence"
+  assert_no_v1 "the ruling itself is well formed"
+  teardown
+}
+
+test_v2_tilde_fence_not_strike() {
+  echo "test: V2 — ~~~ fences are not strike spans"
+  claims_fixture
+  doc_edit "$DOC" "## Requirements" $'## Requirements\n\n~~~sh\ncd ~/app\n~~~'
+  doc_edit "$DOC" "- Refresh tokens are single-use." $'\n~~~text\nexample\n~~~' after
+  cl validate --all
+  assert_v2_ok "a ~~~ fence above the sentence and one below"
+  # The upper fence closed by a longer (legal) ~~~~: unmasked, its second
+  # "~~" would open a strike that the fence below closes, swallowing the
+  # sentence.
+  git checkout -q -- "$DOC"
+  doc_edit "$DOC" "## Requirements" $'## Requirements\n\n~~~sh\ncd ~/app\n~~~~'
+  doc_edit "$DOC" "- Refresh tokens are single-use." $'\n~~~text\nexample\n~~~' after
+  cl validate --all
+  assert_v2_ok "a ~~~ fence closed by ~~~~ above the sentence, a ~~~ fence below"
+  teardown
+}
+
+test_v2_fenced_tilde_restored() {
+  echo "test: V2 — a ~~ inside a fence is neither a strike nor lost"
+  claims_fixture
+  # Unmasked, the fenced "~~" would pair with the fence opener, and the
+  # closer with the later strike, swallowing the claimed prose line.
+  doc_edit "$DOC" "## Requirements" $'## Requirements\n\n```\na ~~ b\n```'
+  doc_edit "$DOC" "- Refresh tokens are single-use." $'~~Refresh tokens are reusable.~~' after
+  cl validate --all
+  assert_v2_ok "a fenced 'a ~~ b' before the claimed prose line"
+  # The fenced text keeps its tildes: a claim may quote it.
+  jset "$SIDECAR" '.claims[0].quote = "a ~~ b"'
+  cl validate --all
+  assert_v2_ok "a claim quoting the fenced 'a ~~ b'"
+  teardown
+}
+
+test_no_raw_sentinel_in_doc_tools() {
+  echo "test: the U+FFFF sentinel appears in doc-tools.sh only as the \\uffff escape"
+  local raw esc
+  raw=$(LC_ALL=C grep -c $'\xef\xbf\xbf' "$SCRIPT_DIR/doc-tools.sh" || true)
+  esc=$(grep -cF '\uffff' "$SCRIPT_DIR/doc-tools.sh" || true)
+  assert_eq "0" "$raw" "no raw U+FFFF bytes in doc-tools.sh"
+  assert_true "the \\uffff escape masks and restores (at least 2 uses; got ${esc:-0})" [ "${esc:-0}" -ge 2 ]
+}
+
+test_v2_crlf_doc() {
+  echo "test: V2 — a CRLF doc anchors as its LF twin does"
+  claims_fixture
+  local tmp
+  tmp=$(harness_mktemp crlf)
+  awk '{ printf "%s\r\n", $0 }' "$DOC" > "$tmp"
+  cat "$tmp" > "$DOC"
+  assert_true "the doc is CRLF" grep -q $'\r$' "$DOC"
+  cl validate --all
+  assert_v2_ok "the CRLF doc"
+  # A wrap in a CRLF doc: the \r is part of the line break.
+  doc_edit "$DOC" "$TTL_LINE"$'\r' $'- Access tokens expire\r\n  after 15 minutes.\r'
+  cl validate --all
+  assert_v2_ok "the sentence wrapped in the CRLF doc"
+  # The CRLF doc's normalised text and line spans equal its LF twin's.
+  local defs crlf lf
+  defs=$(claims_norm_defs)
+  tr -d '\r' < "$DOC" > "$tmp"
+  crlf=$(jq -Rsc "$defs claims_doc" "$DOC" 2>/dev/null || echo "jq failed")
+  lf=$(jq -Rsc "$defs claims_doc" "$tmp" 2>/dev/null || echo "jq failed")
+  assert_contains "$lf" '"lines":[{"n":1,' "claims_doc ran on the LF twin"
+  assert_eq "$lf" "$crlf" "claims_doc of the CRLF doc equals the LF doc's"
+  rm -f "$tmp"
+  teardown
+}
+
+test_v2_unicode_quote() {
+  echo "test: V2 — non-ASCII text: occurrences are codepoint offsets"
+  claims_fixture
+  doc_edit "$DOC" "How long issued tokens stay valid." "How long issued tokens stay valid — durée de vie, § café."
+  doc_edit "$DOC" "- Refresh tokens are single-use." "- Tokens — même après 15 minutes."
+  jset "$SIDECAR" '.claims[0].quote = "Tokens — même après 15 minutes"'
+  cl validate --all
+  assert_v2_ok "a quote with é and — after lines holding them"
+  # claims_occ's offset against an independent codepoint search of the same
+  # normalised text (explode and compare windows; no split, no index).
+  local defs q='Tokens — même après 15 minutes' got want line bytes
+  defs=$(claims_norm_defs)
+  got=$(jq -Rsc --arg q "$q" "$defs claims_doc | claims_occ(\$q)" "$DOC" 2>/dev/null || echo "jq failed")
+  want=$(jq -Rsc --arg q "$q" "$defs claims_doc | .text | explode as \$t | (\$q | explode) as \$e
+    | [range(0; (\$t | length) - (\$e | length) + 1) | select(\$t[.:. + (\$e | length)] == \$e)]" "$DOC" 2>/dev/null || echo "want failed")
+  assert_eq "$want" "$got" "claims_occ equals the codepoint offsets"
+  # …which differ from the byte offset (so the doc does exercise the difference).
+  bytes=$(jq -Rsr --arg q "$q" "$defs claims_doc | .text | split(\$q)[0] | utf8bytelength" "$DOC" 2>/dev/null || echo "bytes failed")
+  assert_true "one occurrence, at a codepoint offset (got $want)" grep -qE '^\[[0-9]+\]$' <<<"$want"
+  assert_true "the codepoint offset $got is not the byte offset $bytes" [ "$want" != "[$bytes]" ]
+  # claims_lines_hit names the line the quote is on (grep -n, independent).
+  line=$(grep -n "^- Tokens — même" "$DOC" | cut -d: -f1)
+  got=$(jq -Rsc --arg q "$q" "$defs claims_doc | claims_lines_hit(\$q; 1)" "$DOC" 2>/dev/null || echo "jq failed")
+  assert_eq "[$line]" "$got" "claims_lines_hit names line $line"
+  teardown
+}
+
+test_v2_lines_hit_wrapped() {
+  echo "test: claims_lines_hit — a wrapped quote hits both its lines"
+  claims_fixture
+  doc_edit "$DOC" "$TTL_LINE" $'- Access tokens expire\n  after 15 minutes.'
+  local defs line got
+  defs=$(claims_norm_defs)
+  line=$(grep -n "^- Access tokens expire$" "$DOC" | cut -d: -f1)
+  got=$(jq -Rsc --arg q "Access tokens expire after 15 minutes" "$defs claims_doc | claims_lines_hit(\$q; 1)" "$DOC" 2>/dev/null || echo "jq failed")
+  assert_eq "[$line,$((line + 1))]" "$got" "the occurrence hits lines $line and $((line + 1))"
+  got=$(jq -Rsc --arg q "Access tokens expire after 15 minutes" "$defs claims_doc | claims_lines_hit(\$q; 2)" "$DOC" 2>/dev/null || echo "jq failed")
+  assert_eq "[]" "$got" "no second occurrence: no lines"
+  # claims_live keeps the line count: the doc's own, struck spans and status block included.
+  doc_edit "$DOC" "## Summary" $'## Summary\n\n~~gone\nacross lines~~\n<!-- spec-claims:status:begin -->\nx\n<!-- spec-claims:status:end -->\n```\ny\n```'
+  got=$(jq -Rsr "$defs claims_live | split(\"\\n\") | length" "$DOC" 2>/dev/null || echo "jq failed")
+  assert_eq "$(jq -Rsr 'split("\n") | length' "$DOC")" "$got" "claims_live keeps the line count"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -990,6 +1307,27 @@ run_tests() {
   test_v1_staged_scope
   test_v1_staged_config_touches_every_claim
   test_v1_staged_reads_index_sidecars
+
+  # --- Task 3: quote normalisation and V2 anchor ---
+  test_v2_unique_live_quote_passes
+  test_v2_quote_missing
+  test_v2_staged_reads_index
+  test_v2_quote_twice_needs_occurrence
+  test_v2_reflow_passes
+  test_v2_emphasis_stripped
+  test_v2_struck_text_not_live
+  test_v2_multiline_struck_lazy
+  test_v2_status_block_not_live
+  test_v2_retired_quote_still_live
+  test_v2_amended_requote_fires
+  test_v2_amended_requote_with_occurrence_ok
+  test_v2_amended_requote_ruling_alone_fails
+  test_v2_tilde_fence_not_strike
+  test_v2_fenced_tilde_restored
+  test_no_raw_sentinel_in_doc_tools
+  test_v2_crlf_doc
+  test_v2_unicode_quote
+  test_v2_lines_hit_wrapped
 
   print_summary
 }

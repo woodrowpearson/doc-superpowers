@@ -6176,6 +6176,134 @@ _claims_v1() {
     "$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_SCHEMA $_JQ_CLAIMS_V1" >> "$_SCRATCH/cl-findings.jsonl"
 }
 
+# --- Spec claims: quote normalisation, V2 --------------------------------------
+#
+# A quote anchors in the doc's live text, normalised (§B): line wraps and
+# whitespace collapsed, *, _ and ` emphasis and leading blockquote markers
+# stripped. Struck text (~~…~~) and the generated status block are not live;
+# a dated AMENDED block is. Everything runs in one jq -Rs call per doc (no
+# shell loop over lines), and every offset is a codepoint offset: strings
+# are located with split($q) and length, never index/indices (jq 1.6 returns
+# byte offsets there), and no gsub pattern can match the empty string (jq
+# 1.6 loops on one).
+
+# The shared jq defs (render, V2, V8 and V8n run after them):
+#   claims_live       raw doc → the same number of lines, CRLF read as LF and
+#                     each dead span (status block, ~~strike~~) blanked to its
+#                     newlines. Code fences are masked first, so a ~~~ fence
+#                     is never read as a strike: a fence delimiter line
+#                     becomes "", and each "~" inside a fence the sentinel
+#                     U+FFFF — written here only as the jq escape \uffff,
+#                     never as raw bytes — restored once strikes are gone.
+#   claims_norm       string → its normalised form (a doc or a quote).
+#   claims_doc        raw doc → {text: <normalised>, lines: [{n, start, end,
+#                     amended}]}: n the 1-based line, [start, end) its
+#                     codepoint span in text, for each line whose normalised
+#                     form is non-empty (lines join with one space). amended:
+#                     a ">" line of a blockquote whose first line matches
+#                     ^>.*\*\*AMENDED YYYY-MM-DD.
+#   claims_occ($q)    on claims_doc: the non-overlapping start offsets of $q
+#                     (a normalised quote) in .text.
+#   claims_lines_hit($q; $k)  on claims_doc: the n of each line the $k-th
+#                     occurrence (1-based, as quote_occurrence) intersects;
+#                     [] when there is none.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_NORM='def claims_blank: gsub("[^\n]"; "");
+ def claims_mask_fences:
+   reduce split("\n")[] as $l ({fence: false, out: []};
+     if $l | test("^[ \t]*(```|~~~)") then .fence |= not | .out += [""]
+     elif .fence then .out += [$l | gsub("~"; "\uffff")]
+     else .out += [$l] end)
+   | .out | join("\n");
+ def claims_live: gsub("\r\n"; "\n") | claims_mask_fences
+   | gsub("(?<s><!-- spec-claims:status:begin -->[\\s\\S]*?<!-- spec-claims:status:end -->)"; .s | claims_blank)
+   | gsub("(?<s>~~[\\s\\S]*?~~)"; .s | claims_blank)
+   | gsub("\uffff"; "~");
+ def claims_norm_line: sub("^[ \t]*(>[ \t]?)+"; "") | gsub("[*_`]"; "") | gsub("[ \t]+"; " ")
+   | sub("^ "; "") | sub(" $"; "");
+ def claims_norm: claims_live | split("\n") | map(claims_norm_line) | map(select(. != "")) | join(" ");
+ def claims_doc:
+   (claims_live | split("\n")) as $ls
+   | reduce range(0; $ls | length) as $i ({parts: [], lines: [], off: 0, bq: false, amd: false};
+       $ls[$i] as $raw
+       | ($raw | claims_norm_line) as $nl
+       | ($raw | test("^[ \t]*>")) as $bq
+       | (if $bq and (.bq | not)
+          then .amd = ($raw | test("^[ \t]*>.*\\*\\*AMENDED [0-9]{4}-[0-9]{2}-[0-9]{2}")) else . end)
+       | .bq = $bq
+       | if $nl == "" then .
+         else .parts += [$nl]
+           | .lines += [{n: ($i + 1), start: .off, end: (.off + ($nl | length)), amended: ($bq and .amd)}]
+           | .off += ($nl | length) + 1
+         end)
+   | {text: (.parts | join(" ")), lines};
+ def claims_occ($q):
+   if $q == "" then []
+   else (.text | split($q)) as $p | ($q | length) as $ql
+     | reduce range(1; $p | length) as $k ([];
+         . + [(if $k == 1 then 0 else .[-1] + $ql end) + ($p[$k - 1] | length)])
+   end;
+ def claims_lines_hit($q; $k):
+   (if $k >= 1 then claims_occ($q)[$k - 1] else null end) as $p
+   | if $p == null then []
+     else ($p + ($q | length)) as $e | [.lines[] | select(.start < $e and .end > $p) | .n] end;'
+
+# V2 over one doc (raw on stdin, path $doc; run after _JQ_CLAIMS_NORM): each
+# eligible, touched claim of the doc ($c: cl-claims.json, $t:
+# cl-touched.json) whose quote is not anchored. With n live occurrences of
+# the normalised quote: retired needs n == 0; quote_occurrence k needs
+# n >= k; otherwise n == 1. When n > 1 without quote_occurrence and an
+# occurrence lies in an AMENDED block, the message says so: a DOC-STALE
+# ruling that re-quotes the sentence must set quote_occurrence too. One
+# finding row per line.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_V2='def v2($claim; $msg): {check: "V2", claim: $claim, doc: $doc, message: $msg};
+ claims_doc as $d
+ | [$d.lines[] | select(.amended) | .n] as $amended
+ | $t[0] as $touched
+ | $c[0][]
+ | select(.eligible and .doc == $doc) | .claim
+ | select((.id | type) == "string" and (.quote | type) == "string")
+ | select(.id as $i | any($touched[]; . == $i))
+ | .id as $id | .quote_occurrence as $k
+ | (.quote | claims_norm) as $q
+ | ($d | claims_occ($q) | length) as $n
+ | "quote not found in the live text of \($doc) (struck text and the status block are not live)" as $missing
+ | (if $q == "" then "quote is empty once normalised (whitespace and *, _, ` emphasis removed)"
+    elif .status == "retired" then
+      (if $n == 0 then empty
+       else "retired claim: its quote is still live (\($n) live occurrence(s) in \($doc)): strike the sentence (~~text~~) or remove it" end)
+    elif ($k | type) == "number" then
+      (if $n >= $k then empty
+       elif $n == 0 then $missing
+       else "quote_occurrence \($k), but the quote has \($n) live occurrence(s) in \($doc)" end)
+    elif $k != null then empty
+    elif $n == 1 then empty
+    elif $n == 0 then $missing
+    elif any(range(1; $n + 1); . as $j | $d | claims_lines_hit($q; $j) | any(.[]; . as $x | any($amended[]; . == $x)))
+    then "AMENDED block re-quotes a claimed sentence: set quote_occurrence to the live occurrence (a ruling alone does not anchor it)"
+    else "quote has \($n) live occurrences in \($doc): make it unique, or set quote_occurrence to the one it anchors"
+    end)
+ | v2($id; .) | tojson'
+
+# V2: one jq -Rs per doc that has an eligible, touched claim, the doc read
+# through _claims_read (the index under --staged). A quote_occurrence that is
+# not an integer >= 1 is V1's finding, not V2's.
+_claims_v2() {
+  local doc_list="$_SCRATCH/cl-v2-docs" doc_raw="$_SCRATCH/cl-v2-doc.raw" doc
+  _claims_jq v2-docs -r --slurpfile t "$_SCRATCH/cl-touched.json" \
+    '[.[] | select(.eligible and (.doc | type) == "string" and (.claim.id | type) == "string")
+      | select(.claim.id as $i | any($t[0][]; . == $i)) | .doc] | unique | .[]' \
+    "$_SCRATCH/cl-claims.json" > "$doc_list"
+  while IFS= read -r doc <&3; do
+    [ -n "$doc" ] || continue
+    _claims_read "$doc" > "$doc_raw" || _claims_die "cannot read $doc (V2)"
+    _claims_jq v2 -Rsr --arg doc "$doc" --slurpfile c "$_SCRATCH/cl-claims.json" \
+      --slurpfile t "$_SCRATCH/cl-touched.json" "$_JQ_CLAIMS_NORM $_JQ_CLAIMS_V2" "$doc_raw" \
+      >> "$_SCRATCH/cl-findings.jsonl"
+  done 3< "$doc_list"
+}
+
 cmd_claims_validate() {
   local mode=all
   if [ "$_OPT_staged" = 1 ]; then mode=staged; fi
@@ -6188,6 +6316,7 @@ cmd_claims_validate() {
   _claims_load
   _claims_touched
   _claims_v1
+  _claims_v2
   _claims_emit validate
 }
 
