@@ -6331,6 +6331,136 @@ _claims_v2() {
   done 3< "$doc_list"
 }
 
+# --- Spec claims: trackers, V5 ---------------------------------------------------
+#
+# A tracker is open (Design deviations) when it matches one of config
+# tracker_patterns — an ERE, tested with jq test(): an issue number or a URL,
+# whose state lives in a service a hook cannot read offline, so it is assumed
+# open — or when it is a repo path present in the proposed tree (read through
+# _claims_read: the index under --staged) whose status value is not closed.
+# The status value is the first status line's: front matter `status:` (in a
+# leading ---…--- block), or a `**Status**:` / `**Status:**` line outside code
+# fences; CRLF reads as LF, and a doc with no status line is open. Leading
+# whitespace, *, ` and _ are stripped, and only the value's leading word (the
+# first run of [A-Za-z]+) counts, matched whole and case-insensitively against
+# the closed words: "Approved — not done" is open, "`Done` (2026-10-01)" closed.
+
+_CL_TRACKER_STATE=""  # _claims_tracker_open's answer: pattern | open | closed | missing
+_CL_TRACKER_VALUE=""  # the tracker doc's status value ("" without a status line)
+
+# 0 when $t matches one of config tracker_patterns (on cl-config.json). A
+# pattern jq cannot compile matches nothing.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_TRACKER_PATTERN='(if (.tracker_patterns | type) == "array" then [.tracker_patterns[] | strings] else [] end) as $ps
+ | any($ps[]; . as $p | $t | try test($p) catch false)'
+
+# A tracker doc (raw on stdin; run after _JQ_CLAIMS_NORM, for
+# claims_fence_kinds) → "<open|closed><TAB><status value>".
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_TRACKER='gsub("\r\n"; "\n") as $raw
+ | ($raw | split("\n")) as $ls
+ | (if ($ls[0] // "") | test("^---[ \t]*$")
+    then ([range(1; $ls | length) | select($ls[.] | test("^(---|\\.\\.\\.)[ \t]*$"))][0] // 0)
+    else 0 end) as $fm
+ | ($raw | claims_fence_kinds) as $k
+ | ([range(0; $ls | length) as $i
+     | if $i < $fm then
+         select($i > 0) | $ls[$i] | capture("^status[ \t]*:(?<v>.*)$") | .v
+       elif $i > $fm or $fm == 0 then
+         select($k[$i].k == "out") | $ls[$i]
+         | capture("^[ \t]*([-+*][ \t]+)?\\*\\*Status(\\*\\*:|:\\*\\*)(?<v>.*)$") | .v
+       else empty end][0]) as $v
+ | if $v == null then "open\t"
+   else ($v | sub("^[ \t*`_]+"; "") | sub("[ \t]+$"; "")) as $val
+     | ([$val | match("[A-Za-z]+")][0].string // "") as $word
+     | (if $word | test("^(closed|resolved|done|fixed|completed|wontfix)$"; "i") then "closed" else "open" end)
+       + "\t" + $val
+   end'
+
+# _claims_tracker_open <tracker>: 0 when the tracker is open (see the section
+# comment). Sets _CL_TRACKER_STATE and _CL_TRACKER_VALUE, so call it in the
+# main shell. A path is a repo path only when relative, with no ".", ".." or
+# empty segment (the index could never hold one, and --all must agree).
+_claims_tracker_open() {
+  local t="$1" raw="$_SCRATCH/cl-tracker.raw" out
+  _CL_TRACKER_STATE=missing
+  _CL_TRACKER_VALUE=""
+  [ -n "$t" ] || return 1
+  out=$(_claims_jq tracker-patterns -r --arg t "$t" "$_JQ_CLAIMS_TRACKER_PATTERN" "$_SCRATCH/cl-config.json") \
+    || _claims_propagate $?
+  if [ "$out" = true ]; then
+    _CL_TRACKER_STATE=pattern
+    return 0
+  fi
+  case "/$t/" in
+    */../*|*/./*|*//*) return 1 ;;
+  esac
+  _claims_read "$t" > "$raw" || return 1
+  out=$(_claims_jq tracker-status -Rsr "$_JQ_CLAIMS_NORM $_JQ_CLAIMS_TRACKER" "$raw") || _claims_propagate $?
+  _CL_TRACKER_STATE=${out%%$'\t'*}
+  _CL_TRACKER_VALUE=${out#*$'\t'}
+  [ "$_CL_TRACKER_STATE" = open ]
+}
+
+# V5 over the eligible, touched claims ($c: cl-claims.json, $t:
+# cl-touched.json; $tr: one {tracker, state, value} row per tracker
+# _claims_v5 resolved — a tracker without a row is missing): diverged and
+# unbuilt need an open tracker; diverged needs a CODE-DIVERGES ruling;
+# retired a RETIRE or DOC-STALE ruling; enforced_by judge a
+# why_not_mechanical. A field of the wrong type counts as absent here (V1
+# names the type). One finding row per line.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_V5='def v5($claim; $doc; $msg): {check: "V5", claim: $claim, doc: $doc, message: $msg};
+ def nes: type == "string" and length > 0;
+ def ruled($dirs): [.rulings | if type == "array" then .[] | objects | .direction else empty end] as $have
+   | any($dirs[]; . as $d | any($have[]; . == $d));
+ (reduce $tr[] as $r ({}; .[$r.tracker] = $r)) as $trackers
+ | $t[0] as $touched
+ | $c[0][]
+ | select(.eligible) | .doc as $doc | .claim
+ | select((.id | type) == "string")
+ | select(.id as $i | any($touched[]; . == $i))
+ | .id as $id
+ | (if .status == "diverged" or .status == "unbuilt" then
+      (if .tracker | nes | not
+       then "\(.status) claim has no tracker: it needs an open one (a repo path, or a string matching config tracker_patterns)"
+       else ($trackers[.tracker] // {state: "missing"}) as $s
+         | if $s.state == "closed"
+           then "tracker is closed: \(.tracker) has status: \($s.value); status \(.status) needs an open tracker"
+           elif $s.state == "missing"
+           then "tracker \(.tracker) is not a path in the proposed tree and matches no config tracker_patterns: status \(.status) needs an open tracker"
+           else empty end
+       end)
+    else empty end),
+   (if .status == "diverged" and (ruled(["CODE-DIVERGES"]) | not)
+    then "diverged claim has no CODE-DIVERGES ruling" else empty end),
+   (if .status == "retired" and (ruled(["RETIRE", "DOC-STALE"]) | not)
+    then "retired claim has no RETIRE or DOC-STALE ruling (the ruling records why)" else empty end),
+   (if .enforced_by == "judge" and (.why_not_mechanical | nes | not)
+    then "enforced_by judge needs why_not_mechanical: why no test, lint or log check is feasible" else empty end)
+ | v5($id; $doc; .) | tojson'
+
+# V5: each distinct tracker of an eligible, touched diverged or unbuilt claim
+# resolved once (_claims_tracker_open), then one jq over the claims. A
+# tracker holding a newline cannot be a repo path, and is left missing.
+_claims_v5() {
+  local list="$_SCRATCH/cl-v5-trackers" rows="$_SCRATCH/cl-v5-trackers.jsonl" t
+  : > "$rows"
+  _claims_jq v5-trackers -r --slurpfile t "$_SCRATCH/cl-touched.json" \
+    '[.[] | select(.eligible and (.claim.id | type) == "string")
+      | select(.claim.id as $i | any($t[0][]; . == $i)) | .claim
+      | select(.status == "diverged" or .status == "unbuilt")
+      | .tracker | strings | select(. != "" and (test("\n") | not))] | unique | .[]' \
+    "$_SCRATCH/cl-claims.json" > "$list"
+  while IFS= read -r t <&3; do
+    _claims_tracker_open "$t" || true
+    _claims_jq v5-tracker-row -nc --arg t "$t" --arg s "$_CL_TRACKER_STATE" --arg v "$_CL_TRACKER_VALUE" \
+      '{tracker: $t, state: $s, value: $v}' >> "$rows"
+  done 3< "$list"
+  _claims_jq v5 -nr --slurpfile c "$_SCRATCH/cl-claims.json" --slurpfile t "$_SCRATCH/cl-touched.json" \
+    --slurpfile tr "$rows" "$_JQ_CLAIMS_V5" >> "$_SCRATCH/cl-findings.jsonl"
+}
+
 cmd_claims_validate() {
   local mode=all
   if [ "$_OPT_staged" = 1 ]; then mode=staged; fi
@@ -6344,6 +6474,7 @@ cmd_claims_validate() {
   _claims_touched
   _claims_v1
   _claims_v2
+  _claims_v5
   _claims_emit validate
 }
 
