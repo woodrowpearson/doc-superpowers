@@ -518,6 +518,417 @@ test_stub_verbs_enabled() {
   teardown
 }
 
+# --- V1 schema -----------------------------------------------------------------
+
+SIDECAR=docs/spec-claims/SPEC-AUTH-001.json
+
+# The last `cl`'s V1 finding messages, one per line, and their count.
+v1_messages() {
+  jq -r '.findings[]? | select(.check == "V1") | .message' <<<"$CL_OUT" 2>/dev/null || true
+}
+v1_count() {
+  jq '[.findings[]? | select(.check == "V1")] | length' <<<"$CL_OUT" 2>/dev/null || echo invalid
+}
+v2_count() {
+  jq '[.findings[]?, .advisories[]? | select(.check == "V2")] | length' <<<"$CL_OUT" 2>/dev/null || echo invalid
+}
+
+# assert_v1 <substring> <what>: the last `cl` exited 1 with a V1 finding whose
+# message contains <substring>.
+assert_v1() {
+  assert_eq "1" "$CL_RC" "$2: exits 1"
+  assert_contains "$(v1_messages)" "$1" "$2: a V1 finding names '$1'"
+}
+
+# assert_no_v1 <what>: the last `cl` reported no V1 finding (its rc is left
+# to the later checks).
+assert_no_v1() {
+  assert_eq "0" "$(v1_count)" "$1: no V1 finding"
+}
+
+# A RETIRE ruling recorded in the fixture's issue doc.
+_CL_RETIRE='{"date":"2026-10-11","direction":"RETIRE","by":"doc-owner","record":"docs/issues/token-ttl.md","reason":"The spec was archived."}'
+
+test_v1_valid_fixture_passes() {
+  echo "test: V1 — the fixture sidecar is valid"
+  claims_fixture
+  cl validate --all
+  assert_eq "0" "$CL_RC" "validate --all on the fixture exits 0"
+  assert_json_field "$CL_OUT" '.findings' "[]" "no findings"
+  teardown
+}
+
+test_v1_malformed_record() {
+  echo "test: V1 — a claim record missing a required field"
+  claims_fixture
+  jset "$SIDECAR" 'del(.claims[0].states)'
+  cl validate --all
+  assert_v1 "states" "a claim without states"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V1")][0].claim' "SPEC-AUTH-001#token-ttl" "…the finding names the claim"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V1")][0].doc' "docs/specs/SPEC-AUTH-001-token.md" "…and its doc"
+  local f
+  for f in id quote kind subject status enforced_by; do
+    git checkout -q -- "$SIDECAR"
+    jset "$SIDECAR" "del(.claims[0].$f)"
+    cl validate --all
+    assert_v1 "missing required field $f" "a claim without $f"
+  done
+  git checkout -q -- "$SIDECAR"
+  jset "$SIDECAR" '.claims[0].subject = "src/auth/token.py"'
+  cl validate --all
+  assert_v1 "subject" "a subject that is not an array"
+  git checkout -q -- "$SIDECAR"
+  jset "$SIDECAR" '.claims[0].quote = ""'
+  cl validate --all
+  assert_v1 "quote" "an empty quote"
+  teardown
+}
+
+test_v1_bad_id() {
+  echo "test: V1 — an id that is not <DOC-ID>#<slug>"
+  claims_fixture
+  jset "$SIDECAR" '.claims[0].id = "SPEC-AUTH-001-token-ttl"'
+  cl validate --all
+  assert_v1 "id" "id SPEC-AUTH-001-token-ttl"
+  local id
+  for id in "SPEC-AUTH-002#token-ttl" "SPEC-AUTH-001#Token-TTL" "SPEC-AUTH-001#-ttl" "SPEC-AUTH-001#" "SPEC-AUTH-001#a#b"; do
+    git checkout -q -- "$SIDECAR"
+    jset "$SIDECAR" ".claims[0].id = \"$id\""
+    cl validate --all
+    assert_v1 "id $id is not SPEC-AUTH-001#<slug>" "id $id"
+  done
+  teardown
+}
+
+test_v1_duplicate_id() {
+  echo "test: V1 — ids are unique across all sidecars"
+  claims_fixture
+  jset "$SIDECAR" '.claims += [.claims[0]]'
+  cl validate --all
+  assert_v1 "duplicate" "a claim copied within its sidecar"
+  assert_eq "1" "$(v1_messages | grep -c duplicate)" "…one finding for the duplicated id"
+  git checkout -q -- "$SIDECAR"
+  # The same id in another doc's sidecar.
+  mkdir -p docs/adr
+  printf '# ADR-007: Cache tokens\n\n## Decision\n\nCache tokens for 5 minutes.\n' > docs/adr/ADR-007-cache.md
+  jq '.doc = "docs/adr/ADR-007-cache.md"' "$SIDECAR" > docs/spec-claims/ADR-007.json
+  cl validate --all
+  assert_v1 "duplicate id SPEC-AUTH-001#token-ttl" "the same id in two sidecars"
+  teardown
+}
+
+test_v1_doc_not_governing() {
+  echo "test: V1 — a sidecar's doc must be governing"
+  claims_fixture
+  printf '# Notes\n\nAccess tokens expire after 15 minutes.\n' > docs/notes.md
+  jset "$SIDECAR" '.doc = "docs/notes.md"'
+  cl validate --all
+  assert_v1 "not governing" "doc docs/notes.md"
+  assert_contains "$(v1_messages)" "docs/notes.md" "…the finding names the doc"
+  assert_eq "1" "$(v1_count)" "…and is the only V1 finding (no stem or id storm)"
+  # Under a governing glob, but without a DOC-ID prefix.
+  cp docs/notes.md docs/specs/template.md
+  jset "$SIDECAR" '.doc = "docs/specs/template.md"'
+  cl validate --all
+  assert_v1 "not governing" "doc docs/specs/template.md (no DOC-ID)"
+  teardown
+}
+
+test_v1_stem_mismatch() {
+  echo "test: V1 — the sidecar stem must equal its doc's DOC-ID"
+  claims_fixture
+  git mv "$SIDECAR" docs/spec-claims/SPEC-AUTH-002.json
+  cl validate --all
+  assert_v1 "stem" "sidecar SPEC-AUTH-002.json for SPEC-AUTH-001"
+  assert_contains "$(v1_messages)" "SPEC-AUTH-001.json" "…naming the stem it should have"
+  teardown
+}
+
+test_v1_host_glob_doc_id_is_stem() {
+  echo "test: V1 — a doc under a governing_extra glob has its file stem as DOC-ID"
+  claims_fixture
+  jset docs/spec-claims/config.json '.governing_extra = ["docs/evals/*.md"]'
+  mkdir -p docs/evals
+  cat > docs/evals/prereg-a.md <<'EOF'
+# Pre-registration A
+
+## Requirements
+
+- The holdout set holds 500 examples.
+EOF
+  jq -n '{schema: 1, doc: "docs/evals/prereg-a.md", claims: [{
+    id: "prereg-a#holdout-size", quote: "The holdout set holds 500 examples",
+    states: "The evaluation holdout set has exactly 500 examples.",
+    kind: "behaviour", subject: ["src/auth/token.py"], status: "unbuilt",
+    enforced_by: "test", test: null, nonvacuity: null, promotion: null,
+    tracker: "docs/issues/token-ttl.md", frozen_at: null, restates: [], rulings: []}]}' \
+    > docs/spec-claims/prereg-a.json
+  cl validate --all
+  assert_eq "0" "$CL_RC" "a host-glob doc's sidecar named by its stem exits 0"
+  assert_no_v1 "host-glob doc, sidecar prereg-a.json"
+  # Without the host glob the same doc is not governing.
+  jset docs/spec-claims/config.json 'del(.governing_extra)'
+  cl validate --all
+  assert_v1 "not governing" "the same doc without governing_extra"
+  teardown
+}
+
+test_v1_adr_doc_id_prefix() {
+  echo "test: V1 — an ADR's DOC-ID is its ADR-NNN filename prefix"
+  claims_fixture
+  mkdir -p docs/adr
+  printf '# ADR-007: Cache tokens\n\n## Decision\n\nCache tokens for 5 minutes.\n' > docs/adr/ADR-007-cache.md
+  jq '.doc = "docs/adr/ADR-007-cache.md" | .claims[0].id = "ADR-007#cache-ttl"
+      | .claims[0].quote = "Cache tokens for 5 minutes"' "$SIDECAR" > docs/spec-claims/ADR-007.json
+  cl validate --all
+  assert_no_v1 "sidecar ADR-007.json for docs/adr/ADR-007-cache.md"
+  jset docs/spec-claims/ADR-007.json '.claims[0].id = "ADR-7#cache-ttl"'
+  cl validate --all
+  assert_v1 "id ADR-7#cache-ttl is not ADR-007#<slug>" "an ADR claim id with the wrong DOC-ID"
+  teardown
+}
+
+test_v1_ruling_missing_reason() {
+  echo "test: V1 — a DOC-STALE or RETIRE ruling needs a reason"
+  claims_fixture
+  jset "$SIDECAR" '.claims[0].rulings = [{"date":"2026-10-11","direction":"DOC-STALE","by":"doc-owner","record":"docs/issues/token-ttl.md"}]'
+  cl validate --all
+  assert_v1 "reason" "a DOC-STALE ruling without reason"
+  jset "$SIDECAR" '.claims[0].rulings[0].direction = "RETIRE" | .claims[0].rulings[0].reason = ""'
+  cl validate --all
+  assert_v1 "reason" "a RETIRE ruling with an empty reason"
+  jset "$SIDECAR" '.claims[0].rulings[0].direction = "CODE-DIVERGES" | del(.claims[0].rulings[0].reason)'
+  cl validate --all
+  assert_no_v1 "a CODE-DIVERGES ruling without reason"
+  teardown
+}
+
+test_v1_ruling_fields() {
+  echo "test: V1 — a ruling needs date YYYY-MM-DD, a known direction, by and record"
+  claims_fixture
+  jset "$SIDECAR" '.claims[0].rulings = [{"date":"10/11/2026","direction":"MAYBE","by":"","reason":"x"}]'
+  cl validate --all
+  assert_v1 "date" "a ruling dated 10/11/2026"
+  assert_contains "$(v1_messages)" "direction" "…an unknown direction is named"
+  assert_contains "$(v1_messages)" "by" "…an empty by is named"
+  assert_contains "$(v1_messages)" "record" "…a missing record is named"
+  jset "$SIDECAR" '.claims[0].rulings = "none"'
+  cl validate --all
+  assert_v1 "rulings" "rulings that is not an array"
+  teardown
+}
+
+test_v1_enums() {
+  echo "test: V1 — status, kind and enforced_by enums (config kinds extend kind)"
+  claims_fixture
+  jset "$SIDECAR" '.claims[0].status = "gated"'
+  cl validate --all
+  assert_v1 "status" "status gated (not valid without the configuration extension)"
+  git checkout -q -- "$SIDECAR"
+  jset "$SIDECAR" '.claims[0].enforced_by = "review"'
+  cl validate --all
+  assert_v1 "enforced_by" "enforced_by review"
+  git checkout -q -- "$SIDECAR"
+  jset "$SIDECAR" '.claims[0].kind = "parity"'
+  cl validate --all
+  assert_v1 "kind" "kind parity without config kinds"
+  jset docs/spec-claims/config.json '.kinds = ["parity"]'
+  cl validate --all
+  assert_no_v1 "kind parity with config kinds [parity]"
+  teardown
+}
+
+test_v1_test_null_only_while_unbuilt() {
+  echo "test: V1 — a test claim's test may be null only while unbuilt"
+  claims_fixture
+  jset "$SIDECAR" '.claims[0].status = "built"'
+  cl validate --all
+  assert_v1 "test" "a built test claim with test null"
+  jset "$SIDECAR" '.claims[0].status = "diverged"'
+  cl validate --all
+  assert_v1 "test" "a diverged test claim with test null"
+  jset "$SIDECAR" '.claims[0].status = "built" | .claims[0].test = {"runner":"pytest","node":"tests/test_token.py::test_ttl"}'
+  cl validate --all
+  assert_no_v1 "a built test claim with test {runner, node}"
+  jset "$SIDECAR" '.claims[0].test = {"runner":"pytest"}'
+  cl validate --all
+  assert_v1 "test.node" "a test without node"
+  jset "$SIDECAR" '.claims[0].test = {"runner":"pytest","node":"t::x","file":""}'
+  cl validate --all
+  assert_v1 "test.file" "a test with an empty file"
+  git checkout -q -- "$SIDECAR"
+  # Retired: nothing runs, so no test is owed.
+  jset "$SIDECAR" ".claims[0].status = \"retired\" | .claims[0].rulings = [$_CL_RETIRE]"
+  cl validate --all
+  assert_no_v1 "a retired test claim with test null"
+  teardown
+}
+
+test_v1_lint_shape() {
+  echo "test: V1 — lint is {pattern, paths[], expect: present|absent, selftest: {violates, clean}}"
+  claims_fixture
+  jset "$SIDECAR" '.claims[0].enforced_by = "lint" | .claims[0].lint = {"pattern":"TTL_SECONDS = 900","paths":["src/auth/token.py"],"expect":"present","selftest":{"violates":"TTL_SECONDS = 1800","clean":"TTL_SECONDS = 900"}}'
+  cl validate --all
+  assert_no_v1 "a well-formed lint"
+  jset "$SIDECAR" '.claims[0].lint = {"pattern":"","paths":[],"expect":"maybe","selftest":{"violates":"x"}}'
+  cl validate --all
+  assert_v1 "lint.pattern" "a lint with an empty pattern"
+  assert_contains "$(v1_messages)" "lint.paths" "…no paths"
+  assert_contains "$(v1_messages)" "lint.expect" "…expect maybe"
+  assert_contains "$(v1_messages)" "lint.selftest" "…selftest without clean"
+  jset "$SIDECAR" '.claims[0].lint = null | .claims[0].status = "built" | .claims[0].test = {"runner":"pytest","node":"t::x"}'
+  cl validate --all
+  assert_v1 "lint" "a built lint claim with lint null"
+  teardown
+}
+
+test_v1_malformed_sidecar() {
+  echo "test: V1 — a sidecar that is not a well-formed envelope is a finding, not a crash"
+  claims_fixture
+  printf 'not json\n' > "$SIDECAR"
+  cl validate --all
+  assert_v1 "not one JSON object" "a sidecar that is not JSON"
+  assert_eq "1" "$(json_count "$CL_OUT")" "…one verdict object"
+  printf '%s\n' '{"schema":1,"doc":"docs/specs/SPEC-AUTH-001-token.md","claims":{}}' > "$SIDECAR"
+  cl validate --all
+  assert_v1 "claims must be an array" "claims that is an object"
+  printf '%s\n' '{"schema":2,"doc":"docs/specs/SPEC-AUTH-001-token.md","claims":["x"]}' > "$SIDECAR"
+  cl validate --all
+  assert_v1 "schema" "schema 2"
+  assert_contains "$(v1_messages)" "not a JSON object" "…a claim that is not an object"
+  printf '%s\n' '{"schema":1,"claims":[]}' > "$SIDECAR"
+  cl validate --all
+  assert_v1 "doc" "a sidecar without doc"
+  teardown
+}
+
+test_v1_archived_doc_sidecar() {
+  echo "test: V1 — a sidecar with live claims whose doc was archived: one finding, no storm"
+  claims_fixture
+  mkdir -p docs/archive/specs
+  git mv docs/specs/SPEC-AUTH-001-token.md docs/archive/specs/SPEC-AUTH-001-token.md
+  # The sidecar still names the old (now missing) path.
+  cl validate --all
+  assert_eq "1" "$CL_RC" "doc missing after the move: exits 1"
+  assert_eq "1" "$(v1_count)" "…exactly one V1 finding"
+  assert_contains "$(v1_messages)" "RETIRE" "…advising RETIRE"
+  assert_contains "$(v1_messages)" "move-entry" "…and move-entry"
+  assert_contains "$(v1_messages)" "docs/specs/SPEC-AUTH-001-token.md" "…naming the doc"
+  assert_eq "0" "$(v2_count)" "…no V2 finding"
+  # The staged rename touches the doc, so --staged reports it too.
+  cl validate --staged
+  assert_eq "1" "$(v1_count)" "validate --staged: exactly one V1 finding"
+  # The sidecar repointed at the archived path, its claim still live.
+  jset "$SIDECAR" '.doc = "docs/archive/specs/SPEC-AUTH-001-token.md"'
+  cl validate --all
+  assert_eq "1" "$CL_RC" "doc archived (not governing): exits 1"
+  assert_eq "1" "$(v1_count)" "…exactly one V1 finding"
+  assert_contains "$(v1_messages)" "not governing" "…the doc is not governing"
+  assert_contains "$(v1_messages)" "RETIRE" "…advising RETIRE"
+  assert_contains "$(v1_messages)" "move-entry" "…and move-entry"
+  assert_contains "$(v1_messages)" "docs/archive/specs/SPEC-AUTH-001-token.md" "…naming the doc"
+  assert_eq "0" "$(v2_count)" "…no V2 finding"
+  teardown
+}
+
+test_v1_archived_doc_all_retired_ok() {
+  echo "test: V1 — a fully retired sidecar may name an archived doc"
+  claims_fixture
+  mkdir -p docs/archive/specs
+  git mv docs/specs/SPEC-AUTH-001-token.md docs/archive/specs/SPEC-AUTH-001-token.md
+  jset "$SIDECAR" ".doc = \"docs/archive/specs/SPEC-AUTH-001-token.md\"
+    | .claims[0].status = \"retired\" | .claims[0].rulings = [$_CL_RETIRE]"
+  cl validate --all
+  assert_eq "0" "$CL_RC" "all claims retired, doc archived: exits 0"
+  assert_no_v1 "all retired, archived doc"
+  assert_eq "0" "$(v2_count)" "…no V2 finding"
+  # The DOC-ID still comes from the basename: a wrong stem is still a finding.
+  git mv "$SIDECAR" docs/spec-claims/SPEC-AUTH-009.json
+  cl validate --all
+  assert_v1 "stem" "a fully retired sidecar under the wrong stem"
+  git mv docs/spec-claims/SPEC-AUTH-009.json "$SIDECAR"
+  # Deleted outright, the doc may be missing too.
+  git rm -qf docs/archive/specs/SPEC-AUTH-001-token.md
+  cl validate --all
+  assert_eq "0" "$CL_RC" "all claims retired, doc deleted: exits 0"
+  assert_no_v1 "all retired, deleted doc"
+  teardown
+}
+
+test_v1_staged_scope() {
+  echo "test: V1 under --staged checks touched claims only, in the index"
+  claims_fixture
+  # A bad id committed on feature: --all sees it.
+  jset "$SIDECAR" '.claims[0].id = "SPEC-AUTH-001-token-ttl"'
+  git commit -qam "bad id"
+  cl validate --all
+  assert_v1 "id" "--all: the committed bad id"
+  # Nothing staged: no claim is touched.
+  cl validate --staged
+  assert_eq "0" "$CL_RC" "--staged with nothing staged exits 0"
+  assert_no_v1 "--staged, nothing staged"
+  # An unrelated staged file touches nothing.
+  echo "more" >> docs/architecture.md
+  git add docs/architecture.md
+  cl validate --staged
+  assert_no_v1 "--staged, an unrelated file staged"
+  # A staged subject file touches the claim.
+  echo "# change" >> src/auth/token.py
+  git add src/auth/token.py
+  cl validate --staged
+  assert_v1 "id" "--staged, the claim's subject staged"
+  git reset -q
+  # A staged doc touches its claims.
+  echo "" >> docs/specs/SPEC-AUTH-001-token.md
+  git add docs/specs/SPEC-AUTH-001-token.md
+  cl validate --staged
+  assert_v1 "id" "--staged, the claim's doc staged"
+  git reset -q
+  # A staged test file (the node's path) touches the claim.
+  mkdir -p tests
+  echo "def test_ttl(): pass" > tests/test_token.py
+  jset "$SIDECAR" '.claims[0].test = {"runner":"pytest","node":"tests/test_token.py::test_ttl"}'
+  git add "$SIDECAR"
+  git commit -qm "bind a test"
+  git add tests/test_token.py
+  cl validate --staged
+  assert_v1 "id" "--staged, the claim's test file staged"
+  git reset -q
+  # --staged reads the index: a fix in the work tree alone does not count,
+  # a staged fix does.
+  jset "$SIDECAR" '.claims[0].id = "SPEC-AUTH-001#token-ttl"'
+  git add src/auth/token.py
+  cl validate --staged
+  assert_v1 "id" "--staged, the fix unstaged (the index still holds the bad id)"
+  git add "$SIDECAR"
+  cl validate --staged
+  assert_no_v1 "--staged, the fix staged"
+  teardown
+}
+
+test_v1_staged_reads_index_sidecars() {
+  echo "test: V1 under --staged lists sidecars from the index, never gates/"
+  claims_fixture
+  # An untracked sidecar is not in the index.
+  jq '.claims[0].id = "bad"' "$SIDECAR" > docs/spec-claims/SPEC-AUTH-003.json
+  echo "# change" >> src/auth/token.py
+  git add src/auth/token.py
+  cl validate --staged
+  assert_no_v1 "--staged: an untracked sidecar is not read"
+  cl validate --all
+  assert_v1 "stem" "--all: the work tree's untracked sidecar is read"
+  rm docs/spec-claims/SPEC-AUTH-003.json
+  # A gate record is never a sidecar.
+  mkdir -p docs/spec-claims/gates/2026-01-01-ttl
+  printf '%s\n' '{"result":"pass"}' > docs/spec-claims/gates/2026-01-01-ttl/chunk-1.json
+  git add docs/spec-claims/gates
+  cl validate --staged
+  assert_no_v1 "--staged: a staged gate record is not a sidecar"
+  cl validate --all
+  assert_no_v1 "--all: a gate record is not a sidecar"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -541,6 +952,26 @@ run_tests() {
   test_config_optional_defaults_apply
   test_v1_config_unknown_key
   test_stub_verbs_enabled
+
+  # --- Task 2: V1 schema, the claim loader and --staged scope ---
+  test_v1_valid_fixture_passes
+  test_v1_malformed_record
+  test_v1_bad_id
+  test_v1_duplicate_id
+  test_v1_doc_not_governing
+  test_v1_stem_mismatch
+  test_v1_host_glob_doc_id_is_stem
+  test_v1_adr_doc_id_prefix
+  test_v1_ruling_missing_reason
+  test_v1_ruling_fields
+  test_v1_enums
+  test_v1_test_null_only_while_unbuilt
+  test_v1_lint_shape
+  test_v1_malformed_sidecar
+  test_v1_archived_doc_sidecar
+  test_v1_archived_doc_all_retired_ok
+  test_v1_staged_scope
+  test_v1_staged_reads_index_sidecars
 
   print_summary
 }

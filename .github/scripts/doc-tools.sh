@@ -5508,7 +5508,9 @@ cmd_tools_version() {
 # Scratch files (in $_SCRATCH): cl-config.json (the merged config),
 # cl-config-unknown.json (the host keys the defaults do not know), and the
 # JSONL accumulators cl-findings.jsonl, cl-advisories.jsonl, cl-indet.jsonl
-# and cl-results.jsonl that _claims_emit folds into the verdict.
+# and cl-results.jsonl that _claims_emit folds into the verdict. The claim
+# lists and the --staged scope (cl-claims.json, cl-touched.json, …) are
+# described with their loader, under "DOC-IDs, the claim loader" below.
 
 _CL_ENABLED=0        # 1: docs/spec-claims/ exists
 _CL_MODE=""          # staged | all | head: which tree _claims_read reads
@@ -5774,6 +5776,391 @@ _claims_v1_config() {
     >> "$_SCRATCH/cl-findings.jsonl"
 }
 
+# --- Spec claims: DOC-IDs, the claim loader, --staged scope, V1 ---------------
+#
+# Sidecars are docs/spec-claims/*.json minus config.json (never gates/), each
+# {"schema": 1, "doc": "<repo path>", "claims": [<claim record>…]}. The
+# loader writes, in $_SCRATCH:
+#   cl-sidecars.jsonl / cl-sidecars-base.jsonl — one line per sidecar in the
+#     proposed tree / at _CL_MB: {sidecar, data (null when the file is not one
+#     JSON object), doc, doc_id, present, governing}, present and governing
+#     describing doc in that same tree;
+#   cl-claims.json / cl-claims-base.json — [{sidecar, doc, doc_id, eligible,
+#     claim}], one per object in a well-formed claims array ([] at base when
+#     _CL_MB is empty);
+#   cl-sidecars.json — [{sidecar, doc, doc_id, eligible, all_retired, skip}]
+#     for the proposed tree; skip is null, "doc missing", "not governing" or
+#     "malformed sidecar".
+# eligible: the doc is present in the tree read and governing. V2–V5, render
+# and V11 skip a claim that is not eligible (one V1 finding already names the
+# doc unless every claim is retired, a legal end state); V1 and V6 run on all.
+# doc_id: the doc's DOC-ID (_claims_doc_id) — for a fully retired sidecar
+# whose doc has none (a host-glob doc moved out of its glob), the doc's file
+# stem; else null.
+# _claims_touched then writes cl-staged.json (the staged paths; [] unless
+# --staged) and cl-touched.json (the claim ids V1–V6 check).
+
+_CL_GOV_READY=0   # 1: _CL_GOV_GLOBS / _CL_GOV_EXTRA hold the config's globs
+_CL_GOV_GLOBS=""  # config governing (governing_extra included), one per line
+_CL_GOV_EXTRA=""  # config governing_extra, one per line
+_CL_DOCID=""      # _claims_doc_id_set's result
+
+# Read the governing globs once, in the main shell (so the $(…) of a later
+# _claims_doc_id finds them set).
+_claims_gov_init() {
+  [ "$_CL_GOV_READY" = 0 ] || return 0
+  _CL_GOV_GLOBS=$(_claims_jq governing -r '.governing[] | strings' "$_SCRATCH/cl-config.json") \
+    || _claims_propagate $?
+  _CL_GOV_EXTRA=$(_claims_jq governing-extra -r '(.governing_extra // [])[] | strings' "$_SCRATCH/cl-config.json") \
+    || _claims_propagate $?
+  _CL_GOV_READY=1
+}
+
+# _claims_glob_any <path> <globs, one per line>: 0 when one matches.
+_claims_glob_any() {
+  local g
+  while IFS= read -r g; do
+    [ -n "$g" ] || continue
+    if _claims_glob_match "$1" "$g"; then return 0; fi
+  done <<EOF
+$2
+EOF
+  return 1
+}
+
+# _claims_doc_id_set <path>: _CL_DOCID = the path's DOC-ID, or "". The
+# basename's ADR-NNN or SPEC-CAT-NNN prefix wherever the file lives (an
+# archived spec keeps its id); else, under a governing_extra glob, the file
+# stem; else none (template.md under docs/specs/ has no DOC-ID).
+_claims_doc_id_set() {
+  local base="${1##*/}" re_adr='^(ADR-[0-9]+)' re_spec='^(SPEC-[A-Z]+-[0-9]+)'
+  _CL_DOCID=""
+  if [[ $base =~ $re_adr ]] || [[ $base =~ $re_spec ]]; then
+    _CL_DOCID="${BASH_REMATCH[1]}"
+    return 0
+  fi
+  _claims_gov_init
+  if [ -n "$base" ] && _claims_glob_any "$1" "$_CL_GOV_EXTRA"; then
+    _CL_DOCID="${base%.*}"
+  fi
+}
+
+# _claims_doc_id <path>: print the path's DOC-ID, or nothing.
+_claims_doc_id() {
+  _claims_doc_id_set "$1"
+  if [ -n "$_CL_DOCID" ]; then printf '%s\n' "$_CL_DOCID"; fi
+}
+
+# _claims_is_governing <path>: 0 when the path matches a governing glob
+# (governing_extra included) and has a DOC-ID.
+_claims_is_governing() {
+  _claims_gov_init
+  _claims_doc_id_set "$1"
+  [ -n "$_CL_DOCID" ] || return 1
+  _claims_glob_any "$1" "$_CL_GOV_GLOBS"
+}
+
+# _claims_load_tree <rev|-> <out.jsonl>: one cl-sidecars line per sidecar of
+# the mode's proposed tree (-) or of commit <rev>. A sidecar that is not one
+# JSON object is a line with data null (V1 reports it), never a failure.
+_claims_load_tree() {
+  local rev="$1" out="$2" listing="$_SCRATCH/cl-list" blob="$_SCRATCH/cl-sidecar.raw"
+  local p prev="" line doc present governing
+  case "$rev" in
+    -)
+      case "$_CL_MODE" in
+        staged) git ls-files -z --cached -- 'docs/spec-claims/*.json' > "$listing" \
+                  || _claims_die "git ls-files failed listing the staged sidecars" ;;
+        head) git ls-tree -r -z --name-only HEAD -- docs/spec-claims/ > "$listing" \
+                || _claims_die "git ls-tree failed listing HEAD's sidecars" ;;
+        *)
+          : > "$listing"
+          for p in docs/spec-claims/*.json; do
+            if [ -f "$p" ]; then printf '%s\0' "$p" >> "$listing"; fi
+          done
+          ;;
+      esac
+      ;;
+    *) git ls-tree -r -z --name-only "$rev" -- docs/spec-claims/ > "$listing" \
+         || _claims_die "git ls-tree failed listing the sidecars at $rev" ;;
+  esac
+  : > "$out"
+  while IFS= read -r -d '' p <&3; do
+    case "$p" in
+      docs/spec-claims/config.json|docs/spec-claims/*/*) continue ;;
+      docs/spec-claims/*.json) ;;
+      *) continue ;;
+    esac
+    # ls-files lists an unmerged path once per stage.
+    [ "$p" != "$prev" ] || continue
+    prev=$p
+    if [ "$rev" = - ]; then
+      _claims_read "$p" > "$blob" || continue
+    else
+      _claims_read_at "$rev" "$p" > "$blob" || continue
+    fi
+    # Its status is the answer (not one JSON object), so not _claims_jq.
+    if ! line=$(jq -c -s --arg p "$p" \
+        'if length == 1 and (.[0] | type) == "object" then {sidecar: $p, data: .[0]} else error("malformed") end' \
+        "$blob" 2>/dev/null); then
+      line=$(_claims_jq sidecar-malformed -nc --arg p "$p" '{sidecar: $p, data: null}') || _claims_propagate $?
+    fi
+    doc=$(_claims_jq sidecar-doc -r '.data.doc? | if type == "string" then . else "" end' <<<"$line") \
+      || _claims_propagate $?
+    present=false
+    governing=false
+    _CL_DOCID=""
+    if [ -n "$doc" ]; then
+      if [ "$rev" = - ]; then
+        if _claims_read "$doc" >/dev/null; then present=true; fi
+      elif _claims_read_at "$rev" "$doc" >/dev/null; then
+        present=true
+      fi
+      if _claims_is_governing "$doc"; then governing=true; fi
+      _claims_doc_id_set "$doc"
+    fi
+    _claims_jq sidecar-line -c --arg doc "$doc" --arg docid "$_CL_DOCID" \
+      --argjson present "$present" --argjson governing "$governing" \
+      '. + {doc: (if $doc == "" then null else $doc end), doc_id: (if $docid == "" then null else $docid end),
+            present: $present, governing: $governing}' <<<"$line" >> "$out"
+  done 3< "$listing"
+}
+
+# cl-sidecars lines (slurped) → the cl-claims entries ($what == "claims") or
+# the cl-sidecars.json summary ($what == "sidecars").
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_LOAD='def well_formed: (.data | type) == "object" and (.data.claims | type) == "array";
+ def all_retired: well_formed and (.data.claims | length) > 0
+   and all(.data.claims[]; type == "object" and .status == "retired");
+ def eff_doc_id: if .doc_id != null then .doc_id
+   elif all_retired and .doc != null then .doc | split("/") | last | sub("\\.[^.]*$"; "")
+   else null end;
+ def eligible: .present and .governing;
+ if $what == "claims" then
+   [.[] | select(well_formed) | . as $s
+    | .data.claims[] | select(type == "object")
+    | {sidecar: $s.sidecar, doc: $s.doc, doc_id: ($s | eff_doc_id), eligible: ($s | eligible), claim: .}]
+ else
+   [.[] | {sidecar, doc, doc_id: eff_doc_id, eligible: eligible, all_retired: all_retired,
+           skip: (if (well_formed | not) then "malformed sidecar" elif eligible then null
+                  elif .present | not then "doc missing" else "not governing" end)}]
+ end'
+
+# _claims_load: the proposed and base claim lists (see the section comment).
+_claims_load() {
+  _claims_gov_init
+  _claims_load_tree - "$_SCRATCH/cl-sidecars.jsonl"
+  _claims_jq load-claims -s --arg what claims "$_JQ_CLAIMS_LOAD" "$_SCRATCH/cl-sidecars.jsonl" \
+    > "$_SCRATCH/cl-claims.json"
+  _claims_jq load-sidecars -s --arg what sidecars "$_JQ_CLAIMS_LOAD" "$_SCRATCH/cl-sidecars.jsonl" \
+    > "$_SCRATCH/cl-sidecars.json"
+  if [ -n "$_CL_MB" ]; then
+    _claims_load_tree "$_CL_MB" "$_SCRATCH/cl-sidecars-base.jsonl"
+  else
+    : > "$_SCRATCH/cl-sidecars-base.jsonl"
+  fi
+  _claims_jq load-claims-base -s --arg what claims "$_JQ_CLAIMS_LOAD" "$_SCRATCH/cl-sidecars-base.jsonl" \
+    > "$_SCRATCH/cl-claims-base.json"
+}
+
+# A claim (proposed or base) is touched when a staged path is its sidecar,
+# its doc, or is covered by a subject, its test file (test.file, else the
+# node's path before "::") or a lint path ("covered": equal, or under it as a
+# directory). Output: the sorted, unique ids.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_TOUCHED='def strs: if type == "array" then .[] | strings else empty end;
+ def covered_by($st): . as $p | ($p | rtrimstr("/")) as $d
+   | any($st[]; . == $p or startswith($d + "/"));
+ ($st[0]) as $st
+ | [($p[0] + $b[0])[]
+    | select((.claim.id | type) == "string")
+    | select($all == 1
+        or (.sidecar | covered_by($st))
+        or (.doc != null and (.doc | covered_by($st)))
+        or any((.claim.subject | strs),
+               (.claim.test | if type == "object" then
+                  (if (.file | type) == "string" then .file
+                   elif (.node | type) == "string" then .node | split("::")[0] else empty end)
+                else empty end),
+               (.claim.lint | if type == "object" then .paths | strs else empty end);
+             covered_by($st)))
+    | .claim.id]
+ | unique'
+
+# _claims_touched: cl-staged.json and cl-touched.json (see the section
+# comment). Under --staged the staged paths are the index's changes against
+# HEAD (both sides of a rename); otherwise every claim is touched.
+_claims_touched() {
+  local all=1 base
+  if [ "$_CL_MODE" = staged ]; then
+    all=0
+    base=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) \
+      || base=4b825dc642cb6eb9a060e54bf8d69288fbee4904 # the empty tree: no commit yet
+    git diff --cached --name-only --no-renames -z "$base" -- > "$_SCRATCH/cl-staged.z" \
+      || _claims_die "git diff --cached failed listing the staged paths"
+    _claims_jq staged-paths -Rs 'split("\u0000") | map(select(. != ""))' "$_SCRATCH/cl-staged.z" \
+      > "$_SCRATCH/cl-staged.json"
+  else
+    printf '[]\n' > "$_SCRATCH/cl-staged.json"
+  fi
+  _claims_jq touched -n --argjson all "$all" --slurpfile st "$_SCRATCH/cl-staged.json" \
+    --slurpfile p "$_SCRATCH/cl-claims.json" --slurpfile b "$_SCRATCH/cl-claims-base.json" \
+    "$_JQ_CLAIMS_TOUCHED" > "$_SCRATCH/cl-touched.json"
+}
+
+# claims_v1($docid; $kinds): on one claim record, a message per V1 violation.
+# $docid null skips the id-prefix check (the doc is the problem, and one
+# sidecar finding already says so). Fields outside §B's record are not
+# checked; `when` and status gated arrive with the configuration extension.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_SCHEMA='def claims_v1($docid; $kinds):
+  def nes: type == "string" and length > 0;
+  def paths_ok: type == "array" and all(.[]; nes);
+  def among($xs): . as $v | any($xs[]; . == $v);
+  def req($k; ok; $what):
+    if has($k) | not then "missing required field \($k)"
+    elif .[$k] | ok then empty
+    else "\($k) \(.[$k] | tojson) \($what)" end;
+  def opt($k; ok; $what):
+    if .[$k] == null then empty
+    elif .[$k] | ok then empty
+    else "\($k) \(.[$k] | tojson) \($what)" end;
+  (["behaviour", "interface", "config"] + $kinds) as $kind_enum
+  | ["built", "diverged", "unbuilt", "retired"] as $status_enum
+  | ["test", "lint", "log", "judge"] as $tier_enum
+  | ["CODE-DIVERGES", "DOC-STALE", "RETIRE"] as $dir_enum
+  | if type != "object" then "the claim record is not a JSON object"
+    else
+      (.status == "built" or .status == "diverged") as $runs
+      | req("id"; nes; "must be a non-empty string"),
+      (if $docid != null and (.id | nes)
+          and ((.id | startswith($docid + "#") | not)
+               or (.id | ltrimstr($docid + "#") | test("^[a-z0-9][a-z0-9-]*$") | not))
+       then "id \(.id) is not \($docid)#<slug> (slug: [a-z0-9][a-z0-9-]*)" else empty end),
+      req("quote"; nes; "must be a non-empty string"),
+      req("states"; nes; "must be a non-empty string"),
+      req("kind"; among($kind_enum); "is not one of \($kind_enum | join(", "))"),
+      req("subject"; paths_ok; "must be an array of repo paths"),
+      req("status"; among($status_enum); "is not one of \($status_enum | join(", "))"),
+      req("enforced_by"; among($tier_enum); "is not one of \($tier_enum | join(", "))"),
+      (if .test == null then
+         (if .enforced_by == "test" and $runs
+          then "test is null: a \(.status) claim enforced by test needs test {runner, node[, file]} (null only while unbuilt)"
+          else empty end)
+       elif (.test | type) != "object" then "test \(.test | tojson) must be {runner, node[, file]} or null"
+       else .test
+         | (if .runner | nes then empty else "test.runner must be a non-empty string" end),
+           (if .node | nes then empty else "test.node must be a non-empty string" end),
+           (if has("file") and (.file | nes | not) then "test.file must be a non-empty string" else empty end)
+       end),
+      (if .lint == null then
+         (if .enforced_by == "lint" and $runs
+          then "lint is null: a \(.status) claim enforced by lint needs lint {pattern, paths, expect, selftest}"
+          else empty end)
+       elif (.lint | type) != "object" then "lint \(.lint | tojson) must be {pattern, paths, expect, selftest} or null"
+       else .lint
+         | (if .pattern | nes then empty else "lint.pattern must be a non-empty string" end),
+           (if (.paths | paths_ok) and (.paths | length) > 0 then empty
+            else "lint.paths must be a non-empty array of repo paths" end),
+           (if .expect == "present" or .expect == "absent" then empty
+            else "lint.expect must be present or absent" end),
+           (if (.selftest | type) == "object" and (.selftest.violates | type) == "string"
+               and (.selftest.clean | type) == "string" then empty
+            else "lint.selftest must be {violates, clean}, two strings" end)
+       end),
+      (if .rulings == null then empty
+       elif (.rulings | type) != "array" then "rulings \(.rulings | tojson) must be an array"
+       else .rulings | range(length) as $i | .[$i]
+         | if type != "object" then "rulings[\($i)] is not a JSON object"
+           else
+             (if (.date | type) == "string" and (.date | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) then empty
+              else "rulings[\($i)]: date \(.date | tojson) must be YYYY-MM-DD" end),
+             (if .direction | among($dir_enum) then empty
+              else "rulings[\($i)]: direction \(.direction | tojson) is not one of \($dir_enum | join(", "))" end),
+             (if .by | nes then empty else "rulings[\($i)]: by must name who ruled" end),
+             (if .record | nes then empty else "rulings[\($i)]: record must name the record of the ruling (a repo path)" end),
+             (if (.direction == "DOC-STALE" or .direction == "RETIRE") and (.reason | nes | not)
+              then "rulings[\($i)] (\(.direction)): reason is required (the ruling records why)"
+              elif .reason != null and (.reason | type) != "string" then "rulings[\($i)]: reason must be a string"
+              else empty end)
+           end
+       end),
+      opt("tracker"; nes; "must be a non-empty string or null"),
+      opt("frozen_at"; nes; "must be a commit or null"),
+      opt("restates"; paths_ok; "must be an array of claim ids"),
+      opt("quote_occurrence"; type == "number" and . >= 1 and . == floor; "must be an integer >= 1"),
+      opt("nonvacuity"; type == "object"; "must be an object or null"),
+      opt("promotion"; type == "object"; "must be an object or null"),
+      opt("why_not_mechanical"; nes; "must be a non-empty string")
+    end;'
+
+# V1 over the proposed sidecars (cl-sidecars.jsonl, slurped as $s): the
+# envelope, the doc (present and governing, unless every claim is retired),
+# the stem, each record (claims_v1) and id uniqueness. Under --staged ($all
+# 0) a claim is in scope when touched or its sidecar or doc is staged; a
+# sidecar when it or its doc is staged or it holds a touched claim. One
+# finding row per line.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_V1='def in_list($l): . as $x | any($l[]; . == $x);
+ def stem: split("/") | last | sub("\\.[^.]*$"; "");
+ def v1($claim; $doc; $msg): {check: "V1", claim: $claim, doc: $doc, message: $msg};
+ (if ($cfg[0].kinds | type) == "array" then [$cfg[0].kinds[] | strings] else [] end) as $kinds
+ | $t[0] as $touched | $st[0] as $staged
+ | ($s | map(select((.data | type) == "object" and (.data.claims | type) == "array"))) as $wf
+ | (
+   ($s[]
+    | .sidecar as $p | .data as $d | (.doc // $p) as $fdoc
+    | (($d | type) == "object" and ($d.claims | type) == "array") as $well
+    | ($well and ($d.claims | length) > 0
+       and all($d.claims[]; type == "object" and .status == "retired")) as $retired
+    | (.present and .governing) as $eligible
+    | (if .doc_id != null then .doc_id elif $retired and .doc != null then .doc | stem else null end) as $docid
+    | ($all == 1 or ($p | in_list($staged)) or (.doc != null and (.doc | in_list($staged)))) as $direct
+    | ($direct or ($well and any($d.claims[]; type == "object" and (.id | type) == "string"
+                                              and (.id | in_list($touched))))) as $in_scope
+    | "\($p): doc \(.doc)" as $at
+    | ("if the doc was archived or moved, retire each live claim (status retired with a RETIRE ruling)"
+       + " and re-key its index entry (doc-tools.sh move-entry <old> <new>), or point doc at its"
+       + " governing path; a sidecar whose claims are all retired may name an archived, moved or deleted doc") as $advice
+    | (select($in_scope)
+       | if ($d | type) != "object" then v1(null; $p; "\($p): not one JSON object (want {\"schema\": 1, \"doc\", \"claims\"})")
+         else
+           (if $d.schema != 1 then v1(null; $fdoc; "\($p): schema \($d.schema | tojson) must be 1") else empty end),
+           (if ($d.claims | type) != "array" then v1(null; $fdoc; "\($p): claims must be an array") else empty end),
+           (if .doc == null then v1(null; $p; "\($p): doc must be the repo path of the governing doc")
+            elif $retired or $eligible then
+              (if ($p | stem) != $docid
+               then v1(null; .doc; "\($p): sidecar stem \($p | stem) is not \($docid), the DOC-ID of \(.doc): rename it docs/spec-claims/\($docid).json")
+               else empty end)
+            elif .present | not then v1(null; .doc; "\($at) is missing: \($advice)")
+            else v1(null; .doc; "\($at) is not governing (no governing glob matches it, or it has no DOC-ID): \($advice)")
+            end)
+         end),
+      (select($well)
+       | (if $retired or $eligible then $docid else null end) as $idbase
+       | $d.claims | range(length) as $i | .[$i]
+       | select($direct or (type == "object" and (.id | type) == "string" and (.id | in_list($touched))))
+       | (if type == "object" and (.id | type) == "string" then .id else null end) as $cid
+       | claims_v1($idbase; $kinds)
+       | v1($cid; $fdoc; "\($p): \($cid // "claims[\($i)]"): \(.)"))),
+   ([$wf[] | .sidecar as $p | (.doc // $p) as $doc
+     | .data.claims[] | select(type == "object" and (.id | type) == "string") | {id, sidecar: $p, doc: $doc}]
+    | group_by(.id)[] | select(length > 1)
+    | select($all == 1 or (.[0].id | in_list($touched)))
+    | v1(.[0].id; .[0].doc;
+         "duplicate id \(.[0].id): \(length) records (in \(map(.sidecar) | unique | join(", "))); ids are unique across all sidecars"))
+ ) | tojson'
+
+# V1 on the claims: one finding row per violation (_JQ_CLAIMS_V1).
+_claims_v1() {
+  local all=1
+  if [ "$_CL_MODE" = staged ]; then all=0; fi
+  _claims_jq v1 -nr --argjson all "$all" \
+    --slurpfile s "$_SCRATCH/cl-sidecars.jsonl" --slurpfile t "$_SCRATCH/cl-touched.json" \
+    --slurpfile st "$_SCRATCH/cl-staged.json" --slurpfile cfg "$_SCRATCH/cl-config.json" \
+    "$_JQ_CLAIMS_SCHEMA $_JQ_CLAIMS_V1" >> "$_SCRATCH/cl-findings.jsonl"
+}
+
 cmd_claims_validate() {
   local mode=all
   if [ "$_OPT_staged" = 1 ]; then mode=staged; fi
@@ -5783,6 +6170,9 @@ cmd_claims_validate() {
   fi
   _claims_no_args "claims validate" "$@"
   _claims_v1_config
+  _claims_load
+  _claims_touched
+  _claims_v1
   _claims_emit validate
 }
 
