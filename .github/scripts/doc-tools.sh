@@ -1416,6 +1416,8 @@ _INDEX_PATCH='reduce $patch[] as $x (.;
   else error("doc-tools: unknown index patch row: \($x | tojson)") end)'
 
 _die() {
+  # A claims verb's failure is "could not run": exit 2, with its verdict.
+  if [ "$_CL_ACTIVE" = 1 ]; then _claims_die "$*"; fi
   echo "ERROR: $*" >&2
   exit 1
 }
@@ -1483,12 +1485,46 @@ cleanup() {
 # `set -u` unbound variable, with $? = 0, so such a crash used to exit 0: a
 # silent success. A run finishes by returning from _main, or by _exit_ok
 # (an intended exit 0, such as --help); both set _EXIT_OK first.
+#
+# A claims verb (_CL_ACTIVE=1) has its own exit family (see "Spec claims"): a
+# run that emitted no verdict — a set -u crash, a stray exit 1, a failed
+# command — gets one fallback verdict object and exits 2, never 1. A run
+# that emitted keeps 0/1/3 and maps anything else to 2. 130/143 (a signal)
+# stand either way. The emitted marker is read BEFORE cleanup, which removes
+# the scratch dir holding it.
 _EXIT_OK=0
+_USAGE_RC=2          # claims verbs: 3 (set in _main)
+_CL_ACTIVE=0         # 1: this run is a claims verb
+_CL_EMITTED=0        # 1: this shell printed the run's verdict (or a usage error)
+_CL_VERB=""          # the claims verb ("validate", …), for verdict objects
 _on_exit() {
-  local rc=$?
+  local rc=$? emitted=0
+  if [ "$_CL_ACTIVE" = 1 ]; then
+    if [ "$_CL_EMITTED" = 1 ]; then
+      emitted=1
+    elif [ -n "$_SCRATCH" ] && [ -e "$_SCRATCH/cl-emitted" ]; then
+      emitted=1
+    fi
+  fi
   cleanup
   if [ "$rc" -eq 0 ] && [ "$_EXIT_OK" != 1 ]; then
     rc=1
+  fi
+  if [ "$_CL_ACTIVE" = 1 ]; then
+    case "$rc" in
+      130|143) ;;
+      *)
+        if [ "$emitted" = 0 ]; then
+          _claims_fallback "$rc"
+          rc=2
+        else
+          case "$rc" in
+            0|1|3) ;;
+            *) rc=2 ;;
+          esac
+        fi
+        ;;
+    esac
   fi
   exit "$rc"
 }
@@ -1529,10 +1565,14 @@ _signals_restore() {
 }
 
 # Create this run's scratch dir. Call in the main shell (never inside $(…)):
-# the path must outlive the call so cleanup can remove it.
+# the path must outlive the call so cleanup can remove it. Assigned through a
+# temporary, so a failed mktemp leaves _SCRATCH empty when _die runs: a claims
+# verb's _claims_die must not write its marker to "/cl-emitted".
 _scratch_init() {
   [ -z "$_SCRATCH" ] || return 0
-  _SCRATCH=$(mktemp -d -t doc-tools.XXXXXX) || _die "mktemp -d failed"
+  local d
+  d=$(mktemp -d -t doc-tools.XXXXXX) || { _SCRATCH=""; _die "mktemp -d failed"; }
+  _SCRATCH=$d
 }
 
 _index_now() {
@@ -2129,6 +2169,51 @@ set-implementation|cmd_set_implementation|deps|ref= status= note=
   blocked. The doc is replaced atomically, keeping its mode. Exits 2 (not
   1) for an invalid --status, a missing <path> or a multi-line --ref /
   --note: they are checked with the command line, before anything is read.
+claims validate|cmd_claims_validate|repo|staged all config=* base=
+  (--staged | --all) [--config <KEY=VALUE>...] [--base <ref>]
+  Check the spec claims in docs/spec-claims/ without running a test:
+  --staged the claims the staged change touches, in the staged tree;
+  --all every claim, in the working tree. A finding blocks (exit 1) when
+  its check is in the config's "blocking" list, and is reported as an
+  advisory otherwise. --config KEY=VALUE checks a configuration change
+  made outside git (the configuration extension only). See "Spec claims".
+claims run|cmd_claims_run|repo|claims+ planes-of= all scheduled judge-sample= base=
+  (--claims <id>... | --planes-of <range> | --all) [--scheduled] [--judge-sample <n>] [--base <ref>]
+  Execute claims: test claims through their runner adapters, lint claims
+  again, log claims (with --scheduled only) through the log adapter.
+  --planes-of runs every claim of each runner whose paths <range>
+  touched; --judge-sample <n> also names n judge claims to review.
+  Frozen claims are skipped. Every finding blocks.
+claims promote|cmd_claims_promote|repo|reverify all base=
+  <id> | --reverify (<id>... | --all) [--base <ref>]
+  Promote a claim to built: run its test green, verify its non-vacuity
+  proof in a throwaway worktree, store the verdict and record the
+  promotion in the sidecar. --reverify re-checks promoted claims and
+  stores fresh verdicts, writing no sidecar. Refuses a dirty tree.
+claims render|cmd_claims_render|repo|check base=
+  [--check] [--base <ref>]
+  Write the generated "## Claim status" block of each doc that has a
+  sidecar; --check writes nothing and reports each block that differs.
+claims gate|cmd_claims_gate|repo|plan= chunk= from= holds=* by= base=
+  --plan <plan> --chunk <n> [--from <rev>] [--holds <id>...] [--by <principal>] [--base <ref>]
+  Run a plan chunk's claims gate and record it in
+  docs/spec-claims/gates/<plan-stem>/chunk-<n>.json. --holds <id> records
+  that a claim-bound test edit leaves the claim's states true, adjudicated
+  by --by. Refuses a dirty tree. Every finding blocks.
+claims attest|cmd_claims_attest|repo|plan= final deep base=
+  --plan <plan> [--final] [--deep] [--base <ref>]
+  Check a plan's gate records against the branch: every chunk recorded,
+  every claim the plan names as expected, every ruling and promotion
+  recorded. --final is the final gate, written to
+  docs/spec-claims/gates/<plan-stem>/final.json (even when red); --deep
+  re-runs each record's claims at the tree it recorded. Every finding
+  blocks.
+claims rulings|cmd_claims_rulings|repo|range= format= base=
+  --range <a>..<b> [--format json|markdown] [--base <ref>]
+  List the DOC-STALE and RETIRE rulings added in <a>..<b>: the spec
+  amendments a reviewer approves. --format markdown prints them as
+  Markdown for a PR description, under "## Spec amendments (N)", instead
+  of the verdict object.
 fragments list|cmd_fragments_list|deps|
   -
   List the per-PR release-notes fragments (RELEASE-NOTES.next/PR-<N>.md in
@@ -2203,8 +2288,8 @@ IFS= read -r -d '' _USAGE_NOTES <<'NOTES' || true
 Options:
   --opt VALUE and --opt=VALUE are the same, and options may appear anywhere
   on the line; "--" ends them. --help (-h) prints a subcommand's usage and
-  exits 0. An option a subcommand does not take is an error (exit 2), never
-  silently ignored.
+  exits 0. An option a subcommand does not take is an error (exit 2; 3 for
+  a claims subcommand), never silently ignored.
 
 Mapping lines (stdin of build-index and add-entry, one doc per line):
   doc_path:code_refs_csv:doc_type
@@ -2288,6 +2373,22 @@ Stored state (who may attest):
   design-spec). Archiving a doc is git mv into docs/archive/<type>/, then
   move-entry, then deprecate-entry.
 
+Spec claims (claims validate, run, promote, render, gate, attest, rulings):
+  Claims live in docs/spec-claims/: one <DOC-ID>.json sidecar per governing
+  doc, and an optional config.json (a key it omits takes its default; an
+  unknown key is a V1 finding). A project without docs/spec-claims/ sees no
+  change: every claims subcommand prints {"verb":…,"enabled":false,"exit":0}
+  and exits 0. That check runs after the options are parsed (an unknown
+  option still exits 3) and before the required arguments are checked.
+  Every ratchet compares with git merge-base HEAD <base>, never the base's
+  tip: <base> is --base, else the config's "base", else origin/main.
+  The output is exactly one verdict JSON object on stdout — verb, enabled,
+  exit, base, findings, advisories, indeterminate, results — except for
+  rulings --format markdown. The exit codes are their own (see "Exit
+  status"): 0 as expected, 1 findings, 2 could not run, 3 usage, with
+  precedence 1 > 2 > 0. In a claims glob (config "governing", "plans", …),
+  * also matches "/".
+
 Exit status:
   0  success
   1  the operation failed or was refused (an invalid mapping line, a path
@@ -2309,6 +2410,16 @@ Exit status:
      and fragments validate exits 2 for a <path> that is not a regular file.
   3  fragments merge refused: a release consumed fragments that are still
      present, because its release commit has not reached <range-end>
+
+  The claims subcommands have their own codes instead:
+  0  everything as expected
+  1  findings (a blocking check failed)
+  2  could not run: an adapter reported indeterminate or exited non-zero,
+     the base did not resolve, the config is not one JSON object, a
+     missing dependency, a run outside a git work tree or below its top
+     level, or an internal failure (never 1)
+  3  usage error
+  When several apply, the precedence is 1 > 2 > 0.
 
 Environment:
   DOC_TOOLS_LOCK_TIMEOUT  Seconds a writer waits for the index lock before
@@ -2413,11 +2524,14 @@ cmd_help() {
   _verb_usage "$*"
 }
 
-# A command-line error: say what is wrong and where the usage is; exit 2.
+# A command-line error: say what is wrong and where the usage is; exit 2
+# (3 for a claims verb: _USAGE_RC). A claims usage error prints no verdict;
+# its marker keeps the EXIT trap from adding the internal-failure one.
 _usage_error() {
   echo "ERROR: $1: $2" >&2
   echo "       See: doc-tools.sh $1 --help" >&2
-  exit 2
+  if [ "$_CL_ACTIVE" = 1 ]; then _claims_mark_emitted; fi
+  exit "$_USAGE_RC"
 }
 
 _is_long_opt() {
@@ -2537,14 +2651,25 @@ _parse_args() {
 _require_repo() {
   local prefix
   if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "ERROR: $1 must run inside a git repository (run doc-tools.sh from the repo root)." >&2
-    exit 2
+    _require_repo_fail "$1 must run inside a git repository (run doc-tools.sh from the repo root)."
   fi
   prefix=$(git rev-parse --show-prefix 2>/dev/null) || prefix=""
   if [ -n "$prefix" ]; then
-    echo "ERROR: $1 must run from the repository's top level, not from ${prefix%/}/ (doc paths are keyed from the root). Run: cd \"\$(git rev-parse --show-toplevel)\"" >&2
-    exit 2
+    _require_repo_fail "$1 must run from the repository's top level, not from ${prefix%/}/ (doc paths are keyed from the root). Run: cd \"\$(git rev-parse --show-toplevel)\""
   fi
+}
+# Exit 2 — for a claims verb with its verdict object (could not run).
+_require_repo_fail() {
+  if [ "$_CL_ACTIVE" = 1 ]; then _claims_die "$1"; fi
+  echo "ERROR: $1" >&2
+  exit 2
+}
+
+# check_deps failed (it named what is missing): exit 1 — 2, with its verdict
+# object, for a claims verb (could not run).
+_deps_fail() {
+  if [ "$_CL_ACTIVE" = 1 ]; then _claims_die "a required command is missing or too old (see the errors above)"; fi
+  exit 1
 }
 
 # Dispatch. --help / help needs nothing: it runs before check_deps.
@@ -2559,6 +2684,15 @@ _main() {
       _exit_ok
       ;;
   esac
+
+  # A claims verb: its own exit family (usage = 3) and fd 9, the run's real
+  # stdout, for its verdict — set before the lookup, so an unknown claims
+  # subcommand is a claims usage error too (see "Spec claims").
+  if [ "$1" = claims ]; then
+    _USAGE_RC=3
+    _CL_ACTIVE=1
+    exec 9>&1
+  fi
 
   local verb
   if [ $# -ge 2 ] && _verb_lookup "$1 $2"; then
@@ -2580,6 +2714,7 @@ _main() {
     usage >&2
     exit 2
   fi
+  if [ "$_CL_ACTIVE" = 1 ]; then _CL_VERB="${verb#claims }"; fi
 
   # --help anywhere before "--" wins, before any dependency is needed.
   local a
@@ -2595,8 +2730,8 @@ _main() {
   _traps
   _parse_args "$verb" "$_VERB_OPTS" "$@"
   case "$_VERB_NEEDS" in
-    repo) check_deps || exit 1; _require_repo "$verb" ;;
-    deps) check_deps || exit 1 ;;
+    repo) check_deps || _deps_fail; _require_repo "$verb" ;;
+    deps) check_deps || _deps_fail ;;
   esac
   "$_VERB_HANDLER" ${_ARGS[@]+"${_ARGS[@]}"}
 }
@@ -5325,6 +5460,374 @@ cmd_tools_version() {
     exit 1
   fi
   _release_notes_version "$_TOOLS_ROOT/RELEASE-NOTES.md" || exit 1
+}
+
+# --- Spec claims -----------------------------------------------------------------
+#
+# `claims <verb>`: executable spec claims. Each governing doc's claims live in
+# a sidecar, docs/spec-claims/<DOC-ID>.json; docs/spec-claims/config.json
+# (optional) holds the host's settings over _JQ_CLAIMS_DEFAULTS. A project
+# without docs/spec-claims/ sees nothing new: every verb prints
+# {"verb":…,"enabled":false,"exit":0} and exits 0 (_claims_init).
+#
+# Exit family, claims verbs only: 0 as expected · 1 findings · 2 could not
+# run · 3 usage; precedence 1 > 2 > 0; an internal failure is 2, never 1. The
+# run prints exactly one verdict object on stdout (rulings --format markdown
+# prints Markdown instead). What keeps both true whatever fails:
+#   - fd 9 is the run's real stdout (_main: exec 9>&1; bash 3.2 has no
+#     {fd}). Every verdict is written >&9, so one printed inside $(…) reaches
+#     the caller instead of the captured value.
+#   - _claims_mark_emitted records "printed" twice: _CL_EMITTED=1 in this
+#     shell, and $_SCRATCH/cl-emitted for the parent of a $(…) (a subshell's
+#     variables never reach it). The file only once scratch exists — never
+#     "/cl-emitted" — since no claims code runs in a $(…) before that.
+#   - _on_exit: a run that printed nothing gets one fallback object, exit 2.
+#   - _die delegates to _claims_die (exit 2). A $(…) of claims code that can
+#     die is written  v=$(…) || _claims_propagate $?  — the subshell already
+#     printed the one verdict; the parent only ends with its status.
+#   - every jq call goes through _claims_jq, which dies on a jq failure (a
+#     `jq -e` predicate, whose status is an answer, calls jq inside an if).
+#
+# Scratch files (in $_SCRATCH): cl-config.json (the merged config),
+# cl-config-unknown.json (the host keys the defaults do not know), and the
+# JSONL accumulators cl-findings.jsonl, cl-advisories.jsonl, cl-indet.jsonl
+# and cl-results.jsonl that _claims_emit folds into the verdict.
+
+_CL_ENABLED=0        # 1: docs/spec-claims/ exists
+_CL_MODE=""          # staged | all | head: which tree _claims_read reads
+_CL_ROOT=""          # the work tree's top level, absolute
+_CL_BASE_REF=""      # --base, else config "base", else origin/main
+_CL_MB=""            # git merge-base HEAD <base>; empty when unresolvable
+_CL_ALL_BLOCKING=0   # 1: every finding blocks (run, promote, gate, attest)
+_CL_JS=""            # _claims_json_str's result
+
+# The config defaults, deep-merged (jq *) under the host's config.json:
+# objects merge, arrays and scalars are replaced — except governing_extra,
+# which is appended to governing. Output: two compact lines, the merged
+# config, then the host's top-level keys the defaults do not have (each a V1
+# finding). $host is the host file slurped ([] when there is none).
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_DEFAULTS='{"schema":1,"base":"origin/main","governing":["docs/adr/*.md","docs/specs/*.md"],"governing_extra":[],
+ "normative_headings":[],"descriptive_headings":[],"kinds":[],"code_roots":[],
+ "plans":["docs/superpowers/plans/*.md","docs/plans/*.md"],"tracker_patterns":[],
+ "source_doc_patterns":["docs/issues/","docs/superpowers/specs/"],
+ "runners":{},"log_adapter":null,"config_adapter":null,
+ "policy":{"in_plan_ruling_requires_gate_record":true,"outside_plan_presumption":"CODE-DIVERGES","doc_stale_outside_plan_requires":null},
+ "blocking":["V1","V2","V3","V4","V5","V6","V10","V11","V12"]} as $d
+ | ($host[0] // {}) as $h
+ | (($d * $h) | .governing += .governing_extra),
+   [$h | keys_unsorted[] | . as $k | select($d | has($k) | not)]'
+
+# The verdict object. A finding blocks — stays in findings, and makes the
+# exit 1 — when $all is 1 or its check is in the config's blocking list;
+# otherwise it is reported as an advisory (code "non-blocking"). Output: the
+# exit code, then the object (one line).
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_EMIT='def blocks($blk): $all == 1 or (.check as $c | $blk | any(.[]; . == $c));
+ ($cfg[0].blocking // []) as $blk
+ | [$f[] | select(blocks($blk))] as $findings
+ | ([$f[] | select(blocks($blk) | not) | {check, claim, code: "non-blocking", message}] + $a) as $advisories
+ | (if ($findings | length) > 0 then 1 elif ($i | length) > 0 then 2 else 0 end) as $exit
+ | ({verb: $verb, enabled: true, exit: $exit,
+     base: {ref: $ref, merge_base: (if $mb == "" then null else $mb end)},
+     findings: $findings, advisories: $advisories, indeterminate: $i, results: $r}
+    + ($extra | del(.verb, .enabled, .exit)))
+ | (.exit | tostring), tojson'
+
+# A JSON string literal for $1 into _CL_JS, in bash alone: _claims_die and
+# the EXIT trap's fallback must print when jq is what failed (or is missing).
+_claims_json_str() {
+  local s="$1"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  s=${s//[[:cntrl:]]/}
+  _CL_JS="\"$s\""
+}
+
+# Print one line of the run's output to fd 9 (stdout when fd 9 is not open:
+# a failure before _main's exec 9>&1). A write that fails (a closed pipe)
+# must not turn the exit status into 1.
+_claims_out() {
+  if { : >&9; } 2>/dev/null; then
+    printf '%s\n' "$1" >&9 || true
+  else
+    printf '%s\n' "$1" || true
+  fi
+}
+
+# Record that this run's verdict (or usage error) was printed. The variable
+# first, before any I/O; the marker file only once the scratch dir exists.
+_claims_mark_emitted() {
+  _CL_EMITTED=1
+  if [ -n "$_SCRATCH" ]; then
+    : > "$_SCRATCH/cl-emitted" || true
+  fi
+}
+
+# _claims_die <message>: the run could not run. Prints the error verdict to
+# fd 9 and exits 2 — inside $(…) too (the parent then _claims_propagate's).
+_claims_die() {
+  local verb
+  _claims_mark_emitted
+  echo "ERROR: $*" >&2
+  _claims_json_str "$_CL_VERB"
+  verb=$_CL_JS
+  _claims_json_str "$*"
+  _claims_out "{\"verb\":$verb,\"enabled\":true,\"exit\":2,\"error\":$_CL_JS}"
+  exit 2
+}
+
+# _claims_propagate <rc>: end the run with a failed $(…)'s status. The
+# subshell already printed the verdict (_claims_die), so nothing is printed;
+# when it printed none, _on_exit adds the fallback.
+_claims_propagate() {
+  exit "${1:-2}"
+}
+
+# The EXIT trap's object for a claims run that printed no verdict.
+_claims_fallback() {
+  local verb
+  _claims_json_str "$_CL_VERB"
+  verb=$_CL_JS
+  _claims_out "{\"verb\":$verb,\"enabled\":true,\"exit\":2,\"error\":\"internal failure (rc $1)\"}"
+}
+
+# _claims_jq <label> <jq args…>: jq, dying with "jq failed (<label>, rc <n>)"
+# when it fails.
+_claims_jq() {
+  local label="$1" rc=0
+  shift
+  jq "$@" || rc=$?
+  if [ "$rc" -ne 0 ]; then _claims_die "jq failed ($label, rc $rc)"; fi
+}
+
+# JSONL rows the verdict is built from; "-" is null.
+_claims_finding() {
+  _claims_jq finding -nc --arg check "$1" --arg claim "$2" --arg doc "$3" --arg message "$4" \
+    '{check: $check, claim: (if $claim == "-" then null else $claim end),
+      doc: (if $doc == "-" then null else $doc end), message: $message}' \
+    >> "$_SCRATCH/cl-findings.jsonl"
+}
+_claims_advisory() {
+  _claims_jq advisory -nc --arg check "$1" --arg claim "$2" --arg code "$3" --arg message "$4" \
+    '{check: $check, claim: (if $claim == "-" then null else $claim end), code: $code, message: $message}' \
+    >> "$_SCRATCH/cl-advisories.jsonl"
+}
+_claims_indeterminate() {
+  _claims_jq indeterminate -nc --arg check "$1" --arg claim "$2" --arg reason "$3" \
+    '{check: $check, claim: (if $claim == "-" then null else $claim end), reason: $reason}' \
+    >> "$_SCRATCH/cl-indet.jsonl"
+}
+_claims_result() {
+  _claims_jq result -nc --argjson r "$1" '$r' >> "$_SCRATCH/cl-results.jsonl"
+}
+
+# _claims_read <path>: the proposed content of a repo path — the index's in
+# mode staged, the working tree's in mode all, HEAD's in mode head. Returns 1
+# (printing nothing) when the path is absent there. cat-file, not show: a
+# directory is absent too (show would list a tree), and no textconv applies.
+_claims_read() {
+  case "$_CL_MODE" in
+    staged) git cat-file blob ":$1" 2>/dev/null || return 1 ;;
+    head) git cat-file blob "HEAD:$1" 2>/dev/null || return 1 ;;
+    *)
+      [ -f "$1" ] || return 1
+      cat -- "$1" || return 1
+      ;;
+  esac
+}
+# _claims_read_at <rev> <path>: the content of <path> at <rev>; 1 when absent.
+_claims_read_at() {
+  git cat-file blob "$1:$2" 2>/dev/null || return 1
+}
+
+# _claims_glob_match <path> <glob>: a case pattern, so * also matches "/"
+# ("docs/specs/*.md" matches docs/specs/sub/x.md).
+_claims_glob_match() {
+  # shellcheck disable=SC2254  # the glob is the pattern
+  case "$1" in
+    $2) return 0 ;;
+  esac
+  return 1
+}
+
+# _claims_init <staged|all|head>: inert check, scratch, config, base.
+# Without docs/spec-claims/ (in the working tree) it prints the inert object
+# and exits 0, before any config is read. Call it in the main shell, after
+# _parse_args and before the verb checks its required arguments.
+_claims_init() {
+  _CL_MODE="$1"
+  if [ ! -d docs/spec-claims ]; then
+    _CL_ENABLED=0
+    _claims_mark_emitted
+    _claims_json_str "$_CL_VERB"
+    _claims_out "{\"verb\":$_CL_JS,\"enabled\":false,\"exit\":0}"
+    _exit_ok
+  fi
+  _CL_ENABLED=1
+  _scratch_init
+  _CL_ROOT=$(git rev-parse --show-toplevel) || _claims_die "cannot resolve the work tree's top level"
+  : > "$_SCRATCH/cl-findings.jsonl"
+  : > "$_SCRATCH/cl-advisories.jsonl"
+  : > "$_SCRATCH/cl-indet.jsonl"
+  : > "$_SCRATCH/cl-results.jsonl"
+
+  local host="$_SCRATCH/cl-config-host.json" cfg
+  if _claims_read docs/spec-claims/config.json > "$host"; then
+    if ! jq -e -s 'length == 1 and (.[0] | type) == "object"' "$host" >/dev/null 2>&1; then
+      _claims_die "docs/spec-claims/config.json is not one JSON object"
+    fi
+    set -- --slurpfile host "$host"
+  else
+    set -- --argjson host '[]'
+  fi
+  cfg=$(_claims_jq config-merge -nc "$@" "$_JQ_CLAIMS_DEFAULTS") || _claims_propagate $?
+  printf '%s\n' "${cfg%%$'\n'*}" > "$_SCRATCH/cl-config.json"
+  printf '%s\n' "${cfg#*$'\n'}" > "$_SCRATCH/cl-config-unknown.json"
+
+  _CL_BASE_REF="${_OPT_base:-}"
+  if [ -z "$_CL_BASE_REF" ]; then
+    _CL_BASE_REF=$(_claims_jq config-base -r 'if (.base | type) == "string" then .base else "" end' \
+      "$_SCRATCH/cl-config.json") || _claims_propagate $?
+    [ -n "$_CL_BASE_REF" ] || _CL_BASE_REF="origin/main"
+  fi
+  _CL_MB=""
+  if git rev-parse -q --verify "$_CL_BASE_REF^{commit}" >/dev/null 2>&1; then
+    _CL_MB=$(git merge-base HEAD "$_CL_BASE_REF" 2>/dev/null) || _CL_MB=""
+  fi
+  if [ -z "$_CL_MB" ]; then _claims_indeterminate V6 - base-unresolvable; fi
+}
+
+# _claims_emit <verb> [<extra-json>]: print the verdict object (merged with
+# <extra-json>; its verb, enabled and exit are never overridden) and exit
+# with the precedence code.
+_claims_emit() {
+  local extra="${2:-}" out rc
+  [ -n "$extra" ] || extra='{}'
+  out=$(_claims_jq emit -rn --arg verb "$1" --argjson extra "$extra" \
+    --arg ref "$_CL_BASE_REF" --arg mb "$_CL_MB" --argjson all "$_CL_ALL_BLOCKING" \
+    --slurpfile cfg "$_SCRATCH/cl-config.json" \
+    --slurpfile f "$_SCRATCH/cl-findings.jsonl" \
+    --slurpfile a "$_SCRATCH/cl-advisories.jsonl" \
+    --slurpfile i "$_SCRATCH/cl-indet.jsonl" \
+    --slurpfile r "$_SCRATCH/cl-results.jsonl" \
+    "$_JQ_CLAIMS_EMIT") || _claims_propagate $?
+  rc=${out%%$'\n'*}
+  _claims_mark_emitted
+  _claims_out "${out#*$'\n'}"
+  if [ "$rc" = 0 ]; then _exit_ok; fi
+  exit "$rc"
+}
+
+# A verb that takes no positional argument.
+_claims_no_args() {
+  local verb="$1"
+  shift
+  [ $# -eq 0 ] || _usage_error "$verb" "takes no arguments (got '$1')"
+}
+
+# V1 (config): each top-level config key the defaults do not know.
+_claims_v1_config() {
+  _claims_jq v1-config -c '.[] | {check: "V1", claim: null, doc: "docs/spec-claims/config.json",
+      message: "config: unknown key \(.)"}' "$_SCRATCH/cl-config-unknown.json" \
+    >> "$_SCRATCH/cl-findings.jsonl"
+}
+
+cmd_claims_validate() {
+  local mode=all
+  if [ "$_OPT_staged" = 1 ]; then mode=staged; fi
+  _claims_init "$mode"
+  if [ "$_OPT_staged" = "$_OPT_all" ]; then
+    _usage_error "claims validate" "give exactly one of --staged and --all"
+  fi
+  _claims_no_args "claims validate" "$@"
+  _claims_v1_config
+  _claims_emit validate
+}
+
+# The verbs below are inert-correct stubs until their tasks land: they
+# check their arguments and report an empty verdict.
+cmd_claims_run() {
+  _CL_ALL_BLOCKING=1
+  _claims_init all
+  _claims_no_args "claims run" "$@"
+  _claims_emit run
+}
+
+cmd_claims_promote() {
+  _CL_ALL_BLOCKING=1
+  _claims_init head
+  if [ "$_OPT_reverify" = 1 ]; then
+    if [ "$_OPT_all" = 1 ]; then
+      [ $# -eq 0 ] || _usage_error "claims promote" "--reverify --all takes no <id> (got '$1')"
+    else
+      [ $# -gt 0 ] || _usage_error "claims promote" "--reverify requires <id>... or --all"
+    fi
+  else
+    [ "$_OPT_all" != 1 ] || _usage_error "claims promote" "--all requires --reverify"
+    [ $# -eq 1 ] || _usage_error "claims promote" "requires exactly one claim <id> (got $#)"
+  fi
+  _claims_emit promote
+}
+
+cmd_claims_render() {
+  _claims_init all
+  _claims_no_args "claims render" "$@"
+  _claims_emit render
+}
+
+cmd_claims_gate() {
+  _CL_ALL_BLOCKING=1
+  _claims_init head
+  [ -n "$_OPT_plan" ] || _usage_error "claims gate" "requires --plan <plan>"
+  [ -n "$_OPT_chunk" ] || _usage_error "claims gate" "requires --chunk <n>"
+  _claims_no_args "claims gate" "$@"
+  _claims_emit gate
+}
+
+cmd_claims_attest() {
+  _CL_ALL_BLOCKING=1
+  _claims_init head
+  [ -n "$_OPT_plan" ] || _usage_error "claims attest" "requires --plan <plan>"
+  _claims_no_args "claims attest" "$@"
+  _claims_emit attest
+}
+
+# rulings: the DOC-STALE / RETIRE rulings added in <a>..<b>. The rows (in
+# results) arrive with their collection; --format markdown prints them under
+# "## Spec amendments (N)" — the heading always, N = 0 included.
+cmd_claims_rulings() {
+  local format="${_OPT_format:-json}" range="$_OPT_range" a b n
+  _claims_init head
+  case "$format" in
+    json|markdown) ;;
+    *) _usage_error "claims rulings" "--format must be json or markdown (got '$format')" ;;
+  esac
+  [ -n "$range" ] || _usage_error "claims rulings" "requires --range <a>..<b>"
+  case "$range" in
+    *..*) ;;
+    *) _usage_error "claims rulings" "--range must be <a>..<b> (got '$range')" ;;
+  esac
+  a="${range%%..*}"
+  b="${range#*..}"
+  case "$b" in
+    ''|.*) _usage_error "claims rulings" "--range must be <a>..<b> (got '$range')" ;;
+  esac
+  [ -n "$a" ] || _usage_error "claims rulings" "--range must be <a>..<b> (got '$range')"
+  _claims_no_args "claims rulings" "$@"
+  git rev-parse -q --verify "$a^{commit}" >/dev/null 2>&1 || _claims_die "--range: '$a' is not a commit"
+  git rev-parse -q --verify "$b^{commit}" >/dev/null 2>&1 || _claims_die "--range: '$b' is not a commit"
+
+  if [ "$format" = markdown ]; then
+    n=$(_claims_jq rulings-count -s 'length' "$_SCRATCH/cl-results.jsonl") || _claims_propagate $?
+    _claims_out "## Spec amendments ($n)"
+    _claims_mark_emitted
+    _exit_ok
+  fi
+  _claims_emit rulings
 }
 
 # --- Main ---
