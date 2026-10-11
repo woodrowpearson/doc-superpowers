@@ -136,42 +136,55 @@ test_inert_runs_before_required_args() {
   assert_eq "0" "$CL_RC" "inert: claims validate without a mode exits 0"
   assert_json_field "$CL_OUT" '.enabled' "false" "inert: claims validate without a mode reports enabled:false"
   cl validate --bogus
-  assert_eq "3" "$CL_RC" "inert: an unknown option still exits 3 (options are parsed first)"
+  assert_usage_verdict validate false "inert: an unknown option (options are parsed first)"
   teardown
 }
 
+# After `cl`: rc 3 and exactly one usage verdict on stdout, for verb $1
+# (enabled $2).
+assert_usage_verdict() {
+  local verb="$1" enabled="$2" what="$3"
+  assert_eq "3" "$CL_RC" "$what exits 3"
+  assert_eq "1" "$(json_count "$CL_OUT")" "$what prints exactly one JSON object"
+  assert_json_field "$CL_OUT" '.exit' "3" "$what: .exit is 3"
+  assert_json_field "$CL_OUT" '.verb' "$verb" "$what: .verb is $verb"
+  assert_json_field "$CL_OUT" '.enabled' "$enabled" "$what: .enabled is $enabled"
+  assert_json_field "$CL_OUT" '.error | length > 0' "true" "$what: .error is non-empty"
+}
+
 test_usage_errors_exit_3() {
-  echo "test: claims usage errors exit 3; other verbs keep exit 2"
+  echo "test: claims usage errors exit 3 with one verdict object; other verbs keep exit 2"
   claims_fixture
   cl validate --bogus
-  assert_eq "3" "$CL_RC" "claims validate --bogus exits 3"
+  assert_usage_verdict validate true "claims validate --bogus"
   assert_contains "$CL_ERR" "--bogus" "…naming the option on stderr"
+  assert_json_field "$CL_OUT" '.error | test("--bogus")' "true" "…and in .error"
   cl frobnicate
-  assert_eq "3" "$CL_RC" "claims frobnicate exits 3"
+  assert_usage_verdict frobnicate true "claims frobnicate"
+  cl
+  assert_usage_verdict claims true "claims with no subcommand"
   cl validate --staged --all
-  assert_eq "3" "$CL_RC" "claims validate --staged --all exits 3"
+  assert_usage_verdict validate true "claims validate --staged --all"
   cl validate
-  assert_eq "3" "$CL_RC" "claims validate with neither --staged nor --all exits 3"
+  assert_usage_verdict validate true "claims validate with neither --staged nor --all"
   cl gate
-  assert_eq "3" "$CL_RC" "claims gate without --plan exits 3"
+  assert_usage_verdict gate true "claims gate without --plan"
   cl gate --plan docs/plans/p.md
-  assert_eq "3" "$CL_RC" "claims gate without --chunk exits 3"
+  assert_usage_verdict gate true "claims gate without --chunk"
   cl promote
-  assert_eq "3" "$CL_RC" "claims promote without <id> exits 3"
+  assert_usage_verdict promote true "claims promote without <id>"
   cl attest
-  assert_eq "3" "$CL_RC" "claims attest without --plan exits 3"
+  assert_usage_verdict attest true "claims attest without --plan"
   cl rulings
-  assert_eq "3" "$CL_RC" "claims rulings without --range exits 3"
+  assert_usage_verdict rulings true "claims rulings without --range"
   cl rulings --range HEAD
-  assert_eq "3" "$CL_RC" "claims rulings --range without '..' exits 3"
+  assert_usage_verdict rulings true "claims rulings --range without '..'"
   cl rulings --range HEAD..HEAD --format yaml
-  assert_eq "3" "$CL_RC" "claims rulings --format yaml exits 3"
-  local rc=0
-  "$DOC_TOOLS" claims </dev/null >/dev/null 2>&1 || rc=$?
-  assert_eq "3" "$rc" "claims with no subcommand exits 3"
-  rc=0
-  "$DOC_TOOLS" status --bogus </dev/null >/dev/null 2>&1 || rc=$?
+  assert_usage_verdict rulings true "claims rulings --format yaml"
+  local rc=0 out
+  out=$("$DOC_TOOLS" status --bogus </dev/null 2>/dev/null) || rc=$?
   assert_eq "2" "$rc" "the general verb status --bogus still exits 2"
+  assert_eq "" "$out" "…printing nothing on stdout"
   rc=0
   "$DOC_TOOLS" frobnicate </dev/null >/dev/null 2>&1 || rc=$?
   assert_eq "2" "$rc" "an unknown general subcommand still exits 2"
@@ -220,8 +233,7 @@ test_usage_error_no_stray_marker() {
   # Scratch dirs land under the suite root, where stray_markers looks.
   tmp=$(harness_mktemp_d scratch)
   TMPDIR="$tmp" cl validate --bogus
-  assert_eq "3" "$CL_RC" "claims validate --bogus exits 3"
-  assert_eq "" "$CL_OUT" "a usage error prints nothing on stdout (no internal-failure object)"
+  assert_usage_verdict validate true "claims validate --bogus"
   assert_eq "" "$(stray_markers)" "no cl-emitted file anywhere"
   assert_not_contains "$CL_ERR" "cl-emitted" "nothing tried to write a cl-emitted path"
   assert_eq "" "$(ls -A "$tmp")" "no scratch dir was created before the usage error"
@@ -229,8 +241,7 @@ test_usage_error_no_stray_marker() {
   # still 3, still prints no object, and the scratch dir (with its marker)
   # is removed.
   TMPDIR="$tmp" cl validate
-  assert_eq "3" "$CL_RC" "a required-argument usage error after scratch exists exits 3"
-  assert_eq "" "$CL_OUT" "…and prints nothing on stdout"
+  assert_usage_verdict validate true "a required-argument usage error after scratch exists"
   assert_eq "" "$(stray_markers)" "…and leaves no cl-emitted file"
   assert_eq "" "$(ls -A "$tmp")" "…and its scratch dir is removed"
   teardown
@@ -275,7 +286,10 @@ test_internal_crash_fallback_object() {
   ' "$SCRIPT_DIR/doc-tools.sh" > "$dir/doc-tools.sh"
   assert_true "precondition: the probe was injected" grep -q _CL_NEVER_SET_PROBE "$dir/doc-tools.sh"
   local crash rc=0 out err
-  crash=$(bash_bin_shim "$dir/doc-tools.sh")
+  # A name of its own: bash_bin_shim names the shim by basename, so
+  # "doc-tools.sh" would replace $DOC_TOOLS's shim for the rest of the suite.
+  mv "$dir/doc-tools.sh" "$dir/dt-crash.sh"
+  crash=$(bash_bin_shim "$dir/dt-crash.sh")
   err=$(harness_mktemp crash-err)
   out=$("$crash" claims render 2>"$err" </dev/null) || rc=$?
   assert_contains "$(cat "$err")" "unbound variable" "precondition: the run crashed on the probe"
@@ -284,6 +298,86 @@ test_internal_crash_fallback_object() {
   assert_json_field "$out" '.error | startswith("internal failure (rc ")' "true" ".error is the internal-failure fallback"
   assert_json_field "$out" '.verb' "render" ".verb names the claims verb"
   assert_json_field "$out" '.exit' "2" ".exit is 2"
+  teardown
+}
+
+# claims_probe <before|after> <line>: a copy of doc-tools.sh whose
+# cmd_claims_render runs <line> just before (no scratch dir yet: the
+# variable-only marker) or just after (scratch exists: the marker file) its
+# _claims_init call. Echoes its shim. <line> must hold no backslash (awk -v).
+_CL_PROBES=0
+claims_probe() {
+  local where="$1" line="$2" dir
+  _CL_PROBES=$((_CL_PROBES + 1))
+  dir=$(harness_mktemp_d probe)
+  awk -v where="$where" -v probe="$line" '
+    $0 == "cmd_claims_render() {" { in_fn = 1 }
+    in_fn && !done && /_claims_init / {
+      if (where == "before") print "  " probe
+      print
+      if (where == "after") print "  " probe
+      done = 1
+      next
+    }
+    { print }' "$SCRIPT_DIR/doc-tools.sh" > "$dir/dt-probe-$_CL_PROBES.sh"
+  grep -qF -- "$line" "$dir/dt-probe-$_CL_PROBES.sh" || { echo "probe not injected: $line" >&2; return 1; }
+  bash_bin_shim "$dir/dt-probe-$_CL_PROBES.sh"
+}
+
+# The run ends with the code its verdict printed, whatever status reaches the
+# EXIT trap: a parent's `|| exit 1` after a subshell's die (doc-tools' own
+# idiom), or a bare exit 0 that the unfinished-run rule turns into 1.
+test_emitted_code_survives_trap() {
+  echo "test: a claims run exits with the code its verdict printed"
+  claims_fixture
+  local probe rc out case where line want
+  for case in \
+    'after|x=$(_die "helper failed") || exit 1|2' \
+    'after|x=$(_claims_mark_emitted 3; _claims_out "{}"; exit 3) || exit 1|3' \
+    'after|x=$(_claims_mark_emitted 0; _claims_out "{}"; exit 0); exit 0|0' \
+    'after|x=$(_claims_mark_emitted 1; _claims_out "{}"; exit 1) || exit 0|1' \
+    'before|_claims_mark_emitted 0; _claims_out "{}"; exit 0|0' \
+    'before|_claims_mark_emitted 2; _claims_out "{}"; exit 1|2' \
+    'before|_claims_mark_emitted 3; _claims_out "{}"; exit 0|3' \
+    'before|_claims_mark_emitted 1; _claims_out "{}"; exit 0|1'; do
+    where="${case%%|*}"
+    line="${case#*|}"
+    want="${line##*|}"
+    line="${line%|*}"
+    probe=$(claims_probe "$where" "$line")
+    rc=0
+    out=$("$probe" claims render </dev/null 2>/dev/null) || rc=$?
+    assert_eq "$want" "$rc" "$where init: '$line' exits $want"
+    assert_eq "1" "$(json_count "$out")" "$where init: '$line' prints exactly one JSON object"
+  done
+  probe=$(claims_probe after 'x=$(_die "helper failed") || exit 1')
+  out=$("$probe" claims render </dev/null 2>/dev/null) || true
+  assert_json_field "$out" '.error' "helper failed" "the subshell's die verdict is the one printed"
+  assert_json_field "$out" '.exit' "2" "…and its exit field matches the process's"
+  teardown
+}
+
+# A closed stderr must cost neither the verdict nor its exit code.
+test_stderr_closed_still_one_verdict() {
+  echo "test: with stderr closed, a die and a usage error still print one verdict with their code"
+  claims_fixture
+  local rc out
+  printf '%s\n' 'not json' > docs/spec-claims/config.json
+  rc=0
+  out=$("$DOC_TOOLS" claims validate --all </dev/null 2>&-) || rc=$?
+  assert_eq "2" "$rc" "die with stderr closed: exits 2"
+  assert_eq "1" "$(json_count "$out")" "die with stderr closed: exactly one JSON object"
+  assert_json_field "$out" '.exit' "2" "die with stderr closed: .exit is 2"
+  git checkout -q -- docs/spec-claims/config.json
+  rc=0
+  out=$("$DOC_TOOLS" claims validate --bogus </dev/null 2>&-) || rc=$?
+  assert_eq "3" "$rc" "usage error (before scratch) with stderr closed: exits 3"
+  assert_eq "1" "$(json_count "$out")" "usage error (before scratch) with stderr closed: exactly one JSON object"
+  assert_json_field "$out" '.exit' "3" "usage error (before scratch) with stderr closed: .exit is 3"
+  rc=0
+  out=$("$DOC_TOOLS" claims validate </dev/null 2>&-) || rc=$?
+  assert_eq "3" "$rc" "usage error (after scratch) with stderr closed: exits 3"
+  assert_eq "1" "$(json_count "$out")" "usage error (after scratch) with stderr closed: exactly one JSON object"
   teardown
 }
 
@@ -437,6 +531,8 @@ run_tests() {
   test_usage_error_no_stray_marker
   test_die_in_subshell_single_verdict
   test_internal_crash_fallback_object
+  test_emitted_code_survives_trap
+  test_stderr_closed_still_one_verdict
   test_missing_jq_exit_2
   test_rulings_markdown_exit_0
   test_enabled_verdict_shape

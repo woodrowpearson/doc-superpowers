@@ -1486,25 +1486,37 @@ cleanup() {
 # silent success. A run finishes by returning from _main, or by _exit_ok
 # (an intended exit 0, such as --help); both set _EXIT_OK first.
 #
-# A claims verb (_CL_ACTIVE=1) has its own exit family (see "Spec claims"): a
-# run that emitted no verdict — a set -u crash, a stray exit 1, a failed
-# command — gets one fallback verdict object and exits 2, never 1. A run
-# that emitted keeps 0/1/3 and maps anything else to 2. 130/143 (a signal)
-# stand either way. The emitted marker is read BEFORE cleanup, which removes
-# the scratch dir holding it.
+# A claims verb (_CL_ACTIVE=1) has its own exit family (see "Spec claims"):
+# the run ends with the exit code its verdict printed — recorded by
+# _claims_mark_emitted in this shell (_CL_EMITTED_RC) or, for a verdict a
+# $(…) printed, in the marker file — whatever status reached the trap (a
+# parent's `|| exit 1` after a subshell's _claims_die, or bash 3.2's crash
+# status 0 → 1 above). A run that emitted no verdict — a set -u crash, a
+# stray exit 1, a failed command — gets one fallback verdict object and
+# exits 2, never 1. 130/143 (a signal) stand either way. The marker is read
+# BEFORE cleanup, which removes the scratch dir holding it.
 _EXIT_OK=0
 _USAGE_RC=2          # claims verbs: 3 (set in _main)
 _CL_ACTIVE=0         # 1: this run is a claims verb
-_CL_EMITTED=0        # 1: this shell printed the run's verdict (or a usage error)
+_CL_EMITTED=0        # 1: this shell printed the run's verdict
+_CL_EMITTED_RC=""    # …and the exit code that verdict carries
 _CL_VERB=""          # the claims verb ("validate", …), for verdict objects
 _on_exit() {
-  local rc=$? emitted=0
+  local rc=$? emitted=0 erc=""
   if [ "$_CL_ACTIVE" = 1 ]; then
     if [ "$_CL_EMITTED" = 1 ]; then
       emitted=1
+      erc="$_CL_EMITTED_RC"
     elif [ -n "$_SCRATCH" ] && [ -e "$_SCRATCH/cl-emitted" ]; then
       emitted=1
+      # No trailing newline: read assigns, then returns 1.
+      IFS= read -r erc < "$_SCRATCH/cl-emitted" || true
     fi
+    # A marker whose code is unreadable still means a verdict was printed.
+    case "$erc" in
+      0|1|2|3) ;;
+      *) erc=2 ;;
+    esac
   fi
   cleanup
   if [ "$rc" -eq 0 ] && [ "$_EXIT_OK" != 1 ]; then
@@ -1518,10 +1530,7 @@ _on_exit() {
           _claims_fallback "$rc"
           rc=2
         else
-          case "$rc" in
-            0|1|3) ;;
-            *) rc=2 ;;
-          esac
+          rc=$erc
         fi
         ;;
     esac
@@ -2525,12 +2534,11 @@ cmd_help() {
 }
 
 # A command-line error: say what is wrong and where the usage is; exit 2
-# (3 for a claims verb: _USAGE_RC). A claims usage error prints no verdict;
-# its marker keeps the EXIT trap from adding the internal-failure one.
+# (a claims verb: _claims_usage_error, exit 3 with its verdict object).
 _usage_error() {
+  if [ "$_CL_ACTIVE" = 1 ]; then _claims_usage_error "$1" "$2"; fi
   echo "ERROR: $1: $2" >&2
   echo "       See: doc-tools.sh $1 --help" >&2
-  if [ "$_CL_ACTIVE" = 1 ]; then _claims_mark_emitted; fi
   exit "$_USAGE_RC"
 }
 
@@ -2688,9 +2696,12 @@ _main() {
   # A claims verb: its own exit family (usage = 3) and fd 9, the run's real
   # stdout, for its verdict — set before the lookup, so an unknown claims
   # subcommand is a claims usage error too (see "Spec claims").
+  # _CL_VERB names the sub-verb in a usage error's object: the word after
+  # "claims" until the lookup confirms it, "claims" when there is none.
   if [ "$1" = claims ]; then
     _USAGE_RC=3
     _CL_ACTIVE=1
+    _CL_VERB="${2:-claims}"
     exec 9>&1
   fi
 
@@ -5472,16 +5483,22 @@ cmd_tools_version() {
 #
 # Exit family, claims verbs only: 0 as expected · 1 findings · 2 could not
 # run · 3 usage; precedence 1 > 2 > 0; an internal failure is 2, never 1. The
-# run prints exactly one verdict object on stdout (rulings --format markdown
-# prints Markdown instead). What keeps both true whatever fails:
+# run prints exactly one verdict object on stdout — a usage error too
+# (_claims_usage_error); rulings --format markdown prints Markdown instead.
+# What keeps both true whatever fails:
 #   - fd 9 is the run's real stdout (_main: exec 9>&1; bash 3.2 has no
 #     {fd}). Every verdict is written >&9, so one printed inside $(…) reaches
 #     the caller instead of the captured value.
-#   - _claims_mark_emitted records "printed" twice: _CL_EMITTED=1 in this
-#     shell, and $_SCRATCH/cl-emitted for the parent of a $(…) (a subshell's
-#     variables never reach it). The file only once scratch exists — never
-#     "/cl-emitted" — since no claims code runs in a $(…) before that.
-#   - _on_exit: a run that printed nothing gets one fallback object, exit 2.
+#   - _claims_mark_emitted <rc> records "printed, exit <rc>" twice:
+#     _CL_EMITTED=1 / _CL_EMITTED_RC in this shell, and $_SCRATCH/cl-emitted
+#     (holding <rc>) for the parent of a $(…) (a subshell's variables never
+#     reach it). The file only once scratch exists — never "/cl-emitted" —
+#     since no claims code runs in a $(…) before that. Every emitter marks
+#     before it prints, and prints its verdict before any stderr line (whose
+#     failure, with stderr closed, is ignored).
+#   - _on_exit: a run that printed a verdict exits with that verdict's code
+#     (whatever status reached the trap); one that printed nothing gets one
+#     fallback object, exit 2.
 #   - _die delegates to _claims_die (exit 2). A $(…) of claims code that can
 #     die is written  v=$(…) || _claims_propagate $?  — the subshell already
 #     printed the one verdict; the parent only ends with its status.
@@ -5558,26 +5575,47 @@ _claims_out() {
   fi
 }
 
-# Record that this run's verdict (or usage error) was printed. The variable
-# first, before any I/O; the marker file only once the scratch dir exists.
+# _claims_mark_emitted <rc>: record that this run's verdict, carrying exit
+# code <rc>, is being printed; _on_exit then ends the run with <rc>. The
+# variables first, before any I/O; the marker file (holding <rc>) only once
+# the scratch dir exists.
 _claims_mark_emitted() {
   _CL_EMITTED=1
+  _CL_EMITTED_RC="$1"
   if [ -n "$_SCRATCH" ]; then
-    : > "$_SCRATCH/cl-emitted" || true
+    printf '%s' "$1" > "$_SCRATCH/cl-emitted" || true
   fi
 }
 
 # _claims_die <message>: the run could not run. Prints the error verdict to
 # fd 9 and exits 2 — inside $(…) too (the parent then _claims_propagate's).
+# The verdict before the stderr line, and a failed stderr write (stderr
+# closed) ignored: the run must still end with its verdict and 2.
 _claims_die() {
   local verb
-  _claims_mark_emitted
-  echo "ERROR: $*" >&2
+  _claims_mark_emitted 2
   _claims_json_str "$_CL_VERB"
   verb=$_CL_JS
   _claims_json_str "$*"
   _claims_out "{\"verb\":$verb,\"enabled\":true,\"exit\":2,\"error\":$_CL_JS}"
+  echo "ERROR: $*" >&2 || true
   exit 2
+}
+
+# _claims_usage_error <verb> <message>: a claims command-line error. One
+# verdict object (exit 3; enabled when docs/spec-claims/ exists here, as the
+# inert check reads it), then _usage_error's two stderr lines; exit 3.
+_claims_usage_error() {
+  local verb enabled=false
+  _claims_mark_emitted 3
+  if [ -d docs/spec-claims ]; then enabled=true; fi
+  _claims_json_str "$_CL_VERB"
+  verb=$_CL_JS
+  _claims_json_str "$1: $2"
+  _claims_out "{\"verb\":$verb,\"enabled\":$enabled,\"exit\":3,\"error\":$_CL_JS}"
+  echo "ERROR: $1: $2" >&2 || true
+  echo "       See: doc-tools.sh $1 --help" >&2 || true
+  exit "$_USAGE_RC"
 }
 
 # _claims_propagate <rc>: end the run with a failed $(…)'s status. The
@@ -5662,7 +5700,7 @@ _claims_init() {
   _CL_MODE="$1"
   if [ ! -d docs/spec-claims ]; then
     _CL_ENABLED=0
-    _claims_mark_emitted
+    _claims_mark_emitted 0
     _claims_json_str "$_CL_VERB"
     _claims_out "{\"verb\":$_CL_JS,\"enabled\":false,\"exit\":0}"
     _exit_ok
@@ -5716,7 +5754,7 @@ _claims_emit() {
     --slurpfile r "$_SCRATCH/cl-results.jsonl" \
     "$_JQ_CLAIMS_EMIT") || _claims_propagate $?
   rc=${out%%$'\n'*}
-  _claims_mark_emitted
+  _claims_mark_emitted "$rc"
   _claims_out "${out#*$'\n'}"
   if [ "$rc" = 0 ]; then _exit_ok; fi
   exit "$rc"
@@ -5824,7 +5862,7 @@ cmd_claims_rulings() {
   if [ "$format" = markdown ]; then
     n=$(_claims_jq rulings-count -s 'length' "$_SCRATCH/cl-results.jsonl") || _claims_propagate $?
     _claims_out "## Spec amendments ($n)"
-    _claims_mark_emitted
+    _claims_mark_emitted 0
     _exit_ok
   fi
   _claims_emit rulings
