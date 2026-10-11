@@ -1263,6 +1263,76 @@ test_v2_lines_hit_wrapped() {
   teardown
 }
 
+# norm_jq <filter> <text>: <filter> (after _JQ_CLAIMS_NORM) on <text> as a raw
+# doc, compact output; "jq failed" when jq fails.
+norm_jq() {
+  local tmp out
+  tmp=$(harness_mktemp norm-jq)
+  printf '%s' "$2" > "$tmp"
+  out=$(jq -Rsc "$(claims_norm_defs) $1" "$tmp" 2>/dev/null) || out="jq failed"
+  rm -f "$tmp"
+  printf '%s' "$out"
+}
+
+test_fence_pairing_commonmark() {
+  echo "test: fence masking pairs fences as CommonMark does (character, run length, no info string)"
+  # A ``` line inside a ```` fence is content: its fenced ~~ stays fenced, and
+  # the prose strike after the fence is blanked alone.
+  local doc
+  doc=$'````md\n```\ncode ~~x\n```\n````\nA ~~struck~~ claim sentence.\n'
+  assert_eq '"\n```\ncode ~~x\n```\n\nA  claim sentence.\n"' "$(norm_jq claims_live "$doc")" \
+    "\`\`\`\` fence holding \`\`\`: the live text keeps 'A ' and blanks only the strike"
+  assert_eq '"code ~~x A claim sentence."' "$(norm_jq claims_norm "$doc")" "…normalised"
+  # A ~~~ line inside a ``` fence is content, and a ```` run followed by an
+  # info string does not close it; a longer bare run does.
+  doc=$'```\n~~~\nx ~~ y\n~~~\n```` not\n````\nLater ~~gone~~ B line.\n'
+  assert_eq '"\n~~~\nx ~~ y\n~~~\n```` not\n\nLater  B line.\n"' "$(norm_jq claims_live "$doc")" \
+    "\`\`\` fence holding ~~~ lines, closed by a longer bare run"
+  # A shorter run of the opener's character is content too.
+  doc=$'~~~~\n~~~\na ~~ b\n~~~\n~~~~\nC ~~gone~~ line.\n'
+  assert_eq '"\n~~~\na ~~ b\n~~~\n\nC  line.\n"' "$(norm_jq claims_live "$doc")" \
+    "~~~~ fence holding ~~~ lines"
+  # A ``` run whose info string holds a ` is not an opener.
+  doc=$'```x`\nD ~~gone~~ line.\n'
+  assert_eq '"```x`\nD  line.\n"' "$(norm_jq claims_live "$doc")" "a \`\`\` run with a \` in its info string opens no fence"
+  # End to end: V2 finds the sentence after the nested fence.
+  claims_fixture
+  doc_edit "$DOC" "- Refresh tokens are single-use." $'\n````md\n```\ncode ~~x\n```\n````\nA ~~struck~~ claim sentence.' after
+  jset "$SIDECAR" '.claims += [.claims[0] | .id = "SPEC-AUTH-001#claim-sentence" | .quote = "A claim sentence"]'
+  cl validate --all
+  assert_v2_ok "a claim quoting the sentence after a nested fence"
+  teardown
+}
+
+test_amended_flag_carry() {
+  echo "test: claims_doc's amended flag — carried through the blockquote, from the source lines"
+  local am='claims_doc | [.lines[] | [.n, .amended]]'
+  # A strike across a line break inside the block does not end it.
+  assert_eq "[[1,true],[2,true],[3,true]]" \
+    "$(norm_jq "$am" $'> ⚠️ **AMENDED 2026-10-10 — ttl.** ~~Access tokens expire after\n> 15 minutes.~~ Access tokens expire after\n> 30 minutes.\n')" \
+    "a strike spanning lines of the AMENDED block: every line amended"
+  # A bare ">" line keeps the block going.
+  assert_eq "[[1,true],[3,true]]" \
+    "$(norm_jq "$am" $'> **AMENDED 2026-10-10 — ttl.** First.\n>\n> Second.\n')" \
+    "carried across a bare '>' line"
+  # A blank line ends it.
+  assert_eq "[[1,true],[3,false]]" \
+    "$(norm_jq "$am" $'> **AMENDED 2026-10-10 — ttl.** First.\n\n> Second.\n')" \
+    "stopped by a blank line"
+  # A later plain blockquote is not amended.
+  assert_eq "[[1,true],[3,false],[5,false]]" \
+    "$(norm_jq "$am" $'> **AMENDED 2026-10-10 — ttl.** First.\n\nPlain.\n\n> Quote.\n')" \
+    "a later plain blockquote is not amended"
+  # Inside a code fence a "> **AMENDED" line is not a blockquote.
+  assert_eq "[[2,false],[5,false]]" \
+    "$(norm_jq "$am" $'```\n> **AMENDED 2026-10-10 — ttl.** In code.\n```\n\n> Quote.\n')" \
+    "a fenced '> **AMENDED' line is not a blockquote"
+  # CRLF: the same as LF.
+  assert_eq "[[1,true],[2,true],[3,true]]" \
+    "$(norm_jq "$am" $'> **AMENDED 2026-10-10 — ttl.** ~~a\r\n> b~~ c\r\n> d\r\n')" \
+    "a CRLF AMENDED block"
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -1328,6 +1398,8 @@ run_tests() {
   test_v2_crlf_doc
   test_v2_unicode_quote
   test_v2_lines_hit_wrapped
+  test_fence_pairing_commonmark
+  test_amended_flag_carry
 
   print_summary
 }

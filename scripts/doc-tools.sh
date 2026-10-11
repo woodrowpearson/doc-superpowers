@@ -6188,20 +6188,37 @@ _claims_v1() {
 # 1.6 loops on one).
 
 # The shared jq defs (render, V2, V8 and V8n run after them):
+#   claims_fence_kinds  LF text → one {t, k} per line, k "out", "delim" (a
+#                     fence's opening or closing line) or "in" (inside a
+#                     fence). CommonMark fence pairing: an opener is
+#                     ^[ \t]* then a run of 3 or more of one character, ` or
+#                     ~ (a ` run's info string may not hold a `); the run's
+#                     character and length are kept. Only a line whose run
+#                     is the same character, at least as long, followed by
+#                     nothing but [ \t], closes it; every other line until
+#                     then — an inner fence with a shorter or other run
+#                     included — is "in". An unclosed fence runs to the end.
+#                     V8's awk section tracker (_claims_sections) pairs
+#                     fences by this same rule.
 #   claims_live       raw doc → the same number of lines, CRLF read as LF and
 #                     each dead span (status block, ~~strike~~) blanked to its
-#                     newlines. Code fences are masked first, so a ~~~ fence
-#                     is never read as a strike: a fence delimiter line
-#                     becomes "", and each "~" inside a fence the sentinel
-#                     U+FFFF — written here only as the jq escape \uffff,
-#                     never as raw bytes — restored once strikes are gone.
+#                     newlines. Code fences are masked first, so a fence is
+#                     never read as a strike: a delimiter line becomes "", and
+#                     each "~" of an "in" line the sentinel U+FFFF — written
+#                     here only as the jq escape \uffff, never as raw bytes —
+#                     restored once strikes are gone.
 #   claims_norm       string → its normalised form (a doc or a quote).
 #   claims_doc        raw doc → {text: <normalised>, lines: [{n, start, end,
 #                     amended}]}: n the 1-based line, [start, end) its
 #                     codepoint span in text, for each line whose normalised
 #                     form is non-empty (lines join with one space). amended:
-#                     a ">" line of a blockquote whose first line matches
-#                     ^>.*\*\*AMENDED YYYY-MM-DD.
+#                     the line is in a blockquote (an "out" line matching
+#                     ^[ \t]*>; a blank line ends one) whose first line
+#                     matches ^[ \t]*>.*\*\*AMENDED YYYY-MM-DD. Membership and
+#                     the header are read from the CRLF-folded source lines
+#                     (fence-aware, before strikes are blanked), so a strike
+#                     across a line break cannot end the block; the spans
+#                     come from the claims_live lines (same indices).
 #   claims_occ($q)    on claims_doc: the non-overlapping start offsets of $q
 #                     (a normalised quote) in .text.
 #   claims_lines_hit($q; $k)  on claims_doc: the n of each line the $k-th
@@ -6209,12 +6226,21 @@ _claims_v1() {
 #                     [] when there is none.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_NORM='def claims_blank: gsub("[^\n]"; "");
+ def claims_fence_kinds:
+   reduce split("\n")[] as $l ({c: null, n: 0, out: []};
+     (($l | capture("^[ \t]*(?<r>`{3,}|~{3,})(?<rest>.*)$")) // null) as $f
+     | if .c == null then
+         if $f != null and ($f.r[0:1] == "~" or ($f.rest | test("`") | not))
+         then .c = $f.r[0:1] | .n = ($f.r | length) | .out += [{t: $l, k: "delim"}]
+         else .out += [{t: $l, k: "out"}] end
+       elif $f != null and $f.r[0:1] == .c and ($f.r | length) >= .n and ($f.rest | test("^[ \t]*$"))
+       then .c = null | .n = 0 | .out += [{t: $l, k: "delim"}]
+       else .out += [{t: $l, k: "in"}] end)
+   | .out;
  def claims_mask_fences:
-   reduce split("\n")[] as $l ({fence: false, out: []};
-     if $l | test("^[ \t]*(```|~~~)") then .fence |= not | .out += [""]
-     elif .fence then .out += [$l | gsub("~"; "\uffff")]
-     else .out += [$l] end)
-   | .out | join("\n");
+   claims_fence_kinds
+   | map(if .k == "delim" then "" elif .k == "in" then .t | gsub("~"; "\uffff") else .t end)
+   | join("\n");
  def claims_live: gsub("\r\n"; "\n") | claims_mask_fences
    | gsub("(?<s><!-- spec-claims:status:begin -->[\\s\\S]*?<!-- spec-claims:status:end -->)"; .s | claims_blank)
    | gsub("(?<s>~~[\\s\\S]*?~~)"; .s | claims_blank)
@@ -6224,12 +6250,13 @@ _JQ_CLAIMS_NORM='def claims_blank: gsub("[^\n]"; "");
  def claims_norm: claims_live | split("\n") | map(claims_norm_line) | map(select(. != "")) | join(" ");
  def claims_doc:
    (claims_live | split("\n")) as $ls
+   | (gsub("\r\n"; "\n") | claims_fence_kinds) as $src
    | reduce range(0; $ls | length) as $i ({parts: [], lines: [], off: 0, bq: false, amd: false};
-       $ls[$i] as $raw
-       | ($raw | claims_norm_line) as $nl
-       | ($raw | test("^[ \t]*>")) as $bq
+       ($ls[$i] | claims_norm_line) as $nl
+       | $src[$i] as $s
+       | ($s.k == "out" and ($s.t | test("^[ \t]*>"))) as $bq
        | (if $bq and (.bq | not)
-          then .amd = ($raw | test("^[ \t]*>.*\\*\\*AMENDED [0-9]{4}-[0-9]{2}-[0-9]{2}")) else . end)
+          then .amd = ($s.t | test("^[ \t]*>.*\\*\\*AMENDED [0-9]{4}-[0-9]{2}-[0-9]{2}")) else . end)
        | .bq = $bq
        | if $nl == "" then .
          else .parts += [$nl]
