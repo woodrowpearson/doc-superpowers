@@ -906,6 +906,23 @@ test_v1_staged_scope() {
   teardown
 }
 
+test_v1_staged_config_touches_every_claim() {
+  echo "test: V1 under --staged — a staged config.json touches every claim"
+  claims_fixture
+  jset docs/spec-claims/config.json '.kinds = ["parity"]'
+  jset "$SIDECAR" '.claims[0].kind = "parity"'
+  git commit -qam "a host kind"
+  cl validate --staged
+  assert_no_v1 "--staged, nothing staged"
+  # Staging a config without kinds makes the committed claim's kind invalid.
+  jset docs/spec-claims/config.json 'del(.kinds)'
+  git add docs/spec-claims/config.json
+  cl validate --staged
+  assert_v1 "kind" "--staged, a config without kinds staged"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V1")][0].claim' "SPEC-AUTH-001#token-ttl" "…the finding names the claim"
+  teardown
+}
+
 test_v1_staged_reads_index_sidecars() {
   echo "test: V1 under --staged lists sidecars from the index, never gates/"
   claims_fixture
@@ -971,6 +988,7 @@ run_tests() {
   test_v1_archived_doc_sidecar
   test_v1_archived_doc_all_retired_ok
   test_v1_staged_scope
+  test_v1_staged_config_touches_every_claim
   test_v1_staged_reads_index_sidecars
 
   print_summary

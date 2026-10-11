@@ -5804,6 +5804,7 @@ _CL_GOV_READY=0   # 1: _CL_GOV_GLOBS / _CL_GOV_EXTRA hold the config's globs
 _CL_GOV_GLOBS=""  # config governing (governing_extra included), one per line
 _CL_GOV_EXTRA=""  # config governing_extra, one per line
 _CL_DOCID=""      # _claims_doc_id_set's result
+_CL_SCOPE_ALL=1   # 0: the --staged scope applies (set by _claims_touched)
 
 # Read the governing globs once, in the main shell (so the $(…) of a later
 # _claims_doc_id finds them set).
@@ -5926,23 +5927,35 @@ _claims_load_tree() {
   done 3< "$listing"
 }
 
-# cl-sidecars lines (slurped) → the cl-claims entries ($what == "claims") or
-# the cl-sidecars.json summary ($what == "sidecars").
+# The one definition of a sidecar's facts, on a cl-sidecars line: the
+# prelude of both _JQ_CLAIMS_LOAD and _JQ_CLAIMS_V1, so the loader (whose
+# eligible V2–V5 read) and V1 can never disagree about a sidecar.
+#   cl_well_formed  data is an object whose claims is an array
+#   cl_all_retired  well formed, at least one claim, every claim retired
+#   cl_eligible     the doc is present and governing in the tree read
+#   cl_doc_id       the doc's DOC-ID; for a fully retired sidecar whose doc
+#                   has none, the doc's file stem; else null
 # shellcheck disable=SC2016  # jq program, not shell expansion
-_JQ_CLAIMS_LOAD='def well_formed: (.data | type) == "object" and (.data.claims | type) == "array";
- def all_retired: well_formed and (.data.claims | length) > 0
+_JQ_CLAIMS_SIDECAR='def cl_stem: split("/") | last | sub("\\.[^.]*$"; "");
+ def cl_well_formed: (.data | type) == "object" and (.data.claims | type) == "array";
+ def cl_all_retired: cl_well_formed and (.data.claims | length) > 0
    and all(.data.claims[]; type == "object" and .status == "retired");
- def eff_doc_id: if .doc_id != null then .doc_id
-   elif all_retired and .doc != null then .doc | split("/") | last | sub("\\.[^.]*$"; "")
-   else null end;
- def eligible: .present and .governing;
- if $what == "claims" then
-   [.[] | select(well_formed) | . as $s
+ def cl_eligible: .present and .governing;
+ def cl_doc_id: if .doc_id != null then .doc_id
+   elif cl_all_retired and .doc != null then .doc | cl_stem
+   else null end;'
+
+# cl-sidecars lines (slurped) → the cl-claims entries ($what == "claims") or
+# the cl-sidecars.json summary ($what == "sidecars"). Run after
+# _JQ_CLAIMS_SIDECAR.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_LOAD='if $what == "claims" then
+   [.[] | select(cl_well_formed) | . as $s
     | .data.claims[] | select(type == "object")
-    | {sidecar: $s.sidecar, doc: $s.doc, doc_id: ($s | eff_doc_id), eligible: ($s | eligible), claim: .}]
+    | {sidecar: $s.sidecar, doc: $s.doc, doc_id: ($s | cl_doc_id), eligible: ($s | cl_eligible), claim: .}]
  else
-   [.[] | {sidecar, doc, doc_id: eff_doc_id, eligible: eligible, all_retired: all_retired,
-           skip: (if (well_formed | not) then "malformed sidecar" elif eligible then null
+   [.[] | {sidecar, doc, doc_id: cl_doc_id, eligible: cl_eligible, all_retired: cl_all_retired,
+           skip: (if (cl_well_formed | not) then "malformed sidecar" elif cl_eligible then null
                   elif .present | not then "doc missing" else "not governing" end)}]
  end'
 
@@ -5950,16 +5963,16 @@ _JQ_CLAIMS_LOAD='def well_formed: (.data | type) == "object" and (.data.claims |
 _claims_load() {
   _claims_gov_init
   _claims_load_tree - "$_SCRATCH/cl-sidecars.jsonl"
-  _claims_jq load-claims -s --arg what claims "$_JQ_CLAIMS_LOAD" "$_SCRATCH/cl-sidecars.jsonl" \
+  _claims_jq load-claims -s --arg what claims "$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_LOAD" "$_SCRATCH/cl-sidecars.jsonl" \
     > "$_SCRATCH/cl-claims.json"
-  _claims_jq load-sidecars -s --arg what sidecars "$_JQ_CLAIMS_LOAD" "$_SCRATCH/cl-sidecars.jsonl" \
+  _claims_jq load-sidecars -s --arg what sidecars "$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_LOAD" "$_SCRATCH/cl-sidecars.jsonl" \
     > "$_SCRATCH/cl-sidecars.json"
   if [ -n "$_CL_MB" ]; then
     _claims_load_tree "$_CL_MB" "$_SCRATCH/cl-sidecars-base.jsonl"
   else
     : > "$_SCRATCH/cl-sidecars-base.jsonl"
   fi
-  _claims_jq load-claims-base -s --arg what claims "$_JQ_CLAIMS_LOAD" "$_SCRATCH/cl-sidecars-base.jsonl" \
+  _claims_jq load-claims-base -s --arg what claims "$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_LOAD" "$_SCRATCH/cl-sidecars-base.jsonl" \
     > "$_SCRATCH/cl-claims-base.json"
 }
 
@@ -5988,22 +6001,30 @@ _JQ_CLAIMS_TOUCHED='def strs: if type == "array" then .[] | strings else empty e
  | unique'
 
 # _claims_touched: cl-staged.json and cl-touched.json (see the section
-# comment). Under --staged the staged paths are the index's changes against
-# HEAD (both sides of a rename); otherwise every claim is touched.
+# comment), and _CL_SCOPE_ALL. Under --staged the staged paths are the
+# index's changes against HEAD (both sides of a rename). Every claim is
+# touched (_CL_SCOPE_ALL=1) outside --staged, and under --staged when
+# docs/spec-claims/config.json is staged: the config (kinds, globs, policy)
+# can invalidate any claim without touching its own paths.
 _claims_touched() {
-  local all=1 base
+  local base
+  _CL_SCOPE_ALL=1
   if [ "$_CL_MODE" = staged ]; then
-    all=0
+    _CL_SCOPE_ALL=0
     base=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) \
       || base=4b825dc642cb6eb9a060e54bf8d69288fbee4904 # the empty tree: no commit yet
     git diff --cached --name-only --no-renames -z "$base" -- > "$_SCRATCH/cl-staged.z" \
       || _claims_die "git diff --cached failed listing the staged paths"
     _claims_jq staged-paths -Rs 'split("\u0000") | map(select(. != ""))' "$_SCRATCH/cl-staged.z" \
       > "$_SCRATCH/cl-staged.json"
+    # Its status is the answer, so jq inside an if (not _claims_jq).
+    if jq -e 'any(.[]; . == "docs/spec-claims/config.json")' "$_SCRATCH/cl-staged.json" >/dev/null 2>&1; then
+      _CL_SCOPE_ALL=1
+    fi
   else
     printf '[]\n' > "$_SCRATCH/cl-staged.json"
   fi
-  _claims_jq touched -n --argjson all "$all" --slurpfile st "$_SCRATCH/cl-staged.json" \
+  _claims_jq touched -n --argjson all "$_CL_SCOPE_ALL" --slurpfile st "$_SCRATCH/cl-staged.json" \
     --slurpfile p "$_SCRATCH/cl-claims.json" --slurpfile b "$_SCRATCH/cl-claims-base.json" \
     "$_JQ_CLAIMS_TOUCHED" > "$_SCRATCH/cl-touched.json"
 }
@@ -6094,27 +6115,23 @@ _JQ_CLAIMS_SCHEMA='def claims_v1($docid; $kinds):
       opt("why_not_mechanical"; nes; "must be a non-empty string")
     end;'
 
-# V1 over the proposed sidecars (cl-sidecars.jsonl, slurped as $s): the
-# envelope, the doc (present and governing, unless every claim is retired),
-# the stem, each record (claims_v1) and id uniqueness. Under --staged ($all
-# 0) a claim is in scope when touched or its sidecar or doc is staged; a
-# sidecar when it or its doc is staged or it holds a touched claim. One
-# finding row per line.
+# V1 over the proposed sidecars (cl-sidecars.jsonl, slurped as $s; run after
+# _JQ_CLAIMS_SIDECAR and _JQ_CLAIMS_SCHEMA): the envelope, the doc (present
+# and governing, unless every claim is retired), the stem, each record
+# (claims_v1) and id uniqueness. With $all 0 (_CL_SCOPE_ALL: --staged, and
+# config.json not staged) a claim is in scope when touched or its sidecar or
+# doc is staged; a sidecar when it or its doc is staged or it holds a touched
+# claim. One finding row per line.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_V1='def in_list($l): . as $x | any($l[]; . == $x);
- def stem: split("/") | last | sub("\\.[^.]*$"; "");
  def v1($claim; $doc; $msg): {check: "V1", claim: $claim, doc: $doc, message: $msg};
  (if ($cfg[0].kinds | type) == "array" then [$cfg[0].kinds[] | strings] else [] end) as $kinds
  | $t[0] as $touched | $st[0] as $staged
- | ($s | map(select((.data | type) == "object" and (.data.claims | type) == "array"))) as $wf
+ | ($s | map(select(cl_well_formed))) as $wf
  | (
    ($s[]
     | .sidecar as $p | .data as $d | (.doc // $p) as $fdoc
-    | (($d | type) == "object" and ($d.claims | type) == "array") as $well
-    | ($well and ($d.claims | length) > 0
-       and all($d.claims[]; type == "object" and .status == "retired")) as $retired
-    | (.present and .governing) as $eligible
-    | (if .doc_id != null then .doc_id elif $retired and .doc != null then .doc | stem else null end) as $docid
+    | cl_well_formed as $well | cl_all_retired as $retired | cl_eligible as $eligible | cl_doc_id as $docid
     | ($all == 1 or ($p | in_list($staged)) or (.doc != null and (.doc | in_list($staged)))) as $direct
     | ($direct or ($well and any($d.claims[]; type == "object" and (.id | type) == "string"
                                               and (.id | in_list($touched))))) as $in_scope
@@ -6129,8 +6146,8 @@ _JQ_CLAIMS_V1='def in_list($l): . as $x | any($l[]; . == $x);
            (if ($d.claims | type) != "array" then v1(null; $fdoc; "\($p): claims must be an array") else empty end),
            (if .doc == null then v1(null; $p; "\($p): doc must be the repo path of the governing doc")
             elif $retired or $eligible then
-              (if ($p | stem) != $docid
-               then v1(null; .doc; "\($p): sidecar stem \($p | stem) is not \($docid), the DOC-ID of \(.doc): rename it docs/spec-claims/\($docid).json")
+              (if ($p | cl_stem) != $docid
+               then v1(null; .doc; "\($p): sidecar stem \($p | cl_stem) is not \($docid), the DOC-ID of \(.doc): rename it docs/spec-claims/\($docid).json")
                else empty end)
             elif .present | not then v1(null; .doc; "\($at) is missing: \($advice)")
             else v1(null; .doc; "\($at) is not governing (no governing glob matches it, or it has no DOC-ID): \($advice)")
@@ -6153,12 +6170,10 @@ _JQ_CLAIMS_V1='def in_list($l): . as $x | any($l[]; . == $x);
 
 # V1 on the claims: one finding row per violation (_JQ_CLAIMS_V1).
 _claims_v1() {
-  local all=1
-  if [ "$_CL_MODE" = staged ]; then all=0; fi
-  _claims_jq v1 -nr --argjson all "$all" \
+  _claims_jq v1 -nr --argjson all "$_CL_SCOPE_ALL" \
     --slurpfile s "$_SCRATCH/cl-sidecars.jsonl" --slurpfile t "$_SCRATCH/cl-touched.json" \
     --slurpfile st "$_SCRATCH/cl-staged.json" --slurpfile cfg "$_SCRATCH/cl-config.json" \
-    "$_JQ_CLAIMS_SCHEMA $_JQ_CLAIMS_V1" >> "$_SCRATCH/cl-findings.jsonl"
+    "$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_SCHEMA $_JQ_CLAIMS_V1" >> "$_SCRATCH/cl-findings.jsonl"
 }
 
 cmd_claims_validate() {
