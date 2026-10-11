@@ -1,7 +1,7 @@
 # Design: Spec Claims — Executable Spec Statements, Recorded Lifecycle Gates, and a Direction Protocol
 
 **Date:** 2026-10-10
-**Status:** Draft — reviewed with its host-project adoption design (three consult rounds on the combined design, then a review of this split); awaiting owner review
+**Status:** Approved by the owner 2026-10-10 — reviewed with its host-project adoption design (three consult rounds on the combined design, then a review of this split). Plan: `docs/superpowers/plans/2026-10-10-spec-claims.md`.
 **Author:** woodrow pearson (with Claude)
 **Issue:** none yet
 **Target version:** 3.2.0 — additive and opt-in: a project with no `docs/spec-claims/` directory sees no behaviour change.
