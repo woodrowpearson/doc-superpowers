@@ -1333,6 +1333,260 @@ test_amended_flag_carry() {
     "a CRLF AMENDED block"
 }
 
+# --- V5 status requirements ----------------------------------------------------
+
+TRACKER=docs/issues/token-ttl.md
+# The fixture tracker's status line.
+TRACKER_OPEN="**Status**: Open"
+# A CODE-DIVERGES ruling recorded in the fixture's issue doc.
+_CL_DIVERGES='{"date":"2026-10-11","direction":"CODE-DIVERGES","by":"doc-owner","record":"docs/issues/token-ttl.md"}'
+
+# The last `cl`'s V5 finding messages, one per line, and their count.
+v5_messages() {
+  jq -r '.findings[]? | select(.check == "V5") | .message' <<<"$CL_OUT" 2>/dev/null || true
+}
+v5_count() {
+  jq '[.findings[]?, .advisories[]? | select(.check == "V5")] | length' <<<"$CL_OUT" 2>/dev/null || echo invalid
+}
+
+# assert_v5 <substring> <what>: the last `cl` exited 1 with a V5 finding whose
+# message contains <substring>.
+assert_v5() {
+  assert_eq "1" "$CL_RC" "$2: exits 1"
+  assert_contains "$(v5_messages)" "$1" "$2: a V5 finding names '$1'"
+}
+
+# assert_v5_ok <what>: the last `cl` exited 0 with no V5 finding.
+assert_v5_ok() {
+  assert_eq "0" "$CL_RC" "$1: exits 0"
+  assert_eq "0" "$(v5_count)" "$1: no V5 finding"
+}
+
+# The fixture claim made diverged: a bound test (V1 wants one once the claim
+# runs) and the CODE-DIVERGES ruling, its tracker left as the fixture's.
+diverge_claim() {
+  jset "$SIDECAR" ".claims[0].status = \"diverged\"
+    | .claims[0].test = {\"runner\":\"pytest\",\"node\":\"tests/test_token.py::test_ttl\"}
+    | .claims[0].rulings = [$_CL_DIVERGES]"
+}
+
+test_v5_fixture_passes() {
+  echo "test: V5 — the fixture's unbuilt claim has an open tracker"
+  claims_fixture
+  cl validate --all
+  assert_v5_ok "unbuilt, tracker docs/issues/token-ttl.md (Status: Open)"
+  teardown
+}
+
+test_v5_diverged_without_tracker() {
+  echo "test: V5 — a diverged claim without a tracker"
+  claims_fixture
+  diverge_claim
+  cl validate --all
+  assert_v5_ok "diverged with its ruling and an open tracker"
+  jset "$SIDECAR" '.claims[0].tracker = null'
+  cl validate --all
+  assert_v5 "no tracker" "diverged, tracker null"
+  assert_eq "1" "$(v5_count)" "…exactly one V5 finding"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V5")][0].claim' "SPEC-AUTH-001#token-ttl" "…the finding names the claim"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V5")][0].doc' "$DOC" "…and its doc"
+  # unbuilt needs one too.
+  jset "$SIDECAR" '.claims[0].status = "unbuilt" | .claims[0].rulings = []'
+  cl validate --all
+  assert_v5 "no tracker" "unbuilt, tracker null"
+  teardown
+}
+
+test_v5_tracker_missing_path() {
+  echo "test: V5 — a tracker path that is not in the proposed tree"
+  claims_fixture
+  jset "$SIDECAR" '.claims[0].tracker = "docs/issues/nope.md"'
+  cl validate --all
+  assert_v5 "docs/issues/nope.md" "tracker docs/issues/nope.md (no such file)"
+  assert_contains "$(v5_messages)" "not a path in the proposed tree" "…saying why"
+  # A directory is not a tracker.
+  jset "$SIDECAR" '.claims[0].tracker = "docs/issues"'
+  cl validate --all
+  assert_v5 "not a path in the proposed tree" "tracker docs/issues (a directory)"
+  # Nor is a path outside the repository.
+  jset "$SIDECAR" '.claims[0].tracker = "../outside.md"'
+  printf '**Status**: Open\n' > ../outside.md
+  cl validate --all
+  assert_v5 "not a path in the proposed tree" "tracker ../outside.md"
+  rm -f ../outside.md
+  # --staged reads the index: a tracker in the work tree alone does not count.
+  jset "$SIDECAR" '.claims[0].tracker = "docs/issues/nope.md"'
+  printf '# Nope\n\n**Status**: Open\n' > docs/issues/nope.md
+  cl validate --all
+  assert_v5_ok "--all, the tracker in the work tree"
+  git add "$SIDECAR"
+  cl validate --staged
+  assert_v5 "docs/issues/nope.md" "--staged, the tracker untracked"
+  git add docs/issues/nope.md
+  cl validate --staged
+  assert_v5_ok "--staged, the tracker staged"
+  teardown
+}
+
+test_v5_tracker_closed_is_finding() {
+  echo "test: V5 — a closed tracker"
+  claims_fixture
+  doc_edit "$TRACKER" "$TRACKER_OPEN" "**Status**: Resolved"
+  cl validate --all
+  assert_v5 "tracker is closed" "the issue doc's Status: Resolved"
+  assert_contains "$(v5_messages)" "Resolved" "…naming the status"
+  # --staged reads the tracker from the index.
+  echo "# change" >> src/auth/token.py
+  git add src/auth/token.py
+  cl validate --staged
+  assert_v5_ok "--staged, the close unstaged"
+  git add "$TRACKER"
+  cl validate --staged
+  assert_v5 "tracker is closed" "--staged, the close staged"
+  # Every closed word, any case.
+  local w
+  for w in closed DONE Fixed completed WontFix; do
+    printf '# Token TTL\n\n**Status**: %s\n' "$w" > "$TRACKER"
+    cl validate --all
+    assert_v5 "tracker is closed" "Status: $w"
+  done
+  teardown
+}
+
+test_v5_tracker_status_leading_word() {
+  echo "test: V5 — only the status value's leading word decides"
+  claims_fixture
+  doc_edit "$TRACKER" "$TRACKER_OPEN" "**Status**: Approved — not done"
+  cl validate --all
+  assert_v5_ok "Status: Approved — not done"
+  doc_edit "$TRACKER" "**Status**: Approved — not done" '**Status:** `Done` (2026-10-01)'
+  cl validate --all
+  assert_v5 "tracker is closed" '**Status:** `Done` (2026-10-01)'
+  printf -- '---\nstatus: reopened, was closed\n---\n# Token TTL\n' > "$TRACKER"
+  cl validate --all
+  assert_v5_ok "front matter status: reopened, was closed"
+  printf -- '---\ntitle: Token TTL\nstatus: Resolved\n---\n# Token TTL\n' > "$TRACKER"
+  cl validate --all
+  assert_v5 "tracker is closed" "front matter status: Resolved"
+  # CRLF reads as LF.
+  printf -- '---\r\nstatus: done\r\n---\r\n# Token TTL\r\n' > "$TRACKER"
+  cl validate --all
+  assert_v5 "tracker is closed" "CRLF front matter status: done"
+  # The first status line counts.
+  printf '# Token TTL\n\n**Status**: Open\n\nLater: **Status**: Done\n**Status**: Done\n' > "$TRACKER"
+  cl validate --all
+  assert_v5_ok "Status: Open, then a later Status: Done"
+  # A status line inside a code fence is not the doc's status.
+  printf '# Token TTL\n\n```\n**Status**: Done\n```\n\n**Status**: Open\n' > "$TRACKER"
+  cl validate --all
+  assert_v5_ok "a fenced Status: Done before Status: Open"
+  # status: outside front matter is not front matter.
+  printf '# Token TTL\n\nstatus: closed\n' > "$TRACKER"
+  cl validate --all
+  assert_v5_ok "a body line status: closed"
+  # No status line at all: open.
+  printf '# Token TTL\n\nBuild the expiry.\n' > "$TRACKER"
+  cl validate --all
+  assert_v5_ok "no status line"
+  teardown
+}
+
+test_v5_tracker_pattern_accepted() {
+  echo "test: V5 — a tracker matching tracker_patterns is accepted as open"
+  claims_fixture
+  diverge_claim
+  jset "$SIDECAR" '.claims[0].tracker = "#42"'
+  cl validate --all
+  assert_v5 "#42" "tracker #42 without tracker_patterns"
+  jset docs/spec-claims/config.json '.tracker_patterns = ["^https://issues\\.example\\.com/", "^#[0-9]+$"]'
+  cl validate --all
+  assert_v5_ok "tracker #42 matching ^#[0-9]+$"
+  jset "$SIDECAR" '.claims[0].tracker = "#42a"'
+  cl validate --all
+  assert_v5 "#42a" "tracker #42a matches no pattern"
+  # An invalid pattern matches nothing (and is not a crash).
+  jset docs/spec-claims/config.json '.tracker_patterns = ["(", "^#[0-9]+a$"]'
+  cl validate --all
+  assert_v5_ok "an invalid pattern beside one that matches"
+  teardown
+}
+
+test_v5_diverged_without_code_diverges_ruling() {
+  echo "test: V5 — a diverged claim needs a CODE-DIVERGES ruling"
+  claims_fixture
+  diverge_claim
+  jset "$SIDECAR" '.claims[0].rulings = []'
+  cl validate --all
+  assert_v5 "CODE-DIVERGES" "diverged with a tracker, no ruling"
+  assert_eq "1" "$(v5_count)" "…exactly one V5 finding"
+  jset "$SIDECAR" '.claims[0].rulings = [{"date":"2026-10-11","direction":"DOC-STALE","by":"doc-owner","record":"docs/issues/token-ttl.md","reason":"Amended."}]'
+  cl validate --all
+  assert_v5 "CODE-DIVERGES" "diverged with a DOC-STALE ruling only"
+  jset "$SIDECAR" ".claims[0].rulings += [$_CL_DIVERGES]"
+  cl validate --all
+  assert_v5_ok "diverged with a later CODE-DIVERGES ruling"
+  teardown
+}
+
+test_v5_retired_without_ruling() {
+  echo "test: V5 — a retired claim needs a RETIRE or DOC-STALE ruling"
+  claims_fixture
+  # Struck, so V2 has nothing to say.
+  doc_edit "$DOC" "$TTL_LINE" "- ~~Access tokens expire after 15 minutes.~~"
+  jset "$SIDECAR" '.claims[0].status = "retired"'
+  cl validate --all
+  assert_v5 "RETIRE" "retired, no ruling"
+  assert_eq "1" "$(v5_count)" "…exactly one V5 finding"
+  jset "$SIDECAR" ".claims[0].rulings = [$_CL_DIVERGES]"
+  cl validate --all
+  assert_v5 "RETIRE" "retired with a CODE-DIVERGES ruling only"
+  jset "$SIDECAR" ".claims[0].rulings = [$_CL_RETIRE]"
+  cl validate --all
+  assert_v5_ok "retired with a RETIRE ruling"
+  jset "$SIDECAR" '.claims[0].rulings = [{"date":"2026-10-11","direction":"DOC-STALE","by":"doc-owner","record":"docs/issues/token-ttl.md","reason":"Superseded."}]'
+  cl validate --all
+  assert_v5_ok "retired with a DOC-STALE ruling"
+  # A retired claim needs no tracker.
+  jset "$SIDECAR" '.claims[0].tracker = null'
+  cl validate --all
+  assert_v5_ok "retired, tracker null"
+  teardown
+}
+
+test_v5_judge_without_why() {
+  echo "test: V5 — a judge claim needs why_not_mechanical"
+  claims_fixture
+  jset "$SIDECAR" '.claims[0].enforced_by = "judge"'
+  cl validate --all
+  assert_v5 "why_not_mechanical" "enforced_by judge, no why_not_mechanical"
+  jset "$SIDECAR" '.claims[0].why_not_mechanical = "Token expiry depends on the identity provider clock."'
+  cl validate --all
+  assert_v5_ok "enforced_by judge with why_not_mechanical"
+  teardown
+}
+
+test_v5_scope() {
+  echo "test: V5 — touched, eligible claims only"
+  claims_fixture
+  jset "$SIDECAR" '.claims[0].tracker = null'
+  git commit -qam "untracked claim"
+  cl validate --all
+  assert_v5 "no tracker" "--all: the committed claim without a tracker"
+  cl validate --staged
+  assert_v5_ok "--staged, nothing staged"
+  echo "# change" >> src/auth/token.py
+  git add src/auth/token.py
+  cl validate --staged
+  assert_v5 "no tracker" "--staged, the claim's subject staged"
+  git reset -q
+  # A doc that is missing: V1 names it once; V5 does not run on its claims.
+  git rm -q "$DOC"
+  cl validate --all
+  assert_eq "1" "$(v1_count)" "doc deleted: one V1 finding"
+  assert_eq "0" "$(v5_count)" "…and no V5 finding"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -1400,6 +1654,18 @@ run_tests() {
   test_v2_lines_hit_wrapped
   test_fence_pairing_commonmark
   test_amended_flag_carry
+
+  # --- Task 4: V5 status requirements ---
+  test_v5_fixture_passes
+  test_v5_diverged_without_tracker
+  test_v5_tracker_missing_path
+  test_v5_tracker_closed_is_finding
+  test_v5_tracker_status_leading_word
+  test_v5_tracker_pattern_accepted
+  test_v5_diverged_without_code_diverges_ruling
+  test_v5_retired_without_ruling
+  test_v5_judge_without_why
+  test_v5_scope
 
   print_summary
 }
