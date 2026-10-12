@@ -6050,8 +6050,9 @@ _claims_load() {
 
 # A claim (proposed or base) is touched when a staged path is its sidecar,
 # its doc, or is covered by a subject, its test file (test.file, else the
-# node's path before "::") or a lint path ("covered": equal, or under it as a
-# directory). Output: the sorted, unique ids.
+# node's path before "::"), its nonvacuity.mutant.file or a lint path
+# ("covered": equal, or under it as a directory). Output: the sorted, unique
+# ids.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_TOUCHED='def strs: if type == "array" then .[] | strings else empty end;
  def covered_by($st): . as $p | ($p | rtrimstr("/")) as $d
@@ -6067,6 +6068,7 @@ _JQ_CLAIMS_TOUCHED='def strs: if type == "array" then .[] | strings else empty e
                   (if (.file | type) == "string" then .file
                    elif (.node | type) == "string" then .node | split("::")[0] else empty end)
                 else empty end),
+               (.claim.nonvacuity | if type == "object" then .mutant | objects | .file | strings else empty end),
                (.claim.lint | if type == "object" then .paths | strs else empty end);
              covered_by($st)))
     | .claim.id]
@@ -7304,39 +7306,66 @@ cmd_claims_run() {
 # --- Spec claims: test binding, V3 ---------------------------------------------
 #
 # V3 checks each eligible, touched test claim (enforced_by test, test
-# {runner, node[, file]}) that is neither retired nor frozen (a frozen claim
-# is validated structurally only, and run skips both). Binding: one
+# {runner, node[, file]}) that is not retired. Binding (skipped for a frozen
+# claim: it is validated structurally only, and run skips it): one
 # `<adapter> list [<file>…]` call per runner (§D: a static scan, so
 # pre-commit can afford it), naming every file of its claims — test.file when
 # set, else the node's path before "::" when that is a file of the proposed
 # tree (_claims_read: the index under --staged), else none, and then the
-# call names no file (all files). A claim is bound when a list row has its
-# id and its node; a bound row must be in_gate and subject_imports_ok (a
-# finding whatever the status: Design clarifications). An adapter rc ≠ 0
-# (126: an unknown runner or a missing adapter, R6), or any non-blank line
-# that is not one §D row, makes every claim of that call indeterminate:
-# never a pass, never "not bound". Whatever the adapter says: a built or
-# gated claim needs nonvacuity (observed_red or mutant) and a promotion; a
-# mutant needs {file, find, replace}, its file a safe repo path
-# (_claims_safe_relpath; in the work tree _claims_contained_path too) present
-# in the proposed tree — an unsafe one is never read — and find occurring
-# there exactly once, counted literally (jq split, codepoints). An unsafe
-# test.file is a finding, and never reaches the adapter. The adapter's
+# call names no file (all files). The adapter reads the work tree whatever
+# the mode, so each such file must be a safe repo path, contained
+# (_claims_contained_path) in every mode, and must not start with "-" (an
+# adapter would take it for an option): else a finding, and the file never
+# reaches the adapter. A claim is bound when a list row has its id and its
+# node; a bound row must be in_gate and subject_imports_ok (a finding
+# whatever the status: Design clarifications). An adapter rc ≠ 0 (126: an
+# unknown runner or a missing adapter, R6; a runner name holding a newline
+# or NUL is one, as in run), or any non-blank line that is not one §D row,
+# makes every claim of that call indeterminate: never a pass, never "not
+# bound". Whatever the adapter says, a built or gated claim (frozen too)
+# needs nonvacuity (observed_red or mutant) and a promotion. The mutant of a
+# built or gated claim that is not frozen needs {file, find, replace}, its
+# file a safe repo path (_claims_safe_relpath; in the work tree
+# _claims_contained_path too) present in the proposed tree — an unsafe one
+# is never read — and find occurring there exactly once, counted literally
+# (jq split, codepoints). A diverged or unbuilt claim's mutant is not
+# checked (a diverged claim's mutant no longer matches, by construction;
+# promote re-verifies a mutant before a claim becomes built). The adapter's
 # stderr passes through (its diagnostics). The when comparisons arrive with
 # the configuration extension.
 #
 # Scratch: cl-v3-plan.json (one entry per checked claim), cl-v3-paths.jsonl
 # ({path, safe, exists} per candidate file), cl-v3-calls.jsonl ({runner,
 # files} per list call), cl-v3-lists.jsonl ({runner, ok, reason, rows} per
-# call) and cl-v3-mutants.jsonl ({i, state, n} per plan entry with a mutant).
+# call) and cl-v3-mutants.jsonl ({i, state, n} per checked mutant).
 
-# Shared by the V3 programs: a well-shaped mutant, and a path with no
-# newline or NUL (the shell reads paths NUL- and newline-separated).
+# Shared by the V3 programs. cl_plain: no newline or NUL (the shell reads
+# names and paths NUL- or newline-separated). cl_v3_bind($pp), on a plan
+# entry given the cl-v3-paths rows by path: what binding does with it —
+# {skip} (frozen), {indet: <reason>}, {finding: <message>} or {arg: <file or
+# null>} (in its runner's list call) — the one decision the call builder and
+# the checks share. cl_v3_mutant_checked: the entry's mutant is checked.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_V3_DEFS='def nes: type == "string" and length > 0;
  def cl_plain: (split("\n") | length) <= 1 and (split("\u0000") | length) <= 1;
+ def cl_unsafe: "(absolute, an empty, . or .. segment, or reached through a symbolic link)";
  def cl_mutant_ok: type == "object" and (.file | nes) and (.find | nes) and (.replace | type) == "string";
- def cl_mutant: .nonvacuity | if type == "object" then .mutant else null end;'
+ def cl_mutant: .nonvacuity | if type == "object" then .mutant else null end;
+ def cl_v3_mutant_checked: (.status == "built" or .status == "gated") and (.frozen | not);
+ def cl_v3_bind($pp):
+   if .frozen then {skip: true}
+   elif .runner | cl_plain | not then {indet: "adapter-exit-126"}
+   elif .file != null then
+     (if $pp[.file].safe != true
+      then {finding: "test.file \(.file) is not a safe repo path \(cl_unsafe): name the test file by its path from the repo root"}
+      elif .file | startswith("-")
+      then {finding: "test.file \(.file) starts with \"-\": an adapter would read it as an option; rename the test file"}
+      else {arg: .file} end)
+   elif $pp[.prefix].exists == true then
+     (if .prefix | startswith("-")
+      then {finding: "test file \(.prefix) (the node path before ::) starts with \"-\": an adapter would read it as an option; rename the test file"}
+      else {arg: .prefix} end)
+   else {arg: null} end;'
 
 # cl-claims.json → the plan: the claims V3 checks ($t: cl-touched.json), in
 # sidecar order.
@@ -7345,26 +7374,25 @@ _JQ_CLAIMS_V3_PLAN='$t[0] as $touched
  | [.[] | select(.eligible and (.claim.id | type) == "string")
     | select(.claim.id as $i | any($touched[]; . == $i))
     | .doc as $doc | .claim
-    | select(.enforced_by == "test" and .status != "retired" and (.frozen_at | nes | not))
+    | select(.enforced_by == "test" and .status != "retired")
     | select((.test | type) == "object" and (.test.runner | nes) and (.test.node | nes))
-    | {claim: .id, doc: $doc, status, runner: .test.runner, node: .test.node,
+    | {claim: .id, doc: $doc, status, frozen: (.frozen_at | nes), runner: .test.runner, node: .test.node,
        file: (if .test.file | nes then .test.file else null end),
        prefix: (.test.node | split("::")[0]), nonvacuity, promotion}]'
 
 # The plan, with $paths (the cl-v3-paths rows) → one {runner, files} line
-# per list call: files [] (all files) when a claim of the runner has none.
-# A claim whose test.file is not safe is in no call.
+# per list call (cl_v3_bind's {arg} entries): files [] (all files) when a
+# claim of the runner has none.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_V3_CALLS='(reduce $paths[] as $p ({}; .[$p.path] = $p)) as $pp
- | [.[] | select(.file == null or $pp[.file].safe == true)
-    | . + {arg: (if .file != null then .file elif $pp[.prefix].exists == true then .prefix else null end)}]
+ | [.[] | . + cl_v3_bind($pp) | select(has("arg"))]
  | group_by(.runner)[]
  | {runner: .[0].runner, files: (if any(.[]; .arg == null) then [] else [.[].arg] | unique end)}'
 
-# The plan → "<i>\0<mutant.file>\0" per entry whose mutant is well shaped
-# and whose file is plain: the mutants the shell reads.
+# The plan → "<i>\0<mutant.file>\0" per checked entry whose mutant is well
+# shaped and whose file is plain: the mutants the shell reads.
 # shellcheck disable=SC2016  # jq program, not shell expansion
-_JQ_CLAIMS_V3_MUTANTS='range(length) as $i | .[$i] | cl_mutant
+_JQ_CLAIMS_V3_MUTANTS='range(length) as $i | .[$i] | select(cl_v3_mutant_checked) | cl_mutant
  | select(cl_mutant_ok and (.file | cl_plain)) | "\($i)\u0000\(.file)\u0000"'
 
 # A list call's stdout ($out: its lines, -R) and rc → {ok, reason, rows}.
@@ -7394,14 +7422,15 @@ _claims_parse_list() {
 # {check, claim, doc, message} and indeterminate rows {check, claim, reason}.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_V3='def v3($e; $msg): {check: "V3", claim: $e.claim, doc: $e.doc, message: $msg};
- "(absolute, an empty, . or .. segment, or reached through a symbolic link)" as $unsafe
- | $plan[0] as $plan
+ $plan[0] as $plan
  | (reduce $paths[] as $p ({}; .[$p.path] = $p)) as $pp
  | (reduce $lists[] as $l ({}; .[$l.runner] = $l)) as $calls
  | (reduce $mut[] as $m ({}; .[$m.i | tostring] = $m)) as $muts
  | range($plan | length) as $i | $plan[$i] as $e
- | (if $e.file != null and $pp[$e.file].safe != true then
-      v3($e; "test.file \($e.file) is not a safe repo path \($unsafe): name the test file by its path from the repo root")
+ | ($e | cl_v3_bind($pp)) as $bind
+ | (if $bind.skip then empty
+    elif $bind.indet != null then {check: "V3", claim: $e.claim, reason: $bind.indet}
+    elif $bind.finding != null then v3($e; $bind.finding)
     else
       ($calls[$e.runner] // error("V3: no list call for runner \($e.runner)")) as $c
       | if $c.ok | not then {check: "V3", claim: $e.claim, reason: $c.reason}
@@ -7425,14 +7454,14 @@ _JQ_CLAIMS_V3='def v3($e; $msg): {check: "V3", claim: $e.claim, doc: $e.doc, mes
         (if ($e.promotion | type) == "object" then empty
          else v3($e; "\($e.status) without promotion: claims promote is the only path into \($e.status)") end)
     else empty end),
-   ($e | cl_mutant | select(type == "object") | . as $m
+   ($e | select(cl_v3_mutant_checked) | cl_mutant | select(type == "object") | . as $m
     | if cl_mutant_ok | not then
         v3($e; "nonvacuity.mutant must be {file, find, replace}: three strings, file and find non-empty")
       elif $m.file | cl_plain | not then
-        v3($e; "nonvacuity.mutant.file \($m.file | tojson) is not a safe repo path \($unsafe): it is never read")
+        v3($e; "nonvacuity.mutant.file \($m.file | tojson) is not a safe repo path \(cl_unsafe): it is never read")
       else ($muts[$i | tostring] // error("V3: no mutant row for plan entry \($i)")) as $r
         | if $r.state == "unsafe" then
-            v3($e; "nonvacuity.mutant.file \($m.file) is not a safe repo path \($unsafe): it is never read")
+            v3($e; "nonvacuity.mutant.file \($m.file) is not a safe repo path \(cl_unsafe): it is never read")
           elif $r.state == "absent" then
             v3($e; "nonvacuity.mutant.file \($m.file) is not in the proposed tree")
           elif $r.n != 1 then
@@ -7457,12 +7486,14 @@ _claims_v3() {
   _claims_jq v3-plan -c --slurpfile t "$_SCRATCH/cl-touched.json" "$_JQ_CLAIMS_V3_DEFS $_JQ_CLAIMS_V3_PLAN" \
     "$_SCRATCH/cl-claims.json" > "$plan"
 
-  # Each candidate file (test.file, else the node's path) once.
-  _claims_jq v3-paths -j '[.[] | .file // .prefix] | unique | .[] | . + "\u0000"' "$plan" > "$z"
+  # Each candidate file (test.file, else the node's path) of a claim that is
+  # not frozen, once. Contained in every mode: the adapter reads the work tree.
+  _claims_jq v3-paths -j '[.[] | select(.frozen | not) | .file // .prefix] | unique | .[] | . + "\u0000"' \
+    "$plan" > "$z"
   while IFS= read -r -d '' p <&3; do
     safe=false
     exists=false
-    if _claims_safe_relpath "$p" && { [ "$_CL_MODE" != all ] || _claims_contained_path "$p"; }; then
+    if _claims_safe_relpath "$p" && _claims_contained_path "$p"; then
       safe=true
       if _claims_read "$p" >/dev/null; then exists=true; fi
     fi
@@ -7471,7 +7502,7 @@ _claims_v3() {
   done 3< "$z"
 
   # One list call per runner, its files as separate arguments.
-  _claims_jq v3-calls -c --slurpfile paths "$paths" "$_JQ_CLAIMS_V3_CALLS" "$plan" > "$calls"
+  _claims_jq v3-calls -c --slurpfile paths "$paths" "$_JQ_CLAIMS_V3_DEFS $_JQ_CLAIMS_V3_CALLS" "$plan" > "$calls"
   while IFS= read -r call <&3; do
     runner=$(_claims_jq v3-runner -j '.runner' <<<"$call") || _claims_propagate $?
     _claims_jq v3-files -j '.files[] | . + "\u0000"' <<<"$call" > "$filesz"
@@ -7484,7 +7515,7 @@ _claims_v3() {
     _claims_jq v3-list-row -c --argjson call "$call" '. + {runner: $call.runner}' "$one" >> "$lists"
   done 3< "$calls"
 
-  # Each mutant's file: unsafe (never read), absent, or find's count in it.
+  # Each checked mutant's file: unsafe (never read), absent, or find's count.
   _claims_jq v3-mutants -j "$_JQ_CLAIMS_V3_DEFS $_JQ_CLAIMS_V3_MUTANTS" "$plan" > "$z"
   while IFS= read -r -d '' i <&3 && IFS= read -r -d '' f <&3; do
     state=count
