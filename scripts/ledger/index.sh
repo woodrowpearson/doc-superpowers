@@ -32,14 +32,20 @@
 # "dates-extend <oid>", to stderr.
 #
 # Dates: fields.date when it starts with YYYY-MM-DD, else the date git first
-# added the path — a rename (R) carries the old path's date, chained; a
-# path re-added after a rename moved its file away takes the later add —
+# added the path (the earliest add) — a rename (R) carries the old path's
+# date, chained; a path re-added after a rename moved its file away takes
+# the later add —
 # from `git log --reverse --date=short --format=%ad --name-status -M
 # --diff-filter=AR` over the item globs' directories, replayed in order; the
 # events are cached in $_LG_CACHE/dates-<commit>.tsv and a new HEAD extends
 # the newest cached ancestor's. A path git never added (uncommitted) takes
 # its file's mtime (UTC). The same rename chain lets a link to a former path
 # reach the item.
+# Order: a cold map replays `git log --reverse HEAD`; an extended one replays
+# the ancestor's events, then anc..HEAD — different orders when a side branch
+# was merged. Adds at an occupied path take the minimum date, so they agree.
+# A rename away from a path and an add at that path on two merged branches
+# still depend on that order (vacated before or after the add): accepted.
 # Known deviation (cost): the log is limited to the item globs' directories,
 # so rename detection sees only moves within them — an item moved into the
 # item dirs from elsewhere is dated by the move, and links to its old path
@@ -244,13 +250,16 @@ _lg_ix_dates() {
     BEGIN {
       js_init()
       # The events in order (oldest first: the cached part, then each
-      # extension). A: the first add dates a path; a path renamed away is
-      # vacated, so a later add there is a new item with its own date. R:
-      # the new path takes the old path date (chained), the old is vacated.
+      # extension). A: an occupied path keeps the earliest of its adds (so
+      # the order a merged side branch is listed in does not matter); a
+      # path renamed away is vacated, and a later add there is a new item
+      # with its own date. R: the new path takes the old path date
+      # (chained), the old is vacated.
       while ((getline k < ev) > 0) {
         if (k == "A") {
           getline d < ev; getline p < ev
           if (!(p in D) || (p in VAC)) { D[p] = d; delete VAC[p] }
+          else if (d < D[p]) D[p] = d
         } else if (k == "R") {
           getline d < ev; getline o < ev; getline p < ev
           D[p] = (o in D && !(o in VAC)) ? D[o] : d
@@ -774,7 +783,7 @@ _lg_ix_effective() {
 # finalized map), an unknown revision, or a git failure.
 _lg_index() {
   local mode=worktree rev="" src commit="" tree="" head base_ref="" base="" s reg di key name tmp rfn f
-  local legacy_path="" dcommit usemtime
+  local legacy_path="" dcommit usemtime map
   case "$#" in
     0) ;;
     1) [ "$1" = --staged ] || _lg_die "internal: _lg_index: unknown argument '$1'"; mode=staged ;;
@@ -895,8 +904,27 @@ _lg_index() {
     rm -f "$tmp"
     _lg_die "jq failed (the index join)"
   fi
-  jq -r '.blob | strings | if startswith("sha256:") then "c-" + .[7:] + ".json" else "b-" + . + ".json" end' \
-    "$s.recs" > "${tmp}.refs" || { rm -f "$tmp" "${tmp}.refs"; _lg_die "jq failed (parse references)"; }
+  # The parse entries this index was read from (pruning spares them): a
+  # working copy's c-<sha256>; a blob's c-<sha256> when the blob id ->
+  # sha256 map names one that exists (that is the one _lg_parse_emit read
+  # first), else its b-<oid>.
+  jq -r '.blob | strings' "$s.recs" > "$s.blobs" || { rm -f "$tmp"; _lg_die "jq failed (parse references)"; }
+  map="$_LG_CACHE/blob-sha256.tsv"
+  [ -f "$map" ] || map=/dev/null
+  _lg_awkv "$map"
+  map=$_LG_AV
+  _lg_awkv "$_LG_PARSE_DIR"
+  LC_ALL=C awk -v map="$map" -v dir="$_LG_AV" '
+    BEGIN { while ((getline l < map) > 0) { t = index(l, "\t"); if (t) H[substr(l, 1, t - 1)] = substr(l, t + 1) } }
+    /^sha256:/ { print "c-" substr($0, 8) ".json"; next }
+    {
+      if ($0 in H && H[$0] ~ /^sha256:/) {
+        c = "c-" substr(H[$0], 8) ".json"
+        if ((getline x < (dir "/" c)) > 0) { close(dir "/" c); print c; next }
+        close(dir "/" c)
+      }
+      print "b-" $0 ".json"
+    }' "$s.blobs" > "${tmp}.refs" || { rm -f "$tmp" "${tmp}.refs"; _lg_die "cannot list the parse references"; }
   if ! mv -f "${tmp}.refs" "$_LG_CACHE/index-$key.refs" || ! mv -f "$tmp" "$name"; then
     rm -f "$tmp" "${tmp}.refs"
     _lg_die "cannot install $name"

@@ -1991,12 +1991,16 @@ test_lg_parse_hash_map() {
 # shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
 lg_t_index_staged_reuse() {
   local ix err="$_SCRATCH/t.err"
+  _lg_parse_prep
   ix=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err")
   assert_eq "2" "$(grep -c '^parse-miss' "$err")" "the worktree index parses both items"
   ix=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index --staged 2> "$err")
   assert_contains "$(cat "$err")" "index-build" "--staged builds its own index"
   assert_eq "0" "$(grep -c '^parse-miss' "$err")" "…from the worktree parse entries (blob id -> sha256 map): nothing parsed"
   assert_json_field "$(lg_ix_item "$ix" docs/issues/b.md)" '[.key, .class] | tojson' '["app-2","open"]' "…with the right values"
+  assert_eq "c-|c-|" "$(cut -c 1-2 "${ix%.json}.refs" | tr '\n' '|')" \
+    "its .refs names the reused c-<sha256> entries it read (pruning spares those), not b-<oid>"
+  assert_true "…entries that exist" test -f "$_LG_PARSE_DIR/$(head -n 1 "${ix%.json}.refs")"
   ix=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index --rev HEAD 2> "$err")
   assert_eq "0" "$(grep -c '^parse-miss' "$err")" "--rev HEAD: nothing parsed either"
   assert_json_field "$(lg_ix_item "$ix" docs/issues/a.md)" '.key' "app-1" "…with the right values"
@@ -2079,7 +2083,7 @@ test_lg_parse_parallel_bin_bash() {
   echo "test: parallel frontmatter parsing (DOC_TOOLS_LEDGER_PAR_MIN) under /bin/bash: order kept, a failing awk is rc 2"
   lg_fixture
   lg_enable
-  local i n fake="$TEST_DIR/fakebin" realawk rc out="$TEST_DIR/par.jsonl" log="$TEST_DIR/awk.log" want got
+  local i n cpus fake="$TEST_DIR/fakebin" realawk rc out="$TEST_DIR/par.jsonl" log="$TEST_DIR/awk.log" want got
   for i in 01 02 03 04 05 06 07 08 09 10 11 12; do
     lg_item "docs/issues/p$i.md" "key: app-$((10#$i))"
   done
@@ -2118,7 +2122,12 @@ EOF
   DOC_TOOLS_LEDGER_PAR_MIN=2 PATH="$fake:$PATH" /bin/bash "$TEST_DIR/drive.sh" "$out" > /dev/null 2>&1 </dev/null || rc=$?
   assert_eq "0" "$rc" "/bin/bash, 12 files, threshold 2: the parse succeeds"
   n=$(grep -c files "$log" 2>/dev/null || true)
-  assert_true "…in more than one awk process (got $n)" test "${n:-0}" -gt 1
+  cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+  if [ "${cpus:-1}" -ge 2 ] 2>/dev/null; then
+    assert_true "…in more than one awk process (got $n)" test "${n:-0}" -gt 1
+  else
+    record_skip "parallel parse: one CPU here (getconf _NPROCESSORS_ONLN = ${cpus:-?}), so one awk process"
+  fi
   want=$(tr '\n' '|' < "$TEST_DIR/paths.txt")
   got=$(jq -r .path "$out" | tr '\n' '|')
   assert_eq "$want" "$got" "…records in the input order"
@@ -2127,6 +2136,47 @@ EOF
   rc=0
   LG_FAIL_AWK=1 DOC_TOOLS_LEDGER_PAR_MIN=2 PATH="$fake:$PATH" /bin/bash "$TEST_DIR/drive.sh" "$out" > /dev/null 2>&1 </dev/null || rc=$?
   assert_eq "2" "$rc" "one failing parallel awk process: rc 2"
+  teardown
+}
+
+# --- Task 4 fix round 2 -------------------------------------------------------
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_dates_merge() {
+  local ix err="$_SCRATCH/t.err" ext cold
+  git checkout -q main
+  ix=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err")
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/x.md)" '.date' "2026-01-10" "main alone: main's add date"
+  # Both sides added x.md with different bytes: an add/add conflict, resolved
+  # to bytes neither side had, so the log walks both parents (identical
+  # bytes would make the merge TREESAME to main and git would prune feat).
+  git merge -q --no-edit feat >/dev/null 2>&1 || true
+  lg_item docs/issues/x.md "key: app-1" "status: Open" "summary: merged"
+  git add -A
+  GIT_AUTHOR_DATE="2026-01-11T12:00:00" GIT_COMMITTER_DATE="2026-01-11T12:00:00" git commit -q --no-edit
+  ix=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err")
+  assert_contains "$(cat "$err")" "dates-extend" "after the merge: the cached map of main is extended"
+  ext=$(lg_ix_item "$ix" docs/issues/x.md | jq -r .date)
+  rm -f "$_LG_CACHE"/dates-*.tsv "$_LG_CACHE"/index-*.json "$_LG_CACHE"/index-*.refs
+  ix=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err")
+  assert_contains "$(cat "$err")" "dates-cold" "caches removed: a cold map"
+  cold=$(lg_ix_item "$ix" docs/issues/x.md | jq -r .date)
+  assert_eq "$cold" "$ext" "cold and extended maps agree across the merge"
+  assert_eq "2026-01-05" "$ext" "…on the earliest add (the merged side branch's)"
+}
+
+test_lg_index_dates_merge_cold_vs_extended() {
+  echo "test: _lg_index — dates agree cold vs extended when a side branch adding the same path is merged"
+  lg_fixture
+  lg_enable
+  lg_commit_at 2026-01-01 base
+  git checkout -q -b feat
+  lg_item docs/issues/x.md "key: app-1" "status: Open" "summary: from feat"
+  lg_commit_at 2026-01-05 feat-adds-x
+  git checkout -q main
+  lg_item docs/issues/x.md "key: app-1" "status: Open" "summary: from main"
+  lg_commit_at 2026-01-10 main-adds-x
+  lg_in lg_t_index_dates_merge
   teardown
 }
 
@@ -2215,6 +2265,9 @@ run_tests() {
   test_lg_index_hit_survives_prune
   test_lg_index_cross_dir_move_deviation
   test_lg_parse_parallel_bin_bash
+
+  # --- Task 4 fix round 2 ---
+  test_lg_index_dates_merge_cold_vs_extended
 
   print_summary
 }
