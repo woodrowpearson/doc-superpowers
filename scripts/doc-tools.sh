@@ -2439,6 +2439,15 @@ Spec claims (claims validate, run, promote, render, gate, attest, rulings):
   status"): 0 as expected, 1 findings, 2 could not run, 3 usage, with
   precedence 1 > 2 > 0. In a claims glob (config "governing", "plans", …),
   * also matches "/".
+  The direction policy (config "policy") judges each new DOC-STALE or RETIRE
+  ruling (validate, V6). A ruling whose record is a gate record
+  (docs/spec-claims/gates/<stem>/chunk-<n>.json or final.json) is made inside
+  a plan: with in_plan_ruling_requires_gate_record true (the default) it is
+  valid only when a plan matching "plans" has that stem and lists the claim's
+  doc as target, infer or amends. Any other record is outside a plan: when
+  doc_stale_outside_plan_requires is a string, the ruling's "by" must equal
+  it. outside_plan_presumption (CODE-DIVERGES) states the default direction
+  for a deviation found outside a plan and has no mechanical effect.
 
 Exit status:
   0  success
@@ -6615,6 +6624,23 @@ _claims_v5() {
 # ruling's record must exist in the proposed tree and be neither the claim's
 # doc nor its sidecar. _CL_MB empty: V6 is skipped (_claims_init already
 # reported base-unresolvable).
+#
+# The direction policy (config policy, §F) judges each new DOC-STALE or
+# RETIRE ruling whose record exists. A gate record is matched structurally:
+# docs/spec-claims/gates/<stem>/chunk-<n>.json (<n> a positive integer,
+# written without a leading zero) or docs/spec-claims/gates/<stem>/final.json,
+# <stem> one path segment (not "." or ".."); no other path is one, whatever
+# it contains. A ruling on a gate record is in a plan: with
+# in_plan_ruling_requires_gate_record not false (the default true), it is
+# valid only when a plan _claims_plan_paths lists (config plans) has that
+# stem and lists the claim's doc as target, infer (as V12's decomposition
+# check counts it) or amends (_claims_plan_parse); else the finding "gate
+# record of a plan that does not govern <doc>". The gate record is not read:
+# its existence is the one check above. Any other record is outside a plan:
+# when doc_stale_outside_plan_requires is a non-empty string, the ruling's
+# by must equal it, else "outside a plan, <direction> needs <principal>".
+# outside_plan_presumption has no mechanical effect (help and
+# references/spec-claims.md only).
 
 # The absolute verdict store (it may not exist yet).
 _claims_store_dir() {
@@ -6743,6 +6769,12 @@ _JQ_CLAIMS_RATCHET='def in_list($l): . as $x | any($l[]; . == $x);
  def cl_rulings: if type == "object" and (.rulings | type) == "array" then .rulings else [] end;
  def cl_rank: if type == "string" then ({"test": 4, "lint": 3, "log": 2, "judge": 1}[.] // 0) else 0 end;
  def cl_promoted: . == "built" or . == "gated";
+ def cl_gate_stem: if type == "string" then
+     first(capture("^docs/spec-claims/gates/(?<s>[^/]+)/(chunk-[123456789][0123456789]*|final)\\.json$")
+           | .s | select(. != "." and . != "..")) // null
+   else null end;
+ def cl_policy: (.policy | if type == "object" then . else {} end);
+ def cl_ruled: type == "object" and (.direction == "DOC-STALE" or .direction == "RETIRE");
  $t[0] as $touched
  | (reduce ($b[0][] | select((.claim.id | type) == "string")) as $e ({};
       if has($e.claim.id) then . else .[$e.claim.id] = $e end)) as $base
@@ -6757,8 +6789,14 @@ _JQ_CLAIMS_RATCHET='def in_list($l): . as $x | any($l[]; . == $x);
  | if $phase == "verify" then $rows[] | select(.verify) | .claim | tojson
    elif $phase == "records" then
      [$rows[] | .new[] | objects | .record | strings | select(. != "" and (test("\n") | not))] | unique | .[]
+   elif $phase == "stems" then
+     if ($cfg[0] | cl_policy | .in_plan_ruling_requires_gate_record) == false then empty
+     else [$rows[] | .new[] | select(cl_ruled) | .record | cl_gate_stem | strings] | unique | .[] end
    else
-     (reduce $rec[] as $r ({}; .[$r.record] = $r.exists)) as $exists
+     ($cfg[0] | cl_policy) as $pol
+     | ($pol.in_plan_ruling_requires_gate_record != false) as $gate_req
+     | ($pol.doc_stale_outside_plan_requires | if type == "string" and . != "" then . else null end) as $outside_by
+     | (reduce $rec[] as $r ({}; .[$r.record] = $r.exists)) as $exists
      | [$p[0][] | .claim.id | strings] as $ids
      | (reduce $sp[] as $s ({}; .[$s.sidecar] = ($s | cl_well_formed))) as $now
      | (reduce $sb[] as $s ({}; .[$s.sidecar] = ($s | cl_all_retired))) as $retired
@@ -6792,11 +6830,21 @@ _JQ_CLAIMS_RATCHET='def in_list($l): . as $x | any($l[]; . == $x);
                else v6($id; $doc; "promotion verdict does not match the claim (its id, states, test or status changed since promote, or the verdict file was edited): run claims promote \($id)")
                end
            else empty end),
-          ($e.new[] | objects | .record | strings | select(. != "") | . as $r
+          ($e.new[] | objects | . as $ru | ($ru.record | strings | select(. != "")) as $r | ($r | cl_gate_stem) as $stem
            | if $r == $doc or $r == $e.sidecar
              then v6($id; $doc; "ruling record \($r) is the doc or the sidecar of the claim it rules on (self-referential record): name where the decision is recorded (an issue, an ADR, a gate record)")
-             elif $exists[$r] == true then empty
-             else v6($id; $doc; "ruling record \($r) does not exist in the proposed tree") end)),
+             elif $exists[$r] != true
+             then v6($id; $doc; "ruling record \($r) does not exist in the proposed tree")
+             elif ($ru | cl_ruled | not) then empty
+             elif $stem != null then
+               (if $gate_req and (any($gov[]; .stem == $stem
+                                      and any(.specs[]; .path == $doc
+                                              and (.role == "target" or .role == "infer" or .role == "amends"))) | not)
+                then v6($id; $doc; "ruling record \($r) is a gate record of a plan that does not govern \($doc) (no plan matching config plans with stem \($stem) lists it as target, infer or amends): rule at the gate of a plan that builds or amends it, or record the ruling elsewhere")
+                else empty end)
+             elif $outside_by != null and $ru.by != $outside_by
+             then v6($id; $doc; "ruling record \($r) is not a gate record, so the ruling is outside a plan: outside a plan, \($ru.direction) needs \($outside_by) (this ruling is by \($ru.by | tojson))")
+             else empty end)),
        ($base[] | select(.claim.id | in_list($touched)) | select(.claim.id | in_list($ids) | not)
         | .sidecar as $sc
         | if $now | has($sc) then
@@ -6814,24 +6862,50 @@ _JQ_CLAIMS_RATCHET='def in_list($l): . as $x | any($l[]; . == $x);
 # repo path), then phase check. The shell loops run over those short lists,
 # never over every claim.
 _claims_v6() {
-  local prog="$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_NORM $_JQ_CLAIMS_RATCHET" line v r exists
+  local prog="$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_NORM $_JQ_CLAIMS_RATCHET" line v r exists plan src stem stems
   local verify="$_SCRATCH/cl-v6-verify" vrows="$_SCRATCH/cl-v6-verdicts.jsonl"
   local records="$_SCRATCH/cl-v6-records" rrows="$_SCRATCH/cl-v6-records.jsonl" out="$_SCRATCH/cl-v6.jsonl"
+  local gov="$_SCRATCH/cl-v6-gov.jsonl" pj="$_SCRATCH/cl-v6-plan.json"
   [ -n "$_CL_MB" ] || return 0
   : > "$vrows"
   : > "$rrows"
+  : > "$gov"
   set -- --slurpfile p "$_SCRATCH/cl-claims.json" --slurpfile b "$_SCRATCH/cl-claims-base.json" \
     --slurpfile t "$_SCRATCH/cl-touched.json" --slurpfile sp "$_SCRATCH/cl-sidecars.jsonl" \
-    --slurpfile sb "$_SCRATCH/cl-sidecars-base.jsonl" --slurpfile v "$vrows" --slurpfile rec "$rrows"
+    --slurpfile sb "$_SCRATCH/cl-sidecars-base.jsonl" --slurpfile v "$vrows" --slurpfile rec "$rrows" \
+    --slurpfile cfg "$_SCRATCH/cl-config.json" --slurpfile gov "$gov"
   _claims_jq v6-verify -nrc --arg phase verify "$@" "$prog" > "$verify"
   _claims_jq v6-records -nrc --arg phase records "$@" "$prog" > "$records"
+  # The direction policy's plans: each plan whose stem a new DOC-STALE/RETIRE
+  # ruling's gate record names, as {stem, path, specs}.
+  stems=$(_claims_jq v6-stems -nr --arg phase stems "$@" "$prog") || _claims_propagate $?
+  if [ -n "$stems" ]; then
+    src=all
+    [ "$_CL_MODE" != staged ] || src=staged
+    _claims_plan_paths
+    while IFS= read -r -d '' plan <&3; do
+      stem=${plan##*/}
+      stem=${stem%.*}
+      case "
+$stems
+" in
+        *"
+$stem
+"*)
+          _claims_plan_parse "$plan" "$src" > "$pj"
+          _claims_jq v6-plan-row -c '{stem, path, specs}' "$pj" >> "$gov"
+          ;;
+      esac
+    done 3< "$_SCRATCH/cl-plans.z"
+  fi
   while IFS= read -r line <&3; do
     v=$(_claims_verdict_check "$line") || _claims_propagate $?
     _claims_jq v6-verdict-row -nc --argjson c "$line" --arg v "$v" '{claim: $c, verdict: $v}' >> "$vrows"
   done 3< "$verify"
   while IFS= read -r r <&3; do
     exists=false
-    if _claims_safe_relpath "$r" && _claims_read "$r" >/dev/null; then exists=true; fi
+    if _claims_safe_relpath "$r" && { [ "$_CL_MODE" != all ] || _claims_contained_path "$r"; } \
+        && _claims_read "$r" >/dev/null; then exists=true; fi
     _claims_jq v6-record-row -nc --arg r "$r" --argjson e "$exists" '{record: $r, exists: $e}' >> "$rrows"
   done 3< "$records"
   # jq reads $v and $rec at each call: here, with the rows written.
@@ -7964,7 +8038,8 @@ _claims_v9() {
 # A plan already completed at _CL_MB is history: none of these checks runs
 # on it, staged or not.
 # Scratch: cl-plan.* (the parser's raw, masked and record files),
-# cl-v12-* (the plan list, the parses, the code paths, the final record).
+# cl-plans.z (the plan list, _claims_plan_paths), cl-v12-* (the parses, the code
+# paths, the final record).
 
 # The injected task titles (references/spec-lifecycle-actions.md,
 # spec-inject --phase=plan), one single-quoted line each: the parser passes
@@ -8345,23 +8420,25 @@ _claims_v12_plan() {
     --arg final "$_CL_V12_FINAL" --arg gp "$_CL_GATE_TITLE_PREFIX" "$_JQ_CLAIMS_V12" >> "$_SCRATCH/cl-findings.jsonl"
 }
 
-# V12: each plan in scope — matching config plans, and staged (--staged;
-# present in the index) or present in the work tree (--all: tracked or
-# untracked, not ignored; a safe path reached through no symbolic link).
-# Under --all, ls-files is narrowed by the globs as pathspecs (a pathspec's
-# * matches "/" too, as _claims_glob_match's does: a superset), each under
-# :(top), with the environment's pathspec overrides (literal, glob: * no
-# longer matching "/") off; _claims_glob_any then decides.
-_claims_v12() {
-  local list="$_SCRATCH/cl-v12-plans.z" globs g p prev=""
+# The plans in scope — matching config plans, and staged (--staged; present
+# in the index) or present in the work tree (--all: tracked or untracked,
+# not ignored; a safe path reached through no symbolic link) —
+# _claims_plan_paths writes to $_SCRATCH/cl-plans.z, NUL-separated (V12 and
+# V6's direction policy read the one list). Under --all, ls-files is
+# narrowed by the globs as pathspecs (a pathspec's * matches "/" too, as
+# _claims_glob_match's does: a superset), each under :(top), with the
+# environment's pathspec overrides (literal, glob: * no longer matching "/")
+# off; _claims_glob_any then decides.
+_claims_plan_paths() {
+  local list="$_SCRATCH/cl-plans-all.z" out="$_SCRATCH/cl-plans.z" globs g p prev=""
   local -a specs=()
+  : > "$out"
   globs=$(_claims_jq plans -r \
     '.plans | if type == "array" then .[] | strings | select(. != "" and (test("\n") | not)) else empty end' \
     "$_SCRATCH/cl-config.json") || _claims_propagate $?
   [ -n "$globs" ] || return 0
-  _claims_code_init
   if [ "$_CL_MODE" = staged ]; then
-    _claims_jq v12-staged -j '.[] | . + "\u0000"' "$_SCRATCH/cl-staged.json" > "$list"
+    _claims_jq plans-staged -j '.[] | . + "\u0000"' "$_SCRATCH/cl-staged.json" > "$list"
   else
     while IFS= read -r g; do
       specs+=(":(top)$g")
@@ -8384,8 +8461,18 @@ EOF
       [ -f "$p" ] || continue
       _claims_contained_path "$p" || continue
     fi
-    _claims_v12_plan "$p"
+    printf '%s\0' "$p" >> "$out"
   done 3< "$list"
+}
+
+# V12: each plan _claims_plan_paths lists.
+_claims_v12() {
+  local p
+  _claims_code_init
+  _claims_plan_paths
+  while IFS= read -r -d '' p <&3; do
+    _claims_v12_plan "$p"
+  done 3< "$_SCRATCH/cl-plans.z"
 }
 
 # --- Spec claims: promote, the nonvacuity proofs -------------------------------
