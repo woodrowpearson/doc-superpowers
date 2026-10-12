@@ -1384,12 +1384,14 @@ assert_v5_ok() {
   assert_eq "0" "$(v5_count)" "$1: no V5 finding"
 }
 
-# The fixture claim made diverged: a bound test (V1 wants one once the claim
-# runs) and the CODE-DIVERGES ruling, its tracker left as the fixture's.
+# diverge_claim [<test-json>]: the fixture claim made diverged: a bound test
+# (V1 wants one once the claim runs; bind_test, so V3 holds; default
+# _CL_PYTEST_TTL) and the CODE-DIVERGES ruling, its tracker left as the
+# fixture's.
+_CL_PYTEST_TTL='{"runner":"pytest","node":"tests/test_token.py::test_ttl"}'
 diverge_claim() {
-  jset "$SIDECAR" ".claims[0].status = \"diverged\"
-    | .claims[0].test = {\"runner\":\"pytest\",\"node\":\"tests/test_token.py::test_ttl\"}
-    | .claims[0].rulings = [$_CL_DIVERGES]"
+  bind_test "${1:-$_CL_PYTEST_TTL}"
+  jset "$SIDECAR" ".claims[0].status = \"diverged\" | .claims[0].rulings = [$_CL_DIVERGES]"
   rerender
 }
 
@@ -1687,13 +1689,15 @@ write_verdict() {
 }
 
 # hand_promote: the fixture claim made built as promote makes it. The bound
-# test and the mutant are committed first (promote refuses a dirty tree, so
-# the sidecar at promotion.at holds the proved states and test); then status
-# built, its verdict in the store, and promotion {at: HEAD, verdict_sha256};
-# then the doc's status block rendered, as promote renders it. Sets CL_DIGEST.
+# test (bind_test: what V3 checks) and the mutant are committed first
+# (promote refuses a dirty tree, so the sidecar at promotion.at holds the
+# proved states and test); then status built, its verdict in the store, and
+# promotion {at: HEAD, verdict_sha256}; then the doc's status block
+# rendered, as promote renders it. Sets CL_DIGEST.
 hand_promote() {
-  jset "$SIDECAR" ".claims[0].test = $_CL_TEST | .claims[0].nonvacuity = $_CL_MUTANT"
-  git add "$SIDECAR" && git commit -qm "bind the TTL test"
+  bind_test "$_CL_TEST"
+  jset "$SIDECAR" ".claims[0].nonvacuity = $_CL_MUTANT"
+  git add "$SIDECAR" docs/spec-claims/config.json tools/claims && git commit -qm "bind the TTL test"
   jset "$SIDECAR" '.claims[0].status = "built"'
   CL_DIGEST=$(write_verdict)
   jset "$SIDECAR" ".claims[0].promotion = {\"at\": \"$(git rev-parse HEAD)\", \"verdict_sha256\": \"$CL_DIGEST\"}"
@@ -1899,6 +1903,7 @@ test_v6_merge_base_ratchet_behind_trunk() {
 test_v6_hand_edited_built_refused() {
   echo "test: V6 — status built without a promotion"
   claims_fixture
+  bind_test "$_CL_TEST"
   jset "$SIDECAR" ".claims[0].status = \"built\" | .claims[0].test = $_CL_TEST | .claims[0].nonvacuity = $_CL_MUTANT"
   cl validate --all
   assert_v6 "promote" "unbuilt → built by hand, no promotion"
@@ -1912,6 +1917,7 @@ test_v6_hand_edited_built_refused() {
 test_v6_unverifiable_here_advisory() {
   echo "test: V6 — a promotion whose verdict is not in this clone's store"
   claims_fixture
+  bind_test "$_CL_TEST"
   jset "$SIDECAR" ".claims[0].status = \"built\" | .claims[0].test = $_CL_TEST | .claims[0].nonvacuity = $_CL_MUTANT
     | .claims[0].promotion = {\"at\": \"$(git rev-parse HEAD)\", \"verdict_sha256\": \"$(printf '%064d' 0)\"}"
   rerender
@@ -1924,6 +1930,7 @@ test_v6_unverifiable_here_advisory() {
 test_v6_verdict_mismatch_is_finding() {
   echo "test: V6 — a promotion whose verdict does not match the claim"
   claims_fixture
+  bind_test "$_CL_TEST"
   local d
   jset "$SIDECAR" ".claims[0].status = \"built\" | .claims[0].test = $_CL_TEST | .claims[0].nonvacuity = $_CL_MUTANT"
   d=$(write_verdict "Another statement.")
@@ -2646,19 +2653,52 @@ write_stub() {
   chmod 755 "$1"
 }
 
-# stub_runner: the fixture made runnable through the stub (see above), all
-# committed; STUB_LOG is a fresh harness_mktemp file.
-stub_runner() {
+# stub_install: the stub runner adapter and its data files in tools/claims/
+# (list.jsonl empty, checks holding STUB_NODE's), not committed; STUB_LOG a
+# fresh harness_mktemp file.
+stub_install() {
   write_stub tools/claims/runner "$STUB_RUNNER_SH"
   : > tools/claims/list.jsonl
   : > tools/claims/force
   : > tools/claims/edited
   printf '%s\t%s\t%s\n' "$STUB_NODE" src/auth/token.py "TTL_SECONDS = 900" > tools/claims/checks
+  STUB_LOG=$(harness_mktemp stub-log)
+  export STUB_LOG
+}
+
+# stub_runner: the fixture made runnable through the stub (see above), all
+# committed. Its list reports nothing yet (list_row binds a node).
+stub_runner() {
+  stub_install
   jset docs/spec-claims/config.json '.runners.stub = {"adapter": "tools/claims/runner", "paths": ["src/", "tests/"]}'
   jset "$SIDECAR" ".claims[0].test = $STUB_TEST"
   git add -A && git commit -qm "stub runner"
-  STUB_LOG=$(harness_mktemp stub-log)
-  export STUB_LOG
+}
+
+# list_row <id> <node> [<in_gate> [<subject_imports_ok>]]: the stub's list
+# reports a test at <node> binding itself to <id> (§D's row; both flags
+# default to true, when is null).
+list_row() {
+  jq -nc --arg id "$1" --arg node "$2" --argjson g "${3:-true}" --argjson s "${4:-true}" \
+    '{id: $id, node: $node, file: ($node | split("::")[0]), in_gate: $g, subject_imports_ok: $s, when: null}' \
+    >> tools/claims/list.jsonl
+}
+
+# bind_test <test-json>: the fixture claim bound to <test-json> ({runner,
+# node}) as a host test binds itself, so V3 holds: the stub installed
+# (stub_install) when the fixture has none, config runners.<runner> naming it
+# unless the config already names that runner, a list.jsonl row binding the
+# node to the claim, and the claim's test set. Nothing is committed. The
+# shared helper every earlier test with a bound test claim goes through (R3).
+bind_test() {
+  local runner node
+  runner=$(jq -r '.runner' <<<"$1")
+  node=$(jq -r '.node' <<<"$1")
+  [ -x tools/claims/runner ] || stub_install
+  jset docs/spec-claims/config.json \
+    ".runners[\"$runner\"] //= {\"adapter\": \"tools/claims/runner\", \"paths\": [\"src/\", \"tests/\"]}"
+  list_row "$(jq -r '.claims[0].id' "$SIDECAR")" "$node"
+  jset "$SIDECAR" ".claims[0].test = $1"
 }
 
 # stub_log_adapter: config log_adapter → the stub log adapter, committed.
@@ -2706,9 +2746,7 @@ run_built() {
 
 # run_diverged: the fixture claim made diverged (tracker open, ruling) on the stub.
 run_diverged() {
-  diverge_claim
-  jset "$SIDECAR" ".claims[0].test = $STUB_TEST"
-  rerender
+  diverge_claim "$STUB_TEST"
 }
 
 # The stub's run calls in $STUB_LOG: the number of "run" lines.
@@ -3161,6 +3199,264 @@ test_run_selection() {
   teardown
 }
 
+# --- V3 test binding -------------------------------------------------------------
+#
+# V3 asks each touched test claim's runner adapter, statically, whether a
+# test binds itself to the claim at test.node: one `list [<file>…]` call per
+# runner. The stub runner's list prints tools/claims/list.jsonl (list_row
+# adds a row), and logs its arguments to $STUB_LOG.
+
+# The last `cl`'s V3 finding messages, one per line, and their count; its V3
+# indeterminate reasons, one per line.
+v3_messages() {
+  jq -r '.findings[]? | select(.check == "V3") | .message' <<<"$CL_OUT" 2>/dev/null || true
+}
+v3_count() {
+  jq '[.findings[]?, .advisories[]? | select(.check == "V3")] | length' <<<"$CL_OUT" 2>/dev/null || echo invalid
+}
+v3_reasons() {
+  jq -r '.indeterminate[]? | select(.check == "V3") | .reason' <<<"$CL_OUT" 2>/dev/null || true
+}
+
+# assert_v3 <substring> <what>: the last `cl` exited 1 with a V3 finding whose
+# message contains <substring>.
+assert_v3() {
+  assert_eq "1" "$CL_RC" "$2: exits 1"
+  assert_contains "$(v3_messages)" "$1" "$2: a V3 finding names '$1'"
+}
+
+# assert_v3_ok <what>: the last `cl` exited 0 with no V3 finding.
+assert_v3_ok() {
+  assert_eq "0" "$CL_RC" "$1: exits 0"
+  assert_eq "0" "$(v3_count)" "$1: no V3 finding"
+}
+
+# The stub's list calls in $STUB_LOG: the number of "list" lines.
+stub_list_calls() {
+  grep -c '^list$' "$STUB_LOG" || true
+}
+
+test_v3_unbound_node() {
+  echo "test: V3 — a test node the runner's list does not bind to the claim"
+  claims_fixture
+  stub_runner
+  cl validate --all
+  assert_v3 "not bound" "list.jsonl empty"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V3")][0].claim' "SPEC-AUTH-001#token-ttl" "…the finding names the claim"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V3")][0].doc' "$DOC" "…and its doc"
+  assert_eq "1" "$(stub_list_calls)" "…one list call"
+  # The id bound at another node, and the node bound to another id: neither
+  # binds this claim's node to it.
+  list_row SPEC-AUTH-001#token-ttl tests/test_token.py::test_other
+  list_row SPEC-AUTH-001#other "$STUB_NODE"
+  cl validate --all
+  assert_v3 "not bound" "the id at another node, the node under another id"
+  teardown
+}
+
+test_v3_bound_passes() {
+  echo "test: V3 — a node the runner's list binds to the claim passes; one list call per runner"
+  claims_fixture
+  stub_runner
+  list_row SPEC-AUTH-001#token-ttl "$STUB_NODE"
+  cl validate --all
+  assert_v3_ok "bound, in the gate, subject imported inside the test"
+  assert_eq "list" "$(cat "$STUB_LOG")" "…tests/test_token.py is not a path: list with no file (all files)"
+  # The node's file exists: list is asked for it, once though two claims
+  # name it.
+  mkdir -p tests
+  printf 'def test_ttl(): pass\n' > tests/test_token.py
+  add_claim "$(refresh_claim stub tests/test_token.py::test_refresh)"
+  list_row SPEC-AUTH-001#refresh-single-use tests/test_token.py::test_refresh
+  rerender
+  : > "$STUB_LOG"
+  cl validate --all
+  assert_v3_ok "two bound claims of one runner"
+  assert_eq "$(printf 'list\ntests/test_token.py')" "$(cat "$STUB_LOG")" "…one list call, the node's file once"
+  # test.file, when set, is the file (passed as one argument, spaces kept).
+  jset "$SIDECAR" '.claims[1].test.file = "tests/refresh spec.py"'
+  : > "$STUB_LOG"
+  cl validate --all
+  assert_v3_ok "test.file set"
+  assert_eq "$(printf 'list\ntests/refresh spec.py\ntests/test_token.py')" "$(cat "$STUB_LOG")" \
+    "…test.file passed as one argument"
+  # --staged checks the touched claims alone: none, then the one whose test
+  # file is staged.
+  git add -A && git commit -qm "two bound claims"
+  : > "$STUB_LOG"
+  cl validate --staged
+  assert_v3_ok "--staged, nothing staged"
+  assert_eq "0" "$(stub_list_calls)" "…no list call"
+  printf 'def test_ttl(): assert True\n' > tests/test_token.py
+  git add tests/test_token.py
+  cl validate --staged
+  assert_v3_ok "--staged, the token-ttl test file staged"
+  assert_eq "$(printf 'list\ntests/test_token.py')" "$(cat "$STUB_LOG")" "…list asked for that claim's file alone"
+  teardown
+}
+
+test_v3_in_gate_false() {
+  echo "test: V3 — a bound node outside the host's test gate"
+  claims_fixture
+  stub_runner
+  list_row SPEC-AUTH-001#token-ttl "$STUB_NODE" false
+  cl validate --all
+  assert_v3 "outside the test gate" "in_gate false"
+  teardown
+}
+
+test_v3_subject_imports_not_ok() {
+  echo "test: V3 — a bound node importing its subject at module level, whatever the status"
+  claims_fixture
+  stub_runner
+  list_row SPEC-AUTH-001#token-ttl "$STUB_NODE" true false
+  cl validate --all
+  assert_v3 "imports its subject at module level" "unbuilt, subject_imports_ok false"
+  run_built
+  : > tools/claims/list.jsonl
+  list_row SPEC-AUTH-001#token-ttl "$STUB_NODE" true false
+  cl validate --all
+  assert_v3 "imports its subject at module level" "built, subject_imports_ok false"
+  teardown
+}
+
+test_v3_built_without_nonvacuity() {
+  echo "test: V3 — built without nonvacuity or without promotion"
+  claims_fixture
+  stub_runner
+  run_built
+  cl validate --all
+  assert_v3_ok "promoted: a bound test, a mutant, a promotion and its verdict"
+  jset "$SIDECAR" '.claims[0].nonvacuity = null'
+  cl validate --all
+  assert_v3 "without nonvacuity" "built, nonvacuity null"
+  jset "$SIDECAR" '.claims[0].nonvacuity = {}'
+  cl validate --all
+  assert_v3 "without nonvacuity" "built, nonvacuity {} (neither observed_red nor mutant)"
+  jset "$SIDECAR" '.claims[0].nonvacuity = {"observed_red": "0123abc"}'
+  cl validate --all
+  assert_v3_ok "built, nonvacuity observed_red"
+  jset "$SIDECAR" '.claims[0].nonvacuity = {"mutant": {"file": "src/auth/token.py", "find": ""}}'
+  cl validate --all
+  assert_v3 "nonvacuity.mutant must be {file, find, replace}" "a mutant without replace, find empty"
+  jset "$SIDECAR" ".claims[0].nonvacuity = $_CL_MUTANT | .claims[0].promotion = null"
+  cl validate --all
+  assert_v3 "without promotion" "built, promotion null"
+  teardown
+}
+
+test_v3_mutant_find_not_unique() {
+  echo "test: V3 — nonvacuity.mutant.find must occur exactly once (literally) in the proposed mutant.file"
+  claims_fixture
+  stub_runner
+  run_built
+  printf 'TTL_SECONDS = 900  # TTL in seconds\n' > src/auth/token.py
+  jset "$SIDECAR" '.claims[0].nonvacuity.mutant.find = "TTL"'
+  cl validate --all
+  assert_v3 "occurs 2 times" "find TTL, twice in src/auth/token.py"
+  jset "$SIDECAR" '.claims[0].nonvacuity.mutant.find = "TTL_SECONDS = 1800"'
+  cl validate --all
+  assert_v3 "occurs 0 times" "find absent from the file"
+  # Literal, never a regex: "." matches only a dot.
+  jset "$SIDECAR" '.claims[0].nonvacuity.mutant.find = "TTL.SECONDS"'
+  cl validate --all
+  assert_v3 "occurs 0 times" "find TTL.SECONDS (a regex would match)"
+  jset "$SIDECAR" '.claims[0].nonvacuity.mutant.find = "TTL_SECONDS = 900"'
+  cl validate --all
+  assert_v3_ok "find once"
+  # --staged reads the index's mutant.file, --all the work tree's.
+  jset "$SIDECAR" '.claims[0].nonvacuity.mutant.find = "TTL"'
+  printf 'TTL_SECONDS = 900  # TTL in seconds\n' > src/auth/token.py
+  git add -A
+  printf 'TTL_SECONDS = 900\n' > src/auth/token.py
+  cl validate --staged
+  assert_v3 "occurs 2 times" "--staged: twice in the index"
+  cl validate --all
+  assert_eq "0" "$(v3_count)" "--all: once in the work tree, no V3 finding"
+  teardown
+}
+
+test_v3_mutant_file_unsafe_never_read() {
+  echo "test: V3 — an unsafe or absent nonvacuity.mutant.file is a finding, never read"
+  claims_fixture
+  stub_runner
+  run_built
+  local out
+  out=$(harness_mktemp_d outside-mutant)
+  printf 'TTL_SECONDS = 900\n' > "$out/token.py"
+  # Through "..": src/../.. is the fixture's parent, where $out lives. Read,
+  # it would hold find exactly once.
+  jset "$SIDECAR" ".claims[0].nonvacuity.mutant.file = \"src/../../$(basename "$out")/token.py\""
+  cl validate --all
+  assert_v3 "is not a safe repo path" "mutant.file with .. segments"
+  # Through a symbolic link.
+  ln -s "$out" src/outside
+  jset "$SIDECAR" '.claims[0].nonvacuity.mutant.file = "src/outside/token.py"'
+  cl validate --all
+  assert_v3 "is not a safe repo path" "mutant.file through a symlinked directory"
+  jset "$SIDECAR" '.claims[0].nonvacuity.mutant.file = "src/auth/nope.py"'
+  cl validate --all
+  assert_v3 "is not in the proposed tree" "mutant.file absent"
+  teardown
+}
+
+test_v3_test_file_unsafe() {
+  echo "test: V3 — an unsafe test.file is a finding, never passed to the adapter"
+  claims_fixture
+  stub_runner
+  list_row SPEC-AUTH-001#token-ttl "$STUB_NODE"
+  jset "$SIDECAR" '.claims[0].test.file = "../tests/test_token.py"'
+  cl validate --all
+  assert_v3 "test.file ../tests/test_token.py is not a safe repo path" "test.file with a .. segment"
+  assert_eq "0" "$(stub_list_calls)" "…no list call for it"
+  teardown
+}
+
+test_v3_list_adapter_failure_indeterminate() {
+  echo "test: V3 — a list call that fails or prints noise is indeterminate, never a pass or a finding"
+  claims_fixture
+  stub_runner
+  list_row SPEC-AUTH-001#token-ttl "$STUB_NODE"
+  STUB_EXIT=1 cl validate --all
+  assert_eq "2" "$CL_RC" "STUB_EXIT=1: exits 2"
+  assert_eq "adapter-exit-1" "$(v3_reasons)" "…V3 indeterminate, adapter-exit-1"
+  assert_json_field "$CL_OUT" '[.indeterminate[] | select(.check == "V3")][0].claim' "SPEC-AUTH-001#token-ttl" "…naming the claim"
+  # Unbound, but the adapter failed: indeterminate, never "not bound".
+  : > tools/claims/list.jsonl
+  STUB_EXIT=1 cl validate --all
+  assert_eq "2" "$CL_RC" "STUB_EXIT=1, no row: exits 2"
+  assert_eq "0" "$(v3_count)" "…no V3 finding"
+  # Noise, or a row of the wrong shape, among the rows.
+  local bad
+  for bad in 'scanning tests...' '[1]' 'null' \
+      '{"id":"SPEC-AUTH-001#token-ttl","node":"'"$STUB_NODE"'","file":"tests/test_token.py","in_gate":"yes","subject_imports_ok":true,"when":null}' \
+      '{"id":"SPEC-AUTH-001#token-ttl","node":"'"$STUB_NODE"'","file":"tests/test_token.py","in_gate":true,"when":null}'; do
+    : > tools/claims/list.jsonl
+    list_row SPEC-AUTH-001#token-ttl "$STUB_NODE"
+    printf '%s\n' "$bad" >> tools/claims/list.jsonl
+    cl validate --all
+    assert_eq "2" "$CL_RC" "list line $bad: exits 2"
+    assert_eq "malformed-adapter-output" "$(v3_reasons)" "…$bad: malformed-adapter-output"
+  done
+  # An unknown runner is a missing adapter (R6): indeterminate, no finding.
+  : > tools/claims/list.jsonl
+  list_row SPEC-AUTH-001#token-ttl "$STUB_NODE"
+  jset "$SIDECAR" '.claims[0].test.runner = "nosuch"'
+  cl validate --all
+  assert_eq "2" "$CL_RC" "an unknown runner: exits 2"
+  assert_eq "adapter-exit-126" "$(v3_reasons)" "…adapter-exit-126"
+  assert_eq "0" "$(v1_count)" "…no V1 finding"
+  assert_eq "0" "$(v3_count)" "…no V3 finding"
+  # The static checks still run when the adapter fails.
+  jset "$SIDECAR" '.claims[0].test.runner = "stub"'
+  run_built
+  jset "$SIDECAR" '.claims[0].nonvacuity = null'
+  STUB_EXIT=1 cl validate --all
+  assert_v3 "without nonvacuity" "STUB_EXIT=1, built without nonvacuity"
+  assert_eq "adapter-exit-1" "$(v3_reasons)" "…beside the indeterminate"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -3308,6 +3604,17 @@ run_tests() {
   test_run_unsafe_adapter_path_indeterminate
   test_run_selection
   test_parse_helpers_require_rc
+
+  # --- Task 8: V3 test binding ---
+  test_v3_unbound_node
+  test_v3_bound_passes
+  test_v3_in_gate_false
+  test_v3_subject_imports_not_ok
+  test_v3_built_without_nonvacuity
+  test_v3_mutant_find_not_unique
+  test_v3_mutant_file_unsafe_never_read
+  test_v3_test_file_unsafe
+  test_v3_list_adapter_failure_indeterminate
 
   print_summary
 }

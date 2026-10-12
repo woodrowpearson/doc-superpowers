@@ -5698,8 +5698,8 @@ _claims_read_at() {
 # _claims_safe_relpath <path>: 0 when <path> is a repo path a claims run may
 # read or write: relative, with no empty, "." or ".." segment (the index
 # could never hold one, so --staged and --all agree, and nothing outside the
-# work tree is reached). Sidecar docs (the loader), trackers (V5) and ruling
-# records (V6) all go through it.
+# work tree is reached). Sidecar docs (the loader), trackers (V5), ruling
+# records (V6), test files and mutant files (V3) all go through it.
 _claims_safe_relpath() {
   case "/$1/" in
     */../*|*/./*|*//*) return 1 ;;
@@ -6964,7 +6964,7 @@ _claims_blocks() {
 # the config (§D; the JSON shapes are the contract, never extended):
 #   runners.<name> = {"adapter": "<repo path>", "paths": ["<prefix-or-glob>"…]}
 #     <adapter> list [<file>…]  → JSON lines {"id", "node", "file", "in_gate":
-#       bool, "subject_imports_ok": bool, "when": {…}|null}
+#       bool, "subject_imports_ok": bool, "when": {…}|null}  (V3, validate)
 #     <adapter> run --root <dir> <node>…  → JSON lines {"node", "outcome":
 #       "pass"|"assert-fail"|"error"|"not-found"|"indeterminate", "reason"}
 #     <adapter> edited-bound-tests --staged | <range>  → claim ids
@@ -7001,6 +7001,17 @@ _claims_adapter_call() {
   fi
   (cd "$_CL_ROOT" && exec "$_CL_ROOT/$adapter" "$@") </dev/null 9>&- 3<&- > "$out" || rc=$?
   return "$rc"
+}
+
+# _claims_runner_adapter <runner>: print config runners.<runner>.adapter —
+# nothing when the config names no such runner, or gives it no adapter
+# string: a missing adapter, which _claims_adapter_call returns 126 for (R6).
+# The one lookup run and V3 share.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_claims_runner_adapter() {
+  _claims_jq runner-adapter -r --arg r "$1" \
+    '.runners | if type == "object" then .[$r] | objects | .adapter | strings else empty end' \
+    "$_SCRATCH/cl-config.json"
 }
 
 # A run call's stdout ($out: its lines, -R) → one {node, outcome, reason} row
@@ -7255,9 +7266,7 @@ cmd_claims_run() {
     _claims_jq run-nodes-z -j '.[] | . + "\u0000"' "$req" > "$nodesz"
     nodes=()
     while IFS= read -r -d '' node; do nodes+=("$node"); done < "$nodesz"
-    adapter=$(_claims_jq run-adapter -r --arg r "$runner" \
-      '.runners | if type == "object" then .[$r] | objects | .adapter | strings else empty end' \
-      "$_SCRATCH/cl-config.json") || _claims_propagate $?
+    adapter=$(_claims_runner_adapter "$runner") || _claims_propagate $?
     rc=0
     _claims_adapter_call "$out" "$adapter" run --root "$_CL_ROOT" ${nodes[@]+"${nodes[@]}"} || rc=$?
     _claims_parse_run "$out" "$req" "$rc" > "$one"
@@ -7292,6 +7301,213 @@ cmd_claims_run() {
   _claims_emit run "$extra"
 }
 
+# --- Spec claims: test binding, V3 ---------------------------------------------
+#
+# V3 checks each eligible, touched test claim (enforced_by test, test
+# {runner, node[, file]}) that is neither retired nor frozen (a frozen claim
+# is validated structurally only, and run skips both). Binding: one
+# `<adapter> list [<file>…]` call per runner (§D: a static scan, so
+# pre-commit can afford it), naming every file of its claims — test.file when
+# set, else the node's path before "::" when that is a file of the proposed
+# tree (_claims_read: the index under --staged), else none, and then the
+# call names no file (all files). A claim is bound when a list row has its
+# id and its node; a bound row must be in_gate and subject_imports_ok (a
+# finding whatever the status: Design clarifications). An adapter rc ≠ 0
+# (126: an unknown runner or a missing adapter, R6), or any non-blank line
+# that is not one §D row, makes every claim of that call indeterminate:
+# never a pass, never "not bound". Whatever the adapter says: a built or
+# gated claim needs nonvacuity (observed_red or mutant) and a promotion; a
+# mutant needs {file, find, replace}, its file a safe repo path
+# (_claims_safe_relpath; in the work tree _claims_contained_path too) present
+# in the proposed tree — an unsafe one is never read — and find occurring
+# there exactly once, counted literally (jq split, codepoints). An unsafe
+# test.file is a finding, and never reaches the adapter. The adapter's
+# stderr passes through (its diagnostics). The when comparisons arrive with
+# the configuration extension.
+#
+# Scratch: cl-v3-plan.json (one entry per checked claim), cl-v3-paths.jsonl
+# ({path, safe, exists} per candidate file), cl-v3-calls.jsonl ({runner,
+# files} per list call), cl-v3-lists.jsonl ({runner, ok, reason, rows} per
+# call) and cl-v3-mutants.jsonl ({i, state, n} per plan entry with a mutant).
+
+# Shared by the V3 programs: a well-shaped mutant, and a path with no
+# newline or NUL (the shell reads paths NUL- and newline-separated).
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_V3_DEFS='def nes: type == "string" and length > 0;
+ def cl_plain: (split("\n") | length) <= 1 and (split("\u0000") | length) <= 1;
+ def cl_mutant_ok: type == "object" and (.file | nes) and (.find | nes) and (.replace | type) == "string";
+ def cl_mutant: .nonvacuity | if type == "object" then .mutant else null end;'
+
+# cl-claims.json → the plan: the claims V3 checks ($t: cl-touched.json), in
+# sidecar order.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_V3_PLAN='$t[0] as $touched
+ | [.[] | select(.eligible and (.claim.id | type) == "string")
+    | select(.claim.id as $i | any($touched[]; . == $i))
+    | .doc as $doc | .claim
+    | select(.enforced_by == "test" and .status != "retired" and (.frozen_at | nes | not))
+    | select((.test | type) == "object" and (.test.runner | nes) and (.test.node | nes))
+    | {claim: .id, doc: $doc, status, runner: .test.runner, node: .test.node,
+       file: (if .test.file | nes then .test.file else null end),
+       prefix: (.test.node | split("::")[0]), nonvacuity, promotion}]'
+
+# The plan, with $paths (the cl-v3-paths rows) → one {runner, files} line
+# per list call: files [] (all files) when a claim of the runner has none.
+# A claim whose test.file is not safe is in no call.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_V3_CALLS='(reduce $paths[] as $p ({}; .[$p.path] = $p)) as $pp
+ | [.[] | select(.file == null or $pp[.file].safe == true)
+    | . + {arg: (if .file != null then .file elif $pp[.prefix].exists == true then .prefix else null end)}]
+ | group_by(.runner)[]
+ | {runner: .[0].runner, files: (if any(.[]; .arg == null) then [] else [.[].arg] | unique end)}'
+
+# The plan → "<i>\0<mutant.file>\0" per entry whose mutant is well shaped
+# and whose file is plain: the mutants the shell reads.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_V3_MUTANTS='range(length) as $i | .[$i] | cl_mutant
+ | select(cl_mutant_ok and (.file | cl_plain)) | "\($i)\u0000\(.file)\u0000"'
+
+# A list call's stdout ($out: its lines, -R) and rc → {ok, reason, rows}.
+# ok only when the rc is 0 and every non-blank line is one §D row: a JSON
+# object with string id and node, boolean in_gate and subject_imports_ok, a
+# string file when present, and when an object or null.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_PARSE_LIST='def row: type == "object" and (.id | type) == "string" and (.node | type) == "string"
+   and (.in_gate | type) == "boolean" and (.subject_imports_ok | type) == "boolean"
+   and ((has("file") | not) or (.file | type) == "string")
+   and ((.when | type) == "object" or .when == null);
+ [inputs | rtrimstr("\r") | select(test("[^ \t]")) | (try {v: fromjson} catch {bad: true})] as $lines
+ | if $rc != 0 then {ok: false, reason: "adapter-exit-\($rc)", rows: []}
+   elif all($lines[]; has("v") and (.v | row)) then {ok: true, reason: null, rows: [$lines[].v]}
+   else {ok: false, reason: "malformed-adapter-output", rows: []} end'
+
+# _claims_parse_list <out-file> <rc>: print the {ok, reason, rows} object of
+# a list call (_JQ_CLAIMS_PARSE_LIST). Both are required: a missing or
+# non-integer <rc> dies (exit 2), as for _claims_parse_run.
+_claims_parse_list() {
+  _claims_rc_arg _claims_parse_list "${2-}"
+  _claims_jq parse-list -ncR --argjson rc "$2" "$_JQ_CLAIMS_PARSE_LIST" < "$1"
+}
+
+# V3 over the plan ($plan), given $paths, $lists ({runner, ok, reason, rows}
+# per call) and $mut ({i, state: unsafe | absent | count, n}): finding rows
+# {check, claim, doc, message} and indeterminate rows {check, claim, reason}.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_V3='def v3($e; $msg): {check: "V3", claim: $e.claim, doc: $e.doc, message: $msg};
+ "(absolute, an empty, . or .. segment, or reached through a symbolic link)" as $unsafe
+ | $plan[0] as $plan
+ | (reduce $paths[] as $p ({}; .[$p.path] = $p)) as $pp
+ | (reduce $lists[] as $l ({}; .[$l.runner] = $l)) as $calls
+ | (reduce $mut[] as $m ({}; .[$m.i | tostring] = $m)) as $muts
+ | range($plan | length) as $i | $plan[$i] as $e
+ | (if $e.file != null and $pp[$e.file].safe != true then
+      v3($e; "test.file \($e.file) is not a safe repo path \($unsafe): name the test file by its path from the repo root")
+    else
+      ($calls[$e.runner] // error("V3: no list call for runner \($e.runner)")) as $c
+      | if $c.ok | not then {check: "V3", claim: $e.claim, reason: $c.reason}
+        else [$c.rows[] | select(.id == $e.claim and .node == $e.node)] as $b
+          | if ($b | length) == 0 then
+              v3($e; "test not bound: the list of runner \($e.runner) reports no test at \($e.node) binding itself to \($e.claim) (the test declares its claim id: a pytest marker, a jest helper, …)")
+            else
+              (if any($b[]; .in_gate == false)
+               then v3($e; "bound test \($e.node) is outside the test gate (in_gate: false): the host test run never runs it")
+               else empty end),
+              (if any($b[]; .subject_imports_ok == false)
+               then v3($e; "bound test \($e.node) imports its subject at module level (subject_imports_ok: false): an unbuilt subject would be a collection error no expected failure can absorb; import it inside the test")
+               else empty end)
+            end
+        end
+    end),
+   (if $e.status == "built" or $e.status == "gated" then
+      ($e.nonvacuity | if type == "object" then . else {} end) as $nv
+      | (if ($nv.observed_red | nes) or ($nv.mutant | type) == "object" then empty
+         else v3($e; "\($e.status) without nonvacuity: a \($e.status) test claim proves its test can fail (observed_red <sha>, or mutant {file, find, replace}); claims promote records it") end),
+        (if ($e.promotion | type) == "object" then empty
+         else v3($e; "\($e.status) without promotion: claims promote is the only path into \($e.status)") end)
+    else empty end),
+   ($e | cl_mutant | select(type == "object") | . as $m
+    | if cl_mutant_ok | not then
+        v3($e; "nonvacuity.mutant must be {file, find, replace}: three strings, file and find non-empty")
+      elif $m.file | cl_plain | not then
+        v3($e; "nonvacuity.mutant.file \($m.file | tojson) is not a safe repo path \($unsafe): it is never read")
+      else ($muts[$i | tostring] // error("V3: no mutant row for plan entry \($i)")) as $r
+        | if $r.state == "unsafe" then
+            v3($e; "nonvacuity.mutant.file \($m.file) is not a safe repo path \($unsafe): it is never read")
+          elif $r.state == "absent" then
+            v3($e; "nonvacuity.mutant.file \($m.file) is not in the proposed tree")
+          elif $r.n != 1 then
+            v3($e; "nonvacuity.mutant.find occurs \($r.n) times in \($m.file) (counted literally): it must match exactly once")
+          else empty end
+      end)'
+
+# V3 (see the section comment): the plan; each candidate file's safety and
+# presence; one list call per runner; each mutant file read and counted;
+# then one jq for the rows. The shell loops run over those short lists.
+# shellcheck disable=SC2016  # jq programs, not shell expansion
+_claims_v3() {
+  local plan="$_SCRATCH/cl-v3-plan.json" paths="$_SCRATCH/cl-v3-paths.jsonl" calls="$_SCRATCH/cl-v3-calls.jsonl"
+  local lists="$_SCRATCH/cl-v3-lists.jsonl" muts="$_SCRATCH/cl-v3-mutants.jsonl" z="$_SCRATCH/cl-v3.z"
+  local filesz="$_SCRATCH/cl-v3-files.z" out="$_SCRATCH/cl-v3-out" one="$_SCRATCH/cl-v3-one.json"
+  local mraw="$_SCRATCH/cl-v3-mutant.raw" res="$_SCRATCH/cl-v3.jsonl"
+  local p safe exists call runner adapter rc i f state n
+  local files=()
+  : > "$paths"
+  : > "$lists"
+  : > "$muts"
+  _claims_jq v3-plan -c --slurpfile t "$_SCRATCH/cl-touched.json" "$_JQ_CLAIMS_V3_DEFS $_JQ_CLAIMS_V3_PLAN" \
+    "$_SCRATCH/cl-claims.json" > "$plan"
+
+  # Each candidate file (test.file, else the node's path) once.
+  _claims_jq v3-paths -j '[.[] | .file // .prefix] | unique | .[] | . + "\u0000"' "$plan" > "$z"
+  while IFS= read -r -d '' p <&3; do
+    safe=false
+    exists=false
+    if _claims_safe_relpath "$p" && { [ "$_CL_MODE" != all ] || _claims_contained_path "$p"; }; then
+      safe=true
+      if _claims_read "$p" >/dev/null; then exists=true; fi
+    fi
+    _claims_jq v3-path-row -nc --arg p "$p" --argjson s "$safe" --argjson e "$exists" \
+      '{path: $p, safe: $s, exists: $e}' >> "$paths"
+  done 3< "$z"
+
+  # One list call per runner, its files as separate arguments.
+  _claims_jq v3-calls -c --slurpfile paths "$paths" "$_JQ_CLAIMS_V3_CALLS" "$plan" > "$calls"
+  while IFS= read -r call <&3; do
+    runner=$(_claims_jq v3-runner -j '.runner' <<<"$call") || _claims_propagate $?
+    _claims_jq v3-files -j '.files[] | . + "\u0000"' <<<"$call" > "$filesz"
+    files=()
+    while IFS= read -r -d '' f; do files+=("$f"); done < "$filesz"
+    adapter=$(_claims_runner_adapter "$runner") || _claims_propagate $?
+    rc=0
+    _claims_adapter_call "$out" "$adapter" list ${files[@]+"${files[@]}"} || rc=$?
+    _claims_parse_list "$out" "$rc" > "$one"
+    _claims_jq v3-list-row -c --argjson call "$call" '. + {runner: $call.runner}' "$one" >> "$lists"
+  done 3< "$calls"
+
+  # Each mutant's file: unsafe (never read), absent, or find's count in it.
+  _claims_jq v3-mutants -j "$_JQ_CLAIMS_V3_DEFS $_JQ_CLAIMS_V3_MUTANTS" "$plan" > "$z"
+  while IFS= read -r -d '' i <&3 && IFS= read -r -d '' f <&3; do
+    state=count
+    n=0
+    if ! _claims_safe_relpath "$f" || { [ "$_CL_MODE" = all ] && ! _claims_contained_path "$f"; }; then
+      state=unsafe
+    elif ! _claims_read "$f" > "$mraw"; then
+      state=absent
+    else
+      n=$(_claims_jq v3-count -Rsr --slurpfile plan "$plan" --argjson i "$i" \
+        '$plan[0][$i].nonvacuity.mutant.find as $f | if . == "" then 0 else (split($f) | length) - 1 end' \
+        "$mraw") || _claims_propagate $?
+    fi
+    _claims_jq v3-mutant-row -nc --argjson i "$i" --arg s "$state" --argjson n "$n" \
+      '{i: $i, state: $s, n: $n}' >> "$muts"
+  done 3< "$z"
+
+  _claims_jq v3 -nc --slurpfile plan "$plan" --slurpfile paths "$paths" --slurpfile lists "$lists" \
+    --slurpfile mut "$muts" "$_JQ_CLAIMS_V3_DEFS $_JQ_CLAIMS_V3" > "$res"
+  _claims_jq v3-findings -c 'select(has("reason") | not)' "$res" >> "$_SCRATCH/cl-findings.jsonl"
+  _claims_jq v3-indeterminate -c 'select(has("reason"))' "$res" >> "$_SCRATCH/cl-indet.jsonl"
+}
+
 cmd_claims_validate() {
   local mode=all
   if [ "$_OPT_staged" = 1 ]; then mode=staged; fi
@@ -7305,6 +7521,7 @@ cmd_claims_validate() {
   _claims_touched
   _claims_v1
   _claims_v2
+  _claims_v3
   _claims_v5
   _claims_v6
   _claims_blocks validate
