@@ -29,7 +29,8 @@
 #   write-tree, commit-tree [-p <tip>] — and pushed as
 #   <commit>:refs/heads/<views.branch> without force and with --no-verify
 #   (a host's pre-push gate is for its code, not for views). A rejected
-#   push is exit 2 ("the branch moved" when git says so). The user's HEAD,
+#   push is exit 2 ("the branch moved" when git reports a non-fast-forward
+#   or "[rejected]"; a remote hook's "[remote rejected]" is "failed"). The user's HEAD,
 #   index and working tree are never touched. Message: "views @
 #   <base>@<short-sha>, <n> in-flight branches, <UTC>". --dry-run renders
 #   into $_LG_CACHE/publish-dry-run and stops before the commit. Links:
@@ -369,7 +370,10 @@ cmd_ledger_publish() {
   esac
   if ! LC_ALL=C git push -q --no-verify "$remote" "$commit:refs/heads/$vb" > "$s.err" 2>&1; then
     err=$(head -n 3 "$s.err" | tr '\n' ' ')
-    if grep -Eq 'non-fast-forward|rejected|fetch first' "$s.err"; then
+    # Only a lost race ("! [rejected] … (non-fast-forward | fetch first)"),
+    # never "! [remote rejected] … (pre-receive hook declined)" or another
+    # refusal: those are failures, reported with git's words.
+    if grep -Eq 'non-fast-forward|fetch first|\[rejected\]' "$s.err"; then
       _lg_die "the push to $remote $vb was rejected: the branch moved since it was read — run publish again ($err)"
     fi
     _lg_die "the push to $remote $vb failed: $err"

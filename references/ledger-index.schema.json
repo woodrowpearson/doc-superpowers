@@ -13,8 +13,8 @@
       "required": ["head", "base", "inputs_hash", "mode", "rev", "registry_findings"],
       "additionalProperties": false,
       "properties": {
-        "head": { "type": ["string", "null"], "description": "HEAD's commit id; null on an unborn branch." },
-        "base": { "type": ["string", "null"], "description": "The commit id config `base` names; null when it does not resolve." },
+        "head": { "type": ["string", "null"], "description": "HEAD's commit id; null on an unborn branch, and for --rev (a rev build does not depend on HEAD)." },
+        "base": { "type": ["string", "null"], "description": "The commit id config `base` names; null when it does not resolve. For --rev: the rev itself." },
         "inputs_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "The cache key: the file is index-<hex>.json." },
         "mode": { "enum": ["worktree", "staged", "rev"] },
         "rev": { "type": ["string", "null"], "description": "The commit id of --rev; null otherwise." },

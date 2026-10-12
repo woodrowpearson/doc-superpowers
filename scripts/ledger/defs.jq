@@ -175,9 +175,12 @@ def lg_v_url($gen): ($gen.link // "") + (split("/") | map(@uri) | join("/"));
 # names sort by date), or null.
 def lg_v_newest: if length == 0 then null else sort_by(split("/") | last) | last end;
 def lg_v_docstem: split("/") | last | if endswith(".md") then .[0:-3] else . end;
-# lg_v_resolution: the first line of the item's resolution (design §E.2),
-# cut to 200 characters — before any escaping, so a cut never splits one.
-def lg_v_resolution: (.resolution // "(no resolution)") | gsub("\r"; "") | split("\n")[0] | lg_q_one | lg_q_cut(200);
+# lg_v_resolution: the first non-empty line (not only whitespace) of the
+# item's resolution (design §E.2), cut to 200 characters — before any
+# escaping, so a cut never splits one; "(no resolution)" when there is none.
+def lg_v_resolution:
+  ((.resolution // "") | gsub("\r"; "") | split("\n") | map(select(test("\\S"))) | .[0]) // "(no resolution)"
+  | lg_q_one | lg_q_cut(200);
 # lg_v_pr_url: the PR's url when it is http(s), else null (never a
 # javascript: or other scheme in a link).
 def lg_v_pr_url: .pr | if type == "object" and (.url | type) == "string" and (.url | test("^https?://")) then .url else null end;
