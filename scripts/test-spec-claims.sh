@@ -1664,11 +1664,15 @@ write_verdict() {
   printf '%s\n' "$digest"
 }
 
-# hand_promote: the fixture claim made built as promote makes it — a bound
-# test, a mutant, its verdict in the store and promotion {at: HEAD,
-# verdict_sha256}. Sets CL_DIGEST.
+# hand_promote: the fixture claim made built as promote makes it. The bound
+# test and the mutant are committed first (promote refuses a dirty tree, so
+# the sidecar at promotion.at holds the proved states and test); then status
+# built, its verdict in the store, and promotion {at: HEAD, verdict_sha256}.
+# Sets CL_DIGEST.
 hand_promote() {
-  jset "$SIDECAR" ".claims[0].status = \"built\" | .claims[0].test = $_CL_TEST | .claims[0].nonvacuity = $_CL_MUTANT"
+  jset "$SIDECAR" ".claims[0].test = $_CL_TEST | .claims[0].nonvacuity = $_CL_MUTANT"
+  git add "$SIDECAR" && git commit -qm "bind the TTL test"
+  jset "$SIDECAR" '.claims[0].status = "built"'
   CL_DIGEST=$(write_verdict)
   jset "$SIDECAR" ".claims[0].promotion = {\"at\": \"$(git rev-parse HEAD)\", \"verdict_sha256\": \"$CL_DIGEST\"}"
 }
@@ -1961,41 +1965,68 @@ repromote_owed() {
   printf '%s\n' "$out"
 }
 
-test_v6_repromote_owed_commit_order() {
-  echo "test: _claims_repromote_owed — by the local verdict, else by commit order"
+test_v6_repromote_owed_proved_record() {
+  echo "test: _claims_repromote_owed — by the local verdict, else by the record at promotion.at"
   claims_fixture
   CL_PROBE=$(claims_probe after '_claims_load; r=$(_claims_repromote_owed "$CL_PROBE_ID" "$_CL_MB") || _claims_propagate $?; _claims_mark_emitted 0; _claims_out "$r"; exit 0')
   assert_eq "clear" "$(repromote_owed)" "an unbuilt claim: clear"
   hand_promote
   base_here "built"
-  local store at aside
+  local store at aside c init other
   store=$(claims_store)
   aside=$(harness_mktemp_d verdict-aside)
   assert_eq "clear" "$(repromote_owed)" "built, the verdict present and matching: clear"
   mv "$store/$CL_DIGEST.json" "$aside/"
-  assert_eq "clear" "$(repromote_owed)" "built, the verdict missing, no ruling since the merge-base: clear"
+  assert_eq "clear" "$(repromote_owed)" "built, the verdict missing, states and test as at promotion.at: clear"
   mv "$aside/$CL_DIGEST.json" "$store/"
-  # The amendment, committed after the proof.
+  # The amendment (commit A), committed after the proof.
   doc_stale_amend
   git add -A && git commit -qm "DOC-STALE: amend the TTL claim"
   assert_eq "owed" "$(repromote_owed)" "amended, the verdict present (mismatch): owed"
   rm -f "$store/$CL_DIGEST.json"
-  assert_eq "owed" "$(repromote_owed)" "amended, the verdict missing, the ruling's commit not an ancestor of promotion.at: owed"
-  # Re-promoted after the amendment.
+  assert_eq "owed" "$(repromote_owed)" "amended, the verdict missing, states not those at promotion.at: owed"
+  # Re-promoted at A.
   at=$(git rev-parse HEAD)
   CL_DIGEST=$(write_verdict)
   jset "$SIDECAR" ".claims[0].promotion = {\"at\": \"$at\", \"verdict_sha256\": \"$CL_DIGEST\"}"
   git commit -qam "promote SPEC-AUTH-001#token-ttl"
-  assert_eq "clear" "$(repromote_owed)" "re-promoted, the verdict present: clear"
-  rm -f "$store/$CL_DIGEST.json"
-  assert_eq "clear" "$(repromote_owed)" "re-promoted, the verdict missing, the ruling's commit an ancestor of promotion.at: clear"
+  assert_eq "clear" "$(repromote_owed)" "re-promoted at A, the verdict present: clear"
+  mv "$store/$CL_DIGEST.json" "$aside/"
+  assert_eq "clear" "$(repromote_owed)" "re-promoted at A, the verdict missing, states and test as at A: clear"
+  # A second states change under the same ruling (commit C): the ruling is
+  # still new against the merge-base, but these states were never proved.
+  jset "$SIDECAR" '.claims[0].states = "An issued access token is rejected 15 minutes after issue, or at logout."'
+  git commit -qam "states again, under the same ruling"
+  mv "$aside/$CL_DIGEST.json" "$store/"
+  cl validate --all
+  assert_contains "$(v6_codes)" "re-promote owed" "precondition: V6 licenses C (re-promote owed, not a finding)"
+  assert_eq "owed" "$(repromote_owed)" "states changed after the re-promotion, the verdict present: owed"
+  mv "$store/$CL_DIGEST.json" "$aside/"
+  assert_eq "owed" "$(repromote_owed)" "states changed after the re-promotion, the verdict missing: owed"
+  # The test changed instead (states as proved at A).
+  git show "$at:$SIDECAR" | jq -r '.claims[0].states' > "$aside/states"
+  jset "$SIDECAR" ".claims[0].states = $(jq -Rs 'rtrimstr("\n")' "$aside/states") | .claims[0].test.node = \"tests/unit/test_token.py::test_other\""
+  assert_eq "owed" "$(repromote_owed)" "the test changed after the re-promotion, the verdict missing: owed"
+  jset "$SIDECAR" ".claims[0].test = $_CL_TEST"
+  assert_eq "clear" "$(repromote_owed)" "states and test back to those proved at A: clear"
   # A rebased branch's old sha.
   jset "$SIDECAR" ".claims[0].promotion.at = \"$(printf '%040d' 7)\""
-  git commit -qam "promotion.at unresolvable"
   assert_eq "unverifiable-here" "$(repromote_owed)" "the verdict missing, promotion.at not a commit here: unverifiable-here"
-  # An uncommitted ruling came after every proof.
-  jset "$SIDECAR" ".claims[0].promotion.at = \"$at\" | .claims[0].rulings += [{\"date\":\"2026-10-12\",\"direction\":\"RETIRE\",\"by\":\"doc-owner\",\"record\":\"docs/issues/token-ttl.md\",\"reason\":\"Pending.\"}]"
-  assert_eq "owed" "$(repromote_owed)" "a RETIRE ruling in the work tree only: owed"
+  # promotion.at a commit without the sidecar (the repository's first).
+  init=$(git rev-list --max-parents=0 HEAD)
+  jset "$SIDECAR" ".claims[0].promotion.at = \"$init\""
+  assert_eq "unverifiable-here" "$(repromote_owed)" "the sidecar absent at promotion.at: unverifiable-here"
+  # promotion.at a commit whose sidecar holds no claim with that id.
+  c=$(git rev-parse HEAD)
+  git checkout -q -b other
+  jset "$SIDECAR" '.claims[0].id = "SPEC-AUTH-001#other"'
+  git commit -qam "another claim id"
+  other=$(git rev-parse HEAD)
+  git checkout -q feature
+  git branch -q -D other
+  assert_eq "$c" "$(git rev-parse HEAD)" "precondition: back on feature"
+  jset "$SIDECAR" ".claims[0].promotion.at = \"$other\" | .claims[0].test = $_CL_TEST"
+  assert_eq "unverifiable-here" "$(repromote_owed)" "no claim with that id in the sidecar at promotion.at: unverifiable-here"
   teardown
 }
 
@@ -2099,7 +2130,7 @@ run_tests() {
   test_v6_doc_stale_on_built_is_repromote_owed
   test_v6_mismatch_with_code_diverges_ruling_still_finding
   test_v6_staged_reads_index_not_worktree
-  test_v6_repromote_owed_commit_order
+  test_v6_repromote_owed_proved_record
 
   print_summary
 }
