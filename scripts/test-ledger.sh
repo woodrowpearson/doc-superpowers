@@ -2180,6 +2180,42 @@ test_lg_index_dates_merge_cold_vs_extended() {
   teardown
 }
 
+# --- Task 4 fix round 3 -------------------------------------------------------
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_dates_treesame() {
+  local ix err="$_SCRATCH/t.err" ext cold
+  git checkout -q feat
+  ix=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err")
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/x.md)" '.date' "2026-01-05" "on feat: feat's add date (the map cached for feat)"
+  git checkout -q main
+  lg_item docs/issues/x.md "key: app-1" "status: Open"
+  lg_commit_at 2026-01-10 main-adds-x-identical
+  # The same bytes on both sides: the merge is TREESAME to main for x.md.
+  GIT_AUTHOR_DATE="2026-01-11T12:00:00" GIT_COMMITTER_DATE="2026-01-11T12:00:00" git merge -q --no-edit feat
+  ix=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err")
+  assert_contains "$(cat "$err")" "dates-extend $(git rev-parse feat)" "after the merge: feat's cached map is extended"
+  ext=$(lg_ix_item "$ix" docs/issues/x.md | jq -r .date)
+  rm -f "$_LG_CACHE"/dates-*.tsv "$_LG_CACHE"/index-*.json "$_LG_CACHE"/index-*.refs
+  ix=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err")
+  assert_contains "$(cat "$err")" "dates-cold" "caches removed: a cold map"
+  cold=$(lg_ix_item "$ix" docs/issues/x.md | jq -r .date)
+  assert_eq "$ext" "$cold" "a TREESAME merge: the cold map (--full-history) agrees with the one extended from feat"
+  assert_eq "2026-01-05" "$cold" "…on feat's earlier add"
+}
+
+test_lg_index_dates_treesame_merge() {
+  echo "test: _lg_index — dates agree cold vs extended-from-the-side-branch across a TREESAME merge"
+  lg_fixture
+  lg_enable
+  lg_commit_at 2026-01-01 base
+  git checkout -q -b feat
+  lg_item docs/issues/x.md "key: app-1" "status: Open"
+  lg_commit_at 2026-01-05 feat-adds-x
+  lg_in lg_t_index_dates_treesame
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -2268,6 +2304,9 @@ run_tests() {
 
   # --- Task 4 fix round 2 ---
   test_lg_index_dates_merge_cold_vs_extended
+
+  # --- Task 4 fix round 3 ---
+  test_lg_index_dates_treesame_merge
 
   print_summary
 }
