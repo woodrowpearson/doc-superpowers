@@ -2073,9 +2073,11 @@ v11_count() {
 }
 
 # rerender: the fixture's status blocks rendered again, as a status change
-# owes (§B); the run must succeed.
+# owes (§B). A failed render fails the test.
 rerender() {
-  "$DOC_TOOLS" claims render </dev/null >/dev/null 2>&1 || { echo "rerender failed" >&2; return 1; }
+  local rc=0
+  "$DOC_TOOLS" claims render </dev/null >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "rerender: claims render exits 0"
 }
 
 # strip_block <file>: drop the status block (its marker lines and every line
@@ -2325,6 +2327,141 @@ test_render_deleted_doc_check_ok() {
   teardown
 }
 
+# evil_sidecar <doc>: a sidecar SPEC-EVIL-001.json whose doc is <doc>, its one
+# claim quoting the evil doc's sentence.
+evil_sidecar() {
+  jq -n --arg doc "$1" '{schema: 1, doc: $doc, claims: [{
+    id: "SPEC-EVIL-001#x", quote: "Evil sentence",
+    states: "The evil doc says so.", kind: "behaviour", subject: ["src/auth/token.py"],
+    status: "unbuilt", enforced_by: "test", test: null, nonvacuity: null, promotion: null,
+    tracker: "docs/issues/token-ttl.md", frozen_at: null, restates: [], rulings: []}]}' \
+    > docs/spec-claims/SPEC-EVIL-001.json
+}
+
+# A spec outside the work tree, beside it in the suite's scratch root: sets
+# EVIL_DIR (absolute) and EVIL_REL (docs/specs/../../../<dir>/…, which a
+# governing glob's * matches).
+evil_outside() {
+  EVIL_DIR=$(mktemp -d "$SUITE_TMP/outside.XXXXXX")
+  printf '# SPEC-EVIL-001\n\n## Summary\n\nEvil sentence.\n\n## Requirements\n\nNone.\n' \
+    > "$EVIL_DIR/SPEC-EVIL-001-x.md"
+  EVIL_REL="docs/specs/../../../$(basename "$EVIL_DIR")/SPEC-EVIL-001-x.md"
+}
+
+test_v1_unsafe_doc_path() {
+  echo "test: V1 — a sidecar doc that is not a safe repo path is a finding, never read"
+  claims_fixture
+  evil_outside
+  printf '# SPEC-EVIL-001\n\n## Summary\n\nEvil sentence.\n' > docs/specs/SPEC-EVIL-001-x.md
+  git add docs/specs/SPEC-EVIL-001-x.md && git commit -qm "an evil spec inside, too"
+  local d
+  for d in "$EVIL_REL" "$EVIL_DIR/SPEC-EVIL-001-x.md" "docs/specs/./SPEC-EVIL-001-x.md"; do
+    evil_sidecar "$d"
+    cl validate --all
+    assert_v1 "not a safe repo path" "--all, doc $d"
+    assert_contains "$(v1_messages)" "docs/spec-claims/SPEC-EVIL-001.json: doc $d" "…naming the sidecar and the path"
+    assert_eq "0" "$(v2_count)" "…no V2 finding (the doc is never read)"
+    assert_eq "0" "$(v11_count)" "…no V11 finding"
+    git add docs/spec-claims/SPEC-EVIL-001.json
+    cl validate --staged
+    assert_v1 "not a safe repo path" "--staged, doc $d"
+    git reset -q
+  done
+  rm -rf "$EVIL_DIR"
+  teardown
+}
+
+test_render_unsafe_doc_skipped() {
+  echo "test: render — a doc outside the work tree is skipped, never written"
+  claims_fixture
+  evil_outside
+  evil_sidecar "$EVIL_REL"
+  local h
+  h=$(hash_file "$EVIL_DIR/SPEC-EVIL-001-x.md")
+  cl render
+  assert_eq "0" "$CL_RC" "render exits 0"
+  assert_json_field "$CL_OUT" "[.results[] | select(.doc == \"$EVIL_REL\")] | tojson" \
+    "[{\"doc\":\"$EVIL_REL\",\"skipped\":\"unsafe path\"}]" "…reports skipped: unsafe path"
+  assert_eq "$h" "$(hash_file "$EVIL_DIR/SPEC-EVIL-001-x.md")" "…and the outside file is byte-identical"
+  cl render --check
+  assert_eq "0" "$CL_RC" "render --check exits 0"
+  assert_eq "0" "$(v11_count)" "…with no V11 finding"
+  rm -rf "$EVIL_DIR"
+  teardown
+}
+
+test_v11_inline_markers_are_text() {
+  echo "test: V11 — a status marker counts only as a whole line"
+  claims_fixture
+  # Both markers quoted inline, on one line, in a doc never rendered.
+  strip_block "$DOC"
+  local prose
+  prose="The block sits between \`$BLOCK_BEGIN\` and \`$BLOCK_END\` lines."
+  doc_edit "$DOC" "How long issued tokens stay valid." "$prose" after
+  cl render
+  assert_eq "0" "$CL_RC" "render exits 0"
+  assert_json_field "$CL_OUT" '.results[0].changed' "true" "…a fresh block is inserted"
+  assert_eq "$BLOCK_END" "$(line_before "$DOC" "## Requirements")" "…before ## Requirements"
+  assert_eq "1" "$(L="$prose" awk '$0 == ENVIRON["L"] { n++ } END { print n + 0 }' "$DOC")" \
+    "…and the prose line is untouched"
+  teardown
+  # One marker quoted inline in a rendered doc: no V11, and V2 reads the
+  # sentence as live.
+  claims_fixture
+  doc_edit "$DOC" "How long issued tokens stay valid." \
+    "Tokens list their claims after \`$BLOCK_BEGIN\` here." after
+  jset "$SIDECAR" '.claims += [.claims[0] | .id = "SPEC-AUTH-001#inline-marker"
+    | .quote = "Tokens list their claims after <!-- spec-claims:status:begin --> here"]'
+  rerender
+  cl validate --all
+  assert_eq "0" "$CL_RC" "one marker quoted inline: validate --all exits 0"
+  assert_eq "0" "$(v11_count)" "…no V11 finding"
+  assert_eq "0" "$(v2_count)" "…and the sentence holding the marker text is live (no V2)"
+  teardown
+}
+
+test_v11_malformed_markers() {
+  echo "test: V11 — end before begin, or two pairs: a finding, the doc never written"
+  claims_fixture
+  local h
+  # End before begin: the fixture block's markers swapped.
+  doc_edit "$DOC" "$BLOCK_BEGIN" "@@BEGIN@@"
+  doc_edit "$DOC" "$BLOCK_END" "$BLOCK_BEGIN"
+  doc_edit "$DOC" "@@BEGIN@@" "$BLOCK_END"
+  h=$(hash_file "$DOC")
+  cl render --check
+  assert_eq "1" "$CL_RC" "end before begin: render --check exits 1"
+  assert_contains "$(v11_messages)" "not one begin/end pair" "…a V11 finding"
+  assert_json_field "$CL_OUT" '.results[0].changed' "null" "…its result's changed is null"
+  cl render
+  assert_eq "1" "$CL_RC" "end before begin: render exits 1"
+  assert_eq "$h" "$(hash_file "$DOC")" "…and never writes the doc"
+  # Two pairs: the fixture block, and a copy of it before ## Implementation Notes.
+  git checkout -q -- "$DOC"
+  doc_edit "$DOC" "## Implementation Notes" "$BLOCK_BEGIN"$'\n'"$BLOCK_END"$'\n'"## Implementation Notes"
+  h=$(hash_file "$DOC")
+  cl validate --all
+  assert_eq "1" "$CL_RC" "two pairs: validate --all exits 1"
+  assert_contains "$(v11_messages)" "not one begin/end pair" "…a V11 finding"
+  cl render
+  assert_eq "1" "$CL_RC" "two pairs: render exits 1"
+  assert_eq "$h" "$(hash_file "$DOC")" "…and never writes the doc"
+  teardown
+}
+
+test_render_base_unused() {
+  echo "test: render — the base is never read, so an unresolvable one is not indeterminate"
+  claims_fixture
+  cl render --base no-such-ref
+  assert_eq "0" "$CL_RC" "render --base no-such-ref exits 0"
+  assert_json_field "$CL_OUT" '.indeterminate | tojson' "[]" "…with nothing indeterminate"
+  cl render --check --base no-such-ref
+  assert_eq "0" "$CL_RC" "render --check --base no-such-ref exits 0 on a clean tree"
+  cl validate --all --base no-such-ref
+  assert_eq "2" "$CL_RC" "precondition: validate (which ratchets) still exits 2"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -2439,6 +2576,11 @@ run_tests() {
   test_v11_crlf_doc
   test_render_archived_doc_skipped
   test_render_deleted_doc_check_ok
+  test_v1_unsafe_doc_path
+  test_render_unsafe_doc_skipped
+  test_v11_inline_markers_are_text
+  test_v11_malformed_markers
+  test_render_base_unused
 
   print_summary
 }

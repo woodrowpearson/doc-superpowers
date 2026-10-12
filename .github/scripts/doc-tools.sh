@@ -5521,6 +5521,7 @@ _CL_ROOT=""          # the work tree's top level, absolute
 _CL_BASE_REF=""      # --base, else config "base", else origin/main
 _CL_MB=""            # git merge-base HEAD <base>; empty when unresolvable
 _CL_ALL_BLOCKING=0   # 1: every finding blocks (run, promote, gate, attest)
+_CL_BASE_UNUSED=0    # 1: the verb never reads the base (render): no base-unresolvable
 _CL_JS=""            # _claims_json_str's result
 
 # The config defaults, deep-merged (jq *) under the host's config.json:
@@ -5687,6 +5688,18 @@ _claims_read_at() {
   git cat-file blob "$1:$2" 2>/dev/null || return 1
 }
 
+# _claims_safe_relpath <path>: 0 when <path> is a repo path a claims run may
+# read or write: relative, with no empty, "." or ".." segment (the index
+# could never hold one, so --staged and --all agree, and nothing outside the
+# work tree is reached). Sidecar docs (the loader), trackers (V5) and ruling
+# records (V6) all go through it.
+_claims_safe_relpath() {
+  case "/$1/" in
+    */../*|*/./*|*//*) return 1 ;;
+  esac
+  return 0
+}
+
 # _claims_glob_match <path> <glob>: a case pattern, so * also matches "/"
 # ("docs/specs/*.md" matches docs/specs/sub/x.md).
 _claims_glob_match() {
@@ -5741,7 +5754,7 @@ _claims_init() {
   if git rev-parse -q --verify "$_CL_BASE_REF^{commit}" >/dev/null 2>&1; then
     _CL_MB=$(git merge-base HEAD "$_CL_BASE_REF" 2>/dev/null) || _CL_MB=""
   fi
-  if [ -z "$_CL_MB" ]; then _claims_indeterminate V6 - base-unresolvable; fi
+  if [ -z "$_CL_MB" ] && [ "$_CL_BASE_UNUSED" = 0 ]; then _claims_indeterminate V6 - base-unresolvable; fi
 }
 
 # _claims_emit <verb> [<extra-json>]: print the verdict object (merged with
@@ -5786,17 +5799,20 @@ _claims_v1_config() {
 # loader writes, in $_SCRATCH:
 #   cl-sidecars.jsonl / cl-sidecars-base.jsonl — one line per sidecar in the
 #     proposed tree / at _CL_MB: {sidecar, data (null when the file is not one
-#     JSON object), doc, doc_id, present, governing}, present and governing
-#     describing doc in that same tree;
+#     JSON object), doc, doc_id, present, governing, unsafe}, present and
+#     governing describing doc in that same tree; unsafe: doc is not a safe
+#     repo path (_claims_safe_relpath: absolute, or an empty, "." or ".."
+#     segment), and is then never read (present and governing false);
 #   cl-claims.json / cl-claims-base.json — [{sidecar, doc, doc_id, eligible,
 #     claim}], one per object in a well-formed claims array ([] at base when
 #     _CL_MB is empty);
 #   cl-sidecars.json — [{sidecar, doc, doc_id, eligible, all_retired, skip}]
-#     for the proposed tree; skip is null, "doc missing", "not governing" or
-#     "malformed sidecar".
-# eligible: the doc is present in the tree read and governing. V2–V5, render
-# and V11 skip a claim that is not eligible (one V1 finding already names the
-# doc unless every claim is retired, a legal end state); V1 and V6 run on all.
+#     for the proposed tree; skip is null, "malformed sidecar", "unsafe path",
+#     "doc missing" or "not governing" (the first that applies).
+# eligible: the doc is a safe repo path, present in the tree read and
+# governing. V2–V5, render and V11 skip a claim that is not eligible (one V1
+# finding already names the doc unless every claim is retired, a legal end
+# state — never for an unsafe path, always a finding); V1 and V6 run on all.
 # doc_id: the doc's DOC-ID (_claims_doc_id) — for a fully retired sidecar
 # whose doc has none (a host-glob doc moved out of its glob), the doc's file
 # stem; else null.
@@ -5869,7 +5885,7 @@ _claims_is_governing() {
 # JSON object is a line with data null (V1 reports it), never a failure.
 _claims_load_tree() {
   local rev="$1" out="$2" listing="$_SCRATCH/cl-list" blob="$_SCRATCH/cl-sidecar.raw"
-  local p prev="" line doc present governing
+  local p prev="" line doc present governing unsafe
   case "$rev" in
     -)
       case "$_CL_MODE" in
@@ -5913,8 +5929,13 @@ _claims_load_tree() {
       || _claims_propagate $?
     present=false
     governing=false
+    unsafe=false
     _CL_DOCID=""
-    if [ -n "$doc" ]; then
+    if [ -n "$doc" ] && ! _claims_safe_relpath "$doc"; then
+      # Never read, never governing: _claims_read in mode all would follow
+      # it out of the work tree, and a glob's * matches "/" and "..".
+      unsafe=true
+    elif [ -n "$doc" ]; then
       if [ "$rev" = - ]; then
         if _claims_read "$doc" >/dev/null; then present=true; fi
       elif _claims_read_at "$rev" "$doc" >/dev/null; then
@@ -5924,9 +5945,9 @@ _claims_load_tree() {
       _claims_doc_id_set "$doc"
     fi
     _claims_jq sidecar-line -c --arg doc "$doc" --arg docid "$_CL_DOCID" \
-      --argjson present "$present" --argjson governing "$governing" \
+      --argjson present "$present" --argjson governing "$governing" --argjson unsafe "$unsafe" \
       '. + {doc: (if $doc == "" then null else $doc end), doc_id: (if $docid == "" then null else $docid end),
-            present: $present, governing: $governing}' <<<"$line" >> "$out"
+            present: $present, governing: $governing, unsafe: $unsafe}' <<<"$line" >> "$out"
   done 3< "$listing"
 }
 
@@ -5935,16 +5956,18 @@ _claims_load_tree() {
 # eligible V2–V5 read) and V1 can never disagree about a sidecar.
 #   cl_well_formed  data is an object whose claims is an array
 #   cl_all_retired  well formed, at least one claim, every claim retired
-#   cl_eligible     the doc is present and governing in the tree read
+#   cl_eligible     the doc is a safe repo path (_claims_safe_relpath),
+#                   present and governing in the tree read
 #   cl_doc_id       the doc's DOC-ID; for a fully retired sidecar whose doc
-#                   has none, the doc's file stem; else null
+#                   has none, the doc's file stem; else (an unsafe path
+#                   included) null
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_SIDECAR='def cl_stem: split("/") | last | sub("\\.[^.]*$"; "");
  def cl_well_formed: (.data | type) == "object" and (.data.claims | type) == "array";
  def cl_all_retired: cl_well_formed and (.data.claims | length) > 0
    and all(.data.claims[]; type == "object" and .status == "retired");
- def cl_eligible: .present and .governing;
- def cl_doc_id: if .doc_id != null then .doc_id
+ def cl_eligible: (.unsafe | not) and .present and .governing;
+ def cl_doc_id: if .unsafe then null elif .doc_id != null then .doc_id
    elif cl_all_retired and .doc != null then .doc | cl_stem
    else null end;'
 
@@ -5958,7 +5981,8 @@ _JQ_CLAIMS_LOAD='if $what == "claims" then
     | {sidecar: $s.sidecar, doc: $s.doc, doc_id: ($s | cl_doc_id), eligible: ($s | cl_eligible), claim: .}]
  else
    [.[] | {sidecar, doc, doc_id: cl_doc_id, eligible: cl_eligible, all_retired: cl_all_retired,
-           skip: (if (cl_well_formed | not) then "malformed sidecar" elif cl_eligible then null
+           skip: (if (cl_well_formed | not) then "malformed sidecar" elif .unsafe then "unsafe path"
+                  elif cl_eligible then null
                   elif .present | not then "doc missing" else "not governing" end)}]
  end'
 
@@ -6148,6 +6172,7 @@ _JQ_CLAIMS_V1='def in_list($l): . as $x | any($l[]; . == $x);
            (if $d.schema != 1 then v1(null; $fdoc; "\($p): schema \($d.schema | tojson) must be 1") else empty end),
            (if ($d.claims | type) != "array" then v1(null; $fdoc; "\($p): claims must be an array") else empty end),
            (if .doc == null then v1(null; $p; "\($p): doc must be the repo path of the governing doc")
+            elif .unsafe then v1(null; $p; "\($p): doc \(.doc) is not a safe repo path (absolute, or an empty, . or .. segment): name the doc by its path from the repo root, as git ls-files prints it")
             elif $retired or $eligible then
               (if ($p | cl_stem) != $docid
                then v1(null; .doc; "\($p): sidecar stem \($p | cl_stem) is not \($docid), the DOC-ID of \(.doc): rename it docs/spec-claims/\($docid).json")
@@ -6203,6 +6228,12 @@ _claims_v1() {
 #                     included — is "in". An unclosed fence runs to the end.
 #                     V8's awk section tracker (_claims_sections) pairs
 #                     fences by this same rule.
+#   claims_status_blank  LF text → the same lines, each status block's lines
+#                     (a begin-marker line through the first end-marker line
+#                     after it) blanked to "". A marker counts only as a
+#                     whole line (a trailing \r tolerated); a marker quoted
+#                     in prose or backticks is text. render (_JQ_CLAIMS_RENDER)
+#                     locates the block by the same whole-line rule.
 #   claims_live       raw doc → the same number of lines, CRLF read as LF and
 #                     each dead span (status block, ~~strike~~) blanked to its
 #                     newlines. Code fences are masked first, so a fence is
@@ -6244,8 +6275,17 @@ _JQ_CLAIMS_NORM='def claims_blank: gsub("[^\n]"; "");
    claims_fence_kinds
    | map(if .k == "delim" then "" elif .k == "in" then .t | gsub("~"; "\uffff") else .t end)
    | join("\n");
+ def claims_status_blank:
+   split("\n") as $ls
+   | (reduce range(0; $ls | length) as $i ({p: null, r: []};
+       ($ls[$i] | rtrimstr("\r")) as $t
+       | if .p == null then (if $t == "<!-- spec-claims:status:begin -->" then .p = $i else . end)
+         elif $t == "<!-- spec-claims:status:end -->" then .r += [[.p, $i]] | .p = null
+         else . end) | .r) as $r
+   | [range(0; $ls | length) as $i | if any($r[]; .[0] <= $i and $i <= .[1]) then "" else $ls[$i] end]
+   | join("\n");
  def claims_live: gsub("\r\n"; "\n") | claims_mask_fences
-   | gsub("(?<s><!-- spec-claims:status:begin -->[\\s\\S]*?<!-- spec-claims:status:end -->)"; .s | claims_blank)
+   | claims_status_blank
    | gsub("(?<s>~~[\\s\\S]*?~~)"; .s | claims_blank)
    | gsub("\uffff"; "~");
  def claims_norm_line: sub("^[ \t]*(>[ \t]?)+"; "") | gsub("[*_`]"; "") | gsub("[ \t]+"; " ")
@@ -6395,9 +6435,7 @@ _claims_tracker_open() {
     _CL_TRACKER_STATE=pattern
     return 0
   fi
-  case "/$t/" in
-    */../*|*/./*|*//*) return 1 ;;
-  esac
+  _claims_safe_relpath "$t" || return 1
   _claims_read "$t" > "$raw" || return 1
   out=$(_claims_jq tracker-status -Rsr "$_JQ_CLAIMS_NORM $_JQ_CLAIMS_TRACKER" "$raw") || _claims_propagate $?
   _CL_TRACKER_STATE=${out%%$'\t'*}
@@ -6702,10 +6740,7 @@ _claims_v6() {
   done 3< "$verify"
   while IFS= read -r r <&3; do
     exists=false
-    case "/$r/" in
-      */../*|*/./*|*//*) ;;
-      *) if _claims_read "$r" >/dev/null; then exists=true; fi ;;
-    esac
+    if _claims_safe_relpath "$r" && _claims_read "$r" >/dev/null; then exists=true; fi
     _claims_jq v6-record-row -nc --arg r "$r" --argjson e "$exists" '{record: $r, exists: $e}' >> "$rrows"
   done 3< "$records"
   # jq reads $v and $rec at each call: here, with the rows written.
@@ -6724,11 +6759,13 @@ _claims_v6() {
 # changes only when a status (or a tracker) does. The first render puts it
 # immediately before the doc's second ## heading line outside a code fence
 # (claims_fence_kinds: the one fence rule V2 masks by), or, with none, at the
-# end of the file after one blank line; thereafter it replaces the span
-# between the markers, inclusive — the span V2's claims_live blanks, located
-# the same way (marker text, fences not consulted), so the block is never
-# live text. Markers that are not exactly one begin and, after it, one end
-# are a V11 finding; that doc is never written. A CRLF doc gets a CRLF block.
+# end of the file after one blank line; thereafter it replaces the marker
+# lines and every line between them — the lines V2's claims_status_blank
+# blanks, located by the same rule (a marker is a whole line, a trailing \r
+# tolerated; fences are not consulted), so the block is never live text,
+# and a marker quoted in prose is text. Marker lines that are not exactly
+# one begin and, after it, one end are a V11 finding; that doc is never
+# written. A CRLF doc gets a CRLF block.
 # A sidecar that is not eligible (its doc missing or not governing in the
 # tree read: the V2 skip) or is malformed is skipped, so nothing is ever
 # written into an archived record and a missing doc is never created.
@@ -6757,19 +6794,21 @@ _JQ_CLAIMS_RENDER='def cl_str: if type == "string" then . else tojson end;
  "<!-- spec-claims:status:begin -->" as $b | "<!-- spec-claims:status:end -->" as $e
  | (if test("\r\n") then "\r\n" else "\n" end) as $eol
  | claims_block($s[0]; $eol) as $blk
- | split($b) as $pb | split($e) as $pe
- | if ($pb | length) == 1 and ($pe | length) == 1 then
+ | split("\n") as $ls
+ | [range(0; $ls | length) | select($ls[.] | rtrimstr("\r") == $b)] as $bi
+ | [range(0; $ls | length) | select($ls[.] | rtrimstr("\r") == $e)] as $ei
+ | if ($bi | length) == 0 and ($ei | length) == 0 then
      (gsub("\r\n"; "\n") | claims_fence_kinds) as $k
      | ([range(0; $k | length) | select($k[.].k == "out" and ($k[.].t | test("^ {0,3}##([ \t]|$)")))][1]) as $i
      | if $i != null then
-         split("\n") as $ls
-         | "I\n" + ($ls[0:$i] + [$blk + (if $eol == "\r\n" then "\r" else "" end)] + $ls[$i:] | join("\n"))
+         "I\n" + ($ls[0:$i] + [$blk + (if $eol == "\r\n" then "\r" else "" end)] + $ls[$i:] | join("\n"))
        elif . == "" then "I\n" + $blk + $eol
        elif endswith("\n") then "I\n" + . + $eol + $blk + $eol
        else "I\n" + . + $eol + $eol + $blk + $eol end
-   elif ($pb | length) == 2 and ($pe | length) == 2 and ($pb[0] | split($e) | length) == 1 then
-     "R\n" + $pb[0] + $blk + ($pb[1] | split($e))[1]
-   else "E\nthe status block markers are not one begin/end pair, begin first (found \(($pb | length) - 1) begin, \(($pe | length) - 1) end): fix them by hand, then run doc-tools.sh claims render"
+   elif ($bi | length) == 1 and ($ei | length) == 1 and $bi[0] < $ei[0] then
+     "R\n" + ($ls[0:$bi[0]] + [$blk + (if $ls[$ei[0]] | endswith("\r") then "\r" else "" end)] + $ls[$ei[0] + 1:]
+               | join("\n"))
+   else "E\nthe status block markers are not one begin/end pair, begin first (found \($bi | length) begin and \($ei | length) end marker line(s)): fix them by hand, then run doc-tools.sh claims render"
    end'
 
 _CL_RENDER_KIND=""  # _claims_render_doc's outcome: inserted | replaced | error
@@ -6814,7 +6853,8 @@ _JQ_CLAIMS_BLOCKS='$sum[0] as $sum | $st[0] as $st
 # (see the section comment). write replaces each doc whose render differs
 # (atomic); check and validate write nothing and report a V11 finding per
 # doc that differs. write and check add a result per sidecar — {doc,
-# changed} (check: whether render would change it) or {doc, skipped};
+# changed} (check: whether render would change it; null when the markers
+# are unusable) or {doc, skipped};
 # validate (V11) adds none, and covers only the staged sidecars under
 # --staged, comparing the staged doc with a render of the staged sidecar.
 _claims_blocks() {
@@ -6834,9 +6874,13 @@ _claims_blocks() {
       fi
       continue
     fi
+    # The loader already skips an unsafe doc ("unsafe path"); never read or
+    # write one even so.
+    _claims_safe_relpath "$doc" || _claims_die "refusing to render $doc: not a safe repo path"
     _claims_jq block-data -c '.data' <<<"$line" > "$sc"
     changed=false
     if ! _claims_render_doc "$doc" "$sc" > "$new"; then
+      changed=null
       _claims_finding V11 - "$doc" "$_CL_RENDER_ERR"
     elif ! cmp -s "$new" "$_SCRATCH/cl-render.raw"; then
       changed=true
@@ -6908,9 +6952,11 @@ cmd_claims_promote() {
 }
 
 # render: every eligible sidecar's doc gets its status block (_claims_blocks).
-# Every finding blocks: --check exits 1 on any doc that differs.
+# Every finding blocks: --check exits 1 on any doc that differs. The base is
+# never read, so an unresolvable one is not indeterminate here.
 cmd_claims_render() {
   _CL_ALL_BLOCKING=1
+  _CL_BASE_UNUSED=1
   _claims_init all
   _claims_no_args "claims render" "$@"
   _claims_load
