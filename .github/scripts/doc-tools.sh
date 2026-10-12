@@ -18,12 +18,12 @@ _jq_version_ok() {
   v="${v#jq-}"
   v="${v#jq version }"
   case "$v" in
-    [0-9]*.[0-9]*) ;;
+    [0123456789]*.[0123456789]*) ;;
     *) return 0 ;;
   esac
   major="${v%%.*}"
   minor="${v#*.}"
-  minor="${minor%%[!0-9]*}"
+  minor="${minor%%[!0123456789]*}"
   [ "$major" -gt 1 ] || { [ "$major" -eq 1 ] && [ "${minor:-0}" -ge 6 ]; }
 }
 
@@ -1614,7 +1614,7 @@ _file_mode() {
   local m=""
   m=$(stat -c '%a' "$1" 2>/dev/null) || m=$(stat -f '%Lp' "$1" 2>/dev/null) || m=""
   case "$m" in
-    [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) printf '%s' "$m" ;;
+    [01234567][01234567][01234567]|[01234567][01234567][01234567][01234567]) printf '%s' "$m" ;;
     *) return 1 ;;
   esac
 }
@@ -1750,7 +1750,7 @@ _index_break_stale() {
 # before.
 _pid_alive() {
   case "$1" in
-    ''|*[!0-9]*) return 1 ;;
+    ''|*[!0123456789]*) return 1 ;;
   esac
   kill -0 "$1" 2>/dev/null || ps -p "$1" >/dev/null 2>&1
 }
@@ -1763,7 +1763,7 @@ _index_lock() {
   [ "$_INDEX_LOCK_HELD" = 0 ] || return 0
   local timeout="${DOC_TOOLS_LOCK_TIMEOUT:-30}"
   case "$timeout" in
-    ''|*[!0-9]*) _die "DOC_TOOLS_LOCK_TIMEOUT must be a whole number of seconds (got '$timeout')." ;;
+    ''|*[!0123456789]*) _die "DOC_TOOLS_LOCK_TIMEOUT must be a whole number of seconds (got '$timeout')." ;;
   esac
   local polls=0 max=$((timeout * 10)) owner err acquired
   while :; do
@@ -2500,7 +2500,7 @@ _verb_lookup() {
 _verb_is_group() {
   local line
   case "$1" in
-    ''|*[!a-z-]*) return 1 ;;
+    ''|*[!abcdefghijklmnopqrstuvwxyz-]*) return 1 ;;
   esac
   while IFS= read -r line; do
     case "$line" in
@@ -4571,7 +4571,7 @@ _frag_n() {
     *) return 1 ;;
   esac
   case "$base" in
-    '' | *[!0-9]*) return 1 ;;
+    '' | *[!0123456789]*) return 1 ;;
   esac
   _FRAG_N="$base"
 }
@@ -5928,7 +5928,7 @@ EOF
 # archived spec keeps its id); else, under a governing_extra glob, the file
 # stem; else none (template.md under docs/specs/ has no DOC-ID).
 _claims_doc_id_set() {
-  local base="${1##*/}" re_adr='^(ADR-[0-9]+)' re_spec='^(SPEC-[A-Z]+-[0-9]+)'
+  local base="${1##*/}" re_adr='^(ADR-[0-9]+)' re_spec='^(SPEC-[ABCDEFGHIJKLMNOPQRSTUVWXYZ]+-[0-9]+)'
   _CL_DOCID=""
   if [[ $base =~ $re_adr ]] || [[ $base =~ $re_spec ]]; then
     _CL_DOCID="${BASH_REMATCH[1]}"
@@ -7088,7 +7088,7 @@ _JQ_CLAIMS_PARSE_RUN='def known: . as $o | any("pass", "assert-fail", "error", "
 # rc would read a crashed adapter's rows as valid.
 _claims_rc_arg() {
   case "$2" in
-    ''|*[!0-9]*) _claims_die "$1: <rc> must be the adapter's exit code (got '$2')" ;;
+    ''|*[!0123456789]*) _claims_die "$1: <rc> must be the adapter's exit code (got '$2')" ;;
   esac
 }
 
@@ -7287,7 +7287,7 @@ cmd_claims_run() {
   if [ "$_OPT_all" = 1 ]; then n=$((n + 1)); fi
   [ "$n" -eq 1 ] || _usage_error "claims run" "give exactly one of --claims <id>..., --planes-of <range> and --all"
   case "$_OPT_judge_sample" in
-    *[!0-9]*) _usage_error "claims run" "--judge-sample must be a whole number (got '$_OPT_judge_sample')" ;;
+    *[!0123456789]*) _usage_error "claims run" "--judge-sample must be a whole number (got '$_OPT_judge_sample')" ;;
   esac
   _claims_no_args "claims run" "$@"
   if [ "$_OPT_scheduled" = 1 ]; then scheduled=1; fi
@@ -8751,7 +8751,7 @@ _claims_prove() {
     # object id, lowercase hex, as long as HEAD's (sha1 or sha256) — never
     # a ref, an abbreviation or an option. Then it must be a commit.
     case "$ored" in
-      *[!0-9a-f]*) x=0 ;;
+      *[!0123456789abcdef]*) x=0 ;;
       *) x=${#ored} ;;
     esac
     if [ "$x" -ne "${#head}" ]; then
