@@ -2204,8 +2204,10 @@ claims validate|cmd_claims_validate|repo|staged all config=* base=
   --staged the claims the staged change touches, in the staged tree;
   --all every claim, in the working tree. A finding blocks (exit 1) when
   its check is in the config's "blocking" list, and is reported as an
-  advisory otherwise. --config KEY=VALUE checks a configuration change
-  made outside git (the configuration extension only). See "Spec claims".
+  advisory otherwise. The plans (config "plans") staged, or present under
+  --all, are checked for their claims gates and **Claims:** lines (V12).
+  --config KEY=VALUE checks a configuration change made outside git (the
+  configuration extension only). See "Spec claims".
 claims run|cmd_claims_run|repo|claims+ planes-of= all scheduled judge-sample= base=
   (--claims <id>... | --planes-of <range> | --all) [--scheduled] [--judge-sample <n>] [--base <ref>]
   Execute claims: test claims through their runner adapters (config
@@ -7903,6 +7905,475 @@ _claims_v9() {
     "$_JQ_CLAIMS_V9" "$_SCRATCH/cl-claims.json" >> "$_SCRATCH/cl-findings.jsonl"
 }
 
+# --- Spec claims: the plan parser, V12 -------------------------------------------
+#
+# A plan is a file matching one of config plans. _claims_plan_parse reads one
+# — from the index, the work tree or a commit — and prints its structure:
+#   {path, stem, completed, chunked, specs: [{path, role}],
+#    chunks: [{n, tasks: [{title, kind, line, claims, claims_none, files, links}]}]}
+# Fenced lines are blanked first, by the one fence rule (claims_fence_kinds:
+# CommonMark pairing, so a ``` line inside a ```` fence stays fenced), CRLF
+# read as LF and line numbers kept; an awk pass then emits one TSV record per
+# recognised line, and jq assembles them:
+#   - `## Chunk <n>:` opens chunk n (chunked true). Without one (chunked
+#     false; spec-inject then treats each `### Task` as a chunk boundary),
+#     each impl task opens chunk 1, 2, … in order, and the injected tasks
+#     after it belong to it.
+#   - `### Task <x>: <title>`: kind by the title, compared with the
+#     _CL_*_TITLE constants as fixed strings: gate (starts with
+#     _CL_GATE_TITLE_PREFIX; its chunk is the digits before ")"),
+#     final-gate, spec-update, amendment (starts with _CL_AMEND_TITLE_PREFIX),
+#     finalize; any other title is impl — an orchestrator's own task
+#     ("Reuse gate (chunk N)") included. A task runs to the next task, chunk
+#     or level-1/2 heading.
+#   - in a task, `**Claims:** <ids, comma-separated>` or `**Claims:** none —
+#     <reason>` (claims / claims_none); `- Create|Modify|Test: \`<path>\``
+#     (each backticked path on the line, a :N-M suffix stripped: files); and
+#     on every other line of the task, its title included, each path-like
+#     token starting with one of config source_doc_patterns (links). A Files
+#     line is not a link: a task editing an issue or a design doc does not
+#     take its behaviour from it.
+#   - specs: the `- <path> — <target|constraint|amends|infer>` lines of each
+#     `**Specs**` block (it ends at a blank line after its items, or at any
+#     other line), and the front matter's `governing_specs:` items
+#     `- <path>[:role]` (no suffix: infer); each {path, role} pair once.
+#   - completed: a `**Status**: Completed` / `**Status:** Completed` line,
+#     or front matter `status: completed` (any case).
+#
+# V12 (validate) checks each plan staged (--staged; a staged deletion is not
+# checked) or present in the work tree (--all) that has governing specs and
+# is new (absent at _CL_MB) or gate-carrying (a gate or final-gate task); a
+# pre-claims plan edited later is exempt, and so is every plan without
+# governing specs. With _CL_MB unresolvable (already indeterminate), only a
+# gate-carrying plan is checked, and not its move to Completed. Findings:
+#   - chunked: a spec-update task with no gate task for its chunk (the gate's
+#     chunk number equal to the chunk's) before it in the chunk; chunkless:
+#     a spec-update task whose immediately preceding task is not its chunk's
+#     gate;
+#   - a finalize task with no final-gate task before it;
+#   - an unbuilt claim (cl-claims.json) of a target or infer spec named on
+#     no task's Claims line;
+#   - an impl task whose files include a code path (_claims_is_code_path)
+#     without a Claims line;
+#   - an impl task with Claims none that has links (the decision must be
+#     promoted into a governing doc first);
+#   - a move to Completed (completed now, and not at _CL_MB or the plan
+#     absent there) that docs/spec-claims/gates/<stem>/final.json (read
+#     from the proposed tree) does not cover (_claims_v12_final). A plan
+#     already completed at _CL_MB is history, never re-judged.
+# Scratch: cl-plan.* (the parser's raw, masked and record files),
+# cl-v12-* (the plan list, the parses, the code paths, the final record).
+
+# The injected task titles (references/spec-lifecycle-actions.md,
+# spec-inject --phase=plan), one single-quoted line each: the parser passes
+# them to awk with -v and compares them as fixed strings, never as a regex.
+_CL_GATE_TITLE_PREFIX='Claims gate (chunk '
+_CL_FINAL_GATE_TITLE='Final claims gate'
+_CL_SPEC_UPDATE_TITLE='Update governing specs for this chunk'
+_CL_AMEND_TITLE_PREFIX='Land the spec amendment for '
+_CL_FINALIZE_TITLE='Finalize all governing specs'
+
+_CL_CODE_READY=0  # 1: _CL_CODE_ROOTS holds config code_roots
+_CL_CODE_ROOTS="" # config code_roots, one per line
+_CL_V12_FINAL=""  # _claims_v12_final's answer
+
+# Read config code_roots once, in the main shell (so a later $(…) finds
+# them set).
+_claims_code_init() {
+  [ "$_CL_CODE_READY" = 0 ] || return 0
+  _CL_CODE_ROOTS=$(_claims_jq code-roots -r \
+    '.code_roots | if type == "array" then .[] | strings | select(. != "" and (test("\n") | not)) else empty end' \
+    "$_SCRATCH/cl-config.json") || _claims_propagate $?
+  _CL_CODE_READY=1
+}
+
+# _claims_is_code_path <path>: 0 when <path> is code. With config
+# code_roots empty, every path outside docs/; otherwise a path matching a
+# code_roots entry as a glob (_claims_glob_match) or as a prefix (the entry
+# itself, or under it as a directory).
+_claims_is_code_path() {
+  local r
+  _claims_code_init
+  if [ -z "$_CL_CODE_ROOTS" ]; then
+    case "$1" in
+      docs/*) return 1 ;;
+    esac
+    return 0
+  fi
+  while IFS= read -r r; do
+    if _claims_glob_match "$1" "$r"; then return 0; fi
+    r=${r%/}
+    [ -n "$r" ] || continue
+    [ "$1" != "$r" ] || return 0
+    case "$1" in
+      "$r"/*) return 0 ;;
+    esac
+  done <<EOF
+$_CL_CODE_ROOTS
+EOF
+  return 1
+}
+
+# A plan (on _JQ_CLAIMS_NORM) → the same lines, CRLF read as LF and every
+# fenced line (a fence's delimiters and its content) blanked.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_PLAN_MASK='gsub("\r\n"; "\n") | claims_fence_kinds | map(if .k == "out" then .t else "" end) | join("\n")'
+
+# The masked plan → TSV records: C <n> (a chunk), T <line> <kind> <title> (a
+# task), E (a heading ending the task), L <value> (a Claims line), F <path>,
+# K <path> (a link), S <path> <role> (a governing spec), D (completed). The
+# titles arrive with -v (gp, fg, su, ap, fz), the source_doc_patterns in
+# ENVIRON["CL_PLAN_PATTERNS"], one per line. Run under LC_ALL=C (bytes: the
+# em dash is matched as its UTF-8 bytes).
+# shellcheck disable=SC2016  # awk program, not shell expansion
+_AWK_CLAIMS_PLAN='
+function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+function links(s,    tok, i) {
+  while (match(s, /[A-Za-z0-9_.\/~+-]+/)) {
+    tok = substr(s, RSTART, RLENGTH)
+    s = substr(s, RSTART + RLENGTH)
+    sub(/^\.\//, "", tok)
+    sub(/\.+$/, "", tok)
+    for (i = 1; i <= npat; i++)
+      if (pat[i] != "" && index(tok, pat[i]) == 1) { print "K\t" tok; break }
+  }
+}
+BEGIN { npat = split(ENVIRON["CL_PLAN_PATTERNS"], pat, "\n"); fm = 0; intask = 0; specs = 0 }
+{ sub(/\r$/, ""); gsub(/\t/, " ") }
+NR == 1 && /^---[ ]*$/ { fm = 1; next }
+fm == 1 {
+  if ($0 ~ /^(---|\.\.\.)[ ]*$/) { fm = 2; next }
+  if ($0 ~ /^[^ #-]/) fmlist = 0
+  if (tolower($0) ~ /^status[ ]*:[ ]*["\047]?completed["\047]?[ ]*$/) print "D"
+  if ($0 ~ /^governing_specs[ ]*:[ ]*$/) { fmlist = 1; next }
+  if (fmlist && $0 ~ /^[ ]*-[ ]+/) {
+    v = $0
+    sub(/^[ ]*-[ ]+/, "", v)
+    v = trim(v)
+    sub(/^["\047]/, "", v)
+    sub(/["\047]$/, "", v)
+    role = "infer"
+    if (match(v, /:(target|constraint|amends|infer)$/)) { role = substr(v, RSTART + 1); v = substr(v, 1, RSTART - 1) }
+    if (v != "") print "S\t" v "\t" role
+  }
+  next
+}
+tolower($0) ~ /^[ ]*([-+*][ ]+)?\*\*status(\*\*:|:\*\*)[ ]*completed([^a-z]|$)/ { print "D" }
+specs {
+  if ($0 ~ /^- [^ ]+ — (target|constraint|amends|infer)[ ]*$/) {
+    p = $0
+    sub(/^- /, "", p)
+    r = p
+    sub(/ — .*$/, "", p)
+    gsub(/`/, "", p)
+    sub(/^.* — /, "", r)
+    print "S\t" p "\t" trim(r)
+    seen = 1
+    next
+  }
+  if ($0 ~ /^[ ]*$/) { if (seen) specs = 0; next }
+  specs = 0
+}
+/^\*\*Specs\*\*/ { specs = 1; seen = 0; next }
+/^## Chunk [0-9]+:/ {
+  n = $0
+  sub(/^## Chunk /, "", n)
+  sub(/:.*$/, "", n)
+  print "C\t" n
+  intask = 0
+  next
+}
+/^##? / || /^##?$/ { if (intask) print "E"; intask = 0; next }
+/^### Task [^:]+: / {
+  t = $0
+  sub(/^### Task [^:]+: /, "", t)
+  t = trim(t)
+  kind = "impl"
+  if (index(t, gp) == 1) kind = "gate"
+  else if (t == fg) kind = "final-gate"
+  else if (t == su) kind = "spec-update"
+  else if (index(t, ap) == 1) kind = "amendment"
+  else if (t == fz) kind = "finalize"
+  print "T\t" NR "\t" kind "\t" t
+  intask = 1
+  links(t)
+  next
+}
+!intask { next }
+/^\*\*Claims:\*\* / {
+  v = $0
+  sub(/^\*\*Claims:\*\* /, "", v)
+  print "L\t" trim(v)
+  links(v)
+  next
+}
+/^- (Create|Modify|Test): `/ {
+  v = $0
+  while (match(v, /`[^`]+`/)) {
+    p = substr(v, RSTART + 1, RLENGTH - 2)
+    v = substr(v, RSTART + RLENGTH)
+    sub(/:[0-9]+(-[0-9]+)?$/, "", p)
+    if (p != "") print "F\t" p
+  }
+  next
+}
+{ links($0) }'
+
+# _claims_plan_parse's records (read with -R) → the plan object (see the
+# section comment). L, F and K belong to the last task (the awk pass emits
+# them only inside one).
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_PLAN='def uniq: reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end);
+ [inputs | select(. != "") | split("\t")] as $r
+ | any($r[]; .[0] == "C") as $chunked
+ | reduce $r[] as $x ({chunks: [], specs: [], completed: false};
+     ((.chunks | length) - 1) as $c
+     | if $x[0] == "C" then .chunks += [{n: ($x[1] | tonumber), tasks: []}]
+       elif $x[0] == "T" then
+         (if $chunked then (if $c < 0 then .chunks += [{n: 0, tasks: []}] else . end)
+          elif $x[2] == "impl" or $c < 0 then .chunks += [{n: ($c + 2), tasks: []}]
+          else . end)
+         | ((.chunks | length) - 1) as $c
+         | .chunks[$c].tasks += [{title: ($x[3] // ""), kind: $x[2], line: ($x[1] | tonumber),
+                                  claims: [], claims_none: null, files: [], links: []}]
+       elif $x[0] == "S" then .specs += [{path: $x[1], role: $x[2]}]
+       elif $x[0] == "D" then .completed = true
+       elif $c < 0 or (.chunks[$c].tasks | length) == 0 then .
+       else ((.chunks[$c].tasks | length) - 1) as $t
+         | ($x[1] // "") as $v
+         | if $x[0] == "L" then
+             (if $v | test("^none([^A-Za-z0-9_#-]|$)")
+              then .chunks[$c].tasks[$t].claims_none = ($v | sub("^none[ \t]*(—|--?|:)?[ \t]*"; ""))
+              else .chunks[$c].tasks[$t].claims += [$v | split(",")[] | gsub("^[ \t`]+|[ \t`]+$"; "") | select(. != "")]
+              end)
+           elif $x[0] == "F" then .chunks[$c].tasks[$t].files += [$v]
+           elif $x[0] == "K" then .chunks[$c].tasks[$t].links += [$v]
+           else . end
+       end)
+ | {path: $path, stem: $stem, completed, chunked: $chunked, specs: (.specs | uniq),
+    chunks: [.chunks[] | .tasks |= map(.claims |= uniq | .files |= uniq | .links |= uniq)]}'
+
+# _claims_plan_parse <plan> <staged|all|rev:<sha>>: print the plan's object
+# (see the section comment), read from the index, the work tree or <sha>.
+# An absent plan dies: callers check presence first.
+_claims_plan_parse() {
+  local plan="$1" src="$2" praw="$_SCRATCH/cl-plan.raw" masked="$_SCRATCH/cl-plan.masked"
+  local recs="$_SCRATCH/cl-plan.tsv" pats base
+  case "$src" in
+    staged) git cat-file blob ":$plan" > "$praw" 2>/dev/null || _claims_die "cannot read $plan from the index (plan parser)" ;;
+    all)
+      [ -f "$plan" ] || _claims_die "cannot read $plan (plan parser)"
+      cat -- "$plan" > "$praw" || _claims_die "cannot read $plan (plan parser)"
+      ;;
+    rev:?*) _claims_read_at "${src#rev:}" "$plan" > "$praw" || _claims_die "cannot read $plan at ${src#rev:} (plan parser)" ;;
+    *) _claims_die "_claims_plan_parse: unknown source '$src'" ;;
+  esac
+  _claims_jq plan-mask -Rsj "$_JQ_CLAIMS_NORM $_JQ_CLAIMS_PLAN_MASK" "$praw" > "$masked"
+  pats=$(_claims_jq plan-patterns -r \
+    '.source_doc_patterns | if type == "array" then .[] | strings | select(. != "" and (test("\n") | not)) else empty end' \
+    "$_SCRATCH/cl-config.json") || _claims_propagate $?
+  CL_PLAN_PATTERNS=$pats LC_ALL=C awk -v gp="$_CL_GATE_TITLE_PREFIX" -v fg="$_CL_FINAL_GATE_TITLE" \
+    -v su="$_CL_SPEC_UPDATE_TITLE" -v ap="$_CL_AMEND_TITLE_PREFIX" -v fz="$_CL_FINALIZE_TITLE" \
+    "$_AWK_CLAIMS_PLAN" "$masked" > "$recs" || _claims_die "awk failed parsing $plan (plan parser)"
+  base=${plan##*/}
+  _claims_jq plan-parse -nRc --arg path "$plan" --arg stem "${base%.*}" "$_JQ_CLAIMS_PLAN" < "$recs"
+}
+
+# V12 over one parsed plan ($plan; run with $c: cl-claims.json, $code: the
+# impl tasks' code paths, $final: _claims_v12_final's answer or "", $gp:
+# _CL_GATE_TITLE_PREFIX). One finding object per line.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_V12='def uniq: reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end);
+ def in_list($l): . as $x | any($l[]; . == $x);
+ $plan[0] as $p
+ | [$p.chunks[] | .n as $n | .tasks[]
+    | . + {chunk: $n,
+           gate_n: (if .kind == "gate"
+                    then [.title | ltrimstr($gp) | capture("^(?<d>[0-9]+)\\)") | .d | tonumber][0]
+                    else null end)}] as $ts
+ | [range(0; $ts | length)] as $ix
+ | def gate_of($i; $n): $ts[$i].kind == "gate" and $ts[$i].gate_n == $n;
+   ([$p.specs[] | select(.role == "target" or .role == "infer") | .path] | uniq) as $targets
+ | ([$ts[] | .claims[]] | uniq) as $named
+ | ((if $p.chunked then
+       [$ix[] | select($ts[.].kind == "spec-update") | . as $i | $ts[$i].chunk as $n
+        | select((any($ix[]; . < $i and $ts[.].chunk == $n and gate_of(.; $n))) | not)
+        | "chunk \($n): no claims gate before the spec-update task"] | uniq[]
+     else
+       [$ix[] | select($ts[.].kind == "spec-update") | . as $i | $ts[$i].chunk as $n
+        | select(($i > 0 and gate_of($i - 1; $n)) | not)
+        | "chunk \($n): the claims gate must immediately precede the spec-update task"] | uniq[]
+     end),
+    ([$ix[] | select($ts[.].kind == "finalize") | . as $i
+      | select((any($ix[]; . < $i and $ts[.].kind == "final-gate")) | not)]
+     | if length > 0 then "no final claims gate before the finalize task" else empty end),
+    ($c[0][] | select((.doc | type) == "string" and (.doc | in_list($targets))) | .doc as $doc | .claim
+     | select(.status == "unbuilt" and (.id | type) == "string" and (.id | in_list($named) | not))
+     | "unbuilt claim \(.id) of target spec \($doc) is named on no **Claims:** line of the plan: name it on the task that builds it"),
+    ($ts[] | select(.kind == "impl") | . as $t
+     | [.files[] | select(in_list($code))]
+     | select(length > 0 and ($t.claims | length) == 0 and $t.claims_none == null)
+     | "task \"\($t.title)\" (line \($t.line)) changes code (\(join(", "))) but has no **Claims:** line: name the claims it builds, or write **Claims:** none — <reason>"),
+    ($ts[] | select(.kind == "impl" and .claims_none != null and (.links | length) > 0)
+     | "task \"\(.title)\" (line \(.line)) has **Claims:** none but links \(.links | join(", ")) as the source of its behaviour: promote the decision into a governing doc first, then name its claim"),
+    (if $final != "" then $final else empty end))
+ | {check: "V12", claim: null, doc: $p.path, message: .}'
+
+# _claims_v12_final <stem>: _CL_V12_FINAL = why the plan's move to
+# Completed is not covered by its final gate record
+# (docs/spec-claims/gates/<stem>/final.json, read from the proposed tree),
+# or "" when it is: the record is one JSON object with result "pass" and a
+# head that is a commit, an ancestor of HEAD or HEAD itself, and no commit in
+# `git rev-list --no-merges HEAD ^<head> ^_CL_MB` — the branch's own commits
+# after the final gate that the base does not hold — touches a code path
+# (_claims_is_code_path). A merge commit is not counted: a merge of the base
+# carries trunk's changes, which are not this plan's. Under --staged the
+# commit being made counts too: a staged code path is a finding.
+_claims_v12_final() {
+  local rec="docs/spec-claims/gates/$1/final.json" fraw="$_SCRATCH/cl-v12-final.json"
+  local commits="$_SCRATCH/cl-v12-commits" paths="$_SCRATCH/cl-v12-paths.z" out head c p
+  _CL_V12_FINAL=""
+  if ! _claims_read "$rec" > "$fraw"; then
+    _CL_V12_FINAL="plan marked Completed without a final gate record: $rec is absent (claims attest --final writes it)"
+    return 0
+  fi
+  # Its status is the answer (not one JSON object), so not _claims_jq.
+  out=$(jq -r -s 'if length == 1 and (.[0] | type) == "object" then .[0]
+      | if .result != "pass" then "result\t" + (.result | tojson)
+        elif (.head | type) != "string" or (.head | test("^[0-9a-f]{7,64}$") | not) then "head\t" + (.head | tojson)
+        else "ok\t" + .head end
+    else "malformed\t" end' "$fraw" 2>/dev/null) || out="malformed"$'\t'
+  head=${out#*$'\t'}
+  case "$out" in
+    result*) _CL_V12_FINAL="plan marked Completed, but its final gate record $rec does not pass (result: $head)"; return 0 ;;
+    head*) _CL_V12_FINAL="plan marked Completed, but its final gate record $rec names no commit head (head: $head)"; return 0 ;;
+    malformed*) _CL_V12_FINAL="plan marked Completed, but its final gate record $rec is not one JSON object"; return 0 ;;
+  esac
+  if ! c=$(git rev-parse -q --verify "$head^{commit}" 2>/dev/null); then
+    _CL_V12_FINAL="plan marked Completed, but its final gate record's head $head is not a commit here"
+    return 0
+  fi
+  head=$c
+  if ! git merge-base --is-ancestor "$head" HEAD 2>/dev/null; then
+    _CL_V12_FINAL="plan marked Completed, but its final gate record's head $head is not an ancestor of HEAD: re-run the final gate"
+    return 0
+  fi
+  git rev-list --no-merges HEAD "^$head" "^$_CL_MB" > "$commits" \
+    || _claims_die "git rev-list failed listing the commits after the final gate"
+  while IFS= read -r c <&3; do
+    [ -n "$c" ] || continue
+    git diff-tree --root -r -z --no-commit-id --name-only --no-renames "$c" > "$paths" \
+      || _claims_die "git diff-tree failed on $c"
+    while IFS= read -r -d '' p <&4; do
+      if _claims_is_code_path "$p"; then
+        _CL_V12_FINAL="plan marked Completed, but commit $c, after the final gate at $head, changes code ($p): re-run the final gate"
+        return 0
+      fi
+    done 4< "$paths"
+  done 3< "$commits"
+  if [ "$_CL_MODE" = staged ]; then
+    _claims_jq v12-staged-paths -j '.[] | . + "\u0000"' "$_SCRATCH/cl-staged.json" > "$paths"
+    while IFS= read -r -d '' p <&4; do
+      if _claims_is_code_path "$p"; then
+        _CL_V12_FINAL="plan marked Completed, but this commit changes code ($p) after the final gate at $head: commit the code first, then re-run the final gate"
+        return 0
+      fi
+    done 4< "$paths"
+  fi
+}
+
+# _claims_v12_plan <plan>: V12 over one plan (see the section comment).
+# shellcheck disable=SC2016  # jq programs, not shell expansion
+_claims_v12_plan() {
+  local plan="$1" src=all pj="$_SCRATCH/cl-v12-plan.json" bj="$_SCRATCH/cl-v12-base.json"
+  local flist="$_SCRATCH/cl-v12-files.z" code="$_SCRATCH/cl-v12-code.jsonl" facts base at_base=unknown base_done=false f
+  [ "$_CL_MODE" != staged ] || src=staged
+  _claims_plan_parse "$plan" "$src" > "$pj"
+  # "<has governing specs> <gate-carrying> <completed>"
+  facts=$(_claims_jq v12-facts -r \
+    '[(.specs | length) > 0, any(.chunks[].tasks[]; .kind == "gate" or .kind == "final-gate"), .completed]
+     | map(tostring) | join(" ")' "$pj") || _claims_propagate $?
+  case "$facts" in
+    true*) ;;
+    *) return 0 ;;
+  esac
+  if [ -n "$_CL_MB" ]; then
+    if _claims_read_at "$_CL_MB" "$plan" >/dev/null; then at_base=present; else at_base=absent; fi
+  fi
+  # In scope when new or gate-carrying; with _CL_MB unresolvable, newness
+  # is unknown, so gate-carrying only.
+  case "$at_base:$facts" in
+    absent:*|*:"true true "*) ;;
+    *) return 0 ;;
+  esac
+  : > "$code"
+  _claims_jq v12-files -j '[.chunks[].tasks[] | select(.kind == "impl") | .files[]] | unique | .[] | . + "\u0000"' \
+    "$pj" > "$flist"
+  while IFS= read -r -d '' f <&3; do
+    if _claims_is_code_path "$f"; then
+      _claims_jq v12-code -nc --arg f "$f" '$f' >> "$code"
+    fi
+  done 3< "$flist"
+  _CL_V12_FINAL=""
+  case "$at_base:$facts" in
+    *:*" true")
+      if [ "$at_base" = present ]; then
+        _claims_plan_parse "$plan" "rev:$_CL_MB" > "$bj"
+        base_done=$(_claims_jq v12-base-completed -r '.completed' "$bj") || _claims_propagate $?
+      fi
+      if [ "$at_base" != unknown ] && [ "$base_done" != true ]; then
+        base=${plan##*/}
+        _claims_v12_final "${base%.*}"
+      fi
+      ;;
+  esac
+  _claims_jq v12 -nc --slurpfile plan "$pj" --slurpfile c "$_SCRATCH/cl-claims.json" --slurpfile code "$code" \
+    --arg final "$_CL_V12_FINAL" --arg gp "$_CL_GATE_TITLE_PREFIX" "$_JQ_CLAIMS_V12" >> "$_SCRATCH/cl-findings.jsonl"
+}
+
+# V12: each plan in scope — matching config plans, and staged (--staged;
+# present in the index) or present in the work tree (--all: tracked or
+# untracked, not ignored; a safe path reached through no symbolic link).
+# Under --all, ls-files is narrowed by the globs as pathspecs (a pathspec's
+# * matches "/" too, as _claims_glob_match's does: a superset), each under
+# :(top), with the environment's pathspec overrides (literal, glob: * no
+# longer matching "/") off; _claims_glob_any then decides.
+_claims_v12() {
+  local list="$_SCRATCH/cl-v12-plans.z" globs g p prev=""
+  local -a specs=()
+  globs=$(_claims_jq plans -r \
+    '.plans | if type == "array" then .[] | strings | select(. != "" and (test("\n") | not)) else empty end' \
+    "$_SCRATCH/cl-config.json") || _claims_propagate $?
+  [ -n "$globs" ] || return 0
+  _claims_code_init
+  if [ "$_CL_MODE" = staged ]; then
+    _claims_jq v12-staged -j '.[] | . + "\u0000"' "$_SCRATCH/cl-staged.json" > "$list"
+  else
+    while IFS= read -r g; do
+      specs+=(":(top)$g")
+    done <<EOF
+$globs
+EOF
+    GIT_LITERAL_PATHSPECS=0 GIT_GLOB_PATHSPECS=0 GIT_NOGLOB_PATHSPECS=0 \
+      git ls-files -z --cached --others --exclude-standard -- ${specs[@]+"${specs[@]}"} > "$list" \
+      || _claims_die "git ls-files failed listing the plans"
+  fi
+  while IFS= read -r -d '' p <&3; do
+    # ls-files lists an unmerged path once per stage.
+    [ "$p" != "$prev" ] || continue
+    prev=$p
+    _claims_glob_any "$p" "$globs" || continue
+    _claims_safe_relpath "$p" || continue
+    if [ "$_CL_MODE" = staged ]; then
+      git cat-file -e ":$p" 2>/dev/null || continue
+    else
+      [ -f "$p" ] || continue
+      _claims_contained_path "$p" || continue
+    fi
+    _claims_v12_plan "$p"
+  done 3< "$list"
+}
+
 # --- Spec claims: promote, the nonvacuity proofs -------------------------------
 #
 # claims promote <id> is the one path into built (§C). It refuses a dirty
@@ -8489,6 +8960,7 @@ cmd_claims_validate() {
   elif [ -n "$_CL_MB" ]; then
     _claims_v9 "$_CL_MB..HEAD"
   fi
+  _claims_v12
   _claims_blocks validate
   _claims_emit validate
 }
