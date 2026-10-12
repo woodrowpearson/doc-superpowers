@@ -1665,24 +1665,37 @@ claims_store() {
   printf '%s/spec-claims/promotions\n' "$(cd "$(git rev-parse --git-common-dir)" && pwd -P)"
 }
 
-# write_verdict [states]: write the fixture claim's verdict into the store as
-# promote will (Task 11): the jq -cS bytes of {claim, states_sha256, test,
-# nonvacuity, head, subject_oids, green, red, status_to}, in a file named by
-# their sha256. states_sha256 is the sha256 of [states] (default: the claim's
-# own), with no trailing newline. Prints the digest.
-write_verdict() {
-  local store tmp st ss digest
-  store=$(claims_store)
-  mkdir -p "$store"
+# verdict_bytes <out-file> [states]: the fixture claim's verdict as promote
+# writes it (doc-tools' claims promote): the jq -cS bytes of {claim,
+# states_sha256, test, nonvacuity, head, subject_oids, green, red,
+# status_to}. states_sha256 is the sha256 of [states] (default: the claim's
+# own), with no trailing newline; head is HEAD; subject_oids maps each
+# subject path to its object at HEAD; status_to is the claim's status.
+verdict_bytes() {
+  local st ss oids p
   st=$(harness_mktemp states)
-  if [ $# -gt 0 ]; then printf '%s' "$1" > "$st"; else jq -j '.claims[0].states' "$SIDECAR" > "$st"; fi
+  if [ $# -gt 1 ]; then printf '%s' "$2" > "$st"; else jq -j '.claims[0].states' "$SIDECAR" > "$st"; fi
   ss=$(hash_file "$st")
   rm -f "$st"
-  tmp=$(harness_mktemp verdict)
-  jq -cS --arg ss "$ss" --arg head "$(git rev-parse HEAD)" --arg oid "$(git rev-parse HEAD:src/auth/token.py)" \
+  oids='{}'
+  while IFS= read -r p; do
+    oids=$(jq -c --arg p "$p" --arg o "$(git rev-parse "HEAD:$p")" '. + {($p): $o}' <<<"$oids")
+  done < <(jq -r '.claims[0].subject[]' "$SIDECAR")
+  jq -cS --arg ss "$ss" --arg head "$(git rev-parse HEAD)" --argjson oids "$oids" \
     '.claims[0] | {claim: .id, states_sha256: $ss, test, nonvacuity, head: $head,
-      subject_oids: {"src/auth/token.py": $oid}, green: "pass", red: "assert-fail", status_to: .status}' \
-    "$SIDECAR" > "$tmp"
+      subject_oids: $oids, green: "pass", red: "assert-fail", status_to: .status}' \
+    "$SIDECAR" > "$1"
+}
+
+# write_verdict [states]: write the fixture claim's verdict (verdict_bytes)
+# into the store, in a file named by its sha256, as promote does. Prints the
+# digest.
+write_verdict() {
+  local store tmp digest
+  store=$(claims_store)
+  mkdir -p "$store"
+  tmp=$(harness_mktemp verdict)
+  verdict_bytes "$tmp" "$@"
   digest=$(hash_file "$tmp")
   mv "$tmp" "$store/$digest.json"
   printf '%s\n' "$digest"
@@ -2564,7 +2577,9 @@ STUB_TEST="{\"runner\":\"stub\",\"node\":\"$STUB_NODE\"}"
 #                         lacks it, error when the file is missing; a node in
 #                         neither file is not-found. A force outcome "noise"
 #                         prints its reason raw on stdout, then the node's
-#                         checks outcome. STUB_BG=1 first starts
+#                         checks outcome. STUB_CAT=<path> first appends
+#                         the bytes of <dir>/<path> to $STUB_LOG.cat (what
+#                         the adapter saw under that root). STUB_BG=1 first starts
 #                         `sleep 30 >/dev/null 2>&1 &` (every other fd
 #                         inherited) and writes its pid to $STUB_LOG.bgpid.
 #   edited-bound-tests    cats edited
@@ -2593,6 +2608,7 @@ case $sub in
   run)
     root=.
     if [ "${1:-}" = --root ]; then root=$2; shift 2; fi
+    if [ -n "${STUB_CAT:-}" ]; then cat "$root/$STUB_CAT" >> "$log.cat"; fi
     if [ "${STUB_BG:-}" = 1 ]; then
       sleep 30 >/dev/null 2>&1 &
       echo $! > "$log.bgpid"
@@ -4082,6 +4098,431 @@ test_v9_adapter_failure_indeterminate() {
   teardown
 }
 
+# --- claims promote with a mutant proof ----------------------------------------
+#
+# promote_fixture: the fixture claim ready for promote, all committed: unbuilt
+# and tracked, bound to the stub (bind_test: the stub's check passes while
+# src/auth/token.py holds TTL_SECONDS = 900), with the mutant $_CL_MUTANT
+# (900 → 1800, so under the mutation the check fails by an assertion).
+
+TTL_ID="SPEC-AUTH-001#token-ttl"
+REFRESH_ID="SPEC-AUTH-001#refresh-single-use"
+REFRESH_NODE="tests/test_token.py::test_refresh"
+
+promote_fixture() {
+  claims_fixture
+  bind_test "$STUB_TEST"
+  jset "$SIDECAR" ".claims[0].nonvacuity = $_CL_MUTANT"
+  git add -A && git commit -qm "bind the TTL test, with its mutant"
+}
+
+# promote_second_claim: a second unbuilt claim (refresh_claim) bound to the
+# stub at REFRESH_NODE, its check on src/auth/refresh.py and its own mutant,
+# all committed.
+promote_second_claim() {
+  printf 'SINGLE_USE = True\n' > src/auth/refresh.py
+  printf '%s\t%s\t%s\n' "$REFRESH_NODE" src/auth/refresh.py "SINGLE_USE = True" >> tools/claims/checks
+  list_row "$REFRESH_ID" "$REFRESH_NODE"
+  add_claim "$(refresh_claim stub "$REFRESH_NODE" | jq -c '.nonvacuity = {mutant: {file: "src/auth/refresh.py",
+    find: "SINGLE_USE = True", replace: "SINGLE_USE = False"}}')"
+  rerender
+  git add -A && git commit -qm "a second claim to promote"
+}
+
+# The claim <id>'s field <f> in the work-tree sidecar (compact JSON).
+claim_field() {
+  jq -c --arg id "$1" --arg f "$2" '.claims[] | select(.id == $id) | .[$f]' "$SIDECAR"
+}
+
+# The repository's worktrees, the main one included.
+wt_count() {
+  git worktree list | wc -l | tr -d ' '
+}
+
+# The --root argument of each stub run call, one per line, in call order.
+stub_roots() {
+  awk 'p { print; p = 0 } $0 == "--root" { p = 1 }' "$STUB_LOG"
+}
+
+# The last `cl`'s finding messages, one per line; its indeterminate reasons.
+promote_messages() {
+  jq -r '.findings[]?.message' <<<"$CL_OUT" 2>/dev/null || true
+}
+promote_reasons() {
+  jq -r '.indeterminate[]?.reason' <<<"$CL_OUT" 2>/dev/null || true
+}
+
+# assert_promote_finding <substring> <what>: the last `cl` exited 1 with a
+# finding whose message contains <substring>.
+assert_promote_finding() {
+  assert_eq "1" "$CL_RC" "$2: exits 1"
+  assert_contains "$(promote_messages)" "$1" "$2: a finding names '$1'"
+}
+
+# assert_promote_dirty <what>: the last `cl` refused a dirty tree (exit 2,
+# reason dirty-tree).
+assert_promote_dirty() {
+  assert_eq "2" "$CL_RC" "$1: exits 2"
+  assert_eq "dirty-tree" "$(promote_reasons)" "$1: indeterminate, reason dirty-tree"
+}
+
+test_promote_mutant_assert_fail_promotes() {
+  echo "test: promote — green at HEAD, the mutant fails by an assertion: built, with its verdict"
+  promote_fixture
+  local head store digest exp oid
+  head=$(git rev-parse HEAD)
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "promote exits 0"
+  assert_eq "1" "$(json_count "$CL_OUT")" "…one verdict object"
+  assert_eq '"built"' "$(claim_field "$TTL_ID" status)" "…the sidecar's status is built"
+  assert_eq "$head" "$(jq -r '.claims[0].promotion.at' "$SIDECAR")" "…promotion.at is HEAD"
+  digest=$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")
+  store=$(claims_store)
+  assert_file_exists "$store/$digest.json" "…the verdict is in the store, named by its digest"
+  assert_eq "$digest" "$(hash_file "$store/$digest.json")" "…promotion.verdict_sha256 is the sha256 of the stored file"
+  exp=$(harness_mktemp exp-verdict)
+  verdict_bytes "$exp"
+  assert_true "…the stored bytes are the jq -cS verdict object (the suite's write_verdict format)" \
+    cmp -s "$exp" "$store/$digest.json"
+  oid=$(git rev-parse HEAD:src/auth/token.py)
+  assert_json_field "$(cat "$store/$digest.json")" '.subject_oids | tojson' "{\"src/auth/token.py\":\"$oid\"}" \
+    "…subject_oids maps each subject path to its blob at HEAD"
+  assert_json_field "$(cat "$store/$digest.json")" '[.green, .red, .status_to, .head] | join(" ")' \
+    "pass assert-fail built $head" "…green pass, red assert-fail, status_to built, head HEAD"
+  assert_json_field "$CL_OUT" '.results | tojson' \
+    "[{\"claim\":\"$TTL_ID\",\"status_from\":\"unbuilt\",\"status_to\":\"built\",\"green\":\"pass\",\"red\":\"assert-fail\",\"verdict_sha256\":\"$digest\"}]" \
+    "…one result row naming the claim, both outcomes and the digest"
+  assert_contains "$(cat "$DOC")" "Claims: 1 built" "…and the doc's status block re-rendered"
+  assert_eq "$(git rev-parse --show-toplevel)" "$(stub_roots | sed -n 1p)" "…the green run under the work tree"
+  assert_true "…the mutant run under another root" test "$(stub_roots | sed -n 2p)" != "$(git rev-parse --show-toplevel)"
+  assert_eq "2" "$(stub_roots | wc -l | tr -d ' ')" "…two run calls in all"
+  assert_eq "TTL_SECONDS = 900" "$(cat src/auth/token.py)" "…the work tree's subject is untouched"
+  cl validate --all
+  assert_eq "0" "$CL_RC" "validate --all after the promote exits 0"
+  teardown
+}
+
+test_promote_mutant_stays_green_refused() {
+  echo "test: promote — a mutant under which the test still passes is refused"
+  promote_fixture
+  local before
+  jset "$SIDECAR" '.claims[0].nonvacuity.mutant.replace = "TTL_SECONDS = 900 "'
+  git commit -qam "a mutant that keeps the needle"
+  before=$(hash_file "$SIDECAR")
+  cl promote "$TTL_ID"
+  assert_promote_finding "mutant stays green" "replace still holds the checked text"
+  assert_eq "$before" "$(hash_file "$SIDECAR")" "…the sidecar unchanged"
+  assert_true "…no verdict stored" test ! -e "$(claims_store)"
+  assert_eq "[]" "$(jq -c '.results' <<<"$CL_OUT")" "…no result row"
+  teardown
+}
+
+test_promote_mutant_error_refused() {
+  echo "test: promote — a mutant run that errors is not an assertion failure"
+  promote_fixture
+  # The check reads an untracked build output: present in the work tree (so
+  # the green run passes), absent from the throwaway worktree at HEAD.
+  mkdir -p build
+  printf 'TTL_SECONDS = 900\n' > build/token.txt
+  printf '%s\t%s\t%s\n' "$STUB_NODE" build/token.txt "TTL_SECONDS = 900" > tools/claims/checks
+  git add tools/claims/checks && git commit -qm "check an untracked build output"
+  cl promote "$TTL_ID"
+  assert_promote_finding "mutant error is not an assertion failure" "the mutant run gives error"
+  assert_eq '"unbuilt"' "$(claim_field "$TTL_ID" status)" "…the claim stays unbuilt"
+  teardown
+}
+
+test_promote_mutant_find_not_unique_refused() {
+  echo "test: promote — mutant.find must match exactly once"
+  promote_fixture
+  printf 'TTL_SECONDS = 900\nTTL_SECONDS = 900\n' > src/auth/token.py
+  git commit -qam "the needle twice"
+  cl promote "$TTL_ID"
+  assert_promote_finding "matches 2 times" "find twice in the mutant file"
+  assert_eq '"unbuilt"' "$(claim_field "$TTL_ID" status)" "…the claim stays unbuilt"
+  printf 'TTL_SECONDS = 600\n' > src/auth/token.py
+  printf '%s\t%s\t%s\n' "$STUB_NODE" src/auth/token.py "TTL_SECONDS" > tools/claims/checks
+  git commit -qam "the needle gone"
+  cl promote "$TTL_ID"
+  assert_promote_finding "matches 0 times" "find absent from the mutant file"
+  teardown
+}
+
+test_promote_mutant_literal_safe() {
+  echo "test: promote — the mutation is literal: no glob, regex or backreference in find or replace"
+  promote_fixture
+  # shellcheck disable=SC2016  # literal text, not expansions
+  local line='x = a*b[0]$\1' repl='y = \1 & $0 * [x]^' exp got
+  printf 'head\n%s\ntail' "$line" > src/auth/expr.py
+  printf '%s\t%s\t%s\n' "$STUB_NODE" src/auth/expr.py "$line" > tools/claims/checks
+  jset "$SIDECAR" ".claims[0].nonvacuity.mutant = {file: \"src/auth/expr.py\",
+    find: $(jq -Rn --arg l "$line" '$l'), replace: $(jq -Rn --arg r "$repl" '$r')}"
+  git add -A && git commit -qm "a mutant full of metacharacters"
+  export STUB_CAT=src/auth/expr.py
+  cl promote "$TTL_ID"
+  unset STUB_CAT
+  assert_eq "0" "$CL_RC" "promote exits 0 (the literal find matched once, the literal replace removed the needle)"
+  exp=$(harness_mktemp exp-cat)
+  got=$(harness_mktemp got-cat)
+  printf 'head\n%s\ntail' "$line" > "$exp"
+  printf 'head\n%s\ntail' "$repl" >> "$exp"
+  cat "$STUB_LOG.cat" > "$got"
+  assert_true "…the adapter saw the subject at HEAD, then exactly find → replace (no byte added, none lost)" cmp -s "$exp" "$got"
+  assert_eq "$(printf 'head\n%s\ntail' "$line")" "$(cat src/auth/expr.py)" "…the work tree's file untouched"
+  teardown
+}
+
+test_promote_requires_green_first() {
+  echo "test: promote — the bound test must pass at HEAD first"
+  promote_fixture
+  set_ttl 1800
+  git commit -qam "the subject at 1800"
+  cl promote "$TTL_ID"
+  assert_promote_finding "not green" "the check fails at HEAD"
+  assert_eq "1" "$(stub_roots | wc -l | tr -d ' ')" "…no mutant run"
+  assert_eq "1" "$(wt_count)" "…no worktree left"
+  # An indeterminate green run: exit 2.
+  set_ttl 900
+  force "$STUB_NODE" indeterminate "runner busy"
+  git commit -qam "back to 900, the stub indeterminate"
+  cl promote "$TTL_ID"
+  assert_eq "2" "$CL_RC" "an indeterminate green run exits 2"
+  assert_eq "runner busy" "$(promote_reasons)" "…with the adapter's reason"
+  assert_eq '"unbuilt"' "$(claim_field "$TTL_ID" status)" "…the claim stays unbuilt"
+  teardown
+}
+
+test_promote_dirty_tree_exit_2() {
+  echo "test: promote — refuses a dirty tree (exit 2, dirty-tree)"
+  promote_fixture
+  local before
+  before=$(hash_file "$SIDECAR")
+  printf '# edited\n' >> src/auth/token.py
+  cl promote "$TTL_ID"
+  assert_promote_dirty "an unstaged edit"
+  assert_eq "" "$(cat "$STUB_LOG")" "…no adapter called"
+  assert_eq "$before" "$(hash_file "$SIDECAR")" "…the sidecar unchanged"
+  git add src/auth/token.py
+  cl promote "$TTL_ID"
+  assert_promote_dirty "a staged edit"
+  git reset -q && git checkout -q -- src/auth/token.py
+  # Neither an untracked file nor a change under docs/spec-claims/gates/ counts.
+  mkdir -p docs/spec-claims/gates/p
+  printf '{}\n' > docs/spec-claims/gates/p/chunk-1.json
+  git add -A && git commit -qm "a gate record"
+  printf '{"edited":true}\n' > docs/spec-claims/gates/p/chunk-1.json
+  printf 'scratch\n' > notes.txt
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "an untracked file and a gate-record edit: promote exits 0"
+  teardown
+}
+
+test_promote_throwaway_worktree_removed() {
+  echo "test: promote — the throwaway worktree is removed on every path"
+  promote_fixture
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "precondition: promote exits 0"
+  assert_eq "1" "$(wt_count)" "after a promotion: git worktree list has 1 line"
+  assert_eq "" "$(ls -A .git/worktrees 2>/dev/null)" "…and no worktree metadata is left"
+  teardown
+  promote_fixture
+  jset "$SIDECAR" '.claims[0].nonvacuity.mutant.replace = "TTL_SECONDS = 900 "'
+  git commit -qam "a mutant that keeps the needle"
+  cl promote "$TTL_ID"
+  assert_eq "1" "$CL_RC" "precondition: a refusal (mutant stays green)"
+  assert_eq "1" "$(wt_count)" "after a refusal: git worktree list has 1 line"
+  assert_eq "" "$(ls -A .git/worktrees 2>/dev/null)" "…and no worktree metadata is left"
+  teardown
+  promote_fixture
+  # The store cannot be created (a file where its parent directory goes):
+  # promote dies after the mutant run.
+  printf 'x\n' > .git/spec-claims
+  cl promote "$TTL_ID"
+  assert_eq "2" "$CL_RC" "precondition: the store cannot be written (exit 2)"
+  assert_eq "2" "$(stub_roots | wc -l | tr -d ' ')" "…after both runs"
+  assert_eq "1" "$(wt_count)" "after a failure: git worktree list has 1 line"
+  assert_eq "" "$(ls -A .git/worktrees 2>/dev/null)" "…and no worktree metadata is left"
+  assert_eq '"unbuilt"' "$(claim_field "$TTL_ID" status)" "…the sidecar unchanged"
+  teardown
+  # Another worktree whose directory looks gone (a volume not mounted) keeps
+  # its registration: promote removes only its own, never prunes.
+  promote_fixture
+  local away
+  away=$(harness_mktemp_d away)
+  git worktree add -q --detach "$away/other" HEAD
+  mv "$away/other" "$away/other.offline"
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "precondition: promote exits 0"
+  assert_contains "$(git worktree list --porcelain)" "$away/other" "…the offline worktree is still registered"
+  assert_eq "2" "$(wt_count)" "…and only promote's own worktree is gone"
+  mv "$away/other.offline" "$away/other"
+  git worktree remove --force "$away/other"
+  teardown
+}
+
+test_promote_mutant_file_unsafe() {
+  echo "test: promote — a mutant file that is not a safe path inside the worktree is never written"
+  promote_fixture
+  local outside before
+  outside=$(harness_mktemp_d outside)
+  printf 'TTL_SECONDS = 900\n' > "$outside/token.py"
+  jset "$SIDECAR" '.claims[0].nonvacuity.mutant.file = "../outside/token.py"'
+  git commit -qam "a mutant file outside the tree"
+  cl promote "$TTL_ID"
+  assert_promote_finding "not a safe repo path" "mutant.file with a .. segment"
+  assert_eq "0" "$(stub_roots | wc -l | tr -d ' ')" "…refused before any run"
+  # Through a committed symbolic link: a safe-looking path whose directory
+  # leaves the worktree.
+  ln -s "$outside" src/linked
+  jset "$SIDECAR" '.claims[0].nonvacuity.mutant.file = "src/linked/token.py"'
+  git add -A && git commit -qm "a mutant file through a symbolic link"
+  before=$(hash_file "$outside/token.py")
+  cl promote "$TTL_ID"
+  assert_promote_finding "not a safe repo path" "mutant.file through a symbolic link"
+  assert_eq "$before" "$(hash_file "$outside/token.py")" "…the file the link reaches is not written"
+  assert_eq '"unbuilt"' "$(claim_field "$TTL_ID" status)" "…the claim stays unbuilt"
+  assert_eq "1" "$(wt_count)" "…no worktree left"
+  teardown
+}
+
+test_promote_subject_not_at_head() {
+  echo "test: promote — every subject path must be at HEAD (its blob goes into subject_oids)"
+  promote_fixture
+  jset "$SIDECAR" '.claims[0].subject += ["src/auth/missing.py"]'
+  git commit -qam "a subject that does not exist"
+  cl promote "$TTL_ID"
+  assert_promote_finding "subject not at HEAD" "a subject path absent at HEAD"
+  assert_contains "$(promote_messages)" "src/auth/missing.py" "…naming the path"
+  teardown
+}
+
+test_promote_claim_preconditions() {
+  echo "test: promote — only a test claim with a nonvacuity proof, in a promotable status"
+  promote_fixture
+  cl promote "SPEC-AUTH-001#nope"
+  assert_eq "3" "$CL_RC" "an unknown claim id: usage error (exit 3)"
+  jset "$SIDECAR" '.claims[0].nonvacuity = null'
+  git commit -qam "no proof"
+  cl promote "$TTL_ID"
+  assert_promote_finding "nonvacuity" "no nonvacuity proof"
+  jset "$SIDECAR" ".claims[0].nonvacuity = $_CL_MUTANT | .claims[0].enforced_by = \"lint\""
+  git commit -qam "a lint claim"
+  cl promote "$TTL_ID"
+  assert_promote_finding "enforced_by" "a lint claim"
+  jset "$SIDECAR" '.claims[0].enforced_by = "test" | .claims[0].test = null'
+  git commit -qam "no test"
+  cl promote "$TTL_ID"
+  assert_promote_finding "test" "no bound test"
+  jset "$SIDECAR" ".claims[0].test = $STUB_TEST | .claims[0].frozen_at = \"$(git rev-parse HEAD)\""
+  git commit -qam "frozen"
+  cl promote "$TTL_ID"
+  assert_promote_finding "frozen" "a frozen claim"
+  assert_eq "0" "$(stub_roots | wc -l | tr -d ' ')" "…no run for any of them"
+  teardown
+}
+
+test_promote_second_without_commit_refused() {
+  echo "test: promote — a second promote before the first is committed sees a dirty tree"
+  promote_fixture
+  promote_second_claim
+  local digest
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "the first promote exits 0"
+  digest=$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")
+  cl promote "$REFRESH_ID"
+  assert_promote_dirty "the second, the first's sidecar and doc writes uncommitted"
+  assert_eq '"built"' "$(claim_field "$TTL_ID" status)" "…the first claim still built"
+  assert_eq "$digest" "$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")" "…its promotion intact"
+  assert_file_exists "$(claims_store)/$digest.json" "…its verdict still stored"
+  assert_eq '"unbuilt"' "$(claim_field "$REFRESH_ID" status)" "…the second claim still unbuilt"
+  teardown
+}
+
+test_promote_twice_with_commit_between() {
+  echo "test: promote — commit the first promote's writes, then the second promotes"
+  promote_fixture
+  promote_second_claim
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "the first promote exits 0"
+  git add "$SIDECAR" "$DOC" && git commit -qm "promote $TTL_ID"
+  cl promote "$REFRESH_ID"
+  assert_eq "0" "$CL_RC" "the second promote exits 0"
+  assert_eq '"built"' "$(claim_field "$TTL_ID" status)" "…the first claim built"
+  assert_eq '"built"' "$(claim_field "$REFRESH_ID" status)" "…the second claim built"
+  assert_eq "$(git rev-parse HEAD)" "$(jq -r --arg id "$REFRESH_ID" '.claims[] | select(.id == $id) | .promotion.at' "$SIDECAR")" \
+    "…the second's promotion.at is the commit holding the first"
+  assert_contains "$(cat "$DOC")" "Claims: 2 built" "…the doc's block shows both built"
+  git add "$SIDECAR" "$DOC" && git commit -qm "promote $REFRESH_ID"
+  cl validate --all
+  assert_eq "0" "$CL_RC" "validate --all exits 0"
+  teardown
+}
+
+test_promote_built_with_ok_verdict_refused() {
+  echo "test: promote — a built claim whose verdict matches is already promoted"
+  promote_fixture
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "the promote exits 0"
+  git add "$SIDECAR" "$DOC" && git commit -qm "promote $TTL_ID"
+  cl promote "$TTL_ID"
+  assert_promote_finding "already promoted" "promote again"
+  assert_eq "2" "$(stub_roots | wc -l | tr -d ' ')" "…no run the second time"
+  teardown
+}
+
+test_repromote_after_doc_stale() {
+  echo "test: promote — a DOC-STALE amendment of a built claim is re-promoted"
+  promote_fixture
+  local old new ss st
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "the promote exits 0"
+  old=$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")
+  git add "$SIDECAR" "$DOC" && git commit -qm "promote $TTL_ID"
+  doc_stale_amend
+  git add -A && git commit -qm "DOC-STALE: amend the TTL claim"
+  cl validate --all
+  assert_eq "0" "$CL_RC" "validate --all after the amendment exits 0"
+  assert_contains "$(v6_codes)" "re-promote owed" "…with the advisory re-promote owed"
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "the re-promote exits 0"
+  new=$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")
+  assert_true "…a new promotion.verdict_sha256" test "$new" != "$old"
+  st=$(harness_mktemp new-states)
+  printf '%s' "$NEW_STATES" > "$st"
+  ss=$(hash_file "$st")
+  assert_json_field "$(cat "$(claims_store)/$new.json")" '.states_sha256' "$ss" "…the new verdict's states_sha256 is the new states'"
+  assert_eq "$(git rev-parse HEAD)" "$(jq -r '.claims[0].promotion.at' "$SIDECAR")" "…promotion.at the amendment commit"
+  git add "$SIDECAR" "$DOC" && git commit -qm "re-promote $TTL_ID"
+  cl validate --all
+  assert_eq "0" "$CL_RC" "validate --all after the re-promote exits 0"
+  assert_not_contains "$(v6_codes)" "re-promote owed" "…with no re-promote owed"
+  teardown
+}
+
+# _claims_mutate itself, through a probe: literal and exactly once, the
+# file's bytes kept (trailing newlines included), an empty file 0 matches.
+test_mutate_exactly_once_bytes_kept() {
+  echo "test: _claims_mutate — exactly once, byte for byte; an empty file matches 0 times"
+  claims_fixture
+  local probe f exp out
+  # shellcheck disable=SC2016  # the probe's own expansions
+  probe=$(claims_probe after '_claims_mutate "$CL_PROBE_FILE" "$CL_PROBE_FIND" "$CL_PROBE_REPL" || { _claims_mark_emitted 0; _claims_out "refused: $_CL_MUTATE_ERR"; exit 0; }; _claims_mark_emitted 0; _claims_out ok; exit 0')
+  f="$TEST_DIR/mutate.txt"
+  exp=$(harness_mktemp mutate-exp)
+  printf 'a\nb\n\n' > "$f"
+  out=$(CL_PROBE_FILE=$f CL_PROBE_FIND=$'b\n' CL_PROBE_REPL=$'c\n\n' "$probe" claims render </dev/null 2>/dev/null) || out="rc $?: $out"
+  assert_eq "ok" "$out" "a find and replace ending in newlines: applied"
+  printf 'a\nc\n\n\n' > "$exp"
+  assert_true "…byte for byte (no newline added or lost)" cmp -s "$exp" "$f"
+  out=$(CL_PROBE_FILE=$f CL_PROBE_FIND=$'\n' CL_PROBE_REPL=x "$probe" claims render </dev/null 2>/dev/null) || out="rc $?: $out"
+  assert_eq "refused: find matches 4 times" "$out" "a find matching four times: refused, counted"
+  assert_true "…the file unchanged" cmp -s "$exp" "$f"
+  : > "$f"
+  out=$(CL_PROBE_FILE=$f CL_PROBE_FIND=x CL_PROBE_REPL=y "$probe" claims render </dev/null 2>/dev/null) || out="rc $?: $out"
+  assert_eq "refused: find matches 0 times" "$out" "an empty file: find matches 0 times"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -4267,6 +4708,24 @@ run_tests() {
   test_v9_all_uses_merge_base_range
   test_v9_unknown_id_ignored
   test_v9_adapter_failure_indeterminate
+
+  # --- Task 11: claims promote with a mutant proof ---
+  test_promote_mutant_assert_fail_promotes
+  test_promote_mutant_stays_green_refused
+  test_promote_mutant_error_refused
+  test_promote_mutant_find_not_unique_refused
+  test_promote_mutant_literal_safe
+  test_mutate_exactly_once_bytes_kept
+  test_promote_requires_green_first
+  test_promote_dirty_tree_exit_2
+  test_promote_throwaway_worktree_removed
+  test_promote_mutant_file_unsafe
+  test_promote_subject_not_at_head
+  test_promote_claim_preconditions
+  test_promote_second_without_commit_refused
+  test_promote_twice_with_commit_between
+  test_promote_built_with_ok_verdict_refused
+  test_repromote_after_doc_stale
 
   print_summary
 }
