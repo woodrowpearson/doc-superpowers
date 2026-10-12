@@ -370,11 +370,13 @@ _lg_parse_blobs() {
         t = index(l, "\t"); p = substr(l, t + 1); split(substr(l, 1, t - 1), f, " ")
         if (index_mode) {
           if (f[3] != "0") { if (!(p in OID)) WHY[p] = "unmerged in the index"; continue }
-          oid = f[2]; type = "blob"
+          # ls-files -s prints no type: mode 160000 is a gitlink (a commit id).
+          oid = f[2]; type = (f[1] == "160000") ? "commit" : "blob"
         } else {
           oid = f[3]; type = f[2]
         }
-        if (type != "blob") WHY[p] = "not a file (" type ") at " where
+        if (type == "commit") WHY[p] = "a submodule (gitlink) at " where ": not parsed"
+        else if (type != "blob") WHY[p] = "not a file (" type ") at " where
         else if (f[1] == "120000") WHY[p] = "a symbolic link at " where ": not parsed"
         else { OID[p] = oid; delete WHY[p] }
       }
@@ -485,7 +487,8 @@ _lg_fm_list_add() {
   rec=$(LC_ALL=C awk -v path=x "${_LG_PARSE_ARGS[@]}" -f "$_LG_LIB/frontmatter.awk" < "$file") \
     || _lg_die "cannot parse $file"
   # state ("present" | "write" | "broken"), the count, the new list joined by
-  # \001 — one jq.
+  # \001 — one jq. A "." ends the output: $(…) strips trailing newlines,
+  # which would eat an empty last item or one ending in a newline.
   res=$(jq -j --arg f "$field" --arg item "$item" '
     if any(.fm_errors[]; startswith($f + ": ")) then "broken\n0\n"
     else (.fm[$f]) as $v
@@ -494,7 +497,8 @@ _lg_fm_list_add() {
         else ($cur + [$item]) as $new
           | "write\n\($new | length)\n" + ($new | join("\u0001"))
         end
-    end' <<<"$rec") || _lg_die "cannot read the frontmatter of $file"
+    end + "."' <<<"$rec") || _lg_die "cannot read the frontmatter of $file"
+  res=${res%.}
   state=${res%%$'\n'*}
   res=${res#*$'\n'}
   count=${res%%$'\n'*}

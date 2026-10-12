@@ -852,6 +852,13 @@ lg_t_fm_write_quotes() {
   _lg_fm_list_add "$f" changes 'c"d'
   _lg_fm_list_add "$f" changes $'e\nf'
   assert_json_field "$(lg_fm "$f")" '.fm.changes | tojson' '["a, b","c\"d","e\nf"]' "flow items round-trip (a newline too)"
+  # An empty item and an item ending in a newline are written as given.
+  _lg_fm_list_add "$f" tags ""
+  assert_json_field "$(lg_fm "$f")" '.fm.tags | tojson' '[""]' "list add: an empty item"
+  _lg_fm_list_add "$f" tags2 $'foo\n'
+  assert_json_field "$(lg_fm "$f")" '.fm.tags2 | tojson' '["foo\n"]' "list add: an item ending in a newline"
+  _lg_fm_list_add "$f" tags2 "bar"
+  assert_json_field "$(lg_fm "$f")" '.fm.tags2 | tojson' '["foo\n","bar"]' "list add: then another item"
   # A bad field name is refused.
   lg_rc _lg_fm_set "$f" "bad name" x
   assert_eq "2" "$LG_RC" "a field name with a space: rc 2"
@@ -1009,6 +1016,15 @@ lg_t_parse_blobs_odd() {
   lg_nul_list "$paths" docs/issues/m.md
   _lg_parse_blobs : "$paths" "$out"
   assert_json_field "$(cat "$out")" '.fm_errors[0] | test("unmerged")' "true" "an unmerged index entry: an error record"
+  # A gitlink (submodule) at an item path: a per-file error, never an abort.
+  lg_nul_list "$paths" docs/issues/g.md docs/issues/a.md
+  _lg_parse_blobs : "$paths" "$out"
+  assert_json_field "$(jq -c 'select(.path == "docs/issues/g.md")' "$out")" '.fm_errors[0] | test("submodule")' "true" \
+    "a gitlink in the index: an error record"
+  assert_json_field "$(jq -c 'select(.path == "docs/issues/a.md")' "$out")" '.fm.key' "x-1" "…and the other items still parse"
+  _lg_parse_blobs HEAD "$paths" "$out"
+  assert_json_field "$(jq -c 'select(.path == "docs/issues/g.md")' "$out")" '.fm_errors[0] | test("submodule")' "true" \
+    "a gitlink at a commit: an error record"
 }
 
 test_lg_parse_blobs_odd_entries() {
@@ -1021,6 +1037,9 @@ test_lg_parse_blobs_odd_entries() {
   git add -A && git commit -qm items
   local oid
   oid=$(git hash-object -w docs/issues/m.md)
+  # A gitlink (mode 160000) at docs/issues/g.md, committed.
+  git update-index --add --cacheinfo "160000,$(git rev-parse HEAD),docs/issues/g.md"
+  git commit -qm gitlink
   git rm -q --cached docs/issues/m.md
   printf '100644 %s 1\tdocs/issues/m.md\n100644 %s 2\tdocs/issues/m.md\n' "$oid" "$oid" | git update-index --index-info
   lg_in lg_t_parse_blobs_odd
