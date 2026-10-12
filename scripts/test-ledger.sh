@@ -5156,6 +5156,7 @@ lg_t_events_derive_exact() {
   cold=$(lg_ev_canon "$_LG_EVENTS")
   assert_eq "$cold" "$derived" "the derived records are the cold walk's"
   lg_assert_cond "[ $(wc -l <<<"$cold") -gt 5 ]" "…a non-trivial history"
+  assert_eq "2" "$(grep -c '|R|' <<<"$cold")" "…with the shared rename and the one inside the range (R records)"
 }
 
 test_lg_recheck_base_not_head() {
@@ -5167,12 +5168,15 @@ test_lg_recheck_base_not_head() {
     "changes: [field:order.total]" "related-files: [src/util/a.js, src/util/b.js]"
   printf '\n## Resolution\n\nFixed.\n' >> docs/issues/a.md
   git add -A && git commit -qm "fix app-1"
+  # A rename in the history both sides share (the derive filter keeps it).
+  git mv docs/issues/g.md docs/issues/g1.md && git commit -qm "rename app-5"
   lg_rel_ix
   expect=$(jq -c '[.items[] | {key, recheck_after}]' "$LG_IX")
-  # HEAD ahead of the base.
+  # HEAD ahead of the base (a rename there too: the derive filter drops it).
   git checkout -q -b ahead
   printf '\nmore\n' >> docs/issues/i.md
   git add -A && git commit -qm "ahead"
+  git mv docs/issues/h.md docs/issues/h1.md && git commit -qm "rename app-6 on ahead"
   rm -rf "$(git rev-parse --git-common-dir)/doc-superpowers"
   DOC_TOOLS_LEDGER_TRACE=1 lg_rel_ix
   assert_contains "$LG_ERR" "dates-derive" "the base's events derived from HEAD's walk"
@@ -5191,8 +5195,19 @@ test_lg_recheck_base_not_head() {
   DOC_TOOLS_LEDGER_TRACE=1 lg_rel_ix
   assert_eq "1" "$(grep -c 'dates-cold' <<<"$LG_ERR")" "one cold walk (HEAD's): the base extends it (HEAD is its ancestor)"
   assert_eq "app-3" "$(lg_rc_of core-3)" "a source fixed only on the base: marked (app-1 landed before core-3's last commit)"
-  # Diverged (HEAD ahead lacks the base's last two commits): derived, and
-  # the same records a cold walk of the base gives.
+  # Inside the diverged range (base commits HEAD lacks): a rename on a side
+  # branch, an item edit on the base, and the side merged --no-ff — so a
+  # record-size mistake shared by the code and lg_ev_canon (R carries three
+  # fields, A two, the others one) would misalign one of the two walks.
+  git checkout -q -b side2 newer
+  git mv docs/issues/f.md docs/issues/f1.md && git commit -qm "rename app-4 on side2"
+  git checkout -q newer
+  printf '\nbase edit\n' >> docs/issues/c.md
+  git add -A && git commit -qm "edit app-2 on newer"
+  git merge -q --no-ff side2 -m "merge side2 into newer"
+  git checkout -q main
+  # Diverged (HEAD ahead lacks the base's last commits): derived, and the
+  # same records a cold walk of the base gives.
   git checkout -q ahead
   DOC_TOOLS_LEDGER_TRACE=1 lg_in lg_t_events_derive_exact
   teardown
@@ -5270,6 +5285,59 @@ test_lg_publish_link_prefix() {
   assert_eq "../main/" "$LG_OUT" "another host: ../<branch>/ (the page sits at blob/<views>/)"
   lg_call _lg_publish_link other main views/ledger
   assert_eq "../../main/" "$LG_OUT" "one ../ per segment of the views branch"
+  teardown
+}
+
+# --- Task 9 review carry-over (Task 10, first commit) --------------------------------
+
+# lg_t_shallow_graph <child> <parent>: the base's graph lists <child> with
+# <parent> as its parent.
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_shallow_graph() {
+  _lg_ix_graph "$(git rev-parse main)"
+  assert_eq "$1 $2" "$(grep "^$1" "$_LG_GRAPH")" "the graph gives $1 its parent"
+}
+
+test_lg_shallow_deepen_rebuilds_caches() {
+  echo "test: a shallow clone — the graph, dates and index caches follow .git/shallow; deepening rebuilds them"
+  lg_fixture
+  lg_enable '{"base":"main"}'
+  lg_registry "$LG_REG_REL"
+  # C1: app-1 (fixed, changes field:order.total) and core-1 (consumes it);
+  # C2: an edit to core-1; C3: outside the items.
+  lg_item docs/issues/s.md "key: app-1" "ledger: app" "status: Fixed" "severity: P2" "summary: Source fixed" "changes: [field:order.total]"
+  printf '\n## Resolution\n\nDone.\n' >> docs/issues/s.md
+  lg_item docs/issues/x.md "key: core-1" "ledger: core" "status: Open" "severity: P2" "summary: Consumer" "consumes: [field:order.total]"
+  git add -A
+  GIT_COMMITTER_DATE="2026-01-05T00:00:00Z" GIT_AUTHOR_DATE="2026-01-05T00:00:00Z" git commit -qm C1
+  printf '\nedited\n' >> docs/issues/x.md
+  git add -A
+  GIT_COMMITTER_DATE="2026-02-05T00:00:00Z" GIT_AUTHOR_DATE="2026-02-05T00:00:00Z" git commit -qm C2
+  echo z > src/z.txt
+  git add -A
+  GIT_COMMITTER_DATE="2026-03-05T00:00:00Z" GIT_AUTHOR_DATE="2026-03-05T00:00:00Z" git commit -qm C3
+  local clone c1 c2 saved="$TEST_DIR"
+  c1=$(git rev-parse HEAD~2)
+  c2=$(git rev-parse HEAD~1)
+  clone="$(harness_mktemp_d lg-shallow)/clone"
+  git clone -q --depth 2 "file://$TEST_DIR" "$clone"
+  cd "$clone"
+  assert_eq "true" "$(git rev-parse --is-shallow-repository)" "a shallow clone (C3, C2)"
+  lg_call_in "$clone" _lg_index
+  LG_IX=$LG_OUT
+  assert_eq "2026-02-05" "$(jq -r '.items[] | select(.key == "app-1") | .date' "$LG_IX")" "shallow: app-1 dated by the boundary commit"
+  assert_eq "" "$(lg_rc_of core-1)" "shallow: no marker"
+  git fetch -q --deepen=1 origin
+  assert_eq "true" "$(git rev-parse --is-shallow-repository)" "still shallow, one commit deeper"
+  lg_call_in "$clone" _lg_index
+  LG_IX=$LG_OUT
+  assert_eq "2026-01-05" "$(jq -r '.items[] | select(.key == "app-1") | .date' "$LG_IX")" "deepened: app-1 dated by C1 (the dates and index caches were rebuilt)"
+  assert_eq "" "$(lg_rc_of core-1)" "deepened: no false re-check marker (app-1 landed before core-1's last commit)"
+  TEST_DIR=$clone
+  lg_in lg_t_shallow_graph "$c2" "$c1"
+  TEST_DIR=$saved
+  cd "$TEST_DIR"
+  rm -rf "$(dirname "$clone")"
   teardown
 }
 
@@ -5471,6 +5539,9 @@ run_tests() {
   test_lg_msg_claims_case_sensitive
   test_lg_index_valid_needs_tail
   test_lg_recheck_base_not_head
+
+  # --- Task 9 review carry-over (Task 10) ---
+  test_lg_shallow_deepen_rebuilds_caches
 
   print_summary
 }
