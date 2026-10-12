@@ -781,6 +781,34 @@ _lg_ix_effective() {
     || _lg_die "cannot compute the working tree listing"
 }
 
+# _lg_ix_refs <records> <out>: the parse entries the records were read from
+# (pruning spares them), one name per line: a working copy's c-<sha256>; a
+# blob's c-<sha256> when the blob id -> sha256 map names one that exists
+# (that is the one _lg_parse_emit read first), else its b-<oid>. Non-zero
+# on a failure (the caller dies). scripts/bench-ledger.sh times it alone.
+_lg_ix_refs() {
+  local recs="$1" out="$2" s map
+  _lg_scratch_name
+  s=$_LG_SN
+  jq -r '.blob | strings' "$recs" > "$s.blobs" || return 1
+  map="$_LG_CACHE/blob-sha256.tsv"
+  [ -f "$map" ] || map=/dev/null
+  _lg_awkv "$map"
+  map=$_LG_AV
+  _lg_awkv "$_LG_PARSE_DIR"
+  LC_ALL=C awk -v map="$map" -v dir="$_LG_AV" '
+    BEGIN { while ((getline l < map) > 0) { t = index(l, "\t"); if (t) H[substr(l, 1, t - 1)] = substr(l, t + 1) } }
+    /^sha256:/ { print "c-" substr($0, 8) ".json"; next }
+    {
+      if ($0 in H && H[$0] ~ /^sha256:/) {
+        c = "c-" substr(H[$0], 8) ".json"
+        if ((getline x < (dir "/" c)) > 0) { close(dir "/" c); print c; next }
+        close(dir "/" c)
+      }
+      print "b-" $0 ".json"
+    }' "$s.blobs" > "$out"
+}
+
 # --- _lg_index ---------------------------------------------------------------------
 
 # _lg_index [--rev <rev>|--staged]: print the path of the index (see the
@@ -909,27 +937,7 @@ _lg_index() {
     rm -f "$tmp"
     _lg_die "jq failed (the index join)"
   fi
-  # The parse entries this index was read from (pruning spares them): a
-  # working copy's c-<sha256>; a blob's c-<sha256> when the blob id ->
-  # sha256 map names one that exists (that is the one _lg_parse_emit read
-  # first), else its b-<oid>.
-  jq -r '.blob | strings' "$s.recs" > "$s.blobs" || { rm -f "$tmp"; _lg_die "jq failed (parse references)"; }
-  map="$_LG_CACHE/blob-sha256.tsv"
-  [ -f "$map" ] || map=/dev/null
-  _lg_awkv "$map"
-  map=$_LG_AV
-  _lg_awkv "$_LG_PARSE_DIR"
-  LC_ALL=C awk -v map="$map" -v dir="$_LG_AV" '
-    BEGIN { while ((getline l < map) > 0) { t = index(l, "\t"); if (t) H[substr(l, 1, t - 1)] = substr(l, t + 1) } }
-    /^sha256:/ { print "c-" substr($0, 8) ".json"; next }
-    {
-      if ($0 in H && H[$0] ~ /^sha256:/) {
-        c = "c-" substr(H[$0], 8) ".json"
-        if ((getline x < (dir "/" c)) > 0) { close(dir "/" c); print c; next }
-        close(dir "/" c)
-      }
-      print "b-" $0 ".json"
-    }' "$s.blobs" > "${tmp}.refs" || { rm -f "$tmp" "${tmp}.refs"; _lg_die "cannot list the parse references"; }
+  _lg_ix_refs "$s.recs" "${tmp}.refs" || { rm -f "$tmp" "${tmp}.refs"; _lg_die "cannot list the parse references"; }
   if ! mv -f "${tmp}.refs" "$_LG_CACHE/index-$key.refs" || ! mv -f "$tmp" "$name"; then
     rm -f "$tmp" "${tmp}.refs"
     _lg_die "cannot install $name"

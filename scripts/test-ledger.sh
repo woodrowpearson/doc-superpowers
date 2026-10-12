@@ -364,14 +364,15 @@ test_lg_stub_not_implemented() {
   echo "test: an enabled verb with no implementation yet exits 2 with one object"
   lg_fixture
   lg_enable
-  lg show x-1 --format json
+  # "related" (Task 9) — show was the stub until Task 5 built it.
+  lg related x-1 --format json
   assert_eq "2" "$LG_RC" "stub exits 2"
   assert_eq "1" "$(json_count "$LG_OUT")" "exactly one object"
-  assert_json_field "$LG_OUT" '.verb' "ledger show" ".verb is 'ledger show'"
+  assert_json_field "$LG_OUT" '.verb' "ledger related" ".verb is 'ledger related'"
   assert_json_field "$LG_OUT" '.enabled' "true" ".enabled is true"
   assert_json_field "$LG_OUT" '.exit' "2" ".exit is 2"
   assert_json_field "$LG_OUT" '.error' "not implemented" ".error"
-  lg show x-1
+  lg related x-1
   assert_eq "2" "$LG_RC" "text mode: exits 2"
   assert_eq "" "$LG_OUT" "text mode: nothing on stdout"
   assert_contains "$LG_ERR" "not implemented" "text mode: stderr says why"
@@ -2216,6 +2217,287 @@ test_lg_index_dates_treesame_merge() {
   teardown
 }
 
+# --- Task 5: show, ls, find, bench --------------------------------------------
+
+# The number of lines in $1 ("" → 0).
+lg_lines() {
+  if [ -z "$1" ]; then echo 0; else printf '%s\n' "$1" | wc -l | tr -d ' '; fi
+}
+
+# Column <n> (whitespace-split) of each line of $1, "|"-joined.
+lg_col() {
+  printf '%s\n' "$1" | awk -v n="$2" '{ printf "%s%s", (NR > 1 ? "|" : ""), $n }'
+}
+
+LG_REG_APP_CORE='{"schema":"ledger-registry/1","ledgers":[
+  {"id":"app","title":"App","kind":"service","status":"active"},
+  {"id":"core","title":"Core","kind":"platform","status":"active"}]}'
+
+test_lg_show_limits() {
+  echo "test: ledger show — header line, derived display, lists capped, ≤ 25 lines; path or key; unknown → rc 1"
+  lg_fixture
+  lg_enable
+  lg_registry "$LG_REG_APP_CORE"
+  local i specs="" plans="" out first
+  lg_item docs/issues/a.md "key: app-1" "ledger: app" "status: Open" "severity: P1" \
+    "summary: Totals are wrong when the cart is edited" "changes: [field:order.total]" \
+    "consumes: [endpoint:createOrder, flag:new_checkout]" \
+    "relates: [root-cause:app-2, sibling:app-3]" "aliases: [old-1, old-2, old-3, old-4, old-5]" \
+    "related-files: [src/a.js, src/b.js, src/c.js, src/d.js, src/e.js, src/f.js]"
+  printf '\nBody text.\n' >> docs/issues/a.md
+  lg_item docs/issues/b.md "key: app-2" "ledger: app" "status: Fixed" "priority: P2" "owed: deploy" \
+    "summary: Order ids collide under load"
+  lg_item docs/issues/c.md "key: app-3" "ledger: app" "status: Closed" "severity: P2" "superseded_by: app-1" \
+    "summary: Old totals bug"
+  printf '\n## Resolution\n\nReplaced by app-1.\nMore text.\n' >> docs/issues/c.md
+  lg_item docs/issues/k.md "ledger: unassigned" "status: Open" "summary: Home not decided yet"
+  mkdir -p docs/specs docs/plans
+  for i in 1 2 3 4 5 6; do
+    printf '# S%s\n\nFixes app-1.\n' "$i" > "docs/specs/s$i.md"
+    specs="$specs\"docs/specs/s$i.md\":{\"doc_type\":\"spec\"},"
+    printf '# P%s\n\nWorks on app-1.\n' "$i" > "docs/plans/p$i.md"
+    plans="$plans\"docs/plans/p$i.md\":{\"doc_type\":\"plan\"},"
+  done
+  lg_doc_index "{\"docs\":{${specs}${plans%,}}}"
+  git add -A && git commit -qm items
+
+  lg show app-1
+  assert_eq "0" "$LG_RC" "show app-1 exits 0"
+  assert_true "at most 25 lines ($(lg_lines "$LG_OUT"))" test "$(lg_lines "$LG_OUT")" -le 25
+  first=$(printf '%s\n' "$LG_OUT" | head -n 1)
+  assert_eq "app-1  app  P1  planned" "$first" "line 1: key, ledger, severity, derived status"
+  assert_eq "Totals are wrong when the cart is edited" "$(printf '%s\n' "$LG_OUT" | sed -n 2p)" "line 2: the summary"
+  assert_contains "$LG_OUT" "spec: docs/specs/s1.md, docs/specs/s2.md, docs/specs/s3.md +3 more" "spec list capped at 3, with the rest counted"
+  assert_contains "$LG_OUT" "plan: docs/plans/p1.md, docs/plans/p2.md, docs/plans/p3.md +3 more" "plan list capped"
+  assert_contains "$LG_OUT" "handoff: —" "an empty column shows —"
+  assert_contains "$LG_OUT" "changes: field:order.total" "changes"
+  assert_contains "$LG_OUT" "consumes: endpoint:createOrder, flag:new_checkout" "consumes"
+  assert_contains "$LG_OUT" "relates: root-cause:app-2, sibling:app-3" "relates as kind:key"
+  assert_contains "$LG_OUT" "aliases: old-1, old-2, old-3 +2 more" "aliases capped"
+  assert_contains "$LG_OUT" "files: src/a.js, src/b.js, src/c.js +3 more" "paths capped"
+  assert_contains "$LG_OUT" "path: docs/issues/a.md" "the path"
+  assert_not_contains "$LG_OUT" "resolution:" "an open item has no resolution line"
+  out=$LG_OUT
+  lg show APP-1
+  assert_eq "$out" "$LG_OUT" "a key matches case-insensitively"
+  lg show docs/issues/a.md
+  assert_eq "$out" "$LG_OUT" "the path gives the same item"
+  lg show ./docs/issues/a.md
+  assert_eq "$out" "$LG_OUT" "…and ./path"
+
+  lg show app-3
+  assert_eq "app-3  app  P2  superseded → app-1" "$(printf '%s\n' "$LG_OUT" | head -n 1)" "superseded → <key>"
+  assert_contains "$LG_OUT" "resolution: Replaced by app-1." "a terminal item: the first resolution line"
+  assert_not_contains "$LG_OUT" "More text." "…only the first line"
+  lg show app-2
+  assert_eq "app-2  app  P2  merged · owed: deploy" "$(printf '%s\n' "$LG_OUT" | head -n 1)" "merged · owed: <owed>"
+  assert_contains "$LG_OUT" "resolution: (none)" "a terminal item without a resolution says so"
+  lg show docs/issues/k.md
+  assert_eq "0" "$LG_RC" "a keyless item by path"
+  assert_eq "docs/issues/k.md  unassigned  —  not started" "$(printf '%s\n' "$LG_OUT" | head -n 1)" \
+    "no key: the path leads; no severity: —"
+
+  lg show app-99
+  assert_eq "1" "$LG_RC" "an unknown ref exits 1"
+  assert_eq "1" "$(lg_lines "$LG_OUT")" "…with one line"
+  assert_contains "$LG_OUT" "app-99" "…naming the ref"
+  lg show app-99 --format json
+  assert_eq "1" "$LG_RC" "JSON: an unknown ref exits 1"
+  assert_eq "1" "$(json_count "$LG_OUT")" "JSON: one object"
+  assert_json_field "$LG_OUT" '[.verb, .exit, .item] | tojson' '["ledger show",1,null]' "JSON: item null"
+  lg show app-1 --format json
+  assert_eq "1" "$(json_count "$LG_OUT")" "JSON: one object"
+  assert_json_field "$LG_OUT" '[.exit, .item.key, .item.path, .item.derived.status] | tojson' \
+    '[0,"app-1","docs/issues/a.md","planned"]' "JSON: the index item"
+  assert_json_field "$LG_OUT" '.display' "planned" "JSON: the derived status as displayed"
+  lg show
+  assert_eq "3" "$LG_RC" "no ref: usage (3)"
+  lg show app-1 app-2
+  assert_eq "3" "$LG_RC" "two refs: usage (3)"
+
+  # An item whose every list is long and whose fields are odd still fits.
+  lg_item docs/issues/z.md "key: app-9" "ledger: app" "status: won't fix" "severity: P3" \
+    "summary: Line one" "changes: [c:1, c:2, c:3, c:4, c:5, c:6, c:7, c:8]" \
+    "consumes: [d:1, d:2, d:3, d:4, d:5, d:6, d:7, d:8]" "relates: [sibling:a-1, sibling:a-2, sibling:a-3, sibling:a-4, sibling:a-5]" \
+    "owed: a device pass" "nested:" "  a: b"
+  lg show app-9
+  assert_eq "0" "$LG_RC" "show app-9 exits 0"
+  assert_true "a crowded item: at most 25 lines ($(lg_lines "$LG_OUT"))" test "$(lg_lines "$LG_OUT")" -le 25
+  assert_eq "app-9  app  P3  won't fix" "$(printf '%s\n' "$LG_OUT" | head -n 1)" "won't fix"
+  assert_contains "$LG_OUT" "changes: c:1, c:2, c:3 +5 more" "changes capped"
+  assert_contains "$LG_OUT" "owed: a device pass" "owed"
+  assert_contains "$LG_OUT" "frontmatter:" "a frontmatter error is shown"
+  teardown
+}
+
+test_lg_ls_filters_and_order() {
+  echo "test: ledger ls — severity order then date; --ledger, --sev, --open, --status, --cluster; JSON items"
+  lg_fixture
+  lg_enable
+  lg_registry "$LG_REG_APP_CORE"
+  lg_item docs/issues/a.md "key: app-1" "ledger: app" "status: Open" "severity: P2" "date: 2026-01-05" "summary: Alpha"
+  lg_item docs/issues/b.md "key: app-2" "ledger: app" "status: Open" "severity: P1" "date: 2026-01-09" "summary: Bravo"
+  lg_item docs/issues/c.md "key: app-3" "ledger: app" "status: Open" "severity: P1" "date: 2026-01-02" "summary: Charlie"
+  lg_item docs/issues/d.md "key: core-1" "ledger: core" "status: Fixed" "severity: P0" "date: 2026-01-01" "summary: Delta"
+  lg_item docs/issues/e.md "key: app-4" "ledger: app" "status: Closed" "severity: P3" "date: 2026-01-01" "summary: Echo"
+  printf '\n## Resolution\n\nDone elsewhere.\n' >> docs/issues/e.md
+  lg_item docs/issues/f.md "key: app-5" "ledger: app" "status: Open" "date: 2026-01-01" "summary: Foxtrot"
+  lg_item docs/issues/g.md "key: app-6" "ledger: app" "status: Open" "severity: p1" "date: 2026-01-03" \
+    "summary: Golf" "changes: [field:x]"
+  lg_item docs/issues/h.md "key: app-7" "ledger: app" "status: Open" "severity: P2" "date: 2026-01-04" \
+    "summary: Hotel" "consumes: [field:x, field:y]"
+  lg_item docs/issues/k.md "ledger: unassigned" "status: Open" "severity: P2" "date: 2026-01-06" "summary: Kilo"
+  lg_item docs/issues/w.md "key: app-8" "ledger: app" "status: won't fix" "severity: P2" "date: 2026-01-07" "summary: Whiskey"
+  printf '\n## Resolution\n\nNot worth it.\n' >> docs/issues/w.md
+  git add -A && git commit -qm items
+
+  lg ls
+  assert_eq "0" "$LG_RC" "ls exits 0"
+  assert_eq "core-1|app-3|app-6|app-2|app-7|app-1|k|app-8|app-4|app-5" "$(lg_col "$LG_OUT" 1)" \
+    "severity order (case-insensitive), then date; no severity last; a keyless item by its path stem"
+  assert_eq "P0|P1|p1|P1|P2|P2|P2|P2|P3|—" "$(lg_col "$LG_OUT" 2)" "the severity column"
+  lg ls --ledger app --sev P1
+  assert_eq "app-3|app-6|app-2" "$(lg_col "$LG_OUT" 1)" "--ledger app --sev P1"
+  lg ls --sev 'p0, P3'
+  assert_eq "core-1|app-4" "$(lg_col "$LG_OUT" 1)" "--sev is a comma list, case-insensitive, spaces ignored"
+  lg ls --open --ledger app
+  assert_eq "app-3|app-6|app-2|app-7|app-1|app-5" "$(lg_col "$LG_OUT" 1)" "--open: the open class only"
+  lg ls --status shipped
+  assert_eq "core-1  P0  shipped  Delta" "$LG_OUT" "--status shipped: one exact line"
+  lg ls --status "won't fix"
+  assert_eq "app-8" "$(lg_col "$LG_OUT" 1)" "--status won't fix"
+  lg ls --status wontfix
+  assert_eq "app-8" "$(lg_col "$LG_OUT" 1)" "--status wontfix (apostrophe and space optional)"
+  lg ls --status "Won’t-fix"
+  assert_eq "app-8" "$(lg_col "$LG_OUT" 1)" "--status with a typographic apostrophe and a dash"
+  lg ls --status "NOT STARTED" --sev P2
+  assert_eq "app-7|app-1|k" "$(lg_col "$LG_OUT" 1)" "--status not started (case-insensitive)"
+  lg ls --status bogus
+  assert_eq "3" "$LG_RC" "an unknown --status is a usage error"
+  assert_contains "$LG_ERR" "not started" "…which lists the statuses"
+  lg ls --cluster field:x
+  assert_eq "app-6|app-7" "$(lg_col "$LG_OUT" 1)" "--cluster: the first of changes, else the first of consumes"
+  lg ls --cluster field:y
+  assert_eq "" "$LG_OUT" "a second consumes entry is not the cluster"
+  assert_eq "0" "$LG_RC" "no match: exit 0"
+  lg ls --cluster unclustered --open --sev P2
+  assert_eq "app-1|k" "$(lg_col "$LG_OUT" 1)" "--cluster unclustered"
+  lg ls --ledger nosuch
+  assert_eq "3" "$LG_RC" "an unknown ledger is a usage error"
+  lg ls --ledger unassigned
+  assert_eq "k" "$(lg_col "$LG_OUT" 1)" "--ledger unassigned"
+  lg ls bogus
+  assert_eq "3" "$LG_RC" "ls takes no argument"
+  lg ls --open --ledger app --format json
+  assert_eq "0" "$LG_RC" "JSON exits 0"
+  assert_eq "1" "$(json_count "$LG_OUT")" "JSON: one object"
+  assert_json_field "$LG_OUT" '[.verb, .exit] | tojson' '["ledger ls",0]' "JSON: verb, exit"
+  assert_json_field "$LG_OUT" '[.items[].key] | join("|")' "app-3|app-6|app-2|app-7|app-1|app-5" "JSON: the same order"
+  assert_json_field "$LG_OUT" '.items[0] | keys_unsorted | join(",")' \
+    "key,path,ledger,severity,status,class,derived,display,date,summary,cluster,archived" "JSON: an item's keys"
+  assert_json_field "$LG_OUT" '.items[1] | [.cluster, .display, .derived.status] | tojson' \
+    '["field:x","not started","not started"]' "JSON: cluster, display, derived"
+  lg ls --cluster nothing --format json
+  assert_json_field "$LG_OUT" '.items | tojson' '[]' "JSON: no match → []"
+  teardown
+}
+
+# lg_gen_ledger_items: 300 items — checkout: 60 open P1/P2 with 140-char
+# summaries (the budget case), 90 fixed P1/P2, 50 open P3; auth: 100 open P1.
+lg_gen_ledger_items() {
+  awk 'BEGIN {
+    s = "Order totals drift when the cart is edited during checkout and the tax line is recomputed from a stale shipping quote, so receipts disagree"
+    while (length(s) < 140) s = s "x"
+    s = substr(s, 1, 140)
+    for (i = 1; i <= 300; i++) {
+      f = sprintf("docs/issues/2026-01-%02d-item-%03d.md", (i % 28) + 1, i)
+      if (i <= 60) { l = "checkout"; st = "Open"; sv = (i % 2) ? "P1" : "P2" }
+      else if (i <= 150) { l = "checkout"; st = "Fixed"; sv = (i % 2) ? "P1" : "P2" }
+      else if (i <= 200) { l = "checkout"; st = "Open"; sv = "P3" }
+      else { l = "auth"; st = "Open"; sv = "P1" }
+      printf "---\nkey: %s-%d\nledger: %s\nstatus: %s\nseverity: %s\nsummary: %s\nchanges: [field:order.total]\n---\n# Item %d\n\nBody.\n", l, i, l, st, sv, s, i > f
+      close(f)
+    }
+  }'
+}
+
+test_lg_ls_output_budget() {
+  echo "test: ledger ls --ledger L --sev P1,P2 --open over a 300-item ledger fits 8,000 bytes"
+  lg_fixture
+  lg_enable
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[
+    {"id":"checkout","title":"Checkout","kind":"service","status":"active"},
+    {"id":"auth","title":"Auth","kind":"service","status":"active"}]}'
+  lg_gen_ledger_items
+  git add -A && git commit -qm items
+  lg ls --ledger checkout --sev P1,P2 --open
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_eq "60" "$(lg_lines "$LG_OUT")" "the 60 open P1/P2 items"
+  local bytes
+  bytes=$(printf '%s\n' "$LG_OUT" | wc -c | tr -d ' ')
+  assert_true "≤ 8,000 bytes ($bytes)" test "$bytes" -le 8000
+  assert_contains "$(printf '%s\n' "$LG_OUT" | head -n 1)" "…" "a long summary is cut, marked with …"
+  teardown
+}
+
+test_lg_find_ranks() {
+  echo "test: ledger find — 3 × key/summary + 2 × H1/slug + 1 × first paragraph per word; top 15"
+  lg_fixture
+  lg_enable
+  lg_registry "$LG_REG_APP_CORE"
+  lg_item docs/issues/a.md "key: app-1" "ledger: app" "status: Open" "severity: P2" "summary: Cart totals are wrong after an edit"
+  lg_item docs/issues/cart-totals.md "key: app-2" "ledger: app" "status: Open" "severity: P2" "summary: Something unrelated here"
+  lg_item docs/issues/c.md "key: app-3" "ledger: app" "status: Open" "severity: P2" "summary: Other issue entirely"
+  printf '\nThe CART TOTALS drift.\n' >> docs/issues/c.md
+  lg_item docs/issues/d.md "key: app-4" "ledger: app" "status: Open" "severity: P2" "summary: Cart badge flickers"
+  lg_item docs/issues/e.md "key: app-5" "ledger: app" "status: Open" "severity: P2" "summary: Nothing here"
+  lg_item docs/issues/f.md "key: app-6" "ledger: app" "status: Open" "severity: P0" "summary: Cart badge is blank"
+  git add -A && git commit -qm items
+  lg find cart totals
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_eq "app-1|app-2|app-6|app-4|app-3" "$(lg_col "$LG_OUT" 2)" "ranked by score; a tie by severity"
+  assert_eq "6|4|3|3|2" "$(lg_col "$LG_OUT" 1)" "the scores"
+  lg find 'CART Totals'
+  assert_eq "app-1|app-2|app-6|app-4|app-3" "$(lg_col "$LG_OUT" 2)" "case-insensitive; one quoted argument splits on spaces"
+  lg find app-5
+  assert_eq "app-5" "$(lg_col "$LG_OUT" 2)" "the key is searched"
+  lg find zzz
+  assert_eq "0" "$LG_RC" "no match: exit 0"
+  assert_eq "no items match" "$LG_OUT" "no match: one line"
+  lg find
+  assert_eq "3" "$LG_RC" "no words: usage (3)"
+  lg find cart --format json
+  assert_eq "1" "$(json_count "$LG_OUT")" "JSON: one object"
+  assert_json_field "$LG_OUT" '[.matches, (.items | length), .items[0].score, .items[0].key] | tojson' \
+    '[5,5,3,"app-6"]' "JSON: matches, items, score"
+  local i
+  for i in 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20; do
+    lg_item "docs/issues/z$i.md" "key: core-$i" "ledger: core" "status: Open" "severity: P3" "summary: Zebra stripes $i"
+  done
+  lg find zebra
+  assert_eq "16" "$(lg_lines "$LG_OUT")" "top 15 and a count line"
+  assert_eq "… 5 more matches" "$(printf '%s\n' "$LG_OUT" | tail -n 1)" "the count line"
+  lg find zebra --format json
+  assert_json_field "$LG_OUT" '[.matches, (.items | length)] | tojson' '[20,15]' "JSON: top 15 of 20"
+  teardown
+}
+
+test_lg_smoke_budgets() {
+  echo "test: scripts/bench-ledger.sh at 300 items — every budget ×3 (CI smoke)"
+  local out rc=0 bench="$REPO_DIR/scripts/bench-ledger.sh"
+  out=$("$BASH_BIN" "$bench" --scale 3 --history-commits 300 300 2>&1) || rc=$?
+  assert_eq "0" "$rc" "bench-ledger.sh 300 --scale 3 exits 0"
+  assert_contains "$out" "bench-ledger: ok" "…and says ok"
+  local row
+  for row in "ls " "ls --ledger" "show " "find " "refs step" "index --staged (20 staged)" \
+      "index --staged (400 staged)" "validate --staged (20 staged)" "history: cold index" "history: dates log --full-history"; do
+    assert_contains "$out" "$row" "a row for '$row'"
+  done
+  if [ "$rc" != 0 ]; then printf '%s\n' "$out" | sed 's/^/    | /'; fi
+  "$BASH_BIN" "$bench" 2>/dev/null && rc=0 || rc=$?
+  assert_eq "3" "$rc" "no N: usage (3)"
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -2307,6 +2589,13 @@ run_tests() {
 
   # --- Task 4 fix round 3 ---
   test_lg_index_dates_treesame_merge
+
+  # --- Task 5: show, ls, find, bench ---
+  test_lg_show_limits
+  test_lg_ls_filters_and_order
+  test_lg_ls_output_budget
+  test_lg_find_ranks
+  test_lg_smoke_budgets
 
   print_summary
 }

@@ -24,6 +24,8 @@ _LG_CACHE=""         # $(git rev-parse --git-common-dir)/doc-superpowers/ledger
 . "$_LG_LIB/validate.sh"
 # shellcheck source=scripts/ledger/index.sh
 . "$_LG_LIB/index.sh"
+# shellcheck source=scripts/ledger/query.sh
+. "$_LG_LIB/query.sh"
 
 # _lg_die <message>: the run could not run — exit 2, with the verdict object
 # in --format json (exactly once, inside $(…) too: the marker file tells the
@@ -202,9 +204,7 @@ _lg_stub() {
   _lg_init "$_LG_VERB"
   _lg_die "not implemented"
 }
-cmd_ledger_show() { _lg_stub "$@"; }
-cmd_ledger_ls() { _lg_stub "$@"; }
-cmd_ledger_find() { _lg_stub "$@"; }
+# show, ls, find: query.sh.
 cmd_ledger_related() { _lg_stub "$@"; }
 cmd_ledger_sweep() { _lg_stub "$@"; }
 cmd_ledger_recheck() { _lg_stub "$@"; }

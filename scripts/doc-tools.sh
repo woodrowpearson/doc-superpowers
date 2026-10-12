@@ -2329,19 +2329,27 @@ claims rulings|cmd_claims_rulings|repo|range= format= base=
   as Markdown for a PR description, under "## Spec amendments (N)",
   instead of the verdict object.
 ledger show|cmd_ledger_show|repo|format=
-  <key|alias|legacy-ref|path> [--format text|json]
+  <key|path> [--format text|json]
   One work-ledger item in at most 25 lines: key, ledger, severity,
-  status, summary, derived status, links, upstream and downstream
-  items, in-flight claims. Accepts "checkout-14", "checkout 14" and
-  "checkout #14". Every ledger verb is inert (exit 0) without
-  docs/ledger/config.json; see "Work ledger".
-ledger ls|cmd_ledger_ls|repo|format=
-  [--format text|json]
-  One line per work-ledger item.
+  derived status, summary, specs, plans, handoffs, contracts, relations,
+  and the first resolution line of a closed item. <key> is matched
+  case-insensitively; <path> is from the top level (a path stem, as ls
+  prints for an item without a key, works too). Unknown: exit 1. Every
+  ledger verb is inert (exit 0) without docs/ledger/config.json; see
+  "Work ledger".
+ledger ls|cmd_ledger_ls|repo|ledger= sev= open status= cluster= format=
+  [--ledger <id>] [--sev <a,b>] [--open] [--status <s>] [--cluster <contract>] [--format text|json]
+  One line per work-ledger item, "<key>  <severity>  <status>  <summary>",
+  by severity then date. --sev takes a comma list; --open keeps the
+  open-class items; --status a derived status (shipped, merged, planned,
+  "not started", …); --cluster an item's primary contract (the first of
+  changes, else of consumes) or "unclustered". JSON: {"items":[…]}.
 ledger find|cmd_ledger_find|repo|format=
   <words>... [--format text|json]
   Ranked fuzzy match over key, summary, file-name slug, H1 and first
-  paragraph: the item whose name you cannot remember.
+  paragraph: the item whose name you cannot remember. Per word: 3 in the
+  key or summary, 2 in the H1 or file name, 1 in the first paragraph;
+  the top 15 with their scores.
 ledger related|cmd_ledger_related|repo|format=
   <key> [--format text|json]
   An item's siblings, upstream and downstream items, and unconfirmed
