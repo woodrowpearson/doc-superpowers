@@ -147,6 +147,10 @@ jobs:
         run: |
           "$BASH_BIN" scripts/test-spec-claims.sh
 
+      - name: test-ledger.sh
+        run: |
+          "$BASH_BIN" scripts/test-ledger.sh
+
       # This repository installs its own CI tier (scripts/hooks/install.sh
       # install --ci), and nothing else notices those copies going stale: for
       # months its freshness workflows called a .github/scripts/doc-tools.sh
