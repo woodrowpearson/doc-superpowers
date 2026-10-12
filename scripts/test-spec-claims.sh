@@ -5220,13 +5220,11 @@ plan_task() {
   printf '\n### Task %s: %s\n\n' "$_PLAN_TASK" "$1"
 }
 
-# plan_specs: an injected Specs list naming the fixture spec as target.
+# plan_specs: an injected Specs list naming the fixture spec as $PLAN_ROLE
+# (default target).
 plan_specs() {
-  cat <<'EOF'
-**Specs** (roles copied from `--specs`; `infer` = resolve against `git diff` when this task runs):
-- docs/specs/SPEC-AUTH-001-token.md — target
-
-EOF
+  printf '%s\n' '**Specs** (roles copied from `--specs`; `infer` = resolve against `git diff` when this task runs):'
+  printf -- '- docs/specs/SPEC-AUTH-001-token.md — %s\n\n' "${PLAN_ROLE:-target}"
 }
 
 # shellcheck disable=SC2016  # Markdown backticks, not command substitution
@@ -5701,6 +5699,159 @@ test_v12_base_unresolvable_gate_carrying_only() {
   teardown
 }
 
+# --- V6 direction policy (Task 15) ----------------------------------------------
+
+POLICY_CHUNK_REC=docs/spec-claims/gates/$PLAN_STEM/chunk-1.json
+POLICY_FINAL_REC=docs/spec-claims/gates/$PLAN_STEM/final.json
+
+# policy_fixture <role> [<record>]: the fixture, the default plan listing the
+# fixture spec as <role>, the gate record file <record> (default chunk 1's),
+# and a new DOC-STALE ruling that names it. Nothing is staged or committed.
+policy_fixture() {
+  local role="$1" rec="${2:-$POLICY_CHUNK_REC}"
+  claims_fixture
+  policy_plan "$role"
+  policy_record "$rec"
+}
+
+# policy_plan <role>: (re)write the default plan with the spec listed as <role>.
+policy_plan() {
+  PLAN_ROLE="$1"
+  # shellcheck disable=SC2086  # the block list splits on spaces
+  plan_write -- $PLAN_DEFAULT
+  unset PLAN_ROLE
+}
+
+# policy_record <record>: the file <record>, and the fixture ruling naming it.
+policy_record() {
+  mkdir -p "$(dirname "$1")"
+  printf '{"result":"pass"}\n' > "$1"
+  jset "$SIDECAR" ".claims[0].rulings = [$_CL_DOC_STALE] | .claims[0].rulings[0].record = \"$1\""
+}
+
+test_v6_in_plan_ruling_requires_gate_record_of_listing_plan() {
+  echo "test: V6 — a ruling on a gate record needs a plan that lists the doc as target, infer or amends"
+  policy_fixture constraint
+  cl validate --all
+  assert_v6 "gate record of a plan that does not govern $DOC" "--all: the plan lists the spec as constraint"
+  git add -A
+  cl validate --staged
+  assert_v6 "gate record of a plan that does not govern $DOC" "--staged: the same"
+  policy_plan target
+  cl validate --all
+  assert_v6_ok "--all: the plan lists the spec as target"
+  git add -A
+  cl validate --staged
+  assert_v6_ok "--staged: the same"
+  policy_plan amends
+  cl validate --all
+  assert_v6_ok "--all: the plan lists the spec as amends"
+  # The record of a stem no plan has.
+  policy_plan target
+  policy_record "docs/spec-claims/gates/2026-02-02-other/chunk-3.json"
+  cl validate --all
+  assert_v6 "gate record of a plan that does not govern $DOC" "a gate record of a plan that is not there"
+  # A plan that exists but does not list the doc at all.
+  policy_record "$POLICY_CHUNK_REC"
+  plan_write -- head chunk1 impl2 gate1 update_nospecs
+  cl validate --all
+  assert_v6 "gate record of a plan that does not govern $DOC" "the plan lists no governing specs"
+  teardown
+}
+
+test_v6_in_plan_ruling_infer_role_ok() {
+  echo "test: V6 — an infer-role plan governs the doc, as V12's decomposition check treats it"
+  policy_fixture infer
+  cl validate --all
+  assert_v6_ok "--all: the plan lists the spec as infer"
+  git add -A
+  cl validate --staged
+  assert_v6_ok "--staged: the same"
+  teardown
+}
+
+test_v6_final_json_is_a_gate_record() {
+  echo "test: V6 — final.json is a gate record, so a ruling on it is never outside a plan"
+  policy_fixture target "$POLICY_FINAL_REC"
+  jset docs/spec-claims/config.json '.policy.doc_stale_outside_plan_requires = "doc-owner"'
+  jset "$SIDECAR" '.claims[0].rulings[0].by = "someone"'
+  cl validate --all
+  assert_v6_ok "final.json of a plan that lists the spec as target, by someone else"
+  policy_plan constraint
+  cl validate --all
+  assert_v6 "gate record of a plan that does not govern $DOC" "final.json of a plan that lists the spec as constraint"
+  assert_not_contains "$(v6_messages)" "outside a plan" "…and not an outside-a-plan finding"
+  teardown
+}
+
+test_v6_gate_record_matched_structurally() {
+  echo "test: V6 — only docs/spec-claims/gates/<stem>/chunk-<n>.json and final.json are gate records"
+  policy_fixture constraint
+  jset docs/spec-claims/config.json '.policy.doc_stale_outside_plan_requires = "doc-owner"'
+  jset "$SIDECAR" '.claims[0].rulings[0].by = "someone"'
+  local rec g=docs/spec-claims/gates/$PLAN_STEM
+  for rec in "$g/chunk-0.json" "$g/chunk-01.json" "$g/chunk-x.json" "$g/chunk-.json" "$g/chunk-1.json.bak" \
+      "$g/final.jsonl" "$g/sub/chunk-1.json" "docs/spec-claims/gates/chunk-1.json" \
+      "docs/issues/$g/chunk-1.json" "x$g/chunk-1.json"; do
+    policy_record "$rec"
+    jset "$SIDECAR" '.claims[0].rulings[0].by = "someone"'
+    cl validate --all
+    assert_v6 "outside a plan, DOC-STALE needs doc-owner" "$rec is not a gate record"
+    assert_not_contains "$(v6_messages)" "does not govern" "$rec: …so no plan is consulted"
+  done
+  teardown
+}
+
+test_v6_outside_plan_requires_principal() {
+  echo "test: V6 — outside a plan, policy.doc_stale_outside_plan_requires names who may rule"
+  claims_fixture
+  jset docs/spec-claims/config.json '.policy.doc_stale_outside_plan_requires = "doc-owner"'
+  jset "$SIDECAR" ".claims[0].rulings = [$_CL_DOC_STALE] | .claims[0].rulings[0].by = \"someone\""
+  cl validate --all
+  assert_v6 "outside a plan, DOC-STALE needs doc-owner" "--all: ruled by someone"
+  git add -A
+  cl validate --staged
+  assert_v6 "outside a plan, DOC-STALE needs doc-owner" "--staged: ruled by someone"
+  jset "$SIDECAR" '.claims[0].rulings[0].by = "doc-owner"'
+  cl validate --all
+  assert_v6_ok "--all: ruled by doc-owner"
+  git add -A
+  cl validate --staged
+  assert_v6_ok "--staged: ruled by doc-owner"
+  # Unset (null, the default): any principal.
+  jset docs/spec-claims/config.json '.policy.doc_stale_outside_plan_requires = null'
+  jset "$SIDECAR" '.claims[0].rulings[0].by = "someone"'
+  cl validate --all
+  assert_v6_ok "no principal required"
+  teardown
+}
+
+test_v6_policy_off_allows_any_record() {
+  echo "test: V6 — with in_plan_ruling_requires_gate_record false, a gate record of any plan is accepted"
+  policy_fixture constraint
+  jset docs/spec-claims/config.json '.policy.in_plan_ruling_requires_gate_record = false'
+  cl validate --all
+  assert_v6_ok "--all: a gate record of a plan listing the spec as constraint"
+  policy_record "docs/spec-claims/gates/2026-02-02-other/chunk-3.json"
+  cl validate --all
+  assert_v6_ok "--all: a gate record of no plan at all"
+  # The record must still exist.
+  /bin/rm -f docs/spec-claims/gates/2026-02-02-other/chunk-3.json
+  cl validate --all
+  assert_v6 "does not exist" "…but it must exist"
+  teardown
+}
+
+test_v6_gate_record_symlink_not_followed() {
+  echo "test: V6 — a ruling record that is a symlink out of the work tree does not exist (--all)"
+  policy_fixture target
+  /bin/rm -f "$POLICY_CHUNK_REC"
+  ln -s /etc/hosts "$POLICY_CHUNK_REC"
+  cl validate --all
+  assert_v6 "does not exist" "a symlinked gate record"
+  teardown
+}
+
 # parse_plan <path> <source>: _claims_plan_parse's JSON, run inside a probed
 # doc-tools (the parser is not a verb).
 parse_plan() {
@@ -6085,6 +6236,13 @@ run_tests() {
   test_v12_completed_at_base_exempt_from_every_check
   test_v12_historical_completed_plan_not_finding
   test_v12_base_unresolvable_gate_carrying_only
+  test_v6_in_plan_ruling_requires_gate_record_of_listing_plan
+  test_v6_in_plan_ruling_infer_role_ok
+  test_v6_final_json_is_a_gate_record
+  test_v6_gate_record_matched_structurally
+  test_v6_outside_plan_requires_principal
+  test_v6_policy_off_allows_any_record
+  test_v6_gate_record_symlink_not_followed
 
   print_summary
 }
