@@ -2505,9 +2505,10 @@ test_lg_status_labels_shared() {
   lg_fixture
   lg_enable
   local q i want
-  # shellcheck disable=SC2031  # read inside the lg_source subshells, where they are set
   want='["superseded","won'"'"'t fix","closed","shipped","merged","in review","on branch","planned","spec'"'"'d","not started"]'
+  # shellcheck disable=SC2031  # read inside the lg_source subshell, where it is set
   q=$( lg_source; jq -nc "$_LG_JQ_QUERY_DEFS"'[lg_status_labels[]]' )
+  # shellcheck disable=SC2031  # read inside the lg_source subshell, where it is set
   i=$( lg_source; jq -nc "$_LG_JQ_INDEX_DEFS"'[lg_status_labels[]]' )
   assert_eq "$want" "$q" "query.sh's labels"
   assert_eq "$q" "$i" "index.sh's labels are the same"
@@ -2583,8 +2584,8 @@ lg_hex4() {
 # <secs> seconds, then reap it with harness_kill_after (which signals it if it
 # is still running); its exit code is the return value.
 lg_wait_job() {
-  local secs="$1" pid="$2" n=0 max rc=0
-  max=$((secs * 10))
+  local limit="$1" pid="$2" n=0 max rc=0
+  max=$((limit * 10))
   while [ "$n" -lt "$max" ] && kill -0 "$pid" 2>/dev/null; do
     sleep 0.1
     n=$((n + 1))
@@ -2705,12 +2706,20 @@ test_lg_resolve_ambiguous() {
 }
 
 test_lg_alloc_seeds_from_base() {
-  echo "test: first allocation seeds a ledger from the highest key on the base (x-1, x-5 → x-6)"
+  echo "test: first allocation seeds a ledger from the highest key on the base (x-1, x-5 → x-6), fetched first"
   lg_keys_fixture
+  local c2 here
+  # The items reach the remote from another clone: this clone's origin/main
+  # is stale until the seeding fetches it.
+  c2=$(harness_mktemp_d seedclone)/c
+  lg_clone "$c2"
+  here=$PWD
+  cd "$c2"
   lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: A"
   lg_item docs/issues/b.md "key: x-5" "ledger: x" "status: Fixed" "summary: B"
   lg_item docs/issues/c.md "key: y-2" "ledger: y" "status: Open" "summary: C" "aliases: [y-7]"
-  git add -A && git commit -qm items && git push -q origin main && git fetch -q origin
+  git add -A && git commit -qm items && git push -q origin main
+  cd "$here"
   # Not on the base: an uncommitted item with a higher key.
   lg_item docs/issues/d.md "key: x-9" "ledger: x" "status: Open" "summary: D"
   assert_eq "absent" "$(lg_remote_counters)" "no counter ref yet"
@@ -2762,6 +2771,8 @@ lg_alloc_job() {
   local dir="$1" n="$2"
   TEST_DIR=$dir
   lg_source
+  # A loaded host must not turn a race into a spurious "gave up".
+  _LG_ALLOC_RETRIES=10
   local i=0
   while [ "$i" -lt "$n" ]; do
     _lg_alloc x 1 docs/issues/r.md
@@ -2856,6 +2867,11 @@ test_lg_counter_push_no_verify() {
   lg_call _lg_alloc x 1 docs/issues/n.md
   assert_eq "0|x	x-1" "$LG_RC|$LG_OUT" "allocated despite a failing pre-push hook"
   assert_eq '{"x":2}' "$(lg_remote_counters)" "the counter ref was pushed"
+  # Reads go where the push goes: remote.origin.pushurl over url.
+  git config remote.origin.pushurl "$LG_REMOTE"
+  git config remote.origin.url "$TEST_DIR/no-such-remote.git"
+  lg_call _lg_alloc x 1 docs/issues/n.md
+  assert_eq "0|x	x-2" "$LG_RC|$LG_OUT" "the counter is read from the push URL (no provisional key)"
   teardown
 }
 
@@ -2891,6 +2907,7 @@ test_lg_merge_mode_provisional_and_finalize() {
   printf '\n## Resolution\n\nReplaced.\n' >> docs/issues/m.md
   lg_item docs/issues/q.md "key: y-1" "ledger: y" "status: Open" "summary: Quiet" "relates:" "  - sibling:x-~$h1"
   lg_item docs/issues/u.md "key: x-1" "ledger: x" "status: Open" "summary: Untouched"
+  lg_item docs/issues/al.md "key: z-1" "ledger: z" "status: Open" "summary: Aliased" "aliases: [old-1, y-~$h2]"
   git add -A && git commit -qm "items with provisional keys"
   before=$(git rev-parse HEAD)
   body_m=$(lg_tail_hash docs/issues/m.md 8)
@@ -2901,7 +2918,8 @@ test_lg_merge_mode_provisional_and_finalize() {
   assert_contains "$LG_OUT" "y-~$h2 → y-2" "y's provisional → y-2"
   assert_eq "$before" "$(git rev-parse HEAD~1)" "one new commit"
   assert_eq "ledger: finalize 2 keys" "$(git log -1 --format=%s)" "its message"
-  assert_eq "docs/issues/m.md
+  assert_eq "docs/issues/al.md
+docs/issues/m.md
 docs/issues/n.md
 docs/issues/o.md
 docs/issues/q.md
@@ -2913,6 +2931,7 @@ docs/ledger/finalized.json" "$(git show --name-only --format= HEAD | sort)" "it 
   assert_contains "$(cat docs/issues/m.md)" "relates: [sibling:y-2, root-cause:x-3]" "m.md: relates"
   assert_contains "$(cat docs/issues/q.md)" "relates:
   - \"sibling:x-4\"" "q.md: a block list stays a block list"
+  assert_contains "$(cat docs/issues/al.md)" "aliases: [old-1, y-2]" "al.md: an alias rewritten"
   assert_eq "$body_m" "$(lg_tail_hash docs/issues/m.md 8)" "m.md: the body is byte-identical"
   assert_eq "$body_q" "$(lg_tail_hash docs/issues/q.md 8)" "q.md: the body is byte-identical"
   after=$(cat docs/ledger/finalized.json)
@@ -2931,6 +2950,16 @@ docs/ledger/finalized.json" "$(git show --name-only --format= HEAD | sort)" "it 
   lg_item docs/issues/s.md "key: x-~beef" "ledger: x" "status: Open" "summary: Side"
   lg finalize
   assert_eq "3" "$LG_RC" "merge mode off the base → usage (3)"
+  lg new --finalize --file docs/issues/s.md
+  assert_eq "2" "$LG_RC" "new --finalize off the base → 2"
+  assert_contains "$LG_ERR" "on the base" "…saying why"
+  printf '# T\n' > docs/issues/t.md
+  lg new --ledger x --summary "Needs a real key" --file docs/issues/t.md --finalize
+  assert_eq "2" "$LG_RC" "new --finalize of a keyless item off the base → 2"
+  assert_eq "# T" "$(cat docs/issues/t.md)" "…nothing written"
+  git checkout -q main
+  lg new --ledger x --summary "Real key on the base" --file docs/issues/t.md --finalize
+  assert_eq "0|x-5  docs/issues/t.md" "$LG_RC|$LG_OUT" "new --finalize on the base: the next real key"
   teardown
 }
 
@@ -3030,6 +3059,17 @@ test_lg_assign_moves_old_key_to_aliases() {
   assert_eq "1" "$LG_RC" "an unknown item → rc 1"
   lg assign y-1
   assert_eq "3" "$LG_RC" "a missing ledger argument → usage (3)"
+  # A provisional old key: its references follow it, it is recorded as
+  # finalized, and it is never kept as an alias.
+  lg_item docs/issues/p.md "key: x-~abcd" "ledger: x" "status: Open" "summary: Pending"
+  lg_item docs/issues/r.md "key: x-9" "ledger: x" "status: Open" "summary: Refers" "relates: [sibling:x-~abcd]"
+  lg assign x-~abcd y
+  assert_eq "0" "$LG_RC" "assign an item with a provisional key"
+  assert_eq "y-2  docs/issues/p.md  (was x-~abcd)" "$LG_OUT" "…a new key"
+  assert_contains "$(cat docs/issues/p.md)" "key: y-2" "p.md: the new key"
+  assert_not_contains "$(cat docs/issues/p.md)" "aliases" "p.md: no provisional alias"
+  assert_contains "$(cat docs/issues/r.md)" "relates: [sibling:y-2]" "r.md: the reference follows"
+  assert_eq '{"x-~abcd":"y-2"}' "$(jq -c . docs/ledger/finalized.json)" "finalized.json records it"
   teardown
 }
 
@@ -3071,6 +3111,52 @@ test_lg_cas_finalize_and_provisional_in_range() {
   \"x-~$h\": \"x-1\"
 }" "$(cat docs/ledger/finalized.json)" "finalized.json, sorted"
   assert_true "cas mode commits nothing" test -n "$(git status --porcelain docs/issues/n.md)"
+  teardown
+}
+
+test_lg_finalize_crash_safe_and_resumable() {
+  echo "test: finalize checks every file before writing; a run cut short completes with the same keys"
+  lg_keys_fixture
+  lg_item docs/issues/n.md "key: x-~aaaa" "ledger: x" "status: Open" "summary: New"
+  lg_item docs/issues/a.md "key: y-1" "ledger: y" "status: Open" "summary: A" "relates: [sibling:x-~aaaa]"
+  lg_item docs/issues/b.md "key: y-2" "ledger: y" "status: Open" "summary: B" "relates: [sibling:x-~aaaa]" \
+    "relates: [depends-on:x-~aaaa]"
+  local hn ha hb
+  hn=$(hash_file docs/issues/n.md)
+  ha=$(hash_file docs/issues/a.md)
+  hb=$(hash_file docs/issues/b.md)
+  lg finalize
+  assert_eq "2" "$LG_RC" "a rejected field in the second file → 2"
+  assert_contains "$LG_ERR" "docs/issues/b.md" "…naming the file"
+  assert_eq "$hn|$ha|$hb" "$(hash_file docs/issues/n.md)|$(hash_file docs/issues/a.md)|$(hash_file docs/issues/b.md)" \
+    "nothing was rewritten"
+  assert_file_not_exists docs/ledger/finalized.json "nothing recorded"
+  assert_eq "absent" "$(lg_remote_counters)" "nothing allocated"
+  lg_item docs/issues/b.md "key: y-2" "ledger: y" "status: Open" "summary: B" "relates: [depends-on:x-~aaaa]"
+  lg finalize
+  assert_eq "0" "$LG_RC" "fixed: finalize completes"
+  assert_contains "$LG_OUT" "x-~aaaa → x-1" "x-1"
+  assert_contains "$(cat docs/issues/b.md)" "relates: [depends-on:x-1]" "b.md rewritten"
+  assert_contains "$(cat docs/issues/a.md)" "relates: [sibling:x-1]" "a.md rewritten"
+  # A run cut short after recording finalized.json: the re-run reuses the
+  # recorded key and allocates nothing.
+  lg_item docs/issues/o.md "key: x-~bbbb" "ledger: x" "status: Open" "summary: Other"
+  lg_item docs/issues/c.md "key: y-3" "ledger: y" "status: Open" "summary: C" "relates: [sibling:x-~bbbb]"
+  jq -S '. + {"x-~bbbb": "x-7"}' docs/ledger/finalized.json > docs/ledger/f.tmp && mv docs/ledger/f.tmp docs/ledger/finalized.json
+  lg_call _lg_resolve "x-~bbbb"
+  assert_eq "0|docs/issues/o.md" "$LG_RC|$LG_OUT" "the intermediate state resolves"
+  lg finalize
+  assert_eq "0" "$LG_RC" "the re-run completes"
+  assert_contains "$LG_OUT" "x-~bbbb → x-7" "…with the recorded key"
+  assert_contains "$(cat docs/issues/o.md)" "key: x-7" "o.md"
+  assert_contains "$(cat docs/issues/c.md)" "relates: [sibling:x-7]" "c.md"
+  assert_eq '{"x":2}' "$(lg_remote_counters)" "nothing allocated again"
+  # A reference an interrupted run left behind is rewritten too.
+  lg_item docs/issues/d.md "key: y-4" "ledger: y" "status: Open" "summary: D" "relates: [sibling:x-~aaaa]"
+  lg finalize
+  assert_eq "0" "$LG_RC" "no provisional keys, one stale reference"
+  assert_contains "$(cat docs/issues/d.md)" "relates: [sibling:x-1]" "d.md rewritten"
+  assert_contains "$LG_OUT" "references" "…and said so"
   teardown
 }
 
@@ -3194,6 +3280,7 @@ run_tests() {
   test_lg_assign_moves_old_key_to_aliases
   test_lg_counter_push_no_verify
   test_lg_cas_finalize_and_provisional_in_range
+  test_lg_finalize_crash_safe_and_resumable
 
   print_summary
 }
