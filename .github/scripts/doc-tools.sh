@@ -2202,7 +2202,10 @@ claims promote|cmd_claims_promote|repo|reverify all base=
 claims render|cmd_claims_render|repo|check base=
   [--check] [--base <ref>]
   Write the generated "## Claim status" block of each doc that has a
-  sidecar; --check writes nothing and reports each block that differs.
+  sidecar (results: {doc, changed}); --check writes nothing and reports
+  each block that differs as a V11 finding. A sidecar whose doc is
+  missing or not governing is skipped (results: {doc, skipped}): its doc
+  is never written, nor created.
 claims gate|cmd_claims_gate|repo|plan= chunk= from= holds=* by= base=
   --plan <plan> --chunk <n> [--from <rev>] [--holds <id>...] [--by <principal>] [--base <ref>]
   Run a plan chunk's claims gate and record it in
@@ -6711,6 +6714,155 @@ _claims_v6() {
   _claims_jq v6-advisories -c 'select(has("code"))' "$out" >> "$_SCRATCH/cl-advisories.jsonl"
 }
 
+# --- Spec claims: the status block, render, V11 --------------------------------
+#
+# A doc with an eligible sidecar carries a generated block (§B), between the
+# markers <!-- spec-claims:status:begin --> and <!-- spec-claims:status:end -->:
+# a "## Claim status" heading, then a table of the claims that are neither
+# built nor retired (sorted by id), or the single line "Claims: N built" when
+# every non-retired claim is built. No dates, SHAs or live values, so it
+# changes only when a status (or a tracker) does. The first render puts it
+# immediately before the doc's second ## heading line outside a code fence
+# (claims_fence_kinds: the one fence rule V2 masks by), or, with none, at the
+# end of the file after one blank line; thereafter it replaces the span
+# between the markers, inclusive — the span V2's claims_live blanks, located
+# the same way (marker text, fences not consulted), so the block is never
+# live text. Markers that are not exactly one begin and, after it, one end
+# are a V11 finding; that doc is never written. A CRLF doc gets a CRLF block.
+# A sidecar that is not eligible (its doc missing or not governing in the
+# tree read: the V2 skip) or is malformed is skipped, so nothing is ever
+# written into an archived record and a missing doc is never created.
+
+# The rendered doc (raw on stdin; $s: the sidecar object, slurped; run after
+# _JQ_CLAIMS_NORM): a tag line — I (the block inserted), R (replaced) or E
+# (the markers are unusable) — then the new content, byte for byte (E: the
+# reason). A gated row names its condition, when's keys sorted:
+# "gated (when: KEY=VALUE, …)". Cells are one line, with "|" escaped.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_RENDER='def cl_str: if type == "string" then . else tojson end;
+ def cl_cell: cl_str | gsub("[\r\n]+"; " ") | gsub("\\|"; "\\|");
+ def cl_status_cell:
+   if .status == "gated" and (.when | type) == "object" and (.when | length) > 0
+   then "gated (when: \([.when | to_entries | sort_by(.key)[] | "\(.key)=\(.value | cl_str)"] | join(", ")))" | cl_cell
+   else .status | cl_cell end;
+ def cl_row: "| `\(.id | cl_cell)` | \(cl_status_cell) | \(if (.tracker | type) == "string" and .tracker != "" then .tracker | cl_cell else "—" end) |";
+ def claims_block($sc; $eol):
+   [$sc.claims[] | select(type == "object") | select(.status != "retired")] as $live
+   | (if all($live[]; .status == "built") then ["Claims: \($live | length) built"]
+      else ["| Claim | Status | Tracker |", "|---|---|---|"]
+        + ([$live[] | select(.status != "built")] | sort_by(.id | cl_str) | map(cl_row))
+      end) as $body
+   | ["<!-- spec-claims:status:begin -->", "## Claim status", ""] + $body + ["", "<!-- spec-claims:status:end -->"]
+   | join($eol);
+ "<!-- spec-claims:status:begin -->" as $b | "<!-- spec-claims:status:end -->" as $e
+ | (if test("\r\n") then "\r\n" else "\n" end) as $eol
+ | claims_block($s[0]; $eol) as $blk
+ | split($b) as $pb | split($e) as $pe
+ | if ($pb | length) == 1 and ($pe | length) == 1 then
+     (gsub("\r\n"; "\n") | claims_fence_kinds) as $k
+     | ([range(0; $k | length) | select($k[.].k == "out" and ($k[.].t | test("^ {0,3}##([ \t]|$)")))][1]) as $i
+     | if $i != null then
+         split("\n") as $ls
+         | "I\n" + ($ls[0:$i] + [$blk + (if $eol == "\r\n" then "\r" else "" end)] + $ls[$i:] | join("\n"))
+       elif . == "" then "I\n" + $blk + $eol
+       elif endswith("\n") then "I\n" + . + $eol + $blk + $eol
+       else "I\n" + . + $eol + $eol + $blk + $eol end
+   elif ($pb | length) == 2 and ($pe | length) == 2 and ($pb[0] | split($e) | length) == 1 then
+     "R\n" + $pb[0] + $blk + ($pb[1] | split($e))[1]
+   else "E\nthe status block markers are not one begin/end pair, begin first (found \(($pb | length) - 1) begin, \(($pe | length) - 1) end): fix them by hand, then run doc-tools.sh claims render"
+   end'
+
+_CL_RENDER_KIND=""  # _claims_render_doc's outcome: inserted | replaced | error
+_CL_RENDER_ERR=""   # why, when error
+
+# _claims_render_doc <doc> <sidecar-json-file>: print <doc>'s new content —
+# the doc read through _claims_read (the index under --staged), its status
+# block rendered from the sidecar object in <sidecar-json-file>. The doc as
+# read stays in $_SCRATCH/cl-render.raw for the caller's comparison. Returns
+# 1, printing nothing, when the markers are unusable (_CL_RENDER_ERR says
+# why). Sets _CL_RENDER_KIND, so call it in the main shell, its output
+# redirected to a file: $(…) would drop the content's trailing newlines.
+_claims_render_doc() {
+  local doc="$1" cur="$_SCRATCH/cl-render.raw" out="$_SCRATCH/cl-render.out" tag=""
+  _CL_RENDER_KIND=error
+  _CL_RENDER_ERR=""
+  _claims_read "$doc" > "$cur" || _claims_die "cannot read $doc (render)"
+  _claims_jq render -Rsj --slurpfile s "$2" "$_JQ_CLAIMS_NORM $_JQ_CLAIMS_RENDER" "$cur" > "$out"
+  IFS= read -r tag < "$out" || true
+  case "$tag" in
+    I) _CL_RENDER_KIND=inserted ;;
+    R) _CL_RENDER_KIND=replaced ;;
+    *)
+      _CL_RENDER_ERR=$(tail -n +2 "$out")
+      return 1
+      ;;
+  esac
+  tail -n +2 "$out"
+}
+
+# The sidecars whose blocks a run covers (on the cl-sidecars lines, $sum:
+# cl-sidecars.json for each one's skip): every sidecar, or under --staged
+# ($staged 1) only those the index changes. One line each: {sidecar, doc,
+# skip, data}.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_BLOCKS='$sum[0] as $sum | $st[0] as $st
+ | .[] | . as $l
+ | select($staged == 0 or any($st[]; . == $l.sidecar))
+ | {sidecar, doc, skip: ([$sum[] | select(.sidecar == $l.sidecar) | .skip][0]), data}'
+
+# _claims_blocks <write|check|validate>: each covered sidecar's doc rendered
+# (see the section comment). write replaces each doc whose render differs
+# (atomic); check and validate write nothing and report a V11 finding per
+# doc that differs. write and check add a result per sidecar — {doc,
+# changed} (check: whether render would change it) or {doc, skipped};
+# validate (V11) adds none, and covers only the staged sidecars under
+# --staged, comparing the staged doc with a render of the staged sidecar.
+_claims_blocks() {
+  local action="$1" staged=0 list="$_SCRATCH/cl-blocks" sc="$_SCRATCH/cl-block-sidecar.json"
+  local new="$_SCRATCH/cl-block.new" line doc skip changed row
+  if [ "$_CL_MODE" = staged ]; then staged=1; fi
+  _claims_jq blocks -sc --argjson staged "$staged" --slurpfile st "$_SCRATCH/cl-staged.json" \
+    --slurpfile sum "$_SCRATCH/cl-sidecars.json" "$_JQ_CLAIMS_BLOCKS" "$_SCRATCH/cl-sidecars.jsonl" > "$list"
+  while IFS= read -r line <&3; do
+    doc=$(_claims_jq block-doc -r '.doc // ""' <<<"$line") || _claims_propagate $?
+    skip=$(_claims_jq block-skip -r '.skip // ""' <<<"$line") || _claims_propagate $?
+    if [ -n "$skip" ]; then
+      if [ "$action" != validate ]; then
+        row=$(_claims_jq block-skipped -nc --arg doc "$doc" --arg skip "$skip" \
+          '{doc: (if $doc == "" then null else $doc end), skipped: $skip}') || _claims_propagate $?
+        _claims_result "$row"
+      fi
+      continue
+    fi
+    _claims_jq block-data -c '.data' <<<"$line" > "$sc"
+    changed=false
+    if ! _claims_render_doc "$doc" "$sc" > "$new"; then
+      _claims_finding V11 - "$doc" "$_CL_RENDER_ERR"
+    elif ! cmp -s "$new" "$_SCRATCH/cl-render.raw"; then
+      changed=true
+      case "$action" in
+        write)
+          _tmp_beside "$doc"
+          cat "$new" > "$_TMP" || _claims_die "cannot write the render of $doc"
+          _replace_file "$_TMP" "$doc"
+          ;;
+        *)
+          if [ "$_CL_RENDER_KIND" = inserted ]; then
+            _claims_finding V11 - "$doc" "no status block: run doc-tools.sh claims render"
+          else
+            _claims_finding V11 - "$doc" "the status block differs from its render (a status changed, or the block was edited by hand): run doc-tools.sh claims render"
+          fi
+          ;;
+      esac
+    fi
+    if [ "$action" != validate ]; then
+      row=$(_claims_jq block-result -nc --arg doc "$doc" --argjson c "$changed" \
+        '{doc: $doc, changed: $c}') || _claims_propagate $?
+      _claims_result "$row"
+    fi
+  done 3< "$list"
+}
+
 cmd_claims_validate() {
   local mode=all
   if [ "$_OPT_staged" = 1 ]; then mode=staged; fi
@@ -6726,6 +6878,7 @@ cmd_claims_validate() {
   _claims_v2
   _claims_v5
   _claims_v6
+  _claims_blocks validate
   _claims_emit validate
 }
 
@@ -6754,9 +6907,19 @@ cmd_claims_promote() {
   _claims_emit promote
 }
 
+# render: every eligible sidecar's doc gets its status block (_claims_blocks).
+# Every finding blocks: --check exits 1 on any doc that differs.
 cmd_claims_render() {
+  _CL_ALL_BLOCKING=1
   _claims_init all
   _claims_no_args "claims render" "$@"
+  _claims_load
+  _claims_touched
+  if [ "$_OPT_check" = 1 ]; then
+    _claims_blocks check
+  else
+    _claims_blocks write
+  fi
   _claims_emit render
 }
 
