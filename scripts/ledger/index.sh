@@ -16,8 +16,8 @@
 # The merged config is the run's (docs/ledger/config.json of the working
 # tree) in every mode. Dates come from HEAD's history (R's for --rev).
 #
-# Cache: $_LG_CACHE/index-<sha256>.json, the hash over the schema, this
-# code, the mode, HEAD, the base oid, the config, and — never by walking the
+# Cache: $_LG_CACHE/index-<sha256>.json, the hash over the schema, the
+# code (every file of scripts/ledger/), the mode, HEAD, the base oid, the config, and — never by walking the
 # items — the commit's tree (--rev), or git's listing (path, blob id) of
 # the directories holding the items, the candidate docs, the registry,
 # doc-index, legacy and finalized maps (--staged: the index's; worktree:
@@ -31,13 +31,19 @@
 # "index-build <name>", and "dates-hit" / "dates-cold" /
 # "dates-extend <oid>", to stderr.
 #
-# Dates: fields.date when it starts with YYYY-MM-DD, else the earliest date
-# git added the path — a rename (R) carries the old path's date, chained —
+# Dates: fields.date when it starts with YYYY-MM-DD, else the date git first
+# added the path — a rename (R) carries the old path's date, chained; a
+# path re-added after a rename moved its file away takes the later add —
 # from `git log --reverse --date=short --format=%ad --name-status -M
-# --diff-filter=AR` over the item globs' directories; the events are cached
-# in $_LG_CACHE/dates-<commit>.tsv and a new HEAD extends the newest cached
-# ancestor's. A path git never added (uncommitted) takes its file's mtime
-# (UTC). The same rename chain lets a link to a former path reach the item.
+# --diff-filter=AR` over the item globs' directories, replayed in order; the
+# events are cached in $_LG_CACHE/dates-<commit>.tsv and a new HEAD extends
+# the newest cached ancestor's. A path git never added (uncommitted) takes
+# its file's mtime (UTC). The same rename chain lets a link to a former path
+# reach the item.
+# Known deviation (cost): the log is limited to the item globs' directories,
+# so rename detection sees only moves within them — an item moved into the
+# item dirs from elsewhere is dated by the move, and links to its old path
+# (outside) are not followed.
 #
 # Docs: doc-index entries whose doc_type is in doc_columns.<col> (a list of
 # doc types, or an object {"doc_types": […], "globs": […]}; globs add the
@@ -223,7 +229,7 @@ _lg_ix_events() {
 # {"p","d"} per item with a date (git, else the file's mtime when <mtime>
 # is 1 and the working copy exists); <formers>: "<former>\n<item>" pairs.
 _lg_ix_dates() {
-  local commit="$1" items="$2" usemtime="$3" out="$4" formers="$5" s ev n m
+  local commit="$1" items="$2" usemtime="$3" out="$4" formers="$5" s ev n m p e
   _lg_scratch_name
   s=$_LG_SN
   ev=/dev/null
@@ -237,29 +243,27 @@ _lg_ix_dates() {
   LC_ALL=C awk -v ev="$_LG_AV" -v nodate="$s.nodate" -v formers="$formers" "$_LG_AWK_JS"'
     BEGIN {
       js_init()
+      # The events in order (oldest first: the cached part, then each
+      # extension). A: the first add dates a path; a path renamed away is
+      # vacated, so a later add there is a new item with its own date. R:
+      # the new path takes the old path date (chained), the old is vacated.
       while ((getline k < ev) > 0) {
         if (k == "A") {
           getline d < ev; getline p < ev
-          if (!(p in D) || d < D[p]) D[p] = d
+          if (!(p in D) || (p in VAC)) { D[p] = d; delete VAC[p] }
         } else if (k == "R") {
           getline d < ev; getline o < ev; getline p < ev
-          n++; RO[n] = o; RN[n] = p; RD[n] = d
+          D[p] = (o in D && !(o in VAC)) ? D[o] : d
+          delete VAC[p]
+          if (o != p) VAC[o] = 1
           PREV[p] = PREV[p] SUBSEP o
         }
       }
-      # A rename carries the old path date (chained, in any event order).
-      do {
-        ch = 0
-        for (i = 1; i <= n; i++) {
-          c = (RO[i] in D) ? D[RO[i]] : RD[i]
-          if (!(RN[i] in D) || c < D[RN[i]]) { D[RN[i]] = c; ch = 1 }
-        }
-      } while (ch)
       printf "" > nodate; printf "" > formers
     }
     {
       p = $0
-      if (p in D) print "{\"p\":" js(rep(p, SOH, "\n")) ",\"d\":" js(D[p]) "}"
+      if ((p in D) && !(p in VAC)) print "{\"p\":" js(rep(p, SOH, "\n")) ",\"d\":" js(D[p]) "}"
       else print p > nodate
       # The former paths of p: every path a rename chain leads from.
       if (!(p in PREV)) next
@@ -283,11 +287,22 @@ _lg_ix_dates() {
   done < "$s.nodate" > "$s.mt"
   [ -s "$s.mt" ] || return 0
   tr '\n' '\000' < "$s.mt" > "$s.mtz" || _lg_die "cannot write $s.mtz"
-  # GNU stat -c, else BSD stat -f (the line count check below catches a mix).
+  # GNU stat -c, else BSD stat -f, in one batch; when the batch does not
+  # line up (a file vanished meanwhile), one by one, skipping the vanished
+  # (they get no date).
   xargs -0 stat -c %Y -- < "$s.mtz" > "$s.ep" 2>/dev/null || xargs -0 stat -f %m -- < "$s.mtz" > "$s.ep" 2>/dev/null || true
   n=$(wc -l < "$s.mt")
   m=$(wc -l < "$s.ep")
-  [ "$n" -eq "$m" ] || _lg_die "cannot read the modification times of the uncommitted items"
+  if [ "$n" -ne "$m" ]; then
+    : > "$s.ep"
+    : > "$s.mt2"
+    while IFS= read -r p; do
+      e=$(stat -c %Y -- "$p" 2>/dev/null || stat -f %m -- "$p" 2>/dev/null) || continue
+      printf '%s\n' "$e" >> "$s.ep"
+      printf '%s\n' "$p" >> "$s.mt2"
+    done < "$s.mt"
+    mv -f "$s.mt2" "$s.mt" || _lg_die "cannot write $s.mt"
+  fi
   LC_ALL=C awk -v ep="$s.ep" "$_LG_AWK_JS"'
     # Days since 1970-01-01 → a civil date (proleptic Gregorian).
     function civil(t,   z, era, doe, yoe, y, doy, mp, dd, mm) {
@@ -575,7 +590,7 @@ def lg_item($F; $CT; $EX; $D; $L; $S; $DI; $terms):
      first_para: $r.first_para,
      resolution: $r.resolution,
      docs: $docs,
-     derived: (if $sup != null and $class != "open" then {status: "superseded", detail: $sup}
+     derived: (if $sup != null and $class == "closed" then {status: "superseded", detail: $sup}
                elif $class == "wontfix" then {status: "won'"'"'t fix", detail: null}
                elif $class == "closed" then {status: "closed", detail: null}
                elif $class == "fixed" then
@@ -624,7 +639,8 @@ _lg_ix_valid() {
 
 # --- Pruning -------------------------------------------------------------------------
 
-# _lg_ix_prune: keep the newest 3 index files (and their .refs); at most
+# _lg_ix_prune: keep the newest 3 index files by mtime (a hit touches its
+# file) and their .refs — and any modified in the last 10 minutes; at most
 # once a day: sweep parse temp dirs older than an hour, other parsers'
 # cache dirs untouched for 14 days, and parse entries older than 14 days
 # that no kept index references.
@@ -635,6 +651,9 @@ _lg_ix_prune() {
   # shellcheck disable=SC2012  # cache names are index-<hex>.json
   ls -t "$_LG_CACHE"/index-*.json 2>/dev/null | tail -n +4 > "$s.old" || true
   while IFS= read -r f; do
+    # Never one written or used in the last 10 minutes (a concurrent run
+    # may be about to read it).
+    if [ -n "$(find "$f" -mmin -10 2>/dev/null)" ]; then continue; fi
     rm -f "$f" "${f%.json}.refs"
   done < "$s.old"
   if [ -f "$stamp" ] && [ -n "$(find "$stamp" -mmin -1440 2>/dev/null)" ]; then return 0; fi
@@ -792,8 +811,11 @@ _lg_index() {
   # working tree, the blob id git would record for each modified or
   # untracked file there (_lg_ix_effective), and the bytes of the small
   # inputs.
-  printf '%s\0' "$_LG_LIB/index.sh" "$_LG_LIB/parse.sh" "$_LG_LIB/frontmatter.awk" "$_LG_LIB/glob.sh" \
-    "$_LG_CFG" > "$s.hashin"
+  # The code: every file of scripts/ledger/ (sorted by name).
+  for f in "$_LG_LIB"/*; do
+    if [ -f "$f" ]; then printf '%s\0' "$f"; fi
+  done > "$s.hashin"
+  printf '%s\0' "$_LG_CFG" >> "$s.hashin"
   : > "$s.dirtyids"
   if [ "$mode" != rev ]; then
     _lg_ix_key_specs "$di" "$legacy_path" "$s.specs"
@@ -817,7 +839,7 @@ _lg_index() {
     printf 'schema %s\nmode %s\nhead %s\nrev %s\ntree %s\nbase %s\nlegacy %s\n' \
       "$_LG_INDEX_SCHEMA" "$mode" "$head" "$commit" "$tree" "$base" "$legacy_path"
     cat "$s.smalls"
-    printf 'inputs: code x4, config[, listing[, the present small files]]\n'
+    printf 'inputs: code (scripts/ledger/*), config[, listing[, the present small files]]\n'
     cat "$s.hashes"
   } > "$s.key" || _lg_die "cannot write the index key"
   _hash_one "$s.key"
@@ -825,6 +847,8 @@ _lg_index() {
   name="$_LG_CACHE/index-$key.json"
   if _lg_ix_valid "$name"; then
     _lg_ix_trace "index-hit index-$key.json"
+    # A hit makes the file the newest: pruning keeps the newest by mtime.
+    touch -c "$name" "${name%.json}.refs" 2>/dev/null || true
     printf '%s\n' "$name"
     return 0
   fi

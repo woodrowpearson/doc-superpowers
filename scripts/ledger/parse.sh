@@ -210,7 +210,8 @@ _lg_parse_lst() {
 }
 
 # _lg_parse_emit <manifest> <out> <misses>: one pass over the cache. For each
-# manifest line ("<cache-key>\t<blob>\t<archived 0|1>\t<path>") whose entry
+# manifest line ("<cache-key>\t<blob>\t<archived 0|1>\t<path>"; the key may
+# list several, "|"-separated, tried in turn) whose entry
 # reads back as one record, its record to <out>; the other lines (no entry,
 # or one that is not a record) to <misses>.
 _lg_parse_emit() {
@@ -220,10 +221,17 @@ _lg_parse_emit() {
       t1 = index($0, "\t"); key = substr($0, 1, t1 - 1); r = substr($0, t1 + 1)
       t2 = index(r, "\t"); blob = substr(r, 1, t2 - 1); r = substr(r, t2 + 1)
       t3 = index(r, "\t"); arch = substr(r, 1, t3 - 1); p = substr(r, t3 + 1)
-      f = dir "/" key ".json"
-      e = ""
-      if ((getline e < f) <= 0 || e !~ /^\{"fm":\{.*\}$/) { close(f); print > miss; next }
-      close(f)
+      # key: one cache key, or several "|"-separated, tried in turn.
+      e = ""; ok = 0
+      while (key != "") {
+        k = index(key, "|")
+        if (k) { f = dir "/" substr(key, 1, k - 1) ".json"; key = substr(key, k + 1) }
+        else { f = dir "/" key ".json"; key = "" }
+        e = ""
+        if ((getline e < f) > 0 && e ~ /^\{"fm":\{.*\}$/) { close(f); ok = 1; break }
+        close(f)
+      }
+      if (!ok) { print > miss; next }
       print "{\"path\":" js(p) ",\"blob\":" js(blob) ",\"archived\":" (arch == "1" ? "true" : "false") "," substr(e, 2)
     }' "$1" > "$2" || _lg_die "cannot read the parse cache ($_LG_PARSE_DIR)"
 }
@@ -343,12 +351,14 @@ _lg_wt_ids() {
     }' "$in" > "$out" || _lg_die "cannot match the blob ids to $in"
 }
 
-# _lg_par_args <n>: xargs options into _LG_PAR — for <n> ≥ 400 files, up
-# to 4 parallel processes (-P) with the files split evenly (-n); else none.
+# _lg_par_args <n>: xargs options into _LG_PAR — for <n> ≥ 400 files
+# (DOC_TOOLS_LEDGER_PAR_MIN overrides the threshold), up to 4 parallel
+# processes (-P) with the files split evenly (-n); else none.
 _lg_par_args() {
-  local n="$1" cpus p
+  local n="$1" cpus p min="${DOC_TOOLS_LEDGER_PAR_MIN:-400}"
   _LG_PAR=()
-  [ "$n" -ge 400 ] 2>/dev/null || return 0
+  case "$min" in ''|*[!0123456789]*) min=400 ;; esac
+  [ "$n" -ge "$min" ] 2>/dev/null || return 0
   cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || cpus=1
   case "$cpus" in ''|*[!0123456789]*) cpus=1 ;; esac
   p=$cpus
@@ -479,13 +489,15 @@ _lg_parse_worktree() {
 
 # _lg_parse_blobs <rev> <paths-file> <out.jsonl>: the paths as <rev> holds
 # them — ":" for the index (stage 0), else a commit-ish — parsed with
-# git cat-file --batch (blob-id cache). The blob ids come from one listing
+# git cat-file --batch (blob-id cache; a blob whose id the blob id ->
+# sha256 map knows reuses the working-copy entry of the same bytes). The
+# blob ids come from one listing
 # of the paths' directories (git ls-files -s / git ls-tree -r), not a
 # lookup per path: <tree>:<path> scans the directory each time. A path
 # <rev> lacks (or holds as a symbolic link, a submodule, or unmerged) gets
 # an error record.
 _lg_parse_blobs() {
-  local rev="$1" paths="$2" out="$3" s where d imode=""
+  local rev="$1" paths="$2" out="$3" s where d imode="" map where_av
   local specs=()
   _lg_parse_prep
   _lg_scratch_name
@@ -529,9 +541,18 @@ _lg_parse_blobs() {
   _lg_awkv "$where"
   # "<mode> <oid> <stage>\t<path>" (ls-files -s) or "<mode> <type> <oid>\t<path>"
   # (ls-tree): the blob of each path, or why there is none.
-  LC_ALL=C awk -v ls="$s.ls" -v arch="$s.arch" -v err="$s.err" -v where="$_LG_AV" -v index_mode="$imode" "$_LG_AWK_JS"'
+  map="$_LG_CACHE/blob-sha256.tsv"
+  [ -f "$map" ] || map=/dev/null
+  where_av=$_LG_AV
+  _lg_awkv "$map"
+  LC_ALL=C awk -v ls="$s.ls" -v arch="$s.arch" -v err="$s.err" -v where="$where_av" -v index_mode="$imode" \
+      -v map="$_LG_AV" "$_LG_AWK_JS"'
     BEGIN {
       js_init()
+      while ((getline l < map) > 0) {
+        t = index(l, "\t")
+        if (t && substr(l, t + 1) ~ /^sha256:[0123456789abcdef]+$/) H[substr(l, 1, t - 1)] = substr(l, t + 1)
+      }
       while ((getline a < arch) > 0) A[a] = 1
       while ((getline l < ls) > 0) {
         t = index(l, "\t"); p = substr(l, t + 1); split(substr(l, 1, t - 1), f, " ")
@@ -549,7 +570,13 @@ _lg_parse_blobs() {
       }
     }
     {
-      if ($0 in OID) printf "b-%s\t%s\t%s\t%s\n", OID[$0], OID[$0], (($0 in A) ? 1 : 0), $0
+      if ($0 in OID) {
+        # A working copy parse of the same bytes (its c-<sha256> entry,
+        # found through the blob id -> sha256 map) serves the blob too.
+        o = OID[$0]; k = "b-" o
+        if (o in H) { h = H[o]; sub(/^sha256:/, "", h); k = "c-" h "|" k }
+        printf "%s\t%s\t%s\t%s\n", k, o, (($0 in A) ? 1 : 0), $0
+      }
       else print err_record($0, ($0 in WHY) ? WHY[$0] : "not found at " where) >> err
     }' "$s.ok" > "$s.man" || _lg_die "cannot list the blobs at $where"
   _lg_parse_finish "$s.man" "$s.err" "$out" _lg_parse_batch "$s"

@@ -981,12 +981,20 @@ lg_t_parse_cache_reuse() {
   DOC_TOOLS_LEDGER_TRACE=1 _lg_parse_worktree "$paths" "$out" 2> "$err"
   assert_eq "parse-miss docs/issues/c.md" "$(cat "$err")" "a corrupt cache entry is a miss"
   assert_json_field "$(cat "$out")" '.fm.key' "y-1" "…and the record is right"
-  # Blobs: keyed by blob id.
-  lg_nul_list "$paths" docs/issues/b.md
+  # Blobs: keyed by blob id. HEAD's a.md (x-1) has no valid working-copy
+  # entry any more (the bytes changed, and its old entry was corrupted).
+  lg_nul_list "$paths" docs/issues/a.md
   DOC_TOOLS_LEDGER_TRACE=1 _lg_parse_blobs HEAD "$paths" "$out" 2> "$err"
-  assert_eq "parse-miss docs/issues/b.md" "$(cat "$err")" "first blob parse: a miss"
+  assert_eq "parse-miss docs/issues/a.md" "$(cat "$err")" "first blob parse: a miss"
   DOC_TOOLS_LEDGER_TRACE=1 _lg_parse_blobs HEAD "$paths" "$out" 2> "$err"
   assert_eq "" "$(cat "$err")" "second blob parse: a hit"
+  assert_json_field "$(cat "$out")" '.fm.key' "x-1" "…with the right value"
+  assert_json_field "$(cat "$out")" '.blob' "$(git rev-parse HEAD:docs/issues/a.md)" "…and the blob id"
+  # b.md's committed bytes are what its working copy holds: the blob parse
+  # reuses that entry through the blob id -> sha256 map.
+  lg_nul_list "$paths" docs/issues/b.md
+  DOC_TOOLS_LEDGER_TRACE=1 _lg_parse_blobs HEAD "$paths" "$out" 2> "$err"
+  assert_eq "" "$(cat "$err")" "a blob whose bytes a working copy parse saw: a hit"
   assert_json_field "$(cat "$out")" '.fm.key' "y-1" "…with the right value"
 }
 
@@ -1441,7 +1449,7 @@ lg_t_index_fields() {
   assert_json_field "$(cat "$ix")" '.ledgers | map(.id) | join(",")' "app" "ledgers: the registry's"
   assert_json_field "$(cat "$ix")" '[.legacy, .finalized] | tojson' '[{},{}]' "legacy and finalized: {} when absent"
   assert_json_field "$(cat "$ix")" '.items | map(.path) | join("|")' \
-    "docs/issues/a.md|docs/issues/b.md|docs/issues/c.md|docs/issues/d.md|docs/issues/e.md|docs/issues/f.md|docs/issues/g.md|docs/issues/h.md" \
+    "docs/issues/a.md|docs/issues/b.md|docs/issues/c.md|docs/issues/d.md|docs/issues/e.md|docs/issues/f.md|docs/issues/g.md|docs/issues/h.md|docs/issues/i.md" \
     "items sorted by path"
   it=$(lg_ix_item "$ix" docs/issues/a.md)
   assert_json_field "$it" 'keys_unsorted | join(",")' \
@@ -1479,6 +1487,9 @@ lg_t_index_fields() {
   it=$(lg_ix_item "$ix" docs/issues/h.md)
   assert_json_field "$it" '[.status, .class] | tojson' '[null,"unknown"]' "no status → unknown"
   assert_json_field "$it" '.fm_errors | length' "1" "a frontmatter error is carried, not fatal"
+  it=$(lg_ix_item "$ix" docs/issues/i.md)
+  assert_json_field "$it" '[.class, .superseded_by, .derived.status] | tojson' '["fixed","app-1","shipped"]' \
+    "superseded_by on a fixed item: not superseded (that needs a closed-class status)"
 }
 
 test_lg_index_fields() {
@@ -1498,6 +1509,7 @@ test_lg_index_fields() {
   lg_item docs/issues/f.md "key: app-5" "ledger: app" "status: won't fix"
   lg_item docs/issues/g.md "key: app-6" "ledger: app" "status: Banana"
   lg_item docs/issues/h.md "key: app-7" "nested:" "  a: b"
+  lg_item docs/issues/i.md "key: app-8" "ledger: app" "status: Fixed" "superseded_by: app-1"
   git add -A && git commit -qm items
   lg_in lg_t_index_fields
   teardown
@@ -1656,6 +1668,9 @@ lg_t_index_renamed_link() {
     "a path re-used by a new item: a link to it is that item's"
   assert_json_field "$(lg_ix_item "$ix" docs/issues/y2.md)" '.docs.spec | tojson' '[]' \
     "…not the item that moved away from it"
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/y.md)" '.date' "2026-01-03" "the re-used path: its own (later) add date"
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/y2.md)" '.date' "2026-01-01" "the moved item keeps the first add date"
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/new.md)" '.date' "2026-01-01" "a chain of renames keeps the first add date"
 }
 
 test_lg_index_renamed_link() {
@@ -1788,7 +1803,8 @@ lg_t_index_cache() {
   p1=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err")
   assert_contains "$(cat "$err")" "index-hit" "the plan edit undone: the earlier cache file again"
   # shellcheck disable=SC2012  # cache names are hex
-  assert_eq "3" "$(ls "$_LG_CACHE"/index-*.json | wc -l | tr -d ' ')" "the newest 3 index files are kept"
+  assert_eq "7" "$(ls "$_LG_CACHE"/index-*.json | wc -l | tr -d ' ')" \
+    "all 7 were written in the last 10 minutes: none pruned (the keep-3 rule: test_lg_index_hit_survives_prune)"
   git add docs/plans/p.md docs/issues/a.md
   p=$(_lg_index)
   assert_eq "$p1" "$p" "staging the same bytes does not change the worktree index"
@@ -1970,6 +1986,150 @@ test_lg_parse_hash_map() {
   teardown
 }
 
+# --- Task 4 fix round 1 -------------------------------------------------------
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_staged_reuse() {
+  local ix err="$_SCRATCH/t.err"
+  ix=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err")
+  assert_eq "2" "$(grep -c '^parse-miss' "$err")" "the worktree index parses both items"
+  ix=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index --staged 2> "$err")
+  assert_contains "$(cat "$err")" "index-build" "--staged builds its own index"
+  assert_eq "0" "$(grep -c '^parse-miss' "$err")" "…from the worktree parse entries (blob id -> sha256 map): nothing parsed"
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/b.md)" '[.key, .class] | tojson' '["app-2","open"]' "…with the right values"
+  ix=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index --rev HEAD 2> "$err")
+  assert_eq "0" "$(grep -c '^parse-miss' "$err")" "--rev HEAD: nothing parsed either"
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/a.md)" '.key' "app-1" "…with the right values"
+}
+
+test_lg_index_staged_reuses_worktree_parse() {
+  echo "test: _lg_index --staged / --rev reuse the worktree's parse entries"
+  lg_fixture
+  lg_enable
+  lg_item docs/issues/a.md "key: app-1" "status: Open"
+  lg_item docs/issues/b.md "key: app-2" "status: Open"
+  git add -A && git commit -qm items
+  lg_in lg_t_index_staged_reuse
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_hit_survives() {
+  local a b c d e err="$_SCRATCH/t.err" orig="$_SCRATCH/a.orig"
+  cp docs/issues/a.md "$orig"
+  a=$(_lg_index)
+  printf 'v1\n' >> docs/issues/a.md; b=$(_lg_index)
+  printf 'v2\n' >> docs/issues/a.md; c=$(_lg_index)
+  printf 'v3\n' >> docs/issues/a.md; d=$(_lg_index)
+  # shellcheck disable=SC2012  # cache names are hex
+  assert_eq "4" "$(ls "$_LG_CACHE"/index-*.json | wc -l | tr -d ' ')" "four indexes written in the last 10 minutes: none pruned"
+  touch -t 202001010001 "$a" "${a%.json}.refs"
+  touch -t 202001010002 "$b" "${b%.json}.refs"
+  touch -t 202001010003 "$c" "${c%.json}.refs"
+  touch -t 202001010004 "$d" "${d%.json}.refs"
+  cp "$orig" docs/issues/a.md
+  e=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err")
+  assert_eq "$a" "$e" "the first state again: index A"
+  assert_contains "$(cat "$err")" "index-hit" "…a hit"
+  printf 'v4\n' >> docs/issues/a.md
+  e=$(_lg_index)
+  assert_true "A, used last, survives the prune" test -f "$a"
+  assert_true "…with its .refs" test -f "${a%.json}.refs"
+  assert_true "the new index E is kept" test -f "$e"
+  assert_true "D (the newest of the old) is kept" test -f "$d"
+  assert_true "B is pruned" test ! -e "$b"
+  assert_true "C is pruned" test ! -e "$c"
+  assert_true "…with its .refs" test ! -e "${c%.json}.refs"
+}
+
+test_lg_index_hit_survives_prune() {
+  echo "test: _lg_index — a cache hit marks the index newest; recent files are never pruned"
+  lg_fixture
+  lg_enable
+  lg_item docs/issues/a.md "key: app-1"
+  git add -A && git commit -qm items
+  lg_in lg_t_index_hit_survives
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_cross_dir() {
+  local ix
+  ix=$(_lg_index)
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/x.md)" '[.date, .docs.plan] | tojson' '["2026-02-02",[]]' \
+    "known deviation: an item moved in from outside the item dirs is dated by the move; links to its old path are not followed"
+}
+
+test_lg_index_cross_dir_move_deviation() {
+  echo "test: _lg_index — a move into the item dirs from elsewhere (pinned deviation: pathspec-limited log)"
+  lg_fixture
+  lg_enable
+  mkdir -p docs/notes docs/plans
+  lg_item docs/notes/x.md "key: app-1" "status: Open"
+  printf '# P\n\n[x](../notes/x.md)\n' > docs/plans/p.md
+  lg_doc_index '{"docs":{"docs/plans/p.md":{"doc_type":"plan"}}}'
+  lg_commit_at 2026-01-01 one
+  git mv docs/notes/x.md docs/issues/x.md
+  lg_commit_at 2026-02-02 moved
+  lg_in lg_t_index_cross_dir
+  teardown
+}
+
+test_lg_parse_parallel_bin_bash() {
+  echo "test: parallel frontmatter parsing (DOC_TOOLS_LEDGER_PAR_MIN) under /bin/bash: order kept, a failing awk is rc 2"
+  lg_fixture
+  lg_enable
+  local i n fake="$TEST_DIR/fakebin" realawk rc out="$TEST_DIR/par.jsonl" log="$TEST_DIR/awk.log" want got
+  for i in 01 02 03 04 05 06 07 08 09 10 11 12; do
+    lg_item "docs/issues/p$i.md" "key: app-$((10#$i))"
+  done
+  git add -A && git commit -qm items
+  realawk=$(command -v awk)
+  mkdir -p "$fake"
+  # A fake awk: logs each frontmatter (mode=files) process, fails one when asked.
+  cat > "$fake/awk" <<EOF
+#!/bin/sh
+files=0; fail=0
+for a in "\$@"; do
+  case "\$a" in
+    mode=files) files=1 ;;
+    *p07.md) [ -n "\${LG_FAIL_AWK:-}" ] && fail=1 ;;
+  esac
+done
+[ "\$files" = 1 ] && echo files >> "$log"
+[ "\$fail" = 1 ] && exit 7
+exec "$realawk" "\$@"
+EOF
+  chmod +x "$fake/awk"
+  cat > "$TEST_DIR/drive.sh" <<EOF
+DOC_TOOLS_SOURCE_ONLY=1
+. "$REPO_DIR/scripts/doc-tools.sh"
+unset DOC_TOOLS_SOURCE_ONLY
+. "$REPO_DIR/scripts/ledger/lib.sh"
+_SCRATCH=\$(mktemp -d "$TEST_DIR/drive.XXXXXX")
+_LG_ACTIVE=1
+_LG_FORMAT=text
+_lg_init ls
+_lg_item_paths worktree "\$_SCRATCH/paths"
+tr '\\000' '\\n' < "\$_SCRATCH/paths" > "$TEST_DIR/paths.txt"
+_lg_parse_worktree "\$_SCRATCH/paths" "\$1"
+EOF
+  rc=0
+  DOC_TOOLS_LEDGER_PAR_MIN=2 PATH="$fake:$PATH" /bin/bash "$TEST_DIR/drive.sh" "$out" > /dev/null 2>&1 </dev/null || rc=$?
+  assert_eq "0" "$rc" "/bin/bash, 12 files, threshold 2: the parse succeeds"
+  n=$(grep -c files "$log" 2>/dev/null || true)
+  assert_true "…in more than one awk process (got $n)" test "${n:-0}" -gt 1
+  want=$(tr '\n' '|' < "$TEST_DIR/paths.txt")
+  got=$(jq -r .path "$out" | tr '\n' '|')
+  assert_eq "$want" "$got" "…records in the input order"
+  assert_json_field "$(jq -c 'select(.path == "docs/issues/p07.md")' "$out")" '.fm.key' "app-7" "…with the right values"
+  rm -rf .git/doc-superpowers
+  rc=0
+  LG_FAIL_AWK=1 DOC_TOOLS_LEDGER_PAR_MIN=2 PATH="$fake:$PATH" /bin/bash "$TEST_DIR/drive.sh" "$out" > /dev/null 2>&1 </dev/null || rc=$?
+  assert_eq "2" "$rc" "one failing parallel awk process: rc 2"
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -2049,6 +2209,12 @@ run_tests() {
   test_lg_index_cache_prune
   test_lg_index_odd_worktree_entries
   test_lg_parse_hash_map
+
+  # --- Task 4 fix round 1 ---
+  test_lg_index_staged_reuses_worktree_parse
+  test_lg_index_hit_survives_prune
+  test_lg_index_cross_dir_move_deviation
+  test_lg_parse_parallel_bin_bash
 
   print_summary
 }
