@@ -4719,6 +4719,32 @@ test_promote_observed_red_bad_sha() {
   teardown
 }
 
+test_promote_observed_red_utf8_locale() {
+  echo "test: promote — observed_red: uppercase hex is refused under a UTF-8 locale too (no collation-dependent range)"
+  local loc="" l bad pad
+  for l in en_US.UTF-8 C.UTF-8 en_US.utf8; do
+    if [ "$(LC_ALL=$l locale charmap 2>/dev/null)" = "UTF-8" ]; then loc=$l; break; fi
+  done
+  if [ -z "$loc" ]; then
+    record_skip "promote — observed_red under a UTF-8 locale (no en_US.UTF-8 / C.UTF-8 locale on this host)"
+    return 0
+  fi
+  observed_red_fixture 1800
+  # Bash 3.2 collates a glob bracket range by locale: under en_US.UTF-8
+  # [!0-9a-f] lets a digits-then-uppercase id through. Full length (HEAD's),
+  # so the hex check alone decides.
+  for bad in 9434591B2DC 94345912B2DC; do
+    pad=$(printf '%040d' 0)
+    bad="$bad${pad:0:$((${#RED_SHA} - ${#bad}))}"
+    jset "$SIDECAR" ".claims[0].nonvacuity.observed_red = $(jq -n --arg b "$bad" '$b')"
+    git commit -qam "observed_red: $bad"
+    LC_ALL=$loc cl promote "$TTL_ID"
+    assert_promote_finding "observed_red is not a full commit id" "observed_red $bad under $loc"
+  done
+  assert_eq "0" "$(stub_run_count)" "…refused before any run"
+  teardown
+}
+
 test_promote_observed_red_subject_absent_at_sha() {
   echo "test: promote — observed_red: a subject path absent at <sha> is removed in the worktree (test-first)"
   claims_fixture
@@ -6017,6 +6043,7 @@ run_tests() {
   test_promote_observed_red_reverified
   test_promote_observed_red_passes_refused
   test_promote_observed_red_bad_sha
+  test_promote_observed_red_utf8_locale
   test_promote_observed_red_subject_absent_at_sha
   test_promote_observed_red_subject_unsafe
   test_promote_observed_red_subject_is_test_file
