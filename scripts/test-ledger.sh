@@ -3499,24 +3499,48 @@ superseded-cycle block docs/issues/c.md" "$(lg_vf)" "each item on a cycle"
 }
 
 test_lg_validate_staged_chain_ends_superseded() {
-  echo "test: validate --staged: superseded_by names the item in effect, not one that is itself superseded"
+  echo "test: validate --staged: a supersession chain is allowed (advisory: repoint to its end); a dead end is advisory"
   lg_v_fixture
   lg_item docs/issues/c.md "key: x-3" "ledger: x" "status: Closed" "summary: C, replaced by D" "superseded_by: x-4"
   lg_resolved docs/issues/c.md "Superseded by x-4."
   lg_item docs/issues/d.md "key: x-4" "ledger: x" "status: Open" "summary: D, the item in effect"
-  git add -A && git commit -qm cd
+  lg_item docs/issues/w.md "key: x-5" "ledger: x" "status: Won't fix" "summary: W, dropped"
+  lg_resolved docs/issues/w.md "Not worth it."
+  lg_item docs/issues/b.md "key: x-6" "ledger: x" "status: Closed" "summary: B, replaced by a missing item" "superseded_by: x-404"
+  lg_resolved docs/issues/b.md "Superseded."
+  git add -A && git commit -qm items --no-verify
+  # A → C → D: allowed; the advisory names the end.
   lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Closed" "summary: A points at C" "superseded_by: x-3"
   lg_resolved docs/issues/a.md "Superseded."
   git add -A
   lg validate --staged --format json
-  assert_eq "1" "$LG_RC" "exit 1"
-  assert_eq "superseded-chain block docs/issues/a.md" "$(lg_vf)" "the chain ends superseded"
-  assert_contains "$(jq -r '.findings[0].detail' <<<"$LG_OUT")" "x-4" "the detail names the item in effect"
+  assert_eq "0" "$LG_RC" "a chain: exit 0"
+  assert_eq "superseded-chain advisory docs/issues/a.md" "$(lg_vf)" "…an advisory"
+  assert_contains "$(jq -r '.findings[0].detail' <<<"$LG_OUT")" "x-3 → x-4" "the detail shows the chain"
+  assert_contains "$(jq -r '.findings[0].detail' <<<"$LG_OUT")" "point it at x-4" "…and suggests its end"
+  # A → D: the item in effect, nothing to say.
   lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Closed" "summary: A points at D" "superseded_by: x-4"
   lg_resolved docs/issues/a.md "Superseded."
   git add -A
   lg validate --staged
-  assert_eq "0|" "$LG_RC|$LG_OUT" "pointing at the item in effect: exit 0"
+  assert_eq "0|" "$LG_RC|$LG_OUT" "pointing at the item in effect: exit 0, nothing printed"
+  # A → W (won't fix): a dead end.
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Closed" "summary: A points at W" "superseded_by: x-5"
+  lg_resolved docs/issues/a.md "Superseded."
+  git add -A
+  lg validate --staged --format json
+  assert_eq "0|superseded-dead-end advisory docs/issues/a.md" "$LG_RC|$(lg_vf)" "a dead end: exit 0, an advisory"
+  # A → B → (missing): the chain's end is B, the break is named; B is a dead end.
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Closed" "summary: A points at B" "superseded_by: x-6"
+  lg_resolved docs/issues/a.md "Superseded."
+  git add -A
+  lg validate --staged --format json
+  assert_eq "0" "$LG_RC" "a chain broken further on: exit 0 (only A's own target must resolve)"
+  assert_eq "superseded-chain advisory docs/issues/a.md
+superseded-dead-end advisory docs/issues/a.md" "$(lg_vf)" "a chain and a dead end"
+  assert_contains "$(jq -r '.findings[] | select(.class == "superseded-chain") | .detail' <<<"$LG_OUT")" "breaks at x-6" \
+    "the detail says where the chain breaks"
+  assert_contains "$(jq -r '.findings[] | select(.class == "superseded-chain") | .detail' <<<"$LG_OUT")" "x-404" "…and on what"
   teardown
 }
 
@@ -3616,6 +3640,10 @@ test_lg_validate_staged_keymap_reads_frontmatter() {
   lg_item docs/issues/block.md "key: x-8" "ledger: x" "status: Open" "aliases:" "  - y-1" "- y-2" "summary: Block list aliases"
   lg_item docs/issues/flow.md "key: x-9" "ledger: x" "status: Open" "aliases: ['y-3', y-4] # a comment" "summary: Flow list aliases"
   lg_item docs/issues/other.md "key: x-10" "ledger: x" "relates:" "  - sibling:y-5" "status: Open" "summary: A list under another field"
+  # A block list with a comment and a blank line inside it (the parser keeps
+  # every item).
+  lg_item docs/issues/gap.md "key: x-11" "ledger: x" "status: Open" "aliases:" "  - x-17" "  # retired alias below" "  - x-18" "" \
+    "  - x-19" "summary: Aliases with gaps"
   git add -A && git commit -qm items
   local k
   for k in x-2 x-3 x-4 x-5 y-5; do
@@ -3625,13 +3653,62 @@ test_lg_validate_staged_keymap_reads_frontmatter() {
     assert_eq "0" "$LG_RC" "$k is not a key or alias of a committed item"
     git reset -q
   done
-  for k in x-1 x-6 x-7 y-1 y-2 y-3 y-4 x-10; do
+  for k in x-1 x-6 x-7 y-1 y-2 y-3 y-4 x-10 x-17 x-18 x-19; do
     lg_item docs/issues/new.md "key: $k" "ledger: x" "status: Open" "summary: A new item that clashes"
     git add -A
     lg validate --staged --format json
     assert_eq "1|duplicate-key block docs/issues/new.md" "$LG_RC|$(lg_vfb)" "$k clashes"
     git reset -q
   done
+  # superseded_by naming an alias after a gap resolves (the whole blob is
+  # parsed): no dangling finding.
+  lg_item docs/issues/new.md "key: x-30" "ledger: x" "status: Closed" "summary: Replaced by gap.md" "superseded_by: x-19"
+  lg_resolved docs/issues/new.md "Superseded."
+  git add -A
+  lg validate --staged
+  assert_eq "0|" "$LG_RC|$LG_OUT" "superseded_by an alias after a blank line resolves"
+  git reset -q
+  teardown
+}
+
+test_lg_validate_staged_keymap_reads_index() {
+  echo "test: validate --staged: an unstaged change to a tracked item does not count — the index does"
+  lg_v_fixture
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: Committed with x-1"
+  git add -A && git commit -qm a
+  # The work tree says x-5; the index (and HEAD) still say x-1.
+  lg_item docs/issues/a.md "key: x-5" "ledger: x" "status: Open" "summary: Edited, not staged"
+  lg_item docs/issues/b.md "key: x-1" "ledger: x" "status: Open" "summary: Clashes with the staged x-1"
+  git add docs/issues/b.md
+  lg validate --staged --format json
+  assert_eq "1|duplicate-key block docs/issues/b.md" "$LG_RC|$(lg_vfb)" "the index's x-1 clashes"
+  git reset -q
+  lg_item docs/issues/b.md "key: x-5" "ledger: x" "status: Open" "summary: Takes the work tree's x-5"
+  git add docs/issues/b.md
+  lg validate --staged
+  assert_eq "0" "$LG_RC" "the work tree's unstaged x-5 does not clash"
+  teardown
+}
+
+test_lg_validate_staged_keymap_newline_path() {
+  echo "test: validate --staged: a tracked item whose name holds a newline is left out of the key map, with a note"
+  lg_v_fixture
+  lg_item "docs/issues/a"$'\n'"docs/issues/b.md" "key: x-1" "ledger: x" "status: Open" "summary: A name with a newline"
+  lg_item docs/issues/b.md "key: x-2" "ledger: x" "status: Open" "summary: The real b.md"
+  git add -A && git commit -qm items
+  lg_item docs/issues/c.md "key: x-2" "ledger: x" "status: Open" "summary: Clashes with b.md"
+  git add docs/issues/c.md
+  lg validate --staged --format json
+  assert_eq "1|duplicate-key block docs/issues/c.md" "$LG_RC|$(lg_vfb)" "x-2 clashes with b.md"
+  assert_eq "the key of docs/issues/b.md" "$(jq -r '.findings[0].detail | sub(".*is also "; "")' <<<"$LG_OUT")" \
+    "…and only with b.md (no line of the other name is read as b.md's)"
+  assert_contains "$LG_ERR" "holds a newline" "a note on stderr"
+  assert_eq "1" "$(printf '%s\n' "$LG_ERR" | grep -c 'holds a newline')" "…one line"
+  git reset -q
+  lg_item docs/issues/c.md "key: x-1" "ledger: x" "status: Open" "summary: Would clash, but that name is unreadable"
+  git add docs/issues/c.md
+  lg validate --staged
+  assert_eq "0" "$LG_RC" "the newline name's key is not in the map (as the index leaves it unparsed)"
   teardown
 }
 
@@ -3942,6 +4019,8 @@ run_tests() {
   test_lg_validate_staged_text_one_line
   test_lg_validate_staged_unborn
   test_lg_validate_staged_keymap_reads_frontmatter
+  test_lg_validate_staged_keymap_reads_index
+  test_lg_validate_staged_keymap_newline_path
   test_lg_validate_all_advisories_rc0
   test_lg_validate_all_concurrent_merge_finalize_dup
   test_lg_validate_plan_marks

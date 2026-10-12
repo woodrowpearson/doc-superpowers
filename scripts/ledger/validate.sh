@@ -154,9 +154,12 @@ _lg_validate_registry() {
 #   superseded-dangling   superseded_by names no item (keys, aliases, and the
 #                         provisional keys docs/ledger/finalized.json maps)
 #   superseded-cycle      following superseded_by comes back to an item
-#   superseded-chain      superseded_by names an item that is itself
-#                         superseded (closed + superseded_by): it must name
-#                         the item in effect — the end of the chain
+#   superseded-chain      (advisory) superseded_by leads through more than
+#                         one link (or a later link does not resolve — the
+#                         detail says where it breaks): point it at the
+#                         chain's end, its last resolvable item
+#   superseded-dead-end   (advisory) the chain ends at a closed or won't-fix
+#                         item: nothing in effect replaces this one
 #   superseded-not-closed superseded_by on an item whose class is not closed
 #   parse-error           the item's frontmatter has errors (advisory)
 #   --all only (advisory): weak-summary (< 20 characters), unassigned-open,
@@ -173,12 +176,13 @@ _lg_validate_registry() {
 # was at HEAD: a finding blocks only when the field it is about changed in
 # this commit — a duplicate when the colliding key or alias is new to either
 # side; a bad key or an unknown ledger when the value changed; a missing
-# resolution when the status moved into closed / won't fix; the supersession
-# checks when that move happened or superseded_by changed (and
-# superseded-not-closed when superseded_by or the status class changed).
-# Otherwise the finding is advisory. A retired or legacy ledger blocks an
-# added item only; missing ledger / summary block an added item only;
-# missing-key and parse-error are always advisory.
+# resolution when the status moved into closed / won't fix; a dangling
+# superseded_by or a cycle when that move happened or superseded_by changed
+# (and superseded-not-closed when superseded_by or the status class
+# changed). Otherwise the finding is advisory. A retired or legacy ledger
+# blocks an added item only; missing ledger / summary block an added item
+# only; missing-key, parse-error, superseded-chain and superseded-dead-end
+# are always advisory.
 #
 # --all: every item of the working-tree index, the blocking classes block;
 # retired-ledger is reported (advisory) only for open / unknown-class items.
@@ -233,30 +237,36 @@ def lg_v_res($R; $fin; $v):
     else (($fin | if type == "object" then (.[$v] // .[$l] // null) else null end)) as $to
       | if ($to | type) == "string" then [($R[$to | ascii_downcase] // [])[] | .p] | unique else [] end
     end;
-# The supersession verdict of the item at path $S: {k: "ok"|"dangling"|
-# "ambiguous"|"cycle"|"chain", …}. $M: {path: {sup, class, key}}.
+# The supersession verdict of the item at path $S. $M: {path: {sup, class,
+# key}}. {k: "dangling"} (its own target resolves to nothing), {k:
+# "ambiguous", v} (to several items), {k: "cycle", path} (following
+# superseded_by comes back to an item it passed), else {k: "ok", path
+# (from $S to the end), hops, end, brk}: the chain is followed while each
+# link resolves to one item; end is the last item reached, brk (or null)
+# {at, v, why} where a later link stops resolving.
 def lg_v_chain($M; $R; $fin; $S):
   lg_v_res($R; $fin; $M[$S].sup) as $t1
   | if ($t1 | length) == 0 then {k: "dangling"}
     elif ($t1 | length) > 1 then {k: "ambiguous", v: $t1}
     elif $t1[0] == $S then {k: "cycle", path: [$S, $S]}
     else
-      ({cur: $t1[0], seen: [$S, $t1[0]], r: null}
-       | until(.r != null;
-           ($M[.cur].sup) as $s
-           | if $s == null then .r = {k: "end", end: .cur}
-             else lg_v_res($R; $fin; $s) as $t
-             | if ($t | length) != 1 then .r = {k: "end", end: .cur}
-               elif (.seen | index([$t[0]])) != null then .r = {k: "cycle", path: (.seen + [$t[0]])}
-               else .cur = $t[0] | .seen += [$t[0]] end
-             end)
-       | .r) as $w
-      | if $w.k == "cycle" then $w
-        elif ($M[$t1[0]].sup != null and $M[$t1[0]].class == "closed") then {k: "chain", via: $t1[0], end: $w.end}
-        else {k: "ok"} end
+      {cur: $t1[0], seen: [$S, $t1[0]], hops: 1, r: null}
+      | until(.r != null;
+          ($M[.cur].sup) as $s
+          | if $s == null then .r = {k: "end", brk: null}
+            else lg_v_res($R; $fin; $s) as $t
+            | if ($t | length) == 0 then .r = {k: "end", brk: {at: .cur, v: $s, why: "names no item"}}
+              elif ($t | length) > 1 then .r = {k: "end", brk: {at: .cur, v: $s, why: "names several items"}}
+              elif (.seen | index([$t[0]])) != null then .r = {k: "cycle", path: (.seen + [$t[0]])}
+              else .cur = $t[0] | .seen += [$t[0]] | .hops += 1 end
+            end)
+      | if .r.k == "cycle" then .r else {k: "ok", path: .seen, hops, end: .cur, brk: .r.brk} end
     end;
 def lg_v_name($M; $p): ($M[$p].key // null) | if type == "string" then . else ($p | lg_v_tok) end;
-# The supersession findings of info $i (severity from $b).
+# The supersession findings of info $i: a dangling or ambiguous target and a
+# cycle take the severity $b; a chain (more than one link, or a later link
+# that does not resolve: point superseded_by at the end) and a dead end (the
+# chain ends at a closed or wontfix-class item) are advisory.
 def lg_v_sup_f($i; $M; $R; $fin; $b):
   if $i.sup == null then empty
   else lg_v_chain($M; $R; $fin; $i.path) as $c
@@ -268,10 +278,20 @@ def lg_v_sup_f($i; $M; $R; $fin; $b):
       elif $c.k == "cycle" then
         lg_v_f("superseded-cycle"; lg_v_sev($b); $i.path; $i.key;
           "superseded_by goes round: \([$c.path[] | lg_v_name($M; .)] | join(" → "))")
-      elif $c.k == "chain" then
-        lg_v_f("superseded-chain"; lg_v_sev($b); $i.path; $i.key;
-          "superseded_by \($i.sup | lg_v_tok) is itself superseded by \($M[$c.via].sup | lg_v_tok): name the item in effect, \(lg_v_name($M; $c.end))")
-      else empty end
+      else
+        (if $c.hops > 1 or $c.brk != null then
+           lg_v_f("superseded-chain"; "advisory"; $i.path; $i.key;
+             "superseded_by leads on: \([$c.path[1:][] | lg_v_name($M; .)] | join(" → "))"
+             + (if $c.brk != null
+                then "; the chain breaks at \(lg_v_name($M; $c.brk.at)): superseded_by \($c.brk.v | lg_v_tok) \($c.brk.why)"
+                else "" end)
+             + (if $c.hops > 1 then "; point it at \(lg_v_name($M; $c.end))" else "" end))
+         else empty end),
+        (if ($M[$c.end].class | lg_v_term) then
+           lg_v_f("superseded-dead-end"; "advisory"; $i.path; $i.key;
+             "the chain ends at \(lg_v_name($M; $c.end)), which is \($M[$c.end].class): nothing in effect replaces this item")
+         else empty end)
+      end
   end;
 # The ledger findings of info $i. $mode: "added" | "modified" | "all";
 # $changed: the ledger value changed in this commit.
@@ -420,18 +440,27 @@ $c[0] as $cfg
 
 # The key map's program (awk, after frontmatter.awk run with mode=lib — it
 # then defines its parser and runs none of its own rules — and glob.sh's
-# _LG_AWK_GLOB). Input: `git grep -n` lines "<path>\001<line no>\001<text>"
-# of the "---" lines, the wanted fields' lines and the list lines. For each
-# path whose line 1 is "---" and whose frontmatter closes, a document made
-# of its frontmatter lines git grep found: the "---" lines, the wanted
-# fields' lines, and the list lines that follow one of those without a gap.
+# _LG_AWK_GLOB). Input: `git grep -z -n` output passed through
+# tr '\n\000' '\001\n': line 1 is the first path; then a line number, then
+# "<text>\001<next path>", and so on (text holds no newline, a path may —
+# as \001 — so each path is read whole; a name holding a newline is left
+# out, with one note per name to -v notes). Lines: the "---" lines, the
+# wanted fields' lines and the list lines. For each path whose line 1 is
+# "---" and whose frontmatter closes, a document made of its frontmatter
+# lines git grep found: the "---" lines, the wanted fields' lines, and the
+# list lines that follow one of those without a gap. A list line after a
+# gap (a blank or comment line inside a block list — git grep does not
+# list those — or a list under a field not grepped) makes the file
+# ambiguous: the document may not be what the parser reads.
 # Then, from the tokens (-v toks: a file, one lower-case token per line):
-# each item file (-v globs: "i\t<glob>" / "a\t<glob>" lines) whose document
-# holds a token (case-insensitive substring: a superset) is parsed with
-# frontmatter.awk's own functions and its record printed; its superseded_by
-# (-v supn: the candidate names) becomes a token too — through -v fin
-# ("<provisional>\t<key>" lines) when docs/ledger/finalized.json maps it —
-# until no new token appears, so every item a chain reaches is printed.
+# each item file (-v globs: "i\t<glob>" / "a\t<glob>" lines) whose grepped
+# frontmatter lines hold a token (case-insensitive substring: a superset)
+# is parsed with frontmatter.awk's own functions and its record printed —
+# an ambiguous one is named in -v amb instead (the caller parses its whole
+# index blob); its superseded_by (-v supn: the candidate names) becomes a
+# token too — through -v fin ("<provisional>\t<key>" lines) when
+# docs/ledger/finalized.json maps it — until no new token appears, so every
+# item a chain reaches is read.
 # shellcheck disable=SC2016  # awk source
 _LG_AWK_VALIDATE_MAP='
 BEGIN {
@@ -447,21 +476,22 @@ BEGIN {
     if (!gx_add(vm_k, substr(vm_l, 3))) { print "bad glob \047" substr(vm_l, 3) "\047: " GLOB_ERR > "/dev/stderr"; VM_BAD = 1; exit 2 }
   }
   close(globs)
-  vm_nf = 0; vm_state = 0; vm_n = 0; vm_last = -1; vm_cur = ""
+  printf "" > amb; printf "" > notes
+  vm_nf = 0; vm_state = 0; vm_n = 0; vm_last = -1; vm_cur = ""; vm_raw = ""; vm_amb = 0
 }
 function vm_add(t) {
   if (t != "" && !(t in VM_TS)) { VM_TS[t] = 1; VM_TL[++VM_NT] = t }
 }
-function vm_flush(   i, low) {
+function vm_flush(   i) {
   if (vm_cur != "" && vm_state == 2) {
     vm_nf++
     VM_P[vm_nf] = vm_cur
     VM_DN[vm_nf] = vm_n
-    low = ""
-    for (i = 1; i <= vm_n; i++) { VM_DL[vm_nf, i] = vm_L[i]; low = low "\n" vm_L[i] }
-    VM_LOW[vm_nf] = tolower(low)
+    for (i = 1; i <= vm_n; i++) VM_DL[vm_nf, i] = vm_L[i]
+    VM_LOW[vm_nf] = tolower(vm_raw)
+    if (vm_amb) VM_AMB[vm_nf] = 1
   }
-  vm_n = 0; vm_state = 0; vm_last = -1
+  vm_n = 0; vm_state = 0; vm_last = -1; vm_raw = ""; vm_amb = 0
 }
 function vm_emit(f,   i, j, nm, v, r) {
   VM_DONE[f] = 1
@@ -470,7 +500,8 @@ function vm_emit(f,   i, j, nm, v, r) {
   doc_begin()
   for (i = 1; i <= VM_DN[f]; i++) doc_line(VM_DL[f, i])
   r = doc_end()
-  print "{\"path\":" js(VM_P[f]) "," substr(r, 2)
+  if (f in VM_AMB) print VM_P[f] > amb
+  else print "{\"path\":" js(VM_P[f]) "," substr(r, 2)
   for (j = 1; j <= vm_nsn; j++) {
     nm = VM_SN[j]
     if (!(nm in FV)) continue
@@ -485,26 +516,40 @@ function vm_emit(f,   i, j, nm, v, r) {
     break
   }
 }
-{
-  vm_a = index($0, SOHC); if (!vm_a) next
-  vm_p = substr($0, 1, vm_a - 1); vm_r = substr($0, vm_a + 1)
-  vm_b = index(vm_r, SOHC); if (!vm_b) next
-  vm_no = substr(vm_r, 1, vm_b - 1) + 0; vm_t = substr(vm_r, vm_b + 1)
-  if (vm_p != vm_cur) { vm_flush(); vm_cur = vm_p }
-  if (vm_state >= 2) next
-  if (vm_no == 1 && bom != "" && substr(vm_t, 1, length(bom)) == bom) vm_t = substr(vm_t, length(bom) + 1)
-  sub(/\r$/, "", vm_t)
+# One grepped line: path p, line number no, text t.
+function vm_line(p, no, t) {
+  if (index(p, SOHC)) {
+    if (!(p in VM_NLN)) {
+      VM_NLN[p] = 1
+      print "ledger: " js(rep(p, SOHC, "\n")) " holds a newline in its name: left out of the key map" > notes
+    }
+    return
+  }
+  if (p != vm_cur) { vm_flush(); vm_cur = p }
+  if (vm_state >= 2) return
+  if (no == 1 && bom != "" && substr(t, 1, length(bom)) == bom) t = substr(t, length(bom) + 1)
+  sub(/\r$/, "", t)
   if (vm_state == 0) {
-    if (vm_no == 1 && vm_t ~ /^---[ \t]*$/) { vm_state = 1; vm_L[++vm_n] = "---" }
+    if (no == 1 && t ~ /^---[ \t]*$/) { vm_state = 1; vm_L[++vm_n] = "---" }
     else vm_state = 3
-    next
+    return
   }
-  if (vm_t ~ /^---[ \t]*$/) { vm_L[++vm_n] = "---"; vm_state = 2; next }
-  if (vm_t ~ /^[ \t]*-([ \t]|$)/) {
-    if (vm_no == vm_last + 1) { vm_L[++vm_n] = vm_t; vm_last = vm_no }
-    next
+  if (t ~ /^---[ \t]*$/) { vm_L[++vm_n] = "---"; vm_state = 2; return }
+  vm_raw = vm_raw "\n" t
+  if (t ~ /^[ \t]*-([ \t]|$)/) {
+    if (no == vm_last + 1) { vm_L[++vm_n] = t; vm_last = no }
+    else vm_amb = 1
+    return
   }
-  vm_L[++vm_n] = vm_t; vm_last = vm_no
+  vm_L[++vm_n] = t; vm_last = no
+}
+NR == 1 { vm_np = $0; vm_want = 0; next }
+vm_want == 0 { vm_lno = $0 + 0; vm_want = 1; next }
+{
+  vm_i = index($0, SOHC)
+  if (vm_i) { vm_t = substr($0, 1, vm_i - 1); vm_nx = substr($0, vm_i + 1) } else { vm_t = $0; vm_nx = "" }
+  vm_line(vm_np, vm_lno, vm_t)
+  vm_np = vm_nx; vm_want = 0
 }
 END {
   if (VM_BAD) exit 2
@@ -535,10 +580,12 @@ _lg_v_item_globs() {
 # from them (see _LG_AWK_VALIDATE_MAP): every item a staged key or alias
 # could collide with, and every link of a supersession chain. One
 # `git grep --cached` over the item globs' directories reads the index; no
-# walk over the items, no parse cache. Known deviation from parsing the
+# walk over the items. A file whose grepped lines cannot be trusted to
+# rebuild its frontmatter (a list line after a gap) is parsed whole, from
+# its index blob (_lg_parse_blobs :). Known deviation from parsing the
 # whole file: a plain value folded onto an indented continuation line keeps
-# its first line only, and a block list loses the items after a blank or a
-# comment line inside it.
+# its first line only. A name holding a newline is left out (a note on
+# stderr), as the parser leaves it unparsed.
 _lg_v_keymap() {
   local toks="$1" fin="$2" globs="$3" out="$4" s names supn d rc=0
   local specs=()
@@ -570,12 +617,21 @@ _lg_v_keymap() {
     0|1) ;;
     *) _lg_die "git grep failed: $(head -n 3 "$s.err" 2>/dev/null)" ;;
   esac
-  tr '\000' '\001' < "$s.grep" > "$s.lines" || _lg_die "cannot read the git grep output"
+  [ -s "$s.grep" ] || return 0
+  tr '\n\000' '\001\n' < "$s.grep" > "$s.lines" || _lg_die "cannot read the git grep output"
   printf '%s\n%s\n' "$_LG_AWK_GLOB" "$_LG_AWK_VALIDATE_MAP" > "$s.awk" || _lg_die "cannot write $s.awk"
   rc=0
-  LC_ALL=C awk -v mode=lib -v toks="$toks" -v fin="$fin" -v globs="$globs" -v supn="$supn" "${_LG_PARSE_ARGS[@]}" \
+  LC_ALL=C awk -v mode=lib -v toks="$toks" -v fin="$fin" -v globs="$globs" -v supn="$supn" \
+      -v amb="$s.amb" -v notes="$s.notes" "${_LG_PARSE_ARGS[@]}" \
     -f "$_LG_LIB/frontmatter.awk" -f "$s.awk" "$s.lines" > "$out" 2> "$s.err" || rc=$?
   [ "$rc" = 0 ] || _lg_die "cannot build the key map: $(head -n 3 "$s.err" 2>/dev/null)"
+  if [ -s "$s.notes" ]; then cat -- "$s.notes" >&2 || true; fi
+  # The ambiguous files: their whole index blobs, through the parse cache.
+  if [ -s "$s.amb" ]; then
+    tr '\n' '\000' < "$s.amb" > "$s.ambz" || _lg_die "cannot write $s.ambz"
+    _lg_parse_blobs : "$s.ambz" "$s.ambrecs"
+    cat -- "$s.ambrecs" >> "$out" || _lg_die "cannot write $out"
+  fi
 }
 
 # _lg_v_staged_list <prefix>: the staged item files, from one
