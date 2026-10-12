@@ -67,16 +67,17 @@ There are no rows. A row's one-line "why it matters" moves to the issue (`summar
   "doc_columns": { "spec": ["spec", "adr", "design-spec"], "plan": ["plan"], "handoff": null },
   "keys": { "mode": "cas", "remote": "origin", "counter_ref": "refs/doc-superpowers/ledger/counters" },
   "trailers": { "claims": ["Ledger-Claims"], "claims_by_path": [], "claims_by_ref": ["Fixes", "Closes", "Resolves"], "contract_change": "Contract-Change", "ack": "Ledger-Ack" },
-  "inflight": { "enabled": false, "ref_prefix": "refs/doc-superpowers/inflight", "host_id": null, "max_age_days": 21 },
+  "inflight": { "enabled": false, "ref_prefix": "refs/doc-superpowers/inflight", "host_id": null, "max_age_days": 21, "pre_push_check": null },
   "views": { "branch": "doc-ledger-views", "recent_days": 14, "html": true },
   "cache": { "remote_ttl_minutes": 10 },
   "adapters": { "pr": null, "contracts": null },
   "state_watch": { "paths": [], "patterns": [] },
-  "legacy": "docs/ledger/legacy.json"
+  "legacy": "docs/ledger/legacy.json",
+  "legacy_ids": []
 }
 ```
 
-Every key has a default (shown); a minimal config is `{}`. `fields` values are a name or a list of candidate names tried in order, so a host keeps its own frontmatter (`severity` or `priority`; `related-files` or `code_refs`). `status` classes are matched case-insensitively on the value's leading words and map the host's vocabulary onto open / fixed / closed / wontfix — the defaults cover doc-superpowers' own issues (`Resolved`); nothing in this feature adds a status value (a new terminal value would break every consumer that matches terminal words, including spec-claims V5). An item's **date** is `fields.date`, else the date git first added the file, else its mtime; ties break by path. `doc_columns.handoff` is off by default (handoffs are not a doc-superpowers doc type); a host that keeps them sets `{"globs": [...]}`. `base` is the comparison base for merge-bases, ratchets and publishing, defaulting like spec-claims' `base`.
+Every key has a default (shown); a minimal config is `{}`. `fields` values are a name or a list of candidate names tried in order, so a host keeps its own frontmatter (`severity` or `priority`; `related-files` or `code_refs`). `status` classes are matched case-insensitively on the value's leading words and map the host's vocabulary onto open / fixed / closed / wontfix — the defaults cover doc-superpowers' own issues (`Resolved`); nothing in this feature adds a status value (a new terminal value would break every consumer that matches terminal words, including spec-claims V5). An item's **date** is `fields.date`, else the date git first added the file, else its mtime; ties break by path. `doc_columns.handoff` is off by default (handoffs are not a doc-superpowers doc type); a host that keeps them sets `{"globs": [...]}`. `base` is the comparison base for merge-bases, ratchets and publishing, defaulting like spec-claims' `base`. `legacy_ids` lists retired ledger ids a host used before adopting (or before a re-split): on an item **modified** (not added) in a commit, a legacy id is advisory ("run `ledger assign`"), so branches cut before a migration are not blocked; on an added item it blocks. `inflight.pre_push_check` names a host command run on the commits about to be pushed to an in-flight ref (the push itself is `--no-verify`, so a host's secret/token guard runs here instead).
 
 **`docs/ledger/ledgers.json`**:
 
@@ -110,7 +111,7 @@ Every key has a default (shown); a minimal config is `{}`. `fields` values are a
 
 **Superseded / won't-fix / obsolete — testable, reason on the issue.** Superseded = a `closed`-class status + `superseded_by` + a non-empty resolution section; won't-fix = `wontfix`-class + resolution; obsolete = `closed` + resolution. `ledger validate` rejects a dangling `superseded_by`, a cycle, a chain that ends superseded, and a missing resolution on any closed/wontfix item it checks.
 
-**`docs/ledger/legacy.json`** (optional, written once by a host's migration and never edited): `{"<old-ledger>#<row>": {"key": "<key>"} | {"archived": "<path>#<anchor>"}}` so citations of a retired hand-written ledger keep resolving.
+**`docs/ledger/legacy.json`** (optional, written once by a host's migration and never edited): `{"<old-ledger>#<row>": {"key": "<key>"} | {"item": "<path>"} | {"archived": "<path>#<anchor>"}}` — an item without a key (terminal items need none) is referenced by path — so citations of a retired hand-written ledger keep resolving.
 
 ### C. `doc-tools.sh ledger` — the CLI
 
