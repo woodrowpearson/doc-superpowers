@@ -3659,6 +3659,18 @@ test_v4_selftest_violates_passes() {
   cl validate --all
   assert_v4 "vacuous pattern" "pattern .*, expect absent"
   assert_contains "$(v4_messages)" "selftest.clean" "…it names the clean selftest"
+  # An empty violates is one empty line, which .* matches: never a 0-byte
+  # file no pattern matches.
+  jset "$SIDECAR" '.claims[0].lint.expect = "present" | .claims[0].lint.selftest.violates = ""'
+  cl validate --all
+  assert_v4 "vacuous pattern" "pattern .*, violates \"\""
+  assert_contains "$(v4_messages)" "selftest.violates" "…it names the violates selftest"
+  # A pattern ending in a newline is also the empty pattern to grep, which
+  # matches every line: an empty violates does not hide it.
+  jset "$SIDECAR" '.claims[0].lint.pattern = "TTL_SECONDS = 900\n"'
+  cl validate --all
+  assert_v4 "vacuous pattern" "pattern with a trailing newline, violates \"\""
+  assert_contains "$(v4_messages)" "selftest.violates" "…it names the violates selftest"
   teardown
 }
 
@@ -3718,6 +3730,37 @@ test_v4_diverged_and_unbuilt_status() {
   set_ttl 900
   cl validate --all
   assert_v4 "contradicts" "diverged, the lint passes"
+  teardown
+}
+
+test_v4_unbuilt_absent_path_allowed() {
+  echo "test: V4 — an unbuilt claim's absent lint path is its allowed failure; an unsafe one is still a finding"
+  claims_fixture
+  lint_claim
+  jset "$SIDECAR" '.claims[0].lint.paths = ["src/auth/rotation.py"]'
+  cl validate --all
+  assert_v4_ok "unbuilt, the lint path not written yet"
+  cl run --all
+  assert_eq "0" "$CL_RC" "…run exits 0"
+  assert_eq "ok" "$(run_field verdict)" "…verdict ok"
+  assert_eq "assert-fail" "$(run_field outcome)" "…outcome assert-fail (the lint evaluates as fail)"
+  assert_contains "$(run_field message)" "absent" "…the message says a lint path is absent"
+  # An unsafe path is a finding whatever the status.
+  jset "$SIDECAR" '.claims[0].lint.paths = ["src/auth/rotation.py", "src/../../x/token.py"]'
+  cl validate --all
+  assert_v4 "is not a safe repo path" "unbuilt, one path unsafe"
+  cl run --all
+  assert_eq "1" "$CL_RC" "…run exits 1"
+  assert_contains "$(run_field message)" "is not a safe repo path" "…a run finding names it"
+  # built: an absent path is still a finding.
+  jset "$SIDECAR" '.claims[0].lint.paths = ["src/auth/token.py"]'
+  lint_promote
+  jset "$SIDECAR" '.claims[0].lint.paths = ["src/auth/rotation.py"]'
+  cl validate --all
+  assert_v4 "is not a file in the proposed tree" "built, the lint path absent"
+  cl run --all
+  assert_eq "1" "$CL_RC" "…run exits 1"
+  assert_contains "$(run_field message)" "is not a file in the proposed tree" "…a run finding names it"
   teardown
 }
 
@@ -3802,6 +3845,14 @@ test_v4_frozen_selftest_only() {
   jset "$SIDECAR" '.claims[0].lint.selftest.clean = "nothing"'
   cl validate --all
   assert_v4 "vacuous pattern" "frozen, clean selftest fails"
+  # Its path strings are structural: an unsafe one is a finding, an absent
+  # one is not read.
+  jset "$SIDECAR" '.claims[0].lint.selftest.clean = "TTL_SECONDS = 900" | .claims[0].lint.paths = ["src/auth/rotation.py"]'
+  cl validate --all
+  assert_v4_ok "frozen, its lint path absent (never read)"
+  jset "$SIDECAR" '.claims[0].lint.paths = ["src/../../x/token.py"]'
+  cl validate --all
+  assert_v4 "is not a safe repo path" "frozen, an unsafe lint path string"
   teardown
 }
 
@@ -3826,6 +3877,18 @@ test_run_lint_rerun() {
   cl run --claims SPEC-AUTH-001#token-ttl
   assert_eq "0" "$CL_RC" "diverged, the lint fails: exits 0"
   assert_eq "assert-fail" "$(run_field outcome)" "…outcome assert-fail"
+  teardown
+}
+
+test_run_lint_unbuilt_pass_is_finding() {
+  echo "test: run — an unbuilt lint claim whose lint passes is a finding: promote"
+  claims_fixture
+  lint_claim
+  cl run --all
+  assert_eq "1" "$CL_RC" "unbuilt, the constant present: exits 1"
+  assert_eq "finding" "$(run_field verdict)" "…verdict finding"
+  assert_eq "pass" "$(run_field outcome)" "…outcome pass"
+  assert_contains "$(run_field message)" "passes: promote" "…it says promote"
   teardown
 }
 
@@ -4029,12 +4092,14 @@ run_tests() {
   test_v4_selftest_clean_fails
   test_v4_pattern_contradicts_status
   test_v4_diverged_and_unbuilt_status
+  test_v4_unbuilt_absent_path_allowed
   test_v4_valid_lint_passes
   test_v4_invalid_pattern
   test_v4_lint_paths_unsafe_or_absent
   test_v4_staged_reads_index
   test_v4_frozen_selftest_only
   test_run_lint_rerun
+  test_run_lint_unbuilt_pass_is_finding
   test_run_lint_structural_findings
 
   print_summary
