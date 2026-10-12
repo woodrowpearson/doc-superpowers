@@ -7135,7 +7135,7 @@ _JQ_CLAIMS_RUN_PLAN='def nes: type == "string" and length > 0;
           elif $c.lint | cl_lint_ok | not then
             {action: "finding", message: "lint \($c.lint | tojson) is not {pattern, paths, expect, selftest}: nothing to run"}
           elif $c.lint.pattern | cl_nonul | not then
-            {action: "finding", message: "invalid pattern: lint.pattern holds a NUL byte, which grep cannot take"}
+            {action: "finding", message: ($c.lint | cl_nul_pattern)}
           else {action: "lint", lint: $c.lint} end)
        elif $c.enforced_by != "test" then {action: "finding", message: "enforced_by \($c.enforced_by | tojson) is not a check run can execute"}
        elif $c.test == null and $c.status == "unbuilt" then {action: "ok", message: "no check yet"}
@@ -7301,22 +7301,28 @@ cmd_claims_run() {
     done 3< "$list"
   fi
 
-  # Each lint claim evaluated over the working tree: pass, assert-fail, or
-  # (an unusable path, an invalid pattern) a finding.
+  # Each lint claim evaluated over the working tree: pass, assert-fail
+  # (an unbuilt claim's absent lint path among them), or (an unusable path,
+  # an invalid pattern) a finding.
   _claims_jq run-lints -j 'range(length) as $i | .[$i] | select(.action == "lint")
       | "\($i)\u0000\(.lint.pattern)\u0000\(.lint.expect)\u0000"' "$plan" > "$list"
   while IFS= read -r -d '' i <&3 && IFS= read -r -d '' pattern <&3 && IFS= read -r -d '' expect <&3; do
-    if ! _claims_lint_tree "$plan" "$i"; then
+    rc=0
+    _claims_lint_tree "$plan" "$i" || rc=$?
+    if [ "$rc" = 1 ]; then
       _claims_jq run-lint-bad -nc --slurpfile plan "$plan" --argjson i "$i" --slurpfile bad "$_SCRATCH/cl-lint-bad.jsonl" \
         '{claim: $plan[0][$i].claim, finding: ([$bad[].message] | join("; "))}' >> "$rows"
       continue
+    elif [ "$rc" = 2 ]; then
+      t=absent
+    else
+      t=$(_claims_lint_eval "$pattern" "$expect" "$_SCRATCH/cl-lint-tree") || t=error
     fi
-    t=$(_claims_lint_eval "$pattern" "$expect" "$_SCRATCH/cl-lint-tree") || t=error
     _claims_jq run-lint-row -nc --slurpfile plan "$plan" --argjson i "$i" --arg t "$t" \
-      '$plan[0][$i] | if $t == "error"
-       then {claim, finding: "invalid pattern: grep -E rejects lint.pattern \(.lint.pattern | tojson): fix the pattern"}
+      "$_JQ_CLAIMS_LINT_DEFS"' $plan[0][$i] | if $t == "error" then {claim, finding: (.lint | cl_invalid_pattern)}
        else {claim, outcome: (if $t == "pass" then "pass" else "assert-fail" end), reason: null,
-             evidence: "grep -E \(.lint.pattern | tojson), expect \(.lint.expect), over \(.lint.paths | join(", "))"}
+             evidence: ("grep -E \(.lint.pattern | tojson), expect \(.lint.expect), over \(.lint.paths | join(", "))"
+                        + (if $t == "absent" then "; a lint path is absent: an unbuilt claim'"'"'s allowed failure" else "" end))}
        end' >> "$rows"
   done 3< "$list"
 
@@ -7581,21 +7587,28 @@ _claims_v3() {
 # several patterns to grep, any one matching), pass when expect is present
 # and it matches, or expect is absent and it does not. V4 checks each
 # eligible, touched lint claim that is not retired. Each selftest string,
-# written to a scratch file, must fail (violates) and pass (clean) the lint:
-# else "vacuous pattern". Then, unless the claim is frozen (validated
-# structurally: its tree is never read), its lint.paths files in the
+# written to a scratch file as a line (cl_as_line: its text and a newline,
+# unless it ends in one — so "" is one empty line, which .* matches, never
+# a 0-byte file no pattern matches), must fail (violates) and pass (clean)
+# the lint: else "vacuous pattern". Then its lint.paths files in the
 # proposed tree (_claims_read: the index under --staged) are concatenated
 # (_claims_lint_tree) and evaluated: a built or gated claim's lint must
 # pass, a diverged claim's fail, an unbuilt claim's either; anything else
 # contradicts the status. Each path must be a safe repo path
-# (_claims_safe_relpath; in the work tree _claims_contained_path too) and a
-# file of the proposed tree: else a finding, the path is never read, and the
-# lint is not evaluated. A pattern grep -E rejects (grep exit 2, not 1: no
-# match) is a finding, "invalid pattern", never a pass or a fail; so is a
-# pattern holding a NUL byte, which no argument can carry. claims run
-# evaluates the same tree, the working tree's, for each lint claim (pass →
-# pass, fail → assert-fail; an unusable path or an invalid pattern is a
-# finding there too, not indeterminate).
+# (_claims_safe_relpath; in the work tree _claims_contained_path too): else
+# a finding whatever the status, the path is never read, and the lint is not
+# evaluated. Each must be a file of the proposed tree too: else a finding —
+# except for an unbuilt claim, where an absent file is an allowed failure
+# (the status table: unbuilt is "any failure, or no check yet"), so its lint
+# evaluates as fail. A frozen claim is validated structurally: its path
+# strings go through _claims_safe_relpath, and nothing is read or
+# evaluated. A pattern grep -E rejects (grep exit 2, not 1: no match) is a
+# finding, "invalid pattern" (cl_invalid_pattern), never a pass or a fail;
+# so is a pattern holding a NUL byte, which no argument can carry. claims
+# run evaluates the same tree, the working tree's, for each lint claim
+# (pass → pass, fail → assert-fail; an unsafe path, an absent one of a claim
+# that is not unbuilt, or an invalid pattern is a finding there too, not
+# indeterminate).
 #
 # Scratch: cl-v4-plan.json (one entry per checked claim), cl-v4-rows.jsonl
 # ({i, violates, clean, tree, bad} per entry), cl-v4-violates and
@@ -7604,7 +7617,9 @@ _claims_v3() {
 
 # Shared by V4 and run. cl_lint_ok: a lint V1 accepts. cl_nonul: no NUL
 # byte (the shell reads these values NUL-separated, and grep takes the
-# pattern as an argument).
+# pattern as an argument). cl_as_line: a selftest string as the line written
+# for grep. cl_invalid_pattern / cl_nul_pattern: on a lint, the finding
+# message validate and run both report.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_LINT_DEFS='def cl_lint_ok: type == "object"
    and (.pattern | type) == "string" and .pattern != ""
@@ -7613,7 +7628,10 @@ _JQ_CLAIMS_LINT_DEFS='def cl_lint_ok: type == "object"
    and (.expect == "present" or .expect == "absent")
    and (.selftest | type) == "object"
    and (.selftest.violates | type) == "string" and (.selftest.clean | type) == "string";
- def cl_nonul: (split("\u0000") | length) <= 1;'
+ def cl_nonul: (split("\u0000") | length) <= 1;
+ def cl_as_line: if endswith("\n") then . else . + "\n" end;
+ def cl_invalid_pattern: "invalid pattern: grep -E rejects lint.pattern \(.pattern | tojson): fix the pattern";
+ def cl_nul_pattern: "invalid pattern: lint.pattern holds a NUL byte, which grep cannot take";'
 
 # _claims_lint_eval <pattern> <expect> <file>: print pass or fail. With
 # expect present, pass when grep -Eq -- <pattern> <file> matches; with
@@ -7631,38 +7649,51 @@ _claims_lint_eval() {
 }
 
 # _claims_lint_tree <entries-file> <i>: the lint.paths files of entry <i> of
-# <entries-file> (a JSON array of entries holding a cl_lint_ok .lint),
-# concatenated into cl-lint-tree, a newline after each file that lacks one
-# (no line of one file runs into the next's); returns 0 when every path was
-# read. Each unusable path — not a safe repo path (in the work tree:
-# contained too), or not a file of the proposed tree (_claims_read, by mode)
-# — is never read: it adds a {message} row to cl-lint-bad.jsonl and makes it
-# return 1. A NUL in a path is written as the text \u0000, so the path names
-# no file.
+# <entries-file> (a JSON array of entries holding a cl_lint_ok .lint, a
+# status and, for V4, frozen), concatenated into cl-lint-tree, a newline
+# after each file that lacks one (no line of one file runs into the next's).
+# Returns 0 when every path was read; 1 when a path is unusable — not a safe
+# repo path (in the work tree: contained too), or, for a claim that is not
+# unbuilt, not a file of the proposed tree (_claims_read, by mode) — each
+# such path never read and named by a {message} row in cl-lint-bad.jsonl;
+# 2 when every path is safe but one is absent and the claim is unbuilt (its
+# allowed failure: the lint evaluates as fail). A frozen entry's paths get
+# _claims_safe_relpath alone (a string check): nothing is read, and it
+# returns 0 or 1. A NUL in a path is written as the text \u0000, so the path
+# names no file.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _claims_lint_tree() {
   local tree="$_SCRATCH/cl-lint-tree" bad="$_SCRATCH/cl-lint-bad.jsonl" one="$_SCRATCH/cl-lint-one"
-  local z="$_SCRATCH/cl-lint-paths.z" p msg nl rc=0
+  local z="$_SCRATCH/cl-lint-paths.z" p msg nl status frozen absent=0 rc=0
+  local unsafe="is not a safe repo path (absolute, an empty, . or .. segment, or reached through a symbolic link): it is never read"
   : > "$tree"
   : > "$bad"
-  _claims_jq lint-paths -j --argjson i "$2" '.[$i].lint.paths[] | split("\u0000") | join("\\u0000") | . + "\u0000"' \
-    "$1" > "$z"
-  while IFS= read -r -d '' p <&4; do
-    msg=""
-    if ! _claims_safe_relpath "$p" || { [ "$_CL_MODE" = all ] && ! _claims_contained_path "$p"; }; then
-      msg="lint.paths entry $p is not a safe repo path (absolute, an empty, . or .. segment, or reached through a symbolic link): it is never read"
-    elif ! _claims_read "$p" > "$one"; then
-      msg="lint.paths entry $p is not a file in the proposed tree"
-    else
-      cat "$one" >> "$tree" || _claims_die "cannot write $tree"
-      nl=$(tail -c 1 "$one" | wc -l)
-      if [ -s "$one" ] && [ $((nl)) -eq 0 ]; then printf '\n' >> "$tree"; fi
+  _claims_jq lint-paths -j --argjson i "$2" '.[$i] | "\(.status)\u0000\(.frozen == true)\u0000",
+      (.lint.paths[] | split("\u0000") | join("\\u0000") | . + "\u0000")' "$1" > "$z"
+  {
+    if ! { IFS= read -r -d '' status <&4 && IFS= read -r -d '' frozen <&4; }; then
+      _claims_die "lint-paths: no status for entry $2"
     fi
-    if [ -n "$msg" ]; then
-      rc=1
-      _claims_jq lint-bad -nc --arg m "$msg" '{message: $m}' >> "$bad"
-    fi
-  done 4< "$z"
+    while IFS= read -r -d '' p <&4; do
+      msg=""
+      if [ "$frozen" = true ]; then
+        _claims_safe_relpath "$p" || msg="lint.paths entry $p $unsafe"
+      elif ! _claims_safe_relpath "$p" || { [ "$_CL_MODE" = all ] && ! _claims_contained_path "$p"; }; then
+        msg="lint.paths entry $p $unsafe"
+      elif ! _claims_read "$p" > "$one"; then
+        if [ "$status" = unbuilt ]; then absent=1; else msg="lint.paths entry $p is not a file in the proposed tree"; fi
+      else
+        cat "$one" >> "$tree" || _claims_die "cannot write $tree"
+        nl=$(tail -c 1 "$one" | wc -l)
+        if [ -s "$one" ] && [ $((nl)) -eq 0 ]; then printf '\n' >> "$tree"; fi
+      fi
+      if [ -n "$msg" ]; then
+        rc=1
+        _claims_jq lint-bad -nc --arg m "$msg" '{message: $m}' >> "$bad"
+      fi
+    done
+  } 4< "$z"
+  if [ "$rc" = 0 ] && [ "$absent" = 1 ]; then rc=2; fi
   return "$rc"
 }
 
@@ -7678,7 +7709,7 @@ _JQ_CLAIMS_V4_PLAN='$t[0] as $touched
 
 # V4 over the plan ($plan) and its rows ($rows: {i, violates, clean: pass |
 # fail | error; tree: pass | fail | "" (not evaluated); bad: messages}) →
-# finding rows.
+# finding rows. Run after _JQ_CLAIMS_LINT_DEFS.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_V4='def v4($e; $msg): {check: "V4", claim: $e.claim, doc: $e.doc, message: $msg};
  $plan[0] as $plan
@@ -7686,7 +7717,7 @@ _JQ_CLAIMS_V4='def v4($e; $msg): {check: "V4", claim: $e.claim, doc: $e.doc, mes
  | "lint (grep -E \($l.pattern | tojson), expect \($l.expect))" as $lint
  | ($l.paths | join(", ")) as $paths
  | if $r.violates == "error" or $r.clean == "error" then
-     v4($e; "invalid pattern: grep -E rejects lint.pattern \($l.pattern | tojson): fix the pattern")
+     v4($e; $l | cl_invalid_pattern)
    else
      (if $r.violates == "pass"
       then v4($e; "vacuous pattern: selftest.violates passes the \($lint): the pattern cannot catch the violation it is for")
@@ -7702,32 +7733,38 @@ _JQ_CLAIMS_V4='def v4($e; $msg): {check: "V4", claim: $e.claim, doc: $e.doc, mes
       else empty end)
    end'
 
-# V4 (see the section comment): the plan; per entry, the selftests and (not
-# frozen, pattern valid) the paths evaluated in the shell; then one jq for
-# the findings. The shell loop runs over that short list.
+# V4 (see the section comment): the plan; per entry, the selftests and
+# (pattern valid) the paths checked and (not frozen) evaluated in the shell;
+# then one jq for the findings. The shell loop runs over that short list.
 # shellcheck disable=SC2016  # jq programs, not shell expansion
 _claims_v4() {
   local plan="$_SCRATCH/cl-v4-plan.json" rows="$_SCRATCH/cl-v4-rows.jsonl" z="$_SCRATCH/cl-v4.z"
   local vio="$_SCRATCH/cl-v4-violates" cln="$_SCRATCH/cl-v4-clean"
-  local i pattern expect frozen v c t
+  local i pattern expect frozen v c t rc
   : > "$rows"
   _claims_jq v4-plan -c --slurpfile t "$_SCRATCH/cl-touched.json" "$_JQ_CLAIMS_LINT_DEFS $_JQ_CLAIMS_V4_PLAN" \
     "$_SCRATCH/cl-claims.json" > "$plan"
   _claims_jq v4-nul -c "$_JQ_CLAIMS_LINT_DEFS"' .[] | select(.lint.pattern | cl_nonul | not)
-      | {check: "V4", claim, doc, message: "invalid pattern: lint.pattern holds a NUL byte, which grep cannot take"}' \
+      | {check: "V4", claim, doc, message: (.lint | cl_nul_pattern)}' \
     "$plan" >> "$_SCRATCH/cl-findings.jsonl"
   _claims_jq v4-entries -j "$_JQ_CLAIMS_LINT_DEFS"' range(length) as $i | .[$i] | select(.lint.pattern | cl_nonul)
       | "\($i)\u0000\(.lint.pattern)\u0000\(.lint.expect)\u0000\(.frozen)\u0000"' "$plan" > "$z"
   while IFS= read -r -d '' i <&3 && IFS= read -r -d '' pattern <&3 \
       && IFS= read -r -d '' expect <&3 && IFS= read -r -d '' frozen <&3; do
-    _claims_jq v4-violates -j --argjson i "$i" '.[$i].lint.selftest.violates' "$plan" > "$vio"
-    _claims_jq v4-clean -j --argjson i "$i" '.[$i].lint.selftest.clean' "$plan" > "$cln"
+    _claims_jq v4-violates -j --argjson i "$i" "$_JQ_CLAIMS_LINT_DEFS"' .[$i].lint.selftest.violates | cl_as_line' \
+      "$plan" > "$vio"
+    _claims_jq v4-clean -j --argjson i "$i" "$_JQ_CLAIMS_LINT_DEFS"' .[$i].lint.selftest.clean | cl_as_line' \
+      "$plan" > "$cln"
     v=$(_claims_lint_eval "$pattern" "$expect" "$vio") || v=error
     c=$(_claims_lint_eval "$pattern" "$expect" "$cln") || c=error
     t=""
     : > "$_SCRATCH/cl-lint-bad.jsonl"
-    if [ "$v" != error ] && [ "$c" != error ] && [ "$frozen" = false ]; then
-      if _claims_lint_tree "$plan" "$i"; then
+    if [ "$v" != error ] && [ "$c" != error ]; then
+      rc=0
+      _claims_lint_tree "$plan" "$i" || rc=$?
+      if [ "$rc" = 2 ]; then
+        t=fail
+      elif [ "$rc" = 0 ] && [ "$frozen" = false ]; then
         t=$(_claims_lint_eval "$pattern" "$expect" "$_SCRATCH/cl-lint-tree") \
           || _claims_die "grep failed evaluating the lint of plan entry $i over its paths"
       fi
@@ -7736,7 +7773,8 @@ _claims_v4() {
       --slurpfile bad "$_SCRATCH/cl-lint-bad.jsonl" '{i: $i, violates: $v, clean: $c, tree: $t, bad: [$bad[].message]}' \
       >> "$rows"
   done 3< "$z"
-  _claims_jq v4 -nc --slurpfile plan "$plan" --slurpfile rows "$rows" "$_JQ_CLAIMS_V4" >> "$_SCRATCH/cl-findings.jsonl"
+  _claims_jq v4 -nc --slurpfile plan "$plan" --slurpfile rows "$rows" "$_JQ_CLAIMS_LINT_DEFS $_JQ_CLAIMS_V4" \
+    >> "$_SCRATCH/cl-findings.jsonl"
 }
 
 cmd_claims_validate() {
