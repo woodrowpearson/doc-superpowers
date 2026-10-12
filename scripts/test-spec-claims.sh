@@ -2537,6 +2537,600 @@ test_v11_indented_markers() {
   teardown
 }
 
+# --- Runner adapters and claims run --------------------------------------------
+#
+# stub_runner makes the fixture runnable: a /bin/sh stub runner adapter in
+# tools/claims/runner (committed with the fixture, as a host's adapter is),
+# config runners.stub, and the fixture claim bound to the stub's node. The
+# stub's behaviour is data in tools/claims/ (see the script), and every call
+# it gets is logged to $STUB_LOG, outside the work tree.
+
+STUB_NODE="tests/test_token.py::test_ttl"
+STUB_TEST="{\"runner\":\"stub\",\"node\":\"$STUB_NODE\"}"
+
+# The stub runner adapter (§D contract, /bin/sh; interpreter-neutral):
+#   list                  cats list.jsonl
+#   run [--root <dir>] <node>…  per node: the force line (node<TAB>outcome
+#                         [<TAB>reason]) when there is one, else checks
+#                         (node<TAB>file<TAB>needle): pass when <dir>/<file>
+#                         holds needle (grep -F), assert-fail when the file
+#                         lacks it, error when the file is missing; a node in
+#                         neither file is not-found. A force outcome "noise"
+#                         prints its reason raw on stdout, then the node's
+#                         checks outcome. STUB_BG=1 first starts
+#                         `sleep 30 >/dev/null 2>&1 &` (every other fd
+#                         inherited) and writes its pid to $STUB_LOG.bgpid.
+#   edited-bound-tests    cats edited
+# Every call appends its subcommand, its arguments (one per line) and the
+# stdin it read to $STUB_LOG; STUB_EXIT=<n> makes it exit n after printing.
+# shellcheck disable=SC2016  # the stub's own expansions
+STUB_RUNNER_SH='#!/bin/sh
+dir=$(cd "$(dirname "$0")" && pwd)
+log=${STUB_LOG:-/dev/null}
+sub=${1:-}
+[ $# -eq 0 ] || shift
+{
+  printf "%s\n" "$sub"
+  for a in "$@"; do printf "%s\n" "$a"; done
+  cat
+} >> "$log"
+lookup() {
+  N="$1" awk -F "	" "\$1 == ENVIRON[\"N\"] { print \$2 \"	\" \$3; exit }" "$2" 2>/dev/null
+}
+jstr() {
+  printf "\"%s\"" "$(printf "%s" "$1" | sed "s/[\\\\\"]/\\\\&/g")"
+}
+case $sub in
+  list) cat "$dir/list.jsonl" ;;
+  edited-bound-tests) cat "$dir/edited" ;;
+  run)
+    root=.
+    if [ "${1:-}" = --root ]; then root=$2; shift 2; fi
+    if [ "${STUB_BG:-}" = 1 ]; then
+      sleep 30 >/dev/null 2>&1 &
+      echo $! > "$log.bgpid"
+    fi
+    for node in "$@"; do
+      forced=$(lookup "$node" "$dir/force")
+      outcome=${forced%%"	"*}
+      reason=${forced#*"	"}
+      if [ "$outcome" = noise ]; then
+        printf "%s\n" "$reason"
+        forced=""
+      fi
+      if [ -z "$forced" ]; then
+        reason=""
+        check=$(lookup "$node" "$dir/checks")
+        if [ -z "$check" ]; then
+          outcome=not-found
+        else
+          file=${check%%"	"*}
+          needle=${check#*"	"}
+          if [ ! -f "$root/$file" ]; then outcome=error
+          elif grep -qF -- "$needle" "$root/$file"; then outcome=pass
+          else outcome=assert-fail; fi
+        fi
+      fi
+      if [ -n "$reason" ]; then r=$(jstr "$reason"); else r=null; fi
+      printf "{\"node\":%s,\"outcome\":\"%s\",\"reason\":%s}\n" "$(jstr "$node")" "$outcome" "$r"
+    done
+    ;;
+esac
+exit "${STUB_EXIT:-0}"
+'
+
+# The stub log adapter: `run <claim-id>` prints {"outcome":
+# $STUB_LOG_OUTCOME (default pass), "evidence"}; logging, STUB_BG and
+# STUB_EXIT as the runner's (its log lines start with "log").
+# shellcheck disable=SC2016  # the stub's own expansions
+STUB_LOG_SH='#!/bin/sh
+log=${STUB_LOG:-/dev/null}
+{
+  printf "log %s\n" "${1:-}"
+  [ $# -eq 0 ] || shift
+  for a in "$@"; do printf "%s\n" "$a"; done
+  cat
+} >> "$log"
+if [ "${STUB_BG:-}" = 1 ]; then
+  sleep 30 >/dev/null 2>&1 &
+  echo $! > "$log.bgpid"
+fi
+printf "{\"outcome\":\"%s\",\"evidence\":\"stub evidence\"}\n" "${STUB_LOG_OUTCOME:-pass}"
+exit "${STUB_EXIT:-0}"
+'
+
+# write_stub <path> <script>: an executable stub (mode 755).
+write_stub() {
+  mkdir -p "$(dirname "$1")"
+  printf '%s' "$2" > "$1"
+  chmod 755 "$1"
+}
+
+# stub_runner: the fixture made runnable through the stub (see above), all
+# committed; STUB_LOG is a fresh harness_mktemp file.
+stub_runner() {
+  write_stub tools/claims/runner "$STUB_RUNNER_SH"
+  : > tools/claims/list.jsonl
+  : > tools/claims/force
+  : > tools/claims/edited
+  printf '%s\t%s\t%s\n' "$STUB_NODE" src/auth/token.py "TTL_SECONDS = 900" > tools/claims/checks
+  jset docs/spec-claims/config.json '.runners.stub = {"adapter": "tools/claims/runner", "paths": ["src/", "tests/"]}'
+  jset "$SIDECAR" ".claims[0].test = $STUB_TEST"
+  git add -A && git commit -qm "stub runner"
+  STUB_LOG=$(harness_mktemp stub-log)
+  export STUB_LOG
+}
+
+# stub_log_adapter: config log_adapter → the stub log adapter, committed.
+stub_log_adapter() {
+  write_stub tools/claims/log "$STUB_LOG_SH"
+  jset docs/spec-claims/config.json '.log_adapter = "tools/claims/log"'
+  git add -A && git commit -qm "stub log adapter"
+}
+
+# add_claim <json>: append a claim record to the fixture sidecar.
+add_claim() {
+  jset "$SIDECAR" ".claims += [$1]"
+}
+
+# A second unbuilt claim of the fixture doc (the refresh sentence), bound to
+# <runner> <node>.
+refresh_claim() {
+  jq -nc --arg r "$1" --arg n "$2" '{
+    id: "SPEC-AUTH-001#refresh-single-use", quote: "Refresh tokens are single-use",
+    states: "A refresh token is rejected on its second use.", kind: "behaviour",
+    subject: ["src/auth/token.py"], status: "unbuilt", enforced_by: "test",
+    test: {runner: $r, node: $n}, nonvacuity: null, promotion: null,
+    tracker: "docs/issues/token-ttl.md", frozen_at: null, restates: [], rulings: []}'
+}
+
+# force <node> <outcome> [<reason>]: the stub reports <outcome> for <node>.
+force() {
+  if [ $# -ge 3 ]; then
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> tools/claims/force
+  else
+    printf '%s\t%s\n' "$1" "$2" >> tools/claims/force
+  fi
+}
+
+# set_ttl <seconds>: the subject's TTL.
+set_ttl() {
+  printf 'TTL_SECONDS = %s\n' "$1" > src/auth/token.py
+}
+
+# run_built: the fixture claim made built (with its verdict) on the stub.
+run_built() {
+  local _CL_TEST="$STUB_TEST"
+  hand_promote
+}
+
+# run_diverged: the fixture claim made diverged (tracker open, ruling) on the stub.
+run_diverged() {
+  diverge_claim
+  jset "$SIDECAR" ".claims[0].test = $STUB_TEST"
+  rerender
+}
+
+# The stub's run calls in $STUB_LOG: the number of "run" lines.
+stub_run_calls() {
+  grep -c '^run$' "$STUB_LOG" || true
+}
+
+# The fixture claim's result field <f> in the last `cl`.
+run_field() {
+  jq -r --arg f "$1" '[.results[] | select(.claim == "SPEC-AUTH-001#token-ttl")][0][$f]' <<<"$CL_OUT" 2>/dev/null
+}
+
+test_run_built_pass_exit_0() {
+  echo "test: run — a built claim whose check passes is ok"
+  claims_fixture
+  stub_runner
+  run_built
+  cl run --all
+  assert_eq "0" "$CL_RC" "built, check passes: run --all exits 0"
+  assert_eq "1" "$(json_count "$CL_OUT")" "…one verdict object"
+  assert_json_field "$CL_OUT" '.verb' "run" "…verb run"
+  assert_eq "ok" "$(run_field verdict)" "…verdict ok"
+  assert_eq "pass" "$(run_field outcome)" "…outcome pass"
+  assert_eq "built" "$(run_field status)" "…status built"
+  assert_eq "$STUB_NODE" "$(run_field node)" "…the bound node"
+  assert_json_field "$CL_OUT" '.results[0] | keys | sort | tojson' \
+    '["claim","message","node","outcome","status","verdict"]' "…a result row is {claim, status, node, outcome, verdict, message}"
+  assert_eq "1" "$(stub_run_calls)" "…one run call for the runner"
+  assert_contains "$(cat "$STUB_LOG")" "--root"$'\n'"$(git rev-parse --show-toplevel)" "…with --root <the work tree>"
+  teardown
+}
+
+test_run_built_assert_fail_exit_1() {
+  echo "test: run — a built claim whose check fails is a finding"
+  claims_fixture
+  stub_runner
+  run_built
+  set_ttl 1800
+  cl run --all
+  assert_eq "1" "$CL_RC" "built, source → 1800: exits 1"
+  assert_eq "finding" "$(run_field verdict)" "…verdict finding"
+  assert_eq "assert-fail" "$(run_field outcome)" "…outcome assert-fail"
+  assert_json_field "$CL_OUT" '.findings[0].claim' "SPEC-AUTH-001#token-ttl" "…the finding names the claim"
+  assert_json_field "$CL_OUT" '.findings[0].doc' "$DOC" "…and its doc"
+  teardown
+}
+
+test_run_diverged_assert_fail_expected_exit_0() {
+  echo "test: run — a diverged claim's assertion failure is its expected red"
+  claims_fixture
+  stub_runner
+  run_diverged
+  set_ttl 1800
+  cl run --all
+  assert_eq "0" "$CL_RC" "diverged, source → 1800: exits 0"
+  assert_eq "ok" "$(run_field verdict)" "…verdict ok"
+  assert_eq "assert-fail" "$(run_field outcome)" "…outcome assert-fail"
+  teardown
+}
+
+test_run_diverged_pass_is_finding_promote() {
+  echo "test: run — a diverged claim that passes is a finding: promote"
+  claims_fixture
+  stub_runner
+  run_diverged
+  cl run --all
+  assert_eq "1" "$CL_RC" "diverged, source 900: exits 1"
+  assert_eq "finding" "$(run_field verdict)" "…verdict finding"
+  assert_contains "$(run_field message)" "promote" "…the message says promote"
+  assert_json_field "$CL_OUT" '.findings[0].message | test("^passes: promote")' "true" "…the finding says 'passes: promote'"
+  teardown
+}
+
+test_run_diverged_error_is_finding() {
+  echo "test: run — a diverged claim's error is not an expected red"
+  claims_fixture
+  stub_runner
+  run_diverged
+  rm src/auth/token.py
+  cl run --all
+  assert_eq "1" "$CL_RC" "diverged, subject deleted (error): exits 1"
+  assert_eq "error" "$(run_field outcome)" "…outcome error"
+  assert_contains "$(run_field message)" "error is not an expected red" "…the message"
+  teardown
+}
+
+test_run_unbuilt_any_failure_ok() {
+  echo "test: run — an unbuilt claim may fail any way"
+  claims_fixture
+  stub_runner
+  local o
+  for o in error not-found assert-fail; do
+    : > tools/claims/force
+    force "$STUB_NODE" "$o"
+    cl run --all
+    assert_eq "0" "$CL_RC" "unbuilt, forced $o: exits 0"
+    assert_eq "ok" "$(run_field verdict)" "…verdict ok ($o)"
+  done
+  teardown
+}
+
+test_run_unbuilt_pass_is_finding() {
+  echo "test: run — an unbuilt claim that passes is a finding"
+  claims_fixture
+  stub_runner
+  cl run --all
+  assert_eq "1" "$CL_RC" "unbuilt, source 900 (pass): exits 1"
+  assert_contains "$(run_field message)" "promote" "…the message says promote"
+  teardown
+}
+
+test_run_unbuilt_no_check_yet() {
+  echo "test: run — an unbuilt claim with test null is not run"
+  claims_fixture
+  stub_runner
+  jset "$SIDECAR" '.claims[0].test = null'
+  cl run --all
+  assert_eq "0" "$CL_RC" "unbuilt, test null: exits 0"
+  assert_eq "ok" "$(run_field verdict)" "…verdict ok"
+  assert_eq "no check yet" "$(run_field message)" "…message 'no check yet'"
+  assert_eq "null" "$(run_field outcome)" "…no outcome"
+  assert_eq "0" "$(stub_run_calls)" "…the adapter was not called"
+  teardown
+}
+
+test_run_indeterminate_exit_2() {
+  echo "test: run — an indeterminate outcome exits 2"
+  claims_fixture
+  stub_runner
+  force "$STUB_NODE" indeterminate env-missing
+  cl run --all
+  assert_eq "2" "$CL_RC" "forced indeterminate: exits 2"
+  assert_json_field "$CL_OUT" '.indeterminate[0].reason' "env-missing" ".indeterminate[0].reason is the adapter's"
+  assert_json_field "$CL_OUT" '.indeterminate[0].claim' "SPEC-AUTH-001#token-ttl" "…naming the claim"
+  assert_eq "indeterminate" "$(run_field verdict)" "…verdict indeterminate"
+  assert_json_field "$CL_OUT" '.findings' "[]" "…never a finding"
+  teardown
+}
+
+test_run_adapter_nonzero_all_indeterminate() {
+  echo "test: run — a non-zero adapter exit makes every requested node indeterminate"
+  claims_fixture
+  stub_runner
+  add_claim "$(refresh_claim stub tests/test_token.py::test_refresh)"
+  STUB_EXIT=3 cl run --all
+  assert_eq "2" "$CL_RC" "STUB_EXIT=3: exits 2"
+  assert_json_field "$CL_OUT" '[.results[].verdict] | tojson' '["indeterminate","indeterminate"]' "…both claims indeterminate"
+  assert_json_field "$CL_OUT" '[.indeterminate[].reason] | unique | tojson' '["adapter-exit-3"]' "…reason adapter-exit-3"
+  assert_json_field "$CL_OUT" '.indeterminate | length' "2" "…one row per claim"
+  assert_eq "1" "$(stub_run_calls)" "…one run call for both nodes"
+  teardown
+}
+
+test_run_precedence_finding_beats_indeterminate() {
+  echo "test: run — a finding beats an indeterminate (exit 1)"
+  claims_fixture
+  stub_runner
+  add_claim "$(refresh_claim stub tests/test_token.py::test_refresh)"
+  run_built
+  force tests/test_token.py::test_refresh indeterminate env-missing
+  set_ttl 1800
+  cl run --all
+  assert_eq "1" "$CL_RC" "one red claim, one indeterminate: exits 1"
+  assert_json_field "$CL_OUT" '.indeterminate | length' "1" "…the indeterminate is still reported"
+  assert_json_field "$CL_OUT" '.findings | length' "1" "…beside the finding"
+  teardown
+}
+
+test_run_adapter_malformed_json_indeterminate() {
+  echo "test: run — noise on the adapter's stdout is indeterminate, never a pass"
+  claims_fixture
+  stub_runner
+  run_built
+  force "$STUB_NODE" noise oops
+  cl run --all
+  assert_eq "2" "$CL_RC" "'oops' before the JSON: exits 2"
+  assert_json_field "$CL_OUT" '.indeterminate[0].reason' "malformed-adapter-output" "…reason malformed-adapter-output"
+  assert_eq "indeterminate" "$(run_field verdict)" "…never the pass the JSON line reported"
+  # A missing outcome, an unknown outcome, a non-object line: the same.
+  local bad
+  for bad in '{"node":"'"$STUB_NODE"'"}' '{"node":"'"$STUB_NODE"'","outcome":"green"}' '[1]' 'null'; do
+    : > tools/claims/force
+    force "$STUB_NODE" noise "$bad"
+    cl run --all
+    assert_eq "2" "$CL_RC" "stdout line $bad: exits 2"
+    assert_json_field "$CL_OUT" '.indeterminate[0].reason' "malformed-adapter-output" "…$bad: malformed-adapter-output"
+  done
+  # A requested node the adapter does not report.
+  write_stub tools/claims/runner '#!/bin/sh
+cat > /dev/null
+printf "{\"node\":\"tests/test_token.py::test_other\",\"outcome\":\"pass\",\"reason\":null}\n"
+'
+  cl run --all
+  assert_eq "2" "$CL_RC" "a requested node missing from the output: exits 2"
+  assert_json_field "$CL_OUT" '.indeterminate[0].reason' "malformed-adapter-output" "…malformed-adapter-output"
+  teardown
+}
+
+test_run_frozen_skipped() {
+  echo "test: run — retired, frozen and judge claims are skipped, the adapter not called"
+  claims_fixture
+  stub_runner
+  jset "$SIDECAR" ".claims[0].frozen_at = \"$(git rev-parse HEAD)\""
+  cl run --all
+  assert_eq "0" "$CL_RC" "frozen: exits 0"
+  assert_eq "skipped" "$(run_field verdict)" "…result skipped"
+  assert_eq "frozen" "$(run_field message)" "…reason frozen"
+  assert_eq "" "$(cat "$STUB_LOG")" "…the adapter was not called (\$STUB_LOG empty)"
+  jset "$SIDECAR" '.claims[0].frozen_at = null | .claims[0].status = "retired"'
+  cl run --all
+  assert_eq "retired" "$(run_field message)" "retired: skipped, reason retired"
+  jset "$SIDECAR" '.claims[0].status = "unbuilt" | .claims[0].enforced_by = "judge"'
+  cl run --all
+  assert_eq "judge" "$(run_field message)" "judge: skipped, reason judge"
+  assert_eq "" "$(cat "$STUB_LOG")" "…the adapter never called"
+  teardown
+}
+
+test_run_planes_of_selects_runner_by_paths() {
+  echo "test: run --planes-of — every claim of each runner whose paths the range touched"
+  claims_fixture
+  stub_runner
+  write_stub tools/claims/docs-runner "$STUB_RUNNER_SH"
+  jset docs/spec-claims/config.json '.runners.docs = {"adapter": "tools/claims/docs-runner", "paths": ["docs/"]}'
+  add_claim "$(refresh_claim docs docs/checks.md::refresh)"
+  git add -A && git commit -qm "a docs runner"
+  set_ttl 901
+  git add -A && git commit -qm "a source change"
+  cl run --planes-of HEAD~1..HEAD
+  assert_eq "0" "$CL_RC" "a src/ change: exits 0 (the stub claim is unbuilt, its assert-fail ok)"
+  assert_json_field "$CL_OUT" '[.results[].claim] | tojson' '["SPEC-AUTH-001#token-ttl"]' "…only the stub runner's claim"
+  assert_not_contains "$(cat "$STUB_LOG")" "docs/checks.md::refresh" "…the docs runner was not called"
+  # A docs change selects the docs runner alone; a glob entry matches too.
+  : > "$STUB_LOG"
+  jset docs/spec-claims/config.json '.runners.docs.paths = ["docs/*.md"]'
+  echo "x" >> docs/architecture.md
+  git add -A && git commit -qm "a docs change"
+  cl run --planes-of HEAD~1..HEAD
+  assert_json_field "$CL_OUT" '[.results[].claim] | tojson' '["SPEC-AUTH-001#refresh-single-use"]' "a docs/*.md change: only the docs runner's claim"
+  assert_not_contains "$(cat "$STUB_LOG")" "$STUB_NODE" "…the stub runner was not called"
+  # Nothing touched: nothing runs.
+  cl run --planes-of HEAD..HEAD
+  assert_eq "0" "$CL_RC" "an empty range: exits 0"
+  assert_json_field "$CL_OUT" '.results' "[]" "…no result"
+  cl run --planes-of nope..HEAD
+  assert_eq "2" "$CL_RC" "an unresolvable range: exits 2"
+  teardown
+}
+
+test_run_log_claims_only_scheduled() {
+  echo "test: run — log claims run only with --scheduled, through the log adapter"
+  claims_fixture
+  stub_runner
+  stub_log_adapter
+  jset "$SIDECAR" '.claims[0].enforced_by = "log" | .claims[0].test = null | .claims[0].status = "built"'
+  cl run --all
+  assert_eq "0" "$CL_RC" "without --scheduled: exits 0"
+  assert_eq "skipped" "$(run_field verdict)" "…the log claim is skipped"
+  assert_eq "" "$(cat "$STUB_LOG")" "…the log adapter was not called"
+  cl run --all --scheduled
+  assert_eq "0" "$CL_RC" "with --scheduled: exits 0 (built, the log check passes)"
+  assert_eq "ok" "$(run_field verdict)" "…verdict ok"
+  assert_eq "null" "$(run_field node)" "…no node"
+  assert_eq "log run"$'\n'"SPEC-AUTH-001#token-ttl" "$(cat "$STUB_LOG")" "…the log adapter got run <claim-id>"
+  STUB_LOG_OUTCOME=fail cl run --all --scheduled
+  assert_eq "1" "$CL_RC" "a failing log check on a built claim: exits 1"
+  STUB_LOG_OUTCOME=indeterminate cl run --all --scheduled
+  assert_eq "2" "$CL_RC" "an indeterminate log check: exits 2"
+  jset docs/spec-claims/config.json '.log_adapter = null'
+  cl run --all --scheduled
+  assert_eq "2" "$CL_RC" "no log adapter configured: exits 2"
+  assert_json_field "$CL_OUT" '.indeterminate[0].reason' "adapter-exit-126" "…reason adapter-exit-126"
+  teardown
+}
+
+test_run_judge_sample_rotates() {
+  echo "test: run --judge-sample — n judge ids, rotated by ISO week"
+  claims_fixture
+  stub_runner
+  local s
+  for s in c a b; do
+    add_claim "$(jq -nc --arg s "$s" '{id: ("SPEC-AUTH-001#judge-" + $s), quote: "Refresh tokens are single-use",
+      states: "Reviewed by a person.", kind: "behaviour", subject: ["src/auth/token.py"], status: "unbuilt",
+      enforced_by: "judge", why_not_mechanical: "a person reads it", test: null, nonvacuity: null, promotion: null,
+      tracker: "docs/issues/token-ttl.md", frozen_at: null, restates: [], rulings: []}')"
+  done
+  local week ids want
+  week=$(date +%V)
+  ids='["SPEC-AUTH-001#judge-a","SPEC-AUTH-001#judge-b","SPEC-AUTH-001#judge-c"]'
+  want=$(jq -r --argjson w "$((10#$week))" '.[$w % 3]' <<<"$ids")
+  cl run --all --judge-sample 1
+  assert_json_field "$CL_OUT" '.judge_sample | length' "1" "--judge-sample 1: one id"
+  assert_json_field "$CL_OUT" '.judge_sample[0]' "$want" "…the id at (ISO week $week) mod 3, sorted by id"
+  cl run --all --judge-sample 3
+  assert_json_field "$CL_OUT" '.judge_sample | sort | tojson' "$ids" "--judge-sample 3: every judge claim"
+  assert_json_field "$CL_OUT" '.judge_sample[0]' "$want" "…starting at the week's index"
+  cl run --all
+  assert_json_field "$CL_OUT" 'has("judge_sample")' "false" "without --judge-sample: no judge_sample"
+  cl run --all --judge-sample x
+  assert_eq "3" "$CL_RC" "--judge-sample x: usage, exits 3"
+  teardown
+}
+
+test_run_node_with_spaces() {
+  echo "test: run — a node with spaces reaches the adapter as one argument"
+  claims_fixture
+  stub_runner
+  run_built
+  printf 'TTL_SECONDS = 900\n' > "src/a b.py"
+  printf '%s\t%s\t%s\n' "tests/a b.py::t" "src/a b.py" "TTL_SECONDS = 900" >> tools/claims/checks
+  jset "$SIDECAR" '.claims[0].test.node = "tests/a b.py::t"'
+  cl run --all
+  assert_eq "0" "$CL_RC" "node 'tests/a b.py::t': exits 0 (pass)"
+  assert_contains "$(cat "$STUB_LOG")" $'\n'"tests/a b.py::t"$'\n' "…\$STUB_LOG shows the node as one argument"
+  assert_eq "tests/a b.py::t" "$(run_field node)" "…the result names it intact"
+  teardown
+}
+
+# assert_returns_promptly <what> <args…>: `doc-tools.sh claims <args>`,
+# captured by a plain $(…) pipe as a hook does, returns in under 10 s while
+# the adapter's background child (STUB_BG=1) still runs; then kills it.
+assert_returns_promptly() {
+  local what="$1" start took pid out
+  shift
+  rm -f "$STUB_LOG.bgpid"
+  start=$SECONDS
+  out=$(STUB_BG=1 "$DOC_TOOLS" claims "$@" 2>/dev/null </dev/null) || true
+  took=$((SECONDS - start))
+  pid=$(cat "$STUB_LOG.bgpid" 2>/dev/null || true)
+  assert_true "$what: the adapter started its background child" test -n "$pid"
+  assert_true "$what: \$(…) returned in under 10 s (took ${took}s)" test "$took" -lt 10
+  assert_eq "1" "$(json_count "$out")" "$what: one verdict object"
+  if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
+}
+
+test_adapter_child_does_not_hold_stdout() {
+  echo "test: run — an adapter's background child never holds the caller's stdout (fd 9 closed)"
+  claims_fixture
+  stub_runner
+  assert_returns_promptly "runner adapter" run --all
+  stub_log_adapter
+  jset "$SIDECAR" '.claims[0].enforced_by = "log" | .claims[0].test = null'
+  assert_returns_promptly "log adapter" run --all --scheduled
+  teardown
+}
+
+test_adapter_stdin_is_dev_null() {
+  echo "test: run — the adapter's stdin is /dev/null, never the caller's"
+  claims_fixture
+  stub_runner
+  # Not `cl` (it closes stdin itself): a hook's ref lines on doc-tools' stdin.
+  local out
+  out=$(printf 'ref-line\n' | "$DOC_TOOLS" claims run --all 2>/dev/null) || true
+  assert_eq "1" "$(json_count "$out")" "one verdict object"
+  assert_eq "1" "$(stub_run_calls)" "the adapter ran"
+  assert_not_contains "$(cat "$STUB_LOG")" "ref-line" "\$STUB_LOG records no stdin bytes"
+  teardown
+}
+
+test_run_unknown_runner_indeterminate() {
+  echo "test: run — a test.runner not in config runners is a missing adapter (indeterminate)"
+  claims_fixture
+  stub_runner
+  jset "$SIDECAR" '.claims[0].test.runner = "nosuch"'
+  cl run --all
+  assert_eq "2" "$CL_RC" "an unknown runner: exits 2"
+  assert_json_field "$CL_OUT" '.indeterminate[0].reason' "adapter-exit-126" "…reason adapter-exit-126"
+  # A configured adapter that is not executable: the same.
+  jset "$SIDECAR" '.claims[0].test.runner = "stub"'
+  chmod 644 tools/claims/runner
+  cl run --all
+  assert_eq "2" "$CL_RC" "a non-executable adapter: exits 2"
+  assert_json_field "$CL_OUT" '.indeterminate[0].reason' "adapter-exit-126" "…reason adapter-exit-126"
+  assert_eq "" "$(cat "$STUB_LOG")" "…nothing ran"
+  teardown
+}
+
+test_run_unsafe_adapter_path_indeterminate() {
+  echo "test: run — an adapter path outside the work tree is a missing adapter, never run"
+  claims_fixture
+  stub_runner
+  local out rel
+  out=$(harness_mktemp_d outside-adapter)
+  printf '#!/bin/sh\ntouch "%s/ran"\nexit 0\n' "$out" > "$out/runner"
+  chmod 755 "$out/runner"
+  # Through "..": the safe-path guard.
+  # tools/claims/../../.. is the fixture's parent, where $out lives.
+  rel="tools/claims/../../../$(basename "$out")/runner"
+  jset docs/spec-claims/config.json ".runners.stub.adapter = \"$rel\""
+  cl run --all
+  assert_eq "2" "$CL_RC" "an adapter path with .. segments: exits 2"
+  assert_json_field "$CL_OUT" '.indeterminate[0].reason' "adapter-exit-126" "…reason adapter-exit-126"
+  # Through a symbolic link: the containment guard.
+  ln -s "$out" tools/outside
+  jset docs/spec-claims/config.json '.runners.stub.adapter = "tools/outside/runner"'
+  cl run --all
+  assert_eq "2" "$CL_RC" "an adapter reached through a symlinked directory: exits 2"
+  assert_json_field "$CL_OUT" '.indeterminate[0].reason' "adapter-exit-126" "…reason adapter-exit-126"
+  assert_file_not_exists "$out/ran" "…the outside adapter never ran"
+  teardown
+}
+
+test_run_selection() {
+  echo "test: run — exactly one of --claims, --planes-of, --all; --claims ids split on commas"
+  claims_fixture
+  stub_runner
+  add_claim "$(refresh_claim stub tests/test_token.py::test_refresh)"
+  cl run
+  assert_usage_verdict run true "claims run with no selection"
+  cl run --all --planes-of HEAD~1..HEAD
+  assert_usage_verdict run true "claims run --all --planes-of"
+  cl run --claims SPEC-AUTH-001#nope
+  assert_usage_verdict run true "claims run --claims <unknown id>"
+  cl run --claims SPEC-AUTH-001#refresh-single-use
+  assert_json_field "$CL_OUT" '[.results[].claim] | tojson' '["SPEC-AUTH-001#refresh-single-use"]' "--claims <id>: that claim alone"
+  cl run --claims SPEC-AUTH-001#token-ttl,SPEC-AUTH-001#refresh-single-use
+  assert_json_field "$CL_OUT" '.results | length' "2" "--claims a,b: both"
+  cl run --claims SPEC-AUTH-001#token-ttl SPEC-AUTH-001#refresh-single-use --scheduled
+  assert_json_field "$CL_OUT" '.results | length' "2" "--claims a b: both"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -2659,6 +3253,30 @@ run_tests() {
   test_unsafe_symlinked_dir
   test_unsafe_symlinked_file
   test_v11_indented_markers
+
+  # --- Task 7: runner adapters and claims run ---
+  test_run_built_pass_exit_0
+  test_run_built_assert_fail_exit_1
+  test_run_diverged_assert_fail_expected_exit_0
+  test_run_diverged_pass_is_finding_promote
+  test_run_diverged_error_is_finding
+  test_run_unbuilt_any_failure_ok
+  test_run_unbuilt_pass_is_finding
+  test_run_unbuilt_no_check_yet
+  test_run_indeterminate_exit_2
+  test_run_adapter_nonzero_all_indeterminate
+  test_run_precedence_finding_beats_indeterminate
+  test_run_adapter_malformed_json_indeterminate
+  test_run_frozen_skipped
+  test_run_planes_of_selects_runner_by_paths
+  test_run_log_claims_only_scheduled
+  test_run_judge_sample_rotates
+  test_run_node_with_spaces
+  test_adapter_child_does_not_hold_stdout
+  test_adapter_stdin_is_dev_null
+  test_run_unknown_runner_indeterminate
+  test_run_unsafe_adapter_path_indeterminate
+  test_run_selection
 
   print_summary
 }

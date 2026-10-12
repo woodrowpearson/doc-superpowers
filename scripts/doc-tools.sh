@@ -2188,11 +2188,16 @@ claims validate|cmd_claims_validate|repo|staged all config=* base=
   made outside git (the configuration extension only). See "Spec claims".
 claims run|cmd_claims_run|repo|claims+ planes-of= all scheduled judge-sample= base=
   (--claims <id>... | --planes-of <range> | --all) [--scheduled] [--judge-sample <n>] [--base <ref>]
-  Execute claims: test claims through their runner adapters, lint claims
-  again, log claims (with --scheduled only) through the log adapter.
-  --planes-of runs every claim of each runner whose paths <range>
-  touched; --judge-sample <n> also names n judge claims to review.
-  Frozen claims are skipped. Every finding blocks.
+  Execute claims: test claims through their runner adapters (config
+  "runners": one run call per runner), lint claims again, log claims (with
+  --scheduled only) through the log adapter. --claims takes ids (commas
+  split them too); --planes-of runs every claim of each runner one of
+  whose "paths" (a prefix, or a glob) a path <range> changes touches;
+  --judge-sample <n> also names n judge claims to review, rotated weekly.
+  Retired, frozen and judge claims are reported skipped. Each outcome is
+  judged by the claim's status: built must pass, diverged fail by an
+  assertion, unbuilt not pass. Every finding blocks; an indeterminate
+  outcome, or a missing or failing adapter, exits 2.
 claims promote|cmd_claims_promote|repo|reverify all base=
   <id> | --reverify (<id>... | --all) [--base <ref>]
   Promote a claim to built: run its test green, verify its non-vacuity
@@ -6952,6 +6957,325 @@ _claims_blocks() {
   done 3< "$list"
 }
 
+# --- Spec claims: runner adapters, claims run --------------------------------
+#
+# A host plugs its test frameworks in through adapter executables named in
+# the config (§D; the JSON shapes are the contract, never extended):
+#   runners.<name> = {"adapter": "<repo path>", "paths": ["<prefix-or-glob>"…]}
+#     <adapter> list [<file>…]  → JSON lines {"id", "node", "file", "in_gate":
+#       bool, "subject_imports_ok": bool, "when": {…}|null}
+#     <adapter> run --root <dir> <node>…  → JSON lines {"node", "outcome":
+#       "pass"|"assert-fail"|"error"|"not-found"|"indeterminate", "reason"}
+#     <adapter> edited-bound-tests --staged | <range>  → claim ids
+#   log_adapter = "<repo path>"|null
+#     <adapter> run <claim-id>  → {"outcome": "pass"|"fail"|"indeterminate",
+#       "evidence"}
+# Every adapter call goes through _claims_adapter_call: from the repo root,
+# stdin /dev/null (an adapter never eats a hook's ref lines) and fd 9, the
+# verdict fd, closed (an adapter, or a child it leaves running, never holds
+# the caller's captured stdout open). A test.runner the config does not name,
+# or an adapter path that is not a safe, contained repo path, is a missing
+# adapter: rc 126, indeterminate.
+#
+# claims run selects claims (--claims, --planes-of, --all), skips the
+# retired, frozen and judge ones (and log ones without --scheduled), makes
+# one run call per runner and one log-adapter call per log claim, and judges
+# each outcome by the claim's status (claims_expect). Every finding blocks.
+# Scratch: cl-run-plan.json (one entry per selected claim), cl-run-rows.jsonl
+# (the parsed adapter rows) and cl-run-results.json.
+
+# _claims_adapter_call <out-file> <adapter-path> <args…>: run
+# "$_CL_ROOT/<adapter-path>" <args…> from the repo root, its stdout into
+# <out-file>, with </dev/null 9>&-; return its rc. An empty, unsafe
+# (_claims_safe_relpath), uncontained (_claims_contained_path), missing or
+# non-executable adapter returns 126 without running anything.
+_claims_adapter_call() {
+  local out="$1" adapter="$2" rc=0
+  shift 2
+  : > "$out" || _claims_die "cannot write $out"
+  if [ -z "$adapter" ] || ! _claims_safe_relpath "$adapter" || ! _claims_contained_path "$adapter" \
+      || [ ! -f "$_CL_ROOT/$adapter" ] || [ ! -x "$_CL_ROOT/$adapter" ]; then
+    return 126
+  fi
+  (cd "$_CL_ROOT" && exec "$_CL_ROOT/$adapter" "$@") </dev/null 9>&- > "$out" || rc=$?
+  return "$rc"
+}
+
+# A run call's stdout ($out: its lines, -R) → one {node, outcome, reason} row
+# per requested node ($req[0], a JSON array of nodes). A non-zero adapter rc
+# makes every node indeterminate (adapter-exit-<rc>); so does any non-blank
+# line that is not a JSON object with a string node and a known outcome
+# (malformed-adapter-output: noise is never a pass). A node the output does
+# not report, or reports with two different outcomes, is indeterminate
+# (malformed-adapter-output). A reason that is not a string is null.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_PARSE_RUN='def known: . as $o | any("pass", "assert-fail", "error", "not-found", "indeterminate"; . == $o);
+ def indet($n; $r): {node: $n, outcome: "indeterminate", reason: $r};
+ $req[0] as $req
+ | [inputs | rtrimstr("\r") | select(test("[^ \t]")) | (try {v: fromjson} catch {bad: true})] as $lines
+ | (all($lines[]; has("v") and (.v | type) == "object" and (.v.node | type) == "string"
+                  and (.v.outcome | type) == "string" and (.v.outcome | known))) as $wf
+ | if $rc != 0 then $req[] | indet(.; "adapter-exit-\($rc)")
+   elif ($wf | not) then $req[] | indet(.; "malformed-adapter-output")
+   else [$lines[].v] as $rows
+     | $req[] | . as $n
+     | [$rows[] | select(.node == $n)] as $m
+     | if ($m | length) == 0 or ([$m[].outcome] | unique | length) > 1 then indet($n; "malformed-adapter-output")
+       else {node: $n, outcome: $m[0].outcome, reason: ($m[0].reason | if type == "string" then . else null end)}
+       end
+   end'
+
+# _claims_parse_run <out-file> <requested-nodes-file> <rc>: print one JSONL
+# row {node, outcome, reason} per node of <requested-nodes-file> (a JSON
+# array), from a run call's <out-file> and exit status <rc>
+# (_JQ_CLAIMS_PARSE_RUN).
+_claims_parse_run() {
+  _claims_jq parse-run -ncR --slurpfile req "$2" --argjson rc "${3:-0}" "$_JQ_CLAIMS_PARSE_RUN" < "$1"
+}
+
+# A log-adapter call's stdout → one {claim, outcome, reason, evidence} row
+# ($claim: the claim id it was called with): exactly
+# one non-blank line, a JSON object whose outcome is pass, fail or
+# indeterminate; anything else malformed-adapter-output, a non-zero rc
+# adapter-exit-<rc> (both indeterminate). An indeterminate's reason is its
+# evidence when that is a string.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_PARSE_LOG='def indet($r): {claim: $claim, outcome: "indeterminate", reason: $r, evidence: null};
+ [inputs | rtrimstr("\r") | select(test("[^ \t]")) | (try {v: fromjson} catch {bad: true})] as $lines
+ | if $rc != 0 then indet("adapter-exit-\($rc)")
+   elif ($lines | length) != 1 or ($lines[0] | has("v") | not) or ($lines[0].v | type) != "object"
+        or (($lines[0].v.outcome as $o | any("pass", "fail", "indeterminate"; . == $o)) | not)
+   then indet("malformed-adapter-output")
+   else $lines[0].v | (.evidence | if type == "string" then . else null end) as $e
+     | {claim: $claim, outcome, reason: (if .outcome == "indeterminate" then ($e // "indeterminate") else null end),
+        evidence: $e}
+   end'
+
+# _claims_parse_log <out-file> <claim-id> <rc>: print the row
+# (_JQ_CLAIMS_PARSE_LOG) of a log-adapter call for <claim-id> that exited <rc>.
+_claims_parse_log() {
+  _claims_jq parse-log -ncR --arg claim "$2" --argjson rc "${3:-0}" "$_JQ_CLAIMS_PARSE_LOG" < "$1"
+}
+
+# claims_expect($status; $outcome): an outcome judged by the claim's status
+# (§D: an unbuilt claim may fail any way; a diverged one only by an
+# assertion; a built or gated one must pass) → {verdict: ok | finding |
+# indeterminate, message}. A status outside the table is a finding (V1
+# names it): nothing can be expected of it.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_EXPECT='def claims_expect($status; $outcome):
+  def r($v; $m): {verdict: $v, message: $m};
+  "passes: promote (the check is green, so the code now does what states says: claims promote <id>)" as $promote
+  | if $outcome == "indeterminate" then r("indeterminate"; "indeterminate")
+    elif $status == "built" or $status == "gated" then
+      (if $outcome == "pass" then r("ok"; "pass")
+       else r("finding"; "\($outcome): a \($status) claim must pass its check") end)
+    elif $status == "diverged" then
+      (if $outcome == "pass" then r("finding"; $promote)
+       elif $outcome == "assert-fail" then r("ok"; "assert-fail: the expected red of a diverged claim")
+       elif $outcome == "error" then r("finding"; "error is not an expected red (only an assertion failure is): fix the error")
+       else r("finding"; "\($outcome): the bound node is not there to fail") end)
+    elif $status == "unbuilt" then
+      (if $outcome == "pass" then r("finding"; $promote)
+       else r("ok"; "\($outcome): an unbuilt claim may fail any way") end)
+    else r("finding"; "status \($status | tojson) has no expected outcome")
+    end;'
+
+# The run plan: one entry per selected claim of cl-claims.json ($sel: the
+# selected ids, null for all), in sidecar order, with what run does with it:
+# skip (retired, frozen, judge; log without --scheduled; lint, not re-run
+# yet), test (runner, node), log, or a verdict decided without running (an
+# unbuilt test claim with test null: ok, no check yet; a test claim that
+# cannot run: a finding).
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_RUN_PLAN='def nes: type == "string" and length > 0;
+ [.[] | select((.claim.id | type) == "string")
+  | select($sel == null or (.claim.id as $i | any($sel[]; . == $i)))
+  | .claim as $c
+  | {claim: $c.id, status: $c.status, doc, node: null}
+    + (if $c.status == "retired" then {action: "skip", message: "retired"}
+       elif $c.frozen_at | nes then {action: "skip", message: "frozen"}
+       elif $c.enforced_by == "judge" then {action: "skip", message: "judge"}
+       elif $c.enforced_by == "log" then
+         (if $scheduled == 1 then {action: "log"} else {action: "skip", message: "scheduled-only"} end)
+       elif $c.enforced_by == "lint" then {action: "skip", message: "lint (not re-run by this version)"}
+       elif $c.enforced_by != "test" then {action: "finding", message: "enforced_by \($c.enforced_by | tojson) is not a check run can execute"}
+       elif $c.test == null and $c.status == "unbuilt" then {action: "ok", message: "no check yet"}
+       elif ($c.test | type) == "object" and ($c.test.runner | nes) and ($c.test.node | nes) then
+         {action: "test", runner: $c.test.runner, node: $c.test.node}
+       else {action: "finding", message: "test \($c.test | tojson) is not {runner, node}: nothing to run"}
+       end)]'
+
+# The plan joined with the adapter rows ($rows: {runner, node, outcome,
+# reason} per test node; {claim, outcome, reason, evidence} per log claim)
+# → the result entries: the row {claim, status, node, outcome, verdict,
+# message}, plus doc and reason (for the finding and indeterminate rows).
+# A log outcome fail is judged as assert-fail.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_RUN_RESULTS='$plan[0] as $plan
+ | [$plan[]
+    | . as $e
+    | if .action == "skip" then {verdict: "skipped", outcome: null, message}
+      elif .action == "ok" then {verdict: "ok", outcome: null, message}
+      elif .action == "finding" then {verdict: "finding", outcome: null, message}
+      else
+        ((if .action == "test" then first($rows[] | select(.runner == $e.runner and .node == $e.node))
+          else first($rows[] | select(.claim == $e.claim)) end)
+         // {outcome: "indeterminate", reason: "not-run"}) as $row
+        | ($row.outcome | if . == "fail" then "assert-fail" else . end) as $o
+        | claims_expect($e.status; $o) as $x
+        | {outcome: $o, verdict: $x.verdict, reason: $row.reason,
+           message: (if $x.verdict == "indeterminate" then ($row.reason // "indeterminate")
+                     elif ($row.evidence | type) == "string" then "\($x.message) (evidence: \($row.evidence))"
+                     else $x.message end)}
+      end
+    | {claim: $e.claim, status: $e.status, node: $e.node, outcome, verdict, message, doc: $e.doc, reason}]'
+
+# _claims_range_paths <range> <out-file>: the paths <range> changes, NUL
+# separated (git diff -z --name-only --no-renames <range>; both sides of a
+# rename). The one definition of a --planes-of range's path set.
+_claims_range_paths() {
+  case "$1" in
+    -*) _claims_die "--planes-of: '$1' is not a revision range" ;;
+  esac
+  git diff -z --name-only --no-renames "$1" -- > "$2" 2>/dev/null \
+    || _claims_die "--planes-of: cannot diff '$1' (git diff failed)"
+}
+
+# _claims_planes_of <range>: the JSON array of runner names one of whose
+# paths entries matches a path <range> changes. An entry holding a glob
+# character (* ? [) is a glob (_claims_glob_match: * also matches "/");
+# any other entry is a prefix ("src/" matches src/auth/token.py).
+# shellcheck disable=SC2016  # jq programs, not shell expansion
+_claims_planes_of() {
+  local zs="$_SCRATCH/cl-range.z" entries="$_SCRATCH/cl-run-entries" hit="$_SCRATCH/cl-run-hit"
+  local name entry p last=""
+  _claims_range_paths "$1" "$zs"
+  _claims_jq runner-paths -r '.runners | if type == "object" then to_entries[] else empty end
+      | .key as $n | .value | objects | (.paths | if type == "array" then .[] | strings else empty end)
+      | select(. != "" and (($n + .) | test("[\t\n]") | not)) | "\($n)\t\(.)"' \
+    "$_SCRATCH/cl-config.json" > "$entries"
+  : > "$hit"
+  while IFS=$'\t' read -r name entry <&3; do
+    [ "$name" != "$last" ] || continue
+    while IFS= read -r -d '' p <&4; do
+      case "$entry" in
+        *[*?[]*) _claims_glob_match "$p" "$entry" || continue ;;
+        *) case "$p" in "$entry"*) ;; *) continue ;; esac ;;
+      esac
+      printf '%s\n' "$name" >> "$hit"
+      last=$name
+      break
+    done 4< "$zs"
+  done 3< "$entries"
+  _claims_jq runners-hit -Rsc 'split("\n") | map(select(. != "")) | unique' "$hit"
+}
+
+# _claims_judge_sample <n>: print the JSON array of <n> judge claim ids
+# (neither retired nor frozen), sorted by id, starting at index (ISO week,
+# date +%V) mod their count and wrapping; every one when <n> exceeds it.
+# shellcheck disable=SC2016  # jq programs, not shell expansion
+_claims_judge_sample() {
+  local week
+  week=$(date +%V) || _claims_die "date +%V failed"
+  week=$((10#$week))
+  _claims_jq judge-sample -c --arg n "$1" --argjson w "$week" \
+    '[.[] | .claim | select(type == "object" and .enforced_by == "judge" and .status != "retired"
+        and ((.frozen_at | type) != "string" or .frozen_at == "") and (.id | type) == "string") | .id]
+     | unique as $ids | ($ids | length) as $k
+     | if $k == 0 then [] else ($w % $k) as $s | [range(0; [($n | tonumber), $k] | min) | $ids[($s + .) % $k]] end' \
+    "$_SCRATCH/cl-claims.json"
+}
+
+# run: see the section comment. --claims takes ids (commas split them too);
+# an id no claim has is a usage error. The base is never read.
+# shellcheck disable=SC2016  # jq programs, not shell expansion
+cmd_claims_run() {
+  _CL_ALL_BLOCKING=1
+  _CL_BASE_UNUSED=1
+  _claims_init all
+  local n=0 scheduled=0 runner adapter rc id unknown extra='{}' node
+  local sel="$_SCRATCH/cl-run-sel.json" plan="$_SCRATCH/cl-run-plan.json" rows="$_SCRATCH/cl-run-rows.jsonl"
+  local req="$_SCRATCH/cl-run-req.json" nodesz="$_SCRATCH/cl-run-nodes" out="$_SCRATCH/cl-run-out"
+  local one="$_SCRATCH/cl-run-one.jsonl" list="$_SCRATCH/cl-run-list" res="$_SCRATCH/cl-run-results.json"
+  local nodes=()
+  if [ ${#_OPTV_claims[@]} -gt 0 ]; then n=$((n + 1)); fi
+  if [ -n "$_OPT_planes_of" ]; then n=$((n + 1)); fi
+  if [ "$_OPT_all" = 1 ]; then n=$((n + 1)); fi
+  [ "$n" -eq 1 ] || _usage_error "claims run" "give exactly one of --claims <id>..., --planes-of <range> and --all"
+  case "$_OPT_judge_sample" in
+    *[!0-9]*) _usage_error "claims run" "--judge-sample must be a whole number (got '$_OPT_judge_sample')" ;;
+  esac
+  _claims_no_args "claims run" "$@"
+  if [ "$_OPT_scheduled" = 1 ]; then scheduled=1; fi
+  _claims_load
+
+  if [ ${#_OPTV_claims[@]} -gt 0 ]; then
+    printf '%s\n' "${_OPTV_claims[@]}" > "$list"
+    _claims_jq run-ids -Rsc 'split("\n") | map(split(",")[] | select(. != ""))' "$list" > "$sel"
+    unknown=$(_claims_jq run-unknown -r --slurpfile c "$_SCRATCH/cl-claims.json" \
+      'if length == 0 then "-" else [.[] | select(. as $i | any($c[0][]; .claim.id == $i) | not)] | unique | join(", ") end' \
+      "$sel") || _claims_propagate $?
+    [ "$unknown" != - ] || _usage_error "claims run" "--claims names no claim id"
+    [ -z "$unknown" ] || _usage_error "claims run" "--claims: no claim has the id $unknown"
+  elif [ -n "$_OPT_planes_of" ]; then
+    runner=$(_claims_planes_of "$_OPT_planes_of") || _claims_propagate $?
+    _claims_jq run-planes -c --argjson r "$runner" \
+      '[.[] | select(.claim.test | type == "object" and (.runner as $n | any($r[]; . == $n))) | .claim.id | strings]' \
+      "$_SCRATCH/cl-claims.json" > "$sel"
+  else
+    printf 'null\n' > "$sel"
+  fi
+  _claims_jq run-plan -c --slurpfile sel "$sel" --argjson scheduled "$scheduled" \
+    '$sel[0] as $sel | '"$_JQ_CLAIMS_RUN_PLAN" "$_SCRATCH/cl-claims.json" > "$plan"
+
+  # One run call per runner, its nodes as separate arguments.
+  : > "$rows"
+  _claims_jq run-runners -r '[.[] | select(.action == "test") | .runner] | unique | .[] | select(test("\n") | not)' \
+    "$plan" > "$list"
+  while IFS= read -r runner <&3; do
+    _claims_jq run-nodes -c --arg r "$runner" '[.[] | select(.action == "test" and .runner == $r) | .node] | unique' \
+      "$plan" > "$req"
+    _claims_jq run-nodes-z -j '.[] | . + "\u0000"' "$req" > "$nodesz"
+    nodes=()
+    while IFS= read -r -d '' node; do nodes+=("$node"); done < "$nodesz"
+    adapter=$(_claims_jq run-adapter -r --arg r "$runner" \
+      '.runners | if type == "object" then .[$r] | objects | .adapter | strings else empty end' \
+      "$_SCRATCH/cl-config.json") || _claims_propagate $?
+    rc=0
+    _claims_adapter_call "$out" "$adapter" run --root "$_CL_ROOT" ${nodes[@]+"${nodes[@]}"} || rc=$?
+    _claims_parse_run "$out" "$req" "$rc" > "$one"
+    _claims_jq run-rows -c --arg r "$runner" '. + {runner: $r}' "$one" >> "$rows"
+  done 3< "$list"
+
+  # One log-adapter call per log claim (--scheduled only: the plan has none
+  # without it).
+  _claims_jq run-logs -r '.[] | select(.action == "log") | .claim | select(test("\n") | not)' "$plan" > "$list"
+  if [ -s "$list" ]; then
+    adapter=$(_claims_jq log-adapter -r '.log_adapter | strings' "$_SCRATCH/cl-config.json") || _claims_propagate $?
+    while IFS= read -r id <&3; do
+      rc=0
+      _claims_adapter_call "$out" "$adapter" run "$id" || rc=$?
+      _claims_parse_log "$out" "$id" "$rc" >> "$rows"
+    done 3< "$list"
+  fi
+
+  _claims_jq run-results -nc --slurpfile plan "$plan" --slurpfile rows "$rows" \
+    "$_JQ_CLAIMS_EXPECT $_JQ_CLAIMS_RUN_RESULTS" > "$res"
+  _claims_jq run-result-rows -c '.[] | {claim, status, node, outcome, verdict, message}' "$res" \
+    >> "$_SCRATCH/cl-results.jsonl"
+  _claims_jq run-findings -c '.[] | select(.verdict == "finding") | {check: "run", claim, doc, message}' "$res" \
+    >> "$_SCRATCH/cl-findings.jsonl"
+  _claims_jq run-indeterminate -c \
+    '.[] | select(.verdict == "indeterminate") | {check: "run", claim, reason: (.reason // "indeterminate")}' "$res" \
+    >> "$_SCRATCH/cl-indet.jsonl"
+  if [ -n "$_OPT_judge_sample" ]; then
+    extra=$(_claims_judge_sample "$_OPT_judge_sample") || _claims_propagate $?
+    extra="{\"judge_sample\":$extra}"
+  fi
+  _claims_emit run "$extra"
+}
+
 cmd_claims_validate() {
   local mode=all
   if [ "$_OPT_staged" = 1 ]; then mode=staged; fi
@@ -6973,13 +7297,6 @@ cmd_claims_validate() {
 
 # The verbs below are inert-correct stubs until their tasks land: they
 # check their arguments and report an empty verdict.
-cmd_claims_run() {
-  _CL_ALL_BLOCKING=1
-  _claims_init all
-  _claims_no_args "claims run" "$@"
-  _claims_emit run
-}
-
 cmd_claims_promote() {
   _CL_ALL_BLOCKING=1
   _claims_init head
