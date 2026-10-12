@@ -6615,6 +6615,16 @@ _claims_sha256() {
   printf '%s\n' "${_HASH#sha256:}"
 }
 
+# _claims_states_sha256 <claim-json>: the claim's states_sha256 — the sha256
+# of its states string's bytes with no trailing newline (jq -j; a states
+# that is not a string hashes its JSON). The one definition promote writes
+# and _claims_verdict_check compares.
+_claims_states_sha256() {
+  local st="$_SCRATCH/cl-states"
+  _claims_jq states -j '.states | if type == "string" then . else tojson end' <<<"$1" > "$st"
+  _claims_sha256 "$st"
+}
+
 # _claims_verdict_check <claim-json>: ok, missing or mismatch. ok: the
 # verdict file <store>/<promotion.verdict_sha256>.json exists, its sha256 is
 # that digest, and its claim, states_sha256, test and status_to equal the
@@ -6622,7 +6632,7 @@ _claims_sha256() {
 # mismatch: anything else — a promotion with no 64-hex verdict_sha256
 # included (there is no verdict to look for).
 _claims_verdict_check() {
-  local claim="$1" digest store file st ss
+  local claim="$1" digest store file ss
   digest=$(_claims_jq verdict-digest -r '.promotion | if type == "object" and (.verdict_sha256 | type) == "string"
       and (.verdict_sha256 | test("^[0-9a-f]{64}$")) then .verdict_sha256 else "" end' <<<"$claim") \
     || _claims_propagate $?
@@ -6641,9 +6651,7 @@ _claims_verdict_check() {
     echo mismatch
     return 0
   fi
-  st="$_SCRATCH/cl-verdict-states"
-  _claims_jq verdict-states -j '.states | if type == "string" then . else tojson end' <<<"$claim" > "$st"
-  ss=$(_claims_sha256 "$st") || _claims_propagate $?
+  ss=$(_claims_states_sha256 "$claim") || _claims_propagate $?
   # Its status is the answer (a verdict file that is not JSON: mismatch), so
   # not _claims_jq.
   if jq -e -n --slurpfile v "$file" --argjson c "$claim" --arg ss "$ss" \
@@ -7395,6 +7403,15 @@ cmd_claims_run() {
 # files} per list call), cl-v3-lists.jsonl ({runner, ok, reason, rows} per
 # call) and cl-v3-mutants.jsonl ({i, state, n} per checked mutant).
 
+# Shared by V3 and promote: cl_mutant_is_test($tf; $node), on a
+# mutant.file — it is the bound test's own file (test.file, or the node's
+# path before "::"): a mutant of the test's expectation proves nothing; and
+# that finding's message.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_MUTANT_DEFS='def cl_mutant_is_test($tf; $node): . as $f
+   | (($tf | type) == "string" and $tf == $f) or (($node | type) == "string" and ($node | split("::")[0]) == $f);
+ def cl_mutant_test_msg: "nonvacuity.mutant.file \(.) is the bound test'"'"'s own file: a mutant of the test'"'"'s expectation proves nothing; mutate the subject";'
+
 # Shared by the V3 programs. cl_plain: no newline or NUL (the shell reads
 # names and paths NUL- or newline-separated). cl_v3_bind($pp), on a plan
 # entry given the cl-v3-paths rows by path: what binding does with it —
@@ -7402,7 +7419,8 @@ cmd_claims_run() {
 # null>} (in its runner's list call) — the one decision the call builder and
 # the checks share. cl_v3_mutant_checked: the entry's mutant is checked.
 # shellcheck disable=SC2016  # jq program, not shell expansion
-_JQ_CLAIMS_V3_DEFS='def nes: type == "string" and length > 0;
+_JQ_CLAIMS_V3_DEFS=$_JQ_CLAIMS_MUTANT_DEFS'
+ def nes: type == "string" and length > 0;
  def cl_plain: (split("\n") | length) <= 1 and (split("\u0000") | length) <= 1;
  def cl_unsafe: "(absolute, an empty, . or .. segment, or reached through a symbolic link)";
  def cl_mutant_ok: type == "object" and (.file | nes) and (.find | nes) and (.replace | type) == "string";
@@ -7513,6 +7531,8 @@ _JQ_CLAIMS_V3='def v3($e; $msg): {check: "V3", claim: $e.claim, doc: $e.doc, mes
    ($e | select(cl_v3_mutant_checked) | cl_mutant | select(type == "object") | . as $m
     | if cl_mutant_ok | not then
         v3($e; "nonvacuity.mutant must be {file, find, replace}: three strings, file and find non-empty")
+      elif $m.file | cl_mutant_is_test($e.file; $e.node) then
+        v3($e; $m.file | cl_mutant_test_msg)
       elif $m.file | cl_plain | not then
         v3($e; "nonvacuity.mutant.file \($m.file | tojson) is not a safe repo path \(cl_unsafe): it is never read")
       else ($muts[$i | tostring] // error("V3: no mutant row for plan entry \($i)")) as $r
@@ -7872,16 +7892,20 @@ _claims_v9() {
 # promoted". Then:
 #   1. the bound node runs at HEAD (the clean work tree, --root its top
 #      level) through its runner adapter: it must pass ("not green");
-#   2. in a throwaway worktree at HEAD (_claims_worktree_add) the mutant is
-#      applied (_claims_mutate: literal, exactly once) and the node runs with
-#      --root the worktree: it must fail by an assertion (pass: "mutant stays
-#      green"; error or not-found: "mutant error is not an assertion
-#      failure");
+#   2. in a throwaway worktree at HEAD (_claims_worktree_add) the node runs
+#      unmutated with --root the worktree: it must pass there too ("not
+#      green in a clean checkout": the work tree's untracked files are not in
+#      it), so the red run differs from a green one only by the mutation;
+#      then the mutant is applied (_claims_mutate: literal, exactly once, on
+#      UTF-8 text only — "mutant file is not UTF-8 text") and the node runs
+#      again: it must fail by an assertion (pass: "mutant stays green";
+#      error or not-found: "mutant error is not an assertion failure");
 #   3. the verdict (see "the verdict store") is stored, then the sidecar is
 #      rewritten atomically — status → status_to (built), promotion → {at:
 #      HEAD, verdict_sha256: <digest>} — and the doc's status block rendered.
 # Everything that can refuse runs before anything is written: the mutant
-# file must be a safe repo path, contained in the worktree (no symbolic link
+# file must not be the bound test's own file, must be a safe repo path,
+# contained in the worktree (no symbolic link
 # on its way, physically under the worktree's root) and a file there; each
 # subject path must be at HEAD (its object id goes into subject_oids); the
 # doc's markers must render. An indeterminate run exits 2. Every finding
@@ -7932,8 +7956,12 @@ _CL_MUTATE_ERR=""  # why _claims_mutate refused
 
 # _claims_mutate <file> <find> <replace>: rewrite <file> with its one
 # occurrence of <find> replaced by <replace> — literal and glob-free (jq
-# split and join: no pattern, no backreference; never bash's ${s/…/…}), byte
-# for byte (-j: no newline added, no JSON quoting). Returns 1, <file>
+# split and join: no pattern, no backreference; never bash's ${s/…/…}). The
+# rest of the file stays byte for byte only because the file must be UTF-8
+# text that jq reads back unchanged (jq -Rs replaces each invalid UTF-8 byte
+# with U+FFFD, and the mutant would then change more than find → replace):
+# its jq -j -Rs . round trip must be cmp-identical, else it returns 2, <file>
+# untouched. -j adds no newline and no JSON quoting. Returns 1, <file>
 # untouched, when <find> is empty or does not occur exactly once:
 # _CL_MUTATE_ERR = "find matches <n> times" (an empty file: 0). Written
 # through _tmp_beside + _replace_file.
@@ -7946,6 +7974,12 @@ _claims_mutate() {
     return 1
   fi
   _tmp_beside "$file"
+  jq -j -Rs . < "$file" > "$_TMP" 2> "$err" || _claims_die "jq failed (mutate: reading $file)"
+  if ! cmp -s "$_TMP" "$file"; then
+    rm -f "$_TMP"
+    _CL_MUTATE_ERR="not UTF-8 text"
+    return 2
+  fi
   jq -j -Rs --arg f "$2" --arg r "$3" \
     'if . == "" then [""] else split($f) end
      | if length != 2 then error("find matches \(length - 1) times") else join($r) end' \
@@ -7996,6 +8030,7 @@ _JQ_CLAIMS_PROMOTE_PLAN='def nes: type == "string" and length > 0;
         elif ($mu | type) != "object" or ($mu.file | nes | not) or ($mu.find | nes | not) or ($mu.replace | type) != "string"
         then "nonvacuity.mutant \($mu | tojson) is not {file, find, replace}"
         elif [$mu.file, $mu.find, $mu.replace] | all(nonul) | not then "nonvacuity.mutant holds a NUL byte"
+        elif $mu.file | cl_mutant_is_test($c.test.file; $c.test.node) then $mu.file | cl_mutant_test_msg
         else null end)}
    end'
 
@@ -8024,13 +8059,14 @@ _claims_promote_run() {
 # shellcheck disable=SC2016  # jq programs, not shell expansion
 _claims_promote() {
   local id="$1" plan="$_SCRATCH/cl-promote.json" z="$_SCRATCH/cl-promote.z"
-  local oids="$_SCRATCH/cl-promote-oids.jsonl" st="$_SCRATCH/cl-promote-states"
+  local oids="$_SCRATCH/cl-promote-oids.jsonl"
   local vfile="$_SCRATCH/cl-promote-verdict.json" sc_old="$_SCRATCH/cl-promote-sidecar.old"
   local sc_new="$_SCRATCH/cl-promote-sidecar.new" doc_new="$_SCRATCH/cl-promote-doc.new"
   local x refuse doc sidecar status claim runner="" node="" mfile="" mfind="" mrepl="" head p oid v rc
-  local green red why ss digest store row unsafe
+  local green clean red why ss digest store row unsafe munsafe
   unsafe="(absolute, an empty, . or .. segment, or reached through a symbolic link)"
-  _claims_jq promote-plan -c --arg id "$id" "$_JQ_CLAIMS_PROMOTE_PLAN" "$_SCRATCH/cl-claims.json" > "$plan"
+  _claims_jq promote-plan -c --arg id "$id" "$_JQ_CLAIMS_MUTANT_DEFS $_JQ_CLAIMS_PROMOTE_PLAN" \
+    "$_SCRATCH/cl-claims.json" > "$plan"
   x=$(_claims_jq promote-unknown -r '.unknown' "$plan") || _claims_propagate $?
   [ "$x" = false ] || _usage_error "claims promote" "no claim has the id $id"
   doc=$(_claims_jq promote-doc -r '.doc | strings' "$plan") || _claims_propagate $?
@@ -8050,6 +8086,7 @@ _claims_promote() {
   { IFS= read -r -d '' runner && IFS= read -r -d '' node && IFS= read -r -d '' mfile \
       && IFS= read -r -d '' mfind && IFS= read -r -d '' mrepl; } < "$z" \
     || _claims_die "cannot read the claim's test and mutant (promote)"
+  munsafe="mutant file $mfile is not a safe repo path $unsafe: name it by its path from the repo root"
 
   if [ "$status" = built ]; then
     v=$(_claims_verdict_check "$claim") || _claims_propagate $?
@@ -8059,7 +8096,7 @@ _claims_promote() {
     fi
   fi
   if ! _claims_safe_relpath "$mfile"; then
-    _claims_finding promote "$id" "$doc" "mutant file $mfile is not a safe repo path $unsafe: name it by its path from the repo root"
+    _claims_finding promote "$id" "$doc" "$munsafe"
     return 0
   fi
   head=$(git rev-parse -q --verify 'HEAD^{commit}') || _claims_die "cannot resolve HEAD"
@@ -8093,16 +8130,18 @@ _claims_promote() {
       ;;
   esac
 
-  # 2. Red under the mutant, in a throwaway worktree at HEAD. The mutant
-  # file is checked inside the worktree (a subshell that takes it for the
-  # work tree) before anything is written there.
+  # 2. Green again in a throwaway worktree at HEAD, unmutated — so the red
+  # run differs from a green run only by the mutation (the work tree may hold
+  # untracked files a test reads; the worktree does not) — then red under
+  # the mutant there. The mutant file is checked inside the worktree (a
+  # subshell that takes it for the work tree) before anything is written.
   _claims_worktree_add "$head"
   rc=0
   (cd "$_CL_WT" && _CL_ROOT=$_CL_WT && _CL_ROOT_PHYS="" && _claims_contained_path "$mfile") || rc=$?
   case "$rc" in
     0) ;;
     1)
-      _claims_finding promote "$id" "$doc" "mutant file $mfile is not a safe repo path $unsafe: name it by its path from the repo root"
+      _claims_finding promote "$id" "$doc" "$munsafe"
       return 0
       ;;
     *) _claims_propagate "$rc" ;;
@@ -8111,10 +8150,33 @@ _claims_promote() {
     _claims_finding promote "$id" "$doc" "mutant file $mfile is not a file at HEAD: nothing to mutate"
     return 0
   fi
-  if ! _claims_mutate "$_CL_WT/$mfile" "$mfind" "$mrepl"; then
-    _claims_finding promote "$id" "$doc" "mutant: $_CL_MUTATE_ERR in $mfile (find must match exactly once)"
-    return 0
-  fi
+  _claims_promote_run "$_CL_WT" "$runner" "$node"
+  clean=$_CL_PR_OUTCOME
+  why=${_CL_PR_REASON:+ ($_CL_PR_REASON)}
+  case "$clean" in
+    pass) ;;
+    indeterminate)
+      _claims_indeterminate promote "$id" "${_CL_PR_REASON:-indeterminate}"
+      return 0
+      ;;
+    *)
+      _claims_finding promote "$id" "$doc" "not green in a clean checkout: the bound test passes in the work tree but gives $clean$why in a checkout of HEAD (it reads something HEAD does not hold: an untracked or ignored file?)"
+      return 0
+      ;;
+  esac
+  rc=0
+  _claims_mutate "$_CL_WT/$mfile" "$mfind" "$mrepl" || rc=$?
+  case "$rc" in
+    0) ;;
+    2)
+      _claims_finding promote "$id" "$doc" "mutant file is not UTF-8 text: $mfile (jq would rewrite its invalid bytes, so the mutant would change more than find → replace)"
+      return 0
+      ;;
+    *)
+      _claims_finding promote "$id" "$doc" "mutant: $_CL_MUTATE_ERR in $mfile (find must match exactly once)"
+      return 0
+      ;;
+  esac
   _claims_promote_run "$_CL_WT" "$runner" "$node"
   red=$_CL_PR_OUTCOME
   why=${_CL_PR_REASON:+ ($_CL_PR_REASON)}
@@ -8136,8 +8198,7 @@ _claims_promote() {
 
   # 3. The verdict, the sidecar and the doc, each prepared (and the render
   # checked) before the first write.
-  _claims_jq promote-states -j '.claim.states | if type == "string" then . else tojson end' "$plan" > "$st"
-  ss=$(_claims_sha256 "$st") || _claims_propagate $?
+  ss=$(_claims_states_sha256 "$claim") || _claims_propagate $?
   _claims_jq promote-verdict -ncS --slurpfile p "$plan" --slurpfile o "$oids" --arg ss "$ss" --arg head "$head" \
     --arg to built \
     '$p[0].claim as $c
