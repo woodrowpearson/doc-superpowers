@@ -1498,6 +1498,9 @@ cleanup() {
   # whose rm was cut short. Named by our pid, so it is ours to remove.
   if [ -e "$INDEX_LOCK.gone.$$" ]; then rm -rf "$INDEX_LOCK.gone.$$"; fi
   _claims_worktrees_remove
+  # A ledger publish's temporary worktree (scripts/ledger/views.sh), also
+  # after a TERM or INT. Before the scratch dir goes: the removal may need it.
+  if [ -n "${_LG_PUBLISH_WT:-}" ]; then _lg_publish_wt_remove || true; fi
   if [ -n "$_SCRATCH" ]; then rm -rf "$_SCRATCH"; fi
   return 0
 }
@@ -2395,9 +2398,16 @@ ledger link|cmd_ledger_link|repo|format=
 ledger note|cmd_ledger_note|repo|format=
   <key> <text> [--format text|json]
   Append a dated line under an item's log heading, or set what it owes.
-ledger view|cmd_ledger_view|repo|format=
-  <ledger|all> [--format text|json]
-  Render ledger views locally from the working tree.
+ledger view|cmd_ledger_view|repo|md html out= open format=
+  <ledger|all> [--md] [--html] [--out <dir>] [--open] [--format text|json]
+  Render the ledger views from the working tree (uncommitted items
+  included) into --out (default <git-common-dir>/doc-superpowers/ledger/
+  views): <ledger>.md, or every ledger's page and README.md for all (--md,
+  the default); --html writes ledger.html, every ledger in one
+  self-contained file with filters and search. A page groups the open items
+  by the contract they change (else consume), then unclustered, recently
+  closed and superseded / won't fix items (views.recent_days). --open
+  opens the HTML (else the page) with open / xdg-open. One line per file.
 ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed= format=
   (--staged | --all | --plan <plan> [--strict] | --pushed <a>..<b>) [--registry] [--format text|json]
   Check items, the ledger registry and keys. One "<class> <path|key>
@@ -2423,9 +2433,16 @@ ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed
   (overlap) or, once any ledger declares paths, that every tracked file
   outside docs/ has one (unowned); alone, one "registry <class> <detail>"
   line per finding, every finding blocking.
-ledger publish|cmd_ledger_publish|repo|format=
-  [--format text|json]
-  Render the views from the remote base and push the views branch.
+ledger publish|cmd_ledger_publish|repo|dry-run format=
+  [--dry-run] [--format text|json]
+  Fetch the remote, render the views from the base commit (a temporary
+  detached worktree under the ledger cache; its own config, registry and
+  items) and push one new commit to views.branch (default
+  doc-ledger-views, an orphan branch holding only the view files) — built
+  with git plumbing, so HEAD, the index and the working tree are never
+  touched — without force: a branch that moved meanwhile exits 2.
+  --dry-run renders into <git-common-dir>/doc-superpowers/ledger/
+  publish-dry-run and stops before the commit.
 ledger finalize|cmd_ledger_finalize|repo|all format=
   [--all] [--format text|json]
   Replace provisional keys with allocated ones — in the item's key and in

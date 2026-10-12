@@ -248,7 +248,7 @@ def lg_k_prov:
 # _lg_k_maxes <records.jsonl> <out>: {ledger: highest key number} over the
 # records' keys and aliases.
 _lg_k_maxes() {
-  jq -n -c --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS$_LG_JQ_KEYS_DEFS"'
+  jq -L "$_LG_LIB" -n -c --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS$_LG_JQ_KEYS_DEFS"'
     lg_fields($c[0]) as $F
     | reduce (inputs | (.fm // {}) | ((lg_fv($F; "key") | lg_list[]), (lg_fv($F; "aliases") | lg_list[]))
               | lg_k_split | select(. != null)) as $x
@@ -596,7 +596,7 @@ _lg_k_names() {
   d=$(mktemp "$_SCRATCH/lg-kn.XXXXXX") || _lg_die "mktemp failed"
   LC_ALL=C awk -v path=x "${_LG_PARSE_ARGS[@]}" -f "$_LG_LIB/frontmatter.awk" < "$1" > "$d.rec" \
     || _lg_die "cannot parse $1"
-  jq -r --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS"'
+  jq -L "$_LG_LIB" -r --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS"'
     lg_fields($c[0]) as $F | (.fm // {}) as $fm
     | ("key", "ledger", "summary", "aliases") as $l
     | ($F[$l] // []) as $cs
@@ -724,7 +724,7 @@ _lg_k_rewrite_ops() {
   _lg_parse_prep
   LC_ALL=C awk -v path=x "${_LG_PARSE_ARGS[@]}" -f "$_LG_LIB/frontmatter.awk" < "$file" > "$out.rec" \
     || _lg_die "cannot parse $file"
-  jq -j --slurpfile c "$_LG_CFG" --slurpfile map "$mapf" --argjson fields "$fields" \
+  jq -L "$_LG_LIB" -j --slurpfile c "$_LG_CFG" --slurpfile map "$mapf" --argjson fields "$fields" \
     "$_LG_JQ_INDEX_DEFS$_LG_JQ_REWRITE" "$out.rec" > "$out" || _lg_die "jq failed (rewriting $file)"
   if [ "$(head -c 6 "$out")" = broken ]; then
     _lg_die "cannot rewrite $(tr -d '\000' < "$out" | cut -c 8-) in $file: the parser rejects that field (see its frontmatter errors) — nothing was changed"
@@ -874,7 +874,7 @@ _lg_k_finalize() {
     if base_c=$(git rev-parse -q --verify "$_LG_K_BASE^{commit}" 2>/dev/null); then
       _lg_item_paths "$base_c" "$d/bpaths.z"
       _lg_parse_blobs "$base_c" "$d/bpaths.z" "$d/brecs"
-      jq -n -c --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS$_LG_JQ_KEYS_DEFS"'
+      jq -L "$_LG_LIB" -n -c --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS$_LG_JQ_KEYS_DEFS"'
         lg_fields($c[0]) as $F | [inputs | (.fm // {}) | lg_fv($F; "key") | lg_k_prov | select(. != null)] | unique' \
         "$d/brecs" > "$d/basep.json" || _lg_die "jq failed (the base's provisional keys)"
     fi
@@ -1271,7 +1271,7 @@ _lg_provisional_in_range() {
   _lg_parse_blobs "$bc" "$d/paths.z" "$d/b.recs"
   : > "$d/a.recs"
   if [ -n "$ac" ]; then _lg_parse_blobs "$ac" "$d/paths.z" "$d/a.recs"; fi
-  jq -n -r --slurpfile c "$_LG_CFG" --slurpfile a "$d/a.recs" "$_LG_JQ_INDEX_DEFS$_LG_JQ_KEYS_DEFS"'
+  jq -L "$_LG_LIB" -n -r --slurpfile c "$_LG_CFG" --slurpfile a "$d/a.recs" "$_LG_JQ_INDEX_DEFS$_LG_JQ_KEYS_DEFS"'
     lg_fields($c[0]) as $F
     | [$a[] | (.fm // {}) | lg_fv($F; "key") | lg_k_prov | select(. != null)] as $old
     | inputs | . as $r | ((.fm // {}) | lg_fv($F; "key") | lg_k_prov) as $k

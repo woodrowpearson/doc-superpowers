@@ -2507,9 +2507,9 @@ test_lg_status_labels_shared() {
   local q i want
   want='["superseded","won'"'"'t fix","closed","shipped","merged","in review","on branch","planned","spec'"'"'d","not started"]'
   # shellcheck disable=SC2031  # read inside the lg_source subshell, where it is set
-  q=$( lg_source; jq -nc "$_LG_JQ_QUERY_DEFS"'[lg_status_labels[]]' )
+  q=$( lg_source; jq -L "$_LG_LIB" -nc "$_LG_JQ_QUERY_DEFS"'[lg_status_labels[]]' )
   # shellcheck disable=SC2031  # read inside the lg_source subshell, where it is set
-  i=$( lg_source; jq -nc "$_LG_JQ_INDEX_DEFS"'[lg_status_labels[]]' )
+  i=$( lg_source; jq -L "$_LG_LIB" -nc "$_LG_JQ_INDEX_DEFS"'[lg_status_labels[]]' )
   assert_eq "$want" "$q" "query.sh's labels"
   assert_eq "$q" "$i" "index.sh's labels are the same"
   # Every label is accepted by ls --status (query.sh) as itself.
@@ -3879,6 +3879,490 @@ test_lg_validate_pushed_range() {
   teardown
 }
 
+# --- Task 8: renderers, view, publish ----------------------------------------------
+
+# A hand-built index (schema ledger-index/1, the fields the renderers read):
+# app — two clusters (field:order.total: app-2 P0 consumes, app-1 P1
+# changes; component:Sheet: app-3 P2), unclustered app-4 (P1) and app-9
+# (fixed, owed: P3), recently closed app-5 (touched 10-03), app-6 (closed
+# long ago: dropped), superseded app-7 → app-1, won't fix app-8; core —
+# core-1 (P0); an unassigned item (P1, no key); k.md on no ledger.
+# shellcheck disable=SC2016  # JSON
+LG_VIEW_IX='{"schema":"ledger-index/1","built":{},"ledgers":[
+ {"id":"app","title":"App","kind":"service","status":"active","scope":"Cart to order",
+  "contracts":[{"id":"field:order.total","title":"Order totals"}]},
+ {"id":"core","title":"Core","kind":"platform","status":"active"},
+ {"id":"old","title":"Old","kind":"service","status":"retired"}],
+"items":[
+ {"path":"docs/issues/a.md","key":"app-1","ledger":"app","status":"Open","class":"open","severity":"P1","date":"2026-09-01",
+  "summary":"Totals are wrong","changes":["field:order.total"],"consumes":[],"h1":"Alpha title",
+  "docs":{"spec":["docs/specs/s.md"],"plan":[],"handoff":["docs/handoffs/2026-10-01-a.md","docs/handoffs/2026-10-05-b.md"]},
+  "derived":{"status":"spec'"'"'d","detail":"docs/specs/s.md"},"pr":null,"inflight":[],"neighbours":null,"resolution":null,"superseded_by":null,"owed":null},
+ {"path":"docs/issues/b.md","key":"app-2","ledger":"app","status":"Open","class":"open","severity":"P0","date":"2026-09-05",
+  "summary":"Receipts read the total","changes":[],"consumes":["field:order.total"],"h1":"B",
+  "docs":{"spec":[],"plan":[],"handoff":[]},"derived":{"status":"not started","detail":null},"pr":null,"inflight":[],"neighbours":null,"resolution":null,"superseded_by":null,"owed":null},
+ {"path":"docs/issues/c d.md","key":"app-3","ledger":"app","status":"Open","class":"open","severity":"P2","date":"2026-09-02",
+  "summary":"Sheet is broken","changes":["component:Sheet"],"consumes":[],"h1":"C",
+  "docs":{"spec":[],"plan":["docs/plans/p.md"],"handoff":[]},"derived":{"status":"planned","detail":"docs/plans/p.md"},"pr":null,"inflight":[],"neighbours":null,"resolution":null,"superseded_by":null,"owed":null},
+ {"path":"docs/issues/d.md","key":"app-4","ledger":"app","status":"Open","class":"open","severity":"P1","date":"2026-09-03",
+  "summary":"Uses <b>bold</b> & pipes |","changes":[],"consumes":[],"h1":"D",
+  "docs":{"spec":[],"plan":[],"handoff":[]},"derived":{"status":"not started","detail":null},"pr":null,"inflight":[],"neighbours":null,"resolution":null,"superseded_by":null,"owed":null},
+ {"path":"docs/issues/e.md","key":"app-5","ledger":"app","status":"Fixed","class":"fixed","severity":"P2","date":"2026-01-01",
+  "summary":"Shipped last week","changes":["field:order.total"],"consumes":[],"h1":"E",
+  "docs":{"spec":[],"plan":[],"handoff":[]},"derived":{"status":"shipped","detail":null},"pr":null,"inflight":[],"neighbours":null,"resolution":"Done.","superseded_by":null,"owed":null},
+ {"path":"docs/issues/f.md","key":"app-6","ledger":"app","status":"Fixed","class":"fixed","severity":"P2","date":"2026-01-01",
+  "summary":"Shipped long ago","changes":[],"consumes":[],"h1":"F",
+  "docs":{"spec":[],"plan":[],"handoff":[]},"derived":{"status":"shipped","detail":null},"pr":null,"inflight":[],"neighbours":null,"resolution":"Done.","superseded_by":null,"owed":null},
+ {"path":"docs/issues/g.md","key":"app-7","ledger":"app","status":"Closed","class":"closed","severity":"P2","date":"2026-01-01",
+  "summary":"Old totals bug","changes":[],"consumes":[],"h1":"G",
+  "docs":{"spec":[],"plan":[],"handoff":[]},"derived":{"status":"superseded","detail":"app-1"},"pr":null,"inflight":[],"neighbours":null,"resolution":"Replaced by app-1.","superseded_by":"app-1","owed":null},
+ {"path":"docs/issues/h.md","key":"app-8","ledger":"app","status":"Won'"'"'t Fix","class":"wontfix","severity":"P3","date":"2026-10-01",
+  "summary":"Not worth doing","changes":[],"consumes":[],"h1":"H",
+  "docs":{"spec":[],"plan":[],"handoff":[]},"derived":{"status":"won'"'"'t fix","detail":null},"pr":null,"inflight":[],"neighbours":null,"resolution":"Not worth it.","superseded_by":null,"owed":null},
+ {"path":"docs/issues/i.md","key":"app-9","ledger":"app","status":"Fixed","class":"fixed","severity":"P3","date":"2026-09-20",
+  "summary":"Merged, deploy owed","changes":[],"consumes":[],"h1":"I",
+  "docs":{"spec":[],"plan":[],"handoff":[]},"derived":{"status":"merged","detail":"deploy"},"pr":null,"inflight":[],"neighbours":null,"resolution":"Merged.","superseded_by":null,"owed":"deploy"},
+ {"path":"docs/issues/j.md","key":"core-1","ledger":"core","status":"Open","class":"open","severity":"P0","date":"2026-08-01",
+  "summary":"Endpoint times out","changes":["endpoint:x"],"consumes":[],"h1":"J",
+  "docs":{"spec":[],"plan":[],"handoff":[]},"derived":{"status":"not started","detail":null},"pr":null,"inflight":[],"neighbours":null,"resolution":null,"superseded_by":null,"owed":null},
+ {"path":"docs/issues/k.md","key":null,"ledger":null,"status":"Open","class":"open","severity":"P0","date":"2026-08-01",
+  "summary":"Legacy item","changes":[],"consumes":[],"h1":"K",
+  "docs":{"spec":[],"plan":[],"handoff":[]},"derived":{"status":"not started","detail":null},"pr":null,"inflight":[],"neighbours":null,"resolution":null,"superseded_by":null,"owed":null},
+ {"path":"docs/issues/l.md","key":null,"ledger":"unassigned","status":"Open","class":"open","severity":"P1","date":"2026-09-10",
+  "summary":"Home not decided","changes":[],"consumes":[],"h1":"L",
+  "docs":{"spec":[],"plan":[],"handoff":[]},"derived":{"status":"not started","detail":null},"pr":null,"inflight":[],"neighbours":null,"resolution":null,"superseded_by":null,"owed":null}
+]}'
+
+LG_VIEW_GEN='{"source":"origin/main@abc1234","inflight":0,"at":"2026-10-12T00:00:00Z","cutoff":"2026-09-28","touched":{"docs/issues/e.md":"2026-10-03","docs/issues/g.md":"2026-10-04"},"link":"../main/"}'
+
+# lg_render <program> <index-file> <ledger> <mode> [generated] [host-config]:
+# the renderer's output (jq -r) into LG_OUT, its exit code into LG_RC.
+# <program>: md or html. The config is config.jq's merge of [host-config].
+lg_render() {
+  local prog="$1" ix="$2" ledger="$3" mode="$4" gen="$LG_VIEW_GEN" host='{}' cfg
+  if [ $# -ge 5 ]; then gen=$5; fi
+  if [ $# -ge 6 ]; then host=$6; fi
+  cfg=$(harness_mktemp lg-cfg)
+  jq -nc --argjson h "$host" -f "$REPO_DIR/scripts/ledger/config.jq" > "$cfg"
+  LG_RC=0
+  LG_OUT=$(jq -r -L "$REPO_DIR/scripts/ledger" --slurpfile c "$cfg" --arg ledger "$ledger" --arg mode "$mode" \
+    --argjson generated "$gen" -f "$REPO_DIR/scripts/ledger/render-$prog.jq" "$ix" 2>&1) || LG_RC=$?
+  rm -f "$cfg"
+}
+
+# lg_view_ix [jq-filter]: LG_VIEW_IX (through the filter) into a file; its path.
+lg_view_ix() {
+  local f
+  f=$(harness_mktemp lg-ix)
+  jq -c "${1:-.}" <<<"$LG_VIEW_IX" > "$f"
+  printf '%s\n' "$f"
+}
+
+# lg_assert_cond <shell-condition> <msg>: assert the condition (eval'd) holds.
+lg_assert_cond() {
+  local r=no
+  if eval "$1"; then r=yes; fi
+  assert_eq yes "$r" "$2 [$1]"
+}
+
+# The line of $1 that starts with $2 (the first), or "".
+lg_line() {
+  printf '%s\n' "$1" | awk -v p="$2" 'index($0, p) == 1 { print; exit }'
+}
+
+# The 1-based line number of the first line of $1 containing $2, or 0.
+lg_lineno() {
+  printf '%s\n' "$1" | awk -v p="$2" 'index($0, p) { print NR; f = 1; exit } END { if (!f) print 0 }'
+}
+
+test_lg_render_pure() {
+  echo "test: the renderers are pure — the same inputs twice render identically; item order does not matter"
+  local ix rev a b
+  ix=$(lg_view_ix)
+  rev=$(lg_view_ix '.items |= reverse')
+  lg_render md "$ix" app page
+  assert_eq "0" "$LG_RC" "render-md.jq exits 0"
+  a=$LG_OUT
+  lg_render md "$ix" app page
+  assert_eq "$a" "$LG_OUT" "page: the same \$generated twice → identical"
+  lg_render md "$rev" app page
+  assert_eq "$a" "$LG_OUT" "page: shuffled item order → identical"
+  lg_render md "$ix" all readme
+  b=$LG_OUT
+  lg_render md "$rev" all readme
+  assert_eq "$b" "$LG_OUT" "readme: shuffled item order → identical"
+  lg_render html "$ix" all page
+  assert_eq "0" "$LG_RC" "render-html.jq exits 0"
+  b=$LG_OUT
+  lg_render html "$rev" all page
+  assert_eq "$b" "$LG_OUT" "html: shuffled item order → identical"
+  lg_render md "$ix" app page '{"source":"origin/main@abc1234","inflight":0,"at":"2026-10-13T09:00:00Z","cutoff":"2026-09-28","touched":{"docs/issues/e.md":"2026-10-03","docs/issues/g.md":"2026-10-04"},"link":"../main/"}'
+  assert_eq "$(printf '%s\n' "$a" | sed '3d')" "$(printf '%s\n' "$LG_OUT" | sed '3d')" "only the header line changes with the timestamp"
+  assert_contains "$(printf '%s\n' "$LG_OUT" | sed -n 3p)" "2026-10-13T09:00:00Z" "…which carries it"
+}
+
+test_lg_render_clusters_and_unclustered() {
+  echo "test: a ledger page — title, header, open counts, clusters by severity counts, rows by severity, unclustered"
+  local ix out n1 n2 n3
+  ix=$(lg_view_ix)
+  lg_render md "$ix" app page
+  out=$LG_OUT
+  assert_eq "# App (\`app\`)" "$(printf '%s\n' "$out" | sed -n 1p)" "title line"
+  assert_eq "> Generated from origin/main@abc1234 + 0 in-flight branches at 2026-10-12T00:00:00Z by doc-superpowers ledger. Do not edit — edit the item." \
+    "$(printf '%s\n' "$out" | sed -n 3p)" "header quote"
+  assert_eq "Cart to order · Open: P0 1 · P1 2 · P2 1 · P3 1 · In flight: 0 branches" "$(lg_line "$out" "Cart to order")" \
+    "scope · open counts (owed work counts as open) · in flight 0"
+  assert_eq "## Order totals — \`field:order.total\` (2)" "$(lg_line "$out" "## Order")" "cluster heading: contract title, id, count"
+  assert_eq "## \`component:Sheet\` (1)" "$(lg_line "$out" "## \`component")" "a contract without a title"
+  n1=$(lg_lineno "$out" "## Order totals")
+  n2=$(lg_lineno "$out" "## \`component:Sheet\`")
+  n3=$(lg_lineno "$out" "## Unclustered (2)")
+  lg_assert_cond "[ $n1 -gt 0 ] && [ $n1 -lt $n2 ] && [ $n2 -lt $n3 ]" "the P0 cluster first, then the P2 one, then Unclustered (2)"
+  assert_eq "| Key | Issue | Why it matters | Sev | Spec | Plan | PR | Latest handoff | Status |" \
+    "$(lg_line "$out" "| Key")" "the 9-column header"
+  lg_assert_cond "[ $(lg_lineno "$out" "| app-2 ") -lt $(lg_lineno "$out" "| app-1 ") ]" "rows by severity: app-2 (P0) before app-1 (P1)"
+  assert_eq "| app-1 | [a](../main/docs/issues/a.md) | Totals are wrong | P1 | [✓](../main/docs/specs/s.md) | — | — | [2026-10-05-b](../main/docs/handoffs/2026-10-05-b.md) | spec'd |" \
+    "$(lg_line "$out" "| app-1 ")" "a row: key, linked issue, summary, sev, spec ✓, plan —, PR —, newest handoff, status"
+  assert_contains "$(lg_line "$out" "| app-3 ")" "[c d](../main/docs/issues/c%20d.md)" "a path with a space is encoded"
+  assert_contains "$(lg_line "$out" "| app-4 ")" "Uses &lt;b>bold&lt;/b> & pipes \\|" "cell text: < and | escaped"
+  assert_contains "$(lg_line "$out" "| app-9 ")" "merged · owed: deploy" "owed work: the shared display (lg_q_display)"
+  lg_assert_cond "[ $(lg_lineno "$out" "| app-4 ") -gt $n3 ] && [ $(lg_lineno "$out" "| app-9 ") -gt $(lg_lineno "$out" "| app-4 ") ]" \
+    "unclustered: app-4 (P1), then app-9 (P3)"
+  assert_not_contains "$out" "↳" "no neighbour lines while neighbours is null"
+  assert_not_contains "$out" "core-1" "another ledger's item is not on the page"
+  # Neighbours (Task 9 computes them): other ledgers only, de-duplicated.
+  ix=$(lg_view_ix '(.items[] | select(.key == "app-1") | .neighbours) = {"upstream":[],"downstream":[{"key":"core-1","via":"field:order.total"},{"key":"app-2","via":"field:order.total"}],"siblings":[]}
+    | (.items[] | select(.key == "app-2") | .neighbours) = {"upstream":[],"downstream":[{"key":"core-1","via":"field:order.total"}],"siblings":[]}
+    | (.items[] | select(.key == "app-3") | .neighbours) = {"upstream":[{"key":"core-1","via":"endpoint:x"}],"downstream":[],"siblings":[]}')
+  lg_render md "$ix" app page
+  assert_eq "↳ Downstream (consumes \`field:order.total\`): core-1 (core)" "$(lg_line "$LG_OUT" "↳ Downstream")" \
+    "downstream line: other ledgers only, once"
+  assert_eq "↳ Upstream: core-1 (core) changes \`endpoint:x\` — not started" "$(lg_line "$LG_OUT" "↳ Upstream")" "upstream line"
+  lg_assert_cond "[ $(lg_lineno "$LG_OUT" "↳ Downstream") -lt $(lg_lineno "$LG_OUT" "## \`component:Sheet\`") ]" \
+    "…under its own cluster"
+  lg_render md "$ix" core page
+  assert_eq "# Core (\`core\`)" "$(printf '%s\n' "$LG_OUT" | sed -n 1p)" "another ledger's page"
+  assert_eq "Open: P0 1 · P1 0 · P2 0 · P3 0 · In flight: 0 branches" "$(lg_line "$LG_OUT" "Open:")" "…with no scope"
+}
+
+test_lg_render_footer_recent_days() {
+  echo "test: closed items last touched within views.recent_days are listed; older ones drop off"
+  local ix
+  ix=$(lg_view_ix)
+  lg_render md "$ix" app page "$LG_VIEW_GEN" '{"views":{"recent_days":7}}'
+  assert_contains "$LG_OUT" "## Recently closed (7 days)" "heading names recent_days"
+  assert_contains "$LG_OUT" "## Superseded / won't fix (7 days)" "…both headings"
+  assert_eq "- [app-5](../main/docs/issues/e.md) — Shipped last week · shipped" "$(lg_line "$LG_OUT" "- [app-5]")" \
+    "app-5: touched on 10-03 (after the cutoff) though dated 01-01"
+  assert_not_contains "$LG_OUT" "app-6" "app-6: closed long ago, never touched since — dropped"
+  lg_render md "$ix" app page
+  assert_contains "$LG_OUT" "## Recently closed (14 days)" "the default recent_days is 14"
+  lg_render md "$ix" app page '{"source":"x","inflight":0,"at":"t","cutoff":"2026-10-05","touched":{"docs/issues/e.md":"2026-10-03","docs/issues/g.md":"2026-10-04"},"link":""}'
+  assert_eq "None." "$(printf '%s\n' "$LG_OUT" | awk '/^## Recently closed/ { getline; getline; print; exit }')" \
+    "a later cutoff: nothing recently closed"
+  assert_not_contains "$LG_OUT" "app-7" "…nor superseded"
+  assert_contains "$LG_OUT" "[a](docs/issues/a.md)" "an empty link prefix leaves the path"
+}
+
+test_lg_render_superseded_line() {
+  echo "test: Superseded / won't fix: '<key> → <superseded_by>: <resolution>'; a won't fix says so"
+  local ix
+  ix=$(lg_view_ix)
+  lg_render md "$ix" app page
+  assert_eq "- app-7 → app-1: Replaced by app-1." "$(lg_line "$LG_OUT" "- app-7")" "superseded line"
+  assert_eq "- app-8 → won't fix: Not worth it." "$(lg_line "$LG_OUT" "- app-8")" "won't fix line"
+  lg_assert_cond "[ $(lg_lineno "$LG_OUT" "- app-7") -lt $(lg_lineno "$LG_OUT" "- app-8") ]" "by severity (P2 before P3)"
+  lg_assert_cond "[ $(lg_lineno "$LG_OUT" "## Superseded") -lt $(lg_lineno "$LG_OUT" "- app-7") ]" "under the Superseded heading"
+  ix=$(lg_view_ix '(.items[] | select(.key == "app-7") | .resolution) = null')
+  lg_render md "$ix" app page
+  assert_eq "- app-7 → app-1: (no resolution)" "$(lg_line "$LG_OUT" "- app-7")" "no resolution: said so"
+}
+
+test_lg_render_readme_rollup() {
+  echo "test: README — one row per ledger (open counts, in flight), items on no page, the open P0/P1 rollup"
+  local ix out
+  ix=$(lg_view_ix)
+  lg_render md "$ix" all readme
+  out=$LG_OUT
+  assert_eq "# Work ledger" "$(printf '%s\n' "$out" | sed -n 1p)" "title"
+  assert_eq "| Ledger | Open | P0 | P1 | P2 | P3 | In flight |" "$(lg_line "$out" "| Ledger")" "ledger table header"
+  assert_eq "| [App (\`app\`)](app.md) | 5 | 1 | 2 | 1 | 1 | 0 |" "$(lg_line "$out" "| [App")" "app row"
+  assert_eq "| [Core (\`core\`)](core.md) | 1 | 1 | 0 | 0 | 0 | 0 |" "$(lg_line "$out" "| [Core")" "core row"
+  assert_eq "| [Unassigned (\`unassigned\`)](unassigned.md) | 1 | 0 | 1 | 0 | 0 | 0 |" "$(lg_line "$out" "| [Unassigned")" \
+    "unassigned items get a row (and a page)"
+  assert_not_contains "$out" "Old" "a retired ledger with no items is left out"
+  assert_contains "$out" "1 items are on no ledger page" "the item with no ledger is counted"
+  assert_eq "## Open P0/P1 (5)" "$(lg_line "$out" "## Open")" "rollup heading"
+  lg_assert_cond "[ $(lg_lineno "$out" "| core-1 ") -lt $(lg_lineno "$out" "| app-2 ") ] && [ $(lg_lineno "$out" "| app-2 ") -lt $(lg_lineno "$out" "| app-1 ") ] && [ $(lg_lineno "$out" "| app-1 ") -lt $(lg_lineno "$out" "| app-4 ") ]" \
+    "rollup by severity then date: core-1, app-2 (P0), app-1, app-4 (P1)"
+  assert_eq "| — | unassigned | [l](../main/docs/issues/l.md) | Home not decided | P1 | not started |" "$(lg_line "$out" "| — | unassigned")" \
+    "a keyless unassigned P1"
+  assert_not_contains "$out" "| app-3 " "P2 is not in the rollup"
+  assert_not_contains "$out" "Legacy item" "nor an item on no ledger"
+}
+
+test_lg_html_self_contained() {
+  echo "test: the HTML view is one self-contained document — no external script or style; every shown key; escaped"
+  local ix out k
+  ix=$(lg_view_ix)
+  lg_render html "$ix" app page
+  out=$LG_OUT
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "<!doctype html>" "$(printf '%s\n' "$out" | sed -n 1p)" "a whole document"
+  assert_eq "0" "$(printf '%s\n' "$out" | grep -Eic '<script[^>]*src=|<link[^>]*href=|@import|url\(' || true)" \
+    "no script src, stylesheet link, @import or url()"
+  assert_eq "0" "$(printf '%s\n' "$out" | grep -Eic '(src|href)="https?://' || true)" "no http(s) resource at all in this fixture"
+  assert_contains "$out" "prefers-color-scheme: dark" "light and dark"
+  assert_contains "$out" "<script>" "inline JS (the filters)"
+  for k in app-1 app-2 app-3 app-4 app-5 app-7 app-8 app-9 core-1; do
+    assert_contains "$out" ">$k</td>" "key $k is present"
+  done
+  assert_not_contains "$out" ">app-6</td>" "an old closed item is not"
+  assert_contains "$out" "Uses &lt;b&gt;bold&lt;/b&gt; &amp; pipes |" "text is HTML-escaped"
+  assert_not_contains "$out" "<b>bold" "…never raw"
+  assert_contains "$out" '<option value="app" selected>' "the ledger filter starts on \$ledger"
+  assert_contains "$out" 'id="f-sev"' "severity filter"
+  assert_contains "$out" 'id="f-class"' "status-class filter"
+  assert_contains "$out" 'id="f-inflight"' "in-flight filter"
+  assert_contains "$out" 'id="f-q"' "search box"
+  assert_contains "$out" 'data-q="app-1 totals are wrong a alpha title"' "search text: key, summary, file stem, H1"
+  assert_contains "$out" '<h3>Order totals — <code>field:order.total</code> (2)</h3>' "the cluster layout"
+  assert_contains "$out" 'href="../main/docs/issues/c%20d.md"' "links encoded"
+}
+
+# lg_view_fixture: a repo with config, registry (app, core) and two items,
+# committed.
+lg_view_fixture() {
+  lg_fixture
+  lg_enable
+  lg_registry "$LG_REG_APP_CORE"
+  lg_item docs/issues/a.md "key: app-1" "ledger: app" "status: Open" "severity: P1" \
+    "summary: Totals are wrong when the cart is edited" "changes: [field:order.total]"
+  lg_item docs/issues/b.md "key: core-1" "ledger: core" "status: Open" "severity: P0" "summary: Endpoint times out"
+  git add -A && git commit -qm items
+}
+
+test_lg_view_writes_files() {
+  echo "test: ledger view writes <L>.md (+ README.md for all) or ledger.html into --out (default: the cache)"
+  lg_view_fixture
+  local out="$TEST_DIR/out dir" common bin
+  lg view all --out "$out"
+  assert_eq "0" "$LG_RC" "view all: exit 0"
+  assert_file_exists "$out/app.md" "app.md"
+  assert_file_exists "$out/core.md" "core.md"
+  assert_file_exists "$out/README.md" "README.md"
+  assert_file_not_exists "$out/ledger.html" "no HTML unless asked"
+  assert_eq "# App (\`app\`)" "$(sed -n 1p "$out/app.md")" "app.md is the app page"
+  assert_contains "$(cat "$out/app.md")" "| app-1 |" "…with its item"
+  assert_contains "$(sed -n 3p "$out/app.md")" "Generated from the working tree" "…rendered from the working tree"
+  assert_contains "$LG_OUT" "$out/README.md" "text names each file written"
+  # Recently closed: by the last commit touching the item (or an
+  # uncommitted edit), not by its date.
+  lg_item docs/issues/z.md "key: app-8" "ledger: app" "status: Fixed" "date: 2020-01-01" "summary: Closed this week"
+  git add docs/issues/z.md && git commit -qm z
+  lg_item docs/issues/y.md "key: app-7" "ledger: app" "status: Fixed" "date: 2020-01-01" "summary: Closed years ago"
+  git add docs/issues/y.md
+  GIT_COMMITTER_DATE="2020-01-02T00:00:00Z" GIT_AUTHOR_DATE="2020-01-02T00:00:00Z" git commit -qm y
+  lg_item docs/issues/x.md "key: app-6" "ledger: app" "status: Fixed" "date: 2020-01-01" "summary: Closed in the working tree"
+  lg view app --out "$out"
+  assert_contains "$(cat "$out/app.md")" "[app-8](" "closed, committed today: recently closed"
+  assert_contains "$(cat "$out/app.md")" "[app-6](" "closed in the working tree (untracked): recently closed"
+  assert_not_contains "$(cat "$out/app.md")" "app-7" "closed by a 2020 commit: dropped"
+  assert_contains "$(cat "$out/app.md")" "($(git rev-parse --show-toplevel)/docs/issues/a.md)" "links: absolute paths into the work tree"
+  rm -f docs/issues/x.md
+  # The working tree, uncommitted edits included.
+  lg_item docs/issues/c.md "key: app-2" "ledger: app" "status: Open" "severity: P2" "summary: Not committed yet"
+  lg view app --html --out "$out"
+  assert_eq "0" "$LG_RC" "view app --html: exit 0"
+  assert_file_exists "$out/ledger.html" "ledger.html"
+  assert_contains "$(cat "$out/ledger.html")" '<option value="app" selected>' "…starting on the app ledger"
+  assert_contains "$(cat "$out/ledger.html")" ">app-2</td>" "…with the uncommitted item"
+  lg view core --md --html --out "$out" --format json
+  assert_eq "0" "$LG_RC" "--md --html --format json: exit 0"
+  assert_eq "1" "$(json_count "$LG_OUT")" "one JSON object"
+  assert_json_field "$LG_OUT" '.files | join(",")' "core.md,ledger.html" ".files"
+  assert_json_field "$LG_OUT" '.dir' "$out" ".dir"
+  lg view app
+  common=$(cd "$(git rev-parse --git-common-dir)" && pwd)
+  assert_eq "0" "$LG_RC" "default --out: exit 0"
+  assert_file_exists "$common/doc-superpowers/ledger/views/app.md" "default dir: <git-common-dir>/doc-superpowers/ledger/views"
+  lg view nope
+  assert_eq "3" "$LG_RC" "an unknown ledger: usage (3)"
+  assert_contains "$LG_ERR" "app, core" "…naming the ledgers"
+  lg view
+  assert_eq "3" "$LG_RC" "no target: usage (3)"
+  lg view app --bogus
+  assert_eq "3" "$LG_RC" "an undeclared option: usage (3)"
+  # --open hands the file to the platform opener.
+  bin=$(harness_mktemp_d lg-bin)
+  # shellcheck disable=SC2016  # $1 is the fake opener's
+  printf '#!/bin/sh\nprintf "%%s\\n" "$1" > "%s/opened"\n' "$bin" > "$bin/open"
+  cp "$bin/open" "$bin/xdg-open"
+  chmod +x "$bin/open" "$bin/xdg-open"
+  PATH="$bin:$PATH" lg view all --html --open --out "$out"
+  assert_eq "0" "$LG_RC" "--open: exit 0"
+  assert_eq "$out/ledger.html" "$(cat "$bin/opened" 2>/dev/null)" "--open opens the HTML file"
+  teardown
+}
+
+# lg_publish_fixture: lg_keys_fixture (bare remote LG_REMOTE, origin/main)
+# with an item x-1 on the remote base.
+lg_publish_fixture() {
+  lg_keys_fixture
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "severity: P1" "summary: On the base" "changes: [field:a]"
+  git add -A && git commit -qm a && git push -q origin main
+}
+
+# The state publish must not touch: HEAD, the index, the status.
+lg_user_state() {
+  printf '%s\n' "$(git rev-parse HEAD)" "$(git symbolic-ref -q HEAD || echo detached)"
+  git ls-files -s
+  git status --porcelain
+}
+
+# The number of worktrees, and of publish worktree directories left behind.
+lg_wt_state() {
+  local common n
+  common=$(cd "$(git rev-parse --git-common-dir)" && pwd)
+  n=$(find "$common/doc-superpowers/ledger/publish-wt" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')
+  printf '%s worktree(s), %s publish dir(s)\n' "$(git worktree list --porcelain | grep -c '^worktree ')" "$n"
+}
+
+test_lg_publish_orphan_branch() {
+  echo "test: ledger publish — an orphan views branch with only view files, from the remote base; then a fast-forward"
+  lg_publish_fixture
+  local before vb first second files msg c2 here
+  # Local work that is not on the remote base must not reach the views.
+  lg_item docs/issues/b.md "key: x-8" "ledger: x" "status: Open" "severity: P1" "summary: Local commit only"
+  git add -A && git commit -qm local
+  lg_item docs/issues/c.md "key: x-9" "ledger: x" "status: Open" "severity: P1" "summary: Uncommitted"
+  git add docs/issues/c.md
+  lg_item docs/issues/d.md "key: x-7" "ledger: x" "status: Open" "severity: P1" "summary: Untracked"
+  before=$(lg_user_state)
+  lg publish
+  assert_eq "0" "$LG_RC" "publish: exit 0"
+  vb=refs/heads/doc-ledger-views
+  first=$(git --git-dir="$LG_REMOTE" rev-parse -q --verify "$vb" || echo none)
+  lg_assert_cond "[ '$first' != none ]" "the remote has the views branch"
+  files=$(git --git-dir="$LG_REMOTE" ls-tree -r --name-only "$vb" | tr '\n' ' ')
+  assert_eq "README.md ledger.html x.md y.md " "$files" "the views branch holds only the view files"
+  assert_eq "1" "$(git --git-dir="$LG_REMOTE" rev-list --parents -n 1 "$vb" | wc -w | tr -d ' ')" "an orphan: no parent"
+  msg=$(git --git-dir="$LG_REMOTE" log -1 --format=%s "$vb")
+  lg_assert_cond "printf '%s' '$msg' | grep -Eq '^views @ origin/main@[0-9a-f]{7,}, 0 in-flight branches, [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'" \
+    "message 'views @ <base>@<short-sha>, <n> in-flight branches, <UTC>' ($msg)"
+  assert_contains "$msg" "origin/main@$(git rev-parse --short refs/remotes/origin/main)" "…naming the base commit"
+  assert_contains "$(git --git-dir="$LG_REMOTE" show "$vb:x.md")" "| x-1 |" "x.md has the base's item"
+  assert_not_contains "$(git --git-dir="$LG_REMOTE" show "$vb:x.md")" "x-8" "…not a local commit's"
+  assert_not_contains "$(git --git-dir="$LG_REMOTE" show "$vb:x.md")" "x-9" "…nor a staged or untracked one"
+  assert_contains "$(git --git-dir="$LG_REMOTE" show "$vb:x.md")" "Generated from origin/main@" "header names the base"
+  assert_eq "$before" "$(lg_user_state)" "HEAD, index and status unchanged"
+  assert_eq "1 worktree(s), 0 publish dir(s)" "$(lg_wt_state)" "the publish worktree is gone"
+  lg_assert_cond "! git rev-parse -q --verify refs/heads/doc-ledger-views >/dev/null" "no local views branch was created"
+  # A second publish after the base moves: a fast-forward.
+  c2=$(harness_mktemp_d pubclone)/c
+  lg_clone "$c2"
+  here=$PWD
+  cd "$c2"
+  lg_item docs/issues/e.md "key: x-2" "ledger: x" "status: Open" "severity: P0" "summary: Added on the base later"
+  git add -A && git commit -qm e && git push -q origin main
+  cd "$here"
+  lg publish --format json
+  assert_eq "0" "$LG_RC" "second publish: exit 0"
+  second=$(git --git-dir="$LG_REMOTE" rev-parse "$vb")
+  assert_eq "$first" "$(git --git-dir="$LG_REMOTE" rev-parse "$second^")" "the second commit's parent is the first (fast-forward)"
+  assert_json_field "$LG_OUT" '.commit' "$second" ".commit"
+  assert_json_field "$LG_OUT" '.parent' "$first" ".parent"
+  assert_json_field "$LG_OUT" '.files | join(",")' "README.md,ledger.html,x.md,y.md" ".files"
+  assert_contains "$(git --git-dir="$LG_REMOTE" show "$vb:x.md")" "| x-2 |" "the fetched base's new item"
+  assert_eq "$before" "$(lg_user_state)" "still unchanged"
+  # --dry-run: everything but the commit and the push.
+  lg publish --dry-run --format json
+  assert_eq "0" "$LG_RC" "--dry-run: exit 0"
+  assert_json_field "$LG_OUT" '.dry_run' "true" ".dry_run"
+  assert_json_field "$LG_OUT" '.commit' "null" "no commit"
+  assert_eq "$second" "$(git --git-dir="$LG_REMOTE" rev-parse "$vb")" "the remote did not move"
+  assert_file_exists "$(jq -r .dir <<<"$LG_OUT")/x.md" "the rendered files are left in .dir"
+  # The base's config decides (this clone's says nothing).
+  cd "$c2"
+  lg_enable '{"views":{"html":false}}'
+  git add docs/ledger/config.json && git commit -qm nohtml && git push -q origin main
+  cd "$here"
+  lg publish
+  assert_eq "0" "$LG_RC" "views.html false: exit 0"
+  assert_eq "README.md x.md y.md " "$(git --git-dir="$LG_REMOTE" ls-tree -r --name-only "$vb" | tr '\n' ' ')" \
+    "views.html false (the base's config): no ledger.html"
+  teardown
+}
+
+test_lg_publish_rejects_non_ff() {
+  echo "test: ledger publish never forces — a views branch that moved meanwhile is rejected with exit 2"
+  lg_publish_fixture
+  local before vb racer
+  lg publish
+  assert_eq "0" "$LG_RC" "first publish: exit 0"
+  vb=refs/heads/doc-ledger-views
+  before=$(lg_user_state)
+  # The selftest hook pushes an unrelated commit to the views branch just
+  # before this run's push: another publisher won the race.
+  DOC_TOOLS_LEDGER_SELFTEST=publish-race lg publish
+  assert_eq "2" "$LG_RC" "a non-fast-forward: could not run (2)"
+  assert_contains "$LG_ERR" "rejected" "stderr says the push was rejected"
+  racer=$(git --git-dir="$LG_REMOTE" log -1 --format=%s "$vb")
+  assert_eq "selftest race" "$racer" "the remote keeps the other publisher's commit"
+  assert_eq "$before" "$(lg_user_state)" "HEAD, index and status unchanged"
+  assert_eq "1 worktree(s), 0 publish dir(s)" "$(lg_wt_state)" "the publish worktree is gone"
+  DOC_TOOLS_LEDGER_SELFTEST=publish-race lg publish --format json
+  assert_eq "2" "$LG_RC" "--format json: exit 2"
+  assert_json_field "$LG_OUT" '.exit' "2" "the verdict object"
+  teardown
+}
+
+test_lg_publish_cleans_worktree() {
+  echo "test: the publish worktree is removed after a TERM, and a dead run's is removed by the next publish"
+  lg_publish_fixture
+  local common dead
+  common=$(cd "$(git rev-parse --git-common-dir)" && pwd)
+  DOC_TOOLS_LEDGER_SELFTEST=publish-term lg publish
+  assert_eq "143" "$LG_RC" "TERM'd: exit 143"
+  assert_eq "1 worktree(s), 0 publish dir(s)" "$(lg_wt_state)" "the worktree is gone after the TERM"
+  # A worktree left by a run that was killed (-9): its pid is dead.
+  sh -c 'exit 0' &
+  dead=$!
+  wait "$dead" || true
+  mkdir -p "$common/doc-superpowers/ledger/publish-wt"
+  git worktree add -q --detach "$common/doc-superpowers/ledger/publish-wt/wt-$dead" HEAD
+  assert_eq "2 worktree(s), 1 publish dir(s)" "$(lg_wt_state)" "a stale publish worktree"
+  lg publish
+  assert_eq "0" "$LG_RC" "the next publish: exit 0"
+  assert_eq "1 worktree(s), 0 publish dir(s)" "$(lg_wt_state)" "…removed it"
+  # A base without the ledger config cannot be published.
+  git rm -q docs/ledger/config.json && git commit -qm off && git push -q origin HEAD:main
+  lg_enable
+  lg publish
+  assert_eq "2" "$LG_RC" "a base without docs/ledger/config.json: exit 2"
+  assert_contains "$LG_ERR" "config.json" "…named"
+  assert_eq "1 worktree(s), 0 publish dir(s)" "$(lg_wt_state)" "nothing left behind"
+  teardown
+}
+
+test_lg_publish_link_prefix() {
+  echo "test: publish links — a GitHub remote's blob URL, else relative to the views branch"
+  lg_fixture
+  lg_enable
+  git remote add gh git@github.com:own-er/re.po.git
+  git remote add gh2 https://github.com/own/repo
+  git remote add other /srv/git/repo.git
+  lg_call _lg_publish_link gh main doc-ledger-views
+  assert_eq "0|https://github.com/own-er/re.po/blob/main/" "$LG_RC|$LG_OUT" "ssh GitHub remote (.git dropped)"
+  lg_call _lg_publish_link gh2 "release/1 x" doc-ledger-views
+  assert_eq "https://github.com/own/repo/blob/release/1%20x/" "$LG_OUT" "https remote; a branch with a slash and a space"
+  lg_call _lg_publish_link other main doc-ledger-views
+  assert_eq "../main/" "$LG_OUT" "another host: ../<branch>/ (the page sits at blob/<views>/)"
+  lg_call _lg_publish_link other main views/ledger
+  assert_eq "../../main/" "$LG_OUT" "one ../ per segment of the views branch"
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -4025,6 +4509,19 @@ run_tests() {
   test_lg_validate_all_concurrent_merge_finalize_dup
   test_lg_validate_plan_marks
   test_lg_validate_pushed_range
+
+  # --- Task 8: renderers, view, publish ---
+  test_lg_render_pure
+  test_lg_render_clusters_and_unclustered
+  test_lg_render_footer_recent_days
+  test_lg_render_superseded_line
+  test_lg_render_readme_rollup
+  test_lg_html_self_contained
+  test_lg_view_writes_files
+  test_lg_publish_orphan_branch
+  test_lg_publish_rejects_non_ff
+  test_lg_publish_cleans_worktree
+  test_lg_publish_link_prefix
 
   print_summary
 }

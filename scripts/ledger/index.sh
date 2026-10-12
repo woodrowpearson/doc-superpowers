@@ -527,21 +527,17 @@ _lg_ix_docs() {
 
 # --- The join ------------------------------------------------------------------------
 
-# The derived-status labels (design §E.1), the one definition: the index
-# writes them (lg_item below) and query.sh reads them (ls --status, the
-# displays) — both prepend this to their jq programs.
-# shellcheck disable=SC2016  # jq source
-_LG_JQ_STATUS_DEFS='
-def lg_status_labels:
-  {superseded: "superseded", wontfix: "won'"'"'t fix", closed: "closed", shipped: "shipped", merged: "merged",
-   in_review: "in review", on_branch: "on branch", planned: "planned", specd: "spec'"'"'d", not_started: "not started"};
-'
+# The shared jq definitions (scripts/ledger/defs.jq: the derived-status
+# labels, the display helpers): every program that uses them starts with
+# this and runs as `jq -L "$_LG_LIB" …` — the index writes the labels
+# (lg_item below), query.sh and the renderers read and display them.
+_LG_JQ_INCLUDE='include "defs"; '
 
 # jq: the item record → the index item; the index object. Inputs (slurped):
 # $c config, $reg registry, $di doc-index, $lgy legacy, $fin finalized,
 # $recs parse records, $dates {"p","d"}, $docs {"c","d","i"} / {"s","v"}.
 # shellcheck disable=SC2016  # jq source
-_LG_JQ_INDEX_DEFS="$_LG_JQ_STATUS_DEFS"'
+_LG_JQ_INDEX_DEFS="$_LG_JQ_INCLUDE"'
 # lg_fields($cfg): {logical: [candidate names]} — config "fields", once.
 def lg_fields($cfg):
   ($cfg.fields // {}) | with_entries(.value |= (if type == "array" then [.[] | strings] elif type == "string" then [.] else [] end));
@@ -927,7 +923,7 @@ _lg_index() {
   else
     _lg_parse_blobs "$commit" "$s.itemz" "$s.recs"
   fi
-  jq -n -r --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS"'
+  jq -L "$_LG_LIB" -n -r --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS"'
     lg_fields($c[0]) as $F
     | inputs
     | ((.fm // {}) | lg_fv($F; "key") | if type == "string" and (test("[\\t\\n\\r]") | not) then ascii_downcase else "" end) as $k
@@ -938,7 +934,7 @@ _lg_index() {
   _lg_registry_findings "$reg" "$s.none" "$s.rf"
   rfn=$(wc -l < "$s.rf" | tr -d ' ')
   tmp=$(mktemp "$_LG_CACHE/.index.XXXXXX") || _lg_die "cannot create a temp file in $_LG_CACHE"
-  if ! jq -n -c \
+  if ! jq -L "$_LG_LIB" -n -c \
       --slurpfile c "$_LG_CFG" --slurpfile reg "$reg" --slurpfile di "$di" \
       --slurpfile lgy "$s.legacy" --slurpfile fin "$s.finalized" \
       --slurpfile recs "$s.recs" --slurpfile dates "$s.dates" --slurpfile docs "$s.docs" \

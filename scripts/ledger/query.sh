@@ -38,57 +38,15 @@
 # "<H1> <file-name stem>", 1 in the first paragraph (substring matches,
 # case-insensitive); score 0 is no match. Ties: severity, date, path.
 
-# The derived-status labels: index.sh's lg_status_labels (_LG_JQ_STATUS_DEFS).
-# shellcheck disable=SC2016  # jq source
-_LG_JQ_QUERY_DEFS="$_LG_JQ_STATUS_DEFS"'
-def lg_q_one: if type == "string" and test("[[:cntrl:]]") then gsub("[[:cntrl:]]+"; " ") else . end;
-def lg_q_cut($n): if length > $n then .[0:($n - 1)] + "…" else . end;
-def lg_q_pad($w): (($w - length) as $k | if $k > 0 then . + (" " * $k) else . end);
-# The jq builtins ascii_downcase / ascii_upcase / sub cost ~0.05–0.16 s per
-# 3,000 strings (they are jq-defined); split, endswith, slices and
-# test(re; "i") do not.
-def lg_q_stem: .path | split("/") | last | if endswith(".md") then .[0:-3] else . end;
-# lg_q_re: the string as a regex matching it literally.
-def lg_q_re: gsub("(?<c>[.\\[\\]\\\\^$|?*+(){}])"; "\\\(.c)");
-def lg_q_id: (.key // lg_q_stem) | lg_q_one;
-def lg_q_display:
-  .derived as $d | ($d.detail // null) as $x | lg_status_labels as $SL
-  | (if $d.status == $SL.superseded then "\($SL.superseded) → \($x // "?")"
-     elif $d.status == $SL.merged then (if $x == null then $SL.merged else "\($SL.merged) · owed: \($x)" end)
-     elif $d.status == $SL.in_review then "\($SL.in_review) #\($x // "?")"
-     elif $d.status == $SL.on_branch then "\($SL.on_branch) \($x // "?")"
-     else ($d.status // "?") end)
-  | lg_q_one;
-def lg_q_cluster: (.changes[0] // .consumes[0] // null);
-# lg_q_rank($R; $n): the place of the severity in severity_order ($R:
-# {SEV: i}, case-insensitive); a value outside it $n, none $n + 1.
-def lg_q_rank($R; $n):
-  .severity as $s
-  | if ($s | type) != "string" then $n + 1 else ($R[$s] // $R[$s | ascii_upcase] // $n) end;
-def lg_q_ranks($c):
-  ([($c.severity_order // [])[] | strings | ascii_upcase]) as $ord
-  | {R: ($ord | to_entries | map({key: .value, value: .key}) | from_entries), n: ($ord | length)};
-# lg_q_rows($lead): text rows {lead?, id, sev, d, s} → padded lines.
-def lg_q_lines:
-  if length == 0 then empty else
-    (map(.lead | length) | max) as $wl
-    | (map(.id | length) | max) as $wi
-    | (map(.sev | length) | max) as $ws
-    | (map(.d | length) | max) as $wd
-    | .[]
-    | (if $wl > 0 then (.lead | lg_q_pad($wl)) + "  " else "" end)
-      + (.id | lg_q_pad($wi)) + "  " + (.sev | lg_q_pad($ws)) + "  "
-      + (if .s == "" then .d else (.d | lg_q_pad($wd)) + "  " + .s end)
-  end;
-def lg_q_row($lead):
-  {lead: $lead, id: lg_q_id, sev: ((.severity // "—") | lg_q_one),
-   d: (lg_q_display | lg_q_cut(24)), s: ((.summary // "") | lg_q_one | lg_q_cut(72))};
-'
+# The display helpers (lg_q_*, lg_status_labels) live in defs.jq, shared
+# with the renderers; every program here starts with _LG_JQ_INCLUDE and
+# runs as `jq -L "$_LG_LIB"`.
+_LG_JQ_QUERY_DEFS="$_LG_JQ_INCLUDE"
 
 # _lg_q_status_label <value>: the derived-status label <value> names (case,
 # spaces, apostrophes, "-" and "_" ignored) into _LG_QSTATUS; "" when none.
 _lg_q_status_label() {
-  _LG_QSTATUS=$(jq -nr --arg v "$1" "$_LG_JQ_STATUS_DEFS"'
+  _LG_QSTATUS=$(jq -L "$_LG_LIB" -nr --arg v "$1" "$_LG_JQ_INCLUDE"'
     def n: ascii_downcase | gsub("[\\s'"'"'\u2019_-]"; "");
     ($v | n) as $k | first(lg_status_labels[] | select(n == $k)) // ""') \
     || _lg_die "jq failed (--status)"
@@ -101,7 +59,7 @@ _lg_q_run() {
   local prog="$1" out="$2" ix
   shift 2
   ix=$(_lg_index)
-  jq -r --slurpfile c "$_LG_CFG" "$@" "$_LG_JQ_QUERY_DEFS$prog" "$ix" > "$out.all" \
+  jq -L "$_LG_LIB" -r --slurpfile c "$_LG_CFG" "$@" "$_LG_JQ_QUERY_DEFS$prog" "$ix" > "$out.all" \
     || _lg_die "jq failed (ledger $_LG_VERB)"
   IFS= read -r _LG_QHEAD < "$out.all" || _LG_QHEAD=""
   tail -n +2 "$out.all" > "$out" || _lg_die "cannot write $out"
@@ -219,7 +177,7 @@ cmd_ledger_ls() {
     _lg_q_status_label "$_OPT_status"
     status=$_LG_QSTATUS
     if [ -z "$status" ]; then
-      _lg_usage "--status '$_OPT_status' is not a status: $(jq -nr "$_LG_JQ_STATUS_DEFS"'[lg_status_labels[]] | join(", ")')"
+      _lg_usage "--status '$_OPT_status' is not a status: $(jq -L "$_LG_LIB" -nr "$_LG_JQ_INCLUDE"'[lg_status_labels[]] | join(", ")')"
     fi
   fi
   _lg_scratch_name
