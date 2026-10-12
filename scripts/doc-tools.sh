@@ -2216,10 +2216,12 @@ claims run|cmd_claims_run|repo|claims+ planes-of= all scheduled judge-sample= ba
 claims promote|cmd_claims_promote|repo|reverify all base=
   <id> | --reverify (<id>... | --all) [--base <ref>]
   Promote a claim to built: run its bound test green at HEAD, verify its
-  non-vacuity proof in a throwaway worktree (under nonvacuity.mutant, an
-  exactly-once literal find/replace, the test must fail by an assertion),
-  store the verdict, record the promotion in the sidecar and render the
-  doc's status block (results: {claim, status_from, status_to, green, red,
+  non-vacuity proofs, each in a throwaway worktree where the test first
+  passes unmodified (under nonvacuity.mutant, an exactly-once literal
+  find/replace, and under nonvacuity.observed_red <sha>, the subject files
+  as at that commit, the test must fail by an assertion), store the
+  verdict, record the promotion in the sidecar and render the doc's status
+  block (results: {claim, status_from, status_to, green, red,
   verdict_sha256}). --reverify re-checks promoted claims and stores fresh
   verdicts, writing no sidecar. Refuses a dirty tree (exit 2, dirty-tree).
   Every finding blocks.
@@ -7392,25 +7394,33 @@ cmd_claims_run() {
 # file a safe repo path (_claims_safe_relpath; in the work tree
 # _claims_contained_path too) present in the proposed tree — an unsafe one
 # is never read — and find occurring there exactly once, counted literally
-# (jq split, codepoints). A diverged or unbuilt claim's mutant is not
-# checked (a diverged claim's mutant no longer matches, by construction;
-# promote re-verifies a mutant before a claim becomes built). The adapter's
-# stderr passes through (its diagnostics). The when comparisons arrive with
-# the configuration extension.
+# (jq split, codepoints). Neither proof of such a claim may move its bound
+# test off HEAD: a mutant.file that is the test's own file, or (with an
+# observed_red) a subject that is or holds it, is a finding. A diverged or
+# unbuilt claim's mutant is not checked (a diverged claim's mutant no
+# longer matches, by construction; promote re-verifies a mutant before a
+# claim becomes built). The adapter's stderr passes through (its
+# diagnostics). The when comparisons arrive with the configuration
+# extension.
 #
 # Scratch: cl-v3-plan.json (one entry per checked claim), cl-v3-paths.jsonl
 # ({path, safe, exists} per candidate file), cl-v3-calls.jsonl ({runner,
 # files} per list call), cl-v3-lists.jsonl ({runner, ok, reason, rows} per
 # call) and cl-v3-mutants.jsonl ({i, state, n} per checked mutant).
 
-# Shared by V3 and promote: cl_mutant_is_test($tf; $node), on a
-# mutant.file — it is the bound test's own file (test.file, or the node's
-# path before "::"): a mutant of the test's expectation proves nothing; and
-# that finding's message.
+# Shared by V3 and promote: the bound test's own files (cl_test_files:
+# test.file, and the node's path before "::"), which a nonvacuity proof must
+# leave at HEAD. cl_mutant_is_test($tf; $node), on a mutant.file — it is one of them:
+# a mutant of the test's expectation proves nothing. cl_subject_holds_test,
+# on a subject path — it is one of them or a directory holding one: an
+# observed_red proof checks each subject out as at its commit, and would
+# take the test back with it. Each with its finding's message.
 # shellcheck disable=SC2016  # jq program, not shell expansion
-_JQ_CLAIMS_MUTANT_DEFS='def cl_mutant_is_test($tf; $node): . as $f
-   | (($tf | type) == "string" and $tf == $f) or (($node | type) == "string" and ($node | split("::")[0]) == $f);
- def cl_mutant_test_msg: "nonvacuity.mutant.file \(.) is the bound test'"'"'s own file: a mutant of the test'"'"'s expectation proves nothing; mutate the subject";'
+_JQ_CLAIMS_MUTANT_DEFS='def cl_test_files($tf; $node): [($tf | strings), ($node | strings | split("::")[0])];
+ def cl_mutant_is_test($tf; $node): . as $f | any(cl_test_files($tf; $node)[]; . == $f);
+ def cl_mutant_test_msg: "nonvacuity.mutant.file \(.) is the bound test'"'"'s own file: a mutant of the test'"'"'s expectation proves nothing; mutate the subject";
+ def cl_subject_holds_test($tf; $node): . as $p | any(cl_test_files($tf; $node)[]; . == $p or startswith($p + "/"));
+ def cl_subject_test_msg: "subject \(.) is, or holds, the bound test'"'"'s own file: observed_red checks each subject out as at its commit, and the test must stay at HEAD; name only the code under test";'
 
 # Shared by the V3 programs. cl_plain: no newline or NUL (the shell reads
 # names and paths NUL- or newline-separated). cl_v3_bind($pp), on a plan
@@ -7452,7 +7462,7 @@ _JQ_CLAIMS_V3_PLAN='$t[0] as $touched
     | select((.test | type) == "object" and (.test.runner | nes) and (.test.node | nes))
     | {claim: .id, doc: $doc, status, frozen: (.frozen_at | nes), runner: .test.runner, node: .test.node,
        file: (if .test.file | nes then .test.file else null end),
-       prefix: (.test.node | split("::")[0]), nonvacuity, promotion}]'
+       prefix: (.test.node | split("::")[0]), subject, nonvacuity, promotion}]'
 
 # The plan, with $paths (the cl-v3-paths rows) → one {runner, files} line
 # per list call (cl_v3_bind's {arg} entries): files [] (all files) when a
@@ -7543,7 +7553,11 @@ _JQ_CLAIMS_V3='def v3($e; $msg): {check: "V3", claim: $e.claim, doc: $e.doc, mes
           elif $r.n != 1 then
             v3($e; "nonvacuity.mutant.find occurs \($r.n) times in \($m.file) (counted literally): it must match exactly once")
           else empty end
-      end)'
+      end),
+   ($e | select(cl_v3_mutant_checked)
+    | select(.nonvacuity | type == "object" and (.observed_red | nes))
+    | .subject | arrays | .[] | strings | select(cl_subject_holds_test($e.file; $e.node))
+    | v3($e; cl_subject_test_msg))'
 
 # V3 (see the section comment): the plan; each candidate file's safety and
 # presence; one list call per runner; each mutant file read and counted;
@@ -7878,28 +7892,36 @@ _claims_v9() {
     "$_JQ_CLAIMS_V9" "$_SCRATCH/cl-claims.json" >> "$_SCRATCH/cl-findings.jsonl"
 }
 
-# --- Spec claims: promote, the mutant proof ------------------------------------
+# --- Spec claims: promote, the nonvacuity proofs -------------------------------
 #
 # claims promote <id> is the one path into built (§C). It refuses a dirty
 # tree (_claims_refuse_dirty: exit 2, dirty-tree), so HEAD is the tree it
 # proves and promotion.at = HEAD holds exactly the states and test proved
 # (what _claims_repromote_owed reads in a clone without the verdict). The
-# claim must be a test claim, not frozen, with a bound test and a
-# nonvacuity.mutant {file, find, replace}, whose status is unbuilt, diverged
+# claim must be a test claim, not frozen, with a bound test and a proof —
+# nonvacuity.mutant {file, find, replace}, nonvacuity.observed_red <sha>, or
+# both (then both must hold) — whose status is unbuilt, diverged
 # or gated — or built whose verdict check is not ok (a DOC-STALE amendment
 # changed its states, or the verdict is in another clone's store):
 # re-proving is always safe. A built claim whose verdict is ok is "already
 # promoted". Then:
 #   1. the bound node runs at HEAD (the clean work tree, --root its top
 #      level) through its runner adapter: it must pass ("not green");
-#   2. in a throwaway worktree at HEAD (_claims_worktree_add) the node runs
-#      unmutated with --root the worktree: it must pass there too ("not
-#      green in a clean checkout": the work tree's untracked files are not in
-#      it), so the red run differs from a green one only by the mutation;
-#      then the mutant is applied (_claims_mutate: literal, exactly once, on
-#      UTF-8 text only — "mutant file is not UTF-8 text") and the node runs
-#      again: it must fail by an assertion (pass: "mutant stays green";
-#      error or not-found: "mutant error is not an assertion failure");
+#   2. for each proof, the mutant first, in a throwaway worktree of its own
+#      at HEAD (_claims_worktree_add; a fresh one per proof, so neither
+#      proof's change reaches the other's runs) the node runs unmodified
+#      with --root the worktree: it must pass there too ("not green in a
+#      clean checkout": the work tree's untracked files are not in it), so
+#      the red run differs from a green one only by the proof's change; then
+#      the change is made and the node runs again: it must fail by an
+#      assertion (pass: "<proof> stays green"; error or not-found: "<proof>
+#      error is not an assertion failure"). The mutant's change:
+#      _claims_mutate (literal, exactly once, on UTF-8 text only — "mutant
+#      file is not UTF-8 text"). observed_red's (<sha> must peel to a commit,
+#      else "observed_red is not a commit"): each subject path removed in
+#      the worktree, then checked out from <sha> when <sha> holds it — absent
+#      there, it stays removed (the test-first case) — while the bound test
+#      stays at HEAD (_claims_promote_swap);
 #   3. the verdict (see "the verdict store") is stored, then the sidecar is
 #      rewritten atomically — status → status_to (built), promotion → {at:
 #      HEAD, verdict_sha256: <digest>} — and the doc's status block rendered.
@@ -7907,13 +7929,18 @@ _claims_v9() {
 # file must not be the bound test's own file, must be a safe repo path,
 # contained in the worktree (no symbolic link
 # on its way, physically under the worktree's root) and a file there; each
-# subject path must be at HEAD (its object id goes into subject_oids); the
-# doc's markers must render. An indeterminate run exits 2. Every finding
-# blocks. Re-promoting replaces promotion with the new digest. The worktree
-# is removed on every exit path (cleanup). Results: one row {claim,
-# status_from, status_to, green, red, verdict_sha256} for a promotion.
+# subject path must be at HEAD (its object id goes into subject_oids), and
+# with an observed_red must neither be nor hold the bound test's own file,
+# and is a safe repo path contained in its worktree whenever it is removed
+# or checked out there (an earlier subject's checkout may have put a
+# symbolic link on its way); the doc's markers must render. An
+# indeterminate run exits 2. Every finding blocks. Re-promoting replaces
+# promotion with the new digest. The worktrees are removed on every exit
+# path (cleanup). Results: one row {claim, status_from, status_to, green,
+# red, verdict_sha256} for a promotion.
 # Scratch: cl-promote.json (the claim's plan), cl-promote-* (the run calls,
-# the subject ids, the verdict, the sidecar and doc rewritten).
+# the subject paths and ids, the verdict, the sidecar and doc rewritten),
+# cl-swap.err (observed_red's checkouts).
 
 # _claims_refuse_dirty <verb>: the gate precondition (Design
 # clarifications): when `git status --porcelain --untracked-files=no` lists
@@ -8009,7 +8036,7 @@ _JQ_CLAIMS_PROMOTE_PLAN='def nes: type == "string" and length > 0;
      refuse: "\($m | length) claims have the id \($id): give each its own id first (V1)"}
    else $m[0] as $e | $e.claim as $c
    | ($c.nonvacuity | if type == "object" then . else {} end) as $nv
-   | $nv.mutant as $mu
+   | $nv.mutant as $mu | $nv.observed_red as $or
    | {unknown: false, sidecar: $e.sidecar, doc: $e.doc, status: $c.status, claim: $c,
       refuse: (
         if ($e.eligible | not) then "its doc \($e.doc | tojson) is missing or not a governing doc here: nothing to promote"
@@ -8023,14 +8050,16 @@ _JQ_CLAIMS_PROMOTE_PLAN='def nes: type == "string" and length > 0;
         then "status \($c.status | tojson) cannot be promoted (unbuilt, diverged, gated or built only)"
         elif ($c.subject | type) != "array" or (all($c.subject[]; nes and nonul) | not)
         then "subject \($c.subject | tojson) is not a list of repo paths"
-        elif $mu == null then
-          (if $nv.observed_red != null
-           then "nonvacuity.observed_red is not verified by this claims promote: give nonvacuity.mutant {file, find, replace}"
-           else "no nonvacuity proof: promote needs nonvacuity.mutant {file, find, replace}, a change under which the bound test fails by an assertion" end)
-        elif ($mu | type) != "object" or ($mu.file | nes | not) or ($mu.find | nes | not) or ($mu.replace | type) != "string"
+        elif $mu == null and $or == null
+        then "no nonvacuity proof: promote needs nonvacuity.mutant {file, find, replace} (a change under which the bound test fails by an assertion) or nonvacuity.observed_red <sha> (a commit whose subject files make it fail by one)"
+        elif $or != null and (($or | nes | not) or ($or | nonul | not))
+        then "nonvacuity.observed_red is not a commit: \($or | tojson) (give the sha of a commit)"
+        elif $mu != null and (($mu | type) != "object" or ($mu.file | nes | not) or ($mu.find | nes | not) or ($mu.replace | type) != "string")
         then "nonvacuity.mutant \($mu | tojson) is not {file, find, replace}"
-        elif [$mu.file, $mu.find, $mu.replace] | all(nonul) | not then "nonvacuity.mutant holds a NUL byte"
-        elif $mu.file | cl_mutant_is_test($c.test.file; $c.test.node) then $mu.file | cl_mutant_test_msg
+        elif $mu != null and ([$mu.file, $mu.find, $mu.replace] | all(nonul) | not) then "nonvacuity.mutant holds a NUL byte"
+        elif $mu != null and ($mu.file | cl_mutant_is_test($c.test.file; $c.test.node)) then $mu.file | cl_mutant_test_msg
+        elif $or != null and any($c.subject[]; cl_subject_holds_test($c.test.file; $c.test.node))
+        then first($c.subject[] | select(cl_subject_holds_test($c.test.file; $c.test.node))) | cl_subject_test_msg
         else null end)}
    end'
 
@@ -8053,17 +8082,90 @@ _claims_promote_run() {
   _CL_PR_REASON=$(_claims_jq promote-reason -r '.reason // ""' "$row") || _claims_propagate $?
 }
 
+# _claims_promote_clean <id> <doc> <runner> <node>: the node run unmodified
+# in the worktree $_CL_WT; 0 when it passes, else 1 with its finding ("not
+# green in a clean checkout") or indeterminate row added.
+_claims_promote_clean() {
+  local why
+  _claims_promote_run "$_CL_WT" "$3" "$4"
+  why=${_CL_PR_REASON:+ ($_CL_PR_REASON)}
+  case "$_CL_PR_OUTCOME" in
+    pass) return 0 ;;
+    indeterminate) _claims_indeterminate promote "$1" "${_CL_PR_REASON:-indeterminate}" ;;
+    *) _claims_finding promote "$1" "$2" "not green in a clean checkout: the bound test passes in the work tree but gives $_CL_PR_OUTCOME$why in a checkout of HEAD (it reads something HEAD does not hold: an untracked or ignored file?)" ;;
+  esac
+  return 1
+}
+
+# _claims_promote_red <id> <doc> <runner> <node> <proof> <under>: the node
+# run in $_CL_WT, the proof's change made; 0 when it fails by an assertion,
+# else 1 with its finding ("<proof> stays green", "<proof> error is not an
+# assertion failure") or indeterminate row added. <under> says what the run
+# saw ("under the mutant of <file>").
+_claims_promote_red() {
+  local why
+  _claims_promote_run "$_CL_WT" "$3" "$4"
+  why=${_CL_PR_REASON:+ ($_CL_PR_REASON)}
+  case "$_CL_PR_OUTCOME" in
+    assert-fail) return 0 ;;
+    indeterminate) _claims_indeterminate promote "$1" "${_CL_PR_REASON:-indeterminate}" ;;
+    pass) _claims_finding promote "$1" "$2" "$5 stays green: $6 the bound test still passes, so it does not check what the claim states" ;;
+    *) _claims_finding promote "$1" "$2" "$5 error is not an assertion failure: $6 the bound test gives $_CL_PR_OUTCOME$why" ;;
+  esac
+  return 1
+}
+
+# _claims_promote_swap <id> <doc> <sha> <subjects>: in the worktree $_CL_WT,
+# each subject path (<subjects>: NUL-separated) made as at commit <sha>:
+# removed (rm -rf), then checked out from <sha> when <sha> holds it (git
+# cat-file -e) — a path absent there is the test-first case, and stays
+# removed. Before anything touches a path it must be a safe repo path
+# contained in the worktree (_claims_contained_path, in a subshell that
+# takes the worktree for the work tree): no symbolic link on its way, which
+# an earlier path's checkout may have put there. Else 1, a finding added,
+# and nothing more touched. Pathspecs are literal; the host's hooks do not
+# run.
+_claims_promote_swap() {
+  local p rc err="$_SCRATCH/cl-swap.err" msg
+  while IFS= read -r -d '' p <&3; do
+    rc=0
+    if _claims_safe_relpath "$p"; then
+      # shellcheck disable=SC2030  # the subshell's own _CL_ROOT, on purpose
+      (cd "$_CL_WT" && _CL_ROOT=$_CL_WT && _CL_ROOT_PHYS="" && _claims_contained_path "$p") || rc=$?
+    else
+      rc=1
+    fi
+    case "$rc" in
+      0) ;;
+      1)
+        _claims_finding promote "$1" "$2" "subject $p is not a safe repo path (absolute, an empty, . or .. segment, or reached through a symbolic link) in the worktree as at observed_red: it is never removed or checked out"
+        return 1
+        ;;
+      *) _claims_propagate "$rc" ;;
+    esac
+    rm -rf -- "${_CL_WT:?}/$p" || _claims_die "cannot remove $p in the throwaway worktree (observed_red)"
+    if git cat-file -e "$3:$p" 2>/dev/null; then
+      if ! git -c core.hooksPath=/dev/null -C "$_CL_WT" --literal-pathspecs checkout -q "$3" -- "$p" \
+          >/dev/null 2>"$err"; then
+        msg=$(head -n 1 "$err" 2>/dev/null) || msg=""
+        _claims_die "git checkout of $p at $3 failed in the throwaway worktree${msg:+: $msg}"
+      fi
+    fi
+  done 3< "$4"
+  return 0
+}
+
 # _claims_promote <id>: promote one claim (see the section comment). A
 # refusal adds its finding (or indeterminate row) and returns; the caller
 # emits.
 # shellcheck disable=SC2016  # jq programs, not shell expansion
 _claims_promote() {
   local id="$1" plan="$_SCRATCH/cl-promote.json" z="$_SCRATCH/cl-promote.z"
-  local oids="$_SCRATCH/cl-promote-oids.jsonl"
+  local oids="$_SCRATCH/cl-promote-oids.jsonl" subj="$_SCRATCH/cl-promote-subjects.z"
   local vfile="$_SCRATCH/cl-promote-verdict.json" sc_old="$_SCRATCH/cl-promote-sidecar.old"
   local sc_new="$_SCRATCH/cl-promote-sidecar.new" doc_new="$_SCRATCH/cl-promote-doc.new"
-  local x refuse doc sidecar status claim runner="" node="" mfile="" mfind="" mrepl="" head p oid v rc
-  local green clean red why ss digest store row unsafe munsafe
+  local x refuse doc sidecar status claim runner="" node="" mfile="" mfind="" mrepl="" ored="" rsha=""
+  local head p oid v rc green why ss digest store row unsafe munsafe
   unsafe="(absolute, an empty, . or .. segment, or reached through a symbolic link)"
   _claims_jq promote-plan -c --arg id "$id" "$_JQ_CLAIMS_MUTANT_DEFS $_JQ_CLAIMS_PROMOTE_PLAN" \
     "$_SCRATCH/cl-claims.json" > "$plan"
@@ -8081,11 +8183,13 @@ _claims_promote() {
   claim=$(_claims_jq promote-claim -c '.claim' "$plan") || _claims_propagate $?
   # NUL-separated and read with read -d '': find and replace keep every byte,
   # trailing newlines included ($(…) would strip them).
+  # A proof the claim does not give reads as "" (mfile, ored): the plan
+  # refused an empty mutant.file or observed_red.
   _claims_jq promote-fields -j '.claim | .test.runner, .test.node, .nonvacuity.mutant.file,
-      .nonvacuity.mutant.find, .nonvacuity.mutant.replace | . + "\u0000"' "$plan" > "$z"
+      .nonvacuity.mutant.find, .nonvacuity.mutant.replace, .nonvacuity.observed_red | . + "\u0000"' "$plan" > "$z"
   { IFS= read -r -d '' runner && IFS= read -r -d '' node && IFS= read -r -d '' mfile \
-      && IFS= read -r -d '' mfind && IFS= read -r -d '' mrepl; } < "$z" \
-    || _claims_die "cannot read the claim's test and mutant (promote)"
+      && IFS= read -r -d '' mfind && IFS= read -r -d '' mrepl && IFS= read -r -d '' ored; } < "$z" \
+    || _claims_die "cannot read the claim's test and proofs (promote)"
   munsafe="mutant file $mfile is not a safe repo path $unsafe: name it by its path from the repo root"
 
   if [ "$status" = built ]; then
@@ -8095,13 +8199,24 @@ _claims_promote() {
       return 0
     fi
   fi
-  if ! _claims_safe_relpath "$mfile"; then
+  if [ -n "$mfile" ] && ! _claims_safe_relpath "$mfile"; then
     _claims_finding promote "$id" "$doc" "$munsafe"
     return 0
   fi
+  if [ -n "$ored" ]; then
+    # Never an option to git (a leading "-"); else it must peel to a commit.
+    case "$ored" in
+      -*) ;;
+      *) rsha=$(git rev-parse -q --verify "$ored^{commit}" 2>/dev/null) || rsha="" ;;
+    esac
+    if [ -z "$rsha" ]; then
+      _claims_finding promote "$id" "$doc" "nonvacuity.observed_red is not a commit: $ored (it must name a commit of this repository: fetch it, or correct the sha)"
+      return 0
+    fi
+  fi
   head=$(git rev-parse -q --verify 'HEAD^{commit}') || _claims_die "cannot resolve HEAD"
   : > "$oids"
-  _claims_jq promote-subjects -j '.claim.subject[] | . + "\u0000"' "$plan" > "$z"
+  _claims_jq promote-subjects -j '.claim.subject[] | . + "\u0000"' "$plan" > "$subj"
   while IFS= read -r -d '' p <&3; do
     if ! _claims_safe_relpath "$p"; then
       _claims_finding promote "$id" "$doc" "subject $p is not a safe repo path $unsafe"
@@ -8112,9 +8227,10 @@ _claims_promote() {
       return 0
     fi
     _claims_jq promote-oid -nc --arg p "$p" --arg o "$oid" '{($p): $o}' >> "$oids"
-  done 3< "$z"
+  done 3< "$subj"
 
   # 1. Green at HEAD.
+  # shellcheck disable=SC2031  # the main shell's _CL_ROOT (a worktree check's subshell sets its own)
   _claims_promote_run "$_CL_ROOT" "$runner" "$node"
   green=$_CL_PR_OUTCOME
   why=${_CL_PR_REASON:+ ($_CL_PR_REASON)}
@@ -8130,71 +8246,55 @@ _claims_promote() {
       ;;
   esac
 
-  # 2. Green again in a throwaway worktree at HEAD, unmutated — so the red
-  # run differs from a green run only by the mutation (the work tree may hold
-  # untracked files a test reads; the worktree does not) — then red under
-  # the mutant there. The mutant file is checked inside the worktree (a
-  # subshell that takes it for the work tree) before anything is written.
-  _claims_worktree_add "$head"
-  rc=0
-  (cd "$_CL_WT" && _CL_ROOT=$_CL_WT && _CL_ROOT_PHYS="" && _claims_contained_path "$mfile") || rc=$?
-  case "$rc" in
-    0) ;;
-    1)
-      _claims_finding promote "$id" "$doc" "$munsafe"
+  # 2. Each proof the claim gives, in a throwaway worktree of its own at
+  # HEAD (so one proof's change never reaches the other's runs): there the
+  # node runs unmodified first and must pass — so its red run differs from
+  # a green run only by the proof's change (the work tree may hold untracked
+  # files a test reads; the worktree does not) — then under the change, and
+  # must fail by an assertion. The mutant: its file is checked inside the
+  # worktree (a subshell that takes it for the work tree) before anything
+  # is written.
+  if [ -n "$mfile" ]; then
+    _claims_worktree_add "$head"
+    rc=0
+    (cd "$_CL_WT" && _CL_ROOT=$_CL_WT && _CL_ROOT_PHYS="" && _claims_contained_path "$mfile") || rc=$?
+    case "$rc" in
+      0) ;;
+      1)
+        _claims_finding promote "$id" "$doc" "$munsafe"
+        return 0
+        ;;
+      *) _claims_propagate "$rc" ;;
+    esac
+    if [ ! -f "$_CL_WT/$mfile" ]; then
+      _claims_finding promote "$id" "$doc" "mutant file $mfile is not a file at HEAD: nothing to mutate"
       return 0
-      ;;
-    *) _claims_propagate "$rc" ;;
-  esac
-  if [ ! -f "$_CL_WT/$mfile" ]; then
-    _claims_finding promote "$id" "$doc" "mutant file $mfile is not a file at HEAD: nothing to mutate"
-    return 0
+    fi
+    _claims_promote_clean "$id" "$doc" "$runner" "$node" || return 0
+    rc=0
+    _claims_mutate "$_CL_WT/$mfile" "$mfind" "$mrepl" || rc=$?
+    case "$rc" in
+      0) ;;
+      2)
+        _claims_finding promote "$id" "$doc" "mutant file is not UTF-8 text: $mfile (jq would rewrite its invalid bytes, so the mutant would change more than find → replace)"
+        return 0
+        ;;
+      *)
+        _claims_finding promote "$id" "$doc" "mutant: $_CL_MUTATE_ERR in $mfile (find must match exactly once)"
+        return 0
+        ;;
+    esac
+    _claims_promote_red "$id" "$doc" "$runner" "$node" mutant "under the mutant of $mfile" || return 0
   fi
-  _claims_promote_run "$_CL_WT" "$runner" "$node"
-  clean=$_CL_PR_OUTCOME
-  why=${_CL_PR_REASON:+ ($_CL_PR_REASON)}
-  case "$clean" in
-    pass) ;;
-    indeterminate)
-      _claims_indeterminate promote "$id" "${_CL_PR_REASON:-indeterminate}"
-      return 0
-      ;;
-    *)
-      _claims_finding promote "$id" "$doc" "not green in a clean checkout: the bound test passes in the work tree but gives $clean$why in a checkout of HEAD (it reads something HEAD does not hold: an untracked or ignored file?)"
-      return 0
-      ;;
-  esac
-  rc=0
-  _claims_mutate "$_CL_WT/$mfile" "$mfind" "$mrepl" || rc=$?
-  case "$rc" in
-    0) ;;
-    2)
-      _claims_finding promote "$id" "$doc" "mutant file is not UTF-8 text: $mfile (jq would rewrite its invalid bytes, so the mutant would change more than find → replace)"
-      return 0
-      ;;
-    *)
-      _claims_finding promote "$id" "$doc" "mutant: $_CL_MUTATE_ERR in $mfile (find must match exactly once)"
-      return 0
-      ;;
-  esac
-  _claims_promote_run "$_CL_WT" "$runner" "$node"
-  red=$_CL_PR_OUTCOME
-  why=${_CL_PR_REASON:+ ($_CL_PR_REASON)}
-  case "$red" in
-    assert-fail) ;;
-    indeterminate)
-      _claims_indeterminate promote "$id" "${_CL_PR_REASON:-indeterminate}"
-      return 0
-      ;;
-    pass)
-      _claims_finding promote "$id" "$doc" "mutant stays green: under the mutant of $mfile the bound test still passes, so it does not check what the claim states"
-      return 0
-      ;;
-    *)
-      _claims_finding promote "$id" "$doc" "mutant error is not an assertion failure: under the mutant of $mfile the bound test gives $red$why"
-      return 0
-      ;;
-  esac
+  # observed_red: the subject as at <sha> (_claims_promote_swap), the test
+  # still at HEAD.
+  if [ -n "$rsha" ]; then
+    _claims_worktree_add "$head"
+    _claims_promote_clean "$id" "$doc" "$runner" "$node" || return 0
+    _claims_promote_swap "$id" "$doc" "$rsha" "$subj" || return 0
+    _claims_promote_red "$id" "$doc" "$runner" "$node" observed_red "with the subject as at observed_red $ored" \
+      || return 0
+  fi
 
   # 3. The verdict, the sidecar and the doc, each prepared (and the render
   # checked) before the first write.
@@ -8266,7 +8366,7 @@ cmd_claims_validate() {
   _claims_emit validate
 }
 
-# promote <id> (see "promote, the mutant proof"). The base is never read, so
+# promote <id> (see "promote, the nonvacuity proofs"). The base is never read, so
 # an unresolvable one is not indeterminate here. --reverify is a stub until
 # it lands: it checks its arguments and reports an empty verdict.
 cmd_claims_promote() {

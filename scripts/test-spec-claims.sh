@@ -4568,17 +4568,19 @@ test_v3_mutant_is_test_file() {
 }
 
 test_promote_mutant_file_absent_or_observed_red() {
-  echo "test: promote — a mutant file absent at HEAD, an observed_red-only proof"
+  echo "test: promote — a mutant file absent at HEAD; an observed_red at HEAD itself proves nothing"
   promote_fixture
   jset "$SIDECAR" '.claims[0].nonvacuity.mutant.file = "src/auth/missing.py"'
   git commit -qam "a mutant file that does not exist"
   cl promote "$TTL_ID"
   assert_promote_finding "is not a file at HEAD" "mutant.file absent at HEAD"
   assert_contains "$(promote_messages)" "src/auth/missing.py" "…naming the path"
+  # The subject as at HEAD is the subject at HEAD: the red run passes.
   jset "$SIDECAR" ".claims[0].nonvacuity = {\"observed_red\": \"$(git rev-parse HEAD)\"}"
   git commit -qam "an observed_red proof"
   cl promote "$TTL_ID"
-  assert_promote_finding "observed_red" "an observed_red-only proof"
+  assert_promote_finding "observed_red stays green" "an observed_red-only proof naming HEAD's parent (the same subject)"
+  assert_eq '"unbuilt"' "$(claim_field "$TTL_ID" status)" "…the claim stays unbuilt"
   teardown
 }
 
@@ -4598,6 +4600,271 @@ test_promote_built_missing_verdict_repromotes() {
   assert_eq "$(git rev-parse HEAD)" "$(jq -r '.claims[0].promotion.at' "$SIDECAR")" "…promotion.at the current HEAD"
   assert_file_exists "$(claims_store)/$new.json" "…its verdict stored"
   assert_json_field "$CL_OUT" '.results[0].status_from' "built" "…status_from built"
+  teardown
+}
+
+# --- claims promote with an observed_red proof ---------------------------------
+#
+# observed_red_fixture <old-ttl>: the fixture claim bound to the stub (its
+# check passes while src/auth/token.py holds TTL_SECONDS = 900), the subject
+# committed at TTL_SECONDS = <old-ttl> (that commit in RED_SHA), then at 900
+# again with the proof nonvacuity.observed_red = RED_SHA, all committed.
+
+observed_red_fixture() {
+  claims_fixture
+  bind_test "$STUB_TEST"
+  set_ttl "$1"
+  git add -A && git commit -qm "the subject at TTL_SECONDS = $1"
+  RED_SHA=$(git rev-parse HEAD)
+  set_ttl 900
+  jset "$SIDECAR" ".claims[0].nonvacuity = {\"observed_red\": \"$RED_SHA\"}"
+  git add -A && git commit -qm "TTL_SECONDS = 900, with its observed_red proof"
+}
+
+# The stub's run calls in $STUB_LOG (their --root lines).
+stub_run_count() {
+  stub_roots | wc -l | tr -d ' '
+}
+
+test_promote_observed_red_reverified() {
+  echo "test: promote — observed_red: green at HEAD, an assertion failure on the subject as at <sha>"
+  observed_red_fixture 1800
+  local head digest store exp top
+  head=$(git rev-parse HEAD)
+  top=$(git rev-parse --show-toplevel)
+  export STUB_CAT=src/auth/token.py
+  cl promote "$TTL_ID"
+  unset STUB_CAT
+  assert_eq "0" "$CL_RC" "promote exits 0"
+  assert_eq '"built"' "$(claim_field "$TTL_ID" status)" "…the sidecar's status is built"
+  assert_eq "$head" "$(jq -r '.claims[0].promotion.at' "$SIDECAR")" "…promotion.at is HEAD"
+  digest=$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")
+  store=$(claims_store)
+  exp=$(harness_mktemp exp-verdict)
+  verdict_bytes "$exp"
+  assert_true "…the stored bytes are the jq -cS verdict object" cmp -s "$exp" "$store/$digest.json"
+  assert_json_field "$(cat "$store/$digest.json")" '.nonvacuity | tojson' "{\"observed_red\":\"$RED_SHA\"}" \
+    "…its nonvacuity the observed_red proof"
+  assert_json_field "$CL_OUT" '.results[0] | [.status_from, .status_to, .green, .red] | join(" ")' \
+    "unbuilt built pass assert-fail" "…one result row: unbuilt → built, green pass, red assert-fail"
+  assert_eq "$top" "$(stub_roots | sed -n 1p)" "…the green run under the work tree"
+  assert_true "…the clean-checkout run under another root" test "$(stub_roots | sed -n 2p)" != "$top"
+  assert_eq "$(stub_roots | sed -n 2p)" "$(stub_roots | sed -n 3p)" "…the red run under that same worktree"
+  assert_eq "3" "$(stub_run_count)" "…three run calls in all"
+  printf 'TTL_SECONDS = 900\nTTL_SECONDS = 900\nTTL_SECONDS = 1800\n' > "$exp"
+  assert_true "…the adapter saw the subject at HEAD twice (work tree, clean checkout), then as at <sha>" \
+    cmp -s "$exp" "$STUB_LOG.cat"
+  assert_eq "TTL_SECONDS = 900" "$(cat src/auth/token.py)" "…the work tree's subject is untouched"
+  assert_eq "1" "$(wt_count)" "…no worktree left"
+  cl validate --all
+  assert_eq "0" "$CL_RC" "validate --all after the promote exits 0"
+  teardown
+}
+
+test_promote_observed_red_passes_refused() {
+  echo "test: promote — observed_red: a <sha> whose subject already passes the test is refused"
+  observed_red_fixture 900
+  local before
+  before=$(hash_file "$SIDECAR")
+  cl promote "$TTL_ID"
+  assert_promote_finding "observed_red stays green" "the subject at <sha> already held TTL_SECONDS = 900"
+  assert_contains "$(promote_messages)" "$RED_SHA" "…naming <sha>"
+  assert_eq "$before" "$(hash_file "$SIDECAR")" "…the sidecar unchanged"
+  assert_true "…no verdict stored" test ! -e "$(claims_store)"
+  assert_eq "3" "$(stub_run_count)" "…after the green, clean-checkout and red runs"
+  assert_eq "1" "$(wt_count)" "…no worktree left"
+  teardown
+  # An error on the old subject is not an assertion failure.
+  observed_red_fixture 900
+  printf 'STUB_ERROR\n' > src/auth/token.py
+  git commit -qam "a subject the test errors on"
+  RED_SHA=$(git rev-parse HEAD)
+  set_ttl 900
+  jset "$SIDECAR" ".claims[0].nonvacuity.observed_red = \"$RED_SHA\""
+  git commit -qam "observed_red: the erroring subject"
+  cl promote "$TTL_ID"
+  assert_promote_finding "observed_red error is not an assertion failure" "the old subject makes the test error"
+  assert_eq '"unbuilt"' "$(claim_field "$TTL_ID" status)" "…the claim stays unbuilt"
+  teardown
+}
+
+test_promote_observed_red_bad_sha() {
+  echo "test: promote — observed_red must name a commit"
+  observed_red_fixture 1800
+  local bad
+  for bad in 0123abc nope "$(git rev-parse HEAD:src/auth/token.py)" "$(git rev-parse 'HEAD^{tree}')" --all -q; do
+    jset "$SIDECAR" ".claims[0].nonvacuity.observed_red = $(jq -n --arg b "$bad" '$b')"
+    git commit -qam "observed_red: $bad"
+    cl promote "$TTL_ID"
+    assert_promote_finding "observed_red is not a commit" "observed_red $bad"
+  done
+  jset "$SIDECAR" '.claims[0].nonvacuity.observed_red = 42'
+  git commit -qam "observed_red: a number"
+  cl promote "$TTL_ID"
+  assert_promote_finding "observed_red is not a commit" "observed_red 42 (not a string)"
+  assert_eq "0" "$(stub_run_count)" "…refused before any run"
+  assert_eq '"unbuilt"' "$(claim_field "$TTL_ID" status)" "…the claim stays unbuilt"
+  teardown
+}
+
+test_promote_observed_red_subject_absent_at_sha() {
+  echo "test: promote — observed_red: a subject path absent at <sha> is removed in the worktree (test-first)"
+  claims_fixture
+  bind_test "$STUB_TEST"
+  set_ttl 1800
+  git add -A && git commit -qm "TTL_SECONDS = 1800, no helper yet"
+  RED_SHA=$(git rev-parse HEAD)
+  set_ttl 900
+  printf 'def helper():\n    return 1\n' > src/auth/helper.py
+  jset "$SIDECAR" ".claims[0].subject = [\"src/auth/token.py\", \"src/auth/helper.py\"]
+    | .claims[0].nonvacuity = {\"observed_red\": \"$RED_SHA\"}"
+  git add -A && git commit -qm "TTL_SECONDS = 900 and a helper, with the observed_red proof"
+  local exp digest
+  export STUB_CAT=src/auth/helper.py
+  cl promote "$TTL_ID"
+  unset STUB_CAT
+  assert_eq "0" "$CL_RC" "promote exits 0 (the red run gives assert-fail)"
+  assert_eq '"built"' "$(claim_field "$TTL_ID" status)" "…promoted: the sidecar's status is built"
+  exp=$(harness_mktemp exp-cat)
+  printf 'def helper():\n    return 1\ndef helper():\n    return 1\n' > "$exp"
+  assert_true "…the helper in the work tree and the clean checkout, gone from the red run (removed, not checked out)" \
+    cmp -s "$exp" "$STUB_LOG.cat"
+  digest=$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")
+  assert_json_field "$(cat "$(claims_store)/$digest.json")" '.subject_oids | keys | join(" ")' \
+    "src/auth/helper.py src/auth/token.py" "…subject_oids holds both paths at HEAD"
+  assert_file_exists src/auth/helper.py "…the work tree's helper untouched"
+  assert_eq "1" "$(wt_count)" "…the worktree is gone"
+  assert_eq "" "$(ls -A .git/worktrees 2>/dev/null)" "…and no worktree metadata is left"
+  teardown
+}
+
+test_promote_observed_red_subject_unsafe() {
+  echo "test: promote — observed_red never removes or checks out a subject path outside the worktree"
+  observed_red_fixture 1800
+  local outside before
+  outside=$(harness_mktemp_d outside)
+  printf 'keep\n' > "$outside/helper.py"
+  before=$(hash_file "$outside/helper.py")
+  jset "$SIDECAR" '.claims[0].subject += ["../outside/helper.py"]'
+  git commit -qam "a subject with a .. segment"
+  cl promote "$TTL_ID"
+  assert_promote_finding "not a safe repo path" "a subject with a .. segment"
+  assert_eq "0" "$(stub_run_count)" "…refused before any run"
+  assert_eq "$before" "$(hash_file "$outside/helper.py")" "…the file outside untouched"
+  teardown
+  # At <sha> src/lib is a symbolic link out of the tree; at HEAD a directory.
+  # Checking the subject src/lib out as at <sha> puts the link in the
+  # worktree, so src/lib/helper.py (absent at <sha>) would be removed
+  # through it: the containment check refuses it first.
+  claims_fixture
+  bind_test "$STUB_TEST"
+  outside=$(harness_mktemp_d outside)
+  printf 'keep\n' > "$outside/helper.py"
+  set_ttl 1800
+  ln -s "$outside" src/lib
+  git add -A && git commit -qm "TTL_SECONDS = 1800; src/lib a symbolic link out of the tree"
+  RED_SHA=$(git rev-parse HEAD)
+  set_ttl 900
+  git rm -q src/lib
+  mkdir -p src/lib
+  printf 'def helper():\n    return 1\n' > src/lib/helper.py
+  jset "$SIDECAR" ".claims[0].subject = [\"src/auth/token.py\", \"src/lib\", \"src/lib/helper.py\"]
+    | .claims[0].nonvacuity = {\"observed_red\": \"$RED_SHA\"}"
+  git add -A && git commit -qm "src/lib a directory, with the observed_red proof"
+  before=$(hash_file "$outside/helper.py")
+  cl promote "$TTL_ID"
+  assert_promote_finding "subject src/lib/helper.py is not a safe repo path" "a subject reached through a symbolic link in the worktree"
+  assert_file_exists "$outside/helper.py" "…the file the link reaches is not removed"
+  assert_eq "$before" "$(hash_file "$outside/helper.py")" "…nor changed"
+  assert_eq "helper.py" "$(ls -A "$outside")" "…and nothing is added beside it"
+  assert_eq "2" "$(stub_run_count)" "…no red run"
+  assert_eq '"unbuilt"' "$(claim_field "$TTL_ID" status)" "…the claim stays unbuilt"
+  assert_eq "1" "$(wt_count)" "…no worktree left"
+  teardown
+}
+
+test_promote_observed_red_subject_is_test_file() {
+  echo "test: promote — observed_red: a subject that is (or holds) the bound test's own file is refused"
+  observed_red_fixture 1800
+  jset "$SIDECAR" '.claims[0].subject += ["tests/test_token.py"]'
+  git commit -qam "the node's file as a subject"
+  cl promote "$TTL_ID"
+  assert_promote_finding "the bound test's own file" "subject = the node's file"
+  jset "$SIDECAR" '.claims[0].subject = ["src/auth/token.py", "tests"]'
+  git commit -qam "the test directory as a subject"
+  cl promote "$TTL_ID"
+  assert_promote_finding "the bound test's own file" "subject = a directory holding the node's file"
+  jset "$SIDECAR" '.claims[0].test.file = "checks/ttl_check.py" | .claims[0].subject = ["src/auth/token.py", "checks/ttl_check.py"]'
+  git commit -qam "test.file as a subject"
+  cl promote "$TTL_ID"
+  assert_promote_finding "the bound test's own file" "subject = test.file"
+  # A sibling whose name only starts like the test's directory is no test file.
+  jset "$SIDECAR" '.claims[0].subject = ["src/auth/token.py", "check"]'
+  git commit -qam "a subject named like the test directory's prefix"
+  cl promote "$TTL_ID"
+  assert_promote_finding "subject not at HEAD: check" "subject = check (a name prefix, not a directory holding test.file)"
+  assert_eq "0" "$(stub_run_count)" "…refused before any run"
+  teardown
+}
+
+test_promote_observed_red_and_mutant_both_verified() {
+  echo "test: promote — a nonvacuity with a mutant and an observed_red: both are verified, apart"
+  observed_red_fixture 3600
+  local top exp
+  top=$(git rev-parse --show-toplevel)
+  jset "$SIDECAR" ".claims[0].nonvacuity.mutant = $(jq -c '.mutant' <<<"$_CL_MUTANT")"
+  git commit -qam "both proofs"
+  export STUB_CAT=src/auth/token.py
+  cl promote "$TTL_ID"
+  unset STUB_CAT
+  assert_eq "0" "$CL_RC" "promote exits 0"
+  assert_eq '"built"' "$(claim_field "$TTL_ID" status)" "…built"
+  assert_eq "5" "$(stub_run_count)" "…five run calls: green, then clean and red for each proof"
+  assert_eq "$top" "$(stub_roots | sed -n 1p)" "…the green run under the work tree"
+  assert_eq "$(stub_roots | sed -n 2p)" "$(stub_roots | sed -n 3p)" "…the mutant's clean and red runs share a worktree"
+  assert_eq "$(stub_roots | sed -n 4p)" "$(stub_roots | sed -n 5p)" "…observed_red's clean and red runs share a worktree"
+  assert_true "…a fresh one, not the mutant's" test "$(stub_roots | sed -n 2p)" != "$(stub_roots | sed -n 4p)"
+  exp=$(harness_mktemp exp-cat)
+  printf 'TTL_SECONDS = 900\nTTL_SECONDS = 900\nTTL_SECONDS = 1800\nTTL_SECONDS = 900\nTTL_SECONDS = 3600\n' \
+    > "$exp"
+  assert_true "…the adapter saw 900, 900, the mutant (1800), 900 again (no mutation carried over), the old subject (3600)" \
+    cmp -s "$exp" "$STUB_LOG.cat"
+  assert_json_field "$(cat "$(claims_store)/$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")".json)" \
+    '.nonvacuity | keys | join(" ")' "mutant observed_red" "…the verdict records both proofs"
+  assert_eq "1" "$(wt_count)" "…no worktree left"
+  teardown
+  # Each must hold: a good mutant does not carry an observed_red that stays green…
+  observed_red_fixture 900
+  jset "$SIDECAR" ".claims[0].nonvacuity.mutant = $(jq -c '.mutant' <<<"$_CL_MUTANT")"
+  git commit -qam "a good mutant, an observed_red that stays green"
+  cl promote "$TTL_ID"
+  assert_promote_finding "observed_red stays green" "the mutant holds, observed_red does not"
+  assert_eq '"unbuilt"' "$(claim_field "$TTL_ID" status)" "…the claim stays unbuilt"
+  teardown
+  # …nor a good observed_red a mutant that stays green.
+  observed_red_fixture 1800
+  jset "$SIDECAR" ".claims[0].nonvacuity.mutant = {file: \"src/auth/token.py\", find: \"TTL_SECONDS = 900\", replace: \"TTL_SECONDS = 900 \"}"
+  git commit -qam "a mutant that stays green, a good observed_red"
+  cl promote "$TTL_ID"
+  assert_promote_finding "mutant stays green" "observed_red holds, the mutant does not"
+  assert_eq '"unbuilt"' "$(claim_field "$TTL_ID" status)" "…the claim stays unbuilt"
+  teardown
+}
+
+test_v3_observed_red_subject_is_test_file() {
+  echo "test: V3 — a built claim's observed_red: no subject is (or holds) its bound test's own file"
+  claims_fixture
+  stub_runner
+  run_built
+  jset "$SIDECAR" '.claims[0].nonvacuity = {"observed_red": "0123abc"}'
+  cl validate --all
+  assert_v3_ok "precondition: observed_red, the subject the code under test"
+  jset "$SIDECAR" '.claims[0].subject += ["tests"]'
+  cl validate --all
+  assert_v3 "the bound test's own file" "a subject directory holding the node's file"
+  jset "$SIDECAR" '.claims[0].nonvacuity = {"mutant": {"file": "src/auth/token.py", "find": "TTL_SECONDS = 900", "replace": "TTL_SECONDS = 1800"}}'
+  cl validate --all
+  assert_eq "0" "$(v3_messages | grep -c "the bound test's own file" || true)" "…a mutant proof swaps no subject: no such finding"
   teardown
 }
 
@@ -4839,6 +5106,16 @@ run_tests() {
   test_promote_twice_with_commit_between
   test_promote_built_with_ok_verdict_refused
   test_repromote_after_doc_stale
+
+  # --- Task 12: observed_red proofs ---
+  test_promote_observed_red_reverified
+  test_promote_observed_red_passes_refused
+  test_promote_observed_red_bad_sha
+  test_promote_observed_red_subject_absent_at_sha
+  test_promote_observed_red_subject_unsafe
+  test_promote_observed_red_subject_is_test_file
+  test_promote_observed_red_and_mutant_both_verified
+  test_v3_observed_red_subject_is_test_file
 
   print_summary
 }
