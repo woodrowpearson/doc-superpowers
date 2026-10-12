@@ -2720,12 +2720,15 @@ test_lg_alloc_seeds_from_base() {
   lg_item docs/issues/c.md "key: y-2" "ledger: y" "status: Open" "summary: C" "aliases: [y-7]"
   git add -A && git commit -qm items && git push -q origin main
   cd "$here"
+  local stale
+  stale=$(git rev-parse refs/remotes/origin/main)
   # Not on the base: an uncommitted item with a higher key.
   lg_item docs/issues/d.md "key: x-9" "ledger: x" "status: Open" "summary: D"
   assert_eq "absent" "$(lg_remote_counters)" "no counter ref yet"
   lg_call _lg_counter_read
   assert_eq "0" "$LG_RC" "_lg_counter_read exits 0"
   assert_json_field "$LG_OUT" '[.x, .y] | tojson' '[6,8]' "seeded: x 6, y 8 (an alias counts: keys are never reused)"
+  assert_eq "$stale" "$(git rev-parse refs/remotes/origin/main)" "the base was fetched into a private ref: origin/main not moved"
   lg_call _lg_alloc x 1 docs/issues/n.md
   assert_eq "0|x	x-6" "$LG_RC|$LG_OUT" "first key x-6"
   assert_eq '{"x":7,"y":8}' "$(lg_remote_counters)" "the counter ref holds every seeded ledger"
@@ -2944,6 +2947,13 @@ docs/ledger/finalized.json" "$(git show --name-only --format= HEAD | sort)" "it 
   lg finalize
   assert_eq "0" "$LG_RC" "a second finalize: nothing to do"
   assert_eq "$before" "$(git rev-parse HEAD~1)" "…no commit"
+  # A reference to a finalized key, merged later: rewritten in its own commit.
+  lg_item docs/issues/late.md "key: x-1" "ledger: x" "status: Open" "summary: Late" "relates: [sibling:x-~$h1]"
+  git rm -q docs/issues/u.md && git add -A && git commit -qm "late reference"
+  lg finalize
+  assert_eq "0" "$LG_RC" "stale references only"
+  assert_eq "ledger: rewrite references to finalized keys" "$(git log -1 --format=%s)" "…committed as a reference rewrite"
+  assert_contains "$(cat docs/issues/late.md)" "relates: [sibling:x-4]" "late.md rewritten"
   # Not on the base: refused.
   git checkout -q -b side
   git commit -q --allow-empty -m side
@@ -3114,6 +3124,47 @@ test_lg_cas_finalize_and_provisional_in_range() {
   teardown
 }
 
+test_lg_finalize_refuses_reused_provisional_key() {
+  echo "test: a provisional key finalized.json records for another item's key is refused, not reused"
+  lg_keys_fixture
+  lg_item docs/issues/a.md "key: x-3" "ledger: x" "status: Open" "summary: Old item"
+  lg_item docs/issues/r.md "key: y-1" "ledger: y" "status: Open" "summary: Refers" "relates: [sibling:x-~abcd]"
+  printf '{\n  "x-~abcd": "x-3"\n}\n' > docs/ledger/finalized.json
+  git add -A && git commit -qm items && git push -q origin main && git fetch -q origin
+  lg_item docs/issues/n.md "key: x-~abcd" "ledger: x" "status: Open" "summary: New item, same provisional key"
+  local hn hr hf
+  hn=$(hash_file docs/issues/n.md)
+  hr=$(hash_file docs/issues/r.md)
+  hf=$(hash_file docs/ledger/finalized.json)
+  lg finalize
+  assert_eq "2" "$LG_RC" "refused (2)"
+  assert_contains "$LG_ERR" "ledger assign docs/issues/n.md" "…suggesting ledger assign"
+  assert_eq "$hn|$hr|$hf" "$(hash_file docs/issues/n.md)|$(hash_file docs/issues/r.md)|$(hash_file docs/ledger/finalized.json)" \
+    "nothing written"
+  assert_eq "absent" "$(lg_remote_counters)" "nothing allocated"
+  lg new --finalize --file docs/issues/n.md
+  assert_eq "2" "$LG_RC" "new --finalize: refused too"
+  lg assign docs/issues/n.md x
+  assert_eq "0" "$LG_RC" "ledger assign gives it a new key"
+  assert_eq "x-4  docs/issues/n.md  (was x-~abcd)" "$LG_OUT" "x-4"
+  assert_contains "$LG_ERR" "another item" "…with a warning"
+  assert_eq "$hr|$hf" "$(hash_file docs/issues/r.md)|$(hash_file docs/ledger/finalized.json)" \
+    "the record and the old item's references are left alone"
+  assert_not_contains "$(cat docs/issues/n.md)" "aliases" "no provisional alias"
+  # A record whose key no item carries is a finalize cut short: assign to
+  # another ledger waits for it (nothing allocated); the same ledger finishes it.
+  lg_item docs/issues/e.md "key: x-~eeee" "ledger: x" "status: Open" "summary: Cut short"
+  jq -S '. + {"x-~eeee": "x-9"}' docs/ledger/finalized.json > docs/ledger/f.tmp && mv docs/ledger/f.tmp docs/ledger/finalized.json
+  lg assign docs/issues/e.md y
+  assert_eq "2" "$LG_RC" "assign to another ledger: refused (2)"
+  assert_contains "$LG_ERR" "cut short" "…saying why"
+  assert_eq '{"x":5,"y":2}' "$(lg_remote_counters)" "…before allocating (the counters as the first assign left them)"
+  lg assign docs/issues/e.md x
+  assert_eq "0" "$LG_RC" "assign to its own ledger completes the finalize"
+  assert_contains "$(cat docs/issues/e.md)" "key: x-9" "…with the recorded key"
+  teardown
+}
+
 test_lg_finalize_crash_safe_and_resumable() {
   echo "test: finalize checks every file before writing; a run cut short completes with the same keys"
   lg_keys_fixture
@@ -3281,6 +3332,7 @@ run_tests() {
   test_lg_counter_push_no_verify
   test_lg_cas_finalize_and_provisional_in_range
   test_lg_finalize_crash_safe_and_resumable
+  test_lg_finalize_refuses_reused_provisional_key
 
   print_summary
 }

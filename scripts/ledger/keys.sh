@@ -38,8 +38,8 @@
 # retries — at most 8 times, 0.1–0.6 s of random jitter apart, re-reading
 # each time — then gives up (rc 2; never a provisional key: the remote was
 # reachable). A ledger absent from the counters starts after the highest key
-# number (keys and aliases) of the items at config base (fetched first when it
-# is a remote-tracking ref). Every counter commit
+# number (keys and aliases) of the items at config base (fetched first, into
+# a private ref, when it is a remote-tracking ref). Every counter commit
 # carries a random nonce: two allocators writing the same numbers on the
 # same parent in the same second must not produce one commit id — the
 # second push would read "up to date" (exit 0) and both would take the keys.
@@ -62,8 +62,9 @@
 # spurious "could not allocate" — run it again). Never a duplicate key: the
 # remote's ref update still decides.
 #
-# Reads (the counter ref, the base when seeding) go to the remote's push URL
-# (remote.<name>.pushurl, else url): the repository the CAS writes to.
+# The counter ref is read from the remote's push URL (remote.<name>.pushurl,
+# else url): the repository the CAS writes to. Seeding reads the base fetched
+# from its remote's url into a private ref (refs/remotes/ are never moved).
 #
 # keys.mode "merge" (fork-and-PR repositories): allocation never touches the
 # network — every key is provisional — and `ledger finalize`, run on the
@@ -71,6 +72,8 @@
 # the rewrite ("ledger: finalize N keys").
 
 _LG_COUNTERS_REMOTE=refs/doc-superpowers/ledger/counters-remote
+_LG_BASE_REMOTE=refs/doc-superpowers/ledger/base-remote
+_LG_K_BASE_C=""      # the base commit seeding reads (_lg_k_fetch_base)
 _LG_ALLOC_RETRIES=8
 _LG_K_MODE=""
 _LG_K_REMOTE=""
@@ -255,11 +258,11 @@ _lg_k_maxes() {
 
 # _lg_k_base_max <out>: _lg_k_maxes over the items at config base.
 _lg_k_base_max() {
-  local out="$1" d commit
+  local out="$1" d commit=$_LG_K_BASE_C
   case "$_LG_K_BASE" in
     -*|'') _lg_die "cannot seed the key counters: config base is '$_LG_K_BASE'" ;;
   esac
-  commit=$(git rev-parse -q --verify "$_LG_K_BASE^{commit}" 2>/dev/null) \
+  [ -n "$commit" ] || commit=$(git rev-parse -q --verify "$_LG_K_BASE^{commit}" 2>/dev/null) \
     || _lg_die "cannot seed the key counters: the base '$_LG_K_BASE' (config base) is not a commit here (fetch it first)"
   d=$(mktemp -d "$_SCRATCH/lg-kbase.XXXXXX") || _lg_die "mktemp failed"
   _lg_item_paths "$commit" "$d/paths.z"
@@ -316,11 +319,15 @@ _lg_k_url() {
 }
 
 # _lg_k_fetch_base: when config base is a remote-tracking ref
-# (refs/remotes/<remote>/<branch> of a configured remote), fetch it from
-# that remote's push URL first, so seeding never reads a stale copy. rc 0;
-# 4 when it cannot be fetched (_LG_CTR_ERR says why).
+# (refs/remotes/<remote>/<branch> of a configured remote), fetch that branch
+# from the remote's url into a private ref ($_LG_BASE_REMOTE — the user's
+# refs/remotes/ are never moved) and seed from it, so seeding never reads a
+# stale copy; _LG_K_BASE_C is the commit to read ("" = config base as it
+# is). rc 0; 1 when the private ref is locked by a concurrent run (retry);
+# 4 when the branch cannot be fetched (_LG_CTR_ERR says why).
 _lg_k_fetch_base() {
-  local full rest rem best="" d
+  local full rest rem best="" d url err
+  _LG_K_BASE_C=""
   full=$(git rev-parse -q --verify --symbolic-full-name "$_LG_K_BASE" 2>/dev/null) || return 0
   case "$full" in refs/remotes/?*) ;; *) return 0 ;; esac
   rest=${full#refs/remotes/}
@@ -330,13 +337,19 @@ _lg_k_fetch_base() {
     esac
   done
   [ -n "$best" ] || return 0
-  _lg_k_url "$best"
+  url=$(git config --get "remote.$best.url" 2>/dev/null) || url=$best
   d=$(mktemp "$_SCRATCH/lg-kfb.XXXXXX") || _lg_die "mktemp failed"
-  if LC_ALL=C git fetch --quiet --no-tags --no-recurse-submodules "$_LG_KU" \
-      "+refs/heads/${rest#"$best"/}:$full" < /dev/null > /dev/null 2> "$d"; then
+  if LC_ALL=C git fetch --quiet --no-tags --no-recurse-submodules "$url" \
+      "+refs/heads/${rest#"$best"/}:$_LG_BASE_REMOTE" < /dev/null > /dev/null 2> "$d"; then
+    _LG_K_BASE_C=$(git rev-parse -q --verify "$_LG_BASE_REMOTE^{commit}" 2>/dev/null) \
+      || _lg_die "the fetched base $_LG_BASE_REMOTE is not a commit"
     return 0
   fi
-  _LG_CTR_ERR="cannot fetch the base $_LG_K_BASE: $(grep -v '^[[:space:]]*$' "$d" | head -n 2 | tr '\n' ' ')"
+  err=$(cat "$d" 2>/dev/null) || err=""
+  case "$err" in
+    *"cannot lock ref"*|*".lock"*) return 1 ;;
+  esac
+  _LG_CTR_ERR="cannot fetch the base $_LG_K_BASE: $(printf '%s\n' "$err" | grep -v '^[[:space:]]*$' | head -n 2 | tr '\n' ' ')"
   return 4
 }
 
@@ -793,6 +806,27 @@ _lg_k_finalized_add() {
   _replace_file "$_TMP" "$f"
 }
 
+# _lg_k_item_carrying <index> <key>: some item's key is <key> (any case).
+_lg_k_item_carrying() {
+  jq -e --arg k "$2" '($k | ascii_downcase) as $l | any(.items[]; ((.key // "") | ascii_downcase) == $l)' "$1" \
+    > /dev/null 2>&1
+}
+
+# _lg_k_collisions <index> <finalized-map-file> <out>: one message line per
+# item whose key is a provisional key the map records as finalized to a key
+# some item carries (see _lg_k_finalize).
+_lg_k_collisions() {
+  jq -r --slurpfile f0 "$2" "$_LG_JQ_KEYS_DEFS"'
+    ($f0[0]) as $F
+    | [.items[] | {p: .path, k: ((.key // "") | ascii_downcase)}] as $I
+    | $I[] | . as $x | ($x.k | lg_k_prov) as $pk
+    | select($pk != null and ($F[$pk] | type) == "string")
+    | ($F[$pk] | ascii_downcase) as $real
+    | [$I[] | select(.k == $real) | .p] | select(length > 0)
+    | "the provisional key \($pk) on \($x.p) was already finalized as \($F[$pk]) (docs/ledger/finalized.json), which \(join(", ")) carries: it now names a different item (a reused path, or two paths whose 4 hex digits collide) — give \($x.p) a new key with: ledger assign \($x.p) <ledger>"' \
+    "$1" > "$3" || _lg_die "jq failed (finalized collisions)"
+}
+
 # _lg_k_merge_on_base <rc>: keys.mode merge gives real keys only on the base:
 # HEAD must be config base's commit, else exit <rc> (3: the finalize verb's
 # usage error; 2: new --finalize could not run).
@@ -867,6 +901,16 @@ _lg_k_finalize() {
   if grep -q '^dup	' "$d/todo"; then
     _lg_die "provisional key $(grep '^dup	' "$d/todo" | head -n 1 | cut -f2) is on several items ($(grep '^dup	' "$d/todo" | head -n 1 | cut -f3)): give each its own key first (ledger assign)"
   fi
+  # A provisional key finalized.json records whose key another item carries:
+  # the provisional key now names a different item (its path was reused, or
+  # two paths' 4 hex digits collide). Reusing the record would give a second
+  # item that key, and redirecting references would point them at the old
+  # item: refuse, before anything is allocated or written. (A genuine resume
+  # — a run cut short after recording — leaves no item with the key.)
+  _lg_k_collisions "$ix" "$d/f0.json" "$d/coll"
+  if [ -s "$d/coll" ]; then
+    _lg_die "$(head -n 1 "$d/coll")"
+  fi
   n=$(grep -c . "$d/todo" || true)
   # The provisional keys whose references go: this run's and every one
   # finalized.json records. Check every file they touch before anything else.
@@ -923,7 +967,8 @@ _lg_k_finalize() {
   if [ "$commit_it" = 1 ]; then
     GIT_LITERAL_PATHSPECS=1 git add -- "${files[@]}" > "$d/commit.out" 2>&1 \
       || _lg_die "git add failed: $(head -n 3 "$d/commit.out")"
-    GIT_LITERAL_PATHSPECS=1 git commit -q -m "ledger: finalize $n keys" -- "${files[@]}" > "$d/commit.out" 2>&1 \
+    if [ "$n" = 0 ]; then m="ledger: rewrite references to finalized keys"; else m="ledger: finalize $n keys"; fi
+    GIT_LITERAL_PATHSPECS=1 git commit -q -m "$m" -- "${files[@]}" > "$d/commit.out" 2>&1 \
       || _lg_die "git commit failed: $(head -n 3 "$d/commit.out")"
     commit="\"$(git rev-parse HEAD)\""
   fi
@@ -1045,7 +1090,7 @@ cmd_ledger_new() {
 
 # shellcheck disable=SC2154  # _ARGS is set by _parse_args
 cmd_ledger_assign() {
-  local ref L ix s out key old oldl p prov=false
+  local ref L ix s out key old oldl p rec_key coll prov=false
   _lg_init assign
   [ "${#_ARGS[@]}" = 2 ] || _lg_usage "give an item and a ledger: ledger assign <item> <ledger>"
   ref=${_ARGS[0]}
@@ -1078,7 +1123,23 @@ cmd_ledger_assign() {
     *-~*) oldl=${old%-~*} ;;
     *) oldl=${old%-*} ;;
   esac
-  if [ -n "$old" ] && [ "$oldl" = "$L" ]; then
+  # finalized.json already recording a provisional old key — checked before
+  # a number is allocated. Its key carried by another item: the provisional
+  # key names a different item now (a reused path or a 4-hex collision), so
+  # the item gets a new key and nothing else changes (the record and the
+  # references stay with the old item). Its key carried by no item: a
+  # finalize was cut short — finalize completes it (same ledger), else
+  # refuse.
+  rec_key=""
+  coll=0
+  case "$old" in
+    *-~*)
+      rec_key=$(jq -r --arg o "$old" '(.finalized // {}) | if type == "object" then (.[$o | ascii_downcase] // "") else "" end
+          | if type == "string" then . else "" end' "$ix") || _lg_die "jq failed (finalized)"
+      if [ -n "$rec_key" ] && _lg_k_item_carrying "$ix" "$rec_key"; then coll=1; fi
+      ;;
+  esac
+  if [ -n "$old" ] && [ "$oldl" = "$L" ] && [ "$coll" = 0 ]; then
     case "$old" in
       *-~*)
         # Already in the ledger with a provisional key: finalize it.
@@ -1096,9 +1157,13 @@ cmd_ledger_assign() {
     esac
     _lg_k_emit_lines "$s/lines" "$s/payload"
   fi
+  if [ -n "$rec_key" ] && [ "$coll" = 0 ]; then
+    _lg_die "$old was already finalized as $rec_key (docs/ledger/finalized.json) but no item carries $rec_key: a finalize was cut short — run ledger finalize first, then assign"
+  fi
+  [ "$coll" = 1 ] || rec_key=""
   _lg_k_names "$_LG_RES"
-  case "$old" in
-    *-~*)
+  case "$old:$rec_key" in
+    *-~*:)
       # A provisional key is never kept as an alias: its references are
       # rewritten to the new key (checked first: a rejected field dies
       # before anything is allocated).
@@ -1112,8 +1177,15 @@ cmd_ledger_assign() {
   out=$(_lg_alloc "$L" 1 "$_LG_RES") || exit "$?"
   key=${out#*$'\t'}
   case "$key" in *-~*) prov=true ;; esac
-  case "$old" in
-    *-~*)
+  case "$old:$rec_key" in
+    *-~*:?*)
+      echo "ledger: warning: $old was already finalized as $rec_key for another item — $_LG_RES gets $key; references to $old stay with $rec_key" >&2
+      _lg_fm_ops_reset
+      _lg_fm_op set "$_LG_KN_KEY" "$key"
+      _lg_fm_op set "$_LG_KN_LEDGER" "$L"
+      _lg_fm_ops_apply "$_LG_RES"
+      ;;
+    *-~*:)
       jq -nc --arg o "$old" --arg k "$key" '{($o | ascii_downcase): $k}' > "$s/map.json" || _lg_die "jq failed (map)"
       # finalized.json first (only a real key finalizes), then the item, then
       # the references.
