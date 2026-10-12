@@ -93,7 +93,7 @@ Every key has a default (shown); a minimal config is `{}`. `fields` values are a
       "governing": ["docs/specs/SPEC-PAY-003-checkout.md"] } ] }
 ```
 
-- `id`: `[a-z0-9-]{1,16}`, unique. `kind`: `service` | `platform` (advisory label). `status`: `active` | `retired`.
+- `id`: `[a-z0-9-]{1,16}`, unique. `kind`: `service` | `platform` (advisory label). `status`: `active` | `retired`. A `retired` ledger owns no paths (it is left out of ownership, overlap and unowned checks) and accepts no new items; it stays so old keys, aliases and citations keep resolving. Contract ids match `^[a-z][a-z0-9_-]*:[^[:space:]]+$`.
 - `paths` / `residual_paths`: globs owning code. `ledger validate --registry` reports files claimed by zero or by several ledgers (residual globs match only files no ordinary glob claims) — a host may require it to be clean. Paths power suggestions (§F.3) and in-flight attribution (§H); they never assign an item.
 - `contracts[].defined_in`: globs where the contract is defined, so a diff touching them is detected as a contract change (§H.1).
 
