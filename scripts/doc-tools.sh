@@ -2398,14 +2398,30 @@ ledger note|cmd_ledger_note|repo|format=
 ledger view|cmd_ledger_view|repo|format=
   <ledger|all> [--format text|json]
   Render ledger views locally from the working tree.
-ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict format=
-  (--staged | --all | --registry | --plan <plan>) [--strict] [--format text|json]
-  Check items, the ledger registry and keys. --registry checks
-  docs/ledger/ledgers.json: schema, ledger ids, statuses, kinds, contract
-  ids, globs, and that no tracked file is claimed by two ledgers (overlap)
-  or, once any ledger declares paths, that every tracked file outside docs/
-  has one (unowned). One "registry <class> <detail>" line per finding;
-  every finding blocks (exit 1).
+ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed= format=
+  (--staged | --all | --plan <plan> [--strict] | --pushed <a>..<b>) [--registry] [--format text|json]
+  Check items, the ledger registry and keys. One "<class> <path|key>
+  <detail>" line per finding, " (advisory)" after an advisory; exit 1 when
+  any finding blocks. --staged (the pre-commit gate) checks the items
+  staged for this commit, as staged: a key is <ledger>-<n> or
+  <ledger>-~<hex4> and unique among keys and aliases; ledger is a
+  registered, active id or unassigned; an added item carries ledger and
+  summary; an item whose status moves to closed or won't fix has a
+  resolution, and its superseded_by names an existing item in effect (no
+  cycle, not itself superseded); superseded_by only on a closed item. On a
+  modified item a finding about what it already was at HEAD is advisory
+  (a legacy_ids or retired ledger likewise); the registry is checked when
+  it is staged. --all: the same over every item of the working tree, plus
+  advisories (missing key, ledger or summary; weak summary; unassigned or
+  contract-less open items; parse errors). --plan: every row of the plan's
+  "Related work" table is marked include or exclude: <reason> (advisory;
+  --strict blocks). --pushed (for pre-push hooks): with keys.mode cas, each
+  provisional key the range introduces blocks; merge mode passes. --registry
+  checks docs/ledger/ledgers.json: schema, ledger ids, statuses, kinds,
+  contract ids, globs, and that no tracked file is claimed by two ledgers
+  (overlap) or, once any ledger declares paths, that every tracked file
+  outside docs/ has one (unowned); alone, one "registry <class> <detail>"
+  line per finding, every finding blocking.
 ledger publish|cmd_ledger_publish|repo|format=
   [--format text|json]
   Render the views from the remote base and push the views branch.

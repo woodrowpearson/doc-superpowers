@@ -25,8 +25,8 @@
 #              probes one parse entry per blob; reported, no budget
 #   index --staged (20 staged) / (400 staged)   _lg_index --staged right
 #              after staging (worktree caches warm) < 5 s, then warm < 1 s
-#   validate --staged (20 staged)   < 1 s when the verb exists; "skipped
-#              (Task 7)" until then; (400 staged) is reported, no budget
+#   validate --staged (20 staged)   `ledger validate --staged` right after
+#              staging < 1 s; (400 staged) is reported, no budget
 #   history: cold index / warm      as ls, on the history repository
 #   history: dates log [--full-history]   the dates pass's `git log` alone,
 #              with and without --full-history (the price of the flag)
@@ -359,15 +359,10 @@ b_validate() {
 }
 
 # b_validate_staged <label> <budget|->: validate --staged right after
-# staging (index files wiped, as after an input change), or "skipped (Task
-# 7)" while the verb is a stub (exit 2, "not implemented").
+# staging (index files wiped, as after an input change: --staged reads no
+# index, so this is its every-commit state).
 b_validate_staged() {
-  local rc=0 label="$1" budget="$2"
-  "$B_BASH" "$B_DT" ledger validate --staged --format json > "$B_OUT" 2> "$B_ERR" || rc=$?
-  if [ "$rc" = 2 ] && [ "$(jq -r '.error // empty' "$B_OUT" 2>/dev/null)" = "not implemented" ]; then
-    b_row "$label" "-" "-" "skipped (Task 7)"
-    return 0
-  fi
+  local label="$1" budget="$2"
   b_measure "$label" "$budget" 2 b_validate --staged
   b_row "$label" "$B_SEC" "-" "$B_MARK"
 }

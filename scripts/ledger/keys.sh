@@ -310,8 +310,9 @@ _lg_counter_fetch() {
 
 # _lg_k_url <remote>: the URL a push to <remote> goes to — its pushurl when
 # set, else its url; a name git does not know is taken as a URL — into
-# _LG_KU. Reads of the counter ref and of the base use it, so they see the
-# repository the CAS push writes to.
+# _LG_KU. Only the counter ref's read (_lg_counter_fetch) uses it, so it
+# sees the repository the CAS push writes to; the base is fetched from its
+# remote's url (_lg_k_fetch_base).
 _lg_k_url() {
   _LG_KU=$(git config --get "remote.$1.pushurl" 2>/dev/null) \
     || _LG_KU=$(git config --get "remote.$1.url" 2>/dev/null) || _LG_KU=$1
