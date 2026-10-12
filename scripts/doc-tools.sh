@@ -11734,6 +11734,15 @@ _lg_enter() {
 
 # --- Main ---
 
+# Test-only source guard: `DOC_TOOLS_SOURCE_ONLY=1 . doc-tools.sh` defines
+# every function and global and returns here, without running _main, so a
+# suite can call internal functions directly (scripts/test-ledger.sh
+# lg_source). Only when SOURCED: executed, the variable changes nothing.
+# `return` at a sourced file's top level ends the `.` (bash 3.2 and 5).
+if [ "${DOC_TOOLS_SOURCE_ONLY:-}" = 1 ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  return 0
+fi
+
 _main "$@"
 # Reached only when the run finished: see _on_exit.
 _EXIT_OK=1
