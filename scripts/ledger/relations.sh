@@ -24,14 +24,18 @@
 # S's class "at B" is the index's when S's file is the same blob at B, else
 # read from B's blob (absent at B: not terminal) — a source closed on a
 # branch, or only in the working tree, has not landed. Contract changes are
-# looked for in B ^L_old only (L_old: the open consumers' L that entered B's
-# first-parent line earliest — "the oldest open consumer's last commit"):
-# one `git log --name-only` over the literal directories of the consumed
-# contracts' defined_in globs, and one message pass (_lg_msg_claims).
+# looked for in B ^M_k only: M_k the first-parent line commit with k the
+# largest, over the open consumers, of their L's index on the line (L off
+# the line: the newest line commit its side walk reaches; one that reaches
+# none — no bound). M_k is an ancestor of every consumer's L, so B ^M_k
+# holds every commit any consumer could count; the decision stays per item
+# (anc). One `git log --name-only` over the literal directories of the
+# consumed contracts' defined_in globs and one message pass, run by the
+# re-check program itself once it knows the bound (one awk pass in all).
 #
 # Ancestry ("is E an ancestor of L, or L itself"), without a git call per
-# pair: from `git rev-list --first-parent B` (the line M_0 = B, M_1, …) and
-# `git rev-list --parents B`, enter(c) = the largest k with c reachable from
+# pair: from `git rev-list --parents B` (cached by B's id; the first-parent
+# line M_0 = B, M_1, … read from it), enter(c) = the largest k with c reachable from
 # M_k (ancestors of M_k are exactly the commits with enter ≥ k). For L on
 # the line (L = M_k): E is an ancestor iff enter(E) ≥ k. For L off it:
 # enter(E) < enter(L) → no; else E is an ancestor iff it is one of the
@@ -41,14 +45,49 @@
 
 # --- Message trailers -------------------------------------------------------------
 
+# The trailer matcher (awk), shared by _lg_msg_claims and the re-check
+# program: tr_load(file) reads "<kind>\t<name>" lines; tr_match(line) sets
+# TRM (the number of matches) and TRMK[i] / TRMV[i] (kind, value).
+# shellcheck disable=SC2016  # awk source
+_LG_AWK_TRAILER='
+function tr_load(f,   l, t) {
+  while ((getline l < f) > 0) { t = index(l, "\t"); TRN++; TRK[TRN] = substr(l, 1, t - 1); TRT[TRN] = substr(l, t + 1) }
+  close(f)
+}
+function tr_match(line,   s, i, L, v) {
+  TRM = 0
+  s = line; sub(/\r$/, "", s); sub(/^[ \t\v\f*-]*/, "", s)
+  for (i = 1; i <= TRN; i++) {
+    L = length(TRT[i])
+    if (substr(s, 1, L + 1) != TRT[i] ":") continue
+    v = substr(s, L + 2)
+    if (v !~ /^[ \t\v\f]+[^ \t\v\f]/) continue
+    sub(/^[ \t\v\f]+/, "", v); sub(/[ \t\v\f]+$/, "", v); gsub(/\t/, " ", v)
+    TRM++; TRMK[TRM] = TRK[i]; TRMV[TRM] = v
+  }
+}
+'
+
+# _lg_trailers <out> [kind]: config "trailers" as "<kind>\t<name>" lines
+# (names without whitespace or ":"), every kind or only [kind].
+_lg_trailers() {
+  # shellcheck disable=SC2016  # jq source
+  jq -r --arg only "${2:-}" '(.trailers // {}) | if type == "object" then to_entries[] else empty end
+    | select($only == "" or .key == $only) | .key as $k
+    | (.value | if type == "array" then .[] elif type == "string" then . else empty end)
+    | strings | select(. != "" and (test("[\\s:[:cntrl:]]") | not)) | "\($k)\t\(.)"' "$_LG_CFG" > "$1" \
+    || _lg_die "jq failed (config trailers)"
+}
+
 # _lg_msg_claims <rev-args…>: "commit<TAB>kind<TAB>value" for every message
 # line (any line: a squash merge carries its commits' messages as body
 # text, "* Ledger-Claims: x-3") of the commits `git log <rev-args>` lists,
 # that matches ^[[:space:]*-]*<Trailer>:[[:space:]]+(.+)$ for a trailer
 # config "trailers" names — kind is its key (claims, claims_by_path,
-# claims_by_ref, contract_change, ack), the trailer name is matched
-# case-insensitively, value is (.+) without trailing blanks (a tab inside
-# becomes a space). In git log order, then line order.
+# claims_by_ref, contract_change, ack); the name matches as configured
+# (case-sensitive: prose "fixes: the crash" is no trailer); value is (.+)
+# without trailing blanks (a tab inside becomes a space). In git log
+# order, then line order.
 _lg_msg_claims() {
   local s a
   for a in "$@"; do
@@ -56,38 +95,47 @@ _lg_msg_claims() {
   done
   _lg_scratch_name
   s=$_LG_SN
-  # shellcheck disable=SC2016  # jq source
-  _lg_cfg '(.trailers // {}) | if type == "object" then to_entries[] else empty end | .key as $k
-    | (.value | if type == "array" then .[] elif type == "string" then . else empty end)
-    | strings | select(. != "" and (test("[\\s:[:cntrl:]]") | not)) | "\($k)\t\(.)"' > "$s.tr"
+  _lg_trailers "$s.tr"
   git -c log.showSignature=false log --no-color --format='%x01%H%n%B' "$@" -- > "$s.msg" 2> "$s.err" \
     || _lg_die "git log failed: $(head -n 3 "$s.err" 2>/dev/null)"
-  LC_ALL=C awk -v tr="$s.tr" '
-    BEGIN {
-      while ((getline l < tr) > 0) { t = index(l, "\t"); n++; K[n] = substr(l, 1, t - 1); T[n] = tolower(substr(l, t + 1)) }
-    }
+  LC_ALL=C awk -v tr="$s.tr" "$_LG_AWK_TRAILER"'
+    BEGIN { tr_load(tr) }
     substr($0, 1, 1) == "\001" { c = substr($0, 2); next }
-    {
-      s = $0; sub(/\r$/, "", s); sub(/^[ \t\v\f*-]*/, "", s)
-      ls = tolower(s)
-      for (i = 1; i <= n; i++) {
-        L = length(T[i])
-        if (substr(ls, 1, L + 1) != T[i] ":") continue
-        v = substr(s, L + 2)
-        if (v !~ /^[ \t\v\f]+[^ \t\v\f]/) continue
-        sub(/^[ \t\v\f]+/, "", v); sub(/[ \t\v\f]+$/, "", v); gsub(/\t/, " ", v)
-        print c "\t" K[i] "\t" v
-      }
-    }' "$s.msg"
+    { tr_match($0); for (i = 1; i <= TRM; i++) print c "\t" TRMK[i] "\t" TRMV[i] }' "$s.msg"
 }
 
 # --- Re-check (index.sh) ------------------------------------------------------------
 
-# The program: -v mode (lold | final), base, graphf, tab, ev, termf, cev.
-# lold: prints L_old. final: "<n>\t<entry>" per marker (n: the item's
-# place, tab's O lines).
+# The contract-change scan the re-check program runs (system()) once it
+# knows its bound: bash <this> <base> <bound|""> <dirs> <clog> <msg> <globs 0|1>
+# — the files the consumed contracts' defined_in name, changed in <base>
+# ^<bound> (tr'd: one token per line, a commit led by \002), and the
+# messages of the same commits.
+# shellcheck disable=SC2016  # bash source
+_LG_SH_RECHECK_SCAN='set -o pipefail
+B=$1 bound=$2 dirs=$3 clog=$4 msg=$5 globs=$6
+rng=("$B")
+if [ -n "$bound" ]; then rng+=("^$bound"); fi
+specs=()
+while IFS= read -r d; do specs+=("$d"); done < "$dirs"
+: > "$clog"
+if [ "$globs" = 1 ]; then
+  GIT_LITERAL_PATHSPECS=1 git -c log.showSignature=false log --no-color --full-history --format="%x02%H" \
+    --name-only -z "${rng[@]}" -- ${specs[@]+"${specs[@]}"} | tr "\n\000" "\001\n" > "$clog" || exit 1
+fi
+git -c log.showSignature=false log --no-color --format="%x01%H%n%B" "${rng[@]}" -- > "$msg" || exit 1
+'
+
+# The program: -v base, graphf, tab, ev, termf, cg (the consumed contracts'
+# globs, "<id>\001<glob>"), trf (the contract_change trailer names), sh,
+# scan, dirs, clog, msg, scanerr. One pass: the graph and the touches, the
+# bound, the scan (system), the decision. Prints "<n>\t<entry>" per marker
+# (n: the item's place, tab's O lines).
 # shellcheck disable=SC2016  # awk source
 _LG_AWK_RECHECK='
+function shq(s) { gsub(/\047/, "\047\\\047\047", s); return "\047" s "\047" }
+# addev(k, c): commit c changed contract k (each pair once).
+function addev(k, c) { if ((k, c) in SEENEV) return; SEENEV[k, c] = 1; NEV[k]++; EV[k, NEV[k]] = c }
 # side(l): the commits reachable from l without passing a commit of the
 # first-parent line (SIDE[l, c]), and the newest line commit it reaches
 # (KMIN[l], the smallest index; -1 when none).
@@ -157,22 +205,54 @@ BEGIN {
     if (k == "M") { getline p < ev; if (p in WANT) LAST[p] = C; continue }
     if (k == "D") { getline p < ev; if (p in LAST) delete LAST[p]; continue }
   }
-  if (mode == "lold") {
-    best = ""; bi = -1
-    for (i = 1; i <= no; i++) {
-      if (OC[i] == "" || !(OP[i] in LAST)) continue
-      l = LAST[OP[i]]
-      if ((l in ENTER) && ENTER[l] > bi) { bi = ENTER[l]; best = l }
+  # The bound (one first-parent line commit M_k, an ancestor of the last
+  # commit of every consumer): k = the largest of, per consumer, the index
+  # of its last commit when on the line, else the newest line commit its
+  # side walk reaches; a consumer reaching none → no bound. Excluding
+  # ancestors of M_k drops only what no consumer could count; anc() below
+  # keeps each item exact.
+  kb = -1; nob = 0; cons = 0
+  for (i = 1; i <= no; i++) {
+    if (OC[i] == "" || !(OP[i] in LAST)) continue
+    l = LAST[OP[i]]; cons = 1
+    if (!(l in ENTER)) { nob = 1; continue }
+    if (l in MIDX) k = MIDX[l]
+    else { side(l); k = KMIN[l] }
+    if (k < 0) nob = 1
+    else if (k > kb) kb = k
+  }
+  if (cons) {
+    bound = (nob || kb < 0) ? "" : MAIN[kb]
+    globs = 0
+    while ((getline l < cg) > 0) {
+      t = index(l, "\001"); g++
+      if (gx_add(g, substr(l, t + 1))) { ID[g] = substr(l, 1, t - 1); globs = 1 }
     }
-    if (best != "") print best
-    exit 0
+    rc = system(shq(sh) " " shq(scan) " " shq(base) " " shq(bound) " " shq(dirs) " " shq(clog) " " shq(msg) " " globs " 2> " shq(scanerr))
+    if (rc != 0) { print "scan failed (rc " rc ")" > "/dev/stderr"; exit 2 }
+    # Files under a consumed contract: each distinct file matched once.
+    while ((getline t < clog) > 0) {
+      while (substr(t, 1, 1) == "\001") t = substr(t, 2)
+      if (substr(t, 1, 1) == "\002") { c = substr(t, 2); continue }
+      if (t == "" || c == "") continue
+      if (!(t in HIT)) {
+        gx_match(t); h = ""
+        for (i = 1; i <= GX_MN; i++) h = h SUBSEP ID[GX_M[i]]
+        HIT[t] = h
+      }
+      n = split(substr(HIT[t], 2), X, SUBSEP)
+      for (i = 1; i <= n; i++) addev(X[i], c)
+    }
+    # Contract-Change: <id> … lines (the first word is the id).
+    tr_load(trf)
+    c = ""
+    while ((getline t < msg) > 0) {
+      if (substr(t, 1, 1) == "\001") { c = substr(t, 2); continue }
+      tr_match(t)
+      for (i = 1; i <= TRM; i++) { v = TRMV[i]; sub(/[ \t].*/, "", v); if (v != "" && c != "") addev(v, c) }
+    }
   }
   while ((getline l < termf) > 0) TERM[l] = 1
-  while ((getline l < cev) > 0) {
-    t = index(l, "\t"); c = substr(l, 1, t - 1); k = substr(l, t + 1)
-    if ((k, c) in SEENEV) continue
-    SEENEV[k, c] = 1; NEV[k]++; EV[k, NEV[k]] = c
-  }
   for (i = 1; i <= no; i++) {
     p = OP[i]
     if (!(p in LAST)) continue
@@ -191,25 +271,18 @@ BEGIN {
   exit 0
 }'
 
-# _lg_ix_recheck_dirs <out>: the item globs' directories (as the dates walk
-# lists them: the same walk, the same cache).
-_lg_ix_recheck_dirs() {
-  local s
-  _lg_scratch_name
-  s=$_LG_SN
-  _lg_cfg '[(.items.globs // [])[]?, (.items.archive_globs // [])[]?] | .[] | strings | select(. != "")' > "$s.globs"
-  _lg_glob_dirs "$s.globs" "$1"
-}
-
-# _lg_ix_recheck <base-commit|""> <tab> <current-ids|""> <out.tsv>: the
-# re-check markers (see the header) into <out.tsv>, one line per marked
-# item: "<n>\t<[entries] as JSON>", n its place among the items (index.sh
-# writes them into the item lines). <tab>: lg_relations' tab lines (defs.jq). <current-ids>: the
-# working tree's "<path>\t<blob id>" (index.sh _lg_ix_effective); "" when
-# the items are B's own (--rev). No base, or no open item to check: empty.
+# _lg_ix_recheck <base-commit|""> <tab> <current-ids|""> <out.tsv> <dirs>
+# <dated-commit|"">: the re-check markers (see the header) into <out.tsv>,
+# one line per marked item: "<n>\t<[entries] as JSON>", n its place among
+# the items (index.sh writes them into the item lines). <tab>:
+# lg_relations' tab lines (defs.jq). <current-ids>: the working tree's
+# "<path>\t<blob id>" (index.sh _lg_ix_effective); "" when the items are
+# B's own (--rev). <dirs>: the item globs' directories (the dates walk's).
+# <dated-commit>: the commit the dates walk read (HEAD; B's events are
+# derived from its map, index.sh _lg_ix_events_base). No base, or no open
+# item to check: empty.
 _lg_ix_recheck() {
-  local B="$1" tab="$2" cur="$3" out="$4" s lold a
-  local specs=()
+  local B="$1" tab="$2" cur="$3" out="$4" dirs="$5" H="$6" s
   : > "$out" || _lg_die "cannot write $out"
   [ -n "$B" ] || return 0
   grep -q '^O' "$tab" || return 0
@@ -252,56 +325,29 @@ _lg_ix_recheck() {
     fi
   fi
 
-  # B's touches (the dates walk's events, shared when B is the dated
-  # commit), its first-parent line and its graph.
-  _lg_ix_recheck_dirs "$s.dirs"
-  _lg_ix_events "$B" "$s.dirs"
+  # B's graph (cached by its id) and touches (derived from the dated
+  # walk when B is another commit); the consumed contracts' globs (the
+  # ones glob.sh accepts) and their literal directories; the
+  # Contract-Change trailer names; the scan script.
   B=$(git rev-parse -q --verify "$B^{commit}") || _lg_die "cannot resolve the base $1"
-  git rev-list --parents "$B" > "$s.graph" 2> "$s.err" || _lg_die "git rev-list failed: $(head -n 3 "$s.err")"
-  lold=$(LC_ALL=C awk -v mode=lold -v base="$B" -v graphf="$s.graph" -v tab="$tab" -v ev="$_LG_EVENTS" \
-    -v termf=/dev/null -v cev=/dev/null "$_LG_AWK_RECHECK" < /dev/null) \
-    || _lg_die "cannot compute the re-check window"
-
-  # The contract changes in B ^L_old: files under the consumed contracts'
-  # defined_in (each distinct file matched once), and Contract-Change lines.
-  : > "$s.cev"
-  if [ -n "$lold" ]; then
-    LC_ALL=C awk 'BEGIN { FS = "\002" } $1 == "G" { print $2 "\001" $3 }' "$tab" | LC_ALL=C awk "$_LG_AWK_GLOB"'
-      { t = index($0, "\001"); g = substr($0, t + 1); if (glob_ere(g) != "") print }' > "$s.cg" \
-      || _lg_die "cannot read the contract globs"
-    if [ -s "$s.cg" ]; then
-      LC_ALL=C awk '{ print substr($0, index($0, "\001") + 1) }' "$s.cg" > "$s.cgl"
-      _lg_glob_dirs "$s.cgl" "$s.cdirs"
-      while IFS= read -r a; do specs+=("$a"); done < "$s.cdirs"
-      GIT_LITERAL_PATHSPECS=1 git -c log.showSignature=false log --no-color --full-history --format='%x02%H' \
-        --name-only -z "$B" "^$lold" -- ${specs[@]+"${specs[@]}"} > "$s.clog" 2> "$s.err" \
-        || _lg_die "git log failed: $(head -n 3 "$s.err")"
-      tr '\n\000' '\001\n' < "$s.clog" | LC_ALL=C awk -v globs="$s.cg" "$_LG_AWK_GLOB"'
-        BEGIN {
-          while ((getline l < globs) > 0) { t = index(l, "\001"); k++; if (gx_add(k, substr(l, t + 1))) ID[k] = substr(l, 1, t - 1) }
-        }
-        {
-          t = $0
-          while (substr(t, 1, 1) == "\001") t = substr(t, 2)
-          if (substr(t, 1, 1) == "\002") { c = substr(t, 2); next }
-          if (t == "" || c == "") next
-          if (!(t in HIT)) {
-            gx_match(t); h = ""
-            for (i = 1; i <= GX_MN; i++) h = h SUBSEP ID[GX_M[i]]
-            HIT[t] = h
-          }
-          n = split(substr(HIT[t], 2), X, SUBSEP)
-          for (i = 1; i <= n; i++) { x = c "\t" X[i]; if (!(x in S)) { S[x] = 1; print x } }
-        }' >> "$s.cev" || _lg_die "cannot read the contract changes"
-    fi
-    _lg_msg_claims "$B" "^$lold" > "$s.mc"
-    LC_ALL=C awk -F '\t' '$2 == "contract_change" { v = $3; sub(/[ \t].*/, "", v); if (v != "") print $1 "\t" v }' \
-      "$s.mc" >> "$s.cev" || _lg_die "cannot read the Contract-Change lines"
+  _lg_ix_graph "$B"
+  _lg_ix_events_base "$B" "$dirs" "$H" "$_LG_GRAPH"
+  LC_ALL=C awk 'BEGIN { FS = "\002" } $1 == "G" { print $2 "\001" $3 }' "$tab" | LC_ALL=C awk "$_LG_AWK_GLOB"'
+    { t = index($0, "\001"); g = substr($0, t + 1); if (glob_ere(g) != "") print }' > "$s.cg" \
+    || _lg_die "cannot read the contract globs"
+  : > "$s.cdirs"
+  if [ -s "$s.cg" ]; then
+    LC_ALL=C awk '{ print substr($0, index($0, "\001") + 1) }' "$s.cg" > "$s.cgl"
+    _lg_glob_dirs "$s.cgl" "$s.cdirs"
   fi
-
-  LC_ALL=C awk -v mode=final -v base="$B" -v graphf="$s.graph" -v tab="$tab" -v ev="$_LG_EVENTS" \
-    -v termf="$s.term" -v cev="$s.cev" "$_LG_AWK_RECHECK" < /dev/null > "$s.res" \
-    || _lg_die "cannot compute the re-check markers"
+  _lg_trailers "$s.trf" contract_change
+  printf '%s' "$_LG_SH_RECHECK_SCAN" > "$s.scan" || _lg_die "cannot write $s.scan"
+  if ! LC_ALL=C awk -v base="$B" -v graphf="$_LG_GRAPH" -v tab="$tab" -v ev="$_LG_EVENTS" \
+      -v termf="$s.term" -v cg="$s.cg" -v trf="$s.trf" -v sh="${BASH:-bash}" -v scan="$s.scan" \
+      -v dirs="$s.cdirs" -v clog="$s.clog" -v msg="$s.msg" -v scanerr="$s.scanerr" \
+      "$_LG_AWK_GLOB$_LG_AWK_TRAILER$_LG_AWK_RECHECK" < /dev/null > "$s.res"; then
+    _lg_die "cannot compute the re-check markers${s:+: $(head -n 3 "$s.scanerr" 2>/dev/null | tr '\n' ' ')}"
+  fi
   [ -s "$s.res" ] || return 0
   jq -R -n -r '[inputs | split("\t") | select(length == 2) | {k: .[0], v: (.[1] | gsub("\u0001"; "\n"))}]
     | group_by(.k)[] | "\(.[0].k)\t\(map(.v) | unique | tojson)"' "$s.res" > "$out" \
@@ -454,7 +500,8 @@ lg_resolve($ref; $c[0]) as $R
     | [ (($I.neighbours.downstream // [])[] | {p: ($M.K2P[.key] // null), via}),
         ($ix.items[] | select(.path != $I.path) | .path as $yp | (.relates // [])[]
          | ((.kind // "sibling") | ascii_downcase) as $k
-         | select(($KM[(.key // "") | ascii_downcase] // null) == $I.path) | {p: $yp, via: $k}) ]
+         | select(lg_rel_kinds | index([$k]) != null)
+        | select(($KM[(.key // "") | ascii_downcase] // null) == $I.path) | {p: $yp, via: $k}) ]
       | map(select(.p != null)) | unique_by([.p, .via])
       | map($M.BYP[.p] as $Y | select($Y | lg_v_active)
             | {key: $Y.key, path: .p, via, display: ($Y | lg_q_display), summary: $Y.summary,

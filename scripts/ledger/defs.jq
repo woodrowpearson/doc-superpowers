@@ -119,9 +119,10 @@ def lg_relations($its; $contracts):
   | lg_lists($RS[] | select(.k != "sibling") | {k: .t, v: {key: $K[.f], via: .k}}) as $ID
   | lg_lists($RS[] | select(.k == "sibling") | {k: .t, v: {key: $K[.f], via: "sibling"}}) as $IS
   | lg_lists($RS[] | {k: .f, v: .t}) as $OT
-  # nbm($me): the lists as one, sorted by key then via, without the item.
-  | def nbm($me): map(select(length > 0))
-      | (if length == 0 then [] elif length == 1 then .[0] else add | unique end)
+  # nbm($me): the lists as one, sorted by key then via, each edge once,
+  # without the item (always add | unique: a relates list is in the order
+  # written and may name an item twice).
+  | def nbm($me): (add // []) | unique
       | if length == 0 or (any(.[]; .key == $me) | not) then . else map(select(.key != $me)) end;
     {nb: lg_obj($its[] | .path as $p | $K[$p] as $me
        | ((.changes // []) | unique) as $ch | ((.consumes // []) | unique) as $co

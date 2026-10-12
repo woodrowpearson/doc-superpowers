@@ -174,6 +174,33 @@ _lg_ix_candidates() {
 
 # --- Dates -------------------------------------------------------------------------
 
+# The walk's output (after tr: one token per line) as event records.
+# shellcheck disable=SC2016  # awk source
+_LG_AWK_EVENTS='
+    {
+      t = $0
+      if (st == "") {
+        if (substr(t, 1, 1) == "\001") t = substr(t, 2)
+        if (t == "") next
+        if (t ~ /^[0-9a-f][0-9a-f]* [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/) {
+          d = substr(t, length(t) - 9); print "@"; print substr(t, 1, length(t) - 11); next
+        }
+        if (t == "A") { st = "A"; next }
+        if (t ~ /^R[0-9]*$/) { st = "R1"; next }
+        if (t ~ /^C[0-9]*$/) { st = "C1"; next }
+        if (t == "M" || t == "T") { st = "M"; next }
+        if (t == "D") { st = "D"; next }
+        st = "X"; next
+      }
+      if (st == "A") { print "A"; print d; print t; st = ""; next }
+      if (st == "R1") { old = t; st = "R2"; next }
+      if (st == "R2") { print "R"; print d; print old; print t; st = ""; next }
+      if (st == "C1") { st = "M"; next }
+      if (st == "M") { print "M"; print t; st = ""; next }
+      if (st == "D") { print "D"; print t; st = ""; next }
+      st = ""
+    }'
+
 # _lg_ix_events_header <dirs-file> → _LG_EP_HEADER: the event file's first
 # line for these directories.
 # _lg_ix_events_plan <commit> <dirs-file>: what _lg_ix_events would do —
@@ -316,32 +343,82 @@ _lg_ix_events() {
   [ "$rc" = 0 ] || { rm -f "$tmp"; _lg_die "git log failed: $(head -n 3 "$err" 2>/dev/null)"; }
   # After tr, one token per line (the first status of a commit, or the next
   # commit line after one with no changes, led by \001).
-  tr '\n\000' '\001\n' < "$log" | LC_ALL=C awk '
-    {
-      t = $0
-      if (st == "") {
-        if (substr(t, 1, 1) == "\001") t = substr(t, 2)
-        if (t == "") next
-        if (t ~ /^[0-9a-f][0-9a-f]* [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/) {
-          d = substr(t, length(t) - 9); print "@"; print substr(t, 1, length(t) - 11); next
-        }
-        if (t == "A") { st = "A"; next }
-        if (t ~ /^R[0-9]*$/) { st = "R1"; next }
-        if (t ~ /^C[0-9]*$/) { st = "C1"; next }
-        if (t == "M" || t == "T") { st = "M"; next }
-        if (t == "D") { st = "D"; next }
-        st = "X"; next
-      }
-      if (st == "A") { print "A"; print d; print t; st = ""; next }
-      if (st == "R1") { old = t; st = "R2"; next }
-      if (st == "R2") { print "R"; print d; print old; print t; st = ""; next }
-      if (st == "C1") { st = "M"; next }
-      if (st == "M") { print "M"; print t; st = ""; next }
-      if (st == "D") { print "D"; print t; st = ""; next }
-      st = ""
-    }' >> "$tmp" || { rm -f "$tmp"; _lg_die "cannot read the git history of the items"; }
+  tr '\n\000' '\001\n' < "$log" | LC_ALL=C awk "$_LG_AWK_EVENTS" >> "$tmp" \
+    || { rm -f "$tmp"; _lg_die "cannot read the git history of the items"; }
   mv -f "$tmp" "$f" || { rm -f "$tmp"; _lg_die "cannot install $f"; }
   # The newest 5 maps are kept.
+  # shellcheck disable=SC2012  # cache names are dates-<hex>.tsv
+  ls -t "$_LG_CACHE"/dates-*.tsv 2>/dev/null | tail -n +6 | while IFS= read -r c; do rm -f "$c"; done
+  _LG_EVENTS=$f
+}
+
+# _lg_ix_graph <commit> → _LG_GRAPH: `git rev-list --parents <commit>`
+# ("<id> <parent>…" per commit reachable from it), cached as
+# $_LG_CACHE/graph-<commit>.txt (a fact about the commit; the newest 3 kept).
+_lg_ix_graph() {
+  local c="$1" f tmp s
+  f="$_LG_CACHE/graph-$c.txt"
+  if [ -f "$f" ]; then
+    touch -c "$f" 2>/dev/null || true
+    _LG_GRAPH=$f
+    return 0
+  fi
+  _lg_scratch_name
+  s=$_LG_SN
+  mkdir -p -- "$_LG_CACHE" 2>/dev/null || _lg_die "cannot create $_LG_CACHE"
+  tmp=$(mktemp "$_LG_CACHE/.graph.XXXXXX") || _lg_die "cannot create a temp file in $_LG_CACHE"
+  git rev-list --parents "$c" > "$tmp" 2> "$s.err" || { rm -f "$tmp"; _lg_die "git rev-list failed: $(head -n 3 "$s.err")"; }
+  mv -f "$tmp" "$f" || { rm -f "$tmp"; _lg_die "cannot install $f"; }
+  # shellcheck disable=SC2012  # cache names are graph-<hex>.txt
+  ls -t "$_LG_CACHE"/graph-*.txt 2>/dev/null | tail -n +4 | while IFS= read -r tmp; do rm -f "$tmp"; done
+  _LG_GRAPH=$f
+}
+
+# _lg_ix_events_base <base> <dirs-file> <dated-commit|""> <graph> →
+# _LG_EVENTS: the base's event file. Its cache, or the extension of a cached
+# ancestor, as _lg_ix_events; else, when the dated commit (HEAD) has its
+# map, derived from it without a second walk of the whole history ("dates-
+# derive <commit>"): the dated commit's records of the commits the base
+# reaches (<graph>: every commit reachable from the base), then a walk of
+# <dated>..<base> only. The records are the same a walk of the base lists
+# (whether git lists a commit, and its changes, do not depend on where the
+# walk starts); the order is the extension's — the common commits in the
+# dated walk's order, then the base's own — which never puts a commit after
+# one of its descendants.
+_lg_ix_events_base() {
+  local B="$1" dirs="$2" H="$3" graph="$4" hf first tmp f s rc=0 c
+  _lg_ix_events_plan "$B" "$dirs"
+  if [ "$_LG_EP_HIT" = 1 ] || [ -n "$_LG_EP_ANC" ] || [ -z "$H" ] || [ "$H" = "$B" ]; then
+    _lg_ix_events "$B" "$dirs"
+    return 0
+  fi
+  hf="$_LG_CACHE/dates-$H.tsv"
+  first=""
+  if [ -f "$hf" ]; then IFS= read -r first < "$hf" || true; fi
+  if [ "$first" != "$_LG_EP_HEADER" ]; then
+    _lg_ix_events "$B" "$dirs"
+    return 0
+  fi
+  _lg_ix_trace "dates-derive $H"
+  _lg_scratch_name
+  s=$_LG_SN
+  f="$_LG_CACHE/dates-$B.tsv"
+  tmp=$(mktemp "$_LG_CACHE/.dates.XXXXXX") || _lg_die "cannot create a temp file in $_LG_CACHE"
+  LC_ALL=C awk -v graph="$graph" '
+    BEGIN { while ((getline l < graph) > 0) { t = index(l, " "); G[t ? substr(l, 1, t - 1) : l] = 1 } }
+    NR == 1 { print; next }
+    {
+      if ($0 == "@") { getline c; keep = (c in G); if (keep) { print "@"; print c }; next }
+      n = ($0 == "A") ? 2 : ($0 == "R") ? 3 : 1
+      k = $0
+      if (keep) print k
+      for (i = 1; i <= n; i++) { getline x; if (keep) print x }
+    }' "$hf" > "$tmp" || { rm -f "$tmp"; _lg_die "cannot derive the base's history from $H"; }
+  _lg_ix_events_git "$H..$B" "$dirs" "$s.log" "$s.err" || rc=$?
+  [ "$rc" = 0 ] || { rm -f "$tmp"; _lg_die "git log failed: $(head -n 3 "$s.err" 2>/dev/null)"; }
+  tr '\n\000' '\001\n' < "$s.log" | LC_ALL=C awk "$_LG_AWK_EVENTS" >> "$tmp" \
+    || { rm -f "$tmp"; _lg_die "cannot read the git history of the items"; }
+  mv -f "$tmp" "$f" || { rm -f "$tmp"; _lg_die "cannot install $f"; }
   # shellcheck disable=SC2012  # cache names are dates-<hex>.tsv
   ls -t "$_LG_CACHE"/dates-*.tsv 2>/dev/null | tail -n +6 | while IFS= read -r c; do rm -f "$c"; done
   _LG_EVENTS=$f
@@ -861,14 +938,21 @@ _lg_ix_contracts() {
       print id "\t" glob_dir(g) "\t" re }' "$cre.in" > "$cre" || _lg_die "cannot read the contract globs"
 }
 
-# _lg_ix_valid <file>: the file is a whole index of this schema.
+# _lg_ix_valid <file>: the file is a whole index of this schema — it starts
+# with the schema and its last line is the tail (],"legacy":… ending in }),
+# so a file cut anywhere, even between two lines, is rebuilt.
 _lg_ix_valid() {
   local f="$1" pre="" last
   [ -f "$f" ] || return 1
   IFS= read -r -n 27 pre < "$f" 2>/dev/null || true
   [ "$pre" = '{"schema":"ledger-index/1",' ] || return 1
-  last=$(tail -c 2 "$f" 2>/dev/null) || return 1
-  [ "$last" = "}" ]
+  last=$(tail -n 1 "$f" 2>/dev/null) || return 1
+  # The tail is ],"legacy":{…},"finalized":{…}} — finalized.json maps
+  # strings to strings, so a tail cut short never ends in }} again.
+  case "$last" in
+    '],"legacy":'*',"finalized":'*'}}') return 0 ;;
+  esac
+  return 1
 }
 
 # --- Pruning -------------------------------------------------------------------------
@@ -896,7 +980,7 @@ _lg_ix_prune() {
   if [ -f "$stamp" ] && [ -n "$(find "$stamp" -mmin -1440 2>/dev/null)" ]; then return 0; fi
   : > "$stamp" || return 0
   find "$_LG_CACHE/parse" -mindepth 2 -maxdepth 2 -name '.new.*' -mmin +60 -exec rm -rf {} + 2>/dev/null || true
-  find "$_LG_CACHE" "$_LG_CACHE/rev" -maxdepth 1 \( -name '.index.*' -o -name '.dates.*' -o -name '.blob-sha256.*' \) -mmin +60 \
+  find "$_LG_CACHE" "$_LG_CACHE/rev" -maxdepth 1 \( -name '.index.*' -o -name '.dates.*' -o -name '.graph.*' -o -name '.blob-sha256.*' \) -mmin +60 \
     -exec rm -f {} + 2>/dev/null || true
   for d in "$_LG_CACHE"/parse/*; do
     [ -d "$d" ] && [ "$d" != "$_LG_PARSE_DIR" ] || continue
@@ -1132,14 +1216,12 @@ _lg_index() {
     return 0
   fi
   _lg_ix_trace "index-build index-$key.json"
-  # The history walks (dates; re-check's base) start now, in the
-  # background, and overlap the parse.
-  if [ "$mode" != staged ] || [ -n "$dcommit" ]; then
-    _lg_cfg '[(.items.globs // [])[]?, (.items.archive_globs // [])[]?] | .[] | strings | select(. != "")' > "$s.pfglobs"
-    _lg_glob_dirs "$s.pfglobs" "$s.pfdirs"
-    if [ -n "$dcommit" ]; then _lg_ix_prefetch "$dcommit" "$s.pfdirs"; fi
-    if [ "$mode" != staged ] && [ -n "$base" ] && [ "$base" != "$dcommit" ]; then _lg_ix_prefetch "$base" "$s.pfdirs"; fi
-  fi
+  # The dates walk starts now, in the background, and overlaps the parse.
+  # (A base other than the dated commit is derived from its walk:
+  # _lg_ix_events_base.)
+  _lg_cfg '[(.items.globs // [])[]?, (.items.archive_globs // [])[]?] | .[] | strings | select(. != "")' > "$s.pfglobs"
+  _lg_glob_dirs "$s.pfglobs" "$s.pfdirs"
+  if [ -n "$dcommit" ]; then _lg_ix_prefetch "$dcommit" "$s.pfdirs"; fi
 
   # The inputs, read and checked.
   reg=$(_lg_registry "$src")
@@ -1203,8 +1285,8 @@ _lg_index() {
   fi
   : > "$s.rcmap"
   case "$mode" in
-    worktree) _lg_ix_recheck "$base" "$s.rctab" "$s.eff" "$s.rcmap" ;;
-    rev) _lg_ix_recheck "$base" "$s.rctab" "" "$s.rcmap" ;;
+    worktree) _lg_ix_recheck "$base" "$s.rctab" "$s.eff" "$s.rcmap" "$s.pfdirs" "$dcommit" ;;
+    rev) _lg_ix_recheck "$base" "$s.rctab" "" "$s.rcmap" "$s.pfdirs" "$dcommit" ;;
   esac
   # Item n is line n + 2 (after the head line); "neighbours":null and
   # "recheck_after":[] are in it once each (in a string value every quote

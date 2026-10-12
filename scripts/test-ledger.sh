@@ -4889,8 +4889,8 @@ Ledger-Ack: abc123 — fine"
   assert_eq "0" "$LG_RC" "rc 0"
   local h
   h=$(git rev-parse HEAD)
-  assert_eq "$(printf '%s\tclaims\tx-3\n%s\tcontract_change\tfield:a — cents now\n%s\tclaims_by_ref\t#45\n%s\tclaims\tx-4\n%s\tack\tabc123 — fine' "$h" "$h" "$h" "$h" "$h")" \
-    "$LG_OUT" "bullets and indents count; no ':', another trailer's suffix and no space after ':' do not; names any case"
+  assert_eq "$(printf '%s\tclaims\tx-3\n%s\tcontract_change\tfield:a — cents now\n%s\tclaims_by_ref\t#45\n%s\tack\tabc123 — fine' "$h" "$h" "$h" "$h")" \
+    "$LG_OUT" "bullets and indents count; no ':', another trailer's suffix, no space after ':' and another case (M6) do not"
   teardown
 }
 
@@ -5016,6 +5016,185 @@ test_lg_show_neighbours() {
     "relates: [sibling:app-1, sibling:app-2, sibling:app-3, sibling:app-4, sibling:app-5]"
   lg show core-9
   assert_contains "$LG_OUT" "siblings: app-1 (sibling), app-2 (sibling), app-3 (sibling) +2 more" "lists cut at 3"
+  teardown
+}
+
+# --- Task 9 fix round 1 --------------------------------------------------------------
+
+# lg_window_fixture <with-M2 0|1>: the reviewer's repro (I1). core-1 and
+# core-2 consume field:order.total; side is cut at M0; main: M1 changes
+# src/order/total.js, then (with 1) M2 edits core-2; side: S1 edits
+# core-1; side merged --no-ff.
+lg_window_fixture() {
+  lg_fixture
+  lg_enable '{"base":"main"}'
+  lg_registry "$LG_REG_REL"
+  lg_item docs/issues/b.md "key: core-1" "ledger: core" "status: Open" "severity: P1" "summary: Reads the total" "consumes: [field:order.total]"
+  lg_item docs/issues/c.md "key: core-2" "ledger: core" "status: Open" "severity: P2" "summary: Also reads it" "consumes: [field:order.total]"
+  mkdir -p src/order && echo 1 > src/order/total.js
+  git add -A && git commit -qm M0
+  git branch -q side
+  echo 2 > src/order/total.js
+  git add -A && git commit -qm "M1 contract change"
+  if [ "$1" = 1 ]; then
+    printf '\nedited on main\n' >> docs/issues/c.md
+    git add -A && git commit -qm "M2 edit core-2"
+  fi
+  git checkout -q side
+  printf '\nedited on side\n' >> docs/issues/b.md
+  git add -A && git commit -qm "S1 edit core-1"
+  git checkout -q main
+  git merge -q --no-ff side -m "M3 merge side"
+}
+
+test_lg_recheck_window_side_branch() {
+  echo "test: re-check window — a change older than another item's last commit still marks a side-branch item that never saw it (I1)"
+  lg_window_fixture 1
+  lg_rel_ix
+  assert_eq "field:order.total" "$(lg_rc_of core-1)" "S1 (side, cut before M1) never saw M1: marked"
+  assert_eq "" "$(lg_rc_of core-2)" "M2 (after M1 on the line): not marked"
+  teardown
+  echo "test: re-check window — the control (no M2): both marked"
+  lg_window_fixture 0
+  lg_rel_ix
+  assert_eq "field:order.total" "$(lg_rc_of core-1)" "control: core-1 marked"
+  assert_eq "field:order.total" "$(lg_rc_of core-2)" "control: core-2 marked"
+  teardown
+}
+
+test_lg_relates_edges_sorted_unique() {
+  echo "test: relates edges — sorted by key then via, no duplicates, however the relates list is ordered (M3)"
+  lg_fixture
+  lg_enable
+  lg_item docs/issues/a.md "key: a-1" "ledger: a" "status: Open" "summary: A"
+  lg_item docs/issues/b.md "key: b-2" "ledger: b" "status: Open" "summary: B"
+  lg_item docs/issues/c.md "key: c-1" "ledger: c" "status: Open" "summary: C" \
+    "relates: [depends-on:b-2, root-cause:a-1, sibling:a-1, a-1]"
+  lg_rel_ix
+  assert_eq "a-1/root-cause b-2/depends-on" "$(lg_nb c-1 upstream)" "upstream sorted by key"
+  assert_eq "a-1/sibling" "$(lg_nb c-1 siblings)" "sibling:a-1 and a bare a-1: one edge"
+  assert_eq "c-1/root-cause" "$(lg_nb a-1 downstream)" "the other side"
+  assert_eq "c-1/sibling" "$(lg_nb a-1 siblings)" "the other side, once"
+  teardown
+}
+
+test_lg_recheck_verb_relates_kinds() {
+  echo "test: ledger recheck — a relates entry of an unknown kind is no dependent (M5)"
+  lg_rel_fixture
+  lg_item docs/issues/k.md "key: core-7" "ledger: core" "status: Open" "severity: P3" "summary: Blocks it" "relates: [blocks:app-5]"
+  lg_item docs/issues/l.md "key: core-8" "ledger: core" "status: Open" "severity: P3" "summary: A sibling" "relates: [Sibling:APP-5]"
+  lg recheck app-5
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_not_contains "$LG_OUT" "core-7" "blocks: is no relation"
+  assert_contains "$LG_OUT" "core-8  via sibling" "a sibling (any case) is"
+  teardown
+}
+
+test_lg_msg_claims_case_sensitive() {
+  echo "test: trailer names match as configured — case-sensitive (M6)"
+  lg_fixture
+  lg_enable
+  git commit -q --allow-empty -m "prose" -m "fixes: the crash
+Fixes: #7
+ledger-claims: x-4
+* Ledger-Claims: x-5"
+  lg_call _lg_msg_claims HEAD~1..HEAD
+  local h
+  h=$(git rev-parse HEAD)
+  assert_eq "$(printf '%s\tclaims_by_ref\t#7\n%s\tclaims\tx-5' "$h" "$h")" "$LG_OUT" "only the configured spelling counts"
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_valid_tail() {
+  local ix cut
+  ix=$(_lg_index)
+  lg_rc _lg_ix_valid "$ix"
+  assert_eq "0" "$LG_RC" "a whole index is valid"
+  cut="$_SCRATCH/cut.json"
+  sed '$d' "$ix" > "$cut"
+  lg_rc _lg_ix_valid "$cut"
+  assert_eq "1" "$LG_RC" "cut after the last item line (no tail): not valid"
+  sed '$ s/.$//' "$ix" > "$cut"
+  lg_rc _lg_ix_valid "$cut"
+  assert_eq "1" "$LG_RC" "a tail cut short: not valid"
+}
+
+test_lg_index_valid_needs_tail() {
+  echo "test: _lg_ix_valid requires the tail line (M7)"
+  lg_rel_fixture
+  lg_in lg_t_index_valid_tail
+  teardown
+}
+
+# lg_ev_canon <events-file>: its records as sorted "<commit>|<record>" lines.
+lg_ev_canon() {
+  awk 'NR == 1 { next }
+    $0 == "@" { getline c; next }
+    { k = $0; n = (k == "A") ? 2 : (k == "R") ? 3 : 1; r = k
+      for (i = 1; i <= n; i++) { getline x; r = r "|" x }
+      print c "|" r }' "$1" | LC_ALL=C sort
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_events_derive_exact() {
+  local g="$_SCRATCH/g" dirs="$_SCRATCH/dirs" H B derived cold
+  _lg_cfg '[(.items.globs // [])[]?, (.items.archive_globs // [])[]?] | .[] | strings' > "$g"
+  _lg_glob_dirs "$g" "$dirs"
+  H=$(git rev-parse HEAD)
+  B=$(git rev-parse newer)
+  rm -rf "$_LG_CACHE"
+  mkdir -p "$_LG_CACHE"
+  _lg_ix_events "$H" "$dirs"
+  _lg_ix_graph "$B"
+  _lg_ix_events_base "$B" "$dirs" "$H" "$_LG_GRAPH" 2> "$_SCRATCH/trace"
+  assert_contains "$(cat "$_SCRATCH/trace")" "dates-derive" "diverged: derived from HEAD's map"
+  derived=$(lg_ev_canon "$_LG_EVENTS")
+  rm -f "$_LG_CACHE/dates-$B.tsv"
+  _lg_ix_events "$B" "$dirs" 2> "$_SCRATCH/trace"
+  assert_contains "$(cat "$_SCRATCH/trace")" "dates-cold" "the control: a cold walk of the base"
+  cold=$(lg_ev_canon "$_LG_EVENTS")
+  assert_eq "$cold" "$derived" "the derived records are the cold walk's"
+  lg_assert_cond "[ $(wc -l <<<"$cold") -gt 5 ]" "…a non-trivial history"
+}
+
+test_lg_recheck_base_not_head() {
+  echo "test: re-check with the base ≠ HEAD — the base's events come from HEAD's walk (I2), same markers"
+  lg_rel_fixture
+  local expect
+  # app-1 fixed on main (the base).
+  lg_item docs/issues/a.md "key: app-1" "ledger: app" "status: Fixed" "severity: P1" "summary: Totals are wrong" \
+    "changes: [field:order.total]" "related-files: [src/util/a.js, src/util/b.js]"
+  printf '\n## Resolution\n\nFixed.\n' >> docs/issues/a.md
+  git add -A && git commit -qm "fix app-1"
+  lg_rel_ix
+  expect=$(jq -c '[.items[] | {key, recheck_after}]' "$LG_IX")
+  # HEAD ahead of the base.
+  git checkout -q -b ahead
+  printf '\nmore\n' >> docs/issues/i.md
+  git add -A && git commit -qm "ahead"
+  rm -rf "$(git rev-parse --git-common-dir)/doc-superpowers"
+  DOC_TOOLS_LEDGER_TRACE=1 lg_rel_ix
+  assert_contains "$LG_ERR" "dates-derive" "the base's events derived from HEAD's walk"
+  assert_eq "$expect" "$(jq -c '[.items[] | {key, recheck_after}]' "$LG_IX")" "HEAD ahead: the base's markers"
+  # The base with commits HEAD lacks: core-3 consumes what app-3 changes; app-3 fixed on the base only.
+  git checkout -q main
+  lg_item docs/issues/i.md "key: core-3" "ledger: core" "status: Open" "severity: P3" "summary: Specified together" "consumes: [field:order.total]"
+  git add -A && git commit -qm "core-3 consumes"
+  git checkout -q -b newer
+  lg_item docs/issues/d.md "key: app-3" "ledger: app" "status: Fixed" "severity: P2" "summary: Tax rounding" "changes: [field:order.total]"
+  printf '\n## Resolution\n\nFixed.\n' >> docs/issues/d.md
+  git add -A && git commit -qm "fix app-3 on newer"
+  git checkout -q main
+  lg_enable '{"base":"newer"}'
+  rm -rf "$(git rev-parse --git-common-dir)/doc-superpowers"
+  DOC_TOOLS_LEDGER_TRACE=1 lg_rel_ix
+  assert_eq "1" "$(grep -c 'dates-cold' <<<"$LG_ERR")" "one cold walk (HEAD's): the base extends it (HEAD is its ancestor)"
+  assert_eq "app-3" "$(lg_rc_of core-3)" "a source fixed only on the base: marked (app-1 landed before core-3's last commit)"
+  # Diverged (HEAD ahead lacks the base's last two commits): derived, and
+  # the same records a cold walk of the base gives.
+  git checkout -q ahead
+  DOC_TOOLS_LEDGER_TRACE=1 lg_in lg_t_events_derive_exact
   teardown
 }
 
@@ -5284,6 +5463,14 @@ run_tests() {
   test_lg_recheck_marker_set_and_cleared
   test_lg_render_neighbours_and_suggestions
   test_lg_show_neighbours
+
+  # --- Task 9 fix round 1 ---
+  test_lg_recheck_window_side_branch
+  test_lg_relates_edges_sorted_unique
+  test_lg_recheck_verb_relates_kinds
+  test_lg_msg_claims_case_sensitive
+  test_lg_index_valid_needs_tail
+  test_lg_recheck_base_not_head
 
   print_summary
 }
