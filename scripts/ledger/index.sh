@@ -527,11 +527,21 @@ _lg_ix_docs() {
 
 # --- The join ------------------------------------------------------------------------
 
+# The derived-status labels (design §E.1), the one definition: the index
+# writes them (lg_item below) and query.sh reads them (ls --status, the
+# displays) — both prepend this to their jq programs.
+# shellcheck disable=SC2016  # jq source
+_LG_JQ_STATUS_DEFS='
+def lg_status_labels:
+  {superseded: "superseded", wontfix: "won'"'"'t fix", closed: "closed", shipped: "shipped", merged: "merged",
+   in_review: "in review", on_branch: "on branch", planned: "planned", specd: "spec'"'"'d", not_started: "not started"};
+'
+
 # jq: the item record → the index item; the index object. Inputs (slurped):
 # $c config, $reg registry, $di doc-index, $lgy legacy, $fin finalized,
 # $recs parse records, $dates {"p","d"}, $docs {"c","d","i"} / {"s","v"}.
 # shellcheck disable=SC2016  # jq source
-_LG_JQ_INDEX_DEFS='
+_LG_JQ_INDEX_DEFS="$_LG_JQ_STATUS_DEFS"'
 # lg_fields($cfg): {logical: [candidate names]} — config "fields", once.
 def lg_fields($cfg):
   ($cfg.fields // {}) | with_entries(.value |= (if type == "array" then [.[] | strings] elif type == "string" then [.] else [] end));
@@ -604,14 +614,15 @@ def lg_item($F; $CT; $EX; $D; $L; $S; $DI; $terms):
      first_para: $r.first_para,
      resolution: $r.resolution,
      docs: $docs,
-     derived: (if $sup != null and $class == "closed" then {status: "superseded", detail: $sup}
-               elif $class == "wontfix" then {status: "won'"'"'t fix", detail: null}
-               elif $class == "closed" then {status: "closed", detail: null}
+     derived: (lg_status_labels as $SL
+               | if $sup != null and $class == "closed" then {status: $SL.superseded, detail: $sup}
+               elif $class == "wontfix" then {status: $SL.wontfix, detail: null}
+               elif $class == "closed" then {status: $SL.closed, detail: null}
                elif $class == "fixed" then
-                 (if $owed != null then {status: "merged", detail: $owed} else {status: "shipped", detail: null} end)
-               elif ($open_plans | length) > 0 then {status: "planned", detail: $open_plans[0]}
-               elif ($docs.spec | length) > 0 then {status: "spec'"'"'d", detail: $docs.spec[0]}
-               else {status: "not started", detail: null} end),
+                 (if $owed != null then {status: $SL.merged, detail: $owed} else {status: $SL.shipped, detail: null} end)
+               elif ($open_plans | length) > 0 then {status: $SL.planned, detail: $open_plans[0]}
+               elif ($docs.spec | length) > 0 then {status: $SL.specd, detail: $docs.spec[0]}
+               else {status: $SL.not_started, detail: null} end),
      pr: null,
      inflight: [],
      neighbours: null,
@@ -816,7 +827,7 @@ _lg_ix_refs() {
 # finalized map), an unknown revision, or a git failure.
 _lg_index() {
   local mode=worktree rev="" src commit="" tree="" head base_ref="" base="" s reg di key name tmp rfn f
-  local legacy_path="" dcommit usemtime map
+  local legacy_path="" dcommit usemtime
   case "$#" in
     0) ;;
     1) [ "$1" = --staged ] || _lg_die "internal: _lg_index: unknown argument '$1'"; mode=staged ;;

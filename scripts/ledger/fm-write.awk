@@ -21,6 +21,9 @@
 # set / setlist replace the field's line and its continuation lines (the
 # indented, blank or "- " lines under it) at its first occurrence and drop any
 # later duplicate; a missing field is appended as the LAST frontmatter line.
+# setlist on a block list keeps the block form (its "key:" line as it was, one
+# "- item" line per item at the first item's indent); otherwise it writes a
+# flow list.
 # del drops every occurrence. New lines take the file's line ending (CRLF when
 # line 1 ends in CR). Untouched frontmatter lines are copied byte for byte.
 #
@@ -135,18 +138,31 @@ function rewrite(   i, j, first, last, out, ln, placed, isblock, k, prefix, item
     for (k = i; k <= j; k++) DROP[k] = 1
     i = j
   }
-  # add on a block list: one more item line after the last one.
-  if (op == "add" && first) {
+  # add on a block list: one more item line after the last one; setlist on
+  # one: the same "key:" line, then the new items.
+  if ((op == "add" || op == "setlist") && first) {
     isblock = (trim(substr(S[first], index(S[first], ":") + 1)) ~ /^(#.*)?$/) && last > first
     for (k = first + 1; isblock && k <= last; k++) {
       if (S[k] ~ /^[ \t]*$/ || S[k] ~ /^[ \t]*#/) continue
       if (S[k] !~ /^[ \t]*-([ \t]|$)/) isblock = 0
       else { prefix = S[k]; sub(/-.*$/, "", prefix) }
     }
-    if (isblock) {
+    if (isblock && op == "add") {
       for (i = 1; i <= n; i++) {
         printf "%s\n", R[i]
         if (i == last) printf "%s- %s%s", prefix, fmt_scalar(VALUE), EOL
+      }
+      return
+    }
+    if (isblock) {
+      for (i = 1; i <= n; i++) {
+        if (i == first) {
+          printf "%s\n", R[i]
+          for (k = 1; k <= NITEMS; k++) printf "%s- %s%s", prefix, fmt_scalar(ITEMS[k]), EOL
+          continue
+        }
+        if (i in DROP) continue
+        printf "%s\n", R[i]
       }
       return
     }

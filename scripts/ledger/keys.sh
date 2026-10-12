@@ -1,0 +1,1021 @@
+# shellcheck shell=bash
+# scripts/ledger/keys.sh — item keys (design §D): resolving a reference to an
+# item, the counter ref on the remote and its compare-and-swap, allocation
+# (one or a batch), provisional keys, finalize, and the verbs `ledger new`,
+# `ledger assign`, `ledger finalize`. Sourced by lib.sh (before query.sh,
+# whose `show` program includes _LG_JQ_RESOLVE_DEFS); uses lib.sh's _lg_init,
+# _lg_cfg, _lg_die, _lg_usage, _lg_emit, _lg_out_file, _lg_registry,
+# index.sh's _lg_index and _LG_JQ_INDEX_DEFS, parse.sh's parsers and
+# writers, glob.sh's _lg_paths_filter and doc-tools.sh's _hash_one,
+# _tmp_beside and _replace_file.
+#
+# Resolution (_lg_resolve <ref>): in order, the first that matches —
+#   1. a path from the top level ("./" allowed) of an item;
+#   2. a key or an alias, case-insensitive: "L-14", or "L 14" / "L #14"
+#      (read as "L-14"); a provisional key recorded in
+#      docs/ledger/finalized.json reaches the key it became;
+#   3. a legacy ref "<old>#<n>", "<old> row <n>", "<old> ledger row <n>"
+#      (case-insensitive), looked up as "<id>#<n>" in the legacy map
+#      (config "legacy"), where <id> is tried as <old> itself, its file stem,
+#      the id config legacy_ledgers maps to a file with that stem, and the
+#      stem without a trailing "-ledger" (Task 15's rule for legacy ids).
+#      {"key": K} → K's item (as in 2); {"item": P} → P; {"archived": A} →
+#      the anchor A (rc 0, kind "archived");
+#   4. a path stem (the file name without ".md"), as `ls` prints an item
+#      without a key.
+# Several items at one step → ambiguous (rc 3); none → rc 1.
+#
+# Keys (design §D): "<ledger>-<n>"; a provisional key is
+# "<ledger>-~<the first 4 hex digits of sha256(item path)>".
+#
+# The counter ref (config keys.counter_ref on keys.remote) is a commit whose
+# tree is one blob, counters.json: {ledger: next number}. Allocation fetches
+# it (one ref, into refs/doc-superpowers/ledger/counters-remote), writes a
+# commit with the new numbers whose parent is the fetched one, and pushes it
+# with --force-with-lease=<ref>:<fetched oid> (--no-verify: a pre-push hook
+# guards the user's branches, not this ref). The remote's ref update is
+# the atomic step: two allocators never get the same numbers. The loser
+# retries — at most 8 times, 0.1–0.6 s of random jitter apart, re-reading
+# each time — then gives up (rc 2; never a provisional key: the remote was
+# reachable). A ledger absent from the counters starts after the highest key
+# number (keys and aliases) of the items at config base. Every counter commit
+# carries a random nonce: two allocators writing the same numbers on the
+# same parent in the same second must not produce one commit id — the
+# second push would read "up to date" (exit 0) and both would take the keys.
+#
+# Push outcome (_lg_counter_cas): success ONLY when the push exits 0 and the
+# ref's porcelain flag is " " (fast-forward), "*" (created) or "=" (the
+# remote already has this very commit: ours, thanks to the nonce) → 0;
+# "!" with "stale info", "failed to lock" or "failed to update ref" → 1
+# (retry) — and with the reasons git ≥ 2.51's receive-pack gives the same
+# lost race when its ref transaction finds the ref moved under it ("reference
+# already exists": a concurrent create; "incorrect old value provided" /
+# "reference does not exist": a concurrent update; deviation from the plan's
+# list, which predates them — observed in the race test on git 2.54); exit
+# 128 or no status line for the ref → 4 (transport); any other outcome (a
+# declining hook, a refused namespace, "+" …) → 2. Retrying is always safe:
+# only a push that exits 0 with one of the three flags hands out keys.
+#
+# keys.mode "merge" (fork-and-PR repositories): allocation never touches the
+# network — every key is provisional — and `ledger finalize`, run on the
+# base, numbers them after the highest key in the working tree and commits
+# the rewrite ("ledger: finalize N keys").
+
+_LG_COUNTERS_REMOTE=refs/doc-superpowers/ledger/counters-remote
+_LG_ALLOC_RETRIES=8
+_LG_K_MODE=""
+_LG_K_REMOTE=""
+_LG_K_REF=""
+_LG_K_BASE=""
+_LG_ALLOC_STRICT=""  # 1: no provisional key — an unreachable remote dies (finalize)
+
+# --- Resolution --------------------------------------------------------------------
+
+# jq: lg_resolve($ref; $cfg), applied to the index object →
+# {r: "item", v: path} | {r: "archived", v: anchor} | {r: "ambiguous", v: [paths]} | {r: "none"}.
+# shellcheck disable=SC2016  # jq source
+_LG_JQ_RESOLVE_DEFS='
+def lg_r_stem: split("/") | last | if endswith(".md") then .[0:-3] else . end;
+def lg_r_by_key($ix; $k):
+  ($k | ascii_downcase) as $l
+  | [$ix.items[] | select(((.key // "") | ascii_downcase) == $l or any((.aliases // [])[]; ascii_downcase == $l)) | .path]
+  | unique;
+def lg_r_keyish($ix; $k):
+  lg_r_by_key($ix; $k) as $m
+  | if $m != [] then $m
+    else (($ix.finalized // {}) | if type == "object" then (.[$k] // .[$k | ascii_downcase] // null) else null end) as $to
+      | if ($to | type) == "string" then lg_r_by_key($ix; $to) else [] end
+    end;
+def lg_r_one($m):
+  if ($m | length) == 1 then {r: "item", v: $m[0]} elif ($m | length) > 1 then {r: "ambiguous", v: $m} else {r: "none"} end;
+def lg_r_legacy_ids($old; $cfg):
+  ($old | lg_r_stem) as $stem
+  | reduce ($old, $stem,
+            (($cfg.legacy_ledgers // {}) | if type == "object" then to_entries[]
+               | select((.value | type) == "string" and (.value | lg_r_stem) == $stem) | .key else empty end),
+            ($stem | if endswith("-ledger") then .[0:-7] else . end)) as $id
+      ([]; if $id == "" or index([$id]) != null then . else . + [$id] end);
+def lg_r_legacy($ix; $cfg; $old; $n):
+  ($ix.legacy // {}) as $L
+  | if ($L | type) != "object" then null
+    else first(lg_r_legacy_ids($old; $cfg)[] as $id
+               | "\($id)#\($n)" as $k
+               | ($k | ascii_downcase) as $lk
+               | ($L[$k] // first($L | to_entries[] | select((.key | ascii_downcase) == $lk) | .value) // empty)) // null
+    end;
+def lg_resolve($ref; $cfg):
+  . as $ix
+  | ($ref | gsub("^\\s+|\\s+$"; "")) as $r
+  | ($r | if startswith("./") then sub("^(\\./)+"; "") else . end) as $p
+  | if $p != "" and any($ix.items[]; .path == $p) then {r: "item", v: $p}
+    else
+      (if ($r | test("^\\S+$")) then $r
+       else ($r | capture("^(?<l>\\S+)\\s+#?\\s*(?<n>[0-9]+)$") // null | if . == null then null else "\(.l)-\(.n)" end)
+       end) as $k
+      | (if $k == null then [] else lg_r_keyish($ix; $k) end) as $m
+      | if $m != [] then lg_r_one($m)
+        else
+          ($r | capture("^(?<o>[^\\s#]+)#(?<n>[0-9]+)$")
+                // capture("^(?<o>\\S+)\\s+(?:ledger\\s+)?row\\s+#?(?<n>[0-9]+)$"; "i") // null) as $lg
+          | (if $lg == null then null else lg_r_legacy($ix; $cfg; $lg.o; ($lg.n | tonumber | tostring)) end) as $e
+          | if $e != null then
+              (if ($e | type) != "object" then {r: "none"}
+               elif ($e.key | type) == "string" then lg_r_one(lg_r_keyish($ix; $e.key))
+               elif ($e.item | type) == "string" then {r: "item", v: $e.item}
+               elif ($e.archived | type) == "string" then {r: "archived", v: $e.archived}
+               else {r: "none"} end)
+            else lg_r_one([$ix.items[] | select(.path | lg_r_stem == $p) | .path])
+            end
+        end
+    end;
+'
+
+# _lg_k_multiword <text>: the text is one of the several-word reference forms
+# ("L 14", "L #14", "<old> row <n>", "<old> ledger row <n>").
+_lg_k_multiword() {
+  local re1='^[^[:space:]]+[[:space:]]+#?[[:space:]]*[0123456789]+$'
+  local re2='^[^[:space:]]+[[:space:]]+([Ll][Ee][Dd][Gg][Ee][Rr][[:space:]]+)?[Rr][Oo][Ww][[:space:]]+#?[0123456789]+$'
+  [[ $1 =~ $re1 ]] || [[ $1 =~ $re2 ]]
+}
+
+# _lg_resolve_into <ref>: resolve into _LG_RES_KIND (item | archived | none
+# | ambiguous) and _LG_RES (the path, the anchor, or the paths ", "-joined).
+# Call in the main shell. Dies (2) when the index cannot be built.
+_lg_resolve_into() {
+  local ix out
+  ix=$(_lg_index) || exit "$?"
+  out=$(jq -r --arg ref "$1" --slurpfile c "$_LG_CFG" "$_LG_JQ_RESOLVE_DEFS"'
+    lg_resolve($ref; $c[0])
+    | if .r == "ambiguous" then "ambiguous\t" + (.v | join(", "))
+      elif .r == "none" then "none\t"
+      else "\(.r)\t\(.v)" end' "$ix") || _lg_die "jq failed (resolving '$1')"
+  _LG_RES_KIND=${out%%$'\t'*}
+  _LG_RES=${out#*$'\t'}
+}
+
+# _lg_resolve <ref>: print the item's path (or a legacy row's archived
+# anchor); rc 1 when nothing matches, rc 3 when several items do (named on
+# stderr).
+_lg_resolve() {
+  _lg_resolve_into "$1"
+  case "$_LG_RES_KIND" in
+    item|archived) printf '%s\n' "$_LG_RES" ;;
+    none) return 1 ;;
+    ambiguous)
+      printf "ledger: '%s' matches several items: %s\n" "$1" "$_LG_RES" >&2
+      return 3 ;;
+    *) _lg_die "internal: resolve kind '$_LG_RES_KIND'" ;;
+  esac
+}
+
+# --- Configuration and small helpers -----------------------------------------------
+
+# _lg_k_cfg: keys.mode, keys.remote, keys.counter_ref and base into _LG_K_*;
+# dies (2) on a value that cannot work.
+_lg_k_cfg() {
+  local d
+  [ -z "$_LG_K_MODE" ] || return 0
+  d=$(mktemp "$_SCRATCH/lg-kcfg.XXXXXX") || _lg_die "mktemp failed"
+  _lg_cfg '(.keys.mode, .keys.remote, .keys.counter_ref, .base) | if type == "string" then gsub("\n"; " ") else "" end' > "$d"
+  { IFS= read -r _LG_K_MODE; IFS= read -r _LG_K_REMOTE; IFS= read -r _LG_K_REF; IFS= read -r _LG_K_BASE; } < "$d" || true
+  case "$_LG_K_MODE" in
+    cas|merge) ;;
+    *) _lg_die "config keys.mode must be \"cas\" or \"merge\" (got '$_LG_K_MODE')" ;;
+  esac
+  case "$_LG_K_REMOTE" in
+    ''|-*) _lg_die "config keys.remote must name a remote (got '$_LG_K_REMOTE')" ;;
+  esac
+  case "$_LG_K_REF" in
+    refs/?*) git check-ref-format "$_LG_K_REF" 2>/dev/null \
+      || _lg_die "config keys.counter_ref is not a valid ref name: '$_LG_K_REF'" ;;
+    *) _lg_die "config keys.counter_ref must be a ref under refs/ (got '$_LG_K_REF')" ;;
+  esac
+}
+
+# _lg_k_provisional <ledger> <path>: print the provisional key.
+_lg_k_provisional() {
+  local f
+  f=$(mktemp "$_SCRATCH/lg-kp.XXXXXX") || _lg_die "mktemp failed"
+  printf '%s' "$2" > "$f" || _lg_die "cannot write $f"
+  _hash_one "$f"
+  printf '%s-~%s\n' "$1" "${_HASH#sha256:}" | cut -c "1-$((${#1} + 6))"
+}
+
+# _lg_k_random: random hex (16 digits from /dev/urandom), with a fresh
+# process id — unique among the processes alive now even without urandom
+# ($RANDOM and $$ are the same in every subshell of one bash 3.2 process).
+_lg_k_random() {
+  local r="" p
+  r=$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || r=""
+  p=$(sh -c 'echo $$') || p=0
+  printf '%s-%s-%s-%s\n' "${r:-$RANDOM$RANDOM}" "$p" "$(date +%s)" "$$"
+}
+
+# _lg_k_jitter: sleep 0.10–0.60 s (from /dev/urandom: subshells share
+# $RANDOM's sequence in bash 3.2, and lockstep retries collide again).
+_lg_k_jitter() {
+  local b
+  b=$(od -An -N1 -tu1 /dev/urandom 2>/dev/null | tr -d ' \n') || b=""
+  case "$b" in ''|*[!0123456789]*) b=$RANDOM ;; esac
+  b=$((b % 51 + 10))
+  sleep "0.$b"
+}
+
+# _lg_k_parse_defs: jq — lg_k_split: a key string → {l, n} (a real key,
+# lowercased), else null; lg_k_prov: a provisional key (lowercased) or null.
+# shellcheck disable=SC2016  # jq source
+_LG_JQ_KEYS_DEFS='
+def lg_k_split:
+  if type != "string" then null
+  else ascii_downcase | if test("^[a-z0-9-]{1,16}-[1-9][0-9]*$") then (capture("^(?<l>.+)-(?<n>[0-9]+)$") | {l, n: (.n | tonumber)}) else null end
+  end;
+def lg_k_prov:
+  if type != "string" then null else ascii_downcase | if test("^[a-z0-9-]{1,16}-~[0-9a-f]{4}$") then . else null end end;
+'
+
+# _lg_k_maxes <records.jsonl> <out>: {ledger: highest key number} over the
+# records' keys and aliases.
+_lg_k_maxes() {
+  jq -n -c --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS$_LG_JQ_KEYS_DEFS"'
+    lg_fields($c[0]) as $F
+    | reduce (inputs | (.fm // {}) | ((lg_fv($F; "key") | lg_list[]), (lg_fv($F; "aliases") | lg_list[]))
+              | lg_k_split | select(. != null)) as $x
+        ({}; .[$x.l] = ([.[$x.l] // 0, $x.n] | max))' "$1" > "$2" \
+    || _lg_die "jq failed (the highest keys)"
+}
+
+# _lg_k_base_max <out>: _lg_k_maxes over the items at config base.
+_lg_k_base_max() {
+  local out="$1" d commit
+  case "$_LG_K_BASE" in
+    -*|'') _lg_die "cannot seed the key counters: config base is '$_LG_K_BASE'" ;;
+  esac
+  commit=$(git rev-parse -q --verify "$_LG_K_BASE^{commit}" 2>/dev/null) \
+    || _lg_die "cannot seed the key counters: the base '$_LG_K_BASE' (config base) is not a commit here (fetch it first)"
+  d=$(mktemp -d "$_SCRATCH/lg-kbase.XXXXXX") || _lg_die "mktemp failed"
+  _lg_item_paths "$commit" "$d/paths.z"
+  _lg_parse_blobs "$commit" "$d/paths.z" "$d/recs"
+  _lg_k_maxes "$d/recs" "$out"
+}
+
+# --- The counter ref ------------------------------------------------------------------
+
+# _lg_counter_fetch: fetch the counter ref → _LG_CTR_OID (the commit, "" when
+# the remote has no counter ref) and _LG_CTR_FILE (its counters, {} when
+# none). rc 0; 1 when the local copy is locked by a concurrent run (retry);
+# 4 when the remote cannot be reached (_LG_CTR_ERR says why). Every failure
+# is checked explicitly: callers run it on the left of ||.
+_lg_counter_fetch() {
+  local d err
+  d=$(mktemp -d "$_SCRATCH/lg-ctr.XXXXXX") || _lg_die "mktemp failed"
+  _LG_CTR_OID=""
+  _LG_CTR_FILE="$d/counters.json"
+  _LG_CTR_ERR=""
+  if LC_ALL=C git fetch --quiet --no-tags --no-recurse-submodules "$_LG_K_REMOTE" \
+      "+$_LG_K_REF:$_LG_COUNTERS_REMOTE" < /dev/null > /dev/null 2> "$d/err"; then
+    _LG_CTR_OID=$(git rev-parse -q --verify "$_LG_COUNTERS_REMOTE^{commit}" 2>/dev/null) \
+      || _lg_die "the counter ref $_LG_K_REF on '$_LG_K_REMOTE' is not a commit"
+    git cat-file blob "$_LG_CTR_OID:counters.json" > "$_LG_CTR_FILE" 2>/dev/null \
+      || _lg_die "the counter ref $_LG_K_REF ($_LG_CTR_OID) has no counters.json"
+    jq -e -s 'length == 1 and (.[0] | type == "object"
+        and all(to_entries[]; (.key | test("^[a-z0-9-]{1,16}$")) and (.value | type == "number" and . >= 1 and . == floor)))' \
+        "$_LG_CTR_FILE" > /dev/null 2>&1 \
+      || _lg_die "the counter ref $_LG_K_REF ($_LG_CTR_OID): counters.json is not {ledger: next number}"
+    return 0
+  fi
+  err=$(cat "$d/err" 2>/dev/null) || err=""
+  case "$err" in
+    *"couldn't find remote ref"*)
+      git update-ref -d "$_LG_COUNTERS_REMOTE" > /dev/null 2>&1 || true
+      printf '{}\n' > "$_LG_CTR_FILE" || _lg_die "cannot write $_LG_CTR_FILE"
+      return 0 ;;
+    *"cannot lock ref"*|*".lock"*) return 1 ;;
+  esac
+  _LG_CTR_ERR=$(printf '%s\n' "$err" | grep -v '^[[:space:]]*$' | head -n 2 | tr '\n' ' ')
+  return 4
+}
+
+# _lg_k_read_merged <want-json|""> <out>: the counters (fetched) with seeds
+# put in: when a wanted ledger (or, with no want, any) is absent from them,
+# every ledger the base has keys for and the counters lack gets its highest
+# number + 1. rc as _lg_counter_fetch.
+_lg_k_read_merged() {
+  local want="$1" out="$2" rc=0 need d
+  _lg_counter_fetch || rc=$?
+  [ "$rc" = 0 ] || return "$rc"
+  if [ -n "$want" ]; then
+    need=$(jq -r --argjson w "$want" '[$w | keys[]] - keys | length' "$_LG_CTR_FILE") \
+      || _lg_die "jq failed (counters)"
+  else
+    need=1
+  fi
+  if [ "$need" = 0 ]; then
+    cp -- "$_LG_CTR_FILE" "$out" || _lg_die "cannot write $out"
+    return 0
+  fi
+  d=$(mktemp "$_SCRATCH/lg-kmax.XXXXXX") || _lg_die "mktemp failed"
+  _lg_k_base_max "$d"
+  jq -c --slurpfile m "$d" '. as $c | reduce ($m[0] | to_entries[]) as $e ($c; if has($e.key) then . else .[$e.key] = $e.value + 1 end)' \
+    "$_LG_CTR_FILE" > "$out" || _lg_die "jq failed (seeding the counters)"
+}
+
+# _lg_counter_read: print the counters {ledger: next} — the remote's, with
+# every ledger they lack that has keys at the base seeded. Dies (2) when the
+# remote cannot be read.
+_lg_counter_read() {
+  local d rc=0
+  _lg_k_cfg
+  d=$(mktemp "$_SCRATCH/lg-kread.XXXXXX") || _lg_die "mktemp failed"
+  _lg_k_read_merged "" "$d" || rc=$?
+  case "$rc" in
+    0) cat -- "$d" ;;
+    1) _lg_die "cannot update $_LG_COUNTERS_REMOTE: locked by another run" ;;
+    *) _lg_die "cannot read the counter ref $_LG_K_REF from '$_LG_K_REMOTE': $_LG_CTR_ERR" ;;
+  esac
+}
+
+# _lg_k_commit_tree <tree> <parent|""> <message-file>: a commit, with a
+# fallback identity when git has none (the counter commits are machinery).
+_lg_k_commit_tree() {
+  local tree="$1" parent="$2" msg="$3"
+  local an="" ae="" cn="" ce=""
+  if ! git var GIT_AUTHOR_IDENT > /dev/null 2>&1 || ! git var GIT_COMMITTER_IDENT > /dev/null 2>&1; then
+    an="doc-superpowers ledger" ae="ledger@doc-superpowers.invalid"
+    cn=$an ce=$ae
+  fi
+  if [ -n "$parent" ]; then
+    GIT_AUTHOR_NAME="${an:-${GIT_AUTHOR_NAME:-}}" GIT_AUTHOR_EMAIL="${ae:-${GIT_AUTHOR_EMAIL:-}}" \
+    GIT_COMMITTER_NAME="${cn:-${GIT_COMMITTER_NAME:-}}" GIT_COMMITTER_EMAIL="${ce:-${GIT_COMMITTER_EMAIL:-}}" \
+      _lg_k_ct "$tree" -p "$parent" < "$msg"
+  else
+    GIT_AUTHOR_NAME="${an:-${GIT_AUTHOR_NAME:-}}" GIT_AUTHOR_EMAIL="${ae:-${GIT_AUTHOR_EMAIL:-}}" \
+    GIT_COMMITTER_NAME="${cn:-${GIT_COMMITTER_NAME:-}}" GIT_COMMITTER_EMAIL="${ce:-${GIT_COMMITTER_EMAIL:-}}" \
+      _lg_k_ct "$tree" < "$msg"
+  fi
+}
+
+# git commit-tree, with an empty identity variable left unset (an empty
+# GIT_AUTHOR_NAME is an error, unset is "use the config").
+_lg_k_ct() {
+  local v
+  for v in GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL; do
+    if [ -z "${!v:-}" ]; then unset "$v"; else export "${v?}"; fi
+  done
+  git commit-tree "$@"
+}
+
+# _lg_counter_cas <expected-oid|""> <new-json> [message]: one commit (tree:
+# counters.json = <new-json>; parent: <expected>, none when ""), pushed to
+# the counter ref with --force-with-lease=<ref>:<expected>. rc 0 pushed · 1
+# lost the race (retry) · 2 refused · 4 transport; _LG_CAS_ERR says why.
+# Every failure is checked explicitly (callers run it on the left of ||).
+_lg_counter_cas() {
+  local expected="$1" json="$2" msg="${3:-ledger: allocate}" d blob tree commit rc=0 line flag summary
+  _lg_k_cfg
+  _LG_CAS_ERR=""
+  d=$(mktemp -d "$_SCRATCH/lg-cas.XXXXXX") || _lg_die "mktemp failed"
+  jq -S . <<<"$json" > "$d/counters.json" 2>/dev/null || _lg_die "internal: the new counters are not JSON: $json"
+  blob=$(git hash-object -w "$d/counters.json") || _lg_die "git hash-object failed (the counters)"
+  tree=$(printf '100644 blob %s\tcounters.json\n' "$blob" | git mktree) || _lg_die "git mktree failed (the counters)"
+  printf '%s\n\nNonce: %s\n' "$msg" "$(_lg_k_random)" > "$d/msg" || _lg_die "cannot write $d/msg"
+  commit=$(_lg_k_commit_tree "$tree" "$expected" "$d/msg") || _lg_die "git commit-tree failed (the counters)"
+  LC_ALL=C git push --porcelain --no-verify "--force-with-lease=$_LG_K_REF:$expected" \
+    "$_LG_K_REMOTE" "$commit:$_LG_K_REF" < /dev/null > "$d/out" 2> "$d/err" || rc=$?
+  # The ref's status line: "<flag>\t<from>:<to>\t<summary>".
+  _lg_awkv ":$_LG_K_REF"
+  line=$(LC_ALL=C awk -F '\t' -v r="$_LG_AV" '
+    NF >= 3 { n = length($2); k = length(r); if (n >= k && substr($2, n - k + 1) == r) { print; exit } }' "$d/out") || line=""
+  if [ "$rc" = 128 ] || [ -z "$line" ]; then
+    _LG_CAS_ERR="the push to '$_LG_K_REMOTE' failed (exit $rc): $(grep -v '^[[:space:]]*$' "$d/err" 2>/dev/null | head -n 2 | tr '\n' ' ')"
+    return 4
+  fi
+  flag=${line:0:1}
+  summary=${line##*$'\t'}
+  if [ "$rc" = 0 ]; then
+    case "$flag" in
+      ' '|'*'|'=')
+        git update-ref "$_LG_COUNTERS_REMOTE" "$commit" > /dev/null 2>&1 || true
+        _LG_CAS_COMMIT=$commit
+        return 0 ;;
+    esac
+  fi
+  if [ "$flag" = '!' ]; then
+    case "$summary" in
+      *"stale info"*|*"failed to lock"*|*"failed to update ref"*|\
+      *"reference already exists"*|*"incorrect old value provided"*|*"reference does not exist"*)
+        _LG_CAS_ERR="lost the race for $_LG_K_REF: $summary"
+        return 1 ;;
+    esac
+  fi
+  _LG_CAS_ERR="the push of $_LG_K_REF to '$_LG_K_REMOTE' was refused (exit $rc, '$flag' $summary)$(
+    grep -v '^[[:space:]]*$' "$d/err" 2>/dev/null | grep -v '^error: failed to push' | head -n 2 | tr '\n' ' ' | sed 's/^/: /')"
+  return 2
+}
+
+# --- Allocation ----------------------------------------------------------------------
+
+# _lg_k_prov_lines <paths-file>: "ledger\tprovisional key" per line of
+# <paths-file> ("ledger\tpath").
+_lg_k_prov_lines() {
+  local l p
+  while IFS=$'\t' read -r l p; do
+    printf '%s\t%s\n' "$l" "$(_lg_k_provisional "$l" "$p")"
+  done < "$1"
+}
+
+# _lg_alloc_batch <json {ledger: count}> [paths-file]: allocate the keys in
+# ONE counter commit and print "ledger\tkey" per key — in <paths-file>'s
+# order when given ("ledger\tpath" per item, as many per ledger as its
+# count: the item each key is for), else by ledger and number. Retries
+# (≤ 8, 0.1–0.6 s jitter, re-reading each time) when it loses the race;
+# exhausted → dies 2. An unreachable remote → provisional keys (they need
+# <paths-file>) with a warning on stderr, rc 0 — unless _LG_ALLOC_STRICT=1
+# (dies 2). keys.mode merge → provisional keys, no network.
+_lg_alloc_batch() {
+  local want="$1" paths="${2:-}" d attempt=0 rc msg json
+  _lg_k_cfg
+  jq -e 'type == "object" and length > 0
+      and all(to_entries[]; (.key | test("^[a-z0-9-]{1,16}$")) and .key != "unassigned"
+              and (.value | type == "number" and . >= 1 and . == floor))' <<<"$want" > /dev/null 2>&1 \
+    || _lg_die "allocation: expected {ledger: count} (ledger ids ^[a-z0-9-]{1,16}\$, not unassigned; counts ≥ 1), got: $want"
+  d=$(mktemp -d "$_SCRATCH/lg-alloc.XXXXXX") || _lg_die "mktemp failed"
+  if [ -n "$paths" ]; then
+    jq -e -R -n --argjson w "$want" '
+      [inputs | split("\t") | .[0]] | group_by(.) | map({key: .[0], value: length}) | from_entries == $w' "$paths" \
+      > /dev/null 2>&1 || _lg_die "internal: allocation: the item paths do not match the counts $want"
+  fi
+  if [ "$_LG_K_MODE" = merge ]; then
+    [ -n "$paths" ] || _lg_die "internal: keys.mode merge allocates provisional keys, which need the item paths"
+    _lg_k_prov_lines "$paths"
+    return 0
+  fi
+  while :; do
+    rc=0
+    _lg_k_read_merged "$want" "$d/cur.json" || rc=$?
+    if [ "$rc" = 0 ]; then
+      jq -n -r --slurpfile cur "$d/cur.json" --argjson want "$want" '
+        reduce ($want | to_entries | sort_by(.key))[] as $e ({c: $cur[0], k: [], m: []};
+          (.c[$e.key] // 1) as $f
+          | .c[$e.key] = $f + $e.value
+          | .k += [range($f; $f + $e.value) as $i | "\($e.key)\t\($e.key)-\($i)"]
+          | .m += ["\($e.key)-\($f)" + (if $e.value > 1 then "..\($e.key)-\($f + $e.value - 1)" else "" end)])
+        | (.c | tojson), ("ledger: allocate " + (.m | join(", "))), .k[]' > "$d/next" \
+        || _lg_die "jq failed (the next counters)"
+      { IFS= read -r json; IFS= read -r msg; } < "$d/next" || _lg_die "cannot read $d/next"
+      tail -n +3 "$d/next" > "$d/keys" || _lg_die "cannot write $d/keys"
+      rc=0
+      _lg_counter_cas "$_LG_CTR_OID" "$json" "$msg" || rc=$?
+      if [ "$rc" = 0 ]; then
+        if [ -n "$paths" ]; then
+          LC_ALL=C awk -F '\t' -v keys="$d/keys" '
+            BEGIN { while ((getline l < keys) > 0) { split(l, f, "\t"); Q[f[1], ++N[f[1]]] = f[2] } }
+            { print $1 "\t" Q[$1, ++I[$1]] }' "$paths" || _lg_die "cannot print the keys"
+        else
+          cat -- "$d/keys"
+        fi
+        return 0
+      fi
+      [ "$rc" != 4 ] || _LG_CTR_ERR=$_LG_CAS_ERR
+      [ "$rc" = 1 ] || [ "$rc" = 4 ] || _lg_die "could not allocate keys: $_LG_CAS_ERR"
+    fi
+    if [ "$rc" = 4 ]; then
+      if [ "${_LG_ALLOC_STRICT:-}" = 1 ]; then
+        _lg_die "cannot reach '$_LG_K_REMOTE' for the counter ref $_LG_K_REF: ${_LG_CTR_ERR:-transport failure}"
+      fi
+      [ -n "$paths" ] || _lg_die "cannot reach '$_LG_K_REMOTE' for the counter ref (${_LG_CTR_ERR:-transport failure}), and no item paths were given for provisional keys"
+      _lg_k_prov_lines "$paths" > "$d/prov" || _lg_die "cannot compute the provisional keys"
+      echo "ledger: warning: cannot reach '$_LG_K_REMOTE' (${_LG_CTR_ERR:-transport failure}) — provisional key(s) $(cut -f2 "$d/prov" | tr '\n' ' ')given; run \`doc-tools.sh ledger finalize\` once it is reachable (in keys.mode cas the pre-push hook refuses provisional keys)." >&2
+      cat -- "$d/prov"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    _lg_ix_trace "alloc-retry $attempt: ${_LG_CAS_ERR:-the counter ref is locked here}"
+    if [ "$attempt" -gt "$_LG_ALLOC_RETRIES" ]; then
+      _lg_die "could not allocate keys: the counter ref $_LG_K_REF kept moving — gave up after $_LG_ALLOC_RETRIES retries (no provisional key: the remote is reachable; run it again)"
+    fi
+    _lg_k_jitter
+  done
+}
+
+# _lg_alloc <ledger> <count> [path…]: _lg_alloc_batch for one ledger (the
+# paths, when given, one per key, are the items the keys are for).
+_lg_alloc() {
+  local l="$1" n="$2" p f=""
+  shift 2
+  case "$n" in ''|*[!0123456789]*) _lg_die "internal: _lg_alloc: count '$n'" ;; esac
+  if [ $# -gt 0 ]; then
+    f=$(mktemp "$_SCRATCH/lg-allocp.XXXXXX") || _lg_die "mktemp failed"
+    for p in "$@"; do printf '%s\t%s\n' "$l" "$p"; done > "$f"
+  fi
+  _lg_alloc_batch "{\"$l\":$n}" "$f"
+}
+
+# _lg_k_local_alloc <paths-file> <index>: keys.mode merge's allocation on the
+# base: "ledger\tkey" per line of <paths-file>, numbered after the highest
+# key (or alias, or finalized key) per ledger in <index>.
+_lg_k_local_alloc() {
+  jq -n -r -R --slurpfile ix "$2" "$_LG_JQ_KEYS_DEFS"'
+    (reduce ($ix[0] | (.items[] | (.key, (.aliases // [])[])), ((.finalized // {}) | if type == "object" then .[] else empty end))
+       as $k ({}; ($k | lg_k_split) as $x | if $x == null then . else .[$x.l] = ([.[$x.l] // 0, $x.n] | max) end)) as $M
+    | foreach (inputs | split("\t")) as $p ({M: $M};
+        .M[$p[0]] = ((.M[$p[0]] // 0) + 1) | .out = "\($p[0])\t\($p[0])-\(.M[$p[0]])"; .out)' "$1" \
+    || _lg_die "jq failed (numbering the provisional keys)"
+}
+
+# --- Reading and writing an item's key fields ---------------------------------------------
+
+# _lg_k_names <file>: the frontmatter names to write for key, ledger,
+# summary and aliases — the first configured candidate the file has, else
+# the first candidate — into _LG_KN_KEY, _LG_KN_LEDGER, _LG_KN_SUMMARY,
+# _LG_KN_ALIASES.
+_lg_k_names() {
+  local d
+  _lg_parse_prep
+  d=$(mktemp "$_SCRATCH/lg-kn.XXXXXX") || _lg_die "mktemp failed"
+  LC_ALL=C awk -v path=x "${_LG_PARSE_ARGS[@]}" -f "$_LG_LIB/frontmatter.awk" < "$1" > "$d.rec" \
+    || _lg_die "cannot parse $1"
+  jq -r --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS"'
+    lg_fields($c[0]) as $F | (.fm // {}) as $fm
+    | ("key", "ledger", "summary", "aliases") as $l
+    | ($F[$l] // []) as $cs
+    | (first($cs[] | select(. as $n | $fm | has($n))) // $cs[0] // $l)' "$d.rec" > "$d" \
+    || _lg_die "jq failed (field names of $1)"
+  { IFS= read -r _LG_KN_KEY; IFS= read -r _LG_KN_LEDGER; IFS= read -r _LG_KN_SUMMARY; IFS= read -r _LG_KN_ALIASES; } < "$d" \
+    || _lg_die "cannot read the field names of $1"
+}
+
+# _lg_k_item_info <index> <path>: the item's key and ledger into _LG_KI_KEY,
+# _LG_KI_LEDGER ("" when none); _LG_KI_FOUND 1 when <path> is an item.
+_lg_k_item_info() {
+  local d
+  d=$(mktemp "$_SCRATCH/lg-kinfo.XXXXXX") || _lg_die "mktemp failed"
+  # Three lines (not one \001-separated line: bash 3.2 mangles \001 in IFS).
+  jq -r --arg p "$2" '[.items[] | select(.path == $p)]
+      | if length == 0 then "0", "", ""
+        else .[0] | "1", (.key // "" | gsub("[\r\n]"; " ")), (.ledger // "" | gsub("[\r\n]"; " ")) end' "$1" > "$d" \
+    || _lg_die "jq failed (item $2)"
+  { IFS= read -r _LG_KI_FOUND; IFS= read -r _LG_KI_KEY; IFS= read -r _LG_KI_LEDGER; } < "$d" \
+    || _lg_die "cannot read the item $2"
+}
+
+# _lg_k_check_ledger <id> <allow-unassigned 0|1>: a usage error unless <id>
+# is a registered, active ledger (or, allowed, "unassigned").
+_lg_k_check_ledger() {
+  local id="$1" st reg re
+  if [ "$id" = unassigned ]; then
+    [ "$2" = 1 ] || _lg_usage "'unassigned' carries no key: give a ledger"
+    return 0
+  fi
+  re='^[abcdefghijklmnopqrstuvwxyz0123456789-]{1,16}$'
+  [[ $id =~ $re ]] || _lg_usage "'$id' is not a ledger id (^[a-z0-9-]{1,16}\$)"
+  reg=$(_lg_registry)
+  st=$(jq -r --arg id "$id" '[.ledgers[] | select(.id == $id)]
+      | if length == 0 then "none" else (.[0].status | if type == "string" then . else "active" end) end' "$reg") \
+    || _lg_die "jq failed (registry)"
+  case "$st" in
+    none) _lg_usage "'$id' is not a ledger (registry: $(jq -r '[.ledgers[] | .id | strings] | join(", ")' "$reg"))" ;;
+    retired) _lg_usage "ledger '$id' is retired: it accepts no new items" ;;
+  esac
+}
+
+# _lg_k_item_path <path>: the path normalized ("./" dropped) into _LG_KP; a
+# usage error unless it is an existing file the item globs match.
+_lg_k_item_path() {
+  local p="$1" d
+  while :; do
+    case "$p" in ./*) p=${p#./} ;; *) break ;; esac
+  done
+  [ -f "$p" ] || _lg_usage "no such file: '$1'"
+  d=$(mktemp "$_SCRATCH/lg-kip.XXXXXX") || _lg_die "mktemp failed"
+  _lg_cfg '[(.items.globs // [])[]?, (.items.archive_globs // [])[]?] | .[] | strings | select(. != "")' > "$d.globs"
+  printf '%s\0' "$p" > "$d.in"
+  _lg_paths_filter "$d.in" "$d.globs" "$d.out"
+  [ -s "$d.out" ] || _lg_usage "'$p' is not an item: config items.globs do not match it"
+  _LG_KP=$p
+}
+
+# _lg_k_new_candidates <index> <with-provisional 0|1> <out>: the staged or
+# untracked item files (items.globs) whose key is missing — or, with 1,
+# provisional — one per line.
+_lg_k_new_candidates() {
+  local ix="$1" prov="$2" out="$3" d
+  d=$(mktemp -d "$_SCRATCH/lg-kcand.XXXXXX") || _lg_die "mktemp failed"
+  git diff --cached --name-only -z --diff-filter=ACMR > "$d/staged.z" 2> "$d/err" \
+    || _lg_die "git diff --cached failed: $(head -n 2 "$d/err")"
+  git ls-files -o --exclude-standard -z > "$d/untracked.z" 2> "$d/err" \
+    || _lg_die "git ls-files -o failed: $(head -n 2 "$d/err")"
+  cat "$d/staged.z" "$d/untracked.z" > "$d/all.z" || _lg_die "cannot write $d/all.z"
+  _lg_cfg '[(.items.globs // [])[]?] | .[] | strings | select(. != "")' > "$d/globs"
+  _lg_paths_filter "$d/all.z" "$d/globs" "$d/items.z"
+  tr '\n\000' '\001\n' < "$d/items.z" > "$d/items" || _lg_die "cannot read $d/items.z"
+  jq -r -R -n --slurpfile ix "$ix" --arg prov "$prov" "$_LG_JQ_KEYS_DEFS"'
+    ([inputs] | unique) as $P
+    | $ix[0].items[] | select(.path as $p | $P | index([$p]) != null)
+    | select(.key == null or ($prov == "1" and (.key | lg_k_prov) != null)) | .path' "$d/items" > "$out" \
+    || _lg_die "jq failed (new item candidates)"
+}
+
+# --- Finalize ------------------------------------------------------------------------------
+
+# shellcheck disable=SC2016  # jq source
+_LG_JQ_REWRITE='
+# The edits that replace the provisional keys of $map ({provisional: key},
+# lowercase) in one record: "set\u0001name\u0001value\u0000" or
+# "setlist\u0001name\u0001count\u0001items joined by \u0001\u0000";
+# "broken\u0001name\u0000" for a field the parser rejected.
+def m($v): if ($v | type) == "string" then $map[$v | ascii_downcase] else null end;
+def item:
+  if m(.) != null then m(.)
+  else (capture("^(?<a>[^:]*:\\s*)(?<b>.*)$") // null) as $x
+    | if $x != null and m($x.b) != null then $x.a + m($x.b) else . end
+  end;
+lg_fields($c[0]) as $F
+| (.fm // {}) as $fm | (.fm_errors // []) as $errs
+| [("key", "superseded_by", "relates", "aliases") as $l | ($F[$l] // [])[]] | unique[] as $n
+| select($fm | has($n))
+| $fm[$n] as $v
+| if ($v | type) == "string" then
+    ($v | item) as $nv
+    | if $nv == $v then empty
+      elif any($errs[]; startswith($n + ": ")) then "broken\u0001\($n)\u0000"
+      else "set\u0001\($n)\u0001\($nv)\u0000" end
+  elif ($v | type) == "array" then
+    [$v[] | if type == "string" then item else . end] as $nl
+    | if $nl == $v then empty
+      elif any($errs[]; startswith($n + ": ")) or any($nl[]; type != "string") then "broken\u0001\($n)\u0000"
+      else "setlist\u0001\($n)\u0001\($nl | length)\u0001\($nl | join("\u0001"))\u0000" end
+  else empty end
+'
+
+# _lg_k_rewrite <file> <map-json>: replace the provisional keys of <map>
+# wherever the item's key, superseded_by, relates or aliases name them.
+_lg_k_rewrite() {
+  local file="$1" map="$2" d rec op rest name count
+  _lg_parse_prep
+  d=$(mktemp "$_SCRATCH/lg-krw.XXXXXX") || _lg_die "mktemp failed"
+  LC_ALL=C awk -v path=x "${_LG_PARSE_ARGS[@]}" -f "$_LG_LIB/frontmatter.awk" < "$file" > "$d.rec" \
+    || _lg_die "cannot parse $file"
+  jq -j --slurpfile c "$_LG_CFG" --argjson map "$map" "$_LG_JQ_INDEX_DEFS$_LG_JQ_REWRITE" "$d.rec" > "$d" \
+    || _lg_die "jq failed (rewriting $file)"
+  while IFS= read -r -d '' rec; do
+    op=${rec%%$'\001'*}
+    rest=${rec#*$'\001'}
+    name=${rest%%$'\001'*}
+    rest=${rest#*$'\001'}
+    case "$op" in
+      set) _lg_fm_set "$file" "$name" "$rest" ;;
+      setlist)
+        count=${rest%%$'\001'*}
+        rest=${rest#*$'\001'}
+        _lg_fm_write "$file" setlist "$name" "" "$rest" "$count" ;;
+      broken) _lg_die "cannot rewrite $name in $file: the parser rejects it (see its frontmatter errors)" ;;
+      *) _lg_die "internal: rewrite op '$op'" ;;
+    esac
+  done < "$d"
+}
+
+# _lg_k_finalized_add <map-json>: merge {provisional: key} into
+# docs/ledger/finalized.json — one entry per line, keys sorted. A provisional
+# key already recorded with another key dies (2).
+_lg_k_finalized_add() {
+  local map="$1" f=docs/ledger/finalized.json d
+  d=$(mktemp "$_SCRATCH/lg-kfin.XXXXXX") || _lg_die "mktemp failed"
+  if [ -f "$f" ]; then
+    jq -e -s 'length == 1 and (.[0] | type) == "object"' "$f" > /dev/null 2>&1 \
+      || _lg_die "$f is not one JSON object"
+    cp -- "$f" "$d" || _lg_die "cannot read $f"
+  else
+    printf '{}\n' > "$d" || _lg_die "cannot write $d"
+  fi
+  jq -S --argjson m "$map" '
+    . as $o
+    | ([$m | to_entries[] | select(($o[.key] // null) != null and $o[.key] != .value) | .key]) as $bad
+    | if $bad != [] then error("already finalized differently: \($bad | join(", "))") else . + $m end' "$d" > "$d.new" \
+    || _lg_die "cannot record the finalized keys in $f"
+  _tmp_beside "$f"
+  cat -- "$d.new" > "$_TMP" || _lg_die "cannot write $_TMP"
+  _replace_file "$_TMP" "$f"
+}
+
+# _lg_k_finalize <only-path|""> <all 0|1> <out-lines> <out-json>: replace
+# provisional keys — <only-path>'s; else (cas) those this branch added
+# (provisional keys the base's items do not carry) or, <all> 1, every one;
+# (merge) every one, committed on the base. Writes "prov → key  path" lines
+# and the JSON payload. Call in the main shell.
+_lg_k_finalize() {
+  local only="$1" all="$2" outl="$3" outj="$4" ix d base_c="" n map p commit=null touched
+  local files=()
+  _lg_k_cfg
+  d=$(mktemp -d "$_SCRATCH/lg-kfz.XXXXXX") || _lg_die "mktemp failed"
+  if [ "$_LG_K_MODE" = merge ]; then
+    base_c=$(git rev-parse -q --verify "$_LG_K_BASE^{commit}" 2>/dev/null) \
+      || _lg_die "keys.mode merge: the base '$_LG_K_BASE' (config base) is not a commit here"
+    [ "$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null || true)" = "$base_c" ] \
+      || _lg_usage "keys.mode merge: finalize runs on the base — check out $_LG_K_BASE (HEAD is not $base_c)"
+    all=1
+  fi
+  ix=$(_lg_index) || exit "$?"
+  # The base's provisional keys (cas, not --all): not this branch's.
+  printf '[]\n' > "$d/basep.json"
+  if [ -z "$only" ] && [ "$all" != 1 ]; then
+    if base_c=$(git rev-parse -q --verify "$_LG_K_BASE^{commit}" 2>/dev/null); then
+      _lg_item_paths "$base_c" "$d/bpaths.z"
+      _lg_parse_blobs "$base_c" "$d/bpaths.z" "$d/brecs"
+      jq -n -c --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS$_LG_JQ_KEYS_DEFS"'
+        lg_fields($c[0]) as $F | [inputs | (.fm // {}) | lg_fv($F; "key") | lg_k_prov | select(. != null)] | unique' \
+        "$d/brecs" > "$d/basep.json" || _lg_die "jq failed (the base's provisional keys)"
+    fi
+  fi
+  # "prov\tledger\tpath" for each item to finalize; a provisional key on
+  # several items cannot be finalized (which one would keep it?).
+  jq -r --slurpfile bp "$d/basep.json" --arg only "$only" "$_LG_JQ_KEYS_DEFS"'
+    [.items[] | {p: .path, k: (.key | lg_k_prov)} | select(.k != null)
+     | select(if $only != "" then .p == $only else (.k as $k | $bp[0] | index([$k]) == null) end)] as $S
+    | ($S | group_by(.k) | map(select(length > 1))) as $dup
+    | if $dup != [] then "dup\t\($dup[0][0].k)\t\($dup[0] | map(.p) | join(", "))"
+      else $S | sort_by(.p)[] | "\(.k)\t\(.k | split("-~")[0])\t\(.p)" end' "$ix" > "$d/todo" \
+    || _lg_die "jq failed (provisional keys)"
+  if [ -n "$only" ]; then
+    # Every item holding <only>'s key — a duplicate elsewhere too.
+    jq -r --arg only "$only" "$_LG_JQ_KEYS_DEFS"'
+      (first(.items[] | select(.path == $only) | .key | lg_k_prov) // null) as $k
+      | if $k == null then empty else [.items[] | select((.key | lg_k_prov) == $k) | .path] | select(length > 1)
+        | "dup\t\($k)\t\(join(", "))" end' "$ix" >> "$d/todo" || _lg_die "jq failed (provisional keys)"
+  fi
+  if grep -q '^dup	' "$d/todo"; then
+    _lg_die "provisional key $(grep '^dup	' "$d/todo" | head -n 1 | cut -f2) is on several items ($(grep '^dup	' "$d/todo" | head -n 1 | cut -f3)): give each its own key first (ledger assign)"
+  fi
+  n=$(grep -c . "$d/todo" || true)
+  if [ "$n" = 0 ]; then
+    : > "$outl"
+    printf '{"finalized":[],"commit":null}\n' > "$outj"
+    return 0
+  fi
+  cut -f2,3 "$d/todo" > "$d/paths" || _lg_die "cannot write $d/paths"
+  # The real keys, in "ledger\tpath" order.
+  if [ "$_LG_K_MODE" = merge ]; then
+    _lg_k_local_alloc "$d/paths" "$ix" > "$d/keys"
+  else
+    jq -R -n -c '[inputs | split("\t") | .[0]] | group_by(.) | map({key: .[0], value: length}) | from_entries' \
+      "$d/paths" > "$d/want" || _lg_die "jq failed (counts)"
+    _LG_ALLOC_STRICT=1 _lg_alloc_batch "$(cat "$d/want")" "$d/paths" > "$d/keys" || exit "$?"
+  fi
+  paste "$d/todo" "$d/keys" > "$d/pairs" || _lg_die "cannot pair the keys"
+  # pairs: prov, ledger, path, ledger, key.
+  map=$(jq -R -n -c '[inputs | split("\t") | {key: .[0], value: .[4]}] | from_entries' "$d/pairs") \
+    || _lg_die "jq failed (the key map)"
+  # The files that name a provisional key being replaced.
+  jq -r --argjson map "$map" '
+    def hit: type == "string" and ($map[ascii_downcase] != null);
+    .items[] | select((.key | hit) or (.superseded_by | hit) or any(.relates[]; .key | hit) or any(.aliases[]; hit))
+    | .path' "$ix" > "$d/touch" || _lg_die "jq failed (references)"
+  while IFS= read -r p; do
+    case "$p" in *$'\001'*) continue ;; esac
+    files+=("$p")
+  done < "$d/touch"
+  files+=(docs/ledger/finalized.json)
+  if [ "$_LG_K_MODE" = merge ]; then
+    touched=$(GIT_LITERAL_PATHSPECS=1 git status --porcelain -- "${files[@]}" 2>&1) || touched="(git status failed) $touched"
+    [ -z "$touched" ] || _lg_die "keys.mode merge: commit or stash the changes to the files finalize rewrites first: $(printf '%s' "$touched" | tr '\n' ' ')"
+  fi
+  for p in "${files[@]}"; do
+    [ "$p" != docs/ledger/finalized.json ] || continue
+    _lg_k_rewrite "$p" "$map"
+  done
+  _lg_k_finalized_add "$map"
+  if [ "$_LG_K_MODE" = merge ]; then
+    GIT_LITERAL_PATHSPECS=1 git add -- "${files[@]}" > "$d/commit.out" 2>&1 \
+      || _lg_die "git add failed: $(head -n 3 "$d/commit.out")"
+    GIT_LITERAL_PATHSPECS=1 git commit -q -m "ledger: finalize $n keys" -- "${files[@]}" > "$d/commit.out" 2>&1 \
+      || _lg_die "git commit failed: $(head -n 3 "$d/commit.out")"
+    commit="\"$(git rev-parse HEAD)\""
+  fi
+  LC_ALL=C awk -F '\t' '{ print $1 " → " $5 "  " $3 }' "$d/pairs" > "$outl" || _lg_die "cannot write $outl"
+  jq -R -n -c --argjson commit "$commit" \
+    '{finalized: [inputs | split("\t") | {provisional: .[0], key: .[4], path: .[2]}], commit: $commit}' \
+    "$d/pairs" > "$outj" || _lg_die "jq failed (finalize payload)"
+}
+
+# --- Verbs -----------------------------------------------------------------------------------
+
+# _lg_k_summary_check <summary>: one line, 1–140 characters, else usage.
+_lg_k_summary_check() {
+  local n
+  case "$1" in
+    *[![:space:]]*) ;;
+    *) _lg_usage "--summary is empty" ;;
+  esac
+  case "$1" in
+    *$'\n'*|*$'\r'*) _lg_usage "--summary must be one line" ;;
+  esac
+  n=$(jq -nr --arg s "$1" '$s | length') || _lg_die "jq failed (summary)"
+  [ "$n" -le 140 ] || _lg_usage "--summary is $n characters: at most 140"
+}
+
+# _lg_k_emit_lines <lines-file> <payload-json-file>: the run's output.
+_lg_k_emit_lines() {
+  if [ "$_LG_FORMAT" = json ]; then _lg_emit "$_LG_VERB" 0 "$2"; fi
+  _lg_out_file "$1"
+  _lg_emit "$_LG_VERB" 0
+}
+
+# shellcheck disable=SC2154  # _OPT_* and _ARGS are set by _parse_args
+cmd_ledger_new() {
+  local L S F fin ix s cands n out key prov=false
+  _lg_init new
+  [ "${#_ARGS[@]}" = 0 ] || _lg_usage "unexpected argument '${_ARGS[0]}' (the item is --file <path>)"
+  L=$_OPT_ledger
+  S=$_OPT_summary
+  F=$_OPT_file
+  fin=$_OPT_finalize
+  _lg_k_cfg
+  if _opt_seen summary; then _lg_k_summary_check "$S"; fi
+  if [ -n "$L" ]; then _lg_k_check_ledger "$L" 1; fi
+  s=$(mktemp -d "$_SCRATCH/lg-new.XXXXXX") || _lg_die "mktemp failed"
+  ix=$(_lg_index) || exit "$?"
+  if [ -n "$F" ]; then
+    _lg_k_item_path "$F"
+    F=$_LG_KP
+  else
+    _lg_k_new_candidates "$ix" "$([ -n "$fin" ] && echo 1 || echo 0)" "$s/cands"
+    n=$(grep -c . "$s/cands" || true)
+    cands=$(tr '\n' ' ' < "$s/cands")
+    case "$n" in
+      0) _lg_usage "no staged or untracked item file without a key: give --file <path>" ;;
+      1) IFS= read -r F < "$s/cands" ;;
+      *) _lg_usage "$n staged or untracked item files have no key ($cands): give --file <path>" ;;
+    esac
+  fi
+  _lg_k_item_info "$ix" "$F"
+  _lg_k_names "$F"
+  if [ -n "$_LG_KI_KEY" ]; then
+    case "$_LG_KI_KEY" in
+      *-~*)
+        [ -n "$fin" ] || _lg_usage "$F already has the provisional key $_LG_KI_KEY: --finalize replaces it"
+        if [ -n "$L" ] && [ "$L" != "${_LG_KI_KEY%%-~*}" ]; then
+          _lg_usage "$F's provisional key $_LG_KI_KEY is in ledger '${_LG_KI_KEY%%-~*}', not '$L' (ledger assign moves it)"
+        fi
+        if [ -n "$S" ]; then _lg_fm_set "$F" "$_LG_KN_SUMMARY" "$S"; fi
+        _lg_k_finalize "$F" 0 "$s/lines" "$s/fin.json"
+        jq -c --arg p "$F" '{path: $p, key: (.finalized[0].key // null), provisional: false, finalized: .finalized}' \
+          "$s/fin.json" > "$s/payload" || _lg_die "jq failed (payload)"
+        _lg_k_emit_lines "$s/lines" "$s/payload" ;;
+      *) _lg_usage "$F already has the key $_LG_KI_KEY (ledger assign moves an item to another ledger)" ;;
+    esac
+  fi
+  [ -n "$L" ] || _lg_usage "give --ledger <id> (or unassigned)"
+  _opt_seen summary || _lg_usage "give --summary \"<why it matters, ≤ 140 characters>\""
+  if [ "$L" = unassigned ]; then
+    _lg_fm_set "$F" "$_LG_KN_LEDGER" "$L"
+    _lg_fm_set "$F" "$_LG_KN_SUMMARY" "$S"
+    printf 'unassigned  %s\n' "$F" > "$s/lines"
+    jq -nc --arg p "$F" '{path: $p, ledger: "unassigned", key: null, provisional: false}' > "$s/payload" \
+      || _lg_die "jq failed (payload)"
+    _lg_k_emit_lines "$s/lines" "$s/payload"
+  fi
+  if [ -n "$fin" ]; then
+    out=$(_LG_ALLOC_STRICT=1 _lg_alloc "$L" 1 "$F") || exit "$?"
+  else
+    out=$(_lg_alloc "$L" 1 "$F") || exit "$?"
+  fi
+  key=${out#*$'\t'}
+  case "$key" in *-~*) prov=true ;; esac
+  _lg_fm_set "$F" "$_LG_KN_KEY" "$key"
+  _lg_fm_set "$F" "$_LG_KN_LEDGER" "$L"
+  _lg_fm_set "$F" "$_LG_KN_SUMMARY" "$S"
+  printf '%s  %s\n' "$key" "$F" > "$s/lines"
+  jq -nc --arg p "$F" --arg l "$L" --arg k "$key" --argjson prov "$prov" \
+    '{path: $p, ledger: $l, key: $k, provisional: $prov}' > "$s/payload" || _lg_die "jq failed (payload)"
+  _lg_k_emit_lines "$s/lines" "$s/payload"
+}
+
+# shellcheck disable=SC2154  # _ARGS is set by _parse_args
+cmd_ledger_assign() {
+  local ref L ix s out key old oldl prov=false
+  _lg_init assign
+  [ "${#_ARGS[@]}" = 2 ] || _lg_usage "give an item and a ledger: ledger assign <item> <ledger>"
+  ref=${_ARGS[0]}
+  L=${_ARGS[1]}
+  [ -n "$ref" ] || _lg_usage "the item is empty"
+  _lg_k_cfg
+  _lg_k_check_ledger "$L" 0
+  s=$(mktemp -d "$_SCRATCH/lg-assign.XXXXXX") || _lg_die "mktemp failed"
+  _lg_resolve_into "$ref"
+  case "$_LG_RES_KIND" in
+    item) ;;
+    none)
+      if [ "$_LG_FORMAT" = json ]; then
+        jq -nc --arg r "$ref" '{item: null, ref: $r}' > "$s/payload" || _lg_die "jq failed (payload)"
+        _lg_emit assign 1 "$s/payload"
+      fi
+      printf "no item matches '%s'\n" "$ref" | tr -d '\000-\010\013-\037' | head -n 1 > "$s/msg"
+      _lg_out_file "$s/msg"
+      _lg_emit assign 1 ;;
+    ambiguous) _lg_usage "'$ref' matches several items: $_LG_RES" ;;
+    archived) _lg_usage "'$ref' is an archived legacy row ($_LG_RES): there is no item to assign" ;;
+    *) _lg_die "internal: resolve kind '$_LG_RES_KIND'" ;;
+  esac
+  [ -f "$_LG_RES" ] || _lg_die "the item '$_LG_RES' is not in the working tree"
+  ix=$(_lg_index) || exit "$?"
+  _lg_k_item_info "$ix" "$_LG_RES"
+  [ "$_LG_KI_FOUND" = 1 ] || _lg_usage "'$ref' leads to $_LG_RES, which is not an item (config items.globs)"
+  old=$_LG_KI_KEY
+  case "$old" in
+    *-~*) oldl=${old%-~*} ;;
+    *) oldl=${old%-*} ;;
+  esac
+  if [ -n "$old" ] && [ "$oldl" = "$L" ]; then
+    case "$old" in
+      *-~*)
+        # Already in the ledger with a provisional key: finalize it.
+        _lg_k_finalize "$_LG_RES" 0 "$s/lines" "$s/fin.json"
+        jq -c --arg p "$_LG_RES" --arg l "$L" --arg o "$old" \
+          '{path: $p, ledger: $l, key: (.finalized[0].key // null), previous: $o, provisional: false}' \
+          "$s/fin.json" > "$s/payload" || _lg_die "jq failed (payload)"
+        ;;
+      *)
+        printf '%s  %s  (already in %s)\n' "$old" "$_LG_RES" "$L" > "$s/lines"
+        jq -nc --arg p "$_LG_RES" --arg l "$L" --arg k "$old" \
+          '{path: $p, ledger: $l, key: $k, previous: null, provisional: false}' > "$s/payload" \
+          || _lg_die "jq failed (payload)"
+        ;;
+    esac
+    _lg_k_emit_lines "$s/lines" "$s/payload"
+  fi
+  _lg_k_names "$_LG_RES"
+  out=$(_lg_alloc "$L" 1 "$_LG_RES") || exit "$?"
+  key=${out#*$'\t'}
+  case "$key" in *-~*) prov=true ;; esac
+  _lg_fm_set "$_LG_RES" "$_LG_KN_KEY" "$key"
+  _lg_fm_set "$_LG_RES" "$_LG_KN_LEDGER" "$L"
+  if [ -n "$old" ]; then
+    _lg_fm_list_add "$_LG_RES" "$_LG_KN_ALIASES" "$old"
+    printf '%s  %s  (was %s)\n' "$key" "$_LG_RES" "$old" > "$s/lines"
+  else
+    printf '%s  %s\n' "$key" "$_LG_RES" > "$s/lines"
+  fi
+  jq -nc --arg p "$_LG_RES" --arg l "$L" --arg k "$key" --arg o "$old" --argjson prov "$prov" \
+    '{path: $p, ledger: $l, key: $k, previous: (if $o == "" then null else $o end), provisional: $prov}' \
+    > "$s/payload" || _lg_die "jq failed (payload)"
+  _lg_k_emit_lines "$s/lines" "$s/payload"
+}
+
+# shellcheck disable=SC2154  # _OPT_* and _ARGS are set by _parse_args
+cmd_ledger_finalize() {
+  local s all=0
+  _lg_init finalize
+  [ "${#_ARGS[@]}" = 0 ] || _lg_usage "unexpected argument '${_ARGS[0]}'"
+  if [ -n "$_OPT_all" ]; then all=1; fi
+  s=$(mktemp -d "$_SCRATCH/lg-fin.XXXXXX") || _lg_die "mktemp failed"
+  _lg_k_finalize "" "$all" "$s/lines" "$s/payload"
+  if [ ! -s "$s/lines" ]; then printf 'no provisional keys to finalize\n' > "$s/lines"; fi
+  if jq -e '.commit != null' "$s/payload" > /dev/null 2>&1; then
+    jq -r '"committed \(.commit[0:12]): ledger: finalize \(.finalized | length) keys"' "$s/payload" >> "$s/lines" \
+      || _lg_die "jq failed (payload)"
+  fi
+  _lg_k_emit_lines "$s/lines" "$s/payload"
+}
+
+# --- Push range -------------------------------------------------------------------------------
+
+# _lg_provisional_in_range <a>..<b>: "key\tpath" for each provisional key
+# the range adds — the item keys at <b> (of the item files the range
+# changes) that no changed item had at <a>. <a> empty or all zeros (a new
+# branch): every provisional key at <b>.
+_lg_provisional_in_range() {
+  local range="$1" a b ac="" bc d
+  case "$range" in
+    *..*) a=${range%%..*}; b=${range#*..} ;;
+    *) _lg_die "internal: _lg_provisional_in_range takes <a>..<b> (got '$range')" ;;
+  esac
+  [ -n "$b" ] || b=HEAD
+  case "$b" in -*) _lg_die "not a revision: '$b'" ;; esac
+  bc=$(git rev-parse -q --verify "$b^{commit}" 2>/dev/null) || _lg_die "unknown revision: '$b'"
+  case "$a" in
+    ''|*[!0]*) ;;
+    *) a="" ;;
+  esac
+  if [ -n "$a" ]; then
+    case "$a" in -*) _lg_die "not a revision: '$a'" ;; esac
+    ac=$(git rev-parse -q --verify "$a^{commit}" 2>/dev/null) || _lg_die "unknown revision: '$a'"
+  fi
+  d=$(mktemp -d "$_SCRATCH/lg-kpr.XXXXXX") || _lg_die "mktemp failed"
+  if [ -n "$ac" ]; then
+    git diff --name-only -z --no-renames "$ac" "$bc" -- > "$d/changed.z" 2> "$d/err" \
+      || _lg_die "git diff failed: $(head -n 2 "$d/err")"
+    _lg_cfg '[(.items.globs // [])[]?, (.items.archive_globs // [])[]?] | .[] | strings | select(. != "")' > "$d/globs"
+    _lg_paths_filter "$d/changed.z" "$d/globs" "$d/paths.z"
+  else
+    _lg_item_paths "$bc" "$d/paths.z"
+  fi
+  [ -s "$d/paths.z" ] || return 0
+  _lg_parse_blobs "$bc" "$d/paths.z" "$d/b.recs"
+  : > "$d/a.recs"
+  if [ -n "$ac" ]; then _lg_parse_blobs "$ac" "$d/paths.z" "$d/a.recs"; fi
+  jq -n -r --slurpfile c "$_LG_CFG" --slurpfile a "$d/a.recs" "$_LG_JQ_INDEX_DEFS$_LG_JQ_KEYS_DEFS"'
+    lg_fields($c[0]) as $F
+    | [$a[] | (.fm // {}) | lg_fv($F; "key") | lg_k_prov | select(. != null)] as $old
+    | inputs | . as $r | ((.fm // {}) | lg_fv($F; "key") | lg_k_prov) as $k
+    | select($k != null and ($old | index([$k]) == null))
+    | "\($k)\t\($r.path)"' "$d/b.recs" || _lg_die "jq failed (provisional keys in $range)"
+}
