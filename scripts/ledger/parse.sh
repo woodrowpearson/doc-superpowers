@@ -620,17 +620,38 @@ _lg_fm_field_ok() {
   esac
 }
 
-# _lg_fm_write <file> <op> <field> [value] [items] [n-items]: fm-write.awk,
-# then the body appended byte for byte, installed with _replace_file (mode
-# kept) unless nothing changed. Call in the main shell (_tmp_beside).
-_lg_fm_write() {
-  local file="$1" op="$2" field="$3" value="${4-}" items="${5-}" nitems="${6-0}"
-  local st="$_SCRATCH/lg-fmw.status" blk="$_SCRATCH/lg-fmw.block" status="" n
-  _lg_fm_field_ok "$field"
+# Several edits of one file in ONE fm-write.awk pass, installed once (one
+# _replace_file: a reader never sees half of them):
+#   _lg_fm_ops_reset
+#   _lg_fm_op <op> <field> [value] [items] [n-items]   (queue an edit)
+#   _lg_fm_op_list_add <file> <field> <item>           (queue a list add)
+#   _lg_fm_ops_apply <file>
+_LG_FMO_N=0
+_lg_fm_ops_reset() {
+  _LG_FMO_N=0
+  _LG_FMO_ENV=()
+}
+_lg_fm_ops_reset
+
+_lg_fm_op() {
+  local k
+  _lg_fm_field_ok "$2"
+  _LG_FMO_N=$((_LG_FMO_N + 1))
+  k=$_LG_FMO_N
+  _LG_FMO_ENV+=("LG_FMW_${k}_OP=$1" "LG_FMW_${k}_FIELD=$2" "LG_FMW_${k}_VALUE=${3-}"
+    "LG_FMW_${k}_ITEMS=${4-}" "LG_FMW_${k}_NITEMS=${5-0}")
+}
+
+# _lg_fm_ops_apply <file>: the queued edits (then reset), fm-write.awk, the
+# body appended byte for byte, installed with _replace_file (mode kept)
+# unless nothing changed. Call in the main shell (_tmp_beside).
+_lg_fm_ops_apply() {
+  local file="$1" st="$_SCRATCH/lg-fmw.status" blk="$_SCRATCH/lg-fmw.block" status="" n
+  local envs=("LG_FMW_NOPS=$_LG_FMO_N" ${_LG_FMO_ENV[@]+"${_LG_FMO_ENV[@]}"})
+  _lg_fm_ops_reset
   [ -f "$file" ] || _lg_die "cannot edit $file: no such file"
   : > "$st"
-  LG_FMW_FIELD="$field" LG_FMW_VALUE="$value" LG_FMW_ITEMS="$items" LG_FMW_NITEMS="$nitems" \
-    LC_ALL=C awk -v op="$op" -v status="$st" -v bom="$_LG_BOM" -f "$_LG_LIB/fm-write.awk" \
+  env "${envs[@]}" LC_ALL=C awk -v status="$st" -v bom="$_LG_BOM" -f "$_LG_LIB/fm-write.awk" \
     < "$file" > "$blk" || _lg_die "cannot edit the frontmatter of $file (fm-write.awk failed)"
   IFS= read -r status < "$st" || true
   case "$status" in
@@ -652,6 +673,15 @@ _lg_fm_write() {
   _replace_file "$_TMP" "$file"
 }
 
+# _lg_fm_write <file> <op> <field> [value] [items] [n-items]: one edit.
+_lg_fm_write() {
+  local file="$1"
+  shift
+  _lg_fm_ops_reset
+  _lg_fm_op "$@"
+  _lg_fm_ops_apply "$file"
+}
+
 # _lg_fm_set <file> <field> <value>: set a scalar (a missing field is
 # appended as the last frontmatter line; a file without frontmatter gets a
 # block).
@@ -671,6 +701,14 @@ _lg_fm_del() {
 # field is appended as [item]. A field the parser rejected (a nested map, a
 # duplicate) is not edited: dies (2).
 _lg_fm_list_add() {
+  _lg_fm_ops_reset
+  _lg_fm_op_list_add "$@"
+  _lg_fm_ops_apply "$1"
+}
+
+# _lg_fm_op_list_add <file> <field> <item>: queue _lg_fm_list_add's edit
+# (nothing when the item is there) — the list as the file holds it now.
+_lg_fm_op_list_add() {
   local file="$1" field="$2" item="$3" rec res state count joined
   _lg_fm_field_ok "$field"
   [ -f "$file" ] || _lg_die "cannot edit $file: no such file"
@@ -703,5 +741,5 @@ _lg_fm_list_add() {
     write) ;;
     *) _lg_die "internal: list add state '$state'" ;;
   esac
-  _lg_fm_write "$file" add "$field" "$item" "$joined" "$count"
+  _lg_fm_op add "$field" "$item" "$joined" "$count"
 }
