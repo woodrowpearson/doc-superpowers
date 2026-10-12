@@ -16,20 +16,20 @@
 #   per file written; --format json: {"dir", "files"}.
 #
 # ledger publish [--dry-run]
-#   git fetch <remote> (the remote <base> names, else keys.remote); the
-#   views branch's tip from `git ls-remote`; a detached worktree of the base
-#   commit under $_LG_CACHE/publish-wt/wt-<pid> (checked out with no hooks
-#   and no LFS smudge; removed as soon as the views are rendered, and by
-#   the EXIT cleanup — doc-tools.sh cleanup — after a TERM or INT; a
-#   worktree a killed run left, its pid dead, is removed by the next
-#   publish) in which the index is built from the base's own config,
-#   registry and items; the pages, README.md and (views.html) ledger.html
-#   rendered there; then one commit on views.branch written with git
-#   plumbing only — a private GIT_INDEX_FILE, hash-object -w,
-#   update-index --add --cacheinfo, write-tree, commit-tree [-p <tip>] —
-#   pushed as <commit>:refs/heads/<views.branch> without force and with
-#   --no-verify (a host's pre-push gate is for its code, not for views). A
-#   rejected push (the branch moved meanwhile) is exit 2. The user's HEAD,
+#   git fetch <remote> (the remote <base> names, else keys.remote); the base
+#   commit is refs/remotes/<remote>/<branch> — never a local branch — and
+#   the views branch's tip comes from `git ls-remote`. Everything is read
+#   from the base commit's blobs: its docs/ledger/config.json (the run's
+#   config from then on: globs, views settings), registry, legacy map,
+#   doc-index and items (`_lg_index --rev`, cached apart from the working
+#   tree's indexes) — no checkout, nothing of the working tree. The pages,
+#   README.md and (views.html) ledger.html are rendered, then one commit on
+#   views.branch is written with git plumbing only — a private
+#   GIT_INDEX_FILE, hash-object -w, update-index --add --cacheinfo,
+#   write-tree, commit-tree [-p <tip>] — and pushed as
+#   <commit>:refs/heads/<views.branch> without force and with --no-verify
+#   (a host's pre-push gate is for its code, not for views). A rejected
+#   push is exit 2 ("the branch moved" when git says so). The user's HEAD,
 #   index and working tree are never touched. Message: "views @
 #   <base>@<short-sha>, <n> in-flight branches, <UTC>". --dry-run renders
 #   into $_LG_CACHE/publish-dry-run and stops before the commit. Links:
@@ -44,9 +44,6 @@
 # commit since the cutoff touched (git log over the item and archive glob
 # directories; for view, also today for each modified or untracked item
 # file), and the link prefix.
-
-_LG_PUBLISH_WT=""    # the publish worktree this run created (cleanup removes it)
-_LG_PUBLISH_MAIN=""  # the main work tree's top level, where that removal runs
 
 # _lg_v_generated <commit> <dirty 0|1> <source> <link> <out>: write the
 # $generated object (see the header) to <out>.
@@ -226,38 +223,6 @@ cmd_ledger_view() {
 
 # --- publish ---------------------------------------------------------------------
 
-# _lg_publish_wt_remove: remove this run's publish worktree (cleanup calls
-# it too; it must not fail).
-_lg_publish_wt_remove() {
-  local wt="$_LG_PUBLISH_WT" main="$_LG_PUBLISH_MAIN"
-  _LG_PUBLISH_WT=""
-  [ -n "$wt" ] || return 0
-  cd -- "$main" 2>/dev/null || cd / || true
-  if [ -e "$wt" ]; then
-    git -C "$main" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf -- "$wt" || true
-  fi
-  git -C "$main" worktree prune >/dev/null 2>&1 || true
-  return 0
-}
-
-# _lg_publish_sweep <dir>: remove the publish worktrees under <dir> whose
-# run (the pid in wt-<pid>) is gone — a run killed with no chance to clean.
-_lg_publish_sweep() {
-  local dir="$1" d pid
-  [ -d "$dir" ] || return 0
-  for d in "$dir"/wt-*; do
-    [ -e "$d" ] || continue
-    pid=${d##*/wt-}
-    case "$pid" in
-      ''|*[!0123456789]*) continue ;;
-    esac
-    if [ "$pid" != "$$" ] && ! kill -0 "$pid" 2>/dev/null; then
-      git worktree remove --force "$d" >/dev/null 2>&1 || rm -rf -- "$d" || true
-    fi
-  done
-  git worktree prune >/dev/null 2>&1 || true
-}
-
 # _lg_publish_link <remote> <branch> <views-branch>: the link prefix.
 _lg_publish_link() {
   local url="" path n segs
@@ -283,9 +248,10 @@ _lg_publish_link() {
   jq -nr --arg up "$path" --arg b "$2" '$up + ($b | split("/") | map(@uri) | join("/")) + "/"'
 }
 
-# _lg_publish_selftest_race <remote> <ref>: test-only (scripts/test-ledger.sh;
-# DOC_TOOLS_LEDGER_SELFTEST=publish-race) — another publisher pushes an
-# unrelated commit to the views branch first.
+# _lg_publish_selftest_race <remote> <ref>: TEST-ONLY (scripts/test-ledger.sh
+# sets DOC_TOOLS_LEDGER_SELFTEST=publish-race; nothing else reaches it):
+# another publisher pushes an unrelated commit to the views branch first.
+# The --force below is the simulated rival's, never publish's own push.
 _lg_publish_selftest_race() {
   local t c
   t=$(git hash-object -t tree -w --stdin < /dev/null) || return 1
@@ -295,14 +261,13 @@ _lg_publish_selftest_race() {
 
 # shellcheck disable=SC2154  # _OPT_* and _ARGS are set by _parse_args
 cmd_ledger_publish() {
-  local s base_ref remote="" branch="" r vb tip="" base short at link wt dir stage n gen ix
-  local msg tree commit gi oid out err dry=0 html prev_short
+  local s base_ref remote="" branch="" r vb tip="" base short at link n gen ix stage
+  local msg tree commit gi oid out err dry=0 html prev_short base_name
   _lg_init publish
   [ "${#_ARGS[@]}" = 0 ] || _lg_usage "unexpected argument '${_ARGS[0]}'"
   if [ -n "$_OPT_dry_run" ]; then dry=1; fi
   _lg_scratch_name
   s=$_LG_SN
-  _LG_PUBLISH_MAIN=$_LG_ROOT
 
   # The remote, the base branch, the views branch (this work tree's config).
   _lg_cfg '(.base | if type == "string" then . else "" end), (.keys.remote | if type == "string" then . else "" end), (.views.branch | if type == "string" then . else "" end)' > "$s.cfgv"
@@ -318,6 +283,7 @@ cmd_ledger_publish() {
     esac
   done < "$s.remotes"
   if [ -z "$remote" ]; then
+    # A base without a remote prefix ("main") names the remote's branch.
     remote=${r:-origin}
     branch=$base_ref
   fi
@@ -325,6 +291,7 @@ cmd_ledger_publish() {
   if [ -z "$vb" ] || ! git check-ref-format "refs/heads/$vb"; then
     _lg_die "config views.branch is not a branch name: '$vb'"
   fi
+  base_name="$remote/$branch"
 
   # Fetch the base; read the views branch's tip from the remote itself.
   LC_ALL=C git fetch -q --no-recurse-submodules "$remote" > "$s.err" 2>&1 || _lg_die "git fetch $remote failed: $(head -n 3 "$s.err")"
@@ -336,40 +303,25 @@ cmd_ledger_publish() {
       || _lg_die "cannot fetch $remote $vb: $(head -n 3 "$s.err")"
     git cat-file -e "$tip^{commit}" 2>/dev/null || _lg_die "the tip of $remote $vb ($tip) did not arrive"
   fi
-  base=$(git rev-parse -q --verify "$base_ref^{commit}" 2>/dev/null) || _lg_die "the base '$base_ref' does not resolve after fetching $remote"
+  base=$(git rev-parse -q --verify "refs/remotes/$remote/$branch^{commit}" 2>/dev/null) \
+    || _lg_die "the base $base_name (refs/remotes/$remote/$branch) does not resolve after fetching $remote"
   short=$(git rev-parse --short "$base") || _lg_die "git rev-parse failed"
-  git cat-file -e "$base:docs/ledger/config.json" 2>/dev/null \
-    || _lg_die "the base $base_ref ($short) has no docs/ledger/config.json — nothing to publish"
   link=$(_lg_publish_link "$remote" "$branch" "$vb") || _lg_die "jq failed (the link prefix)"
 
-  # A detached worktree of the base: its config, registry and items.
-  dir="$_LG_CACHE/publish-wt"
-  mkdir -p -- "$dir" || _lg_die "cannot create $dir"
-  _lg_publish_sweep "$dir"
-  wt="$dir/wt-$$"
-  mkdir -p -- "$_SCRATCH/lg-nohooks" || _lg_die "mkdir failed"
-  _LG_PUBLISH_WT=$wt
-  GIT_LFS_SKIP_SMUDGE=1 git -c core.hooksPath="$_SCRATCH/lg-nohooks" -c advice.detachedHead=false \
-    worktree add --detach "$wt" "$base" > "$s.err" 2>&1 \
-    || _lg_die "git worktree add failed: $(head -n 3 "$s.err")"
-  case "${DOC_TOOLS_LEDGER_SELFTEST:-}" in
-    publish-term) kill -TERM "$$" ;;
-  esac
-  cd -- "$wt" || _lg_die "cannot enter $wt"
-  _lg_init publish
-  ix=$(_lg_index)
+  # The base commit's own config, then its index — blobs only.
+  git cat-file -e "$base:docs/ledger/config.json" 2>/dev/null \
+    || _lg_die "the base $base_name ($short) has no docs/ledger/config.json — nothing to publish"
+  _lg_cfg_from_rev "$base"
+  ix=$(_lg_index --rev "$base")
   gen="$s.gen"
-  _lg_v_generated "$base" 0 "$base_ref@$short" "$link" "$gen"
+  _lg_v_generated "$base" 0 "$base_name@$short" "$link" "$gen"
   at=$(jq -r '.at' "$gen") || _lg_die "jq failed"
   html=$(_lg_cfg 'if .views.html == false then 0 else 1 end')
   stage="$_SCRATCH/lg-publish"
   mkdir -p -- "$stage" || _lg_die "mkdir failed"
   _lg_v_render "$ix" "$gen" all 1 "$html" "$stage"
-  cd -- "$_LG_PUBLISH_MAIN" || _lg_die "cannot return to $_LG_PUBLISH_MAIN"
-  _lg_publish_wt_remove
-  _lg_init publish
 
-  msg="views @ $base_ref@$short, 0 in-flight branches, $at"
+  msg="views @ $base_name@$short, 0 in-flight branches, $at"
   if [ "$dry" = 1 ]; then
     out="$_LG_CACHE/publish-dry-run"
     rm -rf -- "$out"
@@ -412,11 +364,15 @@ cmd_ledger_publish() {
     commit=$(git commit-tree "$tree" -m "$msg") || _lg_die "git commit-tree failed"
   fi
   case "${DOC_TOOLS_LEDGER_SELFTEST:-}" in
+    # TEST-ONLY: a rival publisher wins the race (see _lg_publish_selftest_race).
     publish-race) _lg_publish_selftest_race "$remote" "refs/heads/$vb" || _lg_die "selftest: the race push failed" ;;
   esac
   if ! LC_ALL=C git push -q --no-verify "$remote" "$commit:refs/heads/$vb" > "$s.err" 2>&1; then
     err=$(head -n 3 "$s.err" | tr '\n' ' ')
-    _lg_die "the push to $remote $vb was rejected (the branch moved since it was read — run publish again): $err"
+    if grep -Eq 'non-fast-forward|rejected|fetch first' "$s.err"; then
+      _lg_die "the push to $remote $vb was rejected: the branch moved since it was read — run publish again ($err)"
+    fi
+    _lg_die "the push to $remote $vb failed: $err"
   fi
   if [ "$_LG_FORMAT" = json ]; then
     # shellcheck disable=SC2016  # jq source

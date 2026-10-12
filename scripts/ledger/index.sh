@@ -13,10 +13,12 @@
 #              working copies of the registry, doc-index, legacy map and docs
 #   --staged   the index (stage 0) — the blobs a commit would record
 #   --rev R    the commit R
-# The merged config is the run's (docs/ledger/config.json of the working
-# tree) in every mode. Dates come from HEAD's history (R's for --rev).
+# The merged config is the run's (_LG_CFG: docs/ledger/config.json of the
+# working tree, unless the caller loaded another — ledger publish loads the
+# base commit's with _lg_cfg_from_rev) in every mode. Dates come from HEAD's history (R's for --rev).
 #
-# Cache: $_LG_CACHE/index-<sha256>.json, the hash over the schema, the
+# Cache: $_LG_CACHE/index-<sha256>.json ($_LG_CACHE/rev/… for --rev, with
+# its own retention), the hash over the schema, the
 # code (every file of scripts/ledger/), the mode, HEAD, the base oid, the config, and — never by walking the
 # items — the commit's tree (--rev), or git's listing (path, blob id) of
 # the directories holding the items, the candidate docs, the registry,
@@ -660,17 +662,20 @@ _lg_ix_valid() {
 
 # --- Pruning -------------------------------------------------------------------------
 
-# _lg_ix_prune: keep the newest 3 index files by mtime (a hit touches its
-# file) and their .refs — and any modified in the last 10 minutes; at most
+# _lg_ix_prune <dir>: in <dir> ($_LG_CACHE for the working tree and
+# --staged, $_LG_CACHE/rev for --rev: each keeps its own newest, so a
+# publish never evicts the working tree's index) keep the newest 3 index
+# files by mtime (a hit touches its file) and their .refs — and any
+# modified in the last 10 minutes; at most
 # once a day: sweep parse temp dirs older than an hour, other parsers'
 # cache dirs untouched for 14 days, and parse entries older than 14 days
 # that no kept index references.
 _lg_ix_prune() {
-  local stamp="$_LG_CACHE/prune.stamp" s f d
+  local ixdir="$1" stamp="$_LG_CACHE/prune.stamp" s f d
   _lg_scratch_name
   s=$_LG_SN
   # shellcheck disable=SC2012  # cache names are index-<hex>.json
-  ls -t "$_LG_CACHE"/index-*.json 2>/dev/null | tail -n +4 > "$s.old" || true
+  ls -t "$ixdir"/index-*.json 2>/dev/null | tail -n +4 > "$s.old" || true
   while IFS= read -r f; do
     # Never one written or used in the last 10 minutes (a concurrent run
     # may be about to read it).
@@ -680,13 +685,13 @@ _lg_ix_prune() {
   if [ -f "$stamp" ] && [ -n "$(find "$stamp" -mmin -1440 2>/dev/null)" ]; then return 0; fi
   : > "$stamp" || return 0
   find "$_LG_CACHE/parse" -mindepth 2 -maxdepth 2 -name '.new.*' -mmin +60 -exec rm -rf {} + 2>/dev/null || true
-  find "$_LG_CACHE" -maxdepth 1 \( -name '.index.*' -o -name '.dates.*' -o -name '.blob-sha256.*' \) -mmin +60 \
+  find "$_LG_CACHE" "$_LG_CACHE/rev" -maxdepth 1 \( -name '.index.*' -o -name '.dates.*' -o -name '.blob-sha256.*' \) -mmin +60 \
     -exec rm -f {} + 2>/dev/null || true
   for d in "$_LG_CACHE"/parse/*; do
     [ -d "$d" ] && [ "$d" != "$_LG_PARSE_DIR" ] || continue
     if [ -n "$(find "$d" -maxdepth 0 -mtime +14 2>/dev/null)" ]; then rm -rf "$d"; fi
   done
-  cat "$_LG_CACHE"/index-*.refs > "$s.refs" 2>/dev/null || : > "$s.refs"
+  cat "$_LG_CACHE"/index-*.refs "$_LG_CACHE"/rev/index-*.refs > "$s.refs" 2>/dev/null || true
   ( cd "$_LG_PARSE_DIR" && find . -maxdepth 1 -name '[bc]-*.json' -mtime +14 ) 2>/dev/null \
     | LC_ALL=C awk -v refs="$s.refs" 'BEGIN { while ((getline r < refs) > 0) R[r] = 1 } { n = substr($0, 3); if (!(n in R)) print n }' \
     > "$s.gone" || true
@@ -823,7 +828,7 @@ _lg_ix_refs() {
 # finalized map), an unknown revision, or a git failure.
 _lg_index() {
   local mode=worktree rev="" src commit="" tree="" head base_ref="" base="" s reg di key name tmp rfn f
-  local legacy_path="" dcommit usemtime
+  local legacy_path="" dcommit usemtime ixdir
   case "$#" in
     0) ;;
     1) [ "$1" = --staged ] || _lg_die "internal: _lg_index: unknown argument '$1'"; mode=staged ;;
@@ -893,7 +898,12 @@ _lg_index() {
   } > "$s.key" || _lg_die "cannot write the index key"
   _hash_one "$s.key"
   key=${_HASH#sha256:}
-  name="$_LG_CACHE/index-$key.json"
+  ixdir=$_LG_CACHE
+  if [ "$mode" = rev ]; then
+    ixdir="$_LG_CACHE/rev"
+    mkdir -p -- "$ixdir" 2>/dev/null || _lg_die "cannot create $ixdir"
+  fi
+  name="$ixdir/index-$key.json"
   if _lg_ix_valid "$name"; then
     _lg_ix_trace "index-hit index-$key.json"
     # A hit makes the file the newest: pruning keeps the newest by mtime.
@@ -933,7 +943,7 @@ _lg_index() {
   : > "$s.none"
   _lg_registry_findings "$reg" "$s.none" "$s.rf"
   rfn=$(wc -l < "$s.rf" | tr -d ' ')
-  tmp=$(mktemp "$_LG_CACHE/.index.XXXXXX") || _lg_die "cannot create a temp file in $_LG_CACHE"
+  tmp=$(mktemp "$ixdir/.index.XXXXXX") || _lg_die "cannot create a temp file in $ixdir"
   if ! jq -L "$_LG_LIB" -n -c \
       --slurpfile c "$_LG_CFG" --slurpfile reg "$reg" --slurpfile di "$di" \
       --slurpfile lgy "$s.legacy" --slurpfile fin "$s.finalized" \
@@ -945,10 +955,10 @@ _lg_index() {
     _lg_die "jq failed (the index join)"
   fi
   _lg_ix_refs "$s.recs" "${tmp}.refs" || { rm -f "$tmp" "${tmp}.refs"; _lg_die "cannot list the parse references"; }
-  if ! mv -f "${tmp}.refs" "$_LG_CACHE/index-$key.refs" || ! mv -f "$tmp" "$name"; then
+  if ! mv -f "${tmp}.refs" "$ixdir/index-$key.refs" || ! mv -f "$tmp" "$name"; then
     rm -f "$tmp" "${tmp}.refs"
     _lg_die "cannot install $name"
   fi
-  _lg_ix_prune
+  _lg_ix_prune "$ixdir"
   printf '%s\n' "$name"
 }

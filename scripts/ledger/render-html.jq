@@ -34,14 +34,15 @@ def doc_cell($list):
   if ($list | length) == 0 then none
   else "<a class=\"yes\" href=\"\(href($list[0]))\" title=\"\($list[0] | h)\">✓</a>"
        + (if ($list | length) > 1 then " <span class=\"note\">+\(($list | length) - 1)</span>" else "" end) end;
-def pr_cell: .pr as $p
+def pr_cell: .pr as $p | lg_v_pr_url as $u
   | if ($p | type) == "object" and ($p.number != null) then
-      (if ($p.url | type) == "string" then "<a href=\"\($p.url | h)\">#\($p.number | h)</a>" else "#\($p.number | h)" end)
+      (if $u != null then "<a href=\"\($u | h)\">#\($p.number | h)</a>" else "#\($p.number | h)" end)
     else none end;
 def handoff_cell: (.docs.handoff // []) | lg_v_newest | if . == null then none else link(lg_v_docstem | lg_q_cut(40); .) end;
-def search_text: [.key, .summary, lg_q_stem, .h1] | map(strings | lg_q_one) | join(" ") | ascii_downcase;
+# Case kept: the page's script folds both sides (toLowerCase) when it matches.
+def search_text: [.key, .summary, lg_q_stem, .h1] | map(strings | lg_q_one) | join(" ");
 def row($K):
-  "<tr data-ledger=\"\(.ledger | h)\" data-sev=\"\((.severity // "-") | h)\" data-class=\"\(.class | h)\""
+  "<tr data-ledger=\"\(.ledger | h)\" data-sev=\"\((lg_v_sev($c[0]) // "-") | h)\" data-class=\"\(.class | h)\""
   + " data-inflight=\"\((.inflight // []) | length)\" data-q=\"\(search_text | @html)\">"
   + "<td class=\"key\">\((.key // "—") | h)</td>"
   + "<td>\(link(lg_q_stem | lg_q_cut(48); .path))</td>"
@@ -53,7 +54,7 @@ def row($K):
   + "<td>\(handoff_cell)</td>"
   + "<td>\(status_chip)"
   + (if lg_v_superseded or .class == "wontfix"
-     then "<div class=\"res\">\((.resolution // "(no resolution)") | lg_q_cut(200) | h)</div>" else "" end)
+     then "<div class=\"res\">\(lg_v_resolution | h)</div>" else "" end)
   + "</td></tr>";
 def table($items; $K):
   if ($items | length) == 0 then "<p class=\"note\">None.</p>"
@@ -140,7 +141,8 @@ def js: "
     var shown = 0;
     rows.forEach(function (r) {
       var d = r.dataset, ok = (!l || d.ledger === l) && (!s || d.sev === s) && (!c || d['class'] === c) && (!fly || d.inflight !== '0');
-      for (var i = 0; ok && i < words.length; i++) { if (d.q.indexOf(words[i]) < 0) { ok = false; } }
+      var text = d.q.toLowerCase();
+      for (var i = 0; ok && i < words.length; i++) { if (text.indexOf(words[i]) < 0) { ok = false; } }
       r.hidden = !ok;
       if (ok) { shown++; }
     });

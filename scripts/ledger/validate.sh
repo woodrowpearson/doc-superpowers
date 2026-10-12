@@ -16,7 +16,8 @@
 #   schema              .schema is not "ledger-registry/1"
 #   shape               paths / residual_paths / defined_in not a list of
 #                       strings; contracts not a list of objects
-#   id                  a ledger id not [a-z0-9-]{1,16}, or "unassigned"
+#   id                  a ledger id not [a-z0-9-]{1,16}, or "unassigned" or
+#                       "readme" (reserved: the views write README.md)
 #   duplicate-id        an id two ledgers carry
 #   status              not "active" | "retired"
 #   kind                not "service" | "platform"
@@ -52,6 +53,7 @@ _lg_registry_findings() {
      | (if (.id | type) != "string" or (.id | test("\\A[a-z0-9-]{1,16}\\z") | not)
         then f("id"; "ledgers[\($i)]: \(.id | tojson) is not a ledger id ([a-z0-9-]{1,16})")
         elif .id == "unassigned" then f("id"; "ledgers[\($i)]: \"unassigned\" is reserved")
+        elif .id == "readme" then f("id"; "ledgers[\($i)]: \"readme\" is reserved (the views write README.md)")
         else empty end),
        (if .status == "active" or .status == "retired" then empty
         else f("status"; "\($n): \(.status | tojson) is not active | retired") end),
