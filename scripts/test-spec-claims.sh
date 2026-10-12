@@ -3584,6 +3584,281 @@ test_v3_two_runners_one_call_each() {
   teardown
 }
 
+# --- V4 lint and lint runs ---------------------------------------------------------
+#
+# A lint claim (enforced_by lint) carries {pattern, paths, expect, selftest}.
+# V4 evaluates the pattern (grep -E) on each selftest string — violates must
+# fail the lint, clean pass it — and on the proposed lint.paths files: a
+# built claim's lint must pass, a diverged one's fail. claims run re-runs the
+# same evaluation on the working tree (pass → pass, fail → assert-fail).
+
+# The fixture's TTL sentence as a lint: the 900-second constant present in
+# the subject.
+_CL_LINT='{"pattern":"TTL_SECONDS = 900","paths":["src/auth/token.py"],"expect":"present","selftest":{"violates":"TTL_SECONDS = 1800","clean":"TTL_SECONDS = 900"}}'
+
+# The last `cl`'s V4 finding messages, one per line, and their count.
+v4_messages() {
+  jq -r '.findings[]? | select(.check == "V4") | .message' <<<"$CL_OUT" 2>/dev/null || true
+}
+v4_count() {
+  jq '[.findings[]?, .advisories[]? | select(.check == "V4")] | length' <<<"$CL_OUT" 2>/dev/null || echo invalid
+}
+
+# assert_v4 <substring> <what>: the last `cl` exited 1 with a V4 finding whose
+# message contains <substring>.
+assert_v4() {
+  assert_eq "1" "$CL_RC" "$2: exits 1"
+  assert_contains "$(v4_messages)" "$1" "$2: a V4 finding names '$1'"
+}
+
+# assert_v4_ok <what>: the last `cl` exited 0 with no V4 finding.
+assert_v4_ok() {
+  assert_eq "0" "$CL_RC" "$1: exits 0"
+  assert_eq "0" "$(v4_count)" "$1: no V4 finding"
+}
+
+# lint_claim [<lint-json>]: the fixture claim enforced by lint (default
+# _CL_LINT), test null, still unbuilt, committed as the branch point
+# (base_here: the tier change is not what these tests ratchet).
+lint_claim() {
+  jset "$SIDECAR" ".claims[0].enforced_by = \"lint\" | .claims[0].test = null | .claims[0].lint = ${1:-$_CL_LINT}"
+  base_here "lint claim"
+}
+
+# lint_promote: the lint claim made built as promote makes it (V6): the tree
+# committed first (when it has changes), then status built, its verdict in the store, promotion
+# {at: HEAD, verdict_sha256} and the status block rendered.
+lint_promote() {
+  git add -A
+  git diff --cached --quiet || git commit -qm "lint claim, before promote"
+  jset "$SIDECAR" '.claims[0].status = "built"'
+  CL_DIGEST=$(write_verdict)
+  jset "$SIDECAR" ".claims[0].promotion = {\"at\": \"$(git rev-parse HEAD)\", \"verdict_sha256\": \"$CL_DIGEST\"}"
+  rerender
+}
+
+# lint_diverge: the lint claim made diverged (its tracker the fixture's, a
+# CODE-DIVERGES ruling).
+lint_diverge() {
+  jset "$SIDECAR" ".claims[0].status = \"diverged\" | .claims[0].rulings = [$_CL_DIVERGES]"
+  rerender
+}
+
+test_v4_selftest_violates_passes() {
+  echo "test: V4 — a pattern its violates selftest passes is vacuous"
+  claims_fixture
+  lint_claim '{"pattern":".*","paths":["src/auth/token.py"],"expect":"present","selftest":{"violates":"TTL_SECONDS = 1800","clean":"TTL_SECONDS = 900"}}'
+  cl validate --all
+  assert_v4 "vacuous pattern" "pattern .*, expect present"
+  assert_contains "$(v4_messages)" "selftest.violates" "…it names the violates selftest"
+  assert_not_contains "$(v4_messages)" "selftest.clean" "…not the clean one (it passes)"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V4")][0].claim' "SPEC-AUTH-001#token-ttl" "…the finding names the claim"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V4")][0].doc' "$DOC" "…and its doc"
+  # The same pattern, expect absent: every clean text fails it.
+  jset "$SIDECAR" '.claims[0].lint.expect = "absent"'
+  cl validate --all
+  assert_v4 "vacuous pattern" "pattern .*, expect absent"
+  assert_contains "$(v4_messages)" "selftest.clean" "…it names the clean selftest"
+  teardown
+}
+
+test_v4_selftest_clean_fails() {
+  echo "test: V4 — a pattern its clean selftest fails is vacuous"
+  claims_fixture
+  lint_claim
+  jset "$SIDECAR" '.claims[0].lint.selftest.clean = "TTL = 15 minutes"'
+  cl validate --all
+  assert_v4 "vacuous pattern" "clean text without the constant, expect present"
+  assert_contains "$(v4_messages)" "selftest.clean" "…it names the clean selftest"
+  assert_eq "1" "$(v4_count)" "…one V4 finding (violates still fails the lint)"
+  # A violates text holding the pattern passes the lint: vacuous too.
+  jset "$SIDECAR" '.claims[0].lint.selftest = {"violates":"TTL_SECONDS = 900  # was 1800","clean":"TTL_SECONDS = 900"}'
+  cl validate --all
+  assert_v4 "selftest.violates" "violates text holding the pattern"
+  teardown
+}
+
+test_v4_pattern_contradicts_status() {
+  echo "test: V4 — the lint over the proposed paths contradicts the status"
+  claims_fixture
+  lint_claim
+  lint_promote
+  cl validate --all
+  assert_v4_ok "built, the constant present"
+  set_ttl 1800
+  cl validate --all
+  assert_v4 "contradicts" "built, the pattern absent from the paths"
+  assert_contains "$(v4_messages)" "src/auth/token.py" "…it names the paths"
+  # Two paths: their concatenation is evaluated, so one holding it passes.
+  mkdir -p src/auth/legacy
+  printf 'TTL_SECONDS = 900\n' > src/auth/legacy/token.py
+  jset "$SIDECAR" '.claims[0].lint.paths = ["src/auth/token.py", "src/auth/legacy/token.py"]'
+  cl validate --all
+  assert_eq "0" "$(v4_count)" "built, one of two paths holds the pattern: no V4 finding"
+  # A file without a final newline does not run into the next one.
+  printf 'TTL_SECONDS = 9' > src/auth/token.py
+  printf '00\n' > src/auth/legacy/token.py
+  cl validate --all
+  assert_v4 "contradicts" "the pattern only across the two files' boundary"
+  teardown
+}
+
+test_v4_diverged_and_unbuilt_status() {
+  echo "test: V4 — diverged expects the lint to fail; unbuilt takes either"
+  claims_fixture
+  lint_claim
+  cl validate --all
+  assert_v4_ok "unbuilt, the lint passes"
+  set_ttl 1800
+  cl validate --all
+  assert_v4_ok "unbuilt, the lint fails"
+  lint_diverge
+  cl validate --all
+  assert_v4_ok "diverged, the lint fails"
+  set_ttl 900
+  cl validate --all
+  assert_v4 "contradicts" "diverged, the lint passes"
+  teardown
+}
+
+test_v4_valid_lint_passes() {
+  echo "test: V4 — a lint with honest selftests, consistent with its status, passes"
+  claims_fixture
+  lint_claim
+  cl validate --all
+  assert_v4_ok "unbuilt lint claim"
+  lint_promote
+  cl validate --all
+  assert_v4_ok "built lint claim, the constant present"
+  assert_eq "0" "$(json_count "$(jq -c '.findings[]?' <<<"$CL_OUT")")" "…no finding of any check"
+  # expect absent: the 1800-second constant must not appear.
+  jset "$SIDECAR" '.claims[0].lint = {"pattern":"TTL_SECONDS = 1800","paths":["src/auth/token.py"],"expect":"absent","selftest":{"violates":"TTL_SECONDS = 1800","clean":"TTL_SECONDS = 900"}}'
+  cl validate --all
+  assert_eq "0" "$(v4_count)" "expect absent, the forbidden constant absent: no V4 finding"
+  teardown
+}
+
+test_v4_invalid_pattern() {
+  echo "test: V4 — a pattern grep -E rejects is a finding, never a pass or a fail"
+  claims_fixture
+  lint_claim '{"pattern":"TTL_SECONDS = (900","paths":["src/auth/token.py"],"expect":"absent","selftest":{"violates":"TTL_SECONDS = (900","clean":"x"}}'
+  cl validate --all
+  assert_v4 "invalid pattern" "an unbalanced parenthesis"
+  assert_eq "1" "$(v4_count)" "…one V4 finding (no vacuous-pattern reading of the error)"
+  teardown
+}
+
+test_v4_lint_paths_unsafe_or_absent() {
+  echo "test: V4 — an unsafe or absent lint path is a finding, never read"
+  claims_fixture
+  lint_claim
+  lint_promote
+  local out
+  out=$(harness_mktemp_d outside-lint)
+  printf 'TTL_SECONDS = 900\n' > "$out/token.py"
+  set_ttl 1800
+  # Through "..": read, the outside file would hold the pattern.
+  jset "$SIDECAR" ".claims[0].lint.paths = [\"src/../../$(basename "$out")/token.py\"]"
+  cl validate --all
+  assert_v4 "is not a safe repo path" "a lint path with .. segments"
+  assert_not_contains "$(v4_messages)" "contradicts" "…the lint is not evaluated"
+  # Through a symbolic link.
+  ln -s "$out" src/outside
+  jset "$SIDECAR" '.claims[0].lint.paths = ["src/outside/token.py"]'
+  cl validate --all
+  assert_v4 "is not a safe repo path" "a lint path through a symlinked directory"
+  assert_not_contains "$(v4_messages)" "contradicts" "…the lint is not evaluated"
+  jset "$SIDECAR" '.claims[0].lint.paths = ["src/auth/nope.py"]'
+  cl validate --all
+  assert_v4 "is not a file in the proposed tree" "a lint path absent"
+  teardown
+}
+
+test_v4_staged_reads_index() {
+  echo "test: V4 — --staged evaluates the index's paths; a staged lint path touches the claim"
+  claims_fixture
+  lint_claim
+  lint_promote
+  git add -A && git commit -qm "built lint claim"
+  set_ttl 1800
+  git add src/auth/token.py
+  set_ttl 900
+  cl validate --staged
+  assert_v4 "contradicts" "the index drops the constant, the work tree keeps it"
+  cl validate --all
+  assert_v4_ok "--all reads the work tree"
+  teardown
+}
+
+test_v4_frozen_selftest_only() {
+  echo "test: V4 — a frozen lint claim's selftests are checked, its paths not read"
+  claims_fixture
+  lint_claim
+  lint_promote
+  jset "$SIDECAR" ".claims[0].frozen_at = \"$(git rev-parse HEAD)\""
+  set_ttl 1800
+  cl validate --all
+  assert_v4_ok "frozen built, the pattern gone from the paths"
+  jset "$SIDECAR" '.claims[0].lint.selftest.clean = "nothing"'
+  cl validate --all
+  assert_v4 "vacuous pattern" "frozen, clean selftest fails"
+  teardown
+}
+
+test_run_lint_rerun() {
+  echo "test: run — a lint claim is re-run over the work tree"
+  claims_fixture
+  lint_claim
+  lint_promote
+  cl run --all
+  assert_eq "0" "$CL_RC" "built lint claim, the constant present: run --all exits 0"
+  assert_eq "ok" "$(run_field verdict)" "…verdict ok"
+  assert_eq "pass" "$(run_field outcome)" "…outcome pass"
+  set_ttl 1800
+  cl run --all
+  assert_eq "1" "$CL_RC" "the source edited to violate: exits 1"
+  assert_eq "finding" "$(run_field verdict)" "…verdict finding"
+  assert_eq "assert-fail" "$(run_field outcome)" "…outcome assert-fail"
+  assert_json_field "$CL_OUT" '.findings[0].check' "run" "…a run finding"
+  assert_json_field "$CL_OUT" '.findings[0].claim' "SPEC-AUTH-001#token-ttl" "…naming the claim"
+  # diverged: the violation is the expected red.
+  lint_diverge
+  cl run --claims SPEC-AUTH-001#token-ttl
+  assert_eq "0" "$CL_RC" "diverged, the lint fails: exits 0"
+  assert_eq "assert-fail" "$(run_field outcome)" "…outcome assert-fail"
+  teardown
+}
+
+test_run_lint_structural_findings() {
+  echo "test: run — an invalid pattern or an unsafe or absent lint path is a finding, not indeterminate"
+  claims_fixture
+  lint_claim
+  lint_promote
+  jset "$SIDECAR" '.claims[0].lint.pattern = "TTL_SECONDS = (900"'
+  cl run --all
+  assert_eq "1" "$CL_RC" "invalid pattern: exits 1"
+  assert_eq "finding" "$(run_field verdict)" "…verdict finding"
+  assert_contains "$(run_field message)" "invalid pattern" "…invalid pattern"
+  assert_eq "0" "$(jq '.indeterminate | length' <<<"$CL_OUT")" "…nothing indeterminate"
+  jset "$SIDECAR" ".claims[0].lint.pattern = \"TTL_SECONDS = 900\" | .claims[0].lint.paths = [\"src/../../x/token.py\", \"src/auth/nope.py\"]"
+  cl run --all
+  assert_eq "1" "$CL_RC" "unsafe and absent paths: exits 1"
+  assert_contains "$(run_field message)" "is not a safe repo path" "…the unsafe path named"
+  assert_contains "$(run_field message)" "src/auth/nope.py" "…the absent path named"
+  assert_eq "0" "$(jq '.indeterminate | length' <<<"$CL_OUT")" "…nothing indeterminate"
+  # A malformed lint on a lint claim is a finding too (V1 names the shape).
+  jset "$SIDECAR" '.claims[0].lint = {"pattern": ""}'
+  cl run --all
+  assert_eq "1" "$CL_RC" "malformed lint: exits 1"
+  assert_contains "$(run_field message)" "nothing to run" "…nothing to run"
+  # An unbuilt lint claim with lint null has no check yet.
+  jset "$SIDECAR" '.claims[0].lint = null | .claims[0].status = "unbuilt" | .claims[0].promotion = null'
+  cl run --all
+  assert_eq "0" "$CL_RC" "unbuilt, lint null: exits 0"
+  assert_eq "no check yet" "$(run_field message)" "…no check yet"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -3748,6 +4023,19 @@ run_tests() {
   test_v3_staged_mutant_file_touches_claim
   test_v3_test_file_dash_and_containment
   test_v3_two_runners_one_call_each
+
+  # --- Task 9: V4 lint and lint runs ---
+  test_v4_selftest_violates_passes
+  test_v4_selftest_clean_fails
+  test_v4_pattern_contradicts_status
+  test_v4_diverged_and_unbuilt_status
+  test_v4_valid_lint_passes
+  test_v4_invalid_pattern
+  test_v4_lint_paths_unsafe_or_absent
+  test_v4_staged_reads_index
+  test_v4_frozen_selftest_only
+  test_run_lint_rerun
+  test_run_lint_structural_findings
 
   print_summary
 }
