@@ -1464,6 +1464,24 @@ _JQ_REC_FIELDS='def rec_fields:
      if .want == 0 and .out != null then .out else empty end)];'
 
 
+# _claims_worktrees_remove: a claims run's throwaway worktrees (_CL_WTS, in
+# the scratch dir), each removed with its registration; _CL_WTS emptied.
+# When a remove fails, the directory is deleted and the remove retried (git
+# removes the registration of a worktree whose directory is gone). Never a
+# repository-wide `git worktree prune`: it would also drop the registration
+# of every other worktree that only looks gone (one on an unmounted volume).
+# cleanup runs it on every exit path; --reverify after each claim.
+_claims_worktrees_remove() {
+  local p
+  for p in ${_CL_WTS[@]+"${_CL_WTS[@]}"}; do
+    if ! git worktree remove --force "$p" >/dev/null 2>&1; then
+      rm -rf "$p"
+      git worktree remove --force "$p" >/dev/null 2>&1 || true
+    fi
+  done
+  _CL_WTS=()
+}
+
 # Remove whatever this run left in flight (the EXIT handler, _on_exit, runs
 # it). Never calls exit, so the status of the `exit` that got us here
 # (130/143 from a signal) stands.
@@ -1476,18 +1494,7 @@ cleanup() {
   # A lock renamed aside for deletion (see _index_unlock / _index_break_stale)
   # whose rm was cut short. Named by our pid, so it is ours to remove.
   if [ -e "$INDEX_LOCK.gone.$$" ]; then rm -rf "$INDEX_LOCK.gone.$$"; fi
-  # A claims run's throwaway worktrees (in the scratch dir): each removed
-  # with its registration. When a remove fails, the directory is deleted and
-  # the remove retried (git removes the registration of a worktree whose
-  # directory is gone). Never a repository-wide `git worktree prune`: it
-  # would also drop the registration of every other worktree that only looks
-  # gone (one on an unmounted volume).
-  for p in ${_CL_WTS[@]+"${_CL_WTS[@]}"}; do
-    if ! git worktree remove --force "$p" >/dev/null 2>&1; then
-      rm -rf "$p"
-      git worktree remove --force "$p" >/dev/null 2>&1 || true
-    fi
-  done
+  _claims_worktrees_remove
   if [ -n "$_SCRATCH" ]; then rm -rf "$_SCRATCH"; fi
   return 0
 }
@@ -2222,8 +2229,12 @@ claims promote|cmd_claims_promote|repo|reverify all base=
   the subject files as at that commit, the test must fail by an
   assertion), store the verdict, record the promotion in the sidecar and
   render the doc's status block (results: {claim, status_from, status_to,
-  green, red, verdict_sha256}). --reverify re-checks promoted claims and stores fresh
-  verdicts, writing no sidecar. Refuses a dirty tree (exit 2, dirty-tree).
+  green, red, verdict_sha256}). --reverify re-runs those proofs at HEAD
+  for each <id>, or with --all for each built or gated claim with a
+  promotion (a frozen one is reported skipped), and stores each fresh
+  verdict, writing neither sidecar nor doc (results: {claim, verdict}:
+  ok, finding, indeterminate or skipped); a named claim that is not
+  promoted is a finding. Refuses a dirty tree (exit 2, dirty-tree).
   Every finding blocks.
 claims render|cmd_claims_render|repo|check base=
   [--check] [--base <ref>]
@@ -6574,7 +6585,7 @@ _claims_v5() {
 
 # --- Spec claims: the verdict store, V6 ---------------------------------------
 #
-# promote (Task 11) stores each verdict, outside the tree, at
+# promote (Task 11; --reverify too) stores each verdict, outside the tree, at
 # <store>/<digest>.json: the jq -cS bytes of {claim, states_sha256, test,
 # nonvacuity, head, subject_oids, green, red, status_to}, <digest> their
 # sha256, also written as the claim's promotion.verdict_sha256. Every digest,
@@ -7940,9 +7951,24 @@ _claims_v9() {
 # promotion with the new digest. The worktrees are removed on every exit
 # path (cleanup). Results: one row {claim, status_from, status_to, green,
 # red, verdict_sha256} for a promotion.
+#
+# promote --reverify (§G's scheduled re-verification) takes the same path,
+# _claims_prove, so the two cannot diverge: for each claim it is asked for
+# (<id>…, or --all: every built or gated claim with a promotion, a frozen
+# one reported skipped) at HEAD, in a clean tree, steps 1 and 2 with every
+# guard; then the verdict of the claim as it stands (status_to its own
+# status: built or gated) is stored under its own digest. It never writes
+# the sidecar or the doc — the promotion still names the verdict promote
+# stored — and needs no stored verdict (a fresh clone, CI). A named claim
+# that is not built or gated with a promotion is a finding ("not
+# promoted"); an unknown id is a usage error before anything runs. Each
+# claim's worktrees are removed before the next claim runs. Results: one
+# row {claim, verdict} per claim, verdict ok, finding, indeterminate or
+# skipped.
 # Scratch: cl-promote.json (the claim's plan), cl-promote-* (the run calls,
 # the subject paths and ids, the verdict, the sidecar and doc rewritten),
-# cl-swap.err (observed_red's checkouts).
+# cl-swap.err (observed_red's checkouts), cl-reverify.z (--reverify's
+# claims).
 
 # _claims_refuse_dirty <verb>: the gate precondition (Design
 # clarifications): when `git status --porcelain --untracked-files=no` lists
@@ -8160,30 +8186,57 @@ _claims_promote_swap() {
   return 0
 }
 
-# _claims_promote <id>: promote one claim (see the section comment). A
-# refusal adds its finding (or indeterminate row) and returns; the caller
-# emits.
+_CL_PV_DOC=""      # the claim _claims_prove was asked for: its doc ("-" when none)
+_CL_PV_SIDECAR=""  # …its sidecar
+_CL_PV_STATUS=""   # …its status
+_CL_PV_HEAD=""     # …HEAD, which its proofs ran at
+_CL_PV_DIGEST=""   # …its verdict's digest (the bytes in cl-promote-verdict.json)
+
+# _claims_prove <mode> <id>: the proof path promote and --reverify share
+# (see the section comment), <mode> promote or reverify, so the two cannot
+# diverge. An unknown id is a usage error. Then the claim's preconditions —
+# reverify first needs it built or gated with a promotion ("not promoted");
+# promote refuses a built claim whose verdict is ok ("already promoted") —
+# its subject at HEAD, the green run in the work tree, and each proof in a
+# throwaway worktree of its own, every guard included. 0: proved — its
+# verdict in cl-promote-verdict.json (status_to built for promote, the
+# claim's own status for reverify), the digest in _CL_PV_DIGEST, nothing
+# written outside the scratch dir. 1: refused, its finding (or indeterminate
+# row) added.
 # shellcheck disable=SC2016  # jq programs, not shell expansion
-_claims_promote() {
-  local id="$1" plan="$_SCRATCH/cl-promote.json" z="$_SCRATCH/cl-promote.z"
+_claims_prove() {
+  local mode="$1" id="$2" plan="$_SCRATCH/cl-promote.json" z="$_SCRATCH/cl-promote.z"
   local oids="$_SCRATCH/cl-promote-oids.jsonl" subj="$_SCRATCH/cl-promote-subjects.z"
-  local vfile="$_SCRATCH/cl-promote-verdict.json" sc_old="$_SCRATCH/cl-promote-sidecar.old"
-  local sc_new="$_SCRATCH/cl-promote-sidecar.new" doc_new="$_SCRATCH/cl-promote-doc.new"
-  local x refuse doc sidecar status claim runner="" node="" mfile="" mfind="" mrepl="" ored="" rsha=""
-  local head p oid v rc green why ss digest store row unsafe="$_CL_PROMOTE_UNSAFE" munsafe
+  local vfile="$_SCRATCH/cl-promote-verdict.json"
+  local x refuse doc status claim runner="" node="" mfile="" mfind="" mrepl="" ored="" rsha=""
+  local head p oid v rc green why ss to unsafe="$_CL_PROMOTE_UNSAFE" munsafe
+  _CL_PV_DOC=- _CL_PV_SIDECAR="" _CL_PV_STATUS="" _CL_PV_HEAD="" _CL_PV_DIGEST=""
   _claims_jq promote-plan -c --arg id "$id" "$_JQ_CLAIMS_MUTANT_DEFS $_JQ_CLAIMS_PROMOTE_PLAN" \
     "$_SCRATCH/cl-claims.json" > "$plan"
   x=$(_claims_jq promote-unknown -r '.unknown' "$plan") || _claims_propagate $?
   [ "$x" = false ] || _usage_error "claims promote" "no claim has the id $id"
   doc=$(_claims_jq promote-doc -r '.doc | strings' "$plan") || _claims_propagate $?
   [ -n "$doc" ] || doc=-
+  _CL_PV_DOC=$doc
+  if [ "$mode" = reverify ]; then
+    # (A duplicated id has no claim here: the plan's refusal names it.)
+    refuse=$(_claims_jq reverify-promoted -r 'select(has("claim")) | .claim
+        | select(((.status == "built" or .status == "gated") and (.promotion | type) == "object") | not)
+        | "not promoted: status \(.status | tojson), promotion \(.promotion | tojson): --reverify re-proves the promotion of a built or gated claim (claims promote makes one)"' \
+      "$plan") || _claims_propagate $?
+    if [ -n "$refuse" ]; then
+      _claims_finding promote "$id" "$doc" "$refuse"
+      return 1
+    fi
+  fi
   refuse=$(_claims_jq promote-refuse -r '.refuse | strings' "$plan") || _claims_propagate $?
   if [ -n "$refuse" ]; then
     _claims_finding promote "$id" "$doc" "$refuse"
-    return 0
+    return 1
   fi
-  sidecar=$(_claims_jq promote-sidecar -r '.sidecar' "$plan") || _claims_propagate $?
+  _CL_PV_SIDECAR=$(_claims_jq promote-sidecar -r '.sidecar' "$plan") || _claims_propagate $?
   status=$(_claims_jq promote-status -r '.status' "$plan") || _claims_propagate $?
+  _CL_PV_STATUS=$status
   claim=$(_claims_jq promote-claim -c '.claim' "$plan") || _claims_propagate $?
   # NUL-separated and read with read -d '': find and replace keep every byte,
   # trailing newlines included ($(…) would strip them).
@@ -8196,16 +8249,16 @@ _claims_promote() {
     || _claims_die "cannot read the claim's test and proofs (promote)"
   munsafe="mutant file $mfile is not a safe repo path $unsafe: name it by its path from the repo root"
 
-  if [ "$status" = built ]; then
+  if [ "$mode" = promote ] && [ "$status" = built ]; then
     v=$(_claims_verdict_check "$claim") || _claims_propagate $?
     if [ "$v" = ok ]; then
       _claims_finding promote "$id" "$doc" "already promoted: built, and its verdict matches the claim (promote again after its states or test change)"
-      return 0
+      return 1
     fi
   fi
   if [ -n "$mfile" ] && ! _claims_safe_relpath "$mfile"; then
     _claims_finding promote "$id" "$doc" "$munsafe"
-    return 0
+    return 1
   fi
   head=$(git rev-parse -q --verify 'HEAD^{commit}') || _claims_die "cannot resolve HEAD"
   if [ -n "$ored" ]; then
@@ -8218,11 +8271,11 @@ _claims_promote() {
     esac
     if [ "$x" -ne "${#head}" ]; then
       _claims_finding promote "$id" "$doc" "nonvacuity.observed_red is not a full commit id: $ored (give the full lowercase hex id of a commit, as git rev-parse prints it: a ref or an abbreviation could name another commit when the proof is re-verified)"
-      return 0
+      return 1
     fi
     if ! rsha=$(git rev-parse -q --verify "$ored^{commit}" 2>/dev/null) || [ "$rsha" != "$ored" ]; then
       _claims_finding promote "$id" "$doc" "nonvacuity.observed_red is not a commit: $ored (it must name a commit of this repository: fetch it, or correct the id)"
-      return 0
+      return 1
     fi
   fi
   : > "$oids"
@@ -8230,11 +8283,11 @@ _claims_promote() {
   while IFS= read -r -d '' p <&3; do
     if ! _claims_safe_relpath "$p"; then
       _claims_finding promote "$id" "$doc" "subject $p is not a safe repo path $unsafe"
-      return 0
+      return 1
     fi
     if ! oid=$(git rev-parse -q --verify "HEAD:$p" 2>/dev/null); then
       _claims_finding promote "$id" "$doc" "subject not at HEAD: $p (the verdict records each subject path's object at HEAD; commit it, or correct the path)"
-      return 0
+      return 1
     fi
     _claims_jq promote-oid -nc --arg p "$p" --arg o "$oid" '{($p): $o}' >> "$oids"
   done 3< "$subj"
@@ -8248,11 +8301,11 @@ _claims_promote() {
     pass) ;;
     indeterminate)
       _claims_indeterminate promote "$id" "${_CL_PR_REASON:-indeterminate}"
-      return 0
+      return 1
       ;;
     *)
       _claims_finding promote "$id" "$doc" "not green: the bound test gives $green at HEAD$why; promote proves a passing test"
-      return 0
+      return 1
       ;;
   esac
 
@@ -8272,49 +8325,80 @@ _claims_promote() {
       0) ;;
       1)
         _claims_finding promote "$id" "$doc" "$munsafe"
-        return 0
+        return 1
         ;;
       *) _claims_propagate "$rc" ;;
     esac
     if [ ! -f "$_CL_WT/$mfile" ]; then
       _claims_finding promote "$id" "$doc" "mutant file $mfile is not a file at HEAD: nothing to mutate"
-      return 0
+      return 1
     fi
-    _claims_promote_clean "$id" "$doc" "$runner" "$node" || return 0
+    _claims_promote_clean "$id" "$doc" "$runner" "$node" || return 1
     rc=0
     _claims_mutate "$_CL_WT/$mfile" "$mfind" "$mrepl" || rc=$?
     case "$rc" in
       0) ;;
       2)
         _claims_finding promote "$id" "$doc" "mutant file is not UTF-8 text: $mfile (jq would rewrite its invalid bytes, so the mutant would change more than find → replace)"
-        return 0
+        return 1
         ;;
       *)
         _claims_finding promote "$id" "$doc" "mutant: $_CL_MUTATE_ERR in $mfile (find must match exactly once)"
-        return 0
+        return 1
         ;;
     esac
-    _claims_promote_red "$id" "$doc" "$runner" "$node" mutant "under the mutant of $mfile" || return 0
+    _claims_promote_red "$id" "$doc" "$runner" "$node" mutant "under the mutant of $mfile" || return 1
   fi
   # observed_red: the subject as at <sha> (_claims_promote_swap), the test
   # still at HEAD.
   if [ -n "$rsha" ]; then
     _claims_worktree_add "$head"
-    _claims_promote_clean "$id" "$doc" "$runner" "$node" || return 0
-    _claims_promote_swap "$id" "$doc" "$rsha" "$subj" || return 0
+    _claims_promote_clean "$id" "$doc" "$runner" "$node" || return 1
+    _claims_promote_swap "$id" "$doc" "$rsha" "$subj" || return 1
     _claims_promote_red "$id" "$doc" "$runner" "$node" observed_red "with the subject as at observed_red $ored" \
-      || return 0
+      || return 1
   fi
 
-  # 3. The verdict, the sidecar and the doc, each prepared (and the render
-  # checked) before the first write.
+  # 3. The verdict: the claim as proved at HEAD.
+  to=built
+  [ "$mode" = promote ] || to=$status
   ss=$(_claims_states_sha256 "$claim") || _claims_propagate $?
   _claims_jq promote-verdict -ncS --slurpfile p "$plan" --slurpfile o "$oids" --arg ss "$ss" --arg head "$head" \
-    --arg to built \
+    --arg to "$to" \
     '$p[0].claim as $c
      | {claim: $c.id, states_sha256: $ss, test: $c.test, nonvacuity: $c.nonvacuity, head: $head,
         subject_oids: ($o | add // {}), green: "pass", red: "assert-fail", status_to: $to}' > "$vfile"
-  digest=$(_claims_sha256 "$vfile") || _claims_propagate $?
+  _CL_PV_DIGEST=$(_claims_sha256 "$vfile") || _claims_propagate $?
+  _CL_PV_HEAD=$head
+  return 0
+}
+
+# _claims_store_verdict: the verdict _claims_prove proved
+# (cl-promote-verdict.json) stored as <store>/<_CL_PV_DIGEST>.json, the store
+# created when missing.
+_claims_store_verdict() {
+  local store
+  store=$(_claims_store_dir) || _claims_propagate $?
+  mkdir -p "$store" 2>/dev/null || _claims_die "cannot create the verdict store $store"
+  _tmp_beside "$store/$_CL_PV_DIGEST.json"
+  cat "$_SCRATCH/cl-promote-verdict.json" > "$_TMP" || _claims_die "cannot write the verdict $store/$_CL_PV_DIGEST.json"
+  _replace_file "$_TMP" "$store/$_CL_PV_DIGEST.json"
+}
+
+# _claims_promote <id>: promote one claim (see the section comment). A
+# refusal adds its finding (or indeterminate row) and returns; the caller
+# emits.
+# shellcheck disable=SC2016  # jq programs, not shell expansion
+_claims_promote() {
+  local id="$1" sc_old="$_SCRATCH/cl-promote-sidecar.old" sc_new="$_SCRATCH/cl-promote-sidecar.new"
+  local doc_new="$_SCRATCH/cl-promote-doc.new" sidecar doc row
+  _claims_prove promote "$id" || return 0
+  sidecar=$_CL_PV_SIDECAR
+  doc=$_CL_PV_DOC
+
+  # 3. (continued) The sidecar and the doc, each prepared (and the render
+  # checked) before the first write: the verdict, then the sidecar, then the
+  # doc.
   if ! _claims_safe_relpath "$sidecar" || ! _claims_contained_path "$sidecar"; then
     _claims_die "refusing to write $sidecar: not a safe repo path"
   fi
@@ -8322,7 +8406,7 @@ _claims_promote() {
     _claims_die "refusing to render $doc: not a safe repo path"
   fi
   _claims_read "$sidecar" > "$sc_old" || _claims_die "cannot read $sidecar (promote)"
-  _claims_jq promote-rewrite --arg id "$id" --arg to built --arg at "$head" --arg d "$digest" \
+  _claims_jq promote-rewrite --arg id "$id" --arg to built --arg at "$_CL_PV_HEAD" --arg d "$_CL_PV_DIGEST" \
     '.claims |= map(if type == "object" and .id == $id
                     then .status = $to | .promotion = {at: $at, verdict_sha256: $d} else . end)' \
     "$sc_old" > "$sc_new"
@@ -8331,11 +8415,7 @@ _claims_promote() {
     return 0
   fi
 
-  store=$(_claims_store_dir) || _claims_propagate $?
-  mkdir -p "$store" 2>/dev/null || _claims_die "cannot create the verdict store $store"
-  _tmp_beside "$store/$digest.json"
-  cat "$vfile" > "$_TMP" || _claims_die "cannot write the verdict $store/$digest.json"
-  _replace_file "$_TMP" "$store/$digest.json"
+  _claims_store_verdict
   _tmp_beside "$sidecar"
   cat "$sc_new" > "$_TMP" || _claims_die "cannot write $sidecar"
   _replace_file "$_TMP" "$sidecar"
@@ -8344,11 +8424,48 @@ _claims_promote() {
     cat "$doc_new" > "$_TMP" || _claims_die "cannot write the render of $doc"
     _replace_file "$_TMP" "$doc"
   fi
-  row=$(_claims_jq promote-result -nc --arg c "$id" --arg from "$status" --arg to built --arg d "$digest" \
+  row=$(_claims_jq promote-result -nc --arg c "$id" --arg from "$_CL_PV_STATUS" --arg to built \
+    --arg d "$_CL_PV_DIGEST" \
     '{claim: $c, status_from: $from, status_to: $to, green: "pass", red: "assert-fail", verdict_sha256: $d}') \
     || _claims_propagate $?
   _claims_result "$row"
 }
+
+# _claims_reverify <id>: re-prove one promoted claim (_claims_prove
+# reverify) at HEAD; when it holds, store its fresh verdict (its own digest).
+# Never writes the sidecar or the doc: the claim's promotion still names the
+# verdict promote stored. Its worktrees are removed before the next claim's.
+# Results: {claim, verdict} — ok, finding (its finding names the claim) or
+# indeterminate.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_claims_reverify() {
+  local id="$1" n v row indet="$_SCRATCH/cl-indet.jsonl"
+  n=$(($(wc -l < "$indet")))
+  if _claims_prove reverify "$id"; then
+    _claims_store_verdict
+    v=ok
+  elif [ "$(($(wc -l < "$indet")))" -gt "$n" ]; then
+    v=indeterminate
+  else
+    v=finding
+  fi
+  _claims_worktrees_remove
+  row=$(_claims_jq reverify-result -nc --arg c "$id" --arg v "$v" '{claim: $c, verdict: $v}') \
+    || _claims_propagate $?
+  _claims_result "$row"
+}
+
+# The claims --reverify --all re-proves (cl-claims.json): each built or gated
+# claim with a promotion object, by id, once each, in sidecar order; NUL
+# terminated, prefixed r (re-prove) or s (frozen: never run, reported
+# skipped).
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_REVERIFY_ALL='def nes: type == "string" and length > 0;
+ reduce (.[] | .claim | objects
+         | select((.id | nes) and (.id | split("\u0000") | length) == 1
+                  and (.status == "built" or .status == "gated") and (.promotion | type) == "object")) as $c
+   ([]; if any(.[]; .id == $c.id) then . else . + [{id: $c.id, frozen: ($c.frozen_at | nes)}] end)
+ | .[] | (if .frozen then "s" else "r" end) + .id + "\u0000"'
 
 cmd_claims_validate() {
   local mode=all
@@ -8376,10 +8493,15 @@ cmd_claims_validate() {
   _claims_emit validate
 }
 
-# promote <id> (see "promote, the nonvacuity proofs"). The base is never read, so
-# an unresolvable one is not indeterminate here. --reverify is a stub until
-# it lands: it checks its arguments and reports an empty verdict.
+# promote <id> (see "promote, the nonvacuity proofs"). The base is never
+# read, so an unresolvable one is not indeterminate here.
+# promote --reverify (<id>… | --all): each claim re-proved (_claims_reverify)
+# at HEAD in a clean tree; --all takes _JQ_CLAIMS_REVERIFY_ALL's claims (a
+# frozen one reported skipped), and each <id> named must be a claim (else a
+# usage error, before anything runs).
 cmd_claims_promote() {
+  local ids x id
+  local sel=()
   _CL_ALL_BLOCKING=1
   _CL_BASE_UNUSED=1
   _claims_init head
@@ -8389,6 +8511,33 @@ cmd_claims_promote() {
     else
       [ $# -gt 0 ] || _usage_error "claims promote" "--reverify requires <id>... or --all"
     fi
+    _claims_refuse_dirty promote
+    _claims_load
+    ids="$_SCRATCH/cl-reverify.z"
+    if [ "$_OPT_all" = 1 ]; then
+      _claims_jq reverify-all -j "$_JQ_CLAIMS_REVERIFY_ALL" "$_SCRATCH/cl-claims.json" > "$ids"
+    else
+      : > "$ids"
+      for id in "$@"; do
+        # shellcheck disable=SC2016  # jq program, not shell expansion
+        x=$(_claims_jq reverify-known -r --arg id "$id" 'any(.[]; .claim.id == $id)' "$_SCRATCH/cl-claims.json") \
+          || _claims_propagate $?
+        [ "$x" = true ] || _usage_error "claims promote" "no claim has the id $id"
+        printf 'r%s\0' "$id" >> "$ids"
+      done
+    fi
+    while IFS= read -r -d '' id; do sel+=("$id"); done < "$ids"
+    for id in ${sel[@]+"${sel[@]}"}; do
+      case "$id" in
+        s*)
+          # shellcheck disable=SC2016  # jq program, not shell expansion
+          x=$(_claims_jq reverify-skipped -nc --arg c "${id#s}" '{claim: $c, verdict: "skipped"}') \
+            || _claims_propagate $?
+          _claims_result "$x"
+          ;;
+        *) _claims_reverify "${id#r}" ;;
+      esac
+    done
     _claims_emit promote
   fi
   [ "$_OPT_all" != 1 ] || _usage_error "claims promote" "--all requires --reverify"
