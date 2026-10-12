@@ -18,6 +18,10 @@ _LG_CACHE=""         # $(git rev-parse --git-common-dir)/doc-superpowers/ledger
 # The modules. Each defines functions only.
 # shellcheck source=scripts/ledger/parse.sh
 . "$_LG_LIB/parse.sh"
+# shellcheck source=scripts/ledger/glob.sh
+. "$_LG_LIB/glob.sh"
+# shellcheck source=scripts/ledger/validate.sh
+. "$_LG_LIB/validate.sh"
 
 # _lg_die <message>: the run could not run — exit 2, with the verdict object
 # in --format json (exactly once, inside $(…) too: the marker file tells the
@@ -130,6 +134,41 @@ _lg_doc_index() {
   printf '%s\n' "$snap"
 }
 
+# _lg_out_file <file>: the file's lines as the run's output (fd 9, as
+# _lg_out). A failed write must not change the exit status.
+_lg_out_file() {
+  if { : >&9; } 2>/dev/null; then
+    cat -- "$1" >&9 || true
+  else
+    cat -- "$1" || true
+  fi
+}
+
+# _lg_registry: print the path of a private copy of docs/ledger/ledgers.json
+# (the work tree's), or of {"schema":"ledger-registry/1","ledgers":[]} when
+# the repo has none. Dies (2) unless the file is one JSON object whose
+# "ledgers" (absent: []) is a list of objects — what every reader of the
+# registry relies on. Everything else (schema value, ids, statuses, kinds,
+# contracts, globs, ownership) is `validate --registry`'s to report. The
+# copy always has "ledgers". Needs _lg_init.
+_lg_registry() {
+  local reg=docs/ledger/ledgers.json snap
+  snap=$(mktemp "$_SCRATCH/lg-registry.XXXXXX") || _lg_die "mktemp failed"
+  if [ ! -e "$reg" ] && [ ! -L "$reg" ]; then
+    printf '%s\n' '{"schema":"ledger-registry/1","ledgers":[]}' > "$snap" || _lg_die "cannot write $snap"
+    printf '%s\n' "$snap"
+    return 0
+  fi
+  cat -- "$reg" > "$snap.raw" 2>/dev/null || _lg_die "cannot read $reg"
+  if ! jq -e -s 'length == 1 and (.[0] | type) == "object"
+      and ((.[0].ledgers // []) | type == "array" and all(.[]; type == "object"))' \
+      "$snap.raw" >/dev/null 2>&1; then
+    _lg_die "$reg is not a ledger registry (expected one JSON object with a \"ledgers\" list of objects)"
+  fi
+  jq -c '.ledgers = (.ledgers // [])' "$snap.raw" > "$snap" || _lg_die "jq failed (registry)"
+  printf '%s\n' "$snap"
+}
+
 # --- Handlers ------------------------------------------------------------------
 #
 # One per verb-table row (doc-tools.sh "ledger <sub>|cmd_ledger_<sub>|…").
@@ -152,7 +191,6 @@ cmd_ledger_assign() { _lg_stub "$@"; }
 cmd_ledger_link() { _lg_stub "$@"; }
 cmd_ledger_note() { _lg_stub "$@"; }
 cmd_ledger_view() { _lg_stub "$@"; }
-cmd_ledger_validate() { _lg_stub "$@"; }
 cmd_ledger_publish() { _lg_stub "$@"; }
 cmd_ledger_finalize() { _lg_stub "$@"; }
 cmd_ledger_init() { _lg_stub "$@"; }

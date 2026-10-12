@@ -27,9 +27,9 @@
 # again. DOC_TOOLS_LEDGER_TRACE=1 prints "parse-miss <path>" to stderr for
 # each path parsed (not read from the cache).
 #
-# Globs: items.globs and items.archive_globs are matched by git as
-# ":(glob)" pathspecs — "*" stays within one path segment, "**/" spans
-# directories.
+# Globs: items.globs and items.archive_globs use glob.sh's grammar (the
+# registry's): "*" stays within one path segment, "**/" spans directories,
+# "{a,b}" picks one.
 
 _LG_BOM=$'\357\273\277'
 _LG_PARSE_DIR=""     # $_LG_CACHE/parse/<sig>: _lg_parse_prep
@@ -84,9 +84,6 @@ _lg_scratch_name() {
 
 # --- Item paths ----------------------------------------------------------------
 
-_LG_TREE_IDX=""      # a private index holding _LG_TREE_IDX_OID (_lg_tree_index)
-_LG_TREE_IDX_OID=""
-
 # _lg_tree_oid <rev>: the tree of a commit-ish into _LG_TREE; dies (2) on an
 # option-like or unknown rev.
 _lg_tree_oid() {
@@ -96,54 +93,50 @@ _lg_tree_oid() {
   _LG_TREE=$(git rev-parse --verify -q "$1^{tree}") || _lg_die "unknown revision: '$1'"
 }
 
-# _lg_tree_index <tree-oid>: a private index file holding that tree (git
-# matches ":(glob)" pathspecs in an index, not in ls-tree), into _LG_TREE_IDX.
-_lg_tree_index() {
-  if [ "$_LG_TREE_IDX_OID" = "$1" ] && [ -n "$_LG_TREE_IDX" ]; then return 0; fi
-  _LG_TREE_IDX="$_SCRATCH/lg-tree.index"
-  GIT_INDEX_FILE="$_LG_TREE_IDX" git read-tree "$1" || _lg_die "git read-tree $1 failed"
-  _LG_TREE_IDX_OID=$1
-}
-
 # _lg_globs_matching <src> <out> <config-filter>: the NUL-terminated paths
-# at <src> matching the globs the filter yields (a list of strings). <src>:
+# at <src> matching the globs the filter yields (a list of strings), in
+# git's order. <src>:
 #   worktree      tracked + untracked, .gitignore'd files left out
 #   worktree-all  tracked + untracked, ignored files too (an archived check)
 #   :             the index
 #   <rev>         a commit-ish
+# git lists the globs' literal directories (everything when a glob has
+# none); glob.sh's matcher picks the paths — the grammar registry globs use.
 _lg_globs_matching() {
-  local src="$1" out="$2" filter="$3" g
+  local src="$1" out="$2" filter="$3" s d
   local specs=()
   _lg_scratch_name
+  s=$_LG_SN
   _lg_cfg "[$filter | if type == \"array\" then .[] else empty end | select(type == \"string\" and . != \"\")] | .[]" \
-    > "$_LG_SN.globs"
-  while IFS= read -r g; do
-    specs+=(":(glob)$g")
-  done < "$_LG_SN.globs"
+    > "$s.globs"
   : > "$out"
-  [ "${#specs[@]}" -gt 0 ] || return 0
-  # git's stderr is kept for the error message: a glob whose directory does
-  # not exist makes `--others` warn, which is not a failure.
+  [ -s "$s.globs" ] || return 0
+  _lg_glob_dirs "$s.globs" "$s.dirs"
+  while IFS= read -r d; do
+    specs+=("$d")
+  done < "$s.dirs"
+  # git's stderr is kept for the error message: a directory that does not
+  # exist makes `--others` warn, which is not a failure.
   case "$src" in
     worktree)
-      GIT_LITERAL_PATHSPECS=0 git ls-files -z --cached --others --exclude-standard -- "${specs[@]}" \
-        > "$out" 2> "$_LG_SN.err" || _lg_globs_fail ;;
+      GIT_LITERAL_PATHSPECS=1 git ls-files -z --cached --others --exclude-standard -- ${specs[@]+"${specs[@]}"} \
+        > "$s.all" 2> "$s.err" || _lg_globs_fail "$s.err" ;;
     worktree-all)
-      GIT_LITERAL_PATHSPECS=0 git ls-files -z --cached --others -- "${specs[@]}" \
-        > "$out" 2> "$_LG_SN.err" || _lg_globs_fail ;;
+      GIT_LITERAL_PATHSPECS=1 git ls-files -z --cached --others -- ${specs[@]+"${specs[@]}"} \
+        > "$s.all" 2> "$s.err" || _lg_globs_fail "$s.err" ;;
     :)
-      GIT_LITERAL_PATHSPECS=0 git ls-files -z --cached -- "${specs[@]}" \
-        > "$out" 2> "$_LG_SN.err" || _lg_globs_fail ;;
+      GIT_LITERAL_PATHSPECS=1 git ls-files -z --cached -- ${specs[@]+"${specs[@]}"} \
+        > "$s.all" 2> "$s.err" || _lg_globs_fail "$s.err" ;;
     *)
       _lg_tree_oid "$src"
-      _lg_tree_index "$_LG_TREE"
-      GIT_LITERAL_PATHSPECS=0 GIT_INDEX_FILE="$_LG_TREE_IDX" git ls-files -z --cached -- "${specs[@]}" \
-        > "$out" 2> "$_LG_SN.err" || _lg_globs_fail ;;
+      GIT_LITERAL_PATHSPECS=1 git ls-tree -r -z --name-only --full-name "$_LG_TREE" -- ${specs[@]+"${specs[@]}"} \
+        > "$s.all" 2> "$s.err" || _lg_globs_fail "$s.err" ;;
   esac
+  _lg_paths_filter "$s.all" "$s.globs" "$out"
 }
 
 _lg_globs_fail() {
-  _lg_die "git ls-files failed matching the item globs: $(head -n 3 "$_LG_SN.err" 2>/dev/null)"
+  _lg_die "git failed listing the paths for the item globs: $(head -n 3 "$1" 2>/dev/null)"
 }
 
 # _lg_item_paths <worktree|:|rev> <out>: the item files (items.globs and

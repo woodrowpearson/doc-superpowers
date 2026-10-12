@@ -2375,9 +2375,14 @@ ledger note|cmd_ledger_note|repo|format=
 ledger view|cmd_ledger_view|repo|format=
   <ledger|all> [--format text|json]
   Render ledger views locally from the working tree.
-ledger validate|cmd_ledger_validate|repo|format=
-  [--format text|json]
-  Check items, the ledger registry and keys.
+ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict format=
+  (--staged | --all | --registry | --plan <plan>) [--strict] [--format text|json]
+  Check items, the ledger registry and keys. --registry checks
+  docs/ledger/ledgers.json: schema, ledger ids, statuses, kinds, contract
+  ids, globs, and that no tracked file is claimed by two ledgers (overlap)
+  or, once any ledger declares paths, that every tracked file outside docs/
+  has one (unowned). One "registry <class> <detail>" line per finding;
+  every finding blocks (exit 1).
 ledger publish|cmd_ledger_publish|repo|format=
   [--format text|json]
   Render the views from the remote base and push the views branch.
