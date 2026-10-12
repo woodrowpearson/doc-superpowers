@@ -3211,6 +3211,597 @@ test_lg_finalize_crash_safe_and_resumable() {
   teardown
 }
 
+# --- Task 7: validate --staged | --all | --plan | --pushed -------------------------
+
+# lg_v_fixture [config-json]: lg_fixture + config + the x/y/old registry,
+# committed (no remote).
+lg_v_fixture() {
+  local c='{}'
+  if [ $# -gt 0 ]; then c=$1; fi
+  lg_fixture
+  lg_enable "$c"
+  lg_registry "$LG_REG_XY"
+  git add -A && git commit -qm ledger
+}
+
+# lg_vf: the findings of the last JSON verdict as "<class> <severity> <path|key>"
+# lines, sorted ("invalid" when it is not a verdict with findings).
+lg_vf() {
+  jq -r '.findings[] | "\(.class) \(.severity) \(.path // .key)"' <<<"$LG_OUT" 2>/dev/null | LC_ALL=C sort \
+    || echo invalid
+}
+
+# lg_vfb: lg_vf, blocking findings only.
+lg_vfb() {
+  lg_vf | grep ' block ' || true
+}
+
+# lg_resolved <file> <text>: append a "## Resolution" section to an item.
+lg_resolved() {
+  printf '\n## Resolution\n\n%s\n' "$2" >> "$1"
+}
+
+test_lg_validate_staged_clean() {
+  echo "test: validate --staged: nothing staged, a well-formed added item, a staged registry"
+  lg_v_fixture
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: An existing item"
+  git add -A && git commit -qm a
+  lg validate --staged --format json
+  assert_eq "0" "$LG_RC" "nothing staged: exit 0"
+  assert_eq "1" "$(json_count "$LG_OUT")" "one object"
+  assert_json_field "$LG_OUT" '.findings | length' "0" "no findings"
+  assert_json_field "$LG_OUT" '.verb' "ledger validate" ".verb"
+  lg_item docs/issues/b.md "key: x-2" "ledger: x" "status: Open" "summary: A new item, well formed"
+  lg_item docs/issues/u.md "ledger: unassigned" "status: Open" "summary: Home undecided, no key yet"
+  lg_item docs/issues/p.md "key: y-~0a1f" "ledger: y" "status: Open" "summary: A provisional key is a key"
+  printf 'notes\n' > docs/notes.md
+  git add -A
+  lg validate --staged --format json
+  assert_eq "0" "$LG_RC" "well-formed added items: exit 0"
+  assert_eq "" "$(lg_vf)" "no findings"
+  lg validate --staged
+  assert_eq "0|" "$LG_RC|$LG_OUT" "text mode: nothing printed"
+  git commit -qm b
+  # The registry staged: --registry runs too.
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[
+    {"id":"x","title":"X","kind":"service","status":"active"},
+    {"id":"x","title":"X again","kind":"service","status":"active"}]}'
+  git add docs/ledger/ledgers.json
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "a staged registry with a duplicate id: exit 1"
+  assert_contains "$(lg_vf)" "registry block" "…a registry finding, blocking"
+  lg validate --staged
+  assert_contains "$LG_OUT" "registry duplicate-id x is the id of 2 ledgers" "text: the --registry line"
+  # The working copy of the registry is not what is checked.
+  lg_registry "$LG_REG_XY"
+  lg validate --staged
+  assert_eq "1" "$LG_RC" "the staged registry is checked, not the working copy"
+  git add docs/ledger/ledgers.json
+  lg validate --staged
+  assert_eq "0" "$LG_RC" "registry restored and staged: exit 0"
+  lg validate --staged --all
+  assert_eq "3" "$LG_RC" "two modes: usage (3)"
+  lg validate --pushed
+  assert_eq "3" "$LG_RC" "--pushed without a range: usage (3)"
+  teardown
+}
+
+test_lg_validate_staged_bad_key() {
+  echo "test: validate --staged: a key that is neither <ledger>-<n> nor <ledger>-~<hex4> blocks"
+  lg_v_fixture
+  lg_item docs/issues/a.md "key: x-01" "ledger: x" "status: Open" "summary: Leading zero in the number"
+  lg_item docs/issues/b.md "key: X-2" "ledger: x" "status: Open" "summary: Upper case is not a key"
+  lg_item docs/issues/c.md "key: x-~zz12" "ledger: x" "status: Open" "summary: Not hex in the provisional"
+  lg_item docs/issues/d.md "key: [x-3, x-4]" "ledger: x" "status: Open" "summary: Two keys in a list"
+  git add -A
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "exit 1"
+  assert_eq "bad-key block docs/issues/a.md
+bad-key block docs/issues/b.md
+bad-key block docs/issues/c.md
+bad-key block docs/issues/d.md" "$(lg_vf)" "each bad key"
+  teardown
+}
+
+test_lg_validate_staged_dup_key() {
+  echo "test: validate --staged: a key another item already carries blocks; a pre-existing duplicate a commit merely touches is advisory"
+  lg_v_fixture
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: The first item with x-1"
+  lg_item docs/issues/c.md "key: x-5" "ledger: x" "status: Open" "summary: An old duplicate, one side"
+  lg_item docs/issues/d.md "key: x-5" "ledger: x" "status: Open" "summary: An old duplicate, other side"
+  git add -A && git commit -qm items
+  lg_item docs/issues/b.md "key: x-1" "ledger: x" "status: Open" "summary: A second item with x-1"
+  git add -A
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "exit 1"
+  assert_eq "duplicate-key block docs/issues/b.md" "$(lg_vf)" "the added item is reported (the untouched one is not)"
+  assert_contains "$(jq -r '.findings[0].detail' <<<"$LG_OUT")" "docs/issues/a.md" "the detail names the other item"
+  assert_json_field "$LG_OUT" '.findings[0].key' "x-1" ".key"
+  git reset -q
+  # Case does not make a key different.
+  lg_item docs/issues/b.md "key: y-1" "ledger: y" "status: Open" "summary: A second item, other ledger" "aliases: [X-1]"
+  git add -A
+  lg validate --staged --format json
+  assert_eq "duplicate-key block docs/issues/b.md" "$(lg_vf)" "an alias X-1 collides with the key x-1"
+  git reset -q
+  rm docs/issues/b.md
+  # c.md's body changes; its key is old, and so is d.md's.
+  printf '\nMore detail.\n' >> docs/issues/c.md
+  git add -A
+  lg validate --staged --format json
+  assert_eq "0" "$LG_RC" "a pre-existing duplicate a commit merely touches: exit 0"
+  assert_eq "duplicate-key advisory docs/issues/c.md" "$(lg_vf)" "…reported as advisory"
+  lg validate --staged
+  assert_contains "$LG_OUT" "(advisory)" "text marks it advisory"
+  # Renaming d.md gives it no new key: still advisory.
+  git mv docs/issues/d.md docs/issues/d2.md
+  lg validate --staged --format json
+  assert_eq "0" "$LG_RC" "a renamed item keeps its old key: exit 0"
+  teardown
+}
+
+test_lg_validate_staged_alias_collision() {
+  echo "test: validate --staged: keys and aliases are one namespace"
+  lg_v_fixture
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: Alpha, re-homed from y" "aliases: [y-3]"
+  git add -A && git commit -qm a
+  lg_item docs/issues/b.md "key: y-3" "ledger: y" "status: Open" "summary: Bravo takes a retired key"
+  lg_item docs/issues/c.md "key: x-9" "ledger: x" "status: Open" "summary: Charlie claims x-1 as an alias" "aliases:" "  - x-1"
+  git add -A
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "exit 1"
+  assert_eq "duplicate-key block docs/issues/b.md
+duplicate-key block docs/issues/c.md" "$(lg_vf)" "a key equal to an alias, an alias equal to a key"
+  assert_contains "$(jq -r '.findings[] | select(.path == "docs/issues/b.md") | .detail' <<<"$LG_OUT")" "alias" \
+    "the detail says the other side is an alias"
+  teardown
+}
+
+test_lg_validate_staged_unknown_ledger() {
+  echo "test: validate --staged: ledger must be an active registered id or unassigned; a retired ledger takes no new items"
+  lg_v_fixture
+  lg_item docs/issues/r.md "key: old-1" "ledger: old" "status: Open" "summary: Filed before old was retired"
+  lg_item docs/issues/t.md "key: Typo-1" "ledger: typo" "status: Open" "summary: Committed past the hook"
+  git add -A && git commit -qm r
+  lg_item docs/issues/a.md "key: zz-1" "ledger: zz" "status: Open" "summary: An unregistered ledger"
+  lg_item docs/issues/b.md "key: old-2" "ledger: old" "status: Open" "summary: A new item in a retired ledger"
+  lg_item docs/issues/c.md "ledger: unassigned" "status: Open" "summary: Unassigned is always fine"
+  printf '\nA log line.\n' >> docs/issues/r.md
+  printf '\nA log line.\n' >> docs/issues/t.md
+  git add -A
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "exit 1"
+  assert_eq "bad-key advisory docs/issues/t.md
+retired-ledger advisory docs/issues/r.md
+retired-ledger block docs/issues/b.md
+unknown-ledger advisory docs/issues/t.md
+unknown-ledger block docs/issues/a.md" "$(lg_vf)" "unknown blocks; retired blocks an added item, advises on a modified one; unchanged bad values are advisory"
+  git reset -q
+  lg_item docs/issues/t.md "key: typo-1" "ledger: typo2" "status: Open" "summary: Committed past the hook"
+  git add docs/issues/t.md
+  lg validate --staged --format json
+  assert_eq "1|unknown-ledger block docs/issues/t.md" "$LG_RC|$(lg_vfb)" "a changed ledger value is held to the check"
+  teardown
+}
+
+test_lg_validate_staged_added_needs_fields() {
+  echo "test: validate --staged: an added item carries ledger and summary; a modified one that lacks them is advisory"
+  lg_v_fixture
+  lg_item docs/issues/old.md "status: Open"
+  git add -A && git commit -qm old
+  lg_item docs/issues/new.md "status: Open"
+  printf '# No frontmatter at all\n' > docs/issues/bare.md
+  printf '\nEdited.\n' >> docs/issues/old.md
+  git add -A
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "exit 1"
+  assert_eq "missing-ledger advisory docs/issues/old.md
+missing-ledger block docs/issues/bare.md
+missing-ledger block docs/issues/new.md
+missing-summary advisory docs/issues/old.md
+missing-summary block docs/issues/bare.md
+missing-summary block docs/issues/new.md" "$(lg_vf)" "added: blocking; modified: advisory"
+  git reset -q
+  rm docs/issues/new.md docs/issues/bare.md
+  git add -A
+  lg validate --staged
+  assert_eq "0" "$LG_RC" "only the pre-existing item: exit 0"
+  # An archive move is a rename, not an added item.
+  git commit -qm edit
+  mkdir -p docs/archive/issues
+  git mv docs/issues/old.md docs/archive/issues/old.md
+  lg validate --staged --format json
+  assert_eq "0" "$LG_RC" "a pre-existing item moved to the archive: exit 0"
+  teardown
+}
+
+test_lg_validate_staged_modified_legacy_ok() {
+  echo "test: validate --staged: a legacy_ids ledger is advisory on a modified item, blocking on an added one"
+  lg_v_fixture '{"legacy_ids":["checkout-old"]}'
+  lg_item docs/issues/a.md "key: x-1" "ledger: checkout-old" "status: Open" "summary: Filed before the re-split"
+  git add -A && git commit -qm a
+  printf '\nA log line.\n' >> docs/issues/a.md
+  git add -A
+  lg validate --staged --format json
+  assert_eq "0" "$LG_RC" "modified: exit 0"
+  assert_eq "legacy-ledger-id advisory docs/issues/a.md" "$(lg_vf)" "…an advisory"
+  lg validate --staged
+  assert_contains "$LG_OUT" "ledger assign" "the advisory names the remedy"
+  lg_item docs/issues/b.md "key: x-2" "ledger: checkout-old" "status: Open" "summary: A new item in a legacy ledger"
+  git add -A
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "added: exit 1"
+  assert_contains "$(lg_vf)" "legacy-ledger-id block docs/issues/b.md" "…blocking"
+  teardown
+}
+
+test_lg_validate_staged_reads_staged_blob() {
+  echo "test: validate --staged reads the staged blobs, not the working copies"
+  lg_v_fixture
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: The first item with x-1"
+  git add -A && git commit -qm a
+  lg_item docs/issues/b.md "key: x-1" "ledger: x" "status: Open" "summary: A clash, staged"
+  git add -A
+  lg_item docs/issues/b.md "key: x-2" "ledger: x" "status: Open" "summary: Fixed in the work tree only"
+  lg validate --staged
+  assert_eq "1" "$LG_RC" "worktree fixed, staged still bad: exit 1"
+  git add -A
+  lg validate --staged
+  assert_eq "0" "$LG_RC" "the fix staged: exit 0"
+  lg_item docs/issues/b.md "key: x-1" "ledger: x" "status: Open" "summary: Broken in the work tree only"
+  lg validate --staged
+  assert_eq "0" "$LG_RC" "staged good, worktree bad: exit 0"
+  # An unstaged item in the work tree is not in the staged index.
+  lg_item docs/issues/c.md "key: x-2" "ledger: x" "status: Open" "summary: Untracked clash"
+  lg validate --staged
+  assert_eq "0" "$LG_RC" "an untracked clash is not staged: exit 0"
+  teardown
+}
+
+test_lg_validate_staged_superseded_dangling() {
+  echo "test: validate --staged: superseded_by must resolve to an item"
+  lg_v_fixture
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Closed" "summary: Replaced by a missing item" "superseded_by: x-99"
+  lg_resolved docs/issues/a.md "Superseded."
+  git add -A
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "exit 1"
+  assert_eq "superseded-dangling block docs/issues/a.md" "$(lg_vf)" "dangling"
+  # Through finalized.json: a provisional key that became x-2.
+  lg_item docs/issues/b.md "key: x-2" "ledger: x" "status: Open" "summary: The replacement"
+  printf '{"x-~beef":"x-2"}\n' > docs/ledger/finalized.json
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Closed" "summary: Replaced, provisional name" "superseded_by: x-~beef"
+  lg_resolved docs/issues/a.md "Superseded."
+  git add -A
+  lg validate --staged --format json
+  assert_eq "0" "$LG_RC" "a finalized provisional key resolves: exit 0"
+  teardown
+}
+
+test_lg_validate_staged_cycle() {
+  echo "test: validate --staged: a supersession cycle blocks"
+  lg_v_fixture
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Closed" "summary: A says B replaces it" "superseded_by: x-2"
+  lg_resolved docs/issues/a.md "Superseded."
+  lg_item docs/issues/b.md "key: x-2" "ledger: x" "status: Closed" "summary: B says A replaces it" "superseded_by: x-1"
+  lg_resolved docs/issues/b.md "Superseded."
+  lg_item docs/issues/c.md "key: x-3" "ledger: x" "status: Closed" "summary: C replaces itself" "superseded_by: X-3"
+  lg_resolved docs/issues/c.md "Superseded."
+  git add -A
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "exit 1"
+  assert_eq "superseded-cycle block docs/issues/a.md
+superseded-cycle block docs/issues/b.md
+superseded-cycle block docs/issues/c.md" "$(lg_vf)" "each item on a cycle"
+  assert_contains "$(jq -r '.findings[] | select(.path == "docs/issues/a.md") | .detail' <<<"$LG_OUT")" "x-1 → x-2 → x-1" \
+    "the detail shows the cycle by key"
+  teardown
+}
+
+test_lg_validate_staged_chain_ends_superseded() {
+  echo "test: validate --staged: superseded_by names the item in effect, not one that is itself superseded"
+  lg_v_fixture
+  lg_item docs/issues/c.md "key: x-3" "ledger: x" "status: Closed" "summary: C, replaced by D" "superseded_by: x-4"
+  lg_resolved docs/issues/c.md "Superseded by x-4."
+  lg_item docs/issues/d.md "key: x-4" "ledger: x" "status: Open" "summary: D, the item in effect"
+  git add -A && git commit -qm cd
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Closed" "summary: A points at C" "superseded_by: x-3"
+  lg_resolved docs/issues/a.md "Superseded."
+  git add -A
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "exit 1"
+  assert_eq "superseded-chain block docs/issues/a.md" "$(lg_vf)" "the chain ends superseded"
+  assert_contains "$(jq -r '.findings[0].detail' <<<"$LG_OUT")" "x-4" "the detail names the item in effect"
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Closed" "summary: A points at D" "superseded_by: x-4"
+  lg_resolved docs/issues/a.md "Superseded."
+  git add -A
+  lg validate --staged
+  assert_eq "0|" "$LG_RC|$LG_OUT" "pointing at the item in effect: exit 0"
+  teardown
+}
+
+test_lg_validate_staged_missing_resolution() {
+  echo "test: validate --staged: an item whose status changes to closed or won't fix needs a resolution"
+  lg_v_fixture
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: Will be closed"
+  lg_item docs/issues/b.md "key: x-2" "ledger: x" "status: In progress" "summary: Will be dropped"
+  lg_item docs/issues/c.md "key: x-3" "ledger: x" "status: Closed" "summary: Closed long ago, no resolution"
+  git add -A && git commit -qm items
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Closed" "summary: Will be closed"
+  lg_item docs/issues/b.md "key: x-2" "ledger: x" "status: Won't Fix" "summary: Will be dropped"
+  printf '\nA log line.\n' >> docs/issues/c.md
+  git add -A
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "exit 1"
+  assert_eq "missing-resolution advisory docs/issues/c.md
+missing-resolution block docs/issues/a.md
+missing-resolution block docs/issues/b.md" "$(lg_vf)" "a status change blocks; an old closed item is advisory"
+  lg_resolved docs/issues/a.md "Done in abc123."
+  printf '\n## Resolution\n\n' >> docs/issues/b.md
+  git add -A
+  lg validate --staged --format json
+  assert_eq "missing-resolution advisory docs/issues/c.md
+missing-resolution block docs/issues/b.md" "$(lg_vf)" "an empty resolution section is still missing"
+  lg_item docs/issues/b.md "key: x-2" "ledger: x" "status: Won't Fix" "summary: Will be dropped"
+  lg_resolved docs/issues/b.md "Not worth it."
+  git add -A
+  lg validate --staged
+  assert_eq "0" "$LG_RC" "resolutions written: exit 0"
+  teardown
+}
+
+test_lg_validate_staged_superseded_not_closed() {
+  echo "test: validate --staged: superseded_by on an item that is not closed blocks"
+  lg_v_fixture
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: The item in effect"
+  git add -A && git commit -qm a
+  lg_item docs/issues/b.md "key: x-2" "ledger: x" "status: Open" "summary: Open but superseded" "superseded_by: x-1"
+  lg_item docs/issues/c.md "key: x-3" "ledger: x" "status: Won't fix" "summary: Won't fix is not closed" "superseded_by: x-1"
+  lg_resolved docs/issues/c.md "Dropped."
+  git add -A
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "exit 1"
+  assert_eq "superseded-not-closed block docs/issues/b.md
+superseded-not-closed block docs/issues/c.md" "$(lg_vf)" "open and won't-fix items with superseded_by"
+  teardown
+}
+
+test_lg_validate_staged_text_one_line() {
+  echo "test: validate text: one line per finding; a name with a control character is JSON-quoted"
+  lg_v_fixture
+  lg_item "docs/issues/t$(printf '\t')ab.md" "status: Open"
+  lg_item "docs/issues/n"$'\n'"l.md" "status: Open"
+  lg_item "docs/issues/sp ace é.md" "status: Open"
+  git add -A
+  lg validate --staged --format json
+  local n
+  n=$(jq '.findings | length' <<<"$LG_OUT")
+  lg validate --staged
+  assert_eq "1" "$LG_RC" "exit 1"
+  assert_true "several findings" test "$n" -ge 6
+  assert_eq "$n" "$(printf '%s\n' "$LG_OUT" | wc -l | tr -d ' ')" "one line per finding"
+  assert_contains "$LG_OUT" 'missing-ledger "docs/issues/t\tab.md"' "a tab: JSON-quoted"
+  assert_contains "$LG_OUT" 'missing-ledger "docs/issues/n\nl.md"' "a newline: JSON-quoted"
+  assert_contains "$LG_OUT" "missing-ledger docs/issues/sp ace é.md" "spaces and unicode: as they are"
+  teardown
+}
+
+test_lg_validate_staged_unborn() {
+  echo "test: validate --staged on an unborn branch: every staged item is added"
+  lg_v_fixture
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: A complete item, staged"
+  lg_item docs/issues/b.md "status: Open"
+  git checkout -q --orphan fresh
+  git add -A
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "exit 1"
+  assert_eq "missing-ledger block docs/issues/b.md
+missing-summary block docs/issues/b.md" "$(lg_vf)" "b.md is added; a.md is fine"
+  teardown
+}
+
+test_lg_validate_staged_keymap_reads_frontmatter() {
+  echo "test: validate --staged: the key map reads keys and aliases as the parser does (frontmatter only; BOM, CRLF, quotes, lists)"
+  lg_v_fixture
+  # Not keys: a body line, an unterminated frontmatter, a file that does not
+  # start with ---.
+  lg_item docs/issues/body.md "key: x-1" "ledger: x" "status: Open" "summary: The key x-1 lives here"
+  printf '\nkey: x-2\naliases: [x-3]\n' >> docs/issues/body.md
+  printf -- '---\nkey: x-4\nledger: x\n' > docs/issues/unterminated.md
+  printf '# Title\n---\nkey: x-5\n---\n' > docs/issues/late.md
+  # Keys: BOM + CRLF, quoted, a block list of aliases (indented and at column
+  # 0), a flow list.
+  printf '%s---\r\nkey: x-6\r\nledger: x\r\nsummary: BOM and CRLF item here\r\n---\r\n# T\r\n' "$LG_BOM" > docs/issues/crlf.md
+  lg_item docs/issues/quoted.md 'key: "x-7"' "ledger: x" "status: Open" "summary: A quoted key is a key"
+  lg_item docs/issues/block.md "key: x-8" "ledger: x" "status: Open" "aliases:" "  - y-1" "- y-2" "summary: Block list aliases"
+  lg_item docs/issues/flow.md "key: x-9" "ledger: x" "status: Open" "aliases: ['y-3', y-4] # a comment" "summary: Flow list aliases"
+  lg_item docs/issues/other.md "key: x-10" "ledger: x" "relates:" "  - sibling:y-5" "status: Open" "summary: A list under another field"
+  git add -A && git commit -qm items
+  local k
+  for k in x-2 x-3 x-4 x-5 y-5; do
+    lg_item docs/issues/new.md "key: $k" "ledger: x" "status: Open" "summary: A new item, no clash"
+    git add -A
+    lg validate --staged
+    assert_eq "0" "$LG_RC" "$k is not a key or alias of a committed item"
+    git reset -q
+  done
+  for k in x-1 x-6 x-7 y-1 y-2 y-3 y-4 x-10; do
+    lg_item docs/issues/new.md "key: $k" "ledger: x" "status: Open" "summary: A new item that clashes"
+    git add -A
+    lg validate --staged --format json
+    assert_eq "1|duplicate-key block docs/issues/new.md" "$LG_RC|$(lg_vfb)" "$k clashes"
+    git reset -q
+  done
+  teardown
+}
+
+test_lg_validate_all_advisories_rc0() {
+  echo "test: validate --all: advisories alone exit 0; a blocking class exits 1"
+  lg_v_fixture '{"legacy_ids":["legacy"]}'
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: A complete item with a contract" "changes: [field:a]"
+  lg_item docs/issues/k.md "ledger: x" "status: Open" "summary: Keyless but in a real ledger" "consumes: [field:a]"
+  lg_item docs/issues/l.md "status: Open" "summary: No ledger here, pre-existing" "changes: [field:b]"
+  lg_item docs/issues/s.md "key: x-2" "ledger: x" "status: Fixed" "changes: [field:c]"
+  lg_item docs/issues/w.md "key: x-3" "ledger: x" "status: Fixed" "summary: Too short" "changes: [field:d]"
+  lg_item docs/issues/u.md "ledger: unassigned" "status: Open" "summary: Unassigned and still open" "changes: [field:e]"
+  lg_item docs/issues/n.md "key: x-4" "ledger: x" "status: Open" "summary: Open and names no contract at all"
+  lg_item docs/issues/p.md "key: x-5" "ledger: x" "status: Fixed" "summary: A nested map in a field" "changes: [field:f]" "owed:" "  a: b"
+  lg_item docs/issues/g.md "key: x-6" "ledger: legacy" "status: Fixed" "summary: Filed under the legacy ledger" "changes: [field:g]"
+  lg_item docs/issues/r.md "key: old-1" "ledger: old" "status: Open" "summary: Still open in a retired ledger" "changes: [field:h]"
+  git add -A && git commit -qm items
+  lg validate --all --format json
+  assert_eq "0" "$LG_RC" "advisories only: exit 0"
+  assert_eq "legacy-ledger-id advisory docs/issues/g.md
+missing-key advisory docs/issues/k.md
+missing-ledger advisory docs/issues/l.md
+missing-summary advisory docs/issues/s.md
+no-contract advisory docs/issues/n.md
+parse-error advisory docs/issues/p.md
+retired-ledger advisory docs/issues/r.md
+unassigned-open advisory docs/issues/u.md
+weak-summary advisory docs/issues/w.md" "$(lg_vf)" "each advisory class"
+  lg validate --all
+  assert_eq "9" "$(printf '%s\n' "$LG_OUT" | wc -l | tr -d ' ')" "text: one line each"
+  # --all reads the working tree, and the blocking classes block.
+  lg_item docs/issues/d.md "key: x-1" "ledger: zz" "status: Closed" "summary: A duplicate key in an unknown ledger" "superseded_by: x-404"
+  lg validate --all --format json
+  assert_eq "1" "$LG_RC" "blocking findings: exit 1"
+  assert_contains "$(lg_vf)" "duplicate-key block docs/issues/a.md" "both sides of a duplicate"
+  assert_contains "$(lg_vf)" "duplicate-key block docs/issues/d.md" "…both"
+  assert_contains "$(lg_vf)" "unknown-ledger block docs/issues/d.md" "unknown ledger"
+  assert_contains "$(lg_vf)" "missing-resolution block docs/issues/d.md" "missing resolution"
+  assert_contains "$(lg_vf)" "superseded-dangling block docs/issues/d.md" "dangling superseded_by"
+  lg validate --all --registry --format json
+  assert_eq "1" "$LG_RC" "--registry beside --all"
+  teardown
+}
+
+test_lg_validate_all_concurrent_merge_finalize_dup() {
+  echo "test: validate catches the duplicate two maintainers' concurrent merge-mode finalize leave behind"
+  lg_keys_fixture '{"base":"main","keys":{"mode":"merge"}}'
+  local h1 h2 other
+  lg_item docs/issues/a.md "key: x-3" "ledger: x" "status: Open" "summary: The highest key so far"
+  git add -A && git commit -qm a && git push -q origin main
+  other="$(harness_mktemp_d other)/other clone"
+  lg_clone "$other"
+  # Maintainer 1 merges n.md and finalizes it.
+  h1=$(lg_hex4 docs/issues/n.md)
+  lg_item docs/issues/n.md "key: x-~$h1" "ledger: x" "status: Open" "summary: First new item, provisional"
+  git add -A && git commit -qm n
+  lg finalize
+  assert_eq "0" "$LG_RC" "maintainer 1 finalizes"
+  assert_contains "$(cat docs/issues/n.md)" "key: x-4" "n.md → x-4"
+  git push -q origin main
+  # Maintainer 2, not yet pulled, merges o.md and finalizes it.
+  (
+    cd "$other"
+    git config user.name Other && git config user.email other@example.com
+    h2=$(lg_hex4 docs/issues/o.md)
+    lg_item docs/issues/o.md "key: x-~$h2" "ledger: x" "status: Open" "summary: Second new item, provisional"
+    git add -A && git commit -qm o
+  )
+  cd "$other"
+  h2=$(lg_hex4 docs/issues/o.md)
+  lg finalize
+  assert_eq "0" "$LG_RC" "maintainer 2 finalizes"
+  assert_contains "$(cat docs/issues/o.md)" "key: x-4" "o.md → x-4 too"
+  # Both wrote finalized.json: the pull stops on it; the items merge cleanly.
+  git pull -q --no-rebase --no-edit --no-commit origin main > /dev/null 2>&1 || true
+  printf '{\n  "x-~%s": "x-4",\n  "x-~%s": "x-4"\n}\n' "$h1" "$h2" > docs/ledger/finalized.json
+  git add docs/ledger/finalized.json
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "the merge, staged: exit 1"
+  assert_eq "duplicate-key block docs/issues/n.md" "$(lg_vfb)" "the incoming item clashes"
+  git commit -qm merge --no-verify
+  lg validate --all --format json
+  assert_eq "1" "$LG_RC" "--all after the merge: exit 1"
+  assert_eq "duplicate-key block docs/issues/n.md
+duplicate-key block docs/issues/o.md" "$(lg_vfb)" "both items carry x-4"
+  teardown
+}
+
+test_lg_validate_plan_marks() {
+  echo "test: validate --plan: every Related work row is marked include or exclude: <reason>"
+  lg_v_fixture
+  mkdir -p docs/plans
+  cat > docs/plans/p.md <<'EOF'
+# Plan
+
+## Related work
+
+| Item | Why related | Mark |
+|---|---|---|
+| x-1 | consumes field:a | include |
+| x-2 | shares src/a.ts | exclude: already fixed |
+| x-3 | a \| piped cell | Exclude: different layer |
+| x-4 | candidate | |
+| x-5 | candidate | exclude: |
+| x-6 | candidate | maybe |
+
+## Tasks
+
+| Task | Mark |
+|---|---|
+| not a related-work row | |
+EOF
+  lg validate --plan docs/plans/p.md --format json
+  assert_eq "0" "$LG_RC" "advisory: exit 0"
+  assert_eq "bad-mark advisory docs/plans/p.md
+bad-mark advisory docs/plans/p.md
+unmarked advisory docs/plans/p.md" "$(lg_vf)" "an empty mark, an exclude without a reason, an unknown mark"
+  assert_eq "x-4|x-5|x-6" "$(jq -r '[.findings[].key] | sort | join("|")' <<<"$LG_OUT")" "each names its item"
+  lg validate --plan docs/plans/p.md --strict --format json
+  assert_eq "1" "$LG_RC" "--strict: exit 1"
+  assert_json_field "$LG_OUT" '[.findings[].severity] | unique | join(",")' "block" "--strict findings block"
+  lg validate --plan docs/plans/p.md
+  assert_contains "$LG_OUT" "unmarked docs/plans/p.md line 10: x-4: no mark" "text names the plan, the line and the item"
+  printf '# Plan\n\nNo related work section.\n' > docs/plans/q.md
+  lg validate --plan docs/plans/q.md --format json
+  assert_eq "0|no-related-work advisory docs/plans/q.md" "$LG_RC|$(lg_vf)" "no section: an advisory"
+  printf '# Plan\n\n## Related work\n\n| Item | Why related | Mark |\n|---|---|---|\n| x-1 | why | include |\n' > docs/plans/r.md
+  lg validate --plan docs/plans/r.md --strict
+  assert_eq "0|" "$LG_RC|$LG_OUT" "every row marked: exit 0, nothing printed"
+  lg validate --plan docs/plans/missing.md
+  assert_eq "2" "$LG_RC" "a missing plan: could not run (2)"
+  lg validate --strict --all
+  assert_eq "3" "$LG_RC" "--strict without --plan: usage (3)"
+  teardown
+}
+
+test_lg_validate_pushed_range() {
+  echo "test: validate --pushed <range>: cas refuses provisional keys a push introduces; merge mode never does"
+  lg_keys_fixture
+  local base h
+  base=$(git rev-parse HEAD)
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: A real key"
+  git add -A && git commit -qm a
+  lg validate --pushed "$base..HEAD" --format json
+  assert_eq "0" "$LG_RC" "no provisional key in the range: exit 0"
+  assert_json_field "$LG_OUT" '.findings | length' "0" "no findings"
+  h=$(lg_hex4 "docs/issues/n b.md")
+  lg_item "docs/issues/n b.md" "key: x-~$h" "ledger: x" "status: Open" "summary: Filed offline"
+  git add -A && git commit -qm n
+  lg validate --pushed "$base..HEAD" --format json
+  assert_eq "1" "$LG_RC" "a provisional key in the range: exit 1"
+  assert_eq "provisional-key block docs/issues/n b.md" "$(lg_vf)" "the finding"
+  assert_json_field "$LG_OUT" '.findings[0].key' "x-~$h" ".key"
+  lg validate --pushed "0000000000000000000000000000000000000000..HEAD"
+  assert_eq "1" "$LG_RC" "a new branch (zero base): exit 1"
+  assert_contains "$LG_OUT" "x-~$h" "text names the key"
+  assert_contains "$LG_OUT" "docs/issues/n b.md" "…and the file"
+  lg validate --pushed "HEAD..HEAD"
+  assert_eq "0" "$LG_RC" "an empty range: exit 0"
+  lg validate --pushed "HEAD"
+  assert_eq "3" "$LG_RC" "not a range: usage (3)"
+  lg validate --pushed "no-such-rev..HEAD"
+  assert_eq "2" "$LG_RC" "an unknown revision: could not run (2)"
+  lg_enable '{"keys":{"mode":"merge"}}'
+  lg validate --pushed "$base..HEAD" --format json
+  assert_eq "0" "$LG_RC" "merge mode: exit 0"
+  assert_json_field "$LG_OUT" '.findings | length' "0" "…no findings"
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -3333,6 +3924,28 @@ run_tests() {
   test_lg_cas_finalize_and_provisional_in_range
   test_lg_finalize_crash_safe_and_resumable
   test_lg_finalize_refuses_reused_provisional_key
+
+  # --- Task 7: validate ---
+  test_lg_validate_staged_clean
+  test_lg_validate_staged_bad_key
+  test_lg_validate_staged_dup_key
+  test_lg_validate_staged_alias_collision
+  test_lg_validate_staged_unknown_ledger
+  test_lg_validate_staged_added_needs_fields
+  test_lg_validate_staged_modified_legacy_ok
+  test_lg_validate_staged_reads_staged_blob
+  test_lg_validate_staged_superseded_dangling
+  test_lg_validate_staged_cycle
+  test_lg_validate_staged_chain_ends_superseded
+  test_lg_validate_staged_missing_resolution
+  test_lg_validate_staged_superseded_not_closed
+  test_lg_validate_staged_text_one_line
+  test_lg_validate_staged_unborn
+  test_lg_validate_staged_keymap_reads_frontmatter
+  test_lg_validate_all_advisories_rc0
+  test_lg_validate_all_concurrent_merge_finalize_dup
+  test_lg_validate_plan_marks
+  test_lg_validate_pushed_range
 
   print_summary
 }
