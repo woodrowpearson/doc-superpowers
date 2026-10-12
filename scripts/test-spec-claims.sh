@@ -4568,7 +4568,7 @@ test_v3_mutant_is_test_file() {
 }
 
 test_promote_mutant_file_absent_or_observed_red() {
-  echo "test: promote — a mutant file absent at HEAD; an observed_red at HEAD itself proves nothing"
+  echo "test: promote — a mutant file absent at HEAD; an observed_red naming HEAD's parent (the same subject) proves nothing"
   promote_fixture
   jset "$SIDECAR" '.claims[0].nonvacuity.mutant.file = "src/auth/missing.py"'
   git commit -qam "a mutant file that does not exist"
@@ -4689,19 +4689,31 @@ test_promote_observed_red_passes_refused() {
 }
 
 test_promote_observed_red_bad_sha() {
-  echo "test: promote — observed_red must name a commit"
+  echo "test: promote — observed_red must be a full commit id (lowercase hex, HEAD's length) naming a commit"
   observed_red_fixture 1800
-  local bad
-  for bad in 0123abc nope "$(git rev-parse HEAD:src/auth/token.py)" "$(git rev-parse 'HEAD^{tree}')" --all -q; do
+  local bad upper
+  upper=$(printf '%s' "$RED_SHA" | tr 'a-f' 'A-F')
+  # A ref, an abbreviation, an option, uppercase, the wrong length: never
+  # resolved, so a re-verification cannot name another commit.
+  for bad in 0123abc "${RED_SHA:0:12}" HEAD~1 HEAD feature main "$upper" "${RED_SHA}0" nope --all -q; do
     jset "$SIDECAR" ".claims[0].nonvacuity.observed_red = $(jq -n --arg b "$bad" '$b')"
     git commit -qam "observed_red: $bad"
     cl promote "$TTL_ID"
-    assert_promote_finding "observed_red is not a commit" "observed_red $bad"
+    assert_promote_finding "observed_red is not a full commit id" "observed_red $bad"
   done
   jset "$SIDECAR" '.claims[0].nonvacuity.observed_red = 42'
   git commit -qam "observed_red: a number"
   cl promote "$TTL_ID"
-  assert_promote_finding "observed_red is not a commit" "observed_red 42 (not a string)"
+  assert_promote_finding "observed_red is not a full commit id" "observed_red 42 (not a string)"
+  # A full-length lowercase hex id that is not a commit: a blob, a tree, a
+  # missing object.
+  for bad in "$(git rev-parse HEAD:src/auth/token.py)" "$(git rev-parse 'HEAD^{tree}')" \
+      "$(printf '%s' "$RED_SHA" | tr '0-9a-f' 'e')"; do
+    jset "$SIDECAR" ".claims[0].nonvacuity.observed_red = $(jq -n --arg b "$bad" '$b')"
+    git commit -qam "observed_red: $bad"
+    cl promote "$TTL_ID"
+    assert_promote_finding "observed_red is not a commit" "observed_red $bad (full length, not a commit)"
+  done
   assert_eq "0" "$(stub_run_count)" "…refused before any run"
   assert_eq '"unbuilt"' "$(claim_field "$TTL_ID" status)" "…the claim stays unbuilt"
   teardown

@@ -2218,11 +2218,11 @@ claims promote|cmd_claims_promote|repo|reverify all base=
   Promote a claim to built: run its bound test green at HEAD, verify its
   non-vacuity proofs, each in a throwaway worktree where the test first
   passes unmodified (under nonvacuity.mutant, an exactly-once literal
-  find/replace, and under nonvacuity.observed_red <sha>, the subject files
-  as at that commit, the test must fail by an assertion), store the
-  verdict, record the promotion in the sidecar and render the doc's status
-  block (results: {claim, status_from, status_to, green, red,
-  verdict_sha256}). --reverify re-checks promoted claims and stores fresh
+  find/replace, and under nonvacuity.observed_red <sha>, a full commit id,
+  the subject files as at that commit, the test must fail by an
+  assertion), store the verdict, record the promotion in the sidecar and
+  render the doc's status block (results: {claim, status_from, status_to,
+  green, red, verdict_sha256}). --reverify re-checks promoted claims and stores fresh
   verdicts, writing no sidecar. Refuses a dirty tree (exit 2, dirty-tree).
   Every finding blocks.
 claims render|cmd_claims_render|repo|check base=
@@ -7917,11 +7917,13 @@ _claims_v9() {
 #      assertion (pass: "<proof> stays green"; error or not-found: "<proof>
 #      error is not an assertion failure"). The mutant's change:
 #      _claims_mutate (literal, exactly once, on UTF-8 text only — "mutant
-#      file is not UTF-8 text"). observed_red's (<sha> must peel to a commit,
-#      else "observed_red is not a commit"): each subject path removed in
-#      the worktree, then checked out from <sha> when <sha> holds it — absent
-#      there, it stays removed (the test-first case) — while the bound test
-#      stays at HEAD (_claims_promote_swap);
+#      file is not UTF-8 text"). observed_red's (<sha> must be a full
+#      object id, lowercase hex and as long as HEAD's — "observed_red is not
+#      a full commit id" — naming a commit — "observed_red is not a
+#      commit"): each subject path removed in the worktree, then checked
+#      out from <sha> when <sha> holds it — absent there, it stays removed
+#      (the test-first case) — while the bound test stays at HEAD
+#      (_claims_promote_swap);
 #   3. the verdict (see "the verdict store") is stored, then the sidecar is
 #      rewritten atomically — status → status_to (built), promotion → {at:
 #      HEAD, verdict_sha256: <digest>} — and the doc's status block rendered.
@@ -8053,7 +8055,7 @@ _JQ_CLAIMS_PROMOTE_PLAN='def nes: type == "string" and length > 0;
         elif $mu == null and $or == null
         then "no nonvacuity proof: promote needs nonvacuity.mutant {file, find, replace} (a change under which the bound test fails by an assertion) or nonvacuity.observed_red <sha> (a commit whose subject files make it fail by one)"
         elif $or != null and (($or | nes | not) or ($or | nonul | not))
-        then "nonvacuity.observed_red is not a commit: \($or | tojson) (give the sha of a commit)"
+        then "nonvacuity.observed_red is not a full commit id: \($or | tojson) (give the full lowercase hex id of a commit)"
         elif $mu != null and (($mu | type) != "object" or ($mu.file | nes | not) or ($mu.find | nes | not) or ($mu.replace | type) != "string")
         then "nonvacuity.mutant \($mu | tojson) is not {file, find, replace}"
         elif $mu != null and ([$mu.file, $mu.find, $mu.replace] | all(nonul) | not) then "nonvacuity.mutant holds a NUL byte"
@@ -8062,6 +8064,9 @@ _JQ_CLAIMS_PROMOTE_PLAN='def nes: type == "string" and length > 0;
         then first($c.subject[] | select(cl_subject_holds_test($c.test.file; $c.test.node))) | cl_subject_test_msg
         else null end)}
    end'
+
+# Why promote calls a path unsafe (_claims_safe_relpath, _claims_contained_path).
+_CL_PROMOTE_UNSAFE="(absolute, an empty, . or .. segment, or reached through a symbolic link)"
 
 _CL_PR_OUTCOME=""  # _claims_promote_run's outcome
 _CL_PR_REASON=""   # …and its reason ("" when none)
@@ -8138,7 +8143,7 @@ _claims_promote_swap() {
     case "$rc" in
       0) ;;
       1)
-        _claims_finding promote "$1" "$2" "subject $p is not a safe repo path (absolute, an empty, . or .. segment, or reached through a symbolic link) in the worktree as at observed_red: it is never removed or checked out"
+        _claims_finding promote "$1" "$2" "subject $p is not a safe repo path $_CL_PROMOTE_UNSAFE in the worktree as at observed_red: it is never removed or checked out"
         return 1
         ;;
       *) _claims_propagate "$rc" ;;
@@ -8165,8 +8170,7 @@ _claims_promote() {
   local vfile="$_SCRATCH/cl-promote-verdict.json" sc_old="$_SCRATCH/cl-promote-sidecar.old"
   local sc_new="$_SCRATCH/cl-promote-sidecar.new" doc_new="$_SCRATCH/cl-promote-doc.new"
   local x refuse doc sidecar status claim runner="" node="" mfile="" mfind="" mrepl="" ored="" rsha=""
-  local head p oid v rc green why ss digest store row unsafe munsafe
-  unsafe="(absolute, an empty, . or .. segment, or reached through a symbolic link)"
+  local head p oid v rc green why ss digest store row unsafe="$_CL_PROMOTE_UNSAFE" munsafe
   _claims_jq promote-plan -c --arg id "$id" "$_JQ_CLAIMS_MUTANT_DEFS $_JQ_CLAIMS_PROMOTE_PLAN" \
     "$_SCRATCH/cl-claims.json" > "$plan"
   x=$(_claims_jq promote-unknown -r '.unknown' "$plan") || _claims_propagate $?
@@ -8203,18 +8207,24 @@ _claims_promote() {
     _claims_finding promote "$id" "$doc" "$munsafe"
     return 0
   fi
+  head=$(git rev-parse -q --verify 'HEAD^{commit}') || _claims_die "cannot resolve HEAD"
   if [ -n "$ored" ]; then
-    # Never an option to git (a leading "-"); else it must peel to a commit.
+    # The proof names one commit for good (--reverify re-runs it): a full
+    # object id, lowercase hex, as long as HEAD's (sha1 or sha256) — never
+    # a ref, an abbreviation or an option. Then it must be a commit.
     case "$ored" in
-      -*) ;;
-      *) rsha=$(git rev-parse -q --verify "$ored^{commit}" 2>/dev/null) || rsha="" ;;
+      *[!0-9a-f]*) x=0 ;;
+      *) x=${#ored} ;;
     esac
-    if [ -z "$rsha" ]; then
-      _claims_finding promote "$id" "$doc" "nonvacuity.observed_red is not a commit: $ored (it must name a commit of this repository: fetch it, or correct the sha)"
+    if [ "$x" -ne "${#head}" ]; then
+      _claims_finding promote "$id" "$doc" "nonvacuity.observed_red is not a full commit id: $ored (give the full lowercase hex id of a commit, as git rev-parse prints it: a ref or an abbreviation could name another commit when the proof is re-verified)"
+      return 0
+    fi
+    if ! rsha=$(git rev-parse -q --verify "$ored^{commit}" 2>/dev/null) || [ "$rsha" != "$ored" ]; then
+      _claims_finding promote "$id" "$doc" "nonvacuity.observed_red is not a commit: $ored (it must name a commit of this repository: fetch it, or correct the id)"
       return 0
     fi
   fi
-  head=$(git rev-parse -q --verify 'HEAD^{commit}') || _claims_die "cannot resolve HEAD"
   : > "$oids"
   _claims_jq promote-subjects -j '.claim.subject[] | . + "\u0000"' "$plan" > "$subj"
   while IFS= read -r -d '' p <&3; do
