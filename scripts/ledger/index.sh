@@ -28,7 +28,8 @@
 # code (every file of scripts/ledger/), the contracts adapter's output (or
 # its failure: it runs on every call; adapters.sh), the mode, HEAD and the base oid
 # (--rev: neither — its base is the commit itself, and HEAD has no part in
-# it), the config, and — never by walking the
+# it), the config, the shallow tag (_lg_ix_shallow: a deepened clone
+# has more history behind the same commits), and — never by walking the
 # items — the commit's tree (--rev), or git's listing (path, blob id) of
 # the directories holding the items, the candidate docs, the registry,
 # doc-index, legacy and finalized maps (--staged: the index's; worktree:
@@ -85,6 +86,27 @@ _LG_DOC_TERMINAL='["implemented","complete","completed","done","shipped","merged
 
 _lg_ix_trace() {
   if [ "${DOC_TOOLS_LEDGER_TRACE:-0}" -ge 1 ] 2>/dev/null; then printf '%s\n' "$*" >&2; fi
+}
+
+# _lg_ix_shallow → _LG_SHALLOW: "" in a complete repository; in a shallow
+# one (git rev-parse --git-path shallow exists), "s" + the first 16 hex of
+# the sha256 of that file. Deepening (fetch --deepen / --unshallow) gives a
+# boundary commit its parents, so every cache whose content is a walk of
+# the history — the graph, the dates events, the index —
+# carries it in its name or key. Once per shell.
+_LG_SHALLOW_SET=""
+_LG_SHALLOW=""
+_lg_ix_shallow() {
+  local f
+  [ -z "$_LG_SHALLOW_SET" ] || return 0
+  _LG_SHALLOW=""
+  f=$(git rev-parse --git-path shallow 2>/dev/null) || f=""
+  if [ -n "$f" ] && [ -s "$f" ]; then
+    _hash_one "$f"
+    _LG_SHALLOW="s${_HASH#sha256:}"
+    _LG_SHALLOW=${_LG_SHALLOW:0:17}
+  fi
+  _LG_SHALLOW_SET=1
 }
 
 # --- Blob ids --------------------------------------------------------------------
@@ -211,7 +233,8 @@ _lg_ix_events_header() {
   local s
   _lg_scratch_name
   s=$_LG_SN
-  { printf 'ledger-dates/3\n'; cat "$1"; } > "$s.sig" || _lg_die "cannot write $s.sig"
+  _lg_ix_shallow
+  { printf 'ledger-dates/3\n'; cat "$1"; printf 'shallow %s\n' "$_LG_SHALLOW"; } > "$s.sig" || _lg_die "cannot write $s.sig"
   _hash_one "$s.sig"
   _LG_EP_HEADER="# ledger-dates/3 ${_HASH#sha256:}"
 }
@@ -354,10 +377,13 @@ _lg_ix_events() {
 
 # _lg_ix_graph <commit> → _LG_GRAPH: `git rev-list --parents <commit>`
 # ("<id> <parent>…" per commit reachable from it), cached as
-# $_LG_CACHE/graph-<commit>.txt (a fact about the commit; the newest 3 kept).
+# $_LG_CACHE/graph-<commit>[.<shallow>].txt (a fact about the commit — in a
+# shallow repository, about the commit and .git/shallow: _lg_ix_shallow;
+# the newest 3 kept).
 _lg_ix_graph() {
   local c="$1" f tmp s
-  f="$_LG_CACHE/graph-$c.txt"
+  _lg_ix_shallow
+  f="$_LG_CACHE/graph-$c${_LG_SHALLOW:+.$_LG_SHALLOW}.txt"
   if [ -f "$f" ]; then
     touch -c "$f" 2>/dev/null || true
     _LG_GRAPH=$f
@@ -1158,6 +1184,7 @@ _lg_index() {
     head=""
     base=$commit
   fi
+  _lg_ix_shallow
   di=$(_lg_doc_index "$src")
   # The contracts adapter's list (or its failure) is an input like a file:
   # run every time, hashed into the key.
@@ -1194,8 +1221,8 @@ _lg_index() {
   [ -f "$s.smalls" ] || : > "$s.smalls"
   _hash_list "$s.hashin" "$s.hashes"
   {
-    printf 'schema %s\nmode %s\nhead %s\nrev %s\ntree %s\nbase %s\nlegacy %s\n' \
-      "$_LG_INDEX_SCHEMA" "$mode" "$head" "$commit" "$tree" "$base" "$legacy_path"
+    printf 'schema %s\nmode %s\nhead %s\nrev %s\ntree %s\nbase %s\nlegacy %s\nshallow %s\n' \
+      "$_LG_INDEX_SCHEMA" "$mode" "$head" "$commit" "$tree" "$base" "$legacy_path" "$_LG_SHALLOW"
     cat "$s.smalls"
     printf 'inputs: code (scripts/ledger/*), config, contracts adapter (output, error)[, listing[, the present small files]]\n'
     cat "$s.hashes"
