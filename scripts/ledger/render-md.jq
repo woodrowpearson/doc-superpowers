@@ -38,9 +38,9 @@ def link($text; $path): "[\($text | md_text)](\($path | lg_v_url(gen)))";
 def none: "—";
 def doc_cell($list): if ($list | length) == 0 then none
   else link("✓"; $list[0]) + (if ($list | length) > 1 then " +\(($list | length) - 1)" else "" end) end;
-def pr_cell: .pr as $p
+def pr_cell: .pr as $p | lg_v_pr_url as $u
   | if ($p | type) == "object" and ($p.number != null) then
-      (if ($p.url | type) == "string" then "[#\($p.number | tostring | md_text)](\($p.url | lg_q_one | gsub("\\)"; "%29") | gsub(" "; "%20")))"
+      (if $u != null then "[#\($p.number | tostring | md_text)](\($u | lg_q_one | gsub("\\)"; "%29") | gsub(" "; "%20")))"
        else "#\($p.number | tostring | md)" end)
     else none end;
 def handoff_cell: (.docs.handoff // []) | lg_v_newest | if . == null then none else link(lg_v_docstem | lg_q_cut(40); .) end;
@@ -91,7 +91,7 @@ def page($L):
   blank,
   (if ($L.superseded | length) == 0 then "None."
    else $L.superseded[]
-     | "- \(lg_q_id | md) → \(if lg_v_superseded then (.superseded_by | md) else "won't fix" end): \((.resolution // "(no resolution)") | md | lg_q_cut(200))"
+     | "- \(lg_q_id | md) → \(if lg_v_superseded then (.superseded_by | md) else "won't fix" end): \(lg_v_resolution | md)"
    end);
 
 def readme($M):

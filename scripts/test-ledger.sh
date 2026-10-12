@@ -1254,6 +1254,21 @@ test_lg_registry_duplicate_id() {
   teardown
 }
 
+test_lg_registry_reserved_readme() {
+  echo "test: validate --registry: the ledger id readme is reserved (views write README.md)"
+  lg_fixture
+  lg_enable
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[
+    {"id":"readme","kind":"service","status":"active"},
+    {"id":"README","kind":"service","status":"active"},
+    {"id":"app","kind":"service","status":"active"}]}'
+  lg validate --registry --format json
+  assert_eq "1" "$LG_RC" "findings exit 1"
+  assert_eq "id|id" "$(lg_classes "$LG_OUT")" "both spellings are id findings"
+  assert_contains "$(jq -r '.findings[0].detail' <<<"$LG_OUT")" '"readme" is reserved' "readme: reserved"
+  teardown
+}
+
 test_lg_registry_bad_status() {
   echo "test: validate --registry: schema, status, kind, shape, glob findings"
   lg_fixture
@@ -3950,11 +3965,17 @@ lg_render() {
   rm -f "$cfg"
 }
 
-# lg_view_ix [jq-filter]: LG_VIEW_IX (through the filter) into a file; its path.
+# lg_view_ix [jq args…] [jq-filter]: LG_VIEW_IX (through the filter) into a
+# file; its path.
 lg_view_ix() {
   local f
   f=$(harness_mktemp lg-ix)
-  jq -c "${1:-.}" <<<"$LG_VIEW_IX" > "$f"
+  if [ $# -le 1 ]; then
+    jq -c "${1:-.}" <<<"$LG_VIEW_IX" > "$f"
+  else
+    # [jq args…] <filter>
+    jq -c "$@" <<<"$LG_VIEW_IX" > "$f"
+  fi
   printf '%s\n' "$f"
 }
 
@@ -4125,9 +4146,56 @@ test_lg_html_self_contained() {
   assert_contains "$out" 'id="f-class"' "status-class filter"
   assert_contains "$out" 'id="f-inflight"' "in-flight filter"
   assert_contains "$out" 'id="f-q"' "search box"
-  assert_contains "$out" 'data-q="app-1 totals are wrong a alpha title"' "search text: key, summary, file stem, H1"
+  assert_contains "$out" 'data-q="app-1 Totals are wrong a Alpha title"' "search text: key, summary, file stem, H1 (case kept)"
+  assert_contains "$out" "d.q.toLowerCase()" "…folded in JS at match time, like the query"
   assert_contains "$out" '<h3>Order totals — <code>field:order.total</code> (2)</h3>' "the cluster layout"
   assert_contains "$out" 'href="../main/docs/issues/c%20d.md"' "links encoded"
+}
+
+test_lg_render_hardening() {
+  echo "test: renderers — first resolution line, cut before escaping, canonical severity, safe PR links, stable key map"
+  local ix out rev pipes amps
+  # S1: the first line only; cut, then escaped (no split escape).
+  ix=$(lg_view_ix '(.items[] | select(.key == "app-7") | .resolution) = "First line.\r\nSECRET-MARKER second line"')
+  lg_render md "$ix" app page
+  assert_eq "- app-7 → app-1: First line." "$(lg_line "$LG_OUT" "- app-7")" "md: the first line"
+  assert_not_contains "$LG_OUT" "SECRET-MARKER" "md: never line 2"
+  lg_render html "$ix" app page
+  assert_contains "$LG_OUT" '<div class="res">First line.</div>' "html: the first line"
+  assert_not_contains "$LG_OUT" "SECRET-MARKER" "html: never line 2"
+  pipes=$(printf '%0250d' 0 | tr 0 '|')
+  amps=$(printf '%0250d' 0 | tr 0 '&')
+  # shellcheck disable=SC2016  # jq source
+  ix=$(lg_view_ix --arg p "$pipes" --arg a "$amps" '(.items[] | select(.key == "app-7") | .resolution) = $p
+    | (.items[] | select(.key == "app-8") | .resolution) = $a')
+  lg_render md "$ix" app page
+  out=$(lg_line "$LG_OUT" "- app-7")
+  assert_eq "- app-7 → app-1: $(printf '%0199d' 0 | sed 's/0/\\|/g')…" "$out" "md: 199 escaped pipes + … (cut before escaping)"
+  lg_render html "$ix" app page
+  assert_contains "$LG_OUT" "$(printf '%0199d' 0 | sed 's/0/\&amp;/g')…</div>" "html: 199 whole entities + …"
+  # M2: data-sev is the canonical severity_order label.
+  ix=$(lg_view_ix '(.items[] | select(.key == "app-4") | .severity) = "p1"')
+  lg_render html "$ix" app page
+  assert_contains "$(printf '%s\n' "$LG_OUT" | grep '>app-4</td>')" 'data-sev="P1"' "html: p1 → data-sev P1"
+  # M5: a PR url is linked only when http(s).
+  ix=$(lg_view_ix '(.items[] | select(.key == "app-1") | .pr) = {"number": 5, "url": "javascript:alert(1)"}
+    | (.items[] | select(.key == "app-2") | .pr) = {"number": 6, "url": "https://example.test/pr/6"}')
+  lg_render md "$ix" app page
+  assert_not_contains "$LG_OUT" "javascript:" "md: no javascript: link"
+  assert_contains "$(lg_line "$LG_OUT" "| app-1 ")" "| #5 |" "md: #5 as plain text"
+  assert_contains "$(lg_line "$LG_OUT" "| app-2 ")" "[#6](https://example.test/pr/6)" "md: an https url is linked"
+  lg_render html "$ix" app page
+  assert_not_contains "$LG_OUT" "javascript:" "html: no javascript: link"
+  assert_contains "$LG_OUT" '<a href="https://example.test/pr/6">#6</a>' "html: an https url is linked"
+  # M4: a duplicate key resolves the same whatever the input order.
+  ix=$(lg_view_ix '.items += [{"path":"docs/issues/z.md","key":"core-1","ledger":"zed","status":"Open","class":"open","severity":"P2","date":"2026-08-02","summary":"Duplicate key","changes":[],"consumes":[],"h1":"Z","docs":{"spec":[],"plan":[],"handoff":[]},"derived":{"status":"not started","detail":null},"pr":null,"inflight":[],"neighbours":null,"resolution":null,"superseded_by":null,"owed":null}]
+    | (.items[] | select(.key == "app-1") | .neighbours) = {"upstream":[],"downstream":[{"key":"core-1","via":"field:order.total"}],"siblings":[]}')
+  rev=$(harness_mktemp lg-ix)
+  jq -c '.items |= reverse' "$ix" > "$rev"
+  lg_render md "$ix" app page
+  out=$LG_OUT
+  lg_render md "$rev" app page
+  assert_eq "$out" "$LG_OUT" "duplicate key, reversed input: identical page"
 }
 
 # lg_view_fixture: a repo with config, registry (app, core) and two items,
@@ -4220,12 +4288,9 @@ lg_user_state() {
   git status --porcelain
 }
 
-# The number of worktrees, and of publish worktree directories left behind.
+# The number of worktrees (publish adds none).
 lg_wt_state() {
-  local common n
-  common=$(cd "$(git rev-parse --git-common-dir)" && pwd)
-  n=$(find "$common/doc-superpowers/ledger/publish-wt" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')
-  printf '%s worktree(s), %s publish dir(s)\n' "$(git worktree list --porcelain | grep -c '^worktree ')" "$n"
+  printf '%s worktree(s)\n' "$(git worktree list --porcelain | grep -c '^worktree ')"
 }
 
 test_lg_publish_orphan_branch() {
@@ -4256,7 +4321,7 @@ test_lg_publish_orphan_branch() {
   assert_not_contains "$(git --git-dir="$LG_REMOTE" show "$vb:x.md")" "x-9" "…nor a staged or untracked one"
   assert_contains "$(git --git-dir="$LG_REMOTE" show "$vb:x.md")" "Generated from origin/main@" "header names the base"
   assert_eq "$before" "$(lg_user_state)" "HEAD, index and status unchanged"
-  assert_eq "1 worktree(s), 0 publish dir(s)" "$(lg_wt_state)" "the publish worktree is gone"
+  assert_eq "1 worktree(s)" "$(lg_wt_state)" "no worktree was added"
   lg_assert_cond "! git rev-parse -q --verify refs/heads/doc-ledger-views >/dev/null" "no local views branch was created"
   # A second publish after the base moves: a fast-forward.
   c2=$(harness_mktemp_d pubclone)/c
@@ -4306,42 +4371,104 @@ test_lg_publish_rejects_non_ff() {
   # before this run's push: another publisher won the race.
   DOC_TOOLS_LEDGER_SELFTEST=publish-race lg publish
   assert_eq "2" "$LG_RC" "a non-fast-forward: could not run (2)"
-  assert_contains "$LG_ERR" "rejected" "stderr says the push was rejected"
+  assert_contains "$LG_ERR" "rejected: the branch moved" "stderr says the push was rejected: the branch moved"
   racer=$(git --git-dir="$LG_REMOTE" log -1 --format=%s "$vb")
   assert_eq "selftest race" "$racer" "the remote keeps the other publisher's commit"
   assert_eq "$before" "$(lg_user_state)" "HEAD, index and status unchanged"
-  assert_eq "1 worktree(s), 0 publish dir(s)" "$(lg_wt_state)" "the publish worktree is gone"
+  assert_eq "1 worktree(s)" "$(lg_wt_state)" "no worktree was added"
   DOC_TOOLS_LEDGER_SELFTEST=publish-race lg publish --format json
   assert_eq "2" "$LG_RC" "--format json: exit 2"
   assert_json_field "$LG_OUT" '.exit' "2" "the verdict object"
   teardown
 }
 
-test_lg_publish_cleans_worktree() {
-  echo "test: the publish worktree is removed after a TERM, and a dead run's is removed by the next publish"
+test_lg_publish_base_without_config() {
+  echo "test: ledger publish — a base without docs/ledger/config.json cannot be published (exit 2)"
   lg_publish_fixture
-  local common dead
-  common=$(cd "$(git rev-parse --git-common-dir)" && pwd)
-  DOC_TOOLS_LEDGER_SELFTEST=publish-term lg publish
-  assert_eq "143" "$LG_RC" "TERM'd: exit 143"
-  assert_eq "1 worktree(s), 0 publish dir(s)" "$(lg_wt_state)" "the worktree is gone after the TERM"
-  # A worktree left by a run that was killed (-9): its pid is dead.
-  sh -c 'exit 0' &
-  dead=$!
-  wait "$dead" || true
-  mkdir -p "$common/doc-superpowers/ledger/publish-wt"
-  git worktree add -q --detach "$common/doc-superpowers/ledger/publish-wt/wt-$dead" HEAD
-  assert_eq "2 worktree(s), 1 publish dir(s)" "$(lg_wt_state)" "a stale publish worktree"
-  lg publish
-  assert_eq "0" "$LG_RC" "the next publish: exit 0"
-  assert_eq "1 worktree(s), 0 publish dir(s)" "$(lg_wt_state)" "…removed it"
-  # A base without the ledger config cannot be published.
   git rm -q docs/ledger/config.json && git commit -qm off && git push -q origin HEAD:main
   lg_enable
   lg publish
   assert_eq "2" "$LG_RC" "a base without docs/ledger/config.json: exit 2"
   assert_contains "$LG_ERR" "config.json" "…named"
-  assert_eq "1 worktree(s), 0 publish dir(s)" "$(lg_wt_state)" "nothing left behind"
+  assert_eq "1 worktree(s)" "$(lg_wt_state)" "no worktree"
+  teardown
+}
+
+test_lg_publish_base_only() {
+  echo "test: ledger publish reads only the base commit — its config, registry and items; no checkout"
+  lg_publish_fixture
+  local vb=refs/heads/doc-ledger-views before x
+  # A divergent working tree: other globs, another registry, an uncommitted item.
+  lg_enable '{"items":{"globs":["elsewhere/*.md"]},"views":{"recent_days":3}}'
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[{"id":"zz","title":"ZZ","kind":"service","status":"active"}]}'
+  lg_item docs/issues/u.md "key: x-5" "ledger: x" "status: Open" "severity: P0" "summary: Uncommitted item"
+  mkdir -p elsewhere
+  lg_item elsewhere/e.md "key: zz-1" "ledger: zz" "status: Open" "severity: P0" "summary: Only the working tree globs"
+  before=$(lg_user_state)
+  lg publish
+  assert_eq "0" "$LG_RC" "publish: exit 0"
+  assert_eq "README.md ledger.html x.md y.md " "$(git --git-dir="$LG_REMOTE" ls-tree -r --name-only "$vb" | tr '\n' ' ')" \
+    "the base's registry (x, y), not the working tree's (zz)"
+  x=$(git --git-dir="$LG_REMOTE" show "$vb:x.md")
+  assert_contains "$x" "| x-1 |" "the base's item, through the base's globs"
+  assert_not_contains "$x" "x-5" "not the uncommitted item"
+  assert_contains "$x" "## Recently closed (14 days)" "the base's views settings (recent_days 14), not the working tree's"
+  assert_eq "$before" "$(lg_user_state)" "HEAD, index and status unchanged"
+  assert_eq "1 worktree(s)" "$(lg_wt_state)" "no worktree was added"
+  teardown
+}
+
+test_lg_publish_base_without_remote_prefix() {
+  echo "test: ledger publish — base \"main\" means <remote>/main, never the local branch"
+  lg_publish_fixture
+  local vb=refs/heads/doc-ledger-views msg
+  lg_item docs/issues/b.md "key: x-8" "ledger: x" "status: Open" "severity: P1" "summary: Local main only"
+  git add -A && git commit -qm local
+  lg_enable '{"base":"main"}'
+  lg publish
+  assert_eq "0" "$LG_RC" "publish: exit 0"
+  assert_not_contains "$(git --git-dir="$LG_REMOTE" show "$vb:x.md")" "x-8" "the local main's commit is not published"
+  assert_contains "$(git --git-dir="$LG_REMOTE" show "$vb:x.md")" "| x-1 |" "origin/main's item is"
+  msg=$(git --git-dir="$LG_REMOTE" log -1 --format=%s "$vb")
+  assert_contains "$msg" "views @ origin/main@$(git rev-parse --short refs/remotes/origin/main)," "message names origin/main"
+  teardown
+}
+
+test_lg_publish_keeps_worktree_index() {
+  echo "test: a publish's base index is cached apart (\$_LG_CACHE/rev): the working tree's index is never evicted"
+  lg_publish_fixture
+  local common ix i
+  common=$(cd "$(git rev-parse --git-common-dir)" && pwd)
+  # The working tree differs from the base (else the two indexes could share a key).
+  lg_item docs/issues/u.md "key: x-5" "ledger: x" "status: Open" "severity: P0" "summary: Uncommitted item"
+  DOC_TOOLS_LEDGER_TRACE=1 lg ls
+  assert_contains "$LG_ERR" "index-build" "ls builds the working tree's index"
+  ix=$(find "$common/doc-superpowers/ledger" -maxdepth 1 -name 'index-*.json' | head -n 1)
+  assert_true "the working tree index exists" test -f "$ix"
+  # Age it, and add three newer (but not recent) indexes beside it: a prune
+  # in this directory would now keep those three and drop it.
+  touch -t 202001010000 "$ix"
+  for i in 1 2 3; do
+    cp "$ix" "$common/doc-superpowers/ledger/index-dummy$i.json"
+    touch -t "20210101000$i" "$common/doc-superpowers/ledger/index-dummy$i.json"
+  done
+  lg publish
+  assert_eq "0" "$LG_RC" "publish: exit 0"
+  assert_true "the base index is under rev/" test -n "$(find "$common/doc-superpowers/ledger/rev" -name 'index-*.json' 2>/dev/null)"
+  assert_true "the working tree index still exists" test -f "$ix"
+  DOC_TOOLS_LEDGER_TRACE=1 lg ls
+  assert_contains "$LG_ERR" "index-hit" "the next ls is a cache hit"
+  teardown
+}
+
+test_lg_publish_push_failed_not_moved() {
+  echo "test: a push failure that is not a rejection says 'failed', not 'moved' (exit 2)"
+  lg_publish_fixture
+  git config remote.origin.pushurl "$TEST_DIR/no-such-remote.git"
+  lg publish
+  assert_eq "2" "$LG_RC" "exit 2"
+  assert_contains "$LG_ERR" "the push to origin doc-ledger-views failed" "says the push failed"
+  assert_not_contains "$LG_ERR" "moved" "…without claiming the branch moved"
   teardown
 }
 
@@ -4520,7 +4647,13 @@ run_tests() {
   test_lg_view_writes_files
   test_lg_publish_orphan_branch
   test_lg_publish_rejects_non_ff
-  test_lg_publish_cleans_worktree
+  test_lg_publish_base_without_config
+  test_lg_publish_base_only
+  test_lg_publish_base_without_remote_prefix
+  test_lg_publish_keeps_worktree_index
+  test_lg_publish_push_failed_not_moved
+  test_lg_render_hardening
+  test_lg_registry_reserved_readme
   test_lg_publish_link_prefix
 
   print_summary

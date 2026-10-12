@@ -105,8 +105,9 @@ def lg_v_titles($ix):
               and $k.title != "" and (has($k.id) | not)
            then .[$k.id] = $k.title else . end);
 # lg_v_id: a ledger id a page can be named after (^[a-z0-9-]{1,16}$, the
-# registry's grammar; "unassigned" too).
-def lg_v_id: type == "string" and test("^[a-z0-9-]{1,16}$");
+# registry's grammar; "unassigned" too; never "readme", reserved for
+# README.md).
+def lg_v_id: type == "string" and test("^[a-z0-9-]{1,16}$") and . != "readme";
 # lg_v_ledgers($ix): the ledgers the views show, in order: the registry's
 # (retired ones only when they hold items), then every other ledger id
 # the items carry ("unassigned" and unregistered ids), sorted. Each
@@ -133,9 +134,11 @@ def lg_v_model($ix; $c; $gen):
   lg_q_ranks($c) as $K
   | lg_v_sevs($c) as $sevs
   | lg_v_titles($ix) as $T
-  | ([$ix.items[] | {key: ((.key // "") | ascii_downcase), v: .}] | map(select(.key != ""))
-     | reduce .[] as $x ({}; .[$x.key] = $x.v)) as $BYKEY
   | ($ix.items | sort_by(.path)) as $all
+  # Keys → items over the path-sorted list (a duplicate key resolves to its
+  # last path, whatever the input order).
+  | ([$all[] | {key: ((.key // "") | ascii_downcase), v: .}] | map(select(.key != ""))
+     | reduce .[] as $x ({}; .[$x.key] = $x.v)) as $BYKEY
   | lg_v_ledgers($ix) as $LS
   | ($LS | map(.id)) as $pages
   | {ledgers: [$LS[] as $L
@@ -172,3 +175,15 @@ def lg_v_url($gen): ($gen.link // "") + (split("/") | map(@uri) | join("/"));
 # names sort by date), or null.
 def lg_v_newest: if length == 0 then null else sort_by(split("/") | last) | last end;
 def lg_v_docstem: split("/") | last | if endswith(".md") then .[0:-3] else . end;
+# lg_v_resolution: the first line of the item's resolution (design §E.2),
+# cut to 200 characters — before any escaping, so a cut never splits one.
+def lg_v_resolution: (.resolution // "(no resolution)") | gsub("\r"; "") | split("\n")[0] | lg_q_one | lg_q_cut(200);
+# lg_v_pr_url: the PR's url when it is http(s), else null (never a
+# javascript: or other scheme in a link).
+def lg_v_pr_url: .pr | if type == "object" and (.url | type) == "string" and (.url | test("^https?://")) then .url else null end;
+# lg_v_sev($c): the severity as severity_order spells it (case-insensitive
+# match), else as written; null when none.
+def lg_v_sev($c):
+  .severity as $s
+  | if ($s | type) != "string" then null
+    else first(lg_v_sevs($c)[] | select(ascii_upcase == ($s | ascii_upcase))) // $s end;

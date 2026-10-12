@@ -48,7 +48,7 @@ _lg_usage() {
 # Call in the main shell (never inside $(…)), first thing in a handler.
 # doc-tools.sh has already established that docs/ledger/config.json exists.
 _lg_init() {
-  local host cfg common
+  local host common
   _LG_VERB="$1"
   _scratch_init
   _LG_ROOT=$(git rev-parse --show-toplevel) || _lg_die "cannot resolve the work tree's top level"
@@ -60,17 +60,9 @@ _lg_init() {
   _LG_CACHE="$common/doc-superpowers/ledger"
 
   host="$_SCRATCH/lg-config-host.json"
-  cfg="$_SCRATCH/lg-config.json"
   cat -- docs/ledger/config.json > "$host" 2>/dev/null \
     || _lg_die "cannot read docs/ledger/config.json"
-  if ! jq -e -s 'length == 1 and (.[0] | type) == "object"' "$host" >/dev/null 2>&1; then
-    _lg_die "docs/ledger/config.json is not one JSON object"
-  fi
-  # config.jq reads the host object as $h (a config is small: the command
-  # line holds it).
-  jq -nc --argjson h "$(cat "$host")" -f "$_LG_LIB/config.jq" > "$cfg" \
-    || _lg_die "cannot merge docs/ledger/config.json with the defaults (scripts/ledger/config.jq)"
-  _LG_CFG="$cfg"
+  _lg_cfg_merge "$host" "$_SCRATCH/lg-config.json" "docs/ledger/config.json"
 
   # Test-only hooks (scripts/test-ledger.sh), inert unless the variable is
   # set: a verdict printed inside $(…), and a crash no emitter sees.
@@ -79,6 +71,31 @@ _lg_init() {
     die-in-subst) _lg_selftest_x=$(_lg_die boom) || exit "$?" ;;
     unset-var) unset _lg_selftest_unset; : "$_lg_selftest_unset" ;;
   esac
+}
+
+# _lg_cfg_merge <host-file> <out> <name>: check that <host-file> is one
+# JSON object (<name> in the message), merge it over the defaults
+# (config.jq) into <out>, and make <out> the run's config (_LG_CFG).
+_lg_cfg_merge() {
+  local host="$1" out="$2" name="$3"
+  if ! jq -e -s 'length == 1 and (.[0] | type) == "object"' "$host" >/dev/null 2>&1; then
+    _lg_die "$name is not one JSON object"
+  fi
+  # config.jq reads the host object as $h (a config is small: the command
+  # line holds it).
+  jq -nc --argjson h "$(cat "$host")" -f "$_LG_LIB/config.jq" > "$out" \
+    || _lg_die "cannot merge $name with the defaults (scripts/ledger/config.jq)"
+  _LG_CFG="$out"
+}
+
+# _lg_cfg_from_rev <commit>: make the commit's docs/ledger/config.json the
+# run's config (ledger publish renders a base with its own config). Dies
+# (2) when the commit has none or it is not one JSON object.
+_lg_cfg_from_rev() {
+  local host="$_SCRATCH/lg-config-rev-host.json"
+  _lg_src_cat "$1" docs/ledger/config.json "$host" \
+    || _lg_die "$1 has no docs/ledger/config.json"
+  _lg_cfg_merge "$host" "$_SCRATCH/lg-config-rev.json" "docs/ledger/config.json at $1"
 }
 
 # _lg_cfg <jq-filter>: the filter's result over the merged config, compact

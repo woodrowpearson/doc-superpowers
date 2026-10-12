@@ -1498,9 +1498,6 @@ cleanup() {
   # whose rm was cut short. Named by our pid, so it is ours to remove.
   if [ -e "$INDEX_LOCK.gone.$$" ]; then rm -rf "$INDEX_LOCK.gone.$$"; fi
   _claims_worktrees_remove
-  # A ledger publish's temporary worktree (scripts/ledger/views.sh), also
-  # after a TERM or INT. Before the scratch dir goes: the removal may need it.
-  if [ -n "${_LG_PUBLISH_WT:-}" ]; then _lg_publish_wt_remove || true; fi
   if [ -n "$_SCRATCH" ]; then rm -rf "$_SCRATCH"; fi
   return 0
 }
@@ -2435,9 +2432,9 @@ ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed
   line per finding, every finding blocking.
 ledger publish|cmd_ledger_publish|repo|dry-run format=
   [--dry-run] [--format text|json]
-  Fetch the remote, render the views from the base commit (a temporary
-  detached worktree under the ledger cache; its own config, registry and
-  items) and push one new commit to views.branch (default
+  Fetch the remote, render the views from the base commit (read from its
+  blobs: its own config, registry and items; no checkout) and push one new
+  commit to views.branch (default
   doc-ledger-views, an orphan branch holding only the view files) — built
   with git plumbing, so HEAD, the index and the working tree are never
   touched — without force: a branch that moved meanwhile exits 2.
