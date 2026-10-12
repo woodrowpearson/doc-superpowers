@@ -1418,8 +1418,10 @@ _INDEX_PATCH='reduce $patch[] as $x (.;
   else error("doc-tools: unknown index patch row: \($x | tojson)") end)'
 
 _die() {
-  # A claims verb's failure is "could not run": exit 2, with its verdict.
+  # A claims or ledger verb's failure is "could not run": exit 2, with its
+  # verdict.
   if [ "$_CL_ACTIVE" = 1 ]; then _claims_die "$*"; fi
+  if [ "$_LG_ACTIVE" = 1 ]; then _lg_fail 2 "$*"; fi
   echo "ERROR: $*" >&2
   exit 1
 }
@@ -1522,17 +1524,37 @@ _CL_ACTIVE=0         # 1: this run is a claims verb
 _CL_EMITTED=0        # 1: this shell printed the run's verdict
 _CL_EMITTED_RC=""    # …and the exit code that verdict carries
 _CL_VERB=""          # the claims verb ("validate", …), for verdict objects
+# A ledger verb (_LG_ACTIVE=1) has the same exit family (0 ok · 1 findings ·
+# 2 could not run · 3 usage) with its marker in $_SCRATCH/lg-emitted; see
+# "Work ledger" below.
+_LG_ACTIVE=0         # 1: this run is a ledger verb
+_LG_EMITTED=0        # 1: this shell printed the run's verdict
+_LG_EMITTED_RC=""    # …and the exit code that verdict carries
+_LG_VERB=""          # the ledger sub-verb ("ls", …); "ledger" when none
+_LG_FORMAT=text      # text | json (--format)
 _on_exit() {
-  local rc=$? emitted=0 erc=""
+  local rc=$? emitted=0 erc="" marker=""
   if [ "$_CL_ACTIVE" = 1 ]; then
     if [ "$_CL_EMITTED" = 1 ]; then
       emitted=1
       erc="$_CL_EMITTED_RC"
-    elif [ -n "$_SCRATCH" ] && [ -e "$_SCRATCH/cl-emitted" ]; then
-      emitted=1
-      # No trailing newline: read assigns, then returns 1.
-      IFS= read -r erc < "$_SCRATCH/cl-emitted" || true
+    else
+      marker=cl-emitted
     fi
+  elif [ "$_LG_ACTIVE" = 1 ]; then
+    if [ "$_LG_EMITTED" = 1 ]; then
+      emitted=1
+      erc="$_LG_EMITTED_RC"
+    else
+      marker=lg-emitted
+    fi
+  fi
+  if [ -n "$marker" ] && [ -n "$_SCRATCH" ] && [ -e "$_SCRATCH/$marker" ]; then
+    emitted=1
+    # No trailing newline: read assigns, then returns 1.
+    IFS= read -r erc < "$_SCRATCH/$marker" || true
+  fi
+  if [ "$_CL_ACTIVE" = 1 ] || [ "$_LG_ACTIVE" = 1 ]; then
     # A marker whose code is unreadable still means a verdict was printed.
     case "$erc" in
       0|1|2|3) ;;
@@ -1543,12 +1565,12 @@ _on_exit() {
   if [ "$rc" -eq 0 ] && [ "$_EXIT_OK" != 1 ]; then
     rc=1
   fi
-  if [ "$_CL_ACTIVE" = 1 ]; then
+  if [ "$_CL_ACTIVE" = 1 ] || [ "$_LG_ACTIVE" = 1 ]; then
     case "$rc" in
       130|143) ;;
       *)
         if [ "$emitted" = 0 ]; then
-          _claims_fallback "$rc"
+          if [ "$_CL_ACTIVE" = 1 ]; then _claims_fallback "$rc"; else _lg_fallback "$rc"; fi
           rc=2
         else
           rc=$erc
@@ -2306,6 +2328,65 @@ claims rulings|cmd_claims_rulings|repo|range= format= base=
   new claim), new {quote, states} at <b>}. --format markdown prints them
   as Markdown for a PR description, under "## Spec amendments (N)",
   instead of the verdict object.
+ledger show|cmd_ledger_show|repo|format=
+  <key|alias|legacy-ref|path> [--format text|json]
+  One work-ledger item in at most 25 lines: key, ledger, severity,
+  status, summary, derived status, links, upstream and downstream
+  items, in-flight claims. Accepts "checkout-14", "checkout 14" and
+  "checkout #14". Every ledger verb is inert (exit 0) without
+  docs/ledger/config.json; see "Work ledger".
+ledger ls|cmd_ledger_ls|repo|format=
+  [--format text|json]
+  One line per work-ledger item.
+ledger find|cmd_ledger_find|repo|format=
+  <words>... [--format text|json]
+  Ranked fuzzy match over key, summary, file-name slug, H1 and first
+  paragraph: the item whose name you cannot remember.
+ledger related|cmd_ledger_related|repo|format=
+  <key> [--format text|json]
+  An item's siblings, upstream and downstream items, and unconfirmed
+  candidates.
+ledger sweep|cmd_ledger_sweep|repo|format=
+  [--format text|json]
+  The planning sweep: the open items a plan, a set of files, contracts
+  or keys touch.
+ledger recheck|cmd_ledger_recheck|repo|format=
+  <key> [--format text|json]
+  The items to re-check when <key> resolves or its contracts change.
+ledger inflight|cmd_ledger_inflight|repo|format=
+  [--format text|json]
+  Work in flight on other branches and machines.
+ledger notices|cmd_ledger_notices|repo|format=
+  [--format text|json]
+  In-flight notices for the current branch.
+ledger new|cmd_ledger_new|repo|format=
+  [--format text|json]
+  Allocate an item key and write key, ledger and summary into an issue.
+ledger assign|cmd_ledger_assign|repo|format=
+  <item> <ledger> [--format text|json]
+  Move an item to a ledger: a new key there; the previous key becomes an
+  alias.
+ledger link|cmd_ledger_link|repo|format=
+  <item> [--format text|json]
+  Write a confirmed relation (consumes, changes, relates) into an item.
+ledger note|cmd_ledger_note|repo|format=
+  <key> <text> [--format text|json]
+  Append a dated line under an item's log heading, or set what it owes.
+ledger view|cmd_ledger_view|repo|format=
+  <ledger|all> [--format text|json]
+  Render ledger views locally from the working tree.
+ledger validate|cmd_ledger_validate|repo|format=
+  [--format text|json]
+  Check items, the ledger registry and keys.
+ledger publish|cmd_ledger_publish|repo|format=
+  [--format text|json]
+  Render the views from the remote base and push the views branch.
+ledger finalize|cmd_ledger_finalize|repo|format=
+  [--format text|json]
+  Replace provisional keys with allocated ones.
+ledger init|cmd_ledger_init|repo|format=
+  [--format text|json]
+  Bootstrap the ledger: sources, a proposed registry, assignments.
 fragments list|cmd_fragments_list|deps|
   -
   List the per-PR release-notes fragments (RELEASE-NOTES.next/PR-<N>.md in
@@ -2511,6 +2592,20 @@ Spec claims (claims validate, run, promote, render, gate, attest, rulings):
   whose "when" the change switches on is a finding, whatever its rulings
   (fix the code and promote it, or retire it, first).
 
+Work ledger (ledger show, ls, find, related, sweep, recheck, inflight,
+notices, new, assign, link, note, view, validate, publish, finalize, init):
+  Opt-in: docs/ledger/config.json turns it on (a key it omits takes its
+  default; {} is a complete config). Without it every ledger verb prints
+  "ledger: not enabled (no docs/ledger/config.json)" — with --format json,
+  {"verb":"ledger <sub>","enabled":false,"exit":0} — and exits 0. That
+  check runs after the options are parsed and the repository is checked
+  (an unknown option still exits 3; outside a git work tree, 2) and
+  before any argument is read. The verbs live in scripts/ledger/ beside
+  doc-tools.sh: a copy of doc-tools.sh without that directory exits 2 for
+  an enabled ledger. Text is the default output; --format json prints
+  exactly one object {"verb","enabled","exit",…}. The exit codes are the
+  claims subcommands' (see "Exit status").
+
 Exit status:
   0  success
   1  the operation failed or was refused (an invalid mapping line, a path
@@ -2533,14 +2628,14 @@ Exit status:
   3  fragments merge refused: a release consumed fragments that are still
      present, because its release commit has not reached <range-end>
 
-  The claims subcommands have their own codes instead:
+  The claims and ledger subcommands have their own codes instead:
   0  everything as expected
   1  findings (a blocking check failed)
   2  could not run: an adapter reported indeterminate or exited non-zero,
      the base did not resolve, the config is not one JSON object, a dirty
      tree where one is refused (gate, promote, attest --final), a missing
-     dependency, a run outside a git work tree or below its top level, or
-     an internal failure (never 1)
+     dependency, a run outside a git work tree or below its top level, a
+     ledger run without scripts/ledger/, or an internal failure (never 1)
   3  usage error
   When several apply, the precedence is 1 > 2 > 0.
 
@@ -2648,9 +2743,11 @@ cmd_help() {
 }
 
 # A command-line error: say what is wrong and where the usage is; exit 2
-# (a claims verb: _claims_usage_error, exit 3 with its verdict object).
+# (a claims verb: _claims_usage_error, exit 3 with its verdict object; a
+# ledger verb: exit 3, with its object in --format json).
 _usage_error() {
   if [ "$_CL_ACTIVE" = 1 ]; then _claims_usage_error "$1" "$2"; fi
+  if [ "$_LG_ACTIVE" = 1 ]; then _lg_fail "$_USAGE_RC" "$1: $2" "$1"; fi
   echo "ERROR: $1: $2" >&2
   echo "       See: doc-tools.sh $1 --help" >&2
   exit "$_USAGE_RC"
@@ -2780,17 +2877,20 @@ _require_repo() {
     _require_repo_fail "$1 must run from the repository's top level, not from ${prefix%/}/ (doc paths are keyed from the root). Run: cd \"\$(git rev-parse --show-toplevel)\""
   fi
 }
-# Exit 2 — for a claims verb with its verdict object (could not run).
+# Exit 2 — for a claims or ledger verb with its verdict object (could not
+# run).
 _require_repo_fail() {
   if [ "$_CL_ACTIVE" = 1 ]; then _claims_die "$1"; fi
+  if [ "$_LG_ACTIVE" = 1 ]; then _lg_fail 2 "$1"; fi
   echo "ERROR: $1" >&2
   exit 2
 }
 
 # check_deps failed (it named what is missing): exit 1 — 2, with its verdict
-# object, for a claims verb (could not run).
+# object, for a claims or ledger verb (could not run).
 _deps_fail() {
   if [ "$_CL_ACTIVE" = 1 ]; then _claims_die "a required command is missing or too old (see the errors above)"; fi
+  if [ "$_LG_ACTIVE" = 1 ]; then _lg_fail 2 "a required command is missing or too old (see the errors above)"; fi
   exit 1
 }
 
@@ -2818,6 +2918,19 @@ _main() {
     _CL_VERB="${2:-claims}"
     exec 9>&1
   fi
+  # A ledger verb: the same exit family and fd 9 (see "Work ledger").
+  if [ "$1" = ledger ]; then
+    _USAGE_RC=3
+    _LG_ACTIVE=1
+    # The word after "ledger" until the lookup confirms it; "ledger" when
+    # there is none (or it is an option: "ledger --format json").
+    case "${2:-}" in
+      ''|-*) _LG_VERB=ledger ;;
+      *) _LG_VERB="$2" ;;
+    esac
+    exec 9>&1
+    _lg_prescan "$@"
+  fi
 
   local verb
   if [ $# -ge 2 ] && _verb_lookup "$1 $2"; then
@@ -2840,6 +2953,7 @@ _main() {
     exit 2
   fi
   if [ "$_CL_ACTIVE" = 1 ]; then _CL_VERB="${verb#claims }"; fi
+  if [ "$_LG_ACTIVE" = 1 ]; then _LG_VERB="${verb#ledger }"; fi
 
   # --help anywhere before "--" wins, before any dependency is needed.
   local a
@@ -2854,10 +2968,13 @@ _main() {
   # runs git), so a signal at any point from here ends the run through cleanup.
   _traps
   _parse_args "$verb" "$_VERB_OPTS" "$@"
+  if [ "$_LG_ACTIVE" = 1 ]; then _lg_format; fi
   case "$_VERB_NEEDS" in
     repo) check_deps || _deps_fail; _require_repo "$verb" ;;
     deps) check_deps || _deps_fail ;;
   esac
+  # Inert, refused, or scripts/ledger/ loaded — before the handler exists.
+  if [ "$_LG_ACTIVE" = 1 ]; then _lg_enter; fi
   "$_VERB_HANDLER" ${_ARGS[@]+"${_ARGS[@]}"}
 }
 
@@ -11473,6 +11590,146 @@ cmd_claims_rulings() {
   fi
   _claims_jq rulings-results -c '.[]' "$rows" >> "$_SCRATCH/cl-results.jsonl"
   _claims_emit rulings
+}
+
+# --- Work ledger: dispatch, inert check, verdict helpers ----------------------
+#
+# The ledger verbs live in scripts/ledger/ (lib.sh and the modules it
+# sources), loaded only when a ledger verb runs in a repository that has
+# docs/ledger/config.json. Everything here must work before — or without —
+# that directory: the inert check, the missing-directory refusal (a vendored
+# doc-tools.sh copied alone), the verdict printers the exit paths (_die,
+# _usage_error, _require_repo_fail, _deps_fail, _on_exit) use. The exit
+# family is the claims verbs': 0 ok · 1 findings · 2 could not run (an
+# internal crash too, never 1) · 3 usage. In --format json a run prints
+# exactly one object {"verb":"ledger <sub>","enabled":…,"exit":<rc>,…} on
+# fd 9 (the run's real stdout, so a verdict printed inside $(…) still
+# reaches it); in text mode errors go to stderr and stdout carries only the
+# verb's output.
+
+_LG_JS=""            # _lg_json_str's result
+
+# A JSON string literal for $1 into _LG_JS, in bash alone (the exit paths
+# must print when jq is what failed or is missing). The algorithm of
+# _claims_json_str.
+_lg_json_str() {
+  local s="$1"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  s=${s//[[:cntrl:]]/}
+  _LG_JS="\"$s\""
+}
+
+# Print one line of the run's output to fd 9 (stdout when fd 9 is not open).
+# A failed write (a closed pipe) must not change the exit status.
+_lg_out() {
+  if { : >&9; } 2>/dev/null; then
+    printf '%s\n' "$1" >&9 || true
+  else
+    printf '%s\n' "$1" || true
+  fi
+}
+
+# _lg_mark_emitted <rc>: this run's verdict, carrying exit code <rc>, is
+# being printed; _on_exit ends the run with <rc>. The variables first; the
+# marker file (holding <rc>, read by _on_exit when the verdict was printed
+# inside $(…)) only once the scratch dir exists.
+_lg_mark_emitted() {
+  _LG_EMITTED=1
+  _LG_EMITTED_RC="$1"
+  if [ -n "$_SCRATCH" ]; then
+    printf '%s' "$1" > "$_SCRATCH/lg-emitted" || true
+  fi
+}
+
+# The verb of this run's verdict object, as a JSON string, into _LG_JS.
+_lg_verb_json() {
+  if [ "$_LG_VERB" = ledger ] || [ -z "$_LG_VERB" ]; then
+    _lg_json_str "ledger"
+  else
+    _lg_json_str "ledger $_LG_VERB"
+  fi
+}
+
+# _lg_fail <rc> <message> [<usage-verb>]: end the run with <rc> (2: could
+# not run; 3: usage, when <usage-verb> names the verb whose --help to see).
+# JSON mode prints the verdict object with "error" first; the stderr lines
+# follow, a failed write ignored. Works inside $(…) (fd 9 and the marker).
+# "enabled" says whether docs/ledger/config.json is present here.
+_lg_fail() {
+  local rc="$1" msg="$2" uverb="${3:-}" verb enabled=false
+  _lg_mark_emitted "$rc"
+  if [ "$_LG_FORMAT" = json ]; then
+    if [ -e docs/ledger/config.json ] || [ -L docs/ledger/config.json ]; then enabled=true; fi
+    _lg_verb_json
+    verb=$_LG_JS
+    _lg_json_str "$msg"
+    _lg_out "{\"verb\":$verb,\"enabled\":$enabled,\"exit\":$rc,\"error\":$_LG_JS}"
+  fi
+  echo "ERROR: $msg" >&2 || true
+  if [ -n "$uverb" ]; then echo "       See: doc-tools.sh $uverb --help" >&2 || true; fi
+  exit "$rc"
+}
+
+# The EXIT trap's verdict for a ledger run that printed none (a set -u
+# crash, a stray exit, a failed command); _on_exit then exits 2.
+_lg_fallback() {
+  if [ "$_LG_FORMAT" = json ]; then
+    _lg_verb_json
+    _lg_out "{\"verb\":$_LG_JS,\"enabled\":true,\"exit\":2,\"error\":\"internal\"}"
+  fi
+  echo "ledger: internal error (rc $1)" >&2 || true
+}
+
+# Before _parse_args: --format json anywhere before "--" makes even a usage
+# error in the option loop print its object.
+_lg_prescan() {
+  local a want=0
+  for a in "$@"; do
+    if [ "$want" = 1 ]; then
+      if [ "$a" = json ]; then _LG_FORMAT=json; fi
+      want=0
+      continue
+    fi
+    case "$a" in
+      --) break ;;
+      --format=json) _LG_FORMAT=json ;;
+      --format) want=1 ;;
+    esac
+  done
+}
+
+# After _parse_args: validate --format (a usage error, even when inert).
+_lg_format() {
+  case "${_OPT_format:-}" in
+    ''|text) _LG_FORMAT=text ;;
+    json) _LG_FORMAT=json ;;
+    *) _usage_error "ledger $_LG_VERB" "--format must be text or json (got '$_OPT_format')" ;;
+  esac
+}
+
+# After the repository check: inert without docs/ledger/config.json (decided
+# here, before anything is sourced); a copy of doc-tools.sh without its
+# ledger/ directory cannot run an enabled ledger; else load scripts/ledger/.
+_lg_enter() {
+  if [ ! -e docs/ledger/config.json ] && [ ! -L docs/ledger/config.json ]; then
+    _lg_mark_emitted 0
+    if [ "$_LG_FORMAT" = json ]; then
+      _lg_verb_json
+      _lg_out "{\"verb\":$_LG_JS,\"enabled\":false,\"exit\":0}"
+    else
+      _lg_out "ledger: not enabled (no docs/ledger/config.json)"
+    fi
+    _exit_ok
+  fi
+  if [ ! -f "$SCRIPT_DIR/ledger/lib.sh" ]; then
+    _lg_fail 2 "ledger needs scripts/ledger/ beside doc-tools.sh ($SCRIPT_DIR/ledger)"
+  fi
+  # shellcheck source=scripts/ledger/lib.sh
+  . "$SCRIPT_DIR/ledger/lib.sh"
 }
 
 # --- Main ---

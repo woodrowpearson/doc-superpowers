@@ -515,6 +515,8 @@ test_scripts_are_free_of_bash4_only_constructs() {
   for candidate in \
     "$repo_root"/scripts/doc-tools.sh \
     "$repo_root"/scripts/merge-doc-index.sh \
+    "$repo_root"/scripts/ledger/*.sh \
+    "$repo_root"/scripts/adapters/*.sh \
     "$repo_root"/scripts/hooks/*.sh \
     "$repo_root"/scripts/hooks/claude/*.sh \
     "$repo_root"/scripts/hooks/ci/doc-pr-release/*.sh \
