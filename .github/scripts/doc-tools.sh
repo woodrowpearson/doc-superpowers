@@ -6551,19 +6551,19 @@ _claims_verdict_check() {
 # unverifiable-here for a built/gated claim of cl-claims.json (clear for any
 # other status, or no such claim). With its verdict in the local store:
 # mismatch → owed, ok → clear. Without it (a fresh clone, CI) the answer
-# comes from commit order, never from the store: for each DOC-STALE/RETIRE
-# ruling of the claim absent at <since-rev>, its introducing commit is the
-# first of `git rev-list --reverse <since-rev>..HEAD -- <sidecar>` whose
-# sidecar holds it. owed when that commit is not an ancestor of
-# promotion.at (the amendment came after the proof) — a ruling no commit
-# holds yet (staged or in the work tree) included; clear when every one is,
-# or when there is no such ruling; unverifiable-here when there is one and
-# promotion.at is not a commit here (a rebased branch's old sha). An empty
-# <since-rev> counts every ruling, over all of HEAD's history.
+# comes from git history, never from the store: promote sets promotion.at to
+# HEAD before it writes the sidecar, so the claim's record in its sidecar at
+# promotion.at holds exactly the states and test it proved. clear when both
+# are JSON-equal to the current record's; owed when either differs (an
+# amendment, or a later edit under the same ruling, after the proof);
+# unverifiable-here when promotion.at is not a commit here (a rebased
+# branch's old sha), or the sidecar at promotion.at is absent, not one JSON
+# object with a claims array, or holds no claim with that id. <since-rev>
+# (the gate's from / _CL_MB) is accepted for the callers' interface and not
+# read: the proved record, not when a ruling arrived, decides.
 _claims_repromote_owed() {
-  local id="$1" since="$2" entry claim sidecar v at range r c found
-  local old="$_SCRATCH/cl-owed-base.json" rulings="$_SCRATCH/cl-owed-rulings" commits="$_SCRATCH/cl-owed-commits"
-  local blob="$_SCRATCH/cl-owed-sidecar.json"
+  local id="$1" entry claim sidecar v at
+  local proved="$_SCRATCH/cl-owed-proved.json"
   entry=$(_claims_jq owed-claim -c --arg id "$id" \
     'first(.[] | select(.claim.id == $id and (.claim.status == "built" or .claim.status == "gated"))) // empty' \
     "$_SCRATCH/cl-claims.json") || _claims_propagate $?
@@ -6578,45 +6578,21 @@ _claims_repromote_owed() {
     mismatch) echo owed; return 0 ;;
     ok) echo clear; return 0 ;;
   esac
-  if [ -z "$since" ] || ! _claims_read_at "$since" "$sidecar" > "$old" \
-      || ! jq -e 'type == "object"' "$old" >/dev/null 2>&1; then
-    printf '{}\n' > "$old"
-  fi
-  _claims_jq owed-rulings -c --arg id "$id" --argjson c "$claim" \
-    '[.claims | arrays | .[] | objects | select(.id == $id) | .rulings | arrays | .[]] as $was
-     | $c.rulings | arrays | .[]
-     | select(type == "object" and (.direction == "DOC-STALE" or .direction == "RETIRE"))
-     | . as $r | select(any($was[]; . == $r) | not)' "$old" > "$rulings"
-  if [ ! -s "$rulings" ]; then
-    echo clear
-    return 0
-  fi
   at=$(_claims_jq owed-at -r '.promotion.at | strings' <<<"$claim") || _claims_propagate $?
-  if [ -z "$at" ] || ! at=$(git rev-parse -q --verify "$at^{commit}" 2>/dev/null); then
+  if [ -z "$at" ] || ! at=$(git rev-parse -q --verify "$at^{commit}" 2>/dev/null) \
+      || ! _claims_read_at "$at" "$sidecar" > "$proved"; then
     echo unverifiable-here
     return 0
   fi
-  range=HEAD
-  if [ -n "$since" ]; then range="$since..HEAD"; fi
-  git rev-list --reverse "$range" -- "$sidecar" > "$commits" \
-    || _claims_die "git rev-list failed listing $range -- $sidecar"
-  while IFS= read -r r <&3; do
-    found=""
-    while IFS= read -r c <&4; do
-      _claims_read_at "$c" "$sidecar" > "$blob" || continue
-      # Its status is the answer, so not _claims_jq.
-      if jq -e --arg id "$id" --argjson r "$r" \
-          'any(.claims[] | select(.id == $id) | .rulings[]; . == $r)' "$blob" >/dev/null 2>&1; then
-        found=$c
-        break
-      fi
-    done 4< "$commits"
-    if [ -z "$found" ] || ! git merge-base --is-ancestor "$found" "$at" 2>/dev/null; then
-      echo owed
-      return 0
-    fi
-  done 3< "$rulings"
-  echo clear
+  # Its output is the answer (a sidecar jq cannot parse: unverifiable-here),
+  # so not _claims_jq.
+  jq -r -s --arg id "$id" --argjson c "$claim" \
+    'if length != 1 or (.[0] | type) != "object" or (.[0].claims | type) != "array" then "unverifiable-here"
+     else [.[0].claims[] | objects | select(.id == $id)]
+       | if length == 0 then "unverifiable-here"
+         elif .[0].states == $c.states and .[0].test == $c.test then "clear"
+         else "owed" end
+     end' "$proved" 2>/dev/null || echo unverifiable-here
 }
 
 # V6 (see the section comment), one program in three phases ($phase), run
