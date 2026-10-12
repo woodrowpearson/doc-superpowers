@@ -7960,8 +7960,9 @@ _claims_v9() {
 #     promoted into a governing doc first);
 #   - a move to Completed (completed now, and not at _CL_MB or the plan
 #     absent there) that docs/spec-claims/gates/<stem>/final.json (read
-#     from the proposed tree) does not cover (_claims_v12_final). A plan
-#     already completed at _CL_MB is history, never re-judged.
+#     from the proposed tree) does not cover (_claims_v12_final).
+# A plan already completed at _CL_MB is history: none of these checks runs
+# on it, staged or not.
 # Scratch: cl-plan.* (the parser's raw, masked and record files),
 # cl-v12-* (the plan list, the parses, the code paths, the final record).
 
@@ -8316,6 +8317,13 @@ _claims_v12_plan() {
     absent:*|*:"true true "*) ;;
     *) return 0 ;;
   esac
+  # A plan already completed at _CL_MB is history: none of V12 re-judges it
+  # (a later feature may add an unbuilt claim to a spec it targeted).
+  if [ "$at_base" = present ]; then
+    _claims_plan_parse "$plan" "rev:$_CL_MB" > "$bj"
+    base_done=$(_claims_jq v12-base-completed -r '.completed' "$bj") || _claims_propagate $?
+    [ "$base_done" != true ] || return 0
+  fi
   : > "$code"
   _claims_jq v12-files -j '[.chunks[].tasks[] | select(.kind == "impl") | .files[]] | unique | .[] | . + "\u0000"' \
     "$pj" > "$flist"
@@ -8327,11 +8335,7 @@ _claims_v12_plan() {
   _CL_V12_FINAL=""
   case "$at_base:$facts" in
     *:*" true")
-      if [ "$at_base" = present ]; then
-        _claims_plan_parse "$plan" "rev:$_CL_MB" > "$bj"
-        base_done=$(_claims_jq v12-base-completed -r '.completed' "$bj") || _claims_propagate $?
-      fi
-      if [ "$at_base" != unknown ] && [ "$base_done" != true ]; then
+      if [ "$at_base" != unknown ]; then
         base=${plan##*/}
         _claims_v12_final "${base%.*}"
       fi

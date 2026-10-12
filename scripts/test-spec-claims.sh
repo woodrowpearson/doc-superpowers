@@ -5613,6 +5613,28 @@ test_v12_files_line_first_path_only() {
   teardown
 }
 
+test_v12_completed_at_base_exempt_from_every_check() {
+  echo "test: V12 — a plan completed at the merge-base is history: none of its checks run, edited or not"
+  claims_fixture
+  # Completed on main before the branch point, with no final.json, and not
+  # naming the fixture's unbuilt target claim (the claim a later feature added).
+  # shellcheck disable=SC2086  # the block list splits on spaces
+  plan_write -- head completed chunk1 impl1_noclaims gate1 update chunk2 impl2 update finalize
+  base_here "a completed plan that names no claim"
+  cl validate --all
+  assert_v12_ok "validate --all on feature"
+  printf '\nA typo fix.\n' >> "$PLAN"
+  git add "$PLAN"
+  cl validate --staged
+  assert_v12_ok "…after a one-line edit, staged"
+  # The same text, new on the branch, is judged (the control).
+  cp "$PLAN" docs/superpowers/plans/2026-01-02-copy.md
+  git add docs/superpowers/plans/2026-01-02-copy.md
+  cl validate --staged
+  assert_v12 "SPEC-AUTH-001#token-ttl" "the same plan added on feature"
+  teardown
+}
+
 test_v12_historical_completed_plan_not_finding() {
   echo "test: V12 — a plan Completed on main before the branch point is history"
   claims_fixture
@@ -6033,6 +6055,7 @@ run_tests() {
   test_v12_final_record_unsafe_path
   test_v12_symlinked_plan_skipped
   test_v12_files_line_first_path_only
+  test_v12_completed_at_base_exempt_from_every_check
   test_v12_historical_completed_plan_not_finding
   test_v12_base_unresolvable_gate_carrying_only
 
