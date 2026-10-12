@@ -2189,12 +2189,13 @@ claims validate|cmd_claims_validate|repo|staged all config=* base=
 claims run|cmd_claims_run|repo|claims+ planes-of= all scheduled judge-sample= base=
   (--claims <id>... | --planes-of <range> | --all) [--scheduled] [--judge-sample <n>] [--base <ref>]
   Execute claims: test claims through their runner adapters (config
-  "runners": one run call per runner), lint claims again, log claims (with
-  --scheduled only) through the log adapter. --claims takes ids (commas
-  split them too); --planes-of runs every claim of each runner one of
-  whose "paths" (a prefix, or a glob) a path <range> changes touches;
+  "runners": one run call per runner), and log claims (with --scheduled
+  only) through the log adapter. --claims takes ids (commas split them
+  too). --planes-of <range> runs the test claims of every runner that has
+  a "paths" entry (a prefix or a glob) matching a file the range changes.
   --judge-sample <n> also names n judge claims to review, rotated weekly.
-  Retired, frozen and judge claims are reported skipped. Each outcome is
+  Retired, frozen, judge and lint claims are reported skipped (lint
+  re-runs are not implemented yet). Each outcome is
   judged by the claim's status: built must pass, diverged fail by an
   assertion, unbuilt not pass. Every finding blocks; an indeterminate
   outcome, or a missing or failing adapter, exits 2.
@@ -6986,7 +6987,8 @@ _claims_blocks() {
 
 # _claims_adapter_call <out-file> <adapter-path> <args…>: run
 # "$_CL_ROOT/<adapter-path>" <args…> from the repo root, its stdout into
-# <out-file>, with </dev/null 9>&-; return its rc. An empty, unsafe
+# <out-file>, with </dev/null 9>&- 3<&- (fd 3: the callers' open scratch
+# list); return its rc. An empty, unsafe
 # (_claims_safe_relpath), uncontained (_claims_contained_path), missing or
 # non-executable adapter returns 126 without running anything.
 _claims_adapter_call() {
@@ -6997,7 +6999,7 @@ _claims_adapter_call() {
       || [ ! -f "$_CL_ROOT/$adapter" ] || [ ! -x "$_CL_ROOT/$adapter" ]; then
     return 126
   fi
-  (cd "$_CL_ROOT" && exec "$_CL_ROOT/$adapter" "$@") </dev/null 9>&- > "$out" || rc=$?
+  (cd "$_CL_ROOT" && exec "$_CL_ROOT/$adapter" "$@") </dev/null 9>&- 3<&- > "$out" || rc=$?
   return "$rc"
 }
 
@@ -7025,12 +7027,23 @@ _JQ_CLAIMS_PARSE_RUN='def known: . as $o | any("pass", "assert-fail", "error", "
        end
    end'
 
+# _claims_rc_arg <helper> <value>: die unless <value> is an exit code (a
+# non-empty run of digits). The parse helpers never default one: a missing
+# rc would read a crashed adapter's rows as valid.
+_claims_rc_arg() {
+  case "$2" in
+    ''|*[!0-9]*) _claims_die "$1: <rc> must be the adapter's exit code (got '$2')" ;;
+  esac
+}
+
 # _claims_parse_run <out-file> <requested-nodes-file> <rc>: print one JSONL
 # row {node, outcome, reason} per node of <requested-nodes-file> (a JSON
-# array), from a run call's <out-file> and exit status <rc>
-# (_JQ_CLAIMS_PARSE_RUN).
+# array), from a run call's <out-file> and its exit status <rc>
+# (_JQ_CLAIMS_PARSE_RUN). All three are required: a missing or non-integer
+# <rc> dies (exit 2).
 _claims_parse_run() {
-  _claims_jq parse-run -ncR --slurpfile req "$2" --argjson rc "${3:-0}" "$_JQ_CLAIMS_PARSE_RUN" < "$1"
+  _claims_rc_arg _claims_parse_run "${3-}"
+  _claims_jq parse-run -ncR --slurpfile req "$2" --argjson rc "$3" "$_JQ_CLAIMS_PARSE_RUN" < "$1"
 }
 
 # A log-adapter call's stdout → one {claim, outcome, reason, evidence} row
@@ -7053,8 +7066,10 @@ _JQ_CLAIMS_PARSE_LOG='def indet($r): {claim: $claim, outcome: "indeterminate", r
 
 # _claims_parse_log <out-file> <claim-id> <rc>: print the row
 # (_JQ_CLAIMS_PARSE_LOG) of a log-adapter call for <claim-id> that exited <rc>.
+# All three are required: a missing or non-integer <rc> dies (exit 2).
 _claims_parse_log() {
-  _claims_jq parse-log -ncR --arg claim "$2" --argjson rc "${3:-0}" "$_JQ_CLAIMS_PARSE_LOG" < "$1"
+  _claims_rc_arg _claims_parse_log "${3-}"
+  _claims_jq parse-log -ncR --arg claim "$2" --argjson rc "$3" "$_JQ_CLAIMS_PARSE_LOG" < "$1"
 }
 
 # claims_expect($status; $outcome): an outcome judged by the claim's status
@@ -7110,7 +7125,8 @@ _JQ_CLAIMS_RUN_PLAN='def nes: type == "string" and length > 0;
 # reason} per test node; {claim, outcome, reason, evidence} per log claim)
 # → the result entries: the row {claim, status, node, outcome, verdict,
 # message}, plus doc and reason (for the finding and indeterminate rows).
-# A log outcome fail is judged as assert-fail.
+# A log outcome fail is judged as assert-fail; the row keeps the adapter's
+# own word.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_RUN_RESULTS='$plan[0] as $plan
  | [$plan[]
@@ -7124,7 +7140,7 @@ _JQ_CLAIMS_RUN_RESULTS='$plan[0] as $plan
          // {outcome: "indeterminate", reason: "not-run"}) as $row
         | ($row.outcome | if . == "fail" then "assert-fail" else . end) as $o
         | claims_expect($e.status; $o) as $x
-        | {outcome: $o, verdict: $x.verdict, reason: $row.reason,
+        | {outcome: $row.outcome, verdict: $x.verdict, reason: $row.reason,
            message: (if $x.verdict == "indeterminate" then ($row.reason // "indeterminate")
                      elif ($row.evidence | type) == "string" then "\($x.message) (evidence: \($row.evidence))"
                      else $x.message end)}

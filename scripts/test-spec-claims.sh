@@ -2975,6 +2975,8 @@ test_run_log_claims_only_scheduled() {
   assert_eq "log run"$'\n'"SPEC-AUTH-001#token-ttl" "$(cat "$STUB_LOG")" "…the log adapter got run <claim-id>"
   STUB_LOG_OUTCOME=fail cl run --all --scheduled
   assert_eq "1" "$CL_RC" "a failing log check on a built claim: exits 1"
+  assert_eq "fail" "$(run_field outcome)" "…the row keeps the log adapter's own outcome word"
+  assert_eq "finding" "$(run_field verdict)" "…judged as an assertion failure (a finding)"
   STUB_LOG_OUTCOME=indeterminate cl run --all --scheduled
   assert_eq "2" "$CL_RC" "an indeterminate log check: exits 2"
   jset docs/spec-claims/config.json '.log_adapter = null'
@@ -3108,6 +3110,34 @@ test_run_unsafe_adapter_path_indeterminate() {
   assert_eq "2" "$CL_RC" "an adapter reached through a symlinked directory: exits 2"
   assert_json_field "$CL_OUT" '.indeterminate[0].reason' "adapter-exit-126" "…reason adapter-exit-126"
   assert_file_not_exists "$out/ran" "…the outside adapter never ran"
+  teardown
+}
+
+# The parse helpers never default the adapter's exit code: called without
+# one (or with a non-integer one) they die, exit 2. Reached through a probe
+# copy of doc-tools.sh (claims_probe) that calls the helper after init.
+test_parse_helpers_require_rc() {
+  echo "test: _claims_parse_run / _claims_parse_log without an rc die (exit 2), never default to 0"
+  claims_fixture
+  local line probe rc out
+  for line in \
+    'printf "[]" > "$_SCRATCH/req"; : > "$_SCRATCH/out"; _claims_parse_run "$_SCRATCH/out" "$_SCRATCH/req"' \
+    'printf "[]" > "$_SCRATCH/req"; : > "$_SCRATCH/out"; _claims_parse_run "$_SCRATCH/out" "$_SCRATCH/req" ""' \
+    'printf "[]" > "$_SCRATCH/req"; : > "$_SCRATCH/out"; _claims_parse_run "$_SCRATCH/out" "$_SCRATCH/req" x1' \
+    ': > "$_SCRATCH/out"; _claims_parse_log "$_SCRATCH/out" SPEC-AUTH-001#token-ttl' \
+    ': > "$_SCRATCH/out"; _claims_parse_log "$_SCRATCH/out" SPEC-AUTH-001#token-ttl -1'; do
+    probe=$(claims_probe after "$line")
+    rc=0
+    out=$("$probe" claims render </dev/null 2>/dev/null) || rc=$?
+    assert_eq "2" "$rc" "'$line': exits 2"
+    assert_json_field "$out" '.error | test("<rc> must be the adapter.s exit code")' "true" "…the error names the missing rc"
+  done
+  # With an rc the same call runs (the probe itself works). The probe line
+  # holds no backslash (awk -v): single quotes inside it.
+  probe=$(claims_probe after "printf '%s' '[\"n\"]' > \"\$_SCRATCH/req\"; : > \"\$_SCRATCH/out\"; _claims_parse_run \"\$_SCRATCH/out\" \"\$_SCRATCH/req\" 3 > \"\$_SCRATCH/row\"; jq -e '.reason == \"adapter-exit-3\"' \"\$_SCRATCH/row\" >/dev/null || exit 1")
+  rc=0
+  "$probe" claims render </dev/null >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "with rc 3: the helper runs and reports adapter-exit-3"
   teardown
 }
 
@@ -3277,6 +3307,7 @@ run_tests() {
   test_run_unknown_runner_indeterminate
   test_run_unsafe_adapter_path_indeterminate
   test_run_selection
+  test_parse_helpers_require_rc
 
   print_summary
 }
