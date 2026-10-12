@@ -5518,6 +5518,7 @@ cmd_tools_version() {
 _CL_ENABLED=0        # 1: docs/spec-claims/ exists
 _CL_MODE=""          # staged | all | head: which tree _claims_read reads
 _CL_ROOT=""          # the work tree's top level, absolute
+_CL_ROOT_PHYS=""     # its physical path (pwd -P), once _claims_contained_path needs it
 _CL_BASE_REF=""      # --base, else config "base", else origin/main
 _CL_MB=""            # git merge-base HEAD <base>; empty when unresolvable
 _CL_ALL_BLOCKING=0   # 1: every finding blocks (run, promote, gate, attest)
@@ -5700,6 +5701,39 @@ _claims_safe_relpath() {
   return 0
 }
 
+# _claims_contained_path <path>: for a work-tree read (mode all) of a safe
+# repo path, 0 when reading or writing <path> stays inside the work tree: no
+# existing component of it (each directory prefix, and the file itself) is a
+# symbolic link, and its parent directory, when it exists, is physically
+# under the work tree's top level. A path through a link is never followed:
+# _claims_read's [ -f ] would read through it and render would write through
+# it (_tmp_beside refuses only a linked file, not a linked directory on the
+# way). The index and HEAD need no such check: git stores a link as a blob,
+# so a path through one is simply absent there.
+_claims_contained_path() {
+  local rest="$1" pre="" seg dir phys
+  while [ -n "$rest" ]; do
+    seg=${rest%%/*}
+    if [ "$seg" = "$rest" ]; then rest=""; else rest=${rest#*/}; fi
+    pre=${pre:+$pre/}$seg
+    [ ! -L "$pre" ] || return 1
+  done
+  case "$1" in
+    */*) dir=${1%/*} ;;
+    *) dir=. ;;
+  esac
+  [ -d "$dir" ] || return 0
+  if [ -z "$_CL_ROOT_PHYS" ]; then
+    _CL_ROOT_PHYS=$(CDPATH='' cd -P -- "$_CL_ROOT" 2>/dev/null && pwd -P) \
+      || _claims_die "cannot resolve the work tree's physical path ($_CL_ROOT)"
+  fi
+  phys=$(CDPATH='' cd -P -- "$dir" 2>/dev/null && pwd -P) || return 1
+  case "$phys/" in
+    "$_CL_ROOT_PHYS"/*) return 0 ;;
+  esac
+  return 1
+}
+
 # _claims_glob_match <path> <glob>: a case pattern, so * also matches "/"
 # ("docs/specs/*.md" matches docs/specs/sub/x.md).
 _claims_glob_match() {
@@ -5802,7 +5836,9 @@ _claims_v1_config() {
 #     JSON object), doc, doc_id, present, governing, unsafe}, present and
 #     governing describing doc in that same tree; unsafe: doc is not a safe
 #     repo path (_claims_safe_relpath: absolute, or an empty, "." or ".."
-#     segment), and is then never read (present and governing false);
+#     segment) or, read from the work tree, is reached through a symbolic
+#     link (_claims_contained_path), and is then never read (present and
+#     governing false); through a link in the index or HEAD it is absent;
 #   cl-claims.json / cl-claims-base.json — [{sidecar, doc, doc_id, eligible,
 #     claim}], one per object in a well-formed claims array ([] at base when
 #     _CL_MB is empty);
@@ -5934,6 +5970,9 @@ _claims_load_tree() {
     if [ -n "$doc" ] && ! _claims_safe_relpath "$doc"; then
       # Never read, never governing: _claims_read in mode all would follow
       # it out of the work tree, and a glob's * matches "/" and "..".
+      unsafe=true
+    elif [ -n "$doc" ] && [ "$rev" = - ] && [ "$_CL_MODE" = all ] && ! _claims_contained_path "$doc"; then
+      # A work-tree path through a symbolic link: the same.
       unsafe=true
     elif [ -n "$doc" ]; then
       if [ "$rev" = - ]; then
@@ -6172,7 +6211,7 @@ _JQ_CLAIMS_V1='def in_list($l): . as $x | any($l[]; . == $x);
            (if $d.schema != 1 then v1(null; $fdoc; "\($p): schema \($d.schema | tojson) must be 1") else empty end),
            (if ($d.claims | type) != "array" then v1(null; $fdoc; "\($p): claims must be an array") else empty end),
            (if .doc == null then v1(null; $p; "\($p): doc must be the repo path of the governing doc")
-            elif .unsafe then v1(null; $p; "\($p): doc \(.doc) is not a safe repo path (absolute, or an empty, . or .. segment): name the doc by its path from the repo root, as git ls-files prints it")
+            elif .unsafe then v1(null; $p; "\($p): doc \(.doc) is not a safe repo path (absolute, an empty, . or .. segment, or reached through a symbolic link): name the doc by its real path from the repo root, as git ls-files prints it")
             elif $retired or $eligible then
               (if ($p | cl_stem) != $docid
                then v1(null; .doc; "\($p): sidecar stem \($p | cl_stem) is not \($docid), the DOC-ID of \(.doc): rename it docs/spec-claims/\($docid).json")
@@ -6228,12 +6267,14 @@ _claims_v1() {
 #                     included — is "in". An unclosed fence runs to the end.
 #                     V8's awk section tracker (_claims_sections) pairs
 #                     fences by this same rule.
+#   claims_is_marker($m)  the line is the marker $m alone: up to 3 leading
+#                     spaces (CommonMark HTML-block indentation) and trailing
+#                     spaces, tabs or \r allowed, nothing else; a marker
+#                     quoted in prose or backticks is text.
 #   claims_status_blank  LF text → the same lines, each status block's lines
 #                     (a begin-marker line through the first end-marker line
-#                     after it) blanked to "". A marker counts only as a
-#                     whole line (a trailing \r tolerated); a marker quoted
-#                     in prose or backticks is text. render (_JQ_CLAIMS_RENDER)
-#                     locates the block by the same whole-line rule.
+#                     after it, by claims_is_marker) blanked to "". render
+#                     (_JQ_CLAIMS_RENDER) locates the block by the same rule.
 #   claims_live       raw doc → the same number of lines, CRLF read as LF and
 #                     each dead span (status block, ~~strike~~) blanked to its
 #                     newlines. Code fences are masked first, so a fence is
@@ -6275,12 +6316,13 @@ _JQ_CLAIMS_NORM='def claims_blank: gsub("[^\n]"; "");
    claims_fence_kinds
    | map(if .k == "delim" then "" elif .k == "in" then .t | gsub("~"; "\uffff") else .t end)
    | join("\n");
+ def claims_is_marker($m): test("^ {0,3}" + $m + "[ \t\r]*$");
  def claims_status_blank:
    split("\n") as $ls
    | (reduce range(0; $ls | length) as $i ({p: null, r: []};
-       ($ls[$i] | rtrimstr("\r")) as $t
-       | if .p == null then (if $t == "<!-- spec-claims:status:begin -->" then .p = $i else . end)
-         elif $t == "<!-- spec-claims:status:end -->" then .r += [[.p, $i]] | .p = null
+       $ls[$i] as $t
+       | if .p == null then (if $t | claims_is_marker("<!-- spec-claims:status:begin -->") then .p = $i else . end)
+         elif $t | claims_is_marker("<!-- spec-claims:status:end -->") then .r += [[.p, $i]] | .p = null
          else . end) | .r) as $r
    | [range(0; $ls | length) as $i | if any($r[]; .[0] <= $i and $i <= .[1]) then "" else $ls[$i] end]
    | join("\n");
@@ -6761,9 +6803,10 @@ _claims_v6() {
 # (claims_fence_kinds: the one fence rule V2 masks by), or, with none, at the
 # end of the file after one blank line; thereafter it replaces the marker
 # lines and every line between them — the lines V2's claims_status_blank
-# blanks, located by the same rule (a marker is a whole line, a trailing \r
-# tolerated; fences are not consulted), so the block is never live text,
-# and a marker quoted in prose is text. Marker lines that are not exactly
+# blanks, located by the same rule (claims_is_marker: a marker alone on its
+# line, up to 3 spaces of indentation and trailing blanks or \r allowed;
+# fences are not consulted), so the block is never live text, and a marker
+# quoted in prose is text. Marker lines that are not exactly
 # one begin and, after it, one end are a V11 finding; that doc is never
 # written. A CRLF doc gets a CRLF block.
 # A sidecar that is not eligible (its doc missing or not governing in the
@@ -6795,8 +6838,8 @@ _JQ_CLAIMS_RENDER='def cl_str: if type == "string" then . else tojson end;
  | (if test("\r\n") then "\r\n" else "\n" end) as $eol
  | claims_block($s[0]; $eol) as $blk
  | split("\n") as $ls
- | [range(0; $ls | length) | select($ls[.] | rtrimstr("\r") == $b)] as $bi
- | [range(0; $ls | length) | select($ls[.] | rtrimstr("\r") == $e)] as $ei
+ | [range(0; $ls | length) | select($ls[.] | claims_is_marker($b))] as $bi
+ | [range(0; $ls | length) | select($ls[.] | claims_is_marker($e))] as $ei
  | if ($bi | length) == 0 and ($ei | length) == 0 then
      (gsub("\r\n"; "\n") | claims_fence_kinds) as $k
      | ([range(0; $k | length) | select($k[.].k == "out" and ($k[.].t | test("^ {0,3}##([ \t]|$)")))][1]) as $i
@@ -6876,7 +6919,9 @@ _claims_blocks() {
     fi
     # The loader already skips an unsafe doc ("unsafe path"); never read or
     # write one even so.
-    _claims_safe_relpath "$doc" || _claims_die "refusing to render $doc: not a safe repo path"
+    if ! _claims_safe_relpath "$doc" || ! _claims_contained_path "$doc"; then
+      _claims_die "refusing to render $doc: not a safe repo path"
+    fi
     _claims_jq block-data -c '.data' <<<"$line" > "$sc"
     changed=false
     if ! _claims_render_doc "$doc" "$sc" > "$new"; then
