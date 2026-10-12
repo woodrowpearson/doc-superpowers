@@ -23,7 +23,8 @@
 # Rows (seconds, wall clock):
 #   ls / ls --ledger … --open / show / find / related / recheck   cold (no
 #              caches: the run builds the index) < 5 s and warm (caches from
-#              the previous run) < 1 s
+#              the previous run) < 1 s; ls again with the base ≠ HEAD (HEAD
+#              20 commits ahead; the base 20 commits ahead)
 #   refs step  the index build's parse-reference step (_lg_ix_refs) over all
 #              N items as blob records — the --staged / --rev case, which
 #              probes one parse entry per blob; reported, no budget
@@ -425,6 +426,19 @@ b_verb "related $show_key" related "$show_key"
 b_verb "recheck $show_key" recheck "$show_key"
 # shellcheck disable=SC2012  # cache names are index-<hex>.json
 echo "  (re-check markers: $(jq '[.items[] | select(.recheck_after != [])] | length' "$(ls -t "$(git rev-parse --git-common-dir)"/doc-superpowers/ledger/index-*.json | head -n 1)") items)"
+
+# The base ≠ HEAD: HEAD 20 commits ahead of the base (the base's events are
+# derived from HEAD's walk), then the base 20 commits ahead of HEAD (HEAD is
+# its ancestor: extended).
+git checkout -q -b ahead
+git ls-files -- 'docs/issues/*.md' > "$B_ROOT/items.all"
+head -n 20 "$B_ROOT/items.all" > "$B_ROOT/ahead.list"
+while IFS= read -r f; do printf '\n- ahead edit\n' >> "$f"; git commit -q -a -m "ahead: $f"; done < "$B_ROOT/ahead.list"
+b_verb "ls (HEAD 20 commits ahead of base)" ls
+git checkout -q main
+printf '{"base":"ahead"}\n' > docs/ledger/config.json
+b_verb "ls (base 20 commits ahead of HEAD)" ls
+git checkout -q -- docs/ledger/config.json
 
 # The refs step: every item as a blob record (the --staged / --rev shape).
 git ls-files -s -- docs/issues docs/archive/issues | awk '{ print "{\"blob\":\"" $2 "\"}" }' > "$B_ROOT/recs.jsonl"
