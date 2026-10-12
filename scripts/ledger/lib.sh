@@ -12,7 +12,12 @@ _LG_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _LG_CFG=""           # the merged config (a file in $_SCRATCH): _lg_init
 _LG_ROOT=""          # the work tree's top level
 _LG_CACHE=""         # $(git rev-parse --git-common-dir)/doc-superpowers/ledger
-                     # (absolute; created by whoever first writes to it)
+                     # (absolute; created by whoever first writes to it:
+                     # mkdir -p — the parse cache, parse.sh, is the first)
+
+# The modules. Each defines functions only.
+# shellcheck source=scripts/ledger/parse.sh
+. "$_LG_LIB/parse.sh"
 
 # _lg_die <message>: the run could not run — exit 2, with the verdict object
 # in --format json (exactly once, inside $(…) too: the marker file tells the
@@ -74,19 +79,26 @@ _lg_cfg() {
 # --format json: one object {"verb":"ledger <sub>","enabled":true,"exit":rc}
 # plus the payload object's other keys. Text mode: the verb has already
 # printed its lines (with _lg_out); nothing more is printed. Exits <rc>.
+# .verb comes from _LG_VERB — the verb every error object of this run names
+# — and <sub> must match it (a mismatch is an internal error, rc 2).
 _lg_emit() {
-  local sub="$1" rc="$2" payload="${3:-}" line
+  local sub="$1" rc="$2" payload="${3:-}" line verb
+  if [ "$sub" != "$_LG_VERB" ]; then
+    _lg_die "internal: _lg_emit for 'ledger $sub' in a 'ledger $_LG_VERB' run"
+  fi
   case "$rc" in
     0|1|2|3) ;;
     *) _lg_die "internal: _lg_emit got exit code '$rc'" ;;
   esac
   if [ "$_LG_FORMAT" = json ]; then
+    _lg_verb_json
+    verb=$_LG_JS
     if [ -n "$payload" ]; then
-      line=$(jq -c --arg verb "ledger $sub" --argjson rc "$rc" \
+      line=$(jq -c --argjson verb "$verb" --argjson rc "$rc" \
         '{verb: $verb, enabled: true, exit: $rc} + (. | del(.verb, .enabled, .exit))' "$payload") \
         || _lg_die "jq failed (verdict payload)"
     else
-      line=$(jq -nc --arg verb "ledger $sub" --argjson rc "$rc" '{verb: $verb, enabled: true, exit: $rc}') \
+      line=$(jq -nc --argjson verb "$verb" --argjson rc "$rc" '{verb: $verb, enabled: true, exit: $rc}') \
         || _lg_die "jq failed (verdict)"
     fi
     _lg_mark_emitted "$rc"
