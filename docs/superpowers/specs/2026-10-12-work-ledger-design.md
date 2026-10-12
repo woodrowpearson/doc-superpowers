@@ -73,7 +73,8 @@ There are no rows. A row's one-line "why it matters" moves to the issue (`summar
   "adapters": { "pr": null, "contracts": null },
   "state_watch": { "paths": [], "patterns": [] },
   "legacy": "docs/ledger/legacy.json",
-  "legacy_ids": []
+  "legacy_ids": [],
+  "legacy_ledgers": {}
 }
 ```
 
@@ -111,7 +112,7 @@ Every key has a default (shown); a minimal config is `{}`. `fields` values are a
 
 **Superseded / won't-fix / obsolete — testable, reason on the issue.** Superseded = a `closed`-class status + `superseded_by` + a non-empty resolution section; won't-fix = `wontfix`-class + resolution; obsolete = `closed` + resolution. `ledger validate` rejects a dangling `superseded_by`, a cycle, a chain that ends superseded, and a missing resolution on any closed/wontfix item it checks.
 
-**`docs/ledger/legacy.json`** (optional, written once by a host's migration and never edited): `{"<old-ledger>#<row>": {"key": "<key>"} | {"item": "<path>"} | {"archived": "<path>#<anchor>"}}` — an item without a key (terminal items need none) is referenced by path — so citations of a retired hand-written ledger keep resolving.
+**`docs/ledger/legacy.json`** (optional, written once by a host's migration and never edited; entries keyed `<legacy-id>#<row>`, where config `legacy_ledgers` maps a legacy id to its file, else the file stem minus a trailing `-ledger`): `{"<old-ledger>#<row>": {"key": "<key>"} | {"item": "<path>"} | {"archived": "<path>#<anchor>"}}` — an item without a key (terminal items need none) is referenced by path — so citations of a retired hand-written ledger keep resolving.
 
 ### C. `doc-tools.sh ledger` — the CLI
 
