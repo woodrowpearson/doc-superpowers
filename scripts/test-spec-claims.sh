@@ -2327,15 +2327,16 @@ test_render_deleted_doc_check_ok() {
   teardown
 }
 
-# evil_sidecar <doc>: a sidecar SPEC-EVIL-001.json whose doc is <doc>, its one
-# claim quoting the evil doc's sentence.
+# evil_sidecar <doc> [DOC-ID]: a sidecar <DOC-ID>.json (default SPEC-EVIL-001)
+# whose doc is <doc>, its one claim quoting the evil doc's sentence.
 evil_sidecar() {
-  jq -n --arg doc "$1" '{schema: 1, doc: $doc, claims: [{
-    id: "SPEC-EVIL-001#x", quote: "Evil sentence",
+  local id="${2:-SPEC-EVIL-001}"
+  jq -n --arg doc "$1" --arg id "$id#x" '{schema: 1, doc: $doc, claims: [{
+    id: $id, quote: "Evil sentence",
     states: "The evil doc says so.", kind: "behaviour", subject: ["src/auth/token.py"],
     status: "unbuilt", enforced_by: "test", test: null, nonvacuity: null, promotion: null,
     tracker: "docs/issues/token-ttl.md", frozen_at: null, restates: [], rulings: []}]}' \
-    > docs/spec-claims/SPEC-EVIL-001.json
+    > "docs/spec-claims/$id.json"
 }
 
 # A spec outside the work tree, beside it in the suite's scratch root: sets
@@ -2377,6 +2378,7 @@ test_render_unsafe_doc_skipped() {
   evil_outside
   evil_sidecar "$EVIL_REL"
   local h
+  assert_file_exists "$EVIL_REL" "precondition: the outside file is reachable at the sidecar's doc path"
   h=$(hash_file "$EVIL_DIR/SPEC-EVIL-001-x.md")
   cl render
   assert_eq "0" "$CL_RC" "render exits 0"
@@ -2459,6 +2461,79 @@ test_render_base_unused() {
   assert_eq "0" "$CL_RC" "render --check --base no-such-ref exits 0 on a clean tree"
   cl validate --all --base no-such-ref
   assert_eq "2" "$CL_RC" "precondition: validate (which ratchets) still exits 2"
+  teardown
+}
+
+# assert_symlink_doc_refused <doc> <outside-file> <what>: the SPEC-SYM-001
+# sidecar naming <doc> (which reaches <outside-file> through a link) is V1
+# under --all, render skips it as an unsafe path and leaves <outside-file>
+# byte-identical, and render --check raises no V11 for it.
+assert_symlink_doc_refused() {
+  local h
+  evil_sidecar "$1" SPEC-SYM-001
+  assert_file_exists "$1" "$3: precondition: the outside file is reachable at the doc path"
+  h=$(hash_file "$2")
+  cl validate --all
+  assert_v1 "not a safe repo path" "$3: --all"
+  assert_contains "$(v1_messages)" "docs/spec-claims/SPEC-SYM-001.json: doc $1" "$3: …naming the sidecar and the path"
+  assert_eq "0" "$(v2_count)" "$3: …no V2 (never read)"
+  cl render
+  assert_eq "0" "$CL_RC" "$3: render exits 0"
+  assert_json_field "$CL_OUT" "[.results[] | select(.doc == \"$1\")] | tojson" \
+    "[{\"doc\":\"$1\",\"skipped\":\"unsafe path\"}]" "$3: …reports skipped: unsafe path"
+  assert_eq "$h" "$(hash_file "$2")" "$3: …and the outside file is byte-identical"
+  cl render --check
+  assert_eq "0" "$(v11_count)" "$3: render --check raises no V11"
+}
+
+test_unsafe_symlinked_dir() {
+  echo "test: a doc reached through a committed symlinked directory is unsafe, never written"
+  claims_fixture
+  local out
+  out=$(mktemp -d "$SUITE_TMP/symout.XXXXXX")
+  printf '# SPEC-SYM-001\n\n## Summary\n\nEvil sentence.\n\n## Requirements\n\nNone.\n' > "$out/SPEC-SYM-001-x.md"
+  ln -s "$out" docs/specs/sym
+  git add docs/specs/sym && git commit -qm "a symlinked directory"
+  assert_symlink_doc_refused docs/specs/sym/SPEC-SYM-001-x.md "$out/SPEC-SYM-001-x.md" "symlinked directory"
+  # The index stores the link as a blob: through it the doc is simply absent.
+  git add docs/spec-claims/SPEC-SYM-001.json
+  cl validate --staged
+  assert_eq "1" "$CL_RC" "--staged: exits 1 (a finding, not an error)"
+  assert_contains "$(v1_messages)" "docs/specs/sym/SPEC-SYM-001-x.md is missing" "…the doc is missing in the index"
+  rm -rf "$out"
+  teardown
+}
+
+test_unsafe_symlinked_file() {
+  echo "test: a doc that is itself a symlink is unsafe, never written"
+  claims_fixture
+  local out
+  out=$(mktemp -d "$SUITE_TMP/symout.XXXXXX")
+  printf '# SPEC-SYM-001\n\n## Summary\n\nEvil sentence.\n\n## Requirements\n\nNone.\n' > "$out/SPEC-SYM-001-x.md"
+  ln -s "$out/SPEC-SYM-001-x.md" docs/specs/SPEC-SYM-001-x.md
+  assert_symlink_doc_refused docs/specs/SPEC-SYM-001-x.md "$out/SPEC-SYM-001-x.md" "symlinked file"
+  rm -rf "$out"
+  teardown
+}
+
+test_v11_indented_markers() {
+  echo "test: V11 — indented status markers (up to 3 spaces, trailing blanks) are markers"
+  claims_fixture
+  doc_edit "$DOC" "$BLOCK_BEGIN" "  $BLOCK_BEGIN"
+  doc_edit "$DOC" "$BLOCK_END" "   $BLOCK_END"$'\t '
+  # The quote copied into the indented block: blanked, so V2 sees one occurrence.
+  doc_edit "$DOC" "## Claim status" $'\nAccess tokens expire after 15 minutes.' after
+  cl validate --all
+  assert_eq "0" "$(v2_count)" "the quote inside the indented block: no V2 (the block is blanked)"
+  assert_json_field "$CL_OUT" '[.findings[].check] | unique | tojson' '["V11"]' "…the hand edit is V11's finding alone"
+  cl render
+  assert_eq "0" "$CL_RC" "render exits 0"
+  assert_eq "1" "$(grep -c "spec-claims:status:begin" "$DOC")" "…replaces the block in place, no duplicate"
+  assert_true "…restoring the rendered fixture byte for byte" git diff --quiet -- "$DOC"
+  # Four spaces is an indented code block, not a marker: text.
+  doc_edit "$DOC" "$BLOCK_BEGIN" "    $BLOCK_BEGIN"
+  cl render --check
+  assert_contains "$(v11_messages)" "not one begin/end pair" "a 4-space-indented begin marker is not a marker"
   teardown
 }
 
@@ -2581,6 +2656,9 @@ run_tests() {
   test_v11_inline_markers_are_text
   test_v11_malformed_markers
   test_render_base_unused
+  test_unsafe_symlinked_dir
+  test_unsafe_symlinked_file
+  test_v11_indented_markers
 
   print_summary
 }
