@@ -2574,7 +2574,8 @@ STUB_TEST="{\"runner\":\"stub\",\"node\":\"$STUB_NODE\"}"
 #                         [<TAB>reason]) when there is one, else checks
 #                         (node<TAB>file<TAB>needle): pass when <dir>/<file>
 #                         holds needle (grep -F), assert-fail when the file
-#                         lacks it, error when the file is missing; a node in
+#                         lacks it, error when the file is missing or holds
+#                         the text STUB_ERROR; a node in
 #                         neither file is not-found. A force outcome "noise"
 #                         prints its reason raw on stdout, then the node's
 #                         checks outcome. STUB_CAT=<path> first appends
@@ -2629,7 +2630,7 @@ case $sub in
         else
           file=${check%%"	"*}
           needle=${check#*"	"}
-          if [ ! -f "$root/$file" ]; then outcome=error
+          if [ ! -f "$root/$file" ] || grep -qF STUB_ERROR "$root/$file"; then outcome=error
           elif grep -qF -- "$needle" "$root/$file"; then outcome=pass
           else outcome=assert-fail; fi
         fi
@@ -4194,8 +4195,9 @@ test_promote_mutant_assert_fail_promotes() {
     "…one result row naming the claim, both outcomes and the digest"
   assert_contains "$(cat "$DOC")" "Claims: 1 built" "…and the doc's status block re-rendered"
   assert_eq "$(git rev-parse --show-toplevel)" "$(stub_roots | sed -n 1p)" "…the green run under the work tree"
-  assert_true "…the mutant run under another root" test "$(stub_roots | sed -n 2p)" != "$(git rev-parse --show-toplevel)"
-  assert_eq "2" "$(stub_roots | wc -l | tr -d ' ')" "…two run calls in all"
+  assert_true "…the clean-checkout run under another root" test "$(stub_roots | sed -n 2p)" != "$(git rev-parse --show-toplevel)"
+  assert_eq "$(stub_roots | sed -n 2p)" "$(stub_roots | sed -n 3p)" "…the mutant run under that same worktree"
+  assert_eq "3" "$(stub_roots | wc -l | tr -d ' ')" "…three run calls in all"
   assert_eq "TTL_SECONDS = 900" "$(cat src/auth/token.py)" "…the work tree's subject is untouched"
   cl validate --all
   assert_eq "0" "$CL_RC" "validate --all after the promote exits 0"
@@ -4220,15 +4222,35 @@ test_promote_mutant_stays_green_refused() {
 test_promote_mutant_error_refused() {
   echo "test: promote — a mutant run that errors is not an assertion failure"
   promote_fixture
+  # The mutant writes the stub's error marker into the checked file: under
+  # it the run errors (as a test would on a syntax error).
+  jset "$SIDECAR" '.claims[0].nonvacuity.mutant.replace = "STUB_ERROR"'
+  git commit -qam "a mutant under which the test errors"
+  cl promote "$TTL_ID"
+  assert_promote_finding "mutant error is not an assertion failure" "the mutant run gives error"
+  assert_eq '"unbuilt"' "$(claim_field "$TTL_ID" status)" "…the claim stays unbuilt"
+  assert_eq "3" "$(stub_roots | wc -l | tr -d ' ')" "…after the green, clean-checkout and mutant runs"
+  teardown
+}
+
+test_promote_requires_green_in_clean_checkout() {
+  echo "test: promote — the bound test must also pass unmutated in a clean checkout of HEAD"
+  promote_fixture
+  local before
   # The check reads an untracked build output: present in the work tree (so
-  # the green run passes), absent from the throwaway worktree at HEAD.
+  # the green run passes), absent from the throwaway worktree at HEAD, where
+  # a red under the mutant would prove nothing.
   mkdir -p build
   printf 'TTL_SECONDS = 900\n' > build/token.txt
   printf '%s\t%s\t%s\n' "$STUB_NODE" build/token.txt "TTL_SECONDS = 900" > tools/claims/checks
   git add tools/claims/checks && git commit -qm "check an untracked build output"
+  before=$(hash_file "$SIDECAR")
   cl promote "$TTL_ID"
-  assert_promote_finding "mutant error is not an assertion failure" "the mutant run gives error"
-  assert_eq '"unbuilt"' "$(claim_field "$TTL_ID" status)" "…the claim stays unbuilt"
+  assert_promote_finding "not green in a clean checkout" "green in the work tree only"
+  assert_eq "$before" "$(hash_file "$SIDECAR")" "…the sidecar unchanged (no promotion)"
+  assert_true "…no verdict stored" test ! -e "$(claims_store)"
+  assert_eq "2" "$(stub_roots | wc -l | tr -d ' ')" "…no mutant run"
+  assert_eq "1" "$(wt_count)" "…no worktree left"
   teardown
 }
 
@@ -4265,9 +4287,10 @@ test_promote_mutant_literal_safe() {
   exp=$(harness_mktemp exp-cat)
   got=$(harness_mktemp got-cat)
   printf 'head\n%s\ntail' "$line" > "$exp"
+  printf 'head\n%s\ntail' "$line" >> "$exp"
   printf 'head\n%s\ntail' "$repl" >> "$exp"
   cat "$STUB_LOG.cat" > "$got"
-  assert_true "…the adapter saw the subject at HEAD, then exactly find → replace (no byte added, none lost)" cmp -s "$exp" "$got"
+  assert_true "…the adapter saw the file (work tree, clean checkout), then exactly find → replace (no byte added, none lost)" cmp -s "$exp" "$got"
   assert_eq "$(printf 'head\n%s\ntail' "$line")" "$(cat src/auth/expr.py)" "…the work tree's file untouched"
   teardown
 }
@@ -4339,7 +4362,7 @@ test_promote_throwaway_worktree_removed() {
   printf 'x\n' > .git/spec-claims
   cl promote "$TTL_ID"
   assert_eq "2" "$CL_RC" "precondition: the store cannot be written (exit 2)"
-  assert_eq "2" "$(stub_roots | wc -l | tr -d ' ')" "…after both runs"
+  assert_eq "3" "$(stub_roots | wc -l | tr -d ' ')" "…after all three runs"
   assert_eq "1" "$(wt_count)" "after a failure: git worktree list has 1 line"
   assert_eq "" "$(ls -A .git/worktrees 2>/dev/null)" "…and no worktree metadata is left"
   assert_eq '"unbuilt"' "$(claim_field "$TTL_ID" status)" "…the sidecar unchanged"
@@ -4466,7 +4489,7 @@ test_promote_built_with_ok_verdict_refused() {
   git add "$SIDECAR" "$DOC" && git commit -qm "promote $TTL_ID"
   cl promote "$TTL_ID"
   assert_promote_finding "already promoted" "promote again"
-  assert_eq "2" "$(stub_roots | wc -l | tr -d ' ')" "…no run the second time"
+  assert_eq "3" "$(stub_roots | wc -l | tr -d ' ')" "…no run the second time"
   teardown
 }
 
@@ -4499,6 +4522,85 @@ test_repromote_after_doc_stale() {
   teardown
 }
 
+test_promote_mutant_not_utf8_refused() {
+  echo "test: promote — a mutant file that is not UTF-8 text is refused (jq would rewrite its bytes)"
+  promote_fixture
+  local before
+  printf 'TTL_SECONDS = 900\n# caf\351\n' > src/auth/token.py
+  git commit -qam "a Latin-1 byte in the subject"
+  before=$(hash_file "$SIDECAR")
+  cl promote "$TTL_ID"
+  assert_promote_finding "mutant file is not UTF-8 text" "a \\xe9 byte in the mutant file"
+  assert_eq "$before" "$(hash_file "$SIDECAR")" "…the sidecar unchanged"
+  assert_true "…no verdict stored" test ! -e "$(claims_store)"
+  assert_eq "2" "$(stub_roots | wc -l | tr -d ' ')" "…no mutant run"
+  teardown
+}
+
+test_promote_mutant_is_test_file_refused() {
+  echo "test: promote — mutating the bound test's own file is no proof"
+  promote_fixture
+  jset "$SIDECAR" '.claims[0].nonvacuity.mutant.file = "tests/test_token.py"'
+  git commit -qam "a mutant of the test file (the node's path)"
+  cl promote "$TTL_ID"
+  assert_promote_finding "the bound test's own file" "mutant.file = the node's file"
+  jset "$SIDECAR" '.claims[0].test.file = "tests/ttl_check.py" | .claims[0].nonvacuity.mutant.file = "tests/ttl_check.py"'
+  git commit -qam "a mutant of the test file (test.file)"
+  cl promote "$TTL_ID"
+  assert_promote_finding "the bound test's own file" "mutant.file = test.file"
+  assert_eq "0" "$(stub_roots | wc -l | tr -d ' ')" "…refused before any run"
+  teardown
+}
+
+test_v3_mutant_is_test_file() {
+  echo "test: V3 — a built claim's mutant.file must not be its bound test's own file"
+  claims_fixture
+  stub_runner
+  run_built
+  cl validate --all
+  assert_v3_ok "precondition: the mutant on the subject"
+  mkdir -p tests
+  printf 'assert TTL_SECONDS == 900\n' > tests/test_token.py
+  jset "$SIDECAR" '.claims[0].nonvacuity.mutant = {file: "tests/test_token.py", find: "900", replace: "1800"}'
+  cl validate --all
+  assert_v3 "the bound test's own file" "mutant.file = the node's file"
+  teardown
+}
+
+test_promote_mutant_file_absent_or_observed_red() {
+  echo "test: promote — a mutant file absent at HEAD, an observed_red-only proof"
+  promote_fixture
+  jset "$SIDECAR" '.claims[0].nonvacuity.mutant.file = "src/auth/missing.py"'
+  git commit -qam "a mutant file that does not exist"
+  cl promote "$TTL_ID"
+  assert_promote_finding "is not a file at HEAD" "mutant.file absent at HEAD"
+  assert_contains "$(promote_messages)" "src/auth/missing.py" "…naming the path"
+  jset "$SIDECAR" ".claims[0].nonvacuity = {\"observed_red\": \"$(git rev-parse HEAD)\"}"
+  git commit -qam "an observed_red proof"
+  cl promote "$TTL_ID"
+  assert_promote_finding "observed_red" "an observed_red-only proof"
+  teardown
+}
+
+test_promote_built_missing_verdict_repromotes() {
+  echo "test: promote — a built claim whose verdict is missing (another clone's) is re-proved"
+  promote_fixture
+  local old new
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "the promote exits 0"
+  old=$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")
+  git add "$SIDECAR" "$DOC" && git commit -qm "promote $TTL_ID"
+  rm -f "$(claims_store)/$old.json"
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "built, the verdict missing: promote exits 0"
+  new=$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")
+  assert_true "…a new promotion.verdict_sha256" test "$new" != "$old"
+  assert_eq "$(git rev-parse HEAD)" "$(jq -r '.claims[0].promotion.at' "$SIDECAR")" "…promotion.at the current HEAD"
+  assert_file_exists "$(claims_store)/$new.json" "…its verdict stored"
+  assert_json_field "$CL_OUT" '.results[0].status_from' "built" "…status_from built"
+  teardown
+}
+
 # _claims_mutate itself, through a probe: literal and exactly once, the
 # file's bytes kept (trailing newlines included), an empty file 0 matches.
 test_mutate_exactly_once_bytes_kept() {
@@ -4520,6 +4622,11 @@ test_mutate_exactly_once_bytes_kept() {
   : > "$f"
   out=$(CL_PROBE_FILE=$f CL_PROBE_FIND=x CL_PROBE_REPL=y "$probe" claims render </dev/null 2>/dev/null) || out="rc $?: $out"
   assert_eq "refused: find matches 0 times" "$out" "an empty file: find matches 0 times"
+  printf 'b\n\351\n' > "$f"
+  cp "$f" "$exp"
+  out=$(CL_PROBE_FILE=$f CL_PROBE_FIND=b CL_PROBE_REPL=c "$probe" claims render </dev/null 2>/dev/null) || out="rc $?: $out"
+  assert_eq "refused: not UTF-8 text" "$out" "a file jq would not read back unchanged: refused"
+  assert_true "…the file unchanged" cmp -s "$exp" "$f"
   teardown
 }
 
@@ -4713,6 +4820,12 @@ run_tests() {
   test_promote_mutant_assert_fail_promotes
   test_promote_mutant_stays_green_refused
   test_promote_mutant_error_refused
+  test_promote_requires_green_in_clean_checkout
+  test_promote_mutant_not_utf8_refused
+  test_promote_mutant_is_test_file_refused
+  test_v3_mutant_is_test_file
+  test_promote_mutant_file_absent_or_observed_red
+  test_promote_built_missing_verdict_repromotes
   test_promote_mutant_find_not_unique_refused
   test_promote_mutant_literal_safe
   test_mutate_exactly_once_bytes_kept
