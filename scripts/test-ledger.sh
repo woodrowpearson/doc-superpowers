@@ -1066,6 +1066,286 @@ test_lg_field_candidates() {
   teardown
 }
 
+# --- Task 3: registry, globs, validate --registry ------------------------------
+
+# The glob table: "<glob>|<path>|<1 match, 0 not>".
+LG_GLOB_CASES='src/**/x.js|src/x.js|1
+src/**/x.js|src/a/b/x.js|1
+src/**/x.js|srcx.js|0
+src/**/x.js|src/a/x.jsx|0
+src/**/x.js|x.js|0
+**/x.js|x.js|1
+**/x.js|a/b/x.js|1
+**/x.js|ax.js|0
+src/**|src/a|1
+src/**|src/a/b|1
+src/**|srcx/a|0
+*.md|a.md|1
+*.md|d/a.md|0
+docs/*/a.md|docs/x/a.md|1
+docs/*/a.md|docs/x/y/a.md|0
+a?c|abc|1
+a?c|a/c|0
+a?c|ac|0
+{a,b}/x|a/x|1
+{a,b}/x|b/x|1
+{a,b}/x|c/x|0
+{a,b}/x|ab/x|0
+x/{p/**,q*}|x/p/z/w|1
+x/{p/**,q*}|x/qq|1
+x/{p/**,q*}|x/r|0
+x/{p/**,q*}|x/q/r|0
+{a,{b,c}d}|a|1
+{a,{b,c}d}|cd|1
+{a,{b,c}d}|b|0
+s/{x,**/y}.z|s/k/l/y.z|1
+my dir/*.txt|my dir/f g.txt|1
+my dir/*.txt|my dirx/f.txt|0
+a.b|a.b|1
+a.b|axb|0
+f(1)+[x]$^,|f(1)+[x]$^,|1
+f(1)+[x]$^,|f1x|0
+a\*b|a*b|1
+a\*b|axb|0
+ü/*.md|ü/x y.md|1'
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_glob_ere_cases() {
+  local g p want re got
+  while IFS='|' read -r g p want; do
+    re=$(_lg_glob_ere "$g")
+    # The engine the ledger matches with: awk in the C locale.
+    got=$(LC_ALL=C awk -v re="${re//\\/\\\\}" -v p="$p" 'BEGIN { print (p ~ re) ? 1 : 0 }')
+    assert_eq "$want" "$got" "glob '$g' vs '$p' (ERE $re)"
+  done <<<"$LG_GLOB_CASES"
+  assert_eq '^src/(.*/)?x[.]js$' "$(_lg_glob_ere 'src/**/x.js')" "the ERE of src/**/x.js"
+  lg_rc _lg_glob_ere 'a{b'
+  assert_eq "2" "$LG_RC" "an unbalanced { is refused (rc 2)"
+  lg_rc _lg_glob_ere 'a}b'
+  assert_eq "2" "$LG_RC" "an unbalanced } is refused (rc 2)"
+}
+
+test_lg_glob_ere_cases() {
+  echo "test: glob → ERE: **/, **, *, ?, {a,b}, escapes, a space and unicode"
+  lg_fixture
+  lg_enable
+  lg_in lg_t_glob_ere_cases
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_item_paths_brace() {
+  local paths="$_SCRATCH/t.paths"
+  _lg_item_paths worktree "$paths"
+  assert_eq "docs/bugs/b.md|docs/issues/a.md|" "$(lg_names "$paths" | LC_ALL=C sort | tr '\n' '|')" \
+    "a brace item glob picks both directories, nothing else"
+  _lg_item_paths HEAD "$paths"
+  assert_eq "docs/issues/a.md|" "$(lg_names "$paths" | tr '\n' '|')" "…and at a commit"
+}
+
+test_lg_item_paths_brace_glob() {
+  echo "test: item globs share the registry grammar ({a,b})"
+  lg_fixture
+  lg_enable '{"items":{"globs":["docs/{issues,bugs}/*.md"]}}'
+  mkdir -p docs/bugs docs/notes
+  printf -- '---\nkey: x-1\n---\n' > docs/issues/a.md
+  printf -- '# n\n' > docs/notes/n.md
+  git add -A && git commit -qm a
+  printf -- '---\nkey: x-2\n---\n' > docs/bugs/b.md
+  lg_in lg_t_item_paths_brace
+  teardown
+}
+
+# lg_registry <json>: write docs/ledger/ledgers.json.
+lg_registry() {
+  printf '%s\n' "$1" > docs/ledger/ledgers.json
+}
+
+# lg_files <path>...: create and commit files (a space in a name is fine).
+lg_files() {
+  local f
+  for f in "$@"; do
+    mkdir -p "$(dirname "$f")"
+    printf 'x\n' > "$f"
+  done
+  git add -A && git commit -qm files
+}
+
+# The classes of a validate JSON verdict's findings, sorted, "|"-joined.
+lg_classes() {
+  jq -r '[.findings[].class] | sort | join("|")' <<<"$1" 2>/dev/null || echo invalid
+}
+
+LG_REG_CLEAN='{"schema":"ledger-registry/1","ledgers":[
+  {"id":"app","title":"App","kind":"service","status":"active","paths":["src/app/**"],
+   "contracts":[{"id":"field:order.total","defined_in":["src/app/model.*"]}]},
+  {"id":"core","title":"Core","kind":"platform","status":"retired","paths":["src/core/**","*.json"],
+   "residual_paths":["src/**"],"contracts":[{"id":"component:Core Sheet x"}]}]}'
+
+test_lg_registry_valid_clean() {
+  echo "test: validate --registry: a clean registry exits 0 with no findings; absent; invalid → 2"
+  lg_fixture
+  lg_enable
+  lg_files src/app/model.ts "src/core/a b.ts" src/x.ts docs/readme.md
+  # No registry: nothing declared, nothing to report.
+  lg validate --registry --format json
+  assert_eq "0" "$LG_RC" "no ledgers.json: exit 0"
+  assert_json_field "$LG_OUT" '.findings | length' "0" "no ledgers.json: no findings"
+  assert_json_field "$LG_OUT" '.verb' "ledger validate" ".verb"
+  lg_registry "${LG_REG_CLEAN/Core Sheet x/CoreSheet}"
+  lg validate --registry --format json
+  assert_eq "0" "$LG_RC" "a clean registry exits 0"
+  assert_eq "1" "$(json_count "$LG_OUT")" "one object"
+  assert_json_field "$LG_OUT" '.findings | length' "0" "no findings (residual src/** owns src/x.ts; docs/ is exempt; docs/ledger/*.json is claimed by nobody but exempt)"
+  lg validate --registry
+  assert_eq "0" "$LG_RC" "text mode: exit 0"
+  assert_eq "" "$LG_OUT" "text mode: nothing printed when clean"
+  printf '{"ledgers": [' > docs/ledger/ledgers.json
+  lg validate --registry --format json
+  assert_eq "2" "$LG_RC" "invalid JSON in ledgers.json: could not run (2)"
+  assert_contains "$(jq -r .error <<<"$LG_OUT")" "ledgers.json" "the error names the file"
+  lg_registry '{"schema":"ledger-registry/1","ledgers":["app"]}'
+  lg validate --registry
+  assert_eq "2" "$LG_RC" "a ledger that is not an object: could not run (2)"
+  lg validate --format json
+  assert_eq "3" "$LG_RC" "validate without a mode is a usage error"
+  lg validate --registry stray
+  assert_eq "3" "$LG_RC" "a stray argument is a usage error"
+  teardown
+}
+
+test_lg_registry_duplicate_id() {
+  echo "test: validate --registry: bad and duplicate ledger ids"
+  lg_fixture
+  lg_enable
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[
+    {"id":"app","kind":"service","status":"active"},
+    {"id":"app","kind":"service","status":"active"},
+    {"id":"Bad_Id","kind":"service","status":"active"},
+    {"id":"unassigned","kind":"service","status":"active"},
+    {"kind":"service","status":"active"}]}'
+  lg validate --registry --format json
+  assert_eq "1" "$LG_RC" "findings exit 1"
+  assert_eq "duplicate-id|id|id|id" "$(lg_classes "$LG_OUT")" "one duplicate-id; three bad ids (case, reserved, missing)"
+  assert_contains "$(jq -r '.findings[] | select(.class == "duplicate-id") | .detail' <<<"$LG_OUT")" "app" "the duplicate names the id"
+  lg validate --registry
+  assert_eq "1" "$LG_RC" "text mode: exit 1"
+  assert_contains "$LG_OUT" "registry duplicate-id app" "text: registry <class> <detail>"
+  assert_eq "4" "$(grep -c '^registry ' <<<"$LG_OUT")" "text: one line per finding"
+  teardown
+}
+
+test_lg_registry_bad_status() {
+  echo "test: validate --registry: schema, status, kind, shape, glob findings"
+  lg_fixture
+  lg_enable
+  lg_registry '{"schema":"ledger-registry/2","ledgers":[
+    {"id":"app","kind":"service","status":"draft"},
+    {"id":"web","kind":"team","status":"active","paths":"src/**"},
+    {"id":"ops","kind":"platform","status":"retired","paths":["ops/{a,b"]}]}'
+  lg validate --registry --format json
+  assert_eq "1" "$LG_RC" "findings exit 1"
+  assert_eq "glob|kind|schema|shape|status|unowned" "$(lg_classes "$LG_OUT")" "schema, status, kind, shape (paths a string), glob (unbalanced {); src/index.js unowned"
+  assert_contains "$(jq -r '.findings[] | select(.class == "status") | .detail' <<<"$LG_OUT")" '"draft"' "the status finding quotes the value"
+  teardown
+}
+
+test_lg_registry_contract_dup() {
+  echo "test: validate --registry: bad and duplicate contract ids"
+  lg_fixture
+  lg_enable
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[
+    {"id":"app","kind":"service","status":"active","contracts":[{"id":"field:order.total"},{"id":"nocolon"}]},
+    {"id":"web","kind":"service","status":"active","contracts":[{"id":"field:order.total"},{"id":"spec:SPEC 1"}]}]}'
+  lg validate --registry --format json
+  assert_eq "1" "$LG_RC" "findings exit 1"
+  assert_eq "contract-id|contract-id|duplicate-contract" "$(lg_classes "$LG_OUT")" "two bad contract ids, one duplicate"
+  assert_eq "field:order.total is declared by app, web" \
+    "$(jq -r '.findings[] | select(.class == "duplicate-contract") | .detail' <<<"$LG_OUT")" "the duplicate names both ledgers"
+  teardown
+}
+
+test_lg_registry_overlap() {
+  echo "test: validate --registry: a tracked file claimed by two ledgers"
+  lg_fixture
+  lg_enable
+  lg_files "src/a b.ts" src/only.ts
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[
+    {"id":"app","kind":"service","status":"active","paths":["src/**"]},
+    {"id":"web","kind":"service","status":"active","paths":["src/a*"]}]}'
+  lg validate --registry --format json
+  assert_eq "1" "$LG_RC" "overlap exits 1"
+  assert_eq "overlap" "$(lg_classes "$LG_OUT")" "one overlap (src/only.ts has one owner)"
+  lg validate --registry
+  assert_eq "registry overlap src/a b.ts is claimed by app, web" "$LG_OUT" "the exact text line"
+  teardown
+}
+
+test_lg_registry_unowned() {
+  echo "test: validate --registry: tracked files outside docs/ owned by none, once paths are declared"
+  lg_fixture
+  lg_enable
+  lg_files src/a.ts lib/z.ts docs/readme.md README
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[{"id":"app","kind":"service","status":"active"}]}'
+  lg validate --registry --format json
+  assert_eq "0" "$LG_RC" "no ledger declares paths: unowned is not checked"
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[{"id":"app","kind":"service","status":"active","paths":["src/**"]}]}'
+  lg validate --registry --format json
+  assert_eq "1" "$LG_RC" "unowned files exit 1"
+  assert_eq "README|lib/z.ts" "$(jq -r '[.findings[] | select(.class == "unowned") | .detail] | join("|")' <<<"$LG_OUT")" \
+    "README and lib/z.ts; docs/ files are exempt (docs/ledger/*.json too)"
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_owner_map_residual() {
+  local paths="$_SCRATCH/t.paths" map="$_SCRATCH/t.tsv"
+  git ls-files -z > "$paths"
+  _lg_owner_map "$paths" "$map"
+  assert_eq "docs/architecture.md	-|docs/ledger/config.json	-|docs/ledger/ledgers.json	-|lib/k.ts	multi:app,web|src/b/x y.ts	web|src/c.ts	app|src/index.js	app|" \
+    "$(tr '\n' '|' < "$map")" "ordinary paths win over residual; two residual claims are multi; none is -"
+}
+
+test_lg_registry_residual() {
+  echo "test: residual_paths claim only files no ordinary glob claims"
+  lg_fixture
+  lg_enable
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[
+    {"id":"app","kind":"service","status":"active","paths":[],"residual_paths":["src/**","lib/**"]},
+    {"id":"web","kind":"service","status":"active","paths":["src/b/**"],"residual_paths":["lib/**"]}]}'
+  lg_files "src/b/x y.ts" src/c.ts lib/k.ts
+  lg_in lg_t_owner_map_residual
+  lg validate --registry --format json
+  assert_eq "1" "$LG_RC" "two residual claims are an overlap"
+  assert_eq "lib/k.ts is claimed by app, web" "$(jq -r '[.findings[].detail] | join("|")' <<<"$LG_OUT")" \
+    "only lib/k.ts: src/b/x y.ts goes to web's ordinary glob, not app's residual"
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_owner_map_exclusion() {
+  local paths="$_SCRATCH/t.paths" map="$_SCRATCH/t.tsv"
+  lg_nul_list "$paths" src/gen/g.ts src/a.ts lib/v/w.ts lib/u.ts
+  _lg_owner_map "$paths" "$map"
+  assert_eq "src/gen/g.ts	gen|src/a.ts	app|lib/v/w.ts	gen|lib/u.ts	app|" "$(tr '\n' '|' < "$map")" \
+    "a !glob removes the path from its own ledger only (ordinary and residual)"
+}
+
+test_lg_registry_exclusion() {
+  echo "test: a !glob excludes within its own ledger"
+  lg_fixture
+  lg_enable
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[
+    {"id":"app","kind":"service","status":"active","paths":["src/**","!src/gen/**"],"residual_paths":["lib/**","!lib/v/**"]},
+    {"id":"gen","kind":"platform","status":"active","paths":["src/gen/**"],"residual_paths":["lib/v/**"]}]}'
+  lg_files src/gen/g.ts src/a.ts lib/v/w.ts lib/u.ts
+  lg_in lg_t_owner_map_exclusion
+  lg validate --registry --format json
+  assert_eq "0" "$LG_RC" "no overlap, nothing unowned"
+  assert_json_field "$LG_OUT" '.findings | length' "0" "no findings"
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -1115,6 +1395,18 @@ run_tests() {
   test_lg_parse_cache_reuse_by_content
   test_lg_parse_blobs_odd_entries
   test_lg_field_candidates
+
+  # --- Task 3: registry, globs, validate --registry ---
+  test_lg_glob_ere_cases
+  test_lg_item_paths_brace_glob
+  test_lg_registry_valid_clean
+  test_lg_registry_duplicate_id
+  test_lg_registry_bad_status
+  test_lg_registry_contract_dup
+  test_lg_registry_overlap
+  test_lg_registry_unowned
+  test_lg_registry_residual
+  test_lg_registry_exclusion
 
   print_summary
 }
