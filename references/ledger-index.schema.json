@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/woodrowpearson/doc-superpowers/references/ledger-index.schema.json",
+  "title": "doc-superpowers work-ledger index (ledger-index/1)",
+  "description": "The derived, cached join that `doc-tools.sh ledger` verbs read (scripts/ledger/index.sh). Never committed. Keys appear in the order listed in `required`.",
+  "type": "object",
+  "required": ["schema", "built", "ledgers", "items", "legacy", "finalized"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "ledger-index/1" },
+    "built": {
+      "type": "object",
+      "required": ["head", "base", "inputs_hash", "mode", "rev", "registry_findings"],
+      "additionalProperties": false,
+      "properties": {
+        "head": { "type": ["string", "null"], "description": "HEAD's commit id; null on an unborn branch." },
+        "base": { "type": ["string", "null"], "description": "The commit id config `base` names; null when it does not resolve." },
+        "inputs_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "The cache key: the file is index-<hex>.json." },
+        "mode": { "enum": ["worktree", "staged", "rev"] },
+        "rev": { "type": ["string", "null"], "description": "The commit id of --rev; null otherwise." },
+        "registry_findings": { "type": "integer", "minimum": 0, "description": "Structural `validate --registry` findings of the registry used (ownership checks excluded); the index uses the registry regardless." }
+      }
+    },
+    "ledgers": { "type": "array", "items": { "type": "object" }, "description": "The registry's ledgers, as written." },
+    "items": { "type": "array", "items": { "$ref": "#/$defs/item" }, "description": "Sorted by path." },
+    "legacy": { "type": "object", "description": "The legacy map (config `legacy`), {} when absent." },
+    "finalized": { "type": "object", "description": "docs/ledger/finalized.json, {} when absent." }
+  },
+  "$defs": {
+    "strOrNull": { "type": ["string", "null"] },
+    "strList": { "type": "array", "items": { "type": "string" } },
+    "item": {
+      "type": "object",
+      "required": ["path", "archived", "key", "ledger", "status", "class", "severity", "date", "summary", "changes", "consumes", "relates", "superseded_by", "owed", "aliases", "paths", "h1", "first_para", "resolution", "docs", "derived", "pr", "inflight", "neighbours", "recheck_after", "fm_errors"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string" },
+        "archived": { "type": "boolean", "description": "The path matches items.archive_globs." },
+        "key": { "$ref": "#/$defs/strOrNull" },
+        "ledger": { "$ref": "#/$defs/strOrNull" },
+        "status": { "$ref": "#/$defs/strOrNull", "description": "The status field as written." },
+        "class": { "enum": ["open", "fixed", "closed", "wontfix", "unknown"], "description": "Case-insensitive leading-word match of status against config `status`." },
+        "severity": { "$ref": "#/$defs/strOrNull" },
+        "date": { "type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "fields.date, else git's first-add date (renames chained), else the file's mtime (UTC) when uncommitted." },
+        "summary": { "$ref": "#/$defs/strOrNull" },
+        "changes": { "$ref": "#/$defs/strList" },
+        "consumes": { "$ref": "#/$defs/strList" },
+        "relates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "key"],
+            "additionalProperties": false,
+            "properties": { "kind": { "$ref": "#/$defs/strOrNull" }, "key": { "type": "string" } }
+          }
+        },
+        "superseded_by": { "$ref": "#/$defs/strOrNull" },
+        "owed": { "$ref": "#/$defs/strOrNull" },
+        "aliases": { "$ref": "#/$defs/strList" },
+        "paths": { "$ref": "#/$defs/strList" },
+        "h1": { "$ref": "#/$defs/strOrNull" },
+        "first_para": { "$ref": "#/$defs/strOrNull" },
+        "resolution": { "$ref": "#/$defs/strOrNull" },
+        "docs": {
+          "type": "object",
+          "required": ["spec", "plan", "handoff"],
+          "additionalProperties": false,
+          "properties": {
+            "spec": { "$ref": "#/$defs/strList" },
+            "plan": { "$ref": "#/$defs/strList" },
+            "handoff": { "$ref": "#/$defs/strList" }
+          }
+        },
+        "derived": {
+          "type": "object",
+          "required": ["status", "detail"],
+          "additionalProperties": false,
+          "description": "Design §E.1, first match wins. Shown as: superseded → <detail> · won't fix · closed · shipped · merged · owed: <detail> · in review #<detail> · on branch <detail> · planned (<detail> = the plan) · spec'd (<detail> = the spec) · not started.",
+          "properties": {
+            "status": { "enum": ["superseded", "won't fix", "closed", "shipped", "merged", "in review", "on branch", "planned", "spec'd", "not started"] },
+            "detail": { "$ref": "#/$defs/strOrNull" }
+          }
+        },
+        "pr": { "description": "PR adapter data (Task 10); null until then." },
+        "inflight": { "type": "array", "description": "In-flight branch claims (Task 11)." },
+        "neighbours": { "description": "Related work (Task 9); null until computed." },
+        "recheck_after": { "type": "array" },
+        "fm_errors": { "$ref": "#/$defs/strList" }
+      }
+    }
+  }
+}

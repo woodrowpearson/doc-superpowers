@@ -1394,6 +1394,582 @@ test_lg_registry_retired_owns_nothing() {
   teardown
 }
 
+# --- Task 4: the index — joins, dates, derived status, caches --------------------
+
+# lg_commit_at <YYYY-MM-DD> <message>: commit everything (git add -A) with that
+# author and committer date (noon, local time).
+lg_commit_at() {
+  git add -A
+  GIT_AUTHOR_DATE="$1T12:00:00" GIT_COMMITTER_DATE="$1T12:00:00" git commit -qm "$2"
+}
+
+# lg_doc_index <json>: write docs/.doc-index.json.
+lg_doc_index() {
+  printf '%s\n' "$1" > docs/.doc-index.json
+}
+
+# lg_item <file> <frontmatter lines…>: an item file with that frontmatter
+# (one argument per line) and a "# <stem>" heading.
+lg_item() {
+  local f="$1" stem
+  shift
+  mkdir -p "$(dirname "$f")"
+  stem=$(basename "$f" .md)
+  { printf -- '---\n'; printf '%s\n' "$@"; printf -- '---\n# %s\n' "$stem"; } > "$f"
+}
+
+# lg_ix_item <index-file> <path>: the item with that path, compact.
+lg_ix_item() {
+  jq -c --arg p "$2" '.items[] | select(.path == $p)' "$1"
+}
+
+LG_SCHEMA="$REPO_DIR/references/ledger-index.schema.json"
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_fields() {
+  local ix it
+  ix=$(_lg_index)
+  assert_true "the index file exists under the cache dir" test -f "$ix"
+  assert_contains "$ix" "$_LG_CACHE/index-" "named index-<hash>.json in \$_LG_CACHE"
+  assert_json_field "$(cat "$ix")" 'keys_unsorted | join(",")' "schema,built,ledgers,items,legacy,finalized" "top-level keys, in order"
+  assert_json_field "$(cat "$ix")" '.schema' "ledger-index/1" "schema"
+  assert_json_field "$(cat "$ix")" '.built.head' "$(git rev-parse HEAD)" "built.head is HEAD"
+  assert_json_field "$(cat "$ix")" '.built.base' "null" "built.base: no origin/main here → null"
+  assert_json_field "$(cat "$ix")" '.built.mode' "worktree" "built.mode"
+  assert_json_field "$(cat "$ix")" '.built.inputs_hash | test("^sha256:[0-9a-f]{64}$")' "true" "built.inputs_hash"
+  assert_json_field "$(cat "$ix")" '.built.registry_findings' "0" "built.registry_findings: a clean registry"
+  assert_json_field "$(cat "$ix")" '.ledgers | map(.id) | join(",")' "app" "ledgers: the registry's"
+  assert_json_field "$(cat "$ix")" '[.legacy, .finalized] | tojson' '[{},{}]' "legacy and finalized: {} when absent"
+  assert_json_field "$(cat "$ix")" '.items | map(.path) | join("|")' \
+    "docs/issues/a.md|docs/issues/b.md|docs/issues/c.md|docs/issues/d.md|docs/issues/e.md|docs/issues/f.md|docs/issues/g.md|docs/issues/h.md" \
+    "items sorted by path"
+  it=$(lg_ix_item "$ix" docs/issues/a.md)
+  assert_json_field "$it" 'keys_unsorted | join(",")' \
+    "path,archived,key,ledger,status,class,severity,date,summary,changes,consumes,relates,superseded_by,owed,aliases,paths,h1,first_para,resolution,docs,derived,pr,inflight,neighbours,recheck_after,fm_errors" \
+    "an item's keys, in the brief's order"
+  assert_json_field "$it" 'keys_unsorted | join(",")' "$(jq -r '."$defs".item.required | join(",")' "$LG_SCHEMA")" \
+    "the schema's item.required lists the same keys"
+  assert_json_field "$(cat "$ix")" 'keys_unsorted | join(",")' "$(jq -r '.required | join(",")' "$LG_SCHEMA")" \
+    "the schema's top-level required lists the same keys"
+  assert_json_field "$it" '[.key, .ledger, .status, .class, .severity] | join("|")' "app-1|app|Open|open|P1" "open P1 with a key"
+  assert_json_field "$it" '.summary' "Totals are wrong when the cart is edited" "summary"
+  assert_json_field "$it" '[.changes, .consumes, .relates, .aliases, .paths] | tojson' \
+    '[["field:order.total"],[],[{"kind":"root-cause","key":"app-2"},{"kind":"sibling","key":"app-3"}],[],["src/a.js"]]' \
+    "list fields (paths via the related-files candidate)"
+  assert_json_field "$it" '[.superseded_by, .owed, .resolution, .pr, .neighbours] | tojson' '[null,null,null,null,null]' "absent scalars are null"
+  assert_json_field "$it" '[.inflight, .recheck_after, .fm_errors] | tojson' '[[],[],[]]' "empty lists"
+  assert_json_field "$it" '.docs | tojson' '{"spec":[],"plan":[],"handoff":[]}' "docs: no links"
+  assert_json_field "$it" '.derived | tojson' '{"status":"not started","detail":null}' "open, no docs → not started"
+  assert_json_field "$it" '[.h1, .first_para, .archived] | tojson' '["a","Body text.",false]' "h1, first_para, archived"
+  it=$(lg_ix_item "$ix" docs/issues/b.md)
+  assert_json_field "$it" '[.class, .owed, .severity] | join("|")' "fixed|deploy|P2" "fixed + owed (severity via priority)"
+  assert_json_field "$it" '.derived | tojson' '{"status":"merged","detail":"deploy"}' "fixed + owed → merged · owed"
+  it=$(lg_ix_item "$ix" docs/issues/c.md)
+  assert_json_field "$it" '[.class, .superseded_by, .resolution] | join("|")' "closed|app-1|Replaced by app-1." "closed + superseded_by + resolution"
+  assert_json_field "$it" '.derived | tojson' '{"status":"superseded","detail":"app-1"}' "→ superseded → app-1"
+  it=$(lg_ix_item "$ix" docs/issues/d.md)
+  assert_json_field "$it" '[.key, .ledger, .class] | tojson' '[null,"unassigned","open"]' "unassigned without a key"
+  assert_json_field "$it" '.derived.status' "not started" "…not started"
+  it=$(lg_ix_item "$ix" docs/issues/e.md)
+  assert_json_field "$it" '[.class, .derived.status, .derived.detail] | tojson' '["fixed","shipped",null]' "fixed, nothing owed → shipped"
+  it=$(lg_ix_item "$ix" docs/issues/f.md)
+  assert_json_field "$it" '[.class, .derived.status] | tojson' "[\"wontfix\",\"won't fix\"]" "won't fix"
+  it=$(lg_ix_item "$ix" docs/issues/g.md)
+  assert_json_field "$it" '[.status, .class, .derived.status] | tojson' '["Banana","unknown","not started"]' "an unknown status word → unknown"
+  it=$(lg_ix_item "$ix" docs/issues/h.md)
+  assert_json_field "$it" '[.status, .class] | tojson' '[null,"unknown"]' "no status → unknown"
+  assert_json_field "$it" '.fm_errors | length' "1" "a frontmatter error is carried, not fatal"
+}
+
+test_lg_index_fields() {
+  echo "test: _lg_index — fields, classes and derived status of each item kind; the schema's keys"
+  lg_fixture
+  lg_enable
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[{"id":"app","title":"App","kind":"service","status":"active"}]}'
+  lg_item docs/issues/a.md "key: app-1" "ledger: app" "status: Open" "severity: P1" \
+    "summary: Totals are wrong when the cart is edited" "changes: [field:order.total]" \
+    "relates: [root-cause:app-2, sibling:app-3]" "related-files:" "  - src/a.js"
+  printf '\nBody text.\n' >> docs/issues/a.md
+  lg_item docs/issues/b.md "key: app-2" "ledger: app" "status: Fixed" "priority: P2" "owed: deploy"
+  lg_item docs/issues/c.md "key: app-3" "ledger: app" "status: Closed" "superseded_by: app-1"
+  printf '\n## Resolution\n\nReplaced by app-1.\n' >> docs/issues/c.md
+  lg_item docs/issues/d.md "ledger: unassigned" "status: In progress" "summary: Somewhere"
+  lg_item docs/issues/e.md "key: app-4" "ledger: app" "status: Fixed"
+  lg_item docs/issues/f.md "key: app-5" "ledger: app" "status: won't fix"
+  lg_item docs/issues/g.md "key: app-6" "ledger: app" "status: Banana"
+  lg_item docs/issues/h.md "key: app-7" "nested:" "  a: b"
+  git add -A && git commit -qm items
+  lg_in lg_t_index_fields
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_status_classes() {
+  local ix
+  ix=$(_lg_index)
+  assert_json_field "$(cat "$ix")" '[.items[] | "\(.path | ltrimstr("docs/issues/") | rtrimstr(".md"))=\(.class)"] | join(" ")' \
+    "a=fixed b=fixed c=wontfix d=open e=unknown f=wontfix g=closed h=open i=fixed" \
+    "leading words, any case: RESOLVED, Resolved —, Won’t Fix, In Progress (…), fixedness, Not Planned, Obsolete, open, \`Done\`"
+  # The host's vocabulary replaces a class's list.
+  lg_enable '{"status":{"open":["active"]}}'
+  _lg_init ls
+  ix=$(_lg_index)
+  assert_json_field "$(cat "$ix")" '[.items[] | select(.path | test("/[dh][.]md$")) | .class] | join(",")' "unknown,unknown" \
+    "a host open list without 'open'/'in progress': those values are unknown"
+  lg_item docs/issues/j.md "status: Active"
+  ix=$(_lg_index)
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/j.md)" '.class' "open" "…and its own word is open"
+}
+
+test_lg_index_status_classes_case() {
+  echo "test: _lg_index — status classes by case-insensitive leading-word match"
+  lg_fixture
+  lg_enable
+  lg_item docs/issues/a.md "status: RESOLVED"
+  lg_item docs/issues/b.md "status: Resolved — 2026-10-01"
+  lg_item docs/issues/c.md "status: Won’t Fix"
+  lg_item docs/issues/d.md "status: In Progress (blocked)"
+  lg_item docs/issues/e.md "status: fixedness"
+  lg_item docs/issues/f.md "status: Not Planned"
+  lg_item docs/issues/g.md "status: Obsolete"
+  lg_item docs/issues/h.md "status: open"
+  lg_item docs/issues/i.md 'status: "`Done`"'
+  git add -A && git commit -qm items
+  lg_in lg_t_index_status_classes
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_dates() {
+  local ix err="$_SCRATCH/t.err" h1 h2
+  h1=$(git rev-parse HEAD)
+  ix=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err")
+  assert_contains "$(cat "$err")" "dates-cold" "no cached map: one cold git log pass"
+  assert_json_field "$(cat "$ix")" '[.items[] | "\(.path | ltrimstr("docs/issues/"))=\(.date)"] | join(" ")' \
+    "a.md=2026-01-05 b2.md=2026-02-01 c.md=2026-03-04 t.md=2026-01-07 u.md=2026-04-05 x.md=2026-02-03" \
+    "fields.date wins; else the first-add date (a rename keeps it); else mtime (uncommitted); a non-date value is ignored"
+  assert_true "the date map is cached for HEAD" test -f "$_LG_CACHE/dates-$h1.tsv"
+  lg_item docs/issues/n.md "status: Open"
+  mkdir -p docs/archive/issues
+  git mv docs/issues/c.md docs/archive/issues/c.md
+  lg_commit_at 2026-05-06 "more"
+  h2=$(git rev-parse HEAD)
+  ix=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err")
+  assert_contains "$(cat "$err")" "dates-extend $h1" "a new HEAD extends the cached map of its ancestor"
+  assert_not_contains "$(cat "$err")" "dates-cold" "…without a cold pass"
+  assert_true "the extended map is cached for the new HEAD" test -f "$_LG_CACHE/dates-$h2.tsv"
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/n.md)" '.date' "2026-05-06" "a new commit's item"
+  assert_json_field "$(lg_ix_item "$ix" docs/archive/issues/c.md)" '[.date, .archived] | tojson' '["2026-03-04",true]' \
+    "an archive move keeps the add date; archived"
+  ix=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err")
+  assert_not_contains "$(cat "$err")" "dates-" "a cached index: no date work at all"
+  # A cold map gives the same dates as the extended one.
+  rm -f "$_LG_CACHE"/dates-*.tsv "$_LG_CACHE"/index-*.json
+  ix=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err")
+  assert_contains "$(cat "$err")" "dates-cold" "caches removed: cold again"
+  assert_json_field "$(lg_ix_item "$ix" docs/archive/issues/c.md)" '.date' "2026-03-04" "…the same date"
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/b2.md)" '.date' "2026-02-01" "…and the renamed file's"
+}
+
+test_lg_index_date_fallback_and_rename() {
+  echo "test: _lg_index — dates: fields.date, first add (renames chained), mtime; cached map extended"
+  lg_fixture
+  lg_enable
+  lg_item docs/issues/a.md "date: 2026-01-05" "status: Open"
+  lg_item docs/issues/b.md "status: Open"
+  lg_item docs/issues/t.md "date: 2026-01-07T09:30:00Z"
+  lg_commit_at 2026-02-01 "one"
+  lg_item docs/issues/x.md "date: soon"
+  lg_commit_at 2026-02-03 "two"
+  git mv docs/issues/b.md docs/issues/b2.md
+  # The add date of b.md (2026-02-01) is what a rename keeps.
+  lg_commit_at 2026-03-04 "three"
+  lg_item docs/issues/c.md "status: Open"
+  git add -A
+  GIT_AUTHOR_DATE="2026-03-04T12:00:00" GIT_COMMITTER_DATE="2026-03-04T12:00:00" git commit -qm four
+  lg_item docs/issues/u.md "status: Open"
+  touch -t 202604051200 docs/issues/u.md
+  lg_in lg_t_index_dates
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_docs_links() {
+  local ix
+  ix=$(_lg_index)
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/a.md)" '.docs | tojson' \
+    '{"spec":["docs/adr/r.md"],"plan":["docs/plans/p.md"],"handoff":["docs/handoffs/h1.md"]}' \
+    "a: a plan link with an anchor, an ADR (spec column), a handoff by key; the guide is not a column"
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/a.md)" '.derived | tojson' '{"status":"planned","detail":"docs/plans/p.md"}' \
+    "a linked plan that is not terminal → planned"
+  assert_json_field "$(lg_ix_item "$ix" "docs/issues/a b.md")" '[.docs.plan, .derived.status] | tojson' '[["docs/plans/p.md"],"planned"]' \
+    "a link in <…> and one %20-encoded both reach 'a b.md'"
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/h.md)" '[.docs.spec, .derived] | tojson' \
+    "[[\"docs/specs/s.md\"],{\"status\":\"spec'd\",\"detail\":\"docs/specs/s.md\"}]" "the key as a word in a spec → spec'd"
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/k.md)" '[.docs.plan, .docs.spec, .derived.status] | tojson' \
+    '[["docs/plans/q.md"],[],"not started"]' "only a completed plan links it (and app-40, xapp-4, app-4x, a URL do not) → not started"
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/z.md)" '[.docs.plan, .docs.spec, .derived.status] | tojson' \
+    "[[\"docs/plans/old.md\"],[\"docs/specs/s.md\"],\"spec'd\"]" \
+    "a reference-style link; a deprecated plan is terminal → spec'd"
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/m.md)" '[.docs.plan, .derived.status] | tojson' '[["docs/plans/root.md"],"planned"]' \
+    "a root-relative link (/docs/…) and frontmatter status: draft"
+}
+
+test_lg_index_docs_links() {
+  echo "test: _lg_index — docs joins: links (relative, <…>, %20, anchors, reference-style, /root) and keys as words"
+  lg_fixture
+  lg_enable '{"doc_columns":{"handoff":{"globs":["docs/handoffs/*.md"]}}}'
+  lg_item docs/issues/a.md "key: app-1" "status: Open"
+  lg_item "docs/issues/a b.md" "key: app-2" "status: Open"
+  lg_item docs/issues/h.md "key: app-3" "status: Open"
+  lg_item docs/issues/k.md "key: app-4" "status: Open"
+  lg_item docs/issues/z.md "key: app-5" "status: Open"
+  lg_item docs/issues/m.md "key: app-6" "status: Open"
+  mkdir -p docs/plans docs/specs docs/adr docs/guides docs/handoffs
+  printf '# P\n\n**Status:** In progress\n\nSee [a](../issues/a.md#x), [ab](<../issues/a b.md>) and [ab2](../issues/a%%20b.md).\n' > docs/plans/p.md
+  printf '# Q\n\nStatus: Completed\n\n- [k](../issues/k.md)\n' > docs/plans/q.md
+  printf '# Old\n\nLinks [z](../issues/z.md).\n' > docs/plans/old.md
+  printf -- '---\nstatus: draft\n---\n# Root\n\n[m](/docs/issues/m.md)\n' > docs/plans/root.md
+  printf '# S\n\nFixes app-3. Not app-40, xapp-4, app-4x or https://example.com/docs/issues/k.md.\n\n[z]: ../issues/z.md\n' > docs/specs/s.md
+  printf '# R\n\n[a](../issues/a.md)\n' > docs/adr/r.md
+  printf '# G\n\n[a](../issues/a.md) app-4\n' > docs/guides/g.md
+  printf '# H\n\nPicking up app-1.\n' > docs/handoffs/h1.md
+  lg_doc_index '{"docs":{
+    "docs/plans/p.md":{"doc_type":"plan"},"docs/plans/q.md":{"doc_type":"plan"},
+    "docs/plans/old.md":{"doc_type":"plan","status":"deprecated"},"docs/plans/root.md":{"doc_type":"plan"},
+    "docs/plans/gone.md":{"doc_type":"plan"},
+    "docs/specs/s.md":{"doc_type":"spec"},"docs/adr/r.md":{"doc_type":"adr"},"docs/guides/g.md":{"doc_type":"guide"}}}'
+  git add -A && git commit -qm docs
+  lg_in lg_t_index_docs_links
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_renamed_link() {
+  local ix
+  ix=$(_lg_index)
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/new.md)" '[.docs.plan, .derived.status] | tojson' '[["docs/plans/p.md"],"planned"]' \
+    "a link to the item's former path reaches it (git rename chain)"
+  assert_json_field "$(lg_ix_item "$ix" docs/archive/issues/x.md)" '[.archived, .docs.spec] | tojson' '[true,["docs/specs/s.md"]]' \
+    "an archive move: the old link still reaches the archived item"
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/y.md)" '.docs.spec | tojson' '["docs/specs/s.md"]' \
+    "a path re-used by a new item: a link to it is that item's"
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/y2.md)" '.docs.spec | tojson' '[]' \
+    "…not the item that moved away from it"
+}
+
+test_lg_index_renamed_link() {
+  echo "test: _lg_index — links to a renamed (or archived) item's old path"
+  lg_fixture
+  lg_enable
+  lg_item docs/issues/old.md "key: app-1" "status: Open"
+  lg_item docs/issues/x.md "status: Fixed"
+  lg_item docs/issues/y.md "status: Open"
+  mkdir -p docs/plans docs/specs
+  printf '# P\n\n[old](../issues/old.md)\n' > docs/plans/p.md
+  printf '# S\n\n[x](../issues/x.md) [y](../issues/y.md)\n' > docs/specs/s.md
+  lg_doc_index '{"docs":{"docs/plans/p.md":{"doc_type":"plan"},"docs/specs/s.md":{"doc_type":"spec"}}}'
+  lg_commit_at 2026-01-01 one
+  git mv docs/issues/old.md docs/issues/new.md
+  mkdir -p docs/archive/issues
+  git mv docs/issues/x.md docs/archive/issues/x.md
+  git mv docs/issues/y.md docs/issues/y2.md
+  lg_commit_at 2026-01-02 moves
+  lg_item docs/issues/y.md "key: app-9" "status: Open" "summary: a different item at the old path"
+  git mv docs/issues/new.md docs/issues/tmp.md
+  lg_commit_at 2026-01-03 again
+  git mv docs/issues/tmp.md docs/issues/new.md
+  lg_commit_at 2026-01-04 back
+  lg_in lg_t_index_renamed_link
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_no_doc_index() {
+  local ix
+  ix=$(_lg_index)
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/a.md)" '[.docs, .derived.status] | tojson' \
+    '[{"spec":[],"plan":[],"handoff":[]},"not started"]' "no doc-index: empty docs, the index still builds"
+}
+
+test_lg_index_absent_doc_index_ok() {
+  echo "test: _lg_index — no docs/.doc-index.json is fine"
+  lg_fixture
+  lg_enable
+  lg_item docs/issues/a.md "key: app-1" "status: Open"
+  git add -A && git commit -qm items
+  lg_in lg_t_index_no_doc_index
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_unborn() {
+  local ix
+  ix=$(_lg_index)
+  assert_json_field "$(cat "$ix")" '[.built.head, (.items | length), .items[0].date] | tojson' '[null,1,"2026-04-05"]' \
+    "no commit yet: head null, the untracked item dated by its mtime"
+}
+
+test_lg_index_unborn_head() {
+  echo "test: _lg_index — a repository with no commit yet"
+  lg_fixture
+  rm -rf .git
+  git init -q
+  printf 'home/\nxdg/\n' >> .git/info/exclude
+  lg_enable
+  lg_item docs/issues/a.md "key: app-1"
+  touch -t 202604051200 docs/issues/a.md
+  lg_in lg_t_index_unborn
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_bad_doc_index() {
+  lg_rc _lg_index
+  assert_eq "2" "$LG_RC" "invalid JSON in the doc-index: rc 2"
+  lg_doc_index '{"docs":[]}'
+  lg_rc _lg_index
+  assert_eq "2" "$LG_RC" "docs not an object: rc 2"
+  lg_doc_index '{"docs":{}}'
+  printf '[' > docs/ledger/legacy.json
+  lg_rc _lg_index
+  assert_eq "2" "$LG_RC" "an unreadable legacy.json: rc 2"
+  rm -f docs/ledger/legacy.json
+  printf '{"ledgers":{}}' > docs/ledger/ledgers.json
+  lg_rc _lg_index
+  assert_eq "2" "$LG_RC" "a registry whose ledgers is not a list: rc 2"
+}
+
+test_lg_index_invalid_doc_index_rc2() {
+  echo "test: _lg_index — an invalid doc-index, legacy map or registry is rc 2"
+  lg_fixture
+  lg_enable
+  lg_item docs/issues/a.md "key: app-1"
+  git add -A && git commit -qm items
+  printf '{"docs": [' > docs/.doc-index.json
+  lg_in lg_t_index_bad_doc_index
+  teardown
+}
+
+# lg_ix_hash <file>: the file's content hash.
+lg_ix_hash() {
+  hash_file "$1"
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_cache() {
+  local p0 p1 h0 err="$_SCRATCH/t.err" names="" p n
+  p0=$(_lg_index)
+  h0=$(lg_ix_hash "$p0")
+  p1=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err")
+  assert_eq "$p0" "$p1" "no change: the same cache file"
+  assert_eq "$h0" "$(lg_ix_hash "$p1")" "…with the same content"
+  assert_contains "$(cat "$err")" "index-hit" "…served from the cache"
+  assert_not_contains "$(cat "$err")" "parse-miss" "…without parsing"
+  names="$p0"
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[{"id":"app","title":"App 2","kind":"service","status":"active"}]}'
+  p=$(_lg_index); names="$names $p"
+  lg_enable '{"views":{"recent_days":7}}'
+  _lg_init ls
+  p=$(_lg_index); names="$names $p"
+  printf '{"app#1":{"key":"app-1"}}\n' > docs/ledger/legacy.json
+  p=$(_lg_index); names="$names $p"
+  assert_json_field "$(cat "$p")" '.legacy | tojson' '{"app#1":{"key":"app-1"}}' "legacy: legacy.json's map"
+  lg_doc_index '{"docs":{"docs/plans/p.md":{"doc_type":"plan","last_verified":null}}}'
+  p=$(_lg_index); names="$names $p"
+  printf 'more\n' >> docs/issues/a.md
+  p=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err"); names="$names $p"
+  assert_eq "parse-miss docs/issues/a.md" "$(grep '^parse-miss' "$err")" "an item edit: only that item is parsed again"
+  printf 'An uncommitted line.\n' >> docs/plans/p.md
+  p=$(_lg_index); names="$names $p"
+  n=$(printf '%s\n' $names | sort -u | wc -l | tr -d ' ')
+  assert_eq "7" "$n" "registry, config, legacy.json, doc-index, an item, an uncommitted plan edit: each a new cache file"
+  git checkout -q -- docs/plans/p.md
+  p1=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err")
+  assert_contains "$(cat "$err")" "index-hit" "the plan edit undone: the earlier cache file again"
+  # shellcheck disable=SC2012  # cache names are hex
+  assert_eq "3" "$(ls "$_LG_CACHE"/index-*.json | wc -l | tr -d ' ')" "the newest 3 index files are kept"
+  git add docs/plans/p.md docs/issues/a.md
+  p=$(_lg_index)
+  assert_eq "$p1" "$p" "staging the same bytes does not change the worktree index"
+}
+
+test_lg_index_cache_invalidation() {
+  echo "test: _lg_index — the cache key covers registry, config, legacy, doc-index, items, dirty docs"
+  lg_fixture
+  lg_enable
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[{"id":"app","title":"App","kind":"service","status":"active"}]}'
+  lg_item docs/issues/a.md "key: app-1" "status: Open"
+  lg_item docs/issues/b.md "key: app-2" "status: Open"
+  mkdir -p docs/plans
+  printf '# P\n\n[a](../issues/a.md)\n' > docs/plans/p.md
+  lg_doc_index '{"docs":{"docs/plans/p.md":{"doc_type":"plan"}}}'
+  git add -A && git commit -qm items
+  lg_in lg_t_index_cache
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_foreign() {
+  local p q
+  p=$(_lg_index)
+  printf '{"schema":"ledger-index/0","items":[]}\n' > "$p"
+  q=$(_lg_index)
+  assert_eq "$p" "$q" "the same cache name"
+  assert_json_field "$(cat "$q")" '[.schema, (.items | length)] | tojson' '["ledger-index/1",1]' "a foreign schema is ignored and rebuilt"
+  printf '{"schema":"ledger-index/1","built":' > "$p"
+  q=$(_lg_index)
+  assert_json_field "$(cat "$q")" '.items | length' "1" "a truncated file is rebuilt"
+  printf 'garbage' > "$p"
+  q=$(_lg_index)
+  assert_json_field "$(cat "$q")" '.schema' "ledger-index/1" "garbage is rebuilt"
+}
+
+test_lg_index_foreign_schema_ignored() {
+  echo "test: _lg_index — a cache file of another schema (or broken) is ignored"
+  lg_fixture
+  lg_enable
+  lg_item docs/issues/a.md "key: app-1"
+  git add -A && git commit -qm items
+  lg_in lg_t_index_foreign
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_staged() {
+  local s w r
+  s=$(_lg_index --staged)
+  assert_json_field "$(lg_ix_item "$s" docs/issues/a.md)" '[.key, .class] | tojson' '["x-2","fixed"]' "--staged: the staged blob's values"
+  assert_json_field "$(cat "$s")" '[.built.mode, (.items | map(.path) | join("|"))] | tojson' '["staged","docs/issues/a.md|docs/issues/n.md"]' \
+    "--staged: a staged file deleted from the work tree is an item"
+  assert_json_field "$(cat "$s")" '.ledgers | map(.id) | join(",")' "x" "--staged: the staged registry"
+  w=$(_lg_index)
+  assert_json_field "$(lg_ix_item "$w" docs/issues/a.md)" '.key' "x-3" "worktree: the working copy"
+  assert_json_field "$(cat "$w")" '[(.items | map(.path) | join("|")), (.ledgers | length)] | tojson' '["docs/issues/a.md",0]' \
+    "worktree: no n.md; the registry deleted from the work tree"
+  r=$(_lg_index --rev HEAD)
+  assert_json_field "$(lg_ix_item "$r" docs/issues/a.md)" '.key' "x-1" "--rev HEAD: the commit"
+  assert_json_field "$(cat "$r")" '[.built.mode, .built.rev] | join("|")' "rev|$(git rev-parse HEAD)" "--rev: built.mode and built.rev"
+  assert_eq "3" "$(printf '%s\n' "$s" "$w" "$r" | sort -u | wc -l | tr -d ' ')" "three sources, three cache files"
+  lg_rc _lg_index --rev no-such-rev
+  assert_eq "2" "$LG_RC" "--rev of an unknown revision: rc 2"
+  lg_rc _lg_index --rev --all
+  assert_eq "2" "$LG_RC" "--rev of an option-like value: rc 2"
+  lg_rc _lg_index --bogus
+  assert_eq "2" "$LG_RC" "an unknown argument: rc 2 (internal misuse)"
+}
+
+test_lg_index_staged_mode() {
+  echo "test: _lg_index --staged / --rev — staged blob values win"
+  lg_fixture
+  lg_enable
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[{"id":"x","title":"X","kind":"service","status":"active"}]}'
+  lg_item docs/issues/a.md "key: x-1" "status: Open"
+  git add -A && git commit -qm items
+  lg_item docs/issues/a.md "key: x-2" "status: Fixed"
+  lg_item docs/issues/n.md "key: x-9"
+  git add -A
+  rm docs/issues/n.md docs/ledger/ledgers.json
+  lg_item docs/issues/a.md "key: x-3" "status: Open"
+  lg_in lg_t_index_staged
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_prune() {
+  local ix entry kept
+  ix=$(_lg_index)
+  _lg_parse_prep
+  mkdir "$_LG_PARSE_DIR/.new.stale" "$_LG_PARSE_DIR/.new.fresh"
+  touch -t 202001010000 "$_LG_PARSE_DIR/.new.stale"
+  printf '{"fm":{}}' > "$_LG_PARSE_DIR/c-0000000000000000000000000000000000000000000000000000000000000000.json"
+  touch -t 202001010000 "$_LG_PARSE_DIR/c-0000000000000000000000000000000000000000000000000000000000000000.json"
+  for entry in "$_LG_PARSE_DIR"/c-*.json; do touch -t 202001010000 "$entry"; done
+  kept=$(cd "$_LG_PARSE_DIR" && ls c-*.json | grep -v '^c-0000' | head -n 1)
+  mkdir -p "$_LG_CACHE/parse/0123456789abcdef"
+  touch -t 202001010000 "$_LG_CACHE/parse/0123456789abcdef"
+  rm -f "$_LG_CACHE/prune.stamp"
+  printf 'x\n' >> docs/issues/b.md
+  ix=$(_lg_index)
+  assert_true "a stale .new.* temp dir is swept" test ! -e "$_LG_PARSE_DIR/.new.stale"
+  assert_true "a fresh one (a parse in flight) is kept" test -d "$_LG_PARSE_DIR/.new.fresh"
+  assert_true "an old entry no kept index references is pruned" \
+    test ! -e "$_LG_PARSE_DIR/c-0000000000000000000000000000000000000000000000000000000000000000.json"
+  assert_true "an old entry the index references is kept" test -f "$_LG_PARSE_DIR/$kept"
+  assert_true "an old parser's cache dir is removed" test ! -e "$_LG_CACHE/parse/0123456789abcdef"
+  assert_true "the prune stamp is written" test -f "$_LG_CACHE/prune.stamp"
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/a.md)" '.key' "app-1" "the index is intact"
+}
+
+test_lg_index_cache_prune() {
+  echo "test: _lg_index — parse cache pruning (stale temp dirs, unreferenced old entries, old parser dirs)"
+  lg_fixture
+  lg_enable
+  lg_item docs/issues/a.md "key: app-1"
+  lg_item docs/issues/b.md "key: app-2"
+  printf '%s\n' '---' 'key: app-3' '---' > docs/issues/c.md
+  git add -A && git commit -qm items
+  lg_in lg_t_index_prune
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_index_odd_worktree() {
+  local ix
+  ix=$(_lg_index)
+  assert_json_field "$(cat "$ix")" '.items | map(.path) | join("|")' "docs/issues/a.md|docs/issues/link.md|docs/issues/new.md" \
+    "worktree: a deleted tracked item, a submodule and a link to a directory are not items; a link to a file and an untracked file are"
+  assert_json_field "$(lg_ix_item "$ix" docs/issues/link.md)" '.key' "app-1" "the link to a file parses through it"
+}
+
+test_lg_index_odd_worktree_entries() {
+  echo "test: _lg_index — worktree items skip deleted files, submodules and links to directories"
+  lg_fixture
+  lg_enable
+  lg_item docs/issues/a.md "key: app-1"
+  lg_item docs/issues/gone.md "key: app-2"
+  ln -s a.md docs/issues/link.md
+  mkdir -p docs/issues/dir.md
+  printf 'x\n' > docs/issues/dir.md/inner
+  ln -s dir.md docs/issues/dlink.md
+  git add -A && git commit -qm items
+  git update-index --add --cacheinfo "160000,$(git rev-parse HEAD),docs/issues/sub.md"
+  git commit -qm gitlink
+  mkdir -p docs/issues/sub.md
+  rm docs/issues/gone.md
+  lg_item docs/issues/new.md "key: app-3"
+  lg_in lg_t_index_odd_worktree
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_parse_hash_map() {
+  local paths="$_SCRATCH/t.paths" out="$_SCRATCH/t.jsonl" err="$_SCRATCH/t.err"
+  lg_nul_list "$paths" docs/issues/a.md docs/issues/b.md docs/issues/u.md
+  DOC_TOOLS_LEDGER_TRACE=2 _lg_parse_worktree "$paths" "$out" 2> "$err"
+  assert_eq "3" "$(grep -c '^content-hash ' "$err")" "first run: every file is hashed"
+  printf 'x\n' >> docs/issues/b.md
+  DOC_TOOLS_LEDGER_TRACE=2 _lg_parse_worktree "$paths" "$out" 2> "$err"
+  assert_eq "content-hash docs/issues/b.md|content-hash docs/issues/u.md" "$(grep '^content-hash ' "$err" | tr '\n' '|' | sed 's/|$//')" \
+    "second run: clean tracked files are not hashed (their blob id maps to the hash); modified and untracked are"
+  assert_json_field "$(jq -c 'select(.path == "docs/issues/a.md")' "$out")" '.blob' "sha256:$(hash_file docs/issues/a.md)" \
+    "a clean file's .blob is still its content hash"
+  assert_json_field "$(jq -c 'select(.path == "docs/issues/b.md")' "$out")" '.blob' "sha256:$(hash_file docs/issues/b.md)" \
+    "…and a modified one's"
+}
+
+test_lg_parse_hash_map() {
+  echo "test: _lg_parse_worktree (DOC_TOOLS_LEDGER_TRACE=2) hashes only modified/untracked files once their blob id is known"
+  lg_fixture
+  lg_enable
+  lg_item docs/issues/a.md "key: app-1"
+  lg_item docs/issues/b.md "key: app-2"
+  git add -A && git commit -qm items
+  lg_item docs/issues/u.md "key: app-3"
+  lg_in lg_t_parse_hash_map
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -1457,6 +2033,22 @@ run_tests() {
   test_lg_registry_exclusion
   test_lg_registry_id_newline
   test_lg_registry_retired_owns_nothing
+
+  # --- Task 4: the index ---
+  test_lg_index_fields
+  test_lg_index_status_classes_case
+  test_lg_index_date_fallback_and_rename
+  test_lg_index_docs_links
+  test_lg_index_renamed_link
+  test_lg_index_absent_doc_index_ok
+  test_lg_index_unborn_head
+  test_lg_index_invalid_doc_index_rc2
+  test_lg_index_cache_invalidation
+  test_lg_index_foreign_schema_ignored
+  test_lg_index_staged_mode
+  test_lg_index_cache_prune
+  test_lg_index_odd_worktree_entries
+  test_lg_parse_hash_map
 
   print_summary
 }

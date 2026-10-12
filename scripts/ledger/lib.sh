@@ -22,6 +22,8 @@ _LG_CACHE=""         # $(git rev-parse --git-common-dir)/doc-superpowers/ledger
 . "$_LG_LIB/glob.sh"
 # shellcheck source=scripts/ledger/validate.sh
 . "$_LG_LIB/validate.sh"
+# shellcheck source=scripts/ledger/index.sh
+. "$_LG_LIB/index.sh"
 
 # _lg_die <message>: the run could not run — exit 2, with the verdict object
 # in --format json (exactly once, inside $(…) too: the marker file tells the
@@ -114,19 +116,41 @@ _lg_emit() {
   exit "$rc"
 }
 
-# _lg_doc_index: print the path of a private copy of docs/.doc-index.json
-# (shape-checked like _index_load), or of an empty {"docs":{}} when the repo
-# has none. A present but invalid index dies with 2 — never _index_load's
-# exit 1, which a ledger verb would report as findings. Needs _lg_init.
+# _lg_src_cat <src> <path> <out>: the file <path> as <src> holds it, into
+# <out>. <src>: "worktree" (the working copy), ":" (the index, stage 0) or
+# a commit id. Returns 1 when <src> has no such file; dies (2) when it has
+# one that cannot be read.
+_lg_src_cat() {
+  local src="$1" p="$2" out="$3" spec
+  case "$src" in
+    worktree)
+      if [ ! -e "$p" ] && [ ! -L "$p" ]; then return 1; fi
+      cat -- "$p" > "$out" 2>/dev/null || _lg_die "cannot read $p"
+      ;;
+    *)
+      # ":0:<path>", not ":<path>": ":/…" and ":!…" are not paths.
+      if [ "$src" = : ]; then spec=":0:$p"; else spec="$src:$p"; fi
+      git cat-file -e "$spec" 2>/dev/null || return 1
+      git cat-file blob "$spec" > "$out" 2>/dev/null \
+        || _lg_die "cannot read $p from $(if [ "$src" = : ]; then echo "the index"; else echo "$src"; fi)"
+      ;;
+  esac
+}
+
+# _lg_doc_index [src]: print the path of a private copy of
+# docs/.doc-index.json — the working copy's, or as [src] holds it (see
+# _lg_src_cat) — shape-checked like _index_load, or of an empty
+# {"docs":{}} when there is none. A present but invalid index dies with 2 —
+# never _index_load's exit 1, which a ledger verb would report as findings.
+# Needs _lg_init.
 _lg_doc_index() {
-  local snap
+  local src="${1:-worktree}" snap
   snap=$(mktemp "$_SCRATCH/lg-doc-index.XXXXXX") || _lg_die "mktemp failed"
-  if [ ! -e "$INDEX_FILE" ] && [ ! -L "$INDEX_FILE" ]; then
+  if ! _lg_src_cat "$src" "$INDEX_FILE" "$snap"; then
     printf '%s\n' '{"docs":{}}' > "$snap" || _lg_die "cannot write $snap"
     printf '%s\n' "$snap"
     return 0
   fi
-  cp -- "$INDEX_FILE" "$snap" 2>/dev/null || _lg_die "cannot read $INDEX_FILE"
   if ! jq -e -s 'length == 1 and (.[0] | type) == "object" and (.[0].docs | type) == "object"' \
       "$snap" >/dev/null 2>&1; then
     _lg_die "$INDEX_FILE is not a valid doc-index (expected one JSON object with a \"docs\" object)"
@@ -144,22 +168,22 @@ _lg_out_file() {
   fi
 }
 
-# _lg_registry: print the path of a private copy of docs/ledger/ledgers.json
-# (the work tree's), or of {"schema":"ledger-registry/1","ledgers":[]} when
-# the repo has none. Dies (2) unless the file is one JSON object whose
+# _lg_registry [src]: print the path of a private copy of
+# docs/ledger/ledgers.json — the working copy's, or as [src] holds it (see
+# _lg_src_cat) — or of {"schema":"ledger-registry/1","ledgers":[]} when
+# there is none. Dies (2) unless the file is one JSON object whose
 # "ledgers" (absent: []) is a list of objects — what every reader of the
 # registry relies on. Everything else (schema value, ids, statuses, kinds,
 # contracts, globs, ownership) is `validate --registry`'s to report. The
 # copy always has "ledgers". Needs _lg_init.
 _lg_registry() {
-  local reg=docs/ledger/ledgers.json snap
+  local src="${1:-worktree}" reg=docs/ledger/ledgers.json snap
   snap=$(mktemp "$_SCRATCH/lg-registry.XXXXXX") || _lg_die "mktemp failed"
-  if [ ! -e "$reg" ] && [ ! -L "$reg" ]; then
+  if ! _lg_src_cat "$src" "$reg" "$snap.raw"; then
     printf '%s\n' '{"schema":"ledger-registry/1","ledgers":[]}' > "$snap" || _lg_die "cannot write $snap"
     printf '%s\n' "$snap"
     return 0
   fi
-  cat -- "$reg" > "$snap.raw" 2>/dev/null || _lg_die "cannot read $reg"
   if ! jq -e -s 'length == 1 and (.[0] | type) == "object"
       and ((.[0].ledgers // []) | type == "array" and all(.[]; type == "object"))' \
       "$snap.raw" >/dev/null 2>&1; then

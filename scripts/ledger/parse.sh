@@ -24,7 +24,7 @@
 # headings it reads, so a change to either uses a fresh directory. Entries
 # are written to a temp dir and renamed into place (a reader never sees a
 # partial one); an entry that does not read back as one record is parsed
-# again. DOC_TOOLS_LEDGER_TRACE=1 prints "parse-miss <path>" to stderr for
+# again. DOC_TOOLS_LEDGER_TRACE=1 (or more) prints "parse-miss <path>" to stderr for
 # each path parsed (not read from the cache).
 #
 # Globs: items.globs and items.archive_globs use glob.sh's grammar (the
@@ -96,7 +96,8 @@ _lg_tree_oid() {
 # _lg_globs_matching <src> <out> <config-filter>: the NUL-terminated paths
 # at <src> matching the globs the filter yields (a list of strings), in
 # git's order. <src>:
-#   worktree      tracked + untracked, .gitignore'd files left out
+#   worktree      tracked + untracked, .gitignore'd files and tracked files
+#                 deleted from the work tree left out
 #   worktree-all  tracked + untracked, ignored files too (an archived check)
 #   :             the index
 #   <rev>         a commit-ish
@@ -119,8 +120,32 @@ _lg_globs_matching() {
   # exist makes `--others` warn, which is not a failure.
   case "$src" in
     worktree)
-      GIT_LITERAL_PATHSPECS=1 git ls-files -z --cached --others --exclude-standard -- ${specs[@]+"${specs[@]}"} \
-        > "$s.all" 2> "$s.err" || _lg_globs_fail "$s.err" ;;
+      # -t tags each name; a tracked file deleted from the work tree is
+      # listed again under "R" and is left out (it is not there).
+      # A submodule (mode 160000) is never a file; a symbolic link (120000)
+      # is one only when it leads to a file (checked one by one: few).
+      GIT_LITERAL_PATHSPECS=1 git ls-files -z -t --cached --deleted --others --exclude-standard -- ${specs[@]+"${specs[@]}"} \
+        > "$s.tagged" 2> "$s.err" || _lg_globs_fail "$s.err"
+      GIT_LITERAL_PATHSPECS=1 git ls-files -z -s -- ${specs[@]+"${specs[@]}"} > "$s.modes" 2> "$s.err" \
+        || _lg_globs_fail "$s.err"
+      tr '\n\000' '\001\n' < "$s.modes" > "$s.modes.l" || _lg_die "cannot read $s.modes"
+      tr '\n\000' '\001\n' < "$s.tagged" | LC_ALL=C awk -v modes="$s.modes.l" -v links="$s.links" '
+        BEGIN {
+          printf "" > links
+          while ((getline l < modes) > 0) {
+            m = substr(l, 1, 6); p = substr(l, index(l, "\t") + 1)
+            if (m == "160000") GONE[p] = 1
+            else if (m == "120000") LINK[p] = 1
+          }
+        }
+        { t = substr($0, 1, 1); p = substr($0, 3); if (t == "R") GONE[p] = 1; else if (!(p in SEEN)) { SEEN[p] = 1; P[++n] = p } }
+        END { for (i = 1; i <= n; i++) if (!(P[i] in GONE)) { if (P[i] in LINK) print P[i] > links; else print P[i] } }' \
+        > "$s.keep" || _lg_die "cannot list the working tree paths for the item globs"
+      while IFS= read -r d; do
+        case "$d" in *$'\001'*) continue ;; esac
+        if [ -f "$d" ]; then printf '%s\n' "$d"; fi
+      done < "$s.links" >> "$s.keep"
+      tr '\n\001' '\000\n' < "$s.keep" > "$s.all" || _lg_die "cannot write $s.all" ;;
     worktree-all)
       GIT_LITERAL_PATHSPECS=1 git ls-files -z --cached --others -- ${specs[@]+"${specs[@]}"} \
         > "$s.all" 2> "$s.err" || _lg_globs_fail "$s.err" ;;
@@ -144,16 +169,13 @@ _lg_globs_fail() {
 # untracked files that exist (a tracked file deleted from the work tree is
 # not an item there); ":": the index; else the commit-ish's tree.
 _lg_item_paths() {
-  local src="$1" out="$2" raw p prev=""
+  local src="$1" out="$2" raw
   _lg_scratch_name
   raw="$_LG_SN.raw"
   _lg_globs_matching "$src" "$raw" '[(.items.globs // [])[]?, (.items.archive_globs // [])[]?]'
-  while IFS= read -r -d '' p; do
-    [ "$p" != "$prev" ] || continue
-    prev=$p
-    if [ "$src" = worktree ] && [ ! -f "$p" ]; then continue; fi
-    printf '%s\0' "$p"
-  done < "$raw" > "$out"
+  # Each path once (git lists a path once per stage).
+  tr '\n\000' '\001\n' < "$raw" | LC_ALL=C awk '!seen[$0]++' | tr '\n\001' '\000\n' > "$out" \
+    || _lg_die "cannot write $out"
 }
 
 # --- Parsing -------------------------------------------------------------------
@@ -216,7 +238,7 @@ _lg_parse_finish() {
   local man="$1" errs="$2" out="$3" parser="$4" s="$5" tmp
   _lg_parse_emit "$man" "$out" "$s.miss"
   if [ -s "$s.miss" ]; then
-    if [ "${DOC_TOOLS_LEDGER_TRACE:-}" = 1 ]; then
+    if [ "${DOC_TOOLS_LEDGER_TRACE:-0}" -ge 1 ] 2>/dev/null; then
       LC_ALL=C awk '{ p = $0; for (i = 1; i <= 3; i++) p = substr(p, index(p, "\t") + 1); print "parse-miss " p }' \
         "$s.miss" >&2 || true
     fi
@@ -252,7 +274,10 @@ _lg_parse_files() {
   # Relative names as ./name: awk would read "a=b" as an assignment.
   LC_ALL=C awk '{ p = $0; for (i = 1; i <= 3; i++) p = substr(p, index(p, "\t") + 1); if (substr(p, 1, 1) != "/") p = "./" p; print p }' \
     "$miss" | tr '\n' '\000' > "$s.argz" || _lg_die "cannot write $s.argz"
-  LC_ALL=C xargs -0 awk -v mode=files -v keys="$s.keys" -v outdir="$tmp" "${_LG_PARSE_ARGS[@]}" \
+  # Many files: up to 4 awk processes side by side (each writes its own
+  # entries; nothing shares an output stream).
+  _lg_par_args "$(wc -l < "$s.keys")"
+  LC_ALL=C xargs -0 ${_LG_PAR[@]+"${_LG_PAR[@]}"} awk -v mode=files -v keys="$s.keys" -v outdir="$tmp" "${_LG_PARSE_ARGS[@]}" \
     -f "$_LG_LIB/frontmatter.awk" < "$s.argz" || rc=$?
   [ "$rc" = 0 ] || _lg_die "frontmatter.awk failed on the working copies (rc $rc)"
 }
@@ -267,6 +292,156 @@ _lg_parse_batch() {
     | LC_ALL=C awk -v mode=batch -v outdir="$tmp" "${_LG_PARSE_ARGS[@]}" -f "$_LG_LIB/frontmatter.awk" \
     || rc=$?
   [ "$rc" = 0 ] || _lg_die "cannot parse the blobs (git cat-file --batch | frontmatter.awk: rc $rc)"
+}
+
+# --- Content hashes of working copies -------------------------------------------
+
+# _lg_wt_ids <paths-lines> <out>: for each line of <paths-lines> (a path;
+# a newline in a name travels as \001) the line "<id>\t<path>": <id> is the
+# blob id the index holds for the path when git sees the working copy
+# unmodified (tracked at stage 0 as a regular file, not in
+# `git ls-files -m`), else "-" (untracked, modified, deleted, a link, a
+# submodule, unmerged, or a name holding a newline). Two git calls over the
+# paths' directories, never one per path.
+_lg_wt_ids() {
+  local in="$1" out="$2" s d
+  local specs=()
+  _lg_scratch_name
+  s=$_LG_SN
+  LC_ALL=C awk -v specs="$s.specs" '
+    BEGIN { printf "" > specs }
+    index($0, "\001") == 0 {
+      d = $0
+      if (match(d, /.*\//)) d = substr(d, 1, RLENGTH)
+      if (!(d in seen)) { seen[d] = 1; print d > specs }
+    }' "$in" || _lg_die "cannot list the directories of $in"
+  while IFS= read -r d; do
+    specs+=("$d")
+  done < "$s.specs"
+  : > "$s.ls"
+  : > "$s.mod"
+  if [ "${#specs[@]}" -gt 0 ]; then
+    GIT_LITERAL_PATHSPECS=1 git ls-files -s -z -- "${specs[@]}" > "$s.lsz" \
+      || _lg_die "git ls-files -s failed"
+    GIT_LITERAL_PATHSPECS=1 git ls-files -m -z -- "${specs[@]}" > "$s.modz" \
+      || _lg_die "git ls-files -m failed"
+    _lg_parse_lst "$s.lsz" "$s.ls"
+    _lg_parse_lst "$s.modz" "$s.mod"
+  fi
+  LC_ALL=C awk -v ls="$s.ls" -v mod="$s.mod" '
+    BEGIN {
+      while ((getline l < ls) > 0) {
+        t = index(l, "\t"); p = substr(l, t + 1); split(substr(l, 1, t - 1), f, " ")
+        if (f[3] == "0" && (f[1] == "100644" || f[1] == "100755")) OID[p] = f[2]
+        else BAD[p] = 1
+      }
+      while ((getline l < mod) > 0) MOD[l] = 1
+    }
+    {
+      if (($0 in OID) && !($0 in BAD) && !($0 in MOD)) print OID[$0] "\t" $0
+      else print "-\t" $0
+    }' "$in" > "$out" || _lg_die "cannot match the blob ids to $in"
+}
+
+# _lg_par_args <n>: xargs options into _LG_PAR — for <n> ≥ 400 files, up
+# to 4 parallel processes (-P) with the files split evenly (-n); else none.
+_lg_par_args() {
+  local n="$1" cpus p
+  _LG_PAR=()
+  [ "$n" -ge 400 ] 2>/dev/null || return 0
+  cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || cpus=1
+  case "$cpus" in ''|*[!0123456789]*) cpus=1 ;; esac
+  p=$cpus
+  [ "$p" -le 4 ] || p=4
+  [ "$p" -ge 2 ] || return 0
+  _LG_PAR=(-P "$p" -n "$(( (n + p - 1) / p ))")
+}
+
+# _lg_hash_fast <paths-lines> <out>: _hash_list's output for the paths (one
+# per line, none holding a newline) without its per-file shell loops: one
+# xargs over sha256sum / shasum and one awk. Anything that does not line up
+# one to one falls back to _hash_list.
+_lg_hash_fast() {
+  local in="$1" out="$2" s n m
+  _lg_scratch_name
+  s=$_LG_SN
+  LC_ALL=C awk '{ print (substr($0, 1, 1) == "/") ? $0 : "./" $0 }' "$in" | tr '\n' '\000' > "$s.argz" \
+    || _lg_die "cannot write $s.argz"
+  if command -v sha256sum >/dev/null 2>&1; then
+    xargs -0 sha256sum -- < "$s.argz" > "$s.raw" 2>/dev/null || true
+  else
+    xargs -0 shasum -a 256 -- < "$s.argz" > "$s.raw" 2>/dev/null || true
+  fi
+  # A leading "\" marks a name the tool escaped; the digest follows it.
+  if LC_ALL=C awk '{ h = $1; if (substr(h, 1, 1) == "\\") h = substr(h, 2)
+                     if (length(h) != 64 || h !~ /^[0123456789abcdef]+$/) exit 3
+                     print "sha256:" h }' "$s.raw" > "$out" 2>/dev/null; then
+    n=$(wc -l < "$in")
+    m=$(wc -l < "$out")
+    [ "$n" -ne "$m" ] || return 0
+  fi
+  _hash_list "$s.argz" "$out"
+}
+
+# _lg_wt_hashes <paths-lines> <out>: "sha256:<hex>" of each working copy
+# (each path readable, no newline in a name), one line per path, in order —
+# _hash_list's output. A file git sees unmodified is not read: its blob id
+# is looked up in $_LG_CACHE/blob-sha256.tsv ("<blob id>\t<hash>", filled
+# by earlier runs); the others are hashed, and the map learns the clean
+# ones. DOC_TOOLS_LEDGER_TRACE=2 prints "content-hash <path>" to stderr for
+# each file hashed. (A clean file's bytes are the blob's unless a git
+# filter rewrites them on checkout; the map then holds the checked-out
+# bytes' hash, which is what parsing reads.)
+_lg_wt_hashes() {
+  local in="$1" out="$2" s map="$_LG_CACHE/blob-sha256.tsv" tmp
+  _lg_scratch_name
+  s=$_LG_SN
+  _lg_wt_ids "$in" "$s.ids"
+  if [ -f "$map" ]; then _lg_awkv "$map"; else _lg_awkv /dev/null; fi
+  # s.plan: per path "<hash>" (known) or "?" (to hash); s.needl: the paths
+  # to hash (lines: no name here holds a newline), s.needids: their blob
+  # ids ("-" for none).
+  LC_ALL=C awk -v map="$_LG_AV" -v need="$s.needl" -v needids="$s.needids" '
+    BEGIN {
+      while ((getline l < map) > 0) { t = index(l, "\t"); if (t) H[substr(l, 1, t - 1)] = substr(l, t + 1) }
+      printf "" > need; printf "" > needids
+    }
+    {
+      t = index($0, "\t"); id = substr($0, 1, t - 1); p = substr($0, t + 1)
+      if (id != "-" && (id in H) && H[id] ~ /^sha256:[0-9a-f]+$/) { print H[id]; next }
+      print "?"
+      print p > need
+      print id > needids
+    }' "$s.ids" > "$s.plan" || _lg_die "cannot read the blob hash map $map"
+  tr '\n' '\000' < "$s.needl" > "$s.need" || _lg_die "cannot write $s.need"
+  if [ ! -s "$s.need" ]; then
+    mv -f "$s.plan" "$out" || _lg_die "cannot write $out"
+    return 0
+  fi
+  if [ "${DOC_TOOLS_LEDGER_TRACE:-0}" -ge 2 ] 2>/dev/null; then
+    sed 's/^/content-hash /' "$s.needl" >&2 || true
+  fi
+  _lg_hash_fast "$s.needl" "$s.needh"
+  LC_ALL=C awk -v needh="$s.needh" -v needids="$s.needids" -v learn="$s.learn" '
+    BEGIN { printf "" > learn }
+    $0 == "?" {
+      if ((getline h < needh) <= 0 || (getline id < needids) <= 0) { bad = 1; exit 3 }
+      print h
+      if (id != "-") print id "\t" h > learn
+      next
+    }
+    { print }
+    END { if (bad) exit 3 }' "$s.plan" > "$out" || _lg_die "the content hashes do not line up with the paths"
+  if [ -s "$s.learn" ]; then
+    # The new pairs first, then the old ones (each blob id once), at most
+    # 50,000 lines: concurrent runs may each drop the other's new pairs —
+    # they are hashed again later, never wrong.
+    tmp=$(mktemp "$_LG_CACHE/.blob-sha256.XXXXXX") || _lg_die "cannot create a temp file in $_LG_CACHE"
+    { cat "$s.learn"; [ ! -f "$map" ] || cat "$map"; } \
+      | LC_ALL=C awk -F '\t' '!seen[$1]++ && n++ < 50000' > "$tmp" \
+      || { rm -f "$tmp"; _lg_die "cannot write the blob hash map"; }
+    mv -f "$tmp" "$map" || { rm -f "$tmp"; _lg_die "cannot install the blob hash map $map"; }
+  fi
 }
 
 # _lg_parse_worktree <paths-file> <out.jsonl>: the working copies of the
@@ -289,8 +464,7 @@ _lg_parse_worktree() {
       close($0)
       print > ok
     }' "$s.lst" || _lg_die "cannot check the item files"
-  tr '\n' '\000' < "$s.ok" > "$s.okz" || _lg_die "cannot write $s.okz"
-  _hash_list "$s.okz" "$s.hash"
+  _lg_wt_hashes "$s.ok" "$s.hash"
   # The manifest: c-<hex>, the blob value, archived, path.
   LC_ALL=C awk -v hashes="$s.hash" -v arch="$s.arch" '
     BEGIN { while ((getline a < arch) > 0) A[a] = 1 }
