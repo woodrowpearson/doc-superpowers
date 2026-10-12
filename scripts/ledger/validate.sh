@@ -747,7 +747,7 @@ _lg_validate_staged() {
   _lg_ix_json_obj : docs/ledger/finalized.json "$s.fin" "finalized map"
   # The tokens: the staged items' keys, aliases and superseded_by targets
   # (lower case; a provisional target finalized.json maps adds its key).
-  jq -n -r --slurpfile c "$_LG_CFG" --slurpfile fin "$s.fin" "$_LG_JQ_INDEX_DEFS"'
+  jq -L "$_LG_LIB" -n -r --slurpfile c "$_LG_CFG" --slurpfile fin "$s.fin" "$_LG_JQ_INDEX_DEFS"'
     lg_fields($c[0]) as $F
     | ($fin[0] | if type == "object" then [to_entries[] | select(.value | type == "string")
         | {key: (.key | ascii_downcase), value: (.value | ascii_downcase)}] | from_entries else {} end) as $FIN
@@ -760,7 +760,7 @@ _lg_validate_staged() {
       | "\(.key | ascii_downcase)\t\(.value | ascii_downcase)" | select(test("\n") | not) else empty end' \
     "$s.fin" > "$s.fintsv" || _lg_die "jq failed (finalized map)"
   _lg_v_keymap "$s.toks" "$s.fintsv" "$s.globs" "$s.map"
-  jq -n -c --slurpfile c "$_LG_CFG" --slurpfile reg "$reg" --slurpfile fin "$s.fin" \
+  jq -L "$_LG_LIB" -n -c --slurpfile c "$_LG_CFG" --slurpfile reg "$reg" --slurpfile fin "$s.fin" \
       --slurpfile map "$s.map" --slurpfile new "$s.new" --slurpfile old "$s.old" --slurpfile meta "$s.meta" \
       "$_LG_JQ_INDEX_DEFS$_LG_JQ_VALIDATE_DEFS$_LG_JQ_VALIDATE_STAGED" >> "$out" \
     || _lg_die "jq failed (validate --staged)"
@@ -781,7 +781,7 @@ _lg_validate_all() {
       || _lg_die "git ls-files failed: $(head -n 3 "$s.err" 2>/dev/null)"
     _lg_v_registry_into "$(_lg_registry)" "$s.tracked" "$out"
   fi
-  jq -c --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS$_LG_JQ_VALIDATE_DEFS$_LG_JQ_VALIDATE_ALL" "$ix" >> "$out" \
+  jq -L "$_LG_LIB" -c --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS$_LG_JQ_VALIDATE_DEFS$_LG_JQ_VALIDATE_ALL" "$ix" >> "$out" \
     || _lg_die "jq failed (validate --all)"
 }
 
