@@ -5171,6 +5171,616 @@ test_promote_reverify_same_proof_path() {
   teardown
 }
 
+# --- V12 plan structure -----------------------------------------------------------
+#
+# The fixture plan, docs/superpowers/plans/2026-01-01-ttl.md, is assembled
+# from named blocks (plan_write), its `### Task` headings numbered in order,
+# so a test removes, moves or alters one element by listing other blocks.
+# The default plan has two chunks: chunk 1 builds the fixture claim (a
+# Claims line naming it, src/auth/token.py modified), chunk 2 documents it
+# (Claims none); each chunk carries its claims gate before its spec-update
+# task, and the last ends with the final gate before the finalize task. The
+# Specs lists name the fixture spec as target, as spec-inject writes them.
+
+PLAN=docs/superpowers/plans/2026-01-01-ttl.md
+PLAN_STEM=2026-01-01-ttl
+# shellcheck disable=SC2034  # read by plan_write callers
+PLAN_DEFAULT="head chunk1 impl1 gate1 update chunk2 impl2 gate2 update final finalize"
+_PLAN_TASK=0
+
+# plan_task <title>: the next `### Task N: <title>` heading.
+plan_task() {
+  _PLAN_TASK=$((_PLAN_TASK + 1))
+  printf '\n### Task %s: %s\n\n' "$_PLAN_TASK" "$1"
+}
+
+# plan_specs: an injected Specs list naming the fixture spec as target.
+plan_specs() {
+  cat <<'EOF'
+**Specs** (roles copied from `--specs`; `infer` = resolve against `git diff` when this task runs):
+- docs/specs/SPEC-AUTH-001-token.md — target
+
+EOF
+}
+
+# shellcheck disable=SC2016  # Markdown backticks, not command substitution
+plan_block() {
+  case "$1" in
+    head)
+      printf '# Token TTL Implementation Plan\n\n**Goal:** Build the 15-minute access-token expiry.\n\n**Spec:** docs/specs/SPEC-AUTH-001-token.md\n\n---\n' ;;
+    completed) printf '\n**Status**: Completed\n' ;;
+    chunk1) printf '\n## Chunk 1: Expiry\n' ;;
+    chunk2) printf '\n## Chunk 2: Docs\n' ;;
+    impl1|impl1_noclaims)
+      plan_task "Expire access tokens"
+      printf '**Files:**\n- Modify: `src/auth/token.py:1-1`\n- Test: `tests/unit/test_token.py`\n\n'
+      if [ "$1" = impl1 ]; then printf '**Claims:** SPEC-AUTH-001#token-ttl\n\n'; fi
+      printf -- '- [ ] **Step 1: Write the failing test**\n' ;;
+    impl2)
+      plan_task "Document the expiry"
+      printf '**Files:**\n- Modify: `docs/guides/tokens.md`\n\n**Claims:** none — documentation only\n' ;;
+    impl_code_noclaims)
+      plan_task "Tidy the token module"
+      printf '**Files:**\n- Modify: `src/auth/token.py`\n' ;;
+    impl_none_link)
+      plan_task "Refactor the token module"
+      printf '**Files:**\n- Modify: `src/auth/token.py`\n\n**Claims:** none — refactor\n\nThe approach is in docs/issues/token-ttl.md.\n' ;;
+    amendment)
+      plan_task "Land the spec amendment for docs/specs/SPEC-AUTH-001-token.md"
+      printf -- '- [ ] **Step 1: Write the AMENDED block**\n' ;;
+    impl_docs_prose)
+      plan_task "Describe the expiry in the guide"
+      printf '**Files:**\n- Modify: `docs/guides/tokens.md` (mirrors `src/auth/token.py`)\n' ;;
+    gate1|gate2)
+      plan_task "Claims gate (chunk ${1#gate})"
+      printf -- '- [ ] **Step 1: Run the claims gate**\n' ;;
+    update|update_nospecs)
+      plan_task "Update governing specs for this chunk"
+      if [ "$1" = update ]; then plan_specs; fi
+      printf -- '- [ ] **Step 1: Update spec status (guarded)**\n' ;;
+    final)
+      plan_task "Final claims gate"
+      printf -- '- [ ] **Step 1: Attest the final gate**\n' ;;
+    finalize|finalize_nospecs)
+      plan_task "Finalize all governing specs"
+      if [ "$1" = finalize ]; then plan_specs; fi
+      printf -- '- [ ] **Step 1: Advance implemented specs (scope-gated)**\n' ;;
+    fenced_gate1)
+      printf '\nAn example of an injected gate:\n\n```markdown\n### Task 9: Claims gate (chunk 1)\n```\n' ;;
+    nested_gate1)
+      # A ``` line inside a ```` fence is content: a bare toggle would close
+      # the fence there and read the heading after it.
+      printf '\nA template quoting a fence:\n\n````markdown\n```\n### Task 9: Claims gate (chunk 1)\n```\n````\n' ;;
+    tilde_gate1)
+      # A ~~~ line inside a ~~~~ fence is content (shorter run).
+      printf '\nA template quoting a tilde fence:\n\n~~~~markdown\n~~~\n### Task 9: Claims gate (chunk 1)\n~~~~\n' ;;
+    mixed_gate1)
+      # A ~~~ line does not close a ``` fence (another character).
+      printf '\nA template quoting both:\n\n```markdown\n~~~\n### Task 9: Claims gate (chunk 1)\n~~~\n```\n' ;;
+    *) echo "plan_block: unknown block $1" >&2; return 1 ;;
+  esac
+}
+
+# plan_write [<path>] -- <block>…: write the plan (default $PLAN) from blocks.
+plan_write() {
+  local path="$PLAN"
+  if [ "$1" != -- ]; then path="$1"; shift; fi
+  shift
+  mkdir -p "$(dirname "$path")"
+  _PLAN_TASK=0
+  {
+    local b
+    for b in "$@"; do plan_block "$b"; done
+  } > "$path"
+}
+
+# The last `cl`'s V12 finding messages, one per line, and their count.
+v12_messages() {
+  jq -r '.findings[]? | select(.check == "V12") | .message' <<<"$CL_OUT" 2>/dev/null || true
+}
+v12_count() {
+  jq '[.findings[]?, .advisories[]? | select(.check == "V12")] | length' <<<"$CL_OUT" 2>/dev/null || echo invalid
+}
+
+# assert_v12 <substring> <what>: the last `cl` exited 1 with a V12 finding
+# whose message contains <substring>.
+assert_v12() {
+  assert_eq "1" "$CL_RC" "$2: exits 1"
+  assert_contains "$(v12_messages)" "$1" "$2: a V12 finding names '$1'"
+}
+
+# assert_v12_ok <what>: the last `cl` exited 0 with no V12 row.
+assert_v12_ok() {
+  assert_eq "0" "$CL_RC" "$1: exits 0"
+  assert_eq "0" "$(v12_count)" "$1: no V12 finding"
+}
+
+# v12_staged <block>…: the fixture with the plan written from <block>…,
+# staged, and `validate --staged` run.
+v12_staged() {
+  claims_fixture
+  plan_write -- "$@"
+  git add "$PLAN"
+  cl validate --staged
+}
+
+# final_record <head> [result]: a committed-shape final gate record of the
+# fixture plan (attest --final arrives in Task 17; R7).
+final_record() {
+  mkdir -p "docs/spec-claims/gates/$PLAN_STEM"
+  jq -n --arg head "$1" --arg result "${2:-pass}" '{result: $result, head: $head}' \
+    > "docs/spec-claims/gates/$PLAN_STEM/final.json"
+}
+
+test_v12_well_formed_plan_passes() {
+  echo "test: V12 — a well-formed plan passes"
+  # shellcheck disable=SC2086  # the block list splits on spaces
+  v12_staged $PLAN_DEFAULT
+  assert_v12_ok "the default plan, staged"
+  cl validate --all
+  assert_v12_ok "the default plan, --all"
+  teardown
+}
+
+test_v12_chunk_without_gate() {
+  echo "test: V12 — a chunk without its claims gate"
+  v12_staged head chunk1 impl1 gate1 update chunk2 impl2 update final finalize
+  assert_v12 "chunk 2: no claims gate before the spec-update task" "chunk 2's gate deleted"
+  assert_not_contains "$(v12_messages)" "chunk 1" "…chunk 1 is not named"
+  # A gate numbered for another chunk is not this chunk's gate.
+  plan_write -- head chunk1 impl1 gate1 update chunk2 impl2 gate1 update final finalize
+  git add "$PLAN"
+  cl validate --staged
+  assert_v12 "chunk 2: no claims gate" "chunk 2 carrying chunk 1's gate"
+  teardown
+}
+
+test_v12_gate_after_spec_update() {
+  echo "test: V12 — a claims gate after its spec-update task"
+  v12_staged head chunk1 impl1 update gate1 chunk2 impl2 gate2 update final finalize
+  assert_v12 "chunk 1: no claims gate before" "chunk 1's gate moved after its spec-update task"
+  teardown
+}
+
+test_v12_no_final_gate() {
+  echo "test: V12 — no final claims gate before the finalize task"
+  v12_staged head chunk1 impl1 gate1 update chunk2 impl2 gate2 update finalize
+  assert_v12 "final claims gate" "the final gate deleted"
+  plan_write -- head chunk1 impl1 gate1 update chunk2 impl2 gate2 update finalize final
+  git add "$PLAN"
+  cl validate --staged
+  assert_v12 "final claims gate" "the final gate after the finalize task"
+  teardown
+}
+
+test_v12_unbuilt_target_claim_unnamed() {
+  echo "test: V12 — an unbuilt claim of a target spec named on no Claims line"
+  v12_staged head chunk1 impl1_noclaims gate1 update chunk2 impl2 gate2 update final finalize
+  assert_v12 "SPEC-AUTH-001#token-ttl" "the Claims line naming the claim deleted"
+  teardown
+}
+
+test_v12_code_task_without_claims_line() {
+  echo "test: V12 — an impl task changing code without a Claims line"
+  v12_staged head chunk1 impl1 gate1 update chunk2 impl2 impl_code_noclaims gate2 update final finalize
+  assert_v12 "no **Claims:** line" "a task modifying src/auth/token.py without Claims"
+  assert_contains "$(v12_messages)" "Tidy the token module" "…the finding names the task"
+  assert_contains "$(v12_messages)" "src/auth/token.py" "…and its code path"
+  # With code_roots set, a path outside them is not code.
+  jset docs/spec-claims/config.json '.code_roots = ["lib/"]'
+  git add docs/spec-claims/config.json
+  cl validate --staged
+  assert_eq "0" "$(v12_count)" "code_roots [lib/]: src/auth/token.py is not code, no V12 finding"
+  teardown
+}
+
+test_v12_claims_none_linking_issue() {
+  echo "test: V12 — a Claims none task linking an issue as its source"
+  v12_staged head chunk1 impl1 gate1 update chunk2 impl2 impl_none_link gate2 update final finalize
+  assert_v12 "promote the decision into a governing doc" "Claims none plus a docs/issues/ link"
+  assert_contains "$(v12_messages)" "docs/issues/token-ttl.md" "…the finding names the link"
+  teardown
+}
+
+test_v12_completed_without_final_record() {
+  echo "test: V12 — a plan moving to Completed without a final gate record"
+  v12_staged head completed chunk1 impl1 gate1 update chunk2 impl2 gate2 update final finalize
+  assert_v12 "final gate" "**Status**: Completed with no final.json"
+  assert_contains "$(v12_messages)" "docs/spec-claims/gates/$PLAN_STEM/final.json" "…naming the record's path"
+  teardown
+}
+
+test_v12_plan_without_governing_specs_exempt() {
+  echo "test: V12 — a plan without governing specs is exempt"
+  # No Specs list anywhere, and chunk 2's gate and the final gate missing:
+  # each would be a finding in a plan with governing specs.
+  v12_staged head chunk1 impl1_noclaims gate1 update_nospecs chunk2 impl2 update_nospecs finalize_nospecs
+  assert_v12_ok "every Specs list stripped"
+  teardown
+}
+
+test_v12_legacy_plan_without_gates_exempt() {
+  echo "test: V12 — a pre-claims plan (on main before the branch point, no gate tasks) edited later is exempt"
+  claims_fixture
+  plan_write -- head chunk1 impl1 update chunk2 impl2 update finalize
+  base_here "a pre-claims plan"
+  printf '\nOne more note.\n' >> "$PLAN"
+  git add "$PLAN"
+  cl validate --staged
+  assert_v12_ok "the legacy plan edited on feature"
+  cl validate --all
+  assert_v12_ok "…and under --all"
+  # The same plan, new on the branch, is checked.
+  cp "$PLAN" docs/superpowers/plans/2026-01-02-copy.md
+  git add docs/superpowers/plans/2026-01-02-copy.md
+  cl validate --staged
+  assert_v12 "chunk 1: no claims gate" "the same plan added on feature"
+  teardown
+}
+
+test_v12_fenced_example_ignored() {
+  echo "test: V12 — a gate heading inside a code fence is not a task"
+  v12_staged head chunk1 impl1 fenced_gate1 update chunk2 impl2 gate2 update final finalize
+  assert_v12 "chunk 1: no claims gate" "a fenced gate heading only"
+  teardown
+}
+
+test_v12_nested_fence_ignored() {
+  echo "test: V12 — a gate heading after a \`\`\` line inside a \`\`\`\` fence is still fenced"
+  v12_staged head chunk1 impl1 nested_gate1 update chunk2 impl2 gate2 update final finalize
+  assert_v12 "chunk 1: no claims gate" "a gate heading inside a nested fence"
+  teardown
+}
+
+test_v12_fence_pairing_ignored() {
+  echo "test: V12 — fences pair as in CommonMark: a shorter run, or another character, does not close"
+  v12_staged head chunk1 impl1 tilde_gate1 update chunk2 impl2 gate2 update final finalize
+  assert_v12 "chunk 1: no claims gate" "a gate heading inside a ~~~~ fence holding a ~~~ line"
+  plan_write -- head chunk1 impl1 mixed_gate1 update chunk2 impl2 gate2 update final finalize
+  git add "$PLAN"
+  cl validate --staged
+  assert_v12 "chunk 1: no claims gate" "a gate heading inside a \`\`\` fence holding ~~~ lines"
+  teardown
+}
+
+test_v12_chunkless_plan_gate_immediately_precedes() {
+  echo "test: V12 — a chunkless plan: the gate immediately precedes each spec-update task"
+  v12_staged head impl1 gate1 update impl2 update gate2 final finalize
+  assert_v12 "chunk 2: the claims gate must immediately precede the spec-update task" "chunk 2's gate after its spec-update task"
+  assert_not_contains "$(v12_messages)" "chunk 1" "…chunk 1 is not named"
+  plan_write -- head impl1 gate1 update impl2 gate2 update final finalize
+  git add "$PLAN"
+  cl validate --staged
+  assert_v12_ok "chunk 2 reordered"
+  # Before the spec-update task is not enough: the gate must be the task
+  # right above it.
+  plan_write -- head impl1 gate1 update impl2 gate2 amendment update final finalize
+  git add "$PLAN"
+  cl validate --staged
+  assert_v12 "chunk 2: the claims gate must immediately precede the spec-update task" "chunk 2's gate, then an amendment task, then the spec-update task"
+  teardown
+}
+
+test_v12_completed_after_base_merge_ok() {
+  echo "test: V12 — Completed after merging the base (which gained a code commit) into the branch"
+  claims_fixture
+  # shellcheck disable=SC2086  # the block list splits on spaces
+  plan_write -- $PLAN_DEFAULT
+  git add "$PLAN" && git commit -qm "the plan"
+  final_record "$(git rev-parse HEAD)"
+  git add docs/spec-claims/gates && git commit -qm "the final gate record"
+  git checkout -q main
+  printf 'CLOCK_SKEW = 5\n' > src/auth/clock.py
+  git add src/auth/clock.py && git commit -qm "trunk: a code change"
+  git checkout -q feature
+  git merge -q --no-edit main
+  # shellcheck disable=SC2086
+  plan_write -- head completed ${PLAN_DEFAULT#head }
+  git add "$PLAN"
+  cl validate --staged
+  assert_v12_ok "the merge and trunk's code commit are not this plan's"
+  git commit -qm "the plan completed"
+  cl validate --all
+  assert_v12_ok "…committed, under --all"
+  # A code commit of the branch's own after the final gate is a finding.
+  printf 'TTL_SECONDS = 901\n' > src/auth/token.py
+  git commit -qam "a code change after the final gate"
+  cl validate --all
+  assert_v12 "after the final gate" "a non-merge code commit after the gate"
+  assert_contains "$(v12_messages)" "src/auth/token.py" "…naming its code path"
+  teardown
+}
+
+test_v12_final_record_checked() {
+  echo "test: V12 — the final gate record must pass, its head be an ancestor of HEAD, and the commit change no code"
+  claims_fixture
+  # shellcheck disable=SC2086  # the block list splits on spaces
+  plan_write -- $PLAN_DEFAULT
+  git add "$PLAN" && git commit -qm "the plan"
+  local gated
+  gated=$(git rev-parse HEAD)
+  final_record "$gated" fail
+  # shellcheck disable=SC2086
+  plan_write -- head completed ${PLAN_DEFAULT#head }
+  git add -A
+  cl validate --staged
+  assert_v12 "final gate" "a record whose result is fail"
+  assert_contains "$(v12_messages)" "fail" "…naming the result"
+  final_record "$(git commit-tree -m elsewhere "HEAD^{tree}")"
+  git add -A
+  cl validate --staged
+  assert_v12 "is not an ancestor of HEAD" "a record whose head is off the branch"
+  final_record "$gated"
+  printf 'TTL_SECONDS = 901\n' > src/auth/token.py
+  git add -A
+  cl validate --staged
+  assert_v12 "after the final gate" "a staged code change in the completing commit"
+  git restore --staged --worktree src/auth/token.py
+  cl validate --staged
+  assert_v12_ok "the passing record alone"
+  teardown
+}
+
+test_v12_final_record_malformed() {
+  echo "test: V12 — a final gate record that is not one object with a commit head is a finding"
+  claims_fixture
+  # shellcheck disable=SC2086  # the block list splits on spaces
+  plan_write -- $PLAN_DEFAULT
+  git add "$PLAN" && git commit -qm "the plan"
+  local gated v
+  gated=$(git rev-parse HEAD)
+  # shellcheck disable=SC2086
+  plan_write -- head completed ${PLAN_DEFAULT#head }
+  mkdir -p "docs/spec-claims/gates/$PLAN_STEM"
+  for v in 'not json at all' '[1, 2]' '{"result":"pass"}{"result":"pass"}'; do
+    printf '%s\n' "$v" > "docs/spec-claims/gates/$PLAN_STEM/final.json"
+    git add -A
+    cl validate --staged
+    assert_v12 "is not one JSON object" "the record $v"
+  done
+  for v in '{"result":"pass"}' '{"result":"pass","head":"zzz"}' '{"result":"pass","head":7}'; do
+    printf '%s\n' "$v" > "docs/spec-claims/gates/$PLAN_STEM/final.json"
+    git add -A
+    cl validate --staged
+    assert_v12 "names no commit head" "the record $v"
+  done
+  printf '{"result":"pass","head":"%s"}\n' "$gated" > "docs/spec-claims/gates/$PLAN_STEM/final.json"
+  git add -A
+  cl validate --staged
+  assert_v12_ok "a passing record whose head is a commit of the branch"
+  teardown
+}
+
+test_v12_final_record_unsafe_path() {
+  echo "test: V12 — the final gate record is read only through a safe path inside the work tree"
+  claims_fixture
+  evil_outside
+  local gated
+  # shellcheck disable=SC2086  # the block list splits on spaces
+  plan_write -- $PLAN_DEFAULT
+  git add -A && git commit -qm "the plan"
+  gated=$(git rev-parse HEAD)
+  # shellcheck disable=SC2086
+  plan_write -- head completed ${PLAN_DEFAULT#head }
+  # A passing record, but only through a symlinked gates directory.
+  mkdir -p "$EVIL_DIR/$PLAN_STEM"
+  jq -n --arg head "$gated" '{result: "pass", head: $head}' > "$EVIL_DIR/$PLAN_STEM/final.json"
+  ln -s "$EVIL_DIR" docs/spec-claims/gates
+  cl validate --all
+  assert_v12 "final gate" "the gates directory is a symlink to a passing record outside the work tree"
+  assert_contains "$(v12_messages)" "docs/spec-claims/gates/$PLAN_STEM/final.json" "…naming the record's path"
+  rm docs/spec-claims/gates
+  final_record "$gated"
+  cl validate --all
+  assert_v12_ok "the same record in the work tree"
+  # A plan named ...md has the stem "..": its record path leaves the gates directory.
+  cp "$PLAN" "docs/superpowers/plans/...md"
+  jq -n --arg head "$gated" '{result: "pass", head: $head}' > docs/spec-claims/final.json
+  rm -r "docs/spec-claims/gates/$PLAN_STEM"
+  git rm -q --cached "$PLAN" 2>/dev/null || true
+  rm -f "$PLAN"
+  cl validate --all
+  assert_v12 "not a safe" "a plan whose stem is .. (record path docs/spec-claims/gates/../final.json)"
+  teardown
+}
+
+test_v12_symlinked_plan_skipped() {
+  echo "test: V12 — under --all a plan reached through a symbolic link is skipped, never read"
+  claims_fixture
+  evil_outside
+  # A plan outside the work tree that would be a finding (no gate tasks, new).
+  plan_write "$EVIL_DIR/2026-01-09-link.md" -- head chunk1 impl1 update chunk2 impl2 update finalize
+  mkdir -p docs/superpowers/plans
+  ln -s "$EVIL_DIR/2026-01-09-link.md" docs/superpowers/plans/2026-01-09-link.md
+  cl validate --all
+  assert_v12_ok "a plan that is a symlink to a file outside the work tree"
+  rm docs/superpowers/plans/2026-01-09-link.md
+  # The same plan as a regular file is checked.
+  cp "$EVIL_DIR/2026-01-09-link.md" docs/superpowers/plans/2026-01-09-link.md
+  cl validate --all
+  assert_v12 "chunk 1: no claims gate" "the same plan as a regular file"
+  teardown
+}
+
+test_v12_files_line_first_path_only() {
+  echo "test: V12 — a Files line names its first backticked path; prose after it is not a file"
+  claims_fixture
+  local json
+  v12_staged head chunk1 impl1 gate1 update chunk2 impl_docs_prose gate2 update final finalize
+  assert_v12_ok "a docs task whose Files line mentions src/auth/token.py in prose"
+  json=$(parse_plan "$PLAN" all)
+  assert_json_field "$json" '.chunks[1].tasks[0].files | tojson' '["docs/guides/tokens.md"]' "files: the first backticked path only"
+  teardown
+}
+
+test_v12_historical_completed_plan_not_finding() {
+  echo "test: V12 — a plan Completed on main before the branch point is history"
+  claims_fixture
+  # shellcheck disable=SC2086  # the block list splits on spaces
+  plan_write -- head completed ${PLAN_DEFAULT#head }
+  base_here "a completed plan"
+  cl validate --all
+  assert_v12_ok "no final.json, validate --all on feature"
+  printf '\nA later note.\n' >> "$PLAN"
+  git add "$PLAN"
+  cl validate --staged
+  assert_v12_ok "…edited and staged"
+  # The same plan, new on the branch, moves to Completed here.
+  cp "$PLAN" docs/superpowers/plans/2026-01-02-copy.md
+  cl validate --all
+  assert_v12 "final gate" "the same completed plan added on feature"
+  teardown
+}
+
+test_v12_base_unresolvable_gate_carrying_only() {
+  echo "test: V12 — with the base unresolvable, only a gate-carrying plan is checked, and not its move to Completed"
+  claims_fixture
+  jset docs/spec-claims/config.json '.base = "no-such-ref"'
+  git add docs/spec-claims/config.json
+  # No gate task: newness is unknown, so it is not checked.
+  plan_write -- head completed chunk1 impl1 update chunk2 impl2 update finalize
+  git add "$PLAN"
+  cl validate --staged
+  assert_eq "2" "$CL_RC" "a plan without gates: exits 2 (base-unresolvable)"
+  assert_eq "0" "$(v12_count)" "…no V12 finding"
+  # Gate-carrying: checked (a finding wins over the indeterminate), but its
+  # move to Completed cannot be judged without the base.
+  plan_write -- head completed chunk1 impl1 gate1 update chunk2 impl2 update final finalize
+  git add "$PLAN"
+  cl validate --staged
+  assert_v12 "chunk 2: no claims gate" "a gate-carrying plan"
+  assert_not_contains "$(v12_messages)" "final gate record" "…its move to Completed is not judged"
+  teardown
+}
+
+# parse_plan <path> <source>: _claims_plan_parse's JSON, run inside a probed
+# doc-tools (the parser is not a verb).
+parse_plan() {
+  local out probe
+  out=$(harness_mktemp plan-parse)
+  probe=$(claims_probe after '_claims_plan_parse "$PP_PATH" "$PP_SRC" > "$PP_OUT"')
+  PP_PATH="$1" PP_SRC="$2" PP_OUT="$out" "$probe" claims render </dev/null >/dev/null 2>&1 || true
+  cat "$out"
+  rm -f "$out"
+}
+
+test_plan_parse_shape() {
+  echo "test: _claims_plan_parse — chunks, kinds, Claims, files, links, specs, completed, fences, CRLF"
+  claims_fixture
+  local p=docs/superpowers/plans/2026-01-03-parse.md json crlf
+  mkdir -p docs/superpowers/plans
+  cat > "$p" <<'EOF'
+---
+title: Parser plan
+status: Completed
+governing_specs:
+  - docs/specs/SPEC-AUTH-001-token.md:target
+  - docs/adr/ADR-007-keys.md
+---
+# Parser plan
+
+## Chunk 1: One
+
+### Task 1: Build it
+
+**Files:**
+- Create: `src/auth/new.py`
+- Modify: `src/auth/token.py:10-20`
+- Test: `tests/unit/test_new.py`
+
+**Claims:** SPEC-AUTH-001#token-ttl, `SPEC-AUTH-001#refresh-single-use`
+
+See [the issue](docs/issues/token-ttl.md) and docs/superpowers/specs/2026-01-01-design.md.
+
+```markdown
+### Task 9: Claims gate (chunk 1)
+**Claims:** SPEC-AUTH-001#fenced
+```
+
+### Task 2: Claims gate (chunk 1)
+
+### Task 3: Update governing specs for this chunk
+
+**Specs** (roles copied from `--specs`):
+- docs/specs/SPEC-AUTH-001-token.md — target
+- docs/adr/ADR-007-keys.md — constraint
+
+## Chunk 2: Two
+
+### Task 4: Tidy
+
+**Claims:** none — refactor only
+
+### Task 5: Land the spec amendment for docs/specs/SPEC-AUTH-001-token.md
+
+### Task 6: Final claims gate
+
+### Task 7: Finalize all governing specs
+EOF
+  json=$(parse_plan "$p" all)
+  assert_json_field "$json" '.path' "$p" ".path"
+  assert_json_field "$json" '.stem' "2026-01-03-parse" ".stem"
+  assert_json_field "$json" '.completed' "true" "front matter status: Completed → completed"
+  assert_json_field "$json" '.chunked' "true" "## Chunk headings → chunked"
+  assert_json_field "$json" '.specs | tojson' \
+    '[{"path":"docs/specs/SPEC-AUTH-001-token.md","role":"target"},{"path":"docs/adr/ADR-007-keys.md","role":"infer"},{"path":"docs/adr/ADR-007-keys.md","role":"constraint"}]' \
+    ".specs: front matter (unsuffixed → infer) and the Specs list, each pair once"
+  assert_json_field "$json" '[.chunks[].n] | tojson' '[1,2]' "chunk numbers from the headings"
+  assert_json_field "$json" '[.chunks[] | [.tasks[].kind]] | tojson' \
+    '[["impl","gate","spec-update"],["impl","amendment","final-gate","finalize"]]' "task kinds (the fenced heading is no task)"
+  assert_json_field "$json" '.chunks[0].tasks[0].title' "Build it" "the title follows 'Task N: '"
+  assert_json_field "$json" '.chunks[0].tasks[0].line' "$(line_no "$p" '### Task 1: Build it')" ".line is the heading's line"
+  assert_json_field "$json" '.chunks[0].tasks[0].files | tojson' '["src/auth/new.py","src/auth/token.py","tests/unit/test_new.py"]' "files, :N-M stripped"
+  assert_json_field "$json" '.chunks[0].tasks[0].claims | tojson' '["SPEC-AUTH-001#token-ttl","SPEC-AUTH-001#refresh-single-use"]' "Claims: a comma list (backticks dropped)"
+  assert_json_field "$json" '.chunks[0].tasks[0].claims_none' "null" "…claims_none null"
+  assert_json_field "$json" '.chunks[0].tasks[0].links | tojson' '["docs/issues/token-ttl.md","docs/superpowers/specs/2026-01-01-design.md"]' "links: path tokens under source_doc_patterns"
+  assert_json_field "$json" '.chunks[1].tasks[0].claims_none' "refactor only" "Claims: none — <reason>"
+  assert_json_field "$json" '.chunks[1].tasks[0].claims | tojson' '[]' "…no ids"
+  assert_not_contains "$json" "SPEC-AUTH-001#fenced" "a fenced Claims line is ignored"
+  # The CRLF twin parses the same.
+  crlf=docs/superpowers/plans/2026-01-04-crlf.md
+  awk '{ printf "%s\r\n", $0 }' "$p" > "$crlf"
+  assert_eq "$(jq -c 'del(.path, .stem)' <<<"$json")" "$(parse_plan "$crlf" all | jq -c 'del(.path, .stem)')" "a CRLF plan parses as its LF twin"
+  # The index is read under staged, a commit under rev:<sha>.
+  git add "$p" && git commit -qm "parse plan"
+  printf '\n### Task 8: Added later\n' >> "$p"
+  git add "$p"
+  assert_json_field "$(parse_plan "$p" staged)" '[.chunks[1].tasks[].title] | last' "Added later" "staged reads the index"
+  assert_json_field "$(parse_plan "$p" "rev:$(git rev-parse HEAD)")" '[.chunks[1].tasks[].title] | last' "Finalize all governing specs" "rev:<sha> reads the commit"
+  teardown
+}
+
+test_plan_parse_chunkless() {
+  echo "test: _claims_plan_parse — a chunkless plan: each impl task opens a chunk; **Status:** Completed"
+  claims_fixture
+  local json
+  plan_write -- head impl1 gate1 update impl2 gate2 update final finalize
+  printf '\n**Status:** completed\n' >> "$PLAN"
+  json=$(parse_plan "$PLAN" all)
+  assert_json_field "$json" '.chunked' "false" "no ## Chunk heading → chunked false"
+  assert_json_field "$json" '[.chunks[] | {n, k: [.tasks[].kind]}] | tojson' \
+    '[{"n":1,"k":["impl","gate","spec-update"]},{"n":2,"k":["impl","gate","spec-update","final-gate","finalize"]}]' \
+    "each impl task opens chunk n; the injected tasks after it belong to it"
+  assert_json_field "$json" '.completed' "true" "**Status:** completed (any case) → completed"
+  assert_json_field "$json" '.specs | tojson' '[{"path":"docs/specs/SPEC-AUTH-001-token.md","role":"target"}]' "the Specs lists, once"
+  teardown
+}
+
+test_is_code_path() {
+  echo "test: _claims_is_code_path — outside docs/ without code_roots; else a code_roots glob or prefix"
+  claims_fixture
+  local out probe
+  out=$(harness_mktemp code-paths)
+  probe=$(claims_probe after 'for p in src/a.py README.md docs/x.md docs srcx/a.py lib/a.sh lib/sub/b.sh lib/a.py; do if _claims_is_code_path "$p"; then printf "%s " "$p" >> "$CP_OUT"; fi; done')
+  CP_OUT="$out" "$probe" claims render </dev/null >/dev/null 2>&1 || true
+  assert_eq "src/a.py README.md docs srcx/a.py lib/a.sh lib/sub/b.sh lib/a.py " "$(cat "$out")" "code_roots empty: every path outside docs/"
+  jset docs/spec-claims/config.json '.code_roots = ["src", "lib/*.sh"]'
+  : > "$out"
+  CP_OUT="$out" "$probe" claims render </dev/null >/dev/null 2>&1 || true
+  assert_eq "src/a.py lib/a.sh lib/sub/b.sh " "$(cat "$out")" "code_roots [src, lib/*.sh]: the prefix src (not srcx) and the glob"
+  rm -f "$out"
+  teardown
+}
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -5398,6 +6008,33 @@ run_tests() {
   test_promote_reverify_all_no_sidecar_write
   test_promote_reverify_selection
   test_promote_reverify_same_proof_path
+
+  # --- Task 14: the plan parser and V12 plan structure ---
+  test_plan_parse_shape
+  test_plan_parse_chunkless
+  test_is_code_path
+  test_v12_well_formed_plan_passes
+  test_v12_chunk_without_gate
+  test_v12_gate_after_spec_update
+  test_v12_no_final_gate
+  test_v12_unbuilt_target_claim_unnamed
+  test_v12_code_task_without_claims_line
+  test_v12_claims_none_linking_issue
+  test_v12_completed_without_final_record
+  test_v12_plan_without_governing_specs_exempt
+  test_v12_legacy_plan_without_gates_exempt
+  test_v12_fenced_example_ignored
+  test_v12_nested_fence_ignored
+  test_v12_fence_pairing_ignored
+  test_v12_chunkless_plan_gate_immediately_precedes
+  test_v12_completed_after_base_merge_ok
+  test_v12_final_record_checked
+  test_v12_final_record_malformed
+  test_v12_final_record_unsafe_path
+  test_v12_symlinked_plan_skipped
+  test_v12_files_line_first_path_only
+  test_v12_historical_completed_plan_not_finding
+  test_v12_base_unresolvable_gate_carrying_only
 
   print_summary
 }
