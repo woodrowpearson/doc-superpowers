@@ -17,14 +17,16 @@
 #   duplicate-contract  a contract id declared twice (any ledgers)
 #   glob                a glob the grammar (glob.sh) rejects
 #   overlap             a tracked file two ledgers claim (glob.sh's
-#                       ownership: ordinary paths first, then residual)
+#                       ownership: ordinary paths first, then residual;
+#                       a retired ledger claims nothing)
 #   unowned             a tracked file outside docs/ no ledger claims —
-#                       only when some ledger declares paths or
+#                       only when some active ledger declares paths or
 #                       residual_paths
 # Text: "registry <class> <detail>" per finding. JSON: {"findings":[…]}.
 
 # The contract id form: a lowercase kind, ":", a name without whitespace.
-_LG_CONTRACT_RE='^[a-z][a-z0-9_-]*:[^[:space:]]+$'
+# \A … \z: jq's "$" also matches before a trailing newline.
+_LG_CONTRACT_RE='\A[a-z][a-z0-9_-]*:[^[:space:]]+\z'
 
 # _lg_registry_findings <registry> <tracked-nul> <out.jsonl>: the registry's
 # findings, one JSON object per line, in the order listed above (overlap
@@ -40,7 +42,7 @@ _lg_registry_findings() {
     (if .schema != "ledger-registry/1"
      then f("schema"; "expected \"ledger-registry/1\", got \(.schema | tojson)") else empty end),
     (.ledgers | to_entries[] | .key as $i | .value | name($i) as $n
-     | (if (.id | type) != "string" or (.id | test("^[a-z0-9-]{1,16}$") | not)
+     | (if (.id | type) != "string" or (.id | test("\\A[a-z0-9-]{1,16}\\z") | not)
         then f("id"; "ledgers[\($i)]: \(.id | tojson) is not a ledger id ([a-z0-9-]{1,16})")
         elif .id == "unassigned" then f("id"; "ledgers[\($i)]: \"unassigned\" is reserved")
         else empty end),
@@ -85,7 +87,7 @@ _lg_registry_findings() {
     }' "$s.globs" >> "$out" || _lg_die "cannot check the registry globs"
 
   # Ownership: overlap always; unowned (outside docs/) only when declared.
-  declares=$(jq -r '[.ledgers[] | ((.paths, .residual_paths) | if type == "array" then length else 0 end)]
+  declares=$(jq -r '[.ledgers[] | select(.status != "retired") | ((.paths, .residual_paths) | if type == "array" then length else 0 end)]
     | add // 0 | if . > 0 then 1 else 0 end' "$reg") || _lg_die "jq failed (registry paths)"
   _lg_owner_map "$tracked" "$s.own" "$reg"
   LC_ALL=C awk -v declares="$declares" "$_LG_AWK_JS"'

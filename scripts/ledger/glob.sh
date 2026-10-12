@@ -33,6 +33,14 @@ function glob_lit(c) {
   if (index(".[]()|$+{}*?", c)) return "[" c "]"
   return c
 }
+# glob_alt(out): out, closed with "()" when an alternative of a brace is
+# empty ("{,a}", "{a,}", "{a,,b}", "{}"): BWK awk rejects "(|a)" / "(a|)"
+# ("illegal primary"), and accepts "(()|a)". A literal "(" or "|" is
+# written "[(]" / "[|]", so the last character tells.
+function glob_alt(out,   c) {
+  c = substr(out, length(out), 1)
+  return (c == "(" || c == "|") ? out "()" : out
+}
 # glob_ere(g): the ERE for glob g ("^…$"), or "" with GLOB_ERR set.
 function glob_ere(g,   out, i, n, c, depth, prev) {
   GLOB_ERR = ""
@@ -52,9 +60,9 @@ function glob_ere(g,   out, i, n, c, depth, prev) {
     if (c == "{") { depth++; out = out "("; prev = c; continue }
     if (c == "}") {
       if (depth == 0) { GLOB_ERR = "unbalanced \"}\""; return "" }
-      depth--; out = out ")"; prev = c; continue
+      depth--; out = glob_alt(out) ")"; prev = c; continue
     }
-    if (c == "," && depth > 0) { out = out "|"; prev = c; continue }
+    if (c == "," && depth > 0) { out = glob_alt(out) "|"; prev = c; continue }
     if (c == "\\") {
       if (i == n) { GLOB_ERR = "a trailing \"\\\""; return "" }
       i++; c = substr(g, i, 1)
@@ -153,19 +161,21 @@ _lg_paths_filter() {
 
 # --- The ownership map -------------------------------------------------------
 
-# _lg_registry_globs <registry> <out.tsv>: every string glob of the registry
+# _lg_registry_globs <registry> <out.tsv> [active]: every string glob of the
+# registry (with "active": of the ledgers whose status is not "retired")
 # as "<ledger-index>\t<ledger-id>\t<list>\t<neg>\t<glob>" — list P (paths),
 # R (residual_paths) or D (a contract's defined_in); neg 1 for a "!"
-# exclusion in P or R (the "!" removed). A ledger without a string id is
-# shown as "#<index>". Globs holding a control character are left out
+# exclusion in P or R (the "!" removed). A ledger without a string id (or
+# with a control character in it) is shown as "#<index>". Globs holding a control character are left out
 # (validate reports them).
 _lg_registry_globs() {
-  jq -r '
+  jq -r --arg only "${3:-}" '
     def strs: if type == "array" then .[] | select(type == "string") else empty end;
     def ok: explode | all(. >= 32);
     (.ledgers // []) | to_entries[] | .key as $i | .value
     | select(type == "object")
-    | (if (.id | type) == "string" then .id else "#\($i)" end) as $id
+    | select($only != "active" or .status != "retired")
+    | (if (.id | type) == "string" and (.id | ok) then .id else "#\($i)" end) as $id
     | ((.paths | strs | select(ok) | ["P", .]),
        (.residual_paths | strs | select(ok) | ["R", .]),
        (if (.contracts | type) == "array" then .contracts[] | select(type == "object")
@@ -178,7 +188,8 @@ _lg_registry_globs() {
 
 # _lg_owner_map <paths-file> <out.tsv> [registry]: each path of the
 # NUL-terminated list (in order) as "path<TAB>owner": a ledger id, "-" for
-# none, or "multi:a,b" (registry order) for several. A ledger claims a path
+# none, or "multi:a,b" (registry order) for several. A retired ledger
+# (status "retired") claims nothing. Otherwise a ledger claims a path
 # that one of its ordinary `paths` globs matches; when no ledger does, the
 # `residual_paths` globs are tried the same way. A ledger never claims a
 # path one of its own "!" globs (in either list) matches. A newline in a
@@ -188,7 +199,7 @@ _lg_owner_map() {
   local paths="$1" out="$2" reg="${3:-}" rc=0
   [ -n "$reg" ] || reg=$(_lg_registry)
   _lg_scratch_name
-  _lg_registry_globs "$reg" "$_LG_SN.globs"
+  _lg_registry_globs "$reg" "$_LG_SN.globs" active
   tr '\n\000' '\001\n' < "$paths" > "$_LG_SN.lst" || _lg_die "cannot read the path list $paths"
   LC_ALL=C awk -v globs="$_LG_SN.globs" "$_LG_AWK_GLOB"'
     BEGIN {
