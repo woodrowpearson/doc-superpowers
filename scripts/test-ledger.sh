@@ -2498,6 +2498,582 @@ test_lg_smoke_budgets() {
   assert_eq "3" "$rc" "no N: usage (3)"
 }
 
+# --- Task 5 review carry-over: one derived-status label set --------------------
+
+test_lg_status_labels_shared() {
+  echo "test: the derived-status labels index.sh writes are the ones query.sh accepts (one definition)"
+  lg_fixture
+  lg_enable
+  local q i want
+  # shellcheck disable=SC2031  # read inside the lg_source subshells, where they are set
+  want='["superseded","won'"'"'t fix","closed","shipped","merged","in review","on branch","planned","spec'"'"'d","not started"]'
+  q=$( lg_source; jq -nc "$_LG_JQ_QUERY_DEFS"'[lg_status_labels[]]' )
+  i=$( lg_source; jq -nc "$_LG_JQ_INDEX_DEFS"'[lg_status_labels[]]' )
+  assert_eq "$want" "$q" "query.sh's labels"
+  assert_eq "$q" "$i" "index.sh's labels are the same"
+  # Every label is accepted by ls --status (query.sh) as itself.
+  local l
+  for l in shipped "not started" "spec'd" "won't fix" planned; do
+    lg ls --status "$l"
+    assert_eq "0" "$LG_RC" "ls --status '$l' is accepted"
+  done
+  teardown
+}
+
+# --- Task 6: keys — resolution, CAS allocation, finalize, new, assign ------------
+
+LG_REG_XY='{"schema":"ledger-registry/1","ledgers":[
+  {"id":"x","title":"X","kind":"service","status":"active"},
+  {"id":"y","title":"Y","kind":"service","status":"active"},
+  {"id":"old","title":"Old","kind":"service","status":"retired"}]}'
+
+# lg_keys_fixture [config-json]: lg_fixture + config + registry, committed,
+# with a local bare remote "origin" (LG_REMOTE) holding main, fetched (so
+# origin/main — the default base — exists).
+lg_keys_fixture() {
+  local c='{}'
+  if [ $# -gt 0 ]; then c=$1; fi
+  lg_fixture
+  lg_enable "$c"
+  lg_registry "$LG_REG_XY"
+  git add -A && git commit -qm ledger
+  LG_REMOTE=$(harness_mktemp_d remote).git
+  git init -q --bare "$LG_REMOTE"
+  git --git-dir="$LG_REMOTE" symbolic-ref HEAD refs/heads/main
+  git remote add origin "$LG_REMOTE"
+  git push -q origin main
+  git fetch -q origin
+}
+
+# lg_clone <dir>: a second clone of LG_REMOTE at <dir>.
+lg_clone() {
+  git clone -q "$LG_REMOTE" "$1"
+}
+
+# lg_call_in <dir> <function> [args…]: lg_call with the fixture at <dir>.
+lg_call_in() {
+  local dir="$1" saved="$TEST_DIR"
+  shift
+  TEST_DIR=$dir
+  lg_call "$@"
+  TEST_DIR=$saved
+}
+
+# The counter blob on the remote (compact, keys sorted), or "absent".
+lg_remote_counters() {
+  local oid
+  oid=$(git --git-dir="$LG_REMOTE" rev-parse -q --verify refs/doc-superpowers/ledger/counters 2>/dev/null) \
+    || { echo absent; return 0; }
+  git --git-dir="$LG_REMOTE" cat-file blob "$oid:counters.json" | jq -cS .
+}
+
+# The number of commits on the remote counter ref (0 when absent).
+lg_remote_counter_commits() {
+  git --git-dir="$LG_REMOTE" rev-list --count refs/doc-superpowers/ledger/counters 2>/dev/null || echo 0
+}
+
+# The first 4 hex digits of sha256(<path>) (no newline).
+lg_hex4() {
+  local h
+  if command -v sha256sum >/dev/null 2>&1; then h=$(printf '%s' "$1" | sha256sum); else h=$(printf '%s' "$1" | shasum -a 256); fi
+  printf '%s' "${h:0:4}"
+}
+
+# lg_wait_job <secs> <pid>: wait for a background job (polling), at most
+# <secs> seconds, then reap it with harness_kill_after (which signals it if it
+# is still running); its exit code is the return value.
+lg_wait_job() {
+  local secs="$1" pid="$2" n=0 max rc=0
+  max=$((secs * 10))
+  while [ "$n" -lt "$max" ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 0.1
+    n=$((n + 1))
+  done
+  harness_kill_after 0 TERM "$pid" || rc=$?
+  return "$rc"
+}
+
+lg_keys_resolve_items() {
+  lg_item docs/issues/a.md "key: x-14" "ledger: x" "status: Open" "summary: Alpha" "aliases: [y-3, old-7]"
+  lg_item docs/issues/b.md "key: x-15" "ledger: x" "status: Open" "summary: Bravo"
+  lg_item docs/issues/k.md "ledger: unassigned" "status: Open" "summary: Keyless"
+  lg_item "docs/issues/with space.md" "key: y-9" "ledger: y" "status: Open" "summary: Spaced"
+}
+
+test_lg_resolve_forms() {
+  echo "test: _lg_resolve — key (any case), 'L 14', 'L #14', alias, path, ./path, stem; unknown rc 1"
+  lg_keys_fixture
+  lg_keys_resolve_items
+  local r
+  for r in x-14 X-14 "x 14" "x #14" "x  #14" y-3 OLD-7 docs/issues/a.md ./docs/issues/a.md a; do
+    lg_call _lg_resolve "$r"
+    assert_eq "0|docs/issues/a.md" "$LG_RC|$LG_OUT" "'$r' → docs/issues/a.md"
+  done
+  lg_call _lg_resolve "y 9"
+  assert_eq "0|docs/issues/with space.md" "$LG_RC|$LG_OUT" "'y 9' → a path with a space"
+  lg_call _lg_resolve k
+  assert_eq "0|docs/issues/k.md" "$LG_RC|$LG_OUT" "a keyless item by its stem"
+  for r in x-99 "x 99" nope "x-14 x-15"; do
+    lg_call _lg_resolve "$r"
+    assert_eq "1|" "$LG_RC|$LG_OUT" "'$r' → none (rc 1, nothing printed)"
+  done
+  # show takes the same forms, as one argument or several words.
+  lg show x 14
+  assert_eq "0" "$LG_RC" "show x 14 (two words)"
+  assert_eq "x-14  x  —  not started" "$(printf '%s\n' "$LG_OUT" | head -n 1)" "…the item"
+  lg show "x #14"
+  assert_eq "0" "$LG_RC" "show 'x #14'"
+  lg show old-7
+  assert_eq "0" "$LG_RC" "show an alias"
+  assert_contains "$LG_OUT" "aliases: y-3, old-7" "…the item that carries it"
+  lg show x-14 x-15
+  assert_eq "3" "$LG_RC" "two refs: still a usage error"
+  teardown
+}
+
+test_lg_resolve_legacy_forms() {
+  echo "test: _lg_resolve — legacy refs '<old>#<n>', '<old> row <n>', '<old> ledger row <n>' through legacy.json"
+  lg_keys_fixture '{"legacy_ledgers":{"tier1":"docs/ledgers/tier1-pipeline-ledger.md"}}'
+  lg_keys_resolve_items
+  printf '%s\n' '{"checkout#3":{"key":"x-14"},"checkout#4":{"item":"docs/issues/b.md"},
+    "checkout#5":{"archived":"docs/archive/checkout-ledger.md#row-5"},"tier1#2":{"key":"y-3"},
+    "checkout#6":{"key":"x-404"}}' > docs/ledger/legacy.json
+  local r
+  for r in "checkout#3" "checkout row 3" "checkout ledger row 3" "Checkout Ledger Row 3" "checkout-ledger row 3" \
+      "checkout-ledger#3" "tier1#2" "tier1 row 2" "tier1-pipeline-ledger#2" "tier1-pipeline-ledger ledger row 2"; do
+    lg_call _lg_resolve "$r"
+    assert_eq "0|docs/issues/a.md" "$LG_RC|$LG_OUT" "'$r' → docs/issues/a.md"
+  done
+  lg_call _lg_resolve "checkout#4"
+  assert_eq "0|docs/issues/b.md" "$LG_RC|$LG_OUT" "{\"item\"} → that path"
+  lg_call _lg_resolve "checkout row 5"
+  assert_eq "0|docs/archive/checkout-ledger.md#row-5" "$LG_RC|$LG_OUT" "{\"archived\"} → the anchor, rc 0"
+  for r in "checkout#9" "checkout row 6" "nope#3"; do
+    lg_call _lg_resolve "$r"
+    assert_eq "1" "$LG_RC" "'$r' → none (rc 1)"
+  done
+  lg show checkout row 5
+  assert_eq "0" "$LG_RC" "show an archived legacy row"
+  assert_eq "archived: docs/archive/checkout-ledger.md#row-5" "$LG_OUT" "…prints its anchor"
+  lg show "checkout row 5" --format json
+  assert_json_field "$LG_OUT" '[.exit, .item, .archived] | tojson' '[0,null,"docs/archive/checkout-ledger.md#row-5"]' \
+    "JSON: archived anchor, no item"
+  lg show checkout ledger row 3
+  assert_eq "x-14  x  —  not started" "$(printf '%s\n' "$LG_OUT" | head -n 1)" "show a legacy row's item"
+  teardown
+}
+
+test_lg_resolve_finalized() {
+  echo "test: _lg_resolve — a provisional key recorded in docs/ledger/finalized.json reaches its key"
+  lg_keys_fixture
+  lg_keys_resolve_items
+  printf '{\n  "x-~ab12": "x-15"\n}\n' > docs/ledger/finalized.json
+  lg_call _lg_resolve "x-~ab12"
+  assert_eq "0|docs/issues/b.md" "$LG_RC|$LG_OUT" "x-~ab12 → x-15's item"
+  lg_call _lg_resolve "X-~AB12"
+  assert_eq "0|docs/issues/b.md" "$LG_RC|$LG_OUT" "…in any case"
+  lg_call _lg_resolve "x-~ffff"
+  assert_eq "1" "$LG_RC" "an unrecorded provisional key → none"
+  # A provisional key still on an item resolves to it directly.
+  lg_item docs/issues/p.md "key: y-~0f3c" "ledger: y" "status: Open" "summary: Pending"
+  lg_call _lg_resolve "y-~0f3c"
+  assert_eq "0|docs/issues/p.md" "$LG_RC|$LG_OUT" "a provisional key on an item"
+  teardown
+}
+
+test_lg_resolve_ambiguous() {
+  echo "test: _lg_resolve — several items → rc 3 (duplicate key, key vs alias, stem in two dirs)"
+  lg_keys_fixture
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: A"
+  lg_item docs/issues/b.md "key: x-1" "ledger: x" "status: Open" "summary: B"
+  lg_item docs/issues/c.md "key: x-2" "ledger: x" "status: Open" "summary: C"
+  lg_item docs/issues/d.md "key: x-3" "ledger: x" "status: Open" "summary: D" "aliases: [x-2]"
+  lg_item docs/archive/issues/c.md "key: x-4" "ledger: x" "status: Closed" "summary: C old"
+  lg_call _lg_resolve x-1
+  assert_eq "3|" "$LG_RC|$LG_OUT" "a duplicate key → rc 3, nothing on stdout"
+  assert_contains "$LG_ERR" "docs/issues/a.md" "…stderr names the items"
+  assert_contains "$LG_ERR" "docs/issues/b.md" "…both"
+  lg_call _lg_resolve "x 2"
+  assert_eq "3" "$LG_RC" "a key on one item and an alias on another → rc 3"
+  lg_call _lg_resolve c
+  assert_eq "3" "$LG_RC" "a stem two items share → rc 3"
+  lg_call _lg_resolve docs/issues/c.md
+  assert_eq "0|docs/issues/c.md" "$LG_RC|$LG_OUT" "the path itself is never ambiguous"
+  lg show x-1
+  assert_eq "3" "$LG_RC" "show: ambiguous → usage (3)"
+  teardown
+}
+
+test_lg_alloc_seeds_from_base() {
+  echo "test: first allocation seeds a ledger from the highest key on the base (x-1, x-5 → x-6)"
+  lg_keys_fixture
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: A"
+  lg_item docs/issues/b.md "key: x-5" "ledger: x" "status: Fixed" "summary: B"
+  lg_item docs/issues/c.md "key: y-2" "ledger: y" "status: Open" "summary: C" "aliases: [y-7]"
+  git add -A && git commit -qm items && git push -q origin main && git fetch -q origin
+  # Not on the base: an uncommitted item with a higher key.
+  lg_item docs/issues/d.md "key: x-9" "ledger: x" "status: Open" "summary: D"
+  assert_eq "absent" "$(lg_remote_counters)" "no counter ref yet"
+  lg_call _lg_counter_read
+  assert_eq "0" "$LG_RC" "_lg_counter_read exits 0"
+  assert_json_field "$LG_OUT" '[.x, .y] | tojson' '[6,8]' "seeded: x 6, y 8 (an alias counts: keys are never reused)"
+  lg_call _lg_alloc x 1 docs/issues/n.md
+  assert_eq "0|x	x-6" "$LG_RC|$LG_OUT" "first key x-6"
+  assert_eq '{"x":7,"y":8}' "$(lg_remote_counters)" "the counter ref holds every seeded ledger"
+  lg_call _lg_alloc x 2 docs/issues/n.md docs/issues/o.md
+  assert_eq "x	x-7
+x	x-8" "$LG_OUT" "then x-7, x-8"
+  lg_call _lg_alloc z 1 docs/issues/n.md
+  assert_eq "0|z	z-1" "$LG_RC|$LG_OUT" "a ledger with no keys anywhere starts at 1"
+  lg_call _lg_counter_read
+  assert_json_field "$LG_OUT" '[.x, .y, .z] | tojson' '[9,8,2]' "_lg_counter_read reads the ref"
+  teardown
+}
+
+test_lg_alloc_batch_one_commit() {
+  echo "test: _lg_alloc_batch {x:2,y:3} — one CAS commit for every ledger"
+  lg_keys_fixture
+  lg_call _lg_alloc x 1 docs/issues/n.md
+  assert_eq "x	x-1" "$LG_OUT" "x-1"
+  assert_eq "1" "$(lg_remote_counter_commits)" "one commit"
+  lg_call _lg_alloc_batch '{"x":2,"y":3}'
+  assert_eq "0" "$LG_RC" "batch exits 0"
+  assert_eq "x	x-2
+x	x-3
+y	y-1
+y	y-2
+y	y-3" "$LG_OUT" "ledger<TAB>key lines"
+  assert_eq "2" "$(lg_remote_counter_commits)" "the counter ref advanced by one commit"
+  assert_eq '{"x":4,"y":4}' "$(lg_remote_counters)" "the blob"
+  local msg
+  msg=$(git --git-dir="$LG_REMOTE" log -1 --format=%s refs/doc-superpowers/ledger/counters)
+  assert_contains "$msg" "ledger: allocate" "commit message 'ledger: allocate …'"
+  assert_eq "counters.json" "$(git --git-dir="$LG_REMOTE" ls-tree --name-only refs/doc-superpowers/ledger/counters)" \
+    "the tree is one blob, counters.json"
+  lg_call _lg_alloc_batch '{"x":0}'
+  assert_eq "2" "$LG_RC" "a count below 1 is refused (2)"
+  lg_call _lg_alloc_batch '{"Bad Id":1}'
+  assert_eq "2" "$LG_RC" "a bad ledger id is refused (2)"
+  teardown
+}
+
+# One allocation job: <n> single allocations from the fixture at <dir>.
+lg_alloc_job() {
+  local dir="$1" n="$2"
+  TEST_DIR=$dir
+  lg_source
+  local i=0
+  while [ "$i" -lt "$n" ]; do
+    _lg_alloc x 1 docs/issues/r.md
+    i=$((i + 1))
+  done
+}
+
+test_lg_alloc_race() {
+  echo "test: two clones × 10 allocations racing on one remote → 20 distinct keys, none provisional"
+  lg_keys_fixture
+  local c2 o1 o2 p1 p2 rc1=0 rc2=0 alive1 alive2
+  c2=$(harness_mktemp_d clone2)/c
+  lg_clone "$c2"
+  o1=$(harness_mktemp race1)
+  o2=$(harness_mktemp race2)
+  set +e
+  ( lg_alloc_job "$TEST_DIR" 10 ) > "$o1" 2> "$o1.err" &
+  p1=$!
+  ( lg_alloc_job "$c2" 10 ) > "$o2" 2> "$o2.err" &
+  p2=$!
+  set -e
+  lg_wait_job 180 "$p1" || rc1=$?
+  alive1=$HARNESS_KILL_ALIVE
+  lg_wait_job 180 "$p2" || rc2=$?
+  alive2=$HARNESS_KILL_ALIVE
+  assert_eq "0|0" "$alive1|$alive2" "both jobs finished on their own"
+  assert_eq "0|0" "$rc1|$rc2" "both jobs exit 0"
+  if [ "$rc1|$rc2" != "0|0" ]; then sed 's/^/    | /' "$o1.err" "$o2.err"; fi
+  assert_eq "20" "$(cat "$o1" "$o2" | cut -f2 | sort -u | grep -c .)" "20 distinct keys"
+  assert_eq "0" "$(cat "$o1" "$o2" | grep -c '~' || true)" "none provisional"
+  assert_eq "$(seq 1 20 | sed 's/^/x-/' | sort)" "$(cat "$o1" "$o2" | cut -f2 | sort)" "x-1 … x-20"
+  assert_eq '{"x":21}' "$(lg_remote_counters)" "the counter is 21"
+  teardown
+}
+
+# A receive-pack for the remote that moves the counter ref before every push,
+# so the lease never holds (a remote whose counter always moved on).
+lg_stale_receive_pack() {
+  local f="$1" log="$2"
+  cat > "$f" <<EOF
+#!/bin/sh
+repo="\$1"
+echo push >> "$log"
+b=\$(echo '{"x":1}' | git --git-dir="\$repo" hash-object -w --stdin)
+t=\$(printf '100644 blob %s\\tcounters.json\\n' "\$b" | git --git-dir="\$repo" mktree)
+c=\$(echo "bump \$\$" | git --git-dir="\$repo" commit-tree "\$t")
+git --git-dir="\$repo" update-ref refs/doc-superpowers/ledger/counters "\$c"
+exec git receive-pack "\$repo"
+EOF
+  chmod +x "$f"
+}
+
+test_lg_alloc_exhausted_rc2() {
+  echo "test: a remote that always answers 'stale info' → rc 2 after 8 retries, no key, no provisional"
+  lg_keys_fixture
+  local rp log
+  rp=$(harness_mktemp rp)
+  log=$(harness_mktemp rplog)
+  : > "$log"
+  lg_stale_receive_pack "$rp" "$log"
+  git config remote.origin.receivepack "$rp"
+  lg_call _lg_alloc x 1 docs/issues/n.md
+  assert_eq "2" "$LG_RC" "exhausted → rc 2"
+  assert_eq "" "$LG_OUT" "no key printed"
+  assert_contains "$LG_ERR" "retries" "stderr says the retries ran out"
+  assert_eq "9" "$(grep -c push "$log")" "1 attempt + 8 retries"
+  teardown
+}
+
+test_lg_alloc_declined_rc2() {
+  echo "test: a pre-receive hook that declines → rc 2 at once, no key"
+  lg_keys_fixture
+  local log
+  log=$(harness_mktemp hooklog)
+  : > "$log"
+  printf '#!/bin/sh\necho hook >> "%s"\necho "no counters here" >&2\nexit 1\n' "$log" > "$LG_REMOTE/hooks/pre-receive"
+  chmod +x "$LG_REMOTE/hooks/pre-receive"
+  lg_call _lg_alloc x 1 docs/issues/n.md
+  assert_eq "2" "$LG_RC" "declined → rc 2"
+  assert_eq "" "$LG_OUT" "no key printed"
+  assert_contains "$LG_ERR" "declined" "stderr gives git's reason"
+  assert_eq "1" "$(grep -c hook "$log")" "one attempt, no retries"
+  assert_eq "absent" "$(lg_remote_counters)" "the remote has no counter"
+  teardown
+}
+
+test_lg_counter_push_no_verify() {
+  echo "test: the counter push skips the local pre-push hook (--no-verify)"
+  lg_keys_fixture
+  printf '#!/bin/sh\nexit 1\n' > .git/hooks/pre-push
+  chmod +x .git/hooks/pre-push
+  lg_call _lg_alloc x 1 docs/issues/n.md
+  assert_eq "0|x	x-1" "$LG_RC|$LG_OUT" "allocated despite a failing pre-push hook"
+  assert_eq '{"x":2}' "$(lg_remote_counters)" "the counter ref was pushed"
+  teardown
+}
+
+test_lg_alloc_offline_provisional() {
+  echo "test: an unreachable remote → a provisional key <ledger>-~<hex4 of the path>, a warning, rc 0"
+  lg_keys_fixture
+  git remote set-url origin "$TEST_DIR/no-such-remote.git"
+  local h
+  h=$(lg_hex4 "docs/issues/n.md")
+  lg_call _lg_alloc x 1 docs/issues/n.md
+  assert_eq "0|x	x-~$h" "$LG_RC|$LG_OUT" "x-~$h"
+  assert_contains "$LG_ERR" "provisional" "stderr warns"
+  lg_call _lg_alloc_batch '{"x":1,"y":1}'
+  assert_eq "2" "$LG_RC" "offline without item paths → rc 2 (no provisional to give)"
+  teardown
+}
+
+test_lg_merge_mode_provisional_and_finalize() {
+  echo "test: keys.mode merge — provisional keys with no network; finalize on the base rewrites references in one commit"
+  lg_keys_fixture '{"base":"main","keys":{"mode":"merge"}}'
+  git remote set-url origin "$TEST_DIR/no-such-remote.git"
+  local h1 h2 out before after body_m body_q
+  h1=$(lg_hex4 "docs/issues/n.md")
+  h2=$(lg_hex4 "docs/issues/o.md")
+  lg_call _lg_alloc x 1 docs/issues/n.md
+  assert_eq "0|x	x-~$h1" "$LG_RC|$LG_OUT" "merge mode: provisional"
+  assert_not_contains "$LG_ERR" "warning" "…without an offline warning (no network is tried)"
+  lg_item docs/issues/a.md "key: x-3" "ledger: x" "status: Open" "summary: Existing"
+  lg_item docs/issues/n.md "key: x-~$h1" "ledger: x" "status: Open" "summary: New one"
+  lg_item docs/issues/o.md "key: y-~$h2" "ledger: y" "status: Open" "summary: Other new"
+  lg_item docs/issues/m.md "key: x-2" "ledger: x" "status: Closed" "summary: Old" "superseded_by: x-~$h1" \
+    "relates: [sibling:y-~$h2, root-cause:x-3]"
+  printf '\n## Resolution\n\nReplaced.\n' >> docs/issues/m.md
+  lg_item docs/issues/q.md "key: y-1" "ledger: y" "status: Open" "summary: Quiet" "relates:" "  - sibling:x-~$h1"
+  lg_item docs/issues/u.md "key: x-1" "ledger: x" "status: Open" "summary: Untouched"
+  git add -A && git commit -qm "items with provisional keys"
+  before=$(git rev-parse HEAD)
+  body_m=$(lg_tail_hash docs/issues/m.md 8)
+  body_q=$(lg_tail_hash docs/issues/q.md 8)
+  lg finalize
+  assert_eq "0" "$LG_RC" "finalize exits 0"
+  assert_contains "$LG_OUT" "x-~$h1 → x-4" "x's provisional → x-4 (after x-3)"
+  assert_contains "$LG_OUT" "y-~$h2 → y-2" "y's provisional → y-2"
+  assert_eq "$before" "$(git rev-parse HEAD~1)" "one new commit"
+  assert_eq "ledger: finalize 2 keys" "$(git log -1 --format=%s)" "its message"
+  assert_eq "docs/issues/m.md
+docs/issues/n.md
+docs/issues/o.md
+docs/issues/q.md
+docs/ledger/finalized.json" "$(git show --name-only --format= HEAD | sort)" "it touches only the referencing files and finalized.json"
+  assert_eq "" "$(git status --porcelain)" "nothing left uncommitted"
+  assert_contains "$(cat docs/issues/n.md)" "key: x-4" "n.md: its key"
+  assert_contains "$(cat docs/issues/o.md)" "key: y-2" "o.md: its key"
+  assert_contains "$(cat docs/issues/m.md)" "superseded_by: x-4" "m.md: superseded_by"
+  assert_contains "$(cat docs/issues/m.md)" "relates: [sibling:y-2, root-cause:x-3]" "m.md: relates"
+  assert_contains "$(cat docs/issues/q.md)" "relates:
+  - \"sibling:x-4\"" "q.md: a block list stays a block list"
+  assert_eq "$body_m" "$(lg_tail_hash docs/issues/m.md 8)" "m.md: the body is byte-identical"
+  assert_eq "$body_q" "$(lg_tail_hash docs/issues/q.md 8)" "q.md: the body is byte-identical"
+  after=$(cat docs/ledger/finalized.json)
+  assert_eq "{
+  \"x-~$h1\": \"x-4\",
+  \"y-~$h2\": \"y-2\"
+}" "$after" "finalized.json: one entry per line, keys sorted"
+  lg_call _lg_resolve "x-~$h1"
+  assert_eq "0|docs/issues/n.md" "$LG_RC|$LG_OUT" "the old provisional key still resolves"
+  lg finalize
+  assert_eq "0" "$LG_RC" "a second finalize: nothing to do"
+  assert_eq "$before" "$(git rev-parse HEAD~1)" "…no commit"
+  # Not on the base: refused.
+  git checkout -q -b side
+  git commit -q --allow-empty -m side
+  lg_item docs/issues/s.md "key: x-~beef" "ledger: x" "status: Open" "summary: Side"
+  lg finalize
+  assert_eq "3" "$LG_RC" "merge mode off the base → usage (3)"
+  teardown
+}
+
+test_lg_new_writes_fields() {
+  echo "test: ledger new — key, ledger and summary written into the one new item file"
+  lg_keys_fixture
+  printf '# New bug\n\nIt breaks.\n' > docs/issues/n.md
+  lg new --ledger x --summary "Totals drift after an edit"
+  assert_eq "0" "$LG_RC" "new exits 0"
+  assert_eq "x-1  docs/issues/n.md" "$LG_OUT" "prints the key and the path"
+  assert_contains "$(cat docs/issues/n.md)" "key: x-1" "key written"
+  assert_contains "$(cat docs/issues/n.md)" "ledger: x" "ledger written"
+  assert_contains "$(cat docs/issues/n.md)" "summary: Totals drift after an edit" "summary written"
+  assert_contains "$(cat docs/issues/n.md)" "# New bug" "the body is kept"
+  lg new --ledger x --summary "Another"
+  assert_eq "3" "$LG_RC" "no keyless new item left → usage (3)"
+  printf '# A\n' > docs/issues/a.md
+  printf '# B\n' > docs/issues/b.md
+  git add docs/issues/b.md
+  lg new --ledger x --summary "Which one"
+  assert_eq "3" "$LG_RC" "two candidates (one staged, one untracked) → usage (3)"
+  assert_contains "$LG_ERR" "docs/issues/a.md" "…naming them"
+  lg new --ledger y --summary "Bravo summary" --file docs/issues/b.md --format json
+  assert_eq "0" "$LG_RC" "--file picks one"
+  assert_json_field "$LG_OUT" '[.verb, .exit, .key, .ledger, .path, .provisional] | tojson' \
+    '["ledger new",0,"y-1","y","docs/issues/b.md",false]' "JSON payload"
+  lg new --ledger z --summary "Unknown ledger" --file docs/issues/a.md
+  assert_eq "3" "$LG_RC" "an unregistered ledger → usage (3)"
+  lg new --ledger old --summary "Retired ledger" --file docs/issues/a.md
+  assert_eq "3" "$LG_RC" "a retired ledger → usage (3)"
+  lg new --ledger x --summary "Has a key" --file docs/issues/n.md
+  assert_eq "3" "$LG_RC" "an item that has a key → usage (3)"
+  lg new --ledger x --file docs/issues/a.md
+  assert_eq "3" "$LG_RC" "no --summary → usage (3)"
+  lg new --ledger x --summary "Not an item" --file src/index.js
+  assert_eq "3" "$LG_RC" "a file outside the item globs → usage (3)"
+  assert_eq '{"x":2,"y":2}' "$(lg_remote_counters)" "only the two successful runs allocated"
+  teardown
+}
+
+test_lg_new_unassigned_no_key() {
+  echo "test: ledger new --ledger unassigned — ledger and summary, no key, no network"
+  lg_keys_fixture
+  git remote set-url origin "$TEST_DIR/no-such-remote.git"
+  printf '# Home unknown\n' > docs/issues/u.md
+  lg new --ledger unassigned --summary "Somewhere in the stack"
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_eq "unassigned  docs/issues/u.md" "$LG_OUT" "prints the ledger and the path"
+  assert_eq "" "$LG_ERR" "no warning: nothing was allocated"
+  assert_contains "$(cat docs/issues/u.md)" "ledger: unassigned" "ledger written"
+  assert_not_contains "$(cat docs/issues/u.md)" "key:" "no key"
+  teardown
+}
+
+test_lg_new_summary_too_long() {
+  echo "test: ledger new — a summary over 140 characters is a usage error; 140 is fine"
+  lg_keys_fixture
+  printf '# T\n' > docs/issues/t.md
+  local s140 s141
+  s140=$(printf 'é%.0s' $(seq 1 140))
+  s141="${s140}a"
+  lg new --ledger x --summary "$s141"
+  assert_eq "3" "$LG_RC" "141 characters → usage (3)"
+  assert_contains "$LG_ERR" "140" "…says the limit"
+  assert_eq "# T" "$(cat docs/issues/t.md)" "nothing written"
+  assert_eq "absent" "$(lg_remote_counters)" "nothing allocated"
+  lg new --ledger x --summary "$s140"
+  assert_eq "0" "$LG_RC" "140 characters (multi-byte) are fine"
+  lg new --ledger x --summary "two
+lines" --file docs/issues/t.md
+  assert_eq "3" "$LG_RC" "a summary of two lines → usage (3)"
+  teardown
+}
+
+test_lg_assign_moves_old_key_to_aliases() {
+  echo "test: ledger assign — a new key in the target ledger; the previous key appended to aliases"
+  lg_keys_fixture
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: Alpha" "aliases: [old-2]"
+  lg_item docs/issues/k.md "ledger: unassigned" "status: Open" "summary: Keyless"
+  git add -A && git commit -qm items && git push -q origin main && git fetch -q origin
+  lg assign "x 1" y
+  assert_eq "0" "$LG_RC" "assign exits 0"
+  assert_eq "y-1  docs/issues/a.md  (was x-1)" "$LG_OUT" "prints the new key and the old"
+  assert_contains "$(cat docs/issues/a.md)" "key: y-1" "the new key"
+  assert_contains "$(cat docs/issues/a.md)" "ledger: y" "the new ledger"
+  assert_contains "$(cat docs/issues/a.md)" "aliases: [old-2, x-1]" "the old key appended to aliases"
+  lg_call _lg_resolve x-1
+  assert_eq "0|docs/issues/a.md" "$LG_RC|$LG_OUT" "the old key still resolves (alias)"
+  lg assign docs/issues/k.md x --format json
+  assert_eq "0" "$LG_RC" "an unassigned item gets its first key"
+  assert_json_field "$LG_OUT" '[.key, .ledger, .previous, .path] | tojson' '["x-2","x",null,"docs/issues/k.md"]' \
+    "JSON: x-2 (seeded past x-1), no previous key"
+  assert_not_contains "$(cat docs/issues/k.md)" "aliases" "no alias for a keyless item"
+  lg assign y-1 nosuch
+  assert_eq "3" "$LG_RC" "an unknown ledger → usage (3)"
+  lg assign x-404 y
+  assert_eq "1" "$LG_RC" "an unknown item → rc 1"
+  lg assign y-1
+  assert_eq "3" "$LG_RC" "a missing ledger argument → usage (3)"
+  teardown
+}
+
+test_lg_cas_finalize_and_provisional_in_range() {
+  echo "test: cas finalize replaces provisional keys in the working tree; _lg_provisional_in_range lists those a range adds"
+  lg_keys_fixture
+  local h base
+  base=$(git rev-parse HEAD)
+  git remote set-url origin "$TEST_DIR/no-such-remote.git"
+  printf '# Offline\n' > docs/issues/n.md
+  h=$(lg_hex4 docs/issues/n.md)
+  lg new --ledger x --summary "Filed on a plane"
+  assert_eq "0" "$LG_RC" "offline new exits 0"
+  assert_eq "x-~$h  docs/issues/n.md" "$LG_OUT" "…with a provisional key"
+  assert_contains "$LG_ERR" "provisional" "…and a warning"
+  lg_item docs/issues/r.md "key: x-~0000" "ledger: x" "status: Open" "summary: Other" "relates: [depends-on:x-~$h]"
+  git add -A && git commit -qm "provisional"
+  lg_call _lg_provisional_in_range "$base..HEAD"
+  assert_eq "0" "$LG_RC" "_lg_provisional_in_range exits 0"
+  assert_eq "$(printf 'x-~0000\tdocs/issues/r.md\nx-~%s\tdocs/issues/n.md\n' "$h" | sort)" \
+    "$(printf '%s\n' "$LG_OUT" | sort)" "both provisional keys the range adds"
+  lg_call _lg_provisional_in_range "HEAD..HEAD"
+  assert_eq "0|" "$LG_RC|$LG_OUT" "an empty range adds none"
+  lg finalize
+  assert_eq "2" "$LG_RC" "cas finalize offline → rc 2 (never another provisional key)"
+  assert_contains "$(cat docs/issues/n.md)" "key: x-~$h" "…nothing rewritten"
+  git remote set-url origin "$LG_REMOTE"
+  lg new --finalize --file docs/issues/n.md
+  assert_eq "0" "$LG_RC" "new --finalize for one file"
+  assert_contains "$LG_OUT" "x-~$h → x-1" "n.md's key finalized"
+  assert_contains "$(cat docs/issues/n.md)" "key: x-1" "n.md rewritten"
+  assert_contains "$(cat docs/issues/r.md)" "relates: [depends-on:x-1]" "a reference in another item rewritten"
+  assert_contains "$(cat docs/issues/r.md)" "key: x-~0000" "…but only n.md's key was finalized"
+  lg finalize --all
+  assert_eq "0" "$LG_RC" "finalize --all"
+  assert_contains "$(cat docs/issues/r.md)" "key: x-2" "r.md's key"
+  assert_eq "{
+  \"x-~0000\": \"x-2\",
+  \"x-~$h\": \"x-1\"
+}" "$(cat docs/ledger/finalized.json)" "finalized.json, sorted"
+  assert_true "cas mode commits nothing" test -n "$(git status --porcelain docs/issues/n.md)"
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -2596,6 +3172,28 @@ run_tests() {
   test_lg_ls_output_budget
   test_lg_find_ranks
   test_lg_smoke_budgets
+
+  # --- Task 5 carry-over ---
+  test_lg_status_labels_shared
+
+  # --- Task 6: keys ---
+  test_lg_resolve_forms
+  test_lg_resolve_legacy_forms
+  test_lg_resolve_finalized
+  test_lg_resolve_ambiguous
+  test_lg_alloc_seeds_from_base
+  test_lg_alloc_batch_one_commit
+  test_lg_alloc_race
+  test_lg_alloc_exhausted_rc2
+  test_lg_alloc_declined_rc2
+  test_lg_alloc_offline_provisional
+  test_lg_merge_mode_provisional_and_finalize
+  test_lg_new_writes_fields
+  test_lg_new_unassigned_no_key
+  test_lg_new_summary_too_long
+  test_lg_assign_moves_old_key_to_aliases
+  test_lg_counter_push_no_verify
+  test_lg_cas_finalize_and_provisional_in_range
 
   print_summary
 }

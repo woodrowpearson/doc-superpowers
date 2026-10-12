@@ -2329,18 +2329,24 @@ claims rulings|cmd_claims_rulings|repo|range= format= base=
   as Markdown for a PR description, under "## Spec amendments (N)",
   instead of the verdict object.
 ledger show|cmd_ledger_show|repo|format=
-  <key|path> [--format text|json]
+  <key|alias|legacy-ref|path> [--format text|json]
   One work-ledger item in at most 25 lines: key, ledger, severity,
   derived status, summary, specs, plans, handoffs, contracts, relations,
-  and the first resolution line of a closed item. <key> is matched
-  case-insensitively; <path> is from the top level (a path stem, as ls
-  prints for an item without a key, works too). Unknown: exit 1. Every
-  ledger verb is inert (exit 0) without docs/ledger/config.json; see
-  "Work ledger".
+  and the first resolution line of a closed item. A key or alias is
+  matched case-insensitively and may be spaced: checkout-14, checkout 14,
+  checkout #14 (one argument or several words); a provisional key that
+  was finalized reaches its key (docs/ledger/finalized.json); a legacy
+  ref (<old>#<n>, "<old> row <n>", "<old> ledger row <n>") is looked up
+  in the legacy map — an archived row prints "archived: <anchor>"; <path>
+  is from the top level (a path stem, as ls prints for an item without a
+  key, works too). Unknown: exit 1; several items: exit 3. Every ledger
+  verb is inert (exit 0) without docs/ledger/config.json; see "Work
+  ledger".
 ledger ls|cmd_ledger_ls|repo|ledger= sev= open status= cluster= format=
   [--ledger <id>] [--sev <a,b>] [--open] [--status <s>] [--cluster <contract>] [--format text|json]
-  One line per work-ledger item, "<key>  <severity>  <status>  <summary>",
-  by severity then date. --sev takes a comma list; --open keeps the
+  One line per work-ledger item, "<key>  <severity>  <status>  <summary>"
+  (the first column is the key, or the path stem for an item without
+  one), by severity then date. --sev takes a comma list; --open keeps the
   open-class items; --status a derived status (shipped, merged, planned,
   "not started", …); --cluster an item's primary contract (the first of
   changes, else of consumes) or "unclustered". JSON: {"items":[…]}.
@@ -2367,13 +2373,22 @@ ledger inflight|cmd_ledger_inflight|repo|format=
 ledger notices|cmd_ledger_notices|repo|format=
   [--format text|json]
   In-flight notices for the current branch.
-ledger new|cmd_ledger_new|repo|format=
-  [--format text|json]
-  Allocate an item key and write key, ledger and summary into an issue.
+ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize format=
+  --ledger <id|unassigned> --summary <text> [--file <issue>] [--finalize] [--format text|json]
+  Allocate an item key and write key, ledger and summary (at most 140
+  characters, one line) into an issue: <issue> defaults to the one staged
+  or untracked item file without a key (none or several: exit 3).
+  --ledger unassigned writes no key. The key comes from the counter ref
+  on the remote (config keys); when the remote cannot be reached it is a
+  provisional key "<ledger>-~<4 hex>" (with a warning) that finalize
+  replaces. --finalize allocates for real or fails (exit 2) — and, on an
+  issue that has a provisional key, finalizes that one key (--ledger and
+  --summary optional). Prints "<key>  <path>".
 ledger assign|cmd_ledger_assign|repo|format=
   <item> <ledger> [--format text|json]
-  Move an item to a ledger: a new key there; the previous key becomes an
-  alias.
+  Move an item to a ledger: a new key there; the previous key is appended
+  to its aliases. <item> takes what show takes. Prints
+  "<key>  <path>  (was <old key>)".
 ledger link|cmd_ledger_link|repo|format=
   <item> [--format text|json]
   Write a confirmed relation (consumes, changes, relates) into an item.
@@ -2394,9 +2409,16 @@ ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict format
 ledger publish|cmd_ledger_publish|repo|format=
   [--format text|json]
   Render the views from the remote base and push the views branch.
-ledger finalize|cmd_ledger_finalize|repo|format=
-  [--format text|json]
-  Replace provisional keys with allocated ones.
+ledger finalize|cmd_ledger_finalize|repo|all format=
+  [--all] [--format text|json]
+  Replace provisional keys with allocated ones — in the item's key and in
+  every relates, superseded_by and aliases that names them — and record
+  each in docs/ledger/finalized.json. keys.mode cas: the provisional keys
+  this branch added (--all: every one) in the working tree, nothing
+  committed; the remote must be reachable (else exit 2). keys.mode merge:
+  run on the base; every provisional key, numbered after the highest key
+  in the tree, in one commit "ledger: finalize N keys". One
+  "<provisional> → <key>  <path>" line each.
 ledger init|cmd_ledger_init|repo|format=
   [--format text|json]
   Bootstrap the ledger: sources, a proposed registry, assignments.

@@ -68,9 +68,9 @@ while [ $# -gt 0 ]; do
     *) [ -z "$B_N" ] || b_usage; B_N=$1; shift ;;
   esac
 done
-case "$B_N" in ''|*[!0-9]*) b_usage ;; esac
-case "$B_HIST" in ''|*[!0-9]*) b_usage ;; esac
-case "$B_SCALE" in ''|*[!0-9.]*|*.*.*) b_usage ;; esac
+case "$B_N" in ''|*[!0123456789]*) b_usage ;; esac
+case "$B_HIST" in ''|*[!0123456789]*) b_usage ;; esac
+case "$B_SCALE" in ''|*[!0123456789.]*|*.*.*) b_usage ;; esac
 [ "$B_N" -ge 20 ] || { echo "bench-ledger.sh: N must be at least 20" >&2; exit 3; }
 [ "$B_HIST" -ge 10 ] || { echo "bench-ledger.sh: --history-commits must be at least 10" >&2; exit 3; }
 

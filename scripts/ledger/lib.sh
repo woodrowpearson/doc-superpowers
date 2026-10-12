@@ -24,6 +24,8 @@ _LG_CACHE=""         # $(git rev-parse --git-common-dir)/doc-superpowers/ledger
 . "$_LG_LIB/validate.sh"
 # shellcheck source=scripts/ledger/index.sh
 . "$_LG_LIB/index.sh"
+# shellcheck source=scripts/ledger/keys.sh
+. "$_LG_LIB/keys.sh"
 # shellcheck source=scripts/ledger/query.sh
 . "$_LG_LIB/query.sh"
 
@@ -204,17 +206,14 @@ _lg_stub() {
   _lg_init "$_LG_VERB"
   _lg_die "not implemented"
 }
-# show, ls, find: query.sh.
+# show, ls, find: query.sh. new, assign, finalize: keys.sh.
 cmd_ledger_related() { _lg_stub "$@"; }
 cmd_ledger_sweep() { _lg_stub "$@"; }
 cmd_ledger_recheck() { _lg_stub "$@"; }
 cmd_ledger_inflight() { _lg_stub "$@"; }
 cmd_ledger_notices() { _lg_stub "$@"; }
-cmd_ledger_new() { _lg_stub "$@"; }
-cmd_ledger_assign() { _lg_stub "$@"; }
 cmd_ledger_link() { _lg_stub "$@"; }
 cmd_ledger_note() { _lg_stub "$@"; }
 cmd_ledger_view() { _lg_stub "$@"; }
 cmd_ledger_publish() { _lg_stub "$@"; }
-cmd_ledger_finalize() { _lg_stub "$@"; }
 cmd_ledger_init() { _lg_stub "$@"; }

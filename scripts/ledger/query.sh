@@ -24,21 +24,23 @@
 # "superseded → <key>", "merged · owed: <owed>", "in review #<pr>",
 # "on branch <b>", else the bare label.
 #
-# show <ref>: <ref> is a key (case-insensitive), a path from the top level
-# ("./" allowed) or — the first column ls prints for an item without a key —
-# a path stem. Unknown → rc 1 with one line; a ref several items match →
-# rc 3 naming them (Task 6's _lg_resolve replaces this resolution and adds
-# aliases, "L 14" / "L #14" and legacy refs).
+# show <ref>: whatever keys.sh's lg_resolve accepts — a path from the top
+# level ("./" allowed), a key or an alias (case-insensitive; "L 14" and
+# "L #14" too, as one argument or several words), a provisional key that was
+# finalized, a legacy ref ("<old>#<n>", "<old> row <n>", "<old> ledger row
+# <n>"), or — the first column ls prints for an item without a key — a path
+# stem; resolution and display are one jq pass over the index. Unknown → rc 1
+# with one line; a ref several items match → rc 3 naming them; a legacy row
+# that was archived → "archived: <anchor>", rc 0.
 #
 # find <words…>: per item, the sum over the distinct words (lowercased,
 # split on whitespace) of 3 when the word occurs in "<key> <summary>", 2 in
 # "<H1> <file-name stem>", 1 in the first paragraph (substring matches,
 # case-insensitive); score 0 is no match. Ties: severity, date, path.
 
-_LG_STATUS_LABELS='["superseded","won'"'"'t fix","closed","shipped","merged","in review","on branch","planned","spec'"'"'d","not started"]'
-
+# The derived-status labels: index.sh's lg_status_labels (_LG_JQ_STATUS_DEFS).
 # shellcheck disable=SC2016  # jq source
-_LG_JQ_QUERY_DEFS='
+_LG_JQ_QUERY_DEFS="$_LG_JQ_STATUS_DEFS"'
 def lg_q_one: if type == "string" and test("[[:cntrl:]]") then gsub("[[:cntrl:]]+"; " ") else . end;
 def lg_q_cut($n): if length > $n then .[0:($n - 1)] + "…" else . end;
 def lg_q_pad($w): (($w - length) as $k | if $k > 0 then . + (" " * $k) else . end);
@@ -50,11 +52,11 @@ def lg_q_stem: .path | split("/") | last | if endswith(".md") then .[0:-3] else 
 def lg_q_re: gsub("(?<c>[.\\[\\]\\\\^$|?*+(){}])"; "\\\(.c)");
 def lg_q_id: (.key // lg_q_stem) | lg_q_one;
 def lg_q_display:
-  .derived as $d | ($d.detail // null) as $x
-  | (if $d.status == "superseded" then "superseded → \($x // "?")"
-     elif $d.status == "merged" then (if $x == null then "merged" else "merged · owed: \($x)" end)
-     elif $d.status == "in review" then "in review #\($x // "?")"
-     elif $d.status == "on branch" then "on branch \($x // "?")"
+  .derived as $d | ($d.detail // null) as $x | lg_status_labels as $SL
+  | (if $d.status == $SL.superseded then "\($SL.superseded) → \($x // "?")"
+     elif $d.status == $SL.merged then (if $x == null then $SL.merged else "\($SL.merged) · owed: \($x)" end)
+     elif $d.status == $SL.in_review then "\($SL.in_review) #\($x // "?")"
+     elif $d.status == $SL.on_branch then "\($SL.on_branch) \($x // "?")"
      else ($d.status // "?") end)
   | lg_q_one;
 def lg_q_cluster: (.changes[0] // .consumes[0] // null);
@@ -86,9 +88,9 @@ def lg_q_row($lead):
 # _lg_q_status_label <value>: the derived-status label <value> names (case,
 # spaces, apostrophes, "-" and "_" ignored) into _LG_QSTATUS; "" when none.
 _lg_q_status_label() {
-  _LG_QSTATUS=$(jq -nr --arg v "$1" --argjson labels "$_LG_STATUS_LABELS" '
+  _LG_QSTATUS=$(jq -nr --arg v "$1" "$_LG_JQ_STATUS_DEFS"'
     def n: ascii_downcase | gsub("[\\s'"'"'\u2019_-]"; "");
-    ($v | n) as $k | first($labels[] | select(n == $k)) // ""') \
+    ($v | n) as $k | first(lg_status_labels[] | select(n == $k)) // ""') \
     || _lg_die "jq failed (--status)"
 }
 
@@ -120,22 +122,17 @@ _lg_q_finish() {
 # --- show ------------------------------------------------------------------------
 
 # shellcheck disable=SC2016  # jq source
-_LG_JQ_SHOW='
+_LG_JQ_SHOW="$_LG_JQ_RESOLVE_DEFS"'
 def lg_q_list($n):
   [.[] | strings | lg_q_one]
   | if length == 0 then "—" else (.[0:$n] | join(", ")) + (if length > $n then " +\(length - $n) more" else "" end) end;
-($ref | if startswith("./") then sub("^(\\./)+"; "") else . end) as $p
-| ("^" + ($ref | lg_q_re) + "$") as $kre
-| [.items[] | select(.path == $p)] as $byp
-| (if $byp != [] then $byp
-   else [.items[] | select(.key == $ref)] as $byk
-   | if $byk != [] then $byk
-     else [.items[] | select((.key | type) == "string" and (.key | test($kre; "i")))] as $byi
-     | if $byi != [] then $byi else [.items[] | select(lg_q_stem == $p)] end
-     end
-   end) as $m
-| if ($m | length) == 0 then "none", (if $mode == "json" then ({item: null, ref: $ref} | tojson) else empty end)
-  elif ($m | length) > 1 then "ambiguous\t\($m | map(.path) | join(", "))"
+lg_resolve($ref; $c[0]) as $R
+| (if $R.r == "item" then [.items[] | select(.path == $R.v)] else [] end) as $m
+| if $R.r == "archived" then
+    "archived",
+    (if $mode == "json" then ({item: null, ref: $ref, archived: $R.v} | tojson) else "archived: \($R.v | lg_q_one)" end)
+  elif $R.r == "ambiguous" then "ambiguous\t\($R.v | join(", "))"
+  elif ($m | length) == 0 then "none", (if $mode == "json" then ({item: null, ref: $ref} | tojson) else empty end)
   else $m[0] as $it
   | "ok",
     (if $mode == "json" then ({item: $it, display: ($it | lg_q_display)} | tojson)
@@ -159,22 +156,28 @@ def lg_q_list($n):
 
 # shellcheck disable=SC2154  # _ARGS is set by _parse_args
 cmd_ledger_show() {
-  local s
+  local s ref a
   _lg_init show
-  [ "${#_ARGS[@]}" = 1 ] || _lg_usage "give one item: a key or a path"
-  [ -n "${_ARGS[0]}" ] || _lg_usage "the item is empty"
+  [ "${#_ARGS[@]}" -ge 1 ] || _lg_usage "give one item: a key, an alias, a legacy ref or a path"
+  ref=${_ARGS[0]}
+  if [ "${#_ARGS[@]}" -gt 1 ]; then
+    # Several words: one of the spaced forms ("L 14", "<old> row <n>", …).
+    for a in "${_ARGS[@]:1}"; do ref="$ref $a"; done
+    _lg_k_multiword "$ref" || _lg_usage "give one item: a key, an alias, a legacy ref or a path (got ${#_ARGS[@]} arguments)"
+  fi
+  [ -n "$ref" ] || _lg_usage "the item is empty"
   _lg_scratch_name
   s=$_LG_SN
-  _lg_q_run "$_LG_JQ_SHOW" "$s.out" --arg ref "${_ARGS[0]}" --arg mode "$_LG_FORMAT"
+  _lg_q_run "$_LG_JQ_SHOW" "$s.out" --arg ref "$ref" --arg mode "$_LG_FORMAT"
   case "$_LG_QHEAD" in
-    ok) _lg_q_finish "$s.out" ;;
+    ok|archived) _lg_q_finish "$s.out" ;;
     none)
       if [ "$_LG_FORMAT" = json ]; then _lg_emit show 1 "$s.out"; fi
-      printf "no item matches '%s'\n" "${_ARGS[0]}" | tr -d '\000-\010\013-\037' | head -n 1 > "$s.msg"
+      printf "no item matches '%s'\n" "$ref" | tr -d '\000-\010\013-\037' | head -n 1 > "$s.msg"
       _lg_out_file "$s.msg"
       _lg_emit show 1
       ;;
-    ambiguous*) _lg_usage "'${_ARGS[0]}' matches several items: ${_LG_QHEAD#*	}" ;;
+    ambiguous*) _lg_usage "'$ref' matches several items: ${_LG_QHEAD#*	}" ;;
     *) _lg_die "internal: ledger show: unexpected query result '$_LG_QHEAD'" ;;
   esac
 }
@@ -216,7 +219,7 @@ cmd_ledger_ls() {
     _lg_q_status_label "$_OPT_status"
     status=$_LG_QSTATUS
     if [ -z "$status" ]; then
-      _lg_usage "--status '$_OPT_status' is not a status: $(jq -r 'join(", ")' <<<"$_LG_STATUS_LABELS")"
+      _lg_usage "--status '$_OPT_status' is not a status: $(jq -nr "$_LG_JQ_STATUS_DEFS"'[lg_status_labels[]] | join(", ")')"
     fi
   fi
   _lg_scratch_name
