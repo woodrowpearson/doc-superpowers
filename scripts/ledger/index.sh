@@ -35,8 +35,11 @@
 # added the path (the earliest add) — a rename (R) carries the old path's
 # date, chained; a path re-added after a rename moved its file away takes
 # the later add —
-# from `git log --reverse --date=short --format=%ad --name-status -M
-# --diff-filter=AR` over the item globs' directories, replayed in order; the
+# from `git log --reverse --full-history --date=short --format=%ad
+# --name-status -M --diff-filter=AR` over the item globs' directories
+# (--full-history: no history simplification, so a TREESAME merge hides no
+# side branch from a cold map that an extended one would see), replayed in
+# order; the
 # events are cached in $_LG_CACHE/dates-<commit>.tsv and a new HEAD extends
 # the newest cached ancestor's. A path git never added (uncommitted) takes
 # its file's mtime (UTC). The same rename chain lets a link to a former path
@@ -159,17 +162,17 @@ _lg_ix_candidates() {
 
 # _lg_ix_events <commit> <dirs-file> → _LG_EVENTS: the cached event file of
 # <commit> ("A" date path / "R" date old new, one field per line, a newline
-# in a name as \001; first line "# ledger-dates/1 <sig>"), built cold or by
+# in a name as \001; first line "# ledger-dates/2 <sig>"), built cold or by
 # extending the newest cached ancestor's.
 _lg_ix_events() {
   local commit="$1" dirs="$2" s sig header f c oid anc="" tmp range first d
   local specs=()
   _lg_scratch_name
   s=$_LG_SN
-  { printf 'ledger-dates/1\n'; cat "$dirs"; } > "$s.sig" || _lg_die "cannot write $s.sig"
+  { printf 'ledger-dates/2\n'; cat "$dirs"; } > "$s.sig" || _lg_die "cannot write $s.sig"
   _hash_one "$s.sig"
   sig=${_HASH#sha256:}
-  header="# ledger-dates/1 $sig"
+  header="# ledger-dates/2 $sig"
   f="$_LG_CACHE/dates-$commit.tsv"
   first=""
   if [ -f "$f" ]; then IFS= read -r first < "$f" || true; fi
@@ -207,8 +210,10 @@ _lg_ix_events() {
   fi
   # git log -z: "<date>\0\n<status>\0<path>[\0<path>]\0…"; after tr, one
   # token per line (the first status of a commit led by \001).
-  GIT_LITERAL_PATHSPECS=1 git -c log.showSignature=false log --no-color --reverse --date=short --format=%ad \
-    --name-status -M --diff-filter=AR -z "$range" -- ${specs[@]+"${specs[@]}"} > "$s.log" 2> "$s.err" \
+  # --full-history: a merge TREESAME to one parent must not hide the other
+  # parent's commits — a map extended from that side branch's tip has them.
+  GIT_LITERAL_PATHSPECS=1 git -c log.showSignature=false log --no-color --reverse --full-history --date=short \
+    --format=%ad --name-status -M --diff-filter=AR -z "$range" -- ${specs[@]+"${specs[@]}"} > "$s.log" 2> "$s.err" \
     || { rm -f "$tmp"; _lg_die "git log failed: $(head -n 3 "$s.err" 2>/dev/null)"; }
   tr '\n\000' '\001\n' < "$s.log" | LC_ALL=C awk '
     {
