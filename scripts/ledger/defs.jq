@@ -13,6 +13,16 @@ def lg_status_labels:
   {superseded: "superseded", wontfix: "won't fix", closed: "closed", shipped: "shipped", merged: "merged",
    in_review: "in review", on_branch: "on branch", planned: "planned", specd: "spec'd", not_started: "not started"};
 
+# lg_obj(s): the single-key objects s yields as one object (a later key
+# wins). lg_lists(s): s yields {k, v}; {k: [v…]} in s order. Both build in
+# one pass of C (add / group_by): a reduce that sets one key per step
+# copies the growing object each time (quadratic on 3,000 items).
+def lg_obj(s): [s] | add // {};
+def lg_lists(s): [s] | group_by(.k) | map({(.[0].k): map(.v)}) | add // {};
+# lg_lower: ascii_downcase, skipped when there is nothing to lower (it is
+# jq-defined and slow; test is C).
+def lg_lower: if test("[A-Z]") then ascii_downcase else . end;
+
 # --- Display (query.sh, the renderers) ----------------------------------------
 
 def lg_q_one: if type == "string" and test("[[:cntrl:]]") then gsub("[[:cntrl:]]+"; " ") else . end;
@@ -62,6 +72,136 @@ def lg_q_lines:
 def lg_q_row($lead):
   {lead: $lead, id: lg_q_id, sev: ((.severity // "—") | lg_q_one),
    d: (lg_q_display | lg_q_cut(24)), s: ((.summary // "") | lg_q_one | lg_q_cut(72))};
+
+# --- Related work (index.sh, relations.sh, query.sh, the renderers) ------------
+#
+# Design §F.1. Through contracts: A is upstream of B when A.changes ∩
+# B.consumes ≠ ∅ (via the contract); siblings share a contract on one side
+# (both change it, or both consume it). Directly: an item's relates entries
+# "<kind>:<key>" (kind root-cause | depends-on | sibling, case-insensitive;
+# no kind: sibling; any other kind is no edge) whose key or alias names
+# another item: the named item is upstream of the item for root-cause /
+# depends-on (and the item downstream of it), a sibling for sibling (both
+# ways). An edge is {key, via}: the other item's key (its path when it has
+# none) and the contract id or the relates kind (a contract id holds ":", a
+# kind never).
+
+def lg_rel_kinds: ["root-cause", "depends-on", "sibling"];
+# lg_rel_terminal: the class ends the work (re-check sources).
+def lg_rel_terminal: .class == "fixed" or .class == "closed" or .class == "wontfix";
+
+# lg_relations($its; $contracts): {nb, tab} over the index items $its
+# (index.sh). nb: {path: neighbours}, neighbours = {upstream, downstream,
+# siblings}: [{key, via}], sorted by key then via (each contract's edge list
+# is built once and shared by every item naming the contract). tab: the
+# re-check input lines relations.sh _lg_ix_recheck reads (fields \u0002,
+# lists \u0003, a newline or separator in a name \u0001):
+#   O path consumes sources n — an open (or unknown-class) item that
+#     consumes a contract (the ids without whitespace) or has re-check
+#     sources (the paths of its contract upstream and of the items its own
+#     relates name); n: its place in $its (0-based)
+#   S path key-or-path terminal(1|0) — each source
+#   G contract glob — the defined_in globs of each consumed contract.
+def lg_relations($its; $contracts):
+  lg_obj($its[] | {(.path): (.key // .path)}) as $K
+  | lg_obj([$its[] | .path as $p | ([.key] + (.aliases // []) | .[] | strings | lg_lower) | {($p): .}] | reverse[]
+           | to_entries[0] | {(.value): .key}) as $KM
+  | lg_lists($its[] | .path as $p | ((.changes // []) | unique)[] | {k: ., v: $p}) as $CHP
+  | lg_lists($its[] | .path as $p | ((.consumes // []) | unique)[] | {k: ., v: $p}) as $COP
+  | ($CHP | with_entries(.key as $c | .value |= (map({key: $K[.], via: $c}) | sort_by(.key)))) as $CHE
+  | ($COP | with_entries(.key as $c | .value |= (map({key: $K[.], via: $c}) | sort_by(.key)))) as $COE
+  | [ $its[] | .path as $f | (.relates // [])[] | ((.kind // "sibling") | ascii_downcase) as $k
+      | select(lg_rel_kinds | index([$k]) != null)
+      | ($KM[(.key // "") | lg_lower] // null) as $t
+      | select($t != null and $t != $f) | {f: $f, t: $t, k: $k} ] as $RS
+  | lg_lists($RS[] | select(.k != "sibling") | {k: .f, v: {key: $K[.t], via: .k}}) as $OU
+  | lg_lists($RS[] | select(.k == "sibling") | {k: .f, v: {key: $K[.t], via: "sibling"}}) as $OS
+  | lg_lists($RS[] | select(.k != "sibling") | {k: .t, v: {key: $K[.f], via: .k}}) as $ID
+  | lg_lists($RS[] | select(.k == "sibling") | {k: .t, v: {key: $K[.f], via: "sibling"}}) as $IS
+  | lg_lists($RS[] | {k: .f, v: .t}) as $OT
+  # nbm($me): the lists as one, sorted by key then via, without the item.
+  | def nbm($me): map(select(length > 0))
+      | (if length == 0 then [] elif length == 1 then .[0] else add | unique end)
+      | if length == 0 or (any(.[]; .key == $me) | not) then . else map(select(.key != $me)) end;
+    {nb: lg_obj($its[] | .path as $p | $K[$p] as $me
+       | ((.changes // []) | unique) as $ch | ((.consumes // []) | unique) as $co
+       | {($p): {
+           upstream: ([($co[] | $CHE[.] // []), ($OU[$p] // [])] | nbm($me)),
+           downstream: ([($ch[] | $COE[.] // []), ($ID[$p] // [])] | nbm($me)),
+           siblings: ([($ch[] | $CHE[.] // []), ($co[] | $COE[.] // []), ($OS[$p] // []), ($IS[$p] // [])] | nbm($me))}}),
+     tab: ([ $its | to_entries[] | .key as $n | .value | select(.class == "open" or .class == "unknown") | .path as $p
+             | ((.consumes // []) | map(select(test("^\\S+$"))) | unique) as $co
+             | {n: $n, p: $p, c: $co, s: ([$co[] | ($CHP[.] // [])[] | select(. != $p)] + ($OT[$p] // []) | unique)}
+             | select((.c | length) > 0 or (.s | length) > 0) ] as $open
+           | ([$open[].s[]] | unique) as $SRC
+           | lg_obj($its[] | select(lg_rel_terminal) | {(.path): true}) as $T
+           | lg_obj(($contracts // [])[] | {(.id): (.defined_in // [])}) as $DEF
+           # One test over every name first: a name holding a separator is rare.
+           | ([$its[] | .path, (.key // ""), ((.consumes // [])[])] | join("") | test("[\n\u0002\u0003]")) as $SEP
+           | def f: if $SEP and test("[\n\u0002\u0003]") then gsub("[\n\u0002\u0003]"; "\u0001") else . end;
+             [ ($open[] | "O\u0002\(.p | f)\u0002\(.c | map(f) | join("\u0003"))\u0002\(.s | map(f) | join("\u0003"))\u0002\(.n)"),
+               ($SRC[] | "S\u0002\(f)\u0002\($K[.] | f)\u0002\(if $T[.] then 1 else 0 end)"),
+               (([$open[].c[]] | unique)[] as $k | ($DEF[$k] // [])[] | select(test("[[:cntrl:]]") | not)
+                | "G\u0002\($k)\u0002\(.)") ])};
+
+# lg_path_contracts($its; $cre): {file: [contract ids]} — for every file an
+# item lists in paths, the contracts whose defined_in matches it. $cre:
+# [{id, dir, re}] — each defined_in glob as glob.sh's ERE, filed under its
+# literal directory (a file is tried only against the globs filed under one
+# of its own directories).
+def lg_path_contracts($its; $cre):
+  lg_lists($cre[] | {k: .dir, v: .}) as $GD
+  | lg_obj(([$its[] | (.paths // [])[]] | unique)[] as $f
+      | ($f | split("/")) as $parts
+      | ([""] + [range(1; $parts | length) as $n | ($parts[0:$n] | join("/")) + "/"]) as $dirs
+      | ([$dirs[] as $d | ($GD[$d] // [])[] | select(.re as $re | $f | test($re)) | .id] | unique) as $ids
+      | if ($ids | length) > 0 then {($f): $ids} else empty end);
+
+# lg_r_maps($ix): lookups over the index:
+#   P   {file: [item paths listing it in paths]}
+#   S   {spec: [item paths whose docs.spec has it]}
+#   C   {contract: [item paths naming it in changes or consumes]}
+#   D   {file: [contracts whose defined_in matches it]} (path_contracts)
+#   DI  {contract: [{p, f}]}: items whose file f the contract's defined_in matches
+#   BYP {path: item}, K2P {key or path: path} (a neighbour's key → its item)
+def lg_r_maps($ix):
+  ($ix.path_contracts // {}) as $D
+  | lg_lists($ix.items[] | .path as $p | ((.paths // []) | unique)[] | {k: ., v: $p}) as $P
+  | {P: $P,
+     S: lg_lists($ix.items[] | .path as $p | (((.docs // {}).spec // []) | unique)[] | {k: ., v: $p}),
+     C: lg_lists($ix.items[] | .path as $p | ([(.changes // [])[], (.consumes // [])[]] | unique)[] | {k: ., v: $p}),
+     D: $D,
+     DI: lg_lists($D | to_entries[] | .key as $f | .value[] | {k: ., v: (($P[$f] // [])[] | {p: ., f: $f})}),
+     BYP: lg_obj($ix.items[] | {(.path): .}),
+     # A key names the first item (by path) that has it; a path names its item.
+     K2P: (lg_obj($ix.items[] | {(.path): .path}) + lg_obj([$ix.items[] | {(.key // .path): .path}] | reverse[]))};
+
+# lg_r_candidates($I; $M): the items related to $I by evidence only (design
+# §F.1 candidates; never asserted) — [{p, reasons}], by path; $I left out,
+# nothing else (the caller drops confirmed and closed ones):
+#   ≥ 2 files both list ("shares N files: a, b");
+#   a spec both are linked from ("same spec: s");
+#   a file of the other matching the defined_in of a contract $I names
+#   ("its file f defines C"), or a file of $I matching the defined_in of a
+#   contract the other names ("names C, defined in f (a file <I> lists)").
+def lg_r_candidates($I; $M):
+  (($I.paths // []) | unique) as $ip
+  | ([($I.changes // [])[], ($I.consumes // [])[]] | unique) as $ic
+  | ($I.key // $I.path) as $iid
+  | [ ([$ip[] as $f | ($M.P[$f] // [])[] | select(. != $I.path) | {p: ., f: $f}]
+       | group_by(.p) | map(select(length >= 2) | {p: .[0].p, r: "shares \(length) files: \(map(.f) | join(", "))"}) | .[]),
+      (((($I.docs // {}).spec // []) | unique)[] as $s | ($M.S[$s] // [])[] | select(. != $I.path) | {p: ., r: "same spec: \($s)"}),
+      ($ic[] as $k | ($M.DI[$k] // [])[] | select(.p != $I.path) | {p: .p, r: "its file \(.f) defines \($k)"}),
+      ($ip[] as $f | ($M.D[$f] // [])[] as $k | ($M.C[$k] // [])[] | select(. != $I.path)
+       | {p: ., r: "names \($k), defined in \($f) (a file \($iid) lists)"}) ]
+  | group_by(.p) | map({p: .[0].p, reasons: (map(.r) | unique)});
+
+# lg_r_recheck_text: an item's re-check markers (recheck_after) as shown —
+# "<key> landed" for an item that reached a terminal class, "<contract>
+# changed" for a contract change; "" when none.
+def lg_r_recheck_text:
+  (.recheck_after // []) | if length == 0 then ""
+  else "re-check: " + (map(if test(":") then "\(.) changed" else "\(.) landed" end) | join(", ")) end;
 
 # --- Views (render-md.jq, render-html.jq) ---------------------------------------
 #
@@ -120,16 +260,33 @@ def lg_v_ledgers($ix):
   | ($reg | map(.id)) as $ids
   | $reg + [$used[] | select(. as $u | $ids | index([$u]) == null)
             | {id: ., title: (if . == "unassigned" then "Unassigned" else . end), scope: "", retired: false}];
+# lg_v_status: the derived status as the views show it — the display, then
+# " · re-check: …" when the item carries re-check markers.
+def lg_v_status:
+  lg_r_recheck_text as $r | lg_q_display + (if $r == "" then "" else " · " + $r end);
+# lg_v_suggest($U; $M): the top candidate cluster of an unclustered item —
+# {contract, reason} or null: a contract whose defined_in matches a file it
+# lists (2 points), the cluster of an active candidate item (1 point each,
+# design §F.1 candidates); the highest total, then the contract id.
+def lg_v_suggest($U; $M):
+  [ ((($U.paths // []) | unique)[] as $f | ($M.D[$f] // [])[] | {c: ., s: 2, r: "its file \($f) defines it"}),
+    (lg_r_candidates($U; $M)[] | $M.BYP[.p] as $Y | ($Y | lg_q_cluster) as $k
+     | select($k != null and ($Y | lg_v_active))
+     | {c: $k, s: 1, r: "\(.reasons[0]) (\($Y.key // $Y.path))"}) ]
+  | if length == 0 then null
+    else group_by(.c) | map({contract: .[0].c, score: (map(.s) | add), reason: .[0].r})
+      | sort_by(-.score, .contract) | .[0] | {contract, reason} end;
 # lg_v_model($ix; $c; $gen): every ledger's page model —
 #   {id, title, scope, retired, counts: [{sev, n}], open, inflight: [branches],
 #    clusters: [{contract, title, items, counts, up: [..], down: [..]}],
-#    unclustered: [items], closed: [items], superseded: [items]}
+#    unclustered: [items + {suggest: lg_v_suggest}], closed: [items],
+#    superseded: [items]}
 # plus .unplaced (the items on no page: no ledger, or not an id) and
 # .inflight (every in-flight branch the items name). Clusters by severity counts
 # (severity_order, most severe first) descending, then title, then
 # contract; items by lg_v_sort. up/down: the clusters' neighbours in other
-# ledgers ({key, via, ledger, display}), de-duplicated — only when the
-# index has computed neighbours (Task 9; null until then).
+# ledgers ({key, via, ledger, display}), de-duplicated (a neighbour without
+# a key is named by its path).
 def lg_v_model($ix; $c; $gen):
   lg_q_ranks($c) as $K
   | lg_v_sevs($c) as $sevs
@@ -137,8 +294,9 @@ def lg_v_model($ix; $c; $gen):
   | ($ix.items | sort_by(.path)) as $all
   # Keys → items over the path-sorted list (a duplicate key resolves to its
   # last path, whatever the input order).
-  | ([$all[] | {key: ((.key // "") | ascii_downcase), v: .}] | map(select(.key != ""))
-     | reduce .[] as $x ({}; .[$x.key] = $x.v)) as $BYKEY
+  # A neighbour without a key is named by its path.
+  | (lg_obj($all[] | {(.path): .}) + lg_obj($all[] | ((.key // "") | lg_lower) as $k | select($k != "") | {($k): .})) as $BYKEY
+  | lg_r_maps($ix) as $M
   | lg_v_ledgers($ix) as $LS
   | ($LS | map(.id)) as $pages
   | {ledgers: [$LS[] as $L
@@ -148,19 +306,19 @@ def lg_v_model($ix; $c; $gen):
          | map((.[0] | lg_q_cluster) as $k
                | {contract: $k, title: ($T[$k] // null), items: lg_v_sort($K), counts: lg_v_counts($sevs),
                   up: ([.[] | .neighbours | objects | (.upstream // [])[] | objects]
-                       | map(. + {item: $BYKEY[(.key // "") | ascii_downcase]})
+                       | map(. + {item: ($BYKEY[(.key // "") | ascii_downcase] // $BYKEY[.key // ""])})
                        | map(select(.item != null and .item.ledger != $L.id))
                        | map({key: .key, via: (.via // null), ledger: .item.ledger, display: (.item | lg_q_display)})
                        | unique_by([.key, .via])),
                   down: ([.[] | .neighbours | objects | (.downstream // [])[] | objects]
-                         | map(. + {item: $BYKEY[(.key // "") | ascii_downcase]})
+                         | map(. + {item: ($BYKEY[(.key // "") | ascii_downcase] // $BYKEY[.key // ""])})
                          | map(select(.item != null and .item.ledger != $L.id))
                          | map({key: .key, via: (.via // null), ledger: .item.ledger, display: (.item | lg_q_display)})
                          | unique_by([.key, .via]))})
          | sort_by((.counts | map(0 - .n)), (.title // .contract), .contract)) as $clusters
       | $L + {counts: ($act | lg_v_counts($sevs)), open: ($act | length), inflight: ($its | lg_v_inflight),
               clusters: $clusters,
-              unclustered: ([$act[] | select(lg_q_cluster == null)] | lg_v_sort($K)),
+              unclustered: ([$act[] | select(lg_q_cluster == null)] | lg_v_sort($K) | map(. + {suggest: lg_v_suggest(.; $M)})),
               closed: ([$its[] | select((lg_v_active | not) and (lg_v_superseded | not) and .class != "wontfix" and lg_v_recent($gen))] | lg_v_sort($K)),
               superseded: ([$its[] | select((lg_v_superseded or .class == "wontfix") and lg_v_recent($gen))] | lg_v_sort($K))}],
      unplaced: [$all[] | select(.ledger as $l | $pages | index([$l]) == null)],

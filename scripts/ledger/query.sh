@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # scripts/ledger/query.sh — the read verbs over the index (index.sh):
-# `ledger show`, `ledger ls`, `ledger find`. Sourced by lib.sh; uses lib.sh's
+# `ledger show`, `ledger ls`, `ledger find`, and `ledger link`, which writes
+# a confirmed relation into an item. Sourced by lib.sh; uses lib.sh's
 # _lg_init, _lg_usage, _lg_die, _lg_emit, _lg_out_file, index.sh's _lg_index
 # and parse.sh's _lg_scratch_name. One jq process reads the index per run
 # (a 3,000-item index is a few MB: one parse, one pass).
@@ -9,7 +10,10 @@
 # become spaces) and long values are cut ("…"):
 #   show  ≤ 25 lines: "<key|path>  <ledger>  <severity>  <status>", the
 #         summary, then path/status/date, spec·plan·handoff,
-#         changes·consumes·relates, and — when present — files, aliases,
+#         changes·consumes·relates, and — when present — the neighbours
+#         ("upstream: <key> (<via>), …", downstream, siblings; relations.sh),
+#         the re-check markers ("re-check: <key> landed, <contract>
+#         changed"), files, aliases,
 #         superseded by, owed, the first resolution line (a terminal item:
 #         fixed / closed / won't fix class; "(none)" when it has none) and
 #         the first frontmatter error. Lists show 3 entries and "+N more".
@@ -101,6 +105,11 @@ lg_resolve($ref; $c[0]) as $R
        (if (.h1 | type) == "string" and .h1 != .summary then "title: \(.h1 | lg_q_one | lg_q_cut(160))" else empty end),
        "spec: \(.docs.spec | lg_q_list(3)) · plan: \(.docs.plan | lg_q_list(3)) · handoff: \(.docs.handoff | lg_q_list(3))",
        "changes: \(.changes | lg_q_list(3)) · consumes: \(.consumes | lg_q_list(3)) · relates: \([.relates[] | if .kind == null then .key else "\(.kind):\(.key)" end] | lg_q_list(3))",
+       ((.neighbours // {}) as $n
+        | (if ($n.upstream // []) != [] then "upstream: \($n.upstream | map("\(.key) (\(.via))") | lg_q_list(3))" else empty end),
+          (if ($n.downstream // []) != [] then "downstream: \($n.downstream | map("\(.key) (\(.via))") | lg_q_list(3))" else empty end),
+          (if ($n.siblings // []) != [] then "siblings: \($n.siblings | map("\(.key) (\(.via))") | lg_q_list(3))" else empty end)),
+       (lg_r_recheck_text | if . != "" then (lg_q_one | lg_q_cut(200)) else empty end),
        (if .paths != [] then "files: \(.paths | lg_q_list(3))" else empty end),
        (if .aliases != [] then "aliases: \(.aliases | lg_q_list(3))" else empty end),
        (if .superseded_by != null and .derived.status != "superseded" then "superseded by: \(.superseded_by | lg_q_one)" else empty end),
@@ -124,6 +133,7 @@ cmd_ledger_show() {
     _lg_k_multiword "$ref" || _lg_usage "give one item: a key, an alias, a legacy ref or a path (got ${#_ARGS[@]} arguments)"
   fi
   [ -n "$ref" ] || _lg_usage "the item is empty"
+  _LG_IX_NEED_CONTRACTS=1
   _lg_scratch_name
   s=$_LG_SN
   _lg_q_run "$_LG_JQ_SHOW" "$s.out" --arg ref "$ref" --arg mode "$_LG_FORMAT"
@@ -237,4 +247,159 @@ cmd_ledger_find() {
     ok) _lg_q_finish "$s.out" ;;
     *) _lg_die "internal: ledger find: unexpected query result '$_LG_QHEAD'" ;;
   esac
+}
+
+# --- link ------------------------------------------------------------------------
+
+# ledger link <ref> [--consumes C] [--changes C] [--relates <kind>:<item>]:
+# validate every value first — a contract must be one the index knows
+# (registry or contracts adapter); a relates kind is root-cause, depends-on
+# or sibling (case-insensitive) and names, as show resolves, one other item
+# that has a key — then add them to the item's frontmatter lists in one
+# write (parse.sh _lg_fm_op_list_add; a value already there stays). The
+# field is the first configured candidate name (config fields) the file
+# has, else the first candidate. A relates value is written "<kind>:<key>"
+# with the target's key as the item spells it. Text: "<item>  <field>:
+# <value>  (added | already there)" per value. Any bad value: one "link:
+# <problem>" line each, exit 1, nothing written. JSON: {path, key, added:
+# [{field, value}], present: [{field, value}]} or {problems: [...]}.
+
+# shellcheck disable=SC2016  # jq source
+_LG_JQ_LINK="$_LG_JQ_RESOLVE_DEFS"'
+. as $ix
+| lg_resolve($ref; $c[0]) as $R
+| if $R.r == "ambiguous" then "ambiguous\t\($R.v | join(", "))"
+  elif $R.r == "archived" then "archived\t\($R.v)"
+  elif $R.r != "item" then "none"
+  else
+    first($ix.items[] | select(.path == $R.v)) as $I
+    | [($ix.contracts // [])[] | .id] as $ids
+    | [ ($ops[] | select(.f == "consumes" or .f == "changes") | . as $o
+         | if ($ids | index([$o.v])) != null then {f: $o.f, v: $o.v}
+           else {p: "--\($o.f) \($o.v | tojson) is not a contract (registry or contracts adapter)"} end),
+        ($ops[] | select(.f == "relates") | . as $o
+         | ($o.v | capture("^(?<k>[^:]*):(?<t>.+)$") // null) as $m
+         | if $m == null then {p: "--relates \($o.v | tojson) is not <kind>:<item>"}
+           elif (lg_rel_kinds | index([$m.k | ascii_downcase])) == null
+           then {p: "--relates kind \($m.k | tojson) is not root-cause, depends-on or sibling"}
+           else ($ix | lg_resolve($m.t; $c[0])) as $T
+             | if $T.r == "ambiguous" then {p: "--relates \($m.t | tojson) matches several items: \($T.v | join(", "))"}
+               elif $T.r != "item" then {p: "--relates \($m.t | tojson) is not an item"}
+               elif $T.v == $I.path then {p: "--relates \($m.t | tojson) is the item itself"}
+               else first($ix.items[] | select(.path == $T.v)) as $Y
+                 | if ($Y.key | type) != "string" then {p: "--relates \($m.t | tojson) (\($Y.path)) has no key"}
+                   else {f: "relates", v: "\($m.k | ascii_downcase):\($Y.key)"} end
+               end
+           end) ] as $V
+    | ($V | map(select(has("p")) | .p)) as $P
+    | if $P != [] then "bad", $P[]
+      else "ok", ($I.key // ""), ($V[] | "\(.f)\t\(.v)") end
+  end
+'
+
+# _lg_link_names <file>: the frontmatter names of changes, consumes and
+# relates for <file> (the first configured candidate the file has, else the
+# first candidate) into _LG_LN_changes, _LG_LN_consumes, _LG_LN_relates.
+_lg_link_names() {
+  local d
+  _lg_parse_prep
+  d=$(mktemp "$_SCRATCH/lg-ln.XXXXXX") || _lg_die "mktemp failed"
+  LC_ALL=C awk -v path=x "${_LG_PARSE_ARGS[@]}" -f "$_LG_LIB/frontmatter.awk" < "$1" > "$d.rec" \
+    || _lg_die "cannot parse $1"
+  jq -L "$_LG_LIB" -r --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS"'
+    lg_fields($c[0]) as $F | (.fm // {}) as $fm
+    | ("changes", "consumes", "relates") as $l
+    | ($F[$l] // []) as $cs
+    | (first($cs[] | select(. as $n | $fm | has($n))) // $cs[0] // $l)' "$d.rec" > "$d" \
+    || _lg_die "jq failed (field names of $1)"
+  { IFS= read -r _LG_LN_changes; IFS= read -r _LG_LN_consumes; IFS= read -r _LG_LN_relates; } < "$d" \
+    || _lg_die "cannot read the field names of $1"
+}
+
+# shellcheck disable=SC2154  # _OPT_* and _ARGS are set by _parse_args
+cmd_ledger_link() {
+  local s ref a ops f v key path n field status
+  _lg_init link
+  [ "${#_ARGS[@]}" -ge 1 ] || _lg_usage "give one item: a key, an alias, a legacy ref or a path"
+  ref=${_ARGS[0]}
+  if [ "${#_ARGS[@]}" -gt 1 ]; then
+    for a in "${_ARGS[@]:1}"; do ref="$ref $a"; done
+    _lg_k_multiword "$ref" || _lg_usage "give one item: a key, an alias, a legacy ref or a path (got ${#_ARGS[@]} arguments)"
+  fi
+  [ -n "$ref" ] || _lg_usage "the item is empty"
+  if [ -z "$_OPTSEEN_consumes$_OPTSEEN_changes$_OPTSEEN_relates" ]; then
+    _lg_usage "give --consumes <contract>, --changes <contract> or --relates <kind>:<item>"
+  fi
+  for v in "$_OPT_consumes" "$_OPT_changes" "$_OPT_relates"; do
+    case "$v" in *[$'\n\r']*) _lg_usage "a value cannot hold a line break" ;; esac
+  done
+  ops=$(jq -nc --arg cs "$_OPT_consumes" --arg ch "$_OPT_changes" --arg rl "$_OPT_relates" \
+    --arg scs "$_OPTSEEN_consumes" --arg sch "$_OPTSEEN_changes" --arg srl "$_OPTSEEN_relates" '
+    [(if $scs == "1" then {f: "consumes", v: $cs} else empty end),
+     (if $sch == "1" then {f: "changes", v: $ch} else empty end),
+     (if $srl == "1" then {f: "relates", v: $rl} else empty end)]') || _lg_die "jq failed (link values)"
+  _LG_IX_NEED_CONTRACTS=1
+  _lg_scratch_name
+  s=$_LG_SN
+  _lg_q_run "$_LG_JQ_LINK" "$s.out" --arg ref "$ref" --argjson ops "$ops"
+  case "$_LG_QHEAD" in
+    ok) ;;
+    none)
+      if [ "$_LG_FORMAT" = json ]; then
+        jq -nc --arg r "$ref" '{item: null, ref: $r}' > "$s.json" || _lg_die "jq failed (payload)"
+        _lg_emit link 1 "$s.json"
+      fi
+      printf "no item matches '%s'\n" "$ref" | tr -d '\000-\010\013-\037' | head -n 1 > "$s.msg"
+      _lg_out_file "$s.msg"
+      _lg_emit link 1 ;;
+    bad)
+      if [ "$_LG_FORMAT" = json ]; then
+        jq -R -n -c '{problems: [inputs]}' "$s.out" > "$s.json" || _lg_die "jq failed (payload)"
+        _lg_emit link 1 "$s.json"
+      fi
+      sed 's/^/link: /' "$s.out" | tr -d '\000-\010\013-\037' > "$s.msg"
+      _lg_out_file "$s.msg"
+      _lg_emit link 1 ;;
+    ambiguous*) _lg_usage "'$ref' matches several items: ${_LG_QHEAD#*	}" ;;
+    archived*) _lg_usage "'$ref' is an archived legacy row (${_LG_QHEAD#*	}): there is no item to link" ;;
+    *) _lg_die "internal: ledger link: unexpected query result '$_LG_QHEAD'" ;;
+  esac
+  _lg_resolve_into "$ref"
+  [ "$_LG_RES_KIND" = item ] || _lg_die "internal: ledger link: '$ref' no longer resolves"
+  path=$_LG_RES
+  [ -f "$path" ] || _lg_die "the item '$path' is not in the working tree"
+  { IFS= read -r key; cat > "$s.ops"; } < "$s.out"
+  _lg_link_names "$path"
+  # One write: every value queued, then applied.
+  _lg_fm_ops_reset
+  : > "$s.res"
+  while IFS="$(printf '\t')" read -r f v; do
+    case "$f" in
+      changes) field=$_LG_LN_changes ;;
+      consumes) field=$_LG_LN_consumes ;;
+      relates) field=$_LG_LN_relates ;;
+      *) _lg_die "internal: ledger link field '$f'" ;;
+    esac
+    n=$_LG_FMO_N
+    _lg_fm_op_list_add "$path" "$field" "$v"
+    if [ "$_LG_FMO_N" -gt "$n" ]; then status=added; else status=present; fi
+    printf '%s\t%s\t%s\n' "$status" "$field" "$v" >> "$s.res"
+  done < "$s.ops"
+  # Queued list adds read the file as it is now: two adds to one field
+  # would each rewrite the list from the same start — one op per field
+  # (the values of one field are never more than one per run).
+  _lg_fm_ops_apply "$path"
+  if [ "$_LG_FORMAT" = json ]; then
+    jq -R -n -c --arg p "$path" --arg k "$key" '
+      [inputs | split("\t") | {s: .[0], field: .[1], value: .[2]}] as $r
+      | {path: $p, key: (if $k == "" then null else $k end),
+         added: [$r[] | select(.s == "added") | {field, value}],
+         present: [$r[] | select(.s == "present") | {field, value}]}' "$s.res" > "$s.json" \
+      || _lg_die "jq failed (payload)"
+    _lg_emit link 0 "$s.json"
+  fi
+  LC_ALL=C awk -F '\t' -v id="${key:-$path}" '{ print id "  " $2 ": " $3 "  (" ($1 == "added" ? "added" : "already there") ")" }' \
+    "$s.res" | tr -d '\000-\010\013-\037' > "$s.lines"
+  _lg_out_file "$s.lines"
+  _lg_emit link 0
 }

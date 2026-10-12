@@ -4,13 +4,13 @@
   "title": "doc-superpowers work-ledger index (ledger-index/1)",
   "description": "The derived, cached join that `doc-tools.sh ledger` verbs read (scripts/ledger/index.sh). Never committed. Keys appear in the order listed in `required`.",
   "type": "object",
-  "required": ["schema", "built", "ledgers", "items", "legacy", "finalized"],
+  "required": ["schema", "built", "ledgers", "contracts", "path_contracts", "items", "legacy", "finalized"],
   "additionalProperties": false,
   "properties": {
     "schema": { "const": "ledger-index/1" },
     "built": {
       "type": "object",
-      "required": ["head", "base", "inputs_hash", "mode", "rev", "registry_findings"],
+      "required": ["head", "base", "inputs_hash", "mode", "rev", "registry_findings", "contracts_error"],
       "additionalProperties": false,
       "properties": {
         "head": { "type": ["string", "null"], "description": "HEAD's commit id; null on an unborn branch, and for --rev (a rev build does not depend on HEAD)." },
@@ -18,10 +18,31 @@
         "inputs_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "The cache key: the file is index-<hex>.json." },
         "mode": { "enum": ["worktree", "staged", "rev"] },
         "rev": { "type": ["string", "null"], "description": "The commit id of --rev; null otherwise." },
-        "registry_findings": { "type": "integer", "minimum": 0, "description": "Structural `validate --registry` findings of the registry used (ownership checks excluded); the index uses the registry regardless." }
+        "registry_findings": { "type": "integer", "minimum": 0, "description": "Structural `validate --registry` findings of the registry used (ownership checks excluded); the index uses the registry regardless." },
+        "contracts_error": { "type": ["string", "null"], "description": "Why the contracts adapter (config adapters.contracts) failed — the contracts are then the registry's alone, and every verb that shows relations exits 2; null when it ran or none is configured." }
       }
     },
     "ledgers": { "type": "array", "items": { "type": "object" }, "description": "The registry's ledgers, as written." },
+    "contracts": {
+      "type": "array",
+      "description": "Every contract (design §G): the registry's ledgers[].contracts[] and the contracts adapter's list, one per id, sorted by id. An id in both is one contract: the registry's ledger, defined_in and title win; the adapter's fill only what the registry leaves empty.",
+      "items": {
+        "type": "object",
+        "required": ["id", "ledger", "defined_in", "title"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*:[^\\s]+$" },
+          "ledger": { "$ref": "#/$defs/strOrNull" },
+          "defined_in": { "$ref": "#/$defs/strList", "description": "Globs (scripts/ledger/glob.sh) of the files that define it." },
+          "title": { "$ref": "#/$defs/strOrNull" }
+        }
+      }
+    },
+    "path_contracts": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/strList" },
+      "description": "For each file an item lists in paths that some contract's defined_in matches: those contract ids (the candidate rules, design §F.1)."
+    },
     "items": { "type": "array", "items": { "$ref": "#/$defs/item" }, "description": "Sorted by path." },
     "legacy": { "type": "object", "description": "The legacy map (config `legacy`), {} when absent." },
     "finalized": { "type": "object", "description": "docs/ledger/finalized.json, {} when absent." }
@@ -29,6 +50,15 @@
   "$defs": {
     "strOrNull": { "type": ["string", "null"] },
     "strList": { "type": "array", "items": { "type": "string" } },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "via"],
+        "additionalProperties": false,
+        "properties": { "key": { "type": "string" }, "via": { "type": "string" } }
+      }
+    },
     "item": {
       "type": "object",
       "required": ["path", "archived", "key", "ledger", "status", "class", "severity", "date", "summary", "changes", "consumes", "relates", "superseded_by", "owed", "aliases", "paths", "h1", "first_para", "resolution", "docs", "derived", "pr", "inflight", "neighbours", "recheck_after", "fm_errors"],
@@ -83,8 +113,18 @@
         },
         "pr": { "description": "PR adapter data (Task 10); null until then." },
         "inflight": { "type": "array", "description": "In-flight branch claims (Task 11)." },
-        "neighbours": { "description": "Related work (Task 9); null until computed." },
-        "recheck_after": { "type": "array" },
+        "neighbours": {
+          "type": "object",
+          "required": ["upstream", "downstream", "siblings"],
+          "additionalProperties": false,
+          "description": "Confirmed relations (design §F.1): upstream — items whose changes meet this item's consumes, or that its relates names root-cause / depends-on; downstream — the reverse; siblings — a contract both change or both consume, or relates sibling (either side). Each {key, via}: the other item's key (its path when it has none) and the contract id or the relates kind; sorted by key, then via.",
+          "properties": {
+            "upstream": { "$ref": "#/$defs/edges" },
+            "downstream": { "$ref": "#/$defs/edges" },
+            "siblings": { "$ref": "#/$defs/edges" }
+          }
+        },
+        "recheck_after": { "$ref": "#/$defs/strList", "description": "Re-check markers (design §F.2, computed): on an open item, the key of a re-check source that reached a terminal class on the base, or a contract it consumes that a base commit changed — after the item's last commit on the base. Not computed for --staged." },
         "fm_errors": { "$ref": "#/$defs/strList" }
       }
     }

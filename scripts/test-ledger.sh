@@ -364,15 +364,16 @@ test_lg_stub_not_implemented() {
   echo "test: an enabled verb with no implementation yet exits 2 with one object"
   lg_fixture
   lg_enable
-  # "related" (Task 9) — show was the stub until Task 5 built it.
-  lg related x-1 --format json
+  # "inflight" (Task 11) — show was the stub until Task 5 built it,
+  # related until Task 9.
+  lg inflight --format json
   assert_eq "2" "$LG_RC" "stub exits 2"
   assert_eq "1" "$(json_count "$LG_OUT")" "exactly one object"
-  assert_json_field "$LG_OUT" '.verb' "ledger related" ".verb is 'ledger related'"
+  assert_json_field "$LG_OUT" '.verb' "ledger inflight" ".verb is 'ledger inflight'"
   assert_json_field "$LG_OUT" '.enabled' "true" ".enabled is true"
   assert_json_field "$LG_OUT" '.exit' "2" ".exit is 2"
   assert_json_field "$LG_OUT" '.error' "not implemented" ".error"
-  lg related x-1
+  lg inflight
   assert_eq "2" "$LG_RC" "text mode: exits 2"
   assert_eq "" "$LG_OUT" "text mode: nothing on stdout"
   assert_contains "$LG_ERR" "not implemented" "text mode: stderr says why"
@@ -1455,7 +1456,7 @@ lg_t_index_fields() {
   ix=$(_lg_index)
   assert_true "the index file exists under the cache dir" test -f "$ix"
   assert_contains "$ix" "$_LG_CACHE/index-" "named index-<hash>.json in \$_LG_CACHE"
-  assert_json_field "$(cat "$ix")" 'keys_unsorted | join(",")' "schema,built,ledgers,items,legacy,finalized" "top-level keys, in order"
+  assert_json_field "$(cat "$ix")" 'keys_unsorted | join(",")' "schema,built,ledgers,contracts,path_contracts,items,legacy,finalized" "top-level keys, in order"
   assert_json_field "$(cat "$ix")" '.schema' "ledger-index/1" "schema"
   assert_json_field "$(cat "$ix")" '.built.head' "$(git rev-parse HEAD)" "built.head is HEAD"
   assert_json_field "$(cat "$ix")" '.built.base' "null" "built.base: no origin/main here → null"
@@ -1480,7 +1481,9 @@ lg_t_index_fields() {
   assert_json_field "$it" '[.changes, .consumes, .relates, .aliases, .paths] | tojson' \
     '[["field:order.total"],[],[{"kind":"root-cause","key":"app-2"},{"kind":"sibling","key":"app-3"}],[],["src/a.js"]]' \
     "list fields (paths via the related-files candidate)"
-  assert_json_field "$it" '[.superseded_by, .owed, .resolution, .pr, .neighbours] | tojson' '[null,null,null,null,null]' "absent scalars are null"
+  assert_json_field "$it" '[.superseded_by, .owed, .resolution, .pr] | tojson' '[null,null,null,null]' "absent scalars are null"
+  assert_json_field "$it" '.neighbours | tojson' '{"upstream":[{"key":"app-2","via":"root-cause"}],"downstream":[],"siblings":[{"key":"app-3","via":"sibling"}]}' \
+    "neighbours computed (Task 9): its relates"
   assert_json_field "$it" '[.inflight, .recheck_after, .fm_errors] | tojson' '[[],[],[]]' "empty lists"
   assert_json_field "$it" '.docs | tojson' '{"spec":[],"plan":[],"handoff":[]}' "docs: no links"
   assert_json_field "$it" '.derived | tojson' '{"status":"not started","detail":null}' "open, no docs → not started"
@@ -4472,6 +4475,550 @@ test_lg_publish_push_failed_not_moved() {
   teardown
 }
 
+# --- Task 9: contracts, relations, message trailers, re-check -----------------------
+
+# app: field:order.total (src/order/*.js), component:Sheet (src/sheet/**, a
+# title); core: endpoint:create (server/create.js).
+# shellcheck disable=SC2016  # JSON
+LG_REG_REL='{"schema":"ledger-registry/1","ledgers":[
+  {"id":"app","title":"App","kind":"service","status":"active",
+   "contracts":[{"id":"field:order.total","defined_in":["src/order/*.js"]},
+                {"id":"component:Sheet","defined_in":["src/sheet/**"],"title":"The sheet"}]},
+  {"id":"core","title":"Core","kind":"platform","status":"active",
+   "contracts":[{"id":"endpoint:create","defined_in":["server/create.js"]}]}]}'
+
+# lg_rel_fixture [config]: the relations corpus, committed on main —
+#   app-1 changes field:order.total; files src/util/a.js, src/util/b.js
+#   core-1 (P0) and app-2 consume field:order.total; app-3 changes it
+#   core-2 relates depends-on:app-1, root-cause:core-1, sibling:app-3
+#   app-4 lists both util files (a candidate of app-1), app-5 one of them
+#   (not), app-6 lists src/order/total.js (field:order.total's definition)
+#   core-3 shares the spec docs/specs/s.md with app-1
+#   core-4 (closed) lists both util files (closed: never a candidate)
+lg_rel_fixture() {
+  local c='{"base":"main"}'
+  if [ $# -gt 0 ]; then c=$1; fi
+  lg_fixture
+  lg_enable "$c"
+  lg_registry "$LG_REG_REL"
+  lg_item docs/issues/a.md "key: app-1" "ledger: app" "status: Open" "severity: P1" "summary: Totals are wrong" \
+    "changes: [field:order.total]" "related-files: [src/util/a.js, src/util/b.js]"
+  lg_item docs/issues/b.md "key: core-1" "ledger: core" "status: Open" "severity: P0" "summary: Receipts read the total" \
+    "consumes: [field:order.total]"
+  lg_item docs/issues/c.md "key: app-2" "ledger: app" "status: Open" "severity: P2" "summary: Cart badge reads the total" \
+    "consumes: [field:order.total]"
+  lg_item docs/issues/d.md "key: app-3" "ledger: app" "status: Open" "severity: P2" "summary: Tax rounding" \
+    "changes: [field:order.total]"
+  lg_item docs/issues/e.md "key: core-2" "ledger: core" "status: Open" "severity: P2" "summary: Order export breaks" \
+    "relates: [depends-on:app-1, root-cause:core-1, sibling:app-3]"
+  lg_item docs/issues/f.md "key: app-4" "ledger: app" "status: Open" "severity: P3" "summary: Util cleanup" \
+    "related-files: [src/util/a.js, src/util/b.js]"
+  lg_item docs/issues/g.md "key: app-5" "ledger: app" "status: Open" "severity: P3" "summary: One util file" \
+    "related-files: [src/util/a.js]"
+  lg_item docs/issues/h.md "key: app-6" "ledger: app" "status: Open" "severity: P3" "summary: Total file lint" \
+    "related-files: [src/order/total.js]"
+  lg_item docs/issues/i.md "key: core-3" "ledger: core" "status: Open" "severity: P3" "summary: Specified together"
+  lg_item docs/issues/j.md "key: core-4" "ledger: core" "status: Closed" "severity: P3" "summary: Closed util work" \
+    "related-files: [src/util/a.js, src/util/b.js]"
+  printf '\n## Resolution\n\nDone elsewhere.\n' >> docs/issues/j.md
+  mkdir -p docs/specs src/order src/util server
+  printf '# Spec\n\nCovers app-1 and core-3.\n' > docs/specs/s.md
+  printf '{"docs":{"docs/specs/s.md":{"doc_type":"spec"}}}\n' > docs/.doc-index.json
+  echo total > src/order/total.js
+  echo a > src/util/a.js
+  echo b > src/util/b.js
+  echo create > server/create.js
+  git add -A && git commit -qm relations
+}
+
+# lg_rel_ix: the working tree's index (a file path) into LG_IX.
+lg_rel_ix() {
+  lg_call _lg_index
+  LG_IX=$LG_OUT
+}
+
+# lg_nb <key> <list>: the item's neighbours list (upstream | downstream |
+# siblings) as "key/via key/via …" from LG_IX.
+lg_nb() {
+  jq -r --arg k "$1" --arg l "$2" '.items[] | select(.key == $k) | .neighbours[$l] | map("\(.key)/\(.via)") | join(" ")' "$LG_IX"
+}
+
+# lg_rc_of <key>: the item's recheck_after, joined by spaces, from LG_IX.
+lg_rc_of() {
+  jq -r --arg k "$1" '.items[] | select(.key == $k) | .recheck_after | join(" ")' "$LG_IX"
+}
+
+test_lg_contract_upstream_downstream() {
+  echo "test: contracts — upstream = items changing what it consumes; downstream the reverse"
+  lg_rel_fixture
+  lg_rel_ix
+  assert_eq "0" "$LG_RC" "the index builds"
+  assert_eq "" "$(lg_nb app-1 upstream)" "app-1 consumes nothing: no upstream"
+  assert_eq "app-2/field:order.total core-1/field:order.total core-2/depends-on" "$(lg_nb app-1 downstream)" \
+    "app-1 downstream: the consumers of field:order.total (and core-2's depends-on)"
+  assert_eq "app-1/field:order.total app-3/field:order.total" "$(lg_nb core-1 upstream)" \
+    "core-1 upstream: every item changing field:order.total"
+  assert_eq "core-2/root-cause" "$(lg_nb core-1 downstream)" "core-1 downstream: core-2 (root-cause)"
+  assert_eq "" "$(lg_nb app-4 upstream)$(lg_nb app-4 downstream)$(lg_nb app-4 siblings)" "an item naming no contract: no neighbours"
+  assert_json_field "$(cat "$LG_IX")" '.contracts | map(.id) | join(",")' "component:Sheet,endpoint:create,field:order.total" \
+    "the index lists the registry's contracts, sorted"
+  assert_json_field "$(cat "$LG_IX")" '.contracts[] | select(.id == "field:order.total") | [.ledger, (.defined_in | join(","))] | join("|")' \
+    "app|src/order/*.js" "…with their ledger and defined_in"
+  assert_json_field "$(cat "$LG_IX")" '.path_contracts | tojson' '{"src/order/total.js":["field:order.total"]}' \
+    "path_contracts: a listed file a contract's defined_in matches"
+  teardown
+}
+
+test_lg_contract_siblings() {
+  echo "test: contracts — siblings share a contract on one side (both change, or both consume)"
+  lg_rel_fixture
+  lg_rel_ix
+  assert_eq "app-1/field:order.total core-2/sibling" "$(lg_nb app-3 siblings)" "app-3: app-1 changes it too; core-2's relates sibling"
+  assert_eq "app-2/field:order.total" "$(lg_nb core-1 siblings)" "core-1: app-2 consumes it too"
+  assert_eq "core-1/field:order.total" "$(lg_nb app-2 siblings)" "app-2: core-1 (symmetric)"
+  assert_eq "app-3/field:order.total" "$(lg_nb app-1 siblings)" "app-1: app-3 (a changer is not a consumer's sibling)"
+  teardown
+}
+
+test_lg_relates_edges() {
+  echo "test: relates — root-cause / depends-on make the named item upstream; sibling both ways; other kinds no edge"
+  lg_rel_fixture
+  lg_rel_ix
+  assert_eq "app-1/depends-on core-1/root-cause" "$(lg_nb core-2 upstream)" "core-2 upstream: what its relates name"
+  assert_eq "app-3/sibling" "$(lg_nb core-2 siblings)" "core-2 sibling: app-3"
+  assert_eq "app-2/field:order.total core-1/field:order.total core-2/depends-on" "$(lg_nb app-1 downstream)" \
+    "app-1 downstream includes core-2 (it depends on app-1)"
+  # Kind case-insensitive, key by alias, an unknown kind and an unknown key: no edge.
+  lg_item docs/issues/k.md "key: core-5" "ledger: core" "status: Open" "severity: P3" "summary: Odd relations" \
+    "relates: [Depends-On:APP-6, blocks:app-1, sibling:nope-9, core-5x]" "aliases: [core-50]"
+  lg_item docs/issues/l.md "key: app-7" "ledger: app" "status: Open" "severity: P3" "summary: Names an alias" \
+    "relates: [sibling:core-50]"
+  lg_rel_ix
+  assert_eq "app-6/depends-on" "$(lg_nb core-5 upstream)" "kind and key case-insensitive; blocks: and unknown keys are no edges"
+  assert_eq "app-7/sibling" "$(lg_nb core-5 siblings)" "a relates naming an alias reaches the item"
+  teardown
+}
+
+test_lg_related_candidates_paths() {
+  echo "test: ledger related — confirmed neighbours, then candidates: ≥ 2 shared files (1 is not)"
+  lg_rel_fixture
+  local line
+  lg related app-1
+  assert_eq "0" "$LG_RC" "related: exit 0"
+  assert_contains "$(sed -n 1p <<<"$LG_OUT")" "app-1  app  P1" "the item's line first"
+  assert_contains "$LG_OUT" "downstream  core-1  via field:order.total" "a confirmed downstream item"
+  assert_contains "$LG_OUT" "sibling  app-3  via field:order.total" "a confirmed sibling"
+  line=$(lg_line "$LG_OUT" "candidate  app-4")
+  assert_contains "$line" "shares 2 files: src/util/a.js, src/util/b.js" "2 shared files: a candidate, with its reason"
+  assert_not_contains "$LG_OUT" "app-5" "1 shared file: not a candidate"
+  assert_not_contains "$LG_OUT" "core-4" "a closed item: never a candidate"
+  lg_assert_cond "[ $(lg_lineno "$LG_OUT" "sibling  app-3") -lt $(lg_lineno "$LG_OUT" "candidate  ") ]" "confirmed before candidates"
+  lg related app-1 --format json
+  assert_eq "1" "$(json_count "$LG_OUT")" "JSON: one object"
+  assert_json_field "$LG_OUT" '[.candidates[] | .key] | join(",")' "app-4,app-6,core-3" "JSON candidates"
+  assert_json_field "$LG_OUT" '.neighbours | map("\(.kind)/\(.key)") | join(",")' \
+    "downstream/app-2,downstream/core-1,downstream/core-2,sibling/app-3" "JSON neighbours"
+  lg related nope-9
+  assert_eq "1" "$LG_RC" "an unknown item: exit 1"
+  lg related app-1 --depth 4
+  assert_eq "3" "$LG_RC" "--depth outside 1–3: usage (3)"
+  lg related
+  assert_eq "3" "$LG_RC" "no item: usage (3)"
+  teardown
+}
+
+test_lg_related_candidates_spec() {
+  echo "test: ledger related — candidates by a shared spec and by a contract's defined_in; --depth"
+  lg_rel_fixture
+  lg related app-1
+  assert_contains "$(lg_line "$LG_OUT" "candidate  core-3")" "same spec: docs/specs/s.md" "a shared spec"
+  assert_contains "$(lg_line "$LG_OUT" "candidate  app-6")" "its file src/order/total.js defines field:order.total" \
+    "a file the defined_in of a contract app-1 names"
+  lg related core-3
+  assert_contains "$(lg_line "$LG_OUT" "candidate  app-1")" "same spec: docs/specs/s.md" "the spec, the other way"
+  assert_contains "$LG_OUT" "(no confirmed relations)" "core-3 has no confirmed relations"
+  lg related app-6
+  assert_contains "$(lg_line "$LG_OUT" "candidate  app-1")" "names field:order.total, defined in src/order/total.js" \
+    "the other way: app-1 names the contract app-6's file defines"
+  lg related core-2 --depth 2
+  assert_eq "0" "$LG_RC" "--depth 2: exit 0"
+  assert_contains "$LG_OUT" "downstream (depth 2, through app-1)  app-2  via field:order.total" \
+    "depth 2: reached through a neighbour, once"
+  assert_eq "1" "$(grep -c '  core-1  ' <<<"$LG_OUT")" "each item listed once"
+  teardown
+}
+
+test_lg_recheck_lists_dependents() {
+  echo "test: ledger recheck — downstream and relates dependents, each with the three actions"
+  lg_rel_fixture
+  lg recheck app-1
+  assert_eq "0" "$LG_RC" "recheck: exit 0"
+  assert_eq "core-1  via field:order.total · not started · Receipts read the total  → re-verify | close as superseded by app-1 | reshape" \
+    "$(sed -n 1p <<<"$LG_OUT")" "the most severe first, with its actions"
+  assert_eq "3" "$(wc -l <<<"$LG_OUT" | tr -d ' ')" "three dependents"
+  assert_contains "$(lg_line "$LG_OUT" "core-2")" "via depends-on" "a relates dependent"
+  lg recheck app-3
+  assert_contains "$(lg_line "$LG_OUT" "core-2")" "via sibling" "an item whose relates names it a sibling"
+  assert_contains "$LG_OUT" "close as superseded by app-3" "…superseded by the item asked about"
+  # A dependent that is closed is not listed.
+  lg_item docs/issues/c.md "key: app-2" "ledger: app" "status: Fixed" "severity: P2" "summary: Cart badge reads the total" \
+    "consumes: [field:order.total]"
+  lg recheck app-1
+  assert_not_contains "$LG_OUT" "app-2" "a fixed dependent: not listed"
+  lg recheck core-3
+  assert_eq "nothing to re-check for core-3" "$LG_OUT" "no dependents: said so"
+  lg recheck app-1 --format json
+  assert_json_field "$LG_OUT" '.dependents[0].actions | join("|")' "re-verify|close as superseded by app-1|reshape" "JSON actions"
+  teardown
+}
+
+test_lg_sweep_table_shape() {
+  echo "test: ledger sweep — a Related work table, confirmed rows first, then candidates, Mark empty"
+  lg_rel_fixture
+  local first rows
+  cat > docs/plan.md <<'PLAN'
+# Plan
+
+Touches `src/util/a.js`, `./src/util/b.js` and `nope/missing.js`.
+Changes field:order.total. See core-2 and APP-6.
+
+## Related work
+
+| Item | Why related | Mark |
+|---|---|---|
+| core-3 | earlier sweep | include |
+PLAN
+  lg sweep --plan docs/plan.md
+  assert_eq "0" "$LG_RC" "sweep --plan: exit 0"
+  assert_eq "## Related work" "$(sed -n 1p <<<"$LG_OUT")" "the heading first"
+  assert_eq "" "$(sed -n 2p <<<"$LG_OUT")" "a blank line"
+  assert_eq "| Item | Why related | Mark |" "$(sed -n 3p <<<"$LG_OUT")" "the header row"
+  assert_eq "|---|---|---|" "$(sed -n 4p <<<"$LG_OUT")" "the separator row"
+  rows=$(tail -n +5 <<<"$LG_OUT")
+  assert_eq "0" "$(grep -cv '^| .* | .* | |$' <<<"$rows")" "every row: 3 cells, Mark empty"
+  assert_contains "$(lg_line "$rows" "| core-2 |")" "named" "a key in the text: named"
+  assert_contains "$(lg_line "$rows" "| app-6 |")" "named" "a key in another case: named"
+  assert_contains "$(lg_line "$rows" "| core-3 |")" "named" "a row of the plan's own table: still listed"
+  assert_contains "$(lg_line "$rows" "| app-1 |")" "changes field:order.total" "a contract in the text: its changers"
+  assert_contains "$(lg_line "$rows" "| core-1 |")" "consumes field:order.total" "…its consumers"
+  assert_contains "$(lg_line "$rows" "| app-5 |")" "lists src/util/a.js" "a backticked existing file: the items listing it"
+  assert_not_contains "$rows" "core-4" "a closed item that is not named: no row"
+  first=$(sed -n 5p <<<"$LG_OUT")
+  assert_contains "$first" "| core-1 |" "confirmed rows by severity: P0 first"
+  lg sweep --keys app-1
+  assert_eq "0" "$LG_RC" "sweep --keys: exit 0"
+  rows=$(tail -n +5 <<<"$LG_OUT")
+  assert_contains "$(lg_line "$rows" "| app-4 |")" "shares 2 files" "a candidate of a named key"
+  lg_assert_cond "[ $(lg_lineno "$rows" "| app-3 |") -lt $(lg_lineno "$rows" "| app-4 |") ]" "confirmed (app-3, sibling) before candidates (app-4)"
+  lg sweep --contracts field:order.total --format json
+  assert_eq "1" "$(json_count "$LG_OUT")" "JSON: one object"
+  assert_json_field "$LG_OUT" '[.rows[] | select(.confirmed | not) | .key] | join(",")' "app-6" \
+    "--contracts: a file its defined_in matches is a candidate"
+  assert_json_field "$LG_OUT" '.table | split("\n")[0]' "## Related work" "JSON carries the table"
+  lg sweep --files src/order/new.js
+  assert_eq "0" "$LG_RC" "--files: a path that does not exist yet is fine"
+  assert_contains "$(lg_line "$LG_OUT" "| app-1 |")" "names field:order.total, defined in src/order/new.js" \
+    "an item naming a contract a given file defines: a candidate"
+  lg sweep --contracts field:nope
+  assert_eq "3" "$LG_RC" "an unknown contract: usage (3)"
+  lg sweep --keys nope-1
+  assert_eq "3" "$LG_RC" "a key that is not an item: usage (3)"
+  lg sweep
+  assert_eq "3" "$LG_RC" "no input: usage (3)"
+  # The table it prints passes validate --plan once marked.
+  lg sweep --keys core-2
+  { printf '# P\n\n'; sed 's/| |$/| include |/' <<<"$LG_OUT"; } > docs/plan2.md
+  lg validate --plan docs/plan2.md
+  assert_eq "0" "$LG_RC" "the table, marked, passes validate --plan"
+  teardown
+}
+
+test_lg_link_validates() {
+  echo "test: ledger link — validates every value (exit 1, nothing written), then adds to the lists in one write"
+  lg_rel_fixture
+  local before
+  lg link core-3 --consumes field:order.total
+  assert_eq "0" "$LG_RC" "a known contract: exit 0"
+  assert_eq "core-3  consumes: field:order.total  (added)" "$LG_OUT" "says what it added"
+  assert_contains "$(cat docs/issues/i.md)" "consumes: [field:order.total]" "written into the frontmatter"
+  lg link core-3 --consumes field:order.total
+  assert_eq "core-3  consumes: field:order.total  (already there)" "$LG_OUT" "a value already there: left"
+  before=$(hash_file docs/issues/i.md)
+  lg link core-3 --consumes field:nope
+  assert_eq "1" "$LG_RC" "an unknown contract: exit 1"
+  assert_contains "$LG_OUT" "link: --consumes \"field:nope\" is not a contract" "…named"
+  lg link core-3 --relates blocks:app-1
+  assert_eq "1" "$LG_RC" "a relates kind outside root-cause/depends-on/sibling: exit 1"
+  lg link core-3 --relates sibling:nope-9
+  assert_eq "1" "$LG_RC" "a relates key that resolves to nothing: exit 1"
+  lg link core-3 --relates sibling:core-3
+  assert_eq "1" "$LG_RC" "a self-link: exit 1"
+  assert_contains "$LG_OUT" "is the item itself" "…named"
+  lg link core-3 --relates depends-on:app-4 --changes field:nope
+  assert_eq "1" "$LG_RC" "one bad value of several: exit 1"
+  assert_eq "$before" "$(hash_file docs/issues/i.md)" "nothing was written by any failed link"
+  lg link core-3 --relates Depends-On:APP-4 --changes component:Sheet
+  assert_eq "0" "$LG_RC" "two good values: exit 0"
+  assert_contains "$(cat docs/issues/i.md)" "relates: [depends-on:app-4]" "relates written <kind>:<key> as the item spells it"
+  assert_contains "$(cat docs/issues/i.md)" "changes: [component:Sheet]" "…and changes, in the same run"
+  lg link core-3
+  assert_eq "3" "$LG_RC" "no relation given: usage (3)"
+  lg link nope-1 --consumes field:order.total
+  assert_eq "1" "$LG_RC" "an unknown item: exit 1"
+  lg link core-3 --consumes field:order.total --format json
+  assert_json_field "$LG_OUT" '[.path, (.present | length)] | tojson' '["docs/issues/i.md",1]' "JSON payload"
+  teardown
+}
+
+# lg_contracts_adapter <body>: tools/contracts.sh with <body> (sh), executable.
+lg_contracts_adapter() {
+  mkdir -p tools
+  printf '#!/bin/sh\n%s\n' "$1" > tools/contracts.sh
+  chmod +x tools/contracts.sh
+}
+
+test_lg_contracts_adapter_absent_ok() {
+  echo "test: no contracts adapter — only registry contracts; nothing fails"
+  lg_rel_fixture
+  lg_rel_ix
+  assert_json_field "$(cat "$LG_IX")" '.built.contracts_error' "null" "built.contracts_error null"
+  assert_json_field "$(cat "$LG_IX")" '.contracts[] | select(.id == "component:Sheet") | [.ledger, .title] | join("|")' \
+    "app|The sheet" "a registry title"
+  lg related app-1
+  assert_eq "0" "$LG_RC" "related: exit 0"
+  lg_enable '{"base":"main","adapters":{"contracts":""}}'
+  lg related app-1
+  assert_eq "0" "$LG_RC" "an empty adapter value is absent too"
+  teardown
+}
+
+test_lg_adapter_plugin_prefix_resolves() {
+  echo "test: adapters — doc-superpowers:<name> is the adapter beside the running copy of doc-tools.sh"
+  lg_rel_fixture '{"base":"main","adapters":{"contracts":"doc-superpowers:fixture"}}'
+  local root
+  root=$(harness_mktemp_d lg-plugin)
+  cp -R "$REPO_DIR/scripts" "$root/scripts"
+  mkdir -p "$root/scripts/adapters"
+  printf '#!/bin/sh\n[ "$1" = list ] && echo %s\n' \
+    "'{\"id\":\"flag:plugin\",\"ledger\":\"core\",\"defined_in\":[\"flags.json\"]}'" > "$root/scripts/adapters/fixture.sh"
+  chmod +x "$root/scripts/adapters/fixture.sh"
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$BASH_BIN" "$root/scripts/doc-tools.sh" > "$root/run"
+  chmod +x "$root/run"
+  lg_with "$root/run" link core-3 --consumes flag:plugin
+  assert_eq "0" "$LG_RC" "the copy's sibling adapters/fixture.sh lists flag:plugin"
+  assert_contains "$(cat docs/issues/i.md)" "consumes: [flag:plugin]" "…a contract only the adapter knows"
+  lg related app-1
+  assert_eq "2" "$LG_RC" "this copy has no adapters/fixture.sh: exit 2"
+  assert_contains "$LG_ERR" "$REPO_DIR/scripts/adapters/fixture.sh" "…naming the path it resolved to"
+  lg_enable '{"base":"main","adapters":{"contracts":"doc-superpowers:../fixture"}}'
+  lg_with "$root/run" related app-1
+  assert_eq "2" "$LG_RC" "a name that would leave adapters/: exit 2"
+  rm -rf "$root"
+  teardown
+}
+
+test_lg_contract_registry_wins_over_adapter() {
+  echo "test: a contract in the registry and the adapter is one — the registry's fields win; the adapter fills gaps"
+  lg_rel_fixture '{"base":"main","adapters":{"contracts":"tools/contracts.sh"}}'
+  # shellcheck disable=SC2016  # the adapter's own shell text
+  lg_contracts_adapter 'case "$1" in
+list) echo "{\"id\":\"field:order.total\",\"ledger\":\"core\",\"defined_in\":[\"x/*\"],\"title\":\"Order totals\"}"
+      echo "{\"id\":\"flag:new\",\"ledger\":null,\"defined_in\":[\"flags/*.json\"]}" ;;
+esac'
+  lg_rel_ix
+  assert_eq "0" "$LG_RC" "the index builds"
+  assert_json_field "$(cat "$LG_IX")" '.contracts[] | select(.id == "field:order.total") | [.ledger, (.defined_in | join(",")), .title] | join("|")' \
+    "app|src/order/*.js|Order totals" "registry ledger and defined_in win; the adapter fills the empty title"
+  assert_json_field "$(cat "$LG_IX")" '.contracts[] | select(.id == "flag:new") | [(.ledger // "null"), (.defined_in | join(","))] | join("|")' \
+    "null|flags/*.json" "an adapter-only contract, as listed"
+  assert_json_field "$(cat "$LG_IX")" '[.contracts[] | select(.id == "field:order.total")] | length' "1" "one contract per id"
+  teardown
+}
+
+test_lg_contracts_adapter_failing_rc2() {
+  echo "test: a failing contracts adapter — verbs that show relations exit 2 with its stderr; others run"
+  lg_rel_fixture '{"base":"main","adapters":{"contracts":"tools/contracts.sh"}}'
+  lg_contracts_adapter 'echo "registry server down" >&2; exit 3'
+  lg related app-1
+  assert_eq "2" "$LG_RC" "related: exit 2"
+  assert_contains "$LG_ERR" "registry server down" "…with the adapter's stderr"
+  assert_contains "$LG_ERR" "exited 3" "…and its exit code"
+  lg show app-1
+  assert_eq "2" "$LG_RC" "show: exit 2"
+  lg ls
+  assert_eq "0" "$LG_RC" "ls does not need contracts: exit 0"
+  lg_rel_ix
+  assert_json_field "$(cat "$LG_IX")" '.built.contracts_error | test("registry server down")' "true" "the index records the failure"
+  lg_enable '{"base":"main","adapters":{"contracts":"tools/missing.sh"}}'
+  lg recheck app-1
+  assert_eq "2" "$LG_RC" "a missing adapter file: exit 2"
+  teardown
+}
+
+test_lg_contracts_adapter_invalid_json_rc2() {
+  echo "test: a contracts adapter printing invalid output — exit 2 naming the line"
+  lg_rel_fixture '{"base":"main","adapters":{"contracts":"tools/contracts.sh"}}'
+  lg_contracts_adapter 'echo "{\"id\":\"flag:a\",\"ledger\":null,\"defined_in\":[]}"; echo "not json"'
+  lg related app-1
+  assert_eq "2" "$LG_RC" "invalid JSON: exit 2"
+  assert_contains "$LG_ERR" "line 2" "…naming the line"
+  lg_contracts_adapter 'echo "{\"id\":\"flag:a\",\"ledger\":null}"'
+  lg related app-1
+  assert_eq "2" "$LG_RC" "a line without defined_in: exit 2"
+  assert_contains "$LG_ERR" "contracts contract" "…the contract it breaks"
+  lg_contracts_adapter 'echo "{\"id\":\"Not An Id\",\"ledger\":null,\"defined_in\":[]}"'
+  lg related app-1
+  assert_eq "2" "$LG_RC" "an id that is not <kind>:<name>: exit 2"
+  teardown
+}
+
+test_lg_msg_claims_squash_bullets() {
+  echo "test: trailers read from any message line — a squash body's '* Ledger-Claims: x-3' counts"
+  lg_fixture
+  lg_enable
+  git commit -q --allow-empty -m "Squash of #12" -m "* Ledger-Claims: x-3
+* fix things
+  - Contract-Change: field:a — cents now
+Fixes: #45
+Fixes #46
+Not-Ledger-Claims: x-9
+Ledger-Claims:x-8
+ledger-claims: x-4
+Ledger-Ack: abc123 — fine"
+  lg_call _lg_msg_claims HEAD~1..HEAD
+  assert_eq "0" "$LG_RC" "rc 0"
+  local h
+  h=$(git rev-parse HEAD)
+  assert_eq "$(printf '%s\tclaims\tx-3\n%s\tcontract_change\tfield:a — cents now\n%s\tclaims_by_ref\t#45\n%s\tclaims\tx-4\n%s\tack\tabc123 — fine' "$h" "$h" "$h" "$h" "$h")" \
+    "$LG_OUT" "bullets and indents count; no ':', another trailer's suffix and no space after ':' do not; names any case"
+  teardown
+}
+
+test_lg_recheck_marker_set_and_cleared() {
+  echo "test: re-check markers — set when a source lands on the base or a consumed contract changes there, cleared by a later commit"
+  lg_fixture
+  lg_enable '{"base":"main"}'
+  lg_registry "$LG_REG_REL"
+  local c3 out
+  lg_item docs/issues/a.md "key: app-1" "ledger: app" "status: Open" "severity: P1" "summary: Totals are wrong" "changes: [field:order.total]"
+  lg_item docs/issues/b.md "key: core-1" "ledger: core" "status: Open" "severity: P0" "summary: Receipts read the total" "consumes: [field:order.total]"
+  lg_item docs/issues/c.md "key: core-2" "ledger: core" "status: Open" "severity: P2" "summary: Export breaks" "relates: [depends-on:app-1]"
+  lg_item docs/issues/k.md "key: core-3" "ledger: core" "status: Open" "severity: P3" "summary: Calls create" "consumes: [endpoint:create]"
+  lg_item docs/issues/x.md "key: app-7" "ledger: app" "status: Open" "severity: P2" "summary: Sheet change" "changes: [component:Sheet]"
+  lg_item docs/issues/y.md "key: core-5" "ledger: core" "status: Open" "severity: P2" "summary: Uses the sheet" "consumes: [component:Sheet]"
+  mkdir -p src/order && echo 1 > src/order/total.js
+  git add -A && git commit -qm items
+  lg_rel_ix
+  assert_eq "" "$(jq -r '[.items[].recheck_after[]] | join(" ")' "$LG_IX")" "nothing landed: no markers"
+  # app-1 is fixed on the base.
+  lg_item docs/issues/a.md "key: app-1" "ledger: app" "status: Fixed" "severity: P1" "summary: Totals are wrong" "changes: [field:order.total]"
+  printf '\n## Resolution\n\nFixed.\n' >> docs/issues/a.md
+  git add -A && git commit -qm "fix app-1"
+  lg_rel_ix
+  assert_eq "app-1" "$(lg_rc_of core-1)" "a consumer of what app-1 changes: marked"
+  assert_eq "app-1" "$(lg_rc_of core-2)" "relates depends-on app-1: marked"
+  assert_eq "" "$(lg_rc_of core-3)" "unrelated: not marked"
+  assert_eq "" "$(lg_rc_of app-1)" "the terminal item itself: not marked"
+  lg show core-2
+  assert_contains "$LG_OUT" "re-check: app-1 landed" "show says so"
+  out=$(harness_mktemp_d lg-out)
+  lg view core --out "$out"
+  assert_contains "$(lg_line "$(cat "$out/core.md")" "| core-2 |")" "not started · re-check: app-1 landed" "the view's Status says so"
+  # An uncommitted edit clears nothing; a commit does.
+  printf '\nre-checked\n' >> docs/issues/b.md
+  lg_rel_ix
+  assert_eq "app-1" "$(lg_rc_of core-1)" "an uncommitted edit: still marked"
+  git add -A && git commit -qm "recheck core-1"
+  c3=$(git rev-parse HEAD)
+  lg_rel_ix
+  assert_eq "" "$(lg_rc_of core-1)" "a later commit to the item: cleared"
+  assert_eq "app-1" "$(lg_rc_of core-2)" "…only that item"
+  # A base commit changing field:order.total's defined_in.
+  echo 2 > src/order/total.js
+  git add -A && git commit -qm "totals in cents"
+  lg_rel_ix
+  assert_eq "field:order.total" "$(lg_rc_of core-1)" "a defined_in change: the consumer is marked with the contract"
+  assert_eq "app-1" "$(lg_rc_of core-2)" "an item that does not consume it: unchanged"
+  lg show core-1
+  assert_contains "$LG_OUT" "re-check: field:order.total changed" "show: <contract> changed"
+  # A Contract-Change line (a squash bullet), no defined_in file touched.
+  git commit -q --allow-empty -m "api" -m "* Contract-Change: endpoint:create — a new argument"
+  lg_rel_ix
+  assert_eq "endpoint:create" "$(lg_rc_of core-3)" "a Contract-Change line: marked"
+  # Ancestry, not time: a branch cut before the contract change edits
+  # core-1 and is merged (--no-ff) after it — its commit never saw the
+  # change, so core-1 stays marked; a branch that has the change clears it.
+  git checkout -q -b side "$c3"
+  printf '\nedited on side\n' >> docs/issues/b.md
+  git add -A && git commit -qm "side edit"
+  git checkout -q main
+  git merge -q --no-ff side -m "merge side"
+  lg_rel_ix
+  assert_eq "field:order.total" "$(lg_rc_of core-1)" "an edit on a branch without the change: still marked"
+  git checkout -q -b side2
+  printf '\nedited on side2\n' >> docs/issues/b.md
+  git add -A && git commit -qm "side2 edit"
+  git checkout -q main
+  git merge -q --no-ff side2 -m "merge side2"
+  lg_rel_ix
+  assert_eq "" "$(lg_rc_of core-1)" "an edit on a branch that has the change: cleared"
+  # The base, not the branch: a source closed on a feature branch has not landed.
+  git checkout -q -b feat
+  lg_item docs/issues/x.md "key: app-7" "ledger: app" "status: Fixed" "severity: P2" "summary: Sheet change" "changes: [component:Sheet]"
+  printf '\n## Resolution\n\nDone.\n' >> docs/issues/x.md
+  git add -A && git commit -qm "fix app-7 on feat"
+  lg_rel_ix
+  assert_eq "" "$(lg_rc_of core-5)" "fixed on a branch, not on the base: not marked"
+  git checkout -q main
+  git merge -q feat
+  lg_rel_ix
+  assert_eq "app-7" "$(lg_rc_of core-5)" "merged to the base: marked"
+  teardown
+}
+
+test_lg_render_neighbours_and_suggestions() {
+  echo "test: views — ↳ Upstream / Downstream lines (other ledgers), re-check in Status, Unclustered suggestions"
+  local ix
+  # shellcheck disable=SC2016  # jq source
+  ix=$(lg_view_ix '(.items[] | select(.key == "app-1") | .neighbours) = {"upstream":[{"key":"core-1","via":"root-cause"},{"key":"app-2","via":"depends-on"}],"downstream":[{"key":"core-1","via":"field:order.total"}],"siblings":[]}
+    | (.items[] | select(.key == "app-2") | .neighbours) = {"upstream":[],"downstream":[{"key":"core-1","via":"field:order.total"}],"siblings":[]}
+    | (.items[] | select(.key == "app-2") | .recheck_after) = ["app-7", "field:order.total"]
+    | (.items[] | select(.key == "app-4") | .paths) = ["src/order/total.js"]
+    | .path_contracts = {"src/order/total.js": ["field:order.total"]}')
+  lg_render md "$ix" app page
+  assert_eq "0" "$LG_RC" "md: exit 0"
+  assert_contains "$LG_OUT" "↳ Upstream: core-1 (core), root-cause — not started" "a relates upstream in another ledger"
+  assert_not_contains "$LG_OUT" "↳ Upstream: app-2" "a neighbour in the same ledger: no line"
+  assert_eq "1" "$(grep -c '↳ Downstream (consumes `field:order.total`): core-1 (core)$' <<<"$LG_OUT")" \
+    "downstream de-duplicated across the cluster's items"
+  assert_contains "$(lg_line "$LG_OUT" "| app-2 |")" "not started · re-check: app-7 landed, field:order.total changed" "re-check in Status"
+  assert_contains "$LG_OUT" '↳ Suggested cluster for app-4: `field:order.total` — its file src/order/total.js defines it' \
+    "an unclustered item's top candidate cluster"
+  lg_assert_cond "[ $(lg_lineno "$LG_OUT" "## Unclustered") -lt $(lg_lineno "$LG_OUT" "↳ Suggested cluster") ]" "…under Unclustered"
+  lg_render html "$ix" app page
+  assert_contains "$LG_OUT" "<b>Suggested cluster</b> for app-4: <code>field:order.total</code>" "html: the suggestion"
+  assert_contains "$LG_OUT" "re-check: app-7 landed, field:order.total changed" "html: re-check"
+  assert_contains "$LG_OUT" "<b>Upstream</b>: core-1 (core), root-cause" "html: the relates upstream"
+}
+
+test_lg_show_neighbours() {
+  echo "test: ledger show lists the neighbours (≤ 25 lines)"
+  lg_rel_fixture
+  lg show core-1
+  assert_eq "0" "$LG_RC" "show: exit 0"
+  assert_contains "$LG_OUT" "upstream: app-1 (field:order.total), app-3 (field:order.total)" "upstream"
+  assert_contains "$LG_OUT" "downstream: core-2 (root-cause)" "downstream"
+  assert_contains "$LG_OUT" "siblings: app-2 (field:order.total)" "siblings"
+  lg_assert_cond "[ $(wc -l <<<"$LG_OUT") -le 25 ]" "≤ 25 lines"
+  lg show app-4
+  assert_not_contains "$LG_OUT" "upstream:" "no neighbours: no lines"
+  lg_item docs/issues/m.md "key: core-9" "ledger: core" "status: Open" "severity: P3" "summary: Many" \
+    "relates: [sibling:app-1, sibling:app-2, sibling:app-3, sibling:app-4, sibling:app-5]"
+  lg show core-9
+  assert_contains "$LG_OUT" "siblings: app-1 (sibling), app-2 (sibling), app-3 (sibling) +2 more" "lists cut at 3"
+  teardown
+}
+
 # --- Task 8 review carry-over (Task 9, first commit) --------------------------------
 
 test_lg_publish_hook_declined_not_moved() {
@@ -4718,6 +5265,25 @@ run_tests() {
   test_lg_render_resolution_first_nonempty
   test_lg_render_pr_url_pipe
   test_lg_rev_cache_ignores_head
+
+  # --- Task 9: contracts, relations, trailers, re-check ---
+  test_lg_contract_upstream_downstream
+  test_lg_contract_siblings
+  test_lg_relates_edges
+  test_lg_related_candidates_paths
+  test_lg_related_candidates_spec
+  test_lg_recheck_lists_dependents
+  test_lg_sweep_table_shape
+  test_lg_link_validates
+  test_lg_contracts_adapter_absent_ok
+  test_lg_adapter_plugin_prefix_resolves
+  test_lg_contract_registry_wins_over_adapter
+  test_lg_contracts_adapter_failing_rc2
+  test_lg_contracts_adapter_invalid_json_rc2
+  test_lg_msg_claims_squash_bullets
+  test_lg_recheck_marker_set_and_cleared
+  test_lg_render_neighbours_and_suggestions
+  test_lg_show_neighbours
 
   print_summary
 }

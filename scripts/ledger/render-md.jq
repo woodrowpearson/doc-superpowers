@@ -16,11 +16,17 @@ include "defs";
 # page: "# <title> (`<id>`)", the header quote, "<scope> · Open: <sev> n …
 #   · In flight: n branches", then per cluster "## <title> — `<contract>`
 #   (n)" (no title: "## `<contract>` (n)") and its table, then its ↳
-#   neighbour lines (only when the index has neighbours), "## Unclustered
-#   (n)", "## Recently closed (<recent_days> days)" and "## Superseded /
+#   neighbour lines (neighbours in other ledgers: "↳ Upstream: <key>
+#   (<ledger>) changes `<contract>` — <status>" or "…, <relates kind> —",
+#   "↳ Downstream (consumes `<contract>`): <key> (<ledger>), …" or
+#   "(<relates kind>)"), "## Unclustered (n)" — its table, then "↳ Suggested
+#   cluster for <key>: `<contract>` — <reason>" per item that has one —,
+#   "## Recently closed (<recent_days> days)" and "## Superseded /
 #   won't fix (<recent_days> days)" ("<key> → <superseded_by>: <first
-#   resolution line>"). The model (grouping, counts, order) is defs.jq's
-#   lg_v_model, shared with render-html.jq.
+#   resolution line>"). The Status column is lg_v_status: the derived
+#   status, then " · re-check: <key> landed" for an item with re-check
+#   markers. The model (grouping, counts, order) is defs.jq's lg_v_model,
+#   shared with render-html.jq.
 # files: the pages as "<name>\u0001<content>\u0001…" (jq -j) — <id>.md for
 #   $ledger, or for every ledger and README.md when $ledger is "all".
 # readme: one table row per ledger (open counts by severity, in-flight
@@ -48,19 +54,26 @@ def header_row: "| Key | Issue | Why it matters | Sev | Spec | Plan | PR | Lates
                 "|---|---|---|---|---|---|---|---|---|";
 def row:
   "| \((.key // none) | md) | \(link(lg_q_stem | lg_q_cut(48); .path)) | \((.summary // none) | md) | \((.severity // none) | md)"
-  + " | \(doc_cell(.docs.spec // [])) | \(doc_cell(.docs.plan // [])) | \(pr_cell) | \(handoff_cell) | \(lg_q_display | md) |";
+  + " | \(doc_cell(.docs.spec // [])) | \(doc_cell(.docs.plan // [])) | \(pr_cell) | \(handoff_cell) | \(lg_v_status | md) |";
 def table($items): header_row, ($items[] | row);
 def blank: "";
 def counts_text($counts): [$counts[] | "\(.sev | md) \(.n)"] | join(" · ");
 def recent_days: ($c[0].views.recent_days // 14) | tostring;
 
+# A via is a contract id (it holds ":") or a relates kind.
+def contract_via: type == "string" and test(":");
 def neighbour_lines($cl):
   ($cl.up | map("↳ Upstream: \(.key | md) (\(.ledger | md))"
-                + (if .via != null then " changes \(.via | md_code)" else "" end)
+                + (if .via == null then "" elif (.via | contract_via) then " changes \(.via | md_code)" else ", \(.via | md)" end)
                 + " — \(.display | md)")[]),
   ($cl.down | group_by(.via) | map(
-     (if .[0].via != null then "↳ Downstream (consumes \(.[0].via | md_code)): " else "↳ Downstream: " end)
+     (if .[0].via == null then "↳ Downstream: "
+      elif (.[0].via | contract_via) then "↳ Downstream (consumes \(.[0].via | md_code)): "
+      else "↳ Downstream (\(.[0].via | md)): " end)
      + (map("\(.key | md) (\(.ledger | md))") | join(", ")))[]);
+def suggestion_lines($items):
+  $items[] | select(.suggest != null)
+  | "↳ Suggested cluster for \(lg_q_id | md): \(.suggest.contract | md_code) — \(.suggest.reason | md)";
 
 def page($L):
   "# \($L.title | md) (\($L.id | md_code))",
@@ -80,7 +93,8 @@ def page($L):
   blank,
   "## Unclustered (\($L.unclustered | length))",
   blank,
-  (if ($L.unclustered | length) == 0 then "None." else table($L.unclustered) end),
+  (if ($L.unclustered | length) == 0 then "None."
+   else table($L.unclustered), ([suggestion_lines($L.unclustered)] | if length == 0 then empty else blank, .[] end) end),
   blank,
   "## Recently closed (\(recent_days) days)",
   blank,

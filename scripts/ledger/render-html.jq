@@ -29,7 +29,8 @@ def sev_chip($K):
   then "<span class=\"chip sev sev-\(lg_q_rank($K.R; $K.n))\">\(.severity | h)</span>"
   else none end;
 def status_chip:
-  "<span class=\"chip st st-\((.derived.status // "unknown") | slug)\">\(lg_q_display | h)</span>";
+  "<span class=\"chip st st-\((.derived.status // "unknown") | slug)\">\(lg_q_display | h)</span>"
+  + (lg_r_recheck_text | if . == "" then "" else "<div class=\"note recheck\">\(h)</div>" end);
 def doc_cell($list):
   if ($list | length) == 0 then none
   else "<a class=\"yes\" href=\"\(href($list[0]))\" title=\"\($list[0] | h)\">✓</a>"
@@ -61,13 +62,19 @@ def table($items; $K):
   else "<div class=\"scroll\"><table><thead><tr><th>Key</th><th>Issue</th><th>Why it matters</th><th>Sev</th><th>Spec</th><th>Plan</th><th>PR</th><th>Latest handoff</th><th>Status</th></tr></thead><tbody>"
        + ([$items[] | row($K)] | join(""))
        + "</tbody></table></div>" end;
+# A via is a contract id (it holds ":") or a relates kind.
+def contract_via: type == "string" and test(":");
 def xrefs($cl):
   ($cl.up | map("<p class=\"xref\">↳ <b>Upstream</b>: \(.key | h) (\(.ledger | h))"
-                + (if .via != null then " changes <code>\(.via | h)</code>" else "" end)
+                + (if .via == null then "" elif (.via | contract_via) then " changes <code>\(.via | h)</code>" else ", \(.via | h)" end)
                 + " — \(.display | h)</p>") | join("")),
   ($cl.down | group_by(.via) | map("<p class=\"xref\">↳ <b>Downstream</b>"
-     + (if .[0].via != null then " (consumes <code>\(.[0].via | h)</code>)" else "" end)
+     + (if .[0].via == null then "" elif (.[0].via | contract_via) then " (consumes <code>\(.[0].via | h)</code>)" else " (\(.[0].via | h))" end)
      + ": \(map("\(.key | h) (\(.ledger | h))") | join(", "))</p>") | join(""));
+def suggestions($items):
+  [$items[] | select(.suggest != null)
+   | "<p class=\"xref\">↳ <b>Suggested cluster</b> for \(lg_q_id | h): <code>\(.suggest.contract | h)</code> — \(.suggest.reason | h)</p>"]
+  | join("");
 def counts_text($counts): [$counts[] | "\(.sev | h) \(.n)"] | join(" · ");
 
 def section($L; $K):
@@ -77,7 +84,7 @@ def section($L; $K):
   ($L.clusters[] as $cl
    | "<div class=\"group\"><h3>\(if $cl.title != null then "\($cl.title | h) — " else "" end)<code>\($cl.contract | h)</code> (\($cl.items | length))</h3>"
      + table($cl.items; $K) + ([xrefs($cl)] | join("")) + "</div>"),
-  "<div class=\"group\"><h3>Unclustered (\($L.unclustered | length))</h3>\(table($L.unclustered; $K))</div>",
+  "<div class=\"group\"><h3>Unclustered (\($L.unclustered | length))</h3>\(table($L.unclustered; $K))\(suggestions($L.unclustered))</div>",
   "<div class=\"group\"><h3>Recently closed (\(recent_days) days)</h3>\(table($L.closed; $K))</div>",
   "<div class=\"group\"><h3>Superseded / won't fix (\(recent_days) days)</h3>\(table($L.superseded; $K))</div>",
   "</section>";
