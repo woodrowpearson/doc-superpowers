@@ -40,7 +40,7 @@ def doc_cell($list): if ($list | length) == 0 then none
   else link("✓"; $list[0]) + (if ($list | length) > 1 then " +\(($list | length) - 1)" else "" end) end;
 def pr_cell: .pr as $p | lg_v_pr_url as $u
   | if ($p | type) == "object" and ($p.number != null) then
-      (if $u != null then "[#\($p.number | tostring | md_text)](\($u | lg_q_one | gsub("\\)"; "%29") | gsub(" "; "%20")))"
+      (if $u != null then "[#\($p.number | tostring | md_text)](\($u | lg_q_one | gsub("\\)"; "%29") | gsub(" "; "%20") | gsub("\\|"; "%7C")))"
        else "#\($p.number | tostring | md)" end)
     else none end;
 def handoff_cell: (.docs.handoff // []) | lg_v_newest | if . == null then none else link(lg_v_docstem | lg_q_cut(40); .) end;

@@ -4472,6 +4472,63 @@ test_lg_publish_push_failed_not_moved() {
   teardown
 }
 
+# --- Task 8 review carry-over (Task 9, first commit) --------------------------------
+
+test_lg_publish_hook_declined_not_moved() {
+  echo "test: a push a remote hook declines ('[remote rejected]') says 'failed', not 'moved' (exit 2)"
+  lg_publish_fixture
+  printf '#!/bin/sh\necho "hook says no" >&2\nexit 1\n' > "$LG_REMOTE/hooks/pre-receive"
+  chmod +x "$LG_REMOTE/hooks/pre-receive"
+  lg publish
+  assert_eq "2" "$LG_RC" "exit 2"
+  assert_contains "$LG_ERR" "the push to origin doc-ledger-views failed" "says the push failed"
+  assert_contains "$LG_ERR" "remote rejected" "…with git's reason"
+  assert_not_contains "$LG_ERR" "moved" "…without claiming the branch moved"
+  teardown
+}
+
+test_lg_render_resolution_first_nonempty() {
+  echo "test: the superseded line uses the first NON-EMPTY resolution line"
+  local ix
+  ix=$(lg_view_ix '(.items[] | select(.key == "app-7") | .resolution) = "\n  \r\nReal first line.\nsecond"')
+  lg_render md "$ix" app page
+  assert_eq "- app-7 → app-1: Real first line." "$(lg_line "$LG_OUT" "- app-7")" "md: blank lines skipped"
+  lg_render html "$ix" app page
+  assert_contains "$LG_OUT" '<div class="res">Real first line.</div>' "html: blank lines skipped"
+  ix=$(lg_view_ix '(.items[] | select(.key == "app-7") | .resolution) = " \n\n"')
+  lg_render md "$ix" app page
+  assert_eq "- app-7 → app-1: (no resolution)" "$(lg_line "$LG_OUT" "- app-7")" "only blank lines: (no resolution)"
+}
+
+test_lg_render_pr_url_pipe() {
+  echo "test: a PR url's '|' is percent-encoded in the markdown link target (the table stays intact)"
+  local ix row
+  ix=$(lg_view_ix '(.items[] | select(.key == "app-2") | .pr) = {"number": 6, "url": "https://example.test/pr/6?a|b c)"}')
+  lg_render md "$ix" app page
+  row=$(lg_line "$LG_OUT" "| app-2 ")
+  assert_contains "$row" "[#6](https://example.test/pr/6?a%7Cb%20c%29)" "| → %7C (and space, ) as before)"
+  assert_eq "10" "$(printf '%s' "$row" | sed 's/\\|//g' | tr -cd '|' | wc -c | tr -d ' ')" "still 9 cells (10 pipes)"
+}
+
+test_lg_rev_cache_ignores_head() {
+  echo "test: an --rev index is keyed by the commit and the code, not the local HEAD"
+  lg_publish_fixture
+  local base
+  base=$(git rev-parse refs/remotes/origin/main)
+  DOC_TOOLS_LEDGER_TRACE=1 lg publish --dry-run
+  assert_eq "0" "$LG_RC" "first publish --dry-run: exit 0"
+  assert_contains "$LG_ERR" "index-build" "the base index is built"
+  # A local commit that does not move the base.
+  echo local > src/local.txt
+  git add -A && git commit -qm local
+  DOC_TOOLS_LEDGER_TRACE=1 lg publish --dry-run
+  assert_eq "0" "$LG_RC" "second publish --dry-run: exit 0"
+  assert_contains "$LG_ERR" "index-hit" "same base, another HEAD: a cache hit"
+  assert_not_contains "$LG_ERR" "index-build" "…nothing rebuilt"
+  assert_eq "$base" "$(git rev-parse refs/remotes/origin/main)" "the base did not move"
+  teardown
+}
+
 test_lg_publish_link_prefix() {
   echo "test: publish links — a GitHub remote's blob URL, else relative to the views branch"
   lg_fixture
@@ -4655,6 +4712,12 @@ run_tests() {
   test_lg_render_hardening
   test_lg_registry_reserved_readme
   test_lg_publish_link_prefix
+
+  # --- Task 8 review carry-over ---
+  test_lg_publish_hook_declined_not_moved
+  test_lg_render_resolution_first_nonempty
+  test_lg_render_pr_url_pipe
+  test_lg_rev_cache_ignores_head
 
   print_summary
 }

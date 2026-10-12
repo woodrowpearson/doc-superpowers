@@ -19,7 +19,9 @@
 #
 # Cache: $_LG_CACHE/index-<sha256>.json ($_LG_CACHE/rev/… for --rev, with
 # its own retention), the hash over the schema, the
-# code (every file of scripts/ledger/), the mode, HEAD, the base oid, the config, and — never by walking the
+# code (every file of scripts/ledger/), the mode, HEAD and the base oid
+# (--rev: neither — its base is the commit itself, and HEAD has no part in
+# it), the config, and — never by walking the
 # items — the commit's tree (--rev), or git's listing (path, blob id) of
 # the directories holding the items, the candidate docs, the registry,
 # doc-index, legacy and finalized maps (--staged: the index's; worktree:
@@ -857,6 +859,12 @@ _lg_index() {
     -*|'') ;;
     *) base=$(git rev-parse -q --verify "$base_ref^{commit}" 2>/dev/null) || base="" ;;
   esac
+  if [ "$mode" = rev ]; then
+    # A --rev build is the commit's alone: its base is the commit itself,
+    # and HEAD plays no part (neither in the key nor in built).
+    head=""
+    base=$commit
+  fi
   di=$(_lg_doc_index "$src")
 
   # The key: never a walk over the items. --rev: the commit's tree holds
