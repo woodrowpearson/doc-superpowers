@@ -3236,6 +3236,17 @@ stub_list_calls() {
   grep -c '^list$' "$STUB_LOG" || true
 }
 
+# stub_v9_log <arg>…: the $STUB_LOG lines of one edited-bound-tests call per
+# <arg>, which V9 makes after V3's list calls in every validate (Task 10).
+stub_v9_log() {
+  local a
+  for a in "$@"; do printf 'edited-bound-tests\n%s\n' "$a"; done
+}
+# validate --all's V9 range: <the fixture's merge-base>..HEAD.
+mb_range() {
+  printf '%s..HEAD' "$(git merge-base HEAD main)"
+}
+
 test_v3_unbound_node() {
   echo "test: V3 — a test node the runner's list does not bind to the claim"
   claims_fixture
@@ -3261,7 +3272,8 @@ test_v3_bound_passes() {
   list_row SPEC-AUTH-001#token-ttl "$STUB_NODE"
   cl validate --all
   assert_v3_ok "bound, in the gate, subject imported inside the test"
-  assert_eq "list" "$(cat "$STUB_LOG")" "…tests/test_token.py is not a path: list with no file (all files)"
+  assert_eq "$(printf 'list\n'; stub_v9_log "$(mb_range)")" "$(cat "$STUB_LOG")" \
+    "…tests/test_token.py is not a path: list with no file (all files)"
   # The node's file exists: list is asked for it, once though two claims
   # name it.
   mkdir -p tests
@@ -3272,13 +3284,14 @@ test_v3_bound_passes() {
   : > "$STUB_LOG"
   cl validate --all
   assert_v3_ok "two bound claims of one runner"
-  assert_eq "$(printf 'list\ntests/test_token.py')" "$(cat "$STUB_LOG")" "…one list call, the node's file once"
+  assert_eq "$(printf 'list\ntests/test_token.py\n'; stub_v9_log "$(mb_range)")" "$(cat "$STUB_LOG")" \
+    "…one list call, the node's file once"
   # test.file, when set, is the file (passed as one argument, spaces kept).
   jset "$SIDECAR" '.claims[1].test.file = "tests/refresh spec.py"'
   : > "$STUB_LOG"
   cl validate --all
   assert_v3_ok "test.file set"
-  assert_eq "$(printf 'list\ntests/refresh spec.py\ntests/test_token.py')" "$(cat "$STUB_LOG")" \
+  assert_eq "$(printf 'list\ntests/refresh spec.py\ntests/test_token.py\n'; stub_v9_log "$(mb_range)")" "$(cat "$STUB_LOG")" \
     "…test.file passed as one argument"
   # --staged checks the touched claims alone: none, then the one whose test
   # file is staged.
@@ -3291,7 +3304,8 @@ test_v3_bound_passes() {
   git add tests/test_token.py
   cl validate --staged
   assert_v3_ok "--staged, the token-ttl test file staged"
-  assert_eq "$(printf 'list\ntests/test_token.py')" "$(cat "$STUB_LOG")" "…list asked for that claim's file alone"
+  assert_eq "$(stub_v9_log --staged; printf 'list\ntests/test_token.py\n'; stub_v9_log --staged)" "$(cat "$STUB_LOG")" \
+    "…list asked for that claim's file alone (after the first run's V9 call)"
   teardown
 }
 
@@ -3571,6 +3585,7 @@ test_v3_two_runners_one_call_each() {
   printf 'def test_refresh(): pass\n' > tests/test_refresh.py
   # A second adapter: the same stub in tools/claims2/, its own list.jsonl.
   write_stub tools/claims2/runner "$STUB_RUNNER_SH"
+  : > tools/claims2/edited
   jq -nc '{id: "SPEC-AUTH-001#refresh-single-use", node: "tests/test_refresh.py::test_refresh",
     file: "tests/test_refresh.py", in_gate: true, subject_imports_ok: true, when: null}' > tools/claims2/list.jsonl
   jset docs/spec-claims/config.json '.runners.stub2 = {"adapter": "tools/claims2/runner", "paths": ["tests/"]}'
@@ -3579,8 +3594,8 @@ test_v3_two_runners_one_call_each() {
   : > "$STUB_LOG"
   cl validate --all
   assert_v3_ok "both claims bound, each by its own runner"
-  assert_eq "$(printf 'list\ntests/test_token.py\nlist\ntests/test_refresh.py')" "$(cat "$STUB_LOG")" \
-    "…two list calls, stub then stub2, each with its claim's file alone"
+  assert_eq "$(printf 'list\ntests/test_token.py\nlist\ntests/test_refresh.py\n'; stub_v9_log "$(mb_range)" "$(mb_range)")" \
+    "$(cat "$STUB_LOG")" "…two list calls, stub then stub2, each with its claim's file alone (then V9's, one per runner)"
   teardown
 }
 
@@ -3922,6 +3937,151 @@ test_run_lint_structural_findings() {
   teardown
 }
 
+# --- V9: claim-bound test edits -------------------------------------------------
+#
+# The fixture made runnable (stub_runner) with its node bound (list_row), so
+# V3 holds; tools/claims/edited is what the stub's edited-bound-tests prints.
+
+V9_MSG="bound test edited: adjudicate (states still holds → gate --holds <id>, else a ruling)"
+
+v9_bound() {
+  claims_fixture
+  stub_runner
+  list_row SPEC-AUTH-001#token-ttl "$STUB_NODE"
+}
+
+# The last `cl`'s V9 rows: findings and advisories (count), indeterminate reasons.
+v9_count() {
+  jq '[.findings[]?, .advisories[]? | select(.check == "V9")] | length' <<<"$CL_OUT" 2>/dev/null || echo invalid
+}
+v9_reasons() {
+  jq -r '.indeterminate[]? | select(.check == "V9") | .reason' <<<"$CL_OUT" 2>/dev/null || true
+}
+
+# The arguments of each edited-bound-tests call in $STUB_LOG (its next line;
+# every call here takes one argument), one per line.
+v9_call_args() {
+  awk 'p { print; p = 0 } $0 == "edited-bound-tests" { p = 1 }' "$STUB_LOG"
+}
+
+test_v9_edited_bound_test_listed_advisory() {
+  echo "test: V9 — a claim's bound test edited is listed, advisory in validate"
+  v9_bound
+  cl validate --staged
+  assert_eq "0" "$CL_RC" "nothing edited: exits 0"
+  assert_eq "0" "$(v9_count)" "…no V9 row"
+  assert_eq "--staged" "$(v9_call_args)" "…one edited-bound-tests --staged call"
+  printf 'SPEC-AUTH-001#token-ttl\n' > tools/claims/edited
+  : > "$STUB_LOG"
+  cl validate --staged
+  assert_eq "0" "$CL_RC" "the id listed: exits 0"
+  assert_json_field "$CL_OUT" '[.advisories[] | select(.check == "V9")] | length' "1" "…one V9 advisory"
+  assert_json_field "$CL_OUT" '[.advisories[] | select(.check == "V9")][0].claim' "SPEC-AUTH-001#token-ttl" "…naming the claim"
+  assert_json_field "$CL_OUT" '[.advisories[] | select(.check == "V9")][0].message' "$V9_MSG" "…with the adjudication message"
+  assert_json_field "$CL_OUT" '[.advisories[] | select(.check == "V9")][0].code' "non-blocking" "…non-blocking"
+  assert_json_field "$CL_OUT" '.findings | length' "0" "…no finding"
+  assert_eq "--staged" "$(v9_call_args)" "…called with --staged"
+  # Listed twice (or by two calls): one row.
+  printf 'SPEC-AUTH-001#token-ttl\n' >> tools/claims/edited
+  cl validate --staged
+  assert_json_field "$CL_OUT" '[.advisories[] | select(.check == "V9")] | length' "1" "the id listed twice: one V9 advisory"
+  # The blocking list (the staged config's) decides: with V9 in it, the same
+  # edit blocks.
+  jset docs/spec-claims/config.json '.blocking += ["V9"]'
+  git add docs/spec-claims/config.json
+  cl validate --staged
+  assert_eq "1" "$CL_RC" "V9 in blocking: exits 1"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V9")][0].doc' "$DOC" "…a V9 finding naming the doc"
+  teardown
+}
+
+test_v9_all_uses_merge_base_range() {
+  echo "test: V9 — validate --all asks for the edits over <merge-base>..HEAD; an unresolvable base skips it"
+  v9_bound
+  local mb
+  git commit -qm "feature work" --allow-empty
+  mb=$(git merge-base HEAD main)
+  cl validate --all
+  assert_eq "0" "$CL_RC" "validate --all: exits 0"
+  assert_eq "$mb..HEAD" "$(v9_call_args)" "…one edited-bound-tests <merge-base>..HEAD call"
+  # No base: V9 is skipped, under the one base indeterminate row.
+  : > "$STUB_LOG"
+  printf 'SPEC-AUTH-001#token-ttl\n' > tools/claims/edited
+  cl validate --all --base nosuch
+  assert_eq "2" "$CL_RC" "an unresolvable base: exits 2"
+  assert_eq "" "$(v9_call_args)" "…no edited-bound-tests call"
+  assert_eq "0" "$(v9_count)" "…no V9 row"
+  assert_eq "" "$(v9_reasons)" "…no V9 indeterminate"
+  assert_json_field "$CL_OUT" '[.indeterminate[] | select(.reason == "base-unresolvable")] | length' "1" "…one base-unresolvable row"
+  # --staged needs no base.
+  cl validate --staged --base nosuch
+  assert_eq "--staged" "$(v9_call_args)" "--staged, no base: still called"
+  assert_eq "1" "$(v9_count)" "…the V9 row"
+  teardown
+}
+
+test_v9_unknown_id_ignored() {
+  echo "test: V9 — an id that is not a known claim is ignored"
+  v9_bound
+  printf 'SPEC-AUTH-001#nosuch\nSPEC-AUTH-001#token-ttl \nsomething else\n' > tools/claims/edited
+  cl validate --staged
+  assert_eq "0" "$CL_RC" "unknown ids: exits 0"
+  assert_eq "0" "$(v9_count)" "…no V9 row"
+  assert_eq "" "$(v9_reasons)" "…nothing indeterminate"
+  # Known at the base only (the claim gone from the proposed tree): ignored.
+  add_claim "$(refresh_claim stub tests/test_token.py::test_refresh)"
+  base_here "refresh claim on main"
+  jset "$SIDECAR" 'del(.claims[1])'
+  git add "$SIDECAR"
+  printf 'SPEC-AUTH-001#refresh-single-use\n' > tools/claims/edited
+  cl validate --staged
+  assert_eq "0" "$(v9_count)" "an id known only at the base: no V9 row"
+  assert_eq "" "$(v9_reasons)" "…nothing indeterminate"
+  teardown
+}
+
+test_v9_adapter_failure_indeterminate() {
+  echo "test: V9 — a failing call or an implausible id line is indeterminate, never an empty list"
+  v9_bound
+  printf 'SPEC-AUTH-001#token-ttl\n' > tools/claims/edited
+  STUB_EXIT=1 cl validate --staged
+  assert_eq "2" "$CL_RC" "STUB_EXIT=1: exits 2"
+  assert_eq "adapter-exit-1" "$(v9_reasons)" "…V9 indeterminate, adapter-exit-1"
+  assert_eq "0" "$(v9_count)" "…the failed call's ids unused"
+  : > tools/claims/edited
+  STUB_EXIT=3 cl validate --all
+  assert_eq "2" "$CL_RC" "STUB_EXIT=3, nothing printed, --all: exits 2"
+  assert_contains "$(v9_reasons)" "adapter-exit-3" "…adapter-exit-3"
+  # Garbage lines: empty, carrying a CR, carrying a NUL.
+  local label
+  for label in empty cr nul; do
+    case $label in
+      empty) printf 'SPEC-AUTH-001#token-ttl\n\n' > tools/claims/edited ;;
+      cr) printf 'SPEC-AUTH-001#token-ttl\r\n' > tools/claims/edited ;;
+      nul) printf 'SPEC-AUTH-001#token-ttl\000x\n' > tools/claims/edited ;;
+    esac
+    cl validate --staged
+    assert_eq "2" "$CL_RC" "a $label line: exits 2"
+    assert_eq "malformed-adapter-output" "$(v9_reasons)" "…$label: malformed-adapter-output"
+    assert_eq "0" "$(v9_count)" "…$label: no V9 row"
+  done
+  # A runner with no adapter is a missing adapter: adapter-exit-126.
+  : > tools/claims/edited
+  jset docs/spec-claims/config.json '.runners.other = {"paths": ["lib/"]}'
+  git add docs/spec-claims/config.json
+  cl validate --staged
+  assert_eq "2" "$CL_RC" "a runner without an adapter: exits 2"
+  assert_eq "adapter-exit-126" "$(v9_reasons)" "…adapter-exit-126"
+  # A finding still wins over the indeterminate.
+  jset docs/spec-claims/config.json '.blocking += ["V9"]'
+  git add docs/spec-claims/config.json
+  printf 'SPEC-AUTH-001#token-ttl\n' > tools/claims/edited
+  cl validate --staged
+  assert_eq "1" "$CL_RC" "a V9 finding beside the indeterminate: exits 1"
+  assert_eq "adapter-exit-126" "$(v9_reasons)" "…the indeterminate still reported"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -4101,6 +4261,12 @@ run_tests() {
   test_run_lint_rerun
   test_run_lint_unbuilt_pass_is_finding
   test_run_lint_structural_findings
+
+  # --- Task 10: V9 claim-bound test edits ---
+  test_v9_edited_bound_test_listed_advisory
+  test_v9_all_uses_merge_base_range
+  test_v9_unknown_id_ignored
+  test_v9_adapter_failure_indeterminate
 
   print_summary
 }

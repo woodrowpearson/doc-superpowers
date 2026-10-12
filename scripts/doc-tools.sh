@@ -7777,6 +7777,70 @@ _claims_v4() {
     >> "$_SCRATCH/cl-findings.jsonl"
 }
 
+# --- Spec claims: claim-bound test edits, V9 ------------------------------------
+#
+# V9 lists the claims whose bound tests a change edits, to be adjudicated:
+# states still holds (gate --holds <id>), or a ruling. Each configured
+# runner's adapter is called `edited-bound-tests <arg>` (§D), <arg> being
+# --staged under validate --staged, <merge-base>..HEAD under validate --all
+# (skipped when _CL_MB is empty: _claims_init's base-unresolvable row covers
+# it) and <from>..HEAD under gate. It prints one claim id per line. Each id
+# of a claim in the proposed tree (cl-claims.json) is one V9 finding, however
+# many runners or lines name it; any other id is ignored. A call that exits
+# non-zero (126: a missing adapter, R6) or prints a line that is no plausible
+# id (empty, or holding a CR or a NUL) is indeterminate (adapter-exit-<rc>,
+# malformed-adapter-output), and its ids are not used: an edit list that
+# could not be read is never taken as empty. V9 is not in the default
+# blocking list, so validate reports its findings as advisories (central, in
+# _JQ_CLAIMS_EMIT); gate (_CL_ALL_BLOCKING) blocks on them. Scratch:
+# cl-v9-calls.jsonl, one {ok, reason, ids} per call.
+
+# An edited-bound-tests call's stdout ($out: its lines, -R), its rc and $nul
+# (1: the output holds a NUL byte) → {ok, reason, ids}.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_V9_PARSE='[inputs] as $lines
+ | if $rc != 0 then {ok: false, reason: "adapter-exit-\($rc)", ids: []}
+   elif $nul == 1 or any($lines[]; . == "" or (split("\r") | length) > 1)
+   then {ok: false, reason: "malformed-adapter-output", ids: []}
+   else {ok: true, reason: null, ids: $lines} end'
+
+# The calls ($calls) over cl-claims.json (.) → the V9 finding rows, one per
+# known claim id an ok call printed.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_V9='([$calls[] | select(.ok) | .ids[]] | unique) as $ids
+ | [.[] | select((.claim | type) == "object" and (.claim.id | type) == "string")
+        | select(.claim.id as $i | any($ids[]; . == $i))]
+ | unique_by(.claim.id)[] | {check: "V9", claim: .claim.id, doc, message: $msg}'
+
+# _claims_v9 <arg>: V9 over one edited-bound-tests call per configured runner
+# (see the section comment), its rows added to the findings and the
+# indeterminate. validate passes --staged or "$_CL_MB..HEAD"; gate passes
+# "<from>..HEAD" and tells the held ids apart by the rows' check "V9".
+# shellcheck disable=SC2016  # jq programs, not shell expansion
+_claims_v9() {
+  local arg="$1" z="$_SCRATCH/cl-v9-runners.z" out="$_SCRATCH/cl-v9-out" calls="$_SCRATCH/cl-v9-calls.jsonl"
+  local runner adapter rc nul
+  : > "$calls"
+  # A runner name holding a NUL cannot reach the shell: a missing adapter.
+  _claims_jq v9-nul-runners -c '.runners | objects | keys[] | select((split("\u0000") | length) > 1)
+      | {ok: false, reason: "adapter-exit-126", ids: []}' "$_SCRATCH/cl-config.json" >> "$calls"
+  _claims_jq v9-runners -j '.runners | objects | keys[] | select((split("\u0000") | length) <= 1) | . + "\u0000"' \
+    "$_SCRATCH/cl-config.json" > "$z"
+  while IFS= read -r -d '' runner <&3; do
+    adapter=$(_claims_runner_adapter "$runner") || _claims_propagate $?
+    rc=0
+    _claims_adapter_call "$out" "$adapter" edited-bound-tests "$arg" || rc=$?
+    nul=0
+    if ! LC_ALL=C tr -d '\000' < "$out" | cmp -s - "$out"; then nul=1; fi
+    _claims_jq v9-parse -ncR --argjson rc "$rc" --argjson nul "$nul" "$_JQ_CLAIMS_V9_PARSE" < "$out" >> "$calls"
+  done 3< "$z"
+  _claims_jq v9-indeterminate -c 'select(.ok | not) | {check: "V9", claim: null, reason}' "$calls" \
+    >> "$_SCRATCH/cl-indet.jsonl"
+  _claims_jq v9 -c --slurpfile calls "$calls" \
+    --arg msg "bound test edited: adjudicate (states still holds → gate --holds <id>, else a ruling)" \
+    "$_JQ_CLAIMS_V9" "$_SCRATCH/cl-claims.json" >> "$_SCRATCH/cl-findings.jsonl"
+}
+
 cmd_claims_validate() {
   local mode=all
   if [ "$_OPT_staged" = 1 ]; then mode=staged; fi
@@ -7794,6 +7858,11 @@ cmd_claims_validate() {
   _claims_v4
   _claims_v5
   _claims_v6
+  if [ "$mode" = staged ]; then
+    _claims_v9 --staged
+  elif [ -n "$_CL_MB" ]; then
+    _claims_v9 "$_CL_MB..HEAD"
+  fi
   _claims_blocks validate
   _claims_emit validate
 }
