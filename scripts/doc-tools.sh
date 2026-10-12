@@ -2407,8 +2407,9 @@ ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed
   <ledger>-~<hex4> and unique among keys and aliases; ledger is a
   registered, active id or unassigned; an added item carries ledger and
   summary; an item whose status moves to closed or won't fix has a
-  resolution, and its superseded_by names an existing item in effect (no
-  cycle, not itself superseded); superseded_by only on a closed item. On a
+  resolution, and its superseded_by names an existing item and leads to no
+  cycle (a longer chain, or one ending at a closed or won't-fix item, is
+  advisory); superseded_by only on a closed item. On a
   modified item a finding about what it already was at HEAD is advisory
   (a legacy_ids or retired ledger likewise); the registry is checked when
   it is staged. --all: the same over every item of the working tree, plus
