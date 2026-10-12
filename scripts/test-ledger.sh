@@ -1107,7 +1107,16 @@ f(1)+[x]$^,|f(1)+[x]$^,|1
 f(1)+[x]$^,|f1x|0
 a\*b|a*b|1
 a\*b|axb|0
-ü/*.md|ü/x y.md|1'
+ü/*.md|ü/x y.md|1
+x{,.d}.ts|x.ts|1
+x{,.d}.ts|x.d.ts|1
+x{,.d}.ts|x.e.ts|0
+{a,}b|ab|1
+{a,}b|b|1
+{a,}b|cb|0
+{a,,b}c|c|1
+{a,,b}c|bc|1
+{}x|x|1'
 
 # shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
 lg_t_glob_ere_cases() {
@@ -1181,6 +1190,7 @@ LG_REG_CLEAN='{"schema":"ledger-registry/1","ledgers":[
    "contracts":[{"id":"field:order.total","defined_in":["src/app/model.*"]}]},
   {"id":"core","title":"Core","kind":"platform","status":"retired","paths":["src/core/**","*.json"],
    "residual_paths":["src/**"],"contracts":[{"id":"component:Core Sheet x"}]}]}'
+LG_REG_CLEAN=${LG_REG_CLEAN/'"status":"retired"'/'"status":"active"'}
 
 test_lg_registry_valid_clean() {
   echo "test: validate --registry: a clean registry exits 0 with no findings; absent; invalid → 2"
@@ -1245,7 +1255,7 @@ test_lg_registry_bad_status() {
     {"id":"ops","kind":"platform","status":"retired","paths":["ops/{a,b"]}]}'
   lg validate --registry --format json
   assert_eq "1" "$LG_RC" "findings exit 1"
-  assert_eq "glob|kind|schema|shape|status|unowned" "$(lg_classes "$LG_OUT")" "schema, status, kind, shape (paths a string), glob (unbalanced {); src/index.js unowned"
+  assert_eq "glob|kind|schema|shape|status" "$(lg_classes "$LG_OUT")" "schema, status, kind, shape (paths a string), glob (unbalanced {, in a retired ledger too); no active ledger declares paths: no unowned"
   assert_contains "$(jq -r '.findings[] | select(.class == "status") | .detail' <<<"$LG_OUT")" '"draft"' "the status finding quotes the value"
   teardown
 }
@@ -1346,6 +1356,44 @@ test_lg_registry_exclusion() {
   teardown
 }
 
+test_lg_registry_id_newline() {
+  echo "test: validate --registry: a ledger or contract id with a newline in it is a finding (jq's \$ is not the end)"
+  lg_fixture
+  lg_enable
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[
+    {"id":"app\n","kind":"service","status":"active","paths":["src/**"],"contracts":[{"id":"field:a\n"}]},
+    {"id":"x\nweb","kind":"service","status":"active","contracts":[{"id":"x\nfield:b"}]}]}'
+  lg validate --registry --format json
+  assert_eq "1" "$LG_RC" "findings exit 1"
+  assert_eq "contract-id|contract-id|id|id" "$(lg_classes "$LG_OUT")" \
+    "both ids and both contract ids are refused; src/index.js still owned (no stray rows)"
+  teardown
+}
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_owner_map_retired() {
+  local paths="$_SCRATCH/t.paths" map="$_SCRATCH/t.tsv"
+  lg_nul_list "$paths" src/index.js src/a.d.ts lib/u.ts
+  _lg_owner_map "$paths" "$map"
+  assert_eq "src/index.js	new|src/a.d.ts	new|lib/u.ts	-|" "$(tr '\n' '|' < "$map")" \
+    "the retired ledger claims nothing; its successor owns the shared glob"
+}
+
+test_lg_registry_retired_owns_nothing() {
+  echo "test: a retired ledger owns no paths: no overlap with its active successor"
+  lg_fixture
+  lg_enable
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[
+    {"id":"old","kind":"service","status":"retired","paths":["src/**","lib/**"]},
+    {"id":"new","kind":"service","status":"active","paths":["src/**/*{,.d}.{js,ts}"]}]}'
+  lg_files src/a.d.ts
+  lg_in lg_t_owner_map_retired
+  lg validate --registry --format json
+  assert_eq "0" "$LG_RC" "no overlap (and an empty brace alternative does not crash the map)"
+  assert_json_field "$LG_OUT" '.findings | length' "0" "no findings"
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -1407,6 +1455,8 @@ run_tests() {
   test_lg_registry_unowned
   test_lg_registry_residual
   test_lg_registry_exclusion
+  test_lg_registry_id_newline
+  test_lg_registry_retired_owns_nothing
 
   print_summary
 }
