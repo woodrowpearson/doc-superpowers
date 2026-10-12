@@ -8,9 +8,12 @@
 # written with `git fast-import`) and times the ledger verbs against the
 # Global Constraints budgets (bash 3.2 + jq, 3,000 items, no network):
 #
-#   corpus     N items over ~N/15 commits, 6 ledgers, a registry, a doc-index
-#              of N/15 specs and plans linking items, N/30 items archived by
-#              rename.
+#   corpus     N items over ~N/15 commits, 6 ledgers, a registry (each
+#              contract defined in one of the src/f<n>.txt files every step
+#              touches), a doc-index of N/15 specs and plans linking items,
+#              N/30 items archived by rename; config base "main" (HEAD), so
+#              every index build computes the re-check markers (sources that
+#              reached a terminal class, contract changes in the window).
 #   history    the same N items over ~C commits (default 2,000); every fifth
 #              step merges a side branch that touches the item directories —
 #              half of them ordinary merges, half TREESAME to main (main
@@ -18,8 +21,9 @@
 #              `git log --full-history` walks into.
 #
 # Rows (seconds, wall clock):
-#   ls / ls --ledger … --open / show / find   cold (no caches: the run builds
-#              the index) < 5 s and warm (caches from the previous run) < 1 s
+#   ls / ls --ledger … --open / show / find / related / recheck   cold (no
+#              caches: the run builds the index) < 5 s and warm (caches from
+#              the previous run) < 1 s
 #   refs step  the index build's parse-reference step (_lg_ix_refs) over all
 #              N items as blob records — the --staged / --rev case, which
 #              probes one parse entry per blob; reported, no budget
@@ -202,12 +206,12 @@ b_gen() {
       reg = "{\"schema\":\"ledger-registry/1\",\"ledgers\":["
       for (l = 1; l <= 6; l++) {
         reg = reg (l > 1 ? "," : "") "{\"id\":\"" LN[l] "\",\"title\":\"" LN[l] "\",\"kind\":\"service\",\"status\":\"active\",\"contracts\":["
-        for (c = 1; c <= 20; c++) reg = reg (c > 1 ? "," : "") "{\"id\":\"field:" LN[l] ".f" c "\"}"
+        for (c = 1; c <= 20; c++) reg = reg (c > 1 ? "," : "") "{\"id\":\"field:" LN[l] ".f" c "\",\"defined_in\":[\"src/f" ((l * 20 + c) % 50) ".txt\"]}"
         reg = reg "]}"
       }
       reg = reg "]}\n"
       files = sprintf("M 100644 :%d docs/ledger/ledgers.json\n", blob(reg))
-      files = files sprintf("M 100644 :%d docs/ledger/config.json\n", blob("{}\n"))
+      files = files sprintf("M 100644 :%d docs/ledger/config.json\n", blob("{\"base\":\"main\"}\n"))
       nd = int(N / 15); if (nd < 2) nd = 2
       di = "{\"docs\":{"
       for (d = 1; d <= nd; d++) {
@@ -417,6 +421,10 @@ echo "  (ls --ledger checkout --sev P1,P2 --open: $(wc -l < "$B_OUT" | tr -d ' '
 b_verb "show $show_key" show "$show_key"
 # shellcheck disable=SC2086  # two words
 b_verb "find $find_words" find $find_words
+b_verb "related $show_key" related "$show_key"
+b_verb "recheck $show_key" recheck "$show_key"
+# shellcheck disable=SC2012  # cache names are index-<hex>.json
+echo "  (re-check markers: $(jq '[.items[] | select(.recheck_after != [])] | length' "$(ls -t "$(git rev-parse --git-common-dir)"/doc-superpowers/ledger/index-*.json | head -n 1)") items)"
 
 # The refs step: every item as a blob record (the --staged / --rev shape).
 git ls-files -s -- docs/issues docs/archive/issues | awk '{ print "{\"blob\":\"" $2 "\"}" }' > "$B_ROOT/recs.jsonl"

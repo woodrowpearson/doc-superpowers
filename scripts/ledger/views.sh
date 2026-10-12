@@ -178,6 +178,7 @@ cmd_ledger_view() {
   esac
   _lg_scratch_name
   s=$_LG_SN
+  _LG_IX_NEED_CONTRACTS=1
   ix=$(_lg_index)
   _lg_v_ledger_ids "$ix" > "$s.ids"
   if [ "$target" != all ] && ! grep -Fqx -- "$target" "$s.ids"; then
@@ -313,6 +314,7 @@ cmd_ledger_publish() {
   git cat-file -e "$base:docs/ledger/config.json" 2>/dev/null \
     || _lg_die "the base $base_name ($short) has no docs/ledger/config.json — nothing to publish"
   _lg_cfg_from_rev "$base"
+  _LG_IX_NEED_CONTRACTS=1
   ix=$(_lg_index --rev "$base")
   gen="$s.gen"
   _lg_v_generated "$base" 0 "$base_name@$short" "$link" "$gen"

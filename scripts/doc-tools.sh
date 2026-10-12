@@ -2332,7 +2332,9 @@ ledger show|cmd_ledger_show|repo|format=
   <key|alias|legacy-ref|path> [--format text|json]
   One work-ledger item in at most 25 lines: key, ledger, severity,
   derived status, summary, specs, plans, handoffs, contracts, relations,
-  and the first resolution line of a closed item. A key or alias is
+  its upstream, downstream and sibling items, its re-check markers
+  ("re-check: <key> landed"), and the first resolution line of a closed
+  item. A key or alias is
   matched case-insensitively and may be spaced: checkout-14, checkout 14,
   checkout #14 (one argument or several words); a provisional key that
   was finalized reaches its key (docs/ledger/finalized.json); a legacy
@@ -2356,17 +2358,32 @@ ledger find|cmd_ledger_find|repo|format=
   paragraph: the item whose name you cannot remember. Per word: 3 in the
   key or summary, 2 in the H1 or file name, 1 in the first paragraph;
   the top 15 with their scores.
-ledger related|cmd_ledger_related|repo|format=
-  <key> [--format text|json]
-  An item's siblings, upstream and downstream items, and unconfirmed
-  candidates.
-ledger sweep|cmd_ledger_sweep|repo|format=
-  [--format text|json]
-  The planning sweep: the open items a plan, a set of files, contracts
-  or keys touch.
+ledger related|cmd_ledger_related|repo|depth= format=
+  <item> [--depth 1|2|3] [--format text|json]
+  An item's confirmed relations — upstream (it consumes what they change,
+  or its relates names them root-cause / depends-on), downstream (the
+  reverse) and siblings (a contract changed or consumed by both, or relates
+  sibling) — breadth first to --depth (default 1), then the unconfirmed
+  candidates: open items that share two or more listed files, a spec, or a
+  file a contract it names is defined in, each with its reason. <item>
+  takes what show takes. Unknown: exit 1.
+ledger sweep|cmd_ledger_sweep|repo|plan= files+ contracts+ keys+ format=
+  (--plan <plan> | --files <path>... | --contracts <id>... | --keys <item>...) [--format text|json]
+  The planning sweep: print a "## Related work" table, | Item | Why
+  related | Mark |, of the work a plan touches — confirmed relations first
+  (items named, their neighbours, items that change or consume a contract
+  or list a file), then candidates — the Mark column empty, for the plan's
+  author to fill with include or exclude: <reason> (validate --plan checks
+  it). --plan reads the plan's backticked existing files, the contract ids
+  and keys in its text and its own Related work rows. Unknown --contracts
+  or --keys: exit 3.
 ledger recheck|cmd_ledger_recheck|repo|format=
-  <key> [--format text|json]
-  The items to re-check when <key> resolves or its contracts change.
+  <item> [--format text|json]
+  The open items to re-check when <item> resolves or its contracts
+  change: its downstream items and the items whose relates name it, each
+  "re-verify | close as superseded by <item> | reshape". The index marks
+  them (re-check: <item> landed) once it reaches a terminal class on the
+  base, until a later commit on the base touches them.
 ledger inflight|cmd_ledger_inflight|repo|format=
   [--format text|json]
   Work in flight on other branches and machines.
@@ -2389,9 +2406,14 @@ ledger assign|cmd_ledger_assign|repo|format=
   Move an item to a ledger: a new key there; the previous key is appended
   to its aliases. <item> takes what show takes. Prints
   "<key>  <path>  (was <old key>)".
-ledger link|cmd_ledger_link|repo|format=
-  <item> [--format text|json]
-  Write a confirmed relation (consumes, changes, relates) into an item.
+ledger link|cmd_ledger_link|repo|consumes= changes= relates= format=
+  <item> (--consumes <contract> | --changes <contract> | --relates <kind>:<item>) [--format text|json]
+  Write confirmed relations into an item's frontmatter lists (consumes,
+  changes, relates; any of the three at once, in one write). A contract
+  must exist (registry or contracts adapter); a relates kind is
+  root-cause, depends-on or sibling and names another item that has a
+  key (written as its key). Any bad value: exit 1, nothing written. A
+  value already there is left as it is.
 ledger note|cmd_ledger_note|repo|format=
   <key> <text> [--format text|json]
   Append a dated line under an item's log heading, or set what it owes.
@@ -2670,7 +2692,12 @@ notices, new, assign, link, note, view, validate, publish, finalize, init):
   doc-tools.sh: a copy of doc-tools.sh without that directory exits 2 for
   an enabled ledger. Text is the default output; --format json prints
   exactly one object {"verb","enabled","exit",…}. The exit codes are the
-  claims subcommands' (see "Exit status").
+  claims subcommands' (see "Exit status"). An adapter (config adapters:
+  contracts, pr) is an absolute path, a path from the top level, or
+  doc-superpowers:<name> — scripts/adapters/<name>.sh beside this
+  doc-tools.sh; one that fails or prints output that breaks its contract
+  exits 2 for every verb that needs it (contracts: show, related, recheck,
+  sweep, link, view, publish).
 
 Exit status:
   0  success

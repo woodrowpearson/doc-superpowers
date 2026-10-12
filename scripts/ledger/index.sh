@@ -1,7 +1,9 @@
 # shellcheck shell=bash
 # scripts/ledger/index.sh — the ledger index: items joined with the
 # registry, the doc-index (specs, plans, handoffs that link an item), git
-# dates (renames chained), a local derived status; cached under $_LG_CACHE.
+# dates (renames chained), a local derived status, the contracts (registry
+# + contracts adapter), each item's neighbours and re-check markers
+# (relations.sh, defs.jq lg_relations); cached under $_LG_CACHE.
 # Sourced by lib.sh; uses lib.sh's _lg_die, _lg_cfg, _lg_registry,
 # _lg_doc_index, _lg_src_cat, parse.sh's parsers and helpers, glob.sh's
 # _lg_globs_matching / _lg_glob_dirs, validate.sh's _lg_registry_findings
@@ -17,9 +19,14 @@
 # working tree, unless the caller loaded another — ledger publish loads the
 # base commit's with _lg_cfg_from_rev) in every mode. Dates come from HEAD's history (R's for --rev).
 #
+# The file is one JSON object written one item per line (the head through
+# "items":[ on the first line, then each item, then the tail), so the
+# re-check markers are written into the item lines without a second parse.
+#
 # Cache: $_LG_CACHE/index-<sha256>.json ($_LG_CACHE/rev/… for --rev, with
 # its own retention), the hash over the schema, the
-# code (every file of scripts/ledger/), the mode, HEAD and the base oid
+# code (every file of scripts/ledger/), the contracts adapter's output (or
+# its failure: it runs on every call; adapters.sh), the mode, HEAD and the base oid
 # (--rev: neither — its base is the commit itself, and HEAD has no part in
 # it), the config, and — never by walking the
 # items — the commit's tree (--rev), or git's listing (path, blob id) of
@@ -39,8 +46,11 @@
 # added the path (the earliest add) — a rename (R) carries the old path's
 # date, chained; a path re-added after a rename moved its file away takes
 # the later add —
-# from `git log --reverse --full-history --date=short --format=%ad
-# --name-status -M --diff-filter=AR` over the item globs' directories
+# from `git log --reverse --full-history --date=short --format='%H %ad'
+# --name-status -M` over the item globs' directories (the same walk records
+# every commit and change: re-check reads the last commit touching an item;
+# the walks of the dated commit and of the base start in the background when
+# a build begins, _lg_ix_prefetch, and overlap the parse)
 # (--full-history: no history simplification, so a TREESAME merge hides no
 # side branch from a cold map that an extended one would see), replayed in
 # order; the
@@ -164,25 +174,33 @@ _lg_ix_candidates() {
 
 # --- Dates -------------------------------------------------------------------------
 
-# _lg_ix_events <commit> <dirs-file> → _LG_EVENTS: the cached event file of
-# <commit> ("A" date path / "R" date old new, one field per line, a newline
-# in a name as \001; first line "# ledger-dates/2 <sig>"), built cold or by
-# extending the newest cached ancestor's.
-_lg_ix_events() {
-  local commit="$1" dirs="$2" s sig header f c oid anc="" tmp range first d
-  local specs=()
+# _lg_ix_events_header <dirs-file> → _LG_EP_HEADER: the event file's first
+# line for these directories.
+# _lg_ix_events_plan <commit> <dirs-file>: what _lg_ix_events would do —
+# _LG_EP_F (the cache file), _LG_EP_HEADER, _LG_EP_HIT (1: the cache file
+# answers), _LG_EP_ANC (the cached ancestor to extend, or "") and
+# _LG_EP_RANGE (the git log range).
+_lg_ix_events_header() {
+  local s
   _lg_scratch_name
   s=$_LG_SN
-  { printf 'ledger-dates/2\n'; cat "$dirs"; } > "$s.sig" || _lg_die "cannot write $s.sig"
+  { printf 'ledger-dates/3\n'; cat "$1"; } > "$s.sig" || _lg_die "cannot write $s.sig"
   _hash_one "$s.sig"
-  sig=${_HASH#sha256:}
-  header="# ledger-dates/2 $sig"
-  f="$_LG_CACHE/dates-$commit.tsv"
+  _LG_EP_HEADER="# ledger-dates/3 ${_HASH#sha256:}"
+}
+_lg_ix_events_plan() {
+  local commit="$1" dirs="$2" s c oid first
+  _lg_scratch_name
+  s=$_LG_SN
+  _lg_ix_events_header "$dirs"
+  _LG_EP_F="$_LG_CACHE/dates-$commit.tsv"
+  _LG_EP_HIT=0
+  _LG_EP_ANC=""
+  _LG_EP_RANGE=$commit
   first=""
-  if [ -f "$f" ]; then IFS= read -r first < "$f" || true; fi
-  if [ "$first" = "$header" ]; then
-    _lg_ix_trace "dates-hit"
-    _LG_EVENTS=$f
+  if [ -f "$_LG_EP_F" ]; then IFS= read -r first < "$_LG_EP_F" || true; fi
+  if [ "$first" = "$_LG_EP_HEADER" ]; then
+    _LG_EP_HIT=1
     return 0
   fi
   # shellcheck disable=SC2012  # cache names are dates-<hex>.tsv
@@ -193,45 +211,134 @@ _lg_ix_events() {
     [ "$oid" != "$commit" ] || continue
     first=""
     IFS= read -r first < "$c" || true
-    [ "$first" = "$header" ] || continue
+    [ "$first" = "$_LG_EP_HEADER" ] || continue
     if git merge-base --is-ancestor "$oid" "$commit" 2>/dev/null; then
-      anc=$oid
+      _LG_EP_ANC=$oid
+      _LG_EP_RANGE="$oid..$commit"
       break
     fi
   done < "$s.cached"
+}
+
+# The walk itself (git log -z: "<id> <date>\0\n<status>\0<path>[\0<path>]\0…").
+# --full-history: a merge TREESAME to one parent must not hide the other
+# parent's commits — a map extended from that side branch's tip has them.
+# _lg_ix_events_git <range> <dirs-file> <log> <err>
+_lg_ix_events_git() {
+  local d
+  local specs=()
   while IFS= read -r d; do
     specs+=("$d")
-  done < "$dirs"
+  done < "$2"
+  GIT_LITERAL_PATHSPECS=1 git -c log.showSignature=false log --no-color --reverse --full-history --date=short \
+    --format='%H %ad' --name-status -M -z "$1" -- ${specs[@]+"${specs[@]}"} > "$3" 2> "$4"
+}
+
+# _lg_ix_prefetch <commit> <dirs-file>: start, in the background, the walk a
+# later _lg_ix_events <commit> <dirs-file> needs (nothing when its cache
+# answers), so it overlaps the parse; _lg_ix_events waits for it. Slots:
+# _LG_PF_N, _LG_PF_{C,A,R,P,L,E}_<i> (commit, ancestor, range, pid, log, err).
+_LG_PF_N=0
+_lg_ix_prefetch() {
+  local commit="$1" i s
+  i=1
+  while [ "$i" -le "$_LG_PF_N" ]; do
+    eval "[ \"\$_LG_PF_C_$i\" != \"\$commit\" ]" || return 0
+    i=$((i + 1))
+  done
+  _lg_ix_events_plan "$commit" "$2"
+  [ "$_LG_EP_HIT" = 0 ] || return 0
+  _lg_scratch_name
+  s=$_LG_SN
+  _LG_PF_N=$((_LG_PF_N + 1))
+  i=$_LG_PF_N
+  printf -v "_LG_PF_C_$i" '%s' "$commit"
+  printf -v "_LG_PF_A_$i" '%s' "$_LG_EP_ANC"
+  printf -v "_LG_PF_R_$i" '%s' "$_LG_EP_RANGE"
+  printf -v "_LG_PF_L_$i" '%s' "$s.pflog"
+  printf -v "_LG_PF_E_$i" '%s' "$s.pferr"
+  # Its own stdout and stderr are files: the background shell must not hold
+  # the caller's $(…) pipe.
+  _lg_ix_events_git "$_LG_EP_RANGE" "$2" "$s.pflog" "$s.pferr" < /dev/null > /dev/null 2>&1 &
+  printf -v "_LG_PF_P_$i" '%s' "$!"
+}
+
+# _lg_ix_events <commit> <dirs-file> → _LG_EVENTS: the cached event file of
+# <commit>, one field per line (a newline in a name as \001), in history
+# order (oldest first): "@" <commit id> at each commit, then its changes —
+# "A" date path / "R" date old new (the dates) and "M" path (modified, type
+# changed, or a copy's new path) / "D" path (the touches: re-check reads the
+# last commit touching an item, relations.sh). First line
+# "# ledger-dates/3 <sig>". Built cold or by extending the newest cached
+# ancestor's (a prefetched walk, _lg_ix_prefetch, is used when there is one).
+_lg_ix_events() {
+  local commit="$1" dirs="$2" s f tmp range anc="" i pid="" rc=0 log err c
+  _lg_scratch_name
+  s=$_LG_SN
+  log="$s.log"
+  err="$s.err"
+  i=1
+  while [ "$i" -le "$_LG_PF_N" ]; do
+    if eval "[ \"\$_LG_PF_C_$i\" = \"\$commit\" ] && [ -n \"\$_LG_PF_P_$i\" ]"; then
+      eval "pid=\$_LG_PF_P_$i anc=\$_LG_PF_A_$i range=\$_LG_PF_R_$i log=\$_LG_PF_L_$i err=\$_LG_PF_E_$i"
+      printf -v "_LG_PF_P_$i" '%s' ""
+      break
+    fi
+    i=$((i + 1))
+  done
+  if [ -z "$pid" ]; then
+    _lg_ix_events_plan "$commit" "$dirs"
+    if [ "$_LG_EP_HIT" = 1 ]; then
+      _lg_ix_trace "dates-hit"
+      _LG_EVENTS=$_LG_EP_F
+      return 0
+    fi
+    anc=$_LG_EP_ANC
+    range=$_LG_EP_RANGE
+  else
+    # The plan the prefetch ran; the header (the same dirs) for the file.
+    _lg_ix_events_header "$dirs"
+  fi
+  f="$_LG_CACHE/dates-$commit.tsv"
   tmp=$(mktemp "$_LG_CACHE/.dates.XXXXXX") || _lg_die "cannot create a temp file in $_LG_CACHE"
   if [ -n "$anc" ]; then
     _lg_ix_trace "dates-extend $anc"
     cp -- "$_LG_CACHE/dates-$anc.tsv" "$tmp" || { rm -f "$tmp"; _lg_die "cannot copy the cached dates of $anc"; }
-    range="$anc..$commit"
   else
     _lg_ix_trace "dates-cold"
-    printf '%s\n' "$header" > "$tmp" || { rm -f "$tmp"; _lg_die "cannot write $tmp"; }
-    range=$commit
+    printf '%s\n' "$_LG_EP_HEADER" > "$tmp" || { rm -f "$tmp"; _lg_die "cannot write $tmp"; }
   fi
-  # git log -z: "<date>\0\n<status>\0<path>[\0<path>]\0…"; after tr, one
-  # token per line (the first status of a commit led by \001).
-  # --full-history: a merge TREESAME to one parent must not hide the other
-  # parent's commits — a map extended from that side branch's tip has them.
-  GIT_LITERAL_PATHSPECS=1 git -c log.showSignature=false log --no-color --reverse --full-history --date=short \
-    --format=%ad --name-status -M --diff-filter=AR -z "$range" -- ${specs[@]+"${specs[@]}"} > "$s.log" 2> "$s.err" \
-    || { rm -f "$tmp"; _lg_die "git log failed: $(head -n 3 "$s.err" 2>/dev/null)"; }
-  tr '\n\000' '\001\n' < "$s.log" | LC_ALL=C awk '
+  if [ -n "$pid" ]; then
+    wait "$pid" || rc=$?
+  else
+    _lg_ix_events_git "$range" "$dirs" "$log" "$err" || rc=$?
+  fi
+  [ "$rc" = 0 ] || { rm -f "$tmp"; _lg_die "git log failed: $(head -n 3 "$err" 2>/dev/null)"; }
+  # After tr, one token per line (the first status of a commit, or the next
+  # commit line after one with no changes, led by \001).
+  tr '\n\000' '\001\n' < "$log" | LC_ALL=C awk '
     {
       t = $0
       if (st == "") {
         if (substr(t, 1, 1) == "\001") t = substr(t, 2)
-        if (t ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/) { d = t; next }
+        if (t == "") next
+        if (t ~ /^[0-9a-f][0-9a-f]* [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/) {
+          d = substr(t, length(t) - 9); print "@"; print substr(t, 1, length(t) - 11); next
+        }
         if (t == "A") { st = "A"; next }
         if (t ~ /^R[0-9]*$/) { st = "R1"; next }
-        next
+        if (t ~ /^C[0-9]*$/) { st = "C1"; next }
+        if (t == "M" || t == "T") { st = "M"; next }
+        if (t == "D") { st = "D"; next }
+        st = "X"; next
       }
       if (st == "A") { print "A"; print d; print t; st = ""; next }
       if (st == "R1") { old = t; st = "R2"; next }
-      print "R"; print d; print old; print t; st = ""
+      if (st == "R2") { print "R"; print d; print old; print t; st = ""; next }
+      if (st == "C1") { st = "M"; next }
+      if (st == "M") { print "M"; print t; st = ""; next }
+      if (st == "D") { print "D"; print t; st = ""; next }
+      st = ""
     }' >> "$tmp" || { rm -f "$tmp"; _lg_die "cannot read the git history of the items"; }
   mv -f "$tmp" "$f" || { rm -f "$tmp"; _lg_die "cannot install $f"; }
   # The newest 5 maps are kept.
@@ -275,6 +382,8 @@ _lg_ix_dates() {
           delete VAC[p]
           if (o != p) VAC[o] = 1
           PREV[p] = PREV[p] SUBSEP o
+        } else if (k == "@" || k == "M" || k == "D") {
+          getline x < ev
         }
       }
       printf "" > nodate; printf "" > formers
@@ -580,11 +689,28 @@ def lg_terminal_doc($p; $S; $DI; $terms):
   | (($e | type) == "object" and ($e.status == "deprecated" or (($e.superseded_by // "") | type == "string" and . != "")))
     or ($p | startswith("docs/archive/"))
     or (($S[$p] // null) | if type == "string" then (lg_norm as $v | any($terms[]; . as $t | $v | lg_lead($t))) else false end);
+# lg_item_rel($F; $CT; $EX), applied to a parse record: the fields the
+# relations read (defs.jq lg_relations; the background relations pass) —
+# lg_item takes the same values from it.
+def lg_item_rel($F; $CT; $EX):
+  (.fm // {}) as $fm
+  | (($fm | lg_fv($F; "status")) | lg_str) as $status
+  | {path: .path,
+     key: (($fm | lg_fv($F; "key")) | lg_str),
+     status: $status,
+     class: ($status | lg_class($CT; $EX)),
+     changes: (($fm | lg_fv($F; "changes")) | lg_list),
+     consumes: (($fm | lg_fv($F; "consumes")) | lg_list),
+     relates: [($fm | lg_fv($F; "relates")) | lg_list | .[] | split(":") as $p
+               | if ($p | length) < 2 then {kind: null, key: .}
+                 else {kind: $p[0], key: ($p[1:] | join(":") | ltrimstr(" "))} end],
+     aliases: (($fm | lg_fv($F; "aliases")) | lg_list)};
 def lg_item($F; $CT; $EX; $D; $L; $S; $DI; $terms):
   . as $r
   | ($r.fm // {}) as $fm
-  | (($fm | lg_fv($F; "status")) | lg_str) as $status
-  | ($status | lg_class($CT; $EX)) as $class
+  | lg_item_rel($F; $CT; $EX) as $R
+  | $R.status as $status
+  | $R.class as $class
   | (($fm | lg_fv($F; "owed")) | lg_str) as $owed
   | (($fm | lg_fv($F; "superseded_by")) | lg_str) as $sup
   | (($fm | lg_fv($F; "date")) | if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}([T ]|$)") then .[0:10] else null end) as $fd
@@ -594,21 +720,19 @@ def lg_item($F; $CT; $EX; $D; $L; $S; $DI; $terms):
   | (if $docs.plan == [] then [] else [$docs.plan[] | select(lg_terminal_doc(.; $S; $DI; $terms) | not)] end) as $open_plans
   | {path: $r.path,
      archived: ($r.archived == true),
-     key: (($fm | lg_fv($F; "key")) | lg_str),
+     key: $R.key,
      ledger: (($fm | lg_fv($F; "ledger")) | lg_str),
      status: $status,
      class: $class,
      severity: (($fm | lg_fv($F; "severity")) | lg_str),
      date: ($fd // $D[$r.path]),
      summary: (($fm | lg_fv($F; "summary")) | lg_str),
-     changes: (($fm | lg_fv($F; "changes")) | lg_list),
-     consumes: (($fm | lg_fv($F; "consumes")) | lg_list),
-     relates: [($fm | lg_fv($F; "relates")) | lg_list | .[] | split(":") as $p
-               | if ($p | length) < 2 then {kind: null, key: .}
-                 else {kind: $p[0], key: ($p[1:] | join(":") | ltrimstr(" "))} end],
+     changes: $R.changes,
+     consumes: $R.consumes,
+     relates: $R.relates,
      superseded_by: $sup,
      owed: $owed,
-     aliases: (($fm | lg_fv($F; "aliases")) | lg_list),
+     aliases: $R.aliases,
      paths: (($fm | lg_fv($F; "paths")) | lg_list),
      h1: $r.h1,
      first_para: $r.first_para,
@@ -636,21 +760,106 @@ $c[0] as $cfg
 | lg_class_terms($cfg) as $CT
 | (reduce ($CT | reverse)[] as $x ({}; .[$x.t] = $x.c)) as $EX
 | ($di[0].docs // {}) as $DI
-| (reduce $dates[] as $x ({}; .[$x.p] = $x.d)) as $D
-| (reduce ($docs[] | select(has("i"))) as $x ({}; .[$x.i][$x.c] += [$x.d])) as $L
-| (reduce ($docs[] | select(has("s"))) as $x ({}; .[$x.s] = $x.v)) as $S
-| {schema: $schema,
-   built: {head: (if $head == "" then null else $head end),
-           base: (if $base == "" then null else $base end),
-           inputs_hash: $hash,
-           mode: $mode,
-           rev: (if $rev == "" then null else $rev end),
-           registry_findings: $rf},
-   ledgers: $reg[0].ledgers,
-   items: ([$recs[] | lg_item($F; $CT; $EX; $D; $L; $S; $DI; $terms)] | sort_by(.path)),
-   legacy: $lgy[0],
-   finalized: $fin[0]}
+| lg_obj($dates[] | {(.p): .d}) as $D
+| (lg_lists($docs[] | select(has("i")) | {k: .i, v: {c, d}}) | map_values(lg_lists(.[] | {k: .c, v: .d}))) as $L
+| lg_obj($docs[] | select(has("s")) | {(.s): .v}) as $S
+| ([$recs[] | lg_item($F; $CT; $EX; $D; $L; $S; $DI; $terms)] | sort_by(.path)) as $items
+| ($ctr[0] // []) as $CTR
+| ($cre | split("\n") | map(select(. != "") | split("\t") | select(length == 3) | {id: .[0], dir: .[1], re: .[2]})) as $CRE
+# The index, one item per line (index.sh writes the neighbours of each
+# item — _LG_JQ_REL, computed meanwhile — and its re-check markers there):
+# the head through "items":[, the items, the tail from ],"legacy".
+| ({schema: $schema,
+    built: {head: (if $head == "" then null else $head end),
+            base: (if $base == "" then null else $base end),
+            inputs_hash: $hash,
+            mode: $mode,
+            rev: (if $rev == "" then null else $rev end),
+            registry_findings: $rf,
+            contracts_error: (if $cerr == "" then null else $cerr end)},
+    ledgers: $reg[0].ledgers,
+    contracts: $CTR,
+    path_contracts: lg_path_contracts($items; $CRE)} | tojson | .[0:-1] + ",\"items\":["),
+  ($items | length) as $n
+  | ($items | to_entries[] | (.value | tojson) + (if .key < $n - 1 then "," else "" end)),
+    ("]," + ({legacy: $lgy[0], finalized: $fin[0]} | tojson | .[1:]))
 '
+
+# The relations pass (run in the background beside the dates and docs
+# joins): the items' relation fields (lg_item_rel), sorted by path as the
+# index sorts them; lg_relations. Prints the re-check input's line count,
+# its lines (relations.sh _lg_ix_recheck), then each item's neighbours as
+# JSON, one line per item in index order.
+# shellcheck disable=SC2016  # jq source
+_LG_JQ_REL='
+$c[0] as $cfg
+| lg_fields($cfg) as $F
+| lg_class_terms($cfg) as $CT
+| lg_obj(($CT | reverse)[] | {(.t): .c}) as $EX
+| ([$recs[] | lg_item_rel($F; $CT; $EX)] | sort_by(.path)) as $its
+| lg_relations($its; ($ctr[0] // [])) as $REL
+| ($REL.tab | length), $REL.tab[], ($its[] | $REL.nb[.path] | tojson)
+'
+
+# The contracts (design §G): the registry's (ledgers[].contracts[], with
+# their ledger) and the contracts adapter's list, one per id, sorted by id —
+# an id in both is one contract: the registry's ledger, defined_in and
+# title win, the adapter's fill only what the registry leaves empty. A
+# registry contract whose id is not <kind>:<name> is left out (validate
+# --registry reports it). Inputs: $reg (slurped registry), $adc (slurped
+# adapter lines), $re (_LG_CONTRACT_RE).
+# shellcheck disable=SC2016  # jq source
+_LG_JQ_CONTRACTS='
+def lg_ct_str: if type == "string" and . != "" then . else null end;
+def lg_ct_list: if type == "array" then [.[] | strings | select(. != "")] else [] end;
+[ ($reg[0].ledgers // [])[] | objects | (.id | lg_ct_str) as $lid
+  | (.contracts // []) | if type == "array" then .[] else empty end | objects
+  | select(.id | type == "string" and test($re))
+  | {id, ledger: $lid, defined_in: (.defined_in | lg_ct_list), title: (.title | lg_ct_str)} ] as $R
+| [ $adc[] | {id, ledger: (.ledger | lg_ct_str), defined_in: (.defined_in | lg_ct_list), title: (.title | lg_ct_str)} ] as $A
+| (reduce $A[] as $a ({}; if has($a.id) then . else .[$a.id] = $a end)) as $AM
+| (reduce $R[] as $r ({}; if has($r.id) then . else .[$r.id] = $r end)) as $RM
+| [ ($RM[] | . as $r | ($AM[$r.id] // {}) as $a
+     | {id: $r.id, ledger: ($r.ledger // $a.ledger // null),
+        defined_in: (if ($r.defined_in | length) > 0 then $r.defined_in else ($a.defined_in // []) end),
+        title: ($r.title // $a.title // null)}),
+    ($AM[] | select($RM[.id] == null)) ]
+| sort_by(.id)
+'
+
+# _lg_ix_adapter_contracts <out> <err>: the contracts adapter's validated
+# list (adapters.sh) into <out>; when it fails, its message into <err> and
+# <out> empty — fatal (2) when the caller set _LG_IX_NEED_CONTRACTS=1 (a
+# verb that shows relations), else recorded in built.contracts_error.
+_lg_ix_adapter_contracts() {
+  local out="$1" err="$2" rc=0
+  : > "$err"
+  _lg_adapter contracts list > "$out" 2> "$err" || rc=$?
+  case "$rc" in
+    0) : > "$err" ;;
+    2)
+      : > "$out"
+      if [ "${_LG_IX_NEED_CONTRACTS:-}" = 1 ]; then _lg_die "$(head -n 1 "$err")"; fi ;;
+    *) _lg_die "internal: _lg_adapter rc $rc" ;;
+  esac
+}
+
+# _lg_ix_contracts <registry> <adapter-lines> <out.json> <cre>: the merged
+# contract list (_LG_JQ_CONTRACTS) into <out.json>; <cre>: one
+# "<id>\t<dir>\t<ERE>" line per defined_in glob (glob.sh's grammar; a glob
+# it rejects, or one holding a control character, is left out — validate
+# --registry reports it).
+_lg_ix_contracts() {
+  local reg="$1" adc="$2" out="$3" cre="$4"
+  jq -n -c --slurpfile reg "$reg" --slurpfile adc "$adc" --arg re "$_LG_CONTRACT_RE" "$_LG_JQ_CONTRACTS" > "$out" \
+    || _lg_die "jq failed (the contracts)"
+  jq -r '.[] | .id as $i | .defined_in[] | select(test("[[:cntrl:]]") | not) | "\($i)\u0001\(.)"' "$out" > "$cre.in" \
+    || _lg_die "jq failed (the contract globs)"
+  LC_ALL=C awk "$_LG_AWK_GLOB"'
+    { t = index($0, "\001"); id = substr($0, 1, t - 1); g = substr($0, t + 1)
+      re = glob_ere(g); if (re == "") next
+      print id "\t" glob_dir(g) "\t" re }' "$cre.in" > "$cre" || _lg_die "cannot read the contract globs"
+}
 
 # _lg_ix_valid <file>: the file is a whole index of this schema.
 _lg_ix_valid() {
@@ -829,7 +1038,7 @@ _lg_ix_refs() {
 # header). Dies (2) on an unreadable input (doc-index, registry, legacy or
 # finalized map), an unknown revision, or a git failure.
 _lg_index() {
-  local mode=worktree rev="" src commit="" tree="" head base_ref="" base="" s reg di key name tmp rfn f
+  local mode=worktree rev="" src commit="" tree="" head base_ref="" base="" s reg di key name tmp rfn f n relpid
   local legacy_path="" dcommit usemtime ixdir
   case "$#" in
     0) ;;
@@ -866,6 +1075,9 @@ _lg_index() {
     base=$commit
   fi
   di=$(_lg_doc_index "$src")
+  # The contracts adapter's list (or its failure) is an input like a file:
+  # run every time, hashed into the key.
+  _lg_ix_adapter_contracts "$s.adc" "$s.ade"
 
   # The key: never a walk over the items. --rev: the commit's tree holds
   # every input. Otherwise git's listing (blob ids) of the directories the
@@ -877,7 +1089,7 @@ _lg_index() {
   for f in "$_LG_LIB"/*; do
     if [ -f "$f" ]; then printf '%s\0' "$f"; fi
   done > "$s.hashin"
-  printf '%s\0' "$_LG_CFG" >> "$s.hashin"
+  printf '%s\0' "$_LG_CFG" "$s.adc" "$s.ade" >> "$s.hashin"
   : > "$s.dirtyids"
   if [ "$mode" != rev ]; then
     _lg_ix_key_specs "$di" "$legacy_path" "$s.specs"
@@ -901,7 +1113,7 @@ _lg_index() {
     printf 'schema %s\nmode %s\nhead %s\nrev %s\ntree %s\nbase %s\nlegacy %s\n' \
       "$_LG_INDEX_SCHEMA" "$mode" "$head" "$commit" "$tree" "$base" "$legacy_path"
     cat "$s.smalls"
-    printf 'inputs: code (scripts/ledger/*), config[, listing[, the present small files]]\n'
+    printf 'inputs: code (scripts/ledger/*), config, contracts adapter (output, error)[, listing[, the present small files]]\n'
     cat "$s.hashes"
   } > "$s.key" || _lg_die "cannot write the index key"
   _hash_one "$s.key"
@@ -920,9 +1132,18 @@ _lg_index() {
     return 0
   fi
   _lg_ix_trace "index-build index-$key.json"
+  # The history walks (dates; re-check's base) start now, in the
+  # background, and overlap the parse.
+  if [ "$mode" != staged ] || [ -n "$dcommit" ]; then
+    _lg_cfg '[(.items.globs // [])[]?, (.items.archive_globs // [])[]?] | .[] | strings | select(. != "")' > "$s.pfglobs"
+    _lg_glob_dirs "$s.pfglobs" "$s.pfdirs"
+    if [ -n "$dcommit" ]; then _lg_ix_prefetch "$dcommit" "$s.pfdirs"; fi
+    if [ "$mode" != staged ] && [ -n "$base" ] && [ "$base" != "$dcommit" ]; then _lg_ix_prefetch "$base" "$s.pfdirs"; fi
+  fi
 
   # The inputs, read and checked.
   reg=$(_lg_registry "$src")
+  _lg_ix_contracts "$reg" "$s.adc" "$s.contracts" "$s.cre"
   _lg_ix_json_obj "$src" "$legacy_path" "$s.legacy" "legacy map"
   _lg_ix_json_obj "$src" docs/ledger/finalized.json "$s.finalized" "finalized map"
   case "$mode" in
@@ -941,6 +1162,11 @@ _lg_index() {
   else
     _lg_parse_blobs "$commit" "$s.itemz" "$s.recs"
   fi
+  # The relations (needing only the records and the contracts) run in the
+  # background meanwhile.
+  jq -L "$_LG_LIB" -n -r --slurpfile c "$_LG_CFG" --slurpfile recs "$s.recs" --slurpfile ctr "$s.contracts" \
+    "$_LG_JQ_INDEX_DEFS$_LG_JQ_REL" < /dev/null > "$s.rel" 2> "$s.relerr" &
+  relpid=$!
   jq -L "$_LG_LIB" -n -r --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS"'
     lg_fields($c[0]) as $F
     | inputs
@@ -952,16 +1178,60 @@ _lg_index() {
   _lg_registry_findings "$reg" "$s.none" "$s.rf"
   rfn=$(wc -l < "$s.rf" | tr -d ' ')
   tmp=$(mktemp "$ixdir/.index.XXXXXX") || _lg_die "cannot create a temp file in $ixdir"
-  if ! jq -L "$_LG_LIB" -n -c \
+  if ! jq -L "$_LG_LIB" -n -r \
       --slurpfile c "$_LG_CFG" --slurpfile reg "$reg" --slurpfile di "$di" \
       --slurpfile lgy "$s.legacy" --slurpfile fin "$s.finalized" \
       --slurpfile recs "$s.recs" --slurpfile dates "$s.dates" --slurpfile docs "$s.docs" \
+      --slurpfile ctr "$s.contracts" --rawfile cre "$s.cre" --arg cerr "$(head -n 1 "$s.ade")" \
       --arg schema "$_LG_INDEX_SCHEMA" --arg head "$head" --arg base "$base" --arg hash "sha256:$key" \
       --arg mode "$mode" --arg rev "$commit" --argjson rf "$rfn" --argjson terms "$_LG_DOC_TERMINAL" \
-      "$_LG_JQ_INDEX_DEFS$_LG_JQ_INDEX" > "$tmp"; then
-    rm -f "$tmp"
+      "$_LG_JQ_INDEX_DEFS$_LG_JQ_INDEX" > "$tmp.join"; then
+    rm -f "$tmp" "$tmp.join"
     _lg_die "jq failed (the index join)"
   fi
+  # The relations pass: the re-check input (its count, its lines), then
+  # each item's neighbours. The re-check markers (relations.sh; not for
+  # --staged, which only validate reads) and the neighbours go into the
+  # items' lines.
+  wait "$relpid" || { rm -f "$tmp" "$tmp.join"; _lg_die "jq failed (the relations): $(head -n 3 "$s.relerr" 2>/dev/null)"; }
+  n=""
+  IFS= read -r n < "$s.rel" || true
+  case "$n" in ''|*[!0123456789]*) rm -f "$tmp" "$tmp.join"; _lg_die "internal: the relations pass's first line is '$n'" ;; esac
+  if ! sed -n "2,$((n + 1))p" "$s.rel" > "$s.rctab" || ! tail -n +"$((n + 2))" "$s.rel" > "$s.nb"; then
+    rm -f "$tmp" "$tmp.join"
+    _lg_die "cannot split the relations"
+  fi
+  : > "$s.rcmap"
+  case "$mode" in
+    worktree) _lg_ix_recheck "$base" "$s.rctab" "$s.eff" "$s.rcmap" ;;
+    rev) _lg_ix_recheck "$base" "$s.rctab" "" "$s.rcmap" ;;
+  esac
+  # Item n is line n + 2 (after the head line); "neighbours":null and
+  # "recheck_after":[] are in it once each (in a string value every quote
+  # is escaped).
+  if ! LC_ALL=C awk -v nb="$s.nb" -v map="$s.rcmap" '
+      BEGIN {
+        while ((getline l < map) > 0) { t = index(l, "\t"); M[substr(l, 1, t - 1) + 2] = substr(l, t + 1) }
+        while ((getline l < nb) > 0) NB[++n + 1] = l
+      }
+      (NR in NB) {
+        j = index($0, "\"neighbours\":null")
+        if (!j) exit 3
+        line = substr($0, 1, j + 12) NB[NR] substr($0, j + 17)
+        if (NR in M) {
+          j = index(line, "\"recheck_after\":[]")
+          if (!j) exit 3
+          line = substr(line, 1, j + 15) M[NR] substr(line, j + 18)
+        }
+        print line
+        next
+      }
+      { print }
+      END { if (NR - 2 != n && n > 0) exit 4 }' "$tmp.join" > "$tmp"; then
+    rm -f "$tmp" "$tmp.join"
+    _lg_die "cannot write the neighbours and re-check markers into the index"
+  fi
+  rm -f "$tmp.join"
   _lg_ix_refs "$s.recs" "${tmp}.refs" || { rm -f "$tmp" "${tmp}.refs"; _lg_die "cannot list the parse references"; }
   if ! mv -f "${tmp}.refs" "$ixdir/index-$key.refs" || ! mv -f "$tmp" "$name"; then
     rm -f "$tmp" "${tmp}.refs"

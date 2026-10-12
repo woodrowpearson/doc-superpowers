@@ -11,6 +11,8 @@
 _LG_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _LG_CFG=""           # the merged config (a file in $_SCRATCH): _lg_init
 _LG_ROOT=""          # the work tree's top level
+_LG_IX_NEED_CONTRACTS=""  # 1: the verb shows relations — a failing contracts
+                          # adapter is fatal (index.sh _lg_ix_adapter_contracts)
 _LG_CACHE=""         # $(git rev-parse --git-common-dir)/doc-superpowers/ledger
                      # (absolute; created by whoever first writes to it:
                      # mkdir -p — the parse cache, parse.sh, is the first)
@@ -30,6 +32,10 @@ _LG_CACHE=""         # $(git rev-parse --git-common-dir)/doc-superpowers/ledger
 . "$_LG_LIB/query.sh"
 # shellcheck source=scripts/ledger/views.sh
 . "$_LG_LIB/views.sh"
+# shellcheck source=scripts/ledger/adapters.sh
+. "$_LG_LIB/adapters.sh"
+# shellcheck source=scripts/ledger/relations.sh
+. "$_LG_LIB/relations.sh"
 
 # _lg_die <message>: the run could not run — exit 2, with the verdict object
 # in --format json (exactly once, inside $(…) too: the marker file tells the
@@ -225,13 +231,9 @@ _lg_stub() {
   _lg_init "$_LG_VERB"
   _lg_die "not implemented"
 }
-# show, ls, find: query.sh. new, assign, finalize: keys.sh. view, publish:
-# views.sh.
-cmd_ledger_related() { _lg_stub "$@"; }
-cmd_ledger_sweep() { _lg_stub "$@"; }
-cmd_ledger_recheck() { _lg_stub "$@"; }
+# show, ls, find, link: query.sh. new, assign, finalize: keys.sh. view,
+# publish: views.sh. related, sweep, recheck: relations.sh.
 cmd_ledger_inflight() { _lg_stub "$@"; }
 cmd_ledger_notices() { _lg_stub "$@"; }
-cmd_ledger_link() { _lg_stub "$@"; }
 cmd_ledger_note() { _lg_stub "$@"; }
 cmd_ledger_init() { _lg_stub "$@"; }
