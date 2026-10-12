@@ -4909,6 +4909,268 @@ test_mutate_exactly_once_bytes_kept() {
   teardown
 }
 
+# --- The verdict store round trip, its sharing, claims promote --reverify ------
+#
+# promoted_fixture: promote_fixture with the TTL claim promoted by
+# `claims promote` (mutant proof) and its writes committed, so the tree is
+# clean for a --reverify.
+
+promoted_fixture() {
+  promote_fixture
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "promoted_fixture: promote exits 0"
+  git add "$SIDECAR" "$DOC" && git commit -qm "promote $TTL_ID"
+}
+
+# The last `cl`'s results, compact JSON.
+cl_results() {
+  jq -c '.results' <<<"$CL_OUT" 2>/dev/null || echo invalid
+}
+
+# The verdict files in the fixture repo's store, one name per line, sorted.
+store_files() {
+  local d
+  d=$(claims_store)
+  if [ -d "$d" ]; then (cd "$d" && find . -type f -name '*.json' | sed 's|^\./||' | sort); fi
+}
+
+# assert_reverified <what>: the last `cl` stored the fixture claim's fresh
+# verdict — the verdict_bytes of the claim as it stands at HEAD (head HEAD,
+# status_to its status) — in the store, named by its digest.
+assert_reverified() {
+  local exp digest
+  exp=$(harness_mktemp reverify-exp)
+  verdict_bytes "$exp"
+  digest=$(hash_file "$exp")
+  assert_file_exists "$(claims_store)/$digest.json" "$1: the fresh verdict is in the store, named by its digest"
+  assert_true "$1: …its bytes the verdict of the claim at HEAD (verdict_bytes)" \
+    cmp -s "$exp" "$(claims_store)/$digest.json"
+  rm -f "$exp"
+}
+
+test_verdict_round_trip_v6_accepts() {
+  echo "test: verdict store — promote's verdict round-trips: V6 accepts it; a states edit mismatches it"
+  promoted_fixture
+  cl validate --all
+  assert_v6_ok "after the promote, validate --all"
+  assert_eq "" "$(v6_codes)" "…no V6 advisory: the stored verdict found and matching"
+  jset "$SIDECAR" ".claims[0].states = \"$NEW_STATES\""
+  cl validate --all
+  assert_v6 "states changed since the merge-base without a new ruling" "states edited, no ruling"
+  assert_contains "$(v6_messages)" "promotion verdict does not match the claim" "…and the verdict check reports mismatch"
+  assert_eq "2" "$(v6_count)" "…two V6 findings"
+  assert_not_contains "$(v6_codes)" "re-promote owed" "…not the advisory a DOC-STALE ruling earns"
+  git add "$SIDECAR"
+  cl validate --staged
+  assert_v6 "states changed since the merge-base without a new ruling" "--staged: the same edit"
+  assert_contains "$(v6_messages)" "promotion verdict does not match the claim" "--staged: …and mismatch"
+  teardown
+}
+
+test_verdict_store_shared_across_worktrees() {
+  echo "test: verdict store — one store for every worktree of the repo (the git common dir)"
+  promoted_fixture
+  local away store before
+  store=$(claims_store)
+  away=$(harness_mktemp_d linked)
+  git worktree add -q --detach "$away/linked" HEAD
+  cd "$away/linked"
+  assert_eq "$store" "$(claims_store)" "a linked worktree resolves the main checkout's store"
+  cl validate --all
+  assert_v6_ok "validate --all in the linked worktree"
+  assert_not_contains "$(v6_codes)" "unverifiable-here" "…no unverifiable-here: the main checkout's verdict is found"
+  before=$(store_files | wc -l | tr -d ' ')
+  cl promote --reverify --all
+  assert_eq "0" "$CL_RC" "promote --reverify --all in the linked worktree exits 0"
+  assert_eq "$((before + 1))" "$(store_files | wc -l | tr -d ' ')" "…its fresh verdict lands in the shared store"
+  assert_reverified "in the linked worktree"
+  cd "$TEST_DIR"
+  git worktree remove --force "$away/linked"
+  teardown
+}
+
+test_verdict_store_fresh_clone_unverifiable() {
+  echo "test: verdict store — a fresh clone holds none: unverifiable-here, an advisory, rc 0"
+  promoted_fixture
+  local c digest
+  digest=$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")
+  c="$(harness_mktemp_d clone)/c"
+  git clone -q -b feature "$TEST_DIR" "$c"
+  git -C "$c" branch -q main origin/main
+  cd "$c"
+  assert_true "the clone's store does not hold the verdict" test ! -e "$(claims_store)/$digest.json"
+  cl validate --all
+  assert_eq "0" "$CL_RC" "validate --all in the clone exits 0"
+  assert_contains "$(v6_codes)" "unverifiable-here" "…an unverifiable-here advisory"
+  assert_eq "0" "$(v6_count)" "…no V6 finding"
+  # The scheduled run re-verifies it there: --reverify needs no stored verdict.
+  cl promote --reverify --all
+  assert_eq "0" "$CL_RC" "promote --reverify --all in the clone exits 0"
+  assert_eq "[{\"claim\":\"$TTL_ID\",\"verdict\":\"ok\"}]" "$(cl_results)" "…the claim re-verified"
+  assert_eq "1" "$(store_files | wc -l | tr -d ' ')" "…one fresh verdict in the clone's own store"
+  assert_reverified "in the clone"
+  cd "$TEST_DIR"
+  teardown
+}
+
+test_promote_reverify_all_no_sidecar_write() {
+  echo "test: promote --reverify --all — re-proves each promotion, stores a fresh verdict, writes no sidecar"
+  promoted_fixture
+  local sc doc old n
+  sc=$(hash_file "$SIDECAR")
+  doc=$(hash_file "$DOC")
+  old=$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")
+  : > "$STUB_LOG"
+  cl promote --reverify --all
+  assert_eq "0" "$CL_RC" "--reverify --all exits 0"
+  assert_eq "1" "$(json_count "$CL_OUT")" "…one verdict object"
+  assert_eq "[{\"claim\":\"$TTL_ID\",\"verdict\":\"ok\"}]" "$(cl_results)" "…one result row {claim, verdict}"
+  assert_eq "$sc" "$(hash_file "$SIDECAR")" "…the sidecar's hash unchanged"
+  assert_eq "$doc" "$(hash_file "$DOC")" "…the doc's hash unchanged"
+  assert_eq "" "$(git status --porcelain --untracked-files=no)" "…the tree still clean"
+  assert_reverified "--reverify --all"
+  assert_eq "2" "$(store_files | wc -l | tr -d ' ')" "…a fresh verdict beside the promote's (head moved: its own digest)"
+  assert_file_exists "$(claims_store)/$old.json" "…the promote's verdict kept"
+  assert_eq "3" "$(stub_run_count)" "…promote's three run calls: work tree, clean checkout, mutant"
+  assert_eq "$(git rev-parse --show-toplevel)" "$(stub_roots | sed -n 1p)" "…the green run under the work tree"
+  assert_eq "$(stub_roots | sed -n 2p)" "$(stub_roots | sed -n 3p)" "…the clean and mutant runs under one worktree"
+  assert_eq "1" "$(wt_count)" "…no worktree left"
+  set_ttl 1800
+  git commit -qam "the TTL source changed to 1800"
+  n=$(store_files | wc -l | tr -d ' ')
+  cl promote --reverify --all
+  assert_promote_finding "not green" "after a committed change of the source to 1800"
+  assert_json_field "$CL_OUT" '.findings[0].claim' "$TTL_ID" "…the finding names the claim"
+  assert_eq "[{\"claim\":\"$TTL_ID\",\"verdict\":\"finding\"}]" "$(cl_results)" "…its result row: finding"
+  assert_eq "$sc" "$(hash_file "$SIDECAR")" "…the sidecar's hash still unchanged"
+  assert_eq "$n" "$(store_files | wc -l | tr -d ' ')" "…no verdict stored for a failed proof"
+  teardown
+}
+
+test_promote_reverify_selection() {
+  echo "test: promote --reverify — --all takes the promoted claims; a named claim that is not one is a finding"
+  promoted_fixture
+  promote_second_claim
+  local before
+  : > "$STUB_LOG"
+  cl promote --reverify --all
+  assert_eq "0" "$CL_RC" "--all, one claim built and one unbuilt: exits 0"
+  assert_eq "[{\"claim\":\"$TTL_ID\",\"verdict\":\"ok\"}]" "$(cl_results)" "…only the promoted claim is selected"
+  assert_eq "3" "$(stub_run_count)" "…its three run calls only"
+  : > "$STUB_LOG"
+  cl promote --reverify "$REFRESH_ID"
+  assert_promote_finding "not promoted" "the unbuilt claim named"
+  assert_json_field "$CL_OUT" '.findings[0].claim' "$REFRESH_ID" "…the finding names the claim"
+  assert_eq "[{\"claim\":\"$REFRESH_ID\",\"verdict\":\"finding\"}]" "$(cl_results)" "…its result row: finding"
+  assert_eq "0" "$(stub_run_count)" "…nothing run"
+  cl promote --reverify "$TTL_ID" "$REFRESH_ID"
+  assert_eq "1" "$CL_RC" "both named: exits 1"
+  assert_eq "[{\"claim\":\"$TTL_ID\",\"verdict\":\"ok\"},{\"claim\":\"$REFRESH_ID\",\"verdict\":\"finding\"}]" \
+    "$(cl_results)" "…one row per named claim, in order"
+  : > "$STUB_LOG"
+  before=$(store_files)
+  cl promote --reverify "$TTL_ID" nope
+  assert_eq "3" "$CL_RC" "an unknown id among the named: a usage error"
+  assert_eq "0" "$(stub_run_count)" "…found before anything runs"
+  assert_eq "$before" "$(store_files)" "…no verdict stored"
+  # A dirty tree is refused (an untracked file does not count).
+  printf 'TTL_SECONDS = 901\n' > src/auth/token.py
+  printf 'x\n' > untracked.txt
+  cl promote --reverify --all
+  assert_promote_dirty "--reverify, the subject edited"
+  assert_eq "0" "$(stub_run_count)" "…nothing run"
+  git checkout -q -- src/auth/token.py
+  rm -f untracked.txt
+  # A gated claim with a promotion: its fresh verdict's status_to is gated.
+  jset "$SIDECAR" '.claims[0].status = "gated"'
+  git commit -qam "the TTL claim gated"
+  cl promote --reverify --all
+  assert_eq "0" "$CL_RC" "--all, the claim gated: exits 0"
+  assert_eq "[{\"claim\":\"$TTL_ID\",\"verdict\":\"ok\"}]" "$(cl_results)" "…the gated claim selected"
+  assert_reverified "gated"
+  # A frozen claim is never run: --all reports it skipped; named, it is a finding.
+  jset "$SIDECAR" ".claims[0].frozen_at = \"$(git rev-parse HEAD)\""
+  git commit -qam "the TTL claim frozen"
+  : > "$STUB_LOG"
+  cl promote --reverify --all
+  assert_eq "0" "$CL_RC" "--all, the claim frozen: exits 0"
+  assert_eq "[{\"claim\":\"$TTL_ID\",\"verdict\":\"skipped\"}]" "$(cl_results)" "…reported skipped"
+  cl promote --reverify "$TTL_ID"
+  assert_promote_finding "frozen" "the frozen claim named"
+  assert_eq "0" "$(stub_run_count)" "…nothing run"
+  teardown
+}
+
+test_promote_reverify_same_proof_path() {
+  echo "test: promote --reverify — promote's proof path: clean-checkout green, each proof, every guard"
+  observed_red_fixture 1800
+  local top exp sc
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "precondition: the observed_red promote exits 0"
+  git add "$SIDECAR" "$DOC" && git commit -qm "promote $TTL_ID"
+  top=$(git rev-parse --show-toplevel)
+  : > "$STUB_LOG"
+  rm -f "$STUB_LOG.cat"
+  export STUB_CAT=src/auth/token.py
+  cl promote --reverify "$TTL_ID"
+  unset STUB_CAT
+  assert_eq "0" "$CL_RC" "observed_red re-verified: exits 0"
+  assert_eq "3" "$(stub_run_count)" "…three run calls"
+  assert_eq "$top" "$(stub_roots | sed -n 1p)" "…the green run under the work tree"
+  assert_true "…the clean-checkout run under another root" test "$(stub_roots | sed -n 2p)" != "$top"
+  assert_eq "$(stub_roots | sed -n 2p)" "$(stub_roots | sed -n 3p)" "…the red run under that same worktree"
+  exp=$(harness_mktemp exp-cat)
+  printf 'TTL_SECONDS = 900\nTTL_SECONDS = 900\nTTL_SECONDS = 1800\n' > "$exp"
+  assert_true "…the adapter saw the subject at HEAD twice, then as at observed_red" cmp -s "$exp" "$STUB_LOG.cat"
+  assert_reverified "observed_red"
+  assert_eq "1" "$(wt_count)" "…no worktree left"
+  assert_eq "" "$(ls -A .git/worktrees 2>/dev/null)" "…and no worktree metadata"
+  # The observed_red must stay a full commit id.
+  jset "$SIDECAR" ".claims[0].nonvacuity.observed_red = \"${RED_SHA:0:12}\""
+  git commit -qam "observed_red abbreviated"
+  : > "$STUB_LOG"
+  cl promote --reverify --all
+  assert_promote_finding "observed_red is not a full commit id" "an abbreviated observed_red"
+  assert_eq "0" "$(stub_run_count)" "…nothing run"
+  teardown
+  # The mutant file must still be UTF-8 text.
+  promoted_fixture
+  printf 'TTL_SECONDS = 900\n# caf\351\n' > src/auth/token.py
+  git commit -qam "a Latin-1 byte in the subject"
+  sc=$(hash_file "$SIDECAR")
+  cl promote --reverify --all
+  assert_promote_finding "mutant file is not UTF-8 text" "a \\xe9 byte in the mutant file"
+  assert_eq "[{\"claim\":\"$TTL_ID\",\"verdict\":\"finding\"}]" "$(cl_results)" "…its result row: finding"
+  assert_eq "$sc" "$(hash_file "$SIDECAR")" "…the sidecar unchanged"
+  assert_eq "1" "$(wt_count)" "…no worktree left"
+  teardown
+  # Green in the work tree only (the check reads an untracked file).
+  promoted_fixture
+  printf '%s\t%s\t%s\n' "$STUB_NODE" build/out.txt "TTL_SECONDS = 900" > tools/claims/checks
+  git commit -qam "the check reads build output"
+  mkdir -p build
+  printf 'TTL_SECONDS = 900\n' > build/out.txt
+  cl promote --reverify --all
+  assert_promote_finding "not green in a clean checkout" "the needle only in an untracked file"
+  teardown
+  # A mutant that no longer fails the test.
+  promoted_fixture
+  jset "$SIDECAR" '.claims[0].nonvacuity.mutant.replace = "TTL_SECONDS = 900 "'
+  git commit -qam "a mutant that keeps the needle"
+  cl promote --reverify --all
+  assert_promote_finding "mutant stays green" "a mutant under which the test passes"
+  teardown
+  # An indeterminate run exits 2.
+  promoted_fixture
+  force "$STUB_NODE" indeterminate stub-offline
+  git commit -qam "the runner offline"
+  cl promote --reverify --all
+  assert_eq "2" "$CL_RC" "an indeterminate green run: exits 2"
+  assert_eq "stub-offline" "$(promote_reasons)" "…its reason reported"
+  assert_eq "[{\"claim\":\"$TTL_ID\",\"verdict\":\"indeterminate\"}]" "$(cl_results)" "…its result row: indeterminate"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -5128,6 +5390,14 @@ run_tests() {
   test_promote_observed_red_subject_is_test_file
   test_promote_observed_red_and_mutant_both_verified
   test_v3_observed_red_subject_is_test_file
+
+  # --- Task 13: the verdict store round trip, its sharing, --reverify ---
+  test_verdict_round_trip_v6_accepts
+  test_verdict_store_shared_across_worktrees
+  test_verdict_store_fresh_clone_unverifiable
+  test_promote_reverify_all_no_sidecar_write
+  test_promote_reverify_selection
+  test_promote_reverify_same_proof_path
 
   print_summary
 }
