@@ -548,6 +548,9 @@ assert_no_v1() {
 
 # A RETIRE ruling recorded in the fixture's issue doc.
 _CL_RETIRE='{"date":"2026-10-11","direction":"RETIRE","by":"doc-owner","record":"docs/issues/token-ttl.md","reason":"The spec was archived."}'
+# A DOC-STALE ruling recorded in the fixture's issue doc: what a re-anchor
+# that changes a token, or another ratcheted edit, carries (V6).
+_CL_DOC_STALE='{"date":"2026-10-11","direction":"DOC-STALE","by":"doc-owner","record":"docs/issues/token-ttl.md","reason":"The TTL was renegotiated."}'
 
 test_v1_valid_fixture_passes() {
   echo "test: V1 — the fixture sidecar is valid"
@@ -1176,8 +1179,9 @@ test_v2_fenced_tilde_restored() {
   doc_edit "$DOC" "- Refresh tokens are single-use." $'~~Refresh tokens are reusable.~~' after
   cl validate --all
   assert_v2_ok "a fenced 'a ~~ b' before the claimed prose line"
-  # The fenced text keeps its tildes: a claim may quote it.
-  jset "$SIDECAR" '.claims[0].quote = "a ~~ b"'
+  # The fenced text keeps its tildes: a claim may quote it (a re-anchor to
+  # other tokens, so with a ruling: V6).
+  jset "$SIDECAR" ".claims[0].quote = \"a ~~ b\" | .claims[0].rulings = [$_CL_DOC_STALE]"
   cl validate --all
   assert_v2_ok "a claim quoting the fenced 'a ~~ b'"
   teardown
@@ -1223,7 +1227,8 @@ test_v2_unicode_quote() {
   claims_fixture
   doc_edit "$DOC" "How long issued tokens stay valid." "How long issued tokens stay valid — durée de vie, § café."
   doc_edit "$DOC" "- Refresh tokens are single-use." "- Tokens — même après 15 minutes."
-  jset "$SIDECAR" '.claims[0].quote = "Tokens — même après 15 minutes"'
+  # A re-anchor to other tokens, so with a ruling (V6).
+  jset "$SIDECAR" ".claims[0].quote = \"Tokens — même après 15 minutes\" | .claims[0].rulings = [$_CL_DOC_STALE]"
   cl validate --all
   assert_v2_ok "a quote with é and — after lines holding them"
   # claims_occ's offset against an independent codepoint search of the same
@@ -1559,7 +1564,9 @@ test_v5_judge_without_why() {
   jset "$SIDECAR" '.claims[0].enforced_by = "judge"'
   cl validate --all
   assert_v5 "why_not_mechanical" "enforced_by judge, no why_not_mechanical"
-  jset "$SIDECAR" '.claims[0].why_not_mechanical = "Token expiry depends on the identity provider clock."'
+  # test → judge lowers enforced_by, so with a ruling (V6).
+  jset "$SIDECAR" ".claims[0].why_not_mechanical = \"Token expiry depends on the identity provider clock.\"
+    | .claims[0].rulings = [$_CL_DOC_STALE]"
   cl validate --all
   assert_v5_ok "enforced_by judge with why_not_mechanical"
   teardown
@@ -1584,6 +1591,411 @@ test_v5_scope() {
   cl validate --all
   assert_eq "1" "$(v1_count)" "doc deleted: one V1 finding"
   assert_eq "0" "$(v5_count)" "…and no V5 finding"
+  teardown
+}
+
+# --- V6 merge-base ratchet -----------------------------------------------------
+
+# The last `cl`'s V6 finding messages, one per line, and their count; its V6
+# advisory codes and messages, one per line.
+v6_messages() {
+  jq -r '.findings[]? | select(.check == "V6") | .message' <<<"$CL_OUT" 2>/dev/null || true
+}
+v6_count() {
+  jq '[.findings[]? | select(.check == "V6")] | length' <<<"$CL_OUT" 2>/dev/null || echo invalid
+}
+v6_codes() {
+  jq -r '.advisories[]? | select(.check == "V6") | .code' <<<"$CL_OUT" 2>/dev/null || true
+}
+v6_advice() {
+  jq -r '.advisories[]? | select(.check == "V6") | .message' <<<"$CL_OUT" 2>/dev/null || true
+}
+
+# assert_v6 <substring> <what>: the last `cl` exited 1 with a V6 finding whose
+# message contains <substring>.
+assert_v6() {
+  assert_eq "1" "$CL_RC" "$2: exits 1"
+  assert_contains "$(v6_messages)" "$1" "$2: a V6 finding names '$1'"
+}
+
+# assert_v6_ok <what>: the last `cl` exited 0 with no V6 finding.
+assert_v6_ok() {
+  assert_eq "0" "$CL_RC" "$1: exits 0"
+  assert_eq "0" "$(v6_count)" "$1: no V6 finding"
+}
+
+# base_here <message>: commit everything on feature and move main to it, so
+# this commit is the branch point — the merge-base V6 compares against.
+base_here() {
+  git add -A && git commit -qm "$1" && git branch -f main HEAD
+}
+
+# What a built test claim carries besides its promotion.
+_CL_TEST='{"runner":"pytest","node":"tests/unit/test_token.py::test_ttl_is_15_minutes"}'
+_CL_MUTANT='{"mutant":{"file":"src/auth/token.py","find":"TTL_SECONDS = 900","replace":"TTL_SECONDS = 1800"}}'
+# The amended states of a DOC-STALE amendment.
+NEW_STATES="An issued access token is rejected 15 minutes after issue, refresh included."
+
+# The fixture repo's verdict store, resolved as _claims_store_dir does.
+claims_store() {
+  printf '%s/spec-claims/promotions\n' "$(cd "$(git rev-parse --git-common-dir)" && pwd -P)"
+}
+
+# write_verdict [states]: write the fixture claim's verdict into the store as
+# promote will (Task 11): the jq -cS bytes of {claim, states_sha256, test,
+# nonvacuity, head, subject_oids, green, red, status_to}, in a file named by
+# their sha256. states_sha256 is the sha256 of [states] (default: the claim's
+# own), with no trailing newline. Prints the digest.
+write_verdict() {
+  local store tmp st ss digest
+  store=$(claims_store)
+  mkdir -p "$store"
+  st=$(harness_mktemp states)
+  if [ $# -gt 0 ]; then printf '%s' "$1" > "$st"; else jq -j '.claims[0].states' "$SIDECAR" > "$st"; fi
+  ss=$(hash_file "$st")
+  rm -f "$st"
+  tmp=$(harness_mktemp verdict)
+  jq -cS --arg ss "$ss" --arg head "$(git rev-parse HEAD)" --arg oid "$(git rev-parse HEAD:src/auth/token.py)" \
+    '.claims[0] | {claim: .id, states_sha256: $ss, test, nonvacuity, head: $head,
+      subject_oids: {"src/auth/token.py": $oid}, green: "pass", red: "assert-fail", status_to: .status}' \
+    "$SIDECAR" > "$tmp"
+  digest=$(hash_file "$tmp")
+  mv "$tmp" "$store/$digest.json"
+  printf '%s\n' "$digest"
+}
+
+# hand_promote: the fixture claim made built as promote makes it — a bound
+# test, a mutant, its verdict in the store and promotion {at: HEAD,
+# verdict_sha256}. Sets CL_DIGEST.
+hand_promote() {
+  jset "$SIDECAR" ".claims[0].status = \"built\" | .claims[0].test = $_CL_TEST | .claims[0].nonvacuity = $_CL_MUTANT"
+  CL_DIGEST=$(write_verdict)
+  jset "$SIDECAR" ".claims[0].promotion = {\"at\": \"$(git rev-parse HEAD)\", \"verdict_sha256\": \"$CL_DIGEST\"}"
+}
+
+# The fixture claim's DOC-STALE amendment: an AMENDED block re-quoting the
+# sentence (quote_occurrence 2), new states, and the ruling.
+doc_stale_amend() {
+  add_amended_requote
+  jset "$SIDECAR" ".claims[0].quote_occurrence = 2 | .claims[0].states = \"$NEW_STATES\"
+    | .claims[0].rulings += [${1:-$_CL_DOC_STALE}]"
+}
+
+test_v6_states_changed_without_ruling() {
+  echo "test: V6 — states changed without a ruling"
+  claims_fixture
+  jset "$SIDECAR" ".claims[0].states = \"$NEW_STATES\""
+  git add "$SIDECAR"
+  cl validate --staged
+  assert_v6 "states" "--staged: states edited, no ruling"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V6")][0].claim' "SPEC-AUTH-001#token-ttl" "…the finding names the claim"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V6")][0].doc' "$DOC" "…and its doc"
+  cl validate --all
+  assert_v6 "states" "--all: states edited, no ruling"
+  teardown
+}
+
+test_v6_states_changed_with_doc_stale_ruling_ok() {
+  echo "test: V6 — states changed under a new DOC-STALE ruling"
+  claims_fixture
+  jset "$SIDECAR" ".claims[0].states = \"$NEW_STATES\" | .claims[0].rulings = [$_CL_DOC_STALE]"
+  git add "$SIDECAR"
+  cl validate --staged
+  assert_v6_ok "--staged: states edited with a DOC-STALE ruling"
+  cl validate --all
+  assert_v6_ok "--all: states edited with a DOC-STALE ruling"
+  teardown
+}
+
+test_v6_status_off_built_without_ruling() {
+  echo "test: V6 — status moved off built without a ruling"
+  claims_fixture
+  hand_promote
+  base_here "built"
+  cl validate --all
+  assert_v6_ok "precondition: the base's built claim, its verdict matching"
+  assert_eq "" "$(v6_codes)" "…with no V6 advisory"
+  jset "$SIDECAR" '.claims[0].status = "unbuilt"'
+  cl validate --all
+  assert_v6 "off built" "built → unbuilt, no ruling"
+  jset "$SIDECAR" ".claims[0].rulings += [$_CL_DOC_STALE]"
+  cl validate --all
+  assert_v6_ok "built → unbuilt with a new ruling"
+  teardown
+}
+
+test_v6_enforced_by_lowered() {
+  echo "test: V6 — enforced_by lowered without a ruling"
+  claims_fixture
+  jset "$SIDECAR" '.claims[0].enforced_by = "judge" | .claims[0].why_not_mechanical = "The clock is the identity provider'"'"'s."'
+  cl validate --all
+  assert_v6 "enforced_by" "test → judge, no ruling"
+  jset "$SIDECAR" '.claims[0].enforced_by = "lint" | del(.claims[0].why_not_mechanical)'
+  cl validate --all
+  assert_v6 "enforced_by" "test → lint, no ruling"
+  jset "$SIDECAR" ".claims[0].enforced_by = \"judge\" | .claims[0].why_not_mechanical = \"Clock skew.\" | .claims[0].rulings = [$_CL_DOC_STALE]"
+  cl validate --all
+  assert_v6_ok "test → judge with a new ruling"
+  teardown
+}
+
+test_v6_claim_deleted() {
+  echo "test: V6 — a claim deleted"
+  claims_fixture
+  jset "$SIDECAR" '.claims = []'
+  cl validate --all
+  assert_v6 "retire it instead" "--all: the claim removed from its sidecar"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V6")][0].claim' "SPEC-AUTH-001#token-ttl" "…the finding names the deleted claim"
+  git add "$SIDECAR"
+  cl validate --staged
+  assert_v6 "retire it instead" "--staged: the claim removed from its sidecar"
+  teardown
+}
+
+test_v6_sidecar_deleted_after_all_retired_ok() {
+  echo "test: V6 — a sidecar whose claims were all retired at the merge-base may go"
+  claims_fixture
+  doc_edit "$DOC" "$TTL_LINE" "- ~~Access tokens expire after 15 minutes.~~"
+  jset "$SIDECAR" ".claims[0].status = \"retired\" | .claims[0].rulings = [$_CL_RETIRE]"
+  base_here "retire the TTL claim"
+  git rm -q "$SIDECAR"
+  cl validate --staged
+  assert_v6_ok "--staged: the fully retired sidecar deleted"
+  cl validate --all
+  assert_v6_ok "--all: the fully retired sidecar deleted"
+  teardown
+}
+
+test_v6_sidecar_deleted_with_live_claims_finding() {
+  echo "test: V6 — a sidecar with live claims deleted"
+  claims_fixture
+  git rm -q "$SIDECAR"
+  cl validate --staged
+  assert_v6 "retire it instead" "--staged: the sidecar (claim unbuilt at base) deleted"
+  cl validate --all
+  assert_v6 "retire it instead" "--all: the sidecar deleted"
+  teardown
+}
+
+test_v6_built_record_edit_rechecks_verdict() {
+  echo "test: V6 — a built claim's edited record re-checks its verdict"
+  claims_fixture
+  hand_promote
+  base_here "built"
+  printf 'LEEWAY = 0\n' > src/auth/ttl.py
+  jset "$SIDECAR" '.claims[0].subject += ["src/auth/ttl.py"]'
+  cl validate --all
+  assert_v6_ok "subject edited, the verdict still matching"
+  assert_eq "" "$(v6_codes)" "…with no V6 advisory"
+  rm -f "$(claims_store)/$CL_DIGEST.json"
+  cl validate --all
+  assert_v6_ok "subject edited, the verdict missing"
+  assert_contains "$(v6_codes)" "unverifiable-here" "…re-checked though the status did not move: unverifiable-here"
+  teardown
+}
+
+test_v6_reanchor_reflow_needs_no_ruling() {
+  echo "test: V6 — a re-anchor equal after normalisation needs no ruling"
+  claims_fixture
+  doc_edit "$DOC" "$TTL_LINE" $'- Access tokens expire\n  after 15 minutes.'
+  jset "$SIDECAR" '.claims[0].quote = "Access  tokens expire\nafter 15 minutes"'
+  cl validate --all
+  assert_v6_ok "the quote and the doc reflowed"
+  assert_eq "0" "$(v2_count)" "…and still anchored"
+  teardown
+}
+
+test_v6_reanchor_token_change_needs_ruling() {
+  echo "test: V6 — a re-anchor that changes a token needs a ruling"
+  claims_fixture
+  doc_edit "$DOC" "$TTL_LINE" "- Access tokens expire after 20 minutes."
+  jset "$SIDECAR" '.claims[0].quote = "Access tokens expire after 20 minutes"'
+  cl validate --all
+  assert_v6 "re-anchor" "the doc and the quote both 15 → 20, no ruling"
+  assert_eq "0" "$(v2_count)" "…the new quote anchored (V2 is silent)"
+  jset "$SIDECAR" ".claims[0].rulings = [$_CL_DOC_STALE]"
+  cl validate --all
+  assert_v6_ok "15 → 20 with a new DOC-STALE ruling"
+  teardown
+}
+
+test_v6_self_referential_record_refused() {
+  echo "test: V6 — a ruling whose record is the doc or the sidecar"
+  claims_fixture
+  jset "$SIDECAR" ".claims[0].rulings = [$_CL_DOC_STALE] | .claims[0].rulings[0].record = \"$DOC\""
+  cl validate --all
+  assert_v6 "self-referential" "record = the doc"
+  jset "$SIDECAR" ".claims[0].rulings[0].record = \"$SIDECAR\""
+  cl validate --all
+  assert_v6 "self-referential" "record = the sidecar"
+  teardown
+}
+
+test_v6_record_missing_refused() {
+  echo "test: V6 — a ruling whose record does not exist"
+  claims_fixture
+  jset "$SIDECAR" ".claims[0].rulings = [$_CL_DOC_STALE] | .claims[0].rulings[0].record = \"docs/issues/absent.md\""
+  cl validate --all
+  assert_v6 "record" "record docs/issues/absent.md"
+  assert_contains "$(v6_messages)" "docs/issues/absent.md" "…naming the record"
+  # --staged reads the index: a record in the work tree alone does not count.
+  printf '# Absent\n' > docs/issues/absent.md
+  cl validate --all
+  assert_v6_ok "--all, the record in the work tree"
+  git add "$SIDECAR"
+  cl validate --staged
+  assert_v6 "docs/issues/absent.md" "--staged, the record untracked"
+  git add docs/issues/absent.md
+  cl validate --staged
+  assert_v6_ok "--staged, the record staged"
+  teardown
+}
+
+test_v6_merge_base_ratchet_behind_trunk() {
+  echo "test: V6 — a branch behind a ruled trunk change compares with the merge-base"
+  claims_fixture
+  local fork
+  fork=$(git rev-parse HEAD)
+  git checkout -q main
+  jset "$SIDECAR" ".claims[0].states = \"$NEW_STATES\" | .claims[0].rulings = [$_CL_DOC_STALE]"
+  git commit -qam "DOC-STALE: the TTL states"
+  git checkout -q feature
+  echo "// unrelated" >> src/index.js
+  git commit -qam "unrelated"
+  cl validate --all
+  assert_v6_ok "feature behind main's ruled states change"
+  assert_json_field "$CL_OUT" '.base.merge_base' "$fork" "…compared with the merge-base, not main's tip"
+  teardown
+}
+
+test_v6_hand_edited_built_refused() {
+  echo "test: V6 — status built without a promotion"
+  claims_fixture
+  jset "$SIDECAR" ".claims[0].status = \"built\" | .claims[0].test = $_CL_TEST | .claims[0].nonvacuity = $_CL_MUTANT"
+  cl validate --all
+  assert_v6 "promote" "unbuilt → built by hand, no promotion"
+  assert_eq "1" "$(v6_count)" "…exactly one V6 finding"
+  jset "$SIDECAR" ".claims[0].rulings = [$_CL_DOC_STALE]"
+  cl validate --all
+  assert_v6 "promote" "…which a ruling does not license"
+  teardown
+}
+
+test_v6_unverifiable_here_advisory() {
+  echo "test: V6 — a promotion whose verdict is not in this clone's store"
+  claims_fixture
+  jset "$SIDECAR" ".claims[0].status = \"built\" | .claims[0].test = $_CL_TEST | .claims[0].nonvacuity = $_CL_MUTANT
+    | .claims[0].promotion = {\"at\": \"$(git rev-parse HEAD)\", \"verdict_sha256\": \"$(printf '%064d' 0)\"}"
+  cl validate --all
+  assert_v6_ok "built with a promotion, no verdict file"
+  assert_contains "$(v6_codes)" "unverifiable-here" "…an unverifiable-here advisory"
+  teardown
+}
+
+test_v6_verdict_mismatch_is_finding() {
+  echo "test: V6 — a promotion whose verdict does not match the claim"
+  claims_fixture
+  local d
+  jset "$SIDECAR" ".claims[0].status = \"built\" | .claims[0].test = $_CL_TEST | .claims[0].nonvacuity = $_CL_MUTANT"
+  d=$(write_verdict "Another statement.")
+  jset "$SIDECAR" ".claims[0].promotion = {\"at\": \"$(git rev-parse HEAD)\", \"verdict_sha256\": \"$d\"}"
+  cl validate --all
+  assert_v6 "verdict" "the verdict's states_sha256 is another statement's"
+  # A verdict file whose bytes no longer hash to its digest.
+  hand_promote
+  cl validate --all
+  assert_v6_ok "precondition: a matching verdict"
+  printf ' ' >> "$(claims_store)/$CL_DIGEST.json"
+  cl validate --all
+  assert_v6 "verdict" "the verdict file edited after promotion"
+  teardown
+}
+
+test_v6_doc_stale_on_built_is_repromote_owed() {
+  echo "test: V6 — a DOC-STALE amendment of a built claim: re-promote owed"
+  claims_fixture
+  hand_promote
+  base_here "built"
+  doc_stale_amend
+  git add -A
+  cl validate --staged
+  assert_eq "0" "$CL_RC" "--staged: the amendment commits (exits 0)"
+  assert_eq "0" "$(v6_count)" "…no V6 finding"
+  assert_contains "$(v6_codes)" "re-promote owed" "…a re-promote owed advisory"
+  assert_contains "$(v6_advice)" "states changed under a ruling: run claims promote SPEC-AUTH-001#token-ttl" "…naming the promote to run"
+  teardown
+}
+
+test_v6_mismatch_with_code_diverges_ruling_still_finding() {
+  echo "test: V6 — a CODE-DIVERGES ruling does not cover a built claim's verdict mismatch"
+  claims_fixture
+  hand_promote
+  base_here "built"
+  doc_stale_amend "$_CL_DIVERGES"
+  git add -A
+  cl validate --staged
+  assert_v6 "verdict" "states amended under CODE-DIVERGES, status built"
+  assert_not_contains "$(v6_codes)" "re-promote owed" "…not a re-promote owed advisory"
+  teardown
+}
+
+test_v6_staged_reads_index_not_worktree() {
+  echo "test: V6 — --staged reads the index, not the work tree"
+  claims_fixture
+  printf 'LEEWAY = 0\n' > src/auth/ttl.py
+  jset "$SIDECAR" '.claims[0].subject += ["src/auth/ttl.py"]'
+  git add -A
+  jset "$SIDECAR" ".claims[0].states = \"$NEW_STATES\""
+  cl validate --staged
+  assert_v6_ok "--staged: the staged sidecar is clean"
+  cl validate --all
+  assert_v6 "states" "--all: the work tree's states edit"
+  teardown
+}
+
+# _claims_repromote_owed, through a probe (its consumers, gate and attest,
+# come later): run on the fixture claim with <since-rev> = the merge-base.
+repromote_owed() {
+  local out
+  out=$(CL_PROBE_ID="SPEC-AUTH-001#token-ttl" "$CL_PROBE" claims render </dev/null 2>/dev/null) || out="rc $?: $out"
+  printf '%s\n' "$out"
+}
+
+test_v6_repromote_owed_commit_order() {
+  echo "test: _claims_repromote_owed — by the local verdict, else by commit order"
+  claims_fixture
+  CL_PROBE=$(claims_probe after '_claims_load; r=$(_claims_repromote_owed "$CL_PROBE_ID" "$_CL_MB") || _claims_propagate $?; _claims_mark_emitted 0; _claims_out "$r"; exit 0')
+  assert_eq "clear" "$(repromote_owed)" "an unbuilt claim: clear"
+  hand_promote
+  base_here "built"
+  local store at aside
+  store=$(claims_store)
+  aside=$(harness_mktemp_d verdict-aside)
+  assert_eq "clear" "$(repromote_owed)" "built, the verdict present and matching: clear"
+  mv "$store/$CL_DIGEST.json" "$aside/"
+  assert_eq "clear" "$(repromote_owed)" "built, the verdict missing, no ruling since the merge-base: clear"
+  mv "$aside/$CL_DIGEST.json" "$store/"
+  # The amendment, committed after the proof.
+  doc_stale_amend
+  git add -A && git commit -qm "DOC-STALE: amend the TTL claim"
+  assert_eq "owed" "$(repromote_owed)" "amended, the verdict present (mismatch): owed"
+  rm -f "$store/$CL_DIGEST.json"
+  assert_eq "owed" "$(repromote_owed)" "amended, the verdict missing, the ruling's commit not an ancestor of promotion.at: owed"
+  # Re-promoted after the amendment.
+  at=$(git rev-parse HEAD)
+  CL_DIGEST=$(write_verdict)
+  jset "$SIDECAR" ".claims[0].promotion = {\"at\": \"$at\", \"verdict_sha256\": \"$CL_DIGEST\"}"
+  git commit -qam "promote SPEC-AUTH-001#token-ttl"
+  assert_eq "clear" "$(repromote_owed)" "re-promoted, the verdict present: clear"
+  rm -f "$store/$CL_DIGEST.json"
+  assert_eq "clear" "$(repromote_owed)" "re-promoted, the verdict missing, the ruling's commit an ancestor of promotion.at: clear"
+  # A rebased branch's old sha.
+  jset "$SIDECAR" ".claims[0].promotion.at = \"$(printf '%040d' 7)\""
+  git commit -qam "promotion.at unresolvable"
+  assert_eq "unverifiable-here" "$(repromote_owed)" "the verdict missing, promotion.at not a commit here: unverifiable-here"
+  # An uncommitted ruling came after every proof.
+  jset "$SIDECAR" ".claims[0].promotion.at = \"$at\" | .claims[0].rulings += [{\"date\":\"2026-10-12\",\"direction\":\"RETIRE\",\"by\":\"doc-owner\",\"record\":\"docs/issues/token-ttl.md\",\"reason\":\"Pending.\"}]"
+  assert_eq "owed" "$(repromote_owed)" "a RETIRE ruling in the work tree only: owed"
   teardown
 }
 
@@ -1666,6 +2078,28 @@ run_tests() {
   test_v5_retired_without_ruling
   test_v5_judge_without_why
   test_v5_scope
+
+  # --- Task 5: V6 merge-base ratchet ---
+  test_v6_states_changed_without_ruling
+  test_v6_states_changed_with_doc_stale_ruling_ok
+  test_v6_status_off_built_without_ruling
+  test_v6_enforced_by_lowered
+  test_v6_claim_deleted
+  test_v6_sidecar_deleted_after_all_retired_ok
+  test_v6_sidecar_deleted_with_live_claims_finding
+  test_v6_built_record_edit_rechecks_verdict
+  test_v6_reanchor_reflow_needs_no_ruling
+  test_v6_reanchor_token_change_needs_ruling
+  test_v6_self_referential_record_refused
+  test_v6_record_missing_refused
+  test_v6_merge_base_ratchet_behind_trunk
+  test_v6_hand_edited_built_refused
+  test_v6_unverifiable_here_advisory
+  test_v6_verdict_mismatch_is_finding
+  test_v6_doc_stale_on_built_is_repromote_owed
+  test_v6_mismatch_with_code_diverges_ruling_still_finding
+  test_v6_staged_reads_index_not_worktree
+  test_v6_repromote_owed_commit_order
 
   print_summary
 }

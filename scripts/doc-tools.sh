@@ -6461,6 +6461,280 @@ _claims_v5() {
     --slurpfile tr "$rows" "$_JQ_CLAIMS_V5" >> "$_SCRATCH/cl-findings.jsonl"
 }
 
+# --- Spec claims: the verdict store, V6 ---------------------------------------
+#
+# promote (Task 11) stores each verdict, outside the tree, at
+# <store>/<digest>.json: the jq -cS bytes of {claim, states_sha256, test,
+# nonvacuity, head, subject_oids, green, red, status_to}, <digest> their
+# sha256, also written as the claim's promotion.verdict_sha256. Every digest,
+# verdict file name and states_sha256 is a bare 64-hex sha256
+# (_claims_sha256); states_sha256 hashes the states string's UTF-8 bytes with
+# no trailing newline (jq -j .states). A verdict is local: a fresh clone or a
+# CI runner has none, so a missing verdict is never a finding, only the
+# advisory unverifiable-here (the scheduled run re-verifies).
+#
+# V6 compares each claim with its record at _CL_MB (cl-claims-base.json),
+# joined by id, on every claim — eligible or not — that is touched. Without
+# a new ruling (a ruling object of the proposed record JSON-equal to none of
+# its _CL_MB record's): states changed, status moved off built, enforced_by
+# lowered (test 4 > lint 3 > log 2 > judge 1), or a re-anchor that changed a
+# token (old and new quote differ once normalised; a reflow or move does not)
+# is a finding. Whatever the rulings: a claim deleted is a finding ("retire
+# it instead"; the one legal deletion is a whole sidecar whose claims were
+# all retired at _CL_MB; a claim whose sidecar is still there but no longer
+# well formed is V1's finding, not a deletion), and moving into built/gated
+# without a promotion is one. Each built/gated claim that is new or differs from its _CL_MB record
+# has its verdict checked: missing → advisory unverifiable-here; mismatch →
+# a finding, or the advisory "re-promote owed" when a new DOC-STALE/RETIRE
+# ruling on the claim covers it (a DOC-STALE amendment changes states, so the
+# verdict's states_sha256, by design: promote re-proves it). Each new
+# ruling's record must exist in the proposed tree and be neither the claim's
+# doc nor its sidecar. _CL_MB empty: V6 is skipped (_claims_init already
+# reported base-unresolvable).
+
+# The absolute verdict store (it may not exist yet).
+_claims_store_dir() {
+  local d
+  d=$(git rev-parse --git-common-dir) || _claims_die "cannot resolve the git common dir"
+  d=$(cd "$d" && pwd -P) || _claims_die "cannot resolve the git common dir ($d)"
+  printf '%s\n' "$d/spec-claims/promotions"
+}
+
+# _claims_sha256 <file>: the file's bare sha256 (64 hex).
+_claims_sha256() {
+  _hash_one "$1"
+  printf '%s\n' "${_HASH#sha256:}"
+}
+
+# _claims_verdict_check <claim-json>: ok, missing or mismatch. ok: the
+# verdict file <store>/<promotion.verdict_sha256>.json exists, its sha256 is
+# that digest, and its claim, states_sha256, test and status_to equal the
+# claim's id, sha256(states), test and status. missing: no such file.
+# mismatch: anything else — a promotion with no 64-hex verdict_sha256
+# included (there is no verdict to look for).
+_claims_verdict_check() {
+  local claim="$1" digest store file st ss
+  digest=$(_claims_jq verdict-digest -r '.promotion | if type == "object" and (.verdict_sha256 | type) == "string"
+      and (.verdict_sha256 | test("^[0-9a-f]{64}$")) then .verdict_sha256 else "" end' <<<"$claim") \
+    || _claims_propagate $?
+  if [ -z "$digest" ]; then
+    echo mismatch
+    return 0
+  fi
+  store=$(_claims_store_dir) || _claims_propagate $?
+  file="$store/$digest.json"
+  if [ ! -f "$file" ]; then
+    echo missing
+    return 0
+  fi
+  ss=$(_claims_sha256 "$file") || _claims_propagate $?
+  if [ "$ss" != "$digest" ]; then
+    echo mismatch
+    return 0
+  fi
+  st="$_SCRATCH/cl-verdict-states"
+  _claims_jq verdict-states -j '.states | if type == "string" then . else tojson end' <<<"$claim" > "$st"
+  ss=$(_claims_sha256 "$st") || _claims_propagate $?
+  # Its status is the answer (a verdict file that is not JSON: mismatch), so
+  # not _claims_jq.
+  if jq -e -n --slurpfile v "$file" --argjson c "$claim" --arg ss "$ss" \
+      '($v | length) == 1 and ($v[0] | type) == "object" and $v[0].claim == $c.id
+       and $v[0].states_sha256 == $ss and $v[0].test == $c.test and $v[0].status_to == $c.status' \
+      >/dev/null 2>&1; then
+    echo ok
+  else
+    echo mismatch
+  fi
+}
+
+# _claims_repromote_owed <claim-id> <since-rev>: owed, clear or
+# unverifiable-here for a built/gated claim of cl-claims.json (clear for any
+# other status, or no such claim). With its verdict in the local store:
+# mismatch → owed, ok → clear. Without it (a fresh clone, CI) the answer
+# comes from commit order, never from the store: for each DOC-STALE/RETIRE
+# ruling of the claim absent at <since-rev>, its introducing commit is the
+# first of `git rev-list --reverse <since-rev>..HEAD -- <sidecar>` whose
+# sidecar holds it. owed when that commit is not an ancestor of
+# promotion.at (the amendment came after the proof) — a ruling no commit
+# holds yet (staged or in the work tree) included; clear when every one is,
+# or when there is no such ruling; unverifiable-here when there is one and
+# promotion.at is not a commit here (a rebased branch's old sha). An empty
+# <since-rev> counts every ruling, over all of HEAD's history.
+_claims_repromote_owed() {
+  local id="$1" since="$2" entry claim sidecar v at range r c found
+  local old="$_SCRATCH/cl-owed-base.json" rulings="$_SCRATCH/cl-owed-rulings" commits="$_SCRATCH/cl-owed-commits"
+  local blob="$_SCRATCH/cl-owed-sidecar.json"
+  entry=$(_claims_jq owed-claim -c --arg id "$id" \
+    'first(.[] | select(.claim.id == $id and (.claim.status == "built" or .claim.status == "gated"))) // empty' \
+    "$_SCRATCH/cl-claims.json") || _claims_propagate $?
+  if [ -z "$entry" ]; then
+    echo clear
+    return 0
+  fi
+  claim=$(_claims_jq owed-record -c '.claim' <<<"$entry") || _claims_propagate $?
+  sidecar=$(_claims_jq owed-sidecar -r '.sidecar' <<<"$entry") || _claims_propagate $?
+  v=$(_claims_verdict_check "$claim") || _claims_propagate $?
+  case "$v" in
+    mismatch) echo owed; return 0 ;;
+    ok) echo clear; return 0 ;;
+  esac
+  if [ -z "$since" ] || ! _claims_read_at "$since" "$sidecar" > "$old" \
+      || ! jq -e 'type == "object"' "$old" >/dev/null 2>&1; then
+    printf '{}\n' > "$old"
+  fi
+  _claims_jq owed-rulings -c --arg id "$id" --argjson c "$claim" \
+    '[.claims | arrays | .[] | objects | select(.id == $id) | .rulings | arrays | .[]] as $was
+     | $c.rulings | arrays | .[]
+     | select(type == "object" and (.direction == "DOC-STALE" or .direction == "RETIRE"))
+     | . as $r | select(any($was[]; . == $r) | not)' "$old" > "$rulings"
+  if [ ! -s "$rulings" ]; then
+    echo clear
+    return 0
+  fi
+  at=$(_claims_jq owed-at -r '.promotion.at | strings' <<<"$claim") || _claims_propagate $?
+  if [ -z "$at" ] || ! at=$(git rev-parse -q --verify "$at^{commit}" 2>/dev/null); then
+    echo unverifiable-here
+    return 0
+  fi
+  range=HEAD
+  if [ -n "$since" ]; then range="$since..HEAD"; fi
+  git rev-list --reverse "$range" -- "$sidecar" > "$commits" \
+    || _claims_die "git rev-list failed listing $range -- $sidecar"
+  while IFS= read -r r <&3; do
+    found=""
+    while IFS= read -r c <&4; do
+      _claims_read_at "$c" "$sidecar" > "$blob" || continue
+      # Its status is the answer, so not _claims_jq.
+      if jq -e --arg id "$id" --argjson r "$r" \
+          'any(.claims[] | select(.id == $id) | .rulings[]; . == $r)' "$blob" >/dev/null 2>&1; then
+        found=$c
+        break
+      fi
+    done 4< "$commits"
+    if [ -z "$found" ] || ! git merge-base --is-ancestor "$found" "$at" 2>/dev/null; then
+      echo owed
+      return 0
+    fi
+  done 3< "$rulings"
+  echo clear
+}
+
+# V6 (see the section comment), one program in three phases ($phase), run
+# after _JQ_CLAIMS_SIDECAR (cl_well_formed, cl_all_retired) and
+# _JQ_CLAIMS_NORM (claims_norm). $p, $b: cl-claims.json and
+# cl-claims-base.json; $t: cl-touched.json; $sp, $sb: the cl-sidecars lines of
+# the proposed tree and of _CL_MB. Phase verify prints the touched built/gated
+# claims whose verdict is to be checked (one JSON line each); phase records,
+# the distinct records the new rulings name; phase check, the finding rows
+# and advisory rows (the advisories carry a code), given $v ({claim,
+# verdict} per checked claim) and $rec ({record, exists} per record).
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_RATCHET='def in_list($l): . as $x | any($l[]; . == $x);
+ def v6($claim; $doc; $msg): {check: "V6", claim: $claim, doc: $doc, message: $msg};
+ def v6a($claim; $code; $msg): {check: "V6", claim: $claim, code: $code, message: $msg};
+ def cl_rulings: if type == "object" and (.rulings | type) == "array" then .rulings else [] end;
+ def cl_rank: if type == "string" then ({"test": 4, "lint": 3, "log": 2, "judge": 1}[.] // 0) else 0 end;
+ def cl_promoted: . == "built" or . == "gated";
+ $t[0] as $touched
+ | (reduce ($b[0][] | select((.claim.id | type) == "string")) as $e ({};
+      if has($e.claim.id) then . else .[$e.claim.id] = $e end)) as $base
+ | [$p[0][] | select((.claim.id | type) == "string") | select(.claim.id | in_list($touched))
+    | . as $e | $base[$e.claim.id].claim as $o
+    | ($o | cl_rulings) as $was
+    | $e + {old: $o,
+            new: [$e.claim | cl_rulings | .[] | . as $r | select(any($was[]; . == $r) | not)],
+            moved_in: (($e.claim.status | cl_promoted) and ($o == null or ($o.status | cl_promoted | not)))}
+    | .bare = (.moved_in and (.claim.promotion | type) != "object")
+    | .verify = ((.claim.status | cl_promoted) and (.old == null or .old != .claim) and (.bare | not))] as $rows
+ | if $phase == "verify" then $rows[] | select(.verify) | .claim | tojson
+   elif $phase == "records" then
+     [$rows[] | .new[] | objects | .record | strings | select(. != "" and (test("\n") | not))] | unique | .[]
+   else
+     (reduce $rec[] as $r ({}; .[$r.record] = $r.exists)) as $exists
+     | [$p[0][] | .claim.id | strings] as $ids
+     | (reduce $sp[] as $s ({}; .[$s.sidecar] = ($s | cl_well_formed))) as $now
+     | (reduce $sb[] as $s ({}; .[$s.sidecar] = ($s | cl_all_retired))) as $retired
+     | ($rows[] | . as $e | .claim as $c | .old as $o | .claim.id as $id | .doc as $doc
+        | (if $o != null and ($e.new | length) == 0 then
+             (if $c.states != $o.states
+              then v6($id; $doc; "states changed since the merge-base without a new ruling (a DOC-STALE amendment records its ruling: direction, by, record, reason)")
+              else empty end),
+             (if $o.status == "built" and $c.status != "built"
+              then v6($id; $doc; "status moved off built (built → \($c.status | tostring)) without a new ruling")
+              else empty end),
+             (($o.enforced_by | cl_rank) as $was | ($c.enforced_by | cl_rank) as $is
+              | if $is > 0 and $was > $is
+                then v6($id; $doc; "enforced_by lowered (\($o.enforced_by) → \($c.enforced_by); test > lint > log > judge) without a new ruling")
+                else empty end),
+             (if ($o.quote | type) == "string" and ($c.quote | type) == "string" and $o.quote != $c.quote
+                 and ($o.quote | claims_norm) != ($c.quote | claims_norm)
+              then v6($id; $doc; "re-anchor changed a token of the quote without a new ruling (a reflow or a move, equal once normalised, needs none)")
+              else empty end)
+           else empty end),
+          (if $e.bare
+           then v6($id; $doc; "status \($c.status) without a promotion: claims promote is the only path into \($c.status)")
+           else empty end),
+          (if $e.verify then
+             (first($v[] | select(.claim == $c) | .verdict) // "missing") as $vd
+             | if $vd == "ok" then empty
+               elif $vd == "missing"
+               then v6a($id; "unverifiable-here"; "promotion verdict \($c.promotion.verdict_sha256) is not in the local verdict store (promoted in another clone?): the scheduled run re-verifies it")
+               elif any($e.new[]; type == "object" and (.direction == "DOC-STALE" or .direction == "RETIRE"))
+               then v6a($id; "re-promote owed"; "states changed under a ruling: run claims promote \($id)")
+               else v6($id; $doc; "promotion verdict does not match the claim (its id, states, test or status changed since promote, or the verdict file was edited): run claims promote \($id)")
+               end
+           else empty end),
+          ($e.new[] | objects | .record | strings | select(. != "") | . as $r
+           | if $r == $doc or $r == $e.sidecar
+             then v6($id; $doc; "ruling record \($r) is the doc or the sidecar of the claim it rules on (self-referential record): name where the decision is recorded (an issue, an ADR, a gate record)")
+             elif $exists[$r] == true then empty
+             else v6($id; $doc; "ruling record \($r) does not exist in the proposed tree") end)),
+       ($base[] | select(.claim.id | in_list($touched)) | select(.claim.id | in_list($ids) | not)
+        | .sidecar as $sc
+        | if $now | has($sc) then
+            (if $now[$sc]
+             then v6(.claim.id; .doc; "deleted: retire it instead (status retired, a RETIRE ruling, the sentence struck); only a whole sidecar whose claims were all retired at the merge-base may be deleted")
+             else empty end)
+          elif $retired[$sc] == true then empty
+          else v6(.claim.id; .doc; "deleted with its sidecar \($sc): retire it instead (status retired, a RETIRE ruling, the sentence struck); only a whole sidecar whose claims were all retired at the merge-base may be deleted")
+          end)
+   end'
+
+# V6: the verdict of each claim phase verify names (_claims_verdict_check)
+# and the existence of each record phase records names (_claims_read: the
+# index under --staged; a path with an empty, "." or ".." segment is never a
+# repo path), then phase check. The shell loops run over those short lists,
+# never over every claim.
+_claims_v6() {
+  local prog="$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_NORM $_JQ_CLAIMS_RATCHET" line v r exists
+  local verify="$_SCRATCH/cl-v6-verify" vrows="$_SCRATCH/cl-v6-verdicts.jsonl"
+  local records="$_SCRATCH/cl-v6-records" rrows="$_SCRATCH/cl-v6-records.jsonl" out="$_SCRATCH/cl-v6.jsonl"
+  [ -n "$_CL_MB" ] || return 0
+  : > "$vrows"
+  : > "$rrows"
+  set -- --slurpfile p "$_SCRATCH/cl-claims.json" --slurpfile b "$_SCRATCH/cl-claims-base.json" \
+    --slurpfile t "$_SCRATCH/cl-touched.json" --slurpfile sp "$_SCRATCH/cl-sidecars.jsonl" \
+    --slurpfile sb "$_SCRATCH/cl-sidecars-base.jsonl" --slurpfile v "$vrows" --slurpfile rec "$rrows"
+  _claims_jq v6-verify -nrc --arg phase verify "$@" "$prog" > "$verify"
+  _claims_jq v6-records -nrc --arg phase records "$@" "$prog" > "$records"
+  while IFS= read -r line <&3; do
+    v=$(_claims_verdict_check "$line") || _claims_propagate $?
+    _claims_jq v6-verdict-row -nc --argjson c "$line" --arg v "$v" '{claim: $c, verdict: $v}' >> "$vrows"
+  done 3< "$verify"
+  while IFS= read -r r <&3; do
+    exists=false
+    case "/$r/" in
+      */../*|*/./*|*//*) ;;
+      *) if _claims_read "$r" >/dev/null; then exists=true; fi ;;
+    esac
+    _claims_jq v6-record-row -nc --arg r "$r" --argjson e "$exists" '{record: $r, exists: $e}' >> "$rrows"
+  done 3< "$records"
+  # jq reads $v and $rec at each call: here, with the rows written.
+  _claims_jq v6 -nc --arg phase check "$@" "$prog" > "$out"
+  _claims_jq v6-findings -c 'select(has("code") | not)' "$out" >> "$_SCRATCH/cl-findings.jsonl"
+  _claims_jq v6-advisories -c 'select(has("code"))' "$out" >> "$_SCRATCH/cl-advisories.jsonl"
+}
+
 cmd_claims_validate() {
   local mode=all
   if [ "$_OPT_staged" = 1 ]; then mode=staged; fi
@@ -6475,6 +6749,7 @@ cmd_claims_validate() {
   _claims_v1
   _claims_v2
   _claims_v5
+  _claims_v6
   _claims_emit validate
 }
 
