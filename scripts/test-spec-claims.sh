@@ -15,7 +15,10 @@ DOC_TOOLS="$(bash_bin_shim "$SCRIPT_DIR/doc-tools.sh")"
 # Every claims test builds on claims_fixture: one governing spec with one
 # sidecar claim (unbuilt, tracked), a config naming `main` as the base, all
 # committed on main, then a `feature` branch checked out — so the merge-base
-# the ratchets compare against is main's tip.
+# the ratchets compare against is main's tip. The doc carries its rendered
+# status block (§B: a doc with a sidecar shows its status), byte for byte
+# what `claims render` writes (test_v11_fixture_is_rendered), so V11 holds on
+# the fixture; a test that changes a claim's status re-renders (rerender).
 
 claims_fixture() {
   setup
@@ -30,6 +33,14 @@ claims_fixture() {
 
 How long issued tokens stay valid.
 
+<!-- spec-claims:status:begin -->
+## Claim status
+
+| Claim | Status | Tracker |
+|---|---|---|
+| `SPEC-AUTH-001#token-ttl` | unbuilt | docs/issues/token-ttl.md |
+
+<!-- spec-claims:status:end -->
 ## Requirements
 
 - Access tokens expire after 15 minutes.
@@ -666,6 +677,7 @@ EOF
     enforced_by: "test", test: null, nonvacuity: null, promotion: null,
     tracker: "docs/issues/token-ttl.md", frozen_at: null, restates: [], rulings: []}]}' \
     > docs/spec-claims/prereg-a.json
+  rerender
   cl validate --all
   assert_eq "0" "$CL_RC" "a host-glob doc's sidecar named by its stem exits 0"
   assert_no_v1 "host-glob doc, sidecar prereg-a.json"
@@ -1099,9 +1111,12 @@ test_v2_multiline_struck_lazy() {
 test_v2_status_block_not_live() {
   echo "test: V2 — the generated status block is not live"
   claims_fixture
-  doc_edit "$DOC" "## Requirements" $'<!-- spec-claims:status:begin -->\n## Claim status\n\nAccess tokens expire after 15 minutes.\n\n<!-- spec-claims:status:end -->\n\n## Requirements'
+  # The quote copied into the fixture's rendered block: a hand edit, which
+  # is V11's finding, never V2's.
+  doc_edit "$DOC" "## Claim status" $'\nAccess tokens expire after 15 minutes.' after
   cl validate --all
-  assert_v2_ok "the quote copied inside the status markers"
+  assert_eq "0" "$(v2_count)" "the quote copied inside the status markers: no V2 finding"
+  assert_json_field "$CL_OUT" '[.findings[].check] | unique | tojson' '["V11"]' "…the hand edit is V11's finding alone"
   teardown
 }
 
@@ -1109,6 +1124,7 @@ test_v2_retired_quote_still_live() {
   echo "test: V2 — a retired claim's quote must not be live"
   claims_fixture
   jset "$SIDECAR" ".claims[0].status = \"retired\" | .claims[0].rulings = [$_CL_RETIRE]"
+  rerender
   cl validate --all
   assert_v2 "retired" "a retired claim whose sentence is not struck"
   doc_edit "$DOC" "$TTL_LINE" "- ~~Access tokens expire after 15 minutes.~~"
@@ -1304,6 +1320,7 @@ test_fence_pairing_commonmark() {
   claims_fixture
   doc_edit "$DOC" "- Refresh tokens are single-use." $'\n````md\n```\ncode ~~x\n```\n````\nA ~~struck~~ claim sentence.' after
   jset "$SIDECAR" '.claims += [.claims[0] | .id = "SPEC-AUTH-001#claim-sentence" | .quote = "A claim sentence"]'
+  rerender
   cl validate --all
   assert_v2_ok "a claim quoting the sentence after a nested fence"
   teardown
@@ -1373,6 +1390,7 @@ diverge_claim() {
   jset "$SIDECAR" ".claims[0].status = \"diverged\"
     | .claims[0].test = {\"runner\":\"pytest\",\"node\":\"tests/test_token.py::test_ttl\"}
     | .claims[0].rulings = [$_CL_DIVERGES]"
+  rerender
 }
 
 test_v5_fixture_passes() {
@@ -1422,9 +1440,10 @@ test_v5_tracker_missing_path() {
   # --staged reads the index: a tracker in the work tree alone does not count.
   jset "$SIDECAR" '.claims[0].tracker = "docs/issues/nope.md"'
   printf '# Nope\n\n**Status**: Open\n' > docs/issues/nope.md
+  rerender
   cl validate --all
   assert_v5_ok "--all, the tracker in the work tree"
-  git add "$SIDECAR"
+  git add "$SIDECAR" "$DOC"
   cl validate --staged
   assert_v5 "docs/issues/nope.md" "--staged, the tracker untracked"
   git add docs/issues/nope.md
@@ -1501,12 +1520,14 @@ test_v5_tracker_pattern_accepted() {
   claims_fixture
   diverge_claim
   jset "$SIDECAR" '.claims[0].tracker = "#42"'
+  rerender
   cl validate --all
   assert_v5 "#42" "tracker #42 without tracker_patterns"
   jset docs/spec-claims/config.json '.tracker_patterns = ["^https://issues\\.example\\.com/", "^#[0-9]+$"]'
   cl validate --all
   assert_v5_ok "tracker #42 matching ^#[0-9]+$"
   jset "$SIDECAR" '.claims[0].tracker = "#42a"'
+  rerender
   cl validate --all
   assert_v5 "#42a" "tracker #42a matches no pattern"
   # An invalid pattern matches nothing (and is not a crash).
@@ -1539,6 +1560,7 @@ test_v5_retired_without_ruling() {
   # Struck, so V2 has nothing to say.
   doc_edit "$DOC" "$TTL_LINE" "- ~~Access tokens expire after 15 minutes.~~"
   jset "$SIDECAR" '.claims[0].status = "retired"'
+  rerender
   cl validate --all
   assert_v5 "RETIRE" "retired, no ruling"
   assert_eq "1" "$(v5_count)" "…exactly one V5 finding"
@@ -1667,14 +1689,15 @@ write_verdict() {
 # hand_promote: the fixture claim made built as promote makes it. The bound
 # test and the mutant are committed first (promote refuses a dirty tree, so
 # the sidecar at promotion.at holds the proved states and test); then status
-# built, its verdict in the store, and promotion {at: HEAD, verdict_sha256}.
-# Sets CL_DIGEST.
+# built, its verdict in the store, and promotion {at: HEAD, verdict_sha256};
+# then the doc's status block rendered, as promote renders it. Sets CL_DIGEST.
 hand_promote() {
   jset "$SIDECAR" ".claims[0].test = $_CL_TEST | .claims[0].nonvacuity = $_CL_MUTANT"
   git add "$SIDECAR" && git commit -qm "bind the TTL test"
   jset "$SIDECAR" '.claims[0].status = "built"'
   CL_DIGEST=$(write_verdict)
   jset "$SIDECAR" ".claims[0].promotion = {\"at\": \"$(git rev-parse HEAD)\", \"verdict_sha256\": \"$CL_DIGEST\"}"
+  rerender
 }
 
 # The fixture claim's DOC-STALE amendment: an AMENDED block re-quoting the
@@ -1720,6 +1743,7 @@ test_v6_status_off_built_without_ruling() {
   assert_v6_ok "precondition: the base's built claim, its verdict matching"
   assert_eq "" "$(v6_codes)" "…with no V6 advisory"
   jset "$SIDECAR" '.claims[0].status = "unbuilt"'
+  rerender
   cl validate --all
   assert_v6 "off built" "built → unbuilt, no ruling"
   jset "$SIDECAR" ".claims[0].rulings += [$_CL_DOC_STALE]"
@@ -1890,6 +1914,7 @@ test_v6_unverifiable_here_advisory() {
   claims_fixture
   jset "$SIDECAR" ".claims[0].status = \"built\" | .claims[0].test = $_CL_TEST | .claims[0].nonvacuity = $_CL_MUTANT
     | .claims[0].promotion = {\"at\": \"$(git rev-parse HEAD)\", \"verdict_sha256\": \"$(printf '%064d' 0)\"}"
+  rerender
   cl validate --all
   assert_v6_ok "built with a promotion, no verdict file"
   assert_contains "$(v6_codes)" "unverifiable-here" "…an unverifiable-here advisory"
@@ -2030,6 +2055,276 @@ test_v6_repromote_owed_proved_record() {
   teardown
 }
 
+# --- Status block render and V11 -----------------------------------------------
+
+BLOCK_BEGIN='<!-- spec-claims:status:begin -->'
+BLOCK_END='<!-- spec-claims:status:end -->'
+# The fixture block's row, and the same row hand-edited.
+# shellcheck disable=SC2016  # Markdown backticks, not command substitution
+TTL_ROW='| `SPEC-AUTH-001#token-ttl` | unbuilt | docs/issues/token-ttl.md |'
+# shellcheck disable=SC2016  # Markdown backticks, not command substitution
+TTL_ROW_EDITED='| `SPEC-AUTH-001#token-ttl` | built | docs/issues/token-ttl.md |'
+
+v11_messages() {
+  jq -r '.findings[]? | select(.check == "V11") | .message' <<<"$CL_OUT" 2>/dev/null || true
+}
+v11_count() {
+  jq '[.findings[]?, .advisories[]? | select(.check == "V11")] | length' <<<"$CL_OUT" 2>/dev/null || echo invalid
+}
+
+# rerender: the fixture's status blocks rendered again, as a status change
+# owes (§B); the run must succeed.
+rerender() {
+  "$DOC_TOOLS" claims render </dev/null >/dev/null 2>&1 || { echo "rerender failed" >&2; return 1; }
+}
+
+# strip_block <file>: drop the status block (its marker lines and every line
+# between them), as a doc that was never rendered.
+strip_block() {
+  local tmp
+  tmp=$(harness_mktemp strip-block)
+  B="$BLOCK_BEGIN" E="$BLOCK_END" awk '
+    $0 == ENVIRON["B"] { skip = 1 }
+    !skip { print }
+    $0 == ENVIRON["E"] { skip = 0 }' "$1" > "$tmp"
+  cat "$tmp" > "$1"
+  rm -f "$tmp"
+}
+
+# block_of <file>: the lines strictly between the status-block markers.
+block_of() {
+  B="$BLOCK_BEGIN" E="$BLOCK_END" awk '
+    $0 == ENVIRON["E"] { exit }
+    on { print }
+    $0 == ENVIRON["B"] { on = 1 }' "$1"
+}
+
+# line_no <file> <exact line>: the 1-based number of its first line equal to
+# <exact line> ("" when none).
+line_no() {
+  L="$2" awk '$0 == ENVIRON["L"] { print NR; exit }' "$1"
+}
+
+# 0 when the fixture doc in the work tree differs from HEAD's.
+doc_differs_from_head() {
+  ! git diff --quiet HEAD -- "$DOC"
+}
+
+# The line just before the first line equal to <exact line>.
+line_before() {
+  L="$2" awk '$0 == ENVIRON["L"] { print prev; exit } { prev = $0 }' "$1"
+}
+
+test_v11_fixture_is_rendered() {
+  echo "test: V11 — the fixture's status block is exactly what render writes"
+  claims_fixture
+  cl render --check
+  assert_eq "0" "$CL_RC" "render --check on the fixture exits 0"
+  assert_json_field "$CL_OUT" '.results | tojson' "[{\"doc\":\"$DOC\",\"changed\":false}]" "…one result, unchanged"
+  cl validate --all
+  assert_eq "0" "$(v11_count)" "validate --all: no V11 finding"
+  teardown
+}
+
+test_v11_render_inserts_before_second_heading() {
+  echo "test: V11 — the first render goes before the doc's second ## heading"
+  claims_fixture
+  strip_block "$DOC"
+  assert_eq "" "$(line_no "$DOC" "$BLOCK_BEGIN")" "precondition: no block"
+  cl validate --all
+  assert_eq "1" "$CL_RC" "no block: validate --all exits 1"
+  assert_contains "$(v11_messages)" "no status block" "…a V11 finding: no status block"
+  cl render
+  assert_eq "0" "$CL_RC" "render exits 0"
+  assert_json_field "$CL_OUT" '.results | tojson' "[{\"doc\":\"$DOC\",\"changed\":true}]" "…reports the doc changed"
+  assert_eq "$BLOCK_END" "$(line_before "$DOC" "## Requirements")" "the end marker is the line before ## Requirements"
+  assert_true "## Summary precedes the begin marker" \
+    test "$(line_no "$DOC" "## Summary")" -lt "$(line_no "$DOC" "$BLOCK_BEGIN")"
+  assert_true "the render is byte for byte the committed fixture" git diff --quiet -- "$DOC"
+  cl validate --all
+  assert_eq "0" "$CL_RC" "rendered: validate --all exits 0"
+  teardown
+}
+
+test_v11_render_idempotent() {
+  echo "test: V11 — a second render changes nothing"
+  claims_fixture
+  strip_block "$DOC"
+  cl render
+  assert_json_field "$CL_OUT" '.results[0].changed' "true" "the first render changes the doc"
+  local h
+  h=$(hash_file "$DOC")
+  cl render
+  assert_eq "0" "$CL_RC" "the second render exits 0"
+  assert_json_field "$CL_OUT" '.results[0].changed' "false" "…reports changed: false"
+  assert_eq "$h" "$(hash_file "$DOC")" "…and leaves the doc byte-identical"
+  teardown
+}
+
+test_v11_render_all_built_one_line() {
+  echo "test: V11 — every live claim built: the block is one line"
+  claims_fixture
+  hand_promote
+  assert_true "the promotion's render changed the doc" doc_differs_from_head
+  assert_eq $'## Claim status\n\nClaims: 1 built' "$(block_of "$DOC")" "block body: Claims: 1 built"
+  cl render
+  assert_eq "0" "$CL_RC" "render exits 0"
+  assert_json_field "$CL_OUT" '.results[0].changed' "false" "…and has nothing left to change"
+  cl render --check
+  assert_eq "0" "$CL_RC" "render --check after render exits 0"
+  teardown
+}
+
+test_v11_check_detects_hand_edit() {
+  echo "test: V11 — render --check reports a hand-edited block and writes nothing"
+  claims_fixture
+  doc_edit "$DOC" "$TTL_ROW" "$TTL_ROW_EDITED"
+  local h
+  h=$(hash_file "$DOC")
+  cl render --check
+  assert_eq "1" "$CL_RC" "render --check exits 1"
+  assert_eq "1" "$(v11_count)" "…one V11 finding"
+  assert_json_field "$CL_OUT" '.findings[0].doc' "$DOC" "…naming the doc"
+  assert_contains "$(v11_messages)" "claims render" "…advising claims render"
+  assert_eq "$h" "$(hash_file "$DOC")" "…and the doc is unchanged"
+  cl validate --all
+  assert_eq "1" "$CL_RC" "validate --all exits 1"
+  assert_eq "1" "$(v11_count)" "…with one V11 finding"
+  # Markers that are not one begin/end pair: a finding, the doc untouched.
+  doc_edit "$DOC" "## Requirements" "$BLOCK_BEGIN"$'\n'"## Requirements"
+  h=$(hash_file "$DOC")
+  cl render
+  assert_eq "1" "$CL_RC" "render with an unpaired begin marker exits 1"
+  assert_contains "$(v11_messages)" "not one begin/end pair" "…a V11 finding: the markers are not one pair"
+  assert_eq "$h" "$(hash_file "$DOC")" "…and the doc is not written"
+  teardown
+}
+
+test_v11_only_when_sidecar_staged() {
+  echo "test: V11 under --staged — only a doc whose sidecar is staged"
+  claims_fixture
+  doc_edit "$DOC" "$TTL_ROW" "$TTL_ROW_EDITED"
+  git add "$DOC"
+  cl validate --staged
+  assert_eq "0" "$(v11_count)" "only the doc staged: no V11"
+  # The same claims, reformatted: a staged sidecar change that means nothing.
+  jq -c . "$SIDECAR" > "$SIDECAR.tmp" && mv "$SIDECAR.tmp" "$SIDECAR"
+  git add "$SIDECAR"
+  cl validate --staged
+  assert_eq "1" "$CL_RC" "the sidecar staged too: exits 1"
+  assert_eq "1" "$(v11_count)" "…one V11 finding"
+  # The staged doc is what counts: fixing the work tree alone changes nothing.
+  git show "HEAD:$DOC" > "$DOC"
+  cl validate --staged
+  assert_eq "1" "$(v11_count)" "the work tree fixed, the index not: still V11"
+  git add "$DOC"
+  cl validate --staged
+  assert_eq "0" "$(v11_count)" "the fix staged: no V11"
+  teardown
+}
+
+test_v11_fence_heading_ignored() {
+  echo "test: V11 — a ## line inside a code fence is not a heading"
+  claims_fixture
+  strip_block "$DOC"
+  doc_edit "$DOC" "How long issued tokens stay valid." \
+    $'\n~~~markdown\n## x\n~~~\n\n````markdown\n```\n## y\n```\n````' after
+  cl render
+  assert_eq "0" "$CL_RC" "render exits 0"
+  assert_eq "$BLOCK_END" "$(line_before "$DOC" "## Requirements")" "the block goes before ## Requirements"
+  assert_true "…after the ~~~ fence's ## x" test "$(line_no "$DOC" "## x")" -lt "$(line_no "$DOC" "$BLOCK_BEGIN")"
+  assert_true "…and after the nested fence's ## y (CommonMark pairing)" \
+    test "$(line_no "$DOC" "## y")" -lt "$(line_no "$DOC" "$BLOCK_BEGIN")"
+  # No ## heading outside a fence after the first: end of file, after one blank line.
+  # shellcheck disable=SC2016  # Markdown backticks, not command substitution
+  printf '# T\n\n## Only\n\nText.\n\n```\n## z\n```\n' > "$DOC"
+  cl render
+  assert_eq $'# T\n\n## Only\n\nText.\n\n```\n## z\n```\n\n'"$BLOCK_BEGIN"$'\n## Claim status\n\n| Claim | Status | Tracker |\n|---|---|---|\n| `SPEC-AUTH-001#token-ttl` | unbuilt | docs/issues/token-ttl.md |\n\n'"$BLOCK_END" \
+    "$(cat "$DOC")" "no second heading: the block ends the file, after one blank line"
+  teardown
+}
+
+test_v11_retired_not_listed() {
+  echo "test: V11 — a retired claim is not listed"
+  claims_fixture
+  doc_edit "$DOC" "- Refresh tokens are single-use." "- ~~Refresh tokens are single-use.~~"
+  jset "$SIDECAR" ".claims += [{id: \"SPEC-AUTH-001#refresh-single-use\", quote: \"Refresh tokens are single-use\",
+      states: \"A refresh token is accepted once.\", kind: \"behaviour\", subject: [\"src/auth/token.py\"],
+      status: \"retired\", enforced_by: \"test\", test: null, nonvacuity: null, promotion: null,
+      tracker: null, frozen_at: null, restates: [], rulings: [$_CL_RETIRE]}]"
+  cl render
+  assert_eq "0" "$CL_RC" "render exits 0"
+  assert_contains "$(block_of "$DOC")" "SPEC-AUTH-001#token-ttl" "the unbuilt claim is listed"
+  assert_not_contains "$(block_of "$DOC")" "refresh-single-use" "the retired claim is not"
+  # Every live claim built: the count leaves the retired one out.
+  hand_promote
+  assert_eq $'## Claim status\n\nClaims: 1 built' "$(block_of "$DOC")" "one built, one retired: Claims: 1 built"
+  teardown
+}
+
+test_v11_crlf_doc() {
+  echo "test: V11 — a CRLF doc gets a CRLF block, rendered as its LF twin"
+  claims_fixture
+  local lf
+  lf=$(harness_mktemp lf-doc)
+  cp "$DOC" "$lf"
+  awk '{ printf "%s\r\n", $0 }' "$lf" > "$DOC"
+  cl render --check
+  assert_eq "0" "$CL_RC" "the fixture saved with CRLF: render --check exits 0"
+  strip_block "$lf"
+  awk '{ printf "%s\r\n", $0 }' "$lf" > "$DOC"
+  cl render
+  assert_json_field "$CL_OUT" '.results[0].changed' "true" "the block stripped: render inserts it"
+  tr -d '\r' < "$DOC" > "$lf"
+  git show "HEAD:$DOC" > "$lf.head"
+  assert_true "…the render is the LF fixture's, line for line" cmp -s "$lf" "$lf.head"
+  assert_eq "0" "$(LC_ALL=C awk '!/\r$/ { n++ } END { print n + 0 }' "$DOC")" "…every line still ends in CRLF"
+  rm -f "$lf" "$lf.head"
+  teardown
+}
+
+test_render_archived_doc_skipped() {
+  echo "test: render — an archived doc is skipped, never written"
+  claims_fixture
+  local arch=docs/archive/specs/SPEC-AUTH-001-token.md h
+  mkdir -p docs/archive/specs
+  git mv "$DOC" "$arch"
+  jset "$SIDECAR" ".doc = \"$arch\" | .claims[0].status = \"retired\" | .claims[0].rulings = [$_CL_RETIRE]"
+  git add -A && git commit -qm "archive SPEC-AUTH-001"
+  h=$(hash_file "$arch")
+  cl render
+  assert_eq "0" "$CL_RC" "render exits 0"
+  assert_json_field "$CL_OUT" '.results | tojson' "[{\"doc\":\"$arch\",\"skipped\":\"not governing\"}]" "…reports skipped: not governing"
+  assert_eq "$h" "$(hash_file "$arch")" "…and the archived file is byte-identical"
+  assert_true "…the work tree is clean" git diff --quiet
+  cl validate --all
+  assert_eq "0" "$(v11_count)" "validate --all: no V11"
+  jq -c . "$SIDECAR" > "$SIDECAR.tmp" && mv "$SIDECAR.tmp" "$SIDECAR"
+  git add "$SIDECAR"
+  cl validate --staged
+  assert_eq "0" "$(v11_count)" "validate --staged, the sidecar staged: no V11"
+  cl render --check
+  assert_eq "0" "$CL_RC" "render --check exits 0"
+  teardown
+}
+
+test_render_deleted_doc_check_ok() {
+  echo "test: render — a deleted doc is skipped, never created"
+  claims_fixture
+  jset "$SIDECAR" ".claims[0].status = \"retired\" | .claims[0].rulings = [$_CL_RETIRE]"
+  git rm -q "$DOC"
+  git add -A && git commit -qm "delete SPEC-AUTH-001"
+  cl render --check
+  assert_eq "0" "$CL_RC" "render --check exits 0"
+  assert_json_field "$CL_OUT" '.results | tojson' "[{\"doc\":\"$DOC\",\"skipped\":\"doc missing\"}]" "…reports skipped: doc missing"
+  cl render
+  assert_eq "0" "$CL_RC" "render exits 0"
+  assert_true "…and creates no file at the old path" test ! -e "$DOC"
+  cl validate --all
+  assert_eq "0" "$(v11_count)" "validate --all: no V11"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -2131,6 +2426,19 @@ run_tests() {
   test_v6_mismatch_with_code_diverges_ruling_still_finding
   test_v6_staged_reads_index_not_worktree
   test_v6_repromote_owed_proved_record
+
+  # --- Task 6: status block render and V11 ---
+  test_v11_fixture_is_rendered
+  test_v11_render_inserts_before_second_heading
+  test_v11_render_idempotent
+  test_v11_render_all_built_one_line
+  test_v11_check_detects_hand_edit
+  test_v11_only_when_sidecar_staged
+  test_v11_fence_heading_ignored
+  test_v11_retired_not_listed
+  test_v11_crlf_doc
+  test_render_archived_doc_skipped
+  test_render_deleted_doc_check_ok
 
   print_summary
 }
