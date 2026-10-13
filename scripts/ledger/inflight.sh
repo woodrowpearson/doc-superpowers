@@ -32,7 +32,9 @@
 # commit wins: committer date, then local, worktree, remote, in-flight);
 # other hosts' stay apart. Sorted by name, this host first, then host.
 #
-# Fetch: `git fetch --prune <keys.remote's url> +<ref_prefix>/*:<ref_prefix>/*`
+# Fetch: `git fetch --prune <keys.remote's url> +<ref_prefix>/*:refs/doc-
+# superpowers/inflight-fetch/*` (a private namespace; <ref_prefix>/ is then
+# synced from it, touching only its own mirrors: _lg_ifl_mirror_sync)
 # (+ +<inflight.pull_refs>:refs/doc-superpowers/pull/* when set — PR heads,
 # a fork's too, which index.sh resolves as refs/doc-superpowers/pull/<n>)
 # through the remote cache (_lg_remote_cache "inflight"): on --fetch, or
@@ -130,8 +132,9 @@ _lg_ifl_ref_overlap() {
   return 1
 }
 
-# The refs the in-flight fetch must never write or prune (it runs `git
-# fetch --prune +<ref_prefix>/*:<ref_prefix>/*`): git's own namespaces, the
+# The refs the in-flight fetch must never write or prune (it fetches
+# `+<ref_prefix>/*` into $_LG_IFL_TMP/ with --prune, then syncs
+# <ref_prefix>/ from it): git's own namespaces, the
 # pull refs' destination, and the ledger's counter ref and private refs
 # (keys.sh). A ref_prefix that equals, holds or lies under one is refused —
 # except strictly under refs/heads/ with a segment of its own (design §H.1:
@@ -240,21 +243,32 @@ _lg_host_id() {
 
 # _lg_ifl_fetch_run <git fetch args…>: git fetch in the background and
 # waited for, so a TERM or INT to this shell (the run's EXIT trap killing
-# the scan, or Ctrl-C) takes the fetch with it; the run's own traps
-# (doc-tools.sh _traps) are put back afterwards.
+# the scan, or Ctrl-C) takes the fetch with it — the fetch and every
+# process under it (_lg_kill_tree: its transport, e.g. the shell an ssh
+# command runs in, which a bare `kill <fetch>` would orphan); the run's own
+# traps (doc-tools.sh _traps) are put back afterwards.
 _lg_ifl_fetch_run() {
   local p rc=0
   LC_ALL=C git fetch --quiet --no-tags --no-recurse-submodules "$@" < /dev/null > /dev/null &
   p=$!
   # shellcheck disable=SC2064  # $p now, on purpose
-  trap "kill $p 2>/dev/null; exit 143" TERM
+  trap "_lg_kill_tree $p; exit 143" TERM
   # shellcheck disable=SC2064
-  trap "kill $p 2>/dev/null; exit 130" INT
+  trap "_lg_kill_tree $p; exit 130" INT
   wait "$p" || rc=$?
   trap 'exit 143' TERM
   trap 'exit 130' INT
   return "$rc"
 }
+
+# The shape of an in-flight mirror (awk): shaped(<ref>, <prefix>/) is 1
+# when <ref> is <prefix>/<host>/<name> with a host segment _lg_ifl_seg_ok
+# accepts (and a non-empty name).
+_LG_AWK_IFL_SHAPED='
+function shaped(r, ip,    rest, t, h) {
+  rest = substr(r, length(ip) + 1); t = index(rest, "/"); h = substr(rest, 1, t - 1)
+  return !(t < 2 || t == length(rest) || h !~ /^[A-Za-z0-9_][A-Za-z0-9._-]*$/ || h ~ /\.\./ || length(h) > 64)
+}'
 
 # _lg_ifl_heads_check: with ref_prefix under refs/heads/, every ref there
 # must be an in-flight mirror — <prefix>/<host>/<name> (a host segment
@@ -268,11 +282,10 @@ _lg_ifl_heads_check() {
   s=$_LG_SN
   git for-each-ref --format='%(refname)%09%(upstream)%09%(worktreepath)' "$_LG_IFL_PREFIX/" > "$s.hc" 2> "$s.err" \
     || _lg_die "git for-each-ref failed (checking $_LG_IFL_PREFIX): $(head -n 1 "$s.err")"
-  bad=$(LC_ALL=C awk -F '\t' -v ip="$_LG_IFL_PREFIX/" '
+  bad=$(LC_ALL=C awk -F '\t' -v ip="$_LG_IFL_PREFIX/" "$_LG_AWK_IFL_SHAPED"'
     {
-      rest = substr($1, length(ip) + 1); t = index(rest, "/"); h = substr(rest, 1, t - 1)
       why = ""
-      if (t < 2 || t == length(rest) || h !~ /^[A-Za-z0-9_][A-Za-z0-9._-]*$/ || h ~ /\.\./ || length(h) > 64) why = "not <host>/<name>"
+      if (!shaped($1, ip)) why = "not <host>/<name>"
       else if ($2 != "") why = "tracks " $2
       else if ($3 != "") why = "checked out in a worktree"
       if (why != "") { n++; if (n <= 3) s = s (s == "" ? "" : "; ") substr($1, 12) " (" why ")" }
@@ -283,32 +296,59 @@ _lg_ifl_heads_check() {
   fi
 }
 
-# _lg_ifl_mirror_sync: bring <ref_prefix>/ in line with what was just
-# fetched into $_LG_IFL_TMP/ (a private namespace, pruned by the fetch).
-# No --prune and no forced fetch reach <ref_prefix>/: the refs this sync
-# wrote are recorded (remote/inflight-mirror.<prefix>.tsv, "<ref>\t<oid>"),
-# and a ref here is
+# _lg_ifl_mirror_sync <snapshot>: bring <ref_prefix>/ in line with what
+# was just fetched into $_LG_IFL_TMP/ (a private namespace, pruned by the
+# fetch). No --prune and no forced fetch reach <ref_prefix>/. A ref here is
+# a mirror ("ours") when it holds
+#   - the value this sync last recorded (remote/inflight-mirror.<prefix>.tsv,
+#     "<ref>\t<oid>": the refs it wrote), or
+#   - the value $_LG_IFL_TMP/ held for it before this fetch (<snapshot>,
+#     the producer's one for-each-ref "<oid> <ref>" of that namespace) —
+#     so a lost or lagging record (a wiped cache, a run killed between the
+#     update and the record) neither freezes nor strands a mirror; or,
+#   - with neither a record file nor a snapshot (a first fetch, or both
+#     lost), when it is shaped <prefix>/<host>/<name> (_LG_AWK_IFL_SHAPED;
+#     under refs/heads/, _lg_ifl_heads_check already refused anything with
+#     an upstream or a worktree): adopted, and the run's note says so once.
+# A ref here is
 #   created     when absent;
-#   updated     when it still holds the recorded value (or already the
-#               fetched one);
-#   deleted     when the remote no longer has it and it still holds the
-#               recorded value;
+#   updated     when it is ours (or already holds the fetched value);
+#   deleted     when the remote no longer has it and it is ours;
 #   left alone  otherwise — a ref no fetch wrote, or one changed since:
-#               never overwritten, never deleted; the run's note names it.
+#               never overwritten, never deleted; the run's note names it
+#               and its remedy (`git update-ref -d <ref>`: the next fetch
+#               recreates it).
 # One `git update-ref --stdin` transaction, each change compare-and-swap.
+# DOC_TOOLS_LEDGER_SELFTEST=ifl-kill-after-update-ref (scripts/test-ledger.sh
+# only): SIGKILL to this shell right after the transaction, before the
+# record is written.
 _lg_ifl_mirror_sync() {
-  local s rec recf tmp n list
+  local snap="$1" s rec recf tmp n list adopt=0
   _lg_scratch_name
   s=$_LG_SN
   recf="$_LG_CACHE/remote/inflight-mirror.${_LG_IFL_PREFIX//\//%}.tsv"
   rec=$recf
-  [ -f "$rec" ] || rec=/dev/null
+  if [ ! -f "$rec" ]; then
+    rec=/dev/null
+    if [ ! -s "$snap" ]; then adopt=1; fi
+  fi
   git for-each-ref --format='%(objectname) %(refname)' "$_LG_IFL_TMP/" "$_LG_IFL_PREFIX/" > "$s.cur" 2> "$s.err" \
     || { head -n 1 "$s.err" >&2; return 1; }
-  LC_ALL=C awk -v tmp="$_LG_IFL_TMP/" -v ip="$_LG_IFL_PREFIX/" -v rec="$rec" -v cmds="$s.cmds" -v newrec="$s.rec" -v skip="$s.skip" '
+  LC_ALL=C awk -v tmp="$_LG_IFL_TMP/" -v ip="$_LG_IFL_PREFIX/" -v rec="$rec" -v snap="$snap" -v adopt="$adopt" \
+    -v cmds="$s.cmds" -v newrec="$s.rec" -v skip="$s.skip" -v adopted="$s.adopted" "$_LG_AWK_IFL_SHAPED"'
+    function ours(r) {
+      if ((r in REC) && L[r] == REC[r]) return 1
+      if ((r in SNAP) && L[r] == SNAP[r]) return 1
+      if (adopt && shaped(r, ip)) { na++; return 1 }
+      return 0
+    }
     BEGIN {
       printf "" > cmds; printf "" > newrec; printf "" > skip
       while ((getline l < rec) > 0) { t = index(l, "\t"); REC[substr(l, 1, t - 1)] = substr(l, t + 1) }
+      while ((getline l < snap) > 0) {
+        t = index(l, " "); r = substr(l, t + 1)
+        if (substr(r, 1, length(tmp)) == tmp) SNAP[ip substr(r, length(tmp) + 1)] = substr(l, 1, t - 1)
+      }
     }
     {
       o = $1; r = substr($0, length(o) + 2)
@@ -316,16 +356,21 @@ _lg_ifl_mirror_sync() {
       else if (substr(r, 1, length(ip)) == ip) L[r] = o
     }
     END {
+      na = 0
       for (r in R) {
         if (!(r in L)) { print "create " r " " R[r] > cmds; print r "\t" R[r] > newrec }
         else if (L[r] == R[r]) print r "\t" R[r] > newrec
-        else if ((r in REC) && L[r] == REC[r]) { print "update " r " " R[r] " " L[r] > cmds; print r "\t" R[r] > newrec }
+        else if (ours(r)) { print "update " r " " R[r] " " L[r] > cmds; print r "\t" R[r] > newrec }
         else print r > skip
       }
-      for (r in REC) if (!(r in R) && (r in L) && L[r] == REC[r]) print "delete " r " " L[r] > cmds
+      for (r in L) if (!(r in R) && ours(r)) print "delete " r " " L[r] > cmds
+      print na > adopted
     }' "$s.cur" || return 1
   if [ -s "$s.cmds" ]; then
     git update-ref --stdin < "$s.cmds" 2> "$s.err" || { head -n 1 "$s.err" >&2; return 1; }
+    case "${DOC_TOOLS_LEDGER_SELFTEST:-}" in
+      ifl-kill-after-update-ref) sh -c 'kill -KILL "$PPID"' ;;
+    esac
   fi
   mkdir -p -- "$_LG_CACHE/remote" 2>/dev/null || return 1
   tmp="$_LG_CACHE/remote/.inflight-mirror.$$"
@@ -333,23 +378,36 @@ _lg_ifl_mirror_sync() {
     rm -f -- "$tmp"
     return 1
   fi
+  n=0
+  { IFS= read -r n < "$s.adopted"; } 2>/dev/null || n=0
+  case "$n" in ''|*[!0123456789]*) n=0 ;; esac
+  if [ "$n" -gt 0 ]; then
+    _lg_ifl_note "no record of an earlier in-flight fetch: $n ref(s) under $_LG_IFL_PREFIX/ shaped <host>/<name> adopted as in-flight mirrors (updated or pruned)"
+  fi
   if [ -s "$s.skip" ]; then
     n=$(wc -l < "$s.skip" | tr -d ' ')
     list=$(LC_ALL=C sort "$s.skip" | head -n 3 | tr '\n' ' ' | sed 's/ $//; s/ /, /g')
     if [ "$n" -gt 3 ]; then list="$list, …"; fi
-    _lg_ifl_note "$n in-flight ref(s) here differ from the remote's and from the last fetch's — not updated: $list"
+    _lg_ifl_note "$n in-flight ref(s) here differ from the remote's and from the last fetch's — not updated: $list (\`git update-ref -d <ref>\` lets the next fetch recreate it)"
   fi
 }
 
-# The remote cache's producer: fetch the in-flight refs into $_LG_IFL_TMP/ (and the pull refs into
+# The remote cache's producer: snapshot $_LG_IFL_TMP/ (one for-each-ref:
+# the values the last fetch left there, _lg_ifl_mirror_sync's second proof
+# of ownership), fetch the in-flight refs into it (and the pull refs into
 # refs/doc-superpowers/pull/; both private, so --prune is safe there),
-# sync <ref_prefix>/ (_lg_ifl_mirror_sync), print what is here afterwards
-# (the cached "data": a record, never read back).
+# sync <ref_prefix>/, print what is here afterwards (the cached "data": a
+# record, never read back).
 _lg_ifl_fetch_produce() {
+  local s
+  _lg_scratch_name
+  s=$_LG_SN
+  git for-each-ref --format='%(objectname) %(refname)' "$_LG_IFL_TMP/" > "$s.snap" 2> "$s.err" \
+    || { head -n 1 "$s.err" >&2; return 1; }
   set -- "+$_LG_IFL_PREFIX/*:$_LG_IFL_TMP/*"
   if [ -n "$_LG_IFL_PULL" ]; then set -- "$@" "+$_LG_IFL_PULL:refs/doc-superpowers/pull/*"; fi
   _lg_ifl_fetch_run --prune "$_LG_IFL_URL" "$@" || return 1
-  _lg_ifl_mirror_sync || return 1
+  _lg_ifl_mirror_sync "$s.snap" || return 1
   git for-each-ref --format='%(objectname) %(refname)' "$_LG_IFL_PREFIX/" refs/doc-superpowers/pull/
 }
 
@@ -486,7 +544,9 @@ END {
 # the newer date, then the better-ranked source. The ancestry verdicts are
 # facts about two commits: cached in branch/anc.tsv ("<a> <b> 1|0": a is
 # an ancestor of b), so only a pair never seen runs
-# `git merge-base --is-ancestor`.
+# `git merge-base --is-ancestor`. Only its answers (exit 0/1) are cached;
+# an error (128: a missing object, a broken repository) counts as "not an
+# ancestor" for this run alone and is asked again next time.
 _lg_ifl_dedup() {
   local s af a b v tmp
   _lg_scratch_name
@@ -500,9 +560,15 @@ _lg_ifl_dedup() {
     { n++; O[n] = $2; for (i = 1; i < n; i++) { p = O[i] " " $2; q = $2 " " O[i]; if (!(p in C)) { C[p] = 1; print p } if (!(q in C)) { C[q] = 1; print q } } }' \
     "$1" > "$s.ask" || _lg_die "cannot list the tips to compare"
   : > "$s.new"
+  : > "$s.unc"
   while read -r a b; do
-    if git merge-base --is-ancestor "$a" "$b" 2>/dev/null; then v=1; else v=0; fi
-    printf '%s %s %s\n' "$a" "$b" "$v" >> "$s.new"
+    v=0
+    git merge-base --is-ancestor "$a" "$b" 2>/dev/null || v=$?
+    case "$v" in
+      0) printf '%s %s 1\n' "$a" "$b" >> "$s.new" ;;
+      1) printf '%s %s 0\n' "$a" "$b" >> "$s.new" ;;
+      *) printf '%s %s 0\n' "$a" "$b" >> "$s.unc" ;;
+    esac
   done < "$s.ask"
   if [ -s "$s.new" ]; then
     mkdir -p -- "$_LG_CACHE/branch" 2>/dev/null || _lg_die "cannot create $_LG_CACHE/branch"
@@ -513,9 +579,13 @@ _lg_ifl_dedup() {
     fi
     af="$_LG_CACHE/branch/anc.tsv"
   fi
-  LC_ALL=C awk -F '\t' -v af="$af" -v out="$2" '
+  LC_ALL=C awk -F '\t' -v af="$af" -v unc="$s.unc" -v out="$2" '
     function flush() { if (k != "") print k "\t" bo "\t" bd > out }
-    BEGIN { printf "" > out; while ((getline l < af) > 0) { split(l, x, " "); A[x[1] " " x[2]] = x[3] } }
+    BEGIN {
+      printf "" > out
+      while ((getline l < af) > 0) { split(l, x, " "); A[x[1] " " x[2]] = x[3] }
+      while ((getline l < unc) > 0) { split(l, x, " "); A[x[1] " " x[2]] = x[3] }
+    }
     $1 != k { flush(); k = $1; bo = $2; bd = $3 + 0; bp = $4 + 0; next }
     {
       o = $2; d = $3 + 0; p = $4 + 0

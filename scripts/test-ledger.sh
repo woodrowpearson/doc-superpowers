@@ -6718,6 +6718,9 @@ test_lg_inflight_heads_prefix_checked() {
 test_lg_inflight_fetch_recorded_only() {
   echo "test: the in-flight fetch prunes only refs it recorded, and never overwrites a ref here that differs from its record (R3-2a)"
   lg_ifl_fixture
+  # A first fetch records the mirrors (with no record and no earlier fetch,
+  # <host>/<name>-shaped refs here would be adopted: R4-1, its own test).
+  lg inflight --fetch
   # A ref here that no fetch wrote, and one that differs from the remote's.
   git update-ref refs/doc-superpowers/inflight/hostz/local-only "$LG_A_TIP"
   git update-ref refs/doc-superpowers/inflight/hostb/feat-a "$LG_A_TIP"
@@ -6726,6 +6729,7 @@ test_lg_inflight_fetch_recorded_only() {
   assert_eq "$LG_A_TIP" "$(git rev-parse -q --verify refs/doc-superpowers/inflight/hostz/local-only)" "an unrecorded ref here is never deleted"
   assert_eq "$LG_A_TIP" "$(git rev-parse -q --verify refs/doc-superpowers/inflight/hostb/feat-a)" "a ref that differs is never overwritten"
   assert_contains "$LG_ERR" "refs/doc-superpowers/inflight/hostb/feat-a" "…the note names it"
+  assert_contains "$LG_ERR" "git update-ref -d <ref>" "…and its remedy (R4-1d)"
   # A recorded mirror whose remote ref is gone is pruned; an unrecorded one stays.
   git update-ref -d refs/doc-superpowers/inflight/hostb/feat-a
   lg inflight --fetch
@@ -6756,6 +6760,124 @@ test_lg_inline_producer_die_one_object() {
   DOC_TOOLS_LEDGER_SELFTEST=die-in-pr-numbers lg ls --format json
   assert_eq "2|1" "$LG_RC|$(json_count "$LG_OUT")" "exit 2, one object"
   lg_pr_teardown
+}
+
+# --- Task 11 fix round 4 -------------------------------------------------------------
+
+# lg_ifl_ref <host>/<name>: the oid of refs/doc-superpowers/inflight/<host>/<name> here ("" when absent).
+lg_ifl_ref() {
+  git rev-parse -q --verify "refs/doc-superpowers/inflight/$1" 2>/dev/null || true
+}
+
+# lg_ifl_remote_ref <host>/<name>: its oid on the bare remote ("" when absent).
+lg_ifl_remote_ref() {
+  git --git-dir="$LG_REMOTE" rev-parse -q --verify "refs/doc-superpowers/inflight/$1" 2>/dev/null || true
+}
+
+test_lg_inflight_mirror_cache_wiped() {
+  echo "test: the in-flight mirrors outlive a lost cache — a moved remote ref still updates, a deleted one still prunes (R4-1)"
+  lg_ifl_fixture
+  local m2
+  ( cd "$LG_B" && git push -q origin "HEAD:refs/doc-superpowers/inflight/hostb/moving" "HEAD:refs/doc-superpowers/inflight/hostb/gone" )
+  lg inflight --fetch
+  assert_eq "$(lg_ifl_remote_ref hostb/moving)" "$(lg_ifl_ref hostb/moving)" "fetched"
+  rm -rf "$(git rev-parse --git-common-dir)/doc-superpowers"
+  m2=$(cd "$LG_B" && git commit-tree -p HEAD -m moved "HEAD^{tree}")
+  ( cd "$LG_B" && git push -q -f origin "$m2:refs/doc-superpowers/inflight/hostb/moving" ":refs/doc-superpowers/inflight/hostb/gone" )
+  lg inflight --fetch
+  assert_eq "0" "$LG_RC" "cache wiped: exit 0"
+  assert_eq "$m2" "$(lg_ifl_ref hostb/moving)" "…the moved ref is updated"
+  assert_eq "" "$(lg_ifl_ref hostb/gone)" "…the deleted one is pruned"
+  assert_not_contains "$LG_ERR" "differ" "…no 'differ' note"
+  lg_ifl_teardown
+}
+
+test_lg_inflight_mirror_killed_before_record() {
+  echo "test: a run killed between the mirror update and its record — the next fetch after a remote move still updates (R4-1)"
+  lg_ifl_fixture '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta"},"cache":{"remote_ttl_minutes":0}}'
+  local m1 m2
+  lg inflight --fetch
+  m1=$(cd "$LG_B" && git commit-tree -p HEAD -m m1 "HEAD^{tree}")
+  ( cd "$LG_B" && git push -q -f origin "$m1:refs/doc-superpowers/inflight/hostb/feat-a" )
+  DOC_TOOLS_LEDGER_SELFTEST=ifl-kill-after-update-ref lg ls
+  assert_eq "2" "$LG_RC" "the scan killed after its update-ref: exit 2"
+  assert_eq "$m1" "$(lg_ifl_ref hostb/feat-a)" "…the mirror was updated, its record not"
+  m2=$(cd "$LG_B" && git commit-tree -p "$m1" -m m2 "HEAD^{tree}")
+  ( cd "$LG_B" && git push -q -f origin "$m2:refs/doc-superpowers/inflight/hostb/feat-a" )
+  lg inflight --fetch
+  assert_eq "0" "$LG_RC" "the next fetch: exit 0"
+  assert_eq "$m2" "$(lg_ifl_ref hostb/feat-a)" "…the moved ref is updated"
+  assert_not_contains "$LG_ERR" "differ" "…no 'differ' note"
+  lg_ifl_teardown
+}
+
+test_lg_inflight_mirror_adopt_cold() {
+  echo "test: no record and no earlier fetch — refs here shaped <host>/<name> are adopted as mirrors (said once); others are never touched (R4-1c)"
+  lg_ifl_fixture
+  git update-ref refs/doc-superpowers/inflight/hostb/feat-a "$LG_A_TIP"
+  git update-ref refs/doc-superpowers/inflight/hostz/stale "$LG_A_TIP"
+  git update-ref refs/doc-superpowers/inflight/local-only "$LG_A_TIP"
+  git update-ref refs/doc-superpowers/inflight/-x/y "$LG_A_TIP"
+  lg inflight --fetch
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "$(lg_ifl_remote_ref hostb/feat-a)" "$(lg_ifl_ref hostb/feat-a)" "a shaped ref that differs: adopted, updated"
+  assert_eq "" "$(lg_ifl_ref hostz/stale)" "a shaped ref the remote lacks: adopted, pruned"
+  assert_eq "$LG_A_TIP" "$(lg_ifl_ref local-only)" "a ref not shaped like a mirror survives (no <host>/)"
+  assert_eq "$LG_A_TIP" "$(lg_ifl_ref -x/y)" "…nor one whose host segment is invalid"
+  assert_contains "$LG_ERR" "adopted" "the note says so"
+  assert_eq "1" "$(printf '%s\n' "$LG_ERR" | grep -c 'adopted')" "…once"
+  # Afterwards there is a record and a fetched snapshot: nothing is adopted.
+  git update-ref refs/doc-superpowers/inflight/hostz/later "$LG_A_TIP"
+  lg inflight --fetch
+  assert_eq "$LG_A_TIP" "$(lg_ifl_ref hostz/later)" "with a record: an unrecorded shaped ref is never deleted"
+  assert_not_contains "$LG_ERR" "adopted" "…and nothing is adopted"
+  lg_ifl_teardown
+}
+
+test_lg_inflight_sigint_reaps_transport() {
+  echo "test: a terminal-style SIGINT to the run's process group — the fetch's transport does not survive (R4-2)"
+  lg_ifl_fixture
+  # An ssh transport through a shell (sh → sleep): the shell is the
+  # grandchild that a bare `kill <fetch pid>` orphans.
+  git remote set-url origin "ssh://lg-test.invalid/r.git"
+  local pid i seen=0
+  set -m
+  GIT_SSH_COMMAND='sleep 7.33; exit 1' "$DOC_TOOLS" ledger ls < /dev/null > /dev/null 2>&1 &
+  pid=$!
+  set +m
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if [ "$(lg_ps_has 'sleep 7.33')" = 1 ]; then seen=1; break; fi
+    sleep 0.3
+  done
+  assert_eq "1" "$seen" "the slow transport ran"
+  kill -INT -- "-$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  sleep 1
+  assert_eq "0" "$(lg_ps_has 'sleep 7.33')" "SIGINT to the group: the slow transport is gone"
+  git remote set-url origin "$LG_REMOTE"
+  lg_ifl_teardown
+}
+
+test_lg_inflight_anc_errors_uncached() {
+  echo "test: an ancestry check that errors (merge-base exit 128) is never cached — the next run asks again (R4-3)"
+  lg_ifl_fixture
+  local fake real tr
+  fake=$(harness_mktemp_d lg-fakegit)
+  real=$(command -v git)
+  # shellcheck disable=SC2016  # the fake's own $1 / $@
+  printf '#!/bin/sh\nif [ "$1" = merge-base ] && [ "$2" = --is-ancestor ]; then exit 128; fi\nexec "%s" "$@"\n' "$real" > "$fake/git"
+  chmod +x "$fake/git"
+  PATH="$fake:$PATH" lg inflight --fetch --format json
+  assert_eq "0" "$LG_RC" "every ancestry check errors: exit 0"
+  tr=$(harness_mktemp lg-gtrace)
+  GIT_TRACE="$tr" lg inflight --format json
+  assert_eq "1" "$(if [ "$(grep -c 'is-ancestor' "$tr")" -gt 0 ]; then echo 1; else echo 0; fi)" "the errored verdicts were not cached: asked again"
+  assert_json_field "$LG_OUT" '.branches[] | select(.branch == "feat-a") | .oid' "$LG_A_TIP" "…the descendant wins"
+  : > "$tr"
+  GIT_TRACE="$tr" lg inflight --format json
+  assert_eq "0" "$(grep -c 'is-ancestor' "$tr")" "the 0/1 verdicts are cached"
+  rm -rf "$tr" "$fake"
+  lg_ifl_teardown
 }
 
 test_lg_inflight_ref_prefix_guard() {
@@ -7115,6 +7237,13 @@ run_tests() {
   test_lg_inflight_fetch_recorded_only
   test_lg_verdict_backstop
   test_lg_inline_producer_die_one_object
+
+  # --- Task 11 fix round 4 ---
+  test_lg_inflight_mirror_cache_wiped
+  test_lg_inflight_mirror_killed_before_record
+  test_lg_inflight_mirror_adopt_cold
+  test_lg_inflight_sigint_reaps_transport
+  test_lg_inflight_anc_errors_uncached
 
   print_summary
 }
