@@ -119,7 +119,7 @@
             "url": { "type": ["string", "null"] },
             "state": { "enum": ["open", "merged"] }
           },
-          "description": "The PR (config adapters.pr, through the remote cache) that claims the item: the open one with the highest number, else the merged one; null when none does or no PR adapter is configured."
+          "description": "The PR (config adapters.pr, through the remote cache) that claims the item, the one behind the status shown (highest number first): the merged one when the derived status is merged, else the open one, else the merged one; null when none does or no PR adapter is configured."
         },
         "inflight": { "type": "array", "description": "In-flight branch claims (Task 11)." },
         "neighbours": {
