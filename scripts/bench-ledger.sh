@@ -46,7 +46,7 @@
 #              facts, overlay) < 5 s; "one tip moved, facts warm": ls after
 #              one branch moved (the overlay rebuilt from one new facts
 #              file: the steady state on a host with many worktrees),
-#              best of 3, reported (no budget)
+#              best of 3, < 1.5 s
 #   refs step  the index build's parse-reference step (_lg_ix_refs) over all
 #              N items as blob records — the --staged / --rev case, which
 #              probes one parse entry per blob; reported, no budget
@@ -116,6 +116,10 @@ b_budget() { awk -v b="$1" -v k="$B_SCALE" 'BEGIN { printf "%.3f", b * k }'; }
 B_WARM=$(b_budget 1)
 B_COLD=$(b_budget 5)
 B_VSTAGED=$(b_budget 1)
+# One in-flight tip moved, every other cache warm (controller ruling,
+# Task 11 fix round 2: accepted at ≤ 1.5 s; a per-branch join cache is the
+# remedy if a quiet host exceeds it).
+B_TIPMOVE=$(b_budget 1.5)
 
 # A private root and git environment: no user or system config.
 B_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/bench-ledger.XXXXXX") || b_die "mktemp failed"
@@ -576,7 +580,9 @@ for _ in 2 3; do
   b_run b_tip_move
   ifl_best=$(b_min "$ifl_best" "$B_SEC")
 done
-b_row "one tip moved, facts warm (ls)" "-" "$ifl_best" "reported (no budget; best of 3)"
+B_MARK=ok
+if b_over "$ifl_best" "$B_TIPMOVE"; then B_MARK=OVER; b_fail "one tip moved, facts warm (ls): $ifl_best s > $B_TIPMOVE s (best of 3)"; fi
+b_row "one tip moved, facts warm (ls)" "-" "$ifl_best" "$B_TIPMOVE s · $B_MARK"
 "$B_BASH" "$B_DT" ledger inflight > "$B_OUT" 2> "$B_ERR" || b_die "ledger inflight failed: $(head -n 3 "$B_ERR")"
 "$B_BASH" "$B_DT" ledger ls --format json > "$B_ROOT/ifl.ls" 2> "$B_ERR" || b_die "ls --format json failed"
 echo "  (in flight: $(wc -l < "$B_OUT" | tr -d ' ') branches listed; $(jq -r '[.items[] | .derived.status] | group_by(.) | map(select(.[0] == "on branch") | "\(.[0]) \(length)") | join(", ")' "$B_ROOT/ifl.ls"))"

@@ -6657,7 +6657,7 @@ test_lg_inflight_ref_prefix_guard() {
   echo "test: inflight.ref_prefix / pull_refs never point --fetch --prune at local refs (I2)"
   lg_ifl_fixture
   local p
-  for p in refs/heads refs/heads/x refs/remotes refs/remotes/origin refs/tags refs/notes refs/doc-superpowers/pull refs/doc-superpowers/pull/x \
+  for p in refs/heads refs/remotes refs/remotes/origin refs/tags refs/notes refs/doc-superpowers/pull refs/doc-superpowers/pull/x \
       refs/doc-superpowers refs/doc-superpowers/ledger refs/doc-superpowers/ledger/counters refs/doc-superpowers/ledger/counters/x; do
     lg_enable "{\"base\":\"origin/main\",\"inflight\":{\"enabled\":true,\"host_id\":\"hosta\",\"ref_prefix\":\"$p\"}}"
     lg inflight --fetch
@@ -6671,6 +6671,31 @@ test_lg_inflight_ref_prefix_guard() {
   lg_enable '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta","ref_prefix":"refs/x-inflight"}}'
   lg inflight --fetch
   assert_eq "0" "$LG_RC" "another prefix of its own: exit 0"
+  lg_ifl_teardown
+}
+
+test_lg_inflight_prefix_under_heads() {
+  echo "test: ref_prefix strictly under refs/heads/ (a dedicated segment) — in-flight mirrors read as in flight, never as branches; --fetch --prune touches only that namespace (fix round 2)"
+  lg_ifl_fixture '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta","ref_prefix":"refs/heads/ledger-inflight"}}'
+  git branch -q feature/x "$LG_A_TIP"
+  ( cd "$LG_B" && git push -q origin "HEAD:refs/heads/ledger-inflight/hostb/feat-a" )
+  git fetch -q origin
+  lg inflight --fetch
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_contains "$LG_OUT" "feat-a inflight@hostb no PR claims:core-1" "hostb's mirror: in flight, from the other host"
+  assert_not_contains "$LG_OUT" "ledger-inflight" "the mirrors never appear as local or remote branches"
+  assert_contains "$LG_OUT" "feature/x local no PR" "an ordinary local branch is listed"
+  assert_eq "$LG_A_TIP" "$(git rev-parse -q --verify refs/heads/feature/x)" "…and survives --fetch --prune"
+  assert_eq "$LG_A_TIP" "$(git rev-parse -q --verify refs/heads/feat-a)" "…as does feat-a"
+  ( cd "$LG_B" && git push -q origin ":refs/heads/ledger-inflight/hostb/feat-a" )
+  lg inflight --fetch
+  assert_not_contains "$LG_OUT" "@hostb" "pruned when the remote drops it"
+  assert_eq "$LG_A_TIP" "$(git rev-parse -q --verify refs/heads/feature/x)" "feature/x still there"
+  for p in refs/heads refs/heads/ refs/remotes/x refs/tags/x refs/notes/x; do
+    lg_enable "{\"base\":\"origin/main\",\"inflight\":{\"enabled\":true,\"host_id\":\"hosta\",\"ref_prefix\":\"$p\"}}"
+    lg inflight
+    assert_eq "2" "$LG_RC" "ref_prefix $p: exit 2"
+  done
   lg_ifl_teardown
 }
 
@@ -6969,6 +6994,7 @@ run_tests() {
   test_lg_registry_failure_one_object
   test_lg_inflight_bg_scan_one_object
   test_lg_inflight_ref_prefix_guard
+  test_lg_inflight_prefix_under_heads
   test_lg_inflight_raw_oid_base
   test_lg_inflight_dedup_descendant_wins
   test_lg_ifl_facts_sig_in_name
