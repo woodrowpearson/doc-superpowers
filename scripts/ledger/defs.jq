@@ -324,9 +324,11 @@ def lg_v_model($ix; $c; $gen):
               superseded: ([$its[] | select((lg_v_superseded or .class == "wontfix") and lg_v_recent($gen))] | lg_v_sort($K))}],
      unplaced: [$all[] | select(.ledger as $l | $pages | index([$l]) == null)],
      inflight: ($all | lg_v_inflight)};
-# lg_v_header($gen): the generated-from line (no markup).
+# lg_v_header($gen): the generated-from line (no markup), then the PR data
+# note when there is one ($gen.pr_note: "PR data as of …" / "PR data: —").
 def lg_v_header($gen):
-  "Generated from \($gen.source // "?") + \($gen.inflight // 0) in-flight branches at \($gen.at // "?") by doc-superpowers ledger. Do not edit — edit the item.";
+  "Generated from \($gen.source // "?") + \($gen.inflight // 0) in-flight branches at \($gen.at // "?") by doc-superpowers ledger. Do not edit — edit the item."
+  + (($gen.pr_note // "") | if type == "string" and . != "" then " · " + . else "" end);
 # lg_v_url($gen): the item path as a link target — $gen.link (a prefix,
 # already encoded) + each path segment percent-encoded.
 def lg_v_url($gen): ($gen.link // "") + (split("/") | map(@uri) | join("/"));

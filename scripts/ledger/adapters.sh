@@ -1,6 +1,8 @@
 # shellcheck shell=bash
 # scripts/ledger/adapters.sh — the ledger's adapters (design §G): executables
-# named in config "adapters" that read a host's systems for the ledger.
+# named in config "adapters" that read a host's systems for the ledger, and
+# the remote cache (_lg_remote_cache, below) that keeps what they read from
+# the network for cache.remote_ttl_minutes.
 # Sourced by lib.sh; uses lib.sh's _lg_cfg, _LG_ROOT and parse.sh's
 # _lg_scratch_name; doc-tools.sh's SCRIPT_DIR (the scripts/ directory of the
 # running copy — the plugin's, or a vendored copy's).
@@ -23,7 +25,9 @@
 #   contracts list   "id" a contract id (<kind>:<name>), "ledger" a string
 #                    or null, "defined_in" a list of strings; "title", when
 #                    present, a string or null
-#   pr list          "number", "head", "state", "url"
+#   pr list          "number", "head", "state", "url" (the reference adapter,
+#                    scripts/adapters/ledger-pr-gh.sh, adds "merge_commit";
+#                    state open | merged | closed)
 # Other subcommands (contracts resolve <id>: exit 0/1) are not checked: the
 # caller reads the exit status (_lg_adapter_rc).
 
@@ -125,4 +129,125 @@ _lg_adapter_rc() {
   esac
   printf 'adapter %s (%s %s) exited %s\n' "$name" "$_LG_ADP" "$*" "$rc" >&2
   return 2
+}
+
+# --- The remote cache --------------------------------------------------------------
+#
+# _lg_remote_cache <name> <key-material> <producer…>: data read from a
+# remote system (the PR adapter's list), cached for cache.remote_ttl_minutes
+# (default 10; 0: never served from the cache) so that no verb reaches the
+# network more than once per TTL. Results in globals (callers run it in the
+# shell that reads them):
+#   _LG_RCACHE  the cache file, or "" when there is none to read
+#   _LG_RSTATE  fresh — read within the TTL, or just written;
+#               stale — the producer failed (now, or within the last TTL:
+#                 a failure is not retried before the TTL is out — no
+#                 retry storm against a remote that is down) and the last
+#                 good copy is served;
+#               none — it failed and there is no copy (rc 2)
+#   _LG_RAGE    seconds since the copy was fetched ("" with none)
+#   _LG_RFETCHED its fetch time (epoch seconds; "" with none)
+#   _LG_RERR    the failure's first stderr line ("" when it ran)
+# The file is $_LG_CACHE/remote/<name>-<the first 16 hex of the sha256 of
+# <key-material>>.json: line 1 {"schema":"ledger-remote/1","fetched_at":
+# <epoch s>,"data_sha256":"<hex>","name":"<name>"}, then the producer's
+# stdout as it printed it. It is written to a temp file in the same
+# directory and moved into place, so a reader sees a whole file and of two
+# concurrent refreshes the last to finish wins. A failure is remembered in
+# <file>.fail ({"failed_at", "error"}; removed by the next success).
+# _LG_REMOTE_FORCE=1 (--refresh, publish): the producer runs whatever the
+# age, and its failure is rc 2 even when a copy exists. The producer runs
+# with stdin closed; non-zero is a failure (its output is discarded).
+_LG_REMOTE_FORCE=""
+_LG_RTTL=""
+_lg_remote_cache() {
+  local name="$1" km="$2" s dir f tmp ttl now h t d rc=0 failed_at="" ferr="" fl
+  shift 2
+  _LG_RCACHE=""
+  _LG_RSTATE=none
+  _LG_RAGE=""
+  _LG_RFETCHED=""
+  _LG_RERR=""
+  _lg_scratch_name
+  s=$_LG_SN
+  printf '%s' "$km" > "$s.km" || _lg_die "cannot write $s.km"
+  _hash_one "$s.km"
+  # shellcheck disable=SC2153  # _LG_CACHE: lib.sh's _lg_init
+  dir="$_LG_CACHE/remote"
+  d=${_HASH#sha256:}
+  f="$dir/$name-${d:0:16}.json"
+  # The TTL in seconds: _LG_RTTL when the caller read it already (one jq
+  # less on every warm run), else from the config.
+  ttl=${_LG_RTTL:-}
+  [ -n "$ttl" ] || ttl=$(_lg_cfg '.cache.remote_ttl_minutes | if type == "number" and . >= 0 then . * 60 | floor else 600 end')
+  now=$(date +%s) || _lg_die "date failed"
+  # The copy: its header's fetch time (a file that does not start with
+  # the header is no copy).
+  t=""
+  if [ -f "$f" ]; then
+    h=""
+    IFS= read -r h < "$f" || true
+    case "$h" in
+      '{"schema":"ledger-remote/1","fetched_at":'*)
+        t=${h#*\"fetched_at\":}
+        t=${t%%,*}
+        case "$t" in ''|*[!0123456789]*) t="" ;; esac ;;
+    esac
+  fi
+  if [ -n "$t" ] && [ "${_LG_REMOTE_FORCE:-}" != 1 ] && [ $((now - t)) -lt "$ttl" ]; then
+    _LG_RCACHE=$f
+    _LG_RSTATE=fresh
+    _LG_RFETCHED=$t
+    _LG_RAGE=$((now - t))
+    return 0
+  fi
+  # A failure younger than the TTL is not retried (unless forced).
+  if [ "${_LG_REMOTE_FORCE:-}" != 1 ] && [ -f "$f.fail" ]; then
+    fl=""
+    IFS= read -r fl < "$f.fail" || true
+    failed_at=$(printf '%s' "$fl" | jq -r '.failed_at | if type == "number" then floor else "" end' 2>/dev/null) || failed_at=""
+    case "$failed_at" in ''|*[!0123456789]*) failed_at="" ;; esac
+    if [ -n "$failed_at" ] && [ $((now - failed_at)) -lt "$ttl" ]; then
+      ferr=$(printf '%s' "$fl" | jq -r '.error // "" | tostring' 2>/dev/null) || ferr=""
+      rc=1
+    fi
+  fi
+  if [ "$rc" = 0 ]; then
+    "$@" < /dev/null > "$s.rout" 2> "$s.rerr" || rc=$?
+    if [ "$rc" = 0 ]; then
+      mkdir -p -- "$dir" 2>/dev/null || _lg_die "cannot create $dir"
+      _hash_one "$s.rout"
+      d=${_HASH#sha256:}
+      tmp=$(mktemp "$dir/.$name.XXXXXX") || _lg_die "cannot create a temp file in $dir"
+      if ! { printf '{"schema":"ledger-remote/1","fetched_at":%s,"data_sha256":"%s","name":"%s"}\n' "$now" "$d" "$name" \
+             && cat -- "$s.rout"; } > "$tmp" || ! mv -f -- "$tmp" "$f"; then
+        rm -f -- "$tmp"
+        _lg_die "cannot write $f"
+      fi
+      rm -f -- "$f.fail"
+      _LG_RCACHE=$f
+      _LG_RSTATE=fresh
+      _LG_RFETCHED=$now
+      _LG_RAGE=0
+      return 0
+    fi
+    ferr=$(head -n 1 "$s.rerr" | tr -d '\000-\010\013-\037')
+    [ -n "$ferr" ] || ferr="exited $rc"
+    mkdir -p -- "$dir" 2>/dev/null || _lg_die "cannot create $dir"
+    tmp=$(mktemp "$dir/.$name.XXXXXX") || _lg_die "cannot create a temp file in $dir"
+    if jq -nc --argjson t "$now" --arg e "$ferr" '{failed_at: $t, error: $e}' > "$tmp" 2>/dev/null; then
+      mv -f -- "$tmp" "$f.fail" || rm -f -- "$tmp"
+    else
+      rm -f -- "$tmp"
+    fi
+  fi
+  _LG_RERR=$ferr
+  if [ "${_LG_REMOTE_FORCE:-}" = 1 ] || [ -z "$t" ]; then
+    return 2
+  fi
+  _LG_RCACHE=$f
+  _LG_RSTATE=stale
+  _LG_RFETCHED=$t
+  _LG_RAGE=$((now - t))
+  return 0
 }

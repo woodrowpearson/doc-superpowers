@@ -26,7 +26,11 @@
 #         top 15, then "… N more matches" when there are more.
 # The status shown is design §E.1's display of the index's derived status:
 # "superseded → <key>", "merged · owed: <owed>", "in review #<pr>",
-# "on branch <b>", else the bare label.
+# "on branch <b>", else the bare label. show and ls take --refresh: the PR
+# list (config adapters.pr) is fetched now, not read from a copy younger
+# than cache.remote_ttl_minutes (index.sh, adapters.sh _lg_remote_cache);
+# its failure is exit 2. Without it a failing adapter is one stderr line
+# and exit 0.
 #
 # show <ref>: whatever keys.sh's lg_resolve accepts — a path from the top
 # level ("./" allowed), a key or an alias (case-insensitive; "L 14" and
@@ -134,6 +138,7 @@ cmd_ledger_show() {
   fi
   [ -n "$ref" ] || _lg_usage "the item is empty"
   _LG_IX_NEED_CONTRACTS=1
+  if [ -n "$_OPT_refresh" ]; then _LG_REMOTE_FORCE=1; fi
   _lg_scratch_name
   s=$_LG_SN
   _lg_q_run "$_LG_JQ_SHOW" "$s.out" --arg ref "$ref" --arg mode "$_LG_FORMAT"
@@ -190,6 +195,7 @@ cmd_ledger_ls() {
       _lg_usage "--status '$_OPT_status' is not a status: $(jq -L "$_LG_LIB" -nr "$_LG_JQ_INCLUDE"'[lg_status_labels[]] | join(", ")')"
     fi
   fi
+  if [ -n "$_OPT_refresh" ]; then _LG_REMOTE_FORCE=1; fi
   _lg_scratch_name
   s=$_LG_SN
   _lg_q_run "$_LG_JQ_LS" "$s.out" --arg mode "$_LG_FORMAT" --arg ledger "$_OPT_ledger" --arg sev "$_OPT_sev" \

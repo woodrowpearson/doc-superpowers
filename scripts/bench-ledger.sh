@@ -25,6 +25,13 @@
 #              caches: the run builds the index) < 5 s and warm (caches from
 #              the previous run) < 1 s; ls again with the base ≠ HEAD (HEAD
 #              20 commits ahead; the base 20 commits ahead)
+#   ls / show (50 open PRs)   as ls / show, with config adapters.pr: a
+#              fake PR adapter listing 50 open PRs — each head a
+#              refs/remotes/origin/pr-<i> ref one commit past main that
+#              claims an item (Ledger-Claims) and edits its file — and 100
+#              merged PRs whose merge commits are main's last 100: cold
+#              (the PR list fetched through the remote cache, the heads
+#              walked, the merge commits' files read) < 5 s, warm < 1 s
 #   refs step  the index build's parse-reference step (_lg_ix_refs) over all
 #              N items as blob records — the --staged / --rev case, which
 #              probes one parse entry per blob; reported, no budget
@@ -107,6 +114,11 @@ trap 'exit 143' TERM
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
   GIT_COMMON_DIR GIT_NAMESPACE GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null HOME="$B_ROOT/home"
+# No automatic gc / maintenance: a detached repack started by one commit
+# (after the corpus's fast-import packs) races the next ("fatal: could not
+# parse HEAD") and would load the host under the timings.
+export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=gc.auto GIT_CONFIG_VALUE_0=0 \
+  GIT_CONFIG_KEY_1=maintenance.auto GIT_CONFIG_VALUE_1=false
 export GIT_AUTHOR_NAME=Bench GIT_AUTHOR_EMAIL=bench@example.com GIT_COMMITTER_NAME=Bench GIT_COMMITTER_EMAIL=bench@example.com
 mkdir -p "$HOME"
 TIMEFORMAT=%3R
@@ -426,6 +438,54 @@ b_verb "related $show_key" related "$show_key"
 b_verb "recheck $show_key" recheck "$show_key"
 # shellcheck disable=SC2012  # cache names are index-<hex>.json
 echo "  (re-check markers: $(jq '[.items[] | select(.recheck_after != [])] | length' "$(ls -t "$(git rev-parse --git-common-dir)"/doc-superpowers/ledger/index-*.json | head -n 1)") items)"
+
+# 50 open PRs (and 100 merged): the fake adapter's list, the heads as
+# remote-tracking refs (git fast-import), the config pointing at it in the
+# working tree; undone after the rows.
+b_prs() {
+  local n="$1" i f key main t msg body
+  main=$(git rev-parse main)
+  git ls-files -- 'docs/issues/*.md' > "$B_ROOT/pr.all"
+  head -n "$n" "$B_ROOT/pr.all" > "$B_ROOT/pr.files"
+  : > "$B_ROOT/prs.jsonl"
+  t=1900000000
+  i=0
+  while IFS= read -r f; do
+    i=$((i + 1))
+    key=$(sed -n '/^key: /{s/^key: //p;q;}' "$f")
+    printf '%s\n' "{\"number\":$((1000 + i)),\"head\":\"pr-$i\",\"state\":\"open\",\"url\":\"https://example.test/pull/$((1000 + i))\",\"merge_commit\":null}" >> "$B_ROOT/prs.jsonl"
+    msg="pr $i
+
+Ledger-Claims: $key
+"
+    body="$(cat "$f")
+- pr $i edit
+"
+    printf 'commit refs/remotes/origin/pr-%d\ncommitter Bench <bench@example.com> %d +0000\ndata %d\n%s\nfrom %s\nM 100644 inline %s\ndata %d\n%s\n' \
+      "$i" "$((t + i))" "$(printf '%s' "$msg" | wc -c | tr -d ' ')" "$msg" "$main" "$f" \
+      "$(printf '%s' "$body" | wc -c | tr -d ' ')" "$body"
+  done < "$B_ROOT/pr.files" > "$B_ROOT/prs.stream"
+  LC_ALL=C git fast-import --quiet < "$B_ROOT/prs.stream" || b_die "git fast-import (PR heads) failed"
+  i=0
+  git rev-list --max-count=100 main > "$B_ROOT/pr.merged"
+  while IFS= read -r c; do
+    i=$((i + 1))
+    printf '%s\n' "{\"number\":$i,\"head\":\"merged-$i\",\"state\":\"merged\",\"url\":\"https://example.test/pull/$i\",\"merge_commit\":\"$c\"}"
+  done < "$B_ROOT/pr.merged" >> "$B_ROOT/prs.jsonl"
+  printf '#!/bin/sh\ncat "%s"\n' "$B_ROOT/prs.jsonl" > "$B_ROOT/pr-adapter.sh"
+  chmod +x "$B_ROOT/pr-adapter.sh"
+  if ! jq -c --arg a "$B_ROOT/pr-adapter.sh" '.adapters.pr = $a' docs/ledger/config.json > "$B_ROOT/config.json" \
+      || ! cp "$B_ROOT/config.json" docs/ledger/config.json; then
+    b_die "cannot configure the PR adapter"
+  fi
+}
+b_prs 50
+b_verb "ls (50 open PRs)" ls
+b_verb "show $show_key (50 open PRs)" show "$show_key"
+"$B_BASH" "$B_DT" ledger ls --format json > "$B_OUT" 2> "$B_ERR" || b_die "ls --format json failed"
+echo "  (50 open PRs: $(jq -r '[.items[] | .derived.status] | group_by(.) | map("\(.[0]) \(length)") | join(", ")' "$B_OUT"))"
+git checkout -q -- docs/ledger/config.json
+git for-each-ref --format='delete %(refname)' refs/remotes/origin/ | git update-ref --stdin
 
 # The base ≠ HEAD: HEAD 20 commits ahead of the base (the base's events are
 # derived from HEAD's walk), then the base 20 commits ahead of HEAD (HEAD is
