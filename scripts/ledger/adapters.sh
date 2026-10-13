@@ -45,7 +45,7 @@ _lg_adapter_path() {
   local name="$1" v
   _LG_ADP=""
   _LG_ADP_ERR=""
-  v=$(_lg_cfg ".adapters[\"$name\"] // null | if . == null then \"\" elif type == \"string\" then \"s\" + . else \"!\" + tojson end")
+  v=$(_lg_cfg ".adapters[\"$name\"] // null | if . == null then \"\" elif type == \"string\" then \"s\" + . else \"!\" + tojson end") || exit "$?"
   case "$v" in
     '') return 0 ;;
     s) return 0 ;;
@@ -187,7 +187,7 @@ _LG_REMOTE_FORCE=""
 _LG_RTTL=""
 _LG_RTTL_JQ='.cache.remote_ttl_minutes | if type == "number" and . >= 0 then ([., 1000000] | min) * 60 | floor else 600 end'
 _lg_remote_cache() {
-  local name="$1" km="$2" s dir f tmp ttl now h t d rc=0 failed_at="" ferr="" fl
+  local name="$1" km="$2" s dir f tmp ttl now h t d rc=0 failed_at="" ferr="" fl kh kt
   shift 2
   _LG_RCACHE=""
   _LG_RSNAP=""
@@ -198,16 +198,34 @@ _lg_remote_cache() {
   _LG_RERR=""
   _lg_scratch_name
   s=$_LG_SN
-  printf '%s' "$km" > "$s.km" || _lg_die "cannot write $s.km"
-  _hash_one "$s.km"
   # shellcheck disable=SC2153  # _LG_CACHE: lib.sh's _lg_init
   dir="$_LG_CACHE/remote"
-  d=${_HASH#sha256:}
+  # The file's name: the key material's hash, remembered in
+  # km-<name>.txt (the hash, then the material) so that a run whose
+  # material is the last run's hashes nothing.
+  d=""
+  kh=""
+  kt=""
+  if [ -f "$dir/km-$name.txt" ]; then
+    { IFS= read -r kh; IFS= read -r -d '' kt; } < "$dir/km-$name.txt" 2>/dev/null || true
+    case "$kh" in
+      *[!0123456789abcdef]*|'') ;;
+      *) if [ "$kt" = "$km" ] && [ "${#kh}" = 64 ]; then d=$kh; fi ;;
+    esac
+  fi
+  if [ -z "$d" ]; then
+    printf '%s' "$km" > "$s.km" || _lg_die "cannot write $s.km"
+    _hash_one "$s.km"
+    d=${_HASH#sha256:}
+    if mkdir -p -- "$dir" 2>/dev/null && printf '%s\n%s' "$d" "$km" > "$dir/km-$name.txt.$$" 2>/dev/null; then
+      mv -f -- "$dir/km-$name.txt.$$" "$dir/km-$name.txt" 2>/dev/null || rm -f -- "$dir/km-$name.txt.$$"
+    fi
+  fi
   f="$dir/$name-${d:0:16}.json"
   # The TTL in seconds: _LG_RTTL when the caller read it already (one jq
   # less on every warm run), else from the config.
   ttl=${_LG_RTTL:-}
-  [ -n "$ttl" ] || ttl=$(_lg_cfg "$_LG_RTTL_JQ")
+  if [ -z "$ttl" ]; then ttl=$(_lg_cfg "$_LG_RTTL_JQ") || exit "$?"; fi
   case "$ttl" in ''|*[!0123456789]*) ttl=600 ;; esac
   now=$(date +%s) || _lg_die "date failed"
   _LG_RNOW=$now

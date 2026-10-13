@@ -185,8 +185,8 @@ _lg_item_paths() {
 _lg_parse_prep() {
   local rh lh sigf sig
   [ -z "$_LG_PARSE_DIR" ] || return 0
-  rh=$(_lg_cfg '.resolution_heading // "## Resolution" | tostring')
-  lh=$(_lg_cfg '.log_heading // "## Log" | tostring')
+  rh=$(_lg_cfg '.resolution_heading // "## Resolution" | tostring') || exit "$?"
+  lh=$(_lg_cfg '.log_heading // "## Log" | tostring') || exit "$?"
   _LG_PARSE_ARGS=()
   _lg_awkv "$rh"
   _LG_PARSE_ARGS+=(-v "resolution_heading=$_LG_AV")

@@ -43,7 +43,10 @@
 #              every fifth touches a contract's src file: cold (no caches)
 #              < 5 s, warm < 1 s; "in-flight overlay (cold)": ls with the
 #              index warm and every in-flight cache wiped (merge bases,
-#              facts, overlay) < 5 s
+#              facts, overlay) < 5 s; "one tip moved, facts warm": ls after
+#              one branch moved (the overlay rebuilt from one new facts
+#              file: the steady state on a host with many worktrees),
+#              best of 3, reported (no budget)
 #   refs step  the index build's parse-reference step (_lg_ix_refs) over all
 #              N items as blob records — the --staged / --rev case, which
 #              probes one parse entry per blob; reported, no budget
@@ -557,6 +560,23 @@ b_verb "ls (in flight: 1000 branches, 300 unmerged)" ls
 b_verb "show $show_key (in flight)" show "$show_key"
 b_measure "in-flight overlay (cold) (ls, index warm)" "$B_COLD" 3 "$B_BASH" "$B_DT" ledger ls
 b_row "in-flight overlay (cold) (ls, index warm)" "$B_SEC" "-" "$B_MARK"
+# The steady state: one tip moves (a commit on f-1), every other branch's
+# facts and the index warm — the overlay is rebuilt from one new facts
+# file. Each try moves the tip again; the smallest of three stands.
+b_tip_move() {
+  local c
+  c=$(git commit-tree -p refs/heads/f-1 -m "moved" "refs/heads/f-1^{tree}") || return 1
+  git update-ref refs/heads/f-1 "$c" || return 1
+  "$B_BASH" "$B_DT" ledger ls
+}
+"$B_BASH" "$B_DT" ledger ls > /dev/null 2>&1 || b_die "ls failed"
+b_run b_tip_move
+ifl_best=$B_SEC
+for _ in 2 3; do
+  b_run b_tip_move
+  ifl_best=$(b_min "$ifl_best" "$B_SEC")
+done
+b_row "one tip moved, facts warm (ls)" "-" "$ifl_best" "reported (no budget; best of 3)"
 "$B_BASH" "$B_DT" ledger inflight > "$B_OUT" 2> "$B_ERR" || b_die "ledger inflight failed: $(head -n 3 "$B_ERR")"
 "$B_BASH" "$B_DT" ledger ls --format json > "$B_ROOT/ifl.ls" 2> "$B_ERR" || b_die "ls --format json failed"
 echo "  (in flight: $(wc -l < "$B_OUT" | tr -d ' ') branches listed; $(jq -r '[.items[] | .derived.status] | group_by(.) | map(select(.[0] == "on branch") | "\(.[0]) \(length)") | join(", ")' "$B_ROOT/ifl.ls"))"

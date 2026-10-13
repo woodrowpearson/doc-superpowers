@@ -118,7 +118,7 @@ _lg_registry_findings() {
 # the run (rc 1 on any finding).
 _lg_validate_registry() {
   local reg s rc=0
-  reg=$(_lg_registry)
+  reg=$(_lg_registry) || exit "$?"
   _lg_scratch_name
   s=$_LG_SN
   git ls-files -z --cached > "$s.tracked" 2> "$s.err" \
@@ -737,7 +737,7 @@ _lg_validate_staged() {
   _lg_parse_prep
   _lg_v_staged_list "$s"
   : > "$out"
-  reg=$(_lg_registry :)
+  reg=$(_lg_registry :) || exit "$?"
   if [ "$_LG_V_REGISTRY" = 1 ] || [ "$_OPT_registry" = 1 ]; then
     git ls-files -z --cached > "$s.tracked" 2> "$s.err" \
       || _lg_die "git ls-files failed: $(head -n 3 "$s.err" 2>/dev/null)"
@@ -772,7 +772,7 @@ _lg_validate_staged() {
 # index.
 # shellcheck disable=SC2154  # _OPT_* are set by _parse_args
 _lg_validate_all() {
-  local out="$1" ix
+  local out="$1" ix reg
   ix=$(_lg_index) || exit "$?"
   : > "$out"
   if [ "$_OPT_registry" = 1 ]; then
@@ -781,7 +781,8 @@ _lg_validate_all() {
     s=$_LG_SN
     git ls-files -z --cached > "$s.tracked" 2> "$s.err" \
       || _lg_die "git ls-files failed: $(head -n 3 "$s.err" 2>/dev/null)"
-    _lg_v_registry_into "$(_lg_registry)" "$s.tracked" "$out"
+    reg=$(_lg_registry) || exit "$?"
+    _lg_v_registry_into "$reg" "$s.tracked" "$out"
   fi
   jq -L "$_LG_LIB" -c --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS$_LG_JQ_VALIDATE_DEFS$_LG_JQ_VALIDATE_ALL" "$ix" >> "$out" \
     || _lg_die "jq failed (validate --all)"
@@ -910,7 +911,7 @@ _lg_v_finish() {
 
 # shellcheck disable=SC2154  # _OPT_* and _ARGS are set by _parse_args
 cmd_ledger_validate() {
-  local n=0 f
+  local n=0 f reg
   _lg_init validate
   [ "$_OPT_staged" != 1 ] || n=$((n + 1))
   [ "$_OPT_all" != 1 ] || n=$((n + 1))
@@ -939,7 +940,8 @@ cmd_ledger_validate() {
     s=$_LG_SN
     git ls-files -z --cached > "$s.tracked" 2> "$s.err" \
       || _lg_die "git ls-files failed: $(head -n 3 "$s.err" 2>/dev/null)"
-    _lg_v_registry_into "$(_lg_registry)" "$s.tracked" "$f"
+    reg=$(_lg_registry) || exit "$?"
+    _lg_v_registry_into "$reg" "$s.tracked" "$f"
   fi
   _lg_v_finish "$f"
 }

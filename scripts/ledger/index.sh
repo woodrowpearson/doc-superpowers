@@ -190,7 +190,7 @@ _lg_ix_candidates() {
     | "\($col)\t\(.key | gsub("\n"; "\u0001"))"' "$di" > "$out" || _lg_die "jq failed (doc-index candidates)"
   if [ "$src" = worktree ]; then gsrc=worktree; else gsrc=$src; fi
   for col in spec plan handoff; do
-    g=$(_lg_cfg "(.doc_columns.$col // null) | if type == \"object\" then ((.globs // []) | length) else 0 end")
+    g=$(_lg_cfg "(.doc_columns.$col // null) | if type == \"object\" then ((.globs // []) | length) else 0 end") || exit "$?"
     [ "$g" != 0 ] || continue
     _lg_globs_matching "$gsrc" "$s.$col.z" ".doc_columns.$col.globs"
     tr '\n\000' '\001\n' < "$s.$col.z" | LC_ALL=C awk -v col="$col" '{ print col "\t" $0 }' >> "$out" \
@@ -1319,7 +1319,7 @@ _lg_ix_pr_prepare() {
     _lg_remote_cache pr "$(printf 'pr\n%s\n%s' "$_LG_ADP" "$url")" _lg_adapter pr list || rc=$?
     _LG_RTTL=""
   else
-    remote=$(_lg_cfg '.keys.remote | if type == "string" and . != "" then . else "origin" end')
+    remote=$(_lg_cfg '.keys.remote | if type == "string" and . != "" then . else "origin" end') || exit "$?"
     rc=2
     _LG_RSTATE=none
     _LG_RERR=$_LG_ADP_ERR
@@ -1649,7 +1649,7 @@ _lg_index() {
     base=$commit
   fi
   _lg_ix_shallow
-  di=$(_lg_doc_index "$src")
+  di=$(_lg_doc_index "$src") || exit "$?"
   # The contracts adapter's list (or its failure) is an input like a file:
   # run every time, hashed into the key.
   _lg_ix_adapter_contracts "$s.adc" "$s.ade"
@@ -1726,7 +1726,7 @@ _lg_index() {
   if [ -n "$dcommit" ]; then _lg_ix_prefetch "$dcommit" "$s.pfdirs"; fi
 
   # The inputs, read and checked.
-  reg=$(_lg_registry "$src")
+  reg=$(_lg_registry "$src") || exit "$?"
   _lg_ix_contracts "$reg" "$s.adc" "$s.contracts" "$s.cre"
   _lg_ix_json_obj "$src" "$legacy_path" "$s.legacy" "legacy map"
   _lg_ix_json_obj "$src" docs/ledger/finalized.json "$s.finalized" "finalized map"

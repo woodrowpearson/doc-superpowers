@@ -59,7 +59,7 @@ _lg_v_generated() {
   local specs=()
   _lg_scratch_name
   s=$_LG_SN
-  days=$(_lg_cfg '.views.recent_days | if type == "number" and . >= 0 then floor else 14 end')
+  days=$(_lg_cfg '.views.recent_days | if type == "number" and . >= 0 then floor else 14 end') || exit "$?"
   at=$(date -u +%Y-%m-%dT%H:%M:%SZ) || _lg_die "date failed"
   today=${at%%T*}
   cutoff=$(jq -nr --argjson d "$days" 'now - ($d * 86400) | strftime("%Y-%m-%d")') || _lg_die "jq failed (the recency cutoff)"
@@ -204,7 +204,7 @@ cmd_ledger_view() {
   s=$_LG_SN
   _LG_IX_NEED_CONTRACTS=1
   _lg_ifl_prepare 0
-  ix=$(_lg_index)
+  ix=$(_lg_index) || exit "$?"
   _lg_ifl_index_note
   _lg_v_ifl "$ix"
   ix=$_LG_V_IX
@@ -346,16 +346,16 @@ cmd_ledger_publish() {
   _LG_IX_NEED_CONTRACTS=1
   # The PR list and the in-flight refs are fetched now (no stale copy is
   # published); the in-flight scan (the base commit's config) runs first.
-  _lg_ifl_prepare 1
+  _lg_ifl_prepare 1 "$base"
   _LG_REMOTE_FORCE=1
-  ix=$(_lg_index --rev "$base")
+  ix=$(_lg_index --rev "$base") || exit "$?"
   _lg_ifl_index_note
   _lg_v_ifl "$ix"
   ix=$_LG_V_IX
   gen="$s.gen"
   _lg_v_generated "$base" 0 "$base_name@$short" "$link" "$gen" "" "$_LG_V_IFLN"
   at=$(jq -r '.at' "$gen") || _lg_die "jq failed"
-  html=$(_lg_cfg 'if .views.html == false then 0 else 1 end')
+  html=$(_lg_cfg 'if .views.html == false then 0 else 1 end') || exit "$?"
   stage="$_SCRATCH/lg-publish"
   mkdir -p -- "$stage" || _lg_die "mkdir failed"
   _lg_v_render "$ix" "$gen" all 1 "$html" "$stage"

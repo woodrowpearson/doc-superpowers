@@ -50,12 +50,15 @@
 #   branch/mb-<base>[.<shallow>].tsv   "<tip>\t<merge-base>" per tip seen
 #       against this base ("M" merged, "U" no common history), and the
 #       tip's committer date
-#   branch/f-<tip>-<merge-base>.tsv    the branch's facts, forever (a fact
+#   branch/f-<tip>-<merge-base>-<sig>.tsv   the branch's facts, forever (a fact
 #       about the two commits): its net diff, its trailer lines, the key-
-#       shaped words of the plans it modifies; line 1 carries the signature
-#       of what they depend on (the trailer names, the plan directories) —
-#       a facts file whose signature differs is computed again
-#   inflight/overlay-<key>.json        the claims joined with one index:
+#       shaped words of the plans it modifies; <sig> (and line 1) is the
+#       signature of what they depend on (the trailer names, the plan
+#       directories of the source's doc-index, the parser programs:
+#       _lg_ifl_sig), so two plan-directory sets keep their own files
+#   inflight/[rev/]overlay-<key>.json  the claims joined with one index
+#       (rev/: an index built from a commit — publish — kept apart, so a
+#       publish never evicts the working tree's):
 #       keyed by the index file (its own key covers code, config, items and
 #       PR data), the base, the host id and every scanned branch's host,
 #       name, tip, sources and merge base. The read verbs apply it to the
@@ -117,6 +120,22 @@ _lg_ifl_ref_ok() {
   return 0
 }
 
+# _lg_ifl_ref_overlap <a> <b>: a and b name the same ref, or one lies
+# under the other (whole components: refs/heads overlaps refs/heads/x,
+# never refs/headsx).
+_lg_ifl_ref_overlap() {
+  [ "$1" = "$2" ] && return 0
+  case "$1/" in "$2/"*) return 0 ;; esac
+  case "$2/" in "$1/"*) return 0 ;; esac
+  return 1
+}
+
+# The refs the in-flight fetch must never write or prune (it runs `git
+# fetch --prune +<ref_prefix>/*:<ref_prefix>/*`): git's own namespaces, the
+# pull refs' destination, and the ledger's counter ref and private refs
+# (keys.sh). A ref_prefix that equals, holds or lies under one is refused.
+_LG_IFL_RESERVED="refs/heads refs/remotes refs/tags refs/notes refs/stash refs/bisect refs/replace refs/worktree refs/rewritten refs/prefetch refs/doc-superpowers/pull refs/doc-superpowers/ledger/counters-remote refs/doc-superpowers/ledger/base-remote"
+
 # _lg_ifl_load: the in-flight settings of the run's config, once. Sets
 # _LG_IFL_ON (1 when inflight.enabled is true) and, when on, _LG_IFL_PREFIX,
 # _LG_IFL_AGE (days; 0: no cutoff), _LG_IFL_PULL, _LG_IFL_HOSTCFG,
@@ -124,7 +143,7 @@ _lg_ifl_ref_ok() {
 # Disabled costs no process: the merged config is one compact line, and
 # without '"enabled":true' in it no jq runs.
 _lg_ifl_load() {
-  local line="" s
+  local line="" s ctr="" r
   [ -z "$_LG_IFL_LOADED" ] || return 0
   _LG_IFL_LOADED=1
   _LG_IFL_ON=0
@@ -145,7 +164,8 @@ _lg_ifl_load() {
     (.keys.remote | if type == "string" and . != "" then l else "origin" end),
     (.views.branch | l),
     (.base | l),
-    ('"$_LG_RTTL_JQ"')' > "$s.cfg"
+    ('"$_LG_RTTL_JQ"'),
+    (.keys.counter_ref | if type == "string" and . != "" then l else "refs/doc-superpowers/ledger/counters" end)' > "$s.cfg"
   {
     IFS= read -r line
     IFS= read -r _LG_IFL_PREFIX
@@ -156,9 +176,15 @@ _lg_ifl_load() {
     IFS= read -r _LG_IFL_VIEWS
     IFS= read -r _LG_IFL_BASEREF
     IFS= read -r _LG_IFL_TTL
+    IFS= read -r ctr
   } < "$s.cfg" || _lg_die "cannot read the in-flight config"
   [ "$line" = true ] || return 0
   _lg_ifl_ref_ok "$_LG_IFL_PREFIX" || _lg_die "config inflight.ref_prefix '$_LG_IFL_PREFIX' is not a ref prefix under refs/ (no trailing '/')"
+  for r in $_LG_IFL_RESERVED "$ctr"; do
+    if _lg_ifl_ref_overlap "$_LG_IFL_PREFIX" "$r"; then
+      _lg_die "config inflight.ref_prefix '$_LG_IFL_PREFIX' overlaps $r: the in-flight fetch (--prune) would rewrite or delete those refs — choose a prefix of its own (default refs/doc-superpowers/inflight)"
+    fi
+  done
   if [ -n "$_LG_IFL_PULL" ]; then
     _lg_ifl_ref_ok "$_LG_IFL_PULL" 1 || _lg_die "config inflight.pull_refs '$_LG_IFL_PULL' is not a ref pattern under refs/ with one '*' (e.g. refs/pull/*/head)"
   fi
@@ -177,7 +203,7 @@ _lg_host_id() {
   if [ $# -gt 0 ]; then
     v=$1
   else
-    v=$(_lg_cfg '.inflight.host_id | if type == "string" then . elif . == null then "" else "\u0007" + tojson end')
+    v=$(_lg_cfg '.inflight.host_id | if type == "string" then . elif . == null then "" else "\u0007" + tojson end') || exit "$?"
   fi
   if [ -n "$v" ]; then
     _lg_ifl_seg_ok "$v" || _lg_die "config inflight.host_id '$v' is not a ref segment ([A-Za-z0-9._-], at most 64 characters)"
@@ -190,7 +216,9 @@ _lg_host_id() {
     printf '%s\n' "$v"
     return 0
   fi
-  h=$(hostname 2>/dev/null) || h=""
+  # bash's $HOSTNAME (gethostname, no process), else hostname, else uname -n.
+  h=${HOSTNAME:-}
+  [ -n "$h" ] || h=$(hostname 2>/dev/null) || h=""
   [ -n "$h" ] || h=$(uname -n 2>/dev/null) || h=""
   if command -v sha256sum >/dev/null 2>&1; then
     v=$(printf '%s' "$h" | sha256sum) || _lg_die "sha256sum failed"
@@ -212,16 +240,18 @@ _lg_ifl_fetch_produce() {
 }
 
 # _lg_ifl_fetch <force 0|1>: fetch through the remote cache (see the
-# header). Writes $_SCRATCH/lg-ifl-data.json {"state": fresh|stale|offline|
-# none|unconfigured, "as_of", "error"}; a failure is a note
-# (_LG_IFL_NOTES), or — forced — exit 2.
+# header). For `ledger inflight`, writes $_SCRATCH/lg-ifl-data.json
+# {"state": fresh|stale|offline|none|unconfigured, "as_of", "error"}; a
+# failure is a note (_LG_IFL_NOTES), or — forced — exit 2.
 _lg_ifl_fetch() {
   local force="$1" rc=0 saved="${_LG_REMOTE_FORCE:-}" t state err
   # Its push URL when set, else its URL (keys.sh _lg_k_url's choice).
   _LG_IFL_URL=$(git remote get-url --push "$_LG_IFL_REMOTE" 2>/dev/null) || _LG_IFL_URL=""
   if [ -z "$_LG_IFL_URL" ]; then
     if [ "$force" = 1 ]; then _lg_die "in-flight refs: remote '$_LG_IFL_REMOTE' (keys.remote) has no URL"; fi
-    printf '{"state":"unconfigured","as_of":null,"error":null}\n' > "$_SCRATCH/lg-ifl-data.json" || _lg_die "cannot write the in-flight state"
+    if [ "$_LG_VERB" = inflight ]; then
+      printf '{"state":"unconfigured","as_of":null,"error":null}\n' > "$_SCRATCH/lg-ifl-data.json" || _lg_die "cannot write the in-flight state"
+    fi
     return 0
   fi
   _LG_REMOTE_FORCE=""
@@ -242,6 +272,8 @@ _lg_ifl_fetch() {
     _lg_ifl_note "in-flight refs as of $t — the fetch failed: ${err:-?}"
   fi
   if [ "$state" = offline ]; then err=""; fi
+  # Only `ledger inflight` reports it (inflight_data).
+  [ "$_LG_VERB" = inflight ] || return 0
   jq -nc --arg st "$state" --arg t "${_LG_RFETCHED:-}" --arg e "$err" \
     '{state: $st, as_of: (if $t == "" then null else ($t | tonumber) end), error: (if $e == "" then null else $e end)}' \
     > "$_SCRATCH/lg-ifl-data.json" || _lg_die "cannot write the in-flight state"
@@ -265,23 +297,28 @@ _lg_ifl_note() {
 # "<sort>\t<host>\t<name>\t<oid>\t<sources>\t<date>" — the newest commit
 # (date, then local < worktree < remote < inflight) and every source, in
 # that order; <sort> is name \001 (0 this host, 1 another) \001 host. A
-# detached worktree goes to <det> as "<n>\t<oid>" (its path written to
-# <dd>/<n>, \001 back to \n).
+# key whose copies point at different commits is listed in <conf>
+# ("<sort>\t<oid>\t<date>\t<source rank>" per commit) for the descendant
+# check (_lg_ifl_scan). A detached worktree goes to <det> as "<n>\t<oid>"
+# (its path written to <dd>.<n>, \001 back to \n).
 # shellcheck disable=SC2016  # awk source
 _LG_AWK_IFL_SCAN='
 function wt_end(   p) {
   if (wh != "" && wb != "") { if (substr(wb, 1, 11) == "refs/heads/") W[substr(wb, 12)] = 1 }
   else if (wh != "" && wdet) {
-    nd++; p = wp; gsub(/\001/, "\n", p); printf "%s", p > (dd "/" nd); close(dd "/" nd)
+    nd++; p = wp; gsub(/\001/, "\n", p); printf "%s", p > (dd "." nd); close(dd "." nd)
     print nd "\t" wh > det
   }
   wp = ""; wh = ""; wb = ""; wdet = 0
 }
-function add(host, name, oid, d, src,   k) {
+function add(host, name, oid, d, src,   k, j) {
   k = host SUBSEP name
   if (!(k in O)) { n++; K[n] = k; H[k] = host; N[k] = name }
   if (!(k in O) || d > D[k] || (d == D[k] && PR[src] < PR[P[k]])) { O[k] = oid; D[k] = d; P[k] = src }
   S[k, src] = 1
+  # Every distinct tip of the key (the descendant check runs on these).
+  if (!((k, oid) in TJ)) { NO[k]++; TJ[k, oid] = NO[k]; CO[k, NO[k]] = oid; CD[k, NO[k]] = d; CP[k, NO[k]] = PR[src] }
+  else { j = TJ[k, oid]; if (PR[src] < CP[k, j]) CP[k, j] = PR[src] }
 }
 BEGIN {
   FS = "\t"; PR["local"] = 1; PR["worktree"] = 2; PR["remote"] = 3; PR["inflight"] = 4
@@ -315,9 +352,32 @@ END {
     if (H[k] == me && (N[k] in W) && ((k, "local") in S)) S[k, "worktree"] = 1
     s = ""
     for (j = 1; j <= 4; j++) if ((k, X[j]) in S) s = s (s == "" ? "" : ",") X[j]
-    print N[k] "\001" (H[k] == me ? 0 : 1) "\001" H[k] "\t" H[k] "\t" N[k] "\t" O[k] "\t" s "\t" D[k]
+    sk = N[k] "\001" (H[k] == me ? 0 : 1) "\001" H[k]
+    print sk "\t" H[k] "\t" N[k] "\t" O[k] "\t" s "\t" D[k]
+    if (NO[k] > 1) for (j = 1; j <= NO[k]; j++) print sk "\t" CO[k, j] "\t" CD[k, j] "\t" CP[k, j] > conf
   }
 }'
+
+# _lg_ifl_dedup <conf> <out>: per key of <conf> (consecutive lines
+# "<sort>\t<oid>\t<date>\t<source rank>"), the winning "<sort>\t<oid>\t
+# <date>": a descendant of every other tip wins; between unrelated tips,
+# the newer date, then the better-ranked source.
+_lg_ifl_dedup() {
+  local k o d p pk="" bo="" bd="" bp=""
+  : > "$2" || _lg_die "cannot write $2"
+  while IFS="$(printf '\t')" read -r k o d p; do
+    if [ "$k" != "$pk" ]; then
+      if [ -n "$pk" ]; then printf '%s\t%s\t%s\n' "$pk" "$bo" "$bd" >> "$2"; fi
+      pk=$k; bo=$o; bd=$d; bp=$p
+      continue
+    fi
+    if git merge-base --is-ancestor "$bo" "$o" 2>/dev/null; then bo=$o; bd=$d; bp=$p
+    elif git merge-base --is-ancestor "$o" "$bo" 2>/dev/null; then :
+    elif [ "$d" -gt "$bd" ] || { [ "$d" = "$bd" ] && [ "$p" -lt "$bp" ]; }; then bo=$o; bd=$d; bp=$p
+    fi
+  done < "$1"
+  if [ -n "$pk" ]; then printf '%s\t%s\t%s\n' "$pk" "$bo" "$bd" >> "$2"; fi
+}
 
 # _lg_ifl_scan <out>: the candidate branches (no merge base yet) as
 # "<sort>\t<host>\t<name>\t<oid>\t<sources>\t<date>", sorted (name, this
@@ -340,27 +400,37 @@ _lg_ifl_scan() {
   else
     git worktree list --porcelain > "$s.wt" 2> "$s.err" || _lg_die "git worktree list failed: $(head -n 1 "$s.err")"
   fi
-  mkdir -p "$s.dd" || _lg_die "cannot create $s.dd"
   LC_ALL=C awk -v me="$_LG_IFL_ME" -v rh="refs/remotes/$_LG_IFL_REMOTE/" -v ip="$_LG_IFL_PREFIX/" -v bb="$_LG_IFL_BB" \
     -v views="$_LG_IFL_VIEWS" -v cur="$_LG_IFL_CUR" -v cutoff="$cutoff" -v wt="$s.wt" -v dd="$s.dd" -v det="$s.det" \
-    "$_LG_AWK_IFL_SCAN" "$s.refs" > "$s.cands" || _lg_die "cannot read the branches"
+    -v conf="$s.conf" "$_LG_AWK_IFL_SCAN" "$s.refs" > "$s.cands" || _lg_die "cannot read the branches"
+  # Copies of one branch at different commits (only then, a git call per
+  # pair): a descendant wins; unrelated tips, the newer committer date,
+  # then local < worktree < remote < inflight.
+  if [ -s "$s.conf" ]; then
+    _lg_ifl_dedup "$s.conf" "$s.win"
+    LC_ALL=C awk -F '\t' -v win="$s.win" '
+      BEGIN { while ((getline l < win) > 0) { split(l, a, "\t"); WO[a[1]] = a[2]; WD[a[1]] = a[3] } }
+      ($1 in WO) { print $1 "\t" $2 "\t" $3 "\t" WO[$1] "\t" $5 "\t" WD[$1]; next } { print }' "$s.cands" > "$s.cands2" \
+      || _lg_die "cannot pick the branches' tips"
+    mv -f -- "$s.cands2" "$s.cands" || _lg_die "cannot pick the branches' tips"
+  fi
   # Detached worktrees: the hash of each path (one sha256 call for all) and
   # the tip's date (one git log); merged ones are dropped by the merge-base
   # pass (_lg_ifl_resolve). Each name is its own: nothing to merge.
   if [ -s "$s.det" ]; then
     n=$(wc -l < "$s.det" | tr -d ' ')
     i=1
-    while [ "$i" -le "$n" ]; do printf '%s\n' "$i"; i=$((i + 1)); done > "$s.dn"
+    while [ "$i" -le "$n" ]; do printf '%s\n' "${s##*/}.dd.$i"; i=$((i + 1)); done > "$s.dn"
     if command -v sha256sum >/dev/null 2>&1; then
-      ( cd "$s.dd" && xargs sha256sum < "$s.dn" ) > "$s.dh" 2> "$s.err" || _lg_die "sha256sum failed"
+      ( cd "$_SCRATCH" && xargs sha256sum < "$s.dn" ) > "$s.dh" 2> "$s.err" || _lg_die "sha256sum failed"
     else
-      ( cd "$s.dd" && xargs shasum -a 256 < "$s.dn" ) > "$s.dh" 2> "$s.err" || _lg_die "shasum failed"
+      ( cd "$_SCRATCH" && xargs shasum -a 256 < "$s.dn" ) > "$s.dh" 2> "$s.err" || _lg_die "shasum failed"
     fi
     LC_ALL=C awk -F '\t' '{ print $2 }' "$s.det" | git log --no-walk=unsorted --stdin --format='%H %ct' > "$s.ddate" 2> "$s.err" \
       || _lg_die "git log failed (detached worktrees): $(head -n 1 "$s.err")"
     LC_ALL=C awk -v me="$_LG_IFL_ME" -v dh="$s.dh" -v dt="$s.ddate" -v cutoff="$cutoff" '
       BEGIN {
-        while ((getline l < dh) > 0) { split(l, a, " "); fn = a[2]; sub(/^\*/, "", fn); H[fn] = substr(a[1], 1, 8) }
+        while ((getline l < dh) > 0) { split(l, a, " "); fn = a[2]; sub(/.*\./, "", fn); H[fn] = substr(a[1], 1, 8) }
         while ((getline l < dt) > 0) { split(l, a, " "); T[a[1]] = a[2] }
       }
       { split($0, f, "\t"); if (!(f[2] in T) || (cutoff > 0 && T[f[2]] + 0 < cutoff)) next
@@ -453,16 +523,24 @@ BEGIN { left = -1 }
   else if (left < 0) left = -1
 }'
 
-# _lg_ifl_sig: the facts signature into _LG_IFL_SIG and the plan
-# directories / globs into $_SCRATCH/lg-ifl-plans (lines "d\t<dir/>",
-# "g\t<glob>"), and the trailer names into $_SCRATCH/lg-ifl-tr — once.
+# _lg_ifl_sig: the facts signature into _LG_IFL_SIG (16 hex, part of every
+# facts file's name) and the plan directories / globs into
+# $_SCRATCH/lg-ifl-plans (lines "d\t<dir/>", "g\t<glob>"), and the trailer
+# names into $_SCRATCH/lg-ifl-tr — once per source (_LG_IFL_SRC: the
+# working tree, or the commit an index is built from — publish's base).
+# The signature covers what facts depend on beyond the two commits: the
+# trailer names, the plan directories (the source's doc-index), and the
+# parser programs (_LG_AWK_TRAILER — the closing-keyword rule included —,
+# the walk, the plan words).
+_LG_IFL_SRC=worktree
+_LG_IFL_SIGSRC=""
 _lg_ifl_sig() {
   local di s
-  [ -z "${_LG_IFL_SIG:-}" ] || return 0
+  [ -z "${_LG_IFL_SIG:-}" ] || [ "$_LG_IFL_SIGSRC" != "$_LG_IFL_SRC" ] || return 0
   _lg_scratch_name
   s=$_LG_SN
   _lg_trailers "$_SCRATCH/lg-ifl-tr"
-  di=$(_lg_doc_index worktree)
+  di=$(_lg_doc_index "$_LG_IFL_SRC") || exit "$?"
   # shellcheck disable=SC2016  # jq source
   jq -r --slurpfile c "$_LG_CFG" '
     ($c[0].doc_columns.plan // null) as $pc
@@ -472,15 +550,17 @@ _lg_ifl_sig() {
        | unique[] | "d\t\(.)"),
       ($pc | if type == "object" then ((.globs // [])[] | strings | select(test("[\\n\\t]") | not) | "g\t\(.)") else empty end)' \
     "$di" > "$_SCRATCH/lg-ifl-plans" || _lg_die "jq failed (the plan directories)"
-  { printf '%s\n' "$_LG_IFL_FACTS"; cat "$_SCRATCH/lg-ifl-tr"; printf 'plans\n'; cat "$_SCRATCH/lg-ifl-plans"; } > "$s.sig" \
+  { printf '%s\n' "$_LG_IFL_FACTS"; cat "$_SCRATCH/lg-ifl-tr"; printf 'plans\n'; cat "$_SCRATCH/lg-ifl-plans"
+    printf 'parsers\n%s\n%s\n%s\n' "$_LG_AWK_TRAILER" "$_LG_AWK_IFL_WALK" "$_LG_AWK_IFL_WORDS"; } > "$s.sig" \
     || _lg_die "cannot write $s.sig"
   _hash_one "$s.sig"
   _LG_IFL_SIG=${_HASH#sha256:}
   _LG_IFL_SIG=${_LG_IFL_SIG:0:16}
+  _LG_IFL_SIGSRC=$_LG_IFL_SRC
 }
 
 # _lg_ifl_cold <tips-file> <mbs-out>: compute the facts of the tips (one
-# per line) — see the header — writing branch/f-<tip>-<mb>.tsv for each
+# per line) — see the header — writing branch/f-<tip>-<mb>-<sig>.tsv for each
 # that has a merge base; "<tip>\t<mb|M|U>\t<date>" per tip into <mbs-out>.
 _lg_ifl_cold() {
   local tips="$1" mbs="$2" s dir o mb d n tmpd
@@ -522,8 +602,8 @@ _lg_ifl_cold() {
     "$s.walk" > "$mbs" || _lg_die "cannot write $mbs"
   # The tips whose facts are not here yet (a base that moved finds most
   # of them: facts are about the tip and its merge base, not the base).
-  LC_ALL=C awk -F '\t' -v dir="$dir" -v sig="# $_LG_IFL_FACTS $_LG_IFL_SIG" '
-    $1 == "B" { f = dir "/f-" $2 "-" $3 ".tsv"; h = ""; if ((getline h < f) <= 0) h = ""; close(f); if (h != sig) print $2 " " $3 }' \
+  LC_ALL=C awk -F '\t' -v dir="$dir" -v sig="# $_LG_IFL_FACTS $_LG_IFL_SIG" -v sx="$_LG_IFL_SIG" '
+    $1 == "B" { f = dir "/f-" $2 "-" $3 "-" sx ".tsv"; h = ""; if ((getline h < f) <= 0) h = ""; close(f); if (h != sig) print $2 " " $3 }' \
     "$s.walk" > "$s.pairs" || _lg_die "cannot check the in-flight facts"
   # The net diffs, one diff-tree for every such tip: "<tip> <mb>" per line.
   : > "$s.diff"
@@ -565,7 +645,7 @@ _lg_ifl_cold() {
   # directory, then moved into place (each rename atomic).
   mkdir -p -- "$dir" 2>/dev/null || _lg_die "cannot create $dir"
   tmpd=$(mktemp -d "$dir/.new.XXXXXX") || _lg_die "cannot create a temp dir in $dir"
-  if ! LC_ALL=C awk -F '\t' -v d="$tmpd" -v hdr="# $_LG_IFL_FACTS $_LG_IFL_SIG" -v diff="$s.diff" -v words="$s.words" -v pairs="$s.pairs" '
+  if ! LC_ALL=C awk -F '\t' -v d="$tmpd" -v hdr="# $_LG_IFL_FACTS $_LG_IFL_SIG" -v sx="$_LG_IFL_SIG" -v diff="$s.diff" -v words="$s.words" -v pairs="$s.pairs" '
       BEGIN { while ((getline l < pairs) > 0) { split(l, a, " "); WANT[a[1]] = 1 } }
       $1 == "B" { if ($2 in WANT) { MB[$2] = $3; n++; ORD[n] = $2 } next }
       $1 == "T" { T[$2] = T[$2] "T\t" substr($0, length($1) + length($2) + 3) "\n"; next }
@@ -573,7 +653,7 @@ _lg_ifl_cold() {
         while ((getline l < diff) > 0) { split(l, a, "\t"); F[a[2]] = F[a[2]] "F\t" substr(l, length(a[1]) + length(a[2]) + 3) "\n" }
         while ((getline l < words) > 0) { split(l, a, "\t"); K[a[2]] = K[a[2]] "K\t" a[3] "\n" }
         for (i = 1; i <= n; i++) {
-          o = ORD[i]; f = d "/f-" o "-" MB[o] ".tsv"
+          o = ORD[i]; f = d "/f-" o "-" MB[o] "-" sx ".tsv"
           printf "%s\nmb\t%s\n%s%s%s# end\n", hdr, MB[o], F[o], T[o], K[o] > f
           close(f)
         }
@@ -607,7 +687,7 @@ BEGIN {
   o = $4
   if (!(o in MB)) { if (!(o in ASK)) { ASK[o] = 1; print o > need }; next }
   if (MB[o] == "M" || MB[o] == "U") next
-  f = dir "/f-" o "-" MB[o] ".tsv"
+  f = dir "/f-" o "-" MB[o] "-" sx ".tsv"
   if (check == 1) {
     h = ""
     if ((getline h < f) <= 0) h = ""
@@ -641,7 +721,7 @@ _lg_ifl_resolve() {
   _lg_ix_shallow
   mbf="$dir/mb-$_LG_IFL_B${_LG_SHALLOW:+.$_LG_SHALLOW}.tsv"
   if [ "$check" = 1 ]; then _lg_ifl_sig; fi
-  set -- -v dir="$dir" -v sig="# $_LG_IFL_FACTS ${_LG_IFL_SIG:-}" -v check="$check" -v need="$s.need" \
+  set -- -v dir="$dir" -v sig="# $_LG_IFL_FACTS ${_LG_IFL_SIG:-}" -v sx="${_LG_IFL_SIG:-}" -v check="$check" -v need="$s.need" \
     -v key="$out.key" -v refs="$out.refs" -v hdr="$_LG_IFL_SCHEMA $_LG_IFL_B $_LG_IFL_ME"
   LC_ALL=C awk -v mbs="$mbf" "$@" "$_LG_AWK_IFL_RESOLVE" "$cands" > "$out" || _lg_die "cannot resolve the merge bases"
   [ -s "$s.need" ] || return 0
@@ -659,7 +739,7 @@ _lg_ifl_resolve() {
   LC_ALL=C awk -v mbs="$s.mb" "$@" "$_LG_AWK_IFL_RESOLVE" "$cands" > "$out" || _lg_die "cannot resolve the merge bases"
 }
 
-# _lg_ifl_prepare <fetch 0|1>: the run's in-flight scan, before the index is
+# _lg_ifl_prepare <fetch 0|1> [source]: the run's in-flight scan, before the index is
 # built (its notes join the PR note): load the settings; nothing more when
 # disabled. Fetch (forced with 1), resolve the host id and the base, scan,
 # resolve the merge bases into $_LG_IFL_SCAN (the candidates in
@@ -670,23 +750,27 @@ _LG_IFL_SCAN=""
 _LG_IFL_CANDS=""
 _LG_IFL_ME=""
 _lg_ifl_prepare() {
-  local force="$1" s n refs="" full=""
+  local force="$1" s n refs="" full="" hfull=""
+  _LG_IFL_SRC=${2:-worktree}
   _lg_ifl_load
   _LG_IFL_SCAN=""
   _LG_IFL_CANDS=""
   [ "$_LG_IFL_ON" = 1 ] || return 0
   _lg_scratch_name
   s=$_LG_SN
-  [ -n "$_LG_IFL_ME" ] || _LG_IFL_ME=$(_lg_host_id "$_LG_IFL_HOSTCFG")
-  # The base's commit and full name, and the current branch: one call
-  # (two when HEAD is unborn or the base does not resolve).
+  if [ -z "$_LG_IFL_ME" ]; then _LG_IFL_ME=$(_lg_host_id "$_LG_IFL_HOSTCFG") || exit "$?"; fi
+  # The base's commit, the current branch and the base's full name: one
+  # call (two when HEAD is unborn or the base does not resolve). The
+  # base's name comes last: a base given as a commit id has none (git
+  # prints nothing for it), and nothing after it can shift.
   _LG_IFL_B=""
   _LG_IFL_CUR=""
   case "$_LG_IFL_BASEREF" in
     -*|''|$'\a'*) ;;
     *)
-      if git rev-parse "$_LG_IFL_BASEREF^{commit}" --symbolic-full-name "$_LG_IFL_BASEREF" HEAD > "$s.rp" 2>/dev/null; then
-        { IFS= read -r _LG_IFL_B; IFS= read -r full; IFS= read -r _LG_IFL_CUR; } < "$s.rp" || true
+      if git rev-parse "$_LG_IFL_BASEREF^{commit}" --symbolic-full-name HEAD "$_LG_IFL_BASEREF" > "$s.rp" 2>/dev/null; then
+        { IFS= read -r _LG_IFL_B; IFS= read -r hfull; IFS= read -r full; } < "$s.rp" || true
+        _LG_IFL_CUR=$hfull
       else
         _LG_IFL_B=$(git rev-parse -q --verify "$_LG_IFL_BASEREF^{commit}" 2>/dev/null) || _LG_IFL_B=""
         if [ -n "$_LG_IFL_B" ]; then full=$(git rev-parse --symbolic-full-name "$_LG_IFL_BASEREF" 2>/dev/null) || full=""; fi
@@ -732,36 +816,60 @@ _lg_ifl_prepare() {
 # _lg_ifl_prepare_bg / _lg_ifl_prepare_wait: _lg_ifl_prepare 0 in the
 # background, beside the index build (query.sh _lg_q_run: a warm read verb
 # pays for the scan's git calls in parallel, not in sequence). The settings
-# and the host id are read here first (their errors die in this shell); the
-# child numbers its scratch names apart and leaves its results in
-# $_SCRATCH/lg-ifl.state. While it runs, the index's PR note is held
-# (_LG_NOTE_DEFER: index.sh _lg_ix_pr_note), so the run's one note carries
-# both; _lg_ifl_prepare_wait prints it. A child that died has printed the
-# run's verdict: the wait exits with its status.
+# are read here first (their errors die in this shell), and the shallow tag
+# (one git call either side would make). The child:
+#   - prints no verdict: _LG_IFL_CHILD makes its _lg_fail (doc-tools.sh)
+#     leave "<rc>\t<message>" in $_SCRATCH/lg-ifl.fail and exit; the wait
+#     raises it here, the run's one verdict;
+#   - holds none of this run's output: its stdout and fd 9 go to
+#     /dev/null, its stderr (trace lines) to $_SCRATCH/lg-ifl.err, which the
+#     wait copies to stderr — a `$(…)` reading this run returns when the
+#     run ends;
+#   - numbers its scratch names apart, resolves the host id (off this
+#     shell's path) and leaves its results in $_SCRATCH/lg-ifl.state.
+# _on_exit (doc-tools.sh) kills and waits for it when the run ends first.
+# While it runs, the index's PR note is held (_LG_NOTE_DEFER: index.sh
+# _lg_ix_pr_note), so the run's one note carries both; the wait prints it.
+# DOC_TOOLS_LEDGER_SELFTEST=ifl-pidfile (scripts/test-ledger.sh only): the
+# child's pid into $DOC_TOOLS_LEDGER_SELFTEST_PIDFILE.
 _LG_IFL_PID=""
+_LG_IFL_CHILD=""
 _lg_ifl_prepare_bg() {
   _LG_IFL_PID=""
   _lg_ifl_load
   [ "$_LG_IFL_ON" = 1 ] || return 0
-  _LG_IFL_ME=$(_lg_host_id "$_LG_IFL_HOSTCFG")
-  rm -f -- "$_SCRATCH/lg-ifl.state"
+  _lg_ix_shallow
+  rm -f -- "$_SCRATCH/lg-ifl.state" "$_SCRATCH/lg-ifl.fail" "$_SCRATCH/lg-ifl.err"
   (
+    _LG_IFL_CHILD=1
+    exec > /dev/null 9> /dev/null 2> "$_SCRATCH/lg-ifl.err"
     _LG_PARSE_N=$((_LG_PARSE_N + 100000))
     _lg_ifl_prepare 0
-    printf '%s\n' "$_LG_IFL_SCAN" "$_LG_IFL_CANDS" "${_LG_IFL_SKEY:-}" "$_LG_IFL_B" > "$_SCRATCH/lg-ifl.state.tmp" \
+    printf '%s\n' "$_LG_IFL_SCAN" "$_LG_IFL_CANDS" "${_LG_IFL_SKEY:-}" "$_LG_IFL_B" "$_LG_IFL_ME" > "$_SCRATCH/lg-ifl.state.tmp" \
       && mv -f -- "$_SCRATCH/lg-ifl.state.tmp" "$_SCRATCH/lg-ifl.state"
   ) &
   _LG_IFL_PID=$!
+  case "${DOC_TOOLS_LEDGER_SELFTEST:-}" in
+    ifl-pidfile) printf '%s\n' "$_LG_IFL_PID" > "$DOC_TOOLS_LEDGER_SELFTEST_PIDFILE" ;;
+  esac
   _LG_NOTE_DEFER=1
 }
 _lg_ifl_prepare_wait() {
-  local rc=0 n=""
+  local rc=0 n="" f=""
   [ -n "$_LG_IFL_PID" ] || return 0
   wait "$_LG_IFL_PID" || rc=$?
   _LG_IFL_PID=""
   _LG_NOTE_DEFER=""
-  [ "$rc" = 0 ] || exit "$rc"
-  { IFS= read -r _LG_IFL_SCAN; IFS= read -r _LG_IFL_CANDS; IFS= read -r _LG_IFL_SKEY; IFS= read -r _LG_IFL_B; } \
+  if [ -s "$_SCRATCH/lg-ifl.err" ]; then cat -- "$_SCRATCH/lg-ifl.err" >&2 || true; fi
+  if [ -s "$_SCRATCH/lg-ifl.fail" ]; then
+    { IFS= read -r f < "$_SCRATCH/lg-ifl.fail"; } 2>/dev/null || true
+    case "${f%%	*}" in
+      1|2|3) _lg_fail "${f%%	*}" "${f#*	}" ;;
+    esac
+    _lg_die "${f#*	}"
+  fi
+  [ "$rc" = 0 ] || _lg_die "internal: the in-flight scan exited $rc"
+  { IFS= read -r _LG_IFL_SCAN; IFS= read -r _LG_IFL_CANDS; IFS= read -r _LG_IFL_SKEY; IFS= read -r _LG_IFL_B; IFS= read -r _LG_IFL_ME; } \
     < "$_SCRATCH/lg-ifl.state" || _lg_die "internal: the in-flight scan left no state"
   { IFS= read -r n < "$_SCRATCH/lg-pr.held"; } 2>/dev/null || n=""
   _lg_ix_pr_note "$n"
@@ -870,13 +978,28 @@ def dec: if test("[\u0001\u0002]") then gsub("\u0001"; "\n") | gsub("\u0002"; "\
 # _lg_ifl_join <index> <scan> <files 0|1> <out>: the branches (see
 # _LG_JQ_IFL_BRANCHES) as one JSON array in <out>.
 _lg_ifl_join() {
-  local ix="$1" scan="$2" files="$3" out="$4" s prl heads
+  local ix="$1" scan="$2" files="$3" out="$4" s prl heads ixd dir k tmp
   _lg_scratch_name
   s=$_LG_SN
   prl="$_SCRATCH/lg-pr.prl"
   heads="$_SCRATCH/lg-pr.heads"
   [ -f "$prl" ] || prl=/dev/null
   [ -f "$heads" ] || heads=/dev/null
+  # The index's lines depend on the index alone (its key covers the PR
+  # data): kept beside the overlays as ixd-<index key>.tsv, so a moved tip
+  # re-reads none of the 3,000 items.
+  case "$ix" in
+    */rev/index-*) dir="$_LG_CACHE/inflight/rev" ;;
+    *) dir="$_LG_CACHE/inflight" ;;
+  esac
+  k=${ix##*/index-}
+  ixd="$dir/ixd-${k%.json}.tsv"
+  if [ -s "$ixd" ]; then
+    _lg_ifl_join_lines "$ixd" "$scan" "$files" "$out" "$heads"
+    return 0
+  fi
+  mkdir -p -- "$dir" 2>/dev/null || _lg_die "cannot create $dir"
+  tmp=$(mktemp "$dir/.ixd.XXXXXX") || _lg_die "cannot create a temp file in $dir"
   # shellcheck disable=SC2016  # jq source
   jq -L "$_LG_LIB" -r --slurpfile prs "$prl" "$_LG_JQ_INCLUDE"'
     def e: if test("[\n\t]") then gsub("\n"; "\u0001") | gsub("\t"; "\u0002") else . end;
@@ -886,12 +1009,24 @@ _lg_ifl_join() {
     ($prs[] | select(.state == "open" and (.number | tostring | test("^[0-9]+$")))
      | "Q\t\(.number)\t\(.url // "" | tostring | e)",
        (select(.cross != true and (.head | type) == "string" and (.head | test("^[^\t\n\r]+$"))) | "P\t\(.number)\t\(.head)\t\(.url // "" | tostring | e)"))' \
-    "$ix" > "$s.ixd" || _lg_die "jq failed (the in-flight join's index lines)"
-  LC_ALL=C awk -F '\t' '{ print (NR - 1) "\t" $0 }' "$scan" \
-    | LC_ALL=C awk -v ixd="$s.ixd" -v heads="$heads" -v me="$_LG_IFL_ME" -v files="$files" "$_LG_AWK_GLOB$_LG_AWK_IFL_JOIN" > "$s.join" \
+    "$ix" > "$tmp" || { rm -f -- "$tmp"; _lg_die "jq failed (the in-flight join's index lines)"; }
+  mv -f -- "$tmp" "$ixd" || { rm -f -- "$tmp"; _lg_die "cannot install $ixd"; }
+  # shellcheck disable=SC2012  # cache names are ixd-<hex>.tsv
+  ls -t "$dir"/ixd-*.tsv 2>/dev/null | tail -n +4 | while IFS= read -r tmp; do rm -f "$tmp"; done
+  _lg_ifl_join_lines "$ixd" "$scan" "$files" "$out" "$heads"
+}
+
+# _lg_ifl_join_lines <ixd> <scan> <files 0|1> <out> <heads>: the join
+# proper (_LG_AWK_IFL_JOIN, _LG_JQ_IFL_BRANCHES).
+_lg_ifl_join_lines() {
+  local s
+  _lg_scratch_name
+  s=$_LG_SN
+  LC_ALL=C awk -F '\t' '{ print (NR - 1) "\t" $0 }' "$2" \
+    | LC_ALL=C awk -v ixd="$1" -v heads="$5" -v me="$_LG_IFL_ME" -v files="$3" "$_LG_AWK_GLOB$_LG_AWK_IFL_JOIN" > "$s.join" \
     || _lg_die "cannot join the in-flight branches with the index"
-  jq -L "$_LG_LIB" -R -n -c --arg me "$_LG_IFL_ME" --argjson files "$( [ "$files" = 1 ] && echo true || echo false )" \
-    "$_LG_JQ_INCLUDE$_LG_JQ_IFL_BRANCHES" "$s.join" > "$out" || _lg_die "jq failed (the in-flight branches)"
+  jq -L "$_LG_LIB" -R -n -c --arg me "$_LG_IFL_ME" --argjson files "$( [ "$3" = 1 ] && echo true || echo false )" \
+    "$_LG_JQ_INCLUDE$_LG_JQ_IFL_BRANCHES" "$s.join" > "$4" || _lg_die "jq failed (the in-flight branches)"
 }
 
 # _lg_ifl_overlay <index>: the overlay for <index> (see the header) into
@@ -904,7 +1039,11 @@ _lg_ifl_overlay() {
   [ -n "$_LG_IFL_SCAN" ] || return 0
   _lg_scratch_name
   s=$_LG_SN
-  dir="$_LG_CACHE/inflight"
+  # An index built from a commit (publish) keeps its overlays apart.
+  case "$ix" in
+    */rev/index-*) dir="$_LG_CACHE/inflight/rev" ;;
+    *) dir="$_LG_CACHE/inflight" ;;
+  esac
   # The key: the index's own (its file name) and the scan's (prepare).
   key=${ix##*/index-}
   key="${key%.json}"
@@ -933,8 +1072,8 @@ _lg_ifl_overlay() {
     rm -f -- "$tmp"
     _lg_die "cannot write $f"
   fi
-  # The newest 3 overlays kept (by when they were built); facts files and
-  # temp dirs nobody used for 30 days removed.
+  # The newest 3 overlays of this directory kept (by when they were
+  # built); facts files and temp dirs nobody used for 30 days removed.
   # shellcheck disable=SC2012  # cache names are overlay-<hex>.json
   ls -t "$dir"/overlay-*.json 2>/dev/null | tail -n +4 | while IFS= read -r tmp; do rm -f "$tmp"; done
   cut -f 6 "$s.scan" | tr '\n' '\000' | xargs -0 touch -c 2>/dev/null || true
@@ -975,13 +1114,13 @@ _lg_branch_facts() {
   [ "$_LG_IFL_ON" = 1 ] || _lg_die "in-flight awareness is off (config inflight.enabled)"
   _lg_scratch_name
   s=$_LG_SN
-  _LG_IFL_ME=$(_lg_host_id "$_LG_IFL_HOSTCFG")
+  _LG_IFL_ME=$(_lg_host_id "$_LG_IFL_HOSTCFG") || exit "$?"
   _LG_IFL_B=$(git rev-parse -q --verify "$_LG_IFL_BASEREF^{commit}" 2>/dev/null) || _lg_die "the base '$_LG_IFL_BASEREF' does not resolve"
   o=$(git rev-parse -q --verify "$o^{commit}" 2>/dev/null) || _lg_die "unknown commit: '$1'"
   printf -- '-\t%s\t-\t%s\t-\t0\n' "$_LG_IFL_ME" "$o" > "$s.cands"
   _lg_ifl_resolve "$s.cands" "$s.scan" 1
   [ -s "$s.scan" ] || _lg_die "$o is merged into the base, or shares no history with it"
-  ix=$(_lg_index)
+  ix=$(_lg_index) || exit "$?"
   _lg_ifl_join "$ix" "$s.scan" 1 "$s.br"
   jq -c '.[0] | {merge_base, files, claims, contract_changes, acks, refs}' "$s.br" || _lg_die "jq failed (the branch facts)"
 }
@@ -1020,10 +1159,13 @@ cmd_ledger_inflight() {
     _lg_emit inflight 0
   fi
   _lg_ifl_prepare "$( [ -n "$_OPT_fetch" ] && echo 1 || echo 0 )"
-  ix=$(_lg_index)
+  ix=$(_lg_index) || exit "$?"
   _lg_ifl_index_note
   if [ -n "$_LG_IFL_SCAN" ]; then
-    _lg_ifl_join "$ix" "$_LG_IFL_SCAN" 1 "$s.br"
+    # The facts files (and their signature) are checked here, as for an
+    # overlay build.
+    _lg_ifl_resolve "$_LG_IFL_CANDS" "$s.scan" 1
+    _lg_ifl_join "$ix" "$s.scan" 1 "$s.br"
   else
     printf '[]\n' > "$s.br" || _lg_die "cannot write $s.br"
   fi
