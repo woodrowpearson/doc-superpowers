@@ -8183,7 +8183,8 @@ _claims_v4() {
 #     "|") whose header row names a column matching
 #     resolved|resolution|answer|decision (the first such, case-insensitive),
 #     that cell's normalised text is not empty, and no claim's normalised
-#     quote is a substring of it, nor it of the quote.
+#     quote is a substring of it, nor holds it in an occurrence that hits
+#     this row's line (a short cell, "No.", is in many a quote elsewhere).
 # Each is one finding row "<doc>:<line>: normative text no claim covers"
 # (claim null). V8 is not in the default blocking list, so validate reports
 # its findings as advisories (_JQ_CLAIMS_EMIT); gate (_CL_ALL_BLOCKING)
@@ -8311,6 +8312,7 @@ BEGIN {
     if (x ~ /^#+$/) x = ""
     else sub(/[ \t]+#+$/, "", x)
     cls[h] = hclass(x)
+    for (i = 1; i < h; i++) if (cls[i] == "descriptive") cls[h] = "descriptive"
     for (i = h + 1; i <= 6; i++) cls[i] = ""
     pend = h
     print NR "\tother"
@@ -8334,7 +8336,10 @@ BEGIN {
 # awk one, so a ``` line inside a ```` fence stays fenced — sets its level's
 # class and clears every deeper level's. A line takes the class of the
 # deepest level that has one (a ### heading with none of its own inherits
-# its parent's: Requirements' subsections are normative), else other. A
+# its parent's: Requirements' subsections are normative), else other.
+# Descriptive is sticky downward: under a descriptive heading every deeper
+# heading is descriptive, whatever its text (an Interfaces subsection of
+# Implementation Notes describes; it does not specify). Otherwise a
 # heading's class, from its text (closing #s dropped; compared lower-cased):
 #   1. descriptive, when a <!-- spec-claims:descriptive --> line (up to three
 #      leading spaces) follows it before any other non-blank line;
@@ -8441,8 +8446,9 @@ _claims_added_lines() {
 
 # V8 over one doc (raw on stdin; run after _JQ_CLAIMS_NORM): $doc its path,
 # $sec its _claims_sections lines, $added its added line numbers (one per
-# line) unless $all is 1 (every line), $c cl-claims.json. One finding row
-# per uncovered line (see the section comment).
+# line) unless $all is 1 (every line), $c cl-claims.json. $qs: each claim's
+# normalised quote and the lines its occurrence(s) hit. One finding row per
+# uncovered line (see the section comment).
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_V8='def cl_cells: sub("^[ \t]*\\|"; "") | sub("\\|[ \t]*$"; "") | split("|");
  def cl_delim_row: test("^[ \t]*\\|?[ \t]*:?-+:?[ \t]*(\\|[ \t]*:?-+:?[ \t]*)*\\|?[ \t]*$");
@@ -8452,11 +8458,12 @@ _JQ_CLAIMS_V8='def cl_cells: sub("^[ \t]*\\|"; "") | sub("\\|[ \t]*$"; "") | spl
  | (reduce ($sec | split("\n")[] | select(. != "") | split("\t")) as $x ({}; .[$x[0]] = $x[1])) as $cls
  | [$c[0][] | select(.doc == $doc) | .claim
     | select(type == "object" and (.quote | type) == "string")
-    | {q: (.quote | claims_norm), k: .quote_occurrence} | select(.q != "")] as $qs
- | (reduce ($qs[] | . as $x
-      | if ($x.k | type) == "number" then $d | claims_lines_hit($x.q; $x.k)[]
-        else ($d | claims_occ($x.q) | length) as $n | range(1; $n + 1) as $j | $d | claims_lines_hit($x.q; $j)[] end)
-     as $n ({}; .[$n | tostring] = true)) as $hit
+    | {q: (.quote | claims_norm), k: .quote_occurrence} | select(.q != "")
+    | . as $x
+    | .lines = [if ($x.k | type) == "number" then $d | claims_lines_hit($x.q; $x.k)[]
+                else ($d | claims_occ($x.q) | length) as $n | range(1; $n + 1) as $j
+                  | $d | claims_lines_hit($x.q; $j)[] end]] as $qs
+ | (reduce $qs[].lines[] as $n ({}; .[$n | tostring] = true)) as $hit
  | (reduce range(0; $live | length) as $i ({hdr: null, col: null, body: false, rows: {}};
       $live[$i] as $t
       | if $src[$i].k != "out" or ($t | test("\\|") | not) then .hdr = null | .col = null | .body = false
@@ -8474,7 +8481,8 @@ _JQ_CLAIMS_V8='def cl_cells: sub("^[ \t]*\\|"; "") | sub("\\|[ \t]*$"; "") | spl
  | select(
      ($cls[$s] == "normative" and ($live[$n - 1] // "" | claims_norm_line | test("[[:alnum:]]")) and ($hit[$s] | not))
      or ($cls[$s] == "openq" and (($rows[$s] // "") as $cell
-           | $cell != "" and (any($qs[]; .q as $q | ($cell | contains($q)) or ($q | contains($cell))) | not))))
+           | $cell != "" and (any($qs[]; .q as $q
+               | ($cell | contains($q)) or (($q | contains($cell)) and any(.lines[]; . == $n))) | not))))
  | {check: "V8", claim: null, doc: $doc, message: "\($doc):\($n): normative text no claim covers"}'
 
 # _claims_v8 --staged | --all | <range> [<findings-file>]: V8 (see the
