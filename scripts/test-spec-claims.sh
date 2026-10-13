@@ -7530,6 +7530,27 @@ test_v8_invalid_heading_ere_indeterminate() {
   teardown
 }
 
+test_v8_open_questions_cover_is_row_bound() {
+  echo "test: V8 — a resolved cell inside a quote covers it only where that quote's occurrence is the row"
+  claims_fixture
+  doc_edit "$DOC" "| Rotate keys? | Keys rotate every 30 days. |" '| Ship it? | No. |' after
+  doc_edit "$DOC" "$REFRESH_LINE" "- No. Tokens are never reissued." after
+  add_claim "$(session_claim "No. Tokens are never reissued")"
+  rerender
+  git add "$DOC" "$SIDECAR"
+  cl validate --staged
+  assert_v8_line "$DOC" "| Ship it? | No. |" "an unrelated quote holding the short cell 'No.'"
+  # A quote holding the cell, whose occurrence is on the row itself, covers it.
+  jset "$SIDECAR" '.claims[-1].quote = "Ship it? | No."'
+  doc_edit "$DOC" "- No. Tokens are never reissued." "- Tokens are never reissued."
+  jset "$SIDECAR" '.claims += [.claims[-1] | .id = "SPEC-AUTH-001#never-reissued" | .quote = "Tokens are never reissued"]'
+  rerender
+  git add "$DOC" "$SIDECAR"
+  cl validate --staged
+  assert_eq "0" "$(v8_count)" "a quote whose occurrence is the row, holding the cell: no V8 row"
+  teardown
+}
+
 test_v8_open_questions_resolved_column() {
   echo "test: V8 — an Open questions row's Resolved cell is normative"
   claims_fixture
@@ -7650,11 +7671,21 @@ test_v8_sections_classes() {
     printf '## Open Questions\n| Q | Resolved |\n## 3.1 Interfaces\n<!-- a comment -->\n<!-- a --> g(y). <!-- b -->\nf(x).\n'
     printf '%s\n## Claim status\nrow\n%s\nAfter the block.\n' "$BLOCK_BEGIN" "$BLOCK_END"
     printf '````md\n```\n# Not a heading\n```\n````\n## Summary\nText.\n'
+    # Descriptive is sticky downward: a default-normative heading under a
+    # descriptive one (by name or by the marker) stays descriptive.
+    printf '## Implementation Notes\n### Interfaces\nI2 line.\n#### Sub\nI4 line.\n'
+    printf '## Build notes\n<!-- spec-claims:descriptive -->\n### Requirements\nBuilt line.\n'
+    # Under a normative heading a sub-heading inherits normative unless it is
+    # itself descriptive (and then its own sub-headings stay descriptive).
+    printf '## Requirements\n### Notes\nNote line.\n### Implementation Notes\nImpl line.\n#### Interfaces\nDeep line.\n'
   } > "$doc"
   want="other other other normative other normative other descriptive other other other descriptive"
   want="$want other openq other other normative normative"
   want="$want other other other other normative"
   want="$want normative normative normative normative normative other other"
+  want="$want other other descriptive other descriptive"
+  want="$want other other other descriptive"
+  want="$want other other normative other descriptive other descriptive"
   sections_of "$doc"
   assert_eq "$want" "$SECTIONS" "each line's class"
   sed 's/$/\r/' "$doc" > "$doc.crlf"
@@ -8114,6 +8145,7 @@ run_tests() {
   test_v8_host_heading
   test_v8_invalid_heading_ere_indeterminate
   test_v8_open_questions_resolved_column
+  test_v8_open_questions_cover_is_row_bound
   test_v8_non_normative_section_ignored
   test_v8_status_block_excluded
   test_v8_heading_inside_fence_ignored
