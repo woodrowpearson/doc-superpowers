@@ -133,7 +133,11 @@ _lg_ifl_ref_overlap() {
 # The refs the in-flight fetch must never write or prune (it runs `git
 # fetch --prune +<ref_prefix>/*:<ref_prefix>/*`): git's own namespaces, the
 # pull refs' destination, and the ledger's counter ref and private refs
-# (keys.sh). A ref_prefix that equals, holds or lies under one is refused.
+# (keys.sh). A ref_prefix that equals, holds or lies under one is refused —
+# except strictly under refs/heads/ with a segment of its own (design §H.1:
+# a server that rejects other refs; e.g. refs/heads/ledger-inflight). Then
+# the branch scans skip that namespace and its remote-tracking mirror
+# (_lg_ifl_scan): in-flight refs are never read as ordinary branches.
 _LG_IFL_RESERVED="refs/heads refs/remotes refs/tags refs/notes refs/stash refs/bisect refs/replace refs/worktree refs/rewritten refs/prefetch refs/doc-superpowers/pull refs/doc-superpowers/ledger/counters-remote refs/doc-superpowers/ledger/base-remote"
 
 # _lg_ifl_load: the in-flight settings of the run's config, once. Sets
@@ -181,8 +185,11 @@ _lg_ifl_load() {
   [ "$line" = true ] || return 0
   _lg_ifl_ref_ok "$_LG_IFL_PREFIX" || _lg_die "config inflight.ref_prefix '$_LG_IFL_PREFIX' is not a ref prefix under refs/ (no trailing '/')"
   for r in $_LG_IFL_RESERVED "$ctr"; do
+    if [ "$r" = refs/heads ]; then
+      case "$_LG_IFL_PREFIX" in refs/heads/?*) continue ;; esac
+    fi
     if _lg_ifl_ref_overlap "$_LG_IFL_PREFIX" "$r"; then
-      _lg_die "config inflight.ref_prefix '$_LG_IFL_PREFIX' overlaps $r: the in-flight fetch (--prune) would rewrite or delete those refs — choose a prefix of its own (default refs/doc-superpowers/inflight)"
+      _lg_die "config inflight.ref_prefix '$_LG_IFL_PREFIX' overlaps $r: the in-flight fetch (--prune) would rewrite or delete those refs — choose a prefix of its own (default refs/doc-superpowers/inflight; under refs/heads/, a segment of its own such as refs/heads/ledger-inflight)"
     fi
   done
   if [ -n "$_LG_IFL_PULL" ]; then
@@ -334,12 +341,17 @@ BEGIN {
 }
 {
   oid = $1; d = $2 + 0; r = $3
-  if (substr(r, 1, 11) == "refs/heads/") { host = me; name = substr(r, 12); src = "local" }
-  else if (substr(r, 1, length(rh)) == rh) { host = me; name = substr(r, length(rh) + 1); src = "remote" }
-  else if (substr(r, 1, length(ip)) == ip) {
+  # The in-flight prefix first: under refs/heads/ it is no local branch.
+  if (substr(r, 1, length(ip)) == ip) {
     rest = substr(r, length(ip) + 1); t = index(rest, "/")
     if (t < 2) next
     host = substr(rest, 1, t - 1); name = substr(rest, t + 1); src = "inflight"
+  }
+  else if (substr(r, 1, 11) == "refs/heads/") { host = me; name = substr(r, 12); src = "local" }
+  else if (substr(r, 1, length(rh)) == rh) {
+    # The remote-tracking mirror of an in-flight prefix under refs/heads/.
+    if (rm != "" && substr(r, 1, length(rm)) == rm) next
+    host = me; name = substr(r, length(rh) + 1); src = "remote"
   } else next
   if (name == "" || name == "HEAD" || name == bb || name == views) next
   if (cutoff > 0 && d < cutoff && !(host == me && name == cur)) next
@@ -384,7 +396,10 @@ _lg_ifl_dedup() {
 # host first, host). Needs _lg_ifl_prepare's _LG_IFL_B, _LG_IFL_BB (the
 # base's branch), _LG_IFL_CUR (the current branch), _LG_IFL_ME.
 _lg_ifl_scan() {
-  local out="$1" s cutoff=0 n i now
+  local out="$1" s cutoff=0 n i now rm=""
+  case "$_LG_IFL_PREFIX" in
+    refs/heads/?*) rm="refs/remotes/$_LG_IFL_REMOTE/${_LG_IFL_PREFIX#refs/heads/}/" ;;
+  esac
   _lg_scratch_name
   s=$_LG_SN
   if [ "$_LG_IFL_AGE" -gt 0 ] 2>/dev/null; then
@@ -402,7 +417,7 @@ _lg_ifl_scan() {
   fi
   LC_ALL=C awk -v me="$_LG_IFL_ME" -v rh="refs/remotes/$_LG_IFL_REMOTE/" -v ip="$_LG_IFL_PREFIX/" -v bb="$_LG_IFL_BB" \
     -v views="$_LG_IFL_VIEWS" -v cur="$_LG_IFL_CUR" -v cutoff="$cutoff" -v wt="$s.wt" -v dd="$s.dd" -v det="$s.det" \
-    -v conf="$s.conf" "$_LG_AWK_IFL_SCAN" "$s.refs" > "$s.cands" || _lg_die "cannot read the branches"
+    -v conf="$s.conf" -v rm="$rm" "$_LG_AWK_IFL_SCAN" "$s.refs" > "$s.cands" || _lg_die "cannot read the branches"
   # Copies of one branch at different commits (only then, a git call per
   # pair): a descendant wins; unrelated tips, the newer committer date,
   # then local < worktree < remote < inflight.
