@@ -2214,10 +2214,11 @@ claims run|cmd_claims_run|repo|claims+ planes-of= all scheduled judge-sample= ba
   "runners": one run call per runner), log claims (with --scheduled only)
   through the log adapter, and lint claims by their pattern (grep -E) over
   the working tree's lint.paths files (pass, or assert-fail). --claims
-  takes ids (commas split them too). --planes-of <a>..<b> runs the test
-  claims of every runner that has a "paths" entry (a prefix or a glob)
-  matching a file the range changes: its first-parent commits' files and
-  its merges' conflict resolutions, never trunk merged in. --judge-sample
+  takes ids (commas split them too). --planes-of <a>..<b> (or <a>...<b>:
+  from their merge-base) runs the test claims of every runner that has a
+  "paths" entry (a prefix or a glob) matching a file the range changes:
+  its first-parent commits' files and its merges' conflict resolutions,
+  never trunk merged in. --judge-sample
   <n> also names n judge claims to review, rotated weekly. Retired, frozen
   and judge claims are reported skipped. Each outcome is judged by the
   claim's status: built must pass, diverged fail by an assertion, unbuilt
@@ -7326,7 +7327,8 @@ _JQ_CLAIMS_RUN_RESULTS='$plan[0] as $plan
 #     files>` (plain unified format: a hunk parser reads them as any
 #     other's), to the patch text. Trunk lines inside a resolved file come
 #     along: conservative. Patch ids stay non-merge only.
-# <a> must be an ancestor of <b> (a range that is not one branch's work dies,
+# A three-dot <a>...<b> means <merge-base a b>..<b> (_claims_range_parse). <a>
+# must be an ancestor of <b> (a range that is not one branch's work dies,
 # exit 2: never an empty set). These helpers are the rule's one
 # implementation; no consumer derives a range on its own. Pathspecs are
 # literal (git --literal-pathspecs) and no textconv or external diff applies,
@@ -7336,19 +7338,26 @@ _CL_RANGE_A=""  # _claims_range_parse's <a>, a full commit id
 _CL_RANGE_B=""  # its <b>
 
 # _claims_range_parse <range>: _CL_RANGE_A and _CL_RANGE_B from "<a>..<b>"
-# (both given, no "..."). Dies when <range> has another shape, when either
-# end is not a commit, or when <a> is not an ancestor of <b>.
+# (both given), or from "<a>...<b>", resolved here and only here to
+# "$(git merge-base <a> <b>)..<b>" (no merge base: dies). Dies when <range>
+# has another shape, when either end is not a commit, or when <a> is not an
+# ancestor of <b>.
 _claims_range_parse() {
-  local a b
+  local a b sep=..
   case "$1" in
-    -*|*...*|..*|*..) _claims_die "'$1' is not a revision range <a>..<b>" ;;
+    -*|..*|*..) _claims_die "'$1' is not a revision range <a>..<b> or <a>...<b>" ;;
+    *...*) sep=... ;;
     *..*) ;;
-    *) _claims_die "'$1' is not a revision range <a>..<b>" ;;
+    *) _claims_die "'$1' is not a revision range <a>..<b> or <a>...<b>" ;;
   esac
-  a=${1%%..*}
-  b=${1#*..}
+  a=${1%%"$sep"*}
+  b=${1#*"$sep"}
   _CL_RANGE_A=$(git rev-parse -q --verify "$a^{commit}" 2>/dev/null) || _claims_die "'$a' (in $1) is not a commit"
   _CL_RANGE_B=$(git rev-parse -q --verify "$b^{commit}" 2>/dev/null) || _claims_die "'$b' (in $1) is not a commit"
+  if [ "$sep" = ... ]; then
+    _CL_RANGE_A=$(git merge-base "$_CL_RANGE_A" "$_CL_RANGE_B" 2>/dev/null) \
+      || _claims_die "'$a' and '$b' have no merge base (in $1): the range is not one branch's work"
+  fi
   git merge-base --is-ancestor "$_CL_RANGE_A" "$_CL_RANGE_B" 2>/dev/null \
     || _claims_die "'$a' is not an ancestor of '$b' (in $1): the range is not one branch's work"
 }
@@ -9270,10 +9279,12 @@ _JQ_CLAIMS_REVERIFY_ALL='def nes: type == "string" and length > 0;
 #      --planes-of selection of <from>..HEAD, run through the run core
 #      (_claims_run_selected): the record's claims and verdicts.
 #   4. A named id no claim has is a finding; so is a named claim still
-#      unbuilt that no ruling included in this record covers ("chunk was
-#      meant to build it: promote, rule, or defer"), and a run claim for
-#      which _claims_repromote_owed prints owed ("re-promote owed"), even
-#      when its check passes. unverifiable-here is an advisory.
+#      unbuilt that no DOC-STALE ruling included in this record covers
+#      ("chunk was meant to build it: promote, rule, or defer"; a deferral
+#      moves it to diverged and a RETIRE to retired, so neither leaves it
+#      unbuilt; a CODE-DIVERGES ruling alone never clears it), and a run
+#      claim for which _claims_repromote_owed prints owed ("re-promote
+#      owed"), even when its check passes. unverifiable-here is an advisory.
 #   5. V8 and V8n (_claims_v8, _claims_v8n: hooks, no-ops until those checks
 #      land) and V9 over <from>..HEAD, read by the range rule; every finding
 #      blocks (_CL_ALL_BLOCKING). A V9 id given in --holds is held: no
@@ -9490,7 +9501,8 @@ cmd_claims_gate() {
      | if $e == null then {check: "gate", claim: $i, doc: null,
                            message: "named on chunk \($n)'"'"'s **Claims:** line, but no claim has this id"}
        elif $e.claim.status == "unbuilt"
-            and (any($r[0].reconciliations[]; .claim == $i and .kind == "ruling") | not)
+            and (any($r[0].reconciliations[]; .claim == $i and .kind == "ruling"
+                     and .ruling.direction == "DOC-STALE") | not)
        then {check: "gate", claim: $i, doc: $e.doc, message: "chunk was meant to build it: promote, rule, or defer"}
        else empty end' "$named" >> "$_SCRATCH/cl-findings.jsonl"
   _claims_jq gate-owed-ids -r '.[] | select(.action != "skip") | .claim | select(test("\n") | not)' \
