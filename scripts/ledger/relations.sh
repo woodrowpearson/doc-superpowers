@@ -21,6 +21,19 @@
 # and E is in `git rev-list <L>..B`, L the last commit on B touching X's
 # file (ancestry, not time). An item that has no commit on B gets none; an
 # uncommitted edit clears nothing — a later commit to X on B clears it.
+# Hosted items (config items.adapter; index.sh "Hosted items", controller
+# ruling I2) take part by time, the hosted issue being the source of
+# truth: a hosted source S is terminal as the index has it and landed at
+# its close time ("closed", else "updated"); a hosted X was last touched
+# at its "updated" (any update of the issue clears its markers). Pairs
+# with a hosted side compare times: S's landing (a file source: its event
+# commit E's committer time) against X's touch (a file X: L's committer
+# time); a contract change counts for a hosted X when E's committer time
+# is after its "updated". Commit times come from one `git log --no-walk
+# --stdin` over the commits such pairs need, and from the contract scan
+# (%ct); a hosted consumer scans the base's commits since the oldest such
+# "updated" (--since-as-filter; git < 2.37: --since) beside the bounded
+# scan of the file consumers.
 # S's class "at B" is the index's when S's file is the same blob at B, else
 # read from B's blob (absent at B: not terminal) — a source closed on a
 # branch, or only in the working tree, has not landed. Contract changes are
@@ -132,34 +145,80 @@ _lg_msg_claims() {
 
 # The contract-change scan the re-check program runs (system()) once it
 # knows its bound: bash <this> <base> <bound|""> <dirs> <clog> <msg> <globs 0|1>
-# — the files the consumed contracts' defined_in name, changed in <base>
-# ^<bound> (tr'd: one token per line, a commit led by \002), and the
-# messages of the same commits.
+# [since] — the files the consumed contracts' defined_in name, changed in
+# <base> ^<bound> (tr'd: one token per line, a commit led by \002 and
+# followed by " <committer time>"), and the messages of the same commits
+# ("\001<commit> <committer time>"); [since]: only the commits committed
+# then or later (the hosted consumers' scan).
 # shellcheck disable=SC2016  # bash source
 _LG_SH_RECHECK_SCAN='set -o pipefail
-B=$1 bound=$2 dirs=$3 clog=$4 msg=$5 globs=$6
+B=$1 bound=$2 dirs=$3 clog=$4 msg=$5 globs=$6 since=${7:-}
 rng=("$B")
 if [ -n "$bound" ]; then rng+=("^$bound"); fi
+if [ -n "$since" ]; then
+  if git log -1 --since-as-filter=2000-01-01T00:00:00Z --format=%H "$B" -- > /dev/null 2>&1; then
+    rng+=("--since-as-filter=$since")
+  else
+    rng+=("--since=$since")
+  fi
+fi
 specs=()
 while IFS= read -r d; do specs+=("$d"); done < "$dirs"
 : > "$clog"
 if [ "$globs" = 1 ]; then
-  GIT_LITERAL_PATHSPECS=1 git -c log.showSignature=false log --no-color --full-history --format="%x02%H" \
+  GIT_LITERAL_PATHSPECS=1 git -c log.showSignature=false log --no-color --full-history --format="%x02%H %ct" \
     --name-only -z "${rng[@]}" -- ${specs[@]+"${specs[@]}"} | tr "\n\000" "\001\n" > "$clog" || exit 1
 fi
-git -c log.showSignature=false log --no-color --format="%x01%H%n%B" "${rng[@]}" -- > "$msg" || exit 1
+git -c log.showSignature=false log --no-color --format="%x01%H %ct%n%B" "${rng[@]}" -- > "$msg" || exit 1
 '
 
 # The program: -v base, graphf, tab, ev, termf, cg (the consumed contracts'
 # globs, "<id>\001<glob>"), trf (the contract_change trailer names), sh,
-# scan, dirs, clog, msg, scanerr. One pass: the graph and the touches, the
-# bound, the scan (system), the decision. Prints "<n>\t<entry>" per marker
-# (n: the item's place, tab's O lines).
+# scan, dirs, clog, msg, scanerr, hostf (the hosted items' times,
+# index.sh; /dev/null without), needf / ctf (the commit-time lookup's
+# input and output). One pass: the graph and the touches, the bound, the
+# scans (system), the commit times a hosted pair needs (system), the
+# decision. Prints "<n>\t<entry>" per marker (n: the item's place, tab's
+# O lines).
 # shellcheck disable=SC2016  # awk source
 _LG_AWK_RECHECK='
 function shq(s) { gsub(/\047/, "\047\\\047\047", s); return "\047" s "\047" }
 # addev(k, c): commit c changed contract k (each pair once).
 function addev(k, c) { if ((k, c) in SEENEV) return; SEENEV[k, c] = 1; NEV[k]++; EV[k, NEV[k]] = c }
+# commitct(t): t is "<commit> <committer time>": the commit, its time kept in CT.
+function commitct(t,   sp) {
+  sp = index(t, " ")
+  if (!sp) return t
+  CT[substr(t, 1, sp - 1)] = substr(t, sp + 1) + 0
+  return substr(t, 1, sp - 1)
+}
+# scanrun(bound, since, cl, ms): run the scan into cl / ms and read its
+# events (files under a consumed contract; Contract-Change lines).
+function scanrun(bound, since, cl, ms,   rc, t, c, h, i, n, X, v) {
+  rc = system(shq(sh) " " shq(scan) " " shq(base) " " shq(bound) " " shq(dirs) " " shq(cl) " " shq(ms) " " globs " " shq(since) " 2> " shq(scanerr))
+  if (rc != 0) { print "scan failed (rc " rc ")" > "/dev/stderr"; exit 2 }
+  c = ""
+  while ((getline t < cl) > 0) {
+    while (substr(t, 1, 1) == "\001") t = substr(t, 2)
+    if (substr(t, 1, 1) == "\002") { c = commitct(substr(t, 2)); continue }
+    if (t == "" || c == "") continue
+    if (!(t in HIT)) {
+      gx_match(t); h = ""
+      for (i = 1; i <= GX_MN; i++) h = h SUBSEP ID[GX_M[i]]
+      HIT[t] = h
+    }
+    n = split(substr(HIT[t], 2), X, SUBSEP)
+    for (i = 1; i <= n; i++) addev(X[i], c)
+  }
+  close(cl)
+  c = ""
+  while ((getline t < ms) > 0) {
+    if (substr(t, 1, 1) == "\001") { c = commitct(substr(t, 2)); continue }
+    tr_match(t)
+    for (i = 1; i <= TRM; i++) { v = TRMV[i]; sub(/[ \t].*/, "", v); if (v != "" && c != "") addev(v, c) }
+  }
+  close(ms)
+}
 # side(l): the commits reachable from l without passing a commit of the
 # first-parent line (SIDE[l, c]), and the newest line commit it reaches
 # (KMIN[l], the smallest index; -1 when none).
@@ -216,6 +275,10 @@ BEGIN {
       ns = split(f[4], b, "\003"); for (i = 1; i <= ns; i++) WANT[b[i]] = 1
     } else if (f[1] == "S") SK[f[2]] = f[3]
   }
+  # The hosted items: their landing and touch times (epoch s; "" unknown).
+  while ((getline l < hostf) > 0) {
+    split(l, a, "\t"); HOST[a[1]] = 1; HL[a[1]] = a[2]; HU[a[1]] = a[3]; HUI[a[1]] = a[4]
+  }
   # The last commit on the base touching each wanted path (history order).
   while ((getline k < ev) > 0) {
     if (k == "@") { getline C < ev; continue }
@@ -235,8 +298,14 @@ BEGIN {
   # side walk reaches; a consumer reaching none → no bound. Excluding
   # ancestors of M_k drops only what no consumer could count; anc() below
   # keeps each item exact.
-  kb = -1; nob = 0; cons = 0
+  kb = -1; nob = 0; cons = 0; hcons = 0; hmin = ""
   for (i = 1; i <= no; i++) {
+    # A hosted consumer: the commits since its last update (scanned apart).
+    if (OC[i] != "" && (OP[i] in HOST) && HU[OP[i]] != "") {
+      if (!hcons || HU[OP[i]] + 0 < hmin + 0) { hmin = HU[OP[i]]; hminI = HUI[OP[i]] }
+      hcons = 1
+      continue
+    }
     if (OC[i] == "" || !(OP[i] in LAST)) continue
     l = LAST[OP[i]]; cons = 1
     if (!(l in ENTER)) { nob = 1; continue }
@@ -245,68 +314,86 @@ BEGIN {
     if (k < 0) nob = 1
     else if (k > kb) kb = k
   }
-  if (cons) {
-    bound = (nob || kb < 0) ? "" : MAIN[kb]
+  if (cons || hcons) {
     globs = 0
     while ((getline l < cg) > 0) {
       t = index(l, "\001"); g++
       if (gx_add(g, substr(l, t + 1))) { ID[g] = substr(l, 1, t - 1); globs = 1 }
     }
-    rc = system(shq(sh) " " shq(scan) " " shq(base) " " shq(bound) " " shq(dirs) " " shq(clog) " " shq(msg) " " globs " 2> " shq(scanerr))
-    if (rc != 0) { print "scan failed (rc " rc ")" > "/dev/stderr"; exit 2 }
-    # Files under a consumed contract: each distinct file matched once.
-    while ((getline t < clog) > 0) {
-      while (substr(t, 1, 1) == "\001") t = substr(t, 2)
-      if (substr(t, 1, 1) == "\002") { c = substr(t, 2); continue }
-      if (t == "" || c == "") continue
-      if (!(t in HIT)) {
-        gx_match(t); h = ""
-        for (i = 1; i <= GX_MN; i++) h = h SUBSEP ID[GX_M[i]]
-        HIT[t] = h
-      }
-      n = split(substr(HIT[t], 2), X, SUBSEP)
-      for (i = 1; i <= n; i++) addev(X[i], c)
-    }
     # Contract-Change: <id> … lines (the first word is the id).
     tr_load(trf)
-    c = ""
-    while ((getline t < msg) > 0) {
-      if (substr(t, 1, 1) == "\001") { c = substr(t, 2); continue }
-      tr_match(t)
-      for (i = 1; i <= TRM; i++) { v = TRMV[i]; sub(/[ \t].*/, "", v); if (v != "" && c != "") addev(v, c) }
-    }
+    # The file consumers: B ^M_k. The hosted ones: the base commits since the
+    # oldest of their updates. (An event either scan finds is decided per
+    # item below: anc() for a file item, the time for a hosted one.)
+    if (cons) scanrun((nob || kb < 0) ? "" : MAIN[kb], "", clog, msg)
+    if (hcons) scanrun("", hminI, clog ".h", msg ".h")
   }
   while ((getline l < termf) > 0) TERM[l] = 1
+  # The commit times a pair with a hosted side needs: the last commit L of
+  # a file X (a hosted source), the event commit of a file source (a hosted X).
+  nn = 0
+  printf "" > needf
   for (i = 1; i <= no; i++) {
-    p = OP[i]
-    if (!(p in LAST)) continue
-    l = LAST[p]
+    p = OP[i]; hp = (p in HOST)
+    if (!hp && !(p in LAST)) continue
     ns = split(OS[i], b, "\003")
     for (j = 1; j <= ns; j++) {
       q = b[j]
-      if ((q in TERM) && (q in LAST) && !anc(LAST[q], l)) print ON[i] "\t" SK[q]
+      if (!(q in TERM)) continue
+      if (q in HOST) { if (!hp && !(LAST[p] in NEEDC)) { NEEDC[LAST[p]] = 1; print LAST[p] > needf; nn++ } }
+      else if (hp && (q in LAST) && !(LAST[q] in NEEDC)) { NEEDC[LAST[q]] = 1; print LAST[q] > needf; nn++ }
+    }
+  }
+  close(needf)
+  if (nn > 0) {
+    rc = system("git log --no-walk=unsorted --stdin " shq("--format=%H %ct") " < " shq(needf) " > " shq(ctf) " 2>> " shq(scanerr))
+    if (rc != 0) { print "commit times failed (rc " rc ")" > "/dev/stderr"; exit 2 }
+    while ((getline t < ctf) > 0) commitct(t)
+  }
+  for (i = 1; i <= no; i++) {
+    p = OP[i]
+    hp = (p in HOST)
+    if (hp) { if (HU[p] == "") continue; tu = HU[p] + 0 }
+    else { if (!(p in LAST)) continue; l = LAST[p] }
+    ns = split(OS[i], b, "\003")
+    for (j = 1; j <= ns; j++) {
+      q = b[j]
+      if (!(q in TERM)) continue
+      if (q in HOST) {
+        if (HL[q] == "") continue
+        tq = HL[q] + 0
+        if (hp ? (tq > tu) : ((l in CT) && tq > CT[l])) print ON[i] "\t" SK[q]
+      } else if (q in LAST) {
+        if (hp ? ((LAST[q] in CT) && CT[LAST[q]] > tu) : !anc(LAST[q], l)) print ON[i] "\t" SK[q]
+      }
     }
     nc = split(OC[i], cc, "\003")
     for (j = 1; j <= nc; j++) {
       k = cc[j]
-      for (x = 1; x <= NEV[k]; x++) if (!anc(EV[k, x], l)) { print ON[i] "\t" k; break }
+      for (x = 1; x <= NEV[k]; x++) {
+        e = EV[k, x]
+        if (hp ? ((e in CT) && CT[e] > tu) : !anc(e, l)) { print ON[i] "\t" k; break }
+      }
     }
   }
   exit 0
 }'
 
 # _lg_ix_recheck <base-commit|""> <tab> <current-ids|""> <out.tsv> <dirs>
-# <dated-commit|"">: the re-check markers (see the header) into <out.tsv>,
+# <dated-commit|""> [hosted-times]: the re-check markers (see the header)
+# into <out.tsv>,
 # one line per marked item: "<n>\t<[entries] as JSON>", n its place among
 # the items (index.sh writes them into the item lines). <tab>:
 # lg_relations' tab lines (defs.jq). <current-ids>: the working tree's
 # "<path>\t<blob id>" (index.sh _lg_ix_effective); "" when the items are
 # B's own (--rev). <dirs>: the item globs' directories (the dates walk's).
 # <dated-commit>: the commit the dates walk read (HEAD; B's events are
-# derived from its map, index.sh _lg_ix_events_base). No base, or no open
-# item to check: empty.
+# derived from its map, index.sh _lg_ix_events_base). [hosted-times]:
+# index.sh's "<ref>\t<landed>\t<updated>\t<updated ISO>" lines (a hosted
+# source is terminal as the index has it, whatever the base holds). No
+# base, or no open item to check: empty.
 _lg_ix_recheck() {
-  local B="$1" tab="$2" cur="$3" out="$4" dirs="$5" H="$6" s
+  local B="$1" tab="$2" cur="$3" out="$4" dirs="$5" H="$6" ht="${7:-}" s
   : > "$out" || _lg_die "cannot write $out"
   [ -n "$B" ] || return 0
   grep -q '^O' "$tab" || return 0
@@ -348,6 +435,13 @@ _lg_ix_recheck() {
       fi
     fi
   fi
+  # A hosted source: terminal as the index has it (no blob at the base).
+  if [ -n "$ht" ] && [ -s "$ht" ]; then
+    LC_ALL=C awk -v ht="$ht" 'BEGIN { FS = "\002"; while ((getline l < ht) > 0) { t = index(l, "\t"); H[substr(l, 1, t - 1)] = 1 } }
+      $1 == "S" && $4 == 1 && ($2 in H) { print $2 }' "$tab" >> "$s.term" || _lg_die "cannot list the hosted re-check sources"
+  else
+    ht=/dev/null
+  fi
 
   # B's graph (cached by its id) and touches (derived from the dated
   # walk when B is another commit); the consumed contracts' globs (the
@@ -369,6 +463,7 @@ _lg_ix_recheck() {
   if ! LC_ALL=C awk -v base="$B" -v graphf="$_LG_GRAPH" -v tab="$tab" -v ev="$_LG_EVENTS" \
       -v termf="$s.term" -v cg="$s.cg" -v trf="$s.trf" -v sh="${BASH:-bash}" -v scan="$s.scan" \
       -v dirs="$s.cdirs" -v clog="$s.clog" -v msg="$s.msg" -v scanerr="$s.scanerr" \
+      -v hostf="$ht" -v needf="$s.need" -v ctf="$s.ct" \
       "$_LG_AWK_GLOB$_LG_AWK_TRAILER$_LG_AWK_RECHECK" < /dev/null > "$s.res"; then
     _lg_die "cannot compute the re-check markers${s:+: $(head -n 3 "$s.scanerr" 2>/dev/null | tr '\n' ' ')}"
   fi

@@ -37,8 +37,10 @@
 #                    state open | merged | closed
 #   items list       "ref" a string without whitespace, "url" a non-empty
 #                    string (the index tells a hosted item by it), "status"
-#                    a string, "fields" an object; "title", "body_excerpt"
-#                    and "updated", when present, a string or null;
+#                    a string, "fields" an object; "title", "body_excerpt",
+#                    "updated" and "closed", when present, a string or null
+#                    ("updated" and "closed": ISO 8601 times — the re-check
+#                    markers, index.sh);
 #                    "labels" and "fm_errors", when present, lists of
 #                    strings. The reference adapter is
 #                    scripts/adapters/ledger-items-gh.sh (GitHub issues)
@@ -98,7 +100,7 @@ _LG_ADAPTER_REQ_pr='has("number") and has("head") and has("state") and has("url"
 _LG_ADAPTER_REQ_items='(.ref | type == "string" and test("\\A[^\\s]+\\z"))
   and (.url | type == "string" and . != "")
   and (.status | type == "string") and (.fields | type == "object")
-  and all(.title, .body_excerpt, .updated; . == null or type == "string")
+  and all(.title, .body_excerpt, .updated, .closed; . == null or type == "string")
   and all(.labels, .fm_errors; . == null or (type == "array" and all(.[]; type == "string")))'
 
 _lg_adapter() {
@@ -190,7 +192,11 @@ _lg_adapter_rc() {
 # into place, so a reader sees a whole file and of two concurrent refreshes
 # the last to finish wins; a write sweeps temp files older than 10 minutes
 # (a writer that died). A failure is remembered in <file>.fail
-# ({"failed_at", "error"}; removed by the next success).
+# ({"failed_at", "error"}; removed by the next success). <file>.expired
+# (_lg_remote_expire: what the copy holds was just changed on the remote,
+# e.g. a hosted item written) makes the copy past its TTL whatever its
+# age — the next run fetches, and a failing fetch still serves the copy
+# with its true age; removed by the next success.
 # _LG_REMOTE_FORCE=1 (--refresh, publish): the producer runs whatever the
 # age, and its failure — or DOC_TOOLS_LEDGER_OFFLINE=1 — is rc 2 even when
 # a copy exists. DOC_TOOLS_LEDGER_OFFLINE=1: the producer never runs and no
@@ -200,6 +206,29 @@ _lg_adapter_rc() {
 # only): right after the snapshot, the live file is replaced by
 # $DOC_TOOLS_LEDGER_SELFTEST_SWAP — a concurrent writer; remote-fail-vanish:
 # the .fail record is removed between its test and its read.
+# _lg_remote_expire <name> <key-material>: mark the copy of <name> for
+# <key-material> expired (see above) and forget a recent failure, so the
+# next run fetches. Best effort: a copy that cannot be marked only waits
+# for its TTL.
+_lg_remote_expire() {
+  local dir="$_LG_CACHE/remote" kh="" kt="" d=""
+  if [ -f "$dir/km-$1.txt" ]; then
+    { IFS= read -r kh; IFS= read -r -d '' kt; } < "$dir/km-$1.txt" 2>/dev/null || true
+    case "$kh" in
+      *[!0123456789abcdef]*|'') ;;
+      *) if [ "$kt" = "$2" ] && [ "${#kh}" = 64 ]; then d=$kh; fi ;;
+    esac
+  fi
+  if [ -z "$d" ]; then
+    printf '%s' "$2" > "$_SCRATCH/lg-rexp.km" 2>/dev/null || return 0
+    _hash_one "$_SCRATCH/lg-rexp.km"
+    d=${_HASH#sha256:}
+  fi
+  [ -f "$dir/$1-${d:0:16}.json" ] || return 0
+  : > "$dir/$1-${d:0:16}.json.expired" 2>/dev/null || true
+  rm -f -- "$dir/$1-${d:0:16}.json.fail" 2>/dev/null || true
+}
+
 _LG_REMOTE_FORCE=""
 _LG_RTTL=""
 _LG_RTTL_JQ='.cache.remote_ttl_minutes | if type == "number" and . >= 0 then ([., 1000000] | min) * 60 | floor else 600 end'
@@ -264,7 +293,7 @@ _lg_remote_cache() {
         d=${d%%\"*} ;;
     esac
   fi
-  if [ -n "$t" ] && [ "${_LG_REMOTE_FORCE:-}" != 1 ] && [ "$t" -le "$now" ] && [ $((now - t)) -lt "$ttl" ]; then
+  if [ -n "$t" ] && [ "${_LG_REMOTE_FORCE:-}" != 1 ] && [ ! -e "$f.expired" ] && [ "$t" -le "$now" ] && [ $((now - t)) -lt "$ttl" ]; then
     _LG_RCACHE=$f
     _LG_RSNAP="$s.snap"
     _LG_RDSHA=$d
@@ -315,7 +344,7 @@ _lg_remote_cache() {
         rm -f -- "$tmp"
         _lg_die "cannot write $f"
       fi
-      rm -f -- "$f.fail"
+      rm -f -- "$f.fail" "$f.expired"
       _LG_RCACHE=$f
       _LG_RSNAP="$s.snap"
       _LG_RDSHA=$d

@@ -2488,8 +2488,9 @@ ledger note|cmd_ledger_note|repo|kind= format=
   endings, the final newline); nothing is staged. owed sets the owed field
   (empty text removes it). A hosted item (config items.adapter) goes
   through its adapter: a comment (log, "RULING: <text>"), or its owed
-  field; the adapter failing or offline: exit 2. Prints "<key|path>
-  <line>". Unknown item: exit 1; several, or a blank text: exit 3.
+  field (refused, exit 3, when it holds "-->" or "--!>"); the adapter
+  failing or offline: exit 2. Prints "<key|path>  <line>". Unknown item:
+  exit 1; several, or a blank text: exit 3.
 ledger view|cmd_ledger_view|repo|md html out= open refresh format=
   <ledger|all> [--md] [--html] [--out <dir>] [--open] [--refresh] [--format text|json]
   Render the ledger views from the working tree (uncommitted items
@@ -2798,7 +2799,12 @@ notices, new, assign, link, note, view, validate, publish, finalize, init):
   publish exit 2 when the adapter fails, validate --all too when there is
   no copy. validate --staged never runs it. With in-flight awareness on,
   "Fixes #<n>" (trailers.claims_by_ref) claims the one hosted item whose
-  ref ends in #<n>.
+  ref ends in #<n>. Re-check markers count hosted items by time: one
+  landed when its issue was closed (else at its last update, once
+  closed), and any update of an open hosted issue (an edit, a comment, a
+  label) clears its markers, as a later commit clears a file item's. A
+  hosted write through ledger note expires the cached list, so the next
+  read fetches it; a value holding "-->" or "--!>" is refused (exit 3).
 
 Exit status:
   0  success

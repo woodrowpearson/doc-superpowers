@@ -16,13 +16,17 @@
 #     issue, in gh's order —
 #       {"ref": "gh#<number>", "url", "title", "body_excerpt", "status",
 #        "fields": {…}, "labels": [<name>…], "updated": <updatedAt>,
-#        "fm_errors": [<message>…]}
+#        "closed": <closedAt>|null, "fm_errors": [<message>…]}
+#     ("closed": when it was closed — the ledger's re-check markers take a
+#     hosted item as landed then; beyond §G's contract, like fm_errors)
 #     fields: the metadata block's fields — the HTML comment
 #       <!-- doc-superpowers-ledger
 #       key: checkout-14
 #       summary: …
 #       -->
-#     in the body, invisible when rendered, read with the item frontmatter
+#     in the body (its first marker line outside fenced code: JQ_BLOCK
+#     below; a closing "-->" not on a line of its own is an fm_errors
+#     entry), invisible when rendered, read with the item frontmatter
 #     grammar (scripts/ledger/frontmatter.awk: scalars, flow and block
 #     lists; anything else is an fm_errors entry — beyond §G's contract,
 #     as ledger-pr-gh.sh's merge_commit is) — plus ledger and severity from
@@ -46,11 +50,16 @@
 #     of the metadata block is rewritten (scripts/ledger/fm-write.awk: the
 #     frontmatter quoting; an empty value removes it), the rest of the block
 #     and of the body kept byte for byte; a body without a block gets one at
-#     its end. gh issue view, then gh issue edit --body-file.
+#     its end. gh issue view, then gh issue edit --body-file. Refused
+#     (exit 3): a value holding "-->" or "--!>" (it would close the HTML
+#     comment early), a line break, or — for ledger and severity, which
+#     are joined into gh's comma-separated label lists — a comma.
 #   ledger-items-gh.sh note <ref> <text>
 #     gh issue comment <n> --body-file (the text).
 #   ledger-items-gh.sh create --title <title> --body-file <file>
-#     gh issue create; prints {"ref": "gh#<n>", "url": <url>}.
+#     gh issue create; prints {"ref": "gh#<n>", "url": <url>}. When gh
+#     prints no issue URL the issue may exist all the same: exit 2 with
+#     what gh printed, so a retry does not duplicate it unseen.
 # <ref> is "gh#<number>".
 #
 # Exit: 0 done · 2 could not — gh missing, unauthenticated or failing (its
@@ -75,12 +84,38 @@ LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/ledger"
 LP=${LEDGER_GH_LEDGER_PREFIX:-ledger:}
 SP=${LEDGER_GH_SEV_PREFIX:-sev:}
 LIMIT=1000
-FIELDS=number,title,body,state,stateReason,labels,updatedAt,url
+FIELDS=number,title,body,state,stateReason,labels,updatedAt,url,closedAt
 BOM=$'\357\273\277'
-# The metadata block's parts in a body (jq regex; capture groups: pre,
-# open — the marker and the rest of its line —, blk, close, post).
+# The metadata block in a body (jq): blk → {pre, open, blk, close, post},
+# or nothing. The block starts at the first line outside fenced code (```
+# or ~~~, three or more, closed by the same character at least as long)
+# that is "<!-- doc-superpowers-ledger" — a word: followed by a blank or
+# the line's end — after at most three spaces; open is the marker and the
+# blanks after it with its line break, blk the text up to the first "-->"
+# after it, close that "-->", post the rest; pre the lines before.
 # shellcheck disable=SC2016  # jq source
-JQ_BLOCK='def blk: capture("(?<pre>[\\s\\S]*?)(?<open><!-- doc-superpowers-ledger[ \\t]*(\\r?\\n)?)(?<blk>[\\s\\S]*?)(?<close>-->)(?<post>[\\s\\S]*)");'
+JQ_BLOCK='def blk:
+  . as $b
+  | if ($b | test("<!-- doc-superpowers-ledger") | not) then empty
+    else ($b | split("\n")) as $L
+    | (first(foreach range(0; $L | length) as $i ({f: null, s: null};
+          ($L[$i] | sub("\r$"; "")) as $t
+          | .f as $f
+          | if $f != null then
+              (if ($t | test("^ {0,3}" + $f.c + "{" + ($f.n | tostring) + ",}[ \t]*$")) then .f = null else . end) | .s = null
+            elif ($t | test("^ {0,3}(```|~~~)")) then
+              ($t | capture("^ {0,3}(?<c>`+|~+)(?<r>.*)$")) as $m
+              | if ($m.c[0:1] == "`" and ($m.r | test("`"))) then .s = null
+                else .f = {c: $m.c[0:1], n: ($m.c | length)} | .s = null end
+            elif ($t | test("^ {0,3}<!-- doc-superpowers-ledger(?![^ \t])")) then .s = $i
+            else .s = null end;
+          if .s != null then .s else empty end)) // null) as $s
+    | if $s == null then empty
+      else ($L[$s:] | join("\n"))
+        | capture("^(?<open> {0,3}<!-- doc-superpowers-ledger[ \t]*(\r?\n)?)(?<blk>[\\s\\S]*?)(?<close>-->)(?<post>[\\s\\S]*)")
+        | {pre: (($L[0:$s] | join("\n")) + (if $s > 0 then "\n" else "" end)), open, blk, close, post}
+      end
+    end;'
 
 # ref_num <ref>: the issue number of gh#<n> into N; usage (3) otherwise.
 ref_num() {
@@ -152,7 +187,7 @@ cmd_list() {
     || die "cannot read the issues' metadata blocks: $(head -n 1 "$TMPD/awk.err")"
   # Pass 2: the records joined with the issues.
   # shellcheck disable=SC2016  # jq source
-  if ! jq -c -n --arg lp "$LP" --arg sp "$SP" --slurpfile gh "$TMPD/gh.json" '
+  if ! jq -c -n --arg lp "$LP" --arg sp "$SP" --slurpfile gh "$TMPD/gh.json" "$JQ_BLOCK"'
       def lbl($p): [.[] | select(startswith($p)) | .[($p | length):] | select(. != "")]
         | if length == 0 then null elif length == 1 then .[0] else sort end;
       (reduce inputs as $r ({}; .[input_filename | capture("b-(?<n>[0-9]+)\\.json$").n] = $r)) as $R
@@ -163,6 +198,9 @@ cmd_list() {
       | ($L | lbl($lp)) as $led
       | ($L | lbl($sp)) as $sev
       | ($r.fm // {}) as $fm
+      # A closing "-->" not on a line of its own: read, and said.
+      | ([(.body // "") | strings | gsub("\u0000"; "\u0001") | blk
+          | select(.blk != "" and (.blk | test("\n$") | not))] | length > 0) as $mid
       | ((.state // "") | tostring | ascii_upcase) as $st
       | ((.stateReason // "") | tostring | ascii_upcase) as $why
       | (if $st == "CLOSED" then
@@ -176,7 +214,11 @@ cmd_list() {
          body_excerpt: ($r.first_para | if type == "string" then (if length > 280 then .[0:279] + "…" else . end) else null end),
          status: $status,
          fields: ($fm + (if $led != null then {ledger: $led} else {} end) + (if $sev != null then {severity: $sev} else {} end)),
-         labels: $L, updated: .updatedAt, fm_errors: ($r.fm_errors // [])}' "$TMPD"/rec/b-*.json 2> "$TMPD/jq.err"; then
+         labels: $L, updated: .updatedAt,
+         closed: (.closedAt | if type == "string" and . != "" then . else null end),
+         fm_errors: (($r.fm_errors // [])
+                     + (if $mid then ["metadata block: its closing --> is not on a line of its own"] else [] end))}' \
+      "$TMPD"/rec/b-*.json 2> "$TMPD/jq.err"; then
     die "cannot use gh's issue list: $(jq_err "$TMPD/jq.err")"
   fi
 }
@@ -223,7 +265,7 @@ write_block() {
   gh_view "$n" body "$TMPD/view.json"
   jq -j '.body // "" | if type == "string" then . else "" end' "$TMPD/view.json" > "$TMPD/body" || die "cannot read the body of #$n"
   # shellcheck disable=SC2016  # jq source
-  has=$(jq -r "$JQ_BLOCK"'(.body // "") | if type == "string" and (blk | length) > 0 then "1" else "0" end' "$TMPD/view.json") \
+  has=$(jq -r "$JQ_BLOCK"'[(.body // "") | strings | blk] | if length > 0 then "1" else "0" end' "$TMPD/view.json") \
     || die "cannot read the body of #$n"
   if grep -q $'\r$' "$TMPD/body" 2>/dev/null; then eol=$'\r\n'; fi
   if [ "$has" = 1 ]; then
@@ -285,7 +327,13 @@ cmd_write() {
       echo "ledger-items-gh: '$2' is not a field name" >&2; exit 3 ;;
     status) echo "ledger-items-gh: status follows the issue's state (close or reopen it on GitHub)" >&2; exit 3 ;;
   esac
-  case "$3" in *[$'\n\r']*) echo "ledger-items-gh: a value cannot hold a line break" >&2; exit 3 ;; esac
+  case "$3" in
+    *[$'\n\r']*) echo "ledger-items-gh: a value cannot hold a line break" >&2; exit 3 ;;
+    *'-->'*|*'--!>'*) echo "ledger-items-gh: a value cannot hold '-->' or '--!>' (it would close the metadata comment)" >&2; exit 3 ;;
+  esac
+  case "$2:$3" in
+    ledger:*,*|severity:*,*) echo "ledger-items-gh: a $2 value cannot hold a comma (gh joins labels with commas)" >&2; exit 3 ;;
+  esac
   need
   [ -f "$LIB/fm-write.awk" ] || die "scripts/ledger/fm-write.awk is not beside this adapter's directory ($LIB)"
   tmpd
@@ -321,7 +369,7 @@ cmd_create() {
   need
   out=$(gh issue create --title "$title" --body-file "$file" < /dev/null) || die "gh issue create failed"
   url=$(printf '%s\n' "$out" | grep -E '^https?://[^[:space:]]+/issues/[0-9]+$' | tail -n 1) || url=""
-  [ -n "$url" ] || die "gh issue create printed no issue URL: $(printf '%s' "$out" | tr '\n' ' ' | cut -c 1-200)"
+  [ -n "$url" ] || die "gh issue create printed no issue URL, but the issue may have been created — check before retrying. gh printed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c 1-500)"
   jq -nc --arg u "$url" '{ref: "gh#\($u | capture("/issues/(?<n>[0-9]+)$").n)", url: $u}'
 }
 
