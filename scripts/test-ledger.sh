@@ -7012,6 +7012,22 @@ lg_ntc_id() {
   printf '%s' "${h:0:12}"
 }
 
+# lg_ntc_state [<rev>:<path> | <commit>]…: a base notice's head component —
+# sha256 of the overlap's state, its sorted lines "F\t<path>\t<blob at
+# rev>" and "C\t<commit>" (each newline-ended).
+lg_ntc_state() {
+  local a h
+  for a in "$@"; do
+    case "$a" in
+      *:*) printf 'F\t%s\t%s\n' "${a#*:}" "$(git rev-parse "$a")" ;;
+      *) printf 'C\t%s\n' "$a" ;;
+    esac
+  done | LC_ALL=C sort > "$TEST_DIR/.state"
+  if command -v sha256sum >/dev/null 2>&1; then h=$(sha256sum < "$TEST_DIR/.state"); else h=$(shasum -a 256 < "$TEST_DIR/.state"); fi
+  rm -f "$TEST_DIR/.state"
+  printf '%s' "${h%% *}"
+}
+
 test_lg_notice_contract_change_stop() {
   echo "test: ledger notices — stop when another branch changes a contract B's claimed items consume (defined_in) or that B also changes (Contract-Change); text, JSON and the id formula"
   lg_ntc_fixture
@@ -7023,7 +7039,7 @@ test_lg_notice_contract_change_stop() {
   git push -q origin "$x2:refs/doc-superpowers/inflight/hostb/x-cc"
   lg_ntc_branch x-sheet "sheet work" src/sheet/s.js more
   id1=$(lg_ntc_id "x-cc@hostb" "contracts:endpoint:create" "$x2")
-  id2=$(lg_ntc_id "x-total" "contracts:field:order.total" "$x1")
+  id2=$(lg_ntc_id "x-total@hosta" "contracts:field:order.total" "$x1")
   lg notices
   assert_eq "0" "$LG_RC" "exit 0"
   assert_eq "stop $id1 x-cc@hostb no PR contracts:endpoint:create — endpoint:create: adds a field → reconcile-before-next-chunk
@@ -7061,8 +7077,8 @@ test_lg_notice_double_claim_stop() {
   z=$(git rev-parse z-edit)
   lg notices
   assert_eq "0" "$LG_RC" "exit 0"
-  assert_eq "stop $(lg_ntc_id y-claim keys:app-2 "$y") y-claim no PR keys:app-2 — 0 files → reconcile-before-next-chunk
-stop $(lg_ntc_id z-edit keys:app-2 "$z") z-edit no PR keys:app-2 — 1 file, +2 -0 → reconcile-before-next-chunk" "$LG_OUT" \
+  assert_eq "stop $(lg_ntc_id y-claim@hosta keys:app-2 "$y") y-claim no PR keys:app-2 — 0 files → reconcile-before-next-chunk
+stop $(lg_ntc_id z-edit@hosta keys:app-2 "$z") z-edit no PR keys:app-2 — 1 file, +2 -0 → reconcile-before-next-chunk" "$LG_OUT" \
     "app-2 claimed by a trailer and by an item-file edit: two stops; q-other claims another item"
   assert_not_contains "$LG_OUT" "heads-up" "the doubly-claimed item file is not a heads-up too"
   lg notices --format json
@@ -7083,7 +7099,7 @@ test_lg_notice_file_overlap_headsup() {
   w=$(git rev-parse w-shared)
   lg notices
   assert_eq "0" "$LG_RC" "exit 0"
-  assert_eq "heads-up $(lg_ntc_id w-shared "files:shared.txt,sp ace/ü.txt" "$w") w-shared no PR files:shared.txt,sp ace/ü.txt — 2 files, +3 -0 → rebase-after-merge" "$LG_OUT" \
+  assert_eq "heads-up $(lg_ntc_id w-shared@hosta "files:shared.txt,sp ace/ü.txt" "$w") w-shared no PR files:shared.txt,sp ace/ü.txt — 2 files, +3 -0 → rebase-after-merge" "$LG_OUT" \
     "one heads-up: the shared files and their diffstat; w-other shares none"
   lg notices --format json
   assert_json_field "$LG_OUT" '.notices[0] | [.urgency, (.overlap.files | join(",")), .what_changed, .action] | join("|")' \
@@ -7106,7 +7122,7 @@ test_lg_notice_base_changed_contract() {
   git push -q origin main
   git fetch -q origin
   git checkout -q mine
-  base=$(git rev-parse origin/main)
+  base=$(lg_ntc_state "$(git rev-parse origin/main):src/order/total.js" "$(git rev-parse origin/main~1)")
   lg notices
   assert_eq "0" "$LG_RC" "exit 0"
   assert_eq "stop $(lg_ntc_id origin/main "contracts:endpoint:create,field:order.total" "$base") origin/main no PR contracts:endpoint:create,field:order.total — endpoint:create: adds a field; field:order.total: 1 file, +1 -0 → reconcile-before-next-chunk" "$LG_OUT" \
@@ -7132,8 +7148,8 @@ test_lg_notice_sibling_info() {
   t=$(git rev-parse t-rel)
   lg notices
   assert_eq "0" "$LG_RC" "exit 0"
-  assert_eq "info $(lg_ntc_id s-sib keys:app-4 "$s") s-sib no PR keys:app-4 — 0 files → heads-up
-info $(lg_ntc_id t-rel keys:core-3 "$t") t-rel no PR keys:core-3 — 0 files → heads-up" "$LG_OUT" \
+  assert_eq "info $(lg_ntc_id s-sib@hosta keys:app-4 "$s") s-sib no PR keys:app-4 — 0 files → heads-up
+info $(lg_ntc_id t-rel@hosta keys:core-3 "$t") t-rel no PR keys:core-3 — 0 files → heads-up" "$LG_OUT" \
     "app-4 (component:Sheet, both change it) and core-3 (relates sibling:app-3) claimed elsewhere; core-2 is no sibling"
   lg notices --gate
   assert_eq "0" "$LG_RC" "--gate: info alone passes"
@@ -7147,7 +7163,7 @@ test_lg_notice_ack_hides_and_moved_head_refires() {
   git commit -q --allow-empty -m "mine" -m "Ledger-Claims: app-1"
   lg_ntc_branch x-total "touch the total" src/order/total.js more
   x1=$(git rev-parse x-total)
-  id1=$(lg_ntc_id x-total contracts:field:order.total "$x1")
+  id1=$(lg_ntc_id x-total@hosta contracts:field:order.total "$x1")
   lg notices
   assert_contains "$LG_OUT" "stop $id1 x-total" "the stop fires"
   git commit -q --allow-empty -m "lowercase" -m "ledger-ack: $id1"
@@ -7166,7 +7182,7 @@ test_lg_notice_ack_hides_and_moved_head_refires() {
   git add -A && git commit -qm "x-total moves"
   git checkout -q mine
   x2=$(git rev-parse x-total)
-  id2=$(lg_ntc_id x-total contracts:field:order.total "$x2")
+  id2=$(lg_ntc_id x-total@hosta contracts:field:order.total "$x2")
   lg notices
   assert_eq "stop $id2 x-total no PR contracts:field:order.total — field:order.total: 1 file, +1 -0 → reconcile-before-next-chunk" "$LG_OUT" \
     "the other head moved: a new id, the notice fires again"
@@ -7181,7 +7197,7 @@ test_lg_notices_gate_rc() {
   git commit -q --allow-empty -m "mine" -m "Ledger-Claims: app-1"
   lg_ntc_branch x-total "touch the total" src/order/total.js more
   x=$(git rev-parse x-total)
-  id=$(lg_ntc_id x-total contracts:field:order.total "$x")
+  id=$(lg_ntc_id x-total@hosta contracts:field:order.total "$x")
   lg notices --gate
   assert_eq "1" "$LG_RC" "an unacked stop: exit 1"
   assert_contains "$LG_OUT" "stop $id x-total" "…listing it"
@@ -7341,6 +7357,201 @@ test_lg_publish_prunes_inflight() {
   assert_eq "0" "$LG_RC" "refs/heads/wip: exit 0"
   assert_eq "" "$(git --git-dir="$LG_REMOTE" for-each-ref refs/heads/wip/hostb/)" "the shaped merged ref pruned"
   assert_eq "$(git rev-parse main)" "$(git --git-dir="$LG_REMOTE" rev-parse -q --verify refs/heads/wip/loose)" "an unshaped one is never touched"
+  teardown
+}
+
+# --- Task 12 fix round 1 ------------------------------------------------------------
+
+test_lg_notice_same_branch_other_host() {
+  echo "test: the same branch on another host — an ancestor copy (or any branch behind B) raises nothing; a copy ahead of B is one info, never a stop (I1)"
+  lg_ntc_fixture
+  local b ahead div
+  git commit -q --allow-empty -m "mine 1" -m "Ledger-Claims: app-1"
+  printf 'b\n' >> shared.txt
+  git add -A && git commit -qm "mine 2"
+  b=$(git rev-parse HEAD)
+  git branch -q older HEAD~1
+  ahead=$(git commit-tree -p "$b" -m "more on hostc" "$b^{tree}")
+  git push -q origin "$b~1:refs/doc-superpowers/inflight/hostb/mine" "$ahead:refs/doc-superpowers/inflight/hostc/mine"
+  lg notices
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "info $(lg_ntc_id mine@hostc keys:app-1 "$ahead") mine@hostc no PR keys:app-1 — mine@hostc is ahead of this branch → heads-up" "$LG_OUT" \
+    "hostb's copy and the local 'older' are behind B: nothing; hostc's copy is ahead: one info"
+  lg notices --gate
+  assert_eq "0" "$LG_RC" "--gate: exit 0 (no false stop against itself)"
+  lg notices --format json
+  assert_json_field "$LG_OUT" '.notices | map([.urgency, .other.branch, .other.host, (.overlap.keys | join(",")), .what_changed, .action] | join("|")) | join(";")' \
+    "info|mine|hostc|app-1|mine@hostc is ahead of this branch|heads-up" "json: the one info"
+  # A copy that diverged from B (neither behind nor ahead) is real work
+  # elsewhere: its claim of app-1 is still a stop.
+  div=$(git commit-tree -p "$b~1" -m "diverged on hostd" "$b~1^{tree}")
+  git push -q origin "$div:refs/doc-superpowers/inflight/hostd/mine"
+  lg notices --fetch
+  assert_eq "stop $(lg_ntc_id mine@hostd keys:app-1 "$div") mine@hostd no PR keys:app-1 — 0 files → reconcile-before-next-chunk
+info $(lg_ntc_id mine@hostc keys:app-1 "$ahead") mine@hostc no PR keys:app-1 — mine@hostc is ahead of this branch → heads-up" "$LG_OUT" \
+    "a diverged copy on another host: still a stop"
+  teardown
+}
+
+test_lg_notice_base_id_overlap_state() {
+  echo "test: a base notice's id follows the overlap's state (contract files' blobs, Contract-Change commits) — an unrelated base commit keeps it acked; a new defined_in change or Contract-Change re-fires (C1)"
+  lg_ntc_fixture
+  local id id2 id3
+  git commit -q --allow-empty -m "mine" -m "Ledger-Claims: app-1"
+  git checkout -q main
+  printf 'trunk\n' >> src/order/total.js
+  git add -A && git commit -qm "trunk touches the total" && git push -q origin main
+  git checkout -q mine
+  git fetch -q origin
+  id=$(lg_ntc_id origin/main contracts:field:order.total "$(lg_ntc_state origin/main:src/order/total.js)")
+  lg notices
+  assert_contains "$LG_OUT" "stop $id origin/main" "the base's stop: id from the overlap's state"
+  git commit -q --allow-empty -m "ack" -m "Ledger-Ack: $id — reconciled"
+  lg notices
+  assert_eq "0|" "$LG_RC|$LG_OUT" "acked"
+  git checkout -q main
+  printf 'more\n' >> shared.txt
+  git add -A && git commit -qm "unrelated trunk work" && git push -q origin main
+  git checkout -q mine
+  git fetch -q origin
+  lg notices
+  assert_eq "0|" "$LG_RC|$LG_OUT" "an unrelated base commit: the base moved, the id did not — still acked"
+  git checkout -q main
+  printf 'again\n' >> src/order/total.js
+  git add -A && git commit -qm "trunk touches the total again" && git push -q origin main
+  git checkout -q mine
+  git fetch -q origin
+  id2=$(lg_ntc_id origin/main contracts:field:order.total "$(lg_ntc_state origin/main:src/order/total.js)")
+  lg notices
+  assert_contains "$LG_OUT" "stop $id2 origin/main" "a new defined_in change: re-fires with a new id"
+  git commit -q --allow-empty -m "ack 2" -m "Ledger-Ack: $id2"
+  git checkout -q main
+  git commit -q --allow-empty -m "trunk cc" -m "Contract-Change: field:order.total — renames total"
+  git push -q origin main
+  git checkout -q mine
+  git fetch -q origin
+  id3=$(lg_ntc_id origin/main contracts:field:order.total "$(lg_ntc_state origin/main:src/order/total.js "$(git rev-parse origin/main)")")
+  lg notices
+  assert_contains "$LG_OUT" "stop $id3 origin/main" "a new Contract-Change: re-fires"
+  assert_contains "$LG_OUT" "field:order.total: renames total" "…with its line"
+  teardown
+}
+
+test_lg_notice_id_shared_across_hosts() {
+  echo "test: a notice's id hashes a canonical name (<name>@<host> unless the branch is on the remote) — the same notice on two hosts has one id, so one ack hides it on both (m3)"
+  lg_ntc_fixture
+  local id_a id_b clone here
+  git commit -q --allow-empty -m "mine" -m "Ledger-Claims: app-1"
+  git push -q origin mine
+  lg_ntc_branch x-total "touch the total" src/order/total.js more
+  git checkout -q x-total
+  lg inflight --push
+  git checkout -q mine
+  git fetch -q origin
+  lg notices --format json
+  id_a=$(jq -r '.notices[] | select(.other.branch == "x-total") | .id' <<<"$LG_OUT")
+  assert_eq "$(lg_ntc_id x-total@hosta contracts:field:order.total "$(git rev-parse x-total)")" "$id_a" "host A: hashed as x-total@hosta"
+  clone="$(harness_mktemp_d lg-b)/clone"
+  lg_clone "$clone"
+  ( cd "$clone" && lg_enable '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hostb"}}' )
+  here=$PWD
+  cd "$clone"
+  lg notices --branch mine --format json
+  id_b=$(jq -r '.notices[] | select(.other.branch == "x-total") | .id' <<<"$LG_OUT")
+  assert_eq "$id_a" "$id_b" "host B (mine from the remote, x-total@hosta in flight): the same id"
+  lg notices --branch mine
+  assert_contains "$LG_OUT" "stop $id_b x-total@hosta no PR" "…displayed as x-total@hosta there"
+  cd "$here"
+  lg notices
+  assert_contains "$LG_OUT" "stop $id_a x-total no PR" "…and as x-total here (the display is unchanged)"
+  git commit -q --allow-empty -m "ack" -m "Ledger-Ack: $id_a — checked with x-total"
+  git push -q origin mine
+  cd "$clone"
+  git fetch -q origin
+  lg notices --branch mine
+  assert_not_contains "$LG_OUT" "x-total" "the ack made on host A hides the notice on host B"
+  cd "$here"
+  rm -rf "$(dirname "$clone")"
+  teardown
+}
+
+test_lg_notice_branch_not_current_note() {
+  echo "test: --branch X other than the current branch — its claimed items are read from this working tree, and the note says so (m4)"
+  lg_ntc_fixture
+  git commit -q --allow-empty -m "mine" -m "Ledger-Claims: app-1"
+  lg_ntc_branch x-total "touch the total" src/order/total.js more
+  git checkout -q main
+  lg notices --branch mine
+  assert_contains "$LG_OUT" "stop " "notices for mine"
+  assert_contains "$LG_ERR" "read from this working tree, not from mine's tip" "the note names the limitation"
+  assert_eq "1" "$(printf '%s\n' "$LG_ERR" | grep -c '^ledger: ')" "…in the run's one ledger: line"
+  lg notices --branch mine --format json
+  assert_eq "0|1" "$LG_RC|$(json_count "$LG_OUT")" "json: one object"
+  assert_contains "$LG_ERR" "not from mine's tip" "json: the same note"
+  git checkout -q mine
+  lg notices
+  assert_not_contains "$LG_ERR" "working tree, not from" "the current branch: no such note"
+  lg notices --branch mine
+  assert_not_contains "$LG_ERR" "working tree, not from" "--branch naming the current branch: no such note"
+  teardown
+}
+
+test_lg_inflight_push_auth_failure() {
+  echo "test: ledger inflight --push — an authentication / permission failure is reported as such, exit 0 (m5)"
+  lg_ntc_fixture
+  git commit -q --allow-empty -m "mine"
+  git config protocol.ext.allow always
+  git remote set-url origin "ext::sh -c echo% fatal:% Authentication% failed% for% x>&2;% exit% 128"
+  lg inflight --push
+  assert_eq "0" "$LG_RC" "exit 0 (hooks keep going)"
+  assert_contains "$LG_ERR" "authentication or permission failure" "…reported as an authentication failure"
+  assert_contains "$LG_ERR" "Authentication failed for x" "…with git's words"
+  assert_not_contains "$LG_ERR" "cannot be reached" "…not as unreachable"
+  lg inflight --push --format json
+  assert_eq "0|1" "$LG_RC|$(json_count "$LG_OUT")" "json: exit 0, one object"
+  assert_json_field "$LG_OUT" '[(.pushed | tostring), (.note | startswith("authentication or permission failure on origin"))] | map(tostring) | join(",")' \
+    "false,true" "json: pushed false, the note"
+  git remote set-url origin "ext::sh -c echo% ERROR:% Permission% denied% to% push>&2;% exit% 128"
+  lg inflight --push
+  assert_eq "0" "$LG_RC" "Permission denied: exit 0"
+  assert_contains "$LG_ERR" "authentication or permission failure" "…an authentication failure"
+  git remote set-url origin "ext::sh -c echo% fatal:% The% requested% URL% returned% error:% 403% >&2;% exit% 128"
+  lg inflight --push
+  assert_contains "$LG_ERR" "authentication or permission failure" "HTTP 403: an authentication failure"
+  git remote set-url origin "ext::sh -c echo% fatal:% could% not% read% Username% for% x>&2;% exit% 128"
+  lg inflight --push
+  assert_contains "$LG_ERR" "authentication or permission failure" "no credentials: an authentication failure"
+  git remote set-url origin "ext::sh -c echo% fatal:% unable% to% connect% to% host:4030>&2;% exit% 128"
+  lg inflight --push
+  assert_eq "0" "$LG_RC" "unreachable: exit 0"
+  assert_contains "$LG_ERR" "cannot be reached" "a port 4030 is no HTTP 403: unreachable"
+  assert_eq "" "$(git --git-dir="$LG_REMOTE" for-each-ref refs/doc-superpowers/inflight/)" "nothing pushed"
+  git remote set-url origin "$LG_REMOTE"
+  teardown
+}
+
+test_lg_publish_prune_internal_failure_is_note() {
+  echo "test: an internal failure of the prune after the views were pushed — a note, publish exit 0 (m6)"
+  lg_ntc_fixture
+  local views m
+  m=$(git rev-parse main)
+  git push -q origin "main:refs/doc-superpowers/inflight/hostb/merged"
+  DOC_TOOLS_LEDGER_SELFTEST=ifl-prune-internal lg publish
+  assert_eq "0" "$LG_RC" "exit 0"
+  views=$(git --git-dir="$LG_REMOTE" rev-parse -q --verify refs/heads/doc-ledger-views || true)
+  assert_eq "1" "$(if [ -n "$views" ]; then echo 1; else echo 0; fi)" "the views were pushed"
+  assert_eq "1" "$(printf '%s\n' "$LG_ERR" | grep -c '^ledger: ')" "one ledger: note"
+  assert_contains "$(printf '%s\n' "$LG_ERR" | grep '^ledger: ')" "in-flight refs not pruned (selftest: an internal failure in the prune)" \
+    "…saying the prune did not run, and why"
+  assert_not_contains "$LG_ERR" "ERROR" "no error"
+  assert_eq "$m" "$(git --git-dir="$LG_REMOTE" rev-parse -q --verify refs/doc-superpowers/inflight/hostb/merged || true)" "the merged ref is still there"
+  assert_contains "$LG_OUT" "published" "the publish line"
+  assert_not_contains "$LG_OUT" "pruned" "…and no pruned line"
+  DOC_TOOLS_LEDGER_SELFTEST=ifl-prune-internal lg publish --format json
+  assert_eq "0|1" "$LG_RC|$(json_count "$LG_OUT")" "json: exit 0, one object"
+  assert_json_field "$LG_OUT" '[.exit, (.inflight_pruned | length)] | map(tostring) | join(",")' "0,0" "json: exit 0, nothing pruned"
+  lg publish
+  assert_contains "$LG_OUT" "pruned 1 in-flight ref(s) from origin: refs/doc-superpowers/inflight/hostb/merged" "without the hook: pruned"
   teardown
 }
 
@@ -7724,6 +7935,14 @@ run_tests() {
   test_lg_inflight_push_and_pre_push_check
   test_lg_inflight_push_offline_warns
   test_lg_publish_prunes_inflight
+
+  # --- Task 12 fix round 1 ---
+  test_lg_notice_same_branch_other_host
+  test_lg_notice_base_id_overlap_state
+  test_lg_notice_id_shared_across_hosts
+  test_lg_notice_branch_not_current_note
+  test_lg_inflight_push_auth_failure
+  test_lg_publish_prune_internal_failure_is_note
 
   print_summary
 }

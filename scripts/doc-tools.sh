@@ -2421,11 +2421,13 @@ ledger inflight|cmd_ledger_inflight|repo|branch= fetch push format=
   the base) as <ref_prefix>/<host>/<branch> on keys.remote — forced,
   --no-verify — after inflight.pre_push_check (run with sh -c, one stdin
   line "<merge-base>..<tip>"; non-zero: nothing pushed, its output shown,
-  exit 1); detached HEAD, nothing beyond the base, offline or an
-  unreachable remote: a line, exit 0; a refused push: exit 2. JSON: {"host_id", "inflight_data", "pr_data",
-  "branches": [{host, own, name, branch, oid, sources, merge_base, pr,
-  files_n, files, claims, contract_changes, acks, refs}]}. show and ls
-  show "on branch <b>" for an open item an in-flight branch claims.
+  exit 1); detached HEAD, nothing beyond the base, offline, an
+  unreachable remote or an authentication / permission failure (said as
+  such): a line, exit 0; a refused push: exit 2. JSON: {"host_id",
+  "inflight_data", "pr_data", "branches": [{host, own, name, branch, oid,
+  sources, merge_base, pr, files_n, files, claims, contract_changes, acks,
+  refs}]}. show and ls show "on branch <b>" for an open item an in-flight
+  branch claims.
 ledger notices|cmd_ledger_notices|repo|branch= gate fetch format=
   [--branch <name>|<name>@<host>] [--gate] [--fetch] [--format text|json]
   In-flight notices for a branch (default: the current one) against every
@@ -2436,10 +2438,19 @@ ledger notices|cmd_ledger_notices|repo|branch= gate fetch format=
   its claimed items claimed elsewhere). One line each: "<urgency> <id>
   <other>[@<host>] <PR #n|no PR> <kind>:<values> — <what changed> →
   <action>" (reconcile-before-next-chunk, rebase-after-merge, heads-up);
-  <id> is 12 hex of sha256(other, overlap, other's tip), so a notice fires
-  again only when the other side moves. A "Ledger-Ack: <id> — <clause>"
-  trailer in the branch's commits hides it. --gate: exit 1 on any unacked
-  stop notice. --fetch fetches the in-flight refs first (offline: exit 2).
+  <id> is 12 hex of sha256(other, overlap, other's tip) — other hashed as
+  "<name>" for a branch on keys.remote, else "<name>@<host>", so every host
+  computes one id; for the base, the tip is a digest of the overlap's
+  state (the overlap contract files' blobs, the commits whose
+  Contract-Change names an overlap contract) — so a notice fires again
+  only when the other side's work (the base's: its overlap) moves. A
+  branch the branch already contains raises nothing; the branch itself,
+  ahead on another host, is one info ("<name>@<host> is ahead of this
+  branch"). A "Ledger-Ack: <id> — <clause>" trailer in the branch's
+  commits hides it. The claimed items' consumes and siblings are read
+  from this working tree — for a --branch other than the current one, not
+  from its tip (a note says so). --gate: exit 1 on any unacked stop
+  notice. --fetch fetches the in-flight refs first (offline: exit 2).
   A --branch naming no branch, or a base that does not resolve: exit 2.
   JSON: {"notices": [{id, urgency, other: {branch, host, pr}, overlap:
   {contracts|keys|files}, what_changed, action}], "pr_data"}.

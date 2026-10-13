@@ -216,7 +216,9 @@ Trailers are read from any line of a commit message of the form `[* ]<Trailer>: 
 | `heads-up` | another branch changes files B changes |
 | `info` | siblings of B's claims are in flight elsewhere |
 
-Notice = `{id, urgency, other: {branch, host, pr}, overlap: {files|contracts|keys}, what_changed: <Contract-Change line or diffstat>, action}`; `id` = hash(other branch, overlap, other head), so a notice re-fires only when the other side moves. Ack = trailer `Ledger-Ack: <id> — <clause>`; no state file.
+Notice = `{id, urgency, other: {branch, host, pr}, overlap: {files|contracts|keys}, what_changed: <Contract-Change line or diffstat>, action}`; `id` = hash(other branch, overlap, other head), so a notice re-fires only when the other side moves. For the base, `other head` is a digest of the overlap's state — each overlap contract file's post-image blob and the base commits whose `Contract-Change` names an overlap contract — so an unrelated base commit never re-fires an acked notice; `other branch` is `<name>` for a branch on the shared remote, else `<name>@<host>`, so every host computes one id. Ack = trailer `Ledger-Ack: <id> — <clause>`; no state file.
+
+B's claimed items (their `consumes`, their siblings) are read from the working tree: `--branch` naming a branch that is not checked out reads them as they are here, not at that branch's tip, and the run's note says so (reading them at the tip is a cold index of that commit — about 3 s at 3,000 items, past the 2 s notices budget).
 
 #### H.3 Delivery
 - Claude-tier `SessionStart` hook: unacked `stop`/`heads-up` notices for the session's branch (≤ 15 lines; silent when none).
