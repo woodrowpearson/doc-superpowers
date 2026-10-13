@@ -264,7 +264,7 @@ _lg_ix_events_plan() {
     oid=${oid%.tsv}
     [ "$oid" != "$commit" ] || continue
     first=""
-    IFS= read -r first < "$c" || true
+    { IFS= read -r first < "$c"; } 2>/dev/null || true
     [ "$first" = "$_LG_EP_HEADER" ] || continue
     if git merge-base --is-ancestor "$oid" "$commit" 2>/dev/null; then
       _LG_EP_ANC=$oid
@@ -1238,7 +1238,9 @@ _lg_ix_pr_note() {
 }
 
 # _lg_ix_pr_lines <pr-lines> <out>: "o\t<n>\t<head>" per open PR, "m\t<n>\t
-# <head>" per merged PR, "x\t<n>" per open cross-repository PR ("cross":
+# <head_oid>" per merged PR that gives its merged head's commit (a merged
+# PR is pinned to it: its branch may have moved on since — a merged PR
+# without one is left out), "x\t<n>" per open cross-repository PR ("cross":
 # true — a fork's branch, never resolved through a same-named branch of
 # the remote; merged cross-repository PRs are left out). A head with a tab
 # or newline, or a number that is not one, is left out.
@@ -1247,8 +1249,10 @@ _lg_ix_pr_lines() {
     | (.number | tostring) as $n
     | select($n | test("^[0-9]+$"))
     | if .cross == true then (if .state == "open" then "x\t\($n)" else empty end)
-      elif (.state == "open" or .state == "merged") and (.head | type) == "string" and (.head | test("^[^\\t\\n\\r]+$"))
-      then "\(.state[0:1])\t\($n)\t\(.head)"
+      elif .state == "open" and (.head | type) == "string" and (.head | test("^[^\\t\\n\\r]+$"))
+      then "o\t\($n)\t\(.head)"
+      elif .state == "merged" and (.head_oid | type) == "string" and (.head_oid | test("^[0-9a-f]{40}([0-9a-f]{24})?$"))
+      then "m\t\($n)\t\(.head_oid)"
       else empty end' "$1" > "$2" 2> "$2.err" || _lg_die "jq failed (the PR list): $(head -n 1 "$2.err")"
 }
 
@@ -1264,9 +1268,10 @@ _lg_ix_pr_numbers() {
 # _lg_ix_pr_prepare <base|""> <prefix>: the PR data for an index build
 # (worktree or --rev): <prefix>.prl the adapter's lines (from the remote
 # cache's snapshot; empty without), <prefix>.prheads "<n>\t<head>\t<oid>\t
-# <o|m>" per open or merged PR whose head has a local ref (none when the
-# base does not resolve), <prefix>.prkey the key lines (the data's state
-# class, the heads). $_SCRATCH/lg-pr.mark: the views' header note (stale,
+# <o|m>" per open PR whose head has a local ref and per merged PR whose
+# head_oid this clone has ("-" for its head; none when the base does not
+# resolve), <prefix>.prkey the key lines (the data's state class, the
+# heads, each walked oid). $_SCRATCH/lg-pr.mark: the views' header note (stale,
 # offline or unavailable data; empty otherwise); $_SCRATCH/lg-pr.json: the
 # verbs' pr_data {"state": fresh|stale|offline|none|unconfigured, "as_of":
 # <fetch epoch>|null, "error": <reason>|null}. Prints the run's PR note
@@ -1353,23 +1358,33 @@ _lg_ix_pr_prepare() {
   # open PRs' and the cross-repository open PRs' numbers, and prints how
   # many of each there are.
   : > "$s.refs"
+  : > "$s.mchk"
   if [ -s "$s.pr" ] && [ -n "$base" ]; then
     git for-each-ref --format='%(objectname) %(refname)' "refs/remotes/$remote/" > "$s.refs" 2> "$s.err" \
       || _lg_die "git for-each-ref failed: $(head -n 1 "$s.err")"
+    # The merged heads this clone has: one batch check for all of them.
+    LC_ALL=C awk -F '\t' '$1 == "m" { print $3 }' "$s.pr" > "$s.moids" || _lg_die "cannot list the merged heads"
+    if [ -s "$s.moids" ]; then
+      git cat-file --batch-check='%(objectname) %(objecttype)' < "$s.moids" > "$s.mchk" 2> "$s.err" \
+        || _lg_die "git cat-file --batch-check failed: $(head -n 1 "$s.err")"
+    fi
   fi
-  t=$(LC_ALL=C awk -v refs="$s.refs" -v pre="refs/remotes/$remote/" -v miss="$s.miss" -v xs="$s.cross" \
+  t=$(LC_ALL=C awk -v refs="$s.refs" -v chk="$s.mchk" -v pre="refs/remotes/$remote/" -v miss="$s.miss" -v xs="$s.cross" \
       -v heads="$p.prheads" -v key="$p.prkey" -v state="$(if [ "$rc" != 0 ]; then echo none; else echo data; fi)" '
     BEGIN {
       printf "" > miss; printf "" > xs; printf "" > heads; print "pr " state > key
       while ((getline l < refs) > 0) { t = index(l, " "); R[substr(l, t + 1)] = substr(l, 1, t - 1) }
+      while ((getline l < chk) > 0) { split(l, a, " "); if (a[2] == "commit") C[a[1]] = 1 }
       nm = 0; nx = 0
     }
     {
       k = substr($0, 1, 1); l = substr($0, 3); t = index(l, "\t")
       if (k == "x") { print l > xs; nx++; next }
       n = substr(l, 1, t - 1); v = substr(l, t + 1)
-      if ((pre v) in R) { print n "\t" v "\t" R[pre v] "\t" k > heads; print "head " n "\t" v "\t" R[pre v] "\t" k > key }
-      else if (k == "o") { print n > miss; nm++ }
+      if (k == "m") {
+        if (v in C) { print n "\t-\t" v "\tm" > heads; print "head " n "\t-\t" v "\tm" > key }
+      } else if ((pre v) in R) { print n "\t" v "\t" R[pre v] "\t" k > heads; print "head " n "\t" v "\t" R[pre v] "\t" k > key }
+      else { print n > miss; nm++ }
     }
     END { print nm " " nx }' "$s.pr") || _lg_die "cannot resolve the PR heads"
   missing=${t%% *}
@@ -1409,7 +1424,11 @@ _lg_ix_claim_trailers() {
 # $_LG_CACHE/claims-<base>.tsv, the signature over the trailer names and
 # the shallow tag; a new base extends the newest cached ancestor's (one
 # walk of anc..base); the newest 5 kept. No base, or no such trailer
-# configured: an empty file.
+# configured: an empty file. A cached file that vanishes (another run
+# prunes it) is a miss — a cold walk, silently. DOC_TOOLS_LEDGER_SELFTEST
+# (scripts/test-ledger.sh only): claims-prune-early removes the cached
+# files after they are listed, claims-prune the chosen ancestor's before
+# it is copied.
 _lg_ix_base_claims() {
   local B="$1" s f first hdr c oid anc="" tmp rc=0
   _lg_scratch_name
@@ -1434,12 +1453,15 @@ _lg_ix_base_claims() {
   fi
   # shellcheck disable=SC2012  # cache names are claims-<hex>.tsv
   ls -t "$_LG_CACHE"/claims-*.tsv 2>/dev/null | head -n 8 > "$s.cached" || true
+  case "${DOC_TOOLS_LEDGER_SELFTEST:-}" in
+    claims-prune-early) while IFS= read -r c; do rm -f "$c"; done < "$s.cached" ;;
+  esac
   while IFS= read -r c; do
     oid=${c##*/claims-}
     oid=${oid%.tsv}
     [ "$oid" != "$B" ] || continue
     first=""
-    IFS= read -r first < "$c" || true
+    { IFS= read -r first < "$c"; } 2>/dev/null || true
     [ "$first" = "$hdr" ] || continue
     if git merge-base --is-ancestor "$oid" "$B" 2>/dev/null; then anc=$oid; break; fi
   done < "$s.cached"
@@ -1447,6 +1469,9 @@ _lg_ix_base_claims() {
   tmp=$(mktemp "$_LG_CACHE/.claims.XXXXXX") || _lg_die "cannot create a temp file in $_LG_CACHE"
   if [ -n "$anc" ]; then
     _lg_ix_trace "claims-extend $anc"
+    case "${DOC_TOOLS_LEDGER_SELFTEST:-}" in
+      claims-prune) rm -f "$_LG_CACHE/claims-$anc.tsv" ;;
+    esac
     if ! cp -- "$_LG_CACHE/claims-$anc.tsv" "$tmp" 2>/dev/null; then
       # A cached file that cannot be read (removed meanwhile, …): a cold walk.
       _lg_ix_trace "claims-cold (cannot read claims-$anc.tsv)"

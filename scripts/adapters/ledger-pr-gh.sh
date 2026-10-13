@@ -6,8 +6,8 @@
 #   ledger-pr-gh.sh list
 #     Two calls, run in the current directory (the ledger runs adapters
 #     from the work tree's top level, so gh finds the repository from its
-#     remotes), each `--json number,headRefName,state,url,mergeCommit,
-#     isCrossRepository`:
+#     remotes), each `--json number,headRefName,headRefOid,state,url,
+#     mergeCommit,isCrossRepository`:
 #       gh pr list --state open --limit 1000    (every open PR: in review)
 #       gh pr list --state merged --limit 500   (the newest merged PRs)
 #     Closed (unmerged) PRs are not asked for: no derived status reads them.
@@ -16,11 +16,13 @@
 #     (a cut merged list only drops the oldest merged PRs, whose trailer
 #     claims the base's history carries anyway). Output: one compact JSON
 #     line per PR, the open ones first —
-#       {"number": <n>, "head": <headRefName>, "state": "open"|"merged",
-#        "url": <url>, "merge_commit": <mergeCommit.oid>|null,
-#        "cross": <isCrossRepository>}
+#       {"number": <n>, "head": <headRefName>, "head_oid": <headRefOid>|null,
+#        "state": "open"|"merged", "url": <url>,
+#        "merge_commit": <mergeCommit.oid>|null, "cross": <isCrossRepository>}
 #     ("cross": the head is a fork's branch — the ledger never resolves it
-#     through a same-named branch of its own remote).
+#     through a same-named branch of its own remote; "head_oid": the head's
+#     last commit — a merged PR is walked from it, never from its branch,
+#     which may have moved on since).
 #
 # Exit: 0 listed · 2 could not list — gh missing, gh failing (its stderr is
 # passed through), output that is not gh's JSON list, or the open list at
@@ -53,7 +55,7 @@ fi
 
 OPEN_LIMIT=1000
 MERGED_LIMIT=500
-FIELDS=number,headRefName,state,url,mergeCommit,isCrossRepository
+FIELDS=number,headRefName,headRefOid,state,url,mergeCommit,isCrossRepository
 
 # gh_list <state> <limit>: gh's JSON list (its stderr goes straight
 # through) normalised to the output lines.
@@ -70,6 +72,7 @@ gh_list() {
       else .[] end
       | {number: .number,
          head: .headRefName,
+         head_oid: (.headRefOid | if type == "string" and . != "" then . else null end),
          state: ((.state // "") | ascii_downcase | if . == "open" or . == "merged" then . else "closed" end),
          url: .url,
          merge_commit: (.mergeCommit | if type == "object" then (.oid // null) else null end),

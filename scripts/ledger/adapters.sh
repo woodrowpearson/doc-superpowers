@@ -28,7 +28,10 @@
 #   pr list          "number", "head", "state", "url"; optional "cross"
 #                    (true: the head is a fork's branch — never resolved
 #                    through a same-named branch of keys.remote; absent:
-#                    false). The reference adapter,
+#                    false) and "head_oid" (the head's commit: a merged PR
+#                    is walked from it when this clone has it, never from
+#                    its branch; absent: a merged PR adds nothing beyond
+#                    the base's own claims). The reference adapter,
 #                    scripts/adapters/ledger-pr-gh.sh, adds "merge_commit";
 #                    state open | merged | closed
 # Other subcommands (contracts resolve <id>: exit 0/1) are not checked: the

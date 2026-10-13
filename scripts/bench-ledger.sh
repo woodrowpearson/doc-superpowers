@@ -470,7 +470,7 @@ Ledger-Claims: $key
   git rev-list --max-count=100 main > "$B_ROOT/pr.merged"
   while IFS= read -r c; do
     i=$((i + 1))
-    printf '%s\n' "{\"number\":$i,\"head\":\"merged-$i\",\"state\":\"merged\",\"url\":\"https://example.test/pull/$i\",\"merge_commit\":\"$c\"}"
+    printf '%s\n' "{\"number\":$i,\"head\":\"merged-$i\",\"state\":\"merged\",\"url\":\"https://example.test/pull/$i\",\"merge_commit\":\"$c\",\"head_oid\":\"$c\"}"
   done < "$B_ROOT/pr.merged" >> "$B_ROOT/prs.jsonl"
   printf '#!/bin/sh\ncat "%s"\n' "$B_ROOT/prs.jsonl" > "$B_ROOT/pr-adapter.sh"
   chmod +x "$B_ROOT/pr-adapter.sh"

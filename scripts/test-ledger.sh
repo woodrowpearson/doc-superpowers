@@ -5403,7 +5403,8 @@ LG_PR_CFG='{"adapters":{"pr":"doc-superpowers:ledger-pr-gh"},"trailers":{"claims
 # PR #12's head is "feat/ünï-x"; open PR #16 is cross-repository (a fork)
 # with the same head name — never attributed through origin's branch.
 # Merged PR #9 (its branch deleted) only edited x-5's file → nothing.
-# LG_PR_M: PR #9's merge commit.
+# LG_PR_M: PR #9's merge commit; LG_PR_SQ: PR #10's merged head
+# (headRefOid — a merged PR is walked from it, never from its branch).
 lg_pr_fixture() {
   local c="$LG_PR_CFG"
   if [ $# -gt 0 ]; then c=$1; fi
@@ -5452,6 +5453,7 @@ Ledger-Claims: x-6"
   git add -A && git commit -qm "touch y-5"
   git push -q origin squashed
   git checkout -q main
+  LG_PR_SQ=$(git rev-parse squashed)
   git branch -q -D "feat/ünï-x" "feat/-dash" closed-branch squashed
   git fetch -q origin
   cat > "$LG_GH/prs.json" <<EOF
@@ -5459,7 +5461,7 @@ Ledger-Claims: x-6"
  {"number":15,"headRefName":"feat/-dash","state":"OPEN","url":"https://github.com/o/r/pull/15","mergeCommit":null},
  {"number":13,"headRefName":"gone","state":"OPEN","url":"https://github.com/o/r/pull/13","mergeCommit":null},
  {"number":12,"headRefName":"feat/ünï-x","state":"OPEN","url":"https://github.com/o/r/pull/12","mergeCommit":null},
- {"number":10,"headRefName":"squashed","state":"MERGED","url":"https://github.com/o/r/pull/10","mergeCommit":{"oid":"0123456789abcdef0123456789abcdef01234567"}},
+ {"number":10,"headRefName":"squashed","headRefOid":"$LG_PR_SQ","state":"MERGED","url":"https://github.com/o/r/pull/10","mergeCommit":{"oid":"0123456789abcdef0123456789abcdef01234567"}},
  {"number":9,"headRefName":"merged-branch","state":"MERGED","url":"https://github.com/o/r/pull/9","mergeCommit":{"oid":"$LG_PR_M"}},
  {"number":4,"headRefName":"closed-branch","state":"CLOSED","url":"https://github.com/o/r/pull/4","mergeCommit":null}]
 EOF
@@ -5486,7 +5488,7 @@ test_lg_pr_adapter_normalises() {
   lg_fixture
   lg_fake_gh
   cat > "$LG_GH/prs.json" <<'EOF'
-[{"number":12,"headRefName":"feat/ünï-x","state":"OPEN","url":"https://github.com/o/r/pull/12","mergeCommit":null,"isCrossRepository":false},
+[{"number":12,"headRefName":"feat/ünï-x","headRefOid":"1111111111111111111111111111111111111111","state":"OPEN","url":"https://github.com/o/r/pull/12","mergeCommit":null,"isCrossRepository":false},
  {"number":16,"headRefName":"-dash","state":"OPEN","url":"https://github.com/o/r/pull/16","mergeCommit":null,"isCrossRepository":true},
  {"number":9,"headRefName":"done","state":"MERGED","url":"https://github.com/o/r/pull/9","mergeCommit":{"oid":"0123456789abcdef0123456789abcdef01234567"}},
  {"number":4,"headRefName":"gone","state":"CLOSED","url":"https://github.com/o/r/pull/4","mergeCommit":null}]
@@ -5494,12 +5496,12 @@ EOF
   local out rc=0
   out=$("$BASH_BIN" "$REPO_DIR/scripts/adapters/ledger-pr-gh.sh" list 2>&1) || rc=$?
   assert_eq "0" "$rc" "exit 0"
-  assert_eq '{"number":12,"head":"feat/ünï-x","state":"open","url":"https://github.com/o/r/pull/12","merge_commit":null,"cross":false}
-{"number":16,"head":"-dash","state":"open","url":"https://github.com/o/r/pull/16","merge_commit":null,"cross":true}
-{"number":9,"head":"done","state":"merged","url":"https://github.com/o/r/pull/9","merge_commit":"0123456789abcdef0123456789abcdef01234567","cross":false}' "$out" \
-    "one compact line per open, then merged PR (closed ones not asked for); state lowercased; mergeCommit.oid; isCrossRepository as cross"
-  assert_eq "pr list --state open --limit 1000 --json number,headRefName,state,url,mergeCommit,isCrossRepository
-pr list --state merged --limit 500 --json number,headRefName,state,url,mergeCommit,isCrossRepository" "$(cat "$LG_GH/args")" "the two gh calls"
+  assert_eq '{"number":12,"head":"feat/ünï-x","head_oid":"1111111111111111111111111111111111111111","state":"open","url":"https://github.com/o/r/pull/12","merge_commit":null,"cross":false}
+{"number":16,"head":"-dash","head_oid":null,"state":"open","url":"https://github.com/o/r/pull/16","merge_commit":null,"cross":true}
+{"number":9,"head":"done","head_oid":null,"state":"merged","url":"https://github.com/o/r/pull/9","merge_commit":"0123456789abcdef0123456789abcdef01234567","cross":false}' "$out" \
+    "one compact line per open, then merged PR (closed ones not asked for); state lowercased; headRefOid as head_oid; mergeCommit.oid; isCrossRepository as cross"
+  assert_eq "pr list --state open --limit 1000 --json number,headRefName,headRefOid,state,url,mergeCommit,isCrossRepository
+pr list --state merged --limit 500 --json number,headRefName,headRefOid,state,url,mergeCommit,isCrossRepository" "$(cat "$LG_GH/args")" "the two gh calls"
   printf '[]\n' > "$LG_GH/prs.json"
   out=$("$BASH_BIN" "$REPO_DIR/scripts/adapters/ledger-pr-gh.sh" list 2>&1) || rc=$?
   assert_eq "0|" "$rc|$out" "no PRs: exit 0, no lines"
@@ -5899,7 +5901,7 @@ test_lg_remote_offline() {
 lg_remote_v2() {
   local d h
   d=$(harness_mktemp lg-v2)
-  { tail -n +2 "$1" | sed 's/"number":15,\("head":"feat\/-dash","state":\)"open"/"number":15,\1"closed"/'
+  { tail -n +2 "$1" | jq -c 'if .number == 15 then .state = "closed" else . end'
     echo '{"number":17,"head":"closed-branch","state":"open","url":"https://github.com/o/r/pull/17","merge_commit":null,"cross":false}'; } > "$d"
   h=$(head -n 1 "$1" | jq -c --arg s "$(shasum -a 256 < "$d" | cut -d ' ' -f 1)" '.data_sha256 = $s')
   { printf '%s\n' "$h"; cat "$d"; } > "$2"
@@ -5957,6 +5959,63 @@ EOF
   git fetch -q origin
   lg ls --format json
   assert_eq "in review #12" "$(lg_pr_status y-3)" "claimed by \"9\" and \"12\": #12, the higher number"
+  lg_pr_teardown
+}
+
+test_lg_merged_pr_pinned_to_head_oid() {
+  echo "test: a merged PR is walked from its merged head (headRefOid), never from its branch — later commits on a reused branch are not its claims (R2-1)"
+  lg_pr_fixture
+  lg ls --format json
+  assert_eq "merged · owed: closing" "$(lg_pr_status x-8)" "x-8: claimed at #10's merged head"
+  # The branch "squashed" is reused after the merge: a new commit claims
+  # y-2 (pushed from another clone, fetched here).
+  local other
+  other="$(harness_mktemp_d lg-other)/clone"
+  lg_clone "$other"
+  ( cd "$other" && git checkout -q -b reuse origin/squashed \
+    && git commit -q --allow-empty -m "after the merge" -m "Ledger-Claims: y-2" && git push -q origin "HEAD:squashed" )
+  rm -rf "$(dirname "$other")"
+  git fetch -q origin
+  lg ls --refresh --format json
+  assert_eq "not started" "$(lg_pr_status y-2)" "y-2: claimed after #10 merged — not merged"
+  assert_eq "merged · owed: closing" "$(lg_pr_status x-8)" "x-8 still merged (its merged head)"
+  # An open PR on the reused branch: in review.
+  jq -c '. + [{"number":18,"headRefName":"squashed","headRefOid":"0","state":"OPEN","url":"https://github.com/o/r/pull/18","mergeCommit":null}]' \
+    "$LG_GH/prs.json" > "$LG_GH/p2" && mv "$LG_GH/p2" "$LG_GH/prs.json"
+  lg ls --refresh --format json
+  assert_eq "in review #18" "$(lg_pr_status y-2)" "y-2: in review #18 (the open PR on the reused branch)"
+  # Without head_oid (a third-party adapter), a merged PR adds nothing
+  # beyond the base walk.
+  jq -c 'map(select(.number != 18) | del(.headRefOid))' "$LG_GH/prs.json" > "$LG_GH/p2" && mv "$LG_GH/p2" "$LG_GH/prs.json"
+  lg ls --refresh --format json
+  assert_eq "not started" "$(lg_pr_status x-8)" "no head_oid: x-8 is not merged through #10"
+  # A head_oid this clone does not have: nothing, no failure.
+  jq -c 'map(if .number == 10 then .headRefOid = "abababababababababababababababababababab" else . end)' "$LG_GH/prs.json" > "$LG_GH/p2" \
+    && mv "$LG_GH/p2" "$LG_GH/prs.json"
+  lg ls --refresh --format json
+  assert_eq "0|not started" "$LG_RC|$(lg_pr_status x-8)" "an unknown head_oid: exit 0, nothing"
+  lg_pr_teardown
+}
+
+# lg_claims_prune_check <hook>: a base that moved (one commit, fetched),
+# then ls under DOC_TOOLS_LEDGER_SELFTEST=<hook> and the trace: exit 0, a
+# cold walk of the claims, and stderr holds no stray line — exactly one
+# "ledger:" line (the fixture's unfetched head) besides the trace.
+lg_claims_prune_check() {
+  git commit -q --allow-empty -m "base moves ($1)" && git push -q origin main && git fetch -q origin
+  DOC_TOOLS_LEDGER_SELFTEST=$1 DOC_TOOLS_LEDGER_TRACE=1 lg ls
+  assert_eq "0" "$LG_RC" "$1: exit 0"
+  assert_contains "$LG_ERR" "claims-cold" "$1: a cold walk of the base's claims"
+  assert_eq "1" "$(printf '%s\n' "$LG_ERR" | grep -c '^ledger:')" "$1: one ledger: line"
+  assert_eq "" "$(printf '%s\n' "$LG_ERR" | grep -v -E '^(ledger: |index-|dates-|claims-)')" "$1: no stray stderr"
+}
+
+test_lg_base_claims_prune_race() {
+  echo "test: a cached base-claims file pruned mid-run is a cold walk — exit 0, no stray stderr (R2-2, R2-3)"
+  lg_pr_fixture
+  lg ls
+  lg_claims_prune_check claims-prune
+  lg_claims_prune_check claims-prune-early
   lg_pr_teardown
 }
 
@@ -6176,6 +6235,10 @@ run_tests() {
   test_lg_remote_offline
   test_lg_remote_cache_race_snapshot
   test_lg_pr_numbers_sorted_numerically
+
+  # --- Task 10 fix round 2 ---
+  test_lg_merged_pr_pinned_to_head_oid
+  test_lg_base_claims_prune_race
 
   print_summary
 }
