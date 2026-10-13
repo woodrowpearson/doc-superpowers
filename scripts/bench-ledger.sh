@@ -32,6 +32,11 @@
 #              merged PRs whose merge commits are main's last 100: cold
 #              (the PR list fetched through the remote cache, the heads
 #              walked, the merge commits' files read) < 5 s, warm < 1 s
+#   ls / show (500 hosted items)   as ls / show, with config items.adapter:
+#              a fake items adapter listing 500 hosted items (every third
+#              fixed, the rest open) beside the N file items: cold (the list
+#              fetched through the remote cache and joined) < 5 s, warm (the
+#              cached list, controller ruling R4) < 1 s
 #   ls / show (in flight: 1000 branches, 300 unmerged)   as ls / show, with
 #              config inflight.enabled: 700 branches merged into the base
 #              (refs/heads/m-<i> at main's commits: the for-each-ref
@@ -516,6 +521,27 @@ b_verb "show $show_key (50 open PRs)" show "$show_key"
 echo "  (50 open PRs: $(jq -r '[.items[] | .derived.status] | group_by(.) | map("\(.[0]) \(length)") | join(", ")' "$B_OUT"))"
 git checkout -q -- docs/ledger/config.json
 git for-each-ref --format='delete %(refname)' refs/remotes/origin/ | git update-ref --stdin
+
+# 500 hosted items (config items.adapter): a fake adapter's list, read
+# through the remote cache; undone after the rows.
+b_hosted() {
+  awk -v n="$1" 'BEGIN {
+    for (i = 1; i <= n; i++)
+      printf "{\"ref\":\"gh#%d\",\"url\":\"https://example.test/issues/%d\",\"title\":\"Hosted %d\",\"body_excerpt\":\"A hosted item for the bench.\",\"status\":\"%s\",\"fields\":{\"key\":\"checkout-%d\",\"ledger\":\"checkout\",\"severity\":\"P%d\",\"summary\":\"Hosted item %d: why it matters to the bench\"},\"labels\":[\"ledger:checkout\"],\"updated\":\"2026-10-01T00:00:00Z\",\"fm_errors\":[]}\n", i, i, i, (i % 3 ? "Open" : "Fixed"), 900000 + i, i % 4, i
+  }' > "$B_ROOT/hosted.jsonl" || b_die "cannot write the hosted items"
+  printf '#!/bin/sh\ncat "%s"\n' "$B_ROOT/hosted.jsonl" > "$B_ROOT/items-adapter.sh"
+  chmod +x "$B_ROOT/items-adapter.sh"
+  if ! jq -c --arg a "$B_ROOT/items-adapter.sh" '.items.adapter = $a' docs/ledger/config.json > "$B_ROOT/config.json" \
+      || ! cp "$B_ROOT/config.json" docs/ledger/config.json; then
+    b_die "cannot configure the items adapter"
+  fi
+}
+b_hosted 500
+b_verb "ls (500 hosted items)" ls
+b_verb "show $show_key (500 hosted items)" show "$show_key"
+"$B_BASH" "$B_DT" ledger ls --format json > "$B_OUT" 2> "$B_ERR" || b_die "ls --format json failed"
+echo "  (500 hosted items: $(jq -r '[.items[] | select(.path | startswith("gh#"))] | length' "$B_OUT") listed, items_data $(jq -r '.items_data.state' "$B_OUT"))"
+git checkout -q -- docs/ledger/config.json
 
 # In flight: 1,000 branches (700 merged, 300 not), see the header; undone
 # after the rows.

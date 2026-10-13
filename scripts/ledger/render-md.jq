@@ -53,7 +53,7 @@ def handoff_cell: (.docs.handoff // []) | lg_v_newest | if . == null then none e
 def header_row: "| Key | Issue | Why it matters | Sev | Spec | Plan | PR | Latest handoff | Status |",
                 "|---|---|---|---|---|---|---|---|---|";
 def row:
-  "| \((.key // none) | md) | \(link(lg_q_stem | lg_q_cut(48); .path)) | \((.summary // none) | md) | \((.severity // none) | md)"
+  "| \((.key // none) | md) | \(link(lg_q_stem | lg_q_cut(48); .url // .path)) | \((.summary // none) | md) | \((.severity // none) | md)"
   + " | \(doc_cell(.docs.spec // [])) | \(doc_cell(.docs.plan // [])) | \(pr_cell) | \(handoff_cell) | \(lg_v_status | md) |";
 def table($items): header_row, ($items[] | row);
 def blank: "";
@@ -99,7 +99,7 @@ def page($L):
   "## Recently closed (\(recent_days) days)",
   blank,
   (if ($L.closed | length) == 0 then "None."
-   else $L.closed[] | "- \(link(lg_q_id; .path)) — \((.summary // none) | md) · \(lg_q_display | md)" end),
+   else $L.closed[] | "- \(link(lg_q_id; .url // .path)) — \((.summary // none) | md) · \(lg_q_display | md)" end),
   blank,
   "## Superseded / won't fix (\(recent_days) days)",
   blank,
@@ -130,7 +130,7 @@ def readme($M):
       blank,
       (if ($roll | length) == 0 then "None."
        else "| Key | Ledger | Issue | Why it matters | Sev | Status |", "|---|---|---|---|---|---|",
-            ($roll[] | "| \((.key // none) | md) | \(.ledger | md) | \(link(lg_q_stem | lg_q_cut(48); .path)) | \((.summary // none) | md) | \(.severity | md) | \(lg_q_display | md) |")
+            ($roll[] | "| \((.key // none) | md) | \(.ledger | md) | \(link(lg_q_stem | lg_q_cut(48); .url // .path)) | \((.summary // none) | md) | \(.severity | md) | \(lg_q_display | md) |")
        end));
 
 lg_v_model(.; $c[0]; gen) as $M

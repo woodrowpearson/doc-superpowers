@@ -369,8 +369,12 @@ def lg_v_header($gen):
   "Generated from \($gen.source // "?") + \($gen.inflight // 0) in-flight branches at \($gen.at // "?") by doc-superpowers ledger. Do not edit — edit the item."
   + (($gen.pr_note // "") | if type == "string" and . != "" then " · " + . else "" end);
 # lg_v_url($gen): the item path as a link target — $gen.link (a prefix,
-# already encoded) + each path segment percent-encoded.
-def lg_v_url($gen): ($gen.link // "") + (split("/") | map(@uri) | join("/"));
+# already encoded) + each path segment percent-encoded; an http(s) URL (a
+# hosted item's url: index.sh) as it is, with ")", " " and "|" encoded (a
+# file path never starts with a scheme: git paths hold no "//").
+def lg_v_url($gen):
+  if test("^https?://") then lg_q_one | gsub("\\)"; "%29") | gsub(" "; "%20") | gsub("\\|"; "%7C")
+  else ($gen.link // "") + (split("/") | map(@uri) | join("/")) end;
 # lg_v_newest: the newest of a list of doc paths (by file name: date-led
 # names sort by date), or null.
 def lg_v_newest: if length == 0 then null else sort_by(split("/") | last) | last end;

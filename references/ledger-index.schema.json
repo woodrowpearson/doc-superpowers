@@ -150,7 +150,8 @@
           }
         },
         "recheck_after": { "$ref": "#/$defs/strList", "description": "Re-check markers (design §F.2, computed): on an open item, the key of a re-check source that reached a terminal class on the base, or a contract it consumes that a base commit changed — after the item's last commit on the base. Not computed for --staged." },
-        "fm_errors": { "$ref": "#/$defs/strList" }
+        "fm_errors": { "$ref": "#/$defs/strList" },
+        "url": { "type": "string", "description": "Hosted items only (config items.adapter; not in required): the adapter's url. A hosted item's path is the adapter's ref (gh#<n> for scripts/adapters/ledger-items-gh.sh); file items have no url." }
       }
     }
   }

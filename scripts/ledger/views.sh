@@ -47,12 +47,25 @@
 # <short HEAD>" / "<base>@<short-sha>"), the in-flight branch count (the
 # scan's, inflight.sh; 0 when in-flight awareness is off), the UTC time, the PR data note (view:
 # "PR data as of <UTC> (<age> old)" when the PR adapter failed and its
-# last copy serves, "PR data: — (unavailable)" when there is none;
+# last copy serves, "PR data: — (unavailable)" when there is none; the
+# hosted items' alike before it, _lg_v_marks;
 # publish fetches the PR list and fails, exit 2, without it), the recency cutoff
 # (today − views.recent_days), the last-touched date of every item path a
 # commit since the cutoff touched (git log over the item and archive glob
 # directories; for view, also today for each modified or untracked item
 # file), and the link prefix.
+
+# _lg_v_marks: the header's data notes — the hosted items' (index.sh:
+# "hosted items as of <UTC> (<age> old, stale)", "hosted items: —
+# (unavailable)"; $_SCRATCH/lg-items.mark), then the PR data's
+# ($_SCRATCH/lg-pr.mark), " · " between; "" when both are fresh or not
+# configured.
+_lg_v_marks() {
+  local a="" b=""
+  { IFS= read -r a < "$_SCRATCH/lg-items.mark"; } 2>/dev/null || a=""
+  { IFS= read -r b < "$_SCRATCH/lg-pr.mark"; } 2>/dev/null || b=""
+  printf '%s' "$a${a:+${b:+ · }}$b"
+}
 
 # _lg_v_generated <commit> <dirty 0|1> <source> <link> <out> [pr-note]
 # [in-flight count]: write the $generated object (see the header) to <out>;
@@ -222,7 +235,7 @@ cmd_ledger_view() {
   link=$(jq -nr --arg r "$_LG_ROOT" '$r | split("/") | map(@uri) | join("/") + "/"') || _lg_die "jq failed (the link prefix)"
   gen="$s.gen"
   _lg_v_generated "$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null || true)" 1 \
-    "the working tree at ${head:-(no commit)}" "$link" "$gen" "$(cat "$_SCRATCH/lg-pr.mark" 2>/dev/null || true)" "$_LG_V_IFLN"
+    "the working tree at ${head:-(no commit)}" "$link" "$gen" "$(_lg_v_marks)" "$_LG_V_IFLN"
   stage=$(mktemp -d "$_SCRATCH/lg-view.XXXXXX") || _lg_die "mktemp failed"
   _lg_v_render "$ix" "$gen" "$target" "$md" "$html" "$stage"
   mkdir -p -- "$out" 2>/dev/null || _lg_die "cannot create $out"

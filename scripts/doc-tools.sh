@@ -2478,9 +2478,18 @@ ledger link|cmd_ledger_link|repo|consumes= changes= relates= format=
   root-cause, depends-on or sibling and names another item that has a
   key (written as its key). Any bad value: exit 1, nothing written. A
   value already there is left as it is.
-ledger note|cmd_ledger_note|repo|format=
-  <key> <text> [--format text|json]
-  Append a dated line under an item's log heading, or set what it owes.
+ledger note|cmd_ledger_note|repo|kind= format=
+  <item> <text> [--kind log|ruling|owed] [--format text|json]
+  The one deterministic home for an item's state. <item> takes what show
+  takes; <text> is one line. log (the default) appends "- <YYYY-MM-DD>
+  <text>" under config log_heading, ruling "- <YYYY-MM-DD> RULING: <text>"
+  under "## Rulings" — after the section's last line, the heading created
+  at the end of the file when absent; every other byte is kept (BOM, line
+  endings, the final newline); nothing is staged. owed sets the owed field
+  (empty text removes it). A hosted item (config items.adapter) goes
+  through its adapter: a comment (log, "RULING: <text>"), or its owed
+  field; the adapter failing or offline: exit 2. Prints "<key|path>
+  <line>". Unknown item: exit 1; several, or a blank text: exit 3.
 ledger view|cmd_ledger_view|repo|md html out= open refresh format=
   <ledger|all> [--md] [--html] [--out <dir>] [--open] [--refresh] [--format text|json]
   Render the ledger views from the working tree (uncommitted items
@@ -2776,7 +2785,20 @@ notices, new, assign, link, note, view, validate, publish, finalize, init):
   --refresh and publish exit 2. DOC_TOOLS_LEDGER_OFFLINE=1 never runs it
   (for hooks that must not reach the network): a copy past its TTL is
   served as "PR data as of …", no copy is "—", and --refresh / publish
-  exit 2 ("offline: DOC_TOOLS_LEDGER_OFFLINE=1").
+  exit 2 ("offline: DOC_TOOLS_LEDGER_OFFLINE=1"). Hosted items (config
+  items.adapter, e.g. doc-superpowers:ledger-items-gh — GitHub issues
+  through gh: ledger and severity as "ledger:<id>" / "sev:<value>" labels,
+  the other fields in a <!-- doc-superpowers-ledger … --> block in the
+  issue body; the adapter is also `list [--since <ts>]`, `write <ref>
+  <field> <value>`, `note <ref> <text>` and `create --title T --body-file
+  F`) join the index with their ref as path (gh#<n>) and their url, read
+  through the same cache: a copy that is served stale is "hosted items as
+  of <UTC> (<age> old, stale)" in the note and the views, none is
+  "hosted items: —" (and "items_data" in --format json); --refresh and
+  publish exit 2 when the adapter fails, validate --all too when there is
+  no copy. validate --staged never runs it. With in-flight awareness on,
+  "Fixes #<n>" (trailers.claims_by_ref) claims the one hosted item whose
+  ref ends in #<n>.
 
 Exit status:
   0  success

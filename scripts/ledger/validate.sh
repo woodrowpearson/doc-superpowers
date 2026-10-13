@@ -188,6 +188,12 @@ _lg_validate_registry() {
 #
 # --all: every item of the working-tree index, the blocking classes block;
 # retired-ledger is reported (advisory) only for open / unknown-class items.
+# The index holds the hosted items too (config items.adapter, through the
+# items cache — fresh or stale, the run's note says which; no copy and the
+# adapter failing: exit 2; controller ruling R4): key and alias uniqueness
+# spans both kinds, and a hosted item gets every check whose data its
+# adapter supplies — not missing-resolution (a hosted item's reason lives
+# on the issue). --staged never calls the adapter.
 
 # shellcheck disable=SC2016  # jq source
 _LG_JQ_VALIDATE_DEFS='
@@ -216,11 +222,12 @@ def lg_v_rinfo($F; $CT; $EX):
      errors: (.fm_errors // []),
      changes: (($fm | lg_fv($F; "changes")) | lg_list),
      consumes: (($fm | lg_fv($F; "consumes")) | lg_list)};
-# An index item → the same fields.
+# An index item → the same fields (hosted: a hosted item — config
+# items.adapter — whose adapter supplies no resolution).
 def lg_v_iinfo:
   {path, keyraw: .key, key, aliases, ledgerraw: .ledger, ledger, class, sup: .superseded_by, summary,
    resolution: (.resolution | if type == "string" and test("\\S") then . else null end),
-   errors: (.fm_errors // []), changes, consumes};
+   errors: (.fm_errors // []), changes, consumes, hosted: ((.url | type) == "string")};
 # The tokens (key and aliases, lower case) of an info, with their roles.
 def lg_v_toks:
   ((.key // null) | if type == "string" then ascii_downcase else null end) as $k
@@ -421,7 +428,9 @@ $c[0] as $cfg
      "the summary is \($i.summary | length) characters: say why it matters (20 or more)")
    else empty end),
   (if $i.key == null and $i.ledger != null and $i.ledger != "unassigned" then
-     lg_v_f("missing-key"; "advisory"; $i.path; null; "no key: run ledger new --file <item> --ledger \($i.ledger | lg_v_tok)")
+     lg_v_f("missing-key"; "advisory"; $i.path; null;
+       if $i.hosted then "no key: a hosted item takes one in its metadata (its adapter: write <ref> key <key>)"
+       else "no key: run ledger new --file <item> --ledger \($i.ledger | lg_v_tok)" end)
    else empty end),
   (if $i.ledger == "unassigned" and $i.class == "open" then
      lg_v_f("unassigned-open"; "advisory"; $i.path; $i.key; "open and unassigned: give it a home (ledger assign <item> <ledger>)")
@@ -429,7 +438,7 @@ $c[0] as $cfg
   (if $i.class == "open" and $i.changes == [] and $i.consumes == [] then
      lg_v_f("no-contract"; "advisory"; $i.path; $i.key; "open, and names no contract it changes or consumes")
    else empty end),
-  (if ($i.class | lg_v_term) and $i.resolution == null then
+  (if ($i.class | lg_v_term) and $i.resolution == null and ($i.hosted | not) then
      lg_v_f("missing-resolution"; "block"; $i.path; $i.key; "status \($i.class) needs a resolution (a line under the resolution heading)")
    else empty end),
   lg_v_sup_f($i; $M; $R; $FIN; true),
@@ -773,7 +782,12 @@ _lg_validate_staged() {
 # shellcheck disable=SC2154  # _OPT_* are set by _parse_args
 _lg_validate_all() {
   local out="$1" ix reg
+  # Hosted items (config items.adapter) through the items cache, fresh or
+  # stale — the run's note says which; with no copy and the adapter
+  # failing, exit 2 (index.sh _lg_ix_items_prepare).
+  _LG_IX_NEED_ITEMS=1
   ix=$(_lg_index) || exit "$?"
+  _LG_IX_NEED_ITEMS=""
   : > "$out"
   if [ "$_OPT_registry" = 1 ]; then
     local s
