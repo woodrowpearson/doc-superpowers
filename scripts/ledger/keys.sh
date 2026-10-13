@@ -432,14 +432,15 @@ _lg_k_ct() {
 # lost the race (retry) · 2 refused · 4 transport; _LG_CAS_ERR says why.
 # Every failure is checked explicitly (callers run it on the left of ||).
 _lg_counter_cas() {
-  local expected="$1" json="$2" msg="${3:-ledger: allocate}" d blob tree commit rc=0 line flag summary
+  local expected="$1" json="$2" msg="${3:-ledger: allocate}" d blob tree commit rc=0 line flag summary nonce
   _lg_k_cfg
   _LG_CAS_ERR=""
   d=$(mktemp -d "$_SCRATCH/lg-cas.XXXXXX") || _lg_die "mktemp failed"
   jq -S . <<<"$json" > "$d/counters.json" 2>/dev/null || _lg_die "internal: the new counters are not JSON: $json"
   blob=$(git hash-object -w "$d/counters.json") || _lg_die "git hash-object failed (the counters)"
   tree=$(printf '100644 blob %s\tcounters.json\n' "$blob" | git mktree) || _lg_die "git mktree failed (the counters)"
-  printf '%s\n\nNonce: %s\n' "$msg" "$(_lg_k_random)" > "$d/msg" || _lg_die "cannot write $d/msg"
+  nonce=$(_lg_k_random) || exit "$?"
+  printf '%s\n\nNonce: %s\n' "$msg" "$nonce" > "$d/msg" || _lg_die "cannot write $d/msg"
   commit=$(_lg_k_commit_tree "$tree" "$expected" "$d/msg") || _lg_die "git commit-tree failed (the counters)"
   LC_ALL=C git push --porcelain --no-verify "--force-with-lease=$_LG_K_REF:$expected" \
     "$_LG_K_REMOTE" "$commit:$_LG_K_REF" < /dev/null > "$d/out" 2> "$d/err" || rc=$?
@@ -479,9 +480,10 @@ _lg_counter_cas() {
 # _lg_k_prov_lines <paths-file>: "ledger\tprovisional key" per line of
 # <paths-file> ("ledger\tpath").
 _lg_k_prov_lines() {
-  local l p
+  local l p k
   while IFS=$'\t' read -r l p; do
-    printf '%s\t%s\n' "$l" "$(_lg_k_provisional "$l" "$p")"
+    k=$(_lg_k_provisional "$l" "$p") || exit "$?"
+    printf '%s\t%s\n' "$l" "$k"
   done < "$1"
 }
 

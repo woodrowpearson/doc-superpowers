@@ -1555,9 +1555,10 @@ _on_exit() {
     IFS= read -r erc < "$_SCRATCH/$marker" || true
   fi
   # A ledger run's background in-flight scan (scripts/ledger/inflight.sh)
-  # never outlives it: killed and reaped before the scratch dir goes.
+  # never outlives it: it and every process under it (git fetch, its
+  # transport) are signalled, and it is reaped, before the scratch dir goes.
   if [ -n "${_LG_IFL_PID:-}" ]; then
-    kill "$_LG_IFL_PID" 2>/dev/null || true
+    _lg_kill_tree "$_LG_IFL_PID"
     wait "$_LG_IFL_PID" 2>/dev/null || true
     _LG_IFL_PID=""
   fi
@@ -11794,16 +11795,24 @@ _lg_fail() {
   local rc="$1" msg="$2" uverb="${3:-}" verb enabled=false prev=""
   # The in-flight scan's background child (scripts/ledger/inflight.sh)
   # prints no verdict: it leaves its failure for the run to raise.
+  # (The first failure wins: a later one never overwrites it.)
   if [ -n "${_LG_IFL_CHILD:-}" ]; then
-    printf '%s\t%s\n' "$rc" "$msg" > "$_SCRATCH/lg-ifl.fail" 2>/dev/null || true
+    if [ ! -e "$_SCRATCH/lg-ifl.fail" ]; then
+      printf '%s\t%s\n' "$rc" "$msg" > "$_SCRATCH/lg-ifl.fail" 2>/dev/null || true
+    fi
     exit "$rc"
   fi
   # One verdict per run: a failure after one was printed (a producer that
-  # failed inside $(…) and was run past) ends the run with that verdict's
-  # code, silently.
+  # failed inside $(…) and was run past) is one stderr line, and the run
+  # ends non-zero — with the first verdict's code, unless that was 0.
   if [ -n "$_SCRATCH" ] && [ -e "$_SCRATCH/lg-emitted" ]; then
     { IFS= read -r prev < "$_SCRATCH/lg-emitted"; } 2>/dev/null || true
-    case "$prev" in 0|1|2|3) exit "$prev" ;; esac
+    echo "ERROR (after the run's verdict): $msg" >&2 || true
+    case "$prev" in
+      1|2|3) exit "$prev" ;;
+    esac
+    _LG_EMITTED_RC=$rc
+    printf '%s' "$rc" > "$_SCRATCH/lg-emitted" 2>/dev/null || true
     exit "$rc"
   fi
   _lg_mark_emitted "$rc"
@@ -11817,6 +11826,22 @@ _lg_fail() {
   echo "ERROR: $msg" >&2 || true
   if [ -n "$uverb" ]; then echo "       See: doc-tools.sh $uverb --help" >&2 || true; fi
   exit "$rc"
+}
+
+# _lg_kill_tree <pid>: SIGTERM to <pid> and every process descending from
+# it (one `ps`; deepest first), bash 3.2-safe (no pkill -P walk).
+_lg_kill_tree() {
+  local pids
+  pids=$(ps -e -o pid= -o ppid= 2>/dev/null | awk -v r="$1" '
+    { P[$1] = $2 }
+    END {
+      n = 1; Q[1] = r; S[r] = 1
+      for (i = 1; i <= n; i++) for (p in P) if (P[p] == Q[i] && !(p in S)) { S[p] = 1; Q[++n] = p }
+      for (i = n; i >= 1; i--) printf "%s ", Q[i]
+    }') || pids=$1
+  [ -n "$pids" ] || pids=$1
+  # shellcheck disable=SC2086  # a list of pids
+  kill -TERM $pids 2>/dev/null || true
 }
 
 # The EXIT trap's verdict for a ledger run that printed none (a set -u

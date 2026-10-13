@@ -78,6 +78,8 @@ _lg_init() {
   case "${DOC_TOOLS_LEDGER_SELFTEST:-}" in
     die-in-subst) _lg_selftest_x=$(_lg_die boom) || exit "$?" ;;
     unset-var) unset _lg_selftest_unset; : "$_lg_selftest_unset" ;;
+    die-twice) _lg_selftest_x=$(_lg_die first) || true; _lg_die second ;;
+    emit-after-error) _lg_selftest_x=$(_lg_die first) || true; _lg_emit "$1" 0 ;;
   esac
 }
 
@@ -127,6 +129,14 @@ _lg_emit() {
     0|1|2|3) ;;
     *) _lg_die "internal: _lg_emit got exit code '$rc'" ;;
   esac
+  # An error verdict was printed already (a producer that failed inside
+  # $(…) and was run past): no second object — the run ends with its code.
+  if [ -n "$_SCRATCH" ] && [ -e "$_SCRATCH/lg-emitted" ]; then
+    # (No trailing newline: read assigns, then returns 1.)
+    line=""
+    { IFS= read -r line < "$_SCRATCH/lg-emitted"; } 2>/dev/null || true
+    case "$line" in 1|2|3) exit "$line" ;; esac
+  fi
   if [ "$_LG_FORMAT" = json ]; then
     _lg_verb_json
     verb=$_LG_JS

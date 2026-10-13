@@ -138,7 +138,8 @@ _lg_ifl_ref_overlap() {
 # a server that rejects other refs; e.g. refs/heads/ledger-inflight). Then
 # the branch scans skip that namespace and its remote-tracking mirror
 # (_lg_ifl_scan): in-flight refs are never read as ordinary branches.
-_LG_IFL_RESERVED="refs/heads refs/remotes refs/tags refs/notes refs/stash refs/bisect refs/replace refs/worktree refs/rewritten refs/prefetch refs/doc-superpowers/pull refs/doc-superpowers/ledger/counters-remote refs/doc-superpowers/ledger/base-remote"
+_LG_IFL_TMP=refs/doc-superpowers/inflight-fetch
+_LG_IFL_RESERVED="refs/heads refs/remotes refs/tags refs/notes refs/stash refs/bisect refs/replace refs/worktree refs/rewritten refs/prefetch refs/doc-superpowers/pull $_LG_IFL_TMP refs/doc-superpowers/ledger/counters-remote refs/doc-superpowers/ledger/base-remote"
 
 # _lg_ifl_load: the in-flight settings of the run's config, once. Sets
 # _LG_IFL_ON (1 when inflight.enabled is true) and, when on, _LG_IFL_PREFIX,
@@ -237,12 +238,118 @@ _lg_host_id() {
 
 # --- Fetch --------------------------------------------------------------------------
 
-# The remote cache's producer: fetch the in-flight (and pull) refs, print
-# what is here afterwards (the cached "data": a record, never read back).
+# _lg_ifl_fetch_run <git fetch args…>: git fetch in the background and
+# waited for, so a TERM or INT to this shell (the run's EXIT trap killing
+# the scan, or Ctrl-C) takes the fetch with it; the run's own traps
+# (doc-tools.sh _traps) are put back afterwards.
+_lg_ifl_fetch_run() {
+  local p rc=0
+  LC_ALL=C git fetch --quiet --no-tags --no-recurse-submodules "$@" < /dev/null > /dev/null &
+  p=$!
+  # shellcheck disable=SC2064  # $p now, on purpose
+  trap "kill $p 2>/dev/null; exit 143" TERM
+  # shellcheck disable=SC2064
+  trap "kill $p 2>/dev/null; exit 130" INT
+  wait "$p" || rc=$?
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  return "$rc"
+}
+
+# _lg_ifl_heads_check: with ref_prefix under refs/heads/, every ref there
+# must be an in-flight mirror — <prefix>/<host>/<name> (a host segment
+# _lg_ifl_seg_ok accepts), no upstream, not checked out in any worktree —
+# before anything is fetched into that namespace. Dies (2) naming the
+# first refs that are not.
+_lg_ifl_heads_check() {
+  local s bad
+  case "$_LG_IFL_PREFIX" in refs/heads/?*) ;; *) return 0 ;; esac
+  _lg_scratch_name
+  s=$_LG_SN
+  git for-each-ref --format='%(refname)%09%(upstream)%09%(worktreepath)' "$_LG_IFL_PREFIX/" > "$s.hc" 2> "$s.err" \
+    || _lg_die "git for-each-ref failed (checking $_LG_IFL_PREFIX): $(head -n 1 "$s.err")"
+  bad=$(LC_ALL=C awk -F '\t' -v ip="$_LG_IFL_PREFIX/" '
+    {
+      rest = substr($1, length(ip) + 1); t = index(rest, "/"); h = substr(rest, 1, t - 1)
+      why = ""
+      if (t < 2 || t == length(rest) || h !~ /^[A-Za-z0-9_][A-Za-z0-9._-]*$/ || h ~ /\.\./ || length(h) > 64) why = "not <host>/<name>"
+      else if ($2 != "") why = "tracks " $2
+      else if ($3 != "") why = "checked out in a worktree"
+      if (why != "") { n++; if (n <= 3) s = s (s == "" ? "" : "; ") substr($1, 12) " (" why ")" }
+    }
+    END { if (n > 3) s = s "; …"; print s }' "$s.hc") || _lg_die "cannot check $_LG_IFL_PREFIX"
+  if [ -n "$bad" ]; then
+    _lg_die "config inflight.ref_prefix '$_LG_IFL_PREFIX' holds branches that are not in-flight mirrors: $bad — give the in-flight refs a namespace of their own"
+  fi
+}
+
+# _lg_ifl_mirror_sync: bring <ref_prefix>/ in line with what was just
+# fetched into $_LG_IFL_TMP/ (a private namespace, pruned by the fetch).
+# No --prune and no forced fetch reach <ref_prefix>/: the refs this sync
+# wrote are recorded (remote/inflight-mirror.<prefix>.tsv, "<ref>\t<oid>"),
+# and a ref here is
+#   created     when absent;
+#   updated     when it still holds the recorded value (or already the
+#               fetched one);
+#   deleted     when the remote no longer has it and it still holds the
+#               recorded value;
+#   left alone  otherwise — a ref no fetch wrote, or one changed since:
+#               never overwritten, never deleted; the run's note names it.
+# One `git update-ref --stdin` transaction, each change compare-and-swap.
+_lg_ifl_mirror_sync() {
+  local s rec recf tmp n list
+  _lg_scratch_name
+  s=$_LG_SN
+  recf="$_LG_CACHE/remote/inflight-mirror.${_LG_IFL_PREFIX//\//%}.tsv"
+  rec=$recf
+  [ -f "$rec" ] || rec=/dev/null
+  git for-each-ref --format='%(objectname) %(refname)' "$_LG_IFL_TMP/" "$_LG_IFL_PREFIX/" > "$s.cur" 2> "$s.err" \
+    || { head -n 1 "$s.err" >&2; return 1; }
+  LC_ALL=C awk -v tmp="$_LG_IFL_TMP/" -v ip="$_LG_IFL_PREFIX/" -v rec="$rec" -v cmds="$s.cmds" -v newrec="$s.rec" -v skip="$s.skip" '
+    BEGIN {
+      printf "" > cmds; printf "" > newrec; printf "" > skip
+      while ((getline l < rec) > 0) { t = index(l, "\t"); REC[substr(l, 1, t - 1)] = substr(l, t + 1) }
+    }
+    {
+      o = $1; r = substr($0, length(o) + 2)
+      if (substr(r, 1, length(tmp)) == tmp) R[ip substr(r, length(tmp) + 1)] = o
+      else if (substr(r, 1, length(ip)) == ip) L[r] = o
+    }
+    END {
+      for (r in R) {
+        if (!(r in L)) { print "create " r " " R[r] > cmds; print r "\t" R[r] > newrec }
+        else if (L[r] == R[r]) print r "\t" R[r] > newrec
+        else if ((r in REC) && L[r] == REC[r]) { print "update " r " " R[r] " " L[r] > cmds; print r "\t" R[r] > newrec }
+        else print r > skip
+      }
+      for (r in REC) if (!(r in R) && (r in L) && L[r] == REC[r]) print "delete " r " " L[r] > cmds
+    }' "$s.cur" || return 1
+  if [ -s "$s.cmds" ]; then
+    git update-ref --stdin < "$s.cmds" 2> "$s.err" || { head -n 1 "$s.err" >&2; return 1; }
+  fi
+  mkdir -p -- "$_LG_CACHE/remote" 2>/dev/null || return 1
+  tmp="$_LG_CACHE/remote/.inflight-mirror.$$"
+  if ! LC_ALL=C sort "$s.rec" > "$tmp" || ! mv -f -- "$tmp" "$recf"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if [ -s "$s.skip" ]; then
+    n=$(wc -l < "$s.skip" | tr -d ' ')
+    list=$(LC_ALL=C sort "$s.skip" | head -n 3 | tr '\n' ' ' | sed 's/ $//; s/ /, /g')
+    if [ "$n" -gt 3 ]; then list="$list, …"; fi
+    _lg_ifl_note "$n in-flight ref(s) here differ from the remote's and from the last fetch's — not updated: $list"
+  fi
+}
+
+# The remote cache's producer: fetch the in-flight refs into $_LG_IFL_TMP/ (and the pull refs into
+# refs/doc-superpowers/pull/; both private, so --prune is safe there),
+# sync <ref_prefix>/ (_lg_ifl_mirror_sync), print what is here afterwards
+# (the cached "data": a record, never read back).
 _lg_ifl_fetch_produce() {
-  set -- "+$_LG_IFL_PREFIX/*:$_LG_IFL_PREFIX/*"
+  set -- "+$_LG_IFL_PREFIX/*:$_LG_IFL_TMP/*"
   if [ -n "$_LG_IFL_PULL" ]; then set -- "$@" "+$_LG_IFL_PULL:refs/doc-superpowers/pull/*"; fi
-  LC_ALL=C git fetch --quiet --prune --no-tags --no-recurse-submodules "$_LG_IFL_URL" "$@" > /dev/null || return 1
+  _lg_ifl_fetch_run --prune "$_LG_IFL_URL" "$@" || return 1
+  _lg_ifl_mirror_sync || return 1
   git for-each-ref --format='%(objectname) %(refname)' "$_LG_IFL_PREFIX/" refs/doc-superpowers/pull/
 }
 
@@ -261,6 +368,9 @@ _lg_ifl_fetch() {
     fi
     return 0
   fi
+  # A prefix under refs/heads/ is checked before any fetch can write there
+  # (here, not in the producer: its stderr is the remote cache's).
+  _lg_ifl_heads_check
   _LG_REMOTE_FORCE=""
   if [ "$force" = 1 ]; then _LG_REMOTE_FORCE=1; fi
   _LG_RTTL=$_LG_IFL_TTL
@@ -372,23 +482,48 @@ END {
 
 # _lg_ifl_dedup <conf> <out>: per key of <conf> (consecutive lines
 # "<sort>\t<oid>\t<date>\t<source rank>"), the winning "<sort>\t<oid>\t
-# <date>": a descendant of every other tip wins; between unrelated tips,
-# the newer date, then the better-ranked source.
+# <date>": a descendant of the running best wins; between unrelated tips,
+# the newer date, then the better-ranked source. The ancestry verdicts are
+# facts about two commits: cached in branch/anc.tsv ("<a> <b> 1|0": a is
+# an ancestor of b), so only a pair never seen runs
+# `git merge-base --is-ancestor`.
 _lg_ifl_dedup() {
-  local k o d p pk="" bo="" bd="" bp=""
-  : > "$2" || _lg_die "cannot write $2"
-  while IFS="$(printf '\t')" read -r k o d p; do
-    if [ "$k" != "$pk" ]; then
-      if [ -n "$pk" ]; then printf '%s\t%s\t%s\n' "$pk" "$bo" "$bd" >> "$2"; fi
-      pk=$k; bo=$o; bd=$d; bp=$p
-      continue
+  local s af a b v tmp
+  _lg_scratch_name
+  s=$_LG_SN
+  af="$_LG_CACHE/branch/anc.tsv"
+  [ -f "$af" ] || af=/dev/null
+  # Every ordered pair of a key's tips the cache lacks.
+  LC_ALL=C awk -F '\t' -v af="$af" '
+    BEGIN { while ((getline l < af) > 0) { split(l, x, " "); C[x[1] " " x[2]] = 1 } }
+    $1 != k { k = $1; n = 0 }
+    { n++; O[n] = $2; for (i = 1; i < n; i++) { p = O[i] " " $2; q = $2 " " O[i]; if (!(p in C)) { C[p] = 1; print p } if (!(q in C)) { C[q] = 1; print q } } }' \
+    "$1" > "$s.ask" || _lg_die "cannot list the tips to compare"
+  : > "$s.new"
+  while read -r a b; do
+    if git merge-base --is-ancestor "$a" "$b" 2>/dev/null; then v=1; else v=0; fi
+    printf '%s %s %s\n' "$a" "$b" "$v" >> "$s.new"
+  done < "$s.ask"
+  if [ -s "$s.new" ]; then
+    mkdir -p -- "$_LG_CACHE/branch" 2>/dev/null || _lg_die "cannot create $_LG_CACHE/branch"
+    tmp=$(mktemp "$_LG_CACHE/branch/.anc.XXXXXX") || _lg_die "cannot create a temp file in $_LG_CACHE/branch"
+    if ! cat -- "$af" "$s.new" | tail -n 20000 > "$tmp" || ! mv -f -- "$tmp" "$_LG_CACHE/branch/anc.tsv"; then
+      rm -f -- "$tmp"
+      _lg_die "cannot write the ancestry cache"
     fi
-    if git merge-base --is-ancestor "$bo" "$o" 2>/dev/null; then bo=$o; bd=$d; bp=$p
-    elif git merge-base --is-ancestor "$o" "$bo" 2>/dev/null; then :
-    elif [ "$d" -gt "$bd" ] || { [ "$d" = "$bd" ] && [ "$p" -lt "$bp" ]; }; then bo=$o; bd=$d; bp=$p
-    fi
-  done < "$1"
-  if [ -n "$pk" ]; then printf '%s\t%s\t%s\n' "$pk" "$bo" "$bd" >> "$2"; fi
+    af="$_LG_CACHE/branch/anc.tsv"
+  fi
+  LC_ALL=C awk -F '\t' -v af="$af" -v out="$2" '
+    function flush() { if (k != "") print k "\t" bo "\t" bd > out }
+    BEGIN { printf "" > out; while ((getline l < af) > 0) { split(l, x, " "); A[x[1] " " x[2]] = x[3] } }
+    $1 != k { flush(); k = $1; bo = $2; bd = $3 + 0; bp = $4 + 0; next }
+    {
+      o = $2; d = $3 + 0; p = $4 + 0
+      if (A[bo " " o] == 1) { bo = o; bd = d; bp = p }
+      else if (A[o " " bo] == 1) { }
+      else if (d > bd || (d == bd && p < bp)) { bo = o; bd = d; bp = p }
+    }
+    END { flush() }' "$1" || _lg_die "cannot pick the branches' tips"
 }
 
 # _lg_ifl_scan <out>: the candidate branches (no merge base yet) as

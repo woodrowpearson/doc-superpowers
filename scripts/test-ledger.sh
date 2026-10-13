@@ -6653,6 +6653,111 @@ test_lg_inflight_bg_scan_one_object() {
   lg_ifl_teardown
 }
 
+# --- Task 11 fix round 3 -------------------------------------------------------------
+
+# lg_ps_has <pattern>: 1 when a process whose command line contains
+# <pattern> is running, else 0.
+lg_ps_has() {
+  if ps -ax -o command= 2>/dev/null | grep -F -- "$1" | grep -v grep > /dev/null; then echo 1; else echo 0; fi
+}
+
+test_lg_inflight_scan_children_reaped() {
+  echo "test: the scan's git fetch and its transport never outlive the run — failure path and signal (R3-1)"
+  lg_ifl_fixture
+  git config protocol.ext.allow always
+  git remote set-url origin "ext::sleep 7.31"
+  printf 'not json\n' > docs/ledger/ledgers.json
+  local rc=0 out pid i seen=0
+  out=$(DOC_TOOLS_LEDGER_SELFTEST=ifl-index-delay "$DOC_TOOLS" ledger ls --format json 2>/dev/null </dev/null) || rc=$?
+  assert_eq "2|1" "$rc|$(json_count "$out")" "the index build fails: exit 2, one object"
+  sleep 1
+  assert_eq "0" "$(lg_ps_has 'sleep 7.31')" "failure path: the slow transport is gone"
+  # A signal while the fetch runs (TERM: a background job of a script
+  # ignores INT; both reach the same EXIT trap).
+  printf '%s\n' '{"schema":"ledger-registry/1","ledgers":[]}' > docs/ledger/ledgers.json
+  git remote set-url origin "ext::sleep 7.32"
+  "$DOC_TOOLS" ledger ls < /dev/null > /dev/null 2>&1 &
+  pid=$!
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if [ "$(lg_ps_has 'sleep 7.32')" = 1 ]; then seen=1; break; fi
+    sleep 0.3
+  done
+  assert_eq "1" "$seen" "the slow transport ran"
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  sleep 1
+  assert_eq "0" "$(lg_ps_has 'sleep 7.32')" "signal: the slow transport is gone"
+  git remote set-url origin "$LG_REMOTE"
+  lg_ifl_teardown
+}
+
+test_lg_inflight_heads_prefix_checked() {
+  echo "test: a ref_prefix under refs/heads/ is checked before fetching — no upstream, no worktree, <host>/<name> shape; an unpushed branch there is never touched (R3-2b)"
+  lg_ifl_fixture '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta","ref_prefix":"refs/heads/feature"}}'
+  git branch -q feature/x "$LG_A_TIP"
+  lg inflight --fetch
+  assert_eq "2" "$LG_RC" "feature/x (no <host>/<name> shape): exit 2"
+  assert_contains "$LG_ERR" "feature/x" "…naming it"
+  assert_eq "$LG_A_TIP" "$(git rev-parse -q --verify refs/heads/feature/x)" "feature/x intact"
+  git branch -q -D feature/x
+  git branch -q feature/h/y "$LG_A_TIP"
+  git branch -q --set-upstream-to=origin/main feature/h/y
+  lg inflight --fetch
+  assert_eq "2" "$LG_RC" "a branch with an upstream there: exit 2"
+  assert_eq "$LG_A_TIP" "$(git rev-parse -q --verify refs/heads/feature/h/y)" "…intact"
+  git branch -q -D feature/h/y
+  lg inflight --fetch
+  assert_eq "0" "$LG_RC" "nothing there but in-flight refs: exit 0"
+  git worktree add -q -b feature/h/z "$LG_WT/wt 3" main
+  lg inflight --fetch
+  assert_eq "2" "$LG_RC" "a branch checked out in a worktree there: exit 2"
+  assert_eq "$(git -C "$LG_WT/wt 3" rev-parse HEAD)" "$(git rev-parse -q --verify refs/heads/feature/h/z)" "…intact"
+  lg_ifl_teardown
+}
+
+test_lg_inflight_fetch_recorded_only() {
+  echo "test: the in-flight fetch prunes only refs it recorded, and never overwrites a ref here that differs from its record (R3-2a)"
+  lg_ifl_fixture
+  # A ref here that no fetch wrote, and one that differs from the remote's.
+  git update-ref refs/doc-superpowers/inflight/hostz/local-only "$LG_A_TIP"
+  git update-ref refs/doc-superpowers/inflight/hostb/feat-a "$LG_A_TIP"
+  lg inflight --fetch
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "$LG_A_TIP" "$(git rev-parse -q --verify refs/doc-superpowers/inflight/hostz/local-only)" "an unrecorded ref here is never deleted"
+  assert_eq "$LG_A_TIP" "$(git rev-parse -q --verify refs/doc-superpowers/inflight/hostb/feat-a)" "a ref that differs is never overwritten"
+  assert_contains "$LG_ERR" "refs/doc-superpowers/inflight/hostb/feat-a" "…the note names it"
+  # A recorded mirror whose remote ref is gone is pruned; an unrecorded one stays.
+  git update-ref -d refs/doc-superpowers/inflight/hostb/feat-a
+  lg inflight --fetch
+  assert_contains "$LG_OUT" "feat-a inflight@hostb" "fetched now (recorded)"
+  ( cd "$LG_B" && git push -q origin ":refs/doc-superpowers/inflight/hostb/feat-a" )
+  lg inflight --fetch
+  assert_eq "" "$(git for-each-ref refs/doc-superpowers/inflight/hostb/)" "the recorded mirror is pruned"
+  assert_eq "$LG_A_TIP" "$(git rev-parse -q --verify refs/doc-superpowers/inflight/hostz/local-only)" "the unrecorded one stays"
+  lg_ifl_teardown
+}
+
+test_lg_verdict_backstop() {
+  echo "test: one verdict per run — a later failure is one stderr line and a non-zero exit; no success object after an error object (R3-4, R3-6)"
+  lg_fixture
+  lg_enable
+  DOC_TOOLS_LEDGER_SELFTEST=die-twice lg ls --format json
+  assert_eq "2|1" "$LG_RC|$(json_count "$LG_OUT")" "die twice: exit 2, one object"
+  assert_contains "$LG_ERR" "ERROR (after the run's verdict): second" "…the second as one stderr line"
+  DOC_TOOLS_LEDGER_SELFTEST=emit-after-error lg ls --format json
+  assert_eq "2|1" "$LG_RC|$(json_count "$LG_OUT")" "a success emit after an error object: exit 2, one object"
+  assert_json_field "$LG_OUT" '.exit' "2" "…the error object"
+  teardown
+}
+
+test_lg_inline_producer_die_one_object() {
+  echo "test: a die inside an inline producer (\$(…) inside a string) — exactly one object, non-zero (R3-6)"
+  lg_pr_fixture
+  DOC_TOOLS_LEDGER_SELFTEST=die-in-pr-numbers lg ls --format json
+  assert_eq "2|1" "$LG_RC|$(json_count "$LG_OUT")" "exit 2, one object"
+  lg_pr_teardown
+}
+
 test_lg_inflight_ref_prefix_guard() {
   echo "test: inflight.ref_prefix / pull_refs never point --fetch --prune at local refs (I2)"
   lg_ifl_fixture
@@ -6728,6 +6833,11 @@ test_lg_inflight_dedup_descendant_wins() {
   git checkout -q main
   lg inflight --format json
   assert_json_field "$LG_OUT" '.branches[] | select(.branch == "feat-a") | .oid' "$(git rev-parse feat-a)" "…and the other way"
+  local tr
+  tr=$(harness_mktemp lg-gtrace)
+  GIT_TRACE="$tr" lg inflight --format json
+  assert_eq "0" "$(grep -c 'is-ancestor' "$tr")" "the verdicts are cached: no merge-base --is-ancestor the second time (R3-5)"
+  rm -f "$tr"
   lg_ifl_teardown
 }
 
@@ -6998,6 +7108,13 @@ run_tests() {
   test_lg_inflight_raw_oid_base
   test_lg_inflight_dedup_descendant_wins
   test_lg_ifl_facts_sig_in_name
+
+  # --- Task 11 fix round 3 ---
+  test_lg_inflight_scan_children_reaped
+  test_lg_inflight_heads_prefix_checked
+  test_lg_inflight_fetch_recorded_only
+  test_lg_verdict_backstop
+  test_lg_inline_producer_die_one_object
 
   print_summary
 }
