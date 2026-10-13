@@ -6227,7 +6227,26 @@ test_gate_records_reconciliations_from_sidecar_changes() {
     "$(rec 1 '.reconciliations[0] | "\(.claim) \(.kind) \(.ruling.record) \(.from_status) \(.to_status) \(.verdict_sha256)"')" \
     "…the ruling, citing chunk-1.json"
   assert_eq "[]" "$(rec 1 '.unrecorded | tojson')" "…nothing unrecorded"
-  assert_eq "0" "$CL_RC" "…the ruling reconciles the unbuilt named claim: exits 0"
+  assert_eq "0" "$CL_RC" "…the DOC-STALE ruling reconciles the unbuilt named claim: exits 0"
+  teardown
+}
+
+test_gate_unbuilt_cleared_only_by_doc_stale() {
+  echo "test: gate — a still-unbuilt named claim is cleared by a DOC-STALE ruling here, never by CODE-DIVERGES"
+  gate_plain_fixture
+  gate 1
+  assert_eq "1" "$CL_RC" "precondition: chunk 1 red (the claim unbuilt)"
+  jset "$SIDECAR" ".claims[0].rulings += [$_CL_DIVERGES] | .claims[0].rulings[-1].record = \"$GATE_REC1\""
+  git add "$SIDECAR" "$GATE_REC1" && git commit -qm "CODE-DIVERGES at the chunk 1 gate, the claim left unbuilt"
+  gate 1
+  assert_eq "1" "$CL_RC" "a CODE-DIVERGES ruling citing this record, the claim still unbuilt: exits 1"
+  assert_contains "$(gate_messages gate)" "$GATE_UNBUILT_MSG" "…'$GATE_UNBUILT_MSG'"
+  assert_eq "CODE-DIVERGES" "$(rec 1 '.reconciliations[0].ruling.direction')" "…though the ruling is recorded"
+  gate_ruling "$GATE_REC1"
+  git add "$SIDECAR" "$GATE_REC1" && git commit -qm "DOC-STALE at the chunk 1 gate"
+  gate 1
+  assert_eq "0" "$CL_RC" "a DOC-STALE ruling citing this record: exits 0"
+  assert_not_contains "$(gate_messages gate)" "$GATE_UNBUILT_MSG" "…the unbuilt finding cleared"
   teardown
 }
 
@@ -6453,6 +6472,44 @@ test_gate_v9_trunk_only_bound_test_edit() {
   gate 1 --from "$from"
   assert_eq "1" "$CL_RC" "the branch edits the bound test: exits 1"
   assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V9")][0].claim' "$TTL_ID" "…a V9 finding"
+  teardown
+}
+
+test_planes_of_three_dot_range() {
+  echo "test: range rule — <a>...<b> is <merge-base a b>..<b>, then the range rule"
+  gate_fixture
+  local mb paths3 patch3
+  RANGE_OUT=$(harness_mktemp range)
+  printf 'Notes.\n' > docs/notes.md
+  git add -A && git commit -qm "branch work"
+  git checkout -q main
+  printf 'TRUNK = 1\n' > src/trunk.py
+  git add -A && git commit -qm "trunk work"
+  git checkout -q feature
+  git merge -q --no-edit main
+  printf 'More notes.\n' >> docs/notes.md
+  git add -A && git commit -qm "branch work after the merge"
+  mb=$(git merge-base main HEAD)
+  range_probe "main...HEAD"
+  paths3=$(cat "$RANGE_OUT.paths" 2>/dev/null) || paths3="no path set"
+  patch3=$(cat "$RANGE_OUT.patch" 2>/dev/null) || patch3="no patch"
+  range_probe "$mb..HEAD"
+  assert_eq "$(cat "$RANGE_OUT.paths")" "$paths3" "main...HEAD: the path set of <merge-base>..HEAD"
+  assert_eq "$(cat "$RANGE_OUT.patch")" "$patch3" "…and its patch text"
+  assert_contains "$paths3" "docs/notes.md|" "…the branch's file"
+  assert_not_contains "$paths3" "src/trunk.py" "…not the trunk-only one"
+  cl run --planes-of "$mb..HEAD"
+  local two="$CL_OUT"
+  cl run --planes-of main...HEAD
+  assert_eq "0" "$CL_RC" "run --planes-of main...HEAD exits 0"
+  assert_json_field "$CL_OUT" '.results | tojson' "$(jq -c '.results' <<<"$two")" "…the same selection as <merge-base>..HEAD"
+  # No merge base: indeterminate, never empty.
+  git checkout -q --orphan lone
+  git rm -rq --cached . && git commit -q --allow-empty -m "unrelated root"
+  git checkout -q -f feature
+  cl run --planes-of lone...feature
+  assert_eq "2" "$CL_RC" "<a>...<b> without a merge base: exits 2"
+  assert_json_field "$CL_OUT" '.error | test("no merge base")' "true" "…saying so"
   teardown
 }
 
@@ -6745,6 +6802,7 @@ run_tests() {
   test_gate_dirty_tree_refused_exit_2
   test_gate_from_defaults_previous_chunk_head
   test_gate_records_reconciliations_from_sidecar_changes
+  test_gate_unbuilt_cleared_only_by_doc_stale
   test_gate_ruling_citing_other_record_is_silent
   test_gate_promotion_without_ruling_included
   test_gate_promotion_missing_verdict_still_included
@@ -6754,6 +6812,7 @@ run_tests() {
   test_gate_range_first_parent_excludes_trunk
   test_gate_range_conflict_resolution_in_path_set
   test_gate_v9_trunk_only_bound_test_edit
+  test_planes_of_three_dot_range
   test_planes_of_not_ancestor_indeterminate
 
   print_summary
