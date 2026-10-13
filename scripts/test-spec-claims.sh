@@ -6067,10 +6067,17 @@ gate_ruling() {
   jset "$SIDECAR" ".claims[0].rulings += [$_CL_DOC_STALE] | .claims[0].rulings[-1].record = \"$1\""
 }
 
+# The diff options a record's patch text is read with: pinned, so no clone's
+# git config (diff.noprefix, diff.mnemonicPrefix, diff.algorithm,
+# diff.context, …) changes a patch id.
+PINNED_DIFF="--no-renames --diff-algorithm=myers --src-prefix=a/ --dst-prefix=b/ --no-color --no-ext-diff --no-textconv --unified=3 --inter-hunk-context=0 --indent-heuristic"
+
 # The patch ids of <range>'s first-parent non-merge commits, as the record
 # stores them.
 expected_patch_ids() {
-  git log -p --first-parent --no-merges --format='commit %H' "$1" | git patch-id --stable \
+  # shellcheck disable=SC2086  # the option list splits on spaces
+  git -c core.quotePath=true log -p --no-show-signature --first-parent --no-merges --format='commit %H' \
+    $PINNED_DIFF "$1" | git patch-id --stable \
     | jq -Rsc 'split("\n") | map(select(. != "") | split(" ") | {sha: .[1], patch_id: .[0]})'
 }
 
@@ -6529,6 +6536,491 @@ test_planes_of_not_ancestor_indeterminate() {
   teardown
 }
 
+test_patch_ids_independent_of_clone_diff_config() {
+  echo "test: range rule — a record's patch ids do not depend on the clone's diff config"
+  gate_fixture
+  gate_promote
+  # A change that myers and patience render differently.
+  printf 'a\nb\nc\n{\n x\n}\n{\n y\n}\nz\n' > src/auth/shape.py
+  git add -A && git commit -qm "shape"
+  printf 'a\nb\nc\n{\n y\n}\n{\n x\n}\n{\n w\n}\nz\n' > src/auth/shape.py
+  git commit -qam "shape reordered"
+  local mb before plain
+  mb=$(git merge-base HEAD main)
+  gate 1
+  before=$(rec 1 '[.commits[].patch_id] | tojson')
+  assert_eq "$(expected_patch_ids "$mb..HEAD")" "$(rec 1 '.commits | tojson')" "precondition: the pinned patch ids"
+  plain=$(git log -p --first-parent --no-merges --format='commit %H' -1 HEAD | git patch-id --stable)
+  git config diff.noprefix true
+  git config diff.mnemonicPrefix true
+  git config diff.algorithm patience
+  git config diff.context 6
+  assert_true "precondition: under that config, an unpinned git log -p gives another patch id" \
+    test "$plain" != "$(git log -p --first-parent --no-merges --format='commit %H' -1 HEAD | git patch-id --stable)"
+  gate 1
+  assert_eq "$before" "$(rec 1 '[.commits[].patch_id] | tojson')" \
+    "diff.noprefix, diff.mnemonicPrefix, diff.algorithm patience and diff.context 6: .commits[].patch_id unchanged"
+  teardown
+}
+
+# --- claims attest and claims rulings (Task 17) -----------------------------------
+#
+# attest_fixture is gate_fixture with the claim promoted (gate_promote) and
+# both chunk gates run green, each record committed: a plan that converged
+# chunk by chunk, ready for its final gate. attest runs claims attest on the
+# fixture plan; fin reads its final.json. fresh_clone clones the fixture's
+# feature branch (main tracking origin/main), with an empty verdict store,
+# and enters it (inside home/, which the fixture's git ignores).
+
+GATE_FINAL=docs/spec-claims/gates/$PLAN_STEM/final.json
+ATTEST_UNBUILT_MSG="named claim still unbuilt at the final gate"
+
+attest_fixture() {
+  gate_fixture
+  gate_promote
+  gate 1
+  assert_eq "0" "$CL_RC" "attest_fixture: gate 1 exits 0"
+  git add "$GATE_REC1" && git commit -qm "the chunk 1 gate record"
+  gate 2
+  assert_eq "0" "$CL_RC" "attest_fixture: gate 2 exits 0"
+  git add "$GATE_REC2" && git commit -qm "the chunk 2 gate record"
+}
+
+attest() {
+  cl attest --plan "$PLAN" "$@"
+}
+
+# fin <jq-filter>: the filter's raw output on final.json.
+fin() {
+  jq -r "$1" "$GATE_FINAL" 2>/dev/null || echo "no record"
+}
+
+# The last `cl`'s finding messages, one per line; its advisory codes.
+attest_messages() {
+  jq -r '.findings[]?.message' <<<"$CL_OUT" 2>/dev/null || true
+}
+attest_codes() {
+  jq -r '.advisories[]?.code' <<<"$CL_OUT" 2>/dev/null || true
+}
+
+fresh_clone() {
+  local c="$TEST_DIR/home/clone"
+  git clone -q -b feature "$TEST_DIR" "$c"
+  git -C "$c" branch -q main origin/main
+  cd "$c"
+}
+
+# attest_amend_final <record>: the Final claims gate's DOC-STALE amendment of
+# the fixture claim to 30 minutes (the sentence struck, an AMENDED block, the
+# quote re-anchored, new states, a ruling naming <record>, the stub's needle
+# and the mutant following the code), nothing staged.
+attest_amend_final() {
+  doc_edit "$DOC" "$TTL_LINE" "- ~~Access tokens expire after 15 minutes.~~"$'\n''> ⚠️ **AMENDED 2026-10-12 — ttl.** Access tokens expire after 30 minutes.'
+  jset "$SIDECAR" ".claims[0].quote = \"Access tokens expire after 30 minutes\"
+    | .claims[0].states = \"An issued access token is rejected 30 minutes after issue.\"
+    | .claims[0].rulings += [$_CL_DOC_STALE] | .claims[0].rulings[-1].record = \"$1\"
+    | .claims[0].nonvacuity.mutant.find = \"TTL_SECONDS = 1800\" | .claims[0].nonvacuity.mutant.replace = \"TTL_SECONDS = 900\""
+  printf '%s\t%s\t%s\n' "$STUB_NODE" src/auth/token.py "TTL_SECONDS = 1800" > tools/claims/checks
+}
+
+# attest_converge: the Final claims gate sequence (Task 25) on the fixture's
+# built claim, every step's record committed: the code moves to 1800 (red),
+# the DOC-STALE amendment citing final.json, the re-promotion, the green
+# final gate. Asserts only that the last run passes.
+attest_converge() {
+  attest_fixture
+  set_ttl 1800
+  git add -A && git commit -qm "TTL 30 minutes"
+  attest --final
+  attest_amend_final "$GATE_FINAL"
+  git add -A && git commit -qm "DOC-STALE: the TTL is 30 minutes"
+  gate_promote
+  attest --final
+  assert_eq "0" "$CL_RC" "attest_converge: the final gate passes"
+  git add "$GATE_FINAL" && git commit -qm "the final gate record"
+}
+
+test_attest_final_all_records_pass() {
+  echo "test: attest --final — every chunk recorded and green: final.json result pass, which V12 accepts"
+  attest_fixture
+  local mb head2
+  mb=$(git merge-base HEAD main)
+  head2=$(rec 2 .head)
+  attest --final
+  assert_eq "0" "$CL_RC" "attest --final exits 0"
+  assert_eq "1" "$(json_count "$CL_OUT")" "…one verdict object"
+  assert_json_field "$CL_OUT" '.record' "$GATE_FINAL" "…naming the record"
+  assert_eq "pass" "$(fin .result)" "final.json result pass"
+  assert_eq "1 $PLAN $mb $head2" "$(fin '"\(.schema) \(.plan) \(.base) \(.from)"')" \
+    "…schema, plan, base, and from (chunk 2's head)"
+  assert_eq "$(git rev-parse HEAD) $(git rev-parse 'HEAD^{tree}')" "$(fin '"\(.head) \(.tree)"')" "…head and tree"
+  assert_eq "[{\"chunk\":1,\"record\":\"$GATE_REC1\",\"rebased\":null},{\"chunk\":2,\"record\":\"$GATE_REC2\",\"rebased\":null}]" \
+    "$(fin '.chunks | tojson')" "…both chunk records, matched"
+  assert_eq "[{\"claim\":\"$TTL_ID\",\"status\":\"built\",\"verdict\":\"ok\"}]" "$(fin '.claims | tojson')" "…the named claim, ok"
+  assert_eq '[] {"unrecorded":[],"reverted":[]} [] ok' \
+    "$(fin '"\(.reconciliations | tojson) \(.cross_check | tojson) \(.amendments | tojson) \(.render_check)"')" \
+    "…no reconciliation at the final gate, nothing unrecorded or reverted, no amendment, render ok"
+  # V12 accepts the record attest wrote.
+  # shellcheck disable=SC2086  # the block list splits on spaces
+  plan_write -- head completed ${PLAN_DEFAULT#head }
+  git add "$PLAN" "$GATE_FINAL"
+  cl validate --staged
+  assert_v12_ok "validate --staged, the plan Completed with attest's final.json"
+  git commit -qm "the plan completed"
+  cl validate --all
+  assert_v12_ok "…committed, under --all"
+  teardown
+}
+
+test_attest_missing_chunk_record() {
+  echo "test: attest — a chunk with a gate task and no record is a finding"
+  gate_fixture
+  gate_promote
+  gate 1
+  git add "$GATE_REC1" && git commit -qm "the chunk 1 gate record"
+  attest
+  assert_eq "1" "$CL_RC" "chunk 2 never gated: exits 1"
+  assert_contains "$(attest_messages)" "chunk 2: no gate record" "…'chunk 2: no gate record'"
+  attest --final
+  assert_eq "fail" "$(fin .result)" "--final: final.json written, result fail"
+  assert_eq "null" "$(fin '.chunks[1].record')" "…chunk 2's record null"
+  teardown
+}
+
+test_attest_rebased_branch_matched_by_patch_id() {
+  echo "test: attest — a rebased branch's records match by patch id"
+  attest_fixture
+  git checkout -q main
+  printf 'Trunk notes.\n' > docs/trunk.md
+  git add docs/trunk.md && git commit -qm "trunk: unrelated"
+  git checkout -q feature
+  git rebase -q main
+  assert_true "precondition: chunk 1's recorded head is no longer an ancestor of HEAD" \
+    test "$(git merge-base --is-ancestor "$(rec 1 .head)" HEAD && echo yes || echo no)" = no
+  attest --final
+  assert_eq "0" "$CL_RC" "attest --final after the rebase exits 0"
+  assert_eq "[null,null]" "$(fin '[.chunks[].rebased] | tojson')" "…no record marked rebased"
+  teardown
+}
+
+test_attest_unmatched_commit_marked_rebased_reverified() {
+  echo "test: attest — a record whose commits were squashed is marked re-verified, not a finding"
+  gate_fixture
+  gate_promote
+  gate 1
+  gate 2
+  git reset -q --soft HEAD~2
+  git commit -qm "the plan and the promotion, squashed"
+  attest --final
+  assert_eq "0" "$CL_RC" "attest --final exits 0"
+  assert_eq "re-verified" "$(fin '.chunks[0].rebased')" "…chunk 1 marked rebased: re-verified"
+  assert_eq "null" "$(fin '.chunks[1].rebased')" "…chunk 2 (no commit) not"
+  assert_json_field "$CL_OUT" '.chunks[0].rebased' "re-verified" "…in the verdict too"
+  teardown
+}
+
+test_attest_sidecar_ruling_with_no_gate_record() {
+  echo "test: attest — a ruling after the last chunk gate citing no gate record is silent, never absorbed"
+  attest_fixture
+  gate_ruling docs/issues/token-ttl.md
+  git add -A && git commit -qm "DOC-STALE: rule in the issue"
+  attest --final
+  assert_eq "1" "$CL_RC" "attest --final exits 1"
+  assert_contains "$(attest_messages)" "silent reconciliation" "…a silent reconciliation"
+  assert_eq "fail" "$(fin .result)" "…final.json written, result fail"
+  assert_eq "0" "$(fin '[.reconciliations[] | select(.kind == "ruling")] | length')" "…its reconciliations hold no ruling"
+  assert_eq "docs/issues/token-ttl.md" "$(fin '.cross_check.unrecorded[0].ruling.record')" \
+    "…cross_check.unrecorded holds the ruling, its record the issue doc"
+  attest --final
+  assert_eq "1" "$CL_RC" "a second --final run: exits 1 again (never absorbed)"
+  assert_eq "0" "$(fin '[.reconciliations[] | select(.kind == "ruling")] | length')" "…still not a reconciliation"
+  teardown
+}
+
+test_attest_record_reconciliation_reverted_at_head() {
+  echo "test: attest — a ruling a chunk record reconciled, reverted at HEAD, is a finding"
+  gate_fixture
+  gate_promote
+  gate_ruling "$GATE_REC1"
+  git add "$SIDECAR" && git commit -qm "DOC-STALE at the chunk 1 gate"
+  local ruled
+  ruled=$(git rev-parse HEAD)
+  gate 1
+  assert_eq "1" "$(rec 1 '[.reconciliations[] | select(.kind == "ruling")] | length')" "precondition: chunk 1 records the ruling"
+  git add "$GATE_REC1" && git commit -qm "the chunk 1 gate record"
+  gate 2
+  git add "$GATE_REC2" && git commit -qm "the chunk 2 gate record"
+  attest
+  assert_eq "0" "$CL_RC" "precondition: attest exits 0"
+  git revert --no-edit "$ruled" >/dev/null
+  attest
+  assert_eq "1" "$CL_RC" "the ruling reverted: exits 1"
+  assert_contains "$(attest_messages)" "reconciliation reverted at HEAD" "…'reconciliation reverted at HEAD'"
+  attest --final
+  assert_eq "$GATE_REC1 DOC-STALE" "$(fin '.cross_check.reverted[0] | "\(.record) \(.ruling.direction)"')" \
+    "…cross_check.reverted names the record and the ruling"
+  teardown
+}
+
+test_attest_named_claim_red_at_head() {
+  echo "test: attest — a named built claim red at HEAD is a finding"
+  attest_fixture
+  set_ttl 1800
+  git add -A && git commit -qm "TTL 30 minutes"
+  attest
+  assert_eq "1" "$CL_RC" "the source at 1800: exits 1"
+  assert_contains "$(attest_messages)" "a built claim must pass its check" "…the run finding"
+  teardown
+}
+
+test_attest_named_claim_unbuilt_is_finding() {
+  echo "test: attest — a named claim still unbuilt is a finding"
+  gate_plain_fixture
+  gate 1
+  gate 2
+  attest
+  assert_eq "1" "$CL_RC" "the named claim unbuilt: exits 1"
+  assert_contains "$(attest_messages)" "$ATTEST_UNBUILT_MSG" "…'$ATTEST_UNBUILT_MSG'"
+  assert_json_field "$CL_OUT" "[.findings[] | select(.message | test(\"$ATTEST_UNBUILT_MSG\"))][0].claim" "$TTL_ID" \
+    "…naming the claim"
+  # A name no claim has is a finding too.
+  doc_edit "$PLAN" "**Claims:** SPEC-AUTH-001#token-ttl" "**Claims:** SPEC-AUTH-001#token-ttl, SPEC-AUTH-001#nope"
+  git add -A && git commit -qm "name an unknown claim"
+  attest
+  assert_contains "$(attest_messages)" "no claim has this id" "an unknown id on a Claims line: a finding"
+  teardown
+}
+
+test_attest_unbuilt_cleared_only_by_doc_stale() {
+  echo "test: attest — a still-unbuilt named claim is cleared by a recorded DOC-STALE ruling, never by CODE-DIVERGES"
+  gate_plain_fixture
+  gate 1
+  gate 2
+  jset "$SIDECAR" ".claims[0].rulings += [$_CL_DIVERGES] | .claims[0].rulings[-1].record = \"$GATE_FINAL\""
+  git add "$SIDECAR" && git commit -qm "CODE-DIVERGES at the final gate, the claim left unbuilt"
+  attest --final
+  assert_eq "1" "$CL_RC" "a CODE-DIVERGES ruling in final.json, the claim still unbuilt: exits 1"
+  assert_contains "$(attest_messages)" "$ATTEST_UNBUILT_MSG" "…'$ATTEST_UNBUILT_MSG'"
+  assert_eq "CODE-DIVERGES" "$(fin '.reconciliations[] | select(.kind == "ruling") | .ruling.direction')" \
+    "…though the ruling is recorded in final.json"
+  gate_ruling "$GATE_FINAL"
+  git add "$SIDECAR" && git commit -qm "DOC-STALE at the final gate"
+  attest --final
+  assert_eq "0" "$CL_RC" "a DOC-STALE ruling in final.json: exits 0"
+  assert_not_contains "$(attest_messages)" "$ATTEST_UNBUILT_MSG" "…the unbuilt finding cleared"
+  teardown
+}
+
+test_attest_named_diverged_needs_ruling_and_tracker() {
+  echo "test: attest — a named diverged claim needs its assertion failure, its ruling and an open tracker (V5)"
+  claims_fixture
+  diverge_claim "$STUB_TEST"
+  jset "$SIDECAR" ".claims[0].rulings[0].record = \"$GATE_REC1\""
+  set_ttl 1800
+  # shellcheck disable=SC2086  # the block list splits on spaces
+  plan_write -- $PLAN_DEFAULT
+  git add -A && git commit -qm "diverged at chunk 1, the plan"
+  gate 1
+  git add "$GATE_REC1" && git commit -qm "the chunk 1 gate record"
+  gate 2
+  git add "$GATE_REC2" && git commit -qm "the chunk 2 gate record"
+  attest
+  assert_eq "0" "$CL_RC" "precondition: diverged, failing by an assertion, ruled at chunk 1, tracker open: exits 0"
+  doc_edit "$TRACKER" "$TRACKER_OPEN" "**Status**: Closed"
+  git add -A && git commit -qm "close the tracker"
+  attest
+  assert_eq "1" "$CL_RC" "its tracker closed: exits 1"
+  assert_contains "$(v5_messages)" "tracker is closed" "…V5 names the closed tracker"
+  set_ttl 900
+  git add -A && git commit -qm "the code meets the spec again"
+  attest
+  assert_contains "$(attest_messages)" "passes: promote" "a diverged claim that passes: a finding (promote it)"
+  teardown
+}
+
+test_attest_final_reconciliation_converges() {
+  echo "test: attest --final — red, DOC-STALE amendment citing final.json, re-promote owed, promote, green"
+  attest_fixture
+  # 1. The code moves to 30 minutes after the last chunk gate: red.
+  set_ttl 1800
+  git add -A && git commit -qm "TTL 30 minutes"
+  attest --final
+  assert_eq "1" "$CL_RC" "1. the source at 1800: exits 1"
+  assert_eq "fail" "$(fin .result)" "…final.json written, result fail"
+  # 2. The DOC-STALE amendment, committed with that final.json.
+  attest_amend_final "$GATE_FINAL"
+  git add -A
+  cl validate --staged
+  assert_eq "0" "$CL_RC" "2. validate --staged on the amendment exits 0"
+  assert_contains "$(v6_codes)" "re-promote owed" "…with the advisory re-promote owed"
+  git commit -qm "DOC-STALE: the TTL is 30 minutes"
+  # 3. Still red: the verdict proves the old states.
+  attest --final
+  assert_eq "1" "$CL_RC" "3. the final gate re-run exits 1"
+  assert_contains "$(attest_messages)" "re-promote owed: run claims promote $TTL_ID" "…re-promote owed"
+  # 4. Re-promote.
+  gate_promote
+  # 5. Green.
+  attest --final
+  assert_eq "0" "$CL_RC" "5. after the re-promote: exits 0"
+  assert_eq "pass" "$(fin .result)" "…result pass"
+  assert_eq "$GATE_FINAL" "$(fin '.reconciliations[] | select(.kind == "ruling") | .ruling.record')" \
+    "…final.json's reconciliations hold the ruling"
+  assert_eq "$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")" \
+    "$(fin '.reconciliations[] | select(.kind == "promotion") | .verdict_sha256')" "…and the new promotion"
+  assert_eq "[]" "$(fin '.cross_check.unrecorded | tojson')" "…cross_check.unrecorded empty"
+  assert_eq "1 $TTL_ID DOC-STALE The TTL was renegotiated." \
+    "$(fin '"\(.amendments | length) \(.amendments[0].claim) \(.amendments[0].direction) \(.amendments[0].reason)"')" \
+    "…the amendment batch holds the ruling"
+  teardown
+}
+
+test_attest_final_fresh_clone_passes_converged_plan() {
+  echo "test: attest --final — a fresh clone (no verdict store) passes the converged plan"
+  attest_converge
+  fresh_clone
+  assert_true "precondition: the clone's verdict store is empty" test ! -d "$(claims_store)"
+  attest --final
+  assert_eq "0" "$CL_RC" "attest --final in the fresh clone exits 0"
+  assert_not_contains "$(attest_messages)" "silent reconciliation" "…promotions match by their stored digest"
+  assert_eq "[]" "$(fin '.cross_check.unrecorded | tojson')" "…nothing unrecorded"
+  assert_eq "unverifiable-here" "$(attest_codes | sort -u | tr '\n' ' ' | sed 's/ $//')" \
+    "…advisories: unverifiable-here only"
+  teardown
+}
+
+test_attest_fresh_clone_repromoted_not_flagged() {
+  echo "test: attest — in a fresh clone, an amended claim re-promoted after the amendment is not owed"
+  attest_converge
+  fresh_clone
+  attest --final
+  assert_eq "0" "$CL_RC" "attest --final in the fresh clone exits 0"
+  assert_not_contains "$(attest_messages)" "re-promote owed" "…no re-promote owed finding"
+  assert_not_contains "$(jq -r '.advisories[]?.message' <<<"$CL_OUT")" "re-promote" "…nor advisory"
+  teardown
+}
+
+test_attest_fresh_clone_unrepromoted_flagged_by_commit_order() {
+  echo "test: attest — in a fresh clone, an amendment after the promotion is owed (commit order)"
+  attest_fixture
+  attest --final
+  assert_eq "0" "$CL_RC" "precondition: the final gate passes"
+  doc_stale_amend "$(jq -c --arg r "$GATE_FINAL" '.record = $r' <<<"$_CL_DOC_STALE")"
+  git add -A && git commit -qm "DOC-STALE amendment citing final.json, not re-promoted"
+  fresh_clone
+  attest --final
+  assert_eq "1" "$CL_RC" "attest --final in the fresh clone exits 1"
+  assert_contains "$(attest_messages)" "re-promote owed: run claims promote $TTL_ID" "…re-promote owed"
+  jset "$SIDECAR" '.claims[0].promotion.at = "0123456789abcdef0123456789abcdef01234567"'
+  git commit -qam "promotion.at: a commit this clone does not have"
+  attest
+  assert_not_contains "$(attest_messages)" "re-promote owed" "promotion.at not a commit here: no re-promote owed finding"
+  assert_contains "$(attest_codes)" "unverifiable-here" "…the advisory unverifiable-here"
+  teardown
+}
+
+test_attest_unrelated_ruling_not_attributed() {
+  echo "test: attest — a ruling on a claim of a doc the plan does not govern is not the plan's"
+  attest_fixture
+  mkdir -p docs/adr
+  printf '# ADR-007: Cache tokens\n\n## Decision\n\nCache tokens for 5 minutes.\n' > docs/adr/ADR-007-cache.md
+  jq --argjson r "$_CL_DOC_STALE" '.doc = "docs/adr/ADR-007-cache.md" | .claims = [.claims[0] | .id = "ADR-007#cache-ttl"
+      | .quote = "Cache tokens for 5 minutes" | .status = "unbuilt" | .test = null | .nonvacuity = null
+      | .promotion = null | .rulings = [$r]]' "$SIDECAR" > docs/spec-claims/ADR-007.json
+  rerender
+  git add -A && git commit -qm "ADR-007, its claim ruled DOC-STALE in an issue"
+  attest
+  assert_eq "0" "$CL_RC" "attest --plan (governing SPEC-AUTH-001 only) exits 0"
+  assert_not_contains "$(attest_messages)" "silent reconciliation" "…no silent reconciliation for ADR-007's claim"
+  teardown
+}
+
+test_attest_deep_reruns_recorded_tree() {
+  echo "test: attest --deep — each record's claims re-run in a worktree at its head"
+  attest_fixture
+  # Another worktree, its directory gone (prunable): attest never prunes it.
+  git worktree add -q --detach "$TEST_DIR/home/other" HEAD
+  rm -rf "$TEST_DIR/home/other"
+  : > "$STUB_LOG"
+  attest --deep
+  assert_eq "0" "$CL_RC" "attest --deep exits 0"
+  assert_contains "$(stub_roots)" "/wt." "…the stub ran with --root a throwaway worktree"
+  assert_contains "$(stub_roots)" "$(git rev-parse --show-toplevel)" "…besides the work tree (step 2)"
+  assert_json_field "$CL_OUT" '[.results[] | select(.chunk == 1)][0] | "\(.claim) \(.outcome) \(.verdict)"' \
+    "$TTL_ID pass ok" "…chunk 1's claim passes at its recorded tree"
+  assert_eq "2" "$(wt_count)" "…its worktrees removed; the other, prunable one still registered"
+  # A recorded head that is not a commit here: indeterminate.
+  jset "$GATE_REC1" '.head = "0123456789abcdef0123456789abcdef01234567"'
+  attest --deep
+  assert_eq "2" "$CL_RC" "a recorded head not in this clone: exits 2"
+  assert_json_field "$CL_OUT" '.indeterminate[0].reason | test("not a commit here")' "true" "…indeterminate, saying so"
+  teardown
+}
+
+test_attest_render_check_fails() {
+  echo "test: attest — a hand-edited status block fails render --check (V11)"
+  attest_fixture
+  doc_edit "$DOC" "## Claim status" "## Claim status (edited)"
+  git add -A && git commit -qm "hand-edit the status block"
+  attest --final
+  assert_eq "1" "$CL_RC" "exits 1"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V11")] | length > 0' "true" "…a V11 finding"
+  assert_eq "failed" "$(fin .render_check)" "…final.json render_check failed"
+  assert_json_field "$CL_OUT" '[.results[] | select(has("changed"))] | length' "0" "…render's rows stay out of results"
+  teardown
+}
+
+test_attest_path_safety() {
+  echo "test: attest — the plan path is a safe repo path; final.json is never written through a link"
+  attest_fixture
+  cl attest --plan ../outside.md
+  assert_usage_verdict attest true "--plan with a .. segment"
+  cl attest --plan docs/superpowers/plans/absent.md
+  assert_eq "2" "$CL_RC" "a plan absent at HEAD: exits 2"
+  set_ttl 901
+  attest --final
+  assert_eq "2" "$CL_RC" "--final on a dirty tree: exits 2"
+  assert_file_not_exists "$GATE_FINAL" "…nothing written"
+  git checkout -q -- src/auth/token.py
+  mkdir -p "$SUITE_TMP/elsewhere-final"
+  ln -s "$SUITE_TMP/elsewhere-final" "docs/spec-claims/gates/$PLAN_STEM/final.json"
+  attest --final
+  assert_eq "2" "$CL_RC" "final.json a symbolic link: exits 2"
+  assert_eq "" "$(ls "$SUITE_TMP/elsewhere-final")" "…nothing written through it"
+  teardown
+}
+
+test_rulings_amendment_batch_json_and_markdown() {
+  echo "test: rulings — the amendment batch, as JSON rows and as Markdown"
+  claims_fixture
+  local base
+  base=$(git rev-parse HEAD)
+  doc_stale_amend
+  jset "$SIDECAR" ".claims[0].rulings += [$_CL_DIVERGES]"
+  git add -A && git commit -qm "DOC-STALE amendment, and a CODE-DIVERGES ruling"
+  cl rulings --range "$base..HEAD"
+  assert_eq "0" "$CL_RC" "rulings exits 0"
+  assert_json_field "$CL_OUT" '.results | length' "1" "…one row: CODE-DIVERGES is not an amendment"
+  assert_json_field "$CL_OUT" '.results[0] | "\(.claim)|\(.doc)|\(.direction)|\(.by)|\(.date)|\(.reason)"' \
+    "$TTL_ID|$DOC|DOC-STALE|doc-owner|2026-10-11|The TTL was renegotiated." "…claim, doc, direction, by, date, reason"
+  assert_json_field "$CL_OUT" '.results[0].approved | "\(.quote)|\(.states)"' \
+    "Access tokens expire after 15 minutes|An issued access token is rejected 15 minutes after issue." \
+    "…approved: the quote and states at <a>"
+  assert_json_field "$CL_OUT" '.results[0].new.states' "$NEW_STATES" "…new: the states at <b>"
+  cl rulings --range "$base..HEAD" --format markdown
+  assert_eq "0" "$CL_RC" "--format markdown exits 0"
+  assert_eq "## Spec amendments (1)" "$(head -n 1 <<<"$CL_OUT")" "…'## Spec amendments (1)'"
+  assert_contains "$CL_OUT" "### $TTL_ID — DOC-STALE" "…the row's heading"
+  assert_contains "$CL_OUT" "**Approved:** An issued access token is rejected 15 minutes after issue." "…the approved states"
+  assert_contains "$CL_OUT" "**New:** $NEW_STATES" "…the new states"
+  assert_contains "$CL_OUT" "**Reason:** The TTL was renegotiated." "…the reason"
+  cl rulings --range "main...HEAD"
+  assert_json_field "$CL_OUT" '.results | length' "1" "a three-dot range: from the merge-base"
+  cl rulings --range "HEAD..$base"
+  assert_eq "2" "$CL_RC" "a range whose start is no ancestor of its end: exits 2"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -6814,6 +7306,28 @@ run_tests() {
   test_gate_v9_trunk_only_bound_test_edit
   test_planes_of_three_dot_range
   test_planes_of_not_ancestor_indeterminate
+  test_patch_ids_independent_of_clone_diff_config
+
+  # --- Task 17: claims attest, the final gate; claims rulings ---
+  test_attest_final_all_records_pass
+  test_attest_missing_chunk_record
+  test_attest_rebased_branch_matched_by_patch_id
+  test_attest_unmatched_commit_marked_rebased_reverified
+  test_attest_sidecar_ruling_with_no_gate_record
+  test_attest_record_reconciliation_reverted_at_head
+  test_attest_named_claim_red_at_head
+  test_attest_named_claim_unbuilt_is_finding
+  test_attest_unbuilt_cleared_only_by_doc_stale
+  test_attest_named_diverged_needs_ruling_and_tracker
+  test_attest_final_reconciliation_converges
+  test_attest_final_fresh_clone_passes_converged_plan
+  test_attest_fresh_clone_repromoted_not_flagged
+  test_attest_fresh_clone_unrepromoted_flagged_by_commit_order
+  test_attest_unrelated_ruling_not_attributed
+  test_attest_deep_reruns_recorded_tree
+  test_attest_render_check_fails
+  test_attest_path_safety
+  test_rulings_amendment_batch_json_and_markdown
 
   print_summary
 }
