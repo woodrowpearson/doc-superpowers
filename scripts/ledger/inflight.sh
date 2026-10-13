@@ -321,8 +321,10 @@ _lg_ifl_heads_check() {
 #   left alone  otherwise — a ref no fetch wrote, or one changed since:
 #               never overwritten, never deleted; the run's note names it
 #               — one the remote has, with its remedy (`git update-ref -d
-#               <ref>`: the next fetch recreates it); one the remote lacks,
-#               so it is never listed silently.
+#               <ref>`: the next fetch recreates it; under refs/heads/,
+#               where it may be the user's branch, rename it out of the
+#               prefix with `git branch -m`, else delete it); one the
+#               remote lacks, so it is never listed silently.
 # One `git update-ref --stdin` transaction, each change compare-and-swap.
 # DOC_TOOLS_LEDGER_SELFTEST=ifl-kill-after-update-ref (scripts/test-ledger.sh
 # only): SIGKILL to this shell right after the transaction, before the
@@ -410,7 +412,13 @@ _lg_ifl_mirror_sync() {
     n=$(wc -l < "$s.skip" | tr -d ' ')
     list=$(LC_ALL=C sort "$s.skip" | head -n 3 | tr '\n' ' ' | sed 's/ $//; s/ /, /g')
     if [ "$n" -gt 3 ]; then list="$list, …"; fi
-    _lg_ifl_note "$n in-flight ref(s) here differ from the remote's and from the last fetch's — not updated: $list (\`git update-ref -d <ref>\` lets the next fetch recreate it)"
+    # Under refs/heads/ such a ref may be the user's own branch: never tell
+    # them to delete it outright.
+    if [ "$heads" = 1 ]; then
+      _lg_ifl_note "$n in-flight ref(s) here differ from the remote's and from the last fetch's — not updated: $list (if it is your branch, rename it out of $_LG_IFL_PREFIX/ (\`git branch -m\`); else delete it and the next fetch recreates the mirror)"
+    else
+      _lg_ifl_note "$n in-flight ref(s) here differ from the remote's and from the last fetch's — not updated: $list (\`git update-ref -d <ref>\` lets the next fetch recreate it)"
+    fi
   fi
   if [ -s "$s.gone" ]; then
     n=$(wc -l < "$s.gone" | tr -d ' ')
