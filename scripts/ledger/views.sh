@@ -6,7 +6,7 @@
 # _lg_out_file, _lg_cfg, index.sh's _lg_index, glob.sh's _lg_glob_dirs,
 # parse.sh's _lg_scratch_name.
 #
-# ledger view <L|all> [--md] [--html] [--out DIR] [--open]
+# ledger view <L|all> [--md] [--html] [--out DIR] [--open] [--refresh]
 #   Renders the working tree (its index: uncommitted items included) into
 #   DIR (default $_LG_CACHE/views): <L>.md, or every ledger's page and
 #   README.md for "all" (--md, the default), and/or ledger.html (--html:
@@ -40,16 +40,21 @@
 #
 # $generated (render-md.jq): the header's source ("the working tree at
 # <short HEAD>" / "<base>@<short-sha>"), the in-flight branch count (0
-# until the in-flight scan exists), the UTC time, the recency cutoff
+# until the in-flight scan exists), the UTC time, the PR data note (view:
+# "PR data as of <UTC> (<age> old)" when the PR adapter failed and its
+# last copy serves, "PR data: — (unavailable)" when there is none;
+# publish fetches the PR list and fails, exit 2, without it), the recency cutoff
 # (today − views.recent_days), the last-touched date of every item path a
 # commit since the cutoff touched (git log over the item and archive glob
 # directories; for view, also today for each modified or untracked item
 # file), and the link prefix.
 
-# _lg_v_generated <commit> <dirty 0|1> <source> <link> <out>: write the
-# $generated object (see the header) to <out>.
+# _lg_v_generated <commit> <dirty 0|1> <source> <link> <out> [pr-note]:
+# write the $generated object (see the header) to <out>; [pr-note] the PR
+# data's state for the header ("PR data as of …", "PR data: —"; index.sh
+# writes it to $_SCRATCH/lg-pr.mark), "" when fresh or not configured.
 _lg_v_generated() {
-  local commit="$1" dirty="$2" source="$3" link="$4" out="$5" s days at cutoff today d e xy p since
+  local commit="$1" dirty="$2" source="$3" link="$4" out="$5" prnote="${6:-}" s days at cutoff today d e xy p since
   local specs=()
   _lg_scratch_name
   s=$_LG_SN
@@ -103,8 +108,8 @@ _lg_v_generated() {
       printf '%s\t%s\n' "$today" "${p//$'\n'/$'\001'}"
     done < "$s.st" >> "$s.touch"
   fi
-  jq -n -R -c --arg source "$source" --arg at "$at" --arg cutoff "$cutoff" --arg link "$link" '
-    {source: $source, inflight: 0, at: $at, cutoff: $cutoff, link: $link,
+  jq -n -R -c --arg source "$source" --arg at "$at" --arg cutoff "$cutoff" --arg link "$link" --arg pr "$prnote" '
+    {source: $source, inflight: 0, at: $at, cutoff: $cutoff, link: $link, pr_note: $pr,
      touched: (reduce (inputs | select(length > 11)) as $l ({};
        ($l[11:] | gsub("\u0001"; "\n")) as $p | $l[0:10] as $d
        | if (.[$p] // "") < $d then .[$p] = $d else . end))}' "$s.touch" > "$out" \
@@ -171,6 +176,7 @@ cmd_ledger_view() {
   target=${_ARGS[0]}
   if [ -n "$_OPT_html" ]; then html=1; md=0; fi
   if [ -n "$_OPT_md" ]; then md=1; fi
+  if [ -n "$_OPT_refresh" ]; then _LG_REMOTE_FORCE=1; fi
   out=${_OPT_out:-$_LG_CACHE/views}
   case "$out" in
     /*) ;;
@@ -189,7 +195,7 @@ cmd_ledger_view() {
   link=$(jq -nr --arg r "$_LG_ROOT" '$r | split("/") | map(@uri) | join("/") + "/"') || _lg_die "jq failed (the link prefix)"
   gen="$s.gen"
   _lg_v_generated "$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null || true)" 1 \
-    "the working tree at ${head:-(no commit)}" "$link" "$gen"
+    "the working tree at ${head:-(no commit)}" "$link" "$gen" "$(cat "$_SCRATCH/lg-pr.mark" 2>/dev/null || true)"
   stage=$(mktemp -d "$_SCRATCH/lg-view.XXXXXX") || _lg_die "mktemp failed"
   _lg_v_render "$ix" "$gen" "$target" "$md" "$html" "$stage"
   mkdir -p -- "$out" 2>/dev/null || _lg_die "cannot create $out"
@@ -315,9 +321,11 @@ cmd_ledger_publish() {
     || _lg_die "the base $base_name ($short) has no docs/ledger/config.json — nothing to publish"
   _lg_cfg_from_rev "$base"
   _LG_IX_NEED_CONTRACTS=1
+  # The PR list is fetched now (no stale copy is published).
+  _LG_REMOTE_FORCE=1
   ix=$(_lg_index --rev "$base")
   gen="$s.gen"
-  _lg_v_generated "$base" 0 "$base_name@$short" "$link" "$gen"
+  _lg_v_generated "$base" 0 "$base_name@$short" "$link" "$gen" ""
   at=$(jq -r '.at' "$gen") || _lg_die "jq failed"
   html=$(_lg_cfg 'if .views.html == false then 0 else 1 end')
   stage="$_SCRATCH/lg-publish"

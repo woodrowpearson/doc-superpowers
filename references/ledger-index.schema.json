@@ -111,7 +111,16 @@
             "detail": { "$ref": "#/$defs/strOrNull" }
           }
         },
-        "pr": { "description": "PR adapter data (Task 10); null until then." },
+        "pr": {
+          "type": ["object", "null"],
+          "required": ["number", "url", "state"],
+          "properties": {
+            "number": { "type": ["integer", "string"] },
+            "url": { "type": ["string", "null"] },
+            "state": { "enum": ["open", "merged"] }
+          },
+          "description": "The PR (config adapters.pr, through the remote cache) that claims the item: the open one with the highest number, else the merged one; null when none does or no PR adapter is configured."
+        },
         "inflight": { "type": "array", "description": "In-flight branch claims (Task 11)." },
         "neighbours": {
           "type": "object",

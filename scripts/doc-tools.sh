@@ -2328,8 +2328,8 @@ claims rulings|cmd_claims_rulings|repo|range= format= base=
   new claim), new {quote, states} at <b>}. --format markdown prints them
   as Markdown for a PR description, under "## Spec amendments (N)",
   instead of the verdict object.
-ledger show|cmd_ledger_show|repo|format=
-  <key|alias|legacy-ref|path> [--format text|json]
+ledger show|cmd_ledger_show|repo|refresh format=
+  <key|alias|legacy-ref|path> [--refresh] [--format text|json]
   One work-ledger item in at most 25 lines: key, ledger, severity,
   derived status, summary, specs, plans, handoffs, contracts, relations,
   its upstream, downstream and sibling items, its re-check markers
@@ -2344,14 +2344,20 @@ ledger show|cmd_ledger_show|repo|format=
   key, works too). Unknown: exit 1; several items: exit 3. Every ledger
   verb is inert (exit 0) without docs/ledger/config.json; see "Work
   ledger".
-ledger ls|cmd_ledger_ls|repo|ledger= sev= open status= cluster= format=
-  [--ledger <id>] [--sev <a,b>] [--open] [--status <s>] [--cluster <contract>] [--format text|json]
+ledger ls|cmd_ledger_ls|repo|ledger= sev= open status= cluster= refresh format=
+  [--ledger <id>] [--sev <a,b>] [--open] [--status <s>] [--cluster <contract>] [--refresh] [--format text|json]
   One line per work-ledger item, "<key>  <severity>  <status>  <summary>"
   (the first column is the key, or the path stem for an item without
   one), by severity then date. --sev takes a comma list; --open keeps the
   open-class items; --status a derived status (shipped, merged, planned,
   "not started", …); --cluster an item's primary contract (the first of
   changes, else of consumes) or "unclustered". JSON: {"items":[…]}.
+  With config adapters.pr, the PR list (cached for
+  cache.remote_ttl_minutes) adds "in review #<n>" (an open PR's fetched
+  head claims the item) and, with base claims, "merged · owed: <owed>";
+  --refresh fetches it now (show, ls, view), and its failure is exit 2.
+  Without --refresh a failing adapter serves the last copy (a stderr
+  note) or none (one warning; exit 0).
 ledger find|cmd_ledger_find|repo|format=
   <words>... [--format text|json]
   Ranked fuzzy match over key, summary, file-name slug, H1 and first
@@ -2417,8 +2423,8 @@ ledger link|cmd_ledger_link|repo|consumes= changes= relates= format=
 ledger note|cmd_ledger_note|repo|format=
   <key> <text> [--format text|json]
   Append a dated line under an item's log heading, or set what it owes.
-ledger view|cmd_ledger_view|repo|md html out= open format=
-  <ledger|all> [--md] [--html] [--out <dir>] [--open] [--format text|json]
+ledger view|cmd_ledger_view|repo|md html out= open refresh format=
+  <ledger|all> [--md] [--html] [--out <dir>] [--open] [--refresh] [--format text|json]
   Render the ledger views from the working tree (uncommitted items
   included) into --out (default <git-common-dir>/doc-superpowers/ledger/
   views): <ledger>.md, or every ledger's page and README.md for all (--md,
@@ -2427,6 +2433,9 @@ ledger view|cmd_ledger_view|repo|md html out= open format=
   by the contract they change (else consume), then unclustered, recently
   closed and superseded / won't fix items (views.recent_days). --open
   opens the HTML (else the page) with open / xdg-open. One line per file.
+  Stale PR data (the adapter failed; config adapters.pr) is marked "PR
+  data as of <UTC> (<age> old)" in the header, missing PR data "PR data:
+  —". --refresh fetches the PR list now (a failure: exit 2).
 ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed= format=
   (--staged | --all | --plan <plan> [--strict] | --pushed <a>..<b>) [--registry] [--format text|json]
   Check items, the ledger registry and keys. One "<class> <path|key>
@@ -2459,7 +2468,8 @@ ledger publish|cmd_ledger_publish|repo|dry-run format=
   commit to views.branch (default
   doc-ledger-views, an orphan branch holding only the view files) — built
   with git plumbing, so HEAD, the index and the working tree are never
-  touched — without force: a branch that moved meanwhile exits 2.
+  touched — without force: a branch that moved meanwhile exits 2. With
+  config adapters.pr the PR list is fetched now; its failure is exit 2.
   --dry-run renders into <git-common-dir>/doc-superpowers/ledger/
   publish-dry-run and stops before the commit.
 ledger finalize|cmd_ledger_finalize|repo|all format=
