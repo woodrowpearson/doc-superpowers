@@ -6337,16 +6337,19 @@ _claims_v1() {
 #                     nothing but [ \t], closes it; every other line until
 #                     then — an inner fence with a shorter or other run
 #                     included — is "in". An unclosed fence runs to the end.
-#                     V8's awk section tracker (_claims_sections) pairs
-#                     fences by this same rule.
+#                     V8's section classes (_claims_sections) read it too,
+#                     in a jq pass before their awk one.
 #   claims_is_marker($m)  the line is the marker $m alone: up to 3 leading
 #                     spaces (CommonMark HTML-block indentation) and trailing
 #                     spaces, tabs or \r allowed, nothing else; a marker
 #                     quoted in prose or backticks is text.
+#   claims_status_ranges  LF text → the status blocks, each [first, last]
+#                     (0-based line indices): a begin-marker line through the
+#                     first end-marker line after it, by claims_is_marker.
 #   claims_status_blank  LF text → the same lines, each status block's lines
-#                     (a begin-marker line through the first end-marker line
-#                     after it, by claims_is_marker) blanked to "". render
-#                     (_JQ_CLAIMS_RENDER) locates the block by the same rule.
+#                     (claims_status_ranges) blanked to "". render
+#                     (_JQ_CLAIMS_RENDER) locates the block by the same rule,
+#                     and V8's section classes (_claims_sections) skip it.
 #   claims_live       raw doc → the same number of lines, CRLF read as LF and
 #                     each dead span (status block, ~~strike~~) blanked to its
 #                     newlines. Code fences are masked first, so a fence is
@@ -6389,13 +6392,17 @@ _JQ_CLAIMS_NORM='def claims_blank: gsub("[^\n]"; "");
    | map(if .k == "delim" then "" elif .k == "in" then .t | gsub("~"; "\uffff") else .t end)
    | join("\n");
  def claims_is_marker($m): test("^ {0,3}" + $m + "[ \t\r]*$");
- def claims_status_blank:
+ def claims_status_ranges:
    split("\n") as $ls
-   | (reduce range(0; $ls | length) as $i ({p: null, r: []};
+   | reduce range(0; $ls | length) as $i ({p: null, r: []};
        $ls[$i] as $t
        | if .p == null then (if $t | claims_is_marker("<!-- spec-claims:status:begin -->") then .p = $i else . end)
          elif $t | claims_is_marker("<!-- spec-claims:status:end -->") then .r += [[.p, $i]] | .p = null
-         else . end) | .r) as $r
+         else . end)
+   | .r;
+ def claims_status_blank:
+   split("\n") as $ls
+   | claims_status_ranges as $r
    | [range(0; $ls | length) as $i | if any($r[]; .[0] <= $i and $i <= .[1]) then "" else $ls[$i] end]
    | join("\n");
  def claims_live: gsub("\r\n"; "\n") | claims_mask_fences
@@ -7326,10 +7333,11 @@ _JQ_CLAIMS_RUN_RESULTS='$plan[0] as $plan
 
 # --- The range rule: what <a>..<b> means to a claims consumer ---
 #
-# Every range consumer — run --planes-of's path set, V9 (and V8/V8n) over
-# the gate's <from>..HEAD, the gate record's patch ids (attest matches them
-# against <merge-base>..HEAD) — reads the branch's own work, never trunk
-# that a merge of the base into the branch brought in:
+# Every range consumer — run --planes-of's path set, V9 and V8 over the
+# gate's <from>..HEAD (V8's added lines: blame, with the merges' hand
+# resolutions, _claims_added_lines), the gate record's patch ids (attest
+# matches them against <merge-base>..HEAD) — reads the branch's own work,
+# never trunk that a merge of the base into the branch brought in:
 #   - its commits are `git rev-list --first-parent --no-merges <a>..<b>`;
 #     the path set, the patch text and the patch ids come from them alone;
 #   - each first-parent merge M of the range (`git rev-list --first-parent
@@ -7483,7 +7491,8 @@ _claims_range_log() {
 # text (see the range rule): _claims_range_log, then, per first-parent merge
 # with hand-resolved files, a "commit <M>" line and `git show --remerge-diff`
 # (_CL_DIFF_OPTS, then <diff-option>…) M -- <those files>. A hunk parser
-# (V8's -U0) passes its options.
+# passes its options. (V8 does not read it: one commit's hunk numbers are
+# its own post-image's, not the range end's; see _claims_added_lines.)
 _claims_range_patch() {
   local range="$1" out="$2" ms="$_SCRATCH/cl-range-merges" mf="$_SCRATCH/cl-range-mfiles" m p
   local files=()
@@ -8155,6 +8164,369 @@ _claims_v4() {
   done 3< "$z"
   _claims_jq v4 -nc --slurpfile plan "$plan" --slurpfile rows "$rows" "$_JQ_CLAIMS_LINT_DEFS $_JQ_CLAIMS_V4" \
     >> "$_SCRATCH/cl-findings.jsonl"
+}
+
+# --- Spec claims: normative coverage, V8 ----------------------------------------
+#
+# V8 lists the normative text of a governing doc that no claim covers.
+# _claims_sections classes each line of a doc by the heading it sits under;
+# _claims_added_lines names the lines a change added. A line examined — an
+# added one under --staged and over a gate range, every one under --all — is
+# uncovered when it is
+#   - normative, its live normalised text (claims_doc's: struck text and the
+#     status block are not live) holds a letter or a digit, and no claim of
+#     the doc has an occurrence of its normalised quote — the
+#     quote_occurrence-th, or any one without quote_occurrence — whose span
+#     hits the line (claims_occ, claims_lines_hit);
+#   - openq, and a data row of a table (outside code fences: a row holding
+#     a "|", a delimiter row under it, then each following row holding a
+#     "|") whose header row names a column matching
+#     resolved|resolution|answer|decision (the first such, case-insensitive),
+#     that cell's normalised text is not empty, and no claim's normalised
+#     quote is a substring of it, nor it of the quote.
+# Each is one finding row "<doc>:<line>: normative text no claim covers"
+# (claim null). V8 is not in the default blocking list, so validate reports
+# its findings as advisories (_JQ_CLAIMS_EMIT); gate (_CL_ALL_BLOCKING)
+# blocks on them. The docs examined:
+#   --staged  each staged path that is governing and present in the index;
+#   --all     each eligible doc with a sidecar (cl-sidecars.json skip null),
+#             read in the work tree only through a safe, contained path;
+#   <range>   each path of the range's path set (_claims_range_paths) that
+#             is governing and present at the range's end: a doc outside the
+#             set is the branch's no more than trunk's.
+# The claims are those of cl-claims.json whose doc is the doc examined. The
+# heading EREs of the config (normative_headings, descriptive_headings) must
+# each be a non-empty string awk compiles: otherwise V8 does not run, and is
+# indeterminate, naming the key. Scratch: cl-v8-*, cl-sec-*, cl-added-*.
+
+# The default normative headings (Design clarifications), matched against
+# the whole lower-cased heading text by awk; an ADR's Decision is among them.
+_CL_V8_DEFAULT_RE='^(design|requirements?|invariants?|interfaces?|inputs?|outputs?|inputs? and outputs?|decisions?|.*(phase|stage) contracts?)$'
+
+_CL_SEC_STATE=""  # "" until _claims_sections_init runs; then ok, or why the heading EREs are unusable
+_CL_SEC_NORM=""   # config normative_headings, lower-cased by awk, one per line
+_CL_SEC_DESC=""   # config descriptive_headings, the same
+
+# _claims_sections_init: read and check the config's heading EREs once (in
+# the main shell). 0 when they are usable; else 1, with _CL_SEC_STATE the
+# reason (a value that is not an array of non-empty strings, an entry
+# holding a newline, or one awk cannot compile once lower-cased: awk's own
+# dialect, under LC_ALL=C, is the host ERE's definition).
+_claims_sections_init() {
+  local key list p rc
+  if [ -n "$_CL_SEC_STATE" ]; then
+    [ "$_CL_SEC_STATE" = ok ]
+    return
+  fi
+  for key in normative_headings descriptive_headings; do
+    list=$(_claims_jq sections-res -r --arg k "$key" \
+      '.[$k] | if type != "array" then "!not an array"
+               elif any(.[]; type != "string") then "!holds a value that is not a string"
+               elif any(.[]; . == "") then "!holds an empty string"
+               elif any(.[]; test("\n")) then "!holds an entry with a newline"
+               else .[] end' "$_SCRATCH/cl-config.json") || _claims_propagate $?
+    case "$list" in
+      '!'*)
+        _CL_SEC_STATE="config $key ${list#!}: it must be a list of EREs"
+        return 1
+        ;;
+    esac
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      rc=0
+      CL_SEC_RE=$p LC_ALL=C awk 'BEGIN { if ("" ~ tolower(ENVIRON["CL_SEC_RE"])) n = 1; exit 0 }' \
+        </dev/null >/dev/null 2>&1 || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        _CL_SEC_STATE="config $key: '$p' is not an ERE awk can compile"
+        return 1
+      fi
+    done <<EOF
+$list
+EOF
+    if [ "$key" = normative_headings ]; then _CL_SEC_NORM=$list; else _CL_SEC_DESC=$list; fi
+  done
+  _CL_SEC_STATE=ok
+}
+
+# A raw doc (on _JQ_CLAIMS_NORM) → one line per doc line for the awk pass,
+# "<c><TAB><text>": c "s" in a status block (claims_status_ranges), "f" in
+# a code fence or a fence delimiter (claims_fence_kinds), else "o". CRLF
+# reads as LF; a final newline ends the last line, opening none.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_SECTIONS='gsub("\r\n"; "\n") | (if endswith("\n") then .[:-1] else . end) as $t
+ | ($t | claims_status_ranges) as $r
+ | ($t | claims_fence_kinds) as $k
+ | range(0; $k | length) as $i
+ | (if any($r[]; .[0] <= $i and $i <= .[1]) then "s" elif $k[$i].k == "out" then "o" else "f" end)
+   + "\t" + $k[$i].t'
+
+# The awk pass of _claims_sections (see its comment), on _JQ_CLAIMS_SECTIONS'
+# lines; the EREs in ENVIRON (CL_SEC_NORM, CL_SEC_DESC: one per line;
+# CL_SEC_DEFAULT). cls[1..6] holds each heading level's class.
+# shellcheck disable=SC2016  # awk program, not shell expansion
+_AWK_CLAIMS_SECTIONS='
+function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+function cur(    i) { for (i = 6; i >= 1; i--) if (cls[i] != "") return cls[i]; return "other" }
+function hclass(x,    l, i) {
+  l = tolower(x)
+  for (i = 1; i <= nd; i++) if (l ~ dre[i]) return "descriptive"
+  for (i = 1; i <= nn; i++) if (l ~ nre[i]) return "normative"
+  sub(/^[0-9]+(\.[0-9]+)*\.?[ \t]+/, "", l)
+  gsub(/[*_`]/, "", l)
+  l = trim(l)
+  sub(/[ \t]*:$/, "", l)
+  if (l ~ /^open questions?$/) return "openq"
+  if (l ~ /^implementation notes?$/) return "descriptive"
+  if (l ~ defre) return "normative"
+  return ""
+}
+BEGIN {
+  nn = split(ENVIRON["CL_SEC_NORM"], nre, "\n")
+  nd = split(ENVIRON["CL_SEC_DESC"], dre, "\n")
+  for (i = 1; i <= nn; i++) nre[i] = tolower(nre[i])
+  for (i = 1; i <= nd; i++) dre[i] = tolower(dre[i])
+  defre = ENVIRON["CL_SEC_DEFAULT"]
+  pend = 0
+}
+{
+  c = substr($0, 1, 1)
+  t = substr($0, 3)
+  if (c == "s") { print NR "\tother"; next }
+  if (c == "f") { pend = 0; print NR "\t" cur(); next }
+  if (t ~ /^[ \t]*$/) { print NR "\t" cur(); next }
+  if (pend && t ~ /^ ? ? ?<!-- spec-claims:descriptive -->[ \t]*$/) {
+    cls[pend] = "descriptive"
+    pend = 0
+    print NR "\tother"
+    next
+  }
+  pend = 0
+  s = t
+  k = 0
+  while (k < 3 && substr(s, 1, 1) == " ") { s = substr(s, 2); k++ }
+  h = 0
+  while (h < 7 && substr(s, h + 1, 1) == "#") h++
+  if (h >= 1 && h <= 6 && (length(s) == h || substr(s, h + 1, 1) == " " || substr(s, h + 1, 1) == "\t")) {
+    x = trim(substr(s, h + 1))
+    if (x ~ /^#+$/) x = ""
+    else sub(/[ \t]+#+$/, "", x)
+    cls[h] = hclass(x)
+    for (i = h + 1; i <= 6; i++) cls[i] = ""
+    pend = h
+    print NR "\tother"
+    next
+  }
+  if (t ~ /^[ \t]*<!--/ && t ~ /-->[ \t]*$/) {
+    x = t
+    sub(/^[ \t]*<!--/, "", x)
+    sub(/-->[ \t]*$/, "", x)
+    if (index(x, "-->") == 0) { print NR "\tother"; next }
+  }
+  print NR "\t" cur()
+}'
+
+# _claims_sections <doc-file>: the class of each line of the raw doc
+# <doc-file>, one "<line><TAB><class>" per line, class normative,
+# descriptive, openq or other. The same lines as claims_doc's: CRLF reads as
+# LF, and a final newline opens no line. An ATX heading (up to three spaces,
+# one to six #, then a space, a tab or the line's end) outside a code fence
+# — the one fence rule, claims_fence_kinds, applied by a jq pass before the
+# awk one, so a ``` line inside a ```` fence stays fenced — sets its level's
+# class and clears every deeper level's. A line takes the class of the
+# deepest level that has one (a ### heading with none of its own inherits
+# its parent's: Requirements' subsections are normative), else other. A
+# heading's class, from its text (closing #s dropped; compared lower-cased):
+#   1. descriptive, when a <!-- spec-claims:descriptive --> line (up to three
+#      leading spaces) follows it before any other non-blank line;
+#   2. descriptive, when a config descriptive_headings ERE matches it;
+#   3. normative, when a config normative_headings ERE matches it;
+#   4. the whole text, a leading section number ("3.", "3.1") and *, _ and `
+#      removed and a final ":" dropped: open questions? → openq;
+#      implementation notes? → descriptive; _CL_V8_DEFAULT_RE → normative.
+# The heading line itself, the marker line, a line that is one HTML comment
+# and nothing else (a template's placeholder) and every line of a status block (markers
+# included; a heading inside it is not read) are other. A fenced line takes
+# the class it sits under. Run _claims_sections_init first: an unusable ERE
+# dies here.
+_claims_sections() {
+  local pre="$_SCRATCH/cl-sec.pre"
+  _claims_sections_init || _claims_die "$_CL_SEC_STATE"
+  _claims_jq sections -Rsr "$_JQ_CLAIMS_NORM $_JQ_CLAIMS_SECTIONS" "$1" > "$pre"
+  CL_SEC_NORM=$_CL_SEC_NORM CL_SEC_DESC=$_CL_SEC_DESC CL_SEC_DEFAULT=$_CL_V8_DEFAULT_RE \
+    LC_ALL=C awk "$_AWK_CLAIMS_SECTIONS" "$pre" || _claims_die "awk failed classing the sections of $1"
+}
+
+_CL_ADDED_RANGE=""  # the range whose merges _claims_added_lines has read
+_CL_ADDED_A=""      # its <a> and <b>, full commit ids
+_CL_ADDED_B=""
+
+# The config git blame reads, pinned: no clone's ignore list (and its
+# markers), root or boundary setting, or indent heuristic changes which
+# commit a line is blamed on. With --no-ignore-revs-file, --no-textconv and
+# --diff-algorithm=myers on the command line, and no -w, -M or -C. The empty
+# blame.ignoreRevsFile alone does not clear a clone's list (git sorts the
+# files, so the reset is read first): --no-ignore-revs-file does.
+_CL_BLAME_CFG=(-c blame.ignoreRevsFile= -c blame.markUnblamableLines=false -c blame.markIgnoredLines=false
+  -c blame.showRoot=false -c blame.blankBoundary=false -c diff.indentHeuristic=true)
+
+# `git blame --porcelain` → the final line numbers of the lines blamed on a
+# commit that is neither a boundary nor listed in ENVIRON["CL_SKIP"] (one id
+# per line). A header line is "<id> <orig> <final>[ <count>]"; a commit's
+# keys (boundary among them) follow its first header only; a line's text
+# follows a TAB.
+# shellcheck disable=SC2016  # awk program, not shell expansion
+_AWK_CLAIMS_BLAME='
+BEGIN { n = split(ENVIRON["CL_SKIP"], s, "\n"); for (i = 1; i <= n; i++) if (s[i] != "") skip[s[i]] = 1 }
+/^[0-9a-f]+ [0-9]+ [0-9]+( [0-9]+)?$/ && length($1) >= 40 { id = $1; fl = $3; next }
+$0 == "boundary" { bnd[id] = 1; next }
+/^\t/ { if (!(id in bnd) && !(id in skip)) print fl }'
+
+# _claims_added_lines <doc> --staged | <range>: the numbers of the lines
+# <doc> gains, one per line.
+#   --staged  the new-side lines of each hunk of the doc's staged change
+#             against HEAD (the empty tree before the first commit): `git
+#             diff -U0 --cached` (_CL_DIFF_OPTS, then --unified=0), its
+#             "@@ -a,b +c,d @@" headers read by awk (c..c+d-1; d is 1 when
+#             absent).
+#   <range>   (a gate's <from>..HEAD, by the range rule) the lines of the doc
+#             at the range's end that `git blame --first-parent --porcelain
+#             <a>..<b>` (_CL_BLAME_CFG) blames on a commit in the range:
+#             every line numbered as it stands at <b> — never in one commit's
+#             post-image — and no boundary line. A line blamed on a
+#             first-parent merge counts only when the doc is one of that
+#             merge's hand resolutions (_claims_merge_files): trunk's lines,
+#             merged in cleanly, are not the branch's; inside a resolved doc
+#             every line the merge brought counts (conservative). The doc
+#             must be present at <b>. The range's merges and their
+#             resolutions are read once per range (cl-added-*).
+# A git or awk failure dies (exit 2): an added set that could not be read
+# is never taken as empty.
+_claims_added_lines() {
+  local doc="$1" how="$2" raw="$_SCRATCH/cl-added.raw" ms="$_SCRATCH/cl-added-merges" base m p hit skip=""
+  if [ "$how" = --staged ]; then
+    base=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) \
+      || base=4b825dc642cb6eb9a060e54bf8d69288fbee4904 # the empty tree: no commit yet
+    git -c core.quotePath=true --literal-pathspecs diff --cached "${_CL_DIFF_OPTS[@]}" --unified=0 \
+      "$base" -- "$doc" > "$raw" 2>/dev/null || _claims_die "git diff --cached failed reading the added lines of $doc"
+    LC_ALL=C awk '/^@@ / {
+        s = $3
+        sub(/^\+/, "", s)
+        n = split(s, p, ",")
+        d = (n > 1) ? p[2] + 0 : 1
+        for (i = 0; i < d; i++) print p[1] + i
+      }' "$raw" || _claims_die "awk failed reading the hunks of $doc"
+    return 0
+  fi
+  if [ "$_CL_ADDED_RANGE" != "$how" ]; then
+    _claims_range_merges "$how" "$ms"
+    _CL_ADDED_A=$_CL_RANGE_A
+    _CL_ADDED_B=$_CL_RANGE_B
+    while IFS= read -r m <&3; do
+      _claims_merge_files "$m" "$_SCRATCH/cl-added-mf-$m"
+    done 3< "$ms"
+    _CL_ADDED_RANGE=$how
+  fi
+  while IFS= read -r m <&3; do
+    hit=0
+    while IFS= read -r -d '' p; do
+      if [ "$p" = "$doc" ]; then hit=1; break; fi
+    done < "$_SCRATCH/cl-added-mf-$m"
+    if [ "$hit" = 0 ]; then skip="$skip$m"$'\n'; fi
+  done 3< "$ms"
+  git "${_CL_BLAME_CFG[@]}" blame --porcelain --first-parent --no-ignore-revs-file --no-textconv --diff-algorithm=myers \
+    "$_CL_ADDED_A..$_CL_ADDED_B" -- "$doc" > "$raw" 2>/dev/null \
+    || _claims_die "git blame failed reading the added lines of $doc over $how"
+  CL_SKIP=$skip LC_ALL=C awk "$_AWK_CLAIMS_BLAME" "$raw" || _claims_die "awk failed reading the blame of $doc"
+}
+
+# V8 over one doc (raw on stdin; run after _JQ_CLAIMS_NORM): $doc its path,
+# $sec its _claims_sections lines, $added its added line numbers (one per
+# line) unless $all is 1 (every line), $c cl-claims.json. One finding row
+# per uncovered line (see the section comment).
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_V8='def cl_cells: sub("^[ \t]*\\|"; "") | sub("\\|[ \t]*$"; "") | split("|");
+ def cl_delim_row: test("^[ \t]*\\|?[ \t]*:?-+:?[ \t]*(\\|[ \t]*:?-+:?[ \t]*)*\\|?[ \t]*$");
+ claims_doc as $d
+ | (claims_live | split("\n")) as $live
+ | (gsub("\r\n"; "\n") | claims_fence_kinds) as $src
+ | (reduce ($sec | split("\n")[] | select(. != "") | split("\t")) as $x ({}; .[$x[0]] = $x[1])) as $cls
+ | [$c[0][] | select(.doc == $doc) | .claim
+    | select(type == "object" and (.quote | type) == "string")
+    | {q: (.quote | claims_norm), k: .quote_occurrence} | select(.q != "")] as $qs
+ | (reduce ($qs[] | . as $x
+      | if ($x.k | type) == "number" then $d | claims_lines_hit($x.q; $x.k)[]
+        else ($d | claims_occ($x.q) | length) as $n | range(1; $n + 1) as $j | $d | claims_lines_hit($x.q; $j)[] end)
+     as $n ({}; .[$n | tostring] = true)) as $hit
+ | (reduce range(0; $live | length) as $i ({hdr: null, col: null, body: false, rows: {}};
+      $live[$i] as $t
+      | if $src[$i].k != "out" or ($t | test("\\|") | not) then .hdr = null | .col = null | .body = false
+        elif .body then
+          (if .col == null then . else .rows[($i + 1) | tostring] = (($t | cl_cells)[.col] // "" | claims_norm_line) end)
+        elif .hdr != null and ($t | cl_delim_row) then
+          .body = true
+          | .col = (first(.hdr | to_entries[]
+              | select(.value | claims_norm_line | ascii_downcase | test("resolved|resolution|answer|decision")) | .key) // null)
+        else .hdr = ($t | cl_cells) | .col = null end)
+    | .rows) as $rows
+ | (if $all == 1 then range(1; ($live | length) + 1)
+    else $added | split("\n")[] | select(. != "") | tonumber end) as $n
+ | ($n | tostring) as $s
+ | select(
+     ($cls[$s] == "normative" and ($live[$n - 1] // "" | claims_norm_line | test("[[:alnum:]]")) and ($hit[$s] | not))
+     or ($cls[$s] == "openq" and (($rows[$s] // "") as $cell
+           | $cell != "" and (any($qs[]; .q as $q | ($cell | contains($q)) or ($q | contains($cell))) | not))))
+ | {check: "V8", claim: null, doc: $doc, message: "\($doc):\($n): normative text no claim covers"}'
+
+# _claims_v8 --staged | --all | <range> [<findings-file>]: V8 (see the
+# section comment), its finding rows added to <findings-file> (default the
+# verdict's findings). validate passes --staged or --all; gate passes
+# "<from>..HEAD" and its own file (the record's checks.V8).
+# shellcheck disable=SC2016  # jq programs, not shell expansion
+_claims_v8() {
+  local how="$1" dest="${2:-$_SCRATCH/cl-findings.jsonl}" cand="$_SCRATCH/cl-v8-cand.z" docs="$_SCRATCH/cl-v8-docs.z"
+  local raw="$_SCRATCH/cl-v8-doc.raw" sec="$_SCRATCH/cl-v8-sec.tsv" added="$_SCRATCH/cl-v8-added" all=0 end="" doc
+  if ! _claims_sections_init; then
+    _claims_indeterminate V8 - "$_CL_SEC_STATE"
+    return 0
+  fi
+  case "$how" in
+    --staged)
+      _claims_jq v8-staged -j '.[] | select((split("\u0000") | length) == 1) | . + "\u0000"' \
+        "$_SCRATCH/cl-staged.json" > "$cand" ;;
+    --all)
+      all=1
+      _claims_jq v8-sidecar-docs -j '.[] | select(.skip == null) | .doc | strings
+          | select((split("\u0000") | length) == 1) | . + "\u0000"' "$_SCRATCH/cl-sidecars.json" > "$cand" ;;
+    *)
+      _claims_range_paths "$how" "$cand"
+      end=$_CL_RANGE_B ;;
+  esac
+  # The NUL list reaches jq as a file, never as argv.
+  _claims_jq v8-docs -Rsj 'split("\u0000") | map(select(. != "")) | unique | .[] | . + "\u0000"' "$cand" > "$docs"
+  while IFS= read -r -d '' doc <&3; do
+    _claims_safe_relpath "$doc" || continue
+    case "$how" in
+      --staged)
+        _claims_is_governing "$doc" || continue
+        _claims_read "$doc" > "$raw" || continue
+        _claims_added_lines "$doc" --staged > "$added"
+        ;;
+      --all)
+        _claims_contained_path "$doc" || continue
+        _claims_read "$doc" > "$raw" || continue
+        : > "$added"
+        ;;
+      *)
+        _claims_is_governing "$doc" || continue
+        _claims_read_at "$end" "$doc" > "$raw" || continue
+        _claims_added_lines "$doc" "$how" > "$added"
+        ;;
+    esac
+    [ "$all" = 1 ] || [ -s "$added" ] || continue
+    _claims_sections "$raw" > "$sec"
+    _claims_jq v8 -Rsc --arg doc "$doc" --argjson all "$all" --rawfile sec "$sec" --rawfile added "$added" \
+      --slurpfile c "$_SCRATCH/cl-claims.json" "$_JQ_CLAIMS_NORM $_JQ_CLAIMS_V8" "$raw" >> "$dest"
+  done 3< "$docs"
 }
 
 # --- Spec claims: claim-bound test edits, V9 ------------------------------------
@@ -9369,8 +9741,9 @@ _JQ_CLAIMS_REVERIFY_ALL='def nes: type == "string" and length > 0;
 #      unbuilt; a CODE-DIVERGES ruling alone never clears it), and a run
 #      claim for which _claims_repromote_owed prints owed ("re-promote
 #      owed"), even when its check passes. unverifiable-here is an advisory.
-#   5. V8 and V8n (_claims_v8, _claims_v8n: hooks, no-ops until those checks
-#      land) and V9 over <from>..HEAD, read by the range rule; every finding
+#   5. V8 (_claims_v8: the lines the range added, by blame), V8n
+#      (_claims_v8n: a hook, a no-op until that check lands) and V9 over
+#      <from>..HEAD, read by the range rule; every finding
 #      blocks (_CL_ALL_BLOCKING). A V9 id given in --holds is held: no
 #      finding, and a states-holds reconciliation by --by.
 #   6. Reconciliations: the record-inclusion rule (claims_reconciliations,
@@ -9514,10 +9887,9 @@ _claims_owed_findings() {
   done 3< "$list"
 }
 
-# _claims_v8 / _claims_v8n <range> <findings-file>: the gate's V8 and V8n
-# hooks over <range> (the range rule's patch text, _claims_range_patch), their
-# finding rows into <findings-file>. No-ops until those checks land.
-_claims_v8() { :; }
+# _claims_v8n <range> <findings-file>: the gate's V8n hook over <range>, its
+# finding rows into <findings-file>. A no-op until that check lands. (V8 is
+# _claims_v8, in "normative coverage, V8".)
 _claims_v8n() { :; }
 
 # _claims_gate_path_ok <record> <stem>: 0 when <record> is a safe repo path
@@ -9706,6 +10078,11 @@ cmd_claims_validate() {
   _claims_v4
   _claims_v5
   _claims_v6
+  if [ "$mode" = staged ]; then
+    _claims_v8 --staged
+  else
+    _claims_v8 --all
+  fi
   if [ "$mode" = staged ]; then
     _claims_v9 --staged
   elif [ -n "$_CL_MB" ]; then
