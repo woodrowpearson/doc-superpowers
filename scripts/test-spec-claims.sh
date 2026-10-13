@@ -8344,6 +8344,398 @@ test_v1_restates_malformed_sidecar_no_cascade() {
   teardown
 }
 
+# --- The configuration extension (§B.1) ----------------------------------------
+#
+# config_on turns the extension on: a /bin/sh stub config adapter in
+# tools/claims/config (§D's contract), config config_adapter naming it, the
+# recorded configuration in deploy/flags.json and the code defaults in
+# tools/claims/defaults.json, and tools/claims/readers mapping the fixture's
+# subject to the key it reads — all committed (recorded --staged and --rev
+# read git).
+
+# The stub config adapter (§D contract, /bin/sh; interpreter-neutral):
+#   surfaces              prints deploy/flags.json
+#   recorded [--rev <rev> | --staged] [--override KEY=VALUE]…
+#                         {key: {recorded, default}} for every key of
+#                         tools/claims/defaults.json or of deploy/flags.json —
+#                         at <rev> (git show <rev>:), in the index (git show
+#                         :), else the work tree's — each --override applied
+#                         (its VALUE read as JSON when it parses, else as a
+#                         string); a key the flags do not set records its
+#                         default. STUB_BG=1 first starts `sleep 30 …&` and
+#                         writes its pid to $STUB_LOG.bgpid;
+#                         STUB_CONFIG_EXIT=<n> makes it exit n;
+#                         STUB_CONFIG_NOISE=1 prints a log line instead.
+#   readers <path>…       the keys tools/claims/readers (path<TAB>key) lists
+#                         for each path, one per line
+# Every call appends "config <subcommand>", then its arguments one per line
+# and the stdin it read, to $STUB_LOG.
+# shellcheck disable=SC2016  # the stub's own expansions
+STUB_CONFIG_SH='#!/bin/sh
+dir=$(cd "$(dirname "$0")" && pwd)
+log=${STUB_LOG:-/dev/null}
+sub=${1:-}
+[ $# -eq 0 ] || shift
+{
+  printf "config %s\n" "$sub"
+  for a in "$@"; do printf "%s\n" "$a"; done
+  cat
+} >> "$log"
+case $sub in
+  surfaces) printf "%s\n" deploy/flags.json ;;
+  recorded)
+    if [ "${STUB_BG:-}" = 1 ]; then
+      sleep 30 >/dev/null 2>&1 &
+      echo $! > "$log.bgpid"
+    fi
+    if [ -n "${STUB_CONFIG_EXIT:-}" ]; then exit "$STUB_CONFIG_EXIT"; fi
+    if [ "${STUB_CONFIG_NOISE:-}" = 1 ]; then echo "reading deploy/flags.json"; exit 0; fi
+    src=file
+    rev=""
+    ov=""
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --rev) src=rev; rev=$2; shift 2 ;;
+        --staged) src=staged; shift ;;
+        --override) ov="$ov$2
+"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    case $src in
+      rev) flags=$(git show "$rev:deploy/flags.json") || exit 1 ;;
+      staged) flags=$(git show ":deploy/flags.json") || exit 1 ;;
+      *) flags=$(cat deploy/flags.json) || exit 1 ;;
+    esac
+    printf "%s\n" "$flags" | jq -c --slurpfile d "$dir/defaults.json" --arg ov "$ov" "
+      (\$ov | split(\"\n\") | map(select(. != \"\") | capture(\"^(?<k>[^=]*)=(?<v>.*)\$\")
+        | {(.k): (.v as \$s | try (\$s | fromjson) catch \$s)}) | add // {}) as \$o
+      | (. + \$o) as \$r | \$d[0] as \$d
+      | reduce ((\$d + \$r) | keys[]) as \$k ({};
+          .[\$k] = {recorded: (if \$r | has(\$k) then \$r[\$k] else \$d[\$k] end), default: \$d[\$k]})"
+    ;;
+  readers)
+    for p in "$@"; do
+      P=$p awk -F "	" "\$1 == ENVIRON[\"P\"] { print \$2 }" "$dir/readers"
+    done
+    ;;
+esac
+'
+
+TTL_KEY=token_ttl_minutes
+
+# config_on [<recorded> [<default>]]: the extension on (see above), the
+# fixture's subject reading token_ttl_minutes, recorded <recorded> (default
+# 30) against the code default <default> (default 30); the stub runner
+# installed too when the fixture has none (stub_install: STUB_LOG). All
+# committed.
+config_on() {
+  [ -x tools/claims/runner ] || stub_install
+  write_stub tools/claims/config "$STUB_CONFIG_SH"
+  mkdir -p deploy
+  jq -n --argjson v "${1:-30}" '{token_ttl_minutes: $v}' > deploy/flags.json
+  jq -n --argjson v "${2:-30}" '{token_ttl_minutes: $v}' > tools/claims/defaults.json
+  printf 'src/auth/token.py\ttoken_ttl_minutes\n' > tools/claims/readers
+  jset docs/spec-claims/config.json '.config_adapter = "tools/claims/config"'
+  git add -A && git commit -qm "the configuration extension on"
+}
+
+# list_when <json>: every stub list row's when set to <json>.
+list_when() {
+  local tmp
+  tmp=$(harness_mktemp list)
+  jq -c ".when = $1" tools/claims/list.jsonl > "$tmp"
+  cat "$tmp" > tools/claims/list.jsonl
+  rm -f "$tmp"
+}
+
+# The stub config adapter's calls of <subcommand> in $STUB_LOG, and the
+# arguments of each (the lines after its "config <subcommand>" line, up to
+# the next call), one call per line, space-joined.
+config_calls() {
+  grep -c "^config $1\$" "$STUB_LOG" || true
+}
+config_args() {
+  awk -v want="config $1" '
+    /^(config [a-z]+|list|run|edited-bound-tests|log .*)$/ { if (on) print args; on = ($0 == want); args = ""; next }
+    on { args = (args == "" ? $0 : args " " $0) }
+    END { if (on) print args }' "$STUB_LOG"
+}
+
+# The last `cl`'s indeterminate reasons of check <check>, one per line.
+indet_reasons() {
+  jq -r --arg c "$1" '.indeterminate[]? | select(.check == $c) | .reason' <<<"$CL_OUT" 2>/dev/null || true
+}
+
+test_v1_when_without_config_adapter() {
+  echo "test: V1 — a claim with when, the configuration extension off"
+  claims_fixture
+  jset "$SIDECAR" '.claims[0].when = null'
+  cl validate --all
+  assert_eq "0" "$CL_RC" "when null, the extension off: exits 0"
+  assert_no_v1 "when null"
+  jset "$SIDECAR" ".claims[0].when = {\"$TTL_KEY\": 15}"
+  cl validate --all
+  assert_v1 "configuration extension is off" "when {$TTL_KEY: 15}, config_adapter absent"
+  assert_eq "1" "$(v1_count)" "…one V1 finding"
+  assert_contains "$(v1_messages)" "when {\"$TTL_KEY\":15}" "…naming the when"
+  jset docs/spec-claims/config.json '.config_adapter = null'
+  cl validate --all
+  assert_v1 "configuration extension is off" "config_adapter null: the same"
+  teardown
+}
+
+test_v1_gated_without_config_adapter() {
+  echo "test: V1 — a gated claim, the configuration extension off"
+  claims_fixture
+  jset "$SIDECAR" '.claims[0].status = "gated"'
+  cl validate --all
+  assert_v1 "configuration extension is off" "status gated, config_adapter absent"
+  assert_contains "$(v1_messages)" "status gated" "…naming the status"
+  assert_not_contains "$(v1_messages)" "is not one of" "…not as an unknown status"
+  teardown
+}
+
+test_v1_when_unknown_key() {
+  echo "test: V1 — a when key the recorded configuration does not know (staged index, or the work tree)"
+  claims_fixture
+  config_on
+  jset "$SIDECAR" ".claims[0].when = {\"$TTL_KEY\": 30}"
+  cl validate --all
+  assert_no_v1 "when {$TTL_KEY: 30}, a recorded key"
+  assert_eq "1" "$(config_calls recorded)" "…one recorded call for the run"
+  assert_eq "" "$(config_args recorded)" "…under --all, with no flag (the work tree)"
+  # The work tree's flags gain a key the index does not have.
+  jq '. + {new_flag: true}' deploy/flags.json > deploy/flags.new && mv deploy/flags.new deploy/flags.json
+  jset "$SIDECAR" '.claims[0].when = {"new_flag": true, "no_such_key": 1}'
+  git add "$SIDECAR"
+  : > "$STUB_LOG"
+  cl validate --staged
+  assert_v1 "when key new_flag is not a key of the recorded configuration" "--staged: a key only the work tree records"
+  assert_contains "$(v1_messages)" "when key no_such_key is not a key of the recorded configuration" "…and an unknown key"
+  assert_eq "2" "$(v1_count)" "…two V1 findings"
+  assert_eq "1" "$(config_calls recorded)" "…one recorded call for the run"
+  assert_eq "--staged" "$(config_args recorded)" "…recorded --staged"
+  cl validate --all
+  assert_v1 "when key no_such_key" "--all: the unknown key"
+  assert_eq "1" "$(v1_count)" "…alone: the work tree records new_flag"
+  jset "$SIDECAR" '.claims[0].when = "on"'
+  cl validate --all
+  assert_v1 "when \"on\" must be an object" "when that is not an object"
+  teardown
+}
+
+test_v3_config_faithful_pin_required() {
+  echo "test: V3 — a subject reading a key recorded off its default must pin it in when"
+  claims_fixture
+  config_on 15 30
+  bind_test "$STUB_TEST"
+  cl validate --all
+  assert_v3 "configuration-faithful: pin $TTL_KEY=15 in when or declare config_independent" \
+    "readers lists $TTL_KEY, recorded 15, default 30, no when"
+  assert_eq "1" "$(v3_count)" "…one V3 finding"
+  assert_eq "1" "$(config_calls readers)" "…one readers call"
+  assert_eq "src/auth/token.py" "$(config_args readers)" "…naming the claim's subject"
+  jset "$SIDECAR" ".claims[0].when = {\"$TTL_KEY\": 15}"
+  list_when "{\"$TTL_KEY\": 15}"
+  cl validate --all
+  assert_v3_ok "when {$TTL_KEY: 15}, the test establishing it"
+  jset "$SIDECAR" 'del(.claims[0].when)'
+  list_when null
+  printf 'src/auth/other.py\ttoken_ttl_minutes\n' > tools/claims/readers
+  cl validate --all
+  assert_v3_ok "the subject reads no recorded key"
+  printf 'src/auth/token.py\ttoken_ttl_minutes\n' > tools/claims/readers
+  jq -n '{token_ttl_minutes: 30}' > deploy/flags.json
+  cl validate --all
+  assert_v3_ok "recorded 30 = default 30: nothing to pin"
+  teardown
+}
+
+test_v3_config_independent_accepted() {
+  echo "test: V3 — config_independent (a non-empty reason) answers the pin"
+  claims_fixture
+  config_on 15 30
+  bind_test "$STUB_TEST"
+  jset "$SIDECAR" '.claims[0].config_independent = "the expiry check reads the TTL it is handed, whatever the flag"'
+  cl validate --all
+  assert_v3_ok "config_independent with a reason"
+  jset "$SIDECAR" '.claims[0].config_independent = ""'
+  cl validate --all
+  assert_v3 "configuration-faithful: pin $TTL_KEY=15" "an empty config_independent answers nothing"
+  assert_v1 "config_independent" "…and V1 names its type"
+  teardown
+}
+
+test_v3_when_not_established_by_test() {
+  echo "test: V3 — the bound list row's when must establish every when pair of the claim"
+  claims_fixture
+  config_on 15 30
+  bind_test "$STUB_TEST"
+  jset "$SIDECAR" ".claims[0].when = {\"$TTL_KEY\": 15}"
+  cl validate --all
+  assert_v3 "test does not establish when $TTL_KEY" "the list row's when null"
+  assert_eq "1" "$(v3_count)" "…one V3 finding"
+  list_when "{\"$TTL_KEY\": 30}"
+  cl validate --all
+  assert_v3 "test does not establish when $TTL_KEY" "the list row sets another value"
+  list_when "{\"$TTL_KEY\": 15, \"other\": 1}"
+  cl validate --all
+  assert_v3_ok "the list row sets it (and more)"
+  teardown
+}
+
+test_v5_gated_requires_tracker() {
+  echo "test: V5 — a gated claim needs an open tracker"
+  claims_fixture
+  config_on
+  jset "$SIDECAR" ".claims[0].status = \"gated\" | .claims[0].when = {\"$TTL_KEY\": 15}"
+  cl validate --all
+  assert_eq "0" "$(v5_count)" "gated with the fixture's open tracker: no V5 finding"
+  jset "$SIDECAR" '.claims[0].tracker = null'
+  cl validate --all
+  assert_v5 "gated claim has no tracker" "gated, tracker null"
+  jset "$SIDECAR" ".claims[0].tracker = \"$TRACKER\""
+  doc_edit "$TRACKER" "$TRACKER_OPEN" "**Status**: Done"
+  cl validate --all
+  assert_v5 "tracker is closed" "gated, its tracker done"
+  teardown
+}
+
+test_built_unsatisfied_when_is_finding() {
+  echo "test: V3 — a built claim whose when the recorded configuration does not satisfy is gated"
+  claims_fixture
+  config_on 30 30
+  run_built
+  jset "$SIDECAR" ".claims[0].when = {\"$TTL_KEY\": 15}"
+  list_when "{\"$TTL_KEY\": 15}"
+  cl validate --all
+  assert_v3 "built but recorded configuration does not satisfy when: gated" "built, when 15, recorded 30"
+  assert_eq "1" "$(v3_count)" "…one V3 finding"
+  jset "$SIDECAR" ".claims[0].when = {\"$TTL_KEY\": 30}"
+  list_when "{\"$TTL_KEY\": 30}"
+  cl validate --all
+  assert_eq "0" "$(v3_count)" "built, when 30 = recorded: no V3 finding"
+  teardown
+}
+
+test_run_gated_expects_pass() {
+  echo "test: run — a gated claim is expected to pass, as a built one"
+  claims_fixture
+  stub_runner
+  config_on
+  jset "$SIDECAR" ".claims[0].status = \"gated\" | .claims[0].when = {\"$TTL_KEY\": 15}"
+  cl run --all
+  assert_eq "0" "$CL_RC" "gated, check passes: exits 0"
+  assert_eq "ok" "$(run_field verdict)" "…verdict ok"
+  assert_eq "gated" "$(run_field status)" "…status gated"
+  set_ttl 1800
+  cl run --all
+  assert_eq "1" "$CL_RC" "gated, check fails: exits 1"
+  assert_eq "finding" "$(run_field verdict)" "…verdict finding"
+  assert_contains "$(run_field message)" "a gated claim must pass its check" "…a gated claim must pass"
+  teardown
+}
+
+test_promote_writes_gated_when_recorded_unsatisfied() {
+  echo "test: promote — status_to gated while the recorded configuration at HEAD does not satisfy when"
+  promote_fixture
+  config_on 30 30
+  local store digest
+  jset "$SIDECAR" ".claims[0].when = {\"$TTL_KEY\": 15}"
+  list_when "{\"$TTL_KEY\": 15}"
+  git add -A && git commit -qm "the TTL claim holds when the TTL flag is 15"
+  : > "$STUB_LOG"
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "promote exits 0"
+  assert_eq '"gated"' "$(claim_field "$TTL_ID" status)" "…the sidecar's status is gated"
+  assert_eq "--rev HEAD" "$(config_args recorded)" "…recorded --rev HEAD"
+  digest=$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")
+  store=$(claims_store)
+  assert_json_field "$(cat "$store/$digest.json")" '.status_to' "gated" "…the verdict's status_to is gated"
+  assert_json_field "$CL_OUT" '.results[0] | [.status_from, .status_to] | join(" ")' "unbuilt gated" \
+    "…the result row: unbuilt → gated"
+  assert_contains "$(cat "$DOC")" "gated (when: $TTL_KEY=15)" "…and the status block names the condition"
+  git add -A && git commit -qm "gated"
+  cl validate --all
+  assert_eq "0" "$CL_RC" "validate --all after the promote exits 0"
+  # The recorded configuration now sets the condition: promote writes built.
+  jq -n '{token_ttl_minutes: 15}' > deploy/flags.json
+  git add -A && git commit -qm "the TTL flag set to 15"
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "re-promote with the flag recorded: exits 0"
+  assert_eq '"built"' "$(claim_field "$TTL_ID" status)" "…the sidecar's status is built"
+  assert_json_field "$CL_OUT" '.results[0] | [.status_from, .status_to] | join(" ")' "gated built" \
+    "…the result row: gated → built"
+  teardown
+}
+
+test_render_gated_names_condition() {
+  echo "test: render — a gated row names its condition, keys sorted"
+  claims_fixture
+  config_on
+  jset "$SIDECAR" ".claims[0].status = \"gated\" | .claims[0].when = {\"$TTL_KEY\": 15}"
+  cl render
+  assert_eq "0" "$CL_RC" "render exits 0"
+  assert_contains "$(cat "$DOC")" "| \`$TTL_ID\` | gated (when: $TTL_KEY=15) | $TRACKER |" \
+    "the row: gated (when: $TTL_KEY=15)"
+  jset "$SIDECAR" ".claims[0].when = {\"zone\": \"eu\", \"$TTL_KEY\": 15}"
+  cl render
+  assert_contains "$(cat "$DOC")" "gated (when: $TTL_KEY=15, zone=eu)" "two keys, sorted"
+  teardown
+}
+
+test_extension_off_list_when_ignored() {
+  echo "test: V3 — with the extension off, a list row's when is ignored and no config call is made"
+  claims_fixture
+  stub_install
+  write_stub tools/claims/config "$STUB_CONFIG_SH"
+  bind_test "$STUB_TEST"
+  list_when "{\"$TTL_KEY\": 15}"
+  cl validate --all
+  assert_v3_ok "a list row with when, no claim when, config_adapter absent"
+  jset docs/spec-claims/config.json '.config_adapter = null'
+  cl validate --all
+  assert_v3_ok "config_adapter null: the same"
+  assert_eq "0" "$(grep -c '^config ' "$STUB_LOG" || true)" "…and the config adapter is never called"
+  teardown
+}
+
+test_config_adapter_child_does_not_hold_stdout() {
+  echo "test: validate — the config adapter's background child never holds the caller's stdout (fd 9 closed)"
+  claims_fixture
+  config_on
+  assert_returns_promptly "config adapter" validate --all
+  teardown
+}
+
+test_config_adapter_failure_indeterminate() {
+  echo "test: validate, promote — a failing or noisy config adapter is indeterminate"
+  promote_fixture
+  config_on
+  local before
+  export STUB_CONFIG_EXIT=3
+  cl validate --all
+  unset STUB_CONFIG_EXIT
+  assert_eq "2" "$CL_RC" "recorded exits 3: validate exits 2"
+  assert_eq "adapter-exit-3" "$(indet_reasons config)" "…indeterminate, adapter-exit-3"
+  export STUB_CONFIG_NOISE=1
+  cl validate --all
+  unset STUB_CONFIG_NOISE
+  assert_eq "2" "$CL_RC" "recorded prints a log line: exits 2"
+  assert_eq "malformed-adapter-output" "$(indet_reasons config)" "…indeterminate, malformed-adapter-output"
+  jset docs/spec-claims/config.json '.config_adapter = "tools/claims/missing"'
+  git add -A && git commit -qm "a config adapter that is not there"
+  cl validate --all
+  assert_eq "2" "$CL_RC" "a missing config adapter: exits 2"
+  assert_eq "adapter-exit-126" "$(indet_reasons config)" "…indeterminate, adapter-exit-126"
+  before=$(hash_file "$SIDECAR")
+  cl promote "$TTL_ID"
+  assert_eq "2" "$CL_RC" "promote with the config adapter missing: exits 2"
+  assert_eq "$before" "$(hash_file "$SIDECAR")" "…the sidecar unchanged"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -8719,6 +9111,22 @@ run_tests() {
   test_v7_restated_claim_added_not_judged
   test_v7_restated_sidecar_deleted
   test_v1_restates_malformed_sidecar_no_cascade
+
+  # --- Task 21: the configuration extension (§B.1) ---
+  test_v1_when_without_config_adapter
+  test_v1_gated_without_config_adapter
+  test_v1_when_unknown_key
+  test_v3_config_faithful_pin_required
+  test_v3_config_independent_accepted
+  test_v3_when_not_established_by_test
+  test_v5_gated_requires_tracker
+  test_built_unsatisfied_when_is_finding
+  test_run_gated_expects_pass
+  test_promote_writes_gated_when_recorded_unsatisfied
+  test_render_gated_names_condition
+  test_extension_off_list_when_ignored
+  test_config_adapter_child_does_not_hold_stdout
+  test_config_adapter_failure_indeterminate
 
   print_summary
 }
