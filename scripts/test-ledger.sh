@@ -8535,7 +8535,9 @@ test_lg_items_gh_block_markers() {
 [{"number":40,"title":"Fenced example first","body":"Example:\n\n```\n<!-- doc-superpowers-ledger\nkey: fake-1\n-->\n```\n\n<!-- doc-superpowers-ledger\nkey: x-40\n-->\n","state":"OPEN","stateReason":null,"labels":[],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/40"},
  {"number":41,"title":"Not a marker","body":"<!-- doc-superpowers-ledgerX\nkey: nope-1\n-->\n\nText.\n","state":"OPEN","stateReason":null,"labels":[],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/41"},
  {"number":42,"title":"Closing mid-line","body":"<!-- doc-superpowers-ledger\nkey: x-42\nowed: x -->\n","state":"OPEN","stateReason":null,"labels":[],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/42"},
- {"number":43,"title":"Only a fenced example","body":"Example:\n\n~~~~\n<!-- doc-superpowers-ledger\nkey: fake-2\n-->\n~~~~\n","state":"OPEN","stateReason":null,"labels":[],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/43"}]
+ {"number":43,"title":"Only a fenced example","body":"Example:\n\n~~~~\n<!-- doc-superpowers-ledger\nkey: fake-2\n-->\n~~~~\n","state":"OPEN","stateReason":null,"labels":[],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/43"},
+ {"number":44,"title":"Unclosed fence","body":"Text.\n\n```\ncode never closed\n","state":"OPEN","stateReason":null,"labels":[],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/44"},
+ {"number":45,"title":"Unclosed tilde fence, CRLF","body":"Text.\r\n\r\n~~~~~\r\ncode never closed","state":"OPEN","stateReason":null,"labels":[],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/45"}]
 EOF
   local f
   f=$(harness_mktemp lg-body)
@@ -8555,6 +8557,22 @@ EOF
   jq -j '.[] | select(.number == 40) | .body' "$LG_GH/issues.json" > "$f"
   assert_eq "same" "$(lg_bytes_eq "$f" 'Example:\n\n```\n<!-- doc-superpowers-ledger\nkey: fake-1\n-->\n```\n\n<!-- doc-superpowers-ledger\nkey: x-40\nowed: z\n-->\n')" \
     "write: the real block edited, the fenced one untouched"
+  # A body that ends inside an open fence: the fence is closed first (as
+  # GitHub renders it), then the block is appended outside it.
+  lg_items_gh write gh#44 owed x
+  lg_items_gh write gh#44 summary "Why this matters, briefly"
+  jq -j '.[] | select(.number == 44) | .body' "$LG_GH/issues.json" > "$f"
+  assert_eq "same" "$(lg_bytes_eq "$f" 'Text.\n\n```\ncode never closed\n```\n\n<!-- doc-superpowers-ledger\nowed: x\nsummary: Why this matters, briefly\n-->\n')" \
+    "an open \`\`\` fence closed, then one block; the second write updates it"
+  lg_items_gh write gh#45 owed y
+  jq -j '.[] | select(.number == 45) | .body' "$LG_GH/issues.json" > "$f"
+  assert_eq "same" "$(lg_bytes_eq "$f" 'Text.\r\n\r\n~~~~~\r\ncode never closed\r\n~~~~~\r\n\r\n<!-- doc-superpowers-ledger\r\nowed: y\r\n-->\r\n')" \
+    "an open ~~~~~ fence (CRLF, no final newline): closed with the same run and line ending"
+  lg_items_gh list
+  assert_json_field "$(printf '%s\n' "$LG_OUT" | sed -n 5p)" '[(.fields | tojson), (.fm_errors | length)] | map(tostring) | join("|")' \
+    '{"owed":"x","summary":"Why this matters, briefly"}|0' "list reads the block after the closed fence"
+  assert_json_field "$(printf '%s\n' "$LG_OUT" | sed -n 6p)" '.fields | tojson' '{"owed":"y"}' "…the ~~~~~ one too"
+  assert_eq "1" "$(jq -r '.[] | select(.number == 44) | .body' "$LG_GH/issues.json" | grep -c 'doc-superpowers-ledger')" "exactly one block"
   rm -f "$f"
   lg_fake_gh_off
   teardown
@@ -8587,7 +8605,9 @@ lg_rc_hosted_fixture() {
  {"number":13,"title":"Closed before","body":"<!-- doc-superpowers-ledger\nkey: app-13\n-->\n","state":"CLOSED","stateReason":"COMPLETED","labels":[],"updatedAt":"2026-05-01T00:00:00Z","closedAt":"2026-02-01T00:00:00Z","url":"https://github.com/o/r/issues/13"},
  {"number":16,"title":"Won't fix","body":"<!-- doc-superpowers-ledger\nkey: app-16\n-->\n","state":"CLOSED","stateReason":"NOT_PLANNED","labels":[],"updatedAt":"2026-04-01T00:00:00Z","url":"https://github.com/o/r/issues/16"},
  {"number":14,"title":"Hosted dependent","body":"<!-- doc-superpowers-ledger\nkey: core-14\nrelates: [root-cause:core-1]\n-->\n","state":"OPEN","stateReason":null,"labels":[],"updatedAt":"2026-02-01T00:00:00Z","url":"https://github.com/o/r/issues/14"},
- {"number":15,"title":"Hosted consumer","body":"<!-- doc-superpowers-ledger\nkey: core-15\nconsumes: [field:order.total]\n-->\n","state":"OPEN","stateReason":null,"labels":[],"updatedAt":"2026-03-10T00:00:00Z","url":"https://github.com/o/r/issues/15"}]
+ {"number":15,"title":"Hosted consumer","body":"<!-- doc-superpowers-ledger\nkey: core-15\nconsumes: [field:order.total]\n-->\n","state":"OPEN","stateReason":null,"labels":[],"updatedAt":"2026-03-10T00:00:00Z","url":"https://github.com/o/r/issues/15"},
+ {"number":17,"title":"Hosted on hosted, before","body":"<!-- doc-superpowers-ledger\nkey: core-17\nrelates: [root-cause:app-12]\n-->\n","state":"OPEN","stateReason":null,"labels":[],"updatedAt":"2026-03-20T00:00:00Z","url":"https://github.com/o/r/issues/17"},
+ {"number":18,"title":"Hosted on hosted, after","body":"<!-- doc-superpowers-ledger\nkey: core-18\nrelates: [root-cause:app-12]\n-->\n","state":"OPEN","stateReason":null,"labels":[],"updatedAt":"2026-05-01T00:00:00Z","url":"https://github.com/o/r/issues/18"}]
 EOF
 }
 
@@ -8604,6 +8624,8 @@ test_lg_recheck_hosted_items() {
   lg_rel_ix
   assert_eq "app-1=app-12;app-2=;app-3=app-16;core-14=core-1;core-15=field:order.total;" "$(lg_rc_hosted_all)" \
     "closed hosted root cause after the item's commit: marked; closed before it (a later update does not count): not; no closedAt: its update; a file root cause fixed after the hosted item's update: marked; a contract change after it: marked"
+  assert_eq "core-17=app-12;core-18=;" "core-17=$(lg_rc_of core-17);core-18=$(lg_rc_of core-18);" \
+    "a hosted source against a hosted target: closed after its update → marked; updated after the close → not"
   lg show core-14
   assert_contains "$LG_OUT" "re-check: core-1 landed" "show: on the hosted item"
   lg_call _lg_index --rev main
