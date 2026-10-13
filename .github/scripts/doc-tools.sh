@@ -9406,6 +9406,64 @@ _claims_plan_scope() {
       + [$c[0][] | select(.doc as $d | any($p[0].specs[]; .path == $d)) | .claim.id | strings]) | unique' > "$3"
 }
 
+# The rule gate and attest share for the claims a plan names ($c:
+# cl-claims entries; $all: the included reconciliations; on the named ids).
+# cl_named_findings($c; $all; $check; $unknown; $unbuilt): a finding row
+# {check, claim, doc, message} for each named id no claim has (message
+# $unknown) and each named claim still unbuilt that no DOC-STALE ruling among
+# $all covers (message $unbuilt). A CODE-DIVERGES ruling must defer the claim
+# to diverged, a RETIRE retire it: neither leaves it unbuilt, so only a
+# recorded DOC-STALE ruling (the doc amended to what was built) clears it.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_NAMED='def cl_named_findings($c; $all; $check; $unknown; $unbuilt):
+  .[] | . as $i | (first($c[] | select(.claim.id == $i)) // null) as $e
+  | if $e == null then {check: $check, claim: $i, doc: null, message: $unknown}
+    elif $e.claim.status == "unbuilt"
+         and (any($all[]; .claim == $i and .kind == "ruling"
+                  and (.ruling | type) == "object" and .ruling.direction == "DOC-STALE") | not)
+    then {check: $check, claim: $i, doc: $e.doc, message: $unbuilt}
+    else empty end;'
+
+# _claims_promotions_unverifiable <check> <recon-file>: for each promotion
+# among the reconciliations in <recon-file> (a JSON array) whose verdict is
+# not in the local store (_claims_verdict_check: missing), the advisory
+# unverifiable-here. Inclusion is by digest, never by the store: this only
+# says the store cannot confirm it here.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_claims_promotions_unverifiable() {
+  local check="$1" list="$_SCRATCH/cl-unverifiable-ids" id x
+  _claims_jq promotions -r '.[] | select(.kind == "promotion") | .claim | select(test("\n") | not)' "$2" > "$list"
+  while IFS= read -r id <&3; do
+    x=$(_claims_jq promoted -c --arg id "$id" 'first(.[] | select(.claim.id == $id) | .claim)' \
+      "$_SCRATCH/cl-claims.json") || _claims_propagate $?
+    x=$(_claims_verdict_check "$x") || _claims_propagate $?
+    if [ "$x" = missing ]; then
+      _claims_advisory "$check" "$id" unverifiable-here \
+        "the promotion's verdict is not in the local verdict store (promoted in another clone?): it is recorded by its digest; the scheduled run re-verifies it"
+    fi
+  done 3< "$list"
+}
+
+# _claims_owed_findings <check> <since-rev>: for each claim the last run
+# planned and did not skip (cl-run-plan.json), _claims_repromote_owed: owed
+# is a finding "re-promote owed", unverifiable-here an advisory.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_claims_owed_findings() {
+  local check="$1" since="$2" list="$_SCRATCH/cl-owed-ids" id x
+  _claims_jq owed-ids -r '.[] | select(.action != "skip") | .claim | select(test("\n") | not)' \
+    "$_SCRATCH/cl-run-plan.json" > "$list"
+  while IFS= read -r id <&3; do
+    x=$(_claims_repromote_owed "$id" "$since") || _claims_propagate $?
+    case "$x" in
+      owed) _claims_finding "$check" "$id" - "re-promote owed: run claims promote $id" ;;
+      unverifiable-here)
+        _claims_advisory "$check" "$id" unverifiable-here \
+          "whether a re-promotion is owed cannot be decided here (promotion.at is not a commit here, or its sidecar holds no such claim)"
+        ;;
+    esac
+  done 3< "$list"
+}
+
 # _claims_v8 / _claims_v8n <range> <findings-file>: the gate's V8 and V8n
 # hooks over <range> (the range rule's patch text, _claims_range_patch), their
 # finding rows into <findings-file>. No-ops until those checks land.
@@ -9466,6 +9524,7 @@ cmd_claims_gate() {
   local pj="$_SCRATCH/cl-gate-plan.json" named="$_SCRATCH/cl-gate-named.json" psel="$_SCRATCH/cl-gate-planes.json"
   local sel="$_SCRATCH/cl-gate-sel.json" holds="$_SCRATCH/cl-gate-holds.json" list="$_SCRATCH/cl-gate-list"
   local fromc="$_SCRATCH/cl-gate-from.json" scope="$_SCRATCH/cl-gate-scope.json" recon="$_SCRATCH/cl-gate-recon.json"
+  local included="$_SCRATCH/cl-gate-included.json"
   local v8="$_SCRATCH/cl-gate-v8.jsonl" v8n="$_SCRATCH/cl-gate-v8n.jsonl" v9="$_SCRATCH/cl-gate-v9.jsonl"
   local v9c="$_SCRATCH/cl-gate-v9-checks.jsonl" commits="$_SCRATCH/cl-gate-commits.json" out="$_SCRATCH/cl-gate-record.json"
   _claims_load
@@ -9536,40 +9595,15 @@ cmd_claims_gate() {
     '.unrecorded[] | {check: "gate", claim, doc: null,
       message: "silent reconciliation: this \(.kind) since the chunk began is not recorded in \($rec) (a ruling made during the chunk must name \($rec) as its record; a status change needs a ruling or a promotion recorded there)"}' \
     "$recon" >> "$_SCRATCH/cl-findings.jsonl"
-  _claims_jq gate-promotions -r '.reconciliations[] | select(.kind == "promotion") | .claim | select(test("\n") | not)' \
-    "$recon" > "$list"
-  while IFS= read -r id <&3; do
-    x=$(_claims_jq gate-promoted -c --arg id "$id" 'first(.[] | select(.claim.id == $id) | .claim)' \
-      "$_SCRATCH/cl-claims.json") || _claims_propagate $?
-    x=$(_claims_verdict_check "$x") || _claims_propagate $?
-    if [ "$x" = missing ]; then
-      _claims_advisory gate "$id" unverifiable-here \
-        "the promotion's verdict is not in the local verdict store (promoted in another clone?): it is recorded by its digest; the scheduled run re-verifies it"
-    fi
-  done 3< "$list"
+  _claims_jq gate-recon-included -c '.reconciliations' "$recon" > "$included"
+  _claims_promotions_unverifiable gate "$included"
 
   # 4. The named claims, and re-promotions owed by the claims run.
-  _claims_jq gate-named-findings -c --slurpfile c "$_SCRATCH/cl-claims.json" --slurpfile r "$recon" --argjson n "$n" \
-    '.[] | . as $i | (first($c[0][] | select(.claim.id == $i)) // null) as $e
-     | if $e == null then {check: "gate", claim: $i, doc: null,
-                           message: "named on chunk \($n)'"'"'s **Claims:** line, but no claim has this id"}
-       elif $e.claim.status == "unbuilt"
-            and (any($r[0].reconciliations[]; .claim == $i and .kind == "ruling"
-                     and .ruling.direction == "DOC-STALE") | not)
-       then {check: "gate", claim: $i, doc: $e.doc, message: "chunk was meant to build it: promote, rule, or defer"}
-       else empty end' "$named" >> "$_SCRATCH/cl-findings.jsonl"
-  _claims_jq gate-owed-ids -r '.[] | select(.action != "skip") | .claim | select(test("\n") | not)' \
-    "$_SCRATCH/cl-run-plan.json" > "$list"
-  while IFS= read -r id <&3; do
-    x=$(_claims_repromote_owed "$id" "$from") || _claims_propagate $?
-    case "$x" in
-      owed) _claims_finding gate "$id" - "re-promote owed: run claims promote $id" ;;
-      unverifiable-here)
-        _claims_advisory gate "$id" unverifiable-here \
-          "whether a re-promotion is owed cannot be decided here (promotion.at is not a commit here, or its sidecar holds no such claim)"
-        ;;
-    esac
-  done 3< "$list"
+  _claims_jq gate-named-findings -c --slurpfile c "$_SCRATCH/cl-claims.json" --slurpfile r "$included" \
+    --arg unknown "named on chunk $n's **Claims:** line, but no claim has this id" \
+    "$_JQ_CLAIMS_NAMED"' cl_named_findings($c[0]; $r[0]; "gate"; $unknown;
+       "chunk was meant to build it: promote, rule, or defer")' "$named" >> "$_SCRATCH/cl-findings.jsonl"
+  _claims_owed_findings gate "$from"
 
   # 5. V8, V8n and V9 over the range; --holds ids held.
   : > "$v8"
@@ -9758,12 +9792,16 @@ cmd_claims_render() {
 #      what claims rulings lists).
 #   5. render --check (V11): render_check ok, or failed with its findings.
 # <from> is the last usable record's head when that is a commit here. A
-# rebased branch's old head that is not (a fresh clone) maps to the newest
-# branch commit carrying a patch id of that record's commits, else to
-# _CL_MB (advisory from-remapped): an earlier <from> only widens final.json's
-# reconciliations, never hides a change. With no usable record it is
-# _CL_MB. An unresolvable base makes the run indeterminate (exit 2), and
-# nothing is written.
+# rebased branch's old head that is not (a fresh clone) maps only to its
+# rebased twin: the one first-parent non-merge commit of _CL_MB..HEAD whose
+# patch id is that of the head's own entry in the record's commits
+# (advisory from-remapped). No twin — the head is not one of the record's
+# own commits (a merge, a chunk with no commit), no branch commit carries
+# its patch, or several do — makes the run indeterminate (exit 2, nothing
+# written: re-run that chunk's gate). The window is never widened: an
+# earlier <from> would absorb into final.json a ruling made before the last
+# chunk's gate. With no usable record it is _CL_MB. An unresolvable base
+# makes the run indeterminate too.
 # --deep re-runs each usable record's claims in a throwaway worktree at its
 # head (_claims_worktree_add, removed after each record; never a repository
 # -wide prune): each claim as that head holds it, judged by its status
@@ -9942,6 +9980,7 @@ cmd_claims_attest() {
   local fromc="$_SCRATCH/cl-attest-from.json" frecon="$_SCRATCH/cl-attest-final-recon.json"
   local cross="$_SCRATCH/cl-attest-cross.json" amend="$_SCRATCH/cl-attest-amend.json"
   local saved="$_SCRATCH/cl-attest-results.jsonl" out="$_SCRATCH/cl-attest-record.json"
+  local included="$_SCRATCH/cl-attest-included.json"
 
   # The preconditions that are not usage.
   if [ "$_OPT_final" = 1 ]; then
@@ -9984,19 +10023,35 @@ cmd_claims_attest() {
     '{chunk, record, rebased: (if all(.data.commits[]; .patch_id as $p | any($b[0][]; .patch_id == $p)) then null
                                else "re-verified" end)}' "$recs" >> "$rows"
 
-  # from: the last usable record's head (see the section comment).
+  # from: the last usable record's head, or its rebased twin (see the
+  # section comment); never a wider window.
   from=$_CL_MB
   if [ -s "$recs" ]; then
     x=$(_claims_jq attest-last-head -r -s '.[-1].data.head' "$recs") || _claims_propagate $?
     if c=$(git rev-parse -q --verify "$x^{commit}" 2>/dev/null); then
       from=$c
     else
-      c=$(_claims_jq attest-from-map -r -s --slurpfile b "$branch" \
-        '.[-1] | first(.data.commits[] | .patch_id as $p | first($b[0][] | select(.patch_id == $p)) | .sha) // ""' \
-        "$recs") || _claims_propagate $?
-      if [ -n "$c" ]; then from=$c; fi
+      # "<twin sha>", or "-<why not>".
+      c=$(_claims_jq attest-from-twin -r -s --slurpfile b "$branch" \
+        '.[-1].data as $d
+         | [$d.commits[] | select(.sha == $d.head)] as $own
+         | if ($own | length) != 1 then "-its head is not one of its own commits (a merge, or a chunk with no commit)"
+           else [$b[0][] | select(.patch_id == $own[0].patch_id) | .sha] as $t
+             | if ($t | length) == 1 then $t[0]
+               elif ($t | length) == 0 then "-no commit of the branch carries its head'"'"'s patch"
+               else "-\($t | length) commits of the branch carry its head'"'"'s patch" end
+           end' "$recs") || _claims_propagate $?
+      n=$(_claims_jq attest-last-chunk -r -s '.[-1].chunk' "$recs") || _claims_propagate $?
+      case "$c" in
+        -*)
+          _claims_indeterminate attest - \
+            "chunk $n's record names head $x, which is not a commit here, and it has no rebased twin: ${c#-}: re-run the gate for chunk $n (claims gate --plan $plan --chunk $n)"
+          _claims_emit attest
+          ;;
+      esac
+      from=$c
       _claims_advisory attest - from-remapped \
-        "the last chunk record's head $x is not a commit here (a rebased branch's old head?): final.json's reconciliations are read from $from, the newest commit carrying one of that record's patches (else the merge-base)"
+        "chunk $n's record names head $x, which is not a commit here (a rebased branch's old head): final.json's reconciliations are read from its rebased twin $from, the one branch commit with the head's patch id"
     fi
   fi
 
@@ -10028,44 +10083,18 @@ cmd_claims_attest() {
   _claims_jq attest-reverted -c '.reverted[] | {check: "attest", claim, doc: null,
       message: "reconciliation reverted at HEAD: \(.record) reconciled a \((.ruling | objects | .direction) // "?") ruling on \(.claim) that the claim no longer holds"}' \
     "$cross" >> "$_SCRATCH/cl-findings.jsonl"
-  _claims_jq attest-promotions -r '.[] | select(.kind == "promotion") | .claim | select(test("\n") | not)' \
-    "$frecon" > "$list"
-  while IFS= read -r id <&3; do
-    x=$(_claims_jq attest-promoted -c --arg id "$id" 'first(.[] | select(.claim.id == $id) | .claim)' \
-      "$_SCRATCH/cl-claims.json") || _claims_propagate $?
-    x=$(_claims_verdict_check "$x") || _claims_propagate $?
-    if [ "$x" = missing ]; then
-      _claims_advisory attest "$id" unverifiable-here \
-        "the promotion's verdict is not in the local verdict store (promoted in another clone?): it is recorded by its digest; the scheduled run re-verifies it"
-    fi
-  done 3< "$list"
+  _claims_promotions_unverifiable attest "$frecon"
 
   # 2, continued (it reads step 3's reconciliations): the named claims, and
   # re-promotions owed.
-  _claims_jq attest-named-findings -c --slurpfile c "$_SCRATCH/cl-claims.json" --slurpfile recs "$recs" \
-    --slurpfile f "$frecon" \
-    '([$recs[] | .data.reconciliations[]] + $f[0]) as $all
-     | .[] | . as $i | (first($c[0][] | select(.claim.id == $i)) // null) as $e
-     | if $e == null then {check: "attest", claim: $i, doc: null,
-                           message: "named on a **Claims:** line of the plan, but no claim has this id"}
-       elif $e.claim.status == "unbuilt"
-            and (any($all[]; .claim == $i and .kind == "ruling"
-                     and (.ruling | type) == "object" and .ruling.direction == "DOC-STALE") | not)
-       then {check: "attest", claim: $i, doc: $e.doc,
-             message: "named claim still unbuilt at the final gate: promote it, rule DOC-STALE (recorded in a gate record), or defer it as diverged"}
-       else empty end' "$named" >> "$_SCRATCH/cl-findings.jsonl"
-  _claims_jq attest-owed-ids -r '.[] | select(.action != "skip") | .claim | select(test("\n") | not)' \
-    "$_SCRATCH/cl-run-plan.json" > "$list"
-  while IFS= read -r id <&3; do
-    x=$(_claims_repromote_owed "$id" "$_CL_MB") || _claims_propagate $?
-    case "$x" in
-      owed) _claims_finding attest "$id" - "re-promote owed: run claims promote $id" ;;
-      unverifiable-here)
-        _claims_advisory attest "$id" unverifiable-here \
-          "whether a re-promotion is owed cannot be decided here (promotion.at is not a commit here, or its sidecar holds no such claim)"
-        ;;
-    esac
-  done 3< "$list"
+  _claims_jq attest-included -nc --slurpfile recs "$recs" --slurpfile f "$frecon" \
+    '[$recs[] | .data.reconciliations[]] + $f[0]' > "$included"
+  _claims_jq attest-named-findings -c --slurpfile c "$_SCRATCH/cl-claims.json" --slurpfile r "$included" \
+    "$_JQ_CLAIMS_NAMED"' cl_named_findings($c[0]; $r[0]; "attest";
+       "named on a **Claims:** line of the plan, but no claim has this id";
+       "named claim still unbuilt at the final gate: promote it, rule DOC-STALE (recorded in a gate record), or defer it as diverged")' \
+    "$named" >> "$_SCRATCH/cl-findings.jsonl"
+  _claims_owed_findings attest "$_CL_MB"
 
   # 4. The amendment batch.
   _claims_rulings_rows "$_CL_MB" "$head" "$amend"
