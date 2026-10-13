@@ -1277,6 +1277,9 @@ _lg_ix_pr_lines() {
 # line, numeric order) as "#a, #b, #c[, …]" (<n> of them in all).
 _lg_ix_pr_numbers() {
   local nums
+  case "${DOC_TOOLS_LEDGER_SELFTEST:-}" in
+    die-in-pr-numbers) _lg_die "selftest: a producer inside \$(…) died" ;;
+  esac
   nums=$(LC_ALL=C sort -n "$1" | head -n 3 | sed 's/^/#/' | tr '\n' ' ' | sed 's/ $//; s/ /, /g')
   if [ "$2" -gt 3 ]; then nums="$nums, …"; fi
   printf '%s' "$nums"
@@ -1299,7 +1302,7 @@ _lg_ix_pr_numbers() {
 # (stderr, one line): the data's state, the open heads not fetched, the
 # cross-repository open PRs not compared.
 _lg_ix_pr_prepare() {
-  local base="$1" p="$2" s remote url rc=0 state note="" mark="" missing=0 cross=0 t ol err pull=""
+  local base="$1" p="$2" s remote url rc=0 state note="" mark="" missing=0 cross=0 t ol err pull="" nums
   : > "$p.prl"
   : > "$p.prheads"
   : > "$_SCRATCH/lg-pr.mark"
@@ -1422,20 +1425,22 @@ _lg_ix_pr_prepare() {
   missing=${t%% *}
   cross=${t#* }
   if [ "$missing" -gt 0 ]; then
+    nums=$(_lg_ix_pr_numbers "$s.miss" "$missing") || exit "$?"
     if [ -z "$base" ]; then
-      t="$missing open PR heads not compared ($(_lg_ix_pr_numbers "$s.miss" "$missing")): the base does not resolve"
+      t="$missing open PR heads not compared ($nums): the base does not resolve"
     elif [ "$missing" = 1 ]; then
-      t="1 open PR head not fetched ($(_lg_ix_pr_numbers "$s.miss" 1); git fetch $remote): not shown in review"
+      t="1 open PR head not fetched ($nums; git fetch $remote): not shown in review"
     else
-      t="$missing open PR heads not fetched ($(_lg_ix_pr_numbers "$s.miss" "$missing"); git fetch $remote): not shown in review"
+      t="$missing open PR heads not fetched ($nums; git fetch $remote): not shown in review"
     fi
     note="${note:+$note; }$t"
   fi
   if [ "$cross" -gt 0 ]; then
+    nums=$(_lg_ix_pr_numbers "$s.cross" "$cross") || exit "$?"
     if [ "$cross" = 1 ]; then
-      t="1 cross-repository open PR not compared ($(_lg_ix_pr_numbers "$s.cross" 1))"
+      t="1 cross-repository open PR not compared ($nums)"
     else
-      t="$cross cross-repository open PRs not compared ($(_lg_ix_pr_numbers "$s.cross" "$cross"))"
+      t="$cross cross-repository open PRs not compared ($nums)"
     fi
     note="${note:+$note; }$t"
   fi

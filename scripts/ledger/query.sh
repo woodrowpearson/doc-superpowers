@@ -72,6 +72,9 @@ _lg_q_run() {
   local prog="$1" out="$2" ix
   shift 2
   _lg_ifl_prepare_bg
+  case "${DOC_TOOLS_LEDGER_SELFTEST:-}" in
+    ifl-index-delay) sleep 1 ;;
+  esac
   ix=$(_lg_index) || exit "$?"
   _lg_ifl_prepare_wait
   _lg_ifl_index_note
