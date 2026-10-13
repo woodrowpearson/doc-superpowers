@@ -8071,6 +8071,279 @@ test_v8n_gate_blocks_and_records() {
   teardown
 }
 
+# --- Task 20: V7 restates sweep ------------------------------------------------
+#
+# The fixture's ADR-007 claim restates the spec claim: the same sentence in a
+# second governing doc, in a sidecar of its own. V7 reports the ADR claim when
+# the spec claim's states changed and the ADR claim has no new ruling. It is
+# not in the default blocking list, so validate reports it as an advisory.
+
+V7_A_ID="ADR-007#token-ttl"
+V7_B_ID="SPEC-AUTH-001#token-ttl"
+
+# The last `cl`'s V7 rows: messages (findings and advisories) one per line,
+# their count, and the count of those that block (findings).
+v7_messages() {
+  jq -r '[.findings[]?, .advisories[]? | select(.check == "V7")][] | .message' <<<"$CL_OUT" 2>/dev/null || true
+}
+v7_count() {
+  jq '[.findings[]?, .advisories[]? | select(.check == "V7")] | length' <<<"$CL_OUT" 2>/dev/null || echo invalid
+}
+v7_blocking_count() {
+  jq '[.findings[]? | select(.check == "V7")] | length' <<<"$CL_OUT" 2>/dev/null || echo invalid
+}
+
+# restates_files [jq-filter]: ADR-007, a governing doc holding the fixture
+# claim's sentence, and its sidecar: one unbuilt, tracked claim restating the
+# spec claim, <jq-filter> applied to its record. Not rendered or committed.
+restates_files() {
+  mkdir -p docs/adr
+  cat > docs/adr/ADR-007-tokens.md <<'DOC'
+# ADR-007: Token lifetimes
+
+**Status**: Proposed
+
+## Decision
+
+Access tokens expire after 15 minutes.
+DOC
+  jq -n --arg b "$V7_B_ID" '{schema: 1, doc: "docs/adr/ADR-007-tokens.md", claims: [{
+    id: "ADR-007#token-ttl", quote: "Access tokens expire after 15 minutes",
+    states: "An issued access token is rejected 15 minutes after issue.", kind: "behaviour",
+    subject: ["src/auth/token.py"], status: "unbuilt", enforced_by: "test",
+    test: null, nonvacuity: null, promotion: null,
+    tracker: "docs/issues/token-ttl.md", frozen_at: null, restates: [$b], rulings: []}]}' \
+    > docs/spec-claims/ADR-007.json
+  if [ $# -gt 0 ]; then jset docs/spec-claims/ADR-007.json ".claims[0] |= ($1)"; fi
+}
+
+# restates_base [jq-filter]: restates_files, rendered, and committed as the
+# merge-base.
+restates_base() {
+  restates_files "$@"
+  rerender
+  base_here "ADR-007 restates the spec claim"
+}
+
+# change_b_states: the spec claim's states changed under a DOC-STALE ruling
+# (V6 holds for it), staged as that sidecar alone.
+change_b_states() {
+  jset "$SIDECAR" ".claims[0].states = \"$NEW_STATES\" | .claims[0].rulings = [$_CL_DOC_STALE]"
+  git add "$SIDECAR"
+}
+
+test_v7_restates_sweep() {
+  echo "test: V7 — the restating claim has no ruling after the restated claim's states changed"
+  claims_fixture
+  restates_base
+  cl validate --all
+  assert_eq "0" "$(v7_count)" "precondition: nothing changed, no V7 row"
+  change_b_states
+  cl validate --staged
+  assert_eq "0" "$CL_RC" "--staged: exits 0 (advisory, V6 holds for the amended claim)"
+  assert_eq "1" "$(v7_count)" "--staged: one V7 row, the ADR's sidecar not staged"
+  assert_eq "0" "$(v7_blocking_count)" "…not blocking"
+  assert_eq "restates $V7_B_ID, whose states changed" "$(v7_messages)" "…naming the restated claim"
+  assert_json_field "$CL_OUT" '[.advisories[] | select(.check == "V7")][0].claim' "$V7_A_ID" "…on the restating claim"
+  assert_json_field "$CL_OUT" '[.advisories[] | select(.check == "V7")][0].code' "non-blocking" "…as a non-blocking advisory"
+  cl validate --all
+  assert_eq "0" "$CL_RC" "--all: exits 0"
+  assert_eq "restates $V7_B_ID, whose states changed" "$(v7_messages)" "--all: the same row"
+  teardown
+}
+
+test_v7_sibling_ruled_ok() {
+  echo "test: V7 — the restating claim has a new ruling: no row"
+  claims_fixture
+  restates_base
+  change_b_states
+  jset docs/spec-claims/ADR-007.json ".claims[0].rulings = [$_CL_DOC_STALE]"
+  git add docs/spec-claims/ADR-007.json
+  cl validate --staged
+  assert_eq "0" "$CL_RC" "--staged: exits 0"
+  assert_eq "0" "$(v7_count)" "--staged: the sibling carries a new ruling: no V7 row"
+  cl validate --all
+  assert_eq "0" "$(v7_count)" "--all: no V7 row"
+  teardown
+}
+
+test_v7_old_ruling_is_not_new() {
+  echo "test: V7 — a ruling the base already holds is not a new ruling"
+  claims_fixture
+  restates_files ".rulings = [$_CL_DOC_STALE]"
+  rerender
+  base_here "ADR-007 restates the spec claim, already ruled once"
+  change_b_states
+  cl validate --staged
+  assert_eq "1" "$(v7_count)" "the sibling's ruling predates the change: one V7 row"
+  teardown
+}
+
+test_v7_unchanged_states_no_row() {
+  echo "test: V7 — the restated claim edited without changing its states: no row"
+  claims_fixture
+  restates_base
+  jset "$SIDECAR" '.claims[0].restates = ["ADR-007#token-ttl"]'
+  git add "$SIDECAR"
+  cl validate --staged
+  assert_eq "0" "$(v7_count)" "--staged: no V7 row"
+  cl validate --all
+  assert_eq "0" "$(v7_count)" "--all: no V7 row"
+  teardown
+}
+
+test_v7_staged_scope() {
+  echo "test: V7 — --staged judges the claims the staged paths reach; --all judges every claim"
+  claims_fixture
+  restates_base
+  jset "$SIDECAR" ".claims[0].states = \"$NEW_STATES\" | .claims[0].rulings = [$_CL_DOC_STALE]"
+  cl validate --staged
+  assert_eq "0" "$(v7_count)" "the change is in the work tree only, nothing staged: no V7 row"
+  cl validate --all
+  assert_eq "1" "$(v7_count)" "--all: the work tree's change is judged"
+  git add "$SIDECAR"
+  printf 'x = 1\n' > src/other.py
+  git add src/other.py
+  cl validate --staged
+  assert_eq "1" "$(v7_count)" "the restated claim's sidecar staged with an unrelated file: one V7 row"
+  teardown
+}
+
+test_v7_config_staged_touches_every_claim() {
+  echo "test: V7 — a staged config.json touches every claim, so a restating claim is judged"
+  claims_fixture
+  restates_base
+  change_b_states
+  jset docs/spec-claims/config.json '. + {"normative_headings": ["Rules"]}'
+  git add docs/spec-claims/config.json
+  cl validate --staged
+  assert_eq "1" "$(v7_count)" "config staged beside the restated claim's sidecar: one V7 row"
+  teardown
+}
+
+test_v7_retired_sibling_not_judged() {
+  echo "test: V7 — a retired restating claim is not judged (its sentence is struck)"
+  claims_fixture
+  restates_files ".status = \"retired\" | .tracker = null | .rulings = [$_CL_RETIRE]"
+  doc_edit docs/adr/ADR-007-tokens.md "Access tokens expire after 15 minutes." "~~Access tokens expire after 15 minutes.~~"
+  rerender
+  base_here "ADR-007 claim retired"
+  change_b_states
+  cl validate --all
+  assert_eq "0" "$(v7_count)" "no V7 row for the retired sibling"
+  teardown
+}
+
+test_v7_blocking_when_configured() {
+  echo "test: V7 — blocking when the config's blocking list includes it; a repeated id is one row"
+  claims_fixture
+  restates_files ".restates = [\"$V7_B_ID\", \"$V7_B_ID\"]"
+  jset docs/spec-claims/config.json '.blocking = ["V1","V2","V3","V4","V5","V6","V7","V10","V11","V12"]'
+  rerender
+  base_here "ADR-007 restates the spec claim; V7 blocks"
+  change_b_states
+  cl validate --staged
+  assert_eq "1" "$CL_RC" "exits 1"
+  assert_eq "1" "$(v7_blocking_count)" "one V7 finding"
+  assert_eq "0" "$(jq '[.advisories[] | select(.check == "V7")] | length' <<<"$CL_OUT")" "…and no V7 advisory"
+  teardown
+}
+
+test_v1_restates_unknown_id() {
+  echo "test: V1 — restates names an id that is no claim, or the claim itself"
+  claims_fixture
+  restates_base
+  cl validate --all
+  assert_eq "0" "$(v1_count)" "precondition: restates a known claim of another sidecar: no V1 finding"
+  jset docs/spec-claims/ADR-007.json '.claims[0].restates = ["ADR-007#ghost", "ADR-007#token-ttl", "ADR-007#ghost"]'
+  git add docs/spec-claims/ADR-007.json
+  cl validate --staged
+  assert_v1 "restates ADR-007#ghost: no claim has that id" "--staged: an unknown id"
+  assert_contains "$(v1_messages)" "restates ADR-007#token-ttl, the claim itself" "…and the claim itself"
+  assert_eq "2" "$(v1_count)" "…two rows, a repeated id named once"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V1")][0].claim' "$V7_A_ID" "…on the restating claim"
+  cl validate --all
+  assert_eq "2" "$(v1_count)" "--all: the same two rows"
+  jset docs/spec-claims/ADR-007.json '.claims[0].restates = ["SPEC-AUTH-001#token-ttl"]'
+  cl validate --all
+  assert_eq "0" "$(v1_count)" "a known id: no V1 finding"
+  teardown
+}
+
+test_v7_touched_scope_earlier_commit() {
+  echo "test: V7 — under --staged the restated claim's change must be in reach: an earlier commit is not"
+  claims_fixture
+  restates_base
+  change_b_states
+  git commit -qm "amend the spec claim's states"
+  printf 'x = 1\n' > src/other.py
+  git add src/other.py
+  cl validate --staged
+  assert_eq "0" "$(v7_count)" "--staged: only an unrelated file staged: no V7 row"
+  cl validate --all
+  assert_eq "1" "$(v7_count)" "--all: the branch's change since the merge-base is judged"
+  teardown
+}
+
+test_v7_new_restating_claim_not_judged() {
+  echo "test: V7 — a restating claim added in the same change was written against the new states"
+  claims_fixture
+  restates_files
+  rerender
+  git add -A
+  change_b_states
+  cl validate --staged
+  assert_eq "0" "$(v7_count)" "--staged: the ADR claim is new: no V7 row"
+  cl validate --all
+  assert_eq "0" "$(v7_count)" "--all: no V7 row"
+  teardown
+}
+
+test_v7_restated_claim_added_not_judged() {
+  echo "test: V7 — a restated claim absent at the merge-base has no states to have changed"
+  claims_fixture
+  restates_files '.restates = ["SPEC-AUTH-001#refresh-single-use"]'
+  rerender
+  base_here "ADR-007 restates a spec claim not yet written"
+  jset "$SIDECAR" '.claims += [.claims[0] | .id = "SPEC-AUTH-001#refresh-single-use"
+    | .quote = "Refresh tokens are single-use" | .states = "A refresh token is rejected on its second use."]'
+  rerender
+  git add -A
+  cl validate --staged
+  assert_eq "0" "$(v1_count)" "--staged: the restated id now names a claim: no V1 finding"
+  assert_eq "0" "$(v7_count)" "--staged: the restated claim is new: no V7 row"
+  teardown
+}
+
+test_v7_restated_sidecar_deleted() {
+  echo "test: V7 — the restated claim's fully retired sidecar deleted: V1 on the restating claim, no V7"
+  claims_fixture
+  doc_edit "$DOC" "$TTL_LINE" "- ~~Access tokens expire after 15 minutes.~~"
+  jset "$SIDECAR" ".claims[0].status = \"retired\" | .claims[0].tracker = null | .claims[0].rulings = [$_CL_RETIRE]"
+  restates_base
+  git rm -q "$SIDECAR"
+  cl validate --staged
+  assert_v1 "restates $V7_B_ID: no claim has that id" "--staged: the ADR's sidecar not staged"
+  assert_eq "1" "$(v1_count)" "…one V1 finding"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V1")][0].claim' "$V7_A_ID" "…on the restating claim"
+  assert_eq "0" "$(v7_count)" "…and no V7 row (the restated claim is in one tree only)"
+  cl validate --all
+  assert_v1 "restates $V7_B_ID: no claim has that id" "--all: the same finding"
+  assert_eq "0" "$(v7_count)" "--all: no V7 row"
+  teardown
+}
+
+test_v1_restates_malformed_sidecar_no_cascade() {
+  echo "test: V1 — a malformed sidecar is one finding, not also an unknown restates id"
+  claims_fixture
+  restates_base
+  printf 'not json\n' > "$SIDECAR"
+  cl validate --all
+  assert_v1 "$SIDECAR: not one JSON object" "--all: the malformed sidecar"
+  assert_eq "" "$(v1_messages | grep 'no claim has that id' || true)" "…and no unknown-id finding on the restating claim"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -8430,6 +8703,22 @@ run_tests() {
   test_v8n_blocking_when_configured
   test_v8n_invalid_heading_ere_indeterminate
   test_v8n_gate_blocks_and_records
+
+  # --- Task 20: V7 restates sweep ---
+  test_v7_restates_sweep
+  test_v7_sibling_ruled_ok
+  test_v7_old_ruling_is_not_new
+  test_v7_unchanged_states_no_row
+  test_v7_staged_scope
+  test_v7_config_staged_touches_every_claim
+  test_v7_retired_sibling_not_judged
+  test_v7_blocking_when_configured
+  test_v1_restates_unknown_id
+  test_v7_touched_scope_earlier_commit
+  test_v7_new_restating_claim_not_judged
+  test_v7_restated_claim_added_not_judged
+  test_v7_restated_sidecar_deleted
+  test_v1_restates_malformed_sidecar_no_cascade
 
   print_summary
 }
