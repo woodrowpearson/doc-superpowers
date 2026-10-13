@@ -32,6 +32,18 @@
 #              merged PRs whose merge commits are main's last 100: cold
 #              (the PR list fetched through the remote cache, the heads
 #              walked, the merge commits' files read) < 5 s, warm < 1 s
+#   ls / show (in flight: 1000 branches, 300 unmerged)   as ls / show, with
+#              config inflight.enabled: 700 branches merged into the base
+#              (refs/heads/m-<i> at main's commits: the for-each-ref
+#              --no-merged filter drops them) and 300 unmerged, one commit
+#              each past main claiming an item (Ledger-Claims) and editing
+#              its file — 150 local, 100 refs/remotes/origin/, 50 other
+#              hosts' in-flight refs; every tenth cut from main~3 with main
+#              merged back in (two base commits reached: git merge-base);
+#              every fifth touches a contract's src file: cold (no caches)
+#              < 5 s, warm < 1 s; "in-flight overlay (cold)": ls with the
+#              index warm and every in-flight cache wiped (merge bases,
+#              facts, overlay) < 5 s
 #   refs step  the index build's parse-reference step (_lg_ix_refs) over all
 #              N items as blob records — the --staged / --rev case, which
 #              probes one parse entry per blob; reported, no budget
@@ -291,15 +303,17 @@ b_fail() {
   $1"
 }
 
-# b_wipe <0|1|2>: 0 nothing; 1 every ledger cache (a cold run); 2 the index
-# files only (parse entries and dates stay: the state right after an input
-# changed).
+# b_wipe <0|1|2|3>: 0 nothing; 1 every ledger cache (a cold run); 2 the
+# index files only (parse entries and dates stay: the state right after an
+# input changed); 3 the in-flight caches only (merge bases, branch facts,
+# overlays: every branch new to the index, which stays warm).
 b_wipe() {
   local c
   c="$(git rev-parse --git-common-dir)/doc-superpowers/ledger"
   case "$1" in
     1) rm -rf "$c" ;;
     2) rm -f "$c"/index-*.json "$c"/index-*.refs ;;
+    3) rm -rf "$c/branch" "$c/inflight" ;;
   esac
 }
 
@@ -486,6 +500,68 @@ b_verb "show $show_key (50 open PRs)" show "$show_key"
 echo "  (50 open PRs: $(jq -r '[.items[] | .derived.status] | group_by(.) | map("\(.[0]) \(length)") | join(", ")' "$B_OUT"))"
 git checkout -q -- docs/ledger/config.json
 git for-each-ref --format='delete %(refname)' refs/remotes/origin/ | git update-ref --stdin
+
+# In flight: 1,000 branches (700 merged, 300 not), see the header; undone
+# after the rows.
+b_inflight() {
+  local main now i ref c n f key msg body mtime
+  main=$(git rev-parse main)
+  now=$(date +%s)
+  git rev-list --max-count=700 main > "$B_ROOT/ifl.merged"
+  n=$(wc -l < "$B_ROOT/ifl.merged" | tr -d ' ')
+  awk -v n="$n" '{ M[NR] = $0 } END { for (i = 1; i <= 700; i++) print "create refs/heads/m-" i " " M[((i - 1) % n) + 1] }' \
+    "$B_ROOT/ifl.merged" | git update-ref --stdin || b_die "cannot create the merged branches"
+  # (no `| head`: under pipefail its early exit fails the pipeline)
+  git ls-files -- 'docs/issues/*.md' > "$B_ROOT/ifl.all"
+  head -n 300 "$B_ROOT/ifl.all" > "$B_ROOT/ifl.files"
+  # shellcheck disable=SC2046  # file names without blanks
+  awk 'FNR == 1 { k = "" } /^key: / && k == "" { k = $2; print FILENAME "\t" k }' $(cat "$B_ROOT/ifl.files") > "$B_ROOT/ifl.keys"
+  mtime=$(git rev-parse main~3)
+  i=0
+  while IFS="$(printf '\t')" read -r f key; do
+    i=$((i + 1))
+    if [ "$i" -le 150 ]; then ref="refs/heads/f-$i"
+    elif [ "$i" -le 250 ]; then ref="refs/remotes/origin/f-$i"
+    else ref="refs/doc-superpowers/inflight/h$((i % 5))/f-$i"; fi
+    msg="work $i
+
+Ledger-Claims: $key
+"
+    body="$(cat "$f")
+- in flight $i
+"
+    c=$((now - 600 - i))
+    if [ $((i % 10)) = 0 ]; then
+      printf 'commit %s\ncommitter Bench <bench@example.com> %d +0000\ndata %d\n%s\nfrom %s\nM 100644 inline %s\ndata %d\n%s\n' \
+        "$ref" "$c" "$(printf '%s' "$msg" | wc -c | tr -d ' ')" "$msg" "$mtime" "$f" \
+        "$(printf '%s' "$body" | wc -c | tr -d ' ')" "$body"
+      printf 'commit %s\ncommitter Bench <bench@example.com> %d +0000\ndata 11\nmerge main\nmerge %s\n\n' "$ref" "$((c + 1))" "$main"
+    else
+      printf 'commit %s\ncommitter Bench <bench@example.com> %d +0000\ndata %d\n%s\nfrom %s\nM 100644 inline %s\ndata %d\n%s\n' \
+        "$ref" "$c" "$(printf '%s' "$msg" | wc -c | tr -d ' ')" "$msg" "$main" "$f" \
+        "$(printf '%s' "$body" | wc -c | tr -d ' ')" "$body"
+    fi
+    if [ $((i % 5)) = 0 ]; then
+      printf 'commit %s\ncommitter Bench <bench@example.com> %d +0000\ndata 8\ncontract\nM 100644 inline src/f%d.txt\ndata 9\nin flight\n\n' \
+        "$ref" "$((c + 2))" "$((i % 50))"
+    fi
+  done < "$B_ROOT/ifl.keys" > "$B_ROOT/ifl.stream"
+  LC_ALL=C git fast-import --quiet < "$B_ROOT/ifl.stream" || b_die "git fast-import (in-flight branches) failed"
+  if ! jq -c '.inflight = {enabled: true, host_id: "bench"}' docs/ledger/config.json > "$B_ROOT/config.json" \
+      || ! cp "$B_ROOT/config.json" docs/ledger/config.json; then
+    b_die "cannot enable in-flight awareness"
+  fi
+}
+b_inflight
+b_verb "ls (in flight: 1000 branches, 300 unmerged)" ls
+b_verb "show $show_key (in flight)" show "$show_key"
+b_measure "in-flight overlay (cold) (ls, index warm)" "$B_COLD" 3 "$B_BASH" "$B_DT" ledger ls
+b_row "in-flight overlay (cold) (ls, index warm)" "$B_SEC" "-" "$B_MARK"
+"$B_BASH" "$B_DT" ledger inflight > "$B_OUT" 2> "$B_ERR" || b_die "ledger inflight failed: $(head -n 3 "$B_ERR")"
+"$B_BASH" "$B_DT" ledger ls --format json > "$B_ROOT/ifl.ls" 2> "$B_ERR" || b_die "ls --format json failed"
+echo "  (in flight: $(wc -l < "$B_OUT" | tr -d ' ') branches listed; $(jq -r '[.items[] | .derived.status] | group_by(.) | map(select(.[0] == "on branch") | "\(.[0]) \(length)") | join(", ")' "$B_ROOT/ifl.ls"))"
+git checkout -q -- docs/ledger/config.json
+git for-each-ref --format='delete %(refname)' 'refs/heads/m-*' 'refs/heads/f-*' refs/remotes/origin/ refs/doc-superpowers/ | git update-ref --stdin
 
 # The base ≠ HEAD: HEAD 20 commits ahead of the base (the base's events are
 # derived from HEAD's walk), then the base 20 commits ahead of HEAD (HEAD is

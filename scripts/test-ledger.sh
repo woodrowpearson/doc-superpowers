@@ -275,6 +275,7 @@ test_lg_config_merge() {
   assert_json_field "$out" '.inflight.ref_prefix' "refs/doc-superpowers/inflight" "inflight.ref_prefix default"
   assert_json_field "$out" '.inflight.max_age_days' "21" "inflight.max_age_days default"
   assert_json_field "$out" '.inflight.enabled' "false" "inflight.enabled default"
+  assert_json_field "$out" '.inflight.pull_refs' "" "inflight.pull_refs default (off, R4)"
   assert_json_field "$out" '.cache.remote_ttl_minutes' "10" "cache.remote_ttl_minutes default"
   assert_json_field "$out" '.severity_order | join(",")' "P0,P1,P2,P3" "severity_order default"
   assert_json_field "$out" '.items.globs | join(",")' "docs/issues/*.md" "items.globs default"
@@ -364,16 +365,16 @@ test_lg_stub_not_implemented() {
   echo "test: an enabled verb with no implementation yet exits 2 with one object"
   lg_fixture
   lg_enable
-  # "inflight" (Task 11) — show was the stub until Task 5 built it,
-  # related until Task 9.
-  lg inflight --format json
+  # "notices" (Task 12) — show was the stub until Task 5 built it,
+  # related until Task 9, inflight until Task 11.
+  lg notices --format json
   assert_eq "2" "$LG_RC" "stub exits 2"
   assert_eq "1" "$(json_count "$LG_OUT")" "exactly one object"
-  assert_json_field "$LG_OUT" '.verb' "ledger inflight" ".verb is 'ledger inflight'"
+  assert_json_field "$LG_OUT" '.verb' "ledger notices" ".verb is 'ledger notices'"
   assert_json_field "$LG_OUT" '.enabled' "true" ".enabled is true"
   assert_json_field "$LG_OUT" '.exit' "2" ".exit is 2"
   assert_json_field "$LG_OUT" '.error' "not implemented" ".error"
-  lg inflight
+  lg notices
   assert_eq "2" "$LG_RC" "text mode: exits 2"
   assert_eq "" "$LG_OUT" "text mode: nothing on stdout"
   assert_contains "$LG_ERR" "not implemented" "text mode: stderr says why"
@@ -4889,8 +4890,8 @@ Ledger-Ack: abc123 — fine"
   assert_eq "0" "$LG_RC" "rc 0"
   local h
   h=$(git rev-parse HEAD)
-  assert_eq "$(printf '%s\tclaims\tx-3\n%s\tcontract_change\tfield:a — cents now\n%s\tclaims_by_ref\t#45\n%s\tack\tabc123 — fine' "$h" "$h" "$h" "$h")" \
-    "$LG_OUT" "bullets and indents count; no ':', another trailer's suffix, no space after ':' and another case (M6) do not"
+  assert_eq "$(printf '%s\tclaims\tx-3\n%s\tcontract_change\tfield:a — cents now\n%s\tclaims_by_ref\t#45\n%s\tclaims_by_ref\t#46\n%s\tack\tabc123 — fine' "$h" "$h" "$h" "$h" "$h")" \
+    "$LG_OUT" "bullets and indents count; no ':', another trailer's suffix, no space after ':' and another case (M6) do not — but a closing keyword's ':' is optional (Fixes #46, R3)"
   teardown
 }
 
@@ -5102,6 +5103,30 @@ ledger-claims: x-4
   local h
   h=$(git rev-parse HEAD)
   assert_eq "$(printf '%s\tclaims_by_ref\t#7\n%s\tclaims\tx-5' "$h" "$h")" "$LG_OUT" "only the configured spelling counts"
+  teardown
+}
+
+test_lg_msg_claims_ref_no_colon() {
+  echo "test: claims_by_ref — a closing keyword at a line start, ':' optional, any case, then #<digits>; mid-sentence, owner/repo#N and no #N do not count (R3)"
+  lg_fixture
+  lg_enable
+  git commit -q --allow-empty -m "Fixes #12" -m "closes #13.
+* RESOLVES: #14, and more
+  - Fixes  #15
+this fixes #16
+Fixes o/r#17
+Fixes #18x
+Fixes:#19
+Fixes: the crash
+Fixesx #20
+Closes: abc-21
+Resolves #22"
+  lg_call _lg_msg_claims HEAD~1..HEAD
+  assert_eq "0" "$LG_RC" "rc 0"
+  local h
+  h=$(git rev-parse HEAD)
+  assert_eq "$(printf '%s\tclaims_by_ref\t#%s\n' "$h" 12 "$h" 13 "$h" 14 "$h" 15 "$h" 22)" "$LG_OUT" \
+    "Fixes #12 (the subject), closes #13., RESOLVES: #14, Fixes  #15, Resolves #22 — and nothing else"
   teardown
 }
 
@@ -6072,6 +6097,506 @@ test_lg_pr_matches_shown_status() {
   lg_pr_teardown
 }
 
+# --- Task 11: in-flight scan, branch facts, inflight --------------------------------
+
+LG_IFL_CFG='{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta"}}'
+
+# lg_ifl_fixture [config]: the in-flight corpus — a bare remote (LG_REMOTE),
+# this clone ("hosta": inflight.host_id), base origin/main, the relations
+# registry (contracts field:order.total in src/order/*.js, endpoint:create
+# in server/create.js, component:Sheet in src/sheet/**). Open items: app-1
+# a.md, app-2 b.md, app-3 c.md, core-1 d.md, core-2 e.md, app-4 f.md, app-5
+# g.md; a plan docs/plans/p.md (doc-index doc_type plan) naming none.
+# In flight:
+#   feat-a    local: "Ledger-Claims: app-1", then an edit of b.md (app-2);
+#             its own in-flight copy refs/doc-superpowers/inflight/hosta/
+#             feat-a on the remote, one commit behind (LG_A_TIP: the tip)
+#   feat-wt   the worktree "wt 1" (LG_WT1): the plan names core-2, and
+#             "Contract-Change: endpoint:create — adds a field"
+#   detached  the worktree "wt 2" (LG_WT2) at an unmerged commit claiming
+#             app-4
+#   r-only    pushed from another clone (LG_B), fetched: a remote branch
+#             without a PR, claiming app-3
+#   feat-a    of host "hostb" (LG_B; its in-flight ref only), claiming core-1
+#   doc-ledger-views  local and remote, claiming app-5 — the views branch
+lg_ifl_fixture() {
+  local c="$LG_IFL_CFG"
+  if [ $# -gt 0 ]; then c=$1; fi
+  lg_fixture
+  lg_enable "$c"
+  lg_registry "$LG_REG_REL"
+  lg_item docs/issues/a.md "key: app-1" "ledger: app" "status: Open" "severity: P1" "summary: Claimed on feat-a"
+  lg_item docs/issues/b.md "key: app-2" "ledger: app" "status: Open" "severity: P2" "summary: Edited on feat-a"
+  lg_item docs/issues/c.md "key: app-3" "ledger: app" "status: Open" "severity: P2" "summary: Claimed on a remote-only branch"
+  lg_item docs/issues/d.md "key: core-1" "ledger: core" "status: Open" "severity: P1" "summary: Claimed on another host"
+  lg_item docs/issues/e.md "key: core-2" "ledger: core" "status: Open" "severity: P2" "summary: Named by a plan on a worktree branch"
+  lg_item docs/issues/f.md "key: app-4" "ledger: app" "status: Open" "severity: P3" "summary: Claimed on a detached worktree"
+  lg_item docs/issues/g.md "key: app-5" "ledger: app" "status: Open" "severity: P3" "summary: Claimed by nothing in flight"
+  mkdir -p docs/plans src/order server
+  printf '# Plan\n\nNothing yet.\n' > docs/plans/p.md
+  lg_doc_index '{"docs":{"docs/plans/p.md":{"doc_type":"plan"}}}'
+  echo total > src/order/total.js
+  echo create > server/create.js
+  git add -A && git commit -qm items
+  LG_REMOTE=$(harness_mktemp_d remote).git
+  git init -q --bare "$LG_REMOTE"
+  git --git-dir="$LG_REMOTE" symbolic-ref HEAD refs/heads/main
+  git remote add origin "$LG_REMOTE"
+  git push -q origin main
+  git fetch -q origin
+  git checkout -q -b feat-a
+  git commit -q --allow-empty -m "start a" -m "Ledger-Claims: app-1"
+  git push -q origin "HEAD:refs/doc-superpowers/inflight/hosta/feat-a"
+  printf '\nedited on feat-a\n' >> docs/issues/b.md
+  git add -A && git commit -qm "touch app-2"
+  LG_A_TIP=$(git rev-parse HEAD)
+  git checkout -q main
+  LG_WT=$(harness_mktemp_d lg-wt)
+  LG_WT1="$LG_WT/wt 1"
+  LG_WT2="$LG_WT/wt 2"
+  git worktree add -q -b feat-wt "$LG_WT1" main
+  ( cd "$LG_WT1" && printf '# Plan\n\nCovers core-2.\n' > docs/plans/p.md && git add -A \
+    && git commit -q -m "plan core-2" -m "Contract-Change: endpoint:create — adds a field" )
+  git worktree add -q --detach "$LG_WT2" main
+  ( cd "$LG_WT2" && git commit -q --allow-empty -m "detached work" -m "Ledger-Claims: app-4" )
+  git checkout -q -b doc-ledger-views
+  git commit -q --allow-empty -m "views" -m "Ledger-Claims: app-5"
+  git push -q origin doc-ledger-views
+  git checkout -q main
+  LG_B="$(harness_mktemp_d lg-b)/clone"
+  lg_clone "$LG_B"
+  ( cd "$LG_B" && git checkout -q -b r-only && git commit -q --allow-empty -m "remote only" -m "Ledger-Claims: app-3" \
+    && git push -q origin r-only \
+    && git checkout -q -b feat-a origin/main && git commit -q --allow-empty -m "b's own feat-a" -m "Ledger-Claims: core-1" \
+    && git push -q origin "HEAD:refs/doc-superpowers/inflight/hostb/feat-a" )
+  git fetch -q origin
+}
+
+lg_ifl_teardown() {
+  rm -rf "$LG_WT" "$(dirname "$LG_B")"
+  teardown
+}
+
+# lg_sha8 <text>: the first 8 hex digits of sha256(<text>).
+lg_sha8() {
+  local h
+  if command -v sha256sum >/dev/null 2>&1; then h=$(printf '%s' "$1" | sha256sum); else h=$(printf '%s' "$1" | shasum -a 256); fi
+  printf '%s' "${h:0:8}"
+}
+
+# lg_ifl_detached <worktree-dir>: the in-flight name of a detached worktree
+# — "(detached:<sha8 of its path, as git lists it>)".
+lg_ifl_detached() {
+  local p
+  p=$(git worktree list --porcelain | sed -n 's/^worktree //p' | awk -v s="/$(basename "$1")" 'substr($0, length($0) - length(s) + 1) == s { print; exit }')
+  printf '(detached:%s)' "$(lg_sha8 "$p")"
+}
+
+# lg_ifl_status <key>: the item's display status from `ls --format json` in LG_OUT.
+lg_ifl_status() {
+  jq -r --arg k "$1" '.items[] | select(.key == $k) | .display' <<<"$LG_OUT"
+}
+
+test_lg_inflight_sources() {
+  echo "test: ledger inflight — local branches, worktrees, remote branches without a PR and other hosts' in-flight refs, one line each"
+  lg_ifl_fixture
+  local d
+  d=$(lg_ifl_detached "$LG_WT2")
+  lg inflight
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "$d worktree no PR claims:app-4 contracts:— files:0
+feat-a local,inflight no PR claims:app-1,app-2 contracts:— files:1
+feat-a inflight@hostb no PR claims:core-1 contracts:— files:0
+feat-wt local,worktree no PR claims:core-2 contracts:endpoint:create files:1
+r-only remote no PR claims:app-3 contracts:— files:0" "$LG_OUT" \
+    "detached worktree, local (+ own in-flight copy), other host, worktree branch, remote-only branch — by name, then host"
+  lg inflight --format json
+  assert_json_field "$LG_OUT" '[.verb, .exit, .host_id] | join(",")' "ledger inflight,0,hosta" "json: verb, exit, host_id"
+  assert_json_field "$LG_OUT" '[.branches[] | .branch] | join(",")' "$d,feat-a,feat-a@hostb,feat-wt,r-only" "json: the branches"
+  assert_json_field "$LG_OUT" '.branches[] | select(.branch == "feat-a") | [.oid, (.sources | join(",")), .own] | join(" ")' \
+    "$LG_A_TIP local,inflight true" "feat-a: own copies merged, the newest oid (the local tip)"
+  assert_json_field "$LG_OUT" '.branches[] | select(.branch == "feat-a@hostb") | [.host, .name, .own] | join(" ")' \
+    "hostb feat-a false" "feat-a@hostb: another host's"
+  assert_json_field "$LG_OUT" '.branches[] | select(.branch == "feat-a") | .files | join(",")' "docs/issues/b.md" "json: the files"
+  assert_json_field "$LG_OUT" '.branches[] | select(.branch == "r-only") | .merge_base' "$(git rev-parse origin/main)" "json: the merge base"
+  assert_json_field "$LG_OUT" '.pr_data.state' "unconfigured" "json: pr_data (R5)"
+  assert_json_field "$LG_OUT" '.inflight_data.state' "fresh" "json: the in-flight refs' fetch state"
+  lg inflight --branch feat-wt
+  assert_eq "feat-wt local,worktree no PR claims:core-2 contracts:endpoint:create files:1" "$LG_OUT" "--branch: that branch"
+  lg inflight --branch feat-a@hostb
+  assert_eq "feat-a inflight@hostb no PR claims:core-1 contracts:— files:0" "$LG_OUT" "--branch <name>@<host>"
+  lg inflight --branch nope
+  assert_eq "1" "$LG_RC" "--branch unknown: exit 1"
+  assert_contains "$LG_OUT" "no in-flight branch 'nope'" "…saying so"
+  lg inflight extra
+  assert_eq "3" "$LG_RC" "an argument: exit 3"
+  # A stale branch (tip older than max_age_days) is not in flight — unless
+  # it is the current branch.
+  git checkout -q -b stale main
+  GIT_COMMITTER_DATE="2020-01-01T12:00:00" git commit -q --allow-empty -m "old" -m "Ledger-Claims: app-5"
+  git checkout -q main
+  lg inflight
+  assert_not_contains "$LG_OUT" "stale" "a stale branch is not listed"
+  git checkout -q stale
+  lg inflight
+  assert_contains "$LG_OUT" "stale local,worktree no PR claims:app-5" "…unless it is the current branch (checked out here: a worktree too)"
+  git checkout -q main
+  lg_ifl_teardown
+}
+
+test_lg_inflight_excludes_views_branch() {
+  echo "test: the views branch, the base's own branch and HEAD are never in flight"
+  lg_ifl_fixture
+  # Unmerged commits under the excluded names, on another host too.
+  git push -q origin "$LG_A_TIP:refs/doc-superpowers/inflight/hostb/main" \
+    "$LG_A_TIP:refs/doc-superpowers/inflight/hostb/HEAD" "$LG_A_TIP:refs/doc-superpowers/inflight/hostb/doc-ledger-views"
+  git remote set-head origin main
+  lg inflight --fetch
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_not_contains "$LG_OUT" "doc-ledger-views" "views.branch: neither the local, the remote nor another host's copy"
+  assert_eq "" "$(printf '%s\n' "$LG_OUT" | awk '$1 == "main" || $1 == "HEAD"')" "nor main (the base's branch) nor origin/HEAD"
+  lg ls --format json
+  assert_eq "not started" "$(lg_ifl_status app-5)" "app-5: claimed only on the views branch"
+  lg_enable '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta"},"views":{"branch":"pages"}}'
+  lg inflight
+  assert_contains "$LG_OUT" "doc-ledger-views local,remote no PR claims:app-5" "another views.branch: listed"
+  lg_ifl_teardown
+}
+
+test_lg_inflight_dedup_host_name() {
+  echo "test: one line per (host, name) — this host's local, remote and in-flight copies merge (newest oid); other hosts' stay apart"
+  lg_ifl_fixture
+  git push -q origin feat-a
+  git fetch -q origin
+  lg inflight
+  assert_eq "feat-a local,remote,inflight no PR claims:app-1,app-2 contracts:— files:1" "$(lg_line "$LG_OUT" "feat-a local")" \
+    "local, remote and own in-flight: one line"
+  assert_eq "feat-a inflight@hostb no PR claims:core-1 contracts:— files:0" "$(lg_line "$LG_OUT" "feat-a inflight@hostb")" \
+    "hostb's feat-a: its own line"
+  assert_eq "2" "$(printf '%s\n' "$LG_OUT" | grep -c '^feat-a ')" "two feat-a lines"
+  # This host's in-flight copy is newer than the local branch: it wins.
+  local newer
+  newer=$(GIT_COMMITTER_DATE="$(($(date +%s) + 3600)) +0000" git commit-tree -p "$LG_A_TIP" -m "newer" -m "Ledger-Claims: app-5" "$LG_A_TIP^{tree}")
+  git push -q origin "$newer:refs/doc-superpowers/inflight/hosta/feat-a"
+  lg inflight --fetch --format json
+  assert_json_field "$LG_OUT" '.branches[] | select(.branch == "feat-a") | .oid' "$newer" "the newest copy's oid wins"
+  assert_json_field "$LG_OUT" '.branches[] | select(.branch == "feat-a") | .claims | join(",")' "app-1,app-2,app-5" "…and its claims"
+  lg_ifl_teardown
+}
+
+test_lg_inflight_detached_worktree() {
+  echo "test: a detached worktree is (detached:<path hash>) — never its path; at a merged commit it is not in flight"
+  lg_ifl_fixture
+  local d
+  d=$(lg_ifl_detached "$LG_WT2")
+  lg inflight --format json
+  assert_json_field "$LG_OUT" ".branches[] | select(.branch == \"$d\") | [(.sources | join(\",\")), (.claims | join(\",\")), .oid] | join(\" \")" \
+    "worktree app-4 $(git -C "$LG_WT2" rev-parse HEAD)" "the detached worktree: its HEAD's claims"
+  assert_not_contains "$LG_OUT" "wt 2" "the path never appears"
+  lg show app-4
+  assert_contains "$(lg_line "$LG_OUT" "app-4")" "on branch $d" "show: on branch (detached:…)"
+  ( cd "$LG_WT2" && git checkout -q --detach origin/main )
+  lg inflight
+  assert_not_contains "$LG_OUT" "(detached:" "a detached worktree at a merged commit: not in flight"
+  lg_ifl_teardown
+}
+
+test_lg_inflight_prune_on_fetch() {
+  echo "test: --fetch prunes in-flight refs the remote no longer has; without it the TTL holds"
+  lg_ifl_fixture
+  lg inflight
+  assert_contains "$LG_OUT" "inflight@hostb" "hostb's branch, fetched (no copy yet: the TTL had expired)"
+  ( cd "$LG_B" && git push -q origin ":refs/doc-superpowers/inflight/hostb/feat-a" )
+  lg inflight
+  assert_contains "$LG_OUT" "inflight@hostb" "deleted on the remote, within the TTL: still here"
+  lg inflight --fetch
+  assert_eq "0" "$LG_RC" "--fetch: exit 0"
+  assert_not_contains "$LG_OUT" "inflight@hostb" "--fetch: pruned"
+  assert_eq "" "$(git for-each-ref refs/doc-superpowers/inflight/hostb/)" "…the local ref too"
+  lg_ifl_teardown
+}
+
+test_lg_inflight_unicode_branch() {
+  echo "test: unicode and dash-led branch names travel whole (feat/ü-x, feat/-dash)"
+  lg_ifl_fixture
+  git checkout -q -b "feat/ü-x" main
+  git commit -q --allow-empty -m "u" -m "Ledger-Claims: app-5"
+  git checkout -q main
+  ( cd "$LG_B" && git checkout -q -b "feat/-dash" origin/main && git commit -q --allow-empty -m "d" -m "Ledger-Claims: app-5" \
+    && git push -q origin "feat/-dash" && git push -q origin "HEAD:refs/doc-superpowers/inflight/hostb/-lead/ü" )
+  git fetch -q origin
+  lg inflight --fetch
+  assert_contains "$LG_OUT" "feat/ü-x local no PR claims:app-5" "feat/ü-x"
+  assert_contains "$LG_OUT" "feat/-dash remote no PR claims:app-5" "feat/-dash"
+  assert_contains "$LG_OUT" "-lead/ü inflight@hostb no PR claims:app-5" "another host's -lead/ü"
+  lg inflight --branch=feat/-dash
+  assert_eq "feat/-dash remote no PR claims:app-5 contracts:— files:0" "$LG_OUT" "--branch=feat/-dash"
+  lg inflight --branch "feat/ü-x" --format json
+  assert_json_field "$LG_OUT" '.branches | map(.name) | join(",")' "feat/ü-x" "--branch feat/ü-x (json)"
+  lg ls --format json
+  assert_eq "on branch -lead/ü@hostb" "$(lg_ifl_status app-5)" "app-5: the first claiming branch by name"
+  lg_ifl_teardown
+}
+
+test_lg_host_id_anonymous() {
+  echo "test: the host id — inflight.host_id, else git config doc-superpowers.ledger.host, else 8 hex of sha256(hostname); the hostname never appears"
+  lg_ifl_fixture '{"base":"origin/main","inflight":{"enabled":true}}'
+  local hn hid c
+  hn=$(hostname 2>/dev/null || uname -n)
+  hid=$(lg_sha8 "$hn")
+  lg_call _lg_host_id
+  assert_eq "0|$hid" "$LG_RC|$LG_OUT" "no setting: the hostname's hash"
+  git config doc-superpowers.ledger.host from-git
+  lg_call _lg_host_id
+  assert_eq "from-git" "$LG_OUT" "git config doc-superpowers.ledger.host"
+  lg_enable '{"base":"origin/main","inflight":{"enabled":true,"host_id":"from-config"}}'
+  lg_call _lg_host_id
+  assert_eq "from-config" "$LG_OUT" "inflight.host_id wins"
+  lg_enable '{"base":"origin/main","inflight":{"enabled":true,"host_id":"a/b"}}'
+  lg inflight
+  assert_eq "2" "$LG_RC" "a host id that is no ref segment: exit 2"
+  assert_contains "$LG_ERR$LG_OUT" "inflight.host_id" "…naming the key"
+  git config --unset doc-superpowers.ledger.host
+  lg_enable '{"base":"origin/main","inflight":{"enabled":true}}'
+  # This host's in-flight copy, under the hash, merges with the local branch.
+  git push -q origin "feat-a~1:refs/doc-superpowers/inflight/$hid/feat-a"
+  lg inflight --fetch --format json
+  assert_json_field "$LG_OUT" '.host_id' "$hid" "json: host_id"
+  assert_json_field "$LG_OUT" '.branches[] | select(.name == "feat-a" and .own) | .sources | join(",")' "local,inflight" \
+    "the hash's in-flight copy is this host's"
+  local all
+  all="$LG_OUT$LG_ERR"
+  lg inflight
+  all="$all$LG_OUT$LG_ERR"
+  lg ls
+  all="$all$LG_OUT$LG_ERR"
+  c="$(git rev-parse --git-common-dir)/doc-superpowers"
+  if [ "${#hn}" -ge 3 ]; then
+    assert_not_contains "$(git for-each-ref --format='%(refname)'; git --git-dir="$LG_REMOTE" for-each-ref --format='%(refname)')" "$hn" \
+      "no ref names the hostname (here or on the remote)"
+    assert_not_contains "$(cd "$c" && find . -print)" "$hn" "no cache file names it"
+    assert_not_contains "$all" "$hn" "no output names it"
+  else
+    _pass "hostname '$hn' too short to search for"
+  fi
+  lg_ifl_teardown
+}
+
+test_lg_branch_facts_claims_and_contracts() {
+  echo "test: _lg_branch_facts — claims (trailers, paths, item files, plans), contract changes (defined_in, Contract-Change), acks over merge-base..tip: merged feature work counts, merged trunk never (R2)"
+  lg_ifl_fixture '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta"},"trailers":{"claims_by_path":["Ledger-Claims-Path"]}}'
+  git checkout -q -b facts main
+  git commit -q --allow-empty -m "work" -m "Ledger-Claims: APP-1, nope-9
+Ledger-Claims-Path: ./docs/issues/c.md
+Contract-Change: endpoint:create — renames a param
+Ledger-Ack: 0123456789ab — seen it
+Fixes #12"
+  echo changed >> src/order/total.js
+  git add -A && git commit -qm "touch the total"
+  printf '# Q\n\nCovers core-2.\n' > docs/plans/q.md
+  git add -A && git commit -qm "a new plan"
+  git checkout -q -b feature main
+  git commit -q --allow-empty -m "feature work" -m "Ledger-Claims: app-4"
+  git checkout -q facts
+  git merge -q --no-ff feature -m "merge feature"
+  LG_FACTS1=$(git rev-parse HEAD)
+  # The trunk moves (claims app-5, adds a component:Sheet file) and is merged in.
+  git checkout -q main
+  mkdir -p src/sheet
+  echo s > src/sheet/a.js
+  git add -A && git commit -q -m "trunk work" -m "Ledger-Claims: app-5"
+  git push -q origin main
+  git fetch -q origin
+  git checkout -q facts
+  git merge -q --no-ff origin/main -m "merge trunk"
+  git checkout -q main
+  lg_call _lg_branch_facts "$(git rev-parse facts)"
+  assert_eq "0" "$LG_RC" "rc 0"
+  assert_json_field "$LG_OUT" '.merge_base' "$(git rev-parse origin/main)" "merge_base: the trunk merged in"
+  assert_json_field "$LG_OUT" '.files | join(",")' "docs/plans/q.md,src/order/total.js" "files: the net diff from the merge base"
+  assert_json_field "$LG_OUT" '.claims | join(",")' "app-1,app-3,app-4,core-2" \
+    "claims: a trailer (any case), a path trailer, the merged feature's trailer, a plan's key — never the trunk's app-5, never an unknown key"
+  assert_json_field "$LG_OUT" '.contract_changes | map("\(.id)=\(.line)") | join(",")' "endpoint:create=renames a param,field:order.total=null" \
+    "contract changes: Contract-Change and defined_in — never the trunk's component:Sheet"
+  assert_json_field "$LG_OUT" '.acks | join(",")' "0123456789ab" "acks"
+  assert_json_field "$LG_OUT" '.refs | join(",")' "#12" "issue refs no adapter maps"
+  # Before the trunk merge (one merge base: the fork point).
+  lg_call _lg_branch_facts "$LG_FACTS1"
+  assert_json_field "$LG_OUT" '[.merge_base, (.claims | join(","))] | join(" ")' \
+    "$(git merge-base origin/main "$LG_FACTS1") app-1,app-3,app-4,core-2" "the fork point; the same claims"
+  # The verb: the unresolved ref counted in the one stderr note.
+  lg inflight --branch facts
+  assert_eq "facts local no PR claims:app-1,app-3,app-4,core-2 contracts:endpoint:create,field:order.total files:2" "$LG_OUT" "inflight --branch facts"
+  assert_eq "1" "$(printf '%s\n' "$LG_ERR" | grep -c '^ledger:')" "one ledger: note"
+  assert_contains "$LG_ERR" "1 issue reference not resolved (#12)" "…counting the unresolved ref"
+  lg_ifl_teardown
+}
+
+test_lg_branch_facts_criss_cross() {
+  echo "test: _lg_branch_facts on a criss-cross (git names two merge bases) — the first, and its own range's trailers"
+  lg_ifl_fixture
+  git checkout -q -b cc main
+  git commit -q --allow-empty -m "branch side" -m "Ledger-Claims: app-3"
+  local b
+  b=$(git rev-parse HEAD)
+  git checkout -q main
+  git commit -q --allow-empty -m "trunk side" -m "Ledger-Claims: app-5"
+  local a
+  a=$(git rev-parse HEAD)
+  git merge -q --no-ff cc -m "trunk merges the branch"
+  git push -q origin main
+  git fetch -q origin
+  git checkout -q cc
+  git merge -q --no-ff "$a" -m "the branch merges the trunk side" -m "Ledger-Claims: core-2"
+  git checkout -q main
+  assert_eq "2" "$(git merge-base --all origin/main cc | wc -l | tr -d ' ')" "fixture: two merge bases"
+  lg_call _lg_branch_facts cc
+  assert_eq "0" "$LG_RC" "rc 0"
+  local mb want
+  mb=$(git merge-base origin/main cc)
+  if [ "$mb" = "$a" ]; then want="app-3,core-2"; else want="app-5,core-2"; fi
+  assert_json_field "$LG_OUT" '[.merge_base, (.claims | join(","))] | join(" ")' "$mb $want" \
+    "git's first merge base; the trailers of merge-base..tip"
+  lg_ifl_teardown
+}
+
+test_lg_show_inflight_claims() {
+  echo "test: show lists the in-flight claims; the derived status is on branch <b> (no PR)"
+  lg_ifl_fixture
+  lg show app-1
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_contains "$(lg_line "$LG_OUT" "app-1")" "on branch feat-a" "the status: on branch feat-a"
+  assert_contains "$LG_OUT" "in flight: feat-a (local,inflight, no PR)" "the in-flight line"
+  lg show core-1
+  assert_contains "$(lg_line "$LG_OUT" "core-1")" "on branch feat-a@hostb" "another host's branch: <name>@<host>"
+  assert_contains "$LG_OUT" "in flight: feat-a@hostb (inflight@hostb, no PR)" "…and its line"
+  lg show core-1 --format json
+  assert_json_field "$LG_OUT" '.item.inflight | map("\(.branch) \(.host) \(.sources | join(","))") | join(";")' "feat-a@hostb hostb inflight" \
+    "json: .item.inflight"
+  assert_json_field "$LG_OUT" '.item.derived | "\(.status) \(.detail)"' "on branch feat-a@hostb" "json: derived"
+  lg ls --format json
+  assert_eq "on branch feat-a|on branch r-only|on branch feat-wt|not started" \
+    "$(lg_ifl_status app-2)|$(lg_ifl_status app-3)|$(lg_ifl_status core-2)|$(lg_ifl_status app-5)" "ls: edited file, remote branch, plan; app-5 untouched"
+  lg ls --status "on branch"
+  assert_eq "app-1 app-2 app-3 app-4 core-1 core-2" "$(printf '%s\n' "$LG_OUT" | awk '{ print $1 }' | sort | tr '\n' ' ' | sed 's/ $//')" \
+    "ls --status 'on branch'"
+  lg_ifl_teardown
+}
+
+test_lg_view_publish_inflight() {
+  echo "test: view and publish render the in-flight overlay — the header's branch count, each ledger's in-flight branches"
+  lg_ifl_fixture
+  lg view app --out "$TEST_DIR/v"
+  assert_eq "0" "$LG_RC" "view: exit 0"
+  assert_contains "$(cat "$TEST_DIR/v/app.md")" "+ 5 in-flight branches at" "view: the header counts the branches in flight"
+  assert_contains "$(cat "$TEST_DIR/v/app.md")" "In flight: 3 branches" "view: app's items are claimed on 3 branches"
+  lg publish --format json
+  assert_eq "0" "$LG_RC" "publish: exit 0"
+  assert_json_field "$LG_OUT" '.message | test("^views @ origin/main@[0-9a-f]+, 5 in-flight branches, ")' "true" "publish: the message counts them"
+  lg_ifl_teardown
+}
+
+test_lg_inflight_tip_move_keeps_index() {
+  echo "test: a branch tip that moves never rebuilds the item index — only the in-flight overlay (R1)"
+  lg_ifl_fixture
+  lg ls
+  DOC_TOOLS_LEDGER_TRACE=1 lg ls
+  assert_contains "$LG_ERR" "index-hit" "warm: an index hit"
+  assert_contains "$LG_ERR" "inflight-hit" "…and an overlay hit"
+  ( cd "$LG_WT1" && git commit -q --allow-empty -m "more" -m "Ledger-Claims: app-5" )
+  DOC_TOOLS_LEDGER_TRACE=1 lg ls --format json
+  assert_contains "$LG_ERR" "index-hit" "the tip moved: still an index hit"
+  assert_contains "$LG_ERR" "inflight-build" "…the overlay rebuilt"
+  assert_contains "$LG_ERR" "inflight-facts 1 cold" "…from one branch's new facts"
+  assert_eq "on branch feat-wt" "$(lg_ifl_status app-5)" "app-5: claimed by the moved tip"
+  # The base moves: every merge base is looked up again, no facts recomputed.
+  git commit -q --allow-empty -m "trunk moves"
+  git push -q origin main
+  git fetch -q origin
+  DOC_TOOLS_LEDGER_TRACE=1 lg ls --format json
+  assert_contains "$LG_ERR" "inflight-facts 0 cold" "the base moved: the branches' facts reused"
+  assert_eq "on branch feat-wt" "$(lg_ifl_status app-5)" "…the same claims"
+  lg_ifl_teardown
+}
+
+test_lg_inflight_disabled_zero_cost() {
+  echo "test: inflight.enabled false — nothing scanned, nothing fetched, statuses untouched"
+  lg_ifl_fixture '{"base":"origin/main"}'
+  local tr
+  tr=$(harness_mktemp lg-gtrace)
+  GIT_TRACE="$tr" DOC_TOOLS_LEDGER_TRACE=1 lg ls --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "not started" "$(lg_ifl_status app-1)" "app-1: not started"
+  assert_not_contains "$LG_ERR" "inflight-" "no in-flight trace"
+  assert_eq "" "$(grep -E 'for-each-ref|worktree list|fetch|merge-base|diff-tree' "$tr" || true)" \
+    "git ran no scan, fetch, merge-base or diff"
+  assert_eq "" "$(git for-each-ref refs/doc-superpowers/)" "no in-flight ref fetched"
+  lg inflight
+  assert_eq "0|in-flight awareness is off (config inflight.enabled)" "$LG_RC|$LG_OUT" "inflight: off, exit 0"
+  lg inflight --format json
+  assert_json_field "$LG_OUT" '[.exit, .inflight_enabled, (.branches | length)] | map(tostring) | join(",")' "0,false,0" "json: off"
+  rm -f "$tr"
+  lg_ifl_teardown
+}
+
+test_lg_inflight_fetch_offline() {
+  echo "test: DOC_TOOLS_LEDGER_OFFLINE=1 — --fetch exits 2 (offline); scans use what is here; --push does nothing (R7)"
+  lg_ifl_fixture
+  local tr
+  tr=$(harness_mktemp lg-gtrace)
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg inflight --fetch
+  assert_eq "2" "$LG_RC" "--fetch offline: exit 2"
+  assert_contains "$LG_OUT$LG_ERR" "offline" "…saying offline"
+  GIT_TRACE="$tr" DOC_TOOLS_LEDGER_OFFLINE=1 lg inflight
+  assert_eq "0" "$LG_RC" "offline scan: exit 0"
+  assert_not_contains "$LG_OUT" "@hostb" "nothing fetched: no other host's branch"
+  assert_eq "" "$(grep -E ' fetch ' "$tr" || true)" "no git fetch"
+  local before
+  before=$(git --git-dir="$LG_REMOTE" for-each-ref)
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg inflight --push
+  assert_eq "0" "$LG_RC" "--push offline: exit 0"
+  assert_contains "$LG_ERR" "offline" "…a warning"
+  assert_eq "$before" "$(git --git-dir="$LG_REMOTE" for-each-ref)" "…nothing pushed"
+  lg inflight
+  assert_contains "$LG_OUT" "@hostb" "online: fetched (TTL expired, no copy)"
+  rm -f "$tr"
+  lg_ifl_teardown
+}
+
+test_lg_inflight_pull_refs() {
+  echo "test: inflight.pull_refs — PR heads (a fork's too) fetched into refs/doc-superpowers/pull/*; an in-flight branch shows its PR (R4)"
+  lg_fake_gh
+  local cfg='{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta","pull_refs":"refs/pull/*/head"},"adapters":{"pr":"doc-superpowers:ledger-pr-gh"}}'
+  lg_ifl_fixture "$cfg"
+  local fork
+  fork=$(git commit-tree -p main -m "fork work" -m "Ledger-Claims: app-5" "main^{tree}")
+  git push -q origin "$fork:refs/pull/7/head"
+  git push -q origin feat-a
+  git fetch -q origin
+  cat > "$LG_GH/prs.json" <<JSON
+[{"number":21,"headRefName":"feat-a","state":"OPEN","url":"https://github.com/o/r/pull/21","mergeCommit":null},
+ {"number":7,"headRefName":"feature","headRefOid":"$fork","state":"OPEN","url":"https://github.com/o/r/pull/7","mergeCommit":null,"isCrossRepository":true}]
+JSON
+  lg ls --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "in review #7" "$(lg_ifl_status app-5)" "app-5: the fork's PR #7, its head through refs/doc-superpowers/pull/7"
+  assert_eq "$fork" "$(git rev-parse -q --verify refs/doc-superpowers/pull/7)" "the pull ref was fetched"
+  assert_not_contains "$LG_ERR" "cross-repository" "no 'not compared' note"
+  assert_eq "in review #21" "$(lg_ifl_status app-1)" "app-1: in review #21"
+  lg inflight
+  assert_contains "$LG_OUT" "feat-a local,remote,inflight PR #21 claims:app-1,app-2" "the in-flight line names the PR"
+  lg inflight --format json
+  assert_json_field "$LG_OUT" '.pr_data.state' "fresh" "json: pr_data"
+  assert_json_field "$LG_OUT" '.branches[] | select(.branch == "feat-a") | .pr | "\(.number) \(.state)"' "21 open" "json: the branch's PR"
+  # Without pull_refs: the fork is not compared.
+  lg_enable '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta"},"adapters":{"pr":"doc-superpowers:ledger-pr-gh"}}'
+  lg ls --format json
+  assert_eq "not started" "$(lg_ifl_status app-5)" "no pull_refs: app-5 not started"
+  assert_contains "$LG_ERR" "1 cross-repository open PR not compared (#7)" "…the fork counted"
+  lg_fake_gh_off
+  lg_ifl_teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -6268,6 +6793,7 @@ run_tests() {
   test_lg_relates_edges_sorted_unique
   test_lg_recheck_verb_relates_kinds
   test_lg_msg_claims_case_sensitive
+  test_lg_msg_claims_ref_no_colon
   test_lg_index_valid_needs_tail
   test_lg_recheck_base_not_head
 
@@ -6296,6 +6822,23 @@ run_tests() {
   # --- Task 10 review carry-over (Task 11) ---
   test_lg_check_then_read_silent
   test_lg_pr_matches_shown_status
+
+  # --- Task 11: in-flight scan, branch facts, inflight ---
+  test_lg_inflight_sources
+  test_lg_inflight_excludes_views_branch
+  test_lg_inflight_dedup_host_name
+  test_lg_inflight_detached_worktree
+  test_lg_inflight_prune_on_fetch
+  test_lg_inflight_unicode_branch
+  test_lg_host_id_anonymous
+  test_lg_branch_facts_claims_and_contracts
+  test_lg_branch_facts_criss_cross
+  test_lg_show_inflight_claims
+  test_lg_view_publish_inflight
+  test_lg_inflight_tip_move_keeps_index
+  test_lg_inflight_disabled_zero_cost
+  test_lg_inflight_fetch_offline
+  test_lg_inflight_pull_refs
 
   print_summary
 }

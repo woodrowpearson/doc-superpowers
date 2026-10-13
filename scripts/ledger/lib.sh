@@ -36,6 +36,8 @@ _LG_CACHE=""         # $(git rev-parse --git-common-dir)/doc-superpowers/ledger
 . "$_LG_LIB/adapters.sh"
 # shellcheck source=scripts/ledger/relations.sh
 . "$_LG_LIB/relations.sh"
+# shellcheck source=scripts/ledger/inflight.sh
+. "$_LG_LIB/inflight.sh"
 
 # _lg_die <message>: the run could not run — exit 2, with the verdict object
 # in --format json (exactly once, inside $(…) too: the marker file tells the
@@ -232,8 +234,8 @@ _lg_stub() {
   _lg_die "not implemented"
 }
 # show, ls, find, link: query.sh. new, assign, finalize: keys.sh. view,
-# publish: views.sh. related, sweep, recheck: relations.sh.
-cmd_ledger_inflight() { _lg_stub "$@"; }
+# publish: views.sh. related, sweep, recheck: relations.sh. inflight:
+# inflight.sh.
 cmd_ledger_notices() { _lg_stub "$@"; }
 cmd_ledger_note() { _lg_stub "$@"; }
 cmd_ledger_init() { _lg_stub "$@"; }

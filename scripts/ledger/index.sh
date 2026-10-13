@@ -1233,31 +1233,43 @@ _lg_ix_refs() {
 # pr_data.state offline), none is the "—" path; --refresh and publish
 # exit 2.
 
-# _lg_ix_pr_note <text>: the run's one PR note on stderr ("ledger: …"),
-# printed once per run however many indexes it builds.
+# _lg_ix_pr_note <text>: the run's one note on stderr ("ledger: …"), printed
+# once per run however many indexes it builds: <text> (the PR data's), then
+# the in-flight scan's ($_SCRATCH/lg-ifl.note, inflight.sh _lg_ifl_note —
+# written before the index is built), "; " between.
 _lg_ix_pr_note() {
-  [ -n "$1" ] || return 0
+  local x=""
   [ ! -f "$_SCRATCH/lg-pr.noted" ] || return 0
+  # Held while the in-flight scan runs beside the build (inflight.sh
+  # _lg_ifl_prepare_bg): its wait prints both.
+  if [ -n "${_LG_NOTE_DEFER:-}" ]; then
+    printf '%s\n' "$1" > "$_SCRATCH/lg-pr.held" || _lg_die "cannot hold the PR note"
+    return 0
+  fi
+  if [ -s "$_SCRATCH/lg-ifl.note" ]; then { IFS= read -r x < "$_SCRATCH/lg-ifl.note"; } 2>/dev/null || true; fi
+  [ -n "$1$x" ] || return 0
   : > "$_SCRATCH/lg-pr.noted"
-  printf 'ledger: %s\n' "$1" | tr -d '\000-\010\013-\037' >&2
+  printf 'ledger: %s\n' "$1${1:+${x:+; }}$x" | tr -d '\000-\010\013-\037' >&2
 }
 
 # _lg_ix_pr_lines <pr-lines> <out>: "o\t<n>\t<head>" per open PR, "m\t<n>\t
 # <head_oid>" per merged PR that gives its merged head's commit (a merged
 # PR is pinned to it: its branch may have moved on since — a merged PR
-# without one is left out), "x\t<n>" per open cross-repository PR ("cross":
-# true — a fork's branch, never resolved through a same-named branch of
-# the remote; merged cross-repository PRs are left out). A head with a tab
-# or newline, or a number that is not one, is left out.
+# without one is left out; a cross-repository one too counts, pinned), "x\t
+# <n>" per open cross-repository PR ("cross": true — a fork's branch, never
+# resolved through a same-named branch of the remote: only through its
+# pull ref, inflight.pull_refs). A head with a tab or newline, or a number
+# that is not one, is left out.
 _lg_ix_pr_lines() {
   jq -r 'select((.number | type) == "number" or (.number | type) == "string")
     | (.number | tostring) as $n
     | select($n | test("^[0-9]+$"))
-    | if .cross == true then (if .state == "open" then "x\t\($n)" else empty end)
-      elif .state == "open" and (.head | type) == "string" and (.head | test("^[^\\t\\n\\r]+$"))
-      then "o\t\($n)\t\(.head)"
-      elif .state == "merged" and (.head_oid | type) == "string" and (.head_oid | test("^[0-9a-f]{40}([0-9a-f]{24})?$"))
-      then "m\t\($n)\t\(.head_oid)"
+    | if .state == "merged" then
+        (if (.head_oid | type) == "string" and (.head_oid | test("^[0-9a-f]{40}([0-9a-f]{24})?$"))
+         then "m\t\($n)\t\(.head_oid)" else empty end)
+      elif .state != "open" then empty
+      elif .cross == true then "x\t\($n)"
+      elif (.head | type) == "string" and (.head | test("^[^\\t\\n\\r]+$")) then "o\t\($n)\t\(.head)"
       else empty end' "$1" > "$2" 2> "$2.err" || _lg_die "jq failed (the PR list): $(head -n 1 "$2.err")"
 }
 
@@ -1273,17 +1285,21 @@ _lg_ix_pr_numbers() {
 # _lg_ix_pr_prepare <base|""> <prefix>: the PR data for an index build
 # (worktree or --rev): <prefix>.prl the adapter's lines (from the remote
 # cache's snapshot; empty without), <prefix>.prheads "<n>\t<head>\t<oid>\t
-# <o|m>" per open PR whose head has a local ref and per merged PR whose
-# head_oid this clone has ("-" for its head; none when the base does not
-# resolve), <prefix>.prkey the key lines (the data's state class, the
-# heads, each walked oid). $_SCRATCH/lg-pr.mark: the views' header note (stale,
+# <o|m>" per open PR whose head has a local ref — with inflight.pull_refs
+# set, refs/doc-superpowers/pull/<n> (fetched by the in-flight scan,
+# inflight.sh; a cross-repository PR's head too, "-" for its head), else
+# refs/remotes/<remote>/<head> — and per merged PR whose head_oid this
+# clone has ("-" for its head; none when the base does not resolve),
+# <prefix>.prkey the key lines (the data's state class, the heads, each
+# walked oid). Copies of .prl and .prheads go to $_SCRATCH/lg-pr.prl and
+# lg-pr.heads (the in-flight join reads the last build's). $_SCRATCH/lg-pr.mark: the views' header note (stale,
 # offline or unavailable data; empty otherwise); $_SCRATCH/lg-pr.json: the
 # verbs' pr_data {"state": fresh|stale|offline|none|unconfigured, "as_of":
 # <fetch epoch>|null, "error": <reason>|null}. Prints the run's PR note
 # (stderr, one line): the data's state, the open heads not fetched, the
 # cross-repository open PRs not compared.
 _lg_ix_pr_prepare() {
-  local base="$1" p="$2" s remote url rc=0 state note="" mark="" missing=0 cross=0 t ol err
+  local base="$1" p="$2" s remote url rc=0 state note="" mark="" missing=0 cross=0 t ol err pull=""
   : > "$p.prl"
   : > "$p.prheads"
   : > "$_SCRATCH/lg-pr.mark"
@@ -1293,10 +1309,12 @@ _lg_ix_pr_prepare() {
     if [ -z "$_LG_ADP" ]; then
       printf 'pr unconfigured\n' > "$p.prkey" || _lg_die "cannot write $p.prkey"
       printf '{"state":"unconfigured","as_of":null,"error":null}\n' > "$_SCRATCH/lg-pr.json" || _lg_die "cannot write the PR state"
+      if ! : > "$_SCRATCH/lg-pr.prl" || ! : > "$_SCRATCH/lg-pr.heads"; then _lg_die "cannot write the PR data"; fi
       return 0
     fi
-    _lg_cfg '(.keys.remote | if type == "string" and . != "" then . else "origin" end), ('"$_LG_RTTL_JQ"')' > "$s.cfg"
-    { IFS= read -r remote; IFS= read -r _LG_RTTL; } < "$s.cfg" || _lg_die "cannot read the config"
+    _lg_cfg '(.keys.remote | if type == "string" and . != "" then . else "origin" end), ('"$_LG_RTTL_JQ"'),
+      (.inflight.pull_refs | if type == "string" and . != "" then "1" else "" end)' > "$s.cfg"
+    { IFS= read -r remote; IFS= read -r _LG_RTTL; IFS= read -r pull; } < "$s.cfg" || _lg_die "cannot read the config"
     url=$(git config --get "remote.$remote.url" 2>/dev/null) || url=""
     _lg_remote_cache pr "$(printf 'pr\n%s\n%s' "$_LG_ADP" "$url")" _lg_adapter pr list || rc=$?
     _LG_RTTL=""
@@ -1338,13 +1356,13 @@ _lg_ix_pr_prepare() {
     '{state: $st, as_of: (if $t == "" then null else ($t | tonumber) end), error: (if $e == "" then null else $e end)}' \
     > "$_SCRATCH/lg-pr.json" || _lg_die "cannot write the PR state"
   # The heads ("o|m\t<n>\t<head>", "x\t<n>"), kept beside the cache file as
-  # <file>-ol2-<data sha, 16 hex>.ol: named by the snapshot's data hash and
+  # <file>-ol3-<data sha, 16 hex>.ol: named by the snapshot's data hash and
   # by this format's version, so a refresh with new data, or a newer
   # format, finds none. A copy that fails is a miss (parsed again).
   ol=""
   if [ "$rc" = 0 ]; then
     case "$_LG_RDSHA" in
-      ????????????????*) ol="${_LG_RCACHE%.json}-ol2-${_LG_RDSHA:0:16}.ol" ;;
+      ????????????????*) ol="${_LG_RCACHE%.json}-ol3-${_LG_RDSHA:0:16}.ol" ;;
     esac
   fi
   if [ -z "$ol" ] || [ ! -f "$ol" ] || ! cp -- "$ol" "$s.pr" 2>/dev/null; then
@@ -1365,7 +1383,8 @@ _lg_ix_pr_prepare() {
   : > "$s.refs"
   : > "$s.mchk"
   if [ -s "$s.pr" ] && [ -n "$base" ]; then
-    git for-each-ref --format='%(objectname) %(refname)' "refs/remotes/$remote/" > "$s.refs" 2> "$s.err" \
+    if [ -n "$pull" ]; then set -- "refs/remotes/$remote/" refs/doc-superpowers/pull/; else set -- "refs/remotes/$remote/"; fi
+    git for-each-ref --format='%(objectname) %(refname)' "$@" > "$s.refs" 2> "$s.err" \
       || _lg_die "git for-each-ref failed: $(head -n 1 "$s.err")"
     # The merged heads this clone has: one batch check for all of them.
     LC_ALL=C awk -F '\t' '$1 == "m" { print $3 }' "$s.pr" > "$s.moids" || _lg_die "cannot list the merged heads"
@@ -1375,7 +1394,8 @@ _lg_ix_pr_prepare() {
     fi
   fi
   t=$(LC_ALL=C awk -v refs="$s.refs" -v chk="$s.mchk" -v pre="refs/remotes/$remote/" -v miss="$s.miss" -v xs="$s.cross" \
-      -v heads="$p.prheads" -v key="$p.prkey" -v state="$(if [ "$rc" != 0 ]; then echo none; else echo data; fi)" '
+      -v heads="$p.prheads" -v key="$p.prkey" -v state="$(if [ "$rc" != 0 ]; then echo none; else echo data; fi)" \
+      -v pull="$pull" '
     BEGIN {
       printf "" > miss; printf "" > xs; printf "" > heads; print "pr " state > key
       while ((getline l < refs) > 0) { t = index(l, " "); R[substr(l, t + 1)] = substr(l, 1, t - 1) }
@@ -1384,8 +1404,15 @@ _lg_ix_pr_prepare() {
     }
     {
       k = substr($0, 1, 1); l = substr($0, 3); t = index(l, "\t")
-      if (k == "x") { print l > xs; nx++; next }
-      n = substr(l, 1, t - 1); v = substr(l, t + 1)
+      n = t ? substr(l, 1, t - 1) : l; v = t ? substr(l, t + 1) : "-"
+      # The pull ref first (inflight.pull_refs): the PR head itself, a
+      # fork'"'"'s too.
+      if (k != "m" && pull != "" && (("refs/doc-superpowers/pull/" n) in R)) {
+        o = R["refs/doc-superpowers/pull/" n]
+        print n "\t" v "\t" o "\to" > heads; print "head " n "\t" v "\t" o "\to" > key
+        next
+      }
+      if (k == "x") { print n > xs; nx++; next }
       if (k == "m") {
         if (v in C) { print n "\t-\t" v "\tm" > heads; print "head " n "\t-\t" v "\tm" > key }
       } else if ((pre v) in R) { print n "\t" v "\t" R[pre v] "\t" k > heads; print "head " n "\t" v "\t" R[pre v] "\t" k > key }
@@ -1411,6 +1438,9 @@ _lg_ix_pr_prepare() {
       t="$cross cross-repository open PRs not compared ($(_lg_ix_pr_numbers "$s.cross" "$cross"))"
     fi
     note="${note:+$note; }$t"
+  fi
+  if ! cp -- "$p.prl" "$_SCRATCH/lg-pr.prl" || ! cp -- "$p.prheads" "$_SCRATCH/lg-pr.heads"; then
+    _lg_die "cannot copy the PR data"
   fi
   _lg_ix_pr_note "$note"
 }

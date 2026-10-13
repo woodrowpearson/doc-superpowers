@@ -121,7 +121,23 @@
           },
           "description": "The PR (config adapters.pr, through the remote cache) that claims the item, the one behind the status shown (highest number first): the merged one when the derived status is merged, else the open one, else the merged one; null when none does or no PR adapter is configured."
         },
-        "inflight": { "type": "array", "description": "In-flight branch claims (Task 11)." },
+        "inflight": {
+          "type": "array",
+          "description": "The in-flight branches that claim the item (config inflight.enabled; scripts/ledger/inflight.sh), by branch. Always [] in the cached index — a branch tip never rebuilds it: the read verbs (show, ls, find, view, publish) apply the in-flight overlay at query time (defs.jq lg_ifl_apply), which also sets derived to on branch / in review for an open item whose status ranked below.",
+          "items": {
+            "type": "object",
+            "required": ["branch", "name", "host", "sources", "oid", "pr"],
+            "additionalProperties": false,
+            "properties": {
+              "branch": { "type": "string", "description": "<name>, or <name>@<host> for another machine's branch." },
+              "name": { "type": "string" },
+              "host": { "type": ["string", "null"], "description": "The other machine's host id; null for this one's." },
+              "sources": { "type": "array", "items": { "enum": ["local", "worktree", "remote", "inflight"] } },
+              "oid": { "type": "string" },
+              "pr": { "type": ["integer", "null"], "description": "The branch's open PR (config adapters.pr), or null." }
+            }
+          }
+        },
         "neighbours": {
           "type": "object",
           "required": ["upstream", "downstream", "siblings"],
