@@ -7349,7 +7349,8 @@ _JQ_CLAIMS_RUN_RESULTS='$plan[0] as $plan
 # exit 2: never an empty set). These helpers are the rule's one
 # implementation; no consumer derives a range on its own. Pathspecs are
 # literal (git --literal-pathspecs), and the patch text is read with
-# _CL_DIFF_OPTS, so every clone reads the same text. Scratch: cl-range-* .
+# _CL_DIFF_OPTS, and a merge re-merged with _CL_REMERGE_CFG, so every clone
+# reads the same text and the same merge set. Scratch: cl-range-* .
 
 _CL_RANGE_A=""  # _claims_range_parse's <a>, a full commit id
 _CL_RANGE_B=""  # its <b>
@@ -7363,6 +7364,14 @@ _CL_RANGE_B=""  # its <b>
 # -U0) come after them, and win.
 _CL_DIFF_OPTS=(--no-renames --diff-algorithm=myers --src-prefix=a/ --dst-prefix=b/ --no-color --no-ext-diff
   --no-textconv --unified=3 --inter-hunk-context=0 --indent-heuristic)
+
+# The config git's own re-merge (`show --remerge-diff`) reads, pinned for the
+# same reason as _CL_DIFF_OPTS: the diff options shape only the output, not
+# which files the re-merge calls clean (merge.renames, which defaults to
+# diff.renames, decides whether trunk's edit follows a rename) nor how a
+# conflict reads (merge.conflictStyle adds base sections).
+_CL_REMERGE_CFG=(-c merge.renames=true -c merge.directoryRenames=conflict -c merge.conflictStyle=merge
+  -c merge.renormalize=false -c merge.renameLimit=7000 -c rerere.enabled=false)
 
 # _claims_range_parse <range>: _CL_RANGE_A and _CL_RANGE_B from "<a>..<b>"
 # (both given), or from "<a>...<b>", resolved here and only here to
@@ -7418,7 +7427,7 @@ _claims_merge_files() {
   local ccf=() rmf=()
   git show -z --no-renames --cc --name-only --format= "$1" -- > "$cc" 2>/dev/null \
     || _claims_die "git show --cc failed on merge $1"
-  git show -z --no-renames --remerge-diff --name-only --format= "$1" -- > "$rmz" 2>/dev/null \
+  git "${_CL_REMERGE_CFG[@]}" show -z --no-renames --remerge-diff --name-only --format= "$1" -- > "$rmz" 2>/dev/null \
     || _claims_die "git $(git --version 2>/dev/null | awk '{print $3}') cannot read merge $1 with --remerge-diff (git 2.36 or newer is needed): its hand resolutions are indeterminate"
   while IFS= read -r -d '' p; do
     if [ -n "$p" ]; then ccf+=("$p"); fi
@@ -7489,7 +7498,7 @@ _claims_range_patch() {
     done < "$mf"
     [ ${#files[@]} -gt 0 ] || continue
     printf 'commit %s\n' "$m" >> "$out" || _claims_die "cannot write $out"
-    git -c core.quotePath=true --literal-pathspecs show --no-show-signature --remerge-diff --format= \
+    git "${_CL_REMERGE_CFG[@]}" -c core.quotePath=true --literal-pathspecs show --no-show-signature --remerge-diff --format= \
       "${_CL_DIFF_OPTS[@]}" "$@" "$m" -- "${files[@]}" >> "$out" 2>/dev/null \
       || _claims_die "git show --remerge-diff failed on merge $m"
   done 3< "$ms"
@@ -8222,8 +8231,8 @@ _claims_v9() {
   local arg="$1" dest="${2:-$_SCRATCH/cl-findings.jsonl}" z="$_SCRATCH/cl-v9-runners.z" out="$_SCRATCH/cl-v9-out"
   local calls="$_SCRATCH/cl-v9-calls.jsonl" rows="$_SCRATCH/cl-v9-rows.jsonl" ms="$_SCRATCH/cl-v9-merges"
   local pz="$_SCRATCH/cl-v9-paths.z" fz="$_SCRATCH/cl-v9-files.z" pj="$_SCRATCH/cl-v9-paths.json"
-  local aj="$_SCRATCH/cl-v9-at.json" runner adapter rc nul p
-  local pset=() atfiles=()
+  local aj="$_SCRATCH/cl-v9-at.json" afz="$_SCRATCH/cl-v9-at.z" runner adapter rc nul p
+  local atfiles=()
   : > "$calls"
   # A runner name holding a NUL cannot reach the shell: a missing adapter.
   _claims_jq v9-nul-runners -c '.runners | objects | keys[] | select((split("\u0000") | length) > 1)
@@ -8255,13 +8264,15 @@ _claims_v9() {
   # The range rule: the path set, and which bound test files are files at
   # the range's end (_CL_RANGE_B, set by _claims_range_merges).
   _claims_range_paths "$arg" "$pz"
-  while IFS= read -r -d '' p; do pset+=("$p"); done < "$pz"
-  _claims_jq v9-paths -nc '$ARGS.positional' --args ${pset[@]+"${pset[@]}"} > "$pj"
+  # The NUL lists reach jq as files, never as argv: jq reads an option-like
+  # argument (a file named --arg) as an option even after --args.
+  _claims_jq v9-paths -Rsc 'split("\u0000") | map(select(. != ""))' "$pz" > "$pj"
   _claims_jq v9-files -j '.files[] | select((split("\u0000") | length) == 1) | . + "\u0000"' "$rows" > "$fz"
   while IFS= read -r -d '' p; do
     if _claims_safe_relpath "$p" && [ "$(git cat-file -t "$_CL_RANGE_B:$p" 2>/dev/null)" = blob ]; then atfiles+=("$p"); fi
   done < "$fz"
-  _claims_jq v9-at -nc '$ARGS.positional' --args ${atfiles[@]+"${atfiles[@]}"} > "$aj"
+  for p in ${atfiles[@]+"${atfiles[@]}"}; do printf '%s\0' "$p"; done > "$afz"
+  _claims_jq v9-at -Rsc 'split("\u0000") | map(select(. != ""))' "$afz" > "$aj"
   _claims_jq v9-range-findings -c --slurpfile pathsf "$pj" --slurpfile atf "$aj" --arg out findings \
     "$_JQ_CLAIMS_V9_RANGE" "$rows" >> "$dest"
   _claims_jq v9-range-advisories -c --slurpfile pathsf "$pj" --slurpfile atf "$aj" --arg out advisories \

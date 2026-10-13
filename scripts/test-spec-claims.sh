@@ -6389,11 +6389,15 @@ test_gate_path_safety() {
 
 # range_probe <range>: through a probe, the --planes-of path set of <range>
 # (one path per line) into $RANGE_OUT.paths, and its patch text into
-# $RANGE_OUT.patch.
+# $RANGE_OUT.patch. It asserts that the probe exited 0 and wrote both files,
+# so a test whose expected output is empty cannot pass on a helper that died.
 range_probe() {
-  local probe
+  local probe rc=0
+  rm -f "$RANGE_OUT.paths" "$RANGE_OUT.patch"
   probe=$(claims_probe after '_claims_range_paths "$CL_T_RANGE" "$_SCRATCH/p"; tr "[:cntrl:]" "|" < "$_SCRATCH/p" > "$CL_T_OUT.paths"; _claims_range_patch "$CL_T_RANGE" "$CL_T_OUT.patch"; _claims_mark_emitted 0; exit 0')
-  CL_T_RANGE="$1" CL_T_OUT="$RANGE_OUT" "$probe" claims render </dev/null >/dev/null 2>&1 || true
+  CL_T_RANGE="$1" CL_T_OUT="$RANGE_OUT" "$probe" claims render </dev/null >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "range_probe $1: the helpers ran (exit 0)"
+  assert_true "range_probe $1: ... and wrote the path set and the patch text" test -f "$RANGE_OUT.paths" -a -f "$RANGE_OUT.patch"
 }
 
 test_gate_range_first_parent_excludes_trunk() {
@@ -6601,6 +6605,68 @@ test_range_evil_merge_in_set() {
   teardown
 }
 
+# range_config_probe <range>: range_probe under a clone config that changes
+# how git re-merges and renders (GIT_CONFIG_COUNT: no file is written).
+range_config_probe() {
+  GIT_CONFIG_COUNT=4 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false \
+    GIT_CONFIG_KEY_1=merge.renames GIT_CONFIG_VALUE_1=false \
+    GIT_CONFIG_KEY_2=merge.conflictStyle GIT_CONFIG_VALUE_2=zdiff3 \
+    GIT_CONFIG_KEY_3=merge.directoryRenames GIT_CONFIG_VALUE_3=false \
+    range_probe "$1"
+}
+
+test_range_merge_independent_of_clone_merge_config() {
+  echo "test: range rule — a clean merge across a rename reads the same under any clone merge config"
+  merge_fixture
+  local from
+  mkdir -p lib
+  seq 1 20 | sed 's/^/line /' > lib/old.py
+  git add -A && git commit -qm "lib/old.py on the branch"
+  git checkout -q main && git merge -q --no-edit feature >/dev/null 2>&1
+  git checkout -q feature
+  git mv lib/old.py lib/new.py
+  git commit -qm "the branch renames old.py to new.py"
+  from=$(git rev-parse HEAD)
+  git checkout -q main
+  sed -i 's/^line 20$/line 20 trunk/' lib/old.py
+  git commit -qam "trunk edits old.py"
+  git checkout -q feature
+  git merge -q --no-edit main
+  assert_eq "3" "$(git rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" "precondition: HEAD is a two-parent merge"
+  assert_contains "$(cat lib/new.py)" "line 20 trunk" "precondition: the clean merge carried trunk's edit across the rename"
+  range_probe "$from..HEAD"
+  assert_eq "" "$(cat "$RANGE_OUT.paths")" "default config: the path set is empty"
+  assert_eq "" "$(cat "$RANGE_OUT.patch")" "…and so is the patch text"
+  range_config_probe "$from..HEAD"
+  assert_eq "" "$(cat "$RANGE_OUT.paths")" "diff.renames=false, merge.renames=false: still empty"
+  assert_not_contains "$(cat "$RANGE_OUT.patch")" "trunk" "…and no trunk line in the patch text"
+  teardown
+}
+
+test_range_patch_independent_of_clone_conflict_style() {
+  echo "test: range rule — a resolution's patch text does not depend on merge.conflictStyle"
+  merge_fixture
+  local from plain styled
+  sed -i 's/^l6$/l6 branch/' src/shared.py
+  git commit -qam "branch edits l6"
+  from=$(git rev-parse HEAD)
+  git checkout -q main
+  sed -i 's/^l6$/l6 trunk/' src/shared.py
+  git commit -qam "trunk edits l6"
+  git checkout -q feature
+  git merge -q --no-edit main >/dev/null 2>&1 || true
+  printf 'l1\nl2\nl3\nl4\nl5\nl6 branch\nl6 trunk\nl7\nl8\nl9\nl10\nl11\nl12\n' > src/shared.py
+  git add src/shared.py && git commit -qm "merge main, both kept"
+  range_probe "$from..HEAD"
+  plain=$(cat "$RANGE_OUT.patch")
+  assert_contains "$plain" "-<<<<<<<" "precondition: the patch text shows the removed markers"
+  range_config_probe "$from..HEAD"
+  styled=$(cat "$RANGE_OUT.patch")
+  assert_eq "$plain" "$styled" "merge.conflictStyle=zdiff3: the same patch text"
+  assert_not_contains "$styled" "|||||||" "…no base section"
+  teardown
+}
+
 test_range_octopus_merge_indeterminate() {
   echo "test: range rule — an octopus first-parent merge in the range is indeterminate"
   merge_fixture
@@ -6659,6 +6725,35 @@ EOF
   git add -A && git commit -qm "branch work, no merge"
   PATH="$shim:$PATH" cl run --planes-of "$from..HEAD"
   assert_eq "0" "$CL_RC" "a range without a merge never asks for --remerge-diff: exits 0"
+  teardown
+}
+
+test_gate_v9_hostile_path_names_do_not_hide_bound_test_edit() {
+  echo "test: range rule — files named like jq options in the range do not hide a bound-test edit from V9"
+  gate_fixture
+  gate_promote
+  local from
+  git checkout -q main
+  mkdir -p tests
+  printf 'def test_ttl(): pass\n' > tests/test_token.py
+  git add -A && git commit -qm "the test file on trunk"
+  git checkout -q feature
+  git merge -q --no-edit main
+  printf '%s\n' "$TTL_ID" > tools/claims/edited
+  git add -A && git commit -qm "the adapter reports the edit"
+  from=$(git rev-parse HEAD)
+  git checkout -q main
+  printf 'TRUNK = 1\n' > src/trunk.py
+  git add -A && git commit -qm "trunk work"
+  git checkout -q feature
+  git merge -q --no-edit main
+  printf 'def test_ttl(): assert 1\n' > tests/test_token.py
+  printf 'a\n' > ./--arg
+  printf 'b\n' > ./x
+  git add -A && git commit -qm "the branch edits the test, and adds files named like options"
+  gate 1 --from "$from"
+  assert_eq "1" "$CL_RC" "the branch edits the bound test: exits 1"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V9")][0].claim' "$TTL_ID" "…a V9 finding, not an outside-branch-work advisory"
   teardown
 }
 
@@ -7562,9 +7657,12 @@ run_tests() {
   test_range_conflict_new_line_in_patch
   test_range_conflict_take_theirs_not_in_set
   test_range_evil_merge_in_set
+  test_range_merge_independent_of_clone_merge_config
+  test_range_patch_independent_of_clone_conflict_style
   test_range_octopus_merge_indeterminate
   test_range_git_without_remerge_diff_indeterminate
   test_gate_v9_trunk_only_bound_test_edit
+  test_gate_v9_hostile_path_names_do_not_hide_bound_test_edit
   test_planes_of_three_dot_range
   test_planes_of_not_ancestor_indeterminate
   test_patch_ids_independent_of_clone_diff_config
