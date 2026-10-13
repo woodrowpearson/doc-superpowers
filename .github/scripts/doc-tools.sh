@@ -6167,12 +6167,16 @@ _claims_touched() {
     "$_JQ_CLAIMS_TOUCHED" > "$_SCRATCH/cl-touched.json"
 }
 
-# claims_v1($docid; $kinds): on one claim record, a message per V1 violation.
-# $docid null skips the id-prefix check (the doc is the problem, and one
-# sidecar finding already says so). Fields outside §B's record are not
-# checked; `when` and status gated arrive with the configuration extension.
+# claims_v1($docid; $kinds; $known): on one claim record, a message per V1
+# violation. $docid null skips the id-prefix check (the doc is the problem,
+# and one sidecar finding already says so). $known: the ids of every claim in
+# the proposed sidecars, which restates may name (V7's sweep reads them);
+# null when a sidecar is malformed, which skips the unknown-id check (the id
+# may be in that sidecar, and its own finding already blocks).
+# Fields outside §B's record are not checked; `when` and status gated arrive
+# with the configuration extension.
 # shellcheck disable=SC2016  # jq program, not shell expansion
-_JQ_CLAIMS_SCHEMA='def claims_v1($docid; $kinds):
+_JQ_CLAIMS_SCHEMA='def claims_v1($docid; $kinds; $known):
   def nes: type == "string" and length > 0;
   def paths_ok: type == "array" and all(.[]; nes);
   def among($xs): . as $v | any($xs[]; . == $v);
@@ -6247,6 +6251,13 @@ _JQ_CLAIMS_SCHEMA='def claims_v1($docid; $kinds):
       opt("tracker"; nes; "must be a non-empty string or null"),
       opt("frozen_at"; nes; "must be a commit or null"),
       opt("restates"; paths_ok; "must be an array of claim ids"),
+      (if (.restates | type) == "array" then
+         (. as $c | [.restates[] | select(type == "string" and length > 0)] | unique | .[]
+          | . as $r
+          | if $r == $c.id then "restates \($r), the claim itself: a claim cannot restate itself"
+            elif $known == null or any($known[]; . == $r) then empty
+            else "restates \($r): no claim has that id (restates names the claims this one restates)" end)
+       else empty end),
       opt("quote_occurrence"; type == "number" and . >= 1 and . == floor; "must be an integer >= 1"),
       opt("nonvacuity"; type == "object"; "must be an object or null"),
       opt("promotion"; type == "object"; "must be an object or null"),
@@ -6258,7 +6269,8 @@ _JQ_CLAIMS_SCHEMA='def claims_v1($docid; $kinds):
 # and governing, unless every claim is retired), the stem, each record
 # (claims_v1) and id uniqueness. With $all 0 (_CL_SCOPE_ALL: --staged, and
 # config.json not staged) a claim is in scope when touched or its sidecar or
-# doc is staged; a sidecar when it or its doc is staged or it holds a touched
+# doc is staged, and for its restates messages alone when a claim it restates
+# is touched (deleting that claim's sidecar leaves the id dangling); a sidecar when it or its doc is staged or it holds a touched
 # claim. One finding row per line.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_V1='def in_list($l): . as $x | any($l[]; . == $x);
@@ -6266,6 +6278,8 @@ _JQ_CLAIMS_V1='def in_list($l): . as $x | any($l[]; . == $x);
  (if ($cfg[0].kinds | type) == "array" then [$cfg[0].kinds[] | strings] else [] end) as $kinds
  | $t[0] as $touched | $st[0] as $staged
  | ($s | map(select(cl_well_formed))) as $wf
+ | (if ($wf | length) == ($s | length) then [$wf[] | .data.claims[] | select(type == "object") | .id | strings]
+    else null end) as $known
  | (
    ($s[]
     | .sidecar as $p | .data as $d | (.doc // $p) as $fdoc
@@ -6295,9 +6309,12 @@ _JQ_CLAIMS_V1='def in_list($l): . as $x | any($l[]; . == $x);
       (select($well)
        | (if $retired or $eligible then $docid else null end) as $idbase
        | $d.claims | range(length) as $i | .[$i]
-       | select($direct or (type == "object" and (.id | type) == "string" and (.id | in_list($touched))))
+       | ($direct or (type == "object" and (.id | type) == "string" and (.id | in_list($touched)))) as $full
+       | select($full or (type == "object" and (.restates | type) == "array"
+                          and any(.restates[]; type == "string" and in_list($touched))))
        | (if type == "object" and (.id | type) == "string" then .id else null end) as $cid
-       | claims_v1($idbase; $kinds)
+       | claims_v1($idbase; $kinds; $known)
+       | select($full or startswith("restates "))
        | v1($cid; $fdoc; "\($p): \($cid // "claims[\($i)]"): \(.)"))),
    ([$wf[] | .sidecar as $p | (.doc // $p) as $doc
      | .data.claims[] | select(type == "object" and (.id | type) == "string") | {id, sidecar: $p, doc: $doc}]
@@ -6798,33 +6815,45 @@ _JQ_CLAIMS_GATE_PATH='def cl_gate_stem: if type == "string" then
            | .s | select(. != "." and . != "..")) // null
    else null end;'
 
+# The base-versus-proposed defs V6 and V7 share, so "a new ruling" and the
+# base claim of an id are one definition. cl_base_by_id($b): the cl-claims-base
+# entries keyed by claim id, the first of a duplicated id kept. cl_rulings: a
+# claim's rulings array ([] when absent or not an array). On a claim,
+# cl_new_rulings($o): its rulings that the base claim $o (null: none) does not
+# have, by whole-object equality. (cl_base_by_id also indexes the proposed
+# claims: V7's $now.)
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_DELTA='def in_list($l): . as $x | any($l[]; . == $x);
+ def cl_rulings: if type == "object" and (.rulings | type) == "array" then .rulings else [] end;
+ def cl_base_by_id($b): reduce ($b[] | select((.claim.id | type) == "string")) as $e ({};
+   if has($e.claim.id) then . else .[$e.claim.id] = $e end);
+ def cl_new_rulings($o): ($o | cl_rulings) as $was
+   | [cl_rulings | .[] | . as $r | select(any($was[]; . == $r) | not)];'
+
 # V6 (see the section comment), one program in three phases ($phase), run
 # after _JQ_CLAIMS_SIDECAR (cl_well_formed, cl_all_retired) and
-# _JQ_CLAIMS_NORM (claims_norm), _JQ_CLAIMS_ROLES (cl_targets) and
-# _JQ_CLAIMS_GATE_PATH (cl_gate_stem). $p, $b: cl-claims.json and
-# cl-claims-base.json; $t: cl-touched.json; $sp, $sb: the cl-sidecars lines of
-# the proposed tree and of _CL_MB. Phase verify prints the touched built/gated
-# claims whose verdict is to be checked (one JSON line each); phase records,
-# the distinct records the new rulings name; phase check, the finding rows
-# and advisory rows (the advisories carry a code), given $v ({claim,
-# verdict} per checked claim) and $rec ({record, exists} per record).
+# _JQ_CLAIMS_NORM (claims_norm), _JQ_CLAIMS_ROLES (cl_targets),
+# _JQ_CLAIMS_GATE_PATH (cl_gate_stem) and _JQ_CLAIMS_DELTA. $p, $b:
+# cl-claims.json and cl-claims-base.json; $t: cl-touched.json; $sp, $sb: the
+# cl-sidecars lines of the proposed tree and of _CL_MB. Phase verify prints
+# the touched built/gated claims whose verdict is to be checked (one JSON
+# line each); phase records, the distinct records the new rulings name;
+# phase check, the finding rows and advisory rows (the advisories carry a
+# code), given $v ({claim, verdict} per checked claim) and $rec ({record,
+# exists} per record).
 # shellcheck disable=SC2016  # jq program, not shell expansion
-_JQ_CLAIMS_RATCHET='def in_list($l): . as $x | any($l[]; . == $x);
- def v6($claim; $doc; $msg): {check: "V6", claim: $claim, doc: $doc, message: $msg};
+_JQ_CLAIMS_RATCHET='def v6($claim; $doc; $msg): {check: "V6", claim: $claim, doc: $doc, message: $msg};
  def v6a($claim; $code; $msg): {check: "V6", claim: $claim, code: $code, message: $msg};
- def cl_rulings: if type == "object" and (.rulings | type) == "array" then .rulings else [] end;
  def cl_rank: if type == "string" then ({"test": 4, "lint": 3, "log": 2, "judge": 1}[.] // 0) else 0 end;
  def cl_promoted: . == "built" or . == "gated";
  def cl_policy: (.policy | if type == "object" then . else {} end);
  def cl_ruled: type == "object" and (.direction == "DOC-STALE" or .direction == "RETIRE");
  $t[0] as $touched
- | (reduce ($b[0][] | select((.claim.id | type) == "string")) as $e ({};
-      if has($e.claim.id) then . else .[$e.claim.id] = $e end)) as $base
+ | cl_base_by_id($b[0]) as $base
  | [$p[0][] | select((.claim.id | type) == "string") | select(.claim.id | in_list($touched))
     | . as $e | $base[$e.claim.id].claim as $o
-    | ($o | cl_rulings) as $was
     | $e + {old: $o,
-            new: [$e.claim | cl_rulings | .[] | . as $r | select(any($was[]; . == $r) | not)],
+            new: ($e.claim | cl_new_rulings($o)),
             moved_in: (($e.claim.status | cl_promoted) and ($o == null or ($o.status | cl_promoted | not)))}
     | .bare = (.moved_in and (.claim.promotion | type) != "object")
     | .verify = ((.claim.status | cl_promoted) and (.old == null or .old != .claim) and (.bare | not))] as $rows
@@ -6904,7 +6933,7 @@ _JQ_CLAIMS_RATCHET='def in_list($l): . as $x | any($l[]; . == $x);
 # repo path), then phase check. The shell loops run over those short lists,
 # never over every claim.
 _claims_v6() {
-  local prog="$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_NORM $_JQ_CLAIMS_ROLES $_JQ_CLAIMS_GATE_PATH $_JQ_CLAIMS_RATCHET"
+  local prog="$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_NORM $_JQ_CLAIMS_ROLES $_JQ_CLAIMS_GATE_PATH $_JQ_CLAIMS_DELTA $_JQ_CLAIMS_RATCHET"
   local line v r exists plan src stem stems
   local verify="$_SCRATCH/cl-v6-verify" vrows="$_SCRATCH/cl-v6-verdicts.jsonl"
   local records="$_SCRATCH/cl-v6-records" rrows="$_SCRATCH/cl-v6-records.jsonl" out="$_SCRATCH/cl-v6.jsonl"
@@ -6955,6 +6984,44 @@ $stem
   _claims_jq v6 -nc --arg phase check "$@" "$prog" > "$out"
   _claims_jq v6-findings -c 'select(has("code") | not)' "$out" >> "$_SCRATCH/cl-findings.jsonl"
   _claims_jq v6-advisories -c 'select(has("code"))' "$out" >> "$_SCRATCH/cl-advisories.jsonl"
+}
+
+# --- Spec claims: the restates sweep, V7 ---------------------------------------
+#
+# A claim A with restates [B...] says again what claim B says (an ADR's
+# sentence and the spec's). When B's states differs between the merge-base
+# and the proposed tree and A has no new ruling (the V6 ratchet's own
+# definitions: cl_new_rulings, and a changed states), A is stale until it is
+# swept: V7 "restates <B>, whose states changed". Not in the default blocking
+# list, so validate reports it as an advisory (central, in _JQ_CLAIMS_EMIT).
+# Scope: A is judged when A or B is touched (_claims_touched), so under
+# --staged a change to B's sidecar finds an A in a sidecar that is not staged
+# with it; a staged config.json touches every claim, and --all judges every
+# claim. A retired A is not judged (its sentence is struck), nor is an A new
+# in this change (it was written against B as B now reads); an id that names
+# no claim is V1's, and so is one that names A itself. B must be in both
+# trees to have changed.
+
+# cl-claims.json ($p), cl-claims-base.json ($b), cl-touched.json ($t) → the
+# V7 finding rows. Run after _JQ_CLAIMS_DELTA.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_V7='$t[0] as $touched
+ | cl_base_by_id($b[0]) as $base
+ | cl_base_by_id($p[0]) as $now
+ | $p[0][] | select((.claim.id | type) == "string" and .claim.status != "retired" and (.claim.restates | type) == "array")
+ | . as $e | $e.claim as $c
+ | select($base[$c.id] != null and ($c | cl_new_rulings($base[$c.id].claim) | length) == 0)
+ | ([$c.restates[] | strings | select(. != $c.id)] | unique[]) as $r
+ | select(($c.id | in_list($touched)) or ($r | in_list($touched)))
+ | select($base[$r] != null and $now[$r] != null and $base[$r].claim.states != $now[$r].claim.states)
+ | {check: "V7", claim: $c.id, doc: $e.doc, message: "restates \($r), whose states changed"}'
+
+# _claims_v7: V7 (see the section comment), its rows added to the verdict's
+# findings.
+_claims_v7() {
+  [ -n "$_CL_MB" ] || return 0
+  _claims_jq v7 -nc --slurpfile p "$_SCRATCH/cl-claims.json" --slurpfile b "$_SCRATCH/cl-claims-base.json" \
+    --slurpfile t "$_SCRATCH/cl-touched.json" "$_JQ_CLAIMS_DELTA $_JQ_CLAIMS_V7" >> "$_SCRATCH/cl-findings.jsonl"
 }
 
 # --- Spec claims: the status block, render, V11 --------------------------------
@@ -10150,6 +10217,7 @@ cmd_claims_validate() {
   _claims_v4
   _claims_v5
   _claims_v6
+  _claims_v7
   if [ "$mode" = staged ]; then
     _claims_v8 --staged
     _claims_v8n --staged
