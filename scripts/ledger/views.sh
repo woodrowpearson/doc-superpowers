@@ -37,6 +37,11 @@
 #   https://github.com/<owner>/<repo>/blob/<branch>/<path> for a GitHub
 #   remote, else relative to the views branch (../<branch>/<path>, one ../
 #   per segment of views.branch: the hosted blob view resolves them).
+#   With in-flight awareness on (the base's config), the views pushed, the
+#   in-flight refs on keys.remote whose tips are on the base or older than
+#   inflight.max_age_days are deleted in one push (inflight.sh
+#   _lg_ifl_prune; --dry-run lists them); a failure is the run's note.
+#   The run's one "ledger:" note is printed after it.
 #
 # $generated (render-md.jq): the header's source ("the working tree at
 # <short HEAD>" / "<base>@<short-sha>"), the in-flight branch count (the
@@ -290,6 +295,21 @@ _lg_publish_selftest_race() {
   git push -q --no-verify --force "$1" "$c:$2" >/dev/null 2>&1
 }
 
+# _lg_v_pruned_into <payload>: add "inflight_pruned" (the refs the prune
+# deleted, or would — dry run; inflight.sh _lg_ifl_prune) when in-flight
+# awareness is on.
+_lg_v_pruned_into() {
+  # shellcheck disable=SC2153  # inflight.sh sets _LG_IFL_ON
+  [ "$_LG_IFL_ON" = 1 ] || return 0
+  if [ -n "$_LG_IFL_PRUNED" ]; then
+    # shellcheck disable=SC2016  # jq source
+    jq -c --rawfile p "$_LG_IFL_PRUNED" '. + {inflight_pruned: ($p | split("\n") | map(select(. != "")))}' "$1" > "$1.p"
+  else
+    jq -c '. + {inflight_pruned: []}' "$1" > "$1.p"
+  fi || _lg_die "jq failed (inflight_pruned)"
+  mv -f -- "$1.p" "$1" || _lg_die "cannot write $1"
+}
+
 # shellcheck disable=SC2154  # _OPT_* and _ARGS are set by _parse_args
 cmd_ledger_publish() {
   local s base_ref remote="" branch="" r vb tip="" base short at link n gen ix stage
@@ -348,8 +368,10 @@ cmd_ledger_publish() {
   # published); the in-flight scan (the base commit's config) runs first.
   _lg_ifl_prepare 1 "$base"
   _LG_REMOTE_FORCE=1
+  # The run's one "ledger:" note is held until the in-flight prune has run
+  # (its failure joins it; inflight.sh _lg_note_flush, also on an early exit).
+  _LG_NOTE_DEFER=publish
   ix=$(_lg_index --rev "$base") || exit "$?"
-  _lg_ifl_index_note
   _lg_v_ifl "$ix"
   ix=$_LG_V_IX
   gen="$s.gen"
@@ -362,6 +384,8 @@ cmd_ledger_publish() {
 
   msg="views @ $base_name@$short, $_LG_V_IFLN in-flight branches, $at"
   if [ "$dry" = 1 ]; then
+    _lg_ifl_prune "$base" 1
+    _lg_note_flush
     out="$_LG_CACHE/publish-dry-run"
     rm -rf -- "$out"
     mkdir -p -- "$out" || _lg_die "cannot create $out"
@@ -373,6 +397,7 @@ cmd_ledger_publish() {
       _lg_v_payload "$stage/.names" "$s.json" "$out" --arg remote "$remote" --arg branch "$vb" --arg base "$base" \
         --arg msg "$msg" --arg tip "$tip" '{remote: $remote, branch: $branch, base_commit: $base, message: $msg,
           commit: null, parent: (if $tip == "" then null else $tip end), dry_run: true}'
+      _lg_v_pruned_into "$s.json"
       _lg_emit publish 0 "$s.json"
     fi
     {
@@ -380,6 +405,7 @@ cmd_ledger_publish() {
         "$(if [ -n "$tip" ]; then printf 'fast-forward from %s' "$(git rev-parse --short "$tip")"; else printf 'a new branch'; fi)"
       printf 'message: %s\n' "$msg"
       printf 'files: %s\n' "$out"
+      if [ -n "$_LG_IFL_PRUNED" ]; then _lg_ifl_pruned_line "would prune"; fi
     } > "$s.lines"
     _lg_out_file "$s.lines"
     _lg_emit publish 0
@@ -416,11 +442,15 @@ cmd_ledger_publish() {
     fi
     _lg_die "the push to $remote $vb failed: $err"
   fi
+  # The views are out: prune the stale in-flight refs (a failure is a note).
+  _lg_ifl_prune "$base" 0
+  _lg_note_flush
   if [ "$_LG_FORMAT" = json ]; then
     # shellcheck disable=SC2016  # jq source
     _lg_v_payload "$stage/.names" "$s.json" "" --arg remote "$remote" --arg branch "$vb" --arg base "$base" \
       --arg msg "$msg" --arg tip "$tip" --arg c "$commit" '{remote: $remote, branch: $branch, base_commit: $base,
         message: $msg, commit: $c, parent: (if $tip == "" then null else $tip end), dry_run: false}'
+    _lg_v_pruned_into "$s.json"
     _lg_emit publish 0 "$s.json"
   fi
   prev_short="a new branch"
@@ -428,6 +458,7 @@ cmd_ledger_publish() {
   printf 'published %s files to %s %s @ %s (%s)\n' "$(wc -l < "$stage/.names" | tr -d ' ')" "$remote" "$vb" \
     "$(git rev-parse --short "$commit")" "$prev_short" > "$s.lines"
   printf 'message: %s\n' "$msg" >> "$s.lines"
+  if [ -n "$_LG_IFL_PRUNED" ]; then _lg_ifl_pruned_line "pruned" >> "$s.lines"; fi
   _lg_out_file "$s.lines"
   _lg_emit publish 0
 }

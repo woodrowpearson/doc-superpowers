@@ -1554,6 +1554,11 @@ _on_exit() {
     # No trailing newline: read assigns, then returns 1.
     IFS= read -r erc < "$_SCRATCH/$marker" || true
   fi
+  # A "ledger:" note publish held for its prune (scripts/ledger/inflight.sh
+  # _lg_note_flush) is printed however the run ends.
+  if [ "${_LG_NOTE_DEFER:-}" = publish ] && [ -n "$_SCRATCH" ]; then
+    ( _lg_note_flush ) || true
+  fi
   # A ledger run's background in-flight scan (scripts/ledger/inflight.sh)
   # never outlives it: it and every process under it (git fetch, its
   # transport) are signalled, and it is reaped, before the scratch dir goes.
@@ -2399,7 +2404,7 @@ ledger recheck|cmd_ledger_recheck|repo|format=
   them (re-check: <item> landed) once it reaches a terminal class on the
   base, until a later commit on the base touches them.
 ledger inflight|cmd_ledger_inflight|repo|branch= fetch push format=
-  [--branch <name>|<name>@<host>] [--fetch] [--format text|json]
+  [--branch <name>|<name>@<host>] [--fetch] [--push] [--format text|json]
   Work in flight (config inflight.enabled): local branches, worktrees
   (a detached one as "(detached:<path hash>)"), keys.remote's branches and
   other machines' in-flight refs (<ref_prefix>/<host>/<branch>) not merged
@@ -2412,13 +2417,32 @@ ledger inflight|cmd_ledger_inflight|repo|branch= fetch push format=
   doc-superpowers.ledger.host, else 8 hex digits of a hash of the
   hostname. --fetch fetches the in-flight refs now (otherwise once per
   cache.remote_ttl_minutes; offline: exit 2). Off: one line, exit 0. An
-  unknown --branch: exit 1. JSON: {"host_id", "inflight_data", "pr_data",
+  unknown --branch: exit 1. --push publishes this branch (commits not on
+  the base) as <ref_prefix>/<host>/<branch> on keys.remote — forced,
+  --no-verify — after inflight.pre_push_check (run with sh -c, one stdin
+  line "<merge-base>..<tip>"; non-zero: nothing pushed, its output shown,
+  exit 1); detached HEAD, nothing beyond the base, offline or an
+  unreachable remote: a line, exit 0; a refused push: exit 2. JSON: {"host_id", "inflight_data", "pr_data",
   "branches": [{host, own, name, branch, oid, sources, merge_base, pr,
   files_n, files, claims, contract_changes, acks, refs}]}. show and ls
   show "on branch <b>" for an open item an in-flight branch claims.
-ledger notices|cmd_ledger_notices|repo|format=
-  [--format text|json]
-  In-flight notices for the current branch.
+ledger notices|cmd_ledger_notices|repo|branch= gate fetch format=
+  [--branch <name>|<name>@<host>] [--gate] [--fetch] [--format text|json]
+  In-flight notices for a branch (default: the current one) against every
+  other branch in flight and the base since the branch's merge base: stop
+  (another branch or the base changes a contract the branch's claimed
+  items consume or it changes itself; two branches claim one item),
+  heads-up (another branch changes files it changes), info (siblings of
+  its claimed items claimed elsewhere). One line each: "<urgency> <id>
+  <other>[@<host>] <PR #n|no PR> <kind>:<values> — <what changed> →
+  <action>" (reconcile-before-next-chunk, rebase-after-merge, heads-up);
+  <id> is 12 hex of sha256(other, overlap, other's tip), so a notice fires
+  again only when the other side moves. A "Ledger-Ack: <id> — <clause>"
+  trailer in the branch's commits hides it. --gate: exit 1 on any unacked
+  stop notice. --fetch fetches the in-flight refs first (offline: exit 2).
+  A --branch naming no branch, or a base that does not resolve: exit 2.
+  JSON: {"notices": [{id, urgency, other: {branch, host, pr}, overlap:
+  {contracts|keys|files}, what_changed, action}], "pr_data"}.
 ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize format=
   --ledger <id|unassigned> --summary <text> [--file <issue>] [--finalize] [--format text|json]
   Allocate an item key and write key, ledger and summary (at most 140
@@ -2493,8 +2517,13 @@ ledger publish|cmd_ledger_publish|repo|dry-run format=
   with git plumbing, so HEAD, the index and the working tree are never
   touched — without force: a branch that moved meanwhile exits 2. With
   config adapters.pr the PR list is fetched now; its failure is exit 2.
+  With in-flight awareness on, it then deletes the in-flight refs on the
+  remote (<ref_prefix>/…; under refs/heads/ only <host>/<name>-shaped
+  ones) whose tips are on the base or older than inflight.max_age_days —
+  one push, never offline; a failed prune is a note, not a failed publish.
   --dry-run renders into <git-common-dir>/doc-superpowers/ledger/
-  publish-dry-run and stops before the commit.
+  publish-dry-run and stops before the commit (listing what it would
+  prune).
 ledger finalize|cmd_ledger_finalize|repo|all format=
   [--all] [--format text|json]
   Replace provisional keys with allocated ones — in the item's key and in
