@@ -6482,6 +6482,186 @@ test_gate_v9_trunk_only_bound_test_edit() {
   teardown
 }
 
+# --- The range rule: a merge's hand resolutions, from git's --remerge-diff -----
+
+# merge_fixture: gate_fixture, then a twelve-line src/shared.py and a
+# src/untouched.py that trunk and the branch both hold (merged into the
+# branch), and RANGE_OUT for range_probe.
+merge_fixture() {
+  gate_fixture
+  RANGE_OUT=$(harness_mktemp range)
+  git checkout -q main
+  printf 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\n' > src/shared.py
+  printf 'same\n' > src/untouched.py
+  git add -A && git commit -qm "shared files on trunk"
+  git checkout -q feature
+  git merge -q --no-edit main
+}
+
+# conflict_merge: a docs/notes.md both sides edit on one line; the merge of
+# main into feature is left conflicted (not committed). Sets MERGE_FROM to the
+# branch tip before the merge.
+conflict_merge() {
+  printf 'branch\n' > docs/notes.md
+  git add -A && git commit -qm "branch notes"
+  MERGE_FROM=$(git rev-parse HEAD)
+  git checkout -q main
+  printf 'trunk\n' > docs/notes.md
+  git add -A && git commit -qm "trunk notes"
+  git checkout -q feature
+  git merge -q --no-edit main >/dev/null 2>&1 || true
+}
+
+test_range_clean_merge_excludes_trunk_additions() {
+  echo "test: range rule — a clean merge that auto-merges a file both sides edited adds neither the file nor trunk's lines"
+  merge_fixture
+  local from
+  sed -i 's/^l1$/l1 by the branch/' src/shared.py
+  git commit -qam "the branch edits the top of shared.py"
+  from=$(git rev-parse HEAD)
+  git checkout -q main
+  printf 'def trunk_added():\n    return 1\n' >> src/shared.py
+  git commit -qam "trunk appends a function"
+  git checkout -q feature
+  git merge -q --no-edit main
+  assert_eq "3" "$(git rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" "precondition: HEAD is a two-parent merge"
+  assert_contains "$(git show --cc --name-only --format= HEAD)" "src/shared.py" "precondition: --cc lists the auto-merged file"
+  range_probe "$from..HEAD"
+  assert_eq "" "$(cat "$RANGE_OUT.paths")" "the path set: empty (the merge resolved nothing by hand)"
+  assert_not_contains "$(cat "$RANGE_OUT.patch")" "trunk_added" "…and trunk's function is not in the patch text"
+  assert_eq "" "$(cat "$RANGE_OUT.patch")" "…which is empty"
+  sed -i 's/^l3$/l3 by the branch/' src/shared.py
+  git commit -qam "the branch edits the middle of shared.py"
+  range_probe "$from..HEAD"
+  assert_eq "src/shared.py|" "$(cat "$RANGE_OUT.paths")" "a later branch edit of that file: it is in the set, from its own commit"
+  assert_contains "$(cat "$RANGE_OUT.patch")" "+l3 by the branch" "…its hunk in the patch text"
+  assert_not_contains "$(cat "$RANGE_OUT.patch")" "trunk_added" "…still without trunk's function"
+  teardown
+}
+
+test_range_conflict_keep_both_in_set() {
+  echo "test: range rule — a conflict resolved by keeping both sides is in the set"
+  gate_fixture
+  RANGE_OUT=$(harness_mktemp range)
+  conflict_merge
+  printf 'branch\ntrunk\n' > docs/notes.md
+  git add docs/notes.md && git commit -qm "merge main, both kept"
+  range_probe "$MERGE_FROM..HEAD"
+  assert_eq "docs/notes.md|" "$(cat "$RANGE_OUT.paths")" "the file is in the path set"
+  assert_contains "$(cat "$RANGE_OUT.patch")" "-<<<<<<<" "…its patch text shows the markers git removed"
+  teardown
+}
+
+test_range_conflict_new_line_in_patch() {
+  echo "test: range rule — a line the author wrote into a conflict resolution is a + line"
+  gate_fixture
+  RANGE_OUT=$(harness_mktemp range)
+  conflict_merge
+  printf 'written by hand\n' > docs/notes.md
+  git add docs/notes.md && git commit -qm "merge main, rewritten"
+  range_probe "$MERGE_FROM..HEAD"
+  assert_eq "docs/notes.md|" "$(cat "$RANGE_OUT.paths")" "the file is in the path set"
+  assert_contains "$(cat "$RANGE_OUT.patch")" "+written by hand" "…the new line is a + line"
+  assert_not_contains "$(cat "$RANGE_OUT.patch")" "@@@" "…in plain unified format"
+  teardown
+}
+
+test_range_conflict_take_theirs_not_in_set() {
+  echo "test: range rule — a conflict resolved by taking trunk's side is not the branch's work"
+  gate_fixture
+  RANGE_OUT=$(harness_mktemp range)
+  conflict_merge
+  git checkout -q --theirs docs/notes.md
+  git add docs/notes.md && git commit -qm "merge main, theirs"
+  assert_eq "trunk" "$(cat docs/notes.md)" "precondition: the resolution is trunk's file"
+  range_probe "$MERGE_FROM..HEAD"
+  assert_eq "" "$(cat "$RANGE_OUT.paths")" "the path set: empty"
+  assert_eq "" "$(cat "$RANGE_OUT.patch")" "…and so is the patch text"
+  teardown
+}
+
+test_range_evil_merge_in_set() {
+  echo "test: range rule — an edit a merge makes to a file neither side changed is in the set"
+  merge_fixture
+  local from
+  from=$(git rev-parse HEAD)
+  git checkout -q main
+  printf 'TRUNK = 1\n' > src/trunk.py
+  git add -A && git commit -qm "trunk work"
+  git checkout -q feature
+  printf 'BRANCH = 1\n' > src/branch.py
+  git add -A && git commit -qm "branch work"
+  git merge -q --no-edit --no-commit --no-ff main
+  printf 'same\nsneaked in\n' > src/untouched.py
+  git add -A && git commit -qm "merge main, with an edit"
+  range_probe "$from..HEAD"
+  assert_eq "src/branch.py|src/untouched.py|" "$(cat "$RANGE_OUT.paths")" "the path set: the branch's file and the evil-merge file, not trunk's"
+  assert_contains "$(cat "$RANGE_OUT.patch")" "+sneaked in" "…the evil-merge hunk in the patch text"
+  assert_not_contains "$(cat "$RANGE_OUT.patch")" "TRUNK" "…without trunk's file"
+  teardown
+}
+
+test_range_octopus_merge_indeterminate() {
+  echo "test: range rule — an octopus first-parent merge in the range is indeterminate"
+  merge_fixture
+  local from octo
+  from=$(git rev-parse HEAD)
+  git checkout -q -b side1 main
+  mkdir -p lib
+  printf 'S1 = 1\n' > lib/side1.py
+  git add -A && git commit -qm "side one"
+  git checkout -q -b side2 main
+  mkdir -p lib
+  printf 'S2 = 1\n' > lib/side2.py
+  git add -A && git commit -qm "side two"
+  git checkout -q feature
+  git merge -q --no-edit side1 side2 >/dev/null 2>&1
+  octo=$(git rev-parse HEAD)
+  assert_eq "4" "$(git rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" "precondition: HEAD has three parents"
+  cl run --planes-of "$from..HEAD"
+  assert_eq "2" "$CL_RC" "run --planes-of over an octopus merge: exits 2"
+  assert_json_field "$CL_OUT" ".error | test(\"$octo\")" "true" "…the error names the merge"
+  assert_json_field "$CL_OUT" '.error | test("octopus")' "true" "…and says why"
+  teardown
+}
+
+test_range_git_without_remerge_diff_indeterminate() {
+  echo "test: range rule — a git that rejects --remerge-diff, with a merge in the range, is indeterminate"
+  merge_fixture
+  local from shim real
+  from=$(git rev-parse HEAD)
+  git checkout -q main
+  mkdir -p lib
+  printf 'TRUNK = 1\n' > lib/trunk.py
+  git add -A && git commit -qm "trunk work"
+  git checkout -q feature
+  mkdir -p lib
+  printf 'BRANCH = 1\n' > lib/branch.py
+  git add -A && git commit -qm "branch work"
+  git merge -q --no-edit main
+  shim=$(harness_mktemp_d git-shim)
+  real=$(command -v git)
+  cat > "$shim/git" <<EOF
+#!/bin/sh
+for a in "\$@"; do
+  case "\$a" in --remerge-diff) echo "error: unknown option 'remerge-diff'" >&2; exit 129 ;; esac
+done
+exec "$real" "\$@"
+EOF
+  chmod +x "$shim/git"
+  PATH="$shim:$PATH" cl run --planes-of "$from..HEAD"
+  assert_eq "2" "$CL_RC" "run --planes-of: exits 2"
+  assert_json_field "$CL_OUT" '.error | test("remerge-diff")' "true" "…naming --remerge-diff"
+  assert_json_field "$CL_OUT" ".error | contains(\"$(git --version | awk '{print $3}')\")" "true" "…and the git version"
+  git checkout -q -b flat "$from"
+  mkdir -p lib
+  printf 'BRANCH = 1\n' > lib/branch.py
+  git add -A && git commit -qm "branch work, no merge"
+  PATH="$shim:$PATH" cl run --planes-of "$from..HEAD"
+  assert_eq "0" "$CL_RC" "a range without a merge never asks for --remerge-diff: exits 0"
+  teardown
+}
+
 test_planes_of_three_dot_range() {
   echo "test: range rule — <a>...<b> is <merge-base a b>..<b>, then the range rule"
   gate_fixture
@@ -7377,6 +7557,13 @@ run_tests() {
   test_gate_path_safety
   test_gate_range_first_parent_excludes_trunk
   test_gate_range_conflict_resolution_in_path_set
+  test_range_clean_merge_excludes_trunk_additions
+  test_range_conflict_keep_both_in_set
+  test_range_conflict_new_line_in_patch
+  test_range_conflict_take_theirs_not_in_set
+  test_range_evil_merge_in_set
+  test_range_octopus_merge_indeterminate
+  test_range_git_without_remerge_diff_indeterminate
   test_gate_v9_trunk_only_bound_test_edit
   test_planes_of_three_dot_range
   test_planes_of_not_ancestor_indeterminate

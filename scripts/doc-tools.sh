@@ -7333,12 +7333,17 @@ _JQ_CLAIMS_RUN_RESULTS='$plan[0] as $plan
 #   - its commits are `git rev-list --first-parent --no-merges <a>..<b>`;
 #     the path set, the patch text and the patch ids come from them alone;
 #   - each first-parent merge M of the range (`git rev-list --first-parent
-#     --merges`) adds the files `git show --cc --name-only M` lists — those
-#     differing from every parent: conflict resolutions and evil-merge
-#     edits — to the path set, and their hunks, `git diff M^1 M -- <those
-#     files>` (plain unified format: a hunk parser reads them as any
-#     other's), to the patch text. Trunk lines inside a resolved file come
-#     along: conservative. Patch ids stay non-merge only.
+#     --merges`) must have exactly two parents (an octopus merge: dies, exit
+#     2) and adds its hand resolutions: the files named by BOTH `git show
+#     --cc --name-only M` (differing from every parent) and `git show
+#     --remerge-diff --name-only M` (differing from git's own automatic
+#     re-merge) — conflict resolutions and evil-merge edits, never a file
+#     git merged cleanly nor one resolved by taking a side. Those files go to
+#     the path set, and their hunks, `git show --remerge-diff M -- <those
+#     files>` (plain unified format: a hunk parser reads them as any other's;
+#     a kept conflict marker is a `-` line), to the patch text. Trunk's own
+#     lines never come along. A git without --remerge-diff (2.36) and a merge
+#     in the range: dies, with no fallback. Patch ids stay non-merge only.
 # A three-dot <a>...<b> means <merge-base a b>..<b> (_claims_range_parse). <a>
 # must be an ancestor of <b> (a range that is not one branch's work dies,
 # exit 2: never an empty set). These helpers are the rule's one
@@ -7385,24 +7390,57 @@ _claims_range_parse() {
 }
 
 # _claims_range_merges <range> <out-file>: the range's first-parent merges,
-# one commit id per line (none: an empty file). Sets _CL_RANGE_A/_B.
+# one commit id per line (none: an empty file). Sets _CL_RANGE_A/_B. Dies
+# on a merge with other than two parents: --remerge-diff skips an octopus
+# merge in silence, so its resolutions would read as none.
 _claims_range_merges() {
-  _claims_range_parse "$1"
-  git rev-list --first-parent --merges "$_CL_RANGE_A..$_CL_RANGE_B" -- > "$2" 2>/dev/null \
-    || _claims_die "git rev-list failed listing the merges of $1"
+  local range="$1" out="$2" raw="$_SCRATCH/cl-range-mraw" line m
+  _claims_range_parse "$range"
+  git rev-list --first-parent --merges --parents "$_CL_RANGE_A..$_CL_RANGE_B" -- > "$raw" 2>/dev/null \
+    || _claims_die "git rev-list failed listing the merges of $range"
+  : > "$out" || _claims_die "cannot write $out"
+  while IFS= read -r line; do
+    # shellcheck disable=SC2086  # the line is hex ids: split on spaces
+    set -- $line
+    m=$1
+    [ $# -eq 3 ] || _claims_die "merge $m (in $range) has $(($# - 1)) parents: an octopus merge's resolutions cannot be read (--remerge-diff skips it), so the range is indeterminate"
+    printf '%s\n' "$m" >> "$out"
+  done < "$raw"
 }
 
-# _claims_merge_files <merge> <out-file>: the files merge <merge> changed
-# against every parent (git show --cc --name-only), NUL separated.
+# _claims_merge_files <merge> <out-file>: the hand resolutions of the
+# two-parent merge <merge>, NUL separated: the files named by both `git show
+# --cc --name-only` (changed against every parent) and `git show
+# --remerge-diff --name-only` (changed against git's own re-merge). Dies when
+# this git rejects --remerge-diff (tried, not guessed from the version).
 _claims_merge_files() {
-  git show -z --no-renames --cc --name-only --format= "$1" -- > "$2" 2>/dev/null \
+  local cc="$_SCRATCH/cl-merge-cc" rmz="$_SCRATCH/cl-merge-remerge" p q
+  local ccf=() rmf=()
+  git show -z --no-renames --cc --name-only --format= "$1" -- > "$cc" 2>/dev/null \
     || _claims_die "git show --cc failed on merge $1"
+  git show -z --no-renames --remerge-diff --name-only --format= "$1" -- > "$rmz" 2>/dev/null \
+    || _claims_die "git $(git --version 2>/dev/null | awk '{print $3}') cannot read merge $1 with --remerge-diff (git 2.36 or newer is needed): its hand resolutions are indeterminate"
+  while IFS= read -r -d '' p; do
+    if [ -n "$p" ]; then ccf+=("$p"); fi
+  done < "$cc"
+  while IFS= read -r -d '' p; do
+    if [ -n "$p" ]; then rmf+=("$p"); fi
+  done < "$rmz"
+  : > "$2" || _claims_die "cannot write $2"
+  for p in ${ccf[@]+"${ccf[@]}"}; do
+    for q in ${rmf[@]+"${rmf[@]}"}; do
+      if [ "$p" = "$q" ]; then
+        printf '%s\0' "$p" >> "$2"
+        break
+      fi
+    done
+  done
 }
 
 # _claims_range_paths <range> <out-file>: the range's path set (see the
 # range rule), NUL separated, no empty entry (a path may repeat): the files
 # of its first-parent non-merge commits (both sides of a rename), then each
-# first-parent merge's --cc files.
+# first-parent merge's hand resolutions (_claims_merge_files).
 _claims_range_paths() {
   local zout="$2" zraw="$_SCRATCH/cl-range-paths.raw" ms="$_SCRATCH/cl-range-merges" mf="$_SCRATCH/cl-range-mfiles" m p
   _claims_range_merges "$1" "$ms"
@@ -7434,9 +7472,9 @@ _claims_range_log() {
 
 # _claims_range_patch <range> <out-file> [<diff-option>…]: the range's patch
 # text (see the range rule): _claims_range_log, then, per first-parent merge
-# with --cc files, a "commit <M>" line and `git diff` (_CL_DIFF_OPTS, then
-# <diff-option>…) M^1 M -- <those files>. A hunk parser (V8's -U0) passes
-# its options.
+# with hand-resolved files, a "commit <M>" line and `git show --remerge-diff`
+# (_CL_DIFF_OPTS, then <diff-option>…) M -- <those files>. A hunk parser
+# (V8's -U0) passes its options.
 _claims_range_patch() {
   local range="$1" out="$2" ms="$_SCRATCH/cl-range-merges" mf="$_SCRATCH/cl-range-mfiles" m p
   local files=()
@@ -7451,8 +7489,9 @@ _claims_range_patch() {
     done < "$mf"
     [ ${#files[@]} -gt 0 ] || continue
     printf 'commit %s\n' "$m" >> "$out" || _claims_die "cannot write $out"
-    git -c core.quotePath=true --literal-pathspecs diff "${_CL_DIFF_OPTS[@]}" "$@" "$m^1" "$m" \
-      -- "${files[@]}" >> "$out" 2>/dev/null || _claims_die "git diff failed on merge $m"
+    git -c core.quotePath=true --literal-pathspecs show --no-show-signature --remerge-diff --format= \
+      "${_CL_DIFF_OPTS[@]}" "$@" "$m" -- "${files[@]}" >> "$out" 2>/dev/null \
+      || _claims_die "git show --remerge-diff failed on merge $m"
   done 3< "$ms"
 }
 
