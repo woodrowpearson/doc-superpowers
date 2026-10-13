@@ -7370,6 +7370,420 @@ test_rulings_amendment_batch_json_and_markdown() {
   teardown
 }
 
+# --- V8: normative coverage -------------------------------------------------------
+
+# The last `cl`'s V8 rows (findings and advisories): their count, and their
+# messages one per line.
+v8_count() {
+  jq '[.findings[]?, .advisories[]? | select(.check == "V8")] | length' <<<"$CL_OUT" 2>/dev/null || echo invalid
+}
+v8_messages() {
+  jq -r '.findings[]?, .advisories[]? | select(.check == "V8") | .message' <<<"$CL_OUT" 2>/dev/null || true
+}
+# v8_msg <doc> <line>: the V8 message for line <line> of <doc>.
+v8_msg() {
+  printf '%s:%s: normative text no claim covers' "$1" "$2"
+}
+
+# assert_v8_line <doc> <exact line> <what>: the last `cl`'s V8 rows are
+# exactly one, naming the line of <doc> equal to <exact line>.
+assert_v8_line() {
+  local n
+  n=$(line_no "$1" "$2")
+  assert_true "$3: precondition, the line is in $1" test -n "$n"
+  assert_eq "1" "$(v8_count)" "$3: one V8 row"
+  assert_eq "$(v8_msg "$1" "$n")" "$(v8_messages)" "$3: naming $1:$n"
+}
+
+# session_claim <quote>: an unbuilt claim of the fixture doc quoting <quote>.
+session_claim() {
+  jq -nc --arg q "$1" '{
+    id: "SPEC-AUTH-001#session-idle", quote: $q,
+    states: "A session is closed after its idle limit.", kind: "behaviour",
+    subject: ["src/auth/token.py"], status: "unbuilt", enforced_by: "test",
+    test: null, nonvacuity: null, promotion: null,
+    tracker: "docs/issues/token-ttl.md", frozen_at: null, restates: [], rulings: []}'
+}
+
+REFRESH_LINE="- Refresh tokens are single-use."
+SESSION_LINE="- Sessions end after 8 hours of inactivity."
+SESSION_QUOTE="Sessions end after 8 hours of inactivity"
+
+test_v8_adr_decision_hunk_uncovered() {
+  echo "test: V8 — a new ADR's Decision line no claim covers is one advisory naming the line"
+  claims_fixture
+  mkdir -p docs/adr
+  cat > docs/adr/ADR-007-cache.md <<'EOF'
+# ADR-007: Response cache
+
+**Status**: Proposed
+**Date**: 2026-10-10
+
+## Context
+
+Reads are slow.
+
+## Decision
+
+Cache read responses for 60 seconds.
+
+## Consequences
+
+Faster reads.
+EOF
+  printf '%s\n' '{"schema":1,"doc":"docs/adr/ADR-007-cache.md","claims":[]}' > docs/spec-claims/ADR-007.json
+  git add docs/adr docs/spec-claims/ADR-007.json
+  cl validate --staged
+  assert_v8_line docs/adr/ADR-007-cache.md "Cache read responses for 60 seconds." "the ADR's Decision line"
+  assert_json_field "$CL_OUT" '[.advisories[] | select(.check == "V8")] | length' "1" "…an advisory"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V8")] | length' "0" "…not a finding (V8 is not blocking by default)"
+  teardown
+}
+
+test_v8_covered_by_claim_quote() {
+  echo "test: V8 — an added Requirements line a claim quotes is covered"
+  claims_fixture
+  doc_edit "$DOC" "$REFRESH_LINE" "$SESSION_LINE" after
+  add_claim "$(session_claim "$SESSION_QUOTE")"
+  rerender
+  git add "$DOC" "$SIDECAR"
+  cl validate --staged
+  assert_eq "0" "$CL_RC" "the line and its claim staged: exits 0"
+  assert_eq "0" "$(v8_count)" "…no V8 row"
+  teardown
+}
+
+test_v8_wrapped_quote_covers_both_lines() {
+  echo "test: V8 — a quote wrapped over two added lines covers both"
+  claims_fixture
+  doc_edit "$DOC" "$REFRESH_LINE" $'- Sessions end after 8 hours\n  of inactivity.' after
+  git add "$DOC"
+  cl validate --staged
+  assert_eq "2" "$(v8_count)" "without a claim: both wrapped lines are uncovered"
+  add_claim "$(session_claim "$SESSION_QUOTE")"
+  rerender
+  git add "$DOC" "$SIDECAR"
+  cl validate --staged
+  assert_eq "0" "$(v8_count)" "a claim whose quote wraps over them: no V8 row"
+  teardown
+}
+
+test_v8_spec_requirements_heading() {
+  echo "test: V8 — an added Requirements line without a claim"
+  claims_fixture
+  doc_edit "$DOC" "$REFRESH_LINE" "$SESSION_LINE" after
+  git add "$DOC"
+  cl validate --staged
+  assert_v8_line "$DOC" "$SESSION_LINE" "an uncovered Requirements line"
+  assert_eq "0" "$CL_RC" "…advisory: exits 0"
+  teardown
+}
+
+test_v8_design_default_normative() {
+  echo "test: V8 — the spec template's Design section is normative with no heading config"
+  claims_fixture
+  assert_json_field "$(cat docs/spec-claims/config.json)" 'has("normative_headings")' "false" "precondition: no normative_headings"
+  doc_edit "$DOC" "## Implementation Notes" $'## Design\n\nTokens are signed with the service key.\n\n## Implementation Notes'
+  git add "$DOC"
+  cl validate --staged
+  assert_v8_line "$DOC" "Tokens are signed with the service key." "an uncovered Design line"
+  teardown
+}
+
+test_v8_host_heading() {
+  echo "test: V8 — a normative_headings ERE (case-insensitive) makes its section normative"
+  claims_fixture
+  doc_edit "$DOC" "## Implementation Notes" $'## Contract\n\nThe token endpoint answers within 200 ms.\n\n## Implementation Notes'
+  git add "$DOC"
+  cl validate --staged
+  assert_eq "0" "$(v8_count)" "Contract is no default heading: no V8 row"
+  jset docs/spec-claims/config.json '.normative_headings = ["^Contract$"]'
+  git add docs/spec-claims/config.json
+  cl validate --staged
+  assert_v8_line "$DOC" "The token endpoint answers within 200 ms." "normative_headings [^Contract\$]"
+  jset docs/spec-claims/config.json '.normative_headings = ["^CONTRACT$"]'
+  git add docs/spec-claims/config.json
+  cl validate --staged
+  assert_eq "1" "$(v8_count)" "…matched case-insensitively"
+  jset docs/spec-claims/config.json '.normative_headings = ["^Contract$"] | .descriptive_headings = ["contract"]'
+  git add docs/spec-claims/config.json
+  cl validate --staged
+  assert_eq "0" "$(v8_count)" "…a descriptive_headings match wins over a normative one"
+  teardown
+}
+
+test_v8_invalid_heading_ere_indeterminate() {
+  echo "test: V8 — a heading ERE awk cannot compile is indeterminate (exit 2), never a crash or a silent match-nothing"
+  claims_fixture
+  local v
+  for v in '{"normative_headings": ["("]}' '{"descriptive_headings": ["["]}' \
+           '{"normative_headings": [1]}' '{"normative_headings": "^Contract$"}' '{"normative_headings": [""]}'; do
+    jset docs/spec-claims/config.json ". + $v"
+    cl validate --all
+    assert_eq "2" "$CL_RC" "config $v: exits 2"
+    assert_eq "1" "$(json_count "$CL_OUT")" "config $v: one verdict object"
+    assert_json_field "$CL_OUT" '[.indeterminate[] | select(.check == "V8")] | length' "1" "config $v: one V8 indeterminate row"
+    assert_json_field "$CL_OUT" '[.indeterminate[] | select(.check == "V8")][0].reason | test("_headings")' "true" "config $v: …naming the key"
+    assert_eq "0" "$(v8_count)" "config $v: no V8 row"
+    jset docs/spec-claims/config.json 'del(.normative_headings, .descriptive_headings)'
+  done
+  teardown
+}
+
+test_v8_open_questions_resolved_column() {
+  echo "test: V8 — an Open questions row's Resolved cell is normative"
+  claims_fixture
+  doc_edit "$DOC" "| Rotate keys? | Keys rotate every 30 days. |" \
+    $'| Cache keys? | Keys are hashed with *SHA-256*. |\n| Revoke on logout? |  |' after
+  git add "$DOC"
+  cl validate --staged
+  assert_v8_line "$DOC" "| Cache keys? | Keys are hashed with *SHA-256*. |" "a new row with a Resolved cell (the empty one is open)"
+  add_claim "$(session_claim "Keys are hashed with SHA-256")"
+  rerender
+  git add "$DOC" "$SIDECAR"
+  cl validate --staged
+  assert_eq "0" "$(v8_count)" "a claim quoting the cell: no V8 row"
+  teardown
+}
+
+test_v8_non_normative_section_ignored() {
+  echo "test: V8 — lines added outside a normative section are not checked"
+  claims_fixture
+  doc_edit "$DOC" "How long issued tokens stay valid." "Tokens are opaque strings." after
+  doc_edit "$DOC" "Not started." "Tokens must be stored hashed." after
+  git add "$DOC"
+  cl validate --staged
+  assert_eq "0" "$(v8_count)" "Summary and Implementation Notes lines: no V8 row"
+  teardown
+}
+
+test_v8_status_block_excluded() {
+  echo "test: V8 — the rendered status block is not normative text, inside a normative section too"
+  claims_fixture
+  doc_edit "$DOC" "## Summary" "## Interfaces"
+  git commit -qam "the first section is an Interfaces section"
+  add_claim "$(session_claim "Refresh tokens are single-use")"
+  rerender
+  assert_contains "$(block_of "$DOC")" "SPEC-AUTH-001#session-idle" "precondition: render added a row to the block"
+  git add "$DOC" "$SIDECAR"
+  cl validate --staged
+  assert_eq "0" "$(v8_count)" "render, then stage: no V8 row"
+  doc_edit "$DOC" "$BLOCK_END" "Clients send the token in a header." after
+  git add "$DOC"
+  cl validate --staged
+  assert_v8_line "$DOC" "Clients send the token in a header." "a line after the block, still under Interfaces"
+  teardown
+}
+
+test_v8_heading_inside_fence_ignored() {
+  echo "test: V8 — a heading inside a code fence (nested fences included) opens no section"
+  claims_fixture
+  doc_edit "$DOC" "How long issued tokens stay valid." \
+    $'\n```markdown\n## Requirements\n\n- An example requirement.\n```\n\nText after the example.\n\n````md\n```\n## Requirements\n```\nA nested example line.\n````\n\nText after the nested example.' after
+  git add "$DOC"
+  cl validate --staged
+  assert_eq "0" "$(v8_count)" "fenced Requirements headings under Summary: no V8 row"
+  teardown
+}
+
+test_v8_unicode_line_coverage() {
+  echo "test: V8 — line coverage is by codepoint after lines holding é and —"
+  claims_fixture
+  doc_edit "$DOC" "How long issued tokens stay valid." "How long issued tokens stay valid — durée de vie, § café."
+  doc_edit "$DOC" "$REFRESH_LINE" $'- Sessions end — même après 8 heures.\n- Logout revokes every token.' after
+  add_claim "$(session_claim "Sessions end — même après 8 heures")"
+  rerender
+  git add "$DOC" "$SIDECAR"
+  cl validate --staged
+  assert_v8_line "$DOC" "- Logout revokes every token." "the covered non-ASCII line is not reported, the next one is"
+  teardown
+}
+
+test_v8_blocking_when_configured() {
+  echo "test: V8 — blocking when the config's blocking list includes it"
+  claims_fixture
+  jset docs/spec-claims/config.json '.blocking = ["V1","V2","V3","V4","V5","V6","V8","V10","V11","V12"]'
+  git add docs/spec-claims/config.json
+  doc_edit "$DOC" "$REFRESH_LINE" "$SESSION_LINE" after
+  git add "$DOC"
+  cl validate --staged
+  assert_eq "1" "$CL_RC" "an uncovered line with V8 blocking: exits 1"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V8")] | length' "1" "…a V8 finding"
+  teardown
+}
+
+test_v8_all_every_line_of_sidecar_docs() {
+  echo "test: V8 — validate --all checks every line of each doc with a sidecar, and only those docs"
+  claims_fixture
+  mkdir -p docs/adr
+  printf '# ADR-008: No sidecar\n\n## Decision\n\nUse a queue.\n' > docs/adr/ADR-008-queue.md
+  cl validate --all
+  assert_eq "0" "$CL_RC" "exits 0 (advisory)"
+  assert_eq "2" "$(v8_count)" "two V8 rows"
+  assert_eq "$(v8_msg "$DOC" "$(line_no "$DOC" "$REFRESH_LINE")")
+$(v8_msg "$DOC" "$(line_no "$DOC" "| Rotate keys? | Keys rotate every 30 days. |")")" "$(v8_messages)" \
+    "…the uncovered requirement and the resolved Open Questions row (the quoted line is covered; the ADR without a sidecar is not read)"
+  teardown
+}
+
+# sections_of <file>: SECTIONS, the classes _claims_sections prints for
+# <file>, space separated, through a probe; it asserts that the probe exited
+# 0 and that the rows are numbered 1…n.
+sections_of() {
+  local probe out rc=0
+  out=$(harness_mktemp sections)
+  probe=$(claims_probe after '_claims_sections "$CL_T_DOC" > "$CL_T_OUT"; _claims_mark_emitted 0; exit 0')
+  CL_T_DOC="$1" CL_T_OUT="$out" "$probe" claims render </dev/null >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "sections_of $1: the probe exited 0"
+  assert_eq "$(awk 'END { print NR }' "$out")" "$(awk -F '\t' '$1 == NR { n++ } END { print n + 0 }' "$out")" \
+    "sections_of $1: one row per line, numbered in order"
+  SECTIONS=$(cut -f2 "$out" | paste -sd' ' -)
+}
+
+test_v8_sections_classes() {
+  echo "test: _claims_sections — heading levels, inheritance, markers, fences and the status block"
+  claims_fixture
+  local doc=docs/specs/SPEC-AUTH-002-sections.md want
+  {
+    printf '# SPEC-AUTH-002: Sections\n\n## Requirements\n- Must A.\n### Details\n- Must B.\n'
+    printf '### Implementation Notes\nUses X.\n## Build log\n\n<!-- spec-claims:descriptive -->\nBuilt as specified.\n'
+    printf '## Open Questions\n| Q | Resolved |\n## 3.1 Interfaces\n<!-- a comment -->\n<!-- a --> g(y). <!-- b -->\nf(x).\n'
+    printf '%s\n## Claim status\nrow\n%s\nAfter the block.\n' "$BLOCK_BEGIN" "$BLOCK_END"
+    printf '````md\n```\n# Not a heading\n```\n````\n## Summary\nText.\n'
+  } > "$doc"
+  want="other other other normative other normative other descriptive other other other descriptive"
+  want="$want other openq other other normative normative"
+  want="$want other other other other normative"
+  want="$want normative normative normative normative normative other other"
+  sections_of "$doc"
+  assert_eq "$want" "$SECTIONS" "each line's class"
+  sed 's/$/\r/' "$doc" > "$doc.crlf"
+  sections_of "$doc.crlf"
+  assert_eq "$want" "$SECTIONS" "…the same for the CRLF twin"
+  teardown
+}
+
+# --- V8 over a gate range: the added lines are HEAD's, by blame ------------------
+
+test_v8_gate_range_line_numbers_are_heads() {
+  echo "test: V8 at the gate — an added line is named by its line number at HEAD, over a two-commit range"
+  gate_fixture
+  gate_promote
+  local from line
+  from=$(git rev-parse HEAD)
+  doc_edit "$DOC" "$REFRESH_LINE" "- Logout revokes every token." after
+  git commit -qam "a requirement"
+  doc_edit "$DOC" "How long issued tokens stay valid." $'\nOne.\n\nTwo.\n\nThree.' after
+  git commit -qam "summary lines above it"
+  line=$(line_no "$DOC" "- Logout revokes every token.")
+  assert_true "precondition: commit 1's post-image numbers the line otherwise" \
+    test "$(git show "HEAD~1:$DOC" | grep -n '^- Logout revokes every token\.$' | cut -d: -f1)" != "$line"
+  gate 1 --from "$from"
+  assert_eq "1" "$CL_RC" "an uncovered normative line at the gate: exits 1 (blocking)"
+  assert_eq "$(v8_msg "$DOC" "$line")" "$(gate_messages V8)" "…one V8 finding naming HEAD's line $line"
+  assert_eq "1" "$(rec 1 '.checks.V8 | length')" "…the record's checks.V8"
+  assert_eq "red" "$(rec 1 .result)" "…result red"
+  teardown
+}
+
+test_v8_gate_trunk_merge_not_added() {
+  echo "test: V8 at the gate — a normative line trunk added and a merge brought in is not the branch's"
+  gate_fixture
+  gate_promote
+  local from
+  from=$(git rev-parse HEAD)
+  git checkout -q main
+  doc_edit "$DOC" "$REFRESH_LINE" "- Trunk adds this requirement." after
+  git commit -qam "trunk requirement"
+  git checkout -q feature
+  doc_edit "$DOC" "Not started." "Started on the branch."
+  git commit -qam "branch notes"
+  git merge -q --no-edit main
+  assert_eq "3" "$(git rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" "precondition: a clean two-parent merge"
+  assert_contains "$(git log --format= --name-only --first-parent --no-merges "$from..HEAD")" "$DOC" \
+    "precondition: the branch's own commit edits the doc (it is in the range's path set)"
+  gate 1 --from "$from"
+  assert_eq "0" "$CL_RC" "trunk's requirement merged in: exits 0"
+  assert_eq "0" "$(v8_count)" "…no V8 finding"
+  # A line written in a merge resolution is the branch's (conservatively,
+  # with every line that merge brought into that doc).
+  git checkout -q main
+  doc_edit "$DOC" "- Trunk adds this requirement." "- Trunk adds a second requirement." after
+  git commit -qam "trunk requirement 2"
+  git checkout -q feature
+  git merge -q --no-commit --no-ff main >/dev/null 2>&1
+  doc_edit "$DOC" "- Trunk adds a second requirement." "- The merge adds this requirement." after
+  git add "$DOC" && git commit -qm "merge main, with an evil edit"
+  gate 1 --from "$from"
+  assert_eq "1" "$CL_RC" "a requirement written in the merge: exits 1"
+  assert_contains "$(gate_messages V8)" "$(v8_msg "$DOC" "$(line_no "$DOC" "- The merge adds this requirement.")")" "…naming the merge's line"
+  assert_contains "$(gate_messages V8)" "$(v8_msg "$DOC" "$(line_no "$DOC" "- Trunk adds a second requirement.")")" \
+    "…and, conservatively, trunk's line that merge brought into the doc"
+  assert_not_contains "$(gate_messages V8)" "$(v8_msg "$DOC" "$(line_no "$DOC" "- Trunk adds this requirement.")")" \
+    "…never the line the clean merge brought in"
+  teardown
+}
+
+test_v8_gate_blame_ignore_revs_pinned() {
+  echo "test: V8 at the gate — a clone's blame.ignoreRevsFile does not hide an added line"
+  gate_fixture
+  gate_promote
+  local from line ign
+  from=$(git rev-parse HEAD)
+  doc_edit "$DOC" "$REFRESH_LINE" "- Refresh tokens are single-use and expire after a day."
+  git commit -qam "a requirement reworded"
+  ign=$(harness_mktemp ignore-revs)
+  git rev-parse HEAD > "$ign"
+  git config blame.ignoreRevsFile "$ign"
+  git config blame.markUnblamableLines true
+  git config blame.markIgnoredLines true
+  line=$(line_no "$DOC" "- Refresh tokens are single-use and expire after a day.")
+  assert_true "precondition: with the clone's config, plain blame attributes the line elsewhere" \
+    test "$(git blame --porcelain -L "$line,$line" -- "$DOC" | head -n 1 | cut -d' ' -f1)" != "$(git rev-parse HEAD)"
+  gate 1 --from "$from"
+  assert_eq "1" "$CL_RC" "exits 1"
+  assert_eq "$(v8_msg "$DOC" "$line")" "$(gate_messages V8)" "…the reworded line is a V8 finding"
+  teardown
+}
+
+# git_failing <word>: a git shim directory whose git exits 128 when one of
+# its arguments is <word>, else runs the real git.
+git_failing() {
+  local shim real
+  shim=$(harness_mktemp_d git-shim)
+  real=$(command -v git)
+  cat > "$shim/git" <<EOF
+#!/bin/sh
+for a in "\$@"; do
+  case "\$a" in $1) echo "fatal: simulated failure" >&2; exit 128 ;; esac
+done
+exec "$real" "\$@"
+EOF
+  chmod +x "$shim/git"
+  printf '%s' "$shim"
+}
+
+test_v8_git_failure_indeterminate() {
+  echo "test: V8 — a git failure reading the added lines is exit 2, never an empty set"
+  gate_fixture
+  gate_promote
+  local from shim
+  from=$(git rev-parse HEAD)
+  doc_edit "$DOC" "$REFRESH_LINE" "$SESSION_LINE" after
+  git commit -qam "a requirement"
+  shim=$(git_failing blame)
+  PATH="$shim:$PATH" gate 1 --from "$from"
+  assert_eq "2" "$CL_RC" "git blame failing at the gate: exits 2"
+  assert_json_field "$CL_OUT" '.error | test("blame")' "true" "…naming blame"
+  assert_file_not_exists "$GATE_REC1" "…no record written"
+  doc_edit "$DOC" "$SESSION_LINE" "- Logout revokes every token." after
+  git add "$DOC"
+  shim=$(git_failing --unified=0)
+  PATH="$shim:$PATH" cl validate --staged
+  assert_eq "2" "$CL_RC" "git diff failing under --staged: exits 2"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -7690,6 +8104,27 @@ run_tests() {
   test_attest_render_check_fails
   test_attest_path_safety
   test_rulings_amendment_batch_json_and_markdown
+
+  # --- Task 18: V8 normative coverage ---
+  test_v8_adr_decision_hunk_uncovered
+  test_v8_covered_by_claim_quote
+  test_v8_wrapped_quote_covers_both_lines
+  test_v8_spec_requirements_heading
+  test_v8_design_default_normative
+  test_v8_host_heading
+  test_v8_invalid_heading_ere_indeterminate
+  test_v8_open_questions_resolved_column
+  test_v8_non_normative_section_ignored
+  test_v8_status_block_excluded
+  test_v8_heading_inside_fence_ignored
+  test_v8_unicode_line_coverage
+  test_v8_blocking_when_configured
+  test_v8_all_every_line_of_sidecar_docs
+  test_v8_sections_classes
+  test_v8_gate_range_line_numbers_are_heads
+  test_v8_gate_trunk_merge_not_added
+  test_v8_gate_blame_ignore_revs_pinned
+  test_v8_git_failure_indeterminate
 
   print_summary
 }
