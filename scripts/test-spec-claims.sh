@@ -6008,6 +6008,470 @@ test_is_code_path() {
   rm -f "$out"
   teardown
 }
+
+# --- claims gate (Task 16) -------------------------------------------------------
+#
+# gate_fixture is promote_fixture (the fixture claim bound to the stub, its
+# mutant 900 → 1800) with the default plan committed: chunk 1 names the
+# claim on its Claims line, chunk 2 names none, and the plan lists the
+# fixture spec as target. gate_promote promotes the claim and commits what
+# promote wrote. The gate records land in docs/spec-claims/gates/<stem>/,
+# untracked unless a test commits them (the dirty-tree check ignores them).
+
+GATE_REC1=docs/spec-claims/gates/$PLAN_STEM/chunk-1.json
+GATE_REC2=docs/spec-claims/gates/$PLAN_STEM/chunk-2.json
+GATE_UNBUILT_MSG="chunk was meant to build it: promote, rule, or defer"
+
+gate_fixture() {
+  promote_fixture
+  # shellcheck disable=SC2086  # the block list splits on spaces
+  plan_write -- $PLAN_DEFAULT
+  git add "$PLAN" && git commit -qm "the plan"
+}
+
+# gate_plain_fixture: claims_fixture (the claim unbuilt, no check yet, no
+# runner) with the default plan committed.
+gate_plain_fixture() {
+  claims_fixture
+  # shellcheck disable=SC2086  # the block list splits on spaces
+  plan_write -- $PLAN_DEFAULT
+  git add "$PLAN" && git commit -qm "the plan"
+}
+
+gate_promote() {
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "gate_promote: promote exits 0"
+  git add "$SIDECAR" "$DOC" && git commit -qm "promote $TTL_ID"
+}
+
+# gate <n> [args…]: claims gate of the fixture plan's chunk <n>.
+gate() {
+  local n="$1"
+  shift
+  cl gate --plan "$PLAN" --chunk "$n" "$@"
+}
+
+# rec <n> <jq-filter>: the filter's raw output on chunk <n>'s record.
+rec() {
+  jq -r "$2" "docs/spec-claims/gates/$PLAN_STEM/chunk-$1.json" 2>/dev/null || echo "no record"
+}
+
+# The last `cl`'s finding messages of check <c>, one per line.
+gate_messages() {
+  jq -r --arg c "$1" '.findings[]? | select(.check == $c) | .message' <<<"$CL_OUT" 2>/dev/null || true
+}
+
+# gate_ruling <record>: the fixture claim gets a new DOC-STALE ruling naming
+# <record> (nothing staged).
+gate_ruling() {
+  jset "$SIDECAR" ".claims[0].rulings += [$_CL_DOC_STALE] | .claims[0].rulings[-1].record = \"$1\""
+}
+
+# The patch ids of <range>'s first-parent non-merge commits, as the record
+# stores them.
+expected_patch_ids() {
+  git log -p --first-parent --no-merges --format='commit %H' "$1" | git patch-id --stable \
+    | jq -Rsc 'split("\n") | map(select(. != "") | split(" ") | {sha: .[1], patch_id: .[0]})'
+}
+
+test_gate_writes_record_with_patch_ids() {
+  echo "test: gate — a passing chunk writes its record, with each commit's patch id"
+  gate_fixture
+  gate_promote
+  local mb
+  mb=$(git merge-base HEAD main)
+  gate 1
+  assert_eq "0" "$CL_RC" "gate --chunk 1 after the promote exits 0"
+  assert_eq "1" "$(json_count "$CL_OUT")" "…one verdict object"
+  assert_file_exists "$GATE_REC1" "…the record is written"
+  assert_eq "$(expected_patch_ids "$mb..HEAD")" "$(rec 1 '.commits | tojson')" \
+    "….commits: each commit's sha and git patch-id --stable"
+  assert_eq "3" "$(rec 1 '.commits | length')" "…the branch's three commits"
+  assert_eq "1 $PLAN 1 $mb $mb" "$(rec 1 '"\(.schema) \(.plan) \(.chunk) \(.base) \(.from)"')" \
+    "…schema, plan, chunk, base and from (the merge-base, for chunk 1)"
+  assert_eq "$(git rev-parse HEAD) $(git rev-parse 'HEAD^{tree}')" "$(rec 1 '"\(.head) \(.tree)"')" "…head and tree"
+  assert_eq "[\"$TTL_ID\"]" "$(rec 1 '.claims | tojson')" "…the claims the gate ran"
+  assert_eq "[{\"claim\":\"$TTL_ID\",\"status\":\"built\",\"outcome\":\"pass\",\"verdict\":\"ok\"}]" \
+    "$(rec 1 '.verdicts | tojson')" "…each verdict"
+  assert_eq '{"V8":[],"V8n":[],"V9":[]}' "$(rec 1 '.checks | tojson')" "…the V8, V8n and V9 checks, empty"
+  assert_eq "pass" "$(rec 1 .result)" "…result pass"
+  assert_eq "[]" "$(rec 1 '.unrecorded | tojson')" "…nothing unrecorded"
+  assert_json_field "$CL_OUT" '.record' "$GATE_REC1" "the verdict names the record"
+  assert_json_field "$CL_OUT" '.result' "pass" "…and its result"
+  teardown
+}
+
+test_gate_red_claim_exit_1_record_result_red() {
+  echo "test: gate — a red claim exits 1; the record is written, result red"
+  gate_fixture
+  gate_promote
+  set_ttl 1800
+  git add -A && git commit -qm "TTL 30 minutes"
+  gate 1
+  assert_eq "1" "$CL_RC" "a built claim failing its check: exits 1"
+  assert_eq "red" "$(rec 1 .result)" "…the record is written, result red"
+  assert_eq "assert-fail finding" "$(rec 1 '.verdicts[0] | "\(.outcome) \(.verdict)"')" "…its verdict assert-fail, a finding"
+  assert_contains "$(gate_messages run)" "a built claim must pass its check" "…the run finding"
+  teardown
+}
+
+test_gate_unbuilt_named_claim_is_red() {
+  echo "test: gate — a claim the chunk names that is still unbuilt is red"
+  gate_plain_fixture
+  gate 1
+  assert_eq "1" "$CL_RC" "the named claim still unbuilt: exits 1"
+  assert_contains "$(gate_messages gate)" "$GATE_UNBUILT_MSG" "…'$GATE_UNBUILT_MSG'"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "gate")][0].claim' "$TTL_ID" "…naming the claim"
+  assert_eq "red" "$(rec 1 .result)" "…the record result red"
+  # A name no claim has is red too.
+  doc_edit "$PLAN" "**Claims:** SPEC-AUTH-001#token-ttl" "**Claims:** SPEC-AUTH-001#token-ttl, SPEC-AUTH-001#nope"
+  git add -A && git commit -qm "name an unknown claim"
+  gate 1
+  assert_contains "$(gate_messages gate)" "no claim has this id" "an unknown id on the Claims line: a finding"
+  # Chunk 2 names none: nothing unbuilt is red there.
+  gate 2
+  assert_eq "0" "$CL_RC" "chunk 2 (Claims none) exits 0"
+  assert_eq "[]" "$(rec 2 '.claims | tojson')" "…and ran no claim"
+  teardown
+}
+
+test_gate_v8_v9_mandatory_blocking() {
+  echo "test: gate — V9 blocks at the gate; --holds <id> --by <principal> satisfies it"
+  gate_fixture
+  gate_promote
+  printf '%s\n' "$TTL_ID" > tools/claims/edited
+  git add -A && git commit -qm "the bound test edited"
+  local from
+  from=$(git merge-base HEAD main)
+  gate 1
+  assert_eq "1" "$CL_RC" "a V9 item: exits 1 (blocking at the gate)"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V9")][0].claim' "$TTL_ID" "…V9 in findings"
+  assert_eq "$from..HEAD" "$(v9_call_args)" "…the edits asked for over <from>..HEAD"
+  assert_eq "1 false" "$(rec 1 '"\(.checks.V9 | length) \(.checks.V9[0].held)"')" "…the record's checks.V9, not held"
+  gate 1 --holds "$TTL_ID" --by reviewer
+  assert_eq "0" "$CL_RC" "--holds <id>: exits 0"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V9")] | length' "0" "…no V9 finding"
+  assert_eq "{\"claim\":\"$TTL_ID\",\"kind\":\"states-holds\",\"by\":\"reviewer\"}" \
+    "$(rec 1 '.reconciliations[] | select(.kind == "states-holds") | tojson')" "…the reconciliation states-holds"
+  assert_eq "true" "$(rec 1 '.checks.V9[0].held')" "…checks.V9 marks it held"
+  gate 1 --holds "$TTL_ID"
+  assert_usage_verdict gate true "--holds without --by"
+  gate 1 --holds SPEC-AUTH-001#nope --by reviewer
+  assert_usage_verdict gate true "--holds naming no claim"
+  teardown
+}
+
+test_gate_dirty_tree_refused_exit_2() {
+  echo "test: gate — a dirty tree is refused (exit 2), no record written"
+  gate_fixture
+  set_ttl 901
+  gate 1
+  assert_eq "2" "$CL_RC" "a modified tracked file: exits 2"
+  assert_eq "dirty-tree" "$(promote_reasons)" "…indeterminate, reason dirty-tree"
+  assert_file_not_exists "$GATE_REC1" "…no record written"
+  git checkout -q -- src/auth/token.py
+  # A gate record and an untracked file do not count.
+  mkdir -p "$(dirname "$GATE_REC1")"
+  printf '{}\n' > "$GATE_REC1"
+  printf 'x\n' > untracked.txt
+  gate 1
+  assert_true "a stale record and an untracked file: not refused (rc $CL_RC)" test "$CL_RC" != 2
+  assert_eq "red" "$(rec 1 .result)" "…the record rewritten"
+  teardown
+}
+
+test_gate_from_defaults_previous_chunk_head() {
+  echo "test: gate — from is --from, else chunk <n-1>'s head, else the merge-base"
+  gate_fixture
+  gate_promote
+  local head1 side
+  gate 1
+  head1=$(rec 1 .head)
+  printf 'Guide.\n' > docs/guide.md
+  git add docs/guide.md "$GATE_REC1" && git commit -qm "chunk 2 work"
+  gate 2
+  assert_eq "$head1" "$(rec 2 .from)" "chunk 2's from is chunk 1's head"
+  assert_eq "1" "$(rec 2 '.commits | length')" "…its commits: the one since"
+  gate 2 --from HEAD~2
+  assert_eq "$(git rev-parse HEAD~2)" "$(rec 2 .from)" "--from overrides it"
+  # A previous record whose head is no ancestor of HEAD: indeterminate.
+  git checkout -q -b side main
+  git commit -q --allow-empty -m "side"
+  side=$(git rev-parse HEAD)
+  git checkout -q feature
+  jset "$GATE_REC1" ".head = \"$side\""
+  gate 2
+  assert_eq "2" "$CL_RC" "chunk 1's head not an ancestor of HEAD: exits 2"
+  assert_json_field "$CL_OUT" '.indeterminate[0].reason | test("not an ancestor")' "true" "…saying so"
+  jset "$GATE_REC1" '.head = 7'
+  gate 2
+  assert_eq "2" "$CL_RC" "chunk 1's record without a head: exits 2"
+  gate 2 --from "$side"
+  assert_eq "2" "$CL_RC" "--from not an ancestor of HEAD: exits 2, never an empty range"
+  assert_json_field "$CL_OUT" '.indeterminate[0].reason | test("not an ancestor")' "true" "…saying so"
+  gate 2 --from nope
+  assert_eq "2" "$CL_RC" "--from unresolvable: exits 2"
+  teardown
+}
+
+test_gate_records_reconciliations_from_sidecar_changes() {
+  echo "test: gate — a ruling naming this chunk's record is a reconciliation"
+  gate_plain_fixture
+  gate 1
+  assert_eq "1" "$CL_RC" "precondition: chunk 1 red (the claim unbuilt)"
+  gate_ruling "$GATE_REC1"
+  git add "$SIDECAR" "$GATE_REC1" && git commit -qm "DOC-STALE: rule at the chunk 1 gate"
+  gate 1
+  assert_eq "1" "$(rec 1 '.reconciliations | length')" "the re-run lists one reconciliation"
+  assert_eq "$TTL_ID ruling $GATE_REC1 unbuilt unbuilt null" \
+    "$(rec 1 '.reconciliations[0] | "\(.claim) \(.kind) \(.ruling.record) \(.from_status) \(.to_status) \(.verdict_sha256)"')" \
+    "…the ruling, citing chunk-1.json"
+  assert_eq "[]" "$(rec 1 '.unrecorded | tojson')" "…nothing unrecorded"
+  assert_eq "0" "$CL_RC" "…the ruling reconciles the unbuilt named claim: exits 0"
+  teardown
+}
+
+test_gate_ruling_citing_other_record_is_silent() {
+  echo "test: gate — a ruling citing an issue doc or another record is a silent reconciliation"
+  gate_plain_fixture
+  gate 1
+  git add "$GATE_REC1" && git commit -qm "the chunk 1 record"
+  gate_ruling docs/issues/token-ttl.md
+  git add -A && git commit -qm "DOC-STALE: rule in the issue"
+  gate 2
+  assert_eq "1" "$CL_RC" "a ruling citing an issue doc: exits 1"
+  assert_eq "docs/issues/token-ttl.md" "$(rec 2 '.unrecorded[0].ruling.record')" "…unrecorded, its record the issue doc"
+  assert_eq "ruling" "$(rec 2 '.unrecorded[0].kind')" "…kind ruling"
+  assert_contains "$(gate_messages gate)" "silent reconciliation" "…a silent reconciliation finding"
+  assert_eq "[]" "$(rec 2 '.reconciliations | tojson')" "…not a reconciliation"
+  jset "$SIDECAR" ".claims[0].rulings[-1].record = \"$GATE_REC1\""
+  git add -A && git commit -qm "cite chunk 1's record instead"
+  gate 2
+  assert_eq "1" "$CL_RC" "a ruling citing another chunk's record: exits 1"
+  assert_eq "$GATE_REC1" "$(rec 2 '.unrecorded[0].ruling.record')" "…unrecorded too"
+  teardown
+}
+
+test_gate_promotion_without_ruling_included() {
+  echo "test: gate — a promotion is a reconciliation, stored with its digest; its status change with it"
+  gate_fixture
+  gate_promote
+  local digest
+  digest=$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")
+  gate 1
+  assert_eq "0" "$CL_RC" "a promotion with no ruling: exits 0"
+  assert_eq "$digest" "$(rec 1 '.reconciliations[] | select(.kind == "promotion") | .verdict_sha256')" \
+    "…the promotion, with its verdict_sha256"
+  assert_eq "unbuilt built" "$(rec 1 '.reconciliations[] | select(.kind == "status") | "\(.from_status) \(.to_status)"')" \
+    "…and its status change"
+  assert_eq "[]" "$(rec 1 '.unrecorded | tojson')" "…nothing unrecorded"
+  teardown
+}
+
+test_gate_promotion_missing_verdict_still_included() {
+  echo "test: gate — a promotion whose verdict is not in the local store is still included (advisory)"
+  gate_fixture
+  gate_promote
+  local digest
+  digest=$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")
+  rm -f "$(claims_store)/$digest.json"
+  gate 1
+  assert_eq "0" "$CL_RC" "the verdict missing: exits 0"
+  assert_eq "$digest" "$(rec 1 '.reconciliations[] | select(.kind == "promotion") | .verdict_sha256')" \
+    "…the promotion still included, with its digest"
+  assert_json_field "$CL_OUT" '[.advisories[] | select(.code == "unverifiable-here")][0].claim' "$TTL_ID" \
+    "…the advisory unverifiable-here"
+  teardown
+}
+
+test_gate_doc_stale_repromote_cycle() {
+  echo "test: gate — red, DOC-STALE amendment at the gate, re-promote owed, promote, green"
+  gate_fixture
+  gate_promote
+  # 1. The code moves to 30 minutes: red.
+  set_ttl 1800
+  git add -A && git commit -qm "TTL 30 minutes"
+  gate 1
+  assert_eq "1" "$CL_RC" "1. the source at 1800: exits 1"
+  assert_file_exists "$GATE_REC1" "…chunk-1.json written"
+  # 2. The DOC-STALE amendment, committed with the record.
+  doc_edit "$DOC" "$TTL_LINE" "- ~~Access tokens expire after 15 minutes.~~"$'\n''> ⚠️ **AMENDED 2026-10-12 — ttl.** Access tokens expire after 30 minutes.'
+  jset "$SIDECAR" ".claims[0].quote = \"Access tokens expire after 30 minutes\"
+    | .claims[0].states = \"An issued access token is rejected 30 minutes after issue.\"
+    | .claims[0].rulings += [$_CL_DOC_STALE] | .claims[0].rulings[-1].record = \"$GATE_REC1\"
+    | .claims[0].nonvacuity.mutant.find = \"TTL_SECONDS = 1800\" | .claims[0].nonvacuity.mutant.replace = \"TTL_SECONDS = 900\""
+  printf '%s\t%s\t%s\n' "$STUB_NODE" src/auth/token.py "TTL_SECONDS = 1800" > tools/claims/checks
+  git add -A
+  cl validate --staged
+  assert_eq "0" "$CL_RC" "2. validate --staged on the amendment exits 0"
+  assert_contains "$(v6_codes)" "re-promote owed" "…with the advisory re-promote owed"
+  git commit -qm "DOC-STALE: the TTL is 30 minutes"
+  # 3. Still red: the verdict is the old states'.
+  gate 1
+  assert_eq "1" "$CL_RC" "3. the gate re-run exits 1"
+  assert_contains "$(gate_messages gate)" "re-promote owed: run claims promote $TTL_ID" "…re-promote owed"
+  # 4. Re-promote.
+  gate_promote
+  # 5. Green.
+  gate 1
+  assert_eq "0" "$CL_RC" "5. after the re-promote: exits 0"
+  assert_eq "$GATE_REC1" "$(rec 1 '.reconciliations[] | select(.kind == "ruling") | .ruling.record')" \
+    "…the ruling, record chunk-1.json"
+  assert_eq "$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")" \
+    "$(rec 1 '.reconciliations[] | select(.kind == "promotion") | .verdict_sha256')" "…the new promotion"
+  assert_eq "[]" "$(rec 1 '.unrecorded | tojson')" "…unrecorded empty"
+  teardown
+}
+
+test_gate_indeterminate_exit_2() {
+  echo "test: gate — an indeterminate run exits 2; the record says indeterminate"
+  gate_fixture
+  gate_promote
+  force "$STUB_NODE" indeterminate "no database"
+  git add -A && git commit -qm "the runner cannot run"
+  gate 1
+  assert_eq "2" "$CL_RC" "an indeterminate outcome: exits 2"
+  assert_eq "indeterminate" "$(rec 1 .result)" "…the record result indeterminate"
+  teardown
+}
+
+test_gate_path_safety() {
+  echo "test: gate — --chunk is a positive integer; the plan and record paths are safe repo paths"
+  gate_plain_fixture
+  local n
+  for n in 0 01 -1 1x ""; do
+    gate "$n"
+    assert_usage_verdict gate true "--chunk '$n'"
+  done
+  cl gate --plan ../outside.md --chunk 1
+  assert_usage_verdict gate true "--plan with a .. segment"
+  cl gate --plan docs/superpowers/plans/absent.md --chunk 1
+  assert_eq "2" "$CL_RC" "a plan absent at HEAD: exits 2"
+  gate 3
+  assert_eq "2" "$CL_RC" "a chunk the plan does not have: exits 2"
+  # The gates directory through a symbolic link: never written.
+  mkdir -p "$SUITE_TMP/elsewhere"
+  ln -s "$SUITE_TMP/elsewhere" docs/spec-claims/gates
+  gate 1
+  assert_eq "2" "$CL_RC" "gates/ a symbolic link: exits 2"
+  assert_eq "" "$(ls "$SUITE_TMP/elsewhere")" "…nothing written through it"
+  rm -f docs/spec-claims/gates
+  teardown
+}
+
+# --- The range rule: a <from>..HEAD consumer reads the branch's own work ------
+
+# range_probe <range>: through a probe, the --planes-of path set of <range>
+# (one path per line) into $RANGE_OUT.paths, and its patch text into
+# $RANGE_OUT.patch.
+range_probe() {
+  local probe
+  probe=$(claims_probe after '_claims_range_paths "$CL_T_RANGE" "$_SCRATCH/p"; tr "[:cntrl:]" "|" < "$_SCRATCH/p" > "$CL_T_OUT.paths"; _claims_range_patch "$CL_T_RANGE" "$CL_T_OUT.patch"; _claims_mark_emitted 0; exit 0')
+  CL_T_RANGE="$1" CL_T_OUT="$RANGE_OUT" "$probe" claims render </dev/null >/dev/null 2>&1 || true
+}
+
+test_gate_range_first_parent_excludes_trunk() {
+  echo "test: range rule — trunk merged into the branch is not the branch's work"
+  gate_fixture
+  gate_promote
+  local from trunk mine
+  RANGE_OUT=$(harness_mktemp range)
+  from=$(git rev-parse HEAD)
+  git checkout -q main
+  printf 'TRUNK = 1\n' > src/trunk.py
+  git add -A && git commit -qm "trunk work"
+  trunk=$(git rev-parse HEAD)
+  git checkout -q feature
+  printf 'Notes.\n' > docs/notes.md
+  git add -A && git commit -qm "branch work"
+  mine=$(git rev-parse HEAD)
+  git merge -q --no-edit main
+  range_probe "$from..HEAD"
+  assert_eq "docs/notes.md|" "$(cat "$RANGE_OUT.paths")" "the path set: the branch's file, not the trunk-only one"
+  assert_not_contains "$(cat "$RANGE_OUT.patch")" "src/trunk.py" "…nor is it in the patch text"
+  assert_contains "$(cat "$RANGE_OUT.patch")" "+Notes." "…which holds the branch's hunk"
+  cl run --planes-of "$from..HEAD"
+  assert_json_field "$CL_OUT" '.results' "[]" "run --planes-of: the trunk src/ change selects no runner"
+  gate 1 --from "$from"
+  assert_eq "0" "$CL_RC" "the gate over the merge exits 0"
+  assert_eq "[\"$mine\"]" "$(rec 1 '[.commits[].sha] | tojson')" "….commits: the branch's commit, no trunk commit"
+  assert_eq "$(expected_patch_ids "$from..HEAD")" "$(rec 1 '.commits | tojson')" "…with its patch id"
+  assert_not_contains "$(rec 1 '.commits | tojson')" "$trunk" "…the trunk commit absent"
+  teardown
+}
+
+test_gate_range_conflict_resolution_in_path_set() {
+  echo "test: range rule — a file resolved in a merge is in the path set"
+  gate_fixture
+  local from
+  RANGE_OUT=$(harness_mktemp range)
+  printf 'branch\n' > docs/notes.md
+  git add -A && git commit -qm "branch notes"
+  from=$(git rev-parse HEAD)
+  git checkout -q main
+  printf 'trunk\n' > docs/notes.md
+  printf 'TRUNK = 1\n' > src/trunk.py
+  git add -A && git commit -qm "trunk notes"
+  git checkout -q feature
+  git merge -q --no-edit main >/dev/null 2>&1 || true
+  printf 'resolved\n' > docs/notes.md
+  git add docs/notes.md && git commit -qm "merge main, notes resolved"
+  range_probe "$from..HEAD"
+  assert_eq "docs/notes.md|" "$(cat "$RANGE_OUT.paths")" "the resolved file is in the path set (and the trunk-only one is not)"
+  assert_contains "$(cat "$RANGE_OUT.patch")" "+resolved" "…its resolution hunk in the patch text"
+  assert_not_contains "$(cat "$RANGE_OUT.patch")" "src/trunk.py" "…the trunk-only file absent"
+  gate 1 --from "$from"
+  assert_eq "[]" "$(rec 1 '.commits | tojson')" "…patch ids: non-merge commits only (none here)"
+  teardown
+}
+
+test_gate_v9_trunk_only_bound_test_edit() {
+  echo "test: range rule — V9 does not count a bound-test edit that only trunk made"
+  gate_fixture
+  gate_promote
+  local from
+  git checkout -q main
+  mkdir -p tests
+  printf 'def test_ttl(): pass\n' > tests/test_token.py
+  git add -A && git commit -qm "the test file on trunk"
+  git checkout -q feature
+  git merge -q --no-edit main
+  printf '%s\n' "$TTL_ID" > tools/claims/edited
+  git add -A && git commit -qm "the adapter reports the edit"
+  from=$(git rev-parse HEAD)
+  git checkout -q main
+  printf 'def test_ttl(): assert True\n' > tests/test_token.py
+  git add -A && git commit -qm "trunk edits the test"
+  git checkout -q feature
+  git merge -q --no-edit main
+  gate 1 --from "$from"
+  assert_eq "0" "$CL_RC" "a bound test only trunk edited: exits 0"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V9")] | length' "0" "…no V9 finding"
+  assert_json_field "$CL_OUT" '[.advisories[] | select(.check == "V9")][0].code' "outside-branch-work" "…an advisory says why"
+  printf 'def test_ttl(): assert 1\n' > tests/test_token.py
+  git add -A && git commit -qm "the branch edits the test"
+  gate 1 --from "$from"
+  assert_eq "1" "$CL_RC" "the branch edits the bound test: exits 1"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V9")][0].claim' "$TTL_ID" "…a V9 finding"
+  teardown
+}
+
+test_planes_of_not_ancestor_indeterminate() {
+  echo "test: range rule — a range whose start is no ancestor of its end is indeterminate"
+  gate_fixture
+  local side
+  git checkout -q -b side main
+  git commit -q --allow-empty -m "side"
+  side=$(git rev-parse HEAD)
+  git checkout -q feature
+  cl run --planes-of "$side..HEAD"
+  assert_eq "2" "$CL_RC" "run --planes-of <non-ancestor>..HEAD: exits 2"
+  assert_json_field "$CL_OUT" '.error | test("not an ancestor")' "true" "…saying so"
+  cl run --planes-of HEAD
+  assert_eq "2" "$CL_RC" "run --planes-of without '..': exits 2"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -6272,6 +6736,25 @@ run_tests() {
   test_v6_outside_plan_requires_principal
   test_v6_policy_off_allows_any_record
   test_v6_gate_record_symlink_not_followed
+
+  # --- Task 16: claims gate, the chunk gate records ---
+  test_gate_writes_record_with_patch_ids
+  test_gate_red_claim_exit_1_record_result_red
+  test_gate_unbuilt_named_claim_is_red
+  test_gate_v8_v9_mandatory_blocking
+  test_gate_dirty_tree_refused_exit_2
+  test_gate_from_defaults_previous_chunk_head
+  test_gate_records_reconciliations_from_sidecar_changes
+  test_gate_ruling_citing_other_record_is_silent
+  test_gate_promotion_without_ruling_included
+  test_gate_promotion_missing_verdict_still_included
+  test_gate_doc_stale_repromote_cycle
+  test_gate_indeterminate_exit_2
+  test_gate_path_safety
+  test_gate_range_first_parent_excludes_trunk
+  test_gate_range_conflict_resolution_in_path_set
+  test_gate_v9_trunk_only_bound_test_edit
+  test_planes_of_not_ancestor_indeterminate
 
   print_summary
 }

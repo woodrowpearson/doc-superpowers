@@ -2214,14 +2214,16 @@ claims run|cmd_claims_run|repo|claims+ planes-of= all scheduled judge-sample= ba
   "runners": one run call per runner), log claims (with --scheduled only)
   through the log adapter, and lint claims by their pattern (grep -E) over
   the working tree's lint.paths files (pass, or assert-fail). --claims
-  takes ids (commas split them too). --planes-of <range> runs the test
+  takes ids (commas split them too). --planes-of <a>..<b> runs the test
   claims of every runner that has a "paths" entry (a prefix or a glob)
-  matching a file the range changes. --judge-sample <n> also names n judge
-  claims to review, rotated weekly. Retired, frozen and judge claims are
-  reported skipped. Each outcome is judged by the claim's status: built
-  must pass, diverged fail by an assertion, unbuilt not pass. Every finding
-  blocks (an unsafe or missing lint path, or an invalid pattern, is one);
-  an indeterminate outcome, or a missing or failing adapter, exits 2.
+  matching a file the range changes: its first-parent commits' files and
+  its merges' conflict resolutions, never trunk merged in. --judge-sample
+  <n> also names n judge claims to review, rotated weekly. Retired, frozen
+  and judge claims are reported skipped. Each outcome is judged by the
+  claim's status: built must pass, diverged fail by an assertion, unbuilt
+  not pass. Every finding blocks (an unsafe or missing lint path, or an
+  invalid pattern, is one); an indeterminate outcome, or a missing or
+  failing adapter, exits 2.
 claims promote|cmd_claims_promote|repo|reverify all base=
   <id> | --reverify (<id>... | --all) [--base <ref>]
   Promote a claim to built: run its bound test green at HEAD, verify its
@@ -2247,10 +2249,17 @@ claims render|cmd_claims_render|repo|check base=
   is never written, nor created.
 claims gate|cmd_claims_gate|repo|plan= chunk= from= holds=* by= base=
   --plan <plan> --chunk <n> [--from <rev>] [--holds <id>...] [--by <principal>] [--base <ref>]
-  Run a plan chunk's claims gate and record it in
-  docs/spec-claims/gates/<plan-stem>/chunk-<n>.json. --holds <id> records
-  that a claim-bound test edit leaves the claim's states true, adjudicated
-  by --by. Refuses a dirty tree. Every finding blocks.
+  Run a plan chunk's claims gate at HEAD and record it in
+  docs/spec-claims/gates/<plan-stem>/chunk-<n>.json (written even when
+  red): the claims the chunk's **Claims:** lines name plus --planes-of
+  <from>..HEAD, re-promotions owed, V9 over <from>..HEAD, and the
+  reconciliations since <from> (a ruling counts only when its record is
+  this chunk's record; anything else is a silent reconciliation). <from>
+  is --from, else chunk <n-1>'s head, else the merge-base; a range reads
+  the branch's own commits (first parent), never trunk merged in.
+  --holds <id> records that a claim-bound test edit leaves the claim's
+  states true, adjudicated by --by. Refuses a dirty tree. Every finding
+  blocks.
 claims attest|cmd_claims_attest|repo|plan= final deep base=
   --plan <plan> [--final] [--deep] [--base <ref>]
   Check a plan's gate records against the branch: every chunk recorded,
@@ -6753,9 +6762,26 @@ _claims_repromote_owed() {
      end' "$proved" 2>/dev/null || echo unverifiable-here
 }
 
+# A plan's Specs role that counts as a target (V12's decomposition check, the
+# direction policy): target, or infer.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_ROLES='def cl_targets: .role == "target" or .role == "infer";'
+
+# The gate-record shape, one definition for V6's policy matcher, gate's
+# chunk-<n>.json and attest's final.json: cl_gate_stem, on a path, is <stem>
+# when the path is docs/spec-claims/gates/<stem>/chunk-<n>.json (<n> a
+# positive integer, no leading zero) or docs/spec-claims/gates/<stem>/final.json,
+# <stem> one path segment other than "." and ".."; else null.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_GATE_PATH='def cl_gate_stem: if type == "string" then
+     first(capture("^docs/spec-claims/gates/(?<s>[^/]+)/(chunk-[123456789][0123456789]*|final)\\.json$")
+           | .s | select(. != "." and . != "..")) // null
+   else null end;'
+
 # V6 (see the section comment), one program in three phases ($phase), run
 # after _JQ_CLAIMS_SIDECAR (cl_well_formed, cl_all_retired) and
-# _JQ_CLAIMS_NORM (claims_norm). $p, $b: cl-claims.json and
+# _JQ_CLAIMS_NORM (claims_norm), _JQ_CLAIMS_ROLES (cl_targets) and
+# _JQ_CLAIMS_GATE_PATH (cl_gate_stem). $p, $b: cl-claims.json and
 # cl-claims-base.json; $t: cl-touched.json; $sp, $sb: the cl-sidecars lines of
 # the proposed tree and of _CL_MB. Phase verify prints the touched built/gated
 # claims whose verdict is to be checked (one JSON line each); phase records,
@@ -6763,18 +6789,12 @@ _claims_repromote_owed() {
 # and advisory rows (the advisories carry a code), given $v ({claim,
 # verdict} per checked claim) and $rec ({record, exists} per record).
 # shellcheck disable=SC2016  # jq program, not shell expansion
-_JQ_CLAIMS_ROLES='def cl_targets: .role == "target" or .role == "infer";'
-
 _JQ_CLAIMS_RATCHET='def in_list($l): . as $x | any($l[]; . == $x);
  def v6($claim; $doc; $msg): {check: "V6", claim: $claim, doc: $doc, message: $msg};
  def v6a($claim; $code; $msg): {check: "V6", claim: $claim, code: $code, message: $msg};
  def cl_rulings: if type == "object" and (.rulings | type) == "array" then .rulings else [] end;
  def cl_rank: if type == "string" then ({"test": 4, "lint": 3, "log": 2, "judge": 1}[.] // 0) else 0 end;
  def cl_promoted: . == "built" or . == "gated";
- def cl_gate_stem: if type == "string" then
-     first(capture("^docs/spec-claims/gates/(?<s>[^/]+)/(chunk-[123456789][0123456789]*|final)\\.json$")
-           | .s | select(. != "." and . != "..")) // null
-   else null end;
  def cl_policy: (.policy | if type == "object" then . else {} end);
  def cl_ruled: type == "object" and (.direction == "DOC-STALE" or .direction == "RETIRE");
  $t[0] as $touched
@@ -6864,7 +6884,8 @@ _JQ_CLAIMS_RATCHET='def in_list($l): . as $x | any($l[]; . == $x);
 # repo path), then phase check. The shell loops run over those short lists,
 # never over every claim.
 _claims_v6() {
-  local prog="$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_NORM $_JQ_CLAIMS_ROLES $_JQ_CLAIMS_RATCHET" line v r exists plan src stem stems
+  local prog="$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_NORM $_JQ_CLAIMS_ROLES $_JQ_CLAIMS_GATE_PATH $_JQ_CLAIMS_RATCHET"
+  local line v r exists plan src stem stems
   local verify="$_SCRATCH/cl-v6-verify" vrows="$_SCRATCH/cl-v6-verdicts.jsonl"
   local records="$_SCRATCH/cl-v6-records" rrows="$_SCRATCH/cl-v6-records.jsonl" out="$_SCRATCH/cl-v6.jsonl"
   local gov="$_SCRATCH/cl-v6-gov.jsonl" pj="$_SCRATCH/cl-v6-plan.json"
@@ -7290,15 +7311,121 @@ _JQ_CLAIMS_RUN_RESULTS='$plan[0] as $plan
       end
     | {claim: $e.claim, status: $e.status, node: $e.node, outcome, verdict, message, doc: $e.doc, reason}]'
 
-# _claims_range_paths <range> <out-file>: the paths <range> changes, NUL
-# separated (git diff -z --name-only --no-renames <range>; both sides of a
-# rename). The one definition of a --planes-of range's path set.
-_claims_range_paths() {
+# --- The range rule: what <a>..<b> means to a claims consumer ---
+#
+# Every range consumer — run --planes-of's path set, V9 (and V8/V8n) over
+# the gate's <from>..HEAD, the gate record's patch ids (attest matches them
+# against <merge-base>..HEAD) — reads the branch's own work, never trunk
+# that a merge of the base into the branch brought in:
+#   - its commits are `git rev-list --first-parent --no-merges <a>..<b>`;
+#     the path set, the patch text and the patch ids come from them alone;
+#   - each first-parent merge M of the range (`git rev-list --first-parent
+#     --merges`) adds the files `git show --cc --name-only M` lists — those
+#     differing from every parent: conflict resolutions and evil-merge
+#     edits — to the path set, and their hunks, `git diff M^1 M -- <those
+#     files>` (plain unified format: a hunk parser reads them as any
+#     other's), to the patch text. Trunk lines inside a resolved file come
+#     along: conservative. Patch ids stay non-merge only.
+# <a> must be an ancestor of <b> (a range that is not one branch's work dies,
+# exit 2: never an empty set). These helpers are the rule's one
+# implementation; no consumer derives a range on its own. Pathspecs are
+# literal (git --literal-pathspecs) and no textconv or external diff applies,
+# so every clone reads the same text. Scratch: cl-range-* .
+
+_CL_RANGE_A=""  # _claims_range_parse's <a>, a full commit id
+_CL_RANGE_B=""  # its <b>
+
+# _claims_range_parse <range>: _CL_RANGE_A and _CL_RANGE_B from "<a>..<b>"
+# (both given, no "..."). Dies when <range> has another shape, when either
+# end is not a commit, or when <a> is not an ancestor of <b>.
+_claims_range_parse() {
+  local a b
   case "$1" in
-    -*) _claims_die "--planes-of: '$1' is not a revision range" ;;
+    -*|*...*|..*|*..) _claims_die "'$1' is not a revision range <a>..<b>" ;;
+    *..*) ;;
+    *) _claims_die "'$1' is not a revision range <a>..<b>" ;;
   esac
-  git diff -z --name-only --no-renames "$1" -- > "$2" 2>/dev/null \
-    || _claims_die "--planes-of: cannot diff '$1' (git diff failed)"
+  a=${1%%..*}
+  b=${1#*..}
+  _CL_RANGE_A=$(git rev-parse -q --verify "$a^{commit}" 2>/dev/null) || _claims_die "'$a' (in $1) is not a commit"
+  _CL_RANGE_B=$(git rev-parse -q --verify "$b^{commit}" 2>/dev/null) || _claims_die "'$b' (in $1) is not a commit"
+  git merge-base --is-ancestor "$_CL_RANGE_A" "$_CL_RANGE_B" 2>/dev/null \
+    || _claims_die "'$a' is not an ancestor of '$b' (in $1): the range is not one branch's work"
+}
+
+# _claims_range_merges <range> <out-file>: the range's first-parent merges,
+# one commit id per line (none: an empty file). Sets _CL_RANGE_A/_B.
+_claims_range_merges() {
+  _claims_range_parse "$1"
+  git rev-list --first-parent --merges "$_CL_RANGE_A..$_CL_RANGE_B" -- > "$2" 2>/dev/null \
+    || _claims_die "git rev-list failed listing the merges of $1"
+}
+
+# _claims_merge_files <merge> <out-file>: the files merge <merge> changed
+# against every parent (git show --cc --name-only), NUL separated.
+_claims_merge_files() {
+  git show -z --no-renames --cc --name-only --format= "$1" -- > "$2" 2>/dev/null \
+    || _claims_die "git show --cc failed on merge $1"
+}
+
+# _claims_range_paths <range> <out-file>: the range's path set (see the
+# range rule), NUL separated, no empty entry (a path may repeat): the files
+# of its first-parent non-merge commits (both sides of a rename), then each
+# first-parent merge's --cc files.
+_claims_range_paths() {
+  local zout="$2" zraw="$_SCRATCH/cl-range-paths.raw" ms="$_SCRATCH/cl-range-merges" mf="$_SCRATCH/cl-range-mfiles" m p
+  _claims_range_merges "$1" "$ms"
+  git log -z --first-parent --no-merges --no-renames --format= --name-only \
+    "$_CL_RANGE_A..$_CL_RANGE_B" -- > "$zraw" 2>/dev/null || _claims_die "git log failed listing the paths of $1"
+  while IFS= read -r m <&3; do
+    _claims_merge_files "$m" "$mf"
+    cat "$mf" >> "$zraw" || _claims_die "cannot write $zraw"
+  done 3< "$ms"
+  : > "$zout" || _claims_die "cannot write $zout"
+  while IFS= read -r -d '' p; do
+    if [ -n "$p" ]; then printf '%s\0' "$p" >> "$zout"; fi
+  done < "$zraw"
+}
+
+# _claims_range_patch <range> <out-file> [<diff-option>…]: the range's patch
+# text (see the range rule): `git log -p --first-parent --no-merges
+# --format='commit %H' <diff-option>…`, then, per first-parent merge with
+# --cc files, a "commit <M>" line and `git diff <diff-option>… M^1 M --
+# <those files>`. A hunk parser (V8's -U0) passes its options.
+_claims_range_patch() {
+  local range="$1" out="$2" ms="$_SCRATCH/cl-range-merges" mf="$_SCRATCH/cl-range-mfiles" m p
+  local files=()
+  shift 2
+  _claims_range_merges "$range" "$ms"
+  git log -p --first-parent --no-merges --no-renames --no-color --no-ext-diff --no-textconv \
+    --format='commit %H' "$@" "$_CL_RANGE_A..$_CL_RANGE_B" -- > "$out" 2>/dev/null \
+    || _claims_die "git log -p failed on $range"
+  while IFS= read -r m <&3; do
+    _claims_merge_files "$m" "$mf"
+    files=()
+    while IFS= read -r -d '' p; do
+      if [ -n "$p" ]; then files+=("$p"); fi
+    done < "$mf"
+    [ ${#files[@]} -gt 0 ] || continue
+    printf 'commit %s\n' "$m" >> "$out" || _claims_die "cannot write $out"
+    git --literal-pathspecs diff --no-renames --no-color --no-ext-diff --no-textconv "$@" "$m^1" "$m" \
+      -- "${files[@]}" >> "$out" 2>/dev/null || _claims_die "git diff failed on merge $m"
+  done 3< "$ms"
+}
+
+# _claims_patch_ids <range>: the JSON array [{sha, patch_id}] of the range's
+# first-parent non-merge commits, newest first: `git log -p --first-parent
+# --no-merges --format='commit %H' <range> | git patch-id --stable` (a
+# commit with an empty patch has none, and is not listed). The gate record's
+# commits; attest matches them against <merge-base>..HEAD's.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_claims_patch_ids() {
+  local log="$_SCRATCH/cl-range-log" ids="$_SCRATCH/cl-range-ids"
+  _claims_range_parse "$1"
+  git log -p --first-parent --no-merges --no-color --no-ext-diff --no-textconv --format='commit %H' \
+    "$_CL_RANGE_A..$_CL_RANGE_B" -- > "$log" 2>/dev/null || _claims_die "git log -p failed on $1"
+  git patch-id --stable < "$log" > "$ids" 2>/dev/null || _claims_die "git patch-id failed on $1"
+  _claims_jq patch-ids -Rsc 'split("\n") | map(select(. != "") | split(" ") | {sha: .[1], patch_id: .[0]})' "$ids"
 }
 
 # _claims_planes_of <range>: the JSON array of runner names one of whose
@@ -7346,45 +7473,31 @@ _claims_judge_sample() {
     "$_SCRATCH/cl-claims.json"
 }
 
-# run: see the section comment. --claims takes ids (commas split them too);
-# an id no claim has is a usage error. The base is never read.
+# _claims_planes_sel <range> <out-file>: the --planes-of selection — the
+# JSON array of the ids of every test claim (cl-claims.json) whose runner
+# _claims_planes_of names for <range> — into <out-file>. run and gate share it.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_claims_planes_sel() {
+  local runner
+  runner=$(_claims_planes_of "$1") || _claims_propagate $?
+  _claims_jq run-planes -c --argjson r "$runner" \
+    '[.[] | select(.claim.test | type == "object" and (.runner as $n | any($r[]; . == $n))) | .claim.id | strings]' \
+    "$_SCRATCH/cl-claims.json" > "$2"
+}
+
+# _claims_run_selected <sel-file> <scheduled>: the run core (see the section
+# comment), shared by run and gate: the claims <sel-file> selects (a JSON
+# array of ids, or null for all) planned (cl-run-plan.json), executed and
+# judged (cl-run-results.json); their result rows, findings (check "run")
+# and indeterminate rows added to the verdict. <scheduled> 1 runs the log
+# claims.
 # shellcheck disable=SC2016  # jq programs, not shell expansion
-cmd_claims_run() {
-  _CL_ALL_BLOCKING=1
-  _CL_BASE_UNUSED=1
-  _claims_init all
-  local n=0 scheduled=0 runner adapter rc id unknown extra='{}' node i pattern expect t
-  local sel="$_SCRATCH/cl-run-sel.json" plan="$_SCRATCH/cl-run-plan.json" rows="$_SCRATCH/cl-run-rows.jsonl"
+_claims_run_selected() {
+  local sel="$1" scheduled="$2" runner adapter rc id node i pattern expect t
+  local plan="$_SCRATCH/cl-run-plan.json" rows="$_SCRATCH/cl-run-rows.jsonl"
   local req="$_SCRATCH/cl-run-req.json" nodesz="$_SCRATCH/cl-run-nodes" out="$_SCRATCH/cl-run-out"
   local one="$_SCRATCH/cl-run-one.jsonl" list="$_SCRATCH/cl-run-list" res="$_SCRATCH/cl-run-results.json"
   local nodes=()
-  if [ ${#_OPTV_claims[@]} -gt 0 ]; then n=$((n + 1)); fi
-  if [ -n "$_OPT_planes_of" ]; then n=$((n + 1)); fi
-  if [ "$_OPT_all" = 1 ]; then n=$((n + 1)); fi
-  [ "$n" -eq 1 ] || _usage_error "claims run" "give exactly one of --claims <id>..., --planes-of <range> and --all"
-  case "$_OPT_judge_sample" in
-    *[!0123456789]*) _usage_error "claims run" "--judge-sample must be a whole number (got '$_OPT_judge_sample')" ;;
-  esac
-  _claims_no_args "claims run" "$@"
-  if [ "$_OPT_scheduled" = 1 ]; then scheduled=1; fi
-  _claims_load
-
-  if [ ${#_OPTV_claims[@]} -gt 0 ]; then
-    printf '%s\n' "${_OPTV_claims[@]}" > "$list"
-    _claims_jq run-ids -Rsc 'split("\n") | map(split(",")[] | select(. != ""))' "$list" > "$sel"
-    unknown=$(_claims_jq run-unknown -r --slurpfile c "$_SCRATCH/cl-claims.json" \
-      'if length == 0 then "-" else [.[] | select(. as $i | any($c[0][]; .claim.id == $i) | not)] | unique | join(", ") end' \
-      "$sel") || _claims_propagate $?
-    [ "$unknown" != - ] || _usage_error "claims run" "--claims names no claim id"
-    [ -z "$unknown" ] || _usage_error "claims run" "--claims: no claim has the id $unknown"
-  elif [ -n "$_OPT_planes_of" ]; then
-    runner=$(_claims_planes_of "$_OPT_planes_of") || _claims_propagate $?
-    _claims_jq run-planes -c --argjson r "$runner" \
-      '[.[] | select(.claim.test | type == "object" and (.runner as $n | any($r[]; . == $n))) | .claim.id | strings]' \
-      "$_SCRATCH/cl-claims.json" > "$sel"
-  else
-    printf 'null\n' > "$sel"
-  fi
   _claims_jq run-plan -c --slurpfile sel "$sel" --argjson scheduled "$scheduled" \
     "$_JQ_CLAIMS_LINT_DEFS"' $sel[0] as $sel | '"$_JQ_CLAIMS_RUN_PLAN" "$_SCRATCH/cl-claims.json" > "$plan"
 
@@ -7451,6 +7564,42 @@ cmd_claims_run() {
   _claims_jq run-indeterminate -c \
     '.[] | select(.verdict == "indeterminate") | {check: "run", claim, reason: (.reason // "indeterminate")}' "$res" \
     >> "$_SCRATCH/cl-indet.jsonl"
+}
+
+# run: see the section comment. --claims takes ids (commas split them too);
+# an id no claim has is a usage error. The base is never read.
+# shellcheck disable=SC2016  # jq programs, not shell expansion
+cmd_claims_run() {
+  _CL_ALL_BLOCKING=1
+  _CL_BASE_UNUSED=1
+  _claims_init all
+  local n=0 scheduled=0 unknown extra='{}'
+  local sel="$_SCRATCH/cl-run-sel.json" list="$_SCRATCH/cl-run-list"
+  if [ ${#_OPTV_claims[@]} -gt 0 ]; then n=$((n + 1)); fi
+  if [ -n "$_OPT_planes_of" ]; then n=$((n + 1)); fi
+  if [ "$_OPT_all" = 1 ]; then n=$((n + 1)); fi
+  [ "$n" -eq 1 ] || _usage_error "claims run" "give exactly one of --claims <id>..., --planes-of <range> and --all"
+  case "$_OPT_judge_sample" in
+    *[!0123456789]*) _usage_error "claims run" "--judge-sample must be a whole number (got '$_OPT_judge_sample')" ;;
+  esac
+  _claims_no_args "claims run" "$@"
+  if [ "$_OPT_scheduled" = 1 ]; then scheduled=1; fi
+  _claims_load
+
+  if [ ${#_OPTV_claims[@]} -gt 0 ]; then
+    printf '%s\n' "${_OPTV_claims[@]}" > "$list"
+    _claims_jq run-ids -Rsc 'split("\n") | map(split(",")[] | select(. != ""))' "$list" > "$sel"
+    unknown=$(_claims_jq run-unknown -r --slurpfile c "$_SCRATCH/cl-claims.json" \
+      'if length == 0 then "-" else [.[] | select(. as $i | any($c[0][]; .claim.id == $i) | not)] | unique | join(", ") end' \
+      "$sel") || _claims_propagate $?
+    [ "$unknown" != - ] || _usage_error "claims run" "--claims names no claim id"
+    [ -z "$unknown" ] || _usage_error "claims run" "--claims: no claim has the id $unknown"
+  elif [ -n "$_OPT_planes_of" ]; then
+    _claims_planes_sel "$_OPT_planes_of" "$sel"
+  else
+    printf 'null\n' > "$sel"
+  fi
+  _claims_run_selected "$sel" "$scheduled"
   if [ -n "$_OPT_judge_sample" ]; then
     extra=$(_claims_judge_sample "$_OPT_judge_sample") || _claims_propagate $?
     extra="{\"judge_sample\":$extra}"
@@ -7932,8 +8081,18 @@ _claims_v4() {
 # malformed-adapter-output), and its ids are not used: an edit list that
 # could not be read is never taken as empty. V9 is not in the default
 # blocking list, so validate reports its findings as advisories (central, in
-# _JQ_CLAIMS_EMIT); gate (_CL_ALL_BLOCKING) blocks on them. Scratch:
-# cl-v9-calls.jsonl, one {ok, reason, ids} per call.
+# _JQ_CLAIMS_EMIT); gate (_CL_ALL_BLOCKING) blocks on them.
+# A range (validate --all, gate) is read by the range rule (see "The range
+# rule"): the adapter is handed the range string (§D's contract), so when the
+# range holds a first-parent merge — the one case in which its plain diff
+# differs from the branch's own work — each id is checked against the
+# range's path set (_claims_range_paths): a claim whose bound test files
+# (cl_test_files) are all files at the range's end, none of them in the path
+# set, was edited only by trunk merged in, and is the advisory
+# outside-branch-work instead of a finding. A claim with a test file that is
+# not a file there (a node naming no path) stays a finding: nothing shows it
+# is not the branch's. Scratch: cl-v9-calls.jsonl, one {ok, reason, ids} per
+# call; cl-v9-rows.jsonl, the rows before that check.
 
 # An edited-bound-tests call's stdout ($out: its lines, -R), its rc and $nul
 # (1: the output holds a NUL byte) → {ok, reason, ids}.
@@ -7945,21 +8104,44 @@ _JQ_CLAIMS_V9_PARSE='[inputs] as $lines
    else {ok: true, reason: null, ids: $lines} end'
 
 # The calls ($calls) over cl-claims.json (.) → the V9 finding rows, one per
-# known claim id an ok call printed.
+# known claim id an ok call printed, each with the claim's bound test files
+# (files: cl_test_files, for the range rule's check). Run after
+# _JQ_CLAIMS_MUTANT_DEFS.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_V9='([$calls[] | select(.ok) | .ids[]] | unique) as $ids
  | [.[] | select((.claim | type) == "object" and (.claim.id | type) == "string")
         | select(.claim.id as $i | any($ids[]; . == $i))]
- | unique_by(.claim.id)[] | {check: "V9", claim: .claim.id, doc, message: $msg}'
+ | unique_by(.claim.id)[]
+ | {check: "V9", claim: .claim.id, doc, message: $msg,
+    files: (.claim.test | if type == "object" then cl_test_files(.file; .node) else [] end)}'
 
-# _claims_v9 <arg>: V9 over one edited-bound-tests call per configured runner
-# (see the section comment), its rows added to the findings and the
-# indeterminate. validate passes --staged or "$_CL_MB..HEAD"; gate passes
-# "<from>..HEAD" and tells the held ids apart by the rows' check "V9".
+# The V9 rows (.) of a range with a first-parent merge, given $paths (its
+# path set) and $at (the bound test files that are files at its end), both
+# slurped ($pathsf, $atf): a row whose files are all in $at and none in
+# $paths → the advisory outside-branch-work ($out "advisories"); every other
+# row → the finding ($out "findings"). files dropped.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_V9_RANGE='def in_list($l): . as $x | any($l[]; . == $x);
+ $pathsf[0] as $paths | $atf[0] as $at
+ | ((.files | length) > 0 and all(.files[]; in_list($at)) and (any(.files[]; in_list($paths)) | not)) as $trunk
+ | if $out == "advisories" then
+     select($trunk) | {check, claim, code: "outside-branch-work",
+       message: "bound test edited only by trunk merged into the range (\(.files | join(", ")) is in none of the branch'"'"'s own commits): not this branch'"'"'s change"}
+   else select($trunk | not) | del(.files) end'
+
+# _claims_v9 <arg> [<findings-file>]: V9 over one edited-bound-tests call
+# per configured runner (see the section comment), its finding rows added to
+# <findings-file> (default the verdict's findings), its advisories and
+# indeterminate rows to the verdict's. validate passes --staged or
+# "$_CL_MB..HEAD"; gate passes "<from>..HEAD" and its own file, to tell the
+# held ids apart.
 # shellcheck disable=SC2016  # jq programs, not shell expansion
 _claims_v9() {
-  local arg="$1" z="$_SCRATCH/cl-v9-runners.z" out="$_SCRATCH/cl-v9-out" calls="$_SCRATCH/cl-v9-calls.jsonl"
-  local runner adapter rc nul
+  local arg="$1" dest="${2:-$_SCRATCH/cl-findings.jsonl}" z="$_SCRATCH/cl-v9-runners.z" out="$_SCRATCH/cl-v9-out"
+  local calls="$_SCRATCH/cl-v9-calls.jsonl" rows="$_SCRATCH/cl-v9-rows.jsonl" ms="$_SCRATCH/cl-v9-merges"
+  local pz="$_SCRATCH/cl-v9-paths.z" fz="$_SCRATCH/cl-v9-files.z" pj="$_SCRATCH/cl-v9-paths.json"
+  local aj="$_SCRATCH/cl-v9-at.json" runner adapter rc nul p
+  local pset=() atfiles=()
   : > "$calls"
   # A runner name holding a NUL cannot reach the shell: a missing adapter.
   _claims_jq v9-nul-runners -c '.runners | objects | keys[] | select((split("\u0000") | length) > 1)
@@ -7978,7 +8160,30 @@ _claims_v9() {
     >> "$_SCRATCH/cl-indet.jsonl"
   _claims_jq v9 -c --slurpfile calls "$calls" \
     --arg msg "bound test edited: adjudicate (states still holds → gate --holds <id>, else a ruling)" \
-    "$_JQ_CLAIMS_V9" "$_SCRATCH/cl-claims.json" >> "$_SCRATCH/cl-findings.jsonl"
+    "$_JQ_CLAIMS_MUTANT_DEFS $_JQ_CLAIMS_V9" "$_SCRATCH/cl-claims.json" > "$rows"
+  if [ "$arg" != --staged ] && [ -s "$rows" ]; then
+    _claims_range_merges "$arg" "$ms"
+  else
+    : > "$ms"
+  fi
+  if [ ! -s "$ms" ]; then
+    _claims_jq v9-rows -c 'del(.files)' "$rows" >> "$dest"
+    return 0
+  fi
+  # The range rule: the path set, and which bound test files are files at
+  # the range's end (_CL_RANGE_B, set by _claims_range_merges).
+  _claims_range_paths "$arg" "$pz"
+  while IFS= read -r -d '' p; do pset+=("$p"); done < "$pz"
+  _claims_jq v9-paths -nc '$ARGS.positional' --args ${pset[@]+"${pset[@]}"} > "$pj"
+  _claims_jq v9-files -j '.files[] | select((split("\u0000") | length) == 1) | . + "\u0000"' "$rows" > "$fz"
+  while IFS= read -r -d '' p; do
+    if _claims_safe_relpath "$p" && [ "$(git cat-file -t "$_CL_RANGE_B:$p" 2>/dev/null)" = blob ]; then atfiles+=("$p"); fi
+  done < "$fz"
+  _claims_jq v9-at -nc '$ARGS.positional' --args ${atfiles[@]+"${atfiles[@]}"} > "$aj"
+  _claims_jq v9-range-findings -c --slurpfile pathsf "$pj" --slurpfile atf "$aj" --arg out findings \
+    "$_JQ_CLAIMS_V9_RANGE" "$rows" >> "$dest"
+  _claims_jq v9-range-advisories -c --slurpfile pathsf "$pj" --slurpfile atf "$aj" --arg out advisories \
+    "$_JQ_CLAIMS_V9_RANGE" "$rows" >> "$_SCRATCH/cl-advisories.jsonl"
 }
 
 # --- Spec claims: the plan parser, V12 -------------------------------------------
@@ -9045,6 +9250,296 @@ _JQ_CLAIMS_REVERIFY_ALL='def nes: type == "string" and length > 0;
    ([]; if any(.[]; .id == $c.id) then . else . + [{id: $c.id, frozen: ($c.frozen_at | nes)}] end)
  | .[] | (if .frozen then "s" else "r" end) + .id + "\u0000"'
 
+# --- Spec claims: the chunk gate ------------------------------------------------
+#
+# claims gate --plan <p> --chunk <n> [--from <rev>] [--holds <id>…] [--by
+# <principal>] runs one plan chunk's claims gate at HEAD (§E) and records it
+# in docs/spec-claims/gates/<plan-stem>/chunk-<n>.json:
+#   1. Refused before anything runs: a --chunk that is not a positive integer
+#      without a leading zero, a plan path or record path that is not a safe
+#      repo path of the gate-record shape (_JQ_CLAIMS_GATE_PATH), --holds
+#      without --by or naming no claim (usage, exit 3); a dirty tree
+#      (_claims_refuse_dirty), a plan absent at HEAD or without chunk <n>, a
+#      gates directory reached through a symbolic link (exit 2).
+#   2. from: --from, else the head of chunk-<n-1>.json (read from the work
+#      tree, where the previous gate wrote it), else _CL_MB. A from that is
+#      not a commit, or not an ancestor of HEAD, is indeterminate (exit 2)
+#      and no record is written: <from>..HEAD would not be this branch's
+#      work, and is never taken as empty.
+#   3. The claims the chunk names on its **Claims:** lines, plus the
+#      --planes-of selection of <from>..HEAD, run through the run core
+#      (_claims_run_selected): the record's claims and verdicts.
+#   4. A named id no claim has is a finding; so is a named claim still
+#      unbuilt that no ruling included in this record covers ("chunk was
+#      meant to build it: promote, rule, or defer"), and a run claim for
+#      which _claims_repromote_owed prints owed ("re-promote owed"), even
+#      when its check passes. unverifiable-here is an advisory.
+#   5. V8 and V8n (_claims_v8, _claims_v8n: hooks, no-ops until those checks
+#      land) and V9 over <from>..HEAD, read by the range rule; every finding
+#      blocks (_CL_ALL_BLOCKING). A V9 id given in --holds is held: no
+#      finding, and a states-holds reconciliation by --by.
+#   6. Reconciliations: the record-inclusion rule (claims_reconciliations,
+#      shared with attest's final.json) over the sidecar changes from <from>
+#      to HEAD on the claims in scope — those run, every claim the plan names
+#      on any Claims line, and every claim of a doc the plan's Specs lists
+#      name. Each change it does not include is unrecorded: a finding
+#      "silent reconciliation". An included promotion whose verdict is not
+#      in the local store adds the advisory unverifiable-here; inclusion is
+#      by digest, never by the store.
+#   7. The record {schema: 1, plan, chunk, base, from, head, tree, commits
+#      (_claims_patch_ids <from>..HEAD), claims, verdicts, checks {V8, V8n,
+#      V9}, reconciliations, unrecorded, result} is written atomically, even
+#      when red: result red (a finding), else indeterminate (an
+#      indeterminate row), else pass. The verdict object carries it too
+#      (with its path as record; base is the verdict's own).
+# Scratch: cl-gate-* (the plan, the selections, the from-tree claims, the
+# reconciliations, the check rows and the record).
+
+# The record-inclusion rule. claims_reconciliations($record_path), on {from,
+# head, scope} (from, head: cl-claims entries of the sidecars at <from> and
+# at HEAD; scope: claim ids), compares each claim in scope (by id, its first
+# record at HEAD) with its record at <from> — one pass over the two
+# revisions — and returns {reconciliations, unrecorded}:
+#   - each new ruling (JSON-equal to none of the claim's rulings at <from>)
+#     is included only when its record is $record_path;
+#   - a new promotion (a promotion object that differs from the one at
+#     <from>) is always included, storing its verdict_sha256 (attest
+#     matches a sidecar promotion by that digest, never by the local store);
+#   - a status change (a claim new since <from> counts from unbuilt) is
+#     included only when the claim has an included ruling or promotion;
+#   - every change not included is unrecorded {claim, kind, ruling}.
+# An included entry is {claim, kind (ruling | promotion | status), ruling
+# (the ruling, or null), from_status (null for a claim new since <from>),
+# to_status, verdict_sha256 (the promotion's, or null)}. It reads only the
+# sidecars and the record path, so every clone gives the same answer.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_RECONCILE='def claims_reconciliations($record_path):
+  def cl_rul: if type == "object" and (.rulings | type) == "array" then .rulings else [] end;
+  def cl_by_id: reduce (.[] | .claim | select(type == "object" and (.id | type) == "string")) as $c
+    ({}; if has($c.id) then . else .[$c.id] = $c end);
+  (.from | cl_by_id) as $was
+  | .scope as $scope
+  | (.head | cl_by_id) as $now
+  | [$now[] | select(.id as $i | any($scope[]; . == $i))]
+  | [.[] | . as $c | $was[$c.id] as $o
+     | ($o | cl_rul) as $old
+     | [$c | cl_rul | .[] | . as $r | select(any($old[]; . == $r) | not)] as $new
+     | (($c.promotion | type) == "object" and $c.promotion != $o.promotion) as $promoted
+     | (if $o == null then $c.status != "unbuilt" else $o.status != $c.status end) as $moved
+     | [$new[] | {claim: $c.id, kind: "ruling", ruling: ., from_status: $o.status, to_status: $c.status,
+                  verdict_sha256: null, inc: (type == "object" and .record == $record_path)}] as $rs
+     | ($rs | any(.[]; .inc)) as $ruled
+     | $rs[],
+       (if $promoted then {claim: $c.id, kind: "promotion", ruling: null, from_status: $o.status,
+          to_status: $c.status, inc: true,
+          verdict_sha256: ($c.promotion.verdict_sha256 | if type == "string" then . else null end)}
+        else empty end),
+       (if $moved then {claim: $c.id, kind: "status", ruling: null, from_status: $o.status,
+          to_status: $c.status, verdict_sha256: null, inc: ($ruled or $promoted)}
+        else empty end)]
+  | {reconciliations: [.[] | select(.inc) | del(.inc)],
+     unrecorded: [.[] | select(.inc | not) | {claim, kind, ruling}]};'
+
+# _claims_v8 / _claims_v8n <range> <findings-file>: the gate's V8 and V8n
+# hooks over <range> (the range rule's patch text, _claims_range_patch), their
+# finding rows into <findings-file>. No-ops until those checks land.
+_claims_v8() { :; }
+_claims_v8n() { :; }
+
+# _claims_gate_path_ok <record> <stem>: 0 when <record> is a safe repo path
+# of the gate-record shape whose stem is <stem> (cl_gate_stem).
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_claims_gate_path_ok() {
+  _claims_safe_relpath "$1" || return 1
+  # Its status is the answer, so not _claims_jq.
+  jq -e -n --arg p "$1" --arg s "$2" "$_JQ_CLAIMS_GATE_PATH"' $p | cl_gate_stem == $s' >/dev/null 2>&1
+}
+
+# _claims_gate_indet <reason>: the gate could not run: indeterminate, the
+# verdict printed (exit 2), no record written.
+_claims_gate_indet() {
+  _claims_indeterminate gate - "$1"
+  _claims_emit gate
+}
+
+# _claims_gate_write <record> <file>: <file> installed as the work tree's
+# <record> (the directory made first), atomically; never through a
+# symbolic link or out of the work tree.
+_claims_gate_write() {
+  _claims_safe_relpath "$1" || _claims_die "refusing to write $1: not a safe repo path"
+  _claims_contained_path "$1" || _claims_die "refusing to write $1: reached through a symbolic link or outside the work tree"
+  mkdir -p "${1%/*}" 2>/dev/null || _claims_die "cannot create ${1%/*}"
+  _claims_contained_path "$1" || _claims_die "refusing to write $1: reached through a symbolic link or outside the work tree"
+  _tmp_beside "$1"
+  cat "$2" > "$_TMP" || _claims_die "cannot write $1"
+  _replace_file "$_TMP" "$1"
+}
+
+# gate: see the section comment.
+# shellcheck disable=SC2016  # jq programs, not shell expansion
+cmd_claims_gate() {
+  local plan="$_OPT_plan" n="$_OPT_chunk" by="$_OPT_by" stem rec prev head from x id range tree result
+  _CL_ALL_BLOCKING=1
+  _claims_init head
+  [ -n "$plan" ] || _usage_error "claims gate" "requires --plan <plan>"
+  [ -n "$n" ] || _usage_error "claims gate" "requires --chunk <n>"
+  case "$n" in
+    0*|*[!0123456789]*|??????????*)
+      _usage_error "claims gate" "--chunk must be a positive integer without a leading zero, at most 9 digits (got '$n')" ;;
+  esac
+  _claims_no_args "claims gate" "$@"
+  _claims_safe_relpath "$plan" \
+    || _usage_error "claims gate" "--plan must be a repo path: relative, with no empty, . or .. segment (got '$plan')"
+  stem=${plan##*/}
+  stem=${stem%.*}
+  rec="docs/spec-claims/gates/$stem/chunk-$n.json"
+  _claims_gate_path_ok "$rec" "$stem" || _usage_error "claims gate" "--plan '$plan' gives no gate record path ($rec)"
+  if [ ${#_OPTV_holds[@]} -gt 0 ] && [ -z "$by" ]; then
+    _usage_error "claims gate" "--holds needs --by <principal>: who adjudicated that the claim's states still holds"
+  fi
+  local pj="$_SCRATCH/cl-gate-plan.json" named="$_SCRATCH/cl-gate-named.json" psel="$_SCRATCH/cl-gate-planes.json"
+  local sel="$_SCRATCH/cl-gate-sel.json" holds="$_SCRATCH/cl-gate-holds.json" list="$_SCRATCH/cl-gate-list"
+  local fromc="$_SCRATCH/cl-gate-from.json" scope="$_SCRATCH/cl-gate-scope.json" recon="$_SCRATCH/cl-gate-recon.json"
+  local v8="$_SCRATCH/cl-gate-v8.jsonl" v8n="$_SCRATCH/cl-gate-v8n.jsonl" v9="$_SCRATCH/cl-gate-v9.jsonl"
+  local v9c="$_SCRATCH/cl-gate-v9-checks.jsonl" commits="$_SCRATCH/cl-gate-commits.json" out="$_SCRATCH/cl-gate-record.json"
+  _claims_load
+  if [ ${#_OPTV_holds[@]} -gt 0 ]; then
+    printf '%s\n' "${_OPTV_holds[@]}" > "$list"
+  else
+    : > "$list"
+  fi
+  _claims_jq gate-holds -Rsc 'split("\n") | map(select(. != "")) | reduce .[] as $h ([]; if any(.[]; . == $h) then . else . + [$h] end)' \
+    "$list" > "$holds"
+  x=$(_claims_jq gate-holds-unknown -r --slurpfile c "$_SCRATCH/cl-claims.json" \
+    '[.[] | select(. as $i | any($c[0][]; .claim.id == $i) | not)] | join(", ")' "$holds") || _claims_propagate $?
+  [ -z "$x" ] || _usage_error "claims gate" "--holds: no claim has the id $x"
+
+  # 1. The preconditions that are not usage.
+  _claims_refuse_dirty gate
+  _claims_contained_path "$rec" || _claims_die "refusing to write $rec: reached through a symbolic link or outside the work tree"
+  head=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || _claims_die "cannot resolve HEAD"
+  [ "$(git cat-file -t "$head:$plan" 2>/dev/null)" = blob ] || _claims_die "plan $plan is not at HEAD (commit it first)"
+  _claims_plan_parse "$plan" "rev:$head" > "$pj"
+  if ! jq -e --argjson n "$n" 'any(.chunks[]; .n == $n)' "$pj" >/dev/null 2>&1; then
+    _claims_die "plan $plan has no chunk $n"
+  fi
+
+  # 2. from.
+  prev="docs/spec-claims/gates/$stem/chunk-$((n - 1)).json"
+  if [ -n "$_OPT_from" ]; then
+    from=$(git rev-parse -q --verify "$_OPT_from^{commit}" 2>/dev/null) \
+      || _claims_gate_indet "--from '$_OPT_from' is not a commit"
+    x="--from $_OPT_from"
+  elif [ "$n" -gt 1 ] && { [ -e "$prev" ] || [ -L "$prev" ]; }; then
+    _claims_contained_path "$prev" && [ -f "$prev" ] \
+      || _claims_gate_indet "chunk $((n - 1))'s record $prev is reached through a symbolic link or is not a file"
+    # Its output is the answer (a record jq cannot parse: no head), so not _claims_jq.
+    x=$(jq -r 'if type == "object" and (.head | type) == "string" then .head else "" end' "$prev" 2>/dev/null) || x=""
+    from=""
+    if [ -n "$x" ]; then from=$(git rev-parse -q --verify "$x^{commit}" 2>/dev/null) || from=""; fi
+    [ -n "$from" ] || _claims_gate_indet "chunk $((n - 1))'s record $prev names no commit head (head: ${x:-none})"
+    x="the head of $prev"
+  else
+    # _claims_init already reported an unresolvable base.
+    [ -n "$_CL_MB" ] || _claims_emit gate
+    from=$_CL_MB
+    x="the merge-base"
+  fi
+  git merge-base --is-ancestor "$from" "$head" 2>/dev/null \
+    || _claims_gate_indet "from $from ($x) is not an ancestor of HEAD: $from..HEAD would not be this branch's work"
+  range="$from..HEAD"
+
+  # 3. The chunk's named claims, plus the --planes-of selection, run.
+  _claims_jq gate-named -c --argjson n "$n" '[.chunks[] | select(.n == $n) | .tasks[] | .claims[]] | unique' "$pj" > "$named"
+  _claims_planes_sel "$range" "$psel"
+  _claims_jq gate-sel -nc --slurpfile a "$named" --slurpfile b "$psel" --slurpfile c "$_SCRATCH/cl-claims.json" \
+    '$a[0] + $b[0] | unique | map(select(. as $i | any($c[0][]; .claim.id == $i)))' > "$sel"
+  _claims_run_selected "$sel" 0
+
+  # 6. (first: step 4 reads it) The reconciliations, over the claims in scope.
+  _claims_load_tree "$from" "$_SCRATCH/cl-gate-sidecars-from.jsonl"
+  _claims_jq gate-from-claims -s --arg what claims "$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_LOAD" \
+    "$_SCRATCH/cl-gate-sidecars-from.jsonl" > "$fromc"
+  _claims_jq gate-scope -nc --slurpfile p "$pj" --slurpfile r "$_SCRATCH/cl-run-plan.json" \
+    --slurpfile c "$_SCRATCH/cl-claims.json" \
+    '([$r[0][].claim] + [$p[0].chunks[].tasks[].claims[]]
+      + [$c[0][] | select(.doc as $d | any($p[0].specs[]; .path == $d)) | .claim.id | strings]) | unique' > "$scope"
+  _claims_jq gate-reconcile -nc --slurpfile f "$fromc" --slurpfile h "$_SCRATCH/cl-claims.json" \
+    --slurpfile s "$scope" --slurpfile hold "$holds" --arg rec "$rec" --arg by "$by" \
+    "$_JQ_CLAIMS_RECONCILE"' {from: $f[0], head: $h[0], scope: $s[0]} | claims_reconciliations($rec)
+     | .reconciliations += [$hold[0][] | {claim: ., kind: "states-holds", by: $by}]' > "$recon"
+  _claims_jq gate-unrecorded -c --arg rec "$rec" \
+    '.unrecorded[] | {check: "gate", claim, doc: null,
+      message: "silent reconciliation: this \(.kind) since the chunk began is not recorded in \($rec) (a ruling made during the chunk must name \($rec) as its record; a status change needs a ruling or a promotion recorded there)"}' \
+    "$recon" >> "$_SCRATCH/cl-findings.jsonl"
+  _claims_jq gate-promotions -r '.reconciliations[] | select(.kind == "promotion") | .claim | select(test("\n") | not)' \
+    "$recon" > "$list"
+  while IFS= read -r id <&3; do
+    x=$(_claims_jq gate-promoted -c --arg id "$id" 'first(.[] | select(.claim.id == $id) | .claim)' \
+      "$_SCRATCH/cl-claims.json") || _claims_propagate $?
+    x=$(_claims_verdict_check "$x") || _claims_propagate $?
+    if [ "$x" = missing ]; then
+      _claims_advisory gate "$id" unverifiable-here \
+        "the promotion's verdict is not in the local verdict store (promoted in another clone?): it is recorded by its digest; the scheduled run re-verifies it"
+    fi
+  done 3< "$list"
+
+  # 4. The named claims, and re-promotions owed by the claims run.
+  _claims_jq gate-named-findings -c --slurpfile c "$_SCRATCH/cl-claims.json" --slurpfile r "$recon" --argjson n "$n" \
+    '.[] | . as $i | (first($c[0][] | select(.claim.id == $i)) // null) as $e
+     | if $e == null then {check: "gate", claim: $i, doc: null,
+                           message: "named on chunk \($n)'"'"'s **Claims:** line, but no claim has this id"}
+       elif $e.claim.status == "unbuilt"
+            and (any($r[0].reconciliations[]; .claim == $i and .kind == "ruling") | not)
+       then {check: "gate", claim: $i, doc: $e.doc, message: "chunk was meant to build it: promote, rule, or defer"}
+       else empty end' "$named" >> "$_SCRATCH/cl-findings.jsonl"
+  _claims_jq gate-owed-ids -r '.[] | select(.action != "skip") | .claim | select(test("\n") | not)' \
+    "$_SCRATCH/cl-run-plan.json" > "$list"
+  while IFS= read -r id <&3; do
+    x=$(_claims_repromote_owed "$id" "$from") || _claims_propagate $?
+    case "$x" in
+      owed) _claims_finding gate "$id" - "re-promote owed: run claims promote $id" ;;
+      unverifiable-here)
+        _claims_advisory gate "$id" unverifiable-here \
+          "whether a re-promotion is owed cannot be decided here (promotion.at is not a commit here, or its sidecar holds no such claim)"
+        ;;
+    esac
+  done 3< "$list"
+
+  # 5. V8, V8n and V9 over the range; --holds ids held.
+  : > "$v8"
+  : > "$v8n"
+  : > "$v9"
+  _claims_v8 "$range" "$v8"
+  _claims_v8n "$range" "$v8n"
+  _claims_v9 "$range" "$v9"
+  cat "$v8" "$v8n" >> "$_SCRATCH/cl-findings.jsonl" || _claims_die "cannot write the findings"
+  _claims_jq gate-v9-held -c --slurpfile h "$holds" '. + {held: (.claim as $c | any($h[0][]; . == $c))}' "$v9" > "$v9c"
+  _claims_jq gate-v9-findings -c 'select(.held | not) | del(.held)' "$v9c" >> "$_SCRATCH/cl-findings.jsonl"
+
+  # 7. The record, even when red.
+  result=pass
+  if [ -s "$_SCRATCH/cl-findings.jsonl" ]; then
+    result=red
+  elif [ -s "$_SCRATCH/cl-indet.jsonl" ]; then
+    result=indeterminate
+  fi
+  tree=$(git rev-parse -q --verify "$head^{tree}" 2>/dev/null) || _claims_die "cannot resolve HEAD's tree"
+  _claims_patch_ids "$range" > "$commits"
+  _claims_jq gate-record -n --arg plan "$plan" --argjson chunk "$n" --arg base "$_CL_MB" --arg from "$from" \
+    --arg head "$head" --arg tree "$tree" --arg result "$result" --slurpfile commits "$commits" \
+    --slurpfile rp "$_SCRATCH/cl-run-plan.json" --slurpfile res "$_SCRATCH/cl-run-results.json" \
+    --slurpfile v8 "$v8" --slurpfile v8n "$v8n" --slurpfile v9 "$v9c" --slurpfile recon "$recon" \
+    '{schema: 1, plan: $plan, chunk: $chunk, base: (if $base == "" then null else $base end),
+      from: $from, head: $head, tree: $tree, commits: $commits[0], claims: [$rp[0][].claim],
+      verdicts: [$res[0][] | {claim, status, outcome, verdict}],
+      checks: {V8: $v8, V8n: $v8n, V9: $v9},
+      reconciliations: $recon[0].reconciliations, unrecorded: $recon[0].unrecorded, result: $result}' > "$out"
+  _claims_gate_write "$rec" "$out"
+  x=$(_claims_jq gate-extra -c --arg p "$rec" 'del(.base) + {record: $p}' "$out") || _claims_propagate $?
+  _claims_emit gate "$x"
+}
+
 cmd_claims_validate() {
   local mode=all
   if [ "$_OPT_staged" = 1 ]; then mode=staged; fi
@@ -9146,15 +9641,6 @@ cmd_claims_render() {
     _claims_blocks write
   fi
   _claims_emit render
-}
-
-cmd_claims_gate() {
-  _CL_ALL_BLOCKING=1
-  _claims_init head
-  [ -n "$_OPT_plan" ] || _usage_error "claims gate" "requires --plan <plan>"
-  [ -n "$_OPT_chunk" ] || _usage_error "claims gate" "requires --chunk <n>"
-  _claims_no_args "claims gate" "$@"
-  _claims_emit gate
 }
 
 cmd_claims_attest() {
