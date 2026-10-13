@@ -2263,18 +2263,30 @@ claims gate|cmd_claims_gate|repo|plan= chunk= from= holds=* by= base=
   blocks.
 claims attest|cmd_claims_attest|repo|plan= final deep base=
   --plan <plan> [--final] [--deep] [--base <ref>]
-  Check a plan's gate records against the branch: every chunk recorded,
-  every claim the plan names as expected, every ruling and promotion
-  recorded. --final is the final gate, written to
-  docs/spec-claims/gates/<plan-stem>/final.json (even when red); --deep
-  re-runs each record's claims at the tree it recorded. Every finding
-  blocks.
+  Check a plan's gate records against the branch at HEAD: every chunk
+  with a gate task recorded, its commits matched to merge-base..HEAD by
+  patch id (an unmatched one marks the record rebased: re-verified);
+  every claim the plan names run at HEAD (built must pass, diverged fail
+  with its ruling and tracker; unbuilt, or a re-promotion owed, is a
+  finding); every ruling, promotion and status change since the
+  merge-base on the plan's claims and its specs' claims recorded in a
+  chunk record or in final.json, whose reconciliations are rebuilt from
+  the last chunk record's head (a ruling counts there only when it names
+  final.json as its record), and every recorded ruling still at HEAD; the
+  amendment batch (claims rulings); render --check. --final is the final
+  gate: refuses a dirty tree, and writes
+  docs/spec-claims/gates/<plan-stem>/final.json even when it does not
+  pass. --deep re-runs each record's test claims in a throwaway worktree
+  at its head (a head not here is indeterminate). Every finding blocks.
 claims rulings|cmd_claims_rulings|repo|range= format= base=
   --range <a>..<b> [--format json|markdown] [--base <ref>]
-  List the DOC-STALE and RETIRE rulings added in <a>..<b>: the spec
-  amendments a reviewer approves. --format markdown prints them as
-  Markdown for a PR description, under "## Spec amendments (N)", instead
-  of the verdict object.
+  List the DOC-STALE and RETIRE rulings present at <b> and absent at <a>
+  (or <a>...<b>: from their merge-base; <a> must be an ancestor of <b>):
+  the spec amendments a reviewer approves, one row each {claim, doc,
+  direction, by, date, reason, approved {quote, states} at <a> (null for a
+  new claim), new {quote, states} at <b>}. --format markdown prints them
+  as Markdown for a PR description, under "## Spec amendments (N)",
+  instead of the verdict object.
 fragments list|cmd_fragments_list|deps|
   -
   List the per-PR release-notes fragments (RELEASE-NOTES.next/PR-<N>.md in
@@ -7331,11 +7343,21 @@ _JQ_CLAIMS_RUN_RESULTS='$plan[0] as $plan
 # must be an ancestor of <b> (a range that is not one branch's work dies,
 # exit 2: never an empty set). These helpers are the rule's one
 # implementation; no consumer derives a range on its own. Pathspecs are
-# literal (git --literal-pathspecs) and no textconv or external diff applies,
-# so every clone reads the same text. Scratch: cl-range-* .
+# literal (git --literal-pathspecs), and the patch text is read with
+# _CL_DIFF_OPTS, so every clone reads the same text. Scratch: cl-range-* .
 
 _CL_RANGE_A=""  # _claims_range_parse's <a>, a full commit id
 _CL_RANGE_B=""  # its <b>
+
+# The diff options every patch text of the range rule is read with (with
+# core.quotePath on, and no signature shown): pinned, so no clone's git
+# config — diff.noprefix, diff.mnemonicPrefix, diff.algorithm, diff.context,
+# diff.interHunkContext, diff.indentHeuristic, diff.renames, color, an
+# external diff or a textconv driver — changes the text, nor the patch ids
+# attest matches across clones and rebases. A caller's own options (V8's
+# -U0) come after them, and win.
+_CL_DIFF_OPTS=(--no-renames --diff-algorithm=myers --src-prefix=a/ --dst-prefix=b/ --no-color --no-ext-diff
+  --no-textconv --unified=3 --inter-hunk-context=0 --indent-heuristic)
 
 # _claims_range_parse <range>: _CL_RANGE_A and _CL_RANGE_B from "<a>..<b>"
 # (both given), or from "<a>...<b>", resolved here and only here to
@@ -7396,19 +7418,31 @@ _claims_range_paths() {
   done < "$zraw"
 }
 
+# _claims_range_log <out-file> [<diff-option>…]: the patch text of the
+# first-parent non-merge commits of _CL_RANGE_A.._CL_RANGE_B (set by
+# _claims_range_parse), each after a "commit <sha>" line: `git log -p
+# --first-parent --no-merges --format='commit %H'` with _CL_DIFF_OPTS, then
+# <diff-option>…. The one invocation _claims_range_patch and
+# _claims_patch_ids share.
+_claims_range_log() {
+  local out="$1"
+  shift
+  git -c core.quotePath=true log -p --no-show-signature --first-parent --no-merges --format='commit %H' \
+    "${_CL_DIFF_OPTS[@]}" "$@" "$_CL_RANGE_A..$_CL_RANGE_B" -- > "$out" 2>/dev/null \
+    || _claims_die "git log -p failed on $_CL_RANGE_A..$_CL_RANGE_B"
+}
+
 # _claims_range_patch <range> <out-file> [<diff-option>…]: the range's patch
-# text (see the range rule): `git log -p --first-parent --no-merges
-# --format='commit %H' <diff-option>…`, then, per first-parent merge with
-# --cc files, a "commit <M>" line and `git diff <diff-option>… M^1 M --
-# <those files>`. A hunk parser (V8's -U0) passes its options.
+# text (see the range rule): _claims_range_log, then, per first-parent merge
+# with --cc files, a "commit <M>" line and `git diff` (_CL_DIFF_OPTS, then
+# <diff-option>…) M^1 M -- <those files>. A hunk parser (V8's -U0) passes
+# its options.
 _claims_range_patch() {
   local range="$1" out="$2" ms="$_SCRATCH/cl-range-merges" mf="$_SCRATCH/cl-range-mfiles" m p
   local files=()
   shift 2
   _claims_range_merges "$range" "$ms"
-  git log -p --first-parent --no-merges --no-renames --no-color --no-ext-diff --no-textconv \
-    --format='commit %H' "$@" "$_CL_RANGE_A..$_CL_RANGE_B" -- > "$out" 2>/dev/null \
-    || _claims_die "git log -p failed on $range"
+  _claims_range_log "$out" "$@"
   while IFS= read -r m <&3; do
     _claims_merge_files "$m" "$mf"
     files=()
@@ -7417,22 +7451,22 @@ _claims_range_patch() {
     done < "$mf"
     [ ${#files[@]} -gt 0 ] || continue
     printf 'commit %s\n' "$m" >> "$out" || _claims_die "cannot write $out"
-    git --literal-pathspecs diff --no-renames --no-color --no-ext-diff --no-textconv "$@" "$m^1" "$m" \
+    git -c core.quotePath=true --literal-pathspecs diff "${_CL_DIFF_OPTS[@]}" "$@" "$m^1" "$m" \
       -- "${files[@]}" >> "$out" 2>/dev/null || _claims_die "git diff failed on merge $m"
   done 3< "$ms"
 }
 
 # _claims_patch_ids <range>: the JSON array [{sha, patch_id}] of the range's
-# first-parent non-merge commits, newest first: `git log -p --first-parent
-# --no-merges --format='commit %H' <range> | git patch-id --stable` (a
-# commit with an empty patch has none, and is not listed). The gate record's
-# commits; attest matches them against <merge-base>..HEAD's.
+# first-parent non-merge commits, newest first: their patch text
+# (_claims_range_log, the text _claims_range_patch reads) through `git
+# patch-id --stable` (a commit with an empty patch has none, and is not
+# listed). The gate record's commits; attest matches them against
+# <merge-base>..HEAD's.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _claims_patch_ids() {
   local log="$_SCRATCH/cl-range-log" ids="$_SCRATCH/cl-range-ids"
   _claims_range_parse "$1"
-  git log -p --first-parent --no-merges --no-color --no-ext-diff --no-textconv --format='commit %H' \
-    "$_CL_RANGE_A..$_CL_RANGE_B" -- > "$log" 2>/dev/null || _claims_die "git log -p failed on $1"
+  _claims_range_log "$log"
   git patch-id --stable < "$log" > "$ids" 2>/dev/null || _claims_die "git patch-id failed on $1"
   _claims_jq patch-ids -Rsc 'split("\n") | map(select(. != "") | split(" ") | {sha: .[1], patch_id: .[0]})' "$ids"
 }
@@ -9323,15 +9357,21 @@ _JQ_CLAIMS_REVERIFY_ALL='def nes: type == "string" and length > 0;
 # (the ruling, or null), from_status (null for a claim new since <from>),
 # to_status, verdict_sha256 (the promotion's, or null)}. It reads only the
 # sidecars and the record path, so every clone gives the same answer.
+# claims_changes($record_path) is the same pass's every change, each such an
+# entry plus inc (whether it is included): attest reads all the changes from
+# _CL_MB with it ($record_path null, scope null for every claim). cl_rul (a
+# claim's rulings, [] when it has none) and cl_by_id (cl-claims entries →
+# {<id>: the first claim record with that id}) are shared with the amendment
+# batch (_JQ_CLAIMS_RULINGS).
 # shellcheck disable=SC2016  # jq program, not shell expansion
-_JQ_CLAIMS_RECONCILE='def claims_reconciliations($record_path):
-  def cl_rul: if type == "object" and (.rulings | type) == "array" then .rulings else [] end;
-  def cl_by_id: reduce (.[] | .claim | select(type == "object" and (.id | type) == "string")) as $c
-    ({}; if has($c.id) then . else .[$c.id] = $c end);
+_JQ_CLAIMS_RECONCILE='def cl_rul: if type == "object" and (.rulings | type) == "array" then .rulings else [] end;
+def cl_by_id: reduce (.[] | .claim | select(type == "object" and (.id | type) == "string")) as $c
+  ({}; if has($c.id) then . else .[$c.id] = $c end);
+def claims_changes($record_path):
   (.from | cl_by_id) as $was
   | .scope as $scope
   | (.head | cl_by_id) as $now
-  | [$now[] | select(.id as $i | any($scope[]; . == $i))]
+  | [$now[] | select(.id as $i | $scope == null or any($scope[]; . == $i))]
   | [.[] | . as $c | $was[$c.id] as $o
      | ($o | cl_rul) as $old
      | [$c | cl_rul | .[] | . as $r | select(any($old[]; . == $r) | not)] as $new
@@ -9347,9 +9387,24 @@ _JQ_CLAIMS_RECONCILE='def claims_reconciliations($record_path):
         else empty end),
        (if $moved then {claim: $c.id, kind: "status", ruling: null, from_status: $o.status,
           to_status: $c.status, verdict_sha256: null, inc: ($ruled or $promoted)}
-        else empty end)]
+        else empty end)];
+def claims_reconciliations($record_path):
+  claims_changes($record_path)
   | {reconciliations: [.[] | select(.inc) | del(.inc)],
      unrecorded: [.[] | select(.inc | not) | {claim, kind, ruling}]};'
+
+# _claims_plan_scope <plan-json> <ids-json> <out-file>: the claims a plan
+# answers for, as a sorted JSON array of ids — those of <ids-json> (a file
+# holding a JSON array), every id a **Claims:** line of the plan names, and
+# every claim (cl-claims.json) of a doc its Specs lists (or governing_specs:)
+# name. The gate's reconciliation scope (<ids-json>: the claims it ran) and
+# attest's cross-check scope: one definition, so the two cannot disagree.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_claims_plan_scope() {
+  _claims_jq plan-scope -nc --slurpfile p "$1" --slurpfile x "$2" --slurpfile c "$_SCRATCH/cl-claims.json" \
+    '($x[0] + [$p[0].chunks[].tasks[].claims[]]
+      + [$c[0][] | select(.doc as $d | any($p[0].specs[]; .path == $d)) | .claim.id | strings]) | unique' > "$3"
+}
 
 # _claims_v8 / _claims_v8n <range> <findings-file>: the gate's V8 and V8n
 # hooks over <range> (the range rule's patch text, _claims_range_patch), their
@@ -9471,10 +9526,8 @@ cmd_claims_gate() {
   _claims_load_tree "$from" "$_SCRATCH/cl-gate-sidecars-from.jsonl"
   _claims_jq gate-from-claims -s --arg what claims "$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_LOAD" \
     "$_SCRATCH/cl-gate-sidecars-from.jsonl" > "$fromc"
-  _claims_jq gate-scope -nc --slurpfile p "$pj" --slurpfile r "$_SCRATCH/cl-run-plan.json" \
-    --slurpfile c "$_SCRATCH/cl-claims.json" \
-    '([$r[0][].claim] + [$p[0].chunks[].tasks[].claims[]]
-      + [$c[0][] | select(.doc as $d | any($p[0].specs[]; .path == $d)) | .claim.id | strings]) | unique' > "$scope"
+  _claims_jq gate-run-ids -c '[.[].claim]' "$_SCRATCH/cl-run-plan.json" > "$list"
+  _claims_plan_scope "$pj" "$list" "$scope"
   _claims_jq gate-reconcile -nc --slurpfile f "$fromc" --slurpfile h "$_SCRATCH/cl-claims.json" \
     --slurpfile s "$scope" --slurpfile hold "$holds" --arg rec "$rec" --arg by "$by" \
     "$_JQ_CLAIMS_RECONCILE"' {from: $f[0], head: $h[0], scope: $s[0]} | claims_reconciliations($rec)
@@ -9634,9 +9687,6 @@ cmd_claims_promote() {
   _claims_emit promote
 }
 
-# The verbs below are inert-correct stubs until their tasks land: they
-# check their arguments and report an empty verdict.
-
 # render: every eligible sidecar's doc gets its status block (_claims_blocks).
 # Every finding blocks: --check exits 1 on any doc that differs. The base is
 # never read, so an unresolvable one is not indeterminate here.
@@ -9655,19 +9705,425 @@ cmd_claims_render() {
   _claims_emit render
 }
 
-cmd_claims_attest() {
-  _CL_ALL_BLOCKING=1
-  _claims_init head
-  [ -n "$_OPT_plan" ] || _usage_error "claims attest" "requires --plan <plan>"
-  _claims_no_args "claims attest" "$@"
-  _claims_emit attest
+# --- Spec claims: claims attest, the final gate; claims rulings ----------------
+#
+# claims attest --plan <p> [--final] [--deep] checks a plan's gate records
+# against the branch at HEAD: the claims as HEAD holds them (mode head),
+# their checks run in the work tree, which --final requires clean
+# (_claims_refuse_dirty: exit 2, nothing written; the gate records'
+# directory aside). The plan is read from HEAD. Every finding blocks.
+#   1. Records: each chunk of the plan with a gate task needs its record
+#      docs/spec-claims/gates/<stem>/chunk-<n>.json, read from the work tree
+#      (never through a symbolic link): one JSON object of this plan and
+#      chunk, with a commit head, a commits list of {sha, patch_id} and a
+#      reconciliations list (_JQ_CLAIMS_ATTEST_RECORD). Else a finding
+#      "chunk <n>: no gate record" (or why the record is unusable), and the
+#      record counts for nothing. Its commits are matched by patch_id
+#      against _claims_patch_ids "$_CL_MB..HEAD" (the range rule): one
+#      unmatched (a squash, a rebase that changed a patch) marks the record
+#      rebased "re-verified" — step 2 re-runs its claims at HEAD — never a
+#      finding; a clean rebase keeps every patch id, and no mark.
+#   2. Claims: every claim a **Claims:** line of the plan names runs at HEAD
+#      (_claims_run_selected: built and gated must pass, diverged fail by an
+#      assertion); a named diverged claim also needs its CODE-DIVERGES
+#      ruling and an open tracker (V5). A named id no claim has is a
+#      finding; so is a named claim still unbuilt ("named claim still
+#      unbuilt at the final gate") unless an included reconciliation — of a
+#      chunk record, or of final.json (step 3) — holds a DOC-STALE ruling on
+#      it: a CODE-DIVERGES ruling must defer it to diverged, a RETIRE retire
+#      it. _claims_repromote_owed <id> on each claim run: owed is a finding
+#      ("re-promote owed"), even when its check passes; unverifiable-here an
+#      advisory. Without the verdict store (a fresh clone, CI) the answer
+#      comes from the sidecar at promotion.at, so a plan that converged
+#      locally passes there.
+#   3. Reconciliations. final.json's are rebuilt on every run by the
+#      record-inclusion rule (claims_reconciliations with final.json's
+#      path) over the sidecars from <from> — the last usable chunk record's
+#      head — to HEAD, on the plan's scope (_claims_plan_scope, the gate's:
+#      the claims the plan names, and every claim of a doc its Specs lists
+#      name). A ruling counts there only when its record is final.json: one
+#      citing an issue doc or a chunk record is never absorbed. The
+#      cross-check: every change on those claims from _CL_MB to HEAD
+#      (claims_changes) must be among the reconciliations of a chunk record
+#      or of final.json — a ruling by JSON equality, a promotion by its
+#      verdict_sha256 (the digest the record stored, never the local store),
+#      a status change by a status entry for the claim with the same
+#      to_status — else the finding "silent reconciliation"
+#      (cross_check.unrecorded {claim, kind, ruling}). Each ruling a chunk
+#      record reconciled must still be one of its claim's rulings at HEAD,
+#      else "reconciliation reverted at HEAD" (cross_check.reverted {claim,
+#      record, ruling}). An included promotion whose verdict is not in the
+#      local store adds the advisory unverifiable-here, as at the gate.
+#   4. Amendments: the amendment batch of _CL_MB..HEAD (_claims_rulings_rows,
+#      what claims rulings lists).
+#   5. render --check (V11): render_check ok, or failed with its findings.
+# <from> is the last usable record's head when that is a commit here. A
+# rebased branch's old head that is not (a fresh clone) maps to the newest
+# branch commit carrying a patch id of that record's commits, else to
+# _CL_MB (advisory from-remapped): an earlier <from> only widens final.json's
+# reconciliations, never hides a change. With no usable record it is
+# _CL_MB. An unresolvable base makes the run indeterminate (exit 2), and
+# nothing is written.
+# --deep re-runs each usable record's claims in a throwaway worktree at its
+# head (_claims_worktree_add, removed after each record; never a repository
+# -wide prune): each claim as that head holds it, judged by its status
+# there, its runner's adapter called with --root the worktree. Lint claims
+# are reported skipped (--deep re-runs test claims), log and judge claims
+# too, as run skips them. A head that is not a commit here (a missing
+# object) is indeterminate; a record whose tree is not its head's tree is a
+# finding.
+# --final writes docs/spec-claims/gates/<stem>/final.json — {schema: 1,
+# plan, base, head, tree, from, chunks [{chunk, record, rebased}], claims
+# [{claim, status, verdict}], reconciliations, cross_check {unrecorded,
+# reverted}, amendments, render_check, result} with result pass, fail (a
+# finding) or indeterminate — atomically (_claims_gate_write), even when the
+# result is not pass, so a ruling made at the final gate can cite it before
+# the re-run. The verdict object carries the same (base is its own; with
+# --final, record names the file).
+# Scratch: cl-attest-* (the plan, the records, the scope, the
+# reconciliations, the cross-check, the batch, the record), cl-deep-*
+# (--deep's claims, plan and runs) and cl-rulings-* (the batch's trees).
+
+# The amendment batch over two revisions' claims ($a, $b: cl-claims
+# entries, slurped; after _JQ_CLAIMS_RECONCILE): one row per DOC-STALE or
+# RETIRE ruling of a claim at <b> that no ruling of the same claim at <a>
+# equals (JSON), in sidecar order — {claim, doc, direction, by, date,
+# reason, approved: {quote, states} as <a> holds the claim (null for a claim
+# new since <a>), new: {quote, states} as <b> holds it}.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_RULINGS='($a[0] | cl_by_id) as $was
+ | [$b[0][] | select((.claim | type) == "object" and (.claim.id | type) == "string")
+    | .doc as $doc | .claim as $c | $was[$c.id] as $o | ($o | cl_rul) as $old
+    | $c | cl_rul | .[]
+    | select(type == "object" and (.direction == "DOC-STALE" or .direction == "RETIRE"))
+    | . as $r | select(any($old[]; . == $r) | not)
+    | {claim: $c.id, doc: $doc, direction, by, date, reason,
+       approved: (if $o == null then null else {quote: $o.quote, states: $o.states} end),
+       new: {quote: $c.quote, states: $c.states}}]'
+
+# The batch's rows as Markdown for a PR description: "## Spec amendments
+# (N)", then per row "### <claim> — <direction>", **Approved:** (the
+# states at <a>), **New:** (at <b>) and **Reason:**, each its own paragraph.
+# A value that is not a string is its JSON; a newline is a space.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_RULINGS_MD='def md: if type == "string" then gsub("\r?\n"; " ") else tojson end;
+ "## Spec amendments (\(length))",
+ (.[] | "", "### \(.claim | md) — \(.direction | md)", "",
+   "**Approved:** \(if .approved == null then "(none: a claim new in this range)" else (.approved.states | md) end)", "",
+   "**New:** \(.new.states | md)", "",
+   "**Reason:** \(.reason | md)")'
+
+# _claims_rulings_rows <a> <b> <out-file>: the amendment batch of commits <a>
+# and <b> (_JQ_CLAIMS_RULINGS), a JSON array, into <out-file>.
+_claims_rulings_rows() {
+  local ta="$_SCRATCH/cl-rulings-a.jsonl" tb="$_SCRATCH/cl-rulings-b.jsonl"
+  _claims_gov_init
+  _claims_load_tree "$1" "$ta"
+  _claims_load_tree "$2" "$tb"
+  _claims_jq rulings-a -s --arg what claims "$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_LOAD" "$ta" > "$ta.json"
+  _claims_jq rulings-b -s --arg what claims "$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_LOAD" "$tb" > "$tb.json"
+  _claims_jq rulings -nc --slurpfile a "$ta.json" --slurpfile b "$tb.json" \
+    "$_JQ_CLAIMS_RECONCILE $_JQ_CLAIMS_RULINGS" > "$3"
 }
 
-# rulings: the DOC-STALE / RETIRE rulings added in <a>..<b>. The rows (in
-# results) arrive with their collection; --format markdown prints them under
-# "## Spec amendments (N)" — the heading always, N = 0 included.
+# A chunk record (slurped; $plan, $n, $r its path) → "" when attest can use
+# it, else why not.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_ATTEST_RECORD='def hexid: type == "string" and test("^[0-9a-f]{7,64}$");
+ if length != 1 or (.[0] | type) != "object" then "gate record \($r) is not one JSON object"
+ else .[0]
+   | if .plan != $plan or .chunk != $n
+     then "gate record \($r) is not chunk \($n) of \($plan) (plan \(.plan | tojson), chunk \(.chunk | tojson))"
+     elif .head | hexid | not then "gate record \($r) names no commit head (head: \(.head | tojson))"
+     elif (.commits | type) != "array" or (all(.commits[]; type == "object" and (.patch_id | type) == "string") | not)
+     then "gate record \($r) has no commits list of {sha, patch_id}"
+     elif (.reconciliations | type) != "array" or (all(.reconciliations[]; type == "object") | not)
+     then "gate record \($r) has no reconciliations list"
+     else "" end
+ end'
+
+# The cross-check ($recs: the usable records {chunk, record, data}; $f:
+# final.json's rebuilt reconciliations; $base, $h: cl-claims entries at
+# _CL_MB and HEAD; $s: the scope; after _JQ_CLAIMS_RECONCILE) →
+# {unrecorded, reverted} (see the section comment).
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_ATTEST_CROSS='([$recs[] | .data.reconciliations[]] + $f[0]) as $all
+ | ($h[0] | cl_by_id) as $now
+ | {unrecorded: [{from: $base[0], head: $h[0], scope: $s[0]} | claims_changes(null) | .[] | . as $x
+      | select(if .kind == "ruling" then
+                 any($all[]; .kind == "ruling" and .claim == $x.claim and .ruling == $x.ruling)
+               elif .kind == "promotion" then
+                 $x.verdict_sha256 != null
+                 and any($all[]; .kind == "promotion" and .claim == $x.claim and .verdict_sha256 == $x.verdict_sha256)
+               else any($all[]; .kind == "status" and .claim == $x.claim and .to_status == $x.to_status) end
+               | not)
+      | {claim, kind, ruling}],
+    reverted: [$recs[] | .record as $rec | .data.reconciliations[] | select(.kind == "ruling") | . as $x
+      | select((.claim | type) != "string" or (($now[$x.claim] | cl_rul) | any(.[]; . == $x.ruling) | not))
+      | {claim, record: $rec, ruling}]}'
+
+# _claims_attest_deep <n> <record-file>: --deep for chunk <n>'s usable
+# record (see the section comment). Result rows {chunk, claim, status, node,
+# outcome, verdict, message}; findings and indeterminate rows name the chunk.
+# shellcheck disable=SC2016  # jq programs, not shell expansion
+_claims_attest_deep() {
+  local n="$1" rec="$2" h at t runner adapter rc node
+  local scz="$_SCRATCH/cl-deep-sidecars.jsonl" cl="$_SCRATCH/cl-deep-claims.json" dsel="$_SCRATCH/cl-deep-sel.json"
+  local plan="$_SCRATCH/cl-deep-plan.json" rows="$_SCRATCH/cl-deep-rows.jsonl" req="$_SCRATCH/cl-deep-req.json"
+  local nodesz="$_SCRATCH/cl-deep-nodes" out="$_SCRATCH/cl-deep-out" one="$_SCRATCH/cl-deep-one.jsonl"
+  local list="$_SCRATCH/cl-deep-list" res="$_SCRATCH/cl-deep-results.json"
+  local nodes=()
+  h=$(_claims_jq deep-head -r '.head' "$rec") || _claims_propagate $?
+  if ! at=$(git rev-parse -q --verify "$h^{commit}" 2>/dev/null); then
+    _claims_indeterminate attest - \
+      "chunk $n: --deep: the recorded head $h is not a commit here (a missing object: fetch it, or re-run the chunk's gate)"
+    return 0
+  fi
+  t=$(_claims_jq deep-tree -r '.tree | strings' "$rec") || _claims_propagate $?
+  if [ "$t" != "$(git rev-parse -q --verify "$at^{tree}" 2>/dev/null)" ]; then
+    _claims_finding attest - - "chunk $n: the record's tree ${t:-(none)} is not the tree of its head $at"
+    return 0
+  fi
+  _claims_load_tree "$at" "$scz"
+  _claims_jq deep-claims -s --arg what claims "$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_LOAD" "$scz" > "$cl"
+  _claims_jq deep-sel -c '[.claims | if type == "array" then .[] | strings else empty end]' "$rec" > "$dsel"
+  _claims_jq deep-plan -c --slurpfile sel "$dsel" --argjson scheduled 0 \
+    "$_JQ_CLAIMS_LINT_DEFS"' $sel[0] as $sel | '"$_JQ_CLAIMS_RUN_PLAN"'
+     | map(if .action == "lint" then .action = "skip" | .message = "lint: --deep re-runs test claims only" else . end)' \
+    "$cl" > "$plan"
+  : > "$rows"
+  _claims_jq deep-runners -r '[.[] | select(.action == "test") | .runner] | unique | .[] | select(test("\n") | not)' \
+    "$plan" > "$list"
+  if [ -s "$list" ]; then
+    _claims_worktree_add "$at"
+    while IFS= read -r runner <&3; do
+      _claims_jq deep-nodes -c --arg r "$runner" '[.[] | select(.action == "test" and .runner == $r) | .node] | unique' \
+        "$plan" > "$req"
+      _claims_jq deep-nodes-z -j '.[] | . + "\u0000"' "$req" > "$nodesz"
+      nodes=()
+      while IFS= read -r -d '' node; do nodes+=("$node"); done < "$nodesz"
+      adapter=$(_claims_runner_adapter "$runner") || _claims_propagate $?
+      rc=0
+      _claims_adapter_call "$out" "$adapter" run --root "$_CL_WT" ${nodes[@]+"${nodes[@]}"} || rc=$?
+      _claims_parse_run "$out" "$req" "$rc" > "$one"
+      _claims_jq deep-rows -c --arg r "$runner" '. + {runner: $r}' "$one" >> "$rows"
+    done 3< "$list"
+    _claims_worktrees_remove
+  fi
+  _claims_jq deep-results -nc --slurpfile plan "$plan" --slurpfile rows "$rows" \
+    "$_JQ_CLAIMS_EXPECT $_JQ_CLAIMS_RUN_RESULTS" > "$res"
+  _claims_jq deep-result-rows -c --argjson n "$n" '.[] | {chunk: $n, claim, status, node, outcome, verdict, message}' \
+    "$res" >> "$_SCRATCH/cl-results.jsonl"
+  _claims_jq deep-findings -c --argjson n "$n" --arg at "$at" '.[] | select(.verdict == "finding")
+      | {check: "attest", claim, doc, message: "chunk \($n), at its recorded head \($at): \(.message)"}' \
+    "$res" >> "$_SCRATCH/cl-findings.jsonl"
+  _claims_jq deep-indeterminate -c --argjson n "$n" '.[] | select(.verdict == "indeterminate")
+      | {check: "attest", claim, reason: "chunk \($n), at its recorded head: \(.reason // "indeterminate")"}' \
+    "$res" >> "$_SCRATCH/cl-indet.jsonl"
+}
+
+# attest: see the section comment.
+# shellcheck disable=SC2016  # jq programs, not shell expansion
+cmd_claims_attest() {
+  local plan="$_OPT_plan" stem fin head tree from x c n r i k id result render=ok
+  _CL_ALL_BLOCKING=1
+  _claims_init head
+  [ -n "$plan" ] || _usage_error "claims attest" "requires --plan <plan>"
+  _claims_no_args "claims attest" "$@"
+  _claims_safe_relpath "$plan" \
+    || _usage_error "claims attest" "--plan must be a repo path: relative, with no empty, . or .. segment (got '$plan')"
+  stem=${plan##*/}
+  stem=${stem%.*}
+  fin="docs/spec-claims/gates/$stem/final.json"
+  _claims_gate_path_ok "$fin" "$stem" || _usage_error "claims attest" "--plan '$plan' gives no gate record path ($fin)"
+  local pj="$_SCRATCH/cl-attest-plan.json" named="$_SCRATCH/cl-attest-named.json" asel="$_SCRATCH/cl-attest-sel.json"
+  local list="$_SCRATCH/cl-attest-list" branch="$_SCRATCH/cl-attest-branch.json" recs="$_SCRATCH/cl-attest-records.jsonl"
+  local rows="$_SCRATCH/cl-attest-chunks.jsonl" one="$_SCRATCH/cl-attest-one.json" scope="$_SCRATCH/cl-attest-scope.json"
+  local fromc="$_SCRATCH/cl-attest-from.json" frecon="$_SCRATCH/cl-attest-final-recon.json"
+  local cross="$_SCRATCH/cl-attest-cross.json" amend="$_SCRATCH/cl-attest-amend.json"
+  local saved="$_SCRATCH/cl-attest-results.jsonl" out="$_SCRATCH/cl-attest-record.json"
+
+  # The preconditions that are not usage.
+  if [ "$_OPT_final" = 1 ]; then
+    _claims_refuse_dirty attest
+    _claims_contained_path "$fin" || _claims_die "refusing to write $fin: reached through a symbolic link or outside the work tree"
+  fi
+  head=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || _claims_die "cannot resolve HEAD"
+  [ "$(git cat-file -t "$head:$plan" 2>/dev/null)" = blob ] || _claims_die "plan $plan is not at HEAD (commit it first)"
+  # _claims_init already reported an unresolvable base: nothing to attest against.
+  [ -n "$_CL_MB" ] || _claims_emit attest
+  _claims_load
+  _claims_touched
+  _claims_plan_parse "$plan" "rev:$head" > "$pj"
+  _claims_patch_ids "$_CL_MB..HEAD" > "$branch"
+
+  # 1. The chunk records, matched by patch id.
+  : > "$recs"
+  : > "$rows"
+  _claims_jq attest-gate-chunks -r '[.chunks[] | select(any(.tasks[]; .kind == "gate")) | .n] | unique | .[]' \
+    "$pj" > "$list"
+  while IFS= read -r n <&3; do
+    r="docs/spec-claims/gates/$stem/chunk-$n.json"
+    if [ ! -e "$r" ] && [ ! -L "$r" ]; then
+      x="no gate record ($r: claims gate --plan $plan --chunk $n writes it)"
+    elif ! _claims_contained_path "$r" || [ ! -f "$r" ]; then
+      x="gate record $r is reached through a symbolic link or is not a file: it is never read"
+    else
+      # Its output is the answer (a record jq cannot parse: not JSON), so not _claims_jq.
+      x=$(jq -r -s --arg plan "$plan" --argjson n "$n" --arg r "$r" "$_JQ_CLAIMS_ATTEST_RECORD" "$r" 2>/dev/null) \
+        || x="gate record $r is not one JSON object"
+    fi
+    if [ -n "$x" ]; then
+      _claims_finding attest - - "chunk $n: $x"
+      _claims_jq attest-chunk-unusable -nc --argjson n "$n" '{chunk: $n, record: null, rebased: null}' >> "$rows"
+      continue
+    fi
+    _claims_jq attest-record-line -c -s --argjson n "$n" --arg r "$r" '{chunk: $n, record: $r, data: .[0]}' "$r" >> "$recs"
+  done 3< "$list"
+  _claims_jq attest-rebased -c --slurpfile b "$branch" \
+    '{chunk, record, rebased: (if all(.data.commits[]; .patch_id as $p | any($b[0][]; .patch_id == $p)) then null
+                               else "re-verified" end)}' "$recs" >> "$rows"
+
+  # from: the last usable record's head (see the section comment).
+  from=$_CL_MB
+  if [ -s "$recs" ]; then
+    x=$(_claims_jq attest-last-head -r -s '.[-1].data.head' "$recs") || _claims_propagate $?
+    if c=$(git rev-parse -q --verify "$x^{commit}" 2>/dev/null); then
+      from=$c
+    else
+      c=$(_claims_jq attest-from-map -r -s --slurpfile b "$branch" \
+        '.[-1] | first(.data.commits[] | .patch_id as $p | first($b[0][] | select(.patch_id == $p)) | .sha) // ""' \
+        "$recs") || _claims_propagate $?
+      if [ -n "$c" ]; then from=$c; fi
+      _claims_advisory attest - from-remapped \
+        "the last chunk record's head $x is not a commit here (a rebased branch's old head?): final.json's reconciliations are read from $from, the newest commit carrying one of that record's patches (else the merge-base)"
+    fi
+  fi
+
+  # 2. The named claims, run at HEAD; V5 on the diverged ones.
+  _claims_jq attest-named -c '[.chunks[].tasks[].claims[]] | unique' "$pj" > "$named"
+  _claims_jq attest-sel -c --slurpfile c "$_SCRATCH/cl-claims.json" \
+    'map(select(. as $i | any($c[0][]; .claim.id == $i)))' "$named" > "$asel"
+  _claims_run_selected "$asel" 0
+  _claims_jq attest-diverged -c --slurpfile s "$asel" \
+    '[.[] | .claim | select(.status == "diverged" and (.id as $i | any($s[0][]; . == $i))) | .id] | unique' \
+    "$_SCRATCH/cl-claims.json" > "$_SCRATCH/cl-touched.json"
+  _claims_v5
+
+  # 3. final.json's reconciliations, rebuilt; the cross-check.
+  _claims_plan_scope "$pj" "$named" "$scope"
+  _claims_load_tree "$from" "$_SCRATCH/cl-attest-sidecars-from.jsonl"
+  _claims_jq attest-from-claims -s --arg what claims "$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_LOAD" \
+    "$_SCRATCH/cl-attest-sidecars-from.jsonl" > "$fromc"
+  _claims_jq attest-final-recon -nc --slurpfile f "$fromc" --slurpfile h "$_SCRATCH/cl-claims.json" \
+    --slurpfile s "$scope" --arg rec "$fin" \
+    "$_JQ_CLAIMS_RECONCILE"' {from: $f[0], head: $h[0], scope: $s[0]} | claims_reconciliations($rec) | .reconciliations' \
+    > "$frecon"
+  _claims_jq attest-cross -nc --slurpfile base "$_SCRATCH/cl-claims-base.json" --slurpfile h "$_SCRATCH/cl-claims.json" \
+    --slurpfile s "$scope" --slurpfile f "$frecon" --slurpfile recs "$recs" \
+    "$_JQ_CLAIMS_RECONCILE $_JQ_CLAIMS_ATTEST_CROSS" > "$cross"
+  _claims_jq attest-unrecorded -c --arg fin "$fin" '.unrecorded[] | {check: "attest", claim, doc: null,
+      message: "silent reconciliation: this \(.kind) on \(.claim) since the merge-base is in no chunk record and not in \($fin) (a ruling made at the final gate must name \($fin) as its record; a ruling citing anything else is never absorbed into it; a status change needs a recorded ruling or promotion)"}' \
+    "$cross" >> "$_SCRATCH/cl-findings.jsonl"
+  _claims_jq attest-reverted -c '.reverted[] | {check: "attest", claim, doc: null,
+      message: "reconciliation reverted at HEAD: \(.record) reconciled a \((.ruling | objects | .direction) // "?") ruling on \(.claim) that the claim no longer holds"}' \
+    "$cross" >> "$_SCRATCH/cl-findings.jsonl"
+  _claims_jq attest-promotions -r '.[] | select(.kind == "promotion") | .claim | select(test("\n") | not)' \
+    "$frecon" > "$list"
+  while IFS= read -r id <&3; do
+    x=$(_claims_jq attest-promoted -c --arg id "$id" 'first(.[] | select(.claim.id == $id) | .claim)' \
+      "$_SCRATCH/cl-claims.json") || _claims_propagate $?
+    x=$(_claims_verdict_check "$x") || _claims_propagate $?
+    if [ "$x" = missing ]; then
+      _claims_advisory attest "$id" unverifiable-here \
+        "the promotion's verdict is not in the local verdict store (promoted in another clone?): it is recorded by its digest; the scheduled run re-verifies it"
+    fi
+  done 3< "$list"
+
+  # 2, continued (it reads step 3's reconciliations): the named claims, and
+  # re-promotions owed.
+  _claims_jq attest-named-findings -c --slurpfile c "$_SCRATCH/cl-claims.json" --slurpfile recs "$recs" \
+    --slurpfile f "$frecon" \
+    '([$recs[] | .data.reconciliations[]] + $f[0]) as $all
+     | .[] | . as $i | (first($c[0][] | select(.claim.id == $i)) // null) as $e
+     | if $e == null then {check: "attest", claim: $i, doc: null,
+                           message: "named on a **Claims:** line of the plan, but no claim has this id"}
+       elif $e.claim.status == "unbuilt"
+            and (any($all[]; .claim == $i and .kind == "ruling"
+                     and (.ruling | type) == "object" and .ruling.direction == "DOC-STALE") | not)
+       then {check: "attest", claim: $i, doc: $e.doc,
+             message: "named claim still unbuilt at the final gate: promote it, rule DOC-STALE (recorded in a gate record), or defer it as diverged"}
+       else empty end' "$named" >> "$_SCRATCH/cl-findings.jsonl"
+  _claims_jq attest-owed-ids -r '.[] | select(.action != "skip") | .claim | select(test("\n") | not)' \
+    "$_SCRATCH/cl-run-plan.json" > "$list"
+  while IFS= read -r id <&3; do
+    x=$(_claims_repromote_owed "$id" "$_CL_MB") || _claims_propagate $?
+    case "$x" in
+      owed) _claims_finding attest "$id" - "re-promote owed: run claims promote $id" ;;
+      unverifiable-here)
+        _claims_advisory attest "$id" unverifiable-here \
+          "whether a re-promotion is owed cannot be decided here (promotion.at is not a commit here, or its sidecar holds no such claim)"
+        ;;
+    esac
+  done 3< "$list"
+
+  # 4. The amendment batch.
+  _claims_rulings_rows "$_CL_MB" "$head" "$amend"
+
+  # 5. render --check; its {doc, changed} rows stay out of the results.
+  cat "$_SCRATCH/cl-results.jsonl" > "$saved" || _claims_die "cannot write $saved"
+  k=$(wc -l < "$_SCRATCH/cl-findings.jsonl") || _claims_die "cannot read the findings"
+  _claims_blocks check
+  cat "$saved" > "$_SCRATCH/cl-results.jsonl" || _claims_die "cannot write the results"
+  i=$(wc -l < "$_SCRATCH/cl-findings.jsonl") || _claims_die "cannot read the findings"
+  if [ "$((i))" -ne "$((k))" ]; then render=failed; fi
+
+  # --deep: each usable record's claims at its head.
+  if [ "$_OPT_deep" = 1 ]; then
+    k=$(_claims_jq attest-records-count -s 'length' "$recs") || _claims_propagate $?
+    i=0
+    while [ "$i" -lt "$k" ]; do
+      _claims_jq attest-deep-record -s --argjson i "$i" '.[$i].data' "$recs" > "$one"
+      n=$(_claims_jq attest-deep-chunk -s --argjson i "$i" '.[$i].chunk' "$recs") || _claims_propagate $?
+      _claims_attest_deep "$n" "$one"
+      i=$((i + 1))
+    done
+  fi
+
+  # The record, even when it does not pass.
+  result=pass
+  if [ -s "$_SCRATCH/cl-findings.jsonl" ]; then
+    result=fail
+  elif [ -s "$_SCRATCH/cl-indet.jsonl" ]; then
+    result=indeterminate
+  fi
+  tree=$(git rev-parse -q --verify "$head^{tree}" 2>/dev/null) || _claims_die "cannot resolve HEAD's tree"
+  _claims_jq attest-record -n --arg plan "$plan" --arg base "$_CL_MB" --arg head "$head" --arg tree "$tree" \
+    --arg from "$from" --arg render "$render" --arg result "$result" --slurpfile chunks "$rows" \
+    --slurpfile res "$_SCRATCH/cl-run-results.json" --slurpfile f "$frecon" --slurpfile cross "$cross" \
+    --slurpfile amend "$amend" \
+    '{schema: 1, plan: $plan, base: $base, head: $head, tree: $tree, from: $from,
+      chunks: ($chunks | sort_by(.chunk)), claims: [$res[0][] | {claim, status, verdict}],
+      reconciliations: $f[0], cross_check: $cross[0], amendments: $amend[0],
+      render_check: $render, result: $result}' > "$out"
+  if [ "$_OPT_final" = 1 ]; then
+    _claims_gate_write "$fin" "$out"
+    x=$(_claims_jq attest-extra -c --arg p "$fin" 'del(.base) + {record: $p}' "$out") || _claims_propagate $?
+  else
+    x=$(_claims_jq attest-extra -c 'del(.base)' "$out") || _claims_propagate $?
+  fi
+  _claims_emit attest "$x"
+}
+
+# rulings: the amendment batch of <a>..<b> (_claims_rulings_rows; the range
+# resolved by _claims_range_parse, so <a>...<b> reads from their
+# merge-base, and an <a> that is no ancestor of <b> exits 2), one result row
+# per ruling. --format markdown prints it as Markdown instead
+# (_JQ_CLAIMS_RULINGS_MD; the heading always, N = 0 included). The base is
+# never read.
 cmd_claims_rulings() {
-  local format="${_OPT_format:-json}" range="$_OPT_range" a b n
+  local format="${_OPT_format:-json}" range="$_OPT_range" rows text
+  _CL_BASE_UNUSED=1
   _claims_init head
   case "$format" in
     json|markdown) ;;
@@ -9675,25 +10131,21 @@ cmd_claims_rulings() {
   esac
   [ -n "$range" ] || _usage_error "claims rulings" "requires --range <a>..<b>"
   case "$range" in
+    ..*|*..) _usage_error "claims rulings" "--range must be <a>..<b> (got '$range')" ;;
     *..*) ;;
     *) _usage_error "claims rulings" "--range must be <a>..<b> (got '$range')" ;;
   esac
-  a="${range%%..*}"
-  b="${range#*..}"
-  case "$b" in
-    ''|.*) _usage_error "claims rulings" "--range must be <a>..<b> (got '$range')" ;;
-  esac
-  [ -n "$a" ] || _usage_error "claims rulings" "--range must be <a>..<b> (got '$range')"
   _claims_no_args "claims rulings" "$@"
-  git rev-parse -q --verify "$a^{commit}" >/dev/null 2>&1 || _claims_die "--range: '$a' is not a commit"
-  git rev-parse -q --verify "$b^{commit}" >/dev/null 2>&1 || _claims_die "--range: '$b' is not a commit"
-
+  rows="$_SCRATCH/cl-rulings.json"
+  _claims_range_parse "$range"
+  _claims_rulings_rows "$_CL_RANGE_A" "$_CL_RANGE_B" "$rows"
   if [ "$format" = markdown ]; then
-    n=$(_claims_jq rulings-count -s 'length' "$_SCRATCH/cl-results.jsonl") || _claims_propagate $?
-    _claims_out "## Spec amendments ($n)"
+    text=$(_claims_jq rulings-markdown -r "$_JQ_CLAIMS_RULINGS_MD" "$rows") || _claims_propagate $?
     _claims_mark_emitted 0
+    _claims_out "$text"
     _exit_ok
   fi
+  _claims_jq rulings-results -c '.[]' "$rows" >> "$_SCRATCH/cl-results.jsonl"
   _claims_emit rulings
 }
 
