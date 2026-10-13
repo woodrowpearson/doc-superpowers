@@ -5344,9 +5344,11 @@ test_lg_shallow_deepen_rebuilds_caches() {
 # --- Task 10: PR adapter, remote cache, review / merged status ----------------------
 
 # lg_fake_gh: a fake `gh` first on PATH (never the real one, never the
-# network). It counts its calls (LG_GH/calls), logs its arguments
-# (LG_GH/args) and prints LG_GH/prs.json — or, when LG_GH/fail exists,
-# prints that file on stderr and exits 1. lg_fake_gh_off restores PATH.
+# network). It logs its arguments (LG_GH/args), counts the adapter's runs
+# (LG_GH/calls: its `--state open` calls — ledger-pr-gh.sh makes one per
+# run) and prints the PRs of LG_GH/prs.json in the asked --state (all when
+# none) — or, when LG_GH/fail exists, prints that file on stderr and exits
+# 1. lg_fake_gh_off restores PATH.
 lg_fake_gh() {
   LG_GH=$(harness_mktemp_d lg-gh)
   LG_GH_BIN=$(harness_mktemp_d lg-ghbin)
@@ -5354,11 +5356,19 @@ lg_fake_gh() {
   cat > "$LG_GH_BIN/gh" <<EOF
 #!/bin/sh
 d='$LG_GH'
-n=\$(cat "\$d/calls" 2>/dev/null || echo 0)
-echo \$((n + 1)) > "\$d/calls"
+st=""; prev=""
+for a in "\$@"; do
+  if [ "\$prev" = --state ]; then st=\$a; fi
+  prev=\$a
+done
 printf '%s\n' "\$*" >> "\$d/args"
+if [ "\$st" = open ] || [ -z "\$st" ]; then
+  n=\$(cat "\$d/calls" 2>/dev/null || echo 0)
+  echo \$((n + 1)) > "\$d/calls"
+fi
 if [ -f "\$d/fail" ]; then cat "\$d/fail" >&2; exit 1; fi
-cat "\$d/prs.json"
+if [ -z "\$st" ] || [ "\$st" = all ]; then cat "\$d/prs.json"; exit 0; fi
+jq --arg s "\$st" '[.[] | select((.state | ascii_downcase) == \$s)]' "\$d/prs.json"
 EOF
   chmod +x "$LG_GH_BIN/gh"
   LG_PATH_SAVED=$PATH
@@ -5388,7 +5398,12 @@ LG_PR_CFG='{"adapters":{"pr":"doc-superpowers:ledger-pr-gh"},"trailers":{"claims
 #   y-1 open   claimed on PR #13, whose head never reached this clone
 #   y-2 open   claimed on closed PR #4 → nothing
 #   y-3 open   claimed on open PR #15 (head "feat/-dash")
-# PR #12's head is "feat/ünï-x". LG_PR_M: PR #9's merge commit.
+#   x-8 open   claimed (trailer) on merged PR #10's head (still on the remote)
+#   y-5 open   only its file edited on merged PR #10's head → nothing
+# PR #12's head is "feat/ünï-x"; open PR #16 is cross-repository (a fork)
+# with the same head name — never attributed through origin's branch.
+# Merged PR #9 (its branch deleted) only edited x-5's file → nothing.
+# LG_PR_M: PR #9's merge commit.
 lg_pr_fixture() {
   local c="$LG_PR_CFG"
   if [ $# -gt 0 ]; then c=$1; fi
@@ -5404,6 +5419,8 @@ lg_pr_fixture() {
   lg_item docs/issues/h.md "key: y-1" "ledger: y" "status: Open" "severity: P2" "summary: Claimed on an unfetched head"
   lg_item docs/issues/i.md "key: y-2" "ledger: y" "status: Open" "severity: P2" "summary: Claimed on a closed PR"
   lg_item docs/issues/j.md "key: y-3" "ledger: y" "status: Open" "severity: P2" "summary: Claimed on a dash-led head"
+  lg_item docs/issues/k.md "key: x-8" "ledger: x" "status: Open" "severity: P3" "summary: Claimed on a merged PR head"
+  lg_item docs/issues/l.md "key: y-5" "ledger: y" "status: Open" "severity: P3" "summary: Edited on a merged PR head"
   printf '\n## Resolution\n\nDone.\n' >> docs/issues/f.md
   git add -A && git commit -qm items
   git checkout -q -b merged-branch
@@ -5429,13 +5446,20 @@ Ledger-Claims: x-6"
   git checkout -q -b closed-branch main
   git commit -q --allow-empty -m "abandoned" -m "Ledger-Claims: y-2"
   git push -q origin closed-branch
+  git checkout -q -b squashed main
+  git commit -q --allow-empty -m "squash me" -m "Ledger-Claims: x-8"
+  printf '\nedited on the merged PR\n' >> docs/issues/l.md
+  git add -A && git commit -qm "touch y-5"
+  git push -q origin squashed
   git checkout -q main
-  git branch -q -D "feat/ünï-x" "feat/-dash" closed-branch
+  git branch -q -D "feat/ünï-x" "feat/-dash" closed-branch squashed
   git fetch -q origin
   cat > "$LG_GH/prs.json" <<EOF
-[{"number":15,"headRefName":"feat/-dash","state":"OPEN","url":"https://github.com/o/r/pull/15","mergeCommit":null},
+[{"number":16,"headRefName":"feat/ünï-x","state":"OPEN","url":"https://github.com/o/r/pull/16","mergeCommit":null,"isCrossRepository":true},
+ {"number":15,"headRefName":"feat/-dash","state":"OPEN","url":"https://github.com/o/r/pull/15","mergeCommit":null},
  {"number":13,"headRefName":"gone","state":"OPEN","url":"https://github.com/o/r/pull/13","mergeCommit":null},
  {"number":12,"headRefName":"feat/ünï-x","state":"OPEN","url":"https://github.com/o/r/pull/12","mergeCommit":null},
+ {"number":10,"headRefName":"squashed","state":"MERGED","url":"https://github.com/o/r/pull/10","mergeCommit":{"oid":"0123456789abcdef0123456789abcdef01234567"}},
  {"number":9,"headRefName":"merged-branch","state":"MERGED","url":"https://github.com/o/r/pull/9","mergeCommit":{"oid":"$LG_PR_M"}},
  {"number":4,"headRefName":"closed-branch","state":"CLOSED","url":"https://github.com/o/r/pull/4","mergeCommit":null}]
 EOF
@@ -5458,21 +5482,24 @@ lg_remote_file() {
 }
 
 test_lg_pr_adapter_normalises() {
-  echo "test: ledger-pr-gh.sh list — gh pr list --state all --limit 500 --json …, normalised to {number, head, state, url, merge_commit} lines"
+  echo "test: ledger-pr-gh.sh list — gh pr list (open, then merged) normalised to {number, head, state, url, merge_commit, cross} lines"
   lg_fixture
   lg_fake_gh
   cat > "$LG_GH/prs.json" <<'EOF'
-[{"number":12,"headRefName":"feat/ünï-x","state":"OPEN","url":"https://github.com/o/r/pull/12","mergeCommit":null},
+[{"number":12,"headRefName":"feat/ünï-x","state":"OPEN","url":"https://github.com/o/r/pull/12","mergeCommit":null,"isCrossRepository":false},
+ {"number":16,"headRefName":"-dash","state":"OPEN","url":"https://github.com/o/r/pull/16","mergeCommit":null,"isCrossRepository":true},
  {"number":9,"headRefName":"done","state":"MERGED","url":"https://github.com/o/r/pull/9","mergeCommit":{"oid":"0123456789abcdef0123456789abcdef01234567"}},
- {"number":4,"headRefName":"-dash","state":"CLOSED","url":"https://github.com/o/r/pull/4","mergeCommit":null}]
+ {"number":4,"headRefName":"gone","state":"CLOSED","url":"https://github.com/o/r/pull/4","mergeCommit":null}]
 EOF
   local out rc=0
   out=$("$BASH_BIN" "$REPO_DIR/scripts/adapters/ledger-pr-gh.sh" list 2>&1) || rc=$?
   assert_eq "0" "$rc" "exit 0"
-  assert_eq '{"number":12,"head":"feat/ünï-x","state":"open","url":"https://github.com/o/r/pull/12","merge_commit":null}
-{"number":9,"head":"done","state":"merged","url":"https://github.com/o/r/pull/9","merge_commit":"0123456789abcdef0123456789abcdef01234567"}
-{"number":4,"head":"-dash","state":"closed","url":"https://github.com/o/r/pull/4","merge_commit":null}' "$out" "one compact line per PR, state lowercased, mergeCommit.oid"
-  assert_eq "pr list --state all --limit 500 --json number,headRefName,state,url,mergeCommit" "$(cat "$LG_GH/args")" "the gh call"
+  assert_eq '{"number":12,"head":"feat/ünï-x","state":"open","url":"https://github.com/o/r/pull/12","merge_commit":null,"cross":false}
+{"number":16,"head":"-dash","state":"open","url":"https://github.com/o/r/pull/16","merge_commit":null,"cross":true}
+{"number":9,"head":"done","state":"merged","url":"https://github.com/o/r/pull/9","merge_commit":"0123456789abcdef0123456789abcdef01234567","cross":false}' "$out" \
+    "one compact line per open, then merged PR (closed ones not asked for); state lowercased; mergeCommit.oid; isCrossRepository as cross"
+  assert_eq "pr list --state open --limit 1000 --json number,headRefName,state,url,mergeCommit,isCrossRepository
+pr list --state merged --limit 500 --json number,headRefName,state,url,mergeCommit,isCrossRepository" "$(cat "$LG_GH/args")" "the two gh calls"
   printf '[]\n' > "$LG_GH/prs.json"
   out=$("$BASH_BIN" "$REPO_DIR/scripts/adapters/ledger-pr-gh.sh" list 2>&1) || rc=$?
   assert_eq "0|" "$rc|$out" "no PRs: exit 0, no lines"
@@ -5510,6 +5537,26 @@ test_lg_pr_adapter_gh_missing_rc2() {
   teardown
 }
 
+test_lg_pr_adapter_open_limit_rc2() {
+  echo "test: ledger-pr-gh.sh — as many open PRs as the limit (1000): the list may be cut — exit 2, never a silent truncation"
+  lg_pr_fixture
+  jq -n '[range(1000) | {number: (. + 100), headRefName: "b\(.)", state: "OPEN", url: "https://github.com/o/r/pull/\(. + 100)", mergeCommit: null}]' \
+    > "$LG_GH/prs.json"
+  local out rc=0
+  out=$("$BASH_BIN" "$REPO_DIR/scripts/adapters/ledger-pr-gh.sh" list 2>&1 >/dev/null) || rc=$?
+  assert_eq "2" "$rc" "1000 open PRs: exit 2"
+  assert_contains "$out" "could not list completely: 1000 open PRs" "…saying why"
+  lg ls --format json
+  assert_eq "0" "$LG_RC" "ls: the R1 failure path (exit 0)"
+  assert_contains "$LG_ERR" "PR data unavailable" "…one warning"
+  assert_contains "$LG_ERR" "could not list completely" "…with the reason"
+  jq -c '.[0:999]' "$LG_GH/prs.json" > "$LG_GH/p2" && mv "$LG_GH/p2" "$LG_GH/prs.json"
+  rc=0
+  "$BASH_BIN" "$REPO_DIR/scripts/adapters/ledger-pr-gh.sh" list >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "999 open PRs: exit 0"
+  lg_pr_teardown
+}
+
 # The unit test of _lg_remote_cache (a producer that counts its runs).
 # shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
 lg_t_remote_cache() {
@@ -5539,6 +5586,17 @@ lg_t_remote_cache() {
   { printf '%s\n' "$h"; tail -n +2 "$f"; } > "$f.x" && mv "$f.x" "$f"
   _lg_remote_cache t key1 lg_t_prod
   assert_eq "3|fresh|{\"v\":3}" "$(cat "$_SCRATCH/n")|$_LG_RSTATE|$(tail -n +2 "$f")" "past the TTL: the producer runs again"
+  # A fetch time in the future (clock skew): expired, refreshed (m1).
+  h=$(head -n 1 "$f" | jq -c --argjson t "$((now + 3600))" '.fetched_at = $t')
+  { printf '%s\n' "$h"; tail -n +2 "$f"; } > "$f.x" && mv "$f.x" "$f"
+  _lg_remote_cache t key1 lg_t_prod
+  assert_eq "4|fresh" "$(cat "$_SCRATCH/n")|$_LG_RSTATE" "fetched_at in the future: refreshed"
+  echo 3 > "$_SCRATCH/n"
+  # A huge TTL is clamped (jq prints 6e+31, which no shell test compares:
+  # the TTL was ignored and every call refetched) (m2).
+  jq -c '.cache.remote_ttl_minutes = 1e30' "$_LG_CFG" > "$_LG_CFG.x" && mv "$_LG_CFG.x" "$_LG_CFG"
+  lg_rc _lg_remote_cache t key1 lg_t_prod
+  assert_eq "0|3" "$LG_RC|$(cat "$_SCRATCH/n")" "remote_ttl_minutes 1e30: rc 0, the fresh copy serves"
   # TTL 0: every call refreshes.
   jq -c '.cache.remote_ttl_minutes = 0' "$_LG_CFG" > "$_LG_CFG.x" && mv "$_LG_CFG.x" "$_LG_CFG"
   _lg_remote_cache t key1 lg_t_prod
@@ -5581,6 +5639,17 @@ lg_t_remote_cache() {
   _hash_one "$_SCRATCH/data"
   assert_json_field "$h" '.data_sha256' "${_HASH#sha256:}" "…whose data hash is the data's"
   assert_eq "0" "$(find "$_LG_CACHE/remote" -name '.t*' | wc -l | tr -d ' ')" "…and no temp file left"
+  # A dead writer's temp file older than 10 minutes is swept on the next
+  # write; a young one (a live writer) is not (m4).
+  : > "$_LG_CACHE/remote/.t.old123"
+  touch -t 202001010000 "$_LG_CACHE/remote/.t.old123"
+  : > "$_LG_CACHE/remote/.t.new123"
+  _LG_REMOTE_FORCE=1
+  _lg_remote_cache t key1 lg_t_prod
+  _LG_REMOTE_FORCE=""
+  assert_file_not_exists "$_LG_CACHE/remote/.t.old123" "an old temp file is swept"
+  assert_file_exists "$_LG_CACHE/remote/.t.new123" "a young one stays"
+  rm -f "$_LG_CACHE/remote/.t.new123"
 }
 
 test_lg_remote_cache_ttl() {
@@ -5649,7 +5718,10 @@ test_lg_status_in_review() {
   assert_eq "not started" "$(lg_pr_status y-2)" "y-2: claimed by a closed PR only"
   assert_eq "not started" "$(lg_pr_status y-1)" "y-1: its PR's head has no local ref"
   assert_contains "$LG_ERR" "1 open PR head not fetched (#13" "the unfetched head is counted on stderr"
+  assert_contains "$LG_ERR" "1 cross-repository open PR not compared (#16)" "the fork PR too"
   assert_eq "1" "$(printf '%s\n' "$LG_ERR" | grep -c .)" "…in one line"
+  assert_eq "12" "$(jq -r '.items[] | select(.key == "x-1") | .derived.detail' <<<"$LG_OUT")" \
+    "x-1: #12, never the fork #16 through origin's same-named branch (C2)"
   lg show x-1 --format json
   assert_json_field "$LG_OUT" '.item.pr | [.number, .state, .url] | join(",")' "12,open,https://github.com/o/r/pull/12" "show: .pr"
   assert_json_field "$LG_OUT" '.item.derived | [.status, .detail] | join(",")' "in review,12" "…derived {in review, 12}"
@@ -5690,13 +5762,15 @@ test_lg_status_merged_open_item() {
   lg ls --format json
   assert_eq "merged · owed: closing" "$(lg_pr_status x-3)" "x-3: Ledger-Claims on the base"
   assert_eq "merged · owed: closing" "$(lg_pr_status x-4)" "x-4: Ledger-Claims-Path on the base (config claims_by_path)"
-  assert_eq "merged · owed: closing" "$(lg_pr_status x-5)" "x-5: its file changed by merged PR #9"
+  assert_eq "not started" "$(lg_pr_status x-5)" "x-5: merged PR #9 only changed its file — not merged (C3)"
+  assert_eq "merged · owed: closing" "$(lg_pr_status x-8)" "x-8: a Ledger-Claims trailer on merged PR #10's head"
+  assert_eq "not started" "$(lg_pr_status y-5)" "y-5: merged PR #10 only edited its file — not merged"
   assert_eq "merged · owed: docs" "$(lg_pr_status x-7)" "x-7: claimed in a bullet; its owed field is what is owed"
-  lg show x-5 --format json
-  assert_json_field "$LG_OUT" '.item.pr | [.number, .state] | join(",")' "9,merged" "x-5: .pr is the merged PR"
+  lg show x-8 --format json
+  assert_json_field "$LG_OUT" '.item.pr | [.number, .state] | join(",")' "10,merged" "x-8: .pr is the merged PR"
   assert_json_field "$LG_OUT" '.item.derived | [.status, .detail] | join(",")' "merged,closing" "…derived {merged, closing}"
   lg ls --status merged
-  assert_eq "x-3 x-4 x-5 x-7" "$(printf '%s\n' "$LG_OUT" | awk '{ print $1 }' | sort | tr '\n' ' ' | sed 's/ $//')" "ls --status merged"
+  assert_eq "x-3 x-4 x-7 x-8" "$(printf '%s\n' "$LG_OUT" | awk '{ print $1 }' | sort | tr '\n' ' ' | sed 's/ $//')" "ls --status merged"
   # Closing the item: shipped, whatever claimed it.
   lg_item docs/issues/c.md "key: x-3" "ledger: x" "status: Fixed" "severity: P2" "summary: Claimed on the base"
   printf '\n## Resolution\n\nDone.\n' >> docs/issues/c.md
@@ -5709,7 +5783,9 @@ test_lg_status_merged_open_item() {
   assert_eq "0" "$LG_RC" "no adapters.pr: exit 0"
   assert_eq "" "$LG_ERR" "…no warning"
   assert_eq "merged · owed: closing" "$(lg_pr_status x-4)" "x-4: base claim"
-  assert_eq "not started" "$(lg_pr_status x-5)" "x-5: only a PR said so"
+  assert_eq "not started" "$(lg_pr_status x-8)" "x-8: only a PR said so"
+  assert_json_field "$LG_OUT" '.pr_data | [.state, (.as_of | tostring), (.error | tostring)] | join(",")' "unconfigured,null,null" \
+    "pr_data: unconfigured (I3)"
   assert_eq "not started" "$(lg_pr_status x-1)" "x-1: no PR data, no review"
   assert_eq "1" "$(lg_gh_calls)" "gh was not called without the adapter (the one call: the first ls)"
   # The default trailers: Ledger-Claims-Path is not one.
@@ -5726,6 +5802,10 @@ test_lg_view_stale_pr_marker() {
   lg view all --out "$TEST_DIR/v"
   assert_eq "0" "$LG_RC" "fresh: exit 0"
   assert_not_contains "$(sed -n 3p "$TEST_DIR/v/x.md")" "PR data" "fresh: no marker"
+  lg ls --format json
+  assert_json_field "$LG_OUT" '.pr_data | [.state, (.as_of | type), (.error | tostring)] | join(",")' "fresh,number,null" "pr_data: fresh (I3)"
+  lg view x --out "$TEST_DIR/v" --format json
+  assert_json_field "$LG_OUT" '.pr_data.state' "fresh" "view JSON: pr_data"
   # Older than the TTL, and gh fails.
   local f h
   f=$(lg_remote_file pr) || f=""
@@ -5749,6 +5829,9 @@ test_lg_view_stale_pr_marker() {
   lg show x-1
   assert_eq "0" "$LG_RC" "show: exit 0"
   assert_contains "$LG_ERR" "PR data as of " "show: the note"
+  lg show x-1 --format json
+  assert_json_field "$LG_OUT" '.pr_data | [.state, (.as_of | type), (.error | test("could not connect") | tostring)] | join(",")' \
+    "stale,number,true" "pr_data: stale, its age, the error"
   # No cached copy at all.
   rm -rf "$(git rev-parse --git-common-dir)/doc-superpowers/ledger/remote"
   lg view all --html --md --out "$TEST_DIR/v"
@@ -5762,7 +5845,9 @@ test_lg_view_stale_pr_marker() {
   assert_eq "1" "$(printf '%s\n' "$LG_ERR" | grep -c .)" "one stderr warning"
   assert_contains "$LG_ERR" "PR data unavailable" "…saying the PR data is unavailable"
   assert_eq "merged · owed: closing" "$(lg_pr_status x-3)" "base claims still count"
-  assert_eq "not started" "$(lg_pr_status x-5)" "the merged PR's claim is gone (—)"
+  assert_eq "not started" "$(lg_pr_status x-8)" "the merged PR's claim is gone (—)"
+  assert_json_field "$LG_OUT" '.pr_data | [.state, (.as_of | tostring), (.error | test("could not connect") | tostring)] | join(",")' \
+    "none,null,true" "pr_data: none"
   lg show x-1
   assert_eq "0" "$LG_RC" "show: exit 0"
   lg find claimed
@@ -5770,6 +5855,108 @@ test_lg_view_stale_pr_marker() {
   assert_contains "$LG_ERR" "PR data unavailable" "find: the warning"
   lg ls --refresh
   assert_eq "2" "$LG_RC" "--refresh: exit 2"
+  lg_pr_teardown
+}
+
+test_lg_remote_offline() {
+  echo "test: DOC_TOOLS_LEDGER_OFFLINE=1 — the producer never runs; a copy past the TTL serves (offline), none: '—'; --refresh / publish exit 2"
+  lg_pr_fixture
+  lg ls
+  assert_eq "1" "$(lg_gh_calls)" "online: one fetch"
+  local f h
+  f=$(lg_remote_file pr) || f=""
+  h=$(head -n 1 "$f" | jq -c '.fetched_at -= 2 * 3600')
+  { printf '%s\n' "$h"; tail -n +2 "$f"; } > "$f.x" && mv "$f.x" "$f"
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg ls --format json
+  assert_eq "0|1" "$LG_RC|$(lg_gh_calls)" "past the TTL, offline: exit 0, no gh call"
+  assert_contains "$LG_ERR" "PR data as of " "the stderr note"
+  assert_contains "$LG_ERR" "offline" "…says offline"
+  assert_not_contains "$LG_ERR" "failed" "…not that the adapter failed"
+  assert_json_field "$LG_OUT" '.pr_data | [.state, (.as_of | type), (.error | tostring)] | join(",")' "offline,number,null" "pr_data: offline, as_of, no error"
+  assert_eq "in review #12" "$(lg_pr_status x-1)" "the copy serves"
+  assert_file_not_exists "$f.fail" "no failure recorded"
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg view x --out "$TEST_DIR/v"
+  assert_contains "$(sed -n 3p "$TEST_DIR/v/x.md")" "PR data as of " "view: the header marker"
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg ls --refresh
+  assert_eq "2" "$LG_RC" "--refresh offline: exit 2"
+  assert_contains "$LG_ERR" "offline: DOC_TOOLS_LEDGER_OFFLINE=1" "…saying so"
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg publish --dry-run
+  assert_eq "2" "$LG_RC" "publish offline: exit 2"
+  assert_contains "$LG_ERR" "offline: DOC_TOOLS_LEDGER_OFFLINE=1" "…saying so"
+  rm -rf "$(git rev-parse --git-common-dir)/doc-superpowers/ledger/remote"
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg ls --format json
+  assert_eq "0" "$LG_RC" "no copy, offline: exit 0"
+  assert_eq "1" "$(printf '%s\n' "$LG_ERR" | grep -c .)" "…one warning"
+  assert_contains "$LG_ERR" "PR data unavailable" "…the R1 '—' path"
+  assert_json_field "$LG_OUT" '.pr_data | [.state, (.as_of | tostring)] | join(",")' "offline,null" "pr_data: offline, no as_of"
+  assert_eq "1" "$(lg_gh_calls)" "gh never ran offline"
+  lg_pr_teardown
+}
+
+# lg_remote_v2 <cache-file> <out>: a copy of the cache file as a newer
+# fetch would write it — PR #15 closed, PR #17 opened on closed-branch (it
+# claims y-2) — its header's data hash recomputed.
+lg_remote_v2() {
+  local d h
+  d=$(harness_mktemp lg-v2)
+  { tail -n +2 "$1" | sed 's/"number":15,\("head":"feat\/-dash","state":\)"open"/"number":15,\1"closed"/'
+    echo '{"number":17,"head":"closed-branch","state":"open","url":"https://github.com/o/r/pull/17","merge_commit":null,"cross":false}'; } > "$d"
+  h=$(head -n 1 "$1" | jq -c --arg s "$(shasum -a 256 < "$d" | cut -d ' ' -f 1)" '.data_sha256 = $s')
+  { printf '%s\n' "$h"; cat "$d"; } > "$2"
+  rm -f "$d"
+}
+
+test_lg_remote_cache_race_snapshot() {
+  echo "test: a reader racing a writer reads one snapshot — no parsed sidecar named for data it did not parse (I2)"
+  lg_pr_fixture
+  lg ls --format json
+  assert_eq "in review #15" "$(lg_pr_status y-3)" "v1: y-3 in review #15"
+  local f v2 c
+  f=$(lg_remote_file pr) || f=""
+  rm -f "${f%.json}"-*.ol
+  v2="$TEST_DIR/v2.json"
+  lg_remote_v2 "$f" "$v2"
+  # A writer replaces the file while this run reads it (selftest hook).
+  DOC_TOOLS_LEDGER_SELFTEST=remote-swap DOC_TOOLS_LEDGER_SELFTEST_SWAP="$v2" lg ls --format json
+  assert_eq "0" "$LG_RC" "the racing run: exit 0"
+  assert_eq "in review #15" "$(lg_pr_status y-3)" "…consistent: the data it read (v1)"
+  lg ls --format json
+  assert_eq "0" "$LG_RC" "the next run: exit 0"
+  assert_eq "not started" "$(lg_pr_status y-3)" "the next run reads v2: #15 closed"
+  assert_eq "in review #17" "$(lg_pr_status y-2)" "…and #17's head walked (no sidecar parsed from v1 under v2's name)"
+  # A sidecar that cannot be read is a miss, not a failure.
+  for c in "${f%.json}"-*.ol; do [ -f "$c" ] && chmod 000 "$c"; done
+  lg_enable "$(jq -c '.views.recent_days = 13' docs/ledger/config.json)"
+  lg ls
+  assert_eq "0" "$LG_RC" "an unreadable sidecar: re-parsed, exit 0"
+  for c in "${f%.json}"-*.ol; do [ -f "$c" ] && chmod 644 "$c"; done
+  # An ancestor's base-claims file that cannot be read: a cold walk.
+  c=$(ls "$(git rev-parse --git-common-dir)"/doc-superpowers/ledger/claims-*.tsv | head -n 1)
+  chmod 000 "$c"
+  git commit -q --allow-empty -m "later" && git push -q origin main && git fetch -q origin
+  lg ls
+  assert_eq "0" "$LG_RC" "an unreadable ancestor claims file: a cold walk, exit 0"
+  chmod 644 "$c"
+  lg_pr_teardown
+}
+
+test_lg_pr_numbers_sorted_numerically() {
+  echo "test: PR numbers order numerically, whatever type an adapter gives them (m3)"
+  lg_pr_fixture '{"adapters":{"pr":"tools/pr.sh"}}'
+  mkdir -p tools
+  cat > tools/pr.sh <<'EOF'
+#!/bin/sh
+echo '{"number":"9","head":"feat/-dash","state":"open","url":"https://example.test/9"}'
+echo '{"number":"12","head":"feat/ünï-x","state":"open","url":"https://example.test/12"}'
+EOF
+  chmod +x tools/pr.sh
+  git checkout -q -b more "origin/feat/ünï-x"
+  git commit -q --allow-empty -m "also" -m "Ledger-Claims: y-3"
+  git push -q origin "HEAD:feat/ünï-x"
+  git checkout -q main
+  git fetch -q origin
+  lg ls --format json
+  assert_eq "in review #12" "$(lg_pr_status y-3)" "claimed by \"9\" and \"12\": #12, the higher number"
   lg_pr_teardown
 }
 
@@ -5983,6 +6170,12 @@ run_tests() {
   test_lg_status_in_review
   test_lg_status_merged_open_item
   test_lg_view_stale_pr_marker
+
+  # --- Task 10 fix round 1 ---
+  test_lg_pr_adapter_open_limit_rc2
+  test_lg_remote_offline
+  test_lg_remote_cache_race_snapshot
+  test_lg_pr_numbers_sorted_numerically
 
   print_summary
 }

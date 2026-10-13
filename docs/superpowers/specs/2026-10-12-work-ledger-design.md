@@ -148,7 +148,7 @@ New subcommand group; bash 3.2 + `jq`. Text is the default output (it is what ag
 
 #### E.1 Derived status (first match wins)
 
-`superseded → <key>` · `won't fix` · `closed` · `shipped` (fixed-class, no `owed`) · `merged · owed: <owed>` (fixed with `owed`, or a claims-by-path trailer reachable from the base while still open) · `in review #<pr>` (an open PR whose head claims the item) · `on branch <b>` (an in-flight branch claims it, no PR) · `planned` (an open plan links it) · `spec'd` (a spec links it, no plan) · `not started`.
+`superseded → <key>` · `won't fix` · `closed` · `shipped` (fixed-class, no `owed`) · `merged · owed: <owed>` (fixed with `owed`, or — while still open — a claims or claims-by-path trailer reachable from the base, or in the commits of a merged PR's head; a merged PR's file edits alone do not count; `<owed>` the item's `owed`, else `closing`) · `in review #<pr>` (an open PR whose head claims the item) · `on branch <b>` (an in-flight branch claims it, no PR) · `planned` (an open plan links it) · `spec'd` (a spec links it, no plan) · `not started`.
 
 #### E.2 Ledger page (markdown) — clusters by shared contract
 
@@ -194,7 +194,7 @@ When an item reaches a terminal class, or a base commit changes a contract, `led
 
 | Adapter | Contract |
 |---|---|
-| `pr` | `<adapter> list` → JSON lines `{"number", "head", "state", "url"}`. Reference: `scripts/adapters/ledger-pr-gh.sh` (GitHub CLI). Absent → PR column "—", never an error. |
+| `pr` | `<adapter> list` → JSON lines `{"number", "head", "state", "url"}`, optional `"cross"` (true: the head is a fork's branch — never resolved through a same-named branch of the remote; absent: false). Reference: `scripts/adapters/ledger-pr-gh.sh` (GitHub CLI: open PRs up to a limit it fails at rather than truncate, then the newest merged ones). Absent → PR column "—", never an error. |
 | `contracts` | `<adapter> list` → JSON lines `{"id", "ledger": <id\|null>, "defined_in": [globs]}` for contracts held in host registries (a design-system registry, a flags file, …); `<adapter> resolve <id>` → exit 0/1. Absent → only registry contracts exist. |
 | `items` | `<adapter> list [--since <ts>]` → JSON lines `{"ref", "url", "title", "body_excerpt", "status", "fields": {…}, "labels": [...], "updated"}` with `fields` holding the same logical fields as file frontmatter; `<adapter> write <ref> <field> <value>` sets one field; `<adapter> note <ref> <text>` appends a comment. Reference: `scripts/adapters/ledger-items-gh.sh` — GitHub Issues via `gh`: `ledger` and `severity` as labels (`ledger:<id>`, `sev:<v>`, prefixes configurable), all other fields in an HTML-comment metadata block in the issue body (`<!-- doc-superpowers-ledger … -->`, invisible when rendered); open/closed and the close reason (`completed` / `not planned`) map onto the status classes; `superseded_by` lives in the block. The hosted issue stays the source of truth — the index caches the adapter's list (TTL, `--refresh`), shows a stale marker when offline, and never mirrors items into files. A host that wants files instead runs `ledger init --import` once (§K). Hosted items are validated by `validate --all` through the adapter, not by the pre-commit hook. |
 

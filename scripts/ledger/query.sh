@@ -73,12 +73,24 @@ _lg_q_run() {
   tail -n +2 "$out.all" > "$out" || _lg_die "cannot write $out"
 }
 
+# _lg_pr_data_into <payload-file>: add "pr_data" (the index build's PR data
+# state, $_SCRATCH/lg-pr.json — index.sh _lg_ix_pr_prepare) to the JSON
+# payload, so a stale or missing PR list never reads as a clean answer;
+# nothing when no worktree or rev index was built this run.
+_lg_pr_data_into() {
+  [ -s "$_SCRATCH/lg-pr.json" ] || return 0
+  if ! jq -c --slurpfile pd "$_SCRATCH/lg-pr.json" '. + {pr_data: $pd[0]}' "$1" > "$1.pd" || ! mv -f -- "$1.pd" "$1"; then
+    _lg_die "jq failed (pr_data)"
+  fi
+}
+
 # _lg_q_finish <out>: print <out> as the run's output — the verdict object
 # in --format json (the program printed the payload as one line), the lines
 # in text mode — and end the run with rc 0.
 _lg_q_finish() {
   local out="$1"
   if [ "$_LG_FORMAT" = json ]; then
+    _lg_pr_data_into "$out"
     _lg_emit "$_LG_VERB" 0 "$out"
   fi
   _lg_out_file "$out"

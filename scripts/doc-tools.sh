@@ -2707,7 +2707,13 @@ notices, new, assign, link, note, view, validate, publish, finalize, init):
   doc-superpowers:<name> — scripts/adapters/<name>.sh beside this
   doc-tools.sh; one that fails or prints output that breaks its contract
   exits 2 for every verb that needs it (contracts: show, related, recheck,
-  sweep, link, view, publish).
+  sweep, link, view, publish). The pr adapter's list is cached for
+  cache.remote_ttl_minutes; when it fails, the verbs serve the last copy
+  (or none) with one stderr line and "pr_data" in --format json, and only
+  --refresh and publish exit 2. DOC_TOOLS_LEDGER_OFFLINE=1 never runs it
+  (for hooks that must not reach the network): a copy past its TTL is
+  served as "PR data as of …", no copy is "—", and --refresh / publish
+  exit 2 ("offline: DOC_TOOLS_LEDGER_OFFLINE=1").
 
 Exit status:
   0  success

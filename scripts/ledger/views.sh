@@ -223,6 +223,7 @@ cmd_ledger_view() {
   fi
   if [ "$_LG_FORMAT" = json ]; then
     _lg_v_payload "$stage/.names" "$s.json" "$out"
+    _lg_pr_data_into "$s.json"
     _lg_emit view 0 "$s.json"
   fi
   _lg_out_file "$s.lines"
