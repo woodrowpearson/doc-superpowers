@@ -7815,6 +7815,262 @@ test_v8_git_failure_indeterminate() {
   teardown
 }
 
+# --- V8n: descriptive conformance lines -------------------------------------------
+
+# The last `cl`'s V8n rows (findings and advisories): their count, and their
+# messages one per line.
+v8n_count() {
+  jq '[.findings[]?, .advisories[]? | select(.check == "V8n")] | length' <<<"$CL_OUT" 2>/dev/null || echo invalid
+}
+v8n_messages() {
+  jq -r '.findings[]?, .advisories[]? | select(.check == "V8n") | .message' <<<"$CL_OUT" 2>/dev/null || true
+}
+# v8n_nocite <doc> <line>: the V8n message for a conformance line with no id.
+v8n_nocite() {
+  printf '%s:%s: descriptive line asserts conformance with no claim id or (unverified)' "$1" "$2"
+}
+# v8n_unknown <doc> <line> <id>: the V8n message for an id that is no claim.
+v8n_unknown() {
+  printf '%s:%s: cites unknown claim %s' "$1" "$2" "$3"
+}
+
+# assert_v8n_line <doc> <exact line> <what>: the last `cl`'s V8n rows are
+# exactly one, the no-id message for the line of <doc> equal to <exact line>.
+assert_v8n_line() {
+  local n
+  n=$(line_no "$1" "$2")
+  assert_true "$3: precondition, the line is in $1" test -n "$n"
+  assert_eq "1" "$(v8n_count)" "$3: one V8n row"
+  assert_eq "$(v8n_nocite "$1" "$n")" "$(v8n_messages)" "$3: naming $1:$n"
+}
+
+NOTES_LINE="Token expiry as specified."
+
+# stage_notes <line>…: the arguments, in order, one line each, added after
+# "Not started." and staged.
+stage_notes() {
+  local l text=""
+  for l in "$@"; do text="$text$l"$'\n'; done
+  doc_edit "$DOC" "Not started." "${text%$'\n'}" after
+  git add "$DOC"
+}
+
+test_v8n_conformance_without_id() {
+  echo "test: V8n — an added Implementation Notes line asserting conformance, with no id, is one advisory"
+  claims_fixture
+  stage_notes "$NOTES_LINE"
+  cl validate --staged
+  assert_eq "0" "$CL_RC" "advisory: exits 0"
+  assert_v8n_line "$DOC" "$NOTES_LINE" "the conformance line"
+  assert_json_field "$CL_OUT" '[.advisories[] | select(.check == "V8n")] | length' "1" "…an advisory"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V8n")] | length' "0" "…not a finding (V8n is not blocking by default)"
+  assert_eq "0" "$(v8_count)" "…and no V8 row: a descriptive line is not normative"
+  teardown
+}
+
+test_v8n_with_claim_id_ok() {
+  echo "test: V8n — a conformance line citing a known claim id is exempt"
+  claims_fixture
+  stage_notes "Token expiry as specified (SPEC-AUTH-001#token-ttl)."
+  cl validate --staged
+  assert_eq "0" "$(v8n_count)" "a known id: no V8n row"
+  # shellcheck disable=SC2016  # backticks in the doc text, not a command substitution
+  doc_edit "$DOC" "Token expiry as specified (SPEC-AUTH-001#token-ttl)." 'Token expiry as specified (`SPEC-AUTH-001#token-ttl`).'
+  git add "$DOC"
+  cl validate --staged
+  assert_eq "0" "$(v8n_count)" "…also in backticks"
+  teardown
+}
+
+test_v8n_unverified_ok() {
+  echo "test: V8n — (unverified) exempts a conformance line"
+  claims_fixture
+  stage_notes "Token expiry as specified (unverified)."
+  cl validate --staged
+  assert_eq "0" "$(v8n_count)" "(unverified): no V8n row"
+  doc_edit "$DOC" "Token expiry as specified (unverified)." "Token expiry as specified unverified."
+  git add "$DOC"
+  cl validate --staged
+  assert_eq "1" "$(v8n_count)" "…but the bare word, without its parentheses, is no exemption"
+  teardown
+}
+
+test_v8n_descriptive_marker_section() {
+  echo "test: V8n — a section carrying the descriptive marker is descriptive"
+  claims_fixture
+  stage_notes $'\n## Build log\n\nThe build conforms to the contract.'
+  cl validate --staged
+  assert_eq "0" "$(v8n_count)" "precondition: Build log is no descriptive section without the marker"
+  doc_edit "$DOC" "## Build log" $'## Build log\n\n<!-- spec-claims:descriptive -->'
+  git add "$DOC"
+  cl validate --staged
+  assert_v8n_line "$DOC" "The build conforms to the contract." "under the marker"
+  teardown
+}
+
+test_v8n_unknown_claim_id() {
+  echo "test: V8n — a conformance line citing an id that is no claim is 'cites unknown claim'"
+  claims_fixture
+  stage_notes "Token expiry as specified (SPEC-AUTH-001#token-lifetime)."
+  cl validate --staged
+  assert_eq "1" "$(v8n_count)" "one V8n row"
+  assert_eq "$(v8n_unknown "$DOC" "$(line_no "$DOC" "Token expiry as specified (SPEC-AUTH-001#token-lifetime).")" "SPEC-AUTH-001#token-lifetime")" \
+    "$(v8n_messages)" "…cites unknown claim, naming the id"
+  teardown
+}
+
+test_v8n_pointer_without_trigger_ignored() {
+  echo "test: V8n — a pointer at a normative section with no trigger phrase is never flagged"
+  claims_fixture
+  stage_notes "See §Requirements." "Refresh behaviour is described in SPEC-AUTH-001#nowhere." "The service is aligned, in its way."
+  cl validate --staged
+  assert_eq "0" "$(v8n_count)" "no trigger phrase: no V8n row, even for an unknown id"
+  teardown
+}
+
+test_v8n_triggers_case_insensitive_ids_exact() {
+  echo "test: V8n — the five trigger phrases match in any case; the id token is matched exactly"
+  claims_fixture
+  stage_notes "AS SPECIFIED, the token expires." "It Conforms to the contract." "Aligned With the design." \
+    "Matches §Requirements closely." "IMPLEMENTED PER the plan." "It matches the design." "Implemented perfectly."
+  cl validate --staged
+  assert_eq "6" "$(v8n_count)" "six lines trigger ('It matches the design.' does not; 'Implemented perfectly.' holds 'implemented per')"
+  assert_not_contains "$(v8n_messages)" "$(v8n_nocite "$DOC" "$(line_no "$DOC" "It matches the design.")")" "…'matches' needs the '§'"
+  assert_contains "$(v8n_messages)" "$(v8n_nocite "$DOC" "$(line_no "$DOC" "Matches §Requirements closely.")")" "…'matches §' in any case"
+  # A lower-case look-alike of an id, a bare doc id and a lower-case suffix cite nothing.
+  stage_notes "Token expiry as specified (spec-auth-001#token-ttl)." "Token expiry as specified (SPEC-AUTH-001)." \
+    "Token expiry as specified (SPEC-AUTH-001#Token-ttl)."
+  cl validate --staged
+  assert_eq "9" "$(v8n_count)" "three look-alikes are no id: three more rows, all 'no claim id'"
+  assert_eq "0" "$(v8n_messages | grep -c 'cites unknown claim' || true)" "…none of them an unknown claim"
+  teardown
+}
+
+test_v8n_several_ids_on_a_line() {
+  echo "test: V8n — a line with several ids: a known one exempts it, and each unknown id is its own finding"
+  claims_fixture
+  local known="SPEC-AUTH-001#token-ttl" n1 n2
+  stage_notes "Token expiry as specified ($known, SPEC-AUTH-001#ghost)." \
+    "Token expiry as specified (SPEC-AUTH-001#ghost-a, SPEC-AUTH-001#ghost-b, SPEC-AUTH-001#ghost-a)."
+  cl validate --staged
+  n1=$(line_no "$DOC" "Token expiry as specified ($known, SPEC-AUTH-001#ghost).")
+  n2=$(line_no "$DOC" "Token expiry as specified (SPEC-AUTH-001#ghost-a, SPEC-AUTH-001#ghost-b, SPEC-AUTH-001#ghost-a).")
+  assert_eq "3" "$(v8n_count)" "three rows: one unknown id on line 1, two distinct on line 2"
+  assert_eq "$(v8n_unknown "$DOC" "$n1" SPEC-AUTH-001#ghost)
+$(v8n_unknown "$DOC" "$n2" SPEC-AUTH-001#ghost-a)
+$(v8n_unknown "$DOC" "$n2" SPEC-AUTH-001#ghost-b)" "$(v8n_messages)" \
+    "…the known id adds no 'no claim id' row; a repeated unknown id is named once"
+  teardown
+}
+
+test_v8n_id_of_another_sidecar_is_known() {
+  echo "test: V8n — a claim id of any sidecar is known, a retired claim's included"
+  claims_fixture
+  mkdir -p docs/adr
+  printf '# ADR-007: Response cache\n\n**Status**: Proposed\n\n## Decision\n\nCache read responses for 60 seconds.\n' > docs/adr/ADR-007-cache.md
+  jq -n '{schema: 1, doc: "docs/adr/ADR-007-cache.md", claims: [{
+    id: "ADR-007#cache-ttl", quote: "Cache read responses for 60 seconds",
+    states: "A read response is served from cache for 60 seconds.", kind: "behaviour",
+    subject: ["src/auth/token.py"], status: "retired", enforced_by: "test",
+    test: null, nonvacuity: null, promotion: null,
+    tracker: null, frozen_at: null, restates: [], rulings: []}]}' > docs/spec-claims/ADR-007.json
+  git add docs/adr docs/spec-claims/ADR-007.json
+  stage_notes "Caching as specified (ADR-007#cache-ttl)."
+  cl validate --staged
+  assert_eq "0" "$(v8n_count)" "the other sidecar's (retired) claim is known: no V8n row"
+  teardown
+}
+
+test_v8n_only_added_descriptive_lines() {
+  echo "test: V8n — only added lines are read under --staged, and only descriptive ones"
+  claims_fixture
+  stage_notes "An old line as specified."
+  git commit -qm "an old conformance line"
+  doc_edit "$DOC" "- Refresh tokens are single-use." "- Refresh tokens are single-use, as specified (SPEC-AUTH-001#token-ttl)."
+  doc_edit "$DOC" "How long issued tokens stay valid." "How long issued tokens stay valid, as specified."
+  doc_edit "$DOC" "Not started." "Not started yet." after
+  git add "$DOC"
+  cl validate --staged
+  assert_eq "0" "$(v8n_count)" "an unchanged conformance line, a normative one and a Summary one: no V8n row"
+  teardown
+}
+
+test_v8n_unicode_line_numbers() {
+  echo "test: V8n — line numbers and the § trigger survive lines holding é and —"
+  claims_fixture
+  doc_edit "$DOC" "How long issued tokens stay valid." "How long issued tokens stay valid — durée de vie, § café."
+  stage_notes "Durée de vie — conforme, et café as specified." "Matches §Interfaces — voilà."
+  cl validate --staged
+  assert_eq "2" "$(v8n_count)" "two V8n rows"
+  assert_eq "$(v8n_nocite "$DOC" "$(line_no "$DOC" "Durée de vie — conforme, et café as specified.")")
+$(v8n_nocite "$DOC" "$(line_no "$DOC" "Matches §Interfaces — voilà.")")" "$(v8n_messages)" \
+    "…each naming its own line, after the non-ASCII Summary line"
+  teardown
+}
+
+test_v8n_all_every_descriptive_line() {
+  echo "test: V8n — validate --all reads every descriptive line of the docs with a sidecar"
+  claims_fixture
+  stage_notes "$NOTES_LINE" "- Not a list as specified."
+  git commit -qm "conformance lines"
+  mkdir -p docs/adr
+  printf '# ADR-008: No sidecar\n\n## Implementation Notes\n\nBuilt as specified.\n' > docs/adr/ADR-008-queue.md
+  cl validate --all
+  assert_eq "0" "$CL_RC" "exits 0 (advisory)"
+  assert_eq "2" "$(v8n_count)" "two V8n rows (the ADR without a sidecar is not read)"
+  assert_eq "$(v8n_nocite "$DOC" "$(line_no "$DOC" "$NOTES_LINE")")
+$(v8n_nocite "$DOC" "$(line_no "$DOC" "- Not a list as specified.")")" "$(v8n_messages)" "…both lines of the fixture doc"
+  teardown
+}
+
+test_v8n_blocking_when_configured() {
+  echo "test: V8n — blocking when the config's blocking list includes it"
+  claims_fixture
+  jset docs/spec-claims/config.json '.blocking = ["V1","V2","V3","V4","V5","V6","V8n","V10","V11","V12"]'
+  git add docs/spec-claims/config.json
+  stage_notes "$NOTES_LINE"
+  cl validate --staged
+  assert_eq "1" "$CL_RC" "a conformance line with V8n blocking: exits 1"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V8n")] | length' "1" "…a V8n finding"
+  teardown
+}
+
+test_v8n_invalid_heading_ere_indeterminate() {
+  echo "test: V8n — a heading ERE awk cannot compile makes V8n indeterminate too"
+  claims_fixture
+  jset docs/spec-claims/config.json '. + {"descriptive_headings": ["["]}'
+  cl validate --all
+  assert_eq "2" "$CL_RC" "exits 2"
+  assert_json_field "$CL_OUT" '[.indeterminate[] | select(.check == "V8n")] | length' "1" "one V8n indeterminate row"
+  assert_json_field "$CL_OUT" '[.indeterminate[] | select(.check == "V8n")][0].reason | test("descriptive_headings")' "true" "…naming the key"
+  assert_eq "0" "$(v8n_count)" "…and no V8n row"
+  teardown
+}
+
+test_v8n_gate_blocks_and_records() {
+  echo "test: V8n at the gate — an added conformance line is a blocking finding, in the record's checks.V8n"
+  gate_fixture
+  gate_promote
+  local from line
+  from=$(git rev-parse HEAD)
+  doc_edit "$DOC" "Not started." "$NOTES_LINE" after
+  git commit -qam "notes"
+  doc_edit "$DOC" "How long issued tokens stay valid." $'\nOne.\n\nTwo.' after
+  git commit -qam "summary lines above it"
+  line=$(line_no "$DOC" "$NOTES_LINE")
+  gate 1 --from "$from"
+  assert_eq "1" "$CL_RC" "a conformance line without an id at the gate: exits 1"
+  assert_eq "$(v8n_nocite "$DOC" "$line")" "$(gate_messages V8n)" "…one V8n finding naming HEAD's line $line"
+  assert_eq "1" "$(rec 1 '.checks.V8n | length')" "…the record's checks.V8n"
+  assert_eq "red" "$(rec 1 .result)" "…result red"
+  doc_edit "$DOC" "$NOTES_LINE" "Token expiry as specified (SPEC-AUTH-001#token-ttl)."
+  git commit -qam "cite the claim"
+  gate 1 --from "$from"
+  assert_eq "0" "$(v8n_count)" "the line citing a known claim: no V8n row"
+  assert_eq "0" "$(rec 1 '.checks.V8n | length')" "…and an empty checks.V8n"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -8157,6 +8413,23 @@ run_tests() {
   test_v8_gate_trunk_merge_not_added
   test_v8_gate_blame_ignore_revs_pinned
   test_v8_git_failure_indeterminate
+
+  # --- Task 19: V8n descriptive conformance ---
+  test_v8n_conformance_without_id
+  test_v8n_with_claim_id_ok
+  test_v8n_unverified_ok
+  test_v8n_descriptive_marker_section
+  test_v8n_unknown_claim_id
+  test_v8n_pointer_without_trigger_ignored
+  test_v8n_triggers_case_insensitive_ids_exact
+  test_v8n_several_ids_on_a_line
+  test_v8n_id_of_another_sidecar_is_known
+  test_v8n_only_added_descriptive_lines
+  test_v8n_unicode_line_numbers
+  test_v8n_all_every_descriptive_line
+  test_v8n_blocking_when_configured
+  test_v8n_invalid_heading_ere_indeterminate
+  test_v8n_gate_blocks_and_records
 
   print_summary
 }

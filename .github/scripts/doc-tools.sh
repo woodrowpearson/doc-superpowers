@@ -8485,16 +8485,23 @@ _JQ_CLAIMS_V8='def cl_cells: sub("^[ \t]*\\|"; "") | sub("\\|[ \t]*$"; "") | spl
                | ($cell | contains($q)) or (($q | contains($cell)) and any(.lines[]; . == $n))) | not))))
  | {check: "V8", claim: null, doc: $doc, message: "\($doc):\($n): normative text no claim covers"}'
 
-# _claims_v8 --staged | --all | <range> [<findings-file>]: V8 (see the
-# section comment), its finding rows added to <findings-file> (default the
-# verdict's findings). validate passes --staged or --all; gate passes
-# "<from>..HEAD" and its own file (the record's checks.V8).
+# _claims_sect_scan <V8|V8n> --staged | --all | <range> <findings-file>:
+# the doc loop V8 and V8n share (see the section comments), run over the
+# docs of <how> with the jq program of <check> (_JQ_CLAIMS_V8, or
+# _JQ_CLAIMS_V8N): each doc is read, classed (_claims_sections) and its
+# added lines named (_claims_added_lines) the same way. The finding rows go
+# to <findings-file>.
 # shellcheck disable=SC2016  # jq programs, not shell expansion
-_claims_v8() {
-  local how="$1" dest="${2:-$_SCRATCH/cl-findings.jsonl}" cand="$_SCRATCH/cl-v8-cand.z" docs="$_SCRATCH/cl-v8-docs.z"
-  local raw="$_SCRATCH/cl-v8-doc.raw" sec="$_SCRATCH/cl-v8-sec.tsv" added="$_SCRATCH/cl-v8-added" all=0 end="" doc
+_claims_sect_scan() {
+  local check="$1" how="$2" dest="$3" cand="$_SCRATCH/cl-v8-cand.z" docs="$_SCRATCH/cl-v8-docs.z"
+  local raw="$_SCRATCH/cl-v8-doc.raw" sec="$_SCRATCH/cl-v8-sec.tsv" added="$_SCRATCH/cl-v8-added" all=0 end="" doc prog
+  case "$check" in
+    V8) prog=$_JQ_CLAIMS_V8 ;;
+    V8n) prog=$_JQ_CLAIMS_V8N ;;
+    *) _claims_die "_claims_sect_scan: unknown check $check" ;;
+  esac
   if ! _claims_sections_init; then
-    _claims_indeterminate V8 - "$_CL_SEC_STATE"
+    _claims_indeterminate "$check" - "$_CL_SEC_STATE"
     return 0
   fi
   case "$how" in
@@ -8532,9 +8539,71 @@ _claims_v8() {
     esac
     [ "$all" = 1 ] || [ -s "$added" ] || continue
     _claims_sections "$raw" > "$sec"
-    _claims_jq v8 -Rsc --arg doc "$doc" --argjson all "$all" --rawfile sec "$sec" --rawfile added "$added" \
-      --slurpfile c "$_SCRATCH/cl-claims.json" "$_JQ_CLAIMS_NORM $_JQ_CLAIMS_V8" "$raw" >> "$dest"
+    _claims_jq "$check" -Rsc --arg doc "$doc" --argjson all "$all" --rawfile sec "$sec" --rawfile added "$added" \
+      --slurpfile c "$_SCRATCH/cl-claims.json" "$_JQ_CLAIMS_NORM $prog" "$raw" >> "$dest"
   done 3< "$docs"
+}
+
+# _claims_v8 --staged | --all | <range> [<findings-file>]: V8 (see the
+# section comment), its finding rows added to <findings-file> (default the
+# verdict's findings). validate passes --staged or --all; gate passes
+# "<from>..HEAD" and its own file (the record's checks.V8).
+_claims_v8() {
+  _claims_sect_scan V8 "$1" "${2:-$_SCRATCH/cl-findings.jsonl}"
+}
+
+# --- Spec claims: descriptive conformance lines, V8n ----------------------------
+#
+# V8n lists the descriptive text that asserts conformance with nothing
+# behind it. The lines examined are V8's (_claims_sect_scan: the added ones
+# under --staged and over a gate range, every one under --all, of the same
+# docs), but of class descriptive: Implementation Notes, a section under the
+# <!-- spec-claims:descriptive --> marker, a host descriptive_headings
+# match, and every heading below one. Such a line is a conformance line when
+# its live normalised text (claims_norm_line: emphasis and code marks
+# stripped, blockquote markers dropped) matches, in any case,
+#   as specified|conforms|aligned with|matches §|implemented per
+# No other wording is read: a pointer at a normative section ("see
+# §Interfaces") is never flagged. The claim ids of the line are the tokens
+#   [A-Z][A-Z0-9-]*#[a-z0-9][a-z0-9-]*
+# matched exactly, in that case (jq regex, "g": not a shell glob, whose
+# bracket ranges collate by locale); a known id is the id of a claim of any
+# sidecar in the proposed tree (cl-claims.json, retired claims included).
+#   - Each distinct unknown id of a conformance line is one finding, "cites
+#     unknown claim <id>", whatever else the line carries.
+#   - A conformance line with no id at all is one finding, "asserts
+#     conformance with no claim id or (unverified)", unless it holds the
+#     text (unverified), exactly.
+#   - So a known id (or "(unverified)") exempts the line from the second
+#     finding only: a mistyped id beside a good one is still reported.
+# V8n is not in the default blocking list, so validate reports its findings
+# as advisories; gate (_CL_ALL_BLOCKING) blocks on them. A heading ERE that
+# is unusable makes V8n indeterminate, as it does V8 (_claims_sections_init).
+
+# V8n over one doc (raw on stdin; run after _JQ_CLAIMS_NORM): the same
+# arguments as _JQ_CLAIMS_V8.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_V8N='(claims_live | split("\n")) as $live
+ | (reduce ($sec | split("\n")[] | select(. != "") | split("\t")) as $x ({}; .[$x[0]] = $x[1])) as $cls
+ | [$c[0][] | .claim | objects | .id | strings] as $known
+ | (if $all == 1 then range(1; ($live | length) + 1)
+    else $added | split("\n")[] | select(. != "") | tonumber end) as $n
+ | select($cls[$n | tostring] == "descriptive")
+ | ($live[$n - 1] // "" | claims_norm_line) as $t
+ | select($t | test("as specified|conforms|aligned with|matches \u00a7|implemented per"; "i"))
+ | ([$t | match("[A-Z][A-Z0-9-]*#[a-z0-9][a-z0-9-]*"; "g").string] | unique) as $ids
+ | ($ids - $known) as $unknown
+ | ($unknown[] | {check: "V8n", claim: null, doc: $doc, message: "\($doc):\($n): cites unknown claim \(.)"}),
+   (select(($ids | length) == 0 and ($t | contains("(unverified)") | not))
+    | {check: "V8n", claim: null, doc: $doc,
+       message: "\($doc):\($n): descriptive line asserts conformance with no claim id or (unverified)"})'
+
+# _claims_v8n --staged | --all | <range> [<findings-file>]: V8n (see the
+# section comment), its finding rows added to <findings-file> (default the
+# verdict's findings). validate passes --staged or --all; gate passes
+# "<from>..HEAD" and its own file (the record's checks.V8n).
+_claims_v8n() {
+  _claims_sect_scan V8n "$1" "${2:-$_SCRATCH/cl-findings.jsonl}"
 }
 
 # --- Spec claims: claim-bound test edits, V9 ------------------------------------
@@ -9750,7 +9819,7 @@ _JQ_CLAIMS_REVERIFY_ALL='def nes: type == "string" and length > 0;
 #      claim for which _claims_repromote_owed prints owed ("re-promote
 #      owed"), even when its check passes. unverifiable-here is an advisory.
 #   5. V8 (_claims_v8: the lines the range added, by blame), V8n
-#      (_claims_v8n: a hook, a no-op until that check lands) and V9 over
+#      (_claims_v8n: the same lines, the descriptive ones) and V9 over
 #      <from>..HEAD, read by the range rule; every finding
 #      blocks (_CL_ALL_BLOCKING). A V9 id given in --holds is held: no
 #      finding, and a states-holds reconciliation by --by.
@@ -9894,11 +9963,6 @@ _claims_owed_findings() {
     esac
   done 3< "$list"
 }
-
-# _claims_v8n <range> <findings-file>: the gate's V8n hook over <range>, its
-# finding rows into <findings-file>. A no-op until that check lands. (V8 is
-# _claims_v8, in "normative coverage, V8".)
-_claims_v8n() { :; }
 
 # _claims_gate_path_ok <record> <stem>: 0 when <record> is a safe repo path
 # of the gate-record shape whose stem is <stem> (cl_gate_stem).
@@ -10088,8 +10152,10 @@ cmd_claims_validate() {
   _claims_v6
   if [ "$mode" = staged ]; then
     _claims_v8 --staged
+    _claims_v8n --staged
   else
     _claims_v8 --all
+    _claims_v8n --all
   fi
   if [ "$mode" = staged ]; then
     _claims_v9 --staged
