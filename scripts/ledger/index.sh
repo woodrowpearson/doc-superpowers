@@ -896,9 +896,13 @@ def lg_pr_apply($prs; $pcl; $bcl; $fmr):
            | ([$P[] | select(.state == "merged")] | sort_by(.number | tonumber? // 0) | last) as $mp
            | if $op == null and $mp == null and ($BASE[.path] | not) then .
              else
-               .pr = (($op // $mp) | if . == null then null else {number, url, state} end)
+               # .pr names the PR behind the status shown: the merged one
+               # for "merged · owed", else the open one, else the merged one.
+               ((.class == "open" or .class == "unknown") and ($BASE[.path] or $mp != null)) as $merged
+               | .pr = ((if $merged then ($mp // $op) else ($op // $mp) end)
+                        | if . == null then null else {number, url, state} end)
                | if .class == "open" or .class == "unknown" then
-                   (if $BASE[.path] or $mp != null then .derived = {status: $SL.merged, detail: (.owed // "closing")}
+                   (if $merged then .derived = {status: $SL.merged, detail: (.owed // "closing")}
                     elif $op != null then .derived = {status: $SL.in_review, detail: ($op.number | tostring)}
                     else . end)
                  else . end
@@ -1211,8 +1215,9 @@ _lg_ix_refs() {
 #       file. Of several PRs, the highest number. A cross-repository PR
 #       ("cross": a fork's branch) is never resolved through a same-named
 #       branch of the remote: it is counted on stderr.
-# The item's .pr is {number, url, state} of the open PR that claims it
-# (the highest number), else of the merged one, else null.
+# The item's .pr is {number, url, state} of the PR behind the status shown:
+# for "merged · owed", the merged PR that claims it (the highest number),
+# else the open one; otherwise the open one, else the merged one; else null.
 #
 # PR data come from config adapters.pr (adapters.sh) through the remote
 # cache (_lg_remote_cache, cache.remote_ttl_minutes). Unconfigured: no PR
@@ -1428,7 +1433,7 @@ _lg_ix_claim_trailers() {
 # prunes it) is a miss — a cold walk, silently. DOC_TOOLS_LEDGER_SELFTEST
 # (scripts/test-ledger.sh only): claims-prune-early removes the cached
 # files after they are listed, claims-prune the chosen ancestor's before
-# it is copied.
+# it is copied, claims-vanish-current the base's own after its test.
 _lg_ix_base_claims() {
   local B="$1" s f first hdr c oid anc="" tmp rc=0
   _lg_scratch_name
@@ -1444,7 +1449,13 @@ _lg_ix_base_claims() {
   hdr="# ledger-claims/1 ${_HASH#sha256:}"
   f="$_LG_CACHE/claims-$B.tsv"
   first=""
-  if [ -f "$f" ]; then IFS= read -r first < "$f" || true; fi
+  if [ -f "$f" ]; then
+    case "${DOC_TOOLS_LEDGER_SELFTEST:-}" in
+      claims-vanish-current) rm -f -- "$f" ;;
+    esac
+    # Silent: pruning by another run may remove it after the test — a miss.
+    { IFS= read -r first < "$f"; } 2>/dev/null || true
+  fi
   # A hit is read from a private copy (pruning may remove the file
   # meanwhile); a copy that fails is a miss.
   if [ "$first" = "$hdr" ] && cp -- "$f" "$s.bclaims" 2>/dev/null; then

@@ -6019,6 +6019,59 @@ test_lg_base_claims_prune_race() {
   lg_pr_teardown
 }
 
+# --- Task 10 review carry-over (Task 11) ---------------------------------------------
+
+# lg_no_stray <label>: LG_ERR holds only ledger notes and trace lines.
+lg_no_stray() {
+  assert_eq "" "$(printf '%s\n' "$LG_ERR" | grep -v -E '^(ledger: |index-|dates-|claims-|parse-|inflight-)')" "$1: no stray stderr"
+}
+
+test_lg_check_then_read_silent() {
+  echo "test: a file that vanishes between its check and its read is a miss, silently — the current base's claims, the remote cache's .fail record"
+  lg_pr_fixture
+  lg ls
+  # An item edit rebuilds the index at the same base: the base's claims
+  # file is a hit candidate, and it vanishes after the check.
+  printf '\nmore\n' >> docs/issues/a.md
+  DOC_TOOLS_LEDGER_SELFTEST=claims-vanish-current DOC_TOOLS_LEDGER_TRACE=1 lg ls
+  assert_eq "0" "$LG_RC" "claims file vanished: exit 0"
+  assert_contains "$LG_ERR" "claims-cold" "…a cold walk"
+  lg_no_stray "claims file vanished"
+  lg_pr_teardown
+  # A failure record (TTL 0: every run reads it) that vanishes after the check.
+  lg_pr_fixture '{"adapters":{"pr":"doc-superpowers:ledger-pr-gh"},"cache":{"remote_ttl_minutes":0}}'
+  lg ls
+  echo "gh: boom" > "$LG_GH/fail"
+  lg ls
+  assert_contains "$LG_ERR" "the pr adapter failed" "the failure is recorded"
+  rm -f "$LG_GH/fail"
+  DOC_TOOLS_LEDGER_SELFTEST=remote-fail-vanish lg ls
+  assert_eq "0" "$LG_RC" ".fail vanished: exit 0"
+  lg_no_stray ".fail vanished"
+  lg_pr_teardown
+}
+
+test_lg_pr_matches_shown_status() {
+  echo "test: .pr names the PR behind the status shown — merged · owed names the merged PR, not a later open PR on the same branch"
+  lg_pr_fixture
+  local other
+  other="$(harness_mktemp_d lg-other)/clone"
+  lg_clone "$other"
+  ( cd "$other" && git checkout -q -b reuse origin/squashed \
+    && git commit -q --allow-empty -m "after the merge" -m "Ledger-Claims: y-2" && git push -q origin "HEAD:squashed" )
+  rm -rf "$(dirname "$other")"
+  git fetch -q origin
+  jq -c '. + [{"number":18,"headRefName":"squashed","headRefOid":"0","state":"OPEN","url":"https://github.com/o/r/pull/18","mergeCommit":null}]' \
+    "$LG_GH/prs.json" > "$LG_GH/p2" && mv "$LG_GH/p2" "$LG_GH/prs.json"
+  lg show x-8 --format json
+  assert_json_field "$LG_OUT" '.item.derived.status' "merged" "x-8: merged (#10's merged head claims it; open #18's head reaches the same commit)"
+  assert_json_field "$LG_OUT" '.item.pr | "\(.number) \(.state)"' "10 merged" "x-8: .pr is #10, the merged PR the status shows"
+  lg show y-2 --format json
+  assert_json_field "$LG_OUT" '.item.derived | "\(.status) \(.detail)"' "in review 18" "y-2: in review #18"
+  assert_json_field "$LG_OUT" '.item.pr | "\(.number) \(.state)"' "18 open" "y-2: .pr is #18"
+  lg_pr_teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -6239,6 +6292,10 @@ run_tests() {
   # --- Task 10 fix round 2 ---
   test_lg_merged_pr_pinned_to_head_oid
   test_lg_base_claims_prune_race
+
+  # --- Task 10 review carry-over (Task 11) ---
+  test_lg_check_then_read_silent
+  test_lg_pr_matches_shown_status
 
   print_summary
 }

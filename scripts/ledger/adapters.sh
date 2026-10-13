@@ -179,7 +179,8 @@ _lg_adapter_rc() {
 # producer runs with stdin closed; non-zero is a failure (its output is
 # discarded). DOC_TOOLS_LEDGER_SELFTEST=remote-swap (scripts/test-ledger.sh
 # only): right after the snapshot, the live file is replaced by
-# $DOC_TOOLS_LEDGER_SELFTEST_SWAP — a concurrent writer.
+# $DOC_TOOLS_LEDGER_SELFTEST_SWAP — a concurrent writer; remote-fail-vanish:
+# the .fail record is removed between its test and its read.
 _LG_REMOTE_FORCE=""
 _LG_RTTL=""
 _LG_RTTL_JQ='.cache.remote_ttl_minutes | if type == "number" and . >= 0 then ([., 1000000] | min) * 60 | floor else 600 end'
@@ -248,8 +249,13 @@ _lg_remote_cache() {
   fi
   # A failure younger than the TTL is not retried (unless forced).
   if [ "${_LG_REMOTE_FORCE:-}" != 1 ] && [ -f "$f.fail" ]; then
+    case "${DOC_TOOLS_LEDGER_SELFTEST:-}" in
+      remote-fail-vanish) rm -f -- "$f.fail" ;;
+    esac
     fl=""
-    IFS= read -r fl < "$f.fail" || true
+    # Silent: the record may vanish between the test and the read (a
+    # concurrent success removes it) — a miss, as if it never existed.
+    { IFS= read -r fl < "$f.fail"; } 2>/dev/null || true
     failed_at=$(printf '%s' "$fl" | jq -r '.failed_at | if type == "number" then floor else "" end' 2>/dev/null) || failed_at=""
     case "$failed_at" in ''|*[!0123456789]*) failed_at="" ;; esac
     if [ -n "$failed_at" ] && [ "$failed_at" -le "$now" ] && [ $((now - failed_at)) -lt "$ttl" ]; then
