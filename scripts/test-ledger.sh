@@ -7521,10 +7521,22 @@ test_lg_inflight_push_auth_failure() {
   git remote set-url origin "ext::sh -c echo% fatal:% could% not% read% Username% for% x>&2;% exit% 128"
   lg inflight --push
   assert_contains "$LG_ERR" "authentication or permission failure" "no credentials: an authentication failure"
+  git remote set-url origin "ext::sh -c echo% error:% RPC% failed,% HTTP% 403% curl% 22% >&2;% exit% 128"
+  lg inflight --push
+  assert_contains "$LG_ERR" "authentication or permission failure" "HTTP 403 (curl's RPC line): an authentication failure"
   git remote set-url origin "ext::sh -c echo% fatal:% unable% to% connect% to% host:4030>&2;% exit% 128"
   lg inflight --push
   assert_eq "0" "$LG_RC" "unreachable: exit 0"
   assert_contains "$LG_ERR" "cannot be reached" "a port 4030 is no HTTP 403: unreachable"
+  git remote set-url origin "ext::sh -c echo% fatal:% unable% to% access% https://h/team/403/repo.git/:% Could% not% resolve% host:% h>&2;% exit% 128"
+  lg inflight --push
+  assert_contains "$LG_ERR" "cannot be reached" "a 403 path segment is no HTTP 403: unreachable"
+  git remote set-url origin "ext::sh -c echo% fatal:% repository% https://h/org-403/r.git/% not% found>&2;% exit% 128"
+  lg inflight --push
+  assert_contains "$LG_ERR" "cannot be reached" "a 403 in a repository name is no HTTP 403: unreachable"
+  git remote set-url origin "ext::sh -c echo% ssh:% connect% to% host% h% port% 403:% Connection% refused>&2;% exit% 128"
+  lg inflight --push
+  assert_contains "$LG_ERR" "cannot be reached" "port 403 is no HTTP 403: unreachable"
   assert_eq "" "$(git --git-dir="$LG_REMOTE" for-each-ref refs/doc-superpowers/inflight/)" "nothing pushed"
   git remote set-url origin "$LG_REMOTE"
   teardown
@@ -7552,6 +7564,111 @@ test_lg_publish_prune_internal_failure_is_note() {
   assert_json_field "$LG_OUT" '[.exit, (.inflight_pruned | length)] | map(tostring) | join(",")' "0,0" "json: exit 0, nothing pruned"
   lg publish
   assert_contains "$LG_OUT" "pruned 1 in-flight ref(s) from origin: refs/doc-superpowers/inflight/hostb/merged" "without the hook: pruned"
+  teardown
+}
+
+# --- Task 12 fix round 2 ------------------------------------------------------------
+
+test_lg_notice_id_remote_and_inflight_across_hosts() {
+  echo "test: a branch on keys.remote and in flight from its host — one notice on every host, hashed <name>, keyed to the newer copy; an ack on one host hides it on the others (m3, round 2)"
+  lg_ntc_fixture
+  local x id clone here
+  git commit -q --allow-empty -m "mine" -m "Ledger-Claims: app-1"
+  git push -q origin mine
+  lg_ntc_branch x-total "touch the total" src/order/total.js more
+  git checkout -q x-total
+  git push -q origin x-total
+  lg inflight --push
+  git checkout -q mine
+  x=$(git rev-parse x-total)
+  id=$(lg_ntc_id x-total contracts:field:order.total "$x")
+  lg notices --fetch
+  assert_eq "stop $id x-total no PR contracts:field:order.total — field:order.total: 1 file, +1 -0 → reconcile-before-next-chunk" "$LG_OUT" \
+    "host A: one notice, hashed x-total (the branch is on the remote)"
+  git commit -q --allow-empty -m "ack" -m "Ledger-Ack: $id — checked"
+  git push -q origin mine
+  lg notices --gate
+  assert_eq "0|" "$LG_RC|$LG_OUT" "host A: acked, gate 0"
+  clone="$(harness_mktemp_d lg-b)/clone"
+  lg_clone "$clone"
+  ( cd "$clone" && lg_enable '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hostb"}}' )
+  here=$PWD
+  cd "$clone"
+  lg notices --branch mine --gate --fetch
+  assert_eq "0|" "$LG_RC|$LG_OUT" "host B (x-total from the remote and in flight from hosta, one tip): A's ack hides it, gate 0"
+  # The remote copy behind the in-flight one: hosta commits, and its
+  # post-commit push moves the in-flight ref alone.
+  cd "$here"
+  git checkout -q x-total
+  printf 'again\n' >> src/order/total.js
+  git add -A && git commit -qm "x-total moves"
+  lg inflight --push
+  git checkout -q mine
+  x=$(git rev-parse x-total)
+  id=$(lg_ntc_id x-total contracts:field:order.total "$x")
+  lg notices --fetch
+  assert_eq "stop $id x-total no PR contracts:field:order.total — field:order.total: 1 file, +2 -0 → reconcile-before-next-chunk" "$LG_OUT" \
+    "host A: the new tip"
+  cd "$clone"
+  git fetch -q origin
+  lg notices --branch mine --fetch
+  assert_eq "stop $id x-total@hosta no PR contracts:field:order.total — field:order.total: 1 file, +2 -0 → reconcile-before-next-chunk" "$LG_OUT" \
+    "host B: the stale remote copy collapses into the newer in-flight one — one notice, A's id"
+  # The in-flight copy behind the remote one: hosta pushes the branch, not
+  # the in-flight ref.
+  cd "$here"
+  git checkout -q x-total
+  printf 'third\n' >> src/order/total.js
+  git add -A && git commit -qm "x-total pushed"
+  git push -q origin x-total
+  git checkout -q mine
+  x=$(git rev-parse x-total)
+  id=$(lg_ntc_id x-total contracts:field:order.total "$x")
+  lg notices --fetch
+  assert_eq "stop $id x-total no PR contracts:field:order.total — field:order.total: 1 file, +3 -0 → reconcile-before-next-chunk" "$LG_OUT" \
+    "host A: the pushed tip"
+  cd "$clone"
+  git fetch -q origin
+  lg notices --branch mine --fetch
+  assert_eq "stop $id x-total no PR contracts:field:order.total — field:order.total: 1 file, +3 -0 → reconcile-before-next-chunk" "$LG_OUT" \
+    "host B: the stale in-flight copy collapses into the remote one — one notice, A's id"
+  cd "$here"
+  git commit -q --allow-empty -m "ack 2" -m "Ledger-Ack: $id — checked again"
+  git push -q origin mine
+  cd "$clone"
+  git fetch -q origin
+  lg notices --branch mine --gate
+  assert_eq "0|" "$LG_RC|$LG_OUT" "host B: A's second ack hides it, gate 0"
+  cd "$here"
+  rm -rf "$(dirname "$clone")"
+  teardown
+}
+
+test_lg_publish_prune_term_prompt() {
+  echo "test: a TERM to publish while its prune's push runs — the run ends at once, and the push's remote side does not survive (m6, round 2)"
+  lg_ntc_fixture
+  local pid i=0 seen=0 t0 t1
+  git push -q origin "main:refs/doc-superpowers/inflight/hostb/merged"
+  # The remote is slow over in-flight deletes alone (the views push is quick).
+  printf '#!/bin/sh\nwhile read o n r; do case "$n:$r" in 0000000000000000000000000000000000000000:refs/doc-superpowers/inflight/*) sleep 9.35 ;; esac; done\nexit 0\n' \
+    > "$LG_REMOTE/hooks/pre-receive"
+  chmod +x "$LG_REMOTE/hooks/pre-receive"
+  "$DOC_TOOLS" ledger publish < /dev/null > /dev/null 2>&1 &
+  pid=$!
+  while [ "$i" -lt 40 ]; do
+    if [ "$(lg_ps_has 'sleep 9.35')" = 1 ]; then seen=1; break; fi
+    sleep 0.3
+    i=$((i + 1))
+  done
+  assert_eq "1" "$seen" "the prune's push reached the slow hook"
+  t0=$(date +%s)
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  t1=$(date +%s)
+  assert_eq "1" "$(if [ $((t1 - t0)) -le 3 ]; then echo 1; else echo 0; fi)" "TERM: the run ends within 3 s (it took $((t1 - t0)) s), not after the push"
+  sleep 1
+  assert_eq "0" "$(lg_ps_has 'sleep 9.35')" "…and the push's remote side is gone"
+  rm -f "$LG_REMOTE/hooks/pre-receive"
   teardown
 }
 
@@ -7943,6 +8060,10 @@ run_tests() {
   test_lg_notice_branch_not_current_note
   test_lg_inflight_push_auth_failure
   test_lg_publish_prune_internal_failure_is_note
+
+  # --- Task 12 fix round 2 ---
+  test_lg_notice_id_remote_and_inflight_across_hosts
+  test_lg_publish_prune_term_prompt
 
   print_summary
 }

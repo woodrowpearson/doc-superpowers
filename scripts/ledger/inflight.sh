@@ -1433,8 +1433,12 @@ _lg_branch_facts() {
 # is the branch's name (the base's ref name, host and pr null, for the
 # base); id = the first 12 hex of sha256(<other> NUL <kind>:<values joined
 # by ","> NUL <head>) — <other> canonical, so every host computes one id
-# (ruling m3): "<name>" for a branch on keys.remote, else "<name>@<host>"
-# (this host's too), or the base's ref name; <head> the other's tip, or for
+# (ruling m3): "<name>" when any scanned copy of the branch is on
+# keys.remote, else "<name>@<host>" (this host's too), or the base's ref
+# name; and copies of one branch (one name: the remote's, another host's
+# in-flight ref) collapse — a copy whose tip equals an earlier copy's or is
+# behind another copy's raises nothing, so the branch is one notice keyed to
+# its newer tip on every host (_lg_ifl_rel); <head> the other's tip, or for
 # the base the sha256 (64 hex) of its overlap's state, the sorted unique
 # lines "F\t<path>\t<post-image blob>" (each overlap contract file; \n and
 # \t in a path as \001 and \002) and "C\t<commit>" (each base commit whose
@@ -1515,33 +1519,61 @@ _lg_ifl_range_facts() {
 }
 
 # _lg_ifl_rel <scan> <B host> <B name> <B tip> <out>: B's relatives among
-# the scanned branches (ruling I1), as {"behind": {<tip>: true}, "ahead":
-# {<tip>: true}}. Behind: a tip B's history holds — B already has that
-# work, so it raises nothing (one `git rev-list <B> ^<base>`: no tip in
-# flight is on the base). Ahead: a tip of B's own branch on another host
-# that descends from B's (the ancestry cache, _lg_ifl_anc) — one info.
+# the scanned branches, and copies of one branch, as lines into <out>:
+#   "b\t<tip>"           behind B: a tip B's history holds — B already has
+#                        that work, so it raises nothing (ruling I1; one
+#                        `git rev-list <B> ^<base>`: no tip in flight is on
+#                        the base)
+#   "a\t<tip>"           ahead of B: a tip of B's own branch on another host
+#                        that descends from B's — one info (I1)
+#   "d\t<host>\t<name>"  a copy of a branch (one name, another entry) whose
+#                        tip equals an earlier copy's (scan order: this
+#                        host's first) or is behind another copy's — dropped,
+#                        so the branch on keys.remote and in flight from its
+#                        host is one notice, keyed to its newer tip (m3)
+# The ancestry verdicts come from _lg_ifl_anc (branch/anc.tsv), asked only
+# for copies whose tips differ — usually none, and then no second pass.
 _lg_ifl_rel() {
   local scan="$1" bh="$2" bn="$3" bo="$4" out="$5" s
   _lg_scratch_name
   s=$_LG_SN
   git rev-list "$bo" "^$_LG_IFL_B" -- > "$s.rl" 2> "$s.err" \
     || _lg_die "git rev-list failed (the branches behind '$bn'): $(head -n 1 "$s.err")"
-  # One pass; the copies of B on other hosts ("<B> <tip>" into <ask>: is
-  # B's tip an ancestor of theirs?) — usually none — take a second, with
-  # the ancestry verdicts (<vd>).
+  # Pass 1 lists the pairs to ask ("<a> <b>": is a an ancestor of b?) into
+  # <ask>; pass 2 (only when there are some) reads their verdicts (<vd>).
   # shellcheck disable=SC2016  # awk source
   set -- -v rl="$s.rl" -v bh="$bh" -v bn="$bn" -v bo="$bo" -v ask="$s.ask" '
-    function add(L, o) { return L (L == "" ? "" : ",") "\"" o "\":true" }
+    function anc(x, y,   k) {
+      k = x " " y
+      if (k in V) return V[k] == 1
+      if (!(k in Q)) { Q[k] = 1; print k > ask }
+      return 0
+    }
     BEGIN {
       printf "" > ask
       while ((getline l < rl) > 0) R[l] = 1
-      while ((getline l < vd) > 0) { split(l, x, " "); if (x[3] == 1) D[x[2]] = 1 }
+      while ((getline l < vd) > 0) { split(l, w, " "); V[w[1] " " w[2]] = w[3] }
     }
     $3 == bo { next }
-    $2 == bn && $1 != bh && !($3 in R) && !($3 in Q) { Q[$3] = 1; print bo " " $3 > ask }
-    ($3 in S) { next }
-    { S[$3] = 1; if ($3 in R) a = add(a, $3); else if ($3 in D) d = add(d, $3) }
-    END { printf "{\"behind\":{%s},\"ahead\":{%s}}\n", a, d }'
+    ($3 in R) { if (!($3 in BS)) { BS[$3] = 1; print "b\t" $3 } next }
+    $2 == bn && $1 != bh && anc(bo, $3) && !($3 in AS) { AS[$3] = 1; print "a\t" $3 }
+    { n++; H[n] = $1; N[n] = $2; O[n] = $3; G[$2] = G[$2] " " n; GC[$2]++ }
+    END {
+      for (nm in GC) {
+        if (GC[nm] < 2) continue
+        m = split(G[nm], I, " ")
+        for (i = 1; i <= m; i++) {
+          ia = I[i] + 0; drop = 0
+          for (j = 1; j <= m; j++) {
+            ib = I[j] + 0
+            if (ib == ia) continue
+            if (O[ib] == O[ia]) { if (ib < ia) drop = 1 }
+            else if (anc(O[ia], O[ib])) drop = 1
+          }
+          if (drop) print "d\t" H[ia] "\t" N[ia]
+        }
+      }
+    }'
   LC_ALL=C awk -F '\t' -v vd=/dev/null "$@" "$scan" > "$out" || _lg_die "cannot write $out"
   [ -s "$s.ask" ] || return 0
   _lg_ifl_anc "$s.ask" "$s.verd"
@@ -1549,7 +1581,8 @@ _lg_ifl_rel() {
 }
 
 # The notices (jq, the index as input; --slurpfile br: the branches of
-# _lg_ifl_join with files 2, rel: B's relatives (_lg_ifl_rel); $bh/$bn: B;
+# _lg_ifl_join with files 2; --rawfile rel: B's relatives and the dropped
+# copies (_lg_ifl_rel); $bh/$bn: B;
 # $base: the base's name; $me): raw lines "A\t<ack>" (B's acks), and per
 # notice "J\t<json>" ({n, urgency, other, disp, cn, oid, mb, kind, vals,
 # stat ("all" | [files] | null), parts (contracts: [{id, line, files}]),
@@ -1562,7 +1595,12 @@ _lg_ifl_rel() {
 _LG_JQ_NTC_FIND='
 def enc: if test("[\n\t]") then gsub("\n"; "\u0001") | gsub("\t"; "\u0002") else . end;
 $br[0] as $BR
-| $rel[0] as $REL
+| [$rel | split("\n")[] | select(. != "") | split("\t")] as $RL
+| lg_obj($RL[] | select(.[0] == "b") | {(.[1]): true}) as $BEHIND
+| lg_obj($RL[] | select(.[0] == "a") | {(.[1]): true}) as $AHEAD
+| lg_obj($RL[] | select(.[0] == "d") | {("\(.[1])\t\(.[2])"): true}) as $DROP
+# The canonical name: <name> when any copy of the branch is on keys.remote.
+| lg_obj($BR[] | select(any(.sources[]; . == "remote")) | {(.name): true}) as $RN
 | (first($BR[] | select(.host == $bh and .name == $bn)) // null) as $B
 | if $B == null then empty else
   lg_obj($B.claim_paths[] | {(.): true}) as $BP
@@ -1573,10 +1611,10 @@ $br[0] as $BR
   | lg_obj(($B.files // [])[] | {(.): true}) as $BF
   | def parts($X; $cc): [$cc[] | {id, line, files: (($X.contract_files // {})[.id] // [])}];
   ($B.acks[] | "A\t\(.)"),
-  ([ ( $BR[] | select((.name == "^base" or .oid == $B.oid or $REL.behind[.oid] == true) | not) as $X
+  ([ ( $BR[] | select((.name == "^base" or .oid == $B.oid or $BEHIND[.oid] == true or $DROP["\(.host)\t\(.name)"] == true) | not) as $X
        | {other: {branch: $X.name, host: $X.host, pr: $X.pr},
           disp: (if $X.host == $me then $X.name else "\($X.name)@\($X.host)" end),
-          cn: (if any($X.sources[]; . == "remote") then $X.name else "\($X.name)@\($X.host)" end),
+          cn: (if $RN[$X.name] == true then $X.name else "\($X.name)@\($X.host)" end),
           oid: $X.oid, mb: $X.merge_base} as $o
        | [$X.contract_changes[] | select($S[.id] == true)] as $cc
        | ([$X.claims[] | select($BC[.] == true)] | unique) as $dk
@@ -1588,7 +1626,7 @@ $br[0] as $BR
            (if $df != [] then $o + {urgency: "heads-up", kind: "files", vals: $df, stat: $df} else empty end),
            (if $ik != [] then $o + {urgency: "info", kind: "keys", vals: $ik, stat: "all"} else empty end) ] as $ns
        # B itself, ahead on another host: one info (its first overlap).
-       | if $X.name == $B.name and $X.host != $B.host and $REL.ahead[$X.oid] == true
+       | if $X.name == $B.name and $X.host != $B.host and $AHEAD[$X.oid] == true
          then $ns[0:1][] | . + {urgency: "info", stat: null, parts: [], what: "\($o.disp) is ahead of this branch"}
          else $ns[] end ),
      ( $BR[] | select(.name == "^base") as $X
@@ -1648,7 +1686,7 @@ _lg_ifl_notices() {
   _lg_scratch_name
   s=$_LG_SN
   # shellcheck disable=SC2016  # jq source
-  jq -L "$_LG_LIB" -r --slurpfile br "$br" --slurpfile rel "$rel" --arg bh "$bh" --arg bn "$bn" --arg base "$_LG_IFL_BASEREF" \
+  jq -L "$_LG_LIB" -r --slurpfile br "$br" --rawfile rel "$rel" --arg bh "$bh" --arg bn "$bn" --arg base "$_LG_IFL_BASEREF" \
     --arg me "$_LG_IFL_ME" "$_LG_JQ_INCLUDE$_LG_JQ_NTC_FIND" "$ix" > "$s.find" || _lg_die "jq failed (the notices)"
   LC_ALL=C awk -v j="$s.nj" -v a="$s.sx" -v p="$s.pairs" -v h="$s.pre" -v g="$s.gx" '
     BEGIN { printf "" > j; printf "" > a; printf "" > p; printf "" > h; printf "" > g }
@@ -1869,8 +1907,8 @@ _lg_ifl_push_end() {
 # push URL> <tip>:<ref_prefix>/<host>/<branch>` (the name checked with git
 # check-ref-format: refused, exit 2). DOC_TOOLS_LEDGER_OFFLINE=1, a remote
 # that cannot be reached, or an authentication / permission failure ("Permission
-# denied", "Authentication failed", "could not read Username", HTTP 403 —
-# said as such): a warning, exit 0; a push the remote refuses ("rejected"):
+# denied", "Authentication failed", "could not read Username", "returned
+# error: 403", "HTTP 403" — said as such): a warning, exit 0; a push the remote refuses ("rejected"):
 # exit 2. Detached HEAD, no commits beyond the base, the
 # base's own branch or views.branch: one line, exit 0.
 _lg_ifl_push() {
@@ -1929,9 +1967,10 @@ _lg_ifl_push() {
       _lg_die "the in-flight push to $_LG_IFL_REMOTE $ref was rejected: $err"
     fi
     # Credentials or rights (ruling m5): said as such, still exit 0 — the
-    # post-commit hook never fails a commit. "403" only as a word (an HTTP
-    # status, not part of a port or an oid).
-    if grep -Eq 'Permission denied|Authentication failed|could not read Username|(^|[^0-9A-Za-z])403([^0-9A-Za-z]|$)' "$s.perr"; then
+    # post-commit hook never fails a commit. A 403 only as git / curl
+    # report an HTTP status ("returned error: 403", "HTTP 403"), never a 403
+    # in a URL's path or port.
+    if grep -Eq 'Permission denied|Authentication failed|could not read Username|returned error: 403|HTTP 403' "$s.perr"; then
       _lg_ifl_push_end "$s" 0 false err "authentication or permission failure on $_LG_IFL_REMOTE ($err): nothing pushed" "$ref" "$tip" "$mb"
     fi
     _lg_ifl_push_end "$s" 0 false err "$_LG_IFL_REMOTE cannot be reached ($err): nothing pushed" "$ref" "$tip" "$mb"
@@ -1953,7 +1992,7 @@ _lg_ifl_push() {
 # (ruling m6) — is the run's note ("not pruned"), never the run's failure.
 _LG_IFL_PRUNED=""
 _lg_ifl_prune() {
-  local b="$1" dry="$2" s rc=0 n="" why="" e=""
+  local b="$1" dry="$2" s rc=0 n="" why="" p
   _LG_IFL_PRUNED=""
   [ "$_LG_IFL_ON" = 1 ] || return 0
   [ "${DOC_TOOLS_LEDGER_OFFLINE:-}" != 1 ] || return 0
@@ -1961,15 +2000,23 @@ _lg_ifl_prune() {
   _lg_scratch_name
   s=$_LG_SN
   rm -f -- "$s.note" "$s.die" "$s.sent" "$s.pruned"
-  # The work in a subshell, errexit live there (not in a `||` list, where
-  # bash would ignore it): whatever stops it — a _lg_die (redefined there to
-  # leave its message), a failed command, an unset variable — ends the
-  # subshell alone.
-  case $- in *e*) e=1 ;; esac
-  set +e
-  ( set -e; _lg_ifl_prune_run "$b" "$dry" "$s" )
-  rc=$?
-  if [ -n "$e" ]; then set -e; fi
+  # The work in a subshell, errexit live there: whatever stops it — a
+  # _lg_die (redefined there to leave its message), a failed command, an
+  # unset variable — ends the subshell alone. It runs in the background and
+  # is waited for (_lg_ifl_push_run's shape): bash runs a trap only once a
+  # foreground child exits, while `wait` returns at once — so a TERM / INT
+  # to the run reaps the subshell and every process under it (the push,
+  # its transport, the remote's side of a local one) and ends the run now,
+  # not when the push is done.
+  ( set -e; _lg_ifl_prune_run "$b" "$dry" "$s" ) < /dev/null &
+  p=$!
+  # shellcheck disable=SC2064  # $p now, on purpose
+  trap "_lg_kill_tree $p; exit 143" TERM
+  # shellcheck disable=SC2064
+  trap "_lg_kill_tree $p; exit 130" INT
+  wait "$p" || rc=$?
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
   if [ -s "$s.note" ]; then
     { IFS= read -r n < "$s.note"; } 2>/dev/null || n=""
     [ -z "$n" ] || _lg_ifl_note "$n"
