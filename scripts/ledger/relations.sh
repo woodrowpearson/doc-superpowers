@@ -50,8 +50,10 @@
 # TRM (the number of matches) and TRMK[i] / TRMV[i] (kind, value).
 # A claims_by_ref name is a closing keyword (GitHub's form, "Fixes #123"):
 # at the line start (after the same blanks / "*" / "-" a trailer may have),
-# in any case, an optional ":", blanks, then #<digits> ended by the line or
-# a character other than a letter, digit or "_" — the value is "#<digits>".
+# in any case, then ":" and optional blanks or blanks alone ("Fixes:#12",
+# "Fixes: #12", "Fixes #12"; not "Fixes#12"), then #<number> (no leading
+# zero: #0 is no issue) ended by the line or a character other than a
+# letter, digit or "_" — the value is "#<number>".
 # The #N anchor bounds false positives the way GitHub's own keywords do;
 # "this fixes #12" (mid-sentence) and "Fixes o/r#12" do not count.
 # shellcheck disable=SC2016  # awk source
@@ -72,10 +74,10 @@ function tr_match(line,   s, i, L, v, ls) {
       if (ls == "") ls = tolower(s)
       if (substr(ls, 1, L) != TRL[i]) continue
       v = substr(s, L + 1)
-      if (substr(v, 1, 1) == ":") v = substr(v, 2)
-      if (v !~ /^[ \t\v\f]+#[0-9]+([^A-Za-z0-9_]|$)/) continue
+      if (substr(v, 1, 1) == ":") { v = substr(v, 2); if (v !~ /^[ \t\v\f]*#[1-9][0-9]*([^A-Za-z0-9_]|$)/) continue }
+      else if (v !~ /^[ \t\v\f]+#[1-9][0-9]*([^A-Za-z0-9_]|$)/) continue
       sub(/^[ \t\v\f]+/, "", v)
-      match(v, /^#[0-9]+/)
+      match(v, /^#[1-9][0-9]*/)
       TRM++; TRMK[TRM] = TRK[i]; TRMV[TRM] = substr(v, 1, RLENGTH)
       continue
     }

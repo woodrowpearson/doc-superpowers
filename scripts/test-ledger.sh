@@ -5120,13 +5120,16 @@ Fixes:#19
 Fixes: the crash
 Fixesx #20
 Closes: abc-21
-Resolves #22"
+Resolves #22
+Fixes #0
+Fixes#23
+Closes:  #24"
   lg_call _lg_msg_claims HEAD~1..HEAD
   assert_eq "0" "$LG_RC" "rc 0"
   local h
   h=$(git rev-parse HEAD)
-  assert_eq "$(printf '%s\tclaims_by_ref\t#%s\n' "$h" 12 "$h" 13 "$h" 14 "$h" 15 "$h" 22)" "$LG_OUT" \
-    "Fixes #12 (the subject), closes #13., RESOLVES: #14, Fixes  #15, Resolves #22 — and nothing else"
+  assert_eq "$(printf '%s\tclaims_by_ref\t#%s\n' "$h" 12 "$h" 13 "$h" 14 "$h" 15 "$h" 19 "$h" 22 "$h" 24)" "$LG_OUT" \
+    "Fixes #12 (the subject), closes #13., RESOLVES: #14, Fixes  #15, Fixes:#19 (m8), Resolves #22, Closes:  #24 — not #0, not Fixes#23"
   teardown
 }
 
@@ -6597,6 +6600,128 @@ JSON
   lg_ifl_teardown
 }
 
+# --- Task 11 fix round 1 -------------------------------------------------------------
+
+test_lg_registry_failure_one_object() {
+  echo "test: an unreadable registry is one verdict object — the producer's failure inside \$(…) is not run past (m9)"
+  lg_fixture
+  lg_enable '{"base":"main"}'
+  printf 'not json\n' > docs/ledger/ledgers.json
+  local v
+  for v in ls show find related recheck view; do
+    case "$v" in
+      show|related|recheck) lg "$v" x-1 --format json ;;
+      find) lg find word --format json ;;
+      view) lg view all --out "$TEST_DIR/v" --format json ;;
+      *) lg "$v" --format json ;;
+    esac
+    assert_eq "2|1" "$LG_RC|$(json_count "$LG_OUT")" "$v: exit 2, exactly one object"
+  done
+  teardown
+}
+
+test_lg_inflight_bg_scan_one_object() {
+  echo "test: the background scan prints no verdict — one object when the index build fails during a slow fetch; the child is gone at exit; a \$(…) consumer returns at once (I1)"
+  lg_ifl_fixture
+  git config protocol.ext.allow always
+  git remote set-url origin "ext::sleep 4"
+  printf 'not json\n' > docs/ledger/ledgers.json
+  local pidf t0 t1 out rc=0
+  pidf=$(harness_mktemp lg-pid)
+  t0=$(date +%s)
+  out=$(DOC_TOOLS_LEDGER_SELFTEST=ifl-pidfile DOC_TOOLS_LEDGER_SELFTEST_PIDFILE="$pidf" "$DOC_TOOLS" ledger ls --format json 2>/dev/null </dev/null) || rc=$?
+  t1=$(date +%s)
+  assert_eq "2|1" "$rc|$(json_count "$out")" "exit 2, exactly one object"
+  assert_json_field "$out" '.error | test("registry")' "true" "…the index build's error"
+  assert_eq "1" "$([ $((t1 - t0)) -lt 3 ] && echo 1 || echo "$((t1 - t0)) s")" "the consumer returned before the 4 s fetch ended"
+  assert_eq "gone" "$(if [ -s "$pidf" ] && kill -0 "$(cat "$pidf")" 2>/dev/null; then echo alive; elif [ -s "$pidf" ]; then echo gone; else echo "no pid"; fi)" \
+    "the scan child is gone when the run ends"
+  # A failure in the child itself (an invalid host id from git config) is
+  # the parent's one verdict.
+  printf '%s\n' '{"schema":"ledger-registry/1","ledgers":[]}' > docs/ledger/ledgers.json
+  git remote set-url origin "$LG_REMOTE"
+  lg_enable '{"base":"origin/main","inflight":{"enabled":true}}'
+  git config doc-superpowers.ledger.host "a/b"
+  lg ls --format json
+  assert_eq "2|1" "$LG_RC|$(json_count "$LG_OUT")" "a child failure: exit 2, exactly one object"
+  assert_contains "$LG_OUT" "doc-superpowers.ledger.host" "…its message"
+  lg ls
+  assert_contains "$LG_ERR" "doc-superpowers.ledger.host" "text: the message on stderr"
+  assert_eq "1" "$(printf '%s\n' "$LG_ERR" | grep -c 'ERROR:')" "…once"
+  git config --unset doc-superpowers.ledger.host
+  rm -f "$pidf"
+  lg_ifl_teardown
+}
+
+test_lg_inflight_ref_prefix_guard() {
+  echo "test: inflight.ref_prefix / pull_refs never point --fetch --prune at local refs (I2)"
+  lg_ifl_fixture
+  local p
+  for p in refs/heads refs/heads/x refs/remotes refs/remotes/origin refs/tags refs/notes refs/doc-superpowers/pull refs/doc-superpowers/pull/x \
+      refs/doc-superpowers refs/doc-superpowers/ledger refs/doc-superpowers/ledger/counters refs/doc-superpowers/ledger/counters/x; do
+    lg_enable "{\"base\":\"origin/main\",\"inflight\":{\"enabled\":true,\"host_id\":\"hosta\",\"ref_prefix\":\"$p\"}}"
+    lg inflight --fetch
+    assert_eq "2" "$LG_RC" "ref_prefix $p: exit 2"
+    assert_contains "$LG_ERR" "inflight.ref_prefix" "…naming the key ($p)"
+  done
+  lg_enable '{"base":"origin/main","keys":{"counter_ref":"refs/ctr/x"},"inflight":{"enabled":true,"host_id":"hosta","ref_prefix":"refs/ctr"}}'
+  lg inflight
+  assert_eq "2" "$LG_RC" "a prefix holding keys.counter_ref: exit 2"
+  assert_eq "$LG_A_TIP" "$(git rev-parse -q --verify refs/heads/feat-a)" "local branches untouched"
+  lg_enable '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta","ref_prefix":"refs/x-inflight"}}'
+  lg inflight --fetch
+  assert_eq "0" "$LG_RC" "another prefix of its own: exit 0"
+  lg_ifl_teardown
+}
+
+test_lg_inflight_raw_oid_base() {
+  echo "test: a base given as a commit id — the current branch is not taken for the base's branch (m5)"
+  lg_ifl_fixture
+  git checkout -q feat-a
+  lg_enable "{\"base\":\"$(git rev-parse origin/main)\",\"inflight\":{\"enabled\":true,\"host_id\":\"hosta\"}}"
+  lg inflight
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_contains "$LG_OUT" "feat-a local,worktree,inflight no PR claims:app-1,app-2" "the current branch feat-a is in flight"
+  git checkout -q main
+  lg_ifl_teardown
+}
+
+test_lg_inflight_dedup_descendant_wins() {
+  echo "test: own copies of one branch with different tips — the descendant wins whatever the dates; unrelated tips: the newer date (m6)"
+  lg_ifl_fixture
+  local older
+  # This host's in-flight copy is AHEAD of the local branch but dated in
+  # the past (clock skew): it still wins.
+  older=$(GIT_COMMITTER_DATE="$(($(date +%s) - 86400)) +0000" git commit-tree -p "$LG_A_TIP" -m "ahead, skewed" -m "Ledger-Claims: app-5" "$LG_A_TIP^{tree}")
+  git push -q origin "$older:refs/doc-superpowers/inflight/hosta/feat-a"
+  lg inflight --fetch --format json
+  assert_json_field "$LG_OUT" '.branches[] | select(.branch == "feat-a") | .oid' "$older" "the descendant wins over a newer date"
+  # The local branch moves ahead of it: the local tip wins again.
+  git checkout -q feat-a
+  git merge -q --ff-only "$older"
+  git commit -q --allow-empty -m "local ahead"
+  git checkout -q main
+  lg inflight --format json
+  assert_json_field "$LG_OUT" '.branches[] | select(.branch == "feat-a") | .oid' "$(git rev-parse feat-a)" "…and the other way"
+  lg_ifl_teardown
+}
+
+test_lg_ifl_facts_sig_in_name() {
+  echo "test: facts files carry their signature in the name — two plan-directory sets never overwrite each other (m4)"
+  lg_ifl_fixture
+  lg ls
+  local c n1 n2
+  c="$(git rev-parse --git-common-dir)/doc-superpowers/ledger/branch"
+  n1=$(cd "$c" && ls f-* | wc -l | tr -d ' ')
+  lg_doc_index '{"docs":{"docs/plans/p.md":{"doc_type":"plan"},"docs/other/o.md":{"doc_type":"plan"}}}'
+  lg ls
+  n2=$(cd "$c" && ls f-* | wc -l | tr -d ' ')
+  assert_eq "$((n1 * 2))" "$n2" "another plan-directory set: a second set of facts files beside the first"
+  assert_eq "$n1" "$(cd "$c" && ls f-* | sed 's/.*-\([0-9a-f]*\)\.tsv$/\1/' | sort | uniq -c | awk '{ print $1 }' | sort -u | head -n 1)" \
+    "…each set under its own signature"
+  lg_ifl_teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -6839,6 +6964,14 @@ run_tests() {
   test_lg_inflight_disabled_zero_cost
   test_lg_inflight_fetch_offline
   test_lg_inflight_pull_refs
+
+  # --- Task 11 fix round 1 ---
+  test_lg_registry_failure_one_object
+  test_lg_inflight_bg_scan_one_object
+  test_lg_inflight_ref_prefix_guard
+  test_lg_inflight_raw_oid_base
+  test_lg_inflight_dedup_descendant_wins
+  test_lg_ifl_facts_sig_in_name
 
   print_summary
 }

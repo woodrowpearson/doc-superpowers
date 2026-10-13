@@ -1554,6 +1554,13 @@ _on_exit() {
     # No trailing newline: read assigns, then returns 1.
     IFS= read -r erc < "$_SCRATCH/$marker" || true
   fi
+  # A ledger run's background in-flight scan (scripts/ledger/inflight.sh)
+  # never outlives it: killed and reaped before the scratch dir goes.
+  if [ -n "${_LG_IFL_PID:-}" ]; then
+    kill "$_LG_IFL_PID" 2>/dev/null || true
+    wait "$_LG_IFL_PID" 2>/dev/null || true
+    _LG_IFL_PID=""
+  fi
   if [ "$_CL_ACTIVE" = 1 ] || [ "$_LG_ACTIVE" = 1 ]; then
     # A marker whose code is unreadable still means a verdict was printed.
     case "$erc" in
@@ -11784,7 +11791,21 @@ _lg_verb_json() {
 # follow, a failed write ignored. Works inside $(…) (fd 9 and the marker).
 # "enabled" says whether docs/ledger/config.json is present here.
 _lg_fail() {
-  local rc="$1" msg="$2" uverb="${3:-}" verb enabled=false
+  local rc="$1" msg="$2" uverb="${3:-}" verb enabled=false prev=""
+  # The in-flight scan's background child (scripts/ledger/inflight.sh)
+  # prints no verdict: it leaves its failure for the run to raise.
+  if [ -n "${_LG_IFL_CHILD:-}" ]; then
+    printf '%s\t%s\n' "$rc" "$msg" > "$_SCRATCH/lg-ifl.fail" 2>/dev/null || true
+    exit "$rc"
+  fi
+  # One verdict per run: a failure after one was printed (a producer that
+  # failed inside $(…) and was run past) ends the run with that verdict's
+  # code, silently.
+  if [ -n "$_SCRATCH" ] && [ -e "$_SCRATCH/lg-emitted" ]; then
+    { IFS= read -r prev < "$_SCRATCH/lg-emitted"; } 2>/dev/null || true
+    case "$prev" in 0|1|2|3) exit "$prev" ;; esac
+    exit "$rc"
+  fi
   _lg_mark_emitted "$rc"
   if [ "$_LG_FORMAT" = json ]; then
     if [ -e docs/ledger/config.json ] || [ -L docs/ledger/config.json ]; then enabled=true; fi

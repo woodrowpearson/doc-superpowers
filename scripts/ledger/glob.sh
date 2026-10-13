@@ -197,7 +197,7 @@ _lg_registry_globs() {
 # reports them). [registry] defaults to _lg_registry's. One awk pass.
 _lg_owner_map() {
   local paths="$1" out="$2" reg="${3:-}" rc=0
-  [ -n "$reg" ] || reg=$(_lg_registry)
+  if [ -z "$reg" ]; then reg=$(_lg_registry) || exit "$?"; fi
   _lg_scratch_name
   _lg_registry_globs "$reg" "$_LG_SN.globs" active
   tr '\n\000' '\001\n' < "$paths" > "$_LG_SN.lst" || _lg_die "cannot read the path list $paths"

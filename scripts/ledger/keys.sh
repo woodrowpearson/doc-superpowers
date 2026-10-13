@@ -630,7 +630,7 @@ _lg_k_check_ledger() {
   fi
   re='^[abcdefghijklmnopqrstuvwxyz0123456789-]{1,16}$'
   [[ $id =~ $re ]] || _lg_usage "'$id' is not a ledger id (^[a-z0-9-]{1,16}\$)"
-  reg=$(_lg_registry)
+  reg=$(_lg_registry) || exit "$?"
   st=$(jq -r --arg id "$id" '[.ledgers[] | select(.id == $id)]
       | if length == 0 then "none" else (.[0].status | if type == "string" then . else "active" end) end' "$reg") \
     || _lg_die "jq failed (registry)"
