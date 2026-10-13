@@ -1117,7 +1117,7 @@ cmd_ledger_assign() {
     archived) _lg_usage "'$ref' is an archived legacy row ($_LG_RES): there is no item to assign" ;;
     *) _lg_die "internal: resolve kind '$_LG_RES_KIND'" ;;
   esac
-  [ -f "$_LG_RES" ] || _lg_die "the item '$_LG_RES' is not in the working tree"
+  [ -f "$_LG_RES" ] || _lg_not_file_die "$_LG_RES" assign
   ix=$(_lg_index) || exit "$?"
   _lg_k_item_info "$ix" "$_LG_RES"
   [ "$_LG_KI_FOUND" = 1 ] || _lg_usage "'$ref' leads to $_LG_RES, which is not an item (config items.globs)"

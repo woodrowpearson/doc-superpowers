@@ -411,7 +411,7 @@ cmd_ledger_link() {
   _lg_resolve_into "$ref"
   [ "$_LG_RES_KIND" = item ] || _lg_die "internal: ledger link: '$ref' no longer resolves"
   path=$_LG_RES
-  [ -f "$path" ] || _lg_die "the item '$path' is not in the working tree"
+  [ -f "$path" ] || _lg_not_file_die "$path" link
   { IFS= read -r key; cat > "$s.ops"; } < "$s.out"
   _lg_link_names "$path"
   # One write: every value queued, then applied.
@@ -448,6 +448,18 @@ cmd_ledger_link() {
   _lg_emit link 0
 }
 
+# _lg_not_file_die <path> <verb>: <path> is not a file of the working tree —
+# die (2), naming a hosted item (config items.adapter) as one: <verb>
+# writes item files only.
+_lg_not_file_die() {
+  local ix
+  ix=$(_lg_index) || exit "$?"
+  if jq -e --arg p "$1" 'any(.items[]; .path == $p and (.url | type) == "string")' "$ix" > /dev/null 2>&1; then
+    _lg_die "$1 is a hosted item (config items.adapter): ledger $2 writes item files only — change it on its host"
+  fi
+  _lg_die "the item '$1' is not in the working tree"
+}
+
 # --- note ------------------------------------------------------------------------
 
 # ledger note <item> <text> [--kind log|ruling|owed] (design §C; controller
@@ -471,9 +483,11 @@ cmd_ledger_link() {
 # A hosted item (config items.adapter; ruling R2): log → the adapter's
 # `note <ref> <text>` (a comment carries its own time: no date), ruling →
 # `note <ref> "RULING: <text>"`, owed → `write <ref> owed <text>` (empty
-# clears it). The adapter failing or absent, or DOC_TOOLS_LEDGER_OFFLINE=1:
-# exit 2, the reason named, no clean result. (The index shows a new owed
-# value of a hosted item from the list's next fetch: TTL or --refresh.)
+# clears it; a text holding "-->" or "--!>", which would close the issue's
+# metadata comment, is usage: 3). The adapter failing or absent, or
+# DOC_TOOLS_LEDGER_OFFLINE=1: exit 2, the reason named, no clean result. A
+# write that succeeded marks the cached list expired (adapters.sh
+# _lg_remote_expire): the next read fetches it.
 # Text: "<key|path>  <line>" ("<key|path>  comment: <text>" for a hosted
 # log or ruling; "<key|path>  owed: <text>" or "… owed: (cleared)"). JSON:
 # {ref, path, kind, line}; owed: {ref, path, kind, owed: <text>|null}. An
@@ -521,7 +535,8 @@ _lg_note_append() {
   _lg_scratch_name
   s=$_LG_SN
   printf '%s\n' "$_LG_AWK_NOTE" > "$s.awk" || _lg_die "cannot write $s.awk"
-  LC_ALL=C awk -v mode=lib -v head="$hd" -v bom="$_LG_BOM" -f "$_LG_LIB/frontmatter.awk" -f "$s.awk" < "$file" > "$s.pos" 2> "$s.err" \
+  _lg_awkv "$hd"
+  LC_ALL=C awk -v mode=lib -v head="$_LG_AV" -v bom="$_LG_BOM" -f "$_LG_LIB/frontmatter.awk" -f "$s.awk" < "$file" > "$s.pos" 2> "$s.err" \
     || _lg_die "cannot read $file: $(head -n 1 "$s.err")"
   read -r found ins nr cr lastblank < "$s.pos" || _lg_die "internal: no placement for $file"
   if [ "$cr" = 1 ]; then eol=$'\r\n'; fi
@@ -634,6 +649,10 @@ cmd_ledger_note() {
     # A hosted item: through its adapter (ruling R2).
     _lg_adapter_path items || _lg_die "hosted item $path: $_LG_ADP_ERR"
     [ -n "$_LG_ADP" ] || _lg_die "hosted item $path: no items adapter (config items.adapter)"
+    case "$kind:$text" in
+      owed:*'-->'*|owed:*'--!>'*)
+        _lg_usage "a hosted item's owed cannot hold '-->' or '--!>' (it would close the issue's metadata comment)" ;;
+    esac
     if [ "${DOC_TOOLS_LEDGER_OFFLINE:-}" = 1 ]; then
       _lg_die "hosted item $path: offline (DOC_TOOLS_LEDGER_OFFLINE=1): nothing written"
     fi
@@ -643,6 +662,10 @@ cmd_ledger_note() {
       owed) set -- write "$path" owed "$text" ;;
     esac
     _lg_adapter items "$@" > "$s.aout" 2> "$s.aerr" || _lg_die "hosted item $path: $(head -n 1 "$s.aerr")"
+    # What the cached list holds just changed on the host: expired.
+    a=$(_lg_cfg '.keys.remote | if type == "string" and . != "" then . else "origin" end') || exit "$?"
+    _lg_ix_items_km "$a"
+    _lg_remote_expire items "$_LG_IX_KM"
   else
     [ -f "$path" ] || _lg_die "the item '$path' is not in the working tree"
     case "$kind" in

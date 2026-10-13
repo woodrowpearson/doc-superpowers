@@ -34,7 +34,9 @@
 #              walked, the merge commits' files read) < 5 s, warm < 1 s
 #   ls / show (500 hosted items)   as ls / show, with config items.adapter:
 #              a fake items adapter listing 500 hosted items (every third
-#              fixed, the rest open) beside the N file items: cold (the list
+#              fixed, the rest open; every fifth consumes a contract, every
+#              seventh names a file item as root cause — the re-check
+#              markers' hosted paths) beside the N file items: cold (the list
 #              fetched through the remote cache and joined) < 5 s, warm (the
 #              cached list, controller ruling R4) < 1 s
 #   ls / show (in flight: 1000 branches, 300 unmerged)   as ls / show, with
@@ -525,9 +527,16 @@ git for-each-ref --format='delete %(refname)' refs/remotes/origin/ | git update-
 # 500 hosted items (config items.adapter): a fake adapter's list, read
 # through the remote cache; undone after the rows.
 b_hosted() {
+  # Every fifth consumes a corpus contract and every seventh names a file
+  # item as its root cause (the re-check markers' hosted paths: updated
+  # through January, inside the corpus's history); every third is fixed.
   awk -v n="$1" 'BEGIN {
-    for (i = 1; i <= n; i++)
-      printf "{\"ref\":\"gh#%d\",\"url\":\"https://example.test/issues/%d\",\"title\":\"Hosted %d\",\"body_excerpt\":\"A hosted item for the bench.\",\"status\":\"%s\",\"fields\":{\"key\":\"checkout-%d\",\"ledger\":\"checkout\",\"severity\":\"P%d\",\"summary\":\"Hosted item %d: why it matters to the bench\"},\"labels\":[\"ledger:checkout\"],\"updated\":\"2026-10-01T00:00:00Z\",\"fm_errors\":[]}\n", i, i, i, (i % 3 ? "Open" : "Fixed"), 900000 + i, i % 4, i
+    for (i = 1; i <= n; i++) {
+      x = ""
+      if (i % 5 == 0) x = x ",\"consumes\":[\"field:checkout.f" (i % 20 + 1) "\"]"
+      if (i % 7 == 0) x = x ",\"relates\":[\"root-cause:checkout-" (i % 400 + 1) "\"]"
+      printf "{\"ref\":\"gh#%d\",\"url\":\"https://example.test/issues/%d\",\"title\":\"Hosted %d\",\"body_excerpt\":\"A hosted item for the bench.\",\"status\":\"%s\",\"fields\":{\"key\":\"checkout-%d\",\"ledger\":\"checkout\",\"severity\":\"P%d\",\"summary\":\"Hosted item %d: why it matters to the bench\"%s},\"labels\":[\"ledger:checkout\"],\"updated\":\"2025-01-%02dT00:00:00Z\",\"closed\":%s,\"fm_errors\":[]}\n", i, i, i, (i % 3 ? "Open" : "Fixed"), 900000 + i, i % 4, i, x, i % 28 + 1, (i % 3 ? "null" : "\"2025-01-20T00:00:00Z\"")
+    }
   }' > "$B_ROOT/hosted.jsonl" || b_die "cannot write the hosted items"
   printf '#!/bin/sh\ncat "%s"\n' "$B_ROOT/hosted.jsonl" > "$B_ROOT/items-adapter.sh"
   chmod +x "$B_ROOT/items-adapter.sh"

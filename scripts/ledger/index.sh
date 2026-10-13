@@ -1479,6 +1479,15 @@ _lg_ix_pr_prepare() {
 # h1 the title, first_para the excerpt, the date fields.date else the day
 # of "updated"; no resolution (none is asked of a hosted item). Key and
 # alias uniqueness spans both kinds (validate --all reads the index).
+# Re-check markers (relations.sh, design §F.2; controller ruling I2): a
+# hosted source has landed at its close time ("closed", else "updated"
+# once it is terminal), a hosted target was last touched at "updated" —
+# any update of the hosted issue (an edit, a comment, a label) plays the
+# part of a later commit to an item file and clears its markers; these
+# times are compared with the commit times of the base's commits
+# ($s.htimes: "<ref>\t<landed epoch>\t<updated epoch>\t<updated ISO>").
+# A hosted write through ledger note marks the copy expired
+# (adapters.sh _lg_remote_expire): the next read fetches it.
 # The cache invariant (ruling R4): the index key carries the copy's data
 # hash ("items data <sha256>"), never its fetch time — a copy whose content
 # changed rebuilds the index; a refresh that changed nothing finds it.
@@ -1497,21 +1506,30 @@ _lg_ix_pr_prepare() {
 _LG_IX_HDATA=""
 _LG_IX_NEED_ITEMS=""
 
+# _lg_ix_items_km <keys.remote> → _LG_IX_KM: the hosted items' cache key
+# material (the adapter — _LG_ADP, from _lg_adapter_path items — and the
+# remote's url).
+_lg_ix_items_km() {
+  local url
+  url=$(git config --get "remote.$1.url" 2>/dev/null) || url=""
+  _LG_IX_KM=$(printf 'items\n%s\n%s' "$_LG_ADP" "$url")
+}
+
 # _lg_ix_items_prepare <prefix> <keys.remote> <TTL seconds>: the hosted
 # items for an index build: <prefix>.itemkey the key line, _LG_IX_HDATA the
 # copy (the cache's snapshot: its header line, then the adapter's lines;
 # "" with none), the mark, the note, items_data, the refs.
 _lg_ix_items_prepare() {
-  local p="$1" remote="$2" s rc=0 state err note="" mark="" url t n
+  local p="$1" remote="$2" s rc=0 state err note="" mark="" t n
   _LG_IX_HDATA=""
   : > "$_SCRATCH/lg-items.mark"
   rm -f -- "$_SCRATCH/lg-items.note" "$_SCRATCH/lg-items.refs"
   _lg_scratch_name
   s=$_LG_SN
   if _lg_adapter_path items; then
-    url=$(git config --get "remote.$remote.url" 2>/dev/null) || url=""
+    _lg_ix_items_km "$remote"
     _LG_RTTL=$3
-    _lg_remote_cache items "$(printf 'items\n%s\n%s' "$_LG_ADP" "$url")" _lg_adapter items list || rc=$?
+    _lg_remote_cache items "$_LG_IX_KM" _lg_adapter items list || rc=$?
     _LG_RTTL=""
   else
     rc=2
@@ -1580,9 +1598,12 @@ _lg_ix_items_prepare() {
   fi
 }
 
-# _lg_ix_items_recs <snapshot> <recs>: the hosted items (the cache
+# _lg_ix_items_recs <snapshot> <recs> <times>: the hosted items (the cache
 # snapshot's lines after its header) as parse records (one ref once: the
-# first line), appended to <recs>.
+# first line), appended to <recs>; their re-check times into <times>
+# ("<ref>\t<landed>\t<updated>\t<updated as given>", epoch seconds, ""
+# when unknown) — ISO 8601 read by arithmetic (jq 1.6's fromdateiso8601
+# shifts by the local DST).
 _lg_ix_items_recs() {
   # shellcheck disable=SC2016  # jq source
   jq -L "$_LG_LIB" -s -c --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS"'
@@ -1595,6 +1616,29 @@ _lg_ix_items_recs() {
        fm: (((.fields // {}) | with_entries(.key as $k | .key = ((($F[$k] // [])[0]) // $k))) + {($stn): .status}),
        fm_errors: (.fm_errors // []), h1: .title, first_para: .body_excerpt, resolution: null, log: false}' "$1" >> "$2" \
     || _lg_die "jq failed (the hosted items)"
+  # shellcheck disable=SC2016  # jq source
+  jq -s -r '
+    def iso_epoch:
+      if type != "string" then null
+      else (capture("^(?<y>[0-9]{4})-(?<mo>[0-9]{2})-(?<d>[0-9]{2})T(?<h>[0-9]{2}):(?<mi>[0-9]{2}):(?<s>[0-9]{2})(?:\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:?[0-9]{2})$") // null) as $c
+        | if $c == null then null
+          else ($c.y | tonumber) as $y0 | ($c.mo | tonumber) as $m | ($c.d | tonumber) as $d
+            | (if $m <= 2 then $y0 - 1 else $y0 end) as $y
+            | (($y / 400) | floor) as $era | ($y - $era * 400) as $yoe
+            | (((153 * (if $m > 2 then $m - 3 else $m + 9 end) + 2) / 5 | floor) + $d - 1) as $doy
+            | ($yoe * 365 + (($yoe / 4) | floor) - (($yoe / 100) | floor) + $doy) as $doe
+            | (if $c.z == "Z" then 0
+               else ($c.z | gsub(":"; "")) as $z
+                 | (if $z[0:1] == "-" then -1 else 1 end) * (($z[1:3] | tonumber) * 3600 + ($z[3:5] | tonumber) * 60) end) as $off
+            | ($era * 146097 + $doe - 719468) * 86400 + ($c.h | tonumber) * 3600 + ($c.mi | tonumber) * 60 + ($c.s | tonumber) - $off
+          end
+      end;
+    reduce .[1:][] as $h ({s: {}, o: []}; if .s[$h.ref] then . else .s[$h.ref] = true | .o += [$h] end)
+    | .o[]
+    | (.updated | iso_epoch) as $u
+    | ((.closed | iso_epoch) // $u) as $l
+    | "\(.ref)\t\($l // "")\t\($u // "")\t\(if $u == null then "" else .updated end)"' "$1" > "$3" \
+    || _lg_die "jq failed (the hosted items' times)"
 }
 
 # _lg_ix_claim_trailers <out>: config trailers.claims and claims_by_path as
@@ -1915,7 +1959,8 @@ _lg_index() {
     _lg_parse_blobs "$commit" "$s.itemz" "$s.recs"
   fi
   # The hosted items, as parse records (path = the adapter's ref).
-  if [ -n "$_LG_IX_HDATA" ]; then _lg_ix_items_recs "$_LG_IX_HDATA" "$s.recs"; fi
+  : > "$s.htimes"
+  if [ -n "$_LG_IX_HDATA" ]; then _lg_ix_items_recs "$_LG_IX_HDATA" "$s.recs" "$s.htimes"; fi
   # The relations (needing only the records and the contracts) run in the
   # background meanwhile.
   jq -L "$_LG_LIB" -n -r --slurpfile c "$_LG_CFG" --slurpfile recs "$s.recs" --slurpfile ctr "$s.contracts" \
@@ -1966,8 +2011,8 @@ _lg_index() {
   fi
   : > "$s.rcmap"
   case "$mode" in
-    worktree) _lg_ix_recheck "$base" "$s.rctab" "$s.eff" "$s.rcmap" "$s.pfdirs" "$dcommit" ;;
-    rev) _lg_ix_recheck "$base" "$s.rctab" "" "$s.rcmap" "$s.pfdirs" "$dcommit" ;;
+    worktree) _lg_ix_recheck "$base" "$s.rctab" "$s.eff" "$s.rcmap" "$s.pfdirs" "$dcommit" "$s.htimes" ;;
+    rev) _lg_ix_recheck "$base" "$s.rctab" "" "$s.rcmap" "$s.pfdirs" "$dcommit" "$s.htimes" ;;
   esac
   # Item n is line n + 2 (after the head line); "neighbours":null and
   # "recheck_after":[] are in it once each (in a string value every quote
