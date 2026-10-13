@@ -6904,13 +6904,43 @@ test_lg_inflight_heads_cold_ff_only() {
   assert_eq "$LG_A_TIP" "$(git rev-parse -q --verify refs/heads/wip/bob/thing)" "the diverged branch is not overwritten"
   assert_eq "$y" "$(git rev-parse -q --verify refs/heads/wip/carol/ff)" "the fast-forwardable branch is updated"
   assert_contains "$LG_ERR" "refs/heads/wip/bob/thing" "the note names the diverged one"
-  assert_contains "$LG_ERR" "git update-ref -d <ref>" "…with its remedy"
+  assert_contains "$LG_ERR" "rename it out of refs/heads/wip/ (\`git branch -m\`)" "…with its remedy (never update-ref -d: it may be the user's branch)"
   assert_contains "$LG_ERR" "refs/heads/wip/alice/experiment" "…and the one the remote lacks (R5-2)"
   assert_contains "$LG_ERR" "adopted" "the adoption is said"
   # A second fetch (record and snapshot now): still intact.
   lg inflight --fetch
   assert_eq "$LG_A_TIP|$LG_A_TIP" "$(git rev-parse -q --verify refs/heads/wip/alice/experiment)|$(git rev-parse -q --verify refs/heads/wip/bob/thing)" \
     "a second fetch: both still intact"
+  lg_ifl_teardown
+}
+
+# --- Task 12 carry-over (Task 11 review) ---------------------------------------------
+
+test_lg_inflight_heads_differ_remedy() {
+  echo "test: a 'differ' note under refs/heads/<seg> never tells the user to update-ref -d what may be their own branch; elsewhere the update-ref remedy stays"
+  lg_ifl_fixture '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta","ref_prefix":"refs/heads/wip"}}'
+  local bob
+  bob=$(git -C "$LG_B" rev-parse HEAD)
+  ( cd "$LG_B" && git push -q origin "$bob:refs/heads/wip/bob/thing" )
+  lg inflight --fetch
+  assert_eq "$bob" "$(git rev-parse -q --verify refs/heads/wip/bob/thing)" "the mirror is fetched (and recorded)"
+  # The user's own commit on that name: it differs from the record and the remote.
+  git branch -q -f wip/bob/thing "$LG_A_TIP"
+  lg inflight --fetch
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "$LG_A_TIP" "$(git rev-parse -q --verify refs/heads/wip/bob/thing)" "the differing branch is left alone"
+  assert_contains "$LG_ERR" "refs/heads/wip/bob/thing" "the note names it"
+  assert_contains "$LG_ERR" "if it is your branch, rename it out of refs/heads/wip/ (\`git branch -m\`); else delete it and the next fetch recreates the mirror" \
+    "…with the branch-safe remedy"
+  assert_not_contains "$LG_ERR" "update-ref -d" "…never update-ref -d"
+  lg_ifl_teardown
+  # Outside refs/heads/: the update-ref remedy stays.
+  lg_ifl_fixture
+  lg inflight --fetch
+  git update-ref refs/doc-superpowers/inflight/hostb/feat-a "$LG_A_TIP"
+  lg inflight --fetch
+  assert_contains "$LG_ERR" "(\`git update-ref -d <ref>\` lets the next fetch recreate it)" "default prefix: the update-ref remedy"
+  assert_not_contains "$LG_ERR" "git branch -m" "…not the branch remedy"
   lg_ifl_teardown
 }
 
@@ -7281,6 +7311,9 @@ run_tests() {
 
   # --- Task 11 fix round 5 ---
   test_lg_inflight_heads_cold_ff_only
+
+  # --- Task 12 ---
+  test_lg_inflight_heads_differ_remedy
 
   print_summary
 }
