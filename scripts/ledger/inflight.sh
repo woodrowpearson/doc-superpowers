@@ -77,9 +77,14 @@
 # file in the net diff; a key or alias named (as a word) in a plan the
 # branch modifies — a .md file in the directory of a doc-index entry of a
 # doc_columns.plan type, or matching doc_columns.plan.globs; a
-# trailers.claims_by_ref keyword (#N) maps to an item only through the
-# items adapter (not yet configured: counted in the run's one stderr note
-# and dropped). Contract changes: a net-diff file a contract's defined_in
+# trailers.claims_by_ref keyword (#N) — with config items.adapter, the one
+# hosted item whose ref ends in "#N" (controller ruling R5: mapped at join
+# time against the index, the "H" lines of the join; the branch facts keep
+# the raw "#N"). A ref no hosted item ends in, or several do, or any ref
+# without an items adapter, is counted (once per branch and ref) in the
+# run's one stderr note and dropped (_lg_ifl_refs_note once the hosted
+# items are known; "no items adapter maps #N" without one). Contract
+# changes: a net-diff file a contract's defined_in
 # matches ({id, line: null}), or "Contract-Change: <id> <text>" ({id,
 # line: <text> without the leading separator}); acks: Ledger-Ack's first
 # word. A branch's PR: an open PR (config adapters.pr) whose head is the
@@ -147,7 +152,8 @@ _LG_IFL_RESERVED="refs/heads refs/remotes refs/tags refs/notes refs/stash refs/b
 # _lg_ifl_load: the in-flight settings of the run's config, once. Sets
 # _LG_IFL_ON (1 when inflight.enabled is true) and, when on, _LG_IFL_PREFIX,
 # _LG_IFL_AGE (days; 0: no cutoff), _LG_IFL_PULL, _LG_IFL_HOSTCFG,
-# _LG_IFL_REMOTE, _LG_IFL_VIEWS, _LG_IFL_BASEREF, _LG_IFL_TTL (seconds).
+# _LG_IFL_REMOTE, _LG_IFL_VIEWS, _LG_IFL_BASEREF, _LG_IFL_TTL (seconds),
+# _LG_IFL_ITEMS (1: config items.adapter names an adapter).
 # Disabled costs no process: the merged config is one compact line, and
 # without '"enabled":true' in it no jq runs.
 _lg_ifl_load() {
@@ -173,7 +179,8 @@ _lg_ifl_load() {
     (.views.branch | l),
     (.base | l),
     ('"$_LG_RTTL_JQ"'),
-    (.keys.counter_ref | if type == "string" and . != "" then l else "refs/doc-superpowers/ledger/counters" end)' > "$s.cfg"
+    (.keys.counter_ref | if type == "string" and . != "" then l else "refs/doc-superpowers/ledger/counters" end),
+    (.items | if type == "object" and .adapter != null and .adapter != "" then "1" else "" end)' > "$s.cfg"
   {
     IFS= read -r line
     IFS= read -r _LG_IFL_PREFIX
@@ -185,6 +192,7 @@ _lg_ifl_load() {
     IFS= read -r _LG_IFL_BASEREF
     IFS= read -r _LG_IFL_TTL
     IFS= read -r ctr
+    IFS= read -r _LG_IFL_ITEMS
   } < "$s.cfg" || _lg_die "cannot read the in-flight config"
   [ "$line" = true ] || return 0
   _lg_ifl_ref_ok "$_LG_IFL_PREFIX" || _lg_die "config inflight.ref_prefix '$_LG_IFL_PREFIX' is not a ref prefix under refs/ (no trailing '/')"
@@ -1075,9 +1083,14 @@ _lg_ifl_prepare() {
   _hash_one "$s.scan.key"
   _LG_IFL_SKEY=${_HASH#sha256:}
   # The issue refs (#N) no adapter maps, counted once per (branch, ref)
-  # (the merge-base cache carries each tip's).
+  # (the merge-base cache carries each tip's). With an items adapter, the
+  # refs each branch carries, for the note once the hosted items are known
+  # (_lg_ifl_refs_note).
   { IFS= read -r refs < "$s.scan.refs"; } 2>/dev/null || refs=""
-  if [ -n "$refs" ]; then
+  rm -f -- "$_SCRATCH/lg-ifl.refs"
+  if [ -n "$refs" ] && [ "${_LG_IFL_ITEMS:-}" = 1 ]; then
+    cut -f 7 "$s.scan" | grep . > "$_SCRATCH/lg-ifl.refs" || _lg_die "cannot write the in-flight issue refs"
+  elif [ -n "$refs" ]; then
     n=${refs%%	*}
     if [ "$n" = 1 ]; then
       _lg_ifl_note "1 issue reference not resolved (${refs#*	}): no items adapter maps #N"
@@ -1085,6 +1098,32 @@ _lg_ifl_prepare() {
       _lg_ifl_note "$n issue references not resolved (${refs#*	}): no items adapter maps #N"
     fi
   fi
+}
+
+# _lg_ifl_refs_note: the note on the issue refs no hosted item maps
+# ($_SCRATCH/lg-ifl.refs: one line per branch, its refs; $_SCRATCH/
+# lg-items.refs: the "#<n>" exactly one hosted ref ends in — index.sh
+# _lg_ix_items_prepare; none when the hosted items are unavailable),
+# counted once per (branch, ref): "<n> issue reference(s) not resolved
+# (<the first three>[, …]): no single hosted item (items adapter) is #N";
+# nothing when every ref maps.
+_lg_ifl_refs_note() {
+  local map="$_SCRATCH/lg-items.refs"
+  [ -f "$map" ] || map=/dev/null
+  _lg_awkv "$map"
+  LC_ALL=C awk -v map="$_LG_AV" '
+    BEGIN { while ((getline l < map) > 0) M[l] = 1 }
+    {
+      n = split($0, A, " ")
+      for (j = 1; j <= n; j++) {
+        if (A[j] == "" || (A[j] in M)) continue
+        c++
+        if (!(A[j] in S)) { S[A[j]] = 1; m++; if (m <= 3) rs = rs (rs == "" ? "" : ", ") A[j] }
+      }
+    }
+    END {
+      if (c) printf "%d issue reference%s not resolved (%s%s): no single hosted item (items adapter) is #N", c, (c == 1 ? "" : "s"), rs, (m > 3 ? ", …" : "")
+    }' "$_SCRATCH/lg-ifl.refs" || _lg_die "cannot count the in-flight issue refs"
 }
 
 # _lg_ifl_prepare_bg / _lg_ifl_prepare_wait: _lg_ifl_prepare 0 in the
@@ -1153,7 +1192,9 @@ _lg_ifl_prepare_wait() {
 
 # The join (awk): the index's lines (-v ixd: "I\t<path>\t<id>", "K\t<key or
 # alias, lowercased>\t<path>", "C\t<contract>\t<glob>", "P\t<n>\t<head>\t
-# <url>" per open non-cross PR, "Q\t<n>\t<url>" per open PR), the PR heads
+# <url>" per open non-cross PR, "Q\t<n>\t<url>" per open PR, "H\t#<n>\t
+# <path>" per "#<n>" a hosted item's ref ends in — <path> empty when
+# several do: unmapped, ruling R5), the PR heads
 # (-v heads: index.sh's "<n>\t<head>\t<oid>\t<o|m>"), -v me, files (1: list
 # each branch's files); stdin the scan with an index "<i>\t<host>\t<name>\t
 # <oid>\t<sources>\t<mb>\t<facts>". Prints per branch "B\t<i>\t<host>\t
@@ -1179,6 +1220,7 @@ BEGIN {
     else if (a[1] == "C") { g++; if (gx_add(g, a[3])) CID[g] = a[2] }
     else if (a[1] == "P") { if (!(a[3] in PRH) || a[2] + 0 > PRH[a[3]] + 0) PRH[a[3]] = a[2]; URL[a[2]] = a[4] }
     else if (a[1] == "Q") URL[a[2]] = a[3]
+    else if (a[1] == "H") HM[a[2]] = a[3]
   }
   while ((getline l < heads) > 0) {
     split(l, a, "\t")
@@ -1205,7 +1247,8 @@ BEGIN {
         sub(/^\.\//, "", v); gsub(/\t/, "\002", v)
         if (v in ID) claim(i, v)
       } else if (kind == "claims_by_ref") {
-        if (!((i, v) in RF)) { RF[i, v] = 1; print "R\t" i "\t" v }
+        if ((v in HM) && HM[v] != "" && (HM[v] in ID)) claim(i, HM[v])
+        else if (!((i, v) in RF)) { RF[i, v] = 1; print "R\t" i "\t" v }
       } else if (kind == "contract_change") {
         w = v; sub(/[ \t].*/, "", w); line = substr(v, length(w) + 1)
         sub(/^[ \t:]*/, "", line); if (substr(line, 1, 3) == "\342\200\224" || substr(line, 1, 3) == "\342\200\223") line = substr(line, 4)
@@ -1284,6 +1327,8 @@ _lg_ifl_join() {
     def e: if test("[\n\t]") then gsub("\n"; "\u0001") | gsub("\t"; "\u0002") else . end;
     (.items[] | (.path | e) as $p | "I\t\($p)\t\((.key // .path) | e)",
        (([.key] + (.aliases // []))[] | strings | select(test("[\\s]") | not) | "K\t\(lg_lower)\t\($p)")),
+    ([.items[] | select((.url | type) == "string") | .path | e | {p: ., n: (capture("(?<n>#[0-9]+)$").n // empty)}]
+     | group_by(.n)[] | "H\t\(.[0].n)\t\(if length == 1 then .[0].p else "" end)"),
     (.contracts[]? | .id as $id | (.defined_in // [])[] | strings | select(test("[\n\t]") | not) | "C\t\($id)\t\(.)"),
     ($prs[] | select(.state == "open" and (.number | tostring | test("^[0-9]+$")))
      | "Q\t\(.number)\t\(.url // "" | tostring | e)",

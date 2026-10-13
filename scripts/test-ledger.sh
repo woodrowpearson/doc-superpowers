@@ -365,16 +365,17 @@ test_lg_stub_not_implemented() {
   echo "test: an enabled verb with no implementation yet exits 2 with one object"
   lg_fixture
   lg_enable
-  # "note" — show was the stub until Task 5 built it, related until
-  # Task 9, inflight until Task 11, notices until Task 12.
-  lg note --format json
+  # "init" — show was the stub until Task 5 built it, related until
+  # Task 9, inflight until Task 11, notices until Task 12, note until
+  # Task 13.
+  lg init --format json
   assert_eq "2" "$LG_RC" "stub exits 2"
   assert_eq "1" "$(json_count "$LG_OUT")" "exactly one object"
-  assert_json_field "$LG_OUT" '.verb' "ledger note" ".verb is 'ledger note'"
+  assert_json_field "$LG_OUT" '.verb' "ledger init" ".verb is 'ledger init'"
   assert_json_field "$LG_OUT" '.enabled' "true" ".enabled is true"
   assert_json_field "$LG_OUT" '.exit' "2" ".exit is 2"
   assert_json_field "$LG_OUT" '.error' "not implemented" ".error"
-  lg note
+  lg init
   assert_eq "2" "$LG_RC" "text mode: exits 2"
   assert_eq "" "$LG_OUT" "text mode: nothing on stdout"
   assert_contains "$LG_ERR" "not implemented" "text mode: stderr says why"
@@ -5372,31 +5373,98 @@ test_lg_shallow_deepen_rebuilds_caches() {
 # --- Task 10: PR adapter, remote cache, review / merged status ----------------------
 
 # lg_fake_gh: a fake `gh` first on PATH (never the real one, never the
-# network). It logs its arguments (LG_GH/args), counts the adapter's runs
-# (LG_GH/calls: its `--state open` calls — ledger-pr-gh.sh makes one per
-# run) and prints the PRs of LG_GH/prs.json in the asked --state (all when
-# none) — or, when LG_GH/fail exists, prints that file on stderr and exits
-# 1. lg_fake_gh_off restores PATH.
+# network). It logs its arguments (LG_GH/args) and, when LG_GH/fail exists,
+# prints that file on stderr and exits 1 for every command. `gh pr list`:
+# counts the PR adapter's runs (LG_GH/calls: its `--state open` calls —
+# ledger-pr-gh.sh makes one per run) and prints the PRs of LG_GH/prs.json
+# in the asked --state (all when none). The issue commands (Task 13) keep
+# LG_GH/issues.json as the repository's issues: `issue list` prints it
+# (LG_GH/icalls counts the calls), `issue view <n>` the issue, `issue edit
+# <n>` applies --add-label / --remove-label (comma lists) and --body-file to
+# it, `issue comment <n> --body-file F` appends "<n>\t<text>" to
+# LG_GH/comments, `issue create --title T --body-file F` adds an open issue
+# numbered one past the highest and prints its URL; `label create <name>`
+# records it in LG_GH/labels, and refuses a recorded one ("already exists").
+# lg_fake_gh_off restores PATH.
 lg_fake_gh() {
   LG_GH=$(harness_mktemp_d lg-gh)
   LG_GH_BIN=$(harness_mktemp_d lg-ghbin)
   printf '[]\n' > "$LG_GH/prs.json"
-  cat > "$LG_GH_BIN/gh" <<EOF
-#!/bin/sh
-d='$LG_GH'
+  printf '[]\n' > "$LG_GH/issues.json"
+  printf "#!/bin/sh\nd='%s'\n" "$LG_GH" > "$LG_GH_BIN/gh"
+  cat >> "$LG_GH_BIN/gh" <<'EOF'
 st=""; prev=""
-for a in "\$@"; do
-  if [ "\$prev" = --state ]; then st=\$a; fi
-  prev=\$a
+for a in "$@"; do
+  if [ "$prev" = --state ]; then st=$a; fi
+  prev=$a
 done
-printf '%s\n' "\$*" >> "\$d/args"
-if [ "\$st" = open ] || [ -z "\$st" ]; then
-  n=\$(cat "\$d/calls" 2>/dev/null || echo 0)
-  echo \$((n + 1)) > "\$d/calls"
+printf '%s\n' "$*" >> "$d/args"
+# opt <name> <args…>: the value after --<name> ("" when absent).
+opt() {
+  o=$1; shift; v=""; p=""
+  for a in "$@"; do
+    if [ "$p" = "$o" ]; then v=$a; fi
+    p=$a
+  done
+  printf '%s' "$v"
+}
+case "$1 $2" in
+  "issue list")
+    n=$(cat "$d/icalls" 2>/dev/null || echo 0)
+    echo $((n + 1)) > "$d/icalls"
+    if [ -f "$d/fail" ]; then cat "$d/fail" >&2; exit 1; fi
+    cat "$d/issues.json"
+    exit 0 ;;
+  "issue view")
+    if [ -f "$d/fail" ]; then cat "$d/fail" >&2; exit 1; fi
+    jq -e --argjson n "$3" '.[] | select(.number == $n)' "$d/issues.json" \
+      || { echo "GraphQL: Could not resolve to an issue or pull request with the number of $3. (repository.issue)" >&2; exit 1; }
+    exit 0 ;;
+  "issue edit")
+    if [ -f "$d/fail" ]; then cat "$d/fail" >&2; exit 1; fi
+    n=$3
+    add=$(opt --add-label "$@"); rm=$(opt --remove-label "$@"); bf=$(opt --body-file "$@")
+    jq --argjson n "$n" --arg add "$add" --arg rm "$rm" --arg bf "$bf" --rawfile body "${bf:-/dev/null}" '
+      map(if .number == $n then
+            (if $rm != "" then .labels |= map(select(.name as $x | ($rm | split(",") | index([$x])) | not)) else . end)
+            | (if $add != "" then .labels += [$add | split(",")[] | {name: .}] else . end)
+            | (if $bf != "" then .body = $body else . end)
+          else . end)' "$d/issues.json" > "$d/issues.tmp" && mv "$d/issues.tmp" "$d/issues.json"
+    echo "https://github.com/o/r/issues/$n"
+    exit 0 ;;
+  "issue comment")
+    if [ -f "$d/fail" ]; then cat "$d/fail" >&2; exit 1; fi
+    bf=$(opt --body-file "$@")
+    { printf '%s\t' "$3"; cat "$bf"; printf '\n'; } >> "$d/comments"
+    echo "https://github.com/o/r/issues/$3#issuecomment-1"
+    exit 0 ;;
+  "issue create")
+    if [ -f "$d/fail" ]; then cat "$d/fail" >&2; exit 1; fi
+    t=$(opt --title "$@"); bf=$(opt --body-file "$@")
+    n=$(jq '([.[].number] | max // 0) + 1' "$d/issues.json")
+    jq --argjson n "$n" --arg t "$t" --rawfile body "$bf" \
+      '. + [{number: $n, title: $t, body: $body, state: "OPEN", stateReason: null, labels: [], updatedAt: "2026-10-13T00:00:00Z", url: "https://github.com/o/r/issues/\($n)"}]' \
+      "$d/issues.json" > "$d/issues.tmp" && mv "$d/issues.tmp" "$d/issues.json"
+    echo "Creating issue in o/r"
+    echo
+    echo "https://github.com/o/r/issues/$n"
+    exit 0 ;;
+  "label create")
+    if [ -f "$d/fail" ]; then cat "$d/fail" >&2; exit 1; fi
+    if grep -qxF -- "$3" "$d/labels" 2>/dev/null; then
+      echo "label with name \"$3\" already exists; use \`--force\` to update its color and description" >&2
+      exit 1
+    fi
+    printf '%s\n' "$3" >> "$d/labels"
+    exit 0 ;;
+esac
+if [ "$st" = open ] || [ -z "$st" ]; then
+  n=$(cat "$d/calls" 2>/dev/null || echo 0)
+  echo $((n + 1)) > "$d/calls"
 fi
-if [ -f "\$d/fail" ]; then cat "\$d/fail" >&2; exit 1; fi
-if [ -z "\$st" ] || [ "\$st" = all ]; then cat "\$d/prs.json"; exit 0; fi
-jq --arg s "\$st" '[.[] | select((.state | ascii_downcase) == \$s)]' "\$d/prs.json"
+if [ -f "$d/fail" ]; then cat "$d/fail" >&2; exit 1; fi
+if [ -z "$st" ] || [ "$st" = all ]; then cat "$d/prs.json"; exit 0; fi
+jq --arg s "$st" '[.[] | select((.state | ascii_downcase) == $s)]' "$d/prs.json"
 EOF
   chmod +x "$LG_GH_BIN/gh"
   LG_PATH_SAVED=$PATH
@@ -5408,6 +5476,10 @@ lg_fake_gh_off() {
 }
 lg_gh_calls() {
   cat "$LG_GH/calls" 2>/dev/null || echo 0
+}
+# lg_gh_icalls: the `gh issue list` calls so far.
+lg_gh_icalls() {
+  cat "$LG_GH/icalls" 2>/dev/null || echo 0
 }
 
 LG_PR_CFG='{"adapters":{"pr":"doc-superpowers:ledger-pr-gh"},"trailers":{"claims_by_path":["Ledger-Claims-Path"]}}'
@@ -7771,6 +7843,596 @@ test_lg_ifl_facts_sig_in_name() {
   lg_ifl_teardown
 }
 
+# --- Task 13: note, the items adapter, the GitHub reference adapter ------------------
+
+# lg_note_fixture: lg_keys_fixture with item x-1 (docs/issues/a.md): a
+# body, a "## Log" section holding one entry, then "## Next".
+lg_note_fixture() {
+  lg_keys_fixture
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "severity: P2" "summary: An item that collects notes over time"
+  printf '\nBody.\n\n## Log\n\n- 2026-01-01 first\n\n## Next\n\nOther.\n' >> docs/issues/a.md
+  git add -A && git commit -qm items
+}
+
+# lg_bytes_eq <file> <printf-format> [args…]: the file holds exactly the
+# bytes printf writes.
+lg_bytes_eq() {
+  local f="$1" e
+  shift
+  e=$(harness_mktemp lg-exp)
+  # shellcheck disable=SC2059  # the format is the argument
+  printf "$@" > "$e"
+  if cmp -s "$e" "$f"; then echo same; else echo "differs: $(od -c "$f" | tail -n 4 | head -n 3 | tr -s ' ' | tr '\n' ' ')"; fi
+  rm -f "$e"
+}
+
+test_lg_note_log_appends() {
+  echo "test: ledger note <item> <text> — '- <date> <text>' after the log section's last non-blank line (before the next heading), the heading created at the end when absent; every other byte kept; no git operation"
+  lg_note_fixture
+  local today head0 n
+  today=$(date +%Y-%m-%d)
+  head0=$(git rev-parse HEAD)
+  lg note x-1 "second entry"
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "x-1  - $today second entry" "$LG_OUT" "one line: the item and the line written"
+  assert_eq "same" "$(lg_bytes_eq docs/issues/a.md -- '---\nkey: x-1\nledger: x\nstatus: Open\nseverity: P2\nsummary: An item that collects notes over time\n---\n# a\n\nBody.\n\n## Log\n\n- 2026-01-01 first\n- %s second entry\n\n## Next\n\nOther.\n' "$today")" \
+    "appended after the section's last non-blank line, before the next heading"
+  assert_eq "$head0| M docs/issues/a.md" "$(git rev-parse HEAD)|$(git status --porcelain -- docs)" "no commit, nothing staged"
+  assert_eq "a.md" "$(ls -A docs/issues)" "no temp file left beside it"
+  # The forms show takes.
+  lg note x 1 "third"
+  assert_eq "0|x-1  - $today third" "$LG_RC|$LG_OUT" "'x 1' (two words) resolves"
+  lg note "x #1" "fourth"
+  assert_eq "0" "$LG_RC" "'x #1' resolves"
+  lg note docs/issues/a.md "fifth"
+  assert_eq "0" "$LG_RC" "a path resolves"
+  assert_eq "- 2026-01-01 first|- $today second entry|- $today third|- $today fourth|- $today fifth" \
+    "$(sed -n '/^## Log/,/^## Next/p' docs/issues/a.md | grep '^- ' | paste -sd '|' -)" "each line under the last one"
+  lg note x-1 "sixth" --format json
+  assert_eq "0|1" "$LG_RC|$(json_count "$LG_OUT")" "json: exit 0, one object"
+  assert_json_field "$LG_OUT" '[.verb, .exit, .ref, .path, .kind, .line] | map(tostring) | join("|")' \
+    "ledger note|0|x-1|docs/issues/a.md|log|- $today sixth" "json: ref, path, kind, line"
+  # No log heading: created at the end after one blank line — a heading in
+  # a fenced block or in the frontmatter (a YAML comment there) never counts.
+  lg_item docs/issues/b.md "key: x-2" "ledger: x" "status: Open" "summary: An item without a log section yet" "## Log"
+  # shellcheck disable=SC2016  # literal backticks: a fenced block
+  printf '\nBody.\n\n```\n## Log\n```\n' >> docs/issues/b.md
+  lg note x-2 "created"
+  assert_eq "0" "$LG_RC" "no heading: exit 0"
+  # shellcheck disable=SC2016  # literal backticks: a fenced block
+  assert_eq "same" "$(lg_bytes_eq docs/issues/b.md -- '---\nkey: x-2\nledger: x\nstatus: Open\nsummary: An item without a log section yet\n## Log\n---\n# b\n\nBody.\n\n```\n## Log\n```\n\n## Log\n- %s created\n' "$today")" \
+    "the heading created at the end, after one blank line (fenced and frontmatter lines ignored)"
+  lg note x-2 "again"
+  assert_eq "- $today again" "$(tail -n 1 docs/issues/b.md)" "…and used from then on"
+  assert_eq "3" "$(grep -c '^## Log$' docs/issues/b.md)" "…not created twice (the frontmatter and fenced lines, and the new heading)"
+  # A file ending in a blank line: no second blank line.
+  lg_item docs/issues/c.md "key: x-3" "ledger: x" "status: Open" "summary: An item whose body ends in a blank line"
+  printf '\nBody.\n\n' >> docs/issues/c.md
+  lg note x-3 "c"
+  assert_eq "same" "$(lg_bytes_eq docs/issues/c.md -- '---\nkey: x-3\nledger: x\nstatus: Open\nsummary: An item whose body ends in a blank line\n---\n# c\n\nBody.\n\n## Log\n- %s c\n' "$today")" \
+    "a trailing blank line is the one blank line"
+  # BOM, CRLF and no final newline: kept; the written line takes CRLF.
+  printf '\357\273\277---\r\nkey: x-4\r\nledger: x\r\nstatus: Open\r\nsummary: A CRLF item with a BOM and no final newline\r\n---\r\n# d\r\n\r\n## Log\r\n\r\n- 2026-01-01 old' > docs/issues/d.md
+  lg note x-4 "crlf entry"
+  assert_eq "0" "$LG_RC" "BOM + CRLF: exit 0"
+  assert_eq "same" "$(lg_bytes_eq docs/issues/d.md -- '\357\273\277---\r\nkey: x-4\r\nledger: x\r\nstatus: Open\r\nsummary: A CRLF item with a BOM and no final newline\r\n---\r\n# d\r\n\r\n## Log\r\n\r\n- 2026-01-01 old\r\n- %s crlf entry' "$today")" \
+    "BOM kept, CRLF line, still no final newline"
+  printf -- '---\r\nkey: x-5\r\nledger: x\r\nstatus: Open\r\nsummary: A CRLF item that has no log heading yet\r\n---\r\n# e\r\n\r\nBody.' > docs/issues/e.md
+  lg note x-5 "e"
+  assert_eq "same" "$(lg_bytes_eq docs/issues/e.md -- '---\r\nkey: x-5\r\nledger: x\r\nstatus: Open\r\nsummary: A CRLF item that has no log heading yet\r\n---\r\n# e\r\n\r\nBody.\r\n\r\n## Log\r\n- %s e' "$today")" \
+    "a created heading: CRLF lines, no final newline"
+  # config log_heading: a deeper heading ends at the next one of its level.
+  lg_enable '{"log_heading":"### History"}'
+  lg_item docs/issues/g.md "key: x-7" "ledger: x" "status: Open" "summary: An item with a custom history heading"
+  printf '\n## Notes\n\n### History\n\n- 2026-01-01 old\n\n### Other\n\nx\n' >> docs/issues/g.md
+  lg note x-7 "custom"
+  assert_eq "- 2026-01-01 old|- $today custom|### Other" "$(sed -n '/^### History/,$p' docs/issues/g.md | grep -e '^- ' -e '^### O' | paste -sd '|' -)" \
+    "config log_heading '### History': appended before the next ### heading"
+  lg_enable '{}'
+  # Errors.
+  lg note nope-9 "x"
+  assert_eq "1|no item matches 'nope-9'" "$LG_RC|$LG_OUT" "unknown: exit 1, one line"
+  lg note nope-9 "x" --format json
+  assert_eq "1|1" "$LG_RC|$(json_count "$LG_OUT")" "unknown, json: exit 1, one object"
+  assert_json_field "$LG_OUT" '[.ref, (.path | tostring)] | join("|")' "nope-9|null" "…ref, path null"
+  lg_item docs/issues/dup.md "ledger: x" "status: Open" "summary: One of two items with one stem"
+  lg_item docs/archive/issues/dup.md "ledger: x" "status: Closed" "summary: The other item with that stem"
+  lg note dup "x"
+  assert_eq "3" "$LG_RC" "several items: exit 3"
+  assert_contains "$LG_ERR" "matches several items" "…naming them"
+  n=$(hash_file docs/issues/a.md)
+  lg note x-1
+  assert_eq "3" "$LG_RC" "no text: exit 3"
+  lg note x-1 ""
+  assert_eq "3" "$LG_RC" "empty text: exit 3"
+  lg note x-1 "   "
+  assert_eq "3" "$LG_RC" "blank text: exit 3"
+  lg note x-1 "two
+lines"
+  assert_eq "3" "$LG_RC" "a newline in the text: exit 3"
+  lg note x-1 "x" --kind bogus
+  assert_eq "3" "$LG_RC" "--kind bogus: exit 3"
+  lg note x-1 "x" --kind bogus --format json
+  assert_eq "3|1" "$LG_RC|$(json_count "$LG_OUT")" "…one object"
+  assert_eq "$n" "$(hash_file docs/issues/a.md)" "nothing written by a refused note"
+  teardown
+}
+
+test_lg_note_ruling_heading() {
+  echo "test: ledger note --kind ruling — '- <date> RULING: <text>' under '## Rulings' (created at the end when absent); a deeper heading does not end the section"
+  lg_note_fixture
+  local today
+  today=$(date +%Y-%m-%d)
+  lg note x-1 "Keep the old API" --kind ruling
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "x-1  - $today RULING: Keep the old API" "$LG_OUT" "the line written"
+  assert_eq "same" "$(lg_bytes_eq docs/issues/a.md -- '---\nkey: x-1\nledger: x\nstatus: Open\nseverity: P2\nsummary: An item that collects notes over time\n---\n# a\n\nBody.\n\n## Log\n\n- 2026-01-01 first\n\n## Next\n\nOther.\n\n## Rulings\n- %s RULING: Keep the old API\n' "$today")" \
+    "## Rulings created at the end; the log untouched"
+  lg note x-1 "Ship it behind a flag" --kind ruling --format json
+  assert_json_field "$LG_OUT" '[.kind, .line] | join("|")' "ruling|- $today RULING: Ship it behind a flag" "json: kind ruling"
+  assert_eq "- $today RULING: Keep the old API|- $today RULING: Ship it behind a flag" \
+    "$(sed -n '/^## Rulings/,$p' docs/issues/a.md | grep '^- ' | paste -sd '|' -)" "the second ruling under the first"
+  lg note x-1 "a log line"
+  assert_eq "- 2026-01-01 first|- $today a log line" "$(sed -n '/^## Log/,/^## Next/p' docs/issues/a.md | grep '^- ' | paste -sd '|' -)" \
+    "the default kind still writes under ## Log"
+  lg_item docs/issues/b.md "key: x-2" "ledger: x" "status: Open" "summary: An item whose rulings section has a subsection"
+  printf '\n## Rulings\n\n- 2026-01-01 RULING: one\n\n### Context\n\nWhy.\n\n## After\n\nEnd.\n' >> docs/issues/b.md
+  lg note x-2 "two" --kind ruling
+  assert_eq "- 2026-01-01 RULING: one|### Context|Why.|- $today RULING: two|## After" \
+    "$(sed -n '/^## Rulings/,/^## After/p' docs/issues/b.md | grep -v -e '^$' -e '^## Rulings' | paste -sd '|' -)" \
+    "after the section's last non-blank line: ### Context does not end it, ## After does"
+  teardown
+}
+
+test_lg_note_owed_set_and_clear() {
+  echo "test: ledger note --kind owed — sets fields.owed (its first candidate) through fm-write.awk, empty text removes it; no log line"
+  lg_note_fixture
+  local body
+  body=$(lg_tail_hash docs/issues/a.md 8)
+  lg note x-1 "deploy: then verify #2" --kind owed
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "x-1  owed: deploy: then verify #2" "$LG_OUT" "the value set"
+  assert_eq 'owed: "deploy: then verify #2"' "$(grep '^owed' docs/issues/a.md)" "one frontmatter line, quoted as the parser needs"
+  assert_eq "$body" "$(lg_tail_hash docs/issues/a.md 9)" "the body untouched (no log line)"
+  lg show x-1
+  assert_contains "$LG_OUT" "owed: deploy: then verify #2" "show reads it back"
+  lg note x-1 "device pass" --kind owed --format json
+  assert_json_field "$LG_OUT" '[.ref, .path, .kind, .owed, (has("line") | tostring)] | join("|")' "x-1|docs/issues/a.md|owed|device pass|false" "json: owed, no line"
+  assert_eq "owed: device pass" "$(grep '^owed' docs/issues/a.md)" "replaced, still one line"
+  lg note x-1 "" --kind owed --format json
+  assert_eq "0" "$LG_RC" "empty text: exit 0"
+  assert_json_field "$LG_OUT" '.owed | tostring' "null" "json: owed null"
+  assert_eq "0" "$(grep -c '^owed' docs/issues/a.md)" "removed"
+  lg note x-1 "" --kind owed
+  assert_eq "0|x-1  owed: (cleared)" "$LG_RC|$LG_OUT" "clearing again: exit 0"
+  # A host's own name for the field (its first candidate).
+  lg_enable '{"fields":{"owed":["remaining","owed"]}}'
+  lg note x-1 "docs" --kind owed
+  assert_eq "remaining: docs" "$(grep -e '^remaining' -e '^owed' docs/issues/a.md)" "config fields.owed: the first candidate"
+  teardown
+}
+
+# lg_items_gh <args…>: run the reference items adapter (stdin closed); sets
+# LG_RC, LG_OUT and LG_ERR.
+lg_items_gh() {
+  local err
+  err=$(harness_mktemp lg-err)
+  LG_RC=0
+  LG_OUT=$("$BASH_BIN" "$REPO_DIR/scripts/adapters/ledger-items-gh.sh" "$@" 2>"$err" </dev/null) || LG_RC=$?
+  LG_ERR=$(cat "$err")
+  rm -f "$err"
+}
+
+LG_ITEMS_JSON='[{"number":12,"title":"Totals drift","body":"Intro paragraph\nwraps here.\n\nSecond para.\n\n<!-- doc-superpowers-ledger\nkey: x-12\nsummary: Totals drift when the cart is edited\nchanges: [field:order.total]\nowed: \"deploy: then verify #2\"\n-->\n","state":"OPEN","stateReason":"","labels":[{"name":"ledger:x"},{"name":"sev:P1"},{"name":"bug"}],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/12"},
+ {"number":13,"title":"CRLF, no block","body":"## Heading\r\n\r\nCRLF   body\ttext.\r\n","state":"CLOSED","stateReason":"COMPLETED","labels":[],"updatedAt":"2026-10-05T10:00:00Z","url":"https://github.com/o/r/issues/13"},
+ {"number":14,"title":"Two ledgers","body":"<!-- doc-superpowers-ledger\nkey: y-14\nnested:\n  a: b\n-->\n\nAfter the block.","state":"OPEN","stateReason":null,"labels":[{"name":"ledger:y"},{"name":"ledger:x"}],"updatedAt":"2026-10-06T10:00:00Z","url":"https://github.com/o/r/issues/14"},
+ {"number":15,"title":"Long","body":"","state":"OPEN","stateReason":null,"labels":[{"name":"area/y"},{"name":"priority/P2"}],"updatedAt":"2026-10-07T10:00:00Z","url":"https://github.com/o/r/issues/15"}]'
+
+test_lg_items_gh_list_normalises() {
+  echo "test: ledger-items-gh.sh list — gh issue list (all states, limit 1000) normalised to {ref, url, title, body_excerpt, status, fields, labels, updated} lines; ledger and severity from prefixed labels; --since; at the limit, gh missing or failing, bad JSON: exit 2"
+  lg_fixture
+  lg_fake_gh
+  local long bin bb
+  printf '%s\n' "$LG_ITEMS_JSON" | jq '.[3].body = ([range(80)] | map("word") | join(" "))' > "$LG_GH/issues.json"
+  long=$(jq -nr '([range(80)] | map("word") | join(" "))[0:279] + "…"')
+  lg_items_gh list
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "issue list --state all --limit 1000 --json number,title,body,state,stateReason,labels,updatedAt,url" "$(cat "$LG_GH/args")" "one gh call"
+  assert_eq "4" "$(printf '%s\n' "$LG_OUT" | grep -c .)" "one line per issue"
+  assert_eq '{"ref":"gh#12","url":"https://github.com/o/r/issues/12","title":"Totals drift","body_excerpt":"Intro paragraph wraps here.","status":"Open","fields":{"key":"x-12","summary":"Totals drift when the cart is edited","changes":["field:order.total"],"owed":"deploy: then verify #2","ledger":"x","severity":"P1"},"labels":["ledger:x","sev:P1","bug"],"updated":"2026-10-01T10:00:00Z","fm_errors":[]}' \
+    "$(printf '%s\n' "$LG_OUT" | sed -n 1p)" "the block's fields (frontmatter grammar), ledger and severity from labels, the first paragraph"
+  assert_eq '{"ref":"gh#13","url":"https://github.com/o/r/issues/13","title":"CRLF, no block","body_excerpt":"CRLF body text.","status":"Fixed","fields":{},"labels":[],"updated":"2026-10-05T10:00:00Z","fm_errors":[]}' \
+    "$(printf '%s\n' "$LG_OUT" | sed -n 2p)" "no block: no fields; CRLF and blanks collapsed; a heading is no paragraph"
+  assert_json_field "$(printf '%s\n' "$LG_OUT" | sed -n 3p)" '[.fields.key, (.fields.ledger | tojson), (.fm_errors | length), .body_excerpt] | map(tostring) | join("|")' \
+    'y-14|["x","y"]|1|After the block.' "two ledger labels: a list (validate reports it); a nested map is an fm_errors entry; the paragraph after the block"
+  assert_json_field "$(printf '%s\n' "$LG_OUT" | sed -n 4p)" '[(.fields | tojson), .body_excerpt] | join("|")' "{}|$long" \
+    "labels without the prefixes: no fields; a long paragraph cut to 280 characters"
+  LG_RC=0
+  LG_OUT=$(LEDGER_GH_LEDGER_PREFIX=area/ LEDGER_GH_SEV_PREFIX=priority/ "$BASH_BIN" "$REPO_DIR/scripts/adapters/ledger-items-gh.sh" list 2>/dev/null </dev/null) || LG_RC=$?
+  assert_json_field "$(printf '%s\n' "$LG_OUT" | sed -n 4p)" '.fields | tojson' '{"ledger":"y","severity":"P2"}' "LEDGER_GH_LEDGER_PREFIX / LEDGER_GH_SEV_PREFIX"
+  lg_items_gh list --since 2026-10-05T10:00:00Z
+  assert_eq "0|gh#13,gh#14,gh#15" "$LG_RC|$(printf '%s\n' "$LG_OUT" | jq -r .ref | paste -sd , -)" "--since: updatedAt ≥ the timestamp"
+  lg_items_gh list --since
+  assert_eq "3" "$LG_RC" "--since without a value: usage (3)"
+  lg_items_gh list extra
+  assert_eq "3" "$LG_RC" "an extra argument: usage (3)"
+  lg_items_gh bogus
+  assert_eq "3" "$LG_RC" "an unknown subcommand: usage (3)"
+  printf '[]\n' > "$LG_GH/issues.json"
+  lg_items_gh list
+  assert_eq "0|" "$LG_RC|$LG_OUT" "no issues: exit 0, no lines"
+  jq -n '[range(1000) | {number: (. + 1), title: "t", body: "", state: "OPEN", stateReason: null, labels: [], updatedAt: "2026-10-01T00:00:00Z", url: "u"}]' > "$LG_GH/issues.json"
+  lg_items_gh list
+  assert_eq "2" "$LG_RC" "1000 issues: the list may be cut — exit 2, never a silent truncation"
+  assert_contains "$LG_ERR" "could not list completely: 1000 issues" "…saying why"
+  jq -c '.[0:999]' "$LG_GH/issues.json" > "$LG_GH/i2" && mv "$LG_GH/i2" "$LG_GH/issues.json"
+  lg_items_gh list
+  assert_eq "0|999" "$LG_RC|$(printf '%s\n' "$LG_OUT" | grep -c .)" "999 issues: exit 0, every one"
+  printf 'not json\n' > "$LG_GH/issues.json"
+  lg_items_gh list
+  assert_eq "2" "$LG_RC" "gh prints something that is not JSON: exit 2"
+  printf 'To get started with GitHub CLI, please run:  gh auth login\n' > "$LG_GH/fail"
+  lg_items_gh list
+  assert_eq "2" "$LG_RC" "gh unauthenticated: exit 2"
+  assert_contains "$LG_ERR" "gh auth login" "…with gh's stderr"
+  rm -f "$LG_GH/fail"
+  bin=$(harness_mktemp_d lg-nogh)
+  ln -s "$(command -v jq)" "$bin/jq"
+  bb=$(command -v "$BASH_BIN")
+  LG_RC=0
+  LG_ERR=$(PATH="$bin" "$bb" "$REPO_DIR/scripts/adapters/ledger-items-gh.sh" list 2>&1 >/dev/null </dev/null) || LG_RC=$?
+  assert_eq "2" "$LG_RC" "no gh on PATH: exit 2"
+  assert_contains "$LG_ERR" "gh" "…naming gh"
+  rm -rf "$bin"
+  lg_fake_gh_off
+  teardown
+}
+
+test_lg_items_gh_block_roundtrip() {
+  echo "test: ledger-items-gh.sh write / note / create — a field rewritten in the metadata block (created at the end of the body when absent; every other byte kept) reads back through list; ledger / severity as labels (created once); status refused; note comments; create prints {ref, url}"
+  lg_fixture
+  lg_fake_gh
+  cat > "$LG_GH/issues.json" <<'EOF'
+[{"number":30,"title":"No block yet","body":"Some text.\n","state":"OPEN","stateReason":null,"labels":[{"name":"ledger:x"},{"name":"sev:P2"},{"name":"bug"}],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/30"},
+ {"number":31,"title":"CRLF block mid-body","body":"Top.\r\n\r\n<!-- doc-superpowers-ledger\r\nkey: x-31\r\n-->\r\n\r\nBottom.\r\n","state":"OPEN","stateReason":null,"labels":[],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/31"}]
+EOF
+  local f
+  f=$(harness_mktemp lg-body)
+  lg_items_gh write gh#30 owed "deploy: then verify #2"
+  assert_eq "0" "$LG_RC" "write owed: exit 0"
+  assert_eq "issue view 30 --json body" "$(sed -n 1p "$LG_GH/args")" "it reads the body"
+  assert_contains "$(sed -n 2p "$LG_GH/args")" "issue edit 30 --body-file " "…and writes it back with --body-file"
+  jq -j '.[] | select(.number == 30) | .body' "$LG_GH/issues.json" > "$f"
+  assert_eq "same" "$(lg_bytes_eq "$f" 'Some text.\n\n<!-- doc-superpowers-ledger\nowed: "deploy: then verify #2"\n-->\n')" "the block created at the end of the body (the value quoted)"
+  lg_items_gh write gh#30 summary "Short why it matters here"
+  jq -j '.[] | select(.number == 30) | .body' "$LG_GH/issues.json" > "$f"
+  assert_eq "same" "$(lg_bytes_eq "$f" 'Some text.\n\n<!-- doc-superpowers-ledger\nowed: "deploy: then verify #2"\nsummary: Short why it matters here\n-->\n')" "a second field joins the block"
+  lg_items_gh list
+  assert_json_field "$(printf '%s\n' "$LG_OUT" | sed -n 1p)" '[.fields.owed, .fields.summary, .body_excerpt] | join("|")' \
+    "deploy: then verify #2|Short why it matters here|Some text." "list reads both back; the excerpt is the body outside the block"
+  lg_items_gh write gh#30 owed ""
+  jq -j '.[] | select(.number == 30) | .body' "$LG_GH/issues.json" > "$f"
+  assert_eq "same" "$(lg_bytes_eq "$f" 'Some text.\n\n<!-- doc-superpowers-ledger\nsummary: Short why it matters here\n-->\n')" "an empty value removes the field"
+  lg_items_gh write gh#31 owed "x"
+  jq -j '.[] | select(.number == 31) | .body' "$LG_GH/issues.json" > "$f"
+  assert_eq "same" "$(lg_bytes_eq "$f" 'Top.\r\n\r\n<!-- doc-superpowers-ledger\r\nkey: x-31\r\nowed: x\r\n-->\r\n\r\nBottom.\r\n')" "a CRLF block mid-body: the field added with CRLF, the rest kept"
+  : > "$LG_GH/args"
+  lg_items_gh write gh#30 ledger y
+  assert_eq "0" "$LG_RC" "write ledger: exit 0"
+  assert_eq "issue view 30 --json labels|label create ledger:y|issue edit 30 --remove-label ledger:x --add-label ledger:y" \
+    "$(paste -sd '|' - < "$LG_GH/args")" "ledger: the label with its prefix replaced (created in the repository first)"
+  assert_eq "bug,ledger:y,sev:P2" "$(jq -r '.[] | select(.number == 30) | [.labels[].name] | sort | join(",")' "$LG_GH/issues.json")" "…the labels after"
+  lg_items_gh write gh#31 ledger y
+  assert_eq "0" "$LG_RC" "a label that already exists: not an error"
+  assert_eq "ledger:y" "$(jq -r '.[] | select(.number == 31) | [.labels[].name] | join(",")' "$LG_GH/issues.json")" "…the label added"
+  lg_items_gh write gh#30 severity ""
+  assert_eq "bug,ledger:y" "$(jq -r '.[] | select(.number == 30) | [.labels[].name] | sort | join(",")' "$LG_GH/issues.json")" "an empty severity removes the sev: label only"
+  lg_items_gh write gh#30 status Closed
+  assert_eq "3" "$LG_RC" "write status: refused (3) — it follows the issue's state"
+  lg_items_gh write gh#30 owed "two
+lines"
+  assert_eq "3" "$LG_RC" "a value with a newline: usage (3)"
+  lg_items_gh write 30 owed x
+  assert_eq "3" "$LG_RC" "a ref that is not gh#<n>: usage (3)"
+  lg_items_gh write gh#99 owed x
+  assert_eq "2" "$LG_RC" "an issue gh cannot find: exit 2"
+  lg_items_gh note gh#30 "Looked at it today"
+  assert_eq "0" "$LG_RC" "note: exit 0"
+  assert_eq "30	Looked at it today" "$(cat "$LG_GH/comments")" "note: gh issue comment with the text"
+  printf 'Body of the new issue.\n' > "$f"
+  lg_items_gh create --title "A new one" --body-file "$f"
+  assert_eq "0" "$LG_RC" "create: exit 0"
+  assert_eq '{"ref":"gh#32","url":"https://github.com/o/r/issues/32"}' "$LG_OUT" "create: one {ref, url} object"
+  assert_eq "A new one|Body of the new issue." "$(jq -r '.[] | select(.number == 32) | "\(.title)|\(.body)"' "$LG_GH/issues.json" | head -n 1)" "…the issue created"
+  lg_items_gh create --title "No body"
+  assert_eq "3" "$LG_RC" "create without --body-file: usage (3)"
+  rm -f "$f"
+  lg_fake_gh_off
+  teardown
+}
+
+test_lg_items_gh_close_reason_mapping() {
+  echo "test: ledger-items-gh.sh — status: closed with superseded_by → Closed; COMPLETED → Fixed; NOT_PLANNED → Won't Fix; any other closed → Closed; OPEN → Open; the index maps them onto the status classes"
+  lg_fake_gh
+  lg_keys_fixture "$LG_ITEMS_CFG"
+  cat > "$LG_GH/issues.json" <<'EOF'
+[{"number":20,"title":"open","body":"<!-- doc-superpowers-ledger\nkey: x-20\n-->\n","state":"OPEN","stateReason":"REOPENED","labels":[],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/20"},
+ {"number":21,"title":"done","body":"<!-- doc-superpowers-ledger\nkey: x-21\n-->\n","state":"CLOSED","stateReason":"COMPLETED","labels":[],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/21"},
+ {"number":22,"title":"not planned","body":"<!-- doc-superpowers-ledger\nkey: x-22\n-->\n","state":"CLOSED","stateReason":"NOT_PLANNED","labels":[],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/22"},
+ {"number":23,"title":"duplicate","body":"<!-- doc-superpowers-ledger\nkey: x-23\n-->\n","state":"CLOSED","stateReason":"DUPLICATE","labels":[],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/23"},
+ {"number":24,"title":"no reason","body":"<!-- doc-superpowers-ledger\nkey: x-24\n-->\n","state":"CLOSED","stateReason":null,"labels":[],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/24"},
+ {"number":25,"title":"superseded","body":"<!-- doc-superpowers-ledger\nkey: x-25\nsuperseded_by: x-21\n-->\n","state":"CLOSED","stateReason":"COMPLETED","labels":[],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/25"},
+ {"number":26,"title":"open, superseded_by","body":"<!-- doc-superpowers-ledger\nkey: x-26\nsuperseded_by: x-21\n-->\n","state":"OPEN","stateReason":null,"labels":[],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/26"}]
+EOF
+  lg_items_gh list
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "gh#20=Open,gh#21=Fixed,gh#22=Won't Fix,gh#23=Closed,gh#24=Closed,gh#25=Closed,gh#26=Open" \
+    "$(printf '%s\n' "$LG_OUT" | jq -r '"\(.ref)=\(.status)"' | paste -sd , -)" "the five rules, first match wins"
+  lg ls --format json
+  assert_eq "0" "$LG_RC" "ls: exit 0"
+  assert_eq "x-20=open:not started,x-21=fixed:shipped,x-22=wontfix:won't fix,x-23=closed:closed,x-24=closed:closed,x-25=closed:superseded,x-26=open:not started" \
+    "$(jq -r '[.items[] | "\(.key)=\(.class):\(.derived.status)"] | sort | join(",")' <<<"$LG_OUT")" "the status classes and derived statuses"
+  lg_fake_gh_off
+  teardown
+}
+
+LG_ITEMS_CFG='{"items":{"adapter":"doc-superpowers:ledger-items-gh"}}'
+
+# lg_items_fixture [config]: lg_keys_fixture (ledgers x and y, an origin
+# remote) with config items.adapter = doc-superpowers:ledger-items-gh over a
+# fake gh (lg_fake_gh): file item x-1 (docs/issues/a.md, pushed); hosted
+# gh#12 (x-12, open, P1) and gh#13 (y-13, closed as completed, P2).
+lg_items_fixture() {
+  local c="$LG_ITEMS_CFG"
+  if [ $# -gt 0 ]; then c=$1; fi
+  lg_fake_gh
+  lg_keys_fixture "$c"
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "severity: P2" "summary: A file item beside the hosted ones"
+  git add -A && git commit -qm items
+  git push -q origin main
+  git fetch -q origin
+  cat > "$LG_GH/issues.json" <<'EOF'
+[{"number":12,"title":"Totals drift","body":"The total is wrong after an edit.\n\n<!-- doc-superpowers-ledger\nkey: x-12\nsummary: Totals drift when the cart is edited\n-->\n","state":"OPEN","stateReason":"","labels":[{"name":"ledger:x"},{"name":"sev:P1"}],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/12"},
+ {"number":13,"title":"Old crash","body":"Crashed on launch.\n\n<!-- doc-superpowers-ledger\nkey: y-13\nsummary: The app crashed on launch on old devices\n-->\n","state":"CLOSED","stateReason":"COMPLETED","labels":[{"name":"ledger:y"},{"name":"sev:P2"}],"updatedAt":"2026-10-02T10:00:00Z","url":"https://github.com/o/r/issues/13"}]
+EOF
+}
+
+lg_items_teardown() {
+  lg_fake_gh_off
+  teardown
+}
+
+# lg_age_remote <name> <hours>: the remote cache file of <name> fetched
+# <hours> earlier (its header's fetched_at moved back).
+lg_age_remote() {
+  local f h
+  f=$(lg_remote_file "$1") || f=""
+  [ -n "$f" ] || return 0
+  h=$(head -n 1 "$f" | jq -c --argjson s "$(($2 * 3600))" '.fetched_at -= $s')
+  { printf '%s\n' "$h"; tail -n +2 "$f"; } > "$f.x" && mv "$f.x" "$f"
+}
+
+test_lg_items_offline_stale_marker() {
+  echo "test: hosted items join the index through the remote cache (path = ref, url) — a changed copy rebuilds the index, an unchanged refresh does not; offline or failing: the last copy and a stale marker with its age; none: absent, '—' and one note; --refresh: exit 2"
+  lg_items_fixture
+  local d
+  lg ls --format json
+  assert_eq "0|1" "$LG_RC|$(lg_gh_icalls)" "first ls: exit 0, gh issue list once"
+  assert_json_field "$LG_OUT" '[.items[] | .path] | sort | join(",")' "docs/issues/a.md,gh#12,gh#13" "hosted items beside the file item: path = the adapter's ref"
+  assert_json_field "$LG_OUT" '.items[] | select(.path == "gh#13") | [.key, .ledger, .severity, .status, .class, .display, .date] | join("|")' \
+    "y-13|y|P2|Fixed|fixed|shipped|2026-10-02" "field-equivalent: key, ledger, severity, status, class, derived status, date (updated)"
+  assert_json_field "$LG_OUT" '.items_data | [.state, (.as_of | type), (.error | tostring)] | join(",")' "fresh,number,null" "items_data: fresh"
+  assert_eq "" "$LG_ERR" "fresh: no note"
+  lg show gh#12
+  assert_eq "0" "$LG_RC" "show gh#12: exit 0"
+  assert_eq "x-12  x  P1  not started" "$(printf '%s\n' "$LG_OUT" | sed -n 1p)" "show: key, ledger, severity, status"
+  assert_contains "$LG_OUT" "url: https://github.com/o/r/issues/12" "show: the url"
+  assert_contains "$LG_OUT" "title: Totals drift" "show: the title"
+  lg show x-12 --format json
+  assert_json_field "$LG_OUT" '.item | [.path, .url] | join(" ")' "gh#12 https://github.com/o/r/issues/12" "the key resolves to the hosted item"
+  lg ls
+  assert_eq "1" "$(lg_gh_icalls)" "within the TTL: no gh call"
+  DOC_TOOLS_LEDGER_TRACE=1 lg ls
+  assert_contains "$LG_ERR" "index-hit" "…and the index is a hit"
+  # The copy's content changes: the next read reflects it.
+  jq '(.[] | select(.number == 12) | .body) |= sub("summary: Totals drift when the cart is edited"; "summary: Totals drift after any cart edit")' \
+    "$LG_GH/issues.json" > "$LG_GH/i2" && mv "$LG_GH/i2" "$LG_GH/issues.json"
+  DOC_TOOLS_LEDGER_TRACE=1 lg ls --refresh --format json
+  assert_eq "0|2" "$LG_RC|$(lg_gh_icalls)" "--refresh: gh runs"
+  assert_contains "$LG_ERR" "index-build" "…a changed copy rebuilds the index"
+  assert_json_field "$LG_OUT" '.items[] | select(.path == "gh#12") | .summary' "Totals drift after any cart edit" "…which shows the change"
+  DOC_TOOLS_LEDGER_TRACE=1 lg ls --refresh
+  assert_eq "3" "$(lg_gh_icalls)" "--refresh again: gh runs"
+  assert_contains "$LG_ERR" "index-hit" "…an unchanged copy: no rebuild"
+  assert_not_contains "$LG_ERR" "index-build" "…none"
+  # Offline, past the TTL: the copy serves, marked stale with its age.
+  lg_age_remote items 3
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg ls --format json
+  assert_eq "0|3" "$LG_RC|$(lg_gh_icalls)" "offline past the TTL: exit 0, no gh call"
+  assert_eq "1" "$(printf '%s\n' "$LG_ERR" | grep -c '^ledger:')" "one ledger: note"
+  assert_contains "$LG_ERR" "hosted items as of " "…hosted items as of <UTC>"
+  assert_contains "$LG_ERR" "(3 h old, stale)" "…its age, stale"
+  assert_contains "$LG_ERR" "offline: DOC_TOOLS_LEDGER_OFFLINE=1" "…offline"
+  assert_json_field "$LG_OUT" '.items_data | [.state, (.as_of | type), (.error | tostring)] | join(",")' "offline,number,null" "items_data: offline"
+  assert_json_field "$LG_OUT" '[.items[] | .path] | sort | join(",")' "docs/issues/a.md,gh#12,gh#13" "…the copy serves"
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg view all --out "$TEST_DIR/v"
+  assert_eq "0" "$LG_RC" "view offline: exit 0"
+  assert_contains "$(sed -n 3p "$TEST_DIR/v/x.md")" "hosted items as of " "the page header: the marker"
+  assert_contains "$(sed -n 3p "$TEST_DIR/v/x.md")" "(3 h old, stale)" "…stale, its age"
+  assert_contains "$(grep -F '| x-12 |' "$TEST_DIR/v/x.md")" "(https://github.com/o/r/issues/12)" "the hosted item links to its url"
+  # The adapter fails (online): the copy serves, stale, with the reason.
+  printf 'HTTP 502: Bad Gateway\n' > "$LG_GH/fail"
+  lg ls --format json
+  assert_eq "0" "$LG_RC" "adapter failing: exit 0"
+  assert_contains "$LG_ERR" "(3 h old, stale) — the items adapter failed" "…stale, the adapter failed"
+  assert_contains "$LG_ERR" "HTTP 502" "…with gh's reason"
+  assert_json_field "$LG_OUT" '.items_data | [.state, (.error | test("HTTP 502") | tostring)] | join(",")' "stale,true" "items_data: stale, the error"
+  lg ls --refresh
+  assert_eq "2" "$LG_RC" "--refresh with the adapter failing: exit 2"
+  assert_contains "$LG_ERR" "HTTP 502" "…saying why"
+  lg ls --refresh --format json
+  assert_eq "1|2" "$(json_count "$LG_OUT")|$(jq -r .exit <<<"$LG_OUT")" "…one JSON object, exit 2"
+  # No copy at all: hosted items absent, '—', one note.
+  d="$(git rev-parse --git-common-dir)/doc-superpowers/ledger/remote"
+  rm -rf "$d"
+  lg ls --format json
+  assert_eq "0" "$LG_RC" "no copy: exit 0"
+  assert_eq "1" "$(printf '%s\n' "$LG_ERR" | grep -c .)" "one stderr line"
+  assert_contains "$LG_ERR" "hosted items unavailable" "…hosted items unavailable"
+  assert_json_field "$LG_OUT" '[.items[] | .path] | join(",")' "docs/issues/a.md" "hosted items absent"
+  assert_json_field "$LG_OUT" '.items_data.state' "none" "items_data: none"
+  lg view all --out "$TEST_DIR/v"
+  assert_contains "$(sed -n 3p "$TEST_DIR/v/x.md")" "hosted items: —" "the page header: hosted items: —"
+  lg_items_teardown
+}
+
+test_lg_validate_all_hosted_items() {
+  echo "test: validate --all checks hosted items through the cache (fresh or stale: the note says which) with the file items' checks where the adapter supplies the data; keys unique across both; no cache and a failing adapter: exit 2; --staged never calls the adapter"
+  lg_items_fixture
+  cat > "$LG_GH/issues.json" <<'EOF'
+[{"number":12,"title":"Same key as the file item","body":"<!-- doc-superpowers-ledger\nkey: x-1\nsummary: A hosted item that reuses a file item's key\n-->\n","state":"OPEN","stateReason":null,"labels":[{"name":"ledger:nope"},{"name":"sev:P1"}],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/12"},
+ {"number":14,"title":"Not planned","body":"<!-- doc-superpowers-ledger\nkey: y-14\nsummary: Closed as not planned on GitHub, reason there\n-->\n","state":"CLOSED","stateReason":"NOT_PLANNED","labels":[{"name":"ledger:y"}],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/14"},
+ {"number":15,"title":"Nested","body":"<!-- doc-superpowers-ledger\nkey: y-15\nsummary: A hosted item whose block holds a nested map\nnested:\n  a: b\n-->\n","state":"OPEN","stateReason":null,"labels":[{"name":"ledger:y"}],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/15"}]
+EOF
+  local n
+  lg validate --all --format json
+  assert_eq "1|1" "$LG_RC|$(json_count "$LG_OUT")" "findings: exit 1, one object"
+  assert_eq "duplicate-key,no-contract" "$(jq -r '[.findings[] | select(.path == "docs/issues/a.md") | .class] | sort | join(",")' <<<"$LG_OUT")" \
+    "the file item: its key is also a hosted item's"
+  assert_eq "duplicate-key,no-contract,unknown-ledger" "$(jq -r '[.findings[] | select(.path == "gh#12") | .class] | sort | join(",")' <<<"$LG_OUT")" \
+    "gh#12: the same key, an unknown ledger (from its label)"
+  assert_eq "" "$(jq -r '[.findings[] | select(.path == "gh#14") | .class] | join(",")' <<<"$LG_OUT")" \
+    "gh#14 (won't fix): no missing-resolution — the adapter supplies no resolution"
+  assert_eq "no-contract,parse-error" "$(jq -r '[.findings[] | select(.path == "gh#15") | .class] | sort | join(",")' <<<"$LG_OUT")" \
+    "gh#15: its block's nested map (advisory)"
+  assert_eq "1" "$(printf '%s\n' "$LG_ERR" | grep -c '^ledger:')" "one ledger: note"
+  assert_contains "$LG_ERR" "fresh" "…saying the copy is fresh"
+  # Stale: the copy past its TTL and the adapter failing — still checked.
+  lg_age_remote items 2
+  printf 'HTTP 502: Bad Gateway\n' > "$LG_GH/fail"
+  lg validate --all --format json
+  assert_eq "1" "$LG_RC" "stale: still the findings (exit 1)"
+  assert_eq "duplicate-key,no-contract,unknown-ledger" "$(jq -r '[.findings[] | select(.path == "gh#12") | .class] | sort | join(",")' <<<"$LG_OUT")" "…from the stale copy"
+  assert_contains "$LG_ERR" "stale" "the note says stale"
+  assert_contains "$LG_ERR" "HTTP 502" "…and why"
+  # The pre-commit path never calls the adapter.
+  rm -f "$LG_GH/fail"
+  n=$(lg_gh_icalls)
+  printf '\nedited\n' >> docs/issues/a.md
+  git add docs/issues/a.md
+  lg validate --staged --format json
+  assert_eq "0|$n" "$LG_RC|$(lg_gh_icalls)" "validate --staged: exit 0, no gh call"
+  assert_not_contains "$LG_OUT" "gh#12" "…no hosted item in sight"
+  git reset -q
+  # No copy and the adapter failing: exit 2.
+  rm -rf "$(git rev-parse --git-common-dir)/doc-superpowers/ledger/remote"
+  printf 'HTTP 502: Bad Gateway\n' > "$LG_GH/fail"
+  lg validate --all
+  assert_eq "2" "$LG_RC" "no copy, adapter failing: exit 2"
+  assert_contains "$LG_ERR" "hosted items" "…naming the hosted items"
+  assert_contains "$LG_ERR" "HTTP 502" "…and the reason"
+  lg validate --all --format json
+  assert_eq "1|2" "$(json_count "$LG_OUT")|$(jq -r .exit <<<"$LG_OUT")" "…one JSON object, exit 2"
+  lg_items_teardown
+}
+
+test_lg_inflight_claims_by_ref_hosted() {
+  echo "test: with an items adapter, a claims_by_ref '#N' claims the one hosted item whose ref ends in #N, mapped at join time (the facts keep the raw ref); no match stays unmapped and the note says so"
+  lg_items_fixture '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta"},"items":{"adapter":"doc-superpowers:ledger-items-gh"}}'
+  git checkout -q -b fix-12
+  git commit -q --allow-empty -m "fix it" -m "Fixes #12
+Closes #99"
+  git checkout -q main
+  lg inflight --branch fix-12
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "fix-12 local no PR claims:x-12 contracts:— files:0" "$LG_OUT" "Fixes #12 claims the hosted item gh#12 (x-12)"
+  assert_eq "1" "$(printf '%s\n' "$LG_ERR" | grep -c '^ledger:')" "one ledger: note"
+  assert_contains "$LG_ERR" "1 issue reference not resolved (#99): no single hosted item (items adapter) is #N" "…#99 unmapped, the note reworded"
+  assert_not_contains "$LG_ERR" "#12" "…#12 is not in it"
+  lg inflight --branch fix-12 --format json
+  assert_json_field "$LG_OUT" '.branches[0] | [(.claims | join(",")), (.refs | join(","))] | join(" ")' "x-12 #99" "json: claims x-12, refs (unmapped) #99"
+  lg show gh#12
+  assert_contains "$LG_OUT" "in flight: fix-12 (local, no PR)" "show: the hosted item is in flight"
+  lg ls --format json
+  assert_json_field "$LG_OUT" '.items[] | select(.path == "gh#12") | .display' "on branch fix-12" "ls: on branch fix-12"
+  assert_contains "$(cat "$(git rev-parse --git-common-dir)"/doc-superpowers/ledger/branch/f-*.tsv)" "#12" "the cached branch facts keep the raw ref"
+  lg_items_teardown
+}
+
+test_lg_note_hosted_item() {
+  echo "test: ledger note on a hosted item — log: adapter note <ref> <text>; ruling: note \"RULING: <text>\"; owed: write <ref> owed <text>; a failing or offline adapter: exit 2"
+  lg_items_fixture
+  lg note gh#12 "Looked at it"
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "x-12  comment: Looked at it" "$LG_OUT" "one line: the comment"
+  assert_eq "12	Looked at it" "$(cat "$LG_GH/comments")" "gh issue comment with the text (no date prefix: the comment has its own)"
+  lg note x-12 "Keep the old API" --kind ruling --format json
+  assert_json_field "$LG_OUT" '[.ref, .path, .kind, .line] | join("|")' "x-12|gh#12|ruling|RULING: Keep the old API" "ruling: json"
+  assert_eq "12	RULING: Keep the old API" "$(sed -n 2p "$LG_GH/comments")" "ruling: a RULING: comment"
+  lg note gh#12 "deploy" --kind owed --format json
+  assert_json_field "$LG_OUT" '[.path, .kind, .owed] | join("|")' "gh#12|owed|deploy" "owed: json"
+  assert_contains "$(jq -r '.[] | select(.number == 12) | .body' "$LG_GH/issues.json")" "owed: deploy" "owed: written into the issue's block"
+  lg note gh#12 "" --kind owed
+  assert_eq "0|x-12  owed: (cleared)" "$LG_RC|$LG_OUT" "owed cleared"
+  assert_not_contains "$(jq -r '.[] | select(.number == 12) | .body' "$LG_GH/issues.json")" "owed:" "…removed from the block"
+  printf 'HTTP 502: Bad Gateway\n' > "$LG_GH/fail"
+  lg note gh#12 "x"
+  assert_eq "2" "$LG_RC" "adapter failing: exit 2"
+  assert_contains "$LG_ERR" "HTTP 502" "…naming the reason"
+  assert_eq "" "$LG_OUT" "…no clean result"
+  lg note gh#12 "x" --format json
+  assert_eq "1|2" "$(json_count "$LG_OUT")|$(jq -r .exit <<<"$LG_OUT")" "…json: one object, exit 2"
+  rm -f "$LG_GH/fail"
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg note gh#12 "x"
+  assert_eq "2" "$LG_RC" "offline: exit 2"
+  assert_contains "$LG_ERR" "offline" "…saying so"
+  assert_eq "2" "$(wc -l < "$LG_GH/comments" | tr -d ' ')" "nothing more commented"
+  lg_items_teardown
+}
+
+test_lg_items_adapter_contract() {
+  echo "test: config items.adapter — a path from the top level or an absolute one; output that breaks the items contract (here: no url) is the adapter failing — read verbs serve no hosted items with one note, --refresh and validate --all exit 2; unconfigured: no items_data"
+  lg_keys_fixture '{"items":{"adapter":"tools/items.sh"}}'
+  mkdir -p tools
+  cat > tools/items.sh <<'EOF'
+#!/bin/sh
+cat <<'J'
+{"ref":"t#1","url":"https://example.test/1","title":"One","status":"Open","fields":{"key":"x-41","ledger":"x","summary":"A hosted item from a repo-relative adapter"}}
+J
+EOF
+  chmod +x tools/items.sh
+  lg show x-41
+  assert_eq "0" "$LG_RC" "a path from the top level: exit 0"
+  assert_contains "$LG_OUT" "path: t#1" "…the hosted item, its ref as path"
+  assert_contains "$LG_OUT" "url: https://example.test/1" "…its url"
+  lg_enable "{\"items\":{\"adapter\":\"$TEST_DIR/tools/items.sh\"}}"
+  lg ls --format json
+  assert_eq "0|t#1" "$LG_RC|$(jq -r '[.items[] | .path] | join(",")' <<<"$LG_OUT")" "an absolute path"
+  cat > tools/items.sh <<'EOF'
+#!/bin/sh
+echo '{"ref":"t#1","title":"One","status":"Open","fields":{}}'
+EOF
+  lg ls --refresh
+  assert_eq "2" "$LG_RC" "--refresh, a line without url: exit 2"
+  assert_contains "$LG_ERR" "breaks the items contract" "…saying the output breaks the contract"
+  rm -rf "$(git rev-parse --git-common-dir)/doc-superpowers/ledger/remote"
+  lg ls --format json
+  assert_eq "0|0" "$LG_RC|$(jq -r '.items | length' <<<"$LG_OUT")" "plain ls: exit 0, no hosted items"
+  assert_eq "1" "$(printf '%s\n' "$LG_ERR" | grep -c .)" "…one stderr line"
+  assert_contains "$LG_ERR" "hosted items unavailable (—)" "…the hosted items unavailable"
+  assert_json_field "$LG_OUT" '.items_data.state' "none" "…items_data: none"
+  lg validate --all --format json
+  assert_eq "2|1" "$LG_RC|$(json_count "$LG_OUT")" "validate --all with no copy: exit 2, one object"
+  lg_enable '{"items":{"adapter":"doc-superpowers:../x"}}'
+  lg ls --refresh
+  assert_eq "2" "$LG_RC" "a doc-superpowers: name that leaves the directory: exit 2 with --refresh"
+  assert_contains "$LG_ERR" "config items.adapter" "…naming the setting"
+  lg_enable '{}'
+  lg ls --format json
+  assert_json_field "$LG_OUT" 'has("items_data")' "false" "no items adapter: no items_data"
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -8064,6 +8726,19 @@ run_tests() {
   # --- Task 12 fix round 2 ---
   test_lg_notice_id_remote_and_inflight_across_hosts
   test_lg_publish_prune_term_prompt
+
+  # --- Task 13 ---
+  test_lg_note_log_appends
+  test_lg_note_ruling_heading
+  test_lg_note_owed_set_and_clear
+  test_lg_items_gh_list_normalises
+  test_lg_items_gh_block_roundtrip
+  test_lg_items_gh_close_reason_mapping
+  test_lg_items_offline_stale_marker
+  test_lg_validate_all_hosted_items
+  test_lg_inflight_claims_by_ref_hosted
+  test_lg_note_hosted_item
+  test_lg_items_adapter_contract
 
   print_summary
 }

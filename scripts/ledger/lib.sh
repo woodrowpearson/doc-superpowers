@@ -243,8 +243,7 @@ _lg_stub() {
   _lg_init "$_LG_VERB"
   _lg_die "not implemented"
 }
-# show, ls, find, link: query.sh. new, assign, finalize: keys.sh. view,
-# publish: views.sh. related, sweep, recheck: relations.sh. inflight,
+# show, ls, find, link, note: query.sh. new, assign, finalize: keys.sh.
+# view, publish: views.sh. related, sweep, recheck: relations.sh. inflight,
 # notices: inflight.sh.
-cmd_ledger_note() { _lg_stub "$@"; }
 cmd_ledger_init() { _lg_stub "$@"; }

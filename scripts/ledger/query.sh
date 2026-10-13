@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # scripts/ledger/query.sh — the read verbs over the index (index.sh):
-# `ledger show`, `ledger ls`, `ledger find`, and `ledger link`, which writes
-# a confirmed relation into an item. Sourced by lib.sh; uses lib.sh's
+# `ledger show`, `ledger ls`, `ledger find`; `ledger link`, which writes a
+# confirmed relation into an item, and `ledger note`, which writes a dated
+# line or what an item owes (below). Sourced by lib.sh; uses lib.sh's
 # _lg_init, _lg_usage, _lg_die, _lg_emit, _lg_out_file, index.sh's _lg_index
 # and parse.sh's _lg_scratch_name. One jq process reads the index per run
 # (a 3,000-item index is a few MB: one parse, one pass).
@@ -9,14 +10,16 @@
 # Text is what agents read, so every line is one line (control characters
 # become spaces) and long values are cut ("…"):
 #   show  ≤ 25 lines: "<key|path>  <ledger>  <severity>  <status>", the
-#         summary, then path/status/date, spec·plan·handoff,
+#         summary, then path/status/date, the url of a hosted item (config
+#         items.adapter: its path is the adapter's ref), spec·plan·handoff,
 #         changes·consumes·relates, and — when present — the neighbours
 #         ("upstream: <key> (<via>), …", downstream, siblings; relations.sh),
 #         the re-check markers ("re-check: <key> landed, <contract>
 #         changed"), the in-flight claims ("in flight: <branch>
 #         (<sources>[@<host>], PR #<n>|no PR)", inflight.sh), files, aliases,
-#         superseded by, owed, the first resolution line (a terminal item:
-#         fixed / closed / won't fix class; "(none)" when it has none) and
+#         superseded by, owed, the first resolution line (a terminal file
+#         item: fixed / closed / won't fix class; "(none)" when it has none;
+#         a hosted item's reason lives on the issue) and
 #         the first frontmatter error. Lists show 3 entries and "+N more".
 #   ls    "<key|path stem>  <severity>  <status>  <summary>" per item,
 #         columns padded to the widest value shown, the status cut at 24
@@ -89,11 +92,19 @@ _lg_q_run() {
 # _lg_pr_data_into <payload-file>: add "pr_data" (the index build's PR data
 # state, $_SCRATCH/lg-pr.json — index.sh _lg_ix_pr_prepare) to the JSON
 # payload, so a stale or missing PR list never reads as a clean answer;
-# nothing when no worktree or rev index was built this run.
+# nothing when no worktree or rev index was built this run. With config
+# items.adapter, "items_data" too (the hosted items' copy: index.sh
+# _lg_ix_items_prepare).
 _lg_pr_data_into() {
-  [ -s "$_SCRATCH/lg-pr.json" ] || return 0
-  if ! jq -c --slurpfile pd "$_SCRATCH/lg-pr.json" '. + {pr_data: $pd[0]}' "$1" > "$1.pd" || ! mv -f -- "$1.pd" "$1"; then
-    _lg_die "jq failed (pr_data)"
+  if [ -s "$_SCRATCH/lg-pr.json" ]; then
+    if ! jq -c --slurpfile pd "$_SCRATCH/lg-pr.json" '. + {pr_data: $pd[0]}' "$1" > "$1.pd" || ! mv -f -- "$1.pd" "$1"; then
+      _lg_die "jq failed (pr_data)"
+    fi
+  fi
+  if [ -s "$_SCRATCH/lg-items.json" ]; then
+    if ! jq -c --slurpfile hd "$_SCRATCH/lg-items.json" '. + {items_data: $hd[0]}' "$1" > "$1.pd" || ! mv -f -- "$1.pd" "$1"; then
+      _lg_die "jq failed (items_data)"
+    fi
   fi
 }
 
@@ -131,6 +142,7 @@ lg_resolve($ref; $c[0]) as $R
      | "\(.key // .path | lg_q_one)  \(.ledger // "—" | lg_q_one)  \(.severity // "—" | lg_q_one)  \(lg_q_display)",
        (.summary // "(no summary)" | lg_q_one),
        "path: \(.path | lg_q_one)\(if .archived then " (archived)" else "" end) · status: \(.status // "—" | lg_q_one) (\(.class)) · date: \(.date // "—")",
+       (if (.url | type) == "string" then "url: \(.url | lg_q_one | lg_q_cut(200))" else empty end),
        (if (.h1 | type) == "string" and .h1 != .summary then "title: \(.h1 | lg_q_one | lg_q_cut(160))" else empty end),
        "spec: \(.docs.spec | lg_q_list(3)) · plan: \(.docs.plan | lg_q_list(3)) · handoff: \(.docs.handoff | lg_q_list(3))",
        "changes: \(.changes | lg_q_list(3)) · consumes: \(.consumes | lg_q_list(3)) · relates: \([.relates[] | if .kind == null then .key else "\(.kind):\(.key)" end] | lg_q_list(3))",
@@ -144,7 +156,7 @@ lg_resolve($ref; $c[0]) as $R
        (if .aliases != [] then "aliases: \(.aliases | lg_q_list(3))" else empty end),
        (if .superseded_by != null and .derived.status != "superseded" then "superseded by: \(.superseded_by | lg_q_one)" else empty end),
        (if .owed != null then "owed: \(.owed | lg_q_one | lg_q_cut(160))" else empty end),
-       (if .class == "fixed" or .class == "closed" or .class == "wontfix"
+       (if (.class == "fixed" or .class == "closed" or .class == "wontfix") and (.url | type) != "string"
         then "resolution: \(.resolution // "(none)" | lg_q_one | lg_q_cut(200))" else empty end),
        (if .fm_errors != [] then "frontmatter: \(.fm_errors[0] | lg_q_one | lg_q_cut(160))\(if (.fm_errors | length) > 1 then " (+\((.fm_errors | length) - 1) more)" else "" end)" else empty end)
      end)
@@ -434,4 +446,231 @@ cmd_ledger_link() {
     "$s.res" | tr -d '\000-\010\013-\037' > "$s.lines"
   _lg_out_file "$s.lines"
   _lg_emit link 0
+}
+
+# --- note ------------------------------------------------------------------------
+
+# ledger note <item> <text> [--kind log|ruling|owed] (design §C; controller
+# rulings R1, R2): the one deterministic home for an item's state. <item> is
+# what show takes (several words: the spaced forms "L 14", "L #14"); <text>
+# is the last argument, one line.
+# A file item, written in place (a temp file beside it, then mv: every other
+# byte kept — the BOM, the line endings, the final newline or its absence;
+# nothing staged or committed):
+#   log (the default)  "- <YYYY-MM-DD> <text>" (the local date) under config
+#       log_heading;
+#   ruling  "- <YYYY-MM-DD> RULING: <text>" under "## Rulings" —
+#       after the section's last non-blank line, before the next heading of
+#       the same or a higher level (a heading in a fenced block or in the
+#       frontmatter never counts; the first such heading is the section); a
+#       file without it gets the heading at its end, after one blank line; a
+#       written line takes the file's line ending (CRLF when its first line
+#       ends in CR);
+#   owed  fields.owed (its first candidate name) set through fm-write.awk;
+#       empty text removes it (every candidate name); no log line.
+# A hosted item (config items.adapter; ruling R2): log → the adapter's
+# `note <ref> <text>` (a comment carries its own time: no date), ruling →
+# `note <ref> "RULING: <text>"`, owed → `write <ref> owed <text>` (empty
+# clears it). The adapter failing or absent, or DOC_TOOLS_LEDGER_OFFLINE=1:
+# exit 2, the reason named, no clean result. (The index shows a new owed
+# value of a hosted item from the list's next fetch: TTL or --refresh.)
+# Text: "<key|path>  <line>" ("<key|path>  comment: <text>" for a hosted
+# log or ruling; "<key|path>  owed: <text>" or "… owed: (cleared)"). JSON:
+# {ref, path, kind, line}; owed: {ref, path, kind, owed: <text>|null}. An
+# unknown item: exit 1 ({ref, path: null}); several: 3; an archived legacy
+# row: 3; the text missing, holding a line break, or blank (log, ruling): 3.
+
+# The placement (awk, after frontmatter.awk run with mode=lib: its trim,
+# fence_open, fence_close). -v head (the heading line), bom. Prints
+# "<found 0|1> <line to insert after> <lines> <crlf 0|1> <last line blank
+# 0|1>".
+# shellcheck disable=SC2016  # awk source
+_LG_AWK_NOTE='
+BEGIN {
+  H = trim(head); HL = 0
+  if (H ~ /^#+([ \t]|$)/) { match(H, /^#+/); HL = RLENGTH }
+  st = 0; found = 0; ins = 0; done = 0; cr = -1; nf = 0; last = ""
+}
+{
+  l = $0
+  if (NR == 1 && bom != "" && substr(l, 1, length(bom)) == bom) l = substr(l, length(bom) + 1)
+  if (cr < 0) cr = (l ~ /\r$/) ? 1 : 0
+  sub(/\r$/, "", l)
+  last = l
+  if (NR == 1 && l ~ /^---[ \t]*$/) { st = 1; next }
+  if (st == 1) { if (l ~ /^---[ \t]*$/) st = 2; next }
+  if (done) next
+  if (nf) { if (fence_close(l)) nf = 0; if (found) ins = NR; next }
+  if (fence_open(l)) { nf = 1; if (found) ins = NR; next }
+  lvl = 0
+  if (l ~ /^ ? ? ?#+([ \t]|$)/) { h = l; sub(/^ +/, "", h); match(h, /^#+/); if (RLENGTH <= 6) lvl = RLENGTH }
+  if (found) {
+    if (lvl > 0 && (HL == 0 || lvl <= HL)) { done = 1; next }
+    if (l ~ /[^ \t]/) ins = NR
+    next
+  }
+  if (trim(l) == H) { found = 1; ins = NR }
+}
+END { printf "%d %d %d %d %d\n", found, ins, NR, (cr > 0 ? 1 : 0), (last ~ /[^ \t]/ ? 0 : 1) }
+'
+
+# _lg_note_append <file> <heading> <line>: <line> under <heading> (see the
+# header), installed with _replace_file. Call in the main shell.
+_lg_note_append() {
+  local file="$1" hd="$2" line="$3" s found=0 ins=0 nr=0 cr=0 lastblank=0 eol=$'\n' finalnl=1
+  _lg_scratch_name
+  s=$_LG_SN
+  printf '%s\n' "$_LG_AWK_NOTE" > "$s.awk" || _lg_die "cannot write $s.awk"
+  LC_ALL=C awk -v mode=lib -v head="$hd" -v bom="$_LG_BOM" -f "$_LG_LIB/frontmatter.awk" -f "$s.awk" < "$file" > "$s.pos" 2> "$s.err" \
+    || _lg_die "cannot read $file: $(head -n 1 "$s.err")"
+  read -r found ins nr cr lastblank < "$s.pos" || _lg_die "internal: no placement for $file"
+  if [ "$cr" = 1 ]; then eol=$'\r\n'; fi
+  if [ -s "$file" ] && [ -n "$(tail -c 1 "$file")" ]; then finalnl=0; fi
+  _tmp_beside "$file"
+  {
+    if [ "$found" = 1 ]; then
+      if [ "$ins" -lt "$nr" ]; then
+        head -n "$ins" "$file" && printf '%s%s' "$line" "$eol" && tail -n +"$((ins + 1))" "$file"
+      elif [ "$finalnl" = 1 ]; then
+        cat -- "$file" && printf '%s%s' "$line" "$eol"
+      else
+        cat -- "$file" && printf '%s%s' "$eol" "$line"
+      fi
+    else
+      cat -- "$file"
+      if [ "$nr" -gt 0 ]; then
+        if [ "$finalnl" = 0 ]; then printf '%s' "$eol"; fi
+        if [ "$lastblank" = 0 ]; then printf '%s' "$eol"; fi
+      fi
+      printf '%s%s%s' "$hd" "$eol" "$line"
+      if [ "$finalnl" = 1 ]; then printf '%s' "$eol"; fi
+    fi
+  } > "$_TMP" || _lg_die "cannot write $_TMP"
+  _replace_file "$_TMP" "$file"
+}
+
+# _lg_note_owed <file> <text>: fields.owed's first candidate set to <text>,
+# or — <text> empty — every candidate removed (one fm-write.awk pass).
+_lg_note_owed() {
+  local file="$1" v="$2" s n first=""
+  _lg_scratch_name
+  s=$_LG_SN
+  _lg_cfg '.fields.owed | if type == "array" then .[] elif type == "string" then . else empty end | strings | select(. != "")' > "$s.on"
+  { IFS= read -r first; } < "$s.on" 2>/dev/null || true
+  if [ -z "$first" ]; then first=owed; printf 'owed\n' > "$s.on"; fi
+  _lg_fm_ops_reset
+  if [ -n "$v" ]; then
+    _lg_fm_op set "$first" "$v"
+  else
+    while IFS= read -r n; do _lg_fm_op del "$n"; done < "$s.on"
+  fi
+  _lg_fm_ops_apply "$file"
+}
+
+# shellcheck disable=SC2016  # jq source
+_LG_JQ_NOTE="$_LG_JQ_RESOLVE_DEFS"'
+lg_resolve($ref; $c[0]) as $R
+| if $R.r == "item" then
+    (first(.items[] | select(.path == $R.v)) as $I
+     | {r: "item", path: $I.path, key: ($I.key // ""), hosted: (($I.url | type) == "string")})
+  elif $R.r == "ambiguous" then {r: "ambiguous", v: ($R.v | join(", "))}
+  elif $R.r == "archived" then {r: "archived", v: $R.v}
+  else {r: "none"} end
+'
+
+# shellcheck disable=SC2154  # _OPT_*, _OPTSEEN_* and _ARGS are set by _parse_args
+cmd_ledger_note() {
+  local s n ref text kind a ix r hosted key v path id line="" today
+  _lg_init note
+  n=${#_ARGS[@]}
+  [ "$n" -ge 2 ] || _lg_usage "give an item and the text: ledger note <item> \"<text>\" [--kind log|ruling|owed]"
+  text=${_ARGS[$((n - 1))]}
+  ref=${_ARGS[0]}
+  if [ "$n" -gt 2 ]; then
+    # Several words before the text: one of the spaced forms ("L 14").
+    for a in "${_ARGS[@]:1:$((n - 2))}"; do ref="$ref $a"; done
+    _lg_k_multiword "$ref" || _lg_usage "give one item and one text (got $n arguments: quote the text)"
+  fi
+  [ -n "$ref" ] || _lg_usage "the item is empty"
+  kind=log
+  if [ -n "${_OPTSEEN_kind:-}" ]; then kind=$_OPT_kind; fi
+  case "$kind" in
+    log|ruling|owed) ;;
+    *) _lg_usage "--kind '$kind' is not log, ruling or owed" ;;
+  esac
+  case "$text" in
+    *[$'\n\r']*) _lg_usage "the text cannot hold a line break" ;;
+  esac
+  case "$text" in
+    *[![:space:]]*) ;;
+    *)
+      [ "$kind" = owed ] || _lg_usage "the text is empty"
+      text="" ;;
+  esac
+  _lg_scratch_name
+  s=$_LG_SN
+  ix=$(_lg_index) || exit "$?"
+  jq -c --arg ref "$ref" --slurpfile c "$_LG_CFG" "$_LG_JQ_NOTE" "$ix" > "$s.res" || _lg_die "jq failed (resolving '$ref')"
+  jq -r '.r, (.hosted // false), (.key // ""), (.v // "")' "$s.res" > "$s.f" || _lg_die "jq failed (resolving '$ref')"
+  { IFS= read -r r; IFS= read -r hosted; IFS= read -r key; IFS= read -r v; } < "$s.f" || true
+  case "$r" in
+    item) ;;
+    none)
+      if [ "$_LG_FORMAT" = json ]; then
+        jq -nc --arg r "$ref" --arg k "$kind" '{ref: $r, path: null, kind: $k}' > "$s.json" || _lg_die "jq failed (payload)"
+        _lg_emit note 1 "$s.json"
+      fi
+      printf "no item matches '%s'\n" "$ref" | tr -d '\000-\010\013-\037' | head -n 1 > "$s.msg"
+      _lg_out_file "$s.msg"
+      _lg_emit note 1 ;;
+    ambiguous) _lg_usage "'$ref' matches several items: $v" ;;
+    archived) _lg_usage "'$ref' is an archived legacy row ($v): there is no item to note" ;;
+    *) _lg_die "internal: ledger note: unexpected resolution '$r'" ;;
+  esac
+  path=$(jq -j '.path + "."' "$s.res") || _lg_die "jq failed (resolving '$ref')"
+  path=${path%.}
+  id=${key:-$path}
+  if [ "$hosted" = true ]; then
+    # A hosted item: through its adapter (ruling R2).
+    _lg_adapter_path items || _lg_die "hosted item $path: $_LG_ADP_ERR"
+    [ -n "$_LG_ADP" ] || _lg_die "hosted item $path: no items adapter (config items.adapter)"
+    if [ "${DOC_TOOLS_LEDGER_OFFLINE:-}" = 1 ]; then
+      _lg_die "hosted item $path: offline (DOC_TOOLS_LEDGER_OFFLINE=1): nothing written"
+    fi
+    case "$kind" in
+      log) line=$text; set -- note "$path" "$line" ;;
+      ruling) line="RULING: $text"; set -- note "$path" "$line" ;;
+      owed) set -- write "$path" owed "$text" ;;
+    esac
+    _lg_adapter items "$@" > "$s.aout" 2> "$s.aerr" || _lg_die "hosted item $path: $(head -n 1 "$s.aerr")"
+  else
+    [ -f "$path" ] || _lg_die "the item '$path' is not in the working tree"
+    case "$kind" in
+      log|ruling)
+        today=$(date +%Y-%m-%d) || _lg_die "date failed"
+        if [ "$kind" = log ]; then
+          a=$(_lg_cfg '.log_heading | if type == "string" and (test("\\S")) and (test("[\\n\\r]") | not) then . else "## Log" end') || exit "$?"
+          line="- $today $text"
+        else
+          a="## Rulings"
+          line="- $today RULING: $text"
+        fi
+        _lg_note_append "$path" "$a" "$line" ;;
+      owed) _lg_note_owed "$path" "$text" ;;
+    esac
+  fi
+  if [ "$_LG_FORMAT" = json ]; then
+    jq -nc --arg r "$ref" --arg p "$path" --arg k "$kind" --arg l "$line" --arg o "$text" \
+      '{ref: $r, path: $p, kind: $k} + (if $k == "owed" then {owed: (if $o == "" then null else $o end)} else {line: $l} end)' \
+      > "$s.json" || _lg_die "jq failed (payload)"
+    _lg_emit note 0 "$s.json"
+  fi
+  if [ "$kind" = owed ]; then
+    if [ -n "$text" ]; then line="owed: $text"; else line="owed: (cleared)"; fi
+  elif [ "$hosted" = true ]; then
+    line="comment: $line"
+  fi
+  printf '%s  %s\n' "$id" "$line" | tr -d '\000-\010\013-\037' > "$s.lines" || _lg_die "cannot write $s.lines"
+  _lg_out_file "$s.lines"
+  _lg_emit note 0
 }

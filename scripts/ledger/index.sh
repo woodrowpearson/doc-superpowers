@@ -5,7 +5,8 @@
 # + contracts adapter), each item's neighbours and re-check markers
 # (relations.sh, defs.jq lg_relations), the PR-derived statuses (in review,
 # merged: the PR adapter through the remote cache, the open heads, the
-# base's claims); cached under $_LG_CACHE.
+# base's claims), and the hosted items (config items.adapter, through the
+# remote cache: "Hosted items" below); cached under $_LG_CACHE.
 # Sourced by lib.sh; uses lib.sh's _lg_die, _lg_cfg, _lg_registry,
 # _lg_doc_index, _lg_src_cat, parse.sh's parsers and helpers, glob.sh's
 # _lg_globs_matching / _lg_glob_dirs, validate.sh's _lg_registry_findings,
@@ -30,7 +31,9 @@
 # Cache: $_LG_CACHE/index-<sha256>.json ($_LG_CACHE/rev/… for --rev, with
 # its own retention), the hash over the schema, the
 # code (every file of scripts/ledger/), the contracts adapter's output (or
-# its failure: it runs on every call; adapters.sh), the mode, HEAD and the base oid
+# its failure: it runs on every call; adapters.sh), the hosted items' copy
+# (its data hash: "items data <sha256>", or "items none" / "unconfigured"
+# / "skipped"), the mode, HEAD and the base oid
 # (--rev: neither — its base is the commit itself, and HEAD has no part in
 # it), the config, the shallow tag (_lg_ix_shallow: a deepened clone
 # has more history behind the same commits), and — never by walking the
@@ -832,7 +835,7 @@ def lg_item($F; $CT; $EX; $D; $L; $S; $DI; $terms):
      status: $status,
      class: $class,
      severity: (($fm | lg_fv($F; "severity")) | lg_str),
-     date: ($fd // $D[$r.path]),
+     date: ($fd // $D[$r.path] // $r.hdate),
      summary: (($fm | lg_fv($F; "summary")) | lg_str),
      changes: $R.changes,
      consumes: $R.consumes,
@@ -858,7 +861,8 @@ def lg_item($F; $CT; $EX; $D; $L; $S; $DI; $terms):
      inflight: [],
      neighbours: null,
      recheck_after: [],
-     fm_errors: ($r.fm_errors // [])};
+     fm_errors: ($r.fm_errors // [])}
+  + (if $r.hosted == true then {url: $r.url} else {} end);
 # lg_pr_apply($prs; $pcl; $bcl; $fmr), applied to the items (path-sorted):
 # the PR-derived statuses and .pr (see "PR data, head claims, base claims"
 # above). $prs the lines of the PR adapter; $pcl "<n>\t<kind>\t<value>" lines
@@ -1234,11 +1238,14 @@ _lg_ix_refs() {
 # exit 2.
 
 # _lg_ix_pr_note <text>: the run's one note on stderr ("ledger: …"), printed
-# once per run however many indexes it builds: <text> (the PR data's), then
+# once per run however many indexes it builds: the hosted items' note
+# ($_SCRATCH/lg-items.note, _lg_ix_items_prepare), <text> (the PR data's),
 # the in-flight scan's ($_SCRATCH/lg-ifl.note, inflight.sh _lg_ifl_note —
-# written before the index is built), "; " between.
+# written before the index is built), then its issue references no hosted
+# item maps (inflight.sh _lg_ifl_refs_note: known once the hosted items
+# are), "; " between.
 _lg_ix_pr_note() {
-  local x=""
+  local x="" h="" r="" t
   [ ! -f "$_SCRATCH/lg-pr.noted" ] || return 0
   # Held while the in-flight scan runs beside the build (inflight.sh
   # _lg_ifl_prepare_bg): its wait prints both.
@@ -1246,10 +1253,16 @@ _lg_ix_pr_note() {
     printf '%s\n' "$1" > "$_SCRATCH/lg-pr.held" || _lg_die "cannot hold the PR note"
     return 0
   fi
+  if [ -s "$_SCRATCH/lg-items.note" ]; then { IFS= read -r h < "$_SCRATCH/lg-items.note"; } 2>/dev/null || true; fi
   if [ -s "$_SCRATCH/lg-ifl.note" ]; then { IFS= read -r x < "$_SCRATCH/lg-ifl.note"; } 2>/dev/null || true; fi
-  [ -n "$1$x" ] || return 0
+  if [ -s "$_SCRATCH/lg-ifl.refs" ]; then r=$(_lg_ifl_refs_note) || exit "$?"; fi
+  t=$h
+  for h in "$1" "$x" "$r"; do
+    if [ -n "$h" ]; then t="${t:+$t; }$h"; fi
+  done
+  [ -n "$t" ] || return 0
   : > "$_SCRATCH/lg-pr.noted"
-  printf 'ledger: %s\n' "$1${1:+${x:+; }}$x" | tr -d '\000-\010\013-\037' >&2
+  printf 'ledger: %s\n' "$t" | tr -d '\000-\010\013-\037' >&2
 }
 
 # _lg_ix_pr_lines <pr-lines> <out>: "o\t<n>\t<head>" per open PR, "m\t<n>\t
@@ -1313,6 +1326,8 @@ _lg_ix_pr_prepare() {
       printf 'pr unconfigured\n' > "$p.prkey" || _lg_die "cannot write $p.prkey"
       printf '{"state":"unconfigured","as_of":null,"error":null}\n' > "$_SCRATCH/lg-pr.json" || _lg_die "cannot write the PR state"
       if ! : > "$_SCRATCH/lg-pr.prl" || ! : > "$_SCRATCH/lg-pr.heads"; then _lg_die "cannot write the PR data"; fi
+      # The run's note (the hosted items', the in-flight scan's) all the same.
+      _lg_ix_pr_note ""
       return 0
     fi
     _lg_cfg '(.keys.remote | if type == "string" and . != "" then . else "origin" end), ('"$_LG_RTTL_JQ"'),
@@ -1448,6 +1463,138 @@ _lg_ix_pr_prepare() {
     _lg_die "cannot copy the PR data"
   fi
   _lg_ix_pr_note "$note"
+}
+
+# --- Hosted items (design §G items; controller ruling R4) ---------------------------
+#
+# With config items.adapter (an absolute path, a path from the top level, or
+# doc-superpowers:<name> — adapters.sh _lg_adapter_path), the adapter's list
+# (one JSON line per hosted item: the items contract, adapters.sh) is read
+# through the remote cache (_lg_remote_cache items: cache.remote_ttl_minutes,
+# --refresh, DOC_TOOLS_LEDGER_OFFLINE=1) and joins the index (worktree and
+# --rev builds; --staged, the pre-commit path, never calls the adapter) as
+# items whose path is the adapter's ref, with their url — field-equivalent
+# to file items: each of the adapter's fields (logical names) under its
+# first candidate name (config fields), the status under fields.status's,
+# h1 the title, first_para the excerpt, the date fields.date else the day
+# of "updated"; no resolution (none is asked of a hosted item). Key and
+# alias uniqueness spans both kinds (validate --all reads the index).
+# The cache invariant (ruling R4): the index key carries the copy's data
+# hash ("items data <sha256>"), never its fetch time — a copy whose content
+# changed rebuilds the index; a refresh that changed nothing finds it.
+# A failing adapter (or DOC_TOOLS_LEDGER_OFFLINE=1 past the TTL): the last
+# good copy serves, marked "hosted items as of <UTC> (<age> old, stale)" in
+# the run's note and the views' header ($_SCRATCH/lg-items.mark); with no
+# copy there are no hosted items — "hosted items: — (unavailable)" in the
+# header and the note "hosted items unavailable (—): <why>". --refresh and
+# publish (_LG_REMOTE_FORCE=1) exit 2, and validate --all
+# (_LG_IX_NEED_ITEMS=1) with no copy; validate --all's note also says a
+# fresh copy was checked. JSON verbs carry "items_data" {state: fresh |
+# stale | offline | none, as_of, error} ($_SCRATCH/lg-items.json; query.sh
+# _lg_pr_data_into). With in-flight awareness on, $_SCRATCH/lg-items.refs
+# lists the "#<n>" that exactly one hosted ref ends in (inflight.sh: the
+# claims_by_ref note; the claims themselves map at join time).
+_LG_IX_HDATA=""
+_LG_IX_NEED_ITEMS=""
+
+# _lg_ix_items_prepare <prefix> <keys.remote> <TTL seconds>: the hosted
+# items for an index build: <prefix>.itemkey the key line, _LG_IX_HDATA the
+# copy (the cache's snapshot: its header line, then the adapter's lines;
+# "" with none), the mark, the note, items_data, the refs.
+_lg_ix_items_prepare() {
+  local p="$1" remote="$2" s rc=0 state err note="" mark="" url t n
+  _LG_IX_HDATA=""
+  : > "$_SCRATCH/lg-items.mark"
+  rm -f -- "$_SCRATCH/lg-items.note" "$_SCRATCH/lg-items.refs"
+  _lg_scratch_name
+  s=$_LG_SN
+  if _lg_adapter_path items; then
+    url=$(git config --get "remote.$remote.url" 2>/dev/null) || url=""
+    _LG_RTTL=$3
+    _lg_remote_cache items "$(printf 'items\n%s\n%s' "$_LG_ADP" "$url")" _lg_adapter items list || rc=$?
+    _LG_RTTL=""
+  else
+    rc=2
+    _LG_RSTATE=none
+    _LG_RERR=$_LG_ADP_ERR
+    _LG_RFETCHED=""
+  fi
+  state=$_LG_RSTATE
+  err=$_LG_RERR
+  if [ "$rc" != 0 ]; then
+    if [ "${_LG_REMOTE_FORCE:-}" = 1 ]; then
+      if [ "$state" = offline ]; then _lg_die "hosted items: $err"; fi
+      _lg_die "hosted items: the items adapter failed: $err"
+    fi
+    if [ "${_LG_IX_NEED_ITEMS:-}" = 1 ]; then
+      _lg_die "hosted items unavailable: ${err:-the items adapter failed} (no copy of the list to check)"
+    fi
+    printf 'items none\n' > "$p.itemkey" || _lg_die "cannot write $p.itemkey"
+    note="hosted items unavailable (—): ${err:-the items adapter failed}"
+    mark="hosted items: — (unavailable)"
+  else
+    _LG_IX_HDATA=$_LG_RSNAP
+    printf 'items data %s\n' "$_LG_RDSHA" > "$p.itemkey" || _lg_die "cannot write $p.itemkey"
+    if [ "$state" = stale ] || [ "$state" = offline ] || [ "${_LG_IX_NEED_ITEMS:-}" = 1 ]; then
+      # shellcheck disable=SC2016  # jq source
+      t=$(jq -nr --argjson t "$_LG_RFETCHED" --argjson a "$_LG_RAGE" --arg st "$state" '
+        ($t | strftime("%Y-%m-%d %H:%M UTC"))
+        + (if $st == "fresh" then ""
+           else " (" + (if $a < 3600 then "\($a / 60 | floor) min" elif $a < 172800 then "\($a / 3600 | floor) h"
+                       else "\($a / 86400 | floor) d" end) + " old, stale)" end)') || _lg_die "jq failed (the hosted items' age)"
+      if [ "$state" = fresh ]; then
+        n=$(tail -n +2 "$_LG_IX_HDATA" | grep -c .) || n=0
+        note="hosted items: $n checked from a fresh copy (as of $t)"
+      else
+        mark="hosted items as of $t"
+        if [ "$state" = offline ]; then
+          note="$mark — $err"
+          err=""
+        else
+          note="$mark — the items adapter failed: ${err:-?}"
+        fi
+      fi
+    fi
+  fi
+  printf '%s\n' "$mark" > "$_SCRATCH/lg-items.mark" || _lg_die "cannot write the hosted items' mark"
+  if [ -n "$note" ]; then printf '%s\n' "$note" > "$_SCRATCH/lg-items.note" || _lg_die "cannot write the hosted items' note"; fi
+  if [ "$state" = fresh ] && [ -z "$err" ]; then
+    # (the common case, without a jq)
+    printf '{"state":"fresh","as_of":%s,"error":null}\n' "$_LG_RFETCHED" > "$_SCRATCH/lg-items.json" \
+      || _lg_die "cannot write the hosted items' state"
+  else
+    jq -nc --arg st "$state" --arg t "${_LG_RFETCHED:-}" --arg e "$err" \
+      '{state: $st, as_of: (if $t == "" then null else ($t | tonumber) end), error: (if $e == "" then null else $e end)}' \
+      > "$_SCRATCH/lg-items.json" || _lg_die "cannot write the hosted items' state"
+  fi
+  # The in-flight claims_by_ref note (inflight.sh _lg_ifl_refs_note): the
+  # "#<n>" exactly one hosted ref ends in.
+  if [ "${_LG_IFL_ON:-0}" = 1 ]; then
+    if [ -n "$_LG_IX_HDATA" ]; then
+      # (the snapshot's header line has no ref)
+      jq -r '.ref | strings | capture("(?<n>#[0-9]+)$").n' "$_LG_IX_HDATA" > "$s.hrefs" || _lg_die "jq failed (the hosted refs)"
+      LC_ALL=C sort "$s.hrefs" | uniq -u > "$_SCRATCH/lg-items.refs" || _lg_die "cannot write the hosted refs"
+    else
+      : > "$_SCRATCH/lg-items.refs" || _lg_die "cannot write the hosted refs"
+    fi
+  fi
+}
+
+# _lg_ix_items_recs <snapshot> <recs>: the hosted items (the cache
+# snapshot's lines after its header) as parse records (one ref once: the
+# first line), appended to <recs>.
+_lg_ix_items_recs() {
+  # shellcheck disable=SC2016  # jq source
+  jq -L "$_LG_LIB" -s -c --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS"'
+    lg_fields($c[0]) as $F
+    | (($F.status // [])[0] // "status") as $stn
+    | reduce .[1:][] as $h ({s: {}, o: []}; if .s[$h.ref] then . else .s[$h.ref] = true | .o += [$h] end)
+    | .o[]
+    | {path: .ref, hosted: true, url: .url,
+       hdate: (.updated | if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}") then .[0:10] else null end),
+       fm: (((.fields // {}) | with_entries(.key as $k | .key = ((($F[$k] // [])[0]) // $k))) + {($stn): .status}),
+       fm_errors: (.fm_errors // []), h1: .title, first_para: .body_excerpt, resolution: null, log: false}' "$1" >> "$2" \
+    || _lg_die "jq failed (the hosted items)"
 }
 
 # _lg_ix_claim_trailers <out>: config trailers.claims and claims_by_path as
@@ -1618,7 +1765,7 @@ _lg_ix_pr_claims() {
 # finalized map), an unknown revision, or a git failure.
 _lg_index() {
   local mode=worktree rev="" src commit="" tree="" head base_ref="" base="" s reg di key name tmp rfn f n relpid
-  local legacy_path="" dcommit usemtime ixdir
+  local legacy_path="" dcommit usemtime ixdir items="" iremote="" ittl=""
   case "$#" in
     0) ;;
     1) [ "$1" = --staged ] || _lg_die "internal: _lg_index: unknown argument '$1'"; mode=staged ;;
@@ -1640,9 +1787,13 @@ _lg_index() {
       tree=$(git rev-parse -q --verify "$commit^{tree}") || _lg_die "cannot read the tree of $rev"
       src=$commit; dcommit=$commit; usemtime=0 ;;
   esac
-  # One jq over the config: the base ref, the legacy map's path.
-  _lg_cfg '(.base | if type == "string" then . else "" end), (.legacy | if type == "string" then . else "" end)' > "$s.cfgv"
-  { IFS= read -r base_ref; IFS= read -r legacy_path; } < "$s.cfgv" || true
+  # One jq over the config: the base ref, the legacy map's path, whether an
+  # items adapter is named, keys.remote and the remote TTL (the hosted
+  # items' cache: _lg_ix_items_prepare).
+  _lg_cfg '(.base | if type == "string" then . else "" end), (.legacy | if type == "string" then . else "" end),
+    (.items | if type == "object" and .adapter != null and .adapter != "" then "1" else "" end),
+    (.keys.remote | if type == "string" and . != "" then . else "origin" end), ('"$_LG_RTTL_JQ"')' > "$s.cfgv"
+  { IFS= read -r base_ref; IFS= read -r legacy_path; IFS= read -r items; IFS= read -r iremote; IFS= read -r ittl; } < "$s.cfgv" || true
   case "$base_ref" in
     -*|'') ;;
     *) base=$(git rev-parse -q --verify "$base_ref^{commit}" 2>/dev/null) || base="" ;;
@@ -1673,6 +1824,18 @@ _lg_index() {
   # The PR data (worktree and --rev; --staged, which only validate reads,
   # has none): the adapter's list through the remote cache, the open
   # and merged heads' oids — all in the key.
+  # The hosted items (config items.adapter; worktree and --rev — --staged,
+  # the pre-commit path, never calls the adapter): its list through the
+  # remote cache, in the key by the copy's data hash.
+  _LG_IX_HDATA=""
+  if [ "$mode" = staged ]; then
+    printf 'items skipped\n' > "$s.itemkey"
+  elif [ -z "$items" ]; then
+    printf 'items unconfigured\n' > "$s.itemkey"
+    rm -f -- "$_SCRATCH/lg-items.json" "$_SCRATCH/lg-items.note" "$_SCRATCH/lg-items.mark" "$_SCRATCH/lg-items.refs"
+  else
+    _lg_ix_items_prepare "$s" "$iremote" "$ittl"
+  fi
   if [ "$mode" = staged ]; then
     : > "$s.prl"
     : > "$s.prheads"
@@ -1703,7 +1866,7 @@ _lg_index() {
   {
     printf 'schema %s\nmode %s\nhead %s\nrev %s\ntree %s\nbase %s\nlegacy %s\nshallow %s\n' \
       "$_LG_INDEX_SCHEMA" "$mode" "$head" "$commit" "$tree" "$base" "$legacy_path" "$_LG_SHALLOW"
-    cat "$s.smalls"
+    cat "$s.smalls" "$s.itemkey"
     printf 'inputs: code (scripts/ledger/*), config, contracts adapter (output, error), PR key, PR data[, listing[, the present small files]]\n'
     cat "$s.hashes"
   } > "$s.key" || _lg_die "cannot write the index key"
@@ -1751,6 +1914,8 @@ _lg_index() {
   else
     _lg_parse_blobs "$commit" "$s.itemz" "$s.recs"
   fi
+  # The hosted items, as parse records (path = the adapter's ref).
+  if [ -n "$_LG_IX_HDATA" ]; then _lg_ix_items_recs "$_LG_IX_HDATA" "$s.recs"; fi
   # The relations (needing only the records and the contracts) run in the
   # background meanwhile.
   jq -L "$_LG_LIB" -n -r --slurpfile c "$_LG_CFG" --slurpfile recs "$s.recs" --slurpfile ctr "$s.contracts" \

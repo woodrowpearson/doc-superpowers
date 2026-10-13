@@ -1,14 +1,15 @@
 # shellcheck shell=bash
 # scripts/ledger/adapters.sh — the ledger's adapters (design §G): executables
-# named in config "adapters" that read a host's systems for the ledger, and
-# the remote cache (_lg_remote_cache, below) that keeps what they read from
-# the network for cache.remote_ttl_minutes.
+# named in config "adapters" (and "items": {"adapter"}) that read a host's
+# systems for the ledger, and the remote cache (_lg_remote_cache, below)
+# that keeps what they read from the network for cache.remote_ttl_minutes.
 # Sourced by lib.sh; uses lib.sh's _lg_cfg, _LG_ROOT and parse.sh's
 # _lg_scratch_name; doc-tools.sh's SCRIPT_DIR (the scripts/ directory of the
 # running copy — the plugin's, or a vendored copy's).
 #
-# _lg_adapter <name> <args…>: run adapters.<name> with <args>, from the top
-# level, stdin closed. The value is
+# _lg_adapter <name> <args…>: run adapters.<name> (for <name> "items":
+# config items.adapter) with <args>, from the top level, stdin closed. The
+# value is
 #   - an absolute path,
 #   - a path relative to the top level of the work tree, or
 #   - "doc-superpowers:<adapter>" → $SCRIPT_DIR/adapters/<adapter>.sh, the
@@ -34,22 +35,31 @@
 #                    the base's own claims). The reference adapter,
 #                    scripts/adapters/ledger-pr-gh.sh, adds "merge_commit";
 #                    state open | merged | closed
-# Other subcommands (contracts resolve <id>: exit 0/1) are not checked: the
-# caller reads the exit status (_lg_adapter_rc).
+#   items list       "ref" a string without whitespace, "url" a non-empty
+#                    string (the index tells a hosted item by it), "status"
+#                    a string, "fields" an object; "title", "body_excerpt"
+#                    and "updated", when present, a string or null;
+#                    "labels" and "fm_errors", when present, lists of
+#                    strings. The reference adapter is
+#                    scripts/adapters/ledger-items-gh.sh (GitHub issues)
+# Other subcommands (contracts resolve <id>: exit 0/1; items write <ref>
+# <field> <value>, items note <ref> <text>) are not checked: the caller
+# reads the exit status (_lg_adapter_rc, or _lg_adapter's 0 / 2).
 
-# _lg_adapter_path <name>: the executable adapters.<name> names into
-# _LG_ADP ("" when the config names none); rc 2 with a message in
-# _LG_ADP_ERR when the value cannot be one.
+# _lg_adapter_path <name>: the executable adapters.<name> names (for
+# "items": items.adapter) into _LG_ADP ("" when the config names none); rc 2
+# with a message in _LG_ADP_ERR when the value cannot be one.
 # shellcheck disable=SC2153  # _LG_ROOT: lib.sh's _lg_init
 _lg_adapter_path() {
-  local name="$1" v
+  local name="$1" v key path
   _LG_ADP=""
   _LG_ADP_ERR=""
-  v=$(_lg_cfg ".adapters[\"$name\"] // null | if . == null then \"\" elif type == \"string\" then \"s\" + . else \"!\" + tojson end") || exit "$?"
+  if [ "$name" = items ]; then key=items.adapter; path='.items.adapter'; else key="adapters.$name"; path=".adapters[\"$name\"]"; fi
+  v=$(_lg_cfg "($path)"' // null | if . == null then "" elif type == "string" then "s" + . else "!" + tojson end') || exit "$?"
   case "$v" in
     '') return 0 ;;
     s) return 0 ;;
-    '!'*) _LG_ADP_ERR="config adapters.$name is not a path: ${v#!}"; return 2 ;;
+    '!'*) _LG_ADP_ERR="config $key is not a path: ${v#!}"; return 2 ;;
   esac
   v=${v#s}
   case "$v" in
@@ -57,7 +67,7 @@ _lg_adapter_path() {
       local a=${v#doc-superpowers:}
       case "$a" in
         ''|*[!abcdefghijklmnopqrstuvwxyz0123456789_-]*)
-          _LG_ADP_ERR="config adapters.$name: '$v' does not name a doc-superpowers adapter ([a-z0-9_-]+)"
+          _LG_ADP_ERR="config $key: '$v' does not name a doc-superpowers adapter ([a-z0-9_-]+)"
           return 2 ;;
       esac
       _LG_ADP="$SCRIPT_DIR/adapters/$a.sh" ;;
@@ -65,7 +75,7 @@ _lg_adapter_path() {
     *) _LG_ADP="$_LG_ROOT/$v" ;;
   esac
   if [ ! -f "$_LG_ADP" ]; then
-    _LG_ADP_ERR="adapter $name: no such file: $_LG_ADP (config adapters.$name '$v')"
+    _LG_ADP_ERR="adapter $name: no such file: $_LG_ADP (config $key '$v')"
     return 2
   fi
   if [ ! -x "$_LG_ADP" ]; then
@@ -84,6 +94,12 @@ _LG_ADAPTER_REQ_contracts='(.id | type == "string" and test("\\A[a-z][a-z0-9_-]*
   and ((has("title") | not) or .title == null or (.title | type) == "string")'
 # shellcheck disable=SC2016  # jq source
 _LG_ADAPTER_REQ_pr='has("number") and has("head") and has("state") and has("url")'
+# shellcheck disable=SC2016  # jq source
+_LG_ADAPTER_REQ_items='(.ref | type == "string" and test("\\A[^\\s]+\\z"))
+  and (.url | type == "string" and . != "")
+  and (.status | type == "string") and (.fields | type == "object")
+  and all(.title, .body_excerpt, .updated; . == null or type == "string")
+  and all(.labels, .fm_errors; . == null or (type == "array" and all(.[]; type == "string")))'
 
 _lg_adapter() {
   local name="$1" s rc=0 req=""
@@ -102,6 +118,7 @@ _lg_adapter() {
     case "$name" in
       contracts) req=$_LG_ADAPTER_REQ_contracts ;;
       pr) req=$_LG_ADAPTER_REQ_pr ;;
+      items) req=$_LG_ADAPTER_REQ_items ;;
     esac
   fi
   [ -n "$req" ] || { cat -- "$s.aout"; return 0; }

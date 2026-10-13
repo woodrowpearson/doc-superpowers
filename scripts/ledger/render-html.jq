@@ -46,7 +46,7 @@ def row($K):
   "<tr data-ledger=\"\(.ledger | h)\" data-sev=\"\((lg_v_sev($c[0]) // "-") | h)\" data-class=\"\(.class | h)\""
   + " data-inflight=\"\((.inflight // []) | length)\" data-q=\"\(search_text | @html)\">"
   + "<td class=\"key\">\((.key // "—") | h)</td>"
-  + "<td>\(link(lg_q_stem | lg_q_cut(48); .path))</td>"
+  + "<td>\(link(lg_q_stem | lg_q_cut(48); .url // .path))</td>"
   + "<td>\((.summary // "—") | h)</td>"
   + "<td>\(sev_chip($K))</td>"
   + "<td>\(doc_cell(.docs.spec // []))</td>"
