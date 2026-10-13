@@ -50,7 +50,8 @@
 #     of the metadata block is rewritten (scripts/ledger/fm-write.awk: the
 #     frontmatter quoting; an empty value removes it), the rest of the block
 #     and of the body kept byte for byte; a body without a block gets one at
-#     its end. gh issue view, then gh issue edit --body-file. Refused
+#     its end (after the closing line of a fence the body ends inside).
+#     gh issue view, then gh issue edit --body-file. Refused
 #     (exit 3): a value holding "-->" or "--!>" (it would close the HTML
 #     comment early), a line break, or — for ledger and severity, which
 #     are joined into gh's comma-separated label lists — a comma.
@@ -115,7 +116,19 @@ JQ_BLOCK='def blk:
         | capture("^(?<open> {0,3}<!-- doc-superpowers-ledger[ \t]*(\r?\n)?)(?<blk>[\\s\\S]*?)(?<close>-->)(?<post>[\\s\\S]*)")
         | {pre: (($L[0:$s] | join("\n")) + (if $s > 0 then "\n" else "" end)), open, blk, close, post}
       end
-    end;'
+    end;
+# openfence: the line that closes the fence the body ends inside (its
+# character, as long a run as the opener), or "" when it ends outside one.
+def openfence:
+  reduce (split("\n")[] | sub("\r$"; "")) as $t (null;
+    . as $f
+    | if $f != null then
+        (if ($t | test("^ {0,3}" + $f.c + "{" + ($f.n | tostring) + ",}[ \t]*$")) then null else $f end)
+      elif ($t | test("^ {0,3}(```|~~~)")) then
+        ($t | capture("^ {0,3}(?<c>`+|~+)(?<r>.*)$")) as $m
+        | if ($m.c[0:1] == "`" and ($m.r | test("`"))) then null else {c: $m.c[0:1], n: ($m.c | length)} end
+      else null end)
+  | if . == null then "" else .c * .n end;'
 
 # ref_num <ref>: the issue number of gh#<n> into N; usage (3) otherwise.
 ref_num() {
@@ -261,7 +274,7 @@ write_label() {
 
 # write_block <n> <field> <value>: the metadata block's <field> line.
 write_block() {
-  local n="$1" f="$2" v="$3" eol=$'\n' has st op part
+  local n="$1" f="$2" v="$3" eol=$'\n' has st op part fence
   gh_view "$n" body "$TMPD/view.json"
   jq -j '.body // "" | if type == "string" then . else "" end' "$TMPD/view.json" > "$TMPD/body" || die "cannot read the body of #$n"
   # shellcheck disable=SC2016  # jq source
@@ -305,6 +318,15 @@ write_block() {
     case "$(tail -c 1 "$TMPD/open")" in '') ;; *) printf '%s' "$eol" >> "$TMPD/open" ;; esac
     cat "$TMPD/pre" "$TMPD/open" "$TMPD/newblk" "$TMPD/close" "$TMPD/post" > "$TMPD/newbody" || die "cannot write the new body"
   else
+    # A body that ends inside an open fence gets its closing line first
+    # (GitHub renders the fence closed there already), so the block is
+    # outside it.
+    fence=$(jq -r "$JQ_BLOCK"'(.body // "") | if type == "string" then openfence else "" end' "$TMPD/view.json") \
+      || die "cannot read the body of #$n"
+    if [ -n "$fence" ]; then
+      case "$(tail -c 1 "$TMPD/body")" in '') fence="$fence$eol" ;; *) fence="$eol$fence$eol" ;; esac
+      printf '%s' "$fence" >> "$TMPD/body" || die "cannot write the body"
+    fi
     {
       cat "$TMPD/body"
       if [ -s "$TMPD/body" ]; then
