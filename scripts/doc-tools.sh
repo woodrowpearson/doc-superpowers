@@ -11829,19 +11829,33 @@ _lg_fail() {
 }
 
 # _lg_kill_tree <pid>: SIGTERM to <pid> and every process descending from
-# it (one `ps`; deepest first), bash 3.2-safe (no pkill -P walk).
-_lg_kill_tree() {
-  local pids
-  pids=$(ps -e -o pid= -o ppid= 2>/dev/null | awk -v r="$1" '
+# it, bash 3.2-safe (one `ps` walk, no pkill -P). The tree is frozen first
+# (SIGSTOP), walked again for anything forked before the freeze landed (git
+# fetch starts its ssh transport twice: a probe, then the connection — a
+# parent still running when its child dies would start the next one, which
+# no walk saw), then SIGTERM and SIGCONT to all of it.
+_lg_tree_pids() {
+  ps -e -o pid= -o ppid= 2>/dev/null | awk -v r="$1" '
     { P[$1] = $2 }
     END {
       n = 1; Q[1] = r; S[r] = 1
       for (i = 1; i <= n; i++) for (p in P) if (P[p] == Q[i] && !(p in S)) { S[p] = 1; Q[++n] = p }
-      for (i = n; i >= 1; i--) printf "%s ", Q[i]
-    }') || pids=$1
+      for (i = 1; i <= n; i++) printf "%s ", Q[i]
+    }'
+}
+_lg_kill_tree() {
+  local pids more
+  pids=$(_lg_tree_pids "$1") || pids=$1
   [ -n "$pids" ] || pids=$1
-  # shellcheck disable=SC2086  # a list of pids
-  kill -TERM $pids 2>/dev/null || true
+  # shellcheck disable=SC2086  # lists of pids
+  kill -STOP $pids 2>/dev/null || true
+  more=$(_lg_tree_pids "$1") || more=""
+  # shellcheck disable=SC2086
+  kill -STOP $more 2>/dev/null || true
+  # shellcheck disable=SC2086
+  kill -TERM $pids $more 2>/dev/null || true
+  # shellcheck disable=SC2086
+  kill -CONT $pids $more 2>/dev/null || true
 }
 
 # The EXIT trap's verdict for a ledger run that printed none (a set -u
