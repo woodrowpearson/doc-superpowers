@@ -39,8 +39,8 @@
 #   per segment of views.branch: the hosted blob view resolves them).
 #
 # $generated (render-md.jq): the header's source ("the working tree at
-# <short HEAD>" / "<base>@<short-sha>"), the in-flight branch count (0
-# until the in-flight scan exists), the UTC time, the PR data note (view:
+# <short HEAD>" / "<base>@<short-sha>"), the in-flight branch count (the
+# scan's, inflight.sh; 0 when in-flight awareness is off), the UTC time, the PR data note (view:
 # "PR data as of <UTC> (<age> old)" when the PR adapter failed and its
 # last copy serves, "PR data: — (unavailable)" when there is none;
 # publish fetches the PR list and fails, exit 2, without it), the recency cutoff
@@ -49,12 +49,13 @@
 # directories; for view, also today for each modified or untracked item
 # file), and the link prefix.
 
-# _lg_v_generated <commit> <dirty 0|1> <source> <link> <out> [pr-note]:
-# write the $generated object (see the header) to <out>; [pr-note] the PR
-# data's state for the header ("PR data as of …", "PR data: —"; index.sh
-# writes it to $_SCRATCH/lg-pr.mark), "" when fresh or not configured.
+# _lg_v_generated <commit> <dirty 0|1> <source> <link> <out> [pr-note]
+# [in-flight count]: write the $generated object (see the header) to <out>;
+# [pr-note] the PR data's state for the header ("PR data as of …", "PR
+# data: —"; index.sh writes it to $_SCRATCH/lg-pr.mark), "" when fresh or
+# not configured; [in-flight count] the branches in flight (_lg_v_ifl).
 _lg_v_generated() {
-  local commit="$1" dirty="$2" source="$3" link="$4" out="$5" prnote="${6:-}" s days at cutoff today d e xy p since
+  local commit="$1" dirty="$2" source="$3" link="$4" out="$5" prnote="${6:-}" ifl="${7:-0}" s days at cutoff today d e xy p since
   local specs=()
   _lg_scratch_name
   s=$_LG_SN
@@ -108,12 +109,29 @@ _lg_v_generated() {
       printf '%s\t%s\n' "$today" "${p//$'\n'/$'\001'}"
     done < "$s.st" >> "$s.touch"
   fi
-  jq -n -R -c --arg source "$source" --arg at "$at" --arg cutoff "$cutoff" --arg link "$link" --arg pr "$prnote" '
-    {source: $source, inflight: 0, at: $at, cutoff: $cutoff, link: $link, pr_note: $pr,
+  jq -n -R -c --arg source "$source" --arg at "$at" --arg cutoff "$cutoff" --arg link "$link" --arg pr "$prnote" \
+    --argjson ifl "$ifl" '
+    {source: $source, inflight: $ifl, at: $at, cutoff: $cutoff, link: $link, pr_note: $pr,
      touched: (reduce (inputs | select(length > 11)) as $l ({};
        ($l[11:] | gsub("\u0001"; "\n")) as $p | $l[0:10] as $d
        | if (.[$p] // "") < $d then .[$p] = $d else . end))}' "$s.touch" > "$out" \
     || _lg_die "jq failed (\$generated)"
+}
+
+# _lg_v_ifl <index>: the index the views render — <index> with the
+# in-flight overlay applied (inflight.sh; one jq pass: defs.jq
+# lg_ifl_apply), or <index> itself when nothing is in flight — into
+# _LG_V_IX, and the number of branches in flight into _LG_V_IFLN. Needs
+# _lg_ifl_prepare.
+_lg_v_ifl() {
+  _LG_V_IX=$1
+  _LG_V_IFLN=0
+  _lg_ifl_overlay "$1"
+  [ -n "$_LG_IFL_OV" ] || return 0
+  _LG_V_IFLN=$(wc -l < "$_LG_IFL_SCAN" | tr -d ' ')
+  _LG_V_IX="$_SCRATCH/lg-views-index.json"
+  jq -L "$_LG_LIB" -c --slurpfile ifl "$_LG_IFL_OV" "$_LG_JQ_INCLUDE"'lg_ifl_apply($ifl[0])' "$1" > "$_LG_V_IX" \
+    || _lg_die "jq failed (the in-flight overlay)"
 }
 
 # _lg_v_ledger_ids <index>: the ledgers the views show (defs.jq
@@ -185,7 +203,11 @@ cmd_ledger_view() {
   _lg_scratch_name
   s=$_LG_SN
   _LG_IX_NEED_CONTRACTS=1
+  _lg_ifl_prepare 0
   ix=$(_lg_index)
+  _lg_ifl_index_note
+  _lg_v_ifl "$ix"
+  ix=$_LG_V_IX
   _lg_v_ledger_ids "$ix" > "$s.ids"
   if [ "$target" != all ] && ! grep -Fqx -- "$target" "$s.ids"; then
     ids=$(tr '\n' ',' < "$s.ids" | sed 's/,$//; s/,/, /g')
@@ -195,7 +217,7 @@ cmd_ledger_view() {
   link=$(jq -nr --arg r "$_LG_ROOT" '$r | split("/") | map(@uri) | join("/") + "/"') || _lg_die "jq failed (the link prefix)"
   gen="$s.gen"
   _lg_v_generated "$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null || true)" 1 \
-    "the working tree at ${head:-(no commit)}" "$link" "$gen" "$(cat "$_SCRATCH/lg-pr.mark" 2>/dev/null || true)"
+    "the working tree at ${head:-(no commit)}" "$link" "$gen" "$(cat "$_SCRATCH/lg-pr.mark" 2>/dev/null || true)" "$_LG_V_IFLN"
   stage=$(mktemp -d "$_SCRATCH/lg-view.XXXXXX") || _lg_die "mktemp failed"
   _lg_v_render "$ix" "$gen" "$target" "$md" "$html" "$stage"
   mkdir -p -- "$out" 2>/dev/null || _lg_die "cannot create $out"
@@ -322,18 +344,23 @@ cmd_ledger_publish() {
     || _lg_die "the base $base_name ($short) has no docs/ledger/config.json — nothing to publish"
   _lg_cfg_from_rev "$base"
   _LG_IX_NEED_CONTRACTS=1
-  # The PR list is fetched now (no stale copy is published).
+  # The PR list and the in-flight refs are fetched now (no stale copy is
+  # published); the in-flight scan (the base commit's config) runs first.
+  _lg_ifl_prepare 1
   _LG_REMOTE_FORCE=1
   ix=$(_lg_index --rev "$base")
+  _lg_ifl_index_note
+  _lg_v_ifl "$ix"
+  ix=$_LG_V_IX
   gen="$s.gen"
-  _lg_v_generated "$base" 0 "$base_name@$short" "$link" "$gen" ""
+  _lg_v_generated "$base" 0 "$base_name@$short" "$link" "$gen" "" "$_LG_V_IFLN"
   at=$(jq -r '.at' "$gen") || _lg_die "jq failed"
   html=$(_lg_cfg 'if .views.html == false then 0 else 1 end')
   stage="$_SCRATCH/lg-publish"
   mkdir -p -- "$stage" || _lg_die "mkdir failed"
   _lg_v_render "$ix" "$gen" all 1 "$html" "$stage"
 
-  msg="views @ $base_name@$short, 0 in-flight branches, $at"
+  msg="views @ $base_name@$short, $_LG_V_IFLN in-flight branches, $at"
   if [ "$dry" = 1 ]; then
     out="$_LG_CACHE/publish-dry-run"
     rm -rf -- "$out"

@@ -73,6 +73,45 @@ def lg_q_row($lead):
   {lead: $lead, id: lg_q_id, sev: ((.severity // "—") | lg_q_one),
    d: (lg_q_display | lg_q_cut(24)), s: ((.summary // "") | lg_q_one | lg_q_cut(72))};
 
+# --- In flight (inflight.sh's overlay, applied at query time) ------------------
+#
+# lg_ifl_apply($ov), applied to the index: $ov the overlay object
+# ({branches: [{branch, name, host, own, sources, oid, pr, …}], claims:
+# {<item path>: [branch index…]}}; null or anything else: the index as it
+# is). Each claimed item gets .inflight [{branch, name, host (null: this
+# host's), sources, oid, pr (number|null)}] by branch; an open (or
+# unknown-class) item whose derived status ranks below "on branch"
+# (planned, spec'd, not started) becomes "in review #<n>" when a claiming
+# branch has an open PR (the highest number; .pr set when it was null),
+# else "on branch <b>" (the first claiming branch: <name>, or
+# <name>@<host> for another host's).
+def lg_ifl_apply($ov):
+  if ($ov | type) != "object" or (($ov.claims // {}) | length) == 0 then .
+  else
+    ($ov.branches // []) as $B
+    | $ov.claims as $C
+    | lg_status_labels as $SL
+    | .items |= map(
+        ($C[.path] // null) as $ix
+        | if $ix == null then .
+          else
+            ([$ix[] | $B[.] | {branch, name, host: (if .own then null else .host end), sources, oid, pr: (.pr.number // null)}]
+             | sort_by(.branch)) as $IF
+            | .inflight = $IF
+            | if (.class == "open" or .class == "unknown")
+                 and (.derived.status == $SL.planned or .derived.status == $SL.specd or .derived.status == $SL.not_started)
+              then
+                ([$ix[] | $B[.].pr | objects] | sort_by(.number) | last) as $p
+                | if $p != null then .derived = {status: $SL.in_review, detail: ($p.number | tostring)} | .pr = (.pr // $p)
+                  else .derived = {status: $SL.on_branch, detail: $IF[0].branch} end
+              else . end
+          end)
+  end;
+# lg_ifl_lines: an item's in-flight claims as text, "<branch> (<sources>
+# [@<host>], PR #<n>|no PR)" each.
+def lg_ifl_lines:
+  [(.inflight // [])[] | "\(.branch) (\(.sources | join(","))\(if .host == null then "" else "@\(.host)" end), \(if .pr == null then "no PR" else "PR #\(.pr)" end))"];
+
 # --- Related work (index.sh, relations.sh, query.sh, the renderers) ------------
 #
 # Design §F.1. Through contracts: A is upstream of B when A.changes ∩

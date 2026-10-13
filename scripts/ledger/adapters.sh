@@ -40,6 +40,7 @@
 # _lg_adapter_path <name>: the executable adapters.<name> names into
 # _LG_ADP ("" when the config names none); rc 2 with a message in
 # _LG_ADP_ERR when the value cannot be one.
+# shellcheck disable=SC2153  # _LG_ROOT: lib.sh's _lg_init
 _lg_adapter_path() {
   local name="$1" v
   _LG_ADP=""
@@ -163,6 +164,7 @@ _lg_adapter_rc() {
 #   _LG_RFETCHED its fetch time (epoch seconds; "" with none)
 #   _LG_RERR    the failure's first stderr line, or "offline:
 #               DOC_TOOLS_LEDGER_OFFLINE=1" when forced offline ("" else)
+#   _LG_RNOW    the time it judged the copy's age by (epoch seconds)
 # The file is $_LG_CACHE/remote/<name>-<the first 16 hex of the sha256 of
 # <key-material>>.json: line 1 {"schema":"ledger-remote/1","fetched_at":
 # <epoch s>,"data_sha256":"<hex>","name":"<name>"}, then the producer's
@@ -208,6 +210,7 @@ _lg_remote_cache() {
   [ -n "$ttl" ] || ttl=$(_lg_cfg "$_LG_RTTL_JQ")
   case "$ttl" in ''|*[!0123456789]*) ttl=600 ;; esac
   now=$(date +%s) || _lg_die "date failed"
+  _LG_RNOW=$now
   # The copy, snapshotted once: its header's fetch time and data hash (a
   # file that does not start with the header, or that vanished, is no copy).
   t=""

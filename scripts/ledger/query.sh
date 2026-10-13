@@ -13,7 +13,8 @@
 #         changes·consumes·relates, and — when present — the neighbours
 #         ("upstream: <key> (<via>), …", downstream, siblings; relations.sh),
 #         the re-check markers ("re-check: <key> landed, <contract>
-#         changed"), files, aliases,
+#         changed"), the in-flight claims ("in flight: <branch>
+#         (<sources>[@<host>], PR #<n>|no PR)", inflight.sh), files, aliases,
 #         superseded by, owed, the first resolution line (a terminal item:
 #         fixed / closed / won't fix class; "(none)" when it has none) and
 #         the first frontmatter error. Lists show 3 entries and "+N more".
@@ -62,12 +63,21 @@ _lg_q_status_label() {
 
 # _lg_q_run <program> <out> [jq args…]: run a query program over the index
 # (raw output into <out>); its first line is "ok" or "<problem>\t<detail>",
-# which is left in _LG_QHEAD — the rest of <out> stays.
+# which is left in _LG_QHEAD — the rest of <out> stays. With in-flight
+# awareness on (inflight.sh), the scan runs beside the index build (its
+# notes join the index's one stderr note) and the overlay is applied to
+# the index in the same jq pass (defs.jq lg_ifl_apply) — the index itself
+# never depends on a branch tip.
 _lg_q_run() {
   local prog="$1" out="$2" ix
   shift 2
+  _lg_ifl_prepare_bg
   ix=$(_lg_index)
-  jq -L "$_LG_LIB" -r --slurpfile c "$_LG_CFG" "$@" "$_LG_JQ_QUERY_DEFS$prog" "$ix" > "$out.all" \
+  _lg_ifl_prepare_wait
+  _lg_ifl_index_note
+  _lg_ifl_overlay "$ix"
+  jq -L "$_LG_LIB" -r --slurpfile c "$_LG_CFG" --slurpfile ifl "${_LG_IFL_OV:-/dev/null}" "$@" \
+    "$_LG_JQ_QUERY_DEFS"'lg_ifl_apply($ifl[0]) | '"$prog" "$ix" > "$out.all" \
     || _lg_die "jq failed (ledger $_LG_VERB)"
   IFS= read -r _LG_QHEAD < "$out.all" || _LG_QHEAD=""
   tail -n +2 "$out.all" > "$out" || _lg_die "cannot write $out"
@@ -126,6 +136,7 @@ lg_resolve($ref; $c[0]) as $R
           (if ($n.downstream // []) != [] then "downstream: \($n.downstream | map("\(.key) (\(.via))") | lg_q_list(3))" else empty end),
           (if ($n.siblings // []) != [] then "siblings: \($n.siblings | map("\(.key) (\(.via))") | lg_q_list(3))" else empty end)),
        (lg_r_recheck_text | if . != "" then (lg_q_one | lg_q_cut(200)) else empty end),
+       (lg_ifl_lines | if . != [] then "in flight: \(lg_q_list(3))" else empty end),
        (if .paths != [] then "files: \(.paths | lg_q_list(3))" else empty end),
        (if .aliases != [] then "aliases: \(.aliases | lg_q_list(3))" else empty end),
        (if .superseded_by != null and .derived.status != "superseded" then "superseded by: \(.superseded_by | lg_q_one)" else empty end),

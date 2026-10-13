@@ -48,17 +48,37 @@
 # The trailer matcher (awk), shared by _lg_msg_claims and the re-check
 # program: tr_load(file) reads "<kind>\t<name>" lines; tr_match(line) sets
 # TRM (the number of matches) and TRMK[i] / TRMV[i] (kind, value).
+# A claims_by_ref name is a closing keyword (GitHub's form, "Fixes #123"):
+# at the line start (after the same blanks / "*" / "-" a trailer may have),
+# in any case, an optional ":", blanks, then #<digits> ended by the line or
+# a character other than a letter, digit or "_" — the value is "#<digits>".
+# The #N anchor bounds false positives the way GitHub's own keywords do;
+# "this fixes #12" (mid-sentence) and "Fixes o/r#12" do not count.
 # shellcheck disable=SC2016  # awk source
 _LG_AWK_TRAILER='
 function tr_load(f,   l, t) {
-  while ((getline l < f) > 0) { t = index(l, "\t"); TRN++; TRK[TRN] = substr(l, 1, t - 1); TRT[TRN] = substr(l, t + 1) }
+  while ((getline l < f) > 0) {
+    t = index(l, "\t"); TRN++; TRK[TRN] = substr(l, 1, t - 1); TRT[TRN] = substr(l, t + 1); TRL[TRN] = tolower(TRT[TRN])
+  }
   close(f)
 }
-function tr_match(line,   s, i, L, v) {
+function tr_match(line,   s, i, L, v, ls) {
   TRM = 0
   s = line; sub(/\r$/, "", s); sub(/^[ \t\v\f*-]*/, "", s)
+  ls = ""
   for (i = 1; i <= TRN; i++) {
     L = length(TRT[i])
+    if (TRK[i] == "claims_by_ref") {
+      if (ls == "") ls = tolower(s)
+      if (substr(ls, 1, L) != TRL[i]) continue
+      v = substr(s, L + 1)
+      if (substr(v, 1, 1) == ":") v = substr(v, 2)
+      if (v !~ /^[ \t\v\f]+#[0-9]+([^A-Za-z0-9_]|$)/) continue
+      sub(/^[ \t\v\f]+/, "", v)
+      match(v, /^#[0-9]+/)
+      TRM++; TRMK[TRM] = TRK[i]; TRMV[TRM] = substr(v, 1, RLENGTH)
+      continue
+    }
     if (substr(s, 1, L + 1) != TRT[i] ":") continue
     v = substr(s, L + 2)
     if (v !~ /^[ \t\v\f]+[^ \t\v\f]/) continue
@@ -86,8 +106,10 @@ _lg_trailers() {
 # config "trailers" names — kind is its key (claims, claims_by_path,
 # claims_by_ref, contract_change, ack); the name matches as configured
 # (case-sensitive: prose "fixes: the crash" is no trailer); value is (.+)
-# without trailing blanks (a tab inside becomes a space). In git log
-# order, then line order.
+# without trailing blanks (a tab inside becomes a space). claims_by_ref
+# names are closing keywords instead: "Fixes #12", "closes: #13" (any
+# case, ":" optional, #<digits> required; value "#12" — see
+# _LG_AWK_TRAILER). In git log order, then line order.
 _lg_msg_claims() {
   local s a
   for a in "$@"; do

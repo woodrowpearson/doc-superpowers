@@ -2390,9 +2390,24 @@ ledger recheck|cmd_ledger_recheck|repo|format=
   "re-verify | close as superseded by <item> | reshape". The index marks
   them (re-check: <item> landed) once it reaches a terminal class on the
   base, until a later commit on the base touches them.
-ledger inflight|cmd_ledger_inflight|repo|format=
-  [--format text|json]
-  Work in flight on other branches and machines.
+ledger inflight|cmd_ledger_inflight|repo|branch= fetch push format=
+  [--branch <name>|<name>@<host>] [--fetch] [--format text|json]
+  Work in flight (config inflight.enabled): local branches, worktrees
+  (a detached one as "(detached:<path hash>)"), keys.remote's branches and
+  other machines' in-flight refs (<ref_prefix>/<host>/<branch>) not merged
+  into the base and younger than inflight.max_age_days, one line each:
+  "<name> <sources>[@<host>] <PR #n|no PR> claims:<keys> contracts:<ids>
+  files:<n>". A branch's work is merge-base(<base>, tip)..tip (trunk
+  merged into it never counts); it claims an item by a claims or
+  claims-by-path trailer, by modifying the item file, or through a plan it
+  modifies. <host> is inflight.host_id, else git config
+  doc-superpowers.ledger.host, else 8 hex digits of a hash of the
+  hostname. --fetch fetches the in-flight refs now (otherwise once per
+  cache.remote_ttl_minutes; offline: exit 2). Off: one line, exit 0. An
+  unknown --branch: exit 1. JSON: {"host_id", "inflight_data", "pr_data",
+  "branches": [{host, own, name, branch, oid, sources, merge_base, pr,
+  files_n, files, claims, contract_changes, acks, refs}]}. show and ls
+  show "on branch <b>" for an open item an in-flight branch claims.
 ledger notices|cmd_ledger_notices|repo|format=
   [--format text|json]
   In-flight notices for the current branch.
