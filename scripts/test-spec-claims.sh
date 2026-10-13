@@ -5770,6 +5770,34 @@ test_v6_in_plan_ruling_infer_role_ok() {
   teardown
 }
 
+# policy_committed_plan <role>: the fixture with the plan (listing the spec as
+# <role>) already committed; then the gate record and the ruling, and only
+# those two staged — what a later commit stages. Runs `validate --staged`.
+policy_committed_plan() {
+  claims_fixture
+  policy_plan "$1"
+  git add "$PLAN" && git commit -qm "the plan"
+  policy_record "$POLICY_CHUNK_REC"
+  git add "$SIDECAR" "$POLICY_CHUNK_REC"
+  cl validate --staged
+}
+
+test_v6_staged_reads_plans_committed_earlier() {
+  echo "test: V6 — under --staged, a plan committed earlier governs a ruling staged alone"
+  policy_committed_plan target
+  assert_v6_ok "--staged: the plan (target) is committed, only the sidecar and the gate record are staged"
+  teardown
+  policy_committed_plan infer
+  assert_v6_ok "--staged: the plan (infer) is committed, only the sidecar and the gate record are staged"
+  teardown
+  policy_committed_plan amends
+  assert_v6_ok "--staged: the plan (amends) is committed"
+  teardown
+  policy_committed_plan constraint
+  assert_v6 "gate record of a plan that does not govern $DOC" "--staged: the committed plan lists the spec as constraint"
+  teardown
+}
+
 test_v6_final_json_is_a_gate_record() {
   echo "test: V6 — final.json is a gate record, so a ruling on it is never outside a plan"
   policy_fixture target "$POLICY_FINAL_REC"
@@ -6238,6 +6266,7 @@ run_tests() {
   test_v12_base_unresolvable_gate_carrying_only
   test_v6_in_plan_ruling_requires_gate_record_of_listing_plan
   test_v6_in_plan_ruling_infer_role_ok
+  test_v6_staged_reads_plans_committed_earlier
   test_v6_final_json_is_a_gate_record
   test_v6_gate_record_matched_structurally
   test_v6_outside_plan_requires_principal

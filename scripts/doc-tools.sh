@@ -6763,6 +6763,8 @@ _claims_repromote_owed() {
 # and advisory rows (the advisories carry a code), given $v ({claim,
 # verdict} per checked claim) and $rec ({record, exists} per record).
 # shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_ROLES='def cl_targets: .role == "target" or .role == "infer";'
+
 _JQ_CLAIMS_RATCHET='def in_list($l): . as $x | any($l[]; . == $x);
  def v6($claim; $doc; $msg): {check: "V6", claim: $claim, doc: $doc, message: $msg};
  def v6a($claim; $code; $msg): {check: "V6", claim: $claim, code: $code, message: $msg};
@@ -6839,7 +6841,7 @@ _JQ_CLAIMS_RATCHET='def in_list($l): . as $x | any($l[]; . == $x);
              elif $stem != null then
                (if $gate_req and (any($gov[]; .stem == $stem
                                       and any(.specs[]; .path == $doc
-                                              and (.role == "target" or .role == "infer" or .role == "amends"))) | not)
+                                              and (cl_targets or .role == "amends"))) | not)
                 then v6($id; $doc; "ruling record \($r) is a gate record of a plan that does not govern \($doc) (no plan matching config plans with stem \($stem) lists it as target, infer or amends): rule at the gate of a plan that builds or amends it, or record the ruling elsewhere")
                 else empty end)
              elif $outside_by != null and $ru.by != $outside_by
@@ -6862,7 +6864,7 @@ _JQ_CLAIMS_RATCHET='def in_list($l): . as $x | any($l[]; . == $x);
 # repo path), then phase check. The shell loops run over those short lists,
 # never over every claim.
 _claims_v6() {
-  local prog="$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_NORM $_JQ_CLAIMS_RATCHET" line v r exists plan src stem stems
+  local prog="$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_NORM $_JQ_CLAIMS_ROLES $_JQ_CLAIMS_RATCHET" line v r exists plan src stem stems
   local verify="$_SCRATCH/cl-v6-verify" vrows="$_SCRATCH/cl-v6-verdicts.jsonl"
   local records="$_SCRATCH/cl-v6-records" rrows="$_SCRATCH/cl-v6-records.jsonl" out="$_SCRATCH/cl-v6.jsonl"
   local gov="$_SCRATCH/cl-v6-gov.jsonl" pj="$_SCRATCH/cl-v6-plan.json"
@@ -6882,7 +6884,7 @@ _claims_v6() {
   if [ -n "$stems" ]; then
     src=all
     [ "$_CL_MODE" != staged ] || src=staged
-    _claims_plan_paths
+    _claims_plan_paths indexed
     while IFS= read -r -d '' plan <&3; do
       stem=${plan##*/}
       stem=${stem%.*}
@@ -8268,7 +8270,7 @@ _JQ_CLAIMS_V12='def uniq: reduce .[] as $x ([]; if any(.[]; . == $x) then . else
                     else null end)}] as $ts
  | [range(0; $ts | length)] as $ix
  | def gate_of($i; $n): $ts[$i].kind == "gate" and $ts[$i].gate_n == $n;
-   ([$p.specs[] | select(.role == "target" or .role == "infer") | .path] | uniq) as $targets
+   ([$p.specs[] | select(cl_targets) | .path] | uniq) as $targets
  | ([$ts[] | .claims[]] | uniq) as $named
  | ((if $p.chunked then
        [$ix[] | select($ts[.].kind == "spec-update") | . as $i | $ts[$i].chunk as $n
@@ -8417,27 +8419,29 @@ _claims_v12_plan() {
       ;;
   esac
   _claims_jq v12 -nc --slurpfile plan "$pj" --slurpfile c "$_SCRATCH/cl-claims.json" --slurpfile code "$code" \
-    --arg final "$_CL_V12_FINAL" --arg gp "$_CL_GATE_TITLE_PREFIX" "$_JQ_CLAIMS_V12" >> "$_SCRATCH/cl-findings.jsonl"
+    --arg final "$_CL_V12_FINAL" --arg gp "$_CL_GATE_TITLE_PREFIX" "$_JQ_CLAIMS_ROLES $_JQ_CLAIMS_V12" >> "$_SCRATCH/cl-findings.jsonl"
 }
 
 # The plans in scope — matching config plans, and staged (--staged; present
 # in the index) or present in the work tree (--all: tracked or untracked,
 # not ignored; a safe path reached through no symbolic link) —
-# _claims_plan_paths writes to $_SCRATCH/cl-plans.z, NUL-separated (V12 and
-# V6's direction policy read the one list). Under --all, ls-files is
+# _claims_plan_paths writes to $_SCRATCH/cl-plans.z, NUL-separated. Under
+# --staged it lists the plans this commit changes (V12 judges what is being
+# committed); "_claims_plan_paths indexed" lists every plan in the index
+# (V6's direction policy asks which plans exist, not which changed). Under --all, ls-files is
 # narrowed by the globs as pathspecs (a pathspec's * matches "/" too, as
 # _claims_glob_match's does: a superset), each under :(top), with the
 # environment's pathspec overrides (literal, glob: * no longer matching "/")
 # off; _claims_glob_any then decides.
 _claims_plan_paths() {
-  local list="$_SCRATCH/cl-plans-all.z" out="$_SCRATCH/cl-plans.z" globs g p prev=""
-  local -a specs=()
+  local scope="${1:-changed}" list="$_SCRATCH/cl-plans-all.z" out="$_SCRATCH/cl-plans.z" globs g p prev=""
+  local -a specs=() flags=()
   : > "$out"
   globs=$(_claims_jq plans -r \
     '.plans | if type == "array" then .[] | strings | select(. != "" and (test("\n") | not)) else empty end' \
     "$_SCRATCH/cl-config.json") || _claims_propagate $?
   [ -n "$globs" ] || return 0
-  if [ "$_CL_MODE" = staged ]; then
+  if [ "$_CL_MODE" = staged ] && [ "$scope" = changed ]; then
     _claims_jq plans-staged -j '.[] | . + "\u0000"' "$_SCRATCH/cl-staged.json" > "$list"
   else
     while IFS= read -r g; do
@@ -8445,8 +8449,10 @@ _claims_plan_paths() {
     done <<EOF
 $globs
 EOF
+    flags=(--cached --others --exclude-standard)
+    [ "$_CL_MODE" != staged ] || flags=(--cached)
     GIT_LITERAL_PATHSPECS=0 GIT_GLOB_PATHSPECS=0 GIT_NOGLOB_PATHSPECS=0 \
-      git ls-files -z --cached --others --exclude-standard -- ${specs[@]+"${specs[@]}"} > "$list" \
+      git ls-files -z ${flags[@]+"${flags[@]}"} -- ${specs[@]+"${specs[@]}"} > "$list" \
       || _claims_die "git ls-files failed listing the plans"
   fi
   while IFS= read -r -d '' p <&3; do
