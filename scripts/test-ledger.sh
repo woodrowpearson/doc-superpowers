@@ -6730,6 +6730,8 @@ test_lg_inflight_fetch_recorded_only() {
   assert_eq "$LG_A_TIP" "$(git rev-parse -q --verify refs/doc-superpowers/inflight/hostb/feat-a)" "a ref that differs is never overwritten"
   assert_contains "$LG_ERR" "refs/doc-superpowers/inflight/hostb/feat-a" "…the note names it"
   assert_contains "$LG_ERR" "git update-ref -d <ref>" "…and its remedy (R4-1d)"
+  assert_contains "$LG_ERR" "not on the remote" "a ref here the remote lacks and no fetch wrote is named (R5-2)"
+  assert_contains "$LG_ERR" "refs/doc-superpowers/inflight/hostz/local-only" "…by name"
   # A recorded mirror whose remote ref is gone is pruned; an unrecorded one stays.
   git update-ref -d refs/doc-superpowers/inflight/hostb/feat-a
   lg inflight --fetch
@@ -6826,6 +6828,7 @@ test_lg_inflight_mirror_adopt_cold() {
   assert_eq "$LG_A_TIP" "$(lg_ifl_ref -x/y)" "…nor one whose host segment is invalid"
   assert_contains "$LG_ERR" "adopted" "the note says so"
   assert_eq "1" "$(printf '%s\n' "$LG_ERR" | grep -c 'adopted')" "…once"
+  assert_contains "$LG_ERR" "refs/doc-superpowers/inflight/local-only" "the unshaped refs the remote lacks are named (R5-2)"
   # Afterwards there is a record and a fetched snapshot: nothing is adopted.
   git update-ref refs/doc-superpowers/inflight/hostz/later "$LG_A_TIP"
   lg inflight --fetch
@@ -6877,6 +6880,37 @@ test_lg_inflight_anc_errors_uncached() {
   GIT_TRACE="$tr" lg inflight --format json
   assert_eq "0" "$(grep -c 'is-ancestor' "$tr")" "the 0/1 verdicts are cached"
   rm -rf "$tr" "$fake"
+  lg_ifl_teardown
+}
+
+# --- Task 11 fix round 5 -------------------------------------------------------------
+
+test_lg_inflight_heads_cold_ff_only() {
+  echo "test: cold-start adoption under refs/heads/ only fast-forwards — an unpushed branch is never deleted, a diverged one never overwritten (R5-1)"
+  lg_ifl_fixture '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta","ref_prefix":"refs/heads/wip"}}'
+  local main_oid y bob
+  main_oid=$(git rev-parse origin/main)
+  bob=$(git -C "$LG_B" rev-parse HEAD)
+  y=$(cd "$LG_B" && git commit-tree -p origin/main -m "carol ahead" "origin/main^{tree}")
+  ( cd "$LG_B" && git push -q origin "$bob:refs/heads/wip/bob/thing" "$y:refs/heads/wip/carol/ff" )
+  # First-ever fetch: no record, no snapshot. Here: an unpushed branch, one
+  # that diverges from the remote's, one the remote's tip fast-forwards.
+  git branch -q wip/alice/experiment "$LG_A_TIP"
+  git branch -q wip/bob/thing "$LG_A_TIP"
+  git branch -q wip/carol/ff "$main_oid"
+  lg inflight --fetch
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "$LG_A_TIP" "$(git rev-parse -q --verify refs/heads/wip/alice/experiment)" "the unpushed branch is intact"
+  assert_eq "$LG_A_TIP" "$(git rev-parse -q --verify refs/heads/wip/bob/thing)" "the diverged branch is not overwritten"
+  assert_eq "$y" "$(git rev-parse -q --verify refs/heads/wip/carol/ff)" "the fast-forwardable branch is updated"
+  assert_contains "$LG_ERR" "refs/heads/wip/bob/thing" "the note names the diverged one"
+  assert_contains "$LG_ERR" "git update-ref -d <ref>" "…with its remedy"
+  assert_contains "$LG_ERR" "refs/heads/wip/alice/experiment" "…and the one the remote lacks (R5-2)"
+  assert_contains "$LG_ERR" "adopted" "the adoption is said"
+  # A second fetch (record and snapshot now): still intact.
+  lg inflight --fetch
+  assert_eq "$LG_A_TIP|$LG_A_TIP" "$(git rev-parse -q --verify refs/heads/wip/alice/experiment)|$(git rev-parse -q --verify refs/heads/wip/bob/thing)" \
+    "a second fetch: both still intact"
   lg_ifl_teardown
 }
 
@@ -7244,6 +7278,9 @@ run_tests() {
   test_lg_inflight_mirror_adopt_cold
   test_lg_inflight_sigint_reaps_transport
   test_lg_inflight_anc_errors_uncached
+
+  # --- Task 11 fix round 5 ---
+  test_lg_inflight_heads_cold_ff_only
 
   print_summary
 }

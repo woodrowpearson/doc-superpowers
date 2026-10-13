@@ -307,23 +307,28 @@ _lg_ifl_heads_check() {
 #     so a lost or lagging record (a wiped cache, a run killed between the
 #     update and the record) neither freezes nor strands a mirror; or,
 #   - with neither a record file nor a snapshot (a first fetch, or both
-#     lost), when it is shaped <prefix>/<host>/<name> (_LG_AWK_IFL_SHAPED;
-#     under refs/heads/, _lg_ifl_heads_check already refused anything with
-#     an upstream or a worktree): adopted, and the run's note says so once.
+#     lost), when it is shaped <prefix>/<host>/<name> (_LG_AWK_IFL_SHAPED):
+#     adopted, and the run's note says so once. Under refs/heads/ (where
+#     _lg_ifl_heads_check already refused anything with an upstream or a
+#     worktree) adoption is non-destructive: such a ref is updated only
+#     when the fetched value fast-forwards it (`git merge-base
+#     --is-ancestor`), and never deleted — an unpushed branch there is
+#     not a mirror until proven so.
 # A ref here is
 #   created     when absent;
 #   updated     when it is ours (or already holds the fetched value);
 #   deleted     when the remote no longer has it and it is ours;
 #   left alone  otherwise — a ref no fetch wrote, or one changed since:
 #               never overwritten, never deleted; the run's note names it
-#               and its remedy (`git update-ref -d <ref>`: the next fetch
-#               recreates it).
+#               — one the remote has, with its remedy (`git update-ref -d
+#               <ref>`: the next fetch recreates it); one the remote lacks,
+#               so it is never listed silently.
 # One `git update-ref --stdin` transaction, each change compare-and-swap.
 # DOC_TOOLS_LEDGER_SELFTEST=ifl-kill-after-update-ref (scripts/test-ledger.sh
 # only): SIGKILL to this shell right after the transaction, before the
 # record is written.
 _lg_ifl_mirror_sync() {
-  local snap="$1" s rec recf tmp n list adopt=0
+  local snap="$1" s rec recf tmp n list adopt=0 heads=0 r l o
   _lg_scratch_name
   s=$_LG_SN
   recf="$_LG_CACHE/remote/inflight-mirror.${_LG_IFL_PREFIX//\//%}.tsv"
@@ -332,18 +337,15 @@ _lg_ifl_mirror_sync() {
     rec=/dev/null
     if [ ! -s "$snap" ]; then adopt=1; fi
   fi
+  case "$_LG_IFL_PREFIX" in refs/heads/?*) heads=1 ;; esac
   git for-each-ref --format='%(objectname) %(refname)' "$_LG_IFL_TMP/" "$_LG_IFL_PREFIX/" > "$s.cur" 2> "$s.err" \
     || { head -n 1 "$s.err" >&2; return 1; }
   LC_ALL=C awk -v tmp="$_LG_IFL_TMP/" -v ip="$_LG_IFL_PREFIX/" -v rec="$rec" -v snap="$snap" -v adopt="$adopt" \
-    -v cmds="$s.cmds" -v newrec="$s.rec" -v skip="$s.skip" -v adopted="$s.adopted" "$_LG_AWK_IFL_SHAPED"'
-    function ours(r) {
-      if ((r in REC) && L[r] == REC[r]) return 1
-      if ((r in SNAP) && L[r] == SNAP[r]) return 1
-      if (adopt && shaped(r, ip)) { na++; return 1 }
-      return 0
-    }
+    -v heads="$heads" -v cmds="$s.cmds" -v newrec="$s.rec" -v skip="$s.skip" -v gone="$s.gone" -v ffq="$s.ff" \
+    -v adopted="$s.adopted" "$_LG_AWK_IFL_SHAPED"'
+    function owned(r) { return ((r in REC) && L[r] == REC[r]) || ((r in SNAP) && L[r] == SNAP[r]) }
     BEGIN {
-      printf "" > cmds; printf "" > newrec; printf "" > skip
+      printf "" > cmds; printf "" > newrec; printf "" > skip; printf "" > gone; printf "" > ffq
       while ((getline l < rec) > 0) { t = index(l, "\t"); REC[substr(l, 1, t - 1)] = substr(l, t + 1) }
       while ((getline l < snap) > 0) {
         t = index(l, " "); r = substr(l, t + 1)
@@ -360,12 +362,31 @@ _lg_ifl_mirror_sync() {
       for (r in R) {
         if (!(r in L)) { print "create " r " " R[r] > cmds; print r "\t" R[r] > newrec }
         else if (L[r] == R[r]) print r "\t" R[r] > newrec
-        else if (ours(r)) { print "update " r " " R[r] " " L[r] > cmds; print r "\t" R[r] > newrec }
+        else if (owned(r) || (adopt && !heads && shaped(r, ip) && ++na)) {
+          print "update " r " " R[r] " " L[r] > cmds; print r "\t" R[r] > newrec
+        }
+        else if (adopt && heads && shaped(r, ip)) print r " " L[r] " " R[r] > ffq
         else print r > skip
       }
-      for (r in L) if (!(r in R) && ours(r)) print "delete " r " " L[r] > cmds
+      for (r in L) if (!(r in R)) {
+        if (owned(r) || (adopt && !heads && shaped(r, ip) && ++na)) print "delete " r " " L[r] > cmds
+        else print r > gone
+      }
       print na > adopted
     }' "$s.cur" || return 1
+  n=0
+  { IFS= read -r n < "$s.adopted"; } 2>/dev/null || n=0
+  case "$n" in ''|*[!0123456789]*) n=0 ;; esac
+  # Cold start under refs/heads/: fast-forwards only (an error is "no").
+  while read -r r l o; do
+    if git merge-base --is-ancestor "$l" "$o" 2>/dev/null; then
+      printf 'update %s %s %s\n' "$r" "$o" "$l" >> "$s.cmds"
+      printf '%s\t%s\n' "$r" "$o" >> "$s.rec"
+      n=$((n + 1))
+    else
+      printf '%s\n' "$r" >> "$s.skip"
+    fi
+  done < "$s.ff"
   if [ -s "$s.cmds" ]; then
     git update-ref --stdin < "$s.cmds" 2> "$s.err" || { head -n 1 "$s.err" >&2; return 1; }
     case "${DOC_TOOLS_LEDGER_SELFTEST:-}" in
@@ -378,17 +399,24 @@ _lg_ifl_mirror_sync() {
     rm -f -- "$tmp"
     return 1
   fi
-  n=0
-  { IFS= read -r n < "$s.adopted"; } 2>/dev/null || n=0
-  case "$n" in ''|*[!0123456789]*) n=0 ;; esac
   if [ "$n" -gt 0 ]; then
-    _lg_ifl_note "no record of an earlier in-flight fetch: $n ref(s) under $_LG_IFL_PREFIX/ shaped <host>/<name> adopted as in-flight mirrors (updated or pruned)"
+    if [ "$heads" = 1 ]; then
+      _lg_ifl_note "no record of an earlier in-flight fetch: $n branch(es) under $_LG_IFL_PREFIX/ fast-forwarded and adopted as in-flight mirrors"
+    else
+      _lg_ifl_note "no record of an earlier in-flight fetch: $n ref(s) under $_LG_IFL_PREFIX/ shaped <host>/<name> adopted as in-flight mirrors (updated or pruned)"
+    fi
   fi
   if [ -s "$s.skip" ]; then
     n=$(wc -l < "$s.skip" | tr -d ' ')
     list=$(LC_ALL=C sort "$s.skip" | head -n 3 | tr '\n' ' ' | sed 's/ $//; s/ /, /g')
     if [ "$n" -gt 3 ]; then list="$list, …"; fi
     _lg_ifl_note "$n in-flight ref(s) here differ from the remote's and from the last fetch's — not updated: $list (\`git update-ref -d <ref>\` lets the next fetch recreate it)"
+  fi
+  if [ -s "$s.gone" ]; then
+    n=$(wc -l < "$s.gone" | tr -d ' ')
+    list=$(LC_ALL=C sort "$s.gone" | head -n 3 | tr '\n' ' ' | sed 's/ $//; s/ /, /g')
+    if [ "$n" -gt 3 ]; then list="$list, …"; fi
+    _lg_ifl_note "$n ref(s) under $_LG_IFL_PREFIX/ are not on the remote and no in-flight fetch wrote them — left alone: $list"
   fi
 }
 
