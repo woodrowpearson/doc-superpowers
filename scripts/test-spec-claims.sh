@@ -6703,6 +6703,80 @@ test_attest_rebased_branch_matched_by_patch_id() {
   teardown
 }
 
+# A sha no clone has.
+MISSING_SHA=0123456789abcdef0123456789abcdef01234567
+
+test_attest_unresolvable_head_without_twin_indeterminate() {
+  echo "test: attest — the last record's head not here and no rebased twin: indeterminate, never a wider window"
+  gate_fixture
+  gate_promote
+  gate 1
+  git add "$GATE_REC1" && git commit -qm "the chunk 1 gate record"
+  # A ruling naming final.json, committed during chunk 2: silent there.
+  gate_ruling "$GATE_FINAL"
+  git add "$SIDECAR" && git commit -qm "DOC-STALE citing final.json, before chunk 2's gate"
+  gate 2
+  assert_eq "1" "$CL_RC" "precondition: chunk 2's gate is red (silent reconciliation)"
+  git add "$GATE_REC2" && git commit -qm "the chunk 2 gate record"
+  attest
+  assert_eq "1" "$CL_RC" "precondition: attest exits 1"
+  assert_contains "$(attest_messages)" "silent reconciliation" "…a silent reconciliation"
+  # chunk 2's head gone, its patch matching no branch commit.
+  jset "$GATE_REC2" ".head = \"$MISSING_SHA\" | .commits = [{sha: \"$MISSING_SHA\", patch_id: \"$MISSING_SHA\"}]"
+  attest --final
+  assert_eq "2" "$CL_RC" "the head not a commit here, no twin: exits 2 (never the merge-base window)"
+  assert_json_field "$CL_OUT" '.indeterminate[0].reason | test("re-run the gate for chunk 2")' "true" \
+    "…telling the user to re-run chunk 2's gate"
+  assert_not_contains "$(attest_codes)" "from-remapped" "…no from-remapped"
+  assert_file_not_exists "$GATE_FINAL" "…and final.json not written"
+  # The head absent from its own commits (a merge, or an empty chunk): the same.
+  jset "$GATE_REC2" '.commits = []'
+  attest
+  assert_eq "2" "$CL_RC" "the head not among its record's commits: exits 2"
+  teardown
+}
+
+test_attest_fresh_clone_rebase_remaps_to_twin() {
+  echo "test: attest — in a fresh clone of a rebased branch, the last head maps to its rebased twin"
+  attest_fixture
+  git checkout -q main
+  printf 'Trunk notes.\n' > docs/trunk.md
+  git add docs/trunk.md && git commit -qm "trunk: unrelated"
+  git checkout -q feature
+  git rebase -q main
+  local c="$TEST_DIR/home/clone" old
+  old=$(rec 2 .head)
+  # --no-local: only the reachable objects, so the old heads are not there.
+  git clone -q --no-local -b feature "$TEST_DIR" "$c"
+  git -C "$c" branch -q main origin/main
+  cd "$c"
+  assert_true "precondition: chunk 2's old head is not in the clone" \
+    test "$(git cat-file -e "$old^{commit}" 2>/dev/null && echo yes || echo no)" = no
+  attest --final
+  assert_eq "0" "$CL_RC" "attest --final exits 0"
+  assert_contains "$(attest_codes)" "from-remapped" "…with the advisory from-remapped"
+  assert_eq "$(git log -1 --format=%H -- "$GATE_REC1")" "$(fin .from)" \
+    "…from is the twin: the rebased commit of chunk 1's record (chunk 2's head)"
+  teardown
+}
+
+test_attest_ambiguous_twin_indeterminate() {
+  echo "test: attest — two branch commits with the head's patch id: indeterminate"
+  attest_fixture
+  printf 'Same.\n' > docs/dup.md
+  git add docs/dup.md && git commit -qm "dup"
+  local pid
+  pid=$(git show HEAD | git patch-id --stable | cut -d' ' -f1)
+  git rm -q docs/dup.md && git commit -qm "undo dup"
+  printf 'Same.\n' > docs/dup.md
+  git add docs/dup.md && git commit -qm "dup again"
+  jset "$GATE_REC2" ".head = \"$MISSING_SHA\" | .commits = [{sha: \"$MISSING_SHA\", patch_id: \"$pid\"}]"
+  attest
+  assert_eq "2" "$CL_RC" "the head's patch id on two branch commits: exits 2"
+  assert_json_field "$CL_OUT" '.indeterminate[0].reason | test("re-run the gate for chunk 2")' "true" "…saying so"
+  teardown
+}
+
 test_attest_unmatched_commit_marked_rebased_reverified() {
   echo "test: attest — a record whose commits were squashed is marked re-verified, not a finding"
   gate_fixture
@@ -7313,6 +7387,9 @@ run_tests() {
   test_attest_missing_chunk_record
   test_attest_rebased_branch_matched_by_patch_id
   test_attest_unmatched_commit_marked_rebased_reverified
+  test_attest_unresolvable_head_without_twin_indeterminate
+  test_attest_fresh_clone_rebase_remaps_to_twin
+  test_attest_ambiguous_twin_indeterminate
   test_attest_sidecar_ruling_with_no_gate_record
   test_attest_record_reconciliation_reverted_at_head
   test_attest_named_claim_red_at_head
