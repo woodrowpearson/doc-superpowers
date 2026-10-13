@@ -882,14 +882,18 @@ def lg_pr_apply($prs; $pcl; $bcl; $fmr):
         lg_obj($prs[] | select(.number != null) | {(.number | tostring): .}) as $PRN
         | lg_obj($bcl | split("\n")[] | select(. != "" and (startswith("# ") | not))
                  | index("\t") as $t | select($t != null) | paths(.[0:$t]; .[$t + 1:])[] | {(.): true}) as $BASE
+        # A merged PR counts by its trailers only; a changed file claims
+        # for an open PR (in review).
         | (lg_lists($pcl | split("\n")[] | select(. != "") | split("\t") | select(length >= 3)
-                    | .[0] as $n | paths(if .[1] == "file" then "path" else .[1] end; .[2:] | join("\t"))[] | {k: ., v: $n})
+                    | .[0] as $n
+                    | select(.[1] != "file" or ($PRN[$n].state // "") == "open")
+                    | paths(if .[1] == "file" then "path" else .[1] end; .[2:] | join("\t"))[] | {k: ., v: $n})
            | map_values(unique)) as $PC
         | lg_status_labels as $SL
         | [$its[]
            | ([($PC[.path] // [])[] | $PRN[.] // empty]) as $P
-           | ([$P[] | select(.state == "open")] | sort_by(.number) | last) as $op
-           | ([$P[] | select(.state == "merged")] | sort_by(.number) | last) as $mp
+           | ([$P[] | select(.state == "open")] | sort_by(.number | tonumber? // 0) | last) as $op
+           | ([$P[] | select(.state == "merged")] | sort_by(.number | tonumber? // 0) | last) as $mp
            | if $op == null and $mp == null and ($BASE[.path] | not) then .
              else
                .pr = (($op // $mp) | if . == null then null else {number, url, state} end)
@@ -1190,19 +1194,23 @@ _lg_ix_refs() {
 # --- PR data, head claims, base claims (design §E.1, §G) ---------------------------
 #
 # Derived statuses beyond the item's own fields (lg_pr_apply in the join):
-#   merged · owed: <owed>  an open item that is claimed on the base — a
-#       message line of a commit the base reaches carries a trailers.claims
-#       trailer naming its key or alias, or a trailers.claims_by_path
-#       trailer naming its path (or a former path) — or that a merged PR
-#       claimed: the PR's merge commit (present locally) changed the item's
-#       file against its first parent. <owed> is the item's owed field,
-#       else "closing" (what is left: closing the item).
+#   merged · owed: <owed>  an open item claimed by a claims or
+#       claims-by-path trailer — a message line of a commit the base
+#       reaches carries a trailers.claims trailer naming its key or alias,
+#       or a trailers.claims_by_path trailer naming its path (or a former
+#       path) — or by such a trailer in <base>..<head> of a merged PR whose
+#       head ref is still here (a squash merge leaves the branch's own
+#       commits off the base). A merged PR's file edits do not count.
+#       <owed> is the item's owed field, else "closing" (what is left:
+#       closing the item).
 #   in review #<n>  an open item that an open PR's head claims: the head is
 #       refs/remotes/<keys.remote>/<head> when that ref exists here (index
 #       builds never fetch; a head without one is skipped and counted on
 #       stderr), and it claims the item when a commit in <base>..<head>
 #       carries a claims / claims_by_path line naming it or changes its
-#       file. Of several PRs, the highest number.
+#       file. Of several PRs, the highest number. A cross-repository PR
+#       ("cross": a fork's branch) is never resolved through a same-named
+#       branch of the remote: it is counted on stderr.
 # The item's .pr is {number, url, state} of the open PR that claims it
 # (the highest number), else of the merged one, else null.
 #
@@ -1215,7 +1223,10 @@ _lg_ix_refs() {
 # …", and the verb still exits 0 — except under _LG_REMOTE_FORCE=1
 # (--refresh, publish), where it is exit 2. The key of the index covers
 # the PR data (the copy's data, not its fetch time), each open PR head's
-# resolved oid and which merge commits are present (_lg_ix_pr_prepare).
+# resolved oid (_lg_ix_pr_prepare). DOC_TOOLS_LEDGER_OFFLINE=1: the
+# adapter never runs — a copy past its TTL serves ("PR data as of …",
+# pr_data.state offline), none is the "—" path; --refresh and publish
+# exit 2.
 
 # _lg_ix_pr_note <text>: the run's one PR note on stderr ("ledger: …"),
 # printed once per run however many indexes it builds.
@@ -1226,42 +1237,55 @@ _lg_ix_pr_note() {
   printf 'ledger: %s\n' "$1" | tr -d '\000-\010\013-\037' >&2
 }
 
-# _lg_ix_pr_lines <pr-lines> <out>: "o\t<n>\t<head>" per open PR and
-# "m\t<n>\t<merge commit>" per merged PR with one (a head with a tab or
-# newline, a number that is not one, or a merge commit that is not an
-# object id is left out).
+# _lg_ix_pr_lines <pr-lines> <out>: "o\t<n>\t<head>" per open PR, "m\t<n>\t
+# <head>" per merged PR, "x\t<n>" per open cross-repository PR ("cross":
+# true — a fork's branch, never resolved through a same-named branch of
+# the remote; merged cross-repository PRs are left out). A head with a tab
+# or newline, or a number that is not one, is left out.
 _lg_ix_pr_lines() {
   jq -r 'select((.number | type) == "number" or (.number | type) == "string")
     | (.number | tostring) as $n
     | select($n | test("^[0-9]+$"))
-    | if .state == "open" and (.head | type) == "string" and (.head | test("^[^\\t\\n\\r]+$")) then "o\t\($n)\t\(.head)"
-      elif .state == "merged" and (.merge_commit | type) == "string" and (.merge_commit | test("^[0-9a-f]{40}([0-9a-f]{24})?$")) then "m\t\($n)\t\(.merge_commit)"
+    | if .cross == true then (if .state == "open" then "x\t\($n)" else empty end)
+      elif (.state == "open" or .state == "merged") and (.head | type) == "string" and (.head | test("^[^\\t\\n\\r]+$"))
+      then "\(.state[0:1])\t\($n)\t\(.head)"
       else empty end' "$1" > "$2" 2> "$2.err" || _lg_die "jq failed (the PR list): $(head -n 1 "$2.err")"
+}
+
+# _lg_ix_pr_numbers <file> <n>: the first three numbers of <file> (one per
+# line, numeric order) as "#a, #b, #c[, …]" (<n> of them in all).
+_lg_ix_pr_numbers() {
+  local nums
+  nums=$(LC_ALL=C sort -n "$1" | head -n 3 | sed 's/^/#/' | tr '\n' ' ' | sed 's/ $//; s/ /, /g')
+  if [ "$2" -gt 3 ]; then nums="$nums, …"; fi
+  printf '%s' "$nums"
 }
 
 # _lg_ix_pr_prepare <base|""> <prefix>: the PR data for an index build
 # (worktree or --rev): <prefix>.prl the adapter's lines (from the remote
-# cache; empty without), <prefix>.prheads "<n>\t<head>\t<oid>" per open PR
-# whose head has a local ref (none when the base does not resolve),
-# <prefix>.prmerged "<n>\t<oid>" per merged PR whose merge commit is here,
-# <prefix>.prkey the key lines (the data's state class, the heads, the
-# merge commits). $_SCRATCH/lg-pr.mark: the views' header note (stale or
-# unavailable data; empty otherwise). Prints the run's PR note (stderr).
+# cache's snapshot; empty without), <prefix>.prheads "<n>\t<head>\t<oid>\t
+# <o|m>" per open or merged PR whose head has a local ref (none when the
+# base does not resolve), <prefix>.prkey the key lines (the data's state
+# class, the heads). $_SCRATCH/lg-pr.mark: the views' header note (stale,
+# offline or unavailable data; empty otherwise); $_SCRATCH/lg-pr.json: the
+# verbs' pr_data {"state": fresh|stale|offline|none|unconfigured, "as_of":
+# <fetch epoch>|null, "error": <reason>|null}. Prints the run's PR note
+# (stderr, one line): the data's state, the open heads not fetched, the
+# cross-repository open PRs not compared.
 _lg_ix_pr_prepare() {
-  local base="$1" p="$2" s remote url rc=0 state note="" mark="" missing=0 nums="" t ol
+  local base="$1" p="$2" s remote url rc=0 state note="" mark="" missing=0 cross=0 t ol err
   : > "$p.prl"
   : > "$p.prheads"
-  : > "$p.prmerged"
   : > "$_SCRATCH/lg-pr.mark"
   _lg_scratch_name
   s=$_LG_SN
   if _lg_adapter_path pr; then
     if [ -z "$_LG_ADP" ]; then
       printf 'pr unconfigured\n' > "$p.prkey" || _lg_die "cannot write $p.prkey"
+      printf '{"state":"unconfigured","as_of":null,"error":null}\n' > "$_SCRATCH/lg-pr.json" || _lg_die "cannot write the PR state"
       return 0
     fi
-    _lg_cfg '(.keys.remote | if type == "string" and . != "" then . else "origin" end),
-      (.cache.remote_ttl_minutes | if type == "number" and . >= 0 then . * 60 | floor else 600 end)' > "$s.cfg"
+    _lg_cfg '(.keys.remote | if type == "string" and . != "" then . else "origin" end), ('"$_LG_RTTL_JQ"')' > "$s.cfg"
     { IFS= read -r remote; IFS= read -r _LG_RTTL; } < "$s.cfg" || _lg_die "cannot read the config"
     url=$(git config --get "remote.$remote.url" 2>/dev/null) || url=""
     _lg_remote_cache pr "$(printf 'pr\n%s\n%s' "$_LG_ADP" "$url")" _lg_adapter pr list || rc=$?
@@ -1271,91 +1295,100 @@ _lg_ix_pr_prepare() {
     rc=2
     _LG_RSTATE=none
     _LG_RERR=$_LG_ADP_ERR
-    if [ "${_LG_REMOTE_FORCE:-}" = 1 ]; then _lg_die "PR data: $_LG_RERR"; fi
+    _LG_RFETCHED=""
   fi
   state=$_LG_RSTATE
+  err=$_LG_RERR
   if [ "$rc" != 0 ]; then
-    [ "${_LG_REMOTE_FORCE:-}" != 1 ] || _lg_die "PR data: the pr adapter failed: $_LG_RERR"
-    note="PR data unavailable (—): ${_LG_RERR:-the pr adapter failed}"
+    if [ "${_LG_REMOTE_FORCE:-}" = 1 ]; then
+      if [ "$state" = offline ]; then _lg_die "PR data: $err"; fi
+      _lg_die "PR data: the pr adapter failed: $err"
+    fi
+    note="PR data unavailable (—): ${err:-the pr adapter failed}"
     mark="PR data: — (unavailable)"
   else
-    tail -n +2 "$_LG_RCACHE" > "$p.prl" || _lg_die "cannot read $_LG_RCACHE"
-    if [ "$state" = stale ]; then
+    tail -n +2 "$_LG_RSNAP" > "$p.prl" || _lg_die "cannot read $_LG_RSNAP"
+    if [ "$state" = stale ] || [ "$state" = offline ]; then
       t=$(jq -nr --argjson t "$_LG_RFETCHED" --argjson a "$_LG_RAGE" '
         ($t | strftime("%Y-%m-%d %H:%M UTC")) + " ("
         + (if $a < 3600 then "\($a / 60 | floor) min"
            elif $a < 172800 then "\($a / 3600 | floor) h"
            else "\($a / 86400 | floor) d" end) + " old)"') || _lg_die "jq failed (the PR data age)"
       mark="PR data as of $t"
-      note="PR data as of $t — the pr adapter failed: ${_LG_RERR:-?}"
+      if [ "$state" = offline ]; then
+        note="PR data as of $t — $err"
+        err=""
+      else
+        note="PR data as of $t — the pr adapter failed: ${err:-?}"
+      fi
     fi
   fi
   printf '%s\n' "$mark" > "$_SCRATCH/lg-pr.mark" || _lg_die "cannot write the PR mark"
-  # The open PRs' heads and the merged PRs' merge commits ("o|m\t<n>\t…"),
-  # kept beside the cache file as <file>-<data sha, 16 hex>.ol (the data,
-  # not the file's age, names it: a refresh with new data finds none).
+  jq -nc --arg st "$state" --arg t "${_LG_RFETCHED:-}" --arg e "$err" \
+    '{state: $st, as_of: (if $t == "" then null else ($t | tonumber) end), error: (if $e == "" then null else $e end)}' \
+    > "$_SCRATCH/lg-pr.json" || _lg_die "cannot write the PR state"
+  # The heads ("o|m\t<n>\t<head>", "x\t<n>"), kept beside the cache file as
+  # <file>-ol2-<data sha, 16 hex>.ol: named by the snapshot's data hash and
+  # by this format's version, so a refresh with new data, or a newer
+  # format, finds none. A copy that fails is a miss (parsed again).
   ol=""
   if [ "$rc" = 0 ]; then
-    IFS= read -r t < "$_LG_RCACHE" || t=""
-    t=${t#*\"data_sha256\":\"}
-    t=${t%%\"*}
-    case "$t" in
-      ????????????????*) ol="${_LG_RCACHE%.json}-${t:0:16}.ol" ;;
+    case "$_LG_RDSHA" in
+      ????????????????*) ol="${_LG_RCACHE%.json}-ol2-${_LG_RDSHA:0:16}.ol" ;;
     esac
   fi
-  if [ -n "$ol" ] && [ -f "$ol" ]; then
-    cp -- "$ol" "$s.pr" || _lg_die "cannot read $ol"
-  else
+  if [ -z "$ol" ] || [ ! -f "$ol" ] || ! cp -- "$ol" "$s.pr" 2>/dev/null; then
     _lg_ix_pr_lines "$p.prl" "$s.pr"
     if [ -n "$ol" ]; then
       # Best effort: without it the next run parses the list again.
-      rm -f -- "${_LG_RCACHE%.json}"-*.ol
+      rm -f -- "${_LG_RCACHE%.json}"-*.ol 2>/dev/null || true
       if t=$(mktemp "$_LG_CACHE/remote/.ol.XXXXXX"); then
         if ! cp -- "$s.pr" "$t" || ! mv -f -- "$t" "$ol"; then rm -f -- "$t"; fi
       fi
     fi
   fi
-  # One pass resolves both (the order of the adapter's list, which the
-  # key's data hash already pins): the open heads against `git
-  # for-each-ref refs/remotes/<remote>/`, the merge commits against `git
-  # cat-file --batch-check`; it writes .prheads, .prmerged, the key's lines
-  # and the unfetched PRs' numbers, and prints how many there are.
+  # One pass resolves the heads against `git for-each-ref
+  # refs/remotes/<remote>/` (in the adapter's order, which the key's data
+  # hash already pins); it writes .prheads, the key's lines, the unfetched
+  # open PRs' and the cross-repository open PRs' numbers, and prints how
+  # many of each there are.
   : > "$s.refs"
-  : > "$s.mchk"
-  if [ -s "$s.pr" ]; then
-    if [ -n "$base" ]; then
-      git for-each-ref --format='%(objectname) %(refname)' "refs/remotes/$remote/" > "$s.refs" 2> "$s.err" \
-        || _lg_die "git for-each-ref failed: $(head -n 1 "$s.err")"
-    fi
-    LC_ALL=C awk -F '\t' '$1 == "m" { print $3 }' "$s.pr" \
-      | git cat-file --batch-check='%(objectname) %(objecttype)' > "$s.mchk" 2> "$s.err" \
-      || _lg_die "git cat-file --batch-check failed: $(head -n 1 "$s.err")"
+  if [ -s "$s.pr" ] && [ -n "$base" ]; then
+    git for-each-ref --format='%(objectname) %(refname)' "refs/remotes/$remote/" > "$s.refs" 2> "$s.err" \
+      || _lg_die "git for-each-ref failed: $(head -n 1 "$s.err")"
   fi
-  missing=$(LC_ALL=C awk -v refs="$s.refs" -v chk="$s.mchk" -v pre="refs/remotes/$remote/" -v miss="$s.miss" \
-      -v heads="$p.prheads" -v merged="$p.prmerged" -v key="$p.prkey" -v state="$(if [ "$rc" != 0 ]; then echo none; else echo data; fi)" '
+  t=$(LC_ALL=C awk -v refs="$s.refs" -v pre="refs/remotes/$remote/" -v miss="$s.miss" -v xs="$s.cross" \
+      -v heads="$p.prheads" -v key="$p.prkey" -v state="$(if [ "$rc" != 0 ]; then echo none; else echo data; fi)" '
     BEGIN {
-      printf "" > miss; printf "" > heads; printf "" > merged; print "pr " state > key
+      printf "" > miss; printf "" > xs; printf "" > heads; print "pr " state > key
       while ((getline l < refs) > 0) { t = index(l, " "); R[substr(l, t + 1)] = substr(l, 1, t - 1) }
-      while ((getline l < chk) > 0) { split(l, a, " "); if (a[2] == "commit") C[a[1]] = 1 }
-      nm = 0
+      nm = 0; nx = 0
     }
     {
-      k = substr($0, 1, 1); l = substr($0, 3); t = index(l, "\t"); n = substr(l, 1, t - 1); v = substr(l, t + 1)
-      if (k == "o") {
-        if ((pre v) in R) { print n "\t" v "\t" R[pre v] > heads; print "head " n "\t" v "\t" R[pre v] > key }
-        else { print n > miss; nm++ }
-      } else if (k == "m" && (v in C)) { print n "\t" v > merged; print "merged " n "\t" v > key }
+      k = substr($0, 1, 1); l = substr($0, 3); t = index(l, "\t")
+      if (k == "x") { print l > xs; nx++; next }
+      n = substr(l, 1, t - 1); v = substr(l, t + 1)
+      if ((pre v) in R) { print n "\t" v "\t" R[pre v] "\t" k > heads; print "head " n "\t" v "\t" R[pre v] "\t" k > key }
+      else if (k == "o") { print n > miss; nm++ }
     }
-    END { print nm }' "$s.pr") || _lg_die "cannot resolve the PR heads and merge commits"
+    END { print nm " " nx }' "$s.pr") || _lg_die "cannot resolve the PR heads"
+  missing=${t%% *}
+  cross=${t#* }
   if [ "$missing" -gt 0 ]; then
-    nums=$(LC_ALL=C sort -n "$s.miss" | head -n 3 | sed 's/^/#/' | tr '\n' ' ' | sed 's/ $//; s/ /, /g')
-    if [ "$missing" -gt 3 ]; then nums="$nums, …"; fi
     if [ -z "$base" ]; then
-      t="$missing open PR heads not compared ($nums): the base does not resolve"
+      t="$missing open PR heads not compared ($(_lg_ix_pr_numbers "$s.miss" "$missing")): the base does not resolve"
     elif [ "$missing" = 1 ]; then
-      t="1 open PR head not fetched ($nums; git fetch $remote): not shown in review"
+      t="1 open PR head not fetched ($(_lg_ix_pr_numbers "$s.miss" 1); git fetch $remote): not shown in review"
     else
-      t="$missing open PR heads not fetched ($nums; git fetch $remote): not shown in review"
+      t="$missing open PR heads not fetched ($(_lg_ix_pr_numbers "$s.miss" "$missing"); git fetch $remote): not shown in review"
+    fi
+    note="${note:+$note; }$t"
+  fi
+  if [ "$cross" -gt 0 ]; then
+    if [ "$cross" = 1 ]; then
+      t="1 cross-repository open PR not compared ($(_lg_ix_pr_numbers "$s.cross" 1))"
+    else
+      t="$cross cross-repository open PRs not compared ($(_lg_ix_pr_numbers "$s.cross" "$cross"))"
     fi
     note="${note:+$note; }$t"
   fi
@@ -1369,7 +1402,7 @@ _lg_ix_claim_trailers() {
   LC_ALL=C awk -F '\t' '$1 == "claims" || $1 == "claims_by_path"' "$1.all" > "$1" || _lg_die "cannot read the claims trailers"
 }
 
-# _lg_ix_base_claims <base|""> → _LG_BCLAIMS: a file of "<kind>\t<value>"
+# _lg_ix_base_claims <base|""> → _LG_BCLAIMS: a private file of "<kind>\t<value>"
 # lines (after a "# ledger-claims/1 <sig>" header line) — every claims /
 # claims_by_path message line of the commits the base reaches
 # (_LG_AWK_TRAILER: any line, bullets included). Cached as
@@ -1393,9 +1426,10 @@ _lg_ix_base_claims() {
   f="$_LG_CACHE/claims-$B.tsv"
   first=""
   if [ -f "$f" ]; then IFS= read -r first < "$f" || true; fi
-  if [ "$first" = "$hdr" ]; then
+  # A hit is read from a private copy (pruning may remove the file
+  # meanwhile); a copy that fails is a miss.
+  if [ "$first" = "$hdr" ] && cp -- "$f" "$s.bclaims" 2>/dev/null; then
     _lg_ix_trace "claims-hit"
-    _LG_BCLAIMS=$f
     return 0
   fi
   # shellcheck disable=SC2012  # cache names are claims-<hex>.tsv
@@ -1413,7 +1447,13 @@ _lg_ix_base_claims() {
   tmp=$(mktemp "$_LG_CACHE/.claims.XXXXXX") || _lg_die "cannot create a temp file in $_LG_CACHE"
   if [ -n "$anc" ]; then
     _lg_ix_trace "claims-extend $anc"
-    cp -- "$_LG_CACHE/claims-$anc.tsv" "$tmp" || { rm -f "$tmp"; _lg_die "cannot copy the cached claims of $anc"; }
+    if ! cp -- "$_LG_CACHE/claims-$anc.tsv" "$tmp" 2>/dev/null; then
+      # A cached file that cannot be read (removed meanwhile, …): a cold walk.
+      _lg_ix_trace "claims-cold (cannot read claims-$anc.tsv)"
+      anc=""
+    fi
+  fi
+  if [ -n "$anc" ]; then
     _lg_msg_claims "$anc..$B" > "$s.mc" || rc=$?
   else
     _lg_ix_trace "claims-cold"
@@ -1423,10 +1463,10 @@ _lg_ix_base_claims() {
   [ "$rc" = 0 ] || { rm -f "$tmp"; _lg_die "cannot read the base's claims"; }
   LC_ALL=C awk -F '\t' '$2 == "claims" || $2 == "claims_by_path" { print $2 "\t" substr($0, length($1) + length($2) + 3) }' "$s.mc" >> "$tmp" \
     || { rm -f "$tmp"; _lg_die "cannot read the base's claims"; }
+  cp -- "$tmp" "$_LG_BCLAIMS" || { rm -f "$tmp"; _lg_die "cannot write $_LG_BCLAIMS"; }
   mv -f "$tmp" "$f" || { rm -f "$tmp"; _lg_die "cannot install $f"; }
   # shellcheck disable=SC2012  # cache names are claims-<hex>.tsv
   ls -t "$_LG_CACHE"/claims-*.tsv 2>/dev/null | tail -n +6 | while IFS= read -r c; do rm -f "$c"; done
-  _LG_BCLAIMS=$f
 }
 
 # The attribution of a walk of <base>..<heads> (awk): stdin the messages
@@ -1470,53 +1510,34 @@ END {
   }
 }'
 
-# _lg_ix_pr_claims <base|""> <prheads> <prmerged> <dirs> <out>: what the
-# PRs claim, "<n>\t<kind>\t<value>" lines (kind claims, claims_by_path or
-# file; a newline in a name as \001): the open PRs' heads — one walk of
-# ^<base> <head oids…> for the messages and parents, one (limited to
-# <dirs>, the item globs' directories) for the changed names, attributed
-# per head (_LG_AWK_PR_CLAIMS) — and the merged PRs' merge commits — one
-# `git log --no-walk -m --first-parent` over them, limited to <dirs>: the
-# names each changed against its first parent.
+# _lg_ix_pr_claims <base|""> <prheads> <dirs> <out>: what the PRs' heads
+# claim, "<n>\t<kind>\t<value>" lines (kind claims, claims_by_path or file;
+# a newline in a name as \001): one walk of ^<base> <head oids…> (open and
+# merged PRs alike) for the messages and parents, one (limited to <dirs>,
+# the item globs' directories) for the changed names, attributed per head
+# (_LG_AWK_PR_CLAIMS). lg_pr_apply counts a merged PR's trailers only.
 _lg_ix_pr_claims() {
-  local B="$1" heads="$2" merged="$3" dirs="$4" out="$5" s d rc=0
+  local B="$1" heads="$2" dirs="$3" out="$4" s d rc=0
   local specs=()
   : > "$out" || _lg_die "cannot write $out"
-  [ -s "$heads" ] || [ -s "$merged" ] || return 0
+  [ -s "$heads" ] && [ -n "$B" ] || return 0
   _lg_scratch_name
   s=$_LG_SN
   while IFS= read -r d; do
     specs+=("$d")
   done < "$dirs"
-  if [ -s "$heads" ] && [ -n "$B" ]; then
-    { printf '^%s\n' "$B"; LC_ALL=C awk -F '\t' '{ print $3 }' "$heads" | LC_ALL=C sort -u; } > "$s.revs" \
-      || _lg_die "cannot write $s.revs"
-    _lg_ix_claim_trailers "$s.tr"
-    git -c log.showSignature=false log --no-color --stdin --format='%x01%H %P%n%B' < "$s.revs" > "$s.msg" 2> "$s.err" \
-      || _lg_die "git log failed (the PR heads): $(head -n 3 "$s.err")"
-    GIT_LITERAL_PATHSPECS=1 git -c log.showSignature=false log --no-color --stdin --full-history --no-renames \
-      --format=%x02%H --name-only -z -- ${specs[@]+"${specs[@]}"} < "$s.revs" > "$s.fz" 2> "$s.err" \
-      || _lg_die "git log failed (the PR heads' files): $(head -n 3 "$s.err")"
-    tr '\n\000' '\001\n' < "$s.fz" > "$s.files" || _lg_die "cannot read the PR heads' files"
-    LC_ALL=C awk -v heads="$heads" -v files="$s.files" -v tr="$s.tr" "$_LG_AWK_TRAILER$_LG_AWK_PR_CLAIMS" "$s.msg" >> "$out" \
-      || rc=$?
-    [ "$rc" = 0 ] || _lg_die "cannot attribute the PR heads' commits (awk rc $rc)"
-  fi
-  if [ -s "$merged" ]; then
-    LC_ALL=C awk -F '\t' '{ print $2 }' "$merged" | LC_ALL=C sort -u > "$s.mrevs" || _lg_die "cannot write $s.mrevs"
-    GIT_LITERAL_PATHSPECS=1 git -c log.showSignature=false log --no-color --stdin --no-walk=unsorted -m --first-parent \
-      --no-renames --format=%x02%H --name-only -z -- ${specs[@]+"${specs[@]}"} < "$s.mrevs" > "$s.mz" 2> "$s.err" \
-      || _lg_die "git log failed (the merged PRs): $(head -n 3 "$s.err")"
-    tr '\n\000' '\001\n' < "$s.mz" | LC_ALL=C awk -v merged="$merged" '
-      BEGIN { while ((getline l < merged) > 0) { t = index(l, "\t"); N[substr(l, t + 1)] = N[substr(l, t + 1)] " " substr(l, 1, t - 1) } }
-      substr($0, 1, 1) == "\002" { c = substr($0, 2); next }
-      {
-        t = $0; if (substr(t, 1, 1) == "\001") t = substr(t, 2)
-        if (t == "" || c == "" || !(c in N)) next
-        k = split(N[c], A, " ")
-        for (i = 1; i <= k; i++) if (!((A[i], t) in OUT)) { OUT[A[i], t] = 1; print A[i] "\tfile\t" t }
-      }' >> "$out" || _lg_die "cannot read the merged PRs' files"
-  fi
+  { printf '^%s\n' "$B"; LC_ALL=C awk -F '\t' '{ print $3 }' "$heads" | LC_ALL=C sort -u; } > "$s.revs" \
+    || _lg_die "cannot write $s.revs"
+  _lg_ix_claim_trailers "$s.tr"
+  git -c log.showSignature=false log --no-color --stdin --format='%x01%H %P%n%B' < "$s.revs" > "$s.msg" 2> "$s.err" \
+    || _lg_die "git log failed (the PR heads): $(head -n 3 "$s.err")"
+  GIT_LITERAL_PATHSPECS=1 git -c log.showSignature=false log --no-color --stdin --full-history --no-renames \
+    --format=%x02%H --name-only -z -- ${specs[@]+"${specs[@]}"} < "$s.revs" > "$s.fz" 2> "$s.err" \
+    || _lg_die "git log failed (the PR heads' files): $(head -n 3 "$s.err")"
+  tr '\n\000' '\001\n' < "$s.fz" > "$s.files" || _lg_die "cannot read the PR heads' files"
+  LC_ALL=C awk -v heads="$heads" -v files="$s.files" -v tr="$s.tr" "$_LG_AWK_TRAILER$_LG_AWK_PR_CLAIMS" "$s.msg" >> "$out" \
+    || rc=$?
+  [ "$rc" = 0 ] || _lg_die "cannot attribute the PR heads' commits (awk rc $rc)"
 }
 
 # --- _lg_index ---------------------------------------------------------------------
@@ -1580,11 +1601,10 @@ _lg_index() {
   printf '%s\0' "$_LG_CFG" "$s.adc" "$s.ade" >> "$s.hashin"
   # The PR data (worktree and --rev; --staged, which only validate reads,
   # has none): the adapter's list through the remote cache, the open
-  # heads' oids, the merge commits present — all in the key.
+  # and merged heads' oids — all in the key.
   if [ "$mode" = staged ]; then
     : > "$s.prl"
     : > "$s.prheads"
-    : > "$s.prmerged"
     printf 'pr skipped\n' > "$s.prkey"
   else
     _lg_ix_pr_prepare "$base" "$s"
@@ -1679,7 +1699,7 @@ _lg_index() {
   else
     _lg_ix_base_claims "$base"
   fi
-  _lg_ix_pr_claims "$base" "$s.prheads" "$s.prmerged" "$s.pfdirs" "$s.pcl"
+  _lg_ix_pr_claims "$base" "$s.prheads" "$s.pfdirs" "$s.pcl"
   : > "$s.none"
   _lg_registry_findings "$reg" "$s.none" "$s.rf"
   rfn=$(wc -l < "$s.rf" | tr -d ' ')
