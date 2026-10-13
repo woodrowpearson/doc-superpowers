@@ -47,6 +47,13 @@
 #              one branch moved (the overlay rebuilt from one new facts
 #              file: the steady state on a host with many worktrees),
 #              best of 3, < 1.5 s
+#   notices (20 branches, facts cold)   `ledger notices --branch n-1` with
+#              config inflight.enabled and 20 unmerged branches (n-1 … n-20,
+#              one commit past main each: every one claims an item and
+#              edits src/notices.txt, every other one also claims n-1's
+#              item, every fourth touches a contract's src file), the index
+#              warm and every in-flight cache wiped (merge bases, branch
+#              facts, overlays, the join's index lines) < 2 s
 #   refs step  the index build's parse-reference step (_lg_ix_refs) over all
 #              N items as blob records — the --staged / --rev case, which
 #              probes one parse entry per blob; reported, no budget
@@ -120,6 +127,8 @@ B_VSTAGED=$(b_budget 1)
 # Task 11 fix round 2: accepted at ≤ 1.5 s; a per-branch join cache is the
 # remedy if a quiet host exceeds it).
 B_TIPMOVE=$(b_budget 1.5)
+# ledger notices with the branch facts cold (Task 12, controller ruling R7).
+B_NOTICES=$(b_budget 2)
 
 # A private root and git environment: no user or system config.
 B_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/bench-ledger.XXXXXX") || b_die "mktemp failed"
@@ -588,6 +597,44 @@ b_row "one tip moved, facts warm (ls)" "-" "$ifl_best" "$B_TIPMOVE s · $B_MARK"
 echo "  (in flight: $(wc -l < "$B_OUT" | tr -d ' ') branches listed; $(jq -r '[.items[] | .derived.status] | group_by(.) | map(select(.[0] == "on branch") | "\(.[0]) \(length)") | join(", ")' "$B_ROOT/ifl.ls"))"
 git checkout -q -- docs/ledger/config.json
 git for-each-ref --format='delete %(refname)' 'refs/heads/m-*' 'refs/heads/f-*' refs/remotes/origin/ refs/doc-superpowers/ | git update-ref --stdin
+
+# Notices: 20 branches in flight (see the header), B = n-1; undone after
+# the row.
+b_notices() {
+  local main now i f key key1="" msg
+  main=$(git rev-parse main)
+  now=$(date +%s)
+  git ls-files -- 'docs/issues/*.md' | awk 'NR <= 20' > "$B_ROOT/ntc.files"
+  # shellcheck disable=SC2046  # file names without blanks
+  awk 'FNR == 1 { k = "" } /^key: / && k == "" { k = $2; print FILENAME "\t" k }' $(cat "$B_ROOT/ntc.files") > "$B_ROOT/ntc.keys"
+  i=0
+  while IFS="$(printf '\t')" read -r f key; do
+    i=$((i + 1))
+    [ -n "$key1" ] || key1=$key
+    msg="notice work $i
+
+Ledger-Claims: $key$(if [ $((i % 2)) = 0 ]; then printf ', %s' "$key1"; fi)
+"
+    printf 'commit refs/heads/n-%d\ncommitter Bench <bench@example.com> %d +0000\ndata %d\n%s\nfrom %s\nM 100644 inline src/notices.txt\ndata %d\nnotices %d\n\n' \
+      "$i" "$((now - 600 - i))" "$(printf '%s' "$msg" | wc -c | tr -d ' ')" "$msg" "$main" "$(printf 'notices %d\n' "$i" | wc -c | tr -d ' ')" "$i"
+    if [ $((i % 4)) = 0 ]; then
+      printf 'commit refs/heads/n-%d\ncommitter Bench <bench@example.com> %d +0000\ndata 8\ncontract\nM 100644 inline src/f%d.txt\ndata 8\nnotices\n\n' \
+        "$i" "$((now - 500 - i))" "$((i % 50))"
+    fi
+  done < "$B_ROOT/ntc.keys" > "$B_ROOT/ntc.stream"
+  LC_ALL=C git fast-import --quiet < "$B_ROOT/ntc.stream" || b_die "git fast-import (notices branches) failed"
+  if ! jq -c '.inflight = {enabled: true, host_id: "bench"}' docs/ledger/config.json > "$B_ROOT/config.json" \
+      || ! cp "$B_ROOT/config.json" docs/ledger/config.json; then
+    b_die "cannot enable in-flight awareness"
+  fi
+}
+b_notices
+"$B_BASH" "$B_DT" ledger ls > /dev/null 2>&1 || b_die "ls failed"
+b_measure "notices (20 branches, facts cold)" "$B_NOTICES" 3 "$B_BASH" "$B_DT" ledger notices --branch n-1
+b_row "notices (20 branches, facts cold)" "$B_SEC" "-" "$B_NOTICES s · $B_MARK"
+echo "  (notices: $(wc -l < "$B_OUT" | tr -d ' ') lines: $(awk '{ print $1 }' "$B_OUT" | sort | uniq -c | awk '{ printf "%s%s %s", (NR > 1 ? ", " : ""), $1, $2 }'))"
+git checkout -q -- docs/ledger/config.json
+git for-each-ref --format='delete %(refname)' 'refs/heads/n-*' | git update-ref --stdin
 
 # The base ≠ HEAD: HEAD 20 commits ahead of the base (the base's events are
 # derived from HEAD's walk), then the base 20 commits ahead of HEAD (HEAD is

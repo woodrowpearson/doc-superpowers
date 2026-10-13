@@ -1141,8 +1141,10 @@ _lg_ifl_prepare_wait() {
 # <oid>\t<sources>\t<mb>\t<facts>". Prints per branch "B\t<i>\t<host>\t
 # <name>\t<oid>\t<sources>\t<mb>\t<pr n>\t<pr url>\t<files n>", then
 # "C\t<i>\t<path>\t<id>" (claims), "X\t<i>\t<contract>\t<line>",
-# "A\t<i>\t<ack>", "R\t<i>\t<#N>", "F\t<i>\t<file>" (files=1). Names use
-# \001 for a newline and \002 for a tab.
+# "A\t<i>\t<ack>", "R\t<i>\t<#N>", "F\t<i>\t<file>" (files 1 or 2),
+# "Y\t<i>\t<contract>\t<file>" (files 2: each net-diff file a contract's
+# defined_in matches — the notices' diffstats). Names use \001 for a
+# newline and \002 for a tab.
 # shellcheck disable=SC2016  # awk source
 _LG_AWK_IFL_JOIN='
 function claim(i, p) { if (!((i, p) in CL)) { CL[i, p] = 1; print "C\t" i "\t" p "\t" ID[p] } }
@@ -1175,7 +1177,7 @@ BEGIN {
       if (p in ID) claim(i, p)
       q = p; gsub(/\001/, "\n", q); gsub(/\002/, "\t", q)
       gx_match(q)
-      for (j = 1; j <= GX_MN; j++) cc(i, CID[GX_M[j]], "")
+      for (j = 1; j <= GX_MN; j++) { cc(i, CID[GX_M[j]], ""); if (files == 2) print "Y\t" i "\t" CID[GX_M[j]] "\t" p }
     } else if (k == "T\t") {
       l = substr(l, 3); t = index(l, "\t"); kind = substr(l, 1, t - 1); v = substr(l, t + 1)
       if (kind == "claims") {
@@ -1210,7 +1212,8 @@ BEGIN {
 
 # The join's lines → the branches (jq, -R -n): [{host, own, name, branch,
 # oid, sources, merge_base, pr, files_n, claims, claim_paths,
-# contract_changes, acks, refs[, files]}] in scan order; $me the host id.
+# contract_changes, acks, refs[, files][, contract_files]}] in scan order;
+# $me the host id; contract_files ($cf): {<contract>: [files]}.
 # shellcheck disable=SC2016  # jq source
 _LG_JQ_IFL_BRANCHES='
 def dec: if test("[\u0001\u0002]") then gsub("\u0001"; "\n") | gsub("\u0002"; "\t") else . end;
@@ -1228,11 +1231,13 @@ def dec: if test("[\u0001\u0002]") then gsub("\u0001"; "\n") | gsub("\u0002"; "\
        contract_changes: ([($G["X\($i)"] // [])[] | {id: .[0], line: (if (.[1] // "") == "" then null else .[1] end)}] | sort_by(.id)),
        acks: ([($G["A\($i)"] // [])[] | .[0]] | unique),
        refs: ([($G["R\($i)"] // [])[] | .[0]] | unique)}
-    + (if $files then {files: [($G["F\($i)"] // [])[] | .[0] | dec]} else {} end) ]
+    + (if $files then {files: [($G["F\($i)"] // [])[] | .[0] | dec]} else {} end)
+    + (if $cf then {contract_files: (lg_lists(($G["Y\($i)"] // [])[] | {k: .[0], v: (.[1] | dec)}) | map_values(unique))} else {} end) ]
 '
 
-# _lg_ifl_join <index> <scan> <files 0|1> <out>: the branches (see
-# _LG_JQ_IFL_BRANCHES) as one JSON array in <out>.
+# _lg_ifl_join <index> <scan> <files 0|1|2> <out>: the branches (see
+# _LG_JQ_IFL_BRANCHES) as one JSON array in <out>; files 1 lists each
+# branch's files, 2 also its contract files.
 _lg_ifl_join() {
   local ix="$1" scan="$2" files="$3" out="$4" s prl heads ixd dir k tmp
   _lg_scratch_name
@@ -1272,7 +1277,7 @@ _lg_ifl_join() {
   _lg_ifl_join_lines "$ixd" "$scan" "$files" "$out" "$heads"
 }
 
-# _lg_ifl_join_lines <ixd> <scan> <files 0|1> <out> <heads>: the join
+# _lg_ifl_join_lines <ixd> <scan> <files 0|1|2> <out> <heads>: the join
 # proper (_LG_AWK_IFL_JOIN, _LG_JQ_IFL_BRANCHES).
 _lg_ifl_join_lines() {
   local s
@@ -1281,7 +1286,8 @@ _lg_ifl_join_lines() {
   LC_ALL=C awk -F '\t' '{ print (NR - 1) "\t" $0 }' "$2" \
     | LC_ALL=C awk -v ixd="$1" -v heads="$5" -v me="$_LG_IFL_ME" -v files="$3" "$_LG_AWK_GLOB$_LG_AWK_IFL_JOIN" > "$s.join" \
     || _lg_die "cannot join the in-flight branches with the index"
-  jq -L "$_LG_LIB" -R -n -c --arg me "$_LG_IFL_ME" --argjson files "$( [ "$3" = 1 ] && echo true || echo false )" \
+  jq -L "$_LG_LIB" -R -n -c --arg me "$_LG_IFL_ME" --argjson files "$( [ "$3" != 0 ] && echo true || echo false )" \
+    --argjson cf "$( [ "$3" = 2 ] && echo true || echo false )" \
     "$_LG_JQ_INCLUDE$_LG_JQ_IFL_BRANCHES" "$s.join" > "$4" || _lg_die "jq failed (the in-flight branches)"
 }
 
@@ -1333,7 +1339,8 @@ _lg_ifl_overlay() {
   # shellcheck disable=SC2012  # cache names are overlay-<hex>.json
   ls -t "$dir"/overlay-*.json 2>/dev/null | tail -n +4 | while IFS= read -r tmp; do rm -f "$tmp"; done
   cut -f 6 "$s.scan" | tr '\n' '\000' | xargs -0 touch -c 2>/dev/null || true
-  find "$_LG_CACHE/branch" -maxdepth 1 \( -name 'f-*.tsv' -mtime +30 -o -name '.new.*' -mmin +60 -o -name '.mb.*' -mmin +60 \) \
+  find "$_LG_CACHE/branch" -maxdepth 1 \( -name 'f-*.tsv' -mtime +30 -o -name 'r-*.tsv' -mtime +30 -o -name '.new.*' -mmin +60 \
+    -o -name '.mb.*' -mmin +60 -o -name '.rf.*' -mmin +60 \) \
     -exec rm -rf {} + 2>/dev/null || true
   _LG_IFL_OV=$f
 }
@@ -1381,6 +1388,505 @@ _lg_branch_facts() {
   jq -c '.[0] | {merge_base, files, claims, contract_changes, acks, refs}' "$s.br" || _lg_die "jq failed (the branch facts)"
 }
 
+# --- Notices (design §H.2) ------------------------------------------------------------
+#
+# ledger notices [--branch B] [--gate] [--fetch]: for branch B (default: the
+# current branch; a detached worktree is its "(detached:…)" entry), against
+# every other branch in flight and the base since B's merge base (ruling
+# R1: B's work, and every other branch's, is merge-base(<base>, X)..X; the
+# base's is merge-base(<base>, B)..<base> — its contract changes found as a
+# branch's are: a defined_in path in its net diff, or a Contract-Change
+# line):
+#   stop      another branch, or the base, changes a contract B's claimed
+#             items consume or B changes itself (overlap: contracts); or it
+#             claims an item B claims (overlap: keys — B's own item file,
+#             edited on both, is then no heads-up too)
+#   heads-up  another branch changes files B changes (overlap: files)
+#   info      another branch claims a sibling of an item B claims (defs.jq
+#             lg_relations: a contract both change or both consume, or a
+#             relates sibling) (overlap: keys)
+# One notice per (other branch, urgency, overlap kind). Notice = {id,
+# urgency, other: {branch, host, pr}, overlap: {contracts|keys|files: […]},
+# what_changed, action}; other.branch is the branch's name (the base's
+# ref name, host and pr null, for the base); id = the first 12 hex of
+# sha256(<other> NUL <kind>:<values joined by ","> NUL <other's tip>) —
+# <other> "<name>" (this host's), "<name>@<host>" (another's) or the base's
+# ref name — so a notice fires again only when the other side moves.
+# what_changed: per contract "<id>: <Contract-Change line>", else "<id>:
+# <diffstat of its defined_in files>"; files: the diffstat of the shared
+# files; keys: the other branch's whole diffstat ("<n> file(s), +<added>
+# -<deleted>", "0 files"). action: stop reconcile-before-next-chunk,
+# heads-up rebase-after-merge, info heads-up. A `Ledger-Ack: <id>` trailer
+# line (the configured trailers.ack name, case-sensitive; " — <clause>"
+# may follow) anywhere in B's range hides that notice; an ack of an id that
+# does not fire is silent. Sorted by urgency (stop, heads-up, info), then
+# <other>, then id. Text: "<urgency> <id> <other> <PR #n|no PR>
+# <kind>:<values> — <what_changed> → <action>" (the first three values,
+# then " (+n)"). JSON: {"notices": […], "pr_data"}. Exit 0; with --gate, 1
+# when a stop notice is not acked; 2 when it cannot run (a base that does
+# not resolve, a --branch naming no branch). DOC_TOOLS_LEDGER_OFFLINE=1:
+# the refs and branch facts here, the note says so, nothing fetched
+# (--fetch: exit 2). Computed from the cached branch facts (_lg_ifl_resolve
+# with check 1, _lg_ifl_join) — never an index rebuild; the base's range
+# has its own facts file (_lg_ifl_range_facts).
+
+# _lg_ifl_range_facts <mb> <tip>: the facts of the range <mb>..<tip> — the
+# base since a branch's merge base — into $_LG_IFL_RF, a facts file
+# (branch/r-<mb>-<tip>-<sig>.tsv: its net diff's "F" lines and its
+# Contract-Change "T" lines; facts about two commits, kept like a branch's).
+_LG_IFL_RF=""
+_lg_ifl_range_facts() {
+  local mb="$1" t="$2" s dir f h="" tmp
+  _lg_ifl_sig
+  dir="$_LG_CACHE/branch"
+  f="$dir/r-$mb-$t-$_LG_IFL_SIG.tsv"
+  _LG_IFL_RF=$f
+  if [ -s "$f" ]; then
+    { IFS= read -r h < "$f"; } 2>/dev/null || h=""
+    if [ "$h" = "# $_LG_IFL_FACTS $_LG_IFL_SIG" ]; then
+      touch -c "$f" 2>/dev/null || true
+      return 0
+    fi
+  fi
+  _lg_scratch_name
+  s=$_LG_SN
+  git diff --name-only -z --no-renames "$mb" "$t" -- > "$s.dz" 2> "$s.err" \
+    || _lg_die "git diff failed (the base since $mb): $(head -n 1 "$s.err")"
+  _lg_msg_claims "$mb..$t" > "$s.tr"
+  mkdir -p -- "$dir" 2>/dev/null || _lg_die "cannot create $dir"
+  tmp=$(mktemp "$dir/.rf.XXXXXX") || _lg_die "cannot create a temp file in $dir"
+  if ! {
+      printf '# %s %s\nmb\t%s\n' "$_LG_IFL_FACTS" "$_LG_IFL_SIG" "$mb"
+      tr '\n\000' '\001\n' < "$s.dz" | LC_ALL=C awk '$0 != "" { x = $0; gsub(/\t/, "\002", x); print "F\t" x }'
+      LC_ALL=C awk -F '\t' '$2 == "contract_change" { print "T\tcontract_change\t" substr($0, length($1) + length($2) + 3) }' "$s.tr"
+      printf '# end\n'
+    } > "$tmp" || ! mv -f -- "$tmp" "$f"; then
+    rm -f -- "$tmp"
+    _lg_die "cannot write $f"
+  fi
+}
+
+# The notices (jq, the index as input; --slurpfile br: the branches of
+# _lg_ifl_join with files 2; $bh/$bn: B; $base: the base's name; $me):
+# raw lines "A\t<ack>" (B's acks), and per notice "J\t<json>" ({n,
+# urgency, other, disp, oid, mb, kind, vals, stat ("all" | [files] | null),
+# parts (contracts: [{id, line, files}])}), "H\t<n>\t<disp>\t<kind>:<vals>\t
+# <oid>" (the id's input; \n and \t as \001 and \002), "P\t<oid> <mb>" (a
+# diffstat to compute).
+# shellcheck disable=SC2016  # jq source
+_LG_JQ_NTC_FIND='
+def enc: if test("[\n\t]") then gsub("\n"; "\u0001") | gsub("\t"; "\u0002") else . end;
+$br[0] as $BR
+| (first($BR[] | select(.host == $bh and .name == $bn)) // null) as $B
+| if $B == null then empty else
+  lg_obj($B.claim_paths[] | {(.): true}) as $BP
+  | [.items[] | select($BP[.path] == true)] as $BI
+  | lg_obj((($BI[] | (.consumes // [])[] | strings), ($B.contract_changes[] | .id)) | {(.): true}) as $S
+  | lg_obj($B.claims[] | {(.): true}) as $BC
+  | lg_obj($BI[] | (.neighbours.siblings // [])[] | .key | strings | select($BC[.] != true) | {(.): true}) as $SIB
+  | lg_obj(($B.files // [])[] | {(.): true}) as $BF
+  | def parts($X; $cc): [$cc[] | {id, line, files: (($X.contract_files // {})[.id] // [])}];
+  ($B.acks[] | "A\t\(.)"),
+  ([ ( $BR[] | select((.name == "^base" or .oid == $B.oid) | not) as $X
+       | {other: {branch: $X.name, host: $X.host, pr: $X.pr},
+          disp: (if $X.host == $me then $X.name else "\($X.name)@\($X.host)" end), oid: $X.oid, mb: $X.merge_base} as $o
+       | [$X.contract_changes[] | select($S[.id] == true)] as $cc
+       | ([$X.claims[] | select($BC[.] == true)] | unique) as $dk
+       | lg_obj($X.claim_paths[] | select($BP[.] == true) | {(.): true}) as $DP
+       | ([($X.files // [])[] | select($BF[.] == true and $DP[.] != true)] | unique) as $df
+       | ([$X.claims[] | select($SIB[.] == true)] | unique) as $ik
+       | (if $cc != [] then $o + {urgency: "stop", kind: "contracts", vals: [$cc[] | .id], stat: null, parts: parts($X; $cc)} else empty end),
+         (if $dk != [] then $o + {urgency: "stop", kind: "keys", vals: $dk, stat: "all"} else empty end),
+         (if $df != [] then $o + {urgency: "heads-up", kind: "files", vals: $df, stat: $df} else empty end),
+         (if $ik != [] then $o + {urgency: "info", kind: "keys", vals: $ik, stat: "all"} else empty end) ),
+     ( $BR[] | select(.name == "^base") as $X
+       | [$X.contract_changes[] | select($S[.id] == true)] as $cc
+       | if $cc == [] then empty
+         else {other: {branch: $base, host: null, pr: null}, disp: $base, oid: $X.oid, mb: $X.merge_base,
+               urgency: "stop", kind: "contracts", vals: [$cc[] | .id], stat: null, parts: parts($X; $cc)} end ) ]
+   | to_entries[] | .value + {n: .key}
+   | "J\t\(tojson)",
+     "H\t\(.n)\t\(.disp | enc)\t\(.kind):\(.vals | join(",") | enc)\t\(.oid)",
+     (if .stat != null or any(.parts[]; .line == null and (.files | length) > 0) then "P\t\(.oid) \(.mb)" else empty end))
+  end
+'
+
+# The notices, finished (jq -n -R; inputs: "I\t<n>\t<id>", "A\t<ack>",
+# "S\t<oid>\t<added>\t<deleted>\t<path>"; --slurpfile N: the J objects):
+# line 1 the unacked stop count, line 2 {"notices": […]}, then one text
+# line per notice.
+# shellcheck disable=SC2016  # jq source
+_LG_JQ_NTC_FINISH='
+def dec: if test("[\u0001\u0002]") then gsub("\u0001"; "\n") | gsub("\u0002"; "\t") else . end;
+[inputs | split("\t")] as $L
+| lg_obj($L[] | select(.[0] == "I") | {(.[1]): .[2]}) as $ID
+| lg_obj($L[] | select(.[0] == "A") | {(.[1]): true}) as $ACK
+| lg_lists($L[] | select(.[0] == "S") | {k: .[1], v: {p: (.[4] | dec), a: (.[2] | tonumber), d: (.[3] | tonumber)}}) as $ST
+| def stat($o; $fs):
+    ($ST[$o] // []) as $all
+    | (if $fs == "all" then $all else (lg_obj($fs[] | {(.): true}) as $F | [$all[] | select($F[.p] == true)]) end)
+    | if length == 0 then "0 files"
+      else "\(length) file\(if length == 1 then "" else "s" end), +\(map(.a) | add) -\(map(.d) | add)" end;
+  [ $N[] | . + {id: $ID["\(.n)"]} | select($ACK[.id] != true)
+    | .oid as $o
+    | {rank: {"stop": 0, "heads-up": 1, "info": 2}[.urgency], disp, kind, vals,
+       notice: {id, urgency, other, overlap: {(.kind): .vals},
+                what_changed: (if .kind == "contracts"
+                               then [.parts[] | if .line != null then "\(.id): \(.line)"
+                                                elif (.files | length) > 0 then "\(.id): \(stat($o; .files))"
+                                                else "\(.id) (Contract-Change)" end] | join("; ")
+                               else stat($o; .stat) end),
+                action: {"stop": "reconcile-before-next-chunk", "heads-up": "rebase-after-merge", "info": "heads-up"}[.urgency]}} ]
+| sort_by(.rank, .disp, .notice.id) as $S
+| ([$S[] | select(.notice.urgency == "stop")] | length),
+  ({notices: [$S[] | .notice]} | tojson),
+  ($S[] | "\(.notice.urgency) \(.notice.id) \(.disp | lg_q_one) \(if .notice.other.pr == null then "no PR" else "PR #\(.notice.other.pr.number)" end) \(.kind):\(.vals[0:3] | map(lg_q_one) | join(","))\(if (.vals | length) > 3 then " (+\((.vals | length) - 3))" else "" end) — \(.notice.what_changed | lg_q_one) → \(.notice.action)")
+'
+
+# _lg_ifl_notices <index> <branches> <B host> <B name> <out>: B's notices
+# into <out> — line 1 the unacked stop count, line 2 the JSON payload, then
+# the text lines (see the section header).
+_lg_ifl_notices() {
+  local ix="$1" br="$2" bh="$3" bn="$4" out="$5" s d n o ov oid
+  _lg_scratch_name
+  s=$_LG_SN
+  # shellcheck disable=SC2016  # jq source
+  jq -L "$_LG_LIB" -r --slurpfile br "$br" --arg bh "$bh" --arg bn "$bn" --arg base "$_LG_IFL_BASEREF" --arg me "$_LG_IFL_ME" \
+    "$_LG_JQ_INCLUDE$_LG_JQ_NTC_FIND" "$ix" > "$s.find" || _lg_die "jq failed (the notices)"
+  LC_ALL=C awk -v j="$s.nj" -v a="$s.sx" -v p="$s.pairs" -v h="$s.pre" '
+    BEGIN { printf "" > j; printf "" > a; printf "" > p; printf "" > h }
+    substr($0, 1, 2) == "J\t" { print substr($0, 3) > j; next }
+    substr($0, 1, 2) == "A\t" { print > a; next }
+    substr($0, 1, 2) == "P\t" { k = substr($0, 3); if (!(k in S)) { S[k] = 1; print k > p }; next }
+    substr($0, 1, 2) == "H\t" { print substr($0, 3) > h }' "$s.find" || _lg_die "cannot split the notices"
+  if [ -s "$s.pairs" ]; then
+    # One diff-tree for every diffstat: "<tip> <mb>" pairs — read as a
+    # commit and its parent, so git prints the tip as the header and diffs
+    # mb → tip.
+    git diff-tree --stdin -r --numstat -z --no-renames < "$s.pairs" > "$s.nz" 2> "$s.err" \
+      || _lg_die "git diff-tree failed (the notices' diffstats): $(head -n 1 "$s.err")"
+    tr '\n\000' '\001\n' < "$s.nz" | LC_ALL=C awk -v pairs="$s.pairs" '
+      BEGIN { while ((getline l < pairs) > 0) { split(l, x, " "); TIP[x[1]] = 1 } }
+      ($0 in TIP) { t = $0; next }
+      t != "" && $0 != "" {
+        i = index($0, "\t"); a = substr($0, 1, i - 1); r = substr($0, i + 1)
+        i = index(r, "\t"); d = substr(r, 1, i - 1); p = substr(r, i + 1); gsub(/\t/, "\002", p)
+        if (a !~ /^[0-9]+$/) a = 0
+        if (d !~ /^[0-9]+$/) d = 0
+        print "S\t" t "\t" a "\t" d "\t" p
+      }' >> "$s.sx" || _lg_die "cannot read the notices' diffstats"
+  fi
+  if [ -s "$s.pre" ]; then
+    # The ids: one file per notice holding <other> NUL <overlap> NUL <oid>,
+    # one sha256 call for all.
+    d="$s.ids"
+    mkdir -p -- "$d" || _lg_die "cannot create $d"
+    while IFS="$(printf '\t')" read -r n o ov oid; do
+      o=${o//$'\001'/$'\n'}
+      o=${o//$'\002'/$'\t'}
+      ov=${ov//$'\001'/$'\n'}
+      ov=${ov//$'\002'/$'\t'}
+      printf '%s\0%s\0%s' "$o" "$ov" "$oid" > "$d/$n" || _lg_die "cannot write $d/$n"
+    done < "$s.pre"
+    # (The files are named 0, 1, …: the glob is safe.)
+    if command -v sha256sum >/dev/null 2>&1; then
+      ( cd "$d" && sha256sum -- * ) > "$s.sha" 2> "$s.err" || _lg_die "sha256sum failed"
+    else
+      ( cd "$d" && shasum -a 256 -- * ) > "$s.sha" 2> "$s.err" || _lg_die "shasum failed"
+    fi
+    LC_ALL=C awk '{ print "I\t" $2 "\t" substr($1, 1, 12) }' "$s.sha" >> "$s.sx" || _lg_die "cannot read the notice ids"
+  fi
+  jq -L "$_LG_LIB" -n -r -R --slurpfile N "$s.nj" "$_LG_JQ_INCLUDE$_LG_JQ_NTC_FINISH" "$s.sx" > "$out" \
+    || _lg_die "jq failed (the notices' payload)"
+}
+
+# shellcheck disable=SC2154  # _OPT_* and _ARGS are set by _parse_args
+cmd_ledger_notices() {
+  local s ix want bh="" bn="" bmb="" fetch=0 rc=0 nstop=0 head="" payload=""
+  _lg_init notices
+  [ "${#_ARGS[@]}" = 0 ] || _lg_usage "unexpected argument '${_ARGS[0]}'"
+  if [ -n "$_OPT_fetch" ]; then fetch=1; fi
+  want=${_OPT_branch:-}
+  _lg_scratch_name
+  s=$_LG_SN
+  _lg_ifl_load
+  if [ "$_LG_IFL_ON" != 1 ]; then
+    if [ "$_LG_FORMAT" = json ]; then
+      printf '{"inflight_enabled":false,"notices":[]}\n' > "$s.json" || _lg_die "cannot write $s.json"
+      _lg_emit notices 0 "$s.json"
+    fi
+    printf 'in-flight awareness is off (config inflight.enabled): no notices\n' > "$s.out" || _lg_die "cannot write $s.out"
+    _lg_out_file "$s.out"
+    _lg_emit notices 0
+  fi
+  _lg_ifl_prepare "$fetch"
+  [ -n "$_LG_IFL_B" ] || _lg_die "the base '$_LG_IFL_BASEREF' does not resolve: no notices"
+  if [ "${DOC_TOOLS_LEDGER_OFFLINE:-}" = 1 ]; then
+    _lg_ifl_note "offline (DOC_TOOLS_LEDGER_OFFLINE=1): notices from the in-flight refs and branch facts here, nothing fetched"
+  fi
+  # B: --branch <name>|<name>@<host>, else the current branch, else (HEAD
+  # detached) this worktree's "(detached:…)" entry — the one at HEAD.
+  if [ -z "$want" ] && [ -z "$_LG_IFL_CUR" ]; then
+    head=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || head=""
+  fi
+  LC_ALL=C awk -F '\t' -v me="$_LG_IFL_ME" -v want="$want" -v cur="$_LG_IFL_CUR" -v head="$head" '
+    want != "" { if (($1 == me && $2 == want) || ($2 "@" $1) == want) { print; exit } next }
+    cur != "" { if ($1 == me && $2 == cur) { print; exit } next }
+    head != "" && $1 == me && substr($2, 1, 10) == "(detached:" && $3 == head { print; exit }' "$_LG_IFL_SCAN" > "$s.b" \
+    || _lg_die "cannot find the branch"
+  { IFS="$(printf '\t')" read -r bh bn _ _ bmb _; } < "$s.b" 2>/dev/null || true
+  if [ -z "$bn" ] && [ -n "$want" ]; then
+    if git show-ref -q --verify "refs/heads/$want" 2>/dev/null || [ "$want" = "$_LG_IFL_BB" ]; then
+      _lg_ifl_note "'$want' is not in flight (merged, no commits beyond the base, or older than inflight.max_age_days): no notices"
+    else
+      _lg_die "no branch '$want' here or in flight"
+    fi
+  fi
+  ix=$(_lg_index) || exit "$?"
+  _lg_ifl_index_note
+  if [ -n "$bn" ]; then
+    # Every branch's facts, checked (computed when missing); the base since
+    # B's merge base as one more line ("^base": never a branch name).
+    _lg_ifl_resolve "$_LG_IFL_CANDS" "$s.scan" 1
+    if [ "$bmb" != "$_LG_IFL_B" ]; then
+      _lg_ifl_range_facts "$bmb" "$_LG_IFL_B"
+      printf '%s\t^base\t%s\t-\t%s\t%s\t\n' "$_LG_IFL_ME" "$_LG_IFL_B" "$bmb" "$_LG_IFL_RF" >> "$s.scan" || _lg_die "cannot write $s.scan"
+    fi
+    _lg_ifl_join "$ix" "$s.scan" 2 "$s.br"
+    _lg_ifl_notices "$ix" "$s.br" "$bh" "$bn" "$s.nt"
+  else
+    printf '0\n{"notices":[]}\n' > "$s.nt" || _lg_die "cannot write $s.nt"
+  fi
+  { IFS= read -r nstop; IFS= read -r payload; } < "$s.nt" || _lg_die "internal: no notices payload"
+  if [ -n "$_OPT_gate" ] && [ "$nstop" -gt 0 ] 2>/dev/null; then rc=1; fi
+  if [ "$_LG_FORMAT" = json ]; then
+    printf '%s\n' "$payload" > "$s.json" || _lg_die "cannot write $s.json"
+    _lg_pr_data_into "$s.json"
+    _lg_emit notices "$rc" "$s.json"
+  fi
+  tail -n +3 "$s.nt" > "$s.out" || _lg_die "cannot write $s.out"
+  _lg_out_file "$s.out"
+  _lg_emit notices "$rc"
+}
+
+# --- Push and prune (design §H.1) -----------------------------------------------------
+
+# _lg_ifl_push_run <git push args…>: git push in the background and waited
+# for, reaped with every process under it on TERM / INT (_lg_ifl_fetch_run's
+# shape); stdout and stderr are the caller's.
+_lg_ifl_push_run() {
+  local p rc=0
+  LC_ALL=C git push "$@" < /dev/null &
+  p=$!
+  # shellcheck disable=SC2064  # $p now, on purpose
+  trap "_lg_kill_tree $p; exit 143" TERM
+  # shellcheck disable=SC2064
+  trap "_lg_kill_tree $p; exit 130" INT
+  wait "$p" || rc=$?
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  return "$rc"
+}
+
+# _lg_ifl_push_refname <host> <branch>: print the ref `inflight --push`
+# writes, <ref_prefix>/<host>/<branch>; dies (2) when `git check-ref-format`
+# refuses it.
+_lg_ifl_push_refname() {
+  local r
+  _lg_ifl_load
+  r="$_LG_IFL_PREFIX/$1/$2"
+  git check-ref-format "$r" 2>/dev/null \
+    || _lg_die "'$r' is not a ref name git accepts (git check-ref-format): nothing pushed"
+  printf '%s\n' "$r"
+}
+
+# _lg_ifl_push_end <s> <rc> <pushed true|false> <stream out|err> <line>
+# [<ref> <oid> <base-oid>]: the --push verdict — <line> on the run's output
+# (out) or stderr (err, a warning); JSON {pushed, remote, ref, oid,
+# base_oid, note} (plus $s.check, when present, as "check").
+_lg_ifl_push_end() {
+  local s="$1" rc="$2" pushed="$3" stream="$4" line="$5" ref="${6:-}" oid="${7:-}" mb="${8:-}"
+  if [ "$stream" = err ]; then printf 'ledger inflight --push: %s\n' "$line" >&2; fi
+  if [ "$_LG_FORMAT" = json ]; then
+    [ -f "$s.check" ] || printf 'null\n' > "$s.check" || _lg_die "cannot write $s.check"
+    # shellcheck disable=SC2016  # jq source
+    jq -nc --argjson p "$pushed" --arg r "${_LG_IFL_REMOTE:-}" --arg ref "$ref" --arg o "$oid" --arg mb "$mb" --arg n "$line" \
+      --slurpfile c "$s.check" \
+      'def nn: if . == "" then null else . end;
+       {pushed: $p, remote: ($r | nn), ref: ($ref | nn), oid: ($o | nn), base_oid: ($mb | nn), note: $n}
+       + (if $c[0] == null then {} else {check: $c[0]} end)' > "$s.json" || _lg_die "jq failed (the push verdict)"
+    _lg_emit inflight "$rc" "$s.json"
+  fi
+  if [ "$stream" = out ]; then
+    printf '%s\n' "$line" > "$s.out" || _lg_die "cannot write $s.out"
+    if [ -f "$s.ppc" ]; then cat -- "$s.ppc" >> "$s.out" || _lg_die "cannot write $s.out"; fi
+    _lg_out_file "$s.out"
+  fi
+  _lg_emit inflight "$rc"
+}
+
+# _lg_ifl_push <s>: `ledger inflight --push` (ruling R5). This host's
+# current branch, when in-flight awareness is on and it has commits not on
+# the base: inflight.pre_push_check (when set) runs with `sh -c` in the
+# work tree's top level, its stdin exactly one line "<merge-base>..<tip>"
+# (the merge base with the base, HEAD's commit) — non-zero: nothing pushed,
+# its output shown, exit 1; then `git push --no-verify --force <keys.remote's
+# push URL> <tip>:<ref_prefix>/<host>/<branch>` (the name checked with git
+# check-ref-format: refused, exit 2). DOC_TOOLS_LEDGER_OFFLINE=1 or a remote
+# that cannot be reached: a warning, exit 0; a push the remote refuses
+# ("rejected"): exit 2. Detached HEAD, no commits beyond the base, the
+# base's own branch or views.branch: one line, exit 0.
+_lg_ifl_push() {
+  local s="$1" full br tip b bfull bb="" mb host ref url ppc rc=0 err
+  if [ "${DOC_TOOLS_LEDGER_OFFLINE:-}" = 1 ]; then
+    _lg_ifl_push_end "$s" 0 false err "offline (DOC_TOOLS_LEDGER_OFFLINE=1): nothing pushed"
+  fi
+  if [ "$_LG_IFL_ON" != 1 ]; then
+    _lg_ifl_push_end "$s" 0 false out "in-flight awareness is off (config inflight.enabled): nothing pushed"
+  fi
+  full=$(git symbolic-ref -q HEAD 2>/dev/null) || full=""
+  case "$full" in
+    refs/heads/?*) br=${full#refs/heads/} ;;
+    *) _lg_ifl_push_end "$s" 0 false out "detached HEAD: nothing pushed (an in-flight ref names a branch)" ;;
+  esac
+  tip=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) \
+    || _lg_ifl_push_end "$s" 0 false out "'$br' has no commits: nothing pushed"
+  case "$_LG_IFL_BASEREF" in
+    -*|''|$'\a'*) _lg_die "config base is not a revision: '$_LG_IFL_BASEREF'" ;;
+  esac
+  b=$(git rev-parse -q --verify "$_LG_IFL_BASEREF^{commit}" 2>/dev/null) \
+    || _lg_die "the base '$_LG_IFL_BASEREF' does not resolve: nothing pushed"
+  bfull=$(git rev-parse --symbolic-full-name "$_LG_IFL_BASEREF" 2>/dev/null) || bfull=""
+  case "$bfull" in
+    refs/heads/?*) bb=${bfull#refs/heads/} ;;
+    "refs/remotes/$_LG_IFL_REMOTE/"?*) bb=${bfull#refs/remotes/"$_LG_IFL_REMOTE"/} ;;
+    refs/remotes/?*/?*) bb=${bfull#refs/remotes/*/} ;;
+  esac
+  if [ "$br" = "$bb" ] || [ "$br" = "$_LG_IFL_VIEWS" ]; then
+    _lg_ifl_push_end "$s" 0 false out "'$br' is the base's branch or views.branch — never in flight: nothing pushed"
+  fi
+  mb=$(git merge-base "$b" "$tip" 2>/dev/null) || mb=""
+  [ -n "$mb" ] || _lg_ifl_push_end "$s" 0 false out "'$br' shares no history with the base: nothing pushed"
+  [ "$mb" != "$tip" ] || _lg_ifl_push_end "$s" 0 false out "'$br' has no commits beyond the base: nothing pushed"
+  host=$(_lg_host_id "$_LG_IFL_HOSTCFG") || exit "$?"
+  ref=$(_lg_ifl_push_refname "$host" "$br") || exit "$?"
+  url=$(git remote get-url --push "$_LG_IFL_REMOTE" 2>/dev/null) || url=""
+  [ -n "$url" ] || _lg_die "in-flight push: remote '$_LG_IFL_REMOTE' (keys.remote) has no URL"
+  # shellcheck disable=SC2016  # jq source
+  ppc=$(_lg_cfg '.inflight.pre_push_check | if type == "string" then . elif . == null then "" else "\u0007" end') || exit "$?"
+  case "$ppc" in
+    $'\a') _lg_die "config inflight.pre_push_check is not a command string" ;;
+  esac
+  if [ -n "$ppc" ]; then
+    printf '%s..%s\n' "$mb" "$tip" > "$s.ppin" || _lg_die "cannot write $s.ppin"
+    sh -c "$ppc" < "$s.ppin" > "$s.ppc" 2>&1 || rc=$?
+    if [ "$rc" != 0 ]; then
+      jq -Rsc --argjson rc "$rc" '{exit: $rc, output: .}' "$s.ppc" > "$s.check" || _lg_die "jq failed (the check's output)"
+      _lg_ifl_push_end "$s" 1 false out "inflight.pre_push_check exited $rc on $mb..$tip: nothing pushed to $ref" "$ref" "$tip" "$mb"
+    fi
+    rm -f -- "$s.ppc"
+  fi
+  if ! _lg_ifl_push_run -q --no-verify --force "$url" "$tip:$ref" > "$s.perr" 2>&1; then
+    err=$(head -n 3 "$s.perr" | tr '\n' ' ' | sed 's/ *$//')
+    if grep -q 'rejected' "$s.perr"; then
+      _lg_die "the in-flight push to $_LG_IFL_REMOTE $ref was rejected: $err"
+    fi
+    _lg_ifl_push_end "$s" 0 false err "$_LG_IFL_REMOTE cannot be reached ($err): nothing pushed" "$ref" "$tip" "$mb"
+  fi
+  _lg_ifl_push_end "$s" 0 true out "pushed $(git rev-parse --short "$tip") to $_LG_IFL_REMOTE $ref" "$ref" "$tip" "$mb"
+}
+
+# _lg_ifl_prune <base> <dry 0|1>: delete the in-flight refs on keys.remote
+# whose tips are on <base> (reachable) or older than inflight.max_age_days
+# (> 0) — read from the copies the run's forced fetch just wrote to
+# $_LG_IFL_TMP/ (_lg_ifl_prepare 1: publish), so nothing is listed again;
+# under refs/heads/ only <prefix>/<host>/<name>-shaped refs (the mirror
+# shape). One `git push --porcelain --no-verify --force-with-lease=<ref>:<oid>…
+# <url> --delete <ref>…` (each lease the fetched value: a ref pushed since is
+# kept); never offline, never without a fetched remote. With <dry> 1 nothing
+# is pushed. The refs deleted (or, dry, that would be) into
+# $_LG_IFL_PRUNED (a file, one per line; "" when none); a failure is the
+# run's note ("not pruned"), never the run's failure.
+_LG_IFL_PRUNED=""
+_lg_ifl_prune() {
+  local b="$1" dry="$2" s cutoff=0 now heads=0 n list r o rc=0
+  local -a args
+  _LG_IFL_PRUNED=""
+  [ "$_LG_IFL_ON" = 1 ] || return 0
+  [ "${DOC_TOOLS_LEDGER_OFFLINE:-}" != 1 ] || return 0
+  [ -n "${_LG_IFL_URL:-}" ] || return 0
+  _lg_scratch_name
+  s=$_LG_SN
+  case "$_LG_IFL_PREFIX" in refs/heads/?*) heads=1 ;; esac
+  if [ "$_LG_IFL_AGE" -gt 0 ] 2>/dev/null; then
+    now=${_LG_RNOW:-}
+    [ -n "$now" ] || now=$(date +%s) || _lg_die "date failed"
+    cutoff=$((now - _LG_IFL_AGE * 86400))
+  fi
+  if ! git for-each-ref --format='%(objectname)%09%(committerdate:unix)%09%(refname)' "$_LG_IFL_TMP/" > "$s.all" 2> "$s.err" \
+      || ! git for-each-ref --merged="$b" --format='%(refname)' "$_LG_IFL_TMP/" > "$s.merged" 2>> "$s.err"; then
+    _lg_ifl_note "in-flight refs not pruned (git for-each-ref failed: $(head -n 1 "$s.err"))"
+    return 0
+  fi
+  LC_ALL=C awk -F '\t' -v tmp="$_LG_IFL_TMP/" -v ip="$_LG_IFL_PREFIX/" -v heads="$heads" -v cutoff="$cutoff" -v merged="$s.merged" \
+    "$_LG_AWK_IFL_SHAPED"'
+    BEGIN { while ((getline l < merged) > 0) M[l] = 1 }
+    {
+      r = $3; rr = ip substr(r, length(tmp) + 1)
+      if (heads && !shaped(rr, ip)) next
+      if ((r in M) || (cutoff > 0 && $2 + 0 < cutoff)) print rr "\t" $1
+    }' "$s.all" | LC_ALL=C sort > "$s.cand" || { _lg_ifl_note "in-flight refs not pruned (cannot list them)"; return 0; }
+  [ -s "$s.cand" ] || return 0
+  if [ "$dry" = 1 ]; then
+    cut -f 1 "$s.cand" > "$s.pruned" || _lg_die "cannot write $s.pruned"
+    _LG_IFL_PRUNED="$s.pruned"
+    return 0
+  fi
+  args=()
+  while IFS="$(printf '\t')" read -r r o; do args[${#args[@]}]="--force-with-lease=$r:$o"; done < "$s.cand"
+  args[${#args[@]}]=$_LG_IFL_URL
+  args[${#args[@]}]=--delete
+  while IFS="$(printf '\t')" read -r r o; do args[${#args[@]}]=$r; done < "$s.cand"
+  _lg_ifl_push_run --porcelain --no-verify "${args[@]}" > "$s.out" 2> "$s.err" || rc=$?
+  # --porcelain: "-\t:<ref>\t[deleted]" per ref deleted.
+  LC_ALL=C awk -F '\t' '$1 == "-" { r = $2; sub(/^:/, "", r); print r }' "$s.out" | LC_ALL=C sort > "$s.pruned" \
+    || _lg_die "cannot read the prune's result"
+  if [ -s "$s.pruned" ]; then _LG_IFL_PRUNED="$s.pruned"; fi
+  if [ "$rc" != 0 ] || [ "$(wc -l < "$s.pruned" | tr -d ' ')" != "$(wc -l < "$s.cand" | tr -d ' ')" ]; then
+    cut -f 1 "$s.cand" | LC_ALL=C comm -23 - "$s.pruned" > "$s.left"
+    n=$(wc -l < "$s.left" | tr -d ' ')
+    list=$(head -n 3 "$s.left" | tr '\n' ' ' | sed 's/ $//; s/ /, /g')
+    if [ "$n" -gt 3 ]; then list="$list, …"; fi
+    # The reason: git's summary of the first refused ref, else its first
+    # error line.
+    r=$(LC_ALL=C awk -F '\t' '$1 == "!" { print $3; exit }' "$s.out" 2>/dev/null) || r=""
+    [ -n "$r" ] || r=$(grep -v '^ *$' "$s.err" 2>/dev/null | head -n 1) || r=""
+    _lg_ifl_note "$n in-flight ref(s) not pruned on $_LG_IFL_REMOTE (${r:-git push exited $rc}): $list"
+  fi
+}
+
+# _lg_ifl_pruned_line <verb>: "<verb> <n> in-flight ref(s) from <remote>:
+# <the first three>[, …]" for $_LG_IFL_PRUNED.
+_lg_ifl_pruned_line() {
+  local n list
+  n=$(wc -l < "$_LG_IFL_PRUNED" | tr -d ' ')
+  list=$(head -n 3 "$_LG_IFL_PRUNED" | tr '\n' ' ' | sed 's/ $//; s/ /, /g')
+  if [ "$n" -gt 3 ]; then list="$list, …"; fi
+  printf '%s %s in-flight ref(s) from %s: %s\n' "$1" "$n" "$_LG_IFL_REMOTE" "$list"
+}
+
+# _lg_note_flush: print the run's "ledger:" note held by publish
+# (_LG_NOTE_DEFER=publish: its index build held it so the prune's outcome
+# joins it). doc-tools.sh _on_exit calls it too, so a run that ends early
+# still prints it.
+_lg_note_flush() {
+  local n=""
+  [ "${_LG_NOTE_DEFER:-}" = publish ] || return 0
+  _LG_NOTE_DEFER=""
+  { IFS= read -r n < "$_SCRATCH/lg-pr.held"; } 2>/dev/null || n=""
+  _lg_ix_pr_note "$n"
+}
+
 # --- ledger inflight ------------------------------------------------------------------
 
 # Text: one line per branch, "<name> <sources>[@<host>] <PR #n|no PR>
@@ -1399,11 +1905,8 @@ cmd_ledger_inflight() {
   s=$_LG_SN
   _lg_ifl_load
   if [ -n "$_OPT_push" ]; then
-    if [ "${DOC_TOOLS_LEDGER_OFFLINE:-}" = 1 ]; then
-      echo "ledger inflight --push: offline (DOC_TOOLS_LEDGER_OFFLINE=1): nothing pushed" >&2
-      _lg_emit inflight 0
-    fi
-    _lg_die "ledger inflight --push: not implemented yet"
+    [ -z "$_OPT_fetch" ] && [ -z "${_OPT_branch:-}" ] || _lg_usage "--push takes no --fetch or --branch"
+    _lg_ifl_push "$s"
   fi
   if [ "$_LG_IFL_ON" != 1 ]; then
     if [ "$_LG_FORMAT" = json ]; then
