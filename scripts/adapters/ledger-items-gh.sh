@@ -269,8 +269,8 @@ cmd_get() {
     | (($b | blk) // null) as $m
     | {ref, url, title, status, fields, labels,
        body: (if $m == null then $b else $m.pre + ($m.post | sub("^\r?\n"; "")) end | sub("\\s+$"; "")),
-       created: ($v[0].createdAt | if type == "string" and . != "" then . else null end)}' "$TMPD/rec.json" \
-    || die "cannot use gh issue view $N: $(jq_err "$TMPD/jq.err" 2>/dev/null)"
+       created: ($v[0].createdAt | if type == "string" and . != "" then . else null end)}' "$TMPD/rec.json" 2> "$TMPD/get.err" \
+    || die "cannot use gh issue view $N: $(jq_err "$TMPD/get.err")"
 }
 
 # --- write --------------------------------------------------------------------

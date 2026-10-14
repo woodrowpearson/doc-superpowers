@@ -9826,6 +9826,136 @@ The badge lags." "$(sed '1,/^---$/d' "$f7")" "its body: # title, then the issue'
   teardown
 }
 
+# --- Task 15 fix round 1 ------------------------------------------------------------
+
+test_lg_init_stub_dir_from_globs() {
+  echo "test: stubs go in the literal directory of the first <dir>/<pattern>.md item glob (work/items/), and are items there"
+  lg_fixture
+  lg_enable '{"items":{"globs":["work/items/*.md"]}}'
+  lg_item work/items/a.md 'status: Open'
+  mkdir -p docs/ledgers docs/plans
+  printf -- '---\nstatus: active\n---\n# Plan\n' > docs/plans/p.md
+  cat > docs/ledgers/w-ledger.md <<'EOF'
+| # | Item | State |
+|---|------|-------|
+| 1 | [a](../../work/items/a.md) | open |
+| 2 | **Port the cart** — [plan](../plans/p.md) | open |
+EOF
+  git add -A && git commit -qm items
+  lg_accept_remote
+  lg_init_edit_reg '{"schema":"ledger-registry/1","ledgers":[{"id":"w","title":"W","kind":"service","status":"active","paths":["work/**"]}]}'
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  assert_eq "0" "$LG_RC" "report exits 0"
+  lg init --accept docs/ledger/r.md.decisions.tsv
+  assert_eq "0" "$LG_RC" "accept exits 0"
+  local stub
+  stub="work/items/$(lg_today)-port-the-cart.md"
+  assert_file_exists "$stub" "the stub is in work/items/"
+  assert_eq "w-1" "$(jq -r '.["w#2"].key' docs/ledger/legacy.json)" "its key in legacy.json"
+  lg show w#2
+  assert_eq "0" "$LG_RC" "show w#2: the stub is an item"
+  assert_contains "$LG_OUT" "$stub" "show names it"
+  teardown
+}
+
+test_lg_init_stub_outside_globs_finding() {
+  echo "test: a stub path items.globs would not match (docs/issues/2026-01-*.md) is a finding — rc 1, nothing written, nothing allocated"
+  lg_init_fixture
+  lg_accept_remote
+  lg_enable '{"items":{"globs":["docs/issues/2026-01-*.md"]}}'
+  lg_init_edit_reg
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  assert_eq "0" "$LG_RC" "report exits 0"
+  local st
+  st=$(lg_init_status)
+  lg init --accept docs/ledger/r.md.decisions.tsv --format json
+  assert_eq "1" "$LG_RC" "exits 1"
+  assert_json_field "$LG_OUT" '.findings | map(.detail) | join(" ") | test("items.globs")' "true" "the finding names items.globs"
+  assert_json_field "$LG_OUT" '.findings[0].path' "docs/issues/$(lg_today)-totals-plan.md" "and the stub path"
+  assert_eq "$st" "$(lg_init_status)" "nothing written"
+  assert_eq "absent" "$(lg_remote_counters)" "no counter ref"
+  teardown
+}
+
+test_lg_init_import_outside_globs_finding() {
+  echo "test: --import into a path items.globs would not match is a finding — rc 1, no file, no note"
+  lg_fixture
+  lg_fake_gh
+  lg_accept_gh_issues
+  lg_enable '{"items":{"globs":["docs/issues/2026-01-*.md"],"adapter":"doc-superpowers:ledger-items-gh"}}'
+  git add -A && git commit -qm config
+  lg init --import
+  assert_eq "1" "$LG_RC" "exits 1"
+  assert_contains "$LG_OUT" "items.globs" "the finding names items.globs"
+  assert_eq "" "$(git status --porcelain --untracked-files=all)" "nothing written"
+  assert_file_not_exists "$LG_GH/comments" "no note"
+  lg_fake_gh_off
+  teardown
+}
+
+test_lg_init_accept_trimmed_rows() {
+  echo "test: a decisions file whose trailing tabs an editor trimmed — an undecided row of four columns is skipped, not refused"
+  lg_accept_fixture
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-01-cart-total.md checkout
+  awk '{ sub(/\t+$/, ""); print }' "$LG_DEC" > "$LG_DEC.t" && mv "$LG_DEC.t" "$LG_DEC"
+  assert_eq "4" "$(grep 'sheet-flicker' "$LG_DEC" | awk -F '\t' '{ print NF }')" "precondition: an undecided row has four columns"
+  lg init --accept "$LG_DEC" --format json
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_json_field "$LG_OUT" '.skipped' "3" "the three undecided rows skipped"
+  assert_eq "key: checkout-1" "$(grep '^key:' docs/issues/2026-01-01-cart-total.md)" "the decided row applied"
+  teardown
+}
+
+test_lg_init_stub_slug_collision_and_length() {
+  echo "test: stub paths — a slug of at most 50 characters; a taken name (on disk or by another stub) takes -2, -3"
+  lg_accept_fixture
+  cat >> docs/ledgers/checkout-ledger.md <<'EOF'
+| 4 | **Totals plan** — [plan](../plans/x-plan.md) | open |
+| 5 | **A very long summary that goes on and on beyond the fifty character slug limit** | open |
+EOF
+  git add -A && git commit -qm rows
+  local t
+  t=$(lg_today)
+  lg_item "docs/issues/$t-totals-plan.md" 'status: Open'
+  lg init --accept "$LG_DEC" --dry-run
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_contains "$LG_OUT" "would create docs/issues/$t-totals-plan-2.md: stub of docs/ledgers/checkout-ledger.md row 2" "row 2: -2 (the name is taken on disk)"
+  assert_contains "$LG_OUT" "would create docs/issues/$t-totals-plan-3.md: stub of docs/ledgers/checkout-ledger.md row 4" "row 4: -3 (taken by row 2)"
+  assert_contains "$LG_OUT" "would create docs/issues/$t-a-very-long-summary-that-goes-on-and-on-beyond-the.md:" "row 5: the slug cut at 50 characters"
+  teardown
+}
+
+test_lg_init_accept_malformed_and_duplicate_rows() {
+  echo "test: a row that is not five (or four) tab-separated columns, and a path listed twice, are findings: rc 1, nothing written"
+  lg_accept_fixture
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-01-cart-total.md checkout
+  printf 'docs/issues/2026-01-02-sheet-flicker.md\topen\n' >> "$LG_DEC"
+  printf 'docs/issues/2026-01-01-cart-total.md\topen\tcheckout\tledger-field\torders\n' >> "$LG_DEC"
+  local st
+  st=$(lg_init_status)
+  lg init --accept "$LG_DEC" --format json
+  assert_eq "1" "$LG_RC" "exits 1"
+  assert_json_field "$LG_OUT" '[.findings[] | .detail | (test("tab-separated") or test("listed again"))] | map(tostring) | join(",")' "true,true" \
+    "one finding each: the malformed row, the duplicate"
+  assert_json_field "$LG_OUT" '[.findings[] | .line] | map(tostring) | join(",")' "10,11" "their lines"
+  assert_eq "$st" "$(lg_init_status)" "nothing written"
+  teardown
+}
+
+test_lg_init_import_list_field() {
+  echo "test: --import writes a list field of the metadata block as a list (setlist)"
+  lg_fixture
+  lg_fake_gh
+  printf '%s\n' '[{"number":9,"title":"Linked","body":"See them.\n\n<!-- doc-superpowers-ledger\nrelates: [a-1, b-2]\n-->\n","state":"OPEN","stateReason":null,"labels":[],"createdAt":"2026-03-01T10:00:00Z","updatedAt":"2026-10-02T10:00:00Z","url":"https://github.com/o/r/issues/9"}]' > "$LG_GH/issues.json"
+  lg_enable '{"items":{"adapter":"doc-superpowers:ledger-items-gh"}}'
+  git add -A && git commit -qm config
+  lg init --import
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_contains "$(lg_fmblock docs/issues/2026-03-01-linked.md)" "relates: [a-1, b-2]" "the list, as a flow list"
+  lg_fake_gh_off
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -10177,6 +10307,13 @@ run_tests() {
   test_lg_init_accept_hosted_stub
   test_lg_items_gh_get
   test_lg_init_import_converts_once
+  test_lg_init_stub_dir_from_globs
+  test_lg_init_stub_outside_globs_finding
+  test_lg_init_import_outside_globs_finding
+  test_lg_init_accept_trimmed_rows
+  test_lg_init_stub_slug_collision_and_length
+  test_lg_init_accept_malformed_and_duplicate_rows
+  test_lg_init_import_list_field
 
   print_summary
 }
