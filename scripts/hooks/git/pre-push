@@ -11,13 +11,16 @@
 #
 # With docs/spec-claims/ present, a claims leg (advisory) runs for every
 # branch pushed, tagged or not: `doc-tools.sh claims run --planes-of` over the
-# commits the push adds (<remote oid>..<local oid>; for a new branch, from its
-# merge-base with the config's base, else origin/main), and, when the branch
-# is the one checked out (attest judges HEAD), `claims attest --plan` for
-# each plan with gate records in docs/spec-claims/gates/<stem>/ but no
-# final.json. Something red or indeterminate prints
-# "claims (advisory): <n> red, <m> indeterminate" and the finding lines; the
-# exit code never changes. DOC_SUPERPOWERS_CLAIMS_SKIP=1 turns the leg off.
+# commits the push adds (<remote oid>..<local oid>; from the merge-base with
+# the config's base, else origin/main, for a new branch, and when the remote
+# oid is not an ancestor of the local one: a force-push, or a remote commit
+# not fetched), and, for the first pushed ref whose oid is HEAD's commit
+# (attest judges HEAD; once per push), `claims attest --plan` for each plan
+# with gate records in docs/spec-claims/gates/<stem>/ but no final.json. Each
+# branch the leg runs for prints
+# "claims (advisory): <n> red, <m> indeterminate" (zero counts included) and
+# the finding lines; the exit code never changes.
+# DOC_SUPERPOWERS_CLAIMS_SKIP=1 turns the leg off.
 
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
 [[ "${DOC_SUPERPOWERS_QUIET:-}" == "1" ]] && exit 0
@@ -54,18 +57,22 @@ _claims_call() {
 _claims_push() {
   local range base mb head dir plan stem
   claims_red=0 claims_ind=0 claims_lines=""
+  # A new branch (null remote oid), or a remote oid that is not an ancestor
+  # of the local one (a force-push, or not fetched): from the merge-base.
+  range=""
   case "$2" in
-    *[!0]*) range="$2..$1" ;;
-    *)
-      base=$(jq -r '.base | strings' docs/spec-claims/config.json 2>/dev/null)
-      [[ -n "$base" ]] || base=origin/main
-      # Unresolvable: doc-tools reports the <base>...<oid> range it is given.
-      if mb=$(git merge-base "$1" "$base" 2>/dev/null); then range="$mb..$1"; else range="$base...$1"; fi
-      ;;
+    *[!0]*) git merge-base --is-ancestor "$2" "$1" 2>/dev/null && range="$2..$1" ;;
   esac
+  if [[ -z "$range" ]]; then
+    base=$(jq -r '.base | strings' docs/spec-claims/config.json 2>/dev/null)
+    [[ -n "$base" ]] || base=origin/main
+    # Unresolvable: doc-tools reports the <base>...<oid> range it is given.
+    if mb=$(git merge-base "$1" "$base" 2>/dev/null); then range="$mb..$1"; else range="$base...$1"; fi
+  fi
   _claims_call run --planes-of "$range"
   head=$(git rev-parse -q --verify HEAD 2>/dev/null)
-  if [[ "$1" == "$head" ]]; then
+  if [[ "$1" == "$head" && "$claims_attested" != 1 ]]; then
+    claims_attested=1
     for dir in docs/spec-claims/gates/*/; do
       [[ -d "$dir" && ! -e "${dir}final.json" ]] || continue
       plan=$(cat "$dir"chunk-*.json 2>/dev/null | jq -rs 'map(.plan? | strings) | first // empty' 2>/dev/null)
@@ -76,12 +83,13 @@ _claims_push() {
       _claims_call attest --plan "$plan"
     done
   fi
-  (( claims_red + claims_ind > 0 )) || return 0
   echo ""
   echo "doc-superpowers: claims (advisory): $claims_red red, $claims_ind indeterminate"
   printf '%s' "$claims_lines"
   echo ""
 }
+# attest judges HEAD: run once per push, for the first ref pushing HEAD's oid.
+claims_attested=0
 
 while read -r local_ref local_oid remote_ref remote_oid _ || [[ -n "${local_ref:-}" ]]; do
   case "$local_ref" in
