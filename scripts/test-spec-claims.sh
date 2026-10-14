@@ -2415,6 +2415,24 @@ test_v6_proved_states_doc_stale_is_repromote_owed() {
   teardown
 }
 
+test_v6_proved_states_under_code_diverges_without_store() {
+  echo "test: V6 — a states change under CODE-DIVERGES, the store gone: a finding, not re-promote owed"
+  claims_fixture
+  hand_promote
+  base_here "built"
+  rm -f "$(claims_store)/$CL_DIGEST.json"
+  doc_stale_amend "$_CL_DIVERGES"
+  git add -A
+  cl validate --staged
+  assert_v6 "states changed since promote proved the claim (promotion.proved) without a new DOC-STALE (or RETIRE) ruling" \
+    "--staged, states amended under CODE-DIVERGES, the store gone"
+  assert_not_contains "$(v6_codes)" "re-promote owed" "…not re-promote owed"
+  assert_not_contains "$(v6_codes)" "unverifiable-here" "…not unverifiable-here"
+  cl validate --all
+  assert_v6 "states changed since promote proved the claim" "--all, the same"
+  teardown
+}
+
 test_v6_proved_unreachable_at_unverifiable_here() {
   echo "test: V6 — promotion.at unreachable, nothing changed, the store gone: unverifiable-here only"
   claims_fixture
@@ -9275,6 +9293,38 @@ test_v1_gated_without_config_adapter() {
   teardown
 }
 
+# raw_when <json-text>: the fixture claim's when set to <json-text> byte
+# for byte (jq would print a number literal its own way: the test is about
+# the literal).
+raw_when() {
+  local content pat='"__RAW_WHEN__"'
+  jset "$SIDECAR" '.claims[0].when = "__RAW_WHEN__"'
+  content=$(cat "$SIDECAR")
+  printf '%s\n' "${content/$pat/$1}" > "$SIDECAR"
+}
+
+test_v1_when_numbers_canonical() {
+  echo "test: V1 — every number in when is written canonically (one proved digest on jq 1.6 and 1.7+)"
+  claims_fixture
+  config_on
+  local n
+  for n in 15 0.5 -3 100 0.05 123456789012345; do
+    raw_when "{\"$TTL_KEY\": $n}"
+    cl validate --all
+    assert_not_contains "$(v1_messages)" "write the number canonically" "when {$TTL_KEY: $n}: canonical, no such V1 finding"
+  done
+  for n in 1.0 1.50 1e3 12345678901234567890 1234567890123456; do
+    raw_when "{\"$TTL_KEY\": $n}"
+    cl validate --all
+    assert_v1 "write the number canonically (e.g. 1.5, not 1.50 / 1.0 / 1e3)" "when {$TTL_KEY: $n}"
+  done
+  # Anywhere inside when, not only at its top level.
+  raw_when "{\"$TTL_KEY\": {\"tiers\": [15, 2.50]}}"
+  cl validate --all
+  assert_v1 "write the number canonically" "a non-canonical number nested in a when value"
+  teardown
+}
+
 test_v1_when_unknown_key() {
   echo "test: V1 — a when key the recorded configuration does not know (staged index, or the work tree)"
   claims_fixture
@@ -10171,6 +10221,7 @@ run_tests() {
   test_v6_proved_mutant_swap_is_finding
   test_v6_proved_tier_change_under_doc_stale_is_finding
   test_v6_proved_states_doc_stale_is_repromote_owed
+  test_v6_proved_states_under_code_diverges_without_store
   test_v6_proved_unreachable_at_unverifiable_here
   test_v6_forged_proved_with_real_verdict
   test_v1_built_promotion_needs_proved
@@ -10459,6 +10510,7 @@ run_tests() {
   test_v1_when_without_config_adapter
   test_v1_gated_without_config_adapter
   test_v1_when_unknown_key
+  test_v1_when_numbers_canonical
   test_v3_config_faithful_pin_required
   test_v3_config_independent_accepted
   test_v3_when_not_established_by_test
