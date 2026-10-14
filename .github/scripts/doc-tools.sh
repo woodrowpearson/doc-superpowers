@@ -954,9 +954,9 @@ _warn_refs() {
 #   _FACT_OIDS[i]    the refs' object ids in the entry's baseline,
 #                    \x1f-joined in ref order
 # The baseline is the code an entry is recorded against:
-#   worktree  (update-index, the one verb that attests) the working tree the
-#             verifier read (_worktree_tree); code_commit from HEAD
-#   doc       (build-index, add-entry, set-code-refs: they verify nothing) the
+#   worktree  (update-index, the one baseline reset) the working tree the
+#             reviewer read (_worktree_tree); code_commit from HEAD
+#   doc       (build-index, add-entry, set-code-refs: none is a reset) the
 #             code as of the DOC'S OWN LAST COMMIT (_doc_commits), so a doc
 #             written against older code reads stale; code_commit from that
 #             commit. A doc git has never committed is being written now: its
@@ -1859,7 +1859,7 @@ _index_install() {
 # writers, which pass --slurpfile patch) also classifies every $patch row, in
 # row order, into _INDEX_CLASSES — one character each:
 #   c  the row's key changed          u  unchanged, and it was indexed before
-#   v  changed, but in last_verified alone (update-index re-attesting a doc
+#   v  changed, but in last_verified alone (update-index re-baselining a doc
 #      whose recorded content is as it was: a real write, reported as such)
 #   a  unchanged, and it was not indexed before
 # A real write also drops a stored status of "current" or "stale" from every
@@ -3023,7 +3023,7 @@ _JQ_CODE_OIDS='
 # jq (after $_JQ_REC_FIELDS and $_JQ_CODE_OIDS): the _read_mapping records as
 # a {key: entry} object of fresh entries (field order is the index's). No
 # status (it is stored only as "deprecated"), and last_verified is null:
-# writing an entry is not verifying its doc — only update-index attests.
+# writing an entry is not re-baselining its doc — only update-index does.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_MAPPING_ENTRIES='
   def mapping_entries:
@@ -3370,9 +3370,10 @@ cmd_update_index() {
     k=$((k + 1))
   done > "$raw"
 
-  # Verify: re-hash, re-read code_commit and code_oids, stamp last_verified
-  # (update-index is the ONE verb that attests), capture implementation
-  # (each entry's text: no indent, no "- ", wrapped lines joined).
+  # Re-baseline: re-hash, re-read code_commit and code_oids, stamp
+  # last_verified (update-index is the ONE baseline reset), capture
+  # implementation (each entry's text: no indent, no "- ", wrapped lines
+  # joined).
   # Preserved: status (a deprecated entry stays deprecated; no other status
   # is stored), replaces, superseded_by, doc_type, code_refs, and the
   # top-level build_commit.

@@ -1337,17 +1337,43 @@ assert_contains "$PROTOCOL" "When a doc and the code disagree, neither side is e
 for _d in CODE-DIVERGES DOC-STALE RETIRE in_plan_ruling_requires_gate_record outside_plan_presumption doc_stale_outside_plan_requires; do
   assert_contains "$(_section "$PROTOCOL" '## Direction protocol')" "$_d" "protocol: Direction protocol names $_d"
 done
-assert_contains "$PROTOCOL" "If deviation flags returned → surface to user" "protocol: execute wiring unchanged for projects without claims"
-assert_contains "$PROTOCOL" "If FAIL → surface report to user, let them decide" "protocol: post-execute wiring unchanged for projects without claims"
+assert_contains "$PROTOCOL" 'This protocol applies to claims-enabled projects (`docs/spec-claims/` exists). Without claims, the wiring below is unchanged, and the three directions are offered as a recommended framing for the question put to the user.' \
+  "protocol: the Direction protocol's scope sentence"
+assert_contains "$PROTOCOL" "**Deviation is expected; an unreconciled deviation is the failure.**" \
+  "protocol: deviation is expected; an unreconciled deviation is the failure"
+assert_contains "$(_section "$PROTOCOL" '## Direction protocol')" 'a ruling whose `record` is not a gate record' \
+  "protocol: outside a plan means a ruling whose record is not a gate record"
+assert_line_matches "$PROTOCOL" '^\| Pipeline Point \| When \| Action \| Mode \| With claims enabled \|$' \
+  "protocol: the Lifecycle Overview has the With claims enabled column"
+# The two wiring lines for projects without claims, whole-line (an in-place
+# extension fails), each directly followed by its claims-enabled line.
+_w_exec='    If deviation flags returned → surface to user'
+_w_fail='    If FAIL → surface report to user, let them decide'
+assert_line_matches "$PROTOCOL" "^${_w_exec}\$" "protocol: execute wiring line unchanged for projects without claims"
+assert_line_matches "$PROTOCOL" "^${_w_fail}\$" "protocol: post-execute wiring line unchanged for projects without claims"
+assert_eq '    Claims-enabled: a red claim or a flagged deviation → rule the direction (Direction protocol) before editing either side' \
+  "$(grep -A1 -x -F -- "$_w_exec" <<<"$PROTOCOL" | sed -n 2p)" \
+  "protocol: the execute wiring line is directly followed by its claims-enabled line"
+assert_eq '    Claims-enabled: surface the report and its amendment batch; every unreconciled deviation needs a ruling (Direction protocol)' \
+  "$(grep -A1 -x -F -- "$_w_fail" <<<"$PROTOCOL" | sed -n 2p)" \
+  "protocol: the post-execute wiring line is directly followed by its claims-enabled line"
 assert_contains "$PROTOCOL" "Claims-enabled: a red claim or a flagged deviation → rule the direction" \
   "protocol: execute wiring gains the claims-enabled direction line"
+assert_contains "$PROTOCOL" "Claims-enabled: surface the report and its amendment batch; every unreconciled deviation needs a ruling (Direction protocol)" \
+  "protocol: post-execute wiring gains the claims-enabled amendment-batch line"
 assert_contains "$SKILLMD" "Records a baseline reset, never a verification" "SKILL.md: update-index records a baseline reset"
 assert_not_contains "$SKILLMD" "The one verb that attests a doc was checked against its code" \
   "SKILL.md: update-index is no longer the verb that attests"
 assert_contains "$INTEGRATION" "## Claims-enabled wrappers" "integration patterns: Claims-enabled wrappers section"
-assert_contains "$SKILLMD" "references/spec-claims.md" "SKILL.md names references/spec-claims.md"
+assert_contains "$SKILLMD" '| `references/spec-claims.md` | **REQUIRED** when `docs/spec-claims/` exists — ' \
+  "SKILL.md: references/spec-claims.md is REQUIRED when docs/spec-claims/ exists"
+assert_contains "$SKILLMD" "**Who may re-baseline.**" "SKILL.md: Who may re-baseline"
+assert_line_matches "$SKILLMD" '^\| Doc edited and read against its code \| `update-index <doc>` — a baseline reset \|' \
+  "SKILL.md: the routing cell calls update-index a baseline reset"
 assert_contains "$("$DOC_TOOLS_SHIM" update-index --help)" "never a verification" \
   "doc-tools help: update-index is never a verification"
+assert_contains "$("$DOC_TOOLS_SHIM" --help)" "Stored state (who may re-baseline):" \
+  "doc-tools help: Stored state (who may re-baseline)"
 assert_eq "" "$(grep -n 'the one verb that attests\|only verb that attests' "$REPO_ROOT"/references/doc-spec.md "$REPO_ROOT"/docs/codebase-guide.md "$REPO_ROOT"/docs/conventions.md "$REPO_ROOT"/docs/workflows/doc-superpowers.md "$REPO_ROOT"/docs/architecture/system-overview.md "$REPO_ROOT"/skills/doc-superpowers/SKILL.md || true)" \
   "no doc still calls update-index the verb that attests"
 

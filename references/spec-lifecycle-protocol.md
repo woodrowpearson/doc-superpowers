@@ -145,6 +145,8 @@ The ruling is recorded on the claim in its sidecar (`docs/spec-claims/<DOC-ID>.j
 - `outside_plan_presumption` [`CODE-DIVERGES`] — the default direction for a deviation found outside a plan. It states the presumption; no check enforces it.
 - `doc_stale_outside_plan_requires` [any principal: `null`] — a host may require a named principal (e.g. the doc owner) for `DOC-STALE`/`RETIRE` on approved text outside a plan; the ruling's `by` must then equal it.
 
+Mechanically, a ruling is outside a plan when it is a ruling whose `record` is not a gate record; the gate-record test is structural (the path shape above), never the record's content.
+
 The `by` field names a principal; doc-superpowers records it and checks the `record` path, and makes no claim to verify who ruled.
 
 ---
