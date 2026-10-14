@@ -1930,8 +1930,13 @@ test_v6_hand_edited_built_refused() {
 test_v6_unverifiable_here_advisory() {
   echo "test: V6 — a promotion whose verdict is not in this clone's store"
   claims_fixture
+  # As promote leaves it: the bound test and the mutant committed first, so
+  # the sidecar at promotion.at holds the record that was proved (V6 judges
+  # a missing verdict by it).
   bind_test "$_CL_TEST"
-  jset "$SIDECAR" ".claims[0].status = \"built\" | .claims[0].nonvacuity = $_CL_MUTANT
+  jset "$SIDECAR" ".claims[0].nonvacuity = $_CL_MUTANT"
+  git add -A && git commit -qm "bind the TTL test"
+  jset "$SIDECAR" ".claims[0].status = \"built\"
     | .claims[0].promotion = {\"at\": \"$(git rev-parse HEAD)\", \"verdict_sha256\": \"$(printf '%064d' 0)\"}"
   rerender
   cl validate --all
@@ -2072,6 +2077,161 @@ test_v6_repromote_owed_proved_record() {
   assert_eq "$c" "$(git rev-parse HEAD)" "precondition: back on feature"
   jset "$SIDECAR" ".claims[0].promotion.at = \"$other\" | .claims[0].test = $_CL_TEST"
   assert_eq "unverifiable-here" "$(repromote_owed)" "no claim with that id in the sidecar at promotion.at: unverifiable-here"
+  teardown
+}
+
+# The final review's probe: with policy doc_stale_outside_plan_requires set,
+# a states rewrite labelled CODE-DIVERGES passed validate (exit 0) and stayed
+# out of the amendment batch, while the same edit labelled DOC-STALE was
+# held to the policy. Only DOC-STALE (or RETIRE) changes states (§F), so the
+# in-plan and outside-plan latitude cannot be obtained by labelling.
+test_v6_states_change_needs_doc_stale_or_retire() {
+  echo "test: V6 — a states change under CODE-DIVERGES is a finding; DOC-STALE (policy permitting) holds"
+  claims_fixture
+  local base
+  jset docs/spec-claims/config.json '.policy.doc_stale_outside_plan_requires = "doc-owner"'
+  base_here "the policy names the doc owner"
+  base=$(git rev-parse HEAD)
+  jset "$SIDECAR" ".claims[0].states = \"$NEW_STATES\" | .claims[0].rulings = [$_CL_DIVERGES]"
+  git add -A
+  cl validate --staged
+  assert_v6 "only a new DOC-STALE (or RETIRE) ruling changes states" "--staged: states rewritten under CODE-DIVERGES"
+  assert_contains "$(v6_messages)" "CODE-DIVERGES" "…naming the direction it was given"
+  cl validate --all
+  assert_v6 "only a new DOC-STALE (or RETIRE) ruling changes states" "--all: states rewritten under CODE-DIVERGES"
+  git commit -qm "states under CODE-DIVERGES"
+  cl rulings --range "$base..HEAD"
+  assert_json_field "$CL_OUT" '.results | length' "0" "…and the amendment batch does not list it"
+  git reset -q --hard "$base"
+  # The same edit labelled DOC-STALE, by someone else: the policy holds it.
+  jset "$SIDECAR" ".claims[0].states = \"$NEW_STATES\" | .claims[0].rulings = [$_CL_DOC_STALE]
+    | .claims[0].rulings[0].by = \"someone\""
+  git add -A
+  cl validate --staged
+  assert_v6 "outside a plan, DOC-STALE needs doc-owner" "--staged: DOC-STALE by someone, the policy refuses it"
+  # By the doc owner: it holds, and the batch lists it.
+  jset "$SIDECAR" '.claims[0].rulings[0].by = "doc-owner"'
+  git add -A
+  cl validate --staged
+  assert_v6_ok "--staged: states rewritten under the doc owner's DOC-STALE"
+  git commit -qm "DOC-STALE: the TTL states"
+  cl rulings --range "$base..HEAD"
+  assert_json_field "$CL_OUT" '.results | length' "1" "…and the amendment batch lists it"
+  assert_json_field "$CL_OUT" '.results[0] | "\(.direction)|\(.new.states)"' "DOC-STALE|$NEW_STATES" "…the DOC-STALE row, with the new states"
+  # RETIRE changes states too (the claim is withdrawn).
+  git reset -q --hard "$base"
+  jset "$SIDECAR" ".claims[0].states = \"$NEW_STATES\" | .claims[0].rulings = [$_CL_RETIRE]"
+  cl validate --all
+  assert_v6_ok "--all: states rewritten under RETIRE"
+  teardown
+}
+
+test_v6_reanchor_and_tier_need_doc_stale_or_retire() {
+  echo "test: V6 — a token-changing re-anchor or a lowered tier under CODE-DIVERGES is a finding"
+  claims_fixture
+  doc_edit "$DOC" "$TTL_LINE" "- Access tokens expire after 20 minutes."
+  jset "$SIDECAR" ".claims[0].quote = \"Access tokens expire after 20 minutes\" | .claims[0].rulings = [$_CL_DIVERGES]"
+  cl validate --all
+  assert_v6 "re-anchor changed a token of the quote under a CODE-DIVERGES ruling" "the quote 15 → 20 under CODE-DIVERGES"
+  jset "$SIDECAR" ".claims[0].rulings += [$_CL_DOC_STALE]"
+  cl validate --all
+  assert_v6_ok "…and with a DOC-STALE ruling as well"
+  git checkout -q -- "$DOC" "$SIDECAR"
+  jset "$SIDECAR" ".claims[0].enforced_by = \"judge\" | .claims[0].why_not_mechanical = \"Clock skew.\" | .claims[0].rulings = [$_CL_DIVERGES]"
+  cl validate --all
+  assert_v6 "enforced_by lowered (test → judge; test > lint > log > judge) under a CODE-DIVERGES ruling" "test → judge under CODE-DIVERGES"
+  teardown
+}
+
+test_v6_status_off_built_any_direction() {
+  echo "test: V6 — a status moved off built takes any new ruling (built → diverged under CODE-DIVERGES)"
+  claims_fixture
+  hand_promote
+  base_here "built"
+  jset "$SIDECAR" ".claims[0].status = \"diverged\" | .claims[0].rulings = [$_CL_DIVERGES]"
+  rerender
+  cl validate --all
+  assert_v6_ok "built → diverged under CODE-DIVERGES, its tracker open"
+  teardown
+}
+
+# The final review's probe: a built claim's test.node rebound to a trivially
+# passing test, no ruling, the verdict store gone (CI, a teammate's clone),
+# passed validate --staged with exit 0. Without the verdict, the record promote
+# proved — the sidecar at promotion.at — decides, as for gate and attest.
+test_v6_missing_verdict_applies_the_history_rule() {
+  echo "test: V6 — a missing verdict is judged by the record at promotion.at"
+  claims_fixture
+  hand_promote
+  base_here "built"
+  local store aside
+  store=$(claims_store)
+  aside=$(harness_mktemp_d verdict-aside)
+  # A test swap, no ruling, the store gone.
+  bind_test '{"runner":"pytest","node":"tests/unit/test_token.py::test_always_true"}'
+  git add -A
+  mv "$store/$CL_DIGEST.json" "$aside/"
+  cl validate --staged
+  assert_v6 "differs from its record at promotion.at" "--staged, the store gone: a test swap is a finding"
+  assert_not_contains "$(v6_codes)" "unverifiable-here" "…not the unverifiable-here advisory"
+  cl validate --all
+  assert_v6 "differs from its record at promotion.at" "--all, the store gone: a test swap is a finding"
+  # The same swap under a DOC-STALE amendment, the store present: still a
+  # finding — DOC-STALE covers states, not the test that proves it.
+  mv "$aside/$CL_DIGEST.json" "$store/"
+  doc_stale_amend
+  git add -A
+  cl validate --staged
+  assert_v6 "verdict" "--staged, the store present: a test swap under DOC-STALE is a finding"
+  assert_not_contains "$(v6_codes)" "re-promote owed" "…not re-promote owed"
+  mv "$store/$CL_DIGEST.json" "$aside/"
+  cl validate --staged
+  assert_v6 "differs from its record at promotion.at" "--staged, the store gone: a test swap under DOC-STALE is a finding"
+  assert_not_contains "$(v6_codes)" "re-promote owed" "…not re-promote owed"
+  # States only (the test as proved), under DOC-STALE: re-promote owed, with
+  # the store and without it.
+  bind_test "$_CL_TEST"
+  git add -A
+  cl validate --staged
+  assert_v6_ok "--staged, the store gone: a states-only DOC-STALE amendment"
+  assert_contains "$(v6_codes)" "re-promote owed" "…re-promote owed, by the record at promotion.at"
+  mv "$aside/$CL_DIGEST.json" "$store/"
+  cl validate --staged
+  assert_v6_ok "--staged, the store present: a states-only DOC-STALE amendment"
+  assert_contains "$(v6_codes)" "re-promote owed" "…re-promote owed"
+  # A subject swap (or a lowered tier) under the same DOC-STALE, the store
+  # present: a finding.
+  printf 'LEEWAY = 0\n' > src/auth/ttl.py
+  jset "$SIDECAR" '.claims[0].subject = ["src/auth/ttl.py"]'
+  git add -A
+  cl validate --staged
+  assert_v6 "verdict" "--staged, the store present: a subject swap under DOC-STALE is a finding"
+  assert_not_contains "$(v6_codes)" "re-promote owed" "…not re-promote owed"
+  mv "$store/$CL_DIGEST.json" "$aside/"
+  cl validate --staged
+  assert_v6 "differs from its record at promotion.at" "--staged, the store gone: a subject swap under DOC-STALE is a finding"
+  # promotion.at not a commit here (a rebased branch): unverifiable-here.
+  jset "$SIDECAR" ".claims[0].promotion.at = \"$(printf '%040d' 7)\""
+  git add -A
+  cl validate --staged
+  assert_v6_ok "--staged, the store gone, promotion.at not a commit here"
+  assert_contains "$(v6_codes)" "unverifiable-here" "…the advisory unverifiable-here"
+  teardown
+}
+
+# The local downgrade is states-only too: under a new DOC-STALE ruling, a
+# verdict that differs in its test is a finding, never re-promote owed.
+test_v6_doc_stale_does_not_cover_a_test_swap() {
+  echo "test: V6 — the store present, a DOC-STALE ruling never covers a test swap"
+  claims_fixture
+  hand_promote
+  base_here "built"
+  jset "$SIDECAR" ".claims[0].rulings += [$_CL_DOC_STALE]"
+  bind_test '{"runner":"pytest","node":"tests/unit/test_token.py::test_always_true"}'
+  git add -A
+  cl validate --staged
+  assert_v6 "verdict" "a test swap with a DOC-STALE ruling and no states change"
+  assert_not_contains "$(v6_codes)" "re-promote owed" "…not re-promote owed"
   teardown
 }
 
@@ -9555,6 +9715,11 @@ run_tests() {
   test_v6_mismatch_with_code_diverges_ruling_still_finding
   test_v6_staged_reads_index_not_worktree
   test_v6_repromote_owed_proved_record
+  test_v6_states_change_needs_doc_stale_or_retire
+  test_v6_reanchor_and_tier_need_doc_stale_or_retire
+  test_v6_status_off_built_any_direction
+  test_v6_missing_verdict_applies_the_history_rule
+  test_v6_doc_stale_does_not_cover_a_test_swap
 
   # --- Task 6: status block render and V11 ---
   test_v11_fixture_is_rendered
