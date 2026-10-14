@@ -1257,4 +1257,38 @@ for _f in package.json gemini-extension.json .claude-plugin/plugin.json .claude-
 done
 assert_file_exists "$REPO_ROOT/$(jq -r '.main // "-"' "$REPO_ROOT/package.json")" "package.json main (the OpenCode plugin) exists"
 
+echo "--- spec claims: R5 and phases ---"
+# Task 24: the Spec Status Model's claim-gated rule and the execute /
+# post-execute / review wiring. Every phrase is pinned verbatim: Tasks 25 and 26
+# and references/spec-claims.md cite them. Claims-enabled projects only; the
+# Drifted branch's text for projects without claims stays byte for byte.
+_sq="'"
+assert_contains "$ACTIONS" '- **R5 — Claim-gated advancement.** **Claims-enabled projects only** (`docs/spec-claims/` exists): a target spec advances to `Implemented` only when every claim the plan names for it is `built` with a passing verdict at the final gate (`claims attest --final`); with the configuration extension, `gated` also qualifies. `:amends` specs remain exempt from `Status` writes but not from claim checks.' \
+  "R5 claim-gated advancement is a rule"
+assert_contains "$ACTIONS" "Claims-enabled projects only" "R5 is marked claims-enabled projects only"
+assert_contains "$ACTIONS" '**R5** — claims enabled and the final gate does not show every named claim of this spec `built` (or `gated`) and passing → hold short of `Implemented` (R2 still applies).' \
+  "evaluation order has the R5 step"
+assert_line_matches "$(_section "$ACTIONS" '### Evaluation order')" '\*\*R5\*\*' \
+  "R5 sits inside the Evaluation order section"
+assert_contains "$ACTIONS" '**With claims enabled**, the plan'"$_sq"'s `Claims gate (chunk N)` task is the chunk'"$_sq"'s verifier: this phase reports its record'"$_sq"'s verdicts and does not judge drift by agent.' \
+  "execute phase: the claims gate task is the chunk's verifier"
+assert_contains "$ACTIONS" 'It never calls `update-index` while a claim of that spec fails.' \
+  "execute phase: Aligned never calls update-index over a failing claim"
+assert_contains "$ACTIONS" "Flag for human review with a deviation note" \
+  "execute phase: the Drifted branch's existing sentence is unchanged"
+assert_contains "$ACTIONS" '**Claims-enabled projects:** rule the direction (**Direction protocol**, `spec-lifecycle-protocol.md`) before editing either side, and record the ruling in the sidecar.' \
+  "execute phase: Drifted gains the conditional direction-protocol sentence"
+assert_contains "$ACTIONS" 'With claims enabled an `:amends` spec'"$_sq"'s claims are still checked at the gate.' \
+  "execute phase: an amendment spec's claims are still checked"
+assert_contains "$ACTIONS" '0. **Claims verdict** (claims-enabled projects only): run `$DOC_TOOLS claims attest --plan <plan> --final`; exit 1 → FAIL; exit 2 → report "claims verdict owed", never PASS; include its amendment batch.' \
+  "post-execute step 0 is the claims verdict"
+assert_contains "$ACTIONS" 'AND (claims disabled OR `claims attest --final` exit 0)' \
+  "PASS rule gains the claims clause"
+assert_contains "$ACTIONS" '3c. **Claims** (claims-enabled projects only): `$DOC_TOOLS claims run --planes-of <base>...HEAD` and `claims validate --all`'"$_sq"'s V9 items; a red claim is a **P1 Claim red** finding.' \
+  "review step 3c runs the claims"
+assert_contains "$ACTIONS" '**P1 Claim red**' "review severity list has P1 Claim red"
+assert_contains "$TEMPLATES" "### Claims verdict" "compliance report has a Claims verdict block"
+assert_contains "$(_section "$TEMPLATES" '## Spec Compliance Report')" "claims-enabled projects only" \
+  "Claims verdict block is marked claims-enabled projects only"
+
 print_summary
