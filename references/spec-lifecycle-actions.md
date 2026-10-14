@@ -307,9 +307,9 @@ Two modes: **post-execute** (final compliance check before merging) and **review
 - `--mode=post-execute`
 - `--specs=<paths>` — Paths to governing specs, each with an optional `:target` / `:constraint` / `:amends` role suffix
 - `--design-doc=<path>` — Path to original design doc (for the five-way coverage check)
-- `--plan=<path>` — Optional. The plan whose amendments are being verified. Required for a **full** amendment check: without it the landed-check cannot tell an `AMENDED` block this plan wrote from one some earlier work left behind. See the **amendment** bullet in the Status check.
+- `--plan=<path>` — Optional. The plan whose amendments are being verified. Required for a **full** amendment check: without it the landed-check cannot tell an `AMENDED` block this plan wrote from one some earlier work left behind. See the **amendment** bullet in the Status check. With claims enabled, step 0 needs it: without it the verdict is "claims verdict owed".
 
-0. **Claims verdict** (claims-enabled projects only): run `$DOC_TOOLS claims attest --plan <plan> --final`; exit 1 → FAIL; exit 2 → report "claims verdict owed", never PASS; include its amendment batch.
+0. **Claims verdict** (claims-enabled projects only): run `$DOC_TOOLS claims attest --plan <plan> --final`; exit 1 → FAIL; exit 2 → report "claims verdict owed", never PASS; include its amendment batch. Claims enabled and no `--plan`: there is no plan to attest, so step 0 reports "claims verdict owed", never PASS.
 1. **Existence check** — Run `doc-tools.sh check-freshness` across all specs in scope. If governing specs don't exist, that's a finding.
 2. **Staleness check** — Are any specs still flagged stale after all tasks completed? This catches specs that `spec-inject` (execute phase) flagged for review but were never addressed.
 3. **Status check** — For each governing spec, resolve its role and status class per the **Spec Status Model**, then check only what applies:

@@ -1285,6 +1285,10 @@ assert_contains "$ACTIONS" 'With claims enabled an `:amends` spec'"$_sq"'s claim
   "execute phase: an amendment spec's claims are still checked"
 assert_contains "$ACTIONS" '0. **Claims verdict** (claims-enabled projects only): run `$DOC_TOOLS claims attest --plan <plan> --final`; exit 1 → FAIL; exit 2 → report "claims verdict owed", never PASS; include its amendment batch.' \
   "post-execute step 0 is the claims verdict"
+assert_contains "$ACTIONS" 'Claims enabled and no `--plan`: there is no plan to attest, so step 0 reports "claims verdict owed", never PASS.' \
+  "post-execute step 0 without --plan: claims verdict owed, never PASS"
+assert_contains "$ACTIONS" 'With claims enabled, step 0 needs it: without it the verdict is "claims verdict owed".' \
+  "post-execute --plan input: claims-enabled runs need it"
 assert_contains "$ACTIONS" 'AND (claims disabled OR `claims attest --final` exit 0)' \
   "PASS rule gains the claims clause"
 assert_contains "$ACTIONS" '3c. **Claims** (claims-enabled projects only): `$DOC_TOOLS claims run --planes-of <base>...HEAD` and `claims validate --all`'"$_sq"'s V9 items; a red claim is a **P1 Claim red** finding.' \
