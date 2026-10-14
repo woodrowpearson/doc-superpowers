@@ -41,6 +41,14 @@
 #     block → "Closed"; closed as completed → "Fixed"; closed as not
 #     planned → "Won't Fix"; closed otherwise (duplicate, no reason) →
 #     "Closed"; open → "Open".
+#   ledger-items-gh.sh get <ref>
+#     One issue (gh issue view --json, list's fields plus createdAt), for
+#     ledger init --import: one compact JSON line {"ref", "url", "title",
+#     "body", "created", "fields", "labels", "status"} — ref, url, title,
+#     fields, labels and status as list gives them; body the whole body
+#     with the metadata block (its marker line through "-->" and the line
+#     break after it) taken out, trailing whitespace dropped; created gh's
+#     createdAt (null when absent). An issue gh cannot show: exit 2.
 #   ledger-items-gh.sh write <ref> <field> <value>
 #     ledger, severity: the issue's labels with that prefix are replaced by
 #     <prefix><value> (an empty value removes them), the label created in
@@ -73,7 +81,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: ledger-items-gh.sh list [--since <timestamp>] | write <ref> <field> <value> | note <ref> <text> | create --title <title> --body-file <file>" >&2
+  echo "usage: ledger-items-gh.sh list [--since <timestamp>] | get <ref> | write <ref> <field> <value> | note <ref> <text> | create --title <title> --body-file <file>" >&2
   exit 3
 }
 die() {
@@ -176,12 +184,19 @@ cmd_list() {
     die "gh issue list failed (signed in? gh auth status)"
   fi
   printf '%s\n' "$json" > "$TMPD/gh.json" || die "cannot write $TMPD/gh.json"
+  records "$TMPD/gh.json" "$since" "$LIMIT"
+}
+
+# records <gh.json> <since> <limit>: gh's issue list (a JSON list) as list
+# records, one compact line per issue.
+records() {
+  local gj="$1" since="$2" limit="$3"
   # Pass 1: the checks, --since, and each issue's text as frontmatter.awk
   # reads a blob — its metadata block as the frontmatter, then the body
   # outside it — in `git cat-file --batch` form (sizes in bytes; NUL bytes
   # as \001, as the ledger's own batch passes them).
   # shellcheck disable=SC2016  # jq source
-  if ! jq -r --argjson limit "$LIMIT" --arg since "$since" "$JQ_BLOCK"'
+  if ! jq -r --argjson limit "$limit" --arg since "$since" "$JQ_BLOCK"'
       if type != "array" then error("gh issue list did not print a JSON list")
       elif length >= $limit then error("could not list completely: \(length) issues ≥ limit \($limit)")
       else .[] end
@@ -191,7 +206,7 @@ cmd_list() {
       | (($b | blk) // {pre: $b, blk: "", post: ""}) as $m
       | ($m.blk | sub("\\r?\\n$"; "")) as $k
       | ("---\n" + (if $k == "" then "" else $k + "\n" end) + "---\n" + $m.pre + $m.post) as $doc
-      | "\(.number) blob \($doc | utf8bytelength)\n\($doc)"' "$TMPD/gh.json" > "$TMPD/stream" 2> "$TMPD/jq.err"; then
+      | "\(.number) blob \($doc | utf8bytelength)\n\($doc)"' "$gj" > "$TMPD/stream" 2> "$TMPD/jq.err"; then
     die "cannot use gh's issue list: $(jq_err "$TMPD/jq.err")"
   fi
   [ -s "$TMPD/stream" ] || return 0
@@ -200,7 +215,7 @@ cmd_list() {
     || die "cannot read the issues' metadata blocks: $(head -n 1 "$TMPD/awk.err")"
   # Pass 2: the records joined with the issues.
   # shellcheck disable=SC2016  # jq source
-  if ! jq -c -n --arg lp "$LP" --arg sp "$SP" --slurpfile gh "$TMPD/gh.json" "$JQ_BLOCK"'
+  if ! jq -c -n --arg lp "$LP" --arg sp "$SP" --slurpfile gh "$gj" "$JQ_BLOCK"'
       def lbl($p): [.[] | select(startswith($p)) | .[($p | length):] | select(. != "")]
         | if length == 0 then null elif length == 1 then .[0] else sort end;
       (reduce inputs as $r ({}; .[input_filename | capture("b-(?<n>[0-9]+)\\.json$").n] = $r)) as $R
@@ -234,6 +249,28 @@ cmd_list() {
       "$TMPD"/rec/b-*.json 2> "$TMPD/jq.err"; then
     die "cannot use gh's issue list: $(jq_err "$TMPD/jq.err")"
   fi
+}
+
+# --- get ----------------------------------------------------------------------
+
+cmd_get() {
+  [ "$#" = 1 ] || usage
+  ref_num "$1"
+  need
+  [ -f "$LIB/frontmatter.awk" ] || die "scripts/ledger/frontmatter.awk is not beside this adapter's directory ($LIB)"
+  tmpd
+  gh_view "$N" "$FIELDS,createdAt" "$TMPD/view.json"
+  jq -c '[.]' "$TMPD/view.json" > "$TMPD/gh.json" || die "cannot read gh issue view $N"
+  records "$TMPD/gh.json" "" 2 > "$TMPD/rec.json"
+  [ -s "$TMPD/rec.json" ] || die "gh issue view $N: no issue"
+  # shellcheck disable=SC2016  # jq source
+  jq -c --slurpfile v "$TMPD/view.json" "$JQ_BLOCK"'
+    ($v[0].body // "" | if type == "string" then . else "" end) as $b
+    | (($b | blk) // null) as $m
+    | {ref, url, title, status, fields, labels,
+       body: (if $m == null then $b else $m.pre + ($m.post | sub("^\r?\n"; "")) end | sub("\\s+$"; "")),
+       created: ($v[0].createdAt | if type == "string" and . != "" then . else null end)}' "$TMPD/rec.json" \
+    || die "cannot use gh issue view $N: $(jq_err "$TMPD/jq.err" 2>/dev/null)"
 }
 
 # --- write --------------------------------------------------------------------
@@ -400,5 +437,6 @@ case "${1:-}" in
   write) shift; cmd_write "$@" ;;
   note) shift; cmd_note "$@" ;;
   create) shift; cmd_create "$@" ;;
+  get) shift; cmd_get "$@" ;;
   *) usage ;;
 esac

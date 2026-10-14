@@ -45,8 +45,13 @@
 #                    strings. The reference adapter is
 #                    scripts/adapters/ledger-items-gh.sh (GitHub issues)
 # Other subcommands (contracts resolve <id>: exit 0/1; items write <ref>
-# <field> <value>, items note <ref> <text>) are not checked: the caller
-# reads the exit status (_lg_adapter_rc, or _lg_adapter's 0 / 2).
+# <field> <value>, items note <ref> <text>, items create --title <t>
+# --body-file <f> → {"ref", "url"}; items get <ref> → one object {"ref",
+# "url", "title", "body" (the whole body, any metadata block taken out),
+# "created", "fields", "labels", "status"} — ledger init --import, which
+# takes an exit 3 to get as "this adapter has no get") are not checked:
+# the caller reads the exit status (_lg_adapter_rc, or _lg_adapter's 0 /
+# 2) and the output.
 
 # _lg_adapter_path <name>: the executable adapters.<name> names (for
 # "items": items.adapter) into _LG_ADP ("" when the config names none); rc 2

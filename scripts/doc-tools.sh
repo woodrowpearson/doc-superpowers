@@ -2606,10 +2606,33 @@ ledger init|cmd_ledger_init|repo|dry-run registry= report= accept= import source
   decision is the suggestion for terminal items (fixed, closed, wontfix)
   and empty otherwise — fill it in, then --accept. A re-run keeps each
   decision already in the file (by path) while it is a registered id or
-  unassigned, names the ones it drops (and why) in the report, and keeps
-  the previous file as <file>.decisions.tsv.bak. Without a registry no
-  decisions file is written. Exit 0 once written; 2 could not run; 3
-  usage. --accept and --import: not implemented yet (exit 2).
+  unassigned (a terminal row whose decision is its suggestion is the
+  pre-fill: recomputed), names the ones it drops (and why) in the
+  report, and keeps the previous file as <file>.decisions.tsv.bak.
+  Without a registry no decisions file is written. Exit 0 once written;
+  2 could not run; 3 usage.
+  --accept applies the rows with a decision, after checking every one
+  (a registered, active id or unassigned; still an item; a compatible
+  key): any failure exits 1, one finding per row, nothing written. The
+  registry is ledgers.json, else the decisions header's file (its sha256
+  must match: else exit 2, "registry changed since the report"), which is
+  installed as ledgers.json. It writes config.json when absent ({}; with
+  items.adapter when a decided row is hosted), the keys (one counter
+  commit: open items in a registered ledger without a key there, per
+  ledger in item-date order; a key of another ledger is re-homed into
+  aliases; offline: provisional), the item fields (ledger; summary when
+  missing — the legacy row's bold lead, the H1, the first sentence, ≤ 140
+  characters; key), stubs for the open rows of hand-written ledgers that
+  link no item (docs/issues/<today>-<slug>.md, or through the items
+  adapter's create when items.globs is []), legacy.json entries for every
+  row (<legacy-id>#<row> → key, item or archived; existing entries are
+  kept, a disagreeing one is a finding, exit 1), then renders the views
+  into the cache and prints the paths to review and commit. --dry-run
+  prints the plan and writes nothing. A second run changes nothing.
+  --import turns the hosted items (items.adapter: list, get) into
+  docs/issues/<created>-<slug>.md files once (imported_from, url, the
+  fields; a note links each back; nothing is closed), then sets
+  items.adapter to null; a failure exits 2 and keeps what was imported.
 fragments list|cmd_fragments_list|deps|
   -
   List the per-PR release-notes fragments (RELEASE-NOTES.next/PR-<N>.md in
