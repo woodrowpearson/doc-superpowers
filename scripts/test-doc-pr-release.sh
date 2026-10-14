@@ -3474,7 +3474,9 @@ test_claims_check_scheduled_reports_judge_sample() {
   ( cd "$repo" && printf 'TTL_SECONDS = 9000\n' > src/auth/token.py && git commit -qam "TTL 9000" )
   ck_run "$repo" "$out" scheduled BASE_REF=main
   assert_eq "0|findings" "$CK_RC|$(_out "$out" status)" "a red claim: status findings, still exit 0 (the issue step reports it)"
-  assert_true "…findings counted ($(_out "$out" findings))" test "$(_out "$out" findings)" -ge 1
+  # run (a built claim must pass) and promote --reverify (not green) report
+  # the red claim under two checks: two findings, each counted once.
+  assert_eq "2" "$(_out "$out" findings)" "…findings 2: run's and promote --reverify's"
   ck_run "$repo" "$out" scheduled BASE_REF=main DOC_TOOLS=/nonexistent/doc-tools.sh
   assert_eq "1" "$CK_RC" "nothing could run (doc-tools.sh missing): exit 1"
   assert_contains "$(cat "$out.log")" "::error::" "…with an ::error::"
@@ -3492,5 +3494,103 @@ test_claims_check_pr_amendments_file
 test_claims_check_pr_passes_pr_base
 test_claims_check_pr_attests_only_plans_changed_in_range
 test_claims_check_scheduled_reports_judge_sample
+
+# --- Task 28 review fixes ------------------------------------------------------
+
+test_claims_check_pr_deleted_claims_dir_fails() {
+  echo "Test: claims-check.sh pr — a PR deleting docs/spec-claims/ (present at its base) is a finding, never 'disabled'"
+  local repo out
+  repo=$(ck_repo) || { assert_true "claims fixture" false; return 0; }
+  out="$(harness_mktemp_d step)/out"
+  ( cd "$repo" && git rm -rq docs/spec-claims && git commit -qm "drop the claims" )
+  ck_run "$repo" "$out" pr
+  assert_eq "1|findings|1|0" "$CK_RC|$(_out "$out" status)|$(_out "$out" findings)|$(_out "$out" amendments_count)" \
+    "rc 1, status findings, findings 1, amendments_count 0"
+  assert_contains "$(cat "$out.log")" "::error::doc-superpowers: this change deletes docs/spec-claims/, present at the base" "…with an ::error::"
+  assert_eq "" "$(cat "$out.argv")" "…and no doc-tools call"
+  ck_run "$repo" "$out" scheduled BASE_REF=main
+  assert_eq "0|disabled" "$CK_RC|$(_out "$out" status)" "scheduled (no RANGE): the checkout's own tree decides, disabled"
+  # A project that never had docs/spec-claims/: still inert.
+  local never
+  never=$(new_repo)
+  ( cd "$never" && git rev-parse HEAD > .git/ck-base && echo x > x.txt && git add x.txt && git commit -qm x )
+  ck_run "$never" "$out" pr
+  assert_eq "0|disabled|0" "$CK_RC|$(_out "$out" status)|$(_out "$out" findings)" "never had docs/spec-claims/: rc 0, disabled"
+  ck_run "$never" "$out" pr "RANGE=nosuchref...HEAD"
+  assert_eq "0|disabled" "$CK_RC|$(_out "$out" status)" "…an unresolvable RANGE there too (nothing to check, nothing to fail)"
+}
+
+# gha_if <if-expression> <freshness status> <count> <claims status>: the
+# expression evaluated under node, with steps.freshness / steps.claims outputs
+# set (GitHub's operators && || == != and quoted strings are JavaScript's).
+gha_if() {
+  node -e '
+    const [expr, fs, count, cs] = process.argv.slice(1);
+    const steps = { freshness: { outputs: { status: fs, count } }, claims: { outputs: { status: cs } } };
+    process.stdout.write(String(Boolean(new Function("steps", "return (" + expr + ");")(steps))));' "$@"
+}
+
+test_schedule_close_no_index_claims_ok() {
+  echo "Test: doc-freshness-schedule.yml — which runs close (or open) the issue, the if: expressions evaluated"
+  yaml_unavailable "schedule_close_no_index_claims_ok" && return 0
+  node_unavailable "schedule_close_no_index_claims_ok" && return 0
+  local json close_if create_if row want got bad=""
+  json=$(_yaml_json "$TEMPLATE_DIR/doc-freshness-schedule.yml")
+  close_if=$(jq -r '.jobs[].steps[] | select(.name == "Close issue if all clear") | .if' <<<"$json")
+  create_if=$(jq -r '.jobs[].steps[] | select(.name == "Create or update issue") | .if' <<<"$json")
+  # <freshness status> <count> <claims status> <close?> <create?>
+  for row in "ok 0 disabled true false" "ok 0 ok true false" "ok 0 findings false true" "ok 0 indeterminate false false" \
+             "ok 2 ok false true" "ok 2 disabled false true" \
+             "no-index - ok true false" "no-index - disabled false false" "no-index - findings false true" \
+             "no-index - indeterminate false false"; do
+    # shellcheck disable=SC2086  # five words
+    set -- $row
+    [ "$2" = - ] && set -- "$1" "" "$3" "$4" "$5"
+    got="$(gha_if "$close_if" "$1" "$2" "$3") $(gha_if "$create_if" "$1" "$2" "$3")"
+    want="$4 $5"
+    [ "$got" = "$want" ] || bad="$bad    freshness=$1 count=${2:-''} claims=$3: close/create $got, want $want"$'\n'
+  done
+  [ -z "$bad" ] || printf '%s' "$bad"
+  assert_eq "" "$bad" "close: freshness ok+0 with claims disabled/ok, or no-index with claims ok; inert no-index never closes"
+}
+
+# ck_fake_dt <dir>: a stand-in doc-tools.sh at <dir>/doc-tools.sh. Every
+# claims verb but rulings prints a verdict with the same one finding (exit 1;
+# with FAKE_CLEAN=1 none, exit 0); rulings prints {results: []} and exits
+# $FAKE_RULINGS_EXIT (default 0), carrying it as .exit. Echoes its path.
+ck_fake_dt() {
+  # shellcheck disable=SC2016  # the stand-in's own expansions
+  printf '%s\n' '#!/bin/sh' \
+    'if [ "$2" = rulings ]; then printf "{\"verb\":\"rulings\",\"enabled\":true,\"exit\":%s,\"results\":[]}\n" "${FAKE_RULINGS_EXIT:-0}"; exit "${FAKE_RULINGS_EXIT:-0}"; fi' \
+    'if [ "${FAKE_CLEAN:-0}" = 1 ]; then printf "{\"verb\":\"%s\",\"enabled\":true,\"exit\":0,\"findings\":[],\"advisories\":[],\"indeterminate\":[]}\n" "$2"; exit 0; fi' \
+    'printf "{\"verb\":\"%s\",\"enabled\":true,\"exit\":1,\"findings\":[{\"check\":\"V3\",\"claim\":\"SPEC-AUTH-001#token-ttl\",\"message\":\"the same red claim\"}],\"advisories\":[],\"indeterminate\":[]}\n" "$2"' \
+    'exit 1' > "$1/doc-tools.sh"
+  chmod 755 "$1/doc-tools.sh"
+  printf '%s' "$1/doc-tools.sh"
+}
+
+test_claims_check_findings_counted_once() {
+  echo "Test: claims-check.sh — the same finding from several calls counts once; a rulings run that could not run is indeterminate"
+  local repo out fake
+  repo=$(ck_repo) || { assert_true "claims fixture" false; return 0; }
+  out="$(harness_mktemp_d step)/out"
+  fake=$(ck_fake_dt "$(harness_mktemp_d fake-dt)")
+  ck_run "$repo" "$out" scheduled BASE_REF=main DOC_TOOLS="$fake"
+  assert_eq "0|findings|1" "$CK_RC|$(_out "$out" status)|$(_out "$out" findings)" \
+    "scheduled: run, promote and validate report one identical finding: findings 1"
+  assert_eq "1" "$(grep -c 'the same red claim' "$out.log")" "…listed once in the log"
+  assert_eq "3" "$(jq 'length' "$(_out "$out" report)" 2>/dev/null)" "…the report keeps all three verdicts"
+  ck_run "$repo" "$out" pr DOC_TOOLS="$fake"
+  assert_eq "1|findings|1" "$CK_RC|$(_out "$out" status)|$(_out "$out" findings)" "pr: validate and run report it: findings 1"
+  ck_run "$repo" "$out" pr DOC_TOOLS="$fake" FAKE_CLEAN=1 FAKE_RULINGS_EXIT=2
+  assert_eq "0|indeterminate|0" "$CK_RC|$(_out "$out" status)|$(_out "$out" amendments_count)" \
+    "claims rulings exits 2 with parseable JSON: indeterminate, amendments_count 0"
+  ck_run "$repo" "$out" pr DOC_TOOLS="$fake" FAKE_CLEAN=1
+  assert_eq "0|ok" "$CK_RC|$(_out "$out" status)" "…and exit 0: ok (the stand-in is sound)"
+}
+
+test_claims_check_pr_deleted_claims_dir_fails
+test_schedule_close_no_index_claims_ok
+test_claims_check_findings_counted_once
 
 print_summary

@@ -83,8 +83,12 @@ jobs:
             if (claimsStatus === 'findings' || claimsStatus === 'indeterminate') {
               const verdicts = process.env.CLAIMS_REPORT
                 ? JSON.parse(fs.readFileSync(process.env.CLAIMS_REPORT, 'utf8')) : [];
-              const found = verdicts.flatMap(v => (v.findings || []).map(f =>
-                `- \`${f.claim || f.doc || '?'}\` — ${f.message} (${v.verb}${f.check && f.check !== v.verb ? ' ' + f.check : ''})`));
+              // Each (claim, check, message) once: run and promote --reverify
+              // can report the same red claim (the step counts it once too).
+              const seen = new Set();
+              const found = verdicts.flatMap(v => (v.findings || []).map(f => ({ v, f })))
+                .filter(({ f }) => { const k = JSON.stringify([f.claim, f.check, f.message]); return !seen.has(k) && seen.add(k); })
+                .map(({ v, f }) => `- \`${f.claim || f.doc || '?'}\` — ${f.message} (${v.verb}${f.check && f.check !== v.verb ? ' ' + f.check : ''})`);
               const listed = found.slice(0, 200);
               const sample = (process.env.JUDGE_SAMPLE || '').split(',').filter(Boolean);
               claims.push('### Spec claims', '',
@@ -128,11 +132,13 @@ jobs:
 
       # Only after a check that ran and found nothing: a failed check never
       # closes the issue, nor do spec claims with findings or that could not
-      # all run.
+      # all run. Without a doc index, only claims that ran clean close it (an
+      # issue the claims opened); a project with neither never touches it.
       - name: Close issue if all clear
         if: >-
-          steps.freshness.outputs.status == 'ok' && steps.freshness.outputs.count == '0' &&
-          (steps.claims.outputs.status == 'disabled' || steps.claims.outputs.status == 'ok')
+          (steps.freshness.outputs.status == 'ok' && steps.freshness.outputs.count == '0' &&
+          (steps.claims.outputs.status == 'disabled' || steps.claims.outputs.status == 'ok')) ||
+          (steps.freshness.outputs.status == 'no-index' && steps.claims.outputs.status == 'ok')
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |

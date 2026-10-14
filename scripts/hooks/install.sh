@@ -1251,23 +1251,35 @@ run_tools() {
 # The helper dirs the managed workflows on disk run — a workflow that names
 # .github/scripts/<dir>/ runs it: every template runs step scripts
 # (doc-superpowers-steps), doc-pr-release.yml also the producer helpers. A
-# workflow that probes for the dir with hashFiles('.github/scripts/<dir>/…')
-# uses it only when another workflow ships it (doc-spec-verify.yml's claims
-# job runs update-pr-body.sh only beside doc-pr-release.yml), so it is no
-# reason to ship it.
+# path the workflow guards with hashFiles('<path>') != '' it uses only when
+# another workflow ships it (doc-spec-verify.yml's claims job runs
+# update-pr-body.sh only beside doc-pr-release.yml): no reason to ship the
+# dir. Any other path it names under the dir is.
 needed_helpers() {
   local need="" d w
   for d in doc-pr-release doc-superpowers-steps; do
     for w in $KNOWN_WORKFLOWS; do
       is_managed_workflow ".github/workflows/$w.yml" || continue
-      if grep -q "\.github/scripts/$d/" ".github/workflows/$w.yml" \
-        && ! grep -qF "hashFiles('.github/scripts/$d/" ".github/workflows/$w.yml"; then
+      if workflow_runs_helper_dir ".github/workflows/$w.yml" "$d"; then
         need="${need:+$need }$d"
         break
       fi
     done
   done
   printf '%s' "$need"
+}
+
+# workflow_runs_helper_dir <workflow file> <dir>: the workflow names a path
+# under .github/scripts/<dir>/ that no hashFiles('<path>') != '' guards.
+workflow_runs_helper_dir() {
+  local ref
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    grep -qF "hashFiles('$ref') != ''" "$1" || return 0
+  done <<EOF
+$(grep -oE "\.github/scripts/$2/[A-Za-z0-9_./-]+" "$1" | sort -u)
+EOF
+  return 1
 }
 
 # plan_retired <names>: the retired workflows this run retires (preflight;
