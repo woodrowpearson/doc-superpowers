@@ -109,6 +109,13 @@ Used by `spec-verify --mode=post-execute`. See `references/spec-lifecycle-action
 | SPEC-API-006 | constraint | In Review | Current | Read-only reference — not advanced by this work |
 | SPEC-UI-041 | amends | Implemented | Stale | Amendment landed in `## Design`, cites this plan |
 
+### Claims verdict
+_(claims-enabled projects only: omit this block when `docs/spec-claims/` does not exist)_
+- `attest` exit: {0 | 1 | 2 — claims verdict owed}
+- Red claims: {SPEC-AUTH-001#token-ttl, … | none}
+- `rebased: re-verified` chunks: {chunk numbers | none}
+- Amendment batch: {the rulings the final gate listed | none}
+
 ### Unresolved
 - SPEC-DATA-001 section 3.2: implementation diverged, needs human review
 
