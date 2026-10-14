@@ -110,11 +110,15 @@ jobs:
 
     steps:
       # The PR head itself, not the merge commit: the claims verbs read the
-      # branch's own commits (first parent) from the merge-base to HEAD.
+      # branch's own commits (first parent) from the merge-base to HEAD. This
+      # job runs the PR's own code (its adapters) and needs no git
+      # credentials, so the token is not left in .git/config (the amendments
+      # step calls gh with GH_TOKEN).
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
 
       # Host test-environment setup goes here.
 

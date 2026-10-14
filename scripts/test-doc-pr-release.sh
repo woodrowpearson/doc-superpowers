@@ -2920,6 +2920,10 @@ test_spec_verify_claims_job_structure() {
   assert_eq "ubuntu-latest|20" "$(jq -r '"\(.["runs-on"])|\(.["timeout-minutes"])"' <<<"$job")" "runs-on ubuntu-latest, timeout-minutes 20"
   assert_eq "0" "$(jq -r '[.steps[] | select((.uses // "") | startswith("actions/checkout@")) | .with["fetch-depth"]][0]' <<<"$job")" \
     "checkout with fetch-depth: 0"
+  # The job runs the PR's own code (its adapters) and needs no git
+  # credentials: the checkout must not leave the token in .git/config.
+  assert_eq "false" "$(jq -r '[.steps[] | select((.uses // "") | startswith("actions/checkout@")) | .with["persist-credentials"]][0]' <<<"$job")" \
+    "checkout with persist-credentials: false (the PR's adapters run in this job)"
   assert_eq "0" "$(jq --arg u "$AI_USES" '[.steps[] | select((.uses // "") | startswith($u))] | length' <<<"$job")" "no AI step"
   assert_eq ".github/scripts/doc-superpowers-steps/claims-check.sh pr" \
     "$(jq -r '.steps[] | select(.id == "claims") | .run' <<<"$job")" "step id claims runs claims-check.sh pr"
