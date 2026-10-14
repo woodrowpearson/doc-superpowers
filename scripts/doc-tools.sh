@@ -2238,11 +2238,13 @@ claims promote|cmd_claims_promote|repo|reverify all base=
   passes unmodified (under nonvacuity.mutant, an exactly-once literal
   find/replace, and under nonvacuity.observed_red <sha>, a full commit id,
   the subject files as at that commit, the test must fail by an
-  assertion), store the verdict, record the promotion in the sidecar and
+  assertion), store the verdict, record the promotion in the sidecar
+  ({at, verdict_sha256, proved}: proved digests the fields it proved) and
   render the doc's status block (results: {claim, status_from, status_to,
-  green, red, verdict_sha256}). A built claim whose verdict matches it is
-  refused (already promoted), unless the configuration extension is on and
-  the recorded configuration at HEAD no longer satisfies its "when": it is
+  green, red, verdict_sha256}). A built claim whose verdict matches it,
+  every field as proved records it, is refused (already promoted), unless
+  the configuration extension is on and the recorded configuration at HEAD
+  no longer satisfies its "when": it is
   then re-proved and written gated. --reverify re-runs those proofs at HEAD
   for each <id>, or with --all for each built or gated claim with a
   promotion (a frozen one is reported skipped), and stores each fresh
@@ -6218,7 +6220,11 @@ _claims_touched() {
 # is a key of $rec (the recorded configuration, cl-recorded.json; null when
 # the adapter failed, which skips that check: the run is indeterminate), a
 # gated claim needs a non-empty when, and config_independent is a non-empty
-# string or null. Fields outside §B's record are not checked.
+# string or null. A built or gated claim's promotion (an object) carries
+# proved, exactly the six keys of cl_proved_keys (_JQ_CLAIMS_PROVED: run
+# before it), each a 64-hex sha256 but enforced_by (a value): promote writes
+# it, and V6, gate and attest compare with it. Fields outside §B's record
+# are not checked.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_SCHEMA='def claims_v1($docid; $kinds; $known; $b1; $rec):
   def nes: type == "string" and length > 0;
@@ -6320,6 +6326,13 @@ _JQ_CLAIMS_SCHEMA='def claims_v1($docid; $kinds; $known; $b1; $rec):
       opt("quote_occurrence"; type == "number" and . >= 1 and . == floor; "must be an integer >= 1"),
       opt("nonvacuity"; type == "object"; "must be an object or null"),
       opt("promotion"; type == "object"; "must be an object or null"),
+      (if (.status == "built" or .status == "gated") and (.promotion | type) == "object" then
+         .promotion.proved as $pv
+         | if ($pv | type) == "object" and ($pv | keys) == (cl_proved_keys | sort)
+              and all($pv | .states, .test, .subject, .nonvacuity, .when; type == "string" and test("^[0-9a-f]{64}$"))
+           then empty
+           else "promotion.proved \($pv | tojson) must be {states, test, subject, enforced_by, nonvacuity, when}: each the 64-hex sha256 of that field, enforced_by its value (claims promote writes it: run claims promote)" end
+       else empty end),
       opt("why_not_mechanical"; nes; "must be a non-empty string")
     end;'
 
@@ -6393,7 +6406,7 @@ _claims_v1() {
     --slurpfile rec "$_SCRATCH/cl-recorded.json" \
     --slurpfile s "$_SCRATCH/cl-sidecars.jsonl" --slurpfile t "$_SCRATCH/cl-touched.json" \
     --slurpfile st "$_SCRATCH/cl-staged.json" --slurpfile cfg "$_SCRATCH/cl-config.json" \
-    "$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_SCHEMA $_JQ_CLAIMS_V1" >> "$_SCRATCH/cl-findings.jsonl"
+    "$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_PROVED $_JQ_CLAIMS_SCHEMA $_JQ_CLAIMS_V1" >> "$_SCRATCH/cl-findings.jsonl"
 }
 
 # --- Spec claims: quote normalisation, V2 --------------------------------------
@@ -6709,15 +6722,19 @@ _claims_v5() {
 #
 # promote (Task 11; --reverify too) stores each verdict, outside the tree, at
 # <store>/<digest>.json: the jq -cS bytes of {claim, states_sha256, test,
-# nonvacuity, head, subject_oids, green, red, status_to}, <digest> their
-# sha256, also written as the claim's promotion.verdict_sha256. Every digest,
-# verdict file name and states_sha256 is a bare 64-hex sha256
+# nonvacuity, proved, head, subject_oids, green, red, status_to}, <digest>
+# their sha256, also written as the claim's promotion.verdict_sha256. Every
+# digest, verdict file name and states_sha256 is a bare 64-hex sha256
 # (_claims_sha256); states_sha256 hashes the states string's UTF-8 bytes with
-# no trailing newline (jq -j .states). A verdict is local: a fresh clone or a
-# CI runner has none, so a missing verdict is judged from git history
-# instead (_claims_proof_delta: the record promote proved, in the sidecar at
-# promotion.at), and is the advisory unverifiable-here when that record
-# matches or cannot be read here (the scheduled run re-verifies).
+# no trailing newline (jq -j .states). promote also writes the fingerprint of
+# the record it proved, promotion.proved (_claims_proved), into the sidecar
+# and into the verdict. A verdict is local: a fresh clone or a CI runner has
+# none. So what a promotion proved is read from promotion.proved, never from
+# the store and never from history (promotion.at is unreachable on trunk
+# after a squash or rebase merge): the claim is compared with it field by
+# field (_claims_proved_delta), with the verdict or without it. A missing
+# verdict is the advisory unverifiable-here only when every field is as
+# proved (the scheduled run re-verifies).
 #
 # V6 compares each claim with its record at _CL_MB (cl-claims-base.json),
 # joined by id, on every claim — eligible or not — that is touched. A new
@@ -6735,16 +6752,23 @@ _claims_v5() {
 # _CL_MB; a claim whose sidecar is still there but no longer well formed is
 # V1's finding, not a deletion), and moving into built/gated
 # without a promotion is one. Each built/gated claim that is new or differs
-# from its _CL_MB record has its verdict checked (_claims_verdict_check):
-#   - ok → nothing;
-#   - mismatch → a finding, or the advisory "re-promote owed" when a new
-#     DOC-STALE/RETIRE ruling on the claim covers it and the mismatch is the
-#     states alone (_claims_verdict_states_only: a DOC-STALE amendment
-#     changes states, so the verdict's states_sha256, by design: promote
-#     re-proves it; a test, subject or tier swap stays a finding);
-#   - missing → by the record at promotion.at (_claims_proof_delta): clear
-#     or unreadable → the advisory unverifiable-here; states → "re-promote
-#     owed" under a covering ruling, else a finding; other → a finding.
+# from its _CL_MB record is compared with its promotion.proved
+# (_claims_proved_delta: the fields that differ), and its verdict, when the
+# store holds it, is checked to bind the claim (_claims_verdict_bound):
+#   - the verdict there but not binding the claim (its file edited, or
+#     another claim, status, proved, or — for a field still as proved —
+#     another states, test, nonvacuity or subject) → a finding;
+#   - no proved (V1's finding too) → a finding;
+#   - a field that differs and is not licensed → a finding naming the
+#     fields ("run claims promote <id>"). A new DOC-STALE/RETIRE ruling on
+#     the claim licenses a states difference and, with it, a nonvacuity or
+#     when difference (an amended threshold needs a new mutant); nothing
+#     licenses a test, subject or enforced_by difference (a swapped test
+#     or subject proves nothing about the claim);
+#   - only licensed differences → the advisory "re-promote owed" (promote
+#     re-proves it);
+#   - no difference → nothing with the verdict, the advisory
+#     unverifiable-here without it (promoted in another clone).
 # Each new ruling's record must exist in the proposed tree and be neither
 # the claim's doc nor its sidecar. _CL_MB empty: V6 is skipped (_claims_init already
 # reported base-unresolvable).
@@ -6783,26 +6807,78 @@ _claims_sha256() {
 # _claims_states_sha256 <claim-json>: the claim's states_sha256 — the sha256
 # of its states string's bytes with no trailing newline (jq -j; a states
 # that is not a string hashes its JSON). The one definition promote writes
-# and _claims_verdict_check compares.
+# and _claims_verdict_bound compares.
 _claims_states_sha256() {
   local st="$_SCRATCH/cl-states"
   _claims_jq states -j '.states | if type == "string" then . else tojson end' <<<"$1" > "$st"
   _claims_sha256 "$st"
 }
 
-# _claims_verdict_check <claim-json>: ok, missing or mismatch. ok: the
-# verdict file <store>/<promotion.verdict_sha256>.json exists, its sha256 is
-# that digest, and its claim, states_sha256, test and status_to equal the
-# claim's id, sha256(states), test and status. missing: no such file.
-# mismatch: anything else — a promotion with no 64-hex verdict_sha256
-# included (there is no verdict to look for).
-_claims_verdict_check() {
-  local claim="$1" digest store file ss
+# The fields a promotion proves (promotion.proved), in the order
+# _claims_proved digests them. cl_proved_digested, on a claim: its states,
+# test, subject, nonvacuity and when, one value each (null when absent);
+# cl_proved_keys: the six keys of proved, enforced_by kept as its value.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_PROVED='def cl_proved_digested: .states, .test, .subject, .nonvacuity, .when;
+ def cl_proved_keys: ["states", "test", "subject", "enforced_by", "nonvacuity", "when"];'
+
+# _claims_proved <claim-json>: the claim's fingerprint, compact JSON {states,
+# test, subject, enforced_by, nonvacuity, when}. Each field but enforced_by
+# is the sha256 (_claims_sha256) of its canonical JSON: the jq -cS bytes of
+# its value (null when the field is absent, so the sha256 of the four bytes
+# "null"), with no trailing newline; enforced_by is its value. The one
+# definition promote writes and V6, gate and attest compare with.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_claims_proved() {
+  local lines="$_SCRATCH/cl-proved-fields" f="$_SCRATCH/cl-proved-field" line d ds=""
+  _claims_jq proved-fields -cS "$_JQ_CLAIMS_PROVED cl_proved_digested" <<<"$1" > "$lines"
+  # One compact line per field: no raw newline survives jq -c.
+  while IFS= read -r line <&3; do
+    printf '%s' "$line" > "$f"
+    d=$(_claims_sha256 "$f") || _claims_propagate $?
+    ds="$ds $d"
+  done 3< "$lines"
+  # shellcheck disable=SC2086  # the digests are hex words
+  set -- "$1" $ds
+  [ $# -eq 6 ] || _claims_die "cannot digest the proved fields of a claim"
+  _claims_jq proved -nc --argjson c "$1" --arg s "$2" --arg t "$3" --arg u "$4" --arg n "$5" --arg w "$6" \
+    '{states: $s, test: $t, subject: $u, enforced_by: $c.enforced_by, nonvacuity: $n, when: $w}'
+}
+
+# _claims_proved_delta <claim-json>: the keys of the claim's promotion.proved
+# whose value differs from the claim's own (_claims_proved), as a JSON array
+# in cl_proved_keys order ([]: every field as proved); null when the claim
+# has no promotion.proved object with exactly the six keys (V1's finding).
+# No history is read.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_claims_proved_delta() {
+  local now
+  now=$(_claims_proved "$1") || _claims_propagate $?
+  _claims_jq proved-delta -nc --argjson c "$1" --argjson now "$now" "$_JQ_CLAIMS_PROVED"'
+    ($c.promotion | if type == "object" then .proved else null end) as $p
+    | if ($p | type) == "object" and ($p | keys) == (cl_proved_keys | sort)
+      then [cl_proved_keys[] | select($p[.] != $now[.])]
+      else null end'
+}
+
+# _claims_verdict_bound <claim-json> <delta-json>: bound, missing or unbound —
+# whether the verdict file <store>/<promotion.verdict_sha256>.json binds the
+# claim. <delta-json> is _claims_proved_delta's answer for it. bound: the
+# file exists, its sha256 is that digest, it is one object, and its claim,
+# status_to and proved are the claim's id, status and promotion.proved; and
+# for each field still as proved (not in <delta-json>), its states_sha256
+# (_claims_states_sha256), test, nonvacuity and subject_oids paths (as a set)
+# are the claim's — so neither a forged proved nor an edited verdict hides a
+# mismatch. missing: no such file. unbound: anything else, a promotion with
+# no 64-hex verdict_sha256 included.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_claims_verdict_bound() {
+  local claim="$1" delta="$2" digest store file ss out
   digest=$(_claims_jq verdict-digest -r '.promotion | if type == "object" and (.verdict_sha256 | type) == "string"
       and (.verdict_sha256 | test("^[0-9a-f]{64}$")) then .verdict_sha256 else "" end' <<<"$claim") \
     || _claims_propagate $?
   if [ -z "$digest" ]; then
-    echo mismatch
+    echo unbound
     return 0
   fi
   store=$(_claims_store_dir) || _claims_propagate $?
@@ -6813,122 +6889,61 @@ _claims_verdict_check() {
   fi
   ss=$(_claims_sha256 "$file") || _claims_propagate $?
   if [ "$ss" != "$digest" ]; then
-    echo mismatch
+    echo unbound
     return 0
   fi
   ss=$(_claims_states_sha256 "$claim") || _claims_propagate $?
-  # Its status is the answer (a verdict file that is not JSON: mismatch), so
-  # not _claims_jq.
-  if jq -e -n --slurpfile v "$file" --argjson c "$claim" --arg ss "$ss" \
-      '($v | length) == 1 and ($v[0] | type) == "object" and $v[0].claim == $c.id
-       and $v[0].states_sha256 == $ss and $v[0].test == $c.test and $v[0].status_to == $c.status' \
-      >/dev/null 2>&1; then
-    echo ok
-  else
-    echo mismatch
-  fi
-}
-
-# What a promotion binds besides the states it was asked to prove: the
-# bound test, the subject paths and the tier. A DOC-STALE or RETIRE ruling
-# licenses a states change ("re-promote owed": the quote, quote_occurrence
-# and the non-vacuity proof may move with it — an amended threshold needs a
-# new mutant — and promote re-proves them), never a change to these (a
-# swapped test or subject proves nothing about the claim). cl_subj: the
-# subject compared as a set.
-# shellcheck disable=SC2016  # jq program, not shell expansion
-_JQ_CLAIMS_PROOF='def cl_subj: if type == "array" then unique else . end;'
-
-# _claims_verdict_states_only <claim-json>: yes when the claim's verdict
-# (_claims_verdict_check: mismatch) differs from it in its states alone — the
-# verdict file intact (its sha256 is its digest; one object), its claim,
-# test and status_to the claim's, its subject_oids naming the claim's
-# subject paths, the claim still enforced_by test (promote proves test
-# claims only), and states_sha256 differing; else no.
-# shellcheck disable=SC2016  # jq program, not shell expansion
-_claims_verdict_states_only() {
-  local claim="$1" digest store file ss out
-  digest=$(_claims_jq verdict-digest -r '.promotion | if type == "object" and (.verdict_sha256 | type) == "string"
-      and (.verdict_sha256 | test("^[0-9a-f]{64}$")) then .verdict_sha256 else "" end' <<<"$claim") \
-    || _claims_propagate $?
-  store=$(_claims_store_dir) || _claims_propagate $?
-  file="$store/$digest.json"
-  if [ -z "$digest" ] || [ ! -f "$file" ]; then
-    echo no
-    return 0
-  fi
-  ss=$(_claims_sha256 "$file") || _claims_propagate $?
-  if [ "$ss" != "$digest" ]; then
-    echo no
-    return 0
-  fi
-  ss=$(_claims_states_sha256 "$claim") || _claims_propagate $?
-  # Its output is the answer (a verdict file that is not JSON: no), so not
-  # _claims_jq; empty output (jq 1.6 on an unparseable file) is no too.
-  out=$(jq -r -n --slurpfile v "$file" --argjson c "$claim" --arg ss "$ss" "$_JQ_CLAIMS_PROOF"'
+  # Its output is the answer (a verdict file that is not JSON: unbound), so
+  # not _claims_jq; empty output (jq 1.6 on an unparseable file) is unbound
+  # too.
+  out=$(jq -r -n --slurpfile v "$file" --argjson c "$claim" --arg ss "$ss" --argjson d "$delta" '
+      def moved($k): $d != null and any($d[]; . == $k);
+      def cl_subj: if type == "array" then unique else . end;
       if ($v | length) == 1 and ($v[0] | type) == "object" and $v[0].claim == $c.id
-         and $v[0].test == $c.test and $v[0].status_to == $c.status
-         and ($v[0].subject_oids | type) == "object" and ($v[0].subject_oids | keys) == ($c.subject | cl_subj)
-         and $c.enforced_by == "test" and $v[0].states_sha256 != $ss
-      then "yes" else "no" end' 2>/dev/null) || out=no
-  [ "$out" = yes ] || out=no
+         and $v[0].status_to == $c.status and $v[0].proved == ($c.promotion | objects | .proved)
+         and (moved("states") or $v[0].states_sha256 == $ss)
+         and (moved("test") or $v[0].test == $c.test)
+         and (moved("nonvacuity") or $v[0].nonvacuity == $c.nonvacuity)
+         and (moved("subject") or (($v[0].subject_oids | type) == "object"
+                                   and ($v[0].subject_oids | keys) == ($c.subject | cl_subj)))
+      then "bound" else "unbound" end' 2>/dev/null) || out=unbound
+  [ "$out" = bound ] || out=unbound
   echo "$out"
 }
 
-# _claims_proof_delta <claim-json> <sidecar>: how a built/gated claim differs
-# from the record promote proved, read from git history, never from the
-# verdict store: promote sets promotion.at to HEAD before it writes the
-# sidecar, so the claim's record in <sidecar> at promotion.at holds exactly
-# what it proved. clear: the same states and test; states: the states
-# differ, the test, subject (as a set) and enforced_by as proved; other: the
-# test, subject or enforced_by differs too; unverifiable-here: promotion.at is
-# not a commit here (a rebased branch's old sha), or the sidecar at
-# promotion.at is absent, not one JSON object with a claims array, or holds
-# no claim with that id.
-# shellcheck disable=SC2016  # jq program, not shell expansion
-_claims_proof_delta() {
-  local claim="$1" sidecar="$2" at out
-  local proved="$_SCRATCH/cl-owed-proved.json"
-  at=$(_claims_jq owed-at -r '.promotion | objects | .at | strings' <<<"$claim") || _claims_propagate $?
-  if [ -z "$at" ] || ! at=$(git rev-parse -q --verify "$at^{commit}" 2>/dev/null) \
-      || ! _claims_read_at "$at" "$sidecar" > "$proved"; then
-    echo unverifiable-here
-    return 0
-  fi
-  # Its output is the answer (a sidecar jq cannot parse: unverifiable-here),
-  # so not _claims_jq; empty output (jq 1.6 on an unparseable sidecar) is
-  # unverifiable-here too.
-  out=$(jq -r -s --argjson c "$claim" "$_JQ_CLAIMS_PROOF"'
-    if length != 1 or (.[0] | type) != "object" or (.[0].claims | type) != "array" then "unverifiable-here"
-     else [.[0].claims[] | objects | select(.id == $c.id)]
-       | if length == 0 then "unverifiable-here"
-         else .[0] as $p
-         | if $p.states == $c.states and $p.test == $c.test then "clear"
-           elif $p.test == $c.test and $p.enforced_by == $c.enforced_by
-                and ($p.subject | cl_subj) == ($c.subject | cl_subj) then "states"
-           else "other" end
-         end
-     end' "$proved" 2>/dev/null) || out=unverifiable-here
-  case "$out" in
-    clear|states|other) ;;
-    *) out=unverifiable-here ;;
+# _claims_verdict_check <claim-json>: ok, missing or mismatch. ok: the
+# verdict binds the claim (_claims_verdict_bound) and every field is as
+# promotion.proved says it was proved (_claims_proved_delta: []). missing:
+# the verdict is not in the local store. mismatch: anything else.
+_claims_verdict_check() {
+  local claim="$1" delta b
+  delta=$(_claims_proved_delta "$claim") || _claims_propagate $?
+  b=$(_claims_verdict_bound "$claim" "$delta") || _claims_propagate $?
+  case "$b" in
+    missing) echo missing ;;
+    bound)
+      if [ "$delta" = "[]" ]; then echo ok; else echo mismatch; fi
+      ;;
+    *) echo mismatch ;;
   esac
-  echo "$out"
 }
 
-# _claims_repromote_owed <claim-id> <since-rev>: owed, clear or
-# unverifiable-here for a built/gated claim of cl-claims.json (clear for any
-# other status, or no such claim). With its verdict in the local store:
-# mismatch → owed, ok → clear. Without it (a fresh clone, CI) the answer
-# comes from git history, never from the store (_claims_proof_delta): clear
-# when the states and test are JSON-equal to those of the record promote
-# proved; owed when either differs (an amendment, or a later edit under the
-# same ruling, after the proof); unverifiable-here when that record cannot
-# be read here. <since-rev> (the gate's from / _CL_MB) is accepted for the
-# callers' interface and not read: the proved record, not when a ruling
-# arrived, decides.
+# _claims_repromote_owed <claim-id> <since-rev>: owed or clear for a
+# built/gated claim of cl-claims.json (clear for any other status, or no
+# such claim), decided by promotion.proved, never by history or by the
+# store: owed when the claim's states, test or nonvacuity differs from
+# proved (_claims_proved_delta: an amendment, or a later edit under the
+# same ruling, after the proof), or it has no proved; and, when the store
+# holds its verdict, when that verdict does not bind it
+# (_claims_verdict_bound). Else clear — a subject, enforced_by or when
+# difference is V6's finding, not a re-promotion. So a fresh clone, CI, or
+# a trunk the promotion's branch was squashed onto gives the same answer.
+# <since-rev> (the gate's from / _CL_MB) is accepted for the callers'
+# interface and not read: the proved record, not when a ruling arrived,
+# decides.
+# shellcheck disable=SC2016  # jq program, not shell expansion
 _claims_repromote_owed() {
-  local id="$1" entry claim sidecar v
+  local id="$1" entry claim delta b
   entry=$(_claims_jq owed-claim -c --arg id "$id" \
     'first(.[] | select(.claim.id == $id and (.claim.status == "built" or .claim.status == "gated"))) // empty' \
     "$_SCRATCH/cl-claims.json") || _claims_propagate $?
@@ -6937,17 +6952,14 @@ _claims_repromote_owed() {
     return 0
   fi
   claim=$(_claims_jq owed-record -c '.claim' <<<"$entry") || _claims_propagate $?
-  sidecar=$(_claims_jq owed-sidecar -r '.sidecar' <<<"$entry") || _claims_propagate $?
-  v=$(_claims_verdict_check "$claim") || _claims_propagate $?
-  case "$v" in
-    mismatch) echo owed; return 0 ;;
-    ok) echo clear; return 0 ;;
-  esac
-  v=$(_claims_proof_delta "$claim" "$sidecar") || _claims_propagate $?
-  case "$v" in
-    clear|unverifiable-here) echo "$v" ;;
-    *) echo owed ;;
-  esac
+  delta=$(_claims_proved_delta "$claim") || _claims_propagate $?
+  b=$(_claims_verdict_bound "$claim" "$delta") || _claims_propagate $?
+  if [ "$b" = unbound ]; then
+    echo owed
+    return 0
+  fi
+  _claims_jq owed-delta -nr --argjson d "$delta" \
+    'if $d == null or any($d[]; . == "states" or . == "test" or . == "nonvacuity") then "owed" else "clear" end'
 }
 
 # A plan's Specs role that counts as a target (V12's decomposition check, the
@@ -6990,7 +7002,7 @@ _JQ_CLAIMS_DELTA='def in_list($l): . as $x | any($l[]; . == $x);
 # the touched built/gated claims whose verdict is to be checked (one JSON
 # line each); phase records, the distinct records the new rulings name;
 # phase check, the finding rows and advisory rows (the advisories carry a
-# code), given $v ({claim, verdict} per checked claim) and $rec ({record,
+# code), given $v ({claim, verdict, delta} per checked claim) and $rec ({record,
 # exists} per record).
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_RATCHET='def v6($claim; $doc; $msg): {check: "V6", claim: $claim, doc: $doc, message: $msg};
@@ -7050,18 +7062,22 @@ _JQ_CLAIMS_RATCHET='def v6($claim; $doc; $msg): {check: "V6", claim: $claim, doc
            then v6($id; $doc; "status \($c.status) without a promotion: claims promote is the only path into \($c.status)")
            else empty end),
           (if $e.verify then
-             (first($v[] | select(.claim == $c) | .verdict) // "missing") as $vd
-             | if $vd == "ok" then empty
-               elif $vd == "missing"
-               then v6a($id; "unverifiable-here"; "promotion verdict \($c.promotion.verdict_sha256) is not in the local verdict store (promoted in another clone?): the scheduled run re-verifies it")
-               elif ($vd == "states" or $vd == "history-states") and $amended
+             (first($v[] | select(.claim == $c)) // {verdict: "missing", delta: null}) as $r
+             | $r.delta as $d
+             | (if $d != null and $amended and any($d[]; . == "states")
+                then ["states", "nonvacuity", "when"] else [] end) as $lic
+             | (if $d == null then [] else [$d[] | select(in_list($lic) | not)] end) as $bad
+             | if $d == null
+               then v6($id; $doc; "promotion has no proved record (promotion.proved: the fields promote proved, digested), so what changed since the proof cannot be told: run claims promote \($id)")
+               elif $r.verdict == "unbound"
+               then v6($id; $doc; "promotion verdict does not match the claim (the verdict file was edited, or it was stored for another claim, status, proved record, states, test, mutant or subject): run claims promote \($id)")
+               elif ($bad | length) > 0
+               then v6($id; $doc; "\($bad | join(", ")) changed since promote proved the claim (promotion.proved)\(if $amended then "; a DOC-STALE or RETIRE ruling covers only a states change (with the nonvacuity or when that moves with it)" elif any($bad[]; . == "states") then " without a new DOC-STALE (or RETIRE) ruling" else "" end): run claims promote \($id)")
+               elif ($d | length) > 0
                then v6a($id; "re-promote owed"; "states changed under a ruling: run claims promote \($id)")
-               elif $vd == "history-states"
-               then v6($id; $doc; "promotion verdict \($c.promotion.verdict_sha256) is not in the local verdict store, and the claim'"'"'s states differs from its record at promotion.at \($c.promotion.at) (the record promote proved) without a new DOC-STALE (or RETIRE) ruling: run claims promote \($id)")
-               elif $vd == "history-other"
-               then v6($id; $doc; "promotion verdict \($c.promotion.verdict_sha256) is not in the local verdict store, and the claim'"'"'s test, subject or enforced_by differs from its record at promotion.at \($c.promotion.at) (the record promote proved; a DOC-STALE or RETIRE ruling covers a states change only): run claims promote \($id)")
-               else v6($id; $doc; "promotion verdict does not match the claim (its id, states, test or status changed since promote, or the verdict file was edited)\(if $amended then "; a DOC-STALE or RETIRE ruling covers a states change only, and its test, subject, enforced_by or status changed too" else "" end): run claims promote \($id)")
-               end
+               elif $r.verdict == "missing"
+               then v6a($id; "unverifiable-here"; "promotion verdict \($c.promotion.verdict_sha256) is not in the local verdict store (promoted in another clone?), and the claim is as promote proved it (promotion.proved): the scheduled run re-verifies it")
+               else empty end
            else empty end),
           ($e.new[] | objects | . as $ru | ($ru.record | strings | select(. != "")) as $r | ($r | cl_gate_stem) as $stem
            | if $r == $doc or $r == $e.sidecar
@@ -7089,14 +7105,15 @@ _JQ_CLAIMS_RATCHET='def v6($claim; $doc; $msg): {check: "V6", claim: $claim, doc
           end)
    end'
 
-# V6: the verdict of each claim phase verify names (_claims_verdict_check)
-# and the existence of each record phase records names (_claims_read: the
+# V6: the proved delta and the verdict binding of each claim phase verify
+# names (_claims_proved_delta, _claims_verdict_bound) and the existence of
+# each record phase records names (_claims_read: the
 # index under --staged; a path with an empty, "." or ".." segment is never a
 # repo path), then phase check. The shell loops run over those short lists,
 # never over every claim.
 _claims_v6() {
   local prog="$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_NORM $_JQ_CLAIMS_ROLES $_JQ_CLAIMS_GATE_PATH $_JQ_CLAIMS_DELTA $_JQ_CLAIMS_RATCHET"
-  local line c sc x v r exists plan src stem stems
+  local line c x v r exists plan src stem stems
   local verify="$_SCRATCH/cl-v6-verify" vrows="$_SCRATCH/cl-v6-verdicts.jsonl"
   local records="$_SCRATCH/cl-v6-records" rrows="$_SCRATCH/cl-v6-records.jsonl" out="$_SCRATCH/cl-v6.jsonl"
   local gov="$_SCRATCH/cl-v6-gov.jsonl" pj="$_SCRATCH/cl-v6-plan.json"
@@ -7132,30 +7149,16 @@ $stem
       esac
     done 3< "$_SCRATCH/cl-plans.z"
   fi
-  # Each claim's verdict: ok; missing; or, from _claims_verdict_check's
-  # mismatch, states when only its states moved (_claims_verdict_states_only),
-  # else mismatch. A missing verdict is judged by the record promote proved
-  # (_claims_proof_delta): history-states / history-other when it differs, as
-  # gate and attest judge it; missing (the advisory) when it does not, or
-  # promotion.at cannot be read here.
+  # Each claim's row: the fields that differ from its promotion.proved
+  # (_claims_proved_delta: delta, null without proved) and whether the
+  # store's verdict binds it (_claims_verdict_bound: bound, missing or
+  # unbound). Phase check decides from the two, as gate and attest do.
   while IFS= read -r line <&3; do
     c=$(_claims_jq v6-verify-claim -c '.claim' <<<"$line") || _claims_propagate $?
-    v=$(_claims_verdict_check "$c") || _claims_propagate $?
-    case "$v" in
-      mismatch)
-        x=$(_claims_verdict_states_only "$c") || _claims_propagate $?
-        [ "$x" != yes ] || v=states
-        ;;
-      missing)
-        sc=$(_claims_jq v6-verify-sidecar -r '.sidecar' <<<"$line") || _claims_propagate $?
-        x=$(_claims_proof_delta "$c" "$sc") || _claims_propagate $?
-        case "$x" in
-          states) v=history-states ;;
-          other) v=history-other ;;
-        esac
-        ;;
-    esac
-    _claims_jq v6-verdict-row -nc --argjson c "$c" --arg v "$v" '{claim: $c, verdict: $v}' >> "$vrows"
+    x=$(_claims_proved_delta "$c") || _claims_propagate $?
+    v=$(_claims_verdict_bound "$c" "$x") || _claims_propagate $?
+    _claims_jq v6-verdict-row -nc --argjson c "$c" --arg v "$v" --argjson d "$x" \
+      '{claim: $c, verdict: $v, delta: $d}' >> "$vrows"
   done 3< "$verify"
   while IFS= read -r r <&3; do
     exists=false
@@ -9852,13 +9855,15 @@ _claims_v12() {
 #
 # claims promote <id> is the one path into built (§C). It refuses a dirty
 # tree (_claims_refuse_dirty: exit 2, dirty-tree), so HEAD is the tree it
-# proves and promotion.at = HEAD holds exactly the states and test proved
-# (what _claims_repromote_owed reads in a clone without the verdict). The
+# proves, and the claim record it reads is the one it proves (its
+# fingerprint, promotion.proved, is what V6, gate and attest compare with;
+# promotion.at = HEAD is a record only, never read back). The
 # claim must be a test claim, not frozen, with a bound test and a proof —
 # nonvacuity.mutant {file, find, replace}, nonvacuity.observed_red <sha>, or
 # both (then both must hold) — whose status is unbuilt, diverged
-# or gated — or built whose verdict check is not ok (a DOC-STALE amendment
-# changed its states, or the verdict is in another clone's store):
+# or gated — or built whose verdict check is not ok (a field differs from
+# promotion.proved, e.g. a DOC-STALE amendment changed its states, or the
+# verdict is in another clone's store):
 # re-proving is always safe. A built claim whose verdict is ok is "already
 # promoted". Then:
 #   1. the bound node runs at HEAD (the clean work tree, --root its top
@@ -9885,7 +9890,8 @@ _claims_v12() {
 #      configuration extension on, when the recorded configuration at HEAD,
 #      the config adapter's recorded --rev HEAD, does not satisfy the claim's
 #      when: claims_when_ok), promotion → {at: HEAD, verdict_sha256:
-#      <digest>} — and the doc's status block rendered. That recorded call
+#      <digest>, proved: _claims_proved of the claim} — and the doc's
+#      status block rendered. That recorded call
 #      runs before step 1; when it fails, promote is indeterminate.
 # Everything that can refuse runs before anything is written: the mutant
 # file must not be the bound test's own file, must be a safe repo path,
@@ -10141,6 +10147,7 @@ _CL_PV_STATUS=""   # …its status
 _CL_PV_HEAD=""     # …HEAD, which its proofs ran at
 _CL_PV_DIGEST=""   # …its verdict's digest (the bytes in cl-promote-verdict.json)
 _CL_PV_TO=""       # …its verdict's status_to
+_CL_PV_PROVED=""   # …the fingerprint of the record it proved (_claims_proved)
 
 # _claims_prove <mode> <id>: the proof path promote and --reverify share
 # (see the section comment), <mode> promote or reverify, so the two cannot
@@ -10154,9 +10161,9 @@ _CL_PV_TO=""       # …its verdict's status_to
 # verdict in cl-promote-verdict.json (status_to, also in _CL_PV_TO: built
 # for promote — gated when the configuration extension is on and the
 # recorded configuration at HEAD does not satisfy the claim's when — the
-# claim's own status for reverify), the digest in _CL_PV_DIGEST, nothing
-# written outside the scratch dir. 1: refused, its finding (or indeterminate
-# row) added.
+# claim's own status for reverify), the digest in _CL_PV_DIGEST, the
+# claim's proved fingerprint in _CL_PV_PROVED, nothing written outside the
+# scratch dir. 1: refused, its finding (or indeterminate row) added.
 # shellcheck disable=SC2016  # jq programs, not shell expansion
 _claims_prove() {
   local mode="$1" id="$2" plan="$_SCRATCH/cl-promote.json" z="$_SCRATCH/cl-promote.z"
@@ -10165,7 +10172,7 @@ _claims_prove() {
   local x refuse doc status claim runner="" node="" mfile="" mfind="" mrepl="" ored="" rsha=""
   local head p oid v rc green why ss to unsafe="$_CL_PROMOTE_UNSAFE" munsafe
   local whenp="$_JQ_CLAIMS_WHEN"' .claim | if claims_when_ok($rec[0]) then "built" else "gated" end'
-  _CL_PV_DOC=- _CL_PV_SIDECAR="" _CL_PV_STATUS="" _CL_PV_HEAD="" _CL_PV_DIGEST="" _CL_PV_TO=""
+  _CL_PV_DOC=- _CL_PV_SIDECAR="" _CL_PV_STATUS="" _CL_PV_HEAD="" _CL_PV_DIGEST="" _CL_PV_TO="" _CL_PV_PROVED=""
   _claims_jq promote-plan -c --arg id "$id" "$_JQ_CLAIMS_MUTANT_DEFS $_JQ_CLAIMS_PROMOTE_PLAN" \
     "$_SCRATCH/cl-claims.json" > "$plan"
   x=$(_claims_jq promote-unknown -r '.unknown' "$plan") || _claims_propagate $?
@@ -10220,7 +10227,7 @@ _claims_prove() {
           || _claims_propagate $?
       fi
       if [ "$to" != gated ]; then
-        _claims_finding promote "$id" "$doc" "already promoted: built, and its verdict matches the claim (promote again after its states or test change)"
+        _claims_finding promote "$id" "$doc" "already promoted: built, and its verdict matches the claim (promote again after a field promotion.proved records changes)"
         return 1
       fi
     fi
@@ -10344,12 +10351,14 @@ _claims_prove() {
       || return 1
   fi
 
-  # 3. The verdict: the claim as proved at HEAD.
+  # 3. The verdict: the claim as proved at HEAD, with the fingerprint of
+  # that record (proved).
   ss=$(_claims_states_sha256 "$claim") || _claims_propagate $?
+  _CL_PV_PROVED=$(_claims_proved "$claim") || _claims_propagate $?
   _claims_jq promote-verdict -ncS --slurpfile p "$plan" --slurpfile o "$oids" --arg ss "$ss" --arg head "$head" \
-    --arg to "$to" \
+    --arg to "$to" --argjson pr "$_CL_PV_PROVED" \
     '$p[0].claim as $c
-     | {claim: $c.id, states_sha256: $ss, test: $c.test, nonvacuity: $c.nonvacuity, head: $head,
+     | {claim: $c.id, states_sha256: $ss, test: $c.test, nonvacuity: $c.nonvacuity, proved: $pr, head: $head,
         subject_oids: ($o | add // {}), green: "pass", red: "assert-fail", status_to: $to}' > "$vfile"
   _CL_PV_DIGEST=$(_claims_sha256 "$vfile") || _claims_propagate $?
   _CL_PV_HEAD=$head
@@ -10390,8 +10399,9 @@ _claims_promote() {
   fi
   _claims_read "$sidecar" > "$sc_old" || _claims_die "cannot read $sidecar (promote)"
   _claims_jq promote-rewrite --arg id "$id" --arg to "$_CL_PV_TO" --arg at "$_CL_PV_HEAD" --arg d "$_CL_PV_DIGEST" \
+    --argjson pr "$_CL_PV_PROVED" \
     '.claims |= map(if type == "object" and .id == $id
-                    then .status = $to | .promotion = {at: $at, verdict_sha256: $d} else . end)' \
+                    then .status = $to | .promotion = {at: $at, verdict_sha256: $d, proved: $pr} else . end)' \
     "$sc_old" > "$sc_new"
   if ! _claims_render_doc "$doc" "$sc_new" > "$doc_new"; then
     _claims_finding V11 "$id" "$doc" "$_CL_RENDER_ERR"
@@ -10475,7 +10485,8 @@ _JQ_CLAIMS_REVERIFY_ALL='def nes: type == "string" and length > 0;
 #      moves it to diverged and a RETIRE to retired, so neither leaves it
 #      unbuilt; a CODE-DIVERGES ruling alone never clears it), and a run
 #      claim for which _claims_repromote_owed prints owed ("re-promote
-#      owed"), even when its check passes. unverifiable-here is an advisory.
+#      owed"), even when its check passes (decided by promotion.proved, so
+#      the same in a fresh clone).
 #   5. V8 (_claims_v8: the lines the range added, by blame), V8n
 #      (_claims_v8n: the same lines, the descriptive ones) and V9 over
 #      <from>..HEAD, read by the range rule; every finding
@@ -10604,7 +10615,7 @@ _claims_promotions_unverifiable() {
 
 # _claims_owed_findings <check> <since-rev>: for each claim the last run
 # planned and did not skip (cl-run-plan.json), _claims_repromote_owed: owed
-# is a finding "re-promote owed", unverifiable-here an advisory.
+# is a finding "re-promote owed".
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _claims_owed_findings() {
   local check="$1" since="$2" list="$_SCRATCH/cl-owed-ids" id x
@@ -10612,13 +10623,9 @@ _claims_owed_findings() {
     "$_SCRATCH/cl-run-plan.json" > "$list"
   while IFS= read -r id <&3; do
     x=$(_claims_repromote_owed "$id" "$since") || _claims_propagate $?
-    case "$x" in
-      owed) _claims_finding "$check" "$id" - "re-promote owed: run claims promote $id" ;;
-      unverifiable-here)
-        _claims_advisory "$check" "$id" unverifiable-here \
-          "whether a re-promotion is owed cannot be decided here (promotion.at is not a commit here, or its sidecar holds no such claim)"
-        ;;
-    esac
+    if [ "$x" = owed ]; then
+      _claims_finding "$check" "$id" - "re-promote owed: run claims promote $id"
+    fi
   done 3< "$list"
 }
 
@@ -10943,10 +10950,10 @@ cmd_claims_render() {
 #      chunk record, or of final.json (step 3) — holds a DOC-STALE ruling on
 #      it: a CODE-DIVERGES ruling must defer it to diverged, a RETIRE retire
 #      it. _claims_repromote_owed <id> on each claim run: owed is a finding
-#      ("re-promote owed"), even when its check passes; unverifiable-here an
-#      advisory. Without the verdict store (a fresh clone, CI) the answer
-#      comes from the sidecar at promotion.at, so a plan that converged
-#      locally passes there.
+#      ("re-promote owed"), even when its check passes. The answer comes
+#      from promotion.proved, never from the verdict store or history, so a
+#      plan that converged locally passes in a fresh clone or CI, and after
+#      a squash or rebase merge.
 #   3. Reconciliations. final.json's are rebuilt on every run by the
 #      record-inclusion rule (claims_reconciliations with final.json's
 #      path) over the sidecars from <from> — the last usable chunk record's
