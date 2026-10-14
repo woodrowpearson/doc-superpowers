@@ -1250,13 +1250,18 @@ run_tools() {
 
 # The helper dirs the managed workflows on disk run — a workflow that names
 # .github/scripts/<dir>/ runs it: every template runs step scripts
-# (doc-superpowers-steps), doc-pr-release.yml also the producer helpers.
+# (doc-superpowers-steps), doc-pr-release.yml also the producer helpers. A
+# workflow that probes for the dir with hashFiles('.github/scripts/<dir>/…')
+# uses it only when another workflow ships it (doc-spec-verify.yml's claims
+# job runs update-pr-body.sh only beside doc-pr-release.yml), so it is no
+# reason to ship it.
 needed_helpers() {
   local need="" d w
   for d in doc-pr-release doc-superpowers-steps; do
     for w in $KNOWN_WORKFLOWS; do
       is_managed_workflow ".github/workflows/$w.yml" || continue
-      if grep -q "\.github/scripts/$d/" ".github/workflows/$w.yml"; then
+      if grep -q "\.github/scripts/$d/" ".github/workflows/$w.yml" \
+        && ! grep -qF "hashFiles('.github/scripts/$d/" ".github/workflows/$w.yml"; then
         need="${need:+$need }$d"
         break
       fi
