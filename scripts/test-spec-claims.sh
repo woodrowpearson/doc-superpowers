@@ -7460,6 +7460,36 @@ test_attest_sidecar_ruling_with_no_gate_record() {
   teardown
 }
 
+# final.json's own reconciliation pass (from the last chunk record's head)
+# has an unrecorded list too: a change since that head that final.json does
+# not include is silent even when the merge-base cross-check matches it
+# elsewhere — here a ruling chunk 1 recorded, dropped in chunk 2 and put back
+# after the last chunk gate, citing chunk 1's record instead of final.json.
+test_attest_final_unrecorded_is_folded_into_cross_check() {
+  echo "test: attest --final — a change final.json leaves unrecorded is a silent reconciliation"
+  gate_fixture
+  gate_promote
+  gate_ruling "$GATE_REC1"
+  git add "$SIDECAR" && git commit -qm "DOC-STALE at the chunk 1 gate"
+  gate 1
+  assert_eq "1" "$(rec 1 '[.reconciliations[] | select(.kind == "ruling")] | length')" "precondition: chunk 1 records the ruling"
+  git add "$GATE_REC1" && git commit -qm "the chunk 1 gate record"
+  jset "$SIDECAR" 'del(.claims[0].rulings[-1])'
+  git add "$SIDECAR" && git commit -qm "the ruling dropped in chunk 2"
+  gate 2
+  assert_eq "0" "$CL_RC" "precondition: gate 2 exits 0"
+  git add "$GATE_REC2" && git commit -qm "the chunk 2 gate record"
+  gate_ruling "$GATE_REC1"
+  git add "$SIDECAR" && git commit -qm "the ruling put back after the last chunk gate"
+  attest --final
+  assert_eq "1" "$CL_RC" "attest --final exits 1"
+  assert_contains "$(attest_messages)" "silent reconciliation: this ruling on $TTL_ID" "…a silent reconciliation"
+  assert_eq "fail" "$(fin .result)" "…final.json written, result fail"
+  assert_eq "1 $GATE_REC1" "$(fin '"\(.cross_check.unrecorded | length) \(.cross_check.unrecorded[0].ruling.record)"')" \
+    "…cross_check.unrecorded holds it once, its record chunk 1's"
+  teardown
+}
+
 test_attest_record_reconciliation_reverted_at_head() {
   echo "test: attest — a ruling a chunk record reconciled, reverted at HEAD, is a finding"
   gate_fixture
@@ -9985,6 +10015,7 @@ run_tests() {
   test_attest_ambiguous_twin_indeterminate
   test_attest_sidecar_ruling_with_no_gate_record
   test_attest_record_reconciliation_reverted_at_head
+  test_attest_final_unrecorded_is_folded_into_cross_check
   test_attest_named_claim_red_at_head
   test_attest_named_claim_unbuilt_is_finding
   test_attest_unbuilt_cleared_only_by_doc_stale

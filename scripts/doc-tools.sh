@@ -10960,7 +10960,9 @@ cmd_claims_render() {
 #      verdict_sha256 (the digest the record stored, never the local store),
 #      a status change by a status entry for the claim with the same
 #      to_status — else the finding "silent reconciliation"
-#      (cross_check.unrecorded {claim, kind, ruling}). Each ruling a chunk
+#      (cross_check.unrecorded {claim, kind, ruling}); so is each change
+#      final.json's own pass leaves unrecorded (a change since <from> it
+#      does not include, though the cross-check matched it). Each ruling a chunk
 #      record reconciled must still be one of its claim's rulings at HEAD,
 #      else "reconciliation reverted at HEAD" (cross_check.reverted {claim,
 #      record, ruling}). An included promotion whose verdict is not in the
@@ -11058,13 +11060,14 @@ _JQ_CLAIMS_ATTEST_RECORD='def hexid: type == "string" and test("^[0-9a-f]{7,64}$
  end'
 
 # The cross-check ($recs: the usable records {chunk, record, data}; $f:
-# final.json's rebuilt reconciliations; $base, $h: cl-claims entries at
-# _CL_MB and HEAD; $s: the scope; after _JQ_CLAIMS_RECONCILE) →
-# {unrecorded, reverted} (see the section comment).
+# final.json's rebuilt reconciliations; $fu: the changes that rebuild left
+# unrecorded; $base, $h: cl-claims entries at _CL_MB and HEAD; $s: the
+# scope; after _JQ_CLAIMS_RECONCILE) → {unrecorded, reverted} (see the
+# section comment). unrecorded also holds each of $fu, once.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_ATTEST_CROSS='([$recs[] | .data.reconciliations[]] + $f[0]) as $all
  | ($h[0] | cl_by_id) as $now
- | {unrecorded: [{from: $base[0], head: $h[0], scope: $s[0]} | claims_changes(null) | .[] | . as $x
+ | {unrecorded: ([{from: $base[0], head: $h[0], scope: $s[0]} | claims_changes(null) | .[] | . as $x
       | select(if .kind == "ruling" then
                  any($all[]; .kind == "ruling" and .claim == $x.claim and .ruling == $x.ruling)
                elif .kind == "promotion" then
@@ -11072,7 +11075,7 @@ _JQ_CLAIMS_ATTEST_CROSS='([$recs[] | .data.reconciliations[]] + $f[0]) as $all
                  and any($all[]; .kind == "promotion" and .claim == $x.claim and .verdict_sha256 == $x.verdict_sha256)
                else any($all[]; .kind == "status" and .claim == $x.claim and .to_status == $x.to_status) end
                | not)
-      | {claim, kind, ruling}],
+      | {claim, kind, ruling}] + $fu[0] | unique),
     reverted: [$recs[] | .record as $rec | .data.reconciliations[] | select(.kind == "ruling") | . as $x
       | select((.claim | type) != "string" or (($now[$x.claim] | cl_rul) | any(.[]; . == $x.ruling) | not))
       | {claim, record: $rec, ruling}]}'
@@ -11255,10 +11258,12 @@ cmd_claims_attest() {
     "$_SCRATCH/cl-attest-sidecars-from.jsonl" > "$fromc"
   _claims_jq attest-final-recon -nc --slurpfile f "$fromc" --slurpfile h "$_SCRATCH/cl-claims.json" \
     --slurpfile s "$scope" --arg rec "$fin" \
-    "$_JQ_CLAIMS_RECONCILE"' {from: $f[0], head: $h[0], scope: $s[0]} | claims_reconciliations($rec) | .reconciliations' \
-    > "$frecon"
+    "$_JQ_CLAIMS_RECONCILE"' {from: $f[0], head: $h[0], scope: $s[0]} | claims_reconciliations($rec)' \
+    > "$frecon.all"
+  _claims_jq attest-final-recon-included -c '.reconciliations' "$frecon.all" > "$frecon"
+  _claims_jq attest-final-unrecorded -c '.unrecorded' "$frecon.all" > "$frecon.unrecorded"
   _claims_jq attest-cross -nc --slurpfile base "$_SCRATCH/cl-claims-base.json" --slurpfile h "$_SCRATCH/cl-claims.json" \
-    --slurpfile s "$scope" --slurpfile f "$frecon" --slurpfile recs "$recs" \
+    --slurpfile s "$scope" --slurpfile f "$frecon" --slurpfile recs "$recs" --slurpfile fu "$frecon.unrecorded" \
     "$_JQ_CLAIMS_RECONCILE $_JQ_CLAIMS_ATTEST_CROSS" > "$cross"
   _claims_jq attest-unrecorded -c --arg fin "$fin" '.unrecorded[] | {check: "attest", claim, doc: null,
       message: "silent reconciliation: this \(.kind) on \(.claim) since the merge-base is in no chunk record and not in \($fin) (a ruling made at the final gate must name \($fin) as its record; a ruling citing anything else is never absorbed into it; a status change needs a recorded ruling or promotion)"}' \
