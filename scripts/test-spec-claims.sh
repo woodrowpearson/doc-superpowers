@@ -9015,6 +9015,273 @@ test_promote_regates_built_when_unsatisfied() {
   teardown
 }
 
+# --- Task 23: replay fixtures — the four drift shapes and the planted drifts -----
+#
+# Each replay re-enacts one drift end to end and names, in its echo line, the
+# check that catches it and the lifecycle point it is caught at: pre-commit
+# (`validate --staged`, what the pre-commit claims leg runs), plan commit
+# (`validate --staged` with the plan staged), the chunk gate (`gate`), or a
+# run (`run`). They reuse the per-check fixtures above.
+
+ADR_DOC=docs/adr/ADR-007-cache.md
+ADR_SIDECAR=docs/spec-claims/ADR-007.json
+ADR_ID="ADR-007#cache-ttl"
+DESIGN_DOC=docs/superpowers/specs/2026-01-01-cache-design.md
+
+# adr_unbuilt: an accepted ADR whose Decision is claimed unbuilt, its tracker
+# the design doc the decision came from; rendered and made the branch point.
+adr_unbuilt() {
+  mkdir -p docs/adr "$(dirname "$DESIGN_DOC")"
+  cat > "$ADR_DOC" <<'EOF'
+# ADR-007: Response cache
+
+**Status**: Accepted
+**Date**: 2026-10-10
+
+## Context
+
+Reads are slow.
+
+## Decision
+
+Cache read responses for 60 seconds.
+
+## Consequences
+
+Faster reads.
+EOF
+  printf '# Response cache design\n\n**Status**: Approved\n\nCache read responses for 60 seconds (ADR-007).\n' > "$DESIGN_DOC"
+  printf 'CACHE_SECONDS = 0\n' > src/cache.py
+  jq -n --arg doc "$ADR_DOC" --arg id "$ADR_ID" --arg t "$DESIGN_DOC" '{schema: 1, doc: $doc, claims: [{
+    id: $id, quote: "Cache read responses for 60 seconds",
+    states: "A read response is served from the cache for 60 seconds.", kind: "behaviour",
+    subject: ["src/cache.py"], status: "unbuilt", enforced_by: "test", test: null,
+    nonvacuity: null, promotion: null, tracker: $t, frozen_at: null, restates: [], rulings: []}]}' \
+    > "$ADR_SIDECAR"
+  rerender
+  base_here "ADR-007: its decision claimed, unbuilt"
+}
+
+test_replay_unbuilt() {
+  echo "test: replay unbuilt — V12 at plan commit (validate --staged); gate red at the chunk gate once named"
+  claims_fixture
+  adr_unbuilt
+  cl validate --all
+  assert_eq "0" "$CL_RC" "precondition: the unbuilt ADR claim, its tracker the design doc, validates clean"
+  # shellcheck disable=SC2086  # the block list splits on spaces
+  plan_write -- $PLAN_DEFAULT
+  doc_edit "$PLAN" "- docs/specs/SPEC-AUTH-001-token.md — target" "- $ADR_DOC — target" after
+  git add "$PLAN"
+  cl validate --staged
+  assert_v12 "$ADR_ID" "plan commit: the ADR is a target, no task names its claim"
+  assert_not_contains "$(v12_messages)" "$TTL_ID" "…the spec's claim, named by chunk 1, is not"
+  doc_edit "$PLAN" "**Claims:** $TTL_ID" "**Claims:** $TTL_ID, $ADR_ID"
+  git add "$PLAN"
+  cl validate --staged
+  assert_v12_ok "plan commit: chunk 1 names the ADR claim"
+  git commit -qm "the plan"
+  gate 1
+  assert_eq "1" "$CL_RC" "chunk gate: the named ADR claim still unbuilt exits 1"
+  assert_contains "$(jq -r --arg id "$ADR_ID" '.findings[] | select(.check == "gate" and .claim == $id) | .message' <<<"$CL_OUT")" \
+    "$GATE_UNBUILT_MSG" "…a gate finding on $ADR_ID: '$GATE_UNBUILT_MSG'"
+  assert_eq "red" "$(rec 1 .result)" "…the record result red"
+  teardown
+}
+
+test_replay_never_reconciled() {
+  echo "test: replay never reconciled — V6 at pre-commit (validate --staged)"
+  claims_fixture
+  set_ttl 1800
+  base_here "the code moves to a 30-minute TTL"
+  # The spec quietly edited to match the code: text, quote and states, with no ruling.
+  doc_edit "$DOC" "$TTL_LINE" "- Access tokens expire after 30 minutes."
+  jset "$SIDECAR" '.claims[0].quote = "Access tokens expire after 30 minutes"
+    | .claims[0].states = "An issued access token is rejected 30 minutes after issue."'
+  git add "$DOC" "$SIDECAR"
+  cl validate --staged
+  assert_v6 "states" "pre-commit: states and quote edited to the code, no ruling"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V6")][0].claim' "$TTL_ID" "…naming the claim"
+  # The reconciled path: the same edit under a DOC-STALE ruling passes.
+  jset "$SIDECAR" ".claims[0].rulings = [$_CL_DOC_STALE]"
+  git add "$SIDECAR"
+  cl validate --staged
+  assert_v6_ok "pre-commit: the same edit with its DOC-STALE ruling"
+  teardown
+}
+
+NOTES_DEVIATION="Uses the swapped approach as specified."
+
+test_replay_ratified_deviation() {
+  echo "test: replay ratified deviation — V12 at plan commit; V8n at the chunk gate"
+  promote_fixture
+  plan_write -- head chunk1 impl1 impl_none_link gate1 update chunk2 impl2 gate2 update final finalize
+  doc_edit "$PLAN" "**Claims:** none — refactor" "**Claims:** none — swap approach"
+  git add "$PLAN"
+  cl validate --staged
+  assert_v12 "promote the decision into a governing doc" "plan commit: Claims none — swap approach, linking docs/issues/"
+  assert_contains "$(v12_messages)" "docs/issues/token-ttl.md" "…naming the link"
+  # The deviation lands anyway; the chunk claims conformance in its notes.
+  git commit -qm "the plan"
+  gate_promote
+  gate 1
+  assert_eq "0" "$CL_RC" "precondition: chunk gate green before the notes"
+  doc_edit "$DOC" "Not started." "$NOTES_DEVIATION" after
+  git commit -qam "notes: as specified"
+  local line
+  line=$(line_no "$DOC" "$NOTES_DEVIATION")
+  gate 1
+  assert_eq "1" "$CL_RC" "chunk gate: a conformance line with no claim id exits 1"
+  assert_eq "$(v8n_nocite "$DOC" "$line")" "$(gate_messages V8n)" "…one V8n finding naming $DOC:$line"
+  assert_eq "1" "$(rec 1 '.checks.V8n | length')" "…in the record's checks.V8n"
+  assert_eq "red" "$(rec 1 .result)" "…result red"
+  teardown
+}
+
+PARITY_ID="SPEC-AUTH-001#control-parity"
+PARITY_NODE="tests/test_parity.py::test_control_sends_shipped"
+PARITY_LINE="- The control arm sends the shipped request."
+
+test_replay_parity_by_assertion() {
+  echo "test: replay parity by assertion — run and gate red (exit 1)"
+  claims_fixture
+  jset docs/spec-claims/config.json '.kinds = ["parity"]'
+  doc_edit "$DOC" "$REFRESH_LINE" "$PARITY_LINE" after
+  mkdir -p src/experiment
+  printf 'REQUEST = SHIPPED\n' > src/experiment/control.py
+  stub_install
+  jset docs/spec-claims/config.json '.runners.stub = {"adapter": "tools/claims/runner", "paths": ["src/", "tests/"]}'
+  printf '%s\t%s\t%s\n' "$PARITY_NODE" src/experiment/control.py "REQUEST = SHIPPED" >> tools/claims/checks
+  list_row "$PARITY_ID" "$PARITY_NODE"
+  add_claim "$(jq -nc --arg id "$PARITY_ID" --arg n "$PARITY_NODE" '{
+    id: $id, quote: "The control arm sends the shipped request",
+    states: "The control arm sends the request the shipped build sends, byte for byte.", kind: "parity",
+    subject: ["src/experiment/control.py"], status: "unbuilt", enforced_by: "test",
+    test: {runner: "stub", node: $n},
+    nonvacuity: {mutant: {file: "src/experiment/control.py", find: "REQUEST = SHIPPED", replace: "REQUEST = BUILT"}},
+    promotion: null, tracker: "docs/issues/token-ttl.md", frozen_at: null, restates: [], rulings: []}')"
+  rerender
+  git add -A && git commit -qm "the parity claim (host kind parity)"
+  # shellcheck disable=SC2086  # the block list splits on spaces
+  plan_write -- $PLAN_DEFAULT
+  doc_edit "$PLAN" "**Claims:** $TTL_ID" "**Claims:** $PARITY_ID"
+  git add "$PLAN" && git commit -qm "the plan"
+  cl promote "$PARITY_ID"
+  assert_eq "0" "$CL_RC" "precondition: the parity claim promotes while the control arm sends the shipped request"
+  git add -A && git commit -qm "promote $PARITY_ID"
+  cl run --all
+  assert_eq "0" "$CL_RC" "precondition: run green while the control arm sends the shipped request"
+  # The control arm drifts; the prose still asserts parity.
+  printf 'REQUEST = build_request()\n' > src/experiment/control.py
+  git commit -qam "the control arm builds its own request"
+  cl run --all
+  assert_eq "1" "$CL_RC" "run: the built parity claim failing its check exits 1"
+  assert_json_field "$CL_OUT" "[.results[] | select(.claim == \"$PARITY_ID\")][0] | \"\(.outcome) \(.verdict)\"" \
+    "assert-fail finding" "…its result assert-fail, a finding"
+  gate 1
+  assert_eq "1" "$CL_RC" "gate: exits 1"
+  assert_eq "red" "$(rec 1 .result)" "…the record result red"
+  assert_contains "$(gate_messages run)" "a built claim must pass its check" "…the run finding"
+  teardown
+}
+
+# index_spec: the fixture spec indexed in docs/.doc-index.json, its code_refs
+# the claim's subject, verified now (nothing committed).
+index_spec() {
+  local rc=0
+  printf '%s:src/auth/token.py:spec\n' "$DOC" | "$DOC_TOOLS" build-index >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "index_spec: build-index exits 0"
+  rc=0
+  "$DOC_TOOLS" update-index "$DOC" </dev/null >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "index_spec: update-index exits 0"
+}
+
+# The fixture spec's freshness status (check-freshness [args…]).
+spec_freshness() {
+  "$DOC_TOOLS" check-freshness "$@" </dev/null 2>/dev/null | jq -r --arg d "$DOC" '.docs[$d].status'
+}
+
+test_planted_update_index_does_not_clear_claim() {
+  echo "test: planted — threshold changed, then update-index on the spec: claims run still exits 1"
+  claims_fixture
+  stub_runner
+  run_built
+  index_spec
+  git add -A && git commit -qm "built, the spec indexed"
+  cl run --all
+  assert_eq "0" "$CL_RC" "precondition: run green before the threshold change"
+  set_ttl 1800
+  git commit -qam "TTL 30 minutes"
+  assert_eq "stale" "$(spec_freshness)" "precondition: the threshold change reads stale"
+  local rc=0
+  "$DOC_TOOLS" update-index "$DOC" </dev/null >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "update-index on the spec exits 0"
+  assert_eq "current" "$(spec_freshness)" "…the index re-baselined: current"
+  git commit -qam "the spec re-baselined"
+  cl run --all
+  assert_eq "1" "$CL_RC" "claims run still exits 1: a re-baseline never clears a claim"
+  assert_eq "finding" "$(run_field verdict)" "…the claim's verdict a finding"
+  assert_eq "assert-fail" "$(run_field outcome)" "…outcome assert-fail"
+  teardown
+}
+
+test_planted_unbuilt_requirement_v8() {
+  echo "test: planted — an unbuilt normative requirement: V8 advisory at pre-commit, blocking at the gate"
+  gate_fixture
+  gate_promote
+  gate 1
+  assert_eq "0" "$CL_RC" "precondition: chunk gate green before the requirement"
+  local line
+  doc_edit "$DOC" "$REFRESH_LINE" "- Logout revokes every token." after
+  git add "$DOC"
+  line=$(line_no "$DOC" "- Logout revokes every token.")
+  cl validate --staged
+  assert_eq "0" "$CL_RC" "pre-commit: exits 0 (V8 not blocking by default)"
+  assert_eq "$(v8_msg "$DOC" "$line")" "$(v8_messages)" "…one V8 row naming $DOC:$line"
+  assert_json_field "$CL_OUT" '[.advisories[] | select(.check == "V8")] | length' "1" "…an advisory"
+  git commit -qm "a requirement"
+  gate 1
+  assert_eq "1" "$CL_RC" "chunk gate: exits 1 (V8 blocking at the gate)"
+  assert_eq "$(v8_msg "$DOC" "$line")" "$(gate_messages V8)" "…one V8 finding naming $DOC:$line"
+  assert_eq "1" "$(rec 1 '.checks.V8 | length')" "…in the record's checks.V8"
+  assert_eq "red" "$(rec 1 .result)" "…result red"
+  teardown
+}
+
+test_planted_threshold_change_run_red() {
+  echo "test: planted — threshold changed in a subject file: run --planes-of exits 1"
+  claims_fixture
+  stub_runner
+  run_built
+  git add -A && git commit -qm "built"
+  cl run --all
+  assert_eq "0" "$CL_RC" "precondition: run green before the threshold change"
+  set_ttl 1800
+  git commit -qam "TTL 30 minutes"
+  cl run --planes-of HEAD~1..HEAD
+  assert_eq "1" "$CL_RC" "run --planes-of over the threshold change exits 1"
+  assert_eq "finding" "$(run_field verdict)" "…the claim's verdict a finding"
+  assert_eq "assert-fail" "$(run_field outcome)" "…outcome assert-fail"
+  assert_json_field "$CL_OUT" '.findings[0].claim' "$TTL_ID" "…the finding names the claim"
+  teardown
+}
+
+test_planted_deploy_config_v10() {
+  echo "test: planted — deploy/flags.json, outside every code_refs, disables a built claim: V10 at pre-commit"
+  v10_claim built 15
+  index_spec
+  base_here "the spec indexed"
+  cl validate --all
+  assert_eq "0" "$CL_RC" "precondition: the built claim validates clean"
+  set_flag "$TTL_KEY" 30
+  git add deploy/flags.json
+  assert_eq "current" "$(spec_freshness --tree "$(git write-tree)")" \
+    "precondition: freshness sees nothing (deploy/flags.json is in no code_refs)"
+  cl validate --staged
+  assert_v10 "ruling owed" "pre-commit: $TTL_KEY 15 → 30 turns the built claim's when off"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V10")][0].claim' "$TTL_ID" "…naming the claim"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -9415,6 +9682,16 @@ run_tests() {
   test_validate_config_override
   test_v10_unrelated_key_ignored
   test_promote_regates_built_when_unsatisfied
+
+  # --- Task 23: replay fixtures, the drift shapes and the planted drifts ---
+  test_replay_unbuilt
+  test_replay_never_reconciled
+  test_replay_ratified_deviation
+  test_replay_parity_by_assertion
+  test_planted_update_index_does_not_clear_claim
+  test_planted_unbuilt_requirement_v8
+  test_planted_threshold_change_run_red
+  test_planted_deploy_config_v10
 
   print_summary
 }
