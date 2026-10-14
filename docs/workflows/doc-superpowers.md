@@ -639,11 +639,11 @@ Two modes: **post-execute** (final compliance check before merging) and **review
 - `--mode=post-execute`
 - `--specs=<paths>` — Paths to governing specs. Each path may carry an optional role suffix — `<path>:target`, `<path>:constraint` or `<path>:amends` — declaring whether the work is expected to advance that spec, only reads it, or corrects what it says (an amendment). Unsuffixed paths are resolved by inference at execution time, and inference never yields `:amends`. See **Spec Status Model → Spec roles** in `references/spec-lifecycle-actions.md`
 - `--design-doc=<path>` — Path to original design doc (for the five-way coverage check)
-- `--plan=<path>` — Optional; required for a **full** amendment check. The landed-check finds the dated `AMENDED` block in the amended section and proves its first line cites this plan; without `--plan` it degrades to block-present only and emits `WARN: amendment citation unverified (no --plan)`
+- `--plan=<path>` — Optional; required for a **full** amendment check. The landed-check finds the dated `AMENDED` block in the amended section and proves its first line cites this plan; without `--plan` it degrades to block-present only and emits `WARN: amendment citation unverified (no --plan)`. With claims enabled, step 0 needs it too
 
 **Steps:**
 
-0. **Claims verdict** (claims-enabled projects only) — `claims attest --plan <plan> --final`: exit 1 is a FAIL, exit 2 reports "claims verdict owed" (never a PASS); the report includes its amendment batch
+0. **Claims verdict** (claims-enabled projects only) — `claims attest --plan <plan> --final`: exit 1 is a FAIL, exit 2 reports "claims verdict owed" (never a PASS), and so does a run without `--plan` (there is no plan to attest); the report includes its amendment batch
 1. **Existence check** — run `doc-tools.sh check-freshness` across all specs in scope
 2. **Staleness check** — are any specs still flagged stale after all tasks completed?
 3. **Status check** — is every spec the Spec Status Model requires to reach `Implemented` there? Constraint references, exempt statuses, and targets held at `In Review` (or left at `Approved`) with recorded remaining scope are not findings. Each `:amends` spec gets the amendment landed-check instead. The check also emits four non-blocking **P3 informational** lines — inferred constraints, unrecognized statuses, amendments verified as landed, and targets held at `In Review` by design
