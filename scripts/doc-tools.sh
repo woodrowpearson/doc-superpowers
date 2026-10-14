@@ -6170,6 +6170,13 @@ _JQ_CLAIMS_TOUCHED='def strs: if type == "array" then .[] | strings else empty e
     | .claim.id]
  | unique'
 
+# _claims_empty_tree: the empty tree's id in this repository's object
+# format (what --staged diffs the index against before the first commit): a
+# SHA-256 repository has no 4b825dc… object.
+_claims_empty_tree() {
+  git hash-object -t tree /dev/null 2>/dev/null || _claims_die "git hash-object failed (the empty tree)"
+}
+
 # _claims_touched: cl-staged.json and cl-touched.json (see the section
 # comment), and _CL_SCOPE_ALL. Under --staged the staged paths are the
 # index's changes against HEAD (both sides of a rename). Every claim is
@@ -6181,8 +6188,8 @@ _claims_touched() {
   _CL_SCOPE_ALL=1
   if [ "$_CL_MODE" = staged ]; then
     _CL_SCOPE_ALL=0
-    base=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) \
-      || base=4b825dc642cb6eb9a060e54bf8d69288fbee4904 # the empty tree: no commit yet
+    base=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || base=$(_claims_empty_tree) \
+      || _claims_propagate $?
     git diff --cached --name-only --no-renames -z "$base" -- > "$_SCRATCH/cl-staged.z" \
       || _claims_die "git diff --cached failed listing the staged paths"
     _claims_jq staged-paths -Rs 'split("\u0000") | map(select(. != ""))' "$_SCRATCH/cl-staged.z" \
@@ -9016,8 +9023,8 @@ $0 == "boundary" { bnd[id] = 1; next }
 _claims_added_lines() {
   local doc="$1" how="$2" raw="$_SCRATCH/cl-added.raw" ms="$_SCRATCH/cl-added-merges" base m p hit skip=""
   if [ "$how" = --staged ]; then
-    base=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) \
-      || base=4b825dc642cb6eb9a060e54bf8d69288fbee4904 # the empty tree: no commit yet
+    base=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || base=$(_claims_empty_tree) \
+      || _claims_propagate $?
     git -c core.quotePath=true --literal-pathspecs diff --cached "${_CL_DIFF_OPTS[@]}" --unified=0 \
       "$base" -- "$doc" > "$raw" 2>/dev/null || _claims_die "git diff --cached failed reading the added lines of $doc"
     LC_ALL=C awk '/^@@ / {
