@@ -338,7 +338,7 @@ The `docs/.doc-index.json` file is the machine-readable freshness index. It foll
 
 - **`build-index`** creates the index from scratch (from mapping lines); `--force` keeps deprecations
 - **`add-entry`** adds entries. Like `build-index`, it records them **unverified**: `last_verified: null`, and each ref as of the doc's own last commit
-- **`update-index`** verifies individual entries. It is the **only** writer of `last_verified`: the one verb that attests someone checked the doc against its code
+- **`update-index`** re-baselines individual entries. It is the **only** writer of `last_verified`: a baseline reset, never a verification, run only for a doc someone read against its code
 - **`set-code-refs`** changes one entry's `code_refs` in place (GH #18), in the order given (a reorder writes the new order). It keeps every other field except `code_oids` and, when any ref's content comes from the doc's last commit (a ref was added, or a kept ref has no usable record), `code_commit` (see Entry Schema). It is not a verification
 - **`move-entry`** re-keys an entry when its doc moves (`--stdin` for a batch). It preserves every field but `content_hash`, and is the lossless alternative to `remove-entry` + `add-entry` for a rename. It also repoints every other entry that names the old path — `replaces`, `superseded_by`, and `code_refs` with the matching `code_oids` key, whose recorded id it keeps (GH #22) — so a doc citing the moved one does not dangle, and once the rename is committed reads as it did (an entry without `code_oids`, written before schema 3, reads stale from that commit until `update-index`)
 - **`set-doc-type`** changes one entry's `doc_type` in place. It keeps the entry's position and every other field, and writing the same type writes nothing. It is not a verification. The type decides whether a doc is a record (never stale) or a living doc, so it must be a known type or one the index already uses
@@ -401,5 +401,5 @@ Each entry in the index (keyed by relative doc path) contains:
 - `status` — stored only as `deprecated`, otherwise absent (`current` / `stale` are computed by `check-freshness`, never written)
 - `replaces` — path to doc this one supersedes (null if none)
 - `superseded_by` — path to doc that supersedes this one (null if none)
-- `last_verified` — ISO 8601 timestamp of the last `update-index`, the only writer that attests a doc was checked against its code; `null` for an entry nobody has verified
+- `last_verified` — ISO 8601 timestamp of the last `update-index`, its only writer: a baseline reset, run only for a doc read against its code; `null` for an entry nobody has re-baselined
 - `implementation` — array of entry texts parsed from the doc's `Implementation:` (ADRs) or `Realized-by:` (specs) block (without indent and `- `, wrapped lines joined), recording ADR/spec realization state; `[]` when the doc has no block or an empty one. The block grammar — shared with `set-implementation` and `implementation-status` — is in `references/doc-spec.md` ("Header style and the realization block"). Written by `update-index` only, so it is absent until a doc is first verified
