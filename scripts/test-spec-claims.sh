@@ -8320,6 +8320,21 @@ test_v8n_triggers_case_insensitive_ids_exact() {
   teardown
 }
 
+test_v8n_id_token_left_boundary() {
+  echo "test: V8n — an id token starts at a boundary: a path, a URL or a word does not end in one"
+  claims_fixture
+  stage_notes "Install as specified in docs/README#install." "It conforms to https://example.com/API#intro." \
+    "Implemented per fooBAR#x." "Aligned with the guide (guide.md#setup)." "SPEC-AUTH-001#token-ttl: as specified."
+  cl validate --staged
+  assert_eq "0" "$(v8n_messages | grep -c 'cites unknown claim' || true)" \
+    "…/README#install, /API#intro, fooBAR#x and guide.md#setup cite no claim"
+  assert_eq "4" "$(v8n_count)" "…four rows, each 'no claim id'; an id at the start of a line is still read (known: no row)"
+  stage_notes "As specified (SPEC-AUTH-001#ghost), [SPEC-AUTH-001#ghost-b]."
+  cl validate --staged
+  assert_eq "2" "$(v8n_messages | grep -c 'cites unknown claim SPEC-AUTH-001#ghost' || true)" "…after ( and [ an id is still read"
+  teardown
+}
+
 test_v8n_several_ids_on_a_line() {
   echo "test: V8n — a line with several ids: a known one exempts it, and each unknown id is its own finding"
   claims_fixture
@@ -10014,6 +10029,7 @@ run_tests() {
   test_v8n_unknown_claim_id
   test_v8n_pointer_without_trigger_ignored
   test_v8n_triggers_case_insensitive_ids_exact
+  test_v8n_id_token_left_boundary
   test_v8n_several_ids_on_a_line
   test_v8n_id_of_another_sidecar_is_known
   test_v8n_only_added_descriptive_lines
