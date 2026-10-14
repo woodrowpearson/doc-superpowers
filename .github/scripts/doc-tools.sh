@@ -2048,9 +2048,10 @@ check-freshness|cmd_check_freshness|repo|code-refs+ code-refs-from=* tree=
     git diff -z --name-only --no-renames <range>
 update-index|cmd_update_index|repo|
   <doc_path>...
-  Verify indexed docs — the one subcommand that attests a doc matches its
-  code: re-hash, record code_oids (each code ref's content in the working
-  tree) and code_commit, stamp last_verified. A deprecated entry stays
+  Re-baseline indexed docs (a baseline reset, never a verification —
+  claims carry verification): re-hash, record code_oids (each code ref's
+  content in the working tree) and code_commit, stamp last_verified. Run it
+  only for a doc you read against its code. A deprecated entry stays
   deprecated. Reports Refreshed (something recorded changed), Re-verified
   (only last_verified did) or Unchanged (verified this second already). A
   doc whose file is gone is skipped with advice. A path that is not
@@ -2438,19 +2439,19 @@ Freshness (index schema v3):
   code_commit (null, with a warning). The doc-index itself is never part of
   a ref's content.
 
-Stored state (who may attest):
-  Only update-index writes last_verified: it is the one subcommand that
-  claims a doc was checked against its code. The other writers leave it as
-  it is, and a new entry has null. status is stored only as "deprecated";
-  current and stale are always computed (a stored "current" or "stale" from
-  an older index reads as absent, and the next write drops it). A record
-  doc — doc_type plan, issue, audit or design-spec, or any path under
-  docs/archive/ — describes a point in time, so it is never reported
-  stale: check-freshness reports it current with "record": true (and
-  commits_behind null: not evaluated). set-doc-type retypes an entry in
-  place (an index written before v3 typed design specs "spec": retype them
-  design-spec). Archiving a doc is git mv into docs/archive/<type>/, then
-  move-entry, then deprecate-entry.
+Stored state (who may re-baseline):
+  Only update-index writes last_verified: it records a baseline reset, run
+  only for a doc read against its code (no hook runs it). The other writers
+  leave it as it is, and a new entry has null. status is stored only as
+  "deprecated"; current and stale are always computed (a stored "current"
+  or "stale" from an older index reads as absent, and the next write drops
+  it). A record doc — doc_type plan, issue, audit or design-spec, or any
+  path under docs/archive/ — describes a point in time, so it is never
+  reported stale: check-freshness reports it current with "record": true
+  (and commits_behind null: not evaluated). set-doc-type retypes an entry
+  in place (an index written before v3 typed design specs "spec": retype
+  them design-spec). Archiving a doc is git mv into docs/archive/<type>/,
+  then move-entry, then deprecate-entry.
 
 Spec claims (claims validate, run, promote, render, gate, attest, rulings):
   Claims live in docs/spec-claims/: one <DOC-ID>.json sidecar per governing

@@ -1025,7 +1025,7 @@ Doc paths given anywhere are normalized to the key form: `//` becomes `/`, a pat
 | `docs.<path>.status` | string, optional | Stored only as `"deprecated"` (by `deprecate-entry`, kept by every other writer, including `update-index` and `build-index --force`); otherwise absent. `current`, `stale` and `missing` are computed by `check-freshness`, which never writes. A `current` or `stale` stored by an older release is read as absent, and the next write that changes the index drops it |
 | `docs.<path>.replaces` | string\|null | Path to the doc this one supersedes: set by `deprecate-entry <old> --superseded-by <this>` when empty (it holds one path; an existing one is kept, with a warning), repointed by `move-entry` |
 | `docs.<path>.superseded_by` | string\|null | Path to superseding doc |
-| `docs.<path>.last_verified` | ISO 8601\|null | When the doc was last verified against its code. **Only `update-index` writes it**: it is the one verb that attests. `build-index` and `add-entry` write `null` (never verified); `deprecate-entry`, `set-code-refs`, `set-doc-type` and `move-entry` leave it as it is |
+| `docs.<path>.last_verified` | ISO 8601\|null | When the doc was last re-baselined against its code. **Only `update-index` writes it**: a baseline reset, never a verification, run only for a doc read against its code. `build-index` and `add-entry` write `null` (never re-baselined); `deprecate-entry`, `set-code-refs`, `set-doc-type` and `move-entry` leave it as it is |
 | `docs.<path>.implementation` | string[] | Written by `update-index` only: the entries of an ADR's `Implementation:` or a SPEC's `Realized-by:` block — each entry's text, without its indent and `- `, wrapped lines joined with one space; `[]` when the doc has no block or an empty one (`Implementation: []`) (grammar: [Header style and the realization block](#header-style-and-the-realization-block-adrs-and-specs); see `implementation-status`) |
 
 ### Status Transitions
@@ -1034,7 +1034,7 @@ Only `deprecated` is stored. `current`, `stale` and `missing` are verdicts that 
 
 - (new) → no stored status, `last_verified: null`: `build-index` / `add-entry` record the entry against the doc's own last commit. It reads `current` if the code has not changed since the doc was written, and `stale` if it has
 - `current` → `stale` (computed): a code ref's content no longer matches `code_oids`
-- `stale` → `current` (computed): after `update-index` records the working tree's content and stamps `last_verified`, the attestation that someone checked the doc against that code
+- `stale` → `current` (computed): after `update-index` records the working tree's content and stamps `last_verified`: a baseline reset, run after someone read the doc against that code
 - record docs (`doc_type` `plan` / `issue` / `audit` / `design-spec`, or a path under `docs/archive/`): always `current`, marked `"record": true`; they are never compared
 - → `deprecated` (stored): `deprecate-entry` only (a human decision, or spec supersession via `spec-generate`); `--superseded-by X` also sets `X.replaces` when it is empty
 - `deprecated` is terminal for automated tools: `update-index`, `move-entry`, `set-code-refs`, `set-doc-type` and `build-index --force` all keep it

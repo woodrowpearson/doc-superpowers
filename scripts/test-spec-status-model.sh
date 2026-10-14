@@ -12,6 +12,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/test-helpers.sh"
 
 ACTIONS="$(cat "$REPO_ROOT/references/spec-lifecycle-actions.md")"
+DOC_TOOLS_SHIM="$(bash_bin_shim "$REPO_ROOT/scripts/doc-tools.sh")"
 
 echo "=== spec status model tests ==="
 
@@ -1324,5 +1325,30 @@ assert_contains "$ACTIONS" "### Task N+1g: ${_gp:-<unset>}{C})" \
   "the injected chunk gate's heading starts with the parser's _CL_GATE_TITLE_PREFIX"
 assert_contains "$ACTIONS" "### Task N+2g: ${_fg:-<unset>}" \
   "the injected final gate's heading is the parser's _CL_FINAL_GATE_TITLE"
+
+echo "--- spec claims: direction protocol, wiring and update-index wording ---"
+# Task 26: the direction protocol (§F) in the wrapper guide, conditional on
+# claims being enabled. The wiring lines for projects without claims stay byte
+# for byte; each gains a claims-enabled line. update-index is a baseline reset,
+# never a verification (§H): prose only, the output tokens are unchanged.
+assert_contains "$PROTOCOL" "## Direction protocol" "protocol: Direction protocol section"
+assert_contains "$PROTOCOL" "When a doc and the code disagree, neither side is edited until the direction is ruled and recorded." \
+  "protocol: neither side is edited until the direction is ruled"
+for _d in CODE-DIVERGES DOC-STALE RETIRE in_plan_ruling_requires_gate_record outside_plan_presumption doc_stale_outside_plan_requires; do
+  assert_contains "$(_section "$PROTOCOL" '## Direction protocol')" "$_d" "protocol: Direction protocol names $_d"
+done
+assert_contains "$PROTOCOL" "If deviation flags returned → surface to user" "protocol: execute wiring unchanged for projects without claims"
+assert_contains "$PROTOCOL" "If FAIL → surface report to user, let them decide" "protocol: post-execute wiring unchanged for projects without claims"
+assert_contains "$PROTOCOL" "Claims-enabled: a red claim or a flagged deviation → rule the direction" \
+  "protocol: execute wiring gains the claims-enabled direction line"
+assert_contains "$SKILLMD" "Records a baseline reset, never a verification" "SKILL.md: update-index records a baseline reset"
+assert_not_contains "$SKILLMD" "The one verb that attests a doc was checked against its code" \
+  "SKILL.md: update-index is no longer the verb that attests"
+assert_contains "$INTEGRATION" "## Claims-enabled wrappers" "integration patterns: Claims-enabled wrappers section"
+assert_contains "$SKILLMD" "references/spec-claims.md" "SKILL.md names references/spec-claims.md"
+assert_contains "$("$DOC_TOOLS_SHIM" update-index --help)" "never a verification" \
+  "doc-tools help: update-index is never a verification"
+assert_eq "" "$(grep -n 'the one verb that attests\|only verb that attests' "$REPO_ROOT"/references/doc-spec.md "$REPO_ROOT"/docs/codebase-guide.md "$REPO_ROOT"/docs/conventions.md "$REPO_ROOT"/docs/workflows/doc-superpowers.md "$REPO_ROOT"/docs/architecture/system-overview.md "$REPO_ROOT"/skills/doc-superpowers/SKILL.md || true)" \
+  "no doc still calls update-index the verb that attests"
 
 print_summary
