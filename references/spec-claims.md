@@ -14,7 +14,7 @@ Claims are enabled when the directory `docs/spec-claims/` exists in the working 
 
 Without the directory everything is inert. Every `claims` verb prints `{"verb":"<verb>","enabled":false,"exit":0}` and exits 0, and the git hooks, the CI templates and the `spec-*` actions behave exactly as they did before claims existed. The order of argument handling makes that hold for every invocation: the options are parsed first (an unknown option exits 3 even in an inert project), then the inert check runs, then the required arguments are checked (so a missing `--plan` or `--chunk` in an inert project still exits 0 with `enabled: false`).
 
-A project opts in by creating `docs/spec-claims/` with its first sidecar. From then on the pre-commit claims leg blocks on findings, the pre-push leg reports, the `doc-spec-verify` `claims` job checks every PR, and the weekly schedule re-verifies ([Hooks and CI](#hooks-and-ci)). A PR that deletes a `docs/spec-claims/` its base has is itself a CI finding.
+A project opts in by creating `docs/spec-claims/` with its first sidecar. From then on the pre-commit claims leg blocks on findings, the pre-push leg reports, the `doc-spec-verify` `claims` job checks every same-repository PR (fork and dependabot PRs are not checked), and the weekly schedule re-verifies ([Hooks and CI](#hooks-and-ci)). A same-repository PR that deletes a `docs/spec-claims/` its base has is itself a CI finding.
 
 The checker needs bash ≥ 3.2, `jq` ≥ 1.6 and git; a range that holds a merge (a gate or attest over a branch that merged its base) needs git ≥ 2.36 (`show --remerge-diff`), and is indeterminate (exit 2) on an older git.
 
@@ -358,7 +358,7 @@ It writes `docs/spec-claims/gates/<plan-stem>/chunk-<n>.json`, even when red: `{
 
 - **Pre-commit** runs `claims validate --staged`: a finding blocks the commit whatever `DOC_SUPERPOWERS_STRICT` says (V1–V6 and V10–V12 are blocking by design); advisories only print; a check that cannot run (exit 2 or 3) prints one line and blocks only under STRICT. `DOC_SUPERPOWERS_CLAIMS_SKIP=1` bypasses that leg alone.
 - **Pre-push** is advisory: `claims run --planes-of` over the commits each pushed branch adds (from the merge-base for a new branch, or when the remote oid is not an ancestor), and `claims attest --plan` for each plan with gate records but no `final.json`, once per push, for the first pushed ref at HEAD's commit. **A pushed ref that is not HEAD** has its claims *selected* by that ref's range but *run* against the checked-out tree, which may differ from the ref's.
-- **CI, on a PR** (`doc-spec-verify.yml`'s `claims` job): `claims validate --all`, `claims run --all` and `claims attest --plan <p> --final` for each plan the PR touches, each with `--base <the PR's base SHA>`; findings fail the job; a check that cannot run warns, and fails under `--ci-strict`. The checkout has no verdict store, so promotions count by their stored digest (`unverifiable-here` is an advisory). **The job judges the PR head, not the merged tree:** a claim broken only by later changes on the base surfaces on the next run after the PR is updated or merged, not on this one. **A PR that deletes a `docs/spec-claims/` present at its base is a finding** (`status=findings`, the job fails): a PR cannot switch its own check off. With `doc-pr-release` installed, the amendment batch goes into a `spec-claims` section at the top of the PR description.
+- **CI, on every same-repository PR (fork and dependabot PRs are not checked)** (`doc-spec-verify.yml`'s `claims` job, which runs only when the PR's head repository is the repository itself and the actor is not `dependabot[bot]`): `claims validate --all`, `claims run --all` and `claims attest --plan <p> --final` for each plan the PR touches, each with `--base <the PR's base SHA>`; findings fail the job; a check that cannot run warns, and fails under `--ci-strict`. The checkout has no verdict store, so promotions count by their stored digest (`unverifiable-here` is an advisory). **The job judges the PR head, not the merged tree:** a claim broken only by later changes on the base surfaces on the next run after the PR is updated or merged, not on this one. **A same-repository PR that deletes a `docs/spec-claims/` present at its base is a finding** (`status=findings`, the job fails): such a PR cannot switch its own check off. A fork PR runs no claims job, so this guard does not stop it either: review a fork PR that touches `docs/spec-claims/` by hand. With `doc-pr-release` installed, the amendment batch goes into a `spec-claims` section at the top of the PR description.
 - **Scheduled** (`doc-freshness-schedule.yml`, weekly): `claims run --all --scheduled --judge-sample 3`, `claims promote --reverify --all` and `claims validate --all`; findings keep the audit issue open under `### Spec claims` with the week's judge sample.
 
 ## Direction protocol
@@ -455,7 +455,7 @@ def test_ttl_is_15_minutes():
     assert not expired(899)
 ```
 
-**jest helper** — `claim(id, name, fn)`, CommonJS. An assertion is `err.matcherResult !== undefined || err.name === 'AssertionError'` (jest's `expect`, node's `assert`). `unbuilt` wraps `test.failing`. `diverged` keeps `test.failing`'s inversion but not the wrapper: `test.failing` passes on **any** thrown error, so under it a non-assertion error could never fail the test. The helper writes the inversion out instead, and rethrows every non-assertion error.
+**jest helper** — `claim(id, name, fn)`, CommonJS. `test.failing` exists only under jest-circus, jest's default runner; a host still on `testRunner: "jest-jasmine2"` writes the `unbuilt` inversion out as the `diverged` branch does (any thrown error passes, a pass fails). An assertion is `err.matcherResult !== undefined || err.name === 'AssertionError'` (jest's `expect`, node's `assert`). `unbuilt` wraps `test.failing`. `diverged` keeps `test.failing`'s inversion but not the wrapper: `test.failing` passes on **any** thrown error, so under it a non-assertion error could never fail the test. The helper writes the inversion out instead, and rethrows every non-assertion error.
 
 ```js
 // Spec-claims helper for jest: an example from doc-superpowers'
@@ -561,7 +561,10 @@ Its stdout is the contract's JSON lines (or ids) and nothing else: pytest's own
 output goes to stderr. A non-zero exit makes every requested node indeterminate.
 
 Bound tests are module-level functions: a column-0 @pytest.mark.claim("<id>")
-decorator line (the id on that line) above a column-0 `def test_...`.
+decorator line (the id on that line) above a column-0 `def test_...`. A test's
+span ends at the next column-0 line, so a multi-line string whose continuation
+line starts in column 0 cuts it short: edited-bound-tests misses an edit below
+that line.
 """
 import json
 import os

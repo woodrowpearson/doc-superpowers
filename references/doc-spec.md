@@ -245,7 +245,8 @@ Realized-by: []
        | Claim | Status | Tracker |
        |---|---|---|
        | `SPEC-{CAT}-{NNN}#<slug>` | unbuilt | <tracker> |
-     or the one line "Claims: N built" once every claim is built. -->
+     or the one line "Claims: N built" once every claim that is not retired is built
+     (N counts those). -->
 
 ## Motivation
 <!-- Why this spec is needed -->
@@ -266,7 +267,7 @@ Realized-by: []
 
 `Draft`, `In Review`, `Approved`, and `Implemented` form the ladder that `spec-inject` transitions automatically (`spec-verify` is read-only — it reports on `Status` and never writes it). `Active` (continuously-evolving reference specs), `Deprecated`, `Superseded`, **and any status not on that ladder** sit outside it and are never transitioned by automation — the exempt class is open-world, so a status added later cannot fall back to an unguarded write. See **Spec Status Model** in `references/spec-lifecycle-actions.md`.
 
-**The claim status block and the descriptive marker** (claims-enabled projects only: `docs/spec-claims/` exists; without it both are inert HTML comments). A spec with a sidecar, `docs/spec-claims/<DOC-ID>.json`, carries a generated `## Claim status` block, written by `doc-tools.sh claims render` and checked by `claims render --check` (V11). The first render inserts it immediately before the doc's second `##` heading, which in this template is `## Motivation`, so it lands where the template's comment sits; later renders replace it between its markers. Never edit it by hand: edit the sidecar and re-render. It lists every claim that is neither `built` nor `retired`, or, once every claim is built, the one line `Claims: N built`:
+**The claim status block and the descriptive marker** (claims-enabled projects only: `docs/spec-claims/` exists; without it both are inert HTML comments). A spec with a sidecar, `docs/spec-claims/<DOC-ID>.json`, carries a generated `## Claim status` block, written by `doc-tools.sh claims render` and checked by `claims render --check` (V11). The first render inserts it immediately before the doc's second `##` heading, which in this template is `## Motivation`, so it lands where the template's comment sits; later renders replace it between its markers. Never edit it by hand: edit the sidecar and re-render. It lists every claim that is neither `built` nor `retired`, or, once every claim that is not retired is built, the one line `Claims: N built` (N counts the non-retired claims):
 
 ```markdown
 <!-- spec-claims:status:begin -->
@@ -309,7 +310,8 @@ Implementation: []
        | Claim | Status | Tracker |
        |---|---|---|
        | `ADR-{NNN}#<slug>` | unbuilt | <tracker> |
-     or the one line "Claims: N built" once every claim is built. -->
+     or the one line "Claims: N built" once every claim that is not retired is built
+     (N counts those). -->
 
 ## Decision
 <!-- What is the change that we're proposing and/or doing? -->
