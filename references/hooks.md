@@ -113,7 +113,7 @@ others install only when named:
 | `doc-audit-update.yml` | Push to non-main leaving indexed docs stale | AI-powered audit + update on feature branches |
 | `doc-review-pr.yml` | PR open/sync touching indexed docs; `@claude` PR comment | AI-powered PR doc review (a fixed-prompt job), and tag mode for `@claude` |
 | `doc-release.yml` | Push to `release/**` | AI-powered release-notes drafting, opened as a PR |
-| `doc-spec-verify.yml` | PR open/sync touching indexed specs; its `claims` job on every PR | Verifies spec compliance against changed code; the `claims` job (no AI) checks the spec claims and posts the amendment batch |
+| `doc-spec-verify.yml` | PR open/sync touching indexed specs; its `claims` job on every same-repository PR (never forks or Dependabot) | Verifies spec compliance against changed code; the `claims` job (no AI) checks the spec claims and posts the amendment batch |
 | `doc-pr-full-cycle.yml` | PR open touching indexed docs | Superset of review-pr — runs review + update + diagram + sync |
 | `doc-pr-release.yml` | PR open/sync/reopen | Drafts/maintains `RELEASE-NOTES.next/PR-<N>.md` fragments and the managed `<!-- doc-superpowers:start/end -->` section of the PR body |
 

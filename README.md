@@ -172,6 +172,12 @@ The `:target` / `:constraint` / `:amends` suffix is optional — unsuffixed path
 
 For wrapper skill integration, see `references/spec-lifecycle-protocol.md`.
 
+### Spec claims (opt-in)
+
+A spec or ADR can carry **executable claims**: atomic, falsifiable statements quoted from its normative text, stored beside it in a sidecar (`docs/spec-claims/<DOC-ID>.json`) and each bound to a check — a host test run through a small runner adapter, a `grep -E` lint, a production log query, or a named human judgment. `doc-tools.sh claims <verb>` (`validate`, `run`, `promote`, `render`, `gate`, `attest`, `rulings`) is the checker: `promote` is the only path to `built`, and only with a proof that the bound test can fail; `spec-inject` adds a claims gate to each chunk of a plan and a final gate, whose verdicts are recorded under `docs/spec-claims/gates/`; and when a doc and the code disagree, the direction — `CODE-DIVERGES` (the doc is the intent: fix the code, or defer it as `diverged` with a tracker), `DOC-STALE` (amend the doc) or `RETIRE` — is ruled and recorded on the claim before either side is edited. The git hooks and the `doc-spec-verify` and `doc-freshness-schedule` workflows run the same verbs.
+
+It is **inert without `docs/spec-claims/`**: every `claims` verb then prints `{"verb":"<verb>","enabled":false,"exit":0}` and exits 0, and the hooks, CI templates and `spec-*` actions behave exactly as before. A project opts in by creating that directory with its first sidecar. The schema, the checks (V1–V12), the adapter contracts, the gates and the direction protocol are in [`references/spec-claims.md`](references/spec-claims.md).
+
 ### Workflow Integration
 
 Install opt-in hooks for automated freshness monitoring:
@@ -317,7 +323,7 @@ doc-superpowers/
 │   └── workflows/
 │       ├── doc-freshness-pr.yml
 │       ├── doc-freshness-schedule.yml
-│       └── tests.yml     # This repo only: the five test suites (bash 5.x + 3.2), check-version, self-install check
+│       └── tests.yml     # This repo only: the six test suites (bash 5.x + 3.2), check-version, self-install check
 ├── .opencode/            # OpenCode plugin + installation guide
 │   ├── INSTALL.md
 │   └── plugins/
@@ -335,6 +341,7 @@ doc-superpowers/
 │   ├── test-helpers.sh   # Shared test utilities
 │   ├── test-hooks.sh     # Test suite for hooks installer
 │   ├── test-spec-status-model.sh # Test suite for the Spec Status Model + call sites
+│   ├── test-spec-claims.sh       # Test suite for the spec claims checker (doc-tools.sh claims)
 │   ├── test-doc-pr-release.sh    # Test suite for doc-pr-release helpers
 │   ├── merge-doc-index.sh        # Custom git merge driver for .doc-index.json
 │   ├── test-merge-driver.sh      # Test suite for merge driver
@@ -352,6 +359,7 @@ doc-superpowers/
 │   ├── hooks.md                   # `hooks` action: tiers, consent table, CI templates
 │   ├── spec-lifecycle-actions.md  # Detailed procedures for spec lifecycle actions
 │   ├── spec-lifecycle-protocol.md # Spec lifecycle integration guide
+│   ├── spec-claims.md             # Spec claims (opt-in): schema, checks, adapters, gates
 │   ├── integration-patterns.md    # Code review, commit review, wrapper skill integration
 │   └── tool-mappings.md           # Per-client tool names and capabilities
 ├── evals/                # Evaluation test cases
@@ -399,7 +407,7 @@ Everything else is the POSIX userland (`awk`, `sed`, `grep`, `mktemp`, …) as s
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes — the skill is `skills/doc-superpowers/SKILL.md` and `references/`, the tooling `scripts/`
-4. Run the five test suites under both bash 5.x and macOS's `/bin/bash` 3.2 (the loop and the suite list are in [CLAUDE.md → Conventions](CLAUDE.md#conventions)); all must pass. CI runs the same matrix
+4. Run the six test suites under both bash 5.x and macOS's `/bin/bash` 3.2 (the loop and the suite list are in [CLAUDE.md → Conventions](CLAUDE.md#conventions)); all must pass. CI runs the same matrix
 5. If you changed a CI template, `scripts/doc-tools.sh` or a CI helper script, re-run `bash scripts/hooks/install.sh install --ci` and commit what it writes: this repository installs its own CI tier, and CI fails when the installed copies drift from their sources
 6. For a change to the skill's behaviour, also try it with `/doc-superpowers init` (or the action you changed) on a sample project
 7. Submit a PR

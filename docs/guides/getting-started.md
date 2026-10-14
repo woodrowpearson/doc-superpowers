@@ -179,6 +179,8 @@ Use after brainstorming produces a design spec to track formal specifications th
 
 Each path in `--specs` takes an optional role suffix — `--specs=<path>:target`, `--specs=<path>:constraint`, or `--specs=<path>:amends` (the plan corrects what the spec *says* without building its surface; status-neutral, verified as landed — pass `--plan=<path>` to `spec-verify` so the check can confirm the amendment cites the plan). An explicit marker always wins; unsuffixed paths stay valid and have their role inferred at execution time, and inference never yields `:amends`.
 
+**Spec claims (opt-in).** A project that creates `docs/spec-claims/` turns its specs' and ADRs' normative sentences into executable claims, checked by `doc-tools.sh claims <verb>`: `spec-generate` writes stub claims, `spec-inject --phase=plan` adds a claims gate to each chunk and a final gate, and the git hooks and the `doc-spec-verify` / `doc-freshness-schedule` workflows run the same checks. Without that directory every `claims` verb is inert and nothing above changes. See `references/spec-claims.md`.
+
 For wrapper skill integration details, see `references/spec-lifecycle-protocol.md`.
 For code review and commit review integration, see `references/integration-patterns.md`.
 

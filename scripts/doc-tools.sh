@@ -129,7 +129,7 @@ _git_last_commit() {
 # Commits in <base>..HEAD touching the refs, into _BEHIND; "" (reported as
 # null) when <base> is not reachable from HEAD: the repository does not have
 # it (a squash-merged branch deleted, a shallow clone), or it is not an
-# ancestor of HEAD (only the verify commit was cherry-picked, a branch that
+# ancestor of HEAD (only the re-baseline commit was cherry-picked, a branch that
 # never merged). `rev-list --count <base>..HEAD` answers 0 or a count of
 # unrelated commits there — a masked 0, the same as "not behind". Any other
 # git failure dies. <base> must pass _is_oid. With --literal first, the refs
@@ -348,18 +348,19 @@ _targets_from_args() {
 # --- Content identity (index schema v3) ----------------------------------------
 #
 # A doc is stale when the CONTENT of one of its code refs differs from what was
-# verified. Before schema v3 it was stale when the newest commit touching the
-# refs had a different id from the stored code_commit — and a commit id is a
-# poor proxy for content: squash merges, rebase-merges, cherry-picks and
-# reverts mint new ids for identical bytes; a shallow clone's graft poses as
-# the last commit; a commit cannot contain its own id, so verifying a doc in
-# the same commit as the code never matched; and every doc paid its own
-# history walks (O(N·H): 117 s at N=4,000 docs, H=3,000 commits).
+# recorded at its baseline. Before schema v3 it was stale when the newest
+# commit touching the refs had a different id from the stored code_commit —
+# and a commit id is a poor proxy for content: squash merges, rebase-merges,
+# cherry-picks and reverts mint new ids for identical bytes; a shallow clone's
+# graft poses as the last commit; a commit cannot contain its own id, so
+# re-baselining a doc in the same commit as the code never matched; and every
+# doc paid its own history walks (O(N·H): 117 s at N=4,000 docs, H=3,000
+# commits).
 #
 # Writers (build-index, add-entry, update-index) store per ref the git object
 # id of its content — a blob for a file, a tree for a directory, the commit
 # for a submodule, "missing" when there is none — in code_oids, captured from the WORKING TREE, which is
-# what the verifier read, staged or not (through a private index: git's own is
+# what the doc was read against, staged or not (through a private index: git's own is
 # never touched). Readers (check-freshness, status) look every ref up in HEAD,
 # or in the tree given with --tree (pre-commit passes the staged tree, `git
 # write-tree`), with ONE `git cat-file --batch-check` for the whole index:
@@ -385,7 +386,7 @@ _targets_from_args() {
 #     history) — never a masked 0.
 #   - An entry without code_oids (written before v3) is judged by the old
 #     commit logic — its refs as git pathspecs, globs included — until a
-#     writer re-verifies it. The first write bumps schema_version to 3.
+#     writer records its code_oids. The first write bumps schema_version to 3.
 
 _SCHEMA_VERSION=3
 
@@ -562,9 +563,9 @@ _wt_stage() {
 # as a tree. Paths outside the refs keep their index state; only the refs are
 # ever looked up in it.
 #
-# `add -A` stages untracked files too — new files under a ref are code the
-# verifier read — so an untracked file (not ignored) under a ref is part of
-# the verified content, and HEAD lacks it: the doc reads stale until it is
+# `add -A` stages untracked files too — new files under a ref are code the doc
+# was read against — so an untracked file (not ignored) under a ref is part of
+# the recorded content, and HEAD lacks it: the doc reads stale until it is
 # committed or ignored. One `git ls-files -o` over the refs names every such
 # path in a warning (the doc-index's own files aside). --no-empty-directory:
 # without it an empty directory, or one holding only ignored files, is listed
@@ -1153,7 +1154,7 @@ _JQ_FRESH_EXTRACT='
 # (status "record" in the stream) is reported current, with "record": true
 # and commits_behind null (not evaluated) — no new status value, so every
 # consumer that counts stale or current reads it as before. last_verified
-# is null when the entry has none (never verified).
+# is null when the entry has none (never re-baselined).
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_FRESH_RESULTS='
   def results:
@@ -2016,7 +2017,8 @@ IFS= read -r -d '' _VERBS <<'VERBS' || true
 build-index|cmd_build_index|repo|force
   [--force] < mapping-lines
   Build docs/.doc-index.json from mapping lines on stdin (see "Mapping
-  lines"). Each entry is recorded as add-entry records one: unverified.
+  lines"). Each entry is recorded as add-entry records one, with no
+  baseline reset (last_verified null).
   Writes nothing and exits non-zero when stdin holds no mapping line or
   any line is invalid. Refuses to replace an index that already has
   entries unless --force is given; --force keeps each re-indexed key's
@@ -2028,7 +2030,7 @@ check-freshness|cmd_check_freshness|repo|code-refs+ code-refs-from=* tree=
   [--tree <tree-ish>] [--code-refs <path>...] [--code-refs-from <file|->]
   Report which indexed docs are stale relative to their code (read-only,
   JSON). A doc is stale when the content of one of its code_refs differs
-  from what was verified (code_oids). Without --tree, the working copy's
+  from what was recorded (code_oids). Without --tree, the working copy's
   index and docs are judged against the refs in HEAD. --tree <tree-ish>
   judges one snapshot: the index, the docs (present or missing, and
   doc_modified) and the refs all as that tree holds them. A pre-commit check
@@ -2036,7 +2038,7 @@ check-freshness|cmd_check_freshness|repo|code-refs+ code-refs-from=* tree=
   whose index is not staged does not count. A tree without the index falls
   back to the working copy's index and docs, with a note on stderr. An
   entry without code_oids (pre-v3) keeps the old commit comparison, at
-  HEAD, until update-index re-verifies it.
+  HEAD, until update-index re-baselines it.
   --code-refs limits the report to docs whose code_refs share a path
   segment with a listed path: src/m1 matches refs src/m1, src/m1/a.js and
   src/, never src/m10. It takes every following argument up to the next
@@ -2053,18 +2055,18 @@ update-index|cmd_update_index|repo|
   content in the working tree) and code_commit, stamp last_verified. Run it
   only for a doc you read against its code. A deprecated entry stays
   deprecated. Reports Refreshed (something recorded changed), Re-verified
-  (only last_verified did) or Unchanged (verified this second already). A
+  (only last_verified did) or Unchanged (re-baselined this second already). A
   doc whose file is gone is skipped with advice. A path that is not
   indexed is reported and skipped; the others are still applied, and the
   run exits 1.
 add-entry|cmd_add_entry|repo|
   < mapping-lines
   Add new entries from mapping lines on stdin (same format as
-  build-index). Indexing is not verifying: last_verified is null, and
+  build-index). Indexing is not a baseline reset: last_verified is null, and
   each ref's content is recorded as of the doc's own last commit (the
   working tree for a doc git has never committed), so code that changed
-  since the doc was written reads stale until update-index verifies it. A
-  key already indexed is skipped (update-index re-verifies it,
+  since the doc was written reads stale until update-index re-baselines it.
+  A key already indexed is skipped (update-index re-baselines it,
   set-code-refs changes its refs). An invalid line is rejected; the valid
   lines are still applied, and the run exits 1.
 remove-entry|cmd_remove_entry|repo|
@@ -2084,7 +2086,7 @@ move-entry|cmd_move_entry|repo|stdin
   recorded object id is kept: a rename keeps the content, so once the
   tree judged holds the rename (after the commit) a doc citing the moved
   one reads as it did; an entry without code_oids, written before schema
-  3, reads stale from that commit until update-index re-verifies it. Use this, not
+  3, reads stale from that commit until update-index re-baselines it. Use this, not
   remove-entry + add-entry, for a rename, which would drop the freshness
   metadata. --stdin moves a batch in one index write: one "<old><TAB><new>"
   pair per line (blank lines skipped, a trailing CR removed), taken as one
@@ -2093,13 +2095,13 @@ move-entry|cmd_move_entry|repo|stdin
 set-code-refs|cmd_set_code_refs|repo|refs=
   <doc_path> --refs <ref>[,<ref>...]
   Replace an indexed doc's code_refs in place (--refs '' leaves none); the
-  same refs (compared as paths) write nothing. Not a verification: the
+  same refs (compared as paths) write nothing. Not a baseline reset: the
   entry keeps its position and every other field (last_verified,
   content_hash, status, …). code_oids is re-derived: a ref the entry
   already had keeps its recorded content (for a pre-v3 entry, the content
   in its code_commit); a new one is recorded as add-entry records it (as
   of the doc's last commit), so the doc reads stale if that code changed
-  since, until update-index verifies it. code_commit (the commits_behind
+  since, until update-index re-baselines it. code_commit (the commits_behind
   baseline) stays when every ref is kept; is derived as add-entry derives
   it when every ref's content comes from the doc's last commit; and with
   both is the older baseline — git merge-base of the stored and derived
@@ -2112,7 +2114,7 @@ set-doc-type|cmd_set_doc_type|repo|
   <doc_path> <doc_type>
   Change an indexed doc's doc_type in place: the entry keeps its key
   position and every other field (last_verified, code_oids, status, …);
-  the same type writes nothing. Not a verification. doc_type decides
+  the same type writes nothing. Not a baseline reset. doc_type decides
   whether a doc is a record (plan, issue, audit, design-spec: never
   reported stale) or a living doc compared with its code, so <doc_type>
   must be a known type — architecture, api-contracts, data-layer, infra,
@@ -2120,13 +2122,13 @@ set-doc-type|cmd_set_doc_type|repo|
   adr, plan, issue, audit or design-spec — or one this index already
   uses (a project's own vocabulary); anything else (a typo) exits 1,
   writing nothing. Use it, not remove-entry + add-entry, which would drop
-  the entry's verification, deprecation and links.
+  the entry's baseline, deprecation and links.
 deprecate-entry|cmd_deprecate_entry|repo|superseded-by=
   [--superseded-by <doc_path>] <doc_path>...
   Mark entries deprecated, optionally naming the doc that supersedes them;
   that successor's replaces is set to the (first) deprecated doc unless it
-  already names one. last_verified is not touched: deprecating is not
-  verifying. A path that is not indexed is reported and skipped; the
+  already names one. last_verified is not touched: deprecating is not a
+  baseline reset. A path that is not indexed is reported and skipped; the
   others are still applied, and the run exits 1 (so an archive step that
   names the old path after move-entry, deprecating nothing, fails).
 status|cmd_status|repo|tree=
@@ -2147,7 +2149,7 @@ audit-merges|cmd_audit_merges|repo|
   means the merge kept that parent's entry where the other parent's change
   should have survived (a silent revert, e.g. by a driver that is not
   base-aware, on a last_verified tie); "neither" means the merge commit
-  itself rewrote it (a hand resolution or a re-verification: review it).
+  itself rewrote it (a hand resolution or a re-baseline: review it).
   "refused": the merge needed a resolution the driver would not make (it
   stays reported after a correct hand resolution, and its other entries
   are not compared); "unreadable": "recorded" when the merge's own index
@@ -2387,7 +2389,7 @@ Mapping lines (stdin of build-index and add-entry, one doc per line):
   from which git would stage nothing (a typo, an empty or all-ignored
   directory) is warned about too: it is recorded as missing, which HEAD
   agrees with, so the doc cannot go stale. Untracked (not
-  ignored) files under a ref are part of what is verified: writers name
+  ignored) files under a ref are part of what is recorded: writers name
   them, and the doc reads stale until they are committed or ignored.
 
 Realization blocks (set-implementation, implementation-status, update-index):
@@ -2424,18 +2426,18 @@ Index writes:
 Freshness (index schema v3):
   An entry records, per code ref, the git object id of its content
   (code_oids: a blob, a tree, a submodule's commit, or "missing"):
-  update-index as the working tree holds it (what the verifier read);
+  update-index as the working tree holds it (what the doc was read against);
   build-index, add-entry and set-code-refs as of the doc's own last commit
   (the code it was written against; the working tree for a doc git has
   never committed). A doc is stale when one differs in the compared tree
   (HEAD, or --tree, which also supplies the index and the docs). So squash
   merges, rebase-merges, cherry-picks and reverts to
-  the verified bytes stay current, as does a doc verified in the same
+  the recorded bytes stay current, as does a doc re-baselined in the same
   commit as its code; a submodule bump reads stale. code_refs_changed lists
   exactly the refs that differ. commits_behind counts the commits touching
   the refs since code_commit, and is null when that commit is not an
   ancestor of HEAD here (a deleted squash-merged branch, a shallow clone, a
-  cherry-picked verification). In a shallow clone writers record no
+  cherry-picked re-baseline). In a shallow clone writers record no
   code_commit (null, with a warning). The doc-index itself is never part of
   a ref's content.
 
@@ -3246,7 +3248,7 @@ cmd_update_index() {
 
   # An unknown key is reported and skipped; the rest of the batch is still
   # applied, and the run exits 1 at the end. (It used to abort the whole
-  # batch, so one typo in a list of 20 re-verified nothing.) Refs are kept in
+  # batch, so one typo in a list of 20 re-baselined nothing.) Refs are kept in
   # one flat array with per-target offsets (bash 3.2 has no arrays of arrays).
   local has n j ref idx=0 unknown=0
   local ref_all=() ref_start=() ref_count=() indexed=()
@@ -3392,13 +3394,13 @@ cmd_update_index() {
   _index_apply --report "$_INDEX_PATCH" --slurpfile patch "$patch"
 
   # Report what was written (the patch rows are the live docs, in order).
-  # Every one is a verification, and stamps last_verified:
+  # Every one is a baseline reset, and stamps last_verified:
   #   Refreshed    something it records changed too — the doc's hash, its
   #                code's content (code_oids, code_commit) or its
   #                Implementation: bullets
   #   Re-verified  nothing but last_verified changed: a real write, so never
   #                reported as unchanged
-  #   Unchanged    verified in this same second already: nothing was written
+  #   Unchanged    re-baselined in this same second already: nothing was written
   local refreshed=() reverified=() unchanged=()
   k=0
   while [ "$k" -lt "${#live[@]}" ]; do
@@ -3729,8 +3731,8 @@ cmd_move_entry() {
   # rather than field-by-field, so a field this code has never heard of still
   # survives a move. Only content_hash is adjusted: code_commit, code_oids and
   # last_verified are deliberately PRESERVED, because a move is not a
-  # verification — re-deriving either would make the entry assert a freshness
-  # nobody confirmed. Run update-index afterwards for a genuine re-verify.
+  # baseline reset — re-deriving either would make the entry assert a freshness
+  # nobody confirmed. Run update-index afterwards for a genuine re-baseline.
   #
   # to_entries|map|from_entries re-keys IN POSITION, so the commit-time diff is a
   # one-line key rename rather than the delete-plus-append that
@@ -3874,15 +3876,15 @@ cmd_set_code_refs() {
 
   # A new ref is recorded as add-entry records one: as of the doc's own last
   # commit (the working tree for a doc git has never committed). The entry is
-  # not re-verified, so nothing else about it changes.
+  # not re-baselined, so nothing else about it changes.
   _FACT_KEYS=("$doc_path")
   _FACT_REFSETS=("$joined")
   _entry_facts 1 doc
 
   # A ref the entry already had keeps its recorded content (it may have been
-  # verified): its code_oids id, or — for a pre-v3 entry, which records
+  # re-baselined): its code_oids id, or — for a pre-v3 entry, which records
   # content only as code_commit (the newest commit touching the refs when it
-  # was verified) — its object id in that commit's tree, looked up the way
+  # was re-baselined) — its object id in that commit's tree, looked up the way
   # every ref is (_oid_lookup). Without a usable code_commit (absent, not an
   # object id, not in this repository) it is recorded like a new ref.
   local lrefs="" loids="" lfile="$_SCRATCH/set-code-refs.kept" lout="$_SCRATCH/set-code-refs.kept.oids" x
@@ -3943,7 +3945,7 @@ cmd_set_code_refs() {
   #          stored one is not usable, there is no derived one, or they
   #          share no ancestor. Usable: an object id naming a commit of
   #          this repository that is an ancestor of HEAD. One off HEAD's
-  #          line (only the verify commit was cherry-picked) already reads
+  #          line (only the re-baseline commit was cherry-picked) already reads
   #          null; its merge-base with the derived one would count from a
   #          commit before changes it never saw — a masked 0.
   _head_init
@@ -3982,7 +3984,7 @@ _DOC_TYPES_RECORD="plan issue audit design-spec"
 # entry keeps its key position and every other field. doc_type decides
 # whether a doc is a record (see _JQ_FRESH_EXTRACT): the only other way to
 # change it was remove-entry + add-entry, which drops the entry's
-# verification, deprecation and links.
+# baseline, deprecation and links.
 cmd_set_doc_type() {
   [ $# -eq 2 ] || _usage_error set-doc-type "takes exactly <doc_path> <doc_type> (got $# arguments)"
   if [ ! -f "$INDEX_FILE" ]; then
@@ -4078,7 +4080,7 @@ cmd_deprecate_entry() {
     done
   fi
 
-  # Deprecating is not verifying: last_verified is left as it is.
+  # Deprecating is not a baseline reset: last_verified is left as it is.
   _scratch_init
   local patch="$_SCRATCH/deprecate-patch.jsonl"
   # shellcheck disable=SC2016  # jq program, not shell expansion
