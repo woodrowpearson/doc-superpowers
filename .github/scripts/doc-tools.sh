@@ -2206,8 +2206,9 @@ claims validate|cmd_claims_validate|repo|staged all config=* base=
   its check is in the config's "blocking" list, and is reported as an
   advisory otherwise. The plans (config "plans") staged, or present under
   --all, are checked for their claims gates and **Claims:** lines (V12).
-  --config KEY=VALUE checks a configuration change made outside git (the
-  configuration extension only). See "Spec claims".
+  --config KEY=VALUE (repeatable) checks a configuration change made
+  outside git (V10, the configuration extension only: a usage error
+  without it). See "Spec claims".
 claims run|cmd_claims_run|repo|claims+ planes-of= all scheduled judge-sample= base=
   (--claims <id>... | --planes-of <range> | --all) [--scheduled] [--judge-sample <n>] [--base <ref>]
   Execute claims: test claims through their runner adapters (config
@@ -2236,7 +2237,10 @@ claims promote|cmd_claims_promote|repo|reverify all base=
   the subject files as at that commit, the test must fail by an
   assertion), store the verdict, record the promotion in the sidecar and
   render the doc's status block (results: {claim, status_from, status_to,
-  green, red, verdict_sha256}). --reverify re-runs those proofs at HEAD
+  green, red, verdict_sha256}). A built claim whose verdict matches it is
+  refused (already promoted), unless the configuration extension is on and
+  the recorded configuration at HEAD no longer satisfies its "when": it is
+  then re-proved and written gated. --reverify re-runs those proofs at HEAD
   for each <id>, or with --all for each built or gated claim with a
   promotion (a frozen one is reported skipped), and stores each fresh
   verdict, writing neither sidecar nor doc (results: {claim, verdict}:
@@ -2480,7 +2484,14 @@ Spec claims (claims validate, run, promote, render, gate, attest, rulings):
   key its subject reads whose recorded value is not its default must be
   pinned in "when" unless "config_independent" says why not (V3), a built
   claim's "when" must hold under the recorded configuration (V3), gated
-  needs an open tracker (V5), and run expects a gated claim to pass.
+  needs an open tracker (V5), and run expects a gated claim to pass. V10
+  re-classifies the gated, built and diverged claims whose "when" keys or
+  subject's readers keys a configuration change touches — a staged surface
+  (validate --staged), or validate --config KEY=VALUE — comparing recorded
+  --rev <merge-base> with the proposed configuration: a gated claim now
+  satisfied is to be promoted to built; a built one no longer satisfied
+  owes a new ruling (then promote re-gates it); a diverged one whose
+  "when" the change switches on is a finding.
 
 Exit status:
   0  success
@@ -7826,8 +7837,10 @@ cmd_claims_run() {
 # each called, as every adapter is, through _claims_adapter_call (from the
 # repo root, </dev/null 9>&-). validate calls recorded once (--staged under
 # --staged; no flag, the work tree, under --all) into cl-recorded.json, which
-# V1 (each when key a recorded key) and V3 share; promote calls recorded
-# --rev HEAD and writes gated, not built, when claims_when_ok fails there. A
+# V1 (each when key a recorded key) and V3 share (V10 makes its own calls,
+# and restores it: see "V10"); promote calls recorded --rev HEAD and writes
+# gated, not built, when claims_when_ok fails there — for a built claim
+# whose verdict matches, that re-gates it instead of refusing it. A
 # failing call (an rc ≠ 0, 126 for a missing adapter; output that is not one
 # JSON object whose every value is {recorded, default}) is indeterminate
 # (check config): cl-recorded.json then holds null, and what needs it is
@@ -7849,7 +7862,7 @@ cmd_claims_run() {
 # claims of that list indeterminate.
 # Scratch: cl-recorded.json, cl-v3c-plan.json, cl-v3c-subjects.jsonl
 # (each distinct subject list), cl-v3c-readers.jsonl ({subject, ok, keys |
-# reason | unsafe} per list).
+# reason | unsafe} per list: _claims_readers_rows).
 
 _CL_B1=""  # _claims_b1_on's answer, once read: 0 on, 1 off
 
@@ -7962,16 +7975,33 @@ _JQ_CLAIMS_V3C='def v3($e; $msg): {check: "V3", claim: $e.claim, doc: $e.doc, me
 # shellcheck disable=SC2016  # jq programs, not shell expansion
 _claims_v3_config() {
   local plan="$_SCRATCH/cl-v3c-plan.json" subj="$_SCRATCH/cl-v3c-subjects.jsonl"
-  local rows="$_SCRATCH/cl-v3c-readers.jsonl" out="$_SCRATCH/cl-v3c-out" z="$_SCRATCH/cl-v3c.z"
-  local res="$_SCRATCH/cl-v3c.jsonl" adapter line p bad rc
-  local rpaths=()
-  : > "$rows"
+  local rows="$_SCRATCH/cl-v3c-readers.jsonl" res="$_SCRATCH/cl-v3c.jsonl"
   _claims_jq v3c-plan -c --slurpfile t "$_SCRATCH/cl-touched.json" "$_JQ_CLAIMS_V3C_PLAN" \
     "$_SCRATCH/cl-claims.json" > "$plan"
   _claims_jq v3c-subjects -c '[.[] | .subject | arrays] | unique | .[]' "$plan" > "$subj"
+  _claims_readers_rows "$subj" "$rows"
+  _claims_jq v3c -nc --slurpfile plan "$plan" --slurpfile rows "$rows" --slurpfile rec "$_SCRATCH/cl-recorded.json" \
+    "$_JQ_CLAIMS_WHEN $_JQ_CLAIMS_V3C" > "$res"
+  _claims_jq v3c-findings -c 'select(has("reason") | not)' "$res" >> "$_SCRATCH/cl-findings.jsonl"
+  _claims_jq v3c-indeterminate -c 'select(has("reason"))' "$res" >> "$_SCRATCH/cl-indet.jsonl"
+}
+
+# _claims_readers_rows <subjects> <rows>: one config-adapter readers call per
+# line of <subjects> (a JSON list of subject paths), its row written to
+# <rows> (truncated first): {subject, ok: true, keys} (the lines it printed,
+# trimmed, blank ones dropped, unique), {subject, ok: false, reason:
+# adapter-exit-<rc>}, or {subject, ok: false, unsafe: <path>} for a path
+# that is not a safe repo path, is reached through a symbolic link or starts
+# with "-": it never reaches the adapter. V3 and V10 share it.
+# shellcheck disable=SC2016  # jq programs, not shell expansion
+_claims_readers_rows() {
+  local subj="$1" rows="$2" out="$_SCRATCH/cl-readers-out" z="$_SCRATCH/cl-readers.z"
+  local adapter line p bad rc
+  local rpaths=()
+  : > "$rows" || _claims_die "cannot write $rows"
   adapter=$(_claims_config_adapter) || _claims_propagate $?
   while IFS= read -r line <&3; do
-    _claims_jq v3c-paths -j '.[] | . + "\u0000"' <<<"$line" > "$z"
+    _claims_jq readers-paths -j '.[] | . + "\u0000"' <<<"$line" > "$z"
     rpaths=()
     bad=""
     while IFS= read -r -d '' p; do
@@ -7983,20 +8013,155 @@ _claims_v3_config() {
       rpaths+=("$p")
     done < "$z"
     if [ -n "$bad" ]; then
-      _claims_jq v3c-unsafe -nc --argjson s "$line" --arg p "$bad" '{subject: $s, ok: false, unsafe: $p}' >> "$rows"
+      _claims_jq readers-unsafe -nc --argjson s "$line" --arg p "$bad" '{subject: $s, ok: false, unsafe: $p}' >> "$rows"
       continue
     fi
     rc=0
     _claims_adapter_call "$out" "$adapter" readers ${rpaths[@]+"${rpaths[@]}"} || rc=$?
-    _claims_jq v3c-readers -nRc --argjson s "$line" --argjson rc "$rc" \
+    _claims_jq readers-row -nRc --argjson s "$line" --argjson rc "$rc" \
       '[inputs | rtrimstr("\r") | sub("^[ \t]+"; "") | sub("[ \t]+$"; "") | select(. != "")] as $k
        | if $rc != 0 then {subject: $s, ok: false, reason: "adapter-exit-\($rc)"}
          else {subject: $s, ok: true, keys: ($k | unique)} end' < "$out" >> "$rows"
   done 3< "$subj"
-  _claims_jq v3c -nc --slurpfile plan "$plan" --slurpfile rows "$rows" --slurpfile rec "$_SCRATCH/cl-recorded.json" \
-    "$_JQ_CLAIMS_WHEN $_JQ_CLAIMS_V3C" > "$res"
-  _claims_jq v3c-findings -c 'select(has("reason") | not)' "$res" >> "$_SCRATCH/cl-findings.jsonl"
-  _claims_jq v3c-indeterminate -c 'select(has("reason"))' "$res" >> "$_SCRATCH/cl-indet.jsonl"
+}
+
+# --- Spec claims: configuration re-classification, V10 (§B.1) -----------------
+#
+# With the extension on, V10 runs in validate when a staged path (--staged)
+# is one of the config adapter's surfaces — equal to a line surfaces prints,
+# or under it as a directory — or when --config KEY=VALUE (repeatable) is
+# given; never otherwise (--all without --config: no surfaces call, no V10),
+# nor without a merge-base. It compares the recorded configuration at _CL_MB
+# (recorded --rev <merge-base>) with the proposed one: the staged one
+# (validate's own recorded --staged call) or, under --config, recorded with
+# an --override per --config, in the mode's tree (--staged under --staged,
+# the work tree under --all). A changed key is one whose recorded value
+# differs between the two (a key only one side records included). V10 then
+# judges every eligible claim that is gated, built or diverged and not
+# frozen, and whose when keys or whose subject's readers keys (one readers
+# call per distinct subject list, asked only for a claim its when does not
+# already select) include a changed key, against the proposed configuration
+# (claims_when_ok):
+#   - gated, its when now satisfied → "now satisfied: promote to built";
+#   - built, its when not satisfied, and no new ruling (cl_new_rulings
+#     against its claim at _CL_MB, the V6/V7 definition) → "ruling owed":
+#     the direction is ruled (§F) first, then claims promote re-gates it;
+#   - diverged, its non-empty when satisfied by the proposed configuration
+#     and not by the merge-base's → "switches on a diverged claim".
+# A failing surfaces or recorded call is indeterminate (check config), and a
+# failing readers call makes the claims it was asked for indeterminate
+# (check V10); a subject path readers is never asked about (unsafe: V3's
+# finding) selects nothing. validate's own recorded call having failed,
+# V10 makes no call. V10 is in the default blocking list.
+# Scratch: cl-v10-old.json and cl-v10-new.json (the two recorded objects;
+# cl-recorded.json is restored to validate's own), cl-v10-changed.json,
+# cl-v10-plan.json, cl-v10-subjects.jsonl, cl-v10-readers.jsonl.
+
+# The changed keys ($old, $new: the two recorded objects, slurped), sorted.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_V10_CHANGED='$old[0] as $o | $new[0] as $n
+ | [($o | keys[]), ($n | keys[])] | unique
+ | map(. as $k | select(($o | has($k)) != ($n | has($k)) or $o[$k].recorded != $n[$k].recorded))'
+
+# cl-claims.json → the claims V10 may judge ($ch: the changed keys, $b:
+# cl-claims-base.json; run after _JQ_CLAIMS_DELTA): {claim, doc, status,
+# when (an object; {} when not one), ruled (a new ruling), by_when (a when
+# key changed), subject (null when not a non-empty list of non-empty
+# strings)}.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_V10_PLAN='def nes: type == "string" and length > 0;
+ $ch[0] as $ch
+ | cl_base_by_id($b[0]) as $base
+ | [.[] | select(.eligible and (.claim.id | type) == "string")
+    | .doc as $doc | .claim
+    | select(.status as $s | any("gated", "built", "diverged"; . == $s))
+    | select(.frozen_at | nes | not)
+    | (.when | if type == "object" then . else {} end) as $w
+    | {claim: .id, doc: $doc, status, when: $w,
+       ruled: ((cl_new_rulings($base[.id].claim) | length) > 0),
+       by_when: any($w | keys_unsorted[]; in_list($ch)),
+       subject: (if (.subject | type) == "array" and (.subject | length) > 0 and all(.subject[]; nes)
+                 then .subject else null end)}]'
+
+# V10 over the plan ($plan), given the readers rows ($rows), the two
+# recorded objects ($old, $new) and the changed keys ($ch): finding rows and
+# indeterminate rows. Run after _JQ_CLAIMS_DELTA and _JQ_CLAIMS_WHEN.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_V10='def v10($e; $msg): {check: "V10", claim: $e.claim, doc: $e.doc, message: $msg};
+ def cl_str: if type == "string" then . else tojson end;
+ def cl_cond: [to_entries | sort_by(.key)[] | "\(.key)=\(.value | cl_str)"] | join(", ");
+ def cl_unmet($rec): [to_entries | sort_by(.key)[] | select(($rec[.key] | type) != "object" or $rec[.key].recorded != .value)
+   | if ($rec[.key] | type) == "object" then "\(.key) is recorded as \($rec[.key].recorded | tojson), when sets \(.value | tojson)"
+     else "\(.key) is not recorded, when sets \(.value | tojson)" end] | join("; ");
+ $old[0] as $old | $new[0] as $new | $ch[0] as $ch
+ | $plan[0][] as $e
+ | (if $e.by_when or $e.subject == null then null
+    else [$rows[] | select(.subject == $e.subject)][0] end) as $r
+ | if $r != null and ($r.ok | not) and $r.unsafe == null then {check: "V10", claim: $e.claim, reason: $r.reason}
+   elif $e.by_when or ($r != null and $r.ok and any($r.keys[]; in_list($ch))) then
+     ({when: $e.when} | claims_when_ok($new)) as $now
+     | ($e.when | length > 0) as $cond
+     | if $e.status == "gated" and $cond and $now then
+         v10($e; "now satisfied: promote to built (the configuration this change records satisfies when \($e.when | cl_cond): run claims promote \($e.claim))")
+       elif $e.status == "built" and ($now | not) and ($e.ruled | not) then
+         v10($e; "ruling owed: built, but the configuration this change records no longer satisfies its when (\($e.when | cl_unmet($new))): record the direction (CODE-DIVERGES, DOC-STALE or RETIRE) in a new ruling on the claim, then run claims promote \($e.claim), which re-gates it")
+       elif $e.status == "diverged" and $cond and $now and ({when: $e.when} | claims_when_ok($old) | not) then
+         v10($e; "switches on a diverged claim: the configuration this change records satisfies when \($e.when | cl_cond), which the merge-base'"'"'s did not, so production would run what the claim records as diverged: rule on the direction (a new ruling on the claim) first")
+       else empty end
+   else empty end'
+
+# _claims_v10: V10 (see the section comment), in validate after V9.
+# shellcheck disable=SC2016  # jq programs, not shell expansion
+_claims_v10() {
+  local rec="$_SCRATCH/cl-recorded.json" saved="$_SCRATCH/cl-v10-saved.json"
+  local old="$_SCRATCH/cl-v10-old.json" new="$_SCRATCH/cl-v10-new.json" ch="$_SCRATCH/cl-v10-changed.json"
+  local plan="$_SCRATCH/cl-v10-plan.json" subj="$_SCRATCH/cl-v10-subjects.jsonl"
+  local rows="$_SCRATCH/cl-v10-readers.jsonl" out="$_SCRATCH/cl-v10-surfaces" res="$_SCRATCH/cl-v10.jsonl"
+  local adapter x kv rc=0
+  local ov=() rflag=()
+  if ! _claims_b1_on || [ -z "$_CL_MB" ] || ! _claims_recorded_ok; then return 0; fi
+  for kv in ${_OPTV_config[@]+"${_OPTV_config[@]}"}; do ov+=(--override "$kv"); done
+  cat "$rec" > "$saved" || _claims_die "cannot write $saved"
+  if [ ${#ov[@]} -eq 0 ]; then
+    [ "$_CL_MODE" = staged ] || return 0
+    adapter=$(_claims_config_adapter) || _claims_propagate $?
+    _claims_adapter_call "$out" "$adapter" surfaces || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      _claims_indeterminate config - "adapter-exit-$rc"
+      return 0
+    fi
+    x=$(_claims_jq v10-surfaces -nR --slurpfile st "$_SCRATCH/cl-staged.json" \
+      '[inputs | rtrimstr("\r") | sub("^[ \t]+"; "") | sub("[ \t]+$"; "") | select(. != "")] as $sf
+       | any($st[0][]; . as $p | any($sf[]; . as $s | ($s | rtrimstr("/")) as $d
+                                       | $p == $s or ($d != "" and ($p | startswith($d + "/")))))' < "$out") \
+      || _claims_propagate $?
+    [ "$x" = true ] || return 0
+    cat "$saved" > "$new" || _claims_die "cannot write $new"
+  else
+    [ "$_CL_MODE" != staged ] || rflag=(--staged)
+    if ! _claims_recorded ${rflag[@]+"${rflag[@]}"} "${ov[@]}"; then
+      cat "$saved" > "$rec" || _claims_die "cannot write $rec"
+      return 0
+    fi
+    cat "$rec" > "$new" || _claims_die "cannot write $new"
+  fi
+  if ! _claims_recorded --rev "$_CL_MB"; then
+    cat "$saved" > "$rec" || _claims_die "cannot write $rec"
+    return 0
+  fi
+  cat "$rec" > "$old" || _claims_die "cannot write $old"
+  cat "$saved" > "$rec" || _claims_die "cannot write $rec"
+  _claims_jq v10-changed -nc --slurpfile old "$old" --slurpfile new "$new" "$_JQ_CLAIMS_V10_CHANGED" > "$ch"
+  x=$(_claims_jq v10-any -r 'length > 0' "$ch") || _claims_propagate $?
+  [ "$x" = true ] || return 0
+  _claims_jq v10-plan -c --slurpfile ch "$ch" --slurpfile b "$_SCRATCH/cl-claims-base.json" \
+    "$_JQ_CLAIMS_DELTA $_JQ_CLAIMS_V10_PLAN" "$_SCRATCH/cl-claims.json" > "$plan"
+  _claims_jq v10-subjects -c '[.[] | select(.by_when | not) | .subject | arrays] | unique | .[]' "$plan" > "$subj"
+  _claims_readers_rows "$subj" "$rows"
+  _claims_jq v10 -nc --slurpfile plan "$plan" --slurpfile rows "$rows" --slurpfile old "$old" \
+    --slurpfile new "$new" --slurpfile ch "$ch" "$_JQ_CLAIMS_DELTA $_JQ_CLAIMS_WHEN $_JQ_CLAIMS_V10" > "$res"
+  _claims_jq v10-findings -c 'select(has("reason") | not)' "$res" >> "$_SCRATCH/cl-findings.jsonl"
+  _claims_jq v10-indeterminate -c 'select(has("reason"))' "$res" >> "$_SCRATCH/cl-indet.jsonl"
 }
 
 # --- Spec claims: test binding, V3 ---------------------------------------------
@@ -9829,7 +9994,9 @@ _CL_PV_TO=""       # …its verdict's status_to
 # (see the section comment), <mode> promote or reverify, so the two cannot
 # diverge. An unknown id is a usage error. Then the claim's preconditions —
 # reverify first needs it built or gated with a promotion ("not promoted");
-# promote refuses a built claim whose verdict is ok ("already promoted") —
+# promote refuses a built claim whose verdict is ok ("already promoted"),
+# unless the configuration extension is on and the recorded configuration
+# at HEAD no longer satisfies its when (it is re-proved, and re-gated) —
 # its subject at HEAD, the green run in the work tree, and each proof in a
 # throwaway worktree of its own, every guard included. 0: proved — its
 # verdict in cl-promote-verdict.json (status_to, also in _CL_PV_TO: built
@@ -9845,6 +10012,7 @@ _claims_prove() {
   local vfile="$_SCRATCH/cl-promote-verdict.json"
   local x refuse doc status claim runner="" node="" mfile="" mfind="" mrepl="" ored="" rsha=""
   local head p oid v rc green why ss to unsafe="$_CL_PROMOTE_UNSAFE" munsafe
+  local whenp="$_JQ_CLAIMS_WHEN"' .claim | if claims_when_ok($rec[0]) then "built" else "gated" end'
   _CL_PV_DOC=- _CL_PV_SIDECAR="" _CL_PV_STATUS="" _CL_PV_HEAD="" _CL_PV_DIGEST="" _CL_PV_TO=""
   _claims_jq promote-plan -c --arg id "$id" "$_JQ_CLAIMS_MUTANT_DEFS $_JQ_CLAIMS_PROMOTE_PLAN" \
     "$_SCRATCH/cl-claims.json" > "$plan"
@@ -9884,11 +10052,25 @@ _claims_prove() {
     || _claims_die "cannot read the claim's test and proofs (promote)"
   munsafe="mutant file $mfile is not a safe repo path $unsafe: name it by its path from the repo root"
 
+  to=""
   if [ "$mode" = promote ] && [ "$status" = built ]; then
     v=$(_claims_verdict_check "$claim") || _claims_propagate $?
     if [ "$v" = ok ]; then
-      _claims_finding promote "$id" "$doc" "already promoted: built, and its verdict matches the claim (promote again after its states or test change)"
-      return 1
+      # With the configuration extension on, a built claim whose when the
+      # recorded configuration at HEAD no longer satisfies is not refused:
+      # it is re-proved, and re-gated (V3's "…: gated"; V10's "ruling owed"
+      # comes first). A claim without a when costs no recorded call.
+      x=$(_claims_jq promote-has-when -r '.claim.when | type == "object" and length > 0' "$plan") \
+        || _claims_propagate $?
+      if [ "$x" = true ] && _claims_b1_on; then
+        _claims_recorded --rev HEAD || return 1
+        to=$(_claims_jq promote-when -r --slurpfile rec "$_SCRATCH/cl-recorded.json" "$whenp" "$plan") \
+          || _claims_propagate $?
+      fi
+      if [ "$to" != gated ]; then
+        _claims_finding promote "$id" "$doc" "already promoted: built, and its verdict matches the claim (promote again after its states or test change)"
+        return 1
+      fi
     fi
   fi
   if [ -n "$mfile" ] && ! _claims_safe_relpath "$mfile"; then
@@ -9929,15 +10111,17 @@ _claims_prove() {
 
   # The status the proof leads to: reverify keeps the claim's own; promote
   # writes built — or, with the configuration extension on (§B.1), gated
-  # when the recorded configuration at HEAD does not satisfy its when.
-  to=built
+  # when the recorded configuration at HEAD does not satisfy its when (a
+  # re-gated built claim's was decided above).
   if [ "$mode" != promote ]; then
     to=$status
-  elif _claims_b1_on; then
-    _claims_recorded --rev HEAD || return 1
-    to=$(_claims_jq promote-when -r --slurpfile rec "$_SCRATCH/cl-recorded.json" \
-      "$_JQ_CLAIMS_WHEN"' .claim | if claims_when_ok($rec[0]) then "built" else "gated" end' "$plan") \
-      || _claims_propagate $?
+  elif [ -z "$to" ]; then
+    to=built
+    if _claims_b1_on; then
+      _claims_recorded --rev HEAD || return 1
+      to=$(_claims_jq promote-when -r --slurpfile rec "$_SCRATCH/cl-recorded.json" "$whenp" "$plan") \
+        || _claims_propagate $?
+    fi
   fi
   _CL_PV_TO=$to
 
@@ -10456,13 +10640,24 @@ cmd_claims_gate() {
 }
 
 cmd_claims_validate() {
-  local mode=all
+  local mode=all kv
   if [ "$_OPT_staged" = 1 ]; then mode=staged; fi
   _claims_init "$mode"
   if [ "$_OPT_staged" = "$_OPT_all" ]; then
     _usage_error "claims validate" "give exactly one of --staged and --all"
   fi
   _claims_no_args "claims validate" "$@"
+  # --config KEY=VALUE (repeatable): V10 over a configuration change made
+  # outside git, so the configuration extension must be on.
+  for kv in ${_OPTV_config[@]+"${_OPTV_config[@]}"}; do
+    case "${kv%%=*}" in
+      "$kv"|'') _usage_error "claims validate" "--config takes KEY=VALUE, KEY not empty (got '$kv')" ;;
+      *$'\n'*) _usage_error "claims validate" "--config: KEY holds a newline (got '$kv')" ;;
+    esac
+  done
+  if [ ${#_OPTV_config[@]} -gt 0 ] && ! _claims_b1_on; then
+    _usage_error "claims validate" "--config needs the configuration extension (config config_adapter names an adapter)"
+  fi
   _claims_v1_config
   _claims_load
   _claims_touched
@@ -10490,6 +10685,7 @@ cmd_claims_validate() {
   elif [ -n "$_CL_MB" ]; then
     _claims_v9 "$_CL_MB..HEAD"
   fi
+  _claims_v10
   _claims_v12
   _claims_blocks validate
   _claims_emit validate
