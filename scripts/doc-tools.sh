@@ -2555,9 +2555,51 @@ ledger finalize|cmd_ledger_finalize|repo|all format=
   run on the base; every provisional key, numbered after the highest key
   in the tree, in one commit "ledger: finalize N keys". One
   "<provisional> → <key>  <path>" line each.
-ledger init|cmd_ledger_init|repo|format=
-  [--format text|json]
-  Bootstrap the ledger: sources, a proposed registry, assignments.
+ledger init|cmd_ledger_init|repo|dry-run registry= report= accept= import sources= format=
+  --report <file> [--registry <file>] [--sources files,github]
+  | --accept <decisions.tsv> [--dry-run] | --import  [--format text|json]
+  Bootstrap the ledger. Runs without docs/ledger/config.json (on the
+  default config, {}); only --accept writes one. One mode per run.
+  --report writes three files and nothing else: <file> (a markdown
+  report: Sources, Hand-written ledgers, Registry, Registry findings,
+  Assignment summary, Next steps), docs/ledger/ledgers.proposed.json and
+  <file>.decisions.tsv. Sources (--sources, a comma list; default files,
+  plus github when items.adapter is set): files — the item globs, and a
+  suggested glob (never added) for each tracked directory holding three
+  or more *.md files with a status: frontmatter line; github — gh present
+  and authenticated and `gh repo view --json hasIssuesEnabled` true (the
+  items adapter, default doc-superpowers:ledger-items-gh, lists them);
+  when the check fails, an explicit --sources github exits 2, the default
+  one is reported and skipped. Hand-written ledgers: tracked *.md files
+  with a table whose header has a "#" column and a column linking item
+  files, plus every config legacy_ledgers file; each with its legacy id
+  (legacy_ledgers, else the file stem minus "-ledger"). The registry:
+  --registry <file> (ledger-registry/1, else exit 2), else
+  docs/ledger/ledgers.json, else a proposal written to
+  docs/ledger/ledgers.proposed.json (jq -S): one ledger per top-level
+  directory holding code (tracked files outside docs/ that are not .md,
+  .markdown, .rst or .txt; dot-directories left out but .github,
+  .circleci, .gitlab, .buildkite), the largest one split per second-level
+  directory when it holds more than 40 % of the code files (keeping
+  residual_paths ["<dir>/**"]); docs, CI, scripts and test directories are
+  "platform"; ids are the directory names slugged (16 characters, -2, -3
+  on a collision); contracts from the contracts adapter whose defined_in
+  all fall in one ledger; hints (item component/area values, labels,
+  hand-written ledger names) in the report. ledgers.json is never
+  written. Its validate --registry findings are part of the report.
+  With a registry, each item gets a suggested ledger, first match: its
+  ledger value when registered (ledger-field), a row of a hand-written
+  ledger whose legacy id is registered (legacy:<file>#<row>), the
+  plurality owner of its paths (paths:<ledger> <n>/<m>; files cited by
+  more than 5 % of the items, and at least two, are hubs and skipped; a
+  tie is none), a registered ledger:<id> label (label), else unassigned
+  (none). <file>.decisions.tsv: "# ledger init decisions", "# registry:
+  <path> <sha256>", "# path<TAB>class<TAB>suggestion<TAB>reason<TAB>
+  decision", then one row per item sorted by path (hosted items by ref);
+  decision is the suggestion for terminal items (fixed, closed, wontfix)
+  and empty otherwise — fill it in, then --accept. Without a registry no
+  decisions file is written. Exit 0 once written; 2 could not run; 3
+  usage. --accept and --import: not implemented yet (exit 2).
 fragments list|cmd_fragments_list|deps|
   -
   List the per-PR release-notes fragments (RELEASE-NOTES.next/PR-<N>.md in
@@ -2766,9 +2808,11 @@ Spec claims (claims validate, run, promote, render, gate, attest, rulings):
 Work ledger (ledger show, ls, find, related, sweep, recheck, inflight,
 notices, new, assign, link, note, view, validate, publish, finalize, init):
   Opt-in: docs/ledger/config.json turns it on (a key it omits takes its
-  default; {} is a complete config). Without it every ledger verb prints
-  "ledger: not enabled (no docs/ledger/config.json)" — with --format json,
-  {"verb":"ledger <sub>","enabled":false,"exit":0} — and exits 0. That
+  default; {} is a complete config). Without it every ledger verb except
+  init prints "ledger: not enabled (no docs/ledger/config.json)" — with
+  --format json, {"verb":"ledger <sub>","enabled":false,"exit":0} — and
+  exits 0; init, which bootstraps a repository, runs on the default
+  config ("enabled" false in its object). That
   check runs after the options are parsed and the repository is checked
   (an unknown option still exits 3; outside a git work tree, 2) and
   before any argument is read. The verbs live in scripts/ledger/ beside
@@ -11929,9 +11973,11 @@ _lg_kill_tree() {
 # The EXIT trap's verdict for a ledger run that printed none (a set -u
 # crash, a stray exit, a failed command); _on_exit then exits 2.
 _lg_fallback() {
+  local enabled=false
   if [ "$_LG_FORMAT" = json ]; then
+    if [ -e docs/ledger/config.json ] || [ -L docs/ledger/config.json ]; then enabled=true; fi
     _lg_verb_json
-    _lg_out "{\"verb\":$_LG_JS,\"enabled\":true,\"exit\":2,\"error\":\"internal\"}"
+    _lg_out "{\"verb\":$_LG_JS,\"enabled\":$enabled,\"exit\":2,\"error\":\"internal\"}"
   fi
   echo "ledger: internal error (rc $1)" >&2 || true
 }
@@ -11964,10 +12010,12 @@ _lg_format() {
 }
 
 # After the repository check: inert without docs/ledger/config.json (decided
-# here, before anything is sourced); a copy of doc-tools.sh without its
+# here, before anything is sourced) — every verb but init; a copy of doc-tools.sh without its
 # ledger/ directory cannot run an enabled ledger; else load scripts/ledger/.
 _lg_enter() {
-  if [ ! -e docs/ledger/config.json ] && [ ! -L docs/ledger/config.json ]; then
+  # init is the one exception: it bootstraps a repository that has no
+  # config yet (on the default config; only init --accept writes one).
+  if [ "$_LG_VERB" != init ] && [ ! -e docs/ledger/config.json ] && [ ! -L docs/ledger/config.json ]; then
     _lg_mark_emitted 0
     if [ "$_LG_FORMAT" = json ]; then
       _lg_verb_json
