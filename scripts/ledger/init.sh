@@ -931,6 +931,7 @@ _LG_JQ_ACCEPT_PLAN='
    | reduce .[] as $l ({}; .[$l.id] = ($l.status | if type == "string" then . else "active" end))) as $RS
 | ($lgy[0] | if type == "object" then . else {} end) as $E
 | lg_legacy_ids($c) as $legid
+| (($c.fields.aliases // "aliases") | if type == "array" then [.[] | strings] else [.] end) as $AN
 | ([$scan[] | select(.t == "R")]) as $R
 | ([$scan[] | select(.t == "K")]) as $K
 | lg_hand_files($scan; $c) as $lfiles
@@ -987,6 +988,9 @@ _LG_JQ_ACCEPT_PLAN='
       elif $cl != "open" and $ok != null and $kl != $r.decision then {f: "a \($cl) item carrying the key \($ok) of ledger \($kl), not \($r.decision): run `ledger assign \($r.path) \($r.decision)` to move it"}
       elif $cl == "open" and $kp != null and $kl != $r.decision then {f: "carries the provisional key \($ok) of ledger \($kl) (ledger assign moves it)"}
       elif $cl == "open" and $hosted and $ks != null and $kl != $r.decision then {f: "a hosted item keyed \($ok) cannot be re-homed here (ledger assign)"}
+      elif $cl == "open" and $ks != null and $kl != $r.decision
+           and any(($it.fm_errors // [])[]; . as $e | any($AN[]; . as $n | $e | startswith($n + ": "))) then
+        {f: "a re-home would rewrite its aliases field, which the parser rejects (\([($it.fm_errors // [])[] | select(. as $e | any($AN[]; . as $n | $e | startswith($n + ": ")))] | join("; "))): fix it, then accept again"}
       else
         ($r.decision != "unassigned" and $cl == "open" and $kl != $r.decision) as $need
         | {a: {path: $r.path, hosted: $hosted, class: $cl, decision: $r.decision,
@@ -1167,12 +1171,6 @@ _lg_init_accept() {
       --slurpfile scan "$s.scan" --slurpfile lgy "$s.lgy" --argjson hstub "$hstub" \
       "$_LG_JQ_INIT_DEFS$_LG_JQ_KEYS_DEFS$_LG_JQ_ACCEPT_DEFS$_LG_JQ_ACCEPT_PLAN" > "$s.plan" \
     || _lg_die "jq failed (the --accept plan)"
-  if [ "$hstub" = true ] || [ "$nhosted" -gt 0 ]; then
-    if [ "${DOC_TOOLS_LEDGER_OFFLINE:-}" = 1 ] && [ "$dry" = 0 ] \
-        && [ "$(jq '[.apply[] | select(.hosted)] + [.legacy[] | select(.kind == "stub" and .stub.hosted)] | length' "$s.plan")" != 0 ]; then
-      _lg_die "offline (DOC_TOOLS_LEDGER_OFFLINE=1): hosted items cannot be written — nothing was written"
-    fi
-  fi
 
   # Phase 2: the stubs' paths (the item directory, _lg_init_item_dir; a
   # collision takes -2, -3, …), the findings, the keys.
@@ -1219,6 +1217,14 @@ _lg_init_accept() {
     fi
     _lg_out_file "$s.lines"
     _lg_emit init 1
+  fi
+  # Offline with hosted writes to make: exit 2 — after the findings, so a
+  # decisions file with findings exits 1 either way.
+  if [ "$hstub" = true ] || [ "$nhosted" -gt 0 ]; then
+    if [ "${DOC_TOOLS_LEDGER_OFFLINE:-}" = 1 ] && [ "$dry" = 0 ] \
+        && [ "$(jq '[.apply[] | select(.hosted)] + [.legacy[] | select(.kind == "stub" and .stub.hosted)] | length' "$s.plan")" != 0 ]; then
+      _lg_die "offline (DOC_TOOLS_LEDGER_OFFLINE=1): hosted items cannot be written — nothing was written"
+    fi
   fi
   # shellcheck disable=SC2016  # jq source
   jq -r --slurpfile sp "$s.stubp.json" --arg today "$today" '
@@ -1523,15 +1529,15 @@ _lg_init_import() {
       failed="$ref: the items adapter's get exited $rc: $(head -n 2 "$s.gerr" | tr '\n' ' ' | tr -d '\000-\010\013-\037')"
       break
     fi
-    cat -- "$s.get" >> "$s.gets" || _lg_die "cannot write $s.gets"
-    printf '\n' >> "$s.gets"
+    # Each output closed by a record-separator line: one value per get
+    # (an empty output, or two objects, is no item — see below).
+    { cat -- "$s.get" && printf '\n\036\n'; } >> "$s.gets" || _lg_die "cannot write $s.gets"
     i=$((i + 1))
   done < "$s.refs"
-  # One jq over every item read.
-  if ! jq -s -c . "$s.gets" > "$s.getsj" 2> /dev/null; then
-    [ -n "$failed" ] || failed="the items adapter's get printed something that is not JSON"
-    printf '[]\n' > "$s.getsj"
-  fi
+  # One jq over every item read: each get output must be exactly one JSON
+  # value, else it stands as no item (the X record: exit 2).
+  jq -R -s -c 'split("\n\u001e\n") | .[0:-1] | map(. as $t | try ($t | fromjson) catch {})' "$s.gets" > "$s.getsj" \
+    || _lg_die "jq failed (the get outputs)"
   jq -L "$_LG_LIB" -n -j --slurpfile c "$_LG_CFG" --slurpfile gs "$s.getsj" --arg today "$today" \
       "$_LG_JQ_INDEX_DEFS$_LG_JQ_ACCEPT_DEFS"'$gs[0] as $g | '"$_LG_JQ_IMPORT_RECS" > "$s.stream" \
     || _lg_die "jq failed (the items to import)"
@@ -1560,7 +1566,7 @@ _lg_init_import() {
   _lg_init_glob_check "$s.plist" "$s.unmatched"
   if [ -s "$s.unmatched" ]; then
     # shellcheck disable=SC2016  # jq source
-    jq -R -n -c --slurpfile c "$_LG_CFG" '[inputs | {path: ., detail: "an imported item here would not be an item: items.globs \($c[0].items.globs | tojson) do not match it (imports go in the directory of the first <dir>/<pattern>.md glob)"}]' \
+    jq -R -n -c --slurpfile c "$_LG_CFG" '[inputs | {path: ., detail: (if ($c[0].items.globs // []) == [] then "items.globs is empty (hosted items only): add an items.globs entry (e.g. docs/issues/*.md) to docs/ledger/config.json before importing — the imported files must be items" else "an imported item here would not be an item: items.globs \($c[0].items.globs | tojson) do not match it (imports go in the directory of the first <dir>/<pattern>.md glob)" end)}]' \
       "$s.unmatched" > "$s.find" || _lg_die "jq failed (findings)"
     jq -r '.[] | "finding: \(.path): \(.detail)"' "$s.find" > "$s.lines" || _lg_die "jq failed (findings)"
     echo "ledger init --import: nothing was written" >> "$s.lines"
