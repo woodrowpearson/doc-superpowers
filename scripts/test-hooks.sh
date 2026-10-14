@@ -671,6 +671,417 @@ test_pre_push_skip_env
 test_pre_push_reads_pushed_refs
 test_pre_push_silent_without_doc_tools
 
+# --- Git hooks: the claims legs ---
+#
+# claims_hook_fixture: indexed_fixture (its doc citing src/util.js only, so
+# the claims files leave it current), plus one governing spec whose one
+# sidecar claim (unbuilt, tracked) is bound to a /bin/sh stub runner's node,
+# and docs/spec-claims/config.json naming `main` as the base and the stub as
+# runner "stub" (paths src/, tests/). The spec carries its rendered status
+# block, so V11 holds. All committed on main, then `feature` checked out and
+# the git tier installed. The stub is this suite's own (test-spec-claims.sh
+# is not sourced): `list` cats tools/claims/list.jsonl (the node bound to the
+# claim, so V3 holds), `run [--root <dir>] <node>…` reports each node
+# $STUB_OUTCOME (default assert-fail: the unbuilt claim's check is red, as it
+# should be; pass makes it a finding), anything else prints nothing. Every
+# call appends its subcommand, its arguments (one per line) and
+# "stdin <bytes it read>" to $STUB_LOG, a harness_mktemp file outside the
+# work tree.
+CLAIMS_NODE="tests/test_token.py::test_ttl"
+CLAIMS_ID="SPEC-AUTH-001#token-ttl"
+CLAIMS_DOC="docs/specs/SPEC-AUTH-001-token.md"
+
+claims_hook_fixture() {
+  indexed_fixture src/util.js
+  mkdir -p docs/specs docs/issues docs/spec-claims src/auth tools/claims
+  cat > "$CLAIMS_DOC" <<'EOF'
+# SPEC-AUTH-001: Token lifetimes
+
+**Status**: Draft
+**Created**: 2026-10-10
+
+## Summary
+
+How long issued tokens stay valid.
+
+<!-- spec-claims:status:begin -->
+## Claim status
+
+| Claim | Status | Tracker |
+|---|---|---|
+| `SPEC-AUTH-001#token-ttl` | unbuilt | docs/issues/token-ttl.md |
+
+<!-- spec-claims:status:end -->
+## Requirements
+
+- Access tokens expire after 15 minutes.
+- Refresh tokens are single-use.
+EOF
+  printf 'TTL_SECONDS = 900\n' > src/auth/token.py
+  cat > docs/issues/token-ttl.md <<'EOF'
+# Token TTL
+
+**Status**: Open
+
+Build the 15-minute access-token expiry (SPEC-AUTH-001#token-ttl).
+EOF
+  jq -n '{schema: 1, base: "main",
+    runners: {stub: {adapter: "tools/claims/runner", paths: ["src/", "tests/"]}}}' \
+    > docs/spec-claims/config.json
+  jq -n --arg id "$CLAIMS_ID" --arg doc "$CLAIMS_DOC" --arg node "$CLAIMS_NODE" '{
+    schema: 1, doc: $doc,
+    claims: [{
+      id: $id, quote: "Access tokens expire after 15 minutes",
+      states: "An issued access token is rejected 15 minutes after issue.",
+      kind: "behaviour", subject: ["src/auth/token.py"], status: "unbuilt",
+      enforced_by: "test", test: {runner: "stub", node: $node}, nonvacuity: null,
+      promotion: null, tracker: "docs/issues/token-ttl.md", frozen_at: null,
+      restates: [], rulings: []
+    }]
+  }' > docs/spec-claims/SPEC-AUTH-001.json
+  cat > tools/claims/runner <<'EOF'
+#!/bin/sh
+dir=$(cd "$(dirname "$0")" && pwd)
+log=${STUB_LOG:-/dev/null}
+sub=${1:-}
+[ $# -eq 0 ] || shift
+n=$(cat | wc -c | tr -d ' ')
+{
+  printf '%s\n' "$sub"
+  for a in "$@"; do printf '%s\n' "$a"; done
+  printf 'stdin %s\n' "$n"
+} >> "$log"
+case $sub in
+  list) cat "$dir/list.jsonl" ;;
+  run)
+    if [ "${1:-}" = --root ]; then shift 2; fi
+    for node in "$@"; do
+      printf '{"node":"%s","outcome":"%s","reason":null}\n' "$node" "${STUB_OUTCOME:-assert-fail}"
+    done
+    ;;
+esac
+exit 0
+EOF
+  chmod 755 tools/claims/runner
+  jq -nc --arg id "$CLAIMS_ID" --arg node "$CLAIMS_NODE" \
+    '{id: $id, node: $node, file: ($node | split("::")[0]), in_gate: true, subject_imports_ok: true, when: null}' \
+    > tools/claims/list.jsonl
+  git add -A && git commit -qm "claims fixture"
+  git checkout -qb feature
+  install_tiers --git
+  STUB_LOG=$(harness_mktemp claims-stub)
+  export STUB_LOG
+}
+
+# A commit made in a test's setup, past the installed hooks.
+fixture_commit() {
+  DOC_SUPERPOWERS_SKIP=1 git commit -qm "$1"
+}
+
+# run_pre_commit [VAR=value ...]: the installed pre-commit, run as git runs
+# it (cwd the top level, the staged index), its stdout in RUN_OUT.
+run_pre_commit() {
+  run_hooked ${1+"$@"} -- "$BASH_BIN" .git/hooks/pre-commit
+}
+
+# Stage an edit that breaks the claim's quote (15 → 30 minutes): V2.
+stage_quote_break() {
+  local tmp
+  tmp=$(harness_mktemp doc)
+  awk '{ sub(/expire after 15 minutes/, "expire after 30 minutes"); print }' "$CLAIMS_DOC" > "$tmp"
+  cat "$tmp" > "$CLAIMS_DOC"
+  git add "$CLAIMS_DOC"
+}
+
+# A doc-tools.sh wrapper that appends its argv (one line per call) to <log>,
+# then runs the shim; echoes its path.
+argv_logging_doc_tools() {
+  local wrap
+  wrap="$(harness_mktemp_d dt-wrap)/doc-tools.sh"
+  cat > "$wrap" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$1"
+exec "$DOC_TOOLS" "\$@"
+EOF
+  chmod 755 "$wrap"
+  printf '%s' "$wrap"
+}
+
+test_pre_commit_claims_inert_without_dir() {
+  echo "test: pre-commit — no docs/spec-claims/: the claims leg never runs"
+  hooked_fixture
+  local log wrap
+  log=$(harness_mktemp dt-argv)
+  wrap=$(argv_logging_doc_tools "$log")
+  echo "unrelated" > unrelated.txt
+  git add unrelated.txt
+  run_pre_commit DOC_TOOLS="$wrap"
+  assert_eq "0" "$RUN_RC" "exits 0"
+  assert_eq "" "$RUN_OUT$RUN_ERR" "silent"
+  assert_contains "$(cat "$log")" "check-freshness" "the freshness leg ran through the wrapper (the log is live)"
+  assert_eq "0" "$(grep -c '^claims' "$log" || true)" "no doc-tools call starts with 'claims'"
+  teardown
+}
+
+test_pre_commit_claims_blocks_on_v2() {
+  echo "test: pre-commit — a staged doc edit breaking a claim's quote blocks (V2)"
+  claims_hook_fixture
+  stage_quote_break
+  run_pre_commit
+  assert_eq "1" "$RUN_RC" "exits 1: a finding blocks, without STRICT"
+  assert_contains "$RUN_OUT" "V2" "the finding names its check"
+  assert_contains "$RUN_OUT" "doc-superpowers: claims: V2 $CLAIMS_ID: quote not found" "one line per finding: check, claim, message"
+  assert_contains "$RUN_OUT" "  Commit blocked (claims). Fix, or rule the direction — see references/spec-claims.md. DOC_SUPERPOWERS_CLAIMS_SKIP=1 bypasses." "the block line"
+  run_pre_commit DOC_SUPERPOWERS_QUIET=1
+  assert_eq "1" "$RUN_RC" "QUIET: still exits 1"
+  assert_eq "" "$RUN_OUT$RUN_ERR" "QUIET: silent"
+  local head
+  head=$(git rev-parse HEAD)
+  run_hooked -- git commit -qm "break the quote"
+  assert_true "git commit is refused (rc $RUN_RC)" test "$RUN_RC" -ne 0
+  assert_eq "$head" "$(git rev-parse HEAD)" "…and nothing is committed"
+  teardown
+}
+
+test_pre_commit_claims_advisory_v8_does_not_block() {
+  echo "test: pre-commit — an advisory (V8: normative text no claim covers) prints, never blocks"
+  claims_hook_fixture
+  printf -- '- Sessions last one day.\n' >> "$CLAIMS_DOC"
+  git add "$CLAIMS_DOC"
+  run_pre_commit
+  assert_eq "0" "$RUN_RC" "exits 0"
+  assert_contains "$RUN_OUT" "doc-superpowers: claims: V8: $CLAIMS_DOC:" "the advisory is printed (no claim: none named)"
+  assert_not_contains "$RUN_OUT" "Commit blocked" "no block line"
+  run_pre_commit DOC_SUPERPOWERS_STRICT=1
+  assert_eq "0" "$RUN_RC" "STRICT: an advisory still does not block"
+  run_pre_commit DOC_SUPERPOWERS_QUIET=1
+  assert_eq "0" "$RUN_RC" "QUIET: exits 0"
+  assert_eq "" "$RUN_OUT$RUN_ERR" "QUIET: silent"
+  teardown
+}
+
+test_pre_commit_claims_indeterminate_warns() {
+  echo "test: pre-commit — a claims check that cannot run warns; blocks only under STRICT"
+  claims_hook_fixture
+  local tmp
+  tmp=$(harness_mktemp cfg)
+  jq '.base = "nope"' docs/spec-claims/config.json > "$tmp"
+  cat "$tmp" > docs/spec-claims/config.json
+  git add docs/spec-claims/config.json
+  run_pre_commit
+  assert_eq "0" "$RUN_RC" "exit 2 from validate: the commit goes on"
+  assert_contains "$RUN_ERR" "doc-superpowers: pre-commit: claims check could not run: base-unresolvable" "one line on stderr, with the first indeterminate reason"
+  assert_eq "1" "$(line_count "$RUN_ERR")" "…one line"
+  assert_eq "" "$RUN_OUT" "nothing on stdout"
+  run_pre_commit DOC_SUPERPOWERS_STRICT=1
+  assert_eq "1" "$RUN_RC" "STRICT: exits 1"
+  assert_contains "$RUN_ERR" "claims check could not run: base-unresolvable" "STRICT: the same reason"
+  run_pre_commit DOC_SUPERPOWERS_QUIET=1
+  assert_eq "0" "$RUN_RC" "QUIET: exits 0"
+  assert_eq "" "$RUN_OUT$RUN_ERR" "QUIET: silent"
+  # A doc-tools.sh older than the claims verb (3.1.0 exits 2: unknown subcommand).
+  git checkout -q HEAD -- docs/spec-claims/config.json
+  local old
+  old="$(harness_mktemp_d dt-old)/doc-tools.sh"
+  cat > "$old" <<EOF
+#!/bin/sh
+if [ "\$1" = claims ]; then echo "ERROR: unknown subcommand 'claims'." >&2; exit 2; fi
+exec "$DOC_TOOLS" "\$@"
+EOF
+  chmod 755 "$old"
+  stage_quote_break
+  run_pre_commit DOC_TOOLS="$old"
+  assert_eq "0" "$RUN_RC" "an older doc-tools.sh: the commit goes on"
+  assert_contains "$RUN_ERR" "doc-superpowers: pre-commit: claims check could not run: unknown subcommand 'claims'" "…saying why"
+  run_pre_commit DOC_TOOLS="$old" DOC_SUPERPOWERS_STRICT=1
+  assert_eq "1" "$RUN_RC" "an older doc-tools.sh under STRICT: exits 1"
+  teardown
+}
+
+test_pre_commit_claims_skip_env() {
+  echo "test: pre-commit — DOC_SUPERPOWERS_CLAIMS_SKIP=1 bypasses the claims leg alone"
+  claims_hook_fixture
+  stage_quote_break
+  run_pre_commit DOC_SUPERPOWERS_CLAIMS_SKIP=1
+  assert_eq "0" "$RUN_RC" "exits 0"
+  assert_not_contains "$RUN_OUT$RUN_ERR" "claims" "no claims output"
+  assert_eq "" "$(cat "$STUB_LOG")" "the claims check never ran (no adapter call)"
+  # The freshness leg still runs: a stale doc is still reported.
+  echo "changed" > src/util.js
+  git add src/util.js
+  run_pre_commit DOC_SUPERPOWERS_CLAIMS_SKIP=1
+  assert_contains "$RUN_OUT" "stale" "the freshness leg still reports"
+  teardown
+}
+
+test_pre_commit_claims_runs_without_doc_index() {
+  echo "test: pre-commit — the claims leg runs without docs/.doc-index.json"
+  claims_hook_fixture
+  git rm -q docs/.doc-index.json
+  fixture_commit "no doc-index"
+  stage_quote_break
+  run_pre_commit
+  assert_eq "1" "$RUN_RC" "exits 1"
+  assert_contains "$RUN_OUT" "doc-superpowers: claims: V2 $CLAIMS_ID" "blocks on V2"
+  teardown
+}
+
+# A commit on the current branch touching src/ (a stub runner path), so
+# claims run --planes-of selects the stub's test claims.
+claims_code_commit() {
+  printf 'TTL_SECONDS = %s\n' "$1" > src/auth/token.py
+  git add src/auth/token.py
+  fixture_commit "ttl $1"
+}
+
+# The stub's run calls: the number of "run" lines in $STUB_LOG.
+stub_runs() {
+  grep -c '^run$' "$STUB_LOG" || true
+}
+
+test_pre_push_claims_advisory_never_blocks() {
+  echo "test: pre-push — a red claim is reported, never blocks"
+  claims_hook_fixture
+  claims_code_commit 901
+  run_pre_push "$(push_line feature)" STUB_OUTCOME=pass
+  assert_eq "0" "$RUN_RC" "exits 0"
+  assert_contains "$RUN_OUT" "doc-superpowers: claims (advisory): 1 red, 0 indeterminate" "the tally"
+  assert_contains "$RUN_OUT" "  run $CLAIMS_ID: passes: promote" "…and the finding line"
+  assert_eq "1" "$(stub_runs)" "one run call"
+  run_pre_push "$(push_line feature)"
+  assert_eq "0" "$RUN_RC" "nothing red: exits 0"
+  assert_eq "" "$RUN_OUT$RUN_ERR" "nothing red or indeterminate: silent"
+  : > "$STUB_LOG"
+  run_pre_push "$(push_line feature)" STUB_OUTCOME=pass DOC_SUPERPOWERS_CLAIMS_SKIP=1
+  assert_eq "0" "$RUN_RC" "CLAIMS_SKIP: exits 0"
+  assert_eq "" "$RUN_OUT$RUN_ERR" "CLAIMS_SKIP: silent"
+  assert_eq "0" "$(stub_runs)" "CLAIMS_SKIP: no run call"
+  run_pre_push "$(push_line feature)" STUB_OUTCOME=indeterminate
+  assert_eq "0" "$RUN_RC" "an indeterminate outcome: exits 0"
+  assert_contains "$RUN_OUT" "doc-superpowers: claims (advisory): 0 red, 1 indeterminate" "…counted indeterminate"
+  run_pre_push "refs/heads/feature $(git rev-parse feature) refs/heads/feature $(git rev-parse feature~1)" STUB_OUTCOME=pass
+  assert_contains "$RUN_OUT" "claims (advisory): 1 red" "an existing remote branch: <remote oid>..<local oid>"
+  run_pre_push "refs/heads/feature $(git rev-parse feature) refs/heads/feature $(git rev-parse main)" STUB_OUTCOME=pass DOC_SUPERPOWERS_STRICT=1
+  assert_eq "0" "$RUN_RC" "STRICT: still exits 0"
+  teardown
+}
+
+test_pre_push_claims_could_not_run() {
+  echo "test: pre-push — a claims check that cannot run is counted indeterminate, never blocks"
+  claims_hook_fixture
+  claims_code_commit 901
+  local tmp old
+  tmp=$(harness_mktemp cfg)
+  jq '.base = "nope"' docs/spec-claims/config.json > "$tmp"
+  cat "$tmp" > docs/spec-claims/config.json
+  run_pre_push "$(push_line feature)" DOC_SUPERPOWERS_STRICT=1
+  assert_eq "0" "$RUN_RC" "an unresolvable base, under STRICT: exits 0"
+  assert_contains "$RUN_OUT" "claims (advisory): 0 red, 1 indeterminate" "…counted indeterminate"
+  assert_contains "$RUN_OUT" "  claims run could not run: 'nope'" "…saying why"
+  git checkout -q -- docs/spec-claims/config.json
+  old="$(harness_mktemp_d dt-old)/doc-tools.sh"
+  cat > "$old" <<'EOF'
+#!/bin/sh
+echo "ERROR: unknown subcommand 'claims'." >&2
+exit 2
+EOF
+  chmod 755 "$old"
+  run_pre_push "$(push_line feature)" DOC_TOOLS="$old"
+  assert_eq "0" "$RUN_RC" "an older doc-tools.sh: exits 0"
+  assert_contains "$RUN_OUT" "  claims run could not run: unknown subcommand 'claims'" "…saying why"
+  teardown
+}
+
+test_pre_push_claims_runs_without_tags() {
+  echo "test: pre-push — the claims leg runs where the release reminder stops (no tag)"
+  claims_hook_fixture
+  claims_code_commit 901
+  assert_eq "" "$(git tag)" "the fixture has no tag"
+  run_pre_push "$(push_line feature)" STUB_OUTCOME=pass
+  assert_eq "0" "$RUN_RC" "exits 0"
+  assert_contains "$RUN_OUT" "claims (advisory): 1 red" "the claims line is printed"
+  assert_not_contains "$RUN_OUT" "commits since" "no release reminder"
+  teardown
+}
+
+test_pre_push_claims_two_refs_both_processed() {
+  echo "test: pre-push — two pushed refs: the claims leg runs for both, reading none of the ref lines"
+  claims_hook_fixture
+  claims_code_commit 901
+  DOC_SUPERPOWERS_SKIP=1 git checkout -qb feature2 main
+  claims_code_commit 902
+  DOC_SUPERPOWERS_SKIP=1 git checkout -q feature
+  local stdin
+  stdin="$(push_line feature)
+refs/heads/feature2 $(git rev-parse feature2) refs/heads/feature2 $(git rev-parse main)"
+  run_pre_push "$stdin" STUB_OUTCOME=pass
+  assert_eq "0" "$RUN_RC" "exits 0"
+  assert_eq "2" "$(grep -c 'claims (advisory): 1 red' <<<"$RUN_OUT" || true)" "a claims line per ref"
+  assert_eq "2" "$(stub_runs)" "the stub ran once per ref"
+  assert_eq "0" "$(grep '^stdin ' "$STUB_LOG" | grep -vc '^stdin 0$' || true)" "the stub read no stdin bytes"
+  assert_not_contains "$(cat "$STUB_LOG")" "refs/heads/" "no ref line reached the stub"
+  teardown
+}
+
+test_pre_push_claims_quiet() {
+  echo "test: pre-push — DOC_SUPERPOWERS_QUIET=1 silences the claims leg"
+  claims_hook_fixture
+  claims_code_commit 901
+  run_pre_push "$(push_line feature)" STUB_OUTCOME=pass DOC_SUPERPOWERS_QUIET=1
+  assert_eq "0" "$RUN_RC" "exits 0"
+  assert_eq "" "$RUN_OUT$RUN_ERR" "silent"
+  assert_eq "0" "$(stub_runs)" "nothing is run for output nobody sees"
+  teardown
+}
+
+test_pre_push_claims_attests_open_plans() {
+  echo "test: pre-push — each plan with gate records and no final.json is attested, for the branch checked out"
+  claims_hook_fixture
+  mkdir -p docs/plans docs/spec-claims/gates/p docs/spec-claims/gates/done docs/spec-claims/gates/gone
+  # p names the (unbuilt) fixture claim: its attest is red.
+  printf '# Plan\n\n## Chunk 1\n\n### Task 1: TTL\n\n**Files:**\n- Modify: `src/auth/token.py`\n\n**Claims:** %s\n' \
+    "$CLAIMS_ID" > docs/plans/p.md
+  printf '# Done\n' > docs/plans/done.md
+  printf '{"schema":1,"plan":"docs/plans/p.md","chunk":1}\n' > docs/spec-claims/gates/p/chunk-1.json
+  printf '{"schema":1,"plan":"docs/plans/done.md","chunk":1}\n' > docs/spec-claims/gates/done/chunk-1.json
+  printf '{"schema":1}\n' > docs/spec-claims/gates/done/final.json
+  printf '{"schema":1,"plan":"docs/plans/gone.md","chunk":1}\n' > docs/spec-claims/gates/gone/chunk-1.json
+  git add -A
+  fixture_commit "gate records"
+  local log wrap
+  log=$(harness_mktemp dt-argv)
+  wrap=$(argv_logging_doc_tools "$log")
+  run_pre_push "$(push_line feature)" DOC_TOOLS="$wrap"
+  assert_eq "0" "$RUN_RC" "exits 0"
+  assert_contains "$(cat "$log")" "claims attest --plan docs/plans/p.md" "the open plan is attested"
+  assert_eq "1" "$(grep -c '^claims attest' "$log" || true)" "…only it (final.json present, or the plan gone: not attested)"
+  assert_contains "$RUN_OUT" "claims (advisory): 1 red, 0 indeterminate" "its findings join the tally"
+  assert_contains "$RUN_OUT" "  attest $CLAIMS_ID: named claim still unbuilt" "…and the finding lines"
+  : > "$log"
+  DOC_SUPERPOWERS_SKIP=1 git checkout -qb other
+  DOC_SUPERPOWERS_SKIP=1 git commit -q --allow-empty -m other
+  run_pre_push "$(push_line feature)" DOC_TOOLS="$wrap"
+  assert_eq "0" "$RUN_RC" "another branch checked out: exits 0"
+  assert_contains "$(cat "$log")" "claims run --planes-of" "the pushed branch's claims still run"
+  assert_eq "0" "$(grep -c '^claims attest' "$log" || true)" "…but attest (which judges HEAD) does not"
+  teardown
+}
+
+echo ""
+echo "=== Git Hooks: claims legs ==="
+test_pre_commit_claims_inert_without_dir
+test_pre_commit_claims_blocks_on_v2
+test_pre_commit_claims_advisory_v8_does_not_block
+test_pre_commit_claims_indeterminate_warns
+test_pre_commit_claims_skip_env
+test_pre_commit_claims_runs_without_doc_index
+test_pre_push_claims_advisory_never_blocks
+test_pre_push_claims_could_not_run
+test_pre_push_claims_runs_without_tags
+test_pre_push_claims_two_refs_both_processed
+test_pre_push_claims_quiet
+test_pre_push_claims_attests_open_plans
+
 # --- Claude Code hooks: the real contract ---
 #
 # Every test below drives the INSTALLED copy through the command the installer
