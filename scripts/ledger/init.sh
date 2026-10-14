@@ -382,6 +382,15 @@ def lg_gesc: gsub("(?<c>[\\\\*?{}])"; "\\\(.c)") | if startswith("!") then "\\" 
 def lg_np: sub("^\\./"; "") | sub("#.*$"; "") | sub(":[0-9]+(-[0-9]+)?$"; "");
 def lg_cited: [(.paths // []) | if type == "array" then .[] else . end | strings | lg_np | select(. != "")] | unique;
 def lg_rowkey: if test("^[0-9]+$") then [0, tonumber, .] else [1, 0, .] end;
+# The legacy-id rules (--report and --accept share them): config
+# legacy_ledgers as [{key: id, value: file}]; {file: id} (the first id per
+# file); a hand-written ledger file id — legacy_ledgers, else the file stem
+# minus a trailing "-ledger"; the hand-written ledger files — those of the
+# scan whose table links an item, and every legacy_ledgers file.
+def lg_legacy_ll($c): ($c.legacy_ledgers // {}) | if type == "object" then to_entries | map(select(.value | type == "string")) else [] end;
+def lg_legacy_ids($c): lg_legacy_ll($c) | reduce .[] as $e ({}; if has($e.value) then . else .[$e.value] = $e.key end);
+def lg_legacy_id($legid; $f): $legid[$f] // ($f | split("/") | last | sub("\\.md$"; "") | sub("-ledger$"; ""));
+def lg_hand_files($scan; $c): ([$scan[] | select(.t == "K" and .item) | .file] + [lg_legacy_ll($c)[].value]) | unique;
 '
 
 # _lg_init_report <file>: the --report mode (see the header).
@@ -514,8 +523,8 @@ EOS
       --argjson files "$files" --arg gh "$gh" --arg ghreq "$ghreq" --arg ghwhy "$ghwhy" --arg ad "$ad" "$_LG_JQ_INIT_DEFS"'
     ($c[0]) as $c
     | ($hosted | split("\n") | map(select(. != "") | fromjson)) as $H
-    | (($c.legacy_ledgers // {}) | if type == "object" then to_entries | map(select(.value | type == "string")) else [] end) as $LL
-    | ($LL | reduce .[] as $e ({}; if has($e.value) then . else .[$e.value] = $e.key end)) as $legid
+    | lg_legacy_ll($c) as $LL
+    | lg_legacy_ids($c) as $legid
     | ($c.doc_columns // {}) as $dc
     | (def dtypes($k): ($dc[$k] // []) | if type == "array" then . elif type == "object" then (.doc_types // []) else [] end;
        {plan: dtypes("plan"), spec: dtypes("spec")}) as $DT
@@ -527,9 +536,8 @@ EOS
           elif ($p | test("(^|/)(specs?|adrs?|decisions)/")) then "spec"
           else null end;
     ($scan | map(select(.t == "R" or .t == "K" or .t == "M"))) as $T
-    | ([$T[] | select(.t == "K" and .item) | .file] | unique) as $withitems
     | ([$LL[].value] | unique) as $legfiles
-    | (($withitems + $legfiles) | unique) as $lfiles
+    | lg_hand_files($T; $c) as $lfiles
     | [ $lfiles[] as $f
         | ([$T[] | select(.file == $f and .t == "R") | .row]) as $rows
         | ([$T[] | select(.file == $f and .t == "K")]) as $links
@@ -537,7 +545,7 @@ EOS
         | ([$links[] | select(.item | not) | select(kind(.to) == "plan") | .row] | unique) as $prows
         | ([$links[] | select(.item | not) | select(kind(.to) == "spec") | .row] | unique) as $srows
         | {file: $f,
-           id: ($legid[$f] // ($f | split("/") | last | sub("\\.md$"; "") | sub("-ledger$"; ""))),
+           id: lg_legacy_id($legid; $f),
            configured: ($legfiles | index([$f]) != null),
            missing: any($T[]; .t == "M" and .file == $f),
            rows: ($rows | length), items: ($irows | length), plans: ($prows | length), specs: ($srows | length),
@@ -922,12 +930,11 @@ _LG_JQ_ACCEPT_PLAN='
 | ([$reg[0].ledgers[] | select((.id | type) == "string")]
    | reduce .[] as $l ({}; .[$l.id] = ($l.status | if type == "string" then . else "active" end))) as $RS
 | ($lgy[0] | if type == "object" then . else {} end) as $E
-| (($c.legacy_ledgers // {}) | if type == "object" then to_entries | map(select(.value | type == "string")) else [] end) as $LL
-| ($LL | reduce .[] as $e ({}; if has($e.value) then . else .[$e.value] = $e.key end)) as $legid
+| lg_legacy_ids($c) as $legid
 | ([$scan[] | select(.t == "R")]) as $R
 | ([$scan[] | select(.t == "K")]) as $K
-| (([$K[] | select(.item) | .file] + [$LL[].value]) | unique) as $lfiles
-| def lid($f): $legid[$f] // ($f | split("/") | last | sub("\\.md$"; "") | sub("-ledger$"; ""));
+| lg_hand_files($scan; $c) as $lfiles
+| def lid($f): lg_legacy_id($legid; $f);
   def reg($l): $RS[$l] != null and $RS[$l] != "retired" and ($l | test("^[a-z0-9-]{1,16}$"));
 # The hand-written rows (the first of a repeated row id).
 [ $lfiles[] as $f
@@ -970,14 +977,14 @@ _LG_JQ_ACCEPT_PLAN='
     | ($ok | lg_k_prov) as $kp
     | (if $ks != null then $ks.l elif $kp != null then ($kp | sub("-~[0-9a-f]{4}$"; "")) else null end) as $kl
     | ($it.url != null and $it.url != false) as $hosted
-    | if $r.bad then {f: "not five tab-separated columns (path, class, suggestion, reason, decision)"}
+    | if $r.bad then {f: "not five tab-separated columns (path, class, suggestion, reason, decision; four when the decision is empty)"}
       elif $r.dup != null then {f: "listed again (first on line \($r.dup))"}
       elif $r.decision != "unassigned" and $RS[$r.decision] == null then {f: "decision \($r.decision | tojson) is not a registered ledger id or unassigned"}
       elif $RS[$r.decision] == "retired" then {f: "ledger \($r.decision | tojson) is retired: it accepts no items"}
       elif $r.decision != "unassigned" and ($r.decision | test("^[a-z0-9-]{1,16}$") | not) then {f: "\($r.decision | tojson) is registered but is not a ledger id (^[a-z0-9-]{1,16}$; validate --registry)"}
-      elif $it == null then {f: ("no longer an item" + (if ($r.path | test("^[a-z][a-z0-9_-]*#")) then " (a hosted item needs config items.adapter)" else "" end))}
+      elif $it == null then {f: ("no longer an item" + (if ($r.path | test("^[a-z][a-z0-9_-]*#[1-9][0-9]*$")) then " (a hosted item needs config items.adapter)" else "" end))}
       elif $r.decision == "unassigned" and $ok != null then {f: "carries the key \($ok): unassigned carries none (ledger assign moves an item)"}
-      elif $cl != "open" and $ok != null and $kl != $r.decision then {f: "carries the key \($ok) of ledger \($kl), not \($r.decision) (ledger assign moves an item)"}
+      elif $cl != "open" and $ok != null and $kl != $r.decision then {f: "a \($cl) item carrying the key \($ok) of ledger \($kl), not \($r.decision): run `ledger assign \($r.path) \($r.decision)` to move it"}
       elif $cl == "open" and $kp != null and $kl != $r.decision then {f: "carries the provisional key \($ok) of ledger \($kl) (ledger assign moves it)"}
       elif $cl == "open" and $hosted and $ks != null and $kl != $r.decision then {f: "a hosted item keyed \($ok) cannot be re-homed here (ledger assign)"}
       else
@@ -1038,10 +1045,44 @@ _LG_JQ_ACCEPT_FINAL='
                   names: {status: first_nm("status"), key: first_nm("key"), ledger: first_nm("ledger"), summary: first_nm("summary")}}],
    items: [$P.apply[] | . as $a | ($FM[$a.path] // {}) as $fm
            | {path, hosted, key: ($KM[$a.path] // null), previous, ledger: (if .set_ledger then .decision else null end), summary,
+              # A re-home: the aliases as the index read them, the old key last.
+              aliases: (if .previous == null then null
+                        else [(.aliases // [])[] | strings] | if index([$a.previous]) then . else . + [$a.previous] end end),
               names: {key: nm($fm; "key"), ledger: nm($fm; "ledger"), summary: nm($fm; "summary"), aliases: nm($fm; "aliases")}}
            | select(.key != null or .ledger != null or .summary != null)],
    keys: [$P.apply[] | select($KM[.path] != null) | {path, ledger: .decision, key: $KM[.path], previous}]}
 '
+
+# _lg_init_item_dir: the directory new item files go in (stubs, imports)
+# into _LG_INIT_IDIR — the literal directory of the first items.globs entry
+# shaped <dir>/<pattern>.md whose <dir> holds no glob character; else
+# docs/issues.
+_lg_init_item_dir() {
+  local g d
+  _LG_INIT_IDIR=docs/issues
+  _lg_cfg '(.items.globs // []) | if type == "array" then .[] | strings else empty end' > "$_SCRATCH/lg-init-globs" || exit "$?"
+  while IFS= read -r g; do
+    case "$g" in */?*.md) ;; *) continue ;; esac
+    d=${g%/*}
+    case "$d" in ''|*'*'*|*'?'*|*'{'*|*'}'*|*'['*|*']'*|*\\*) continue ;; esac
+    _LG_INIT_IDIR=${d#./}
+    return 0
+  done < "$_SCRATCH/lg-init-globs"
+}
+
+# _lg_init_glob_check <paths-file> <out>: the paths (one per line) that
+# items.globs do not match, one per line, into <out>.
+_lg_init_glob_check() {
+  local in="$1" out="$2"
+  : > "$out"
+  [ -s "$in" ] || return 0
+  tr '\n' '\000' < "$in" > "$in.z" || _lg_die "cannot write $in.z"
+  _lg_cfg '(.items.globs // []) | if type == "array" then .[] | strings | select(. != "") else empty end' > "$in.globs" || exit "$?"
+  _lg_paths_filter "$in.z" "$in.globs" "$in.hit"
+  tr '\000' '\n' < "$in.hit" > "$in.hitl" || _lg_die "cannot read $in.hit"
+  LC_ALL=C awk -v hit="$in.hitl" 'BEGIN { while ((getline l < hit) > 0) H[l] = 1 } !($0 in H)' "$in" > "$out" \
+    || _lg_die "cannot compare the paths with items.globs"
+}
 
 # _lg_init_accept <decisions.tsv>: the --accept mode (see above).
 # shellcheck disable=SC2154  # _OPT_* are set by _parse_args
@@ -1061,9 +1102,10 @@ _lg_init_accept() {
     | {reg: (first(.[] | select(startswith("# registry: ")) | ltrimstr("# registry: ")) // null),
        rows: [to_entries[] | select(.value != "" and (.value | startswith("#") | not))
               | (.value | split("\t")) as $f
-              | if ($f | length) == 5
+              # Four columns: an editor trimmed the empty decision away.
+              | if ($f | length) == 5 or ($f | length) == 4
                 then {line: (.key + 1), path: $f[0], class: $f[1], suggestion: $f[2], reason: $f[3],
-                      decision: ($f[4] | gsub("^\\s+|\\s+$"; ""))}
+                      decision: ($f[4] // "" | gsub("^\\s+|\\s+$"; ""))}
                 else {line: (.key + 1), path: $f[0], bad: true, decision: null} end]}' "$tsv" > "$s.dec" \
     || _lg_die "cannot read $tsv"
   hdr=$(jq -r '.reg // ""' "$s.dec") || _lg_die "jq failed (the registry line)"
@@ -1090,7 +1132,7 @@ _lg_init_accept() {
 
   # The run's config: config.json, else {} — plus the reference GitHub
   # adapter when a decided row is hosted (R2).
-  nhosted=$(jq '[.rows[] | select((.bad // false) | not) | select(.decision != "" and (.path | test("^[a-z][a-z0-9_-]*#[^/]+$")))] | length' "$s.dec") \
+  nhosted=$(jq '[.rows[] | select((.bad // false) | not) | select(.decision != "" and (.path | test("^[a-z][a-z0-9_-]*#[1-9][0-9]*$")))] | length' "$s.dec") \
     || _lg_die "jq failed (hosted rows)"
   host="$s.host"
   if [ -e "$cfgpath" ] || [ -L "$cfgpath" ]; then
@@ -1125,18 +1167,6 @@ _lg_init_accept() {
       --slurpfile scan "$s.scan" --slurpfile lgy "$s.lgy" --argjson hstub "$hstub" \
       "$_LG_JQ_INIT_DEFS$_LG_JQ_KEYS_DEFS$_LG_JQ_ACCEPT_DEFS$_LG_JQ_ACCEPT_PLAN" > "$s.plan" \
     || _lg_die "jq failed (the --accept plan)"
-  if [ "$(jq '.findings | length' "$s.plan")" != 0 ]; then
-    jq -r '.findings[] | "finding: \(.path) (line \(.line)): \(.detail)"' "$s.plan" | tr -d '\000-\010\013-\037' > "$s.lines" \
-      || _lg_die "jq failed (findings)"
-    printf 'ledger init --accept: %s finding(s) in %s — nothing was written\n' "$(jq '.findings | length' "$s.plan")" "$tsv" >> "$s.lines"
-    if [ "$_LG_FORMAT" = json ]; then
-      jq -c --arg d "$tsv" --argjson dry "$([ "$dry" = 1 ] && echo true || echo false)" \
-        '{decisions: $d, dry_run: $dry, findings: .findings, written: []}' "$s.plan" > "$s.payload" || _lg_die "jq failed (payload)"
-      _lg_emit init 1 "$s.payload"
-    fi
-    _lg_out_file "$s.lines"
-    _lg_emit init 1
-  fi
   if [ "$hstub" = true ] || [ "$nhosted" -gt 0 ]; then
     if [ "${DOC_TOOLS_LEDGER_OFFLINE:-}" = 1 ] && [ "$dry" = 0 ] \
         && [ "$(jq '[.apply[] | select(.hosted)] + [.legacy[] | select(.kind == "stub" and .stub.hosted)] | length' "$s.plan")" != 0 ]; then
@@ -1144,7 +1174,9 @@ _lg_init_accept() {
     fi
   fi
 
-  # Phase 2: the stubs' paths (a collision takes -2, -3, …), the keys.
+  # Phase 2: the stubs' paths (the item directory, _lg_init_item_dir; a
+  # collision takes -2, -3, …), the findings, the keys.
+  _lg_init_item_dir
   : > "$s.stubp"
   taken=$'\n'
   nl=$'\n'
@@ -1152,7 +1184,7 @@ _lg_init_accept() {
     || _lg_die "jq failed (stubs)"
   while IFS=$'\t' read -r id slug hosted; do
     [ "$hosted" = false ] || continue
-    base="docs/issues/$today-$slug"
+    base="$_LG_INIT_IDIR/$today-$slug"
     p="$base.md"
     n=2
     while [ -e "$p" ] || [ -L "$p" ] || case "$taken" in *"$nl$p$nl"*) true ;; *) false ;; esac; do
@@ -1164,6 +1196,30 @@ _lg_init_accept() {
   done < "$s.stubs"
   jq -R -n -c '[inputs | split("\t") | {key: .[0], value: .[1]}] | from_entries' "$s.stubp" > "$s.stubp.json" \
     || _lg_die "jq failed (stub paths)"
+  # A stub must be an item (I1): its path matches items.globs, else a
+  # finding — before anything is written.
+  cut -f 2 "$s.stubp" > "$s.stubpl"
+  _lg_init_glob_check "$s.stubpl" "$s.unmatched"
+  if [ -s "$s.unmatched" ]; then
+    # shellcheck disable=SC2016  # jq source
+    jq -c --rawfile u "$s.unmatched" --slurpfile c "$_LG_CFG" '
+      .findings += [$u | split("\n")[] | select(. != "")
+        | {line: null, path: ., detail: "a stub here would not be an item: items.globs \($c[0].items.globs | tojson) do not match it (stubs go in the directory of the first <dir>/<pattern>.md glob)"}]' \
+      "$s.plan" > "$s.plan2" || _lg_die "jq failed (stub findings)"
+    mv -f "$s.plan2" "$s.plan" || _lg_die "cannot write $s.plan"
+  fi
+  if [ "$(jq '.findings | length' "$s.plan")" != 0 ]; then
+    jq -r '.findings[] | "finding: \(.path)\(if .line then " (line \(.line))" else "" end): \(.detail)"' "$s.plan" | tr -d '\000-\010\013-\037' > "$s.lines" \
+      || _lg_die "jq failed (findings)"
+    printf 'ledger init --accept: %s finding(s) in %s — nothing was written\n' "$(jq '.findings | length' "$s.plan")" "$tsv" >> "$s.lines"
+    if [ "$_LG_FORMAT" = json ]; then
+      jq -c --arg d "$tsv" --argjson dry "$([ "$dry" = 1 ] && echo true || echo false)" \
+        '{decisions: $d, dry_run: $dry, findings: .findings, written: []}' "$s.plan" > "$s.payload" || _lg_die "jq failed (payload)"
+      _lg_emit init 1 "$s.payload"
+    fi
+    _lg_out_file "$s.lines"
+    _lg_emit init 1
+  fi
   # shellcheck disable=SC2016  # jq source
   jq -r --slurpfile sp "$s.stubp.json" --arg today "$today" '
     ([.apply[] | select(.need_key) | {l: .decision, p: .path, d: .date}]
@@ -1214,7 +1270,7 @@ _lg_init_accept() {
 # writes, the stubs, legacy.json, the views, the output.
 _lg_init_accept_apply() {
   local s="$1" dry="$2" lgpath="$3" tsv="$4" rec path hosted key prev ledger summary nk nl ns na what
-  local file row id st sk sl ss text body out ref rc=0 views="" vdir nlines a
+  local file row id st sk sl ss text body out ref rc=0 views="" vdir nlines a an aj
   vdir="$_LG_CACHE/views"
   [ -e "$s.written" ] || : > "$s.written"
   : > "$s.lines"
@@ -1226,12 +1282,16 @@ _lg_init_accept_apply() {
     cat -- "$s.written" >> "$s.lines"
   fi
   # The items: one fm-write.awk pass per file, the adapter for a hosted one.
+  # shellcheck disable=SC2016  # jq source
   jq -r '.items[] | [.path, (.hosted | tostring), (.key // ""), (.previous // ""), (.ledger // ""), (.summary // ""),
-      .names.key, .names.ledger, .names.summary, .names.aliases] | map(gsub("[\n\r]"; " ")) | .[]' "$s.final" > "$s.items" \
+      .names.key, .names.ledger, .names.summary, .names.aliases,
+      (.aliases // [] | length | tostring), (.aliases // [] | map(gsub("[\u0001]"; " ")) | join("\u0001"))]
+      | map(gsub("[\n\r]"; " ")) | .[]' "$s.final" > "$s.items" \
     || _lg_die "jq failed (the item edits)"
-  # Ten lines per item (an empty field is a line of its own).
+  # Twelve lines per item (an empty field is a line of its own).
   while IFS= read -r path && IFS= read -r hosted && IFS= read -r key && IFS= read -r prev && IFS= read -r ledger \
-      && IFS= read -r summary && IFS= read -r nk && IFS= read -r nl && IFS= read -r ns && IFS= read -r na; do
+      && IFS= read -r summary && IFS= read -r nk && IFS= read -r nl && IFS= read -r ns && IFS= read -r na \
+      && IFS= read -r an && IFS= read -r aj; do
     what=""
     [ -z "$key" ] || what="key $key"
     [ -z "$ledger" ] || what="${what:+$what, }ledger $ledger"
@@ -1250,22 +1310,20 @@ _lg_init_accept_apply() {
       [ -z "$key" ] || _lg_fm_op set "$nk" "$key"
       [ -z "$ledger" ] || _lg_fm_op set "$nl" "$ledger"
       [ -z "$summary" ] || _lg_fm_op set "$ns" "$summary"
-      if [ -n "$prev" ]; then _lg_fm_op_list_add "$path" "$na" "$prev"; fi
+      if [ -n "$prev" ]; then _lg_fm_op setlist "$na" "" "$aj" "$an"; fi
       _lg_fm_ops_apply "$path"
     fi
     printf 'updated %s: %s\n' "$path" "$what" >> "$s.lines"
   done < "$s.items"
 
   # The stubs.
-  jq -c '.stubs[]' "$s.final" > "$s.stubrecs" || _lg_die "jq failed (stubs)"
-  while IFS= read -r rec; do
-    jq -r '[.path // "", (.hosted | tostring), .file, .row, .id, (.key // ""), .ledger, .summary,
-        .names.status, .names.key, .names.ledger, .names.summary] | map(gsub("[\n\r]"; " ")) | .[]' <<<"$rec" > "$s.stub1" \
-      || _lg_die "jq failed (stub)"
-    { IFS= read -r path; IFS= read -r hosted; IFS= read -r file; IFS= read -r row; IFS= read -r id; IFS= read -r key
-      IFS= read -r ledger; IFS= read -r summary; IFS= read -r st; IFS= read -r sk; IFS= read -r sl; IFS= read -r ss; } < "$s.stub1" \
-      || _lg_die "cannot read the stub record"
-    text=$(jq -r '.text' <<<"$rec") || _lg_die "jq failed (stub)"
+  # One jq for every stub: thirteen lines each.
+  jq -r '.stubs[] | [.path // "", (.hosted | tostring), .file, .row, .id, (.key // ""), .ledger, .summary,
+      .names.status, .names.key, .names.ledger, .names.summary, .text] | map(gsub("[\n\r]"; " ")) | .[]' "$s.final" > "$s.stubrecs" \
+    || _lg_die "jq failed (stubs)"
+  while IFS= read -r path && IFS= read -r hosted && IFS= read -r file && IFS= read -r row && IFS= read -r id \
+      && IFS= read -r key && IFS= read -r ledger && IFS= read -r summary && IFS= read -r st && IFS= read -r sk \
+      && IFS= read -r sl && IFS= read -r ss && IFS= read -r text; do
     what="stub of $file row $row${key:+, key $key}, ledger $ledger"
     if [ "$dry" = 1 ]; then
       if [ "$hosted" = true ]; then
@@ -1279,7 +1337,8 @@ _lg_init_accept_apply() {
     if [ "$hosted" = true ]; then
       printf 'Migrated from %s row %s.\n\n%s\n' "$file" "$row" "$text" > "$body" || _lg_die "cannot write $body"
       out=$(_lg_adapter items create --title "$summary" --body-file "$body") || _lg_die "the items adapter could not create the stub of $file row $row"
-      ref=$(jq -r 'select(type == "object") | .ref | strings' <<<"$out" | head -n 1) || ref=""
+      # {"ref": …} read without a jq per stub.
+      ref=$(printf '%s\n' "$out" | sed -n 's/^.*"ref"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*$/\1/p' | head -n 1) || ref=""
       [ -n "$ref" ] || _lg_die "the items adapter's create printed no ref for the stub of $file row $row: $out"
       printf '%s\n' "$id" "$ref" "$key" >> "$s.created"
       _lg_init_hosted_write "$ref" ledger "$ledger"
@@ -1341,7 +1400,7 @@ _lg_init_accept_apply() {
   # shellcheck disable=SC2016  # jq source
   jq -r --slurpfile p "$s.plan" --argjson dry "$dry" '
     "ledger init --accept: \($p[0].apply | length) row(s) applied, \($p[0].skipped) without a decision (left alone)"
-    + (if (.keys | length) > 0 then "; \(.keys | length + 0) key(s)" else "" end)
+    + ([.keys[], (.stubs[] | select(.key != null))] | length | if . > 0 then "; \(.) key(s)" else "" end)
     + (if $dry == 1 then " — dry run: nothing was written" else "; review and commit the files above" end)' "$s.final" >> "$s.lines" \
     || _lg_die "jq failed (summary)"
   if [ "$_LG_FORMAT" = json ]; then
@@ -1378,32 +1437,57 @@ _lg_init_hosted_write() {
 # ledger init --import (design §K; Task 15 ruling R6): the hosted items
 # (config items.adapter's list, read now) become file items, once. Each
 # not yet imported — no item file has imported_from: <ref> — is read with
-# the adapter's get <ref> and written to docs/issues/<created
-# YYYY-MM-DD>-<slug of its title>.md (today without a created date; -2, -3
-# … on a collision): frontmatter imported_from, url, then its fields
-# (logical names as config fields' first candidates) and status, sorted;
-# body "# <title>", then its body. Then the adapter's note <ref> "Imported
-# to <path> (doc-superpowers ledger)." links it back; nothing is closed.
-# The first failure stops the run: exit 2, what was imported stays, the
+# the adapter's get <ref> (one call per item; the jq work is one pass over
+# all of them) and written to <dir>/<created YYYY-MM-DD>-<slug of its
+# title>.md — <dir> as stubs (_lg_init_item_dir), today without a created
+# date, -2, -3 … on a collision: frontmatter imported_from, url, then its
+# fields (logical names as config fields' first candidates) and status,
+# sorted; body "# <title>", then its body. A path items.globs would not
+# match is a finding: exit 1, nothing written. Then the adapter's note
+# <ref> "Imported to <path> (doc-superpowers ledger)." links it back;
+# nothing is closed. The first failure (a get, its output, a note) stops
+# the run: exit 2, what was read before it is imported and stays, the
 # adapter stays configured. When every listed item is imported,
 # config.json's items.adapter becomes null (keys are not held twice). An
 # adapter without get (it exits 3 to it): exit 2, naming it.
 
+# The records of the items read (one object per get, in order): per item
+# "I\1<ref>\1<title>\1<created>\1<slug>\0", "B\1<body text>\0", its
+# frontmatter edits ("set\1name\1value\0", "setlist\1name\1count\1items
+# joined by \1\0"), "E\0"; the first output that is no {ref, title, body,
+# fields} object: "X\1<n>\0" and nothing after it. jq source.
 # shellcheck disable=SC2016  # jq source
-_LG_JQ_IMPORT_OPS='
+_LG_JQ_IMPORT_RECS='
 ($c[0]) as $c | lg_fields($c) as $F
-| def v: if type == "string" then gsub("[\r\n]+"; " ") elif type == "array" then . else tojson end;
-  ([{k: "imported_from", v: .ref}, {k: "url", v: .url}]
-   + ((.fields // {}) + {status: .status} | to_entries | sort_by(.key)
-      | map(select(.value != null) | {k: ((($F[.key] // [])[0]) // .key), v: (.value | v)})))[]
-| if (.v | type) == "array" then
-    [.v[] | if type == "string" then gsub("[\r\n\u0001]+"; " ") else tojson end] as $l
-    | "setlist\u0001\(.k)\u0001\($l | length)\u0001\($l | join("\u0001"))\u0000"
-  else "set\u0001\(.k)\u0001\(.v)\u0000" end
+| def clean: gsub("[\u0000\u0001]"; " ");
+  def one: gsub("[\r\n]+"; " ") | clean;
+  def v: if type == "string" then one elif type == "array" then . else tojson | one end;
+  def ok: type == "object" and (.ref | type) == "string" and (.title | type) == "string"
+          and ((.body // "") | type) == "string" and ((.fields // {}) | type) == "object";
+  def ops:
+    ([{k: "imported_from", v: .ref}, {k: "url", v: (.url // "")}]
+     + ((.fields // {}) + {status: .status} | to_entries | sort_by(.key)
+        | map(select(.value != null) | {k: ((($F[.key] // [])[0]) // .key), v: (.value | v)})))[]
+    | if (.v | type) == "array" then
+        [.v[] | if type == "string" then one else tojson | one end] as $l
+        | "setlist\u0001\(.k)\u0001\($l | length)\u0001\($l | join("\u0001"))\u0000"
+      else "set\u0001\(.k)\u0001\(.v)\u0000" end;
+  (reduce range(0; $g | length) as $i ({stop: false, out: []};
+     if .stop then .
+     elif ($g[$i] | ok) then .out += [$g[$i]]
+     else .stop = true | .out += [{bad: $i}] end)).out[]
+| if .bad != null then "X\u0001\(.bad)\u0000"
+  else
+    "I\u0001\(.ref | one)\u0001\(.title | one)\u0001\(.created | if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}") then .[0:10] else $today end)\u0001\(.title | lg_stubslug)\u0000",
+    "B\u0001\((.body // "") | clean | if . == "" then "" else "\n" + sub("\n*$"; "") + "\n" end)\u0000",
+    ops,
+    "E\u0000"
+  end
 '
 
 _lg_init_import() {
-  local s ad today rc out ref title created path base slug n imported=0 failed="" listed done_n rec op rest name count a
+  local s ad today rc ref title created slug path base n imported=0 failed="" listed done_n i rec op rest name count a body
+  local nl=$'\n' taken
   _lg_scratch_name
   s=$_LG_SN
   _lg_adapter_path items || _lg_die "init --import: $_LG_ADP_ERR"
@@ -1411,21 +1495,25 @@ _lg_init_import() {
   if [ "${DOC_TOOLS_LEDGER_OFFLINE:-}" = 1 ]; then _lg_die "init --import: offline (DOC_TOOLS_LEDGER_OFFLINE=1)"; fi
   ad=$(_lg_cfg '.items.adapter') || exit "$?"
   today=$(date +%Y-%m-%d) || _lg_die "date failed"
+  _lg_init_item_dir
   _lg_adapter items list > "$s.list" 2> "$s.lerr" \
     || _lg_die "init --import: the items adapter ($ad) could not list the items: $(head -n 2 "$s.lerr" | tr '\n' ' ')"
-  # The refs already imported (imported_from of the item files).
+  # The refs already imported (imported_from of the item files), the rest.
   _lg_item_paths worktree "$s.paths"
   : > "$s.recs"
   if [ -s "$s.paths" ]; then _lg_parse_worktree "$s.paths" "$s.recs"; fi
-  jq -r -n --slurpfile r "$s.recs" '[$r[] | .fm.imported_from | strings] | unique | .[]' > "$s.done" \
-    || _lg_die "jq failed (imported items)"
-  jq -r '.ref' "$s.list" > "$s.refs" || _lg_die "jq failed (the hosted refs)"
-  listed=$(grep -c . "$s.refs" || true)
-  : > "$s.lines"
-  : > "$s.imp"
-  done_n=0
+  # shellcheck disable=SC2016  # jq source
+  jq -r -n --slurpfile r "$s.recs" --slurpfile l "$s.list" '
+    ([$r[] | .fm.imported_from | strings] | unique) as $done
+    | ($l | map(.ref | strings)) as $refs
+    | "\($refs | length)\t\([$refs[] | select(. as $x | $done | index([$x]))] | length)",
+      ($refs[] | select(. as $x | $done | index([$x]) | not))' > "$s.todo" || _lg_die "jq failed (the refs to import)"
+  IFS=$'\t' read -r listed done_n < "$s.todo" || _lg_die "cannot read $s.todo"
+  tail -n +2 "$s.todo" > "$s.refs" || _lg_die "cannot write $s.refs"
+  # One get per ref; the first failure stops the reads.
+  i=0
+  : > "$s.gets"
   while IFS= read -r ref; do
-    if grep -Fqx -- "$ref" "$s.done"; then done_n=$((done_n + 1)); continue; fi
     rc=0
     ( cd "$_LG_ROOT" && "$_LG_ADP" get "$ref" ) < /dev/null > "$s.get" 2> "$s.gerr" || rc=$?
     if [ "$rc" = 3 ]; then
@@ -1435,46 +1523,95 @@ _lg_init_import() {
       failed="$ref: the items adapter's get exited $rc: $(head -n 2 "$s.gerr" | tr '\n' ' ' | tr -d '\000-\010\013-\037')"
       break
     fi
-    if ! jq -e -s 'length == 1 and (.[0] | type == "object" and (.ref | type) == "string" and (.title | type) == "string"
-        and ((.body // "") | type) == "string" and ((.fields // {}) | type) == "object")' "$s.get" > /dev/null 2>&1; then
-      failed="$ref: the items adapter's get printed no {ref, title, body, fields} object"
-      break
-    fi
-    { IFS= read -r title; IFS= read -r created; IFS= read -r slug; } < <(jq -r --arg today "$today" "$_LG_JQ_ACCEPT_DEFS"'
-        (.title | gsub("[\r\n]+"; " ")),
-        (.created | if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}") then .[0:10] else $today end),
-        (.title | lg_stubslug)' "$s.get") || _lg_die "jq failed (import $ref)"
-    base="docs/issues/$created-$slug"
-    path="$base.md"
-    n=2
-    while [ -e "$path" ] || [ -L "$path" ]; do path="$base-$n.md"; n=$((n + 1)); done
-    { printf -- '---\n---\n# %s\n' "$title"
-      jq -j '(.body // "") | if . == "" then "" else "\n" + sub("\n*$"; "") + "\n" end' "$s.get"; } > "$s.file" \
-      || _lg_die "cannot write $s.file"
-    jq -L "$_LG_LIB" -j --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS$_LG_JQ_IMPORT_OPS" "$s.get" > "$s.ops" \
-      || _lg_die "jq failed (the fields of $ref)"
-    _lg_fm_ops_reset
-    while IFS= read -r -d '' rec; do
-      op=${rec%%$'\001'*}
-      rest=${rec#*$'\001'}
-      name=${rest%%$'\001'*}
-      rest=${rest#*$'\001'}
-      case "$op" in
-        set) _lg_fm_op set "$name" "$rest" ;;
-        setlist) count=${rest%%$'\001'*}; rest=${rest#*$'\001'}; _lg_fm_op setlist "$name" "" "$rest" "$count" ;;
-      esac
-    done < "$s.ops"
-    _lg_fm_ops_apply "$s.file"
-    mkdir -p docs/issues || _lg_die "cannot create docs/issues"
-    _lg_init_put "$s.file" "$path"
-    imported=$((imported + 1))
-    printf '%s\t%s\n' "$ref" "$path" >> "$s.imp"
-    printf 'imported %s → %s\n' "$ref" "$path" >> "$s.lines"
-    if ! _lg_adapter items note "$ref" "Imported to $path (doc-superpowers ledger)." > /dev/null 2> "$s.nerr"; then
-      failed="$ref: imported to $path, but the link-back note failed: $(head -n 2 "$s.nerr" | tr '\n' ' ')"
-      break
-    fi
+    cat -- "$s.get" >> "$s.gets" || _lg_die "cannot write $s.gets"
+    printf '\n' >> "$s.gets"
+    i=$((i + 1))
   done < "$s.refs"
+  # One jq over every item read.
+  if ! jq -s -c . "$s.gets" > "$s.getsj" 2> /dev/null; then
+    [ -n "$failed" ] || failed="the items adapter's get printed something that is not JSON"
+    printf '[]\n' > "$s.getsj"
+  fi
+  jq -L "$_LG_LIB" -n -j --slurpfile c "$_LG_CFG" --slurpfile gs "$s.getsj" --arg today "$today" \
+      "$_LG_JQ_INDEX_DEFS$_LG_JQ_ACCEPT_DEFS"'$gs[0] as $g | '"$_LG_JQ_IMPORT_RECS" > "$s.stream" \
+    || _lg_die "jq failed (the items to import)"
+  # Pass 1: the paths, then the glob check — before anything is written.
+  : > "$s.plist"
+  taken=$nl
+  while IFS= read -r -d '' rec; do
+    case "$rec" in
+      I$'\001'*)
+        rest=${rec#I$'\001'}
+        slug=${rest##*$'\001'}
+        rest=${rest%$'\001'*}
+        created=${rest##*$'\001'}
+        base="$_LG_INIT_IDIR/$created-$slug"
+        path="$base.md"
+        n=2
+        while [ -e "$path" ] || [ -L "$path" ] || case "$taken" in *"$nl$path$nl"*) true ;; *) false ;; esac; do
+          path="$base-$n.md"
+          n=$((n + 1))
+        done
+        taken="$taken$path$nl"
+        printf '%s\n' "$path" >> "$s.plist" ;;
+      X$'\001'*) break ;;
+    esac
+  done < "$s.stream"
+  _lg_init_glob_check "$s.plist" "$s.unmatched"
+  if [ -s "$s.unmatched" ]; then
+    # shellcheck disable=SC2016  # jq source
+    jq -R -n -c --slurpfile c "$_LG_CFG" '[inputs | {path: ., detail: "an imported item here would not be an item: items.globs \($c[0].items.globs | tojson) do not match it (imports go in the directory of the first <dir>/<pattern>.md glob)"}]' \
+      "$s.unmatched" > "$s.find" || _lg_die "jq failed (findings)"
+    jq -r '.[] | "finding: \(.path): \(.detail)"' "$s.find" > "$s.lines" || _lg_die "jq failed (findings)"
+    echo "ledger init --import: nothing was written" >> "$s.lines"
+    if [ "$_LG_FORMAT" = json ]; then
+      jq -c '{findings: ., imported: []}' "$s.find" > "$s.payload" || _lg_die "jq failed (payload)"
+      _lg_emit init 1 "$s.payload"
+    fi
+    _lg_out_file "$s.lines"
+    _lg_emit init 1
+  fi
+  # Pass 2: write, link back.
+  local paths=()
+  while IFS= read -r path; do paths+=("$path"); done < "$s.plist"
+  : > "$s.lines"
+  : > "$s.imp"
+  i=0
+  while IFS= read -r -d '' rec; do
+    op=${rec%%$'\001'*}
+    rest=${rec#*$'\001'}
+    case "$op" in
+      I)
+        i=$((i + 1))
+        ref=${rest%%$'\001'*}
+        rest=${rest#*$'\001'}
+        title=${rest%%$'\001'*}
+        path=${paths[$((i - 1))]}
+        _lg_fm_ops_reset ;;
+      B) body=$rest ;;
+      set) name=${rest%%$'\001'*}; _lg_fm_op set "$name" "${rest#*$'\001'}" ;;
+      setlist)
+        name=${rest%%$'\001'*}
+        rest=${rest#*$'\001'}
+        count=${rest%%$'\001'*}
+        _lg_fm_op setlist "$name" "" "${rest#*$'\001'}" "$count" ;;
+      E)
+        { printf -- '---\n---\n# %s\n' "$title" && printf '%s' "$body"; } > "$s.file" || _lg_die "cannot write $s.file"
+        _lg_fm_ops_apply "$s.file"
+        mkdir -p "$(dirname -- "$path")" || _lg_die "cannot create $(dirname -- "$path")"
+        _lg_init_put "$s.file" "$path"
+        imported=$((imported + 1))
+        printf '%s\t%s\n' "$ref" "$path" >> "$s.imp"
+        printf 'imported %s → %s\n' "$ref" "$path" >> "$s.lines"
+        if ! _lg_adapter items note "$ref" "Imported to $path (doc-superpowers ledger)." > /dev/null 2> "$s.nerr"; then
+          failed="$ref: imported to $path, but the link-back note failed: $(head -n 2 "$s.nerr" | tr '\n' ' ')"
+          break
+        fi ;;
+      X)
+        [ -n "$failed" ] || failed="$(sed -n "$((rest + 1))p" "$s.refs"): the items adapter's get printed no {ref, title, body, fields} object"
+        break ;;
+    esac
+  done < "$s.stream"
   [ "$done_n" = 0 ] || printf 'already imported: %s item(s) (imported_from)\n' "$done_n" >> "$s.lines"
   # The hosted copy changed (comments): the next read fetches it.
   a=$(_lg_cfg '.keys.remote | if type == "string" and . != "" then . else "origin" end') || exit "$?"
