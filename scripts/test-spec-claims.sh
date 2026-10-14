@@ -112,7 +112,10 @@ jset() {
 
 # The number of JSON values in $1 ("" → 0; not JSON → "invalid").
 json_count() {
-  jq -s 'length' <<<"$1" 2>/dev/null || echo invalid
+  local n
+  # Empty output is invalid too: jq 1.6 -s exits 0 on input it cannot parse.
+  n=$(jq -s 'length' <<<"$1" 2>/dev/null) || n=""
+  printf '%s\n' "${n:-invalid}"
 }
 
 # Every file named cl-emitted that a claims run could have left behind.
@@ -7294,6 +7297,22 @@ test_attest_missing_chunk_record() {
   teardown
 }
 
+# A chunk record a log line precedes is not one JSON object: never read as
+# usable (jq 1.6 -s prints nothing and exits 0 on input it cannot parse).
+test_attest_malformed_chunk_record() {
+  echo "test: attest — a chunk record that is not one JSON object is a finding"
+  gate_fixture
+  gate_promote
+  gate 1
+  { printf 'gate: wrote the record\n'; cat "$GATE_REC1"; } > "$GATE_REC1.new"
+  mv "$GATE_REC1.new" "$GATE_REC1"
+  git add "$GATE_REC1" && git commit -qm "a chunk 1 record with a log line"
+  attest
+  assert_eq "1" "$CL_RC" "a log line before the record: exits 1"
+  assert_contains "$(attest_messages)" "chunk 1: gate record $GATE_REC1 is not one JSON object" "…'is not one JSON object'"
+  teardown
+}
+
 test_attest_rebased_branch_matched_by_patch_id() {
   echo "test: attest — a rebased branch's records match by patch id"
   attest_fixture
@@ -9919,6 +9938,7 @@ run_tests() {
   # --- Task 17: claims attest, the final gate; claims rulings ---
   test_attest_final_all_records_pass
   test_attest_missing_chunk_record
+  test_attest_malformed_chunk_record
   test_attest_rebased_branch_matched_by_patch_id
   test_attest_unmatched_commit_marked_rebased_reverified
   test_attest_unresolvable_head_without_twin_indeterminate
