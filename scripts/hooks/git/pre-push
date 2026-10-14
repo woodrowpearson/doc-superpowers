@@ -8,6 +8,16 @@
 # suggests drafting release notes. Never blocks.
 # The skill being absent is silent. DOC_SUPERPOWERS_QUIET=1 silences it;
 # DOC_SUPERPOWERS_SKIP=1 turns it off.
+#
+# With docs/spec-claims/ present, a claims leg (advisory) runs for every
+# branch pushed, tagged or not: `doc-tools.sh claims run --planes-of` over the
+# commits the push adds (<remote oid>..<local oid>; for a new branch, from its
+# merge-base with the config's base, else origin/main), and, when the branch
+# is the one checked out (attest judges HEAD), `claims attest --plan` for
+# each plan with gate records in docs/spec-claims/gates/<stem>/ but no
+# final.json. Something red or indeterminate prints
+# "claims (advisory): <n> red, <m> indeterminate" and the finding lines; the
+# exit code never changes. DOC_SUPERPOWERS_CLAIMS_SKIP=1 turns the leg off.
 
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
 [[ "${DOC_SUPERPOWERS_QUIET:-}" == "1" ]] && exit 0
@@ -15,7 +25,65 @@
 [[ -n "${DOC_TOOLS:-}" ]] || DOC_TOOLS=$(__DOC_TOOLS_RESOLVE__)
 [[ -f "$DOC_TOOLS" ]] || exit 0
 
-while read -r local_ref local_oid remote_ref _ || [[ -n "${local_ref:-}" ]]; do
+# --- Spec claims (advisory) ---
+# Every doc-tools call reads /dev/null: the ref lines are the loop's stdin.
+# _claims_call <verb> <args…>: runs the verb and adds its verdict to the
+# tally — claims_red (findings), claims_ind (indeterminate rows, or 1 when it
+# could not run) and claims_lines.
+_claims_call() {
+  local out tally why
+  out=$("$DOC_TOOLS" claims "$@" </dev/null 2>/dev/null)
+  tally=$(jq -r --arg verb "$1" 'if type == "object" and (.exit | type) == "number" then
+      "\((.findings // []) | length) \(((.indeterminate // []) | length) + (if .error then 1 else 0 end))",
+      (.findings[]?, .indeterminate[]?
+        | "  \(.check)\(if .claim then " \(.claim)" else "" end): \(.message // .reason)"),
+      (.error // empty | "  claims \($verb) could not run: \(.)")
+    else error("no verdict") end' <<<"$out" 2>/dev/null)
+  if [[ -z "$tally" ]]; then
+    why=$("$DOC_TOOLS" claims "$@" </dev/null 2>&1 >/dev/null | awk '/^ERROR: / { sub(/^ERROR: /, ""); print; exit }')
+    why="${why%.}"
+    tally="0 1"$'\n'"  claims $1 could not run: ${why:-no verdict}"
+  fi
+  claims_red=$((claims_red + ${tally%% *}))
+  tally=${tally#* }
+  claims_ind=$((claims_ind + ${tally%%$'\n'*}))
+  [[ "$tally" == *$'\n'* ]] && claims_lines+="${tally#*$'\n'}"$'\n'
+  return 0
+}
+# _claims_push <local oid> <remote oid>
+_claims_push() {
+  local range base mb head dir plan stem
+  claims_red=0 claims_ind=0 claims_lines=""
+  case "$2" in
+    *[!0]*) range="$2..$1" ;;
+    *)
+      base=$(jq -r '.base | strings' docs/spec-claims/config.json 2>/dev/null)
+      [[ -n "$base" ]] || base=origin/main
+      # Unresolvable: doc-tools reports the <base>...<oid> range it is given.
+      if mb=$(git merge-base "$1" "$base" 2>/dev/null); then range="$mb..$1"; else range="$base...$1"; fi
+      ;;
+  esac
+  _claims_call run --planes-of "$range"
+  head=$(git rev-parse -q --verify HEAD 2>/dev/null)
+  if [[ "$1" == "$head" ]]; then
+    for dir in docs/spec-claims/gates/*/; do
+      [[ -d "$dir" && ! -e "${dir}final.json" ]] || continue
+      plan=$(cat "$dir"chunk-*.json 2>/dev/null | jq -rs 'map(.plan? | strings) | first // empty' 2>/dev/null)
+      stem=${plan##*/}
+      stem=${stem%.*}
+      dir=${dir%/}
+      [[ -n "$plan" && -f "$plan" && "$stem" == "${dir##*/}" ]] || continue
+      _claims_call attest --plan "$plan"
+    done
+  fi
+  (( claims_red + claims_ind > 0 )) || return 0
+  echo ""
+  echo "doc-superpowers: claims (advisory): $claims_red red, $claims_ind indeterminate"
+  printf '%s' "$claims_lines"
+  echo ""
+}
+
+while read -r local_ref local_oid remote_ref remote_oid _ || [[ -n "${local_ref:-}" ]]; do
   case "$local_ref" in
     refs/tags/*) continue ;;
   esac
@@ -24,6 +92,9 @@ while read -r local_ref local_oid remote_ref _ || [[ -n "${local_ref:-}" ]]; do
     *[!0]*) ;;
     *) continue ;;
   esac
+  if [[ -d docs/spec-claims && "${DOC_SUPERPOWERS_CLAIMS_SKIP:-}" != "1" ]]; then
+    _claims_push "$local_oid" "${remote_oid:-}" </dev/null
+  fi
   latest_tag=$(git describe --tags --abbrev=0 "$local_oid" 2>/dev/null) || continue
   [[ -n "$latest_tag" ]] || continue
   commit_count=$(git rev-list --count "${latest_tag}..${local_oid}" 2>/dev/null) || continue

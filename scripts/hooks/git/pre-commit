@@ -14,6 +14,15 @@
 # The skill or the doc-index being absent is silent. The check failing (jq
 # missing from PATH, a corrupt index) prints one line on stderr, and blocks
 # only under STRICT.
+#
+# With docs/spec-claims/ present, a claims leg runs first, with or without a
+# doc-index: `doc-tools.sh claims validate --staged` checks the spec claims
+# the staged change touches. A finding (exit 1) blocks the commit whatever
+# STRICT says; an advisory is printed and the commit goes on; the check not
+# running (exit 2 or 3, or a doc-tools.sh without the claims verb) prints one
+# line on stderr, and blocks only under STRICT.
+# DOC_SUPERPOWERS_CLAIMS_SKIP=1 bypasses that leg alone. Without
+# docs/spec-claims/ the leg never runs.
 
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
 
@@ -25,10 +34,48 @@
 
 # --- Graceful degradation: tooling absent ---
 [[ -f "$DOC_TOOLS" ]] || exit 0
-[[ -f docs/.doc-index.json ]] || exit 0
 
 _quiet() { [[ "${DOC_SUPERPOWERS_QUIET:-}" == "1" ]]; }
 _strict() { [[ "${DOC_SUPERPOWERS_STRICT:-}" == "1" ]]; }
+
+# --- Spec claims: a finding blocks, whatever STRICT says ---
+# stdin is /dev/null: no adapter the verb runs may read the hook's stdin.
+if [[ -d docs/spec-claims && "${DOC_SUPERPOWERS_CLAIMS_SKIP:-}" != "1" ]]; then
+  _claims() { "$DOC_TOOLS" claims validate --staged </dev/null; }
+  # One line per row of the verdict's <findings|advisories>.
+  _claims_lines() {
+    jq -r --arg k "$1" '.[$k][]?
+      | "doc-superpowers: claims: \(.check)\(if .claim then " \(.claim)" else "" end): \(.message)"' \
+      <<<"$claims" 2>/dev/null
+  }
+  claims_rc=0
+  claims=$(_claims 2>/dev/null) || claims_rc=$?
+  case "$claims_rc" in
+    0) _quiet || _claims_lines advisories ;;
+    1)
+      if ! _quiet; then
+        _claims_lines findings
+        echo "  Commit blocked (claims). Fix, or rule the direction — see references/spec-claims.md. DOC_SUPERPOWERS_CLAIMS_SKIP=1 bypasses."
+      fi
+      exit 1
+      ;;
+    *)
+      # The verdict's error, else its first indeterminate reason, else (no
+      # verdict: a doc-tools.sh older than the verb) the ERROR line on stderr.
+      why=$(jq -r '.error // .indeterminate[0].reason // empty' <<<"$claims" 2>/dev/null)
+      [[ -n "$why" ]] || why=$(_claims 2>&1 >/dev/null | awk '/^ERROR: / { sub(/^ERROR: /, ""); print; exit }')
+      why="${why%.}"
+      why="${why:-doc-tools.sh claims validate failed}"
+      if _strict; then
+        _quiet || echo "doc-superpowers: pre-commit: claims check could not run: $why — commit blocked (DOC_SUPERPOWERS_STRICT=1; DOC_SUPERPOWERS_CLAIMS_SKIP=1 bypasses)" >&2
+        exit 1
+      fi
+      _quiet || echo "doc-superpowers: pre-commit: claims check could not run: $why — check skipped" >&2
+      ;;
+  esac
+fi
+
+[[ -f docs/.doc-index.json ]] || exit 0
 
 # --- Tooling failing: one line; blocks only under STRICT ---
 _fail() {
