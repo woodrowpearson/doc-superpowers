@@ -5699,6 +5699,118 @@ test_v12_base_unresolvable_gate_carrying_only() {
   teardown
 }
 
+# --- The reference's injected task templates (Task 25) ----------------------------
+#
+# references/spec-lifecycle-actions.md's spec-inject --phase=plan fences are
+# what an injector copies into a plan, so the plan V12 judges is built from
+# them. ref_fence finds each fence by where it sits (its Plan Phase step),
+# never by its title, so a drifted title reaches V12 rather than failing the
+# lookup.
+
+LIFECYCLE_REF="$SCRIPT_DIR/../references/spec-lifecycle-actions.md"
+
+# ref_fence <section-heading> <item-prefix>: the content of the first fenced
+# block after the line starting with <item-prefix> inside the section whose
+# heading line is <section-heading> (it ends at the next column-0 heading),
+# dedented by the fence's own indent; the fence lines themselves dropped. A
+# fence closes on a run of its character at least as long as the opener's,
+# so a ``` line inside a ```` fence is content.
+# shellcheck disable=SC2016  # awk program, not shell expansion
+ref_fence() {
+  LC_ALL=C awk -v sec="$1" -v item="$2" '
+    function lead(s) { match(s, /^ */); return RLENGTH }
+    function run(t, c,    n) { n = 0; while (substr(t, n + 1, 1) == c) n++; return n }
+    st == 0 { if ($0 == sec) st = 1; next }
+    st == 1 && /^#/ { exit }
+    st == 1 { if (index($0, item) == 1) st = 2; next }
+    st == 2 {
+      t = $0; sub(/^ +/, "", t)
+      c = substr(t, 1, 1)
+      if ((c == "`" || c == "~") && run(t, c) >= 3) { st = 3; fc = c; fn = run(t, c); fi = lead($0) }
+      next
+    }
+    st == 3 {
+      t = $0; sub(/^ +/, "", t)
+      if (substr(t, 1, 1) == fc && run(t, fc) >= fn) { r = substr(t, run(t, fc) + 1); if (r ~ /^ *$/) exit }
+      print (lead($0) >= fi ? substr($0, fi + 1) : t)
+    }' "$LIFECYCLE_REF"
+}
+
+# ref_fill <placeholder> <value> …: stdin with each placeholder replaced by
+# its value, literally (no regex: the role placeholder holds "|").
+# shellcheck disable=SC2016  # awk program, not shell expansion
+ref_fill() {
+  LC_ALL=C awk 'BEGIN { for (i = 1; i < ARGC; i += 2) { k[++n] = ARGV[i]; v[n] = ARGV[i + 1] } ARGC = 1 }
+    { s = $0
+      for (j = 1; j <= n; j++) {
+        o = ""
+        while ((p = index(s, k[j])) > 0) { o = o substr(s, 1, p - 1) v[j]; s = substr(s, p + length(k[j])) }
+        s = o s
+      }
+      print s }' "$@"
+}
+
+# ref_task <fence> [<chunk>]: the template <fence> (as read into REF_*),
+# its placeholders resolved as the injector resolves them for the fixture
+# plan, after a blank line.
+ref_task() {
+  printf '\n'
+  printf '%s\n' "$1" | ref_fill '{C}' "${2:-}" '{plan-path}' "$PLAN" '{plan-stem}' "$PLAN_STEM" \
+    '{spec-path}' docs/specs/SPEC-AUTH-001-token.md '{target | constraint | amends | infer}' target
+}
+
+# ref_plan <slot>…: the fixture plan, its fixture blocks (plan_block) and
+# its injected tasks (gate1, gate2, update, final, finalize: ref_task)
+# written in the order given.
+ref_plan() {
+  local b
+  _PLAN_TASK=0
+  mkdir -p "$(dirname "$PLAN")"
+  for b in "$@"; do
+    case "$b" in
+      gate1|gate2) ref_task "$REF_GATE" "${b#gate}" ;;
+      update) ref_task "$REF_UPDATE" ;;
+      final) ref_task "$REF_FINAL" ;;
+      finalize) ref_task "$REF_FINALIZE" ;;
+      *) plan_block "$b" ;;
+    esac
+  done > "$PLAN"
+}
+
+test_v12_reference_template_passes() {
+  echo "test: V12 — a plan injected from the reference's templates passes"
+  REF_UPDATE=$(ref_fence '### Plan Phase' '2. ')
+  REF_GATE=$(ref_fence '### Plan Phase' '2b. ')
+  REF_FINALIZE=$(ref_fence '### Plan Phase' '4. ')
+  REF_FINAL=$(ref_fence '### Plan Phase' '4b. ')
+  assert_contains "$(printf '%s\n' "$REF_UPDATE" | head -n 1)" "### Task " "step 2's fence opens with a task heading"
+  assert_contains "$(printf '%s\n' "$REF_GATE" | head -n 1)" "### Task " "step 2b's fence opens with a task heading"
+  assert_contains "$(printf '%s\n' "$REF_FINALIZE" | head -n 1)" "### Task " "step 4's fence opens with a task heading"
+  assert_contains "$(printf '%s\n' "$REF_FINAL" | head -n 1)" "### Task " "step 4b's fence opens with a task heading"
+  # Every placeholder the templates carry is one ref_task resolves.
+  assert_eq "" "$(printf '%s\n' "$REF_UPDATE" "$REF_GATE" "$REF_FINALIZE" "$REF_FINAL" \
+    | ref_fill '{C}' 1 '{plan-path}' p '{plan-stem}' s '{spec-path}' p '{target | constraint | amends | infer}' target \
+    | grep -E '\{[A-Za-z][^}]*\}' || true)" "no placeholder ref_task leaves unresolved"
+  claims_fixture
+  # Each chunk: impl → gate → spec-update; the last ends final gate → finalize.
+  ref_plan head chunk1 impl1 gate1 update chunk2 impl2 gate2 update final finalize
+  git add "$PLAN"
+  cl validate --staged
+  assert_v12_ok "the injected plan, staged"
+  # Controls: the same plan with an order the injection steps forbid is a
+  # finding, so the pass above is not V12 skipping a plan it cannot read (a
+  # spec-update, finalize or Specs block it did not recognise).
+  ref_plan head chunk1 impl1 update gate1 chunk2 impl2 gate2 update final finalize
+  git add "$PLAN"
+  cl validate --staged
+  assert_v12 "chunk 1: no claims gate before the spec-update task" "control: chunk 1's gate after its spec-update task"
+  ref_plan head chunk1 impl1 gate1 update chunk2 impl2 gate2 update finalize final
+  git add "$PLAN"
+  cl validate --staged
+  assert_v12 "no final claims gate before the finalize task" "control: the final gate after the finalize task"
+  teardown
+}
+
 # --- V6 direction policy (Task 15) ----------------------------------------------
 
 POLICY_CHUNK_REC=docs/spec-claims/gates/$PLAN_STEM/chunk-1.json
@@ -9692,6 +9804,9 @@ run_tests() {
   test_planted_unbuilt_requirement_v8
   test_planted_threshold_change_run_red
   test_planted_deploy_config_v10
+
+  # --- Task 25: the reference's injected task templates ---
+  test_v12_reference_template_passes
 
   print_summary
 }

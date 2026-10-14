@@ -1291,4 +1291,38 @@ assert_contains "$TEMPLATES" "### Claims verdict" "compliance report has a Claim
 assert_contains "$(_section "$TEMPLATES" '## Spec Compliance Report')" "claims-enabled projects only" \
   "Claims verdict block is marked claims-enabled projects only"
 
+echo "--- spec claims: stubs and injected gates ---"
+# Task 25: spec-generate's claim stubs and spec-inject's injected claims
+# gates. The titles the reference injects are the ones V12 parses
+# (doc-tools.sh _CL_GATE_TITLE_PREFIX / _CL_FINAL_GATE_TITLE), so the
+# constants are pinned here too, and the reference is pinned to contain each
+# constant's value as read from doc-tools.sh, never re-typed. Their order in
+# an injected plan (gate before spec-update) is not pinned on the
+# reference's text order (step 2 describes the spec-update template before
+# step 2b's gate): test-spec-claims.sh's test_v12_reference_template_passes
+# assembles a plan from the reference's fences and runs V12 on it.
+assert_contains "$ACTIONS" 'Claims gate (chunk {C})' "the chunk gate's title template"
+assert_contains "$ACTIONS" 'Final claims gate' "the final gate's title"
+assert_contains "$ACTIONS" '**Claims:** none — <reason>' "the Claims none line form"
+assert_contains "$ACTIONS" 'Run by the orchestrating agent, not a delegated implementer' \
+  "the gate tasks are run by the orchestrating agent"
+assert_contains "$ACTIONS" 'Inject these only when `docs/spec-claims/` exists; otherwise the plan is unchanged.' \
+  "the injections are conditional on docs/spec-claims/"
+assert_contains "$ACTIONS" '6b. **Claim stubs**' "spec-generate step 6b writes claim stubs"
+assert_contains "$ACTIONS" 'DOC-STALE commit (with the record) → `promote` → commit → re-run Step 1' \
+  "the gate's DOC-STALE re-promotion order"
+assert_contains "$ACTIONS" '**target**, fully covered by this plan → set `Implemented`, subject to R5.' \
+  "Task N+2 Step 1's target branch is subject to R5"
+_dt_src="$REPO_ROOT/scripts/doc-tools.sh"
+assert_eq "1" "$(grep -cF "_CL_GATE_TITLE_PREFIX='Claims gate (chunk '" "$_dt_src" || true)" \
+  "doc-tools.sh defines _CL_GATE_TITLE_PREFIX on exactly one line"
+assert_eq "1" "$(grep -cF "_CL_FINAL_GATE_TITLE='Final claims gate'" "$_dt_src" || true)" \
+  "doc-tools.sh defines _CL_FINAL_GATE_TITLE on exactly one line"
+_gp=$(sed -n "s/^_CL_GATE_TITLE_PREFIX='\\(.*\\)'\$/\\1/p" "$_dt_src")
+_fg=$(sed -n "s/^_CL_FINAL_GATE_TITLE='\\(.*\\)'\$/\\1/p" "$_dt_src")
+assert_contains "$ACTIONS" "### Task N+1g: ${_gp:-<unset>}{C})" \
+  "the injected chunk gate's heading starts with the parser's _CL_GATE_TITLE_PREFIX"
+assert_contains "$ACTIONS" "### Task N+2g: ${_fg:-<unset>}" \
+  "the injected final gate's heading is the parser's _CL_FINAL_GATE_TITLE"
+
 print_summary
