@@ -9125,7 +9125,8 @@ docs/issues/2026-01-06-wontfix.md	unassigned
 docs/issues/2026-01-09-new.md	-" "$(lg_init_rows "$d" | cut -f 1,5)" \
     "kept: checkout, unassigned (an open item's and a terminal one's over its pre-fill); dropped: orders; the new item added"
   assert_eq "$filled" "$(cat "$d.bak" 2>/dev/null)" "the previous file is kept as .bak"
-  assert_json_field "$LG_OUT" '[.counts.kept, .counts.dropped] | map(tostring) | join("|")' "4|1" "JSON: 4 kept (3 filled in, 1 pre-filled), 1 dropped"
+  assert_json_field "$LG_OUT" '[.counts.kept, .counts.dropped] | map(tostring) | join("|")' "3|1" \
+    "JSON: 3 kept (filled in; the won't-fix item's pre-fill is recomputed, Task 15 R9), 1 dropped"
   local r
   r=$(cat docs/ledger/r.md)
   assert_contains "$r" '`docs/issues/2026-01-05-misc.md` (`orders`: not a registered ledger id)' "the report names the dropped decision, its value and why"
@@ -9279,6 +9280,84 @@ test_lg_init_split_boundary_40() {
   assert_eq "app||app/**" "$(jq -r '.ledgers[] | select(.title == "app") | "\(.id)|\(.paths | join(","))|\(.residual_paths | join(","))"' docs/ledger/ledgers.proposed.json)" \
     "5 of 11 (45 %): split, app keeps the residual"
   assert_eq "5" "$(jq '[.ledgers[] | select(.paths[0] // "" | startswith("app/"))] | length' docs/ledger/ledgers.proposed.json)" "one ledger per second-level dir"
+  teardown
+}
+
+# --- Task 15 R9: carry from the Task 14 review ----------------------------------
+
+# lg_mode <file>: its permission string (ls -l's first 10 characters).
+lg_mode() {
+  ls -l -- "$1" | cut -c 1-10
+}
+
+test_lg_init_files_umask_mode() {
+  echo "test: init's files get the mode a new file gets under the umask (022 → -rw-r--r--), not mktemp's 0600"
+  lg_init_fixture
+  lg_init_edit_reg
+  local m
+  m=$(umask)
+  umask 022
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  umask "$m"
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_eq "-rw-r--r--" "$(lg_mode docs/ledger/r.md)" "the report: 0644"
+  assert_eq "-rw-r--r--" "$(lg_mode docs/ledger/r.md.decisions.tsv)" "the decisions file: 0644"
+  rm -f docs/ledger/edited.json
+  umask 027
+  lg init --report docs/ledger/r2.md
+  umask "$m"
+  assert_eq "-rw-r-----" "$(lg_mode docs/ledger/ledgers.proposed.json)" "the proposal under umask 027: 0640"
+  teardown
+}
+
+test_lg_init_guard_same_file() {
+  echo "test: the report guard refuses any name of a protected file — a hard link, and another case on a case-insensitive file system (SKIP on a case-sensitive one)"
+  lg_init_fixture
+  lg_registry "$LG_INIT_REG"
+  git add docs/ledger/ledgers.json && git commit -qm registry
+  local before
+  before=$(cksum < docs/ledger/ledgers.json)
+  ln docs/ledger/ledgers.json docs/ledger/hard.md
+  lg init --report docs/ledger/hard.md
+  assert_eq "3" "$LG_RC" "a hard link to ledgers.json: exits 3"
+  assert_contains "$LG_ERR" "the same file" "the message says why"
+  rm -f docs/ledger/hard.md
+  : > docs/ledger/ci-probe
+  if [ -e docs/ledger/CI-PROBE ]; then
+    lg init --report docs/ledger/LEDGERS.json
+    assert_eq "3" "$LG_RC" "case-insensitive file system: docs/ledger/LEDGERS.json exits 3"
+    lg init --report docs/LEDGER/Ledgers.json --format json
+    assert_eq "3" "$LG_RC" "docs/LEDGER/Ledgers.json exits 3"
+    assert_eq "1" "$(json_count "$LG_OUT")" "JSON: one object"
+  else
+    record_skip "case-sensitive file system here — the case-change bypass (LEDGERS.json) cannot happen, so it is not tested"
+  fi
+  assert_eq "$before" "$(cksum < docs/ledger/ledgers.json)" "ledgers.json untouched"
+  rm -f docs/ledger/ci-probe
+  teardown
+}
+
+test_lg_init_stale_prefill_recomputed() {
+  echo "test: a re-run recomputes a terminal row's pre-fill (decision = suggestion): a won't-fix item pre-filled unassigned becomes checkout once checkout is registered"
+  lg_init_fixture
+  lg_item docs/issues/2026-01-07-wf.md "status: Won't Fix" 'ledger: checkout'
+  git add -A && git commit -qm wf
+  lg_init_edit_reg '{"schema":"ledger-registry/1","ledgers":[{"id":"orders","title":"Orders","kind":"service","status":"active","paths":["server/orders/**"]}]}'
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  assert_eq "0" "$LG_RC" "first run exits 0"
+  local d=docs/ledger/r.md.decisions.tsv
+  assert_eq "docs/issues/2026-01-07-wf.md	wontfix	unassigned	none	unassigned" "$(lg_init_rows "$d" | grep 'wf.md')" \
+    "pre-filled unassigned (checkout is not registered yet)"
+  # A terminal row the user changed is a decision: it stays.
+  lg_init_decide "$d" docs/issues/2026-01-04-old-bug.md orders
+  lg_init_edit_reg
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json --format json
+  assert_eq "0" "$LG_RC" "re-run exits 0"
+  assert_eq "docs/issues/2026-01-07-wf.md	wontfix	checkout	ledger-field	checkout" "$(lg_init_rows "$d" | grep 'wf.md')" \
+    "the stale pre-fill is recomputed: checkout"
+  assert_eq "docs/issues/2026-01-04-old-bug.md	orders" "$(lg_init_rows "$d" | grep 'old-bug' | cut -f 1,5)" \
+    "a terminal row's changed decision is kept"
+  assert_json_field "$LG_OUT" '[.counts.kept, .counts.dropped] | map(tostring) | join("|")' "1|0" "JSON: only the changed decision is kept"
   teardown
 }
 
@@ -9615,6 +9694,9 @@ run_tests() {
   test_lg_init_custom_items_adapter_no_gh
   test_lg_init_legacy_rows_and_links
   test_lg_init_split_boundary_40
+  test_lg_init_files_umask_mode
+  test_lg_init_guard_same_file
+  test_lg_init_stale_prefill_recomputed
 
   print_summary
 }

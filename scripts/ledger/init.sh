@@ -53,8 +53,9 @@
 #    least two); a single registered "ledger:<id>" label (label); else
 #    unassigned (none). A decisions file from an earlier run: each filled-in
 #    decision carries over by path while it is a registered id or
-#    "unassigned" (the others are dropped and named in the report); the
-#    old file is kept as <decisions>.bak.
+#    "unassigned" (the others are dropped and named in the report) — but a
+#    terminal row whose decision equals its suggestion is the pre-fill, and
+#    is recomputed; the old file is kept as <decisions>.bak.
 # Writes: each file through a temp file beside it, then mv; the report
 # last. The report and decisions paths never resolve (spelling, symbolic
 # links) to ledgers.json, config.json, the legacy map, the proposal or the
@@ -120,9 +121,10 @@ _lg_init_canon() {
 
 # _lg_init_guard <report> <decisions> <proposal> [<registry>]: exit 3 when
 # the report or its decisions file is — under any spelling, through any
-# symbolic link — docs/ledger/ledgers.json, docs/ledger/config.json, the
-# legacy map (config "legacy"; docs/ledger/legacy.json), the proposal or
-# the --registry file.
+# symbolic link, and (when both exist) any name of the same file: another
+# case on a case-insensitive file system, a hard link — docs/ledger/
+# ledgers.json, docs/ledger/config.json, the legacy map (config "legacy";
+# docs/ledger/legacy.json), the proposal or the --registry file.
 _lg_init_guard() {
   local report="$1" dec="$2" t w c lg
   local targets=()
@@ -137,6 +139,11 @@ _lg_init_guard() {
       _lg_init_canon "$t"
       if [ "$c" = "$_LG_CANON" ]; then
         _lg_usage "--report $report: $w would overwrite $t"
+      fi
+      # The same file under another spelling the canonical form cannot see:
+      # a case-insensitive file system (LEDGERS.json), a hard link.
+      if [ -e "$w" ] && [ -e "$t" ] && [ "$w" -ef "$t" ]; then
+        _lg_usage "--report $report: $w would overwrite $t (the same file)"
       fi
     done
   done
@@ -596,7 +603,11 @@ EOS
       | ($own | split("\n") | map(select(. != "") | split("\t") | {key: (.[0:-1] | join("\t") | gsub("\u0001"; "\n")), value: .[-1]}) | from_entries) as $O
       | ($hosted | split("\n") | map(select(. != "") | fromjson | {key: .ref, value: (.labels // [])}) | from_entries) as $LB
       | ($prev | split("\n") | map(sub("\r$"; "") | select(. != "" and (startswith("#") | not)) | split("\t")
-         | select(length >= 5 and .[4] != "") | {path: .[0], v: .[4]})) as $PV
+         | select(length >= 5 and .[4] != "")
+         # A terminal row whose decision is its suggestion is the pre-fill:
+         # recomputed, never carried over (the registry may have grown).
+         | select(. as $r | ((["fixed", "closed", "wontfix"] | index([$r[1]])) != null and $r[4] == $r[2]) | not)
+         | {path: .[0], v: .[4]})) as $PV
       | ($ix[0].items) as $I
       | ($I | length) as $N
       | ([$f[0].ledgers[] | select($isreg[.id]) | .id as $lid | .file as $file | .members[] | {item, file: $file, row, id: $lid}]
@@ -634,11 +645,13 @@ EOS
 }
 
 # _lg_init_put <src> <target>: <target> becomes a copy of <src> atomically
-# (a temp file in <target>'s directory, then mv).
+# (a temp file in <target>'s directory, then mv), with the mode a new file
+# gets under the umask (mktemp's 0600 would survive the mv).
 _lg_init_put() {
-  local tmp
+  local tmp mode
   tmp=$(mktemp "$(dirname -- "$2")/.lg-init.XXXXXX") || _lg_die "cannot create a temp file beside $2"
-  if ! cp -- "$1" "$tmp" || ! mv -f -- "$tmp" "$2"; then
+  mode=$(printf '%o' $(( 0666 & ~0$(umask) ))) || mode=644
+  if ! cp -- "$1" "$tmp" || ! chmod "$mode" "$tmp" || ! mv -f -- "$tmp" "$2"; then
     rm -f -- "$tmp"
     _lg_die "cannot write $2"
   fi
