@@ -950,7 +950,7 @@ test_pre_push_claims_advisory_never_blocks() {
   assert_eq "1" "$(stub_runs)" "one run call"
   run_pre_push "$(push_line feature)"
   assert_eq "0" "$RUN_RC" "nothing red: exits 0"
-  assert_eq "" "$RUN_OUT$RUN_ERR" "nothing red or indeterminate: silent"
+  assert_contains "$RUN_OUT" "doc-superpowers: claims (advisory): 0 red, 0 indeterminate" "nothing red or indeterminate: the tally still prints"
   : > "$STUB_LOG"
   run_pre_push "$(push_line feature)" STUB_OUTCOME=pass DOC_SUPERPOWERS_CLAIMS_SKIP=1
   assert_eq "0" "$RUN_RC" "CLAIMS_SKIP: exits 0"
@@ -992,14 +992,33 @@ EOF
   teardown
 }
 
+test_pre_push_claims_force_push_ranges_from_merge_base() {
+  echo "test: pre-push — a remote oid that is not an ancestor (force-push, unfetched): from the merge-base"
+  claims_hook_fixture
+  claims_code_commit 901
+  claims_code_commit 902
+  local remote
+  remote=$(git rev-parse HEAD)
+  git reset -q --hard HEAD~1
+  # remote..local is empty here: only the merge-base range reaches 901's change.
+  run_pre_push "refs/heads/feature $(git rev-parse HEAD) refs/heads/feature $remote" STUB_OUTCOME=pass
+  assert_eq "0" "$RUN_RC" "a force-push: exits 0"
+  assert_contains "$RUN_OUT" "claims (advisory): 1 red, 0 indeterminate" "a force-push: the branch's own commits are run"
+  run_pre_push "refs/heads/feature $(git rev-parse HEAD) refs/heads/feature 1234567890abcdef1234567890abcdef12345678" STUB_OUTCOME=pass
+  assert_eq "0" "$RUN_RC" "an unfetched remote oid: exits 0"
+  assert_contains "$RUN_OUT" "claims (advisory): 1 red, 0 indeterminate" "an unfetched remote oid: from the merge-base too"
+  teardown
+}
+
 test_pre_push_claims_runs_without_tags() {
   echo "test: pre-push — the claims leg runs where the release reminder stops (no tag)"
   claims_hook_fixture
   claims_code_commit 901
   assert_eq "" "$(git tag)" "the fixture has no tag"
-  run_pre_push "$(push_line feature)" STUB_OUTCOME=pass
+  run_pre_push "$(push_line feature)"
   assert_eq "0" "$RUN_RC" "exits 0"
-  assert_contains "$RUN_OUT" "claims (advisory): 1 red" "the claims line is printed"
+  assert_contains "$RUN_OUT" "doc-superpowers: claims (advisory): 0 red, 0 indeterminate" "the claims line is printed"
+  assert_eq "1" "$(stub_runs)" "…after the claims ran"
   assert_not_contains "$RUN_OUT" "commits since" "no release reminder"
   teardown
 }
@@ -1014,9 +1033,23 @@ test_pre_push_claims_two_refs_both_processed() {
   local stdin
   stdin="$(push_line feature)
 refs/heads/feature2 $(git rev-parse feature2) refs/heads/feature2 $(git rev-parse main)"
-  run_pre_push "$stdin" STUB_OUTCOME=pass
+  # DOC_TOOLS logs the stdin bytes each doc-tools call received: a call the
+  # hook made without </dev/null would read (and so drop) the next ref line.
+  local log wrap
+  log=$(harness_mktemp dt-stdin)
+  wrap="$(harness_mktemp_d dt-wrap)/doc-tools.sh"
+  cat > "$wrap" <<EOF
+#!/bin/sh
+n=\$(cat | wc -c | tr -d ' ')
+printf '%s stdin %s\n' "\$1 \$2" "\$n" >> "$log"
+exec "$DOC_TOOLS" "\$@"
+EOF
+  chmod 755 "$wrap"
+  run_pre_push "$stdin" STUB_OUTCOME=pass DOC_TOOLS="$wrap"
   assert_eq "0" "$RUN_RC" "exits 0"
   assert_eq "2" "$(grep -c 'claims (advisory): 1 red' <<<"$RUN_OUT" || true)" "a claims line per ref"
+  assert_eq "2" "$(grep -c '^claims run stdin ' "$log" || true)" "doc-tools saw two claims run calls"
+  assert_eq "0" "$(grep -vc ' stdin 0$' "$log" || true)" "every doc-tools call read 0 stdin bytes"
   assert_eq "2" "$(stub_runs)" "the stub ran once per ref"
   assert_eq "0" "$(grep '^stdin ' "$STUB_LOG" | grep -vc '^stdin 0$' || true)" "the stub read no stdin bytes"
   assert_not_contains "$(cat "$STUB_LOG")" "refs/heads/" "no ref line reached the stub"
@@ -1058,6 +1091,11 @@ test_pre_push_claims_attests_open_plans() {
   assert_contains "$RUN_OUT" "claims (advisory): 1 red, 0 indeterminate" "its findings join the tally"
   assert_contains "$RUN_OUT" "  attest $CLAIMS_ID: named claim still unbuilt" "…and the finding lines"
   : > "$log"
+  run_pre_push "$(push_line feature)
+refs/heads/feature $(git rev-parse feature) refs/heads/mirror $ZERO_OID" DOC_TOOLS="$wrap"
+  assert_eq "2" "$(grep -c '^claims run' "$log" || true)" "HEAD's oid pushed under two names: run per ref"
+  assert_eq "1" "$(grep -c '^claims attest' "$log" || true)" "…attest once per push"
+  : > "$log"
   DOC_SUPERPOWERS_SKIP=1 git checkout -qb other
   DOC_SUPERPOWERS_SKIP=1 git commit -q --allow-empty -m other
   run_pre_push "$(push_line feature)" DOC_TOOLS="$wrap"
@@ -1077,6 +1115,7 @@ test_pre_commit_claims_skip_env
 test_pre_commit_claims_runs_without_doc_index
 test_pre_push_claims_advisory_never_blocks
 test_pre_push_claims_could_not_run
+test_pre_push_claims_force_push_ranges_from_merge_base
 test_pre_push_claims_runs_without_tags
 test_pre_push_claims_two_refs_both_processed
 test_pre_push_claims_quiet
