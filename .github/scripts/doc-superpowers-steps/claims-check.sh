@@ -43,10 +43,12 @@
 # description; empty when there is none).
 #
 # Outputs: status=disabled|ok|findings|indeterminate; findings (the blocking
-# findings only: advisories never count), report, amendments and
+# findings only, each (claim, check, message) once: advisories never
+# count), report, amendments and
 # amendments_count; when scheduled also judge_sample (comma-separated ids).
 # With disabled (or when nothing could run): status, findings=0 and
-# amendments_count=0 only.
+# amendments_count=0 only. A PR that deletes docs/spec-claims/ (present at
+# its base) is status=findings, findings=1, exit 1.
 #
 # Exit codes: 0; 1 as above; 2 bad usage.
 set -euo pipefail
@@ -75,6 +77,24 @@ out() {
 }
 
 if [ ! -d docs/spec-claims ]; then
+  # A PR that deletes docs/spec-claims/ must not switch its own check off:
+  # present at the PR's base, gone here, is a finding (the deleted-index
+  # guard of freshness-check.sh). A base that does not resolve, or that has
+  # no docs/spec-claims either, leaves the project inert.
+  if [ "$MODE" = pr ]; then
+    case "${RANGE:-}" in
+      ?*...?*)
+        if b=$(git rev-parse --verify --quiet "${RANGE%%...*}^{commit}") \
+          && git cat-file -e "$b:docs/spec-claims" 2>/dev/null; then
+          out status findings
+          out findings 1
+          out amendments_count 0
+          echo "::error::doc-superpowers: this change deletes docs/spec-claims/, present at the base ($b): the spec claims cannot be switched off by the change they would check."
+          exit 1
+        fi
+        ;;
+    esac
+  fi
   echo "doc-superpowers: no docs/spec-claims/ here, so there are no spec claims to check."
   out status disabled
   out findings 0
@@ -183,8 +203,13 @@ case "$MODE" in
     fi
     changed="$RUNNER_TEMP/claims-changed-files.txt"
     # -z: git quotes no name.
-    git diff -z --name-only --no-renames "$base...$head" | tr '\000' '\n' > "$changed" \
-      || cannot_run "git diff $base...$head failed"
+    # A failure here (or of the merge-base below) keeps what validate and
+    # run found: the run is indeterminate, never thrown away.
+    if ! git diff -z --name-only --no-renames "$base...$head" | tr '\000' '\n' > "$changed"; then
+      echo "doc-superpowers: git diff $base...$head failed: no plan is attested."
+      : > "$changed"
+      indet=1
+    fi
     while IFS= read -r plan; do
       matched=0
       while IFS= read -r g; do
@@ -203,12 +228,21 @@ case "$MODE" in
     done < <(git ls-files -z | tr '\000' '\n')
     # The amendment batch, read from the merge-base. Its count from the JSON
     # rows; the Markdown only when there is one (it always has a heading).
-    mb=$(git merge-base "$base" "$head") || cannot_run "no merge-base of $base and $head"
+    # A rulings run that could not run (exit 2 or 3, or a verdict saying so)
+    # is indeterminate whatever rows it printed.
     rc=0
-    "$DOC_TOOLS" claims rulings --range "$mb..$head" ${base_args[@]+"${base_args[@]}"} \
-      < /dev/null > "$RUNNER_TEMP/claims-rulings.json" || rc=$?
-    if ! amendments_count=$(jq -er '.results | length' "$RUNNER_TEMP/claims-rulings.json" 2>/dev/null); then
-      echo "doc-superpowers: claims rulings exited $rc without a verdict object: the amendment batch is unknown."
+    if ! mb=$(git merge-base "$base" "$head"); then
+      echo "doc-superpowers: no merge-base of $base and $head: the amendment batch is unknown."
+      indet=1
+    else
+      "$DOC_TOOLS" claims rulings --range "$mb..$head" ${base_args[@]+"${base_args[@]}"} \
+        < /dev/null > "$RUNNER_TEMP/claims-rulings.json" || rc=$?
+    fi
+    if [ -z "${mb:-}" ]; then
+      amendments_count=0
+    elif [ "$rc" -gt 1 ] \
+      || ! amendments_count=$(jq -er 'select((.exit // 0) <= 1) | .results | length' "$RUNNER_TEMP/claims-rulings.json" 2>/dev/null); then
+      echo "doc-superpowers: claims rulings exited $rc without a usable verdict: the amendment batch is unknown."
       amendments_count=0
       indet=1
     elif [ "$amendments_count" -gt 0 ]; then
@@ -232,7 +266,9 @@ case "$MODE" in
 esac
 
 jq -s '.' "$verdicts" > "$report" || cannot_run "cannot write $report"
-counts=$(jq -r '[(map(.findings // [] | length) | add // 0),
+# A red claim can be reported by more than one call (run and attest, run
+# and promote --reverify): findings count once per (claim, check, message).
+counts=$(jq -r '[([.[] | (.findings // [])[]] | unique_by([.claim, .check, .message]) | length),
                  (map(select((.exit // 0) > 1 or .error != null or ((.indeterminate // []) | length) > 0)) | length)]
                 | "\(.[0]) \(.[1])"' "$report") || cannot_run "cannot read $report"
 # shellcheck disable=SC2086  # two numbers
@@ -263,7 +299,8 @@ fi
 
 scope_note="${base:+ for ${base:0:12}...${head:0:12}}"
 echo "Spec claims$scope_note: $status, $findings finding(s), $amendments_count amendment(s)."
-jq -r '[.[] | .verb as $v | (.findings // [])[] | "  \($v): \(.check // "") \(.claim // .doc // "") \(.message // "")"] | .[:200][]' "$report"
+jq -r '[.[] | .verb as $v | (.findings // [])[] | . + {verb: $v}] | unique_by([.claim, .check, .message])
+  | map("  \(.verb): \(.check // "") \(.claim // .doc // "") \(.message // "")") | .[:200][]' "$report"
 jq -r '[.[] | .verb as $v | ((.indeterminate // [])[] | "  \($v) (indeterminate): \(.claim // .node // "") \(.message // .reason // "")"),
         (select(.error != null) | "  \($v) (could not run): \(.error)")] | .[:200][]' "$report"
 
