@@ -9956,6 +9956,116 @@ test_lg_init_import_list_field() {
   teardown
 }
 
+# --- Task 15 fix round 2 ------------------------------------------------------------
+
+test_lg_init_rehome_malformed_aliases_finding() {
+  echo "test: a re-home over an aliases field the parser rejects (a nested map) is a finding — rc 1, the file untouched, nothing allocated"
+  lg_fixture
+  printf -- '---\nstatus: Open\nkey: orders-3\nledger: orders\nsummary: Moving\naliases:\n  legacy: tier1-9\n  note: keep me\n---\n# u\n' > docs/issues/u.md
+  git add -A && git commit -qm items
+  lg_accept_remote
+  lg_init_edit_reg
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  lg_init_decide docs/ledger/r.md.decisions.tsv docs/issues/u.md checkout
+  local before
+  before=$(cksum < docs/issues/u.md)
+  lg init --accept docs/ledger/r.md.decisions.tsv --format json
+  assert_eq "1" "$LG_RC" "exits 1"
+  assert_json_field "$LG_OUT" '.findings | map(select(.path == "docs/issues/u.md") | .detail) | join(" ") | test("aliases")' "true" \
+    "the finding names the aliases field"
+  assert_eq "$before" "$(cksum < docs/issues/u.md)" "the item is untouched (keep me stays)"
+  assert_eq "absent" "$(lg_remote_counters)" "nothing allocated"
+  assert_file_not_exists docs/ledger/ledgers.json "nothing written"
+  teardown
+}
+
+# lg_get_adapter: tools/items.sh lists x#1 and x#2; get x#2 prints its
+# object; get x#1 prints what tools/mode says — nothing (empty), two
+# objects (two), or its object (ok); note succeeds.
+lg_get_adapter() {
+  mkdir -p tools
+  cat > tools/items.sh <<'EOF'
+#!/bin/sh
+one='{"ref":"x#1","url":"https://x.example/1","title":"One","body":"b1","created":"2026-02-01","fields":{},"labels":[],"status":"Open"}'
+two='{"ref":"x#2","url":"https://x.example/2","title":"Two","body":"b2","created":"2026-02-02","fields":{},"labels":[],"status":"Open"}'
+case "$1" in
+  list) printf '%s\n%s\n' "$one" "$two" ;;
+  get)
+    if [ "$2" = "x#2" ]; then printf '%s\n' "$two"; exit 0; fi
+    case "$(cat tools/mode)" in
+      empty) ;;
+      two) printf '%s\n%s\n' "$one" "$one" ;;
+      *) printf '%s\n' "$one" ;;
+    esac ;;
+  note) exit 0 ;;
+  *) exit 3 ;;
+esac
+EOF
+  chmod +x tools/items.sh
+}
+
+test_lg_init_import_get_output_counts() {
+  echo "test: --import counts each get's output — nothing, or two objects, is no item: exit 2, nothing imported from there on, items.adapter kept"
+  lg_fixture
+  lg_get_adapter
+  lg_enable '{"items":{"adapter":"tools/items.sh"}}'
+  git add -A && git commit -qm adapter
+  echo empty > tools/mode
+  lg init --import
+  assert_eq "2" "$LG_RC" "an empty get: exits 2"
+  assert_contains "$LG_ERR" "x#1: the items adapter's get printed no {ref, title, body, fields} object" "the message names the ref"
+  assert_file_not_exists docs/issues/2026-02-02-two.md "x#2 (after it) not imported"
+  assert_contains "$(cat docs/ledger/config.json)" "tools/items.sh" "items.adapter kept"
+  echo two > tools/mode
+  lg init --import
+  assert_eq "2" "$LG_RC" "a get printing two objects: exits 2"
+  assert_contains "$LG_ERR" "x#1: the items adapter's get printed no" "the message"
+  assert_file_not_exists docs/issues/2026-02-01-one.md "x#1 not imported"
+  echo ok > tools/mode
+  lg init --import
+  assert_eq "0" "$LG_RC" "one object each: exits 0"
+  assert_file_exists docs/issues/2026-02-01-one.md "x#1 imported"
+  assert_file_exists docs/issues/2026-02-02-two.md "x#2 imported"
+  teardown
+}
+
+test_lg_init_accept_findings_before_offline() {
+  echo "test: offline with hosted writes to make, and a bad row: the findings win (rc 1); without the bad row, offline exits 2"
+  lg_init_fixture
+  lg_accept_remote
+  lg_fake_gh
+  lg_accept_gh_issues
+  lg_init_edit_reg
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json --sources files,github
+  lg_init_decide docs/ledger/r.md.decisions.tsv gh#7 checkout
+  lg_init_decide docs/ledger/r.md.decisions.tsv docs/issues/2026-01-01-cart-total.md nope
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg init --accept docs/ledger/r.md.decisions.tsv
+  assert_eq "1" "$LG_RC" "offline and a bad row: exits 1"
+  assert_contains "$LG_OUT" "nope" "the finding"
+  lg_init_decide docs/ledger/r.md.decisions.tsv docs/issues/2026-01-01-cart-total.md checkout
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg init --accept docs/ledger/r.md.decisions.tsv
+  assert_eq "2" "$LG_RC" "offline, the rows valid: exits 2"
+  assert_contains "$LG_ERR" "offline" "the reason"
+  assert_file_not_exists docs/ledger/config.json "nothing written"
+  lg_fake_gh_off
+  teardown
+}
+
+test_lg_init_import_empty_globs_finding() {
+  echo "test: --import with items.globs [] (hosted only): the finding says to add an items.globs entry first"
+  lg_fixture
+  lg_fake_gh
+  lg_accept_gh_issues
+  lg_enable '{"items":{"globs":[],"adapter":"doc-superpowers:ledger-items-gh"}}'
+  git add -A && git commit -qm config
+  lg init --import
+  assert_eq "1" "$LG_RC" "exits 1"
+  assert_contains "$LG_OUT" "add an items.globs entry (e.g. docs/issues/*.md)" "the finding says what to do"
+  assert_eq "" "$(git status --porcelain --untracked-files=all)" "nothing written"
+  lg_fake_gh_off
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -10314,6 +10424,10 @@ run_tests() {
   test_lg_init_stub_slug_collision_and_length
   test_lg_init_accept_malformed_and_duplicate_rows
   test_lg_init_import_list_field
+  test_lg_init_rehome_malformed_aliases_finding
+  test_lg_init_import_get_output_counts
+  test_lg_init_accept_findings_before_offline
+  test_lg_init_import_empty_globs_finding
 
   print_summary
 }
