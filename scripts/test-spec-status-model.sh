@@ -1418,6 +1418,17 @@ assert_true "ADR template: the status-block comment sits between ## Context and 
 assert_eq '<!-- spec-claims:descriptive -->' "$(grep -A1 -x -F '## Implementation Notes' <<<"$_sc_spec" | sed -n 2p)" \
   "spec template: the descriptive marker directly follows ## Implementation Notes (V8 reads it there only)"
 assert_contains "$_sc_spec" 'references/spec-claims.md' "spec template: its note links references/spec-claims.md"
+assert_not_contains "$DOCSPEC" 'once every claim is built' \
+  "doc-spec.md: Claims: N built counts the non-retired claims (render's rule), never every claim"
+# The CI claims job's scope, as the template gates it: same-repository PRs,
+# never dependabot's. The reference must say so (a fork PR is not checked).
+_sc_job=$(awk '/^  claims:$/ { s = 1; print; next } s && /^  [A-Za-z_-]+:/ { exit } s' "$CI/doc-spec-verify.yml")
+assert_contains "$_sc_job" 'github.event.pull_request.head.repo.full_name == github.repository &&' \
+  "doc-spec-verify.yml: the claims job runs on same-repository PRs only"
+assert_contains "$_sc_job" "github.actor != 'dependabot[bot]'" "doc-spec-verify.yml: …and not on dependabot's"
+assert_contains "$SPECCLAIMS" 'every same-repository PR (fork and dependabot PRs are not checked)' \
+  "spec-claims.md: the CI claims job's scope (fork and dependabot PRs are not checked)"
+assert_not_contains "$SPECCLAIMS" 'checks every PR' "spec-claims.md: never says the CI job checks every PR"
 
 # _fence_blocks <file> <lang> <dir> <ext>: each unindented ```<lang> fence of
 # <file> written to <dir>/<n>.<ext>; prints how many.
