@@ -1433,6 +1433,18 @@ assert_contains "$_sc_job" "github.actor != 'dependabot[bot]'" "doc-spec-verify.
 assert_contains "$SPECCLAIMS" 'every same-repository PR (fork and dependabot PRs are not checked)' \
   "spec-claims.md: the CI claims job's scope (fork and dependabot PRs are not checked)"
 assert_not_contains "$SPECCLAIMS" 'checks every PR' "spec-claims.md: never says the CI job checks every PR"
+# V6 as the fix wave left it: the direction a change needs, the history rule
+# on a missing verdict, and the limit of trusting a promotion by its digest.
+assert_contains "$SPECCLAIMS" 'a `states` change, a lowered `enforced_by` or a token-changing re-anchor needs a new `DOC-STALE` or `RETIRE` ruling' \
+  "spec-claims.md: V6 — only DOC-STALE or RETIRE licenses a states change, a lowered tier, a re-anchor"
+assert_contains "$SPECCLAIMS" 'A missing verdict is judged by the record at `promotion.at`' \
+  "spec-claims.md: V6 — a missing verdict takes the history rule"
+assert_not_contains "$SPECCLAIMS" 'a missing verdict is the advisory `unverifiable-here`, never a finding' \
+  "spec-claims.md: never says a missing verdict is always only an advisory"
+assert_contains "$SPECCLAIMS" 'a test, subject or tier swap is a finding whatever the ruling' \
+  "spec-claims.md: V6 — re-promote owed covers a states change only"
+assert_contains "$SPECCLAIMS" 'A forged digest is undetectable outside the promoting clone' \
+  "spec-claims.md: promotions are trusted by digest (a hand-forged promotion passes locally)"
 
 # _fence_blocks <file> <lang> <dir> <ext>: each unindented ```<lang> fence of
 # <file> written to <dir>/<n>.<ext>; prints how many.
