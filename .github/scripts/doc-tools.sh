@@ -6055,10 +6055,12 @@ _claims_load_tree() {
     else
       _claims_read_at "$rev" "$p" > "$blob" || continue
     fi
-    # Its status is the answer (not one JSON object), so not _claims_jq.
+    # Its status is the answer (not one JSON object), so not _claims_jq; and
+    # so is empty output: jq 1.6 -s prints nothing and exits 0 on input it
+    # cannot parse.
     if ! line=$(jq -c -s --arg p "$p" \
         'if length == 1 and (.[0] | type) == "object" then {sidecar: $p, data: .[0]} else error("malformed") end' \
-        "$blob" 2>/dev/null); then
+        "$blob" 2>/dev/null) || [ -z "$line" ]; then
       line=$(_claims_jq sidecar-malformed -nc --arg p "$p" '{sidecar: $p, data: null}') || _claims_propagate $?
     fi
     doc=$(_claims_jq sidecar-doc -r '.data.doc? | if type == "string" then . else "" end' <<<"$line") \
@@ -8025,10 +8027,12 @@ _claims_recorded() {
     _claims_indeterminate config - "adapter-exit-$rc"
     return 1
   fi
-  # Its status is the answer (malformed output), so not _claims_jq.
+  # Its status is the answer (malformed output), so not _claims_jq; and so
+  # is empty output: jq 1.6 -s prints nothing and exits 0 on input it cannot
+  # parse (a log line on stdout).
   if ! jq -c -s 'if length == 1 and (.[0] | type) == "object"
         and all(.[0][]; type == "object" and has("recorded") and has("default"))
-      then .[0] else error("malformed") end' "$out" > "$rec.new" 2>/dev/null; then
+      then .[0] else error("malformed") end' "$out" > "$rec.new" 2>/dev/null || [ ! -s "$rec.new" ]; then
     _claims_indeterminate config - malformed-adapter-output
     return 1
   fi
@@ -9681,6 +9685,8 @@ _claims_v12_final() {
         elif (.head | type) != "string" or (.head | test("^[0-9a-f]{7,64}$") | not) then "head\t" + (.head | tojson)
         else "ok\t" + .head end
     else "malformed\t" end' "$fraw" 2>/dev/null) || out="malformed"$'\t'
+  # Empty output: jq 1.6 -s on a record it cannot parse (it exits 0).
+  [ -n "$out" ] || out="malformed"$'\t'
   head=${out#*$'\t'}
   case "$out" in
     result*) _CL_V12_FINAL="plan marked Completed, but its final gate record $rec does not pass (result: $head)"; return 0 ;;
@@ -11168,9 +11174,15 @@ cmd_claims_attest() {
     elif ! _claims_contained_path "$r" || [ ! -f "$r" ]; then
       x="gate record $r is reached through a symbolic link or is not a file: it is never read"
     else
-      # Its output is the answer (a record jq cannot parse: not JSON), so not _claims_jq.
-      x=$(jq -r -s --arg plan "$plan" --argjson n "$n" --arg r "$r" "$_JQ_CLAIMS_ATTEST_RECORD" "$r" 2>/dev/null) \
-        || x="gate record $r is not one JSON object"
+      # Its output is the answer (a record jq cannot parse: not JSON), so not
+      # _claims_jq. "=" leads every answer, so empty output (jq 1.6 -s exits
+      # 0 on input it cannot parse) is never read as "usable".
+      x=$(jq -r -s --arg plan "$plan" --argjson n "$n" --arg r "$r" "$_JQ_CLAIMS_ATTEST_RECORD"' | "=" + .' "$r" \
+        2>/dev/null) || x=""
+      case "$x" in
+        =*) x=${x#=} ;;
+        *) x="gate record $r is not one JSON object" ;;
+      esac
     fi
     if [ -n "$x" ]; then
       _claims_finding attest - - "chunk $n: $x"
