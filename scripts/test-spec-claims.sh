@@ -8736,6 +8736,234 @@ test_config_adapter_failure_indeterminate() {
   teardown
 }
 
+# --- V10: configuration re-classification (§B.1) --------------------------------
+#
+# v10_claim <status> <recorded> builds each V10 fixture: the fixture claim
+# bound to the stub with when {token_ttl_minutes: 15} (its list row
+# establishing it), made <status> as its own path makes it — built or gated
+# as promote makes it (nonvacuity, verdict, promotion), diverged with its
+# CODE-DIVERGES ruling — under the extension on, token_ttl_minutes recorded
+# as <recorded> against the code default 30; then base_here, so the
+# merge-base V10 compares against records <recorded> and holds the claim as
+# it is. STUB_LOG emptied.
+v10_claim() {
+  claims_fixture
+  config_on "$2" 30
+  bind_test "$STUB_TEST"
+  list_when "{\"$TTL_KEY\": 15}"
+  jset "$SIDECAR" ".claims[0].when = {\"$TTL_KEY\": 15}"
+  case "$1" in
+    diverged) jset "$SIDECAR" ".claims[0].status = \"diverged\" | .claims[0].rulings = [$_CL_DIVERGES]" ;;
+    *)
+      jset "$SIDECAR" ".claims[0].nonvacuity = $_CL_MUTANT"
+      git add -A && git commit -qm "bind the TTL test, when $TTL_KEY=15"
+      jset "$SIDECAR" ".claims[0].status = \"$1\""
+      CL_DIGEST=$(write_verdict)
+      jset "$SIDECAR" ".claims[0].promotion = {\"at\": \"$(git rev-parse HEAD)\", \"verdict_sha256\": \"$CL_DIGEST\"}"
+      ;;
+  esac
+  rerender
+  base_here "the TTL claim $1, $TTL_KEY recorded as $2"
+  : > "$STUB_LOG"
+}
+
+# set_flag <key> <json>: deploy/flags.json records <key> as <json> (the work
+# tree; nothing staged).
+set_flag() {
+  jset deploy/flags.json ".[\"$1\"] = $2"
+}
+
+v10_messages() {
+  jq -r '.findings[]? | select(.check == "V10") | .message' <<<"$CL_OUT" 2>/dev/null || true
+}
+v10_count() {
+  jq '[.findings[]?, .advisories[]? | select(.check == "V10")] | length' <<<"$CL_OUT" 2>/dev/null || echo invalid
+}
+
+# assert_v10 <substring> <what>: the last `cl` exited 1 with a V10 finding
+# whose message contains <substring>.
+assert_v10() {
+  assert_eq "1" "$CL_RC" "$2: exits 1"
+  assert_contains "$(v10_messages)" "$1" "$2: a V10 finding names '$1'"
+}
+
+test_v10_gated_now_satisfied_promote() {
+  echo "test: V10 — a staged surface change that satisfies a gated claim's when: promote it to built"
+  v10_claim gated 30
+  cl validate --all
+  assert_eq "0" "$CL_RC" "the gated fixture validates clean (--all)"
+  assert_eq "0" "$(config_calls surfaces)" "…--all asks for no surfaces"
+  set_flag "$TTL_KEY" 15
+  : > "$STUB_LOG"
+  cl validate --staged
+  assert_eq "0" "$CL_RC" "the flag changed in the work tree, nothing staged: exits 0"
+  assert_eq "1" "$(config_calls surfaces)" "…--staged asks the config adapter for its surfaces"
+  assert_eq "0" "$(v10_count)" "…no V10 finding: no staged path is a surface"
+  assert_eq "1" "$(config_calls recorded)" "…and no merge-base recorded call (validate's own alone)"
+  git add deploy/flags.json
+  : > "$STUB_LOG"
+  cl validate --staged
+  assert_v10 "now satisfied: promote to built" "--staged: $TTL_KEY recorded 30 → 15, the gated claim's when $TTL_KEY=15"
+  assert_eq "1" "$(v10_count)" "…one V10 finding"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V10")][0].claim' "$TTL_ID" "…naming the claim"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V10")][0].doc' "$DOC" "…and its doc"
+  assert_contains "$(config_args recorded)" "--rev $(git rev-parse main)" "…the merge-base's recorded configuration"
+  assert_contains "$(config_args recorded)" "--staged" "…against the staged one"
+  cl validate --all
+  assert_eq "0" "$(v10_count)" "--all without --config: V10 does not run"
+  teardown
+}
+
+test_v10_built_no_longer_satisfied_ruling_owed() {
+  echo "test: V10 — a staged surface change under which a built claim's when no longer holds: a ruling is owed"
+  v10_claim built 15
+  cl validate --all
+  assert_eq "0" "$CL_RC" "the built fixture validates clean (--all)"
+  set_flag "$TTL_KEY" 30
+  git add deploy/flags.json
+  cl validate --staged
+  assert_v10 "ruling owed" "--staged: $TTL_KEY recorded 15 → 30, the built claim's when $TTL_KEY=15"
+  assert_eq "1" "$(v10_count)" "…one V10 finding"
+  assert_contains "$(v10_messages)" "claims promote $TTL_ID" "…naming the promote that re-gates it once ruled"
+  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V10")][0].claim' "$TTL_ID" "…naming the claim"
+  set_flag "$TTL_KEY" 15
+  git add deploy/flags.json
+  set_flag "$TTL_KEY" 30
+  cl validate --staged
+  assert_eq "0" "$CL_RC" "the staged flags as the merge-base's (the change unstaged): exits 0"
+  assert_eq "0" "$(v10_count)" "…no V10 finding"
+  teardown
+}
+
+test_v10_built_with_ruling_ok() {
+  echo "test: V10 — a new ruling on the built claim answers 'ruling owed'; one the merge-base has does not"
+  v10_claim built 15
+  jset "$SIDECAR" ".claims[0].rulings = [$_CL_DIVERGES]"
+  base_here "a ruling the merge-base has"
+  set_flag "$TTL_KEY" 30
+  git add deploy/flags.json
+  cl validate --staged
+  assert_v10 "ruling owed" "a ruling already at the merge-base is not new"
+  jset "$SIDECAR" '.claims[0].rulings += [{"date":"2026-10-12","direction":"CODE-DIVERGES","by":"doc-owner","record":"docs/issues/token-ttl.md"}]'
+  git add "$SIDECAR"
+  cl validate --staged
+  assert_eq "0" "$(v10_count)" "a new ruling staged with the change: no V10 finding"
+  assert_eq "0" "$(v6_count)" "…the ruling itself is sound (no V6 finding)"
+  assert_contains "$(v3_messages)" "built but recorded configuration does not satisfy when: gated" \
+    "…V3 still owes the re-gate (claims promote)"
+  teardown
+}
+
+test_v10_diverged_when_switched_on() {
+  echo "test: V10 — a staged surface change that switches on a diverged claim's when"
+  v10_claim diverged 30
+  cl validate --all
+  assert_eq "0" "$CL_RC" "the diverged fixture validates clean (--all)"
+  set_flag "$TTL_KEY" 15
+  git add deploy/flags.json
+  cl validate --staged
+  assert_v10 "switches on a diverged claim" "--staged: $TTL_KEY recorded 30 → 15, the diverged claim's when $TTL_KEY=15"
+  assert_eq "1" "$(v10_count)" "…one V10 finding"
+  set_flag "$TTL_KEY" 20
+  git add deploy/flags.json
+  cl validate --staged
+  assert_eq "0" "$CL_RC" "recorded 30 → 20, when still unsatisfied: exits 0"
+  assert_eq "0" "$(v10_count)" "…no V10 finding"
+  teardown
+}
+
+test_validate_config_override() {
+  echo "test: validate --config KEY=VALUE — V10 over a configuration change made outside git"
+  v10_claim built 15
+  local mb
+  mb=$(git rev-parse main)
+  cl validate --staged --config "$TTL_KEY=30"
+  assert_v10 "ruling owed" "--staged --config $TTL_KEY=30, nothing staged"
+  assert_eq "1" "$(v10_count)" "…one V10 finding"
+  assert_eq "0" "$(config_calls surfaces)" "…--config asks for no surfaces"
+  assert_contains "$(config_args recorded)" "--staged --override $TTL_KEY=30" "…the staged configuration, the override applied"
+  assert_contains "$(config_args recorded)" "--rev $mb" "…against the merge-base's"
+  : > "$STUB_LOG"
+  cl validate --all --config "$TTL_KEY=30"
+  assert_v10 "ruling owed" "--all --config $TTL_KEY=30"
+  assert_eq "1" "$(config_args recorded | grep -cx -- "--override $TTL_KEY=30")" "…the work tree's configuration, the override applied"
+  cl validate --staged --config "$TTL_KEY=15"
+  assert_eq "0" "$CL_RC" "--config $TTL_KEY=15 (the recorded value): exits 0"
+  assert_eq "0" "$(v10_count)" "…no V10 finding"
+  : > "$STUB_LOG"
+  cl validate --staged --config other_flag=1 --config "$TTL_KEY=30"
+  assert_v10 "ruling owed" "--config given twice"
+  assert_contains "$(config_args recorded)" "--override other_flag=1 --override $TTL_KEY=30" "…each override passed, in order"
+  cl validate --staged --config "$TTL_KEY"
+  assert_usage_verdict validate true "--config without '='"
+  cl validate --staged --config "=30"
+  assert_usage_verdict validate true "--config with an empty KEY"
+  jset docs/spec-claims/config.json '.config_adapter = null'
+  cl validate --all --config "$TTL_KEY=30"
+  assert_usage_verdict validate true "--config with the configuration extension off"
+  git rm -rqf docs/spec-claims
+  cl validate --config "$TTL_KEY"
+  assert_eq "0" "$CL_RC" "inert: a malformed --config exits 0"
+  assert_json_field "$CL_OUT" '.enabled' "false" "…enabled:false"
+  teardown
+}
+
+test_v10_unrelated_key_ignored() {
+  echo "test: V10 — a changed key neither the claim's when nor its subject's readers names is ignored"
+  v10_claim gated 15
+  jq '. + {other_flag: false}' tools/claims/defaults.json > tools/claims/defaults.new
+  mv tools/claims/defaults.new tools/claims/defaults.json
+  set_flag other_flag false
+  base_here "another flag, recorded as its default"
+  : > "$STUB_LOG"
+  set_flag other_flag true
+  git add deploy/flags.json
+  cl validate --staged
+  assert_eq "0" "$CL_RC" "other_flag recorded false → true, a gated claim whose when holds: exits 0"
+  assert_eq "0" "$(v10_count)" "…no V10 finding"
+  assert_contains "$(config_args recorded)" "--rev $(git rev-parse main)" "…V10 ran (the merge-base's recorded call)"
+  assert_eq "src/auth/token.py" "$(config_args readers)" "…asking readers for the claim's subject"
+  printf 'src/auth/token.py\tother_flag\n' >> tools/claims/readers
+  cl validate --staged
+  assert_v10 "now satisfied: promote to built" "the subject reads other_flag: the claim is re-classified"
+  teardown
+}
+
+test_promote_regates_built_when_unsatisfied() {
+  echo "test: promote — a built claim whose when the recorded configuration no longer satisfies is re-gated"
+  promote_fixture
+  config_on 15 30
+  local digest
+  jset "$SIDECAR" ".claims[0].when = {\"$TTL_KEY\": 15}"
+  list_when "{\"$TTL_KEY\": 15}"
+  git add -A && git commit -qm "the TTL claim holds when the TTL flag is 15"
+  cl promote "$TTL_ID"
+  assert_eq '"built"' "$(claim_field "$TTL_ID" status)" "promote with $TTL_KEY recorded 15: built"
+  git add -A && git commit -qm "built"
+  cl promote "$TTL_ID"
+  assert_eq "1" "$CL_RC" "promote again, when still satisfied: exits 1"
+  assert_contains "$(jq -r '.findings[].message' <<<"$CL_OUT")" "already promoted" "…already promoted"
+  jq -n '{token_ttl_minutes: 30}' > deploy/flags.json
+  git add -A && git commit -qm "the TTL flag recorded as 30"
+  cl validate --all
+  assert_v3 "built but recorded configuration does not satisfy when: gated" "the recorded flag changed to 30"
+  : > "$STUB_LOG"
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "promote the built claim: exits 0 (not 'already promoted')"
+  assert_eq '"gated"' "$(claim_field "$TTL_ID" status)" "…the sidecar's status is gated"
+  assert_json_field "$CL_OUT" '.results[0] | [.status_from, .status_to] | join(" ")' "built gated" \
+    "…the result row: built → gated"
+  assert_eq "--rev HEAD" "$(config_args recorded)" "…one recorded call, --rev HEAD"
+  digest=$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")
+  assert_json_field "$(cat "$(claims_store)/$digest.json")" '.status_to' "gated" "…the verdict's status_to is gated"
+  assert_eq "true" "$(if [ "$(stub_run_calls)" -gt 0 ]; then echo true; else echo false; fi)" \
+    "…re-proved (the bound test run)"
+  git add -A && git commit -qm "re-gated"
+  cl validate --all
+  assert_v3_ok "after the re-gate: the V3 finding clears"
+  teardown
+}
+
 run_tests() {
   echo "Running spec-claims tests..."
   echo ""
@@ -9127,6 +9355,15 @@ run_tests() {
   test_extension_off_list_when_ignored
   test_config_adapter_child_does_not_hold_stdout
   test_config_adapter_failure_indeterminate
+
+  # --- Task 22: V10 configuration re-classification (§B.1) ---
+  test_v10_gated_now_satisfied_promote
+  test_v10_built_no_longer_satisfied_ruling_owed
+  test_v10_built_with_ruling_ok
+  test_v10_diverged_when_switched_on
+  test_validate_config_override
+  test_v10_unrelated_key_ignored
+  test_promote_regates_built_when_unsatisfied
 
   print_summary
 }
