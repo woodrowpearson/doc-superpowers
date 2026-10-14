@@ -2238,6 +2238,29 @@ test_v6_doc_stale_does_not_cover_a_test_swap() {
   teardown
 }
 
+# --staged on a repository's first commit diffs the index against the empty
+# tree, whose id depends on the object format: a SHA-256 repository has no
+# 4b825dc… object, so a hard-coded SHA-1 id made the run die ("git diff
+# --cached failed") where a SHA-1 repository reports base-unresolvable.
+test_staged_first_commit_sha256_repo() {
+  echo "test: validate --staged on the first commit of a SHA-256 repository reads the empty tree"
+  claims_fixture
+  local fmt
+  for fmt in sha1 sha256; do
+    git init -q --object-format="$fmt" "$TEST_DIR/home/first-$fmt"
+    git ls-files -z | xargs -0 tar cf - | (cd "$TEST_DIR/home/first-$fmt" && tar xf -)
+    cd "$TEST_DIR/home/first-$fmt"
+    git add -A
+    cl validate --staged
+    assert_eq "2" "$CL_RC" "$fmt: no commit, no base: exits 2"
+    assert_json_field "$CL_OUT" '[.indeterminate[]?.reason] | join(",")' "base-unresolvable" "$fmt: …base-unresolvable, the one indeterminate row"
+    assert_not_contains "$CL_ERR" "git diff --cached failed" "$fmt: …the staged paths read against the empty tree"
+    assert_json_field "$CL_OUT" '[.advisories[]? | select(.check == "V8")] | length > 0' "true" "$fmt: …and V8 read the staged hunks"
+    cd "$TEST_DIR"
+  done
+  teardown
+}
+
 # --- Status block render and V11 -----------------------------------------------
 
 BLOCK_BEGIN='<!-- spec-claims:status:begin -->'
@@ -9739,6 +9762,7 @@ run_tests() {
   test_v6_status_off_built_any_direction
   test_v6_missing_verdict_applies_the_history_rule
   test_v6_doc_stale_does_not_cover_a_test_swap
+  test_staged_first_commit_sha256_repo
 
   # --- Task 6: status block render and V11 ---
   test_v11_fixture_is_rendered
