@@ -5363,7 +5363,8 @@ test_lg_shallow_deepen_rebuilds_caches() {
 # LG_GH/issues.json as the repository's issues: `issue list` prints it
 # (LG_GH/icalls counts the calls), `issue view <n>` the issue, `issue edit
 # <n>` applies --add-label / --remove-label (comma lists) and --body-file to
-# it, `issue comment <n> --body-file F` appends "<n>\t<text>" to
+# it (Task 15: it fails for <n> while LG_GH/view-fail-<n> exists), `issue
+# comment <n> --body-file F` appends "<n>\t<text>" to
 # LG_GH/comments, `issue create --title T --body-file F` adds an open issue
 # numbered one past the highest and prints its URL (no URL when
 # LG_GH/create-nourl exists); `label create <name>`
@@ -5406,6 +5407,7 @@ case "$1 $2" in
     exit 0 ;;
   "issue view")
     if [ -f "$d/fail" ]; then cat "$d/fail" >&2; exit 1; fi
+    if [ -f "$d/view-fail-$3" ]; then echo "HTTP 502: Bad Gateway" >&2; exit 1; fi
     jq -e --argjson n "$3" '.[] | select(.number == $n)' "$d/issues.json" \
       || { echo "GraphQL: Could not resolve to an issue or pull request with the number of $3. (repository.issue)" >&2; exit 1; }
     exit 0 ;;
@@ -5432,7 +5434,7 @@ case "$1 $2" in
     t=$(opt --title "$@"); bf=$(opt --body-file "$@")
     n=$(jq '([.[].number] | max // 0) + 1' "$d/issues.json")
     jq --argjson n "$n" --arg t "$t" --rawfile body "$bf" \
-      '. + [{number: $n, title: $t, body: $body, state: "OPEN", stateReason: null, labels: [], updatedAt: "2026-10-13T00:00:00Z", url: "https://github.com/o/r/issues/\($n)"}]' \
+      '. + [{number: $n, title: $t, body: $body, state: "OPEN", stateReason: null, labels: [], createdAt: "2026-10-13T00:00:00Z", updatedAt: "2026-10-13T00:00:00Z", url: "https://github.com/o/r/issues/\($n)"}]' \
       "$d/issues.json" > "$d/issues.tmp" && mv "$d/issues.tmp" "$d/issues.json"
     echo "Creating issue in o/r"
     echo
@@ -8729,7 +8731,7 @@ test_lg_init_runs_without_config() {
 }
 
 test_lg_init_usage_errors() {
-  echo "test: ledger init modes (R2) — none or two: 3; --dry-run with --report: 3; bad --sources: 3; --accept / --import: 2 (Task 15); a bad --registry: 2"
+  echo "test: ledger init modes (R2) — none or two: 3; --dry-run with --report: 3; bad --sources: 3; --accept of a missing file / --import without an adapter: 2; a bad --registry: 2"
   lg_init_fixture
   lg init
   assert_eq "3" "$LG_RC" "no mode exits 3"
@@ -8752,11 +8754,11 @@ test_lg_init_usage_errors() {
   lg init --report r.md extra
   assert_eq "3" "$LG_RC" "a positional argument exits 3"
   lg init --accept d.tsv
-  assert_eq "2" "$LG_RC" "--accept exits 2 (not implemented yet)"
-  assert_contains "$LG_ERR" "not implemented yet" "stderr says so"
+  assert_eq "2" "$LG_RC" "--accept of a missing file exits 2"
+  assert_contains "$LG_ERR" "d.tsv" "stderr names it"
   lg init --import --format json
-  assert_eq "2" "$LG_RC" "--import exits 2"
-  assert_json_field "$LG_OUT" '.error | test("not implemented yet")' "true" "JSON error says so"
+  assert_eq "2" "$LG_RC" "--import without an items adapter exits 2"
+  assert_json_field "$LG_OUT" '.error | test("items.adapter")' "true" "JSON error says why"
   lg init --report r.md --registry missing.json
   assert_eq "2" "$LG_RC" "a missing --registry exits 2"
   assert_contains "$LG_ERR" "missing.json" "stderr names it"
@@ -9361,6 +9363,469 @@ test_lg_init_stale_prefill_recomputed() {
   teardown
 }
 
+# --- Task 15: init --accept, --import ---------------------------------------------
+
+# lg_add_fm <file> <line>: insert a frontmatter line after the opening ---.
+lg_add_fm() {
+  awk -v l="$2" 'NR == 1 { print; print l; next } { print }' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+
+# lg_fmblock <file>: its frontmatter lines (between the first two --- lines),
+# "|"-joined.
+lg_fmblock() {
+  awk 'NR == 1 && /^---$/ { f = 1; next } f && /^---$/ { exit } f { print }' "$1" | paste -sd '|' -
+}
+
+# lg_accept_remote: a local bare remote "origin" (LG_REMOTE) holding main,
+# fetched — origin/main, the default base, exists (as lg_keys_fixture).
+lg_accept_remote() {
+  LG_REMOTE=$(harness_mktemp_d remote).git
+  git init -q --bare "$LG_REMOTE"
+  git --git-dir="$LG_REMOTE" symbolic-ref HEAD refs/heads/main
+  git remote add origin "$LG_REMOTE"
+  git push -q origin main
+  git fetch -q origin
+}
+
+# lg_accept_fixture: lg_init_fixture with each item dated (date: 2026-01-0N,
+# its file name's day), the remote, and the report against LG_INIT_REG
+# (docs/ledger/edited.json, untracked); LG_DEC is the decisions file. No
+# config.json, no ledgers.json.
+lg_accept_fixture() {
+  local f
+  lg_init_fixture
+  for f in docs/issues/2026-01-0*.md; do
+    lg_add_fm "$f" "date: $(basename "$f" | cut -c 1-10)"
+  done
+  git add -A && git commit -qm dated
+  lg_accept_remote
+  lg_init_edit_reg
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  LG_DEC=docs/ledger/r.md.decisions.tsv
+}
+
+# lg_today: today's date (local), as a stub's file name carries it.
+lg_today() {
+  date +%Y-%m-%d
+}
+
+test_lg_init_accept_only_decided_rows() {
+  echo "test: init --accept applies only the rows with a decision — ledger, summary when missing, a key for an open item in a registered ledger; writes config.json ({}) and ledgers.json (the report's registry) when absent; rows left empty are untouched"
+  lg_accept_fixture
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-01-cart-total.md checkout
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-03-order-sync.md orders
+  local flicker misc
+  flicker=$(cksum < docs/issues/2026-01-02-sheet-flicker.md)
+  misc=$(cksum < docs/issues/2026-01-05-misc.md)
+  lg init --accept "$LG_DEC"
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_eq "date: 2026-01-01|status: Open|ledger: checkout|summary: Totals drift|key: checkout-1" \
+    "$(lg_fmblock docs/issues/2026-01-01-cart-total.md)" "cart-total: its key (ledger and summary were there)"
+  assert_eq "date: 2026-01-03|status: In Progress|related-files: [server/orders/model.ts]|key: orders-1|ledger: orders|summary: 2026-01-03-order-sync" \
+    "$(lg_fmblock docs/issues/2026-01-03-order-sync.md)" "order-sync: key, ledger, summary (its H1)"
+  assert_eq "date: 2026-01-04|status: Resolved|ledger: checkout|summary: 2026-01-04-old-bug" \
+    "$(lg_fmblock docs/issues/2026-01-04-old-bug.md)" "old-bug (fixed, pre-filled checkout): ledger and summary, no key"
+  assert_eq "date: 2026-01-06|status: Won't Fix|area: profile|ledger: unassigned|summary: 2026-01-06-wontfix" \
+    "$(lg_fmblock docs/issues/2026-01-06-wontfix.md)" "wontfix (pre-filled unassigned): ledger unassigned, no key"
+  assert_eq "$flicker|$misc" "$(cksum < docs/issues/2026-01-02-sheet-flicker.md)|$(cksum < docs/issues/2026-01-05-misc.md)" \
+    "the rows left empty: untouched"
+  assert_eq "{}" "$(cat docs/ledger/config.json)" "config.json: {} (no hosted row)"
+  assert_eq "$(cksum < docs/ledger/edited.json)" "$(cksum < docs/ledger/ledgers.json)" "ledgers.json: the report's registry, byte for byte"
+  assert_eq '{"checkout":3,"orders":2}' "$(lg_remote_counters)" "counters: checkout-1 and the stub's checkout-2, orders-1"
+  assert_contains "$LG_OUT" "docs/issues/2026-01-03-order-sync.md" "stdout names the items to review"
+  assert_contains "$LG_OUT" "wrote docs/ledger/config.json" "stdout names config.json"
+  assert_contains "$LG_OUT" "wrote docs/ledger/ledgers.json" "stdout names ledgers.json"
+  teardown
+}
+
+test_lg_init_legacy_map_and_stub() {
+  echo "test: legacy import — a row linking an item → {key} (or {item} without a key), an open row tracked by a plan → a stub item (file, status Open, the row's ledger, summary from the row, Migrated-from body), a done row without an item → {archived}"
+  lg_accept_fixture
+  cat >> docs/ledgers/checkout-ledger.md <<'EOF'
+| 4 | Shipped thing | ~~Shipped~~ 2025 |
+| 5 | **Retry queue** — [spec](../specs/retry.md) | DONE |
+| 6 | **Rate limits are wrong for EU carts** — [plan](../plans/x-plan.md) | blocked |
+EOF
+  git add -A && git commit -qm rows
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-02-sheet-flicker.md checkout
+  lg init --accept "$LG_DEC" --format json
+  assert_eq "0" "$LG_RC" "exits 0"
+  local t s1 s2
+  t=$(lg_today)
+  s1="docs/issues/$t-totals-plan.md"
+  s2="docs/issues/$t-rate-limits-are-wrong-for-eu-carts.md"
+  assert_file_exists "$s1" "row 2 (open, a plan): a stub"
+  assert_file_exists "$s2" "row 6 (blocked, a plan): a stub"
+  assert_eq "status: Open|key: checkout-3|ledger: checkout|summary: Totals plan" "$(lg_fmblock "$s1")" \
+    "the stub: Open, the row's ledger (checkout: registered), the summary from the row's bold lead, a key"
+  assert_contains "$(cat "$s1")" "Migrated from docs/ledgers/checkout-ledger.md row 2." "the stub's body names its row"
+  assert_contains "$(cat "$s1")" '| 2 | **Totals plan** — [plan](../plans/x-plan.md) | open |' "and carries the row text"
+  # sheet-flicker (2026-01-02) is the oldest checkout item: checkout-1; the
+  # stubs (today) follow, by path: rate-limits… checkout-2, totals-plan checkout-3.
+  assert_eq "checkout-1" "$(jq -r '.["checkout#3"].key' docs/ledger/legacy.json)" "row 3 → the linked item's key"
+  assert_eq "docs/issues/2026-01-04-old-bug.md" "$(jq -r '.["checkout#1"].item' docs/ledger/legacy.json)" "row 1 (done, an item without a key) → {item}"
+  assert_eq "checkout-3" "$(jq -r '.["checkout#2"].key' docs/ledger/legacy.json)" "row 2 → the stub's key"
+  assert_eq "docs/ledgers/checkout-ledger.md#4" "$(jq -r '.["checkout#4"].archived' docs/ledger/legacy.json)" "row 4 (~~Shipped~~, no item) → {archived}"
+  assert_eq "docs/ledgers/checkout-ledger.md#5" "$(jq -r '.["checkout#5"].archived' docs/ledger/legacy.json)" "row 5 (DONE, a spec) → {archived}"
+  assert_eq "checkout-2" "$(jq -r '.["checkout#6"].key' docs/ledger/legacy.json)" "row 6 → its stub's key"
+  assert_eq "6" "$(jq 'length' docs/ledger/legacy.json)" "one entry per row"
+  assert_eq "$(jq -S . docs/ledger/legacy.json)" "$(cat docs/ledger/legacy.json)" "legacy.json: jq -S, 2-space indent"
+  assert_json_field "$LG_OUT" '[.stubs[] | .path] | sort | join(",")' "$s2,$s1" "JSON: the stubs"
+  # The stub and its legacy ref resolve.
+  lg show checkout#2
+  assert_contains "$LG_OUT" "$s1" "show checkout#2 → the stub"
+  teardown
+}
+
+test_lg_init_legacy_ids_from_config() {
+  echo "test: legacy ids — legacy_ledgers maps an id to a file (tier1 → docs/ledgers/tier1-pipeline-ledger.md); an unmapped file's id is its stem minus -ledger (checkout); a configured config.json is kept"
+  lg_init_fixture
+  cat > docs/ledgers/tier1-pipeline-ledger.md <<'EOF'
+# Tier 1 pipeline
+
+| # | Item | Status |
+|---|------|--------|
+| 7 | [Order sync](../issues/2026-01-03-order-sync.md) | open |
+| 8 | Old migration | closed |
+EOF
+  git add -A && git commit -qm tier1
+  lg_accept_remote
+  lg_enable '{"legacy_ledgers":{"tier1":"docs/ledgers/tier1-pipeline-ledger.md"}}'
+  local cfg
+  cfg=$(cat docs/ledger/config.json)
+  lg_init_edit_reg
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  lg init --accept docs/ledger/r.md.decisions.tsv
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_eq "checkout#1,checkout#2,checkout#3,tier1#7,tier1#8" "$(jq -r 'keys | join(",")' docs/ledger/legacy.json)" \
+    "keys: tier1#<row> (legacy_ledgers), checkout#<row> (the stem minus -ledger)"
+  assert_eq "docs/issues/2026-01-03-order-sync.md" "$(jq -r '.["tier1#7"].item' docs/ledger/legacy.json)" "tier1#7 → the item (no decision, no key)"
+  assert_eq "docs/ledgers/tier1-pipeline-ledger.md#8" "$(jq -r '.["tier1#8"].archived' docs/ledger/legacy.json)" "tier1#8 (closed) → archived"
+  assert_eq "$cfg" "$(cat docs/ledger/config.json)" "an existing config.json is not rewritten"
+  # The stub of checkout#2: tier1 is not a registered ledger, checkout is.
+  assert_contains "$(lg_fmblock "docs/issues/$(lg_today)-totals-plan.md")" "ledger: checkout" "the stub takes its ledger's id when registered"
+  teardown
+}
+
+test_lg_init_summaries_sources() {
+  echo "test: summaries — the existing summary, else the legacy row's first **bold** span, else the H1, else the first sentence of the first paragraph; at most 140 characters, cut at a word boundary"
+  lg_fixture
+  local long
+  long="Checkout totals drift when a coupon and a gift card are combined and the cart is edited after the payment sheet has already been presented to the shopper"
+  printf -- '---\nstatus: Open\nsummary: Kept as it is\n---\n# Some heading\n' > docs/issues/a.md
+  printf -- '---\nstatus: Open\n---\n# Heading b\n' > docs/issues/b.md
+  printf -- '---\nstatus: Open\n---\n# Heading c\n\nBody.\n' > docs/issues/c.md
+  printf -- '---\nstatus: Open\n---\nFirst sentence here. Second sentence.\n' > docs/issues/d.md
+  printf -- '---\nstatus: Open\n---\n# %s\n' "$long" > docs/issues/e.md
+  mkdir -p docs/ledgers
+  cat > docs/ledgers/x-ledger.md <<'EOF'
+| # | Item | State |
+|---|------|-------|
+| 1 | **Sheet flickers on rotate** — [b](../issues/b.md) | open |
+| 2 | [a](../issues/a.md) **Not this** | open |
+EOF
+  git add -A && git commit -qm items
+  lg_init_edit_reg
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  local p
+  for p in a b c d e; do lg_init_decide docs/ledger/r.md.decisions.tsv "docs/issues/$p.md" unassigned; done
+  lg init --accept docs/ledger/r.md.decisions.tsv
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_eq "summary: Kept as it is" "$(grep '^summary:' docs/issues/a.md)" "a: the existing summary (the row's bold is not used)"
+  assert_eq "summary: Sheet flickers on rotate" "$(grep '^summary:' docs/issues/b.md)" "b: the legacy row's bold lead over its H1"
+  assert_eq "summary: Heading c" "$(grep '^summary:' docs/issues/c.md)" "c: the H1"
+  assert_eq "summary: First sentence here." "$(grep '^summary:' docs/issues/d.md)" "d: the first sentence"
+  local want
+  want="Checkout totals drift when a coupon and a gift card are combined and the cart is edited after the payment sheet has already been presented"
+  assert_eq "summary: $want" "$(grep '^summary:' docs/issues/e.md)" "e: the H1 cut at a word boundary"
+  assert_eq "true" "$(jq -nr --arg s "$want" '$s | length <= 140 and length > 130')" "≤ 140 characters"
+  teardown
+}
+
+test_lg_init_keys_one_commit_date_order() {
+  echo "test: keys — one counter commit for every new key, numbered per ledger in item-date order (fields.date, ties by path), seeded from the base; a key in the ledger is kept, one in another ledger re-homed (old key → aliases); terminal items get none"
+  lg_fixture
+  lg_item docs/issues/p.md 'status: Open' 'date: 2026-03-01'
+  lg_item docs/issues/q.md 'status: Open' 'date: 2026-01-15'
+  lg_item docs/issues/r.md 'status: Open' 'date: 2026-03-01'
+  lg_item docs/issues/s.md 'status: Open' 'date: 2026-02-01'
+  lg_item docs/issues/t.md 'status: Open' 'key: checkout-5' 'ledger: checkout' 'summary: Kept'
+  lg_item docs/issues/u.md 'status: Open' 'key: orders-3' 'ledger: orders' 'summary: Moving' 'date: 2026-04-01'
+  lg_item docs/issues/v.md 'status: Fixed' 'date: 2025-01-01'
+  git add -A && git commit -qm items
+  lg_accept_remote
+  lg_init_edit_reg
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  local d=docs/ledger/r.md.decisions.tsv p
+  for p in p q r t u v; do lg_init_decide "$d" "docs/issues/$p.md" checkout; done
+  lg_init_decide "$d" docs/issues/s.md orders
+  lg init --accept "$d" --format json
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_eq "1" "$(lg_remote_counter_commits)" "one counter commit"
+  assert_eq '{"checkout":10,"orders":5}' "$(lg_remote_counters)" "checkout seeded past checkout-5, orders past orders-3"
+  local k=""
+  for p in q p r u s t v; do k="$k$p=$({ grep '^key:' "docs/issues/$p.md" || true; } | cut -d ' ' -f 2);"; done
+  assert_eq "q=checkout-6;p=checkout-7;r=checkout-8;u=checkout-9;s=orders-4;t=checkout-5;v=;" "$k" \
+    "date order (q 01-15, then p and r on 03-01 by path, then u 04-01); t keeps checkout-5; v (fixed) none"
+  assert_eq "aliases: [orders-3]" "$(grep '^aliases:' docs/issues/u.md)" "u re-homed: orders-3 kept as an alias"
+  assert_eq "ledger: checkout" "$(grep '^ledger:' docs/issues/u.md)" "u's ledger"
+  assert_json_field "$LG_OUT" '[.keys[] | select(.path == "docs/issues/u.md") | .previous] | join(",")' "orders-3" "JSON: the re-home"
+  # Offline: provisional keys, a warning, rc 0.
+  lg_item docs/issues/w.md 'status: Open'
+  git add -A && git commit -qm w
+  lg init --report docs/ledger/r.md
+  lg_init_decide "$d" docs/issues/w.md checkout
+  git remote set-url origin "$TEST_DIR/no-such-remote.git"
+  lg init --accept "$d"
+  assert_eq "0" "$LG_RC" "offline: exits 0"
+  assert_eq "key: checkout-~$(lg_hex4 docs/issues/w.md)" "$(grep '^key:' docs/issues/w.md)" "offline: a provisional key"
+  assert_contains "$LG_ERR" "provisional" "stderr warns"
+  teardown
+}
+
+test_lg_init_first_views_rendered() {
+  echo "test: --accept renders the first views (every ledger's page and README.md) into \$_LG_CACHE/views and prints their path"
+  lg_accept_fixture
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-01-cart-total.md checkout
+  lg init --accept "$LG_DEC" --format json
+  assert_eq "0" "$LG_RC" "exits 0"
+  local v
+  v="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)/doc-superpowers/ledger/views"
+  assert_file_exists "$v/README.md" "README.md"
+  assert_file_exists "$v/checkout.md" "the checkout page"
+  assert_contains "$(cat "$v/checkout.md")" "checkout-1" "the page lists the new key"
+  assert_json_field "$LG_OUT" '.views | endswith("/doc-superpowers/ledger/views")' "true" "JSON: the views dir"
+  lg init --accept "$LG_DEC"
+  assert_contains "$LG_OUT" "doc-superpowers/ledger/views" "text: the views path"
+  teardown
+}
+
+test_lg_init_idempotent() {
+  echo "test: a second --accept of the same decisions file changes nothing — no file, no counter commit, no second stub, no new legacy entry"
+  lg_accept_fixture
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-01-cart-total.md checkout
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-05-misc.md unassigned
+  lg init --accept "$LG_DEC"
+  assert_eq "0" "$LG_RC" "first run exits 0"
+  git add -A && git commit -qm accepted
+  local commits
+  commits=$(lg_remote_counter_commits)
+  lg init --accept "$LG_DEC" --format json
+  assert_eq "0" "$LG_RC" "second run exits 0"
+  assert_eq "" "$(git status --porcelain --untracked-files=all)" "the work tree is unchanged"
+  assert_eq "$commits" "$(lg_remote_counter_commits)" "no counter commit"
+  assert_json_field "$LG_OUT" '[(.keys | length), (.stubs | length), (.legacy.added | length), (.items | length)] | map(tostring) | join("|")' "0|0|0|0" \
+    "JSON: no key, stub, legacy entry or item change"
+  # A legacy entry that disagrees: a finding, the entry kept.
+  jq '.["checkout#3"] = {"item": "docs/issues/2026-01-05-misc.md"}' docs/ledger/legacy.json > l.tmp && mv l.tmp docs/ledger/legacy.json
+  local before
+  before=$(cat docs/ledger/legacy.json 2>/dev/null || true)
+  lg init --accept "$LG_DEC"
+  assert_eq "1" "$LG_RC" "a disagreeing legacy entry: exits 1"
+  assert_contains "$LG_OUT" "checkout#3" "the finding names it"
+  assert_eq "$before" "$(cat docs/ledger/legacy.json)" "the entry is not changed"
+  teardown
+}
+
+test_lg_init_accept_dry_run() {
+  echo "test: --accept --dry-run validates, prints the planned changes, and writes nothing (no file, no counter, no views)"
+  lg_accept_fixture
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-01-cart-total.md checkout
+  local st
+  st=$(lg_init_status)
+  lg init --accept "$LG_DEC" --dry-run
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_eq "$st" "$(lg_init_status)" "nothing written"
+  assert_eq "absent" "$(lg_remote_counters)" "no counter ref"
+  assert_file_not_exists "$(git rev-parse --git-common-dir)/doc-superpowers/ledger/views/README.md" "no views"
+  assert_contains "$LG_OUT" "would write docs/ledger/config.json" "plans config.json"
+  assert_contains "$LG_OUT" "would write docs/ledger/ledgers.json" "plans ledgers.json"
+  assert_contains "$LG_OUT" "would write docs/ledger/legacy.json" "plans legacy.json"
+  assert_contains "$LG_OUT" "docs/issues/2026-01-01-cart-total.md" "plans the item"
+  assert_contains "$LG_OUT" "would create docs/issues/$(lg_today)-totals-plan.md" "plans the stub"
+  lg init --accept "$LG_DEC" --dry-run --format json
+  assert_json_field "$LG_OUT" '[.dry_run, (.keys | length)] | map(tostring) | join("|")' "true|2" "JSON: dry run, two keys planned"
+  teardown
+}
+
+test_lg_init_accept_validates_first() {
+  echo "test: --accept checks every row first (R1) — a decision that is not a registered id or unassigned, a path that is no longer an item: exit 1, one finding per row, nothing written; an empty decision is skipped"
+  lg_accept_fixture
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-01-cart-total.md nope
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-03-order-sync.md orders
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-05-misc.md checkout
+  git rm -q docs/issues/2026-01-05-misc.md
+  local st
+  st=$(lg_init_status)
+  lg init --accept "$LG_DEC" --format json
+  assert_eq "1" "$LG_RC" "exits 1"
+  assert_json_field "$LG_OUT" '.findings | map(.path) | join(",")' \
+    "docs/issues/2026-01-01-cart-total.md,docs/issues/2026-01-05-misc.md" "one finding per bad row"
+  assert_eq "$st" "$(lg_init_status)" "nothing written"
+  assert_eq "absent" "$(lg_remote_counters)" "nothing allocated"
+  lg init --accept "$LG_DEC"
+  assert_eq "1" "$LG_RC" "text: exits 1"
+  assert_contains "$LG_OUT" "nope" "the finding names the bad value"
+  # No registry line and no ledgers.json: exit 2.
+  grep -v '^# registry:' "$LG_DEC" > nohdr.tsv
+  lg init --accept nohdr.tsv
+  assert_eq "2" "$LG_RC" "no registry header, no ledgers.json: exits 2"
+  lg init --accept missing.tsv
+  assert_eq "2" "$LG_RC" "a missing decisions file: exits 2"
+  teardown
+}
+
+test_lg_init_accept_registry_changed() {
+  echo "test: the report's registry is installed only when its sha256 matches the decisions header; else exit 2 'registry changed since the report'; with ledgers.json present, decisions are checked against it"
+  lg_accept_fixture
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-01-cart-total.md checkout
+  printf '%s\n' "$LG_INIT_REG" | jq -c . > docs/ledger/edited.json
+  lg init --accept "$LG_DEC"
+  assert_eq "2" "$LG_RC" "a changed registry: exits 2"
+  assert_contains "$LG_ERR" "registry changed since the report; re-run \`init --report\`" "the message"
+  assert_file_not_exists docs/ledger/ledgers.json "nothing installed"
+  assert_file_not_exists docs/ledger/config.json "nothing written"
+  # ledgers.json present: the header is not used.
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[{"id":"orders","title":"Orders","kind":"service","status":"active"}]}'
+  lg init --accept "$LG_DEC"
+  assert_eq "1" "$LG_RC" "checked against ledgers.json: checkout is not registered there"
+  assert_contains "$LG_OUT" "checkout" "the finding names it"
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[{"id":"orders","title":"Orders","kind":"service","status":"active"},{"id":"checkout","title":"Checkout","kind":"service","status":"retired"},{"id":"Bad Id","title":"Bad","kind":"service","status":"active"}]}'
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-05-misc.md "Bad Id"
+  lg init --accept "$LG_DEC"
+  assert_eq "1" "$LG_RC" "a retired ledger, an id that is not a ledger id: exits 1"
+  assert_contains "$LG_OUT" "is retired" "the retired ledger"
+  assert_contains "$LG_OUT" "is not a ledger id" "the malformed id"
+  assert_file_not_exists docs/ledger/config.json "still nothing written"
+  teardown
+}
+
+# lg_accept_gh_issues: two hosted issues for the fake gh (created dates,
+# a metadata block on #8).
+lg_accept_gh_issues() {
+  printf '%s\n' '[{"number":7,"title":"Cart badge stale","body":"The badge lags.","state":"OPEN","stateReason":null,"labels":[],"createdAt":"2026-02-03T10:00:00Z","updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/7"},
+{"number":8,"title":"Orders: retry on 502","body":"Retries are missing.\n\n<!-- doc-superpowers-ledger\nsummary: Retry orders on 502\nseverity: P2\n-->\n","state":"OPEN","stateReason":null,"labels":[{"name":"ledger:orders"}],"createdAt":"2026-02-05T10:00:00Z","updatedAt":"2026-10-02T10:00:00Z","url":"https://github.com/o/r/issues/8"}]' > "$LG_GH/issues.json"
+}
+
+test_lg_init_accept_hosted_items() {
+  echo "test: hosted rows — config.json gets items.adapter (the reference gh adapter) when absent; ledger as a label, summary and key in the metadata block, through the adapter"
+  lg_init_fixture
+  lg_accept_remote
+  lg_fake_gh
+  lg_accept_gh_issues
+  lg_init_edit_reg
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json --sources files,github
+  assert_eq "0" "$LG_RC" "report exits 0"
+  lg_init_decide docs/ledger/r.md.decisions.tsv gh#7 checkout
+  lg init --accept docs/ledger/r.md.decisions.tsv
+  assert_eq "0" "$LG_RC" "accept exits 0"
+  assert_eq '{
+  "items": {
+    "adapter": "doc-superpowers:ledger-items-gh"
+  }
+}' "$(cat docs/ledger/config.json)" "config.json: items.adapter (jq -S, 2-space)"
+  assert_eq "ledger:checkout" "$(jq -r '.[] | select(.number == 7) | [.labels[].name] | join(",")' "$LG_GH/issues.json")" "gh#7: the ledger label"
+  local body
+  body=$(jq -r '.[] | select(.number == 7) | .body' "$LG_GH/issues.json")
+  assert_contains "$body" "key: checkout-1" "gh#7: the key in the block"
+  assert_contains "$body" "summary: Cart badge stale" "gh#7: the summary (its title) in the block"
+  lg show checkout-1
+  assert_contains "$LG_OUT" "gh#7" "show checkout-1 → the hosted item"
+  lg_fake_gh_off
+  teardown
+}
+
+test_lg_init_accept_hosted_stub() {
+  echo "test: items.globs [] with an items adapter — an open legacy row's stub is created through the adapter (create) with its fields, its legacy entry written; a re-run creates no second one"
+  lg_init_fixture
+  lg_accept_remote
+  lg_fake_gh
+  lg_enable '{"items":{"globs":[],"adapter":"doc-superpowers:ledger-items-gh"},"legacy_ledgers":{"checkout":"docs/ledgers/checkout-ledger.md"}}'
+  lg_init_edit_reg
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  assert_eq "0" "$LG_RC" "report exits 0"
+  lg init --accept docs/ledger/r.md.decisions.tsv
+  assert_eq "0" "$LG_RC" "accept exits 0"
+  # No file is an item now: row 1 (done) is archived, rows 2 and 3 (open)
+  # become hosted stubs.
+  assert_eq "Totals plan|Sheet flicker" "$(jq -r 'map(.title) | join("|")' "$LG_GH/issues.json")" "two issues created, titled by their rows"
+  assert_contains "$(jq -r '.[0].body' "$LG_GH/issues.json")" "Migrated from docs/ledgers/checkout-ledger.md row 2." "the body names the row"
+  assert_eq "ledger:checkout" "$(jq -r '.[0] | [.labels[].name] | join(",")' "$LG_GH/issues.json")" "its ledger label"
+  assert_contains "$(jq -r '.[0].body' "$LG_GH/issues.json")" "key: checkout-1" "its key in the block"
+  assert_eq "checkout-1|checkout-2|docs/ledgers/checkout-ledger.md#1" \
+    "$(jq -r '[.["checkout#2"].key, .["checkout#3"].key, .["checkout#1"].archived] | join("|")' docs/ledger/legacy.json)" "the legacy entries"
+  assert_eq "0" "$(find docs/issues -name "$(lg_today)-*" | wc -l | tr -d ' ')" "no file stub"
+  rm -rf "$(git rev-parse --git-common-dir)/doc-superpowers/ledger/remote"
+  lg init --accept docs/ledger/r.md.decisions.tsv
+  assert_eq "0" "$LG_RC" "re-run exits 0"
+  assert_eq "2" "$(jq 'length' "$LG_GH/issues.json")" "no new issue"
+  lg_fake_gh_off
+  teardown
+}
+
+test_lg_items_gh_get() {
+  echo "test: the reference items adapter's get <ref> — {ref, url, title, body (the metadata block removed), created, fields, labels, status}; an unknown issue exits 2"
+  lg_fixture
+  lg_fake_gh
+  lg_accept_gh_issues
+  local a="$REPO_DIR/scripts/adapters/ledger-items-gh.sh" out rc=0
+  out=$("$BASH_BIN" "$a" get gh#8) || rc=$?
+  assert_eq "0" "$rc" "exits 0"
+  assert_eq '{"body":"Retries are missing.","created":"2026-02-05T10:00:00Z","fields":{"ledger":"orders","severity":"P2","summary":"Retry orders on 502"},"labels":["ledger:orders"],"ref":"gh#8","status":"Open","title":"Orders: retry on 502","url":"https://github.com/o/r/issues/8"}' \
+    "$(jq -cS . <<<"$out")" "the object"
+  rc=0
+  "$BASH_BIN" "$a" get gh#99 > /dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "an unknown issue exits 2"
+  rc=0
+  "$BASH_BIN" "$a" get 99 > /dev/null 2>&1 || rc=$?
+  assert_eq "3" "$rc" "a ref that is not gh#<n> exits 3"
+  lg_fake_gh_off
+  teardown
+}
+
+test_lg_init_import_converts_once() {
+  echo "test: init --import — each hosted item becomes docs/issues/<created>-<slug>.md (fields, imported_from, url; # title + body), linked back with a note, nothing closed; a partial failure exits 2 and keeps the adapter; a re-run skips the imported ones and then sets items.adapter to null"
+  lg_fixture
+  lg_accept_remote
+  lg_fake_gh
+  lg_accept_gh_issues
+  lg_enable '{"items":{"adapter":"doc-superpowers:ledger-items-gh"}}'
+  git add -A && git commit -qm config
+  : > "$LG_GH/view-fail-8"
+  lg init --import
+  assert_eq "2" "$LG_RC" "#8 cannot be read: exits 2"
+  local f7=docs/issues/2026-02-03-cart-badge-stale.md f8=docs/issues/2026-02-05-orders-retry-on-502.md
+  assert_file_exists "$f7" "#7 imported"
+  assert_eq "imported_from: \"gh#7\"|url: \"https://github.com/o/r/issues/7\"|status: Open" "$(lg_fmblock "$f7")" "its frontmatter (the writer quotes # and :)"
+  assert_eq "# Cart badge stale
+
+The badge lags." "$(sed '1,/^---$/d' "$f7")" "its body: # title, then the issue's body"
+  assert_eq "7	Imported to $f7 (doc-superpowers ledger)." "$(cat "$LG_GH/comments")" "linked back with a note"
+  assert_eq "OPEN,OPEN" "$(jq -r 'map(.state) | join(",")' "$LG_GH/issues.json")" "nothing closed"
+  assert_contains "$(cat docs/ledger/config.json)" "ledger-items-gh" "a partial failure keeps the adapter"
+  rm -f "$LG_GH/view-fail-8"
+  lg init --import --format json
+  assert_eq "0" "$LG_RC" "re-run exits 0"
+  assert_eq "1" "$(grep -c '^7	' "$LG_GH/comments")" "#7 skipped (already imported_from)"
+  assert_file_exists "$f8" "#8 imported"
+  assert_eq "imported_from: \"gh#8\"|url: \"https://github.com/o/r/issues/8\"|ledger: orders|severity: P2|status: Open|summary: Retry orders on 502" \
+    "$(lg_fmblock "$f8")" "its fields from the block and labels"
+  assert_eq "null" "$(jq -c '.items.adapter' docs/ledger/config.json)" "every item imported: items.adapter null"
+  assert_contains "$LG_OUT" '"items.adapter"' "JSON: the config change is named"
+  # An adapter without get: exit 2 naming it.
+  mkdir -p tools
+  # shellcheck disable=SC2016  # the adapter's own shell text
+  printf '#!/bin/sh\ncase "$1" in\nlist) echo %s ;;\n*) exit 3 ;;\nesac\n' \
+    "'{\"ref\":\"jira#5\",\"url\":\"https://jira.example/5\",\"status\":\"Open\",\"fields\":{},\"labels\":[]}'" > tools/items.sh
+  chmod +x tools/items.sh
+  lg_enable '{"items":{"adapter":"tools/items.sh"}}'
+  lg init --import
+  assert_eq "2" "$LG_RC" "an adapter without get: exits 2"
+  assert_contains "$LG_ERR" "tools/items.sh" "the message names it"
+  lg_fake_gh_off
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -9697,6 +10162,21 @@ run_tests() {
   test_lg_init_files_umask_mode
   test_lg_init_guard_same_file
   test_lg_init_stale_prefill_recomputed
+  # --- Task 15 ---
+  test_lg_init_accept_only_decided_rows
+  test_lg_init_legacy_map_and_stub
+  test_lg_init_legacy_ids_from_config
+  test_lg_init_summaries_sources
+  test_lg_init_keys_one_commit_date_order
+  test_lg_init_first_views_rendered
+  test_lg_init_idempotent
+  test_lg_init_accept_dry_run
+  test_lg_init_accept_validates_first
+  test_lg_init_accept_registry_changed
+  test_lg_init_accept_hosted_items
+  test_lg_init_accept_hosted_stub
+  test_lg_items_gh_get
+  test_lg_init_import_converts_once
 
   print_summary
 }
