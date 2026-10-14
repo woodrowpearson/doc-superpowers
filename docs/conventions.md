@@ -288,7 +288,7 @@ Every template in `scripts/hooks/ci/` follows these rules; `test-doc-pr-release.
 | `DOC_SUPERPOWERS_STRICT=1` | The git pre-commit hook (exit 1) and the Claude pre-commit gate (exit 2, reason on stderr) block instead of warn — also when the check itself cannot run |
 | `DOC_SUPERPOWERS_QUIET=1` | Suppress hook output while still enforcing (exit codes unchanged). The Claude gate's block reason (stderr on exit 2, Claude's feedback) is never suppressed |
 | `DOC_SUPERPOWERS_SKIP=1` | Bypass all hooks temporarily |
-| `DOC_SUPERPOWERS_CLAIMS_SKIP=1` | Bypass only the git pre-commit hook's claims leg (it runs only with `docs/spec-claims/`). That leg blocks on a finding whatever `DOC_SUPERPOWERS_STRICT` says; a claims check that cannot run blocks only under STRICT |
+| `DOC_SUPERPOWERS_CLAIMS_SKIP=1` | Turn off the git hooks' claims legs only: pre-commit's (blocking) and pre-push's (advisory), each of which runs only with `docs/spec-claims/`. The pre-commit leg blocks on a finding whatever `DOC_SUPERPOWERS_STRICT` says; a claims check that cannot run blocks only under STRICT |
 
 `DOC_TOOLS` overrides the path of `doc-tools.sh` a hook runs (tests use it). The index path is fixed: `docs/.doc-index.json`.
 
