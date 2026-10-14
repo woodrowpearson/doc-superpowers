@@ -5787,6 +5787,10 @@ test_v12_reference_template_passes() {
   assert_contains "$(printf '%s\n' "$REF_GATE" | head -n 1)" "### Task " "step 2b's fence opens with a task heading"
   assert_contains "$(printf '%s\n' "$REF_FINALIZE" | head -n 1)" "### Task " "step 4's fence opens with a task heading"
   assert_contains "$(printf '%s\n' "$REF_FINAL" | head -n 1)" "### Task " "step 4b's fence opens with a task heading"
+  # The Specs line the parser reads a governing spec from, in both templates
+  # that carry one (either alone would give the plan its spec).
+  assert_contains "$REF_UPDATE" '- {spec-path} — {target | constraint | amends | infer}' "step 2's fence lists its specs on the parser's Specs line"
+  assert_contains "$REF_FINALIZE" '- {spec-path} — {target | constraint | amends | infer}' "step 4's fence lists its specs on the parser's Specs line"
   # Every placeholder the templates carry is one ref_task resolves.
   assert_eq "" "$(printf '%s\n' "$REF_UPDATE" "$REF_GATE" "$REF_FINALIZE" "$REF_FINAL" \
     | ref_fill '{C}' 1 '{plan-path}' p '{plan-stem}' s '{spec-path}' p '{target | constraint | amends | infer}' target \
@@ -5808,6 +5812,62 @@ test_v12_reference_template_passes() {
   git add "$PLAN"
   cl validate --staged
   assert_v12 "no final claims gate before the finalize task" "control: the final gate after the finalize task"
+  teardown
+}
+
+# stub_sidecar <fields-json>: append to the fixture sidecar a second claim,
+# an unbuilt stub on the doc's "Refresh tokens are single-use." line, holding
+# only the fields named in <fields-json> (a JSON array of names).
+stub_sidecar() {
+  local tmp
+  tmp=$(harness_mktemp stub)
+  jq --argjson f "$1" '.claims += [{
+      id: "SPEC-AUTH-001#refresh-single-use",
+      quote: "Refresh tokens are single-use",
+      states: "A refresh token is rejected on its second use.",
+      kind: "behaviour",
+      subject: ["src/auth/token.py"],
+      status: "unbuilt",
+      enforced_by: "test",
+      test: null,
+      nonvacuity: null,
+      promotion: null,
+      tracker: "docs/issues/token-ttl.md",
+      frozen_at: null,
+      restates: [],
+      rulings: []
+    } | with_entries(select(.key as $k | any($f[]; . == $k)))]' docs/spec-claims/SPEC-AUTH-001.json > "$tmp"
+  cat "$tmp" > docs/spec-claims/SPEC-AUTH-001.json
+  rm -f "$tmp"
+}
+
+# shellcheck disable=SC2016  # Markdown backticks in a grep pattern, not command substitution
+test_spec_generate_stub_fields_validate() {
+  echo "test: V1 — a claim stub with exactly the fields spec-generate step 6b names validates"
+  local line fields
+  line=$(grep -E '^6b\. \*\*Claim stubs\*\*' "$LIFECYCLE_REF" || true)
+  assert_contains "$line" "6b. **Claim stubs**" "the reference has spec-generate step 6b"
+  claims_fixture
+  # The field names 6b gives (`name` or `name: …` in backticks) that are
+  # fields of a claim record (the fixture claim's keys).
+  fields=$(printf '%s\n' "$line" | grep -oE '`[a-z_]+(`|: )' | tr -d '`: ' \
+    | jq -Rnc --slurpfile s docs/spec-claims/SPEC-AUTH-001.json \
+      '[inputs] as $named | [$s[0].claims[0] | keys_unsorted[] | select(. as $k | any($named[]; . == $k))]')
+  assert_contains "$fields" '"id"' "6b names the id field"
+  assert_contains "$fields" '"quote"' "6b names the quote field"
+  stub_sidecar "$fields"
+  cl render
+  assert_eq "0" "$CL_RC" "6b's claims render: exits 0"
+  cl validate --all
+  assert_eq "0" "$CL_RC" "6b's claims validate --all over the stub: exits 0"
+  assert_eq "0" "$(v1_count)" "…no V1 finding"
+  # Control: a stub missing one field V1 requires is a finding, so the pass
+  # above is V1 reading the stub.
+  git checkout -q -- docs/spec-claims/SPEC-AUTH-001.json docs/specs/SPEC-AUTH-001-token.md
+  stub_sidecar "$(jq -c 'map(select(. != "kind"))' <<<"$fields")"
+  cl render
+  cl validate --all
+  assert_contains "$(v1_messages)" "missing required field kind" "control: the stub without kind is a V1 finding"
   teardown
 }
 
@@ -9807,6 +9867,7 @@ run_tests() {
 
   # --- Task 25: the reference's injected task templates ---
   test_v12_reference_template_passes
+  test_spec_generate_stub_fields_validate
 
   print_summary
 }
