@@ -1440,8 +1440,19 @@ assert_contains "$SPECCLAIMS" 'a `states` change, a lowered `enforced_by` or a t
   "spec-claims.md: V6 — only DOC-STALE or RETIRE licenses a states change, a lowered tier, a re-anchor"
 assert_contains "$SPECCLAIMS" 'What a promotion proved is read from `promotion.proved`**, never from the store and never from history' \
   "spec-claims.md: V6 — what a promotion proved is read from promotion.proved"
-assert_not_contains "$SPECCLAIMS" 'judged by the record at `promotion.at`' \
+assert_not_contains "$SPECCLAIMS" 'record at `promotion.at`' \
   "spec-claims.md: no history rule (promotion.at is unreachable after a squash or rebase merge)"
+assert_not_contains "$SPECCLAIMS" 'sidecar at `promotion.at`' "spec-claims.md: …nor the sidecar at promotion.at"
+assert_contains "$SPECCLAIMS" 'V6 compares each changed promoted claim with its `promotion.proved`' \
+  "spec-claims.md: the CI job's V6 decides by promotion.proved"
+assert_not_contains "$HOOKSREF" '`unverifiable-here` advisory, never a finding' \
+  "hooks.md: a missing verdict in CI is not always only an advisory"
+assert_contains "$HOOKSREF" 'V6 compares each changed promoted claim with its `promotion.proved`' \
+  "hooks.md: the CI job's V6 decides by promotion.proved"
+_ck_src="$(_read "$REPO_ROOT/scripts/hooks/ci/doc-superpowers-steps/claims-check.sh")"
+assert_not_contains "$_ck_src" 'unverifiable-here advisory, never a finding' \
+  "claims-check.sh: a missing verdict in CI is not always only an advisory"
+assert_contains "$_ck_src" 'promoted claim with its promotion.proved' "claims-check.sh: …V6 decides by promotion.proved"
 assert_contains "$SPECCLAIMS" 'A forged `proved` is as undetectable outside the promoting clone as a forged `verdict_sha256`' \
   "spec-claims.md: a forged proved is the trust-by-digest limit too"
 assert_not_contains "$SPECCLAIMS" 'a missing verdict is the advisory `unverifiable-here`, never a finding' \

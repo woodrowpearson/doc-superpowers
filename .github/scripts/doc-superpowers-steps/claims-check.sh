@@ -14,8 +14,11 @@
 #              so an unrelated change is never laid at its door. Then the
 #              amendment batch: claims rulings over <merge-base>..<head>.
 #              The checkout holds no verdict store, by design: promotions
-#              count by their stored digest, so a missing verdict is an
-#              unverifiable-here advisory, never a finding. Findings exit 1,
+#              count by their stored digest, and V6 compares each changed
+#              promoted claim with its promotion.proved, so a missing
+#              verdict is an unverifiable-here advisory only when nothing
+#              changed since the proof (a changed field is a finding).
+#              Findings exit 1,
 #              whatever DOC_SUPERPOWERS_STRICT says. A check that cannot run
 #              is a ::warning:: with status=indeterminate (exit 0), and under
 #              DOC_SUPERPOWERS_STRICT=1 an ::error:: and exit 1.

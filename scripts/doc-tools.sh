@@ -6220,14 +6220,20 @@ _claims_touched() {
 # is a key of $rec (the recorded configuration, cl-recorded.json; null when
 # the adapter failed, which skips that check: the run is indeterminate), a
 # gated claim needs a non-empty when, and config_independent is a non-empty
-# string or null. A built or gated claim's promotion (an object) carries
-# proved, exactly the six keys of cl_proved_keys (_JQ_CLAIMS_PROVED: run
-# before it), each a 64-hex sha256 but enforced_by (a value): promote writes
-# it, and V6, gate and attest compare with it. Fields outside §B's record
-# are not checked.
+# string or null. Every number inside an object when, as tojson prints it,
+# is canonical (cl_canonical_num: an integer, or a decimal with no trailing
+# zero, no exponent, at most 15 significant digits): jq 1.7+ keeps a
+# number's literal (1.0, 1E+3) and upstream jq 1.6 does not, so only a
+# canonical number gives promotion.proved.when one digest on both. A built
+# or gated claim's promotion (an object) carries proved, exactly the six
+# keys of cl_proved_keys (_JQ_CLAIMS_PROVED: run before it), each a 64-hex
+# sha256 but enforced_by (a value): promote writes it, and V6, gate and
+# attest compare with it. Fields outside §B's record are not checked.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_SCHEMA='def claims_v1($docid; $kinds; $known; $b1; $rec):
   def nes: type == "string" and length > 0;
+  def cl_canonical_num: test("^-?(0|[1-9][0-9]*)(\\.[0-9]*[1-9])?$")
+    and (ltrimstr("-") | split(".") | join("") | sub("^0+"; "") | length) <= 15;
   def paths_ok: type == "array" and all(.[]; nes);
   def among($xs): . as $v | any($xs[]; . == $v);
   def req($k; ok; $what):
@@ -6266,6 +6272,11 @@ _JQ_CLAIMS_SCHEMA='def claims_v1($docid; $kinds; $known; $b1; $rec):
        else .when | keys_unsorted[] | select(. as $k | $rec | has($k) | not)
          | "when key \(.) is not a key of the recorded configuration (the config adapter'"'"'s recorded does not report it)"
        end),
+      (if (.when | type) == "object" then
+         [.when | .. | numbers | tojson | select(cl_canonical_num | not)]
+         | if length == 0 then empty
+           else "when holds \(join(", ")): write the number canonically (e.g. 1.5, not 1.50 / 1.0 / 1e3), at most 15 significant digits (promotion.proved digests when'"'"'s jq -cS bytes, which jq 1.6 and jq 1.7+ print alike only for a canonical number)" end
+       else empty end),
       (if $b1 and .status == "gated" and ((.when | type) != "object" or (.when | length) == 0)
        then "status gated needs when: the condition, not yet set by the recorded configuration, under which the claim holds"
        else empty end),
