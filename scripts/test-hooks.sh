@@ -2940,12 +2940,19 @@ test_install_ci_ships_step_scripts_with_workflow() {
 # _assert_installed_workflows_wired <label> — every `.github/scripts/...` path an
 # installed workflow runs exists and is executable; no placeholder survives.
 _assert_installed_workflows_wired() {
-  local label="$1" refs missing="" ref
-  refs=$(grep -hoE '\.github/scripts/[A-Za-z0-9_./-]+\.sh' .github/workflows/doc-*.yml | sort -u)
-  while IFS= read -r ref; do
-    [ -n "$ref" ] || continue
-    [ -x "$ref" ] || missing="${missing} ${ref}"
-  done <<<"$refs"
+  local label="$1" refs missing="" ref wf
+  for wf in .github/workflows/doc-*.yml; do
+    [ -f "$wf" ] || continue
+    refs=$(grep -hoE '\.github/scripts/[A-Za-z0-9_./-]+\.sh' "$wf" | sort -u)
+    while IFS= read -r ref; do
+      [ -n "$ref" ] || continue
+      # A step guarded by hashFiles('<ref>') != '' runs the script only when
+      # another workflow ships it (doc-spec-verify.yml's claims job and
+      # doc-pr-release.yml's update-pr-body.sh): not this install's to ship.
+      grep -qF "hashFiles('$ref') != ''" "$wf" && continue
+      [ -x "$ref" ] || missing="${missing} ${ref}"
+    done <<<"$refs"
+  done
   assert_eq "" "$missing" "$label: every script an installed workflow runs is installed and executable"
   assert_eq "" "$(grep -lE '__[A-Z][A-Z0-9_]*__' .github/workflows/doc-*.yml || true)" \
     "$label: no placeholder survives in installed workflows"

@@ -305,6 +305,141 @@ test_marker_injection_rejected
 test_midline_marker_rejected
 test_trailing_whitespace_no_double_blank
 
+# --- Named sections (DOC_SUPERPOWERS_SECTION) ---------------------------------
+#
+# DOC_SUPERPOWERS_SECTION=<name> selects the markers
+# <!-- doc-superpowers:<name>:start --> / <!-- doc-superpowers:<name>:end -->;
+# a new named section goes at the top of the body. Unset, everything above
+# holds unchanged.
+
+NAMED_START='<!-- doc-superpowers:spec-claims:start -->'
+NAMED_END='<!-- doc-superpowers:spec-claims:end -->'
+
+# named_update <existing body> <new section> [<name>]: a dry run of the named
+# section <name> (default spec-claims); sets NAMED_OUT and NAMED_RC.
+named_update() {
+  NAMED_RC=0
+  NAMED_OUT=$(DOC_SUPERPOWERS_SECTION="${3:-spec-claims}" DOC_SUPERPOWERS_DRY_RUN=1 \
+    DOC_SUPERPOWERS_EXISTING_BODY="$1" "$UPDATE_SCRIPT" 999 <<<"$2" 2>&1) || NAMED_RC=$?
+}
+
+test_named_section_inserted_at_top() {
+  echo "Test: a new named section goes at the top of the body, then one blank line"
+  named_update $'## Summary\nUser wrote this.' $'## Spec amendments (1)\n- one'
+  assert_eq "0" "$NAMED_RC" "inserted: exits 0"
+  assert_eq "$NAMED_START"$'\n## Spec amendments (1)\n- one\n'"$NAMED_END"$'\n\n## Summary\nUser wrote this.' "$NAMED_OUT" \
+    "the section, one blank line, the body as it was"
+  named_update $'\n\n## Summary\nUser wrote this.' $'## Spec amendments (1)\n- one'
+  assert_eq "$NAMED_START"$'\n## Spec amendments (1)\n- one\n'"$NAMED_END"$'\n\n## Summary\nUser wrote this.' "$NAMED_OUT" \
+    "a body starting with blank lines: still exactly one blank line between"
+  named_update "" $'## Spec amendments (1)\n- one'
+  assert_eq "$NAMED_START"$'\n## Spec amendments (1)\n- one\n'"$NAMED_END" "$NAMED_OUT" "an empty body: the section alone"
+  named_update $'## Summary\n```\nan unclosed fence' $'## Spec amendments (1)\n- one'
+  assert_eq "0" "$NAMED_RC" "a body ending inside an unclosed fence: exits 0 (the section goes above it)"
+  assert_eq "$NAMED_START"$'\n## Spec amendments (1)\n- one\n'"$NAMED_END"$'\n\n## Summary\n```\nan unclosed fence' "$NAMED_OUT" \
+    "…at the top"
+}
+
+test_named_section_replaced_in_place() {
+  echo "Test: an existing named section is replaced where it stands"
+  local existing="## Summary
+User prose.
+
+$NAMED_START
+## Spec amendments (1)
+- old
+$NAMED_END
+
+More user prose below."
+  named_update "$existing" $'## Spec amendments (2)\n- new\n- newer'
+  assert_eq "0" "$NAMED_RC" "replaced: exits 0"
+  assert_eq "## Summary
+User prose.
+
+$NAMED_START
+## Spec amendments (2)
+- new
+- newer
+$NAMED_END
+
+More user prose below." "$NAMED_OUT" "the section replaced in place, the prose around it kept"
+  named_update "$existing" $'## Spec amendments (1)\n- old'
+  assert_eq "0|${existing}" "$NAMED_RC|$NAMED_OUT" "the same content: a no-op"
+  named_update "## Summary
+$NAMED_START
+- dangling" "- new"
+  assert_eq "1" "$NAMED_RC" "a named start without its end: refused (exit 1)"
+}
+
+test_named_and_default_sections_coexist() {
+  echo "Test: the named and the default sections coexist; each run edits only its own"
+  local body="## Summary
+User prose.
+
+<!-- doc-superpowers:start -->
+### Added
+- old thing
+<!-- doc-superpowers:end -->"
+  named_update "$body" $'## Spec amendments (1)\n- one'
+  assert_eq "0" "$NAMED_RC" "named into a body with a default section: exits 0"
+  local both="$NAMED_START
+## Spec amendments (1)
+- one
+$NAMED_END
+
+$body"
+  assert_eq "$both" "$NAMED_OUT" "…at the top, the default section untouched"
+  local rc=0 out
+  out=$(DOC_SUPERPOWERS_DRY_RUN=1 DOC_SUPERPOWERS_EXISTING_BODY="$both" "$UPDATE_SCRIPT" 999 <<<$'### Added\n- new thing') || rc=$?
+  assert_eq "0" "$rc" "default (DOC_SUPERPOWERS_SECTION unset) over both: exits 0"
+  assert_eq "$NAMED_START
+## Spec amendments (1)
+- one
+$NAMED_END
+
+## Summary
+User prose.
+
+<!-- doc-superpowers:start -->
+### Added
+- new thing
+<!-- doc-superpowers:end -->" "$out" "…only the default section changes"
+  named_update "$both" $'## Spec amendments (2)\n- two'
+  assert_eq "$NAMED_START
+## Spec amendments (2)
+- two
+$NAMED_END
+
+$body" "$NAMED_OUT" "named over both: only the named section changes"
+  named_update "$both" $'## Spec amendments (1)\n- one' other-section
+  assert_eq "0" "$NAMED_RC" "another name over both: exits 0"
+  assert_eq '<!-- doc-superpowers:other-section:start -->' "$(head -n 1 <<<"$NAMED_OUT")" "…its own section, at the top"
+  # Marker injection, both kinds, either way round.
+  named_update "$both" "- x"$'\n'"$NAMED_END"
+  assert_eq "1" "$NAMED_RC" "named content holding its own end marker: refused (exit 1)"
+  named_update "$both" $'- x\n<!-- doc-superpowers:end -->'
+  assert_eq "1" "$NAMED_RC" "named content holding the default end marker: refused (exit 1)"
+  rc=0
+  DOC_SUPERPOWERS_DRY_RUN=1 DOC_SUPERPOWERS_EXISTING_BODY="$both" "$UPDATE_SCRIPT" 999 \
+    <<<"- x"$'\n'"$NAMED_START" >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "default content holding a named start marker: refused (exit 1)"
+}
+
+test_named_section_bad_name_exit_2() {
+  echo "Test: DOC_SUPERPOWERS_SECTION outside [a-z0-9-]+ — exit 2, nothing printed"
+  local name
+  for name in Spec-Claims 'spec claims' spec_claims '../x' 'a:b' 'x-->'; do
+    named_update $'## Summary' "- one" "$name"
+    assert_eq "2" "$NAMED_RC" "DOC_SUPERPOWERS_SECTION='$name': exits 2"
+    assert_not_contains "$NAMED_OUT" "doc-superpowers:" "…writes no section"
+  done
+}
+
+test_named_section_inserted_at_top
+test_named_section_replaced_in_place
+test_named_and_default_sections_coexist
+test_named_section_bad_name_exit_2
+
 # ============================================================================
 # extract-context.sh tests
 # ============================================================================
@@ -2753,5 +2888,609 @@ test_fw_commit_refuses_what_the_release_would_skip
 test_fw_precheck_untagged_release
 test_fw_release_branch_per_attempt
 test_fw_freshness_scope_quoted_names
+
+# ============================================================================
+# Spec claims in CI: claims-check.sh, the claims job, the schedule step
+# ============================================================================
+echo
+echo "=== Spec claims (CI) ==="
+
+CK_STEP="$STEPS_DIR/claims-check.sh"
+
+test_schedule_timeout_raised() {
+  echo "Test: doc-freshness-schedule.yml — the audit job's timeout covers the claims runs (30 minutes)"
+  yaml_unavailable "schedule_timeout_raised" && return 0
+  assert_eq "30" "$(_yaml_get "$TEMPLATE_DIR/doc-freshness-schedule.yml" jobs.audit-freshness.timeout-minutes)" \
+    "jobs.audit-freshness.timeout-minutes == 30"
+  assert_true "…with a comment saying why" \
+    grep -qE '^[[:space:]]*#.*promote --reverify --all' "$TEMPLATE_DIR/doc-freshness-schedule.yml"
+}
+
+test_spec_verify_claims_job_structure() {
+  echo "Test: doc-spec-verify.yml — a claims job (no AI): spec-verify's guard, least privilege, the step script, the amendments step"
+  yaml_unavailable "spec_verify_claims_job_structure" && return 0
+  local json job
+  json=$(_yaml_json "$TEMPLATE_DIR/doc-spec-verify.yml")
+  job=$(jq -c '.jobs.claims // empty' <<<"$json")
+  assert_true "doc-spec-verify.yml has a job 'claims'" test -n "$job"
+  [ -n "$job" ] || return 0
+  assert_eq '{"contents":"read","pull-requests":"write"}' "$(jq -cS '.permissions' <<<"$job")" \
+    "permissions: exactly contents: read, pull-requests: write"
+  assert_eq "$(jq -r '.jobs["spec-verify"].if' <<<"$json")" "$(jq -r '.if' <<<"$job")" "the same if: guard as spec-verify"
+  assert_eq "ubuntu-latest|20" "$(jq -r '"\(.["runs-on"])|\(.["timeout-minutes"])"' <<<"$job")" "runs-on ubuntu-latest, timeout-minutes 20"
+  assert_eq "0" "$(jq -r '[.steps[] | select((.uses // "") | startswith("actions/checkout@")) | .with["fetch-depth"]][0]' <<<"$job")" \
+    "checkout with fetch-depth: 0"
+  assert_eq "0" "$(jq --arg u "$AI_USES" '[.steps[] | select((.uses // "") | startswith($u))] | length' <<<"$job")" "no AI step"
+  assert_eq ".github/scripts/doc-superpowers-steps/claims-check.sh pr" \
+    "$(jq -r '.steps[] | select(.id == "claims") | .run' <<<"$job")" "step id claims runs claims-check.sh pr"
+  assert_eq '${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}' \
+    "$(jq -r '.steps[] | select(.id == "claims") | .env.RANGE' <<<"$job")" "…with RANGE <PR base>...<PR head>"
+  local amend
+  amend=$(jq -c '[.steps[] | select((.run // "") | startswith(".github/scripts/doc-pr-release/update-pr-body.sh"))][0] // empty' <<<"$job")
+  assert_true "a following step runs update-pr-body.sh" test -n "$amend"
+  [ -n "$amend" ] || return 0
+  assert_contains "$(jq -r '.if' <<<"$amend")" "steps.claims.outputs.amendments_count != '0'" "…only when there are amendments"
+  assert_contains "$(jq -r '.if' <<<"$amend")" "hashFiles('.github/scripts/doc-pr-release/update-pr-body.sh') != ''" \
+    "…and only when update-pr-body.sh is installed"
+  assert_eq "spec-claims" "$(jq -r '.env.DOC_SUPERPOWERS_SECTION' <<<"$amend")" "…into the named section spec-claims"
+  assert_eq '${{ github.token }}' "$(jq -r '.env.GH_TOKEN' <<<"$amend")" "…with GH_TOKEN"
+  assert_contains "$(jq -r '.run' <<<"$amend")" '"$AMENDMENTS"' "…reading the amendments file"
+  assert_true "a comment tells hosts to add their test-environment setup before the claims step" \
+    grep -qiE '^[[:space:]]*#.*test-environment setup' "$TEMPLATE_DIR/doc-spec-verify.yml"
+  # update-pr-body.sh is doc-pr-release.yml's to ship: the claims job only
+  # uses it when it is there (hashFiles), so installing doc-spec-verify alone
+  # ships the step scripts and not the producer helpers.
+  local repo
+  repo=$(installed_repo --ci --workflows=doc-spec-verify) || { assert_true "install --ci --workflows=doc-spec-verify" false; return 0; }
+  assert_true "doc-spec-verify alone: claims-check.sh vendored executable" \
+    test -x "$repo/.github/scripts/doc-superpowers-steps/claims-check.sh"
+  assert_true "…and no producer helpers (no RELEASE-NOTES.next/ either)" \
+    test ! -e "$repo/.github/scripts/doc-pr-release" -a ! -e "$repo/RELEASE-NOTES.next"
+  assert_true "with --workflows=all: update-pr-body.sh is there for the claims job" \
+    test -x "$ALL_REPO/.github/scripts/doc-pr-release/update-pr-body.sh"
+}
+
+test_schedule_close_requires_claims_ok() {
+  echo "Test: doc-freshness-schedule.yml — the claims step; the issue opens on claims findings and closes only with claims disabled or ok"
+  yaml_unavailable "schedule_close_requires_claims_ok" && return 0
+  local json close_if create_if step
+  json=$(_yaml_json "$TEMPLATE_DIR/doc-freshness-schedule.yml")
+  step=$(jq -c '.jobs["audit-freshness"].steps as $s
+    | ($s | to_entries | map(select(.value.id == "freshness")) | .[0].key) as $f
+    | ($s | to_entries | map(select(.value.id == "claims")) | .[0]) as $c
+    | if $c == null then empty else $c.value + {after_freshness: ($c.key > $f)} end' <<<"$json")
+  assert_true "a step with id claims" test -n "$step"
+  [ -n "$step" ] || return 0
+  assert_eq ".github/scripts/doc-superpowers-steps/claims-check.sh scheduled|true|false|origin/__BASE_BRANCH__" \
+    "$(jq -r '"\(.run)|\(.after_freshness)|\(.["continue-on-error"])|\(.env.BASE_REF)"' <<<"$step")" \
+    "claims-check.sh scheduled, after the freshness step, continue-on-error false, BASE_REF origin/__BASE_BRANCH__"
+  close_if=$(jq -r '.jobs[].steps[] | select(.name == "Close issue if all clear") | .if' <<<"$json")
+  create_if=$(jq -r '.jobs[].steps[] | select(.name == "Create or update issue") | .if' <<<"$json")
+  assert_contains "$close_if" "steps.claims.outputs.status" "close: reads the claims status"
+  assert_contains "$close_if" "steps.claims.outputs.status == 'disabled'" "…disabled may close"
+  assert_contains "$close_if" "steps.claims.outputs.status == 'ok'" "…ok may close"
+  assert_contains "$create_if" "steps.claims.outputs.status == 'findings'" "create/update: also on claims findings"
+}
+
+# node_unavailable <label>: as test-spec-status-model.sh's — no node is a
+# loud SKIP locally, a FAIL under DOC_SP_REQUIRE_NODE=1 (tests.yml).
+node_unavailable() {
+  command -v node >/dev/null 2>&1 && return 1
+  if [ "${DOC_SP_REQUIRE_NODE:-0}" = "1" ]; then
+    TESTS_RUN=$((TESTS_RUN + 1))
+    FAIL=$((FAIL + 1))
+    # shellcheck disable=SC2059
+    printf "${RED}  FAIL${NC}: %s — node not found and DOC_SP_REQUIRE_NODE=1\n" "$1"
+  else
+    record_skip "$1 — node not found (install Node.js to run it)"
+  fi
+  return 0
+}
+
+# The issue body doc-freshness-schedule.yml's github-script wrote in 3.1.0
+# for <report> (one stale doc, one missing), dated 2026-01-05T00:00:00.000Z.
+SCHEDULE_BODY_310='<!-- doc-superpowers:freshness-audit -->
+## Stale Documentation Report
+
+**1 stale, 1 missing doc(s)** detected:
+
+- `docs/a.md` — code changed (3 commits behind)
+- `docs/b.md` — missing (indexed, file gone)
+
+### How to fix
+1. Open Claude Code in this repo
+2. Run `/doc-superpowers update`
+3. Review and commit the changes
+
+---
+*Generated by [doc-superpowers](https://github.com/woodrowpearson/doc-superpowers) scheduled audit*
+*Last checked: 2026-01-05T00:00:00.000Z*'
+
+# schedule_issue_body <dir> [ENV=value…]: run the "Create or update issue"
+# step's script under node, with github/context mocked (no open issue) and
+# the clock fixed; prints the body it creates.
+schedule_issue_body() {
+  local dir="$1"
+  shift
+  _yaml_json "$TEMPLATE_DIR/doc-freshness-schedule.yml" \
+    | jq -r '.jobs[].steps[] | select(.name == "Create or update issue") | .with.script' > "$dir/script.js"
+  cat > "$dir/run.js" <<'JS'
+const fs = require('fs');
+const RealDate = Date;
+global.Date = class extends RealDate { constructor(...a) { super(...(a.length ? a : ['2026-01-05T00:00:00.000Z'])); } };
+const body = fs.readFileSync(process.argv[2], 'utf8');
+let created = null;
+const github = {
+  paginate: async () => [],
+  rest: { issues: { listForRepo: () => {}, update: async (o) => { created = o.body; }, create: async (o) => { created = o.body; } } },
+};
+const context = { repo: { owner: 'o', repo: 'r' } };
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+new AsyncFunction('require', 'github', 'context', 'process', body)(require, github, context, process)
+  .then(() => { process.stdout.write(created === null ? '<no issue>' : created); })
+  .catch((e) => { console.error(e); process.exit(1); });
+JS
+  env "$@" node "$dir/run.js" "$dir/script.js"
+}
+
+test_schedule_issue_body_claims_section() {
+  echo "Test: doc-freshness-schedule.yml's issue body — byte-identical to 3.1.0's with claims disabled; a ### Spec claims section on findings"
+  yaml_unavailable "schedule_issue_body_claims_section" && return 0
+  node_unavailable "schedule_issue_body_claims_section" && return 0
+  local dir body
+  dir=$(harness_mktemp_d issue-body)
+  printf '%s' '{"summary":{"stale":1,"missing":1},"docs":{"docs/a.md":{"status":"stale","reason":"code changed","commits_behind":3},"docs/b.md":{"status":"missing"}}}' > "$dir/report.json"
+  jq -n '[{verb: "validate", exit: 0, findings: [], advisories: []},
+          {verb: "run", exit: 1, findings: [{check: "run", claim: "SPEC-AUTH-001#token-ttl", doc: "docs/specs/SPEC-AUTH-001-token.md",
+            message: "assert-fail: a built claim must pass its check"}], advisories: [], judge_sample: ["SPEC-AUTH-001#judge-a"]}]' > "$dir/claims.json"
+  body=$(schedule_issue_body "$dir" REPORT="$dir/report.json" CLAIMS_STATUS=disabled CLAIMS_FINDINGS=0 CLAIMS_REPORT= JUDGE_SAMPLE=) || true
+  assert_eq "$SCHEDULE_BODY_310" "$body" "claims disabled: the 3.1.0 body, byte for byte"
+  body=$(schedule_issue_body "$dir" REPORT="$dir/report.json" CLAIMS_STATUS=ok CLAIMS_FINDINGS=0 CLAIMS_REPORT="$dir/claims.json" JUDGE_SAMPLE=SPEC-AUTH-001#judge-a) || true
+  assert_eq "$SCHEDULE_BODY_310" "$body" "claims ok: no claims section either"
+  body=$(schedule_issue_body "$dir" REPORT="$dir/report.json" CLAIMS_STATUS=findings CLAIMS_FINDINGS=1 CLAIMS_REPORT="$dir/claims.json" JUDGE_SAMPLE=SPEC-AUTH-001#judge-a) || true
+  assert_contains "$body" $'\n### Spec claims\n' "claims findings: a ### Spec claims section"
+  assert_contains "$body" "1 finding(s)" "…with the count"
+  assert_contains "$body" "assert-fail: a built claim must pass its check" "…the finding"
+  assert_contains "$body" "SPEC-AUTH-001#token-ttl" "…naming its claim"
+  assert_contains "$body" "SPEC-AUTH-001#judge-a" "…and the judge sample"
+  assert_contains "$body" "**1 stale, 1 missing doc(s)** detected:" "…after the freshness report"
+  body=$(schedule_issue_body "$dir" REPORT= CLAIMS_STATUS=findings CLAIMS_FINDINGS=1 CLAIMS_REPORT="$dir/claims.json" JUDGE_SAMPLE=) || true
+  assert_contains "$body" "### Spec claims" "claims findings with no freshness report (no doc index): the issue still carries them"
+}
+
+# --- claims-check.sh -----------------------------------------------------------
+#
+# The claims fixture (a trimmed copy of test-spec-claims.sh's): one governing
+# spec, SPEC-AUTH-001, with one claim bound to a /bin/sh stub runner adapter
+# (tools/claims/runner: `list` cats list.jsonl; `run [--root <dir>] <node>…`
+# passes a node when <dir>/<file> holds the needle line of its checks row —
+# node<TAB>file<TAB>line, matched whole with grep -xF — and assert-fails it
+# otherwise; STUB_EXIT=<n> makes it exit n, which the claims verbs read as
+# indeterminate), and its non-vacuity mutant 900 → 1800, all committed on
+# main. The stub is a fixture, not code under test, so it is
+# interpreter-neutral; doc-tools runs through its $BASH_BIN shim.
+
+CK_DOC=docs/specs/SPEC-AUTH-001-token.md
+CK_SIDECAR=docs/spec-claims/SPEC-AUTH-001.json
+CK_ID="SPEC-AUTH-001#token-ttl"
+CK_NODE="tests/test_token.py::test_ttl"
+CK_PLAN=docs/superpowers/plans/2026-01-01-ttl.md
+CK_FINAL=docs/spec-claims/gates/2026-01-01-ttl/final.json
+CK_PLAN_B=docs/superpowers/plans/2026-02-01-b.md
+CK_FINAL_B=docs/spec-claims/gates/2026-02-01-b/final.json
+
+# shellcheck disable=SC2016  # the stub's own expansions
+CK_STUB_SH='#!/bin/sh
+dir=$(cd "$(dirname "$0")" && pwd)
+sub=${1:-}
+[ $# -eq 0 ] || shift
+case $sub in
+  list) cat "$dir/list.jsonl" ;;
+  run)
+    root=.
+    if [ "${1:-}" = --root ]; then root=$2; shift 2; fi
+    for node in "$@"; do
+      check=$(N="$node" awk -F "	" "\$1 == ENVIRON[\"N\"] { print \$2 \"	\" \$3; exit }" "$dir/checks")
+      if [ -z "$check" ]; then outcome=not-found
+      else
+        file=${check%%"	"*}
+        needle=${check#*"	"}
+        if grep -qxF -- "$needle" "$root/$file"; then outcome=pass; else outcome=assert-fail; fi
+      fi
+      printf "{\"node\":\"%s\",\"outcome\":\"%s\",\"reason\":null}\n" "$node" "$outcome"
+    done
+    ;;
+esac
+exit "${STUB_EXIT:-0}"
+'
+
+# ck_dt <args…>: the repo's doc-tools.sh (its $BASH_BIN shim), stdin closed;
+# output discarded. Returns its exit code.
+ck_dt() {
+  "$DOC_TOOLS_SCRIPT" "$@" </dev/null >/dev/null 2>&1
+}
+
+# ck_ok <what> <args…>: ck_dt that must exit 0; otherwise says so on stderr
+# and returns its code (the fixture builders run in subshells: their caller
+# counts the failure).
+ck_ok() {
+  local what="$1" rc=0
+  shift
+  ck_dt "$@" || rc=$?
+  [ "$rc" -eq 0 ] || echo "  fixture: $what exited $rc" >&2
+  return "$rc"
+}
+
+# ck_jset <file> <jq-filter>: rewrite a JSON file in place.
+ck_jset() {
+  local tmp
+  tmp=$(harness_mktemp ck-jset)
+  jq "$2" "$1" > "$tmp" && cat "$tmp" > "$1"
+}
+
+# ck_base: in the cwd (a new_repo), the claims fixture committed on main.
+ck_base() {
+  mkdir -p docs/specs docs/issues docs/spec-claims src/auth tools/claims
+  cat > "$CK_DOC" <<'EOF'
+# SPEC-AUTH-001: Token lifetimes
+
+**Status**: Draft
+**Created**: 2026-10-10
+
+## Summary
+
+How long issued tokens stay valid.
+
+## Requirements
+
+- Access tokens expire after 15 minutes.
+- Refresh tokens are single-use.
+EOF
+  printf 'TTL_SECONDS = 900\n' > src/auth/token.py
+  printf '# Token TTL\n\n**Status**: Open\n\nBuild the 15-minute expiry (%s).\n' "$CK_ID" > docs/issues/token-ttl.md
+  printf '%s' "$CK_STUB_SH" > tools/claims/runner
+  chmod 755 tools/claims/runner
+  jq -nc --arg id "$CK_ID" --arg n "$CK_NODE" \
+    '{id: $id, node: $n, file: ($n | split("::")[0]), in_gate: true, subject_imports_ok: true, when: null}' > tools/claims/list.jsonl
+  printf '%s\t%s\t%s\n' "$CK_NODE" src/auth/token.py "TTL_SECONDS = 900" > tools/claims/checks
+  printf '%s\n' '{"schema":1,"base":"main","runners":{"stub":{"adapter":"tools/claims/runner","paths":["src/","tests/"]}}}' \
+    > docs/spec-claims/config.json
+  jq -n --arg id "$CK_ID" --arg n "$CK_NODE" '{schema: 1, doc: "docs/specs/SPEC-AUTH-001-token.md", claims: [{
+      id: $id, quote: "Access tokens expire after 15 minutes",
+      states: "An issued access token is rejected 15 minutes after issue.", kind: "behaviour",
+      subject: ["src/auth/token.py"], status: "unbuilt", enforced_by: "test", test: {runner: "stub", node: $n},
+      nonvacuity: {mutant: {file: "src/auth/token.py", find: "TTL_SECONDS = 900", replace: "TTL_SECONDS = 1800"}},
+      promotion: null, tracker: "docs/issues/token-ttl.md", frozen_at: null, restates: [], rulings: []}]}' > "$CK_SIDECAR"
+  ck_ok "claims render" claims render
+  git add -A && git commit -qm "claims fixture"
+}
+
+# ck_repo: a new_repo with the claims fixture on main, then a feature branch
+# where the claim is promoted (claims promote: built, its verdict in this
+# clone's store) and committed. Echoes the path; main's SHA is in .git/ck-base.
+ck_repo() {
+  local dir
+  dir=$(new_repo)
+  (
+    cd "$dir" || exit 1
+    ck_base
+    git rev-parse HEAD > .git/ck-base
+    git checkout -qb feature
+    ck_ok "claims promote" claims promote "$CK_ID" || exit 1
+    git add -A && git commit -qm "promote $CK_ID"
+  ) || return 1
+  printf '%s' "$dir"
+}
+
+# ck_amend_ttl [<record>]: the claim's DOC-STALE amendment to 30 minutes (the
+# sentence struck, an AMENDED block, the quote re-anchored, new states, a
+# ruling naming <record> — default the tracker), the code at 1800, and the
+# stub's needle and the mutant following the code. Nothing is staged.
+ck_amend_ttl() {
+  local tmp
+  tmp=$(harness_mktemp ck-doc)
+  awk '$0 == "- Access tokens expire after 15 minutes." {
+         print "- ~~Access tokens expire after 15 minutes.~~"
+         print "> ⚠️ **AMENDED 2026-10-12 — ttl.** Access tokens expire after 30 minutes."
+         next }
+       { print }' "$CK_DOC" > "$tmp" && cat "$tmp" > "$CK_DOC"
+  jq --arg r "${1:-docs/issues/token-ttl.md}" '.claims[0].quote = "Access tokens expire after 30 minutes"
+    | .claims[0].states = "An issued access token is rejected 30 minutes after issue."
+    | .claims[0].rulings += [{date: "2026-10-12", direction: "DOC-STALE", by: "doc-owner", record: $r,
+        reason: "The TTL was renegotiated."}]
+    | .claims[0].nonvacuity.mutant.find = "TTL_SECONDS = 1800"
+    | .claims[0].nonvacuity.mutant.replace = "TTL_SECONDS = 900"' "$CK_SIDECAR" > "$tmp" && cat "$tmp" > "$CK_SIDECAR"
+  printf 'TTL_SECONDS = 1800\n' > src/auth/token.py
+  printf '%s\t%s\t%s\n' "$CK_NODE" src/auth/token.py "TTL_SECONDS = 1800" > tools/claims/checks
+}
+
+# ck_plan <path>: the two-chunk plan building the claim (chunk 1 names it on
+# its Claims line, chunk 2 none), each chunk with its claims gate, the final
+# gate last; the Specs lists name SPEC-AUTH-001 as target.
+ck_plan() {
+  mkdir -p "$(dirname "$1")"
+  # shellcheck disable=SC2016  # Markdown backticks
+  printf '%s\n' '# Token TTL Implementation Plan' '' '**Goal:** Build the 15-minute access-token expiry.' '' \
+    '**Spec:** docs/specs/SPEC-AUTH-001-token.md' '' '---' '' '## Chunk 1: Expiry' '' '### Task 1: Expire access tokens' '' \
+    '**Files:**' '- Modify: `src/auth/token.py:1-1`' '- Test: `tests/unit/test_token.py`' '' "**Claims:** $CK_ID" '' \
+    '- [ ] **Step 1: Write the failing test**' '' '### Task 2: Claims gate (chunk 1)' '' '- [ ] **Step 1: Run the claims gate**' '' \
+    '### Task 3: Update governing specs for this chunk' '' \
+    '**Specs** (roles copied from `--specs`; `infer` = resolve against `git diff` when this task runs):' \
+    '- docs/specs/SPEC-AUTH-001-token.md — target' '' '- [ ] **Step 1: Update spec status (guarded)**' '' \
+    '## Chunk 2: Docs' '' '### Task 4: Document the expiry' '' '**Files:**' '- Modify: `docs/guides/tokens.md`' '' \
+    '**Claims:** none — documentation only' '' '### Task 5: Claims gate (chunk 2)' '' '- [ ] **Step 1: Run the claims gate**' '' \
+    '### Task 6: Update governing specs for this chunk' '' \
+    '**Specs** (roles copied from `--specs`; `infer` = resolve against `git diff` when this task runs):' \
+    '- docs/specs/SPEC-AUTH-001-token.md — target' '' '- [ ] **Step 1: Update spec status (guarded)**' '' \
+    '### Task 7: Final claims gate' '' '- [ ] **Step 1: Attest the final gate**' '' \
+    '### Task 8: Finalize all governing specs' '' \
+    '**Specs** (roles copied from `--specs`; `infer` = resolve against `git diff` when this task runs):' \
+    '- docs/specs/SPEC-AUTH-001-token.md — target' '' '- [ ] **Step 1: Advance implemented specs (scope-gated)**' > "$1"
+}
+
+# ck_converged_repo: the plan converged on a feature branch as the Final
+# claims gate sequence leaves it, every record committed: the plan on main;
+# then promote, both chunk gates, the code moved to 1800 (the final gate red),
+# the DOC-STALE amendment citing final.json, the re-promotion, the green final
+# gate. Built once, into CK_CONVERGED (call it outside $(…)); tests clone
+# it. main's SHA is in .git/ck-base.
+CK_CONVERGED=""
+ck_converged_repo() {
+  [ -z "$CK_CONVERGED" ] || return 0
+  local dir
+  dir=$(new_repo)
+  (
+    cd "$dir" || exit 1
+    ck_base
+    ck_plan "$CK_PLAN"
+    git add -A && git commit -qm "the plan"
+    git rev-parse HEAD > .git/ck-base
+    git checkout -qb feature
+    ck_ok "promote" claims promote "$CK_ID" || exit 1
+    git add -A && git commit -qm "promote"
+    ck_ok "gate 1" claims gate --plan "$CK_PLAN" --chunk 1 || exit 1
+    git add -A && git commit -qm "the chunk 1 gate record"
+    ck_ok "gate 2" claims gate --plan "$CK_PLAN" --chunk 2 || exit 1
+    git add -A && git commit -qm "the chunk 2 gate record"
+    printf 'TTL_SECONDS = 1800\n' > src/auth/token.py
+    git commit -qam "TTL 30 minutes"
+    ck_dt claims attest --plan "$CK_PLAN" --final || true
+    ck_amend_ttl "$CK_FINAL"
+    git add -A && git commit -qm "DOC-STALE: the TTL is 30 minutes"
+    ck_ok "re-promote" claims promote "$CK_ID" || exit 1
+    git add -A && git commit -qm "re-promote"
+    ck_ok "final gate" claims attest --plan "$CK_PLAN" --final || exit 1
+    git add -A && git commit -qm "the final gate record"
+  ) || return 1
+  CK_CONVERGED="$dir"
+}
+
+# ck_clone <repo>: a fresh clone of <repo>'s feature branch (an empty verdict
+# store), its base SHA copied to .git/ck-base. Echoes the path.
+ck_clone() {
+  local c
+  c="$(harness_mktemp_d ck-clone)/clone"
+  git clone -q -b feature "$1" "$c" && cp "$1/.git/ck-base" "$c/.git/ck-base" || return 1
+  printf '%s' "$c"
+}
+
+# ck_wrapper <dir>: a doc-tools.sh wrapper at <dir>/doc-tools.sh logging each
+# call's argv (one line, space-joined) to <dir>/argv, then running the repo's
+# doc-tools.sh. Echoes its path.
+ck_wrapper() {
+  printf '#!/bin/sh\necho "$*" >> "%s/argv"\nexec "%s" "$@"\n' "$1" "$DOC_TOOLS_SCRIPT" > "$1/doc-tools.sh"
+  : > "$1/argv"
+  chmod 755 "$1/doc-tools.sh"
+  printf '%s' "$1/doc-tools.sh"
+}
+
+# ck_run <repo> <out> <mode> [ENV=value…]: claims-check.sh <mode> as the step
+# runs it (run_installed), DOC_TOOLS the logging wrapper (its log is
+# <out>.argv); pr mode gets RANGE <ck-base>...HEAD. Sets CK_RC.
+ck_run() {
+  local repo="$1" out="$2" mode="$3" wdir range=()
+  shift 3
+  wdir=$(harness_mktemp_d ck-wrap)
+  ck_wrapper "$wdir" >/dev/null
+  if [ "$mode" = pr ]; then
+    range=("RANGE=$(cat "$repo/.git/ck-base" 2>/dev/null || git -C "$repo" rev-parse HEAD)...$(git -C "$repo" rev-parse HEAD)")
+  fi
+  CK_RC=0
+  run_installed "$repo" "$out" DOC_TOOLS="$wdir/doc-tools.sh" ${range[@]+"${range[@]}"} "$@" -- "$CK_STEP" "$mode" || CK_RC=$?
+  cp "$wdir/argv" "$out.argv"
+}
+
+test_claims_check_disabled() {
+  echo "Test: claims-check.sh — no docs/spec-claims/: status disabled, exit 0, doc-tools never called"
+  local repo out mode
+  repo=$(new_repo)
+  out="$(harness_mktemp_d step)/out"
+  for mode in pr scheduled; do
+    ck_run "$repo" "$out" "$mode" BASE_REF=main
+    assert_eq "0|disabled|0|0" "$CK_RC|$(_out "$out" status)|$(_out "$out" findings)|$(_out "$out" amendments_count)" \
+      "$mode: rc 0, status disabled, findings 0, amendments_count 0"
+    assert_eq "" "$(cat "$out.argv")" "$mode: no doc-tools call"
+  done
+  local rc=0
+  ( cd "$repo" && env -u GITHUB_OUTPUT "$BASH_BIN" "$CK_STEP" pr ) >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "no GITHUB_OUTPUT: usage, exit 2"
+  rc=0
+  ( cd "$repo" && GITHUB_OUTPUT="$out" "$BASH_BIN" "$CK_STEP" bogus ) >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "an unknown mode: usage, exit 2"
+}
+
+test_claims_check_pr_empty_store_converged_plan_passes() {
+  echo "Test: claims-check.sh pr — a plan converged locally (DOC-STALE, re-promotion), final.json in RANGE, in a fresh clone: ok"
+  local repo out
+  ck_converged_repo || { assert_true "converged fixture" false; return 0; }
+  repo=$(ck_clone "$CK_CONVERGED") || { assert_true "clone" false; return 0; }
+  out="$(harness_mktemp_d step)/out"
+  assert_true "precondition: the clone has no verdict store" test ! -d "$repo/.git/spec-claims"
+  ck_run "$repo" "$out" pr
+  assert_eq "0|ok|0" "$CK_RC|$(_out "$out" status)|$(_out "$out" findings)" "rc 0, status ok, findings 0"
+  assert_contains "$(cat "$out.argv")" "claims attest --plan $CK_PLAN --final" "the plan was attested"
+  assert_eq "unverifiable-here" \
+    "$(jq -r '[.[] | .advisories[]? | select(.check != "V8") | .code] | unique | join(" ")' "$(_out "$out" report)" 2>/dev/null)" \
+    "…the empty store gives unverifiable-here advisories, never findings"
+  assert_eq "$out.tmp/claims-report.json" "$(_out "$out" report)" "report is \$RUNNER_TEMP/claims-report.json"
+  assert_eq "3" "$(jq '[.[] | .verb] | length' "$(_out "$out" report)" 2>/dev/null)" "…an array of the 3 verdicts (validate, run, attest)"
+  assert_eq "" "$(grep -vE '^[a-z_]+=[^[:space:]]*$' "$out" || true)" "every step output is one key=value line"
+}
+
+test_claims_check_pr_findings_exit_1() {
+  echo "Test: claims-check.sh pr — a red built claim: findings=1, exit 1"
+  local repo out
+  repo=$(ck_repo) || { assert_true "claims fixture" false; return 0; }
+  out="$(harness_mktemp_d step)/out"
+  ck_run "$repo" "$out" pr
+  assert_eq "0|ok|0" "$CK_RC|$(_out "$out" status)|$(_out "$out" findings)" "precondition: the promoted claim, green: ok"
+  ( cd "$repo" && printf 'TTL_SECONDS = 9000\n' > src/auth/token.py && git commit -qam "TTL 9000" )
+  ck_run "$repo" "$out" pr
+  assert_eq "1|findings|1" "$CK_RC|$(_out "$out" status)|$(_out "$out" findings)" "the source moved: rc 1, status findings, findings 1"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error::"
+  assert_contains "$(cat "$out.log")" "a built claim must pass its check" "…and the finding in the log"
+  assert_eq "assert-fail: a built claim must pass its check" \
+    "$(jq -r '[.[] | .findings[]? | .message] | join("|")' "$(_out "$out" report)" 2>/dev/null)" "the report holds the one finding"
+}
+
+test_claims_check_pr_indeterminate_warns() {
+  echo "Test: claims-check.sh pr — an adapter that fails: indeterminate, a ::warning:: and exit 0; STRICT exits 1"
+  local repo out
+  repo=$(ck_repo) || { assert_true "claims fixture" false; return 0; }
+  out="$(harness_mktemp_d step)/out"
+  ck_run "$repo" "$out" pr STUB_EXIT=3
+  assert_eq "0|indeterminate|0" "$CK_RC|$(_out "$out" status)|$(_out "$out" findings)" "rc 0, status indeterminate, findings 0"
+  assert_contains "$(cat "$out.log")" "::warning::" "…with a ::warning::"
+  ck_run "$repo" "$out" pr STUB_EXIT=3 DOC_SUPERPOWERS_STRICT=1
+  assert_eq "1|indeterminate" "$CK_RC|$(_out "$out" status)" "DOC_SUPERPOWERS_STRICT=1: exit 1"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error::"
+  ck_run "$repo" "$out" pr DOC_TOOLS=/nonexistent/doc-tools.sh
+  assert_eq "0|indeterminate" "$CK_RC|$(_out "$out" status)" "doc-tools.sh missing: indeterminate, never ok"
+  ck_run "$repo" "$out" pr "RANGE=nosuchref...HEAD"
+  assert_eq "0|indeterminate" "$CK_RC|$(_out "$out" status)" "an unresolvable RANGE: indeterminate, never ok"
+}
+
+test_claims_check_pr_amendments_file() {
+  echo "Test: claims-check.sh pr — a DOC-STALE ruling in range: amendments_count=1, the Markdown batch in the amendments file"
+  local repo out f
+  repo=$(ck_repo) || { assert_true "claims fixture" false; return 0; }
+  out="$(harness_mktemp_d step)/out"
+  ck_run "$repo" "$out" pr
+  f=$(_out "$out" amendments)
+  assert_eq "0|$out.tmp/claims-amendments.md" "$(_out "$out" amendments_count)|$f" "no ruling: amendments_count 0, the file \$RUNNER_TEMP/claims-amendments.md"
+  assert_eq "" "$(cat "$f" 2>/dev/null || echo "<missing>")" "…empty"
+  ( cd "$repo" && ck_amend_ttl && git add -A && git commit -qm "DOC-STALE: 30 minutes" && ck_dt claims promote "$CK_ID" \
+    && git add -A && git commit -qm "re-promote" ) || { assert_true "amendment fixture" false; return 0; }
+  ck_run "$repo" "$out" pr
+  f=$(_out "$out" amendments)
+  assert_eq "1" "$(_out "$out" amendments_count)" "one DOC-STALE ruling: amendments_count 1"
+  assert_eq "## Spec amendments (1)" "$(head -n 1 "$f" 2>/dev/null)" "…the file starts '## Spec amendments (1)'"
+  assert_contains "$(cat "$f" 2>/dev/null)" "### $CK_ID — DOC-STALE" "…with the ruling's row"
+  assert_contains "$(cat "$f" 2>/dev/null)" "**Reason:** The TTL was renegotiated." "…and its reason"
+}
+
+test_claims_check_pr_passes_pr_base() {
+  echo "Test: claims-check.sh pr — every claims call passes --base <the left side of RANGE>"
+  local repo out base calls
+  ck_converged_repo || { assert_true "converged fixture" false; return 0; }
+  repo=$(ck_clone "$CK_CONVERGED") || { assert_true "clone" false; return 0; }
+  out="$(harness_mktemp_d step)/out"
+  base=$(cat "$repo/.git/ck-base")
+  ck_run "$repo" "$out" pr
+  calls=$(grep '^claims ' "$out.argv" || true)
+  assert_eq "5" "$(grep -c . <<<"$calls")" \
+    "5 claims calls: validate, run, attest, rulings (json), rulings (markdown) ($(tr '\n' ';' <<<"$calls"))"
+  assert_eq "" "$(grep -vF -- "--base $base" <<<"$calls" || true)" "each one with --base $base"
+  assert_eq "" "$(grep -v '^claims ' "$out.argv" || true)" "no other doc-tools call"
+  assert_eq "claims validate --all|claims run --all|claims attest --plan $CK_PLAN --final" \
+    "$(grep -E '^claims (validate|run|attest) ' <<<"$calls" | sed 's/ --base .*//' | paste -sd '|' -)" "in order: validate, run, attest"
+  assert_contains "$calls" "claims rulings --range $base..$(git -C "$repo" rev-parse HEAD)" "rulings over <merge-base>..<head>"
+}
+
+test_claims_check_pr_attests_only_plans_changed_in_range() {
+  echo "Test: claims-check.sh pr — only a plan whose file or final.json the PR changes is attested"
+  local repo out report
+  ck_converged_repo || { assert_true "converged fixture" false; return 0; }
+  repo=$(ck_clone "$CK_CONVERGED") || { assert_true "clone" false; return 0; }
+  (
+    cd "$repo" || exit 1
+    # Both plans Completed, each with a final.json, on main.
+    awk 'NR == 2 { print; print "**Status**: Completed"; next } { print }' "$CK_PLAN" > .git/ck-plan && cat .git/ck-plan > "$CK_PLAN"
+    cp "$CK_PLAN" "$CK_PLAN_B"
+    mkdir -p "$(dirname "$CK_FINAL_B")"
+    cp "$CK_FINAL" "$CK_FINAL_B"
+    git add -A && git commit -qm "both plans completed"
+    git branch -f main HEAD
+    git rev-parse HEAD > .git/ck-base
+    # The PR: plan B edited; a ruling on SPEC-AUTH-001 (which plan A governs)
+    # made outside any plan.
+    printf '\nA note.\n' >> "$CK_PLAN_B"
+    ck_jset "$CK_SIDECAR" '.claims[0].states = "An issued access token is rejected 30 minutes after issue, refresh included."
+      | .claims[0].rulings += [{date: "2026-10-13", direction: "DOC-STALE", by: "doc-owner",
+          record: "docs/issues/token-ttl.md", reason: "Refresh is included."}]'
+    git add -A && git commit -qm "the PR"
+  ) || { assert_true "two-plan fixture" false; return 0; }
+  out="$(harness_mktemp_d step)/out"
+  ck_run "$repo" "$out" pr
+  assert_contains "$(cat "$out.argv")" "claims attest --plan $CK_PLAN_B --final" "plan B (its file changed) is attested"
+  assert_not_contains "$(cat "$out.argv")" "attest --plan $CK_PLAN " "plan A (untouched) is not"
+  report=$(_out "$out" report)
+  assert_eq "$CK_FINAL_B" "$(jq -r '[.[] | select(.verb == "attest") | .record] | join(" ")' "$report" 2>/dev/null)" \
+    "the report's one attest verdict is plan B's"
+  assert_eq "0" "$(jq --arg a "2026-01-01-ttl" '[.[] | .findings[]? | tostring | select(contains($a))] | length' "$report" 2>/dev/null)" \
+    "no finding attributed to plan A"
+  # Without the RANGE filter plan A would carry the ruling as a silent
+  # reconciliation: the filter is what keeps it off plan A.
+  local rc=0 v
+  v=$(cd "$repo" && "$DOC_TOOLS_SCRIPT" claims attest --plan "$CK_PLAN" --base "$(cat .git/ck-base)" </dev/null 2>/dev/null) || rc=$?
+  assert_contains "$(jq -r '.findings[]?.message' <<<"$v" 2>/dev/null)" "silent reconciliation" \
+    "precondition: attesting plan A here would report the ruling against it"
+}
+
+test_claims_check_scheduled_reports_judge_sample() {
+  echo "Test: claims-check.sh scheduled — run --scheduled --judge-sample 3, promote --reverify --all, validate --all; judge_sample; never exit 1 on findings"
+  local repo out calls
+  repo=$(ck_repo) || { assert_true "claims fixture" false; return 0; }
+  (
+    cd "$repo" || exit 1
+    for s in b a; do
+      ck_jset "$CK_SIDECAR" ".claims += [{id: \"SPEC-AUTH-001#judge-$s\", quote: \"Refresh tokens are single-use\",
+        states: \"Reviewed by a person.\", kind: \"behaviour\", subject: [\"src/auth/token.py\"], status: \"unbuilt\",
+        enforced_by: \"judge\", why_not_mechanical: \"a person reads it\", test: null, nonvacuity: null, promotion: null,
+        tracker: \"docs/issues/token-ttl.md\", frozen_at: null, restates: [], rulings: []}]"
+    done
+    ck_ok "claims render" claims render || exit 1
+    git add -A && git commit -qm "two judge claims"
+  ) || { assert_true "judge fixture" false; return 0; }
+  out="$(harness_mktemp_d step)/out"
+  ck_run "$repo" "$out" scheduled BASE_REF=main
+  assert_eq "0|ok|0" "$CK_RC|$(_out "$out" status)|$(_out "$out" findings)" "rc 0, status ok, findings 0"
+  assert_eq "SPEC-AUTH-001#judge-a,SPEC-AUTH-001#judge-b" "$(_out "$out" judge_sample | tr ',' '\n' | sort | paste -sd , -)" \
+    "judge_sample: the judge claims, comma-separated"
+  calls=$(sed 's/ --base main$//' "$out.argv")
+  assert_eq "claims run --all --scheduled --judge-sample 3|claims promote --reverify --all|claims validate --all" \
+    "$(paste -sd '|' - <<<"$calls")" "the three calls, in order"
+  assert_eq "" "$(grep -vF -- "--base main" "$out.argv" || true)" "…each with --base \$BASE_REF"
+  ( cd "$repo" && printf 'TTL_SECONDS = 9000\n' > src/auth/token.py && git commit -qam "TTL 9000" )
+  ck_run "$repo" "$out" scheduled BASE_REF=main
+  assert_eq "0|findings" "$CK_RC|$(_out "$out" status)" "a red claim: status findings, still exit 0 (the issue step reports it)"
+  assert_true "…findings counted ($(_out "$out" findings))" test "$(_out "$out" findings)" -ge 1
+  ck_run "$repo" "$out" scheduled BASE_REF=main DOC_TOOLS=/nonexistent/doc-tools.sh
+  assert_eq "1" "$CK_RC" "nothing could run (doc-tools.sh missing): exit 1"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error::"
+}
+
+test_schedule_timeout_raised
+test_spec_verify_claims_job_structure
+test_schedule_close_requires_claims_ok
+test_schedule_issue_body_claims_section
+test_claims_check_disabled
+test_claims_check_pr_empty_store_converged_plan_passes
+test_claims_check_pr_findings_exit_1
+test_claims_check_pr_indeterminate_warns
+test_claims_check_pr_amendments_file
+test_claims_check_pr_passes_pr_base
+test_claims_check_pr_attests_only_plans_changed_in_range
+test_claims_check_scheduled_reports_judge_sample
 
 print_summary

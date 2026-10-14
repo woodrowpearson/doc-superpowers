@@ -36,17 +36,18 @@ Routes to `"$ROOT/scripts/hooks/install.sh" <subcommand> [flags]` (`install.sh h
 | Workflow | Runs on | Permissions | Commits / writes |
 |---|---|---|---|
 | `doc-freshness-pr` (default) | PR open/sync | contents: read, pull-requests: write | one PR comment (updated each push); `--ci-strict` fails the check |
-| `doc-freshness-schedule` (default) | weekly cron | contents: read, issues: write | opens/updates/closes an audit issue |
+| `doc-freshness-schedule` (default) | weekly cron | contents: read, issues: write | opens/updates/closes an audit issue (with `docs/spec-claims/`: also for spec-claims findings) |
 | `doc-audit-update` (AI) | push to a non-base branch that leaves indexed docs stale or missing (not Dependabot's) | contents: write | **a checked step commits `docs/` and indexed docs to that branch** — the doc updates and the audit report itself (`docs/plans/<date>-audit-report.md`), one per run that finds work |
 | `doc-review-pr` (AI) | PR open/sync touching indexed docs or their code; `@claude` PR comments by members | contents: read, pull-requests + issues: write | PR comments only (its tools edit no file — see *What an AI job's agent can reach*) |
 | `doc-release` (AI) | push to `release/**` | contents + pull-requests: write | a checked step commits the release files to a new branch and opens a PR |
-| `doc-spec-verify` (AI) | PR open/sync touching indexed specs or their code | contents: read, pull-requests: write | PR comment only (its tools edit no file — see *What an AI job's agent can reach*) |
+| `doc-spec-verify` (AI) | PR open/sync touching indexed specs or their code; its `claims` job (no AI) on every same-repository PR | contents: read, pull-requests: write | PR comment only (its tools edit no file — see *What an AI job's agent can reach*); with `docs/spec-claims/`, the `claims` job fails the check on findings and, while `doc-pr-release` is installed, writes the PR's spec amendments into a `spec-claims` section at the top of the PR description |
 | `doc-pr-full-cycle` (AI) | PR open touching indexed docs or their code | contents + pull-requests: write | **a checked step commits `docs/` and indexed docs to the PR branch** |
 | `doc-pr-release` (AI) | PR pushes | contents + pull-requests: write | **a checked step commits the PR's fragment to the PR branch**, edits the PR body |
 
 How every workflow behaves (tell the user when they ask what they agree to):
 - A check that cannot run is never "all current": the freshness PR check warns (fails under `--ci-strict`), the schedule run fails and never closes the issue, and the AI jobs' scope step fails the job. Results stay in files; only counts reach step outputs.
 - Which docs and code a change touches comes from the doc index (`check-freshness --code-refs-from`), not from path filters in the workflow.
+- Spec claims (`doc-spec-verify`'s `claims` job, and a step of `doc-freshness-schedule`) run only with `docs/spec-claims/`; without it the step reports `status=disabled`, runs nothing, and the schedule's issue body is unchanged. On a PR, `claims-check.sh pr` runs `claims validate --all`, `claims run --all` and `claims attest --plan <p> --final` for each plan the PR touches (its file or `final.json`), every call with `--base <the PR's base SHA>`; findings fail the job, and a check that cannot run (an adapter reports `indeterminate` — the host adds its test-environment setup before the claims step) warns, and fails under `--ci-strict`. The CI checkout holds no verdict store: promotions count by their stored digest, so that is an `unverifiable-here` advisory, never a finding. Weekly, `claims-check.sh scheduled` runs `claims run --all --scheduled --judge-sample 3`, `claims promote --reverify --all` and `claims validate --all` (`--base origin/<base branch>`): findings keep the audit issue open under `### Spec claims` with the week's judge sample, and the step fails only when nothing could run. The job's timeout is 30 minutes for those runs.
 - AI workflows use the job's own `GITHUB_TOKEN` (`github_token: ${{ github.token }}`; no `id-token: write`), so `permissions:` bounds that token and its pushes start no other workflow run. They install this plugin from its GitHub tag `v<the installed version>`, run only for same-repository PRs (never forks or Dependabot), grant the agent a scoped `--allowedTools` list with `--max-turns`, and have `timeout-minutes`. The agent never commits: a later step (a pre-agent copy of the checker, git hooks and fsmonitor off — an integrity check against agent mistakes, not a sandbox: see *What an AI job's agent can reach*) refuses any changed path outside the workflow's set, then commits and pushes without force. The three that commit to a branch check out the branch and share one concurrency group per branch: never cancelled mid-run, pending runs queued in order (`queue: max`; on a GitHub Enterprise Server without it, delete that key). A `doc-audit-update` or `doc-pr-release` run whose branch received someone else's commits meanwhile ends green as superseded, committing nothing — that push starts a new run. `doc-pr-full-cycle` runs only when the PR is opened, so nothing would re-run it: its superseded run fails ("… received new commits during this run (…); nothing was committed to it. Re-run this workflow …"). A run whose branch moved only by doc-superpowers commits, or backwards, fails visibly — re-run it.
 - **Commits and PRs made with the job's token start no workflow run** — of any workflow. The commit `doc-audit-update`, `doc-pr-full-cycle` or `doc-pr-release` pushes gets no check runs, and it is the branch head (`doc-pr-release` pushes after every author push), so a PR's required status checks wait at "Expected"; the PR `doc-release` opens gets none either. The author pushes another commit, or closes and reopens the PR, to run them.
 - `doc-release` opens its PR with the job's token: the repository setting *Allow GitHub Actions to create and approve pull requests* must be on (the step says so when it is off). That setting also lets **any** workflow job with `pull-requests: write` approve pull requests — so require a human's review (below).
@@ -108,24 +109,25 @@ others install only when named:
 | Workflow | Trigger | Purpose |
 |---|---|---|
 | `doc-freshness-pr.yml` | PR open/sync | One PR comment listing the docs the diff leaves stale or missing (updated every push; STRICT fails the check) |
-| `doc-freshness-schedule.yml` | Weekly cron | Keeps one audit issue open while docs are stale or missing; closes it after a clean check |
+| `doc-freshness-schedule.yml` | Weekly cron | Keeps one audit issue open while docs are stale or missing, or spec claims have findings; closes it after a clean check |
 | `doc-audit-update.yml` | Push to non-main leaving indexed docs stale | AI-powered audit + update on feature branches |
 | `doc-review-pr.yml` | PR open/sync touching indexed docs; `@claude` PR comment | AI-powered PR doc review (a fixed-prompt job), and tag mode for `@claude` |
 | `doc-release.yml` | Push to `release/**` | AI-powered release-notes drafting, opened as a PR |
-| `doc-spec-verify.yml` | PR open/sync touching indexed specs | Verifies spec compliance against changed code |
+| `doc-spec-verify.yml` | PR open/sync touching indexed specs; its `claims` job on every PR | Verifies spec compliance against changed code; the `claims` job (no AI) checks the spec claims and posts the amendment batch |
 | `doc-pr-full-cycle.yml` | PR open touching indexed docs | Superset of review-pr — runs review + update + diagram + sync |
 | `doc-pr-release.yml` | PR open/sync/reopen | Drafts/maintains `RELEASE-NOTES.next/PR-<N>.md` fragments and the managed `<!-- doc-superpowers:start/end -->` section of the PR body |
 
 The `doc-pr-release.yml` workflow uses shell helpers installed alongside
 it at `.github/scripts/doc-pr-release/`:
 - `extract-context.sh` — emits JSON context: PR body, the fragment and its computed hash state, and the PR's own commits (never base-branch or bot commits) since the checkout the last sync recorded
-- `update-pr-body.sh` — idempotent marker-based PR body merge (markers inside code fences are ignored; an END before the START, or no section and a body ending inside an unclosed fence, is refused)
+- `update-pr-body.sh` — idempotent marker-based PR body merge (markers inside code fences are ignored; an END before the START, or no section and a body ending inside an unclosed fence, is refused). `DOC_SUPERPOWERS_SECTION=<name>` (`[a-z0-9-]+`, else exit 2) edits a named section instead, `<!-- doc-superpowers:<name>:start -->` / `<!-- doc-superpowers:<name>:end -->`, inserted at the top of the body when new; content holding any section's marker is refused. `doc-spec-verify.yml`'s `claims` job writes the `spec-claims` section with it, only while this helper is installed (its step tests `hashFiles(…)`, so installing `doc-spec-verify` alone does not ship these helpers)
 - `fragment-lib.sh` — the fragment line rules (markers, hash line, sha256) the helpers source
 - `commit-and-push.sh` — seals the fragment (writes its line-2 hash), commits only that file, and pushes it only while the branch is still at the checkout (`--force-with-lease` on the checkout: someone else's push → superseded, exit 0; a force-push or reset → exit 1, never undone); never overwrites a hand-edited fragment, and refuses (exit 1) one the release would skip — text before the first `###`, a `#`/`##` heading, an unclosed code fence — checked with the vendored `doc-tools.sh fragments list`, so the author learns it at PR time
 
 Every template's `run:` steps are scripts in
 `.github/scripts/doc-superpowers-steps/` (the freshness check and the AI
-jobs' scope gate `freshness-check.sh`, auth selection, the pinned plugin
+jobs' scope gate `freshness-check.sh`, the spec-claims check
+`claims-check.sh`, auth selection, the pinned plugin
 fetch `prepare-agent.sh`, the checked commit `commit-changes.sh`, the fork
 guard `pr-guard.sh`, and `doc-pr-release.yml`'s sentinel skip, context
 extraction and post-agent verification, `doc-release.yml`'s precheck),
