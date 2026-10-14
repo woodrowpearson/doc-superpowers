@@ -1,21 +1,21 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-10-14T10:55:08Z",
+  "generated_at": "2026-10-14T11:31:55Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
-      "content_hash": "sha256:1ec302fb1130f6f912ea7ff8d6d5b2c892fa8335b5eeacc6cf1273c53291dbbf",
+      "content_hash": "sha256:cd3510f6b8b3c2cc43ff5a70088a47652ead4c772f8352aed7ff4ca5213e40fb",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/",
         "references/"
       ],
-      "code_commit": "2418d53786942af94d28e796cdb0dfa5b261f593",
+      "code_commit": "b0695337160ff4e6c7676651332106088e9a7b13",
       "doc_type": "architecture",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-14T10:55:08Z",
+      "last_verified": "2026-10-14T11:31:55Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "6df15bdca5a172e38ff4ab23e2254fa5ac966adf",
@@ -41,7 +41,7 @@
       }
     },
     "docs/conventions.md": {
-      "content_hash": "sha256:05b47e510c5d6d7f2ee432c46b5ee68c91497cfb06b0994cbab2ab7a9be90c08",
+      "content_hash": "sha256:0464f7b89cef321766e40df59c65e7421cf453f84614880046cf3846b44525a5",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "references/doc-spec.md",
@@ -49,11 +49,11 @@
         "scripts/doc-tools.sh",
         "scripts/hooks"
       ],
-      "code_commit": "2418d53786942af94d28e796cdb0dfa5b261f593",
+      "code_commit": "b0695337160ff4e6c7676651332106088e9a7b13",
       "doc_type": "conventions",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-14T10:55:08Z",
+      "last_verified": "2026-10-14T11:31:55Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "6df15bdca5a172e38ff4ab23e2254fa5ac966adf",
@@ -658,6 +658,36 @@
       "code_oids": {},
       "code_commit": null,
       "doc_type": "audit",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/superpowers/plans/2026-10-10-spec-claims.md": {
+      "content_hash": "sha256:db36a6d200c26b1af85f8d791bde378c78f70800d6f6ddf5b59cd50dc7b49e00",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/superpowers/plans/2026-10-10-spec-claims-whats-next.md": {
+      "content_hash": "sha256:2fc2dc255e44faed2c5d33bf5f2947b61b7c4976f33e49eb1a3f05049a39ae31",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/superpowers/specs/2026-10-10-spec-claims-design.md": {
+      "content_hash": "sha256:943f529d014cccf963aed5321b91f16e4cde14ae68f886e5e599c09dcf083416",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "design-spec",
       "replaces": null,
       "superseded_by": null,
       "last_verified": null
