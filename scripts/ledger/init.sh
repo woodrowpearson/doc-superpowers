@@ -18,10 +18,11 @@
 # 1. Sources. files: the item globs (items.globs, archive_globs), and a
 #    suggestion (never added) for each tracked directory holding >= 3 *.md
 #    files, item files aside, whose frontmatter has a status: line. github
-#    (--sources github, or by default when items.adapter is set): gh
-#    present, authenticated, `gh repo view --json hasIssuesEnabled` true;
-#    the hosted items come from items.adapter, else
-#    doc-superpowers:ledger-items-gh, through the remote cache. A failed
+#    (--sources github, or by default when items.adapter is set): the
+#    hosted items come from items.adapter, else
+#    doc-superpowers:ledger-items-gh, through the remote cache; for the
+#    reference adapter (only), gh must be present and authenticated and
+#    `gh repo view --json hasIssuesEnabled` true. A failed
 #    check or list: exit 2 when asked for explicitly, else reported and
 #    skipped. Hand-written ledgers: tracked *.md files with a table whose
 #    header row has a "#" column and in which a cell links to an item file
@@ -50,7 +51,14 @@
 #    (paths:<ledger> <n>/<m>: n of the m non-hub paths; a tie is no
 #    suggestion; a hub is a path more than 5 % of the items cite, and at
 #    least two); a single registered "ledger:<id>" label (label); else
-#    unassigned (none).
+#    unassigned (none). A decisions file from an earlier run: each filled-in
+#    decision carries over by path while it is a registered id or
+#    "unassigned" (the others are dropped and named in the report); the
+#    old file is kept as <decisions>.bak.
+# Writes: each file through a temp file beside it, then mv; the report
+# last. The report and decisions paths never resolve (spelling, symbolic
+# links) to ledgers.json, config.json, the legacy map, the proposal or the
+# --registry file (_lg_init_guard: exit 3).
 #
 # Cost: one git ls-files, the index (cached), one awk pass over the tracked
 # *.md files (item files: their frontmatter only), one owner-map awk; jq
@@ -58,6 +66,81 @@
 
 _LG_INIT_CI='[".github", ".circleci", ".gitlab", ".buildkite"]'
 _LG_INIT_GH_ADAPTER="doc-superpowers:ledger-items-gh"
+_LG_INIT_TAB=$'\t'
+_LG_INIT_NL=$'\n'
+_LG_LEX=""           # _lg_init_lex's result
+_LG_CANON=""         # _lg_init_canon's result
+
+# _lg_init_lex <absolute path>: "." and empty segments dropped, ".." applied
+# (never above /), into _LG_LEX.
+_lg_init_lex() {
+  local p="$1/" out="" seg
+  while [ -n "$p" ]; do
+    seg=${p%%/*}
+    p=${p#*/}
+    case "$seg" in
+      ''|.) ;;
+      ..) out=${out%/*} ;;
+      *) out="$out/$seg" ;;
+    esac
+  done
+  _LG_LEX=${out:-/}
+}
+
+# _lg_init_canon <path>: the file <path> names, as an absolute path — from
+# the top level, ".", ".." and "//" resolved, the symbolic links of its
+# existing directories and of the file itself followed — into _LG_CANON.
+_lg_init_canon() {
+  local p="$1" d b rest l n=0
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  while :; do
+    _lg_init_lex "$p"
+    p=$_LG_LEX
+    d=${p%/*}
+    b=${p##*/}
+    [ -n "$d" ] || d=/
+    rest=""
+    while [ "$d" != / ] && [ ! -d "$d" ]; do
+      rest="/${d##*/}$rest"
+      d=${d%/*}
+      [ -n "$d" ] || d=/
+    done
+    d=$(cd -P -- "$d" 2>/dev/null && pwd -P) || d=${p%/*}
+    p="${d%/}$rest/$b"
+    if [ -z "$rest" ] && [ -L "$p" ] && [ "$n" -lt 16 ]; then
+      l=$(readlink -- "$p") || break
+      case "$l" in /*) p=$l ;; *) p="${d%/}/$l" ;; esac
+      n=$((n + 1))
+      continue
+    fi
+    break
+  done
+  _LG_CANON=$p
+}
+
+# _lg_init_guard <report> <decisions> <proposal> [<registry>]: exit 3 when
+# the report or its decisions file is — under any spelling, through any
+# symbolic link — docs/ledger/ledgers.json, docs/ledger/config.json, the
+# legacy map (config "legacy"; docs/ledger/legacy.json), the proposal or
+# the --registry file.
+_lg_init_guard() {
+  local report="$1" dec="$2" t w c lg
+  local targets=()
+  lg=$(_lg_cfg '.legacy // "" | strings') || exit "$?"
+  targets=(docs/ledger/ledgers.json docs/ledger/config.json docs/ledger/legacy.json "$3")
+  [ -z "$lg" ] || targets+=("$lg")
+  [ -z "${4:-}" ] || targets+=("$4")
+  for w in "$report" "$dec"; do
+    _lg_init_canon "$w"
+    c=$_LG_CANON
+    for t in "${targets[@]}"; do
+      _lg_init_canon "$t"
+      if [ "$c" = "$_LG_CANON" ]; then
+        _lg_usage "--report $report: $w would overwrite $t"
+      fi
+    done
+  done
+}
 
 # shellcheck disable=SC2154  # _OPT_* and _ARGS are set by _parse_args
 cmd_ledger_init() {
@@ -110,7 +193,8 @@ _lg_init_gh_check() {
 #   {"t":"S","path","dir"}           a non-item file whose frontmatter has a
 #                                    status: line
 #   {"t":"H","path","k","v"}         an item file's component / area value
-#   {"t":"R","file","row"}           a data row of a "#"-headed table
+#   {"t":"R","file","row"}           a data row of a "#"-headed table (row:
+#                                    its "#" cell, else "n<ordinal in the file>")
 #   {"t":"K","file","row","to","item"}  a link in such a row (to: the path it
 #                                    resolves to; item: it is an item file)
 #   {"t":"M","file"}                 a legacy_ledgers file that cannot be read
@@ -163,7 +247,7 @@ function issep(line) {
 function rowid(c, ord) {
   c = rep(rep(c, "~~", ""), "*", "")
   c = trim(c)
-  return (c == "") ? ord "" : c
+  return (c == "") ? "n" ord : c
 }
 # A cell value of a frontmatter line "<key>: <value>".
 function fmval(line) {
@@ -251,6 +335,9 @@ BEGIN {
 _LG_JQ_INIT_DEFS='
 def lg_slug: ascii_downcase | gsub("[^a-z0-9]+"; "-") | sub("^-+"; "") | .[0:16] | sub("-+$"; "");
 def lg_gesc: gsub("(?<c>[\\\\*?{}])"; "\\\(.c)") | if startswith("!") then "\\" + . else . end;
+def lg_np: sub("^\\./"; "") | sub("#.*$"; "") | sub(":[0-9]+(-[0-9]+)?$"; "");
+def lg_cited: [(.paths // []) | if type == "array" then .[] else . end | strings | lg_np | select(. != "")] | unique;
+def lg_rowkey: if test("^[0-9]+$") then [0, tonumber, .] else [1, 0, .] end;
 '
 
 # _lg_init_report <file>: the --report mode (see the header).
@@ -263,10 +350,6 @@ _lg_init_report() {
   dec="$report.decisions.tsv"
   case "$report" in
     */|.|..) _lg_usage "--report needs a file name (got '$report')" ;;
-  esac
-  case "$report" in
-    docs/ledger/ledgers.json|docs/ledger/config.json|"$prop"|docs/ledger/legacy.json)
-      _lg_usage "--report $report would overwrite a ledger file" ;;
   esac
   if [ -d "$report" ]; then _lg_die "--report $report is a directory"; fi
 
@@ -294,9 +377,15 @@ EOS
   if [ -n "$_OPT_registry" ]; then
     regpath=$_OPT_registry
     regsrc=option
+    case "$regpath" in
+      *"$_LG_INIT_TAB"*|*"$_LG_INIT_NL"*)
+        _lg_usage "--registry: a path holding a tab or a newline cannot be named in the decisions file" ;;
+    esac
+  fi
+  _lg_init_guard "$report" "$dec" "$prop" "$regpath"
+  if [ -n "$regpath" ]; then
     if [ ! -f "$regpath" ]; then _lg_die "--registry $regpath: no such file"; fi
-    if ! jq -e -s 'length == 1 and (.[0] | type) == "object" and .[0].schema == "ledger-registry/1"
-        and ((.[0].ledgers // []) | type == "array" and all(.[]; type == "object"))' "$regpath" >/dev/null 2>&1; then
+    if ! _lg_registry_ok "$regpath" schema; then
       _lg_die "--registry $regpath is not a ledger-registry/1 file (one JSON object, \"schema\": \"ledger-registry/1\", a \"ledgers\" list of objects)"
     fi
     reg="$s.reg"
@@ -315,7 +404,11 @@ EOS
   ad=""
   if [ "$gh" = on ]; then
     ok=1
-    _lg_init_gh_check "$s" || ok=0
+    # The gh probe: for the reference adapter (or none, which means it);
+    # a custom items.adapter is listed through itself.
+    if [ -z "$cfgad" ] || [ "$cfgad" = "$_LG_INIT_GH_ADAPTER" ]; then
+      _lg_init_gh_check "$s" || ok=0
+    fi
     if [ "$ok" = 1 ]; then
       ad=${cfgad:-$_LG_INIT_GH_ADAPTER}
       jq -c --arg ad "$ad" '.items.adapter = $ad' "$_LG_CFG" > "$s.cfg-gh" || _lg_die "jq failed (config)"
@@ -483,37 +576,41 @@ EOS
   _lg_registry_findings "$reg" "$s.tracked" "$s.findings"
 
   # --- Assignment ----------------------------------------------------------------
+  # A decisions file from an earlier run: its filled-in decisions carry over.
   : > "$s.rows"
+  : > "$s.prevdec"
   printf '{}\n' > "$s.assign"
   if [ -n "$regpath" ]; then
+    if [ -f "$dec" ]; then cp -- "$dec" "$s.prevdec" || _lg_die "cannot read $dec"; fi
     # The paths the items cite (normalised), their owners in one awk.
     # shellcheck disable=SC2016  # jq source
-    jq -r '
-      def np: sub("^\\./"; "") | sub("#.*$"; "") | sub(":[0-9]+(-[0-9]+)?$"; "");
-      [.items[] | (.paths // []) | if type == "array" then .[] else . end | strings | np
-       | select(. != "" and (contains("\n") | not))] | unique | .[]' "$ix" > "$s.cited" \
+    jq -r "$_LG_JQ_INIT_DEFS"'[.items[] | lg_cited[] | select(contains("\n") | not)] | unique | .[]' "$ix" > "$s.cited" \
       || _lg_die "jq failed (cited paths)"
     tr '\n' '\000' < "$s.cited" > "$s.citedz" || _lg_die "cannot write $s.citedz"
     _lg_owner_map "$s.citedz" "$s.own" "$reg"
     # shellcheck disable=SC2016  # jq source
     jq -n -c --slurpfile ix "$ix" --slurpfile reg "$reg" --slurpfile f "$s.facts" --rawfile own "$s.own" \
-        --rawfile hosted "$hosted" '
-      def np: sub("^\\./"; "") | sub("#.*$"; "") | sub(":[0-9]+(-[0-9]+)?$"; "");
+        --rawfile hosted "$hosted" --rawfile prev "$s.prevdec" "$_LG_JQ_INIT_DEFS"'
       ([$reg[0].ledgers[] | .id | strings]) as $ids
       | ($ids | map({(.): true}) | add // {}) as $isreg
       | ($own | split("\n") | map(select(. != "") | split("\t") | {key: (.[0:-1] | join("\t") | gsub("\u0001"; "\n")), value: .[-1]}) | from_entries) as $O
       | ($hosted | split("\n") | map(select(. != "") | fromjson | {key: .ref, value: (.labels // [])}) | from_entries) as $LB
+      | ($prev | split("\n") | map(sub("\r$"; "") | select(. != "" and (startswith("#") | not)) | split("\t")
+         | select(length >= 5 and .[4] != "") | {path: .[0], v: .[4]})) as $PV
       | ($ix[0].items) as $I
       | ($I | length) as $N
-      | ([$f[0].ledgers[] | select($isreg[.id]) | .id as $lid | .file as $file | .members[] | {item, src: "\($file)#\(.row)", id: $lid}]
-         | group_by(.item) | map({key: .[0].item, value: (sort_by(.src) | first)}) | from_entries) as $MEM
-      | ([$I[] | [(.paths // []) | if type == "array" then .[] else . end | strings | np | select(. != "")] | unique[]]
-         | group_by(.) | map({key: .[0], value: length}) | from_entries) as $CITE
+      | ([$f[0].ledgers[] | select($isreg[.id]) | .id as $lid | .file as $file | .members[] | {item, file: $file, row, id: $lid}]
+         | group_by(.item)
+         | map({key: .[0].item, value: (sort_by(.file, (.row | lg_rowkey)) | first | {id, src: "\(.file)#\(.row)"})}) | from_entries) as $MEM
+      | ([$I[] | lg_cited[]] | group_by(.) | map({key: .[0], value: length}) | from_entries) as $CITE
       | ($CITE | to_entries | map(select(.value >= 2 and .value * 100 > 5 * $N)) | from_entries) as $HUB
+      | ([$I[] | .path] | map({(.): true}) | add // {}) as $isitem
+      | ($PV | map(select($isitem[.path] and (.v == "unassigned" or $isreg[.v]))) | map({(.path): .v}) | add // {}) as $KEEP
+      | [$PV[] | select($KEEP[.path] == null)
+         | . + {why: (if $isitem[.path] | not then "no longer an item" else "not a registered ledger id" end)}] as $DROP
       | [$I[] | . as $it
          | (.class // "unknown") as $cl
-         | ([(.paths // []) | if type == "array" then .[] else . end | strings | np | select(. != "")] | unique
-            | map(select($HUB[.] | not))) as $ps
+         | (lg_cited | map(select($HUB[.] | not))) as $ps
          | ([$ps[] | $O[.] // "-" | select(. != "-" and (startswith("multi:") | not))]
             | group_by(.) | map({l: .[0], n: length}) | sort_by(-.n)) as $votes
          | ([(($LB[$it.path] // [])[] | select(startswith("ledger:")) | ltrimstr("ledger:") | select($isreg[.]))] | unique) as $lab
@@ -524,15 +621,27 @@ EOS
             elif ($lab | length) == 1 then {s: $lab[0], r: "label"}
             else {s: "unassigned", r: "none"} end) as $sg
          | {path, class: $cl, suggestion: $sg.s, reason: $sg.r,
-            decision: (if ["fixed", "closed", "wontfix"] | index([$cl]) then $sg.s else "" end)}] as $rows
+            decision: ($KEEP[.path] // (if ["fixed", "closed", "wontfix"] | index([$cl]) then $sg.s else "" end))}] as $rows
       | {rows: ($rows | sort_by(.path)),
          hubs: ($HUB | to_entries | sort_by(-.value, .key) | map({path: .key, items: .value})),
+         kept: ($KEEP | length), dropped: ($DROP | sort_by(.path)), previous: ($prev != ""),
          items: $N}' > "$s.assign" || _lg_die "jq failed (assignment)"
     jq -r '.rows[] | select((.path | test("[\t\n]")) | not) | [.path, .class, .suggestion, .reason, .decision] | join("\t")' \
       "$s.assign" > "$s.rows" || _lg_die "jq failed (decision rows)"
   fi
 
   _lg_init_write "$report" "$dec" "$prop" "$s" "$reg" "$regpath" "$regsrc" "$regsha" "$ix"
+}
+
+# _lg_init_put <src> <target>: <target> becomes a copy of <src> atomically
+# (a temp file in <target>'s directory, then mv).
+_lg_init_put() {
+  local tmp
+  tmp=$(mktemp "$(dirname -- "$2")/.lg-init.XXXXXX") || _lg_die "cannot create a temp file beside $2"
+  if ! cp -- "$1" "$tmp" || ! mv -f -- "$tmp" "$2"; then
+    rm -f -- "$tmp"
+    _lg_die "cannot write $2"
+  fi
 }
 
 # _lg_init_write <report> <decisions> <proposed> <scratch> <registry>
@@ -561,7 +670,10 @@ _lg_init_write() {
                 findings: ($fd[0] | length),
                 by_suggestion: (if $hasreg then ($A.rows | group_by(.suggestion) | map({key: .[0].suggestion, value: length}) | from_entries) else null end),
                 by_reason: (if $hasreg then ($A.rows | group_by(.reason | sub("[:].*$"; "")) | map({key: (.[0].reason | sub("[:].*$"; "")), value: length}) | from_entries) else null end),
-                by_class: (if $hasreg then ($A.rows | group_by(.class) | map({key: .[0].class, value: length}) | from_entries) else null end)},
+                by_class: (if $hasreg then ($A.rows | group_by(.class) | map({key: .[0].class, value: length}) | from_entries) else null end),
+                kept: (if $hasreg then $A.kept else null end),
+                dropped: (if $hasreg then ($A.dropped | length) else null end)},
+       previous: ($A.previous // false), dropped: ($A.dropped // []),
        ledgers_reg: [$R.ledgers[] | {id: (.id | tostring), title: (.title // null), kind: (.kind // null),
                                     paths: (.paths // []), residual_paths: (.residual_paths // []),
                                     contracts: [(.contracts // [])[] | objects | .id]}],
@@ -642,6 +754,11 @@ _lg_init_write() {
             "",
             "| reason | items |", "|---|---|",
             ($o.counts.by_reason | to_entries | sort_by(-.value, .key)[] | "| \(.key) | \(.value) |"),
+            (if $o.previous then "", "Decisions carried over from the previous \($o.decisions | code) (kept as \($o.decisions + ".bak" | code)): \($o.counts.kept) kept, \($o.counts.dropped) dropped."
+                 + (if ($o.dropped | length) > 0
+                    then " Dropped: " + ($o.dropped | map("\(.path | code) (\(.v | code): \(.why))") | join("; ")) + "."
+                    else "" end)
+             else empty end),
             (if ($o.hubs | length) > 0 then "", "Hub files (cited by more than 5 % of the items; skipped by the paths rule): " + ($o.hubs | map("\(.path | code) (\(plural(.items; "item")))") | join(", ")) else empty end),
             (if ($o.unwritten | length) > 0 then "", "Not written (a tab or a newline in the path): " + ($o.unwritten | map(tojson) | join(", ")) else empty end)
        end),
@@ -657,25 +774,35 @@ _lg_init_write() {
       (if ($o.sources.files.suggested | length) > 0 then "3. To take the suggested globs as items, add them to items.globs in docs/ledger/config.json, then re-run the report." else empty end)
   ' "$s.out" > "$s.report" || _lg_die "jq failed (the report)"
 
-  # Write: the proposal, the decisions file, the report.
+  # The summary line (a failure surfaces, never an empty line).
+  jq -r '"ledger init: \(.counts.items) items (\(.counts.hosted) hosted), registry \(.registry.path) (\(.counts.ledgers) ledger\(if .counts.ledgers == 1 then "" else "s" end), \(.counts.findings) finding\(if .counts.findings == 1 then "" else "s" end))"
+    + (if .decisions then ", decisions \(.decisions)" else "" end)' "$s.out" > "$s.summary" || _lg_die "jq failed (the summary)"
+  # Write — each file through a temp file beside it, then mv: the proposal,
+  # the previous decisions file as .bak, the decisions file, the report last.
   d=$(dirname -- "$report")
   mkdir -p -- "$d" 2>/dev/null || _lg_die "cannot create $d"
   if [ -z "$regpath" ]; then
     mkdir -p docs/ledger || _lg_die "cannot create docs/ledger"
-    cp -- "$reg" "$prop" || _lg_die "cannot write $prop"
+    _lg_init_put "$reg" "$prop"
   else
+    if [ -s "$s.prevdec" ]; then _lg_init_put "$s.prevdec" "$dec.bak"; fi
     { printf '# ledger init decisions\n# registry: %s %s\n# path\tclass\tsuggestion\treason\tdecision\n' "$regpath" "$regsha" \
-        && LC_ALL=C sort "$s.rows"; } > "$dec" || _lg_die "cannot write $dec"
+        && LC_ALL=C sort "$s.rows"; } > "$s.dec" || _lg_die "cannot write $s.dec"
+    _lg_init_put "$s.dec" "$dec"
   fi
-  cp -- "$s.report" "$report" || _lg_die "cannot write $report"
+  _lg_init_put "$s.report" "$report"
 
   if [ "$_LG_FORMAT" = json ]; then
     jq -c '{report, decisions, proposed, registry, sources, counts}' "$s.out" > "$s.payload" || _lg_die "jq failed (payload)"
     _lg_emit init 0 "$s.payload"
   fi
   _lg_out "wrote $report"
-  if [ -z "$regpath" ]; then _lg_out "wrote $prop"; else _lg_out "wrote $dec"; fi
-  _lg_out "$(jq -r '"ledger init: \(.counts.items) items (\(.counts.hosted) hosted), registry \(.registry.path) (\(.counts.ledgers) ledger\(if .counts.ledgers == 1 then "" else "s" end), \(.counts.findings) finding\(if .counts.findings == 1 then "" else "s" end))"
-    + (if .decisions then ", decisions \(.decisions)" else "" end)' "$s.out")" || true
+  if [ -z "$regpath" ]; then
+    _lg_out "wrote $prop"
+  else
+    if [ -s "$s.prevdec" ]; then _lg_out "wrote $dec.bak"; fi
+    _lg_out "wrote $dec"
+  fi
+  _lg_out_file "$s.summary"
   _lg_emit init 0
 }

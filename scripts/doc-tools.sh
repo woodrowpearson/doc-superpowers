@@ -2563,17 +2563,23 @@ ledger init|cmd_ledger_init|repo|dry-run registry= report= accept= import source
   --report writes three files and nothing else: <file> (a markdown
   report: Sources, Hand-written ledgers, Registry, Registry findings,
   Assignment summary, Next steps), docs/ledger/ledgers.proposed.json and
-  <file>.decisions.tsv. Sources (--sources, a comma list; default files,
+  <file>.decisions.tsv (each through a temp file and mv; the report last).
+  A report or decisions path that is — under any spelling or symbolic
+  link — ledgers.json, config.json, the legacy map, the proposal or the
+  --registry file exits 3, as does a --registry path holding a tab or a
+  newline. Sources (--sources, a comma list; default files,
   plus github when items.adapter is set): files — the item globs, and a
   suggested glob (never added) for each tracked directory holding three
-  or more *.md files with a status: frontmatter line; github — gh present
-  and authenticated and `gh repo view --json hasIssuesEnabled` true (the
-  items adapter, default doc-superpowers:ledger-items-gh, lists them);
-  when the check fails, an explicit --sources github exits 2, the default
+  or more *.md files with a status: frontmatter line; github — the items
+  adapter lists them (items.adapter, else doc-superpowers:ledger-items-gh;
+  for that one, gh must be present and authenticated and `gh repo view
+  --json hasIssuesEnabled` true; a custom adapter is not probed); when the
+  check or the list fails, an explicit --sources github exits 2, the default
   one is reported and skipped. Hand-written ledgers: tracked *.md files
   with a table whose header has a "#" column and a column linking item
   files, plus every config legacy_ledgers file; each with its legacy id
-  (legacy_ledgers, else the file stem minus "-ledger"). The registry:
+  (legacy_ledgers, else the file stem minus "-ledger") and its rows (the
+  "#" cell, else n<ordinal in the file>). The registry:
   --registry <file> (ledger-registry/1, else exit 2), else
   docs/ledger/ledgers.json, else a proposal written to
   docs/ledger/ledgers.proposed.json (jq -S): one ledger per top-level
@@ -2589,7 +2595,8 @@ ledger init|cmd_ledger_init|repo|dry-run registry= report= accept= import source
   written. Its validate --registry findings are part of the report.
   With a registry, each item gets a suggested ledger, first match: its
   ledger value when registered (ledger-field), a row of a hand-written
-  ledger whose legacy id is registered (legacy:<file>#<row>), the
+  ledger whose legacy id is registered (legacy:<file>#<row>, the lowest
+  row by number), the
   plurality owner of its paths (paths:<ledger> <n>/<m>; files cited by
   more than 5 % of the items, and at least two, are hubs and skipped; a
   tie is none), a registered ledger:<id> label (label), else unassigned
@@ -2597,7 +2604,10 @@ ledger init|cmd_ledger_init|repo|dry-run registry= report= accept= import source
   <path> <sha256>", "# path<TAB>class<TAB>suggestion<TAB>reason<TAB>
   decision", then one row per item sorted by path (hosted items by ref);
   decision is the suggestion for terminal items (fixed, closed, wontfix)
-  and empty otherwise — fill it in, then --accept. Without a registry no
+  and empty otherwise — fill it in, then --accept. A re-run keeps each
+  decision already in the file (by path) while it is a registered id or
+  unassigned, names the ones it drops (and why) in the report, and keeps
+  the previous file as <file>.decisions.tsv.bak. Without a registry no
   decisions file is written. Exit 0 once written; 2 could not run; 3
   usage. --accept and --import: not implemented yet (exit 2).
 fragments list|cmd_fragments_list|deps|
@@ -2812,7 +2822,9 @@ notices, new, assign, link, note, view, validate, publish, finalize, init):
   init prints "ledger: not enabled (no docs/ledger/config.json)" — with
   --format json, {"verb":"ledger <sub>","enabled":false,"exit":0} — and
   exits 0; init, which bootstraps a repository, runs on the default
-  config ("enabled" false in its object). That
+  config ({}) instead, and every object it prints there — its verdict,
+  an error, the crash fallback — says "enabled": false (true once the
+  config exists). That
   check runs after the options are parsed and the repository is checked
   (an unknown option still exits 3; outside a git work tree, 2) and
   before any argument is read. The verbs live in scripts/ledger/ beside

@@ -218,6 +218,15 @@ _lg_out_file() {
   fi
 }
 
+# _lg_registry_ok <file> [schema]: rc 0 when <file> is one JSON object whose
+# "ledgers" (absent: []) is a list of objects — with "schema", its "schema"
+# must also be "ledger-registry/1" (init --registry); else rc 1.
+_lg_registry_ok() {
+  jq -e -s --arg strict "${2:-}" 'length == 1 and (.[0] | type) == "object"
+    and ($strict == "" or .[0].schema == "ledger-registry/1")
+    and ((.[0].ledgers // []) | type == "array" and all(.[]; type == "object"))' "$1" >/dev/null 2>&1
+}
+
 # _lg_registry [src]: print the path of a private copy of
 # docs/ledger/ledgers.json — the working copy's, or as [src] holds it (see
 # _lg_src_cat) — or of {"schema":"ledger-registry/1","ledgers":[]} when
@@ -234,9 +243,7 @@ _lg_registry() {
     printf '%s\n' "$snap"
     return 0
   fi
-  if ! jq -e -s 'length == 1 and (.[0] | type) == "object"
-      and ((.[0].ledgers // []) | type == "array" and all(.[]; type == "object"))' \
-      "$snap.raw" >/dev/null 2>&1; then
+  if ! _lg_registry_ok "$snap.raw"; then
     _lg_die "$reg is not a ledger registry (expected one JSON object with a \"ledgers\" list of objects)"
   fi
   jq -c '.ledgers = (.ledgers // [])' "$snap.raw" > "$snap" || _lg_die "jq failed (registry)"
