@@ -38,6 +38,8 @@ _LG_CACHE=""         # $(git rev-parse --git-common-dir)/doc-superpowers/ledger
 . "$_LG_LIB/relations.sh"
 # shellcheck source=scripts/ledger/inflight.sh
 . "$_LG_LIB/inflight.sh"
+# shellcheck source=scripts/ledger/init.sh
+. "$_LG_LIB/init.sh"
 
 # _lg_die <message>: the run could not run — exit 2, with the verdict object
 # in --format json (exactly once, inside $(…) too: the marker file tells the
@@ -54,7 +56,8 @@ _lg_usage() {
 
 # _lg_init <sub>: scratch dir, top level, cache path, the merged config.
 # Call in the main shell (never inside $(…)), first thing in a handler.
-# doc-tools.sh has already established that docs/ledger/config.json exists.
+# doc-tools.sh has already established that docs/ledger/config.json exists
+# — except for init, which runs on the default config ({}) without one.
 _lg_init() {
   local host common
   _LG_VERB="$1"
@@ -68,8 +71,12 @@ _lg_init() {
   _LG_CACHE="$common/doc-superpowers/ledger"
 
   host="$_SCRATCH/lg-config-host.json"
-  cat -- docs/ledger/config.json > "$host" 2>/dev/null \
-    || _lg_die "cannot read docs/ledger/config.json"
+  if [ "$1" = init ] && [ ! -e docs/ledger/config.json ] && [ ! -L docs/ledger/config.json ]; then
+    printf '{}\n' > "$host" || _lg_die "cannot write $host"
+  else
+    cat -- docs/ledger/config.json > "$host" 2>/dev/null \
+      || _lg_die "cannot read docs/ledger/config.json"
+  fi
   _lg_cfg_merge "$host" "$_SCRATCH/lg-config.json" "docs/ledger/config.json"
 
   # Test-only hooks (scripts/test-ledger.sh), inert unless the variable is
@@ -116,12 +123,13 @@ _lg_cfg() {
 
 # _lg_emit <sub> <rc> [payload-json-file]: end the run with its verdict.
 # --format json: one object {"verb":"ledger <sub>","enabled":true,"exit":rc}
-# plus the payload object's other keys. Text mode: the verb has already
+# plus the payload object's other keys ("enabled" is false only for init
+# run without docs/ledger/config.json). Text mode: the verb has already
 # printed its lines (with _lg_out); nothing more is printed. Exits <rc>.
 # .verb comes from _LG_VERB — the verb every error object of this run names
 # — and <sub> must match it (a mismatch is an internal error, rc 2).
 _lg_emit() {
-  local sub="$1" rc="$2" payload="${3:-}" line verb
+  local sub="$1" rc="$2" payload="${3:-}" line verb enabled=true
   if [ "$sub" != "$_LG_VERB" ]; then
     _lg_die "internal: _lg_emit for 'ledger $sub' in a 'ledger $_LG_VERB' run"
   fi
@@ -140,12 +148,13 @@ _lg_emit() {
   if [ "$_LG_FORMAT" = json ]; then
     _lg_verb_json
     verb=$_LG_JS
+    if [ ! -e docs/ledger/config.json ] && [ ! -L docs/ledger/config.json ]; then enabled=false; fi
     if [ -n "$payload" ]; then
-      line=$(jq -c --argjson verb "$verb" --argjson rc "$rc" \
-        '{verb: $verb, enabled: true, exit: $rc} + (. | del(.verb, .enabled, .exit))' "$payload") \
+      line=$(jq -c --argjson verb "$verb" --argjson rc "$rc" --argjson en "$enabled" \
+        '{verb: $verb, enabled: $en, exit: $rc} + (. | del(.verb, .enabled, .exit))' "$payload") \
         || _lg_die "jq failed (verdict payload)"
     else
-      line=$(jq -nc --argjson verb "$verb" --argjson rc "$rc" '{verb: $verb, enabled: true, exit: $rc}') \
+      line=$(jq -nc --argjson verb "$verb" --argjson rc "$rc" --argjson en "$enabled" '{verb: $verb, enabled: $en, exit: $rc}') \
         || _lg_die "jq failed (verdict)"
     fi
     _lg_mark_emitted "$rc"
@@ -236,14 +245,8 @@ _lg_registry() {
 
 # --- Handlers ------------------------------------------------------------------
 #
-# One per verb-table row (doc-tools.sh "ledger <sub>|cmd_ledger_<sub>|…").
-# A verb not yet built loads the config and says so (exit 2); the task that
-# builds it replaces its line here with the module that defines it.
-_lg_stub() {
-  _lg_init "$_LG_VERB"
-  _lg_die "not implemented"
-}
-# show, ls, find, link, note: query.sh. new, assign, finalize: keys.sh.
-# view, publish: views.sh. related, sweep, recheck: relations.sh. inflight,
-# notices: inflight.sh.
-cmd_ledger_init() { _lg_stub "$@"; }
+# One per verb-table row (doc-tools.sh "ledger <sub>|cmd_ledger_<sub>|…"),
+# each in the module that defines it: show, ls, find, link, note: query.sh.
+# new, assign, finalize: keys.sh. view, publish: views.sh. related, sweep,
+# recheck: relations.sh. inflight, notices: inflight.sh. validate:
+# validate.sh. init: init.sh.

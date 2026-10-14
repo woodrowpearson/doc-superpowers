@@ -171,10 +171,13 @@ lg_names() {
 # --- Task 1: verb group, exit family, config, inert ---------------------------
 
 test_lg_inert_text_every_verb() {
-  echo "test: without docs/ledger/config.json every ledger verb prints the inert line and exits 0"
+  echo "test: without docs/ledger/config.json every ledger verb except init prints the inert line and exits 0"
   lg_fixture
   local v
   for v in $LG_VERBS; do
+    # init bootstraps a repository that has no config yet (Task 14 R1):
+    # test_lg_init_runs_without_config.
+    if [ "$v" = init ]; then continue; fi
     lg "$v"
     assert_eq "0" "$LG_RC" "ledger $v: inert exits 0"
     assert_eq "$LG_INERT_LINE" "$LG_OUT" "ledger $v: stdout is exactly the inert line"
@@ -358,27 +361,6 @@ test_lg_outside_repo_rc2() {
     print_counts_to "$TEST_DIR/counts"
   )
   absorb_counts "$TEST_DIR/counts"
-  teardown
-}
-
-test_lg_stub_not_implemented() {
-  echo "test: an enabled verb with no implementation yet exits 2 with one object"
-  lg_fixture
-  lg_enable
-  # "init" — show was the stub until Task 5 built it, related until
-  # Task 9, inflight until Task 11, notices until Task 12, note until
-  # Task 13.
-  lg init --format json
-  assert_eq "2" "$LG_RC" "stub exits 2"
-  assert_eq "1" "$(json_count "$LG_OUT")" "exactly one object"
-  assert_json_field "$LG_OUT" '.verb' "ledger init" ".verb is 'ledger init'"
-  assert_json_field "$LG_OUT" '.enabled' "true" ".enabled is true"
-  assert_json_field "$LG_OUT" '.exit' "2" ".exit is 2"
-  assert_json_field "$LG_OUT" '.error' "not implemented" ".error"
-  lg init
-  assert_eq "2" "$LG_RC" "text mode: exits 2"
-  assert_eq "" "$LG_OUT" "text mode: nothing on stdout"
-  assert_contains "$LG_ERR" "not implemented" "text mode: stderr says why"
   teardown
 }
 
@@ -5386,6 +5368,8 @@ test_lg_shallow_deepen_rebuilds_caches() {
 # numbered one past the highest and prints its URL (no URL when
 # LG_GH/create-nourl exists); `label create <name>`
 # records it in LG_GH/labels, and refuses a recorded one ("already exists").
+# `repo view` (Task 14: ledger init's GitHub check) prints
+# {"hasIssuesEnabled": true}, false when LG_GH/issues-off exists.
 # lg_fake_gh_off restores PATH.
 lg_fake_gh() {
   LG_GH=$(harness_mktemp_d lg-gh)
@@ -5410,6 +5394,10 @@ opt() {
   printf '%s' "$v"
 }
 case "$1 $2" in
+  "repo view")
+    if [ -f "$d/fail" ]; then cat "$d/fail" >&2; exit 1; fi
+    if [ -f "$d/issues-off" ]; then echo '{"hasIssuesEnabled":false}'; else echo '{"hasIssuesEnabled":true}'; fi
+    exit 0 ;;
   "issue list")
     n=$(cat "$d/icalls" 2>/dev/null || echo 0)
     echo $((n + 1)) > "$d/icalls"
@@ -8650,6 +8638,443 @@ test_lg_recheck_hosted_items() {
   teardown
 }
 
+# --- Task 14: init — sources, registry proposal, assignment decisions ---------
+
+# lg_init_fixture: lg_fixture (setup's src/index.js and docs/architecture.md)
+# plus code under app/ (6 of the 13 code files: more than 40 %, so it is
+# split), server/, scripts/, .github/, .vscode/ (a dot-dir, left out) and a
+# root Makefile; six items under docs/issues/; docs/notes/ (three files with
+# status: frontmatter: a suggested glob); a plan; the hand-written ledger
+# docs/ledgers/checkout-ledger.md (3 rows: one done linking an item, one open
+# linking a plan, one open linking an item). Committed; no config.
+lg_init_fixture() {
+  lg_fixture
+  local f
+  for f in app/checkout/Cart.ts app/checkout/CheckoutSheet.ts app/checkout/total.ts app/profile/Profile.ts \
+      app/profile/Avatar.ts app/main.ts server/orders/model.ts server/orders/api.ts scripts/build.sh \
+      .github/workflows/ci.yml .vscode/settings.json Makefile; do
+    mkdir -p "$(dirname "$f")"
+    printf 'x\n' > "$f"
+  done
+  lg_item docs/issues/2026-01-01-cart-total.md 'status: Open' 'ledger: checkout' 'summary: Totals drift'
+  lg_item docs/issues/2026-01-02-sheet-flicker.md 'status: Open'
+  lg_item docs/issues/2026-01-03-order-sync.md 'status: In Progress' 'related-files: [server/orders/model.ts]'
+  lg_item docs/issues/2026-01-04-old-bug.md 'status: Resolved'
+  lg_item docs/issues/2026-01-05-misc.md 'status: Open' 'component: Checkout'
+  lg_item docs/issues/2026-01-06-wontfix.md "status: Won't Fix" 'area: profile'
+  lg_item docs/notes/a.md 'status: draft'
+  lg_item docs/notes/b.md 'status: draft'
+  lg_item docs/notes/c.md 'status: done'
+  lg_item docs/plans/x-plan.md 'status: active'
+  mkdir -p docs/ledgers
+  cat > docs/ledgers/checkout-ledger.md <<'EOF'
+# Checkout ledger
+
+| # | Item | State |
+|---|------|-------|
+| 1 | [Old bug](../issues/2026-01-04-old-bug.md) | ~~done~~ |
+| 2 | **Totals plan** — [plan](../plans/x-plan.md) | open |
+| 3 | [Sheet flicker](../issues/2026-01-02-sheet-flicker.md#detail) | open |
+EOF
+  git add -A && git commit -qm "init fixture"
+}
+
+# The registry the assignment tests accept: checkout and orders.
+LG_INIT_REG='{"schema":"ledger-registry/1","ledgers":[
+ {"id":"checkout","title":"Checkout","kind":"service","status":"active","paths":["app/checkout/**"]},
+ {"id":"orders","title":"Orders","kind":"service","status":"active","paths":["server/orders/**"]}]}'
+
+# lg_init_edit_reg [json]: write the edited registry docs/ledger/edited.json
+# (untracked; default LG_INIT_REG).
+lg_init_edit_reg() {
+  printf '%s\n' "${1:-$LG_INIT_REG}" > docs/ledger/edited.json
+}
+
+# lg_init_rows <decisions.tsv>: its rows (the "#" header lines dropped), an
+# empty decision shown as "-" (an assertion's literal keeps no trailing tab).
+lg_init_rows() {
+  { grep -v '^#' "$1" || true; } | awk -F '\t' -v OFS='\t' 'NF == 5 && $5 == "" { $5 = "-" } { print }'
+}
+
+# lg_init_status: the work tree's changes, one porcelain line each, sorted.
+lg_init_status() {
+  git status --porcelain --untracked-files=all | LC_ALL=C sort
+}
+
+test_lg_init_runs_without_config() {
+  echo "test: ledger init is exempt from the inert check (R1) — it runs on the default config and writes no config.json"
+  lg_init_fixture
+  lg init --report docs/ledger/r.md --format json
+  assert_eq "0" "$LG_RC" "init without config.json exits 0"
+  assert_eq "1" "$(json_count "$LG_OUT")" "exactly one object"
+  assert_json_field "$LG_OUT" '[.verb, .enabled, .exit, .report] | map(tostring) | join("|")' \
+    "ledger init|false|0|docs/ledger/r.md" "verb, enabled false (no config), exit 0, report"
+  assert_file_exists docs/ledger/r.md "the report is written"
+  assert_file_not_exists docs/ledger/config.json "no config.json (only --accept writes it)"
+  # Every other verb stays inert.
+  lg ls
+  assert_eq "0|$LG_INERT_LINE" "$LG_RC|$LG_OUT" "ls is still inert"
+  # A vendored copy without scripts/ledger/: init cannot run (2), never inert.
+  local vend
+  vend=$(harness_mktemp_d lg-vend)
+  cp "$REPO_DIR/scripts/doc-tools.sh" "$vend/doc-tools.sh"
+  # Its own runner (see test_lg_vendored_copy_no_config_inert).
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$BASH_BIN" "$vend/doc-tools.sh" > "$vend/run"
+  chmod +x "$vend/run"
+  lg_with "$vend/run" init --report docs/ledger/r2.md
+  assert_eq "2" "$LG_RC" "vendored copy without scripts/ledger/: init exits 2"
+  assert_contains "$LG_ERR" "scripts/ledger/" "stderr names the missing directory"
+  rm -rf "$vend"
+  teardown
+}
+
+test_lg_init_usage_errors() {
+  echo "test: ledger init modes (R2) — none or two: 3; --dry-run with --report: 3; bad --sources: 3; --accept / --import: 2 (Task 15); a bad --registry: 2"
+  lg_init_fixture
+  lg init
+  assert_eq "3" "$LG_RC" "no mode exits 3"
+  assert_contains "$LG_ERR" "--report" "the message names --report"
+  lg init --report r.md --accept d.tsv --format json
+  assert_eq "3" "$LG_RC" "two modes exit 3"
+  assert_eq "1" "$(json_count "$LG_OUT")" "JSON: one object"
+  lg init --report r.md --import
+  assert_eq "3" "$LG_RC" "--report with --import exits 3"
+  lg init --report r.md --dry-run
+  assert_eq "3" "$LG_RC" "--dry-run with --report exits 3"
+  lg init --report r.md --sources files,svn
+  assert_eq "3" "$LG_RC" "an unknown source exits 3"
+  assert_contains "$LG_ERR" "svn" "the message names it"
+  lg init --report r.md --sources ''
+  assert_eq "3" "$LG_RC" "an empty --sources exits 3"
+  lg init --report r.md extra
+  assert_eq "3" "$LG_RC" "a positional argument exits 3"
+  lg init --accept d.tsv
+  assert_eq "2" "$LG_RC" "--accept exits 2 (not implemented yet)"
+  assert_contains "$LG_ERR" "not implemented yet" "stderr says so"
+  lg init --import --format json
+  assert_eq "2" "$LG_RC" "--import exits 2"
+  assert_json_field "$LG_OUT" '.error | test("not implemented yet")' "true" "JSON error says so"
+  lg init --report r.md --registry missing.json
+  assert_eq "2" "$LG_RC" "a missing --registry exits 2"
+  assert_contains "$LG_ERR" "missing.json" "stderr names it"
+  printf '{"schema":"ledger-registry/2","ledgers":[]}\n' > bad.json
+  lg init --report r.md --registry bad.json
+  assert_eq "2" "$LG_RC" "a --registry that is not ledger-registry/1 exits 2"
+  printf 'nope\n' > bad.json
+  lg init --report r.md --registry bad.json
+  assert_eq "2" "$LG_RC" "an unparsable --registry exits 2"
+  assert_file_not_exists r.md "no report on a failed run"
+  teardown
+}
+
+test_lg_init_report_writes_only_report_files() {
+  echo "test: init --report writes only the report, the decisions file and docs/ledger/ledgers.proposed.json; never ledgers.json or config.json"
+  lg_init_fixture
+  lg init --report docs/ledger/init-report.md
+  assert_eq "0" "$LG_RC" "no registry: exits 0"
+  assert_eq "?? docs/ledger/init-report.md
+?? docs/ledger/ledgers.proposed.json" "$(lg_init_status)" "the report and the proposal, nothing else"
+  assert_eq "wrote docs/ledger/init-report.md" "$(printf '%s\n' "$LG_OUT" | sed -n 1p)" "stdout: the report"
+  assert_eq "wrote docs/ledger/ledgers.proposed.json" "$(printf '%s\n' "$LG_OUT" | sed -n 2p)" "stdout: the proposal"
+  assert_eq "3" "$(printf '%s\n' "$LG_OUT" | grep -c .)" "three lines: two files and a summary"
+  assert_file_not_exists docs/ledger/init-report.md.decisions.tsv "no registry: no decisions file"
+  assert_contains "$(cat docs/ledger/init-report.md)" "--registry docs/ledger/ledgers.proposed.json" "the report says how to re-run"
+  # Its sections, in order.
+  assert_eq "## Sources|## Hand-written ledgers|## Registry|## Registry findings|## Assignment summary|## Next steps" \
+    "$(grep '^## ' docs/ledger/init-report.md | paste -sd '|' -)" "the report's sections, in order"
+  # With --registry: the decisions file; no proposal written.
+  rm -f docs/ledger/init-report.md docs/ledger/ledgers.proposed.json
+  lg_init_edit_reg
+  lg init --report docs/ledger/init-report.md --registry docs/ledger/edited.json --format json
+  assert_eq "0" "$LG_RC" "--registry: exits 0"
+  assert_eq "?? docs/ledger/edited.json
+?? docs/ledger/init-report.md
+?? docs/ledger/init-report.md.decisions.tsv" "$(lg_init_status)" "the report and the decisions file"
+  assert_json_field "$LG_OUT" '[.report, .decisions, (.proposed | tostring)] | join("|")' \
+    "docs/ledger/init-report.md|docs/ledger/init-report.md.decisions.tsv|null" "JSON: report, decisions, no proposal"
+  # ledgers.json present: used, never rewritten, no proposal.
+  rm -f docs/ledger/init-report.md docs/ledger/init-report.md.decisions.tsv docs/ledger/edited.json
+  lg_registry "$LG_INIT_REG"
+  git add -A && git commit -qm registry
+  local before
+  before=$(cksum < docs/ledger/ledgers.json || true)
+  lg init --report docs/ledger/init-report.md
+  assert_eq "0" "$LG_RC" "ledgers.json present: exits 0"
+  assert_eq "$before" "$(cksum < docs/ledger/ledgers.json)" "ledgers.json unchanged"
+  assert_eq "?? docs/ledger/init-report.md
+?? docs/ledger/init-report.md.decisions.tsv" "$(lg_init_status)" "no proposal beside a registry"
+  assert_contains "$(sed -n '/^## Registry$/,/^## Registry findings/p' docs/ledger/init-report.md)" "docs/ledger/ledgers.json" \
+    "the report names the registry it used"
+  teardown
+}
+
+test_lg_init_registry_proposal_mece() {
+  echo "test: the proposal — one ledger per top-level code dir, the >40 % dir split by second-level dir with a residual ledger, platform kinds, slug ids with collisions; MECE (validate --registry: only root files and non-CI dot-dirs unowned)"
+  lg_init_fixture
+  local f
+  for f in app/server/x.ts tests/unit.sh 'Weird Name!/x.ts' a-very-long-directory-name/x.ts docs/tool.py; do
+    mkdir -p "$(dirname "$f")"
+    printf 'x\n' > "$f"
+  done
+  git add -A && git commit -qm more
+  lg init --report docs/ledger/r.md
+  assert_eq "0" "$LG_RC" "exits 0"
+  local p=docs/ledger/ledgers.proposed.json
+  assert_eq "$(jq -S . "$p")" "$(cat "$p")" "jq -S formatting (sorted keys, 2-space indent)"
+  assert_json_field "$(cat "$p")" '.schema' "ledger-registry/1" "schema"
+  assert_eq ".github/**|github|platform||.github
+Weird Name!/**|weird-name|service||Weird Name!
+a-very-long-directory-name/**|a-very-long-dire|service||a-very-long-directory-name
+app/checkout/**|checkout|service||checkout
+app/profile/**|profile|service||profile
+app/server/**|server-2|service||server
+scripts/**|scripts|platform||scripts
+server/**|server|service||server
+src/**|src|service||src
+tests/**|tests|platform||tests
+|app|service|app/**|app" \
+    "$(jq -r '.ledgers[] | "\(.paths | join(","))|\(.id)|\(.kind)|\(.residual_paths | join(","))|\(.title)"' "$p" | LC_ALL=C sort)" \
+    "paths|id|kind|residual_paths|title of each ledger (top-level ids first: app/server takes server-2)"
+  assert_json_field "$(cat "$p")" '[.ledgers[] | .status] | unique | join(",")' "active" "every ledger active"
+  assert_json_field "$(cat "$p")" '[.ledgers[] | .id | length <= 16] | all' "true" "ids within 16 characters"
+  # MECE: the proposal as the registry — overlap never; unowned only the
+  # root file and the non-CI dot-dir.
+  cp "$p" docs/ledger/ledgers.json 2>/dev/null || true
+  lg_enable
+  lg validate --registry
+  assert_eq "1" "$LG_RC" "validate --registry: the unowned findings"
+  assert_eq "registry unowned .vscode/settings.json
+registry unowned Makefile" "$LG_OUT" "only the root file and the non-CI dot-dir are unowned"
+  assert_contains "$(sed -n '/^## Registry findings/,/^## Assignment/p' docs/ledger/r.md)" "unowned Makefile" \
+    "the report carries the proposal's findings"
+  teardown
+}
+
+test_lg_init_registry_hints_and_contracts() {
+  echo "test: the proposal's hints (component/area, hand-written ledger names, labels) per ledger; initial contracts from the contracts adapter when every defined_in falls in one ledger"
+  lg_init_fixture
+  mkdir -p docs/archive
+  cat > docs/archive/tier1-pipeline-ledger.md <<'EOF'
+| # | Step | State |
+|---|------|-------|
+| 1 | Ingest | done |
+EOF
+  lg_enable '{"adapters":{"contracts":"tools/contracts.sh"},"legacy_ledgers":{"tier1":"docs/archive/tier1-pipeline-ledger.md"}}'
+  # shellcheck disable=SC2016  # the adapter's own shell text
+  lg_contracts_adapter 'case "$1" in
+list) echo "{\"id\":\"field:order.total\",\"ledger\":null,\"defined_in\":[\"server/orders/model.*\"]}"
+      echo "{\"id\":\"component:CheckoutSheet\",\"ledger\":null,\"defined_in\":[\"app/checkout/CheckoutSheet.*\"]}"
+      echo "{\"id\":\"api:cross\",\"ledger\":null,\"defined_in\":[\"server/orders/api.ts\",\"app/checkout/Cart.ts\"]}"
+      echo "{\"id\":\"flag:root\",\"ledger\":null,\"defined_in\":[\"app/main.ts\"]}" ;;
+esac'
+  lg init --report docs/ledger/r.md
+  assert_eq "0" "$LG_RC" "exits 0"
+  local p=docs/ledger/ledgers.proposed.json r
+  assert_json_field "$(cat "$p")" '[.ledgers[] | select(.contracts | length > 0) | "\(.id)=\([.contracts[] | "\(.id)@\(.defined_in | join(","))"] | join(";"))"] | join(" ")' \
+    "app=flag:root@app/main.ts checkout=component:CheckoutSheet@app/checkout/CheckoutSheet.* server=field:order.total@server/orders/model.*" \
+    "contracts placed by defined_in (the residual ledger takes app/main.ts)"
+  r=$(cat docs/ledger/r.md 2>/dev/null || true)
+  assert_contains "$r" "api:cross" "a contract spanning two ledgers is named, unplaced"
+  assert_contains "$(printf '%s\n' "$r" | grep '^- `checkout`')" 'component "Checkout"' "checkout's hints: the item component"
+  assert_contains "$(printf '%s\n' "$r" | grep '^- `checkout`')" 'hand-written ledger "checkout"' "checkout's hints: the hand-written ledger"
+  assert_contains "$(printf '%s\n' "$r" | grep '^- `profile`')" 'area "profile"' "profile's hints: the item area"
+  assert_contains "$r" 'hand-written ledger "tier1"' "a legacy_ledgers id is a hint too (no ledger matches it)"
+  # Hand-written ledgers: the detected one and the configured (archived) one.
+  local hw
+  hw=$(sed -n '/^## Hand-written ledgers/,/^## Registry$/p' docs/ledger/r.md 2>/dev/null || true)
+  assert_contains "$hw" '`docs/ledgers/checkout-ledger.md` — `checkout`: 3 rows; 2 link items, 1 plans, 0 specs' "the detected ledger, its id and counts"
+  assert_contains "$hw" '`docs/archive/tier1-pipeline-ledger.md` — `tier1`: 1 rows; 0 link items, 0 plans, 0 specs' "legacy_ledgers: always included, with its configured id"
+  # The registry is a proposal only: hints never change it.
+  assert_json_field "$(cat "$p")" '[.ledgers[] | keys[]] | unique | join(",")' "contracts,id,kind,paths,residual_paths,status,title" "the ledger objects' keys"
+  teardown
+}
+
+test_lg_init_assignment_reasons() {
+  echo "test: assignment suggestions, first match wins — registered ledger value, hand-written membership, plurality of paths, (labels: github test), none"
+  lg_init_fixture
+  lg_init_edit_reg
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_eq "docs/issues/2026-01-01-cart-total.md	open	checkout	ledger-field	-
+docs/issues/2026-01-02-sheet-flicker.md	open	checkout	legacy:docs/ledgers/checkout-ledger.md#3	-
+docs/issues/2026-01-03-order-sync.md	open	orders	paths:orders 1/1	-
+docs/issues/2026-01-04-old-bug.md	fixed	checkout	legacy:docs/ledgers/checkout-ledger.md#1	checkout
+docs/issues/2026-01-05-misc.md	open	unassigned	none	-
+docs/issues/2026-01-06-wontfix.md	wontfix	unassigned	none	unassigned" \
+    "$(lg_init_rows docs/ledger/r.md.decisions.tsv)" "one row per item, each with its reason"
+  # The summary counts.
+  assert_contains "$(cat docs/ledger/r.md)" "| checkout | 3 |" "summary: by suggestion"
+  # An id the registry does not hold is no suggestion: the ledger value and
+  # the hand-written membership fall through.
+  lg_init_edit_reg '{"schema":"ledger-registry/1","ledgers":[{"id":"orders","title":"Orders","kind":"service","status":"active","paths":["server/orders/**"]}]}'
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json --format json
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_eq "docs/issues/2026-01-01-cart-total.md	unassigned	none
+docs/issues/2026-01-02-sheet-flicker.md	unassigned	none
+docs/issues/2026-01-03-order-sync.md	orders	paths:orders 1/1" \
+    "$(lg_init_rows docs/ledger/r.md.decisions.tsv | cut -f 1,3,4 | sed -n 1,3p)" "unregistered ids are not suggested"
+  assert_json_field "$LG_OUT" '[.counts.items, .counts.by_reason.none, .counts.by_reason.paths] | map(tostring) | join("|")' \
+    "6|5|1" "JSON counts"
+  teardown
+}
+
+test_lg_init_hub_files_downweighted() {
+  echo "test: paths plurality skips hub files (cited by > 5 % of items) and ties"
+  lg_fixture
+  local i
+  for i in $(seq 1 36); do
+    lg_item "docs/issues/i$i.md" 'status: Open'
+  done
+  lg_item docs/issues/a.md 'status: Open' 'related-files: [shared/hub.ts, server/orders/model.ts]'
+  lg_item docs/issues/b.md 'status: Open' 'related-files: [shared/hub.ts]'
+  lg_item docs/issues/c.md 'status: Open' 'related-files: [shared/hub.ts, shared/util.ts, server/orders/api.ts]'
+  lg_item docs/issues/d.md 'status: Open' 'code_refs: [server/orders/api.ts]'
+  mkdir -p shared server/orders
+  printf 'x\n' > shared/hub.ts
+  printf 'x\n' > shared/util.ts
+  printf 'x\n' > server/orders/model.ts
+  printf 'x\n' > server/orders/api.ts
+  git add -A && git commit -qm items
+  lg_init_edit_reg '{"schema":"ledger-registry/1","ledgers":[
+    {"id":"shared","title":"Shared","kind":"platform","status":"active","paths":["shared/**"]},
+    {"id":"orders","title":"Orders","kind":"service","status":"active","paths":["server/orders/**"]}]}'
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_eq "docs/issues/a.md	orders	paths:orders 1/1
+docs/issues/b.md	unassigned	none
+docs/issues/c.md	unassigned	none
+docs/issues/d.md	orders	paths:orders 1/1" \
+    "$(lg_init_rows docs/ledger/r.md.decisions.tsv | grep -v '/i[0-9]' | cut -f 1,3,4)" \
+    "a: the hub skipped, orders wins; b: only a hub; c: a tie; d: a file 2 of 40 items cite (5 %) is no hub"
+  assert_contains "$(cat docs/ledger/r.md)" '`shared/hub.ts` (3 items)' "the report names the hub file"
+  teardown
+}
+
+test_lg_init_decisions_prefill() {
+  echo "test: the decision column — pre-filled with the suggestion for terminal items only; class unknown when no class matches"
+  lg_init_fixture
+  lg_item docs/issues/2026-01-07-parked.md 'status: Parked'
+  lg_item docs/issues/2026-01-08-closed.md 'status: Closed' 'ledger: orders'
+  git add -A && git commit -qm more
+  lg_init_edit_reg
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_eq "docs/issues/2026-01-01-cart-total.md	open	-
+docs/issues/2026-01-02-sheet-flicker.md	open	-
+docs/issues/2026-01-03-order-sync.md	open	-
+docs/issues/2026-01-04-old-bug.md	fixed	checkout
+docs/issues/2026-01-05-misc.md	open	-
+docs/issues/2026-01-06-wontfix.md	wontfix	unassigned
+docs/issues/2026-01-07-parked.md	unknown	-
+docs/issues/2026-01-08-closed.md	closed	orders" \
+    "$(lg_init_rows docs/ledger/r.md.decisions.tsv | cut -f 1,2,5)" "terminal (fixed, closed, wontfix): the suggestion; open and unknown: empty"
+  assert_eq "5" "$(lg_init_rows docs/ledger/r.md.decisions.tsv | awk -F '\t' '{ print NF }' | sort -u)" "five columns on every row"
+  teardown
+}
+
+test_lg_init_decisions_header() {
+  echo "test: the decisions file's header (R5) — title, the registry's path and sha256, the column names; rows sorted (C locale); a path with a tab is left out and named"
+  lg_init_fixture
+  lg_item "docs/issues/tab	name.md" 'status: Open'
+  lg_item docs/issues/Zeta.md 'status: Open'
+  git add -A && git commit -qm awkward
+  lg_init_edit_reg
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  assert_eq "0" "$LG_RC" "exits 0"
+  local sha
+  sha=$( (shasum -a 256 2>/dev/null || sha256sum) < docs/ledger/edited.json | cut -d ' ' -f 1 || true)
+  assert_eq "# ledger init decisions
+# registry: docs/ledger/edited.json $sha
+# path	class	suggestion	reason	decision" "$(sed -n 1,3p docs/ledger/r.md.decisions.tsv)" "the three header lines"
+  assert_eq "3" "$(grep -c '^#' docs/ledger/r.md.decisions.tsv)" "no other '#' line"
+  assert_eq "docs/issues/2026-01-01-cart-total.md" "$(lg_init_rows docs/ledger/r.md.decisions.tsv | sed -n 1p | cut -f 1)" "C order: digits first"
+  assert_eq "docs/issues/Zeta.md" "$(lg_init_rows docs/ledger/r.md.decisions.tsv | sed -n '$p' | cut -f 1)" "C order: an uppercase name after digits"
+  assert_eq "0" "$(lg_init_rows docs/ledger/r.md.decisions.tsv | grep -c 'tab')" "the path with a tab is not written"
+  assert_contains "$(cat docs/ledger/r.md)" 'docs/issues/tab\tname.md' "the report names it"
+  # ledgers.json: its path on the registry line.
+  cp docs/ledger/edited.json docs/ledger/ledgers.json 2>/dev/null || true
+  lg init --report docs/ledger/r.md
+  assert_eq "# registry: docs/ledger/ledgers.json $sha" "$(sed -n 2p docs/ledger/r.md.decisions.tsv)" "ledgers.json named when used"
+  teardown
+}
+
+test_lg_init_github_source() {
+  echo "test: GitHub as a source — --sources github or items.adapter, gh repo view hasIssuesEnabled; hosted items by ref; a ledger: label suggests; labels are hints"
+  lg_init_fixture
+  lg_fake_gh
+  printf '%s\n' '[{"number":7,"title":"Two ledger labels","body":"","state":"OPEN","stateReason":null,"labels":[{"name":"ledger:checkout"},{"name":"ledger:old"}],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/7"},
+{"number":8,"title":"Done","body":"","state":"CLOSED","stateReason":"COMPLETED","labels":[{"name":"profile"}],"updatedAt":"2026-10-02T10:00:00Z","closedAt":"2026-10-02T09:00:00Z","url":"https://github.com/o/r/issues/8"}]' > "$LG_GH/issues.json"
+  lg_init_edit_reg
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json --sources files,github --format json
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_contains "$(cat "$LG_GH/args")" "repo view --json hasIssuesEnabled" "gh repo view checks the issues"
+  assert_eq "1" "$(lg_gh_icalls)" "one issue list"
+  assert_json_field "$LG_OUT" '[.sources.github.state, .sources.github.items] | map(tostring) | join("|")' "on|2" "JSON: GitHub on, 2 hosted items"
+  assert_eq "gh#7	open	checkout	label	-
+gh#8	fixed	unassigned	none	unassigned" "$(lg_init_rows docs/ledger/r.md.decisions.tsv | grep '^gh#')" \
+    "hosted items by ref; one registered ledger: label suggests (two make the ledger field a list)"
+  assert_eq "6" "$(lg_init_rows docs/ledger/r.md.decisions.tsv | grep -c '^docs/')" "the file items too"
+  assert_contains "$(cat docs/ledger/r.md)" 'label "profile"' "labels are hints"
+  assert_contains "$(sed -n '/^## Sources/,/^## Hand-written/p' docs/ledger/r.md)" "GitHub: on" "the report: GitHub on"
+  # --sources github alone: no file items.
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json --sources github
+  assert_eq "0" "$LG_RC" "github only: exits 0"
+  assert_eq "gh#7
+gh#8" "$(lg_init_rows docs/ledger/r.md.decisions.tsv | cut -f 1)" "github only: the hosted items alone"
+  # items.adapter configured: GitHub by default; --sources files turns it off.
+  lg_enable '{"items":{"adapter":"doc-superpowers:ledger-items-gh"}}'
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  assert_eq "0" "$LG_RC" "default with items.adapter: exits 0"
+  assert_eq "2" "$(lg_init_rows docs/ledger/r.md.decisions.tsv | grep -c '^gh#')" "items.adapter: GitHub on by default"
+  : > "$LG_GH/args"
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json --sources files
+  assert_eq "0" "$(lg_init_rows docs/ledger/r.md.decisions.tsv | grep -c '^gh#')" "--sources files: no hosted items"
+  assert_eq "" "$(cat "$LG_GH/args")" "--sources files: gh never runs"
+  lg_fake_gh_off
+  teardown
+}
+
+test_lg_init_github_failure_explicit_vs_default() {
+  echo "test: GitHub unavailable — explicit --sources github exits 2 with the reason; reached by default (items.adapter) it is reported and skipped (0)"
+  lg_init_fixture
+  lg_fake_gh
+  : > "$LG_GH/issues-off"
+  lg init --report docs/ledger/r.md --sources files,github
+  assert_eq "2" "$LG_RC" "explicit, issues disabled: exits 2"
+  assert_contains "$LG_ERR" "issues" "stderr gives the reason"
+  assert_file_not_exists docs/ledger/r.md "nothing written"
+  rm -f "$LG_GH/issues-off"
+  printf 'gh: To get started with GitHub CLI, please run:  gh auth login\n' > "$LG_GH/fail"
+  lg init --report docs/ledger/r.md --sources github --format json
+  assert_eq "2" "$LG_RC" "explicit, gh unauthenticated: exits 2"
+  assert_json_field "$LG_OUT" '.error | test("gh auth login")' "true" "the reason carries gh's message"
+  # By default (items.adapter set): skipped, reported, rc 0.
+  lg_enable '{"items":{"adapter":"doc-superpowers:ledger-items-gh"}}'
+  lg init --report docs/ledger/r.md --format json
+  assert_eq "0" "$LG_RC" "default: exits 0"
+  assert_json_field "$LG_OUT" '[.sources.github.state, (.sources.github.reason | test("gh auth login"))] | map(tostring) | join("|")' \
+    "skipped|true" "JSON: skipped, with the reason"
+  assert_contains "$(sed -n '/^## Sources/,/^## Hand-written/p' docs/ledger/r.md)" "GitHub: skipped" "the report says it was skipped"
+  assert_eq "0" "$(lg_gh_icalls)" "no issue list after a failed check"
+  lg_fake_gh_off
+  teardown
+}
+
+test_lg_init_sources_suggestions() {
+  echo "test: sources — the item globs, a suggested glob for a dir with >= 3 status: files (not added), hand-written ledgers detected by their table"
+  lg_init_fixture
+  lg init --report docs/ledger/r.md --format json
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_json_field "$LG_OUT" '.sources.files.suggested | map("\(.glob)=\(.files)") | join(",")' "docs/notes/*.md=3" \
+    "docs/notes/ suggested (3 files); docs/plans/ (1) not"
+  assert_json_field "$LG_OUT" '.sources.files.globs | join(",")' "docs/issues/*.md" "the item globs"
+  assert_json_field "$LG_OUT" '.sources.ledgers | map("\(.file)=\(.id)") | join(",")' "docs/ledgers/checkout-ledger.md=checkout" \
+    "the hand-written ledger (the plan and the notes have no such table)"
+  assert_contains "$(sed -n '/^## Sources/,/^## Hand-written/p' docs/ledger/r.md)" '`docs/notes/*.md`' "the report suggests the glob"
+  assert_file_not_exists docs/ledger/config.json "a suggestion is not added"
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -8674,7 +9099,6 @@ run_tests() {
   test_lg_vendored_copy_no_config_inert
   test_lg_vendored_copy_with_config_rc2
   test_lg_outside_repo_rc2
-  test_lg_stub_not_implemented
   test_lg_die_inside_subshell_one_object
   test_lg_crash_is_rc2
 
@@ -8961,6 +9385,20 @@ run_tests() {
   test_lg_items_gh_hostile_values
   test_lg_items_gh_block_markers
   test_lg_recheck_hosted_items
+
+  # --- Task 14 ---
+  test_lg_init_runs_without_config
+  test_lg_init_usage_errors
+  test_lg_init_report_writes_only_report_files
+  test_lg_init_registry_proposal_mece
+  test_lg_init_registry_hints_and_contracts
+  test_lg_init_assignment_reasons
+  test_lg_init_hub_files_downweighted
+  test_lg_init_decisions_prefill
+  test_lg_init_decisions_header
+  test_lg_init_github_source
+  test_lg_init_github_failure_explicit_vs_default
+  test_lg_init_sources_suggestions
 
   print_summary
 }
