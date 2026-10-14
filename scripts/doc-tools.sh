@@ -9876,7 +9876,7 @@ _JQ_CLAIMS_PROMOTE_PLAN='def nes: type == "string" and length > 0;
      refuse: "\($m | length) claims have the id \($id): give each its own id first (V1)"}
    else $m[0] as $e | $e.claim as $c
    | ($c.nonvacuity | if type == "object" then . else {} end) as $nv
-   | $nv.mutant as $mu | $nv.observed_red as $or
+   | $nv.mutant as $mu | $nv.observed_red as $ord
    | {unknown: false, sidecar: $e.sidecar, doc: $e.doc, status: $c.status, claim: $c,
       refuse: (
         if ($e.eligible | not) then "its doc \($e.doc | tojson) is missing or not a governing doc here: nothing to promote"
@@ -9890,15 +9890,15 @@ _JQ_CLAIMS_PROMOTE_PLAN='def nes: type == "string" and length > 0;
         then "status \($c.status | tojson) cannot be promoted (unbuilt, diverged, gated or built only)"
         elif ($c.subject | type) != "array" or (all($c.subject[]; nes and nonul) | not)
         then "subject \($c.subject | tojson) is not a list of repo paths"
-        elif $mu == null and $or == null
+        elif $mu == null and $ord == null
         then "no nonvacuity proof: promote needs nonvacuity.mutant {file, find, replace} (a change under which the bound test fails by an assertion) or nonvacuity.observed_red <sha> (a commit whose subject files make it fail by one)"
-        elif $or != null and (($or | nes | not) or ($or | nonul | not))
-        then "nonvacuity.observed_red is not a full commit id: \($or | tojson) (give the full lowercase hex id of a commit)"
+        elif $ord != null and (($ord | nes | not) or ($ord | nonul | not))
+        then "nonvacuity.observed_red is not a full commit id: \($ord | tojson) (give the full lowercase hex id of a commit)"
         elif $mu != null and (($mu | type) != "object" or ($mu.file | nes | not) or ($mu.find | nes | not) or ($mu.replace | type) != "string")
         then "nonvacuity.mutant \($mu | tojson) is not {file, find, replace}"
         elif $mu != null and ([$mu.file, $mu.find, $mu.replace] | all(nonul) | not) then "nonvacuity.mutant holds a NUL byte"
         elif $mu != null and ($mu.file | cl_mutant_is_test($c.test.file; $c.test.node)) then $mu.file | cl_mutant_test_msg
-        elif $or != null and any($c.subject[]; cl_subject_holds_test($c.test.file; $c.test.node))
+        elif $ord != null and any($c.subject[]; cl_subject_holds_test($c.test.file; $c.test.node))
         then first($c.subject[] | select(cl_subject_holds_test($c.test.file; $c.test.node))) | cl_subject_test_msg
         else null end)}
    end'
