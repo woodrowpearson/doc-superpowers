@@ -16,7 +16,7 @@ Without the directory everything is inert. Every `claims` verb prints `{"verb":"
 
 A project opts in by creating `docs/spec-claims/` with its first sidecar. From then on the pre-commit claims leg blocks on findings, the pre-push leg reports, the `doc-spec-verify` `claims` job checks every same-repository PR (fork and dependabot PRs are not checked), and the weekly schedule re-verifies ([Hooks and CI](#hooks-and-ci)). A same-repository PR that deletes a `docs/spec-claims/` its base has is itself a CI finding.
 
-The checker needs bash ≥ 3.2, `jq` ≥ 1.6 and git; a range that holds a merge (a gate or attest over a branch that merged its base) needs git ≥ 2.36 (`show --remerge-diff`), and is indeterminate (exit 2) on an older git.
+The checker needs bash ≥ 3.2, `jq` ≥ 1.6 and git. A claims check over a commit range that holds a merge — `claims run --planes-of`, `claims gate`, and `claims validate`'s V9 over the merge-base range — reads the merge's hand resolutions with `git show --remerge-diff`, so it needs git ≥ 2.36; an older git makes that check indeterminate (exit 2). `claims attest` never reads a merge.
 
 ## Normative vs descriptive text
 
