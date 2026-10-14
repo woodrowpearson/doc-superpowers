@@ -1433,12 +1433,17 @@ assert_contains "$_sc_job" "github.actor != 'dependabot[bot]'" "doc-spec-verify.
 assert_contains "$SPECCLAIMS" 'every same-repository PR (fork and dependabot PRs are not checked)' \
   "spec-claims.md: the CI claims job's scope (fork and dependabot PRs are not checked)"
 assert_not_contains "$SPECCLAIMS" 'checks every PR' "spec-claims.md: never says the CI job checks every PR"
-# V6 as the fix wave left it: the direction a change needs, the history rule
-# on a missing verdict, and the limit of trusting a promotion by its digest.
+# V6 as the promotion fingerprint left it: the direction a change needs,
+# what a promotion proved read from promotion.proved (never history), and
+# the limit of trusting a promotion by its digest.
 assert_contains "$SPECCLAIMS" 'a `states` change, a lowered `enforced_by` or a token-changing re-anchor needs a new `DOC-STALE` or `RETIRE` ruling' \
   "spec-claims.md: V6 — only DOC-STALE or RETIRE licenses a states change, a lowered tier, a re-anchor"
-assert_contains "$SPECCLAIMS" 'A missing verdict is judged by the record at `promotion.at`' \
-  "spec-claims.md: V6 — a missing verdict takes the history rule"
+assert_contains "$SPECCLAIMS" 'What a promotion proved is read from `promotion.proved`**, never from the store and never from history' \
+  "spec-claims.md: V6 — what a promotion proved is read from promotion.proved"
+assert_not_contains "$SPECCLAIMS" 'judged by the record at `promotion.at`' \
+  "spec-claims.md: no history rule (promotion.at is unreachable after a squash or rebase merge)"
+assert_contains "$SPECCLAIMS" 'A forged `proved` is as undetectable outside the promoting clone as a forged `verdict_sha256`' \
+  "spec-claims.md: a forged proved is the trust-by-digest limit too"
 assert_not_contains "$SPECCLAIMS" 'a missing verdict is the advisory `unverifiable-here`, never a finding' \
   "spec-claims.md: never says a missing verdict is always only an advisory"
 assert_contains "$SPECCLAIMS" 'a test, subject or tier swap is a finding whatever the ruling' \

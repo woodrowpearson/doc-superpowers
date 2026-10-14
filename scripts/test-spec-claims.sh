@@ -1668,12 +1668,35 @@ claims_store() {
   printf '%s/spec-claims/promotions\n' "$(cd "$(git rev-parse --git-common-dir)" && pwd -P)"
 }
 
+# proved_of <claim-json>: the claim's promotion fingerprint as promote
+# writes it (promotion.proved, and the verdict's proved): for each of
+# states, test, subject, nonvacuity and when, the sha256 of the field's
+# jq -cS bytes with no trailing newline (an absent field is null, so it
+# hashes the four bytes "null"); enforced_by as its value. Computed apart
+# from doc-tools, so a test pins the definition rather than reusing it.
+proved_of() {
+  local f k out='{}'
+  f=$(harness_mktemp proved)
+  for k in states test subject nonvacuity when; do
+    printf '%s' "$(jq -cS --arg k "$k" '.[$k]' <<<"$1")" > "$f"
+    out=$(jq -c --arg k "$k" --arg d "$(hash_file "$f")" '. + {($k): $d}' <<<"$out")
+  done
+  rm -f "$f"
+  jq -c --argjson c "$1" '. + {enforced_by: $c.enforced_by}' <<<"$out"
+}
+
+# claim_proved: proved_of the fixture sidecar's first claim as it stands.
+claim_proved() {
+  proved_of "$(jq -c '.claims[0]' "$SIDECAR")"
+}
+
 # verdict_bytes <out-file> [states]: the fixture claim's verdict as promote
 # writes it (doc-tools' claims promote): the jq -cS bytes of {claim,
-# states_sha256, test, nonvacuity, head, subject_oids, green, red,
+# states_sha256, test, nonvacuity, proved, head, subject_oids, green, red,
 # status_to}. states_sha256 is the sha256 of [states] (default: the claim's
-# own), with no trailing newline; head is HEAD; subject_oids maps each
-# subject path to its object at HEAD; status_to is the claim's status.
+# own), with no trailing newline; proved is claim_proved; head is HEAD;
+# subject_oids maps each subject path to its object at HEAD; status_to is
+# the claim's status.
 verdict_bytes() {
   local st ss oids p
   st=$(harness_mktemp states)
@@ -1684,8 +1707,8 @@ verdict_bytes() {
   while IFS= read -r p; do
     oids=$(jq -c --arg p "$p" --arg o "$(git rev-parse "HEAD:$p")" '. + {($p): $o}' <<<"$oids")
   done < <(jq -r '.claims[0].subject[]' "$SIDECAR")
-  jq -cS --arg ss "$ss" --arg head "$(git rev-parse HEAD)" --argjson oids "$oids" \
-    '.claims[0] | {claim: .id, states_sha256: $ss, test, nonvacuity, head: $head,
+  jq -cS --arg ss "$ss" --arg head "$(git rev-parse HEAD)" --argjson oids "$oids" --argjson pr "$(claim_proved)" \
+    '.claims[0] | {claim: .id, states_sha256: $ss, test, nonvacuity, proved: $pr, head: $head,
       subject_oids: $oids, green: "pass", red: "assert-fail", status_to: .status}' \
     "$SIDECAR" > "$1"
 }
@@ -1704,19 +1727,27 @@ write_verdict() {
   printf '%s\n' "$digest"
 }
 
+# hand_promotion [digest]: the fixture claim's promotion as promote writes
+# it — {at: HEAD, verdict_sha256, proved: claim_proved} — with its verdict
+# written to the store (write_verdict), or, given [digest], naming that
+# digest and writing nothing. Sets CL_DIGEST.
+hand_promotion() {
+  if [ $# -gt 0 ]; then CL_DIGEST=$1; else CL_DIGEST=$(write_verdict); fi
+  jset "$SIDECAR" ".claims[0].promotion = {\"at\": \"$(git rev-parse HEAD)\", \"verdict_sha256\": \"$CL_DIGEST\",
+    \"proved\": $(claim_proved)}"
+}
+
 # hand_promote: the fixture claim made built as promote makes it. The bound
 # test (bind_test: what V3 checks) and the mutant are committed first
-# (promote refuses a dirty tree, so the sidecar at promotion.at holds the
-# proved states and test); then status built, its verdict in the store, and
-# promotion {at: HEAD, verdict_sha256}; then the doc's status block
-# rendered, as promote renders it. Sets CL_DIGEST.
+# (promote refuses a dirty tree); then status built and its promotion
+# (hand_promotion: the verdict in the store, the proved fingerprint); then
+# the doc's status block rendered, as promote renders it. Sets CL_DIGEST.
 hand_promote() {
   bind_test "$_CL_TEST"
   jset "$SIDECAR" ".claims[0].nonvacuity = $_CL_MUTANT"
   git add "$SIDECAR" docs/spec-claims/config.json tools/claims && git commit -qm "bind the TTL test"
   jset "$SIDECAR" '.claims[0].status = "built"'
-  CL_DIGEST=$(write_verdict)
-  jset "$SIDECAR" ".claims[0].promotion = {\"at\": \"$(git rev-parse HEAD)\", \"verdict_sha256\": \"$CL_DIGEST\"}"
+  hand_promotion
   rerender
 }
 
@@ -1825,19 +1856,20 @@ test_v6_sidecar_deleted_with_live_claims_finding() {
   teardown
 }
 
+# The edit is to a field promote does not prove (kind): a subject edit is
+# a change to what was proved (test_v6_proved_subject_swap_is_finding).
 test_v6_built_record_edit_rechecks_verdict() {
   echo "test: V6 — a built claim's edited record re-checks its verdict"
   claims_fixture
   hand_promote
   base_here "built"
-  printf 'LEEWAY = 0\n' > src/auth/ttl.py
-  jset "$SIDECAR" '.claims[0].subject += ["src/auth/ttl.py"]'
+  jset "$SIDECAR" '.claims[0].kind = "interface"'
   cl validate --all
-  assert_v6_ok "subject edited, the verdict still matching"
+  assert_v6_ok "kind edited, the verdict still matching"
   assert_eq "" "$(v6_codes)" "…with no V6 advisory"
   rm -f "$(claims_store)/$CL_DIGEST.json"
   cl validate --all
-  assert_v6_ok "subject edited, the verdict missing"
+  assert_v6_ok "kind edited, the verdict missing"
   assert_contains "$(v6_codes)" "unverifiable-here" "…re-checked though the status did not move: unverifiable-here"
   teardown
 }
@@ -1933,14 +1965,14 @@ test_v6_hand_edited_built_refused() {
 test_v6_unverifiable_here_advisory() {
   echo "test: V6 — a promotion whose verdict is not in this clone's store"
   claims_fixture
-  # As promote leaves it: the bound test and the mutant committed first, so
-  # the sidecar at promotion.at holds the record that was proved (V6 judges
-  # a missing verdict by it).
+  # As promote leaves it: the bound test and the mutant committed first, and
+  # promotion.proved the record as it stands (V6 judges a missing verdict by
+  # it), its verdict_sha256 a digest no store here holds.
   bind_test "$_CL_TEST"
   jset "$SIDECAR" ".claims[0].nonvacuity = $_CL_MUTANT"
   git add -A && git commit -qm "bind the TTL test"
-  jset "$SIDECAR" ".claims[0].status = \"built\"
-    | .claims[0].promotion = {\"at\": \"$(git rev-parse HEAD)\", \"verdict_sha256\": \"$(printf '%064d' 0)\"}"
+  jset "$SIDECAR" '.claims[0].status = "built"'
+  hand_promotion "$(printf '%064d' 0)"
   rerender
   cl validate --all
   assert_v6_ok "built with a promotion, no verdict file"
@@ -1955,16 +1987,16 @@ test_v6_verdict_mismatch_is_finding() {
   bind_test "$_CL_TEST"
   jset "$SIDECAR" ".claims[0].status = \"built\" | .claims[0].nonvacuity = $_CL_MUTANT"
   d=$(write_verdict "Another statement.")
-  jset "$SIDECAR" ".claims[0].promotion = {\"at\": \"$(git rev-parse HEAD)\", \"verdict_sha256\": \"$d\"}"
+  hand_promotion "$d"
   cl validate --all
-  assert_v6 "verdict" "the verdict's states_sha256 is another statement's"
+  assert_v6 "promotion verdict does not match the claim" "the verdict's states_sha256 is another statement's"
   # A verdict file whose bytes no longer hash to its digest.
   hand_promote
   cl validate --all
   assert_v6_ok "precondition: a matching verdict"
   printf ' ' >> "$(claims_store)/$CL_DIGEST.json"
   cl validate --all
-  assert_v6 "verdict" "the verdict file edited after promotion"
+  assert_v6 "promotion verdict does not match the claim" "the verdict file edited after promotion"
   teardown
 }
 
@@ -1991,7 +2023,8 @@ test_v6_mismatch_with_code_diverges_ruling_still_finding() {
   doc_stale_amend "$_CL_DIVERGES"
   git add -A
   cl validate --staged
-  assert_v6 "verdict" "states amended under CODE-DIVERGES, status built"
+  assert_v6 "states changed since promote proved the claim (promotion.proved) without a new DOC-STALE (or RETIRE) ruling" \
+    "states amended under CODE-DIVERGES, status built"
   assert_not_contains "$(v6_codes)" "re-promote owed" "…not a re-promote owed advisory"
   teardown
 }
@@ -2019,33 +2052,36 @@ repromote_owed() {
 }
 
 test_v6_repromote_owed_proved_record() {
-  echo "test: _claims_repromote_owed — by the local verdict, else by the record at promotion.at"
+  echo "test: _claims_repromote_owed — by promotion.proved, with the local verdict or without it"
   claims_fixture
   CL_PROBE=$(claims_probe after '_claims_load; r=$(_claims_repromote_owed "$CL_PROBE_ID" "$_CL_MB") || _claims_propagate $?; _claims_mark_emitted 0; _claims_out "$r"; exit 0')
   assert_eq "clear" "$(repromote_owed)" "an unbuilt claim: clear"
   hand_promote
   base_here "built"
-  local store at aside c init other
+  local store aside
   store=$(claims_store)
   aside=$(harness_mktemp_d verdict-aside)
   assert_eq "clear" "$(repromote_owed)" "built, the verdict present and matching: clear"
   mv "$store/$CL_DIGEST.json" "$aside/"
-  assert_eq "clear" "$(repromote_owed)" "built, the verdict missing, states and test as at promotion.at: clear"
+  assert_eq "clear" "$(repromote_owed)" "built, the verdict missing, every field as proved: clear"
   mv "$aside/$CL_DIGEST.json" "$store/"
   # The amendment (commit A), committed after the proof.
   doc_stale_amend
   git add -A && git commit -qm "DOC-STALE: amend the TTL claim"
-  assert_eq "owed" "$(repromote_owed)" "amended, the verdict present (mismatch): owed"
+  assert_eq "owed" "$(repromote_owed)" "amended, the verdict present: owed (states differ from proved)"
   rm -f "$store/$CL_DIGEST.json"
-  assert_eq "owed" "$(repromote_owed)" "amended, the verdict missing, states not those at promotion.at: owed"
+  assert_eq "owed" "$(repromote_owed)" "amended, the verdict missing: owed (states differ from proved)"
   # Re-promoted at A.
-  at=$(git rev-parse HEAD)
-  CL_DIGEST=$(write_verdict)
-  jset "$SIDECAR" ".claims[0].promotion = {\"at\": \"$at\", \"verdict_sha256\": \"$CL_DIGEST\"}"
+  hand_promotion
   git commit -qam "promote SPEC-AUTH-001#token-ttl"
   assert_eq "clear" "$(repromote_owed)" "re-promoted at A, the verdict present: clear"
   mv "$store/$CL_DIGEST.json" "$aside/"
-  assert_eq "clear" "$(repromote_owed)" "re-promoted at A, the verdict missing, states and test as at A: clear"
+  assert_eq "clear" "$(repromote_owed)" "re-promoted at A, the verdict missing: clear"
+  # promotion.at not a commit here (a squash or a rebase merge): no history
+  # is read, so nothing changes.
+  jset "$SIDECAR" ".claims[0].promotion.at = \"$(printf '%040d' 7)\""
+  git commit -qam "promotion.at: a commit this clone does not have"
+  assert_eq "clear" "$(repromote_owed)" "promotion.at not a commit here, every field as proved: clear"
   # A second states change under the same ruling (commit C): the ruling is
   # still new against the merge-base, but these states were never proved.
   jset "$SIDECAR" '.claims[0].states = "An issued access token is rejected 15 minutes after issue, or at logout."'
@@ -2056,30 +2092,31 @@ test_v6_repromote_owed_proved_record() {
   assert_eq "owed" "$(repromote_owed)" "states changed after the re-promotion, the verdict present: owed"
   mv "$store/$CL_DIGEST.json" "$aside/"
   assert_eq "owed" "$(repromote_owed)" "states changed after the re-promotion, the verdict missing: owed"
-  # The test changed instead (states as proved at A).
-  git show "$at:$SIDECAR" | jq -r '.claims[0].states' > "$aside/states"
-  jset "$SIDECAR" ".claims[0].states = $(jq -Rs 'rtrimstr("\n")' "$aside/states") | .claims[0].test.node = \"tests/unit/test_token.py::test_other\""
+  jset "$SIDECAR" ".claims[0].states = \"$NEW_STATES\""
+  assert_eq "clear" "$(repromote_owed)" "states back to those proved at A: clear"
+  # The test, or the mutant, changed instead (states as proved at A).
+  jset "$SIDECAR" '.claims[0].test.node = "tests/unit/test_token.py::test_other"'
   assert_eq "owed" "$(repromote_owed)" "the test changed after the re-promotion, the verdict missing: owed"
-  jset "$SIDECAR" ".claims[0].test = $_CL_TEST"
-  assert_eq "clear" "$(repromote_owed)" "states and test back to those proved at A: clear"
-  # A rebased branch's old sha.
-  jset "$SIDECAR" ".claims[0].promotion.at = \"$(printf '%040d' 7)\""
-  assert_eq "unverifiable-here" "$(repromote_owed)" "the verdict missing, promotion.at not a commit here: unverifiable-here"
-  # promotion.at a commit without the sidecar (the repository's first).
-  init=$(git rev-list --max-parents=0 HEAD)
-  jset "$SIDECAR" ".claims[0].promotion.at = \"$init\""
-  assert_eq "unverifiable-here" "$(repromote_owed)" "the sidecar absent at promotion.at: unverifiable-here"
-  # promotion.at a commit whose sidecar holds no claim with that id.
-  c=$(git rev-parse HEAD)
-  git checkout -q -b other
-  jset "$SIDECAR" '.claims[0].id = "SPEC-AUTH-001#other"'
-  git commit -qam "another claim id"
-  other=$(git rev-parse HEAD)
-  git checkout -q feature
-  git branch -q -D other
-  assert_eq "$c" "$(git rev-parse HEAD)" "precondition: back on feature"
-  jset "$SIDECAR" ".claims[0].promotion.at = \"$other\" | .claims[0].test = $_CL_TEST"
-  assert_eq "unverifiable-here" "$(repromote_owed)" "no claim with that id in the sidecar at promotion.at: unverifiable-here"
+  jset "$SIDECAR" ".claims[0].test = $_CL_TEST | .claims[0].nonvacuity.mutant.replace = \"TTL_SECONDS = 901\""
+  assert_eq "owed" "$(repromote_owed)" "the mutant changed after the re-promotion, the verdict missing: owed"
+  mv "$aside/$CL_DIGEST.json" "$store/"
+  assert_eq "owed" "$(repromote_owed)" "the mutant changed after the re-promotion, the verdict present: owed"
+  jset "$SIDECAR" ".claims[0].nonvacuity = $_CL_MUTANT"
+  assert_eq "clear" "$(repromote_owed)" "every field back to proved, the verdict present: clear"
+  # The subject alone is not owed here: gate and attest owe a re-promotion
+  # for states, test or nonvacuity; a subject swap is V6's finding.
+  jset "$SIDECAR" '.claims[0].subject = ["src/auth/ttl.py"]'
+  assert_eq "clear" "$(repromote_owed)" "the subject alone changed: clear (V6 reports it)"
+  jset "$SIDECAR" '.claims[0].subject = ["src/auth/token.py"]'
+  # A forged proved: the test swapped and promotion.proved rewritten to
+  # match it, the real verdict in the store — the verdict's own proved
+  # differs, so the binding fails.
+  jset "$SIDECAR" '.claims[0].test.node = "tests/unit/test_token.py::test_other"'
+  jset "$SIDECAR" ".claims[0].promotion.proved = $(claim_proved)"
+  assert_eq "owed" "$(repromote_owed)" "a forged proved, the real verdict present: owed"
+  # No proved at all (V1's finding): owed — promote writes one.
+  jset "$SIDECAR" ".claims[0].test = $_CL_TEST | del(.claims[0].promotion.proved)"
+  assert_eq "owed" "$(repromote_owed)" "a promotion without proved: owed"
   teardown
 }
 
@@ -2160,10 +2197,10 @@ test_v6_status_off_built_any_direction() {
 
 # The final review's probe: a built claim's test.node rebound to a trivially
 # passing test, no ruling, the verdict store gone (CI, a teammate's clone),
-# passed validate --staged with exit 0. Without the verdict, the record promote
-# proved — the sidecar at promotion.at — decides, as for gate and attest.
-test_v6_missing_verdict_applies_the_history_rule() {
-  echo "test: V6 — a missing verdict is judged by the record at promotion.at"
+# passed validate --staged with exit 0. With the verdict or without it, the
+# record promote proved — promotion.proved — decides, as for gate and attest.
+test_v6_missing_verdict_decided_by_proved() {
+  echo "test: V6 — with the verdict or without it, promotion.proved decides"
   claims_fixture
   hand_promote
   base_here "built"
@@ -2175,21 +2212,22 @@ test_v6_missing_verdict_applies_the_history_rule() {
   git add -A
   mv "$store/$CL_DIGEST.json" "$aside/"
   cl validate --staged
-  assert_v6 "differs from its record at promotion.at" "--staged, the store gone: a test swap is a finding"
+  assert_v6 "test changed since promote proved the claim (promotion.proved)" "--staged, the store gone: a test swap is a finding"
   assert_not_contains "$(v6_codes)" "unverifiable-here" "…not the unverifiable-here advisory"
   cl validate --all
-  assert_v6 "differs from its record at promotion.at" "--all, the store gone: a test swap is a finding"
+  assert_v6 "test changed since promote proved the claim (promotion.proved)" "--all, the store gone: a test swap is a finding"
   # The same swap under a DOC-STALE amendment, the store present: still a
   # finding — DOC-STALE covers states, not the test that proves it.
   mv "$aside/$CL_DIGEST.json" "$store/"
   doc_stale_amend
   git add -A
   cl validate --staged
-  assert_v6 "verdict" "--staged, the store present: a test swap under DOC-STALE is a finding"
+  assert_v6 "test changed since promote proved the claim" "--staged, the store present: a test swap under DOC-STALE is a finding"
+  assert_contains "$(v6_messages)" "a DOC-STALE or RETIRE ruling covers only a states change" "…saying what the ruling covers"
   assert_not_contains "$(v6_codes)" "re-promote owed" "…not re-promote owed"
   mv "$store/$CL_DIGEST.json" "$aside/"
   cl validate --staged
-  assert_v6 "differs from its record at promotion.at" "--staged, the store gone: a test swap under DOC-STALE is a finding"
+  assert_v6 "test changed since promote proved the claim" "--staged, the store gone: a test swap under DOC-STALE is a finding"
   assert_not_contains "$(v6_codes)" "re-promote owed" "…not re-promote owed"
   # States only (the test as proved), under DOC-STALE: re-promote owed, with
   # the store and without it.
@@ -2197,7 +2235,7 @@ test_v6_missing_verdict_applies_the_history_rule() {
   git add -A
   cl validate --staged
   assert_v6_ok "--staged, the store gone: a states-only DOC-STALE amendment"
-  assert_contains "$(v6_codes)" "re-promote owed" "…re-promote owed, by the record at promotion.at"
+  assert_contains "$(v6_codes)" "re-promote owed" "…re-promote owed, by promotion.proved"
   mv "$aside/$CL_DIGEST.json" "$store/"
   cl validate --staged
   assert_v6_ok "--staged, the store present: a states-only DOC-STALE amendment"
@@ -2208,17 +2246,26 @@ test_v6_missing_verdict_applies_the_history_rule() {
   jset "$SIDECAR" '.claims[0].subject = ["src/auth/ttl.py"]'
   git add -A
   cl validate --staged
-  assert_v6 "verdict" "--staged, the store present: a subject swap under DOC-STALE is a finding"
+  assert_v6 "subject changed since promote proved the claim" "--staged, the store present: a subject swap under DOC-STALE is a finding"
   assert_not_contains "$(v6_codes)" "re-promote owed" "…not re-promote owed"
   mv "$store/$CL_DIGEST.json" "$aside/"
   cl validate --staged
-  assert_v6 "differs from its record at promotion.at" "--staged, the store gone: a subject swap under DOC-STALE is a finding"
-  # promotion.at not a commit here (a rebased branch): unverifiable-here.
+  assert_v6 "subject changed since promote proved the claim" "--staged, the store gone: a subject swap under DOC-STALE is a finding"
+  # promotion.at not a commit here (a rebased or squashed branch): no
+  # history is read, so the subject swap is still a finding, never
+  # unverifiable-here.
   jset "$SIDECAR" ".claims[0].promotion.at = \"$(printf '%040d' 7)\""
   git add -A
   cl validate --staged
-  assert_v6_ok "--staged, the store gone, promotion.at not a commit here"
-  assert_contains "$(v6_codes)" "unverifiable-here" "…the advisory unverifiable-here"
+  assert_v6 "subject changed since promote proved the claim" "--staged, the store gone, promotion.at not a commit here: the subject swap"
+  assert_not_contains "$(v6_codes)" "unverifiable-here" "…not unverifiable-here"
+  # The subject as proved: the states-only amendment, re-promote owed.
+  jset "$SIDECAR" '.claims[0].subject = ["src/auth/token.py"]'
+  git add -A
+  cl validate --staged
+  assert_v6_ok "--staged, the store gone, promotion.at not a commit here, states only"
+  assert_contains "$(v6_codes)" "re-promote owed" "…re-promote owed"
+  assert_not_contains "$(v6_codes)" "unverifiable-here" "…not unverifiable-here"
   teardown
 }
 
@@ -2233,8 +2280,210 @@ test_v6_doc_stale_does_not_cover_a_test_swap() {
   bind_test '{"runner":"pytest","node":"tests/unit/test_token.py::test_always_true"}'
   git add -A
   cl validate --staged
-  assert_v6 "verdict" "a test swap with a DOC-STALE ruling and no states change"
+  assert_v6 "test changed since promote proved the claim" "a test swap with a DOC-STALE ruling and no states change"
   assert_not_contains "$(v6_codes)" "re-promote owed" "…not re-promote owed"
+  teardown
+}
+
+# --- The promotion fingerprint (promotion.proved) ----------------------------
+#
+# promote records what it proved, field by field (proved_of); V6 compares
+# the claim with it, whether or not the local store holds the verdict, and
+# reads no history (promotion.at is unreachable after a squash or rebase
+# merge). Each test changes the built fixture claim against a base that
+# holds it as promoted.
+
+# assert_v6_with_and_without_store <substring> <what>: with the change
+# staged, validate --staged and --all each give a V6 finding naming
+# <substring>, the fixture claim's verdict (CL_DIGEST) in the store, and
+# again with it moved out (never the advisory unverifiable-here); the
+# verdict is put back.
+assert_v6_with_and_without_store() {
+  local store aside
+  store=$(claims_store)
+  aside=$(harness_mktemp_d verdict-aside)
+  git add -A
+  cl validate --staged
+  assert_v6 "$1" "$2, the store present (--staged)"
+  cl validate --all
+  assert_v6 "$1" "$2, the store present (--all)"
+  mv "$store/$CL_DIGEST.json" "$aside/"
+  cl validate --staged
+  assert_v6 "$1" "$2, the store gone (--staged)"
+  assert_not_contains "$(v6_codes)" "unverifiable-here" "$2, the store gone: not unverifiable-here"
+  cl validate --all
+  assert_v6 "$1" "$2, the store gone (--all)"
+  mv "$aside/$CL_DIGEST.json" "$store/"
+}
+
+# assert_v6_owed_with_and_without_store <what>: as above, but each run exits
+# 0 with no V6 finding and the advisory re-promote owed.
+assert_v6_owed_with_and_without_store() {
+  local store aside m
+  store=$(claims_store)
+  aside=$(harness_mktemp_d verdict-aside)
+  git add -A
+  for m in --staged --all; do
+    cl validate "$m"
+    assert_v6_ok "$1, the store present ($m)"
+    assert_contains "$(v6_codes)" "re-promote owed" "$1, the store present ($m): re-promote owed"
+  done
+  mv "$store/$CL_DIGEST.json" "$aside/"
+  for m in --staged --all; do
+    cl validate "$m"
+    assert_v6_ok "$1, the store gone ($m)"
+    assert_contains "$(v6_codes)" "re-promote owed" "$1, the store gone ($m): re-promote owed"
+    assert_not_contains "$(v6_codes)" "unverifiable-here" "$1, the store gone ($m): not unverifiable-here"
+  done
+  mv "$aside/$CL_DIGEST.json" "$store/"
+}
+
+test_v6_proved_test_swap_is_finding() {
+  echo "test: V6 — a test swap is a finding, with the verdict and without it"
+  claims_fixture
+  hand_promote
+  base_here "built"
+  bind_test '{"runner":"pytest","node":"tests/unit/test_token.py::test_always_true"}'
+  assert_v6_with_and_without_store "test changed since promote proved the claim (promotion.proved): run claims promote $TTL_ID" \
+    "a test swap, no ruling"
+  teardown
+}
+
+test_v6_proved_subject_swap_is_finding() {
+  echo "test: V6 — a subject swap alone is a finding, with the verdict and without it"
+  claims_fixture
+  hand_promote
+  base_here "built"
+  printf 'LEEWAY = 0\n' > src/auth/ttl.py
+  jset "$SIDECAR" '.claims[0].subject = ["src/auth/ttl.py"]'
+  assert_v6_with_and_without_store "subject changed since promote proved the claim (promotion.proved): run claims promote $TTL_ID" \
+    "a subject swap alone, no ruling"
+  assert_eq "1" "$(v6_count)" "…the one V6 finding (the ratchet itself does not compare subjects)"
+  # A subject added to the proved one changes it too.
+  jset "$SIDECAR" '.claims[0].subject = ["src/auth/token.py", "src/auth/ttl.py"]'
+  assert_v6_with_and_without_store "subject changed since promote proved the claim" "a subject added"
+  teardown
+}
+
+test_v6_proved_mutant_swap_is_finding() {
+  echo "test: V6 — a mutant swap alone is a finding, with a DOC-STALE ruling or without one"
+  claims_fixture
+  hand_promote
+  base_here "built"
+  jset "$SIDECAR" '.claims[0].nonvacuity.mutant.replace = "TTL_SECONDS = 901"'
+  assert_v6_with_and_without_store "nonvacuity changed since promote proved the claim (promotion.proved): run claims promote $TTL_ID" \
+    "a mutant swap alone, no ruling"
+  # A DOC-STALE ruling covers a mutant that moves with an amended states,
+  # not one that moves alone.
+  jset "$SIDECAR" ".claims[0].rulings += [$_CL_DOC_STALE]"
+  assert_v6_with_and_without_store "nonvacuity changed since promote proved the claim" \
+    "a mutant swap under DOC-STALE, the states as proved"
+  assert_contains "$(v6_messages)" "a DOC-STALE or RETIRE ruling covers only a states change" "…saying what the ruling covers"
+  teardown
+}
+
+test_v6_proved_tier_change_under_doc_stale_is_finding() {
+  echo "test: V6 — test → lint under DOC-STALE, the states unchanged: a finding"
+  claims_fixture
+  hand_promote
+  base_here "built"
+  jset "$SIDECAR" ".claims[0].enforced_by = \"lint\" | .claims[0].lint = $_CL_LINT | .claims[0].rulings += [$_CL_DOC_STALE]"
+  assert_v6_with_and_without_store "enforced_by changed since promote proved the claim (promotion.proved)" \
+    "test → lint under DOC-STALE, the states unchanged"
+  assert_not_contains "$(v6_messages)" "enforced_by lowered" "…the ratchet licenses the lowered tier under DOC-STALE; promotion.proved does not"
+  teardown
+}
+
+test_v6_proved_states_doc_stale_is_repromote_owed() {
+  echo "test: V6 — a states-only DOC-STALE amendment, and one moving the mutant with it: re-promote owed"
+  claims_fixture
+  hand_promote
+  base_here "built"
+  doc_stale_amend
+  assert_v6_owed_with_and_without_store "a states-only DOC-STALE amendment"
+  assert_contains "$(v6_advice)" "states changed under a ruling: run claims promote $TTL_ID" "…naming the promote to run"
+  # The amended threshold needs a new mutant: it moves with the states.
+  jset "$SIDECAR" '.claims[0].nonvacuity.mutant.replace = "TTL_SECONDS = 901"'
+  assert_v6_owed_with_and_without_store "states and the mutant under DOC-STALE"
+  # Without the ruling, the same change is a finding naming both fields.
+  jset "$SIDECAR" '.claims[0].rulings = []'
+  git add -A
+  rm -f "$(claims_store)/$CL_DIGEST.json"
+  cl validate --staged
+  assert_v6 "states, nonvacuity changed since promote proved the claim (promotion.proved) without a new DOC-STALE (or RETIRE) ruling" \
+    "states and the mutant, no ruling, the store gone"
+  teardown
+}
+
+test_v6_proved_unreachable_at_unverifiable_here() {
+  echo "test: V6 — promotion.at unreachable, nothing changed, the store gone: unverifiable-here only"
+  claims_fixture
+  hand_promote
+  base_here "built"
+  jset "$SIDECAR" ".claims[0].promotion.at = \"$(printf '%040d' 7)\""
+  git add -A
+  cl validate --staged
+  assert_v6_ok "the verdict present, promotion.at not a commit here"
+  assert_eq "" "$(v6_codes)" "…no advisory: the verdict matches"
+  rm -f "$(claims_store)/$CL_DIGEST.json"
+  cl validate --staged
+  assert_v6_ok "--staged: the verdict missing, every field as proved"
+  assert_eq "unverifiable-here" "$(v6_codes)" "…the advisory unverifiable-here, alone"
+  cl validate --all
+  assert_v6_ok "--all: the verdict missing, every field as proved"
+  assert_eq "unverifiable-here" "$(v6_codes)" "…the advisory unverifiable-here, alone"
+  teardown
+}
+
+test_v6_forged_proved_with_real_verdict() {
+  echo "test: V6 — a forged proved beside the real verdict: the verdict's binding catches it"
+  claims_fixture
+  hand_promote
+  base_here "built"
+  bind_test '{"runner":"pytest","node":"tests/unit/test_token.py::test_always_true"}'
+  jset "$SIDECAR" ".claims[0].promotion.proved = $(claim_proved)"
+  git add -A
+  cl validate --staged
+  assert_v6 "promotion verdict does not match the claim" "a test swap with promotion.proved rewritten to match it, the verdict present"
+  # Without the verdict nothing tells the forged proved from a real one:
+  # the trust-by-digest limit (references/spec-claims.md).
+  rm -f "$(claims_store)/$CL_DIGEST.json"
+  cl validate --staged
+  assert_v6_ok "the same, the verdict missing (undetectable outside the promoting clone)"
+  assert_eq "unverifiable-here" "$(v6_codes)" "…the advisory unverifiable-here"
+  teardown
+}
+
+test_v1_built_promotion_needs_proved() {
+  echo "test: V1 — a built claim's promotion carries proved, with its six keys"
+  claims_fixture
+  hand_promote
+  cl validate --all
+  assert_no_v1 "precondition: promote's proved"
+  jset "$SIDECAR" 'del(.claims[0].promotion.proved)'
+  cl validate --all
+  assert_v1 "promotion.proved" "a built promotion without proved"
+  hand_promotion
+  jset "$SIDECAR" 'del(.claims[0].promotion.proved.when)'
+  cl validate --all
+  assert_v1 "promotion.proved" "proved without when"
+  hand_promotion
+  jset "$SIDECAR" '.claims[0].promotion.proved.extra = "x"'
+  cl validate --all
+  assert_v1 "promotion.proved" "proved with a seventh key"
+  hand_promotion
+  jset "$SIDECAR" '.claims[0].promotion.proved.states = "not-a-digest"'
+  cl validate --all
+  assert_v1 "promotion.proved" "a digest that is not 64 hex"
+  hand_promotion
+  jset "$SIDECAR" '.claims[0].promotion.proved = "x"'
+  cl validate --all
+  assert_v1 "promotion.proved" "proved not an object"
+  # Only built and gated need it: a promotion left on a diverged claim is
+  # history.
+  jset "$SIDECAR" ".claims[0].status = \"diverged\" | .claims[0].rulings = [$_CL_DIVERGES] | del(.claims[0].promotion.proved)"
+  cl validate --all
+  assert_not_contains "$(v1_messages)" "promotion.proved" "a diverged claim's promotion without proved: no V1 finding"
   teardown
 }
 
@@ -3550,7 +3799,10 @@ test_v3_built_without_nonvacuity() {
   jset "$SIDECAR" '.claims[0].nonvacuity = {}'
   cl validate --all
   assert_v3 "without nonvacuity" "built, nonvacuity {} (neither observed_red nor mutant)"
+  # Promoted with that proof (promotion.proved names the proof promote ran:
+  # without the re-promotion, the swap is V6's finding).
   jset "$SIDECAR" '.claims[0].nonvacuity = {"observed_red": "0123abc"}'
+  hand_promotion
   cl validate --all
   assert_v3_ok "built, nonvacuity observed_red"
   jset "$SIDECAR" '.claims[0].nonvacuity = {"mutant": {"file": "src/auth/token.py", "find": ""}}'
@@ -3844,14 +4096,14 @@ lint_claim() {
 }
 
 # lint_promote: the lint claim made built as promote makes it (V6): the tree
-# committed first (when it has changes), then status built, its verdict in the store, promotion
-# {at: HEAD, verdict_sha256} and the status block rendered.
+# committed first (when it has changes), then status built, its promotion
+# (hand_promotion: the verdict in the store, {at: HEAD, verdict_sha256,
+# proved}) and the status block rendered.
 lint_promote() {
   git add -A
   git diff --cached --quiet || git commit -qm "lint claim, before promote"
   jset "$SIDECAR" '.claims[0].status = "built"'
-  CL_DIGEST=$(write_verdict)
-  jset "$SIDECAR" ".claims[0].promotion = {\"at\": \"$(git rev-parse HEAD)\", \"verdict_sha256\": \"$CL_DIGEST\"}"
+  hand_promotion
   rerender
 }
 
@@ -4387,6 +4639,34 @@ test_promote_mutant_assert_fail_promotes() {
   assert_eq "TTL_SECONDS = 900" "$(cat src/auth/token.py)" "…the work tree's subject is untouched"
   cl validate --all
   assert_eq "0" "$CL_RC" "validate --all after the promote exits 0"
+  teardown
+}
+
+test_promote_writes_proved() {
+  echo "test: promote — promotion.proved: the six fields of the record it proved, digested"
+  promote_fixture
+  local proved f digest
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "promote exits 0"
+  proved=$(jq -c '.claims[0].promotion.proved' "$SIDECAR")
+  assert_eq "enforced_by nonvacuity states subject test when" "$(jq -r 'keys | join(" ")' <<<"$proved")" \
+    "…proved has the six keys"
+  assert_eq "$(claim_proved | jq -cS .)" "$(jq -cS . <<<"$proved")" "…each digest as the suite's proved_of computes it"
+  assert_eq "test" "$(jq -r '.enforced_by' <<<"$proved")" "…enforced_by stored as its value"
+  # Two digests by hand, apart from proved_of: the states' JSON string, and
+  # an absent field (when) as the four bytes null.
+  f=$(harness_mktemp proved-byte)
+  printf '"%s"' "An issued access token is rejected 15 minutes after issue." > "$f"
+  assert_eq "$(hash_file "$f")" "$(jq -r '.states' <<<"$proved")" "…states: the sha256 of its JSON string, no trailing newline"
+  printf 'null' > "$f"
+  assert_eq "$(hash_file "$f")" "$(jq -r '.when' <<<"$proved")" "…when, absent: the sha256 of null"
+  printf '["src/auth/token.py"]' > "$f"
+  assert_eq "$(hash_file "$f")" "$(jq -r '.subject' <<<"$proved")" "…subject: the sha256 of its compact JSON"
+  rm -f "$f"
+  digest=$(jq -r '.claims[0].promotion.verdict_sha256' "$SIDECAR")
+  assert_eq "$(jq -cS . <<<"$proved")" "$(jq -cS '.proved' "$(claims_store)/$digest.json")" "…the verdict binds the same proved"
+  assert_eq "at verdict_sha256 proved" "$(jq -r '.claims[0].promotion | keys_unsorted | join(" ")' "$SIDECAR")" \
+    "…promotion is {at, verdict_sha256, proved}"
   teardown
 }
 
@@ -5080,7 +5360,9 @@ test_v3_observed_red_subject_is_test_file() {
   claims_fixture
   stub_runner
   run_built
+  # Promoted with that proof (promotion.proved names the proof promote ran).
   jset "$SIDECAR" '.claims[0].nonvacuity = {"observed_red": "0123abc"}'
+  hand_promotion
   cl validate --all
   assert_v3_ok "precondition: observed_red, the subject the code under test"
   jset "$SIDECAR" '.claims[0].subject += ["tests"]'
@@ -5169,13 +5451,14 @@ test_verdict_round_trip_v6_accepts() {
   jset "$SIDECAR" ".claims[0].states = \"$NEW_STATES\""
   cl validate --all
   assert_v6 "states changed since the merge-base without a new ruling" "states edited, no ruling"
-  assert_contains "$(v6_messages)" "promotion verdict does not match the claim" "…and the verdict check reports mismatch"
+  assert_contains "$(v6_messages)" "states changed since promote proved the claim (promotion.proved)" \
+    "…and the promotion check reports the states moved from what was proved"
   assert_eq "2" "$(v6_count)" "…two V6 findings"
   assert_not_contains "$(v6_codes)" "re-promote owed" "…not the advisory a DOC-STALE ruling earns"
   git add "$SIDECAR"
   cl validate --staged
   assert_v6 "states changed since the merge-base without a new ruling" "--staged: the same edit"
-  assert_contains "$(v6_messages)" "promotion verdict does not match the claim" "--staged: …and mismatch"
+  assert_contains "$(v6_messages)" "states changed since promote proved the claim (promotion.proved)" "--staged: …and the promotion check"
   teardown
 }
 
@@ -7653,8 +7936,8 @@ test_attest_fresh_clone_repromoted_not_flagged() {
   teardown
 }
 
-test_attest_fresh_clone_unrepromoted_flagged_by_commit_order() {
-  echo "test: attest — in a fresh clone, an amendment after the promotion is owed (commit order)"
+test_attest_fresh_clone_unrepromoted_flagged_by_proved() {
+  echo "test: attest — in a fresh clone, an amendment after the promotion is owed (by promotion.proved)"
   attest_fixture
   attest --final
   assert_eq "0" "$CL_RC" "precondition: the final gate passes"
@@ -7664,11 +7947,88 @@ test_attest_fresh_clone_unrepromoted_flagged_by_commit_order() {
   attest --final
   assert_eq "1" "$CL_RC" "attest --final in the fresh clone exits 1"
   assert_contains "$(attest_messages)" "re-promote owed: run claims promote $TTL_ID" "…re-promote owed"
+  # No history is read: promotion.at not a commit here (a squash or rebase
+  # merge) changes nothing.
   jset "$SIDECAR" '.claims[0].promotion.at = "0123456789abcdef0123456789abcdef01234567"'
   git commit -qam "promotion.at: a commit this clone does not have"
   attest
-  assert_not_contains "$(attest_messages)" "re-promote owed" "promotion.at not a commit here: no re-promote owed finding"
-  assert_contains "$(attest_codes)" "unverifiable-here" "…the advisory unverifiable-here"
+  assert_eq "1" "$CL_RC" "promotion.at not a commit here: attest exits 1"
+  assert_contains "$(attest_messages)" "re-promote owed: run claims promote $TTL_ID" "…re-promote owed, by promotion.proved"
+  teardown
+}
+
+# A squash merge: the promoted branch lands on main as one new commit, so
+# promotion.at is on no branch, and a fresh clone (an empty verdict store)
+# cannot read it. Validate, attest and gate there decide owed or clear by
+# promotion.proved.
+test_squash_merge_decided_by_proved() {
+  echo "test: a squash-merged promotion — in a fresh clone, validate, gate and attest decide by promotion.proved"
+  promote_fixture
+  local at c
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "precondition: promote exits 0"
+  git add "$SIDECAR" "$DOC" && git commit -qm "promote $TTL_ID"
+  at=$(jq -r '.claims[0].promotion.at' "$SIDECAR")
+  git checkout -q main
+  git merge -q --squash feature
+  git commit -qm "the TTL claim, promoted, squashed"
+  assert_true "precondition: promotion.at is not an ancestor of the squashed main" \
+    sh -c '! git merge-base --is-ancestor "$1" main' sh "$at"
+  git branch -q -D feature
+  # --no-local: the clone gets what main reaches, not a copy of every
+  # object (promotion.at would still be in it). The next branch, a plan
+  # that names the claim, starts there.
+  c="$TEST_DIR/home/squashed"
+  git clone -q --no-local -b main "$TEST_DIR" "$c"
+  cd "$c"
+  git checkout -qb feature
+  assert_true "precondition: promotion.at is not a commit in the clone" \
+    sh -c '! git cat-file -e "$1^{commit}" 2>/dev/null' sh "$at"
+  assert_true "precondition: the clone's verdict store is empty" test ! -d "$(claims_store)"
+  # Nothing proved changed: clear (an edit outside proved re-checks it:
+  # unverifiable-here, the verdict being in the promoting clone's store).
+  jset "$SIDECAR" '.claims[0].kind = "interface"'
+  cl validate --all
+  assert_eq "0" "$CL_RC" "validate --all, the squashed promotion unchanged, exits 0"
+  assert_eq "unverifiable-here" "$(v6_codes)" "…the advisory unverifiable-here alone"
+  git checkout -q -- "$SIDECAR"
+  # shellcheck disable=SC2086  # the block list splits on spaces
+  plan_write -- $PLAN_DEFAULT
+  git add "$PLAN" && git commit -qm "the plan"
+  gate 1
+  assert_eq "0" "$CL_RC" "gate 1 on the squashed trunk exits 0"
+  assert_not_contains "$(attest_messages)" "re-promote owed" "…no re-promote owed"
+  assert_not_contains "$(jq -r '.advisories[]?.message' <<<"$CL_OUT")" "cannot be decided here" \
+    "…and no advisory that it cannot be decided"
+  git add "$GATE_REC1" && git commit -qm "the chunk 1 gate record"
+  gate 2
+  assert_eq "0" "$CL_RC" "gate 2 exits 0"
+  git add "$GATE_REC2" && git commit -qm "the chunk 2 gate record"
+  attest
+  assert_eq "0" "$CL_RC" "attest on the squashed trunk exits 0"
+  assert_not_contains "$(attest_messages)" "re-promote owed" "…no re-promote owed"
+  assert_not_contains "$(jq -r '.advisories[]?.message' <<<"$CL_OUT")" "cannot be decided here" \
+    "…and no advisory that it cannot be decided"
+  # A DOC-STALE amendment, not re-promoted: owed.
+  doc_stale_amend
+  git add -A && git commit -qm "DOC-STALE, not re-promoted"
+  cl validate --all
+  assert_eq "0" "$CL_RC" "validate --all after the amendment exits 0"
+  assert_contains "$(v6_codes)" "re-promote owed" "…re-promote owed, by promotion.proved"
+  assert_not_contains "$(v6_codes)" "unverifiable-here" "…not unverifiable-here"
+  attest
+  assert_eq "1" "$CL_RC" "attest after the amendment exits 1"
+  assert_contains "$(attest_messages)" "re-promote owed: run claims promote $TTL_ID" "…re-promote owed"
+  gate 1
+  assert_eq "1" "$CL_RC" "gate 1 after the amendment exits 1"
+  assert_contains "$(attest_messages)" "re-promote owed: run claims promote $TTL_ID" "…re-promote owed"
+  git checkout -q -- docs/spec-claims/gates
+  # A test swap instead: a V6 finding.
+  git reset -q --hard HEAD~1
+  bind_test '{"runner":"pytest","node":"tests/unit/test_token.py::test_always_true"}'
+  cl validate --all
+  assert_v6 "test changed since promote proved the claim" "validate --all, a test swap on the squashed trunk"
+  cd "$TEST_DIR"
   teardown
 }
 
@@ -9177,8 +9537,7 @@ v10_claim() {
       jset "$SIDECAR" ".claims[0].nonvacuity = $_CL_MUTANT"
       git add -A && git commit -qm "bind the TTL test, when $TTL_KEY=15"
       jset "$SIDECAR" ".claims[0].status = \"$1\""
-      CL_DIGEST=$(write_verdict)
-      jset "$SIDECAR" ".claims[0].promotion = {\"at\": \"$(git rev-parse HEAD)\", \"verdict_sha256\": \"$CL_DIGEST\"}"
+      hand_promotion
       ;;
   esac
   rerender
@@ -9805,8 +10164,16 @@ run_tests() {
   test_v6_states_change_needs_doc_stale_or_retire
   test_v6_reanchor_and_tier_need_doc_stale_or_retire
   test_v6_status_off_built_any_direction
-  test_v6_missing_verdict_applies_the_history_rule
+  test_v6_missing_verdict_decided_by_proved
   test_v6_doc_stale_does_not_cover_a_test_swap
+  test_v6_proved_test_swap_is_finding
+  test_v6_proved_subject_swap_is_finding
+  test_v6_proved_mutant_swap_is_finding
+  test_v6_proved_tier_change_under_doc_stale_is_finding
+  test_v6_proved_states_doc_stale_is_repromote_owed
+  test_v6_proved_unreachable_at_unverifiable_here
+  test_v6_forged_proved_with_real_verdict
+  test_v1_built_promotion_needs_proved
   test_staged_first_commit_sha256_repo
 
   # --- Task 6: status block render and V11 ---
@@ -9895,6 +10262,7 @@ run_tests() {
 
   # --- Task 11: claims promote with a mutant proof ---
   test_promote_mutant_assert_fail_promotes
+  test_promote_writes_proved
   test_promote_mutant_stays_green_refused
   test_promote_mutant_error_refused
   test_promote_requires_green_in_clean_checkout
@@ -10023,7 +10391,8 @@ run_tests() {
   test_attest_final_reconciliation_converges
   test_attest_final_fresh_clone_passes_converged_plan
   test_attest_fresh_clone_repromoted_not_flagged
-  test_attest_fresh_clone_unrepromoted_flagged_by_commit_order
+  test_attest_fresh_clone_unrepromoted_flagged_by_proved
+  test_squash_merge_decided_by_proved
   test_attest_unrelated_ruling_not_attributed
   test_attest_deep_reruns_recorded_tree
   test_attest_render_check_fails
