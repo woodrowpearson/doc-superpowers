@@ -79,7 +79,7 @@ chore: <maintenance task>
 
 - Keep PRs focused on a single change
 - Test skill changes by running `/doc-superpowers init` on a sample project before merging
-- Run the five shell test suites — `scripts/test-doc-tools.sh`, `scripts/test-hooks.sh`, `scripts/test-merge-driver.sh`, `scripts/test-doc-pr-release.sh`, `scripts/test-spec-status-model.sh` — all must pass before merge, under both bash 5.x and `/bin/bash` 3.2. Their assertion counts and the command that runs the matrix are in [CLAUDE.md → Conventions](../CLAUDE.md#conventions), the one place they are kept. They share the `scripts/test-helpers.sh` harness (isolated git environment, private scratch root, pipefail-safe asserts, SKIP/XFAIL reporting)
+- Run the six shell test suites — `scripts/test-doc-tools.sh`, `scripts/test-hooks.sh`, `scripts/test-merge-driver.sh`, `scripts/test-doc-pr-release.sh`, `scripts/test-spec-status-model.sh`, `scripts/test-spec-claims.sh` — all must pass before merge, under both bash 5.x and `/bin/bash` 3.2. Their assertion counts and the command that runs the matrix are in [CLAUDE.md → Conventions](../CLAUDE.md#conventions), the one place they are kept. They share the `scripts/test-helpers.sh` harness (isolated git environment, private scratch root, pipefail-safe asserts, SKIP/XFAIL reporting)
 - A change to a CI template, `scripts/doc-tools.sh` or a CI helper script also re-runs `bash scripts/hooks/install.sh install --ci` and commits what it writes: this repository installs its own CI tier, and `.github/workflows/tests.yml` fails when the installed copies drift from their sources
 - Include before/after examples for behavior changes
 
@@ -288,6 +288,7 @@ Every template in `scripts/hooks/ci/` follows these rules; `test-doc-pr-release.
 | `DOC_SUPERPOWERS_STRICT=1` | The git pre-commit hook (exit 1) and the Claude pre-commit gate (exit 2, reason on stderr) block instead of warn — also when the check itself cannot run |
 | `DOC_SUPERPOWERS_QUIET=1` | Suppress hook output while still enforcing (exit codes unchanged). The Claude gate's block reason (stderr on exit 2, Claude's feedback) is never suppressed |
 | `DOC_SUPERPOWERS_SKIP=1` | Bypass all hooks temporarily |
+| `DOC_SUPERPOWERS_CLAIMS_SKIP=1` | Bypass only the git pre-commit hook's claims leg (it runs only with `docs/spec-claims/`). That leg blocks on a finding whatever `DOC_SUPERPOWERS_STRICT` says; a claims check that cannot run blocks only under STRICT |
 
 `DOC_TOOLS` overrides the path of `doc-tools.sh` a hook runs (tests use it). The index path is fixed: `docs/.doc-index.json`.
 
@@ -302,13 +303,13 @@ Spec files use a `Status` field. Ladder statuses progress monotonically; exempt 
 | `Draft` | Ladder | Spec generated, not yet implemented | `spec-generate` |
 | `In Review` | Ladder | Implementation started, or a partially-covered target held pending deferred scope | `spec-inject` |
 | `Approved` | Ladder | Human-approved pre-implementation; automation never writes it | human only |
-| `Implemented` | Ladder | Scope-covered target, verification passed | `spec-inject` |
+| `Implemented` | Ladder | Scope-covered target, verification passed (claims-enabled projects: every claim the plan names for it `built` and passing at the final gate, R5) | `spec-inject` |
 | `Active` | Exempt | Continuously-evolving reference spec; never "completes" | human only |
 | `Deprecated` | Exempt | No longer governing | human only |
 | `Superseded` | Exempt | Replaced by another spec | human only — `spec-generate` writes the `Superseded by` field and the index entry, not this `Status` |
 | any other status | Exempt | Unrecognized vocabulary — anything not on the ladder above | nothing — `spec-verify` reports it informationally, and no action ever writes or corrects it |
 
-Transitions: `Draft` → `In Review` → `Approved` → `Implemented`, monotonic — never regress. `spec-verify` is read-only and writes no `Status`; the writes belong to `spec-inject`. Role gates before status: a path passed as a **constraint** reference is never written at all — no `Status`, no Implementation Notes, no `code_refs` refinement. A path passed as an **amendment** (`--specs=<path>:amends`, never inferred) is status-neutral too: the plan corrects what the spec *says* without building its surface, so `spec-inject --phase=plan` injects one task that verifies the dated `AMENDED` block landed and cites the plan, and `spec-verify` re-runs that landed-check (post-execute FAILs, review reports **P1 Amendment not landed** when it is absent or unattributed). Pass `spec-verify --plan=<path>` for the full check; without it the citation half is skipped and reported as unverified. For a **target**, coverage gates the top rung — Full coverage makes it eligible for `Implemented`, Partial coverage holds it at `In Review` (or leaves it at `Approved`, never regressing) with the remaining scope recorded in Implementation Notes. See the **Spec Status Model** section of `references/spec-lifecycle-actions.md` for roles, coverage classes, and evaluation order.
+Transitions: `Draft` → `In Review` → `Approved` → `Implemented`, monotonic — never regress. `spec-verify` is read-only and writes no `Status`; the writes belong to `spec-inject`. Role gates before status: a path passed as a **constraint** reference is never written at all — no `Status`, no Implementation Notes, no `code_refs` refinement. A path passed as an **amendment** (`--specs=<path>:amends`, never inferred) is status-neutral too: the plan corrects what the spec *says* without building its surface, so `spec-inject --phase=plan` injects one task that verifies the dated `AMENDED` block landed and cites the plan, and `spec-verify` re-runs that landed-check (post-execute FAILs, review reports **P1 Amendment not landed** when it is absent or unattributed). Pass `spec-verify --plan=<path>` for the full check; without it the citation half is skipped and reported as unverified. For a **target**, coverage gates the top rung — Full coverage makes it eligible for `Implemented`, Partial coverage holds it at `In Review` (or leaves it at `Approved`, never regressing) with the remaining scope recorded in Implementation Notes. In a claims-enabled project (`docs/spec-claims/` exists) R5 also holds a target short of `Implemented` until every claim the plan names for it is `built` (or `gated`) and passing at the final gate (`claims attest --final`); without claims, R5 never applies. See the **Spec Status Model** section of `references/spec-lifecycle-actions.md` for roles, coverage classes, and evaluation order.
 
 ### Supersession Conventions
 
@@ -348,7 +349,7 @@ The `docs/.doc-index.json` file is the machine-readable freshness index. It foll
 - **`status`** reports one doc's freshness (read-only): the verdict `check-freshness` gives for it
 - **`audit-merges`** works out what each merge in a range should have recorded (the changed side's index when only one side changed it, else the merge driver run as an oracle) and reports the entries a recorded merge got differently (read-only, GH #25)
 
-Those eight writers (`build-index`, `add-entry`, `update-index`, `set-code-refs`, `set-doc-type`, `move-entry`, `remove-entry`, `deprecate-entry`) are the only ones that write the index. They take its lock and replace it atomically. `implementation-status` and `fragments list|validate` read without writing, and `set-implementation` edits one doc's realization block, not the index.
+Those eight writers (`build-index`, `add-entry`, `update-index`, `set-code-refs`, `set-doc-type`, `move-entry`, `remove-entry`, `deprecate-entry`) are the only ones that write the index. They take its lock and replace it atomically. `implementation-status` and `fragments list|validate` read without writing, and `set-implementation` edits one doc's realization block, not the index. The `claims` verbs never write the index either: they write only sidecars and gate records under `docs/spec-claims/`, a governing doc's generated claim status block, and the local verdict store under the git directory.
 
 ### Freshness Model
 
