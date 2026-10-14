@@ -8779,6 +8779,20 @@ v10_messages() {
 v10_count() {
   jq '[.findings[]?, .advisories[]? | select(.check == "V10")] | length' <<<"$CL_OUT" 2>/dev/null || echo invalid
 }
+# The last `cl`'s V10 advisories of code <code>: their messages, one per line.
+v10_advisories() {
+  jq -r --arg c "$1" '.advisories[]? | select(.check == "V10" and .code == $c) | .message' <<<"$CL_OUT" 2>/dev/null || true
+}
+
+# assert_v10_promote_owed <what>: the last `cl` exited 0 with exactly one V10
+# row, the promote-owed advisory "now satisfied: promote to built" (never
+# blocking: its remedy, promote, needs the change committed).
+assert_v10_promote_owed() {
+  assert_eq "0" "$CL_RC" "$1: exits 0"
+  assert_eq "1" "$(v10_count)" "$1: one V10 row"
+  assert_contains "$(v10_advisories promote-owed)" "now satisfied: promote to built" \
+    "$1: a promote-owed advisory names 'now satisfied: promote to built'"
+}
 
 # assert_v10 <substring> <what>: the last `cl` exited 1 with a V10 finding
 # whose message contains <substring>.
@@ -8788,7 +8802,7 @@ assert_v10() {
 }
 
 test_v10_gated_now_satisfied_promote() {
-  echo "test: V10 — a staged surface change that satisfies a gated claim's when: promote it to built"
+  echo "test: V10 — a staged surface change that satisfies a gated claim's when: an advisory to promote it, then promote writes built"
   v10_claim gated 30
   cl validate --all
   assert_eq "0" "$CL_RC" "the gated fixture validates clean (--all)"
@@ -8803,14 +8817,24 @@ test_v10_gated_now_satisfied_promote() {
   git add deploy/flags.json
   : > "$STUB_LOG"
   cl validate --staged
-  assert_v10 "now satisfied: promote to built" "--staged: $TTL_KEY recorded 30 → 15, the gated claim's when $TTL_KEY=15"
-  assert_eq "1" "$(v10_count)" "…one V10 finding"
-  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V10")][0].claim' "$TTL_ID" "…naming the claim"
-  assert_json_field "$CL_OUT" '[.findings[] | select(.check == "V10")][0].doc' "$DOC" "…and its doc"
+  assert_v10_promote_owed "--staged: $TTL_KEY recorded 30 → 15, the gated claim's when $TTL_KEY=15"
+  assert_eq "0" "$(jq '[.findings[] | select(.check == "V10")] | length' <<<"$CL_OUT")" "…not a finding (V10 blocks by default)"
+  assert_json_field "$CL_OUT" '[.advisories[] | select(.check == "V10")][0].claim' "$TTL_ID" "…naming the claim"
   assert_contains "$(config_args recorded)" "--rev $(git rev-parse main)" "…the merge-base's recorded configuration"
   assert_contains "$(config_args recorded)" "--staged" "…against the staged one"
+  jset docs/spec-claims/config.json '.blocking = ["V10"]'
+  cl validate --all --config "$TTL_KEY=15"
+  assert_v10_promote_owed "--config, config blocking [\"V10\"]: still an advisory"
+  git checkout -q docs/spec-claims/config.json
   cl validate --all
   assert_eq "0" "$(v10_count)" "--all without --config: V10 does not run"
+  # The change committed, promote re-proves the gated claim and writes built.
+  git commit -qm "the TTL flag recorded as 15"
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "promote the gated claim once the change is committed: exits 0"
+  assert_eq '"built"' "$(claim_field "$TTL_ID" status)" "…the sidecar's status is built"
+  assert_json_field "$CL_OUT" '.results[0] | [.status_from, .status_to] | join(" ")' "gated built" \
+    "…the result row: gated → built"
   teardown
 }
 
@@ -8835,6 +8859,8 @@ test_v10_built_no_longer_satisfied_ruling_owed() {
   teardown
 }
 
+_CL_V10_RULING='{"date":"2026-10-12","direction":"CODE-DIVERGES","by":"doc-owner","record":"docs/issues/token-ttl.md"}'
+
 test_v10_built_with_ruling_ok() {
   echo "test: V10 — a new ruling on the built claim answers 'ruling owed'; one the merge-base has does not"
   v10_claim built 15
@@ -8844,13 +8870,30 @@ test_v10_built_with_ruling_ok() {
   git add deploy/flags.json
   cl validate --staged
   assert_v10 "ruling owed" "a ruling already at the merge-base is not new"
-  jset "$SIDECAR" '.claims[0].rulings += [{"date":"2026-10-12","direction":"CODE-DIVERGES","by":"doc-owner","record":"docs/issues/token-ttl.md"}]'
+  assert_contains "$(v10_messages)" "commit a new ruling on the claim first" "…the remedy: the ruling committed first"
+  # The ruling staged with the change: V10 is answered, V3 blocks (the claim
+  # is touched, and the staged configuration no longer satisfies its when).
+  jset "$SIDECAR" ".claims[0].rulings += [$_CL_V10_RULING]"
   git add "$SIDECAR"
   cl validate --staged
-  assert_eq "0" "$(v10_count)" "a new ruling staged with the change: no V10 finding"
+  assert_eq "1" "$CL_RC" "a new ruling staged with the change: exits 1"
+  assert_eq "0" "$(v10_count)" "…no V10 finding"
   assert_eq "0" "$(v6_count)" "…the ruling itself is sound (no V6 finding)"
   assert_contains "$(v3_messages)" "built but recorded configuration does not satisfy when: gated" \
-    "…V3 still owes the re-gate (claims promote)"
+    "…V3's '…: gated' blocks it"
+  # The order the message gives: the ruling committed, then the change.
+  git reset -q
+  set_flag "$TTL_KEY" 15
+  git add "$SIDECAR" && git commit -qm "the ruling on the TTL claim"
+  set_flag "$TTL_KEY" 30
+  git add deploy/flags.json
+  cl validate --staged
+  assert_eq "0" "$CL_RC" "the ruling committed, then the change staged: exits 0"
+  assert_eq "0" "$(v10_count)" "…no V10 finding (the ruling is new since the merge-base)"
+  git commit -qm "the TTL flag recorded as 30"
+  cl promote "$TTL_ID"
+  assert_eq "0" "$CL_RC" "…then promote: exits 0"
+  assert_eq '"gated"' "$(claim_field "$TTL_ID" status)" "…re-gating the claim"
   teardown
 }
 
@@ -8864,6 +8907,14 @@ test_v10_diverged_when_switched_on() {
   cl validate --staged
   assert_v10 "switches on a diverged claim" "--staged: $TTL_KEY recorded 30 → 15, the diverged claim's when $TTL_KEY=15"
   assert_eq "1" "$(v10_count)" "…one V10 finding"
+  assert_contains "$(v10_messages)" "fix the code and promote the claim, or retire it" "…naming the remedies"
+  # A ruling does not clear it: a diverged claim carries one by construction.
+  git reset -q
+  jset "$SIDECAR" ".claims[0].rulings += [$_CL_V10_RULING]"
+  git add "$SIDECAR" && git commit -qm "a new ruling on the diverged claim"
+  git add deploy/flags.json
+  cl validate --staged
+  assert_v10 "switches on a diverged claim" "a new ruling committed, the switch-on staged: still a finding"
   set_flag "$TTL_KEY" 20
   git add deploy/flags.json
   cl validate --staged
@@ -8925,7 +8976,7 @@ test_v10_unrelated_key_ignored() {
   assert_eq "src/auth/token.py" "$(config_args readers)" "…asking readers for the claim's subject"
   printf 'src/auth/token.py\tother_flag\n' >> tools/claims/readers
   cl validate --staged
-  assert_v10 "now satisfied: promote to built" "the subject reads other_flag: the claim is re-classified"
+  assert_v10_promote_owed "the subject reads other_flag: the claim is re-classified"
   teardown
 }
 

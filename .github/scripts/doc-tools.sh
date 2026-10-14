@@ -2478,7 +2478,7 @@ Spec claims (claims validate, run, promote, render, gate, attest, rulings):
   for a deviation found outside a plan and has no mechanical effect.
   The configuration extension is off unless config "config_adapter" names
   an adapter (surfaces; recorded [--rev <rev> | --staged] [--override
-  KEY=VALUE] → {key: {recorded, default}}; readers <path>…). Off, a claim's
+  KEY=VALUE]… → {key: {recorded, default}}; readers <path>…). Off, a claim's
   "when" or status gated is a V1 finding. On, each "when" key must be a
   recorded key (V1), a bound test must establish the claim's "when" (V3), a
   key its subject reads whose recorded value is not its default must be
@@ -2489,9 +2489,11 @@ Spec claims (claims validate, run, promote, render, gate, attest, rulings):
   subject's readers keys a configuration change touches — a staged surface
   (validate --staged), or validate --config KEY=VALUE — comparing recorded
   --rev <merge-base> with the proposed configuration: a gated claim now
-  satisfied is to be promoted to built; a built one no longer satisfied
-  owes a new ruling (then promote re-gates it); a diverged one whose
-  "when" the change switches on is a finding.
+  satisfied is an advisory (promote-owed: promote it to built once the
+  change is committed); a built one no longer satisfied owes a new ruling,
+  committed before the change (then promote re-gates it); a diverged one
+  whose "when" the change switches on is a finding, whatever its rulings
+  (fix the code and promote it, or retire it, first).
 
 Exit status:
   0  success
@@ -7830,7 +7832,7 @@ cmd_claims_run() {
 # runner list row's when is ignored. On, the config adapter (§D, the
 # contract; never extended):
 #   <adapter> surfaces  → the files that carry production configuration
-#   <adapter> recorded [--rev <rev> | --staged] [--override KEY=VALUE]
+#   <adapter> recorded [--rev <rev> | --staged] [--override KEY=VALUE]…
 #     → JSON {key: {"recorded": …, "default": …}}
 #   <adapter> readers <path>…  → the keys read by code in those paths, one
 #     per line
@@ -8042,12 +8044,19 @@ _claims_readers_rows() {
 # call per distinct subject list, asked only for a claim its when does not
 # already select) include a changed key, against the proposed configuration
 # (claims_when_ok):
-#   - gated, its when now satisfied → "now satisfied: promote to built";
+#   - gated, its when now satisfied → "now satisfied: promote to built", an
+#     advisory (code promote-owed, as V6's re-promote owed): never blocking,
+#     for its remedy, claims promote, needs the change committed (a clean
+#     tree, and HEAD's recorded configuration satisfying when);
 #   - built, its when not satisfied, and no new ruling (cl_new_rulings
 #     against its claim at _CL_MB, the V6/V7 definition) → "ruling owed":
-#     the direction is ruled (§F) first, then claims promote re-gates it;
+#     the direction is ruled (§F) in a commit before the change (staged
+#     with it, V3's "…: gated" blocks), then claims promote re-gates it;
 #   - diverged, its non-empty when satisfied by the proposed configuration
-#     and not by the merge-base's → "switches on a diverged claim".
+#     and not by the merge-base's → "switches on a diverged claim", whatever
+#     its rulings (a diverged claim carries one: honouring it would make
+#     the check vacuous): the code is fixed and the claim promoted, or the
+#     claim retired, before the configuration switches it on.
 # A failing surfaces or recorded call is indeterminate (check config), and a
 # failing readers call makes the claims it was asked for indeterminate
 # (check V10); a subject path readers is never asked about (unsafe: V3's
@@ -8084,10 +8093,11 @@ _JQ_CLAIMS_V10_PLAN='def nes: type == "string" and length > 0;
                  then .subject else null end)}]'
 
 # V10 over the plan ($plan), given the readers rows ($rows), the two
-# recorded objects ($old, $new) and the changed keys ($ch): finding rows and
-# indeterminate rows. Run after _JQ_CLAIMS_DELTA and _JQ_CLAIMS_WHEN.
+# recorded objects ($old, $new) and the changed keys ($ch): finding rows,
+# advisory rows (with a code) and indeterminate rows (with a reason). Run after _JQ_CLAIMS_DELTA and _JQ_CLAIMS_WHEN.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_V10='def v10($e; $msg): {check: "V10", claim: $e.claim, doc: $e.doc, message: $msg};
+ def v10a($e; $code; $msg): {check: "V10", claim: $e.claim, code: $code, message: $msg};
  def cl_str: if type == "string" then . else tojson end;
  def cl_cond: [to_entries | sort_by(.key)[] | "\(.key)=\(.value | cl_str)"] | join(", ");
  def cl_unmet($rec): [to_entries | sort_by(.key)[] | select(($rec[.key] | type) != "object" or $rec[.key].recorded != .value)
@@ -8102,11 +8112,11 @@ _JQ_CLAIMS_V10='def v10($e; $msg): {check: "V10", claim: $e.claim, doc: $e.doc, 
      ({when: $e.when} | claims_when_ok($new)) as $now
      | ($e.when | length > 0) as $cond
      | if $e.status == "gated" and $cond and $now then
-         v10($e; "now satisfied: promote to built (the configuration this change records satisfies when \($e.when | cl_cond): run claims promote \($e.claim))")
+         v10a($e; "promote-owed"; "now satisfied: promote to built (the configuration this change records satisfies when \($e.when | cl_cond): once it is committed, run claims promote \($e.claim))")
        elif $e.status == "built" and ($now | not) and ($e.ruled | not) then
-         v10($e; "ruling owed: built, but the configuration this change records no longer satisfies its when (\($e.when | cl_unmet($new))): record the direction (CODE-DIVERGES, DOC-STALE or RETIRE) in a new ruling on the claim, then run claims promote \($e.claim), which re-gates it")
+         v10($e; "ruling owed: built, but the configuration this change records no longer satisfies its when (\($e.when | cl_unmet($new))): commit a new ruling on the claim first (the direction: CODE-DIVERGES, DOC-STALE or RETIRE), then make the configuration change, then run claims promote \($e.claim), which re-gates it")
        elif $e.status == "diverged" and $cond and $now and ({when: $e.when} | claims_when_ok($old) | not) then
-         v10($e; "switches on a diverged claim: the configuration this change records satisfies when \($e.when | cl_cond), which the merge-base'"'"'s did not, so production would run what the claim records as diverged: rule on the direction (a new ruling on the claim) first")
+         v10($e; "switches on a diverged claim: the configuration this change records satisfies when \($e.when | cl_cond), which the merge-base'"'"'s did not, so production would run what the claim records as diverged: fix the code and promote the claim, or retire it, before switching the configuration on (a ruling does not answer this)")
        else empty end
    else empty end'
 
@@ -8160,7 +8170,8 @@ _claims_v10() {
   _claims_readers_rows "$subj" "$rows"
   _claims_jq v10 -nc --slurpfile plan "$plan" --slurpfile rows "$rows" --slurpfile old "$old" \
     --slurpfile new "$new" --slurpfile ch "$ch" "$_JQ_CLAIMS_DELTA $_JQ_CLAIMS_WHEN $_JQ_CLAIMS_V10" > "$res"
-  _claims_jq v10-findings -c 'select(has("reason") | not)' "$res" >> "$_SCRATCH/cl-findings.jsonl"
+  _claims_jq v10-findings -c 'select(has("reason") or has("code") | not)' "$res" >> "$_SCRATCH/cl-findings.jsonl"
+  _claims_jq v10-advisories -c 'select(has("code"))' "$res" >> "$_SCRATCH/cl-advisories.jsonl"
   _claims_jq v10-indeterminate -c 'select(has("reason"))' "$res" >> "$_SCRATCH/cl-indet.jsonl"
 }
 
