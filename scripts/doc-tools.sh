@@ -2228,9 +2228,10 @@ claims run|cmd_claims_run|repo|claims+ planes-of= all scheduled judge-sample= ba
   <n> also names n judge claims to review, rotated weekly. Retired, frozen
   and judge claims are reported skipped. Each outcome is judged by the
   claim's status: built must pass, diverged fail by an assertion, unbuilt
-  not pass. Every finding blocks (an unsafe or missing lint path, or an
-  invalid pattern, is one); an indeterminate outcome, or a missing or
-  failing adapter, exits 2.
+  not pass. Every finding blocks (an unsafe lint path, an invalid pattern,
+  or an absent lint path on a claim that is not unbuilt, is one: an unbuilt
+  claim's absent lint path is its allowed assert-fail); an indeterminate
+  outcome, or a missing or failing adapter, exits 2.
 claims promote|cmd_claims_promote|repo|reverify all base=
   <id> | --reverify (<id>... | --all) [--base <ref>]
   Promote a test claim to built (to gated, with the configuration extension
@@ -2262,18 +2263,21 @@ claims render|cmd_claims_render|repo|check base=
   missing or not governing is skipped (results: {doc, skipped}): its doc
   is never written, nor created.
 claims gate|cmd_claims_gate|repo|plan= chunk= from= holds=* by= base=
-  --plan <plan> --chunk <n> [--from <rev>] [--holds <id>...] [--by <principal>] [--base <ref>]
+  --plan <plan> --chunk <n> [--from <rev>] [--holds <id>]... [--by <principal>] [--base <ref>]
   Run a plan chunk's claims gate at HEAD and record it in
   docs/spec-claims/gates/<plan-stem>/chunk-<n>.json (written even when
   red): the claims the chunk's **Claims:** lines name plus --planes-of
   <from>..HEAD and each lint, log or judge claim the range moved into
-  built or gated, re-promotions owed, V9 over <from>..HEAD, and the
-  reconciliations since <from> (a ruling counts only when its record is
-  this chunk's record; anything else is a silent reconciliation). <from>
-  is --from, else chunk <n-1>'s head, else the merge-base; a range reads
-  the branch's own commits (first parent), never trunk merged in.
-  --holds <id> records that a claim-bound test edit leaves the claim's
-  states true, adjudicated by --by. Refuses a dirty tree. Every finding
+  built or gated, re-promotions owed, V8, V8n and V9 over <from>..HEAD,
+  every named id no claim has and every named claim still unbuilt that no
+  included DOC-STALE ruling covers, and the reconciliations since <from> (a
+  ruling counts only when its record is this chunk's record; anything else
+  is a silent reconciliation). <from> is --from, else chunk <n-1>'s head,
+  else the merge-base; a range reads the branch's own commits (first
+  parent), never trunk merged in.
+  --holds <id> (repeatable, one id each) records that a claim-bound test
+  edit leaves the claim's states true, adjudicated by --by (required with
+  --holds: without it, exit 3). Refuses a dirty tree. Every finding
   blocks.
 claims attest|cmd_claims_attest|repo|plan= final deep base=
   --plan <plan> [--final] [--deep] [--base <ref>]
@@ -2533,9 +2537,10 @@ Exit status:
   0  everything as expected
   1  findings (a blocking check failed)
   2  could not run: an adapter reported indeterminate or exited non-zero,
-     the base did not resolve, the config is not one JSON object, a
-     missing dependency, a run outside a git work tree or below its top
-     level, or an internal failure (never 1)
+     the base did not resolve, the config is not one JSON object, a dirty
+     tree where one is refused (gate, promote, attest --final), a missing
+     dependency, a run outside a git work tree or below its top level, or
+     an internal failure (never 1)
   3  usage error
   When several apply, the precedence is 1 > 2 > 0.
 

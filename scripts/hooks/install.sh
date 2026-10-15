@@ -96,11 +96,11 @@ source "$SCRIPT_DIR/state.sh"
 workflow_desc() {
   case "$1" in
     doc-freshness-pr) echo "PR opened/updated: one comment with the docs the diff leaves stale or missing; STRICT fails the check (contents: read, pull-requests: write)" ;;
-    doc-freshness-schedule) echo "weekly cron: opens/updates/closes an audit issue (contents: read, issues: write)" ;;
+    doc-freshness-schedule) echo "weekly cron: opens/updates/closes an audit issue; with docs/spec-claims/, its claims step re-runs and re-proves the spec claims (contents: read, issues: write)" ;;
     doc-audit-update) echo "push to a non-base branch leaving docs stale: AI audit + update, a checked step commits docs to that branch (contents: write)" ;;
     doc-review-pr) echo "PR opened/updated touching indexed docs: AI review comment; @claude PR comments: tag mode (contents: read, pull-requests + issues: write)" ;;
     doc-release) echo "push to release/**: AI release-notes draft, a checked step commits it to a new branch and opens a PR (contents + pull-requests: write)" ;;
-    doc-spec-verify) echo "PR opened/updated touching indexed specs: AI spec-compliance comment (contents: read, pull-requests: write)" ;;
+    doc-spec-verify) echo "PR opened/updated touching indexed specs: AI spec-compliance comment; with docs/spec-claims/, a non-AI claims job on every same-repository PR (claims validate, run, attest; findings fail it) (contents: read, pull-requests: write)" ;;
     doc-pr-full-cycle) echo "PR opened touching indexed docs: AI review + update + diagram + sync, a checked step commits docs to the PR branch (contents + pull-requests: write)" ;;
     doc-pr-release) echo "PR pushes: AI release-notes fragment, a checked step commits it to the PR branch; PR body edited (contents + pull-requests: write)" ;;
     *) echo "(no description)" ;;
@@ -124,11 +124,15 @@ ever written through a symbolic link.
 
 Tiers:
   --git     Git hooks, where git runs them (git rev-parse --git-path hooks):
-              pre-commit          reports the docs a commit leaves stale (STRICT: blocks it)
+              pre-commit          reports the docs a commit leaves stale (STRICT: blocks it);
+                                  with docs/spec-claims/, claims validate --staged
+                                  first: a finding blocks the commit, STRICT or not
               post-merge          reports the docs a merge left stale or missing
               post-checkout       reports the docs stale on the branch checked out
               prepare-commit-msg  lists stale docs as comment lines (editor commits)
-              pre-push            reminds about unreleased commits on the pushed refs
+              pre-push            reminds about unreleased commits on the pushed refs;
+                                  with docs/spec-claims/, claims run over the pushed
+                                  commits (advisory: never blocks)
             plus the docs/.doc-index.json merge driver (git config + .gitattributes).
             A hook of yours is kept: when it is a shell script, a marked block
             that runs ours (with git's arguments) goes right after its #! line.
@@ -153,7 +157,11 @@ CI options (install --ci / --all):
             Without it: the recorded set (a first install: the shell workflows).
   --base-branch NAME        target branch (default: main)
   --cron EXPR               schedule, 5 fields (default: 0 9 * * 1)
-  --ci-strict[=true|false]  the PR check fails on stale docs (default: false)
+  --ci-strict[=true|false]  the PR checks fail on what is otherwise a warning
+                            (default: false): doc-freshness-pr on stale docs or
+                            a freshness check that cannot run, doc-spec-verify's
+                            claims job on a claims check that cannot run (its
+                            findings fail it either way)
   --helpers=<true|false>    deprecated, and inert: the helpers ship exactly
                             while an installed workflow runs them.
                             --helpers=false only refuses doc-pr-release

@@ -1398,6 +1398,25 @@ assert_contains "$("$DOC_TOOLS_SHIM" update-index --help)" "never a verification
   "doc-tools help: update-index is never a verification"
 assert_contains "$("$DOC_TOOLS_SHIM" --help)" "Stored state (who may re-baseline):" \
   "doc-tools help: Stored state (who may re-baseline)"
+# The claims help as the 3.2.0 audit left it (P3-12–P3-15), and the
+# installer's claims half (P2-23, P3-37).
+_gh=$("$DOC_TOOLS_SHIM" claims gate --help)
+assert_contains "$_gh" "[--holds <id>]... [--by <principal>]" "claims gate help: --holds repeats, one id each"
+assert_contains "$_gh" "(repeatable, one id each)" "…said in words"
+assert_contains "$_gh" "V8, V8n and V9 over <from>..HEAD" "claims gate help: the gate runs V8 and V8n too"
+assert_contains "$_gh" "every named id no claim has" "…and reports named ids no claim has"
+assert_contains "$("$DOC_TOOLS_SHIM" claims run --help)" "claim's absent lint path is its allowed assert-fail" \
+  "claims run help: an unbuilt claim's absent lint path is not a finding"
+assert_contains "$("$DOC_TOOLS_SHIM" --help)" "tree where one is refused (gate, promote, attest --final)" \
+  "doc-tools help: a refused dirty tree is a claims exit 2"
+_ih=$("${BASH_BIN:-bash}" "$REPO_ROOT/scripts/hooks/install.sh" help 2>&1 || true)
+assert_contains "$_ih" "claims job on a claims check that cannot run" "installer help: --ci-strict's claims half"
+assert_contains "$_ih" "claims validate --staged" "installer help: pre-commit's claims leg"
+assert_contains "$_ih" "commits (advisory: never blocks)" "installer help: pre-push's claims leg"
+assert_contains "$_ih" "a non-AI claims job on every same-repository PR" "installer help: doc-spec-verify's claims job"
+assert_contains "$_ih" "its claims step re-runs and re-proves the spec claims" "installer help: the schedule's claims step"
+assert_contains "$HOOKSREF" '`doc-spec-verify`'"'"'s `claims` job fails on a claims check that cannot run' \
+  "hooks.md: --ci-strict's claims half"
 assert_eq "" "$(grep -n 'the one verb that attests\|only verb that attests' "$REPO_ROOT"/references/doc-spec.md "$REPO_ROOT"/docs/codebase-guide.md "$REPO_ROOT"/docs/conventions.md "$REPO_ROOT"/docs/workflows/doc-superpowers.md "$REPO_ROOT"/docs/architecture/system-overview.md "$REPO_ROOT"/skills/doc-superpowers/SKILL.md || true)" \
   "no doc still calls update-index the verb that attests"
 
