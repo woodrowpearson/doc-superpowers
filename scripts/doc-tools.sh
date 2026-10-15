@@ -2351,7 +2351,9 @@ ledger show|cmd_ledger_show|repo|refresh format=
   matched case-insensitively and may be spaced: checkout-14, checkout 14,
   checkout #14 (one argument or several words); a provisional key that
   was finalized reaches its key (docs/ledger/finalized.json); a legacy
-  ref (<old>#<n>, "<old> row <n>", "<old> ledger row <n>") is looked up
+  ref (<old>#<n>, "<old> #<n>", "<old> row <n>", "<old> ledger row
+  <n>"; <n> digits and an optional letter, 21c — leading zeros and case
+  do not matter) is looked up
   in the legacy map — an archived row prints "archived: <anchor>"; <path>
   is from the top level (a path stem, as ls prints for an item without a
   key, works too). Unknown: exit 1; several items: exit 3. Every ledger

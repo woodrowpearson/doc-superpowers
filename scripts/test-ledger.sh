@@ -10313,6 +10313,43 @@ EOF
   teardown
 }
 
+# --- Task 16b (U5): letter-suffixed legacy rows --------------------------------
+
+test_lg_resolve_legacy_letter_rows() {
+  echo "test: _lg_resolve (U5) — a letter-suffixed legacy row: '<old>#21c', '<old> #21c', '<old> row 21c' (any case) reach <id>#21c; 21 and 21c are distinct entries; leading zeros are dropped (07 → 7, 07b → 7b); an unknown suffix → rc 1"
+  lg_keys_fixture
+  lg_keys_resolve_items
+  printf '%s\n' '{"design-system#21":{"key":"x-15"},"design-system#21c":{"key":"x-14"},
+    "design-system#7":{"item":"docs/issues/k.md"},"design-system#7b":{"archived":"docs/ledgers/design-system-ledger.md#7b"}}' \
+    > docs/ledger/legacy.json
+  local r
+  for r in "design-system#21c" "design-system #21c" "design-system row 21c" "design-system ledger row #21c" \
+      "Design-System#21C" "design-system-ledger row 21C"; do
+    lg_call _lg_resolve "$r"
+    assert_eq "0|docs/issues/a.md" "$LG_RC|$LG_OUT" "'$r' → design-system#21c (x-14)"
+  done
+  for r in "design-system#21" "design-system row 21" "design-system #21"; do
+    lg_call _lg_resolve "$r"
+    assert_eq "0|docs/issues/b.md" "$LG_RC|$LG_OUT" "'$r' → design-system#21 (x-15), not #21c"
+  done
+  lg_call _lg_resolve "design-system#07"
+  assert_eq "0|docs/issues/k.md" "$LG_RC|$LG_OUT" "'#07' → design-system#7"
+  lg_call _lg_resolve "design-system row 07B"
+  assert_eq "0|docs/ledgers/design-system-ledger.md#7b" "$LG_RC|$LG_OUT" "'row 07B' → design-system#7b (archived)"
+  for r in "design-system#21d" "design-system row 21d" "design-system #7c" "design-system#21cc"; do
+    lg_call _lg_resolve "$r"
+    assert_eq "1|" "$LG_RC|$LG_OUT" "'$r' → none (rc 1)"
+  done
+  lg show design-system row 21c
+  assert_eq "0" "$LG_RC" "show design-system row 21c (three words)"
+  assert_eq "x-14  x  —  not started" "$(printf '%s\n' "$LG_OUT" | head -n 1)" "…the item"
+  lg show design-system "#21c"
+  assert_eq "0" "$LG_RC" "show design-system #21c (two words)"
+  lg show design-system row 21d
+  assert_eq "1" "$LG_RC" "show an unknown suffix: exit 1"
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -10683,6 +10720,7 @@ run_tests() {
   test_lg_init_hand_written_discovery_without_legacy_ledgers
   test_lg_init_preseeded_legacy_entries_authoritative
   test_lg_init_row_item_from_tracker_column
+  test_lg_resolve_legacy_letter_rows
 
   print_summary
 }
