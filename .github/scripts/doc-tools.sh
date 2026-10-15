@@ -9117,8 +9117,9 @@ _JQ_CLAIMS_V8='def cl_cells: sub("^[ \t]*\\|"; "") | sub("\\|[ \t]*$"; "") | spl
 # the doc loop V8 and V8n share (see the section comments), run over the
 # docs of <how> with the jq program of <check> (_JQ_CLAIMS_V8, or
 # _JQ_CLAIMS_V8N): each doc is read, classed (_claims_sections) and its
-# added lines named (_claims_added_lines) the same way. The finding rows go
-# to <findings-file>.
+# added lines named (_claims_added_lines) the same way, and both programs
+# get the same arguments (V8n alone reads $sc, the DOC-IDs). The finding
+# rows go to <findings-file>.
 # shellcheck disable=SC2016  # jq programs, not shell expansion
 _claims_sect_scan() {
   local check="$1" how="$2" dest="$3" cand="$_SCRATCH/cl-v8-cand.z" docs="$_SCRATCH/cl-v8-docs.z"
@@ -9168,7 +9169,8 @@ _claims_sect_scan() {
     [ "$all" = 1 ] || [ -s "$added" ] || continue
     _claims_sections "$raw" > "$sec"
     _claims_jq "$check" -Rsc --arg doc "$doc" --argjson all "$all" --rawfile sec "$sec" --rawfile added "$added" \
-      --slurpfile c "$_SCRATCH/cl-claims.json" "$_JQ_CLAIMS_NORM $prog" "$raw" >> "$dest"
+      --slurpfile c "$_SCRATCH/cl-claims.json" --slurpfile sc "$_SCRATCH/cl-sidecars.json" \
+      "$_JQ_CLAIMS_NORM $prog" "$raw" >> "$dest"
   done 3< "$docs"
 }
 
@@ -9192,15 +9194,19 @@ _claims_v8() {
 # stripped, blockquote markers dropped) matches, in any case,
 #   as specified|conforms|aligned with|matches §|implemented per
 # No other wording is read: a pointer at a normative section ("see
-# §Interfaces") is never flagged. The claim ids of the line are the tokens
-#   [A-Z][A-Z0-9-]*#[a-z0-9][a-z0-9-]*
+# §Interfaces") is never flagged. The claim ids of the line (its citations)
+# are the tokens
+#   <P>#[a-z0-9][a-z0-9-]*      <P> a run of [A-Za-z0-9_.-]
 # matched exactly, in that case (jq regex, "g": not a shell glob, whose
 # bracket ranges collate by locale), each starting at a boundary: not after
 # a letter, digit, _, ., /, # or - (an Oniguruma lookbehind, in jq 1.6 too),
-# so a path (docs/README#install), a URL (/API#intro), a word's tail
-# (fooBAR#x) or a file anchor (guide.md#setup) is no id. A known id is the
-# id of a claim of any sidecar in the proposed tree (cl-claims.json, retired
-# claims included).
+# so a path (docs/README#install) or a URL (/API#intro) holds no token, and
+# whose <P> is a DOC-ID: the DOC-ID of a proposed sidecar's doc
+# (cl-sidecars.json's doc_id, a governing_extra file stem included), or of
+# the ADR or SPEC id shape (ADR-[0-9]+, SPEC-[A-Z]+-[0-9]+, whole). Any other
+# token — README#install, C#sharp, a word's tail (fooBAR#x), a file anchor
+# (guide.md#setup) — is no citation. A known id is the id of a claim of any
+# sidecar in the proposed tree (cl-claims.json, retired claims included).
 #   - Each distinct unknown id of a conformance line is one finding, "cites
 #     unknown claim <id>", whatever else the line carries.
 #   - A conformance line with no id at all is one finding, "asserts
@@ -9213,17 +9219,21 @@ _claims_v8() {
 # is unusable makes V8n indeterminate, as it does V8 (_claims_sections_init).
 
 # V8n over one doc (raw on stdin; run after _JQ_CLAIMS_NORM): the same
-# arguments as _JQ_CLAIMS_V8.
+# arguments as _JQ_CLAIMS_V8, and $sc (cl-sidecars.json: the DOC-IDs).
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _JQ_CLAIMS_V8N='(claims_live | split("\n")) as $live
  | (reduce ($sec | split("\n")[] | select(. != "") | split("\t")) as $x ({}; .[$x[0]] = $x[1])) as $cls
  | [$c[0][] | .claim | objects | .id | strings] as $known
+ | [$sc[0][] | .doc_id | strings] as $docids
  | (if $all == 1 then range(1; ($live | length) + 1)
     else $added | split("\n")[] | select(. != "") | tonumber end) as $n
  | select($cls[$n | tostring] == "descriptive")
  | ($live[$n - 1] // "" | claims_norm_line) as $t
  | select($t | test("as specified|conforms|aligned with|matches \u00a7|implemented per"; "i"))
- | ([$t | match("(?<![A-Za-z0-9_./#-])[A-Z][A-Z0-9-]*#[a-z0-9][a-z0-9-]*"; "g").string] | unique) as $ids
+ | ([$t | match("(?<![A-Za-z0-9_./#-])([A-Za-z0-9_.-]+)#[a-z0-9][a-z0-9-]*"; "g")
+     | select(.captures[0].string as $p
+         | ($p | test("^(ADR-[0-9]+|SPEC-[A-Z]+-[0-9]+)$")) or any($docids[]; . == $p))
+     | .string] | unique) as $ids
  | ($ids - $known) as $unknown
  | ($unknown[] | {check: "V8n", claim: null, doc: $doc, message: "\($doc):\($n): cites unknown claim \(.)"}),
    (select(($ids | length) == 0 and ($t | contains("(unverified)") | not))
