@@ -8986,7 +8986,8 @@ test_lg_init_registry_hints_and_contracts() {
 |---|------|-------|
 | 1 | Ingest | done |
 EOF
-  lg_enable '{"adapters":{"contracts":"tools/contracts.sh"},"legacy_ledgers":{"tier1":"docs/archive/tier1-pipeline-ledger.md"}}'
+  # legacy_ledgers names both ledgers (naming any, it names them all: U2a).
+  lg_enable '{"adapters":{"contracts":"tools/contracts.sh"},"legacy_ledgers":{"tier1":"docs/archive/tier1-pipeline-ledger.md","checkout":"docs/ledgers/checkout-ledger.md"}}'
   # shellcheck disable=SC2016  # the adapter's own shell text
   lg_contracts_adapter 'case "$1" in
 list) echo "{\"id\":\"field:order.total\",\"ledger\":null,\"defined_in\":[\"server/orders/model.*\"]}"
@@ -9006,10 +9007,10 @@ esac'
   assert_contains "$(printf '%s\n' "$r" | grep '^- `checkout`')" 'hand-written ledger "checkout"' "checkout's hints: the hand-written ledger"
   assert_contains "$(printf '%s\n' "$r" | grep '^- `profile`')" 'area "profile"' "profile's hints: the item area"
   assert_contains "$r" 'hand-written ledger "tier1"' "a legacy_ledgers id is a hint too (no ledger matches it)"
-  # Hand-written ledgers: the detected one and the configured (archived) one.
+  # Hand-written ledgers: the two configured ones (one archived).
   local hw
   hw=$(sed -n '/^## Hand-written ledgers/,/^## Registry$/p' docs/ledger/r.md 2>/dev/null || true)
-  assert_contains "$hw" '`docs/ledgers/checkout-ledger.md` — `checkout`: 3 rows; 2 link items, 1 plans, 0 specs' "the detected ledger, its id and counts"
+  assert_contains "$hw" '`docs/ledgers/checkout-ledger.md` — `checkout`: 3 rows; 2 link items, 1 plans, 0 specs' "the checkout ledger, its id and counts"
   assert_contains "$hw" '`docs/archive/tier1-pipeline-ledger.md` — `tier1`: 1 rows; 0 link items, 0 plans, 0 specs' "legacy_ledgers: always included, with its configured id"
   # The registry is a proposal only: hints never change it.
   assert_json_field "$(cat "$p")" '[.ledgers[] | keys[]] | unique | join(",")' "contracts,id,kind,paths,residual_paths,status,title" "the ledger objects' keys"
@@ -9592,7 +9593,7 @@ EOF
 }
 
 test_lg_init_legacy_ids_from_config() {
-  echo "test: legacy ids — legacy_ledgers maps an id to a file (tier1 → docs/ledgers/tier1-pipeline-ledger.md); an unmapped file's id is its stem minus -ledger (checkout); a configured config.json is kept"
+  echo "test: legacy ids — legacy_ledgers maps an id to a file (tier1 → docs/ledgers/tier1-pipeline-ledger.md, checkout → docs/ledgers/checkout-ledger.md; the stem rule for unnamed files: test_lg_init_legacy_map_and_stub); a configured config.json is kept"
   lg_init_fixture
   cat > docs/ledgers/tier1-pipeline-ledger.md <<'EOF'
 # Tier 1 pipeline
@@ -9604,7 +9605,7 @@ test_lg_init_legacy_ids_from_config() {
 EOF
   git add -A && git commit -qm tier1
   lg_accept_remote
-  lg_enable '{"legacy_ledgers":{"tier1":"docs/ledgers/tier1-pipeline-ledger.md"}}'
+  lg_enable '{"legacy_ledgers":{"tier1":"docs/ledgers/tier1-pipeline-ledger.md","checkout":"docs/ledgers/checkout-ledger.md"}}'
   local cfg
   cfg=$(cat docs/ledger/config.json)
   lg_init_edit_reg
@@ -9612,7 +9613,7 @@ EOF
   lg init --accept docs/ledger/r.md.decisions.tsv
   assert_eq "0" "$LG_RC" "exits 0"
   assert_eq "checkout#1,checkout#2,checkout#3,tier1#7,tier1#8" "$(jq -r 'keys | join(",")' docs/ledger/legacy.json)" \
-    "keys: tier1#<row> (legacy_ledgers), checkout#<row> (the stem minus -ledger)"
+    "keys: <id>#<row>, each id from legacy_ledgers"
   assert_eq "docs/issues/2026-01-03-order-sync.md" "$(jq -r '.["tier1#7"].item' docs/ledger/legacy.json)" "tier1#7 → the item (no decision, no key)"
   assert_eq "docs/ledgers/tier1-pipeline-ledger.md#8" "$(jq -r '.["tier1#8"].archived' docs/ledger/legacy.json)" "tier1#8 (closed) → archived"
   assert_eq "$cfg" "$(cat docs/ledger/config.json)" "an existing config.json is not rewritten"
@@ -9730,13 +9731,14 @@ test_lg_init_idempotent() {
   assert_eq "$commits" "$(lg_remote_counter_commits)" "no counter commit"
   assert_json_field "$LG_OUT" '[(.keys | length), (.stubs | length), (.legacy.added | length), (.items | length)] | map(tostring) | join("|")' "0|0|0|0" \
     "JSON: no key, stub, legacy entry or item change"
-  # A legacy entry that disagrees: a finding, the entry kept.
+  # A legacy entry that differs from the computed one is authoritative
+  # (Task 16b U2b): no finding, the entry kept.
   jq '.["checkout#3"] = {"item": "docs/issues/2026-01-05-misc.md"}' docs/ledger/legacy.json > l.tmp && mv l.tmp docs/ledger/legacy.json
   local before
   before=$(cat docs/ledger/legacy.json 2>/dev/null || true)
   lg init --accept "$LG_DEC"
-  assert_eq "1" "$LG_RC" "a disagreeing legacy entry: exits 1"
-  assert_contains "$LG_OUT" "checkout#3" "the finding names it"
+  assert_eq "0" "$LG_RC" "a legacy entry that differs: exits 0 (it is authoritative)"
+  assert_not_contains "$LG_OUT" "finding" "…no finding"
   assert_eq "$before" "$(cat docs/ledger/legacy.json)" "the entry is not changed"
   teardown
 }
@@ -10180,6 +10182,100 @@ test_lg_init_import_empty_globs_finding() {
   teardown
 }
 
+# --- Task 16b (U2): which files are hand-written ledgers; pre-seeded entries ----
+
+# lg_u2_fixture: lg_init_fixture with dated items and the remote, plus two
+# tracked files that discovery reads as hand-written ledgers: a plan whose
+# "#" table links an item (row 1) and has a row with no tracker (row 2), no
+# State column (docs/plans/y-plan.md); and the host's archived snapshot of
+# the checkout ledger (docs/archive/ledgers/checkout-ledger.md). The
+# registry LG_INIT_REG is docs/ledger/edited.json; no config, no report.
+lg_u2_fixture() {
+  local f
+  lg_init_fixture
+  for f in docs/issues/2026-01-0*.md; do
+    lg_add_fm "$f" "date: $(basename "$f" | cut -c 1-10)"
+  done
+  cat > docs/plans/y-plan.md <<'EOF'
+# Y plan
+
+| # | Task | Tracker |
+|---|------|---------|
+| 1 | Fix the flicker | [sheet](../issues/2026-01-02-sheet-flicker.md) |
+| 2 | Write the follow-up doc | — |
+EOF
+  mkdir -p docs/archive/ledgers
+  cp docs/ledgers/checkout-ledger.md docs/archive/ledgers/checkout-ledger.md
+  git add -A && git commit -qm "u2 fixture"
+  lg_accept_remote
+  lg_init_edit_reg
+}
+
+# lg_u2_hand <report>: its "Hand-written ledgers" section.
+lg_u2_hand() {
+  sed -n '/^## Hand-written ledgers/,/^## Registry$/p' "$1" 2>/dev/null || true
+}
+
+test_lg_init_legacy_ledgers_only_named() {
+  echo "test: init with config legacy_ledgers set (U2a) — only the files it names are hand-written ledgers, in --report and --accept: a plan's \"#\" table linking an item and the host's archived snapshot of a ledger are not scanned"
+  lg_u2_fixture
+  lg_enable '{"legacy_ledgers":{"checkout":"docs/ledgers/checkout-ledger.md"}}'
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  assert_eq "0" "$LG_RC" "--report exits 0"
+  local hw t
+  hw=$(lg_u2_hand docs/ledger/r.md)
+  assert_contains "$hw" '`docs/ledgers/checkout-ledger.md` — `checkout`: 3 rows' "the named ledger is listed"
+  assert_not_contains "$hw" "y-plan" "the plan is not a hand-written ledger"
+  assert_not_contains "$hw" "docs/archive/ledgers" "nor the archived snapshot"
+  assert_eq "docs/issues/2026-01-02-sheet-flicker.md	open	checkout	legacy:docs/ledgers/checkout-ledger.md#3" \
+    "$(lg_init_rows docs/ledger/r.md.decisions.tsv | grep sheet-flicker | cut -f 1-4)" "membership from the named ledger only"
+  lg_init_decide docs/ledger/r.md.decisions.tsv docs/issues/2026-01-01-cart-total.md checkout
+  lg init --accept docs/ledger/r.md.decisions.tsv --format json
+  assert_eq "0" "$LG_RC" "--accept exits 0"
+  assert_eq "checkout#1,checkout#2,checkout#3" "$(jq -r 'keys | join(",")' docs/ledger/legacy.json 2>/dev/null)" \
+    "legacy.json: the named ledger's rows only"
+  assert_eq "docs/ledgers/checkout-ledger.md#2" "$(jq -r '[.stubs[] | .row] | join(",")' <<<"$LG_OUT")" \
+    "one stub: the named ledger's open row 2 — none for the plan's row 2 or the snapshot's rows"
+  t=$(lg_today)
+  assert_file_not_exists "docs/issues/$t-write-the-follow-up-doc.md" "no stub from the plan"
+  teardown
+}
+
+test_lg_init_hand_written_discovery_without_legacy_ledgers() {
+  echo "test: init with legacy_ledgers empty (U2a) — discovery stands: every tracked \"#\" table linking an item is listed, so the user can then set legacy_ledgers"
+  lg_u2_fixture
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  assert_eq "0" "$LG_RC" "--report exits 0"
+  local hw
+  hw=$(lg_u2_hand docs/ledger/r.md)
+  assert_contains "$hw" '`docs/ledgers/checkout-ledger.md` — `checkout`: 3 rows' "the ledger"
+  assert_contains "$hw" '`docs/plans/y-plan.md` — `y-plan`: 2 rows' "the plan is listed"
+  assert_contains "$hw" '`docs/archive/ledgers/checkout-ledger.md`' "the snapshot is listed"
+  teardown
+}
+
+test_lg_init_preseeded_legacy_entries_authoritative() {
+  echo "test: init --accept (U2b) — a row whose <legacy-id>#<row> is already in legacy.json is skipped: no stub for an open row tracked by a plan, no finding for an entry that differs from the computed one, no new entry; the other rows get theirs"
+  lg_accept_fixture
+  printf '%s\n' '{"checkout#2":{"archived":"docs/ledgers/checkout-ledger.md#2"},"checkout#3":{"item":"docs/issues/2026-01-05-misc.md"}}' \
+    | jq -S . > docs/ledger/legacy.json
+  local before t
+  before=$(jq -c '{"checkout#2": .["checkout#2"], "checkout#3": .["checkout#3"]}' docs/ledger/legacy.json)
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-01-cart-total.md checkout
+  lg init --accept "$LG_DEC" --format json
+  assert_eq "0" "$LG_RC" "exits 0 (no finding)"
+  assert_json_field "$LG_OUT" '.findings | length' "0" "JSON: no finding"
+  assert_json_field "$LG_OUT" '[.legacy.added[]] | join(",")' "checkout#1" "JSON: one new entry, row 1's"
+  assert_json_field "$LG_OUT" '.stubs | length' "0" "JSON: no stub (row 2 is pre-seeded)"
+  t=$(lg_today)
+  assert_file_not_exists "docs/issues/$t-totals-plan.md" "no stub file"
+  assert_eq "$before" "$(jq -c '{"checkout#2": .["checkout#2"], "checkout#3": .["checkout#3"]}' docs/ledger/legacy.json)" \
+    "the pre-seeded entries are unchanged"
+  assert_eq "docs/issues/2026-01-04-old-bug.md" "$(jq -r '.["checkout#1"].item' docs/ledger/legacy.json)" "row 1 gets its entry"
+  assert_eq '{"checkout":2}' "$(lg_remote_counters)" "counters: checkout-1 only (no stub key)"
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -10546,6 +10642,9 @@ run_tests() {
   test_lg_ifl_plan_words_exact_tips
   test_lg_ifl_plan_words_large_batch
   test_lg_ifl_plan_words_stream_in_step
+  test_lg_init_legacy_ledgers_only_named
+  test_lg_init_hand_written_discovery_without_legacy_ledgers
+  test_lg_init_preseeded_legacy_entries_authoritative
 
   print_summary
 }

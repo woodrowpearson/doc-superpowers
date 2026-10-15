@@ -24,13 +24,15 @@
 #    reference adapter (only), gh must be present and authenticated and
 #    `gh repo view --json hasIssuesEnabled` true. A failed
 #    check or list: exit 2 when asked for explicitly, else reported and
-#    skipped. Hand-written ledgers: tracked *.md files with a table whose
-#    header row has a "#" column and in which a cell links to an item file
-#    (a match of the item globs; links resolved from the file's directory,
-#    "/" from the top level, anchors and queries dropped), plus every file
-#    config legacy_ledgers names — tracked or not; each with its legacy id
-#    (legacy_ledgers, else the file stem minus a trailing "-ledger") and its
-#    rows, keyed by the "#" cell (its ordinal in the file when empty).
+#    skipped. Hand-written ledgers: the files config legacy_ledgers names
+#    — tracked or not — when it names any (Task 16b U2a: then no other file
+#    is read for tables, in --report and --accept); else discovery: the
+#    tracked *.md files with a table whose header row has a "#" column and
+#    in which a cell links to an item file (a match of the item globs;
+#    links resolved from the file's directory, "/" from the top level,
+#    anchors and queries dropped). Each with its legacy id (legacy_ledgers,
+#    else the file stem minus a trailing "-ledger") and its rows, keyed by
+#    the "#" cell (its ordinal in the file when empty).
 # 2. The registry: --registry <file> (ledger-registry/1, else exit 2), else
 #    docs/ledger/ledgers.json, else a proposal (docs/ledger/ledgers.proposed
 #    .json, jq -S): one ledger per top-level directory holding code — a
@@ -196,7 +198,9 @@ _lg_init_gh_check() {
 
 # The awk scan of the tracked *.md files (and the legacy_ledgers files).
 # Input lines "<flag>\t<path>" (flag T tracked, L named by legacy_ledgers);
-# -v globs: the item globs, one per line. Output: one JSON object per line —
+# -v globs: the item globs, one per line; -v lonly: 1 when legacy_ledgers
+# names a file — then only the L files' tables are read (R, K), a T file's
+# frontmatter alone (S, H). Output: one JSON object per line —
 #   {"t":"S","path","dir"}           a non-item file whose frontmatter has a
 #                                    status: line
 #   {"t":"H","path","k","v"}         an item file's component / area value
@@ -293,7 +297,7 @@ function scan(p, flag,   line, n, infm, isitem, fence, prev, intable, hcol, scol
       }
       continue
     }
-    if (isitem) break
+    if (isitem || (lonly && flag != "L")) break
     if (fence != "") {
       if (index(trim(line), fence) == 1) fence = ""
       continue
@@ -370,7 +374,10 @@ _lg_init_md_scan() {
     /[.]md$/ && !($0 in L) { print "T\t" $0 }
     END { for (i = 1; i <= n; i++) if (!index(O[i], "\t")) print "L\t" O[i] }' > "$s.mdlist" \
     || _lg_die "cannot list the markdown files"
-  LC_ALL=C awk -v globs="$s.iglobs" -v bom="$_LG_BOM" "$_LG_AWK_JS$_LG_AWK_GLOB$_LG_AWK_INIT_SCAN" "$s.mdlist" > "$s.scan" || rc=$?
+  # legacy_ledgers naming a file: the hand-written ledgers are those files
+  # alone — the tracked files are read for their frontmatter only (lonly).
+  LC_ALL=C awk -v globs="$s.iglobs" -v bom="$_LG_BOM" -v lonly="$([ -s "$s.legacy" ] && echo 1 || echo 0)" \
+    "$_LG_AWK_JS$_LG_AWK_GLOB$_LG_AWK_INIT_SCAN" "$s.mdlist" > "$s.scan" || rc=$?
   [ "$rc" = 0 ] || _lg_die "cannot scan the markdown files (awk rc $rc)"
 }
 
@@ -385,8 +392,9 @@ def lg_rowkey: if test("^[0-9]+$") then [0, tonumber, .] else [1, 0, .] end;
 # The legacy-id rules (--report and --accept share them): config
 # legacy_ledgers as [{key: id, value: file}]; {file: id} (the first id per
 # file); a hand-written ledger file id — legacy_ledgers, else the file stem
-# minus a trailing "-ledger"; the hand-written ledger files — those of the
-# scan whose table links an item, and every legacy_ledgers file.
+# minus a trailing "-ledger"; the hand-written ledger files — every
+# legacy_ledgers file, and those of the scan whose table links an item
+# (with legacy_ledgers naming a file, the scan reads no other table).
 def lg_legacy_ll($c): ($c.legacy_ledgers // {}) | if type == "object" then to_entries | map(select(.value | type == "string")) else [] end;
 def lg_legacy_ids($c): lg_legacy_ll($c) | reduce .[] as $e ({}; if has($e.value) then . else .[$e.value] = $e.key end);
 def lg_legacy_id($legid; $f): $legid[$f] // ($f | split("/") | last | sub("\\.md$"; "") | sub("-ledger$"; ""));
@@ -888,8 +896,10 @@ _lg_init_write() {
 #    after the keys and the stubs, whose keys and hosted refs its entries
 #    carry; a run cut short anywhere converges on a re-run.
 # Hand-written ledgers (step 4 of §K): every row of every hand-written
-# ledger (as --report finds them) gets a legacy.json entry
-# "<legacy-id>#<row>": a row linking an item → {"key"} (its key after this
+# ledger (as --report finds them) whose "<legacy-id>#<row>" legacy.json
+# does not hold yet gets an entry — one it holds is authoritative (a host
+# may pre-seed them; Task 16b U2b): the row is left alone, no stub, no
+# finding, no new entry. A row linking an item → {"key"} (its key after this
 # run) or {"item": <path>} (none); else a done row (its state cell, ~~
 # dropped, starts with done/shipped/resolved/closed/superseded/dropped,
 # any case) → {"archived": "<file>#<row>"}; else a stub item —
@@ -899,8 +909,7 @@ _lg_init_write() {
 # an items adapter, an issue (adapter create). A stub is found again by its
 # first paragraph ("Migrated from <file> row <n>.") or by the row's
 # legacy.json entry, never created twice. legacy.json's entries are never
-# changed: an entry that resolves elsewhere than the computed one is a
-# finding (rc 1), kept.
+# changed.
 # Summaries (written only when missing): the item's legacy row's first
 # **bold** span, else its H1, else the first sentence of its first
 # paragraph — whitespace collapsed, at most 140 characters, cut at a word
@@ -952,10 +961,12 @@ _LG_JQ_ACCEPT_PLAN='
      ({}; .[$i.first_para] = $i.path)) as $MIG
 | [ $LR[]
     | ("Migrated from \(.file) row \(.row).") as $mig
-    | if .item != null then {id, kind: "item", path: .item}
+    # An entry already in legacy.json is authoritative (a host may pre-seed
+    # them): the row is left alone — no stub, no finding, no new entry.
+    | if $E[.id] != null then {id, kind: "kept"}
+      elif .item != null then {id, kind: "item", path: .item}
       elif .done then {id, kind: "archived", archived: "\(.file)#\(.row)"}
       elif $MIG[$mig] != null then {id, kind: "item", path: $MIG[$mig]}
-      elif $E[.id] != null then {id, kind: "kept"}
       else {id, kind: "stub",
             stub: {file, row, id,
                    ledger: (if reg(.lid) then .lid else "unassigned" end),
@@ -1013,7 +1024,6 @@ _LG_JQ_ACCEPT_PLAN='
 # shellcheck disable=SC2016  # jq source
 _LG_JQ_ACCEPT_FINAL='
 ($c[0]) as $c | $plan[0] as $P | $km[0] as $KM | $sp[0] as $SP
-| ($lgy[0] | if type == "object" then . else {} end) as $E
 | lg_fields($c) as $F
 | (reduce $recs[] as $r ({}; .[$r.path] = ($r.fm // {}))) as $FM
 | def nm($fm; $l): (($F[$l] // []) as $cs | first($cs[] | select(. as $n | $fm | has($n))) // $cs[0] // $l);
@@ -1021,15 +1031,7 @@ _LG_JQ_ACCEPT_FINAL='
 # The final key per path (new, else the one kept); every key now, by path.
   (reduce $P.apply[] as $a ({}; .[$a.path] = ($KM[$a.path] // $a.key))) as $FK
 | (reduce ($ix[0].items[] | select((.key | type) == "string" and .key != "")) as $i ({}; .[$i.path] = $i.key)) as $IK
-# Every key and alias after the run → its item.
-| (reduce ($ix[0].items[] | . as $i | ((.key // empty), ((.aliases // [])[])) | strings | {k: ascii_downcase, p: $i.path}) as $x ({}; .[$x.k] = $x.p)
-   | reduce $P.apply[] as $a (.; if $KM[$a.path] then .[$KM[$a.path] | ascii_downcase] = $a.path else . end)) as $KEYS
-| def tgt($e): if ($e | type) != "object" then null
-               elif ($e.key | type) == "string" then ($KEYS[$e.key | ascii_downcase] // ("key:" + $e.key))
-               elif ($e.item | type) == "string" then $e.item
-               elif ($e.archived | type) == "string" then ("archived:" + $e.archived)
-               else null end;
-  def entry($p): ($FK[$p] // $KM[$p] // $IK[$p] // null) as $k | if $k != null then {key: $k} else {item: $p} end;
+| def entry($p): ($FK[$p] // $KM[$p] // $IK[$p] // null) as $k | if $k != null then {key: $k} else {item: $p} end;
 # The legacy rows: their stub paths, entries.
   [ $P.legacy[]
     | if .kind == "stub" then .stub.path = ($SP[.id] // null) else . end
@@ -1037,13 +1039,8 @@ _LG_JQ_ACCEPT_FINAL='
       elif .kind == "archived" then . + {entry: {archived}}
       elif .kind == "stub" and (.stub.hosted | not) then . + {entry: entry(.stub.path)}
       else . end ] as $L
-| [ $L[] | select(.entry != null) | . as $x
-    | if $E[$x.id] == null then {new: {key: $x.id, value: $x.entry}}
-      elif $E[$x.id] == $x.entry or (tgt($E[$x.id]) != null and tgt($E[$x.id]) == tgt($x.entry)) then empty
-      else {finding: {id: $x.id, existing: $E[$x.id], computed: $x.entry,
-                      detail: "legacy.json \($x.id): \($E[$x.id] | tojson) differs from \($x.entry | tojson) — kept"}} end ] as $LX
-| {legacy_new: ([$LX[] | .new | select(. != null)] | from_entries),
-   legacy_findings: [$LX[] | .finding | select(. != null)],
+# Every entry is new: a row already in legacy.json is "kept" by the plan.
+| {legacy_new: ([$L[] | select(.entry != null) | {key: .id, value: .entry}] | from_entries),
    stubs: [$L[] | select(.kind == "stub") | .stub
            | . + {key: ($KM[if .hosted then "\(.file)#\(.row)" else .path end] // null),
                   names: {status: first_nm("status"), key: first_nm("key"), ledger: first_nm("ledger"), summary: first_nm("summary")}}],
@@ -1266,7 +1263,7 @@ _lg_init_accept() {
   : > "$s.recs"
   if [ -s "$s.fpaths" ]; then _lg_parse_worktree "$s.fpaths" "$s.recs"; fi
   jq -L "$_LG_LIB" -n -c --slurpfile c "$_LG_CFG" --slurpfile plan "$s.plan" --slurpfile km "$s.km" \
-      --slurpfile sp "$s.stubp.json" --slurpfile lgy "$s.lgy" --slurpfile ix "$ix" --slurpfile recs "$s.recs" \
+      --slurpfile sp "$s.stubp.json" --slurpfile ix "$ix" --slurpfile recs "$s.recs" \
       "$_LG_JQ_INDEX_DEFS$_LG_JQ_ACCEPT_FINAL" > "$s.final" || _lg_die "jq failed (the --accept edits)"
 
   _lg_init_accept_apply "$s" "$dry" "$lgpath" "$tsv"
@@ -1276,7 +1273,7 @@ _lg_init_accept() {
 # writes, the stubs, legacy.json, the views, the output.
 _lg_init_accept_apply() {
   local s="$1" dry="$2" lgpath="$3" tsv="$4" rec path hosted key prev ledger summary nk nl ns na what
-  local file row id st sk sl ss text body out ref rc=0 views="" vdir nlines a an aj
+  local file row id st sk sl ss text body out ref rc=0 views="" vdir a an aj
   vdir="$_LG_CACHE/views"
   [ -e "$s.written" ] || : > "$s.written"
   : > "$s.lines"
@@ -1382,8 +1379,6 @@ _lg_init_accept_apply() {
       printf 'wrote %s (+%s entries)\n' "$lgpath" "$(jq 'length' "$s.lnew")" >> "$s.lines"
     fi
   fi
-  jq -r '.legacy_findings[] | "finding: \(.detail)"' "$s.final" | tr -d '\000-\010\013-\037' >> "$s.lines" \
-    || _lg_die "jq failed (legacy findings)"
   if [ -s "$s.created" ] || [ "$(jq '[.items[] | select(.hosted)] | length' "$s.final")" != 0 ]; then
     a=$(_lg_cfg '.keys.remote | if type == "string" and . != "" then . else "origin" end') || exit "$?"
     _lg_adapter_path items > /dev/null 2>&1 || true
@@ -1402,7 +1397,6 @@ _lg_init_accept_apply() {
     views=$vdir
     printf 'views: %s\n' "$vdir" >> "$s.lines"
   fi
-  nlines=$(jq '.legacy_findings | length' "$s.final") || _lg_die "jq failed"
   # shellcheck disable=SC2016  # jq source
   jq -r --slurpfile p "$s.plan" --argjson dry "$dry" '
     "ledger init --accept: \($p[0].apply | length) row(s) applied, \($p[0].skipped) without a decision (left alone)"
@@ -1414,7 +1408,7 @@ _lg_init_accept_apply() {
     jq -c --slurpfile p "$s.plan" --slurpfile n "$s.lnew" --arg d "$tsv" --argjson dry "$([ "$dry" = 1 ] && echo true || echo false)" \
         --arg views "$views" --arg lg "$lgpath" --rawfile w "$s.written" --rawfile cr "$s.created" '
       ($cr | split("\n") | map(select(. != ""))) as $c
-      | {decisions: $d, dry_run: $dry, findings: .legacy_findings,
+      | {decisions: $d, dry_run: $dry, findings: [],
          written: ($w | split("\n") | map(select(. != "") | sub("^wrote "; "") | sub(" \\(.*$"; ""))),
          keys: (.keys + [range(0; ($c | length) / 3 | floor) as $i | select($c[$i * 3 + 2] != "")
                          | {path: $c[$i * 3 + 1], ledger: null, key: $c[$i * 3 + 2], previous: null}]
@@ -1426,10 +1420,10 @@ _lg_init_accept_apply() {
          legacy: {path: (if $lg == "" then null else $lg end), added: ($n[0] | keys)},
          skipped: $p[0].skipped,
          views: (if $views == "" then null else $views end)}' "$s.final" > "$s.payload" || _lg_die "jq failed (payload)"
-    _lg_emit init "$([ "$nlines" = 0 ] && echo 0 || echo 1)" "$s.payload"
+    _lg_emit init 0 "$s.payload"
   fi
   _lg_out_file "$s.lines"
-  _lg_emit init "$([ "$nlines" = 0 ] && echo 0 || echo 1)"
+  _lg_emit init 0
 }
 
 # _lg_init_hosted_write <ref> <field> <value>: the items adapter's write.
