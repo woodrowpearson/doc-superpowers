@@ -771,7 +771,11 @@ END {
 # The plan words (awk): stdin `git cat-file --batch` (NUL → \001) for
 # "<tip>:<path>" lines (-v req: the same lines, in order). Prints
 # "K\t<tip>\t<word>" per distinct key-shaped word (lowercased) of each
-# blob.
+# blob. Each header takes one request; a header past the last request,
+# or a line where a header belongs that is none, is a stream out of step
+# with its requests: exit 3 (the caller dies), never a short read that
+# passes — or that only fails when git, past the pipe buffers, dies of
+# SIGPIPE.
 # shellcheck disable=SC2016  # awk source
 _LG_AWK_IFL_WORDS='
 function words(s,   n, i, w, W, j) {
@@ -787,18 +791,24 @@ function words(s,   n, i, w, W, j) {
 }
 BEGIN { left = -1 }
 {
+  # -2: this line is the separator after an object that ended on a
+  # newline (or was empty) — tested first, since -2 < 0 would read it as
+  # a header and take the next request with it.
+  if (left == -2) { left = -1; next }
   if (left < 0) {
-    if ((getline r < req) <= 0) exit
+    if ((getline r < req) <= 0) exit 3
+    if ($0 ~ / (missing|ambiguous)$/) next
+    if ($0 !~ /^[0123456789abcdef]+ (blob|tree|commit|tag) [0123456789]+$/) exit 3
     t = index(r, ":"); tip = substr(r, 1, t - 1)
-    if ($0 ~ / missing$/ || $2 != "blob") { left = -1; next }
+    blob = ($2 == "blob")
     left = $3 + 0
     if (left == 0) left = -2
     next
   }
-  if (left == -2) { left = -1; next }
-  words($0)
-  # The blob ends with this line: exactly (its newline was part of the
-  # blob; the separator line follows), or one byte short (the separator
+  # Another type (a gitlink whose commit is here): its content is skipped.
+  if (blob) words($0)
+  # The object ends with this line: exactly (its newline was part of the
+  # object; the separator line follows), or one byte short (the separator
   # ended it).
   left -= length($0) + 1
   if (left == 0) left = -2
