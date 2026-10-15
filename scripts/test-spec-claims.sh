@@ -8778,6 +8778,46 @@ test_v8n_id_of_another_sidecar_is_known() {
   teardown
 }
 
+test_v8n_extra_glob_stem_id_is_a_citation() {
+  echo "test: V8n — a governing_extra doc's file-stem DOC-ID is citable: a known id exempts, an unknown one is reported"
+  claims_fixture
+  jset docs/spec-claims/config.json '.governing_extra = ["docs/evals/*.md"]'
+  mkdir -p docs/evals
+  printf '# Pre-registration A\n\n## Requirements\n\n- The holdout set holds 500 examples.\n' > docs/evals/prereg-a.md
+  jq -n '{schema: 1, doc: "docs/evals/prereg-a.md", claims: [{
+    id: "prereg-a#holdout-size", quote: "The holdout set holds 500 examples",
+    states: "The evaluation holdout set has exactly 500 examples.",
+    kind: "behaviour", subject: ["src/auth/token.py"], status: "unbuilt",
+    enforced_by: "test", test: null, nonvacuity: null, promotion: null,
+    tracker: "docs/issues/token-ttl.md", frozen_at: null, restates: [], rulings: []}]}' \
+    > docs/spec-claims/prereg-a.json
+  git add docs/evals docs/spec-claims
+  stage_notes "Holdout size as specified (prereg-a#holdout-size)."
+  cl validate --staged
+  assert_eq "0" "$(v8n_count)" "a known id under a stem DOC-ID (prereg-a): a citation, so no V8n row"
+  stage_notes "Holdout split as specified (prereg-a#holdout-split)."
+  cl validate --staged
+  assert_eq "$(v8n_unknown "$DOC" "$(line_no "$DOC" "Holdout split as specified (prereg-a#holdout-split).")" prereg-a#holdout-split)" \
+    "$(v8n_messages)" "…an unknown slug under that DOC-ID is 'cites unknown claim'"
+  teardown
+}
+
+test_v8n_citation_needs_a_doc_id() {
+  echo "test: V8n — <P>#<slug> cites a claim only when <P> is a proposed sidecar's DOC-ID or has the ADR/SPEC id shape"
+  claims_fixture
+  local l1="Install as specified in README#install." l2="Implemented per C#sharp." l3="Aligned with FOO-1#bar."
+  local l4="Token expiry as specified (SPEC-AUTH-001#nope)." l5="Caching as specified (ADR-012#ghost)."
+  stage_notes "$l1" "$l2" "$l3" "$l4" "$l5"
+  cl validate --staged
+  assert_eq "0" "$(v8n_messages | grep -cE 'cites unknown claim (README|C|FOO-1)#' || true)" \
+    "README#install, C#sharp and FOO-1#bar after whitespace cite no claim"
+  assert_eq "$(printf '%s\n' "$(v8n_nocite "$DOC" "$(line_no "$DOC" "$l1")")" "$(v8n_nocite "$DOC" "$(line_no "$DOC" "$l2")")" \
+      "$(v8n_nocite "$DOC" "$(line_no "$DOC" "$l3")")" "$(v8n_unknown "$DOC" "$(line_no "$DOC" "$l4")" SPEC-AUTH-001#nope)" \
+      "$(v8n_unknown "$DOC" "$(line_no "$DOC" "$l5")" ADR-012#ghost)" | sort)" "$(v8n_messages | sort)" \
+    "…so each of those lines is 'no claim id'; SPEC-AUTH-001#nope and ADR-012#ghost (the id shapes) are still unknown claims"
+  teardown
+}
+
 test_v8n_only_added_descriptive_lines() {
   echo "test: V8n — only added lines are read under --staged, and only descriptive ones"
   claims_fixture
@@ -10483,6 +10523,8 @@ run_tests() {
   test_v8n_id_token_left_boundary
   test_v8n_several_ids_on_a_line
   test_v8n_id_of_another_sidecar_is_known
+  test_v8n_extra_glob_stem_id_is_a_citation
+  test_v8n_citation_needs_a_doc_id
   test_v8n_only_added_descriptive_lines
   test_v8n_unicode_line_numbers
   test_v8n_all_every_descriptive_line
