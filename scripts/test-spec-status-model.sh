@@ -1294,6 +1294,16 @@ assert_contains "$ACTIONS" 'AND (claims disabled OR `claims attest --final` exit
 assert_contains "$ACTIONS" '3c. **Claims** (claims-enabled projects only): `$DOC_TOOLS claims run --planes-of <base>...HEAD` and `claims validate --all`'"$_sq"'s V9 items; a red claim is a **P1 Claim red** finding.' \
   "review step 3c runs the claims"
 assert_contains "$ACTIONS" '**P1 Claim red**' "review severity list has P1 Claim red"
+# In CI, step 3c is the non-AI claims job's (P0-1): the claims verbs run the
+# PR's own adapters, which no CI agent may run, and the AI step is granted
+# none of them. The reference says so, and the template's prompt sends the
+# agent past step 3c.
+assert_contains "$ACTIONS" 'In a doc-superpowers CI run, skip step 3c: `doc-spec-verify.yml`'"$_sq"'s non-AI `claims` job is the 3c check' \
+  "review step 3c: in CI the claims job is the 3c check"
+_sv_prompt=$(awk '/^  spec-verify:$/ { s = 1; next } s && /^  [A-Za-z_-]+:$/ { exit } s' "$CI/doc-spec-verify.yml")
+assert_contains "$_sv_prompt" 'Skip review step 3c (Claims)' "doc-spec-verify.yml: the AI step's prompt skips step 3c"
+assert_not_contains "$(grep -F -- '--allowedTools' <<<"$_sv_prompt")" 'doc-tools.sh claims' \
+  "doc-spec-verify.yml: …and its --allowedTools grants no claims verb"
 assert_contains "$TEMPLATES" "### Claims verdict" "compliance report has a Claims verdict block"
 assert_contains "$(_section "$TEMPLATES" '## Spec Compliance Report')" "claims-enabled projects only" \
   "Claims verdict block is marked claims-enabled projects only"
