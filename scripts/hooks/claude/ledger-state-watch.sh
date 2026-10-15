@@ -12,7 +12,8 @@
 # (additionalContext, for Claude) suggests `doc-tools.sh ledger note <key>
 # "…"` instead.
 #
-# A state_watch.paths entry is a path: a leading "~/" is $HOME, an absolute
+# A state_watch.paths entry is a path: a leading "~/" is $HOME (with HOME
+# empty or unset, such an entry names nothing), an absolute
 # one is itself, any other is under the project (git's top level, or
 # $CLAUDE_PROJECT_DIR). "*" matches within one path segment; every other
 # character — a space, a "~" anywhere else, "?", "[" — is itself. An entry
@@ -55,11 +56,12 @@ reg=docs/ledger/ledgers.json
 _watch_jq='
   # An entry as a regex: "*" is any run within a segment, all else literal.
   def glob_re: gsub("(?<c>[.+?()\\[\\]{}^$|\\\\])"; "\\\(.c)") | gsub("\\*"; "[^/]*");
-  # An entry'\''s absolute spellings ("" and "/" name nothing).
+  # An entry'\''s absolute spellings ("" and "/" name nothing, nor does "~/…"
+  # with HOME empty or unset: it would read as a path from the root).
   def spellings:
     sub("/+$"; "") as $e
     | if $e == "" then empty
-      elif ($e | startswith("~/")) then $home + ($e | .[1:])
+      elif ($e | startswith("~/")) then (if $home == "" then empty else $home + ($e | .[1:]) end)
       elif ($e | startswith("/")) then $e
       else ([$top, $proj] | map(select(. != "")) | unique | .[]) + "/" + $e
       end;

@@ -4779,13 +4779,17 @@ test_ledger_pre_push_allows_provisional_merge_mode() {
   lgh_fixture '{"keys":{"mode":"merge"}}'
   lgh_remote
   inst install --ledger
-  local h
+  local h log wrap old
+  log=$(harness_mktemp calls)
+  wrap=$(lgh_wrap "$log")
   h=$(lgh_hex4 "docs/issues/n.md")
   lgh_item docs/issues/n.md "key: x-~$h" "ledger: x" "status: Open" "summary: Filed offline, a provisional key"
   git add -A
   git commit -qm n --no-verify
-  run_hooked -- git push -q origin main
+  old=$(git rev-parse origin/main)
+  run_hooked DOC_TOOLS="$wrap" -- git push -q origin main
   assert_eq "0" "$RUN_RC" "merge mode: the push goes through"
+  assert_contains "$(cat "$log")" "ledger validate --pushed $old..$(git rev-parse HEAD)" "…after the ledger block checked it"
   assert_eq "$(git rev-parse HEAD)" "$(git --git-dir="$LGH_REMOTE" rev-parse main)" "…the remote has it"
   teardown
 }
@@ -4873,6 +4877,170 @@ test_ledger_pre_push_foreign_stdin_intact() {
   teardown
 }
 
+# lgh_guard <hook> <#! line>: a foreign pre-push guard that counts the ref
+# lines it reads on stdin (to stderr: "guard saw <n> line(s)").
+lgh_guard() {
+  printf '%s\n# a storage-token guard: reads the pushed refs on stdin\nn=0\nwhile read -r l; do n=$((n + 1)); done\necho "guard saw $n line(s)" >&2\nexit 0\n' "$2" > "$1"
+  chmod +x "$1"
+}
+
+# lgh_dry_push_full_disk: `git push --dry-run origin main` (pre-push runs; git
+# writes no file) with every file write failing (ulimit -f 0), stderr through
+# a pipe (a file would fail too); "push-rc=<rc>" closes RUN_OUT.
+lgh_dry_push_full_disk() {
+  run_hooked TMPDIR="$1" -- sh -c '(ulimit -f 0; git push --dry-run origin main; echo "push-rc=$?") 2>&1 | cat'
+}
+
+test_ledger_pre_push_copy_failure_refuses() {
+  echo "test: ledger (fix round 1, I1): when git's ref lines cannot be copied (every file write fails), the ledger block and the git tier's integration block refuse the push instead of handing your guard an empty stdin; no temp file is left"
+  lgh_fixture
+  lgh_remote
+  local tmpd
+  tmpd=$(harness_mktemp_d pushtmp)
+  echo a > src/a.js
+  git add -A
+  git commit -qm a --no-verify
+  # The ledger block, before a bash guard (bash: the suite's interpreter).
+  lgh_guard .git/hooks/pre-push '#!/usr/bin/env bash'
+  inst install --ledger
+  run_hooked TMPDIR="$tmpd" -- sh -c '(git push --dry-run origin main; echo "push-rc=$?") 2>&1 | cat'
+  assert_contains "$RUN_OUT" "guard saw 1 line(s)" "control: the guard reads git's ref line"
+  assert_contains "$RUN_OUT" "push-rc=0" "…and the dry run goes through"
+  lgh_dry_push_full_disk "$tmpd"
+  assert_contains "$RUN_OUT" "push-rc=1" "the copy fails: the ledger block refuses the push"
+  assert_contains "$RUN_OUT" "ledger: push refused" "…with its reason line"
+  assert_not_contains "$RUN_OUT" "guard saw 0 line(s)" "…never handing your guard an empty stdin"
+  assert_eq "0" "$(find "$tmpd" -name 'doc-sp-*' | wc -l | tr -d ' ')" "…and no temp file is left"
+  # The same block in a POSIX sh guard.
+  inst uninstall --ledger
+  lgh_guard .git/hooks/pre-push '#!/bin/sh'
+  inst install --ledger
+  lgh_dry_push_full_disk "$tmpd"
+  assert_contains "$RUN_OUT" "push-rc=1" "a #!/bin/sh hook: refused too"
+  assert_not_contains "$RUN_OUT" "guard saw 0 line(s)" "…your guard never runs on an empty stdin"
+  assert_eq "0" "$(find "$tmpd" -name 'doc-sp-*' | wc -l | tr -d ' ')" "…no temp file left"
+  # The git tier's integration block (no ledger), before a bash guard.
+  inst uninstall --ledger
+  lgh_guard .git/hooks/pre-push '#!/usr/bin/env bash'
+  inst install --git
+  assert_contains "$(sed -n 2p .git/hooks/pre-push)" "# doc-superpowers:begin" "the git tier's block is in your hook"
+  run_hooked TMPDIR="$tmpd" -- sh -c '(git push --dry-run origin main; echo "push-rc=$?") 2>&1 | cat'
+  assert_contains "$RUN_OUT" "guard saw 1 line(s)" "control: the guard reads git's ref line after the git tier's block"
+  lgh_dry_push_full_disk "$tmpd"
+  assert_contains "$RUN_OUT" "push-rc=1" "the copy fails: the git tier's block refuses the push"
+  assert_contains "$RUN_OUT" "doc-superpowers: push refused" "…with its reason line"
+  assert_not_contains "$RUN_OUT" "guard saw 0 line(s)" "…never handing your guard an empty stdin"
+  assert_eq "0" "$(find "$tmpd" -name 'doc-sp-*' | wc -l | tr -d ' ')" "…and no temp file is left"
+  teardown
+}
+
+test_ledger_git_status_flags_old_pre_push_block() {
+  echo "test: ledger (fix round 1, I1): status --git compares the whole integration block, so a pre-push block of the shape that failed open reads as outdated"
+  setup
+  printf '#!/bin/sh\necho yours\n' > .git/hooks/pre-push
+  chmod +x .git/hooks/pre-push
+  inst install --git
+  inst status --git
+  assert_contains "$(grep ' pre-push ' <<<"$IOUT")" "✓" "the current block: ✓"
+  # The earlier block: an unchecked copy of the ref lines.
+  awk 'index($0, "  if ! cat > ") == 1 { print "  cat > \"$DOC_SP_IN\"; bash \"$DOC_SP_HOOK\" \"$@\" < \"$DOC_SP_IN\" || true; exec < \"$DOC_SP_IN\"; rm -f \"$DOC_SP_IN\""; skip = 1; next }
+       skip && index($0, "  bash ") == 1 { skip = 0; next } { print }' .git/hooks/pre-push > .git/pre-push.old
+  cat .git/pre-push.old > .git/hooks/pre-push
+  inst status --git
+  assert_contains "$(grep ' pre-push ' <<<"$IOUT")" "outdated" "the earlier block: ⚠ outdated (re-run install --git)"
+  teardown
+}
+
+test_ledger_pre_push_delete_replayed() {
+  echo "test: ledger (fix round 1, m3): a delete-only push — the ledger block checks nothing (deletions are skipped) and your guard still reads git's delete line"
+  lgh_fixture
+  lgh_remote
+  local old
+  git push -q origin main:refs/heads/side
+  old=$(git --git-dir="$LGH_REMOTE" rev-parse side)
+  printf '#!/bin/sh\n# a guard\ncat > "$(git rev-parse --git-dir)/guard-saw.log"\nexit 0\n' > .git/hooks/pre-push
+  chmod +x .git/hooks/pre-push
+  inst install --ledger
+  run_hooked -- git push -q origin :refs/heads/side
+  assert_eq "0" "$RUN_RC" "the delete goes through"
+  assert_eq "(delete) 0000000000000000000000000000000000000000 refs/heads/side $old" "$(cat .git/guard-saw.log 2>/dev/null)" "your guard read git's delete line"
+  assert_eq "" "$(git --git-dir="$LGH_REMOTE" rev-parse -q --verify refs/heads/side || true)" "…and the branch is gone"
+  teardown
+}
+
+test_ledger_post_commit_batch_ssh() {
+  echo "test: ledger (fix round 1, I2): the background in-flight push never prompts — ssh runs with -o BatchMode=yes (added to GIT_SSH_COMMAND, else core.sshCommand, else ssh), GIT_SSH left alone, GIT_TERMINAL_PROMPT=0, GCM_INTERACTIVE=never"
+  lgh_fixture
+  inst install --ledger
+  local wrap out n
+  wrap=$(harness_mktemp wrap)
+  printf '#!/bin/sh\nif [ "$2" = inflight ]; then\n  { echo "ssh=${GIT_SSH_COMMAND-<unset>}"; echo "gitssh=${GIT_SSH-<unset>}"; echo "prompt=${GIT_TERMINAL_PROMPT-<unset>}"; echo "gcm=${GCM_INTERACTIVE-<unset>}"; } > "$LGH_OUT.tmp" && mv "$LGH_OUT.tmp" "$LGH_OUT"\n  exit 0\nfi\nexec "%s" "$@"\n' "$DOC_TOOLS" > "$wrap"
+  chmod +x "$wrap"
+  # lgh_env_commit <name> [VAR=value …]: commit; wait (30 s) for the job's env.
+  lgh_env_commit() {
+    local name="$1"
+    shift
+    out="$TEST_DIR/.git/env-$name"
+    echo "$name" > "src/$name.js"
+    git add -A
+    (
+      unset GIT_SSH GIT_SSH_COMMAND GIT_TERMINAL_PROMPT GCM_INTERACTIVE
+      run_hooked DOC_TOOLS="$wrap" LGH_OUT="$out" ${1+"$@"} -- git commit -qm "$name"
+    )
+    n=0
+    while [ ! -e "$out" ] && [ "$n" -lt 300 ]; do
+      sleep 0.1
+      n=$((n + 1))
+    done
+  }
+  lgh_env_commit plain
+  assert_eq "ssh=ssh -o BatchMode=yes|gitssh=<unset>|prompt=0|gcm=never" "$(paste -sd '|' "$out" 2>/dev/null)" "nothing set: ssh -o BatchMode=yes; no prompts"
+  git config core.sshCommand "ssh -i key"
+  lgh_env_commit sshcommand
+  assert_contains "$(cat "$out" 2>/dev/null)" "ssh=ssh -i key -o BatchMode=yes" "core.sshCommand kept, BatchMode added"
+  lgh_env_commit preset GIT_SSH_COMMAND="ssh -v"
+  assert_contains "$(cat "$out" 2>/dev/null)" "ssh=ssh -v -o BatchMode=yes" "a preset GIT_SSH_COMMAND kept (it wins over core.sshCommand), BatchMode added"
+  lgh_env_commit gitssh GIT_SSH=/usr/local/bin/my-ssh
+  assert_contains "$(cat "$out" 2>/dev/null)" "ssh=<unset>" "GIT_SSH set: GIT_SSH_COMMAND not added"
+  assert_contains "$(cat "$out" 2>/dev/null)" "gitssh=/usr/local/bin/my-ssh" "…GIT_SSH left alone"
+  assert_contains "$(cat "$out" 2>/dev/null)" "prompt=0" "…and still no terminal prompt"
+  teardown
+}
+
+test_ledger_session_hook_budget() {
+  echo "test: ledger (fix round 1, I3): a SessionStart run past its 2 s budget is cut — the hook returns in about 2 s with the '(budget)' line; in-flight awareness off: doc-tools.sh is not run at all"
+  lgh_fixture '{"inflight":{"enabled":true}}'
+  inst install --ledger-claude
+  local slow log t0 t1
+  log=$(harness_mktemp calls)
+  slow=$(harness_mktemp slow)
+  printf '#!/bin/sh\necho called >> "%s"\nsleep 10\necho "stop late other no PR files:f — x → y"\n' "$log" > "$slow"
+  chmod +x "$slow"
+  t0=$(date +%s)
+  run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION" DOC_TOOLS="$slow"
+  t1=$(date +%s)
+  assert_true "it returns well before the 10 s stub ($((t1 - t0)) s; budget 2 s)" test "$((t1 - t0))" -le 5
+  assert_contains "$(jq -r '.systemMessage // empty' <<<"$RUN_OUT" 2>/dev/null)" "(budget)" "…with the budget line"
+  printf '{}\n' > docs/ledger/config.json
+  : > "$log"
+  run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION" DOC_TOOLS="$slow"
+  assert_eq "0||" "$RUN_RC|$RUN_OUT|$(cat "$log")" "in-flight awareness off: silent, doc-tools.sh never run"
+  teardown
+}
+
+test_ledger_claude_tracked_note_names_flag() {
+  echo "test: ledger (fix round 1, m1): the tracked-files note from --ledger-claude tells teammates to re-run --ledger-claude (not --claude, which would install the general tier)"
+  lgh_fixture
+  mkdir -p .claude
+  printf '{}\n' > .claude/settings.local.json
+  git add -f .claude/settings.local.json
+  git commit -qm tracked
+  inst install --ledger-claude
+  assert_contains "$IOUT" "'install.sh install --ledger-claude' after pulling" "the note names --ledger-claude"
+  assert_not_contains "$IOUT" "'install.sh install --claude' after pulling" "…not --claude"
+  teardown
+}
+
 test_ledger_post_commit_backgrounds() {
   echo "test: ledger: post-commit block — ledger inflight --push runs in the background (the commit does not wait), its output in <git common dir>/doc-superpowers/ledger/push.log; the test waits for it (sentinel, timeout)"
   lgh_fixture '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta"}}'
@@ -4906,7 +5074,7 @@ test_ledger_post_commit_backgrounds() {
 
 test_ledger_session_hook_clip() {
   echo "test: ledger: SessionStart — the unacked stop/heads-up notices of 'ledger notices' (no --fetch, offline), at most 15 lines with the rest counted; info left out; silent when none"
-  lgh_fixture
+  lgh_fixture '{"inflight":{"enabled":true}}'
   inst install --ledger-claude
   local fake log msg ctx
   log=$(harness_mktemp calls)
@@ -4937,6 +5105,7 @@ test_ledger_session_hook_clip() {
   : > "$log"
   run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION" DOC_TOOLS="$fake" DOC_SUPERPOWERS_LEDGER_SKIP=1
   assert_eq "0||" "$RUN_RC|$RUN_OUT|$(cat "$log")" "DOC_SUPERPOWERS_LEDGER_SKIP=1: off (nothing run)"
+  printf '{}\n' > docs/ledger/config.json
   run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION"
   assert_eq "0|" "$RUN_RC|$RUN_OUT" "the real doc-tools.sh, in-flight awareness off: silent"
   teardown
@@ -4965,6 +5134,8 @@ test_ledger_state_watch_advisory() {
   assert_eq "" "$LGH_CTX" "'*' does not cross a '/': silent"
   lgh_watch '{not json'
   assert_eq "0|" "$RUN_RC|$RUN_OUT" "a payload it cannot read: silent, exit 0"
+  lgh_watch '{"hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"content":"x-12 next: wire the hook"}}'
+  assert_eq "0|" "$RUN_RC|$RUN_OUT" "a payload without file_path: silent, exit 0"
   lgh_watch "$(lgh_write_payload "$HOME/notes/today.md" "x-12 next: wire the hook")" DOC_SUPERPOWERS_LEDGER_SKIP=1
   assert_eq "" "$LGH_CTX" "DOC_SUPERPOWERS_LEDGER_SKIP=1: off"
   teardown
@@ -5027,6 +5198,10 @@ test_ledger_state_watch_paths_spaces_tilde() {
   assert_eq "" "$LGH_CTX" "…never ~user expansion"
   lgh_watch "$(lgh_write_payload "$HOME/gc/f.md" "next: x-7 review")"
   assert_contains "$LGH_CTX" "ledger note x-7" "'~/g*' matches ~/gc, a directory that does not exist (a pattern, not a glob of the disk)"
+  lgh_watch "$(lgh_write_payload "/gc/f.md" "next: x-7 review")" HOME=
+  assert_eq "0|" "$RUN_RC|$LGH_CTX" "(fix round 1, m5) HOME empty: '~/g*' matches nothing (not /g*)"
+  lgh_watch "$(lgh_write_payload "/Library/Mobile Documents/com~apple~CloudDocs/claude-memory/M.md" "next: x-7 review")" HOME=
+  assert_eq "" "$LGH_CTX" "…nor does the iCloud entry"
   teardown
 }
 
@@ -5078,7 +5253,13 @@ test_ledger_pre_push_refuses_provisional_cas
 test_ledger_pre_push_allows_provisional_merge_mode
 test_ledger_pre_push_stdin_replayed
 test_ledger_pre_push_foreign_stdin_intact
+test_ledger_pre_push_copy_failure_refuses
+test_ledger_git_status_flags_old_pre_push_block
+test_ledger_pre_push_delete_replayed
 test_ledger_post_commit_backgrounds
+test_ledger_post_commit_batch_ssh
+test_ledger_session_hook_budget
+test_ledger_claude_tracked_note_names_flag
 test_ledger_session_hook_clip
 test_ledger_state_watch_advisory
 test_ledger_foreign_hook_runs_ledger_first

@@ -709,7 +709,10 @@ check_hooks_path_scope() {
 # after the #! line, so it runs before anything of yours can exit or exec.
 # pre-commit passes our exit code on (DOC_SUPERPOWERS_STRICT blocks the
 # commit); the others never stop your hook. pre-push reads the ref lines on
-# stdin, so the block hands ours a copy and your hook the same lines.
+# stdin, so the block hands ours a copy and your hook the same lines: the
+# copy becomes your hook's stdin again, unread. A copy that fails (a full
+# disk) refuses the push — git's lines are gone from stdin by then, and your
+# hook (a token guard) would read nothing and pass.
 integration_block() {
   local hook="$1"
   printf '%s (managed by doc-superpowers install.sh --git; uninstall --git removes it)\n' "$BLOCK_BEGIN"
@@ -724,7 +727,9 @@ integration_block() {
       # shellcheck disable=SC2016
       echo 'if [ -f "$DOC_SP_HOOK" ] && DOC_SP_IN=$(mktemp "${TMPDIR:-/tmp}/doc-sp-push.XXXXXX"); then'
       # shellcheck disable=SC2016
-      echo '  cat > "$DOC_SP_IN"; bash "$DOC_SP_HOOK" "$@" < "$DOC_SP_IN" || true; exec < "$DOC_SP_IN"; rm -f "$DOC_SP_IN"'
+      echo '  if ! cat > "$DOC_SP_IN" || ! exec < "$DOC_SP_IN"; then rm -f "$DOC_SP_IN"; echo "doc-superpowers: push refused: git'"'"'s ref lines could not be copied to $DOC_SP_IN (a full disk?), so the rest of this hook would read nothing" >&2; exit 1; fi'
+      # shellcheck disable=SC2016
+      echo '  bash "$DOC_SP_HOOK" "$@" < "$DOC_SP_IN" || true; rm -f "$DOC_SP_IN"'
       echo 'fi'
       ;;
     *)
@@ -795,7 +800,10 @@ hook_state() {
   if is_our_hook "$dest"; then
     echo ours
   elif [ -f "$dest" ] && grep -qF "$BLOCK_BEGIN" "$dest"; then
-    if grep -qxF "$(integration_block "$1" | sed -n 3p)" "$dest" && [ -f "$HOOKS_DIR/.doc-superpowers-$1" ]; then
+    # The whole block, as this install writes it (an earlier pre-push block
+    # differs only below its third line: it copied the ref lines unchecked).
+    if [ "$(awk -v b="$BLOCK_BEGIN" -v e="$BLOCK_END" 'index($0, b) == 1 { inb = 1 } inb { print } inb && index($0, e) == 1 { exit }' "$dest")" = "$(integration_block "$1")" ] \
+      && [ -f "$HOOKS_DIR/.doc-superpowers-$1" ]; then
       echo current
     else
       echo outdated
@@ -1104,13 +1112,14 @@ install_claude() {
   upsert_block "$EXCLUDE_FILE" "$EXCLUDE_BLOCK" 644
   echo "Claude Code hooks: 3 installed (pre-commit-gate, post-commit-sync, session-summary; their shared $CLAUDE_LIB.sh beside them)"
   echo "  Scripts in $CLAUDE_HOOKS_DIR/, registered in $SETTINGS_FILE — per-user: both are excluded from git ($EXCLUDE_FILE)"
-  claude_tracked_note
+  claude_tracked_note --claude
 }
 
 # An exclude entry cannot hide a file git already tracks — the settings or
-# the rendered scripts (both hold this machine's paths).
+# the rendered scripts (both hold this machine's paths). <flag>: the tier or
+# set just installed, the one teammates re-run (--claude or --ledger-claude).
 claude_tracked_note() {
-  local tracked
+  local tracked flag="${1:---claude}"
   tracked=$(git ls-files -- "$SETTINGS_FILE" "$CLAUDE_HOOKS_DIR" 2>/dev/null) || tracked=""
   if [ -n "$tracked" ]; then
     echo "  NOTE: these per-user files are tracked by git, so this machine's hook wiring would be committed for everyone:"
@@ -1118,7 +1127,7 @@ claude_tracked_note() {
     echo "        Untrack them to keep the tier per-user (your copies stay on disk):"
     echo "          git rm -r --cached --ignore-unmatch -- $SETTINGS_FILE $CLAUDE_HOOKS_DIR"
     echo "        Pulling that commit DELETES these files from every other clone: tell each teammate to re-run"
-    echo "        'install.sh install --claude' after pulling (a permission allowlist they kept in $SETTINGS_FILE"
+    echo "        'install.sh install $flag' after pulling (a permission allowlist they kept in $SETTINGS_FILE"
     echo "        comes back with: git show ORIG_HEAD:$SETTINGS_FILE)."
   fi
 }
@@ -1335,7 +1344,7 @@ install_ledger_claude() {
   lg_upsert_block "$EXCLUDE_FILE" "$LG_EXCLUDE_BLOCK"
   echo "Ledger Claude Code hooks: 2 installed (ledger-session-notices: SessionStart; ledger-state-watch: PostToolUse Write|Edit; their $CLAUDE_LIB.sh beside them)"
   echo "  Scripts in $CLAUDE_HOOKS_DIR/, registered in $SETTINGS_FILE — per-user: both are excluded from git ($EXCLUDE_FILE)"
-  claude_tracked_note
+  claude_tracked_note --ledger-claude
 }
 
 # --ledger: every ledger block (a hook it made goes whole).
