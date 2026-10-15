@@ -64,7 +64,7 @@ No configuration required. The skill auto-detects everything it needs from the t
 |-------------|-----------|-----------------|
 | Mermaid MCP | `claude mcp add` (`--scope user` for every project; `--scope project` writes `.mcp.json` at the project root, shared through git) | PNG diagram rendering instead of inline source |
 
-Bundled: `scripts/doc-tools.sh` provides freshness tracking out of the box — content hashing for docs, content identity for code (the git object id of each code ref, recorded when a doc is verified). No additional scripts needed.
+Bundled: `scripts/doc-tools.sh` provides freshness tracking out of the box — content hashing for docs, content identity for code (the git object id of each code ref, recorded when a doc is re-baselined). No additional scripts needed.
 
 ## First Run
 
@@ -178,6 +178,8 @@ Use after brainstorming produces a design spec to track formal specifications th
 ```
 
 Each path in `--specs` takes an optional role suffix — `--specs=<path>:target`, `--specs=<path>:constraint`, or `--specs=<path>:amends` (the plan corrects what the spec *says* without building its surface; status-neutral, verified as landed — pass `--plan=<path>` to `spec-verify` so the check can confirm the amendment cites the plan). An explicit marker always wins; unsuffixed paths stay valid and have their role inferred at execution time, and inference never yields `:amends`.
+
+**Spec claims (opt-in).** A project that creates `docs/spec-claims/` turns its specs' and ADRs' normative sentences into executable claims, checked by `doc-tools.sh claims <verb>`: `spec-generate` writes stub claims, `spec-inject --phase=plan` adds a claims gate to each chunk and a final gate, and the git hooks and the `doc-spec-verify` / `doc-freshness-schedule` workflows run the same checks. Without that directory every `claims` verb is inert and nothing above changes. See `references/spec-claims.md`.
 
 For wrapper skill integration details, see `references/spec-lifecycle-protocol.md`.
 For code review and commit review integration, see `references/integration-patterns.md`.

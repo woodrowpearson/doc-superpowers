@@ -63,3 +63,14 @@ During review  → spec-verify --mode=review --changed-files=<paths> --specs=<pa
 ```
 
 `--specs` paths may carry a role suffix (`:target`, `:constraint`, `:amends`); pass the same list at every point, and `--plan` wherever the work has a plan — it is what lets an `:amends` spec's landed-check attribute the block to this plan.
+
+## Claims-enabled wrappers
+
+When the host has `docs/spec-claims/` (`references/spec-claims.md`), the gates are tasks in the plan, injected by `spec-inject --phase=plan`. A wrapper calls the same five actions; it does not run the gates itself. Where each gate runs:
+
+| Gate | Plan task | Runs |
+|---|---|---|
+| Chunk gate | `Claims gate (chunk N)`, in each chunk before its spec-update task | `$DOC_TOOLS claims gate --plan <plan> --chunk <N>`, by the orchestrating agent (not a delegated implementer); every red claim is reconciled (`spec-lifecycle-protocol.md` → **Direction protocol**) before the next chunk starts, and `docs/spec-claims/gates/<plan-stem>/chunk-<N>.json` records the verdicts |
+| Final gate | `Final claims gate`, in the last chunk before the finalize tasks | `$DOC_TOOLS claims attest --plan <plan> --final`, which writes `docs/spec-claims/gates/<plan-stem>/final.json`; `spec-verify --mode=post-execute` reports its verdict and amendment batch |
+
+Every implementation task carries `**Claims:** <ids>` or `**Claims:** none — <reason>`. A wrapper that skips a gate (an execute path that drops a `Claims gate (chunk N)` task, or reconciles a deviation outside one) is detected by `claims attest --final`: a chunk with a gate task and no record, and a ruling that appears in no gate record (a silent reconciliation), are findings, so the final gate stays red.

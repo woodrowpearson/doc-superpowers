@@ -1,4 +1,4 @@
-# Shell test suites — the five suites that gate changes to this repo — and the
+# Shell test suites — the six suites that gate changes to this repo — and the
 # check that this repo's own self-installed CI tier is what the installer
 # would write today.
 #
@@ -142,6 +142,10 @@ jobs:
       - name: test-merge-driver.sh
         run: |
           "$BASH_BIN" scripts/test-merge-driver.sh
+
+      - name: test-spec-claims.sh
+        run: |
+          "$BASH_BIN" scripts/test-spec-claims.sh
 
       # This repository installs its own CI tier (scripts/hooks/install.sh
       # install --ci), and nothing else notices those copies going stale: for

@@ -755,6 +755,169 @@ test_scripts_are_free_of_bash4_only_constructs() {
   rm -f "$scrubbed"
 }
 
+test_shipped_jq_is_free_of_jq17_only_forms() {
+  # `$nv.observed_red as $or` shipped in claims promote: jq 1.7+ accepts a
+  # keyword as a binding name, jq 1.6 refuses to compile the program
+  # ("unexpected or, expecting IDENT"), so every promote died with "jq failed".
+  # The jq floor is 1.6, and the suites run under whatever jq the host has, so
+  # this is a static scan, like the bash-4 guard above. jq programs are the
+  # single-quoted shell strings of the shipped scripts (the '"'"' idiom joined);
+  # an extractor lexes each script's shell quoting (comments, double quotes,
+  # $(…) inside them, $'…', heredocs) so a shell variable such as "$label" is
+  # never read as jq. Checked by hand when this guard was written, with no hit
+  # (the scan cannot parse jq): an `if … then … end` with no else (1.7+).
+  echo "test: shipped jq programs use no jq-1.7-only forms (the jq floor is 1.6)"
+  local repo_root
+  repo_root="$(cd "$SCRIPT_DIR/.." && pwd)"
+  local targets=() candidate
+  for candidate in \
+    "$repo_root"/scripts/doc-tools.sh \
+    "$repo_root"/scripts/merge-doc-index.sh \
+    "$repo_root"/scripts/hooks/*.sh \
+    "$repo_root"/scripts/hooks/claude/*.sh \
+    "$repo_root"/scripts/hooks/ci/doc-pr-release/*.sh \
+    "$repo_root"/scripts/hooks/ci/doc-superpowers-steps/*.sh \
+    "$repo_root"/scripts/hooks/git/*
+  do
+    [ -f "$candidate" ] && targets+=("$candidate")
+  done
+  assert_true "found shipped scripts to scan (${#targets[@]})" test "${#targets[@]}" -ge 5
+
+  # Prints, per line, the text of that line inside single-quoted strings
+  # ("<line>:<text>"); full-line comments are blanked first by the caller.
+  local extract='
+    BEGIN { st = 0; depth = 0; sp = 0; hd = "" }
+    {
+      line = $0
+      if (hd != "") { t = line; if (hdtab) sub(/^\t+/, "", t); if (t == hd) hd = ""; next }
+      out = ""; n = length(line); i = 1; pend = ""
+      while (i <= n) {
+        c = substr(line, i, 1)
+        if (st == 1) {
+          if (c == q) {
+            if (substr(line, i, 5) == q dq q dq q) { out = out q; i += 5; continue }
+            st = 0; out = out " "; i++; continue
+          }
+          out = out c; i++; continue
+        }
+        if (st == 2) {
+          if (c == "\\") { i += 2; continue }
+          if (c == dq) { st = 0; i++; continue }
+          if (substr(line, i, 2) == "$(") { stk[++sp] = depth; depth++; st = 0; i += 2; continue }
+          i++; continue
+        }
+        if (st == 3) {
+          if (c == "\\") { i += 2; continue }
+          if (c == q) st = 0
+          i++; continue
+        }
+        if (c == "\\") { i += 2; continue }
+        if (c == q) { st = 1; i++; continue }
+        if (c == dq) { st = 2; i++; continue }
+        if (c == "$" && substr(line, i + 1, 1) == q) { st = 3; i += 2; continue }
+        if (c == "#" && (i == 1 || substr(line, i - 1, 1) ~ /[ \t;(]/)) break
+        if (substr(line, i, 2) == "<<" && substr(line, i, 3) != "<<<") {
+          rest = substr(line, i + 2)
+          if (match(rest, /^-?[ \t]*[\047"]?[A-Za-z_][A-Za-z0-9_]*/)) {
+            w = substr(rest, 1, RLENGTH); hdtab = (substr(w, 1, 1) == "-")
+            sub(/^-?[ \t]*[\047"]?/, "", w); pend = w
+            i += 2 + RLENGTH; continue
+          }
+        }
+        if (c == "(") depth++
+        if (c == ")") { depth--; if (sp > 0 && depth == stk[sp]) { sp--; st = 2 } }
+        i++
+      }
+      if (out ~ /[^ ]/) printf "%d:%s\n", NR, out
+      if (pend != "") hd = pend
+    }'
+
+  # <label>|<ERE over the extracted text>, index-aligned with `samples`: one
+  # planted shell line per pattern, which the extractor and the pattern
+  # together MUST flag.
+  local patterns=(
+    'a jq keyword as a $binding name (and or not if then elif else end as def reduce foreach try catch label import include) [jq 1.7+]|[$](and|or|not|if|then|elif|else|end|as|def|reduce|foreach|try|catch|label|import|include)([^A-Za-z0-9_]|$)'
+    'pick/1 [jq 1.7+]|(^|[^A-Za-z0-9_$.])pick[[:space:]]*[(]'
+    'have_literal_numbers / have_decnum [jq 1.7+]|(^|[^A-Za-z0-9_$.])have_(literal_numbers|decnum)([^A-Za-z0-9_]|$)'
+    'toarray [jq 1.7.1+]|(^|[^A-Za-z0-9_$.])toarray([^A-Za-z0-9_]|$)'
+    'trim / ltrim / rtrim / abs as a jq filter [jq 1.7.1+]|[|][[:space:]]*(trim|ltrim|rtrim|abs)([^A-Za-z0-9_(]|$)'
+    'debug/1, scan/2 [jq 1.7+]|(^|[^A-Za-z0-9_$.])(debug|scan)[[:space:]]*[(][^();]*;'
+    'add/1 [jq 1.7.1+]|(^|[^A-Za-z0-9_$.])add[[:space:]]*[(]'
+    '@urid [jq 1.7.1+]|@urid'
+    'limit(0; …) [emits one value before jq 1.7]|(^|[^A-Za-z0-9_$.])limit[(][[:space:]]*0[[:space:]]*;'
+  )
+  local samples=(
+    "x=\$(jq -c '.a as \$or | \$or' f)"
+    "_JQ_X='[.] | pick(.a)'"
+    "jq -n 'have_decnum'"
+    "jq -c '.a | toarray' f"
+    "jq -r '.name | trim' f"
+    "jq -r '[scan(\"x\"; \"g\")]' f"
+    "jq -r 'add(.[])' f"
+    "jq -r '@urid' f"
+    "jq -c '[limit(0; .[])]' f"
+  )
+  local idx=0 spec sample_rc unmatched="" plant
+  plant=$(harness_mktemp jq17plant)
+  TESTS_RUN=$((TESTS_RUN + 1))
+  while [ "$idx" -lt "${#patterns[@]}" ]; do
+    spec="${patterns[$idx]}"
+    printf '%s\n' "${samples[$idx]}" > "$plant"
+    sample_rc=0
+    awk -v q="'" -v dq='"' "$extract" "$plant" | grep -qE -- "${spec#*|}" 2>/dev/null || sample_rc=$?
+    [ "$sample_rc" -eq 0 ] || unmatched="${unmatched}    ${spec%%|*}: rc=$sample_rc on planted '${samples[$idx]}'"$'\n'
+    idx=$((idx + 1))
+  done
+  # A shell variable named like a keyword is not jq: it must never be flagged.
+  printf '%s\n' 'echo "jq failed ($label)"; x=$end; jq -r ".a" "$or"' > "$plant"
+  if awk -v q="'" -v dq='"' "$extract" "$plant" | grep -qE -- "${patterns[0]#*|}"; then
+    unmatched="${unmatched}    shell variables \$label / \$end / \$or outside single quotes were read as jq"$'\n'
+  fi
+  rm -f "$plant"
+  if [ -z "$unmatched" ] && [ "${#patterns[@]}" -eq "${#samples[@]}" ]; then
+    PASS=$((PASS + 1))
+    # shellcheck disable=SC2059
+    printf "${GREEN}  PASS${NC}: every one of %d jq-1.7 patterns catches its planted form\n" "${#patterns[@]}"
+  else
+    FAIL=$((FAIL + 1))
+    # shellcheck disable=SC2059
+    printf "${RED}  FAIL${NC}: jq-1.7 pattern(s) miss their planted form (%d patterns, %d samples)\n%s" \
+      "${#patterns[@]}" "${#samples[@]}" "$unmatched"
+  fi
+
+  local scanned label regex hits target file_hits grep_rc
+  scanned=$(harness_mktemp_d jq17scan)
+  for target in "${targets[@]}"; do
+    awk '{ if ($0 ~ /^[[:space:]]*#/) print ""; else print }' "$target" \
+      | awk -v q="'" -v dq='"' "$extract" > "$scanned/${target##*/}.sq" \
+      || { echo "  cannot extract the quoted strings of $target" >&2; FAIL=$((FAIL + 1)); }
+  done
+  for spec in "${patterns[@]}"; do
+    label="${spec%%|*}"
+    regex="${spec#*|}"
+    hits=""
+    for target in "${targets[@]}"; do
+      grep_rc=0
+      file_hits=$(grep -E -- "$regex" "$scanned/${target##*/}.sq" 2>&1) || grep_rc=$?
+      if [ "$grep_rc" -ge 2 ]; then
+        hits="${hits}    ${target#"$repo_root/"}: grep rc=$grep_rc (pattern error): ${file_hits}"$'\n'
+      elif [ "$grep_rc" -eq 0 ] && [ -n "$file_hits" ]; then
+        hits="${hits}$(printf '%s\n' "$file_hits" | sed "s|^|    ${target#"$repo_root/"}:|")"$'\n'
+      fi
+    done
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ -z "$hits" ]; then
+      PASS=$((PASS + 1))
+      # shellcheck disable=SC2059
+      printf "${GREEN}  PASS${NC}: no %s\n" "$label"
+    else
+      FAIL=$((FAIL + 1))
+      # shellcheck disable=SC2059
+      printf "${RED}  FAIL${NC}: %s\n%s" "$label" "$hits"
+    fi
+  done
+}
+
 test_build_index_and_check_freshness_beyond_argv_limits() {
   # Regression guard for "jq: Argument list too long" (exit 126), which killed
   # build-index on Linux at a few hundred entries.
@@ -5258,6 +5421,50 @@ test_i3_deprecate_entry_sets_replaces_not_last_verified() {
   teardown
 }
 
+# The archive recipe is git mv, move-entry, then deprecate-entry <new>
+# without --superseded-by. For a doc that was already superseded (spec-generate
+# step 5), deprecate-entry used to write superseded_by: null, so archiving it
+# erased the link its successor's replaces still names (P1-1). An existing
+# superseded_by is kept unless --superseded-by is given, which replaces it.
+test_deprecate_entry_keeps_an_existing_superseded_by() {
+  echo "test: deprecate-entry without --superseded-by keeps an existing superseded_by (the archive recipe); with it, replaces it"
+  setup
+  local json out rc k
+  for k in new newer; do echo "# $k" > "docs/$k.md"; done
+  _i1_commit docs
+  printf '%s\n' docs/architecture.md:src/:architecture docs/new.md:src/:architecture docs/newer.md:src/:architecture \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  "$DOC_TOOLS" deprecate-entry docs/architecture.md --superseded-by docs/new.md >/dev/null 2>&1
+  # The archive recipe: git mv, move-entry, deprecate-entry on the new path.
+  mkdir -p docs/archive/architecture
+  git mv docs/architecture.md docs/archive/architecture/architecture.md
+  "$DOC_TOOLS" move-entry docs/architecture.md docs/archive/architecture/architecture.md >/dev/null 2>&1
+  rc=0
+  out=$("$DOC_TOOLS" deprecate-entry docs/archive/architecture/architecture.md 2>&1) || rc=$?
+  json=$(cat docs/.doc-index.json)
+  assert_eq "0" "$rc" "deprecate-entry <archived> exits 0"
+  assert_json_field "$json" '.docs["docs/archive/architecture/architecture.md"].status' "deprecated" "the archived doc is deprecated"
+  assert_json_field "$json" '.docs["docs/archive/architecture/architecture.md"].superseded_by' "docs/new.md" \
+    "…and keeps its superseded_by (no --superseded-by given)"
+  assert_json_field "$json" '.docs["docs/new.md"].replaces' "docs/archive/architecture/architecture.md" \
+    "…which its successor's replaces still names (move-entry repointed it)"
+  assert_contains "$out" "already deprecated" "an entry already deprecated with its link kept is unchanged"
+  # A doc never superseded keeps superseded_by null.
+  "$DOC_TOOLS" deprecate-entry docs/newer.md >/dev/null 2>&1
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/newer.md"].status' "deprecated" "a doc with no successor is deprecated"
+  assert_json_field "$json" '.docs["docs/newer.md"].superseded_by' "null" "…its superseded_by stays null"
+  # --superseded-by replaces an existing one (and the new successor's empty
+  # replaces names it).
+  "$DOC_TOOLS" deprecate-entry docs/archive/architecture/architecture.md --superseded-by docs/newer.md >/dev/null 2>&1
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/archive/architecture/architecture.md"].superseded_by' "docs/newer.md" \
+    "--superseded-by replaces an existing superseded_by"
+  assert_json_field "$json" '.docs["docs/newer.md"].replaces' "docs/archive/architecture/architecture.md" \
+    "…and sets the new successor's empty replaces"
+  teardown
+}
+
 test_i3_set_code_refs_edits_in_place() {
   echo "test: I-3: set-code-refs replaces code_refs in place (GH #18): position and every other field kept, code_oids re-derived, code_commit null (kept and new refs, unusable stored one)"
   setup
@@ -6967,6 +7174,7 @@ run_tests() {
 
   # --- cross-platform regression guards (CI matrix: bash 5.x + bash 3.2) ---
   test_scripts_are_free_of_bash4_only_constructs
+  test_shipped_jq_is_free_of_jq17_only_forms
   test_build_index_accepts_entry_with_no_code_refs
   test_update_index_when_every_target_is_skipped
   test_build_index_and_check_freshness_beyond_argv_limits
@@ -7142,6 +7350,7 @@ run_tests() {
   test_i3_build_index_force_preserves_deprecations
   test_i3_add_entry_baselines_to_the_docs_last_commit
   test_i3_deprecate_entry_sets_replaces_not_last_verified
+  test_deprecate_entry_keeps_an_existing_superseded_by
   test_i3_set_code_refs_edits_in_place
   test_i3_set_code_refs_on_a_legacy_entry
   test_i3_set_code_refs_added_ref_never_masks_commits_behind

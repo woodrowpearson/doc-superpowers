@@ -5,6 +5,9 @@
 # Runs when a same-repository PR touches an indexed spec (docs/specs/**/SPEC-*.md)
 # or code one cites — judged by check-freshness from the doc index, no
 # hard-coded paths. Read-only: findings go to one PR comment.
+#
+# The claims job (no AI) checks the spec claims of a project with
+# docs/spec-claims/ (claims-check.sh pr) and does nothing without it.
 
 name: Spec Compliance Check (AI)
 
@@ -85,5 +88,61 @@ jobs:
             `git diff --name-only --no-renames ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}`
             lists (git prints a name holding a non-ASCII byte, `"`, `\` or a tab
             in double quotes with C escapes: pass it unquoted).
+            Skip review step 3c (Claims): this workflow's `claims` job runs
+            the claims checks without AI, and your tools do not allow them.
             Post the compliance findings as one PR comment:
             `gh pr comment ${{ github.event.pull_request.number }} --body "<findings>"`.
+
+  # Spec claims, without AI: claims validate --all, claims run --all, and
+  # claims attest --final for each plan this PR touches (claims-check.sh pr;
+  # status disabled, and nothing run, without docs/spec-claims/). Findings
+  # fail the job. Hosts add their test-environment setup (the toolchain and
+  # dependencies their claim-bound tests need) before the claims step in
+  # their own copy of this workflow; without it, the adapters report
+  # `indeterminate` (a warning; a failure with --ci-strict).
+  claims:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      # The PR head itself, not the merge commit: the claims verbs read the
+      # branch's own commits (first parent) from the merge-base to HEAD. This
+      # job runs the PR's own code (its adapters) and needs no git
+      # credentials, so the token is not left in .git/config (the amendments
+      # step calls gh with GH_TOKEN).
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      # Host test-environment setup goes here.
+
+      - name: Check spec claims
+        id: claims
+        env:
+          RANGE: ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}
+          DOC_SUPERPOWERS_STRICT: "__CI_STRICT__"
+        run: .github/scripts/doc-superpowers-steps/claims-check.sh pr
+
+      # The amendment batch (the DOC-STALE and RETIRE rulings the PR adds) at
+      # the top of the PR description, in its own managed section. After a
+      # findings failure too. update-pr-body.sh ships with doc-pr-release.yml:
+      # without that workflow installed, this step is skipped.
+      - name: Spec amendments into the PR description
+        if: >-
+          !cancelled() &&
+          steps.claims.outputs.amendments_count != '0' && steps.claims.outputs.amendments_count != '' &&
+          hashFiles('.github/scripts/doc-pr-release/update-pr-body.sh') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOC_SUPERPOWERS_SECTION: spec-claims
+          PR: ${{ github.event.pull_request.number }}
+          AMENDMENTS: ${{ steps.claims.outputs.amendments }}
+        run: .github/scripts/doc-pr-release/update-pr-body.sh "$PR" < "$AMENDMENTS"
