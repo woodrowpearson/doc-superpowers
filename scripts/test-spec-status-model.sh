@@ -1479,6 +1479,20 @@ assert_contains "$SPECCLAIMS" 'a test, subject or tier swap is a finding whateve
   "spec-claims.md: V6 — re-promote owed covers a states change only"
 assert_contains "$SPECCLAIMS" 'A forged digest is undetectable outside the promoting clone' \
   "spec-claims.md: promotions are trusted by digest (a hand-forged promotion passes locally)"
+# P1-3 (design §B's status table): a promotion and non-vacuity are a test
+# claim's; a lint, log or judge claim enters built by a reviewed status edit,
+# and run and the gate run its check (test-spec-claims.sh:
+# test_lint_built_by_status_edit, test_lint_built_failing_check_red_at_run_and_gate).
+assert_not_contains "$SPECCLAIMS" '**`claims promote <id>` is the only path into `built`.**' \
+  "spec-claims.md: promote is not every claim's path into built"
+assert_contains "$SPECCLAIMS" '**`claims promote <id>` is a test claim'"$_sq"'s only path into `built`.**' \
+  "spec-claims.md: promote is a test claim's only path into built"
+assert_contains "$SPECCLAIMS" '**A `lint`, `log` or `judge` claim enters `built` (or `gated`) by a reviewed status edit.**' \
+  "spec-claims.md: a lint, log or judge claim enters built by a reviewed status edit"
+assert_contains "$SPECCLAIMS" 'and a `test` claim'"$_sq"'s move into `built`/`gated` without a promotion' \
+  "spec-claims.md: V6's missing-promotion finding is a test claim's"
+assert_contains "$_cg" '`promote` proves test claims only: a `lint` or `log` claim whose check now passes' \
+  "the chunk gate's Step 2: a lint or log claim moves to built by a status edit, not promote"
 
 # _fence_blocks <file> <lang> <dir> <ext>: each unindented ```<lang> fence of
 # <file> written to <dir>/<n>.<ext>; prints how many.

@@ -2233,8 +2233,8 @@ claims run|cmd_claims_run|repo|claims+ planes-of= all scheduled judge-sample= ba
   failing adapter, exits 2.
 claims promote|cmd_claims_promote|repo|reverify all base=
   <id> | --reverify (<id>... | --all) [--base <ref>]
-  Promote a claim to built (to gated, with the configuration extension on,
-  when the recorded configuration at HEAD does not satisfy its "when"):
+  Promote a test claim to built (to gated, with the configuration extension
+  on, when the recorded configuration at HEAD does not satisfy its "when"):
   run its bound test green at HEAD, verify its
   non-vacuity proofs, each in a throwaway worktree where the test first
   passes unmodified (under nonvacuity.mutant, an exactly-once literal
@@ -2266,7 +2266,8 @@ claims gate|cmd_claims_gate|repo|plan= chunk= from= holds=* by= base=
   Run a plan chunk's claims gate at HEAD and record it in
   docs/spec-claims/gates/<plan-stem>/chunk-<n>.json (written even when
   red): the claims the chunk's **Claims:** lines name plus --planes-of
-  <from>..HEAD, re-promotions owed, V9 over <from>..HEAD, and the
+  <from>..HEAD and each lint, log or judge claim the range moved into
+  built or gated, re-promotions owed, V9 over <from>..HEAD, and the
   reconciliations since <from> (a ruling counts only when its record is
   this chunk's record; anything else is a silent reconciliation). <from>
   is --from, else chunk <n-1>'s head, else the merge-base; a range reads
@@ -2279,7 +2280,8 @@ claims attest|cmd_claims_attest|repo|plan= final deep base=
   Check a plan's gate records against the branch at HEAD: every chunk
   with a gate task recorded, its commits matched to merge-base..HEAD by
   patch id (an unmatched one marks the record rebased: re-verified);
-  every claim the plan names run at HEAD (built must pass, diverged fail
+  every claim the plan names, and each lint, log or judge claim the branch
+  moved into built or gated, run at HEAD (built must pass, diverged fail
   with its ruling and tracker; unbuilt, or a re-promotion owed, is a
   finding); every ruling, promotion and status change since the
   merge-base on the plan's claims and its specs' claims recorded in a
@@ -6768,9 +6770,12 @@ _claims_v5() {
 # Whatever the rulings: a claim deleted is a finding ("retire it instead";
 # the one legal deletion is a whole sidecar whose claims were all retired at
 # _CL_MB; a claim whose sidecar is still there but no longer well formed is
-# V1's finding, not a deletion), and moving into built/gated
-# without a promotion is one. Each built/gated claim that is new or differs
-# from its _CL_MB record is compared with its promotion.proved
+# V1's finding, not a deletion), and moving a test claim into built/gated
+# without a promotion is one (a promotion and nonvacuity are a test claim's,
+# §B: a lint, log or judge claim enters built by a reviewed status edit, and
+# run and gate run its check). Each built/gated claim that is new or differs
+# from its _CL_MB record — a test claim, or any claim that carries a
+# promotion — is compared with its promotion.proved
 # (_claims_proved_delta: the fields that differ), and its verdict, when the
 # store holds it, is checked to bind the claim (_claims_verdict_bound):
 #   - the verdict there but not binding the claim (its file edited, or
@@ -6778,7 +6783,8 @@ _claims_v5() {
 #     another states, test, nonvacuity or subject) → a finding;
 #   - no proved (V1's finding too) → a finding;
 #   - a field that differs and is not licensed → a finding naming the
-#     fields ("run claims promote <id>"). A new DOC-STALE/RETIRE ruling on
+#     fields ("run claims promote <id>"; for a lint, log or judge claim, which
+#     promote refuses, "remove its promotion"). A new DOC-STALE/RETIRE ruling on
 #     the claim licenses a states difference and, with it, a nonvacuity or
 #     when difference (an amended threshold needs a new mutant); nothing
 #     licenses a test, subject or enforced_by difference (a swapped test
@@ -6947,12 +6953,13 @@ _claims_verdict_check() {
 }
 
 # _claims_repromote_owed <claim-id> <since-rev>: owed or clear for a
-# built/gated claim of cl-claims.json (clear for any other status, or no
-# such claim), decided by promotion.proved, never by history or by the
-# store: owed when the claim's states, test or nonvacuity differs from
-# proved (_claims_proved_delta: an amendment, or a later edit under the
-# same ruling, after the proof), or it has no proved; and, when the store
-# holds its verdict, when that verdict does not bind it
+# built/gated claim of cl-claims.json (clear for any other status, for a
+# lint, log or judge claim without a promotion — it is not promoted: run and
+# gate run its check — or no such claim), decided by promotion.proved, never
+# by history or by the store: owed when the claim's states, test or
+# nonvacuity differs from proved (_claims_proved_delta: an amendment, or a
+# later edit under the same ruling, after the proof), or it has no proved;
+# and, when the store holds its verdict, when that verdict does not bind it
 # (_claims_verdict_bound). Else clear — a subject, enforced_by or when
 # difference is V6's finding, not a re-promotion. So a fresh clone, CI, or
 # a trunk the promotion's branch was squashed onto gives the same answer.
@@ -6963,7 +6970,8 @@ _claims_verdict_check() {
 _claims_repromote_owed() {
   local id="$1" entry claim delta b
   entry=$(_claims_jq owed-claim -c --arg id "$id" \
-    'first(.[] | select(.claim.id == $id and (.claim.status == "built" or .claim.status == "gated"))) // empty' \
+    'first(.[] | select(.claim.id == $id and (.claim.status == "built" or .claim.status == "gated")
+                       and (.claim.enforced_by == "test" or (.claim.promotion | type) == "object"))) // empty' \
     "$_SCRATCH/cl-claims.json") || _claims_propagate $?
   if [ -z "$entry" ]; then
     echo clear
@@ -7036,8 +7044,9 @@ _JQ_CLAIMS_RATCHET='def v6($claim; $doc; $msg): {check: "V6", claim: $claim, doc
     | $e + {old: $o,
             new: ($e.claim | cl_new_rulings($o)),
             moved_in: (($e.claim.status | cl_promoted) and ($o == null or ($o.status | cl_promoted | not)))}
-    | .bare = (.moved_in and (.claim.promotion | type) != "object")
-    | .verify = ((.claim.status | cl_promoted) and (.old == null or .old != .claim) and (.bare | not))] as $rows
+    | .bare = (.moved_in and .claim.enforced_by == "test" and (.claim.promotion | type) != "object")
+    | .verify = ((.claim.status | cl_promoted) and (.claim.enforced_by == "test" or (.claim.promotion | type) == "object")
+                 and (.old == null or .old != .claim) and (.bare | not))] as $rows
  | if $phase == "verify" then $rows[] | select(.verify) | {claim, sidecar} | tojson
    elif $phase == "records" then
      [$rows[] | .new[] | objects | .record | strings | select(. != "" and (test("\n") | not))] | unique | .[]
@@ -7058,6 +7067,8 @@ _JQ_CLAIMS_RATCHET='def v6($claim; $doc; $msg): {check: "V6", claim: $claim, doc
         | ([$e.new[] | objects | .direction | strings] | unique | join(", ")) as $dirs
         | (if $ruled | not then "without a new ruling" elif $dirs == "" then "under a new ruling with no direction"
            else "under a \($dirs) ruling" end) as $how
+        | (if $c.enforced_by == "test" then "run claims promote \($id)"
+           else "a \($c.enforced_by | tostring) claim is not promoted (claims promote proves test claims only): remove its promotion" end) as $fix
         | (if $o != null then
              (if $c.states != $o.states and ($amended | not)
               then (if $ruled | not
@@ -7077,7 +7088,7 @@ _JQ_CLAIMS_RATCHET='def v6($claim; $doc; $msg): {check: "V6", claim: $claim, doc
               else empty end)
            else empty end),
           (if $e.bare
-           then v6($id; $doc; "status \($c.status) without a promotion: claims promote is the only path into \($c.status)")
+           then v6($id; $doc; "status \($c.status) without a promotion: claims promote is a test claim'"'"'s only path into \($c.status)")
            else empty end),
           (if $e.verify then
              (first($v[] | select(.claim == $c)) // {verdict: "missing", delta: null}) as $r
@@ -7086,13 +7097,13 @@ _JQ_CLAIMS_RATCHET='def v6($claim; $doc; $msg): {check: "V6", claim: $claim, doc
                 then ["states", "nonvacuity", "when"] else [] end) as $lic
              | (if $d == null then [] else [$d[] | select(in_list($lic) | not)] end) as $bad
              | if $d == null
-               then v6($id; $doc; "promotion has no proved record (promotion.proved: the fields promote proved, digested), so what changed since the proof cannot be told: run claims promote \($id)")
+               then v6($id; $doc; "promotion has no proved record (promotion.proved: the fields promote proved, digested), so what changed since the proof cannot be told: \($fix)")
                elif $r.verdict == "unbound"
-               then v6($id; $doc; "promotion verdict does not match the claim (the verdict file was edited, or it was stored for another claim, status, proved record, states, test, mutant or subject): run claims promote \($id)")
+               then v6($id; $doc; "promotion verdict does not match the claim (the verdict file was edited, or it was stored for another claim, status, proved record, states, test, mutant or subject): \($fix)")
                elif ($bad | length) > 0
-               then v6($id; $doc; "\($bad | join(", ")) changed since promote proved the claim (promotion.proved)\(if $amended then "; a DOC-STALE or RETIRE ruling covers only a states change (with the nonvacuity or when that moves with it)" elif any($bad[]; . == "states") then " without a new DOC-STALE (or RETIRE) ruling" else "" end): run claims promote \($id)")
+               then v6($id; $doc; "\($bad | join(", ")) changed since promote proved the claim (promotion.proved)\(if $amended then "; a DOC-STALE or RETIRE ruling covers only a states change (with the nonvacuity or when that moves with it)" elif any($bad[]; . == "states") then " without a new DOC-STALE (or RETIRE) ruling" else "" end): \($fix)")
                elif ($d | length) > 0
-               then v6a($id; "re-promote owed"; "states changed under a ruling: run claims promote \($id)")
+               then v6a($id; "re-promote owed"; "states changed under a ruling: \($fix)")
                elif $r.verdict == "missing"
                then v6a($id; "unverifiable-here"; "promotion verdict \($c.promotion.verdict_sha256) is not in the local verdict store (promoted in another clone?), and the claim is as promote proved it (promotion.proved): the scheduled run re-verifies it")
                else empty end
@@ -7516,15 +7527,20 @@ _claims_parse_log() {
   _claims_jq parse-log -ncR --arg claim "$2" --argjson rc "$3" "$_JQ_CLAIMS_PARSE_LOG" < "$1"
 }
 
-# claims_expect($status; $outcome): an outcome judged by the claim's status
-# (§D: an unbuilt claim may fail any way; a diverged one only by an
+# claims_expect($status; $outcome; $tier): an outcome judged by the claim's
+# status (§D: an unbuilt claim may fail any way; a diverged one only by an
 # assertion; a built or gated one must pass) → {verdict: ok | finding |
 # indeterminate, message}. A status outside the table is a finding (V1
-# names it): nothing can be expected of it.
+# names it): nothing can be expected of it. $tier (enforced_by) only words
+# the "passes" finding: a test claim is promoted, a lint or log claim moved
+# into built by a reviewed status edit (promote refuses it).
 # shellcheck disable=SC2016  # jq program, not shell expansion
-_JQ_CLAIMS_EXPECT='def claims_expect($status; $outcome):
+_JQ_CLAIMS_EXPECT='def claims_expect($status; $outcome; $tier):
   def r($v; $m): {verdict: $v, message: $m};
-  "passes: promote (the check is green, so the code now does what states says: claims promote <id>)" as $promote
+  (if $tier == "test" or ($tier | type) != "string"
+   then "passes: promote (the check is green, so the code now does what states says: claims promote <id>)"
+   else "passes: move it to built (the check is green, so the code now does what states says: a \($tier) claim enters built by a reviewed status edit; claims promote proves test claims only)"
+   end) as $promote
   | if $outcome == "indeterminate" then r("indeterminate"; "indeterminate")
     elif $status == "built" or $status == "gated" then
       (if $outcome == "pass" then r("ok"; "pass")
@@ -7552,7 +7568,7 @@ _JQ_CLAIMS_RUN_PLAN='def nes: type == "string" and length > 0;
  [.[] | select((.claim.id | type) == "string")
   | select($sel == null or (.claim.id as $i | any($sel[]; . == $i)))
   | .claim as $c
-  | {claim: $c.id, status: $c.status, doc, node: null}
+  | {claim: $c.id, status: $c.status, tier: $c.enforced_by, doc, node: null}
     + (if $c.status == "retired" then {action: "skip", message: "retired"}
        elif $c.frozen_at | nes then {action: "skip", message: "frozen"}
        elif $c.enforced_by == "judge" then {action: "skip", message: "judge"}
@@ -7593,7 +7609,7 @@ _JQ_CLAIMS_RUN_RESULTS='$plan[0] as $plan
         | if $row.finding != null then {verdict: "finding", outcome: null, message: $row.finding}
           else
             ($row.outcome | if . == "fail" then "assert-fail" else . end) as $o
-            | claims_expect($e.status; $o) as $x
+            | claims_expect($e.status; $o; $e.tier) as $x
             | {outcome: $row.outcome, verdict: $x.verdict, reason: $row.reason,
                message: (if $x.verdict == "indeterminate" then ($row.reason // "indeterminate")
                          elif ($row.evidence | type) == "string" then "\($x.message) (evidence: \($row.evidence))"
@@ -8753,7 +8769,7 @@ _JQ_CLAIMS_V4='def v4($e; $msg): {check: "V4", claim: $e.claim, doc: $e.doc, mes
      (if ($e.status == "built" or $e.status == "gated") and $r.tree == "fail" then
         v4($e; "pattern contradicts status: a \($e.status) claim'"'"'s lint must pass, but it fails over \($paths): \($lint)")
       elif $e.status == "diverged" and $r.tree == "pass" then
-        v4($e; "pattern contradicts status: a diverged claim'"'"'s lint must fail (the code diverges from states), but it passes over \($paths): \($lint); if the code now does what states says, claims promote it")
+        v4($e; "pattern contradicts status: a diverged claim'"'"'s lint must fail (the code diverges from states), but it passes over \($paths): \($lint); if the code now does what states says, move it to built (a reviewed status edit: claims promote proves test claims only)")
       else empty end)
    end'
 
@@ -10508,7 +10524,10 @@ _JQ_CLAIMS_REVERIFY_ALL='def nes: type == "string" and length > 0;
 #      <from>..HEAD would not be this branch's work, and is never taken as
 #      empty.
 #   3. The claims the chunk names on its **Claims:** lines, plus the
-#      --planes-of selection of <from>..HEAD, run through the run core
+#      --planes-of selection of <from>..HEAD and each lint, log or judge
+#      claim in the plan's scope that <from>..HEAD moved into built or gated
+#      (_JQ_CLAIMS_GATE_EDITED: its reviewed status edit, which step 6
+#      records as reconciled), run through the run core
 #      (_claims_run_selected): the record's claims and verdicts.
 #   4. A named id no claim has is a finding; so is a named claim still
 #      unbuilt that no DOC-STALE ruling included in this record covers
@@ -10551,7 +10570,10 @@ _JQ_CLAIMS_REVERIFY_ALL='def nes: type == "string" and length > 0;
 #     <from>) is always included, storing its verdict_sha256 (attest
 #     matches a sidecar promotion by that digest, never by the local store);
 #   - a status change (a claim new since <from> counts from unbuilt) is
-#     included only when the claim has an included ruling or promotion;
+#     included only when the claim has an included ruling or promotion, or
+#     when it moves a lint, log or judge claim into built or gated (its
+#     reviewed status edit: such a claim is never promoted, and the gate
+#     runs its check, _JQ_CLAIMS_GATE_EDITED);
 #   - every change not included is unrecorded {claim, kind, ruling}.
 # An included entry is {claim, kind (ruling | promotion | status), ruling
 # (the ruling, or null), from_status (null for a claim new since <from>),
@@ -10577,6 +10599,8 @@ def claims_changes($record_path):
      | [$c | cl_rul | .[] | . as $r | select(any($old[]; . == $r) | not)] as $new
      | (($c.promotion | type) == "object" and $c.promotion != $o.promotion) as $promoted
      | (if $o == null then $c.status != "unbuilt" else $o.status != $c.status end) as $moved
+     | ($c.enforced_by as $t | any("lint", "log", "judge"; . == $t)
+        and ($c.status == "built" or $c.status == "gated")) as $edited
      | [$new[] | {claim: $c.id, kind: "ruling", ruling: ., from_status: $o.status, to_status: $c.status,
                   verdict_sha256: null, inc: (type == "object" and .record == $record_path)}] as $rs
      | ($rs | any(.[]; .inc)) as $ruled
@@ -10586,12 +10610,28 @@ def claims_changes($record_path):
           verdict_sha256: ($c.promotion.verdict_sha256 | if type == "string" then . else null end)}
         else empty end),
        (if $moved then {claim: $c.id, kind: "status", ruling: null, from_status: $o.status,
-          to_status: $c.status, verdict_sha256: null, inc: ($ruled or $promoted)}
+          to_status: $c.status, verdict_sha256: null, inc: ($ruled or $promoted or $edited)}
         else empty end)];
 def claims_reconciliations($record_path):
   claims_changes($record_path)
   | {reconciliations: [.[] | select(.inc) | del(.inc)],
      unrecorded: [.[] | select(.inc | not) | {claim, kind, ruling}]};'
+
+# The claims a gate runs for their reviewed status edits ($f, $h: cl-claims
+# entries at <from> and HEAD; $s: the plan's scope; after
+# _JQ_CLAIMS_RECONCILE): each lint, log or judge claim in scope that
+# <from>..HEAD moved into built or gated (new since <from>: from unbuilt).
+# The record-inclusion rule records that move as reconciled, so the chunk
+# gate (from: its <from>) and attest (from: _CL_MB) run its check whether or
+# not a Claims line names it.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+_JQ_CLAIMS_GATE_EDITED='($f[0] | cl_by_id) as $was
+ | [$h[0] | cl_by_id | .[]
+    | select(.id as $i | any($s[0][]; . == $i))
+    | select(.enforced_by as $t | any("lint", "log", "judge"; . == $t))
+    | select(.status == "built" or .status == "gated")
+    | select(($was[.id] // null) as $o | $o == null or $o.status != .status)
+    | .id]'
 
 # _claims_plan_scope <plan-json> <ids-json> <out-file>: the claims a plan
 # answers for, as a sorted JSON array of ids — those of <ids-json> (a file
@@ -10714,7 +10754,7 @@ cmd_claims_gate() {
   local pj="$_SCRATCH/cl-gate-plan.json" named="$_SCRATCH/cl-gate-named.json" psel="$_SCRATCH/cl-gate-planes.json"
   local sel="$_SCRATCH/cl-gate-sel.json" holds="$_SCRATCH/cl-gate-holds.json" list="$_SCRATCH/cl-gate-list"
   local fromc="$_SCRATCH/cl-gate-from.json" scope="$_SCRATCH/cl-gate-scope.json" recon="$_SCRATCH/cl-gate-recon.json"
-  local included="$_SCRATCH/cl-gate-included.json"
+  local included="$_SCRATCH/cl-gate-included.json" edited="$_SCRATCH/cl-gate-edited.json"
   local v8="$_SCRATCH/cl-gate-v8.jsonl" v8n="$_SCRATCH/cl-gate-v8n.jsonl" v9="$_SCRATCH/cl-gate-v9.jsonl"
   local v9c="$_SCRATCH/cl-gate-v9-checks.jsonl" commits="$_SCRATCH/cl-gate-commits.json" out="$_SCRATCH/cl-gate-record.json"
   _claims_load
@@ -10777,17 +10817,22 @@ cmd_claims_gate() {
     || _claims_gate_indet "from $from ($x) is not an ancestor of HEAD: $from..HEAD would not be this branch's work"
   range="$from..HEAD"
 
-  # 3. The chunk's named claims, plus the --planes-of selection, run.
+  # 3. The chunk's named claims, the --planes-of selection, and the lint,
+  # log and judge claims the range moved into built or gated, run.
   _claims_jq gate-named -c --argjson n "$n" '[.chunks[] | select(.n == $n) | .tasks[] | .claims[]] | unique' "$pj" > "$named"
   _claims_planes_sel "$range" "$psel"
-  _claims_jq gate-sel -nc --slurpfile a "$named" --slurpfile b "$psel" --slurpfile c "$_SCRATCH/cl-claims.json" \
-    '$a[0] + $b[0] | unique | map(select(. as $i | any($c[0][]; .claim.id == $i)))' > "$sel"
-  _claims_run_selected "$sel" 0
-
-  # 6. (first: step 4 reads it) The reconciliations, over the claims in scope.
   _claims_load_tree "$from" "$_SCRATCH/cl-gate-sidecars-from.jsonl"
   _claims_jq gate-from-claims -s --arg what claims "$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_LOAD" \
     "$_SCRATCH/cl-gate-sidecars-from.jsonl" > "$fromc"
+  _claims_plan_scope "$pj" "$named" "$scope"
+  _claims_jq gate-edited -nc --slurpfile f "$fromc" --slurpfile h "$_SCRATCH/cl-claims.json" --slurpfile s "$scope" \
+    "$_JQ_CLAIMS_RECONCILE $_JQ_CLAIMS_GATE_EDITED" > "$edited"
+  _claims_jq gate-sel -nc --slurpfile a "$named" --slurpfile b "$psel" --slurpfile e "$edited" \
+    --slurpfile c "$_SCRATCH/cl-claims.json" \
+    '$a[0] + $b[0] + $e[0] | unique | map(select(. as $i | any($c[0][]; .claim.id == $i)))' > "$sel"
+  _claims_run_selected "$sel" 0
+
+  # 6. (first: step 4 reads it) The reconciliations, over the claims in scope.
   _claims_jq gate-run-ids -c '[.[].claim]' "$_SCRATCH/cl-run-plan.json" > "$list"
   _claims_plan_scope "$pj" "$list" "$scope"
   _claims_jq gate-reconcile -nc --slurpfile f "$fromc" --slurpfile h "$_SCRATCH/cl-claims.json" \
@@ -10796,7 +10841,7 @@ cmd_claims_gate() {
      | .reconciliations += [$hold[0][] | {claim: ., kind: "states-holds", by: $by}]' > "$recon"
   _claims_jq gate-unrecorded -c --arg rec "$rec" \
     '.unrecorded[] | {check: "gate", claim, doc: null,
-      message: "silent reconciliation: this \(.kind) since the chunk began is not recorded in \($rec) (a ruling made during the chunk must name \($rec) as its record; a status change needs a ruling or a promotion recorded there)"}' \
+      message: "silent reconciliation: this \(.kind) since the chunk began is not recorded in \($rec) (a ruling made during the chunk must name \($rec) as its record; a status change needs a ruling or a promotion recorded there, unless it moves a lint, log or judge claim into built or gated)"}' \
     "$recon" >> "$_SCRATCH/cl-findings.jsonl"
   _claims_jq gate-recon-included -c '.reconciliations' "$recon" > "$included"
   _claims_promotions_unverifiable gate "$included"
@@ -10985,9 +11030,11 @@ cmd_claims_render() {
 #      unmatched (a squash, a rebase that changed a patch) marks the record
 #      rebased "re-verified" — step 2 re-runs its claims at HEAD — never a
 #      finding; a clean rebase keeps every patch id, and no mark.
-#   2. Claims: every claim a **Claims:** line of the plan names runs at HEAD
-#      (_claims_run_selected: built and gated must pass, diverged fail by an
-#      assertion); a named diverged claim also needs its CODE-DIVERGES
+#   2. Claims: every claim a **Claims:** line of the plan names, and each
+#      lint, log or judge claim in the plan's scope that _CL_MB..HEAD moved
+#      into built or gated (_JQ_CLAIMS_GATE_EDITED: its reviewed status
+#      edit), runs at HEAD (_claims_run_selected: built and gated must pass,
+#      diverged fail by an assertion); a named diverged claim also needs its CODE-DIVERGES
 #      ruling and an open tracker (V5). A named id no claim has is a
 #      finding; so is a named claim still unbuilt ("named claim still
 #      unbuilt at the final gate") unless an included reconciliation — of a
@@ -11211,6 +11258,7 @@ cmd_claims_attest() {
   local fromc="$_SCRATCH/cl-attest-from.json" frecon="$_SCRATCH/cl-attest-final-recon.json"
   local cross="$_SCRATCH/cl-attest-cross.json" amend="$_SCRATCH/cl-attest-amend.json"
   local saved="$_SCRATCH/cl-attest-results.jsonl" out="$_SCRATCH/cl-attest-record.json"
+  local edited="$_SCRATCH/cl-attest-edited.json"
   local included="$_SCRATCH/cl-attest-included.json"
 
   # The preconditions that are not usage.
@@ -11292,10 +11340,14 @@ cmd_claims_attest() {
     fi
   fi
 
-  # 2. The named claims, run at HEAD; V5 on the diverged ones.
+  # 2. The named claims, and the lint, log and judge claims the branch moved
+  # into built or gated, run at HEAD; V5 on the diverged ones.
   _claims_jq attest-named -c '[.chunks[].tasks[].claims[]] | unique' "$pj" > "$named"
-  _claims_jq attest-sel -c --slurpfile c "$_SCRATCH/cl-claims.json" \
-    'map(select(. as $i | any($c[0][]; .claim.id == $i)))' "$named" > "$asel"
+  _claims_plan_scope "$pj" "$named" "$scope"
+  _claims_jq attest-edited -nc --slurpfile f "$_SCRATCH/cl-claims-base.json" --slurpfile h "$_SCRATCH/cl-claims.json" \
+    --slurpfile s "$scope" "$_JQ_CLAIMS_RECONCILE $_JQ_CLAIMS_GATE_EDITED" > "$edited"
+  _claims_jq attest-sel -c --slurpfile c "$_SCRATCH/cl-claims.json" --slurpfile e "$edited" \
+    '. + $e[0] | unique | map(select(. as $i | any($c[0][]; .claim.id == $i)))' "$named" > "$asel"
   _claims_run_selected "$asel" 0
   _claims_jq attest-diverged -c --slurpfile s "$asel" \
     '[.[] | .claim | select(.status == "diverged" and (.id as $i | any($s[0][]; . == $i))) | .id] | unique' \
@@ -11303,7 +11355,6 @@ cmd_claims_attest() {
   _claims_v5
 
   # 3. final.json's reconciliations, rebuilt; the cross-check.
-  _claims_plan_scope "$pj" "$named" "$scope"
   _claims_load_tree "$from" "$_SCRATCH/cl-attest-sidecars-from.jsonl"
   _claims_jq attest-from-claims -s --arg what claims "$_JQ_CLAIMS_SIDECAR $_JQ_CLAIMS_LOAD" \
     "$_SCRATCH/cl-attest-sidecars-from.jsonl" > "$fromc"
