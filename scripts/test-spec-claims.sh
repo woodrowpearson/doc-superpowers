@@ -4453,6 +4453,57 @@ test_lint_built_by_status_edit() {
   teardown
 }
 
+# The other side of the P1-3 boundary, at the gates: a test claim moved into
+# built by a bare status edit (no promotion) stays red at gate and attest,
+# named or not. Unnamed (gate 2 --from main, attest), the status change is a
+# silent reconciliation: only a lint, log or judge claim's move is recorded
+# as a reviewed status edit. Named and ruled DOC-STALE at the chunk's own
+# record (the ruling carries the status change), it is still owed a
+# promotion: only a non-test claim without one is never owed.
+test_test_claim_status_edit_red_at_gate_and_attest() {
+  echo "test: P1-3 — a test claim moved into built by a bare status edit: red at gate and attest, named or not, DOC-STALE-ruled or not"
+  local rec_msgs
+  # Unnamed: no Claims line names it; the range does not touch the runner's
+  # paths, so neither --planes-of nor the edited selection runs it.
+  gate_fixture
+  doc_edit "$PLAN" "**Claims:** SPEC-AUTH-001#token-ttl" "**Claims:** none — the claim is built by a status edit"
+  git add -A && git commit -qm "the plan names no claim"
+  jset "$SIDECAR" '.claims[0].status = "built"'
+  rerender
+  git add -A && git commit -qm "a bare status edit: built, no promotion"
+  gate 2 --from main
+  assert_eq "1" "$CL_RC" "gate 2 --from main, the claim unnamed: exits 1"
+  assert_eq "[]" "$(rec 2 '.claims | tojson')" "…it ran no claim"
+  rec_msgs=$(gate_messages gate)
+  assert_contains "$rec_msgs" "silent reconciliation: this status since the chunk began" \
+    "…the test claim's status edit is a silent reconciliation"
+  assert_eq "[]" "$(rec 2 '[.reconciliations[] | select(.kind == "status")] | tojson')" "…and is not recorded as reconciled"
+  gate 1
+  assert_eq "1" "$CL_RC" "gate 1, the claim unnamed: exits 1"
+  gate 2
+  attest
+  assert_eq "1" "$CL_RC" "attest, the claim unnamed: exits 1"
+  assert_contains "$(attest_messages)" "silent reconciliation: this status on $TTL_ID since the merge-base" \
+    "…the status edit is in no record"
+  teardown
+  # Named, then ruled DOC-STALE at chunk 1's own record.
+  gate_fixture
+  jset "$SIDECAR" '.claims[0].status = "built"'
+  rerender
+  git add -A && git commit -qm "a bare status edit: built, no promotion"
+  gate 1
+  assert_eq "1" "$CL_RC" "gate 1, the claim named: exits 1"
+  assert_contains "$(gate_messages gate)" "re-promote owed: run claims promote $TTL_ID" "…a promotion is owed"
+  assert_contains "$(gate_messages gate)" "silent reconciliation: this status since the chunk began" "…and the status edit is unrecorded"
+  gate_ruling "$GATE_REC1"
+  git add "$SIDECAR" "$GATE_REC1" && git commit -qm "DOC-STALE, recorded at chunk 1"
+  gate 1
+  assert_eq "1" "$CL_RC" "gate 1, the edit ruled DOC-STALE at chunk-1.json: still exits 1"
+  assert_contains "$(gate_messages gate)" "re-promote owed: run claims promote $TTL_ID" "…a test claim is still owed its promotion"
+  assert_not_contains "$(gate_messages gate)" "silent reconciliation" "…though the ruling records the status change"
+  teardown
+}
+
 test_lint_built_failing_check_red_at_run_and_gate() {
   echo "test: P1-3 — a lint claim moved into built by a status edit, its check failing: red at run, at the gate and at attest, named or not"
   gate_plain_fixture
@@ -6812,7 +6863,7 @@ test_is_code_path() {
 
 GATE_REC1=docs/spec-claims/gates/$PLAN_STEM/chunk-1.json
 GATE_REC2=docs/spec-claims/gates/$PLAN_STEM/chunk-2.json
-GATE_UNBUILT_MSG="chunk was meant to build it: promote, rule, or defer"
+GATE_UNBUILT_MSG="chunk was meant to build it: promote it (a test claim) or mark it built by a reviewed status edit (a lint, log or judge claim), rule, or defer"
 
 gate_fixture() {
   promote_fixture
@@ -8034,6 +8085,8 @@ test_attest_named_claim_unbuilt_is_finding() {
   assert_contains "$(attest_messages)" "$ATTEST_UNBUILT_MSG" "…'$ATTEST_UNBUILT_MSG'"
   assert_json_field "$CL_OUT" "[.findings[] | select(.message | test(\"$ATTEST_UNBUILT_MSG\"))][0].claim" "$TTL_ID" \
     "…naming the claim"
+  assert_contains "$(attest_messages)" "promote it (a test claim) or mark it built by a reviewed status edit (a lint, log or judge claim)" \
+    "…its remedy names each tier's path into built"
   # A name no claim has is a finding too.
   doc_edit "$PLAN" "**Claims:** SPEC-AUTH-001#token-ttl" "**Claims:** SPEC-AUTH-001#token-ttl, SPEC-AUTH-001#nope"
   git add -A && git commit -qm "name an unknown claim"
@@ -10540,6 +10593,7 @@ run_tests() {
   test_v4_frozen_selftest_only
   test_run_lint_rerun
   test_lint_built_by_status_edit
+  test_test_claim_status_edit_red_at_gate_and_attest
   test_lint_built_failing_check_red_at_run_and_gate
   test_run_lint_unbuilt_pass_is_finding
   test_run_lint_structural_findings

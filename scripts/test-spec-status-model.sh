@@ -1512,6 +1512,24 @@ assert_contains "$SPECCLAIMS" 'and a `test` claim'"$_sq"'s move into `built`/`ga
   "spec-claims.md: V6's missing-promotion finding is a test claim's"
 assert_contains "$_cg" '`promote` proves test claims only: a `lint` or `log` claim whose check now passes' \
   "the chunk gate's Step 2: a lint or log claim moves to built by a status edit, not promote"
+# A DOC-STALE owes a re-promotion only on a test claim (no other tier is
+# promoted), at the chunk gate and at the final gate; gated follows built;
+# README says the same.
+assert_contains "$_cg" '**A `DOC-STALE` on a test claim that is already `built`/`gated`**' \
+  "the chunk gate's Step 3: a DOC-STALE owes a re-promotion on a test claim"
+assert_contains "$_cg" 'A `lint`, `log` or `judge` claim is not promoted, so its `DOC-STALE` owes no re-promotion' \
+  "…and none on a lint, log or judge claim"
+assert_not_contains "$ACTIONS" '**A `DOC-STALE` on a claim that is already `built`/`gated`**' \
+  "no gate template says every built claim owes a re-promotion"
+assert_contains "$(_section "$ACTIONS" '### Plan Phase')" 'A `lint`, `log` or `judge` claim owes no re-promotion. Then re-run Step 1' \
+  "the final gate's Step 2: no re-promotion for a lint, log or judge claim"
+assert_contains "$SPECCLAIMS" 'required for a `test` claim that is `built` or `gated` (V3). A `lint`, `log` or `judge` claim needs none.' \
+  "spec-claims.md: nonvacuity is a test claim's"
+assert_contains "$SPECCLAIMS" '- **Tier.** `gated` follows `built`' \
+  "spec-claims.md: the extension's As built notes gated follows built"
+assert_contains "$_readme" '`promote` is a test claim'"$_sq"'s only path to `built`' \
+  "README: promote is a test claim's only path to built"
+assert_not_contains "$_readme" '`promote` is the only path to `built`' "README: …never every claim's"
 
 # _fence_blocks <file> <lang> <dir> <ext>: each unindented ```<lang> fence of
 # <file> written to <dir>/<n>.<ext>; prints how many.
