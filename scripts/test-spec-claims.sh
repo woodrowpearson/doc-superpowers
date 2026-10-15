@@ -6914,6 +6914,36 @@ test_gate_previous_record_read_strictly() {
   teardown
 }
 
+test_gate_previous_record_head_must_be_hex() {
+  echo "test: gate — chunk <n-1>'s head must be a hex commit id, as attest requires; a ref name or symbolic head is indeterminate"
+  gate_fixture
+  gate_promote
+  local head1 good h upper
+  gate 1
+  head1=$(rec 1 .head)
+  printf 'Guide.\n' > docs/guide.md
+  git add docs/guide.md "$GATE_REC1" && git commit -qm "chunk 2 work"
+  good=$(harness_mktemp gate-rec1)
+  cp "$GATE_REC1" "$good"
+  upper=$(printf '%s' "$head1" | tr 'abcdef' 'ABCDEF')
+  # "HEAD" would give the empty range HEAD..HEAD; "main" a range wider than
+  # the chunk; each resolves with git rev-parse, so the shape is checked first.
+  for h in HEAD main HEAD~1 "$upper" "${head1:0:6}"; do
+    jq --arg h "$h" '.head = $h' "$good" > "$GATE_REC1"
+    gate 2
+    assert_eq "2" "$CL_RC" "chunk 1's head \"$h\": exits 2"
+    assert_json_field "$CL_OUT" '.indeterminate[0].reason | test("chunk 1.s record .* names no commit head")' "true" \
+      "…it names no commit head"
+    assert_file_not_exists "docs/spec-claims/gates/$PLAN_STEM/chunk-2.json" "…and no record is written"
+  done
+  # An abbreviated hex id (7+ lower-case hex digits) is a commit id.
+  jq --arg h "${head1:0:12}" '.head = $h' "$good" > "$GATE_REC1"
+  gate 2
+  assert_eq "0" "$CL_RC" "an abbreviated hex head: exits 0"
+  assert_eq "$head1" "$(rec 2 .from)" "…from chunk 1's head, resolved"
+  teardown
+}
+
 test_gate_records_reconciliations_from_sidecar_changes() {
   echo "test: gate — a ruling naming this chunk's record is a reconciliation"
   gate_plain_fixture
@@ -10473,6 +10503,7 @@ run_tests() {
   test_gate_dirty_tree_refused_exit_2
   test_gate_from_defaults_previous_chunk_head
   test_gate_previous_record_read_strictly
+  test_gate_previous_record_head_must_be_hex
   test_gate_records_reconciliations_from_sidecar_changes
   test_gate_unbuilt_cleared_only_by_doc_stale
   test_gate_ruling_citing_other_record_is_silent
