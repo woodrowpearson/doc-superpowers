@@ -2464,8 +2464,11 @@ ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize format=
   or untracked item file without a key (none or several: exit 3).
   --ledger unassigned writes no key. The key comes from the counter ref
   on the remote (config keys); when the remote cannot be reached it is a
-  provisional key "<ledger>-~<4 hex>" (with a warning) that finalize
-  replaces. --finalize allocates for real or fails (exit 2) — and, on an
+  provisional key "<ledger>-~<hex>" (with a warning) that finalize
+  replaces: the first 4 hex digits of sha256(<issue>), lengthened one at
+  a time (8 at most) past any key, alias or finalized.json key it would
+  repeat, and past the keys given before it in one batch (by path).
+  --finalize allocates for real or fails (exit 2) — and, on an
   issue that has a provisional key, finalizes that one key (--ledger and
   --summary optional). Prints "<key>  <path>".
 ledger assign|cmd_ledger_assign|repo|format=
@@ -2513,7 +2516,7 @@ ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed
   <detail>" line per finding, " (advisory)" after an advisory; exit 1 when
   any finding blocks. --staged (the pre-commit gate) checks the items
   staged for this commit, as staged: a key is <ledger>-<n> or
-  <ledger>-~<hex4> and unique among keys and aliases; ledger is a
+  <ledger>-~<4–8 hex> and unique among keys and aliases; ledger is a
   registered, active id or unassigned; an added item carries ledger and
   summary; an item whose status moves to closed or won't fix has a
   resolution, and its superseded_by names an existing item and leads to no

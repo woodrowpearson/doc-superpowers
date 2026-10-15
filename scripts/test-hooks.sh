@@ -4774,6 +4774,23 @@ test_ledger_pre_push_refuses_provisional_cas() {
   teardown
 }
 
+test_ledger_pre_push_refuses_long_provisional_cas() {
+  echo "test: ledger: pre-push block — keys.mode cas refuses a push adding a 6-hex provisional key (Task 16c U9: provisional keys are 4–8 hex)"
+  lgh_fixture
+  lgh_remote
+  inst install --ledger
+  local before
+  lgh_item docs/issues/n.md "key: x-~$(lgh_hex4 docs/issues/n.md)e0" "ledger: x" "status: Open" "summary: Filed offline, a lengthened provisional key"
+  git add -A
+  git commit -qm n --no-verify
+  before=$(git --git-dir="$LGH_REMOTE" rev-parse main)
+  run_hooked -- git push -q origin main
+  assert_true "a 6-hex provisional key in the pushed commits: refused (rc $RUN_RC)" test "$RUN_RC" != 0
+  assert_contains "$RUN_OUT$RUN_ERR" "x-~$(lgh_hex4 docs/issues/n.md)e0" "…naming the key"
+  assert_eq "$before" "$(git --git-dir="$LGH_REMOTE" rev-parse main)" "…the remote is unchanged"
+  teardown
+}
+
 test_ledger_pre_push_allows_provisional_merge_mode() {
   echo "test: ledger: pre-push block — keys.mode merge lets a provisional key through"
   lgh_fixture '{"keys":{"mode":"merge"}}'
@@ -5258,6 +5275,7 @@ test_ledger_install_order_ledger_then_git
 test_ledger_uninstall_each_tier_independent
 test_ledger_pre_commit_blocks_invalid
 test_ledger_pre_push_refuses_provisional_cas
+test_ledger_pre_push_refuses_long_provisional_cas
 test_ledger_pre_push_allows_provisional_merge_mode
 test_ledger_pre_push_stdin_replayed
 test_ledger_pre_push_foreign_stdin_intact

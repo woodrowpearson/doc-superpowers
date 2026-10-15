@@ -30,7 +30,8 @@
 # Several items at one step → ambiguous (rc 3); none → rc 1.
 #
 # Keys (design §D): "<ledger>-<n>"; a provisional key is
-# "<ledger>-~<the first 4 hex digits of sha256(item path)>".
+# "<ledger>-~<the first 4 to 8 hex digits of sha256(item path)>": 4,
+# lengthened past a key it would repeat (_lg_k_prov_lines).
 #
 # The counter ref (config keys.counter_ref on keys.remote) is a commit whose
 # tree is one blob, counters.json: {ledger: next number}. Allocation fetches
@@ -222,15 +223,6 @@ _lg_k_cfg() {
   esac
 }
 
-# _lg_k_provisional <ledger> <path>: print the provisional key.
-_lg_k_provisional() {
-  local f
-  f=$(mktemp "$_SCRATCH/lg-kp.XXXXXX") || _lg_die "mktemp failed"
-  printf '%s' "$2" > "$f" || _lg_die "cannot write $f"
-  _hash_one "$f"
-  printf '%s-~%s\n' "$1" "${_HASH#sha256:}" | cut -c "1-$((${#1} + 6))"
-}
-
 # _lg_k_random: random hex (16 digits from /dev/urandom), with a fresh
 # process id — unique among the processes alive now even without urandom
 # ($RANDOM and $$ are the same in every subshell of one bash 3.2 process).
@@ -260,7 +252,7 @@ def lg_k_split:
   else ascii_downcase | if test("^[a-z0-9-]{1,16}-[1-9][0-9]*$") then (capture("^(?<l>.+)-(?<n>[0-9]+)$") | {l, n: (.n | tonumber)}) else null end
   end;
 def lg_k_prov:
-  if type != "string" then null else ascii_downcase | if test("^[a-z0-9-]{1,16}-~[0-9a-f]{4}$") then . else null end end;
+  if type != "string" then null else ascii_downcase | if test("^[a-z0-9-]{1,16}-~[0-9a-f]{4,8}$") then . else null end end;
 '
 
 # _lg_k_maxes <records.jsonl> <out>: {ledger: highest key number} over the
@@ -496,13 +488,55 @@ _lg_counter_cas() {
 # --- Allocation ----------------------------------------------------------------------
 
 # _lg_k_prov_lines <paths-file>: "ledger\tprovisional key" per line of
-# <paths-file> ("ledger\tpath").
+# <paths-file> ("ledger\tpath"), in its order. A provisional key is
+# "<ledger>-~<the first 4 hex digits of sha256(path)>", lengthened one
+# digit at a time (8 at most) while it is taken — a key or an alias of an
+# item in the index (_LG_K_IX when the caller has one, else _lg_index), a
+# provisional key docs/ledger/finalized.json records, or a key given
+# earlier in this batch, which is numbered in path order (so the keys do not
+# depend on the input order). All five lengths taken: dies 2. One hash
+# process for the batch (xargs), one jq program.
+_LG_K_IX=""
 _lg_k_prov_lines() {
-  local l p k
+  local d ix i=0 l p
+  d=$(mktemp -d "$_SCRATCH/lg-kp.XXXXXX") || _lg_die "mktemp failed"
+  ix=${_LG_K_IX:-}
+  if [ -z "$ix" ]; then ix=$(_lg_index) || exit "$?"; fi
+  : > "$d/names"
   while IFS=$'\t' read -r l p; do
-    k=$(_lg_k_provisional "$l" "$p") || exit "$?"
-    printf '%s\t%s\n' "$l" "$k"
+    i=$((i + 1))
+    printf '%s' "$p" > "$d/$i" || _lg_die "cannot write $d/$i"
+    printf '%s\n' "$i" >> "$d/names"
   done < "$1"
+  : > "$d/sums"
+  if [ "$i" -gt 0 ]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+      ( cd "$d" && xargs sha256sum < names ) > "$d/sums" || _lg_die "sha256sum failed (provisional keys)"
+    else
+      ( cd "$d" && xargs shasum -a 256 < names ) > "$d/sums" || _lg_die "shasum failed (provisional keys)"
+    fi
+  fi
+  # shellcheck disable=SC2016  # jq source
+  jq -n -r -R --rawfile h "$d/sums" --slurpfile ix "$ix" '
+    ($ix[0]) as $X
+    | (reduce ([$X.items[] | (.key, (.aliases // [])[])]
+               + [($X.finalized // {}) | if type == "object" then keys[] else empty end])[] as $k
+         ({}; if ($k | type) == "string" then .[$k | ascii_downcase] = true else . end)) as $T
+    | ($h | split("\n") | map(select(. != "") | .[0:64])) as $H
+    | [inputs | split("\t") | {l: .[0], p: (.[1:] | join("\t"))}] as $in
+    | if ($in | length) != ($H | length) then error("\($H | length) hashes for \($in | length) paths") else . end
+    | (reduce ([range(0; $in | length)] | sort_by($in[.].p))[] as $i ({t: $T, k: [], bad: null};
+         . as $s | $in[$i] as $x
+         | (first(range(4; 9) as $n | "\($x.l)-~\($H[$i][0:$n])" | select($s.t[ascii_downcase] == null)) // null) as $k
+         | if $k == null then .bad = (.bad // "\($x.p) (\($x.l)-~\($H[$i][0:4])…\($H[$i][4:8]))")
+           else .t[$k | ascii_downcase] = true | .k[$i] = $k end)) as $R
+    | if $R.bad != null then "!\t\($R.bad)"
+      else range(0; $in | length) | "\($in[.].l)\t\($R.k[.])" end' "$1" > "$d/out" \
+    || _lg_die "jq failed (provisional keys)"
+  if [ "$(head -c 1 "$d/out")" = "!" ]; then
+    _lg_die "cannot give $(head -n 1 "$d/out" | cut -f 2-) a provisional key: every length from 4 to 8 hex digits is taken (by a key, an alias, docs/ledger/finalized.json or this batch)"
+  fi
+  cat -- "$d/out"
 }
 
 # _lg_alloc_batch <json {ledger: count}> [paths-file]: allocate the keys in
@@ -844,7 +878,7 @@ _lg_k_collisions() {
     | select($pk != null and ($F[$pk] | type) == "string")
     | ($F[$pk] | ascii_downcase) as $real
     | [$I[] | select(.k == $real) | .p] | select(length > 0)
-    | "the provisional key \($pk) on \($x.p) was already finalized as \($F[$pk]) (docs/ledger/finalized.json), which \(join(", ")) carries: it now names a different item (a reused path, or two paths whose 4 hex digits collide) — give \($x.p) a new key with: ledger assign \($x.p) <ledger>"' \
+    | "the provisional key \($pk) on \($x.p) was already finalized as \($F[$pk]) (docs/ledger/finalized.json), which \(join(", ")) carries: it now names a different item (a reused path, or two paths whose hex digits collide on two branches) — give \($x.p) a new key with: ledger assign \($x.p) <ledger>"' \
     "$1" > "$3" || _lg_die "jq failed (finalized collisions)"
 }
 
@@ -924,10 +958,11 @@ _lg_k_finalize() {
   fi
   # A provisional key finalized.json records whose key another item carries:
   # the provisional key now names a different item (its path was reused, or
-  # two paths' 4 hex digits collide). Reusing the record would give a second
-  # item that key, and redirecting references would point them at the old
-  # item: refuse, before anything is allocated or written. (A genuine resume
-  # — a run cut short after recording — leaves no item with the key.)
+  # two paths' hex digits collide on two branches). Reusing the record would
+  # give a second item that key, and redirecting references would point them
+  # at the old item: refuse, before anything is allocated or written. (A
+  # genuine resume — a run cut short after recording — leaves no item with
+  # the key.)
   _lg_k_collisions "$ix" "$d/f0.json" "$d/coll"
   if [ -s "$d/coll" ]; then
     _lg_die "$(head -n 1 "$d/coll")"
@@ -1039,6 +1074,7 @@ cmd_ledger_new() {
   if [ -n "$L" ]; then _lg_k_check_ledger "$L" 1; fi
   s=$(mktemp -d "$_SCRATCH/lg-new.XXXXXX") || _lg_die "mktemp failed"
   ix=$(_lg_index) || exit "$?"
+  _LG_K_IX=$ix
   if [ -n "$F" ]; then
     _lg_k_item_path "$F"
     F=$_LG_KP

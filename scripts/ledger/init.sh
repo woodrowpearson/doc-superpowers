@@ -1046,7 +1046,7 @@ _LG_JQ_ACCEPT_PLAN='
     | ($it.key | lg_str) as $ok
     | ($ok | lg_k_split) as $ks
     | ($ok | lg_k_prov) as $kp
-    | (if $ks != null then $ks.l elif $kp != null then ($kp | sub("-~[0-9a-f]{4}$"; "")) else null end) as $kl
+    | (if $ks != null then $ks.l elif $kp != null then ($kp | sub("-~[0-9a-f]{4,8}$"; "")) else null end) as $kl
     | ($it.url != null and $it.url != false) as $hosted
     | if $r.bad then {f: "not five tab-separated columns (path, class, suggestion, reason, decision; four when the decision is empty)"}
       elif $r.dup != null then {f: "listed again (first on line \($r.dup))"}
@@ -1309,6 +1309,9 @@ _lg_init_accept() {
       printf 'wrote docs/ledger/ledgers.json (the report'"'"'s registry, %s)\n' "$hp" >> "$s.written"
     fi
     if [ "$want" != "{}" ]; then
+      # Provisional keys (offline, keys.mode merge) steer clear of the
+      # index's keys and aliases.
+      _LG_K_IX=$ix
       _lg_alloc_batch "$want" "$s.kp" > "$s.kk" || exit "$?"
     fi
   fi

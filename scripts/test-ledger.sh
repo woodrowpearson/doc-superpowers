@@ -10467,6 +10467,114 @@ EOF
   teardown
 }
 
+# --- Task 16c (U9): provisional keys lengthen past a collision -------------------
+
+# lg_hexn <n> <path>: the first <n> hex digits of sha256(<path>) (no newline).
+lg_hexn() {
+  local h
+  if command -v sha256sum >/dev/null 2>&1; then h=$(printf '%s' "$2" | sha256sum); else h=$(printf '%s' "$2" | shasum -a 256); fi
+  printf '%s' "${h:0:$1}"
+}
+
+test_lg_prov_key_batch_collision() {
+  echo "test: provisional keys — two paths of one batch whose sha256 share 4 hex digits get distinct keys; the later in path order is longer, whatever the input order"
+  lg_keys_fixture
+  git remote set-url origin "$TEST_DIR/no-such-remote.git"
+  # c387 and c839 share "1b4c" (and differ at the 5th digit).
+  local a=docs/issues/c387.md b=docs/issues/c839.md pf
+  assert_eq "$(lg_hexn 4 "$a")" "$(lg_hexn 4 "$b")" "the fixture's two paths share their first 4 hex digits"
+  lg_call _lg_alloc x 2 "$b" "$a"
+  assert_eq "0" "$LG_RC" "an offline batch exits 0"
+  assert_eq "x	x-~$(lg_hexn 5 "$b")
+x	x-~$(lg_hexn 4 "$a")" "$LG_OUT" "in the given order: $a (first by path) keeps 4 hex, $b takes 5"
+  lg_call _lg_alloc x 2 "$a" "$b"
+  assert_eq "x	x-~$(lg_hexn 4 "$a")
+x	x-~$(lg_hexn 5 "$b")" "$LG_OUT" "…the same keys in the other input order"
+  # One ledger's keys never collide with another's.
+  pf=$(harness_mktemp prov-paths)
+  printf 'x\t%s\ny\t%s\n' "$b" "$a" > "$pf"
+  lg_call _lg_alloc_batch '{"x":1,"y":1}' "$pf"
+  assert_eq "0|x	x-~$(lg_hexn 4 "$b")
+y	y-~$(lg_hexn 4 "$a")" "$LG_RC|$LG_OUT" "two ledgers: 4 hex each"
+  teardown
+}
+
+test_lg_prov_key_existing_collision() {
+  echo "test: provisional keys — a candidate an item already carries (as its key or an alias, any case) or finalized.json records is lengthened (keys.mode merge)"
+  lg_keys_fixture '{"base":"main","keys":{"mode":"merge"}}'
+  local n=docs/issues/n.md o=docs/issues/o.md q=docs/issues/q.md
+  lg_item docs/issues/al.md "key: x-1" "ledger: x" "status: Open" "summary: Aliased" \
+    "aliases: [old-1, X-~$(lg_hexn 4 "$n" | tr 'abcdef' 'ABCDEF')]"
+  lg_item docs/issues/pk.md "key: x-~$(lg_hexn 4 "$o")" "ledger: x" "status: Open" "summary: Another branch's provisional key"
+  printf '{\n  "x-~%s": "x-1"\n}\n' "$(lg_hexn 4 "$q")" > docs/ledger/finalized.json
+  lg_call _lg_alloc x 1 "$n"
+  assert_eq "0|x	x-~$(lg_hexn 5 "$n")" "$LG_RC|$LG_OUT" "an alias holds the 4-hex key: 5 hex"
+  lg_call _lg_alloc x 1 "$o"
+  assert_eq "0|x	x-~$(lg_hexn 5 "$o")" "$LG_RC|$LG_OUT" "another item's key holds it: 5 hex"
+  lg_call _lg_alloc x 1 "$q"
+  assert_eq "0|x	x-~$(lg_hexn 5 "$q")" "$LG_RC|$LG_OUT" "finalized.json records it: 5 hex"
+  lg_call _lg_alloc y 1 "$n"
+  assert_eq "0|y	y-~$(lg_hexn 4 "$n")" "$LG_RC|$LG_OUT" "another ledger: 4 hex"
+  printf '# N\n' > "$n"
+  lg new --ledger x --summary "Filed where the short key is taken" --file "$n"
+  assert_eq "0|x-~$(lg_hexn 5 "$n")  $n" "$LG_RC|$LG_OUT" "ledger new writes the lengthened key"
+  lg validate --all
+  assert_not_contains "$LG_OUT" "duplicate-key" "…which no other item carries"
+  assert_not_contains "$LG_OUT" "bad-key" "…and is well-formed"
+  teardown
+}
+
+test_lg_prov_key_long_forms() {
+  echo "test: provisional keys of 5–8 hex are well-formed, listed by _lg_provisional_in_range, finalized and resolved; 9 hex is a bad key"
+  lg_keys_fixture
+  local base
+  base=$(git rev-parse HEAD)
+  lg_item docs/issues/s.md "key: x-~abcdef" "ledger: x" "status: Open" "summary: Six hex digits"
+  lg_item docs/issues/e.md "key: x-~0123abcd" "ledger: x" "status: Open" "summary: Eight hex digits"
+  lg_item docs/issues/r.md "key: y-1" "ledger: y" "status: Open" "summary: Refers" "relates: [depends-on:x-~abcdef]"
+  lg_item docs/issues/bad.md "key: x-~0123abcde" "ledger: x" "status: Open" "summary: Nine hex digits"
+  lg validate --all
+  assert_contains "$LG_OUT" "bad-key docs/issues/bad.md" "9 hex: bad-key"
+  assert_not_contains "$LG_OUT" "bad-key docs/issues/s.md" "6 hex: well-formed"
+  assert_not_contains "$LG_OUT" "bad-key docs/issues/e.md" "8 hex: well-formed"
+  git add -A && git commit -qm "long provisional keys" --no-verify
+  lg_call _lg_provisional_in_range "$base..HEAD"
+  assert_eq "$(printf 'x-~0123abcd\tdocs/issues/e.md\nx-~abcdef\tdocs/issues/s.md\n')" \
+    "$(printf '%s\n' "$LG_OUT" | sort)" "_lg_provisional_in_range lists the 6- and 8-hex keys (not the 9-hex one)"
+  lg validate --pushed "$base..HEAD"
+  assert_eq "1" "$LG_RC" "validate --pushed (cas) blocks"
+  assert_contains "$LG_OUT" "x-~abcdef" "…naming the 6-hex key"
+  git rm -q docs/issues/bad.md && git commit -qm "drop the bad key" --no-verify
+  lg finalize --all
+  assert_eq "0" "$LG_RC" "finalize --all"
+  assert_contains "$LG_OUT" "x-~0123abcd → x-1" "the 8-hex key finalized (by path: e.md first)"
+  assert_contains "$LG_OUT" "x-~abcdef → x-2" "the 6-hex key finalized"
+  assert_contains "$(cat docs/issues/s.md)" "key: x-2" "s.md rewritten"
+  assert_contains "$(cat docs/issues/r.md)" "relates: [depends-on:x-2]" "a reference to it rewritten"
+  lg_call _lg_resolve "x-~ABCDEF"
+  assert_eq "0|docs/issues/s.md" "$LG_RC|$LG_OUT" "the old 6-hex key resolves through finalized.json"
+  teardown
+}
+
+test_lg_init_long_provisional_key_ledger() {
+  echo "test: init --accept reads a long provisional key's ledger (checkout-~abcdef is in checkout)"
+  lg_init_fixture
+  lg_add_fm docs/issues/2026-01-02-sheet-flicker.md "key: checkout-~abcdef"
+  lg_add_fm docs/issues/2026-01-05-misc.md "key: checkout-~0123abcd"
+  git add -A && git commit -qm "provisional keys"
+  lg_accept_remote
+  lg_init_edit_reg
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  LG_DEC=docs/ledger/r.md.decisions.tsv
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-02-sheet-flicker.md checkout
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-05-misc.md orders
+  lg init --accept "$LG_DEC"
+  assert_eq "1" "$LG_RC" "a finding: exit 1"
+  assert_contains "$LG_OUT" "carries the provisional key checkout-~0123abcd of ledger checkout" "misc (orders): its key's ledger is checkout"
+  assert_not_contains "$LG_OUT" "checkout-~abcdef" "sheet-flicker (checkout): its own ledger — no finding"
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -10840,6 +10948,11 @@ run_tests() {
   test_lg_init_row_item_from_tracker_column
   test_lg_resolve_legacy_letter_rows
   test_lg_init_done_states_from_config
+  # --- Task 16c ---
+  test_lg_prov_key_batch_collision
+  test_lg_prov_key_existing_collision
+  test_lg_prov_key_long_forms
+  test_lg_init_long_provisional_key_ledger
 
   print_summary
 }
