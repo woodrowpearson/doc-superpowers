@@ -144,7 +144,7 @@ _lg_validate_registry() {
 # by path. rc 1 when any finding blocks.
 #
 # Classes (design §B, §J):
-#   bad-key               a key that is neither <ledger>-<n> nor <ledger>-~<4 hex>
+#   bad-key               a key that is neither <ledger>-<n> nor <ledger>-~<4–8 hex>
 #   duplicate-key         a key or alias another item carries as its key or an
 #                         alias (case-insensitive)
 #   unknown-ledger        ledger is not a registered id (nor unassigned, nor a
@@ -203,7 +203,7 @@ def lg_v_f($c; $sev; $p; $k; $d): {class: $c, severity: $sev, path: $p, key: $k,
 def lg_v_sev($b): if $b then "block" else "advisory" end;
 def lg_v_term: . == "closed" or . == "wontfix";
 def lg_v_keyform:
-  type == "string" and (test("\\A[a-z0-9-]{1,16}-[1-9][0-9]*\\z") or test("\\A[a-z0-9-]{1,16}-~[0-9a-f]{4}\\z"));
+  type == "string" and (test("\\A[a-z0-9-]{1,16}-[1-9][0-9]*\\z") or test("\\A[a-z0-9-]{1,16}-~[0-9a-f]{4,8}\\z"));
 def lg_v_present: . != null and . != "" and . != [];
 # A parse record → the fields the checks read.
 def lg_v_rinfo($F; $CT; $EX):
@@ -381,7 +381,7 @@ $c[0] as $cfg
     | ($added or $o.sup != $i.sup) as $supch
     | (if ($i.keyraw | lg_v_present) and ($i.keyraw | lg_v_keyform | not) then
          lg_v_f("bad-key"; lg_v_sev($added or $o.keyraw != $i.keyraw); $i.path; $i.key;
-           "key \($i.keyraw | tojson | lg_v_tok) is not <ledger>-<n> or <ledger>-~<4 hex>")
+           "key \($i.keyraw | tojson | lg_v_tok) is not <ledger>-<n> or <ledger>-~<4–8 hex>")
        else empty end),
       lg_v_dup_f($i; $R; $HAD),
       lg_v_ledger_f($i; $RG; $LEG; $mode; $added or $o.ledgerraw != $i.ledgerraw),
@@ -417,7 +417,7 @@ $c[0] as $cfg
 | (reduce $ALL[] as $i ({}; .[$i.path] = {sup: $i.sup, class: $i.class, key: $i.key})) as $M
 | $ALL[] | . as $i
 | (if ($i.keyraw | lg_v_present) and ($i.keyraw | lg_v_keyform | not) then
-     lg_v_f("bad-key"; "block"; $i.path; $i.key; "key \($i.keyraw | tojson | lg_v_tok) is not <ledger>-<n> or <ledger>-~<4 hex>")
+     lg_v_f("bad-key"; "block"; $i.path; $i.key; "key \($i.keyraw | tojson | lg_v_tok) is not <ledger>-<n> or <ledger>-~<4–8 hex>")
    else empty end),
   lg_v_dup_f($i; $R; {}),
   lg_v_ledger_f($i; $RG; $LEG; "all"; true),
