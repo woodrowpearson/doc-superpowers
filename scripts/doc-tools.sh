@@ -2575,9 +2575,11 @@ ledger init|cmd_ledger_init|repo|dry-run registry= report= accept= import source
   for that one, gh must be present and authenticated and `gh repo view
   --json hasIssuesEnabled` true; a custom adapter is not probed); when the
   check or the list fails, an explicit --sources github exits 2, the default
-  one is reported and skipped. Hand-written ledgers: tracked *.md files
-  with a table whose header has a "#" column and a column linking item
-  files, plus every config legacy_ledgers file; each with its legacy id
+  one is reported and skipped. Hand-written ledgers: the files config
+  legacy_ledgers names, when it names any (no other file is read for
+  tables, here or in --accept); else the tracked *.md files with a table
+  whose header has a "#" column and a column linking item files — set
+  legacy_ledgers to the ones that are ledgers; each with its legacy id
   (legacy_ledgers, else the file stem minus "-ledger") and its rows (the
   "#" cell, else n<ordinal in the file>). The registry:
   --registry <file> (ledger-registry/1, else exit 2), else
@@ -2625,8 +2627,9 @@ ledger init|cmd_ledger_init|repo|dry-run registry= report= accept= import source
   characters; key), stubs for the open rows of hand-written ledgers that
   link no item (docs/issues/<today>-<slug>.md, or through the items
   adapter's create when items.globs is []), legacy.json entries for every
-  row (<legacy-id>#<row> → key, item or archived; existing entries are
-  kept, a disagreeing one is a finding, exit 1), then renders the views
+  row (<legacy-id>#<row> → key, item or archived; a row legacy.json
+  already holds is left alone — no stub, no finding: pre-seeded entries
+  are authoritative), then renders the views
   into the cache and prints the paths to review and commit. --dry-run
   prints the plan and writes nothing. A second run changes nothing.
   --import turns the hosted items (items.adapter: list, get) into
