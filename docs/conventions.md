@@ -331,7 +331,7 @@ The `replaces` and `superseded_by` fields in `.doc-index.json` track the chain:
 
 Specs use sequential numbering within their category: `SPEC-{CAT}-NNN-{slug}.md`, zero-padded to 3 digits. A number is never reused, even after its spec is archived: the next one is one past the highest for that category in `docs/specs/` **and** `docs/archive/specs/` (e.g., `SPEC-AUTH-003` when `docs/specs/` holds `SPEC-AUTH-001` and `docs/archive/specs/` holds `SPEC-AUTH-002`). A spec that supersedes another takes a new number the same way.
 
-ADRs follow the same rule without categories: `ADR-NNN`, sequential and never reused, one past the highest number in the ADR directory (`docs/adr/`) **and** `docs/archive/adr/`, so an archived ADR's number is never issued again.
+ADRs follow the same rule without categories: `ADR-NNN`, sequential and never reused, one past the highest number in the ADR directory (e.g. `docs/adr/`) **and** `docs/archive/adr/`, so an archived ADR's number is never issued again.
 
 ## Doc-Index Schema Conventions
 
