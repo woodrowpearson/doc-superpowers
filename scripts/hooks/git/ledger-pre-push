@@ -9,8 +9,11 @@
 # stdin again, unread, so whatever runs after this block — your own checks,
 # a token guard — reads exactly the lines git sent. The block reads its own
 # descriptor (9) of that file, and unlinks it before any check runs, so
-# nothing is left behind however the hook ends. No temp file: the push is
-# refused. DOC_SUPERPOWERS_LEDGER_SKIP=1 skips it, with a line saying so.
+# nothing is left behind however the hook ends. No temp file, a copy that
+# fails (a full disk, a write error) or a redirect that fails: the push is
+# refused — git's lines are gone from stdin by then, and whatever runs next
+# would read nothing and pass. DOC_SUPERPOWERS_LEDGER_SKIP=1 skips it, with
+# a line saying so.
 if [ "${DOC_SUPERPOWERS_LEDGER_SKIP:-}" = 1 ]; then
   echo "ledger: pre-push check skipped (DOC_SUPERPOWERS_LEDGER_SKIP=1)" >&2
 elif [ -f docs/ledger/config.json ]; then
@@ -21,9 +24,11 @@ elif [ -f docs/ledger/config.json ]; then
   elif ! DOC_SP_LG_IN=$(mktemp "${TMPDIR:-/tmp}/doc-sp-ledger-push.XXXXXX"); then
     echo "ledger: push refused: cannot create a temp file for the ref lines, so the provisional-key check cannot run (DOC_SUPERPOWERS_LEDGER_SKIP=1 skips it)" >&2
     exit 1
+  elif ! cat > "$DOC_SP_LG_IN" || ! exec < "$DOC_SP_LG_IN" 9< "$DOC_SP_LG_IN"; then
+    rm -f "$DOC_SP_LG_IN"
+    echo "ledger: push refused: git's ref lines could not be copied to $DOC_SP_LG_IN (a full disk?), so the checks after this one would read nothing (DOC_SUPERPOWERS_LEDGER_SKIP=1 skips it)" >&2
+    exit 1
   else
-    cat > "$DOC_SP_LG_IN"
-    exec < "$DOC_SP_LG_IN" 9< "$DOC_SP_LG_IN"
     rm -f "$DOC_SP_LG_IN"
     DOC_SP_LG_RC=0
     while read -r DOC_SP_LG_LR DOC_SP_LG_LO DOC_SP_LG_RR DOC_SP_LG_RO DOC_SP_LG_X <&9 || [ -n "${DOC_SP_LG_LR:-}" ]; do

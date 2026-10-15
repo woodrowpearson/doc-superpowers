@@ -11,9 +11,11 @@
 # the notices, held to HOOK_LINES_MAX (15) lines in all, the rest counted
 # with the command for the full list, and to the character bound (hook-lib.sh
 # _clip). info notices are left to `ledger notices`. None: nothing printed.
-# The check gets BUDGET seconds (hook-lib.sh _bounded): past that it is
+# The check gets BUDGET (2) seconds (hook-lib.sh _bounded): past that it is
 # killed, with everything it started, and one line says so; a check that
-# fails says so in one line. Silent without docs/ledger/config.json,
+# fails says so in one line. With in-flight awareness off (config
+# inflight.enabled, false by default) there are no notices: silent, and
+# doc-tools.sh is not run. Silent without docs/ledger/config.json,
 # doc-tools.sh or jq. Always exits 0. DOC_SUPERPOWERS_LEDGER_SKIP=1 turns it
 # off.
 
@@ -24,7 +26,7 @@
 [ -t 0 ] || cat >/dev/null 2>&1
 
 HOOK_EVENT=SessionStart
-BUDGET=7
+BUDGET=2
 # The shared library beside this script, as an absolute path: the cd below
 # would break a relative one.
 case "${BASH_SOURCE[0]}" in
@@ -39,6 +41,9 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || exit 0
 [[ -f "$DOC_TOOLS" ]] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 have_jq=1
+# In-flight awareness off (the default; the host's value replaces it): no
+# notices, nothing to run.
+jq -e '.inflight.enabled == true' docs/ledger/config.json >/dev/null 2>&1 || exit 0
 
 # shellcheck source=scripts/hooks/claude/hook-lib.sh
 if ! . "$_lib" 2>/dev/null; then
