@@ -3593,8 +3593,72 @@ test_claims_check_findings_counted_once() {
   assert_eq "0|ok" "$CK_RC|$(_out "$out" status)" "…and exit 0: ok (the stand-in is sound)"
 }
 
+# ck_fence_plan <stem> <line>…: in the cwd, plan docs/superpowers/plans/<stem>.md
+# holding the lines, and a gate-record dir for it with no final.json (so
+# claims-check.sh attests the plan only when it reads it as Completed).
+ck_fence_plan() {
+  local stem="$1"
+  shift
+  mkdir -p docs/superpowers/plans "docs/spec-claims/gates/$stem"
+  printf '%s\n' "# Plan $stem" '' "$@" > "docs/superpowers/plans/$stem.md"
+  printf '{}\n' > "docs/spec-claims/gates/$stem/chunk-1.json"
+}
+
+test_claims_check_pr_completed_pairs_fences_like_the_plan_parser() {
+  echo "Test: claims-check.sh pr — Completed is read outside code fences paired the CommonMark way, as the plan parser reads it"
+  local repo out fake_dir fake argv stem
+  repo=$(new_repo)
+  (
+    cd "$repo" || exit 1
+    mkdir -p docs/spec-claims
+    printf '%s\n' '{"schema":1,"base":"main"}' > docs/spec-claims/config.json
+    git add -A && git commit -qm "claims enabled"
+    git rev-parse HEAD > .git/ck-base
+    git checkout -qb feature
+    # Not Completed: the line sits inside a fence (claims_fence_kinds' pairing:
+    # a closer is the opener's character, a run at least as long, no info
+    # string; the opener may be indented by spaces or tabs).
+    ck_fence_plan nested '````markdown' '```' '**Status**: Completed' '```' '````'
+    ck_fence_plan tilde '~~~~markdown' '~~~' '**Status**: Completed' '~~~~'
+    ck_fence_plan mixed '```markdown' '~~~' '**Status**: Completed' '~~~' '```'
+    ck_fence_plan info-closer '```' '```js' '**Status**: Completed' '```'
+    ck_fence_plan tab-indented $'\t```' '**Status**: Completed' $'\t```'
+    ck_fence_plan fenced '```' '**Status**: Completed' '```'
+    # Completed: the line is outside every fence (a backtick run whose info
+    # string holds a backtick opens none), a tab after the colon included.
+    ck_fence_plan nested-then '````markdown' '```' '**Status**: Draft' '```' '````' '' '**Status**: Completed'
+    ck_fence_plan backtick-info '``` a`b' '**Status**: Completed'
+    ck_fence_plan tab-value $'**Status**:\tCompleted'
+    ck_fence_plan plain '**Status**: Completed'
+    printf '%s\n' '---' 'status: completed' '---' '# Plan front-matter' > docs/superpowers/plans/front-matter.md
+    mkdir -p docs/spec-claims/gates/front-matter
+    printf '{}\n' > docs/spec-claims/gates/front-matter/chunk-1.json
+    git add -A && git commit -qm "the plans"
+  ) || { assert_true "fence-plan fixture" false; return 0; }
+  # A stand-in doc-tools (clean verdicts), its argv logged: only the plans
+  # claims-check.sh selects matter here.
+  fake_dir=$(harness_mktemp_d fence-dt)
+  fake=$(ck_fake_dt "$fake_dir")
+  printf '#!/bin/sh\necho "$*" >> "%s/argv"\nexec "%s" "$@"\n' "$fake_dir" "$fake" > "$fake_dir/log.sh"
+  chmod 755 "$fake_dir/log.sh"
+  : > "$fake_dir/argv"
+  out="$(harness_mktemp_d step)/out"
+  ck_run "$repo" "$out" pr DOC_TOOLS="$fake_dir/log.sh" FAKE_CLEAN=1
+  assert_eq "0|ok" "$CK_RC|$(_out "$out" status)" "the stand-in run: rc 0, status ok"
+  argv=$(cat "$fake_dir/argv")
+  for stem in nested tilde mixed info-closer tab-indented fenced; do
+    assert_not_contains "$argv" "claims attest --plan docs/superpowers/plans/$stem.md --final" \
+      "$stem: the Completed line is fenced, so the plan is not attested"
+  done
+  for stem in nested-then backtick-info tab-value plain front-matter; do
+    assert_contains "$argv" "claims attest --plan docs/superpowers/plans/$stem.md --final" \
+      "$stem: Completed outside every fence, so the plan is attested"
+  done
+}
+
 test_claims_check_pr_deleted_claims_dir_fails
 test_schedule_close_no_index_claims_ok
 test_claims_check_findings_counted_once
+test_claims_check_pr_completed_pairs_fences_like_the_plan_parser
 
 print_summary

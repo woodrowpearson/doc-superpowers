@@ -177,17 +177,38 @@ claims() {
 
 # is_completed <plan>: a `**Status**: Completed` line outside a code fence,
 # or front matter `status: completed` (the plan parser's rule, any case).
+# Fences pair as the plan parser pairs them (doc-tools' claims_fence_kinds,
+# CommonMark's rule): a run of 3+ backticks or tildes after any spaces or
+# tabs opens one (a backtick run only when the rest of its line holds no
+# backtick); it closes only on a run of the same character at least as long
+# with nothing but spaces or tabs after it. Every line is classed first, the
+# front matter's included; a fenced line, its delimiters included, is then
+# read as blank, and tabs as spaces, as the parser reads its masked plan.
 is_completed() {
-  awk '
+  LC_ALL=C awk '
     { sub(/\r$/, "") }
+    {
+      t = $0
+      sub(/^[ \t]*/, "", t)
+      ch = substr(t, 1, 1)
+      n = 0
+      if (ch == "`" || ch == "~") while (substr(t, n + 1, 1) == ch) n++
+      rest = substr(t, n + 1)
+      if (fc == "") {
+        if (n >= 3 && (ch == "~" || index(rest, "`") == 0)) { fc = ch; fn = n; $0 = "" }
+      } else {
+        if (n >= 3 && ch == fc && n >= fn && rest ~ /^[ \t]*$/) { fc = ""; fn = 0 }
+        $0 = ""
+      }
+      gsub(/\t/, " ")
+    }
     NR == 1 && /^---[ ]*$/ { fm = 1; next }
     fm == 1 {
       if ($0 ~ /^(---|\.\.\.)[ ]*$/) { fm = 2; next }
       if (tolower($0) ~ /^status[ ]*:[ ]*["\047]?completed["\047]?[ ]*$/) found = 1
       next
     }
-    /^[ ]*(```|~~~)/ { fence = !fence; next }
-    !fence && tolower($0) ~ /^[ ]*([-+*][ ]+)?\*\*status(\*\*:|:\*\*)[ ]*completed([^a-z]|$)/ { found = 1 }
+    tolower($0) ~ /^[ ]*([-+*][ ]+)?\*\*status(\*\*:|:\*\*)[ ]*completed([^a-z]|$)/ { found = 1 }
     END { exit !found }' "$1"
 }
 
