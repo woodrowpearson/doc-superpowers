@@ -2351,9 +2351,10 @@ ledger show|cmd_ledger_show|repo|refresh format=
   matched case-insensitively and may be spaced: checkout-14, checkout 14,
   checkout #14 (one argument or several words); a provisional key that
   was finalized reaches its key (docs/ledger/finalized.json); a legacy
-  ref (<old>#<n>, "<old> #<n>", "<old> row <n>", "<old> ledger row
-  <n>"; <n> digits and an optional letter, 21c — leading zeros and case
-  do not matter) is looked up
+  ref (<old>#<n>, "<old> row <n>", "<old> ledger row <n>", and "<old>
+  #<n>" for a letter-suffixed row only — with digits alone it is a key;
+  <n> digits and an optional letter, 21c — leading zeros and case do not
+  matter) is looked up
   in the legacy map — an archived row prints "archived: <anchor>"; <path>
   is from the top level (a path stem, as ls prints for an item without a
   key, works too). Unknown: exit 1; several items: exit 3. Every ledger
@@ -2630,14 +2631,19 @@ ledger init|cmd_ledger_init|repo|dry-run registry= report= accept= import source
   aliases; offline: provisional), the item fields (ledger; summary when
   missing — the legacy row's bold lead, the H1, the first sentence, ≤ 140
   characters; key), stubs for the open rows of hand-written ledgers that
-  link no item (a row is done when its State starts with done, shipped,
-  resolved, closed, superseded, dropped or a config status.fixed, closed
-  or wontfix value — any case; ~~, blanks, -, _ and ' ignored: WONT-FIX)
+  link no item (a row is done when its State's first words are done,
+  shipped, resolved, closed, superseded, dropped or a config status.fixed,
+  closed or wontfix value, or when its first words run together spell
+  one — any case; ~~, *, ` and apostrophes dropped, any other run of
+  non-alphanumerics splits words: WONT-FIX, Won't fix and wontfix are
+  done, "Do next" and "Closing" are not)
   (docs/issues/<today>-<slug>.md, or through the items
   adapter's create when items.globs is []), legacy.json entries for every
   row (<legacy-id>#<row> → key, item or archived; a row legacy.json
   already holds is left alone — no stub, no finding: pre-seeded entries
-  are authoritative), then renders the views
+  are authoritative; its key is read as show reads one, so x#7 is the
+  row numbered 07; the summary line and JSON legacy.kept count these
+  rows), then renders the views
   into the cache and prints the paths to review and commit. --dry-run
   prints the plan and writes nothing. A second run changes nothing.
   --import turns the hosted items (items.adapter: list, get) into

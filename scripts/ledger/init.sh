@@ -5,7 +5,8 @@
 # glob.sh's _LG_AWK_GLOB / _lg_owner_map, parse.sh's _LG_AWK_JS, _LG_BOM,
 # _lg_scratch_name, validate.sh's _lg_registry_findings, index.sh's
 # _lg_index / _lg_ix_items_km, adapters.sh's _lg_adapter_path / _lg_adapter
-# / _lg_remote_cache and doc-tools.sh's _hash_one / _opt_seen.
+# / _lg_remote_cache, keys.sh's _LG_JQ_KEYS_DEFS / _LG_JQ_RESOLVE_DEFS
+# (lg_r_lkey) and doc-tools.sh's _hash_one / _opt_seen.
 #
 # init runs without docs/ledger/config.json (doc-tools.sh _lg_enter exempts
 # it from the inert check): on the default config ({}). One mode per run:
@@ -220,7 +221,8 @@ _lg_init_gh_check() {
 #                                    resolves to; item: it is an item file)
 #                                    — in its Tracker… column when the header
 #                                    has one (a cell starting "tracker", any
-#                                    case), else in any cell; never a dep:
+#                                    case, * and _ dropped: **Tracker**),
+#                                    else in any cell; never a dep:
 #                                    link (isdep)
 #   {"t":"M","file"}                 a legacy_ledgers file that cannot be read
 # Item files are read through their frontmatter only.
@@ -294,17 +296,18 @@ function lastidx(s, c,   i, k) {
 }
 # isdep(label, before): a dependency link, not the tracker of the row — its
 # label starts with "dep:", or the text just before it (since the previous
-# link; trailing blanks and * _ emphasis dropped) ends with the word
-# "dep:", any case: [dep: x](…), dep: [x](…), **dep:** [x](…).
+# link; trailing blanks dropped) ends with the word "dep:", any case, the
+# * and _ of emphasis dropped from both: [dep: x](…), [_dep:_ x](…),
+# dep: [x](…), **dep:** [x](…), _dep:_ [x](…).
 function isdep(label, before,   n) {
-  label = tolower(label); sub(/^[*_ \t]+/, "", label)
+  label = tolower(label); gsub(/[*_]/, "", label); sub(/^[ \t]+/, "", label)
   if (substr(label, 1, 4) == "dep:") return 1
-  before = tolower(before); sub(/[*_ \t]+$/, "", before)
+  before = tolower(before); gsub(/[*_]/, "", before); sub(/[ \t]+$/, "", before)
   n = length(before)
   if (n < 4 || substr(before, n - 3) != "dep:") return 0
-  return n == 4 || substr(before, n - 4, 1) !~ /[a-z0-9_-]/
+  return n == 4 || substr(before, n - 4, 1) !~ /[a-z0-9-]/
 }
-function scan(p, flag,   line, n, infm, isitem, fence, prev, intable, hcol, scol, tcol, nc, i, j, ord, rid, rest, t, base, st, sc, cl, pre, lb, dep) {
+function scan(p, flag,   line, n, infm, isitem, fence, prev, intable, hcol, scol, tcol, nc, i, j, ord, rid, rest, t, base, st, sc, cl, pre, lb, dep, hc) {
   gx_match(p)
   isitem = (GX_MN > 0)
   base = dirof(p)
@@ -368,7 +371,8 @@ function scan(p, flag,   line, n, infm, isitem, fence, prev, intable, hcol, scol
       for (i = 1; i <= nc; i++) {
         if (hcol == 0 && C[i] == "#") hcol = i
         if (scol == 0 && tolower(C[i]) ~ /^(state|status)/) scol = i
-        if (tcol == 0 && tolower(C[i]) ~ /^tracker/) tcol = i
+        hc = tolower(C[i]); gsub(/[*_]/, "", hc)
+        if (tcol == 0 && trim(hc) ~ /^tracker/) tcol = i
       }
       if (hcol > 0) intable = 1
       prev = ""
@@ -961,17 +965,25 @@ def lg_t140:
 def lg_sent: (capture("^(?<s>.*?[.!?])(\\s|$)") // null) as $m | if $m == null then . else $m.s end;
 def lg_unlink: gsub("\\[(?<t>[^\\]]*)\\]\\([^)]*\\)"; "\(.t)") | gsub("\\*\\*|~~"; "") | lg_t140;
 def lg_stubslug: ascii_downcase | gsub("[^a-z0-9]+"; "-") | sub("^-+"; "") | .[0:50] | sub("-+$"; "") | if . == "" then "item" else . end;
-# A State cell is done when its lead, normalised (lg_dnorm: lower case; ~~,
-# * and ` dropped; blanks, -, _ and apostrophes removed), starts with a
-# term of lg_done_terms($c): the built-in words, and every config
-# status.fixed / closed / wontfix value normalised the same way.
-def lg_dnorm: ascii_downcase | gsub("~~|[*`]"; "") | gsub("[\\s_'"'"'\u2019-]"; "");
+# A State cell is done (Task 16b U6, fix round 1) when its words
+# (lg_dwords: lower case; ~~, *, ` and apostrophes, ASCII and U+2019,
+# dropped; split at every other run of non-alphanumerics) begin with the words
+# of a term of lg_done_terms($c) — the built-in words and every config
+# status.fixed / closed / wontfix value, split the same way — or when its
+# first k <= 3 words run together equal the term run together: WONT-FIX,
+# Wont fix and wontfix all match the default wontfix terms; "Do next" and
+# "Closing" match nothing.
+def lg_dwords: ascii_downcase | gsub("~~|[*`'"'"'\u2019]"; "") | [splits("[^a-z0-9]+") | select(. != "")];
 def lg_done_terms($c):
-  (["done", "shipped", "resolved", "closed", "superseded", "dropped"]
+  ([["done"], ["shipped"], ["resolved"], ["closed"], ["superseded"], ["dropped"]]
    + [("fixed", "closed", "wontfix") as $cl
       | ($c.status // {})[$cl] | if type == "array" then .[] elif type == "string" then . else empty end
-      | strings | lg_dnorm | select(. != "")]) | unique;
-def lg_done($T): lg_dnorm as $s | any($T[]; . as $t | $s | startswith($t));
+      | strings | lg_dwords | select(length > 0)]) | unique;
+def lg_done($T):
+  lg_dwords as $w
+  | any($T[]; . as $t
+        | $w[0:($t | length)] == $t
+          or (($t | join("")) as $j | any(range(1; ([3, ($w | length)] | min) + 1); $w[0:.] | join("") == $j)));
 def lg_str: if type == "string" and . != "" then . else null end;
 '
 
@@ -982,7 +994,7 @@ _LG_JQ_ACCEPT_PLAN='
 | (reduce $I[] as $i ({}; .[$i.path] = $i)) as $IT
 | ([$reg[0].ledgers[] | select((.id | type) == "string")]
    | reduce .[] as $l ({}; .[$l.id] = ($l.status | if type == "string" then . else "active" end))) as $RS
-| ($lgy[0] | if type == "object" then . else {} end) as $E
+| (reduce (($lgy[0] | if type == "object" then . else {} end) | keys[]) as $k ({}; .[$k | lg_r_lkey] = true)) as $EK
 | lg_legacy_ids($c) as $legid
 | lg_done_terms($c) as $DONE
 | (($c.fields.aliases // "aliases") | if type == "array" then [.[] | strings] else [.] end) as $AN
@@ -1007,8 +1019,10 @@ _LG_JQ_ACCEPT_PLAN='
 | [ $LR[]
     | ("Migrated from \(.file) row \(.row).") as $mig
     # An entry already in legacy.json is authoritative (a host may pre-seed
-    # them): the row is left alone — no stub, no finding, no new entry.
-    | if $E[.id] != null then {id, kind: "kept"}
+    # them): the row is left alone — no stub, no finding, no new entry. Its
+    # key is read as resolution reads one (lg_r_lkey: any case, the row
+    # without leading zeros): a pre-seeded x#7 is the row whose cell is 07.
+    | if $EK[.id | lg_r_lkey] then {id, kind: "kept"}
       elif .item != null then {id, kind: "item", path: .item}
       elif .done then {id, kind: "archived", archived: "\(.file)#\(.row)"}
       elif $MIG[$mig] != null then {id, kind: "item", path: $MIG[$mig]}
@@ -1211,7 +1225,7 @@ _lg_init_accept() {
   # Phase 1: validate and plan.
   jq -L "$_LG_LIB" -n -c --slurpfile c "$_LG_CFG" --slurpfile ix "$ix" --slurpfile reg "$reg" --slurpfile d "$s.dec" \
       --slurpfile scan "$s.scan" --slurpfile lgy "$s.lgy" --argjson hstub "$hstub" \
-      "$_LG_JQ_INIT_DEFS$_LG_JQ_KEYS_DEFS$_LG_JQ_ACCEPT_DEFS$_LG_JQ_ACCEPT_PLAN" > "$s.plan" \
+      "$_LG_JQ_INIT_DEFS$_LG_JQ_KEYS_DEFS$_LG_JQ_RESOLVE_DEFS$_LG_JQ_ACCEPT_DEFS$_LG_JQ_ACCEPT_PLAN" > "$s.plan" \
     || _lg_die "jq failed (the --accept plan)"
 
   # Phase 2: the stubs' paths (the item directory, _lg_init_item_dir; a
@@ -1445,6 +1459,7 @@ _lg_init_accept_apply() {
   # shellcheck disable=SC2016  # jq source
   jq -r --slurpfile p "$s.plan" --argjson dry "$dry" '
     "ledger init --accept: \($p[0].apply | length) row(s) applied, \($p[0].skipped) without a decision (left alone)"
+    + "; \([$p[0].legacy[] | select(.kind == "kept")] | length) row(s) already in legacy.json, left alone"
     + ([.keys[], (.stubs[] | select(.key != null))] | length | if . > 0 then "; \(.) key(s)" else "" end)
     + (if $dry == 1 then " — dry run: nothing was written" else "; review and commit the files above" end)' "$s.final" >> "$s.lines" \
     || _lg_die "jq failed (summary)"
@@ -1462,7 +1477,8 @@ _lg_init_accept_apply() {
          stubs: ([.stubs[] | select(.hosted | not) | {path, row: "\(.file)#\(.row)", id, ledger, key, hosted: false}]
                  + [range(0; ($c | length) / 3 | floor) as $i | {path: $c[$i * 3 + 1], id: $c[$i * 3], key: (if $c[$i * 3 + 2] == "" then null else $c[$i * 3 + 2] end), hosted: true}]
                  + (if $dry then [.stubs[] | select(.hosted) | {path: null, row: "\(.file)#\(.row)", id, ledger, key, hosted: true}] else [] end)),
-         legacy: {path: (if $lg == "" then null else $lg end), added: ($n[0] | keys)},
+         legacy: {path: (if $lg == "" then null else $lg end), added: ($n[0] | keys),
+                  kept: ([$p[0].legacy[] | select(.kind == "kept")] | length)},
          skipped: $p[0].skipped,
          views: (if $views == "" then null else $views end)}' "$s.final" > "$s.payload" || _lg_die "jq failed (payload)"
     _lg_emit init 0 "$s.payload"

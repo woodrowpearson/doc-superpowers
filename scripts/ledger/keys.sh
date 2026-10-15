@@ -14,8 +14,9 @@
 #   2. a key or an alias, case-insensitive: "L-14", or "L 14" / "L #14"
 #      (read as "L-14"); a provisional key recorded in
 #      docs/ledger/finalized.json reaches the key it became;
-#   3. a legacy ref "<old>#<n>", "<old> #<n>", "<old> row <n>", "<old>
-#      ledger row <n>" (case-insensitive; <n> digits and an optional
+#   3. a legacy ref "<old>#<n>", "<old> row <n>", "<old> ledger row <n>",
+#      or "<old> #<n>" for a letter-suffixed row only (with digits alone
+#      it is a key form, 2) (case-insensitive; <n> digits and an optional
 #      letter, "21c": canonical without leading zeros and in lower case,
 #      "07B" → "7b" — a map key's row is read the same way), looked up as
 #      "<id>#<n>" in the legacy map
@@ -139,7 +140,11 @@ def lg_resolve($ref; $cfg):
       | (if $k == null then [] else lg_r_keyish($ix; $k) end) as $m
       | if $m != [] then lg_r_one($m)
         else
-          ($r | capture("^(?<o>[^\\s#]+)\\s*#(?<n>[0-9]+[A-Za-z]?)$")
+          # "<old> #<n>" spaced is a key form ("L #14", step 2): as a legacy
+          # ref it takes a letter-suffixed row only, so a missing key never
+          # falls through to a legacy row of the same number.
+          ($r | capture("^(?<o>[^\\s#]+)#(?<n>[0-9]+[A-Za-z]?)$")
+                // capture("^(?<o>[^\\s#]+)\\s+#(?<n>[0-9]+[A-Za-z])$")
                 // capture("^(?<o>\\S+)\\s+(?:ledger\\s+)?row\\s+#?(?<n>[0-9]+[a-z]?)$"; "i") // null) as $lg
           | (if $lg == null then null else lg_r_legacy($ix; $cfg; $lg.o; ($lg.n | lg_r_row)) end) as $e
           | if $e != null then

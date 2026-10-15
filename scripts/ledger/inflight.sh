@@ -771,13 +771,16 @@ END {
 # The plan words (awk): stdin `git cat-file --batch` (NUL → \001) for
 # "<tip>:<path>" lines (-v req: the same lines, in order). Prints
 # "K\t<tip>\t<word>" per distinct key-shaped word (lowercased) of each
-# blob. Each header takes one request; a header past the last request,
-# or a line where a header belongs that is none, is a stream out of step
-# with its requests: exit 3 (the caller dies), never a short read that
-# passes — or that only fails when git, past the pipe buffers, dies of
-# SIGPIPE.
+# blob. Each header takes one request. As frontmatter.awk's batch mode, a
+# stream out of step with its requests exits 3 (the caller dies): a header
+# past the last request, a line where a header belongs that is none, a
+# separator line that is not empty, an object whose lines overrun its
+# size, a stream that ends inside an object or before every request has
+# its object — never a short read that passes, or that only fails when
+# git, past the pipe buffers, dies of SIGPIPE.
 # shellcheck disable=SC2016  # awk source
 _LG_AWK_IFL_WORDS='
+function desync() { DIE = 1; exit 3 }
 function words(s,   n, i, w, W, j) {
   s = tolower(s); gsub(/[^a-z0-9-]+/, " ", s)
   n = split(s, W, " ")
@@ -794,11 +797,11 @@ BEGIN { left = -1 }
   # -2: this line is the separator after an object that ended on a
   # newline (or was empty) — tested first, since -2 < 0 would read it as
   # a header and take the next request with it.
-  if (left == -2) { left = -1; next }
+  if (left == -2) { if ($0 != "") desync(); left = -1; next }
   if (left < 0) {
-    if ((getline r < req) <= 0) exit 3
+    if ((getline r < req) <= 0) desync()
     if ($0 ~ / (missing|ambiguous)$/) next
-    if ($0 !~ /^[0123456789abcdef]+ (blob|tree|commit|tag) [0123456789]+$/) exit 3
+    if ($0 !~ /^[0123456789abcdef]+ (blob|tree|commit|tag) [0123456789]+$/) desync()
     t = index(r, ":"); tip = substr(r, 1, t - 1)
     blob = ($2 == "blob")
     left = $3 + 0
@@ -812,7 +815,12 @@ BEGIN { left = -1 }
   # ended it).
   left -= length($0) + 1
   if (left == 0) left = -2
-  else if (left < 0) left = -1
+  else if (left < -1) desync()
+}
+# An `exit` in a rule still runs END: DIE says it was a desync already.
+END {
+  if (DIE) exit 3
+  if (left != -1 || (getline r < req) > 0) exit 3
 }'
 
 # _lg_ifl_sig: the facts signature into _LG_IFL_SIG (16 hex, part of every
