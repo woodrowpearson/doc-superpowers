@@ -9258,8 +9258,8 @@ _claims_v8n() {
 # --- Spec claims: claim-bound test edits, V9 ------------------------------------
 #
 # V9 lists the claims whose bound tests a change edits, to be adjudicated:
-# states still holds (gate --holds <id>), or a ruling. Each configured
-# runner's adapter is called `edited-bound-tests <arg>` (§D), <arg> being
+# states still holds (gate --holds <id> --by <principal>), or a ruling. Each
+# configured runner's adapter is called `edited-bound-tests <arg>` (§D), <arg> being
 # --staged under validate --staged, <merge-base>..HEAD under validate --all
 # (skipped when _CL_MB is empty: _claims_init's base-unresolvable row covers
 # it) and <from>..HEAD under gate. It prints one claim id per line. Each id
@@ -9348,7 +9348,7 @@ _claims_v9() {
   _claims_jq v9-indeterminate -c 'select(.ok | not) | {check: "V9", claim: null, reason}' "$calls" \
     >> "$_SCRATCH/cl-indet.jsonl"
   _claims_jq v9 -c --slurpfile calls "$calls" \
-    --arg msg "bound test edited: adjudicate (states still holds → gate --holds <id>, else a ruling)" \
+    --arg msg "bound test edited: adjudicate (states still holds → gate --holds <id> --by <principal>, else a ruling)" \
     "$_JQ_CLAIMS_MUTANT_DEFS $_JQ_CLAIMS_V9" "$_SCRATCH/cl-claims.json" > "$rows"
   if [ "$arg" != --staged ] && [ -s "$rows" ]; then
     _claims_range_merges "$arg" "$ms"
