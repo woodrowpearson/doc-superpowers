@@ -1,0 +1,47 @@
+# The work ledger's pre-push leg (POSIX sh; install.sh wraps it in its
+# markers). With keys.mode cas, a push whose commits add a provisional key
+# (<ledger>-~<hex>) is refused: doc-tools.sh ledger validate --pushed
+# <remote oid>..<local oid> for each ref pushed — from all zeros (every
+# provisional key at the pushed tip) for a new branch, and when the remote
+# oid is not here or not an ancestor; a deletion is skipped. Any non-zero
+# refuses the push.
+# git's ref lines (stdin) are copied to a temp file that becomes this hook's
+# stdin again, unread, so whatever runs after this block — your own checks,
+# a token guard — reads exactly the lines git sent. The block reads its own
+# descriptor (9) of that file, and unlinks it before any check runs, so
+# nothing is left behind however the hook ends. No temp file: the push is
+# refused. DOC_SUPERPOWERS_LEDGER_SKIP=1 skips it, with a line saying so.
+if [ "${DOC_SUPERPOWERS_LEDGER_SKIP:-}" = 1 ]; then
+  echo "ledger: pre-push check skipped (DOC_SUPERPOWERS_LEDGER_SKIP=1)" >&2
+elif [ -f docs/ledger/config.json ]; then
+  DOC_SP_LG_TOOLS=${DOC_TOOLS:-}
+  [ -n "$DOC_SP_LG_TOOLS" ] || DOC_SP_LG_TOOLS=$(__DOC_TOOLS_RESOLVE__)
+  if [ ! -f "$DOC_SP_LG_TOOLS" ]; then
+    echo "ledger: doc-tools.sh not found ($DOC_SP_LG_TOOLS): pre-push check skipped" >&2
+  elif ! DOC_SP_LG_IN=$(mktemp "${TMPDIR:-/tmp}/doc-sp-ledger-push.XXXXXX"); then
+    echo "ledger: push refused: cannot create a temp file for the ref lines, so the provisional-key check cannot run (DOC_SUPERPOWERS_LEDGER_SKIP=1 skips it)" >&2
+    exit 1
+  else
+    cat > "$DOC_SP_LG_IN"
+    exec < "$DOC_SP_LG_IN" 9< "$DOC_SP_LG_IN"
+    rm -f "$DOC_SP_LG_IN"
+    DOC_SP_LG_RC=0
+    while read -r DOC_SP_LG_LR DOC_SP_LG_LO DOC_SP_LG_RR DOC_SP_LG_RO DOC_SP_LG_X <&9 || [ -n "${DOC_SP_LG_LR:-}" ]; do
+      case "$DOC_SP_LG_LO" in
+        *[!0]*) ;;
+        *) continue ;;
+      esac
+      git rev-parse -q --verify "$DOC_SP_LG_LO^{commit}" </dev/null >/dev/null 2>&1 || continue
+      if ! git merge-base --is-ancestor "$DOC_SP_LG_RO" "$DOC_SP_LG_LO" </dev/null >/dev/null 2>&1; then
+        DOC_SP_LG_RO=0000000000000000000000000000000000000000
+      fi
+      "$DOC_SP_LG_TOOLS" ledger validate --pushed "$DOC_SP_LG_RO..$DOC_SP_LG_LO" </dev/null 9<&- || DOC_SP_LG_RC=$?
+    done
+    exec 9<&-
+    if [ "$DOC_SP_LG_RC" != 0 ]; then
+      echo "ledger: push refused: doc-tools.sh ledger validate --pushed exited $DOC_SP_LG_RC (doc-tools.sh ledger finalize replaces provisional keys; DOC_SUPERPOWERS_LEDGER_SKIP=1 skips this check)" >&2
+      exit 1
+    fi
+  fi
+  unset DOC_SP_LG_IN DOC_SP_LG_TOOLS DOC_SP_LG_RC DOC_SP_LG_LR DOC_SP_LG_LO DOC_SP_LG_RR DOC_SP_LG_RO DOC_SP_LG_X
+fi

@@ -1,0 +1,22 @@
+# The work ledger's pre-commit leg (POSIX sh; install.sh wraps it in its
+# markers). doc-tools.sh ledger validate --staged: exit 1 (findings) or 2 (it
+# could not run) — any non-zero — blocks the commit. Silent without
+# docs/ledger/config.json; doc-tools.sh not found: one line, not blocked.
+# DOC_SUPERPOWERS_LEDGER_SKIP=1 skips it, with a line saying so.
+if [ "${DOC_SUPERPOWERS_LEDGER_SKIP:-}" = 1 ]; then
+  echo "ledger: validate --staged skipped (DOC_SUPERPOWERS_LEDGER_SKIP=1)" >&2
+elif [ -f docs/ledger/config.json ]; then
+  DOC_SP_LG_TOOLS=${DOC_TOOLS:-}
+  [ -n "$DOC_SP_LG_TOOLS" ] || DOC_SP_LG_TOOLS=$(__DOC_TOOLS_RESOLVE__)
+  if [ -f "$DOC_SP_LG_TOOLS" ]; then
+    DOC_SP_LG_RC=0
+    "$DOC_SP_LG_TOOLS" ledger validate --staged </dev/null || DOC_SP_LG_RC=$?
+    if [ "$DOC_SP_LG_RC" != 0 ]; then
+      echo "ledger: commit blocked: doc-tools.sh ledger validate --staged exited $DOC_SP_LG_RC (fix what it reports; DOC_SUPERPOWERS_LEDGER_SKIP=1 skips this check)" >&2
+      exit 1
+    fi
+  else
+    echo "ledger: doc-tools.sh not found ($DOC_SP_LG_TOOLS): validate --staged skipped" >&2
+  fi
+  unset DOC_SP_LG_TOOLS DOC_SP_LG_RC
+fi
