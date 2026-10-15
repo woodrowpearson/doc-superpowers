@@ -425,5 +425,6 @@ During review: /doc-superpowers spec-verify --mode=review --changed-files=<paths
   → Check if changes align with or contradict spec intent
   → Amendment landed-check for :amends specs → P1 Amendment not landed
   → Claims-enabled projects only: `claims run --planes-of <base>...HEAD` and V9 items → P1 Claim red
+    (skipped in a CI run: there `doc-spec-verify.yml`'s non-AI claims job is that check)
   → Output: coverage report per changed file
 ```
