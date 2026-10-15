@@ -10493,10 +10493,12 @@ _JQ_CLAIMS_REVERIFY_ALL='def nes: type == "string" and length > 0;
 #      (_claims_refuse_dirty), a plan absent at HEAD or without chunk <n>, a
 #      gates directory reached through a symbolic link (exit 2).
 #   2. from: --from, else the head of chunk-<n-1>.json (read from the work
-#      tree, where the previous gate wrote it), else _CL_MB. A from that is
-#      not a commit, or not an ancestor of HEAD, is indeterminate (exit 2)
-#      and no record is written: <from>..HEAD would not be this branch's
-#      work, and is never taken as empty.
+#      tree, where the previous gate wrote it, as attest reads a record:
+#      exactly one JSON object), else _CL_MB. A from that is not a commit,
+#      or not an ancestor of HEAD, and a chunk-<n-1>.json that is not one
+#      JSON object, are indeterminate (exit 2) and no record is written:
+#      <from>..HEAD would not be this branch's work, and is never taken as
+#      empty.
 #   3. The claims the chunk names on its **Claims:** lines, plus the
 #      --planes-of selection of <from>..HEAD, run through the run core
 #      (_claims_run_selected): the record's claims and verdicts.
@@ -10738,8 +10740,18 @@ cmd_claims_gate() {
   elif [ "$n" -gt 1 ] && { [ -e "$prev" ] || [ -L "$prev" ]; }; then
     _claims_contained_path "$prev" && [ -f "$prev" ] \
       || _claims_gate_indet "chunk $((n - 1))'s record $prev is reached through a symbolic link or is not a file"
-    # Its output is the answer (a record jq cannot parse: no head), so not _claims_jq.
-    x=$(jq -r 'if type == "object" and (.head | type) == "string" then .head else "" end' "$prev" 2>/dev/null) || x=""
+    # Its output is the answer (a record jq cannot parse: not JSON), so not
+    # _claims_jq. Read as attest reads a record: slurped, exactly one object,
+    # so a valid prefix with more after it (garbage, which jq 1.6 reads past
+    # and exits 0; a second value) is never taken for the record. "=" leads
+    # every usable answer, so empty output (jq 1.6 -s exits 0 on input it
+    # cannot parse) is never read as one.
+    x=$(jq -r -s 'if length == 1 and (.[0] | type) == "object"
+        then "=" + (.[0].head | if type == "string" then . else "" end) else "" end' "$prev" 2>/dev/null) || x=""
+    case "$x" in
+      =*) x=${x#=} ;;
+      *) _claims_gate_indet "chunk $((n - 1))'s record $prev is not one JSON object" ;;
+    esac
     from=""
     if [ -n "$x" ]; then from=$(git rev-parse -q --verify "$x^{commit}" 2>/dev/null) || from=""; fi
     [ -n "$from" ] || _claims_gate_indet "chunk $((n - 1))'s record $prev names no commit head (head: ${x:-none})"

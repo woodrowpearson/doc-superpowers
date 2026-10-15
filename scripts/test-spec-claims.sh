@@ -6880,6 +6880,40 @@ test_gate_from_defaults_previous_chunk_head() {
   teardown
 }
 
+test_gate_previous_record_read_strictly() {
+  echo "test: gate — chunk <n-1>'s record is read as attest reads it: exactly one JSON object, else indeterminate"
+  gate_fixture
+  gate_promote
+  local head1 good rec2="docs/spec-claims/gates/$PLAN_STEM/chunk-2.json" why
+  gate 1
+  head1=$(rec 1 .head)
+  printf 'Guide.\n' > docs/guide.md
+  git add docs/guide.md "$GATE_REC1" && git commit -qm "chunk 2 work"
+  good=$(harness_mktemp gate-rec1)
+  cp "$GATE_REC1" "$good"
+  why='.indeterminate[0].reason | test("chunk 1.s record .* is not one JSON object")'
+  # Valid JSON, then garbage: jq 1.6 reads the valid prefix and exits 0.
+  { cat "$good"; printf 'garbage{\n'; } > "$GATE_REC1"
+  gate 2
+  assert_eq "2" "$CL_RC" "chunk 1's record, a valid object then garbage: exits 2"
+  assert_json_field "$CL_OUT" "$why" "true" "…the record is not one JSON object"
+  assert_file_not_exists "$rec2" "…and no record is written"
+  # Valid JSON, then a second value: every jq reads the first one's head.
+  { cat "$good"; printf '{"x": 1}\n'; } > "$GATE_REC1"
+  gate 2
+  assert_eq "2" "$CL_RC" "a valid object then a second JSON value: exits 2"
+  assert_json_field "$CL_OUT" "$why" "true" "…the record is not one JSON object"
+  : > "$GATE_REC1"
+  gate 2
+  assert_eq "2" "$CL_RC" "an empty record: exits 2"
+  assert_json_field "$CL_OUT" "$why" "true" "…the record is not one JSON object"
+  cp "$good" "$GATE_REC1"
+  gate 2
+  assert_eq "0" "$CL_RC" "the record restored: exits 0"
+  assert_eq "$head1" "$(rec 2 .from)" "…from chunk 1's head"
+  teardown
+}
+
 test_gate_records_reconciliations_from_sidecar_changes() {
   echo "test: gate — a ruling naming this chunk's record is a reconciliation"
   gate_plain_fixture
@@ -10438,6 +10472,7 @@ run_tests() {
   test_gate_v8_v9_mandatory_blocking
   test_gate_dirty_tree_refused_exit_2
   test_gate_from_defaults_previous_chunk_head
+  test_gate_previous_record_read_strictly
   test_gate_records_reconciliations_from_sidecar_changes
   test_gate_unbuilt_cleared_only_by_doc_stale
   test_gate_ruling_citing_other_record_is_silent
