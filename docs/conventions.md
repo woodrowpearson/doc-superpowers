@@ -203,6 +203,14 @@ Generated documentation follows strict naming conventions for consistency and ma
 | `docs/plans/` | Audit reports and plans | n/a |
 | `docs/archive/` | Superseded/deleted docs by type | n/a |
 
+### This repo's exemptions from the Scope → Generated Docs Matrix
+
+doc-superpowers documents itself, but its own `docs/` does not follow every row of the *Scope → Generated Docs Matrix* (`skills/doc-superpowers/SKILL.md`). The owner ruled these exemptions on 2026-10-14. Audits record them and do not re-raise them, and `update` must not create the files.
+
+- **`docs/specs/` and `docs/adr/`**, the README and template pairs from the matrix's "Always" row: the templates' single source is `references/doc-spec.md` (the `docs/specs/template.md` and `docs/adr/template.md` sections). A copy under `docs/` would drift from it. This repo has no specs or ADRs of its own: its design decisions live in `docs/superpowers/specs/` (design docs) and in `docs/architecture/system-overview.md` (Key Decisions).
+- **`docs/ci-cd.md` and `docs/workflows/deployment.md`**, the `ci-cd` scope, which is detected from `.github/workflows/`: this repo deploys nothing. Its CI is `tests.yml` (the suites, `check-version` and the self-install drift check) plus the self-installed freshness workflows, all described in `CLAUDE.md` (Testing, Self-installed tiers) and in `references/hooks.md`.
+- **`docs/workflows/agentic/`**, the `agentic` scope: the skill's agentic workflow is documented in `docs/workflows/doc-superpowers.md`. This is a structural decision already recorded by the 2026-07-24 and 2026-09-28 audits.
+
 ### Diagram Co-location
 
 Diagrams live in `diagrams/` subdirectories within their parent section, not in a global `docs/diagrams/` directory:
