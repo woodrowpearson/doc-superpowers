@@ -1328,6 +1328,14 @@ assert_contains "$ACTIONS" 'Inject these only when `docs/spec-claims/` exists; o
 assert_contains "$ACTIONS" '6b. **Claim stubs**' "spec-generate step 6b writes claim stubs"
 assert_contains "$ACTIONS" 'DOC-STALE commit (with the record) → `promote` → commit → re-run Step 1' \
   "the gate's DOC-STALE re-promotion order"
+# P1-2: --holds without --by exits 3, so the chunk gate's Step 3 gives the
+# whole command, and Step 1 routes exit 3 (test-spec-claims.sh runs the
+# command: test_gate_reference_holds_command_runs).
+_cg=$(awk '/^   ### Task N\+1g:/ { s = 1 } s { print } s && /^   ````$/ { exit }' <<<"$ACTIONS")
+assert_contains "$_cg" '`$DOC_TOOLS claims gate --plan {plan-path} --chunk {C} --holds <id> --by <principal>`' \
+  "the chunk gate's Step 3 holds a V9 item with --holds <id> --by <principal>"
+assert_not_contains "$_cg" '`--holds <id>` when' "…never with a bare --holds <id>"
+assert_contains "$_cg" 'Exit 3 → a usage error' "the chunk gate's Step 1 routes exit 3"
 assert_contains "$ACTIONS" '**target**, fully covered by this plan → set `Implemented`, subject to R5.' \
   "Task N+2 Step 1's target branch is subject to R5"
 _dt_src="$REPO_ROOT/scripts/doc-tools.sh"

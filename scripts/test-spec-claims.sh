@@ -4415,7 +4415,7 @@ test_run_lint_structural_findings() {
 # The fixture made runnable (stub_runner) with its node bound (list_row), so
 # V3 holds; tools/claims/edited is what the stub's edited-bound-tests prints.
 
-V9_MSG="bound test edited: adjudicate (states still holds → gate --holds <id>, else a ruling)"
+V9_MSG="bound test edited: adjudicate (states still holds → gate --holds <id> --by <principal>, else a ruling)"
 
 v9_bound() {
   claims_fixture
@@ -6299,6 +6299,33 @@ test_v12_reference_template_passes() {
   git add "$PLAN"
   cl validate --staged
   assert_v12 "no final claims gate before the finalize task" "control: the final gate after the finalize task"
+  teardown
+}
+
+# The chunk gate template's Step 3 holds a V9 item with a command the
+# executing agent copies: run as written (placeholders resolved, <id> and
+# <principal> filled), it must hold the item, never exit 3 (P1-2: --holds
+# without --by is a usage error).
+test_gate_reference_holds_command_runs() {
+  echo "test: gate — the chunk gate template's --holds command, run as written, holds a V9 item"
+  local fence cmd
+  fence=$(ref_fence '### Plan Phase' '2b. ')
+  cmd=$(printf '%s\n' "$fence" | grep -o '`\$DOC_TOOLS claims gate [^`]*--holds[^`]*`' | head -n 1 | tr -d '`' || true)
+  assert_contains "$cmd" "--holds <id> --by <principal>" "the template's Step 3 command passes --holds with --by"
+  assert_contains "$fence" "Exit 3" "…and Step 1 routes exit 3"
+  [ -n "$cmd" ] || return 0
+  gate_fixture
+  gate_promote
+  printf '%s\n' "$TTL_ID" > tools/claims/edited
+  git add -A && git commit -qm "the bound test edited"
+  gate 1
+  assert_eq "1" "$CL_RC" "precondition: a V9 item, exits 1"
+  cmd=$(printf '%s\n' "$cmd" | ref_fill '{plan-path}' "$PLAN" '{C}' 1 '<id>' "$TTL_ID" '<principal>' reviewer)
+  cmd=${cmd#\$DOC_TOOLS claims }
+  # shellcheck disable=SC2086  # the command's words (no value holds a space)
+  cl $cmd
+  assert_eq "0" "$CL_RC" "the template's command ($cmd): exits 0"
+  assert_eq "true" "$(rec 1 '.checks.V9[0].held')" "…and the record marks the V9 item held"
   teardown
 }
 
@@ -10652,6 +10679,7 @@ run_tests() {
 
   # --- Task 25: the reference's injected task templates ---
   test_v12_reference_template_passes
+  test_gate_reference_holds_command_runs
   test_spec_generate_stub_fields_validate
 
   print_summary
