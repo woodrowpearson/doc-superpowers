@@ -14,8 +14,11 @@
 #   2. a key or an alias, case-insensitive: "L-14", or "L 14" / "L #14"
 #      (read as "L-14"); a provisional key recorded in
 #      docs/ledger/finalized.json reaches the key it became;
-#   3. a legacy ref "<old>#<n>", "<old> row <n>", "<old> ledger row <n>"
-#      (case-insensitive), looked up as "<id>#<n>" in the legacy map
+#   3. a legacy ref "<old>#<n>", "<old> #<n>", "<old> row <n>", "<old>
+#      ledger row <n>" (case-insensitive; <n> digits and an optional
+#      letter, "21c": canonical without leading zeros and in lower case,
+#      "07B" → "7b" — a map key's row is read the same way), looked up as
+#      "<id>#<n>" in the legacy map
 #      (config "legacy"), where <id> is tried as <old> itself, its file stem,
 #      the id config legacy_ledgers maps to a file with that stem, and the
 #      stem without a trailing "-ledger" (Task 15's rule for legacy ids).
@@ -107,13 +110,22 @@ def lg_r_legacy_ids($old; $cfg):
                | select((.value | type) == "string" and (.value | lg_r_stem) == $stem) | .key else empty end),
             ($stem | if endswith("-ledger") then .[0:-7] else . end)) as $id
       ([]; if $id == "" or index([$id]) != null then . else . + [$id] end);
+# lg_r_row: a legacy row number as typed → its canonical form: the digits
+# without leading zeros, then the optional letter, lower case ("07B" → "7b");
+# null when it is not one.
+def lg_r_row:
+  ascii_downcase | (capture("^0*(?<d>[0-9]+)(?<s>[a-z]?)$") // null) | if . == null then null else .d + .s end;
+# lg_r_lkey: a legacy map key "<id>#<row>", lower case, its row canonical.
+def lg_r_lkey:
+  ascii_downcase | (rindex("#") // null) as $i
+  | if $i == null then . else .[0:$i + 1] + (.[$i + 1:] | lg_r_row // .) end;
 def lg_r_legacy($ix; $cfg; $old; $n):
   ($ix.legacy // {}) as $L
   | if ($L | type) != "object" then null
     else first(lg_r_legacy_ids($old; $cfg)[] as $id
                | "\($id)#\($n)" as $k
                | ($k | ascii_downcase) as $lk
-               | ($L[$k] // first($L | to_entries[] | select((.key | ascii_downcase) == $lk) | .value) // empty)) // null
+               | ($L[$k] // first($L | to_entries[] | select(.key | lg_r_lkey == $lk) | .value) // empty)) // null
     end;
 def lg_resolve($ref; $cfg):
   . as $ix
@@ -127,9 +139,9 @@ def lg_resolve($ref; $cfg):
       | (if $k == null then [] else lg_r_keyish($ix; $k) end) as $m
       | if $m != [] then lg_r_one($m)
         else
-          ($r | capture("^(?<o>[^\\s#]+)#(?<n>[0-9]+)$")
-                // capture("^(?<o>\\S+)\\s+(?:ledger\\s+)?row\\s+#?(?<n>[0-9]+)$"; "i") // null) as $lg
-          | (if $lg == null then null else lg_r_legacy($ix; $cfg; $lg.o; ($lg.n | tonumber | tostring)) end) as $e
+          ($r | capture("^(?<o>[^\\s#]+)\\s*#(?<n>[0-9]+[A-Za-z]?)$")
+                // capture("^(?<o>\\S+)\\s+(?:ledger\\s+)?row\\s+#?(?<n>[0-9]+[a-z]?)$"; "i") // null) as $lg
+          | (if $lg == null then null else lg_r_legacy($ix; $cfg; $lg.o; ($lg.n | lg_r_row)) end) as $e
           | if $e != null then
               (if ($e | type) != "object" then {r: "none"}
                elif ($e.key | type) == "string" then lg_r_one(lg_r_keyish($ix; $e.key))
@@ -145,8 +157,9 @@ def lg_resolve($ref; $cfg):
 # _lg_k_multiword <text>: the text is one of the several-word reference forms
 # ("L 14", "L #14", "<old> row <n>", "<old> ledger row <n>").
 _lg_k_multiword() {
-  local re1='^[^[:space:]]+[[:space:]]+#?[[:space:]]*[0123456789]+$'
-  local re2='^[^[:space:]]+[[:space:]]+([Ll][Ee][Dd][Gg][Ee][Rr][[:space:]]+)?[Rr][Oo][Ww][[:space:]]+#?[0123456789]+$'
+  local l='[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]?'
+  local re1='^[^[:space:]]+[[:space:]]+#?[[:space:]]*[0123456789]+'"$l"'$'
+  local re2='^[^[:space:]]+[[:space:]]+([Ll][Ee][Dd][Gg][Ee][Rr][[:space:]]+)?[Rr][Oo][Ww][[:space:]]+#?[0123456789]+'"$l"'$'
   [[ $1 =~ $re1 ]] || [[ $1 =~ $re2 ]]
 }
 
