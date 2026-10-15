@@ -7835,6 +7835,120 @@ test_lg_ifl_facts_sig_in_name() {
   lg_ifl_teardown
 }
 
+# --- Task 16b (U7): the plan words' `git cat-file --batch` reader -------------
+
+# lg_ifl_plan_file <path> <filler-lines> <last-line-format>: a plan — a
+# heading, <filler-lines> lines naming no key, then the printf format.
+lg_ifl_plan_file() {
+  {
+    printf '# Plan\n\n'
+    awk -v n="$2" 'BEGIN { for (i = 1; i <= n; i++) printf "Step %d: nothing to see here, and no key-shaped word on this line.\n", i }'
+    # shellcheck disable=SC2059  # the format is the argument
+    printf "$3"
+  } > "$1"
+}
+
+# lg_ifl_plans_fixture <filler-lines>: open items app-1..app-4 (docs/issues/
+# a1.md..a4.md), the plan directory docs/plans (doc-index doc_type plan),
+# base origin/main on a bare remote (LG_REMOTE), and four branches off main,
+# each adding plans whose last line names one key, after <filler-lines>
+# lines of filler — the blob shapes `git cat-file --batch` ends differently:
+#   plan-1  docs/plans/one.md, newline-terminated: app-1
+#   plan-2  an empty docs/plans/empty.md, then docs/plans/two.md: app-2
+#   plan-3  docs/plans/three.md, no final newline: app-3
+#   plan-4  docs/plans/four.md, newline-terminated: app-4
+lg_ifl_plans_fixture() {
+  local n="$1" b
+  lg_fixture
+  lg_enable "$LG_IFL_CFG"
+  lg_registry "$LG_REG_REL"
+  for b in 1 2 3 4; do
+    lg_item "docs/issues/a$b.md" "key: app-$b" "ledger: app" "status: Open" "severity: P2" "summary: Named by the plan on branch plan-$b"
+  done
+  mkdir -p docs/plans
+  printf '# Plan\n\nNothing yet.\n' > docs/plans/p.md
+  lg_doc_index '{"docs":{"docs/plans/p.md":{"doc_type":"plan"}}}'
+  git add -A && git commit -qm items
+  LG_REMOTE="$(harness_mktemp_d remote)/r.git"
+  git init -q --bare "$LG_REMOTE"
+  git --git-dir="$LG_REMOTE" symbolic-ref HEAD refs/heads/main
+  git remote add origin "$LG_REMOTE"
+  git push -q origin main
+  git fetch -q origin
+  git checkout -q -b plan-1 main
+  lg_ifl_plan_file docs/plans/one.md "$n" 'Covers app-1.\n'
+  git add -A && git commit -qm "plan 1"
+  git checkout -q -b plan-2 main
+  : > docs/plans/empty.md
+  lg_ifl_plan_file docs/plans/two.md "$n" 'Covers app-2.\n'
+  git add -A && git commit -qm "plan 2"
+  git checkout -q -b plan-3 main
+  lg_ifl_plan_file docs/plans/three.md "$n" 'Covers app-3.'
+  git add -A && git commit -qm "plan 3"
+  git checkout -q -b plan-4 main
+  lg_ifl_plan_file docs/plans/four.md "$n" 'Covers app-4.\n'
+  git add -A && git commit -qm "plan 4"
+  git checkout -q main
+}
+
+LG_IFL_PLANS_OUT="plan-1 local no PR claims:app-1 contracts:— files:1
+plan-2 local no PR claims:app-2 contracts:— files:2
+plan-3 local no PR claims:app-3 contracts:— files:1
+plan-4 local no PR claims:app-4 contracts:— files:1"
+
+test_lg_ifl_plan_words_exact_tips() {
+  echo "test: the plan words (U7) — a small batch: each plan's key goes to its own tip (the separator after a newline-terminated or empty blob is not a header)"
+  lg_ifl_plans_fixture 2
+  lg inflight
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "$LG_IFL_PLANS_OUT" "$LG_OUT" "each branch claims the key its own plan names — none dropped, none moved to another tip"
+  rm -rf "$(dirname "$LG_REMOTE")"
+  teardown
+}
+
+# lg_t_ifl_words <req> <stream>: the plan-words reader on a crafted stream.
+lg_t_ifl_words() {
+  LC_ALL=C awk -v req="$1" "$_LG_AWK_IFL_WORDS" < "$2"
+}
+
+test_lg_ifl_plan_words_stream_in_step() {
+  echo "test: the plan words (U7 audit) — a non-blob's content is skipped, a missing object takes its request, and a stream out of step with its requests exits 3 (never a silent short read)"
+  lg_fixture
+  lg_enable
+  local rq st o
+  rq=$(harness_mktemp ifl-req)
+  st=$(harness_mktemp ifl-stream)
+  o=0123456789abcdef0123456789abcdef01234567
+  printf 't1:docs/plans/sub\nt2:docs/plans/gone.md\nt3:docs/plans/a.md\n' > "$rq"
+  printf '%s tree 8\napp-7 x\n\nt2:docs/plans/gone.md missing\n%s blob 10\nSee app-1\n\n' "$o" "$o" > "$st"
+  lg_call lg_t_ifl_words "$rq" "$st"
+  assert_eq "0" "$LG_RC" "in step: exit 0"
+  assert_eq "$(printf 'K\tt3\tapp-1')" "$LG_OUT" "…the blob's word, on its own tip; the tree's content read as content (no word, no header)"
+  printf 't1:docs/plans/a.md\n' > "$rq"
+  printf '%s blob 10\nSee app-1\n\n%s blob 10\nSee app-2\n\n' "$o" "$o" > "$st"
+  lg_call lg_t_ifl_words "$rq" "$st"
+  assert_eq "3" "$LG_RC" "a header past the last request: exit 3"
+  printf 't1:docs/plans/a.md\nt2:docs/plans/b.md\n' > "$rq"
+  printf '%s blob 4\nSee app-1\n\n%s blob 10\nSee app-2\n\n' "$o" "$o" > "$st"
+  lg_call lg_t_ifl_words "$rq" "$st"
+  assert_eq "3" "$LG_RC" "a size that does not match the content (a line where a header belongs): exit 3"
+  teardown
+}
+
+test_lg_ifl_plan_words_large_batch() {
+  echo "test: the plan words (U7) — plan blobs past the pipe buffers (> 64 KB) across several tips: the reader reads the whole batch (exit 0, no SIGPIPE) and attributes every word to its tip"
+  lg_ifl_plans_fixture 2500
+  local bytes
+  bytes=$(git cat-file -s "plan-1:docs/plans/one.md")
+  assert_eq "1" "$([ "$bytes" -gt 65536 ] && echo 1 || echo 0)" "the fixture: each plan is past 64 KB ($bytes bytes)"
+  lg inflight
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_not_contains "$LG_ERR" "cannot read the in-flight plans" "…the plans read"
+  assert_eq "$LG_IFL_PLANS_OUT" "$LG_OUT" "each branch claims the key its own plan names"
+  rm -rf "$(dirname "$LG_REMOTE")"
+  teardown
+}
+
 # --- Task 13: note, the items adapter, the GitHub reference adapter ------------------
 
 # lg_note_fixture: lg_keys_fixture with item x-1 (docs/issues/a.md): a
@@ -10428,6 +10542,10 @@ run_tests() {
   test_lg_init_import_get_output_counts
   test_lg_init_accept_findings_before_offline
   test_lg_init_import_empty_globs_finding
+  # --- Task 16b ---
+  test_lg_ifl_plan_words_exact_tips
+  test_lg_ifl_plan_words_large_batch
+  test_lg_ifl_plan_words_stream_in_step
 
   print_summary
 }
