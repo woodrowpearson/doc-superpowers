@@ -69,7 +69,7 @@ AI workflows need a `CLAUDE_CODE_OAUTH_TOKEN` (preferred) or `ANTHROPIC_API_KEY`
   - `none`: no workflow, only the vendored `doc-tools.sh` (prefer `tools install` for that).
 - `--base-branch NAME` — Target branch (default: `main`); a name git accepts, of letters, digits and `. _ / -` only (anything else could corrupt a workflow line).
 - `--cron EXPR` — Schedule, 5 fields (default: `0 9 * * 1`).
-- `--ci-strict[=true|false]` — Fail the PR check on stale docs (default false).
+- `--ci-strict[=true|false]` — Fail the PR checks on what is otherwise a warning (default false). It is rendered into two workflows: `doc-freshness-pr` then fails on stale docs and on a freshness check that cannot run, and `doc-spec-verify`'s `claims` job fails on a claims check that cannot run (an adapter `indeterminate` or failing; `claims-check.sh pr` under `DOC_SUPERPOWERS_STRICT=1`). Claims findings fail that job either way.
 - `--helpers=<true|false>` — Deprecated, and inert: the helper directories ship exactly while an installed workflow runs them (the `doc-pr-release` producer helpers with `doc-pr-release`, the step scripts in `.github/scripts/doc-superpowers-steps/` with any workflow), whatever this flag says. Its only effect: `--helpers=false` is refused (non-zero, nothing written) while `doc-pr-release` is selected or already installed; a `doc-pr-release` uninstalled on purpose does not count. Do not pass it.
 - `--force` — Also re-install workflows uninstalled on purpose. **Never pass `--force` unless the user asked for exactly that.**
 
