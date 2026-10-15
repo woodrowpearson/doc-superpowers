@@ -5421,6 +5421,50 @@ test_i3_deprecate_entry_sets_replaces_not_last_verified() {
   teardown
 }
 
+# The archive recipe is git mv, move-entry, then deprecate-entry <new>
+# without --superseded-by. For a doc that was already superseded (spec-generate
+# step 5), deprecate-entry used to write superseded_by: null, so archiving it
+# erased the link its successor's replaces still names (P1-1). An existing
+# superseded_by is kept unless --superseded-by is given, which replaces it.
+test_deprecate_entry_keeps_an_existing_superseded_by() {
+  echo "test: deprecate-entry without --superseded-by keeps an existing superseded_by (the archive recipe); with it, replaces it"
+  setup
+  local json out rc k
+  for k in new newer; do echo "# $k" > "docs/$k.md"; done
+  _i1_commit docs
+  printf '%s\n' docs/architecture.md:src/:architecture docs/new.md:src/:architecture docs/newer.md:src/:architecture \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  "$DOC_TOOLS" deprecate-entry docs/architecture.md --superseded-by docs/new.md >/dev/null 2>&1
+  # The archive recipe: git mv, move-entry, deprecate-entry on the new path.
+  mkdir -p docs/archive/architecture
+  git mv docs/architecture.md docs/archive/architecture/architecture.md
+  "$DOC_TOOLS" move-entry docs/architecture.md docs/archive/architecture/architecture.md >/dev/null 2>&1
+  rc=0
+  out=$("$DOC_TOOLS" deprecate-entry docs/archive/architecture/architecture.md 2>&1) || rc=$?
+  json=$(cat docs/.doc-index.json)
+  assert_eq "0" "$rc" "deprecate-entry <archived> exits 0"
+  assert_json_field "$json" '.docs["docs/archive/architecture/architecture.md"].status' "deprecated" "the archived doc is deprecated"
+  assert_json_field "$json" '.docs["docs/archive/architecture/architecture.md"].superseded_by' "docs/new.md" \
+    "…and keeps its superseded_by (no --superseded-by given)"
+  assert_json_field "$json" '.docs["docs/new.md"].replaces' "docs/archive/architecture/architecture.md" \
+    "…which its successor's replaces still names (move-entry repointed it)"
+  assert_contains "$out" "already deprecated" "an entry already deprecated with its link kept is unchanged"
+  # A doc never superseded keeps superseded_by null.
+  "$DOC_TOOLS" deprecate-entry docs/newer.md >/dev/null 2>&1
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/newer.md"].status' "deprecated" "a doc with no successor is deprecated"
+  assert_json_field "$json" '.docs["docs/newer.md"].superseded_by' "null" "…its superseded_by stays null"
+  # --superseded-by replaces an existing one (and the new successor's empty
+  # replaces names it).
+  "$DOC_TOOLS" deprecate-entry docs/archive/architecture/architecture.md --superseded-by docs/newer.md >/dev/null 2>&1
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/archive/architecture/architecture.md"].superseded_by' "docs/newer.md" \
+    "--superseded-by replaces an existing superseded_by"
+  assert_json_field "$json" '.docs["docs/newer.md"].replaces' "docs/archive/architecture/architecture.md" \
+    "…and sets the new successor's empty replaces"
+  teardown
+}
+
 test_i3_set_code_refs_edits_in_place() {
   echo "test: I-3: set-code-refs replaces code_refs in place (GH #18): position and every other field kept, code_oids re-derived, code_commit null (kept and new refs, unusable stored one)"
   setup
@@ -7306,6 +7350,7 @@ run_tests() {
   test_i3_build_index_force_preserves_deprecations
   test_i3_add_entry_baselines_to_the_docs_last_commit
   test_i3_deprecate_entry_sets_replaces_not_last_verified
+  test_deprecate_entry_keeps_an_existing_superseded_by
   test_i3_set_code_refs_edits_in_place
   test_i3_set_code_refs_on_a_legacy_entry
   test_i3_set_code_refs_added_ref_never_masks_commits_behind
