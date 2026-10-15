@@ -4969,7 +4969,7 @@ test_ledger_pre_push_delete_replayed() {
 }
 
 test_ledger_post_commit_batch_ssh() {
-  echo "test: ledger (fix round 1, I2): the background in-flight push never prompts — ssh runs with -o BatchMode=yes (added to GIT_SSH_COMMAND, else core.sshCommand, else ssh), GIT_SSH left alone, GIT_TERMINAL_PROMPT=0, GCM_INTERACTIVE=never"
+  echo "test: ledger (fix round 1, I2): the background in-flight push never prompts — ssh runs with -o BatchMode=yes, following git's precedence (added to GIT_SSH_COMMAND, else core.sshCommand, else — unless GIT_SSH names the program — ssh), GIT_SSH left alone, GIT_TERMINAL_PROMPT=0, GCM_INTERACTIVE=never"
   lgh_fixture
   inst install --ledger
   local wrap out n
@@ -5000,8 +5000,16 @@ test_ledger_post_commit_batch_ssh() {
   assert_contains "$(cat "$out" 2>/dev/null)" "ssh=ssh -i key -o BatchMode=yes" "core.sshCommand kept, BatchMode added"
   lgh_env_commit preset GIT_SSH_COMMAND="ssh -v"
   assert_contains "$(cat "$out" 2>/dev/null)" "ssh=ssh -v -o BatchMode=yes" "a preset GIT_SSH_COMMAND kept (it wins over core.sshCommand), BatchMode added"
+  # git's precedence: GIT_SSH_COMMAND > core.sshCommand > GIT_SSH > ssh. Only
+  # when neither of the first two is set does GIT_SSH name the program git runs.
+  lgh_env_commit gitsshcore GIT_SSH=/usr/local/bin/my-ssh
+  assert_contains "$(cat "$out" 2>/dev/null)" "ssh=ssh -i key -o BatchMode=yes" "GIT_SSH and core.sshCommand set: git runs core.sshCommand, so BatchMode goes on it"
+  assert_contains "$(cat "$out" 2>/dev/null)" "gitssh=/usr/local/bin/my-ssh" "…GIT_SSH left alone"
+  lgh_env_commit gitsshpreset GIT_SSH=/usr/local/bin/my-ssh GIT_SSH_COMMAND="ssh -v"
+  assert_contains "$(cat "$out" 2>/dev/null)" "ssh=ssh -v -o BatchMode=yes" "GIT_SSH and GIT_SSH_COMMAND set: git runs GIT_SSH_COMMAND, so BatchMode goes on it"
+  git config --unset core.sshCommand
   lgh_env_commit gitssh GIT_SSH=/usr/local/bin/my-ssh
-  assert_contains "$(cat "$out" 2>/dev/null)" "ssh=<unset>" "GIT_SSH set: GIT_SSH_COMMAND not added"
+  assert_contains "$(cat "$out" 2>/dev/null)" "ssh=<unset>" "GIT_SSH alone (no core.sshCommand): GIT_SSH_COMMAND not added"
   assert_contains "$(cat "$out" 2>/dev/null)" "gitssh=/usr/local/bin/my-ssh" "…GIT_SSH left alone"
   assert_contains "$(cat "$out" 2>/dev/null)" "prompt=0" "…and still no terminal prompt"
   teardown
