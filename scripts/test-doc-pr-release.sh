@@ -2954,6 +2954,27 @@ test_spec_verify_claims_job_structure() {
     test -x "$ALL_REPO/.github/scripts/doc-pr-release/update-pr-body.sh"
 }
 
+# Review step 3c (claims run, claims validate) runs the PR's own adapters,
+# which no CI agent may do, and spec-verify's tools do not grant the claims
+# verbs: the prompt sends step 3c to the non-AI claims job instead (P0-1).
+test_spec_verify_agent_leaves_claims_to_claims_job() {
+  echo "Test: doc-spec-verify.yml — the AI step skips review step 3c (the claims job is that check) and is granted no claims verb"
+  yaml_unavailable "spec_verify_agent_leaves_claims_to_claims_job" && return 0
+  local json ai tools prompt
+  json=$(_yaml_json "$TEMPLATE_DIR/doc-spec-verify.yml")
+  ai=$(jq -c --arg u "$AI_USES" '[.jobs["spec-verify"].steps[] | select((.uses // "") | startswith($u))][0] // empty' <<<"$json")
+  assert_true "the spec-verify job has an AI step" test -n "$ai"
+  [ -n "$ai" ] || return 0
+  tools=$(jq -r "$_JQ_TOOLS"' tools | join(",")' <<<"$ai")
+  prompt=$(jq -r '.with.prompt' <<<"$ai")
+  assert_contains "$tools" "Bash(.github/scripts/doc-tools.sh status:*)" "precondition: the tools read (status is granted)"
+  assert_contains "$prompt" "spec-verify --mode=review" "the prompt runs review mode"
+  assert_contains "$prompt" "Skip review step 3c (Claims)" "…and tells the agent to skip step 3c"
+  assert_contains "$prompt" '`claims` job runs' "…because this workflow's claims job runs the claims checks"
+  assert_not_contains "$tools" "doc-tools.sh claims" "no claims verb is granted (they run the PR's own adapters)"
+  assert_true "the claims job is in the same workflow" test -n "$(jq -c '.jobs.claims // empty' <<<"$json")"
+}
+
 test_schedule_close_requires_claims_ok() {
   echo "Test: doc-freshness-schedule.yml — the claims step; the issue opens on claims findings and closes only with claims disabled or ok"
   yaml_unavailable "schedule_close_requires_claims_ok" && return 0
@@ -3488,6 +3509,7 @@ test_claims_check_scheduled_reports_judge_sample() {
 
 test_schedule_timeout_raised
 test_spec_verify_claims_job_structure
+test_spec_verify_agent_leaves_claims_to_claims_job
 test_schedule_close_requires_claims_ok
 test_schedule_issue_body_claims_section
 test_claims_check_disabled

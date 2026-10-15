@@ -88,6 +88,8 @@ jobs:
             `git diff --name-only --no-renames ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}`
             lists (git prints a name holding a non-ASCII byte, `"`, `\` or a tab
             in double quotes with C escapes: pass it unquoted).
+            Skip review step 3c (Claims): this workflow's `claims` job runs
+            the claims checks without AI, and your tools do not allow them.
             Post the compliance findings as one PR comment:
             `gh pr comment ${{ github.event.pull_request.number }} --body "<findings>"`.
 
