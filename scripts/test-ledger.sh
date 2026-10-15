@@ -7931,7 +7931,22 @@ test_lg_ifl_plan_words_stream_in_step() {
   printf 't1:docs/plans/a.md\nt2:docs/plans/b.md\n' > "$rq"
   printf '%s blob 4\nSee app-1\n\n%s blob 10\nSee app-2\n\n' "$o" "$o" > "$st"
   lg_call lg_t_ifl_words "$rq" "$st"
-  assert_eq "3" "$LG_RC" "a size that does not match the content (a line where a header belongs): exit 3"
+  assert_eq "3" "$LG_RC" "a size short of the content: exit 3"
+  # Fix round 1 (m2), as frontmatter.awk's batch mode: a short read never passes.
+  printf 't1:docs/plans/a.md\n' > "$rq"
+  printf '%s blob 10\nSee ap' "$o" > "$st"
+  lg_call lg_t_ifl_words "$rq" "$st"
+  assert_eq "3" "$LG_RC" "a stream cut inside an object: exit 3"
+  printf 't1:docs/plans/a.md\nt2:docs/plans/b.md\n' > "$rq"
+  printf '%s blob 10\nSee app-1\n\n' "$o" > "$st"
+  lg_call lg_t_ifl_words "$rq" "$st"
+  assert_eq "3" "$LG_RC" "fewer objects than requests: exit 3"
+  printf '%s blob 10\nSee app-1\nX\n%s blob 10\nSee app-2\n\n' "$o" "$o" > "$st"
+  lg_call lg_t_ifl_words "$rq" "$st"
+  assert_eq "3" "$LG_RC" "a separator line that is not empty: exit 3"
+  printf '%s blob 0\n\n%s blob 9\nSee app-2\n' "$o" "$o" > "$st"
+  lg_call lg_t_ifl_words "$rq" "$st"
+  assert_eq "0|$(printf 'K\tt2\tapp-2')" "$LG_RC|$LG_OUT" "in step: an empty object, then one without a final newline of its own (the separator ends it): exit 0"
   teardown
 }
 
@@ -10273,6 +10288,36 @@ test_lg_init_preseeded_legacy_entries_authoritative() {
     "the pre-seeded entries are unchanged"
   assert_eq "docs/issues/2026-01-04-old-bug.md" "$(jq -r '.["checkout#1"].item' docs/ledger/legacy.json)" "row 1 gets its entry"
   assert_eq '{"checkout":2}' "$(lg_remote_counters)" "counters: checkout-1 only (no stub key)"
+  # Fix round 1 (m4a): the rows left alone are counted.
+  assert_json_field "$LG_OUT" '.legacy.kept' "2" "JSON: legacy.kept 2 (rows 2 and 3)"
+  lg init --accept "$LG_DEC"
+  assert_eq "0" "$LG_RC" "a second run exits 0"
+  assert_contains "$LG_OUT" "3 row(s) already in legacy.json, left alone" "the summary line counts the rows left alone (all three now)"
+  teardown
+}
+
+test_lg_init_preseeded_legacy_keys_canonical() {
+  echo "test: init --accept (fix round 1, m4b) — the pre-seeded check reads a legacy key as U5 does: a pre-seeded x#7 is the row whose # cell is 07, x#21c the row 21C (no second entry, no stub)"
+  lg_accept_fixture
+  cat > docs/ledgers/x-ledger.md <<'EOF'
+| # | Item | State |
+|---|------|-------|
+| 07 | Seven — [plan](../plans/x-plan.md) | open |
+| 21C | Twenty-one c — [plan](../plans/x-plan.md) | open |
+| 8 | Eight — [plan](../plans/x-plan.md) | open |
+EOF
+  git add -A && git commit -qm "x ledger"
+  lg_enable '{"legacy_ledgers":{"checkout":"docs/ledgers/checkout-ledger.md","x":"docs/ledgers/x-ledger.md"}}'
+  printf '%s\n' '{"x#7":{"archived":"docs/ledgers/x-ledger.md#07"},"x#21c":{"archived":"docs/ledgers/x-ledger.md#21C"}}' \
+    | jq -S . > docs/ledger/legacy.json
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-01-cart-total.md checkout
+  lg init --accept "$LG_DEC" --format json
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_eq "checkout#1,checkout#2,checkout#3,x#21c,x#7,x#8" "$(jq -r 'keys | join(",")' docs/ledger/legacy.json)" \
+    "legacy.json: no x#07 or x#21C beside the pre-seeded x#7 and x#21c; x#8 added"
+  assert_eq "docs/ledgers/checkout-ledger.md#2,docs/ledgers/x-ledger.md#8" "$(jq -r '[.stubs[] | .row] | sort | join(",")' <<<"$LG_OUT")" \
+    "stubs: x#8 and checkout#2 only"
+  assert_json_field "$LG_OUT" '.legacy.kept' "2" "JSON: legacy.kept 2"
   teardown
 }
 
@@ -10293,13 +10338,20 @@ EOF
 |---|------|-------|
 | 1 | [dep: cart](../issues/2026-01-01-cart-total.md) then [misc](../issues/2026-01-05-misc.md) | open |
 | 2 | Blocked — **dep:** [cart](../issues/2026-01-01-cart-total.md) | open |
+| 3 | _dep:_ [cart](../issues/2026-01-01-cart-total.md), [_dep:_ sheet](../issues/2026-01-02-sheet-flicker.md), [misc](../issues/2026-01-05-misc.md) | open |
+EOF
+  # Fix round 1 (m3): an emphasised header cell is still the Tracker column.
+  cat > docs/ledgers/v-ledger.md <<'EOF'
+| # | Work | **Tracker** | State |
+|---|------|-------------|-------|
+| 1 | See [misc](../issues/2026-01-05-misc.md) | [sync](../issues/2026-01-03-order-sync.md) | open |
 EOF
   git add -A && git commit -qm "u1 ledgers"
   lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
   assert_eq "0" "$LG_RC" "--report exits 0"
   assert_contains "$(lg_u2_hand docs/ledger/r.md)" '`docs/ledgers/z-ledger.md` — `z`: 3 rows; 2 link items, 1 plans, 0 specs' \
     "z: rows 1 and 3 link items, row 2 a plan (Work's links do not count)"
-  assert_contains "$(lg_u2_hand docs/ledger/r.md)" '`docs/ledgers/y-ledger.md` — `y`: 2 rows; 1 link items' "y: row 1 links an item (its dep: link skipped), row 2 none"
+  assert_contains "$(lg_u2_hand docs/ledger/r.md)" '`docs/ledgers/y-ledger.md` — `y`: 3 rows; 2 link items' "y: rows 1 and 3 link an item (their dep: links skipped), row 2 none"
   lg_init_decide "$LG_DEC" docs/issues/2026-01-01-cart-total.md checkout
   lg init --accept "$LG_DEC" --format json
   assert_eq "0" "$LG_RC" "--accept exits 0"
@@ -10307,6 +10359,10 @@ EOF
   assert_eq '{"item":"docs/issues/2026-01-03-order-sync.md"}' "$(jq -c '.["z#3"]' docs/ledger/legacy.json)" \
     "z#3: a multi-link Tracker cell — the first link that is no dep: link"
   assert_eq '{"item":"docs/issues/2026-01-05-misc.md"}' "$(jq -c '.["y#1"]' docs/ledger/legacy.json)" "y#1 (no Tracker column): the first item link that is no dep: link"
+  assert_eq '{"item":"docs/issues/2026-01-05-misc.md"}' "$(jq -c '.["y#3"]' docs/ledger/legacy.json)" \
+    "y#3: _dep:_ before a link and in a label are dep: links too (m3)"
+  assert_eq '{"item":"docs/issues/2026-01-03-order-sync.md"}' "$(jq -c '.["v#1"]' docs/ledger/legacy.json)" \
+    "v#1: a **Tracker** header is the Tracker column (m3)"
   assert_eq "docs/ledgers/checkout-ledger.md#2,docs/ledgers/y-ledger.md#2,docs/ledgers/z-ledger.md#2" \
     "$(jq -r '[.stubs[] | .row] | sort | join(",")' <<<"$LG_OUT")" \
     "stubs: z#2 (its only item link is outside Tracker: a non-item tracker) and y#2 (a **dep:** link only), beside checkout#2"
@@ -10328,10 +10384,31 @@ test_lg_resolve_legacy_letter_rows() {
     lg_call _lg_resolve "$r"
     assert_eq "0|docs/issues/a.md" "$LG_RC|$LG_OUT" "'$r' → design-system#21c (x-14)"
   done
-  for r in "design-system#21" "design-system row 21" "design-system #21"; do
+  for r in "design-system#21" "design-system row 21"; do
     lg_call _lg_resolve "$r"
     assert_eq "0|docs/issues/b.md" "$LG_RC|$LG_OUT" "'$r' → design-system#21 (x-15), not #21c"
   done
+  # Fix round 1 (m5): the spaced "<old> #<n>" is a key form; as a legacy
+  # ref it takes a letter-suffixed row only. Ledger x has no key x-14b, and
+  # "x #16" (no key x-16) never falls through to a legacy row x#16.
+  printf '%s\n' '{"design-system#21":{"key":"x-15"},"design-system#21c":{"key":"x-14"},
+    "design-system#7":{"item":"docs/issues/k.md"},"design-system#7b":{"archived":"docs/ledgers/design-system-ledger.md#7b"},
+    "x#16":{"item":"docs/issues/b.md"},"x#16b":{"item":"docs/issues/k.md"}}' \
+    > docs/ledger/legacy.json
+  for r in "design-system #21" "x #16"; do
+    lg_call _lg_resolve "$r"
+    assert_eq "1|" "$LG_RC|$LG_OUT" "'$r' → none: a missing key, never a legacy row (m5)"
+  done
+  lg_call _lg_resolve "x#16"
+  assert_eq "0|docs/issues/b.md" "$LG_RC|$LG_OUT" "'x#16' (one token) → the legacy row, as before"
+  lg_call _lg_resolve "x row 16"
+  assert_eq "0|docs/issues/b.md" "$LG_RC|$LG_OUT" "'x row 16' → the legacy row, as before"
+  lg show x "#16"
+  assert_eq "1" "$LG_RC" "show x #16 (no key x-16, a legacy row x#16): exit 1"
+  lg show x "#16b"
+  assert_eq "0" "$LG_RC" "show x #16b: the letter-suffixed legacy row"
+  lg_call _lg_resolve "x #16b"
+  assert_eq "0|docs/issues/k.md" "$LG_RC|$LG_OUT" "'x #16b' → x#16b's item"
   lg_call _lg_resolve "design-system#07"
   assert_eq "0|docs/issues/k.md" "$LG_RC|$LG_OUT" "'#07' → design-system#7"
   lg_call _lg_resolve "design-system row 07B"
@@ -10353,7 +10430,7 @@ test_lg_resolve_legacy_letter_rows() {
 # --- Task 16b (U6): terminal State tokens ------------------------------------------
 
 test_lg_init_done_states_from_config() {
-  echo "test: init --accept (U6) — a row is done when its State's lead (~~ dropped, any case, - _ ' and blanks ignored) is a built-in done word or a config status.fixed / closed / wontfix value: WONT-FIX, Won't fix, wontfix, a host's closed value → archived, no stub; OPEN stays open"
+  echo "test: init --accept (U6, fix round 1) — a row is done when its State's first words (~~ * \` ' dropped, any case, split at any other non-alphanumeric) are a built-in done word or a config status.fixed / closed / wontfix value, or run together (k ≤ 3) spell one: WONT-FIX, Won't fix, wontfix, a host's closed value → archived; OPEN, Do next, do-next, Do new, Closing stay open"
   lg_accept_fixture
   cat > docs/ledgers/w-ledger.md <<'EOF'
 | # | Item | State |
@@ -10366,6 +10443,13 @@ test_lg_init_done_states_from_config() {
 | 6 | A duplicate | Won’t Fix (dup of 3) |
 | 7 | Out of scope | ~~Not planned~~ |
 | 8 | Old work | **Shipped** |
+| 9 | Next up | Do next |
+| 10 | Next too | do-next |
+| 11 | Fresh | Do new |
+| 12 | Closing soon | Closing |
+| 13 | Done with it | Done-ish |
+| 14 | Wont fix spaced | Wont fix |
+| 15 | Partly | Done_partly |
 EOF
   git add -A && git commit -qm "w ledger"
   lg_enable '{"legacy_ledgers":{"checkout":"docs/ledgers/checkout-ledger.md","w":"docs/ledgers/w-ledger.md"},"status":{"closed":["closed","obsolete","parked"]}}'
@@ -10373,11 +10457,13 @@ EOF
   lg init --accept "$LG_DEC" --format json
   assert_eq "0" "$LG_RC" "exits 0"
   local n
-  for n in 1 2 3 4 6 7 8; do
+  for n in 1 2 3 4 6 7 8 13 14 15; do
     assert_eq "docs/ledgers/w-ledger.md#$n" "$(jq -r --arg k "w#$n" '.[$k].archived' docs/ledger/legacy.json)" "w#$n: done → archived"
   done
-  assert_eq "docs/ledgers/checkout-ledger.md#2,docs/ledgers/w-ledger.md#5" "$(jq -r '[.stubs[] | .row] | sort | join(",")' <<<"$LG_OUT")" \
-    "stubs: OPEN (w#5) and the checkout ledger's open row only"
+  # Fix round 1 (Important 1): whole words — "Do next" is not "done…".
+  assert_eq "docs/ledgers/checkout-ledger.md#2,docs/ledgers/w-ledger.md#10,docs/ledgers/w-ledger.md#11,docs/ledgers/w-ledger.md#12,docs/ledgers/w-ledger.md#5,docs/ledgers/w-ledger.md#9" \
+    "$(jq -r '[.stubs[] | .row] | sort | join(",")' <<<"$LG_OUT")" \
+    "stubs: OPEN (w#5), Do next / do-next / Do new (w#9-11: no word is done), Closing (w#12), and the checkout ledger's open row"
   teardown
 }
 
@@ -10750,6 +10836,7 @@ run_tests() {
   test_lg_init_legacy_ledgers_only_named
   test_lg_init_hand_written_discovery_without_legacy_ledgers
   test_lg_init_preseeded_legacy_entries_authoritative
+  test_lg_init_preseeded_legacy_keys_canonical
   test_lg_init_row_item_from_tracker_column
   test_lg_resolve_legacy_letter_rows
   test_lg_init_done_states_from_config
