@@ -2391,6 +2391,20 @@ test_v6_proved_tier_change_under_doc_stale_is_finding() {
   assert_v6_with_and_without_store "enforced_by changed since promote proved the claim (promotion.proved)" \
     "test → lint under DOC-STALE, the states unchanged"
   assert_not_contains "$(v6_messages)" "enforced_by lowered" "…the ratchet licenses the lowered tier under DOC-STALE; promotion.proved does not"
+  # promote refuses a lint claim, so the remedy is not a promote (P1-3): a
+  # lint claim needs no promotion, and once it carries none V6 has nothing
+  # to compare (the lowering itself still needs the DOC-STALE ruling).
+  assert_contains "$(v6_messages)" "a lint claim is not promoted" "…the remedy names the lint claim"
+  assert_contains "$(v6_messages)" "remove its promotion" "…remove its promotion"
+  assert_not_contains "$(v6_messages)" "run claims promote" "…never a promote, which refuses it"
+  jset "$SIDECAR" '.claims[0].promotion = null'
+  git add -A
+  cl validate --staged
+  assert_v6_ok "test → lint under DOC-STALE, the promotion removed"
+  jset "$SIDECAR" '.claims[0].rulings = []'
+  git add -A
+  cl validate --staged
+  assert_v6 "enforced_by lowered" "…while the lowering itself still needs the ruling"
   teardown
 }
 
@@ -4113,15 +4127,15 @@ lint_claim() {
   base_here "lint claim"
 }
 
-# lint_promote: the lint claim made built as promote makes it (V6): the tree
-# committed first (when it has changes), then status built, its promotion
-# (hand_promotion: the verdict in the store, {at: HEAD, verdict_sha256,
-# proved}) and the status block rendered.
-lint_promote() {
+# lint_build: the lint claim made built as a lint claim enters built — a
+# reviewed status edit, with no promotion and no nonvacuity (its selftest is
+# its non-vacuity, V4; claims promote proves test claims only): the tree
+# committed first (when it has changes), then status built and the status
+# block rendered.
+lint_build() {
   git add -A
-  git diff --cached --quiet || git commit -qm "lint claim, before promote"
+  git diff --cached --quiet || git commit -qm "lint claim, before the status edit"
   jset "$SIDECAR" '.claims[0].status = "built"'
-  hand_promotion
   rerender
 }
 
@@ -4182,7 +4196,7 @@ test_v4_pattern_contradicts_status() {
   echo "test: V4 — the lint over the proposed paths contradicts the status"
   claims_fixture
   lint_claim
-  lint_promote
+  lint_build
   cl validate --all
   assert_v4_ok "built, the constant present"
   set_ttl 1800
@@ -4218,6 +4232,9 @@ test_v4_diverged_and_unbuilt_status() {
   set_ttl 900
   cl validate --all
   assert_v4 "contradicts" "diverged, the lint passes"
+  # The remedy is a status edit, not a promote, which refuses a lint claim.
+  assert_contains "$(v4_messages)" "move it to built (a reviewed status edit" "…its remedy: a reviewed status edit"
+  assert_not_contains "$(v4_messages)" "claims promote it" "…never a promote"
   teardown
 }
 
@@ -4242,7 +4259,7 @@ test_v4_unbuilt_absent_path_allowed() {
   assert_contains "$(run_field message)" "is not a safe repo path" "…a run finding names it"
   # built: an absent path is still a finding.
   jset "$SIDECAR" '.claims[0].lint.paths = ["src/auth/token.py"]'
-  lint_promote
+  lint_build
   jset "$SIDECAR" '.claims[0].lint.paths = ["src/auth/rotation.py"]'
   cl validate --all
   assert_v4 "is not a file in the proposed tree" "built, the lint path absent"
@@ -4258,7 +4275,7 @@ test_v4_valid_lint_passes() {
   lint_claim
   cl validate --all
   assert_v4_ok "unbuilt lint claim"
-  lint_promote
+  lint_build
   cl validate --all
   assert_v4_ok "built lint claim, the constant present"
   assert_eq "0" "$(json_count "$(jq -c '.findings[]?' <<<"$CL_OUT")")" "…no finding of any check"
@@ -4283,7 +4300,7 @@ test_v4_lint_paths_unsafe_or_absent() {
   echo "test: V4 — an unsafe or absent lint path is a finding, never read"
   claims_fixture
   lint_claim
-  lint_promote
+  lint_build
   local out
   out=$(harness_mktemp_d outside-lint)
   printf 'TTL_SECONDS = 900\n' > "$out/token.py"
@@ -4309,7 +4326,7 @@ test_v4_staged_reads_index() {
   echo "test: V4 — --staged evaluates the index's paths; a staged lint path touches the claim"
   claims_fixture
   lint_claim
-  lint_promote
+  lint_build
   git add -A && git commit -qm "built lint claim"
   set_ttl 1800
   git add src/auth/token.py
@@ -4325,7 +4342,7 @@ test_v4_frozen_selftest_only() {
   echo "test: V4 — a frozen lint claim's selftests are checked, its paths not read"
   claims_fixture
   lint_claim
-  lint_promote
+  lint_build
   jset "$SIDECAR" ".claims[0].frozen_at = \"$(git rev-parse HEAD)\""
   set_ttl 1800
   cl validate --all
@@ -4348,7 +4365,7 @@ test_run_lint_rerun() {
   echo "test: run — a lint claim is re-run over the work tree"
   claims_fixture
   lint_claim
-  lint_promote
+  lint_build
   cl run --all
   assert_eq "0" "$CL_RC" "built lint claim, the constant present: run --all exits 0"
   assert_eq "ok" "$(run_field verdict)" "…verdict ok"
@@ -4369,14 +4386,103 @@ test_run_lint_rerun() {
 }
 
 test_run_lint_unbuilt_pass_is_finding() {
-  echo "test: run — an unbuilt lint claim whose lint passes is a finding: promote"
+  echo "test: run — an unbuilt lint claim whose lint passes is a finding: move it to built (a reviewed status edit, not promote)"
   claims_fixture
   lint_claim
   cl run --all
   assert_eq "1" "$CL_RC" "unbuilt, the constant present: exits 1"
   assert_eq "finding" "$(run_field verdict)" "…verdict finding"
   assert_eq "pass" "$(run_field outcome)" "…outcome pass"
-  assert_contains "$(run_field message)" "passes: promote" "…it says promote"
+  assert_json_field "$CL_OUT" '.findings[0].message | test("^passes: ")' "true" "…the finding says 'passes: '"
+  assert_contains "$(run_field message)" "a lint claim enters built by a reviewed status edit" "…it names the lint claim's path into built"
+  assert_not_contains "$(run_field message)" "claims promote <id>" "…never a promote, which refuses a lint claim"
+  teardown
+}
+
+# P1-3 (design §B's status table): a promotion and non-vacuity are a test
+# claim's. A lint claim enters built by a reviewed status edit — no V6 or V3
+# finding — and run and the gate run its check: green, the gate records the
+# status change as reconciled; red, both are red. The same edit on a test
+# claim is still a finding.
+test_lint_built_by_status_edit() {
+  echo "test: P1-3 — a lint claim moved into built by a status edit, its check passing: validate, run, gate and attest pass"
+  gate_plain_fixture
+  lint_claim
+  lint_build
+  git add -A
+  cl validate --staged
+  assert_eq "0" "$CL_RC" "--staged: unbuilt → built by a status edit, no promotion: exits 0"
+  assert_eq "0" "$(json_count "$(jq -c '.findings[]?' <<<"$CL_OUT")")" "…no finding of any check"
+  assert_eq "0" "$(json_count "$(jq -c '.advisories[]?' <<<"$CL_OUT")")" "…and no advisory"
+  cl validate --all
+  assert_eq "0" "$CL_RC" "--all: exits 0"
+  assert_eq "0" "$(json_count "$(jq -c '.findings[]?' <<<"$CL_OUT")")" "…no finding of any check"
+  git commit -qm "the lint claim built"
+  cl run --all
+  assert_eq "0" "$CL_RC" "run --all exits 0"
+  assert_eq "ok pass" "$(run_field verdict) $(run_field outcome)" "…the built lint claim passes"
+  gate 1
+  assert_eq "0" "$CL_RC" "gate 1 exits 0: no re-promote owed, no silent reconciliation"
+  assert_eq "pass" "$(rec 1 .result)" "…result pass"
+  assert_eq "[{\"claim\":\"$TTL_ID\",\"status\":\"built\",\"outcome\":\"pass\",\"verdict\":\"ok\"}]" \
+    "$(rec 1 '.verdicts | tojson')" "…the gate ran its check"
+  assert_eq "{\"claim\":\"$TTL_ID\",\"kind\":\"status\",\"from_status\":\"unbuilt\",\"to_status\":\"built\"}" \
+    "$(rec 1 '.reconciliations[] | {claim, kind, from_status, to_status} | tojson')" "…and records the status edit as reconciled"
+  assert_eq "[]" "$(rec 1 '.unrecorded | tojson')" "…nothing unrecorded"
+  git add "$GATE_REC1" && git commit -qm "the chunk 1 gate record"
+  gate 2
+  assert_eq "0" "$CL_RC" "gate 2 exits 0"
+  git add "$GATE_REC2" && git commit -qm "the chunk 2 gate record"
+  attest --final
+  assert_eq "0" "$CL_RC" "attest --final exits 0: the status edit is recorded in chunk 1's record"
+  # promote still proves test claims only, and re-proves nothing here.
+  cl promote "$TTL_ID"
+  assert_contains "$(jq -r '.findings[]?.message' <<<"$CL_OUT")" "promote proves a test claim" "promote refuses the lint claim"
+  # The contrast: the same status edit on a test claim is a finding (V6, V3).
+  teardown
+  claims_fixture
+  bind_test "$_CL_TEST"
+  jset "$SIDECAR" ".claims[0].nonvacuity = $_CL_MUTANT"
+  git add -A && git commit -qm "bind the TTL test"
+  jset "$SIDECAR" '.claims[0].status = "built"'
+  rerender
+  cl validate --all
+  assert_v6 "without a promotion" "a test claim moved into built by a status edit"
+  assert_contains "$(jq -r '.findings[]? | select(.check == "V3") | .message' <<<"$CL_OUT")" "without promotion" \
+    "…and V3's finding"
+  teardown
+}
+
+test_lint_built_failing_check_red_at_run_and_gate() {
+  echo "test: P1-3 — a lint claim moved into built by a status edit, its check failing: red at run, at the gate and at attest, named or not"
+  gate_plain_fixture
+  lint_claim
+  lint_build
+  set_ttl 1800
+  git add -A && git commit -qm "the lint claim built, the code violating it"
+  cl run --all
+  assert_eq "1" "$CL_RC" "run --all exits 1"
+  assert_eq "finding assert-fail" "$(run_field verdict) $(run_field outcome)" "…a finding: the lint fails"
+  assert_contains "$(run_field message)" "a built claim must pass its check" "…a built claim must pass"
+  gate 1
+  assert_eq "1" "$CL_RC" "gate 1 (it names the claim) exits 1"
+  assert_eq "red" "$(rec 1 .result)" "…result red"
+  assert_contains "$(gate_messages run)" "a built claim must pass its check" "…the run finding"
+  # Chunk 2 names no claim: the gate still runs a lint claim its range moved
+  # into built, so a status edit is never recorded unchecked.
+  gate 2 --from main
+  assert_eq "1" "$CL_RC" "gate 2 (Claims none), the status edit in its range: exits 1"
+  assert_eq "[\"$TTL_ID\"]" "$(rec 2 '.claims | tojson')" "…it ran the claim the range moved into built"
+  assert_contains "$(gate_messages run)" "a built claim must pass its check" "…and found it red"
+  # The final gate too: attest runs each lint claim the branch moved into
+  # built, whether or not the plan names it.
+  doc_edit "$PLAN" "**Claims:** SPEC-AUTH-001#token-ttl" "**Claims:** none — the lint claim is built by a status edit"
+  git add -A && git commit -qm "the plan names no claim"
+  attest
+  assert_eq "1" "$CL_RC" "attest, the plan naming no claim: exits 1"
+  assert_eq "finding" "$(jq -r --arg c "$TTL_ID" '[.results[]? | select(.claim == $c)][0].verdict' <<<"$CL_OUT")" \
+    "…it ran the lint claim the branch moved into built"
+  assert_contains "$(attest_messages)" "a built claim must pass its check" "…and found it red"
   teardown
 }
 
@@ -4384,7 +4490,7 @@ test_run_lint_structural_findings() {
   echo "test: run — an invalid pattern or an unsafe or absent lint path is a finding, not indeterminate"
   claims_fixture
   lint_claim
-  lint_promote
+  lint_build
   jset "$SIDECAR" '.claims[0].lint.pattern = "TTL_SECONDS = (900"'
   cl run --all
   assert_eq "1" "$CL_RC" "invalid pattern: exits 1"
@@ -10433,6 +10539,8 @@ run_tests() {
   test_v4_staged_reads_index
   test_v4_frozen_selftest_only
   test_run_lint_rerun
+  test_lint_built_by_status_edit
+  test_lint_built_failing_check_red_at_run_and_gate
   test_run_lint_unbuilt_pass_is_finding
   test_run_lint_structural_findings
 
