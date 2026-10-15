@@ -1,0 +1,26 @@
+# The work ledger's post-commit leg (POSIX sh; install.sh wraps it in its
+# markers). doc-tools.sh ledger inflight --push in the background — the
+# commit never waits, and the job holds none of its output: stdin is
+# /dev/null, stdout and stderr go to <git common dir>/doc-superpowers/ledger/
+# push.log. It pushes only with inflight.enabled and commits beyond the base
+# (--no-verify, forced); it never prompts (GIT_TERMINAL_PROMPT=0), and a
+# hangup does not orphan its transport (HUP ignored; doc-tools.sh reaps the
+# push on TERM / INT). DOC_SUPERPOWERS_LEDGER_SKIP=1 skips it.
+if [ "${DOC_SUPERPOWERS_LEDGER_SKIP:-}" != 1 ] && [ -f docs/ledger/config.json ]; then
+  DOC_SP_LG_TOOLS=${DOC_TOOLS:-}
+  [ -n "$DOC_SP_LG_TOOLS" ] || DOC_SP_LG_TOOLS=$(__DOC_TOOLS_RESOLVE__)
+  DOC_SP_LG_DIR=$(git rev-parse --git-common-dir 2>/dev/null) || DOC_SP_LG_DIR=""
+  case "$DOC_SP_LG_DIR" in
+    "" | /*) ;;
+    *) DOC_SP_LG_DIR="$PWD/$DOC_SP_LG_DIR" ;;
+  esac
+  if [ -f "$DOC_SP_LG_TOOLS" ] && [ -n "$DOC_SP_LG_DIR" ] && mkdir -p "$DOC_SP_LG_DIR/doc-superpowers/ledger" 2>/dev/null; then
+    (
+      trap '' HUP
+      GIT_TERMINAL_PROMPT=0
+      export GIT_TERMINAL_PROMPT
+      exec "$DOC_SP_LG_TOOLS" ledger inflight --push
+    ) </dev/null >"$DOC_SP_LG_DIR/doc-superpowers/ledger/push.log" 2>&1 &
+  fi
+  unset DOC_SP_LG_TOOLS DOC_SP_LG_DIR
+fi

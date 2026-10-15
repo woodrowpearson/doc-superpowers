@@ -30,6 +30,15 @@ set -euo pipefail
 #     a RETIRED one too (doc-index-update.yml): any install --ci removes it;
 #   - vendored files: `doc-tools.sh tools install|uninstall` decide (uninstall
 #     removes only files identical to the plugin's copies, and says what it kept).
+#   - the work ledger's two opt-in sets (never part of --all): --ledger, in a
+#     git hook, the "# ledger-superpowers:begin" … "# ledger-superpowers:end"
+#     block (a hook it created holds only "#!/bin/sh" and that block);
+#     --ledger-claude, the same block in git's info/exclude and, in
+#     .claude/settings.local.json, each hook ENTRY whose command runs
+#     .claude/hooks/doc-superpowers/{ledger-session-notices,ledger-state-watch}.sh,
+#     and those scripts (hook-lib.sh stays while any script that sources it
+#     does). Its markers and the git tier's never match each other: each
+#     uninstall takes its own.
 #
 # STATE — the CI tier's choices (workflow set, base branch, cron, strict) are
 # recorded in .claude/doc-superpowers/installed.json (state.sh), so a plain
@@ -59,6 +68,13 @@ RETIRED_WORKFLOWS="doc-index-update"
 VENDOR_DEST=".github/scripts"
 BLOCK_BEGIN="# doc-superpowers:begin"
 BLOCK_END="# doc-superpowers:end"
+# The work ledger's set (--ledger): its own markers — not prefixed by
+# BLOCK_BEGIN, which blocks_balanced / strip_blocks / has_block match.
+LG_BEGIN="# ledger-superpowers:begin"
+LG_END="# ledger-superpowers:end"
+LEDGER_CONFIG="docs/ledger/config.json"
+LEDGER_GIT_HOOKS="pre-commit pre-push post-commit"
+LEDGER_CLAUDE_HOOKS="ledger-session-notices ledger-state-watch"
 
 # The workflow templates, once (a membership test is a string match).
 KNOWN_WORKFLOWS=""
@@ -113,9 +129,9 @@ usage() {
 doc-superpowers hooks installer
 
 Usage:
-  install.sh install   [--git] [--claude] [--ci] [--all] [CI options]
-  install.sh uninstall [--git] [--claude] [--ci] [--all] [--workflows=<csv|all|none>] [--transient]
-  install.sh status    [--git] [--claude] [--ci] [--all]
+  install.sh install   [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [CI options]
+  install.sh uninstall [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--workflows=<csv|all|none>] [--transient]
+  install.sh status    [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude]
   install.sh help
 
 Every command acts on the repository holding the current directory, at its
@@ -148,6 +164,25 @@ Tiers:
             doc-tools.sh tools install. Default: the shell workflows; the
             Claude-powered ones are opt-in by name (--workflows=).
   --all     All three tiers.
+  --ledger  The work ledger's hooks: an opt-in set, never part of --all, that
+            needs docs/ledger/config.json. Marked blocks
+            ("# ledger-superpowers:begin" … ":end") where git runs hooks; in a
+            hook of yours the block goes after its #! line and leading comment
+            lines, before your code:
+              pre-commit   doc-tools.sh ledger validate --staged (any non-zero blocks)
+              pre-push     refuses provisional keys a push adds (keys.mode cas)
+              post-commit  doc-tools.sh ledger inflight --push, in the background
+                           (output: <git common dir>/doc-superpowers/ledger/push.log)
+  --ledger-claude
+            The work ledger's two Claude Code events, an opt-in set of their
+            own (per-user like --claude, which it never installs; never part of
+            --all; needs docs/ledger/config.json):
+              ledger-session-notices  SessionStart  unacked in-flight notices (≤ 15 lines)
+              ledger-state-watch      PostToolUse   (Write|Edit) suggests ledger note when
+                                                    state lands under state_watch.paths
+            Each uninstall (--ledger, --ledger-claude) removes its own set;
+            status reports each on its own. DOC_SUPERPOWERS_LEDGER_SKIP=1
+            skips every leg of both.
 
 CI options (install --ci / --all):
   --workflows=<csv|all|none>
@@ -345,10 +380,11 @@ remove_dir_if_empty() {
 # --- Marked blocks ---------------------------------------------------------------
 
 # The "# doc-superpowers:begin" / ":end" lines of <file> pair up (an unpaired
-# begin would make a removal run to the end of the file).
+# begin would make a removal run to the end of the file). [begin] [end]: other
+# markers (the ledger set's).
 blocks_balanced() {
   [ -f "$1" ] || return 0
-  awk -v b="$BLOCK_BEGIN" -v e="$BLOCK_END" '
+  awk -v b="${2:-$BLOCK_BEGIN}" -v e="${3:-$BLOCK_END}" '
     index($0, b) == 1 { if (open) bad = 1; open = 1 }
     index($0, e) == 1 { if (!open) bad = 1; open = 0 }
     END { exit (bad || open) ? 1 : 0 }' "$1"
@@ -421,6 +457,115 @@ remove_block() {
   has_block "$f" || return 0
   tmp_beside "$f"
   strip_blocks "$f" > "$_TMP"
+  if ! grep -q '[^[:space:]]' "$_TMP"; then
+    rm -f "$_TMP"
+    remove_file "$f"
+    return 0
+  fi
+  commit_tmp "$f" 644
+}
+
+# --- The ledger set's blocks (--ledger) ----------------------------------------
+#
+# Every edit keeps the rest of the file byte for byte — a missing final
+# newline too — so an uninstall is the exact inverse of an install.
+
+# lg_has_block <file>: <file> holds a ledger block.
+lg_has_block() {
+  [ -f "$1" ] && grep -q "^$LG_BEGIN" "$1"
+}
+
+lg_check_blocks() {
+  blocks_balanced "$1" "$LG_BEGIN" "$LG_END" \
+    || die "$1 has a '$LG_BEGIN' line without its '$LG_END' (or the reverse): fix or remove the ledger lines by hand, then re-run. Nothing was changed."
+}
+
+# _lg_edit <strip|insert> <file> [<block file>, - for stdin]: <file> without
+# its ledger blocks, on stdout; insert also puts the block at the set's place:
+# after the #! line, after a git tier block right there, and after the
+# comment lines that follow — before anything the hook runs, so no exit of
+# the hook's own (a trailing "exit 0") can skip it. The same place whatever
+# else is in the file, so install order never changes the result.
+_lg_edit() {
+  local nonl=0
+  if [ -s "$2" ] && [ -n "$(tail -c 1 "$2")" ]; then
+    nonl=1
+  fi
+  awk -v mode="$1" -v b="$LG_BEGIN" -v e="$LG_END" -v db="$BLOCK_BEGIN" -v de="$BLOCK_END" -v nonl="$nonl" '
+    phase == 1 { B[++nb] = $0; next }
+    { last = FNR }
+    inb { if (index($0, e) == 1) inb = 0; next }
+    index($0, b) == 1 { inb = 1; next }
+    { L[++n] = $0; src[n] = FNR }
+    END {
+      k = n
+      if (mode == "insert") {
+        k = 0
+        if (n >= 1 && substr(L[1], 1, 2) == "#!") k = 1
+        if (k < n && index(L[k + 1], db) == 1) {
+          j = k + 1
+          while (j <= n && index(L[j], de) != 1) j++
+          if (j <= n) k = j
+        }
+        while (k < n && substr(L[k + 1], 1, 1) == "#" && index(L[k + 1], db) != 1) k++
+      }
+      m = 0
+      for (i = 1; i <= k; i++) O[++m] = L[i]
+      if (mode == "insert") for (i = 1; i <= nb; i++) O[++m] = B[i]
+      for (i = k + 1; i <= n; i++) O[++m] = L[i]
+      # The file ended without a newline: so does its last line, still last.
+      cut = nonl && n > 0 && src[n] == last && (mode != "insert" || k < n)
+      for (i = 1; i <= m; i++) printf "%s%s", O[i], ((i == m && cut) ? "" : "\n")
+    }' phase=1 "${3:-/dev/null}" phase=2 "$2"
+}
+
+# lg_extract <file>: the ledger block lines of <file>.
+lg_extract() {
+  awk -v b="$LG_BEGIN" -v e="$LG_END" '
+    index($0, b) == 1 { inb = 1 }
+    inb { print }
+    inb && index($0, e) == 1 { inb = 0 }' "$1"
+}
+
+# lg_block <hook>: the block this install writes into <hook> (the template
+# scripts/hooks/git/ledger-<hook>, rendered, between the markers).
+lg_block() {
+  printf '%s — the work ledger'"'"'s %s leg (doc-superpowers install.sh --ledger; uninstall --ledger removes it)\n' "$LG_BEGIN" "$1"
+  render_hook "$SCRIPT_DIR/git/ledger-$1"
+  printf '%s\n' "$LG_END"
+}
+
+# _lg_left_empty <file>: nothing in <file> but blank lines and "#!/bin/sh".
+_lg_left_empty() {
+  ! grep -qv -e '^#!/bin/sh$' -e '^[[:space:]]*$' "$1"
+}
+
+# lg_only <file>: a hook the ledger set made — "#!/bin/sh" and its block.
+lg_only() {
+  local rest
+  lg_has_block "$1" || return 1
+  rest=$(_lg_edit strip "$1")
+  ! grep -qv -e '^#!/bin/sh$' -e '^[[:space:]]*$' <<<"$rest"
+}
+
+# lg_upsert_block <file> <block>: <file> without its ledger block, the block
+# appended. lg_remove_block <file>: drop it; a file left blank is removed.
+lg_upsert_block() {
+  local f="$1"
+  tmp_beside "$f"
+  {
+    if [ -f "$f" ]; then
+      _lg_edit strip "$f" | awk '{ print }'
+    fi
+    printf '%s\n' "$2"
+  } > "$_TMP"
+  commit_tmp "$f" 644
+}
+lg_remove_block() {
+  local f="$1"
+  lg_has_block "$f" || return 0
+  tmp_beside "$f"
+  _lg_edit strip "$f" > "$_TMP"
   if ! grep -q '[^[:space:]]' "$_TMP"; then
     rm -f "$_TMP"
     remove_file "$f"
@@ -540,14 +685,15 @@ hooks_path_scope() {
 # from any other scope (global, system, a command-line -c) serves every
 # repository: install would add our hooks to all of them, uninstall remove
 # hooks they all use. Both refuse, each saying what it would have done.
+# [tier]: the flag named (default --git).
 check_hooks_path_scope() {
-  local scope what
+  local scope what tier="${1:---git}"
   scope=$(hooks_path_scope)
   case "$scope" in
     "" | local | worktree) ;;
     *)
       if [ "$COMMAND" = uninstall ]; then
-        what="uninstall --git does not touch it: those hooks serve every repository. If an older doc-superpowers installer put hooks there (a hook whose first lines say 'doc-superpowers hook v1'), remove them by hand"
+        what="uninstall $tier does not touch it: those hooks serve every repository. If an older doc-superpowers installer put hooks there (a hook whose first lines say 'doc-superpowers hook v1'), remove them by hand"
       else
         what="installing into it would add doc-superpowers hooks to all of them. Set a repository-local one (git config --local core.hooksPath <dir>) or unset the $scope one, then re-run"
       fi
@@ -633,12 +779,14 @@ integrate_hook() {
 # Whether <file> is what this install renders from <template>, line 2 (the
 # install date) aside. A hook of another doc-superpowers version carries the
 # same marker, so presence alone cannot tell a v2 hook (whose gate read
-# $TOOL_INPUT, which nothing sets: it never gated) from a current one.
+# $TOOL_INPUT, which nothing sets: it never gated) from a current one. A
+# ledger block in it (the --ledger set's own) is not this tier's and is left
+# out of the comparison.
 render_matches() {
   local rendered
   [ -f "$1" ] || return 1
   rendered=$(render_hook "$2" | sed 2d) || return 1
-  [ "$(sed 2d "$1")" = "$rendered" ]
+  [ "$(_lg_edit strip "$1" | sed 2d)" = "$rendered" ]
 }
 
 # The integration state of <hook> in HOOKS_DIR: ours | current | outdated | none.
@@ -672,13 +820,15 @@ preflight_git() {
     if [ -f "$dest" ] && ! is_our_hook "$dest"; then
       check_blocks "$dest"
     fi
+    # A ledger block this tier re-inserts (install) or keeps (uninstall).
+    lg_check_blocks "$dest"
   done
   safe_dest .gitattributes
   check_blocks .gitattributes
 }
 
 install_git() {
-  local hook src dest copy installed=0 integrated=0 skipped=0
+  local hook src dest copy rendered installed=0 integrated=0 skipped=0
   ensure_dir "$HOOKS_DIR"
   echo "  Hooks directory: $HOOKS_DIR"
   for hook in $GIT_HOOKS; do
@@ -686,9 +836,17 @@ install_git() {
     [ -f "$src" ] || continue
     dest="$HOOKS_DIR/$hook"
     copy="$HOOKS_DIR/.doc-superpowers-$hook"
-    if [ ! -e "$dest" ] || is_our_hook "$dest"; then
+    # Ours, absent, or one the ledger set made: written whole, the ledger
+    # block it held put back at its place (install order never matters).
+    if [ ! -e "$dest" ] || is_our_hook "$dest" || lg_only "$dest"; then
       tmp_beside "$dest"
       render_hook "$src" > "$_TMP"
+      if lg_has_block "$dest"; then
+        rendered="$_TMP"
+        tmp_beside "$dest"
+        lg_extract "$dest" | _lg_edit insert "$rendered" - > "$_TMP"
+        rm -f "$rendered"
+      fi
       commit_tmp "$dest" 755 1
       if [ -f "$copy" ]; then
         remove_file "$copy"
@@ -730,7 +888,13 @@ uninstall_git() {
   for hook in $GIT_HOOKS; do
     dest="$HOOKS_DIR/$hook"
     copy="$HOOKS_DIR/.doc-superpowers-$hook"
-    if is_our_hook "$dest"; then
+    if is_our_hook "$dest" && lg_has_block "$dest"; then
+      # The ledger set's block stays, in the hook it would have made itself.
+      tmp_beside "$dest"
+      { printf '#!/bin/sh\n'; lg_extract "$dest"; } > "$_TMP"
+      commit_tmp "$dest" 755
+      removed=$((removed + 1))
+    elif is_our_hook "$dest"; then
       remove_file "$dest"
       removed=$((removed + 1))
     elif [ -f "$dest" ] && grep -qF "$BLOCK_BEGIN" "$dest"; then
@@ -838,6 +1002,11 @@ _CLAUDE_JQ_DEFS='
             and (.command | test("\\.claude/hooks/doc-superpowers/(pre-commit-gate|post-commit-sync|session-summary)\\.sh"));
   def holds_ours: type == "object" and ((.hooks | type) == "array") and any(.hooks[]; ours);
   def strip: map(if holds_ours then (.hooks |= map(select(ours | not))) | select(.hooks | length > 0) else . end);
+  # The ledger set'"'"'s entries (--ledger-claude): a second, disjoint owner.
+  def lg_ours: type == "object" and .type == "command" and ((.command | type) == "string")
+            and (.command | test("\\.claude/hooks/doc-superpowers/(ledger-session-notices|ledger-state-watch)\\.sh"));
+  def lg_holds: type == "object" and ((.hooks | type) == "array") and any(.hooks[]; lg_ours);
+  def lg_strip: map(if lg_holds then (.hooks |= map(select(lg_ours | not))) | select(.hooks | length > 0) else . end);
   def shape:
     if type != "object" then error("it is not a JSON object")
     elif has("hooks") and (.hooks | type) != "object" then error(".hooks is not an object")
@@ -935,8 +1104,12 @@ install_claude() {
   upsert_block "$EXCLUDE_FILE" "$EXCLUDE_BLOCK" 644
   echo "Claude Code hooks: 3 installed (pre-commit-gate, post-commit-sync, session-summary; their shared $CLAUDE_LIB.sh beside them)"
   echo "  Scripts in $CLAUDE_HOOKS_DIR/, registered in $SETTINGS_FILE — per-user: both are excluded from git ($EXCLUDE_FILE)"
-  # An exclude entry cannot hide a file git already tracks — the settings or
-  # the rendered scripts (both hold this machine's paths).
+  claude_tracked_note
+}
+
+# An exclude entry cannot hide a file git already tracks — the settings or
+# the rendered scripts (both hold this machine's paths).
+claude_tracked_note() {
   local tracked
   tracked=$(git ls-files -- "$SETTINGS_FILE" "$CLAUDE_HOOKS_DIR" 2>/dev/null) || tracked=""
   if [ -n "$tracked" ]; then
@@ -963,6 +1136,10 @@ uninstall_claude() {
     any=1
   fi
   for h in $CLAUDE_HOOKS $CLAUDE_LIB; do
+    # hook-lib.sh stays while the ledger set's scripts, which source it, do.
+    if [ "$h" = "$CLAUDE_LIB" ] && scripts_present "$LEDGER_CLAUDE_HOOKS"; then
+      continue
+    fi
     if [ -f "$CLAUDE_HOOKS_DIR/$h.sh" ]; then
       remove_file "$CLAUDE_HOOKS_DIR/$h.sh"
       any=1
@@ -1020,6 +1197,266 @@ status_claude() {
       fi
     else
       printf "  ✗ %-22s not installed\n" "$h"
+    fi
+  done
+}
+
+# --- The work ledger's set (--ledger) ------------------------------------------------
+#
+# Two opt-in sets, neither part of --all, and like the git and Claude tiers
+# per-clone / per-user (never in installed.json); each needs the config to
+# install, and each uninstall takes only its own set:
+#   --ledger         the git legs, as blocks (scripts/hooks/git/ledger-<hook>),
+#                    never whole files: in a hook of the git tier, after its
+#                    header comments (install --git puts it back after writing
+#                    its hook whole, whatever the order); in a hook of yours,
+#                    after its #! line and leading comments, so your own exit
+#                    cannot skip it; where there is no hook, in a "#!/bin/sh"
+#                    hook of its own;
+#   --ledger-claude  the two Claude events, alone: it never installs the
+#                    general Claude tier (--claude), whose gate a host may not
+#                    want; hook-lib.sh, which both source, comes with either.
+
+LG_EXCLUDE_BLOCK="$LG_BEGIN — the per-user ledger Claude Code hooks (install.sh --ledger-claude; uninstall --ledger-claude removes this block)
+$SETTINGS_FILE
+$CLAUDE_HOOKS_DIR/
+$LG_END"
+
+# scripts_present <names>: one of those Claude scripts is installed.
+scripts_present() {
+  local h
+  for h in $1; do
+    [ ! -f "$CLAUDE_HOOKS_DIR/$h.sh" ] || return 0
+  done
+  return 1
+}
+
+lg_event() {
+  case "$1" in
+    ledger-session-notices) echo SessionStart ;;
+    *) echo PostToolUse ;;
+  esac
+}
+
+# Every check before the first write. Installing either set needs the config
+# (one check for both flags, so the message names what was asked for).
+preflight_ledger_config() {
+  local asked=""
+  [ "$COMMAND" = install ] || return 0
+  [ ! -f "$LEDGER_CONFIG" ] || return 0
+  if $DO_LEDGER; then asked="--ledger"; fi
+  if $DO_LEDGER_CLAUDE; then asked="${asked:+$asked }--ledger-claude"; fi
+  echo "ERROR: install $asked needs $LEDGER_CONFIG, which this repository does not have: the work ledger is not enabled here (doc-tools.sh ledger init sets it up). Nothing was changed." >&2
+  exit 1
+}
+
+preflight_ledger() {
+  local hook
+  check_hooks_path_scope --ledger
+  safe_dest "$HOOKS_DIR"
+  for hook in $LEDGER_GIT_HOOKS; do
+    safe_dest "$HOOKS_DIR/$hook"
+    lg_check_blocks "$HOOKS_DIR/$hook"
+    if [ "$COMMAND" = install ] && [ ! -f "$SCRIPT_DIR/git/ledger-$hook" ]; then
+      die "the plugin's $SCRIPT_DIR/git/ledger-$hook is missing. Nothing was changed."
+    fi
+  done
+}
+
+preflight_ledger_claude() {
+  local h cur
+  safe_dest "$SETTINGS_FILE"
+  for h in $LEDGER_CLAUDE_HOOKS $CLAUDE_LIB; do
+    safe_dest "$CLAUDE_HOOKS_DIR/$h.sh"
+    if [ "$COMMAND" = install ] && [ ! -f "$SCRIPT_DIR/claude/$h.sh" ]; then
+      die "the plugin's $SCRIPT_DIR/claude/$h.sh is missing. Nothing was changed."
+    fi
+  done
+  safe_dest "$EXCLUDE_FILE"
+  lg_check_blocks "$EXCLUDE_FILE"
+  if [ -e "$SETTINGS_FILE" ]; then
+    cur=$(settings_read) || settings_refuse "$cur"
+    cur=$(jq -c "$_CLAUDE_JQ_DEFS"'shape' <<<"$cur" 2>&1) || settings_refuse "$cur"
+  fi
+}
+
+install_ledger() {
+  local hook dest installed=0 skipped=0
+  ensure_dir "$HOOKS_DIR"
+  for hook in $LEDGER_GIT_HOOKS; do
+    dest="$HOOKS_DIR/$hook"
+    if [ ! -e "$dest" ]; then
+      tmp_beside "$dest"
+      { printf '#!/bin/sh\n'; lg_block "$hook"; } > "$_TMP"
+      commit_tmp "$dest" 755 1
+    elif host_is_shell "$dest"; then
+      tmp_beside "$dest"
+      lg_block "$hook" | _lg_edit insert "$dest" - > "$_TMP"
+      commit_tmp "$dest" 755
+      if [ ! -x "$dest" ]; then
+        echo "  NOTE: $dest is not executable, so git skips it and the ledger block in it: chmod +x $dest"
+      fi
+    else
+      echo "  Skipped ledger $hook: your existing hook is not a shell script, so no block can go into it (run the ledger leg from it yourself: see scripts/hooks/git/ledger-$hook)"
+      skipped=$((skipped + 1))
+      continue
+    fi
+    installed=$((installed + 1))
+  done
+  echo "Ledger git legs: $installed installed, $skipped skipped ($HOOKS_DIR: pre-commit validate --staged, pre-push provisional keys, post-commit in-flight push)"
+}
+
+# --ledger-claude: the two events alone (never the general --claude tier).
+install_ledger_claude() {
+  local h cur new
+  ensure_dir "$CLAUDE_HOOKS_DIR"
+  # The library first: a hook never runs without the copy it sources.
+  tmp_beside "$CLAUDE_HOOKS_DIR/$CLAUDE_LIB.sh"
+  render_hook "$SCRIPT_DIR/claude/$CLAUDE_LIB.sh" > "$_TMP"
+  commit_tmp "$CLAUDE_HOOKS_DIR/$CLAUDE_LIB.sh" 644
+  for h in $LEDGER_CLAUDE_HOOKS; do
+    tmp_beside "$CLAUDE_HOOKS_DIR/$h.sh"
+    render_hook "$SCRIPT_DIR/claude/$h.sh" > "$_TMP"
+    commit_tmp "$CLAUDE_HOOKS_DIR/$h.sh" 755 1
+  done
+  # Read now: --claude, in the same run, may have just written it.
+  cur=$(settings_read) || settings_refuse "$cur"
+  new=$(jq \
+    --argjson ss "$(jq -cn --arg c "$(claude_cmd ledger-session-notices)" '{matcher: "", hooks: [{type: "command", command: $c, timeout: 10}]}')" \
+    --argjson sw "$(jq -cn --arg c "$(claude_cmd ledger-state-watch)" '{matcher: "Write|Edit", hooks: [{type: "command", command: $c, timeout: 10}]}')" \
+    "$_CLAUDE_JQ_DEFS"'
+    shape
+    | .hooks = (.hooks // {})
+    | .hooks.SessionStart = ((.hooks.SessionStart // []) | lg_strip) + [$ss]
+    | .hooks.PostToolUse = ((.hooks.PostToolUse // []) | lg_strip) + [$sw]' <<<"$cur" 2>&1) || settings_refuse "$new"
+  tmp_beside "$SETTINGS_FILE"
+  printf '%s\n' "$new" | jq . > "$_TMP"
+  commit_tmp "$SETTINGS_FILE" 644
+  lg_upsert_block "$EXCLUDE_FILE" "$LG_EXCLUDE_BLOCK"
+  echo "Ledger Claude Code hooks: 2 installed (ledger-session-notices: SessionStart; ledger-state-watch: PostToolUse Write|Edit; their $CLAUDE_LIB.sh beside them)"
+  echo "  Scripts in $CLAUDE_HOOKS_DIR/, registered in $SETTINGS_FILE — per-user: both are excluded from git ($EXCLUDE_FILE)"
+  claude_tracked_note
+}
+
+# --ledger: every ledger block (a hook it made goes whole).
+uninstall_ledger() {
+  local hook dest removed=0
+  for hook in $LEDGER_GIT_HOOKS; do
+    dest="$HOOKS_DIR/$hook"
+    lg_has_block "$dest" || continue
+    tmp_beside "$dest"
+    _lg_edit strip "$dest" > "$_TMP"
+    if _lg_left_empty "$_TMP"; then
+      rm -f "$_TMP"
+      remove_file "$dest"
+    else
+      commit_tmp "$dest" 755
+    fi
+    removed=$((removed + 1))
+  done
+  echo "Ledger git legs: $removed removed (from $HOOKS_DIR)"
+}
+
+# --ledger-claude: the two events and their scripts; hook-lib.sh only when no
+# script of the general tier is left either.
+uninstall_ledger_claude() {
+  local h cur new any=0
+  if [ -e "$SETTINGS_FILE" ]; then
+    cur=$(settings_read) || settings_refuse "$cur"
+    new=$(jq -c "$_CLAUDE_JQ_DEFS"'
+      shape
+      | if has("hooks") then
+          . as $orig
+          | reduce (.hooks | keys_unsorted[]) as $e (.;
+              if any(.hooks[$e][]; lg_holds)
+              then .hooks[$e] |= lg_strip | (if (.hooks[$e] | length) == 0 then del(.hooks[$e]) else . end)
+              else . end)
+          | if (.hooks | length) == 0 and ($orig.hooks | length) > 0 then del(.hooks) else . end
+        else . end' <<<"$cur" 2>&1) || settings_refuse "$new"
+    if [ "$new" != "$(jq -c . <<<"$cur")" ]; then
+      if [ "$new" = "{}" ]; then
+        remove_file "$SETTINGS_FILE"
+      else
+        tmp_beside "$SETTINGS_FILE"
+        printf '%s\n' "$new" | jq . > "$_TMP"
+        commit_tmp "$SETTINGS_FILE" 644
+      fi
+      any=1
+    fi
+  fi
+  for h in $LEDGER_CLAUDE_HOOKS; do
+    if [ -f "$CLAUDE_HOOKS_DIR/$h.sh" ]; then
+      remove_file "$CLAUDE_HOOKS_DIR/$h.sh"
+      any=1
+    fi
+  done
+  if [ -f "$CLAUDE_HOOKS_DIR/$CLAUDE_LIB.sh" ] && ! scripts_present "$CLAUDE_HOOKS"; then
+    remove_file "$CLAUDE_HOOKS_DIR/$CLAUDE_LIB.sh"
+    any=1
+  fi
+  remove_dir_if_empty "$CLAUDE_HOOKS_DIR"
+  remove_dir_if_empty .claude/hooks
+  remove_dir_if_empty .claude
+  if lg_has_block "$EXCLUDE_FILE"; then
+    lg_remove_block "$EXCLUDE_FILE"
+    any=1
+  fi
+  if [ "$any" = 1 ]; then
+    echo "Ledger Claude Code hooks: removed"
+  else
+    echo "Ledger Claude Code hooks: nothing to uninstall"
+  fi
+}
+
+lg_config_note() {
+  if [ ! -f "$LEDGER_CONFIG" ]; then
+    echo "  ⚠ $LEDGER_CONFIG is missing: the work ledger is not enabled here, so an installed leg does nothing"
+  fi
+}
+
+status_ledger() {
+  local hook dest
+  echo "Ledger git hooks (the opt-in --ledger set; never part of --all):"
+  lg_config_note
+  for hook in $LEDGER_GIT_HOOKS; do
+    dest="$HOOKS_DIR/$hook"
+    if ! lg_has_block "$dest"; then
+      printf "  ✗ %-22s not installed\n" "$hook"
+    elif [ "$(lg_extract "$dest")" != "$(lg_block "$hook")" ]; then
+      printf "  ⚠ %-22s outdated block (another version's, or edited): re-run install --ledger\n" "$hook"
+    elif [ ! -x "$dest" ]; then
+      printf "  ⚠ %-22s installed but not executable (git skips it): chmod +x %s\n" "$hook" "$dest"
+    else
+      printf "  ✓ %-22s installed (a block in %s)\n" "$hook" "$dest"
+    fi
+  done
+}
+
+status_ledger_claude() {
+  local h ev reg=""
+  echo "Ledger Claude Code hooks (the opt-in --ledger-claude set, per-user; never part of --all or --claude):"
+  lg_config_note
+  # Each registered entry of the set: "<event> <script> <command>".
+  if [ -e "$SETTINGS_FILE" ]; then
+    reg=$(jq -r "$_CLAUDE_JQ_DEFS"'
+      [(.hooks // {}) | to_entries[] | select(.value | type == "array") | .key as $e
+       | .value[] | select(type == "object" and ((.hooks | type) == "array")) | .hooks[] | select(lg_ours)
+       | "\($e) \(.command | capture("doc-superpowers/(?<n>[a-z-]+)\\.sh").n) \(.command)"] | .[]' "$SETTINGS_FILE" 2>/dev/null) \
+      || echo "  ⚠ $SETTINGS_FILE cannot be read as JSON"
+  fi
+  for h in $LEDGER_CLAUDE_HOOKS; do
+    ev=$(lg_event "$h")
+    if ! grep -q "^$ev $h " <<<"$reg"; then
+      printf "  ✗ %-22s not installed (install --ledger-claude)\n" "$h"
+    elif [ ! -f "$CLAUDE_HOOKS_DIR/$h.sh" ]; then
+      printf "  ⚠ %-22s in settings but script missing from %s/\n" "$h" "$CLAUDE_HOOKS_DIR"
+    elif ! grep -qxF "$ev $h $(claude_cmd "$h")" <<<"$reg"; then
+      printf "  ⚠ %-22s outdated (registered with another command than %s): re-run install --ledger-claude\n" "$h" "$(claude_cmd "$h")"
+    elif ! render_matches "$CLAUDE_HOOKS_DIR/$h.sh" "$SCRIPT_DIR/claude/$h.sh" \
+      || ! render_matches "$CLAUDE_HOOKS_DIR/$CLAUDE_LIB.sh" "$SCRIPT_DIR/claude/$CLAUDE_LIB.sh"; then
+      printf "  ⚠ %-22s outdated (its script or %s.sh is another version's or install's): re-run install --ledger-claude\n" "$h" "$CLAUDE_LIB"
+    else
+      printf "  ✓ %-22s active (%s: script + settings)\n" "$h" "$ev"
     fi
   done
 }
@@ -1538,7 +1975,7 @@ case "$SKILL_DIR" in
   *$'\n'*) die "the skill path holds a line break, which no hook line can carry: $SKILL_DIR" ;;
 esac
 
-DO_GIT=false DO_CLAUDE=false DO_CI=false
+DO_GIT=false DO_CLAUDE=false DO_CI=false DO_LEDGER=false DO_LEDGER_CLAUDE=false
 OPT_BASE="" OPT_CRON="" OPT_STRICT="" HELPERS=true FORCE=false TRANSIENT=false
 WF_MODE=plain CSV_NAMES=""
 SEEN_CI_OPTS=""
@@ -1546,7 +1983,7 @@ SEEN_CI_OPTS=""
 # Which command takes which flag (anything else: exit 2).
 allowed() {
   case "$COMMAND:$1" in
-    *:--git | *:--claude | *:--ci | *:--all) return 0 ;;
+    *:--git | *:--claude | *:--ci | *:--all | *:--ledger | *:--ledger-claude) return 0 ;;
     install:--workflows | install:--base-branch | install:--cron | install:--ci-strict | install:--helpers | install:--force) return 0 ;;
     uninstall:--workflows | uninstall:--transient) return 0 ;;
   esac
@@ -1562,7 +1999,7 @@ while [ $# -gt 0 ]; do
     *) value="" has_value=0 ;;
   esac
   case "$name" in
-    --git | --claude | --ci | --all | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient) ;;
+    --git | --claude | --ci | --all | --ledger | --ledger-claude | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient) ;;
     *) usage_error "unknown option: $arg" ;;
   esac
   allowed "$name" || usage_error "$name does not apply to $COMMAND"
@@ -1582,6 +2019,8 @@ while [ $# -gt 0 ]; do
     --claude) DO_CLAUDE=true ;;
     --ci) DO_CI=true ;;
     --all) DO_GIT=true DO_CLAUDE=true DO_CI=true ;;
+    --ledger) DO_LEDGER=true ;;
+    --ledger-claude) DO_LEDGER_CLAUDE=true ;;
     --base-branch)
       valid_branch "$value" || die "invalid --base-branch '$value': a branch name of letters, digits and . _ / - that git accepts"
       OPT_BASE="$value"
@@ -1627,7 +2066,7 @@ enter_repo
 
 case "$COMMAND" in
   install)
-    if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI; then
+    if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE; then
       if [[ -t 0 ]]; then
         echo "doc-superpowers hooks installer"
         echo ""
@@ -1637,6 +2076,7 @@ case "$COMMAND" in
         echo "  [3] CI/CD workflows: $SHELL_WORKFLOWS"
         echo "      (Claude-powered ones are opt-in: install.sh install --ci --workflows=<names>; install.sh help lists them)"
         echo "  [a] All of the above"
+        echo "  (The work ledger's hooks are sets of their own: install.sh install --ledger and/or --ledger-claude.)"
         echo ""
         read -rp "Select (comma-separated, e.g. 1,2): " selection
         [[ "$selection" == *1* ]] && DO_GIT=true
@@ -1649,6 +2089,9 @@ case "$COMMAND" in
       fi
     fi
     # Every check first: a refusal writes nothing.
+    { $DO_LEDGER || $DO_LEDGER_CLAUDE; } && preflight_ledger_config
+    $DO_LEDGER && preflight_ledger
+    $DO_LEDGER_CLAUDE && preflight_ledger_claude
     $DO_GIT && preflight_git
     $DO_CLAUDE && preflight_claude
     $DO_CI && preflight_ci
@@ -1658,12 +2101,15 @@ case "$COMMAND" in
     $DO_GIT && install_git
     $DO_CLAUDE && install_claude
     $DO_CI && install_ci
+    $DO_LEDGER && install_ledger
+    # After install_claude: the settings it wrote are the ones extended.
+    $DO_LEDGER_CLAUDE && install_ledger_claude
     echo ""
     echo "Done."
     ;;
 
   uninstall)
-    if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI; then
+    if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE; then
       if [[ -t 0 ]]; then
         read -rp "No tier specified. Uninstall all tiers? [y/N] " confirm
         if [[ "$confirm" =~ ^[Yy] ]]; then
@@ -1673,10 +2119,12 @@ case "$COMMAND" in
           exit 0
         fi
       else
-        echo "ERROR: specify tier flags (--git, --claude, --ci, --all)" >&2
+        echo "ERROR: specify tier flags (--git, --claude, --ci, --all, --ledger, --ledger-claude)" >&2
         exit 1
       fi
     fi
+    $DO_LEDGER && preflight_ledger
+    $DO_LEDGER_CLAUDE && preflight_ledger_claude
     $DO_GIT && preflight_git
     $DO_CLAUDE && preflight_uninstall_claude
     $DO_CI && preflight_uninstall_ci
@@ -1686,13 +2134,16 @@ case "$COMMAND" in
     $DO_GIT && uninstall_git
     $DO_CLAUDE && uninstall_claude
     $DO_CI && uninstall_ci
+    $DO_LEDGER && uninstall_ledger
+    # After uninstall_claude: a hook-lib.sh it kept for the set goes now.
+    $DO_LEDGER_CLAUDE && uninstall_ledger_claude
     echo ""
     echo "Done."
     ;;
 
   status)
-    if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI; then
-      DO_GIT=true DO_CLAUDE=true DO_CI=true
+    if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE; then
+      DO_GIT=true DO_CLAUDE=true DO_CI=true DO_LEDGER=true DO_LEDGER_CLAUDE=true
     fi
     echo ""
     echo "doc-superpowers hooks status"
@@ -1709,6 +2160,14 @@ case "$COMMAND" in
       status_ci
       echo ""
     fi
-    echo "Env overrides: DOC_SUPERPOWERS_STRICT=${DOC_SUPERPOWERS_STRICT:-unset} DOC_SUPERPOWERS_SKIP=${DOC_SUPERPOWERS_SKIP:-unset}"
+    if $DO_LEDGER; then
+      status_ledger
+      echo ""
+    fi
+    if $DO_LEDGER_CLAUDE; then
+      status_ledger_claude
+      echo ""
+    fi
+    echo "Env overrides: DOC_SUPERPOWERS_STRICT=${DOC_SUPERPOWERS_STRICT:-unset} DOC_SUPERPOWERS_SKIP=${DOC_SUPERPOWERS_SKIP:-unset} DOC_SUPERPOWERS_LEDGER_SKIP=${DOC_SUPERPOWERS_LEDGER_SKIP:-unset}"
     ;;
 esac
