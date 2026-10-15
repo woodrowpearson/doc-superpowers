@@ -10350,6 +10350,37 @@ test_lg_resolve_legacy_letter_rows() {
   teardown
 }
 
+# --- Task 16b (U6): terminal State tokens ------------------------------------------
+
+test_lg_init_done_states_from_config() {
+  echo "test: init --accept (U6) — a row is done when its State's lead (~~ dropped, any case, - _ ' and blanks ignored) is a built-in done word or a config status.fixed / closed / wontfix value: WONT-FIX, Won't fix, wontfix, a host's closed value → archived, no stub; OPEN stays open"
+  lg_accept_fixture
+  cat > docs/ledgers/w-ledger.md <<'EOF'
+| # | Item | State |
+|---|------|-------|
+| 1 | Not worth it | WONT-FIX |
+| 2 | Nor this | Won't fix |
+| 3 | Nor that | wontfix |
+| 4 | Parked idea | Parked until Q3 |
+| 5 | Still to do | OPEN |
+| 6 | A duplicate | Won’t Fix (dup of 3) |
+| 7 | Out of scope | ~~Not planned~~ |
+| 8 | Old work | **Shipped** |
+EOF
+  git add -A && git commit -qm "w ledger"
+  lg_enable '{"legacy_ledgers":{"checkout":"docs/ledgers/checkout-ledger.md","w":"docs/ledgers/w-ledger.md"},"status":{"closed":["closed","obsolete","parked"]}}'
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-01-cart-total.md checkout
+  lg init --accept "$LG_DEC" --format json
+  assert_eq "0" "$LG_RC" "exits 0"
+  local n
+  for n in 1 2 3 4 6 7 8; do
+    assert_eq "docs/ledgers/w-ledger.md#$n" "$(jq -r --arg k "w#$n" '.[$k].archived' docs/ledger/legacy.json)" "w#$n: done → archived"
+  done
+  assert_eq "docs/ledgers/checkout-ledger.md#2,docs/ledgers/w-ledger.md#5" "$(jq -r '[.stubs[] | .row] | sort | join(",")' <<<"$LG_OUT")" \
+    "stubs: OPEN (w#5) and the checkout ledger's open row only"
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -10721,6 +10752,7 @@ run_tests() {
   test_lg_init_preseeded_legacy_entries_authoritative
   test_lg_init_row_item_from_tracker_column
   test_lg_resolve_legacy_letter_rows
+  test_lg_init_done_states_from_config
 
   print_summary
 }

@@ -932,9 +932,11 @@ _lg_init_write() {
 # does not hold yet gets an entry — one it holds is authoritative (a host
 # may pre-seed them; Task 16b U2b): the row is left alone, no stub, no
 # finding, no new entry. A row linking an item → {"key"} (its key after this
-# run) or {"item": <path>} (none); else a done row (its state cell, ~~
-# dropped, starts with done/shipped/resolved/closed/superseded/dropped,
-# any case) → {"archived": "<file>#<row>"}; else a stub item —
+# run) or {"item": <path>} (none); else a done row (its state cell —
+# ~~, * and ` dropped, any case, blanks, -, _ and apostrophes ignored —
+# starts with done/shipped/resolved/closed/superseded/dropped or a config
+# status.fixed / closed / wontfix value: WONT-FIX, Won't fix; Task 16b U6)
+# → {"archived": "<file>#<row>"}; else a stub item —
 # docs/issues/<today>-<slug>.md (status Open, the row's legacy id as its
 # ledger when registered, else unassigned; summary from the row; body
 # "Migrated from <file> row <n>." and the row) or, with items.globs [] and
@@ -959,7 +961,17 @@ def lg_t140:
 def lg_sent: (capture("^(?<s>.*?[.!?])(\\s|$)") // null) as $m | if $m == null then . else $m.s end;
 def lg_unlink: gsub("\\[(?<t>[^\\]]*)\\]\\([^)]*\\)"; "\(.t)") | gsub("\\*\\*|~~"; "") | lg_t140;
 def lg_stubslug: ascii_downcase | gsub("[^a-z0-9]+"; "-") | sub("^-+"; "") | .[0:50] | sub("-+$"; "") | if . == "" then "item" else . end;
-def lg_done: gsub("~~"; "") | sub("^\\s+"; "") | ascii_downcase | test("^(done|shipped|resolved|closed|superseded|dropped)");
+# A State cell is done when its lead, normalised (lg_dnorm: lower case; ~~,
+# * and ` dropped; blanks, -, _ and apostrophes removed), starts with a
+# term of lg_done_terms($c): the built-in words, and every config
+# status.fixed / closed / wontfix value normalised the same way.
+def lg_dnorm: ascii_downcase | gsub("~~|[*`]"; "") | gsub("[\\s_'"'"'\u2019-]"; "");
+def lg_done_terms($c):
+  (["done", "shipped", "resolved", "closed", "superseded", "dropped"]
+   + [("fixed", "closed", "wontfix") as $cl
+      | ($c.status // {})[$cl] | if type == "array" then .[] elif type == "string" then . else empty end
+      | strings | lg_dnorm | select(. != "")]) | unique;
+def lg_done($T): lg_dnorm as $s | any($T[]; . as $t | $s | startswith($t));
 def lg_str: if type == "string" and . != "" then . else null end;
 '
 
@@ -972,6 +984,7 @@ _LG_JQ_ACCEPT_PLAN='
    | reduce .[] as $l ({}; .[$l.id] = ($l.status | if type == "string" then . else "active" end))) as $RS
 | ($lgy[0] | if type == "object" then . else {} end) as $E
 | lg_legacy_ids($c) as $legid
+| lg_done_terms($c) as $DONE
 | (($c.fields.aliases // "aliases") | if type == "array" then [.[] | strings] else [.] end) as $AN
 | ([$scan[] | select(.t == "R")]) as $R
 | ([$scan[] | select(.t == "K")]) as $K
@@ -985,7 +998,7 @@ _LG_JQ_ACCEPT_PLAN='
   | . as $r
   | ([$K[] | select(.file == $f and .row == $r.row and .item and ($IT[.to] != null)) | .to] | first) as $it
   | {file: $f, row: $r.row, lid: lid($f), id: "\(lid($f))#\($r.row)", bold: ($r.bold // ""), text: ($r.text // ""),
-     cells: ($r.cells // []), item: $it, done: (($r.state // "") | lg_done)} ] as $LR
+     cells: ($r.cells // []), item: $it, done: (($r.state // "") | lg_done($DONE))} ] as $LR
 # An item legacy row bold lead: its first linking row (file, row order) with one.
 | (reduce ($LR | map(select(.item != null and .bold != "")) | sort_by(.file, (.row | lg_rowkey)))[] as $x
      ({}; if has($x.item) then . else .[$x.item] = $x.bold end)) as $BOLD

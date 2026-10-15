@@ -2630,7 +2630,10 @@ ledger init|cmd_ledger_init|repo|dry-run registry= report= accept= import source
   aliases; offline: provisional), the item fields (ledger; summary when
   missing — the legacy row's bold lead, the H1, the first sentence, ≤ 140
   characters; key), stubs for the open rows of hand-written ledgers that
-  link no item (docs/issues/<today>-<slug>.md, or through the items
+  link no item (a row is done when its State starts with done, shipped,
+  resolved, closed, superseded, dropped or a config status.fixed, closed
+  or wontfix value — any case; ~~, blanks, -, _ and ' ignored: WONT-FIX)
+  (docs/issues/<today>-<slug>.md, or through the items
   adapter's create when items.globs is []), legacy.json entries for every
   row (<legacy-id>#<row> → key, item or archived; a row legacy.json
   already holds is left alone — no stub, no finding: pre-seeded entries
