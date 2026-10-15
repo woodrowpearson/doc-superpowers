@@ -261,7 +261,7 @@ The Claude tier is **per-user**. It **copies** hook scripts to `.claude/hooks/do
 | `--workflows=<csv\|all\|none>` | the recorded set; first install: the 2 shell workflows | Which workflows; the Claude-powered ones are opt-in by name |
 | `--base-branch NAME` | `main` | Target branch for PR checks (validated: git ref name of `A-Za-z0-9._/-`) |
 | `--cron EXPR` | `0 9 * * 1` | Schedule for weekly freshness audit (5 fields) |
-| `--ci-strict[=true\|false]` | `false` | Fail PR check on stale docs (exit non-zero) |
+| `--ci-strict[=true\|false]` | `false` | Fail the PR checks on what is otherwise a warning (exit non-zero): `doc-freshness-pr` on stale docs or a freshness check that cannot run, `doc-spec-verify`'s `claims` job on a claims check that cannot run |
 | `--helpers=<true\|false>` | `true` | Deprecated, and inert: the helper directories ship exactly while an installed workflow runs them. Its only effect: `--helpers=false` is refused while `doc-pr-release` is selected or installed (the workflow runs the producer helpers) |
 | `--force` | off | Also re-install workflows uninstalled on purpose |
 | `--transient` | off | `uninstall` only: record the removal as temporary (`intentional: false`), so the next plain `install --ci` puts the workflow back. Without it the removal is intentional, and a plain `install --ci` leaves the workflow out |
