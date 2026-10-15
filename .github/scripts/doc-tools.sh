@@ -10536,9 +10536,11 @@ _JQ_CLAIMS_REVERIFY_ALL='def nes: type == "string" and length > 0;
 #      (_claims_run_selected): the record's claims and verdicts.
 #   4. A named id no claim has is a finding; so is a named claim still
 #      unbuilt that no DOC-STALE ruling included in this record covers
-#      ("chunk was meant to build it: promote, rule, or defer"; a deferral
-#      moves it to diverged and a RETIRE to retired, so neither leaves it
-#      unbuilt; a CODE-DIVERGES ruling alone never clears it), and a run
+#      ("chunk was meant to build it: promote it (a test claim) or mark it
+#      built by a reviewed status edit (a lint, log or judge claim), rule, or
+#      defer"; a deferral moves it to diverged and a RETIRE to retired, so
+#      neither leaves it unbuilt; a CODE-DIVERGES ruling alone never clears
+#      it), and a run
 #      claim for which _claims_repromote_owed prints owed ("re-promote
 #      owed"), even when its check passes (decided by promotion.proved, so
 #      the same in a fresh clone).
@@ -10855,7 +10857,7 @@ cmd_claims_gate() {
   _claims_jq gate-named-findings -c --slurpfile c "$_SCRATCH/cl-claims.json" --slurpfile r "$included" \
     --arg unknown "named on chunk $n's **Claims:** line, but no claim has this id" \
     "$_JQ_CLAIMS_NAMED"' cl_named_findings($c[0]; $r[0]; "gate"; $unknown;
-       "chunk was meant to build it: promote, rule, or defer")' "$named" >> "$_SCRATCH/cl-findings.jsonl"
+       "chunk was meant to build it: promote it (a test claim) or mark it built by a reviewed status edit (a lint, log or judge claim), rule, or defer")' "$named" >> "$_SCRATCH/cl-findings.jsonl"
   _claims_owed_findings gate "$from"
 
   # 5. V8, V8n and V9 over the range; --holds ids held.
@@ -11387,7 +11389,7 @@ cmd_claims_attest() {
   _claims_jq attest-named-findings -c --slurpfile c "$_SCRATCH/cl-claims.json" --slurpfile r "$included" \
     "$_JQ_CLAIMS_NAMED"' cl_named_findings($c[0]; $r[0]; "attest";
        "named on a **Claims:** line of the plan, but no claim has this id";
-       "named claim still unbuilt at the final gate: promote it, rule DOC-STALE (recorded in a gate record), or defer it as diverged")' \
+       "named claim still unbuilt at the final gate: promote it (a test claim) or mark it built by a reviewed status edit (a lint, log or judge claim), rule DOC-STALE (recorded in a gate record), or defer it as diverged")' \
     "$named" >> "$_SCRATCH/cl-findings.jsonl"
   _claims_owed_findings attest "$_CL_MB"
 

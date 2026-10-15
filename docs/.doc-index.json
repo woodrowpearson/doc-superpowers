@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-10-15T04:43:38Z",
+  "generated_at": "2026-10-15T05:58:28Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -11,16 +11,16 @@
         "scripts/",
         "references/"
       ],
-      "code_commit": "aed19d853b682d84bb36407dee3a8d56a4c9e3a9",
+      "code_commit": "08a49fc22ca8b6f5559368151393db4e54d1b99f",
       "doc_type": "architecture",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-15T04:43:38Z",
+      "last_verified": "2026-10-15T05:58:28Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "2a07777a830045d728f0829b6e2c854633232f6b",
-        "scripts/": "708aa368888e248e3b78954a16ac10312375389b",
-        "references/": "3f0b7bf771b7ded195613125e63b9993de1c74a5"
+        "scripts/": "2564adcb4cc68db3e76b47508734f5b73c3a3535",
+        "references/": "3beafdbc80246101af2c0d5d84625fa6f7edf726"
       }
     },
     "docs/codebase-guide.md": {
@@ -33,11 +33,11 @@
       "doc_type": "codebase-guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-15T04:35:57Z",
+      "last_verified": "2026-10-15T05:58:28Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "2a07777a830045d728f0829b6e2c854633232f6b",
-        "scripts/": "708aa368888e248e3b78954a16ac10312375389b"
+        "scripts/": "2564adcb4cc68db3e76b47508734f5b73c3a3535"
       }
     },
     "docs/conventions.md": {
@@ -53,13 +53,13 @@
       "doc_type": "conventions",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-15T04:43:38Z",
+      "last_verified": "2026-10-15T05:58:28Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "2a07777a830045d728f0829b6e2c854633232f6b",
         "references/doc-spec.md": "c1f9e9d86d1f2d6812e83f3320b615302063fc45",
-        "references/spec-lifecycle-actions.md": "ed5601e343d327100ef2ef8380cd36d7cd6da7b6",
-        "scripts/doc-tools.sh": "bc64fb2bbc30009d3de1fa247145ab6a0d9a9e3d",
+        "references/spec-lifecycle-actions.md": "88767f3a2488b77dc88570b250aa5f7f249b308c",
+        "scripts/doc-tools.sh": "c0970438b0cb9cf50b0557607de74141dfb0a806",
         "scripts/hooks": "1a5d2ad6391640346b25388a3e52e462aa1239fb"
       }
     },
@@ -71,17 +71,17 @@
         "scripts/hooks/install.sh",
         "scripts/doc-tools.sh"
       ],
-      "code_commit": "2a60a511fdf605b51b7394d729b52671e0bae3ea",
+      "code_commit": "aed19d853b682d84bb36407dee3a8d56a4c9e3a9",
       "doc_type": "guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-15T03:13:18Z",
+      "last_verified": "2026-10-15T05:58:28Z",
       "implementation": [],
       "code_oids": {
-        "README.md": "62253874137313437f975ec3d4d25fa841ffe902",
+        "README.md": "17796e6e1604e1d1cc774b10301bc58f31f62318",
         "skills/doc-superpowers/SKILL.md": "2a07777a830045d728f0829b6e2c854633232f6b",
         "scripts/hooks/install.sh": "aa6ed1c9d9175bda1450dcb2886309732333c4a2",
-        "scripts/doc-tools.sh": "bc64fb2bbc30009d3de1fa247145ab6a0d9a9e3d"
+        "scripts/doc-tools.sh": "c0970438b0cb9cf50b0557607de74141dfb0a806"
       }
     },
     "docs/workflows/doc-superpowers.md": {
@@ -91,16 +91,16 @@
         "scripts/",
         "references/"
       ],
-      "code_commit": "aed19d853b682d84bb36407dee3a8d56a4c9e3a9",
+      "code_commit": "08a49fc22ca8b6f5559368151393db4e54d1b99f",
       "doc_type": "workflows",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-15T04:43:38Z",
+      "last_verified": "2026-10-15T05:58:28Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "2a07777a830045d728f0829b6e2c854633232f6b",
-        "scripts/": "708aa368888e248e3b78954a16ac10312375389b",
-        "references/": "3f0b7bf771b7ded195613125e63b9993de1c74a5"
+        "scripts/": "2564adcb4cc68db3e76b47508734f5b73c3a3535",
+        "references/": "3beafdbc80246101af2c0d5d84625fa6f7edf726"
       }
     },
     "docs/plans/2026-03-26-audit-report.md": {
