@@ -2127,7 +2127,9 @@ deprecate-entry|cmd_deprecate_entry|repo|superseded-by=
   [--superseded-by <doc_path>] <doc_path>...
   Mark entries deprecated, optionally naming the doc that supersedes them;
   that successor's replaces is set to the (first) deprecated doc unless it
-  already names one. last_verified is not touched: deprecating is not a
+  already names one. --superseded-by replaces an entry's superseded_by;
+  without it, an existing superseded_by is kept (so archiving a superseded
+  doc keeps its link). last_verified is not touched: deprecating is not a
   baseline reset. A path that is not indexed is reported and skipped; the
   others are still applied, and the run exits 1 (so an archive step that
   names the old path after move-entry, deprecating nothing, fails).
@@ -2455,7 +2457,8 @@ Stored state (who may re-baseline):
   (and commits_behind null: not evaluated). set-doc-type retypes an entry
   in place (an index written before v3 typed design specs "spec": retype
   them design-spec). Archiving a doc is git mv into docs/archive/<type>/,
-  then move-entry, then deprecate-entry.
+  then move-entry, then deprecate-entry on the new path (which keeps the
+  doc's superseded_by).
 
 Spec claims (claims validate, run, promote, render, gate, attest, rulings):
   Claims live in docs/spec-claims/: one <DOC-ID>.json sidecar per governing
@@ -4060,7 +4063,10 @@ cmd_deprecate_entry() {
   # --superseded-by may come anywhere on the line (_parse_args): given after
   # the path it used to be taken for a second target, deprecating the
   # successor. The value is stored as a doc reference, so it is held to the
-  # same key contract as the entries themselves.
+  # same key contract as the entries themselves. Without it, an entry's
+  # superseded_by is left as it is: the archive recipe (move-entry, then
+  # deprecate-entry <new>) used to reset a superseded doc's link to null,
+  # while its successor's replaces still named it.
   local superseded_by="null" succ=""
   if _opt_seen superseded-by; then
     _norm_path "$_OPT_superseded_by" "--superseded-by path" || exit 1
@@ -4088,8 +4094,9 @@ cmd_deprecate_entry() {
   _scratch_init
   local patch="$_SCRATCH/deprecate-patch.jsonl"
   # shellcheck disable=SC2016  # jq program, not shell expansion
-  jq -nc --argjson superseded_by "$superseded_by" \
-    '$ARGS.positional[] | {key: ., merge: {status: "deprecated", superseded_by: $superseded_by}}' \
+  jq -nc --argjson superseded_by "$superseded_by" --arg given "$succ" \
+    '$ARGS.positional[] | {key: ., merge: ({status: "deprecated"}
+       + (if $given != "" then {superseded_by: $superseded_by} else {} end))}' \
     --args "${targets[@]}" > "$patch"
 
   # The successor's replaces names the doc it supersedes: the first target
