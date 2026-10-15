@@ -12,6 +12,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/test-helpers.sh"
 
 ACTIONS="$(cat "$REPO_ROOT/references/spec-lifecycle-actions.md")"
+DOC_TOOLS_SHIM="$(bash_bin_shim "$REPO_ROOT/scripts/doc-tools.sh")"
 
 echo "=== spec status model tests ==="
 
@@ -304,6 +305,7 @@ RELREF="$(_read "$REPO_ROOT/references/release.md")"
 HOOKSREF="$(_read "$REPO_ROOT/references/hooks.md")"
 MAPPINGS="$(_read "$REPO_ROOT/references/tool-mappings.md")"
 INTEGRATION="$(_read "$REPO_ROOT/references/integration-patterns.md")"
+SPECCLAIMS="$(_read "$REPO_ROOT/references/spec-claims.md")"
 # The prompt layer: every file an agent reads as instructions.
 PROMPTS="$SKILLMD
 $ACTIONS
@@ -314,7 +316,8 @@ $INTEGRATION
 $AGENTPROMPT
 $TEMPLATES
 $DOCSPEC
-$MAPPINGS"
+$MAPPINGS
+$SPECCLAIMS"
 CI="$REPO_ROOT/scripts/hooks/ci"
 
 echo "--- I-11: tool resolution ---"
@@ -1256,5 +1259,312 @@ for _f in package.json gemini-extension.json .claude-plugin/plugin.json .claude-
   assert_true "$_f is valid JSON" _json_ok "$REPO_ROOT/$_f"
 done
 assert_file_exists "$REPO_ROOT/$(jq -r '.main // "-"' "$REPO_ROOT/package.json")" "package.json main (the OpenCode plugin) exists"
+
+echo "--- spec claims: R5 and phases ---"
+# Task 24: the Spec Status Model's claim-gated rule and the execute /
+# post-execute / review wiring. Every phrase is pinned verbatim: Tasks 25 and 26
+# and references/spec-claims.md cite them. Claims-enabled projects only; the
+# Drifted branch's text for projects without claims stays byte for byte.
+_sq="'"
+assert_contains "$ACTIONS" '- **R5 — Claim-gated advancement.** **Claims-enabled projects only** (`docs/spec-claims/` exists): a target spec advances to `Implemented` only when every claim the plan names for it is `built` with a passing verdict at the final gate (`claims attest --final`); with the configuration extension, `gated` also qualifies. `:amends` specs remain exempt from `Status` writes but not from claim checks.' \
+  "R5 claim-gated advancement is a rule"
+assert_contains "$ACTIONS" "Claims-enabled projects only" "R5 is marked claims-enabled projects only"
+assert_contains "$ACTIONS" '**R5** — claims enabled and the final gate does not show every named claim of this spec `built` (or `gated`) and passing → hold short of `Implemented` (R2 still applies).' \
+  "evaluation order has the R5 step"
+assert_line_matches "$(_section "$ACTIONS" '### Evaluation order')" '\*\*R5\*\*' \
+  "R5 sits inside the Evaluation order section"
+assert_contains "$ACTIONS" '**With claims enabled**, the plan'"$_sq"'s `Claims gate (chunk N)` task is the chunk'"$_sq"'s verifier: this phase reports its record'"$_sq"'s verdicts and does not judge drift by agent.' \
+  "execute phase: the claims gate task is the chunk's verifier"
+assert_contains "$ACTIONS" 'It never calls `update-index` while a claim of that spec fails.' \
+  "execute phase: Aligned never calls update-index over a failing claim"
+assert_contains "$ACTIONS" "Flag for human review with a deviation note" \
+  "execute phase: the Drifted branch's existing sentence is unchanged"
+assert_contains "$ACTIONS" '**Claims-enabled projects:** rule the direction (**Direction protocol**, `spec-lifecycle-protocol.md`) before editing either side, and record the ruling in the sidecar.' \
+  "execute phase: Drifted gains the conditional direction-protocol sentence"
+assert_contains "$ACTIONS" 'With claims enabled an `:amends` spec'"$_sq"'s claims are still checked at the gate.' \
+  "execute phase: an amendment spec's claims are still checked"
+assert_contains "$ACTIONS" '0. **Claims verdict** (claims-enabled projects only): run `$DOC_TOOLS claims attest --plan <plan> --final`; exit 1 → FAIL; exit 2 → report "claims verdict owed", never PASS; include its amendment batch.' \
+  "post-execute step 0 is the claims verdict"
+assert_contains "$ACTIONS" 'Claims enabled and no `--plan`: there is no plan to attest, so step 0 reports "claims verdict owed", never PASS.' \
+  "post-execute step 0 without --plan: claims verdict owed, never PASS"
+assert_contains "$ACTIONS" 'With claims enabled, step 0 needs it: without it the verdict is "claims verdict owed".' \
+  "post-execute --plan input: claims-enabled runs need it"
+assert_contains "$ACTIONS" 'AND (claims disabled OR `claims attest --final` exit 0)' \
+  "PASS rule gains the claims clause"
+assert_contains "$ACTIONS" '3c. **Claims** (claims-enabled projects only): `$DOC_TOOLS claims run --planes-of <base>...HEAD` and `claims validate --all`'"$_sq"'s V9 items; a red claim is a **P1 Claim red** finding.' \
+  "review step 3c runs the claims"
+assert_contains "$ACTIONS" '**P1 Claim red**' "review severity list has P1 Claim red"
+# In CI, step 3c is the non-AI claims job's (P0-1): the claims verbs run the
+# PR's own adapters, which no CI agent may run, and the AI step is granted
+# none of them. The reference says so, and the template's prompt sends the
+# agent past step 3c.
+assert_contains "$ACTIONS" 'In a doc-superpowers CI run, skip step 3c: `doc-spec-verify.yml`'"$_sq"'s non-AI `claims` job is the 3c check' \
+  "review step 3c: in CI the claims job is the 3c check"
+_sv_prompt=$(awk '/^  spec-verify:$/ { s = 1; next } s && /^  [A-Za-z_-]+:$/ { exit } s' "$CI/doc-spec-verify.yml")
+assert_contains "$_sv_prompt" 'Skip review step 3c (Claims)' "doc-spec-verify.yml: the AI step's prompt skips step 3c"
+assert_not_contains "$(grep -F -- '--allowedTools' <<<"$_sv_prompt")" 'doc-tools.sh claims' \
+  "doc-spec-verify.yml: …and its --allowedTools grants no claims verb"
+assert_contains "$TEMPLATES" "### Claims verdict" "compliance report has a Claims verdict block"
+assert_contains "$(_section "$TEMPLATES" '## Spec Compliance Report')" "claims-enabled projects only" \
+  "Claims verdict block is marked claims-enabled projects only"
+
+echo "--- spec claims: stubs and injected gates ---"
+# Task 25: spec-generate's claim stubs and spec-inject's injected claims
+# gates. The titles the reference injects are the ones V12 parses
+# (doc-tools.sh _CL_GATE_TITLE_PREFIX / _CL_FINAL_GATE_TITLE), so the
+# constants are pinned here too, and the reference is pinned to contain each
+# constant's value as read from doc-tools.sh, never re-typed. Their order in
+# an injected plan (gate before spec-update) is not pinned on the
+# reference's text order (step 2 describes the spec-update template before
+# step 2b's gate): test-spec-claims.sh's test_v12_reference_template_passes
+# assembles a plan from the reference's fences and runs V12 on it.
+assert_contains "$ACTIONS" 'Claims gate (chunk {C})' "the chunk gate's title template"
+assert_contains "$ACTIONS" 'Final claims gate' "the final gate's title"
+assert_contains "$ACTIONS" '**Claims:** none — <reason>' "the Claims none line form"
+assert_contains "$ACTIONS" 'Run by the orchestrating agent, not a delegated implementer' \
+  "the gate tasks are run by the orchestrating agent"
+assert_contains "$ACTIONS" 'Inject these only when `docs/spec-claims/` exists; otherwise the plan is unchanged.' \
+  "the injections are conditional on docs/spec-claims/"
+assert_contains "$ACTIONS" '6b. **Claim stubs**' "spec-generate step 6b writes claim stubs"
+assert_contains "$ACTIONS" 'DOC-STALE commit (with the record) → `promote` → commit → re-run Step 1' \
+  "the gate's DOC-STALE re-promotion order"
+# P1-2: --holds without --by exits 3, so the chunk gate's Step 3 gives the
+# whole command, and Step 1 routes exit 3 (test-spec-claims.sh runs the
+# command: test_gate_reference_holds_command_runs).
+_cg=$(awk '/^   ### Task N\+1g:/ { s = 1 } s { print } s && /^   ````$/ { exit }' <<<"$ACTIONS")
+assert_contains "$_cg" '`$DOC_TOOLS claims gate --plan {plan-path} --chunk {C} --holds <id> --by <principal>`' \
+  "the chunk gate's Step 3 holds a V9 item with --holds <id> --by <principal>"
+assert_not_contains "$_cg" '`--holds <id>` when' "…never with a bare --holds <id>"
+assert_contains "$_cg" 'Exit 3 → a usage error' "the chunk gate's Step 1 routes exit 3"
+assert_contains "$ACTIONS" '**target**, fully covered by this plan → set `Implemented`, subject to R5.' \
+  "Task N+2 Step 1's target branch is subject to R5"
+_dt_src="$REPO_ROOT/scripts/doc-tools.sh"
+assert_eq "1" "$(grep -cF "_CL_GATE_TITLE_PREFIX='Claims gate (chunk '" "$_dt_src" || true)" \
+  "doc-tools.sh defines _CL_GATE_TITLE_PREFIX on exactly one line"
+assert_eq "1" "$(grep -cF "_CL_FINAL_GATE_TITLE='Final claims gate'" "$_dt_src" || true)" \
+  "doc-tools.sh defines _CL_FINAL_GATE_TITLE on exactly one line"
+_gp=$(sed -n "s/^_CL_GATE_TITLE_PREFIX='\\(.*\\)'\$/\\1/p" "$_dt_src")
+_fg=$(sed -n "s/^_CL_FINAL_GATE_TITLE='\\(.*\\)'\$/\\1/p" "$_dt_src")
+assert_contains "$ACTIONS" "### Task N+1g: ${_gp:-<unset>}{C})" \
+  "the injected chunk gate's heading starts with the parser's _CL_GATE_TITLE_PREFIX"
+assert_contains "$ACTIONS" "### Task N+2g: ${_fg:-<unset>}" \
+  "the injected final gate's heading is the parser's _CL_FINAL_GATE_TITLE"
+
+echo "--- spec claims: direction protocol, wiring and update-index wording ---"
+# Task 26: the direction protocol (§F) in the wrapper guide, conditional on
+# claims being enabled. The wiring lines for projects without claims stay byte
+# for byte; each gains a claims-enabled line. update-index is a baseline reset,
+# never a verification (§H): prose only, the output tokens are unchanged.
+assert_contains "$PROTOCOL" "## Direction protocol" "protocol: Direction protocol section"
+assert_contains "$PROTOCOL" "When a doc and the code disagree, neither side is edited until the direction is ruled and recorded." \
+  "protocol: neither side is edited until the direction is ruled"
+for _d in CODE-DIVERGES DOC-STALE RETIRE in_plan_ruling_requires_gate_record outside_plan_presumption doc_stale_outside_plan_requires; do
+  assert_contains "$(_section "$PROTOCOL" '## Direction protocol')" "$_d" "protocol: Direction protocol names $_d"
+done
+assert_contains "$PROTOCOL" 'This protocol applies to claims-enabled projects (`docs/spec-claims/` exists). Without claims, the wiring below is unchanged, and the three directions are offered as a recommended framing for the question put to the user.' \
+  "protocol: the Direction protocol's scope sentence"
+assert_contains "$PROTOCOL" "**Deviation is expected; an unreconciled deviation is the failure.**" \
+  "protocol: deviation is expected; an unreconciled deviation is the failure"
+assert_contains "$(_section "$PROTOCOL" '## Direction protocol')" 'a ruling whose `record` is not a gate record' \
+  "protocol: outside a plan means a ruling whose record is not a gate record"
+assert_line_matches "$PROTOCOL" '^\| Pipeline Point \| When \| Action \| Mode \| With claims enabled \|$' \
+  "protocol: the Lifecycle Overview has the With claims enabled column"
+# The two wiring lines for projects without claims, whole-line (an in-place
+# extension fails), each directly followed by its claims-enabled line.
+_w_exec='    If deviation flags returned → surface to user'
+_w_fail='    If FAIL → surface report to user, let them decide'
+assert_line_matches "$PROTOCOL" "^${_w_exec}\$" "protocol: execute wiring line unchanged for projects without claims"
+assert_line_matches "$PROTOCOL" "^${_w_fail}\$" "protocol: post-execute wiring line unchanged for projects without claims"
+assert_eq '    Claims-enabled: a red claim or a flagged deviation → rule the direction (Direction protocol) before editing either side' \
+  "$(grep -A1 -x -F -- "$_w_exec" <<<"$PROTOCOL" | sed -n 2p)" \
+  "protocol: the execute wiring line is directly followed by its claims-enabled line"
+assert_eq '    Claims-enabled: surface the report and its amendment batch; every unreconciled deviation needs a ruling (Direction protocol)' \
+  "$(grep -A1 -x -F -- "$_w_fail" <<<"$PROTOCOL" | sed -n 2p)" \
+  "protocol: the post-execute wiring line is directly followed by its claims-enabled line"
+assert_contains "$PROTOCOL" "Claims-enabled: a red claim or a flagged deviation → rule the direction" \
+  "protocol: execute wiring gains the claims-enabled direction line"
+assert_contains "$PROTOCOL" "Claims-enabled: surface the report and its amendment batch; every unreconciled deviation needs a ruling (Direction protocol)" \
+  "protocol: post-execute wiring gains the claims-enabled amendment-batch line"
+assert_contains "$SKILLMD" "Records a baseline reset, never a verification" "SKILL.md: update-index records a baseline reset"
+assert_not_contains "$SKILLMD" "The one verb that attests a doc was checked against its code" \
+  "SKILL.md: update-index is no longer the verb that attests"
+assert_contains "$INTEGRATION" "## Claims-enabled wrappers" "integration patterns: Claims-enabled wrappers section"
+assert_contains "$SKILLMD" '| `references/spec-claims.md` | **REQUIRED** when `docs/spec-claims/` exists — ' \
+  "SKILL.md: references/spec-claims.md is REQUIRED when docs/spec-claims/ exists"
+assert_contains "$SKILLMD" "**Who may re-baseline.**" "SKILL.md: Who may re-baseline"
+assert_line_matches "$SKILLMD" '^\| Doc edited and read against its code \| `update-index <doc>` — a baseline reset \|' \
+  "SKILL.md: the routing cell calls update-index a baseline reset"
+assert_contains "$("$DOC_TOOLS_SHIM" update-index --help)" "never a verification" \
+  "doc-tools help: update-index is never a verification"
+assert_contains "$("$DOC_TOOLS_SHIM" --help)" "Stored state (who may re-baseline):" \
+  "doc-tools help: Stored state (who may re-baseline)"
+# The claims help as the 3.2.0 audit left it (P3-12–P3-15), and the
+# installer's claims half (P2-23, P3-37).
+_gh=$("$DOC_TOOLS_SHIM" claims gate --help)
+assert_contains "$_gh" "[--holds <id>]... [--by <principal>]" "claims gate help: --holds repeats, one id each"
+assert_contains "$_gh" "(repeatable, one id each)" "…said in words"
+assert_contains "$_gh" "V8, V8n and V9 over <from>..HEAD" "claims gate help: the gate runs V8 and V8n too"
+assert_contains "$_gh" "every named id no claim has" "…and reports named ids no claim has"
+assert_contains "$("$DOC_TOOLS_SHIM" claims run --help)" "claim's absent lint path is its allowed assert-fail" \
+  "claims run help: an unbuilt claim's absent lint path is not a finding"
+assert_contains "$("$DOC_TOOLS_SHIM" --help)" "tree where one is refused (gate, promote, attest --final)" \
+  "doc-tools help: a refused dirty tree is a claims exit 2"
+_ih=$("${BASH_BIN:-bash}" "$REPO_ROOT/scripts/hooks/install.sh" help 2>&1 || true)
+assert_contains "$_ih" "claims job on a claims check that cannot run" "installer help: --ci-strict's claims half"
+assert_contains "$_ih" "claims validate --staged" "installer help: pre-commit's claims leg"
+assert_contains "$_ih" "commits (advisory: never blocks)" "installer help: pre-push's claims leg"
+assert_contains "$_ih" "a non-AI claims job on every same-repository PR" "installer help: doc-spec-verify's claims job"
+assert_contains "$_ih" "its claims step re-runs and re-proves the spec claims" "installer help: the schedule's claims step"
+assert_contains "$HOOKSREF" '`doc-spec-verify`'"'"'s `claims` job fails on a claims check that cannot run' \
+  "hooks.md: --ci-strict's claims half"
+assert_eq "" "$(grep -n 'the one verb that attests\|only verb that attests' "$REPO_ROOT"/references/doc-spec.md "$REPO_ROOT"/docs/codebase-guide.md "$REPO_ROOT"/docs/conventions.md "$REPO_ROOT"/docs/workflows/doc-superpowers.md "$REPO_ROOT"/docs/architecture/system-overview.md "$REPO_ROOT"/skills/doc-superpowers/SKILL.md || true)" \
+  "no doc still calls update-index the verb that attests"
+
+echo "--- spec claims: the reference and the template status block ---"
+# Task 29: references/spec-claims.md (schema, checks, adapters, the reference
+# helpers) and the spec/ADR templates' status-block comment and descriptive
+# marker. The helpers are examples, not shipped files, but they must stay
+# valid code: every ```python fence compiles under python3 -m py_compile (CI
+# has python; without it, a loud SKIP), the ```js fence under node --check
+# (node_unavailable: a SKIP, a FAIL under DOC_SP_REQUIRE_NODE=1).
+_sc_ref="$REPO_ROOT/references/spec-claims.md"
+assert_file_exists "$_sc_ref" "references/spec-claims.md exists"
+assert_contains "$SPECCLAIMS" '<!-- spec-claims:status:begin -->' "spec-claims.md: the status block's begin marker"
+assert_contains "$SPECCLAIMS" '<!-- spec-claims:descriptive -->' "spec-claims.md: the descriptive marker"
+assert_contains "$SPECCLAIMS" 'xfail(strict=True, raises=AssertionError)' \
+  "spec-claims.md: diverged is an expected failure on an assertion only"
+assert_contains "$SPECCLAIMS" '"subject_imports_ok"' "spec-claims.md: the list row's subject_imports_ok field"
+assert_contains "$SPECCLAIMS" '"outcome": "pass"|"assert-fail"|"error"|"not-found"|"indeterminate"' \
+  "spec-claims.md: the run row's five outcomes, unescaped"
+assert_contains "$DOCSPEC" '<!-- spec-claims:descriptive -->' "doc-spec.md: the descriptive marker"
+# The example blocks show what render writes: its table header is read from
+# doc-tools.sh, never re-typed.
+assert_eq "1" "$(grep -cF '"| Claim | Status | Tracker |"' "$_dt_src" || true)" \
+  "doc-tools.sh renders the status table header on exactly one line"
+assert_contains "$SPECCLAIMS" '| Claim | Status | Tracker |' "spec-claims.md: the status block example has render's table header"
+assert_contains "$DOCSPEC" '| Claim | Status | Tracker |' "doc-spec.md: …and so does the templates' status-block example"
+_sc_spec=$(_section "$DOCSPEC" '## docs/specs/template.md')
+_sc_adr=$(_section "$DOCSPEC" '## docs/adr/template.md')
+_sc_gen='generated by `doc-tools.sh claims render`; do not edit'
+# _in_order <text> <a> <b> <c>: the first lines holding a, b and c come in that order.
+_in_order() {
+  awk -v a="$2" -v b="$3" -v c="$4" '
+    !x && index($0, a) { x = NR } !y && index($0, b) { y = NR } !z && index($0, c) { z = NR }
+    END { exit !(x && y && z && x < y && y < z) }' <<<"$1"
+}
+assert_true "spec template: the status-block comment sits between ## Summary and ## Motivation" \
+  _in_order "$_sc_spec" '## Summary' "$_sc_gen" '## Motivation'
+assert_true "ADR template: the status-block comment sits between ## Context and ## Decision" \
+  _in_order "$_sc_adr" '## Context' "$_sc_gen" '## Decision'
+assert_eq '<!-- spec-claims:descriptive -->' "$(grep -A1 -x -F '## Implementation Notes' <<<"$_sc_spec" | sed -n 2p)" \
+  "spec template: the descriptive marker directly follows ## Implementation Notes (V8 reads it there only)"
+assert_contains "$_sc_spec" 'references/spec-claims.md' "spec template: its note links references/spec-claims.md"
+assert_not_contains "$DOCSPEC" 'once every claim is built' \
+  "doc-spec.md: Claims: N built counts the non-retired claims (render's rule), never every claim"
+# The CI claims job's scope, as the template gates it: same-repository PRs,
+# never dependabot's. The reference must say so (a fork PR is not checked).
+_sc_job=$(awk '/^  claims:$/ { s = 1; print; next } s && /^  [A-Za-z_-]+:/ { exit } s' "$CI/doc-spec-verify.yml")
+assert_contains "$_sc_job" 'github.event.pull_request.head.repo.full_name == github.repository &&' \
+  "doc-spec-verify.yml: the claims job runs on same-repository PRs only"
+assert_contains "$_sc_job" "github.actor != 'dependabot[bot]'" "doc-spec-verify.yml: …and not on dependabot's"
+assert_contains "$SPECCLAIMS" 'every same-repository PR (fork and dependabot PRs are not checked)' \
+  "spec-claims.md: the CI claims job's scope (fork and dependabot PRs are not checked)"
+assert_not_contains "$SPECCLAIMS" 'checks every PR' "spec-claims.md: never says the CI job checks every PR"
+# V6 as the promotion fingerprint left it: the direction a change needs,
+# what a promotion proved read from promotion.proved (never history), and
+# the limit of trusting a promotion by its digest.
+assert_contains "$SPECCLAIMS" 'a `states` change, a lowered `enforced_by` or a token-changing re-anchor needs a new `DOC-STALE` or `RETIRE` ruling' \
+  "spec-claims.md: V6 — only DOC-STALE or RETIRE licenses a states change, a lowered tier, a re-anchor"
+assert_contains "$SPECCLAIMS" 'What a promotion proved is read from `promotion.proved`**, never from the store and never from history' \
+  "spec-claims.md: V6 — what a promotion proved is read from promotion.proved"
+assert_not_contains "$SPECCLAIMS" 'record at `promotion.at`' \
+  "spec-claims.md: no history rule (promotion.at is unreachable after a squash or rebase merge)"
+assert_not_contains "$SPECCLAIMS" 'sidecar at `promotion.at`' "spec-claims.md: …nor the sidecar at promotion.at"
+assert_contains "$SPECCLAIMS" 'V6 compares each changed promoted claim with its `promotion.proved`' \
+  "spec-claims.md: the CI job's V6 decides by promotion.proved"
+assert_not_contains "$HOOKSREF" '`unverifiable-here` advisory, never a finding' \
+  "hooks.md: a missing verdict in CI is not always only an advisory"
+assert_contains "$HOOKSREF" 'V6 compares each changed promoted claim with its `promotion.proved`' \
+  "hooks.md: the CI job's V6 decides by promotion.proved"
+_ck_src="$(_read "$REPO_ROOT/scripts/hooks/ci/doc-superpowers-steps/claims-check.sh")"
+assert_not_contains "$_ck_src" 'unverifiable-here advisory, never a finding' \
+  "claims-check.sh: a missing verdict in CI is not always only an advisory"
+assert_contains "$_ck_src" 'promoted claim with its promotion.proved' "claims-check.sh: …V6 decides by promotion.proved"
+assert_contains "$SPECCLAIMS" 'A forged `proved` is as undetectable outside the promoting clone as a forged `verdict_sha256`' \
+  "spec-claims.md: a forged proved is the trust-by-digest limit too"
+assert_not_contains "$SPECCLAIMS" 'a missing verdict is the advisory `unverifiable-here`, never a finding' \
+  "spec-claims.md: never says a missing verdict is always only an advisory"
+assert_contains "$SPECCLAIMS" 'a test, subject or tier swap is a finding whatever the ruling' \
+  "spec-claims.md: V6 — re-promote owed covers a states change only"
+assert_contains "$SPECCLAIMS" 'A forged digest is undetectable outside the promoting clone' \
+  "spec-claims.md: promotions are trusted by digest (a hand-forged promotion passes locally)"
+# P1-3 (design §B's status table): a promotion and non-vacuity are a test
+# claim's; a lint, log or judge claim enters built by a reviewed status edit,
+# and run and the gate run its check (test-spec-claims.sh:
+# test_lint_built_by_status_edit, test_lint_built_failing_check_red_at_run_and_gate).
+assert_not_contains "$SPECCLAIMS" '**`claims promote <id>` is the only path into `built`.**' \
+  "spec-claims.md: promote is not every claim's path into built"
+assert_contains "$SPECCLAIMS" '**`claims promote <id>` is a test claim'"$_sq"'s only path into `built`.**' \
+  "spec-claims.md: promote is a test claim's only path into built"
+assert_contains "$SPECCLAIMS" '**A `lint`, `log` or `judge` claim enters `built` (or `gated`) by a reviewed status edit.**' \
+  "spec-claims.md: a lint, log or judge claim enters built by a reviewed status edit"
+assert_contains "$SPECCLAIMS" 'and a `test` claim'"$_sq"'s move into `built`/`gated` without a promotion' \
+  "spec-claims.md: V6's missing-promotion finding is a test claim's"
+assert_contains "$_cg" '`promote` proves test claims only: a `lint` or `log` claim whose check now passes' \
+  "the chunk gate's Step 2: a lint or log claim moves to built by a status edit, not promote"
+# A DOC-STALE owes a re-promotion only on a test claim (no other tier is
+# promoted), at the chunk gate and at the final gate; gated follows built;
+# README says the same.
+assert_contains "$_cg" '**A `DOC-STALE` on a test claim that is already `built`/`gated`**' \
+  "the chunk gate's Step 3: a DOC-STALE owes a re-promotion on a test claim"
+assert_contains "$_cg" 'A `lint`, `log` or `judge` claim is not promoted, so its `DOC-STALE` owes no re-promotion' \
+  "…and none on a lint, log or judge claim"
+assert_not_contains "$ACTIONS" '**A `DOC-STALE` on a claim that is already `built`/`gated`**' \
+  "no gate template says every built claim owes a re-promotion"
+assert_contains "$(_section "$ACTIONS" '### Plan Phase')" 'A `lint`, `log` or `judge` claim owes no re-promotion. Then re-run Step 1' \
+  "the final gate's Step 2: no re-promotion for a lint, log or judge claim"
+assert_contains "$SPECCLAIMS" 'required for a `test` claim that is `built` or `gated` (V3). A `lint`, `log` or `judge` claim needs none.' \
+  "spec-claims.md: nonvacuity is a test claim's"
+assert_contains "$SPECCLAIMS" '- **Tier.** `gated` follows `built`' \
+  "spec-claims.md: the extension's As built notes gated follows built"
+assert_contains "$_readme" '`promote` is a test claim'"$_sq"'s only path to `built`' \
+  "README: promote is a test claim's only path to built"
+assert_not_contains "$_readme" '`promote` is the only path to `built`' "README: …never every claim's"
+
+# _fence_blocks <file> <lang> <dir> <ext>: each unindented ```<lang> fence of
+# <file> written to <dir>/<n>.<ext>; prints how many.
+_fence_blocks() {
+  awk -v lang="$2" -v dir="$3" -v ext="$4" '
+    !inf && /^```/ { inf = 1; info = substr($0, 4); sub(/[ \t]+$/, "", info); out = ""
+                     if (info == lang) { n++; out = dir "/" n "." ext; printf "" > out }
+                     next }
+    inf && /^```[ \t]*$/ { inf = 0; if (out != "") close(out); out = ""; next }
+    inf && out != "" { print > out }
+    END { print n + 0 }' "$1"
+}
+if [ -f "$_sc_ref" ]; then
+  _hx=$(harness_mktemp_d spec-claims-helpers)
+  assert_eq "3" "$(_fence_blocks "$_sc_ref" python "$_hx" py)" \
+    "spec-claims.md: three python examples (conftest.py, a bound test, the runner adapter)"
+  assert_eq "1" "$(_fence_blocks "$_sc_ref" js "$_hx" cjs)" "spec-claims.md: one js example (the jest helper)"
+  if command -v python3 >/dev/null 2>&1; then
+    for _f in "$_hx"/*.py; do
+      [ -f "$_f" ] || continue
+      _rc=0
+      _out=$(python3 -m py_compile "$_f" 2>&1) || _rc=$?
+      assert_eq "0" "$_rc" "spec-claims.md: python example $(basename "$_f") compiles${_out:+ — $_out}"
+    done
+  else
+    record_skip "spec-claims.md python examples (py_compile) — python3 not found"
+  fi
+  if ! node_unavailable "spec-claims.md jest example (node --check)"; then
+    for _f in "$_hx"/*.cjs; do
+      [ -f "$_f" ] || continue
+      _rc=0
+      _out=$(node --check "$_f" 2>&1) || _rc=$?
+      assert_eq "0" "$_rc" "spec-claims.md: js example $(basename "$_f") passes node --check${_out:+ — $_out}"
+    done
+  fi
+fi
 
 print_summary

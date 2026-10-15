@@ -4,7 +4,11 @@
 #
 # Checks the whole index and keeps one tracking issue: opened or updated
 # while docs are stale or missing, closed once a check finds none. A check
-# that cannot run fails the run and leaves the issue as it is.
+# that cannot run fails the run and leaves the issue as it is. With
+# docs/spec-claims/ present it also re-runs the spec claims (claims-check.sh
+# scheduled): their findings open or update the same issue, under
+# "### Spec claims", and keep it open. Without it the claims step does
+# nothing and the issue is exactly as before.
 
 name: Doc Freshness Audit (Scheduled)
 
@@ -16,7 +20,11 @@ on:
 jobs:
   audit-freshness:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The freshness check alone was budgeted at 10 minutes. With spec claims,
+    # `claims run --all` plus `promote --reverify --all` execute the host's
+    # claim-bound tests twice over; a project without docs/spec-claims/
+    # still finishes in the old time.
+    timeout-minutes: 30
     permissions:
       contents: read
       issues: write
@@ -31,15 +39,35 @@ jobs:
         id: freshness
         run: .github/scripts/doc-superpowers-steps/freshness-check.sh audit
 
+      # Spec claims: run, re-verify every promotion, validate (status
+      # disabled, and nothing run, without docs/spec-claims/). Findings never
+      # fail this step: the issue reports them. It fails only when nothing
+      # could run, leaving the issue as it is.
+      - name: Check spec claims
+        id: claims
+        continue-on-error: false
+        env:
+          BASE_REF: origin/main
+        run: .github/scripts/doc-superpowers-steps/claims-check.sh scheduled
+
       - name: Create or update issue
-        if: steps.freshness.outputs.status == 'ok' && steps.freshness.outputs.count != '0'
+        if: >-
+          (steps.freshness.outputs.status == 'ok' && steps.freshness.outputs.count != '0') ||
+          steps.claims.outputs.status == 'findings'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           REPORT: ${{ steps.freshness.outputs.report }}
+          CLAIMS_STATUS: ${{ steps.claims.outputs.status }}
+          CLAIMS_FINDINGS: ${{ steps.claims.outputs.findings }}
+          CLAIMS_REPORT: ${{ steps.claims.outputs.report }}
+          JUDGE_SAMPLE: ${{ steps.claims.outputs.judge_sample }}
         with:
           script: |
             const fs = require('fs');
-            const report = JSON.parse(fs.readFileSync(process.env.REPORT, 'utf8'));
+            // No freshness report (no doc index): the issue is for the claims.
+            const report = process.env.REPORT
+              ? JSON.parse(fs.readFileSync(process.env.REPORT, 'utf8'))
+              : { summary: { stale: 0, missing: 0 }, docs: {} };
             const { stale, missing } = report.summary;
             const marker = '<!-- doc-superpowers:freshness-audit -->';
             const title = '[doc-superpowers] Stale documentation detected';
@@ -48,6 +76,28 @@ jobs:
               ? `- \`${doc}\` — missing (indexed, file gone)`
               : `- \`${doc}\` — ${v.reason || 'stale'} (${v.commits_behind ?? '?'} commits behind)`);
             const shown = rows.slice(0, 200);
+            // The claims section only when the claims found something or could
+            // not all run: with them disabled or ok, the body is as it was.
+            const claimsStatus = process.env.CLAIMS_STATUS || 'disabled';
+            const claims = [];
+            if (claimsStatus === 'findings' || claimsStatus === 'indeterminate') {
+              const verdicts = process.env.CLAIMS_REPORT
+                ? JSON.parse(fs.readFileSync(process.env.CLAIMS_REPORT, 'utf8')) : [];
+              // Each (claim, check, message) once: run and promote --reverify
+              // can report the same red claim (the step counts it once too).
+              const seen = new Set();
+              const found = verdicts.flatMap(v => (v.findings || []).map(f => ({ v, f })))
+                .filter(({ f }) => { const k = JSON.stringify([f.claim, f.check, f.message]); return !seen.has(k) && seen.add(k); })
+                .map(({ v, f }) => `- \`${f.claim || f.doc || '?'}\` — ${f.message} (${v.verb}${f.check && f.check !== v.verb ? ' ' + f.check : ''})`);
+              const listed = found.slice(0, 200);
+              const sample = (process.env.JUDGE_SAMPLE || '').split(',').filter(Boolean);
+              claims.push('### Spec claims', '',
+                `**${process.env.CLAIMS_FINDINGS || '0'} finding(s)**${claimsStatus === 'indeterminate' ? ' (some claims could not be checked: see the job log)' : ''}`,
+                '', ...listed,
+                ...(found.length > listed.length ? ['', `…and ${found.length - listed.length} more: see the job log.`] : []),
+                ...(sample.length ? ['', `Judge claims to review this week: ${sample.map(id => `\`${id}\``).join(', ')}`] : []),
+                '');
+            }
             const body = [
               marker,
               '## Stale Documentation Report',
@@ -62,6 +112,7 @@ jobs:
               '2. Run `/doc-superpowers update`',
               '3. Review and commit the changes',
               '',
+              ...claims,
               '---',
               '*Generated by [doc-superpowers](https://github.com/woodrowpearson/doc-superpowers) scheduled audit*',
               `*Last checked: ${new Date().toISOString()}*`,
@@ -80,9 +131,14 @@ jobs:
             }
 
       # Only after a check that ran and found nothing: a failed check never
-      # closes the issue.
+      # closes the issue, nor do spec claims with findings or that could not
+      # all run. Without a doc index, only claims that ran clean close it (an
+      # issue the claims opened); a project with neither never touches it.
       - name: Close issue if all clear
-        if: steps.freshness.outputs.status == 'ok' && steps.freshness.outputs.count == '0'
+        if: >-
+          (steps.freshness.outputs.status == 'ok' && steps.freshness.outputs.count == '0' &&
+          (steps.claims.outputs.status == 'disabled' || steps.claims.outputs.status == 'ok')) ||
+          (steps.freshness.outputs.status == 'no-index' && steps.claims.outputs.status == 'ok')
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |

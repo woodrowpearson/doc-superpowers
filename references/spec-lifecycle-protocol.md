@@ -6,13 +6,15 @@ Reference for wrapper skill authors integrating doc-superpowers spec lifecycle a
 
 5 pipeline interception points mapped to 3 actions:
 
-| Pipeline Point | When | Action | Mode |
-|---|---|---|---|
-| Post-brainstorm | Design doc written | `spec-generate` | — |
-| During plan | Implementation plan being written | `spec-inject` | `plan` |
-| During execute | After each plan chunk completes | `spec-inject` | `execute` |
-| Pre-finish | All tasks done, before merging | `spec-verify` | `post-execute` |
-| During review | Alongside other review participants | `spec-verify` | `review` |
+| Pipeline Point | When | Action | Mode | With claims enabled |
+|---|---|---|---|---|
+| Post-brainstorm | Design doc written | `spec-generate` | — | Also writes claim stubs (`unbuilt`, tracker = the design doc) for each requirement / decision it generates |
+| During plan | Implementation plan being written | `spec-inject` | `plan` | Also injects a `Claims gate (chunk N)` task in each chunk, before its spec-update task, and a `Final claims gate` task before the finalize tasks; each implementation task carries `**Claims:** <ids>` or `**Claims:** none — <reason>` |
+| During execute | After each plan chunk completes | `spec-inject` | `execute` | The chunk gate is the plan's `Claims gate (chunk N)` task (`claims gate`), run by the orchestrating agent: every red claim is reconciled (Direction protocol) before the next chunk starts, and `chunk-<n>.json` records the verdicts; this phase reports them |
+| Pre-finish | All tasks done, before merging | `spec-verify` | `post-execute` | The final gate, `claims attest --final`: every chunk has a record (matched by patch-id), every claim the plan names re-runs at HEAD, every ruling appears in a record, and the amendment batch is emitted; R5 holds a target short of `Implemented` until its claims are `built` and passing |
+| During review | Alongside other review participants | `spec-verify` | `review` | Adds the claims verdict for the test claims of every runner whose `paths` match a changed file (`claims run --planes-of`), and `claims validate --all`'s V9 items |
+
+Claims are enabled when `docs/spec-claims/` exists. Three of the points then become **gates with recorded verdicts**, and the per-chunk gate is a plan task, so it runs on every execute path, including one that never re-enters the wrapper. Without `docs/spec-claims/` the right column does not apply and every action behaves as described below.
 
 ```
 Design doc ──→ spec-generate ──→ formal SPEC-{CAT}-NNN files
@@ -122,6 +124,33 @@ The plan-phase `--plan` is also consumed by the amendment tasks it injects, whic
 
 ---
 
+## Direction protocol
+
+This protocol applies to claims-enabled projects (`docs/spec-claims/` exists). Without claims, the wiring below is unchanged, and the three directions are offered as a recommended framing for the question put to the user.
+
+When a doc and the code disagree, neither side is edited until the direction is ruled and recorded. The disagreement may be a failing claim, an edit to a claimed quote or `states`, a configuration conflict (the configuration extension, `references/spec-claims.md`), or a mismatch found by any audit or review.
+
+| Direction | Meaning | What changes |
+|---|---|---|
+| `CODE-DIVERGES` | the doc is the intent | the code is fixed, or the claim goes `diverged` with a tracker |
+| `DOC-STALE` | the approved text was wrong or incomplete | the doc's normative text (dated `AMENDED` block) and the claim's `states`; the ruling records why — an implementation finding, a later decision. "The code is what runs" is evidence of behaviour, never of intent. |
+| `RETIRE` | the decision is withdrawn | the claim is `retired`; the sentence is struck or removed |
+
+The ruling is recorded on the claim in its sidecar (`docs/spec-claims/<DOC-ID>.json`): `date`, `direction`, `by`, `record` and `reason` (`reason` is required for `DOC-STALE` and `RETIRE`).
+
+**Deviation is expected; an unreconciled deviation is the failure.** No plan or spec is perfect. Inside a plan, the chunk gate is where deviations are reconciled, with the full context and no presumption. **Outside a plan** (an audit, a review, a later session), nobody recorded a reason to depart from approved text, so the default presumption is `CODE-DIVERGES`.
+
+**Policy** (`docs/spec-claims/config.json` `policy`, host-set; doc-superpowers ships the defaults in brackets):
+- `in_plan_ruling_requires_gate_record` [`true`] — a `DOC-STALE`/`RETIRE` ruled at a gate is valid only when its `record` is a gate record (`docs/spec-claims/gates/<plan-stem>/chunk-<n>.json` or `final.json`) of a plan whose governing specs list that doc as target (an unsuffixed spec counts) or amendment (V6), so the in-plan latitude cannot be obtained by labelling.
+- `outside_plan_presumption` [`CODE-DIVERGES`] — the default direction for a deviation found outside a plan. It states the presumption; no check enforces it.
+- `doc_stale_outside_plan_requires` [any principal: `null`] — a host may require a named principal (e.g. the doc owner) for `DOC-STALE`/`RETIRE` on approved text outside a plan; the ruling's `by` must then equal it.
+
+Mechanically, a ruling is outside a plan when it is a ruling whose `record` is not a gate record; the gate-record test is structural (the path shape above), never the record's content.
+
+The `by` field names a principal; doc-superpowers records it and checks the `record` path, and makes no claim to verify who ruled.
+
+---
+
 ## Integration Patterns
 
 ### Wiring into a wrapper skill
@@ -143,11 +172,13 @@ During execute:
   After each plan chunk completes →
     invoke doc-superpowers spec-inject --phase=execute --specs=<paths> --plan=<path>
     If deviation flags returned → surface to user
+    Claims-enabled: a red claim or a flagged deviation → rule the direction (Direction protocol) before editing either side
 
 Pre-finish:
   After all tasks, before finishing →
     invoke doc-superpowers spec-verify --mode=post-execute --specs=<paths> --design-doc=<path> --plan=<path>
     If FAIL → surface report to user, let them decide
+    Claims-enabled: surface the report and its amendment batch; every unreconciled deviation needs a ruling (Direction protocol)
 
 During review:
   Alongside other review participants →
@@ -184,3 +215,5 @@ doc-superpowers expects these to exist (or bootstraps them):
 | `docs/specs/README.md` | `init` action | `spec-generate` |
 | `docs/.doc-index.json` | `init` (`doc-tools.sh build-index`, only when no index exists) | `spec-generate` (same) |
 | Spec template in `references/doc-spec.md` | Bundled with skill | (always available) |
+| `docs/spec-claims/` (sidecars, optional `config.json`, gate records) | The host — optional: its existence enables claims | Never bootstrapped: without it every `claims` verb is inert |
+| Runner adapters (named in `docs/spec-claims/config.json` `runners`) | The host — one small executable per test framework (`references/spec-claims.md`) | Never bootstrapped: reference helpers in `references/spec-claims.md` |
