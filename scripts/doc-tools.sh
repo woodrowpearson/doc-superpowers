@@ -2581,7 +2581,10 @@ ledger init|cmd_ledger_init|repo|dry-run registry= report= accept= import source
   whose header has a "#" column and a column linking item files — set
   legacy_ledgers to the ones that are ledgers; each with its legacy id
   (legacy_ledgers, else the file stem minus "-ledger") and its rows (the
-  "#" cell, else n<ordinal in the file>). The registry:
+  "#" cell, else n<ordinal in the file>). A row's links are its Tracker…
+  column's when the header has one, else every cell's, never a dep: link
+  ([dep: x](…), dep: [x](…)); its item is the first that is an item.
+  The registry:
   --registry <file> (ledger-registry/1, else exit 2), else
   docs/ledger/ledgers.json, else a proposal written to
   docs/ledger/ledgers.proposed.json (jq -S): one ledger per top-level

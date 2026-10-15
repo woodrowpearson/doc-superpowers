@@ -10276,6 +10276,43 @@ test_lg_init_preseeded_legacy_entries_authoritative() {
   teardown
 }
 
+# --- Task 16b (U1): the row's item comes from its Tracker column -----------------
+
+test_lg_init_row_item_from_tracker_column() {
+  echo "test: init (U1) — a hand-written row's item: with a Tracker… column, its links only (the first item link that is no dep: link wins); without one, any cell's, dep: links skipped"
+  lg_accept_fixture
+  cat > docs/ledgers/z-ledger.md <<'EOF'
+| # | Work | Tracker (the authoritative home) | State |
+|---|------|----------------------------------|-------|
+| 1 | Fix totals — [dep: sheet](../issues/2026-01-02-sheet-flicker.md) | [cart](../issues/2026-01-01-cart-total.md) | open |
+| 2 | See [misc](../issues/2026-01-05-misc.md) first | [plan](../plans/x-plan.md) | open |
+| 3 | Sync orders | dep: [sheet](../issues/2026-01-02-sheet-flicker.md), [sync](../issues/2026-01-03-order-sync.md) | open |
+EOF
+  cat > docs/ledgers/y-ledger.md <<'EOF'
+| # | Item | State |
+|---|------|-------|
+| 1 | [dep: cart](../issues/2026-01-01-cart-total.md) then [misc](../issues/2026-01-05-misc.md) | open |
+| 2 | Blocked — **dep:** [cart](../issues/2026-01-01-cart-total.md) | open |
+EOF
+  git add -A && git commit -qm "u1 ledgers"
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  assert_eq "0" "$LG_RC" "--report exits 0"
+  assert_contains "$(lg_u2_hand docs/ledger/r.md)" '`docs/ledgers/z-ledger.md` — `z`: 3 rows; 2 link items, 1 plans, 0 specs' \
+    "z: rows 1 and 3 link items, row 2 a plan (Work's links do not count)"
+  assert_contains "$(lg_u2_hand docs/ledger/r.md)" '`docs/ledgers/y-ledger.md` — `y`: 2 rows; 1 link items' "y: row 1 links an item (its dep: link skipped), row 2 none"
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-01-cart-total.md checkout
+  lg init --accept "$LG_DEC" --format json
+  assert_eq "0" "$LG_RC" "--accept exits 0"
+  assert_eq '{"key":"checkout-1"}' "$(jq -c '.["z#1"]' docs/ledger/legacy.json)" "z#1: the Tracker link (cart-total), not Work's dep: link"
+  assert_eq '{"item":"docs/issues/2026-01-03-order-sync.md"}' "$(jq -c '.["z#3"]' docs/ledger/legacy.json)" \
+    "z#3: a multi-link Tracker cell — the first link that is no dep: link"
+  assert_eq '{"item":"docs/issues/2026-01-05-misc.md"}' "$(jq -c '.["y#1"]' docs/ledger/legacy.json)" "y#1 (no Tracker column): the first item link that is no dep: link"
+  assert_eq "docs/ledgers/checkout-ledger.md#2,docs/ledgers/y-ledger.md#2,docs/ledgers/z-ledger.md#2" \
+    "$(jq -r '[.stubs[] | .row] | sort | join(",")' <<<"$LG_OUT")" \
+    "stubs: z#2 (its only item link is outside Tracker: a non-item tracker) and y#2 (a **dep:** link only), beside checkout#2"
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -10645,6 +10682,7 @@ run_tests() {
   test_lg_init_legacy_ledgers_only_named
   test_lg_init_hand_written_discovery_without_legacy_ledgers
   test_lg_init_preseeded_legacy_entries_authoritative
+  test_lg_init_row_item_from_tracker_column
 
   print_summary
 }

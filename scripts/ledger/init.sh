@@ -32,7 +32,11 @@
 #    links resolved from the file's directory, "/" from the top level,
 #    anchors and queries dropped). Each with its legacy id (legacy_ledgers,
 #    else the file stem minus a trailing "-ledger") and its rows, keyed by
-#    the "#" cell (its ordinal in the file when empty).
+#    the "#" cell (its ordinal in the file when empty). A row's links (its
+#    item, its plan or spec): those of its Tracker… column when the header
+#    has one, else of every cell — never a dep: link ([dep: x](…),
+#    dep: [x](…)); the row's item is the first link to an item (Task 16b
+#    U1).
 # 2. The registry: --registry <file> (ledger-registry/1, else exit 2), else
 #    docs/ledger/ledgers.json, else a proposal (docs/ledger/ledgers.proposed
 #    .json, jq -S): one ledger per top-level directory holding code — a
@@ -214,6 +218,10 @@ _lg_init_gh_check() {
 #                                    cells: the other cells, in order)
 #   {"t":"K","file","row","to","item"}  a link in such a row (to: the path it
 #                                    resolves to; item: it is an item file)
+#                                    — in its Tracker… column when the header
+#                                    has one (a cell starting "tracker", any
+#                                    case), else in any cell; never a dep:
+#                                    link (isdep)
 #   {"t":"M","file"}                 a legacy_ledgers file that cannot be read
 # Item files are read through their frontmatter only.
 # shellcheck disable=SC2016  # awk source
@@ -278,7 +286,25 @@ function fmval(line) {
   sub(/^[^:]*:[ \t]*/, "", line)
   return trim(line)
 }
-function scan(p, flag,   line, n, infm, isitem, fence, prev, intable, hcol, scol, nc, i, j, ord, rid, rest, t, base, st, sc, cl) {
+# lastidx(s, c): the position of the last c in s (0: none).
+function lastidx(s, c,   i, k) {
+  k = 0
+  while ((i = index(s, c)) > 0) { k += i; s = substr(s, i + 1) }
+  return k
+}
+# isdep(label, before): a dependency link, not the tracker of the row — its
+# label starts with "dep:", or the text just before it (since the previous
+# link; trailing blanks and * _ emphasis dropped) ends with the word
+# "dep:", any case: [dep: x](…), dep: [x](…), **dep:** [x](…).
+function isdep(label, before,   n) {
+  label = tolower(label); sub(/^[*_ \t]+/, "", label)
+  if (substr(label, 1, 4) == "dep:") return 1
+  before = tolower(before); sub(/[*_ \t]+$/, "", before)
+  n = length(before)
+  if (n < 4 || substr(before, n - 3) != "dep:") return 0
+  return n == 4 || substr(before, n - 4, 1) !~ /[a-z0-9_-]/
+}
+function scan(p, flag,   line, n, infm, isitem, fence, prev, intable, hcol, scol, tcol, nc, i, j, ord, rid, rest, t, base, st, sc, cl, pre, lb, dep) {
   gx_match(p)
   isitem = (GX_MN > 0)
   base = dirof(p)
@@ -317,14 +343,19 @@ function scan(p, flag,   line, n, infm, isitem, fence, prev, intable, hcol, scol
         for (i = 1; i <= nc; i++) if (i != hcol && i != scol) cl = cl (cl == "" ? "" : ",") js(C[i])
         print "{\"t\":\"R\",\"file\":" js(p) ",\"row\":" js(rid) ",\"state\":" js(sc) ",\"bold\":" js(bold(line)) ",\"text\":" js(trim(line)) ",\"cells\":[" cl "]}"
         for (i = 1; i <= nc; i++) {
+          if (tcol > 0 && i != tcol) continue
           rest = C[i]
           while ((j = index(rest, "](")) > 0) {
+            pre = substr(rest, 1, j - 1)
+            lb = lastidx(pre, "[")
+            if (lb > 0) dep = isdep(substr(pre, lb + 1), substr(pre, 1, lb - 1))
+            else dep = isdep("", pre)
             rest = substr(rest, j + 2)
             j = index(rest, ")")
             if (j == 0) break
             t = target(substr(rest, 1, j - 1), base)
             rest = substr(rest, j + 1)
-            if (t == "") continue
+            if (t == "" || dep) continue
             gx_match(t)
             print "{\"t\":\"K\",\"file\":" js(p) ",\"row\":" js(rid) ",\"to\":" js(t) ",\"item\":" (GX_MN > 0 ? "true" : "false") "}"
           }
@@ -333,10 +364,11 @@ function scan(p, flag,   line, n, infm, isitem, fence, prev, intable, hcol, scol
       }
     }
     if (prev != "" && index(prev, "|") > 0 && issep(line)) {
-      nc = cells(prev); hcol = 0; scol = 0
+      nc = cells(prev); hcol = 0; scol = 0; tcol = 0
       for (i = 1; i <= nc; i++) {
         if (hcol == 0 && C[i] == "#") hcol = i
         if (scol == 0 && tolower(C[i]) ~ /^(state|status)/) scol = i
+        if (tcol == 0 && tolower(C[i]) ~ /^tracker/) tcol = i
       }
       if (hcol > 0) intable = 1
       prev = ""
