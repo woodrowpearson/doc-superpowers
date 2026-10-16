@@ -2526,7 +2526,13 @@ ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed
   (a legacy_ids or retired ledger likewise); the registry is checked when
   it is staged. --all: the same over every item of the working tree, plus
   advisories (missing key, ledger or summary; weak summary; unassigned or
-  contract-less open items; parse errors). --plan: every row of the plan's
+  contract-less open items; parse errors). A closed or won't-fix item from
+  before adoption — config base has no commit adding
+  docs/ledger/config.json yet, or the base holds the item's file and no
+  commit after the first one that added config.json (a descendant of it)
+  touched it — reports a missing resolution as advisory, "terminal before
+  adoption" (--staged is unchanged: a status moving into closed or won't
+  fix in the commit needs a resolution). --plan: every row of the plan's
   "Related work" table is marked include or exclude: <reason> (advisory;
   --strict blocks). --pushed (for pre-push hooks): with keys.mode cas, each
   provisional key the range introduces blocks; merge mode passes. --registry

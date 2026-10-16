@@ -237,6 +237,7 @@ B's claimed items (their `consumes`, their siblings) are read from the working t
 |---|---|---|
 | on **staged** items only: any present key well-formed and globally unique (keys + aliases) · `ledger` is a registered id or `unassigned` · items **added** in this commit carry `ledger` + `summary` · supersession integrity and a non-empty resolution on items whose status changed to closed/wontfix in this commit | blocking | git-tier pre-commit `ledger validate --staged` |
 | pre-existing items missing `key`/`ledger`/`summary` | advisory (so a host can migrate in stages) | `validate --all` |
+| a missing resolution on a terminal item from before adoption — the base has no commit adding `docs/ledger/config.json` yet, or the base holds the item and no commit after the first that added it (a descendant of that commit; the adoption commit itself is not after it) touched its file — reported "terminal before adoption" (amended 2026-10-14: a first host had 350 such items, mostly archived); `--staged` is unchanged | advisory | `validate --all` |
 | provisional keys (`cas` mode only) | blocking | git-tier pre-push |
 | registry: ids, statuses, contract ids, MECE paths | blocking when the registry is staged | pre-commit |
 | unconfirmed candidates · items with no contract · weak summary (< 20 chars) · sweep marks | advisory | `validate --all` / `--plan` |

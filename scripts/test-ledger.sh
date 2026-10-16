@@ -1454,8 +1454,8 @@ lg_t_index_fields() {
     "items sorted by path"
   it=$(lg_ix_item "$ix" docs/issues/a.md)
   assert_json_field "$it" 'keys_unsorted | join(",")' \
-    "path,archived,key,ledger,status,class,severity,date,summary,changes,consumes,relates,superseded_by,owed,aliases,paths,h1,first_para,resolution,docs,derived,pr,inflight,neighbours,recheck_after,fm_errors" \
-    "an item's keys, in the brief's order"
+    "path,archived,key,ledger,status,class,severity,date,summary,changes,consumes,relates,superseded_by,owed,aliases,paths,h1,first_para,resolution,docs,derived,pr,inflight,neighbours,recheck_after,fm_errors,pre_adoption" \
+    "an item's keys, in the brief's order (pre_adoption: Task 16c U11)"
   assert_json_field "$it" 'keys_unsorted | join(",")' "$(jq -r '."$defs".item.required | join(",")' "$LG_SCHEMA")" \
     "the schema's item.required lists the same keys"
   assert_json_field "$(cat "$ix")" 'keys_unsorted | join(",")' "$(jq -r '.required | join(",")' "$LG_SCHEMA")" \
@@ -10604,6 +10604,93 @@ EOF
   teardown
 }
 
+# --- Task 16c (U11): terminal items from before adoption need no resolution ------
+
+# lg_pre_adoption_fixture: items x-1 (closed), x-2 (won't fix), x-3 (open),
+# none with a resolution, committed on main before docs/ledger/config.json
+# ({"base":"main"}) exists; the config is written, not committed.
+lg_pre_adoption_fixture() {
+  lg_fixture
+  lg_registry "$LG_REG_XY"
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Closed" "summary: Closed long before the ledger came"
+  lg_item docs/issues/b.md "key: x-2" "ledger: x" "status: Won't Fix" "summary: Dropped long before the ledger came"
+  lg_item docs/issues/c.md "key: x-3" "ledger: x" "status: Open" "summary: Still open when the ledger came"
+  git add -A && git commit -qm "before the ledger"
+  lg_enable '{"base":"main"}'
+}
+
+# lg_vmr: the missing-resolution findings of the last JSON verdict (lg_vf).
+lg_vmr() {
+  lg_vf | grep '^missing-resolution ' || true
+}
+
+test_lg_validate_all_pre_adoption_terminal() {
+  echo "test: validate --all — a terminal item with no commit on the base after the adoption commit (the first there to add docs/ledger/config.json): missing-resolution is advisory, 'terminal before adoption'; edited after adoption, or new, it blocks"
+  lg_pre_adoption_fixture
+  lg validate --all --format json
+  assert_eq "0" "$LG_RC" "config.json on no commit of the base yet: every terminal item is pre-adoption — exit 0"
+  assert_eq "missing-resolution advisory docs/issues/a.md
+missing-resolution advisory docs/issues/b.md" "$(lg_vmr)" "…both advisory"
+  assert_eq "terminal before adoption" \
+    "$(jq -r '[.findings[] | select(.class == "missing-resolution") | .detail | test("terminal before adoption") | select(.)] | length | if . == 2 then "terminal before adoption" else "\(.) of 2" end' <<<"$LG_OUT")" \
+    "…each with the reason"
+  # The adoption commit (it also touches b.md, as init --accept's writes
+  # committed with the config would): still before adoption.
+  printf '\nMigrated.\n' >> docs/issues/b.md
+  git add -A && git commit -qm "adopt the ledger"
+  local adopt
+  adopt=$(git rev-parse HEAD)
+  lg validate --all --format json
+  assert_eq "0" "$LG_RC" "adopted: no commit after the adoption commit touches them — exit 0"
+  assert_eq "missing-resolution advisory docs/issues/a.md
+missing-resolution advisory docs/issues/b.md" "$(lg_vmr)" "…both advisory (the adoption commit itself is not after it)"
+  lg validate --all
+  assert_contains "$LG_OUT" "missing-resolution docs/issues/a.md status closed needs a resolution (a line under the resolution heading) — terminal before adoption (advisory)" \
+    "text: the reason, then (advisory)"
+  lg_call _lg_index
+  assert_eq "$adopt" "$(jq -r '.built.adoption' "$LG_OUT")" "built.adoption: the commit that added config.json"
+  assert_eq "a.md:true,b.md:true,c.md:true" \
+    "$(jq -r '[.items[] | "\(.path | split("/") | last):\(.pre_adoption)"] | join(",")' "$LG_OUT")" "items: pre_adoption"
+  # On a branch, the base unchanged: still advisory (the base decides).
+  git checkout -q -b side
+  printf '\nA branch note.\n' >> docs/issues/a.md
+  git add -A && git commit -qm "a note on a branch"
+  lg validate --all --format json
+  assert_eq "0|missing-resolution advisory docs/issues/a.md
+missing-resolution advisory docs/issues/b.md" "$LG_RC|$(lg_vmr)" "a branch's commit is not on the base: still advisory"
+  # On the base after adoption: blocks.
+  git checkout -q main
+  git merge -q --ff-only side
+  lg validate --all --format json
+  assert_eq "1" "$LG_RC" "a.md edited on the base after adoption: exit 1"
+  assert_eq "missing-resolution advisory docs/issues/b.md
+missing-resolution block docs/issues/a.md" "$(lg_vmr)" "a.md blocks, b.md stays advisory"
+  assert_not_contains "$(jq -r '.findings[] | select(.path == "docs/issues/a.md") | .detail' <<<"$LG_OUT")" "before adoption" \
+    "…without the pre-adoption reason"
+  lg_call _lg_index
+  assert_eq "a.md:false,b.md:true,c.md:true" \
+    "$(jq -r '[.items[] | "\(.path | split("/") | last):\(.pre_adoption)"] | join(",")' "$LG_OUT")" "items: pre_adoption after the edit"
+  # A terminal item the base does not hold (new here): blocks.
+  lg_item docs/issues/n.md "key: x-4" "ledger: x" "status: Closed" "summary: Closed here, never on the base"
+  lg validate --all --format json
+  assert_contains "$(lg_vmr)" "missing-resolution block docs/issues/n.md" "a new terminal item blocks"
+  teardown
+}
+
+test_lg_validate_staged_closing_pre_adoption_blocks() {
+  echo "test: validate --staged — closing a pre-adoption item without a resolution still blocks (the relief is validate --all's)"
+  lg_pre_adoption_fixture
+  git add -A && git commit -qm "adopt the ledger"
+  lg_item docs/issues/c.md "key: x-3" "ledger: x" "status: Closed" "summary: Still open when the ledger came"
+  printf '\nA log line.\n' >> docs/issues/a.md
+  git add -A
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "exit 1"
+  assert_eq "missing-resolution advisory docs/issues/a.md
+missing-resolution block docs/issues/c.md" "$(lg_vmr)" "c.md closed in this commit blocks; a.md (closed before) is advisory, as before"
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -10983,6 +11070,8 @@ run_tests() {
   test_lg_prov_key_long_forms
   test_lg_init_long_provisional_key_ledger
   test_lg_init_stub_relinks_relative_links
+  test_lg_validate_all_pre_adoption_terminal
+  test_lg_validate_staged_closing_pre_adoption_blocks
 
   print_summary
 }
