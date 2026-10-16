@@ -943,8 +943,10 @@ _lg_init_write() {
 # → {"archived": "<file>#<row>"}; else a stub item —
 # docs/issues/<today>-<slug>.md (status Open, the row's legacy id as its
 # ledger when registered, else unassigned; summary from the row; body
-# "Migrated from <file> row <n>." and the row) or, with items.globs [] and
-# an items adapter, an issue (adapter create). A stub is found again by its
+# "Migrated from <file> row <n>." and the row, its relative links
+# re-expressed from the stub's directory: _LG_JQ_RELINK_DEFS) or, with
+# items.globs [] and an items adapter, an issue (adapter create; the row
+# text as it is). A stub is found again by its
 # first paragraph ("Migrated from <file> row <n>.") or by the row's
 # legacy.json entry, never created twice. legacy.json's entries are never
 # changed.
@@ -1076,6 +1078,65 @@ _LG_JQ_ACCEPT_PLAN='
 | {findings: [$X[] | .finding | select(. != null)],
    apply: [$X[] | .a | select(. != null)],
    skipped: $skipped, legacy: $LEG}
+'
+
+# A stub's row text, copied from a ledger file in another directory, keeps
+# its relative links working (Task 16c U8): each "[t](dest)", "[t](<dest>)"
+# and "<dest>" whose dest resolves from the ledger file's directory to a
+# path that exists is re-expressed from the stub's directory, its ?query
+# and #fragment kept. An empty, #anchor-only, absolute (/…) or scheme (URL,
+# mailto:) dest, one that climbs above the top, and one naming no existing
+# path (%20 read as a space for that check) are left as they are. The
+# existence check is the caller's: lg_rl_targets lists the paths, a shell
+# loop keeps those that exist ($EX: {path: true}). jq source.
+# shellcheck disable=SC2016  # jq source
+_LG_JQ_RELINK_DEFS='
+def lg_rl_re: "(?<a>\\]\\()(?<d1>[^)\\s<>]+)|(?<b>\\]\\(<)(?<d2>[^>\\n]+)>|<(?<d3>[^<>\\s]+)>";
+def lg_rl_dirs: split("/") | .[0:-1];
+def lg_rl_norm:
+  reduce .[] as $g ([];
+    if . == null then null
+    elif $g == "" or $g == "." then .
+    elif $g == ".." then (if length == 0 then null else .[0:-1] end)
+    else . + [$g] end);
+# A dest → {p: the path it names from the directory $sd (segments), s: its
+# ?query / #fragment, slash: a final "/"}, or null (left alone).
+def lg_rl_target($sd):
+  if . == "" or test("^(#|/|[A-Za-z][A-Za-z0-9+.-]*:)") then null
+  else capture("^(?<p>[^?#]*)(?<s>.*)$") as $c
+    | if $c.p == "" then null
+      else (($sd + ($c.p | split("/"))) | lg_rl_norm) as $r
+        | if $r == null or $r == [] then null
+          else {p: ($r | join("/")), s: $c.s, slash: ($c.p | endswith("/"))} end
+      end
+  end;
+def lg_rl_moves: (.hosted | not) and (.path | type) == "string" and (.file | type) == "string"
+  and ((.file | lg_rl_dirs) != (.path | lg_rl_dirs));
+# A stub → the paths its row text links name (and their %20-decoded forms).
+def lg_rl_targets:
+  select(lg_rl_moves) | (.file | lg_rl_dirs) as $sd
+  | (.text // "") | match(lg_rl_re; "g") | .captures[] | select((.name // "") | startswith("d")) | .string | strings
+  | lg_rl_target($sd) | select(. != null) | .p | (., (select(test("%20")) | gsub("%20"; " ")))
+  | select(test("\n") | not);
+def lg_rl_from($EX; $sd; $dd):
+  . as $d | lg_rl_target($sd) as $t
+  | if $t == null then $d
+    elif (($EX[$t.p] // false) or ($EX[$t.p | gsub("%20"; " ")] // false)) | not then $d
+    else ($t.p | split("/")) as $r
+      | ([($dd | length), ($r | length)] | min) as $m
+      | (first(range(0; $m) | select($dd[.] != $r[.])) // $m) as $k
+      | ([range(0; ($dd | length) - $k) | ".."] + $r[$k:]) as $o
+      | (if $o == [] then "." else ($o | join("/")) end) + (if $t.slash then "/" else "" end) + $t.s
+    end;
+# A stub → its row text, relinked.
+def lg_rl_text($EX):
+  if lg_rl_moves then
+    (.file | lg_rl_dirs) as $sd | (.path | lg_rl_dirs) as $dd
+    | (.text // "") | gsub(lg_rl_re;
+        if .a != null then "](" + (.d1 | lg_rl_from($EX; $sd; $dd))
+        elif .b != null then "](<" + (.d2 | lg_rl_from($EX; $sd; $dd)) + ">"
+        else "<" + (.d3 | lg_rl_from($EX; $sd; $dd)) + ">" end)
+  else .text end;
 '
 
 # The final pass (phase 3): with the keys → the edits, the stubs, the legacy
@@ -1335,7 +1396,7 @@ _lg_init_accept() {
 # writes, the stubs, legacy.json, the views, the output.
 _lg_init_accept_apply() {
   local s="$1" dry="$2" lgpath="$3" tsv="$4" rec path hosted key prev ledger summary nk nl ns na what
-  local file row id st sk sl ss text body out ref rc=0 views="" vdir a an aj
+  local file row id st sk sl ss text body out ref rc=0 views="" vdir a an aj lnk
   vdir="$_LG_CACHE/views"
   [ -e "$s.written" ] || : > "$s.written"
   : > "$s.lines"
@@ -1382,9 +1443,19 @@ _lg_init_accept_apply() {
   done < "$s.items"
 
   # The stubs.
-  # One jq for every stub: thirteen lines each.
-  jq -r '.stubs[] | [.path // "", (.hosted | tostring), .file, .row, .id, (.key // ""), .ledger, .summary,
-      .names.status, .names.key, .names.ledger, .names.summary, .text] | map(gsub("[\n\r]"; " ")) | .[]' "$s.final" > "$s.stubrecs" \
+  # The paths their row texts link (from the ledger file's directory), and
+  # those that exist — one loop of test builtins, no process per link.
+  jq -r "$_LG_JQ_RELINK_DEFS"'[.stubs[] | lg_rl_targets] | unique[]' "$s.final" > "$s.rlt" \
+    || _lg_die "jq failed (the stubs' links)"
+  while IFS= read -r lnk; do
+    if [ -e "$lnk" ]; then printf '%s\n' "$lnk"; fi
+  done < "$s.rlt" > "$s.rlx" || _lg_die "cannot write $s.rlx"
+  # One jq for every stub: thirteen lines each; a file stub's row text
+  # relinked from its directory.
+  jq -r --rawfile ex "$s.rlx" "$_LG_JQ_RELINK_DEFS"'
+    ($ex | split("\n") | map(select(. != "") | {key: ., value: true}) | from_entries) as $EX
+    | .stubs[] | [.path // "", (.hosted | tostring), .file, .row, .id, (.key // ""), .ledger, .summary,
+      .names.status, .names.key, .names.ledger, .names.summary, lg_rl_text($EX)] | map(gsub("[\n\r]"; " ")) | .[]' "$s.final" > "$s.stubrecs" \
     || _lg_die "jq failed (stubs)"
   while IFS= read -r path && IFS= read -r hosted && IFS= read -r file && IFS= read -r row && IFS= read -r id \
       && IFS= read -r key && IFS= read -r ledger && IFS= read -r summary && IFS= read -r st && IFS= read -r sk \

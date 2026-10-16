@@ -2640,7 +2640,10 @@ ledger init|cmd_ledger_init|repo|dry-run registry= report= accept= import source
   one — any case; ~~, *, ` and apostrophes dropped, any other run of
   non-alphanumerics splits words: WONT-FIX, Won't fix and wontfix are
   done, "Do next" and "Closing" are not)
-  (docs/issues/<today>-<slug>.md, or through the items
+  (docs/issues/<today>-<slug>.md, carrying the row text with each
+  relative link that resolves from the ledger file re-expressed from the
+  stub's directory — ?query and #fragment kept; URLs, #anchors, absolute
+  and dead links as they were — or through the items
   adapter's create when items.globs is []), legacy.json entries for every
   row (<legacy-id>#<row> → key, item or archived; a row legacy.json
   already holds is left alone — no stub, no finding: pre-seeded entries

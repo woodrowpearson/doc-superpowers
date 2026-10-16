@@ -10575,6 +10575,35 @@ test_lg_init_long_provisional_key_ledger() {
   teardown
 }
 
+# --- Task 16c (U8): a stub's copied row text keeps its relative links working ------
+
+test_lg_init_stub_relinks_relative_links() {
+  echo "test: init --accept — a stub's row text: relative links re-expressed from the stub's directory (query and fragment kept); URLs, anchors, absolute paths and links that do not resolve from the ledger left alone"
+  lg_accept_fixture
+  lg_item docs/issues/a.md "status: Open"
+  mkdir -p docs/plans
+  printf '# P\n\n## S\n' > docs/plans/p.md
+  printf 'png\n' > docs/ledgers/img.png
+  cat > docs/ledgers/x-ledger.md <<'EOF'
+| # | Work | Tracker | State |
+|---|------|---------|-------|
+| 1 | **Relink the migrated rows** — see [a](../issues/a.md) and [p](../plans/p.md#s), <../issues/a.md>, [t](<../issues/a.md>), [q](../issues/a.md?x=1#f "A title"), [web](https://example.com/a.md), [top](#top), [abs](/docs/issues/a.md), [dead](../nope/missing.md), [esc](../../../out.md), [img](./img.png), ![i](img.png) | [plan](../plans/p.md) | open |
+| 2 | Its own item | [a](../issues/a.md) | open |
+EOF
+  git add -A && git commit -qm "x ledger"
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-01-cart-total.md checkout
+  lg init --accept "$LG_DEC" --format json
+  assert_eq "0" "$LG_RC" "--accept exits 0"
+  local stub
+  stub="docs/issues/$(lg_today)-relink-the-migrated-rows.md"
+  assert_file_exists "$stub" "x#1 (a plan tracks it): a stub in docs/issues"
+  assert_contains "$(cat "$stub")" '| 1 | **Relink the migrated rows** — see [a](a.md) and [p](../plans/p.md#s), <a.md>, [t](<a.md>), [q](a.md?x=1#f "A title"), [web](https://example.com/a.md), [top](#top), [abs](/docs/issues/a.md), [dead](../nope/missing.md), [esc](../../../out.md), [img](../ledgers/img.png), ![i](../ledgers/img.png) | [plan](../plans/p.md) | open |' \
+    "../issues/a.md → a.md, ../plans/p.md#s kept (a sibling directory), ./img.png → ../ledgers/img.png; the rest as they were"
+  assert_contains "$(cat "$stub")" "Migrated from docs/ledgers/x-ledger.md row 1." "…the body still names its row"
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -10953,6 +10982,7 @@ run_tests() {
   test_lg_prov_key_existing_collision
   test_lg_prov_key_long_forms
   test_lg_init_long_provisional_key_ledger
+  test_lg_init_stub_relinks_relative_links
 
   print_summary
 }
