@@ -18,9 +18,10 @@
 # awareness off (config inflight.enabled, false by default) there are no
 # notices, and doc-tools.sh is not run; silent without
 # docs/ledger/config.json, doc-tools.sh or jq. Always exits 0.
-# DOC_SUPERPOWERS_LEDGER_SKIP=1 turns it off.
+# DOC_SUPERPOWERS_SKIP=1 (every hook) or DOC_SUPERPOWERS_LEDGER_SKIP=1 (the
+# ledger legs) turns it off.
 
-[[ "${DOC_SUPERPOWERS_LEDGER_SKIP:-}" == "1" ]] && exit 0
+[[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" || "${DOC_SUPERPOWERS_LEDGER_SKIP:-}" == "1" ]] && exit 0
 
 HOOK_EVENT=SessionStart
 BUDGET=2

@@ -12,9 +12,12 @@
 # nothing is left behind however the hook ends. No temp file, a copy that
 # fails (a full disk, a write error) or a redirect that fails: the push is
 # refused — git's lines are gone from stdin by then, and whatever runs next
-# would read nothing and pass. DOC_SUPERPOWERS_LEDGER_SKIP=1 skips it, with
-# a line saying so.
-if [ "${DOC_SUPERPOWERS_LEDGER_SKIP:-}" = 1 ]; then
+# would read nothing and pass. DOC_SUPERPOWERS_SKIP=1 (every hook) or
+# DOC_SUPERPOWERS_LEDGER_SKIP=1 (the ledger legs) skips it, with a line
+# naming the variable.
+if [ "${DOC_SUPERPOWERS_SKIP:-}" = 1 ]; then
+  echo "ledger: pre-push check skipped (DOC_SUPERPOWERS_SKIP=1)" >&2
+elif [ "${DOC_SUPERPOWERS_LEDGER_SKIP:-}" = 1 ]; then
   echo "ledger: pre-push check skipped (DOC_SUPERPOWERS_LEDGER_SKIP=1)" >&2
 elif [ -f docs/ledger/config.json ]; then
   DOC_SP_LG_TOOLS=${DOC_TOOLS:-}

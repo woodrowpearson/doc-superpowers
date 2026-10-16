@@ -18,9 +18,10 @@
 # doc-tools.sh is not run).
 #
 # Advisory only: always exits 0 and never blocks.
-# DOC_SUPERPOWERS_LEDGER_SKIP=1 turns it off.
+# DOC_SUPERPOWERS_SKIP=1 (every hook) or DOC_SUPERPOWERS_LEDGER_SKIP=1 (the
+# ledger legs) turns it off.
 
-[[ "${DOC_SUPERPOWERS_LEDGER_SKIP:-}" == "1" ]] && exit 0
+[[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" || "${DOC_SUPERPOWERS_LEDGER_SKIP:-}" == "1" ]] && exit 0
 
 # The event, read before the cd (a terminal on stdin is not waited on).
 payload=""
