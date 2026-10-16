@@ -1279,8 +1279,10 @@ assert_contains "$ACTIONS" 'It never calls `update-index` while a claim of that 
   "execute phase: Aligned never calls update-index over a failing claim"
 assert_contains "$ACTIONS" "Flag for human review with a deviation note" \
   "execute phase: the Drifted branch's existing sentence is unchanged"
-assert_contains "$ACTIONS" '**Claims-enabled projects:** rule the direction (**Direction protocol**, `spec-lifecycle-protocol.md`) before editing either side, and record the ruling in the sidecar.' \
-  "execute phase: Drifted gains the conditional direction-protocol sentence"
+assert_contains "$ACTIONS" '**Claims-enabled projects:** rule the direction (**Direction protocol**, `spec-lifecycle-protocol.md`) before editing either side — not in this phase, but at the chunk'"$_sq"'s `Claims gate (chunk N)` task, Step 3, whose record (`docs/spec-claims/gates/<plan-stem>/chunk-<N>.json`) is the ruling'"$_sq"'s `record`. This phase flags the deviation and leaves the ruling to that step.' \
+  "execute phase: Drifted gains the conditional direction-protocol sentence, routed to the chunk gate's Step 3 (A-P2-28)"
+assert_not_contains "$ACTIONS" 'before editing either side, and record the ruling in the sidecar.' \
+  "execute phase: the Drifted branch no longer rules by agent (the gate is the chunk's verifier)"
 assert_contains "$ACTIONS" 'With claims enabled an `:amends` spec'"$_sq"'s claims are still checked at the gate.' \
   "execute phase: an amendment spec's claims are still checked"
 assert_contains "$ACTIONS" '0. **Claims verdict** (claims-enabled projects only): run `$DOC_TOOLS claims attest --plan <plan> --final`; exit 1 → FAIL; exit 2 → report "claims verdict owed", never PASS; include its amendment batch.' \
