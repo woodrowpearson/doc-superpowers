@@ -69,19 +69,23 @@
 # letter, digit or "_" — the value is "#<number>".
 # The #N anchor bounds false positives the way GitHub's own keywords do;
 # "this fixes #12" (mid-sentence) and "Fixes o/r#12" do not count.
-# tr_since(file) reads the commits config trailers.since cuts off (one id
-# per line: _lg_tr_since's _LG_TR_EXCL; "" none); tr_cut(commit), after
-# tr_match, drops the claims, claims_by_path and claims_by_ref matches of
-# such a commit — contract_change and ack matches stay (Task 16c U12).
+# tr_since(file) reads _lg_tr_incl's set ("" or an empty file: no
+# cutoff; else "on", then the commits whose claims still count — the since
+# commit's descendants); tr_cut(commit), after tr_match, drops the claims,
+# claims_by_path and claims_by_ref matches of every other commit —
+# contract_change and ack matches stay (Task 16c U12, fix round 1).
 # shellcheck disable=SC2016  # awk source
 _LG_AWK_TRAILER='
 function tr_since(f,   l) {
   if (f == "") return
-  while ((getline l < f) > 0) TRX[l] = 1
+  if ((getline l < f) > 0 && l == "on") {
+    TRON = 1
+    while ((getline l < f) > 0) TRI[l] = 1
+  }
   close(f)
 }
 function tr_cut(c,   i, j) {
-  if (!(c in TRX)) return
+  if (!TRON || (c in TRI)) return
   j = 0
   for (i = 1; i <= TRM; i++) {
     if (TRMK[i] == "claims" || TRMK[i] == "claims_by_path" || TRMK[i] == "claims_by_ref") continue
@@ -132,25 +136,31 @@ _lg_trailers() {
     || _lg_die "jq failed (config trailers)"
 }
 
-# _lg_tr_since → _LG_TR_SINCE, _LG_TR_EXCL (Task 16c U12): config
-# trailers.since, resolved once per run. null (the default): "" and an
-# empty file — every claim trailer counts. A commit-ish (an abbreviated id
-# will do): its commit. "adoption": the adoption commit (index.sh
-# _lg_adoption_commit: the first commit on config base to add
-# docs/ledger/config.json) — while the base has none, the base itself (all
-# of its history predates adoption); a base that does not resolve: no
-# cutoff. _LG_TR_EXCL lists the since commit and its ancestors (one `git
-# rev-list`, cached per commit as $_LG_CACHE/since-<id>[.<shallow>].txt):
-# the commits whose claims, claims_by_path and claims_by_ref lines tr_cut
-# drops — `^<since>` applied to the claim trailers of every range walk
-# (_lg_msg_claims, the PR heads, the in-flight branches) without a process
-# per commit; Contract-Change and ack lines are kept. A value that is not a
-# string, or names no commit here (a shallow clone may lack it): dies 2.
+# _lg_tr_since → _LG_TR_MODE, _LG_TR_SINCE (Task 16c U12; fix round 1):
+# config trailers.since, resolved once per run. Claim trailers count only
+# in the commits that are descendants of the since commit (not the commit
+# itself: "after" it, as U11's adoption point reads `--ancestry-path
+# <adoption>..<base>`); in every other commit — its ancestors, and a
+# commit on a branch forked before it, merged or still in flight — they
+# are ignored.
+#   null (the default): _LG_TR_MODE off, _LG_TR_SINCE "" — every claim
+#     trailer counts;
+#   a commit-ish (an abbreviated id will do): mode commit, its commit;
+#   "adoption": the adoption commit (index.sh _lg_adoption_commit: the
+#     first commit on config base to add docs/ledger/config.json); while
+#     the base has none, mode all, _LG_TR_SINCE "*all" — every commit
+#     predates adoption, no claim trailer counts (U11: every terminal item
+#     is pre-adoption); a base that does not resolve: off; in a shallow
+#     clone whose boundary is where config.json first shows (the real
+#     adoption commit is out of reach): dies 2, as a since naming no
+#     commit here.
+# A value that is not a string, or names no commit here: dies 2.
+# _lg_tr_incl builds the per-walk set tr_cut reads.
 _LG_TR_SINCE_SET=""
 _LG_TR_SINCE=""
-_LG_TR_EXCL=""
+_LG_TR_MODE=off
 _lg_tr_since() {
-  local v="" base_ref="" b c="" f tmp s old
+  local v="" base_ref="" b c="" s
   [ -z "$_LG_TR_SINCE_SET" ] || return 0
   _lg_scratch_name
   s=$_LG_SN
@@ -158,6 +168,7 @@ _lg_tr_since() {
   _lg_cfg '(.trailers.since | if . == null then "n" elif type == "string" then "s" + (gsub("[\n\r]"; " ")) else "b" end),
     (.base | if type == "string" then . else "" end)' > "$s.cfg"
   { IFS= read -r v; IFS= read -r base_ref; } < "$s.cfg" || true
+  _LG_TR_MODE=off
   case "$v" in
     n) ;;
     b|s) _lg_die "config trailers.since must be a commit, \"adoption\" or null" ;;
@@ -169,36 +180,49 @@ _lg_tr_since() {
       esac
       if [ -n "$b" ]; then
         _lg_adoption_commit "$b"
-        c=${_LG_ADOPTC:-$b}
+        if [ "$_LG_ADOPTC" = "?" ]; then
+          _lg_die "config trailers.since \"adoption\": the adoption commit is beyond this shallow clone's history (config.json first shows at its boundary); deepen it (git fetch --unshallow) or name the commit"
+        elif [ -n "$_LG_ADOPTC" ]; then
+          c=$_LG_ADOPTC
+          _LG_TR_MODE=commit
+        else
+          c="*all"
+          _LG_TR_MODE=all
+        fi
       fi ;;
     s-*) _lg_die "config trailers.since names no commit: '${v#s}'" ;;
     s*)
       c=$(git rev-parse -q --verify "${v#s}^{commit}" 2>/dev/null) \
-        || _lg_die "config trailers.since names no commit here: '${v#s}' (a shallow clone may lack it)" ;;
+        || _lg_die "config trailers.since names no commit here: '${v#s}' (a shallow clone may lack it)"
+      _LG_TR_MODE=commit ;;
     *) _lg_die "internal: trailers.since read as '$v'" ;;
   esac
   _LG_TR_SINCE=$c
-  _LG_TR_EXCL="$s.trx"
-  : > "$_LG_TR_EXCL" || _lg_die "cannot write $_LG_TR_EXCL"
-  if [ -n "$c" ]; then
-    _lg_ix_shallow
-    f="$_LG_CACHE/since-$c${_LG_SHALLOW:+.$_LG_SHALLOW}.txt"
-    if [ -f "$f" ] && cp -- "$f" "$_LG_TR_EXCL" 2>/dev/null; then
-      touch -c "$f" 2>/dev/null || true
-    else
-      git rev-list "$c" > "$_LG_TR_EXCL" 2> "$s.err" \
-        || _lg_die "git rev-list failed (config trailers.since): $(head -n 3 "$s.err" 2>/dev/null)"
-      mkdir -p -- "$_LG_CACHE" 2>/dev/null || _lg_die "cannot create $_LG_CACHE"
-      tmp=$(mktemp "$_LG_CACHE/.since.XXXXXX") || _lg_die "cannot create a temp file in $_LG_CACHE"
-      if cp -- "$_LG_TR_EXCL" "$tmp" && mv -f "$tmp" "$f"; then
-        # shellcheck disable=SC2012  # cache names are since-<hex>.txt
-        ls -t "$_LG_CACHE"/since-*.txt 2>/dev/null | tail -n +4 | while IFS= read -r old; do rm -f "$old"; done
-      else
-        rm -f "$tmp"
-      fi
-    fi
-  fi
   _LG_TR_SINCE_SET=1
+}
+
+# _lg_tr_incl <out> <revs-file>: the set tr_since / tr_cut read for one
+# walk over <revs-file>'s revisions (one per line, as git log --stdin
+# takes them: "^<bottom>", "<a>..<tip>", "<tip>"). Mode off: an empty file
+# (nothing cut). Otherwise "on", then — mode commit — the descendants of
+# the since commit that the walk's tips reach: one `git rev-list
+# --ancestry-path ^<since> <tips>` (no process per commit); mode all:
+# "on" alone (every claim cut).
+_lg_tr_incl() {
+  local out="$1" revs="$2" s
+  _lg_tr_since
+  : > "$out" || _lg_die "cannot write $out"
+  [ "$_LG_TR_MODE" != off ] || return 0
+  printf 'on\n' > "$out" || _lg_die "cannot write $out"
+  [ "$_LG_TR_MODE" = commit ] || return 0
+  _lg_scratch_name
+  s=$_LG_SN
+  # The tips: "<a>..<tip>" → <tip>; a "^<bottom>" is no tip.
+  { printf '^%s\n' "$_LG_TR_SINCE"
+    LC_ALL=C awk '/^\^/ || $0 == "" { next } { i = index($0, ".."); print (i ? substr($0, i + 2) : $0) }' "$revs"; } > "$s.revs" \
+    || _lg_die "cannot write $s.revs"
+  git rev-list --ancestry-path --stdin < "$s.revs" >> "$out" 2> "$s.err" \
+    || _lg_die "git rev-list failed (config trailers.since): $(head -n 3 "$s.err" 2>/dev/null)"
 }
 
 # _lg_msg_claims <rev-args…>: "commit<TAB>kind<TAB>value" for every message
@@ -211,9 +235,9 @@ _lg_tr_since() {
 # without trailing blanks (a tab inside becomes a space). claims_by_ref
 # names are closing keywords instead: "Fixes #12", "closes: #13" (any
 # case, ":" optional, #<digits> required; value "#12" — see
-# _LG_AWK_TRAILER). In git log order, then line order. A commit config
-# trailers.since cuts off (_lg_tr_since) prints no claims, claims_by_path
-# or claims_by_ref line.
+# _LG_AWK_TRAILER). In git log order, then line order. A commit that is
+# no descendant of config trailers.since (_lg_tr_since, _lg_tr_incl)
+# prints no claims, claims_by_path or claims_by_ref line.
 _lg_msg_claims() {
   local s a
   for a in "$@"; do
@@ -222,10 +246,11 @@ _lg_msg_claims() {
   _lg_scratch_name
   s=$_LG_SN
   _lg_trailers "$s.tr"
-  _lg_tr_since
+  printf '%s\n' "$@" > "$s.revl" || _lg_die "cannot write $s.revl"
+  _lg_tr_incl "$s.tri" "$s.revl"
   git -c log.showSignature=false log --no-color --format='%x01%H%n%B' "$@" -- > "$s.msg" 2> "$s.err" \
     || _lg_die "git log failed: $(head -n 3 "$s.err" 2>/dev/null)"
-  LC_ALL=C awk -v tr="$s.tr" -v trx="$_LG_TR_EXCL" "$_LG_AWK_TRAILER"'
+  LC_ALL=C awk -v tr="$s.tr" -v trx="$s.tri" "$_LG_AWK_TRAILER"'
     BEGIN { tr_load(tr); tr_since(trx) }
     substr($0, 1, 1) == "\001" { c = substr($0, 2); next }
     { tr_match($0); tr_cut(c); for (i = 1; i <= TRM; i++) print c "\t" TRMK[i] "\t" TRMV[i] }' "$s.msg"

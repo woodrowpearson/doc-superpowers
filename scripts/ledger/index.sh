@@ -385,12 +385,16 @@ _lg_ix_events() {
 # _lg_adoption_commit <base> → _LG_ADOPTC: the adoption commit — the first
 # commit on <base> to add docs/ledger/config.json (`git log
 # --diff-filter=A`, oldest first) — or "" when <base> has none (Task 16c
-# U11, U12). Cached as $_LG_CACHE/adoptc-<base>[.<shallow>].txt (the commit
-# or "-"; the newest 3 kept).
+# U11, U12). "?" when it cannot be known (fix round 1, I2): in a shallow
+# clone a boundary commit (listed in .git/shallow) has no parents, so git
+# reads every file it holds as added there — config.json first showing at
+# the boundary says nothing about where it was added. Cached as
+# $_LG_CACHE/adoptc-<base>[.<shallow>].txt (the commit, "-" or "?"; the
+# newest 3 kept).
 _lg_adoption_commit() {
-  local B="$1" f tmp s A="" old
+  local B="$1" f tmp s A="" old sf
   _lg_ix_shallow
-  f="$_LG_CACHE/adoptc-$B${_LG_SHALLOW:+.$_LG_SHALLOW}.txt"
+  f="$_LG_CACHE/adoptc-$B${_LG_SHALLOW:+.$_LG_SHALLOW}.2.txt"
   if [ -f "$f" ] && { IFS= read -r A < "$f"; } 2>/dev/null && [ -n "$A" ]; then
     [ "$A" != - ] || A=""
     _LG_ADOPTC=$A
@@ -402,6 +406,10 @@ _lg_adoption_commit() {
     > "$s.adds" 2> "$s.err" || _lg_die "git log failed (the adoption commit): $(head -n 3 "$s.err" 2>/dev/null)"
   A=""
   IFS= read -r A < "$s.adds" || A=""
+  if [ -n "$A" ] && [ -n "$_LG_SHALLOW" ]; then
+    sf=$(git rev-parse --git-path shallow 2>/dev/null) || sf=""
+    if [ -n "$sf" ] && grep -qx -- "$A" "$sf" 2>/dev/null; then A="?"; fi
+  fi
   mkdir -p -- "$_LG_CACHE" 2>/dev/null || _lg_die "cannot create $_LG_CACHE"
   tmp=$(mktemp "$_LG_CACHE/.adoptc.XXXXXX") || _lg_die "cannot create a temp file in $_LG_CACHE"
   if printf '%s\n' "${A:--}" > "$tmp" && mv -f "$tmp" "$f"; then
@@ -416,15 +424,50 @@ _lg_adoption_commit() {
 # _lg_ix_adoption <base> <dirs-file> <out>: the adoption point (Task 16c
 # U11) → <out>: line 1 the adoption commit — the first commit on <base> to
 # add docs/ledger/config.json (`git log --diff-filter=A`, oldest first) —
-# or "-" when <base> has none; then, with one, "T\t<path>" for each path
-# under <dirs> (the item globs' directories) that a commit after it
-# touched — a descendant of it that <base> reaches (`git log
-# --ancestry-path <adoption>..<base>`: the adoption commit itself is not
-# after it; a merge lists no paths, as in the dates walk) — and
+# or "-" when <base> has none, "?" when it cannot be known (a shallow
+# boundary: _lg_adoption_commit); then, with one, "T\t<path>" for each
+# path under <dirs> (the item globs' directories) that a commit after it
+# touched — a descendant of it on <base>'s first-parent line (`git log
+# --ancestry-path -m --first-parent <adoption>..<base>`: the adoption
+# commit itself is not after it; a merge counts with the changes it
+# brings in against its first parent, so a commit of a branch forked
+# before adoption and merged after it counts; fix round 1, m3). A pure
+# rename (R100: an archive move) does not touch the moved file: its new
+# path is touched only when a path it was renamed from is — and
 # "B\t<path>" for each path under <dirs> in <base>'s tree (a newline in a
 # name as \001). Two range walks and one ls-tree per base, never one per
 # item: cached as $_LG_CACHE/adopt-<base>[.<shallow>].txt behind a
-# "# ledger-adopt/1 <sha256 of the dirs>" line (the newest 3 kept).
+# "# ledger-adopt/2 <sha256 of the dirs>" line (the newest 3 kept).
+# The after-adoption walk's `--name-status -M -z` output, tr'd (one token
+# per line; a newline in a name as \001) → "T\t<path>" lines: a status
+# token, then one path (two for R<score> / C<score>: from, to). M, A, D,
+# T, a copy's new path, both paths of an inexact rename: touched. R100:
+# the new path is touched only when a path in its rename chain is
+# (followed at most 64 steps).
+# shellcheck disable=SC2016  # awk source
+_LG_AWK_ADOPT_AFTER='
+need == 0 {
+  st = $0; sub(/^\001+/, "", st)
+  if (st == "") next
+  k = substr(st, 1, 1); need = (k == "R" || k == "C") ? 2 : 1; n = 0
+  next
+}
+{
+  P[++n] = $0; need--
+  if (need > 0) next
+  if (k == "R" && st == "R100") { if (!(P[2] in REN)) REN[P[2]] = P[1]; NEWP[P[2]] = 1 }
+  else if (k == "R") { T[P[1]] = 1; T[P[2]] = 1 }
+  else if (k == "C") T[P[2]] = 1
+  else T[P[1]] = 1
+}
+END {
+  for (p in NEWP) {
+    q = p
+    for (i = 0; i < 64 && (q in REN); i++) { q = REN[q]; if (q in T) { T[p] = 1; break } }
+  }
+  for (p in T) if (p != "") print "T\t" p
+}'
+
 _lg_ix_adoption() {
   local B="$1" dirs="$2" out="$3" f tmp s dh A="" d
   local specs=()
@@ -432,7 +475,7 @@ _lg_ix_adoption() {
   _hash_one "$dirs"
   dh=${_HASH#sha256:}
   f="$_LG_CACHE/adopt-$B${_LG_SHALLOW:+.$_LG_SHALLOW}.txt"
-  if [ -f "$f" ] && [ "$(head -n 1 "$f")" = "# ledger-adopt/1 $dh" ]; then
+  if [ -f "$f" ] && [ "$(head -n 1 "$f")" = "# ledger-adopt/2 $dh" ]; then
     touch -c "$f" 2>/dev/null || true
     tail -n +2 "$f" > "$out" || _lg_die "cannot read $f"
     return 0
@@ -446,15 +489,15 @@ _lg_ix_adoption() {
   A=$_LG_ADOPTC
   mkdir -p -- "$_LG_CACHE" 2>/dev/null || _lg_die "cannot create $_LG_CACHE"
   tmp=$(mktemp "$_LG_CACHE/.adopt.XXXXXX") || _lg_die "cannot create a temp file in $_LG_CACHE"
-  printf '# ledger-adopt/1 %s\n%s\n' "$dh" "${A:--}" > "$tmp" || { rm -f "$tmp"; _lg_die "cannot write $tmp"; }
-  if [ -n "$A" ]; then
-    if ! GIT_LITERAL_PATHSPECS=1 git -c log.showSignature=false log --no-color --ancestry-path --full-history \
-        --format= --name-only -z "$A..$B" -- ${specs[@]+"${specs[@]}"} > "$s.after" 2> "$s.err" \
+  printf '# ledger-adopt/2 %s\n%s\n' "$dh" "${A:--}" > "$tmp" || { rm -f "$tmp"; _lg_die "cannot write $tmp"; }
+  if [ -n "$A" ] && [ "$A" != "?" ]; then
+    if ! GIT_LITERAL_PATHSPECS=1 git -c log.showSignature=false log --no-color --ancestry-path -m --first-parent \
+        --format= --name-status -M -z "$A..$B" -- ${specs[@]+"${specs[@]}"} > "$s.after" 2> "$s.err" \
         || ! git ls-tree -r -z --name-only "$B" -- ${specs[@]+"${specs[@]}"} > "$s.on" 2>> "$s.err"; then
       rm -f "$tmp"
       _lg_die "git failed (the items after the adoption commit): $(head -n 3 "$s.err" 2>/dev/null)"
     fi
-    if ! { tr '\n\000' '\001\n' < "$s.after" | LC_ALL=C awk '$0 != "" && !($0 in S) { S[$0] = 1; print "T\t" $0 }'
+    if ! { tr '\n\000' '\001\n' < "$s.after" | LC_ALL=C awk "$_LG_AWK_ADOPT_AFTER"
            tr '\n\000' '\001\n' < "$s.on" | LC_ALL=C awk '$0 != "" { print "B\t" $0 }'; } >> "$tmp"; then
       rm -f "$tmp"
       _lg_die "cannot list the items after the adoption commit"
@@ -1012,7 +1055,7 @@ $c[0] as $cfg
      .[$l[0:1]][$l[2:] | if test("\u0001") then gsub("\u0001"; "\n") else . end] = true)) as $AD
 | ([$recs[] | lg_item($F; $CT; $EX; $D; $L; $S; $DI; $terms)] | sort_by(.path) | lg_pr_apply($prs; $pcl; $bcl; $fmr)
    # pre_adoption after fm_errors; a hosted item keeps its url last.
-   | map(del(.url) + {pre_adoption: (if $pre == "staged" then null elif $pre == "nobase" then false elif $pre == "before" then true
+   | map(del(.url) + {pre_adoption: (if $pre == "staged" then null elif $pre == "nobase" or $pre == "unknown" then false elif $pre == "before" then true
                                      else ($AD.B[.path] == true and ($AD.T[.path] | not)) end)}
          + (if has("url") then {url} else {} end))) as $items
 | ($ctr[0] // []) as $CTR
@@ -1744,7 +1787,7 @@ _lg_ix_claim_trailers() {
 # lines (after a "# ledger-claims/1 <sig>" header line) — every claims /
 # claims_by_path message line of the commits the base reaches
 # (_LG_AWK_TRAILER: any line, bullets included) — config trailers.since
-# cutting off those it reaches (_lg_tr_since). Cached as
+# keeping only its descendants' (_lg_tr_since). Cached as
 # $_LG_CACHE/claims-<base>.tsv, the signature over the trailer names, the
 # shallow tag and the since commit; a new base extends the newest cached ancestor's (one
 # walk of anc..base); the newest 5 kept. No base, or no such trailer
@@ -1764,7 +1807,7 @@ _lg_ix_base_claims() {
   [ -s "$s.tr" ] || return 0
   _lg_ix_shallow
   _lg_tr_since
-  { printf 'ledger-claims/1\n'; cat "$s.tr"; printf 'shallow %s\nsince %s\n' "$_LG_SHALLOW" "$_LG_TR_SINCE"; } > "$s.sig" \
+  { printf 'ledger-claims/1\n'; cat "$s.tr"; printf 'shallow %s\nsince %s descendants\n' "$_LG_SHALLOW" "$_LG_TR_SINCE"; } > "$s.sig" \
     || _lg_die "cannot write $s.sig"
   _hash_one "$s.sig"
   hdr="# ledger-claims/1 ${_HASH#sha256:}"
@@ -1886,14 +1929,14 @@ _lg_ix_pr_claims() {
   { printf '^%s\n' "$B"; LC_ALL=C awk -F '\t' '{ print $3 }' "$heads" | LC_ALL=C sort -u; } > "$s.revs" \
     || _lg_die "cannot write $s.revs"
   _lg_ix_claim_trailers "$s.tr"
-  _lg_tr_since
+  _lg_tr_incl "$s.tri" "$s.revs"
   git -c log.showSignature=false log --no-color --stdin --format='%x01%H %P%n%B' < "$s.revs" > "$s.msg" 2> "$s.err" \
     || _lg_die "git log failed (the PR heads): $(head -n 3 "$s.err")"
   GIT_LITERAL_PATHSPECS=1 git -c log.showSignature=false log --no-color --stdin --full-history --no-renames \
     --format=%x02%H --name-only -z -- ${specs[@]+"${specs[@]}"} < "$s.revs" > "$s.fz" 2> "$s.err" \
     || _lg_die "git log failed (the PR heads' files): $(head -n 3 "$s.err")"
   tr '\n\000' '\001\n' < "$s.fz" > "$s.files" || _lg_die "cannot read the PR heads' files"
-  LC_ALL=C awk -v heads="$heads" -v files="$s.files" -v tr="$s.tr" -v trx="$_LG_TR_EXCL" \
+  LC_ALL=C awk -v heads="$heads" -v files="$s.files" -v tr="$s.tr" -v trx="$s.tri" \
     "$_LG_AWK_TRAILER$_LG_AWK_PR_CLAIMS" "$s.msg" >> "$out" \
     || rc=$?
   [ "$rc" = 0 ] || _lg_die "cannot attribute the PR heads' commits (awk rc $rc)"
@@ -2036,8 +2079,10 @@ _lg_index() {
   # The adoption point (Task 16c U11; validate --all reads pre_adoption):
   # none for --staged (null); a base that does not resolve tells nothing
   # (false); a base with no commit adding config.json yet: every item is
-  # from before adoption (true); else an item is when the base holds its
-  # path and no commit after the adoption commit touched it.
+  # from before adoption (true); an adoption commit beyond a shallow
+  # clone's history (fix round 1, I2): none is (false — fails closed);
+  # else an item is when the base holds its path and no commit after the
+  # adoption commit touched it.
   : > "$s.adopt"
   if [ "$mode" = staged ]; then
     pre=staged
@@ -2047,7 +2092,11 @@ _lg_index() {
     _lg_ix_adoption "$base" "$s.pfdirs" "$s.adoptall"
     IFS= read -r adopt < "$s.adoptall" || adopt=-
     tail -n +2 "$s.adoptall" > "$s.adopt" || _lg_die "cannot write $s.adopt"
-    if [ "$adopt" = - ]; then adopt=""; pre=before; else pre=after; fi
+    case "$adopt" in
+      -) adopt=""; pre=before ;;
+      "?") adopt=""; pre=unknown ;;
+      *) pre=after ;;
+    esac
   fi
 
   # The inputs, read and checked.

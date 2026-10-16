@@ -2561,10 +2561,15 @@ ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed
   contract-less open items; parse errors). A closed or won't-fix item from
   before adoption — config base has no commit adding
   docs/ledger/config.json yet, or the base holds the item's file and no
-  commit after the first one that added config.json (a descendant of it)
-  touched it — reports a missing resolution as advisory, "terminal before
-  adoption" (--staged is unchanged: a status moving into closed or won't
-  fix in the commit needs a resolution). --plan: every row of the plan's
+  commit after the first one that added config.json (a descendant of it
+  on the base's first-parent line; a merge counts with what it brings
+  in, so a branch forked before adoption and merged after it touches
+  what it changed; a pure rename, an archive move, does not touch the
+  moved file) touched it — reports a missing resolution as advisory,
+  "terminal before adoption" (--staged is unchanged: a status moving into
+  closed or won't fix in the commit needs a resolution). In a shallow
+  clone whose boundary is where config.json first shows, the adoption
+  commit cannot be known: no item is from before it (fails closed). --plan: every row of the plan's
   "Related work" table is marked include or exclude: <reason> (advisory;
   --strict blocks). --pushed (for pre-push hooks): with keys.mode cas, each
   provisional key the range introduces blocks; merge mode passes. --registry
@@ -2903,12 +2908,15 @@ Spec claims (claims validate, run, promote, render, gate, attest, rulings):
   (fix the code and promote it, or retire it, first).
 
 Work ledger (ledger show, ls, find, related, sweep, recheck, inflight,
-notices, new, assign, link, note, view, validate, publish, finalize, init):
+notices, state-watch, new, assign, link, note, view, validate, publish,
+finalize, init):
   Opt-in: docs/ledger/config.json turns it on (a key it omits takes its
   default; {} is a complete config). Without it every ledger verb except
   init prints "ledger: not enabled (no docs/ledger/config.json)" — with
   --format json, {"verb":"ledger <sub>","enabled":false,"exit":0} — and
-  exits 0; init, which bootstraps a repository, runs on the default
+  exits 0, a hook mode (notices --hook, state-watch --hook) excepted: it
+  prints nothing (its stdout reaches a Claude Code session) and exits 0,
+  as it does on every failure; init, which bootstraps a repository, runs on the default
   config ({}) instead, and every object it prints there — its verdict,
   an error, the crash fallback — says "enabled": false (true once the
   config exists). That
@@ -2948,15 +2956,25 @@ notices, new, assign, link, note, view, validate, publish, finalize, init):
   label) clears its markers, as a later commit clears a file item's. A
   hosted write through ledger note expires the cached list, so the next
   read fetches it; a value holding "-->" or "--!>" is refused (exit 3).
+  Provisional keys are <ledger>-~<4 to 8 hex>, lengthened past a
+  collision (see ledger new). Adoption: the first commit on config base
+  to add docs/ledger/config.json. validate --all reports a missing
+  resolution on a terminal item from before it as advisory, "terminal
+  before adoption" (see ledger validate); in a shallow clone whose
+  boundary is where config.json first shows, the adoption commit cannot
+  be known and no item counts as from before it.
   Config trailers.since — a commit (an abbreviated id will do), "adoption"
-  or null (the default: every trailer counts) — cuts off the claim
-  trailers (claims, claims_by_path, claims_by_ref) of the commits it
-  reaches, itself included, wherever they are read: the base's claims
-  ("merged · owed: …"), the PR heads, the in-flight branches. "adoption"
-  is the first commit on the base to add docs/ledger/config.json (while
-  there is none, the base itself: all of its history predates adoption).
-  Contract-Change and ack lines are unaffected. A since that names no
-  commit here (a shallow clone may lack it) exits 2.
+  or null (the default: every trailer counts) — keeps the claim trailers
+  (claims, claims_by_path, claims_by_ref) of the commits that descend from
+  it and ignores them in every other commit (the since commit itself, its
+  ancestors, a branch forked before it whether merged after it or still in
+  flight), wherever they are read: the base's claims ("merged · owed:
+  …"), the PR heads, the in-flight branches. "adoption" is the adoption
+  commit — the same "after" as validate's (while the base has none, every
+  commit predates adoption and no claim trailer counts; in a shallow clone
+  where it cannot be known, exit 2). Contract-Change and ack lines are
+  unaffected. A since that names no commit here (a shallow clone may lack
+  it) exits 2.
 
 Exit status:
   0  success

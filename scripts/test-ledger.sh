@@ -10723,7 +10723,7 @@ lg_since_statuses() {
 }
 
 test_lg_trailers_since() {
-  echo "test: config trailers.since — claim trailers in commits the since commit reaches (itself included) no longer claim; later ones do; null keeps every one; \"adoption\" is the adoption commit; Contract-Change and ack lines are unaffected"
+  echo "test: config trailers.since — claim trailers count only in the since commit's descendants (not in it or before it); null keeps every one; \"adoption\" is the adoption commit; Contract-Change and ack lines are unaffected"
   lg_since_fixture
   assert_eq "x-1:merged · owed: closing,x-2:merged · owed: closing,x-3:merged · owed: closing" "$(lg_since_statuses)" \
     "since unset (null): every Doc-Fixes claims"
@@ -10766,7 +10766,7 @@ test_lg_trailers_since_adoption_before_adopted() {
 }
 
 test_lg_trailers_since_inflight() {
-  echo "test: trailers.since in the in-flight scan — a branch's claims in commits the since commit reaches are dropped, later ones kept; Contract-Change kept"
+  echo "test: trailers.since in the in-flight scan — a branch's claims in the since commit and before it are dropped, its descendants' kept; Contract-Change kept"
   lg_fixture
   lg_enable '{"base":"main","inflight":{"enabled":true,"host_id":"hosta"}}'
   lg_registry "$LG_REG_XY"
@@ -10774,7 +10774,8 @@ test_lg_trailers_since_inflight() {
   lg_item docs/issues/b.md "key: x-2" "ledger: x" "status: Open" "summary: Claimed late on the branch"
   git add -A && git commit -qm items
   git checkout -q -b side
-  git commit -q --allow-empty -m "s1" -m "Ledger-Claims: x-1"
+  git commit -q --allow-empty -m "s1" -m "Ledger-Claims: x-1
+Contract-Change: field:s1 — kept"
   git commit -q --allow-empty -m "s-cut"
   LG_SINCE=$(git rev-parse HEAD)
   git commit -q --allow-empty -m "s2" -m "Ledger-Claims: x-2"
@@ -10785,7 +10786,7 @@ test_lg_trailers_since_inflight() {
   lg_enable "{\"base\":\"main\",\"inflight\":{\"enabled\":true,\"host_id\":\"hosta\"},\"trailers\":{\"since\":\"$LG_SINCE\"}}"
   lg inflight --branch side
   assert_eq "0" "$LG_RC" "inflight exits 0"
-  assert_contains "$LG_OUT" "claims:x-2 contracts:" "since s-cut: s1's claim dropped, s2's kept"
+  assert_contains "$LG_OUT" "claims:x-2 contracts:field:s1 " "since s-cut: s1's claim dropped (its Contract-Change kept), s2's kept"
   teardown
 }
 
@@ -11036,6 +11037,210 @@ test_lg_state_watch_hook() {
   rm -f docs/ledger/config.json
   lg_hook "$p" state-watch --hook
   assert_eq "0|" "$LG_RC|$LG_OUT" "not enabled: silent"
+  teardown
+}
+
+# --- Task 16c fix round 1: since = descendants; shallow adoption; m3, m4, m5 ------
+
+test_lg_trailers_since_forked_before_merged_after() {
+  echo "test: trailers.since (fix round 1, I1) — only the since commit's descendants claim: a branch forked before it and merged after it keeps its claim trailers out (they are no descendant), the merge and later commits claim; \"adoption\" cuts the same way"
+  lg_fixture
+  lg_registry "$LG_REG_XY"
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: Claimed on a branch forked before the cutover"
+  lg_item docs/issues/b.md "key: x-2" "ledger: x" "status: Open" "summary: Claimed after the cutover"
+  lg_item docs/issues/c.md "key: x-3" "ledger: x" "status: Open" "summary: Claimed by a merge after the cutover"
+  git add -A && git commit -qm items
+  git checkout -q -b early
+  git commit -q --allow-empty -m "e1" -m "Doc-Fixes: docs/issues/a.md"
+  git checkout -q main
+  lg_enable '{"base":"main","trailers":{"claims_by_path":["Doc-Fixes"]}}'
+  git add -A && git commit -qm "adopt (the cutover)"
+  local since
+  since=$(git rev-parse HEAD)
+  git merge -q --no-ff early -m "merge early" -m "Doc-Fixes: docs/issues/c.md"
+  git commit -q --allow-empty -m "c2" -m "Doc-Fixes: docs/issues/b.md"
+  assert_eq "x-1:merged · owed: closing,x-2:merged · owed: closing,x-3:merged · owed: closing" "$(lg_since_statuses)" \
+    "since unset: every Doc-Fixes claims"
+  lg_enable "{\"base\":\"main\",\"trailers\":{\"claims_by_path\":[\"Doc-Fixes\"],\"since\":\"$since\"}}"
+  assert_eq "x-1:not started,x-2:merged · owed: closing,x-3:merged · owed: closing" "$(lg_since_statuses)" \
+    "since the cutover: e1 (forked before it, merged after) no longer claims; the merge and c2 (descendants) do"
+  lg_enable '{"base":"main","trailers":{"claims_by_path":["Doc-Fixes"],"since":"adoption"}}'
+  assert_eq "x-1:not started,x-2:merged · owed: closing,x-3:merged · owed: closing" "$(lg_since_statuses)" \
+    "since \"adoption\" (the same commit): the same set, as U11's after-adoption walk reads it"
+  teardown
+}
+
+test_lg_trailers_since_inflight_forked_before() {
+  echo "test: trailers.since (fix round 1, I1) in the in-flight scan — a branch forked before the since commit claims nothing; one forked after it claims; Contract-Change lines stay either way"
+  lg_fixture
+  lg_enable '{"base":"main","inflight":{"enabled":true,"host_id":"hosta"}}'
+  lg_registry "$LG_REG_XY"
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: Claimed on an early branch"
+  lg_item docs/issues/b.md "key: x-2" "ledger: x" "status: Open" "summary: Claimed on a late branch"
+  git add -A && git commit -qm items
+  git checkout -q -b early
+  git commit -q --allow-empty -m "e1" -m "Ledger-Claims: x-1
+Contract-Change: field:early — kept"
+  git checkout -q main
+  git commit -q --allow-empty -m cutover
+  local since
+  since=$(git rev-parse HEAD)
+  git checkout -q -b late
+  git commit -q --allow-empty -m "l1" -m "Ledger-Claims: x-2"
+  git checkout -q main
+  lg_enable "{\"base\":\"main\",\"inflight\":{\"enabled\":true,\"host_id\":\"hosta\"},\"trailers\":{\"since\":\"$since\"}}"
+  lg inflight --branch early
+  assert_eq "0" "$LG_RC" "inflight exits 0"
+  assert_contains "$LG_OUT" "claims:— contracts:field:early" "early (forked before since): no claim, its Contract-Change kept"
+  lg inflight --branch late
+  assert_contains "$LG_OUT" "claims:x-2" "late (forked after since): its claim counts"
+  teardown
+}
+
+test_lg_trailers_since_pr_heads() {
+  echo "test: trailers.since (fix round 1, m4) on the PR heads' walk — claims in a PR head's commits count only when they descend from the since commit"
+  lg_pr_fixture
+  local rw
+  rw=$(git rev-parse "origin/feat/ünï-x~1")
+  lg ls --format json
+  assert_eq "x-1=in review #12,x-8=merged · owed: closing,y-3=in review #15" \
+    "$(jq -r '[.items[] | select(.key == "x-1" or .key == "y-3" or .key == "x-8") | "\(.key)=\(.display)"] | sort | join(",")' <<<"$LG_OUT")" "since unset"
+  lg_enable "{\"adapters\":{\"pr\":\"doc-superpowers:ledger-pr-gh\"},\"trailers\":{\"claims_by_path\":[\"Ledger-Claims-Path\"],\"since\":\"$LG_PR_M\"}}"
+  lg ls --format json
+  assert_eq "x-1=in review #12,x-8=merged · owed: closing,y-3=in review #15" \
+    "$(jq -r '[.items[] | select(.key == "x-1" or .key == "y-3" or .key == "x-8") | "\(.key)=\(.display)"] | sort | join(",")' <<<"$LG_OUT")" \
+    "since PR #9's merge (every head descends from it): every PR claim counts"
+  lg_enable "{\"adapters\":{\"pr\":\"doc-superpowers:ledger-pr-gh\"},\"trailers\":{\"claims_by_path\":[\"Ledger-Claims-Path\"],\"since\":\"$rw\"}}"
+  lg ls --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "x-1=not started,x-8=not started,y-3=not started" \
+    "$(jq -r '[.items[] | select(.key == "x-1" or .key == "y-3" or .key == "x-8") | "\(.key)=\(.display)"] | sort | join(",")' <<<"$LG_OUT")" \
+    "since PR #12's first commit: that commit itself, PR #15's and merged PR #10's heads (no descendants) claim nothing"
+  lg_pr_teardown
+}
+
+# lg_shallow_clone <depth>: a --depth <depth> clone of the fixture (file://),
+# cd'd into; LG_CLONE its path. The fixture's uncommitted config is copied.
+lg_shallow_clone() {
+  local src="$TEST_DIR"
+  LG_CLONE="$(harness_mktemp_d lg-shallow)/clone"
+  git clone -q --depth "$1" "file://$src" "$LG_CLONE"
+  cp "$src/docs/ledger/config.json" "$LG_CLONE/docs/ledger/config.json"
+  cd "$LG_CLONE"
+}
+
+test_lg_trailers_since_adoption_shallow() {
+  echo "test: trailers.since \"adoption\" (fix round 1, I2) in a shallow clone — config.json first showing at the boundary is no adoption commit: exit 2, saying so; deep enough to see the real one, it is used"
+  lg_since_fixture
+  lg_enable '{"base":"main","trailers":{"claims_by_path":["Doc-Fixes"],"since":"adoption"}}'
+  local saved="$TEST_DIR"
+  lg_shallow_clone 1
+  lg ls
+  assert_eq "2" "$LG_RC" "depth 1 (the boundary is the tip): exit 2"
+  assert_contains "$LG_ERR" "shallow" "…naming the shallow clone"
+  cd "$saved"
+  lg_shallow_clone 4
+  lg ls
+  assert_eq "2" "$LG_RC" "depth 4 (the boundary is the adoption commit itself: its parent is out of reach): exit 2"
+  cd "$saved"
+  lg_shallow_clone 5
+  assert_eq "x-1:merged · owed: closing,x-2:merged · owed: closing,x-3:not started" "$(lg_since_statuses)" \
+    "depth 5 (the adoption commit has its parent): the cutoff, as in the full clone"
+  cd "$saved"
+  teardown
+}
+
+test_lg_validate_all_pre_adoption_shallow() {
+  echo "test: validate --all (fix round 1, I2) in a shallow clone whose boundary is where config.json first shows — the adoption point is unknown: no item is pre-adoption (fails closed: missing-resolution blocks); deep enough, the relief is back"
+  lg_pre_adoption_fixture
+  git add -A && git commit -qm "adopt the ledger"
+  git commit -q --allow-empty -m "later"
+  local saved="$TEST_DIR"
+  lg_shallow_clone 1
+  lg validate --all --format json
+  assert_eq "1" "$LG_RC" "depth 1: exit 1"
+  assert_eq "missing-resolution block docs/issues/a.md
+missing-resolution block docs/issues/b.md" "$(lg_vmr)" "…both block"
+  lg_call_in "$LG_CLONE" _lg_index
+  assert_eq "null|a.md:false,b.md:false,c.md:false" \
+    "$(jq -r '"\(.built.adoption)|" + ([.items[] | "\(.path | split("/") | last):\(.pre_adoption)"] | join(","))' "$LG_OUT")" \
+    "built.adoption null, every pre_adoption false"
+  cd "$saved"
+  lg_shallow_clone 2
+  lg validate --all --format json
+  assert_eq "1" "$LG_RC" "depth 2 (the boundary is the adoption commit): still unknown, exit 1"
+  cd "$saved"
+  lg_shallow_clone 3
+  lg validate --all --format json
+  assert_eq "0|missing-resolution advisory docs/issues/a.md
+missing-resolution advisory docs/issues/b.md" "$LG_RC|$(lg_vmr)" "depth 3 (the adoption commit has its parent): advisory again"
+  cd "$saved"
+  teardown
+}
+
+test_lg_validate_all_pre_adoption_merges_renames() {
+  echo "test: validate --all (fix round 1, m3) — a commit of a branch forked before adoption and merged after it touches the item (the merge's first-parent changes); a pure archive move after adoption does not, a move of an edited file does"
+  lg_pre_adoption_fixture
+  printf -- '---\nkey: x-5\nledger: x\nstatus: Closed\nsummary: Closed long ago, moved and edited\n---\n' > docs/issues/e.md
+  git add docs/issues/e.md && git commit -qm "another old item"
+  git checkout -q -b old-branch
+  printf '\nEdited on a long-lived branch.\n' >> docs/issues/a.md
+  git commit -qam "edit a on an old branch"
+  git checkout -q main
+  git add -A && git commit -qm "adopt the ledger"
+  mkdir -p docs/archive/issues
+  git mv docs/issues/b.md docs/archive/issues/b.md
+  git commit -qm "archive b (a pure move)"
+  printf '\nEdited after adoption.\n' >> docs/issues/e.md
+  git add -A && git commit -qm "edit e"
+  git mv docs/issues/e.md docs/archive/issues/e.md
+  git commit -qm "archive e"
+  git merge -q --no-ff old-branch -m "merge the old branch"
+  lg validate --all --format json
+  assert_eq "1" "$LG_RC" "exit 1"
+  assert_eq "missing-resolution advisory docs/archive/issues/b.md
+missing-resolution block docs/archive/issues/e.md
+missing-resolution block docs/issues/a.md" "$(lg_vmr | LC_ALL=C sort)" \
+    "a.md (edited on the merged branch) blocks; b.md (only moved) stays advisory; e.md (edited, then moved) blocks"
+  teardown
+}
+
+test_lg_init_summary_skips_long_number() {
+  echo "test: init summaries (fix round 1, m5) — a bold span of 12 digits passes the 12-character floor, so only the pure-number rule skips it; one all-caps word of 12+ letters likewise only the all-caps rule (P0-P9 is 2 characters: the floor always covers it)"
+  lg_fixture
+  printf -- '---\nstatus: Open\n---\n# Heading n from its file\n' > docs/issues/n.md
+  printf -- '---\nstatus: Open\n---\n# Heading w from its file\n' > docs/issues/w.md
+  mkdir -p docs/ledgers
+  printf '| # | Item | State |\n|---|------|-------|\n| 1 | **202607220001** [n](../issues/n.md) | open |\n| 2 | **DECOMMISSIONED** [w](../issues/w.md) | open |\n' > docs/ledgers/x-ledger.md
+  git add -A && git commit -qm items
+  lg_init_edit_reg
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  lg_init_decide docs/ledger/r.md.decisions.tsv docs/issues/n.md unassigned
+  lg_init_decide docs/ledger/r.md.decisions.tsv docs/issues/w.md unassigned
+  lg init --accept docs/ledger/r.md.decisions.tsv
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_eq "summary: Heading n from its file" "$(grep '^summary:' docs/issues/n.md)" "**202607220001** (12 digits): the H1"
+  assert_eq "summary: Heading w from its file" "$(grep '^summary:' docs/issues/w.md)" "**DECOMMISSIONED** (one all-caps word of 14): the H1"
+  teardown
+}
+
+test_lg_trailers_since_adoption_none_inflight() {
+  echo "test: trailers.since \"adoption\" (fix round 1) while the base has no commit adding config.json: every commit predates adoption — an in-flight branch's claims are dropped too (its Contract-Change kept)"
+  lg_fixture
+  lg_registry "$LG_REG_XY"
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: Claimed on a branch before adoption"
+  git add -A && git commit -qm items
+  git checkout -q -b side
+  git commit -q --allow-empty -m "s1" -m "Ledger-Claims: x-1
+Contract-Change: field:s1 — kept"
+  git checkout -q main
+  lg_enable '{"base":"main","inflight":{"enabled":true,"host_id":"hosta"}}'
+  lg inflight --branch side
+  assert_contains "$LG_OUT" "claims:x-1 contracts:field:s1" "since unset: the claim"
+  lg_enable '{"base":"main","inflight":{"enabled":true,"host_id":"hosta"},"trailers":{"since":"adoption"}}'
+  lg inflight --branch side
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_contains "$LG_OUT" "claims:— contracts:field:s1" "since adoption, none on the base yet: no claim, the Contract-Change kept"
   teardown
 }
 
@@ -11416,6 +11621,15 @@ run_tests() {
   test_lg_notices_hook
   test_lg_notices_hook_clip
   test_lg_state_watch_hook
+  # --- Task 16c fix round 1 ---
+  test_lg_trailers_since_forked_before_merged_after
+  test_lg_trailers_since_inflight_forked_before
+  test_lg_trailers_since_pr_heads
+  test_lg_trailers_since_adoption_shallow
+  test_lg_validate_all_pre_adoption_shallow
+  test_lg_validate_all_pre_adoption_merges_renames
+  test_lg_init_summary_skips_long_number
+  test_lg_trailers_since_adoption_none_inflight
 
   print_summary
 }
