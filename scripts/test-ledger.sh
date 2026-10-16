@@ -11044,6 +11044,41 @@ test_lg_state_watch_hook() {
   teardown
 }
 
+test_lg_state_watch_across_symlinks() {
+  echo "test: ledger state-watch --hook (Task 17 carry) — paths compare canonically: a write through a symlinked spelling of the top level (or of \$HOME), or a physical path under a symlinked one, still matches; a path outside stays silent"
+  lg_fixture
+  lg_enable "$LG_HOOK_SW_CFG"
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[{"id":"x","title":"X","kind":"service","status":"active"}]}'
+  git add -A && git commit -qm sw
+  mkdir -p scratch/a/state "$HOME/notes"
+  local lnk ptop phome
+  lnk=$(harness_mktemp_d lg-symlinks)
+  ptop=$(cd -P "$TEST_DIR" && pwd)
+  phome=$(cd -P "$HOME" && pwd)
+  ln -s "$ptop" "$lnk/repo"
+  ln -s "$phome" "$lnk/home"
+  # The session works in the symlinked spelling of the top level.
+  ( cd "$lnk/repo" && lg_hook "$(lg_sw_payload Edit "$lnk/repo/scratch/a/state/s.md" "APPROVED for x-3")" state-watch --hook \
+      && printf '%s|%s' "$LG_RC" "$LG_OUT" > "$TEST_DIR/.sw" )
+  assert_contains "$(cat "$TEST_DIR/.sw")" "ledger note x-3" "run from a symlinked top level, the file under it: matched (scratch/*/state)"
+  assert_contains "$(cat "$TEST_DIR/.sw")" "this write to $lnk/repo/scratch/a/state/s.md" "…naming the file as the event spelled it"
+  lg_hook "$(lg_sw_payload Edit "$lnk/repo/scratch/a/state/s.md" "APPROVED for x-3")" state-watch --hook
+  assert_contains "$LG_OUT" "ledger note x-3" "run from the physical top level, the file under a symlinked spelling: matched"
+  lg_hook "$(jq -cn --arg c "$lnk/repo" '{hook_event_name: "PostToolUse", tool_name: "Write", cwd: $c, tool_input: {file_path: "scratch/a/state/s.md", content: "x-4 next: y"}}')" state-watch --hook
+  assert_contains "$LG_OUT" "ledger note x-4" "a relative file_path against a symlinked cwd: matched"
+  # ~/notes with HOME a symlinked spelling, the file physical — and the reverse.
+  HOME="$lnk/home" lg_hook "$(lg_sw_payload Write "$phome/notes/today.md" "x-12 next: wire it")" state-watch --hook
+  assert_contains "$LG_OUT" "ledger note x-12" "HOME symlinked, the file physical: ~/notes matched"
+  HOME="$phome" lg_hook "$(lg_sw_payload Write "$lnk/home/notes/today.md" "x-12 next: wire it")" state-watch --hook
+  assert_contains "$LG_OUT" "ledger note x-12" "HOME physical, the file under a symlinked spelling: ~/notes matched"
+  lg_hook "$(lg_sw_payload Write "$lnk/repo/elsewhere/t.md" "x-12 next: y")" state-watch --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "a symlinked path outside state_watch.paths: silent"
+  lg_hook "$(lg_sw_payload Write "$lnk/nowhere/deeper/t.md" "x-12 next: y")" state-watch --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "a path whose directories do not exist: silent, exit 0"
+  rm -f "$TEST_DIR/.sw"
+  teardown
+}
+
 # --- Task 16c fix round 1: since = descendants; shallow adoption; m3, m4, m5 ------
 
 test_lg_trailers_since_forked_before_merged_after() {
@@ -11625,6 +11660,7 @@ run_tests() {
   test_lg_notices_hook
   test_lg_notices_hook_clip
   test_lg_state_watch_hook
+  test_lg_state_watch_across_symlinks
   # --- Task 16c fix round 1 ---
   test_lg_trailers_since_forked_before_merged_after
   test_lg_trailers_since_inflight_forked_before

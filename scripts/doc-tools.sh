@@ -2482,7 +2482,9 @@ ledger state-watch|cmd_ledger_state_watch|repo|hook
   state_watch.paths ("~/" is $HOME — HOME empty or unset: the entry names
   nothing; an absolute entry is itself; any other is under the top level
   or $CLAUDE_PROJECT_DIR; "*" matches within one segment, every other
-  character is itself; an entry matches the file and anything below it)
+  character is itself; an entry matches the file and anything below it;
+  either path may cross a symbolic link: the directories that exist are
+  compared resolved)
   and the text written (content, new_string, edits[].new_string) names an
   item key (of a registered ledger or a config legacy_ids id; any
   key-shaped word without a registry) and holds one of

@@ -113,17 +113,22 @@ _lg_notices_hook_out() {
 
 # The PostToolUse (Write|Edit) state-watch program (Task 16 R2's, moved
 # here from ledger-state-watch.sh): the event on stdin; --arg home ($HOME,
-# "" when unset), top (git's top level), proj ($CLAUDE_PROJECT_DIR);
-# --slurpfile cfg (docs/ledger/config.json as the host wrote it);
-# --rawfile reg (the registry, "" without one). Prints the advisory line or
-# nothing.
+# "" when unset), top (git's top level), proj ($CLAUDE_PROJECT_DIR), and
+# their canonical spellings phome, ptop, pproj (no symbolic link left in
+# them; "" when one does not resolve) and pfile (the written file's, from
+# its deepest existing directory); --slurpfile cfg (docs/ledger/config.json
+# as the host wrote it); --rawfile reg (the registry, "" without one). The
+# file matches an entry when either spelling of it lies under either
+# spelling of the entry: a symbolic link on one side only (macOS's /var →
+# /private/var, a symlinked checkout or $HOME) does not hide it. Prints the
+# advisory line or nothing.
 # shellcheck disable=SC2016  # jq source
 _LG_JQ_STATE_WATCH='
   # An entry as a regex: "*" is any run within a segment, all else literal.
   def glob_re: gsub("(?<c>[.+?()\\[\\]{}^$|\\\\])"; "\\\(.c)") | gsub("\\*"; "[^/]*");
   # An entry'"'"'s absolute spellings ("" and "/" name nothing, nor does "~/…"
   # with HOME empty or unset: it would read as a path from the root).
-  def spellings:
+  def spellings($home; $top; $proj):
     sub("/+$"; "") as $e
     | if $e == "" then empty
       elif ($e | startswith("~/")) then (if $home == "" then empty else $home + ($e | .[1:]) end)
@@ -137,8 +142,10 @@ _LG_JQ_STATE_WATCH='
   | ($in.file_path // "") as $raw
   | select(($raw | type) == "string" and $raw != "")
   | (if ($raw | startswith("/")) then $raw else ((.cwd // $top) + "/" + $raw) end) as $p
-  | [($sw.paths // [])[]? | strings | spellings | glob_re] as $res
-  | select(any($res[]; . as $r | $p | test("^" + $r + "(/|$)")))
+  | ([$p, $pfile] | map(select(. != "")) | unique) as $ps
+  | [($sw.paths // [])[]? | strings | (spellings($home; $top; $proj), spellings($phome; $ptop; $pproj))]
+  | unique | map(glob_re) as $res
+  | select(any($res[]; . as $r | any($ps[]; test("^" + $r + "(/|$)"))))
   | ([$in.content, $in.new_string, (($in.edits // []) | .[]? | .new_string?)] | map(strings) | join("\n")) as $text
   | ($text | ascii_downcase) as $lc
   | select(any(($sw.patterns // [])[]? | strings | select(. != "") | ascii_downcase; . as $pt | $lc | contains($pt)))
@@ -149,6 +156,33 @@ _LG_JQ_STATE_WATCH='
   | reduce .[] as $k ([]; if index([$k]) != null then . else . + [$k] end)
   | select(length > 0)
   | "ledger: this write to \($raw) records state for \(.[0:5] | join(", "))\(if length > 5 then ", …" else "" end): keep it in the ledger, its one home — doc-tools.sh ledger note \(.[0]) \"…\" (--kind ruling for a ruling)"'
+
+# _lg_phys_dir <dir>: <dir> with no symbolic link left in it (cd -P); ""
+# when it is empty or does not resolve.
+_lg_phys_dir() {
+  [ -n "$1" ] || return 0
+  (cd -P -- "$1" 2>/dev/null && pwd -P) || true
+}
+
+# _lg_phys_path <absolute path>: the path with its deepest existing
+# directory canonical (_lg_phys_dir), the rest — what does not exist yet,
+# and the file's own name — appended as given.
+_lg_phys_path() {
+  local d="${1%/*}" rest="/${1##*/}" r
+  while [ -n "$d" ]; do
+    if [ -d "$d" ]; then
+      r=$(_lg_phys_dir "$d")
+      if [ -n "$r" ]; then
+        [ "$r" != / ] || r=""
+        printf '%s%s' "$r" "$rest"
+        return 0
+      fi
+    fi
+    rest="/${d##*/}$rest"
+    d=${d%/*}
+  done
+  printf '%s' "$rest"
+}
 
 # ledger state-watch --hook: `ledger note` is the one home for an item's
 # state. When Claude writes a file under one of config state_watch.paths
@@ -162,11 +196,14 @@ _LG_JQ_STATE_WATCH='
 # absolute one is itself, any other is under the top level or
 # $CLAUDE_PROJECT_DIR; "*" matches within one segment and every other
 # character — a space, a "~" anywhere else, "?", "[" — is itself; an entry
-# matches the file and anything below it. Nothing is word-split or matched
-# against the disk. Advisory only: anything it cannot read prints nothing.
+# matches the file and anything below it. Paths compare canonically: the
+# directories that exist are resolved (cd -P), so a symbolic link in either
+# spelling does not hide a match; no glob is ever expanded against the disk
+# and nothing is word-split. Advisory only: anything it cannot read prints
+# nothing.
 # shellcheck disable=SC2154  # _ARGS, _OPT_* are set by _parse_args
 cmd_ledger_state_watch() {
-  local reg line=""
+  local reg line="" f pfile="" ptop phome pproj
   _lg_init state-watch
   [ "${#_ARGS[@]}" = 0 ] || _lg_usage "unexpected argument '${_ARGS[0]}'"
   [ -n "${_OPT_hook:-}" ] || _lg_usage "state-watch is the PostToolUse hook: give --hook (the event on stdin)"
@@ -174,7 +211,20 @@ cmd_ledger_state_watch() {
   [ -s "$_LG_HOOK_PAYLOAD" ] || _lg_hook_done
   reg=docs/ledger/ledgers.json
   [ -f "$reg" ] || reg=/dev/null
+  # The written file's path as the program reads it, and every spelling
+  # canonical (the program compares both sides both ways).
+  # shellcheck disable=SC2016  # jq source
+  f=$(jq -r --arg top "$PWD" '((.tool_input // {}) | if type == "object" then .file_path else null end) as $raw
+    | select(($raw | type) == "string" and $raw != "")
+    | if ($raw | startswith("/")) then $raw else ((.cwd // $top) + "/" + $raw) end' < "$_LG_HOOK_PAYLOAD" 2>/dev/null) || f=""
+  case "$f" in
+    /*) pfile=$(_lg_phys_path "$f") ;;
+  esac
+  ptop=$(_lg_phys_dir "$PWD")
+  phome=$(_lg_phys_dir "${HOME:-}")
+  pproj=$(_lg_phys_dir "${CLAUDE_PROJECT_DIR:-}")
   line=$(jq -r --arg home "${HOME:-}" --arg top "$PWD" --arg proj "${CLAUDE_PROJECT_DIR:-}" \
+    --arg phome "$phome" --arg ptop "$ptop" --arg pproj "$pproj" --arg pfile "$pfile" \
     --slurpfile cfg docs/ledger/config.json --rawfile reg "$reg" "$_LG_JQ_STATE_WATCH" < "$_LG_HOOK_PAYLOAD" 2>/dev/null) || line=""
   [ -z "$line" ] || _lg_hook_emit PostToolUse "" "$line"
   _lg_hook_done
