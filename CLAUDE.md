@@ -76,8 +76,8 @@ doc-superpowers/
 │   ├── release.md                 # `release` action steps 1–12 (REQUIRED pointer from SKILL.md)
 │   ├── hooks.md                   # `hooks` action: tiers, consent table, CI templates (REQUIRED pointer from SKILL.md)
 │   ├── spec-lifecycle-actions.md  # Detailed procedures for spec-generate/inject/verify
-│   ├── spec-lifecycle-protocol.md  # Wrapper author integration guide
-│   ├── spec-claims.md             # Spec claims (opt-in): claim schema, checks V1–V12, adapters, gates, direction protocol
+│   ├── spec-lifecycle-protocol.md  # Wrapper author integration guide; the claims direction protocol
+│   ├── spec-claims.md             # Spec claims (opt-in): claim schema, checks V1–V12, adapters, gates, direction policy keys (config `policy`)
 │   ├── integration-patterns.md    # How other skills integrate with doc-superpowers
 │   └── tool-mappings.md           # The one capability matrix: per-client tool names + capabilities, tool resolution ($ROOT)
 ├── docs/                 # Documentation about this skill itself
@@ -130,8 +130,8 @@ doc-superpowers/
 | `references/agent-prompt-template.md` | Review agent prompt template + scope-specific focus areas | Changing agent review instructions or adding project signals |
 | `references/output-templates.md` | Audit report format (with its Update Tasks, the handoff to `update`) + spec compliance report | Changing report structure |
 | `references/spec-lifecycle-actions.md` | Detailed procedures for spec-generate (incl. Step 5b stale content scan), spec-inject, spec-verify; defines the canonical **Spec Status Model** (ladder, exempt class, rules R1-R5 — R5 for claims-enabled projects only — evaluation order) | Changing spec action steps or adding new spec actions; changing status transition rules, roles, or vocabulary |
-| `references/spec-claims.md` | Spec claims (opt-in, enabled by `docs/spec-claims/`): sidecar and claim schema, `config.json`, checks V1–V12, exit codes, adapter contracts, gates and records, the direction protocol, reference pytest/jest helpers | Changing a `claims` verb, check, adapter contract or the claims policy |
-| `references/spec-lifecycle-protocol.md` | Wrapper author integration guide — input/output contracts, integration patterns | Adding integration patterns, changing action contracts |
+| `references/spec-claims.md` | Spec claims (opt-in, enabled by `docs/spec-claims/`): sidecar and claim schema, `config.json`, checks V1–V12, exit codes, adapter contracts, gates and records, the direction policy keys (config `policy`), reference pytest/jest helpers | Changing a `claims` verb, check, adapter contract or the claims policy |
+| `references/spec-lifecycle-protocol.md` | Wrapper author integration guide — input/output contracts, integration patterns; defines the claims **Direction protocol** (directions, rulings, policy defaults) | Adding integration patterns, changing action contracts or the direction protocol |
 | `references/release.md` | `release` action procedure (steps 1–12); its `$DOC_TOOLS fragments merge … --remove` forms are pinned to `doc-release.yml`'s `--allowedTools` | Changing the release flow (change the template and its test in the same commit) |
 | `references/hooks.md` | `hooks` action: installer routing, per-user Claude tier, `--ci` consent table, CI templates and helpers | Changing installer flags, tiers, or workflow templates |
 | `evals/evals.json`, `evals/fixtures/` | Skill evals with machine-checkable fields; per-eval `setup.sh` fixtures | Adding or changing an eval (the spec-status-model suite validates both) |
