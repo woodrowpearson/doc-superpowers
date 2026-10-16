@@ -737,7 +737,7 @@ _lg_ifl_scan() {
 # then an ancestor of m, so m..tip is exactly the walk's commits.)
 # shellcheck disable=SC2016  # awk source
 _LG_AWK_IFL_WALK='
-BEGIN { tr_load(tr) }
+BEGIN { tr_load(tr); tr_since(trx) }
 substr($0, 1, 1) == "\001" {
   l = substr($0, 2); n = split(l, a, " ")
   c = a[1]; DT[c] = a[2]; IN[c] = 1; p = ""
@@ -745,7 +745,7 @@ substr($0, 1, 1) == "\001" {
   PAR[c] = p
   next
 }
-{ tr_match($0); for (i = 1; i <= TRM; i++) { NT[c]++; TK[c, NT[c]] = TRMK[i]; TV[c, NT[c]] = TRMV[i] } }
+{ tr_match($0); tr_cut(c); for (i = 1; i <= TRM; i++) { NT[c]++; TK[c, NT[c]] = TRMK[i]; TV[c, NT[c]] = TRMV[i] } }
 END {
   while ((getline o < tips) > 0) {
     if (!(o in IN)) { print "M\t" o; continue }
@@ -840,6 +840,7 @@ _lg_ifl_sig() {
   _lg_scratch_name
   s=$_LG_SN
   _lg_trailers "$_SCRATCH/lg-ifl-tr"
+  _lg_tr_since
   di=$(_lg_doc_index "$_LG_IFL_SRC") || exit "$?"
   # shellcheck disable=SC2016  # jq source
   jq -r --slurpfile c "$_LG_CFG" '
@@ -850,7 +851,7 @@ _lg_ifl_sig() {
        | unique[] | "d\t\(.)"),
       ($pc | if type == "object" then ((.globs // [])[] | strings | select(test("[\\n\\t]") | not) | "g\t\(.)") else empty end)' \
     "$di" > "$_SCRATCH/lg-ifl-plans" || _lg_die "jq failed (the plan directories)"
-  { printf '%s\n' "$_LG_IFL_FACTS"; cat "$_SCRATCH/lg-ifl-tr"; printf 'plans\n'; cat "$_SCRATCH/lg-ifl-plans"
+  { printf '%s\n' "$_LG_IFL_FACTS"; cat "$_SCRATCH/lg-ifl-tr"; printf 'since %s\nplans\n' "$_LG_TR_SINCE"; cat "$_SCRATCH/lg-ifl-plans"
     printf 'parsers\n%s\n%s\n%s\n' "$_LG_AWK_TRAILER" "$_LG_AWK_IFL_WALK" "$_LG_AWK_IFL_WORDS"; } > "$s.sig" \
     || _lg_die "cannot write $s.sig"
   _hash_one "$s.sig"
@@ -871,7 +872,7 @@ _lg_ifl_cold() {
   { printf '^%s\n' "$_LG_IFL_B"; cat "$tips"; } > "$s.revs" || _lg_die "cannot write $s.revs"
   git -c log.showSignature=false log --no-color --stdin --format='%x01%H %ct %P%n%B' < "$s.revs" > "$s.log" 2> "$s.err" \
     || _lg_die "git log failed (the in-flight branches): $(head -n 3 "$s.err")"
-  LC_ALL=C awk -v tips="$tips" -v tr="$_SCRATCH/lg-ifl-tr" "$_LG_AWK_TRAILER$_LG_AWK_IFL_WALK" "$s.log" > "$s.walk" \
+  LC_ALL=C awk -v tips="$tips" -v tr="$_SCRATCH/lg-ifl-tr" -v trx="$_LG_TR_EXCL" "$_LG_AWK_TRAILER$_LG_AWK_IFL_WALK" "$s.log" > "$s.walk" \
     || _lg_die "cannot read the in-flight branches' commits"
   # Several base commits reached (the trunk merged in): git's merge base.
   # One (the usual case): the walk's trailers are the range's. Several (a

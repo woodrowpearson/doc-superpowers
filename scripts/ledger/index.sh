@@ -382,6 +382,37 @@ _lg_ix_events() {
   _LG_EVENTS=$f
 }
 
+# _lg_adoption_commit <base> → _LG_ADOPTC: the adoption commit — the first
+# commit on <base> to add docs/ledger/config.json (`git log
+# --diff-filter=A`, oldest first) — or "" when <base> has none (Task 16c
+# U11, U12). Cached as $_LG_CACHE/adoptc-<base>[.<shallow>].txt (the commit
+# or "-"; the newest 3 kept).
+_lg_adoption_commit() {
+  local B="$1" f tmp s A="" old
+  _lg_ix_shallow
+  f="$_LG_CACHE/adoptc-$B${_LG_SHALLOW:+.$_LG_SHALLOW}.txt"
+  if [ -f "$f" ] && { IFS= read -r A < "$f"; } 2>/dev/null && [ -n "$A" ]; then
+    [ "$A" != - ] || A=""
+    _LG_ADOPTC=$A
+    return 0
+  fi
+  _lg_scratch_name
+  s=$_LG_SN
+  git -c log.showSignature=false log --no-color --reverse --diff-filter=A --format=%H "$B" -- docs/ledger/config.json \
+    > "$s.adds" 2> "$s.err" || _lg_die "git log failed (the adoption commit): $(head -n 3 "$s.err" 2>/dev/null)"
+  A=""
+  IFS= read -r A < "$s.adds" || A=""
+  mkdir -p -- "$_LG_CACHE" 2>/dev/null || _lg_die "cannot create $_LG_CACHE"
+  tmp=$(mktemp "$_LG_CACHE/.adoptc.XXXXXX") || _lg_die "cannot create a temp file in $_LG_CACHE"
+  if printf '%s\n' "${A:--}" > "$tmp" && mv -f "$tmp" "$f"; then
+    # shellcheck disable=SC2012  # cache names are adoptc-<hex>.txt
+    ls -t "$_LG_CACHE"/adoptc-*.txt 2>/dev/null | tail -n +4 | while IFS= read -r old; do rm -f "$old"; done
+  else
+    rm -f "$tmp"
+  fi
+  _LG_ADOPTC=$A
+}
+
 # _lg_ix_adoption <base> <dirs-file> <out>: the adoption point (Task 16c
 # U11) → <out>: line 1 the adoption commit — the first commit on <base> to
 # add docs/ledger/config.json (`git log --diff-filter=A`, oldest first) —
@@ -411,9 +442,8 @@ _lg_ix_adoption() {
   while IFS= read -r d; do
     specs+=("$d")
   done < "$dirs"
-  git -c log.showSignature=false log --no-color --reverse --diff-filter=A --format=%H "$B" -- docs/ledger/config.json \
-    > "$s.adds" 2> "$s.err" || _lg_die "git log failed (the adoption commit): $(head -n 3 "$s.err" 2>/dev/null)"
-  IFS= read -r A < "$s.adds" || A=""
+  _lg_adoption_commit "$B"
+  A=$_LG_ADOPTC
   mkdir -p -- "$_LG_CACHE" 2>/dev/null || _lg_die "cannot create $_LG_CACHE"
   tmp=$(mktemp "$_LG_CACHE/.adopt.XXXXXX") || _lg_die "cannot create a temp file in $_LG_CACHE"
   printf '# ledger-adopt/1 %s\n%s\n' "$dh" "${A:--}" > "$tmp" || { rm -f "$tmp"; _lg_die "cannot write $tmp"; }
@@ -1713,9 +1743,10 @@ _lg_ix_claim_trailers() {
 # _lg_ix_base_claims <base|""> → _LG_BCLAIMS: a private file of "<kind>\t<value>"
 # lines (after a "# ledger-claims/1 <sig>" header line) — every claims /
 # claims_by_path message line of the commits the base reaches
-# (_LG_AWK_TRAILER: any line, bullets included). Cached as
-# $_LG_CACHE/claims-<base>.tsv, the signature over the trailer names and
-# the shallow tag; a new base extends the newest cached ancestor's (one
+# (_LG_AWK_TRAILER: any line, bullets included) — config trailers.since
+# cutting off those it reaches (_lg_tr_since). Cached as
+# $_LG_CACHE/claims-<base>.tsv, the signature over the trailer names, the
+# shallow tag and the since commit; a new base extends the newest cached ancestor's (one
 # walk of anc..base); the newest 5 kept. No base, or no such trailer
 # configured: an empty file. A cached file that vanishes (another run
 # prunes it) is a miss — a cold walk, silently. DOC_TOOLS_LEDGER_SELFTEST
@@ -1732,7 +1763,9 @@ _lg_ix_base_claims() {
   _lg_ix_claim_trailers "$s.tr"
   [ -s "$s.tr" ] || return 0
   _lg_ix_shallow
-  { printf 'ledger-claims/1\n'; cat "$s.tr"; printf 'shallow %s\n' "$_LG_SHALLOW"; } > "$s.sig" || _lg_die "cannot write $s.sig"
+  _lg_tr_since
+  { printf 'ledger-claims/1\n'; cat "$s.tr"; printf 'shallow %s\nsince %s\n' "$_LG_SHALLOW" "$_LG_TR_SINCE"; } > "$s.sig" \
+    || _lg_die "cannot write $s.sig"
   _hash_one "$s.sig"
   hdr="# ledger-claims/1 ${_HASH#sha256:}"
   f="$_LG_CACHE/claims-$B.tsv"
@@ -1803,13 +1836,13 @@ _lg_ix_base_claims() {
 # shellcheck disable=SC2016  # awk source
 _LG_AWK_PR_CLAIMS='
 function emit(n, k, v) { if ((n, k, v) in OUT) return; OUT[n, k, v] = 1; print n "\t" k "\t" v }
-BEGIN { tr_load(tr) }
+BEGIN { tr_load(tr); tr_since(trx) }
 substr($0, 1, 1) == "\001" {
   l = substr($0, 2); t = index(l, " ")
   c = t ? substr(l, 1, t - 1) : l; PAR[c] = t ? substr(l, t + 1) : ""; IN[c] = 1
   next
 }
-{ tr_match($0); for (i = 1; i <= TRM; i++) { NT[c]++; TK[c, NT[c]] = TRMK[i]; TV[c, NT[c]] = TRMV[i] } }
+{ tr_match($0); tr_cut(c); for (i = 1; i <= TRM; i++) { NT[c]++; TK[c, NT[c]] = TRMK[i]; TV[c, NT[c]] = TRMV[i] } }
 END {
   fc = ""
   while ((getline t < files) > 0) {
@@ -1853,13 +1886,15 @@ _lg_ix_pr_claims() {
   { printf '^%s\n' "$B"; LC_ALL=C awk -F '\t' '{ print $3 }' "$heads" | LC_ALL=C sort -u; } > "$s.revs" \
     || _lg_die "cannot write $s.revs"
   _lg_ix_claim_trailers "$s.tr"
+  _lg_tr_since
   git -c log.showSignature=false log --no-color --stdin --format='%x01%H %P%n%B' < "$s.revs" > "$s.msg" 2> "$s.err" \
     || _lg_die "git log failed (the PR heads): $(head -n 3 "$s.err")"
   GIT_LITERAL_PATHSPECS=1 git -c log.showSignature=false log --no-color --stdin --full-history --no-renames \
     --format=%x02%H --name-only -z -- ${specs[@]+"${specs[@]}"} < "$s.revs" > "$s.fz" 2> "$s.err" \
     || _lg_die "git log failed (the PR heads' files): $(head -n 3 "$s.err")"
   tr '\n\000' '\001\n' < "$s.fz" > "$s.files" || _lg_die "cannot read the PR heads' files"
-  LC_ALL=C awk -v heads="$heads" -v files="$s.files" -v tr="$s.tr" "$_LG_AWK_TRAILER$_LG_AWK_PR_CLAIMS" "$s.msg" >> "$out" \
+  LC_ALL=C awk -v heads="$heads" -v files="$s.files" -v tr="$s.tr" -v trx="$_LG_TR_EXCL" \
+    "$_LG_AWK_TRAILER$_LG_AWK_PR_CLAIMS" "$s.msg" >> "$out" \
     || rc=$?
   [ "$rc" = 0 ] || _lg_die "cannot attribute the PR heads' commits (awk rc $rc)"
 }
