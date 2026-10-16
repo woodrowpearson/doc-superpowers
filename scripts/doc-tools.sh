@@ -2638,8 +2638,11 @@ ledger init|cmd_ledger_init|repo|dry-run registry= report= accept= import source
   commit: open items in a registered ledger without a key there, per
   ledger in item-date order; a key of another ledger is re-homed into
   aliases; offline: provisional), the item fields (ledger; summary when
-  missing — the legacy row's bold lead, the H1, the first sentence, ≤ 140
-  characters; key), stubs for the open rows of hand-written ledgers that
+  missing — the legacy row's bold lead (its first **…** span that is no
+  tag: not P0-P9, a pure number, under 12 characters once emoji and
+  punctuation are trimmed from its ends, or one all-caps word), the H1,
+  the first sentence, ≤ 140 characters; a stub's: that bold lead, else
+  the row's cells; key), stubs for the open rows of hand-written ledgers that
   link no item (a row is done when its State's first words are done,
   shipped, resolved, closed, superseded, dropped or a config status.fixed,
   closed or wontfix value, or when its first words run together spell
