@@ -382,6 +382,60 @@ _lg_ix_events() {
   _LG_EVENTS=$f
 }
 
+# _lg_ix_adoption <base> <dirs-file> <out>: the adoption point (Task 16c
+# U11) → <out>: line 1 the adoption commit — the first commit on <base> to
+# add docs/ledger/config.json (`git log --diff-filter=A`, oldest first) —
+# or "-" when <base> has none; then, with one, "T\t<path>" for each path
+# under <dirs> (the item globs' directories) that a commit after it
+# touched — a descendant of it that <base> reaches (`git log
+# --ancestry-path <adoption>..<base>`: the adoption commit itself is not
+# after it; a merge lists no paths, as in the dates walk) — and
+# "B\t<path>" for each path under <dirs> in <base>'s tree (a newline in a
+# name as \001). Two range walks and one ls-tree per base, never one per
+# item: cached as $_LG_CACHE/adopt-<base>[.<shallow>].txt behind a
+# "# ledger-adopt/1 <sha256 of the dirs>" line (the newest 3 kept).
+_lg_ix_adoption() {
+  local B="$1" dirs="$2" out="$3" f tmp s dh A="" d
+  local specs=()
+  _lg_ix_shallow
+  _hash_one "$dirs"
+  dh=${_HASH#sha256:}
+  f="$_LG_CACHE/adopt-$B${_LG_SHALLOW:+.$_LG_SHALLOW}.txt"
+  if [ -f "$f" ] && [ "$(head -n 1 "$f")" = "# ledger-adopt/1 $dh" ]; then
+    touch -c "$f" 2>/dev/null || true
+    tail -n +2 "$f" > "$out" || _lg_die "cannot read $f"
+    return 0
+  fi
+  _lg_scratch_name
+  s=$_LG_SN
+  while IFS= read -r d; do
+    specs+=("$d")
+  done < "$dirs"
+  git -c log.showSignature=false log --no-color --reverse --diff-filter=A --format=%H "$B" -- docs/ledger/config.json \
+    > "$s.adds" 2> "$s.err" || _lg_die "git log failed (the adoption commit): $(head -n 3 "$s.err" 2>/dev/null)"
+  IFS= read -r A < "$s.adds" || A=""
+  mkdir -p -- "$_LG_CACHE" 2>/dev/null || _lg_die "cannot create $_LG_CACHE"
+  tmp=$(mktemp "$_LG_CACHE/.adopt.XXXXXX") || _lg_die "cannot create a temp file in $_LG_CACHE"
+  printf '# ledger-adopt/1 %s\n%s\n' "$dh" "${A:--}" > "$tmp" || { rm -f "$tmp"; _lg_die "cannot write $tmp"; }
+  if [ -n "$A" ]; then
+    if ! GIT_LITERAL_PATHSPECS=1 git -c log.showSignature=false log --no-color --ancestry-path --full-history \
+        --format= --name-only -z "$A..$B" -- ${specs[@]+"${specs[@]}"} > "$s.after" 2> "$s.err" \
+        || ! git ls-tree -r -z --name-only "$B" -- ${specs[@]+"${specs[@]}"} > "$s.on" 2>> "$s.err"; then
+      rm -f "$tmp"
+      _lg_die "git failed (the items after the adoption commit): $(head -n 3 "$s.err" 2>/dev/null)"
+    fi
+    if ! { tr '\n\000' '\001\n' < "$s.after" | LC_ALL=C awk '$0 != "" && !($0 in S) { S[$0] = 1; print "T\t" $0 }'
+           tr '\n\000' '\001\n' < "$s.on" | LC_ALL=C awk '$0 != "" { print "B\t" $0 }'; } >> "$tmp"; then
+      rm -f "$tmp"
+      _lg_die "cannot list the items after the adoption commit"
+    fi
+  fi
+  mv -f "$tmp" "$f" || { rm -f "$tmp"; _lg_die "cannot install $f"; }
+  # shellcheck disable=SC2012  # cache names are adopt-<hex>.txt
+  ls -t "$_LG_CACHE"/adopt-*.txt 2>/dev/null | tail -n +4 | while IFS= read -r tmp; do rm -f "$tmp"; done
+  tail -n +2 "$f" > "$out" || _lg_die "cannot read $f"
+}
+
 # _lg_ix_graph <commit> → _LG_GRAPH: `git rev-list --parents <commit>`
 # ("<id> <parent>…" per commit reachable from it), cached as
 # $_LG_CACHE/graph-<commit>[.<shallow>].txt (a fact about the commit — in a
@@ -923,7 +977,14 @@ $c[0] as $cfg
 | lg_obj($dates[] | {(.p): .d}) as $D
 | (lg_lists($docs[] | select(has("i")) | {k: .i, v: {c, d}}) | map_values(lg_lists(.[] | {k: .c, v: .d}))) as $L
 | lg_obj($docs[] | select(has("s")) | {(.s): .v}) as $S
-| ([$recs[] | lg_item($F; $CT; $EX; $D; $L; $S; $DI; $terms)] | sort_by(.path) | lg_pr_apply($prs; $pcl; $bcl; $fmr)) as $items
+# The adoption point sets: "T" paths touched after it, "B" paths the base holds.
+| ($adopt | split("\n") | reduce (.[] | select(length > 2)) as $l ({T: {}, B: {}};
+     .[$l[0:1]][$l[2:] | if test("\u0001") then gsub("\u0001"; "\n") else . end] = true)) as $AD
+| ([$recs[] | lg_item($F; $CT; $EX; $D; $L; $S; $DI; $terms)] | sort_by(.path) | lg_pr_apply($prs; $pcl; $bcl; $fmr)
+   # pre_adoption after fm_errors; a hosted item keeps its url last.
+   | map(del(.url) + {pre_adoption: (if $pre == "staged" then null elif $pre == "nobase" then false elif $pre == "before" then true
+                                     else ($AD.B[.path] == true and ($AD.T[.path] | not)) end)}
+         + (if has("url") then {url} else {} end))) as $items
 | ($ctr[0] // []) as $CTR
 | ($cre | split("\n") | map(select(. != "") | split("\t") | select(length == 3) | {id: .[0], dir: .[1], re: .[2]})) as $CRE
 # The index, one item per line (index.sh writes the neighbours of each
@@ -936,7 +997,8 @@ $c[0] as $cfg
             mode: $mode,
             rev: (if $rev == "" then null else $rev end),
             registry_findings: $rf,
-            contracts_error: (if $cerr == "" then null else $cerr end)},
+            contracts_error: (if $cerr == "" then null else $cerr end),
+            adoption: (if $adoption == "" then null else $adoption end)},
     ledgers: $reg[0].ledgers,
     contracts: $CTR,
     path_contracts: lg_path_contracts($items; $CRE)} | tojson | .[0:-1] + ",\"items\":["),
@@ -1809,7 +1871,7 @@ _lg_ix_pr_claims() {
 # finalized map), an unknown revision, or a git failure.
 _lg_index() {
   local mode=worktree rev="" src commit="" tree="" head base_ref="" base="" s reg di key name tmp rfn f n relpid
-  local legacy_path="" dcommit usemtime ixdir items="" iremote="" ittl=""
+  local legacy_path="" dcommit usemtime ixdir items="" iremote="" ittl="" adopt="" pre
   case "$#" in
     0) ;;
     1) [ "$1" = --staged ] || _lg_die "internal: _lg_index: unknown argument '$1'"; mode=staged ;;
@@ -1936,6 +1998,22 @@ _lg_index() {
   _lg_cfg '[(.items.globs // [])[]?, (.items.archive_globs // [])[]?] | .[] | strings | select(. != "")' > "$s.pfglobs"
   _lg_glob_dirs "$s.pfglobs" "$s.pfdirs"
   if [ -n "$dcommit" ]; then _lg_ix_prefetch "$dcommit" "$s.pfdirs"; fi
+  # The adoption point (Task 16c U11; validate --all reads pre_adoption):
+  # none for --staged (null); a base that does not resolve tells nothing
+  # (false); a base with no commit adding config.json yet: every item is
+  # from before adoption (true); else an item is when the base holds its
+  # path and no commit after the adoption commit touched it.
+  : > "$s.adopt"
+  if [ "$mode" = staged ]; then
+    pre=staged
+  elif [ -z "$base" ]; then
+    pre=nobase
+  else
+    _lg_ix_adoption "$base" "$s.pfdirs" "$s.adoptall"
+    IFS= read -r adopt < "$s.adoptall" || adopt=-
+    tail -n +2 "$s.adoptall" > "$s.adopt" || _lg_die "cannot write $s.adopt"
+    if [ "$adopt" = - ]; then adopt=""; pre=before; else pre=after; fi
+  fi
 
   # The inputs, read and checked.
   reg=$(_lg_registry "$src") || exit "$?"
@@ -1993,6 +2071,7 @@ _lg_index() {
       --slurpfile prs "$s.prl" --rawfile pcl "$s.pcl" --rawfile bcl "$_LG_BCLAIMS" --rawfile fmr "$s.formers" \
       --arg schema "$_LG_INDEX_SCHEMA" --arg head "$head" --arg base "$base" --arg hash "sha256:$key" \
       --arg mode "$mode" --arg rev "$commit" --argjson rf "$rfn" --argjson terms "$_LG_DOC_TERMINAL" \
+      --arg adoption "$adopt" --arg pre "$pre" --rawfile adopt "$s.adopt" \
       "$_LG_JQ_INDEX_DEFS$_LG_JQ_INDEX" > "$tmp.join"; then
     rm -f "$tmp" "$tmp.join"
     _lg_die "jq failed (the index join)"

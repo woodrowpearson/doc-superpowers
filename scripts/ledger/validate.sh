@@ -187,7 +187,12 @@ _lg_validate_registry() {
 # are always advisory.
 #
 # --all: every item of the working-tree index, the blocking classes block;
-# retired-ledger is reported (advisory) only for open / unknown-class items.
+# retired-ledger is reported (advisory) only for open / unknown-class items;
+# missing-resolution is advisory, "terminal before adoption", on an item
+# from before the ledger was adopted (the index's pre_adoption: config base
+# has no commit adding docs/ledger/config.json yet, or the base holds the
+# item and no commit after the first that added it touched it; Task 16c
+# U11).
 # The index holds the hosted items too (config items.adapter, through the
 # items cache — fresh or stale, the run's note says which; no copy and the
 # adapter failing: exit 2; controller ruling R4): key and alias uniqueness
@@ -227,7 +232,8 @@ def lg_v_rinfo($F; $CT; $EX):
 def lg_v_iinfo:
   {path, keyraw: .key, key, aliases, ledgerraw: .ledger, ledger, class, sup: .superseded_by, summary,
    resolution: (.resolution | if type == "string" and test("\\S") then . else null end),
-   errors: (.fm_errors // []), changes, consumes, hosted: ((.url | type) == "string")};
+   errors: (.fm_errors // []), changes, consumes, hosted: ((.url | type) == "string"),
+   pre: (.pre_adoption == true)};
 # The tokens (key and aliases, lower case) of an info, with their roles.
 def lg_v_toks:
   ((.key // null) | if type == "string" then ascii_downcase else null end) as $k
@@ -439,7 +445,9 @@ $c[0] as $cfg
      lg_v_f("no-contract"; "advisory"; $i.path; $i.key; "open, and names no contract it changes or consumes")
    else empty end),
   (if ($i.class | lg_v_term) and $i.resolution == null and ($i.hosted | not) then
-     lg_v_f("missing-resolution"; "block"; $i.path; $i.key; "status \($i.class) needs a resolution (a line under the resolution heading)")
+     lg_v_f("missing-resolution"; lg_v_sev($i.pre | not); $i.path; $i.key;
+       "status \($i.class) needs a resolution (a line under the resolution heading)"
+       + (if $i.pre then " — terminal before adoption" else "" end))
    else empty end),
   lg_v_sup_f($i; $M; $R; $FIN; true),
   (if $i.sup != null and $i.class != "closed" then
