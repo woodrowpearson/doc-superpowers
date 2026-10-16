@@ -1532,6 +1532,8 @@ _LG_EMITTED=0        # 1: this shell printed the run's verdict
 _LG_EMITTED_RC=""    # …and the exit code that verdict carries
 _LG_VERB=""          # the ledger sub-verb ("ls", …); "ledger" when none
 _LG_FORMAT=text      # text | json (--format)
+_LG_HOOK=0           # 1: a hook mode (ledger notices|state-watch --hook): exit 0, stdout the hook's
+_LG_HOOK_FAIL=""     # a hook mode's failure handler (scripts/ledger/hooks.sh), once it is set
 _on_exit() {
   local rc=$? emitted=0 erc="" marker=""
   if [ "$_CL_ACTIVE" = 1 ]; then
@@ -1591,6 +1593,9 @@ _on_exit() {
         ;;
     esac
   fi
+  # A hook mode (Task 16c U4) never fails its session: whatever happened —
+  # a usage error, no repository, a crash — it ends 0.
+  if [ "$_LG_HOOK" = 1 ]; then rc=0; fi
   exit "$rc"
 }
 
@@ -2431,8 +2436,8 @@ ledger inflight|cmd_ledger_inflight|repo|branch= fetch push format=
   sources, merge_base, pr, files_n, files, claims, contract_changes, acks,
   refs}]}. show and ls show "on branch <b>" for an open item an in-flight
   branch claims.
-ledger notices|cmd_ledger_notices|repo|branch= gate fetch format=
-  [--branch <name>|<name>@<host>] [--gate] [--fetch] [--format text|json]
+ledger notices|cmd_ledger_notices|repo|branch= gate fetch hook format=
+  [--branch <name>|<name>@<host>] [--gate] [--fetch] [--format text|json] | --hook
   In-flight notices for a branch (default: the current one) against every
   other branch in flight and the base since the branch's merge base: stop
   (another branch or the base changes a contract the branch's claimed
@@ -2457,6 +2462,33 @@ ledger notices|cmd_ledger_notices|repo|branch= gate fetch format=
   A --branch naming no branch, or a base that does not resolve: exit 2.
   JSON: {"notices": [{id, urgency, other: {branch, host, pr}, overlap:
   {contracts|keys|files}, what_changed, action}], "pr_data"}.
+  --hook: the Claude Code SessionStart hook (the event on stdin, read
+  only for being empty or one JSON object), for the current branch,
+  offline (as DOC_TOOLS_LEDGER_OFFLINE=1: nothing is fetched): one hook
+  object — systemMessage and additionalContext — holding a count line
+  and the stop and heads-up notices, at most 15 lines in all ("…and M
+  more"), each string at most 9,000 characters; nothing when there are
+  none or in-flight awareness is off; a failure is one "cannot list"
+  line. Always exits 0, printing nothing else (a usage error, no
+  repository, no docs/ledger/config.json, an event that is not JSON:
+  silent); DOC_SUPERPOWERS_LEDGER_SKIP=1: silent. It takes no other
+  option. The installed hook (install.sh --ledger-claude) runs it under
+  a 2-second budget.
+ledger state-watch|cmd_ledger_state_watch|repo|hook
+  --hook
+  The Claude Code PostToolUse (Write|Edit) hook: reads the event on
+  stdin; when its tool_input.file_path lies under one of config
+  state_watch.paths ("~/" is $HOME — HOME empty or unset: the entry names
+  nothing; an absolute entry is itself; any other is under the top level
+  or $CLAUDE_PROJECT_DIR; "*" matches within one segment, every other
+  character is itself; an entry matches the file and anything below it)
+  and the text written (content, new_string, edits[].new_string) names an
+  item key (of a registered ledger or a config legacy_ids id; any
+  key-shaped word without a registry) and holds one of
+  state_watch.patterns (any case), prints one hook object whose
+  additionalContext suggests `doc-tools.sh ledger note <key> "…"`.
+  Otherwise nothing. Always exits 0, printing nothing else (as notices
+  --hook); DOC_SUPERPOWERS_LEDGER_SKIP=1: silent.
 ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize format=
   --ledger <id|unassigned> --summary <text> [--file <issue>] [--finalize] [--format text|json]
   Allocate an item key and write key, ledger and summary (at most 140
@@ -3250,6 +3282,13 @@ _main() {
     esac
     exec 9>&1
     _lg_prescan "$@"
+    if [ "$_LG_HOOK" = 1 ]; then
+      # A hook runs wherever the session is: from the top level, as every
+      # ledger verb; outside a work tree the repository check fails —
+      # silently, as every hook-mode failure.
+      [ "${DOC_SUPERPOWERS_LEDGER_SKIP:-}" != 1 ] || { _lg_mark_emitted 0; _exit_ok; }
+      cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || true
+    fi
   fi
 
   local verb
@@ -12004,6 +12043,9 @@ _lg_fail() {
     exit "$rc"
   fi
   _lg_mark_emitted "$rc"
+  # A hook mode prints no verdict; once its handler is set (the check
+  # itself is running), the handler's hook object says what failed.
+  if [ "$_LG_HOOK" = 1 ] && [ -n "$_LG_HOOK_FAIL" ]; then "$_LG_HOOK_FAIL" "$msg" 2>/dev/null || true; fi
   if [ "$_LG_FORMAT" = json ]; then
     if [ -e docs/ledger/config.json ] || [ -L docs/ledger/config.json ]; then enabled=true; fi
     _lg_verb_json
@@ -12062,6 +12104,19 @@ _lg_fallback() {
 # error in the option loop print its object.
 _lg_prescan() {
   local a want=0
+  # A hook mode (Task 16c U4): notices or state-watch with --hook before
+  # "--". Its output is the hook's object alone: text mode (a --format is
+  # then a usage error, silent like every hook-mode failure).
+  case "${2:-}" in
+    notices|state-watch)
+      for a in "$@"; do
+        case "$a" in
+          --) break ;;
+          --hook) _LG_HOOK=1 ;;
+        esac
+      done ;;
+  esac
+  if [ "$_LG_HOOK" = 1 ]; then return 0; fi
   for a in "$@"; do
     if [ "$want" = 1 ]; then
       if [ "$a" = json ]; then _LG_FORMAT=json; fi
@@ -12078,6 +12133,9 @@ _lg_prescan() {
 
 # After _parse_args: validate --format (a usage error, even when inert).
 _lg_format() {
+  if [ "$_LG_HOOK" = 1 ] && [ -n "${_OPT_format:-}" ]; then
+    _usage_error "ledger $_LG_VERB" "--hook prints the hook's object: it takes no --format"
+  fi
   case "${_OPT_format:-}" in
     ''|text) _LG_FORMAT=text ;;
     json) _LG_FORMAT=json ;;
@@ -12093,6 +12151,8 @@ _lg_enter() {
   # config yet (on the default config; only init --accept writes one).
   if [ "$_LG_VERB" != init ] && [ ! -e docs/ledger/config.json ] && [ ! -L docs/ledger/config.json ]; then
     _lg_mark_emitted 0
+    # A hook mode: nothing (a hook's stdout reaches the session).
+    if [ "$_LG_HOOK" = 1 ]; then _exit_ok; fi
     if [ "$_LG_FORMAT" = json ]; then
       _lg_verb_json
       _lg_out "{\"verb\":$_LG_JS,\"enabled\":false,\"exit\":0}"
