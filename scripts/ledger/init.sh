@@ -209,13 +209,14 @@ _lg_init_gh_check() {
 #   {"t":"S","path","dir"}           a non-item file whose frontmatter has a
 #                                    status: line
 #   {"t":"H","path","k","v"}         an item file's component / area value
-#   {"t":"R","file","row","state","bold","text","cells"}
+#   {"t":"R","file","row","state","bold","bolds","text","cells"}
 #                                    a data row of a "#"-headed table (row:
 #                                    its "#" cell, else "n<ordinal in the
 #                                    file>"; state: the cell of the first
 #                                    column headed state… or status… — ""
 #                                    without one; bold: the row's first
-#                                    **…** span, ""; text: the line, trimmed;
+#                                    **…** span, ""; bolds: every **…**
+#                                    span, in order; text: the line, trimmed;
 #                                    cells: the other cells, in order)
 #   {"t":"K","file","row","to","item"}  a link in such a row (to: the path it
 #                                    resolves to; item: it is an item file)
@@ -277,6 +278,18 @@ function bold(line,   i, j) {
   line = substr(line, i + 2)
   j = index(line, "**"); if (j == 0) return ""
   return trim(substr(line, 1, j - 1))
+}
+# bolds(line): the text of every **…** span, in order, as JSON strings joined
+# by ",".
+function bolds(line,   i, j, o) {
+  o = ""
+  while ((i = index(line, "**")) > 0) {
+    line = substr(line, i + 2)
+    j = index(line, "**"); if (j == 0) break
+    o = o (o == "" ? "" : ",") js(trim(substr(line, 1, j - 1)))
+    line = substr(line, j + 2)
+  }
+  return o
 }
 function rowid(c, ord) {
   c = rep(rep(c, "~~", ""), "*", "")
@@ -344,7 +357,7 @@ function scan(p, flag,   line, n, infm, isitem, fence, prev, intable, hcol, scol
         sc = (scol > 0 && scol <= nc) ? C[scol] : ""
         cl = ""
         for (i = 1; i <= nc; i++) if (i != hcol && i != scol) cl = cl (cl == "" ? "" : ",") js(C[i])
-        print "{\"t\":\"R\",\"file\":" js(p) ",\"row\":" js(rid) ",\"state\":" js(sc) ",\"bold\":" js(bold(line)) ",\"text\":" js(trim(line)) ",\"cells\":[" cl "]}"
+        print "{\"t\":\"R\",\"file\":" js(p) ",\"row\":" js(rid) ",\"state\":" js(sc) ",\"bold\":" js(bold(line)) ",\"bolds\":[" bolds(line) "],\"text\":" js(trim(line)) ",\"cells\":[" cl "]}"
         for (i = 1; i <= nc; i++) {
           if (tcol > 0 && i != tcol) continue
           rest = C[i]
@@ -951,8 +964,10 @@ _lg_init_write() {
 # legacy.json entry, never created twice. legacy.json's entries are never
 # changed.
 # Summaries (written only when missing): the item's legacy row's first
-# **bold** span, else its H1, else the first sentence of its first
-# paragraph — whitespace collapsed, at most 140 characters, cut at a word
+# **bold** span that is no tag (lg_bl_pick: not P0-P9, a pure number,
+# under 12 characters once emoji and punctuation are trimmed from its
+# ends, or one all-caps word; Task 16c U10), else its H1, else the first
+# sentence of its first paragraph — whitespace collapsed, at most 140 characters, cut at a word
 # boundary.
 # Idempotent: a second run of the same file changes nothing (no write, no
 # counter commit).
@@ -966,6 +981,27 @@ def lg_t140:
   | if length <= 140 then . else .[0:141] | (if test(" ") then sub(" [^ ]*$"; "") else .[0:140] end) | sub(" +$"; "") end;
 def lg_sent: (capture("^(?<s>.*?[.!?])(\\s|$)") // null) as $m | if $m == null then . else $m.s end;
 def lg_unlink: gsub("\\[(?<t>[^\\]]*)\\]\\([^)]*\\)"; "\(.t)") | gsub("\\*\\*|~~"; "") | lg_t140;
+# A bold span that is a tag, not a lead (Task 16c U10), is skipped: once
+# lg_bl_trim takes the emoji, punctuation and blanks off its ends it is a
+# priority (P0-P9), a pure number, shorter than 12 characters, or one
+# all-caps word. lg_bl_cp: a codepoint that is a letter or digit (ASCII,
+# and every codepoint from U+00C0 on except the multiplication and
+# division signs, U+2000-U+2BFF punctuation, arrows and symbols, U+3000-
+# U+303F CJK punctuation, the variation selectors U+FE00-U+FE0F, the emoji
+# planes U+1F000-U+1FAFF and the tags U+E0000-U+E007F).
+def lg_bl_cp: (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122)
+  or (. >= 192 and . != 215 and . != 247 and (. < 8192 or . > 11263) and (. < 12288 or . > 12351)
+      and (. < 65024 or . > 65039) and (. < 126976 or . > 129791) and (. < 917504 or . > 917631));
+def lg_bl_trim:
+  explode as $c
+  | (first(range(0; $c | length) | select($c[.] | lg_bl_cp)) // ($c | length)) as $a
+  | (first(range(($c | length) - 1; -1; -1) | select($c[.] | lg_bl_cp)) // -1) as $b
+  | if $b < $a then "" else $c[$a:$b + 1] | implode end;
+def lg_bl_weak:
+  (lg_unlink | lg_bl_trim) as $t
+  | ($t | test("^P[0-9]$")) or ($t | test("^[0-9]+$")) or ($t | length) < 12 or ($t | test("^[A-Z][A-Z0-9_-]*$"));
+# lg_bl_pick: of a row'"'"'s bold spans, the first that is no tag ("" none).
+def lg_bl_pick: first(.[] | strings | select(lg_bl_weak | not)) // "";
 def lg_stubslug: ascii_downcase | gsub("[^a-z0-9]+"; "-") | sub("^-+"; "") | .[0:50] | sub("-+$"; "") | if . == "" then "item" else . end;
 # A State cell is done (Task 16b U6, fix round 1) when its words
 # (lg_dwords: lower case; ~~, *, ` and apostrophes, ASCII and U+2019,
@@ -1011,7 +1047,7 @@ _LG_JQ_ACCEPT_PLAN='
   | reduce .[] as $r ({seen: {}, out: []}; if .seen[$r.row] then . else .seen[$r.row] = true | .out += [$r] end) | .out[]
   | . as $r
   | ([$K[] | select(.file == $f and .row == $r.row and .item and ($IT[.to] != null)) | .to] | first) as $it
-  | {file: $f, row: $r.row, lid: lid($f), id: "\(lid($f))#\($r.row)", bold: ($r.bold // ""), text: ($r.text // ""),
+  | {file: $f, row: $r.row, lid: lid($f), id: "\(lid($f))#\($r.row)", bold: (($r.bolds // [($r.bold // "")]) | lg_bl_pick), text: ($r.text // ""),
      cells: ($r.cells // []), item: $it, done: (($r.state // "") | lg_done($DONE))} ] as $LR
 # An item legacy row bold lead: its first linking row (file, row order) with one.
 | (reduce ($LR | map(select(.item != null and .bold != "")) | sort_by(.file, (.row | lg_rowkey)))[] as $x

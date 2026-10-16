@@ -8804,7 +8804,7 @@ lg_init_fixture() {
 | # | Item | State |
 |---|------|-------|
 | 1 | [Old bug](../issues/2026-01-04-old-bug.md) | ~~done~~ |
-| 2 | **Totals plan** — [plan](../plans/x-plan.md) | open |
+| 2 | **Totals plan rework** — [plan](../plans/x-plan.md) | open |
 | 3 | [Sheet flicker](../issues/2026-01-02-sheet-flicker.md#detail) | open |
 EOF
   git add -A && git commit -qm "init fixture"
@@ -9582,16 +9582,16 @@ EOF
   assert_eq "0" "$LG_RC" "exits 0"
   local t s1 s2
   t=$(lg_today)
-  s1="docs/issues/$t-totals-plan.md"
+  s1="docs/issues/$t-totals-plan-rework.md"
   s2="docs/issues/$t-rate-limits-are-wrong-for-eu-carts.md"
   assert_file_exists "$s1" "row 2 (open, a plan): a stub"
   assert_file_exists "$s2" "row 6 (blocked, a plan): a stub"
-  assert_eq "status: Open|key: checkout-3|ledger: checkout|summary: Totals plan" "$(lg_fmblock "$s1")" \
+  assert_eq "status: Open|key: checkout-3|ledger: checkout|summary: Totals plan rework" "$(lg_fmblock "$s1")" \
     "the stub: Open, the row's ledger (checkout: registered), the summary from the row's bold lead, a key"
   assert_contains "$(cat "$s1")" "Migrated from docs/ledgers/checkout-ledger.md row 2." "the stub's body names its row"
-  assert_contains "$(cat "$s1")" '| 2 | **Totals plan** — [plan](../plans/x-plan.md) | open |' "and carries the row text"
+  assert_contains "$(cat "$s1")" '| 2 | **Totals plan rework** — [plan](../plans/x-plan.md) | open |' "and carries the row text"
   # sheet-flicker (2026-01-02) is the oldest checkout item: checkout-1; the
-  # stubs (today) follow, by path: rate-limits… checkout-2, totals-plan checkout-3.
+  # stubs (today) follow, by path: rate-limits… checkout-2, totals-plan-rework checkout-3.
   assert_eq "checkout-1" "$(jq -r '.["checkout#3"].key' docs/ledger/legacy.json)" "row 3 → the linked item's key"
   assert_eq "docs/issues/2026-01-04-old-bug.md" "$(jq -r '.["checkout#1"].item' docs/ledger/legacy.json)" "row 1 (done, an item without a key) → {item}"
   assert_eq "checkout-3" "$(jq -r '.["checkout#2"].key' docs/ledger/legacy.json)" "row 2 → the stub's key"
@@ -9633,7 +9633,7 @@ EOF
   assert_eq "docs/ledgers/tier1-pipeline-ledger.md#8" "$(jq -r '.["tier1#8"].archived' docs/ledger/legacy.json)" "tier1#8 (closed) → archived"
   assert_eq "$cfg" "$(cat docs/ledger/config.json)" "an existing config.json is not rewritten"
   # The stub of checkout#2: tier1 is not a registered ledger, checkout is.
-  assert_contains "$(lg_fmblock "docs/issues/$(lg_today)-totals-plan.md")" "ledger: checkout" "the stub takes its ledger's id when registered"
+  assert_contains "$(lg_fmblock "docs/issues/$(lg_today)-totals-plan-rework.md")" "ledger: checkout" "the stub takes its ledger's id when registered"
   teardown
 }
 
@@ -9773,7 +9773,7 @@ test_lg_init_accept_dry_run() {
   assert_contains "$LG_OUT" "would write docs/ledger/ledgers.json" "plans ledgers.json"
   assert_contains "$LG_OUT" "would write docs/ledger/legacy.json" "plans legacy.json"
   assert_contains "$LG_OUT" "docs/issues/2026-01-01-cart-total.md" "plans the item"
-  assert_contains "$LG_OUT" "would create docs/issues/$(lg_today)-totals-plan.md" "plans the stub"
+  assert_contains "$LG_OUT" "would create docs/issues/$(lg_today)-totals-plan-rework.md" "plans the stub"
   lg init --accept "$LG_DEC" --dry-run --format json
   assert_json_field "$LG_OUT" '[.dry_run, (.keys | length)] | map(tostring) | join("|")' "true|2" "JSON: dry run, two keys planned"
   teardown
@@ -9879,7 +9879,7 @@ test_lg_init_accept_hosted_stub() {
   assert_eq "0" "$LG_RC" "accept exits 0"
   # No file is an item now: row 1 (done) is archived, rows 2 and 3 (open)
   # become hosted stubs.
-  assert_eq "Totals plan|Sheet flicker" "$(jq -r 'map(.title) | join("|")' "$LG_GH/issues.json")" "two issues created, titled by their rows"
+  assert_eq "Totals plan rework|Sheet flicker" "$(jq -r 'map(.title) | join("|")' "$LG_GH/issues.json")" "two issues created, titled by their rows"
   assert_contains "$(jq -r '.[0].body' "$LG_GH/issues.json")" "Migrated from docs/ledgers/checkout-ledger.md row 2." "the body names the row"
   assert_eq "ledger:checkout" "$(jq -r '.[0] | [.labels[].name] | join(",")' "$LG_GH/issues.json")" "its ledger label"
   assert_contains "$(jq -r '.[0].body' "$LG_GH/issues.json")" "key: checkout-1" "its key in the block"
@@ -10002,7 +10002,7 @@ test_lg_init_stub_outside_globs_finding() {
   lg init --accept docs/ledger/r.md.decisions.tsv --format json
   assert_eq "1" "$LG_RC" "exits 1"
   assert_json_field "$LG_OUT" '.findings | map(.detail) | join(" ") | test("items.globs")' "true" "the finding names items.globs"
-  assert_json_field "$LG_OUT" '.findings[0].path' "docs/issues/$(lg_today)-totals-plan.md" "and the stub path"
+  assert_json_field "$LG_OUT" '.findings[0].path' "docs/issues/$(lg_today)-totals-plan-rework.md" "and the stub path"
   assert_eq "$st" "$(lg_init_status)" "nothing written"
   assert_eq "absent" "$(lg_remote_counters)" "no counter ref"
   teardown
@@ -10041,17 +10041,17 @@ test_lg_init_stub_slug_collision_and_length() {
   echo "test: stub paths — a slug of at most 50 characters; a taken name (on disk or by another stub) takes -2, -3"
   lg_accept_fixture
   cat >> docs/ledgers/checkout-ledger.md <<'EOF'
-| 4 | **Totals plan** — [plan](../plans/x-plan.md) | open |
+| 4 | **Totals plan rework** — [plan](../plans/x-plan.md) | open |
 | 5 | **A very long summary that goes on and on beyond the fifty character slug limit** | open |
 EOF
   git add -A && git commit -qm rows
   local t
   t=$(lg_today)
-  lg_item "docs/issues/$t-totals-plan.md" 'status: Open'
+  lg_item "docs/issues/$t-totals-plan-rework.md" 'status: Open'
   lg init --accept "$LG_DEC" --dry-run
   assert_eq "0" "$LG_RC" "exits 0"
-  assert_contains "$LG_OUT" "would create docs/issues/$t-totals-plan-2.md: stub of docs/ledgers/checkout-ledger.md row 2" "row 2: -2 (the name is taken on disk)"
-  assert_contains "$LG_OUT" "would create docs/issues/$t-totals-plan-3.md: stub of docs/ledgers/checkout-ledger.md row 4" "row 4: -3 (taken by row 2)"
+  assert_contains "$LG_OUT" "would create docs/issues/$t-totals-plan-rework-2.md: stub of docs/ledgers/checkout-ledger.md row 2" "row 2: -2 (the name is taken on disk)"
+  assert_contains "$LG_OUT" "would create docs/issues/$t-totals-plan-rework-3.md: stub of docs/ledgers/checkout-ledger.md row 4" "row 4: -3 (taken by row 2)"
   assert_contains "$LG_OUT" "would create docs/issues/$t-a-very-long-summary-that-goes-on-and-on-beyond-the.md:" "row 5: the slug cut at 50 characters"
   teardown
 }
@@ -10283,7 +10283,7 @@ test_lg_init_preseeded_legacy_entries_authoritative() {
   assert_json_field "$LG_OUT" '[.legacy.added[]] | join(",")' "checkout#1" "JSON: one new entry, row 1's"
   assert_json_field "$LG_OUT" '.stubs | length' "0" "JSON: no stub (row 2 is pre-seeded)"
   t=$(lg_today)
-  assert_file_not_exists "docs/issues/$t-totals-plan.md" "no stub file"
+  assert_file_not_exists "docs/issues/$t-totals-plan-rework.md" "no stub file"
   assert_eq "$before" "$(jq -c '{"checkout#2": .["checkout#2"], "checkout#3": .["checkout#3"]}' docs/ledger/legacy.json)" \
     "the pre-seeded entries are unchanged"
   assert_eq "docs/issues/2026-01-04-old-bug.md" "$(jq -r '.["checkout#1"].item' docs/ledger/legacy.json)" "row 1 gets its entry"
@@ -10800,6 +10800,53 @@ absorb_counts() {
   PASS=$p FAIL=$f TESTS_RUN=$t
 }
 
+# --- Task 16c (U10): a bold tag is no summary -----------------------------------
+
+test_lg_init_summary_skips_bold_tags() {
+  echo "test: init summaries — a row's bold span that is a tag (P1, a pure number, under 12 characters once emoji and punctuation are trimmed, one all-caps word) is skipped for the next bold span, else the H1, else the first sentence; a real bold lead is kept"
+  lg_fixture
+  local p
+  for p in b c e f h; do printf -- '---\nstatus: Open\n---\n# Heading %s from its file\n' "$p" > "docs/issues/$p.md"; done
+  printf -- '---\nstatus: Open\n---\nNo heading here at all. A second sentence.\n' > docs/issues/d.md
+  printf -- '---\nstatus: Open\n---\n# Heading g from its file\n' > docs/issues/g.md
+  mkdir -p docs/ledgers docs/plans
+  printf '# P\n' > docs/plans/p.md
+  cat > docs/ledgers/x-ledger.md <<'EOF'
+| # | Item | State |
+|---|------|-------|
+| 1 | **P1** [b](../issues/b.md) | open |
+| 2 | **⚡ Fable 5** [c](../issues/c.md) | open |
+| 3 | **297** [d](../issues/d.md) | open |
+| 4 | **REVERSED** [e](../issues/e.md) | open |
+| 5 | **INVESTIGATING** [f](../issues/f.md) | open |
+| 6 | **P2** then **Sheet flickers on rotate** [g](../issues/g.md) | open |
+| 7 | **🔥 Totals drift on coupons!** [h](../issues/h.md) | open |
+| 8 | **P1** Rate limits are wrong for EU carts — [plan](../plans/p.md) | open |
+| 9 | **Retry orders on a 502** — [plan](../plans/p.md) | open |
+EOF
+  git add -A && git commit -qm items
+  lg_init_edit_reg
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  for p in b c d e f g h; do lg_init_decide docs/ledger/r.md.decisions.tsv "docs/issues/$p.md" unassigned; done
+  lg init --accept docs/ledger/r.md.decisions.tsv --format json
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_eq "summary: Heading b from its file" "$(grep '^summary:' docs/issues/b.md)" "**P1** (a priority): the H1"
+  assert_eq "summary: Heading c from its file" "$(grep '^summary:' docs/issues/c.md)" "**⚡ Fable 5** (7 characters without the emoji): the H1"
+  assert_eq "summary: No heading here at all." "$(grep '^summary:' docs/issues/d.md)" "**297** (a number), no H1: the first sentence"
+  assert_eq "summary: Heading e from its file" "$(grep '^summary:' docs/issues/e.md)" "**REVERSED**: the H1"
+  assert_eq "summary: Heading f from its file" "$(grep '^summary:' docs/issues/f.md)" "**INVESTIGATING** (one all-caps word of 13): the H1"
+  assert_eq "summary: Sheet flickers on rotate" "$(grep '^summary:' docs/issues/g.md)" "**P2** skipped: the next bold span"
+  assert_eq "summary: 🔥 Totals drift on coupons!" "$(grep '^summary:' docs/issues/h.md)" "a real bold lead (emoji and all) is kept"
+  assert_eq "Retry orders on a 502" \
+    "$(jq -r '.stubs[] | select(.row == "docs/ledgers/x-ledger.md#9") | .path' <<<"$LG_OUT" | xargs grep -h '^summary:' | sed 's/^summary: //')" \
+    "a stub's real bold lead is its summary"
+  local s8
+  s8=$(jq -r '.stubs[] | select(.row == "docs/ledgers/x-ledger.md#8") | .path' <<<"$LG_OUT" | xargs grep -h '^summary:' | sed 's/^summary: //')
+  assert_contains "$s8" "Rate limits are wrong for EU carts" "a stub whose only bold is a tag: its cells, not the tag"
+  assert_true "…not \"P1\" (got '$s8')" test "$s8" != "P1"
+  teardown
+}
+
 run_tests() {
   echo "Running ledger tests..."
   echo ""
@@ -11173,6 +11220,7 @@ run_tests() {
   test_lg_trailers_since
   test_lg_trailers_since_adoption_before_adopted
   test_lg_trailers_since_inflight
+  test_lg_init_summary_skips_bold_tags
 
   print_summary
 }
