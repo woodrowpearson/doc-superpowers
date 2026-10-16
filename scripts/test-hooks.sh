@@ -5097,36 +5097,32 @@ test_ledger_post_commit_backgrounds() {
   teardown
 }
 
-test_ledger_session_hook_clip() {
-  echo "test: ledger: SessionStart — the unacked stop/heads-up notices of 'ledger notices' (no --fetch, offline), at most 15 lines with the rest counted; info left out; silent when none"
+test_ledger_session_hook_wraps_verb() {
+  echo "test: ledger: SessionStart (Task 16c U4) — a thin wrapper over 'doc-tools.sh ledger notices --hook', offline, the event on its stdin: what the verb prints is the hook's output, verbatim; silent when it prints nothing; a verb that fails (one that predates --hook): one 'cannot list' line; DOC_SUPERPOWERS_LEDGER_SKIP=1: nothing run; the real doc-tools.sh, in-flight awareness off: silent"
   lgh_fixture '{"inflight":{"enabled":true}}'
   inst install --ledger-claude
-  local fake log msg ctx
+  local fake log obj
   log=$(harness_mktemp calls)
   fake=$(harness_mktemp fake)
-  {
-    printf '#!/bin/sh\nprintf "%%s|offline=%%s\\n" "$*" "${DOC_TOOLS_LEDGER_OFFLINE:-}" >> "%s"\n' "$log"
-    printf '[ -n "${FAKE_NONE:-}" ] && exit 0\n'
-    printf 'i=1\nwhile [ "$i" -le 40 ]; do\n'
-    printf '  if [ "$i" -le 30 ]; then u=stop; else u=heads-up; fi\n'
-    printf '  echo "$u n$i other-$i@hostb no PR files:f$i — 1 file changed → reconcile-before-next-chunk"\n'
-    printf '  i=$((i + 1))\ndone\n'
-    printf 'echo "info nz other no PR keys:x-9 — a sibling in flight → heads-up"\n'
-  } > "$fake"
+  obj='{"systemMessage":"ledger: 1 in-flight notice(s)","hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"ledger: 1 in-flight notice(s)"}}'
+  cat > "$fake" <<EOF
+#!/bin/sh
+printf '%s|offline=%s|' "\$*" "\${DOC_TOOLS_LEDGER_OFFLINE:-}" >> "$log"
+cat >> "$log"
+echo >> "$log"
+[ -n "\${FAKE_NONE:-}" ] && exit 0
+if [ -n "\${FAKE_OLD:-}" ]; then echo "ERROR: unknown option '--hook'." >&2; exit 3; fi
+printf '%s\n' '$obj'
+EOF
   chmod +x "$fake"
   run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION" DOC_TOOLS="$fake"
-  msg=$(jq -r '.systemMessage // empty' <<<"$RUN_OUT" 2>/dev/null || true)
-  ctx=$(jq -r '.hookSpecificOutput.additionalContext // empty' <<<"$RUN_OUT" 2>/dev/null || true)
-  assert_true "40 notices: at most 15 lines ($(printf '%s\n' "$msg" | wc -l | tr -d ' '))" test "$(printf '%s\n' "$msg" | wc -l)" -le 15
-  assert_contains "$msg" "40" "…counting all 40"
-  assert_contains "$msg" "stop n1 other-1@hostb" "…the first stop notice"
-  assert_contains "$msg" "more" "…the rest counted"
-  assert_contains "$msg" "doc-tools.sh ledger notices" "…with the command for the full list"
-  assert_not_contains "$msg" "info nz" "info notices are left out"
-  assert_eq "$msg" "$ctx" "Claude gets the same lines (additionalContext)"
-  assert_eq "ledger notices|offline=1" "$(cat "$log")" "one call: ledger notices — no --fetch, offline"
+  assert_eq "0|$obj" "$RUN_RC|$RUN_OUT" "the verb's object, verbatim"
+  assert_eq "ledger notices --hook|offline=1|$LGH_SESSION" "$(cat "$log")" "one call: ledger notices --hook, offline, the SessionStart event on its stdin"
   run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION" DOC_TOOLS="$fake" FAKE_NONE=1
-  assert_eq "0|" "$RUN_RC|$RUN_OUT" "no notices: silent"
+  assert_eq "0|" "$RUN_RC|$RUN_OUT" "the verb prints nothing: silent"
+  run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION" DOC_TOOLS="$fake" FAKE_OLD=1
+  assert_eq "0" "$RUN_RC" "a doc-tools.sh that predates --hook: exit 0"
+  assert_contains "$(jq -r '.systemMessage // empty' <<<"$RUN_OUT" 2>/dev/null)" "ledger: cannot list the in-flight notices: unknown option '--hook'" "…one 'cannot list' line with its error"
   : > "$log"
   run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION" DOC_TOOLS="$fake" DOC_SUPERPOWERS_LEDGER_SKIP=1
   assert_eq "0||" "$RUN_RC|$RUN_OUT|$(cat "$log")" "DOC_SUPERPOWERS_LEDGER_SKIP=1: off (nothing run)"
@@ -5286,7 +5282,7 @@ test_ledger_post_commit_backgrounds
 test_ledger_post_commit_batch_ssh
 test_ledger_session_hook_budget
 test_ledger_claude_tracked_note_names_flag
-test_ledger_session_hook_clip
+test_ledger_session_hook_wraps_verb
 test_ledger_state_watch_advisory
 test_ledger_foreign_hook_runs_ledger_first
 test_ledger_state_watch_paths_spaces_tilde

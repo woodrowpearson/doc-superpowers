@@ -243,7 +243,7 @@ B's claimed items (their `consumes`, their siblings) are read from the working t
 | unconfirmed candidates · items with no contract · weak summary (< 20 chars) · sweep marks | advisory | `validate --all` / `--plan` |
 | unacked `stop` notice | blocking at chunk close | spec-inject gate |
 
-Hooks install as their own opt-in set — `install --ledger` adds the git legs (pre-commit validate, pre-push provisional check, post-commit in-flight push) and, with `--claude`, the Claude events (`SessionStart` notices, `PostToolUse(Write|Edit)` state-watch); `uninstall --ledger` removes them. Like the existing git and Claude tiers they are per-clone / per-user and are **not** recorded in `installed.json` (which records the CI tier only). `install --ledger` refuses when `docs/ledger/config.json` is absent.
+Hooks install as their own opt-in set — `install --ledger` adds the git legs (pre-commit validate, pre-push provisional check, post-commit in-flight push) and, with `--claude`, the Claude events (`SessionStart` notices, `PostToolUse(Write|Edit)` state-watch); `uninstall --ledger` removes them. Like the existing git and Claude tiers they are per-clone / per-user and are **not** recorded in `installed.json` (which records the CI tier only). `install --ledger` refuses when `docs/ledger/config.json` is absent. The two Claude events are hook modes of verbs — `ledger notices --hook` and `ledger state-watch --hook` (the event on stdin, one hook object or nothing, never a fetch, always exit 0) — stable entry points beside `doc-tools.sh` that a host can register in its own committed `.claude/settings.json`; the installed scripts are thin wrappers over them (amended 2026-10-14).
 
 ### K. Bootstrapping — `init`
 

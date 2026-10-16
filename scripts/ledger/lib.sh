@@ -40,6 +40,8 @@ _LG_CACHE=""         # $(git rev-parse --git-common-dir)/doc-superpowers/ledger
 . "$_LG_LIB/inflight.sh"
 # shellcheck source=scripts/ledger/init.sh
 . "$_LG_LIB/init.sh"
+# shellcheck source=scripts/ledger/hooks.sh
+. "$_LG_LIB/hooks.sh"
 
 # _lg_die <message>: the run could not run — exit 2, with the verdict object
 # in --format json (exactly once, inside $(…) too: the marker file tells the

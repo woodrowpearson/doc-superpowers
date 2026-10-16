@@ -1833,12 +1833,21 @@ cmd_ledger_notices() {
   local s ix want bh="" bn="" bo="" bmb="" fetch=0 rc=0 nstop=0 head="" payload=""
   _lg_init notices
   [ "${#_ARGS[@]}" = 0 ] || _lg_usage "unexpected argument '${_ARGS[0]}'"
+  # --hook (Task 16c U4; hooks.sh): the SessionStart hook — the current
+  # branch, offline, its own output.
+  if [ -n "${_OPT_hook:-}" ]; then
+    [ -z "$_OPT_branch" ] && [ -z "$_OPT_gate" ] && [ -z "$_OPT_fetch" ] || _lg_usage "--hook takes no other option"
+    _lg_hook_payload
+    DOC_TOOLS_LEDGER_OFFLINE=1
+    export DOC_TOOLS_LEDGER_OFFLINE
+  fi
   if [ -n "$_OPT_fetch" ]; then fetch=1; fi
   want=${_OPT_branch:-}
   _lg_scratch_name
   s=$_LG_SN
   _lg_ifl_load
   if [ "$_LG_IFL_ON" != 1 ]; then
+    if [ -n "${_OPT_hook:-}" ]; then _lg_hook_done; fi
     if [ "$_LG_FORMAT" = json ]; then
       printf '{"inflight_enabled":false,"notices":[]}\n' > "$s.json" || _lg_die "cannot write $s.json"
       _lg_emit notices 0 "$s.json"
@@ -1847,6 +1856,8 @@ cmd_ledger_notices() {
     _lg_out_file "$s.out"
     _lg_emit notices 0
   fi
+  # From here a hook-mode failure is the "cannot list" line.
+  if [ -n "${_OPT_hook:-}" ]; then _LG_HOOK_FAIL=_lg_notices_hook_fail; fi
   _lg_ifl_prepare "$fetch"
   [ -n "$_LG_IFL_B" ] || _lg_die "the base '$_LG_IFL_BASEREF' does not resolve: no notices"
   if [ "${DOC_TOOLS_LEDGER_OFFLINE:-}" = 1 ]; then
@@ -1895,6 +1906,12 @@ cmd_ledger_notices() {
     printf '0\n{"notices":[]}\n' > "$s.nt" || _lg_die "cannot write $s.nt"
   fi
   { IFS= read -r nstop; IFS= read -r payload; } < "$s.nt" || _lg_die "internal: no notices payload"
+  if [ -n "${_OPT_hook:-}" ]; then
+    tail -n +3 "$s.nt" > "$s.out" || _lg_die "cannot write $s.out"
+    _LG_HOOK_FAIL=""
+    _lg_notices_hook_out "$s.out"
+    _lg_hook_done
+  fi
   if [ -n "$_OPT_gate" ] && [ "$nstop" -gt 0 ] 2>/dev/null; then rc=1; fi
   if [ "$_LG_FORMAT" = json ]; then
     printf '%s\n' "$payload" > "$s.json" || _lg_die "cannot write $s.json"

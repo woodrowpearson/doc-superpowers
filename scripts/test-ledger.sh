@@ -12,7 +12,7 @@ source "$SCRIPT_DIR/test-helpers.sh"
 DOC_TOOLS="$(bash_bin_shim "$REPO_DIR/scripts/doc-tools.sh")"
 
 # The ledger sub-verbs (doc-tools.sh ledger <sub>), in verb-table order.
-LG_VERBS="show ls find related sweep recheck inflight notices new assign link note view validate publish finalize init"
+LG_VERBS="show ls find related sweep recheck inflight notices state-watch new assign link note view validate publish finalize init"
 
 LG_INERT_LINE="ledger: not enabled (no docs/ledger/config.json)"
 
@@ -10847,6 +10847,198 @@ EOF
   teardown
 }
 
+# --- Task 16c (U4): hook modes — notices --hook, state-watch --hook ---------------
+
+# lg_hook <payload> <args…>: lg with <payload> on stdin (a hook's event)
+# instead of /dev/null; sets LG_RC, LG_OUT and LG_ERR.
+lg_hook() {
+  local p="$1" err in
+  shift
+  err=$(harness_mktemp lg-err)
+  in=$(harness_mktemp lg-in)
+  printf '%s' "$p" > "$in"
+  LG_RC=0
+  LG_OUT=$("$DOC_TOOLS" ledger "$@" 2>"$err" <"$in") || LG_RC=$?
+  LG_ERR=$(cat "$err")
+  rm -f "$err" "$in"
+}
+
+# lg_hook_wrapper <script> <payload> [VAR=value…]: the hook script of the
+# source tree (scripts/hooks/claude/<script>.sh, uninstalled: DOC_TOOLS set,
+# so its resolver placeholder is never run) with <payload> on stdin; sets
+# LG_RC and LG_OUT (stderr dropped).
+lg_hook_wrapper() {
+  local s="$1" p="$2" in
+  shift 2
+  in=$(harness_mktemp lg-in)
+  printf '%s' "$p" > "$in"
+  LG_RC=0
+  LG_OUT=$(env DOC_TOOLS="$DOC_TOOLS" CLAUDE_PROJECT_DIR="$TEST_DIR" ${1+"$@"} \
+    "${BASH_BIN:-bash}" "$REPO_DIR/scripts/hooks/claude/$s.sh" 2>/dev/null <"$in") || LG_RC=$?
+  rm -f "$in"
+}
+
+LG_HOOK_SS='{"hook_event_name":"SessionStart","source":"startup"}'
+
+test_lg_notices_hook() {
+  echo "test: ledger notices --hook (U4) — the SessionStart event on stdin; one hook object (systemMessage = additionalContext: a count line, the stop and heads-up notices), offline, never fetching; silent when none, when off, when not enabled or outside a repository, on a malformed event or another option; a failure past the start: the 'cannot list' line; always exit 0; the installed wrapper prints the same"
+  lg_ntc_fixture
+  local x id tr msg ctx
+  git commit -q --allow-empty -m "mine" -m "Ledger-Claims: app-1"
+  lg_ntc_branch x-total "touch the total" src/order/total.js more
+  x=$(git rev-parse x-total)
+  id=$(lg_ntc_id x-total@hosta contracts:field:order.total "$x")
+  tr=$(harness_mktemp lg-htrace)
+  GIT_TRACE="$tr" lg_hook "$LG_HOOK_SS" notices --hook
+  assert_eq "0|1" "$LG_RC|$(json_count "$LG_OUT")" "an unacked stop: exit 0, one JSON object"
+  msg=$(jq -r '.systemMessage // empty' <<<"$LG_OUT" 2>/dev/null || true)
+  ctx=$(jq -r '.hookSpecificOutput.additionalContext // empty' <<<"$LG_OUT" 2>/dev/null || true)
+  assert_contains "$msg" "ledger: 1 in-flight notice(s) on this branch (1 stop, 0 heads-up)" "…the count line"
+  assert_contains "$msg" "stop $id x-total" "…the notice"
+  assert_eq "$msg" "$ctx" "…Claude gets the same (additionalContext)"
+  assert_json_field "$LG_OUT" '.hookSpecificOutput.hookEventName' "SessionStart" "…as SessionStart's"
+  assert_eq "" "$(grep -E ' fetch ' "$tr" || true)" "never fetched (offline)"
+  local vout="$LG_OUT"
+  lg_hook_wrapper ledger-session-notices "$LG_HOOK_SS"
+  assert_eq "0|$vout" "$LG_RC|$LG_OUT" "the wrapper (scripts/hooks/claude/ledger-session-notices.sh) prints what the verb prints"
+  lg_hook '{not json' notices --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "a malformed event: silent, exit 0"
+  lg_hook '[1,2]' notices --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "an event that is no object: silent, exit 0"
+  lg_hook "" notices --hook
+  assert_eq "0|1" "$LG_RC|$(json_count "$LG_OUT")" "an empty event (stdin closed): the notices"
+  lg_hook "$LG_HOOK_SS" notices --hook --format json
+  assert_eq "0|" "$LG_RC|$LG_OUT" "--hook --format json (a usage error): silent, exit 0"
+  lg_hook "$LG_HOOK_SS" notices --hook --gate
+  assert_eq "0|" "$LG_RC|$LG_OUT" "--hook --gate (--hook takes no other option): silent, exit 0"
+  lg_hook "$LG_HOOK_SS" notices --hook --bogus
+  assert_eq "0|" "$LG_RC|$LG_OUT" "an undeclared option: silent, exit 0"
+  DOC_SUPERPOWERS_LEDGER_SKIP=1 lg_hook "$LG_HOOK_SS" notices --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "DOC_SUPERPOWERS_LEDGER_SKIP=1: silent"
+  mkdir -p sub/dir
+  ( cd sub/dir && lg_hook "$LG_HOOK_SS" notices --hook && printf '%s|%s' "$LG_RC" "$(json_count "$LG_OUT")" > "$TEST_DIR/.sub" )
+  assert_eq "0|1" "$(cat "$TEST_DIR/.sub")" "run from a subdirectory: the top level's notices"
+  rm -f "$TEST_DIR/.sub"
+  git commit -q --allow-empty -m "ack" -m "Ledger-Ack: $id — checked"
+  lg_hook "$LG_HOOK_SS" notices --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "acked: no notices, silent"
+  lg_enable '{"base":"origin/nope","inflight":{"enabled":true,"host_id":"hosta"}}'
+  lg_hook "$LG_HOOK_SS" notices --hook
+  assert_eq "0" "$LG_RC" "a base that does not resolve: exit 0"
+  assert_contains "$(jq -r '.systemMessage // empty' <<<"$LG_OUT" 2>/dev/null)" "ledger: cannot list the in-flight notices: the base 'origin/nope' does not resolve" \
+    "…one 'cannot list' line naming it"
+  assert_eq "" "$(jq -r '.hookSpecificOutput // empty' <<<"$LG_OUT" 2>/dev/null)" "…for the user alone"
+  lg_enable '{"base":"origin/main"}'
+  lg_hook "$LG_HOOK_SS" notices --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "in-flight awareness off: silent"
+  rm -f docs/ledger/config.json
+  lg_hook "$LG_HOOK_SS" notices --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "not enabled (no config): silent"
+  local out
+  out=$(harness_mktemp_d lg-norepo)
+  ( cd "$out" && GIT_CEILING_DIRECTORIES=$(dirname "$out") lg_hook "$LG_HOOK_SS" notices --hook && printf '%s|%s' "$LG_RC" "$LG_OUT" > "$TEST_DIR/.nr" )
+  assert_eq "0|" "$(cat "$TEST_DIR/.nr")" "outside a repository: silent, exit 0"
+  rm -f "$TEST_DIR/.nr" "$tr"
+  teardown
+}
+
+# 30 stop, 10 heads-up and 1 info notice lines.
+lg_t_notices_hook_clip() {
+  local f i u msg n
+  f="$_SCRATCH/lines"
+  : > "$f"
+  i=1
+  while [ "$i" -le 40 ]; do
+    if [ "$i" -le 30 ]; then u=stop; else u=heads-up; fi
+    printf '%s n%s other-%s@hostb no PR files:f%s — 1 file changed → reconcile-before-next-chunk\n' "$u" "$i" "$i" "$i" >> "$f"
+    i=$((i + 1))
+  done
+  printf 'info nz other no PR keys:x-9 — a sibling in flight → heads-up\n' >> "$f"
+  msg=$(_lg_notices_hook_out "$f" | jq -r '.systemMessage')
+  n=$(printf '%s\n' "$msg" | wc -l | tr -d ' ')
+  assert_eq "15" "$n" "40 notices: 15 lines in all"
+  assert_contains "$(printf '%s\n' "$msg" | sed -n 1p)" "40 in-flight notice(s) on this branch (30 stop, 10 heads-up)" "…the count line counts all 40"
+  assert_contains "$(printf '%s\n' "$msg" | sed -n 2p)" "stop n1 other-1@hostb" "…the first stop notice next"
+  assert_eq "  …and 27 more (run 'doc-tools.sh ledger notices' for the full list)" "$(printf '%s\n' "$msg" | sed -n 15p)" \
+    "…13 notices, then the rest counted with the command for the full list"
+  assert_not_contains "$msg" "info nz" "info notices are left out"
+  head -n 14 "$f" > "$f.14"
+  msg=$(_lg_notices_hook_out "$f.14" | jq -r '.systemMessage')
+  assert_eq "15|" "$(printf '%s\n' "$msg" | wc -l | tr -d ' ')|$(printf '%s\n' "$msg" | grep 'more' || true)" "14 notices: all 14 and the count line, nothing cut"
+  printf 'heads-up h1 o no PR files:f — x → y\nstop s1 o no PR files:f — x → y\n' > "$f.2"
+  assert_eq "stop s1|heads-up h1" "$(_lg_notices_hook_out "$f.2" | jq -r '.systemMessage' | sed -n '2,3p' | cut -d' ' -f1,2 | paste -sd'|' -)" \
+    "stop notices before heads-up"
+  printf 'info nz other no PR keys:x-9 — a sibling in flight → heads-up\n' > "$f.i"
+  assert_eq "" "$(_lg_notices_hook_out "$f.i")" "info alone: nothing"
+}
+test_lg_notices_hook_clip() {
+  echo "test: ledger notices --hook (U4) — at most 15 lines: the count line, then the stop and heads-up notices (stop first), past 14 the first 13 and '…and M more' with the command for the full list; info left out"
+  lg_fixture
+  lg_enable
+  lg_in lg_t_notices_hook_clip
+  teardown
+}
+
+LG_HOOK_SW_CFG='{"state_watch":{"paths":["~/notes","scratch/*/state"],"patterns":["next:","Approved"]}}'
+
+# lg_sw_payload <tool> <file_path> <text>: a PostToolUse event (Write: content;
+# Edit: new_string).
+lg_sw_payload() {
+  local k=content
+  if [ "$1" = Edit ]; then k=new_string; fi
+  jq -cn --arg t "$1" --arg f "$2" --arg k "$k" --arg s "$3" \
+    '{hook_event_name: "PostToolUse", tool_name: $t, tool_input: ({file_path: $f} + {($k): $s})}'
+}
+
+test_lg_state_watch_hook() {
+  echo "test: ledger state-watch --hook (U4) — a PostToolUse event on stdin: a write under state_watch.paths naming an item key and a pattern gets one advisory object (additionalContext) naming 'doc-tools.sh ledger note <key> \"…\"'; else silent; a malformed event silent; always exit 0; without --hook a usage error; the installed wrapper prints the same"
+  lg_fixture
+  lg_enable "$LG_HOOK_SW_CFG"
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[{"id":"x","title":"X","kind":"service","status":"active","paths":["src/**"]}]}'
+  git add -A && git commit -qm sw
+  local p ctx
+  p=$(lg_sw_payload Write "$HOME/notes/today.md" "x-12 next: wire the hook")
+  lg_hook "$p" state-watch --hook
+  assert_eq "0|1" "$LG_RC|$(json_count "$LG_OUT")" "a key and a pattern under ~/notes: exit 0, one JSON object"
+  ctx=$(jq -r '.hookSpecificOutput.additionalContext // empty' <<<"$LG_OUT" 2>/dev/null || true)
+  assert_eq "ledger: this write to $HOME/notes/today.md records state for x-12: keep it in the ledger, its one home — doc-tools.sh ledger note x-12 \"…\" (--kind ruling for a ruling)" \
+    "$ctx" "…the advisory line"
+  assert_json_field "$LG_OUT" '[.hookSpecificOutput.hookEventName, (has("systemMessage") | tostring)] | join(",")' "PostToolUse,false" "…for Claude alone, as PostToolUse's"
+  local vout="$LG_OUT"
+  lg_hook_wrapper ledger-state-watch "$p"
+  assert_eq "0|$vout" "$LG_RC|$LG_OUT" "the wrapper (scripts/hooks/claude/ledger-state-watch.sh) prints what the verb prints"
+  lg_hook "$(lg_sw_payload Edit "$TEST_DIR/scratch/a/state/s.md" "APPROVED for x-3")" state-watch --hook
+  assert_contains "$LG_OUT" "ledger note x-3" "an Edit under scratch/*/state (relative to the top level), the pattern in any case"
+  lg_hook "$(lg_sw_payload Write "$HOME/notes/today.md" "x-12 is fine")" state-watch --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "a key but no pattern: silent"
+  lg_hook "$(lg_sw_payload Write "$HOME/notes/today.md" "next: q-4")" state-watch --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "a key of no registered ledger: silent"
+  lg_hook "$(lg_sw_payload Write "$HOME/elsewhere/t.md" "x-12 next: y")" state-watch --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "outside state_watch.paths: silent"
+  lg_hook '{not json' state-watch --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "a malformed event: silent, exit 0"
+  lg_hook '{"tool_input":{"content":"x-12 next: y"}}' state-watch --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "no file_path: silent"
+  lg_hook "" state-watch --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "no event: silent"
+  DOC_SUPERPOWERS_LEDGER_SKIP=1 lg_hook "$p" state-watch --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "DOC_SUPERPOWERS_LEDGER_SKIP=1: silent"
+  lg_hook "$p" state-watch
+  assert_eq "3" "$LG_RC" "without --hook: a usage error (exit 3)"
+  assert_contains "$LG_ERR" "--hook" "…naming --hook"
+  lg_hook "$p" state-watch --hook --format json
+  assert_eq "0|" "$LG_RC|$LG_OUT" "--hook --format json: silent, exit 0"
+  lg_enable '{}'
+  lg_hook "$p" state-watch --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "no state_watch config: silent"
+  lg_hook_wrapper ledger-state-watch "$p"
+  assert_eq "0|" "$LG_RC|$LG_OUT" "…and the wrapper too (doc-tools.sh not run)"
+  rm -f docs/ledger/config.json
+  lg_hook "$p" state-watch --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "not enabled: silent"
+  teardown
+}
+
 run_tests() {
   echo "Running ledger tests..."
   echo ""
@@ -11221,6 +11413,9 @@ run_tests() {
   test_lg_trailers_since_adoption_before_adopted
   test_lg_trailers_since_inflight
   test_lg_init_summary_skips_bold_tags
+  test_lg_notices_hook
+  test_lg_notices_hook_clip
+  test_lg_state_watch_hook
 
   print_summary
 }
