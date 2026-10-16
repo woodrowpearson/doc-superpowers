@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-10-15T06:06:49Z",
+  "generated_at": "2026-10-16T00:12:03Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -9,7 +9,9 @@
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/",
-        "references/"
+        "references/",
+        "evals/",
+        ".github/workflows/tests.yml"
       ],
       "code_commit": "daa9c421c7d4d0dafc819b9eea26c2534c6cb855",
       "doc_type": "architecture",
@@ -20,7 +22,9 @@
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "2a07777a830045d728f0829b6e2c854633232f6b",
         "scripts/": "2564adcb4cc68db3e76b47508734f5b73c3a3535",
-        "references/": "3beafdbc80246101af2c0d5d84625fa6f7edf726"
+        "references/": "3beafdbc80246101af2c0d5d84625fa6f7edf726",
+        "evals/": "da57aab2008cfa77e310501c86bd6855bd8a1db7",
+        ".github/workflows/tests.yml": "f4ad4254a2a42b09cdac23e37449c10f23874b02"
       }
     },
     "docs/codebase-guide.md": {
