@@ -83,8 +83,8 @@ doc-superpowers/
 │   ├── hooks.md                   # `hooks` action: installer routing, consent table, CI templates (REQUIRED)
 │   ├── spec-lifecycle-actions.md  # Detailed procedures for spec-generate/inject/verify + the Spec Status Model
 │   ├── integration-patterns.md  # Code review, commit review, wrapper skill integration
-│   ├── spec-lifecycle-protocol.md  # Wrapper author integration guide — input/output contracts
-│   ├── spec-claims.md             # Spec claims (opt-in): claim schema, checks V1–V12, adapters, gates, direction protocol
+│   ├── spec-lifecycle-protocol.md  # Wrapper author integration guide — input/output contracts, the claims direction protocol
+│   ├── spec-claims.md             # Spec claims (opt-in): claim schema, checks V1–V12, adapters, gates, the direction policy keys
 │   └── tool-mappings.md           # The one capability matrix: per-client tool names + capabilities, tool resolution
 ├── docs/                 # Documentation about this skill (you are here)
 │   ├── architecture/
@@ -139,8 +139,8 @@ doc-superpowers/
 | `references/release.md` | The `release` action's steps 1–12 (SKILL.md keeps a summary and a REQUIRED pointer) | Changing the release flow |
 | `references/hooks.md` | The `hooks` action: installer routing, the per-user Claude tier, the `--ci` consent table, CI templates and helpers, install state | Changing installer flags, tiers, or workflow templates |
 | `references/spec-lifecycle-actions.md` | Detailed procedures for spec-generate, spec-inject, spec-verify actions | Changing spec action steps or adding new spec actions |
-| `references/spec-claims.md` | Spec claims (opt-in, enabled by `docs/spec-claims/`): sidecar and claim schema, `config.json`, checks V1–V12, exit codes, adapter contracts, gates and records, the direction protocol, reference pytest/jest helpers | Changing a `claims` verb, check, adapter contract or the claims policy |
-| `references/spec-lifecycle-protocol.md` | Wrapper author integration guide — input/output contracts for spec-generate, spec-inject, spec-verify; integration patterns for calling skills | Adding integration patterns, changing action contracts |
+| `references/spec-claims.md` | Spec claims (opt-in, enabled by `docs/spec-claims/`): sidecar and claim schema, `config.json`, checks V1–V12, exit codes, adapter contracts, gates and records, the direction policy keys (config `policy`), reference pytest/jest helpers | Changing a `claims` verb, check, adapter contract or the claims policy |
+| `references/spec-lifecycle-protocol.md` | Wrapper author integration guide — input/output contracts for spec-generate, spec-inject, spec-verify; integration patterns for calling skills; the claims **Direction protocol** (`CODE-DIVERGES`, `DOC-STALE`, `RETIRE`, its policy keys and their defaults) | Adding integration patterns, changing action contracts, changing the direction protocol |
 | `references/tool-mappings.md` | The one capability matrix — per-client tool names and capabilities (INSTALL files, AGENTS.md and GEMINI.md link here), tool resolution | Adding framework support, tool name or capability changes |
 | `AGENTS.md` | Cross-client agent instructions | Adding commands, changing project orientation |
 | `.opencode/plugins/doc-superpowers.js` | OpenCode ESM plugin | Changing skill registration or tool mapping injection |
@@ -181,7 +181,7 @@ doc-superpowers/
 | Hook installer logic | `scripts/hooks/install.sh` — placement (`enter_repo`), `safe_dest` + preflight, marked blocks, integration block, tier routing, status, per-command flag allow-list |
 | Install-state tracking | `scripts/hooks/state.sh` — `.claude/doc-superpowers/installed.json` schema 2, `state_load` / marks / `state_flush` |
 | Granular CI install flags | `references/hooks.md` — `--workflows=<csv\|all\|none>`, `--force`, `--transient`, the deprecated `--helpers=<bool>`, the consent table and what an AI job's agent can reach |
-| Tools subcommand | `scripts/doc-tools.sh` `cmd_tools_*` — `tools install [--dest <path>] [--with-helpers \| --helper <dir>...]`, `tools uninstall [--helper <dir>...]` (removes only files byte-identical to the plugin's; refuses symlinked paths), `tools status`, `tools version` |
+| Tools subcommand | `scripts/doc-tools.sh` `cmd_tools_*` — `tools install [--dest <path>] [--with-helpers \| --helper <dir>...]`, `tools uninstall [--dest <path>] [--helper <dir>...]` (removes only files byte-identical to the plugin's; refuses symlinked paths), `tools status [--dest <path>]`, `tools version` |
 | Git hook scripts | `scripts/hooks/git/` — pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push |
 | Claude Code hook scripts | `scripts/hooks/claude/` — pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh |
 | CI workflow templates | `scripts/hooks/ci/` — 8 templates total (2 shell-based, 6 AI-powered; `doc-index-update.yml` was retired in v3.0.0). Shell: doc-freshness-pr.yml, doc-freshness-schedule.yml (run the vendored `.github/scripts/doc-tools.sh` through `doc-superpowers-steps/freshness-check.sh`). AI: doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml (plus a `claims` job, no AI, run through `doc-superpowers-steps/claims-check.sh pr`; the schedule runs `claims-check.sh scheduled`; both inert without `docs/spec-claims/`), doc-pr-full-cycle.yml, doc-pr-release.yml (per-PR release-notes fragment producer, with colocated helpers under `doc-pr-release/`). All actions SHA-pinned. This repo self-installs only the 2 shell-based workflows into its own `.github/workflows/` (with the vendored `.github/scripts/` they run, and the choices in `.claude/doc-superpowers/installed.json`) — the 6 AI ones need Anthropic credentials configured as repository secrets, so the 2-of-8 gap here is deliberate, not drift. `tests.yml` fails when a self-installed file differs from its template |
@@ -191,9 +191,9 @@ doc-superpowers/
 | Hooks action routing | `skills/doc-superpowers/SKILL.md` Section 1 "`hooks`" (the non-negotiables) → `references/hooks.md` (the procedure) |
 | This repo's own installed tiers, and the check that they match their templates | `.github/workflows/` + `.github/scripts/` + `.claude/doc-superpowers/installed.json` + `.gitattributes`; `.github/workflows/tests.yml` step "Self-installed CI tier matches its templates" |
 | Spec lifecycle routing | `skills/doc-superpowers/SKILL.md` "Spec Lifecycle Routing" diagram + Section 1 "Spec Lifecycle Actions" (quick routing, the `:amends` role, `--plan`) → `references/spec-lifecycle-actions.md` (the procedures) |
-| Spec lifecycle integration guide | `references/spec-lifecycle-protocol.md` — wrapper author contracts, integration patterns |
+| Spec lifecycle integration guide | `references/spec-lifecycle-protocol.md` — wrapper author contracts, integration patterns, the claims **Direction protocol** |
 | Spec status transitions | `references/spec-lifecycle-actions.md` **Spec Status Model** section — canonical ladder, exemptions, and roles |
-| Spec claims (opt-in) | `references/spec-claims.md` — schema, checks V1–V12, adapter contracts, gates, direction protocol; the code is `scripts/doc-tools.sh`'s `# --- Spec claims` sections (`cmd_claims_*`, `_claims_*`, `_JQ_CLAIMS_*`); the CI step is `scripts/hooks/ci/doc-superpowers-steps/claims-check.sh` |
+| Spec claims (opt-in) | `references/spec-claims.md` — schema, checks V1–V12, adapter contracts, gates, the direction policy keys (config `policy`); the flow is Code Flow → "Spec claims (every claims verb)"; the code is `scripts/doc-tools.sh`'s `# --- Spec claims` sections (`cmd_claims_*`, `_claims_*`, `_JQ_CLAIMS_*`); the CI step is `scripts/hooks/ci/doc-superpowers-steps/claims-check.sh` |
 | Spec claims tests | `scripts/test-spec-claims.sh` |
 | Spec supersession logic | `references/spec-lifecycle-actions.md` `spec-generate` overlap check — `deprecate-entry <old> --superseded-by <new>` writes `superseded_by` and the successor's `replaces` |
 | Release action routing | `skills/doc-superpowers/SKILL.md` Section 1 "`release`" (summary) → `references/release.md` steps 1–12 — range start, fragment merge, semver bump, drafting agent, RELEASE-NOTES.md prepend, one release commit |
@@ -246,11 +246,15 @@ User invokes /doc-superpowers init
 User invokes /doc-superpowers audit
   → Discovery Phase (same as above)
   → Action Router → audit
-    → Load doc-index (if exists)
-    → For each scope: dispatch general-purpose agent with prompt template
+    → Step 2: check-freshness through the discovery jq filter (stale, missing and untracked docs)
+    → Step 3: scope inventory vs existing docs (a scope with no doc, a doc missing sections)
+    → Step 4: naming conventions (SPEC-{CAT}-NNN, ADR-NNN, kebab-case; doc-spec.md's naming table lists the exceptions)
+    → Step 5: structure (flat-structure docs, diagrams in a global docs/diagrams/)
+    → Steps 6–8: CLAUDE.md, README.md and RELEASE-NOTES.md currency (the orchestrator's own checks)
+    → Step 9: for each affected scope, dispatch a general-purpose agent with the prompt template
     → Each agent: read doc + code_refs → report findings with evidence
-    → Merge agent results → sort by severity (P0 > P1 > P2 > P3)
-    → Compare agentic inventory vs workflows/doc-superpowers.md sections
+    → Step 10: merge agent results with steps 6–8's findings → sort by severity (P0 > P1 > P2 > P3)
+    → Step 11, when auditing workflows/: compare the agentic inventory with the documented workflow sections
   → Output unified report
   → Write audit report to docs/plans/YYYY-MM-DD-audit-report.md (name taken: -<short HEAD sha>), with its Update Tasks
   → Suggest /doc-superpowers update --report=<that path>
@@ -418,7 +422,7 @@ Wrapper skill calls /doc-superpowers spec-verify --mode=post-execute --specs=<pa
   → Amendment landed-check for each :amends spec: FAIL when the dated AMENDED block is absent or does not cite this plan (without --plan: block-present only, with a WARN)
   → Five-way coverage check: design doc ↔ specs ↔ code ↔ CLAUDE.md ↔ README.md
   → Output: PASS/FAIL verdict with compliance report
-  → Reports status only — spec-verify is read-only; the In Review → Implemented write belongs to spec-inject, and only for scope-covered target specs
+  → Writes no Status (claims-enabled: step 0's `attest --final` writes final.json); the In Review → Implemented write belongs to spec-inject, and only for scope-covered target specs
 
 During review: /doc-superpowers spec-verify --mode=review --changed-files=<paths> [--specs=<paths>] [--plan=<path>]
   → Map changed files to governing specs via code_refs
@@ -427,4 +431,53 @@ During review: /doc-superpowers spec-verify --mode=review --changed-files=<paths
   → Claims-enabled projects only: `claims run --planes-of <base>...HEAD` and V9 items → P1 Claim red
     (skipped in a CI run: there `doc-spec-verify.yml`'s non-AI claims job is that check)
   → Output: coverage report per changed file
+```
+
+### Spec claims (every `claims` verb)
+
+The seven `claims` verbs share one path through `scripts/doc-tools.sh` (the `# --- Spec claims` sections; the contract is `references/spec-claims.md`). Each run prints exactly one verdict object and exits by the claims family's precedence, 1 > 2 > 0.
+
+```
+doc-tools.sh claims <verb> [options] [args]
+  → _main: _USAGE_RC=3 and fd 9 (the run's real stdout, for the verdict) are set before the verb
+    lookup, so an unknown claims verb or option is a claims usage error: {verb, enabled, exit: 3, error}
+  → _parse_args, then check_deps and _require_repo (exit 2 outside a work tree or below its top level)
+    — both run before the inert check, so they hold in an inert project too
+  → cmd_claims_<verb> → _claims_init
+      → no docs/spec-claims/: print {"verb":…,"enabled":false,"exit":0} and exit 0 — inert, nothing read
+      → else: config.json deep-merged over _JQ_CLAIMS_DEFAULTS (not one JSON object: exit 2);
+        the base (--base, else config base, else origin/main) resolved to git merge-base HEAD <base>
+        (unresolvable: indeterminate, except for a verb that never reads it)
+  → gate, promote, attest --final: _claims_refuse_dirty — git status --porcelain --untracked-files=no,
+    docs/spec-claims/gates/ excluded; anything listed → indeterminate dirty-tree, exit 2, before
+    anything runs (untracked files do not count)
+  → _claims_load: the sidecars (docs/spec-claims/*.json but config.json; never gates/) in the proposed
+    tree (the staged tree for validate --staged) and at the merge-base, each claim marked eligible or not
+  → a range (run --planes-of, V8 / V9 over the gate's <from>..HEAD, the gate record's patch ids):
+    the range rule, its one implementation (_claims_range_*) — git rev-list --first-parent --no-merges
+    <a>..<b>, plus each first-parent merge's own hand resolutions (git show --cc ∩ git show
+    --remerge-diff; git ≥ 2.36, else exit 2); <a>...<b> means <merge-base>..<b>; <a> must be an
+    ancestor of <b>; diff and re-merge options pinned, so every clone reads the same text
+  → an adapter call (_claims_adapter_call): <top level>/<adapter path>, run from the top level with
+    stdin /dev/null and fd 9 closed; an unsafe, uncontained, missing or non-executable adapter is
+    rc 126, indeterminate. Output parsed fail-closed (_JQ_CLAIMS_PARSE_RUN / _PARSE_LIST): a non-zero
+    exit or one malformed line makes every requested node indeterminate — never a pass, never
+    "not bound"
+  → promote <id>: the bound test green at HEAD; each proof (mutant, observed_red) in its own throwaway
+    worktree at HEAD (_claims_worktree_add: hooks off, removed on every exit path), green unmodified,
+    then red by an assertion with the proof applied; then, in order: the verdict into the local store
+    <git common dir>/spec-claims/promotions/<digest>.json, the sidecar rewritten atomically
+    (status, promotion {at, verdict_sha256, proved}), the doc's ## Claim status block re-rendered
+  → render: each eligible doc's status block, between its markers (_claims_blocks)
+  → gate --plan --chunk: the chunk's named claims, the --planes-of selection and the lint/log/judge
+    claims the range moved into built/gated run at HEAD; V8, V8n, V9 over <from>..HEAD; the
+    record-inclusion rule (a change not included is a silent reconciliation); then _claims_gate_write
+    installs docs/spec-claims/gates/<plan-stem>/chunk-<n>.json atomically — red or not, through no
+    symbolic link and never outside the work tree
+  → attest --plan [--final]: the records matched to merge-base..HEAD by git patch-id --stable, the named
+    claims re-run at HEAD, the cross-check, the amendment batch, render --check; --final writes
+    final.json through the same writer, even when it does not pass
+  → _claims_emit: one verdict object on fd 9 — {verb, enabled, exit, base, findings, advisories,
+    indeterminate, results} plus the verb's own fields — and exit 1 (findings) > 2 (could not run) > 0;
+    claims rulings --format markdown prints the amendment batch as Markdown instead
 ```
