@@ -530,7 +530,7 @@ function wt_end(   p) {
   }
   wp = ""; wh = ""; wb = ""; wdet = 0
 }
-function add(host, name, oid, d, src,   k, j) {
+function add_tip(host, name, oid, d, src,   k, j) {
   k = host SUBSEP name
   if (!(k in O)) { n++; K[n] = k; H[k] = host; N[k] = name }
   if (!(k in O) || d > D[k] || (d == D[k] && PR[src] < PR[P[k]])) { O[k] = oid; D[k] = d; P[k] = src }
@@ -567,7 +567,7 @@ BEGIN {
   } else next
   if (name == "" || name == "HEAD" || name == bb || name == views) next
   if (cutoff > 0 && d < cutoff && !(host == me && name == cur)) next
-  add(host, name, oid, d, src)
+  add_tip(host, name, oid, d, src)
 }
 END {
   split("local worktree remote inflight", X, " ")

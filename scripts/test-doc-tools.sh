@@ -768,6 +768,9 @@ test_shipped_jq_is_free_of_jq17_only_forms() {
   # $(…) inside them, $'…', heredocs) so a shell variable such as "$label" is
   # never read as jq. Checked by hand when this guard was written, with no hit
   # (the scan cannot parse jq): an `if … then … end` with no else (1.7+).
+  # The work ledger's code is scanned too: its scripts (scripts/ledger/*.sh,
+  # scripts/adapters/*.sh) like any other, and its whole jq programs
+  # (scripts/ledger/*.jq) as jq — every line but a comment.
   echo "test: shipped jq programs use no jq-1.7-only forms (the jq floor is 1.6)"
   local repo_root
   repo_root="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -775,6 +778,8 @@ test_shipped_jq_is_free_of_jq17_only_forms() {
   for candidate in \
     "$repo_root"/scripts/doc-tools.sh \
     "$repo_root"/scripts/merge-doc-index.sh \
+    "$repo_root"/scripts/ledger/*.sh \
+    "$repo_root"/scripts/adapters/*.sh \
     "$repo_root"/scripts/hooks/*.sh \
     "$repo_root"/scripts/hooks/claude/*.sh \
     "$repo_root"/scripts/hooks/ci/doc-pr-release/*.sh \
@@ -784,6 +789,18 @@ test_shipped_jq_is_free_of_jq17_only_forms() {
     [ -f "$candidate" ] && targets+=("$candidate")
   done
   assert_true "found shipped scripts to scan (${#targets[@]})" test "${#targets[@]}" -ge 5
+  local jqfiles=()
+  for candidate in "$repo_root"/scripts/ledger/*.jq; do
+    [ -f "$candidate" ] && jqfiles+=("$candidate")
+  done
+  assert_true "found the ledger's jq programs to scan (${#jqfiles[@]})" test "${#jqfiles[@]}" -ge 3
+  local ledger_n=0
+  for candidate in ${targets[@]+"${targets[@]}"}; do
+    case "$candidate" in
+      "$repo_root"/scripts/ledger/*.sh | "$repo_root"/scripts/adapters/*.sh) ledger_n=$((ledger_n + 1)) ;;
+    esac
+  done
+  assert_true "the ledger's scripts and adapters are among them ($ledger_n)" test "$ledger_n" -ge 10
 
   # Prints, per line, the text of that line inside single-quoted strings
   # ("<line>:<text>"); full-line comments are blanked first by the caller.
@@ -834,6 +851,31 @@ test_shipped_jq_is_free_of_jq17_only_forms() {
       if (pend != "") hd = pend
     }'
 
+  # The same for a whole jq program: "<line>:<text>" with its comments (a "#"
+  # outside a string, up to the end of the line) left out. A string's
+  # interpolation, "\(…)", is code again, so a "#" in a string inside it is
+  # not a comment either.
+  local jqextract='
+    BEGIN { st = 0; depth = 0; sp = 0 }
+    {
+      line = $0; out = ""; n = length(line); i = 1
+      while (i <= n) {
+        c = substr(line, i, 1)
+        if (st == 1) {
+          if (substr(line, i, 2) == "\\(") { stk[++sp] = depth; depth++; st = 0; out = out "\\("; i += 2; continue }
+          if (c == "\\") { out = out substr(line, i, 2); i += 2; continue }
+          if (c == dq) st = 0
+          out = out c; i++; continue
+        }
+        if (c == dq) { st = 1; out = out c; i++; continue }
+        if (c == "#") break
+        if (c == "(") depth++
+        if (c == ")") { depth--; if (sp > 0 && depth == stk[sp]) { sp--; st = 1 } }
+        out = out c; i++
+      }
+      if (out ~ /[^ ]/) printf "%d:%s\n", NR, out
+    }'
+
   # <label>|<ERE over the extracted text>, index-aligned with `samples`: one
   # planted shell line per pattern, which the extractor and the pattern
   # together MUST flag.
@@ -875,6 +917,18 @@ test_shipped_jq_is_free_of_jq17_only_forms() {
   if awk -v q="'" -v dq='"' "$extract" "$plant" | grep -qE -- "${patterns[0]#*|}"; then
     unmatched="${unmatched}    shell variables \$label / \$end / \$or outside single quotes were read as jq"$'\n'
   fi
+  # A jq program: a form in its code is flagged, also after a "#" in a string
+  # or in an interpolation's string; a form in a comment is not.
+  printf '%s\n' 'def f: .a as $or | $or;' > "$plant"
+  awk -v dq='"' "$jqextract" "$plant" | grep -qE -- "${patterns[0]#*|}" \
+    || unmatched="${unmatched}    a .jq program: '.a as \$or' in its code was not flagged"$'\n'
+  printf '%s\n' '"a # b" as $x | pick(.a)' '"\("#")" | pick(.b)' > "$plant"
+  [ "$(awk -v dq='"' "$jqextract" "$plant" | grep -cE -- "${patterns[1]#*|}")" = 2 ] \
+    || unmatched="${unmatched}    a .jq program: a \"#\" in a string (or an interpolation's) was read as a comment"$'\n'
+  printf '%s\n' '# .a as $or | pick(.a)' '.a # as $or' > "$plant"
+  if awk -v dq='"' "$jqextract" "$plant" | grep -qE -- "${patterns[0]#*|}|${patterns[1]#*|}"; then
+    unmatched="${unmatched}    a .jq program: a form in a comment was flagged"$'\n'
+  fi
   rm -f "$plant"
   if [ -z "$unmatched" ] && [ "${#patterns[@]}" -eq "${#samples[@]}" ]; then
     PASS=$((PASS + 1))
@@ -887,20 +941,31 @@ test_shipped_jq_is_free_of_jq17_only_forms() {
       "${#patterns[@]}" "${#samples[@]}" "$unmatched"
   fi
 
-  local scanned label regex hits target file_hits grep_rc
+  local scanned label regex hits target file_hits grep_rc k=0
   scanned=$(harness_mktemp_d jq17scan)
+  # One scan file per target, by its position (two targets may share a
+  # basename).
   for target in "${targets[@]}"; do
+    k=$((k + 1))
     awk '{ if ($0 ~ /^[[:space:]]*#/) print ""; else print }' "$target" \
-      | awk -v q="'" -v dq='"' "$extract" > "$scanned/${target##*/}.sq" \
+      | awk -v q="'" -v dq='"' "$extract" > "$scanned/$k.sq" \
       || { echo "  cannot extract the quoted strings of $target" >&2; FAIL=$((FAIL + 1)); }
+  done
+  for target in "${jqfiles[@]}"; do
+    targets+=("$target")
+    k=$((k + 1))
+    awk -v dq='"' "$jqextract" "$target" > "$scanned/$k.sq" \
+      || { echo "  cannot extract the jq program $target" >&2; FAIL=$((FAIL + 1)); }
   done
   for spec in "${patterns[@]}"; do
     label="${spec%%|*}"
     regex="${spec#*|}"
     hits=""
+    k=0
     for target in "${targets[@]}"; do
+      k=$((k + 1))
       grep_rc=0
-      file_hits=$(grep -E -- "$regex" "$scanned/${target##*/}.sq" 2>&1) || grep_rc=$?
+      file_hits=$(grep -E -- "$regex" "$scanned/$k.sq" 2>&1) || grep_rc=$?
       if [ "$grep_rc" -ge 2 ]; then
         hits="${hits}    ${target#"$repo_root/"}: grep rc=$grep_rc (pattern error): ${file_hits}"$'\n'
       elif [ "$grep_rc" -eq 0 ] && [ -n "$file_hits" ]; then
