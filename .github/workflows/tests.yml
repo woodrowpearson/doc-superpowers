@@ -83,7 +83,7 @@ jobs:
           for tool in jq git; do
             command -v "$tool" >/dev/null 2>&1 || { echo "::error::$tool not found"; exit 1; }
           done
-          # test-doc-pr-release.sh parses the eight CI templates to prove the
+          # test-doc-pr-release.sh parses the nine CI templates to prove the
           # placeholder substitution leaves valid YAML, and reads template
           # structure (concurrency, job guards, run: wiring) through the same
           # parser. PyYAML ships on the ubuntu image but not the macOS one, so
@@ -215,19 +215,30 @@ jobs:
           cmp scripts/doc-tools.sh .github/scripts/doc-tools.sh \
             || drift .github/scripts/doc-tools.sh "differs from scripts/doc-tools.sh"
           [ -x .github/scripts/doc-tools.sh ] || drift .github/scripts/doc-tools.sh "is not executable"
+          # Each vendored directory against its source: the CI helpers'
+          # scripts/hooks/ci/<dir>/*.sh, and the ledger helper set's
+          # scripts/ledger/ (*.sh, *.awk, *.jq) and scripts/adapters/*.sh.
+          # Scripts must be executable; the awk and jq programs are data.
           for d in .github/scripts/*/; do
             [ -d "$d" ] || continue
             d=$(basename "$d")
+            case "$d" in
+              ledger | adapters) src=scripts/$d ;;
+              *) src=scripts/hooks/ci/$d ;;
+            esac
             for f in ".github/scripts/$d"/*; do
-              p="scripts/hooks/ci/$d/$(basename "$f")"
+              p="$src/$(basename "$f")"
               if [ ! -f "$p" ]; then
                 drift "$f" "is not a plugin helper (no $p)"
                 continue
               fi
               cmp "$p" "$f" || drift "$f" "differs from $p"
-              [ -x "$f" ] || drift "$f" "is not executable"
+              case "$f" in
+                *.sh) [ -x "$f" ] || drift "$f" "is not executable" ;;
+              esac
             done
-            for p in "scripts/hooks/ci/$d"/*.sh; do
+            for p in "$src"/*.sh "$src"/*.awk "$src"/*.jq; do
+              [ -f "$p" ] || continue
               [ -e ".github/scripts/$d/$(basename "$p")" ] \
                 || drift ".github/scripts/$d" "lacks $(basename "$p") (a partial helper install)"
             done
