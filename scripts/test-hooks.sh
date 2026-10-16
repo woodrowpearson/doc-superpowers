@@ -5221,6 +5221,74 @@ test_ledger_state_watch_advisory() {
   teardown
 }
 
+test_ledger_legs_honour_both_skips() {
+  # Ruling (audit 2026-10-15): DOC_SUPERPOWERS_SKIP=1 bypasses all hooks, the
+  # ledger legs included — beside DOC_SUPERPOWERS_LEDGER_SKIP=1, which
+  # bypasses the ledger legs alone. The ledger block runs before the git
+  # tier's own SKIP exit, so each leg checks both itself.
+  echo "test: ledger: DOC_SUPERPOWERS_SKIP=1 and DOC_SUPERPOWERS_LEDGER_SKIP=1 each skip every ledger leg — pre-commit and pre-push with a line naming the variable, post-commit, SessionStart and state-watch silently"
+  lgh_fixture '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta"},"state_watch":{"paths":["~/notes"],"patterns":["next:"]}}'
+  lgh_remote
+  inst install --ledger --ledger-claude
+  local var head h calls fake wrap n
+  calls=$(harness_mktemp calls)
+  # A stand-in doc-tools.sh for the post-commit leg: it logs its call and
+  # pushes nothing (no background job outlives the test).
+  wrap=$(harness_mktemp stub)
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n' "$calls" > "$wrap"
+  chmod +x "$wrap"
+  fake=$(harness_mktemp fake)
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\nprintf "%%s\\n" %s\n' "$calls" \
+    "'{\"systemMessage\":\"x\",\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"x\"}}'" > "$fake"
+  chmod +x "$fake"
+  for var in DOC_SUPERPOWERS_SKIP DOC_SUPERPOWERS_LEDGER_SKIP; do
+    # pre-commit: an item in no registered ledger would block the commit.
+    lgh_item "docs/issues/bad-$var.md" "key: nope-1" "ledger: nope" "status: Open" "summary: An item in no registered ledger"
+    git add -A
+    head=$(git rev-parse HEAD)
+    run_hooked "$var=1" -- git commit -qm "bad ($var)"
+    assert_eq "0" "$RUN_RC" "$var=1: pre-commit lets the commit through"
+    assert_contains "$RUN_ERR" "ledger: validate --staged skipped ($var=1)" "…with a line naming $var"
+    # pre-push: a provisional key would refuse the push (keys.mode cas).
+    h=$(lgh_hex4 "docs/issues/p-$var.md")
+    lgh_item "docs/issues/p-$var.md" "key: x-~$h" "ledger: x" "status: Open" "summary: Filed offline, a provisional key"
+    git add -A
+    git commit -qm "provisional ($var)" --no-verify
+    run_hooked "$var=1" -- git push -q origin HEAD:main
+    assert_eq "0" "$RUN_RC" "$var=1: pre-push lets the push through"
+    assert_contains "$RUN_ERR" "ledger: pre-push check skipped ($var=1)" "…with a line naming $var"
+    assert_eq "$(git rev-parse HEAD)" "$(git --git-dir="$LGH_REMOTE" rev-parse main)" "…the remote has it"
+    # post-commit: no in-flight push is started (a control commit shows one is).
+    git checkout -q -b "topic-$var"
+    : > "$calls"
+    echo "$var" > "skip-$var.txt"
+    git add "skip-$var.txt"
+    run_hooked "$var=1" DOC_TOOLS="$wrap" -- git commit -qm "skipped push ($var)" --no-verify
+    assert_eq "0" "$RUN_RC" "$var=1: the commit succeeds"
+    echo control > "control-$var.txt"
+    git add "control-$var.txt"
+    run_hooked DOC_TOOLS="$wrap" -- git commit -qm "control ($var)" --no-verify
+    n=0
+    while ! grep -q "inflight --push" "$calls" 2>/dev/null && [ "$n" -lt 300 ]; do
+      sleep 0.1
+      n=$((n + 1))
+    done
+    sleep 1
+    assert_eq "1" "$(grep -c "inflight --push" "$calls" || true)" "$var=1: post-commit starts no in-flight push (the control commit's is the only one)"
+    git checkout -q main
+    # SessionStart and state-watch: doc-tools.sh is not run, nothing printed.
+    : > "$calls"
+    run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION" DOC_TOOLS="$fake" "$var=1"
+    assert_eq "0||" "$RUN_RC|$RUN_OUT|$(cat "$calls")" "$var=1: SessionStart is off (nothing run, nothing printed)"
+    run_claude_hook PostToolUse ledger-state-watch "$(lgh_write_payload "$HOME/notes/today.md" "x-1 next: y")" DOC_TOOLS="$fake" "$var=1"
+    assert_eq "0||" "$RUN_RC|$RUN_OUT|$(cat "$calls")" "$var=1: state-watch is off (nothing run, nothing printed)"
+  done
+  # Neither set: the SessionStart and state-watch legs do run (the control).
+  run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION" DOC_TOOLS="$fake"
+  assert_contains "$(cat "$calls")" "ledger notices --hook" "neither variable: SessionStart runs ledger notices --hook"
+  teardown
+}
+
 test_ledger_foreign_hook_runs_ledger_first() {
   echo "test: ledger: a hook of yours ending in 'exit 0' — the block goes after its #! and leading comments, before your code, so the exit cannot skip it; the mode is kept; uninstall restores it byte-for-byte"
   lgh_fixture
@@ -5343,6 +5411,7 @@ test_ledger_session_hook_budget
 test_ledger_claude_tracked_note_names_flag
 test_ledger_session_hook_wraps_verb
 test_ledger_state_watch_advisory
+test_ledger_legs_honour_both_skips
 test_ledger_foreign_hook_runs_ledger_first
 test_ledger_state_watch_paths_spaces_tilde
 test_ledger_status_reports_set

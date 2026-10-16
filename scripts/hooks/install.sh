@@ -183,7 +183,8 @@ Tiers:
                                                     state lands under state_watch.paths
             Each uninstall (--ledger, --ledger-claude) removes its own set;
             status reports each on its own. DOC_SUPERPOWERS_LEDGER_SKIP=1
-            skips every leg of both.
+            skips every leg of both, and DOC_SUPERPOWERS_SKIP=1 (every
+            hook) does too.
 
 CI options (install --ci / --all):
   --workflows=<csv|all|none>

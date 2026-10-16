@@ -10916,6 +10916,8 @@ test_lg_notices_hook() {
   assert_eq "0|" "$LG_RC|$LG_OUT" "an undeclared option: silent, exit 0"
   DOC_SUPERPOWERS_LEDGER_SKIP=1 lg_hook "$LG_HOOK_SS" notices --hook
   assert_eq "0|" "$LG_RC|$LG_OUT" "DOC_SUPERPOWERS_LEDGER_SKIP=1: silent"
+  DOC_SUPERPOWERS_SKIP=1 lg_hook "$LG_HOOK_SS" notices --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "DOC_SUPERPOWERS_SKIP=1 (every hook): silent"
   mkdir -p sub/dir
   ( cd sub/dir && lg_hook "$LG_HOOK_SS" notices --hook && printf '%s|%s' "$LG_RC" "$(json_count "$LG_OUT")" > "$TEST_DIR/.sub" )
   assert_eq "0|1" "$(cat "$TEST_DIR/.sub")" "run from a subdirectory: the top level's notices"
@@ -11024,6 +11026,8 @@ test_lg_state_watch_hook() {
   assert_eq "0|" "$LG_RC|$LG_OUT" "no event: silent"
   DOC_SUPERPOWERS_LEDGER_SKIP=1 lg_hook "$p" state-watch --hook
   assert_eq "0|" "$LG_RC|$LG_OUT" "DOC_SUPERPOWERS_LEDGER_SKIP=1: silent"
+  DOC_SUPERPOWERS_SKIP=1 lg_hook "$p" state-watch --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "DOC_SUPERPOWERS_SKIP=1 (every hook): silent"
   lg_hook "$p" state-watch
   assert_eq "3" "$LG_RC" "without --hook: a usage error (exit 3)"
   assert_contains "$LG_ERR" "--hook" "…naming --hook"

@@ -2471,7 +2471,8 @@ ledger notices|cmd_ledger_notices|repo|branch= gate fetch hook format=
   none or in-flight awareness is off; a failure is one "cannot list"
   line. Always exits 0, printing nothing else (a usage error, no
   repository, no docs/ledger/config.json, an event that is not JSON:
-  silent); DOC_SUPERPOWERS_LEDGER_SKIP=1: silent. It takes no other
+  silent); DOC_SUPERPOWERS_LEDGER_SKIP=1 or DOC_SUPERPOWERS_SKIP=1:
+  silent. It takes no other
   option. The installed hook (install.sh --ledger-claude) runs it under
   a 2-second budget.
 ledger state-watch|cmd_ledger_state_watch|repo|hook
@@ -2488,7 +2489,8 @@ ledger state-watch|cmd_ledger_state_watch|repo|hook
   state_watch.patterns (any case), prints one hook object whose
   additionalContext suggests `doc-tools.sh ledger note <key> "…"`.
   Otherwise nothing. Always exits 0, printing nothing else (as notices
-  --hook); DOC_SUPERPOWERS_LEDGER_SKIP=1: silent.
+  --hook); DOC_SUPERPOWERS_LEDGER_SKIP=1 or DOC_SUPERPOWERS_SKIP=1:
+  silent.
 ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize format=
   --ledger <id|unassigned> --summary <text> [--file <issue>] [--finalize] [--format text|json]
   Allocate an item key and write key, ledger and summary (at most 140
@@ -3310,7 +3312,11 @@ _main() {
       # A hook runs wherever the session is: from the top level, as every
       # ledger verb; outside a work tree the repository check fails —
       # silently, as every hook-mode failure.
-      [ "${DOC_SUPERPOWERS_LEDGER_SKIP:-}" != 1 ] || { _lg_mark_emitted 0; _exit_ok; }
+      # DOC_SUPERPOWERS_SKIP=1 bypasses every hook, this one included.
+      if [ "${DOC_SUPERPOWERS_SKIP:-}" = 1 ] || [ "${DOC_SUPERPOWERS_LEDGER_SKIP:-}" = 1 ]; then
+        _lg_mark_emitted 0
+        _exit_ok
+      fi
       cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || true
     fi
   fi

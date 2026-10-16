@@ -11,8 +11,9 @@
 # which is then what git runs — to ssh (a passphrase or an unknown host key
 # fails the push; push.log says so). A hangup does not
 # orphan its transport (HUP ignored; doc-tools.sh reaps the push on TERM /
-# INT). DOC_SUPERPOWERS_LEDGER_SKIP=1 skips it, silently.
-if [ "${DOC_SUPERPOWERS_LEDGER_SKIP:-}" != 1 ] && [ -f docs/ledger/config.json ]; then
+# INT). DOC_SUPERPOWERS_SKIP=1 (every hook) or DOC_SUPERPOWERS_LEDGER_SKIP=1
+# (the ledger legs) skips it, silently.
+if [ "${DOC_SUPERPOWERS_SKIP:-}" != 1 ] && [ "${DOC_SUPERPOWERS_LEDGER_SKIP:-}" != 1 ] && [ -f docs/ledger/config.json ]; then
   DOC_SP_LG_TOOLS=${DOC_TOOLS:-}
   [ -n "$DOC_SP_LG_TOOLS" ] || DOC_SP_LG_TOOLS=$(__DOC_TOOLS_RESOLVE__)
   DOC_SP_LG_DIR=$(git rev-parse --git-common-dir 2>/dev/null) || DOC_SP_LG_DIR=""
