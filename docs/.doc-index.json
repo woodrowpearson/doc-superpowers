@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-10-16T00:13:47Z",
+  "generated_at": "2026-10-16T00:24:53Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -714,6 +714,36 @@
     },
     "docs/plans/2026-10-14-audit-report.md": {
       "content_hash": "sha256:b1c786d570ae35f6f40cd6f33c1b44dd72d66518d1fd8b3a4d3bf21cd7c2c50b",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/superpowers/plans/2026-10-12-work-ledger.md": {
+      "content_hash": "sha256:537cedc77ec3f9867db1f7e462aaf948617b9ef3af313a364a91b8b3db506865",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/superpowers/specs/2026-10-12-work-ledger-design.md": {
+      "content_hash": "sha256:78a2cd10286b1f784ae68c110c4aa62b0ec54624c16f5bcbad90ca662da7c175",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "design-spec",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/plans/2026-10-15-audit-report.md": {
+      "content_hash": "sha256:904f15ef4bc2051a35efb37477a72140605dc370b16323b3f3d522c7e4e56d8d",
       "code_refs": [],
       "code_oids": {},
       "code_commit": null,
