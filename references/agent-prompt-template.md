@@ -28,12 +28,15 @@ SECRETS: Never quote a secret (token, API key, password, private key,
 connection string, .env value) in a finding or a doc. Name it and where it is
 read; for a secret committed in code or docs, give the file and line only.
 
-VERIFICATION REQUIRED: Report findings WITH evidence (exact quotes from doc vs
-code). No "looks stale" without specific discrepancies.
+VERIFICATION REQUIRED: After reviewing docs, you MUST verify your findings by
+reading both the doc AND its code_refs. Report findings WITH evidence (exact
+quotes from doc vs code). No "looks stale" without specific discrepancies.
 
 Output format:
 ## {doc filename}
 ### Status: FRESH | STALE | MISSING_COVERAGE
+### Accurate sections:
+- {section heading} — checked against {code refs read}; no changes needed
 ### Findings:
 - [P0/P1/P2/P3] Description of issue
   - Doc says: "..."
