@@ -173,6 +173,8 @@ During execute:
     invoke doc-superpowers spec-inject --phase=execute --specs=<paths> --plan=<path>
     If deviation flags returned → surface to user
     Claims-enabled: a red claim or a flagged deviation → rule the direction (Direction protocol) before editing either side
+      — within a plan, at its `Claims gate (chunk N)` task: that chunk's record (chunk-<n>.json) is the ruling's `record`,
+      and a reconciliation made outside the gate is a silent reconciliation that keeps `claims attest --final` red
 
 Pre-finish:
   After all tasks, before finishing →
