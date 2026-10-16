@@ -965,7 +965,7 @@ for _e in $(cut -d'|' -f1 <<<"$_scored" | sort -u); do
   done 3< <(jq -r --arg e "$_e" '.evals[] | select(.name == $e) | .assertions[] | select(.type == "tool_call_check" and .negate == true) | .command' "$EVALS_JSON")
 done
 # Required cases: fixtures that build the scenario, runnable here.
-_required="update-from-audit update-from-session-report spec-generate-from-design hooks-install-all sync-index release-draft release-draft-untagged spec-inject-execute spec-verify-review spec-inject-amends release-fragment-merge hooks-status-uninstall"
+_required="update-from-audit update-from-session-report spec-generate-from-design hooks-install-all sync-index release-draft release-draft-untagged spec-inject-execute spec-verify-review spec-inject-amends release-fragment-merge hooks-status-uninstall spec-inject-claims spec-inject-claims-inert"
 for _e in $_required; do
   _setup=$(jq -r --arg e "$_e" '.evals[] | select(.name == $e) | .setup // ""' "$EVALS_JSON")
   if [ -z "$_setup" ]; then

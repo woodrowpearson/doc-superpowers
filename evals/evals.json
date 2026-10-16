@@ -1408,6 +1408,178 @@
         }
       ],
       "setup": "evals/fixtures/release-draft-untagged/setup.sh"
+    },
+    {
+      "id": 21,
+      "name": "spec-inject-claims",
+      "prompt": "Inject the spec maintenance tasks into the auth tokens plan. /doc-superpowers spec-inject --phase=plan --plan=docs/superpowers/plans/2026-10-02-auth-tokens.md --specs=docs/specs/SPEC-AUTH-001-token-lifetime.md:target",
+      "expected_output": "docs/spec-claims/ exists, so claims are enabled. Besides a spec-update task per chunk and one finalize task (SPEC-AUTH-001 listed with its target role copied verbatim), the plan gains a `Claims gate (chunk 1)` and a `Claims gate (chunk 2)` task, each before its chunk's spec-update task and running `claims gate --plan docs/superpowers/plans/2026-10-02-auth-tokens.md --chunk <C>`, and a `Final claims gate` task before the finalize task, running `claims attest --plan docs/superpowers/plans/2026-10-02-auth-tokens.md --final`. Every implementation task carries a `**Claims:**` line: the token-lifetime tasks name SPEC-AUTH-001#token-ttl and the refresh tasks SPEC-AUTH-001#refresh-single-use (a task that builds no claim says `**Claims:** none — <reason>`), so `claims validate` reports no V12 finding on the plan. Injection runs no gate. No spec and no sidecar is modified.",
+      "files": [
+        "evals/fixtures/spec-inject-claims/setup.sh",
+        "evals/fixtures/spec-inject-claims-inert/setup.sh",
+        "evals/fixtures/lib.sh"
+      ],
+      "setup": "evals/fixtures/spec-inject-claims/setup.sh",
+      "assertions": [
+        {
+          "name": "chunk-gates",
+          "type": "content_check",
+          "path": "docs/superpowers/plans/2026-10-02-auth-tokens.md",
+          "pattern": "^### Task [0-9N+]+g: Claims gate \\(chunk [12]\\)$",
+          "count": 2,
+          "description": "One Claims gate (chunk N) task per chunk, titled as V12 parses it (spec-inject plan phase step 2b)"
+        },
+        {
+          "name": "final-gate",
+          "type": "content_check",
+          "path": "docs/superpowers/plans/2026-10-02-auth-tokens.md",
+          "pattern": "^### Task [0-9N+]+g: Final claims gate$",
+          "count": 1,
+          "description": "One Final claims gate, in the last chunk (step 4b)"
+        },
+        {
+          "name": "per-chunk-tasks",
+          "type": "content_check",
+          "path": "docs/superpowers/plans/2026-10-02-auth-tokens.md",
+          "pattern": "^### Task [0-9N+]+: Update governing specs for this chunk$",
+          "count": 2,
+          "description": "The spec-update task of each chunk is still injected"
+        },
+        {
+          "name": "finalize-once",
+          "type": "content_check",
+          "path": "docs/superpowers/plans/2026-10-02-auth-tokens.md",
+          "pattern": "^### Task [0-9N+]+: Finalize all governing specs$",
+          "count": 1,
+          "description": "One finalization task, in the last chunk"
+        },
+        {
+          "name": "gate-commands-resolved",
+          "type": "content_check",
+          "path": "docs/superpowers/plans/2026-10-02-auth-tokens.md",
+          "pattern": [
+            "claims gate --plan docs/superpowers/plans/2026-10-02-auth-tokens\\.md --chunk 1",
+            "claims gate --plan docs/superpowers/plans/2026-10-02-auth-tokens\\.md --chunk 2",
+            "claims attest --plan docs/superpowers/plans/2026-10-02-auth-tokens\\.md --final"
+          ],
+          "description": "The gates' placeholders are resolved at inject time: this plan's path and each chunk's number"
+        },
+        {
+          "name": "names-each-unbuilt-claim",
+          "type": "content_check",
+          "path": "docs/superpowers/plans/2026-10-02-auth-tokens.md",
+          "pattern": [
+            "\\*\\*Claims:\\*\\* .*SPEC-AUTH-001#token-ttl",
+            "\\*\\*Claims:\\*\\* .*SPEC-AUTH-001#refresh-single-use"
+          ],
+          "description": "Each unbuilt claim of the target spec is named on a task's **Claims:** line (step 1b; V12)"
+        },
+        {
+          "name": "carries-role-marker",
+          "type": "content_check",
+          "path": "docs/superpowers/plans/2026-10-02-auth-tokens.md",
+          "pattern": "SPEC-AUTH-001-token-lifetime\\.md — target",
+          "description": "The explicit role marker is copied into the injected tasks"
+        },
+        {
+          "name": "gates-precede-spec-tasks",
+          "type": "behavior_check",
+          "description": "Each chunk's Claims gate sits before that chunk's spec-update task, the Final claims gate before the finalize task, and every implementation task carries a **Claims:** line: `claims validate --all` reports no V12 finding on the injected plan"
+        },
+        {
+          "name": "runs-no-gate",
+          "type": "tool_call_check",
+          "command": "doc-tools\\.sh\"? claims (gate|attest|promote)",
+          "negate": true,
+          "description": "Injection writes the gate tasks; it runs no gate, attest or promote"
+        },
+        {
+          "name": "specs-untouched",
+          "type": "no_file_modification",
+          "path": "docs/specs",
+          "description": "No spec file is modified"
+        },
+        {
+          "name": "sidecars-untouched",
+          "type": "no_file_modification",
+          "path": "docs/spec-claims",
+          "description": "No sidecar is modified: only the plan is"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "name": "spec-inject-claims-inert",
+      "prompt": "Inject the spec maintenance tasks into the auth tokens plan. /doc-superpowers spec-inject --phase=plan --plan=docs/superpowers/plans/2026-10-02-auth-tokens.md --specs=docs/specs/SPEC-AUTH-001-token-lifetime.md:target",
+      "expected_output": "There is no docs/spec-claims/, so claims are inert and the injection is exactly the claims-free one: a spec-update task per chunk and one finalize task, SPEC-AUTH-001 listed with its target role. No Claims gate, no Final claims gate and no **Claims:** line is injected, docs/spec-claims/ is not created, and no claims verb writes anything. No spec file is modified.",
+      "files": [
+        "evals/fixtures/spec-inject-claims-inert/setup.sh",
+        "evals/fixtures/lib.sh"
+      ],
+      "setup": "evals/fixtures/spec-inject-claims-inert/setup.sh",
+      "assertions": [
+        {
+          "name": "per-chunk-tasks",
+          "type": "content_check",
+          "path": "docs/superpowers/plans/2026-10-02-auth-tokens.md",
+          "pattern": "^### Task [0-9N+]+: Update governing specs for this chunk$",
+          "count": 2,
+          "description": "One spec update task per chunk (the injection ran)"
+        },
+        {
+          "name": "finalize-once",
+          "type": "content_check",
+          "path": "docs/superpowers/plans/2026-10-02-auth-tokens.md",
+          "pattern": "^### Task [0-9N+]+: Finalize all governing specs$",
+          "count": 1,
+          "description": "One finalization task, in the last chunk"
+        },
+        {
+          "name": "carries-role-marker",
+          "type": "content_check",
+          "path": "docs/superpowers/plans/2026-10-02-auth-tokens.md",
+          "pattern": "SPEC-AUTH-001-token-lifetime\\.md — target",
+          "description": "The explicit role marker is copied into the injected tasks"
+        },
+        {
+          "name": "no-claims-gates",
+          "type": "content_check",
+          "path": "docs/superpowers/plans/2026-10-02-auth-tokens.md",
+          "pattern": [
+            "Claims gate \\(chunk",
+            "Final claims gate"
+          ],
+          "negate": true,
+          "description": "Without docs/spec-claims/ no claims gate is injected (steps 2b and 4b inject only when it exists)"
+        },
+        {
+          "name": "no-claims-lines",
+          "type": "content_check",
+          "path": "docs/superpowers/plans/2026-10-02-auth-tokens.md",
+          "pattern": "\\*\\*Claims:\\*\\*",
+          "negate": true,
+          "description": "…and no **Claims:** line (step 1b)"
+        },
+        {
+          "name": "no-claims-dir",
+          "type": "file_not_exists",
+          "path": "docs/spec-claims",
+          "description": "The injection does not opt the project in to claims"
+        },
+        {
+          "name": "no-claims-writes",
+          "type": "tool_call_check",
+          "command": "doc-tools\\.sh\"? claims (render|promote|gate|attest)",
+          "negate": true,
+          "description": "No claims verb that writes runs on the inert path"
+        },
+        {
+          "name": "specs-untouched",
+          "type": "no_file_modification",
+          "path": "docs/specs",
+          "description": "Only the plan is modified"
+        }
+      ]
     }
   ],
   "assertion_fields": {
