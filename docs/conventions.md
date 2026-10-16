@@ -11,6 +11,19 @@ Follows [obra/superpowers](https://github.com/obra/superpowers) skill convention
 - `description` starts with "Use when..." and describes triggering conditions only (never summarizes workflow)
 - Supporting files in subdirectories (`references/`) only when content exceeds ~100 lines
 
+## Code Style
+
+The shipped scripts — `scripts/doc-tools.sh`, `scripts/merge-doc-index.sh`, the installer, the hook scripts and the CI helpers — are bash, written for the floors in README.md → *Dependencies*: bash ≥ 3.2, `jq` ≥ 1.6, and the POSIX userland as stock macOS and Linux ship it. `scripts/test-doc-tools.sh` enforces three of these rules statically, on every run and under any bash, so a violation fails on the Linux leg too, where no bash 3.2 or BSD userland would catch it by running:
+
+| Rule | Enforced by |
+|------|-------------|
+| bash ≥ 3.2 (macOS's `/bin/bash`): no bash-4-only construct — associative arrays, `mapfile`, `${v^^}`, `&>>`, namerefs, `[[ -v x ]]`, `\|&`, `coproc`, `wait -n`, `${a[-1]}` and the rest of its list | `test_scripts_are_free_of_bash4_only_constructs`: every shipped shell script, plus the templates' inline `run:` bodies |
+| No GNU-only flag or tool: `sed -i`, `sort -V`, `readlink -f`, `date -d`, `stat -c` without a `stat -f` fallback on the same line, `timeout`, `grep -P`, `find -printf`, `tac` | the same test's GNU-only scan, over the same scripts |
+| jq ≥ 1.6: no jq-1.7-only form in a jq program — a keyword as a `$binding` name, `pick`, `toarray`, `trim`, `abs`, `add/1`, `@urid`, `limit(0; …)` and the rest of its list (jq programs are the scripts' single-quoted strings) | `test_shipped_jq_is_free_of_jq17_only_forms`: `doc-tools.sh`, `merge-doc-index.sh`, the installer, the hook scripts and the CI helpers |
+| Where `awk` is mawk, 1.3.4 or newer (the POSIX character classes, `[[:space:]]`) | nothing: a documented floor |
+
+Each scan pattern carries a planted sample it must match, so a pattern that stops matching is a FAIL, never a silent pass. Full-line comments are blanked before the scans: a comment may name a forbidden construct, and inline code may not. `# shellcheck disable=SC… # reason` lines mark deliberate exceptions; no suite or CI step runs ShellCheck.
+
 ## Naming Conventions
 
 | Element | Convention | Example |
@@ -61,26 +74,34 @@ Manifest files managed: `package.json`, `.claude-plugin/plugin.json`, `.claude-p
 ### Branches
 
 - `main` — stable releases
-- `feature/<name>` — new features
+- `feat/<name>` — new features
 - `fix/<name>` — bug fixes
+- `design/<name>` — a design and its implementation plan, often the long-lived branch a feature lands on
+- `chore/<name>` — maintenance
+- `wip/<name>` — work in progress, not for review
+- `claude/<name>` — branches an agent session opened
 
 ### Commits
 
-Conventional commits format:
+Conventional commits, usually with a scope naming the area (`claims`, `doc-tools`, `hooks`, `ci`, `docs`):
 
 ```
-feat: add support for <new capability>
-fix: correct <specific issue>
-docs: update <document> for <reason>
+feat(<scope>): add support for <new capability>
+fix(<scope>): correct <specific issue>
+docs(<scope>): update <document> for <reason>
+test(<scope>): <test change>
 chore: <maintenance task>
+release: vX.Y.Z
 ```
+
+An unscoped form (`docs: …`) is fine for a change with no single area. `release: vX.Y.Z` is the `release` action's one commit (`references/release.md`, step 11).
 
 ### Pull Requests
 
 - Keep PRs focused on a single change
 - Test skill changes by running `/doc-superpowers init` on a sample project before merging
 - Run the six shell test suites — `scripts/test-doc-tools.sh`, `scripts/test-hooks.sh`, `scripts/test-merge-driver.sh`, `scripts/test-doc-pr-release.sh`, `scripts/test-spec-status-model.sh`, `scripts/test-spec-claims.sh` — all must pass before merge, under both bash 5.x and `/bin/bash` 3.2. Their assertion counts and the command that runs the matrix are in [CLAUDE.md → Conventions](../CLAUDE.md#conventions), the one place they are kept. They share the `scripts/test-helpers.sh` harness (isolated git environment, private scratch root, pipefail-safe asserts, SKIP/XFAIL reporting)
-- A change to a CI template, `scripts/doc-tools.sh` or a CI helper script also re-runs `bash scripts/hooks/install.sh install --ci` and commits what it writes: this repository installs its own CI tier, and `.github/workflows/tests.yml` fails when the installed copies drift from their sources
+- A change to a CI template, `scripts/doc-tools.sh` or a CI helper script also re-runs `bash scripts/hooks/install.sh install --ci` and commits what it writes: this repository installs its own CI tier, and `.github/workflows/tests.yml` fails when the installed copies drift from their sources. The same step fails when `.gitattributes` no longer routes `docs/.doc-index.json` to the doc-index merge driver, and then names `bash scripts/hooks/install.sh install --git` (commit the `.gitattributes` it writes)
 - Include before/after examples for behavior changes
 
 ## Documentation Conventions
@@ -162,13 +183,15 @@ Four rules hold for every action and for every agent the skill dispatches. `skil
 
 ### Graceful Degradation
 
-Missing tools trigger fallbacks, never failures:
+Optional tools trigger fallbacks; a missing required tool fails, naming itself:
 
 | Missing | Fallback |
 |---------|----------|
 | Mermaid MCP | Inline Mermaid source |
 | Doc-index (first run) | `check-freshness` exits 1 ("doc-index.json not found"); `init` builds it |
-| `jq`, or a `jq` older than 1.6 | `doc-tools.sh` exits non-zero naming the requirement (`jq >= 1.6`: the index writers use `--args` / `$ARGS.positional`) and the version found |
+| `git` or `jq` (required) | `doc-tools.sh` exits non-zero: "required command not found: jq" (or `git`) |
+| A `jq` older than 1.6 (required) | `doc-tools.sh` exits non-zero naming the requirement (`jq >= 1.6`: the index writers use `--args` / `$ARGS.positional`) and the version found |
+| Both `sha256sum` and `shasum` (one is required) | `doc-tools.sh` exits non-zero: "required command not found: sha256sum or shasum" |
 | User-provided scripts | Bundled tooling handles core operations; optional scripts are listed, never auto-run (Safety Rules) |
 
 ### Evidence-Based Verification
@@ -188,7 +211,13 @@ Generated documentation follows strict naming conventions for consistency and ma
 | Architecture docs | `kebab-case.md` | `system-overview.md` |
 | Workflow docs | `kebab-case.md` | `ci-cd-pipeline.md` |
 | Guide docs | `kebab-case.md` | `getting-started.md` |
-| Diagrams | `kebab-case.{png,svg}` | `c4-context.png` |
+| Diagrams | `{type}-{name}.png`, or `{type}.png` for the one diagram of its type | `sequence-audit.png`, `c4-context.png` |
+| Plans | `YYYY-MM-DD-{slug}.md`; an audit report is `YYYY-MM-DD-audit-report.md` (`-<short HEAD sha>` appended when that name is taken) | `2026-10-15-audit-report.md` |
+| Templates | `template.md`, in `docs/specs/` and `docs/adr/` only | `docs/adr/template.md` |
+| Index files | `README.md`, in `docs/specs/`, `docs/adr/` and `docs/workflows/agentic/` | `docs/specs/README.md` |
+| Spec claims (claims-enabled only) | `docs/spec-claims/<DOC-ID>.json`, one sidecar per governing doc, beside `config.json`; see [Spec claims names](#spec-claims-names) | `docs/spec-claims/SPEC-AUTH-001.json` |
+
+The diagram, plan, template and index-file rows are `references/doc-spec.md`'s *Naming Conventions Reference*; it is the source when they differ.
 
 ### Directory Structure
 
@@ -202,6 +231,22 @@ Generated documentation follows strict naming conventions for consistency and ma
 | `docs/guides/` | Getting started, onboarding | n/a |
 | `docs/plans/` | Audit reports and plans | n/a |
 | `docs/archive/` | Superseded/deleted docs by type | n/a |
+| `docs/spec-claims/` | Claims-enabled projects only, and the switch itself: `config.json`, one sidecar per governing doc, the gate records under `gates/<plan-stem>/` | n/a |
+
+### Spec claims names
+
+Claims-enabled projects only: the directory `docs/spec-claims/` turns them on, and this repository has none. The full list, with the rules behind each name, is [`references/spec-claims.md` → *Files and names*](../references/spec-claims.md#files-and-names).
+
+| What | Name |
+|------|------|
+| Host config (optional) | `docs/spec-claims/config.json` |
+| Sidecar, one per governing doc | `docs/spec-claims/<DOC-ID>.json` (`ADR-<digits>`, `SPEC-<CAT>-<digits>`, or a `governing_extra` doc's file stem); nothing in a subdirectory is a sidecar |
+| Gate records | `docs/spec-claims/gates/<plan-stem>/chunk-<n>.json` (`<n>` with no leading zero) and `final.json`; `<plan-stem>` is the plan's file name without its extension |
+| Verdict store (local, never committed) | `$(git rev-parse --git-common-dir)/spec-claims/promotions/<digest>.json` |
+| Generated status block in a governing doc | `<!-- spec-claims:status:begin -->` … `<!-- spec-claims:status:end -->`, around a `## Claim status` table |
+| Descriptive-section marker | `<!-- spec-claims:descriptive -->` |
+| Plan task lines | `**Claims:** <id>, <id>…` or `**Claims:** none — <reason>`; the injected tasks `Claims gate (chunk <n>)` and `Final claims gate` |
+| Claim ids | `<DOC-ID>#<slug>`, the slug `[a-z0-9][a-z0-9-]*` |
 
 ### This repo's exemptions from the Scope → Generated Docs Matrix
 
@@ -283,7 +328,7 @@ The choices are recorded in `.claude/doc-superpowers/installed.json` (schema 2: 
 Every template in `scripts/hooks/ci/` follows these rules; `test-doc-pr-release.sh` checks them on the installer's output.
 
 - **Step bodies are helpers.** Every `run:` is one call of a script in `doc-superpowers-steps/` (or `doc-pr-release/`), tested on its own; the only inline step is `doc-pr-release.yml`'s pre-checkout PR resolver, which runs before any helper is on disk. The step scripts ship with any installed workflow.
-- **Fail closed.** A check that cannot run is never "0 stale": `freshness-check.sh` writes `status=failed` and no count (a `::warning::`; an `::error::` and exit 1 under STRICT, in the schedule run, and in the AI jobs' scope gate). The schedule closes its issue only after `status == 'ok'` with nothing stale or missing. Missing docs count with stale ones.
+- **Fail closed.** A check that cannot run is never "0 stale": `freshness-check.sh` writes `status=failed` and no count (a `::warning::`; an `::error::` and exit 1 under STRICT, in the schedule run, and in the AI jobs' scope gate). The schedule closes its issue only after `status == 'ok'` with nothing stale or missing **and** a claims step that reports `disabled` or `ok`, or, with no doc index (`no-index`), when the claims step reports `ok`. Claims findings open or update the same issue, under `### Spec claims`, and keep it open; a claims step that could not all run (`indeterminate`) never closes it. Missing docs count with stale ones.
 - **Nothing index- or PR-sized in `$GITHUB_OUTPUT` or an env var** (Linux caps one string at 128 KiB): results stay in `$RUNNER_TEMP` files (`freshness.json`, `freshness-report.json`), read by `github-script` with `fs.readFileSync`; step outputs carry scalars only.
 - **No hard-coded code paths.** Which docs a change touches comes from the index: the AI jobs' scope step runs `check-freshness --code-refs-from` on the change's paths and gates the agent on the result.
 - **Every job has `timeout-minutes`;** every action is SHA-pinned with its exact version comment (`# v4.3.1`, `# v7.1.0`, `# v1.0.88`).
@@ -311,13 +356,13 @@ Spec files use a `Status` field. Ladder statuses progress monotonically; exempt 
 | `Draft` | Ladder | Spec generated, not yet implemented | `spec-generate` |
 | `In Review` | Ladder | Implementation started, or a partially-covered target held pending deferred scope | `spec-inject` |
 | `Approved` | Ladder | Human-approved pre-implementation; automation never writes it | human only |
-| `Implemented` | Ladder | Scope-covered target, verification passed (claims-enabled projects: every claim the plan names for it `built` and passing at the final gate, R5) | `spec-inject` |
+| `Implemented` | Ladder | Scope-covered target, verification passed (claims-enabled projects: also gated on its claims, **Spec Status Model → R5**) | `spec-inject` |
 | `Active` | Exempt | Continuously-evolving reference spec; never "completes" | human only |
 | `Deprecated` | Exempt | No longer governing | human only |
 | `Superseded` | Exempt | Replaced by another spec | human only — `spec-generate` writes the `Superseded by` field and the index entry, not this `Status` |
 | any other status | Exempt | Unrecognized vocabulary — anything not on the ladder above | nothing — `spec-verify` reports it informationally, and no action ever writes or corrects it |
 
-Transitions: `Draft` → `In Review` → `Approved` → `Implemented`, monotonic — never regress. `spec-verify` is read-only and writes no `Status`; the writes belong to `spec-inject`. Role gates before status: a path passed as a **constraint** reference is never written at all — no `Status`, no Implementation Notes, no `code_refs` refinement. A path passed as an **amendment** (`--specs=<path>:amends`, never inferred) is status-neutral too: the plan corrects what the spec *says* without building its surface, so `spec-inject --phase=plan` injects one task that verifies the dated `AMENDED` block landed and cites the plan, and `spec-verify` re-runs that landed-check (post-execute FAILs, review reports **P1 Amendment not landed** when it is absent or unattributed). Pass `spec-verify --plan=<path>` for the full check; without it the citation half is skipped and reported as unverified. For a **target**, coverage gates the top rung — Full coverage makes it eligible for `Implemented`, Partial coverage holds it at `In Review` (or leaves it at `Approved`, never regressing) with the remaining scope recorded in Implementation Notes. In a claims-enabled project (`docs/spec-claims/` exists) R5 also holds a target short of `Implemented` until every claim the plan names for it is `built` (or `gated`) and passing at the final gate (`claims attest --final`); without claims, R5 never applies. See the **Spec Status Model** section of `references/spec-lifecycle-actions.md` for roles, coverage classes, and evaluation order.
+Transitions: `Draft` → `In Review` → `Approved` → `Implemented`, monotonic — never regress. `spec-verify` writes no `Status` (claims-enabled: its post-execute step 0, `claims attest --final`, writes `final.json`); the writes belong to `spec-inject`. Role gates before status: a path passed as a **constraint** reference is never written at all — no `Status`, no Implementation Notes, no `code_refs` refinement. A path passed as an **amendment** (`--specs=<path>:amends`, never inferred) is status-neutral too: the plan corrects what the spec *says* without building its surface, so `spec-inject --phase=plan` injects one task that verifies the dated `AMENDED` block landed and cites the plan, and `spec-verify` re-runs that landed-check (post-execute FAILs, review reports **P1 Amendment not landed** when it is absent or unattributed). Pass `spec-verify --plan=<path>` for the full check; without it the citation half is skipped and reported as unverified. For a **target**, coverage gates the top rung — Full coverage makes it eligible for `Implemented`, Partial coverage holds it at `In Review` (or leaves it at `Approved`, never regressing) with the remaining scope recorded in Implementation Notes. In a claims-enabled project (`docs/spec-claims/` exists) a target is also held short of `Implemented` until its claims clear the final gate (`claims attest --final`); the rule, with its `gated` and `:amends` cases, is **Spec Status Model → R5**. Without claims, R5 never applies. See the **Spec Status Model** section of `references/spec-lifecycle-actions.md` for roles, coverage classes, and evaluation order.
 
 ### Supersession Conventions
 
