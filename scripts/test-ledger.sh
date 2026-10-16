@@ -10691,6 +10691,104 @@ missing-resolution block docs/issues/c.md" "$(lg_vmr)" "c.md closed in this comm
   teardown
 }
 
+# --- Task 16c (U12): config trailers.since --------------------------------------
+
+# lg_since_fixture: base main; items x-1..x-3 (open); history on main:
+# "items" · c0 (Doc-Fixes: c.md) · "adopt" (adds config.json; LG_ADOPT) ·
+# c1 (Doc-Fixes: a.md, a Contract-Change and a Ledger-Ack line) · "cutover"
+# (LG_SINCE) · c2 (Doc-Fixes: b.md). Doc-Fixes is a claims_by_path name.
+lg_since_fixture() {
+  lg_fixture
+  lg_registry "$LG_REG_XY"
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: Claimed before the cutover"
+  lg_item docs/issues/b.md "key: x-2" "ledger: x" "status: Open" "summary: Claimed after the cutover"
+  lg_item docs/issues/c.md "key: x-3" "ledger: x" "status: Open" "summary: Claimed before adoption"
+  git add -A && git commit -qm items
+  git commit -q --allow-empty -m "c0" -m "Doc-Fixes: docs/issues/c.md"
+  lg_enable '{"base":"main","trailers":{"claims_by_path":["Doc-Fixes"]}}'
+  git add -A && git commit -qm adopt
+  LG_ADOPT=$(git rev-parse HEAD)
+  git commit -q --allow-empty -m "c1" -m "Doc-Fixes: docs/issues/a.md
+Contract-Change: field:x — before the cutover
+Ledger-Ack: deadbeef — seen"
+  git commit -q --allow-empty -m cutover
+  LG_SINCE=$(git rev-parse HEAD)
+  git commit -q --allow-empty -m "c2" -m "Doc-Fixes: docs/issues/b.md"
+}
+
+# lg_since_statuses: "x-1:<display>,x-2:…,x-3:…" from ls --format json.
+lg_since_statuses() {
+  lg ls --format json
+  jq -r '[.items[] | "\(.key):\(.display)"] | sort | join(",")' <<<"$LG_OUT"
+}
+
+test_lg_trailers_since() {
+  echo "test: config trailers.since — claim trailers in commits the since commit reaches (itself included) no longer claim; later ones do; null keeps every one; \"adoption\" is the adoption commit; Contract-Change and ack lines are unaffected"
+  lg_since_fixture
+  assert_eq "x-1:merged · owed: closing,x-2:merged · owed: closing,x-3:merged · owed: closing" "$(lg_since_statuses)" \
+    "since unset (null): every Doc-Fixes claims"
+  lg_enable '{"base":"main","trailers":{"claims_by_path":["Doc-Fixes"],"since":null}}'
+  assert_eq "x-1:merged · owed: closing,x-2:merged · owed: closing,x-3:merged · owed: closing" "$(lg_since_statuses)" \
+    "since null: the same"
+  lg_enable "{\"base\":\"main\",\"trailers\":{\"claims_by_path\":[\"Doc-Fixes\"],\"since\":\"${LG_SINCE:0:10}\"}}"
+  assert_eq "x-1:not started,x-2:merged · owed: closing,x-3:not started" "$(lg_since_statuses)" \
+    "since an abbreviated commit: c2 (after it) claims; c1 and c0 (before) do not"
+  lg_call _lg_msg_claims main
+  assert_eq "0" "$LG_RC" "_lg_msg_claims exits 0"
+  assert_eq "$(printf '%s\tack\tdeadbeef — seen\n%s\tcontract_change\tfield:x — before the cutover\n%s\tclaims_by_path\tdocs/issues/b.md\n' \
+      "$(git rev-parse HEAD~2)" "$(git rev-parse HEAD~2)" "$(git rev-parse HEAD)" | LC_ALL=C sort)" "$(printf '%s\n' "$LG_OUT" | LC_ALL=C sort)" \
+    "…the message lines: c1's Contract-Change and ack kept, its claim dropped; c2's claim"
+  lg_enable '{"base":"main","trailers":{"claims_by_path":["Doc-Fixes"],"since":"adoption"}}'
+  assert_eq "x-1:merged · owed: closing,x-2:merged · owed: closing,x-3:not started" "$(lg_since_statuses)" \
+    "since \"adoption\": only c0 (before the commit that added config.json) is cut off"
+  lg_enable '{"base":"main","trailers":{"claims_by_path":["Doc-Fixes"],"since":"no-such-commit"}}'
+  lg ls
+  assert_eq "2" "$LG_RC" "a since that names no commit: exit 2"
+  assert_contains "$LG_ERR" "trailers.since" "…naming the setting"
+  lg_enable '{"base":"main","trailers":{"claims_by_path":["Doc-Fixes"],"since":7}}'
+  lg ls
+  assert_eq "2" "$LG_RC" "a since that is not a string: exit 2"
+  teardown
+}
+
+test_lg_trailers_since_adoption_before_adopted() {
+  echo "test: trailers.since \"adoption\" while the base has no commit adding config.json: all of the base's history predates adoption — no base claim counts"
+  lg_fixture
+  lg_registry "$LG_REG_XY"
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: Claimed on the base before adoption"
+  git add -A && git commit -qm items
+  git commit -q --allow-empty -m "c0" -m "Doc-Fixes: docs/issues/a.md"
+  lg_enable '{"base":"main","trailers":{"claims_by_path":["Doc-Fixes"]}}'
+  assert_eq "x-1:merged · owed: closing" "$(lg_since_statuses)" "since unset: the claim counts"
+  lg_enable '{"base":"main","trailers":{"claims_by_path":["Doc-Fixes"],"since":"adoption"}}'
+  assert_eq "x-1:not started" "$(lg_since_statuses)" "since adoption, config.json on no base commit yet: it does not"
+  teardown
+}
+
+test_lg_trailers_since_inflight() {
+  echo "test: trailers.since in the in-flight scan — a branch's claims in commits the since commit reaches are dropped, later ones kept; Contract-Change kept"
+  lg_fixture
+  lg_enable '{"base":"main","inflight":{"enabled":true,"host_id":"hosta"}}'
+  lg_registry "$LG_REG_XY"
+  lg_item docs/issues/a.md "key: x-1" "ledger: x" "status: Open" "summary: Claimed early on the branch"
+  lg_item docs/issues/b.md "key: x-2" "ledger: x" "status: Open" "summary: Claimed late on the branch"
+  git add -A && git commit -qm items
+  git checkout -q -b side
+  git commit -q --allow-empty -m "s1" -m "Ledger-Claims: x-1"
+  git commit -q --allow-empty -m "s-cut"
+  LG_SINCE=$(git rev-parse HEAD)
+  git commit -q --allow-empty -m "s2" -m "Ledger-Claims: x-2"
+  git checkout -q main
+  lg inflight --branch side
+  assert_eq "0" "$LG_RC" "inflight exits 0"
+  assert_contains "$LG_OUT" "claims:x-1,x-2" "since unset: both claims"
+  lg_enable "{\"base\":\"main\",\"inflight\":{\"enabled\":true,\"host_id\":\"hosta\"},\"trailers\":{\"since\":\"$LG_SINCE\"}}"
+  lg inflight --branch side
+  assert_eq "0" "$LG_RC" "inflight exits 0"
+  assert_contains "$LG_OUT" "claims:x-2 contracts:" "since s-cut: s1's claim dropped, s2's kept"
+  teardown
+}
+
 # Pass/fail counters across a ( … ) subshell: the child writes its counts, the
 # parent adds them.
 print_counts_to() {
@@ -11072,6 +11170,9 @@ run_tests() {
   test_lg_init_stub_relinks_relative_links
   test_lg_validate_all_pre_adoption_terminal
   test_lg_validate_staged_closing_pre_adoption_blocks
+  test_lg_trailers_since
+  test_lg_trailers_since_adoption_before_adopted
+  test_lg_trailers_since_inflight
 
   print_summary
 }

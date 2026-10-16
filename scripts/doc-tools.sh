@@ -2913,6 +2913,15 @@ notices, new, assign, link, note, view, validate, publish, finalize, init):
   label) clears its markers, as a later commit clears a file item's. A
   hosted write through ledger note expires the cached list, so the next
   read fetches it; a value holding "-->" or "--!>" is refused (exit 3).
+  Config trailers.since — a commit (an abbreviated id will do), "adoption"
+  or null (the default: every trailer counts) — cuts off the claim
+  trailers (claims, claims_by_path, claims_by_ref) of the commits it
+  reaches, itself included, wherever they are read: the base's claims
+  ("merged · owed: …"), the PR heads, the in-flight branches. "adoption"
+  is the first commit on the base to add docs/ledger/config.json (while
+  there is none, the base itself: all of its history predates adoption).
+  Contract-Change and ack lines are unaffected. A since that names no
+  commit here (a shallow clone may lack it) exits 2.
 
 Exit status:
   0  success
