@@ -1455,7 +1455,7 @@ test_i8_every_job_has_a_timeout() {
   done
   [ -z "$bad" ] || printf '%s' "$bad"
   assert_eq "" "$bad" "no job without timeout-minutes"
-  assert_eq "8" "$n" "8 installed workflows checked"
+  assert_eq "9" "$n" "9 installed workflows checked"
 }
 
 test_i8_pins_carry_exact_versions() {
@@ -3682,5 +3682,82 @@ test_claims_check_pr_deleted_claims_dir_fails
 test_schedule_close_no_index_claims_ok
 test_claims_check_findings_counted_once
 test_claims_check_pr_completed_pairs_fences_like_the_plan_parser
+
+# ============================================================================
+# doc-ledger-publish.yml and its step (3.3.0 Task 17)
+# ============================================================================
+echo
+echo "=== doc-ledger-publish ==="
+
+test_ledger_publish_template() {
+  echo "Test: doc-ledger-publish.yml — every 30 minutes and workflow_dispatch, one job: contents: write (pull-requests and issues read for the adapters), one publisher at a time, a timeout, the publish step with the helper set it needs"
+  yaml_unavailable "ledger_publish_template" && return 0
+  local dir json
+  dir=$(installed_repo --ci --workflows=doc-ledger-publish) || { assert_true "install --ci --workflows=doc-ledger-publish" false; return 0; }
+  json=$(_yaml_json "$dir/.github/workflows/doc-ledger-publish.yml")
+  assert_eq '["*/30 * * * *"]' "$(jq -c '[(.on // .true).schedule[].cron]' <<<"$json")" "scheduled every 30 minutes"
+  assert_eq "true" "$(jq '(.on // .true) | has("workflow_dispatch")' <<<"$json")" "…and by hand"
+  assert_eq '{"contents":"write","issues":"read","pull-requests":"read"}' "$(jq -cS '[.jobs[].permissions] | first' <<<"$json")" \
+    "permissions: contents write, pull-requests and issues read, nothing else"
+  assert_eq "1|null" "$(jq -r '"\(.jobs | length)|\(.permissions)"' <<<"$json")" "one job, no workflow-level permissions"
+  assert_eq "doc-ledger-publish|false" "$(jq -r '"\(.concurrency.group)|\(.concurrency["cancel-in-progress"])"' <<<"$json")" \
+    "one publisher at a time, never cancelled midway (a second run queues)"
+  assert_eq "number" "$(jq -r '[.jobs[]["timeout-minutes"] | type] | first' <<<"$json")" "the job has a timeout"
+  assert_eq "1" "$(jq '[.jobs[].steps[] | select(.run != null)] | length' <<<"$json")" "one run: step"
+  assert_eq ".github/scripts/doc-superpowers-steps/ledger-publish.sh|.github/scripts/ledger/lib.sh" \
+    "$(jq -r '[.jobs[].steps[] | select(.run != null)] | first | "\(.run | rtrimstr("\n"))|\(.env.LEDGER_HELPERS)"' <<<"$json")" \
+    "…the publish step script, told where the vendored ledger helper set is"
+  assert_eq '${{ github.token }}' "$(jq -r '[.jobs[].steps[] | select(.run != null)] | first | .env.GH_TOKEN' <<<"$json")" \
+    "…with the job token for gh (the reference adapters)"
+  assert_eq "0" "$(jq '[.jobs[].steps[] | select((.uses // "") | startswith("actions/checkout@")) | .with["fetch-depth"]] | first' <<<"$json")" \
+    "the checkout has the full history (git first-add dates)"
+}
+
+test_ledger_publish_step() {
+  echo "Test: ledger-publish.sh — no vendored helper set: ::error::, exit 1; no ledger config: inert, exit 0; a publish that fails: its exit code, ::error::; the vendored tier publishes the views branch"
+  local dir remote out rc
+  dir=$(installed_repo --ci --workflows=doc-ledger-publish) || { assert_true "install --ci --workflows=doc-ledger-publish" false; return 0; }
+  out="$(harness_mktemp_d lp-step)/out"
+  local step=.github/scripts/doc-superpowers-steps/ledger-publish.sh
+  # Not enabled: the inert line, exit 0.
+  rc=0
+  run_installed "$dir" "$out" LEDGER_HELPERS=.github/scripts/ledger/lib.sh -- "$step" || rc=$?
+  assert_eq "0" "$rc" "no docs/ledger/config.json: exit 0"
+  assert_contains "$(cat "$out.log")" "ledger: not enabled (no docs/ledger/config.json)" "…the inert line"
+  # Enabled, with a remote: the views branch is published.
+  remote=$(harness_mktemp_d lp-remote)
+  git init -q --bare "$remote/origin.git"
+  (
+    cd "$dir"
+    mkdir -p docs/issues docs/ledger
+    printf '{}\n' > docs/ledger/config.json
+    printf '%s\n' '{"schema":"ledger-registry/1","ledgers":[{"id":"app","title":"App","kind":"service","status":"active"}]}' > docs/ledger/ledgers.json
+    printf '%s\n' '---' 'key: app-1' 'ledger: app' 'status: Open' 'severity: P2' 'summary: Published from CI' '---' '# a' > docs/issues/a.md
+    git add -A && git commit -qm "ledger: enable"
+    git remote add origin "$remote/origin.git"
+    git push -q origin main
+  )
+  rc=0
+  run_installed "$dir" "$out" LEDGER_HELPERS=.github/scripts/ledger/lib.sh -- "$step" || rc=$?
+  assert_eq "0" "$rc" "the vendored tier publishes: exit 0 ($(tail -n 2 "$out.log" | tr '\n' ' '))"
+  assert_contains "$(cat "$out.log")" "published" "…saying so"
+  assert_true "…the views branch is on the remote" git -C "$remote/origin.git" rev-parse -q --verify refs/heads/doc-ledger-views
+  # A publish that fails (no such remote): its exit code, with an ::error::.
+  git -C "$dir" remote remove origin
+  rc=0
+  run_installed "$dir" "$out" LEDGER_HELPERS=.github/scripts/ledger/lib.sh -- "$step" || rc=$?
+  assert_eq "2" "$rc" "publish could not run: its exit code (2)"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error:: line"
+  # No vendored helper set: refused before doc-tools.sh runs, even inert.
+  rm -rf "$dir/.github/scripts/ledger" "$dir/docs/ledger/config.json"
+  rc=0
+  run_installed "$dir" "$out" LEDGER_HELPERS=.github/scripts/ledger/lib.sh -- "$step" || rc=$?
+  assert_eq "1" "$rc" "the ledger helper set is not vendored: exit 1"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error:: line"
+  assert_contains "$(cat "$out.log")" "install --ci" "…naming the fix"
+}
+
+test_ledger_publish_template
+test_ledger_publish_step
 
 print_summary

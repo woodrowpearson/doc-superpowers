@@ -2973,6 +2973,64 @@ test_install_ci_every_referenced_helper_is_installed() {
   teardown
 }
 
+test_ci_publish_template_vendors_ledger() {
+  # doc-ledger-publish.yml runs `doc-tools.sh ledger publish`, which needs the
+  # ledger modules beside the vendored doc-tools.sh: the workflow names
+  # .github/scripts/ledger/, so install --ci ships the ledger helper set with
+  # it (needed_helpers) and takes it away with it.
+  echo "test: doc-ledger-publish.yml — every 30 minutes and by hand, contents: write, runs ledger publish; install --ci vendors the ledger helper set with it, uninstall removes it"
+  local tpl="$HOOKS_DIR/ci/doc-ledger-publish.yml"
+  assert_file_exists "$tpl" "the template exists"
+  local t
+  t=$(cat "$tpl" 2>/dev/null || true)
+  assert_eq "# doc-superpowers workflow v1" "$(head -n 1 "$tpl" 2>/dev/null || true)" "it carries the workflow marker (the installer owns it)"
+  assert_contains "$t" "- cron: '*/30 * * * *'" "scheduled every 30 minutes"
+  assert_contains "$t" "workflow_dispatch:" "…and runnable by hand"
+  assert_contains "$t" "contents: write" "contents: write (it pushes the views branch)"
+  assert_contains "$t" ".github/scripts/doc-superpowers-steps/ledger-publish.sh" "its step runs the vendored publish step script"
+  assert_contains "$t" ".github/scripts/ledger/" "…and names the vendored ledger helper set"
+  assert_contains "$(cat "$HOOKS_DIR/ci/doc-superpowers-steps/ledger-publish.sh" 2>/dev/null || true)" "ledger publish" \
+    "…which runs doc-tools.sh ledger publish"
+  setup
+  local output exit_code=0 f missing=""
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-ledger-publish 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "install --ci --workflows=doc-ledger-publish exits 0"
+  assert_file_exists ".github/workflows/doc-ledger-publish.yml" "the workflow is installed"
+  for f in "$SCRIPT_DIR"/ledger/*.sh "$SCRIPT_DIR"/ledger/*.awk "$SCRIPT_DIR"/ledger/*.jq; do
+    [ -f "$f" ] || continue
+    cmp -s "$f" ".github/scripts/ledger/${f##*/}" || missing="$missing ledger/${f##*/}"
+  done
+  for f in "$SCRIPT_DIR"/adapters/*.sh; do
+    [ -f "$f" ] || continue
+    cmp -s "$f" ".github/scripts/adapters/${f##*/}" || missing="$missing adapters/${f##*/}"
+  done
+  assert_eq "" "$missing" "the ledger modules and adapters are vendored, byte copies"
+  assert_true "the publish step script is vendored executable" test -x .github/scripts/doc-superpowers-steps/ledger-publish.sh
+  assert_true "doc-pr-release's helpers are not (no workflow runs them)" test ! -e .github/scripts/doc-pr-release
+  assert_contains "$output" "ledger helpers → .github/scripts/ledger/" "the install reports the ledger helper set"
+  _assert_installed_workflows_wired "install --ci --workflows=doc-ledger-publish"
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" status --ci 2>&1) || true
+  assert_contains "$output" "ledger helpers:" "status reports the ledger modules"
+  assert_contains "$output" "ledger adapters:" "…and the adapters"
+  # Another workflow beside it keeps the step scripts; the ledger set follows
+  # the publish workflow alone.
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-freshness-pr >/dev/null 2>&1
+  exit_code=0
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-ledger-publish 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "uninstall --ci --workflows=doc-ledger-publish exits 0"
+  assert_file_not_exists ".github/workflows/doc-ledger-publish.yml" "the workflow is removed"
+  assert_true "the ledger modules are removed with it" test ! -e .github/scripts/ledger
+  assert_true "…and the adapters" test ! -e .github/scripts/adapters
+  assert_true "the step scripts stay (doc-freshness-pr runs them)" test -x .github/scripts/doc-superpowers-steps/freshness-check.sh
+  # An adapter of your own in .github/scripts/adapters/ survives the removal.
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-ledger-publish >/dev/null 2>&1
+  printf '#!/bin/sh\n' > .github/scripts/adapters/mine.sh
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci >/dev/null 2>&1 || true
+  assert_file_exists ".github/scripts/adapters/mine.sh" "a full uninstall keeps an adapter of your own"
+  assert_file_not_exists ".github/scripts/adapters/ledger-items-gh.sh" "…and removes the plugin's"
+  teardown
+}
+
 test_install_ci_version_comes_from_doc_tools() {
   # install.sh:22 took the first "## vX.Y.Z" SUBSTRING of RELEASE-NOTES.md,
   # and under pipefail a file without one aborted the installer silently, so
@@ -3975,6 +4033,7 @@ test_install_ci_workflows_bogus_errors_with_valid_set
 test_install_ci_helpers_false_refuses_doc_pr_release
 test_install_ci_ships_step_scripts_with_workflow
 test_install_ci_every_referenced_helper_is_installed
+test_ci_publish_template_vendors_ledger
 test_install_ci_helpers_false_still_wires_steps
 test_install_ci_version_comes_from_doc_tools
 test_install_ci_writes_state_file_on_first_install

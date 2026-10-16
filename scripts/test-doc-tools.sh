@@ -6723,6 +6723,211 @@ test_i10_no_hidden_sed_or_ripgrep_dependency() {
   assert_eq "" "$hits" "no GNU sed or ripgrep name in shipped scripts or workflows"
 }
 
+# --- Work ledger: the vendored helper set (3.3.0 Task 17) ---
+#
+# tools install --helper ledger ships the ledger modules (scripts/ledger/*.sh,
+# *.awk, *.jq) to <dest>/ledger/ and the reference adapters
+# (scripts/adapters/*.sh) to <dest>/adapters/, so a vendored doc-tools.sh
+# finds $SCRIPT_DIR/ledger and resolves "doc-superpowers:<adapter>" beside
+# itself. Scripts are vendored executable; the awk and jq programs are data.
+
+# _lg_modules <dir>: the files the ledger helper set takes from <dir>, one
+# basename per line.
+_lg_modules() {
+  local f
+  for f in "$1"/*.sh "$1"/*.awk "$1"/*.jq; do
+    [ -f "$f" ] && printf '%s\n' "${f##*/}"
+  done
+  return 0
+}
+
+test_tools_install_ledger_helper_set() {
+  echo "test: tools install --helper ledger vendors scripts/ledger/*.{sh,awk,jq} to <dest>/ledger/ and scripts/adapters/*.sh to <dest>/adapters/; status reports both"
+  setup
+  local rc=0 out f n na missing="" differ="" nonexec=""
+  out=$("$DOC_TOOLS" tools install --helper ledger 2>&1) || rc=$?
+  assert_eq "0" "$rc" "exits 0"
+  n=$(_lg_modules "$SCRIPT_DIR/ledger" | wc -l | tr -d ' ')
+  na=$(_lg_modules "$SCRIPT_DIR/adapters" | wc -l | tr -d ' ')
+  assert_true "the plugin has ledger modules ($n) and adapters ($na) to ship" test "$n" -ge 10 -a "$na" -ge 2
+  for f in $(_lg_modules "$SCRIPT_DIR/ledger"); do
+    if [ ! -f ".github/scripts/ledger/$f" ]; then missing="$missing ledger/$f"
+    elif ! cmp -s "$SCRIPT_DIR/ledger/$f" ".github/scripts/ledger/$f"; then differ="$differ ledger/$f"; fi
+  done
+  for f in $(_lg_modules "$SCRIPT_DIR/adapters"); do
+    if [ ! -f ".github/scripts/adapters/$f" ]; then missing="$missing adapters/$f"
+    elif ! cmp -s "$SCRIPT_DIR/adapters/$f" ".github/scripts/adapters/$f"; then differ="$differ adapters/$f"; fi
+  done
+  assert_eq "" "$missing" "every ledger module and adapter is vendored"
+  assert_eq "" "$differ" "…as a byte copy"
+  assert_eq "$n|$na" "$(ls -A .github/scripts/ledger 2>/dev/null | wc -l | tr -d ' ')|$(ls -A .github/scripts/adapters 2>/dev/null | wc -l | tr -d ' ')" \
+    "…and nothing else (no test, no README)"
+  for f in .github/scripts/ledger/*.sh .github/scripts/adapters/*.sh; do
+    [ -x "$f" ] || nonexec="$nonexec $f"
+  done
+  assert_eq "" "$nonexec" "every vendored script is executable"
+  assert_eq "644" "$(_file_mode_of .github/scripts/ledger/config.jq 2>/dev/null)" "a jq program is vendored 644 (data, not a script)"
+  assert_eq "644" "$(_file_mode_of .github/scripts/ledger/frontmatter.awk 2>/dev/null)" "…and so is an awk program"
+  assert_file_exists ".github/scripts/doc-tools.sh" "doc-tools.sh is vendored with it"
+  assert_true "no CI helper directory is shipped with it" test ! -e .github/scripts/doc-pr-release -a ! -e .github/scripts/doc-superpowers-steps
+  assert_contains "$out" "ledger helpers → .github/scripts/ledger/" "the report names the ledger modules"
+  assert_contains "$out" "ledger adapters → .github/scripts/adapters/" "…and the adapters"
+  out=$("$DOC_TOOLS" tools status 2>&1) || true
+  assert_eq "1" "$(grep -cxF -- "ledger helpers: $n installed at .github/scripts/ledger/" <<<"$out" || true)" "status: the ledger modules"
+  assert_eq "1" "$(grep -cxF -- "ledger adapters: $na installed at .github/scripts/adapters/" <<<"$out" || true)" "status: the adapters"
+  echo "# local" >> .github/scripts/ledger/config.jq
+  printf '#!/bin/sh\n' > .github/scripts/adapters/mine.sh
+  out=$("$DOC_TOOLS" tools status 2>&1) || true
+  assert_eq "1" "$(grep -cxF -- "ledger helpers: $n installed at .github/scripts/ledger/ (1 differ from the plugin's)" <<<"$out" || true)" \
+    "status: an edited jq program is drift"
+  assert_eq "1" "$(grep -cxF -- "ledger adapters: $((na + 1)) installed at .github/scripts/adapters/ (1 not shipped by the plugin)" <<<"$out" || true)" \
+    "status: an adapter of your own is not the plugin's, and not drift"
+  # --with-helpers is every helper the templates run: the ledger set too.
+  rm -rf .github
+  rc=0
+  "$DOC_TOOLS" tools install --with-helpers >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "--with-helpers exits 0"
+  assert_true "--with-helpers ships the ledger modules and adapters" test -f .github/scripts/ledger/lib.sh -a -x .github/scripts/adapters/ledger-pr-gh.sh
+  # A symbolic link on the way is refused before anything is written.
+  rm -rf .github
+  mkdir -p .github/scripts elsewhere
+  ln -s ../../elsewhere .github/scripts/adapters
+  rc=0
+  out=$("$DOC_TOOLS" tools install --helper ledger 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a symlinked adapters directory: refused (exit 1)"
+  assert_contains "$out" "symbolic link" "…saying why"
+  assert_true "…writing nothing" test ! -e .github/scripts/doc-tools.sh -a ! -e .github/scripts/ledger -a -z "$(ls -A elsewhere)"
+  teardown
+}
+
+test_tools_uninstall_ledger_byte_identical_only() {
+  echo "test: tools uninstall --helper ledger removes only byte-identical modules and adapters; edited and added files, their directories and doc-tools.sh stay"
+  setup
+  "$DOC_TOOLS" tools install --helper ledger >/dev/null 2>&1
+  echo "# local" >> .github/scripts/ledger/config.jq
+  printf '#!/bin/sh\n' > .github/scripts/adapters/mine.sh
+  local rc=0 out
+  out=$("$DOC_TOOLS" tools uninstall --helper ledger 2>&1) || rc=$?
+  assert_eq "0" "$rc" "exits 0"
+  assert_file_exists ".github/scripts/ledger/config.jq" "an edited jq program is kept"
+  assert_file_not_exists ".github/scripts/ledger/lib.sh" "an unmodified module is removed"
+  assert_file_not_exists ".github/scripts/ledger/frontmatter.awk" "…an awk program too"
+  assert_file_exists ".github/scripts/adapters/mine.sh" "an adapter of your own is kept"
+  assert_file_not_exists ".github/scripts/adapters/ledger-pr-gh.sh" "an unmodified adapter is removed"
+  assert_contains "$out" "Kept .github/scripts/ledger/" "the kept module directory is reported"
+  assert_contains "$out" "Kept .github/scripts/adapters/" "…and the kept adapters directory"
+  assert_file_exists ".github/scripts/doc-tools.sh" "--helper ledger leaves doc-tools.sh"
+  # Unmodified: both directories go; a plain uninstall takes doc-tools.sh too.
+  rm -rf .github
+  "$DOC_TOOLS" tools install --helper ledger >/dev/null 2>&1
+  rc=0
+  "$DOC_TOOLS" tools uninstall >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "an unmodified install uninstalls cleanly"
+  assert_true "…leaving no .github/scripts" test ! -e .github/scripts
+  # A symlinked module directory is refused before anything is removed.
+  "$DOC_TOOLS" tools install --helper ledger >/dev/null 2>&1
+  mv .github/scripts/ledger real-ledger
+  ln -s ../../real-ledger .github/scripts/ledger
+  rc=0
+  out=$("$DOC_TOOLS" tools uninstall --helper ledger 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a symlinked ledger directory: refused (exit 1)"
+  assert_true "…removing nothing through it, nor the adapters" test -f real-ledger/lib.sh -a -f .github/scripts/adapters/ledger-pr-gh.sh
+  teardown
+}
+
+test_vendored_ledger_runs() {
+  echo "test: a vendored doc-tools.sh with the ledger helper set runs the ledger verbs, and resolves doc-superpowers:<adapter> beside itself"
+  setup
+  mkdir -p docs/issues docs/ledger
+  printf '{}\n' > docs/ledger/config.json
+  printf '%s\n' '{"schema":"ledger-registry/1","ledgers":[{"id":"app","title":"App","kind":"service","status":"active"}]}' > docs/ledger/ledgers.json
+  printf '%s\n' '---' 'key: app-1' 'ledger: app' 'status: Open' 'severity: P2' 'date: 2026-01-05' 'summary: Vendored alpha' '---' '# a' > docs/issues/a.md
+  git add -A && git commit -qm items
+  local vend rc=0 out err
+  vend=$(harness_mktemp_d vendored)
+  "$DOC_TOOLS" tools install --helper ledger --dest "$vend" >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "tools install --helper ledger --dest <dir> exits 0"
+  # Its own runner (the vendored copy under this suite's bash).
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$BASH_BIN" "$vend/doc-tools.sh" > "$vend/run"
+  chmod +x "$vend/run"
+  rc=0
+  out=$("$vend/run" ledger ls 2>/dev/null </dev/null) || rc=$?
+  assert_eq "0" "$rc" "the vendored copy: ledger ls exits 0"
+  assert_eq "app-1  P2  not started  Vendored alpha" "$out" "…and lists the item"
+  rc=0
+  out=$("$vend/run" ledger show app-1 --format json 2>/dev/null </dev/null) || rc=$?
+  assert_eq "0" "$rc" "…ledger show exits 0"
+  assert_json_field "$out" '.item.key' "app-1" "…and finds the item"
+  printf '%s\n' '{"adapters":{"pr":"doc-superpowers:nope"}}' > docs/ledger/config.json
+  err=$(harness_mktemp vendored-err)
+  rc=0
+  "$vend/run" ledger ls --refresh >/dev/null 2>"$err" </dev/null || rc=$?
+  assert_eq "2" "$rc" "an unknown doc-superpowers adapter: exit 2"
+  assert_contains "$(cat "$err")" "${vend##*/}/adapters/nope.sh" "…looked up in the vendored adapters directory"
+  teardown
+}
+
+# _tests_yml_drift_step <out>: the run: body of tests.yml's "Self-installed
+# CI tier matches its templates" step, as a script.
+_tests_yml_drift_step() {
+  awk '
+    /- name: Self-installed CI tier matches its templates/ { found = 1; next }
+    found && !inrun && /^[[:space:]]*run:[[:space:]]*[|]/ { match($0, /^[[:space:]]*/); ind = RLENGTH; inrun = 1; next }
+    inrun {
+      if ($0 ~ /^[[:space:]]*$/) { print ""; next }
+      match($0, /^[[:space:]]*/)
+      if (RLENGTH > ind) { print; next }
+      exit
+    }' "$SCRIPT_DIR/../.github/workflows/tests.yml" > "$1"
+}
+
+test_tests_yml_drift_step_covers_vendored_ledger() {
+  echo "test: tests.yml's self-install drift step checks a vendored ledger helper set against scripts/ledger/ and scripts/adapters/ (byte copies, scripts executable, none missing)"
+  setup
+  local root step rt rc out
+  root="$(cd "$SCRIPT_DIR/.." && pwd)"
+  step=$(harness_mktemp drift-step)
+  _tests_yml_drift_step "$step"
+  assert_contains "$(cat "$step")" "cmp scripts/doc-tools.sh .github/scripts/doc-tools.sh" "the step body is extracted"
+  # A copy of the plugin, its CI tier freshly installed with this repo's choices.
+  mkdir -p scripts skills/doc-superpowers .claude/doc-superpowers
+  cp -R "$root/scripts/ledger" "$root/scripts/adapters" "$root/scripts/hooks" scripts/
+  cp "$root/scripts/doc-tools.sh" "$root/scripts/merge-doc-index.sh" scripts/
+  cp "$root/skills/doc-superpowers/SKILL.md" skills/doc-superpowers/
+  cp "$root/RELEASE-NOTES.md" "$root/.gitattributes" .
+  cp "$root/.claude/doc-superpowers/installed.json" .claude/doc-superpowers/
+  rc=0
+  "$BASH_BIN" scripts/hooks/install.sh install --ci >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "precondition: install --ci in the copy exits 0"
+  rt=$(harness_mktemp_d drift-rt)
+  rc=0
+  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "a fresh install passes the drift step"
+  "$BASH_BIN" scripts/doc-tools.sh tools install --helper ledger >/dev/null 2>&1
+  rc=0
+  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "the vendored ledger helper set passes it ($(printf '%s' "$out" | grep -m1 '::error' || true))"
+  echo "# drift" >> .github/scripts/ledger/views.sh
+  rc=0
+  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "1" "$rc" "an edited vendored module fails it"
+  assert_contains "$out" "::error file=.github/scripts/ledger/views.sh::differs from scripts/ledger/views.sh" "…naming the module and its source"
+  "$BASH_BIN" scripts/doc-tools.sh tools install --helper ledger >/dev/null 2>&1
+  rm -f .github/scripts/adapters/ledger-pr-gh.sh .github/scripts/ledger/render-md.jq
+  rc=0
+  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a partial helper set fails it"
+  assert_contains "$out" "lacks ledger-pr-gh.sh" "…naming the missing adapter"
+  assert_contains "$out" "lacks render-md.jq" "…and the missing jq program"
+  "$BASH_BIN" scripts/doc-tools.sh tools install --helper ledger >/dev/null 2>&1
+  chmod a-x .github/scripts/ledger/lib.sh
+  rc=0
+  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a vendored ledger script that is not executable fails it"
+  assert_contains "$out" "::error file=.github/scripts/ledger/lib.sh::is not executable" "…naming it"
+  teardown
+}
+
 # --- Final whole-branch review fixes (sweep 05ea982 final review) ---
 #
 # set-doc-type (retype an entry in place: record status depends on doc_type);
@@ -7386,6 +7591,12 @@ run_tests() {
   test_i10_tools_status_counts_user_added_helpers_apart
   test_i10_tools_from_the_vendored_copy
   test_i10_no_hidden_sed_or_ripgrep_dependency
+
+  # --- Work ledger: the vendored helper set (3.3.0 Task 17) ---
+  test_tools_install_ledger_helper_set
+  test_tools_uninstall_ledger_byte_identical_only
+  test_vendored_ledger_runs
+  test_tests_yml_drift_step_covers_vendored_ledger
 
   # --- Final whole-branch review fixes (sweep 05ea982 final review) ---
   test_fw_set_doc_type_retypes_in_place

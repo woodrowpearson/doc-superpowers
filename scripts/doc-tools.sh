@@ -2727,25 +2727,30 @@ fragments merge|cmd_fragments_merge|repo|paths-out= remove
   whose release commit has not reached <range-end> (merge or cherry-pick
   it first); 1 on any other failure.
 tools install|cmd_tools_install|deps|dest= with-helpers helper=*
-  [--dest <path>] [--with-helpers | --helper <dir>...]
+  [--dest <path>] [--with-helpers | --helper <set>...]
   Vendor doc-tools.sh into <path> (default .github/scripts); with
-  --with-helpers also every helper the CI templates run
-  (<path>/doc-pr-release/ and <path>/doc-superpowers-steps/), with
-  --helper <dir> (repeatable) only those helper directories; shipping
-  doc-pr-release also creates RELEASE-NOTES.next/README.md (only if
-  absent). Files are replaced atomically; an existing file keeps its mode,
-  and every script ends up executable (the templates run them directly).
+  --with-helpers also every helper set the CI templates run, with --helper
+  <set> (repeatable) only those: doc-pr-release and doc-superpowers-steps
+  (<path>/<set>/), and ledger — the work ledger's modules
+  (scripts/ledger/*.sh, *.awk, *.jq → <path>/ledger/) and reference
+  adapters (scripts/adapters/*.sh → <path>/adapters/), which the vendored
+  doc-tools.sh runs from beside itself; shipping doc-pr-release also
+  creates RELEASE-NOTES.next/README.md (only if absent). Files are
+  replaced atomically; an existing file keeps its mode, every script ends
+  up executable (the templates run them directly), and a new awk or jq
+  program is 644.
   A symbolic link at a destination or at a directory on its way is refused
   before anything is written. Run from a vendored copy it can only copy
   itself (onto itself it only makes sure the copy is executable); a helper
   request then exits 1, writing nothing.
 tools uninstall|cmd_tools_uninstall|deps|dest= helper=*
-  [--dest <path>] [--helper <dir>...]
+  [--dest <path>] [--helper <set>...]
   Remove from <path> each vendored file that is byte-identical to the
   plugin's copy; a file with local edits (or from another plugin
   version) and a file you added are kept and reported, and so is a helper
-  directory that still holds them. With --helper <dir> (repeatable), only
-  those helper directories (doc-tools.sh stays). A symbolic link on the
+  directory that still holds them. With --helper <set> (repeatable), only
+  those helper sets (doc-tools.sh stays; ledger is <path>/ledger/ and
+  <path>/adapters/). A symbolic link on the
   way is refused. With the doc-pr-release helpers it also removes
   RELEASE-NOTES.next/README.md when it is byte-identical to the plugin's
   fragment-format spec and the only file there (an edited one, or one
@@ -2754,9 +2759,10 @@ tools uninstall|cmd_tools_uninstall|deps|dest= helper=*
 tools status|cmd_tools_status|deps|dest=
   [--dest <path>]
   Report whether doc-tools.sh is vendored at <path>, whether it matches the
-  plugin's copy (and the plugin's version), and the helpers present: how
-  many differ from the plugin's copies, and how many the plugin does not
-  ship (added locally) — and whether RELEASE-NOTES.next/README.md matches
+  plugin's copy (and the plugin's version), and the helpers present (the
+  ledger set as "ledger helpers" and "ledger adapters"): how many differ
+  from the plugin's copies, and how many the plugin does not ship (added
+  locally) — and whether RELEASE-NOTES.next/README.md matches
   the plugin's fragment-format spec (an older copy gives outdated advice:
   replace it with the plugin's). Run from a vendored copy it reports
   presence only: no plugin to compare with.
@@ -5797,11 +5803,36 @@ _tools_is_plugin() {
   [ -f "$_TOOLS_ROOT/skills/doc-superpowers/SKILL.md" ] && [ -d "$SCRIPT_DIR/hooks/ci" ]
 }
 
-# The helper directories the CI templates run as .github/scripts/<dir>/*.sh,
-# laid out in the plugin as scripts/hooks/ci/<dir>/. doc-superpowers-steps
-# holds the step scripts every template runs; doc-pr-release the producer
-# helpers of doc-pr-release.yml.
-_TOOLS_HELPER_DIRS="doc-pr-release doc-superpowers-steps"
+# The helper sets tools install / uninstall / status act on (--helper names
+# one). doc-pr-release and doc-superpowers-steps are directories the CI
+# templates run as .github/scripts/<dir>/*.sh, laid out in the plugin as
+# scripts/hooks/ci/<dir>/: doc-superpowers-steps holds the step scripts every
+# template runs, doc-pr-release the producer helpers of doc-pr-release.yml.
+# ledger is the work ledger's modules and reference adapters, which a vendored
+# doc-tools.sh runs from beside itself ($SCRIPT_DIR/ledger; a
+# "doc-superpowers:<adapter>" config value is $SCRIPT_DIR/adapters/<adapter>.sh).
+_TOOLS_HELPER_DIRS="doc-pr-release doc-superpowers-steps ledger"
+
+# Each set's parts, "<set>:<source dir under scripts/>:<dest subdir>": a part
+# ships its source dir's *.sh, *.awk and *.jq to <dest>/<subdir>/ — the
+# scripts executable (the templates run them directly), the awk and jq
+# programs 644 (data the scripts read). A part is reported as "<set> helpers"
+# when its subdir is the set's name, else as "<set> <subdir>".
+_TOOLS_PARTS="doc-pr-release:hooks/ci/doc-pr-release:doc-pr-release
+doc-superpowers-steps:hooks/ci/doc-superpowers-steps:doc-superpowers-steps
+ledger:ledger:ledger
+ledger:adapters:adapters"
+
+# _tools_part <part>: split one _TOOLS_PARTS entry into _TP_SET, _TP_SRC (an
+# absolute path), _TP_SUB and _TP_LABEL.
+_tools_part() {
+  local r
+  _TP_SET=${1%%:*}
+  r=${1#*:}
+  _TP_SRC="$SCRIPT_DIR/${r%%:*}"
+  _TP_SUB=${r#*:}
+  if [ "$_TP_SUB" = "$_TP_SET" ]; then _TP_LABEL="$_TP_SET helpers"; else _TP_LABEL="$_TP_SET $_TP_SUB"; fi
+}
 
 # _tools_copy <src> <dest> <mode for a new dest> [exec]: copy through a tmp
 # beside <dest> (never cp over a file a running CI job may be reading). An
@@ -5836,7 +5867,7 @@ _tools_helper_selection() {
   for d in ${_OPTV_helper[@]+"${_OPTV_helper[@]}"}; do
     case " $_TOOLS_HELPER_DIRS " in
       *" $d "*) ;;
-      *) _usage_error "$1" "unknown helper directory '$d' (one of: $_TOOLS_HELPER_DIRS)" ;;
+      *) _usage_error "$1" "unknown helper set '$d' (one of: $_TOOLS_HELPER_DIRS)" ;;
     esac
     case " $sel " in
       *" $d "*) ;;
@@ -5866,7 +5897,7 @@ _tools_no_link() {
 
 cmd_tools_install() {
   [ $# -eq 0 ] || _usage_error "tools install" "takes no arguments (got '$1')"
-  local dest="${_OPT_dest:-.github/scripts}" helpers d f n
+  local dest="${_OPT_dest:-.github/scripts}" helpers f n p
   helpers=$(_tools_helper_selection "tools install")
   local src="$SCRIPT_DIR/doc-tools.sh"
 
@@ -5876,10 +5907,13 @@ cmd_tools_install() {
       echo "ERROR: --with-helpers / --helper ship the plugin's CI helpers, and $src is a vendored copy, which has none. Run the plugin's doc-tools.sh. Nothing was installed." >&2
       exit 1
     fi
-    for d in $helpers; do
-      [ -d "$SCRIPT_DIR/hooks/ci/$d" ] || _die "the plugin's helper directory $SCRIPT_DIR/hooks/ci/$d is missing. Nothing was installed."
-      for f in "$SCRIPT_DIR/hooks/ci/$d"/*.sh; do
-        _tools_no_link "$dest/$d/${f##*/}"
+    for p in $_TOOLS_PARTS; do
+      _tools_part "$p"
+      case " $helpers " in *" $_TP_SET "*) ;; *) continue ;; esac
+      [ -d "$_TP_SRC" ] || _die "the plugin's helper directory $_TP_SRC is missing. Nothing was installed."
+      for f in "$_TP_SRC"/*.sh "$_TP_SRC"/*.awk "$_TP_SRC"/*.jq; do
+        [ -f "$f" ] || continue
+        _tools_no_link "$dest/$_TP_SUB/${f##*/}"
       done
     done
     case " $helpers " in
@@ -5897,15 +5931,20 @@ cmd_tools_install() {
   fi
   [ -n "$helpers" ] || return 0
 
-  for d in $helpers; do
-    mkdir -p "$dest/$d" || _die "cannot create $dest/$d"
+  for p in $_TOOLS_PARTS; do
+    _tools_part "$p"
+    case " $helpers " in *" $_TP_SET "*) ;; *) continue ;; esac
+    mkdir -p "$dest/$_TP_SUB" || _die "cannot create $dest/$_TP_SUB"
     n=0
-    for f in "$SCRIPT_DIR/hooks/ci/$d"/*.sh; do
+    for f in "$_TP_SRC"/*.sh "$_TP_SRC"/*.awk "$_TP_SRC"/*.jq; do
       [ -f "$f" ] || continue
-      _tools_copy "$f" "$dest/$d/$(basename "$f")" 755 1
+      case "$f" in
+        *.sh) _tools_copy "$f" "$dest/$_TP_SUB/${f##*/}" 755 1 ;;
+        *) _tools_copy "$f" "$dest/$_TP_SUB/${f##*/}" 644 ;;
+      esac
       n=$((n + 1))
     done
-    echo "Installed $n $d helpers → $dest/$d/"
+    echo "Installed $n $_TP_LABEL → $dest/$_TP_SUB/"
   done
 
   # RELEASE-NOTES.next/README.md (with the doc-pr-release helpers: the
@@ -5938,10 +5977,11 @@ cmd_tools_uninstall() {
   # and reported. RELEASE-NOTES.next/README.md goes with the doc-pr-release
   # helpers only when it is the plugin's own spec and alone there: an edited
   # one, or one beside fragments, is kept.
-  local removed=0 kept=0 d f p n
+  local removed=0 kept=0 f p n part
   _tools_no_link "$dest/doc-tools.sh"
-  for d in $_TOOLS_HELPER_DIRS; do
-    _tools_no_link "$dest/$d/x"
+  for part in $_TOOLS_PARTS; do
+    _tools_part "$part"
+    _tools_no_link "$dest/$_TP_SUB/x"
   done
   f="$dest/doc-tools.sh"
   if [ -z "$only" ] && [ -f "$f" ]; then
@@ -5958,23 +5998,25 @@ cmd_tools_uninstall() {
     fi
   fi
 
-  for d in ${only:-$_TOOLS_HELPER_DIRS}; do
-    [ -d "$dest/$d" ] || continue
+  for part in $_TOOLS_PARTS; do
+    _tools_part "$part"
+    case " ${only:-$_TOOLS_HELPER_DIRS} " in *" $_TP_SET "*) ;; *) continue ;; esac
+    [ -d "$dest/$_TP_SUB" ] || continue
     n=0
-    for p in "$SCRIPT_DIR/hooks/ci/$d"/*.sh; do
+    for p in "$_TP_SRC"/*.sh "$_TP_SRC"/*.awk "$_TP_SRC"/*.jq; do
       [ -f "$p" ] || continue
-      f="$dest/$d/$(basename "$p")"
+      f="$dest/$_TP_SUB/${p##*/}"
       if [ -f "$f" ] && ! [ "$p" -ef "$f" ] && cmp -s "$p" "$f"; then
         rm -f "$f" || _die "cannot remove $f"
         n=$((n + 1))
       fi
     done
-    [ "$n" -eq 0 ] || echo "Removed $n $d helpers from $dest/$d/"
+    [ "$n" -eq 0 ] || echo "Removed $n $_TP_LABEL from $dest/$_TP_SUB/"
     removed=$((removed + n))
-    if rmdir "$dest/$d" 2>/dev/null; then
+    if rmdir "$dest/$_TP_SUB" 2>/dev/null; then
       :
     else
-      echo "Kept $dest/$d/ (it holds files that are not unmodified plugin helpers: local edits or your own)"
+      echo "Kept $dest/$_TP_SUB/ (it holds files that are not unmodified plugin helpers: local edits or your own)"
       kept=$((kept + 1))
     fi
   done
@@ -6038,15 +6080,16 @@ cmd_tools_status() {
   # Helper-presence summary (and, when there is a plugin to compare, how many
   # differ from the plugin's copy and how many the plugin does not ship at
   # all — a file the user added is not drift).
-  local d f p n drift added note
-  for d in $_TOOLS_HELPER_DIRS; do
-    if [ -d "$dest/$d" ]; then
+  local f p n drift added note part
+  for part in $_TOOLS_PARTS; do
+    _tools_part "$part"
+    if [ -d "$dest/$_TP_SUB" ]; then
       n=0 drift=0 added=0
-      for f in "$dest/$d"/*.sh; do
+      for f in "$dest/$_TP_SUB"/*.sh "$dest/$_TP_SUB"/*.awk "$dest/$_TP_SUB"/*.jq; do
         [ -f "$f" ] || continue
         n=$((n + 1))
         [ "$plugin" = 1 ] || continue
-        p="$SCRIPT_DIR/hooks/ci/$d/${f##*/}"
+        p="$_TP_SRC/${f##*/}"
         if [ ! -f "$p" ]; then
           added=$((added + 1))
         elif ! cmp -s "$p" "$f"; then
@@ -6056,9 +6099,9 @@ cmd_tools_status() {
       note=""
       [ "$drift" -eq 0 ] || note="$drift differ from the plugin's"
       [ "$added" -eq 0 ] || note="${note:+$note, }$added not shipped by the plugin"
-      echo "$d helpers: $n installed at $dest/$d/${note:+ ($note)}"
+      echo "$_TP_LABEL: $n installed at $dest/$_TP_SUB/${note:+ ($note)}"
     else
-      echo "$d helpers: not installed at $dest"
+      echo "$_TP_LABEL: not installed at $dest"
     fi
   done
   # An upgrade keeps an existing README (tools install never overwrites it),

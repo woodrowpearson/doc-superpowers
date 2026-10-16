@@ -119,6 +119,7 @@ workflow_desc() {
     doc-spec-verify) echo "PR opened/updated touching indexed specs: AI spec-compliance comment; with docs/spec-claims/, a non-AI claims job on every same-repository PR (claims validate, run, attest; findings fail it) (contents: read, pull-requests: write)" ;;
     doc-pr-full-cycle) echo "PR opened touching indexed docs: AI review + update + diagram + sync, a checked step commits docs to the PR branch (contents + pull-requests: write)" ;;
     doc-pr-release) echo "PR pushes: AI release-notes fragment, a checked step commits it to the PR branch; PR body edited (contents + pull-requests: write)" ;;
+    doc-ledger-publish) echo "every 30 minutes and by hand: with docs/ledger/config.json, doc-tools.sh ledger publish renders the work-ledger views from the base and pushes them to views.branch; ships the ledger helper set (contents: write; pull-requests + issues: read, for the adapters)" ;;
     *) echo "(no description)" ;;
   esac
 }
@@ -1702,16 +1703,19 @@ run_tools() {
   [ -z "$out" ] || printf '%s\n' "$out" | sed 's/^/  /'
 }
 
-# The helper dirs the managed workflows on disk run — a workflow that names
+# The helper sets the managed workflows on disk run — a workflow that names
 # .github/scripts/<dir>/ runs it: every template runs step scripts
-# (doc-superpowers-steps), doc-pr-release.yml also the producer helpers. A
+# (doc-superpowers-steps), doc-pr-release.yml also the producer helpers, and
+# doc-ledger-publish.yml the ledger set (.github/scripts/ledger/, with the
+# adapters beside it: doc-tools.sh tools install --helper ledger). A
 # path the workflow guards with hashFiles('<path>') != '' it uses only when
 # another workflow ships it (doc-spec-verify.yml's claims job runs
 # update-pr-body.sh only beside doc-pr-release.yml): no reason to ship the
 # dir. Any other path it names under the dir is.
+HELPER_SETS="doc-pr-release doc-superpowers-steps ledger"
 needed_helpers() {
   local need="" d w
-  for d in doc-pr-release doc-superpowers-steps; do
+  for d in $HELPER_SETS; do
     for w in $KNOWN_WORKFLOWS; do
       is_managed_workflow ".github/workflows/$w.yml" || continue
       if workflow_runs_helper_dir ".github/workflows/$w.yml" "$d"; then
@@ -1781,11 +1785,24 @@ vendor_sync() {
     done
     run_tools "${args[@]}"
   fi
-  for d in doc-pr-release doc-superpowers-steps; do
-    if ! in_list "$d" "$need" && [ -d "$VENDOR_DEST/$d" ]; then
+  for d in $HELPER_SETS; do
+    in_list "$d" "$need" && continue
+    if [ -d "$VENDOR_DEST/$d" ] || { [ "$d" = ledger ] && vendored_ledger_adapter; }; then
       run_tools tools uninstall --dest "$VENDOR_DEST" --helper "$d"
     fi
   done
+}
+
+# vendored_ledger_adapter: one of the plugin's ledger adapters is in
+# $VENDOR_DEST/adapters/ (the ledger set's second directory; a directory of
+# that name holding only your own adapters is not the set's).
+vendored_ledger_adapter() {
+  local f
+  for f in "$SKILL_DIR"/scripts/adapters/*.sh; do
+    [ -f "$f" ] || continue
+    [ ! -e "$VENDOR_DEST/adapters/${f##*/}" ] || return 0
+  done
+  return 1
 }
 
 install_ci() {
@@ -1937,16 +1954,21 @@ status_ci() {
   if [ "$state_ok" = 1 ] && [ "$STATE_HAS_CI" = 1 ]; then
     echo "  choices: base branch ${STATE_BASE:-main}, cron '${STATE_CRON:-0 9 * * 1}', strict ${STATE_STRICT:-false} ($STATE_FILE)"
   fi
-  local d n f
-  for d in doc-pr-release doc-superpowers-steps; do
+  local d n f label
+  for d in doc-pr-release doc-superpowers-steps ledger adapters; do
     [ -d "$VENDOR_DEST/$d" ] || continue
+    if [ "$d" = adapters ] && [ ! -d "$VENDOR_DEST/ledger" ] && ! vendored_ledger_adapter; then
+      continue
+    fi
     n=0
-    for f in "$VENDOR_DEST/$d"/*.sh; do
+    for f in "$VENDOR_DEST/$d"/*.sh "$VENDOR_DEST/$d"/*.awk "$VENDOR_DEST/$d"/*.jq; do
       if [ -f "$f" ]; then
         n=$((n + 1))
       fi
     done
-    echo "  $d helpers: $n in $VENDOR_DEST/$d/"
+    label="$d helpers"
+    [ "$d" != adapters ] || label="ledger adapters"
+    echo "  $label: $n in $VENDOR_DEST/$d/"
   done
   if [ -f "$VENDOR_DEST/doc-tools.sh" ]; then
     echo "  doc-tools.sh: vendored at $VENDOR_DEST/doc-tools.sh"
