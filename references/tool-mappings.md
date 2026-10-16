@@ -33,7 +33,7 @@ Use the tool that does the same job in your client. Only the skill's own referen
 | Capability | Claude Code | Cursor | Codex | OpenCode | Gemini CLI |
 |------------|-------------|--------|-------|----------|------------|
 | How this mapping reaches the model | not needed | not delivered: SKILL.md's references table points here | not delivered: SKILL.md's references table points here | the plugin adds this file to the system prompt | `GEMINI.md` imports this file |
-| Subagent dispatch (`init`, `audit`, `review-pr`, `update`) | `Agent`, in parallel | subagents; parallel dispatch unverified | `spawn_agent` (`[features] multi_agent`, on by default) | `task`; parallel dispatch unverified | `invoke_agent`; parallel dispatch unverified |
+| Subagent dispatch (`init`, `audit`, `review-pr`, `update`, `release`) | `Agent`, in parallel | subagents; parallel dispatch unverified | `spawn_agent` (`[features] multi_agent`, on by default) | `task`; parallel dispatch unverified | `invoke_agent`; parallel dispatch unverified |
 | Git hook tier (`--git`) | yes | yes | yes | yes | yes |
 | Claude hook tier (`--claude`) | yes | unverified: Cursor runs Claude Code hooks from `.claude/settings.json` when *Include Third-Party Plugins, Skills, and Other Configs* is on; this tier writes `.claude/settings.local.json`, which Cursor's docs do not name | no | no | no |
 | CI tier (`--ci`) | yes | yes | yes | yes | yes |
