@@ -2372,7 +2372,7 @@ test_tools_install_unknown_flag_errors() {
 # --- Doc-path key normalization (add-entry and siblings) ---
 #
 # The doc-index is keyed by working-tree-relative paths; every other consumer
-# (update-index, check-freshness, the coverage gate, the merge driver) looks
+# (update-index, check-freshness, the CI freshness check, the merge driver) looks
 # entries up by that key. A non-relative key can be written but never found, so
 # these commands must normalize it or refuse it — never write it silently.
 #

@@ -1,4 +1,4 @@
-# Shell test suites — the six suites that gate changes to this repo — and the
+# Shell test suites — the seven suites that gate changes to this repo — and the
 # check that this repo's own self-installed CI tier is what the installer
 # would write today.
 #
