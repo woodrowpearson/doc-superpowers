@@ -10077,6 +10077,57 @@ test_validate_config_override() {
   teardown
 }
 
+# v10_lint_claim <status> <recorded>: v10_claim's fixture as a lint claim —
+# enforced_by lint, no test, when token_ttl_minutes=15 — in <status>, entered
+# as a lint claim enters it (a reviewed status edit: no promotion), the
+# extension recording <recorded>.
+v10_lint_claim() {
+  claims_fixture
+  config_on "$2" 30
+  jset "$SIDECAR" ".claims[0].enforced_by = \"lint\" | .claims[0].test = null | .claims[0].lint = $_CL_LINT | .claims[0].when = {\"$TTL_KEY\": 15}"
+  git add -A && git commit -qm "the TTL claim as a lint claim, when $TTL_KEY=15"
+  case "$1" in
+    diverged) set_ttl 1800; lint_diverge ;;  # the code diverges: the lint fails
+    *) jset "$SIDECAR" ".claims[0].status = \"$1\""; rerender ;;
+  esac
+  base_here "the TTL lint claim $1, $TTL_KEY recorded as $2"
+  : > "$STUB_LOG"
+}
+
+test_v10_non_test_claim_remedies() {
+  echo "test: V10 — a lint claim's remedies are reviewed status edits, never claims promote (promote proves test claims only)"
+  v10_lint_claim gated 30
+  cl validate --all
+  assert_eq "0" "$CL_RC" "the gated lint fixture validates clean (--all)"
+  set_flag "$TTL_KEY" 15
+  git add deploy/flags.json
+  cl validate --staged
+  assert_eq "0|1" "$CL_RC|$(v10_count)" "gated, now satisfied: exit 0, one V10 row"
+  assert_contains "$(v10_advisories promote-owed)" "now satisfied: move it to built by a reviewed status edit" "…the advisory: a reviewed status edit to built"
+  assert_not_contains "$(v10_advisories promote-owed)" "run claims promote" "…never tells it to run claims promote"
+  teardown
+  v10_lint_claim built 15
+  cl validate --all
+  assert_eq "0" "$CL_RC" "the built lint fixture validates clean (--all)"
+  set_flag "$TTL_KEY" 30
+  git add deploy/flags.json
+  cl validate --staged
+  assert_v10 "ruling owed" "built, no longer satisfied"
+  assert_contains "$(v10_messages)" "then move it to gated by a reviewed status edit" "…the ruling, the change, then a reviewed status edit to gated"
+  assert_not_contains "$(v10_messages)" "run claims promote" "…never tells it to run claims promote"
+  teardown
+  v10_lint_claim diverged 30
+  cl validate --all
+  assert_eq "0" "$CL_RC" "the diverged lint fixture validates clean (--all)"
+  set_flag "$TTL_KEY" 15
+  git add deploy/flags.json
+  cl validate --staged
+  assert_v10 "switches on a diverged claim" "diverged, switched on"
+  assert_contains "$(v10_messages)" "fix the code and move the claim to built by a reviewed status edit, or retire it" "…the remedies for a lint claim"
+  assert_not_contains "$(v10_messages)" "promote the claim" "…not promote"
+  teardown
+}
+
 test_v10_unrelated_key_ignored() {
   echo "test: V10 — a changed key neither the claim's when nor its subject's readers names is ignored"
   v10_claim gated 15
@@ -10827,6 +10878,7 @@ run_tests() {
   test_v10_diverged_when_switched_on
   test_validate_config_override
   test_v10_unrelated_key_ignored
+  test_v10_non_test_claim_remedies
   test_promote_regates_built_when_unsatisfied
 
   # --- Task 23: replay fixtures, the drift shapes and the planted drifts ---

@@ -1407,6 +1407,22 @@ assert_contains "$_gh" "[--holds <id>]... [--by <principal>]" "claims gate help:
 assert_contains "$_gh" "(repeatable, one id each)" "…said in words"
 assert_contains "$_gh" "V8, V8n and V9 over <from>..HEAD" "claims gate help: the gate runs V8 and V8n too"
 assert_contains "$_gh" "every named id no claim has" "…and reports named ids no claim has"
+# The 3.3.0 self-audit's code halves (C-1, C-3, C-2): the help says what
+# references/spec-claims.md says.
+assert_contains "$(printf '%s' "$_gh" | tr '\n' ' ' | tr -s ' ')" "each lint, log or judge claim in the plan's scope (the claims its **Claims:** lines name and every claim of a doc its Specs list names) that the range moved into built or gated" \
+  "claims gate help: the moved-in lint, log and judge claims are the plan's scope only (C-1)"
+_ah=$("$DOC_TOOLS_SHIM" claims attest --help | tr '\n' ' ' | tr -s ' ')
+assert_contains "$_ah" "each lint, log or judge claim in the plan's scope (as for the gate) that the branch moved into built or gated" \
+  "claims attest help: …and attest's too (C-1)"
+assert_contains "$_ah" "a change in that window the rebuild does not include is a silent reconciliation even when an earlier chunk record holds a matching entry" \
+  "claims attest help: the final window's stricter rule (C-3)"
+_xh=$("$DOC_TOOLS_SHIM" --help | tr '\n' ' ' | tr -s ' ')
+assert_contains "$_xh" "promote it to built once the change is committed; a lint, log or judge claim: move it to built by a reviewed status edit" \
+  "doc-tools help: V10's promote-owed remedy for a non-test claim (C-2)"
+assert_contains "$_xh" "then promote re-gates it, or a reviewed status edit to gated for a lint, log or judge claim" \
+  "doc-tools help: V10's ruling-owed remedy for a non-test claim (C-2)"
+assert_contains "$_xh" "fix the code and promote it (a lint, log or judge claim: move it to built by a reviewed status edit), or retire it, first" \
+  "doc-tools help: V10's switch-on remedy for a non-test claim (C-2)"
 assert_contains "$("$DOC_TOOLS_SHIM" claims run --help)" "claim's absent lint path is its allowed assert-fail" \
   "claims run help: an unbuilt claim's absent lint path is not a finding"
 assert_contains "$("$DOC_TOOLS_SHIM" --help)" "tree where one is refused (gate, promote, attest --final)" \

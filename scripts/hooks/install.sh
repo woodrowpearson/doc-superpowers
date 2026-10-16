@@ -1147,7 +1147,8 @@ uninstall_claude() {
     any=1
   fi
   for h in $CLAUDE_HOOKS $CLAUDE_LIB; do
-    # hook-lib.sh stays while the ledger set's scripts, which source it, do.
+    # hook-lib.sh stays while the ledger set's scripts do (its SessionStart
+    # script sources it).
     if [ "$h" = "$CLAUDE_LIB" ] && scripts_present "$LEDGER_CLAUDE_HOOKS"; then
       continue
     fi
@@ -1226,7 +1227,8 @@ status_claude() {
 #                    hook of its own;
 #   --ledger-claude  the two Claude events, alone: it never installs the
 #                    general Claude tier (--claude), whose gate a host may not
-#                    want; hook-lib.sh, which both source, comes with either.
+#                    want; hook-lib.sh, which ledger-session-notices.sh sources,
+#                    comes with either.
 
 LG_EXCLUDE_BLOCK="$LG_BEGIN — the per-user ledger Claude Code hooks (install.sh --ledger-claude; uninstall --ledger-claude removes this block)
 $SETTINGS_FILE

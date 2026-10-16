@@ -2307,8 +2307,10 @@ claims gate|cmd_claims_gate|repo|plan= chunk= from= holds=* by= base=
   Run a plan chunk's claims gate at HEAD and record it in
   docs/spec-claims/gates/<plan-stem>/chunk-<n>.json (written even when
   red): the claims the chunk's **Claims:** lines name plus --planes-of
-  <from>..HEAD and each lint, log or judge claim the range moved into
-  built or gated, re-promotions owed, V8, V8n and V9 over <from>..HEAD,
+  <from>..HEAD and each lint, log or judge claim in the plan's scope (the
+  claims its **Claims:** lines name and every claim of a doc its Specs
+  list names) that the range moved into built or gated, re-promotions
+  owed, V8, V8n and V9 over <from>..HEAD,
   every named id no claim has and every named claim still unbuilt that no
   included DOC-STALE ruling covers, and the reconciliations since <from> (a
   ruling counts only when its record is this chunk's record; anything else
@@ -2324,14 +2326,17 @@ claims attest|cmd_claims_attest|repo|plan= final deep base=
   Check a plan's gate records against the branch at HEAD: every chunk
   with a gate task recorded, its commits matched to merge-base..HEAD by
   patch id (an unmatched one marks the record rebased: re-verified);
-  every claim the plan names, and each lint, log or judge claim the branch
-  moved into built or gated, run at HEAD (built must pass, diverged fail
-  with its ruling and tracker; unbuilt, or a re-promotion owed, is a
-  finding); every ruling, promotion and status change since the
-  merge-base on the plan's claims and its specs' claims recorded in a
-  chunk record or in final.json, whose reconciliations are rebuilt from
-  the last chunk record's head (a ruling counts there only when it names
-  final.json as its record), and every recorded ruling still at HEAD; the
+  every claim the plan names, and each lint, log or judge claim in the
+  plan's scope (as for the gate) that the branch moved into built or
+  gated, run at HEAD (built must pass, diverged fail with its ruling and
+  tracker; unbuilt, or a re-promotion owed, is a finding); every ruling,
+  promotion and status change since the merge-base on the plan's claims
+  and its specs' claims recorded in a chunk record or in final.json, whose
+  reconciliations are rebuilt from the last chunk record's head (a ruling
+  counts there only when it names final.json as its record) — a stricter
+  window: a change in that window the rebuild does not include is a
+  silent reconciliation even when an earlier chunk record holds a
+  matching entry — and every recorded ruling still at HEAD; the
   amendment batch (claims rulings); render --check. --final is the final
   gate: refuses a dirty tree, and writes
   docs/spec-claims/gates/<plan-stem>/final.json even when it does not
@@ -2912,10 +2917,13 @@ Spec claims (claims validate, run, promote, render, gate, attest, rulings):
   (validate --staged), or validate --config KEY=VALUE — comparing recorded
   --rev <merge-base> with the proposed configuration: a gated claim now
   satisfied is an advisory (promote-owed: promote it to built once the
-  change is committed); a built one no longer satisfied owes a new ruling,
-  committed before the change (then promote re-gates it); a diverged one
+  change is committed; a lint, log or judge claim: move it to built by a
+  reviewed status edit); a built one no longer satisfied owes a new ruling,
+  committed before the change (then promote re-gates it, or a reviewed
+  status edit to gated for a lint, log or judge claim); a diverged one
   whose "when" the change switches on is a finding, whatever its rulings
-  (fix the code and promote it, or retire it, first).
+  (fix the code and promote it (a lint, log or judge claim: move it to
+  built by a reviewed status edit), or retire it, first).
 
 Work ledger (ledger show, ls, find, related, sweep, recheck, inflight,
 notices, state-watch, new, assign, link, note, view, validate, publish,
@@ -8779,6 +8787,9 @@ _claims_readers_rows() {
 #     its rulings (a diverged claim carries one: honouring it would make
 #     the check vacuous): the code is fixed and the claim promoted, or the
 #     claim retired, before the configuration switches it on.
+# Each remedy is a test claim's. A lint, log or judge claim is never promoted
+# (promote proves test claims only): it enters built or gated by a reviewed
+# status edit, and its messages say so (the plan row's test flag).
 # A failing surfaces or recorded call is indeterminate (check config), and a
 # failing readers call makes the claims it was asked for indeterminate
 # (check V10); a subject path readers is never asked about (unsafe: V3's
@@ -8796,7 +8807,9 @@ _JQ_CLAIMS_V10_CHANGED='$old[0] as $o | $new[0] as $n
 
 # cl-claims.json → the claims V10 may judge ($ch: the changed keys, $b:
 # cl-claims-base.json; run after _JQ_CLAIMS_DELTA): {claim, doc, status,
-# when (an object; {} when not one), ruled (a new ruling), by_when (a when
+# when (an object; {} when not one), test (enforced_by test: its remedies
+# name promote; another tier's, a reviewed status edit), ruled (a new
+# ruling), by_when (a when
 # key changed), subject (null when not a non-empty list of non-empty
 # strings)}.
 # shellcheck disable=SC2016  # jq program, not shell expansion
@@ -8808,7 +8821,7 @@ _JQ_CLAIMS_V10_PLAN='def nes: type == "string" and length > 0;
     | select(.status as $s | any("gated", "built", "diverged"; . == $s))
     | select(.frozen_at | nes | not)
     | (.when | if type == "object" then . else {} end) as $w
-    | {claim: .id, doc: $doc, status, when: $w,
+    | {claim: .id, doc: $doc, status, when: $w, test: (.enforced_by == "test"),
        ruled: ((cl_new_rulings($base[.id].claim) | length) > 0),
        by_when: any($w | keys_unsorted[]; in_list($ch)),
        subject: (if (.subject | type) == "array" and (.subject | length) > 0 and all(.subject[]; nes)
@@ -8834,11 +8847,13 @@ _JQ_CLAIMS_V10='def v10($e; $msg): {check: "V10", claim: $e.claim, doc: $e.doc, 
      ({when: $e.when} | claims_when_ok($new)) as $now
      | ($e.when | length > 0) as $cond
      | if $e.status == "gated" and $cond and $now then
-         v10a($e; "promote-owed"; "now satisfied: promote to built (the configuration this change records satisfies when \($e.when | cl_cond): once it is committed, run claims promote \($e.claim))")
+         (if $e.test
+          then v10a($e; "promote-owed"; "now satisfied: promote to built (the configuration this change records satisfies when \($e.when | cl_cond): once it is committed, run claims promote \($e.claim))")
+          else v10a($e; "promote-owed"; "now satisfied: move it to built by a reviewed status edit (the configuration this change records satisfies when \($e.when | cl_cond): once it is committed, edit its status to built; claims promote proves test claims only)") end)
        elif $e.status == "built" and ($now | not) and ($e.ruled | not) then
-         v10($e; "ruling owed: built, but the configuration this change records no longer satisfies its when (\($e.when | cl_unmet($new))): commit a new ruling on the claim first (the direction: CODE-DIVERGES, DOC-STALE or RETIRE), then make the configuration change, then run claims promote \($e.claim), which re-gates it")
+         v10($e; "ruling owed: built, but the configuration this change records no longer satisfies its when (\($e.when | cl_unmet($new))): commit a new ruling on the claim first (the direction: CODE-DIVERGES, DOC-STALE or RETIRE), then make the configuration change, then \(if $e.test then "run claims promote \($e.claim), which re-gates it" else "move it to gated by a reviewed status edit (claims promote proves test claims only)" end)")
        elif $e.status == "diverged" and $cond and $now and ({when: $e.when} | claims_when_ok($old) | not) then
-         v10($e; "switches on a diverged claim: the configuration this change records satisfies when \($e.when | cl_cond), which the merge-base'"'"'s did not, so production would run what the claim records as diverged: fix the code and promote the claim, or retire it, before switching the configuration on (a ruling does not answer this)")
+         v10($e; "switches on a diverged claim: the configuration this change records satisfies when \($e.when | cl_cond), which the merge-base'"'"'s did not, so production would run what the claim records as diverged: fix the code and \(if $e.test then "promote the claim" else "move the claim to built by a reviewed status edit" end), or retire it, before switching the configuration on (a ruling does not answer this)")
        else empty end
    else empty end'
 
