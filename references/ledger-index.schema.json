@@ -20,7 +20,7 @@
         "rev": { "type": ["string", "null"], "description": "The commit id of --rev; null otherwise." },
         "registry_findings": { "type": "integer", "minimum": 0, "description": "Structural `validate --registry` findings of the registry used (ownership checks excluded); the index uses the registry regardless." },
         "contracts_error": { "type": ["string", "null"], "description": "Why the contracts adapter (config adapters.contracts) failed — the contracts are then the registry's alone, and every verb that shows relations exits 2; null when it ran or none is configured." },
-        "adoption": { "type": ["string", "null"], "description": "The adoption commit (Task 16c U11): the first commit on config base to add docs/ledger/config.json (git log --diff-filter=A, oldest first); null when the base has none, does not resolve, or for --staged." }
+        "adoption": { "type": ["string", "null"], "description": "The adoption commit (Task 16c U11): the first commit on config base to add docs/ledger/config.json (git log --diff-filter=A, oldest first); null when the base has none, does not resolve, in a shallow clone whose boundary is where config.json first shows (it cannot be known), or for --staged." }
       }
     },
     "ledgers": { "type": "array", "items": { "type": "object" }, "description": "The registry's ledgers, as written." },
@@ -152,7 +152,7 @@
         },
         "recheck_after": { "$ref": "#/$defs/strList", "description": "Re-check markers (design §F.2, computed): on an open item, the key of a re-check source that reached a terminal class on the base, or a contract it consumes that a base commit changed — after the item's last commit on the base. Not computed for --staged." },
         "fm_errors": { "$ref": "#/$defs/strList" },
-        "pre_adoption": { "type": ["boolean", "null"], "description": "From before the ledger was adopted (Task 16c U11; validate --all reports a missing resolution on such a terminal item as advisory): true when config base has no commit adding docs/ledger/config.json yet, or when the base holds the item's path and no commit after the adoption commit (built.adoption) touched it; false otherwise, and when the base does not resolve; null for --staged." },
+        "pre_adoption": { "type": ["boolean", "null"], "description": "From before the ledger was adopted (Task 16c U11; validate --all reports a missing resolution on such a terminal item as advisory): true when config base has no commit adding docs/ledger/config.json yet, or when the base holds the item's path and no commit after the adoption commit (built.adoption) touched it; false otherwise, when the base does not resolve, and when the adoption commit cannot be known (a shallow clone whose boundary is where config.json first shows: fails closed); null for --staged. A commit after the adoption commit: a descendant on the base's first-parent line, a merge counting with its changes against its first parent; a pure rename does not touch the moved file." },
         "url": { "type": "string", "description": "Hosted items only (config items.adapter; not in required): the adapter's url. A hosted item's path is the adapter's ref (gh#<n> for scripts/adapters/ledger-items-gh.sh); file items have no url." }
       }
     }

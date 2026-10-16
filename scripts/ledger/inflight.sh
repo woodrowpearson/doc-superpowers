@@ -870,9 +870,10 @@ _lg_ifl_cold() {
   dir="$_LG_CACHE/branch"
   _lg_ifl_sig
   { printf '^%s\n' "$_LG_IFL_B"; cat "$tips"; } > "$s.revs" || _lg_die "cannot write $s.revs"
+  _lg_tr_incl "$s.tri" "$s.revs"
   git -c log.showSignature=false log --no-color --stdin --format='%x01%H %ct %P%n%B' < "$s.revs" > "$s.log" 2> "$s.err" \
     || _lg_die "git log failed (the in-flight branches): $(head -n 3 "$s.err")"
-  LC_ALL=C awk -v tips="$tips" -v tr="$_SCRATCH/lg-ifl-tr" -v trx="$_LG_TR_EXCL" "$_LG_AWK_TRAILER$_LG_AWK_IFL_WALK" "$s.log" > "$s.walk" \
+  LC_ALL=C awk -v tips="$tips" -v tr="$_SCRATCH/lg-ifl-tr" -v trx="$s.tri" "$_LG_AWK_TRAILER$_LG_AWK_IFL_WALK" "$s.log" > "$s.walk" \
     || _lg_die "cannot read the in-flight branches' commits"
   # Several base commits reached (the trunk merged in): git's merge base.
   # One (the usual case): the walk's trailers are the range's. Several (a
