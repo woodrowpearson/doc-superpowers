@@ -11,7 +11,8 @@
 
 ### Summary
 - Scanned: {N} docs across {N} scopes ({scope names})
-- Fresh: {N} | Stale: {N} | Missing coverage: {N} | Untracked: {N}
+- Fresh: {N} | Stale: {N} | Missing coverage: {N} | Untracked: {N} | Missing from disk: {N} | Deprecated: {N}
+  (`check-freshness`'s summary: `current`, `stale`, `untracked`, `missing`, `deprecated`; Missing coverage counts the docs a review agent rated MISSING_COVERAGE)
 
 ### P0 Critical
 1. {doc path}
@@ -111,7 +112,7 @@ Used by `spec-verify --mode=post-execute`. See `references/spec-lifecycle-action
 
 ### Claims verdict
 _(claims-enabled projects only: omit this block when `docs/spec-claims/` does not exist)_
-- `attest` exit: {0 | 1 | 2 — claims verdict owed}
+- `attest` exit: {0 | 1 | 2 — claims verdict owed | not run: no `--plan` — claims verdict owed}
 - Red claims: {SPEC-AUTH-001#token-ttl, … | none}
 - `rebased: re-verified` chunks: {chunk numbers | none}
 - Amendment batch: {the rulings the final gate listed | none}
@@ -124,7 +125,7 @@ Non-blocking. Never contributes to a FAIL verdict.
 - Inferred constraints: N spec(s) treated as constraint references by inference — pass `:constraint` to confirm, or fix their `code_refs` if they were meant to be implementation targets
 - Unrecognized statuses: N spec(s) at an unrecognized status — automation will never transition these
 - Amendments verified: N amendment(s) verified as landed (a no-`--plan` check is listed with its `WARN: amendment citation unverified (no --plan)`, not counted)
-- Held at `In Review` (or left at `Approved`): N partially-covered target(s) held by design, remaining scope recorded in Implementation Notes
+- Held short of `Implemented`: N partially-covered target(s) held by design — at `In Review`, or left at `Approved` — remaining scope recorded in Implementation Notes; N target(s) held by R5 (claims-enabled projects only)
 
 ### Recommendation
 [Fix before merging | Accept with noted gaps | Block merge]
