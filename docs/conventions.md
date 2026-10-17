@@ -373,7 +373,7 @@ Every template in `scripts/hooks/ci/` follows these rules; `test-doc-pr-release.
 | `DOC_SUPERPOWERS_QUIET=1` | Suppress hook output while still enforcing (exit codes unchanged). The Claude gate's block reason (stderr on exit 2, Claude's feedback) is never suppressed |
 | `DOC_SUPERPOWERS_SKIP=1` | Bypass all hooks temporarily, the work ledger's legs and events included (its pre-commit and pre-push legs print a line naming the variable) |
 | `DOC_SUPERPOWERS_LEDGER_SKIP=1` | Bypass only the work ledger's legs and events (`--ledger`, `--ledger-claude`, and the hook modes) |
-| `DOC_TOOLS_LEDGER_OFFLINE=1` | Keep every ledger verb off the network: no adapter runs, nothing is fetched, `inflight --push` pushes nothing (the SessionStart event sets it) |
+| `DOC_TOOLS_LEDGER_OFFLINE=1` | No ledger adapter runs, nothing is fetched (a cached copy past its TTL is served stale; `--refresh` and `publish` exit 2) and `inflight --push` pushes nothing; the SessionStart event sets it. It does not cover key allocation: `new`, `assign`, `finalize` and `init --accept` still reach the counter ref |
 | `DOC_SUPERPOWERS_CLAIMS_SKIP=1` | Turn off the git hooks' claims legs only: pre-commit's (blocking) and pre-push's (advisory), each of which runs only with `docs/spec-claims/`. The pre-commit leg blocks on a finding whatever `DOC_SUPERPOWERS_STRICT` says; a claims check that cannot run blocks only under STRICT |
 
 `DOC_TOOLS` overrides the path of `doc-tools.sh` a hook runs (tests use it). The index path is fixed: `docs/.doc-index.json`.

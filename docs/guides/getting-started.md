@@ -210,13 +210,17 @@ If you track work as markdown issue files (`docs/issues/*.md`) — or as GitHub 
 Bootstrap it on a repository that already has issues (or let `/doc-superpowers init` run it as its *Ledger (opt-in)* step):
 
 ```bash
-# 1. A report, a registry proposal and a decisions file — nothing else is written
-$DOC_TOOLS ledger init --report /tmp/ledger-init.md [--registry <file>] [--sources files,github]
-# 2. Edit docs/ledger/ledgers.proposed.json and fill the decisions column of /tmp/ledger-init.md.decisions.tsv
-# 3. Apply exactly what you decided: config, registry, keys, item fields, legacy.json
+# 1. A report and a registry proposal (docs/ledger/ledgers.proposed.json) — no decisions file yet
+$DOC_TOOLS ledger init --report /tmp/ledger-init.md [--sources files,github]
+# 2. Edit docs/ledger/ledgers.proposed.json, then report again against it: this run writes the decisions file
+$DOC_TOOLS ledger init --report /tmp/ledger-init.md --registry docs/ledger/ledgers.proposed.json
+# 3. Fill the decision column of /tmp/ledger-init.md.decisions.tsv, then apply exactly what you decided:
+#    config, registry (the edited proposal becomes ledgers.json), keys, item fields, legacy.json
 $DOC_TOOLS ledger init --accept /tmp/ledger-init.md.decisions.tsv --dry-run
 $DOC_TOOLS ledger init --accept /tmp/ledger-init.md.decisions.tsv
 ```
+
+A repository that already has `docs/ledger/ledgers.json` skips the proposal: its first `--report` writes the decisions file.
 
 Everyday verbs:
 
@@ -226,7 +230,7 @@ $DOC_TOOLS ledger show checkout-14                 # one item in ≤ 25 lines
 $DOC_TOOLS ledger new --ledger checkout --summary "Totals round twice on refunds"   # a key for a new issue
 $DOC_TOOLS ledger note checkout-14 "repro on staging"                              # the one home for item state
 $DOC_TOOLS ledger view all --html --open           # render the views locally
-$DOC_TOOLS ledger validate --all                   # every item, the registry, keys
+$DOC_TOOLS ledger validate --all                   # every item and key (add --registry for the registry)
 ```
 
 Exit codes are the claims family: 0 ok, 1 findings, 2 could not run, 3 usage. With the ledger on, `spec-inject --phase=plan` also pastes a `## Related work` sweep into the plan and adds a `Ledger notices (chunk N)` gate to each chunk. Config keys, keys and provisional keys, adapters, the in-flight layer (it publishes local branch names to the remote: read the privacy note first) and the hooks are in `references/ledger.md`.
