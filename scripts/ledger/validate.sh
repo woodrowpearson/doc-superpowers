@@ -890,8 +890,9 @@ _lg_validate_plan() {
 
 # _lg_validate_pushed <range> <findings.jsonl>: keys.mode cas — each
 # provisional key the commits of <a>..<b> introduce (_lg_provisional_in_range;
-# <a> all zeros: a new branch, the keys it adds since config base, or every
-# provisional key at <b> when there is no base to compare) blocks — the
+# only the keys the branch adds since its merge-base with config base — <a>
+# all zeros (a new branch) or not; every provisional key at <b> for a new
+# branch when there is no base to compare) blocks — the
 # detail names `ledger finalize --all` for a key the base carries too; merge
 # mode — none (provisional keys may reach the base). For pre-push hooks.
 _lg_validate_pushed() {

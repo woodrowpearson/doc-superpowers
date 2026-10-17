@@ -11519,6 +11519,48 @@ provisional-key block docs/issues/mine.md" "$(lg_vf)" "every provisional key at 
   teardown
 }
 
+test_lg_validate_pushed_existing_branch_merges_base() {
+  echo "test: 3.3.1 item 2 — an existing branch's push (remote oid known) that merged the base after a provisional key landed there is not refused for that key: only keys added since the branch's merge-base with the base are checked; a key the branch adds itself still is"
+  lg_keys_fixture
+  local h old
+  git checkout -q -b feat/old
+  lg_item docs/issues/real.md "key: x-1" "ledger: x" "status: Open" "summary: A real key on the branch"
+  git add -A && git commit -qm real
+  git push -q origin feat/old
+  old=$(git rev-parse HEAD)
+  # Meanwhile a provisional key reaches the base (a claude.ai/code session's PR).
+  git checkout -q main
+  h=$(lg_hex4 docs/issues/cloud.md)
+  lg_item docs/issues/cloud.md "key: x-~$h" "ledger: x" "status: Open" "summary: Filed in a cloud session"
+  git add -A && git commit -qm cloud
+  git push -q origin main
+  git fetch -q origin
+  # The existing branch merges the base, then pushes again.
+  git checkout -q feat/old
+  git merge -q --no-edit origin/main
+  lg validate --pushed "$old..HEAD" --format json
+  assert_eq "0" "$LG_RC" "the merged base's x-~$h is not this push's: exit 0"
+  assert_json_field "$LG_OUT" '.findings | length' "0" "no findings"
+  # The branch edits the base's item (its key kept): still the base's key.
+  printf '\nMore detail.\n' >> docs/issues/cloud.md
+  git add -A && git commit -qm "edit cloud"
+  lg validate --pushed "$old..HEAD" --format json
+  assert_eq "0" "$LG_RC" "an edit to the base's item keeps the key the base's: exit 0"
+  lg_item docs/issues/mine.md "key: x-~$(lg_hex4 docs/issues/mine.md)" "ledger: x" "status: Open" "summary: Filed offline on the branch"
+  git add -A && git commit -qm mine
+  lg validate --pushed "$old..HEAD" --format json
+  assert_eq "1" "$LG_RC" "the branch adds one: exit 1"
+  assert_eq "provisional-key block docs/issues/mine.md" "$(lg_vf)" "only the branch's key is refused"
+  # No base to compare: the range alone decides (3.3.0 behaviour), so the
+  # merged base key is refused too, and its detail names finalize --all.
+  lg_enable '{"base":"origin/no-such-branch"}'
+  lg validate --pushed "$old..HEAD" --format json
+  assert_eq "1" "$LG_RC" "no base: exit 1"
+  assert_eq "provisional-key block docs/issues/cloud.md
+provisional-key block docs/issues/mine.md" "$(lg_vf)" "no base: every key the range adds"
+  teardown
+}
+
 test_lg_hook_clip_constants_pinned() {
   echo "test: the ledger hook modes clip with hook-lib.sh's constants (HOOK_MAX_CHARS, HOOK_LINES_MAX): one changed without the other fails here"
   local v lib lg
@@ -12035,6 +12077,8 @@ run_tests() {
   test_lg_help_exit3_and_report_files
   test_lg_state_watch_absolute_entry_resolved
   test_lg_alloc_permission_refusal_provisional
+  # --- 3.3.1 ---
+  test_lg_validate_pushed_existing_branch_merges_base
 
   print_summary
 }
