@@ -198,9 +198,11 @@ jobs:
             for p in $(grep -oE '\.github/scripts/[A-Za-z0-9._/-]+\.sh' "$f" | sort -u || true); do
               [ -x "$p" ] || drift "$f" "runs $p, which is not vendored (or not executable)"
             done
-            # The claims step's V5 reads ledger trackers through the ledger
-            # set beside the vendored doc-tools.sh (install --ci ships it).
-            if grep -qF '.github/scripts/doc-superpowers-steps/claims-check.sh' "$f" \
+            # On a ledger host (docs/ledger/config.json), the claims step's
+            # V5 reads ledger trackers through the ledger set beside the
+            # vendored doc-tools.sh (install --ci ships it there only).
+            if [ -f docs/ledger/config.json ] \
+              && grep -qF '.github/scripts/doc-superpowers-steps/claims-check.sh' "$f" \
               && [ ! -f .github/scripts/ledger/lib.sh ]; then
               drift "$f" "runs claims-check.sh without the vendored ledger helper set (.github/scripts/ledger/)"
             fi

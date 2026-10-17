@@ -2950,6 +2950,11 @@ _assert_installed_workflows_wired() {
       # another workflow ships it (doc-spec-verify.yml's claims job and
       # doc-pr-release.yml's update-pr-body.sh): not this install's to ship.
       grep -qF "hashFiles('$ref') != ''" "$wf" && continue
+      # The ledger helper set ships only on a ledger host (final review
+      # OPS-I1); elsewhere ledger-publish.sh runs the verb's inert line.
+      case "$ref" in
+        .github/scripts/ledger/*|.github/scripts/adapters/*) [ -f docs/ledger/config.json ] || continue ;;
+      esac
       [ -x "$ref" ] || missing="${missing} ${ref}"
     done <<<"$refs"
   done
@@ -2997,15 +3002,29 @@ test_ci_claims_templates_vendor_ledger() {
   # claims-check.sh runs `doc-tools.sh claims …`, whose V5 reads ledger
   # trackers through scripts/ledger/ when docs/ledger/config.json exists
   # (work-ledger design §I). Without the ledger set beside the vendored
-  # doc-tools.sh, V5 judges no tracker there (ledger-unavailable). So every
-  # workflow that runs the claims step ships the ledger helper set — whether
-  # or not the config exists yet — and the set goes with the last of them.
-  echo "test: install --ci — each workflow running claims-check.sh vendors the ledger helper set; removing the last one removes it, byte for byte"
+  # doc-tools.sh, V5 judges no tracker there (ledger-unavailable). So on a
+  # ledger host (the config exists) every workflow that runs the claims step
+  # ships the ledger helper set, and the set goes with the last of them; a
+  # host without the config gets none and no warning, and a set vendored
+  # before goes on the next install --ci (final review OPS-I1, ruled).
+  echo "test: install --ci — on a ledger host each workflow running claims-check.sh vendors the ledger helper set (removing the last one removes it, byte for byte); without docs/ledger/config.json none is vendored and status warns nothing"
   local claims w output exit_code f missing before after
   claims=$(_claims_templates | tr '\n' ' ')
   assert_eq "doc-freshness-schedule doc-spec-verify " "$claims" "the claims-running templates"
   for w in $claims; do
     setup
+    # No ledger here: no set, no warning.
+    exit_code=0
+    output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows="$w" 2>&1) || exit_code=$?
+    assert_eq "0" "$exit_code" "$w (no ledger): install exits 0"
+    assert_true "$w (no ledger): no ledger modules vendored" test ! -e .github/scripts/ledger
+    assert_true "$w (no ledger): …and no adapters" test ! -e .github/scripts/adapters
+    assert_not_contains "$output" "ledger helpers" "$w (no ledger): the install reports no ledger set"
+    output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" status --ci 2>&1) || true
+    assert_not_contains "$output" "without the ledger helper set" "$w (no ledger): status warns nothing"
+    # A ledger host: the set ships.
+    mkdir -p docs/ledger
+    printf '{}\n' > docs/ledger/config.json
     exit_code=0
     output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows="$w" 2>&1) || exit_code=$?
     assert_eq "0" "$exit_code" "$w: install exits 0"
@@ -3017,24 +3036,45 @@ test_ci_claims_templates_vendor_ledger() {
         *) cmp -s "$f" ".github/scripts/ledger/${f##*/}" || missing="$missing ledger/${f##*/}" ;;
       esac
     done
-    assert_eq "" "$missing" "$w: the ledger modules and adapters are vendored, byte copies (no docs/ledger/config.json here)"
+    assert_eq "" "$missing" "$w: the ledger modules and adapters are vendored, byte copies"
     assert_contains "$output" "ledger helpers → .github/scripts/ledger/" "$w: the install reports the ledger set"
     output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" status --ci 2>&1) || true
     assert_contains "$output" "ledger helpers:" "$w: status reports the ledger modules"
     assert_not_contains "$output" "without the ledger helper set" "$w: …and no missing-set warning"
-    # The set alone missing (an old install, a hand removal): status says so.
+    # The set alone missing (a hand removal, the config added after the
+    # install): status says so.
     rm -rf .github/scripts/ledger .github/scripts/adapters
     output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" status --ci 2>&1) || true
     assert_contains "$output" "$w.yml runs claims-check.sh without the ledger helper set" "$w: status flags the missing set"
     assert_contains "$output" "install --ci" "$w: …and names the fix"
     "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows="$w" >/dev/null 2>&1
     assert_true "$w: a re-install brings the set back" test -f .github/scripts/ledger/lib.sh
+    # The config gone: the next install --ci removes the set.
+    rm -f docs/ledger/config.json
+    "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows="$w" >/dev/null 2>&1
+    assert_true "$w: no config any more: the next install --ci removes the ledger modules" test ! -e .github/scripts/ledger
+    assert_true "$w: …and the adapters" test ! -e .github/scripts/adapters
     teardown
   done
 
-  # Two claims workflows: the set stays while one remains, and leaves with
-  # the last — the vendored tree then byte-identical to the one before.
+  # A set vendored before (3.3.0's first cut, or by hand) on a host without
+  # the ledger: the next install --ci removes it, byte for byte.
   setup
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-freshness-schedule >/dev/null 2>&1
+  before=$(_vendor_snapshot)
+  "$BASH_BIN" "$SCRIPT_DIR/doc-tools.sh" tools install --dest .github/scripts --helper ledger >/dev/null 2>&1
+  assert_true "a set vendored by hand" test -f .github/scripts/ledger/lib.sh
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-freshness-schedule >/dev/null 2>&1
+  after=$(_vendor_snapshot)
+  assert_eq "$before" "$after" "no config: install --ci removes it, the vendored tree byte-identical to the one before"
+  teardown
+
+  # Two claims workflows on a ledger host: the set stays while one remains,
+  # and leaves with the last — the vendored tree then byte-identical to the
+  # one before.
+  setup
+  mkdir -p docs/ledger
+  printf '{}\n' > docs/ledger/config.json
   "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-freshness-pr >/dev/null 2>&1
   before=$(_vendor_snapshot)
   assert_true "doc-freshness-pr alone vendors no ledger set (it runs no claims step)" test ! -e .github/scripts/ledger
@@ -3078,6 +3118,15 @@ test_ci_publish_template_vendors_ledger() {
     "…which runs doc-tools.sh ledger publish"
   setup
   local output exit_code=0 f missing=""
+  # Named without the ledger: the workflow is installed (it prints "not
+  # enabled" until the config exists), the set is not (OPS-I1, ruled).
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-ledger-publish 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "no ledger: install --ci --workflows=doc-ledger-publish exits 0"
+  assert_file_exists ".github/workflows/doc-ledger-publish.yml" "no ledger: the named workflow is installed"
+  assert_true "no ledger: no ledger set vendored" test ! -e .github/scripts/ledger
+  mkdir -p docs/ledger
+  printf '{}\n' > docs/ledger/config.json
+  exit_code=0
   output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-ledger-publish 2>&1) || exit_code=$?
   assert_eq "0" "$exit_code" "install --ci --workflows=doc-ledger-publish exits 0"
   assert_file_exists ".github/workflows/doc-ledger-publish.yml" "the workflow is installed"
@@ -3114,6 +3163,50 @@ test_ci_publish_template_vendors_ledger() {
   assert_file_exists ".github/scripts/adapters/mine.sh" "a full uninstall keeps an adapter of your own"
   assert_file_not_exists ".github/scripts/adapters/ledger-items-gh.sh" "…and removes the plugin's"
   teardown
+}
+
+test_ci_workflows_all_skips_publish_without_ledger() {
+  # --workflows=all would install the every-30-minutes publish cron on a host
+  # without the ledger: 48 billed no-op runs a day (final review OPS-I2,
+  # ruled). all skips it there, with one note line; naming it installs it.
+  echo "test: install --ci --workflows=all skips doc-ledger-publish without docs/ledger/config.json (one note line); with the config it installs it; an explicit name installs it either way"
+  local output exit_code w
+  setup
+  exit_code=0
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=all 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "no ledger: --workflows=all exits 0"
+  assert_file_not_exists ".github/workflows/doc-ledger-publish.yml" "no ledger: doc-ledger-publish is not installed"
+  assert_contains "$output" "skipped doc-ledger-publish: no docs/ledger/config.json (name it in --workflows= to install it anyway)" "…one note line says so"
+  assert_eq "1" "$(grep -c 'skipped doc-ledger-publish' <<<"$output")" "…once"
+  for w in doc-freshness-pr doc-freshness-schedule doc-audit-update doc-review-pr doc-release doc-spec-verify doc-pr-full-cycle doc-pr-release; do
+    assert_file_exists ".github/workflows/$w.yml" "no ledger: --workflows=all installs $w"
+  done
+  exit_code=0
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-ledger-publish 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "no ledger: naming doc-ledger-publish exits 0"
+  assert_file_exists ".github/workflows/doc-ledger-publish.yml" "no ledger: the explicit name installs it"
+  teardown
+  setup
+  mkdir -p docs/ledger
+  printf '{}\n' > docs/ledger/config.json
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=all 2>&1) || true
+  assert_file_exists ".github/workflows/doc-ledger-publish.yml" "a ledger host: --workflows=all installs doc-ledger-publish"
+  assert_not_contains "$output" "skipped doc-ledger-publish" "…and no note"
+  teardown
+}
+
+test_install_help_groups_publish_as_shell_optin() {
+  # doc-ledger-publish runs no AI and needs no secret: help lists it in a
+  # group of its own, not under Claude-powered (final review OPS-I4).
+  echo "test: install.sh help — doc-ledger-publish is listed under 'shell, opt-in by name', not under Claude-powered; --workflows=all's help names the exception"
+  local out claude optin
+  out=$("$BASH_BIN" "$HOOKS_DIR/install.sh" help 2>&1) || true
+  optin=$(awk '/^  shell, opt-in by name/ { f = 1; next } /^  [^ ]/ { f = 0 } f' <<<"$out")
+  claude=$(awk '/^  Claude-powered/ { f = 1; next } /^  [^ ]/ { f = 0 } f' <<<"$out")
+  assert_contains "$optin" "doc-ledger-publish" "doc-ledger-publish under 'shell, opt-in by name'"
+  assert_not_contains "$claude" "doc-ledger-publish" "…not under Claude-powered"
+  assert_contains "$claude" "doc-review-pr" "Claude-powered still lists the AI workflows"
+  assert_contains "$out" "and except doc-ledger-publish on a host without" "--workflows=all's help names the exception"
 }
 
 test_install_ci_version_comes_from_doc_tools() {
@@ -4120,6 +4213,8 @@ test_install_ci_ships_step_scripts_with_workflow
 test_install_ci_every_referenced_helper_is_installed
 test_ci_publish_template_vendors_ledger
 test_ci_claims_templates_vendor_ledger
+test_ci_workflows_all_skips_publish_without_ledger
+test_install_help_groups_publish_as_shell_optin
 test_install_ci_helpers_false_still_wires_steps
 test_install_ci_version_comes_from_doc_tools
 test_install_ci_writes_state_file_on_first_install
@@ -5372,6 +5467,9 @@ test_ledger_legs_honour_both_skips() {
   # Neither set: the SessionStart and state-watch legs do run (the control).
   run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION" DOC_TOOLS="$fake"
   assert_contains "$(cat "$calls")" "ledger notices --hook" "neither variable: SessionStart runs ledger notices --hook"
+  : > "$calls"
+  run_claude_hook PostToolUse ledger-state-watch "$(lgh_write_payload "$HOME/notes/today.md" "x-1 next: y")" DOC_TOOLS="$fake"
+  assert_contains "$(cat "$calls")" "state-watch --hook" "neither variable: state-watch runs ledger state-watch --hook (final review, Task 17 m6)"
   teardown
 }
 
@@ -5472,9 +5570,31 @@ test_ledger_status_reports_set() {
   teardown
 }
 
+test_ledger_status_quiet_without_ledger() {
+  # Every 3.3.0 user who never opted in ran plain `status` and read two
+  # "⚠ docs/ledger/config.json is missing" lines about legs nobody
+  # installed (final review DOCS-I4): with nothing installed and no config,
+  # each ledger section is one plain line; the ⚠ stays for an installed leg.
+  echo "test: ledger: plain status without docs/ledger/config.json and nothing of the ledger installed — one plain 'not enabled' line per ledger section, no ⚠; an installed leg without the config still gets the ⚠"
+  lgh_fixture
+  rm -f docs/ledger/config.json
+  inst install --git --claude
+  inst status
+  assert_not_contains "$IOUT" "⚠ docs/ledger/config.json is missing" "no config, nothing installed: no ⚠ about the ledger"
+  assert_eq "2" "$(grep -c 'not enabled (no docs/ledger/config.json)' <<<"$IOUT")" "…one plain line in each ledger section"
+  assert_not_contains "$(sed -n '/^Ledger git hooks/,/^$/p' <<<"$IOUT")" "✗" "…and no ✗ list of legs nobody asked for"
+  printf '{}\n' > docs/ledger/config.json
+  inst install --ledger
+  rm -f docs/ledger/config.json
+  inst status --ledger
+  assert_contains "$IOUT" "⚠ docs/ledger/config.json is missing" "a leg installed, the config gone: the ⚠ stays"
+  teardown
+}
+
 echo ""
 echo "=== The ledger hook set (install --ledger) ==="
 test_ledger_install_requires_config
+test_ledger_status_quiet_without_ledger
 test_ledger_all_excludes_ledger
 test_ledger_claude_only_no_general_tier
 test_ledger_claude_flags_independent

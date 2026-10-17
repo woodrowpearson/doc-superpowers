@@ -101,8 +101,12 @@ jobs:
   # their own copy of this workflow: delete the "doc-superpowers workflow
   # v<N>" marker line at its top, and install --ci leaves it alone from then
   # on (a step added to a managed copy is lost at the next install --ci).
-  # Without that setup, the adapters report `indeterminate` (a warning; a
-  # failure with --ci-strict).
+  # The vendored helpers ship only while a managed workflow runs them: with
+  # every claims workflow unmanaged, the next install --ci removes the ledger
+  # helper set (claims V5 is then ledger-unavailable on a ledger host), and
+  # the step scripts too when no managed workflow is left (references/
+  # hooks.md, Test-environment setup). Without that setup, the adapters
+  # report `indeterminate` (a warning; a failure with --ci-strict).
   claims:
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&

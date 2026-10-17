@@ -59,6 +59,9 @@ CLAUDE_HOOKS_DIR=".claude/hooks/doc-superpowers"
 SETTINGS_FILE=".claude/settings.local.json"
 SHELL_WORKFLOWS="doc-freshness-pr doc-freshness-schedule"
 CI_DEFAULT_WORKFLOWS="$SHELL_WORKFLOWS"
+# Shell workflows outside the default set, installed by name (or by
+# --workflows=all): no AI, no secret (final review OPS-I4).
+SHELL_OPTIN_WORKFLOWS="doc-ledger-publish"
 # Workflows an earlier version installed and this one no longer ships. A
 # managed copy (the workflow marker) is removed by any install --ci and by a
 # full uninstall, and its state entry dropped; a file without the marker is
@@ -112,14 +115,14 @@ source "$SCRIPT_DIR/state.sh"
 workflow_desc() {
   case "$1" in
     doc-freshness-pr) echo "PR opened/updated: one comment with the docs the diff leaves stale or missing; STRICT fails the check (contents: read, pull-requests: write)" ;;
-    doc-freshness-schedule) echo "weekly cron: opens/updates/closes an audit issue; with docs/spec-claims/, its claims step re-runs and re-proves the spec claims (ships the ledger helper set: claims V5 reads ledger trackers) (contents: read, issues: write)" ;;
+    doc-freshness-schedule) echo "weekly cron: opens/updates/closes an audit issue; with docs/spec-claims/, its claims step re-runs and re-proves the spec claims (with docs/ledger/config.json, ships the ledger helper set: claims V5 reads ledger trackers) (contents: read, issues: write)" ;;
     doc-audit-update) echo "push to a non-base branch leaving docs stale: AI audit + update, a checked step commits docs to that branch (contents: write)" ;;
     doc-review-pr) echo "PR opened/updated touching indexed docs: AI review comment; @claude PR comments: tag mode (contents: read, pull-requests + issues: write)" ;;
     doc-release) echo "push to release/**: AI release-notes draft, a checked step commits it to a new branch and opens a PR (contents + pull-requests: write)" ;;
-    doc-spec-verify) echo "PR opened/updated touching indexed specs: AI spec-compliance comment; with docs/spec-claims/, a non-AI claims job on every same-repository PR (claims validate, run, attest; findings fail it; ships the ledger helper set: claims V5 reads ledger trackers) (contents: read, pull-requests: write)" ;;
+    doc-spec-verify) echo "PR opened/updated touching indexed specs: AI spec-compliance comment; with docs/spec-claims/, a non-AI claims job on every same-repository PR (claims validate, run, attest; findings fail it; with docs/ledger/config.json, ships the ledger helper set: claims V5 reads ledger trackers) (contents: read, pull-requests: write)" ;;
     doc-pr-full-cycle) echo "PR opened touching indexed docs: AI review + update + diagram + sync, a checked step commits docs to the PR branch (contents + pull-requests: write)" ;;
     doc-pr-release) echo "PR pushes: AI release-notes fragment, a checked step commits it to the PR branch; PR body edited (contents + pull-requests: write)" ;;
-    doc-ledger-publish) echo "every 30 minutes and by hand: with docs/ledger/config.json, doc-tools.sh ledger publish renders the work-ledger views from the base and pushes them to views.branch; ships the ledger helper set (contents: write; pull-requests + issues: read, for the adapters)" ;;
+    doc-ledger-publish) echo "every 30 minutes and by hand: with docs/ledger/config.json, doc-tools.sh ledger publish renders the work-ledger views from the base and pushes them to views.branch; with the config, ships the ledger helper set (contents: write; pull-requests + issues: read, for the adapters)" ;;
     *) echo "(no description)" ;;
   esac
 }
@@ -190,7 +193,9 @@ CI options (install --ci / --all):
   --workflows=<csv|all|none>
             A CSV of names: install those (an explicit name overrides an earlier
             "removed on purpose"). all: every template, except those removed on
-            purpose. none: no workflow, only the vendored doc-tools.sh.
+            purpose, and except doc-ledger-publish on a host without
+            docs/ledger/config.json (a note says so; name it to install it).
+            none: no workflow, only the vendored doc-tools.sh.
             Without it: the recorded set (a first install: the shell workflows).
   --base-branch NAME        target branch (default: main)
   --cron EXPR               schedule, 5 fields (default: 0 9 * * 1)
@@ -220,9 +225,15 @@ EOF
     in_list "$w" "$SHELL_WORKFLOWS" || continue
     printf '    %-24s %s\n' "$w" "$(workflow_desc "$w")"
   done
+  echo "  shell, opt-in by name (not part of the default set; no AI, no secret):"
+  for w in $KNOWN_WORKFLOWS; do
+    in_list "$w" "$SHELL_OPTIN_WORKFLOWS" || continue
+    printf '    %-24s %s\n' "$w" "$(workflow_desc "$w")"
+  done
   echo "  Claude-powered (opt-in; need the CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY secret):"
   for w in $KNOWN_WORKFLOWS; do
     in_list "$w" "$SHELL_WORKFLOWS" && continue
+    in_list "$w" "$SHELL_OPTIN_WORKFLOWS" && continue
     printf '    %-24s %s\n' "$w" "$(workflow_desc "$w")"
   done
 }
@@ -1421,16 +1432,27 @@ uninstall_ledger_claude() {
   fi
 }
 
+# lg_config_note <any 0|1>: without docs/ledger/config.json, a ⚠ when a leg
+# of the set is installed (it does nothing); with none installed, one plain
+# line and rc 1 — the section ends there (final review DOCS-I4: a host that
+# never opted in reads no warning).
 lg_config_note() {
-  if [ ! -f "$LEDGER_CONFIG" ]; then
+  [ ! -f "$LEDGER_CONFIG" ] || return 0
+  if [ "$1" = 1 ]; then
     echo "  ⚠ $LEDGER_CONFIG is missing: the work ledger is not enabled here, so an installed leg does nothing"
+    return 0
   fi
+  echo "  not enabled (no $LEDGER_CONFIG); nothing of this set is installed"
+  return 1
 }
 
 status_ledger() {
-  local hook dest
+  local hook dest any=0
   echo "Ledger git hooks (the opt-in --ledger set; never part of --all):"
-  lg_config_note
+  for hook in $LEDGER_GIT_HOOKS; do
+    if lg_has_block "$HOOKS_DIR/$hook"; then any=1; fi
+  done
+  lg_config_note "$any" || return 0
   for hook in $LEDGER_GIT_HOOKS; do
     dest="$HOOKS_DIR/$hook"
     if ! lg_has_block "$dest"; then
@@ -1446,16 +1468,25 @@ status_ledger() {
 }
 
 status_ledger_claude() {
-  local h ev reg=""
+  local h ev reg="" any
   echo "Ledger Claude Code hooks (the opt-in --ledger-claude set, per-user; never part of --all or --claude):"
-  lg_config_note
   # Each registered entry of the set: "<event> <script> <command>".
   if [ -e "$SETTINGS_FILE" ]; then
     reg=$(jq -r "$_CLAUDE_JQ_DEFS"'
       [(.hooks // {}) | to_entries[] | select(.value | type == "array") | .key as $e
        | .value[] | select(type == "object" and ((.hooks | type) == "array")) | .hooks[] | select(lg_ours)
        | "\($e) \(.command | capture("doc-superpowers/(?<n>[a-z-]+)\\.sh").n) \(.command)"] | .[]' "$SETTINGS_FILE" 2>/dev/null) \
-      || echo "  ⚠ $SETTINGS_FILE cannot be read as JSON"
+      || reg="?"
+  fi
+  any=0
+  [ -z "$reg" ] || any=1
+  for h in $LEDGER_CLAUDE_HOOKS; do
+    if [ -f "$CLAUDE_HOOKS_DIR/$h.sh" ]; then any=1; fi
+  done
+  lg_config_note "$any" || return 0
+  if [ "$reg" = "?" ]; then
+    echo "  ⚠ $SETTINGS_FILE cannot be read as JSON"
+    reg=""
   fi
   for h in $LEDGER_CLAUDE_HOOKS; do
     ev=$(lg_event "$h")
@@ -1616,6 +1647,10 @@ preflight_ci() {
           state_wf_get "$w" || true
           if [ "$WF_STATE" = uninstalled ] && [ "$WF_INTENT" = true ] && [ "$FORCE" != true ] && ! in_list "$w" "$CI_DISK"; then
             skip="${skip:+$skip }$w"
+          elif [ "$w" = doc-ledger-publish ] && [ ! -f "$LEDGER_CONFIG" ] && ! in_list "$w" "$CI_DISK" && [ "$WF_STATE" != installed ]; then
+            # The 30-minute publish cron on a host without the ledger: billed
+            # no-op runs (final review OPS-I2, ruled). Named, it installs.
+            echo "  skipped doc-ledger-publish: no $LEDGER_CONFIG (name it in --workflows= to install it anyway)"
           else
             new="${new:+$new }$w"
           fi
@@ -1718,12 +1753,16 @@ run_tools() {
 # claims step (claims-check.sh: doc-freshness-schedule, doc-spec-verify)
 # needs the ledger set too: with docs/ledger/config.json, claims V5 reads
 # ledger trackers through scripts/ledger/ beside doc-tools.sh, and without it
-# judges none (indeterminate, "ledger-unavailable"). It ships whether or not
-# the config exists now — one added later must find it there.
+# judges none (indeterminate, "ledger-unavailable"). The ledger set ships
+# only on a ledger host — docs/ledger/config.json exists (final review
+# OPS-I1, ruled): elsewhere none is vendored, a set vendored before goes
+# (byte-identical files only), and `ledger init --accept`, which writes the
+# config, says to re-run install --ci.
 HELPER_SETS="doc-pr-release doc-superpowers-steps ledger"
 needed_helpers() {
   local need="" d w
   for d in $HELPER_SETS; do
+    if [ "$d" = ledger ] && [ ! -f "$LEDGER_CONFIG" ]; then continue; fi
     for w in $KNOWN_WORKFLOWS; do
       is_managed_workflow ".github/workflows/$w.yml" || continue
       if workflow_runs_helper_dir ".github/workflows/$w.yml" "$d" \
@@ -1969,10 +2008,12 @@ status_ci() {
   if [ "$state_ok" = 1 ] && [ "$STATE_HAS_CI" = 1 ]; then
     echo "  choices: base branch ${STATE_BASE:-main}, cron '${STATE_CRON:-0 9 * * 1}', strict ${STATE_STRICT:-false} ($STATE_FILE)"
   fi
-  # A claims workflow without the ledger set beside doc-tools.sh (installed
-  # before 3.3.0, or the set removed by hand): its V5 judges no ledger
-  # tracker. The next install --ci ships the set.
+  # On a ledger host, a claims workflow without the ledger set beside
+  # doc-tools.sh (installed before the config, or the set removed by hand):
+  # its V5 judges no ledger tracker. The next install --ci ships the set.
+  # Without the config there is no tracker to read: nothing to say.
   for w in $on_disk; do
+    [ -f "$LEDGER_CONFIG" ] || break
     if workflow_runs_claims ".github/workflows/$w.yml" && [ ! -f "$VENDOR_DEST/ledger/lib.sh" ]; then
       printf "  ⚠ %s runs claims-check.sh without the ledger helper set (%s/ledger/): claims V5 cannot read ledger trackers there; re-run install --ci\n" "$w.yml" "$VENDOR_DEST"
     fi
@@ -2128,7 +2169,7 @@ case "$COMMAND" in
         echo "  [1] Git hooks: pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push (+ the index merge driver)"
         echo "  [2] Claude Code hooks (per-user): pre-commit-gate, post-commit-sync, session-summary"
         echo "  [3] CI/CD workflows: $SHELL_WORKFLOWS"
-        echo "      (Claude-powered ones are opt-in: install.sh install --ci --workflows=<names>; install.sh help lists them)"
+        echo "      (the others are opt-in by name — $SHELL_OPTIN_WORKFLOWS (no AI) and the Claude-powered ones: install.sh install --ci --workflows=<names>; install.sh help lists them)"
         echo "  [a] All of the above"
         echo "  (The work ledger's hooks are sets of their own: install.sh install --ledger and/or --ledger-claude.)"
         echo ""
