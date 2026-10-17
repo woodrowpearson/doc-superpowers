@@ -94,13 +94,13 @@ chore: <maintenance task>
 release: vX.Y.Z
 ```
 
-An unscoped form (`docs: …`) is fine for a change with no single area. `release: vX.Y.Z` is the `release` action's one commit (`references/release.md`, step 11).
+An unscoped form (`docs: …`) is fine for a change with no single area. A project with a work ledger (`docs/ledger/config.json`, `references/ledger.md`) also reads these trailers from any line of a commit message (`[* ]<Trailer>: <value>`, so squash merges keep them): `Ledger-Claims: <key>` (config `trailers.claims`) claims an item for the branch; `Fixes` / `Closes` / `Resolves #<n>` (`trailers.claims_by_ref`) claims a hosted item; `Contract-Change: <contract-id> — <one line>` says a commit changes a contract; `Ledger-Ack: <notice id> — <clause>` acks an in-flight notice. This repository has no ledger. `release: vX.Y.Z` is the `release` action's one commit (`references/release.md`, step 11).
 
 ### Pull Requests
 
 - Keep PRs focused on a single change
 - Test skill changes by running `/doc-superpowers init` on a sample project before merging
-- Run the six shell test suites — `scripts/test-doc-tools.sh`, `scripts/test-hooks.sh`, `scripts/test-merge-driver.sh`, `scripts/test-doc-pr-release.sh`, `scripts/test-spec-status-model.sh`, `scripts/test-spec-claims.sh` — all must pass before merge, under both bash 5.x and `/bin/bash` 3.2. Their assertion counts and the command that runs the matrix are in [CLAUDE.md → Conventions](../CLAUDE.md#conventions), the one place they are kept. They share the `scripts/test-helpers.sh` harness (isolated git environment, private scratch root, pipefail-safe asserts, SKIP/XFAIL reporting)
+- Run every shell test suite (`scripts/test-*.sh`; see **Testing** below) — all must pass before merge, under both bash 5.x and `/bin/bash` 3.2. The suite list, their assertion counts and the command that runs the matrix are in [CLAUDE.md → Conventions](../CLAUDE.md#conventions), the one place they are kept
 - A change to a CI template, `scripts/doc-tools.sh` or a CI helper script also re-runs `bash scripts/hooks/install.sh install --ci` and commits what it writes: this repository installs its own CI tier, and `.github/workflows/tests.yml` fails when the installed copies drift from their sources. The same step fails when `.gitattributes` no longer routes `docs/.doc-index.json` to the doc-index merge driver, and then names `bash scripts/hooks/install.sh install --git` (commit the `.gitattributes` it writes)
 - Include before/after examples for behavior changes
 
@@ -159,6 +159,15 @@ Archived docs retain their original filenames. Their `.doc-index.json` entries a
 3. `doc-tools.sh deprecate-entry <new> [--superseded-by <successor>]`
 
 There is no `archived_at` field. The `docs/archive/` path and the `deprecated` status already record the archival, and git holds its date. PR #16's Option B, an `archive-entry` verb that stamps `archived_at`, was not needed once batch `move-entry` existed. A consumer's `*archive_doc*` script keeps its own policy (what is eligible, where it moves) and uses these verbs for the index. An archived doc is a record doc, so it is never reported stale.
+
+## Testing
+
+- **Framework.** Plain bash suites on one shared harness, `scripts/test-helpers.sh`: a private scratch root removed on EXIT/INT/TERM (`harness_mktemp`, `harness_mktemp_d`; nothing at a fixed path), an isolated git environment (`GIT_CONFIG_GLOBAL=/dev/null`, a private `HOME`), pipefail-safe asserts (`assert_eq`, `assert_true`, `assert_contains`, `assert_exit_code`, `assert_json_field`, …), counted SKIPs (`record_skip`) and known-bug markers (`assert_*_known_bug`, which turn into a FAIL the moment the bug is fixed). No test framework beyond bash, git, jq and the POSIX userland.
+- **Where tests live.** `scripts/test-<area>.sh`, one suite per area — `doc-tools`, `hooks`, `spec-status-model`, `doc-pr-release`, `merge-driver`, `spec-claims`, `ledger` (the list and the counts: [CLAUDE.md → Conventions](../CLAUDE.md#conventions), the only place they are kept). `scripts/bench-ledger.sh` is the work ledger's performance check on a synthetic corpus, run by hand (`bench-ledger.sh 3000`), not a suite. The skill evals are `evals/evals.json`, with a self-checking `evals/fixtures/<eval>/setup.sh` (sharing `fixtures/lib.sh`) for each eval that needs a project; `test-spec-status-model.sh` validates the fields and runs every fixture.
+- **How to run them.** Each suite under both interpreters, bash 5.x and macOS's `/bin/bash` 3.2, with `BASH_BIN` naming the interpreter so every script under test runs under it too (`bash_bin_shim`); the loop is in CLAUDE.md. The harness never runs a fixture with the checkout as cwd. `.github/workflows/tests.yml` runs the same matrix on every PR to `main` (ubuntu bash 5.x, macOS `/bin/bash` 3.2), plus `check-version` and the self-install drift check.
+- **Naming.** A test is a function `test_<area>_<what>` (`test_lg_…` in the ledger suite), registered in its suite's run list; an assertion's message says what holds, in prose.
+- **Fixtures.** Built per test in the scratch root with the real tools (`doc-tools.sh` verbs, `git`, the installer), never checked in; external programs (`gh`, adapters, runners) are small `/bin/sh` stubs on a private `PATH`. A missing YAML parser or `node` is a loud SKIP locally and a FAIL in CI (`DOC_SP_REQUIRE_YAML_PARSER=1`, `DOC_SP_REQUIRE_NODE=1`).
+- **Static guards** in `test-doc-tools.sh` fail on any bash-4-only construct and any jq-1.7-only form in the shipped scripts, `scripts/ledger/` and `scripts/adapters/` included.
 
 ## Project-Specific Patterns
 
@@ -248,6 +257,25 @@ Claims-enabled projects only: the directory `docs/spec-claims/` turns them on, a
 | Plan task lines | `**Claims:** <id>, <id>…` or `**Claims:** none — <reason>`; the injected tasks `Claims gate (chunk <n>)` and `Final claims gate` |
 | Claim ids | `<DOC-ID>#<slug>`, the slug `[a-z0-9][a-z0-9-]*` |
 
+### Work ledger names
+
+Ledger-enabled projects only: `docs/ledger/config.json` turns the work ledger on, and this repository has none. The full reference is [`references/ledger.md`](../references/ledger.md).
+
+| What | Name |
+|------|------|
+| The switch and the settings | `docs/ledger/config.json` (`{}` is complete) |
+| The registry; a bootstrap proposal | `docs/ledger/ledgers.json`; `docs/ledger/ledgers.proposed.json` |
+| Legacy and finalized maps | `docs/ledger/legacy.json` (config `legacy`), keys `<legacy id>#<row>`; `docs/ledger/finalized.json` |
+| Items | config `items.globs`, default `docs/issues/*.md`; archived, `docs/archive/issues/*.md`; item sections `## Resolution` and `## Log` (config `resolution_heading`, `log_heading`), and `## Rulings` |
+| Keys and ledger ids | `<ledger>-<n>` (`^[a-z0-9-]{1,16}-[1-9][0-9]*$`); provisional `<ledger>-~<4–8 hex>`; ledger ids `^[a-z0-9-]{1,16}$`, `unassigned` reserved |
+| Contract ids | `<kind>:<name>` (`^[a-z][a-z0-9_-]*:[^[:space:]]+$`): `field:`, `endpoint:`, `component:`, `flag:`, `spec:` … |
+| Commit trailers | `Ledger-Claims`, `Contract-Change`, `Ledger-Ack`, `Fixes` / `Closes` / `Resolves` (see *Commits* above) |
+| Adapters | config value `doc-superpowers:<name>` → `scripts/adapters/<name>.sh` beside `doc-tools.sh` |
+| Remote refs | the counter `refs/doc-superpowers/ledger/counters`, in-flight refs `refs/doc-superpowers/inflight/<host>/<branch>`, the views branch `doc-ledger-views` (all configurable) |
+| Cache (local, never committed) | `$(git rev-parse --git-common-dir)/doc-superpowers/ledger/` |
+| Index shape | `references/ledger-index.schema.json` (`ledger-index/1`) |
+| Plan task | `Ledger notices (chunk <n>)`, and a plan's `## Related work` table |
+
 ### This repo's exemptions from the Scope → Generated Docs Matrix
 
 doc-superpowers documents itself, but its own `docs/` does not follow every row of the *Scope → Generated Docs Matrix* (`skills/doc-superpowers/SKILL.md`). The owner ruled these exemptions on 2026-10-14. Audits record them and do not re-raise them, and `update` must not create the files.
@@ -266,22 +294,25 @@ Diagrams live in `diagrams/` subdirectories within their parent section, not in 
 
 ### Tier Options
 
-Hooks are organized into three tiers, each independently installable:
+Hooks are organized into three tiers, each independently installable, plus the work ledger's two opt-in sets:
 
 | Tier | Flag | Scripts |
 |------|------|---------|
 | Git | `--git` | pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push |
-| Claude Code | `--claude` | pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh (and hook-lib.sh, which all three source) |
-| CI/CD | `--ci` | doc-freshness-pr.yml, doc-freshness-schedule.yml (the default set); doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml (by name) |
+| Claude Code | `--claude` | pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh (and hook-lib.sh, which all three source, as does ledger-session-notices.sh) |
+| CI/CD | `--ci` | doc-freshness-pr.yml, doc-freshness-schedule.yml (the default set); doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml, doc-ledger-publish.yml (by name) |
+| Work-ledger git legs | `--ledger` | ledger-pre-commit, ledger-pre-push, ledger-post-commit, installed as `# ledger-superpowers:begin` … `:end` blocks in pre-commit, pre-push and post-commit |
+| Work-ledger Claude events | `--ledger-claude` | ledger-session-notices.sh (SessionStart), ledger-state-watch.sh (PostToolUse, matcher `Write\|Edit`), with hook-lib.sh |
 
-Use `--all` to install all tiers at once.
+Use `--all` to install all three tiers at once. The ledger sets are never part of `--all`, each refuses to install without `docs/ledger/config.json` (exit 1, nothing written), and like the git and Claude tiers they are per-clone / per-user and never recorded in `installed.json`.
 
 ### Installation Rules
 
 - Hook entries **must always be installed via the installer script** (`scripts/hooks/install.sh`), never manually edited into settings files or hook directories. The templates carry a `__DOC_TOOLS_RESOLVE__` placeholder that only the installer renders.
 - Every subcommand acts on `git rev-parse --show-toplevel` (a linked worktree or a submodule is its own top level), so it runs from any subdirectory.
 - **Nothing is written through a symbolic link.** A link at a write target, or at a directory between the repository top (or git's common dir) and it, makes the installer refuse; every check runs before the first write, so a refusal writes nothing. Every write is a temp file beside the target, then `mv`.
-- **Ownership is exact**: a hook or workflow by its marker (`doc-superpowers hook v<N>`, `doc-superpowers workflow v<N>`), a `# doc-superpowers:begin` … `:end` block in a user's hook, `.gitattributes` or `info/exclude`, a settings hook *entry* by the path of the script it runs. Never a substring match.
+- **Ownership is exact**: a hook or workflow by its marker (`doc-superpowers hook v<N>`, `doc-superpowers workflow v<N>`), a `# doc-superpowers:begin` … `:end` block in a user's hook, `.gitattributes` or `info/exclude`, a settings hook *entry* by the path of the script it runs. The ledger sets own their `# ledger-superpowers:begin` … `:end` block — in a git hook (`--ledger`) and in `info/exclude` (`--ledger-claude`) — and the settings entries running their two scripts; the two marker pairs never match each other, so each uninstall takes only its own. Never a substring match.
+- **Ledger block placement**: in the git tier's own hook, after its header comments (`install --git` puts the block back whenever it writes its hook whole, so the order of the two installs never matters); in a shell hook of the user's, after the `#!` line, any git-tier block and the leading comment lines — before the user's code, so a trailing `exit 0` cannot skip it — with the hook's mode kept; with no hook, a hook the set creates holding only `#!/bin/sh` and the block (`uninstall --git` likewise leaves a hook holding the ledger block as `#!/bin/sh` and the block). A hook in another language is skipped.
 - Flags outside a subcommand's scope exit 2; CI options need `--ci` (or `--all`).
 
 ### Git Hooks Directory
@@ -304,8 +335,8 @@ The Claude tier is **per-user**. It **copies** hook scripts to `.claude/hooks/do
 - `__DOC_TOOLS_RESOLVE__` becomes the program that finds `doc-tools.sh` at run time — the merge driver's rule: for a plugin-cache install the newest version-named sibling in numeric order (never another sibling, no GNU `sort -V`), for a checkout its own pinned path, single-quoted — and `__INSTALL_DATE__` the date.
 - Hooks are registered in `.claude/settings.local.json` as `bash "$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/<hook>.sh`, and both that file and the scripts directory are excluded from git through a marked block in `$(git rev-parse --git-path info/exclude)`. An exclude cannot hide a tracked file: when the repository tracks either, install prints `git rm -r --cached --ignore-unmatch -- .claude/settings.local.json .claude/hooks/doc-superpowers` and warns that pulling that commit deletes them from every other clone (each teammate re-runs `install --claude`). `status` flags a script or settings command another version installed as `outdated: re-run install --claude`.
 - Existing settings are merged per entry: the installer's entries (by script path) are replaced, every other entry and group is kept byte-for-byte; a settings file that is not one JSON object is refused.
-- The three scripts source `hook-lib.sh`, copied beside them and never registered: one copy of the output bounds (every emitted string under Claude Code's 10,000-character hook-output limit) and of the check watchdog. `status` flags a hook whose `hook-lib.sh` is missing or another version's; a hook that cannot source it says so (and the gate blocks under STRICT).
-- Uninstall removes the installer's entries (a group only when nothing else is left in it), the three scripts, `hook-lib.sh` and the exclude block; a settings file left empty is removed.
+- The three scripts source `hook-lib.sh` (as does the ledger's `ledger-session-notices.sh`), copied beside them and never registered: one copy of the output bounds (every emitted string under Claude Code's 10,000-character hook-output limit) and of the check watchdog. `status` flags a hook whose `hook-lib.sh` is missing or another version's; a hook that cannot source it says so (and the gate blocks under STRICT).
+- Uninstall removes the installer's entries (a group only when nothing else is left in it), the three scripts, `hook-lib.sh` — kept while a ledger script that sources it is installed — and the exclude block; a settings file left empty is removed. `--ledger-claude` is copied the same way, with its own exclude block, and never installs this tier.
 
 ### CI-Specific Flags
 
@@ -315,11 +346,11 @@ The Claude tier is **per-user**. It **copies** hook scripts to `.claude/hooks/do
 | `--base-branch NAME` | `main` | Target branch for PR checks (validated: git ref name of `A-Za-z0-9._/-`) |
 | `--cron EXPR` | `0 9 * * 1` | Schedule for weekly freshness audit (5 fields) |
 | `--ci-strict[=true\|false]` | `false` | Fail the PR checks on what is otherwise a warning (exit non-zero): `doc-freshness-pr` on stale docs or a freshness check that cannot run, `doc-spec-verify`'s `claims` job on a claims check that cannot run |
-| `--helpers=<true\|false>` | `true` | Deprecated, and inert: the helper directories ship exactly while an installed workflow runs them. Its only effect: `--helpers=false` is refused while `doc-pr-release` is selected or installed (the workflow runs the producer helpers) |
+| `--helpers=<true\|false>` | `true` | Deprecated, and inert: the helper directories ship exactly while an installed workflow runs them (the ledger set, `ledger/` and `adapters/`, with `doc-ledger-publish` and every claims-running workflow). Its only effect: `--helpers=false` is refused while `doc-pr-release` is selected or installed (the workflow runs the producer helpers) |
 | `--force` | off | Also re-install workflows uninstalled on purpose |
 | `--transient` | off | `uninstall` only: record the removal as temporary (`intentional: false`), so the next plain `install --ci` puts the workflow back. Without it the removal is intentional, and a plain `install --ci` leaves the workflow out |
 
-The choices are recorded in `.claude/doc-superpowers/installed.json` (schema 2: `.tiers.ci.{base_branch,cron,ci_strict,workflows}`); a plain `install --ci` reproduces them. Vendoring goes through `doc-tools.sh tools install|uninstall --helper <dir>`, per installed workflow.
+The choices are recorded in `.claude/doc-superpowers/installed.json` (schema 2: `.tiers.ci.{base_branch,cron,ci_strict,workflows}`); a plain `install --ci` reproduces them. Vendoring goes through `doc-tools.sh tools install|uninstall --helper <set>` (`doc-pr-release`, `doc-superpowers-steps`, `ledger`), per installed workflow.
 
 **Retired workflows.** `doc-index-update` was retired in v3.0.0 (it re-baselined every doc edited on the base branch, unread, and failed every run). It is in `install.sh`'s `RETIRED_WORKFLOWS`: any `install --ci` (and a full `uninstall --ci`, or `uninstall --ci --workflows=doc-index-update`) removes a copy that carries the workflow marker and drops its state entry; a file of that name without the marker is kept and reported. `install --ci --workflows=doc-index-update` is an error.
 
@@ -338,9 +369,11 @@ Every template in `scripts/hooks/ci/` follows these rules; `test-doc-pr-release.
 
 | Variable | Effect |
 |----------|--------|
-| `DOC_SUPERPOWERS_STRICT=1` | The git pre-commit hook (exit 1) and the Claude pre-commit gate (exit 2, reason on stderr) block instead of warn — also when the check itself cannot run |
+| `DOC_SUPERPOWERS_STRICT=1` | The git pre-commit hook (exit 1) and the Claude pre-commit gate (exit 2, reason on stderr) block instead of warn — also when the check itself cannot run. The work ledger's pre-commit and pre-push legs block without it |
 | `DOC_SUPERPOWERS_QUIET=1` | Suppress hook output while still enforcing (exit codes unchanged). The Claude gate's block reason (stderr on exit 2, Claude's feedback) is never suppressed |
-| `DOC_SUPERPOWERS_SKIP=1` | Bypass all hooks temporarily |
+| `DOC_SUPERPOWERS_SKIP=1` | Bypass all hooks temporarily, the work ledger's legs and events included (its pre-commit and pre-push legs print a line naming the variable) |
+| `DOC_SUPERPOWERS_LEDGER_SKIP=1` | Bypass only the work ledger's legs and events (`--ledger`, `--ledger-claude`, and the hook modes) |
+| `DOC_TOOLS_LEDGER_OFFLINE=1` | Keep every ledger verb off the network: no adapter runs, nothing is fetched, `inflight --push` pushes nothing (the SessionStart event sets it) |
 | `DOC_SUPERPOWERS_CLAIMS_SKIP=1` | Turn off the git hooks' claims legs only: pre-commit's (blocking) and pre-push's (advisory), each of which runs only with `docs/spec-claims/`. The pre-commit leg blocks on a finding whatever `DOC_SUPERPOWERS_STRICT` says; a claims check that cannot run blocks only under STRICT |
 
 `DOC_TOOLS` overrides the path of `doc-tools.sh` a hook runs (tests use it). The index path is fixed: `docs/.doc-index.json`.
@@ -404,7 +437,7 @@ The `docs/.doc-index.json` file is the machine-readable freshness index. It foll
 - **`status`** reports one doc's freshness (read-only): the verdict `check-freshness` gives for it
 - **`audit-merges`** works out what each merge in a range should have recorded (the changed side's index when only one side changed it, else the merge driver run as an oracle) and reports the entries a recorded merge got differently (read-only, GH #25)
 
-Those eight writers (`build-index`, `add-entry`, `update-index`, `set-code-refs`, `set-doc-type`, `move-entry`, `remove-entry`, `deprecate-entry`) are the only ones that write the index. They take its lock and replace it atomically. `implementation-status` and `fragments list|validate` read without writing, and `set-implementation` edits one doc's realization block, not the index. The `claims` verbs never write the index either: they write only sidecars and gate records under `docs/spec-claims/`, a governing doc's generated claim status block, and the local verdict store under the git directory.
+Those eight writers (`build-index`, `add-entry`, `update-index`, `set-code-refs`, `set-doc-type`, `move-entry`, `remove-entry`, `deprecate-entry`) are the only ones that write the index. They take its lock and replace it atomically. `implementation-status` and `fragments list|validate` read without writing, and `set-implementation` edits one doc's realization block, not the index. The `claims` verbs never write the index either: they write only sidecars and gate records under `docs/spec-claims/`, a governing doc's generated claim status block, and the local verdict store under the git directory. Nor do the `ledger` verbs, which read it: they write item files (their frontmatter and `## Log` / `## Rulings` lines), `docs/ledger/` (config, registry, legacy and finalized maps), the cache `<git common dir>/doc-superpowers/ledger/`, and on the remote the counter ref, the in-flight refs and the views branch.
 
 ### Freshness Model
 

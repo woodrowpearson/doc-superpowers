@@ -13,6 +13,7 @@
 
 Optional:
 - [ ] Mermaid MCP server configured (for PNG diagram rendering)
+- [ ] [`gh`](https://cli.github.com), authenticated — only for the work ledger's GitHub adapters (`doc-superpowers:ledger-pr-gh`, `doc-superpowers:ledger-items-gh`) and `ledger init --sources github`
 
 ## Installation
 
@@ -58,7 +59,7 @@ For installation in other frameworks (Cursor, Codex, OpenCode, Gemini CLI), see 
 
 ## Configuration
 
-No configuration required (spec claims are opt-in, and need some: see [Spec lifecycle commands](#spec-lifecycle-commands)). The skill auto-detects everything it needs from the target project.
+No configuration required for the doc suite. Spec claims and the work ledger are opt-in, and need some: see [Spec lifecycle commands](#spec-lifecycle-commands) and [Work ledger (opt-in)](#work-ledger-opt-in). The skill auto-detects everything it needs from the target project.
 
 **Optional enhancements** the skill will auto-discover if present:
 
@@ -89,12 +90,14 @@ This will:
 5. Offer to commit, then check that every generated doc reads `current`
 6. Suggest installing workflow hooks for automated freshness monitoring
 
+If you ask for a work ledger (or `docs/ledger/config.json` already exists), it also bootstraps one before the commit, with your review of the proposed ledgers and assignments — see [Work ledger (opt-in)](#work-ledger-opt-in).
+
 ### Install workflow hooks (recommended follow-up)
 
 After `init` completes, set up automated freshness monitoring:
 
 ```bash
-# Install all hook tiers (git, Claude Code, CI/CD)
+# Install all three hook tiers (git, Claude Code, CI/CD) — not the work ledger's sets
 /doc-superpowers hooks install --all
 
 # Or pick specific tiers
@@ -105,6 +108,10 @@ After `init` completes, set up automated freshness monitoring:
 # Claude-powered workflows are opt-in by name
 /doc-superpowers hooks install --ci --workflows=doc-release
 /doc-superpowers hooks install --ci --workflows=none                 # vendor doc-tools.sh only
+
+# With a work ledger (docs/ledger/config.json): its opt-in sets, never part of --all
+/doc-superpowers hooks install --ledger        # pre-commit validate, pre-push provisional-key check, post-commit in-flight push
+/doc-superpowers hooks install --ledger-claude # Claude Code: SessionStart notices, the state-watch hook (per-user)
 ```
 
 The installer acts on the repository's top level from any subdirectory, puts git hooks where git runs them, keeps a hook of yours (a marked block after its `#!` line runs ours), and refuses — writing nothing — a symbolic link on a path it would write or a global or system `core.hooksPath`. The Claude tier is per-user: `.claude/settings.local.json` and `.claude/hooks/doc-superpowers/` are excluded from git through git's `info/exclude` (`git rev-parse --git-path info/exclude`, which is not `.git/info/exclude` in a linked worktree or a submodule).
@@ -129,8 +136,11 @@ Run these from the repository's top level: `tools` resolves `--dest` (default `.
 ```bash
 $DOC_TOOLS tools install                          # → .github/scripts/doc-tools.sh
 $DOC_TOOLS tools install --dest bin --with-helpers # → bin/doc-tools.sh + bin/doc-pr-release/ + bin/doc-superpowers-steps/
+$DOC_TOOLS tools install --helper ledger          # + .github/scripts/ledger/ and adapters/: the work ledger, for a vendored copy
 $DOC_TOOLS tools status                            # shows location, drift + the plugin's version
 ```
+
+A vendored `doc-tools.sh` runs the work ledger from `ledger/` and `adapters/` beside it: without them, every ledger verb (and, on a ledger-enabled project, the claims check V5) exits 2. `hooks install --ci` ships that set with `doc-ledger-publish` and with each workflow that runs the claims check.
 
 Shipping the `doc-pr-release` helpers (`--with-helpers`, or `--helper doc-pr-release`) also creates `RELEASE-NOTES.next/README.md`, the fragment-format spec, when it is absent; an existing one is never overwritten.
 
@@ -193,6 +203,34 @@ Opting in changes more than the spec actions:
 - **Adapters.** A `test` claim runs through a runner adapter you write and name in `docs/spec-claims/config.json` (`runners`, which defaults to `{}`); without one, every check of that claim is indeterminate (exit 2), never a pass.
 - **`--plan`.** Pass `spec-verify --mode=post-execute --plan=<path>`: its claims verdict (`claims attest --plan <plan> --final`) needs the plan, and without it the run reports "claims verdict owed", never PASS. It also writes `final.json`, so commit first: the final gate refuses a dirty tree.
 
+### Work ledger (opt-in)
+
+If you track work as markdown issue files (`docs/issues/*.md`) — or as GitHub issues — the work ledger gives each item a stable key, generates ledger pages from the items, finds related work through named contracts, and warns when another branch or machine touches what yours depends on. It is off until `docs/ledger/config.json` exists (`{}` is a complete config): without it every `doc-tools.sh ledger` verb except `init` prints `ledger: not enabled (no docs/ledger/config.json)` and exits 0.
+
+Bootstrap it on a repository that already has issues (or let `/doc-superpowers init` run it as its *Ledger (opt-in)* step):
+
+```bash
+# 1. A report, a registry proposal and a decisions file — nothing else is written
+$DOC_TOOLS ledger init --report /tmp/ledger-init.md [--registry <file>] [--sources files,github]
+# 2. Edit docs/ledger/ledgers.proposed.json and fill the decisions column of /tmp/ledger-init.md.decisions.tsv
+# 3. Apply exactly what you decided: config, registry, keys, item fields, legacy.json
+$DOC_TOOLS ledger init --accept /tmp/ledger-init.md.decisions.tsv --dry-run
+$DOC_TOOLS ledger init --accept /tmp/ledger-init.md.decisions.tsv
+```
+
+Everyday verbs:
+
+```bash
+$DOC_TOOLS ledger ls --ledger checkout --open      # one line per item
+$DOC_TOOLS ledger show checkout-14                 # one item in ≤ 25 lines
+$DOC_TOOLS ledger new --ledger checkout --summary "Totals round twice on refunds"   # a key for a new issue
+$DOC_TOOLS ledger note checkout-14 "repro on staging"                              # the one home for item state
+$DOC_TOOLS ledger view all --html --open           # render the views locally
+$DOC_TOOLS ledger validate --all                   # every item, the registry, keys
+```
+
+Exit codes are the claims family: 0 ok, 1 findings, 2 could not run, 3 usage. With the ledger on, `spec-inject --phase=plan` also pastes a `## Related work` sweep into the plan and adds a `Ledger notices (chunk N)` gate to each chunk. Config keys, keys and provisional keys, adapters, the in-flight layer (it publishes local branch names to the remote: read the privacy note first) and the hooks are in `references/ledger.md`.
+
 For wrapper skill integration details, see `references/spec-lifecycle-protocol.md`.
 For code review and commit review integration, see `references/integration-patterns.md`.
 
@@ -206,12 +244,13 @@ For code review and commit review integration, see `references/integration-patte
 | `/doc-superpowers update [scope] [--report=<path>]` | Execute doc updates from an audit report (default: this session's audit, else the freshness check) |
 | `/doc-superpowers diagram [scope]` | Regenerate architecture and workflow diagrams |
 | `/doc-superpowers sync` | Sync doc index with filesystem |
-| `/doc-superpowers hooks install [--git] [--claude] [--ci] [--all] [--workflows=<csv\|all\|none>] [--force] [--base-branch NAME] [--cron EXPR] [--ci-strict[=true\|false]]` | Install workflow hooks (CI: the shell workflows by default, AI ones by name; choices recorded) |
-| `/doc-superpowers hooks status [--git] [--claude] [--ci]` | Show installed hooks |
-| `/doc-superpowers hooks uninstall [--git] [--claude] [--ci] [--all] [--workflows=<csv\|all\|none>] [--transient]` | Remove installed hooks (granular CI uninstall; `--transient` keeps state non-intentional) |
+| `/doc-superpowers hooks install [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--workflows=<csv\|all\|none>] [--force] [--base-branch NAME] [--cron EXPR] [--ci-strict[=true\|false]]` | Install workflow hooks (CI: the shell workflows by default, the rest by name; choices recorded; the ledger sets opt-in, never in `--all`) |
+| `/doc-superpowers hooks status [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude]` | Show installed hooks |
+| `/doc-superpowers hooks uninstall [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--workflows=<csv\|all\|none>] [--transient]` | Remove installed hooks (granular CI uninstall; `--transient` keeps state non-intentional) |
 | `/doc-superpowers spec-generate --design-doc=<path>` | Generate formal specs from design doc |
 | `/doc-superpowers spec-inject --phase=plan\|execute --specs=<paths> [--plan=<path>]` | Inject spec tasks into the plan (`--plan` required) or track drift after a chunk |
 | `/doc-superpowers release [--from=<ref>]` | Draft release notes entry from git history |
+| `/doc-superpowers ledger <verb> [args]` | The work ledger (`doc-tools.sh ledger <verb>`; inert without `docs/ledger/config.json`, except `init`) |
 | `/doc-superpowers spec-verify --mode=post-execute\|review --specs=<paths> [--plan=<path>]` | Verify spec compliance (`post-execute` also takes `--design-doc=<path>`; `review` takes `--changed-files=<paths>`, with `--specs` optional) |
 
 ## Verification
