@@ -11703,6 +11703,20 @@ test_lg_merge_finalize_remote_recheck() {
   teardown
 }
 
+test_lg_alloc_lowercase_forbidden_is_refusal() {
+  echo "test: 3.3.1 N1 — the permission pattern matches the capitalised Forbidden (HTTP's reason phrase) only: a hook's lowercase 'forbidden' is a refusal of the content (rc 2), not a permission failure; a bare Forbidden still gives a provisional key"
+  lg_keys_fixture
+  printf '#!/bin/sh\necho "pushes to this ref are forbidden by policy" >&2\nexit 1\n' > "$LG_REMOTE/hooks/pre-receive"
+  chmod +x "$LG_REMOTE/hooks/pre-receive"
+  lg_call _lg_alloc x 1 docs/issues/n.md
+  assert_eq "2" "$LG_RC" "lowercase 'forbidden' from a hook: rc 2"
+  assert_eq "absent" "$(lg_remote_counters)" "…nothing on the remote"
+  printf '#!/bin/sh\necho "remote: Forbidden" >&2\nexit 1\n' > "$LG_REMOTE/hooks/pre-receive"
+  lg_call _lg_alloc x 1 docs/issues/n.md
+  assert_eq "0|x	x-~$(lg_hex4 docs/issues/n.md)" "$LG_RC|$LG_OUT" "a capitalised Forbidden: a provisional key"
+  teardown
+}
+
 test_lg_hook_clip_constants_pinned() {
   echo "test: the ledger hook modes clip with hook-lib.sh's constants (HOOK_MAX_CHARS, HOOK_LINES_MAX): one changed without the other fails here"
   local v lib lg
@@ -12225,6 +12239,7 @@ run_tests() {
   test_lg_init_accept_symlinked_legacy_finding
   test_lg_init_put_refuses_symlink
   test_lg_merge_finalize_remote_recheck
+  test_lg_alloc_lowercase_forbidden_is_refusal
 
   print_summary
 }
