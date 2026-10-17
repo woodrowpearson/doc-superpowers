@@ -1362,6 +1362,12 @@ _yaml_json() {
 AI_WORKFLOWS="doc-audit-update doc-review-pr doc-release doc-spec-verify doc-pr-full-cycle doc-pr-release"
 AI_USES="anthropics/claude-code-action@"
 ALL_REPO=$(installed_repo --all --workflows=all) || ALL_REPO=""
+# --workflows=all skips doc-ledger-publish on a host without
+# docs/ledger/config.json (final review OPS-I2); named, it installs: every
+# template is then on disk.
+if [ -n "$ALL_REPO" ]; then
+  ( cd "$ALL_REPO" && PATH="$BASH_PATH" "$BASH_BIN" "$INSTALLER" install --ci --workflows=doc-ledger-publish ) > /dev/null 2>&1 || ALL_REPO=""
+fi
 
 # _need_all_repo <label>: a FAIL, and 1, when the install --all fixture failed.
 _need_all_repo() {
@@ -3714,12 +3720,14 @@ test_ledger_publish_template() {
 }
 
 test_ledger_publish_step() {
-  echo "Test: ledger-publish.sh — no vendored helper set: ::error::, exit 1; no ledger config: inert, exit 0; a publish that fails: its exit code, ::error::; the vendored tier publishes the views branch"
+  echo "Test: ledger-publish.sh — no ledger config: inert, exit 0 (no helper set is vendored there); the config but no vendored helper set: ::error::, exit 1; a publish that fails: its exit code, ::error::; the vendored tier publishes the views branch"
   local dir remote out rc
   dir=$(installed_repo --ci --workflows=doc-ledger-publish) || { assert_true "install --ci --workflows=doc-ledger-publish" false; return 0; }
   out="$(harness_mktemp_d lp-step)/out"
   local step=.github/scripts/doc-superpowers-steps/ledger-publish.sh
-  # Not enabled: the inert line, exit 0.
+  # Not enabled: the inert line, exit 0 — install --ci vendored no helper
+  # set without the config (final review OPS-I1).
+  assert_true "no config: no ledger helper set vendored" test ! -e "$dir/.github/scripts/ledger"
   rc=0
   run_installed "$dir" "$out" LEDGER_HELPERS=.github/scripts/ledger/lib.sh -- "$step" || rc=$?
   assert_eq "0" "$rc" "no docs/ledger/config.json: exit 0"
@@ -3737,6 +3745,14 @@ test_ledger_publish_step() {
     git remote add origin "$remote/origin.git"
     git push -q origin main
   )
+  # The config, no helper set yet: refused before doc-tools.sh runs.
+  rc=0
+  run_installed "$dir" "$out" LEDGER_HELPERS=.github/scripts/ledger/lib.sh -- "$step" || rc=$?
+  assert_eq "1" "$rc" "the config but no vendored ledger helper set: exit 1"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error:: line"
+  assert_contains "$(cat "$out.log")" "install --ci" "…naming the fix"
+  ( cd "$dir" && PATH="$BASH_PATH" "$BASH_BIN" "$INSTALLER" install --ci --workflows=doc-ledger-publish ) > /dev/null 2>&1
+  assert_true "install --ci on the ledger host vendors the set" test -f "$dir/.github/scripts/ledger/lib.sh"
   rc=0
   run_installed "$dir" "$out" LEDGER_HELPERS=.github/scripts/ledger/lib.sh -- "$step" || rc=$?
   assert_eq "0" "$rc" "the vendored tier publishes: exit 0 ($(tail -n 2 "$out.log" | tr '\n' ' '))"
@@ -3748,13 +3764,12 @@ test_ledger_publish_step() {
   run_installed "$dir" "$out" LEDGER_HELPERS=.github/scripts/ledger/lib.sh -- "$step" || rc=$?
   assert_eq "2" "$rc" "publish could not run: its exit code (2)"
   assert_contains "$(cat "$out.log")" "::error::" "…with an ::error:: line"
-  # No vendored helper set: refused before doc-tools.sh runs, even inert.
+  # No config and no set: inert, exit 0.
   rm -rf "$dir/.github/scripts/ledger" "$dir/docs/ledger/config.json"
   rc=0
   run_installed "$dir" "$out" LEDGER_HELPERS=.github/scripts/ledger/lib.sh -- "$step" || rc=$?
-  assert_eq "1" "$rc" "the ledger helper set is not vendored: exit 1"
-  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error:: line"
-  assert_contains "$(cat "$out.log")" "install --ci" "…naming the fix"
+  assert_eq "0" "$rc" "no config, no helper set: inert, exit 0"
+  assert_contains "$(cat "$out.log")" "ledger: not enabled (no docs/ledger/config.json)" "…the inert line"
 }
 
 test_ledger_publish_template
