@@ -2618,7 +2618,10 @@ ledger finalize|cmd_ledger_finalize|repo|all format=
   this branch added (--all: every one) in the working tree, nothing
   committed; the remote must be reachable (else exit 2). keys.mode merge:
   run on the base; every provisional key, numbered after the highest key
-  in the tree, in one commit "ledger: finalize N keys". One
+  in the tree, in one commit "ledger: finalize N keys" — first it fetches
+  the base's branch from its remote and refuses (exit 2, nothing written)
+  when HEAD lacks a commit there (another maintainer's finalize: pull,
+  then run it again); unreachable or offline, a warning. One
   "<provisional> → <key>  <path>" line each.
 ledger init|cmd_ledger_init|repo|dry-run registry= report= accept= import sources= format=
   --report <file> [--registry <file>] [--sources files,github]

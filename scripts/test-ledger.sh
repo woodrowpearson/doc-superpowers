@@ -3765,7 +3765,7 @@ weak-summary advisory docs/issues/w.md" "$(lg_vf)" "each advisory class"
 }
 
 test_lg_validate_all_concurrent_merge_finalize_dup() {
-  echo "test: validate catches the duplicate two maintainers' concurrent merge-mode finalize leave behind"
+  echo "test: validate catches the duplicate two maintainers' concurrent merge-mode finalize leave behind (one finalized offline, unchecked)"
   lg_keys_fixture '{"base":"main","keys":{"mode":"merge"}}'
   local h1 h2 other
   lg_item docs/issues/a.md "key: x-3" "ledger: x" "status: Open" "summary: The highest key so far"
@@ -3790,8 +3790,11 @@ test_lg_validate_all_concurrent_merge_finalize_dup() {
   )
   cd "$other"
   h2=$(lg_hex4 docs/issues/o.md)
-  lg finalize
-  assert_eq "0" "$LG_RC" "maintainer 2 finalizes"
+  # Online, finalize refuses here (3.3.1 CORE-m2: the remote's base has
+  # maintainer 1's commit); offline it cannot check, warns and goes on.
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg finalize
+  assert_eq "0" "$LG_RC" "maintainer 2 finalizes (offline: unchecked)"
+  assert_contains "$LG_ERR" "warning" "…with a warning"
   assert_contains "$(cat docs/issues/o.md)" "key: x-4" "o.md → x-4 too"
   # Both wrote finalized.json: the pull stops on it; the items merge cleanly.
   git pull -q --no-rebase --no-edit --no-commit origin main > /dev/null 2>&1 || true
@@ -11643,6 +11646,63 @@ test_lg_init_put_refuses_symlink() {
   teardown
 }
 
+test_lg_merge_finalize_remote_recheck() {
+  echo "test: 3.3.1 CORE-m2 — keys.mode merge finalize re-checks the remote before it writes: when the remote's base has commits this base lacks (another maintainer's finalize), it refuses (exit 2, nothing written); after a pull it numbers past them; unreachable or offline: a warning, finalized as before"
+  lg_keys_fixture '{"base":"main","keys":{"mode":"merge"}}'
+  local h1 h2 other before
+  lg_item docs/issues/a.md "key: x-3" "ledger: x" "status: Open" "summary: The highest key so far"
+  git add -A && git commit -qm a && git push -q origin main
+  other="$(harness_mktemp_d other)/other clone"
+  lg_clone "$other"
+  # Maintainer 1 merges n.md, finalizes it and pushes.
+  h1=$(lg_hex4 docs/issues/n.md)
+  lg_item docs/issues/n.md "key: x-~$h1" "ledger: x" "status: Open" "summary: First new item, provisional"
+  git add -A && git commit -qm n
+  lg finalize
+  assert_eq "0" "$LG_RC" "maintainer 1 (the remote's base is in HEAD) finalizes"
+  assert_contains "$(cat docs/issues/n.md)" "key: x-4" "n.md → x-4"
+  git push -q origin main
+  # Maintainer 2, not yet pulled, merges o.md and finalizes it: refused.
+  cd "$other"
+  git config user.name Other && git config user.email other@example.com
+  h2=$(lg_hex4 docs/issues/o.md)
+  lg_item docs/issues/o.md "key: x-~$h2" "ledger: x" "status: Open" "summary: Second new item, provisional"
+  git add -A && git commit -qm o
+  before=$(git rev-parse HEAD)
+  lg finalize
+  assert_eq "2" "$LG_RC" "the remote's base has a commit HEAD lacks: exit 2"
+  assert_contains "$LG_ERR" "pull" "…the remedy: pull"
+  assert_eq "$before" "$(git rev-parse HEAD)" "…no commit"
+  assert_contains "$(cat docs/issues/o.md)" "key: x-~$h2" "…o.md keeps its provisional key"
+  assert_file_not_exists docs/ledger/finalized.json "…finalized.json not written"
+  lg new --finalize --file docs/issues/o.md
+  assert_eq "2" "$LG_RC" "new --finalize on the item: refused too (exit 2)"
+  assert_contains "$(cat docs/issues/o.md)" "key: x-~$h2" "…o.md unchanged"
+  # After the pull: numbered past maintainer 1's key.
+  git pull -q --no-rebase --no-edit origin main > /dev/null 2>&1
+  lg finalize
+  assert_eq "0" "$LG_RC" "after the pull: exit 0"
+  assert_contains "$(cat docs/issues/o.md)" "key: x-5" "o.md → x-5"
+  lg validate --all --format json
+  assert_json_field "$LG_OUT" '[.findings[]? | select(.class == "duplicate-key")] | length' "0" "no duplicate key"
+  # The remote cannot be reached: a warning, finalized as in 3.3.0.
+  lg_item docs/issues/p.md "key: x-~$(lg_hex4 docs/issues/p.md)" "ledger: x" "status: Open" "summary: Third new item, provisional"
+  git add -A && git commit -qm p
+  git remote set-url origin "$TEST_DIR/no-such-remote.git"
+  lg finalize
+  assert_eq "0" "$LG_RC" "unreachable: exit 0"
+  assert_contains "$LG_ERR" "warning" "…with a warning"
+  assert_contains "$(cat docs/issues/p.md)" "key: x-6" "p.md → x-6"
+  # Offline: no fetch, the same warning.
+  lg_item docs/issues/q.md "key: x-~$(lg_hex4 docs/issues/q.md)" "ledger: x" "status: Open" "summary: Fourth new item, provisional"
+  git add -A && git commit -qm q
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg finalize
+  assert_eq "0" "$LG_RC" "offline: exit 0"
+  assert_contains "$LG_ERR" "warning" "…with a warning"
+  assert_contains "$(cat docs/issues/q.md)" "key: x-7" "q.md → x-7"
+  teardown
+}
+
 test_lg_hook_clip_constants_pinned() {
   echo "test: the ledger hook modes clip with hook-lib.sh's constants (HOOK_MAX_CHARS, HOOK_LINES_MAX): one changed without the other fails here"
   local v lib lg
@@ -12164,6 +12224,7 @@ run_tests() {
   test_lg_notices_gate_fetch_failure_fails_closed
   test_lg_init_accept_symlinked_legacy_finding
   test_lg_init_put_refuses_symlink
+  test_lg_merge_finalize_remote_recheck
 
   print_summary
 }

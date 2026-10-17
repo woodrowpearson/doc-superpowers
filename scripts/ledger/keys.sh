@@ -913,6 +913,61 @@ _lg_k_merge_on_base() {
   _lg_die "$msg"
 }
 
+# _lg_k_merge_remote_check: keys.mode merge numbers keys after the highest
+# one in this base, so two maintainers finalizing different copies of the
+# base would give one number to two items, in different files git merges
+# without a conflict (final review CORE-m2). Before finalize writes, fetch
+# the base's branch from its remote — config base's remote and branch for a
+# remote-tracking ref, a local branch's upstream (else keys.remote's branch
+# of the same name) — into a private ref; HEAD must contain its tip, else
+# exit 2 (pull, then run finalize again). The remote has no such branch, or
+# config base is a commit or tag: nothing to compare. Unreachable, or
+# DOC_TOOLS_LEDGER_OFFLINE=1: a warning, and finalize goes on as before.
+_lg_k_merge_remote_check() {
+  local full rest rem="" best="" br="" mref url err d tip
+  if [ "${DOC_TOOLS_LEDGER_OFFLINE:-}" = 1 ]; then
+    echo "ledger: warning: offline (DOC_TOOLS_LEDGER_OFFLINE=1): finalize did not check the remote's base for another maintainer's finalize — pull before you push this one" >&2
+    return 0
+  fi
+  full=$(git rev-parse -q --verify --symbolic-full-name "$_LG_K_BASE" 2>/dev/null) || full=""
+  case "$full" in
+    refs/remotes/?*)
+      rest=${full#refs/remotes/}
+      for rem in $(git remote 2>/dev/null); do
+        case "$rest" in
+          "$rem"/?*) if [ "${#rem}" -gt "${#best}" ]; then best=$rem; fi ;;
+        esac
+      done
+      [ -n "$best" ] || return 0
+      rem=$best
+      br=${rest#"$best"/} ;;
+    refs/heads/?*)
+      br=${full#refs/heads/}
+      rem=$(git config --get "branch.$br.remote" 2>/dev/null) || rem=""
+      mref=$(git config --get "branch.$br.merge" 2>/dev/null) || mref=""
+      case "$rem:$mref" in
+        ?*:refs/heads/?*) br=${mref#refs/heads/} ;;
+        *) rem=$_LG_K_REMOTE ;;
+      esac
+      case "$rem" in .|'') return 0 ;; esac ;;
+    *) return 0 ;;
+  esac
+  url=$(git config --get "remote.$rem.url" 2>/dev/null) || url=$rem
+  d=$(mktemp "$_SCRATCH/lg-kmrc.XXXXXX") || _lg_die "mktemp failed"
+  if ! LC_ALL=C git fetch --quiet --no-tags --no-recurse-submodules "$url" \
+      "+refs/heads/$br:$_LG_BASE_REMOTE" < /dev/null > /dev/null 2> "$d"; then
+    err=$(grep -v '^[[:space:]]*$' "$d" 2>/dev/null | head -n 2 | tr '\n' ' ') || err=""
+    case "$err" in
+      *"couldn't find remote ref"*) return 0 ;;
+    esac
+    echo "ledger: warning: cannot fetch $br from '$rem' (${err:-the fetch failed}): finalize did not check the remote's base for another maintainer's finalize — pull before you push this one" >&2
+    return 0
+  fi
+  tip=$(git rev-parse -q --verify "$_LG_BASE_REMOTE^{commit}" 2>/dev/null) || _lg_die "the fetched base $_LG_BASE_REMOTE is not a commit"
+  git merge-base --is-ancestor "$tip" HEAD 2>/dev/null \
+    || _lg_die "keys.mode merge: $br on '$rem' has commits this base lacks (another maintainer's finalize, or merges): pull them, then run finalize again — finalizing two copies of the base would give one number to two items. Nothing was written."
+}
+
 # _lg_k_finalize <only-path|""> <all 0|1> <out-lines> <out-json> [off-base-rc]
 # [summary-field summary]: replace provisional keys — <only-path>'s; else
 # (cas) those this branch added (provisional keys the base's items do not
@@ -1004,6 +1059,7 @@ _lg_k_finalize() {
     touched=$(GIT_LITERAL_PATHSPECS=1 git status --porcelain -- "${files[@]}" 2>&1) || touched="(git status failed) $touched"
     [ -z "$touched" ] || _lg_die "keys.mode merge: commit or stash the changes to the files finalize rewrites first: $(printf '%s' "$touched" | tr '\n' ' ')"
   fi
+  if [ "$_LG_K_MODE" = merge ]; then _lg_k_merge_remote_check; fi
   # The keys: finalized.json's, else allocated (in "ledger\tpath" order).
   LC_ALL=C awk -F '\t' '$4 == "" { print $2 "\t" $3 }' "$d/todo" > "$d/paths" || _lg_die "cannot write $d/paths"
   : > "$d/keys"
