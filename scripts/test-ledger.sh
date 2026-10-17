@@ -1454,8 +1454,9 @@ lg_t_index_fields() {
     "items sorted by path"
   it=$(lg_ix_item "$ix" docs/issues/a.md)
   assert_json_field "$it" 'keys_unsorted | join(",")' \
-    "path,archived,key,ledger,status,class,severity,date,summary,changes,consumes,relates,superseded_by,owed,aliases,paths,h1,first_para,resolution,docs,derived,pr,inflight,neighbours,recheck_after,fm_errors,pre_adoption" \
-    "an item's keys, in the brief's order (pre_adoption: Task 16c U11)"
+    "path,archived,key,ledger,status,class,severity,date,summary,changes,consumes,relates,superseded_by,owed,aliases,paths,h1,first_para,resolution,docs,derived,pr,inflight,neighbours,recheck_after,fm_errors,pre_adoption,claims" \
+    "an item's keys, in the brief's order (pre_adoption: Task 16c U11; claims: Task 18a)"
+  assert_json_field "$it" '.claims | tojson' '{"diverged":0,"unbuilt":0}' "claims: no spec claim tracks it"
   assert_json_field "$it" 'keys_unsorted | join(",")' "$(jq -r '."$defs".item.required | join(",")' "$LG_SCHEMA")" \
     "the schema's item.required lists the same keys"
   assert_json_field "$(cat "$ix")" 'keys_unsorted | join(",")' "$(jq -r '.required | join(",")' "$LG_SCHEMA")" \
@@ -6527,7 +6528,7 @@ test_lg_branch_facts_criss_cross() {
   lg_ifl_teardown
 }
 
-# --- Task 18a: status classes for spec-claims V5 ----------------------------------
+# --- Task 18a: status classes for spec-claims V5; claims an item tracks ----------
 
 # shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
 lg_t_status_class() {
@@ -6582,6 +6583,62 @@ test_lg_status_class_helper() {
   lg_item docs/issues/g.md "key: dup-1" "status: Open"
   git add -A && git commit -qm items
   lg_in lg_t_status_class
+  teardown
+}
+
+# lg_sidecar <file> <json>: a spec-claims sidecar (or any file under
+# docs/spec-claims/).
+lg_sidecar() {
+  mkdir -p "$(dirname "$1")"
+  printf '%s\n' "$2" > "$1"
+}
+
+test_lg_claims_counts() {
+  echo "test: the index, show and the views count the diverged/unbuilt spec claims an item tracks"
+  lg_view_fixture
+  local out="$TEST_DIR/out" c
+  c='{"id":"S#a","status":"unbuilt","tracker":"app-1"}'
+  lg_sidecar docs/spec-claims/SPEC-A.json "{\"schema\":1,\"doc\":\"docs/specs/a.md\",\"claims\":[
+    $c,
+    {\"id\":\"S#b\",\"status\":\"unbuilt\",\"tracker\":\"APP-1\"},
+    {\"id\":\"S#c\",\"status\":\"diverged\",\"tracker\":\"docs/issues/a.md\"},
+    {\"id\":\"S#d\",\"status\":\"built\",\"tracker\":\"app-1\"},
+    {\"id\":\"S#e\",\"status\":\"retired\",\"tracker\":\"app-1\"},
+    {\"id\":\"S#f\",\"status\":\"gated\",\"tracker\":\"app-1\"},
+    {\"id\":\"S#g\",\"status\":\"unbuilt\",\"tracker\":\"#42\"},
+    {\"id\":\"S#h\",\"status\":\"unbuilt\",\"tracker\":null},
+    {\"id\":\"S#i\",\"status\":\"diverged\",\"tracker\":\"core-1\"}]}"
+  # Not sidecars: the config, a gate record, a file that is not JSON.
+  lg_sidecar docs/spec-claims/config.json '{"claims":[{"status":"unbuilt","tracker":"app-1"}]}'
+  lg_sidecar docs/spec-claims/gates/p/chunk-1.json '{"claims":[{"status":"unbuilt","tracker":"app-1"}]}'
+  lg_sidecar docs/spec-claims/SPEC-BAD.json '{"claims": ['
+  lg_sidecar docs/spec-claims/SPEC-ODD.json '{"claims":"no"}'
+  git add -A && git commit -qm claims
+  lg show app-1 --format json
+  assert_eq "0" "$LG_RC" "show app-1: exit 0 (a malformed sidecar is skipped)"
+  assert_json_field "$LG_OUT" '.item.claims | tojson' '{"diverged":1,"unbuilt":2}' \
+    "the index: 1 diverged, 2 unbuilt (key, key in another case, path; built/retired/gated, the config, gates/ and other trackers not counted)"
+  lg show app-1
+  assert_contains "$LG_OUT" "claims: 1 diverged · 2 unbuilt" "show: the counts line"
+  lg show core-1
+  assert_contains "$LG_OUT" "claims: 1 diverged" "show core-1: one diverged"
+  assert_not_contains "$LG_OUT" "unbuilt" "…no zero count"
+  lg view all --out "$out"
+  assert_eq "0" "$LG_RC" "view all: exit 0"
+  assert_contains "$(grep '| app-1 |' "$out/app.md")" "claims: 1 diverged, 2 unbuilt" "the ledger page: the Status column carries the counts"
+  lg view all --html --out "$out"
+  assert_contains "$(cat "$out/ledger.html")" '<div class="note claims">claims: 1 diverged, 2 unbuilt</div>' "the HTML view: a claims note"
+  # The working tree: an edited sidecar changes the counts (a new index).
+  lg_sidecar docs/spec-claims/SPEC-A.json "{\"schema\":1,\"claims\":[$c]}"
+  lg show app-1 --format json
+  assert_json_field "$LG_OUT" '.item.claims | tojson' '{"diverged":0,"unbuilt":1}' "an edited sidecar: counted again"
+  lg show app-1
+  assert_contains "$LG_OUT" "claims: 1 unbuilt" "show: only the non-zero count"
+  lg show core-1
+  assert_not_contains "$LG_OUT" "claims:" "no tracked claim: no claims line"
+  rm -f docs/spec-claims/SPEC-A.json
+  lg show app-1 --format json
+  assert_json_field "$LG_OUT" '.item.claims | tojson' '{"diverged":0,"unbuilt":0}' "a deleted sidecar: none"
   teardown
 }
 
@@ -11730,6 +11787,7 @@ run_tests() {
   test_lg_trailers_since_adoption_none_inflight
   # --- Task 18a ---
   test_lg_status_class_helper
+  test_lg_claims_counts
 
   print_summary
 }
