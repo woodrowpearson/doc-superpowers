@@ -1,0 +1,51 @@
+# doc-superpowers workflow v1
+# Work-ledger views publisher
+# Installed by doc-superpowers hooks installer
+#
+# Every 30 minutes (and by hand): `doc-tools.sh ledger publish` renders the
+# ledger views from the base commit (config "base", default origin/main) and
+# pushes one new commit to the views branch (config views.branch, default
+# doc-ledger-views), fast-forward only. Without docs/ledger/config.json it
+# does nothing and passes. The ledger modules and the reference adapters are
+# vendored with this workflow (.github/scripts/ledger/ and
+# .github/scripts/adapters/, beside doc-tools.sh). A publish that cannot run —
+# the views branch moved meanwhile, an adapter that fails — fails the run; the
+# next one retries.
+
+name: Doc Ledger Publish
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch: # Allow manual trigger
+
+# One publisher at a time: a run that starts while one is pushing waits for it
+# (a second push would lose the race and fail), and is never cancelled midway.
+concurrency:
+  group: doc-ledger-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # The views branch push, and the in-flight ref prune.
+      contents: write
+      # Read by the reference adapters (gh), when the config names them.
+      pull-requests: read
+      issues: read
+
+    steps:
+      # The full history: an item's date falls back to its first commit.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Publish the ledger views
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The vendored ledger helper set: doc-tools.sh runs the ledger verbs
+          # from beside itself, and the step refuses to run without it.
+          LEDGER_HELPERS: .github/scripts/ledger/lib.sh
+        run: .github/scripts/doc-superpowers-steps/ledger-publish.sh

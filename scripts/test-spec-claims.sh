@@ -1621,6 +1621,242 @@ test_v5_scope() {
   teardown
 }
 
+# --- V5 with the work ledger (3.3.0, work-ledger design §I) ----------------------
+#
+# With docs/ledger/config.json a tracker that names a ledger item — its key
+# (an alias, any case) or its path — is open or closed by the ledger's
+# status classes (open → open; fixed, closed, wontfix → closed). An item
+# whose status matches no class is read as 3.2.0 reads its file. Anything
+# else is a 3.2.0 tracker. Without the config, V5 is 3.2.0's to the byte.
+
+# ledger_on [json]: docs/ledger/config.json (default {}: items are
+# docs/issues/*.md, so the fixture's tracker is an item).
+ledger_on() {
+  local c='{}'
+  if [ $# -gt 0 ]; then c=$1; fi
+  mkdir -p docs/ledger
+  printf '%s\n' "$c" > docs/ledger/config.json
+}
+
+# tracker_item <status> [front matter lines…]: the fixture tracker as a
+# ledger item keyed auth-1 with that front matter status.
+tracker_item() {
+  local st="$1"
+  shift
+  {
+    printf -- '---\nkey: auth-1\nstatus: %s\n' "$st"
+    if [ $# -gt 0 ]; then printf '%s\n' "$@"; fi
+    printf -- '---\n# Token TTL\n\nBuild the 15-minute access-token expiry (SPEC-AUTH-001#token-ttl).\n'
+  } > "$TRACKER"
+}
+
+# set_tracker <tracker>: the fixture claim's tracker, its status block
+# rendered again.
+set_tracker() {
+  jset "$SIDECAR" ".claims[0].tracker = $(jq -n --arg t "$1" '$t')"
+  rerender
+}
+
+# v5_shape: the last `cl`'s exit code, its V5 findings and advisories, and
+# its indeterminate rows — compact.
+v5_shape() {
+  jq -c '[.exit, [(.findings[]?, .advisories[]?) | select(.check == "V5")], .indeterminate]' <<<"$CL_OUT" 2>/dev/null \
+    || echo invalid
+}
+
+test_v5_ledger_key_tracker() {
+  echo "test: V5 — with the ledger on, a tracker naming an item's key resolves through the index"
+  claims_fixture
+  tracker_item Open "aliases: [ttl-old]"
+  set_tracker auth-1
+  cl validate --all
+  assert_v5 "tracker auth-1 is not a path in the proposed tree" "ledger off: a key is no tracker (3.2.0)"
+  ledger_on
+  cl validate --all
+  assert_v5_ok "ledger on: auth-1 is an open item"
+  set_tracker AUTH-1
+  cl validate --all
+  assert_v5_ok "ledger on: a key matches in any case"
+  set_tracker ttl-old
+  cl validate --all
+  assert_v5_ok "ledger on: an alias resolves"
+  set_tracker auth-1
+  tracker_item Fixed
+  cl validate --all
+  assert_v5 "tracker is closed: auth-1 has status: Fixed; status unbuilt needs an open tracker" "a fixed-class item"
+  assert_eq "1" "$(v5_count)" "…one V5 finding"
+  tracker_item "In progress"
+  cl validate --all
+  assert_v5_ok "an open-class item (In progress)"
+  # --staged reads the item as the index holds it.
+  git add -A
+  tracker_item Done
+  cl validate --staged
+  assert_v5_ok "--staged: the close is not staged"
+  git add "$TRACKER"
+  cl validate --staged
+  assert_v5 "tracker is closed: auth-1 has status: Done" "--staged: the close staged"
+  git reset -q
+  # A key no item carries is what it was: no path, no pattern.
+  set_tracker auth-9
+  cl validate --all
+  assert_v5 "tracker auth-9 is not a path in the proposed tree" "a key no item has"
+  # An item whose status matches no class: its file's status line decides,
+  # as 3.2.0 reads it.
+  set_tracker auth-1
+  printf -- '---\nkey: auth-1\n---\n# Token TTL\n\n**Status**: Resolved\n' > "$TRACKER"
+  cl validate --all
+  assert_v5 "tracker is closed: auth-1 has status: Resolved" "no front matter status: the **Status** line (closed)"
+  printf -- '---\nkey: auth-1\n---\n# Token TTL\n\n**Status**: Open\n' > "$TRACKER"
+  cl validate --all
+  assert_v5_ok "no front matter status: the **Status** line (open)"
+  printf -- '---\nkey: auth-1\nstatus: Banana\n---\n# Token TTL\n' > "$TRACKER"
+  cl validate --all
+  assert_v5_ok "a status no class names (Banana): open, as 3.2.0 reads it"
+  # Two items carrying the key: not one item, so not resolved.
+  mkdir -p docs/issues
+  printf -- '---\nkey: auth-1\nstatus: Open\n---\n# Twin\n' > docs/issues/twin.md
+  cl validate --all
+  assert_v5 "tracker auth-1 is not a path in the proposed tree" "an ambiguous key"
+  teardown
+}
+
+test_v5_ledger_wontfix_closed() {
+  echo "test: V5 — with the ledger on, Won't Fix (every wontfix and closed word) counts as closed"
+  claims_fixture
+  tracker_item "Won't Fix"
+  cl validate --all
+  assert_v5_ok "ledger off: Won't Fix reads as open (its leading word is Won; 3.2.0)"
+  ledger_on
+  cl validate --all
+  assert_v5 "tracker is closed: docs/issues/token-ttl.md has status: Won't Fix" "ledger on: the path tracker's item is wontfix-class"
+  local st
+  for st in wontfix "Not planned" "wont-fix (dup)" Obsolete "won’t fix" Resolved; do
+    tracker_item "$st"
+    cl validate --all
+    assert_v5 "tracker is closed: docs/issues/token-ttl.md has status: $st" "ledger on: status $st"
+  done
+  set_tracker auth-1
+  tracker_item "Won't Fix"
+  cl validate --all
+  assert_v5 "tracker is closed: auth-1 has status: Won't Fix" "ledger on: by key"
+  # The host's classes decide: a wontfix list without "won't fix".
+  ledger_on '{"status":{"wontfix":["not planned"]}}'
+  cl validate --all
+  assert_v5_ok "Won't Fix in no class: the item's file, read as 3.2.0 reads it (open)"
+  set_tracker "$TRACKER"
+  cl validate --all
+  assert_v5_ok "…by path too"
+  # A path that is not an item (outside items.globs) is a 3.2.0 tracker.
+  ledger_on '{"items":{"globs":["docs/other/*.md"]}}'
+  cl validate --all
+  assert_v5_ok "not an item: Won't Fix reads as open (3.2.0)"
+  teardown
+}
+
+# The V5 rows 3.2.0 printed for each scenario of
+# test_v5_ledger_off_byte_identical (v5_shape), captured by running this
+# test against doc-tools.sh as it was before the ledger change (1d70af2).
+_V5_OFF_GOLDEN_KEY='[1,[{"check":"V5","claim":"SPEC-AUTH-001#token-ttl","doc":"docs/specs/SPEC-AUTH-001-token.md","message":"tracker auth-1 is not a path in the proposed tree and matches no config tracker_patterns: status unbuilt needs an open tracker"}],[]]'
+_V5_OFF_GOLDEN_WONTFIX='[0,[],[]]'
+_V5_OFF_GOLDEN_NOTPLANNED='[0,[],[]]'
+_V5_OFF_GOLDEN_RESOLVED='[1,[{"check":"V5","claim":"SPEC-AUTH-001#token-ttl","doc":"docs/specs/SPEC-AUTH-001-token.md","message":"tracker is closed: docs/issues/token-ttl.md has status: Resolved; status unbuilt needs an open tracker"}],[]]'
+_V5_OFF_GOLDEN_STAGED='[1,[{"check":"V5","claim":"SPEC-AUTH-001#token-ttl","doc":"docs/specs/SPEC-AUTH-001-token.md","message":"tracker auth-1 is not a path in the proposed tree and matches no config tracker_patterns: status unbuilt needs an open tracker"}],[]]'
+
+test_v5_ledger_off_byte_identical() {
+  echo "test: V5 — without docs/ledger/config.json, V5 prints what 3.2.0 printed"
+  claims_fixture
+  # A ledger directory without its config: the ledger is off.
+  mkdir -p docs/ledger
+  printf '%s\n' '{"schema":"ledger-registry/1","ledgers":[]}' > docs/ledger/ledgers.json
+  tracker_item Open
+  set_tracker auth-1
+  cl validate --all
+  assert_eq "$_V5_OFF_GOLDEN_KEY" "$(v5_shape)" "a key tracker: 3.2.0's rows"
+  set_tracker "$TRACKER"
+  tracker_item "Won't Fix"
+  cl validate --all
+  assert_eq "$_V5_OFF_GOLDEN_WONTFIX" "$(v5_shape)" "Won't Fix: 3.2.0's rows"
+  tracker_item "Not planned"
+  cl validate --all
+  assert_eq "$_V5_OFF_GOLDEN_NOTPLANNED" "$(v5_shape)" "Not planned: 3.2.0's rows"
+  tracker_item Resolved
+  cl validate --all
+  assert_eq "$_V5_OFF_GOLDEN_RESOLVED" "$(v5_shape)" "Resolved: 3.2.0's rows"
+  git add -A
+  set_tracker auth-1
+  git add -A
+  cl validate --staged
+  assert_eq "$_V5_OFF_GOLDEN_STAGED" "$(v5_shape)" "--staged, a key tracker: 3.2.0's rows"
+  teardown
+}
+
+test_v5_ledger_unavailable() {
+  echo "test: V5 — the ledger on but unreadable: indeterminate (exit 2), never a clean pass"
+  claims_fixture
+  tracker_item "Won't Fix"
+  ledger_on '['
+  cl validate --all
+  assert_eq "2" "$CL_RC" "an invalid docs/ledger/config.json: exit 2"
+  assert_eq "0" "$(v5_count)" "…no V5 tracker finding decided without it"
+  assert_json_field "$CL_OUT" '[.indeterminate[] | select(.check == "V5") | .reason | startswith("ledger-unavailable: ")] | tojson' \
+    '[true]' "…one V5 indeterminate row, ledger-unavailable"
+  assert_contains "$CL_OUT" "docs/ledger/config.json" "…naming the config"
+  # A doc-tools.sh copied without scripts/ledger/ (a CI vendor without the
+  # ledger set) cannot read trackers either.
+  ledger_on
+  local dir
+  dir=$(harness_mktemp_d vendored)
+  cp "$SCRIPT_DIR/doc-tools.sh" "$dir/doc-tools.sh"
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$BASH_BIN" "$dir/doc-tools.sh" > "$dir/run"
+  chmod +x "$dir/run"
+  local DOC_TOOLS="$dir/run"
+  cl validate --all
+  assert_eq "2" "$CL_RC" "vendored without scripts/ledger/: exit 2"
+  assert_json_field "$CL_OUT" '[.indeterminate[] | select(.check == "V5") | .reason] | length' "1" "…one V5 indeterminate row"
+  assert_contains "$CL_OUT" "scripts/ledger/" "…naming scripts/ledger/"
+  # No tracker to read: the ledger is never needed.
+  jset "$SIDECAR" '.claims[0].status = "built"'
+  cl validate --all
+  assert_json_field "$CL_OUT" '[.indeterminate[] | select(.check == "V5")] | length' "0" "no tracker to read: no V5 indeterminate row"
+  # The ledger off: the copy is 3.2.0's V5.
+  jset "$SIDECAR" '.claims[0].status = "unbuilt"'
+  rm -f docs/ledger/config.json
+  cl validate --all
+  assert_v5_ok "vendored, ledger off: Won't Fix reads as open (3.2.0)"
+  teardown
+}
+
+test_v5_ledger_vendored_ci_tier() {
+  echo "test: V5 — a CI tier installed by install --ci judges a ledger tracker from .github/scripts/ (the ledger set vendored beside doc-tools.sh)"
+  claims_fixture
+  tracker_item "Won't Fix"
+  ledger_on
+  local rc=0 out vend rt
+  "$BASH_BIN" "$SCRIPT_DIR/hooks/install.sh" install --ci --workflows=doc-freshness-schedule >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "install --ci --workflows=doc-freshness-schedule exits 0"
+  assert_true "the ledger set is vendored beside doc-tools.sh" test -f .github/scripts/ledger/lib.sh
+  git add -A && git commit -qm "ci tier"
+  vend=$(harness_mktemp_d vend-run)
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$BASH_BIN" "$PWD/.github/scripts/doc-tools.sh" > "$vend/run"
+  chmod +x "$vend/run"
+  local DOC_TOOLS="$vend/run"
+  cl validate --all
+  assert_v5 "tracker is closed: docs/issues/token-ttl.md has status: Won't Fix" "the vendored doc-tools.sh: Won't Fix closes the tracker"
+  assert_json_field "$CL_OUT" '[.indeterminate[] | select(.check == "V5")] | length' "0" "…no ledger-unavailable row"
+  # The scheduled claims step itself, as the workflow runs it.
+  rt=$(harness_mktemp_d claims-rt)
+  rc=0
+  RUNNER_TEMP="$rt" GITHUB_OUTPUT="$rt/out" BASE_REF=main \
+    .github/scripts/doc-superpowers-steps/claims-check.sh scheduled >/dev/null 2>&1 </dev/null || rc=$?
+  assert_eq "0" "$rc" "claims-check.sh scheduled exits 0"
+  out=$(jq -c '[.[] | select(.verb == "validate")][0]' "$rt/claims-report.json" 2>/dev/null || echo invalid)
+  assert_contains "$(jq -r '[.findings[]? | select(.check == "V5") | .message] | join("\n")' <<<"$out" 2>/dev/null)" \
+    "tracker is closed: docs/issues/token-ttl.md has status: Won't Fix" "…its validate verdict carries the V5 finding"
+  assert_json_field "$out" '[.indeterminate[]? | select(.check == "V5")] | length' "0" "…and no ledger-unavailable row"
+  teardown
+}
+
 # --- V6 merge-base ratchet -----------------------------------------------------
 
 # The last `cl`'s V6 finding messages, one per line, and their count; its V6
@@ -10077,6 +10313,57 @@ test_validate_config_override() {
   teardown
 }
 
+# v10_lint_claim <status> <recorded>: v10_claim's fixture as a lint claim —
+# enforced_by lint, no test, when token_ttl_minutes=15 — in <status>, entered
+# as a lint claim enters it (a reviewed status edit: no promotion), the
+# extension recording <recorded>.
+v10_lint_claim() {
+  claims_fixture
+  config_on "$2" 30
+  jset "$SIDECAR" ".claims[0].enforced_by = \"lint\" | .claims[0].test = null | .claims[0].lint = $_CL_LINT | .claims[0].when = {\"$TTL_KEY\": 15}"
+  git add -A && git commit -qm "the TTL claim as a lint claim, when $TTL_KEY=15"
+  case "$1" in
+    diverged) set_ttl 1800; lint_diverge ;;  # the code diverges: the lint fails
+    *) jset "$SIDECAR" ".claims[0].status = \"$1\""; rerender ;;
+  esac
+  base_here "the TTL lint claim $1, $TTL_KEY recorded as $2"
+  : > "$STUB_LOG"
+}
+
+test_v10_non_test_claim_remedies() {
+  echo "test: V10 — a lint claim's remedies are reviewed status edits, never claims promote (promote proves test claims only)"
+  v10_lint_claim gated 30
+  cl validate --all
+  assert_eq "0" "$CL_RC" "the gated lint fixture validates clean (--all)"
+  set_flag "$TTL_KEY" 15
+  git add deploy/flags.json
+  cl validate --staged
+  assert_eq "0|1" "$CL_RC|$(v10_count)" "gated, now satisfied: exit 0, one V10 row"
+  assert_contains "$(v10_advisories promote-owed)" "now satisfied: move it to built by a reviewed status edit" "…the advisory: a reviewed status edit to built"
+  assert_not_contains "$(v10_advisories promote-owed)" "run claims promote" "…never tells it to run claims promote"
+  teardown
+  v10_lint_claim built 15
+  cl validate --all
+  assert_eq "0" "$CL_RC" "the built lint fixture validates clean (--all)"
+  set_flag "$TTL_KEY" 30
+  git add deploy/flags.json
+  cl validate --staged
+  assert_v10 "ruling owed" "built, no longer satisfied"
+  assert_contains "$(v10_messages)" "then move it to gated by a reviewed status edit" "…the ruling, the change, then a reviewed status edit to gated"
+  assert_not_contains "$(v10_messages)" "run claims promote" "…never tells it to run claims promote"
+  teardown
+  v10_lint_claim diverged 30
+  cl validate --all
+  assert_eq "0" "$CL_RC" "the diverged lint fixture validates clean (--all)"
+  set_flag "$TTL_KEY" 15
+  git add deploy/flags.json
+  cl validate --staged
+  assert_v10 "switches on a diverged claim" "diverged, switched on"
+  assert_contains "$(v10_messages)" "fix the code and move the claim to built by a reviewed status edit, or retire it" "…the remedies for a lint claim"
+  assert_not_contains "$(v10_messages)" "promote the claim" "…not promote"
+  teardown
+}
+
 test_v10_unrelated_key_ignored() {
   echo "test: V10 — a changed key neither the claim's when nor its subject's readers names is ignored"
   v10_claim gated 15
@@ -10479,6 +10766,12 @@ run_tests() {
   test_v5_retired_without_ruling
   test_v5_judge_without_why
   test_v5_scope
+  # --- 3.3.0: V5 with the work ledger (work-ledger Task 18a) ---
+  test_v5_ledger_key_tracker
+  test_v5_ledger_wontfix_closed
+  test_v5_ledger_off_byte_identical
+  test_v5_ledger_unavailable
+  test_v5_ledger_vendored_ci_tier
 
   # --- Task 5: V6 merge-base ratchet ---
   test_v6_states_changed_without_ruling
@@ -10827,6 +11120,7 @@ run_tests() {
   test_v10_diverged_when_switched_on
   test_validate_config_override
   test_v10_unrelated_key_ignored
+  test_v10_non_test_claim_remedies
   test_promote_regates_built_when_unsatisfied
 
   # --- Task 23: replay fixtures, the drift shapes and the planted drifts ---

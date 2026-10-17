@@ -1,0 +1,44 @@
+# The work ledger's post-commit leg (POSIX sh; install.sh wraps it in its
+# markers). doc-tools.sh ledger inflight --push in the background — the
+# commit never waits, and the job holds none of its output: stdin is
+# /dev/null, stdout and stderr go to <git common dir>/doc-superpowers/ledger/
+# push.log. It pushes only with inflight.enabled and commits beyond the base
+# (--no-verify, forced). The job keeps the terminal (no setsid on macOS), so
+# nothing in it may ask: GIT_TERMINAL_PROMPT=0 (git's own prompts),
+# GCM_INTERACTIVE=never (Git Credential Manager), and ssh runs with
+# -o BatchMode=yes, following git's own precedence: added to GIT_SSH_COMMAND,
+# else to core.sshCommand, else — unless GIT_SSH names a program of yours,
+# which is then what git runs — to ssh (a passphrase or an unknown host key
+# fails the push; push.log says so). A hangup does not
+# orphan its transport (HUP ignored; doc-tools.sh reaps the push on TERM /
+# INT). DOC_SUPERPOWERS_SKIP=1 (every hook) or DOC_SUPERPOWERS_LEDGER_SKIP=1
+# (the ledger legs) skips it, silently.
+if [ "${DOC_SUPERPOWERS_SKIP:-}" != 1 ] && [ "${DOC_SUPERPOWERS_LEDGER_SKIP:-}" != 1 ] && [ -f docs/ledger/config.json ]; then
+  DOC_SP_LG_TOOLS=${DOC_TOOLS:-}
+  [ -n "$DOC_SP_LG_TOOLS" ] || DOC_SP_LG_TOOLS=$(__DOC_TOOLS_RESOLVE__)
+  DOC_SP_LG_DIR=$(git rev-parse --git-common-dir 2>/dev/null) || DOC_SP_LG_DIR=""
+  case "$DOC_SP_LG_DIR" in
+    "" | /*) ;;
+    *) DOC_SP_LG_DIR="$PWD/$DOC_SP_LG_DIR" ;;
+  esac
+  if [ -f "$DOC_SP_LG_TOOLS" ] && [ -n "$DOC_SP_LG_DIR" ] && mkdir -p "$DOC_SP_LG_DIR/doc-superpowers/ledger" 2>/dev/null; then
+    (
+      trap '' HUP
+      if [ -n "${GIT_SSH_COMMAND:-}" ]; then
+        GIT_SSH_COMMAND="$GIT_SSH_COMMAND -o BatchMode=yes"
+        export GIT_SSH_COMMAND
+      elif DOC_SP_LG_SSH=$(git config --get core.sshCommand) && [ -n "$DOC_SP_LG_SSH" ]; then
+        GIT_SSH_COMMAND="$DOC_SP_LG_SSH -o BatchMode=yes"
+        export GIT_SSH_COMMAND
+      elif [ -z "${GIT_SSH:-}" ]; then
+        GIT_SSH_COMMAND="ssh -o BatchMode=yes"
+        export GIT_SSH_COMMAND
+      fi
+      GIT_TERMINAL_PROMPT=0
+      GCM_INTERACTIVE=never
+      export GIT_TERMINAL_PROMPT GCM_INTERACTIVE
+      exec "$DOC_SP_LG_TOOLS" ledger inflight --push
+    ) </dev/null >"$DOC_SP_LG_DIR/doc-superpowers/ledger/push.log" 2>&1 &
+  fi
+  unset DOC_SP_LG_TOOLS DOC_SP_LG_DIR
+fi

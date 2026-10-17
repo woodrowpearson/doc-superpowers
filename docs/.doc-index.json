@@ -1,47 +1,57 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-10-15T06:06:49Z",
+  "generated_at": "2026-10-17T08:39:37Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
-      "content_hash": "sha256:3c8fe2c23255c9ebed719b03f64d355daeed64347ff5f905de45ed6ae5fa6c4b",
+      "content_hash": "sha256:dbab9b3c95232d4ab21c696aabc3e17bbb6eba69387dffee833614ad7863ebbe",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/",
-        "references/"
+        "references/",
+        "evals/",
+        ".github/workflows/tests.yml"
       ],
-      "code_commit": "daa9c421c7d4d0dafc819b9eea26c2534c6cb855",
+      "code_commit": "e2f38f3d8f7bdf73e5dc4b23c02cf294475d29fd",
       "doc_type": "architecture",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-15T06:06:49Z",
+      "last_verified": "2026-10-17T08:39:37Z",
       "implementation": [],
       "code_oids": {
-        "skills/doc-superpowers/SKILL.md": "2a07777a830045d728f0829b6e2c854633232f6b",
-        "scripts/": "2564adcb4cc68db3e76b47508734f5b73c3a3535",
-        "references/": "3beafdbc80246101af2c0d5d84625fa6f7edf726"
+        "skills/doc-superpowers/SKILL.md": "fd71cc600d9f2d1b7cc44ebfcee443beaea49ad3",
+        "scripts/": "deaab2b1ef7ef4f3de9c5db27cdcc7bda3ad4319",
+        "references/": "36fbc92e57e40c9c47131406d862b3bb0b844c8d",
+        "evals/": "fb1628d44093505ceb4ff2cb377ddc90d39974ee",
+        ".github/workflows/tests.yml": "ce4ef6d3ede5ce31600142363cede4a5094c3549"
       }
     },
     "docs/codebase-guide.md": {
-      "content_hash": "sha256:c90e0ec859682a78e33d69ce3ce8e2cd0ed3162a3e86f30f9c5f4c32d8ecaedf",
+      "content_hash": "sha256:d0ce6ab36ae7c5e023cb67f5865481d2e21730bf2c5c61703798fc5d7e4f1761",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
-        "scripts/"
+        "scripts/",
+        "references/",
+        "evals/",
+        ".github/workflows/tests.yml"
       ],
-      "code_commit": "aed19d853b682d84bb36407dee3a8d56a4c9e3a9",
+      "code_commit": "e2f38f3d8f7bdf73e5dc4b23c02cf294475d29fd",
       "doc_type": "codebase-guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-15T05:58:28Z",
+      "last_verified": "2026-10-17T08:39:37Z",
       "implementation": [],
       "code_oids": {
-        "skills/doc-superpowers/SKILL.md": "2a07777a830045d728f0829b6e2c854633232f6b",
-        "scripts/": "2564adcb4cc68db3e76b47508734f5b73c3a3535"
+        "skills/doc-superpowers/SKILL.md": "fd71cc600d9f2d1b7cc44ebfcee443beaea49ad3",
+        "scripts/": "deaab2b1ef7ef4f3de9c5db27cdcc7bda3ad4319",
+        "references/": "36fbc92e57e40c9c47131406d862b3bb0b844c8d",
+        "evals/": "fb1628d44093505ceb4ff2cb377ddc90d39974ee",
+        ".github/workflows/tests.yml": "ce4ef6d3ede5ce31600142363cede4a5094c3549"
       }
     },
     "docs/conventions.md": {
-      "content_hash": "sha256:ef0f8b0b4cbbf57f8a1860b1069f3bff5ee2ece3394b0a847c75a3700a8f5185",
+      "content_hash": "sha256:b511a324ccb9df6be0a64ceef54a76dd5f1d619aa99ad012c13feb60f4d020e5",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "references/doc-spec.md",
@@ -49,58 +59,58 @@
         "scripts/doc-tools.sh",
         "scripts/hooks"
       ],
-      "code_commit": "daa9c421c7d4d0dafc819b9eea26c2534c6cb855",
+      "code_commit": "c52685b8377708ed42cd7edc198338f834f442a4",
       "doc_type": "conventions",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-15T06:06:49Z",
+      "last_verified": "2026-10-17T08:39:37Z",
       "implementation": [],
       "code_oids": {
-        "skills/doc-superpowers/SKILL.md": "2a07777a830045d728f0829b6e2c854633232f6b",
-        "references/doc-spec.md": "c1f9e9d86d1f2d6812e83f3320b615302063fc45",
-        "references/spec-lifecycle-actions.md": "88767f3a2488b77dc88570b250aa5f7f249b308c",
-        "scripts/doc-tools.sh": "c0970438b0cb9cf50b0557607de74141dfb0a806",
-        "scripts/hooks": "1a5d2ad6391640346b25388a3e52e462aa1239fb"
+        "skills/doc-superpowers/SKILL.md": "fd71cc600d9f2d1b7cc44ebfcee443beaea49ad3",
+        "references/doc-spec.md": "3b0b74eb85085d124748f83e28830c6076caecdb",
+        "references/spec-lifecycle-actions.md": "14a04fba73f3d84332895b2c8713a3ee433560ff",
+        "scripts/doc-tools.sh": "305d43ab2536b541849154d931e2e743cd7eff3d",
+        "scripts/hooks": "eb157e884d35cf9a679c86b508cf622c65258031"
       }
     },
     "docs/guides/getting-started.md": {
-      "content_hash": "sha256:119ec9d3a923e3e173c91eb3214d2dc7160f92a5275b8794fddc934bbf8af17a",
+      "content_hash": "sha256:986d5c9f33dc8fda4ff23c44245a6fdc58ac51dbab176ca3c6bf4f6b401163a2",
       "code_refs": [
         "README.md",
         "skills/doc-superpowers/SKILL.md",
         "scripts/hooks/install.sh",
         "scripts/doc-tools.sh"
       ],
-      "code_commit": "aed19d853b682d84bb36407dee3a8d56a4c9e3a9",
+      "code_commit": "c52685b8377708ed42cd7edc198338f834f442a4",
       "doc_type": "guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-15T05:58:28Z",
+      "last_verified": "2026-10-17T08:39:37Z",
       "implementation": [],
       "code_oids": {
-        "README.md": "17796e6e1604e1d1cc774b10301bc58f31f62318",
-        "skills/doc-superpowers/SKILL.md": "2a07777a830045d728f0829b6e2c854633232f6b",
-        "scripts/hooks/install.sh": "aa6ed1c9d9175bda1450dcb2886309732333c4a2",
-        "scripts/doc-tools.sh": "c0970438b0cb9cf50b0557607de74141dfb0a806"
+        "README.md": "1a5828f02012c09bb1b6ba8396e0a7b9c48f0d57",
+        "skills/doc-superpowers/SKILL.md": "fd71cc600d9f2d1b7cc44ebfcee443beaea49ad3",
+        "scripts/hooks/install.sh": "9445f14b9ac804d5738e52cb1335c303342b01d7",
+        "scripts/doc-tools.sh": "305d43ab2536b541849154d931e2e743cd7eff3d"
       }
     },
     "docs/workflows/doc-superpowers.md": {
-      "content_hash": "sha256:86c475735feaea2b53984a6df8c51f7ff08e3b7d8c99bb5ee676c8a5b77adc4a",
+      "content_hash": "sha256:ed8994d83fea2b28ffef22dca1892402d1642ee715114dfa9faf1c5291be7102",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/",
         "references/"
       ],
-      "code_commit": "08a49fc22ca8b6f5559368151393db4e54d1b99f",
+      "code_commit": "e2f38f3d8f7bdf73e5dc4b23c02cf294475d29fd",
       "doc_type": "workflows",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-15T05:58:28Z",
+      "last_verified": "2026-10-17T08:39:37Z",
       "implementation": [],
       "code_oids": {
-        "skills/doc-superpowers/SKILL.md": "2a07777a830045d728f0829b6e2c854633232f6b",
-        "scripts/": "2564adcb4cc68db3e76b47508734f5b73c3a3535",
-        "references/": "3beafdbc80246101af2c0d5d84625fa6f7edf726"
+        "skills/doc-superpowers/SKILL.md": "fd71cc600d9f2d1b7cc44ebfcee443beaea49ad3",
+        "scripts/": "deaab2b1ef7ef4f3de9c5db27cdcc7bda3ad4319",
+        "references/": "36fbc92e57e40c9c47131406d862b3bb0b844c8d"
       }
     },
     "docs/plans/2026-03-26-audit-report.md": {
@@ -704,6 +714,36 @@
     },
     "docs/plans/2026-10-14-audit-report.md": {
       "content_hash": "sha256:b1c786d570ae35f6f40cd6f33c1b44dd72d66518d1fd8b3a4d3bf21cd7c2c50b",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/superpowers/plans/2026-10-12-work-ledger.md": {
+      "content_hash": "sha256:537cedc77ec3f9867db1f7e462aaf948617b9ef3af313a364a91b8b3db506865",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/superpowers/specs/2026-10-12-work-ledger-design.md": {
+      "content_hash": "sha256:78a2cd10286b1f784ae68c110c4aa62b0ec54624c16f5bcbad90ca662da7c175",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "design-spec",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/archive/plans/2026-10-15-audit-report.md": {
+      "content_hash": "sha256:904f15ef4bc2051a35efb37477a72140605dc370b16323b3f3d522c7e4e56d8d",
       "code_refs": [],
       "code_oids": {},
       "code_commit": null,

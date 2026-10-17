@@ -107,9 +107,10 @@ It is merged **losslessly or not at all**:
   the notes; human edits are authoritative.
 - **Skipped, named on stderr, left for the next release** (never consumed):
   line 1 missing or naming another PR; text before the first `### ` heading; a
-  `#` or `##` heading; an unclosed code fence; no notes at all; a name that is
-  not `PR-<number>.md`; a symbolic link (never read); an empty file. Fix it and
-  commit; the next release takes it.
+  `#` or `##` heading; an empty `###` heading (no section name); an unclosed
+  code fence; no notes at all; the no-notes marker together with notes; a name
+  that is not `PR-<number>.md`; a symbolic link (never read); an empty (0-byte)
+  file. Fix it and commit; the next release takes it.
 - Trailing `\r` (CRLF files) and trailing blanks are dropped; a file without a
   final newline keeps its last line.
 - Notes are merged as **units**. A unit starts at a list item (`-`, `*`, `+`
@@ -137,8 +138,10 @@ The consumer consumes (deletes) it and prints nothing. The bot writes this for
 a PR with no user-facing change and replaces it when later work needs notes.
 **To opt a PR out** for good, write it by hand and do not re-seal it: the
 workflow never drafts over a hand-written no-notes fragment (and never
-overwrites any hand-edited fragment). An empty fragment is not this state —
-it is skipped as "no notes".
+overwrites any hand-edited fragment). An empty fragment is not this state: a
+0-byte file is skipped as "an empty file", and one with its marker lines but
+no notes as "no notes". Nor is the marker beside notes: that fragment is
+skipped too.
 
 ## Manual edits and re-sealing
 

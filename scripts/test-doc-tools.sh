@@ -515,6 +515,8 @@ test_scripts_are_free_of_bash4_only_constructs() {
   for candidate in \
     "$repo_root"/scripts/doc-tools.sh \
     "$repo_root"/scripts/merge-doc-index.sh \
+    "$repo_root"/scripts/ledger/*.sh \
+    "$repo_root"/scripts/adapters/*.sh \
     "$repo_root"/scripts/hooks/*.sh \
     "$repo_root"/scripts/hooks/claude/*.sh \
     "$repo_root"/scripts/hooks/ci/doc-pr-release/*.sh \
@@ -766,6 +768,9 @@ test_shipped_jq_is_free_of_jq17_only_forms() {
   # $(…) inside them, $'…', heredocs) so a shell variable such as "$label" is
   # never read as jq. Checked by hand when this guard was written, with no hit
   # (the scan cannot parse jq): an `if … then … end` with no else (1.7+).
+  # The work ledger's code is scanned too: its scripts (scripts/ledger/*.sh,
+  # scripts/adapters/*.sh) like any other, and its whole jq programs
+  # (scripts/ledger/*.jq) as jq — every line but a comment.
   echo "test: shipped jq programs use no jq-1.7-only forms (the jq floor is 1.6)"
   local repo_root
   repo_root="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -773,6 +778,8 @@ test_shipped_jq_is_free_of_jq17_only_forms() {
   for candidate in \
     "$repo_root"/scripts/doc-tools.sh \
     "$repo_root"/scripts/merge-doc-index.sh \
+    "$repo_root"/scripts/ledger/*.sh \
+    "$repo_root"/scripts/adapters/*.sh \
     "$repo_root"/scripts/hooks/*.sh \
     "$repo_root"/scripts/hooks/claude/*.sh \
     "$repo_root"/scripts/hooks/ci/doc-pr-release/*.sh \
@@ -782,6 +789,18 @@ test_shipped_jq_is_free_of_jq17_only_forms() {
     [ -f "$candidate" ] && targets+=("$candidate")
   done
   assert_true "found shipped scripts to scan (${#targets[@]})" test "${#targets[@]}" -ge 5
+  local jqfiles=()
+  for candidate in "$repo_root"/scripts/ledger/*.jq; do
+    [ -f "$candidate" ] && jqfiles+=("$candidate")
+  done
+  assert_true "found the ledger's jq programs to scan (${#jqfiles[@]})" test "${#jqfiles[@]}" -ge 3
+  local ledger_n=0
+  for candidate in ${targets[@]+"${targets[@]}"}; do
+    case "$candidate" in
+      "$repo_root"/scripts/ledger/*.sh | "$repo_root"/scripts/adapters/*.sh) ledger_n=$((ledger_n + 1)) ;;
+    esac
+  done
+  assert_true "the ledger's scripts and adapters are among them ($ledger_n)" test "$ledger_n" -ge 10
 
   # Prints, per line, the text of that line inside single-quoted strings
   # ("<line>:<text>"); full-line comments are blanked first by the caller.
@@ -832,6 +851,31 @@ test_shipped_jq_is_free_of_jq17_only_forms() {
       if (pend != "") hd = pend
     }'
 
+  # The same for a whole jq program: "<line>:<text>" with its comments (a "#"
+  # outside a string, up to the end of the line) left out. A string's
+  # interpolation, "\(…)", is code again, so a "#" in a string inside it is
+  # not a comment either.
+  local jqextract='
+    BEGIN { st = 0; depth = 0; sp = 0 }
+    {
+      line = $0; out = ""; n = length(line); i = 1
+      while (i <= n) {
+        c = substr(line, i, 1)
+        if (st == 1) {
+          if (substr(line, i, 2) == "\\(") { stk[++sp] = depth; depth++; st = 0; out = out "\\("; i += 2; continue }
+          if (c == "\\") { out = out substr(line, i, 2); i += 2; continue }
+          if (c == dq) st = 0
+          out = out c; i++; continue
+        }
+        if (c == dq) { st = 1; out = out c; i++; continue }
+        if (c == "#") break
+        if (c == "(") depth++
+        if (c == ")") { depth--; if (sp > 0 && depth == stk[sp]) { sp--; st = 1 } }
+        out = out c; i++
+      }
+      if (out ~ /[^ ]/) printf "%d:%s\n", NR, out
+    }'
+
   # <label>|<ERE over the extracted text>, index-aligned with `samples`: one
   # planted shell line per pattern, which the extractor and the pattern
   # together MUST flag.
@@ -873,6 +917,18 @@ test_shipped_jq_is_free_of_jq17_only_forms() {
   if awk -v q="'" -v dq='"' "$extract" "$plant" | grep -qE -- "${patterns[0]#*|}"; then
     unmatched="${unmatched}    shell variables \$label / \$end / \$or outside single quotes were read as jq"$'\n'
   fi
+  # A jq program: a form in its code is flagged, also after a "#" in a string
+  # or in an interpolation's string; a form in a comment is not.
+  printf '%s\n' 'def f: .a as $or | $or;' > "$plant"
+  awk -v dq='"' "$jqextract" "$plant" | grep -qE -- "${patterns[0]#*|}" \
+    || unmatched="${unmatched}    a .jq program: '.a as \$or' in its code was not flagged"$'\n'
+  printf '%s\n' '"a # b" as $x | pick(.a)' '"\("#")" | pick(.b)' > "$plant"
+  [ "$(awk -v dq='"' "$jqextract" "$plant" | grep -cE -- "${patterns[1]#*|}")" = 2 ] \
+    || unmatched="${unmatched}    a .jq program: a \"#\" in a string (or an interpolation's) was read as a comment"$'\n'
+  printf '%s\n' '# .a as $or | pick(.a)' '.a # as $or' > "$plant"
+  if awk -v dq='"' "$jqextract" "$plant" | grep -qE -- "${patterns[0]#*|}|${patterns[1]#*|}"; then
+    unmatched="${unmatched}    a .jq program: a form in a comment was flagged"$'\n'
+  fi
   rm -f "$plant"
   if [ -z "$unmatched" ] && [ "${#patterns[@]}" -eq "${#samples[@]}" ]; then
     PASS=$((PASS + 1))
@@ -885,20 +941,31 @@ test_shipped_jq_is_free_of_jq17_only_forms() {
       "${#patterns[@]}" "${#samples[@]}" "$unmatched"
   fi
 
-  local scanned label regex hits target file_hits grep_rc
+  local scanned label regex hits target file_hits grep_rc k=0
   scanned=$(harness_mktemp_d jq17scan)
+  # One scan file per target, by its position (two targets may share a
+  # basename).
   for target in "${targets[@]}"; do
+    k=$((k + 1))
     awk '{ if ($0 ~ /^[[:space:]]*#/) print ""; else print }' "$target" \
-      | awk -v q="'" -v dq='"' "$extract" > "$scanned/${target##*/}.sq" \
+      | awk -v q="'" -v dq='"' "$extract" > "$scanned/$k.sq" \
       || { echo "  cannot extract the quoted strings of $target" >&2; FAIL=$((FAIL + 1)); }
+  done
+  for target in "${jqfiles[@]}"; do
+    targets+=("$target")
+    k=$((k + 1))
+    awk -v dq='"' "$jqextract" "$target" > "$scanned/$k.sq" \
+      || { echo "  cannot extract the jq program $target" >&2; FAIL=$((FAIL + 1)); }
   done
   for spec in "${patterns[@]}"; do
     label="${spec%%|*}"
     regex="${spec#*|}"
     hits=""
+    k=0
     for target in "${targets[@]}"; do
+      k=$((k + 1))
       grep_rc=0
-      file_hits=$(grep -E -- "$regex" "$scanned/${target##*/}.sq" 2>&1) || grep_rc=$?
+      file_hits=$(grep -E -- "$regex" "$scanned/$k.sq" 2>&1) || grep_rc=$?
       if [ "$grep_rc" -ge 2 ]; then
         hits="${hits}    ${target#"$repo_root/"}: grep rc=$grep_rc (pattern error): ${file_hits}"$'\n'
       elif [ "$grep_rc" -eq 0 ] && [ -n "$file_hits" ]; then
@@ -2305,7 +2372,7 @@ test_tools_install_unknown_flag_errors() {
 # --- Doc-path key normalization (add-entry and siblings) ---
 #
 # The doc-index is keyed by working-tree-relative paths; every other consumer
-# (update-index, check-freshness, the coverage gate, the merge driver) looks
+# (update-index, check-freshness, the CI freshness check, the merge driver) looks
 # entries up by that key. A non-relative key can be written but never found, so
 # these commands must normalize it or refuse it — never write it silently.
 #
@@ -6721,6 +6788,228 @@ test_i10_no_hidden_sed_or_ripgrep_dependency() {
   assert_eq "" "$hits" "no GNU sed or ripgrep name in shipped scripts or workflows"
 }
 
+# --- Work ledger: the vendored helper set (3.3.0 Task 17) ---
+#
+# tools install --helper ledger ships the ledger modules (scripts/ledger/*.sh,
+# *.awk, *.jq) to <dest>/ledger/ and the reference adapters
+# (scripts/adapters/*.sh) to <dest>/adapters/, so a vendored doc-tools.sh
+# finds $SCRIPT_DIR/ledger and resolves "doc-superpowers:<adapter>" beside
+# itself. Scripts are vendored executable; the awk and jq programs are data.
+
+# _lg_modules <dir>: the files the ledger helper set takes from <dir>, one
+# basename per line.
+_lg_modules() {
+  local f
+  for f in "$1"/*.sh "$1"/*.awk "$1"/*.jq; do
+    [ -f "$f" ] && printf '%s\n' "${f##*/}"
+  done
+  return 0
+}
+
+test_tools_install_ledger_helper_set() {
+  echo "test: tools install --helper ledger vendors scripts/ledger/*.{sh,awk,jq} to <dest>/ledger/ and scripts/adapters/*.sh to <dest>/adapters/; status reports both"
+  setup
+  local rc=0 out f n na missing="" differ="" nonexec=""
+  out=$("$DOC_TOOLS" tools install --helper ledger 2>&1) || rc=$?
+  assert_eq "0" "$rc" "exits 0"
+  n=$(_lg_modules "$SCRIPT_DIR/ledger" | wc -l | tr -d ' ')
+  na=$(_lg_modules "$SCRIPT_DIR/adapters" | wc -l | tr -d ' ')
+  assert_true "the plugin has ledger modules ($n) and adapters ($na) to ship" test "$n" -ge 10 -a "$na" -ge 2
+  for f in $(_lg_modules "$SCRIPT_DIR/ledger"); do
+    if [ ! -f ".github/scripts/ledger/$f" ]; then missing="$missing ledger/$f"
+    elif ! cmp -s "$SCRIPT_DIR/ledger/$f" ".github/scripts/ledger/$f"; then differ="$differ ledger/$f"; fi
+  done
+  for f in $(_lg_modules "$SCRIPT_DIR/adapters"); do
+    if [ ! -f ".github/scripts/adapters/$f" ]; then missing="$missing adapters/$f"
+    elif ! cmp -s "$SCRIPT_DIR/adapters/$f" ".github/scripts/adapters/$f"; then differ="$differ adapters/$f"; fi
+  done
+  assert_eq "" "$missing" "every ledger module and adapter is vendored"
+  assert_eq "" "$differ" "…as a byte copy"
+  assert_eq "$n|$na" "$(ls -A .github/scripts/ledger 2>/dev/null | wc -l | tr -d ' ')|$(ls -A .github/scripts/adapters 2>/dev/null | wc -l | tr -d ' ')" \
+    "…and nothing else (no test, no README)"
+  for f in .github/scripts/ledger/*.sh .github/scripts/adapters/*.sh; do
+    [ -x "$f" ] || nonexec="$nonexec $f"
+  done
+  assert_eq "" "$nonexec" "every vendored script is executable"
+  assert_eq "644" "$(_file_mode_of .github/scripts/ledger/config.jq 2>/dev/null)" "a jq program is vendored 644 (data, not a script)"
+  assert_eq "644" "$(_file_mode_of .github/scripts/ledger/frontmatter.awk 2>/dev/null)" "…and so is an awk program"
+  assert_file_exists ".github/scripts/doc-tools.sh" "doc-tools.sh is vendored with it"
+  assert_true "no CI helper directory is shipped with it" test ! -e .github/scripts/doc-pr-release -a ! -e .github/scripts/doc-superpowers-steps
+  assert_contains "$out" "ledger helpers → .github/scripts/ledger/" "the report names the ledger modules"
+  assert_contains "$out" "ledger adapters → .github/scripts/adapters/" "…and the adapters"
+  out=$("$DOC_TOOLS" tools status 2>&1) || true
+  assert_eq "1" "$(grep -cxF -- "ledger helpers: $n installed at .github/scripts/ledger/" <<<"$out" || true)" "status: the ledger modules"
+  assert_eq "1" "$(grep -cxF -- "ledger adapters: $na installed at .github/scripts/adapters/" <<<"$out" || true)" "status: the adapters"
+  echo "# local" >> .github/scripts/ledger/config.jq
+  printf '#!/bin/sh\n' > .github/scripts/adapters/mine.sh
+  out=$("$DOC_TOOLS" tools status 2>&1) || true
+  assert_eq "1" "$(grep -cxF -- "ledger helpers: $n installed at .github/scripts/ledger/ (1 differ from the plugin's)" <<<"$out" || true)" \
+    "status: an edited jq program is drift"
+  assert_eq "1" "$(grep -cxF -- "ledger adapters: $((na + 1)) installed at .github/scripts/adapters/ (1 not shipped by the plugin)" <<<"$out" || true)" \
+    "status: an adapter of your own is not the plugin's, and not drift"
+  # --with-helpers is every helper the templates run: the ledger set too.
+  rm -rf .github
+  rc=0
+  "$DOC_TOOLS" tools install --with-helpers >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "--with-helpers exits 0"
+  assert_true "--with-helpers ships the ledger modules and adapters" test -f .github/scripts/ledger/lib.sh -a -x .github/scripts/adapters/ledger-pr-gh.sh
+  # A symbolic link on the way is refused before anything is written.
+  rm -rf .github
+  mkdir -p .github/scripts elsewhere
+  ln -s ../../elsewhere .github/scripts/adapters
+  rc=0
+  out=$("$DOC_TOOLS" tools install --helper ledger 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a symlinked adapters directory: refused (exit 1)"
+  assert_contains "$out" "symbolic link" "…saying why"
+  assert_true "…writing nothing" test ! -e .github/scripts/doc-tools.sh -a ! -e .github/scripts/ledger -a -z "$(ls -A elsewhere)"
+  teardown
+}
+
+test_tools_uninstall_ledger_byte_identical_only() {
+  echo "test: tools uninstall --helper ledger removes only byte-identical modules and adapters; edited and added files, their directories and doc-tools.sh stay"
+  setup
+  "$DOC_TOOLS" tools install --helper ledger >/dev/null 2>&1
+  echo "# local" >> .github/scripts/ledger/config.jq
+  printf '#!/bin/sh\n' > .github/scripts/adapters/mine.sh
+  local rc=0 out
+  out=$("$DOC_TOOLS" tools uninstall --helper ledger 2>&1) || rc=$?
+  assert_eq "0" "$rc" "exits 0"
+  assert_file_exists ".github/scripts/ledger/config.jq" "an edited jq program is kept"
+  assert_file_not_exists ".github/scripts/ledger/lib.sh" "an unmodified module is removed"
+  assert_file_not_exists ".github/scripts/ledger/frontmatter.awk" "…an awk program too"
+  assert_file_exists ".github/scripts/adapters/mine.sh" "an adapter of your own is kept"
+  assert_file_not_exists ".github/scripts/adapters/ledger-pr-gh.sh" "an unmodified adapter is removed"
+  assert_contains "$out" "Kept .github/scripts/ledger/" "the kept module directory is reported"
+  assert_contains "$out" "Kept .github/scripts/adapters/" "…and the kept adapters directory"
+  assert_file_exists ".github/scripts/doc-tools.sh" "--helper ledger leaves doc-tools.sh"
+  # Unmodified: both directories go; a plain uninstall takes doc-tools.sh too.
+  rm -rf .github
+  "$DOC_TOOLS" tools install --helper ledger >/dev/null 2>&1
+  rc=0
+  "$DOC_TOOLS" tools uninstall >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "an unmodified install uninstalls cleanly"
+  assert_true "…leaving no .github/scripts" test ! -e .github/scripts
+  # A symlinked module directory is refused before anything is removed.
+  "$DOC_TOOLS" tools install --helper ledger >/dev/null 2>&1
+  mv .github/scripts/ledger real-ledger
+  ln -s ../../real-ledger .github/scripts/ledger
+  rc=0
+  out=$("$DOC_TOOLS" tools uninstall --helper ledger 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a symlinked ledger directory: refused (exit 1)"
+  assert_true "…removing nothing through it, nor the adapters" test -f real-ledger/lib.sh -a -f .github/scripts/adapters/ledger-pr-gh.sh
+  teardown
+}
+
+test_vendored_ledger_runs() {
+  echo "test: a vendored doc-tools.sh with the ledger helper set runs the ledger verbs, and resolves doc-superpowers:<adapter> beside itself"
+  setup
+  mkdir -p docs/issues docs/ledger
+  printf '{}\n' > docs/ledger/config.json
+  printf '%s\n' '{"schema":"ledger-registry/1","ledgers":[{"id":"app","title":"App","kind":"service","status":"active"}]}' > docs/ledger/ledgers.json
+  printf '%s\n' '---' 'key: app-1' 'ledger: app' 'status: Open' 'severity: P2' 'date: 2026-01-05' 'summary: Vendored alpha' '---' '# a' > docs/issues/a.md
+  git add -A && git commit -qm items
+  local vend rc=0 out err
+  vend=$(harness_mktemp_d vendored)
+  "$DOC_TOOLS" tools install --helper ledger --dest "$vend" >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "tools install --helper ledger --dest <dir> exits 0"
+  # Its own runner (the vendored copy under this suite's bash).
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$BASH_BIN" "$vend/doc-tools.sh" > "$vend/run"
+  chmod +x "$vend/run"
+  rc=0
+  out=$("$vend/run" ledger ls 2>/dev/null </dev/null) || rc=$?
+  assert_eq "0" "$rc" "the vendored copy: ledger ls exits 0"
+  assert_eq "app-1  P2  not started  Vendored alpha" "$out" "…and lists the item"
+  rc=0
+  out=$("$vend/run" ledger show app-1 --format json 2>/dev/null </dev/null) || rc=$?
+  assert_eq "0" "$rc" "…ledger show exits 0"
+  assert_json_field "$out" '.item.key' "app-1" "…and finds the item"
+  printf '%s\n' '{"adapters":{"pr":"doc-superpowers:nope"}}' > docs/ledger/config.json
+  err=$(harness_mktemp vendored-err)
+  rc=0
+  "$vend/run" ledger ls --refresh >/dev/null 2>"$err" </dev/null || rc=$?
+  assert_eq "2" "$rc" "an unknown doc-superpowers adapter: exit 2"
+  assert_contains "$(cat "$err")" "${vend##*/}/adapters/nope.sh" "…looked up in the vendored adapters directory"
+  teardown
+}
+
+# _tests_yml_drift_step <out>: the run: body of tests.yml's "Self-installed
+# CI tier matches its templates" step, as a script.
+_tests_yml_drift_step() {
+  awk '
+    /- name: Self-installed CI tier matches its templates/ { found = 1; next }
+    found && !inrun && /^[[:space:]]*run:[[:space:]]*[|]/ { match($0, /^[[:space:]]*/); ind = RLENGTH; inrun = 1; next }
+    inrun {
+      if ($0 ~ /^[[:space:]]*$/) { print ""; next }
+      match($0, /^[[:space:]]*/)
+      if (RLENGTH > ind) { print; next }
+      exit
+    }' "$SCRIPT_DIR/../.github/workflows/tests.yml" > "$1"
+}
+
+test_tests_yml_drift_step_covers_vendored_ledger() {
+  echo "test: tests.yml's self-install drift step checks a vendored ledger helper set against scripts/ledger/ and scripts/adapters/ (byte copies, scripts executable, none missing; present beside a claims workflow)"
+  setup
+  local root step rt rc out
+  root="$(cd "$SCRIPT_DIR/.." && pwd)"
+  step=$(harness_mktemp drift-step)
+  _tests_yml_drift_step "$step"
+  assert_contains "$(cat "$step")" "cmp scripts/doc-tools.sh .github/scripts/doc-tools.sh" "the step body is extracted"
+  # A copy of the plugin, its CI tier freshly installed with this repo's choices.
+  mkdir -p scripts skills/doc-superpowers .claude/doc-superpowers
+  cp -R "$root/scripts/ledger" "$root/scripts/adapters" "$root/scripts/hooks" scripts/
+  cp "$root/scripts/doc-tools.sh" "$root/scripts/merge-doc-index.sh" scripts/
+  cp "$root/skills/doc-superpowers/SKILL.md" skills/doc-superpowers/
+  cp "$root/RELEASE-NOTES.md" "$root/.gitattributes" .
+  cp "$root/.claude/doc-superpowers/installed.json" .claude/doc-superpowers/
+  rc=0
+  "$BASH_BIN" scripts/hooks/install.sh install --ci >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "precondition: install --ci in the copy exits 0"
+  rt=$(harness_mktemp_d drift-rt)
+  rc=0
+  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "a fresh install passes the drift step"
+  "$BASH_BIN" scripts/doc-tools.sh tools install --helper ledger >/dev/null 2>&1
+  rc=0
+  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "the vendored ledger helper set passes it ($(printf '%s' "$out" | grep -m1 '::error' || true))"
+  echo "# drift" >> .github/scripts/ledger/views.sh
+  rc=0
+  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "1" "$rc" "an edited vendored module fails it"
+  assert_contains "$out" "::error file=.github/scripts/ledger/views.sh::differs from scripts/ledger/views.sh" "…naming the module and its source"
+  "$BASH_BIN" scripts/doc-tools.sh tools install --helper ledger >/dev/null 2>&1
+  rm -f .github/scripts/adapters/ledger-pr-gh.sh .github/scripts/ledger/render-md.jq
+  rc=0
+  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a partial helper set fails it"
+  assert_contains "$out" "lacks ledger-pr-gh.sh" "…naming the missing adapter"
+  assert_contains "$out" "lacks render-md.jq" "…and the missing jq program"
+  "$BASH_BIN" scripts/doc-tools.sh tools install --helper ledger >/dev/null 2>&1
+  chmod a-x .github/scripts/ledger/lib.sh
+  rc=0
+  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a vendored ledger script that is not executable fails it"
+  assert_contains "$out" "::error file=.github/scripts/ledger/lib.sh::is not executable" "…naming it"
+  # On a ledger host (docs/ledger/config.json) a workflow running the claims
+  # step needs the ledger set beside the vendored doc-tools.sh (V5 reads
+  # ledger trackers through it); elsewhere none is vendored (final review
+  # OPS-I1, ruled).
+  "$BASH_BIN" scripts/doc-tools.sh tools install --helper ledger >/dev/null 2>&1
+  assert_true "precondition: this repo's choices install doc-freshness-schedule (it runs claims-check.sh)" \
+    test -f .github/workflows/doc-freshness-schedule.yml
+  rm -rf .github/scripts/ledger .github/scripts/adapters
+  rc=0
+  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "no ledger config: a claims workflow without the ledger set passes it ($(printf '%s' "$out" | grep -m1 '::error' || true))"
+  mkdir -p docs/ledger
+  printf '{}\n' > docs/ledger/config.json
+  rc=0
+  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a ledger host: a claims workflow without the vendored ledger set fails it"
+  assert_contains "$out" "::error file=.github/workflows/doc-freshness-schedule.yml::runs claims-check.sh without the vendored ledger helper set" "…naming the workflow"
+  teardown
+}
+
 # --- Final whole-branch review fixes (sweep 05ea982 final review) ---
 #
 # set-doc-type (retype an entry in place: record status depends on doc_type);
@@ -7384,6 +7673,12 @@ run_tests() {
   test_i10_tools_status_counts_user_added_helpers_apart
   test_i10_tools_from_the_vendored_copy
   test_i10_no_hidden_sed_or_ripgrep_dependency
+
+  # --- Work ledger: the vendored helper set (3.3.0 Task 17) ---
+  test_tools_install_ledger_helper_set
+  test_tools_uninstall_ledger_byte_identical_only
+  test_vendored_ledger_runs
+  test_tests_yml_drift_step_covers_vendored_ledger
 
   # --- Final whole-branch review fixes (sweep 05ea982 final review) ---
   test_fw_set_doc_type_retypes_in_place

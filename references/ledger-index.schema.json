@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/woodrowpearson/doc-superpowers/references/ledger-index.schema.json",
+  "title": "doc-superpowers work-ledger index (ledger-index/1)",
+  "description": "The derived, cached join that `doc-tools.sh ledger` verbs read (scripts/ledger/index.sh). Never committed. Keys appear in the order listed in `required`.",
+  "type": "object",
+  "required": ["schema", "built", "ledgers", "contracts", "path_contracts", "items", "legacy", "finalized"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "ledger-index/1" },
+    "built": {
+      "type": "object",
+      "required": ["head", "base", "inputs_hash", "mode", "rev", "registry_findings", "contracts_error", "adoption"],
+      "additionalProperties": false,
+      "properties": {
+        "head": { "type": ["string", "null"], "description": "HEAD's commit id; null on an unborn branch, and for --rev (a rev build does not depend on HEAD)." },
+        "base": { "type": ["string", "null"], "description": "The commit id config `base` names; null when it does not resolve. For --rev: the rev itself." },
+        "inputs_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "The cache key: the file is index-<hex>.json." },
+        "mode": { "enum": ["worktree", "staged", "rev"] },
+        "rev": { "type": ["string", "null"], "description": "The commit id of --rev; null otherwise." },
+        "registry_findings": { "type": "integer", "minimum": 0, "description": "Structural `validate --registry` findings of the registry used (ownership checks excluded); the index uses the registry regardless." },
+        "contracts_error": { "type": ["string", "null"], "description": "Why the contracts adapter (config adapters.contracts) failed — the contracts are then the registry's alone, and every verb that shows relations exits 2; null when it ran or none is configured." },
+        "adoption": { "type": ["string", "null"], "description": "The adoption commit (Task 16c U11): the first commit on config base to add docs/ledger/config.json (git log --diff-filter=A, oldest first); null when the base has none, does not resolve, in a shallow clone whose boundary is where config.json first shows (it cannot be known), or for --staged." }
+      }
+    },
+    "ledgers": { "type": "array", "items": { "type": "object" }, "description": "The registry's ledgers, as written." },
+    "contracts": {
+      "type": "array",
+      "description": "Every contract (design §G): the registry's ledgers[].contracts[] and the contracts adapter's list, one per id, sorted by id. An id in both is one contract: the registry's ledger, defined_in and title win; the adapter's fill only what the registry leaves empty.",
+      "items": {
+        "type": "object",
+        "required": ["id", "ledger", "defined_in", "title"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*:[^\\s]+$" },
+          "ledger": { "$ref": "#/$defs/strOrNull" },
+          "defined_in": { "$ref": "#/$defs/strList", "description": "Globs (scripts/ledger/glob.sh) of the files that define it." },
+          "title": { "$ref": "#/$defs/strOrNull" }
+        }
+      }
+    },
+    "path_contracts": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/strList" },
+      "description": "For each file an item lists in paths that some contract's defined_in matches: those contract ids (the candidate rules, design §F.1)."
+    },
+    "items": { "type": "array", "items": { "$ref": "#/$defs/item" }, "description": "Sorted by path." },
+    "legacy": { "type": "object", "description": "The legacy map (config `legacy`), {} when absent." },
+    "finalized": { "type": "object", "description": "docs/ledger/finalized.json, {} when absent." }
+  },
+  "$defs": {
+    "strOrNull": { "type": ["string", "null"] },
+    "strList": { "type": "array", "items": { "type": "string" } },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "via"],
+        "additionalProperties": false,
+        "properties": { "key": { "type": "string" }, "via": { "type": "string" } }
+      }
+    },
+    "item": {
+      "type": "object",
+      "required": ["path", "archived", "key", "ledger", "status", "class", "severity", "date", "summary", "changes", "consumes", "relates", "superseded_by", "owed", "aliases", "paths", "h1", "first_para", "resolution", "docs", "derived", "pr", "inflight", "neighbours", "recheck_after", "fm_errors", "pre_adoption", "claims"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string" },
+        "archived": { "type": "boolean", "description": "The path matches items.archive_globs." },
+        "key": { "$ref": "#/$defs/strOrNull" },
+        "ledger": { "$ref": "#/$defs/strOrNull" },
+        "status": { "$ref": "#/$defs/strOrNull", "description": "The status field as written." },
+        "class": { "enum": ["open", "fixed", "closed", "wontfix", "unknown"], "description": "Case-insensitive leading-word match of status against config `status`." },
+        "severity": { "$ref": "#/$defs/strOrNull" },
+        "date": { "type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "fields.date, else git's first-add date (renames chained), else the file's mtime (UTC) when uncommitted." },
+        "summary": { "$ref": "#/$defs/strOrNull" },
+        "changes": { "$ref": "#/$defs/strList" },
+        "consumes": { "$ref": "#/$defs/strList" },
+        "relates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "key"],
+            "additionalProperties": false,
+            "properties": { "kind": { "$ref": "#/$defs/strOrNull" }, "key": { "type": "string" } }
+          }
+        },
+        "superseded_by": { "$ref": "#/$defs/strOrNull" },
+        "owed": { "$ref": "#/$defs/strOrNull" },
+        "aliases": { "$ref": "#/$defs/strList" },
+        "paths": { "$ref": "#/$defs/strList" },
+        "h1": { "$ref": "#/$defs/strOrNull" },
+        "first_para": { "$ref": "#/$defs/strOrNull" },
+        "resolution": { "$ref": "#/$defs/strOrNull" },
+        "docs": {
+          "type": "object",
+          "required": ["spec", "plan", "handoff"],
+          "additionalProperties": false,
+          "properties": {
+            "spec": { "$ref": "#/$defs/strList" },
+            "plan": { "$ref": "#/$defs/strList" },
+            "handoff": { "$ref": "#/$defs/strList" }
+          }
+        },
+        "derived": {
+          "type": "object",
+          "required": ["status", "detail"],
+          "additionalProperties": false,
+          "description": "Design §E.1, first match wins. Shown as: superseded → <detail> · won't fix · closed · shipped · merged · owed: <detail> · in review #<detail> · on branch <detail> · planned (<detail> = the plan) · spec'd (<detail> = the spec) · not started.",
+          "properties": {
+            "status": { "enum": ["superseded", "won't fix", "closed", "shipped", "merged", "in review", "on branch", "planned", "spec'd", "not started"] },
+            "detail": { "$ref": "#/$defs/strOrNull" }
+          }
+        },
+        "pr": {
+          "type": ["object", "null"],
+          "required": ["number", "url", "state"],
+          "properties": {
+            "number": { "type": ["integer", "string"] },
+            "url": { "type": ["string", "null"] },
+            "state": { "enum": ["open", "merged"] }
+          },
+          "description": "The PR (config adapters.pr, through the remote cache) that claims the item, the one behind the status shown (highest number first): the merged one when the derived status is merged, else the open one, else the merged one; null when none does or no PR adapter is configured."
+        },
+        "inflight": {
+          "type": "array",
+          "description": "The in-flight branches that claim the item (config inflight.enabled; scripts/ledger/inflight.sh), by branch. Always [] in the cached index — a branch tip never rebuilds it: the read verbs (show, ls, find, view, publish) apply the in-flight overlay at query time (defs.jq lg_ifl_apply), which also sets derived to on branch / in review for an open item whose status ranked below.",
+          "items": {
+            "type": "object",
+            "required": ["branch", "name", "host", "sources", "oid", "pr"],
+            "additionalProperties": false,
+            "properties": {
+              "branch": { "type": "string", "description": "<name>, or <name>@<host> for another machine's branch." },
+              "name": { "type": "string" },
+              "host": { "type": ["string", "null"], "description": "The other machine's host id; null for this one's." },
+              "sources": { "type": "array", "items": { "enum": ["local", "worktree", "remote", "inflight"] } },
+              "oid": { "type": "string" },
+              "pr": { "type": ["integer", "null"], "description": "The branch's open PR (config adapters.pr), or null." }
+            }
+          }
+        },
+        "neighbours": {
+          "type": "object",
+          "required": ["upstream", "downstream", "siblings"],
+          "additionalProperties": false,
+          "description": "Confirmed relations (design §F.1): upstream — items whose changes meet this item's consumes, or that its relates names root-cause / depends-on; downstream — the reverse; siblings — a contract both change or both consume, or relates sibling (either side). Each {key, via}: the other item's key (its path when it has none) and the contract id or the relates kind; sorted by key, then via.",
+          "properties": {
+            "upstream": { "$ref": "#/$defs/edges" },
+            "downstream": { "$ref": "#/$defs/edges" },
+            "siblings": { "$ref": "#/$defs/edges" }
+          }
+        },
+        "recheck_after": { "$ref": "#/$defs/strList", "description": "Re-check markers (design §F.2, computed): on an open item, the key of a re-check source that reached a terminal class on the base, or a contract it consumes that a base commit changed — after the item's last commit on the base. Not computed for --staged." },
+        "fm_errors": { "$ref": "#/$defs/strList" },
+        "pre_adoption": { "type": ["boolean", "null"], "description": "From before the ledger was adopted (Task 16c U11; validate --all reports a missing resolution on such a terminal item as advisory): true when config base has no commit adding docs/ledger/config.json yet, or when the base holds the item's path and no commit after the adoption commit (built.adoption) touched it; false otherwise, when the base does not resolve, and when the adoption commit cannot be known (a shallow clone whose boundary is where config.json first shows: fails closed); null for --staged. A commit after the adoption commit: a descendant on the base's first-parent line, a merge counting with its changes against its first parent; a pure rename does not touch the moved file." },
+        "claims": { "type": "object", "required": ["diverged", "unbuilt"], "additionalProperties": false,
+          "properties": { "diverged": { "type": "integer", "minimum": 0 }, "unbuilt": { "type": "integer", "minimum": 0 } },
+          "description": "The spec claims this item tracks (design §I): how many claims in the spec-claims sidecars (docs/spec-claims/*.json but config.json; nothing in a subdirectory) of the tree the index reads are diverged or unbuilt with a tracker naming this item — its path exactly, or its key or an alias in any case, carried by no other item (a provisional key finalized.json maps resolves to its finalized key). A malformed sidecar adds nothing. Zero counts when none." },
+        "url": { "type": "string", "description": "Hosted items only (config items.adapter; not in required): the adapter's url. A hosted item's path is the adapter's ref (gh#<n> for scripts/adapters/ledger-items-gh.sh); file items have no url." }
+      }
+    }
+  }
+}

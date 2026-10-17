@@ -98,8 +98,15 @@ jobs:
   # status disabled, and nothing run, without docs/spec-claims/). Findings
   # fail the job. Hosts add their test-environment setup (the toolchain and
   # dependencies their claim-bound tests need) before the claims step in
-  # their own copy of this workflow; without it, the adapters report
-  # `indeterminate` (a warning; a failure with --ci-strict).
+  # their own copy of this workflow: delete the "doc-superpowers workflow
+  # v<N>" marker line at its top, and install --ci leaves it alone from then
+  # on (a step added to a managed copy is lost at the next install --ci).
+  # The vendored helpers ship only while a managed workflow runs them: with
+  # every claims workflow unmanaged, the next install --ci removes the ledger
+  # helper set (claims V5 is then ledger-unavailable on a ledger host), and
+  # the step scripts too when no managed workflow is left (references/
+  # hooks.md, Test-environment setup). Without that setup, the adapters
+  # report `indeterminate` (a warning; a failure with --ci-strict).
   claims:
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
