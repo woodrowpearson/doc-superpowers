@@ -397,7 +397,7 @@ User invokes /doc-superpowers hooks install --all
       → Remove a retired workflow the installer owns (doc-index-update.yml with its marker) and drop its state entry; keep and report one without the marker
       → Generate workflow files from scripts/hooks/ci/ templates to .github/workflows/
       → Substitute __BASE_BRANCH__, __VERSION__, __CRON_SCHEDULE__, __CI_STRICT__ (validated, sed-escaped)
-      → Vendor via `doc-tools.sh tools install --helper <set>` for the helper sets the installed workflows run (ledger: with doc-ledger-publish or a claims-running workflow)
+      → Vendor via `doc-tools.sh tools install --helper <set>` for the helper sets the installed workflows run (ledger: with doc-ledger-publish or a claims-running workflow, only when docs/ledger/config.json exists; else a vendored set is removed)
       → Record the set and the choices in .claude/doc-superpowers/installed.json
     → Report installed hooks
 
@@ -434,7 +434,8 @@ doc-tools.sh ledger <verb> [options] [args]
     with cache.remote_ttl_minutes), the spec-claims counts; cached, keyed by HEAD, dirty items and the
     inputs' hashes
   → keys (keys.sh): fetch keys.counter_ref, write next+1, push --force-with-lease=<ref>:<old> (8 retries
-    with jitter); unreachable → provisional <ledger>-~<hex>; finalize → finalized.json first, then the items
+    with jitter; a missing ledger seeded past the base's and the run's index's keys); unreachable, or refused
+    for permission → provisional <ledger>-~<hex>; finalize → finalized.json first, then the items
   → in flight (inflight.sh): local, worktree, remote and <ref_prefix>/<host>/<branch> refs; fetch into
     refs/doc-superpowers/inflight-fetch/*; --push forced, --no-verify, after inflight.pre_push_check
   → adapters: doc-superpowers:<name> → scripts/adapters/<name>.sh; absolute or top-level paths; output

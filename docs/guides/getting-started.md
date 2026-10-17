@@ -105,7 +105,7 @@ After `init` completes, set up automated freshness monitoring:
 /doc-superpowers hooks install --claude        # Claude Code hooks only (per-user)
 /doc-superpowers hooks install --ci            # GitHub Actions: the 2 shell workflows
 
-# Claude-powered workflows are opt-in by name
+# The others are opt-in by name: the Claude-powered ones and the shell doc-ledger-publish
 /doc-superpowers hooks install --ci --workflows=doc-release
 /doc-superpowers hooks install --ci --workflows=none                 # vendor doc-tools.sh only
 
@@ -140,7 +140,7 @@ $DOC_TOOLS tools install --helper ledger          # + .github/scripts/ledger/ an
 $DOC_TOOLS tools status                            # shows location, drift + the plugin's version
 ```
 
-A vendored `doc-tools.sh` runs the work ledger from `ledger/` and `adapters/` beside it: without them, every ledger verb (and, on a ledger-enabled project, the claims check V5) exits 2. `hooks install --ci` ships that set with `doc-ledger-publish` and with each workflow that runs the claims check.
+A vendored `doc-tools.sh` runs the work ledger from `ledger/` and `adapters/` beside it: without them, every ledger verb (and, on a ledger-enabled project, the claims check V5) exits 2. `hooks install --ci` ships that set on a ledger host (`docs/ledger/config.json` exists) with `doc-ledger-publish` and with each workflow that runs the claims check: after `ledger init --accept` writes the config, re-run `install --ci` (it says so) and commit `.github/scripts/`.
 
 Shipping the `doc-pr-release` helpers (`--with-helpers`, or `--helper doc-pr-release`) also creates `RELEASE-NOTES.next/README.md`, the fragment-format spec, when it is absent; an existing one is never overwritten.
 

@@ -342,7 +342,7 @@ The Claude tier is **per-user**. It **copies** hook scripts to `.claude/hooks/do
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `--workflows=<csv\|all\|none>` | the recorded set; first install: the 2 shell workflows | Which workflows; the Claude-powered ones are opt-in by name |
+| `--workflows=<csv\|all\|none>` | the recorded set; first install: the 2 shell workflows | Which workflows; the Claude-powered ones and the shell `doc-ledger-publish` are opt-in by name (`all` skips `doc-ledger-publish` without `docs/ledger/config.json`, with a note) |
 | `--base-branch NAME` | `main` | Target branch for PR checks (validated: git ref name of `A-Za-z0-9._/-`) |
 | `--cron EXPR` | `0 9 * * 1` | Schedule for weekly freshness audit (5 fields) |
 | `--ci-strict[=true\|false]` | `false` | Fail the PR checks on what is otherwise a warning (exit non-zero): `doc-freshness-pr` on stale docs or a freshness check that cannot run, `doc-spec-verify`'s `claims` job on a claims check that cannot run |
