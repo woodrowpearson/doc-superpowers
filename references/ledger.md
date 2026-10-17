@@ -260,7 +260,17 @@ Two opt-in installer sets, never part of `--all`; each refuses to install (exit 
 - **`hooks install --ledger-claude`** — two Claude Code events in `.claude/settings.local.json` (it never installs the general `--claude` tier):
   - `ledger-session-notices.sh` (SessionStart): `ledger notices --hook` — the unacked `stop` and `heads-up` notices for the session's branch, offline, at most 15 lines, under a 2 s budget; silent with none or with `inflight.enabled` off.
   - `ledger-state-watch.sh` (PostToolUse, matcher `Write|Edit`): `ledger state-watch --hook` — when a write lands under a `state_watch.paths` entry (a leading `~/` is `$HOME`; an absolute entry is itself; any other is under the project; `*` within one segment; it matches the file and anything below; a path crossing a symbolic link is compared resolved) and what was written names an item key and holds one of `state_watch.patterns` (any case), one advisory line suggests `doc-tools.sh ledger note <key> "…"`. Never blocks. Hosts list their agent-memory and scratch directories in `paths` and phrases like `"next:"` or `"approved"` in `patterns`.
-- **Hook modes.** `ledger notices --hook` and `ledger state-watch --hook` are the stable entry points: each reads the event on stdin, prints one hook object or nothing, never fetches, and always exits 0 (a usage error, no repository, no config: silent). A host that keeps its hooks in a committed `.claude/settings.json` registers them directly instead of `--ledger-claude` — the snippet is in `references/hooks.md` → *Registering the ledger hooks in your own settings.json*.
+- **Hook modes.** `ledger notices --hook` and `ledger state-watch --hook` are the stable entry points: each reads the event on stdin, prints one hook object or nothing, never fetches, and always exits 0 (a usage error, no repository, no config: silent). A host that keeps its hooks in a committed `.claude/settings.json` (which, unlike the per-user `settings.local.json` `--ledger-claude` writes, travels to every worktree) registers them directly instead of `--ledger-claude`:
+
+  ```json
+  { "hooks": {
+      "SessionStart": [ { "matcher": "", "hooks": [ { "type": "command", "timeout": 10,
+        "command": "bash \"$CLAUDE_PROJECT_DIR\"/<path>/doc-tools.sh ledger notices --hook" } ] } ],
+      "PostToolUse": [ { "matcher": "Write|Edit", "hooks": [ { "type": "command", "timeout": 10,
+        "command": "bash \"$CLAUDE_PROJECT_DIR\"/<path>/doc-tools.sh ledger state-watch --hook" } ] } ] } }
+  ```
+
+  `<path>` is a `doc-tools.sh` every worktree resolves, with its `ledger/` directory beside it. A direct registration has no 2 s watchdog (the entry's `timeout` bounds it), and registering both a mode and `--ledger-claude` for one event prints its notices twice. Details: `references/hooks.md` → *Registering the ledger hooks in your own settings.json*.
 - **Skipping.** `DOC_SUPERPOWERS_LEDGER_SKIP=1` skips every ledger leg and hook mode; `DOC_SUPERPOWERS_SKIP=1` (every doc-superpowers hook) does too. The pre-commit and pre-push legs print a line naming the variable; the others are silent.
 - **Upgrading.** `hooks status` reports each set in its own section; a block or script of another version reads `⚠ … outdated: re-run install --ledger` (or `--ledger-claude`).
 
