@@ -30,7 +30,8 @@ def sev_chip($K):
   else none end;
 def status_chip:
   "<span class=\"chip st st-\((.derived.status // "unknown") | slug)\">\(lg_q_display | h)</span>"
-  + (lg_r_recheck_text | if . == "" then "" else "<div class=\"note recheck\">\(h)</div>" end);
+  + (lg_r_recheck_text | if . == "" then "" else "<div class=\"note recheck\">\(h)</div>" end)
+  + (lg_r_claims_text(", ") | if . == "" then "" else "<div class=\"note claims\">\(h)</div>" end);
 def doc_cell($list):
   if ($list | length) == 0 then none
   else "<a class=\"yes\" href=\"\(href($list[0]))\" title=\"\($list[0] | h)\">✓</a>"

@@ -176,6 +176,52 @@ _lg_ix_json_obj() {
   jq -c . "$out.raw" > "$out" || _lg_die "jq failed ($p)"
 }
 
+# _lg_ix_claims <src> <out>: the spec claims (work-ledger design §I) as
+# <src> holds them — the spec-claims sidecars docs/spec-claims/*.json,
+# config.json and anything in a subdirectory (gate records) excepted — into
+# <out>: one JSON array of {t: tracker, s: status} per diverged or unbuilt
+# claim whose tracker is a non-empty string. A sidecar that is not one JSON
+# object, or whose claims is not an array, adds nothing (claims validate
+# reports it: V1); a work-tree symbolic link is not read. One read per
+# sidecar, one jq for all of them (\001 cannot occur in JSON text, so it
+# separates them).
+_lg_ix_claims() {
+  local src="$1" out="$2" s p
+  _lg_scratch_name
+  s=$_LG_SN
+  : > "$s.cz"
+  case "$src" in
+    worktree)
+      for p in docs/spec-claims/*.json; do
+        if [ -f "$p" ] && [ ! -L "$p" ]; then printf '%s\0' "$p" >> "$s.cz"; fi
+      done ;;
+    :)
+      GIT_LITERAL_PATHSPECS=1 git ls-files -z -- docs/spec-claims > "$s.cz" 2> "$s.err" \
+        || _lg_die "git ls-files failed (docs/spec-claims): $(head -n 3 "$s.err" 2>/dev/null)" ;;
+    *)
+      GIT_LITERAL_PATHSPECS=1 git ls-tree -r -z --name-only "$src" -- docs/spec-claims > "$s.cz" 2> "$s.err" \
+        || _lg_die "git ls-tree failed (docs/spec-claims at $src): $(head -n 3 "$s.err" 2>/dev/null)" ;;
+  esac
+  : > "$s.all"
+  while IFS= read -r -d '' p; do
+    case "$p" in
+      docs/spec-claims/config.json|docs/spec-claims/*/*) continue ;;
+      docs/spec-claims/*.json) ;;
+      *) continue ;;
+    esac
+    _lg_src_cat "$src" "$p" "$s.one" || continue
+    { cat "$s.one" && printf '\001'; } >> "$s.all" || _lg_die "cannot write $s.all"
+  done < "$s.cz"
+  if [ ! -s "$s.all" ]; then
+    printf '[]\n' > "$out" || _lg_die "cannot write $out"
+    return 0
+  fi
+  jq -R -s -c 'split("\u0001") | .[0:-1]
+    | [.[] | (try fromjson catch null) | objects | .claims | arrays | .[] | objects
+       | select((.status == "diverged" or .status == "unbuilt") and (.tracker | type) == "string" and .tracker != "")
+       | {t: .tracker, s: .status}]' "$s.all" > "$out" || _lg_die "jq failed (the spec claims)"
+}
+
 # _lg_ix_candidates <src> <doc-index> <out>: "<column>\t<path>" lines (a
 # newline in a name as \001) — the docs the docs join reads.
 _lg_ix_candidates() {
@@ -1053,10 +1099,14 @@ $c[0] as $cfg
 # The adoption point sets: "T" paths touched after it, "B" paths the base holds.
 | ($adopt | split("\n") | reduce (.[] | select(length > 2)) as $l ({T: {}, B: {}};
      .[$l[0:1]][$l[2:] | if test("\u0001") then gsub("\u0001"; "\n") else . end] = true)) as $AD
-| ([$recs[] | lg_item($F; $CT; $EX; $D; $L; $S; $DI; $terms)] | sort_by(.path) | lg_pr_apply($prs; $pcl; $bcl; $fmr)
-   # pre_adoption after fm_errors; a hosted item keeps its url last.
+| ([$recs[] | lg_item($F; $CT; $EX; $D; $L; $S; $DI; $terms)] | sort_by(.path) | lg_pr_apply($prs; $pcl; $bcl; $fmr)) as $its
+# The diverged / unbuilt spec claims each item tracks (design §I).
+| (if ($cls[0] | length) == 0 then {} else lg_claims_counts($cls[0]; lg_track_map($its; $fin[0])) end) as $CC
+# pre_adoption after fm_errors, then claims; a hosted item keeps its url last.
+| ($its
    | map(del(.url) + {pre_adoption: (if $pre == "staged" then null elif $pre == "nobase" or $pre == "unknown" then false elif $pre == "before" then true
                                      else ($AD.B[.path] == true and ($AD.T[.path] | not)) end)}
+         + {claims: ($CC[.path] // {diverged: 0, unbuilt: 0})}
          + (if has("url") then {url} else {} end))) as $items
 | ($ctr[0] // []) as $CTR
 | ($cre | split("\n") | map(select(. != "") | split("\t") | select(length == 3) | {id: .[0], dir: .[1], re: .[2]})) as $CRE
@@ -1218,7 +1268,7 @@ _lg_ix_prune() {
 # _lg_ix_key_specs <doc-index> <legacy-path> <out>: the pathspecs (one per
 # line) whose listing the key hashes: the item globs' directories, the
 # directories of the doc-index's candidate docs and of the column globs,
-# and the small inputs. Empty when a glob has no literal directory (the
+# the small inputs, and docs/spec-claims (the claims items track). Empty when a glob has no literal directory (the
 # whole tree is listed).
 _lg_ix_key_specs() {
   local di="$1" legacy="$2" out="$3" s
@@ -1237,7 +1287,7 @@ _lg_ix_key_specs() {
     | .docs | to_entries[] | select((.value | type) == "object" and ((.value.doc_type // null) as $t | $types | index([$t])))
     | .key | select(test("\n") | not) | if test("/") then sub("[^/]*$"; "") else . end' "$di" > "$s.ddirs" \
     || _lg_die "jq failed (doc-index directories)"
-  { cat "$s.dirs" "$s.ddirs"; printf '%s\n' docs/ledger/ledgers.json "$INDEX_FILE" docs/ledger/finalized.json;
+  { cat "$s.dirs" "$s.ddirs"; printf '%s\n' docs/ledger/ledgers.json "$INDEX_FILE" docs/ledger/finalized.json docs/spec-claims;
     if [ -n "$legacy" ]; then printf '%s\n' "$legacy"; fi; } | LC_ALL=C sort -u > "$out" \
     || _lg_die "cannot write $out"
 }
@@ -2104,6 +2154,7 @@ _lg_index() {
   _lg_ix_contracts "$reg" "$s.adc" "$s.contracts" "$s.cre"
   _lg_ix_json_obj "$src" "$legacy_path" "$s.legacy" "legacy map"
   _lg_ix_json_obj "$src" docs/ledger/finalized.json "$s.finalized" "finalized map"
+  _lg_ix_claims "$src" "$s.cls"
   case "$mode" in
     worktree) _lg_item_paths worktree "$s.itemz" ;;
     staged) _lg_item_paths : "$s.itemz" ;;
@@ -2153,6 +2204,7 @@ _lg_index() {
       --slurpfile recs "$s.recs" --slurpfile dates "$s.dates" --slurpfile docs "$s.docs" \
       --slurpfile ctr "$s.contracts" --rawfile cre "$s.cre" --arg cerr "$(head -n 1 "$s.ade")" \
       --slurpfile prs "$s.prl" --rawfile pcl "$s.pcl" --rawfile bcl "$_LG_BCLAIMS" --rawfile fmr "$s.formers" \
+      --slurpfile cls "$s.cls" \
       --arg schema "$_LG_INDEX_SCHEMA" --arg head "$head" --arg base "$base" --arg hash "sha256:$key" \
       --arg mode "$mode" --arg rev "$commit" --argjson rf "$rfn" --argjson terms "$_LG_DOC_TERMINAL" \
       --arg adoption "$adopt" --arg pre "$pre" --rawfile adopt "$s.adopt" \

@@ -152,6 +152,7 @@ lg_resolve($ref; $c[0]) as $R
           (if ($n.siblings // []) != [] then "siblings: \($n.siblings | map("\(.key) (\(.via))") | lg_q_list(3))" else empty end)),
        (lg_r_recheck_text | if . != "" then (lg_q_one | lg_q_cut(200)) else empty end),
        (lg_ifl_lines | if . != [] then "in flight: \(lg_q_list(3))" else empty end),
+       (lg_r_claims_text(" · ") | if . != "" then . else empty end),
        (if .paths != [] then "files: \(.paths | lg_q_list(3))" else empty end),
        (if .aliases != [] then "aliases: \(.aliases | lg_q_list(3))" else empty end),
        (if .superseded_by != null and .derived.status != "superseded" then "superseded by: \(.superseded_by | lg_q_one)" else empty end),

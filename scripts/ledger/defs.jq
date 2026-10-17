@@ -268,6 +268,19 @@ def lg_track($M; $t):
   else ($M.F[$t] // $M.F[$t | lg_lower] // null) as $to
     | if ($to | type) == "string" then one($to) else null end
   end;
+# lg_claims_counts($rows; $M): {path: {diverged, unbuilt}} over claim rows
+# {t: tracker, s: status} (diverged / unbuilt only), by the item each
+# tracker names.
+def lg_claims_counts($rows; $M):
+  lg_lists($rows[] | lg_track($M; .t) as $p | select($p != null) | {k: $p, v: .s})
+  | map_values({diverged: (map(select(. == "diverged")) | length), unbuilt: (map(select(. == "unbuilt")) | length)});
+# lg_r_claims_text: the spec claims an item tracks (.claims), as shown —
+# "claims: 1 diverged, 2 unbuilt" ($sep between the counts); "" when none.
+def lg_r_claims_text($sep):
+  (.claims // {}) as $c
+  | [(if ($c.diverged // 0) > 0 then "\($c.diverged) diverged" else empty end),
+     (if ($c.unbuilt // 0) > 0 then "\($c.unbuilt) unbuilt" else empty end)]
+  | if length == 0 then "" else "claims: " + join($sep) end;
 
 # --- Views (render-md.jq, render-html.jq) ---------------------------------------
 #
@@ -327,9 +340,11 @@ def lg_v_ledgers($ix):
   | $reg + [$used[] | select(. as $u | $ids | index([$u]) == null)
             | {id: ., title: (if . == "unassigned" then "Unassigned" else . end), scope: "", retired: false}];
 # lg_v_status: the derived status as the views show it — the display, then
-# " · re-check: …" when the item carries re-check markers.
+# " · re-check: …" when the item carries re-check markers, then " · claims:
+# …" when spec claims it tracks are diverged or unbuilt.
 def lg_v_status:
-  lg_r_recheck_text as $r | lg_q_display + (if $r == "" then "" else " · " + $r end);
+  lg_r_recheck_text as $r | lg_r_claims_text(", ") as $k
+  | lg_q_display + (if $r == "" then "" else " · " + $r end) + (if $k == "" then "" else " · " + $k end);
 # lg_v_suggest($U; $M): the top candidate cluster of an unclustered item —
 # {contract, reason} or null: a contract whose defined_in matches a file it
 # lists (2 points), the cluster of an active candidate item (1 point each,

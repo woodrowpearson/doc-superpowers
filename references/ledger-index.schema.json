@@ -62,7 +62,7 @@
     },
     "item": {
       "type": "object",
-      "required": ["path", "archived", "key", "ledger", "status", "class", "severity", "date", "summary", "changes", "consumes", "relates", "superseded_by", "owed", "aliases", "paths", "h1", "first_para", "resolution", "docs", "derived", "pr", "inflight", "neighbours", "recheck_after", "fm_errors", "pre_adoption"],
+      "required": ["path", "archived", "key", "ledger", "status", "class", "severity", "date", "summary", "changes", "consumes", "relates", "superseded_by", "owed", "aliases", "paths", "h1", "first_para", "resolution", "docs", "derived", "pr", "inflight", "neighbours", "recheck_after", "fm_errors", "pre_adoption", "claims"],
       "additionalProperties": false,
       "properties": {
         "path": { "type": "string" },
@@ -153,6 +153,9 @@
         "recheck_after": { "$ref": "#/$defs/strList", "description": "Re-check markers (design §F.2, computed): on an open item, the key of a re-check source that reached a terminal class on the base, or a contract it consumes that a base commit changed — after the item's last commit on the base. Not computed for --staged." },
         "fm_errors": { "$ref": "#/$defs/strList" },
         "pre_adoption": { "type": ["boolean", "null"], "description": "From before the ledger was adopted (Task 16c U11; validate --all reports a missing resolution on such a terminal item as advisory): true when config base has no commit adding docs/ledger/config.json yet, or when the base holds the item's path and no commit after the adoption commit (built.adoption) touched it; false otherwise, when the base does not resolve, and when the adoption commit cannot be known (a shallow clone whose boundary is where config.json first shows: fails closed); null for --staged. A commit after the adoption commit: a descendant on the base's first-parent line, a merge counting with its changes against its first parent; a pure rename does not touch the moved file." },
+        "claims": { "type": "object", "required": ["diverged", "unbuilt"], "additionalProperties": false,
+          "properties": { "diverged": { "type": "integer", "minimum": 0 }, "unbuilt": { "type": "integer", "minimum": 0 } },
+          "description": "The spec claims this item tracks (design §I): how many claims in the spec-claims sidecars (docs/spec-claims/*.json but config.json; nothing in a subdirectory) of the tree the index reads are diverged or unbuilt with a tracker naming this item — its path exactly, or its key or an alias in any case, carried by no other item (a provisional key finalized.json maps resolves to its finalized key). A malformed sidecar adds nothing. Zero counts when none." },
         "url": { "type": "string", "description": "Hosted items only (config items.adapter; not in required): the adapter's url. A hosted item's path is the adapter's ref (gh#<n> for scripts/adapters/ledger-items-gh.sh); file items have no url." }
       }
     }
