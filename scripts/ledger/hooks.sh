@@ -116,7 +116,10 @@ _lg_notices_hook_out() {
 # "" when unset), top (git's top level), proj ($CLAUDE_PROJECT_DIR), and
 # their canonical spellings phome, ptop, pproj (no symbolic link left in
 # them; "" when one does not resolve) and pfile (the written file's, from
-# its deepest existing directory); --slurpfile cfg (docs/ledger/config.json
+# its deepest existing directory); --argjson pabs (the canonical spellings
+# of the absolute paths entries, final review OPS-m3: an existing directory
+# resolved whole, else from its deepest existing directory — a "*" segment
+# never exists, so a glob keeps its tail); --slurpfile cfg (docs/ledger/config.json
 # as the host wrote it); --rawfile reg (the registry, "" without one). The
 # file matches an entry when either spelling of it lies under either
 # spelling of the entry: a symbolic link on one side only (macOS's /var →
@@ -143,7 +146,7 @@ _LG_JQ_STATE_WATCH='
   | select(($raw | type) == "string" and $raw != "")
   | (if ($raw | startswith("/")) then $raw else ((.cwd // $top) + "/" + $raw) end) as $p
   | ([$p, $pfile] | map(select(. != "")) | unique) as $ps
-  | [($sw.paths // [])[]? | strings | (spellings($home; $top; $proj), spellings($phome; $ptop; $pproj))]
+  | [(($sw.paths // [])[]? | strings | (spellings($home; $top; $proj), spellings($phome; $ptop; $pproj))), ($pabs[] | strings | select(. != ""))]
   | unique | map(glob_re) as $res
   | select(any($res[]; . as $r | any($ps[]; test("^" + $r + "(/|$)"))))
   | ([$in.content, $in.new_string, (($in.edits // []) | .[]? | .new_string?)] | map(strings) | join("\n")) as $text
@@ -203,7 +206,7 @@ _lg_phys_path() {
 # nothing.
 # shellcheck disable=SC2154  # _ARGS, _OPT_* are set by _parse_args
 cmd_ledger_state_watch() {
-  local reg line="" f pfile="" ptop phome pproj
+  local reg line="" f pfile="" ptop phome pproj e pabs
   _lg_init state-watch
   [ "${#_ARGS[@]}" = 0 ] || _lg_usage "unexpected argument '${_ARGS[0]}'"
   [ -n "${_OPT_hook:-}" ] || _lg_usage "state-watch is the PostToolUse hook: give --hook (the event on stdin)"
@@ -223,8 +226,19 @@ cmd_ledger_state_watch() {
   ptop=$(_lg_phys_dir "$PWD")
   phome=$(_lg_phys_dir "${HOME:-}")
   pproj=$(_lg_phys_dir "${CLAUDE_PROJECT_DIR:-}")
+  # The absolute entries' canonical spellings, one line each (no process
+  # per entry beyond the cd -P a resolution takes).
+  : > "$_SCRATCH/lg-sw.abs"
+  jq -r '(.state_watch // {}) | if type == "object" then (.paths // []) else [] end | .[]? | strings
+    | sub("/+$"; "") | select(startswith("/") and (test("[\n\r]") | not))' docs/ledger/config.json 2>/dev/null \
+    > "$_SCRATCH/lg-sw.ents" || : > "$_SCRATCH/lg-sw.ents"
+  while IFS= read -r e; do
+    if [ -d "$e" ]; then _lg_phys_dir "$e"; else _lg_phys_path "$e"; fi
+    printf '\n'
+  done < "$_SCRATCH/lg-sw.ents" > "$_SCRATCH/lg-sw.abs" 2>/dev/null || : > "$_SCRATCH/lg-sw.abs"
+  pabs=$(jq -R -s -c 'split("\n") | map(select(. != ""))' "$_SCRATCH/lg-sw.abs" 2>/dev/null) || pabs='[]'
   line=$(jq -r --arg home "${HOME:-}" --arg top "$PWD" --arg proj "${CLAUDE_PROJECT_DIR:-}" \
-    --arg phome "$phome" --arg ptop "$ptop" --arg pproj "$pproj" --arg pfile "$pfile" \
+    --arg phome "$phome" --arg ptop "$ptop" --arg pproj "$pproj" --arg pfile "$pfile" --argjson pabs "$pabs" \
     --slurpfile cfg docs/ledger/config.json --rawfile reg "$reg" "$_LG_JQ_STATE_WATCH" < "$_LG_HOOK_PAYLOAD" 2>/dev/null) || line=""
   [ -z "$line" ] || _lg_hook_emit PostToolUse "" "$line"
   _lg_hook_done

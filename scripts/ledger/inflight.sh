@@ -585,24 +585,52 @@ END {
 # _lg_ifl_anc <pairs> <out>: for each "<a> <b>" line of <pairs>, "<a> <b>
 # 1|0" into <out> (1: a is an ancestor of b). The verdicts are facts about
 # two commits: cached in branch/anc.tsv ("<a> <b> 1|0"), so only a pair
-# never seen runs `git merge-base --is-ancestor`. Only its answers (exit
-# 0/1) are cached; an error (128: a missing object, a broken repository)
-# counts as "not an ancestor" for this run alone and is asked again next
-# time.
+# never seen runs git. A pair asked both ways is one process (final review,
+# Task 12 m): `git merge-base --all <a> <b>` lists <a> exactly when <a> is
+# an ancestor of <b>, and <b> when the reverse; one asked one way is `git
+# merge-base --is-ancestor`. Of two distinct commits at most one is an
+# ancestor of the other: when the cache holds <b> <a> as 1, <a> <b> is 0
+# without asking. Only the answers are cached; an error (128: a missing
+# object, a broken repository) counts as "not an ancestor" for this run
+# alone and is asked again next time.
 _lg_ifl_anc() {
-  local s af a b v tmp
+  local s af a b r v tmp mb nl=$'\n'
   _lg_scratch_name
   s=$_LG_SN
   af="$_LG_CACHE/branch/anc.tsv"
   [ -f "$af" ] || af=/dev/null
-  # The pairs the cache lacks, each once.
-  LC_ALL=C awk -v af="$af" '
-    BEGIN { while ((getline l < af) > 0) { split(l, x, " "); C[x[1] " " x[2]] = 1 } }
-    $0 != "" && !($0 in C) { C[$0] = 1; print }' "$1" > "$s.ask" || _lg_die "cannot list the tips to compare"
   : > "$s.new"
   : > "$s.unc"
-  while read -r a b; do
+  # The pairs the cache lacks, each once: "<a> <b> 2" when <b> <a> is asked
+  # too (only the first of the two is listed), else "<a> <b> 1"; a pair
+  # whose reverse the cache holds as 1 is 0 at once (into <new>).
+  LC_ALL=C awk -v af="$af" -v new="$s.new" '
+    BEGIN { while ((getline l < af) > 0) { split(l, x, " "); C[x[1] " " x[2]] = x[3] } }
+    $0 != "" && !($0 in C) && !($0 in S) { S[$0] = 1; n++; K[n] = $0 }
+    END {
+      for (i = 1; i <= n; i++) {
+        k = K[i]
+        if (k in D) continue
+        split(k, x, " "); r = x[2] " " x[1]
+        if (x[1] != x[2] && C[r] == 1) { print k " 0" > new; continue }
+        if (x[1] != x[2] && (r in S)) { D[r] = 1; print k " 2" } else print k " 1"
+      }
+    }' "$1" > "$s.ask" || _lg_die "cannot list the tips to compare"
+  while read -r a b r; do
     v=0
+    if [ "$r" = 2 ]; then
+      mb=$(git merge-base --all "$a" "$b" 2>/dev/null) || v=$?
+      case "$v" in
+        0|1)
+          case "$nl$mb$nl" in
+            *"$nl$a$nl"*) printf '%s %s 1\n%s %s 0\n' "$a" "$b" "$b" "$a" >> "$s.new" ;;
+            *"$nl$b$nl"*) printf '%s %s 0\n%s %s 1\n' "$a" "$b" "$b" "$a" >> "$s.new" ;;
+            *) printf '%s %s 0\n%s %s 0\n' "$a" "$b" "$b" "$a" >> "$s.new" ;;
+          esac ;;
+        *) printf '%s %s 0\n%s %s 0\n' "$a" "$b" "$b" "$a" >> "$s.unc" ;;
+      esac
+      continue
+    fi
     git merge-base --is-ancestor "$a" "$b" 2>/dev/null || v=$?
     case "$v" in
       0) printf '%s %s 1\n' "$a" "$b" >> "$s.new" ;;
@@ -1990,8 +2018,9 @@ _lg_ifl_push_end() {
 # check-ref-format: refused, exit 2). DOC_TOOLS_LEDGER_OFFLINE=1, a remote
 # that cannot be reached, or an authentication / permission failure ("Permission
 # denied", "Authentication failed", "could not read Username", "returned
-# error: 403", "HTTP 403" — said as such): a warning, exit 0; a push the remote refuses ("rejected"):
-# exit 2. Detached HEAD, no commits beyond the base, the
+# error: 403", "HTTP 403", "Forbidden" — lib.sh _LG_PERM_RE, said as such,
+# a rejected ref included): a warning, exit 0; a push the remote refuses
+# for any other reason ("rejected"): exit 2. Detached HEAD, no commits beyond the base, the
 # base's own branch or views.branch: one line, exit 0.
 _lg_ifl_push() {
   local s="$1" full br tip b bfull bb="" mb host ref url ppc rc=0 err
@@ -2045,15 +2074,15 @@ _lg_ifl_push() {
   fi
   if ! _lg_ifl_push_run -q --no-verify --force "$url" "$tip:$ref" > "$s.perr" 2>&1; then
     err=$(head -n 3 "$s.perr" | tr '\n' ' ' | sed 's/ *$//')
+    # Credentials or rights (ruling m5): said as such, still exit 0 — the
+    # post-commit hook never fails a commit — whether git reports it as an
+    # HTTP failure or as a rejected ref (lib.sh _LG_PERM_RE, shared with the
+    # counter CAS: final review OPS-m9).
+    if grep -Eq "$_LG_PERM_RE" "$s.perr"; then
+      _lg_ifl_push_end "$s" 0 false err "authentication or permission failure on $_LG_IFL_REMOTE ($err): nothing pushed" "$ref" "$tip" "$mb"
+    fi
     if grep -q 'rejected' "$s.perr"; then
       _lg_die "the in-flight push to $_LG_IFL_REMOTE $ref was rejected: $err"
-    fi
-    # Credentials or rights (ruling m5): said as such, still exit 0 — the
-    # post-commit hook never fails a commit. A 403 only as git / curl
-    # report an HTTP status ("returned error: 403", "HTTP 403"), never a 403
-    # in a URL's path or port.
-    if grep -Eq 'Permission denied|Authentication failed|could not read Username|returned error: 403|HTTP 403' "$s.perr"; then
-      _lg_ifl_push_end "$s" 0 false err "authentication or permission failure on $_LG_IFL_REMOTE ($err): nothing pushed" "$ref" "$tip" "$mb"
     fi
     _lg_ifl_push_end "$s" 0 false err "$_LG_IFL_REMOTE cannot be reached ($err): nothing pushed" "$ref" "$tip" "$mb"
   fi

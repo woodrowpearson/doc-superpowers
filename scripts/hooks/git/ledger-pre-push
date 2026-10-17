@@ -1,10 +1,10 @@
 # The work ledger's pre-push leg (POSIX sh; install.sh wraps it in its
 # markers). With keys.mode cas, a push whose commits add a provisional key
 # (<ledger>-~<hex>) is refused: doc-tools.sh ledger validate --pushed
-# <remote oid>..<local oid> for each ref pushed — from all zeros (every
-# provisional key at the pushed tip) for a new branch, and when the remote
-# oid is not here or not an ancestor; a deletion is skipped. Any non-zero
-# refuses the push.
+# <remote oid>..<local oid> for each ref pushed — from all zeros (the
+# provisional keys the pushed tip adds since config base) for a new branch,
+# and when the remote oid is not here or not an ancestor; a deletion is
+# skipped. Any non-zero refuses the push.
 # git's ref lines (stdin) are copied to a temp file that becomes this hook's
 # stdin again, unread, so whatever runs after this block — your own checks,
 # a token guard — reads exactly the lines git sent. The block reads its own

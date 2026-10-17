@@ -60,7 +60,10 @@
 #              edits src/notices.txt, every other one also claims n-1's
 #              item, every fourth touches a contract's src file), the index
 #              warm and every in-flight cache wiped (merge bases, branch
-#              facts, overlays, the join's index lines) < 2 s
+#              facts, overlays, the join's index lines) < 2 s; then again
+#              with copies of every other branch at other tips (origin's
+#              one commit ahead, this host's in-flight copy unrelated), the
+#              ancestry verdicts cold too, < 2 s
 #   refs step  the index build's parse-reference step (_lg_ix_refs) over all
 #              N items as blob records — the --staged / --rev case, which
 #              probes one parse entry per blob; reported, no budget
@@ -668,8 +671,25 @@ b_notices
 b_measure "notices (20 branches, facts cold)" "$B_NOTICES" 3 "$B_BASH" "$B_DT" ledger notices --branch n-1
 b_row "notices (20 branches, facts cold)" "$B_SEC" "-" "$B_NOTICES s · $B_MARK"
 echo "  (notices: $(wc -l < "$B_OUT" | tr -d ' ') lines: $(awk '{ print $1 }' "$B_OUT" | sort | uniq -c | awk '{ printf "%s%s %s", (NR > 1 ? ", " : ""), $1, $2 }'))"
+# The same, with copies of every other branch at other tips (final review,
+# Task 12 m): refs/remotes/origin/n-<i> one commit ahead of the local tip,
+# and this host's in-flight copy at an unrelated commit off main — the
+# ancestry verdicts (merge-base, one per pair) are cold too.
+b_copies() {
+  local i t c u main
+  main=$(git rev-parse main)
+  for i in 2 4 6 8 10 12 14 16 18 20; do
+    t=$(git rev-parse "refs/heads/n-$i") || return 1
+    c=$(git commit-tree -p "$t" -m "remote ahead $i" "$t^{tree}") || return 1
+    u=$(git commit-tree -p "$main" -m "in flight elsewhere $i" "$t^{tree}") || return 1
+    printf 'create refs/remotes/origin/n-%d %s\ncreate refs/doc-superpowers/inflight/bench/n-%d %s\n' "$i" "$c" "$i" "$u"
+  done | git update-ref --stdin
+}
+b_copies || b_die "cannot create the branch copies"
+b_measure "notices (20 branches, 10 with remote ≠ in-flight copies, facts cold)" "$B_NOTICES" 3 "$B_BASH" "$B_DT" ledger notices --branch n-1
+b_row "notices (10 remote ≠ in-flight copies, facts cold)" "$B_SEC" "-" "$B_NOTICES s · $B_MARK"
 git checkout -q -- docs/ledger/config.json
-git for-each-ref --format='delete %(refname)' 'refs/heads/n-*' | git update-ref --stdin
+git for-each-ref --format='delete %(refname)' 'refs/heads/n-*' 'refs/remotes/origin/n-*' 'refs/doc-superpowers/inflight/' | git update-ref --stdin
 
 # The base ≠ HEAD: HEAD 20 commits ahead of the base (the base's events are
 # derived from HEAD's walk), then the base 20 commits ahead of HEAD (HEAD is
