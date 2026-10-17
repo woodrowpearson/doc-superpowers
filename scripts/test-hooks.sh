@@ -4915,7 +4915,7 @@ test_ledger_uninstall_each_tier_independent() {
   inst install --ledger --ledger-claude
   assert_eq "0" "$IRC" "install --ledger --ledger-claude: exit 0"
   assert_contains "$(jq -c '.hooks.SessionStart' .claude/settings.local.json)" "ledger-session-notices.sh" "SessionStart → ledger-session-notices.sh"
-  assert_eq '"Write|Edit"' "$(jq -c '[.hooks.PostToolUse[] | select(any(.hooks[]; .command | contains("ledger-state-watch.sh")))][0].matcher' .claude/settings.local.json)" "PostToolUse (Write|Edit) → ledger-state-watch.sh"
+  assert_eq '"Write|Edit|MultiEdit"' "$(jq -c '[.hooks.PostToolUse[] | select(any(.hooks[]; .command | contains("ledger-state-watch.sh")))][0].matcher' .claude/settings.local.json)" "PostToolUse (Write|Edit|MultiEdit) → ledger-state-watch.sh"
   inst uninstall --ledger
   assert_eq "0" "$IRC" "uninstall --ledger: exit 0"
   for h in pre-commit pre-push; do
@@ -5570,6 +5570,67 @@ test_ledger_status_reports_set() {
   teardown
 }
 
+test_ledger_state_watch_matcher_multiedit() {
+  # 3.3.1 item 4 (final review OPS-m5): the state-watch verb reads
+  # MultiEdit's edits[].new_string, so its PostToolUse entry names
+  # MultiEdit too; an install made with the old matcher reads outdated.
+  echo "test: ledger: --ledger-claude registers state-watch for Write|Edit|MultiEdit; an older install (matcher Write|Edit) reads outdated in status --ledger-claude and status --claude; re-running install --ledger-claude updates it in place"
+  lgh_fixture '{"state_watch":{"paths":["~/notes"],"patterns":["next:"]}}'
+  local t sel='[.hooks.PostToolUse[] | select(any(.hooks[]; .command | contains("ledger-state-watch.sh")))]'
+  inst install --ledger-claude
+  assert_eq "0" "$IRC" "install --ledger-claude: exit 0"
+  assert_eq '"Write|Edit|MultiEdit"' "$(jq -c "$sel[0].matcher" .claude/settings.local.json)" "PostToolUse (Write|Edit|MultiEdit) → ledger-state-watch.sh"
+  assert_contains "$IOUT" "Write|Edit|MultiEdit" "…the install line says so"
+  lgh_watch "$(jq -nc --arg p "$HOME/notes/today.md" '{hook_event_name: "PostToolUse", tool_name: "MultiEdit", tool_input: {file_path: $p, edits: [{old_string: "a", new_string: "b"}, {old_string: "c", new_string: "x-7 next: ship it"}]}}')"
+  assert_contains "$LGH_CTX" "ledger note x-7" "a MultiEdit payload: the advisory reads its edits"
+  # An install 3.3.0 made: the same entry, matcher Write|Edit.
+  t=$(harness_mktemp settings)
+  jq '(.hooks.PostToolUse[] | select(any(.hooks[]; .command | contains("ledger-state-watch.sh"))) | .matcher) = "Write|Edit"' \
+    .claude/settings.local.json > "$t"
+  cat "$t" > .claude/settings.local.json
+  inst status --ledger-claude
+  assert_contains "$(grep ' ledger-state-watch ' <<<"$IOUT")" "⚠" "status --ledger-claude: the old matcher is ⚠"
+  assert_contains "$(grep ' ledger-state-watch ' <<<"$IOUT")" "outdated" "…outdated"
+  assert_contains "$(grep ' ledger-state-watch ' <<<"$IOUT")" "Write|Edit|MultiEdit" "…naming the matcher it wants"
+  assert_contains "$(grep ' ledger-state-watch ' <<<"$IOUT")" "install --ledger-claude" "…and the command that fixes it"
+  assert_contains "$(grep ' ledger-session-notices ' <<<"$IOUT")" "✓" "…the SessionStart entry stays ✓"
+  inst status --claude
+  assert_contains "$(grep ' ledger-state-watch ' <<<"$IOUT")" "outdated" "status --claude: the ledger set's outdated entry shows too (same settings file)"
+  assert_contains "$IOUT" "install --ledger-claude" "…with the command that fixes it"
+  inst install --ledger-claude
+  assert_eq "0" "$IRC" "re-run install --ledger-claude: exit 0"
+  assert_eq '1|"Write|Edit|MultiEdit"' "$(jq -r "$sel | \"\\(length)|\\(.[0].matcher | tojson)\"" .claude/settings.local.json)" "…one state-watch entry, matcher updated"
+  inst status --ledger-claude
+  assert_contains "$(grep ' ledger-state-watch ' <<<"$IOUT")" "✓" "…and status reads ✓"
+  teardown
+}
+
+test_ledger_status_state_watch_paths_without_patterns() {
+  # 3.3.1 item 6 (adopter finding): state_watch.patterns defaults to [], so
+  # paths alone make a hook that never fires.
+  echo "test: ledger: status --ledger-claude with state-watch installed flags state_watch.paths set while state_watch.patterns is empty or absent (the hook never fires); quiet with patterns, and with the set not installed"
+  local c
+  lgh_fixture '{"state_watch":{"paths":["~/notes"]}}'
+  inst status --ledger-claude
+  assert_not_contains "$IOUT" "state_watch.patterns" "the set not installed: no warning"
+  inst install --ledger-claude
+  inst status --ledger-claude
+  assert_contains "$IOUT" "⚠ ledger-state-watch never fires" "installed, patterns absent: ⚠ never fires"
+  assert_contains "$IOUT" "state_watch.patterns" "…naming state_watch.patterns"
+  for c in '{"state_watch":{"paths":["~/notes"],"patterns":[]}}' '{"state_watch":{"paths":["~/notes"],"patterns":[""]}}' \
+      '{"state_watch":{"paths":["~/notes"],"patterns":"next:"}}'; do
+    printf '%s\n' "$c" > docs/ledger/config.json
+    inst status --ledger-claude
+    assert_contains "$IOUT" "never fires" "$c: ⚠ never fires"
+  done
+  for c in '{"state_watch":{"paths":["~/notes"],"patterns":["next:"]}}' '{}' '{"state_watch":{"paths":[],"patterns":[]}}'; do
+    printf '%s\n' "$c" > docs/ledger/config.json
+    inst status --ledger-claude
+    assert_not_contains "$IOUT" "never fires" "$c: no warning"
+  done
+  teardown
+}
+
 test_ledger_status_quiet_without_ledger() {
   # Every 3.3.0 user who never opted in ran plain `status` and read two
   # "⚠ docs/ledger/config.json is missing" lines about legs nobody
@@ -5621,6 +5682,8 @@ test_ledger_legs_honour_both_skips
 test_ledger_foreign_hook_runs_ledger_first
 test_ledger_state_watch_paths_spaces_tilde
 test_ledger_status_reports_set
+test_ledger_state_watch_matcher_multiedit
+test_ledger_status_state_watch_paths_without_patterns
 
 test_claude_hook_contract_held() {
   echo "test: every Claude hook run above held the contract (exit 0, or 2 only under STRICT; stdout one JSON object or nothing)"

@@ -2485,7 +2485,7 @@ ledger notices|cmd_ledger_notices|repo|branch= gate fetch hook format=
   a 2-second budget.
 ledger state-watch|cmd_ledger_state_watch|repo|hook
   --hook
-  The Claude Code PostToolUse (Write|Edit) hook: reads the event on
+  The Claude Code PostToolUse (Write|Edit|MultiEdit) hook: reads the event on
   stdin; when its tool_input.file_path lies under one of config
   state_watch.paths ("~/" is $HOME — HOME empty or unset: the entry names
   nothing; an absolute entry is itself; any other is under the top level
