@@ -11566,6 +11566,19 @@ test_lg_init_accept_install_ci_note() {
   teardown
 }
 
+test_lg_help_exit3_and_report_files() {
+  echo "test: final OPS-m1/m2 — help says an unknown option exits 3 for a ledger subcommand too; init --report's help names the files it writes (two, plus a .bak), not three"
+  local out
+  out=$("$BASH_BIN" "$REPO_DIR/scripts/doc-tools.sh" --help 2>&1) || true
+  assert_contains "$(tr '\n' ' ' <<<"$out" | tr -s ' ')" "(exit 2; 3 for a claims or ledger subcommand)" "Options: 3 for a claims or ledger subcommand"
+  lg_fixture
+  lg ls --bogus
+  assert_eq "3" "$LG_RC" "…as ledger ls --bogus does"
+  out=$("$BASH_BIN" "$REPO_DIR/scripts/doc-tools.sh" help ledger init 2>&1) || true
+  assert_not_contains "$out" "three files" "init help: not 'three files'"
+  assert_contains "$(tr '\n' ' ' <<<"$out" | tr -s ' ')" "with no --registry, docs/ledger/ledgers.proposed.json; with one, <file>.decisions.tsv" "init help: the files by mode"
+  teardown
+}
 
 test_lg_state_watch_absolute_entry_resolved() {
   echo "test: final OPS-m3 — an absolute state_watch.paths entry is compared resolved too: an entry spelled through a symbolic link matches a write reported at the physical path, and the reverse"
@@ -12019,6 +12032,7 @@ run_tests() {
   test_lg_hook_clip_constants_pinned
   test_lg_ifl_ancestry_one_direction_first
   test_lg_init_accept_install_ci_note
+  test_lg_help_exit3_and_report_files
   test_lg_state_watch_absolute_entry_resolved
   test_lg_alloc_permission_refusal_provisional
 
