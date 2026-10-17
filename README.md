@@ -18,6 +18,7 @@ doc-superpowers is a Claude Code skill that treats documentation as a first-clas
 - **Installs** opt-in workflow hooks for automated freshness monitoring (`hooks`)
 - **Tracks specifications** through implementation with formal spec lifecycle (`spec-generate`, `spec-inject`, `spec-verify`)
 - **Checks spec claims** (opt-in, with `docs/spec-claims/`): executable claims quoted from a spec's normative text, each bound to a check, run by `doc-tools.sh claims` and gated through the spec actions and the hooks
+- **Keeps a work ledger** (opt-in, with `docs/ledger/config.json`): issue files get stable keys, ledger pages and one HTML view are generated from them, related work is found through named contracts, and work in flight on other branches and machines raises notices (`ledger`, `doc-tools.sh ledger`)
 - **Drafts release notes** from git history with agent-assisted diff review (`release`)
 - **Syncs CLAUDE.md and README.md** automatically in the actions that write docs (`init`, `update`, `sync`, `release`, `spec-generate`) to prevent drift; in a CI workflow `update` and `sync` report the change instead of editing them
 - **Tracks freshness** via bundled `scripts/doc-tools.sh` — content hashing for docs, content identity (git object ids per code ref) for code
@@ -100,7 +101,7 @@ v3.0.0 changes what the installer writes, the doc-index schema and a few verbs' 
 ```
 /doc-superpowers <action> [scope]
 
-Actions: init | audit | review-pr | update | diagram | sync | hooks | release | spec-generate | spec-inject | spec-verify
+Actions: init | audit | review-pr | update | diagram | sync | hooks | release | spec-generate | spec-inject | spec-verify | ledger
 Scopes:  all | one scope from Detect Scopes (application, api-contracts, data-layer, …)
 ```
 
@@ -121,6 +122,7 @@ Scopes:  all | one scope from Detect Scopes (application, api-contracts, data-la
 | `spec-generate` | Generate formal specs from design doc; scans overlapping specs for stale content | After brainstorming produces a design spec |
 | `spec-inject` | Inject spec tasks into plans, track during execution | During plan writing and after each chunk executes |
 | `spec-verify` | Verify spec compliance, review spec coverage | Before merging or during code review |
+| `ledger` | Work ledger (opt-in): show, list, find and relate work items, allocate keys, note item state, render views, check in-flight notices (`doc-tools.sh ledger <verb>`) | Tracking work as issue files across branches and machines |
 
 ### Examples
 
@@ -179,6 +181,14 @@ A spec or ADR can carry **executable claims**: atomic, falsifiable statements qu
 
 It is **inert without `docs/spec-claims/`**: every `claims` verb then prints `{"verb":"<verb>","enabled":false,"exit":0}` and exits 0 (run outside a git repository, below its top level, or without git, jq ≥ 1.6 and `sha256sum`/`shasum`, a verb exits 2 before it gets that far, as every `doc-tools.sh` verb does), and the hooks, CI templates and `spec-*` actions behave exactly as before. A project opts in by creating that directory with its first sidecar. The schema, the checks (V1–V12), the adapter contracts, the gates and the policy keys are in [`references/spec-claims.md`](references/spec-claims.md), and the direction protocol is in [`references/spec-lifecycle-protocol.md`](references/spec-lifecycle-protocol.md).
 
+### Work ledger (opt-in)
+
+Projects that track work as markdown issue files (`docs/issues/*.md`) — or as GitHub issues — can turn on the **work ledger** with `docs/ledger/config.json` (`{}` is a complete config). The issue stays the only source of truth: each item gets a short stable key (`checkout-14`) allocated so two branches or machines never take the same one, ledger pages and one self-contained HTML file are generated from the items and never edited, related work is computed through named *contracts* an item `changes` or `consumes`, and — with in-flight awareness on — branches here, on the remote and on other machines raise `stop` / `heads-up` / `info` notices when they touch what this branch depends on.
+
+`doc-tools.sh ledger <verb>` has 18 verbs: `show`, `ls`, `find`, `related`, `sweep` and `recheck` read; `new`, `assign`, `link`, `note` and `finalize` write item fields and keys; `inflight` and `notices` (with `--gate`, an exit-1 gate) cover work in flight; `view` renders locally and `publish` pushes the views to an orphan branch (`doc-ledger-views`); `validate` checks staged items, every item, a plan's Related work marks or a push; `state-watch` is a hook mode; and `init --report` / `--accept` / `--import` bootstraps a ledger from the issues, GitHub issues and hand-written ledger tables a repository already has (the `init` action runs it as an opt-in step, with your review of the proposed registry and assignments). Text output is the default and `--format json` prints one verdict object; exits are the claims family (0 ok, 1 findings, 2 could not run, 3 usage). Adapters plug in a host's systems — PRs, contract registries, hosted items — and two reference adapters for GitHub ship with it (`doc-superpowers:ledger-pr-gh`, `doc-superpowers:ledger-items-gh`, through `gh`). With the ledger on, `spec-inject` pastes a `## Related work` sweep into each plan and gives each chunk a `Ledger notices (chunk N)` gate, and spec-claims V5 reads ledger items' status classes (so `Won't Fix` closes a tracker).
+
+It is **inert without `docs/ledger/config.json`**: every verb but `init` prints `ledger: not enabled (no docs/ledger/config.json)` and exits 0. Everything — config keys and defaults, keys and provisional keys, adapter contracts, privacy of in-flight refs, the hooks — is in [`references/ledger.md`](references/ledger.md).
+
 ### Workflow Integration
 
 Install opt-in hooks for automated freshness monitoring:
@@ -192,8 +202,13 @@ Install opt-in hooks for automated freshness monitoring:
 /doc-superpowers hooks install --claude        # Claude Code hooks (per-user)
 /doc-superpowers hooks install --ci            # GitHub Actions: the 2 shell workflows
 
+# The work ledger's opt-in sets (need docs/ledger/config.json; never part of --all)
+/doc-superpowers hooks install --ledger        # git legs: pre-commit validate, pre-push provisional-key check, post-commit in-flight push
+/doc-superpowers hooks install --ledger-claude # Claude Code: SessionStart notices, PostToolUse state-watch (per-user)
+
 # Claude-powered workflows are opt-in by name
 /doc-superpowers hooks install --ci --workflows=doc-pr-release,doc-review-pr
+/doc-superpowers hooks install --ci --workflows=doc-ledger-publish  # the ledger views publisher (shell, no secret)
 /doc-superpowers hooks install --ci --workflows=all    # every template
 /doc-superpowers hooks install --ci --workflows=none   # only vendor doc-tools.sh
 /doc-superpowers hooks install --ci --force            # also re-add workflows you removed on purpose
@@ -207,30 +222,37 @@ Install opt-in hooks for automated freshness monitoring:
 # ($DOC_TOOLS is the plugin's scripts/doc-tools.sh: see docs/guides/getting-started.md, "Independent of hooks")
 $DOC_TOOLS tools install                       # → .github/scripts/doc-tools.sh
 $DOC_TOOLS tools install --with-helpers        # + every helper the CI templates run
-$DOC_TOOLS tools install --helper doc-superpowers-steps  # + only the named helper dir(s)
+$DOC_TOOLS tools install --helper doc-superpowers-steps  # + only the named helper set(s)
+$DOC_TOOLS tools install --helper ledger       # + the work ledger's modules and adapters (ledger/, adapters/)
 $DOC_TOOLS tools status                        # present? matches the plugin? which version?
 $DOC_TOOLS tools uninstall                     # removes only files identical to the plugin's
 
-# Check what's installed (optionally one tier: --git / --claude / --ci, or --all);
-# "⚠ … outdated: re-run install --git|--claude" marks another version's install
+# Check what's installed (optionally one tier: --git / --claude / --ci, or --all; the ledger
+# sets with --ledger / --ledger-claude, each in its own section after the tiers);
+# "⚠ … outdated: re-run install --git|--claude|--ledger|--ledger-claude" marks another version's install
 /doc-superpowers hooks status
 
 # Remove hooks
 /doc-superpowers hooks uninstall --all
 /doc-superpowers hooks uninstall --ci --workflows=doc-release  # remove ONE workflow
+/doc-superpowers hooks uninstall --ledger --ledger-claude      # the ledger sets (--all removes neither)
 ```
 
-The installer works from anywhere in the repository (it acts on the top level; a linked worktree or submodule is its own top level) and puts git hooks where git runs them (`git rev-parse --git-path hooks`). It refuses, writing nothing, when `core.hooksPath` comes from your global/system git config, or when a file it would write — or a directory on the way — is a symbolic link. It owns only what it marks: a hook of yours is kept, with a marked POSIX block after its `#!` line that runs ours (skipped if the hook is not a shell script); its `.gitattributes` and `info/exclude` entries are marked blocks; in `.claude/settings.local.json` it touches only the entries that run its own scripts. `uninstall` puts all of that back as it was. The Claude tier is **per-user**: its settings file and scripts are excluded from git through `.git/info/exclude`, and its commands run `"$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/…`.
+The installer works from anywhere in the repository (it acts on the top level; a linked worktree or submodule is its own top level) and puts git hooks where git runs them (`git rev-parse --git-path hooks`). It refuses, writing nothing, when `core.hooksPath` comes from your global/system git config, or when a file it would write — or a directory on the way — is a symbolic link. It owns only what it marks: a hook of yours is kept, with a marked POSIX block after its `#!` line that runs ours (skipped if the hook is not a shell script); its `.gitattributes` and `info/exclude` entries are marked blocks; in `.claude/settings.local.json` it touches only the entries that run its own scripts. The work ledger's sets mark theirs `# ledger-superpowers:begin` … `:end` (a hook the set created holds only `#!/bin/sh` and that block), and neither set's markers match the other's. `uninstall` puts all of that back as it was. The Claude tier is **per-user**: its settings file and scripts are excluded from git through `.git/info/exclude`, and its commands run `"$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/…`.
 
 **State tracking:** the CI tier's choices — the workflow set, base branch, cron, strict — persist in `.claude/doc-superpowers/installed.json` (commit it). A plain `install --ci` reproduces them and respects intentional uninstalls; pass `--workflows=<name>` to add one back, `--force` to re-add all, or `uninstall --ci --transient` so the next install re-installs. An unreadable state file (e.g. a merge conflict) is never overwritten: resolve it, or move it to `installed.json.corrupt` and the next install rebuilds it from disk without adding anything. Uninstall keeps a vendored helper you edited and says so (`Kept …`).
 
-**Git hooks (5):** Pre-commit checks the staged tree, so it reports the docs *this* commit leaves stale (renames included), and every entry the staged index adds. An indexed doc the commit leaves out is "not in this commit" when it is on disk (`git add` it), "missing from disk" when it is gone. With `docs/spec-claims/`, pre-commit first runs a claims leg, `claims validate --staged` over the staged change: a finding blocks the commit whatever STRICT says, and a check that cannot run blocks only under STRICT. Post-merge and post-checkout report the docs a merge or branch switch left stale or missing. Prepare-commit-msg lists the stale docs as comment lines, only for a message written in the editor (git strips them; with `-m`/`-F` it adds nothing). Pre-push reminds about unreleased commits on the branches being pushed; with `docs/spec-claims/`, it also runs an advisory claims leg (`claims run --planes-of` over the pushed commits, and `claims attest --plan` for each plan with gate records but no `final.json`) that never blocks.
+**Git hooks (5, the `--git` tier):** Pre-commit checks the staged tree, so it reports the docs *this* commit leaves stale (renames included), and every entry the staged index adds. An indexed doc the commit leaves out is "not in this commit" when it is on disk (`git add` it), "missing from disk" when it is gone. With `docs/spec-claims/`, pre-commit first runs a claims leg, `claims validate --staged` over the staged change: a finding blocks the commit whatever STRICT says, and a check that cannot run blocks only under STRICT. Post-merge and post-checkout report the docs a merge or branch switch left stale or missing. Prepare-commit-msg lists the stale docs as comment lines, only for a message written in the editor (git strips them; with `-m`/`-F` it adds nothing). Pre-push reminds about unreleased commits on the branches being pushed; with `docs/spec-claims/`, it also runs an advisory claims leg (`claims run --planes-of` over the pushed commits, and `claims attest --plan` for each plan with gate records but no `final.json`) that never blocks.
 
-**Claude Code hooks (3):** They read the event JSON on stdin and answer through Claude Code's JSON output (`additionalContext` for Claude, `systemMessage` for you). The pre-commit gate (PreToolUse) checks the staged tree of a `git commit`; a command that stages as it commits (`git add … && git commit`, `commit -a`) is left to the git pre-commit hook, which sees the real index, and the gate says so. Post-commit sync (PostToolUse) reports the docs a commit left stale. Session summary (Stop, which fires after every response) reports docs citing code changed in the working tree; a clean tree costs nothing. Every report stays under Claude Code's 10,000-character hook-output limit, whatever the stale count: each list names its first entries, then `…and N more` with the command for the full list. Each check has a time budget inside the hooks' 10 s timeout; past it the hook says `check skipped (budget)`, and under `DOC_SUPERPOWERS_STRICT=1` the gate blocks. No hook runs `update-index`: only a reviewer who read a doc against its code re-baselines it.
+**Work-ledger git legs (`--ledger`, 3):** pre-commit runs `ledger validate --staged`, and any non-zero exit — findings, or a check that could not run — blocks the commit, STRICT or not. Pre-push runs `ledger validate --pushed` over each pushed ref and refuses a push that adds a provisional key when `keys.mode` is `cas` (and refuses when it cannot save git's ref lines for the checks after it). Post-commit runs `ledger inflight --push` in the background — the one leg that writes to the remote: with in-flight awareness on, it pushes this branch's in-flight ref, logging to `<git common dir>/doc-superpowers/ledger/push.log`, and never prompts. All three are silent without `docs/ledger/config.json`.
 
-**CI/CD (8 workflows — 2 shell-based, installed by default; 6 Claude-powered, opt-in by name):** The PR freshness check keeps one comment listing the docs the PR leaves stale or missing (`--ci-strict` fails the check). The weekly cron keeps one drift issue open while docs are stale and closes it after a clean check; with `docs/spec-claims/`, its claims step also re-runs the spec claims and re-proves every promotion, and the issue reports the findings. Both fail closed: a check that cannot run is never reported as "all current". Which docs a change touches comes from the doc index, not from path filters. (The post-merge `doc-index-update` workflow was retired in v3.0.0: it re-baselined docs nobody had read. `install --ci` removes an installed copy it owns.) Claude-powered workflows provide AI audit+update on feature branches, AI PR doc review with @claude interactive support, AI release notes drafting on release branches, AI spec compliance checks on PRs (with `docs/spec-claims/`, `doc-spec-verify` also runs a non-AI `claims` job on every same-repository PR — `claims validate`, `claims run` and `claims attest` for the plans the PR touches — which needs no Claude secret and fails on any finding; under `--ci-strict` it also fails when the check cannot run), AI PR full-cycle orchestration (review, update, diagram, sync), and AI per-PR release-notes fragment producer (drafts `RELEASE-NOTES.next/PR-<N>.md` on every push, consumed by the release workflow at release time; the release commit, which deletes the consumed fragments, must then reach `main` — until it does, the next release refuses rather than release them twice). Claude-powered workflows require one of `CLAUDE_CODE_OAUTH_TOKEN` (preferred) or `ANTHROPIC_API_KEY` as a GitHub Actions secret; if both are set, `CLAUDE_CODE_OAUTH_TOKEN` takes precedence. They run with the job's own `GITHUB_TOKEN` (so `permissions:` bounds the token, and its pushes trigger no other workflow — nor any check run: a PR whose head is the bot's commit waits at "Expected" for its required checks until you push again or close and reopen it), install this plugin from its GitHub tag for the installed version, run only for same-repository PRs, and give the agent a scoped tool list and a turn cap. The agent never commits: a later step checks which paths changed (only docs, or only the release files) and commits them without force. That check is not a sandbox: an agent steered by text it reads (a PR, a comment) can run code with the job's secrets and use the token repository-wide, so protect your base branch and `release/**` with required human review (`references/hooks.md`, *What an AI job's agent can reach*). `doc-release` opens its PR with that token, which needs the repository setting *Allow GitHub Actions to create and approve pull requests* — a setting that also lets workflow jobs approve pull requests.
+**Claude Code hooks (3, the `--claude` tier):** They read the event JSON on stdin and answer through Claude Code's JSON output (`additionalContext` for Claude, `systemMessage` for you). The pre-commit gate (PreToolUse) checks the staged tree of a `git commit`; a command that stages as it commits (`git add … && git commit`, `commit -a`) is left to the git pre-commit hook, which sees the real index, and the gate says so. Post-commit sync (PostToolUse) reports the docs a commit left stale. Session summary (Stop, which fires after every response) reports docs citing code changed in the working tree; a clean tree costs nothing. Every report stays under Claude Code's 10,000-character hook-output limit, whatever the stale count: each list names its first entries, then `…and N more` with the command for the full list. Each check has a time budget inside the hooks' 10 s timeout; past it the hook says `check skipped (budget)`, and under `DOC_SUPERPOWERS_STRICT=1` the gate blocks. No hook runs `update-index`: only a reviewer who read a doc against its code re-baselines it.
 
-Set `DOC_SUPERPOWERS_STRICT=1` to make the git pre-commit hook and the Claude pre-commit gate block instead of warn (the gate exits 2 with the reason on stderr). Set `DOC_SUPERPOWERS_QUIET=1` to suppress hook output while still enforcing checks (the Claude gate still gives Claude its block reason). Set `DOC_SUPERPOWERS_SKIP=1` to bypass all hooks temporarily, or `DOC_SUPERPOWERS_CLAIMS_SKIP=1` to bypass only the claims legs. A hook whose tooling is absent (no skill, no `docs/.doc-index.json`) stays silent, except the claims legs, which need no index: with the skill present they run whenever `docs/spec-claims/` exists; one whose check fails (jq missing from PATH, a corrupt index) prints one line saying so and, under STRICT, blocks.
+**Work-ledger Claude events (`--ledger-claude`, 2; it never installs the `--claude` tier):** SessionStart prints the unacked `stop` and `heads-up` notices for the session's branch (offline, at most 15 lines, a 2 s budget; silent with none or with in-flight awareness off), and PostToolUse (`Write|Edit`) suggests `ledger note <key> "…"` when a write lands under the config's `state_watch.paths` naming an item key and a `state_watch.patterns` phrase. Both are thin wrappers over `ledger notices --hook` and `ledger state-watch --hook`, which a host can register in its own committed `.claude/settings.json` instead (`references/hooks.md`).
+
+**CI/CD (9 workflows — 2 shell-based, installed by default; the shell workflow `doc-ledger-publish` and 6 Claude-powered ones, opt-in by name):** The PR freshness check keeps one comment listing the docs the PR leaves stale or missing (`--ci-strict` fails the check). The weekly cron keeps one drift issue open while docs are stale and closes it after a clean check; with `docs/spec-claims/`, its claims step also re-runs the spec claims and re-proves every promotion, and the issue reports the findings. Both fail closed: a check that cannot run is never reported as "all current". Which docs a change touches comes from the doc index, not from path filters. `doc-ledger-publish` runs `ledger publish` every 30 minutes (and by hand) to push the work-ledger views to their branch; without `docs/ledger/config.json` it does nothing. The workflows that run the claims check (`doc-freshness-schedule`, `doc-spec-verify`) and `doc-ledger-publish` ship the ledger helper set (`.github/scripts/ledger/`, `.github/scripts/adapters/`) — after upgrading, re-run `install --ci` and commit it (`hooks status --ci` warns until then). (The post-merge `doc-index-update` workflow was retired in v3.0.0: it re-baselined docs nobody had read. `install --ci` removes an installed copy it owns.) Claude-powered workflows provide AI audit+update on feature branches, AI PR doc review with @claude interactive support, AI release notes drafting on release branches, AI spec compliance checks on PRs (with `docs/spec-claims/`, `doc-spec-verify` also runs a non-AI `claims` job on every same-repository PR — `claims validate`, `claims run` and `claims attest` for the plans the PR touches — which needs no Claude secret and fails on any finding; under `--ci-strict` it also fails when the check cannot run), AI PR full-cycle orchestration (review, update, diagram, sync), and AI per-PR release-notes fragment producer (drafts `RELEASE-NOTES.next/PR-<N>.md` on every push, consumed by the release workflow at release time; the release commit, which deletes the consumed fragments, must then reach `main` — until it does, the next release refuses rather than release them twice). Claude-powered workflows require one of `CLAUDE_CODE_OAUTH_TOKEN` (preferred) or `ANTHROPIC_API_KEY` as a GitHub Actions secret; if both are set, `CLAUDE_CODE_OAUTH_TOKEN` takes precedence. They run with the job's own `GITHUB_TOKEN` (so `permissions:` bounds the token, and its pushes trigger no other workflow — nor any check run: a PR whose head is the bot's commit waits at "Expected" for its required checks until you push again or close and reopen it), install this plugin from its GitHub tag for the installed version, run only for same-repository PRs, and give the agent a scoped tool list and a turn cap. The agent never commits: a later step checks which paths changed (only docs, or only the release files) and commits them without force. That check is not a sandbox: an agent steered by text it reads (a PR, a comment) can run code with the job's secrets and use the token repository-wide, so protect your base branch and `release/**` with required human review (`references/hooks.md`, *What an AI job's agent can reach*). `doc-release` opens its PR with that token, which needs the repository setting *Allow GitHub Actions to create and approve pull requests* — a setting that also lets workflow jobs approve pull requests.
+
+Set `DOC_SUPERPOWERS_STRICT=1` to make the git pre-commit hook and the Claude pre-commit gate block instead of warn (the gate exits 2 with the reason on stderr). Set `DOC_SUPERPOWERS_QUIET=1` to suppress hook output while still enforcing checks (the Claude gate still gives Claude its block reason). Set `DOC_SUPERPOWERS_SKIP=1` to bypass all hooks temporarily (the work-ledger legs included), `DOC_SUPERPOWERS_CLAIMS_SKIP=1` to bypass only the claims legs, or `DOC_SUPERPOWERS_LEDGER_SKIP=1` to bypass only the work-ledger legs and events. `DOC_TOOLS_LEDGER_OFFLINE=1` keeps every ledger verb off the network (no adapter, no fetch; the SessionStart event sets it). In the `--git` and `--claude` tiers, a hook whose tooling is absent (no skill, no `docs/.doc-index.json`) stays silent, except the claims legs, which need no index: with the skill present they run whenever `docs/spec-claims/` exists; one whose check fails (jq missing from PATH, a corrupt index) prints one line saying so and, under STRICT, blocks. The work-ledger legs differ, as above: their pre-commit and pre-push block without STRICT.
 
 ## Generated Documentation
 
@@ -320,11 +342,11 @@ doc-superpowers/
 ├── .codex/               # Codex installation guide
 │   └── INSTALL.md
 ├── .github/              # This repo's own CI tier (installer output) + its test workflow
-│   ├── scripts/          # Vendored doc-tools.sh + doc-superpowers-steps/
+│   ├── scripts/          # Vendored doc-tools.sh + doc-superpowers-steps/ + the ledger helper set (ledger/, adapters/)
 │   └── workflows/
 │       ├── doc-freshness-pr.yml
 │       ├── doc-freshness-schedule.yml
-│       └── tests.yml     # This repo only: the six test suites (bash 5.x + 3.2), check-version, self-install check
+│       └── tests.yml     # This repo only: every test suite (bash 5.x + 3.2), check-version, self-install check
 ├── .opencode/            # OpenCode plugin + installation guide
 │   ├── INSTALL.md
 │   └── plugins/
@@ -344,13 +366,17 @@ doc-superpowers/
 │   ├── test-spec-status-model.sh # Test suite for the Spec Status Model + call sites
 │   ├── test-spec-claims.sh       # Test suite for the spec claims checker (doc-tools.sh claims)
 │   ├── test-doc-pr-release.sh    # Test suite for doc-pr-release helpers
+│   ├── test-ledger.sh            # Test suite for the work ledger (doc-tools.sh ledger, adapters, hook modes)
+│   ├── bench-ledger.sh           # Work-ledger performance check on a synthetic corpus (not run in CI)
+│   ├── ledger/                   # The work ledger's modules (lib.sh + sourced *.sh, *.jq, *.awk)
+│   ├── adapters/                 # Reference ledger adapters (ledger-pr-gh.sh, ledger-items-gh.sh; GitHub via gh)
 │   ├── merge-doc-index.sh        # Custom git merge driver for .doc-index.json
 │   ├── test-merge-driver.sh      # Test suite for merge driver
 │   └── hooks/
 │       ├── install.sh        # Hook installer engine
 │       ├── state.sh          # Install-state tracking
-│       ├── git/              # Git hook scripts (pre-commit, post-merge, etc.)
-│       ├── claude/           # Claude Code hook scripts
+│       ├── git/              # Git hook scripts (pre-commit, post-merge, etc.; ledger-* legs)
+│       ├── claude/           # Claude Code hook scripts (and ledger-session-notices, ledger-state-watch)
 │       └── ci/               # GitHub Actions workflow templates
 ├── references/
 │   ├── doc-spec.md       # Templates and conventions
@@ -361,6 +387,8 @@ doc-superpowers/
 │   ├── spec-lifecycle-actions.md  # Detailed procedures for spec lifecycle actions
 │   ├── spec-lifecycle-protocol.md # Spec lifecycle integration guide
 │   ├── spec-claims.md             # Spec claims (opt-in): schema, checks, adapters, gates
+│   ├── ledger.md                  # Work ledger (opt-in): config, verbs, keys, adapters, hooks, init
+│   ├── ledger-index.schema.json   # The work-ledger index shape (ledger-index/1)
 │   ├── integration-patterns.md    # Code review, commit review, wrapper skill integration
 │   └── tool-mappings.md           # Per-client tool names and capabilities
 ├── evals/                # Evaluation test cases
@@ -400,6 +428,7 @@ The skill runs the bundled tooling in `scripts/` and reads `references/` from it
 | `git` | Yes; **≥ 2.36** in a claims-enabled project | Already required by doc-superpowers. A claims check over a commit range that holds a merge reads the merge with `git show --remerge-diff` (git 2.36+); an older git makes that check indeterminate (exit 2) |
 | `jq` | Yes, **≥ 1.6** | `brew install jq` / `apt install jq`. 1.6 is the floor: the index writers use `--args` / `$ARGS.positional`. `doc-tools.sh` refuses an older jq with a clear error |
 | `sha256sum` or `shasum` | Yes | Standard on Linux/macOS respectively |
+| `gh` (GitHub CLI), authenticated | Only for the work ledger's GitHub adapters | `doc-superpowers:ledger-pr-gh`, `doc-superpowers:ledger-items-gh` and `ledger init --sources github`, when a project's `docs/ledger/config.json` names them |
 
 Everything else is the POSIX userland (`awk`, `sed`, `grep`, `mktemp`, …) as stock macOS and Linux ship it: no GNU-only tool (GNU sed, ripgrep) is needed. Where `awk` is mawk (Debian, Ubuntu), it must be 1.3.4 or newer: older mawk lacks the POSIX character classes (`[[:space:]]`) the tools use.
 
@@ -408,7 +437,7 @@ Everything else is the POSIX userland (`awk`, `sed`, `grep`, `mktemp`, …) as s
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes — the skill is `skills/doc-superpowers/SKILL.md` and `references/`, the tooling `scripts/`
-4. Run the six test suites under both bash 5.x and macOS's `/bin/bash` 3.2 (the loop and the suite list are in [CLAUDE.md → Conventions](CLAUDE.md#conventions)); all must pass. CI runs the same matrix
+4. Run every test suite under both bash 5.x and macOS's `/bin/bash` 3.2 (the loop and the suite list are in [CLAUDE.md → Conventions](CLAUDE.md#conventions)); all must pass. CI runs the same matrix
 5. If you changed a CI template, `scripts/doc-tools.sh` or a CI helper script, re-run `bash scripts/hooks/install.sh install --ci` and commit what it writes: this repository installs its own CI tier, and CI fails when the installed copies drift from their sources
 6. For a change to the skill's behaviour, also try it with `/doc-superpowers init` (or the action you changed) on a sample project
 7. Submit a PR

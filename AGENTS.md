@@ -4,7 +4,7 @@ Documentation orchestrator skill for AI coding agents. Generates, audits, and ma
 
 ## Skill Location
 
-The main skill definition is `skills/doc-superpowers/SKILL.md`. Activate it when the user asks about documentation quality, auditing, freshness, diagrams, specs, ADRs, or release notes.
+The main skill definition is `skills/doc-superpowers/SKILL.md`. Activate it when the user asks about documentation quality, auditing, freshness, diagrams, specs, ADRs, release notes, or a work ledger (keyed issue files, ledger views, related or in-flight work).
 
 ## Key Commands
 
@@ -23,6 +23,7 @@ The main skill definition is `skills/doc-superpowers/SKILL.md`. Activate it when
 | `spec-generate` | Generate formal specs from design doc |
 | `spec-inject` | Inject spec tasks or track drift |
 | `spec-verify` | Verify spec compliance |
+| `ledger` | Work ledger (opt-in, `docs/ledger/config.json`): `doc-tools.sh ledger <verb>` |
 
 ## Platform Setup
 
