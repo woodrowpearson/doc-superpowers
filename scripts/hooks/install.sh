@@ -112,11 +112,11 @@ source "$SCRIPT_DIR/state.sh"
 workflow_desc() {
   case "$1" in
     doc-freshness-pr) echo "PR opened/updated: one comment with the docs the diff leaves stale or missing; STRICT fails the check (contents: read, pull-requests: write)" ;;
-    doc-freshness-schedule) echo "weekly cron: opens/updates/closes an audit issue; with docs/spec-claims/, its claims step re-runs and re-proves the spec claims (contents: read, issues: write)" ;;
+    doc-freshness-schedule) echo "weekly cron: opens/updates/closes an audit issue; with docs/spec-claims/, its claims step re-runs and re-proves the spec claims (ships the ledger helper set: claims V5 reads ledger trackers) (contents: read, issues: write)" ;;
     doc-audit-update) echo "push to a non-base branch leaving docs stale: AI audit + update, a checked step commits docs to that branch (contents: write)" ;;
     doc-review-pr) echo "PR opened/updated touching indexed docs: AI review comment; @claude PR comments: tag mode (contents: read, pull-requests + issues: write)" ;;
     doc-release) echo "push to release/**: AI release-notes draft, a checked step commits it to a new branch and opens a PR (contents + pull-requests: write)" ;;
-    doc-spec-verify) echo "PR opened/updated touching indexed specs: AI spec-compliance comment; with docs/spec-claims/, a non-AI claims job on every same-repository PR (claims validate, run, attest; findings fail it) (contents: read, pull-requests: write)" ;;
+    doc-spec-verify) echo "PR opened/updated touching indexed specs: AI spec-compliance comment; with docs/spec-claims/, a non-AI claims job on every same-repository PR (claims validate, run, attest; findings fail it; ships the ledger helper set: claims V5 reads ledger trackers) (contents: read, pull-requests: write)" ;;
     doc-pr-full-cycle) echo "PR opened touching indexed docs: AI review + update + diagram + sync, a checked step commits docs to the PR branch (contents + pull-requests: write)" ;;
     doc-pr-release) echo "PR pushes: AI release-notes fragment, a checked step commits it to the PR branch; PR body edited (contents + pull-requests: write)" ;;
     doc-ledger-publish) echo "every 30 minutes and by hand: with docs/ledger/config.json, doc-tools.sh ledger publish renders the work-ledger views from the base and pushes them to views.branch; ships the ledger helper set (contents: write; pull-requests + issues: read, for the adapters)" ;;
@@ -1714,20 +1714,32 @@ run_tools() {
 # path the workflow guards with hashFiles('<path>') != '' it uses only when
 # another workflow ships it (doc-spec-verify.yml's claims job runs
 # update-pr-body.sh only beside doc-pr-release.yml): no reason to ship the
-# dir. Any other path it names under the dir is.
+# dir. Any other path it names under the dir is. A workflow that runs the
+# claims step (claims-check.sh: doc-freshness-schedule, doc-spec-verify)
+# needs the ledger set too: with docs/ledger/config.json, claims V5 reads
+# ledger trackers through scripts/ledger/ beside doc-tools.sh, and without it
+# judges none (indeterminate, "ledger-unavailable"). It ships whether or not
+# the config exists now — one added later must find it there.
 HELPER_SETS="doc-pr-release doc-superpowers-steps ledger"
 needed_helpers() {
   local need="" d w
   for d in $HELPER_SETS; do
     for w in $KNOWN_WORKFLOWS; do
       is_managed_workflow ".github/workflows/$w.yml" || continue
-      if workflow_runs_helper_dir ".github/workflows/$w.yml" "$d"; then
+      if workflow_runs_helper_dir ".github/workflows/$w.yml" "$d" \
+        || { [ "$d" = ledger ] && workflow_runs_claims ".github/workflows/$w.yml"; }; then
         need="${need:+$need }$d"
         break
       fi
     done
   done
   printf '%s' "$need"
+}
+
+# workflow_runs_claims <workflow file>: a line outside a comment names the
+# claims step script, .github/scripts/doc-superpowers-steps/claims-check.sh.
+workflow_runs_claims() {
+  awk '!/^[ \t]*#/ && index($0, ".github/scripts/doc-superpowers-steps/claims-check.sh") { f = 1 } END { exit !f }' "$1"
 }
 
 # workflow_runs_helper_dir <workflow file> <dir>: the workflow names a path
@@ -1957,6 +1969,14 @@ status_ci() {
   if [ "$state_ok" = 1 ] && [ "$STATE_HAS_CI" = 1 ]; then
     echo "  choices: base branch ${STATE_BASE:-main}, cron '${STATE_CRON:-0 9 * * 1}', strict ${STATE_STRICT:-false} ($STATE_FILE)"
   fi
+  # A claims workflow without the ledger set beside doc-tools.sh (installed
+  # before 3.3.0, or the set removed by hand): its V5 judges no ledger
+  # tracker. The next install --ci ships the set.
+  for w in $on_disk; do
+    if workflow_runs_claims ".github/workflows/$w.yml" && [ ! -f "$VENDOR_DEST/ledger/lib.sh" ]; then
+      printf "  ⚠ %s runs claims-check.sh without the ledger helper set (%s/ledger/): claims V5 cannot read ledger trackers there; re-run install --ci\n" "$w.yml" "$VENDOR_DEST"
+    fi
+  done
   local d n f label
   for d in doc-pr-release doc-superpowers-steps ledger adapters; do
     [ -d "$VENDOR_DEST/$d" ] || continue

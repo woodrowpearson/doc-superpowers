@@ -1827,6 +1827,36 @@ test_v5_ledger_unavailable() {
   teardown
 }
 
+test_v5_ledger_vendored_ci_tier() {
+  echo "test: V5 — a CI tier installed by install --ci judges a ledger tracker from .github/scripts/ (the ledger set vendored beside doc-tools.sh)"
+  claims_fixture
+  tracker_item "Won't Fix"
+  ledger_on
+  local rc=0 out vend rt
+  "$BASH_BIN" "$SCRIPT_DIR/hooks/install.sh" install --ci --workflows=doc-freshness-schedule >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "install --ci --workflows=doc-freshness-schedule exits 0"
+  assert_true "the ledger set is vendored beside doc-tools.sh" test -f .github/scripts/ledger/lib.sh
+  git add -A && git commit -qm "ci tier"
+  vend=$(harness_mktemp_d vend-run)
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$BASH_BIN" "$PWD/.github/scripts/doc-tools.sh" > "$vend/run"
+  chmod +x "$vend/run"
+  local DOC_TOOLS="$vend/run"
+  cl validate --all
+  assert_v5 "tracker is closed: docs/issues/token-ttl.md has status: Won't Fix" "the vendored doc-tools.sh: Won't Fix closes the tracker"
+  assert_json_field "$CL_OUT" '[.indeterminate[] | select(.check == "V5")] | length' "0" "…no ledger-unavailable row"
+  # The scheduled claims step itself, as the workflow runs it.
+  rt=$(harness_mktemp_d claims-rt)
+  rc=0
+  RUNNER_TEMP="$rt" GITHUB_OUTPUT="$rt/out" BASE_REF=main \
+    .github/scripts/doc-superpowers-steps/claims-check.sh scheduled >/dev/null 2>&1 </dev/null || rc=$?
+  assert_eq "0" "$rc" "claims-check.sh scheduled exits 0"
+  out=$(jq -c '[.[] | select(.verb == "validate")][0]' "$rt/claims-report.json" 2>/dev/null || echo invalid)
+  assert_contains "$(jq -r '[.findings[]? | select(.check == "V5") | .message] | join("\n")' <<<"$out" 2>/dev/null)" \
+    "tracker is closed: docs/issues/token-ttl.md has status: Won't Fix" "…its validate verdict carries the V5 finding"
+  assert_json_field "$out" '[.indeterminate[]? | select(.check == "V5")] | length' "0" "…and no ledger-unavailable row"
+  teardown
+}
+
 # --- V6 merge-base ratchet -----------------------------------------------------
 
 # The last `cl`'s V6 finding messages, one per line, and their count; its V6
@@ -10741,6 +10771,7 @@ run_tests() {
   test_v5_ledger_wontfix_closed
   test_v5_ledger_off_byte_identical
   test_v5_ledger_unavailable
+  test_v5_ledger_vendored_ci_tier
 
   # --- Task 5: V6 merge-base ratchet ---
   test_v6_states_changed_without_ruling

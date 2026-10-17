@@ -2973,6 +2973,91 @@ test_install_ci_every_referenced_helper_is_installed() {
   teardown
 }
 
+# _vendor_snapshot: every file under .github/scripts/ with its mode bits and
+# sha256, one line each, sorted — the vendored tree, byte for byte.
+_vendor_snapshot() {
+  local f
+  [ -d .github/scripts ] || return 0
+  find .github/scripts -type f | LC_ALL=C sort | while IFS= read -r f; do
+    printf '%s %s %s\n' "$f" "$(if [ -x "$f" ]; then echo x; else echo -; fi)" "$(shasum -a 256 < "$f" | cut -d' ' -f1)"
+  done
+}
+
+# _claims_templates: the templates whose steps run the claims step script.
+_claims_templates() {
+  local t
+  for t in "$HOOKS_DIR"/ci/*.yml; do
+    awk '!/^[ \t]*#/ && index($0, ".github/scripts/doc-superpowers-steps/claims-check.sh") { f = 1 } END { exit !f }' "$t" \
+      && basename "$t" .yml
+  done
+  return 0
+}
+
+test_ci_claims_templates_vendor_ledger() {
+  # claims-check.sh runs `doc-tools.sh claims …`, whose V5 reads ledger
+  # trackers through scripts/ledger/ when docs/ledger/config.json exists
+  # (work-ledger design §I). Without the ledger set beside the vendored
+  # doc-tools.sh, V5 judges no tracker there (ledger-unavailable). So every
+  # workflow that runs the claims step ships the ledger helper set — whether
+  # or not the config exists yet — and the set goes with the last of them.
+  echo "test: install --ci — each workflow running claims-check.sh vendors the ledger helper set; removing the last one removes it, byte for byte"
+  local claims w output exit_code f missing before after
+  claims=$(_claims_templates | tr '\n' ' ')
+  assert_eq "doc-freshness-schedule doc-spec-verify " "$claims" "the claims-running templates"
+  for w in $claims; do
+    setup
+    exit_code=0
+    output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows="$w" 2>&1) || exit_code=$?
+    assert_eq "0" "$exit_code" "$w: install exits 0"
+    missing=""
+    for f in "$SCRIPT_DIR"/ledger/*.sh "$SCRIPT_DIR"/ledger/*.awk "$SCRIPT_DIR"/ledger/*.jq "$SCRIPT_DIR"/adapters/*.sh; do
+      [ -f "$f" ] || continue
+      case "$f" in
+        */adapters/*) cmp -s "$f" ".github/scripts/adapters/${f##*/}" || missing="$missing adapters/${f##*/}" ;;
+        *) cmp -s "$f" ".github/scripts/ledger/${f##*/}" || missing="$missing ledger/${f##*/}" ;;
+      esac
+    done
+    assert_eq "" "$missing" "$w: the ledger modules and adapters are vendored, byte copies (no docs/ledger/config.json here)"
+    assert_contains "$output" "ledger helpers → .github/scripts/ledger/" "$w: the install reports the ledger set"
+    output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" status --ci 2>&1) || true
+    assert_contains "$output" "ledger helpers:" "$w: status reports the ledger modules"
+    assert_not_contains "$output" "without the ledger helper set" "$w: …and no missing-set warning"
+    # The set alone missing (an old install, a hand removal): status says so.
+    rm -rf .github/scripts/ledger .github/scripts/adapters
+    output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" status --ci 2>&1) || true
+    assert_contains "$output" "$w.yml runs claims-check.sh without the ledger helper set" "$w: status flags the missing set"
+    assert_contains "$output" "install --ci" "$w: …and names the fix"
+    "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows="$w" >/dev/null 2>&1
+    assert_true "$w: a re-install brings the set back" test -f .github/scripts/ledger/lib.sh
+    teardown
+  done
+
+  # Two claims workflows: the set stays while one remains, and leaves with
+  # the last — the vendored tree then byte-identical to the one before.
+  setup
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-freshness-pr >/dev/null 2>&1
+  before=$(_vendor_snapshot)
+  assert_true "doc-freshness-pr alone vendors no ledger set (it runs no claims step)" test ! -e .github/scripts/ledger
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-freshness-schedule,doc-spec-verify >/dev/null 2>&1
+  assert_true "two claims workflows: the set is vendored" test -f .github/scripts/ledger/lib.sh
+  exit_code=0
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-spec-verify >/dev/null 2>&1 || exit_code=$?
+  assert_eq "0" "$exit_code" "uninstall doc-spec-verify exits 0"
+  assert_true "doc-freshness-schedule still runs claims: the set stays" test -f .github/scripts/ledger/lib.sh
+  exit_code=0
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-freshness-schedule >/dev/null 2>&1 || exit_code=$?
+  assert_eq "0" "$exit_code" "uninstall doc-freshness-schedule exits 0"
+  assert_true "the last claims workflow gone: the ledger modules go" test ! -e .github/scripts/ledger
+  assert_true "…and the adapters" test ! -e .github/scripts/adapters
+  after=$(_vendor_snapshot)
+  assert_eq "$before" "$after" "the vendored tree is byte-identical to the one before the claims workflows"
+  # The publish workflow beside a claims workflow: the set follows either.
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-ledger-publish,doc-freshness-schedule >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-ledger-publish >/dev/null 2>&1
+  assert_true "publish removed, doc-freshness-schedule left: the set stays" test -f .github/scripts/ledger/lib.sh
+  teardown
+}
+
 test_ci_publish_template_vendors_ledger() {
   # doc-ledger-publish.yml runs `doc-tools.sh ledger publish`, which needs the
   # ledger modules beside the vendored doc-tools.sh: the workflow names
@@ -4034,6 +4119,7 @@ test_install_ci_helpers_false_refuses_doc_pr_release
 test_install_ci_ships_step_scripts_with_workflow
 test_install_ci_every_referenced_helper_is_installed
 test_ci_publish_template_vendors_ledger
+test_ci_claims_templates_vendor_ledger
 test_install_ci_helpers_false_still_wires_steps
 test_install_ci_version_comes_from_doc_tools
 test_install_ci_writes_state_file_on_first_install
