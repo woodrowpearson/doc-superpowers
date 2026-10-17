@@ -43,12 +43,13 @@ audit my project's documentation
 | `spec-generate` | Generate formal specs from design doc |
 | `spec-inject` | Inject spec tasks or track drift |
 | `spec-verify` | Verify spec compliance |
+| `ledger` | Work ledger (opt-in, `docs/ledger/config.json`): `doc-tools.sh ledger <verb>` |
 
 ## Tool names and capabilities
 
 The skill is written with Claude Code's tool names; Cursor's tools do the same jobs under different names. What each Claude Code tool corresponds to in Cursor, and which hook tiers, subagent and diagram features work here, is in the one capability matrix: [`references/tool-mappings.md`](../references/tool-mappings.md).
 
-For hooks in particular: git hooks and the CI workflows work as in any client. The Claude hook tier (`hooks install --claude`) is unverified under Cursor — Cursor's docs say it runs Claude Code hooks from `.claude/settings.json` when **Include Third-Party Plugins, Skills, and Other Configs** is enabled, but this tier writes `.claude/settings.local.json`, which they do not mention. Install it only after checking that the hooks fire, or use `hooks install --git --ci`.
+For hooks in particular: git hooks and the CI workflows work as in any client. The Claude hook tier (`hooks install --claude`) is unverified under Cursor — Cursor's docs say it runs Claude Code hooks from `.claude/settings.json` when **Include Third-Party Plugins, Skills, and Other Configs** is enabled, but this tier writes `.claude/settings.local.json`, which they do not mention. Install it only after checking that the hooks fire, or use `hooks install --git --ci`. The same holds for the work ledger's sets: its git legs (`hooks install --ledger`) work as any git hook; its Claude events (`--ledger-claude`, which add a `SessionStart` hook Cursor's docs do not map) are unverified.
 
 ## Spec Lifecycle
 
