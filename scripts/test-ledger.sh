@@ -11717,6 +11717,144 @@ test_lg_alloc_lowercase_forbidden_is_refusal() {
   teardown
 }
 
+# --- 3.3.1 item 9: validate.require_relations ---
+
+# lg_vrel: the no-relations findings of the last JSON verdict (lg_vf).
+lg_vrel() {
+  lg_vf | grep '^no-relations ' || true
+}
+
+# lg_rr_fixture: an open item with no relation (old.md) before the ledger,
+# then the adoption commit (config base main, plus require_relations "new").
+lg_rr_fixture() {
+  lg_fixture
+  lg_registry "$LG_REG_XY"
+  lg_item docs/issues/old.md "key: x-1" "ledger: x" "status: Open" "summary: Open since before the ledger came here"
+  git add -A && git commit -qm "before the ledger"
+  lg_enable '{"base":"main","validate":{"require_relations":"new"}}'
+  git add -A && git commit -qm "adopt the ledger"
+}
+
+test_lg_validate_require_relations_staged() {
+  echo "test: 3.3.1 item 9 — config validate.require_relations \"new\": validate --staged blocks an added open item naming no changes, consumes or relates (no-relations), unless its frontmatter says relations: none; modified and terminal items, and hosts without the key, are unchanged"
+  lg_rr_fixture
+  lg_item docs/issues/n.md "key: x-2" "ledger: x" "status: Open" "summary: A new open item that names no relation"
+  git add -A
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "an added open item with no relation: exit 1"
+  assert_eq "no-relations block docs/issues/n.md" "$(lg_vrel)" "…a blocking no-relations finding"
+  assert_contains "$(jq -r '.findings[] | select(.class == "no-relations") | .detail' <<<"$LG_OUT")" "relations: none" "…naming the opt-out"
+  lg validate --staged
+  assert_contains "$LG_OUT" "no-relations docs/issues/n.md" "text: one line for it"
+  local f
+  for f in "consumes: [field:order.total]" "changes: [field:order.total]" "relates: [depends-on:x-1]" "relations: none" "relations: None"; do
+    lg_item docs/issues/n.md "key: x-2" "ledger: x" "status: Open" "summary: A new open item that names no relation" "$f"
+    git add -A
+    lg validate --staged --format json
+    assert_eq "0|" "$LG_RC|$(lg_vrel)" "$f: passes"
+  done
+  lg_item docs/issues/n.md "key: x-2" "ledger: x" "status: Open" "summary: A new open item that names no relation" "relations: later"
+  git add -A
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "relations: later is no opt-out: exit 1"
+  # A terminal added item, and a modified open one: no finding.
+  lg_item docs/issues/n.md "key: x-2" "ledger: x" "status: Closed" "summary: A new closed item that names no relation"
+  printf '\n## Resolution\n\nDone.\n' >> docs/issues/n.md
+  printf '\nA log line.\n' >> docs/issues/old.md
+  git add -A
+  lg validate --staged --format json
+  assert_eq "0|" "$LG_RC|$(lg_vrel)" "an added closed item and a modified open one (old.md): no finding"
+  # Off (the key absent or null): no finding, exit 0.
+  lg_item docs/issues/n.md "key: x-2" "ledger: x" "status: Open" "summary: A new open item that names no relation"
+  git add -A
+  for f in '{"base":"main"}' '{"base":"main","validate":{"require_relations":null}}' '{"base":"main","validate":{}}'; do
+    lg_enable "$f"
+    lg validate --staged --format json
+    assert_eq "0|" "$LG_RC|$(lg_vrel)" "$f: off — no finding"
+  done
+  teardown
+}
+
+test_lg_validate_require_relations_all() {
+  echo "test: 3.3.1 item 9 — validate --all with validate.require_relations \"new\": an open item whose file is new since the adoption commit (not in its tree, nor renamed from a file there) and names no relation is reported (no-relations, advisory); items from before adoption, renamed ones, opted-out ones and ones with a relation are not; before adoption none is; a base that does not resolve: every open item counts (fails closed)"
+  lg_rr_fixture
+  lg_item docs/issues/a.md "key: x-2" "ledger: x" "status: Open" "summary: Added on the base after the ledger came"
+  lg_item docs/issues/b.md "key: x-3" "ledger: x" "status: Open" "summary: Added after the ledger came, opted out" "relations: none"
+  lg_item docs/issues/c.md "key: x-4" "ledger: x" "status: Open" "summary: Added after the ledger came, with a relation" "consumes: [field:order.total]"
+  lg_item docs/issues/d.md "key: x-5" "ledger: x" "status: Closed" "summary: Added after the ledger came, already closed"
+  printf '\n## Resolution\n\nDone.\n' >> docs/issues/d.md
+  git add -A && git commit -qm "items after adoption"
+  git mv docs/issues/old.md docs/issues/old-renamed.md
+  git commit -qm "rename an old item"
+  lg_item docs/issues/u.md "key: x-6" "ledger: x" "status: Open" "summary: Untracked, in the working tree only"
+  lg validate --all --format json
+  assert_eq "0" "$LG_RC" "advisory only: exit 0"
+  assert_eq "no-relations advisory docs/issues/a.md
+no-relations advisory docs/issues/u.md" "$(lg_vrel)" "a.md (committed after adoption) and u.md (untracked) are reported; old-renamed.md, b.md, c.md, d.md are not"
+  lg validate --all
+  assert_contains "$LG_OUT" "no-relations docs/issues/a.md" "text: a line for a.md"
+  assert_contains "$LG_OUT" "relations: none" "…naming the opt-out"
+  # Off: no finding.
+  lg_enable '{"base":"main"}'
+  lg validate --all --format json
+  assert_eq "" "$(lg_vrel)" "the key absent: no finding"
+  # Before adoption (config base has no commit adding config.json): none.
+  git checkout -q -- docs/ledger/config.json
+  git checkout -q -b pre "HEAD~3"
+  lg_item docs/issues/p.md "key: x-7" "ledger: x" "status: Open" "summary: Added before the ledger reached the base"
+  lg_enable '{"base":"pre","validate":{"require_relations":"new"}}'
+  git add docs/issues/p.md && git commit -qm "p before adoption"
+  lg validate --all --format json
+  assert_eq "" "$(lg_vrel)" "config.json on no commit of the base: no item is new"
+  # A base that does not resolve: every open item counts.
+  lg_enable '{"base":"origin/nowhere","validate":{"require_relations":"new"}}'
+  lg validate --all --format json
+  assert_eq "no-relations advisory docs/issues/old.md
+no-relations advisory docs/issues/p.md
+no-relations advisory docs/issues/u.md" "$(lg_vrel)" "base unresolved: every open item with no relation (fails closed)"
+  teardown
+}
+
+test_lg_validate_require_relations_config() {
+  echo "test: 3.3.1 item 9 — validate.require_relations takes null (off, the default) or \"new\"; any other value, or a validate that is not an object, is a config error: validate --staged and --all exit 2 naming the key"
+  lg_rr_fixture
+  local c
+  for c in '{"validate":{"require_relations":"all"}}' '{"validate":{"require_relations":true}}' '{"validate":{"require_relations":["new"]}}' '{"validate":"new"}'; do
+    lg_enable "$c"
+    lg validate --staged
+    assert_eq "2" "$LG_RC" "$c: --staged exit 2"
+    assert_contains "$LG_ERR" "validate.require_relations" "…naming the key"
+    lg validate --all
+    assert_eq "2" "$LG_RC" "$c: --all exit 2"
+  done
+  lg_enable '{"validate":{"require_relations":null}}'
+  lg validate --all
+  assert_eq "0" "$LG_RC" "null: exit 0"
+  teardown
+}
+
+test_lg_validate_all_state_watch_paths_without_patterns() {
+  echo "test: 3.3.1 item 6 — validate --all reports config state_watch.paths set with state_watch.patterns empty or absent (the state-watch hook never fires): one advisory config finding on docs/ledger/config.json; none with patterns, or without paths"
+  lg_fixture
+  lg_registry "$LG_REG_XY"
+  local c
+  for c in '{"state_watch":{"paths":["~/notes"]}}' '{"state_watch":{"paths":["~/notes"],"patterns":[]}}' \
+      '{"state_watch":{"paths":["~/notes"],"patterns":[""]}}' '{"state_watch":{"paths":["~/notes"],"patterns":null}}'; do
+    lg_enable "$c"
+    lg validate --all --format json
+    assert_eq "0|config advisory docs/ledger/config.json" "$LG_RC|$(lg_vf | grep '^config ' || true)" "$c: one advisory config finding, exit 0"
+    assert_contains "$(jq -r '.findings[] | select(.class == "config") | .detail' <<<"$LG_OUT")" "state_watch.patterns" "…naming state_watch.patterns"
+  done
+  lg validate --all
+  assert_contains "$LG_OUT" "config docs/ledger/config.json state_watch.paths" "text: the config line"
+  for c in '{"state_watch":{"paths":["~/notes"],"patterns":["next:"]}}' '{}' '{"state_watch":{"paths":[],"patterns":[]}}' '{"state_watch":{"paths":[""]}}'; do
+    lg_enable "$c"
+    lg validate --all --format json
+    assert_eq "" "$(lg_vf | grep '^config ' || true)" "$c: no config finding"
+  done
+  teardown
+}
+
 test_lg_hook_clip_constants_pinned() {
   echo "test: the ledger hook modes clip with hook-lib.sh's constants (HOOK_MAX_CHARS, HOOK_LINES_MAX): one changed without the other fails here"
   local v lib lg
@@ -12240,6 +12378,10 @@ run_tests() {
   test_lg_init_put_refuses_symlink
   test_lg_merge_finalize_remote_recheck
   test_lg_alloc_lowercase_forbidden_is_refusal
+  test_lg_validate_require_relations_staged
+  test_lg_validate_require_relations_all
+  test_lg_validate_require_relations_config
+  test_lg_validate_all_state_watch_paths_without_patterns
 
   print_summary
 }

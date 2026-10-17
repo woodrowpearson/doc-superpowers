@@ -1,5 +1,5 @@
-# The work-ledger config: the defaults (design §B, verbatim), deep-merged
-# under the host's docs/ledger/config.json. Run as
+# The work-ledger config: the defaults (design §B, verbatim; "validate" from
+# 3.3.1), deep-merged under the host's docs/ledger/config.json. Run as
 #   jq -n --argjson h <host-config-object> -f config.jq
 # jq's `*`: objects merge key by key, recursively; arrays and scalars
 # (including null) in the host replace the default, so a host may give a
@@ -26,6 +26,7 @@
   "cache": { "remote_ttl_minutes": 10 },
   "adapters": { "pr": null, "contracts": null },
   "state_watch": { "paths": [], "patterns": [] },
+  "validate": { "require_relations": null },
   "legacy": "docs/ledger/legacy.json",
   "legacy_ids": [],
   "legacy_ledgers": {}
