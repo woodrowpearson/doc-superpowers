@@ -2581,7 +2581,9 @@ ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed
   commit cannot be known: no item is from before it (fails closed). --plan: every row of the plan's
   "Related work" table is marked include or exclude: <reason> (advisory;
   --strict blocks). --pushed (for pre-push hooks): with keys.mode cas, each
-  provisional key the range introduces blocks; merge mode passes. --registry
+  provisional key the range introduces blocks (an all-zeros <a>, a new
+  branch: those it adds since config base; a key the base carries too is
+  named with ledger finalize --all); merge mode passes. --registry
   checks docs/ledger/ledgers.json: schema, ledger ids, statuses, kinds,
   contract ids, globs, and that no tracked file is claimed by two ledgers
   (overlap) or, once any ledger declares paths, that every tracked file
@@ -2618,10 +2620,11 @@ ledger init|cmd_ledger_init|repo|dry-run registry= report= accept= import source
   | --accept <decisions.tsv> [--dry-run] | --import  [--format text|json]
   Bootstrap the ledger. Runs without docs/ledger/config.json (on the
   default config, {}); only --accept writes one. One mode per run.
-  --report writes three files and nothing else: <file> (a markdown
-  report: Sources, Hand-written ledgers, Registry, Registry findings,
-  Assignment summary, Next steps), docs/ledger/ledgers.proposed.json and
-  <file>.decisions.tsv (each through a temp file and mv; the report last).
+  --report writes <file> (a markdown report: Sources, Hand-written
+  ledgers, Registry, Registry findings, Assignment summary, Next steps)
+  and, with no --registry, docs/ledger/ledgers.proposed.json; with one,
+  <file>.decisions.tsv (the previous one kept as <file>.decisions.tsv.bak)
+  — nothing else (each through a temp file and mv; the report last).
   A report or decisions path that is — under any spelling or symbolic
   link — ledgers.json, config.json, the legacy map, the proposal or the
   --registry file exits 3, as does a --registry path holding a tab or a
@@ -2792,7 +2795,7 @@ Options:
   --opt VALUE and --opt=VALUE are the same, and options may appear anywhere
   on the line; "--" ends them. --help (-h) prints a subcommand's usage and
   exits 0. An option a subcommand does not take is an error (exit 2; 3 for
-  a claims subcommand), never silently ignored.
+  a claims or ledger subcommand), never silently ignored.
 
 Mapping lines (stdin of build-index and add-entry, one doc per line):
   doc_path:code_refs_csv:doc_type
@@ -7311,7 +7314,7 @@ _claims_v5_ledger() {
   local list="$1" out="$2" err="$_SCRATCH/cl-v5-ledger.err" rc msg n m
   local ixopt=()
   if [ ! -f "$SCRIPT_DIR/ledger/lib.sh" ]; then
-    _claims_indeterminate V5 - "ledger-unavailable: docs/ledger/config.json turns the work ledger on, and V5 reads trackers through it, but scripts/ledger/ is not beside doc-tools.sh ($SCRIPT_DIR/ledger; vendor it with doc-tools.sh tools install --helper ledger)"
+    _claims_indeterminate V5 - "ledger-unavailable: docs/ledger/config.json turns the work ledger on, and V5 reads trackers through it, but scripts/ledger/ is not beside doc-tools.sh ($SCRIPT_DIR/ledger; a CI tier: re-run scripts/hooks/install.sh install --ci, which ships it with the claims workflows on a ledger host, and commit it; another vendored copy: doc-tools.sh tools install --helper ledger)"
     return 1
   fi
   case "$_CL_MODE" in
