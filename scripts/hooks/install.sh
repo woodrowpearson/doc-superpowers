@@ -2112,6 +2112,8 @@ case "$SKILL_DIR" in
 esac
 
 DO_GIT=false DO_CLAUDE=false DO_CI=false DO_LEDGER=false DO_LEDGER_CLAUDE=false
+# --claude named itself (not through --all, which never reports a ledger set).
+CLAUDE_NAMED=false
 OPT_BASE="" OPT_CRON="" OPT_STRICT="" HELPERS=true FORCE=false TRANSIENT=false
 WF_MODE=plain CSV_NAMES=""
 SEEN_CI_OPTS=""
@@ -2152,7 +2154,7 @@ while [ $# -gt 0 ]; do
   esac
   case "$name" in
     --git) DO_GIT=true ;;
-    --claude) DO_CLAUDE=true ;;
+    --claude) DO_CLAUDE=true CLAUDE_NAMED=true ;;
     --ci) DO_CI=true ;;
     --all) DO_GIT=true DO_CLAUDE=true DO_CI=true ;;
     --ledger) DO_LEDGER=true ;;
@@ -2284,8 +2286,9 @@ case "$COMMAND" in
     # status --claude: the ledger's Claude set lives in the same settings
     # file, so once any of it is installed it is reported too (an install
     # older than this one — a state-watch entry without MultiEdit — reads
-    # outdated there, naming install --ledger-claude).
-    if $DO_CLAUDE && ! $DO_LEDGER_CLAUDE && lg_claude_present; then
+    # outdated there, naming install --ledger-claude). Not status --all:
+    # --all names the three tiers, never a ledger set.
+    if $CLAUDE_NAMED && ! $DO_LEDGER_CLAUDE && lg_claude_present; then
       DO_LEDGER_CLAUDE=true
     fi
     echo ""
