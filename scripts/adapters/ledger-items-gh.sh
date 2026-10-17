@@ -7,10 +7,14 @@
 # repository from its remotes).
 #
 #   ledger-items-gh.sh list [--since <timestamp>]
-#     One call: gh issue list --state all --limit 1000 --json number,title,
-#     body,state,stateReason,labels,updatedAt,url. When it returns as many
-#     issues as its limit, the list may be cut: exit 2 ("could not list
-#     completely"), never a silent truncation. --since keeps the issues
+#     One call: gh issue list --state all --limit <LEDGER_GH_LIMIT> --json
+#     number,title,body,state,stateReason,labels,updatedAt,url,closedAt (gh
+#     pages through them). The limit counts every issue, open and closed:
+#     LEDGER_GH_LIMIT, a positive integer, default 10000 (final review
+#     OPS-I3; a mature repository passes 1,000). When gh returns as many
+#     issues as the limit, the list may be cut: exit 2 ("could not list
+#     completely", naming LEDGER_GH_LIMIT), never a silent truncation. The
+#     ledger lists in full at each cache.remote_ttl_minutes. --since keeps the issues
 #     whose updatedAt is that timestamp or later (compared as strings: give
 #     gh's form, 2026-10-01T00:00:00Z). Output: one compact JSON line per
 #     issue, in gh's order —
@@ -92,7 +96,7 @@ die() {
 LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/ledger"
 LP=${LEDGER_GH_LEDGER_PREFIX:-ledger:}
 SP=${LEDGER_GH_SEV_PREFIX:-sev:}
-LIMIT=1000
+LIMIT=${LEDGER_GH_LIMIT:-10000}
 FIELDS=number,title,body,state,stateReason,labels,updatedAt,url,closedAt
 BOM=$'\357\273\277'
 # The metadata block in a body (jq): blk → {pre, open, blk, close, post},
@@ -177,6 +181,9 @@ cmd_list() {
       *) usage ;;
     esac
   done
+  case "$LIMIT" in
+    ''|*[!0123456789]*|0*) die "LEDGER_GH_LIMIT must be a positive integer (got '$LIMIT')" ;;
+  esac
   need
   [ -f "$LIB/frontmatter.awk" ] || die "scripts/ledger/frontmatter.awk is not beside this adapter's directory ($LIB)"
   tmpd
@@ -198,7 +205,7 @@ records() {
   # shellcheck disable=SC2016  # jq source
   if ! jq -r --argjson limit "$limit" --arg since "$since" "$JQ_BLOCK"'
       if type != "array" then error("gh issue list did not print a JSON list")
-      elif length >= $limit then error("could not list completely: \(length) issues ≥ limit \($limit)")
+      elif length >= $limit then error("could not list completely: \(length) issues ≥ limit \($limit) (raise LEDGER_GH_LIMIT)")
       else .[] end
       | if (.number | type) != "number" or .number < 1 or (.number | floor) != .number then error("an issue without a number: \(tojson | .[0:200])") else . end
       | select($since == "" or ((.updatedAt // "") | tostring) >= $since)

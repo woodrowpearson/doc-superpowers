@@ -8292,7 +8292,7 @@ LG_ITEMS_JSON='[{"number":12,"title":"Totals drift","body":"Intro paragraph\nwra
  {"number":15,"title":"Long","body":"","state":"OPEN","stateReason":null,"labels":[{"name":"area/y"},{"name":"priority/P2"}],"updatedAt":"2026-10-07T10:00:00Z","url":"https://github.com/o/r/issues/15"}]'
 
 test_lg_items_gh_list_normalises() {
-  echo "test: ledger-items-gh.sh list — gh issue list (all states, limit 1000) normalised to {ref, url, title, body_excerpt, status, fields, labels, updated} lines; ledger and severity from prefixed labels; --since; at the limit, gh missing or failing, bad JSON: exit 2"
+  echo "test: ledger-items-gh.sh list — gh issue list (all states, limit LEDGER_GH_LIMIT, default 10000) normalised to {ref, url, title, body_excerpt, status, fields, labels, updated} lines; ledger and severity from prefixed labels; --since; at the limit, gh missing or failing, bad JSON: exit 2"
   lg_fixture
   lg_fake_gh
   local long bin bb
@@ -8300,7 +8300,7 @@ test_lg_items_gh_list_normalises() {
   long=$(jq -nr '([range(80)] | map("word") | join(" "))[0:279] + "…"')
   lg_items_gh list
   assert_eq "0" "$LG_RC" "exit 0"
-  assert_eq "issue list --state all --limit 1000 --json number,title,body,state,stateReason,labels,updatedAt,url,closedAt" "$(cat "$LG_GH/args")" "one gh call"
+  assert_eq "issue list --state all --limit 10000 --json number,title,body,state,stateReason,labels,updatedAt,url,closedAt" "$(cat "$LG_GH/args")" "one gh call (limit 10000: final review OPS-I3)"
   assert_eq "4" "$(printf '%s\n' "$LG_OUT" | grep -c .)" "one line per issue"
   assert_eq '{"ref":"gh#12","url":"https://github.com/o/r/issues/12","title":"Totals drift","body_excerpt":"Intro paragraph wraps here.","status":"Open","fields":{"key":"x-12","summary":"Totals drift when the cart is edited","changes":["field:order.total"],"owed":"deploy: then verify #2","ledger":"x","severity":"P1"},"labels":["ledger:x","sev:P1","bug"],"updated":"2026-10-01T10:00:00Z","closed":null,"fm_errors":[]}' \
     "$(printf '%s\n' "$LG_OUT" | sed -n 1p)" "the block's fields (frontmatter grammar), ledger and severity from labels, the first paragraph"
@@ -8326,11 +8326,22 @@ test_lg_items_gh_list_normalises() {
   assert_eq "0|" "$LG_RC|$LG_OUT" "no issues: exit 0, no lines"
   jq -n '[range(1000) | {number: (. + 1), title: "t", body: "", state: "OPEN", stateReason: null, labels: [], updatedAt: "2026-10-01T00:00:00Z", url: "u"}]' > "$LG_GH/issues.json"
   lg_items_gh list
-  assert_eq "2" "$LG_RC" "1000 issues: the list may be cut — exit 2, never a silent truncation"
+  assert_eq "0|1000" "$LG_RC|$(printf '%s\n' "$LG_OUT" | grep -c .)" "1000 issues (a mature repository) under the default limit: exit 0, every one"
+  : > "$LG_GH/args"
+  LG_RC=0
+  LG_ERR=$(LEDGER_GH_LIMIT=1000 "$BASH_BIN" "$REPO_DIR/scripts/adapters/ledger-items-gh.sh" list 2>&1 >/dev/null </dev/null) || LG_RC=$?
+  assert_eq "2" "$LG_RC" "1000 issues at LEDGER_GH_LIMIT=1000: the list may be cut — exit 2, never a silent truncation"
   assert_contains "$LG_ERR" "could not list completely: 1000 issues" "…saying why"
+  assert_contains "$LG_ERR" "LEDGER_GH_LIMIT" "…and naming the setting that raises it"
+  assert_contains "$(cat "$LG_GH/args")" "--limit 1000 " "LEDGER_GH_LIMIT is gh's --limit"
   jq -c '.[0:999]' "$LG_GH/issues.json" > "$LG_GH/i2" && mv "$LG_GH/i2" "$LG_GH/issues.json"
-  lg_items_gh list
-  assert_eq "0|999" "$LG_RC|$(printf '%s\n' "$LG_OUT" | grep -c .)" "999 issues: exit 0, every one"
+  LG_RC=0
+  LG_OUT=$(LEDGER_GH_LIMIT=1000 "$BASH_BIN" "$REPO_DIR/scripts/adapters/ledger-items-gh.sh" list 2>/dev/null </dev/null) || LG_RC=$?
+  assert_eq "0|999" "$LG_RC|$(printf '%s\n' "$LG_OUT" | grep -c .)" "999 issues under LEDGER_GH_LIMIT=1000: exit 0, every one"
+  LG_RC=0
+  LG_ERR=$(LEDGER_GH_LIMIT=lots "$BASH_BIN" "$REPO_DIR/scripts/adapters/ledger-items-gh.sh" list 2>&1 >/dev/null </dev/null) || LG_RC=$?
+  assert_eq "2" "$LG_RC" "LEDGER_GH_LIMIT not a positive integer: exit 2"
+  assert_contains "$LG_ERR" "LEDGER_GH_LIMIT" "…naming it"
   printf 'not json\n' > "$LG_GH/issues.json"
   lg_items_gh list
   assert_eq "2" "$LG_RC" "gh prints something that is not JSON: exit 2"
