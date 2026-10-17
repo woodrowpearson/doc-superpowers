@@ -2950,6 +2950,11 @@ _assert_installed_workflows_wired() {
       # another workflow ships it (doc-spec-verify.yml's claims job and
       # doc-pr-release.yml's update-pr-body.sh): not this install's to ship.
       grep -qF "hashFiles('$ref') != ''" "$wf" && continue
+      # The ledger helper set ships only on a ledger host (final review
+      # OPS-I1); elsewhere ledger-publish.sh runs the verb's inert line.
+      case "$ref" in
+        .github/scripts/ledger/*|.github/scripts/adapters/*) [ -f docs/ledger/config.json ] || continue ;;
+      esac
       [ -x "$ref" ] || missing="${missing} ${ref}"
     done <<<"$refs"
   done
@@ -2971,6 +2976,237 @@ test_install_ci_every_referenced_helper_is_installed() {
   assert_contains "$refs" ".github/scripts/doc-superpowers-steps/verify-fragment.sh" "doc-pr-release.yml runs its verify step"
   _assert_installed_workflows_wired "install --ci --workflows=all"
   teardown
+}
+
+# _vendor_snapshot: every file under .github/scripts/ with its mode bits and
+# sha256, one line each, sorted — the vendored tree, byte for byte.
+_vendor_snapshot() {
+  local f
+  [ -d .github/scripts ] || return 0
+  find .github/scripts -type f | LC_ALL=C sort | while IFS= read -r f; do
+    printf '%s %s %s\n' "$f" "$(if [ -x "$f" ]; then echo x; else echo -; fi)" "$(shasum -a 256 < "$f" | cut -d' ' -f1)"
+  done
+}
+
+# _claims_templates: the templates whose steps run the claims step script.
+_claims_templates() {
+  local t
+  for t in "$HOOKS_DIR"/ci/*.yml; do
+    awk '!/^[ \t]*#/ && index($0, ".github/scripts/doc-superpowers-steps/claims-check.sh") { f = 1 } END { exit !f }' "$t" \
+      && basename "$t" .yml
+  done
+  return 0
+}
+
+test_ci_claims_templates_vendor_ledger() {
+  # claims-check.sh runs `doc-tools.sh claims …`, whose V5 reads ledger
+  # trackers through scripts/ledger/ when docs/ledger/config.json exists
+  # (work-ledger design §I). Without the ledger set beside the vendored
+  # doc-tools.sh, V5 judges no tracker there (ledger-unavailable). So on a
+  # ledger host (the config exists) every workflow that runs the claims step
+  # ships the ledger helper set, and the set goes with the last of them; a
+  # host without the config gets none and no warning, and a set vendored
+  # before goes on the next install --ci (final review OPS-I1, ruled).
+  echo "test: install --ci — on a ledger host each workflow running claims-check.sh vendors the ledger helper set (removing the last one removes it, byte for byte); without docs/ledger/config.json none is vendored and status warns nothing"
+  local claims w output exit_code f missing before after
+  claims=$(_claims_templates | tr '\n' ' ')
+  assert_eq "doc-freshness-schedule doc-spec-verify " "$claims" "the claims-running templates"
+  for w in $claims; do
+    setup
+    # No ledger here: no set, no warning.
+    exit_code=0
+    output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows="$w" 2>&1) || exit_code=$?
+    assert_eq "0" "$exit_code" "$w (no ledger): install exits 0"
+    assert_true "$w (no ledger): no ledger modules vendored" test ! -e .github/scripts/ledger
+    assert_true "$w (no ledger): …and no adapters" test ! -e .github/scripts/adapters
+    assert_not_contains "$output" "ledger helpers" "$w (no ledger): the install reports no ledger set"
+    output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" status --ci 2>&1) || true
+    assert_not_contains "$output" "without the ledger helper set" "$w (no ledger): status warns nothing"
+    # A ledger host: the set ships.
+    mkdir -p docs/ledger
+    printf '{}\n' > docs/ledger/config.json
+    exit_code=0
+    output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows="$w" 2>&1) || exit_code=$?
+    assert_eq "0" "$exit_code" "$w: install exits 0"
+    missing=""
+    for f in "$SCRIPT_DIR"/ledger/*.sh "$SCRIPT_DIR"/ledger/*.awk "$SCRIPT_DIR"/ledger/*.jq "$SCRIPT_DIR"/adapters/*.sh; do
+      [ -f "$f" ] || continue
+      case "$f" in
+        */adapters/*) cmp -s "$f" ".github/scripts/adapters/${f##*/}" || missing="$missing adapters/${f##*/}" ;;
+        *) cmp -s "$f" ".github/scripts/ledger/${f##*/}" || missing="$missing ledger/${f##*/}" ;;
+      esac
+    done
+    assert_eq "" "$missing" "$w: the ledger modules and adapters are vendored, byte copies"
+    assert_contains "$output" "ledger helpers → .github/scripts/ledger/" "$w: the install reports the ledger set"
+    output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" status --ci 2>&1) || true
+    assert_contains "$output" "ledger helpers:" "$w: status reports the ledger modules"
+    assert_not_contains "$output" "without the ledger helper set" "$w: …and no missing-set warning"
+    # The set alone missing (a hand removal, the config added after the
+    # install): status says so.
+    rm -rf .github/scripts/ledger .github/scripts/adapters
+    output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" status --ci 2>&1) || true
+    assert_contains "$output" "$w.yml runs claims-check.sh without the ledger helper set" "$w: status flags the missing set"
+    assert_contains "$output" "install --ci" "$w: …and names the fix"
+    "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows="$w" >/dev/null 2>&1
+    assert_true "$w: a re-install brings the set back" test -f .github/scripts/ledger/lib.sh
+    # The config gone: the next install --ci removes the set.
+    rm -f docs/ledger/config.json
+    "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows="$w" >/dev/null 2>&1
+    assert_true "$w: no config any more: the next install --ci removes the ledger modules" test ! -e .github/scripts/ledger
+    assert_true "$w: …and the adapters" test ! -e .github/scripts/adapters
+    teardown
+  done
+
+  # A set vendored before (3.3.0's first cut, or by hand) on a host without
+  # the ledger: the next install --ci removes it, byte for byte.
+  setup
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-freshness-schedule >/dev/null 2>&1
+  before=$(_vendor_snapshot)
+  "$BASH_BIN" "$SCRIPT_DIR/doc-tools.sh" tools install --dest .github/scripts --helper ledger >/dev/null 2>&1
+  assert_true "a set vendored by hand" test -f .github/scripts/ledger/lib.sh
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-freshness-schedule >/dev/null 2>&1
+  after=$(_vendor_snapshot)
+  assert_eq "$before" "$after" "no config: install --ci removes it, the vendored tree byte-identical to the one before"
+  teardown
+
+  # Two claims workflows on a ledger host: the set stays while one remains,
+  # and leaves with the last — the vendored tree then byte-identical to the
+  # one before.
+  setup
+  mkdir -p docs/ledger
+  printf '{}\n' > docs/ledger/config.json
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-freshness-pr >/dev/null 2>&1
+  before=$(_vendor_snapshot)
+  assert_true "doc-freshness-pr alone vendors no ledger set (it runs no claims step)" test ! -e .github/scripts/ledger
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-freshness-schedule,doc-spec-verify >/dev/null 2>&1
+  assert_true "two claims workflows: the set is vendored" test -f .github/scripts/ledger/lib.sh
+  exit_code=0
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-spec-verify >/dev/null 2>&1 || exit_code=$?
+  assert_eq "0" "$exit_code" "uninstall doc-spec-verify exits 0"
+  assert_true "doc-freshness-schedule still runs claims: the set stays" test -f .github/scripts/ledger/lib.sh
+  exit_code=0
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-freshness-schedule >/dev/null 2>&1 || exit_code=$?
+  assert_eq "0" "$exit_code" "uninstall doc-freshness-schedule exits 0"
+  assert_true "the last claims workflow gone: the ledger modules go" test ! -e .github/scripts/ledger
+  assert_true "…and the adapters" test ! -e .github/scripts/adapters
+  after=$(_vendor_snapshot)
+  assert_eq "$before" "$after" "the vendored tree is byte-identical to the one before the claims workflows"
+  # The publish workflow beside a claims workflow: the set follows either.
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-ledger-publish,doc-freshness-schedule >/dev/null 2>&1
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-ledger-publish >/dev/null 2>&1
+  assert_true "publish removed, doc-freshness-schedule left: the set stays" test -f .github/scripts/ledger/lib.sh
+  teardown
+}
+
+test_ci_publish_template_vendors_ledger() {
+  # doc-ledger-publish.yml runs `doc-tools.sh ledger publish`, which needs the
+  # ledger modules beside the vendored doc-tools.sh: the workflow names
+  # .github/scripts/ledger/, so install --ci ships the ledger helper set with
+  # it (needed_helpers) and takes it away with it.
+  echo "test: doc-ledger-publish.yml — every 30 minutes and by hand, contents: write, runs ledger publish; install --ci vendors the ledger helper set with it, uninstall removes it"
+  local tpl="$HOOKS_DIR/ci/doc-ledger-publish.yml"
+  assert_file_exists "$tpl" "the template exists"
+  local t
+  t=$(cat "$tpl" 2>/dev/null || true)
+  assert_eq "# doc-superpowers workflow v1" "$(head -n 1 "$tpl" 2>/dev/null || true)" "it carries the workflow marker (the installer owns it)"
+  assert_contains "$t" "- cron: '*/30 * * * *'" "scheduled every 30 minutes"
+  assert_contains "$t" "workflow_dispatch:" "…and runnable by hand"
+  assert_contains "$t" "contents: write" "contents: write (it pushes the views branch)"
+  assert_contains "$t" ".github/scripts/doc-superpowers-steps/ledger-publish.sh" "its step runs the vendored publish step script"
+  assert_contains "$t" ".github/scripts/ledger/" "…and names the vendored ledger helper set"
+  assert_contains "$(cat "$HOOKS_DIR/ci/doc-superpowers-steps/ledger-publish.sh" 2>/dev/null || true)" "ledger publish" \
+    "…which runs doc-tools.sh ledger publish"
+  setup
+  local output exit_code=0 f missing=""
+  # Named without the ledger: the workflow is installed (it prints "not
+  # enabled" until the config exists), the set is not (OPS-I1, ruled).
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-ledger-publish 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "no ledger: install --ci --workflows=doc-ledger-publish exits 0"
+  assert_file_exists ".github/workflows/doc-ledger-publish.yml" "no ledger: the named workflow is installed"
+  assert_true "no ledger: no ledger set vendored" test ! -e .github/scripts/ledger
+  mkdir -p docs/ledger
+  printf '{}\n' > docs/ledger/config.json
+  exit_code=0
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-ledger-publish 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "install --ci --workflows=doc-ledger-publish exits 0"
+  assert_file_exists ".github/workflows/doc-ledger-publish.yml" "the workflow is installed"
+  for f in "$SCRIPT_DIR"/ledger/*.sh "$SCRIPT_DIR"/ledger/*.awk "$SCRIPT_DIR"/ledger/*.jq; do
+    [ -f "$f" ] || continue
+    cmp -s "$f" ".github/scripts/ledger/${f##*/}" || missing="$missing ledger/${f##*/}"
+  done
+  for f in "$SCRIPT_DIR"/adapters/*.sh; do
+    [ -f "$f" ] || continue
+    cmp -s "$f" ".github/scripts/adapters/${f##*/}" || missing="$missing adapters/${f##*/}"
+  done
+  assert_eq "" "$missing" "the ledger modules and adapters are vendored, byte copies"
+  assert_true "the publish step script is vendored executable" test -x .github/scripts/doc-superpowers-steps/ledger-publish.sh
+  assert_true "doc-pr-release's helpers are not (no workflow runs them)" test ! -e .github/scripts/doc-pr-release
+  assert_contains "$output" "ledger helpers → .github/scripts/ledger/" "the install reports the ledger helper set"
+  _assert_installed_workflows_wired "install --ci --workflows=doc-ledger-publish"
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" status --ci 2>&1) || true
+  assert_contains "$output" "ledger helpers:" "status reports the ledger modules"
+  assert_contains "$output" "ledger adapters:" "…and the adapters"
+  # Another workflow beside it keeps the step scripts; the ledger set follows
+  # the publish workflow alone.
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-freshness-pr >/dev/null 2>&1
+  exit_code=0
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci --workflows=doc-ledger-publish 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "uninstall --ci --workflows=doc-ledger-publish exits 0"
+  assert_file_not_exists ".github/workflows/doc-ledger-publish.yml" "the workflow is removed"
+  assert_true "the ledger modules are removed with it" test ! -e .github/scripts/ledger
+  assert_true "…and the adapters" test ! -e .github/scripts/adapters
+  assert_true "the step scripts stay (doc-freshness-pr runs them)" test -x .github/scripts/doc-superpowers-steps/freshness-check.sh
+  # An adapter of your own in .github/scripts/adapters/ survives the removal.
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-ledger-publish >/dev/null 2>&1
+  printf '#!/bin/sh\n' > .github/scripts/adapters/mine.sh
+  "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --ci >/dev/null 2>&1 || true
+  assert_file_exists ".github/scripts/adapters/mine.sh" "a full uninstall keeps an adapter of your own"
+  assert_file_not_exists ".github/scripts/adapters/ledger-items-gh.sh" "…and removes the plugin's"
+  teardown
+}
+
+test_ci_workflows_all_skips_publish_without_ledger() {
+  # --workflows=all would install the every-30-minutes publish cron on a host
+  # without the ledger: 48 billed no-op runs a day (final review OPS-I2,
+  # ruled). all skips it there, with one note line; naming it installs it.
+  echo "test: install --ci --workflows=all skips doc-ledger-publish without docs/ledger/config.json (one note line); with the config it installs it; an explicit name installs it either way"
+  local output exit_code w
+  setup
+  exit_code=0
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=all 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "no ledger: --workflows=all exits 0"
+  assert_file_not_exists ".github/workflows/doc-ledger-publish.yml" "no ledger: doc-ledger-publish is not installed"
+  assert_contains "$output" "skipped doc-ledger-publish: no docs/ledger/config.json (name it in --workflows= to install it anyway)" "…one note line says so"
+  assert_eq "1" "$(grep -c 'skipped doc-ledger-publish' <<<"$output")" "…once"
+  for w in doc-freshness-pr doc-freshness-schedule doc-audit-update doc-review-pr doc-release doc-spec-verify doc-pr-full-cycle doc-pr-release; do
+    assert_file_exists ".github/workflows/$w.yml" "no ledger: --workflows=all installs $w"
+  done
+  exit_code=0
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=doc-ledger-publish 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "no ledger: naming doc-ledger-publish exits 0"
+  assert_file_exists ".github/workflows/doc-ledger-publish.yml" "no ledger: the explicit name installs it"
+  teardown
+  setup
+  mkdir -p docs/ledger
+  printf '{}\n' > docs/ledger/config.json
+  output=$("$BASH_BIN" "$HOOKS_DIR/install.sh" install --ci --workflows=all 2>&1) || true
+  assert_file_exists ".github/workflows/doc-ledger-publish.yml" "a ledger host: --workflows=all installs doc-ledger-publish"
+  assert_not_contains "$output" "skipped doc-ledger-publish" "…and no note"
+  teardown
+}
+
+test_install_help_groups_publish_as_shell_optin() {
+  # doc-ledger-publish runs no AI and needs no secret: help lists it in a
+  # group of its own, not under Claude-powered (final review OPS-I4).
+  echo "test: install.sh help — doc-ledger-publish is listed under 'shell, opt-in by name', not under Claude-powered; --workflows=all's help names the exception"
+  local out claude optin
+  out=$("$BASH_BIN" "$HOOKS_DIR/install.sh" help 2>&1) || true
+  optin=$(awk '/^  shell, opt-in by name/ { f = 1; next } /^  [^ ]/ { f = 0 } f' <<<"$out")
+  claude=$(awk '/^  Claude-powered/ { f = 1; next } /^  [^ ]/ { f = 0 } f' <<<"$out")
+  assert_contains "$optin" "doc-ledger-publish" "doc-ledger-publish under 'shell, opt-in by name'"
+  assert_not_contains "$claude" "doc-ledger-publish" "…not under Claude-powered"
+  assert_contains "$claude" "doc-review-pr" "Claude-powered still lists the AI workflows"
+  assert_contains "$out" "and except doc-ledger-publish on a host without" "--workflows=all's help names the exception"
 }
 
 test_install_ci_version_comes_from_doc_tools() {
@@ -3975,6 +4211,10 @@ test_install_ci_workflows_bogus_errors_with_valid_set
 test_install_ci_helpers_false_refuses_doc_pr_release
 test_install_ci_ships_step_scripts_with_workflow
 test_install_ci_every_referenced_helper_is_installed
+test_ci_publish_template_vendors_ledger
+test_ci_claims_templates_vendor_ledger
+test_ci_workflows_all_skips_publish_without_ledger
+test_install_help_groups_publish_as_shell_optin
 test_install_ci_helpers_false_still_wires_steps
 test_install_ci_version_comes_from_doc_tools
 test_install_ci_writes_state_file_on_first_install
@@ -4358,6 +4598,1029 @@ test_fw_removed_doc_keeps_move_advice
 test_fw_claude_note_names_every_tracked_per_user_file
 test_fw_hooks_path_scope_worktree_and_uninstall_wording
 test_fw_helpers_help_is_true
+
+# --- The ledger hook set: install --ledger (work ledger) ----------------------
+#
+# Two opt-in sets, neither part of --all: --ledger, the git legs as
+# "# ledger-superpowers:begin" … ":end" blocks (pre-commit validate --staged,
+# pre-push provisional keys, post-commit in-flight push); --ledger-claude, two
+# Claude events (SessionStart notices, PostToolUse Write|Edit state-watch),
+# never the general --claude tier.
+
+LGH_BEGIN="# ledger-superpowers:begin"
+LGH_REG='{"schema":"ledger-registry/1","ledgers":[{"id":"x","title":"X","kind":"service","status":"active"}]}'
+LGH_SESSION='{"hook_event_name":"SessionStart","source":"startup"}'
+
+# lgh_fixture [config]: setup, then the ledger enabled — docs/ledger/config.json
+# (default {}) and a registry with ledger x — committed.
+lgh_fixture() {
+  local c='{}'
+  if [ $# -gt 0 ]; then c=$1; fi
+  setup
+  mkdir -p docs/issues docs/ledger
+  printf '%s\n' "$c" > docs/ledger/config.json
+  printf '%s\n' "$LGH_REG" > docs/ledger/ledgers.json
+  git add -A && git commit -qm ledger
+}
+
+# lgh_remote: a bare remote "origin" (LGH_REMOTE) holding main, fetched.
+lgh_remote() {
+  LGH_REMOTE=$(harness_mktemp_d remote).git
+  git init -q --bare "$LGH_REMOTE"
+  git --git-dir="$LGH_REMOTE" symbolic-ref HEAD refs/heads/main
+  git remote add origin "$LGH_REMOTE"
+  git push -q origin main
+  git fetch -q origin
+}
+
+# lgh_item <file> <frontmatter lines…>: an item file with that frontmatter.
+lgh_item() {
+  local f="$1"
+  shift
+  mkdir -p "$(dirname "$f")"
+  { printf -- '---\n'; printf '%s\n' "$@"; printf -- '---\n# %s\n' "$(basename "$f" .md)"; } > "$f"
+}
+
+# An item no registered ledger holds: validate --staged blocks it.
+lgh_bad_item() {
+  lgh_item docs/issues/bad.md "key: nope-1" "ledger: nope" "status: Open" "summary: An item in no registered ledger"
+}
+
+# The first 4 hex digits of sha256(<path>): a provisional key's suffix.
+lgh_hex4() {
+  local h
+  if command -v sha256sum >/dev/null 2>&1; then h=$(printf '%s' "$1" | sha256sum); else h=$(printf '%s' "$1" | shasum -a 256); fi
+  printf '%s' "${h:0:4}"
+}
+
+# The number of ledger blocks in <file> (0 when it is absent).
+lgh_blocks() {
+  if [ -f "$1" ]; then grep -c "^$LGH_BEGIN" "$1" || true; else echo 0; fi
+}
+
+# The ledger blocks of the three git legs, "<pre-commit> <pre-push> <post-commit>".
+lgh_legs() {
+  printf '%s %s %s' "$(lgh_blocks .git/hooks/pre-commit)" "$(lgh_blocks .git/hooks/pre-push)" "$(lgh_blocks .git/hooks/post-commit)"
+}
+
+# lgh_wrap <log>: a doc-tools.sh wrapper (its path printed) that appends its
+# arguments to <log>, one call per line, then runs the real one.
+lgh_wrap() {
+  local w
+  w=$(harness_mktemp wrap)
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\nexec "%s" "$@"\n' "$1" "$DOC_TOOLS" > "$w"
+  chmod +x "$w"
+  printf '%s' "$w"
+}
+
+# PostToolUse payloads: Write <path> <content>, Edit <path> <new_string>.
+lgh_write_payload() {
+  jq -nc --arg p "$1" --arg c "$2" '{hook_event_name: "PostToolUse", tool_name: "Write", tool_input: {file_path: $p, content: $c}, tool_response: {success: true}}'
+}
+lgh_edit_payload() {
+  jq -nc --arg p "$1" --arg n "$2" '{hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: {file_path: $p, old_string: "a", new_string: $n}}'
+}
+
+# lgh_watch <payload> [VAR=value …]: run the state-watch hook; LGH_CTX is its
+# additionalContext ("" when silent).
+lgh_watch() {
+  local p="$1"
+  shift
+  run_claude_hook PostToolUse ledger-state-watch "$p" ${1+"$@"}
+  LGH_CTX=$(jq -r '.hookSpecificOutput.additionalContext // empty' <<<"$RUN_OUT" 2>/dev/null || true)
+}
+
+test_ledger_install_requires_config() {
+  echo "test: ledger: install --ledger and --ledger-claude refuse without docs/ledger/config.json (exit 1, naming it, nothing written); their uninstalls do not need it"
+  setup
+  local before
+  before=$(_tree_state)
+  inst install --ledger
+  assert_eq "1" "$IRC" "install --ledger without the config: exit 1"
+  assert_contains "$IOUT" "docs/ledger/config.json" "…naming docs/ledger/config.json"
+  inst install --ledger-claude
+  assert_eq "1" "$IRC" "install --ledger-claude without it: exit 1"
+  assert_contains "$IOUT" "docs/ledger/config.json" "…naming it"
+  inst install --git --claude --ledger --ledger-claude
+  assert_eq "1" "$IRC" "install --git --claude --ledger --ledger-claude without it: exit 1 too"
+  assert_eq "$before" "$(_tree_state)" "…and no tier or set wrote anything"
+  inst uninstall --ledger --ledger-claude
+  assert_eq "0" "$IRC" "uninstall --ledger --ledger-claude without the config: exit 0"
+  mkdir -p docs/ledger
+  printf '{}\n' > docs/ledger/config.json
+  inst install --ledger
+  assert_eq "0" "$IRC" "with the config: exit 0"
+  assert_eq "1 1 1" "$(lgh_legs)" "one block in each of pre-commit, pre-push and post-commit"
+  assert_true "post-commit, which the set created, is executable" test -x .git/hooks/post-commit
+  assert_eq "#!/bin/sh" "$(sed -n 1p .git/hooks/post-commit)" "…a #!/bin/sh hook"
+  assert_file_not_exists ".claude/settings.local.json" "no Claude event without --ledger-claude"
+  teardown
+}
+
+test_ledger_all_excludes_ledger() {
+  echo "test: ledger: --all includes neither ledger set (install --all adds no block and no ledger event, uninstall --all removes none)"
+  lgh_fixture
+  inst install --all
+  assert_eq "0" "$IRC" "install --all: exit 0"
+  assert_eq "0 0 0" "$(lgh_legs)" "…no ledger block"
+  assert_not_contains "$(cat .claude/settings.local.json 2>/dev/null)" "ledger-" "…no ledger Claude event"
+  inst install --ledger --ledger-claude
+  assert_eq "0" "$IRC" "install --ledger --ledger-claude: exit 0"
+  inst uninstall --all
+  assert_eq "0" "$IRC" "uninstall --all: exit 0"
+  assert_eq "1 1 1" "$(lgh_legs)" "uninstall --all keeps every ledger block"
+  assert_eq "PostToolUse SessionStart" "$(jq -r '[.hooks | keys[]] | join(" ")' .claude/settings.local.json 2>/dev/null)" "…and the ledger's two Claude events"
+  assert_eq "0" "$(jq '[.hooks[][].hooks[].command | select(contains("ledger-") | not)] | length' .claude/settings.local.json 2>/dev/null)" "…alone in the settings"
+  assert_file_exists ".claude/hooks/doc-superpowers/hook-lib.sh" "…with the hook-lib.sh they source"
+  inst status
+  assert_contains "$IOUT" "Ledger git hooks" "plain status reports the ledger git set"
+  assert_contains "$IOUT" "Ledger Claude Code hooks" "…and the ledger Claude set"
+  inst status --all
+  assert_not_contains "$IOUT" "Ledger " "…status --all (the three tiers) reports neither"
+  teardown
+}
+
+test_ledger_claude_only_no_general_tier() {
+  echo "test: ledger: --ledger-claude alone writes the ledger's two Claude entries and nothing of the general Claude tier (no gate, sync or summary) and no git block"
+  lgh_fixture
+  local h
+  inst install --ledger-claude
+  assert_eq "0" "$IRC" "install --ledger-claude: exit 0"
+  assert_eq "PostToolUse SessionStart" "$(jq -r '[.hooks | keys[]] | join(" ")' .claude/settings.local.json 2>/dev/null)" "two events: SessionStart and PostToolUse"
+  assert_eq "ledger-session-notices.sh ledger-state-watch.sh" \
+    "$(jq -r '[.hooks[][].hooks[].command | capture("doc-superpowers/(?<n>[a-z-]+[.]sh)").n] | sort | join(" ")' .claude/settings.local.json 2>/dev/null)" "…running the ledger's two scripts, nothing else"
+  for h in pre-commit-gate post-commit-sync session-summary; do
+    assert_not_contains "$(cat .claude/settings.local.json)" "$h" "no $h entry"
+    assert_file_not_exists ".claude/hooks/doc-superpowers/$h.sh" "no $h.sh"
+  done
+  assert_file_exists ".claude/hooks/doc-superpowers/hook-lib.sh" "hook-lib.sh, which both scripts source"
+  assert_eq "0 0 0" "$(lgh_legs)" "no git block"
+  assert_file_not_exists .git/hooks/pre-commit "…no git hook at all"
+  assert_true "the per-user files are excluded from git" git check-ignore -q .claude/settings.local.json
+  inst status --claude
+  assert_eq "3" "$(grep -c 'not installed' <<<"$IOUT")" "status --claude: the general tier is not installed"
+  inst status --ledger-claude
+  assert_eq "2" "$(grep -c '✓' <<<"$IOUT")" "status --ledger-claude: both events ✓"
+  teardown
+}
+
+test_ledger_claude_flags_independent() {
+  echo "test: ledger: --ledger-claude and --claude in either order — each install and uninstall leaves the other set intact"
+  lgh_fixture
+  local before plain lonly
+  plain=$(harness_mktemp_d plain)
+  lonly=$(harness_mktemp_d lonly)
+  before=$(_tree_state)
+  # --claude, then --ledger-claude; uninstall --ledger-claude, then --claude.
+  inst install --claude
+  jq -S . .claude/settings.local.json > "$plain/settings"
+  inst install --ledger-claude
+  assert_eq "0" "$IRC" "--ledger-claude after --claude: exit 0"
+  assert_eq "PostToolUse PreToolUse SessionStart Stop" "$(jq -r '[.hooks | keys[]] | join(" ")' .claude/settings.local.json)" "both sets' events"
+  inst uninstall --ledger-claude
+  assert_eq "$(cat "$plain/settings")" "$(jq -S . .claude/settings.local.json)" "uninstall --ledger-claude: the general tier as it was"
+  assert_file_exists .claude/hooks/doc-superpowers/session-summary.sh "…its scripts kept"
+  assert_file_exists .claude/hooks/doc-superpowers/hook-lib.sh "…and hook-lib.sh"
+  inst uninstall --claude
+  assert_eq "$before" "$(_tree_state)" "both gone: as before"
+  # --ledger-claude, then --claude; uninstall --claude, then --ledger-claude.
+  inst install --ledger-claude
+  jq -S . .claude/settings.local.json > "$lonly/settings"
+  inst install --claude
+  assert_eq "0" "$IRC" "--claude after --ledger-claude: exit 0"
+  inst uninstall --claude
+  assert_eq "$(cat "$lonly/settings")" "$(jq -S . .claude/settings.local.json)" "uninstall --claude: the ledger's events as they were"
+  assert_file_exists .claude/hooks/doc-superpowers/ledger-state-watch.sh "…its scripts kept"
+  assert_file_exists .claude/hooks/doc-superpowers/hook-lib.sh "…and hook-lib.sh, which they source"
+  assert_true "…still excluded from git" git check-ignore -q .claude/settings.local.json
+  run_claude_hook PostToolUse ledger-state-watch "$(lgh_write_payload "$HOME/x.md" "next: x-1")"
+  assert_eq "0" "$RUN_RC" "…and the ledger hook still runs"
+  inst uninstall --ledger-claude
+  assert_eq "$before" "$(_tree_state)" "both gone: as before"
+  teardown
+}
+
+test_ledger_blocks_markers_distinct() {
+  echo "test: ledger: the markers are the set's own — the git tier's block code (every '# doc-superpowers:begin' match) never touches a ledger block, nor the reverse; an unpaired one is refused"
+  lgh_fixture
+  local orig gitonly before
+  orig=$(harness_mktemp host)
+  gitonly=$(harness_mktemp gitonly)
+  inst install --ledger
+  assert_contains "$(grep "^$LGH_BEGIN" .git/hooks/pre-commit)" "$LGH_BEGIN" "the block starts with '$LGH_BEGIN'"
+  assert_eq "0" "$(grep -c '^# doc-superpowers:begin' .git/hooks/pre-commit || true)" "…no line of it starts with '# doc-superpowers:begin'"
+  assert_eq "1" "$(grep -c '^# ledger-superpowers:end' .git/hooks/pre-commit || true)" "…and it ends with '# ledger-superpowers:end'"
+  inst status --git
+  assert_contains "$(grep ' pre-commit ' <<<"$IOUT")" "not installed" "status --git: a ledger block is not the git tier's"
+  cp -p .git/hooks/pre-commit "$orig"
+  inst uninstall --git
+  assert_true "uninstall --git leaves a ledger-only hook byte-for-byte" cmp -s "$orig" .git/hooks/pre-commit
+  inst uninstall --ledger
+  # A hook of yours holding both blocks: each uninstall takes only its own.
+  printf '#!/bin/sh\n# yours\necho "yours ran"\nexit 0\n' > .git/hooks/pre-push
+  chmod +x .git/hooks/pre-push
+  cp -p .git/hooks/pre-push "$orig"
+  inst install --git
+  cp -p .git/hooks/pre-push "$gitonly"
+  inst install --ledger
+  assert_eq "1 1" "$(grep -c '^# doc-superpowers:begin' .git/hooks/pre-push) $(lgh_blocks .git/hooks/pre-push)" "your hook holds both blocks"
+  inst uninstall --ledger
+  assert_true "uninstall --ledger takes only the ledger block" cmp -s "$gitonly" .git/hooks/pre-push
+  inst install --ledger
+  inst uninstall --git
+  assert_eq "0 1" "$(grep -c '^# doc-superpowers:begin' .git/hooks/pre-push || true) $(lgh_blocks .git/hooks/pre-push)" "uninstall --git takes only its block"
+  inst uninstall --ledger
+  assert_true "…both gone: your hook byte-for-byte" cmp -s "$orig" .git/hooks/pre-push
+  # An unpaired ledger marker: refused, nothing changed.
+  printf '#!/bin/sh\n%s\necho half\n' "$LGH_BEGIN" > .git/hooks/pre-commit
+  chmod +x .git/hooks/pre-commit
+  before=$(_tree_state)
+  inst install --ledger
+  assert_eq "1" "$IRC" "an unpaired '$LGH_BEGIN' line: install --ledger exits 1"
+  assert_contains "$IOUT" "ledger-superpowers" "…naming the marker"
+  assert_eq "$before" "$(_tree_state)" "…nothing changed"
+  teardown
+}
+
+test_ledger_install_order_git_then_ledger() {
+  echo "test: ledger: install --git then --ledger — the block goes into the git tier's hooks after their header comments; status --git stays ✓; re-running either install changes nothing"
+  lgh_fixture
+  local saved h
+  saved=$(harness_mktemp_d saved)
+  inst install --git
+  inst install --ledger
+  assert_eq "0" "$IRC" "exit 0"
+  for h in pre-commit pre-push; do
+    assert_eq "1" "$(lgh_blocks ".git/hooks/$h")" "$h: one ledger block"
+    assert_contains "$(sed -n 2p ".git/hooks/$h")" "doc-superpowers hook v1" "$h: still the git tier's hook (its marker on line 2)"
+    assert_eq "#" "$(awk -v b="$LGH_BEGIN" 'index($0, b) == 1 { print substr(prev, 1, 1); exit } { prev = $0 }' ".git/hooks/$h")" "$h: the block right after the header comments"
+    cp -p ".git/hooks/$h" "$saved/$h"
+  done
+  inst status --git
+  assert_contains "$(grep ' pre-commit ' <<<"$IOUT")" "✓" "status --git: pre-commit ✓ (the ledger block aside)"
+  assert_contains "$(grep ' pre-push ' <<<"$IOUT")" "✓" "…pre-push ✓"
+  inst install --git
+  inst install --ledger
+  for h in pre-commit pre-push; do
+    assert_true "$h: re-running install --git and --ledger changes nothing" cmp -s "$saved/$h" ".git/hooks/$h"
+  done
+  assert_file_not_exists .git/hooks/.doc-superpowers-pre-commit "no local copy (the git tier's hook is whole)"
+  lgh_bad_item
+  git add -A
+  run_hooked -- git commit -qm bad
+  assert_eq "1" "$RUN_RC" "the ledger leg blocks an invalid item"
+  teardown
+}
+
+test_ledger_install_order_ledger_then_git() {
+  echo "test: ledger: install --ledger then --git gives the same hooks as --git then --ledger; uninstall --git hands back the ledger-only hooks"
+  local saved lonly h
+  saved=$(harness_mktemp_d saved)
+  lonly=$(harness_mktemp_d lonly)
+  lgh_fixture
+  inst install --git
+  inst install --ledger
+  for h in pre-commit pre-push post-commit; do cp ".git/hooks/$h" "$saved/$h"; done
+  teardown
+  lgh_fixture
+  inst install --ledger
+  for h in pre-commit pre-push post-commit; do cp -p ".git/hooks/$h" "$lonly/$h"; done
+  assert_eq "#!/bin/sh" "$(sed -n 1p .git/hooks/pre-commit)" "--ledger alone: a #!/bin/sh hook…"
+  assert_contains "$(sed -n 2p .git/hooks/pre-commit)" "$LGH_BEGIN" "…holding the block"
+  inst install --git
+  assert_eq "0" "$IRC" "install --git over the ledger's hooks: exit 0"
+  for h in pre-commit pre-push post-commit; do
+    assert_true "$h: the same file as --git then --ledger" cmp -s "$saved/$h" ".git/hooks/$h"
+  done
+  assert_file_not_exists .git/hooks/.doc-superpowers-pre-commit "the git tier wrote its hook whole (no local copy)"
+  inst status --git
+  assert_contains "$(grep ' pre-commit ' <<<"$IOUT")" "✓" "status --git: pre-commit ✓"
+  inst uninstall --git
+  for h in pre-commit pre-push post-commit; do
+    assert_true "$h: uninstall --git hands back the ledger-only hook" cmp -s "$lonly/$h" ".git/hooks/$h"
+  done
+  teardown
+}
+
+test_ledger_uninstall_each_tier_independent() {
+  echo "test: ledger: each uninstall takes its own tier or set only — --ledger and --ledger-claude leave git and Claude as a plain install has them, and each other; --git and --claude leave both ledger sets working; all gone leave nothing"
+  lgh_fixture
+  local plain before h
+  plain=$(harness_mktemp_d plain)
+  before=$(_tree_state)
+  inst install --git --claude
+  for h in pre-commit pre-push; do cp ".git/hooks/$h" "$plain/$h"; done
+  cp .claude/settings.local.json "$plain/settings"
+  cp .git/info/exclude "$plain/exclude"
+  inst install --ledger --ledger-claude
+  assert_eq "0" "$IRC" "install --ledger --ledger-claude: exit 0"
+  assert_contains "$(jq -c '.hooks.SessionStart' .claude/settings.local.json)" "ledger-session-notices.sh" "SessionStart → ledger-session-notices.sh"
+  assert_eq '"Write|Edit"' "$(jq -c '[.hooks.PostToolUse[] | select(any(.hooks[]; .command | contains("ledger-state-watch.sh")))][0].matcher' .claude/settings.local.json)" "PostToolUse (Write|Edit) → ledger-state-watch.sh"
+  inst uninstall --ledger
+  assert_eq "0" "$IRC" "uninstall --ledger: exit 0"
+  for h in pre-commit pre-push; do
+    assert_true "$h: as the git tier alone has it" cmp -s "$plain/$h" ".git/hooks/$h"
+  done
+  assert_file_not_exists .git/hooks/post-commit "post-commit (the set created it) is removed"
+  assert_contains "$(jq -c '.hooks.SessionStart' .claude/settings.local.json)" "ledger-session-notices.sh" "…the --ledger-claude set stays"
+  inst install --ledger
+  inst uninstall --ledger-claude
+  assert_eq "0" "$IRC" "uninstall --ledger-claude: exit 0"
+  assert_eq "1 1 1" "$(lgh_legs)" "…the --ledger blocks stay"
+  inst uninstall --ledger
+  assert_eq "$(jq -S . "$plain/settings")" "$(jq -S . .claude/settings.local.json)" "the settings: the Claude tier's entries alone"
+  assert_true "info/exclude: as the Claude tier has it" cmp -s "$plain/exclude" .git/info/exclude
+  assert_file_not_exists .claude/hooks/doc-superpowers/ledger-state-watch.sh "the ledger scripts are removed"
+  assert_file_exists .claude/hooks/doc-superpowers/hook-lib.sh "…hook-lib.sh stays (the Claude tier's)"
+  # The other way round: --git and --claude go; the ledger set stays and works.
+  inst install --ledger --ledger-claude
+  inst uninstall --git
+  assert_eq "1 1 1" "$(lgh_legs)" "uninstall --git keeps every ledger block"
+  assert_not_contains "$(head -5 .git/hooks/pre-commit)" "doc-superpowers hook v" "…in hooks no longer the git tier's"
+  inst uninstall --claude
+  assert_eq "0" "$IRC" "uninstall --claude: exit 0"
+  assert_eq "PostToolUse SessionStart" "$(jq -r '[.hooks | keys[]] | join(" ")' .claude/settings.local.json 2>/dev/null)" "the ledger's Claude events stay"
+  assert_eq "0" "$(jq '[.hooks[][].hooks[].command | select(contains("ledger-") | not)] | length' .claude/settings.local.json 2>/dev/null)" "…alone"
+  assert_file_exists .claude/hooks/doc-superpowers/hook-lib.sh "hook-lib.sh stays (the ledger scripts source it)"
+  assert_file_not_exists .claude/hooks/doc-superpowers/session-summary.sh "the Claude tier's scripts are gone"
+  assert_true "the per-user files stay out of git (the ledger's exclude block)" git check-ignore -q .claude/settings.local.json
+  run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION"
+  assert_eq "0|" "$RUN_RC|$RUN_OUT" "the ledger SessionStart hook still runs (in-flight off: silent)"
+  lgh_bad_item
+  git add -A
+  run_hooked -- git commit -qm bad
+  assert_eq "1" "$RUN_RC" "the ledger pre-commit leg still blocks an invalid item"
+  git reset -q
+  rm -f docs/issues/bad.md
+  inst uninstall --ledger --ledger-claude
+  assert_eq "$before" "$(_tree_state)" "all uninstalled: hooks, settings, info/exclude, git config as before"
+  teardown
+}
+
+test_ledger_pre_commit_blocks_invalid() {
+  echo "test: ledger: pre-commit block — validate --staged exit 1 (findings) or 2 (could not run) blocks; DOC_SUPERPOWERS_LEDGER_SKIP=1 bypasses with a reason line; a valid item passes"
+  lgh_fixture
+  inst install --ledger
+  local head
+  head=$(git rev-parse HEAD)
+  lgh_bad_item
+  git add -A
+  run_hooked -- git commit -qm bad
+  assert_eq "1" "$RUN_RC" "an item in no registered ledger: the commit is blocked"
+  assert_contains "$RUN_OUT$RUN_ERR" "nope" "…the finding names it"
+  assert_contains "$RUN_ERR" "DOC_SUPERPOWERS_LEDGER_SKIP=1" "…and says how to bypass"
+  assert_eq "$head" "$(git rev-parse HEAD)" "…no commit made"
+  run_hooked DOC_SUPERPOWERS_LEDGER_SKIP=1 -- git commit -qm bad
+  assert_eq "0" "$RUN_RC" "DOC_SUPERPOWERS_LEDGER_SKIP=1: the commit goes through"
+  assert_contains "$RUN_ERR" "DOC_SUPERPOWERS_LEDGER_SKIP=1" "…with a line saying why the check was skipped"
+  lgh_item docs/issues/good.md "key: x-1" "ledger: x" "status: Open" "summary: A valid item with its key"
+  git add -A
+  run_hooked -- git commit -qm good
+  assert_eq "0" "$RUN_RC" "a valid item: the commit goes through"
+  head=$(git rev-parse HEAD)
+  printf 'not json\n' > docs/ledger/config.json
+  echo y > src/y.js
+  git add src/y.js
+  run_hooked -- git commit -qm y
+  assert_eq "1" "$RUN_RC" "validate --staged cannot run (exit 2): blocked too"
+  assert_contains "$RUN_ERR" "exited 2" "…saying so"
+  assert_eq "$head" "$(git rev-parse HEAD)" "…no commit made"
+  teardown
+}
+
+test_ledger_pre_push_refuses_provisional_cas() {
+  echo "test: ledger: pre-push block — keys.mode cas refuses a push adding a provisional key (an existing branch or a new one); DOC_SUPERPOWERS_LEDGER_SKIP=1 bypasses"
+  lgh_fixture
+  lgh_remote
+  inst install --ledger
+  local h before
+  h=$(lgh_hex4 "docs/issues/n b.md")
+  lgh_item "docs/issues/n b.md" "key: x-~$h" "ledger: x" "status: Open" "summary: Filed offline, a provisional key"
+  git add -A
+  git commit -qm n --no-verify
+  before=$(git --git-dir="$LGH_REMOTE" rev-parse main)
+  run_hooked -- git push -q origin main
+  assert_true "a provisional key in the pushed commits: refused (rc $RUN_RC)" test "$RUN_RC" != 0
+  assert_contains "$RUN_OUT$RUN_ERR" "x-~$h" "…naming the key"
+  assert_contains "$RUN_OUT$RUN_ERR" "ledger finalize" "…and the fix"
+  assert_eq "$before" "$(git --git-dir="$LGH_REMOTE" rev-parse main)" "…the remote is unchanged"
+  run_hooked -- git push -q origin main:refs/heads/fresh
+  assert_true "a new branch carrying it: refused too (rc $RUN_RC)" test "$RUN_RC" != 0
+  assert_eq "" "$(git --git-dir="$LGH_REMOTE" rev-parse -q --verify refs/heads/fresh || true)" "…no branch created"
+  run_hooked DOC_SUPERPOWERS_LEDGER_SKIP=1 -- git push -q origin main
+  assert_eq "0" "$RUN_RC" "DOC_SUPERPOWERS_LEDGER_SKIP=1: pushed"
+  assert_contains "$RUN_ERR" "DOC_SUPERPOWERS_LEDGER_SKIP=1" "…with a reason line"
+  assert_eq "$(git rev-parse HEAD)" "$(git --git-dir="$LGH_REMOTE" rev-parse main)" "…the remote has it"
+  teardown
+}
+
+test_ledger_pre_push_refuses_long_provisional_cas() {
+  echo "test: ledger: pre-push block — keys.mode cas refuses a push adding a 6-hex provisional key (Task 16c U9: provisional keys are 4–8 hex)"
+  lgh_fixture
+  lgh_remote
+  inst install --ledger
+  local before
+  lgh_item docs/issues/n.md "key: x-~$(lgh_hex4 docs/issues/n.md)e0" "ledger: x" "status: Open" "summary: Filed offline, a lengthened provisional key"
+  git add -A
+  git commit -qm n --no-verify
+  before=$(git --git-dir="$LGH_REMOTE" rev-parse main)
+  run_hooked -- git push -q origin main
+  assert_true "a 6-hex provisional key in the pushed commits: refused (rc $RUN_RC)" test "$RUN_RC" != 0
+  assert_contains "$RUN_OUT$RUN_ERR" "x-~$(lgh_hex4 docs/issues/n.md)e0" "…naming the key"
+  assert_eq "$before" "$(git --git-dir="$LGH_REMOTE" rev-parse main)" "…the remote is unchanged"
+  teardown
+}
+
+test_ledger_pre_push_allows_provisional_merge_mode() {
+  echo "test: ledger: pre-push block — keys.mode merge lets a provisional key through"
+  lgh_fixture '{"keys":{"mode":"merge"}}'
+  lgh_remote
+  inst install --ledger
+  local h log wrap old
+  log=$(harness_mktemp calls)
+  wrap=$(lgh_wrap "$log")
+  h=$(lgh_hex4 "docs/issues/n.md")
+  lgh_item docs/issues/n.md "key: x-~$h" "ledger: x" "status: Open" "summary: Filed offline, a provisional key"
+  git add -A
+  git commit -qm n --no-verify
+  old=$(git rev-parse origin/main)
+  run_hooked DOC_TOOLS="$wrap" -- git push -q origin main
+  assert_eq "0" "$RUN_RC" "merge mode: the push goes through"
+  assert_contains "$(cat "$log")" "ledger validate --pushed $old..$(git rev-parse HEAD)" "…after the ledger block checked it"
+  assert_eq "$(git rev-parse HEAD)" "$(git --git-dir="$LGH_REMOTE" rev-parse main)" "…the remote has it"
+  teardown
+}
+
+test_ledger_pre_push_stdin_replayed() {
+  echo "test: ledger: pre-push block — captures the ref lines and replays them, so the git tier's leg and your hook see the same lines"
+  lgh_fixture
+  lgh_remote
+  local log wrap i old new line
+  log=$(harness_mktemp calls)
+  wrap=$(lgh_wrap "$log")
+  # The git tier owning pre-push: its release reminder reads the ref lines.
+  git tag v0
+  for i in 1 2 3 4 5 6; do
+    echo "$i" > "src/f$i.js"
+    git add -A
+    git commit -qm "c$i"
+  done
+  inst install --git --ledger
+  old=$(git rev-parse origin/main)
+  new=$(git rev-parse HEAD)
+  run_hooked DOC_TOOLS="$wrap" -- git push origin main
+  assert_eq "0" "$RUN_RC" "the push goes through"
+  assert_contains "$(cat "$log")" "ledger validate --pushed $old..$new" "the ledger block read the ref line"
+  assert_contains "$RUN_OUT$RUN_ERR" "6 commits since v0 on main" "…and the git tier's leg read it after (replayed)"
+  # A hook of yours holding both blocks: every part sees the same line.
+  inst uninstall --git --ledger
+  printf '#!/bin/sh\n# yours\ncat > "$(git rev-parse --git-dir)/yours-push.log"\nexit 0\n' > .git/hooks/pre-push
+  chmod +x .git/hooks/pre-push
+  inst install --git --ledger
+  printf '#!/bin/sh\ncat > "$(git rev-parse --git-dir)/ours-push.log"\n' > .git/hooks/.doc-superpowers-pre-push
+  : > "$log"
+  echo 7 > src/f7.js
+  git add -A
+  git commit -qm c7 --no-verify
+  old=$(git rev-parse origin/main)
+  new=$(git rev-parse HEAD)
+  line="refs/heads/main $new refs/heads/main $old"
+  run_hooked DOC_TOOLS="$wrap" -- git push origin main
+  assert_eq "0" "$RUN_RC" "the push goes through"
+  assert_eq "$line" "$(cat .git/ours-push.log 2>/dev/null)" "the git tier's block: the ref line"
+  assert_eq "$line" "$(cat .git/yours-push.log 2>/dev/null)" "your hook: the same line"
+  assert_contains "$(cat "$log")" "ledger validate --pushed $old..$new" "the ledger block: the same push"
+  teardown
+}
+
+test_ledger_pre_push_foreign_stdin_intact() {
+  echo "test: ledger: pre-push (R6) — the block goes before your pre-push code, which still reads exactly git's ref lines (a token guard reading stdin is not bypassed); no temp file is left, pushed or refused"
+  lgh_fixture
+  lgh_remote
+  local tmpd want h old
+  tmpd=$(harness_mktemp_d pushtmp)
+  printf '#!/bin/sh\n# a storage-token guard: reads the pushed refs on stdin\ncat > "$(git rev-parse --git-dir)/guard-saw.log"\nexit 0\n' > .git/hooks/pre-push
+  chmod +x .git/hooks/pre-push
+  inst install --ledger
+  assert_contains "$(sed -n 3p .git/hooks/pre-push)" "$LGH_BEGIN" "the ledger block goes before your guard's code"
+  git branch side
+  echo a > src/a.js
+  git add -A
+  git commit -qm a --no-verify
+  git checkout -q side
+  echo b > src/b.js
+  git add -A
+  git commit -qm b --no-verify
+  git checkout -q main
+  want=$(printf 'refs/heads/main %s refs/heads/main %s\nrefs/heads/side %s refs/heads/side %s\n' \
+    "$(git rev-parse main)" "$(git rev-parse origin/main)" "$(git rev-parse side)" 0000000000000000000000000000000000000000 | LC_ALL=C sort)
+  run_hooked TMPDIR="$tmpd" -- git push -q origin main side
+  assert_eq "0" "$RUN_RC" "two refs pushed: exit 0"
+  assert_eq "$want" "$(LC_ALL=C sort .git/guard-saw.log 2>/dev/null)" "your guard read exactly git's two ref lines"
+  assert_eq "0" "$(find "$tmpd" -name 'doc-sp-ledger-push.*' | wc -l | tr -d ' ')" "…and no temp file is left"
+  h=$(lgh_hex4 "docs/issues/n.md")
+  lgh_item docs/issues/n.md "key: x-~$h" "ledger: x" "status: Open" "summary: Filed offline, a provisional key"
+  git add -A
+  git commit -qm n --no-verify
+  rm -f .git/guard-saw.log
+  run_hooked TMPDIR="$tmpd" -- git push -q origin main
+  assert_true "a provisional key: refused (rc $RUN_RC)" test "$RUN_RC" != 0
+  assert_eq "0" "$(find "$tmpd" -name 'doc-sp-ledger-push.*' | wc -l | tr -d ' ')" "…no temp file left either"
+  old=$(git rev-parse origin/main)
+  run_hooked TMPDIR="$tmpd" DOC_SUPERPOWERS_LEDGER_SKIP=1 -- git push -q origin main
+  assert_eq "0" "$RUN_RC" "DOC_SUPERPOWERS_LEDGER_SKIP=1: pushed"
+  assert_eq "refs/heads/main $(git rev-parse main) refs/heads/main $old" \
+    "$(cat .git/guard-saw.log 2>/dev/null)" "…your guard still read git's ref line"
+  teardown
+}
+
+# lgh_guard <hook> <#! line>: a foreign pre-push guard that counts the ref
+# lines it reads on stdin (to stderr: "guard saw <n> line(s)").
+lgh_guard() {
+  printf '%s\n# a storage-token guard: reads the pushed refs on stdin\nn=0\nwhile read -r l; do n=$((n + 1)); done\necho "guard saw $n line(s)" >&2\nexit 0\n' "$2" > "$1"
+  chmod +x "$1"
+}
+
+# lgh_dry_push_full_disk: `git push --dry-run origin main` (pre-push runs; git
+# writes no file) with every file write failing (ulimit -f 0), stderr through
+# a pipe (a file would fail too); "push-rc=<rc>" closes RUN_OUT.
+lgh_dry_push_full_disk() {
+  run_hooked TMPDIR="$1" -- sh -c '(ulimit -f 0; git push --dry-run origin main; echo "push-rc=$?") 2>&1 | cat'
+}
+
+test_ledger_pre_push_copy_failure_refuses() {
+  echo "test: ledger (fix round 1, I1): when git's ref lines cannot be copied (every file write fails), the ledger block and the git tier's integration block refuse the push instead of handing your guard an empty stdin; no temp file is left"
+  lgh_fixture
+  lgh_remote
+  local tmpd
+  tmpd=$(harness_mktemp_d pushtmp)
+  echo a > src/a.js
+  git add -A
+  git commit -qm a --no-verify
+  # The ledger block, before a bash guard (bash: the suite's interpreter).
+  lgh_guard .git/hooks/pre-push '#!/usr/bin/env bash'
+  inst install --ledger
+  run_hooked TMPDIR="$tmpd" -- sh -c '(git push --dry-run origin main; echo "push-rc=$?") 2>&1 | cat'
+  assert_contains "$RUN_OUT" "guard saw 1 line(s)" "control: the guard reads git's ref line"
+  assert_contains "$RUN_OUT" "push-rc=0" "…and the dry run goes through"
+  lgh_dry_push_full_disk "$tmpd"
+  assert_contains "$RUN_OUT" "push-rc=1" "the copy fails: the ledger block refuses the push"
+  assert_contains "$RUN_OUT" "ledger: push refused" "…with its reason line"
+  assert_not_contains "$RUN_OUT" "guard saw 0 line(s)" "…never handing your guard an empty stdin"
+  assert_eq "0" "$(find "$tmpd" -name 'doc-sp-*' | wc -l | tr -d ' ')" "…and no temp file is left"
+  # The same block in a POSIX sh guard.
+  inst uninstall --ledger
+  lgh_guard .git/hooks/pre-push '#!/bin/sh'
+  inst install --ledger
+  lgh_dry_push_full_disk "$tmpd"
+  assert_contains "$RUN_OUT" "push-rc=1" "a #!/bin/sh hook: refused too"
+  assert_not_contains "$RUN_OUT" "guard saw 0 line(s)" "…your guard never runs on an empty stdin"
+  assert_eq "0" "$(find "$tmpd" -name 'doc-sp-*' | wc -l | tr -d ' ')" "…no temp file left"
+  # The git tier's integration block (no ledger), before a bash guard.
+  inst uninstall --ledger
+  lgh_guard .git/hooks/pre-push '#!/usr/bin/env bash'
+  inst install --git
+  assert_contains "$(sed -n 2p .git/hooks/pre-push)" "# doc-superpowers:begin" "the git tier's block is in your hook"
+  run_hooked TMPDIR="$tmpd" -- sh -c '(git push --dry-run origin main; echo "push-rc=$?") 2>&1 | cat'
+  assert_contains "$RUN_OUT" "guard saw 1 line(s)" "control: the guard reads git's ref line after the git tier's block"
+  lgh_dry_push_full_disk "$tmpd"
+  assert_contains "$RUN_OUT" "push-rc=1" "the copy fails: the git tier's block refuses the push"
+  assert_contains "$RUN_OUT" "doc-superpowers: push refused" "…with its reason line"
+  assert_not_contains "$RUN_OUT" "guard saw 0 line(s)" "…never handing your guard an empty stdin"
+  assert_eq "0" "$(find "$tmpd" -name 'doc-sp-*' | wc -l | tr -d ' ')" "…and no temp file is left"
+  teardown
+}
+
+test_ledger_git_status_flags_old_pre_push_block() {
+  echo "test: ledger (fix round 1, I1): status --git compares the whole integration block, so a pre-push block of the shape that failed open reads as outdated"
+  setup
+  printf '#!/bin/sh\necho yours\n' > .git/hooks/pre-push
+  chmod +x .git/hooks/pre-push
+  inst install --git
+  inst status --git
+  assert_contains "$(grep ' pre-push ' <<<"$IOUT")" "✓" "the current block: ✓"
+  # The earlier block: an unchecked copy of the ref lines.
+  awk 'index($0, "  if ! cat > ") == 1 { print "  cat > \"$DOC_SP_IN\"; bash \"$DOC_SP_HOOK\" \"$@\" < \"$DOC_SP_IN\" || true; exec < \"$DOC_SP_IN\"; rm -f \"$DOC_SP_IN\""; skip = 1; next }
+       skip && index($0, "  bash ") == 1 { skip = 0; next } { print }' .git/hooks/pre-push > .git/pre-push.old
+  cat .git/pre-push.old > .git/hooks/pre-push
+  inst status --git
+  assert_contains "$(grep ' pre-push ' <<<"$IOUT")" "outdated" "the earlier block: ⚠ outdated (re-run install --git)"
+  teardown
+}
+
+test_ledger_pre_push_delete_replayed() {
+  echo "test: ledger (fix round 1, m3): a delete-only push — the ledger block checks nothing (deletions are skipped) and your guard still reads git's delete line"
+  lgh_fixture
+  lgh_remote
+  local old
+  git push -q origin main:refs/heads/side
+  old=$(git --git-dir="$LGH_REMOTE" rev-parse side)
+  printf '#!/bin/sh\n# a guard\ncat > "$(git rev-parse --git-dir)/guard-saw.log"\nexit 0\n' > .git/hooks/pre-push
+  chmod +x .git/hooks/pre-push
+  inst install --ledger
+  run_hooked -- git push -q origin :refs/heads/side
+  assert_eq "0" "$RUN_RC" "the delete goes through"
+  assert_eq "(delete) 0000000000000000000000000000000000000000 refs/heads/side $old" "$(cat .git/guard-saw.log 2>/dev/null)" "your guard read git's delete line"
+  assert_eq "" "$(git --git-dir="$LGH_REMOTE" rev-parse -q --verify refs/heads/side || true)" "…and the branch is gone"
+  teardown
+}
+
+test_ledger_post_commit_batch_ssh() {
+  echo "test: ledger (fix round 1, I2): the background in-flight push never prompts — ssh runs with -o BatchMode=yes, following git's precedence (added to GIT_SSH_COMMAND, else core.sshCommand, else — unless GIT_SSH names the program — ssh), GIT_SSH left alone, GIT_TERMINAL_PROMPT=0, GCM_INTERACTIVE=never"
+  lgh_fixture
+  inst install --ledger
+  local wrap out n
+  wrap=$(harness_mktemp wrap)
+  printf '#!/bin/sh\nif [ "$2" = inflight ]; then\n  { echo "ssh=${GIT_SSH_COMMAND-<unset>}"; echo "gitssh=${GIT_SSH-<unset>}"; echo "prompt=${GIT_TERMINAL_PROMPT-<unset>}"; echo "gcm=${GCM_INTERACTIVE-<unset>}"; } > "$LGH_OUT.tmp" && mv "$LGH_OUT.tmp" "$LGH_OUT"\n  exit 0\nfi\nexec "%s" "$@"\n' "$DOC_TOOLS" > "$wrap"
+  chmod +x "$wrap"
+  # lgh_env_commit <name> [VAR=value …]: commit; wait (30 s) for the job's env.
+  lgh_env_commit() {
+    local name="$1"
+    shift
+    out="$TEST_DIR/.git/env-$name"
+    echo "$name" > "src/$name.js"
+    git add -A
+    (
+      unset GIT_SSH GIT_SSH_COMMAND GIT_TERMINAL_PROMPT GCM_INTERACTIVE
+      run_hooked DOC_TOOLS="$wrap" LGH_OUT="$out" ${1+"$@"} -- git commit -qm "$name"
+    )
+    n=0
+    while [ ! -e "$out" ] && [ "$n" -lt 300 ]; do
+      sleep 0.1
+      n=$((n + 1))
+    done
+  }
+  lgh_env_commit plain
+  assert_eq "ssh=ssh -o BatchMode=yes|gitssh=<unset>|prompt=0|gcm=never" "$(paste -sd '|' "$out" 2>/dev/null)" "nothing set: ssh -o BatchMode=yes; no prompts"
+  git config core.sshCommand "ssh -i key"
+  lgh_env_commit sshcommand
+  assert_contains "$(cat "$out" 2>/dev/null)" "ssh=ssh -i key -o BatchMode=yes" "core.sshCommand kept, BatchMode added"
+  lgh_env_commit preset GIT_SSH_COMMAND="ssh -v"
+  assert_contains "$(cat "$out" 2>/dev/null)" "ssh=ssh -v -o BatchMode=yes" "a preset GIT_SSH_COMMAND kept (it wins over core.sshCommand), BatchMode added"
+  # git's precedence: GIT_SSH_COMMAND > core.sshCommand > GIT_SSH > ssh. Only
+  # when neither of the first two is set does GIT_SSH name the program git runs.
+  lgh_env_commit gitsshcore GIT_SSH=/usr/local/bin/my-ssh
+  assert_contains "$(cat "$out" 2>/dev/null)" "ssh=ssh -i key -o BatchMode=yes" "GIT_SSH and core.sshCommand set: git runs core.sshCommand, so BatchMode goes on it"
+  assert_contains "$(cat "$out" 2>/dev/null)" "gitssh=/usr/local/bin/my-ssh" "…GIT_SSH left alone"
+  lgh_env_commit gitsshpreset GIT_SSH=/usr/local/bin/my-ssh GIT_SSH_COMMAND="ssh -v"
+  assert_contains "$(cat "$out" 2>/dev/null)" "ssh=ssh -v -o BatchMode=yes" "GIT_SSH and GIT_SSH_COMMAND set: git runs GIT_SSH_COMMAND, so BatchMode goes on it"
+  git config --unset core.sshCommand
+  lgh_env_commit gitssh GIT_SSH=/usr/local/bin/my-ssh
+  assert_contains "$(cat "$out" 2>/dev/null)" "ssh=<unset>" "GIT_SSH alone (no core.sshCommand): GIT_SSH_COMMAND not added"
+  assert_contains "$(cat "$out" 2>/dev/null)" "gitssh=/usr/local/bin/my-ssh" "…GIT_SSH left alone"
+  assert_contains "$(cat "$out" 2>/dev/null)" "prompt=0" "…and still no terminal prompt"
+  teardown
+}
+
+test_ledger_session_hook_budget() {
+  echo "test: ledger (fix round 1, I3): a SessionStart run past its 2 s budget is cut — the hook returns in about 2 s with the '(budget)' line; in-flight awareness off: doc-tools.sh is not run at all"
+  lgh_fixture '{"inflight":{"enabled":true}}'
+  inst install --ledger-claude
+  local slow log t0 t1
+  log=$(harness_mktemp calls)
+  slow=$(harness_mktemp slow)
+  printf '#!/bin/sh\necho called >> "%s"\nsleep 10\necho "stop late other no PR files:f — x → y"\n' "$log" > "$slow"
+  chmod +x "$slow"
+  t0=$(date +%s)
+  run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION" DOC_TOOLS="$slow"
+  t1=$(date +%s)
+  assert_true "it returns well before the 10 s stub ($((t1 - t0)) s; budget 2 s)" test "$((t1 - t0))" -le 5
+  assert_contains "$(jq -r '.systemMessage // empty' <<<"$RUN_OUT" 2>/dev/null)" "(budget)" "…with the budget line"
+  printf '{}\n' > docs/ledger/config.json
+  : > "$log"
+  run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION" DOC_TOOLS="$slow"
+  assert_eq "0||" "$RUN_RC|$RUN_OUT|$(cat "$log")" "in-flight awareness off: silent, doc-tools.sh never run"
+  teardown
+}
+
+test_ledger_claude_tracked_note_names_flag() {
+  echo "test: ledger (fix round 1, m1): the tracked-files note from --ledger-claude tells teammates to re-run --ledger-claude (not --claude, which would install the general tier)"
+  lgh_fixture
+  mkdir -p .claude
+  printf '{}\n' > .claude/settings.local.json
+  git add -f .claude/settings.local.json
+  git commit -qm tracked
+  inst install --ledger-claude
+  assert_contains "$IOUT" "'install.sh install --ledger-claude' after pulling" "the note names --ledger-claude"
+  assert_not_contains "$IOUT" "'install.sh install --claude' after pulling" "…not --claude"
+  teardown
+}
+
+test_ledger_post_commit_backgrounds() {
+  echo "test: ledger: post-commit block — ledger inflight --push runs in the background (the commit does not wait), its output in <git common dir>/doc-superpowers/ledger/push.log; the test waits for it (sentinel, timeout)"
+  lgh_fixture '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta"}}'
+  lgh_remote
+  inst install --ledger
+  git checkout -q -b topic
+  local wrap go sent n=0 ref="refs/doc-superpowers/inflight/hosta/topic" log
+  go="$TEST_DIR/.git/lgh-go"
+  sent="$TEST_DIR/.git/lgh-done"
+  wrap=$(harness_mktemp wrap)
+  printf '#!/bin/sh\nif [ "$2" = inflight ]; then\n  n=0\n  while [ ! -e "%s" ] && [ "$n" -lt 300 ]; do sleep 0.1; n=$((n + 1)); done\n  "%s" "$@"; rc=$?\n  echo "$rc" > "%s"\n  exit "$rc"\nfi\nexec "%s" "$@"\n' \
+    "$go" "$DOC_TOOLS" "$sent" "$DOC_TOOLS" > "$wrap"
+  chmod +x "$wrap"
+  echo work > work.txt
+  git add work.txt
+  run_hooked DOC_TOOLS="$wrap" -- git commit -qm "topic work"
+  assert_eq "0" "$RUN_RC" "the commit succeeds"
+  assert_file_not_exists "$sent" "…and returns while the push still waits (it runs in the background, holding none of the commit's output)"
+  : > "$go"
+  while [ ! -e "$sent" ] && [ "$n" -lt 300 ]; do
+    sleep 0.1
+    n=$((n + 1))
+  done
+  assert_file_exists "$sent" "the background push finished (sentinel, within 30 s)"
+  assert_eq "0" "$(cat "$sent" 2>/dev/null)" "…exit 0"
+  log="$(git rev-parse --git-common-dir)/doc-superpowers/ledger/push.log"
+  assert_contains "$(cat "$log" 2>/dev/null)" "pushed $(git rev-parse --short HEAD) to origin $ref" "its output is in push.log"
+  assert_eq "$(git rev-parse HEAD)" "$(git --git-dir="$LGH_REMOTE" rev-parse -q --verify "$ref" || true)" "…and the in-flight ref is on the remote"
+  teardown
+}
+
+test_ledger_session_hook_wraps_verb() {
+  echo "test: ledger: SessionStart (Task 16c U4) — a thin wrapper over 'doc-tools.sh ledger notices --hook', offline, the event on its stdin: what the verb prints is the hook's output, verbatim; silent when it prints nothing; a verb that fails (one that predates --hook): one 'cannot list' line; DOC_SUPERPOWERS_LEDGER_SKIP=1: nothing run; the real doc-tools.sh, in-flight awareness off: silent"
+  lgh_fixture '{"inflight":{"enabled":true}}'
+  inst install --ledger-claude
+  local fake log obj
+  log=$(harness_mktemp calls)
+  fake=$(harness_mktemp fake)
+  obj='{"systemMessage":"ledger: 1 in-flight notice(s)","hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"ledger: 1 in-flight notice(s)"}}'
+  cat > "$fake" <<EOF
+#!/bin/sh
+printf '%s|offline=%s|' "\$*" "\${DOC_TOOLS_LEDGER_OFFLINE:-}" >> "$log"
+cat >> "$log"
+echo >> "$log"
+[ -n "\${FAKE_NONE:-}" ] && exit 0
+if [ -n "\${FAKE_OLD:-}" ]; then echo "ERROR: unknown option '--hook'." >&2; exit 3; fi
+printf '%s\n' '$obj'
+EOF
+  chmod +x "$fake"
+  run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION" DOC_TOOLS="$fake"
+  assert_eq "0|$obj" "$RUN_RC|$RUN_OUT" "the verb's object, verbatim"
+  assert_eq "ledger notices --hook|offline=1|$LGH_SESSION" "$(cat "$log")" "one call: ledger notices --hook, offline, the SessionStart event on its stdin"
+  run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION" DOC_TOOLS="$fake" FAKE_NONE=1
+  assert_eq "0|" "$RUN_RC|$RUN_OUT" "the verb prints nothing: silent"
+  run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION" DOC_TOOLS="$fake" FAKE_OLD=1
+  assert_eq "0" "$RUN_RC" "a doc-tools.sh that predates --hook: exit 0"
+  assert_contains "$(jq -r '.systemMessage // empty' <<<"$RUN_OUT" 2>/dev/null)" "ledger: cannot list the in-flight notices: unknown option '--hook'" "…one 'cannot list' line with its error"
+  : > "$log"
+  run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION" DOC_TOOLS="$fake" DOC_SUPERPOWERS_LEDGER_SKIP=1
+  assert_eq "0||" "$RUN_RC|$RUN_OUT|$(cat "$log")" "DOC_SUPERPOWERS_LEDGER_SKIP=1: off (nothing run)"
+  printf '{}\n' > docs/ledger/config.json
+  run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION"
+  assert_eq "0|" "$RUN_RC|$RUN_OUT" "the real doc-tools.sh, in-flight awareness off: silent"
+  teardown
+}
+
+test_ledger_state_watch_advisory() {
+  echo "test: ledger: PostToolUse(Write|Edit) state-watch — a write under state_watch.paths naming an item key and a state_watch pattern gets one advisory line naming 'doc-tools.sh ledger note <key> \"…\"'; anything else is silent; never blocks"
+  lgh_fixture '{"state_watch":{"paths":["~/notes","scratch/*/state"],"patterns":["next:","Approved"]}}'
+  inst install --ledger-claude
+  lgh_watch "$(lgh_write_payload "$HOME/notes/today.md" "x-12 next: wire the hook")"
+  assert_contains "$LGH_CTX" 'doc-tools.sh ledger note x-12 "…"' "a key and a pattern under ~/notes: the advisory names ledger note x-12"
+  assert_eq "1" "$(printf '%s\n' "$LGH_CTX" | wc -l | tr -d ' ')" "…in one line"
+  lgh_watch "$(lgh_edit_payload "$TEST_DIR/scratch/a/state/s.md" "APPROVED for x-3 by the owner")"
+  assert_contains "$LGH_CTX" "ledger note x-3" "an Edit under scratch/*/state (relative, '*' one segment), pattern any case: advisory"
+  lgh_watch "$(lgh_write_payload "$HOME/notes/today.md" "x-12 is a fine item")"
+  assert_eq "" "$LGH_CTX" "a key but no pattern: silent"
+  lgh_watch "$(lgh_write_payload "$HOME/notes/today.md" "next: tidy up")"
+  assert_eq "" "$LGH_CTX" "a pattern but no key: silent"
+  lgh_watch "$(lgh_write_payload "$HOME/notes/today.md" "next: q-4 on 2026-10-14")"
+  assert_eq "" "$LGH_CTX" "only keys of no registered ledger (q-4, a date): silent"
+  lgh_watch "$(lgh_write_payload "$HOME/elsewhere/today.md" "x-12 next: wire the hook")"
+  assert_eq "" "$LGH_CTX" "outside state_watch.paths: silent"
+  lgh_watch "$(lgh_write_payload "$HOME/notes2/today.md" "x-12 next: wire the hook")"
+  assert_eq "" "$LGH_CTX" "a sibling sharing the prefix (~/notes2): silent"
+  lgh_watch "$(lgh_write_payload "$TEST_DIR/scratch/a/b/state/s.md" "x-12 next: wire the hook")"
+  assert_eq "" "$LGH_CTX" "'*' does not cross a '/': silent"
+  lgh_watch '{not json'
+  assert_eq "0|" "$RUN_RC|$RUN_OUT" "a payload it cannot read: silent, exit 0"
+  lgh_watch '{"hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"content":"x-12 next: wire the hook"}}'
+  assert_eq "0|" "$RUN_RC|$RUN_OUT" "a payload without file_path: silent, exit 0"
+  lgh_watch "$(lgh_write_payload "$HOME/notes/today.md" "x-12 next: wire the hook")" DOC_SUPERPOWERS_LEDGER_SKIP=1
+  assert_eq "" "$LGH_CTX" "DOC_SUPERPOWERS_LEDGER_SKIP=1: off"
+  teardown
+}
+
+test_ledger_legs_honour_both_skips() {
+  # Ruling (audit 2026-10-15): DOC_SUPERPOWERS_SKIP=1 bypasses all hooks, the
+  # ledger legs included — beside DOC_SUPERPOWERS_LEDGER_SKIP=1, which
+  # bypasses the ledger legs alone. The ledger block runs before the git
+  # tier's own SKIP exit, so each leg checks both itself.
+  echo "test: ledger: DOC_SUPERPOWERS_SKIP=1 and DOC_SUPERPOWERS_LEDGER_SKIP=1 each skip every ledger leg — pre-commit and pre-push with a line naming the variable, post-commit, SessionStart and state-watch silently"
+  lgh_fixture '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta"},"state_watch":{"paths":["~/notes"],"patterns":["next:"]}}'
+  lgh_remote
+  inst install --ledger --ledger-claude
+  local var head h calls fake wrap n
+  calls=$(harness_mktemp calls)
+  # A stand-in doc-tools.sh for the post-commit leg: it logs its call and
+  # pushes nothing (no background job outlives the test).
+  wrap=$(harness_mktemp stub)
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n' "$calls" > "$wrap"
+  chmod +x "$wrap"
+  fake=$(harness_mktemp fake)
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\nprintf "%%s\\n" %s\n' "$calls" \
+    "'{\"systemMessage\":\"x\",\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"x\"}}'" > "$fake"
+  chmod +x "$fake"
+  for var in DOC_SUPERPOWERS_SKIP DOC_SUPERPOWERS_LEDGER_SKIP; do
+    # pre-commit: an item in no registered ledger would block the commit.
+    lgh_item "docs/issues/bad-$var.md" "key: nope-1" "ledger: nope" "status: Open" "summary: An item in no registered ledger"
+    git add -A
+    head=$(git rev-parse HEAD)
+    run_hooked "$var=1" -- git commit -qm "bad ($var)"
+    assert_eq "0" "$RUN_RC" "$var=1: pre-commit lets the commit through"
+    assert_contains "$RUN_ERR" "ledger: validate --staged skipped ($var=1)" "…with a line naming $var"
+    # pre-push: a provisional key would refuse the push (keys.mode cas).
+    h=$(lgh_hex4 "docs/issues/p-$var.md")
+    lgh_item "docs/issues/p-$var.md" "key: x-~$h" "ledger: x" "status: Open" "summary: Filed offline, a provisional key"
+    git add -A
+    git commit -qm "provisional ($var)" --no-verify
+    run_hooked "$var=1" -- git push -q origin HEAD:main
+    assert_eq "0" "$RUN_RC" "$var=1: pre-push lets the push through"
+    assert_contains "$RUN_ERR" "ledger: pre-push check skipped ($var=1)" "…with a line naming $var"
+    assert_eq "$(git rev-parse HEAD)" "$(git --git-dir="$LGH_REMOTE" rev-parse main)" "…the remote has it"
+    # post-commit: no in-flight push is started (a control commit shows one is).
+    git checkout -q -b "topic-$var"
+    : > "$calls"
+    echo "$var" > "skip-$var.txt"
+    git add "skip-$var.txt"
+    run_hooked "$var=1" DOC_TOOLS="$wrap" -- git commit -qm "skipped push ($var)" --no-verify
+    assert_eq "0" "$RUN_RC" "$var=1: the commit succeeds"
+    echo control > "control-$var.txt"
+    git add "control-$var.txt"
+    run_hooked DOC_TOOLS="$wrap" -- git commit -qm "control ($var)" --no-verify
+    n=0
+    while ! grep -q "inflight --push" "$calls" 2>/dev/null && [ "$n" -lt 300 ]; do
+      sleep 0.1
+      n=$((n + 1))
+    done
+    sleep 1
+    assert_eq "1" "$(grep -c "inflight --push" "$calls" || true)" "$var=1: post-commit starts no in-flight push (the control commit's is the only one)"
+    git checkout -q main
+    # SessionStart and state-watch: doc-tools.sh is not run, nothing printed.
+    : > "$calls"
+    run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION" DOC_TOOLS="$fake" "$var=1"
+    assert_eq "0||" "$RUN_RC|$RUN_OUT|$(cat "$calls")" "$var=1: SessionStart is off (nothing run, nothing printed)"
+    run_claude_hook PostToolUse ledger-state-watch "$(lgh_write_payload "$HOME/notes/today.md" "x-1 next: y")" DOC_TOOLS="$fake" "$var=1"
+    assert_eq "0||" "$RUN_RC|$RUN_OUT|$(cat "$calls")" "$var=1: state-watch is off (nothing run, nothing printed)"
+  done
+  # Neither set: the SessionStart and state-watch legs do run (the control).
+  run_claude_hook SessionStart ledger-session-notices "$LGH_SESSION" DOC_TOOLS="$fake"
+  assert_contains "$(cat "$calls")" "ledger notices --hook" "neither variable: SessionStart runs ledger notices --hook"
+  : > "$calls"
+  run_claude_hook PostToolUse ledger-state-watch "$(lgh_write_payload "$HOME/notes/today.md" "x-1 next: y")" DOC_TOOLS="$fake"
+  assert_contains "$(cat "$calls")" "state-watch --hook" "neither variable: state-watch runs ledger state-watch --hook (final review, Task 17 m6)"
+  teardown
+}
+
+test_ledger_foreign_hook_runs_ledger_first() {
+  echo "test: ledger: a hook of yours ending in 'exit 0' — the block goes after its #! and leading comments, before your code, so the exit cannot skip it; the mode is kept; uninstall restores it byte-for-byte"
+  lgh_fixture
+  local orig
+  orig=$(harness_mktemp host)
+  printf '#!/bin/sh\n# managed by the host repo: its own hook blocks\n# (keep this header)\necho "yours ran" >> .git/yours.log\nexit 0\n' > .git/hooks/pre-commit
+  chmod 750 .git/hooks/pre-commit
+  cp -p .git/hooks/pre-commit "$orig"
+  inst install --ledger
+  assert_eq "0" "$IRC" "exit 0"
+  assert_eq "$(sed -n 1,3p "$orig")" "$(sed -n 1,3p .git/hooks/pre-commit)" "your #! line and leading comments stay first"
+  assert_contains "$(sed -n 4p .git/hooks/pre-commit)" "$LGH_BEGIN" "…the block right after them"
+  assert_eq "$(tail -n 2 "$orig")" "$(tail -n 2 .git/hooks/pre-commit)" "…your code after it, unchanged"
+  assert_eq "$(ls -l "$orig" | cut -c1-10)" "$(ls -l .git/hooks/pre-commit | cut -c1-10)" "the mode is kept"
+  lgh_bad_item
+  git add -A
+  run_hooked -- git commit -qm bad
+  assert_eq "1" "$RUN_RC" "an invalid item is blocked although your hook ends in 'exit 0'"
+  assert_file_not_exists .git/yours.log "…the ledger ran first"
+  git reset -q
+  rm -f docs/issues/bad.md
+  echo ok > src/ok.js
+  git add src/ok.js
+  run_hooked -- git commit -qm ok
+  assert_eq "0" "$RUN_RC" "a valid commit goes through"
+  assert_eq "yours ran" "$(cat .git/yours.log 2>/dev/null)" "…and your hook ran"
+  inst install --ledger
+  assert_eq "1" "$(lgh_blocks .git/hooks/pre-commit)" "re-install: still one block"
+  inst uninstall --ledger
+  assert_true "uninstall restores your hook byte-for-byte" cmp -s "$orig" .git/hooks/pre-commit
+  assert_eq "$(ls -l "$orig" | cut -c1-10)" "$(ls -l .git/hooks/pre-commit | cut -c1-10)" "…and its mode"
+  teardown
+}
+
+test_ledger_state_watch_paths_spaces_tilde() {
+  echo "test: ledger: state_watch.paths with spaces and '~' inside segments (an iCloud dir) — only a leading '~/' is \$HOME; nothing word-split or glob-expanded; only '*' is special"
+  # shellcheck disable=SC2088  # tildes are the config's text, not the shell's
+  local icloud='~/Library/Mobile Documents/com~apple~CloudDocs/claude-memory'
+  lgh_fixture "$(jq -nc --arg a "$icloud" '{state_watch: {paths: [$a, "/srv/odd [dir]?/m*", "~nobody/x", "~/g*"], patterns: ["next:"]}}')"
+  inst install --ledger-claude
+  mkdir -p "$HOME/ga" "$HOME/gb"
+  lgh_watch "$(lgh_write_payload "$HOME/Library/Mobile Documents/com~apple~CloudDocs/claude-memory/proj/MEMORY.md" "next: x-7 review")"
+  assert_contains "$LGH_CTX" 'ledger note x-7 "…"' "spaces and com~apple~CloudDocs under \$HOME: advisory"
+  lgh_watch "$(lgh_write_payload "$HOME/Library/Mobile Documents/com/claude-memory/MEMORY.md" "next: x-7 review")"
+  assert_eq "" "$LGH_CTX" "…a mid-path '~' is no wildcard"
+  lgh_watch "$(lgh_write_payload "/srv/odd [dir]?/memo/f.md" "next: x-7 review")"
+  assert_contains "$LGH_CTX" "ledger note x-7" "'[', ']' and '?' are themselves; 'm*' matches memo"
+  lgh_watch "$(lgh_write_payload "/srv/odd d?/memo/f.md" "next: x-7 review")"
+  assert_eq "" "$LGH_CTX" "…'[dir]' is no character class"
+  lgh_watch "$(lgh_write_payload "/srv/odd [dir]x/memo/f.md" "next: x-7 review")"
+  assert_eq "" "$LGH_CTX" "…'?' is no wildcard"
+  lgh_watch "$(lgh_write_payload "$TEST_DIR/~nobody/x/f.md" "next: x-7 review")"
+  assert_contains "$LGH_CTX" "ledger note x-7" "'~nobody/x' (no '/' after '~'): a path in the project"
+  lgh_watch "$(lgh_write_payload "$HOME/x/f.md" "next: x-7 review")"
+  assert_eq "" "$LGH_CTX" "…never ~user expansion"
+  lgh_watch "$(lgh_write_payload "$HOME/gc/f.md" "next: x-7 review")"
+  assert_contains "$LGH_CTX" "ledger note x-7" "'~/g*' matches ~/gc, a directory that does not exist (a pattern, not a glob of the disk)"
+  lgh_watch "$(lgh_write_payload "/gc/f.md" "next: x-7 review")" HOME=
+  assert_eq "0|" "$RUN_RC|$LGH_CTX" "(fix round 1, m5) HOME empty: '~/g*' matches nothing (not /g*)"
+  lgh_watch "$(lgh_write_payload "/Library/Mobile Documents/com~apple~CloudDocs/claude-memory/M.md" "next: x-7 review")" HOME=
+  assert_eq "" "$LGH_CTX" "…nor does the iCloud entry"
+  teardown
+}
+
+test_ledger_status_reports_set() {
+  echo "test: ledger: status reports each ledger set in its own section (status --ledger, status --ledger-claude; plain status both) — ✓, ⚠ outdated, ✗"
+  lgh_fixture
+  local h t
+  inst status --ledger
+  assert_contains "$IOUT" "Ledger git hooks" "status --ledger: its section"
+  assert_contains "$(grep ' pre-commit ' <<<"$IOUT")" "not installed" "…✗ before an install"
+  assert_not_contains "$IOUT" "Git Hooks" "…and no tier"
+  assert_not_contains "$IOUT" "Ledger Claude Code hooks" "…nor the other set"
+  inst status --ledger-claude
+  assert_contains "$IOUT" "Ledger Claude Code hooks" "status --ledger-claude: its section"
+  assert_not_contains "$IOUT" "Ledger git hooks" "…alone"
+  inst install --git --claude --ledger --ledger-claude
+  inst status --ledger
+  for h in pre-commit pre-push post-commit; do
+    assert_contains "$(grep " $h " <<<"$IOUT")" "✓" "$h ✓"
+  done
+  inst status --ledger-claude
+  for h in ledger-session-notices ledger-state-watch; do
+    assert_contains "$(grep " $h " <<<"$IOUT")" "✓" "$h ✓"
+  done
+  t=$(harness_mktemp hook)
+  awk -v b="$LGH_BEGIN" '{ print } index($0, b) == 1 { print "echo tampered" }' .git/hooks/pre-push > "$t"
+  cat "$t" > .git/hooks/pre-push
+  inst status --ledger
+  assert_contains "$(grep ' pre-push ' <<<"$IOUT")" "outdated" "a changed block: ⚠ outdated"
+  inst status
+  assert_contains "$IOUT" "Ledger git hooks" "plain status: the ledger git set"
+  assert_contains "$IOUT" "Ledger Claude Code hooks" "…the ledger Claude set"
+  assert_contains "$IOUT" "Git Hooks" "…beside the tiers"
+  teardown
+}
+
+test_ledger_status_quiet_without_ledger() {
+  # Every 3.3.0 user who never opted in ran plain `status` and read two
+  # "⚠ docs/ledger/config.json is missing" lines about legs nobody
+  # installed (final review DOCS-I4): with nothing installed and no config,
+  # each ledger section is one plain line; the ⚠ stays for an installed leg.
+  echo "test: ledger: plain status without docs/ledger/config.json and nothing of the ledger installed — one plain 'not enabled' line per ledger section, no ⚠; an installed leg without the config still gets the ⚠"
+  lgh_fixture
+  rm -f docs/ledger/config.json
+  inst install --git --claude
+  inst status
+  assert_not_contains "$IOUT" "⚠ docs/ledger/config.json is missing" "no config, nothing installed: no ⚠ about the ledger"
+  assert_eq "2" "$(grep -c 'not enabled (no docs/ledger/config.json)' <<<"$IOUT")" "…one plain line in each ledger section"
+  assert_not_contains "$(sed -n '/^Ledger git hooks/,/^$/p' <<<"$IOUT")" "✗" "…and no ✗ list of legs nobody asked for"
+  printf '{}\n' > docs/ledger/config.json
+  inst install --ledger
+  rm -f docs/ledger/config.json
+  inst status --ledger
+  assert_contains "$IOUT" "⚠ docs/ledger/config.json is missing" "a leg installed, the config gone: the ⚠ stays"
+  teardown
+}
+
+echo ""
+echo "=== The ledger hook set (install --ledger) ==="
+test_ledger_install_requires_config
+test_ledger_status_quiet_without_ledger
+test_ledger_all_excludes_ledger
+test_ledger_claude_only_no_general_tier
+test_ledger_claude_flags_independent
+test_ledger_blocks_markers_distinct
+test_ledger_install_order_git_then_ledger
+test_ledger_install_order_ledger_then_git
+test_ledger_uninstall_each_tier_independent
+test_ledger_pre_commit_blocks_invalid
+test_ledger_pre_push_refuses_provisional_cas
+test_ledger_pre_push_refuses_long_provisional_cas
+test_ledger_pre_push_allows_provisional_merge_mode
+test_ledger_pre_push_stdin_replayed
+test_ledger_pre_push_foreign_stdin_intact
+test_ledger_pre_push_copy_failure_refuses
+test_ledger_git_status_flags_old_pre_push_block
+test_ledger_pre_push_delete_replayed
+test_ledger_post_commit_backgrounds
+test_ledger_post_commit_batch_ssh
+test_ledger_session_hook_budget
+test_ledger_claude_tracked_note_names_flag
+test_ledger_session_hook_wraps_verb
+test_ledger_state_watch_advisory
+test_ledger_legs_honour_both_skips
+test_ledger_foreign_hook_runs_ledger_first
+test_ledger_state_watch_paths_spaces_tilde
+test_ledger_status_reports_set
 
 test_claude_hook_contract_held() {
   echo "test: every Claude hook run above held the contract (exit 0, or 2 only under STRICT; stdout one JSON object or nothing)"

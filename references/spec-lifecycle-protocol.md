@@ -11,10 +11,12 @@ Reference for wrapper skill authors integrating doc-superpowers spec lifecycle a
 | Post-brainstorm | Design doc written | `spec-generate` | — | Also writes claim stubs (`unbuilt`, tracker = the design doc) for each requirement / decision it generates |
 | During plan | Implementation plan being written | `spec-inject` | `plan` | Also injects a `Claims gate (chunk N)` task in each chunk, before its spec-update task, and a `Final claims gate` task before the finalize tasks; each implementation task carries `**Claims:** <ids>` or `**Claims:** none — <reason>` |
 | During execute | After each plan chunk completes | `spec-inject` | `execute` | The chunk gate is the plan's `Claims gate (chunk N)` task (`claims gate`), run by the orchestrating agent: every red claim is reconciled (Direction protocol) before the next chunk starts, and `chunk-<n>.json` records the verdicts; this phase reports them |
-| Pre-finish | All tasks done, before merging | `spec-verify` | `post-execute` | The final gate, `claims attest --final`: every chunk has a record (matched by patch-id), every claim the plan names re-runs at HEAD, every ruling appears in a record, and the amendment batch is emitted; R5 holds a target short of `Implemented` until its claims are `built` and passing |
+| Pre-finish | All tasks done, before merging | `spec-verify` | `post-execute` | The final gate, `claims attest --final`: every chunk has a record (matched by patch-id), every claim the plan names re-runs at HEAD, every ruling appears in a record, and the amendment batch is emitted; whether a target may reach `Implemented` is **Spec Status Model → R5** (`spec-lifecycle-actions.md`) |
 | During review | Alongside other review participants | `spec-verify` | `review` | Adds the claims verdict for the test claims of every runner whose `paths` match a changed file (`claims run --planes-of`), and `claims validate --all`'s V9 items |
 
-Claims are enabled when `docs/spec-claims/` exists. Three of the points then become **gates with recorded verdicts**, and the per-chunk gate is a plan task, so it runs on every execute path, including one that never re-enters the wrapper. Without `docs/spec-claims/` the right column does not apply and every action behaves as described below.
+Claims are enabled when `docs/spec-claims/` exists. Two of the points then become **gates with recorded verdicts** — the chunk gate writes `chunk-<n>.json` and the final gate `final.json` — and review adds a claims verdict that records nothing. The per-chunk gate is a plan task, so it runs on every execute path, including one that never re-enters the wrapper. Without `docs/spec-claims/` the right column does not apply and every action behaves as described below.
+
+**With the work ledger on** (`docs/ledger/config.json`; `references/ledger.md`), the *During plan* point does two more things, independent of claims: `spec-inject --phase=plan` pastes `ledger sweep --plan <plan>` into the plan as a `## Related work` table for the author to mark, and gives each chunk a `Ledger notices (chunk N)` task that runs `ledger notices --gate` before the next chunk starts (`spec-lifecycle-actions.md` → Plan Phase, steps 1c and 2c). A wrapper makes no extra call: the gate is a plan task, run on every execute path. Without the config neither is injected.
 
 ```
 Design doc ──→ spec-generate ──→ formal SPEC-{CAT}-NNN files
@@ -173,6 +175,8 @@ During execute:
     invoke doc-superpowers spec-inject --phase=execute --specs=<paths> --plan=<path>
     If deviation flags returned → surface to user
     Claims-enabled: a red claim or a flagged deviation → rule the direction (Direction protocol) before editing either side
+      — within a plan, at its `Claims gate (chunk N)` task: that chunk's record (chunk-<n>.json) is the ruling's `record`,
+      and a reconciliation made outside the gate is a silent reconciliation that keeps `claims attest --final` red
 
 Pre-finish:
   After all tasks, before finishing →
@@ -217,3 +221,4 @@ doc-superpowers expects these to exist (or bootstraps them):
 | Spec template in `references/doc-spec.md` | Bundled with skill | (always available) |
 | `docs/spec-claims/` (sidecars, optional `config.json`, gate records) | The host — optional: its existence enables claims | Never bootstrapped: without it every `claims` verb is inert |
 | Runner adapters (named in `docs/spec-claims/config.json` `runners`) | The host — one small executable per test framework (`references/spec-claims.md`) | Never bootstrapped: reference helpers in `references/spec-claims.md` |
+| `docs/ledger/config.json` (and `ledgers.json`) | The host, or `init`'s *Ledger (opt-in)* step (`ledger init --accept`) — optional: its existence enables the work ledger | Never bootstrapped by a spec action: without it every `ledger` verb but `init` is inert |

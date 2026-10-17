@@ -11,6 +11,19 @@ Follows [obra/superpowers](https://github.com/obra/superpowers) skill convention
 - `description` starts with "Use when..." and describes triggering conditions only (never summarizes workflow)
 - Supporting files in subdirectories (`references/`) only when content exceeds ~100 lines
 
+## Code Style
+
+The shipped scripts — `scripts/doc-tools.sh`, `scripts/merge-doc-index.sh`, the installer, the hook scripts and the CI helpers — are bash, written for the floors in README.md → *Dependencies*: bash ≥ 3.2, `jq` ≥ 1.6, and the POSIX userland as stock macOS and Linux ship it. `scripts/test-doc-tools.sh` enforces three of these rules statically, on every run and under any bash, so a violation fails on the Linux leg too, where no bash 3.2 or BSD userland would catch it by running:
+
+| Rule | Enforced by |
+|------|-------------|
+| bash ≥ 3.2 (macOS's `/bin/bash`): no bash-4-only construct — associative arrays, `mapfile`, `${v^^}`, `&>>`, namerefs, `[[ -v x ]]`, `\|&`, `coproc`, `wait -n`, `${a[-1]}` and the rest of its list | `test_scripts_are_free_of_bash4_only_constructs`: every shipped shell script, plus the templates' inline `run:` bodies |
+| No GNU-only flag or tool: `sed -i`, `sort -V`, `readlink -f`, `date -d`, `stat -c` without a `stat -f` fallback on the same line, `timeout`, `grep -P`, `find -printf`, `tac` | the same test's GNU-only scan, over the same scripts |
+| jq ≥ 1.6: no jq-1.7-only form in a jq program — a keyword as a `$binding` name, `pick`, `toarray`, `trim`, `abs`, `add/1`, `@urid`, `limit(0; …)` and the rest of its list (jq programs are the scripts' single-quoted strings) | `test_shipped_jq_is_free_of_jq17_only_forms`: `doc-tools.sh`, `merge-doc-index.sh`, the installer, the hook scripts and the CI helpers |
+| Where `awk` is mawk, 1.3.4 or newer (the POSIX character classes, `[[:space:]]`) | nothing: a documented floor |
+
+Each scan pattern carries a planted sample it must match, so a pattern that stops matching is a FAIL, never a silent pass. Full-line comments are blanked before the scans: a comment may name a forbidden construct, and inline code may not. `# shellcheck disable=SC… # reason` lines mark deliberate exceptions; no suite or CI step runs ShellCheck.
+
 ## Naming Conventions
 
 | Element | Convention | Example |
@@ -61,26 +74,34 @@ Manifest files managed: `package.json`, `.claude-plugin/plugin.json`, `.claude-p
 ### Branches
 
 - `main` — stable releases
-- `feature/<name>` — new features
+- `feat/<name>` — new features
 - `fix/<name>` — bug fixes
+- `design/<name>` — a design and its implementation plan, often the long-lived branch a feature lands on
+- `chore/<name>` — maintenance
+- `wip/<name>` — work in progress, not for review
+- `claude/<name>` — branches an agent session opened
 
 ### Commits
 
-Conventional commits format:
+Conventional commits, usually with a scope naming the area (`claims`, `doc-tools`, `hooks`, `ci`, `docs`):
 
 ```
-feat: add support for <new capability>
-fix: correct <specific issue>
-docs: update <document> for <reason>
+feat(<scope>): add support for <new capability>
+fix(<scope>): correct <specific issue>
+docs(<scope>): update <document> for <reason>
+test(<scope>): <test change>
 chore: <maintenance task>
+release: vX.Y.Z
 ```
+
+An unscoped form (`docs: …`) is fine for a change with no single area. A project with a work ledger (`docs/ledger/config.json`, `references/ledger.md`) also reads these trailers from any line of a commit message (`[* ]<Trailer>: <value>`, so squash merges keep them): `Ledger-Claims: <key>` (config `trailers.claims`) claims an item for the branch; `Fixes` / `Closes` / `Resolves #<n>` (`trailers.claims_by_ref`) claims a hosted item; `Contract-Change: <contract-id> — <one line>` says a commit changes a contract; `Ledger-Ack: <notice id> — <clause>` acks an in-flight notice. This repository has no ledger. `release: vX.Y.Z` is the `release` action's one commit (`references/release.md`, step 11).
 
 ### Pull Requests
 
 - Keep PRs focused on a single change
 - Test skill changes by running `/doc-superpowers init` on a sample project before merging
-- Run the six shell test suites — `scripts/test-doc-tools.sh`, `scripts/test-hooks.sh`, `scripts/test-merge-driver.sh`, `scripts/test-doc-pr-release.sh`, `scripts/test-spec-status-model.sh`, `scripts/test-spec-claims.sh` — all must pass before merge, under both bash 5.x and `/bin/bash` 3.2. Their assertion counts and the command that runs the matrix are in [CLAUDE.md → Conventions](../CLAUDE.md#conventions), the one place they are kept. They share the `scripts/test-helpers.sh` harness (isolated git environment, private scratch root, pipefail-safe asserts, SKIP/XFAIL reporting)
-- A change to a CI template, `scripts/doc-tools.sh` or a CI helper script also re-runs `bash scripts/hooks/install.sh install --ci` and commits what it writes: this repository installs its own CI tier, and `.github/workflows/tests.yml` fails when the installed copies drift from their sources
+- Run every shell test suite (`scripts/test-*.sh`; see **Testing** below) — all must pass before merge, under both bash 5.x and `/bin/bash` 3.2. The suite list, their assertion counts and the command that runs the matrix are in [CLAUDE.md → Conventions](../CLAUDE.md#conventions), the one place they are kept
+- A change to a CI template, `scripts/doc-tools.sh` or a CI helper script also re-runs `bash scripts/hooks/install.sh install --ci` and commits what it writes: this repository installs its own CI tier, and `.github/workflows/tests.yml` fails when the installed copies drift from their sources. The same step fails when `.gitattributes` no longer routes `docs/.doc-index.json` to the doc-index merge driver, and then names `bash scripts/hooks/install.sh install --git` (commit the `.gitattributes` it writes)
 - Include before/after examples for behavior changes
 
 ## Documentation Conventions
@@ -139,6 +160,15 @@ Archived docs retain their original filenames. Their `.doc-index.json` entries a
 
 There is no `archived_at` field. The `docs/archive/` path and the `deprecated` status already record the archival, and git holds its date. PR #16's Option B, an `archive-entry` verb that stamps `archived_at`, was not needed once batch `move-entry` existed. A consumer's `*archive_doc*` script keeps its own policy (what is eligible, where it moves) and uses these verbs for the index. An archived doc is a record doc, so it is never reported stale.
 
+## Testing
+
+- **Framework.** Plain bash suites on one shared harness, `scripts/test-helpers.sh`: a private scratch root removed on EXIT/INT/TERM (`harness_mktemp`, `harness_mktemp_d`; nothing at a fixed path), an isolated git environment (`GIT_CONFIG_GLOBAL=/dev/null`, a private `HOME`), pipefail-safe asserts (`assert_eq`, `assert_true`, `assert_contains`, `assert_exit_code`, `assert_json_field`, …), counted SKIPs (`record_skip`) and known-bug markers (`assert_*_known_bug`, which turn into a FAIL the moment the bug is fixed). No test framework beyond bash, git, jq and the POSIX userland.
+- **Where tests live.** `scripts/test-<area>.sh`, one suite per area — `doc-tools`, `hooks`, `spec-status-model`, `doc-pr-release`, `merge-driver`, `spec-claims`, `ledger` (the list and the counts: [CLAUDE.md → Conventions](../CLAUDE.md#conventions), the only place they are kept). `scripts/bench-ledger.sh` is the work ledger's performance check on a synthetic corpus, run by hand (`bench-ledger.sh 3000`), not a suite. The skill evals are `evals/evals.json`, with a self-checking `evals/fixtures/<eval>/setup.sh` (sharing `fixtures/lib.sh`) for each eval that needs a project; `test-spec-status-model.sh` validates the fields and runs every fixture.
+- **How to run them.** Each suite under both interpreters, bash 5.x and macOS's `/bin/bash` 3.2, with `BASH_BIN` naming the interpreter so every script under test runs under it too (`bash_bin_shim`); the loop is in CLAUDE.md. The harness never runs a fixture with the checkout as cwd. `.github/workflows/tests.yml` runs the same matrix on every PR to `main` (ubuntu bash 5.x, macOS `/bin/bash` 3.2), plus `check-version` and the self-install drift check.
+- **Naming.** A test is a function `test_<area>_<what>` (`test_lg_…` in the ledger suite), registered in its suite's run list; an assertion's message says what holds, in prose.
+- **Fixtures.** Built per test in the scratch root with the real tools (`doc-tools.sh` verbs, `git`, the installer), never checked in; external programs (`gh`, adapters, runners) are small `/bin/sh` stubs on a private `PATH`. A missing YAML parser or `node` is a loud SKIP locally and a FAIL in CI (`DOC_SP_REQUIRE_YAML_PARSER=1`, `DOC_SP_REQUIRE_NODE=1`).
+- **Static guards** in `test-doc-tools.sh` fail on any bash-4-only construct and any jq-1.7-only form in the shipped scripts, `scripts/ledger/` and `scripts/adapters/` included.
+
 ## Project-Specific Patterns
 
 ### Discovery-First
@@ -162,13 +192,15 @@ Four rules hold for every action and for every agent the skill dispatches. `skil
 
 ### Graceful Degradation
 
-Missing tools trigger fallbacks, never failures:
+Optional tools trigger fallbacks; a missing required tool fails, naming itself:
 
 | Missing | Fallback |
 |---------|----------|
 | Mermaid MCP | Inline Mermaid source |
 | Doc-index (first run) | `check-freshness` exits 1 ("doc-index.json not found"); `init` builds it |
-| `jq`, or a `jq` older than 1.6 | `doc-tools.sh` exits non-zero naming the requirement (`jq >= 1.6`: the index writers use `--args` / `$ARGS.positional`) and the version found |
+| `git` or `jq` (required) | `doc-tools.sh` exits non-zero: "required command not found: jq" (or `git`) |
+| A `jq` older than 1.6 (required) | `doc-tools.sh` exits non-zero naming the requirement (`jq >= 1.6`: the index writers use `--args` / `$ARGS.positional`) and the version found |
+| Both `sha256sum` and `shasum` (one is required) | `doc-tools.sh` exits non-zero: "required command not found: sha256sum or shasum" |
 | User-provided scripts | Bundled tooling handles core operations; optional scripts are listed, never auto-run (Safety Rules) |
 
 ### Evidence-Based Verification
@@ -188,7 +220,13 @@ Generated documentation follows strict naming conventions for consistency and ma
 | Architecture docs | `kebab-case.md` | `system-overview.md` |
 | Workflow docs | `kebab-case.md` | `ci-cd-pipeline.md` |
 | Guide docs | `kebab-case.md` | `getting-started.md` |
-| Diagrams | `kebab-case.{png,svg}` | `c4-context.png` |
+| Diagrams | `{type}-{name}.png`, or `{type}.png` for the one diagram of its type | `sequence-audit.png`, `c4-context.png` |
+| Plans | `YYYY-MM-DD-{slug}.md`; an audit report is `YYYY-MM-DD-audit-report.md` (`-<short HEAD sha>` appended when that name is taken) | `2026-10-15-audit-report.md` |
+| Templates | `template.md`, in `docs/specs/` and `docs/adr/` only | `docs/adr/template.md` |
+| Index files | `README.md`, in `docs/specs/`, `docs/adr/` and `docs/workflows/agentic/` | `docs/specs/README.md` |
+| Spec claims (claims-enabled only) | `docs/spec-claims/<DOC-ID>.json`, one sidecar per governing doc, beside `config.json`; see [Spec claims names](#spec-claims-names) | `docs/spec-claims/SPEC-AUTH-001.json` |
+
+The diagram, plan, template and index-file rows are `references/doc-spec.md`'s *Naming Conventions Reference*; it is the source when they differ.
 
 ### Directory Structure
 
@@ -202,6 +240,49 @@ Generated documentation follows strict naming conventions for consistency and ma
 | `docs/guides/` | Getting started, onboarding | n/a |
 | `docs/plans/` | Audit reports and plans | n/a |
 | `docs/archive/` | Superseded/deleted docs by type | n/a |
+| `docs/spec-claims/` | Claims-enabled projects only, and the switch itself: `config.json`, one sidecar per governing doc, the gate records under `gates/<plan-stem>/` | n/a |
+
+### Spec claims names
+
+Claims-enabled projects only: the directory `docs/spec-claims/` turns them on, and this repository has none. The full list, with the rules behind each name, is [`references/spec-claims.md` → *Files and names*](../references/spec-claims.md#files-and-names).
+
+| What | Name |
+|------|------|
+| Host config (optional) | `docs/spec-claims/config.json` |
+| Sidecar, one per governing doc | `docs/spec-claims/<DOC-ID>.json` (`ADR-<digits>`, `SPEC-<CAT>-<digits>`, or a `governing_extra` doc's file stem); nothing in a subdirectory is a sidecar |
+| Gate records | `docs/spec-claims/gates/<plan-stem>/chunk-<n>.json` (`<n>` with no leading zero) and `final.json`; `<plan-stem>` is the plan's file name without its extension |
+| Verdict store (local, never committed) | `$(git rev-parse --git-common-dir)/spec-claims/promotions/<digest>.json` |
+| Generated status block in a governing doc | `<!-- spec-claims:status:begin -->` … `<!-- spec-claims:status:end -->`, around a `## Claim status` table |
+| Descriptive-section marker | `<!-- spec-claims:descriptive -->` |
+| Plan task lines | `**Claims:** <id>, <id>…` or `**Claims:** none — <reason>`; the injected tasks `Claims gate (chunk <n>)` and `Final claims gate` |
+| Claim ids | `<DOC-ID>#<slug>`, the slug `[a-z0-9][a-z0-9-]*` |
+
+### Work ledger names
+
+Ledger-enabled projects only: `docs/ledger/config.json` turns the work ledger on, and this repository has none. The full reference is [`references/ledger.md`](../references/ledger.md).
+
+| What | Name |
+|------|------|
+| The switch and the settings | `docs/ledger/config.json` (`{}` is complete) |
+| The registry; a bootstrap proposal | `docs/ledger/ledgers.json`; `docs/ledger/ledgers.proposed.json` |
+| Legacy and finalized maps | `docs/ledger/legacy.json` (config `legacy`), keys `<legacy id>#<row>`; `docs/ledger/finalized.json` |
+| Items | config `items.globs`, default `docs/issues/*.md`; archived, `docs/archive/issues/*.md`; item sections `## Resolution` and `## Log` (config `resolution_heading`, `log_heading`), and `## Rulings` |
+| Keys and ledger ids | `<ledger>-<n>` (`^[a-z0-9-]{1,16}-[1-9][0-9]*$`); provisional `<ledger>-~<4–8 hex>`; ledger ids `^[a-z0-9-]{1,16}$`, `unassigned` reserved |
+| Contract ids | `<kind>:<name>` (`^[a-z][a-z0-9_-]*:[^[:space:]]+$`): `field:`, `endpoint:`, `component:`, `flag:`, `spec:` … |
+| Commit trailers | `Ledger-Claims`, `Contract-Change`, `Ledger-Ack`, `Fixes` / `Closes` / `Resolves` (see *Commits* above) |
+| Adapters | config value `doc-superpowers:<name>` → `scripts/adapters/<name>.sh` beside `doc-tools.sh` |
+| Remote refs | the counter `refs/doc-superpowers/ledger/counters`, in-flight refs `refs/doc-superpowers/inflight/<host>/<branch>`, the views branch `doc-ledger-views` (all configurable) |
+| Cache (local, never committed) | `$(git rev-parse --git-common-dir)/doc-superpowers/ledger/` |
+| Index shape | `references/ledger-index.schema.json` (`ledger-index/1`) |
+| Plan task | `Ledger notices (chunk <n>)`, and a plan's `## Related work` table |
+
+### This repo's exemptions from the Scope → Generated Docs Matrix
+
+doc-superpowers documents itself, but its own `docs/` does not follow every row of the *Scope → Generated Docs Matrix* (`skills/doc-superpowers/SKILL.md`). The owner ruled these exemptions on 2026-10-14. Audits record them and do not re-raise them, and `update` must not create the files.
+
+- **`docs/specs/` and `docs/adr/`**, the README and template pairs from the matrix's "Always" row: the templates' single source is `references/doc-spec.md` (the `docs/specs/template.md` and `docs/adr/template.md` sections). A copy under `docs/` would drift from it. This repo has no specs or ADRs of its own: its design decisions live in `docs/superpowers/specs/` (design docs) and in `docs/architecture/system-overview.md` (Key Decisions).
+- **`docs/ci-cd.md` and `docs/workflows/deployment.md`**, the `ci-cd` scope, which is detected from `.github/workflows/`: this repo deploys nothing. Its CI is `tests.yml` (the suites, `check-version` and the self-install drift check) plus the self-installed freshness workflows, all described in `CLAUDE.md` (Testing, Self-installed tiers) and in `references/hooks.md`.
+- **`docs/workflows/agentic/`**, the `agentic` scope: the skill's agentic workflow is documented in `docs/workflows/doc-superpowers.md`. This is a structural decision already recorded by the 2026-07-24 and 2026-09-28 audits.
 
 ### Diagram Co-location
 
@@ -213,22 +294,25 @@ Diagrams live in `diagrams/` subdirectories within their parent section, not in 
 
 ### Tier Options
 
-Hooks are organized into three tiers, each independently installable:
+Hooks are organized into three tiers, each independently installable, plus the work ledger's two opt-in sets:
 
 | Tier | Flag | Scripts |
 |------|------|---------|
 | Git | `--git` | pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push |
-| Claude Code | `--claude` | pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh (and hook-lib.sh, which all three source) |
-| CI/CD | `--ci` | doc-freshness-pr.yml, doc-freshness-schedule.yml (the default set); doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml (by name) |
+| Claude Code | `--claude` | pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh (and hook-lib.sh, which all three source, as does ledger-session-notices.sh) |
+| CI/CD | `--ci` | doc-freshness-pr.yml, doc-freshness-schedule.yml (the default set); doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml, doc-ledger-publish.yml (by name) |
+| Work-ledger git legs | `--ledger` | ledger-pre-commit, ledger-pre-push, ledger-post-commit, installed as `# ledger-superpowers:begin` … `:end` blocks in pre-commit, pre-push and post-commit |
+| Work-ledger Claude events | `--ledger-claude` | ledger-session-notices.sh (SessionStart), ledger-state-watch.sh (PostToolUse, matcher `Write\|Edit`), with hook-lib.sh |
 
-Use `--all` to install all tiers at once.
+Use `--all` to install all three tiers at once. The ledger sets are never part of `--all`, each refuses to install without `docs/ledger/config.json` (exit 1, nothing written), and like the git and Claude tiers they are per-clone / per-user and never recorded in `installed.json`.
 
 ### Installation Rules
 
 - Hook entries **must always be installed via the installer script** (`scripts/hooks/install.sh`), never manually edited into settings files or hook directories. The templates carry a `__DOC_TOOLS_RESOLVE__` placeholder that only the installer renders.
 - Every subcommand acts on `git rev-parse --show-toplevel` (a linked worktree or a submodule is its own top level), so it runs from any subdirectory.
 - **Nothing is written through a symbolic link.** A link at a write target, or at a directory between the repository top (or git's common dir) and it, makes the installer refuse; every check runs before the first write, so a refusal writes nothing. Every write is a temp file beside the target, then `mv`.
-- **Ownership is exact**: a hook or workflow by its marker (`doc-superpowers hook v<N>`, `doc-superpowers workflow v<N>`), a `# doc-superpowers:begin` … `:end` block in a user's hook, `.gitattributes` or `info/exclude`, a settings hook *entry* by the path of the script it runs. Never a substring match.
+- **Ownership is exact**: a hook or workflow by its marker (`doc-superpowers hook v<N>`, `doc-superpowers workflow v<N>`), a `# doc-superpowers:begin` … `:end` block in a user's hook, `.gitattributes` or `info/exclude`, a settings hook *entry* by the path of the script it runs. The ledger sets own their `# ledger-superpowers:begin` … `:end` block — in a git hook (`--ledger`) and in `info/exclude` (`--ledger-claude`) — and the settings entries running their two scripts; the two marker pairs never match each other, so each uninstall takes only its own. Never a substring match.
+- **Ledger block placement**: in the git tier's own hook, after its header comments (`install --git` puts the block back whenever it writes its hook whole, so the order of the two installs never matters); in a shell hook of the user's, after the `#!` line, any git-tier block and the leading comment lines — before the user's code, so a trailing `exit 0` cannot skip it — with the hook's mode kept; with no hook, a hook the set creates holding only `#!/bin/sh` and the block (`uninstall --git` likewise leaves a hook holding the ledger block as `#!/bin/sh` and the block). A hook in another language is skipped.
 - Flags outside a subcommand's scope exit 2; CI options need `--ci` (or `--all`).
 
 ### Git Hooks Directory
@@ -251,22 +335,22 @@ The Claude tier is **per-user**. It **copies** hook scripts to `.claude/hooks/do
 - `__DOC_TOOLS_RESOLVE__` becomes the program that finds `doc-tools.sh` at run time — the merge driver's rule: for a plugin-cache install the newest version-named sibling in numeric order (never another sibling, no GNU `sort -V`), for a checkout its own pinned path, single-quoted — and `__INSTALL_DATE__` the date.
 - Hooks are registered in `.claude/settings.local.json` as `bash "$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/<hook>.sh`, and both that file and the scripts directory are excluded from git through a marked block in `$(git rev-parse --git-path info/exclude)`. An exclude cannot hide a tracked file: when the repository tracks either, install prints `git rm -r --cached --ignore-unmatch -- .claude/settings.local.json .claude/hooks/doc-superpowers` and warns that pulling that commit deletes them from every other clone (each teammate re-runs `install --claude`). `status` flags a script or settings command another version installed as `outdated: re-run install --claude`.
 - Existing settings are merged per entry: the installer's entries (by script path) are replaced, every other entry and group is kept byte-for-byte; a settings file that is not one JSON object is refused.
-- The three scripts source `hook-lib.sh`, copied beside them and never registered: one copy of the output bounds (every emitted string under Claude Code's 10,000-character hook-output limit) and of the check watchdog. `status` flags a hook whose `hook-lib.sh` is missing or another version's; a hook that cannot source it says so (and the gate blocks under STRICT).
-- Uninstall removes the installer's entries (a group only when nothing else is left in it), the three scripts, `hook-lib.sh` and the exclude block; a settings file left empty is removed.
+- The three scripts source `hook-lib.sh` (as does the ledger's `ledger-session-notices.sh`), copied beside them and never registered: one copy of the output bounds (every emitted string under Claude Code's 10,000-character hook-output limit) and of the check watchdog. `status` flags a hook whose `hook-lib.sh` is missing or another version's; a hook that cannot source it says so (and the gate blocks under STRICT).
+- Uninstall removes the installer's entries (a group only when nothing else is left in it), the three scripts, `hook-lib.sh` — kept while a ledger script that sources it is installed — and the exclude block; a settings file left empty is removed. `--ledger-claude` is copied the same way, with its own exclude block, and never installs this tier.
 
 ### CI-Specific Flags
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `--workflows=<csv\|all\|none>` | the recorded set; first install: the 2 shell workflows | Which workflows; the Claude-powered ones are opt-in by name |
+| `--workflows=<csv\|all\|none>` | the recorded set; first install: the 2 shell workflows | Which workflows; the Claude-powered ones and the shell `doc-ledger-publish` are opt-in by name (`all` skips `doc-ledger-publish` without `docs/ledger/config.json`, with a note) |
 | `--base-branch NAME` | `main` | Target branch for PR checks (validated: git ref name of `A-Za-z0-9._/-`) |
 | `--cron EXPR` | `0 9 * * 1` | Schedule for weekly freshness audit (5 fields) |
 | `--ci-strict[=true\|false]` | `false` | Fail the PR checks on what is otherwise a warning (exit non-zero): `doc-freshness-pr` on stale docs or a freshness check that cannot run, `doc-spec-verify`'s `claims` job on a claims check that cannot run |
-| `--helpers=<true\|false>` | `true` | Deprecated, and inert: the helper directories ship exactly while an installed workflow runs them. Its only effect: `--helpers=false` is refused while `doc-pr-release` is selected or installed (the workflow runs the producer helpers) |
+| `--helpers=<true\|false>` | `true` | Deprecated, and inert: the helper directories ship exactly while an installed workflow runs them (the ledger set, `ledger/` and `adapters/`, with `doc-ledger-publish` and every claims-running workflow, on a ledger host only — `docs/ledger/config.json` exists). Its only effect: `--helpers=false` is refused while `doc-pr-release` is selected or installed (the workflow runs the producer helpers) |
 | `--force` | off | Also re-install workflows uninstalled on purpose |
 | `--transient` | off | `uninstall` only: record the removal as temporary (`intentional: false`), so the next plain `install --ci` puts the workflow back. Without it the removal is intentional, and a plain `install --ci` leaves the workflow out |
 
-The choices are recorded in `.claude/doc-superpowers/installed.json` (schema 2: `.tiers.ci.{base_branch,cron,ci_strict,workflows}`); a plain `install --ci` reproduces them. Vendoring goes through `doc-tools.sh tools install|uninstall --helper <dir>`, per installed workflow.
+The choices are recorded in `.claude/doc-superpowers/installed.json` (schema 2: `.tiers.ci.{base_branch,cron,ci_strict,workflows}`); a plain `install --ci` reproduces them. Vendoring goes through `doc-tools.sh tools install|uninstall --helper <set>` (`doc-pr-release`, `doc-superpowers-steps`, `ledger`), per installed workflow.
 
 **Retired workflows.** `doc-index-update` was retired in v3.0.0 (it re-baselined every doc edited on the base branch, unread, and failed every run). It is in `install.sh`'s `RETIRED_WORKFLOWS`: any `install --ci` (and a full `uninstall --ci`, or `uninstall --ci --workflows=doc-index-update`) removes a copy that carries the workflow marker and drops its state entry; a file of that name without the marker is kept and reported. `install --ci --workflows=doc-index-update` is an error.
 
@@ -275,7 +359,7 @@ The choices are recorded in `.claude/doc-superpowers/installed.json` (schema 2: 
 Every template in `scripts/hooks/ci/` follows these rules; `test-doc-pr-release.sh` checks them on the installer's output.
 
 - **Step bodies are helpers.** Every `run:` is one call of a script in `doc-superpowers-steps/` (or `doc-pr-release/`), tested on its own; the only inline step is `doc-pr-release.yml`'s pre-checkout PR resolver, which runs before any helper is on disk. The step scripts ship with any installed workflow.
-- **Fail closed.** A check that cannot run is never "0 stale": `freshness-check.sh` writes `status=failed` and no count (a `::warning::`; an `::error::` and exit 1 under STRICT, in the schedule run, and in the AI jobs' scope gate). The schedule closes its issue only after `status == 'ok'` with nothing stale or missing. Missing docs count with stale ones.
+- **Fail closed.** A check that cannot run is never "0 stale": `freshness-check.sh` writes `status=failed` and no count (a `::warning::`; an `::error::` and exit 1 under STRICT, in the schedule run, and in the AI jobs' scope gate). The schedule closes its issue only after `status == 'ok'` with nothing stale or missing **and** a claims step that reports `disabled` or `ok`, or, with no doc index (`no-index`), when the claims step reports `ok`. Claims findings open or update the same issue, under `### Spec claims`, and keep it open; a claims step that could not all run (`indeterminate`) never closes it. Missing docs count with stale ones.
 - **Nothing index- or PR-sized in `$GITHUB_OUTPUT` or an env var** (Linux caps one string at 128 KiB): results stay in `$RUNNER_TEMP` files (`freshness.json`, `freshness-report.json`), read by `github-script` with `fs.readFileSync`; step outputs carry scalars only.
 - **No hard-coded code paths.** Which docs a change touches comes from the index: the AI jobs' scope step runs `check-freshness --code-refs-from` on the change's paths and gates the agent on the result.
 - **Every job has `timeout-minutes`;** every action is SHA-pinned with its exact version comment (`# v4.3.1`, `# v7.1.0`, `# v1.0.88`).
@@ -285,9 +369,11 @@ Every template in `scripts/hooks/ci/` follows these rules; `test-doc-pr-release.
 
 | Variable | Effect |
 |----------|--------|
-| `DOC_SUPERPOWERS_STRICT=1` | The git pre-commit hook (exit 1) and the Claude pre-commit gate (exit 2, reason on stderr) block instead of warn — also when the check itself cannot run |
+| `DOC_SUPERPOWERS_STRICT=1` | The git pre-commit hook (exit 1) and the Claude pre-commit gate (exit 2, reason on stderr) block instead of warn — also when the check itself cannot run. The work ledger's pre-commit and pre-push legs block without it |
 | `DOC_SUPERPOWERS_QUIET=1` | Suppress hook output while still enforcing (exit codes unchanged). The Claude gate's block reason (stderr on exit 2, Claude's feedback) is never suppressed |
-| `DOC_SUPERPOWERS_SKIP=1` | Bypass all hooks temporarily |
+| `DOC_SUPERPOWERS_SKIP=1` | Bypass all hooks temporarily, the work ledger's legs and events included (its pre-commit and pre-push legs print a line naming the variable) |
+| `DOC_SUPERPOWERS_LEDGER_SKIP=1` | Bypass only the work ledger's legs and events (`--ledger`, `--ledger-claude`, and the hook modes) |
+| `DOC_TOOLS_LEDGER_OFFLINE=1` | No ledger adapter runs, nothing is fetched (a cached copy past its TTL is served stale; `--refresh` and `publish` exit 2) and `inflight --push` pushes nothing; the SessionStart event sets it. It does not cover key allocation: `new`, `assign`, `finalize` and `init --accept` still reach the counter ref (`init --accept` with hosted items to write needs the items adapter: exit 2) |
 | `DOC_SUPERPOWERS_CLAIMS_SKIP=1` | Turn off the git hooks' claims legs only: pre-commit's (blocking) and pre-push's (advisory), each of which runs only with `docs/spec-claims/`. The pre-commit leg blocks on a finding whatever `DOC_SUPERPOWERS_STRICT` says; a claims check that cannot run blocks only under STRICT |
 
 `DOC_TOOLS` overrides the path of `doc-tools.sh` a hook runs (tests use it). The index path is fixed: `docs/.doc-index.json`.
@@ -303,13 +389,13 @@ Spec files use a `Status` field. Ladder statuses progress monotonically; exempt 
 | `Draft` | Ladder | Spec generated, not yet implemented | `spec-generate` |
 | `In Review` | Ladder | Implementation started, or a partially-covered target held pending deferred scope | `spec-inject` |
 | `Approved` | Ladder | Human-approved pre-implementation; automation never writes it | human only |
-| `Implemented` | Ladder | Scope-covered target, verification passed (claims-enabled projects: every claim the plan names for it `built` and passing at the final gate, R5) | `spec-inject` |
+| `Implemented` | Ladder | Scope-covered target, verification passed (claims-enabled projects: also gated on its claims, **Spec Status Model → R5**) | `spec-inject` |
 | `Active` | Exempt | Continuously-evolving reference spec; never "completes" | human only |
 | `Deprecated` | Exempt | No longer governing | human only |
 | `Superseded` | Exempt | Replaced by another spec | human only — `spec-generate` writes the `Superseded by` field and the index entry, not this `Status` |
 | any other status | Exempt | Unrecognized vocabulary — anything not on the ladder above | nothing — `spec-verify` reports it informationally, and no action ever writes or corrects it |
 
-Transitions: `Draft` → `In Review` → `Approved` → `Implemented`, monotonic — never regress. `spec-verify` is read-only and writes no `Status`; the writes belong to `spec-inject`. Role gates before status: a path passed as a **constraint** reference is never written at all — no `Status`, no Implementation Notes, no `code_refs` refinement. A path passed as an **amendment** (`--specs=<path>:amends`, never inferred) is status-neutral too: the plan corrects what the spec *says* without building its surface, so `spec-inject --phase=plan` injects one task that verifies the dated `AMENDED` block landed and cites the plan, and `spec-verify` re-runs that landed-check (post-execute FAILs, review reports **P1 Amendment not landed** when it is absent or unattributed). Pass `spec-verify --plan=<path>` for the full check; without it the citation half is skipped and reported as unverified. For a **target**, coverage gates the top rung — Full coverage makes it eligible for `Implemented`, Partial coverage holds it at `In Review` (or leaves it at `Approved`, never regressing) with the remaining scope recorded in Implementation Notes. In a claims-enabled project (`docs/spec-claims/` exists) R5 also holds a target short of `Implemented` until every claim the plan names for it is `built` (or `gated`) and passing at the final gate (`claims attest --final`); without claims, R5 never applies. See the **Spec Status Model** section of `references/spec-lifecycle-actions.md` for roles, coverage classes, and evaluation order.
+Transitions: `Draft` → `In Review` → `Approved` → `Implemented`, monotonic — never regress. `spec-verify` writes no `Status` (claims-enabled: its post-execute step 0, `claims attest --final`, writes `final.json`); the writes belong to `spec-inject`. Role gates before status: a path passed as a **constraint** reference is never written at all — no `Status`, no Implementation Notes, no `code_refs` refinement. A path passed as an **amendment** (`--specs=<path>:amends`, never inferred) is status-neutral too: the plan corrects what the spec *says* without building its surface, so `spec-inject --phase=plan` injects one task that verifies the dated `AMENDED` block landed and cites the plan, and `spec-verify` re-runs that landed-check (post-execute FAILs, review reports **P1 Amendment not landed** when it is absent or unattributed). Pass `spec-verify --plan=<path>` for the full check; without it the citation half is skipped and reported as unverified. For a **target**, coverage gates the top rung — Full coverage makes it eligible for `Implemented`, Partial coverage holds it at `In Review` (or leaves it at `Approved`, never regressing) with the remaining scope recorded in Implementation Notes. In a claims-enabled project (`docs/spec-claims/` exists) a target is also held short of `Implemented` until its claims clear the final gate (`claims attest --final`); the rule, with its `gated` and `:amends` cases, is **Spec Status Model → R5**. Without claims, R5 never applies. See the **Spec Status Model** section of `references/spec-lifecycle-actions.md` for roles, coverage classes, and evaluation order.
 
 ### Supersession Conventions
 
@@ -351,7 +437,7 @@ The `docs/.doc-index.json` file is the machine-readable freshness index. It foll
 - **`status`** reports one doc's freshness (read-only): the verdict `check-freshness` gives for it
 - **`audit-merges`** works out what each merge in a range should have recorded (the changed side's index when only one side changed it, else the merge driver run as an oracle) and reports the entries a recorded merge got differently (read-only, GH #25)
 
-Those eight writers (`build-index`, `add-entry`, `update-index`, `set-code-refs`, `set-doc-type`, `move-entry`, `remove-entry`, `deprecate-entry`) are the only ones that write the index. They take its lock and replace it atomically. `implementation-status` and `fragments list|validate` read without writing, and `set-implementation` edits one doc's realization block, not the index. The `claims` verbs never write the index either: they write only sidecars and gate records under `docs/spec-claims/`, a governing doc's generated claim status block, and the local verdict store under the git directory.
+Those eight writers (`build-index`, `add-entry`, `update-index`, `set-code-refs`, `set-doc-type`, `move-entry`, `remove-entry`, `deprecate-entry`) are the only ones that write the index. They take its lock and replace it atomically. `implementation-status` and `fragments list|validate` read without writing, and `set-implementation` edits one doc's realization block, not the index. The `claims` verbs never write the index either: they write only sidecars and gate records under `docs/spec-claims/`, a governing doc's generated claim status block, and the local verdict store under the git directory. Nor do the `ledger` verbs, which read it: they write item files (their frontmatter and `## Log` / `## Rulings` lines), `docs/ledger/` (config, registry, legacy and finalized maps), the cache `<git common dir>/doc-superpowers/ledger/`, and on the remote the counter ref, the in-flight refs and the views branch.
 
 ### Freshness Model
 

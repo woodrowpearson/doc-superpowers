@@ -1,4 +1,4 @@
-# Shell test suites — the six suites that gate changes to this repo — and the
+# Shell test suites — the seven suites that gate changes to this repo — and the
 # check that this repo's own self-installed CI tier is what the installer
 # would write today.
 #
@@ -83,7 +83,7 @@ jobs:
           for tool in jq git; do
             command -v "$tool" >/dev/null 2>&1 || { echo "::error::$tool not found"; exit 1; }
           done
-          # test-doc-pr-release.sh parses the eight CI templates to prove the
+          # test-doc-pr-release.sh parses the nine CI templates to prove the
           # placeholder substitution leaves valid YAML, and reads template
           # structure (concurrency, job guards, run: wiring) through the same
           # parser. PyYAML ships on the ubuntu image but not the macOS one, so
@@ -147,6 +147,10 @@ jobs:
         run: |
           "$BASH_BIN" scripts/test-spec-claims.sh
 
+      - name: test-ledger.sh
+        run: |
+          "$BASH_BIN" scripts/test-ledger.sh
+
       # This repository installs its own CI tier (scripts/hooks/install.sh
       # install --ci), and nothing else notices those copies going stale: for
       # months its freshness workflows called a .github/scripts/doc-tools.sh
@@ -194,6 +198,14 @@ jobs:
             for p in $(grep -oE '\.github/scripts/[A-Za-z0-9._/-]+\.sh' "$f" | sort -u || true); do
               [ -x "$p" ] || drift "$f" "runs $p, which is not vendored (or not executable)"
             done
+            # On a ledger host (docs/ledger/config.json), the claims step's
+            # V5 reads ledger trackers through the ledger set beside the
+            # vendored doc-tools.sh (install --ci ships it there only).
+            if [ -f docs/ledger/config.json ] \
+              && grep -qF '.github/scripts/doc-superpowers-steps/claims-check.sh' "$f" \
+              && [ ! -f .github/scripts/ledger/lib.sh ]; then
+              drift "$f" "runs claims-check.sh without the vendored ledger helper set (.github/scripts/ledger/)"
+            fi
           done
           # A doc-superpowers workflow with no template (a retired one, such as
           # doc-index-update) is drift too, on disk or recorded in the state.
@@ -211,19 +223,30 @@ jobs:
           cmp scripts/doc-tools.sh .github/scripts/doc-tools.sh \
             || drift .github/scripts/doc-tools.sh "differs from scripts/doc-tools.sh"
           [ -x .github/scripts/doc-tools.sh ] || drift .github/scripts/doc-tools.sh "is not executable"
+          # Each vendored directory against its source: the CI helpers'
+          # scripts/hooks/ci/<dir>/*.sh, and the ledger helper set's
+          # scripts/ledger/ (*.sh, *.awk, *.jq) and scripts/adapters/*.sh.
+          # Scripts must be executable; the awk and jq programs are data.
           for d in .github/scripts/*/; do
             [ -d "$d" ] || continue
             d=$(basename "$d")
+            case "$d" in
+              ledger | adapters) src=scripts/$d ;;
+              *) src=scripts/hooks/ci/$d ;;
+            esac
             for f in ".github/scripts/$d"/*; do
-              p="scripts/hooks/ci/$d/$(basename "$f")"
+              p="$src/$(basename "$f")"
               if [ ! -f "$p" ]; then
                 drift "$f" "is not a plugin helper (no $p)"
                 continue
               fi
               cmp "$p" "$f" || drift "$f" "differs from $p"
-              [ -x "$f" ] || drift "$f" "is not executable"
+              case "$f" in
+                *.sh) [ -x "$f" ] || drift "$f" "is not executable" ;;
+              esac
             done
-            for p in "scripts/hooks/ci/$d"/*.sh; do
+            for p in "$src"/*.sh "$src"/*.awk "$src"/*.jq; do
+              [ -f "$p" ] || continue
               [ -e ".github/scripts/$d/$(basename "$p")" ] \
                 || drift ".github/scripts/$d" "lacks $(basename "$p") (a partial helper install)"
             done

@@ -42,6 +42,7 @@ audit my project's documentation
 | `spec-generate` | Generate formal specs from design doc |
 | `spec-inject` | Inject spec tasks or track drift |
 | `spec-verify` | Verify spec compliance |
+| `ledger` | Work ledger (opt-in, `docs/ledger/config.json`): `doc-tools.sh ledger <verb>` |
 
 ## Tool names and capabilities
 
@@ -58,7 +59,7 @@ multi_agent = true
 
 ## Hooks
 
-Install the tiers that work outside Claude Code with `hooks install --git --ci`. The Claude hook tier needs Claude Code; see the matrix.
+Install the tiers that work outside Claude Code with `hooks install --git --ci`; in a project with a work ledger (`docs/ledger/config.json`), also its git legs, `hooks install --ledger`. The Claude hook tier and the ledger's Claude events (`--ledger-claude`) need Claude Code; see the matrix.
 
 ## Spec Lifecycle
 

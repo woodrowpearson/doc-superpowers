@@ -1418,8 +1418,10 @@ _INDEX_PATCH='reduce $patch[] as $x (.;
   else error("doc-tools: unknown index patch row: \($x | tojson)") end)'
 
 _die() {
-  # A claims verb's failure is "could not run": exit 2, with its verdict.
+  # A claims or ledger verb's failure is "could not run": exit 2, with its
+  # verdict.
   if [ "$_CL_ACTIVE" = 1 ]; then _claims_die "$*"; fi
+  if [ "$_LG_ACTIVE" = 1 ]; then _lg_fail 2 "$*"; fi
   echo "ERROR: $*" >&2
   exit 1
 }
@@ -1522,17 +1524,52 @@ _CL_ACTIVE=0         # 1: this run is a claims verb
 _CL_EMITTED=0        # 1: this shell printed the run's verdict
 _CL_EMITTED_RC=""    # …and the exit code that verdict carries
 _CL_VERB=""          # the claims verb ("validate", …), for verdict objects
+# A ledger verb (_LG_ACTIVE=1) has the same exit family (0 ok · 1 findings ·
+# 2 could not run · 3 usage) with its marker in $_SCRATCH/lg-emitted; see
+# "Work ledger" below.
+_LG_ACTIVE=0         # 1: this run is a ledger verb
+_LG_EMITTED=0        # 1: this shell printed the run's verdict
+_LG_EMITTED_RC=""    # …and the exit code that verdict carries
+_LG_VERB=""          # the ledger sub-verb ("ls", …); "ledger" when none
+_LG_FORMAT=text      # text | json (--format)
+_LG_HOOK=0           # 1: a hook mode (ledger notices|state-watch --hook): exit 0, stdout the hook's
+_LG_HOOK_FAIL=""     # a hook mode's failure handler (scripts/ledger/hooks.sh), once it is set
 _on_exit() {
-  local rc=$? emitted=0 erc=""
+  local rc=$? emitted=0 erc="" marker=""
   if [ "$_CL_ACTIVE" = 1 ]; then
     if [ "$_CL_EMITTED" = 1 ]; then
       emitted=1
       erc="$_CL_EMITTED_RC"
-    elif [ -n "$_SCRATCH" ] && [ -e "$_SCRATCH/cl-emitted" ]; then
-      emitted=1
-      # No trailing newline: read assigns, then returns 1.
-      IFS= read -r erc < "$_SCRATCH/cl-emitted" || true
+    else
+      marker=cl-emitted
     fi
+  elif [ "$_LG_ACTIVE" = 1 ]; then
+    if [ "$_LG_EMITTED" = 1 ]; then
+      emitted=1
+      erc="$_LG_EMITTED_RC"
+    else
+      marker=lg-emitted
+    fi
+  fi
+  if [ -n "$marker" ] && [ -n "$_SCRATCH" ] && [ -e "$_SCRATCH/$marker" ]; then
+    emitted=1
+    # No trailing newline: read assigns, then returns 1.
+    IFS= read -r erc < "$_SCRATCH/$marker" || true
+  fi
+  # A "ledger:" note publish held for its prune (scripts/ledger/inflight.sh
+  # _lg_note_flush) is printed however the run ends.
+  if [ "${_LG_NOTE_DEFER:-}" = publish ] && [ -n "$_SCRATCH" ]; then
+    ( _lg_note_flush ) || true
+  fi
+  # A ledger run's background in-flight scan (scripts/ledger/inflight.sh)
+  # never outlives it: it and every process under it (git fetch, its
+  # transport) are signalled, and it is reaped, before the scratch dir goes.
+  if [ -n "${_LG_IFL_PID:-}" ]; then
+    _lg_kill_tree "$_LG_IFL_PID"
+    wait "$_LG_IFL_PID" 2>/dev/null || true
+    _LG_IFL_PID=""
+  fi
+  if [ "$_CL_ACTIVE" = 1 ] || [ "$_LG_ACTIVE" = 1 ]; then
     # A marker whose code is unreadable still means a verdict was printed.
     case "$erc" in
       0|1|2|3) ;;
@@ -1543,12 +1580,12 @@ _on_exit() {
   if [ "$rc" -eq 0 ] && [ "$_EXIT_OK" != 1 ]; then
     rc=1
   fi
-  if [ "$_CL_ACTIVE" = 1 ]; then
+  if [ "$_CL_ACTIVE" = 1 ] || [ "$_LG_ACTIVE" = 1 ]; then
     case "$rc" in
       130|143) ;;
       *)
         if [ "$emitted" = 0 ]; then
-          _claims_fallback "$rc"
+          if [ "$_CL_ACTIVE" = 1 ]; then _claims_fallback "$rc"; else _lg_fallback "$rc"; fi
           rc=2
         else
           rc=$erc
@@ -1556,6 +1593,9 @@ _on_exit() {
         ;;
     esac
   fi
+  # A hook mode (Task 16c U4) never fails its session: whatever happened —
+  # a usage error, no repository, a crash — it ends 0.
+  if [ "$_LG_HOOK" = 1 ]; then rc=0; fi
   exit "$rc"
 }
 
@@ -2267,8 +2307,10 @@ claims gate|cmd_claims_gate|repo|plan= chunk= from= holds=* by= base=
   Run a plan chunk's claims gate at HEAD and record it in
   docs/spec-claims/gates/<plan-stem>/chunk-<n>.json (written even when
   red): the claims the chunk's **Claims:** lines name plus --planes-of
-  <from>..HEAD and each lint, log or judge claim the range moved into
-  built or gated, re-promotions owed, V8, V8n and V9 over <from>..HEAD,
+  <from>..HEAD and each lint, log or judge claim in the plan's scope (the
+  claims its **Claims:** lines name and every claim of a doc its Specs
+  list names) that the range moved into built or gated, re-promotions
+  owed, V8, V8n and V9 over <from>..HEAD,
   every named id no claim has and every named claim still unbuilt that no
   included DOC-STALE ruling covers, and the reconciliations since <from> (a
   ruling counts only when its record is this chunk's record; anything else
@@ -2284,14 +2326,17 @@ claims attest|cmd_claims_attest|repo|plan= final deep base=
   Check a plan's gate records against the branch at HEAD: every chunk
   with a gate task recorded, its commits matched to merge-base..HEAD by
   patch id (an unmatched one marks the record rebased: re-verified);
-  every claim the plan names, and each lint, log or judge claim the branch
-  moved into built or gated, run at HEAD (built must pass, diverged fail
-  with its ruling and tracker; unbuilt, or a re-promotion owed, is a
-  finding); every ruling, promotion and status change since the
-  merge-base on the plan's claims and its specs' claims recorded in a
-  chunk record or in final.json, whose reconciliations are rebuilt from
-  the last chunk record's head (a ruling counts there only when it names
-  final.json as its record), and every recorded ruling still at HEAD; the
+  every claim the plan names, and each lint, log or judge claim in the
+  plan's scope (as for the gate) that the branch moved into built or
+  gated, run at HEAD (built must pass, diverged fail with its ruling and
+  tracker; unbuilt, or a re-promotion owed, is a finding); every ruling,
+  promotion and status change since the merge-base on the plan's claims
+  and its specs' claims recorded in a chunk record or in final.json, whose
+  reconciliations are rebuilt from the last chunk record's head (a ruling
+  counts there only when it names final.json as its record) — a stricter
+  window: a change in that window the rebuild does not include is a
+  silent reconciliation even when an earlier chunk record holds a
+  matching entry — and every recorded ruling still at HEAD; the
   amendment batch (claims rulings); render --check. --final is the final
   gate: refuses a dirty tree, and writes
   docs/spec-claims/gates/<plan-stem>/final.json even when it does not
@@ -2306,6 +2351,369 @@ claims rulings|cmd_claims_rulings|repo|range= format= base=
   new claim), new {quote, states} at <b>}. --format markdown prints them
   as Markdown for a PR description, under "## Spec amendments (N)",
   instead of the verdict object.
+ledger show|cmd_ledger_show|repo|refresh format=
+  <key|alias|legacy-ref|path> [--refresh] [--format text|json]
+  One work-ledger item in at most 25 lines: key, ledger, severity,
+  derived status, summary, specs, plans, handoffs, contracts, relations,
+  its upstream, downstream and sibling items, its re-check markers
+  ("re-check: <key> landed"), and the first resolution line of a closed
+  item. A key or alias is
+  matched case-insensitively and may be spaced: checkout-14, checkout 14,
+  checkout #14 (one argument or several words); a provisional key that
+  was finalized reaches its key (docs/ledger/finalized.json); a legacy
+  ref (<old>#<n>, "<old> row <n>", "<old> ledger row <n>", and "<old>
+  #<n>" for a letter-suffixed row only — with digits alone it is a key;
+  <n> digits and an optional letter, 21c — leading zeros and case do not
+  matter) is looked up
+  in the legacy map — an archived row prints "archived: <anchor>"; <path>
+  is from the top level (a path stem, as ls prints for an item without a
+  key, works too). Unknown: exit 1; several items: exit 3. Every ledger
+  verb is inert (exit 0) without docs/ledger/config.json; see "Work
+  ledger".
+ledger ls|cmd_ledger_ls|repo|ledger= sev= open status= cluster= refresh format=
+  [--ledger <id>] [--sev <a,b>] [--open] [--status <s>] [--cluster <contract>] [--refresh] [--format text|json]
+  One line per work-ledger item, "<key>  <severity>  <status>  <summary>"
+  (the first column is the key, or the path stem for an item without
+  one), by severity then date. --sev takes a comma list; --open keeps the
+  open-class items; --status a derived status (shipped, merged, planned,
+  "not started", …); --cluster an item's primary contract (the first of
+  changes, else of consumes) or "unclustered". JSON: {"items":[…]}.
+  With config adapters.pr, the PR list (cached for
+  cache.remote_ttl_minutes) adds "in review #<n>" (an open PR's fetched
+  head claims the item) and, with base claims, "merged · owed: <owed>";
+  --refresh fetches it now (show, ls, view), and its failure is exit 2.
+  Without --refresh a failing adapter serves the last copy (a stderr
+  note) or none (one warning; exit 0).
+ledger find|cmd_ledger_find|repo|format=
+  <words>... [--format text|json]
+  Ranked fuzzy match over key, summary, file-name slug, H1 and first
+  paragraph: the item whose name you cannot remember. Per word: 3 in the
+  key or summary, 2 in the H1 or file name, 1 in the first paragraph;
+  the top 15 with their scores.
+ledger related|cmd_ledger_related|repo|depth= format=
+  <item> [--depth 1|2|3] [--format text|json]
+  An item's confirmed relations — upstream (it consumes what they change,
+  or its relates names them root-cause / depends-on), downstream (the
+  reverse) and siblings (a contract changed or consumed by both, or relates
+  sibling) — breadth first to --depth (default 1), then the unconfirmed
+  candidates: open items that share two or more listed files, a spec, or a
+  file a contract it names is defined in, each with its reason. <item>
+  takes what show takes. Unknown: exit 1.
+ledger sweep|cmd_ledger_sweep|repo|plan= files+ contracts+ keys+ format=
+  (--plan <plan> | --files <path>... | --contracts <id>... | --keys <item>...) [--format text|json]
+  The planning sweep: print a "## Related work" table, | Item | Why
+  related | Mark |, of the work a plan touches — confirmed relations first
+  (items named, their neighbours, items that change or consume a contract
+  or list a file), then candidates — the Mark column empty, for the plan's
+  author to fill with include or exclude: <reason> (validate --plan checks
+  it). --plan reads the plan's backticked existing files, the contract ids
+  and keys in its text and its own Related work rows. Unknown --contracts
+  or --keys: exit 3.
+ledger recheck|cmd_ledger_recheck|repo|format=
+  <item> [--format text|json]
+  The open items to re-check when <item> resolves or its contracts
+  change: its downstream items and the items whose relates name it, each
+  "re-verify | close as superseded by <item> | reshape". The index marks
+  them (re-check: <item> landed) once it reaches a terminal class on the
+  base, until a later commit on the base touches them.
+ledger inflight|cmd_ledger_inflight|repo|branch= fetch push format=
+  [--branch <name>|<name>@<host>] [--fetch] [--push] [--format text|json]
+  Work in flight (config inflight.enabled): local branches, worktrees
+  (a detached one as "(detached:<path hash>)"), keys.remote's branches and
+  other machines' in-flight refs (<ref_prefix>/<host>/<branch>) not merged
+  into the base and younger than inflight.max_age_days, one line each:
+  "<name> <sources>[@<host>] <PR #n|no PR> claims:<keys> contracts:<ids>
+  files:<n>". A branch's work is merge-base(<base>, tip)..tip (trunk
+  merged into it never counts); it claims an item by a claims or
+  claims-by-path trailer, by modifying the item file, or through a plan it
+  modifies. <host> is inflight.host_id, else git config
+  doc-superpowers.ledger.host, else 8 hex digits of a hash of the
+  hostname. --fetch fetches the in-flight refs now (otherwise once per
+  cache.remote_ttl_minutes; offline: exit 2). Off: one line, exit 0. An
+  unknown --branch: exit 1. --push publishes this branch (commits not on
+  the base) as <ref_prefix>/<host>/<branch> on keys.remote — forced,
+  --no-verify — after inflight.pre_push_check (run with sh -c, one stdin
+  line "<merge-base>..<tip>"; non-zero: nothing pushed, its output shown,
+  exit 1); detached HEAD, nothing beyond the base, offline, an
+  unreachable remote or an authentication / permission failure (said as
+  such): a line, exit 0; a refused push: exit 2. JSON: {"host_id",
+  "inflight_data", "pr_data", "branches": [{host, own, name, branch, oid,
+  sources, merge_base, pr, files_n, files, claims, contract_changes, acks,
+  refs}]}. show and ls show "on branch <b>" for an open item an in-flight
+  branch claims.
+ledger notices|cmd_ledger_notices|repo|branch= gate fetch hook format=
+  [--branch <name>|<name>@<host>] [--gate] [--fetch] [--format text|json] | --hook
+  In-flight notices for a branch (default: the current one) against every
+  other branch in flight and the base since the branch's merge base: stop
+  (another branch or the base changes a contract the branch's claimed
+  items consume or it changes itself; two branches claim one item),
+  heads-up (another branch changes files it changes), info (siblings of
+  its claimed items claimed elsewhere). One line each: "<urgency> <id>
+  <other>[@<host>] <PR #n|no PR> <kind>:<values> — <what changed> →
+  <action>" (reconcile-before-next-chunk, rebase-after-merge, heads-up);
+  <id> is 12 hex of sha256(other, overlap, other's tip) — other hashed as
+  "<name>" for a branch on keys.remote, else "<name>@<host>", so every host
+  computes one id; for the base, the tip is a digest of the overlap's
+  state (the overlap contract files' blobs, the commits whose
+  Contract-Change names an overlap contract) — so a notice fires again
+  only when the other side's work (the base's: its overlap) moves. A
+  branch the branch already contains raises nothing; the branch itself,
+  ahead on another host, is one info ("<name>@<host> is ahead of this
+  branch"). A "Ledger-Ack: <id> — <clause>" trailer in the branch's
+  commits hides it. The claimed items' consumes and siblings are read
+  from this working tree — for a --branch other than the current one, not
+  from its tip (a note says so). --gate: exit 1 on any unacked stop
+  notice. --fetch fetches the in-flight refs first (offline: exit 2).
+  A --branch naming no branch, or a base that does not resolve: exit 2.
+  JSON: {"notices": [{id, urgency, other: {branch, host, pr}, overlap:
+  {contracts|keys|files}, what_changed, action}], "pr_data"}.
+  --hook: the Claude Code SessionStart hook (the event on stdin, read
+  only for being empty or one JSON object), for the current branch,
+  offline (as DOC_TOOLS_LEDGER_OFFLINE=1: nothing is fetched): one hook
+  object — systemMessage and additionalContext — holding a count line
+  and the stop and heads-up notices, at most 15 lines in all ("…and M
+  more"), each string at most 9,000 characters; nothing when there are
+  none or in-flight awareness is off; a failure is one "cannot list"
+  line. Always exits 0, printing nothing else (a usage error, no
+  repository, no docs/ledger/config.json, an event that is not JSON:
+  silent); DOC_SUPERPOWERS_LEDGER_SKIP=1 or DOC_SUPERPOWERS_SKIP=1:
+  silent. It takes no other
+  option. The installed hook (install.sh --ledger-claude) runs it under
+  a 2-second budget.
+ledger state-watch|cmd_ledger_state_watch|repo|hook
+  --hook
+  The Claude Code PostToolUse (Write|Edit) hook: reads the event on
+  stdin; when its tool_input.file_path lies under one of config
+  state_watch.paths ("~/" is $HOME — HOME empty or unset: the entry names
+  nothing; an absolute entry is itself; any other is under the top level
+  or $CLAUDE_PROJECT_DIR; "*" matches within one segment, every other
+  character is itself; an entry matches the file and anything below it;
+  either path may cross a symbolic link: the directories that exist are
+  compared resolved)
+  and the text written (content, new_string, edits[].new_string) names an
+  item key (of a registered ledger or a config legacy_ids id; any
+  key-shaped word without a registry) and holds one of
+  state_watch.patterns (any case), prints one hook object whose
+  additionalContext suggests `doc-tools.sh ledger note <key> "…"`.
+  Otherwise nothing. Always exits 0, printing nothing else (as notices
+  --hook); DOC_SUPERPOWERS_LEDGER_SKIP=1 or DOC_SUPERPOWERS_SKIP=1:
+  silent.
+ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize format=
+  --ledger <id|unassigned> --summary <text> [--file <issue>] [--finalize] [--format text|json]
+  Allocate an item key and write key, ledger and summary (at most 140
+  characters, one line) into an issue: <issue> defaults to the one staged
+  or untracked item file without a key (none or several: exit 3).
+  --ledger unassigned writes no key. The key comes from the counter ref
+  on the remote (config keys); when the remote cannot be reached it is a
+  provisional key "<ledger>-~<hex>" (with a warning) that finalize
+  replaces: the first 4 hex digits of sha256(<issue>), lengthened one at
+  a time (8 at most) past any key, alias or finalized.json key it would
+  repeat, and past the keys given before it in one batch (by path).
+  --finalize allocates for real or fails (exit 2) — and, on an
+  issue that has a provisional key, finalizes that one key (--ledger and
+  --summary optional). Prints "<key>  <path>".
+ledger assign|cmd_ledger_assign|repo|format=
+  <item> <ledger> [--format text|json]
+  Move an item to a ledger: a new key there; the previous key is appended
+  to its aliases. <item> takes what show takes. Prints
+  "<key>  <path>  (was <old key>)".
+ledger link|cmd_ledger_link|repo|consumes= changes= relates= format=
+  <item> (--consumes <contract> | --changes <contract> | --relates <kind>:<item>) [--format text|json]
+  Write confirmed relations into an item's frontmatter lists (consumes,
+  changes, relates; any of the three at once, in one write). A contract
+  must exist (registry or contracts adapter); a relates kind is
+  root-cause, depends-on or sibling and names another item that has a
+  key (written as its key). Any bad value: exit 1, nothing written. A
+  value already there is left as it is.
+ledger note|cmd_ledger_note|repo|kind= format=
+  <item> <text> [--kind log|ruling|owed] [--format text|json]
+  The one deterministic home for an item's state. <item> takes what show
+  takes; <text> is one line. log (the default) appends "- <YYYY-MM-DD>
+  <text>" under config log_heading, ruling "- <YYYY-MM-DD> RULING: <text>"
+  under "## Rulings" — after the section's last line, the heading created
+  at the end of the file when absent; every other byte is kept (BOM, line
+  endings, the final newline); nothing is staged. owed sets the owed field
+  (empty text removes it). A hosted item (config items.adapter) goes
+  through its adapter: a comment (log, "RULING: <text>"), or its owed
+  field (refused, exit 3, when it holds "-->" or "--!>"); the adapter
+  failing or offline: exit 2. Prints "<key|path>  <line>". Unknown item:
+  exit 1; several, or a blank text: exit 3.
+ledger view|cmd_ledger_view|repo|md html out= open refresh format=
+  <ledger|all> [--md] [--html] [--out <dir>] [--open] [--refresh] [--format text|json]
+  Render the ledger views from the working tree (uncommitted items
+  included) into --out (default <git-common-dir>/doc-superpowers/ledger/
+  views): <ledger>.md, or every ledger's page and README.md for all (--md,
+  the default); --html writes ledger.html, every ledger in one
+  self-contained file with filters and search. A page groups the open items
+  by the contract they change (else consume), then unclustered, recently
+  closed and superseded / won't fix items (views.recent_days). --open
+  opens the HTML (else the page) with open / xdg-open. One line per file.
+  Stale PR data (the adapter failed; config adapters.pr) is marked "PR
+  data as of <UTC> (<age> old)" in the header, missing PR data "PR data:
+  —". --refresh fetches the PR list now (a failure: exit 2).
+ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed= format=
+  (--staged | --all | --plan <plan> [--strict] | --pushed <a>..<b>) [--registry] [--format text|json]
+  Check items, the ledger registry and keys. One "<class> <path|key>
+  <detail>" line per finding, " (advisory)" after an advisory; exit 1 when
+  any finding blocks. --staged (the pre-commit gate) checks the items
+  staged for this commit, as staged: a key is <ledger>-<n> or
+  <ledger>-~<4–8 hex> and unique among keys and aliases; ledger is a
+  registered, active id or unassigned; an added item carries ledger and
+  summary; an item whose status moves to closed or won't fix has a
+  resolution, and its superseded_by names an existing item and leads to no
+  cycle (a longer chain, or one ending at a closed or won't-fix item, is
+  advisory); superseded_by only on a closed item. On a
+  modified item a finding about what it already was at HEAD is advisory
+  (a legacy_ids or retired ledger likewise); the registry is checked when
+  it is staged. --all: the same over every item of the working tree, plus
+  advisories (missing key, ledger or summary; weak summary; unassigned or
+  contract-less open items; parse errors). A closed or won't-fix item from
+  before adoption — config base has no commit adding
+  docs/ledger/config.json yet, or the base holds the item's file and no
+  commit after the first one that added config.json (a descendant of it
+  on the base's first-parent line; a merge counts with what it brings
+  in, so a branch forked before adoption and merged after it touches
+  what it changed; a pure rename, an archive move, does not touch the
+  moved file) touched it — reports a missing resolution as advisory,
+  "terminal before adoption" (--staged is unchanged: a status moving into
+  closed or won't fix in the commit needs a resolution). In a shallow
+  clone whose boundary is where config.json first shows, the adoption
+  commit cannot be known: no item is from before it (fails closed). --plan: every row of the plan's
+  "Related work" table is marked include or exclude: <reason> (advisory;
+  --strict blocks). --pushed (for pre-push hooks): with keys.mode cas, each
+  provisional key the range introduces blocks (an all-zeros <a>, a new
+  branch: those it adds since config base; a key the base carries too is
+  named with ledger finalize --all); merge mode passes. --registry
+  checks docs/ledger/ledgers.json: schema, ledger ids, statuses, kinds,
+  contract ids, globs, and that no tracked file is claimed by two ledgers
+  (overlap) or, once any ledger declares paths, that every tracked file
+  outside docs/ has one (unowned); alone, one "registry <class> <detail>"
+  line per finding, every finding blocking.
+ledger publish|cmd_ledger_publish|repo|dry-run format=
+  [--dry-run] [--format text|json]
+  Fetch the remote, render the views from the base commit (read from its
+  blobs: its own config, registry and items; no checkout) and push one new
+  commit to views.branch (default
+  doc-ledger-views, an orphan branch holding only the view files) — built
+  with git plumbing, so HEAD, the index and the working tree are never
+  touched — without force: a branch that moved meanwhile exits 2. With
+  config adapters.pr the PR list is fetched now; its failure is exit 2.
+  With in-flight awareness on, it then deletes the in-flight refs on the
+  remote (<ref_prefix>/…; under refs/heads/ only <host>/<name>-shaped
+  ones) whose tips are on the base or older than inflight.max_age_days —
+  one push, never offline; a failed prune is a note, not a failed publish.
+  --dry-run renders into <git-common-dir>/doc-superpowers/ledger/
+  publish-dry-run and stops before the commit (listing what it would
+  prune).
+ledger finalize|cmd_ledger_finalize|repo|all format=
+  [--all] [--format text|json]
+  Replace provisional keys with allocated ones — in the item's key and in
+  every relates, superseded_by and aliases that names them — and record
+  each in docs/ledger/finalized.json. keys.mode cas: the provisional keys
+  this branch added (--all: every one) in the working tree, nothing
+  committed; the remote must be reachable (else exit 2). keys.mode merge:
+  run on the base; every provisional key, numbered after the highest key
+  in the tree, in one commit "ledger: finalize N keys". One
+  "<provisional> → <key>  <path>" line each.
+ledger init|cmd_ledger_init|repo|dry-run registry= report= accept= import sources= format=
+  --report <file> [--registry <file>] [--sources files,github]
+  | --accept <decisions.tsv> [--dry-run] | --import  [--format text|json]
+  Bootstrap the ledger. Runs without docs/ledger/config.json (on the
+  default config, {}); only --accept writes one. One mode per run.
+  --report writes <file> (a markdown report: Sources, Hand-written
+  ledgers, Registry, Registry findings, Assignment summary, Next steps)
+  and, with no --registry, docs/ledger/ledgers.proposed.json; with one,
+  <file>.decisions.tsv (the previous one kept as <file>.decisions.tsv.bak)
+  — nothing else (each through a temp file and mv; the report last).
+  A report or decisions path that is — under any spelling or symbolic
+  link — ledgers.json, config.json, the legacy map, the proposal or the
+  --registry file exits 3, as does a --registry path holding a tab or a
+  newline. Sources (--sources, a comma list; default files,
+  plus github when items.adapter is set): files — the item globs, and a
+  suggested glob (never added) for each tracked directory holding three
+  or more *.md files with a status: frontmatter line; github — the items
+  adapter lists them (items.adapter, else doc-superpowers:ledger-items-gh;
+  for that one, gh must be present and authenticated and `gh repo view
+  --json hasIssuesEnabled` true; a custom adapter is not probed); when the
+  check or the list fails, an explicit --sources github exits 2, the default
+  one is reported and skipped. Hand-written ledgers: the files config
+  legacy_ledgers names, when it names any (no other file is read for
+  tables, here or in --accept); else the tracked *.md files with a table
+  whose header has a "#" column and a column linking item files — set
+  legacy_ledgers to the ones that are ledgers; each with its legacy id
+  (legacy_ledgers, else the file stem minus "-ledger") and its rows (the
+  "#" cell, else n<ordinal in the file>). A row's links are its Tracker…
+  column's when the header has one, else every cell's, never a dep: link
+  ([dep: x](…), dep: [x](…)); its item is the first that is an item.
+  The registry:
+  --registry <file> (ledger-registry/1, else exit 2), else
+  docs/ledger/ledgers.json, else a proposal written to
+  docs/ledger/ledgers.proposed.json (jq -S): one ledger per top-level
+  directory holding code (tracked files outside docs/ that are not .md,
+  .markdown, .rst or .txt; dot-directories left out but .github,
+  .circleci, .gitlab, .buildkite), the largest one split per second-level
+  directory when it holds more than 40 % of the code files (keeping
+  residual_paths ["<dir>/**"]); docs, CI, scripts and test directories are
+  "platform"; ids are the directory names slugged (16 characters, -2, -3
+  on a collision); contracts from the contracts adapter whose defined_in
+  all fall in one ledger; hints (item component/area values, labels,
+  hand-written ledger names) in the report. ledgers.json is never
+  written. Its validate --registry findings are part of the report.
+  With a registry, each item gets a suggested ledger, first match: its
+  ledger value when registered (ledger-field), a row of a hand-written
+  ledger whose legacy id is registered (legacy:<file>#<row>, the lowest
+  row by number), the
+  plurality owner of its paths (paths:<ledger> <n>/<m>; files cited by
+  more than 5 % of the items, and at least two, are hubs and skipped; a
+  tie is none), a registered ledger:<id> label (label), else unassigned
+  (none). <file>.decisions.tsv: "# ledger init decisions", "# registry:
+  <path> <sha256>", "# path<TAB>class<TAB>suggestion<TAB>reason<TAB>
+  decision", then one row per item sorted by path (hosted items by ref);
+  decision is the suggestion for terminal items (fixed, closed, wontfix)
+  and empty otherwise — fill it in, then --accept. A re-run keeps each
+  decision already in the file (by path) while it is a registered id or
+  unassigned (a terminal row whose decision is its suggestion is the
+  pre-fill: recomputed), names the ones it drops (and why) in the
+  report, and keeps the previous file as <file>.decisions.tsv.bak.
+  Without a registry no decisions file is written. Exit 0 once written;
+  2 could not run; 3 usage.
+  --accept applies the rows with a decision, after checking every one
+  (a registered, active id or unassigned; still an item; a compatible
+  key): any failure exits 1, one finding per row, nothing written. The
+  registry is ledgers.json, else the decisions header's file (its sha256
+  must match: else exit 2, "registry changed since the report"), which is
+  installed as ledgers.json. It writes config.json when absent ({}; with
+  items.adapter when a decided row is hosted), the keys (one counter
+  commit: open items in a registered ledger without a key there, per
+  ledger in item-date order; a key of another ledger is re-homed into
+  aliases; offline: provisional), the item fields (ledger; summary when
+  missing — the legacy row's bold lead (its first **…** span that is no
+  tag: not P0-P9, a pure number, under 12 characters once emoji and
+  punctuation are trimmed from its ends, or one all-caps word), the H1,
+  the first sentence, ≤ 140 characters; a stub's: that bold lead, else
+  the row's cells; key), stubs for the open rows of hand-written ledgers that
+  link no item (a row is done when its State's first words are done,
+  shipped, resolved, closed, superseded, dropped or a config status.fixed,
+  closed or wontfix value, or when its first words run together spell
+  one — any case; ~~, *, ` and apostrophes dropped, any other run of
+  non-alphanumerics splits words: WONT-FIX, Won't fix and wontfix are
+  done, "Do next" and "Closing" are not)
+  (docs/issues/<today>-<slug>.md, carrying the row text with each
+  relative link that resolves from the ledger file re-expressed from the
+  stub's directory — ?query and #fragment kept; URLs, #anchors, absolute
+  and dead links as they were — or through the items
+  adapter's create when items.globs is []), legacy.json entries for every
+  row (<legacy-id>#<row> → key, item or archived; a row legacy.json
+  already holds is left alone — no stub, no finding: pre-seeded entries
+  are authoritative; its key is read as show reads one, so x#7 is the
+  row numbered 07; the summary line and JSON legacy.kept count these
+  rows), then renders the views
+  into the cache and prints the paths to review and commit. --dry-run
+  prints the plan and writes nothing. A second run changes nothing.
+  --import turns the hosted items (items.adapter: list, get) into
+  docs/issues/<created>-<slug>.md files once (imported_from, url, the
+  fields; a note links each back; nothing is closed), then sets
+  items.adapter to null; a failure exits 2 and keeps what was imported.
 fragments list|cmd_fragments_list|deps|
   -
   List the per-PR release-notes fragments (RELEASE-NOTES.next/PR-<N>.md in
@@ -2331,25 +2739,30 @@ fragments merge|cmd_fragments_merge|repo|paths-out= remove
   whose release commit has not reached <range-end> (merge or cherry-pick
   it first); 1 on any other failure.
 tools install|cmd_tools_install|deps|dest= with-helpers helper=*
-  [--dest <path>] [--with-helpers | --helper <dir>...]
+  [--dest <path>] [--with-helpers | --helper <set>...]
   Vendor doc-tools.sh into <path> (default .github/scripts); with
-  --with-helpers also every helper the CI templates run
-  (<path>/doc-pr-release/ and <path>/doc-superpowers-steps/), with
-  --helper <dir> (repeatable) only those helper directories; shipping
-  doc-pr-release also creates RELEASE-NOTES.next/README.md (only if
-  absent). Files are replaced atomically; an existing file keeps its mode,
-  and every script ends up executable (the templates run them directly).
+  --with-helpers also every helper set the CI templates run, with --helper
+  <set> (repeatable) only those: doc-pr-release and doc-superpowers-steps
+  (<path>/<set>/), and ledger — the work ledger's modules
+  (scripts/ledger/*.sh, *.awk, *.jq → <path>/ledger/) and reference
+  adapters (scripts/adapters/*.sh → <path>/adapters/), which the vendored
+  doc-tools.sh runs from beside itself; shipping doc-pr-release also
+  creates RELEASE-NOTES.next/README.md (only if absent). Files are
+  replaced atomically; an existing file keeps its mode, every script ends
+  up executable (the templates run them directly), and a new awk or jq
+  program is 644.
   A symbolic link at a destination or at a directory on its way is refused
   before anything is written. Run from a vendored copy it can only copy
   itself (onto itself it only makes sure the copy is executable); a helper
   request then exits 1, writing nothing.
 tools uninstall|cmd_tools_uninstall|deps|dest= helper=*
-  [--dest <path>] [--helper <dir>...]
+  [--dest <path>] [--helper <set>...]
   Remove from <path> each vendored file that is byte-identical to the
   plugin's copy; a file with local edits (or from another plugin
   version) and a file you added are kept and reported, and so is a helper
-  directory that still holds them. With --helper <dir> (repeatable), only
-  those helper directories (doc-tools.sh stays). A symbolic link on the
+  directory that still holds them. With --helper <set> (repeatable), only
+  those helper sets (doc-tools.sh stays; ledger is <path>/ledger/ and
+  <path>/adapters/). A symbolic link on the
   way is refused. With the doc-pr-release helpers it also removes
   RELEASE-NOTES.next/README.md when it is byte-identical to the plugin's
   fragment-format spec and the only file there (an edited one, or one
@@ -2358,9 +2771,10 @@ tools uninstall|cmd_tools_uninstall|deps|dest= helper=*
 tools status|cmd_tools_status|deps|dest=
   [--dest <path>]
   Report whether doc-tools.sh is vendored at <path>, whether it matches the
-  plugin's copy (and the plugin's version), and the helpers present: how
-  many differ from the plugin's copies, and how many the plugin does not
-  ship (added locally) — and whether RELEASE-NOTES.next/README.md matches
+  plugin's copy (and the plugin's version), and the helpers present (the
+  ledger set as "ledger helpers" and "ledger adapters"): how many differ
+  from the plugin's copies, and how many the plugin does not ship (added
+  locally) — and whether RELEASE-NOTES.next/README.md matches
   the plugin's fragment-format spec (an older copy gives outdated advice:
   replace it with the plugin's). Run from a vendored copy it reports
   presence only: no plugin to compare with.
@@ -2381,7 +2795,7 @@ Options:
   --opt VALUE and --opt=VALUE are the same, and options may appear anywhere
   on the line; "--" ends them. --help (-h) prints a subcommand's usage and
   exits 0. An option a subcommand does not take is an error (exit 2; 3 for
-  a claims subcommand), never silently ignored.
+  a claims or ledger subcommand), never silently ignored.
 
 Mapping lines (stdin of build-index and add-entry, one doc per line):
   doc_path:code_refs_csv:doc_type
@@ -2481,6 +2895,15 @@ Spec claims (claims validate, run, promote, render, gate, attest, rulings):
   status"): 0 as expected, 1 findings, 2 could not run, 3 usage, with
   precedence 1 > 2 > 0. In a claims glob (config "governing", "plans", …),
   * also matches "/".
+  With the work ledger on (docs/ledger/config.json), V5 reads a tracker that
+  names a ledger item — its path, or its key or an alias (any case) that
+  one item carries — by the ledger's status classes: open is open; fixed,
+  closed and wontfix are closed ("Won't Fix", "Not planned" included). An
+  item whose status no class names is read at its path as any tracker; a
+  tracker naming no item is unchanged. The ledger index is read offline
+  (DOC_TOOLS_LEDGER_OFFLINE=1); a ledger that cannot be read (scripts/ledger/
+  not beside doc-tools.sh, an invalid config) is one indeterminate V5 row,
+  "ledger-unavailable: …" (exit 2), and no tracker is then judged.
   Only a new DOC-STALE or RETIRE ruling licenses a changed states, a lowered
   enforced_by or a re-anchor that changes a token (validate, V6). The
   direction policy (config "policy") judges each new DOC-STALE or RETIRE
@@ -2506,10 +2929,87 @@ Spec claims (claims validate, run, promote, render, gate, attest, rulings):
   (validate --staged), or validate --config KEY=VALUE — comparing recorded
   --rev <merge-base> with the proposed configuration: a gated claim now
   satisfied is an advisory (promote-owed: promote it to built once the
-  change is committed); a built one no longer satisfied owes a new ruling,
-  committed before the change (then promote re-gates it); a diverged one
+  change is committed; a lint, log or judge claim: move it to built by a
+  reviewed status edit); a built one no longer satisfied owes a new ruling,
+  committed before the change (then promote re-gates it, or a reviewed
+  status edit to gated for a lint, log or judge claim); a diverged one
   whose "when" the change switches on is a finding, whatever its rulings
-  (fix the code and promote it, or retire it, first).
+  (fix the code and promote it (a lint, log or judge claim: move it to
+  built by a reviewed status edit), or retire it, first).
+
+Work ledger (ledger show, ls, find, related, sweep, recheck, inflight,
+notices, state-watch, new, assign, link, note, view, validate, publish,
+finalize, init):
+  Opt-in: docs/ledger/config.json turns it on (a key it omits takes its
+  default; {} is a complete config). Without it every ledger verb except
+  init prints "ledger: not enabled (no docs/ledger/config.json)" — with
+  --format json, {"verb":"ledger <sub>","enabled":false,"exit":0} — and
+  exits 0, a hook mode (notices --hook, state-watch --hook) excepted: it
+  prints nothing (its stdout reaches a Claude Code session) and exits 0,
+  as it does on every failure; init, which bootstraps a repository, runs on the default
+  config ({}) instead, and every object it prints there — its verdict,
+  an error, the crash fallback — says "enabled": false (true once the
+  config exists). That
+  check runs after the options are parsed and the repository is checked
+  (an unknown option still exits 3; outside a git work tree, 2) and
+  before any argument is read. The verbs live in scripts/ledger/ beside
+  doc-tools.sh: a copy of doc-tools.sh without that directory exits 2 for
+  an enabled ledger. Text is the default output; --format json prints
+  exactly one object {"verb","enabled","exit",…}. The exit codes are the
+  claims subcommands' (see "Exit status"). An adapter (config adapters:
+  contracts, pr) is an absolute path, a path from the top level, or
+  doc-superpowers:<name> — scripts/adapters/<name>.sh beside this
+  doc-tools.sh; one that fails or prints output that breaks its contract
+  exits 2 for every verb that needs it (contracts: show, related, recheck,
+  sweep, link, view, publish). The pr adapter's list is cached for
+  cache.remote_ttl_minutes; when it fails, the verbs serve the last copy
+  (or none) with one stderr line and "pr_data" in --format json, and only
+  --refresh and publish exit 2. DOC_TOOLS_LEDGER_OFFLINE=1 never runs it
+  (for hooks that must not reach the network): a copy past its TTL is
+  served as "PR data as of …", no copy is "—", and --refresh / publish
+  exit 2 ("offline: DOC_TOOLS_LEDGER_OFFLINE=1"). Hosted items (config
+  items.adapter, e.g. doc-superpowers:ledger-items-gh — GitHub issues
+  through gh: ledger and severity as "ledger:<id>" / "sev:<value>" labels,
+  the other fields in a <!-- doc-superpowers-ledger … --> block in the
+  issue body; the adapter is also `list [--since <ts>]`, `write <ref>
+  <field> <value>`, `note <ref> <text>` and `create --title T --body-file
+  F`) join the index with their ref as path (gh#<n>) and their url, read
+  through the same cache: a copy that is served stale is "hosted items as
+  of <UTC> (<age> old, stale)" in the note and the views, none is
+  "hosted items: —" (and "items_data" in --format json); --refresh and
+  publish exit 2 when the adapter fails, validate --all too when there is
+  no copy. validate --staged never runs it. With in-flight awareness on,
+  "Fixes #<n>" (trailers.claims_by_ref) claims the one hosted item whose
+  ref ends in #<n>. Re-check markers count hosted items by time: one
+  landed when its issue was closed (else at its last update, once
+  closed), and any update of an open hosted issue (an edit, a comment, a
+  label) clears its markers, as a later commit clears a file item's. A
+  hosted write through ledger note expires the cached list, so the next
+  read fetches it; a value holding "-->" or "--!>" is refused (exit 3).
+  Provisional keys are <ledger>-~<4 to 8 hex>, lengthened past a
+  collision (see ledger new). Adoption: the first commit on config base
+  to add docs/ledger/config.json. validate --all reports a missing
+  resolution on a terminal item from before it as advisory, "terminal
+  before adoption" (see ledger validate); in a shallow clone whose
+  boundary is where config.json first shows, the adoption commit cannot
+  be known and no item counts as from before it.
+  The index counts, per item, the spec claims (docs/spec-claims/*.json but
+  config.json) that are diverged or unbuilt and whose tracker names it
+  (its path, or its key or an alias): "claims" in the index and in show
+  --format json; show prints "claims: <n> diverged · <n> unbuilt" and the
+  views' Status column " · claims: …", each only when one is non-zero.
+  Config trailers.since — a commit (an abbreviated id will do), "adoption"
+  or null (the default: every trailer counts) — keeps the claim trailers
+  (claims, claims_by_path, claims_by_ref) of the commits that descend from
+  it and ignores them in every other commit (the since commit itself, its
+  ancestors, a branch forked before it whether merged after it or still in
+  flight), wherever they are read: the base's claims ("merged · owed:
+  …"), the PR heads, the in-flight branches. "adoption" is the adoption
+  commit — the same "after" as validate's (while the base has none, every
+  commit predates adoption and no claim trailer counts; in a shallow clone
+  where it cannot be known, exit 2). Contract-Change and ack lines are
+  unaffected. A since that names no commit here (a shallow clone may lack
+  it) exits 2.
 
 Exit status:
   0  success
@@ -2533,14 +3033,14 @@ Exit status:
   3  fragments merge refused: a release consumed fragments that are still
      present, because its release commit has not reached <range-end>
 
-  The claims subcommands have their own codes instead:
+  The claims and ledger subcommands have their own codes instead:
   0  everything as expected
   1  findings (a blocking check failed)
   2  could not run: an adapter reported indeterminate or exited non-zero,
      the base did not resolve, the config is not one JSON object, a dirty
      tree where one is refused (gate, promote, attest --final), a missing
-     dependency, a run outside a git work tree or below its top level, or
-     an internal failure (never 1)
+     dependency, a run outside a git work tree or below its top level, a
+     ledger run without scripts/ledger/, or an internal failure (never 1)
   3  usage error
   When several apply, the precedence is 1 > 2 > 0.
 
@@ -2648,9 +3148,11 @@ cmd_help() {
 }
 
 # A command-line error: say what is wrong and where the usage is; exit 2
-# (a claims verb: _claims_usage_error, exit 3 with its verdict object).
+# (a claims verb: _claims_usage_error, exit 3 with its verdict object; a
+# ledger verb: exit 3, with its object in --format json).
 _usage_error() {
   if [ "$_CL_ACTIVE" = 1 ]; then _claims_usage_error "$1" "$2"; fi
+  if [ "$_LG_ACTIVE" = 1 ]; then _lg_fail "$_USAGE_RC" "$1: $2" "$1"; fi
   echo "ERROR: $1: $2" >&2
   echo "       See: doc-tools.sh $1 --help" >&2
   exit "$_USAGE_RC"
@@ -2780,17 +3282,20 @@ _require_repo() {
     _require_repo_fail "$1 must run from the repository's top level, not from ${prefix%/}/ (doc paths are keyed from the root). Run: cd \"\$(git rev-parse --show-toplevel)\""
   fi
 }
-# Exit 2 — for a claims verb with its verdict object (could not run).
+# Exit 2 — for a claims or ledger verb with its verdict object (could not
+# run).
 _require_repo_fail() {
   if [ "$_CL_ACTIVE" = 1 ]; then _claims_die "$1"; fi
+  if [ "$_LG_ACTIVE" = 1 ]; then _lg_fail 2 "$1"; fi
   echo "ERROR: $1" >&2
   exit 2
 }
 
 # check_deps failed (it named what is missing): exit 1 — 2, with its verdict
-# object, for a claims verb (could not run).
+# object, for a claims or ledger verb (could not run).
 _deps_fail() {
   if [ "$_CL_ACTIVE" = 1 ]; then _claims_die "a required command is missing or too old (see the errors above)"; fi
+  if [ "$_LG_ACTIVE" = 1 ]; then _lg_fail 2 "a required command is missing or too old (see the errors above)"; fi
   exit 1
 }
 
@@ -2818,6 +3323,30 @@ _main() {
     _CL_VERB="${2:-claims}"
     exec 9>&1
   fi
+  # A ledger verb: the same exit family and fd 9 (see "Work ledger").
+  if [ "$1" = ledger ]; then
+    _USAGE_RC=3
+    _LG_ACTIVE=1
+    # The word after "ledger" until the lookup confirms it; "ledger" when
+    # there is none (or it is an option: "ledger --format json").
+    case "${2:-}" in
+      ''|-*) _LG_VERB=ledger ;;
+      *) _LG_VERB="$2" ;;
+    esac
+    exec 9>&1
+    _lg_prescan "$@"
+    if [ "$_LG_HOOK" = 1 ]; then
+      # A hook runs wherever the session is: from the top level, as every
+      # ledger verb; outside a work tree the repository check fails —
+      # silently, as every hook-mode failure.
+      # DOC_SUPERPOWERS_SKIP=1 bypasses every hook, this one included.
+      if [ "${DOC_SUPERPOWERS_SKIP:-}" = 1 ] || [ "${DOC_SUPERPOWERS_LEDGER_SKIP:-}" = 1 ]; then
+        _lg_mark_emitted 0
+        _exit_ok
+      fi
+      cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || true
+    fi
+  fi
 
   local verb
   if [ $# -ge 2 ] && _verb_lookup "$1 $2"; then
@@ -2840,6 +3369,7 @@ _main() {
     exit 2
   fi
   if [ "$_CL_ACTIVE" = 1 ]; then _CL_VERB="${verb#claims }"; fi
+  if [ "$_LG_ACTIVE" = 1 ]; then _LG_VERB="${verb#ledger }"; fi
 
   # --help anywhere before "--" wins, before any dependency is needed.
   local a
@@ -2854,10 +3384,13 @@ _main() {
   # runs git), so a signal at any point from here ends the run through cleanup.
   _traps
   _parse_args "$verb" "$_VERB_OPTS" "$@"
+  if [ "$_LG_ACTIVE" = 1 ]; then _lg_format; fi
   case "$_VERB_NEEDS" in
     repo) check_deps || _deps_fail; _require_repo "$verb" ;;
     deps) check_deps || _deps_fail ;;
   esac
+  # Inert, refused, or scripts/ledger/ loaded — before the handler exists.
+  if [ "$_LG_ACTIVE" = 1 ]; then _lg_enter; fi
   "$_VERB_HANDLER" ${_ARGS[@]+"${_ARGS[@]}"}
 }
 
@@ -5303,11 +5836,36 @@ _tools_is_plugin() {
   [ -f "$_TOOLS_ROOT/skills/doc-superpowers/SKILL.md" ] && [ -d "$SCRIPT_DIR/hooks/ci" ]
 }
 
-# The helper directories the CI templates run as .github/scripts/<dir>/*.sh,
-# laid out in the plugin as scripts/hooks/ci/<dir>/. doc-superpowers-steps
-# holds the step scripts every template runs; doc-pr-release the producer
-# helpers of doc-pr-release.yml.
-_TOOLS_HELPER_DIRS="doc-pr-release doc-superpowers-steps"
+# The helper sets tools install / uninstall / status act on (--helper names
+# one). doc-pr-release and doc-superpowers-steps are directories the CI
+# templates run as .github/scripts/<dir>/*.sh, laid out in the plugin as
+# scripts/hooks/ci/<dir>/: doc-superpowers-steps holds the step scripts every
+# template runs, doc-pr-release the producer helpers of doc-pr-release.yml.
+# ledger is the work ledger's modules and reference adapters, which a vendored
+# doc-tools.sh runs from beside itself ($SCRIPT_DIR/ledger; a
+# "doc-superpowers:<adapter>" config value is $SCRIPT_DIR/adapters/<adapter>.sh).
+_TOOLS_HELPER_DIRS="doc-pr-release doc-superpowers-steps ledger"
+
+# Each set's parts, "<set>:<source dir under scripts/>:<dest subdir>": a part
+# ships its source dir's *.sh, *.awk and *.jq to <dest>/<subdir>/ — the
+# scripts executable (the templates run them directly), the awk and jq
+# programs 644 (data the scripts read). A part is reported as "<set> helpers"
+# when its subdir is the set's name, else as "<set> <subdir>".
+_TOOLS_PARTS="doc-pr-release:hooks/ci/doc-pr-release:doc-pr-release
+doc-superpowers-steps:hooks/ci/doc-superpowers-steps:doc-superpowers-steps
+ledger:ledger:ledger
+ledger:adapters:adapters"
+
+# _tools_part <part>: split one _TOOLS_PARTS entry into _TP_SET, _TP_SRC (an
+# absolute path), _TP_SUB and _TP_LABEL.
+_tools_part() {
+  local r
+  _TP_SET=${1%%:*}
+  r=${1#*:}
+  _TP_SRC="$SCRIPT_DIR/${r%%:*}"
+  _TP_SUB=${r#*:}
+  if [ "$_TP_SUB" = "$_TP_SET" ]; then _TP_LABEL="$_TP_SET helpers"; else _TP_LABEL="$_TP_SET $_TP_SUB"; fi
+}
 
 # _tools_copy <src> <dest> <mode for a new dest> [exec]: copy through a tmp
 # beside <dest> (never cp over a file a running CI job may be reading). An
@@ -5342,7 +5900,7 @@ _tools_helper_selection() {
   for d in ${_OPTV_helper[@]+"${_OPTV_helper[@]}"}; do
     case " $_TOOLS_HELPER_DIRS " in
       *" $d "*) ;;
-      *) _usage_error "$1" "unknown helper directory '$d' (one of: $_TOOLS_HELPER_DIRS)" ;;
+      *) _usage_error "$1" "unknown helper set '$d' (one of: $_TOOLS_HELPER_DIRS)" ;;
     esac
     case " $sel " in
       *" $d "*) ;;
@@ -5372,7 +5930,7 @@ _tools_no_link() {
 
 cmd_tools_install() {
   [ $# -eq 0 ] || _usage_error "tools install" "takes no arguments (got '$1')"
-  local dest="${_OPT_dest:-.github/scripts}" helpers d f n
+  local dest="${_OPT_dest:-.github/scripts}" helpers f n p
   helpers=$(_tools_helper_selection "tools install")
   local src="$SCRIPT_DIR/doc-tools.sh"
 
@@ -5382,10 +5940,13 @@ cmd_tools_install() {
       echo "ERROR: --with-helpers / --helper ship the plugin's CI helpers, and $src is a vendored copy, which has none. Run the plugin's doc-tools.sh. Nothing was installed." >&2
       exit 1
     fi
-    for d in $helpers; do
-      [ -d "$SCRIPT_DIR/hooks/ci/$d" ] || _die "the plugin's helper directory $SCRIPT_DIR/hooks/ci/$d is missing. Nothing was installed."
-      for f in "$SCRIPT_DIR/hooks/ci/$d"/*.sh; do
-        _tools_no_link "$dest/$d/${f##*/}"
+    for p in $_TOOLS_PARTS; do
+      _tools_part "$p"
+      case " $helpers " in *" $_TP_SET "*) ;; *) continue ;; esac
+      [ -d "$_TP_SRC" ] || _die "the plugin's helper directory $_TP_SRC is missing. Nothing was installed."
+      for f in "$_TP_SRC"/*.sh "$_TP_SRC"/*.awk "$_TP_SRC"/*.jq; do
+        [ -f "$f" ] || continue
+        _tools_no_link "$dest/$_TP_SUB/${f##*/}"
       done
     done
     case " $helpers " in
@@ -5403,15 +5964,20 @@ cmd_tools_install() {
   fi
   [ -n "$helpers" ] || return 0
 
-  for d in $helpers; do
-    mkdir -p "$dest/$d" || _die "cannot create $dest/$d"
+  for p in $_TOOLS_PARTS; do
+    _tools_part "$p"
+    case " $helpers " in *" $_TP_SET "*) ;; *) continue ;; esac
+    mkdir -p "$dest/$_TP_SUB" || _die "cannot create $dest/$_TP_SUB"
     n=0
-    for f in "$SCRIPT_DIR/hooks/ci/$d"/*.sh; do
+    for f in "$_TP_SRC"/*.sh "$_TP_SRC"/*.awk "$_TP_SRC"/*.jq; do
       [ -f "$f" ] || continue
-      _tools_copy "$f" "$dest/$d/$(basename "$f")" 755 1
+      case "$f" in
+        *.sh) _tools_copy "$f" "$dest/$_TP_SUB/${f##*/}" 755 1 ;;
+        *) _tools_copy "$f" "$dest/$_TP_SUB/${f##*/}" 644 ;;
+      esac
       n=$((n + 1))
     done
-    echo "Installed $n $d helpers → $dest/$d/"
+    echo "Installed $n $_TP_LABEL → $dest/$_TP_SUB/"
   done
 
   # RELEASE-NOTES.next/README.md (with the doc-pr-release helpers: the
@@ -5444,10 +6010,11 @@ cmd_tools_uninstall() {
   # and reported. RELEASE-NOTES.next/README.md goes with the doc-pr-release
   # helpers only when it is the plugin's own spec and alone there: an edited
   # one, or one beside fragments, is kept.
-  local removed=0 kept=0 d f p n
+  local removed=0 kept=0 f p n part
   _tools_no_link "$dest/doc-tools.sh"
-  for d in $_TOOLS_HELPER_DIRS; do
-    _tools_no_link "$dest/$d/x"
+  for part in $_TOOLS_PARTS; do
+    _tools_part "$part"
+    _tools_no_link "$dest/$_TP_SUB/x"
   done
   f="$dest/doc-tools.sh"
   if [ -z "$only" ] && [ -f "$f" ]; then
@@ -5464,23 +6031,25 @@ cmd_tools_uninstall() {
     fi
   fi
 
-  for d in ${only:-$_TOOLS_HELPER_DIRS}; do
-    [ -d "$dest/$d" ] || continue
+  for part in $_TOOLS_PARTS; do
+    _tools_part "$part"
+    case " ${only:-$_TOOLS_HELPER_DIRS} " in *" $_TP_SET "*) ;; *) continue ;; esac
+    [ -d "$dest/$_TP_SUB" ] || continue
     n=0
-    for p in "$SCRIPT_DIR/hooks/ci/$d"/*.sh; do
+    for p in "$_TP_SRC"/*.sh "$_TP_SRC"/*.awk "$_TP_SRC"/*.jq; do
       [ -f "$p" ] || continue
-      f="$dest/$d/$(basename "$p")"
+      f="$dest/$_TP_SUB/${p##*/}"
       if [ -f "$f" ] && ! [ "$p" -ef "$f" ] && cmp -s "$p" "$f"; then
         rm -f "$f" || _die "cannot remove $f"
         n=$((n + 1))
       fi
     done
-    [ "$n" -eq 0 ] || echo "Removed $n $d helpers from $dest/$d/"
+    [ "$n" -eq 0 ] || echo "Removed $n $_TP_LABEL from $dest/$_TP_SUB/"
     removed=$((removed + n))
-    if rmdir "$dest/$d" 2>/dev/null; then
+    if rmdir "$dest/$_TP_SUB" 2>/dev/null; then
       :
     else
-      echo "Kept $dest/$d/ (it holds files that are not unmodified plugin helpers: local edits or your own)"
+      echo "Kept $dest/$_TP_SUB/ (it holds files that are not unmodified plugin helpers: local edits or your own)"
       kept=$((kept + 1))
     fi
   done
@@ -5544,15 +6113,16 @@ cmd_tools_status() {
   # Helper-presence summary (and, when there is a plugin to compare, how many
   # differ from the plugin's copy and how many the plugin does not ship at
   # all — a file the user added is not drift).
-  local d f p n drift added note
-  for d in $_TOOLS_HELPER_DIRS; do
-    if [ -d "$dest/$d" ]; then
+  local f p n drift added note part
+  for part in $_TOOLS_PARTS; do
+    _tools_part "$part"
+    if [ -d "$dest/$_TP_SUB" ]; then
       n=0 drift=0 added=0
-      for f in "$dest/$d"/*.sh; do
+      for f in "$dest/$_TP_SUB"/*.sh "$dest/$_TP_SUB"/*.awk "$dest/$_TP_SUB"/*.jq; do
         [ -f "$f" ] || continue
         n=$((n + 1))
         [ "$plugin" = 1 ] || continue
-        p="$SCRIPT_DIR/hooks/ci/$d/${f##*/}"
+        p="$_TP_SRC/${f##*/}"
         if [ ! -f "$p" ]; then
           added=$((added + 1))
         elif ! cmp -s "$p" "$f"; then
@@ -5562,9 +6132,9 @@ cmd_tools_status() {
       note=""
       [ "$drift" -eq 0 ] || note="$drift differ from the plugin's"
       [ "$added" -eq 0 ] || note="${note:+$note, }$added not shipped by the plugin"
-      echo "$d helpers: $n installed at $dest/$d/${note:+ ($note)}"
+      echo "$_TP_LABEL: $n installed at $dest/$_TP_SUB/${note:+ ($note)}"
     else
-      echo "$d helpers: not installed at $dest"
+      echo "$_TP_LABEL: not installed at $dest"
     fi
   done
   # An upgrade keeps an existing README (tools install never overwrites it),
@@ -6628,7 +7198,7 @@ _claims_v2() {
 # first run of [A-Za-z]+) counts, matched whole and case-insensitively against
 # the closed words: "Approved — not done" is open, "`Done` (2026-10-01)" closed.
 
-_CL_TRACKER_STATE=""  # _claims_tracker_open's answer: pattern | open | closed | missing
+_CL_TRACKER_STATE=""  # _claims_tracker_open's answer: pattern | open | closed | missing (skip: _claims_v5, the ledger unreadable)
 _CL_TRACKER_VALUE=""  # the tracker doc's status value ("" without a status line)
 
 # 0 when $t matches one of config tracker_patterns (on cl-config.json). A
@@ -6722,23 +7292,114 @@ _JQ_CLAIMS_V5='def v5($claim; $doc; $msg): {check: "V5", claim: $claim, doc: $do
     then "enforced_by judge needs why_not_mechanical: why no test, lint or log check is feasible" else empty end)
  | v5($id; $doc; .) | tojson'
 
+# The work ledger (3.3.0; work-ledger design §I). With docs/ledger/config.json
+# in the work tree, a tracker that names a ledger item — its path, its key
+# or an alias (scripts/ledger/lib.sh _lg_status_classes) — is open or closed
+# by the ledger's status classes, read from the ledger index of the tree V5
+# reads (--staged: the index's; head: HEAD's; else the work tree's): open is
+# open; fixed, closed and wontfix are closed (so "Won't Fix" and "Not
+# planned" close a tracker, which the leading-word reading above misses).
+# An item whose status no class names (none included) is read as a 3.2.0
+# tracker at its path; a tracker naming no item is a 3.2.0 tracker. Without
+# the config nothing here runs: V5 is 3.2.0's. The ledger code runs in a
+# subshell (it has its own exit paths); a ledger that cannot be read — no
+# scripts/ledger/ beside doc-tools.sh, an invalid config, an index that
+# cannot be built — is one indeterminate V5 row (exit 2), and no tracker is
+# then judged. It runs offline (DOC_TOOLS_LEDGER_OFFLINE=1).
+
+# _claims_v5_ledger <list> <out>: _lg_status_classes over the trackers in
+# <list> into <out> (one line per tracker, in order); 1, with the
+# indeterminate row written, when the ledger cannot be read.
+_claims_v5_ledger() {
+  local list="$1" out="$2" err="$_SCRATCH/cl-v5-ledger.err" rc msg n m
+  local ixopt=()
+  if [ ! -f "$SCRIPT_DIR/ledger/lib.sh" ]; then
+    _claims_indeterminate V5 - "ledger-unavailable: docs/ledger/config.json turns the work ledger on, and V5 reads trackers through it, but scripts/ledger/ is not beside doc-tools.sh ($SCRIPT_DIR/ledger; a CI tier: re-run scripts/hooks/install.sh install --ci, which ships it with the claims workflows on a ledger host, and commit it; another vendored copy: doc-tools.sh tools install --helper ledger)"
+    return 1
+  fi
+  case "$_CL_MODE" in
+    staged) ixopt=(--staged) ;;
+    head) ixopt=(--rev HEAD) ;;
+  esac
+  : > "$out"
+  # Not the left side of ||: errexit stays live inside the subshell.
+  set +e
+  (
+    set -e
+    # V5 never reaches the network: the pr and items adapters' cached
+    # copies only (a hosted item resolves while its copy lasts).
+    DOC_TOOLS_LEDGER_OFFLINE=1
+    export DOC_TOOLS_LEDGER_OFFLINE
+    # Not followed here (_lg_enter follows it): what the ledger code sets
+    # stays in this subshell, by design.
+    # shellcheck source=/dev/null
+    . "$SCRIPT_DIR/ledger/lib.sh"
+    _lg_init claims-v5
+    _lg_status_classes ${ixopt[@]+"${ixopt[@]}"} "$list" "$out"
+  ) < /dev/null > /dev/null 9> /dev/null 2> "$err"
+  rc=$?
+  set -e
+  if [ "$rc" = 0 ]; then
+    n=$(wc -l < "$list" | tr -d ' ')
+    m=$(wc -l < "$out" | tr -d ' ')
+    [ "$n" = "$m" ] && return 0
+    msg="the ledger answered $m lines for $n trackers"
+  else
+    msg=$(sed -n 's/^ERROR: //p' "$err" 2>/dev/null | head -n 1) || msg=""
+    [ -n "$msg" ] || msg="the ledger index could not be built (rc $rc)"
+  fi
+  _claims_indeterminate V5 - "ledger-unavailable: $msg"
+  return 1
+}
+
 # V5: each distinct tracker of an eligible, touched diverged, unbuilt or gated claim
-# resolved once (_claims_tracker_open), then one jq over the claims. A
-# tracker holding a newline cannot be a repo path, and is left missing.
+# resolved once (_claims_tracker_open; with the ledger on, _claims_v5_ledger
+# first), then one jq over the claims. A tracker holding a newline cannot be
+# a repo path, and is left missing.
 _claims_v5() {
   local list="$_SCRATCH/cl-v5-trackers" rows="$_SCRATCH/cl-v5-trackers.jsonl" t
+  local lgf="$_SCRATCH/cl-v5-ledger.tsv" lg=0 m cls rest st p
   : > "$rows"
+  : > "$lgf"
   _claims_jq v5-trackers -r --slurpfile t "$_SCRATCH/cl-touched.json" \
     '[.[] | select(.eligible and (.claim.id | type) == "string")
       | select(.claim.id as $i | any($t[0][]; . == $i)) | .claim
       | select(.status == "diverged" or .status == "unbuilt" or .status == "gated")
       | .tracker | strings | select(. != "" and (test("\n") | not))] | unique | .[]' \
     "$_SCRATCH/cl-claims.json" > "$list"
+  if [ -s "$list" ] && { [ -e docs/ledger/config.json ] || [ -L docs/ledger/config.json ]; }; then
+    if _claims_v5_ledger "$list" "$lgf"; then lg=1; else lg=skip; fi
+  fi
   while IFS= read -r t <&3; do
-    _claims_tracker_open "$t" || true
+    m=""
+    if [ "$lg" = 1 ]; then IFS= read -r m <&4 || m=""; fi
+    if [ "$lg" = skip ]; then
+      # The ledger could not be read (one indeterminate row): not judged.
+      _CL_TRACKER_STATE=skip
+      _CL_TRACKER_VALUE=""
+    elif [ -n "$m" ]; then
+      cls=${m%%$'\t'*}
+      rest=${m#*$'\t'}
+      st=${rest%%$'\t'*}
+      p=${rest#*$'\t'}
+      if [ -z "$p" ]; then
+        _claims_tracker_open "$t" || true
+      else
+        case "$cls" in
+          open) _CL_TRACKER_STATE=open; _CL_TRACKER_VALUE=$st ;;
+          fixed|closed|wontfix) _CL_TRACKER_STATE=closed; _CL_TRACKER_VALUE=$st ;;
+          *)
+            _claims_tracker_open "$p" || true
+            if [ "$_CL_TRACKER_STATE" = missing ]; then _claims_tracker_open "$t" || true; fi
+            ;;
+        esac
+      fi
+    else
+      _claims_tracker_open "$t" || true
+    fi
     _claims_jq v5-tracker-row -nc --arg t "$t" --arg s "$_CL_TRACKER_STATE" --arg v "$_CL_TRACKER_VALUE" \
       '{tracker: $t, state: $s, value: $v}' >> "$rows"
-  done 3< "$list"
+  done 3< "$list" 4< "$lgf"
   _claims_jq v5 -nr --slurpfile c "$_SCRATCH/cl-claims.json" --slurpfile t "$_SCRATCH/cl-touched.json" \
     --slurpfile tr "$rows" "$_JQ_CLAIMS_V5" >> "$_SCRATCH/cl-findings.jsonl"
 }
@@ -8234,6 +8895,9 @@ _claims_readers_rows() {
 #     its rulings (a diverged claim carries one: honouring it would make
 #     the check vacuous): the code is fixed and the claim promoted, or the
 #     claim retired, before the configuration switches it on.
+# Each remedy is a test claim's. A lint, log or judge claim is never promoted
+# (promote proves test claims only): it enters built or gated by a reviewed
+# status edit, and its messages say so (the plan row's test flag).
 # A failing surfaces or recorded call is indeterminate (check config), and a
 # failing readers call makes the claims it was asked for indeterminate
 # (check V10); a subject path readers is never asked about (unsafe: V3's
@@ -8251,7 +8915,9 @@ _JQ_CLAIMS_V10_CHANGED='$old[0] as $o | $new[0] as $n
 
 # cl-claims.json → the claims V10 may judge ($ch: the changed keys, $b:
 # cl-claims-base.json; run after _JQ_CLAIMS_DELTA): {claim, doc, status,
-# when (an object; {} when not one), ruled (a new ruling), by_when (a when
+# when (an object; {} when not one), test (enforced_by test: its remedies
+# name promote; another tier's, a reviewed status edit), ruled (a new
+# ruling), by_when (a when
 # key changed), subject (null when not a non-empty list of non-empty
 # strings)}.
 # shellcheck disable=SC2016  # jq program, not shell expansion
@@ -8263,7 +8929,7 @@ _JQ_CLAIMS_V10_PLAN='def nes: type == "string" and length > 0;
     | select(.status as $s | any("gated", "built", "diverged"; . == $s))
     | select(.frozen_at | nes | not)
     | (.when | if type == "object" then . else {} end) as $w
-    | {claim: .id, doc: $doc, status, when: $w,
+    | {claim: .id, doc: $doc, status, when: $w, test: (.enforced_by == "test"),
        ruled: ((cl_new_rulings($base[.id].claim) | length) > 0),
        by_when: any($w | keys_unsorted[]; in_list($ch)),
        subject: (if (.subject | type) == "array" and (.subject | length) > 0 and all(.subject[]; nes)
@@ -8289,11 +8955,13 @@ _JQ_CLAIMS_V10='def v10($e; $msg): {check: "V10", claim: $e.claim, doc: $e.doc, 
      ({when: $e.when} | claims_when_ok($new)) as $now
      | ($e.when | length > 0) as $cond
      | if $e.status == "gated" and $cond and $now then
-         v10a($e; "promote-owed"; "now satisfied: promote to built (the configuration this change records satisfies when \($e.when | cl_cond): once it is committed, run claims promote \($e.claim))")
+         (if $e.test
+          then v10a($e; "promote-owed"; "now satisfied: promote to built (the configuration this change records satisfies when \($e.when | cl_cond): once it is committed, run claims promote \($e.claim))")
+          else v10a($e; "promote-owed"; "now satisfied: move it to built by a reviewed status edit (the configuration this change records satisfies when \($e.when | cl_cond): once it is committed, edit its status to built; claims promote proves test claims only)") end)
        elif $e.status == "built" and ($now | not) and ($e.ruled | not) then
-         v10($e; "ruling owed: built, but the configuration this change records no longer satisfies its when (\($e.when | cl_unmet($new))): commit a new ruling on the claim first (the direction: CODE-DIVERGES, DOC-STALE or RETIRE), then make the configuration change, then run claims promote \($e.claim), which re-gates it")
+         v10($e; "ruling owed: built, but the configuration this change records no longer satisfies its when (\($e.when | cl_unmet($new))): commit a new ruling on the claim first (the direction: CODE-DIVERGES, DOC-STALE or RETIRE), then make the configuration change, then \(if $e.test then "run claims promote \($e.claim), which re-gates it" else "move it to gated by a reviewed status edit (claims promote proves test claims only)" end)")
        elif $e.status == "diverged" and $cond and $now and ({when: $e.when} | claims_when_ok($old) | not) then
-         v10($e; "switches on a diverged claim: the configuration this change records satisfies when \($e.when | cl_cond), which the merge-base'"'"'s did not, so production would run what the claim records as diverged: fix the code and promote the claim, or retire it, before switching the configuration on (a ruling does not answer this)")
+         v10($e; "switches on a diverged claim: the configuration this change records satisfies when \($e.when | cl_cond), which the merge-base'"'"'s did not, so production would run what the claim records as diverged: fix the code and \(if $e.test then "promote the claim" else "move the claim to built by a reviewed status edit" end), or retire it, before switching the configuration on (a ruling does not answer this)")
        else empty end
    else empty end'
 
@@ -11475,7 +12143,233 @@ cmd_claims_rulings() {
   _claims_emit rulings
 }
 
+# --- Work ledger: dispatch, inert check, verdict helpers ----------------------
+#
+# The ledger verbs live in scripts/ledger/ (lib.sh and the modules it
+# sources), loaded only when a ledger verb runs in a repository that has
+# docs/ledger/config.json. Everything here must work before — or without —
+# that directory: the inert check, the missing-directory refusal (a vendored
+# doc-tools.sh copied alone), the verdict printers the exit paths (_die,
+# _usage_error, _require_repo_fail, _deps_fail, _on_exit) use. The exit
+# family is the claims verbs': 0 ok · 1 findings · 2 could not run (an
+# internal crash too, never 1) · 3 usage. In --format json a run prints
+# exactly one object {"verb":"ledger <sub>","enabled":…,"exit":<rc>,…} on
+# fd 9 (the run's real stdout, so a verdict printed inside $(…) still
+# reaches it); in text mode errors go to stderr and stdout carries only the
+# verb's output.
+
+_LG_JS=""            # _lg_json_str's result
+
+# A JSON string literal for $1 into _LG_JS, in bash alone (the exit paths
+# must print when jq is what failed or is missing). The algorithm of
+# _claims_json_str.
+_lg_json_str() {
+  local s="$1"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  s=${s//[[:cntrl:]]/}
+  _LG_JS="\"$s\""
+}
+
+# Print one line of the run's output to fd 9 (stdout when fd 9 is not open).
+# A failed write (a closed pipe) must not change the exit status.
+_lg_out() {
+  if { : >&9; } 2>/dev/null; then
+    printf '%s\n' "$1" >&9 || true
+  else
+    printf '%s\n' "$1" || true
+  fi
+}
+
+# _lg_mark_emitted <rc>: this run's verdict, carrying exit code <rc>, is
+# being printed; _on_exit ends the run with <rc>. The variables first; the
+# marker file (holding <rc>, read by _on_exit when the verdict was printed
+# inside $(…)) only once the scratch dir exists.
+_lg_mark_emitted() {
+  _LG_EMITTED=1
+  _LG_EMITTED_RC="$1"
+  if [ -n "$_SCRATCH" ]; then
+    printf '%s' "$1" > "$_SCRATCH/lg-emitted" || true
+  fi
+}
+
+# The verb of this run's verdict object, as a JSON string, into _LG_JS.
+_lg_verb_json() {
+  if [ "$_LG_VERB" = ledger ] || [ -z "$_LG_VERB" ]; then
+    _lg_json_str "ledger"
+  else
+    _lg_json_str "ledger $_LG_VERB"
+  fi
+}
+
+# _lg_fail <rc> <message> [<usage-verb>]: end the run with <rc> (2: could
+# not run; 3: usage, when <usage-verb> names the verb whose --help to see).
+# JSON mode prints the verdict object with "error" first; the stderr lines
+# follow, a failed write ignored. Works inside $(…) (fd 9 and the marker).
+# "enabled" says whether docs/ledger/config.json is present here.
+_lg_fail() {
+  local rc="$1" msg="$2" uverb="${3:-}" verb enabled=false prev=""
+  # The in-flight scan's background child (scripts/ledger/inflight.sh)
+  # prints no verdict: it leaves its failure for the run to raise.
+  # (The first failure wins: a later one never overwrites it.)
+  if [ -n "${_LG_IFL_CHILD:-}" ]; then
+    if [ ! -e "$_SCRATCH/lg-ifl.fail" ]; then
+      printf '%s\t%s\n' "$rc" "$msg" > "$_SCRATCH/lg-ifl.fail" 2>/dev/null || true
+    fi
+    exit "$rc"
+  fi
+  # One verdict per run: a failure after one was printed (a producer that
+  # failed inside $(…) and was run past) is one stderr line, and the run
+  # ends non-zero — with the first verdict's code, unless that was 0.
+  if [ -n "$_SCRATCH" ] && [ -e "$_SCRATCH/lg-emitted" ]; then
+    { IFS= read -r prev < "$_SCRATCH/lg-emitted"; } 2>/dev/null || true
+    echo "ERROR (after the run's verdict): $msg" >&2 || true
+    case "$prev" in
+      1|2|3) exit "$prev" ;;
+    esac
+    _LG_EMITTED_RC=$rc
+    printf '%s' "$rc" > "$_SCRATCH/lg-emitted" 2>/dev/null || true
+    exit "$rc"
+  fi
+  _lg_mark_emitted "$rc"
+  # A hook mode prints no verdict; once its handler is set (the check
+  # itself is running), the handler's hook object says what failed.
+  if [ "$_LG_HOOK" = 1 ] && [ -n "$_LG_HOOK_FAIL" ]; then "$_LG_HOOK_FAIL" "$msg" 2>/dev/null || true; fi
+  if [ "$_LG_FORMAT" = json ]; then
+    if [ -e docs/ledger/config.json ] || [ -L docs/ledger/config.json ]; then enabled=true; fi
+    _lg_verb_json
+    verb=$_LG_JS
+    _lg_json_str "$msg"
+    _lg_out "{\"verb\":$verb,\"enabled\":$enabled,\"exit\":$rc,\"error\":$_LG_JS}"
+  fi
+  echo "ERROR: $msg" >&2 || true
+  if [ -n "$uverb" ]; then echo "       See: doc-tools.sh $uverb --help" >&2 || true; fi
+  exit "$rc"
+}
+
+# _lg_kill_tree <pid>: SIGTERM to <pid> and every process descending from
+# it, bash 3.2-safe (one `ps` walk, no pkill -P). The tree is frozen first
+# (SIGSTOP), walked again for anything forked before the freeze landed (git
+# fetch starts its ssh transport twice: a probe, then the connection — a
+# parent still running when its child dies would start the next one, which
+# no walk saw), then SIGTERM and SIGCONT to all of it.
+_lg_tree_pids() {
+  ps -e -o pid= -o ppid= 2>/dev/null | awk -v r="$1" '
+    { P[$1] = $2 }
+    END {
+      n = 1; Q[1] = r; S[r] = 1
+      for (i = 1; i <= n; i++) for (p in P) if (P[p] == Q[i] && !(p in S)) { S[p] = 1; Q[++n] = p }
+      for (i = 1; i <= n; i++) printf "%s ", Q[i]
+    }'
+}
+_lg_kill_tree() {
+  local pids more
+  pids=$(_lg_tree_pids "$1") || pids=$1
+  [ -n "$pids" ] || pids=$1
+  # shellcheck disable=SC2086  # lists of pids
+  kill -STOP $pids 2>/dev/null || true
+  more=$(_lg_tree_pids "$1") || more=""
+  # shellcheck disable=SC2086
+  kill -STOP $more 2>/dev/null || true
+  # shellcheck disable=SC2086
+  kill -TERM $pids $more 2>/dev/null || true
+  # shellcheck disable=SC2086
+  kill -CONT $pids $more 2>/dev/null || true
+}
+
+# The EXIT trap's verdict for a ledger run that printed none (a set -u
+# crash, a stray exit, a failed command); _on_exit then exits 2.
+_lg_fallback() {
+  local enabled=false
+  if [ "$_LG_FORMAT" = json ]; then
+    if [ -e docs/ledger/config.json ] || [ -L docs/ledger/config.json ]; then enabled=true; fi
+    _lg_verb_json
+    _lg_out "{\"verb\":$_LG_JS,\"enabled\":$enabled,\"exit\":2,\"error\":\"internal\"}"
+  fi
+  echo "ledger: internal error (rc $1)" >&2 || true
+}
+
+# Before _parse_args: --format json anywhere before "--" makes even a usage
+# error in the option loop print its object.
+_lg_prescan() {
+  local a want=0
+  # A hook mode (Task 16c U4): notices or state-watch with --hook before
+  # "--". Its output is the hook's object alone: text mode (a --format is
+  # then a usage error, silent like every hook-mode failure).
+  case "${2:-}" in
+    notices|state-watch)
+      for a in "$@"; do
+        case "$a" in
+          --) break ;;
+          --hook) _LG_HOOK=1 ;;
+        esac
+      done ;;
+  esac
+  if [ "$_LG_HOOK" = 1 ]; then return 0; fi
+  for a in "$@"; do
+    if [ "$want" = 1 ]; then
+      if [ "$a" = json ]; then _LG_FORMAT=json; fi
+      want=0
+      continue
+    fi
+    case "$a" in
+      --) break ;;
+      --format=json) _LG_FORMAT=json ;;
+      --format) want=1 ;;
+    esac
+  done
+}
+
+# After _parse_args: validate --format (a usage error, even when inert).
+_lg_format() {
+  if [ "$_LG_HOOK" = 1 ] && [ -n "${_OPT_format:-}" ]; then
+    _usage_error "ledger $_LG_VERB" "--hook prints the hook's object: it takes no --format"
+  fi
+  case "${_OPT_format:-}" in
+    ''|text) _LG_FORMAT=text ;;
+    json) _LG_FORMAT=json ;;
+    *) _usage_error "ledger $_LG_VERB" "--format must be text or json (got '$_OPT_format')" ;;
+  esac
+}
+
+# After the repository check: inert without docs/ledger/config.json (decided
+# here, before anything is sourced) — every verb but init; a copy of doc-tools.sh without its
+# ledger/ directory cannot run an enabled ledger; else load scripts/ledger/.
+_lg_enter() {
+  # init is the one exception: it bootstraps a repository that has no
+  # config yet (on the default config; only init --accept writes one).
+  if [ "$_LG_VERB" != init ] && [ ! -e docs/ledger/config.json ] && [ ! -L docs/ledger/config.json ]; then
+    _lg_mark_emitted 0
+    # A hook mode: nothing (a hook's stdout reaches the session).
+    if [ "$_LG_HOOK" = 1 ]; then _exit_ok; fi
+    if [ "$_LG_FORMAT" = json ]; then
+      _lg_verb_json
+      _lg_out "{\"verb\":$_LG_JS,\"enabled\":false,\"exit\":0}"
+    else
+      _lg_out "ledger: not enabled (no docs/ledger/config.json)"
+    fi
+    _exit_ok
+  fi
+  if [ ! -f "$SCRIPT_DIR/ledger/lib.sh" ]; then
+    _lg_fail 2 "ledger needs scripts/ledger/ beside doc-tools.sh ($SCRIPT_DIR/ledger)"
+  fi
+  # shellcheck source=scripts/ledger/lib.sh
+  . "$SCRIPT_DIR/ledger/lib.sh"
+}
+
 # --- Main ---
+
+# Test-only source guard: `DOC_TOOLS_SOURCE_ONLY=1 . doc-tools.sh` defines
+# every function and global and returns here, without running _main, so a
+# suite can call internal functions directly (scripts/test-ledger.sh
+# lg_source). Only when SOURCED: executed, the variable changes nothing.
+# `return` at a sourced file's top level ends the `.` (bash 3.2 and 5).
+if [ "${DOC_TOOLS_SOURCE_ONLY:-}" = 1 ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  return 0
+fi
 
 _main "$@"
 # Reached only when the run finished: see _on_exit.

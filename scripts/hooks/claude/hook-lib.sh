@@ -4,9 +4,10 @@
 #
 # (The install date is on line 2, as in the hooks: install.sh status compares
 # every line but that one.)
-# Sourced, never run, by pre-commit-gate.sh, post-commit-sync.sh and
-# session-summary.sh, which set HOOK_EVENT, have_jq and (for _bounded) BUDGET
-# and work first. One copy, so the three cannot drift apart.
+# Sourced, never run, by pre-commit-gate.sh, post-commit-sync.sh,
+# session-summary.sh and the work ledger's ledger-session-notices.sh, which
+# set HOOK_EVENT, have_jq and (for _bounded) BUDGET and work first. One copy,
+# so they cannot drift apart. (ledger-state-watch.sh does not source it.)
 #
 # Claude Code keeps each hook string (systemMessage, additionalContext, the
 # stderr of a blocking exit 2) inline only up to 10,000 characters; past that
