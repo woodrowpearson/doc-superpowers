@@ -74,3 +74,15 @@ When the host has `docs/spec-claims/` (`references/spec-claims.md`), the gates a
 | Final gate | `Final claims gate`, in the last chunk before the finalize tasks | `$DOC_TOOLS claims attest --plan <plan> --final`, which writes `docs/spec-claims/gates/<plan-stem>/final.json`; `spec-verify --mode=post-execute` re-runs it as its step 0, which rewrites `final.json` and so needs a clean tree, and reports its verdict and amendment batch |
 
 Every implementation task carries `**Claims:** <ids>` or `**Claims:** none — <reason>`. A wrapper that skips a gate (an execute path that drops a `Claims gate (chunk N)` task, or reconciles a deviation outside one) is detected by `claims attest --final`: a chunk with a gate task and no record, and a ruling that appears in no gate record (a silent reconciliation), are findings, so the final gate stays red.
+
+## Ledger-enabled wrappers
+
+When the host has `docs/ledger/config.json` (`references/ledger.md`), the work ledger joins the same interception points; a wrapper makes no extra call for it:
+
+| Point | What happens | Run by |
+|---|---|---|
+| During plan | `spec-inject --phase=plan` pastes `$DOC_TOOLS ledger sweep --plan <plan>` as the plan's `## Related work` table and runs `ledger validate --plan <plan>` on its marks (advisory unless the host passes `--strict`); it injects a `Ledger notices (chunk N)` task in each chunk | the plan's author marks the table |
+| After chunk | the plan's `Ledger notices (chunk N)` task runs `$DOC_TOOLS ledger notices --gate`: an unacked `stop` (another branch or the base changing a contract this work's items consume or change, or two branches claiming one item) blocks the next chunk until it is reconciled or acked with a `Ledger-Ack: <id> — <clause>` trailer | the orchestrating agent |
+| Anywhere | `ledger note <item> "<text>"` is the one home for an item's state (a dated log line, a ruling, `owed`); a wrapper that tracks "next", approvals or arc status writes them there, not into agent memory or scratch files | the wrapper |
+
+A wrapper may also run `ledger notices` at any other pause it owns (pre-PR, pre-close) — it is cheap and read-only — and `ledger show <key>` / `ledger related <key>` to load an item's context. Route every call on the ledger's exit family: `0` ok, `1` findings, `2` could not run (never clean), `3` usage. Without `docs/ledger/config.json` every verb but `init` prints one `not enabled` line and exits 0, so a wrapper needs no ledger check of its own.

@@ -16,6 +16,8 @@ Reference for wrapper skill authors integrating doc-superpowers spec lifecycle a
 
 Claims are enabled when `docs/spec-claims/` exists. Two of the points then become **gates with recorded verdicts** — the chunk gate writes `chunk-<n>.json` and the final gate `final.json` — and review adds a claims verdict that records nothing. The per-chunk gate is a plan task, so it runs on every execute path, including one that never re-enters the wrapper. Without `docs/spec-claims/` the right column does not apply and every action behaves as described below.
 
+**With the work ledger on** (`docs/ledger/config.json`; `references/ledger.md`), the *During plan* point does two more things, independent of claims: `spec-inject --phase=plan` pastes `ledger sweep --plan <plan>` into the plan as a `## Related work` table for the author to mark, and gives each chunk a `Ledger notices (chunk N)` task that runs `ledger notices --gate` before the next chunk starts (`spec-lifecycle-actions.md` → Plan Phase, steps 1c and 2c). A wrapper makes no extra call: the gate is a plan task, run on every execute path. Without the config neither is injected.
+
 ```
 Design doc ──→ spec-generate ──→ formal SPEC-{CAT}-NNN files
                                       │
@@ -219,3 +221,4 @@ doc-superpowers expects these to exist (or bootstraps them):
 | Spec template in `references/doc-spec.md` | Bundled with skill | (always available) |
 | `docs/spec-claims/` (sidecars, optional `config.json`, gate records) | The host — optional: its existence enables claims | Never bootstrapped: without it every `claims` verb is inert |
 | Runner adapters (named in `docs/spec-claims/config.json` `runners`) | The host — one small executable per test framework (`references/spec-claims.md`) | Never bootstrapped: reference helpers in `references/spec-claims.md` |
+| `docs/ledger/config.json` (and `ledgers.json`) | The host, or `init`'s *Ledger (opt-in)* step (`ledger init --accept`) — optional: its existence enables the work ledger | Never bootstrapped by a spec action: without it every `ledger` verb but `init` is inert |
