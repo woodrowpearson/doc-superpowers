@@ -38,11 +38,11 @@ When several apply, `1` wins over `2`, and `2` over `0`. A caller routes on all 
 |---|---|---|
 | `docs/ledger/config.json` | the host (`init --accept` writes `{}` when absent) | the switch and the settings (*Config*) |
 | `docs/ledger/ledgers.json` | the host (`init --accept` installs the accepted proposal) | the registry of ledgers (*Registry*) |
-| `docs/ledger/ledgers.proposed.json` | `init --report` | a registry proposal for the host to edit; never read as the registry |
+| `docs/ledger/ledgers.proposed.json` | `init --report` without a registry | a registry proposal for the host to edit; never read as the registry unless named with `--registry` |
 | `docs/ledger/legacy.json` (config `legacy`) | `init --accept`, once | the map from hand-written ledger rows to items (*Legacy map*) |
 | `docs/ledger/finalized.json` | `new --finalize`, `finalize` | provisional key → allocated key (*Keys*) |
 | item files (`items.globs`) | the host; `new`, `assign`, `link`, `note`, `finalize`, `init --accept`, `init --import` write fields | the items |
-| `<report>`, `<report>.decisions.tsv` (+ `.bak`) | `init --report` | the bootstrap report and the assignment decisions (*Bootstrapping*) |
+| `<report>`; `<report>.decisions.tsv` (+ `.bak`) | `init --report`; the decisions file only when the run has a registry | the bootstrap report and the assignment decisions (*Bootstrapping*) |
 | `<git common dir>/doc-superpowers/ledger/` | every verb | the cache: the parse cache, the indexes, the remote cache (PR list, hosted items, in-flight facts), rendered views (`views/`, `publish-dry-run/`), `push.log`. Never committed; safe to delete |
 | `keys.counter_ref` on `keys.remote` (default `refs/doc-superpowers/ledger/counters`) | `new`, `assign`, `finalize`, `init --accept` | the key counters |
 | `<inflight.ref_prefix>/<host>/<branch>` on `keys.remote` | `inflight --push` (the post-commit leg); pruned by `publish` | other machines' local branches |
@@ -170,7 +170,7 @@ Keys are `<legacy id>#<row>`; the legacy id is `legacy_ledgers`' name for the fi
 | `link <item> --consumes <c> \| --changes <c> \| --relates <kind>:<item>` | write confirmed relations into the item's lists (any of the three at once; one write) | 1 a bad value, nothing written |
 | `note <item> <text> [--kind log\|ruling\|owed]` | the one home for item state: `- <date> <text>` under `log_heading`, `- <date> RULING: <text>` under `## Rulings`, or the `owed` field; nothing else in the file changes, nothing is staged; a hosted item goes through its adapter | 1 unknown · 3 several or a blank text · 2 adapter failing |
 | `view <ledger\|all> [--md] [--html] [--out <dir>] [--open] [--refresh]` | render the views from the working tree (uncommitted items included) | 2 `--refresh` failing |
-| `validate --staged \| --all \| --plan <plan> [--strict] \| --pushed <a>..<b> [--registry]` | *Validation* | 1 a blocking finding |
+| `validate (--staged \| --all \| --plan <plan> [--strict] \| --pushed <a>..<b>) [--registry]`, or `validate --registry` alone | *Validation* | 1 a blocking finding |
 | `publish [--dry-run]` | render from the remote base and push one commit to `views.branch` (*Views*) | 2 the branch moved, an adapter failing, offline |
 | `finalize [--all]` | replace provisional keys (*Keys*) | 2 remote unreachable (`cas`) |
 | `init --report <file> [--registry <file>] [--sources files,github] \| --accept <decisions.tsv> [--dry-run] \| --import` | *Bootstrapping* | 1 a decision row failing · 2 could not run · 3 usage |
@@ -276,14 +276,16 @@ Two opt-in installer sets, never part of `--all`; each refuses to install (exit 
 
 ## Bootstrapping — `ledger init`
 
-SKILL.md's `init` action runs it as its *Ledger (opt-in)* step; it also runs standalone on a repository that already has docs. Three modes, one per run:
+SKILL.md's `init` action runs it as its *Ledger (opt-in)* step; it also runs standalone on a repository that already has docs. Three modes, one per run. On a repository with no registry yet the bootstrap is **two `--report` passes**: the first proposes a registry, the second — against the edited proposal — writes the decisions file:
 
-1. **`init --report <file> [--registry <file>] [--sources files,github]`** writes three files and nothing else: `<file>` (a markdown report: Sources, Hand-written ledgers, Registry, Registry findings, Assignment summary, Next steps), `docs/ledger/ledgers.proposed.json`, and `<file>.decisions.tsv`.
+1. **`init --report <file> [--registry <file>] [--sources files,github]`** writes the report `<file>` (a markdown report: Sources, Hand-written ledgers, Registry, Registry findings, Assignment summary, Next steps) and, depending on the registry, one more file, and nothing else:
+   - **No registry** (no `--registry`, no `docs/ledger/ledgers.json`): it writes `docs/ledger/ledgers.proposed.json`, a proposal, and **no decisions file**. Its Next steps say what follows: edit the proposal, then run `init --report <file> --registry docs/ledger/ledgers.proposed.json`.
+   - **With a registry** (`--registry <file>`, else `docs/ledger/ledgers.json`): it writes `<file>.decisions.tsv` (the previous one kept as `.bak`) and no proposal.
    - Sources: `files` (the item globs, plus a suggested glob — never added — for each tracked directory holding three or more `*.md` files with a `status:` line) and `github` (the items adapter; for the reference adapter, `gh` must be authenticated and the repository must have issues enabled — an explicit `--sources github` that fails exits 2, the default one is reported and skipped).
    - Hand-written ledgers: the files `legacy_ledgers` names, when it names any; else every tracked `*.md` file with a table whose header has a `#` column and a column linking item files (set `legacy_ledgers` to the ones that are ledgers). A row's links come from its Tracker column when the header has one, never from a `dep:` link.
    - The registry: `--registry <file>`, else `docs/ledger/ledgers.json`, else a proposal (one ledger per top-level code directory, the largest split per second-level directory when it holds over 40 % of the code; docs, CI, scripts and tests as `platform`). Its `validate --registry` findings are in the report.
    - Each item gets a suggested ledger — its `ledger` value when registered, then a hand-written ledger row, then the plurality owner of its paths, then a `ledger:<id>` label, else `unassigned` — never by keyword. The decisions file pre-fills the suggestion for terminal items and leaves open items' decision empty; a re-run keeps decisions already made.
-2. **Review.** The host's owner edits the proposal (installed as `ledgers.json` by `--accept`, or written as `ledgers.json` by hand) and fills the decisions column. Nothing is assigned the owner did not decide.
+2. **Review**, in two parts on a repository without a registry: the host's owner edits `docs/ledger/ledgers.proposed.json` (ids, titles, kinds, paths, contracts; the report's findings), then the second pass, `init --report <file> --registry docs/ledger/ledgers.proposed.json`, writes `<file>.decisions.tsv`, whose decision column the owner fills. The decisions header records the registry and its sha256, and `--accept` installs that file as `ledgers.json` (or write `ledgers.json` by hand and run the report against it). With a registry already in place, the first pass writes the decisions file and only the second part applies. Nothing is assigned the owner did not decide.
 3. **`init --accept <decisions.tsv> [--dry-run]`** checks every decided row first (any failure: exit 1, one finding per row, nothing written), then writes `config.json` when absent, the registry, the keys (one counter commit, per ledger in item-date order; offline: provisional), the item fields (`ledger`; a mechanical `summary` when missing; `key`), stubs (`docs/issues/<today>-<slug>.md`) for the open rows of hand-written ledgers that link no item — each relative link re-expressed from the stub's directory — and `legacy.json` entries for every row (a row `legacy.json` already holds is left alone), then renders the views into the cache and prints the paths to review and commit. A second run changes nothing. `--dry-run` prints the plan only.
 
 **`init --import`** turns hosted items into `docs/issues/<created>-<slug>.md` files once (each linked back with a note; nothing closed), then sets `items.adapter` to `null`, for a host that chooses files as the source of truth.
@@ -292,7 +294,7 @@ The ledger dispatches no agent: summaries are mechanical (the item's `summary`, 
 
 ## Spec claims (3.2.0) with the ledger on
 
-With `docs/ledger/config.json` and `docs/spec-claims/`, check **V5** reads a claim's `tracker` that names a ledger item — its path, or its key or an alias that one item carries — by the ledger's status classes: open is open; fixed, closed and wontfix are closed, so `Won't Fix`, `Not planned` and `Obsolete` now close a tracker (an `unbuilt` or `diverged` claim tracked by one becomes a V5 finding). An item whose status no class names is read at its path as any tracker is; a tracker naming no item is unchanged. V5 reads the ledger index offline; a ledger that cannot be read (`scripts/ledger/` not beside `doc-tools.sh`, an invalid config) is one indeterminate V5 row, `ledger-unavailable: …` (exit 2), and no tracker is then judged. With the ledger off, V5 is byte-identical to 3.2.0. `references/spec-claims.md` → V5.
+With `docs/ledger/config.json` and `docs/spec-claims/`, check **V5** reads a claim's `tracker` that names a ledger item — its path, or its key or an alias that one item carries — by the ledger's status classes: open is open; fixed, closed and wontfix are closed, so `Won't Fix`, `Not planned` and `Obsolete` now close a tracker (an `unbuilt`, `diverged` or `gated` claim tracked by one becomes a V5 finding). An item whose status no class names is read at its path as any tracker is; a tracker naming no item is unchanged. V5 reads the ledger index offline; a ledger that cannot be read (`scripts/ledger/` not beside `doc-tools.sh`, an invalid config) is one indeterminate V5 row, `ledger-unavailable: …` (exit 2), and no tracker is then judged. With the ledger off, V5 is byte-identical to 3.2.0. `references/spec-claims.md` → V5.
 
 ## Vendored copies
 
@@ -302,7 +304,7 @@ With `docs/ledger/config.json` and `docs/spec-claims/`, check **V5** reads a cla
 
 | Variable | Effect |
 |---|---|
-| `DOC_TOOLS_LEDGER_OFFLINE=1` | no adapter runs and nothing is fetched or pushed by the remote cache or `inflight --push` (*Adapters*) |
+| `DOC_TOOLS_LEDGER_OFFLINE=1` | no adapter runs and nothing is fetched or pushed by the remote cache or `inflight --push` (*Adapters*); key allocation is not covered |
 | `DOC_SUPERPOWERS_LEDGER_SKIP=1` | skips every ledger hook leg and hook mode |
 | `DOC_SUPERPOWERS_SKIP=1` | skips every doc-superpowers hook, the ledger legs included |
 | `LEDGER_GH_LEDGER_PREFIX`, `LEDGER_GH_SEV_PREFIX` | the GitHub items adapter's label prefixes (default `ledger:`, `sev:`) |
