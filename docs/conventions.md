@@ -346,7 +346,7 @@ The Claude tier is **per-user**. It **copies** hook scripts to `.claude/hooks/do
 | `--base-branch NAME` | `main` | Target branch for PR checks (validated: git ref name of `A-Za-z0-9._/-`) |
 | `--cron EXPR` | `0 9 * * 1` | Schedule for weekly freshness audit (5 fields) |
 | `--ci-strict[=true\|false]` | `false` | Fail the PR checks on what is otherwise a warning (exit non-zero): `doc-freshness-pr` on stale docs or a freshness check that cannot run, `doc-spec-verify`'s `claims` job on a claims check that cannot run |
-| `--helpers=<true\|false>` | `true` | Deprecated, and inert: the helper directories ship exactly while an installed workflow runs them (the ledger set, `ledger/` and `adapters/`, with `doc-ledger-publish` and every claims-running workflow). Its only effect: `--helpers=false` is refused while `doc-pr-release` is selected or installed (the workflow runs the producer helpers) |
+| `--helpers=<true\|false>` | `true` | Deprecated, and inert: the helper directories ship exactly while an installed workflow runs them (the ledger set, `ledger/` and `adapters/`, with `doc-ledger-publish` and every claims-running workflow, on a ledger host only — `docs/ledger/config.json` exists). Its only effect: `--helpers=false` is refused while `doc-pr-release` is selected or installed (the workflow runs the producer helpers) |
 | `--force` | off | Also re-install workflows uninstalled on purpose |
 | `--transient` | off | `uninstall` only: record the removal as temporary (`intentional: false`), so the next plain `install --ci` puts the workflow back. Without it the removal is intentional, and a plain `install --ci` leaves the workflow out |
 
@@ -373,7 +373,7 @@ Every template in `scripts/hooks/ci/` follows these rules; `test-doc-pr-release.
 | `DOC_SUPERPOWERS_QUIET=1` | Suppress hook output while still enforcing (exit codes unchanged). The Claude gate's block reason (stderr on exit 2, Claude's feedback) is never suppressed |
 | `DOC_SUPERPOWERS_SKIP=1` | Bypass all hooks temporarily, the work ledger's legs and events included (its pre-commit and pre-push legs print a line naming the variable) |
 | `DOC_SUPERPOWERS_LEDGER_SKIP=1` | Bypass only the work ledger's legs and events (`--ledger`, `--ledger-claude`, and the hook modes) |
-| `DOC_TOOLS_LEDGER_OFFLINE=1` | No ledger adapter runs, nothing is fetched (a cached copy past its TTL is served stale; `--refresh` and `publish` exit 2) and `inflight --push` pushes nothing; the SessionStart event sets it. It does not cover key allocation: `new`, `assign`, `finalize` and `init --accept` still reach the counter ref |
+| `DOC_TOOLS_LEDGER_OFFLINE=1` | No ledger adapter runs, nothing is fetched (a cached copy past its TTL is served stale; `--refresh` and `publish` exit 2) and `inflight --push` pushes nothing; the SessionStart event sets it. It does not cover key allocation: `new`, `assign`, `finalize` and `init --accept` still reach the counter ref (`init --accept` with hosted items to write needs the items adapter: exit 2) |
 | `DOC_SUPERPOWERS_CLAIMS_SKIP=1` | Turn off the git hooks' claims legs only: pre-commit's (blocking) and pre-push's (advisory), each of which runs only with `docs/spec-claims/`. The pre-commit leg blocks on a finding whatever `DOC_SUPERPOWERS_STRICT` says; a claims check that cannot run blocks only under STRICT |
 
 `DOC_TOOLS` overrides the path of `doc-tools.sh` a hook runs (tests use it). The index path is fixed: `docs/.doc-index.json`.
