@@ -2581,9 +2581,11 @@ ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed
   commit cannot be known: no item is from before it (fails closed). --plan: every row of the plan's
   "Related work" table is marked include or exclude: <reason> (advisory;
   --strict blocks). --pushed (for pre-push hooks): with keys.mode cas, each
-  provisional key the range introduces blocks (an all-zeros <a>, a new
-  branch: those it adds since config base; a key the base carries too is
-  named with ledger finalize --all); merge mode passes. --registry
+  provisional key the range introduces blocks (only those the branch adds
+  since its merge-base with config base: a new branch's all-zeros <a>, and
+  a branch that merged the base after a provisional key landed there; a
+  key the base carries too is named with ledger finalize --all); merge
+  mode passes. --registry
   checks docs/ledger/ledgers.json: schema, ledger ids, statuses, kinds,
   contract ids, globs, and that no tracked file is claimed by two ledgers
   (overlap) or, once any ledger declares paths, that every tracked file

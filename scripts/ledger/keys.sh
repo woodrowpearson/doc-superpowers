@@ -1313,16 +1313,21 @@ cmd_ledger_finalize() {
 
 # _lg_provisional_in_range <a>..<b>: "key\twhere\tpath" for each provisional
 # key the range adds — the item keys at <b> (of the item files the range
-# changes) that no changed item had at <a>. <a> empty or all zeros (a new
+# changes) that no changed item had at <a>, nor at git merge-base <b>
+# <base> (an existing branch that merged the base after a provisional key
+# landed there is not refused for it: 3.3.1). <a> empty or all zeros (a new
 # branch): the keys <b> adds since config base (from git merge-base <b>
 # <base>, so a provisional key already on the base never blocks a new
 # branch: final review CORE-I4); with no base here (it does not resolve, or
-# shares no history with <b>), every provisional key at <b>. <where>:
+# shares no history with <b>), every provisional key at <b> (a new branch)
+# or that the range adds (an existing one). <where>:
 # "base" for a key the base's copy of that file also carries, "nobase" for
-# every key when there is no base to compare, else "" — `ledger finalize`
-# replaces only the keys the base lacks; `--all` the others too.
+# every key when config base does not resolve here, else "" (a base that
+# resolves but shares no history with <b> is still compared file by file,
+# so its keys are "base") — `ledger finalize` replaces only the keys the
+# base lacks; `--all` the others too.
 _lg_provisional_in_range() {
-  local range="$1" a b ac="" bc d basec="" where="" k w p
+  local range="$1" a b ac="" bc d basec="" where="" k w p mb
   case "$range" in
     *..*) a=${range%%..*}; b=${range#*..} ;;
     *) _lg_die "internal: _lg_provisional_in_range takes <a>..<b> (got '$range')" ;;
@@ -1359,6 +1364,18 @@ _lg_provisional_in_range() {
   _lg_parse_blobs "$bc" "$d/paths.z" "$d/b.recs"
   : > "$d/a.recs"
   if [ -n "$ac" ]; then _lg_parse_blobs "$ac" "$d/paths.z" "$d/a.recs"; fi
+  # An existing branch (<a> given): a key the branch got from the base —
+  # one its merge-base with config base already carries — is not this
+  # push's either (3.3.1: a branch that merges the base after a provisional
+  # key lands there; CORE-I4 covered new branches). Only the keys the branch
+  # adds since that merge-base are checked.
+  if [ -n "$a" ] && [ -n "$basec" ]; then
+    mb=$(git merge-base "$bc" "$basec" 2>/dev/null) || mb=""
+    if [ -n "$mb" ] && [ "$mb" != "$ac" ]; then
+      _lg_parse_blobs "$mb" "$d/paths.z" "$d/m.recs"
+      cat "$d/m.recs" >> "$d/a.recs" || _lg_die "cannot write $d/a.recs"
+    fi
+  fi
   jq -L "$_LG_LIB" -n -r --slurpfile c "$_LG_CFG" --slurpfile a "$d/a.recs" "$_LG_JQ_INDEX_DEFS$_LG_JQ_KEYS_DEFS"'
     lg_fields($c[0]) as $F
     | [$a[] | (.fm // {}) | lg_fv($F; "key") | lg_k_prov | select(. != null)] as $old
