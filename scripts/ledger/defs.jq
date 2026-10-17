@@ -243,6 +243,32 @@ def lg_r_recheck_text:
   (.recheck_after // []) | if length == 0 then ""
   else "re-check: " + (map(if test(":") then "\(.) changed" else "\(.) landed" end) | join(", ")) end;
 
+# --- Trackers (spec claims; work-ledger design §I) ------------------------------
+#
+# A spec claim's `tracker` names an item when it is an item's path, exactly,
+# or its key or one of its aliases (any case; a provisional key that
+# finalized.json maps on resolves to the finalized key's item) carried by
+# exactly one item — what lg_resolve takes as a key or a path. Its looser
+# forms (a file stem, "L 14", a legacy row) are no tracker: a tracker is a
+# written field, not a command-line reference.
+
+# lg_track_map($items; $fin): the lookup tables, built once: P {path: true},
+# K {lower-case key or alias: [paths]}, F the finalized map.
+def lg_track_map($items; $fin):
+  {P: lg_obj($items[] | {(.path): true}),
+   K: lg_lists($items[] | .path as $p | ((.key | strings), ((.aliases // [])[] | strings)) | {k: lg_lower, v: $p}),
+   F: ($fin | if type == "object" then . else {} end)};
+# lg_track($M; $t): the item path tracker $t names, or null.
+def lg_track($M; $t):
+  def one($k): (($M.K[$k | lg_lower] // []) | unique) as $m | if ($m | length) == 1 then $m[0] else null end;
+  def any_of($k): (($M.K[$k | lg_lower] // []) | length) > 0;
+  if ($t | type) != "string" or $t == "" then null
+  elif $M.P[$t] == true then $t
+  elif any_of($t) then one($t)
+  else ($M.F[$t] // $M.F[$t | lg_lower] // null) as $to
+    | if ($to | type) == "string" then one($to) else null end
+  end;
+
 # --- Views (render-md.jq, render-html.jq) ---------------------------------------
 #
 # Both renderers read the same model, lg_v_model, so the markdown pages and

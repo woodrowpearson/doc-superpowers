@@ -252,6 +252,70 @@ _lg_registry() {
   printf '%s\n' "$snap"
 }
 
+# --- Status classes (spec-claims V5; work-ledger design §I) --------------------
+#
+# A spec claim's tracker names an item by its path, its key or an alias
+# (defs.jq lg_track: exactly one item; no stem or legacy forms). The item's
+# class is its status read through the config's status classes (index.sh
+# lg_class): open | fixed | closed | wontfix, or unknown when no class names
+# its status (no status at all included).
+
+# _lg_status_classes [--staged|--rev <rev>] <list> <out>: one line per line
+# of <list> (one tracker each) into <out>, in order: "<class>\t<status>\t
+# <path>" for a tracker naming an item (status "" without one; a tab or
+# control character in it as a space), "unknown\t\t" for one naming none.
+# The index is _lg_index's for the same option (the working tree without
+# one). One jq for every tracker. Dies (2) when the index cannot be built.
+# Needs _lg_init.
+_lg_status_classes() {
+  local ix
+  local ixargs=()
+  case "${1:-}" in
+    --staged) ixargs=(--staged); shift ;;
+    --rev) ixargs=(--rev "${2:-}"); shift 2 ;;
+  esac
+  [ "$#" = 2 ] || _lg_die "internal: _lg_status_classes [--staged|--rev <rev>] <list> <out>"
+  ix=$(_lg_index ${ixargs[@]+"${ixargs[@]}"}) || exit "$?"
+  jq -L "$_LG_LIB" -n -R -r --slurpfile ix "$ix" 'include "defs";
+    $ix[0] as $ix
+    | lg_track_map($ix.items; $ix.finalized) as $M
+    | lg_obj($ix.items[] | {(.path): .}) as $BY
+    | inputs
+    | lg_track($M; .) as $p
+    | if $p == null or ($p | test("[\n\r]")) then "unknown\t\t"
+      else $BY[$p] as $it
+        | "\($it.class // "unknown")\t\($it.status // "" | gsub("[[:cntrl:]]"; " "))\t\($p)"
+      end' "$1" > "$2" || _lg_die "jq failed (status classes)"
+}
+
+# _lg_status_class [--staged|--rev <rev>] <tracker>: print the class of the
+# item <tracker> names (see _lg_status_classes); rc 0 when it names one, 1
+# (printing "unknown") when it names none. Needs _lg_init.
+_lg_status_class() {
+  local t list out line
+  local ixargs=()
+  case "${1:-}" in
+    --staged) ixargs=(--staged); shift ;;
+    --rev) ixargs=(--rev "${2:-}"); shift 2 ;;
+  esac
+  t=${1-}
+  _lg_scratch_name
+  list="$_LG_SN.sc-list"
+  out="$_LG_SN.sc-out"
+  case "$t" in
+    *$'\n'*) t="" ;;
+  esac
+  printf '%s\n' "$t" > "$list" || _lg_die "cannot write $list"
+  _lg_status_classes ${ixargs[@]+"${ixargs[@]}"} "$list" "$out"
+  IFS= read -r line < "$out" || line=""
+  printf '%s\n' "${line%%$'\t'*}"
+  case "$line" in
+    unknown$'\t'$'\t') return 1 ;;
+    '') return 1 ;;
+  esac
+  return 0
+}
+
 # --- Handlers ------------------------------------------------------------------
 #
 # One per verb-table row (doc-tools.sh "ledger <sub>|cmd_ledger_<sub>|…"),
