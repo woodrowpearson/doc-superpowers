@@ -967,8 +967,21 @@ for _e in $(cut -d'|' -f1 <<<"$_scored" | sort -u); do
     assert_no_line_matches "$_cmds" "$_re" "eval $_e: no command SKILL.md prescribes for it trips its negated check $_re"
   done 3< <(jq -r --arg e "$_e" '.evals[] | select(.name == $e) | .assertions[] | select(.type == "tool_call_check" and .negate == true) | .command' "$EVALS_JSON")
 done
+# The ledger eval's sweep check matches Plan Phase step 1c's command as
+# spec-lifecycle-actions.md writes it, its {plan-path} placeholder resolved,
+# and its negated check trips on neither ledger command the procedure injects.
+_sw=$(grep -o '`\$DOC_TOOLS ledger sweep --plan {plan-path}`' <<<"$ACTIONS" | head -1 | tr -d '`' | sed 's|\$DOC_TOOLS|/w/scripts/doc-tools.sh|; s|{plan-path}|docs/superpowers/plans/2026-10-02-auth-tokens.md|')
+assert_true "spec-lifecycle-actions step 1c prescribes \$DOC_TOOLS ledger sweep --plan {plan-path}" test -n "$_sw"
+_swre=$(jq -r '.evals[] | select(.name == "spec-inject-ledger") | .assertions[] | select(.name == "runs-the-sweep") | .command' "$EVALS_JSON")
+assert_true "eval spec-inject-ledger / runs-the-sweep matches step 1c's command" grep -qE -- "${_swre:-^$}" <<<"${_sw:-none}"
+_lgneg=$(jq -r '.evals[] | select(.name == "spec-inject-ledger") | .assertions[] | select(.name == "allocates-no-key") | .command' "$EVALS_JSON")
+assert_true "eval spec-inject-ledger / allocates-no-key spares the sweep, validate --plan and notices --gate" \
+  assert_false_re "${_lgneg:-^$}" "${_sw:-none}
+/w/scripts/doc-tools.sh ledger validate --plan docs/superpowers/plans/2026-10-02-auth-tokens.md
+/w/scripts/doc-tools.sh ledger notices --gate"
+assert_true "…and trips on a key allocation" grep -qE -- "${_lgneg:-^$}" <<<"/w/scripts/doc-tools.sh ledger new --ledger auth --summary x"
 # Required cases: fixtures that build the scenario, runnable here.
-_required="update-from-audit update-from-session-report spec-generate-from-design hooks-install-all sync-index release-draft release-draft-untagged spec-inject-execute spec-verify-review spec-inject-amends release-fragment-merge hooks-status-uninstall spec-inject-claims spec-inject-claims-inert"
+_required="update-from-audit update-from-session-report spec-generate-from-design hooks-install-all sync-index release-draft release-draft-untagged spec-inject-execute spec-verify-review spec-inject-amends release-fragment-merge hooks-status-uninstall spec-inject-claims spec-inject-claims-inert spec-inject-ledger"
 for _e in $_required; do
   _setup=$(jq -r --arg e "$_e" '.evals[] | select(.name == $e) | .setup // ""' "$EVALS_JSON")
   if [ -z "$_setup" ]; then

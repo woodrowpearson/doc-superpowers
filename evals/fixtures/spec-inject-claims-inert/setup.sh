@@ -3,7 +3,9 @@
 # one Draft spec, in a project WITHOUT docs/spec-claims/. Claims are inert
 # there, so spec-inject --phase=plan must inject exactly what it injects
 # without claims: a spec-update task per chunk and one finalize task, and no
-# Claims gate, no Final claims gate and no **Claims:** line.
+# Claims gate, no Final claims gate and no **Claims:** line. It has no
+# docs/ledger/config.json either, so no ledger task is injected (the eval
+# "spec-inject-ledger" builds this project and then opts it in to the ledger).
 # The eval "spec-inject-claims" builds this same project and then opts it in
 # to claims (its setup runs this one first).
 . "$(dirname "$0")/../lib.sh"
@@ -82,5 +84,6 @@ fx_expect "nothing is injected yet" sh -c '! grep -qE "Update governing specs|Cl
 # The inert path: no docs/spec-claims/, so every claims verb reports
 # enabled:false and exits 0.
 fx_expect "the project has no docs/spec-claims/" test ! -e docs/spec-claims
+fx_expect "…nor a work ledger (docs/ledger/config.json)" test ! -e docs/ledger/config.json
 fx_expect "claims are inert (enabled: false)" \
   test "$(dt claims validate --all 2>/dev/null | jq -r '.enabled')" = false
