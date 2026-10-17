@@ -36,12 +36,14 @@ Use the tool that does the same job in your client. Only the skill's own referen
 | Subagent dispatch (`init`, `audit`, `review-pr`, `update`, `release`) | `Agent`, in parallel | subagents; parallel dispatch unverified | `spawn_agent` (`[features] multi_agent`, on by default) | `task`; parallel dispatch unverified | `invoke_agent`; parallel dispatch unverified |
 | Git hook tier (`--git`) | yes | yes | yes | yes | yes |
 | Claude hook tier (`--claude`) | yes | unverified: Cursor runs Claude Code hooks from `.claude/settings.json` when *Include Third-Party Plugins, Skills, and Other Configs* is on; this tier writes `.claude/settings.local.json`, which Cursor's docs do not name | no | no | no |
+| Work-ledger git legs (`--ledger`) | yes | yes | yes | yes | yes |
+| Work-ledger Claude events (`--ledger-claude`: `SessionStart`, `PostToolUse` `Write\|Edit`) | yes | unverified, as for `--claude`; whether Cursor maps `SessionStart` is undocumented | no | no | no |
 | CI tier (`--ci`) | yes | yes | yes | yes | yes |
 | Web search / fetch | yes | yes | search only, model-dependent | yes | yes |
 | Diagram PNGs (`diagram`) | with a Mermaid MCP server | with a Mermaid MCP server | with a Mermaid MCP server | with a Mermaid MCP server | with a Mermaid MCP server |
 
 - **Git hooks** are run by git, whatever client made the commit. **CI workflows** run on GitHub Actions; the AI workflows run Claude Code there with the repository's Anthropic secret, whatever client you use locally.
-- **Claude hooks** are Claude Code's `PreToolUse` / `PostToolUse` / `Stop` hooks. Cursor maps those three events to its own; whether it also reads `.claude/settings.local.json` is not documented, so install the tier under Cursor only after checking that the hooks fire.
+- **Claude hooks** are Claude Code's `PreToolUse` / `PostToolUse` / `Stop` hooks (the `--claude` tier) and its `SessionStart` / `PostToolUse` hooks (the work ledger's `--ledger-claude` set). Cursor maps the first three events to its own; whether it maps `SessionStart`, and whether it reads `.claude/settings.local.json`, is not documented, so install either set under Cursor only after checking that the hooks fire. The work ledger's git legs (`--ledger`) are git hooks and run under any client.
 - **Without subagents** — or when a client runs them one at a time — do each scope's work inline, in turn (gather, analyze, report or execute), then merge the results. Slower; same result.
 - **Without a Mermaid MCP server** the `diagram` action writes the Mermaid source in place of the PNG.
 - The skill's core workflows do not depend on web search or fetch.
