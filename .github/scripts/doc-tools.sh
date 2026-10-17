@@ -2485,7 +2485,7 @@ ledger notices|cmd_ledger_notices|repo|branch= gate fetch hook format=
   a 2-second budget.
 ledger state-watch|cmd_ledger_state_watch|repo|hook
   --hook
-  The Claude Code PostToolUse (Write|Edit) hook: reads the event on
+  The Claude Code PostToolUse (Write|Edit|MultiEdit) hook: reads the event on
   stdin; when its tool_input.file_path lies under one of config
   state_watch.paths ("~/" is $HOME — HOME empty or unset: the entry names
   nothing; an absolute entry is itself; any other is under the top level
@@ -2568,10 +2568,18 @@ ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed
   advisory); superseded_by only on a closed item. On a
   modified item a finding about what it already was at HEAD is advisory
   (a legacy_ids or retired ledger likewise); the registry is checked when
-  it is staged. --all: the same over every item of the working tree, plus
-  advisories (missing key, ledger or summary; weak summary; unassigned or
-  contract-less open items; parse errors). A closed or won't-fix item from
-  before adoption — config base has no commit adding
+  it is staged. With config validate.require_relations "new" (default
+  null: off; any other value exits 2), an added open item naming no
+  changes, consumes or relates blocks (no-relations) unless its
+  frontmatter says relations: none. --all: the same over every item of
+  the working tree, plus advisories (missing key, ledger or summary; weak
+  summary; unassigned or contract-less open items; parse errors; config
+  state_watch.paths set with no state_watch.patterns, so the state-watch
+  hook never fires; with require_relations "new", no-relations on open
+  items new since adoption: not in the adoption commit's tree nor renamed
+  from a file there — every one when config base does not resolve or the
+  adoption commit cannot be known, none before adoption). A closed or
+  won't-fix item from before adoption — config base has no commit adding
   docs/ledger/config.json yet, or the base holds the item's file and no
   commit after the first one that added config.json (a descendant of it
   on the base's first-parent line; a merge counts with what it brings
