@@ -743,6 +743,10 @@ EOS
 # gets under the umask (mktemp's 0600 would survive the mv).
 _lg_init_put() {
   local tmp mode
+  # A symbolic link is never replaced by a regular file (final review
+  # CORE-m5; _tmp_beside's rule). --accept reports the ones it would write
+  # as findings before writing anything; this is the backstop.
+  [ ! -L "$2" ] || _lg_die "$2 is a symbolic link: not replacing it (edit the file it points to)"
   tmp=$(mktemp "$(dirname -- "$2")/.lg-init.XXXXXX") || _lg_die "cannot create a temp file beside $2"
   mode=$(printf '%o' $(( 0666 & ~0$(umask) ))) || mode=644
   if ! cp -- "$1" "$tmp" || ! chmod "$mode" "$tmp" || ! mv -f -- "$tmp" "$2"; then
@@ -1393,6 +1397,17 @@ _lg_init_accept() {
       | .findings += [.apply[] | select(.path as $p | $L | index([$p])) | {line: null, path, decision,
           detail: "a symbolic link: its fields are not written through a link (edit or decide the file it points to)"}]' \
       "$s.plan" > "$s.plan2" || _lg_die "jq failed (link findings)"
+    mv -f "$s.plan2" "$s.plan" || _lg_die "cannot write $s.plan"
+  fi
+  # The legacy map the run would write, a symbolic link: _lg_init_put
+  # refuses it, so a finding now (final review CORE-m5). (config.json is
+  # written only when absent, ledgers.json only when absent, and a stub
+  # path is never an existing name.)
+  if [ -n "$lgpath" ] && [ -L "$lgpath" ] && [ "$(jq '.legacy | length' "$s.plan")" != 0 ]; then
+    # shellcheck disable=SC2016  # jq source
+    jq -c --arg p "$lgpath" '.findings += [{line: null, path: $p,
+        detail: "a symbolic link: the legacy map is not written through a link (point config legacy at the file it points to, or replace the link with that file)"}]' \
+      "$s.plan" > "$s.plan2" || _lg_die "jq failed (legacy link finding)"
     mv -f "$s.plan2" "$s.plan" || _lg_die "cannot write $s.plan"
   fi
   if [ "$(jq '.findings | length' "$s.plan")" != 0 ]; then

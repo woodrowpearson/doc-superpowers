@@ -11604,6 +11604,45 @@ test_lg_notices_gate_fetch_failure_fails_closed() {
   teardown
 }
 
+test_lg_init_accept_symlinked_legacy_finding() {
+  echo "test: 3.3.1 CORE-m5 — init --accept never replaces a symbolic link with a regular file: a symlinked legacy.json it would write is a finding before anything is written (exit 1, no counter, no file changed, the link intact)"
+  lg_accept_fixture
+  cat >> docs/ledgers/checkout-ledger.md <<'EOF'
+| 4 | Shipped thing | ~~Shipped~~ 2025 |
+EOF
+  mkdir -p docs/real
+  printf '{}\n' > docs/real/legacy.json
+  ln -s ../real/legacy.json docs/ledger/legacy.json
+  git add -A && git commit -qm "rows, linked legacy.json"
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-02-sheet-flicker.md checkout
+  local st
+  st=$(lg_init_status)
+  lg init --accept "$LG_DEC" --format json
+  assert_eq "1" "$LG_RC" "exits 1"
+  assert_json_field "$LG_OUT" '[.findings[] | select(.path == "docs/ledger/legacy.json") | .detail | test("symbolic link")] | any' "true" \
+    "a finding names legacy.json: a symbolic link"
+  assert_eq "$st" "$(lg_init_status)" "nothing written"
+  assert_eq "absent" "$(lg_remote_counters)" "no key allocated"
+  assert_eq "../real/legacy.json" "$(readlink docs/ledger/legacy.json)" "the link is intact"
+  assert_eq "{}" "$(cat docs/real/legacy.json)" "its target unchanged"
+  teardown
+}
+
+test_lg_init_put_refuses_symlink() {
+  echo "test: 3.3.1 CORE-m5 — _lg_init_put (every init write) refuses a target that is a symbolic link, as _tmp_beside does: exit 2, the link and its target untouched"
+  lg_fixture
+  lg_enable
+  printf 'old\n' > real.json
+  ln -s real.json link.json
+  printf 'new\n' > src.json
+  lg_call _lg_init_put src.json link.json
+  assert_eq "2" "$LG_RC" "exit 2"
+  assert_contains "$LG_ERR" "symbolic link" "…saying so"
+  assert_eq "real.json" "$(readlink link.json)" "the link is intact"
+  assert_eq "old" "$(cat real.json)" "its target unchanged"
+  teardown
+}
+
 test_lg_hook_clip_constants_pinned() {
   echo "test: the ledger hook modes clip with hook-lib.sh's constants (HOOK_MAX_CHARS, HOOK_LINES_MAX): one changed without the other fails here"
   local v lib lg
@@ -12123,6 +12162,8 @@ run_tests() {
   # --- 3.3.1 ---
   test_lg_validate_pushed_existing_branch_merges_base
   test_lg_notices_gate_fetch_failure_fails_closed
+  test_lg_init_accept_symlinked_legacy_finding
+  test_lg_init_put_refuses_symlink
 
   print_summary
 }
