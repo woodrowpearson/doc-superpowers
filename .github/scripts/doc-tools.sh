@@ -2463,7 +2463,10 @@ ledger notices|cmd_ledger_notices|repo|branch= gate fetch hook format=
   commits hides it. The claimed items' consumes and siblings are read
   from this working tree — for a --branch other than the current one, not
   from its tip (a note says so). --gate: exit 1 on any unacked stop
-  notice. --fetch fetches the in-flight refs first (offline: exit 2).
+  notice, else exit 2 "could not verify" when the in-flight fetch failed
+  (a stale copy or the refs here would decide; DOC_TOOLS_LEDGER_OFFLINE=1
+  decides on them deliberately). --fetch fetches the in-flight refs first
+  (offline: exit 2).
   A --branch naming no branch, or a base that does not resolve: exit 2.
   JSON: {"notices": [{id, urgency, other: {branch, host, pr}, overlap:
   {contracts|keys|files}, what_changed, action}], "pr_data"}.
@@ -2581,9 +2584,11 @@ ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed
   commit cannot be known: no item is from before it (fails closed). --plan: every row of the plan's
   "Related work" table is marked include or exclude: <reason> (advisory;
   --strict blocks). --pushed (for pre-push hooks): with keys.mode cas, each
-  provisional key the range introduces blocks (an all-zeros <a>, a new
-  branch: those it adds since config base; a key the base carries too is
-  named with ledger finalize --all); merge mode passes. --registry
+  provisional key the range introduces blocks (only those the branch adds
+  since its merge-base with config base: a new branch's all-zeros <a>, and
+  a branch that merged the base after a provisional key landed there; a
+  key the base carries too is named with ledger finalize --all); merge
+  mode passes. --registry
   checks docs/ledger/ledgers.json: schema, ledger ids, statuses, kinds,
   contract ids, globs, and that no tracked file is claimed by two ledgers
   (overlap) or, once any ledger declares paths, that every tracked file
@@ -2613,7 +2618,10 @@ ledger finalize|cmd_ledger_finalize|repo|all format=
   this branch added (--all: every one) in the working tree, nothing
   committed; the remote must be reachable (else exit 2). keys.mode merge:
   run on the base; every provisional key, numbered after the highest key
-  in the tree, in one commit "ledger: finalize N keys". One
+  in the tree, in one commit "ledger: finalize N keys" — first it fetches
+  the base's branch from its remote and refuses (exit 2, nothing written)
+  when HEAD lacks a commit there (another maintainer's finalize: pull,
+  then run it again); unreachable or offline, a warning. One
   "<provisional> → <key>  <path>" line each.
 ledger init|cmd_ledger_init|repo|dry-run registry= report= accept= import sources= format=
   --report <file> [--registry <file>] [--sources files,github]
