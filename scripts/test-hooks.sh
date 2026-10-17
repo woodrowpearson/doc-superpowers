@@ -5597,6 +5597,8 @@ test_ledger_state_watch_matcher_multiedit() {
   inst status --claude
   assert_contains "$(grep ' ledger-state-watch ' <<<"$IOUT")" "outdated" "status --claude: the ledger set's outdated entry shows too (same settings file)"
   assert_contains "$IOUT" "install --ledger-claude" "…with the command that fixes it"
+  inst status --all
+  assert_not_contains "$IOUT" "Ledger " "status --all (the three tiers): no ledger set, as before"
   inst install --ledger-claude
   assert_eq "0" "$IRC" "re-run install --ledger-claude: exit 0"
   assert_eq '1|"Write|Edit|MultiEdit"' "$(jq -r "$sel | \"\\(length)|\\(.[0].matcher | tojson)\"" .claude/settings.local.json)" "…one state-watch entry, matcher updated"
