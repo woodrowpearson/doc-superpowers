@@ -2892,6 +2892,15 @@ Spec claims (claims validate, run, promote, render, gate, attest, rulings):
   status"): 0 as expected, 1 findings, 2 could not run, 3 usage, with
   precedence 1 > 2 > 0. In a claims glob (config "governing", "plans", …),
   * also matches "/".
+  With the work ledger on (docs/ledger/config.json), V5 reads a tracker that
+  names a ledger item — its path, or its key or an alias (any case) that
+  one item carries — by the ledger's status classes: open is open; fixed,
+  closed and wontfix are closed ("Won't Fix", "Not planned" included). An
+  item whose status no class names is read at its path as any tracker; a
+  tracker naming no item is unchanged. The ledger index is read offline
+  (DOC_TOOLS_LEDGER_OFFLINE=1); a ledger that cannot be read (scripts/ledger/
+  not beside doc-tools.sh, an invalid config) is one indeterminate V5 row,
+  "ledger-unavailable: …" (exit 2), and no tracker is then judged.
   Only a new DOC-STALE or RETIRE ruling licenses a changed states, a lowered
   enforced_by or a re-anchor that changes a token (validate, V6). The
   direction policy (config "policy") judges each new DOC-STALE or RETIRE
@@ -2981,6 +2990,11 @@ finalize, init):
   before adoption" (see ledger validate); in a shallow clone whose
   boundary is where config.json first shows, the adoption commit cannot
   be known and no item counts as from before it.
+  The index counts, per item, the spec claims (docs/spec-claims/*.json but
+  config.json) that are diverged or unbuilt and whose tracker names it
+  (its path, or its key or an alias): "claims" in the index and in show
+  --format json; show prints "claims: <n> diverged · <n> unbuilt" and the
+  views' Status column " · claims: …", each only when one is non-zero.
   Config trailers.since — a commit (an abbreviated id will do), "adoption"
   or null (the default: every trailer counts) — keeps the claim trailers
   (claims, claims_by_path, claims_by_ref) of the commits that descend from
@@ -7181,7 +7195,7 @@ _claims_v2() {
 # first run of [A-Za-z]+) counts, matched whole and case-insensitively against
 # the closed words: "Approved — not done" is open, "`Done` (2026-10-01)" closed.
 
-_CL_TRACKER_STATE=""  # _claims_tracker_open's answer: pattern | open | closed | missing
+_CL_TRACKER_STATE=""  # _claims_tracker_open's answer: pattern | open | closed | missing (skip: _claims_v5, the ledger unreadable)
 _CL_TRACKER_VALUE=""  # the tracker doc's status value ("" without a status line)
 
 # 0 when $t matches one of config tracker_patterns (on cl-config.json). A
@@ -7275,23 +7289,114 @@ _JQ_CLAIMS_V5='def v5($claim; $doc; $msg): {check: "V5", claim: $claim, doc: $do
     then "enforced_by judge needs why_not_mechanical: why no test, lint or log check is feasible" else empty end)
  | v5($id; $doc; .) | tojson'
 
+# The work ledger (3.3.0; work-ledger design §I). With docs/ledger/config.json
+# in the work tree, a tracker that names a ledger item — its path, its key
+# or an alias (scripts/ledger/lib.sh _lg_status_classes) — is open or closed
+# by the ledger's status classes, read from the ledger index of the tree V5
+# reads (--staged: the index's; head: HEAD's; else the work tree's): open is
+# open; fixed, closed and wontfix are closed (so "Won't Fix" and "Not
+# planned" close a tracker, which the leading-word reading above misses).
+# An item whose status no class names (none included) is read as a 3.2.0
+# tracker at its path; a tracker naming no item is a 3.2.0 tracker. Without
+# the config nothing here runs: V5 is 3.2.0's. The ledger code runs in a
+# subshell (it has its own exit paths); a ledger that cannot be read — no
+# scripts/ledger/ beside doc-tools.sh, an invalid config, an index that
+# cannot be built — is one indeterminate V5 row (exit 2), and no tracker is
+# then judged. It runs offline (DOC_TOOLS_LEDGER_OFFLINE=1).
+
+# _claims_v5_ledger <list> <out>: _lg_status_classes over the trackers in
+# <list> into <out> (one line per tracker, in order); 1, with the
+# indeterminate row written, when the ledger cannot be read.
+_claims_v5_ledger() {
+  local list="$1" out="$2" err="$_SCRATCH/cl-v5-ledger.err" rc msg n m
+  local ixopt=()
+  if [ ! -f "$SCRIPT_DIR/ledger/lib.sh" ]; then
+    _claims_indeterminate V5 - "ledger-unavailable: docs/ledger/config.json turns the work ledger on, and V5 reads trackers through it, but scripts/ledger/ is not beside doc-tools.sh ($SCRIPT_DIR/ledger; vendor it with doc-tools.sh tools install --helper ledger)"
+    return 1
+  fi
+  case "$_CL_MODE" in
+    staged) ixopt=(--staged) ;;
+    head) ixopt=(--rev HEAD) ;;
+  esac
+  : > "$out"
+  # Not the left side of ||: errexit stays live inside the subshell.
+  set +e
+  (
+    set -e
+    # V5 never reaches the network: the pr and items adapters' cached
+    # copies only (a hosted item resolves while its copy lasts).
+    DOC_TOOLS_LEDGER_OFFLINE=1
+    export DOC_TOOLS_LEDGER_OFFLINE
+    # Not followed here (_lg_enter follows it): what the ledger code sets
+    # stays in this subshell, by design.
+    # shellcheck source=/dev/null
+    . "$SCRIPT_DIR/ledger/lib.sh"
+    _lg_init claims-v5
+    _lg_status_classes ${ixopt[@]+"${ixopt[@]}"} "$list" "$out"
+  ) < /dev/null > /dev/null 9> /dev/null 2> "$err"
+  rc=$?
+  set -e
+  if [ "$rc" = 0 ]; then
+    n=$(wc -l < "$list" | tr -d ' ')
+    m=$(wc -l < "$out" | tr -d ' ')
+    [ "$n" = "$m" ] && return 0
+    msg="the ledger answered $m lines for $n trackers"
+  else
+    msg=$(sed -n 's/^ERROR: //p' "$err" 2>/dev/null | head -n 1) || msg=""
+    [ -n "$msg" ] || msg="the ledger index could not be built (rc $rc)"
+  fi
+  _claims_indeterminate V5 - "ledger-unavailable: $msg"
+  return 1
+}
+
 # V5: each distinct tracker of an eligible, touched diverged, unbuilt or gated claim
-# resolved once (_claims_tracker_open), then one jq over the claims. A
-# tracker holding a newline cannot be a repo path, and is left missing.
+# resolved once (_claims_tracker_open; with the ledger on, _claims_v5_ledger
+# first), then one jq over the claims. A tracker holding a newline cannot be
+# a repo path, and is left missing.
 _claims_v5() {
   local list="$_SCRATCH/cl-v5-trackers" rows="$_SCRATCH/cl-v5-trackers.jsonl" t
+  local lgf="$_SCRATCH/cl-v5-ledger.tsv" lg=0 m cls rest st p
   : > "$rows"
+  : > "$lgf"
   _claims_jq v5-trackers -r --slurpfile t "$_SCRATCH/cl-touched.json" \
     '[.[] | select(.eligible and (.claim.id | type) == "string")
       | select(.claim.id as $i | any($t[0][]; . == $i)) | .claim
       | select(.status == "diverged" or .status == "unbuilt" or .status == "gated")
       | .tracker | strings | select(. != "" and (test("\n") | not))] | unique | .[]' \
     "$_SCRATCH/cl-claims.json" > "$list"
+  if [ -s "$list" ] && { [ -e docs/ledger/config.json ] || [ -L docs/ledger/config.json ]; }; then
+    if _claims_v5_ledger "$list" "$lgf"; then lg=1; else lg=skip; fi
+  fi
   while IFS= read -r t <&3; do
-    _claims_tracker_open "$t" || true
+    m=""
+    if [ "$lg" = 1 ]; then IFS= read -r m <&4 || m=""; fi
+    if [ "$lg" = skip ]; then
+      # The ledger could not be read (one indeterminate row): not judged.
+      _CL_TRACKER_STATE=skip
+      _CL_TRACKER_VALUE=""
+    elif [ -n "$m" ]; then
+      cls=${m%%$'\t'*}
+      rest=${m#*$'\t'}
+      st=${rest%%$'\t'*}
+      p=${rest#*$'\t'}
+      if [ -z "$p" ]; then
+        _claims_tracker_open "$t" || true
+      else
+        case "$cls" in
+          open) _CL_TRACKER_STATE=open; _CL_TRACKER_VALUE=$st ;;
+          fixed|closed|wontfix) _CL_TRACKER_STATE=closed; _CL_TRACKER_VALUE=$st ;;
+          *)
+            _claims_tracker_open "$p" || true
+            if [ "$_CL_TRACKER_STATE" = missing ]; then _claims_tracker_open "$t" || true; fi
+            ;;
+        esac
+      fi
+    else
+      _claims_tracker_open "$t" || true
+    fi
     _claims_jq v5-tracker-row -nc --arg t "$t" --arg s "$_CL_TRACKER_STATE" --arg v "$_CL_TRACKER_VALUE" \
       '{tracker: $t, state: $s, value: $v}' >> "$rows"
-  done 3< "$list"
+  done 3< "$list" 4< "$lgf"
   _claims_jq v5 -nr --slurpfile c "$_SCRATCH/cl-claims.json" --slurpfile t "$_SCRATCH/cl-touched.json" \
     --slurpfile tr "$rows" "$_JQ_CLAIMS_V5" >> "$_SCRATCH/cl-findings.jsonl"
 }
