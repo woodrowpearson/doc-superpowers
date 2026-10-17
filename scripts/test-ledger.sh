@@ -6527,6 +6527,64 @@ test_lg_branch_facts_criss_cross() {
   lg_ifl_teardown
 }
 
+# --- Task 18a: status classes for spec-claims V5 ----------------------------------
+
+# shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
+lg_t_status_class() {
+  local out list="$_SCRATCH/t.trackers" res="$_SCRATCH/t.classes"
+  assert_eq "open" "$(_lg_status_class app-1)" "a key: its item's class (Open → open)"
+  assert_eq "open" "$(_lg_status_class APP-1)" "a key in any case"
+  assert_eq "fixed" "$(_lg_status_class app-2)" "Resolved → fixed"
+  assert_eq "fixed" "$(_lg_status_class old-2)" "an alias"
+  assert_eq "wontfix" "$(_lg_status_class app-3)" "Won't Fix → wontfix"
+  assert_eq "wontfix" "$(_lg_status_class docs/issues/c.md)" "a path: its item's class"
+  assert_eq "closed" "$(_lg_status_class docs/archive/issues/d.md)" "an archived item's path (Obsolete → closed)"
+  assert_eq "unknown" "$(_lg_status_class app-5)" "an item whose status no class names: unknown"
+  lg_rc _lg_status_class app-5
+  assert_eq "0" "$LG_RC" "…resolved (rc 0)"
+  assert_eq "unknown" "$(_lg_status_class app-99)" "a key no item has: unknown"
+  lg_rc _lg_status_class app-99
+  assert_eq "1" "$LG_RC" "…not resolved (rc 1)"
+  lg_rc _lg_status_class docs/issues/nope.md
+  assert_eq "1" "$LG_RC" "a path that is no item: rc 1"
+  lg_rc _lg_status_class a
+  assert_eq "1" "$LG_RC" "a file stem is not a tracker (show's looser forms are not resolved)"
+  lg_rc _lg_status_class "app #1"
+  assert_eq "1" "$LG_RC" "a spaced key form is not a tracker"
+  lg_rc _lg_status_class dup-1
+  assert_eq "1" "$LG_RC" "a key two items carry: not resolved"
+  lg_rc _lg_status_class ""
+  assert_eq "1" "$LG_RC" "empty: not resolved"
+  # The batch: one line per tracker, "<class>\t<status>\t<path>", in order.
+  printf '%s\n' app-3 nope docs/issues/a.md app-5 > "$list"
+  _lg_status_classes "$list" "$res"
+  assert_eq "wontfix	Won't Fix	docs/issues/c.md|unknown		|open	Open	docs/issues/a.md|unknown	Banana	docs/issues/e.md|" \
+    "$(tr '\n' '|' < "$res")" "_lg_status_classes: class, status, path per tracker"
+  # --staged: the index's copy; the working tree's edit is not seen.
+  printf -- '---\nkey: app-1\nstatus: Fixed\n---\n# a\n' > docs/issues/a.md
+  assert_eq "fixed" "$(_lg_status_class app-1)" "the working tree: Fixed"
+  assert_eq "open" "$(_lg_status_class --staged app-1)" "--staged: the index's Open"
+  assert_eq "open" "$(_lg_status_class --rev HEAD app-1)" "--rev HEAD: the commit's Open"
+  out=$(_lg_status_classes --staged "$list" "$res"; cat "$res")
+  assert_contains "$out" "open	Open	docs/issues/a.md" "_lg_status_classes --staged"
+}
+
+test_lg_status_class_helper() {
+  echo "test: _lg_status_class — a key, an alias or an item path → open|fixed|closed|wontfix|unknown"
+  lg_fixture
+  lg_enable '{"items":{"globs":["docs/issues/*.md"],"archive_globs":["docs/archive/issues/*.md"]}}'
+  lg_item docs/issues/a.md "key: app-1" "status: Open"
+  lg_item docs/issues/b.md "key: app-2" "status: Resolved" "aliases: [old-2]"
+  lg_item docs/issues/c.md "key: app-3" "status: Won't Fix"
+  lg_item docs/archive/issues/d.md "key: app-4" "status: Obsolete"
+  lg_item docs/issues/e.md "key: app-5" "status: Banana"
+  lg_item docs/issues/f.md "key: dup-1" "status: Open"
+  lg_item docs/issues/g.md "key: dup-1" "status: Open"
+  git add -A && git commit -qm items
+  lg_in lg_t_status_class
+  teardown
+}
+
 test_lg_show_inflight_claims() {
   echo "test: show lists the in-flight claims; the derived status is on branch <b> (no PR)"
   lg_ifl_fixture
@@ -11670,6 +11728,8 @@ run_tests() {
   test_lg_validate_all_pre_adoption_merges_renames
   test_lg_init_summary_skips_long_number
   test_lg_trailers_since_adoption_none_inflight
+  # --- Task 18a ---
+  test_lg_status_class_helper
 
   print_summary
 }
