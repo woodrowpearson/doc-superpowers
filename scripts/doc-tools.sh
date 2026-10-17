@@ -2463,7 +2463,10 @@ ledger notices|cmd_ledger_notices|repo|branch= gate fetch hook format=
   commits hides it. The claimed items' consumes and siblings are read
   from this working tree — for a --branch other than the current one, not
   from its tip (a note says so). --gate: exit 1 on any unacked stop
-  notice. --fetch fetches the in-flight refs first (offline: exit 2).
+  notice, else exit 2 "could not verify" when the in-flight fetch failed
+  (a stale copy or the refs here would decide; DOC_TOOLS_LEDGER_OFFLINE=1
+  decides on them deliberately). --fetch fetches the in-flight refs first
+  (offline: exit 2).
   A --branch naming no branch, or a base that does not resolve: exit 2.
   JSON: {"notices": [{id, urgency, other: {branch, host, pr}, overlap:
   {contracts|keys|files}, what_changed, action}], "pr_data"}.

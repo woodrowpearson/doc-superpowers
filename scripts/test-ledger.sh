@@ -11561,6 +11561,49 @@ provisional-key block docs/issues/mine.md" "$(lg_vf)" "no base: every key the ra
   teardown
 }
 
+test_lg_notices_gate_fetch_failure_fails_closed() {
+  echo "test: 3.3.1 CORE-m1 — notices --gate never passes on in-flight data it could not verify: a failed fetch (a stale copy served, or none) is exit 2 'could not verify' unless a stop already blocks (1); without --gate, offline, and in hook mode nothing changes"
+  lg_ntc_fixture '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta"},"cache":{"remote_ttl_minutes":0}}'
+  local x id good
+  good=$(git remote get-url origin)
+  # No fetch has ever succeeded: no copy at all (state none).
+  git remote set-url origin "$TEST_DIR/no-such-remote.git"
+  lg notices --gate
+  assert_eq "2" "$LG_RC" "the fetch failed, no copy: exit 2"
+  assert_contains "$LG_ERR" "could not verify" "…'could not verify'"
+  lg notices --gate --format json
+  assert_eq "2|1" "$LG_RC|$(json_count "$LG_OUT")" "json: exit 2, one object"
+  # A fetch succeeds (the copy is written), then the remote goes away: the
+  # gate would decide on the stale copy.
+  git remote set-url origin "$good"
+  lg notices --gate
+  assert_eq "0|" "$LG_RC|$LG_OUT" "a fresh fetch, nothing in flight: exit 0"
+  git remote set-url origin "$TEST_DIR/no-such-remote.git"
+  lg notices --gate
+  assert_eq "2" "$LG_RC" "the fetch failed, a stale copy served: exit 2 (never a clean gate)"
+  assert_contains "$LG_ERR" "could not verify" "…'could not verify'"
+  assert_contains "$LG_ERR" "--fetch" "…naming the retry"
+  # Without --gate: the note, exit 0 (3.3.0 behaviour).
+  lg notices
+  assert_eq "0" "$LG_RC" "no --gate: exit 0"
+  assert_contains "$LG_ERR" "in-flight refs not fetched" "…the note says the fetch failed"
+  # Deliberately offline: the refs here decide, as the note says.
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg notices --gate
+  assert_eq "0" "$LG_RC" "DOC_TOOLS_LEDGER_OFFLINE=1: the refs here decide, exit 0"
+  # An unacked stop still blocks as a stop (1), whatever the fetch did.
+  git commit -q --allow-empty -m "mine" -m "Ledger-Claims: app-1"
+  lg_ntc_branch x-total "touch the total" src/order/total.js more
+  x=$(git rev-parse x-total)
+  id=$(lg_ntc_id x-total@hosta contracts:field:order.total "$x")
+  lg notices --gate
+  assert_eq "1" "$LG_RC" "an unacked stop with the fetch failing: exit 1"
+  assert_contains "$LG_OUT" "stop $id x-total" "…listing it"
+  # Hook mode never fetches and always exits 0.
+  lg_hook "$LG_HOOK_SS" notices --hook
+  assert_eq "0|1" "$LG_RC|$(json_count "$LG_OUT")" "--hook: exit 0, its one object"
+  teardown
+}
+
 test_lg_hook_clip_constants_pinned() {
   echo "test: the ledger hook modes clip with hook-lib.sh's constants (HOOK_MAX_CHARS, HOOK_LINES_MAX): one changed without the other fails here"
   local v lib lg
@@ -12079,6 +12122,7 @@ run_tests() {
   test_lg_alloc_permission_refusal_provisional
   # --- 3.3.1 ---
   test_lg_validate_pushed_existing_branch_merges_base
+  test_lg_notices_gate_fetch_failure_fails_closed
 
   print_summary
 }
