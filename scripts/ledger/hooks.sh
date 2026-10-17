@@ -1,8 +1,8 @@
 # shellcheck shell=bash
 # scripts/ledger/hooks.sh — the hook modes of the ledger verbs (Task 16c
 # U4): `ledger notices --hook` (Claude Code SessionStart) and `ledger
-# state-watch --hook` (PostToolUse, Write|Edit), stable entry points beside
-# doc-tools.sh that a host can register in its committed
+# state-watch --hook` (PostToolUse: Write|Edit|MultiEdit), stable entry
+# points beside doc-tools.sh that a host can register in its committed
 # .claude/settings.json; the installed hooks
 # (scripts/hooks/claude/ledger-session-notices.sh, ledger-state-watch.sh)
 # are thin wrappers over them. Sourced by lib.sh; uses lib.sh's _lg_init,
@@ -111,8 +111,8 @@ _lg_notices_hook_out() {
 
 # --- ledger state-watch --hook -----------------------------------------------------
 
-# The PostToolUse (Write|Edit) state-watch program (Task 16 R2's, moved
-# here from ledger-state-watch.sh): the event on stdin; --arg home ($HOME,
+# The PostToolUse (Write|Edit|MultiEdit) state-watch program (Task 16 R2's,
+# moved here from ledger-state-watch.sh): the event on stdin; --arg home ($HOME,
 # "" when unset), top (git's top level), proj ($CLAUDE_PROJECT_DIR), and
 # their canonical spellings phome, ptop, pproj (no symbolic link left in
 # them; "" when one does not resolve) and pfile (the written file's, from

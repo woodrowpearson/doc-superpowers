@@ -182,10 +182,14 @@ Tiers:
             own (per-user like --claude, which it never installs; never part of
             --all; needs docs/ledger/config.json):
               ledger-session-notices  SessionStart  unacked in-flight notices (≤ 15 lines)
-              ledger-state-watch      PostToolUse   (Write|Edit) suggests ledger note when
-                                                    state lands under state_watch.paths
+              ledger-state-watch      PostToolUse   (Write|Edit|MultiEdit) suggests
+                                                    ledger note when state lands
+                                                    under state_watch.paths
             Each uninstall (--ledger, --ledger-claude) removes its own set;
-            status reports each on its own. DOC_SUPERPOWERS_LEDGER_SKIP=1
+            status reports each on its own (status --claude also reports
+            --ledger-claude once any of it is installed: an older install,
+            say a state-watch entry without MultiEdit, reads outdated until
+            install --ledger-claude is re-run). DOC_SUPERPOWERS_LEDGER_SKIP=1
             skips every leg of both, and DOC_SUPERPOWERS_SKIP=1 (every
             hook) does too.
 
@@ -1262,6 +1266,35 @@ lg_event() {
   esac
 }
 
+# lg_claude_present: a script of the --ledger-claude set is installed, or the
+# settings file registers one of its entries.
+lg_claude_present() {
+  scripts_present "$LEDGER_CLAUDE_HOOKS" && return 0
+  [ -e "$SETTINGS_FILE" ] || return 1
+  jq -e "$_CLAUDE_JQ_DEFS"'any((.hooks // {}) | objects | .[] | arrays | .[]; lg_holds)' "$SETTINGS_FILE" >/dev/null 2>&1
+}
+
+# The matcher each event's entry is registered with. State-watch reads
+# Write's content, Edit's new_string and MultiEdit's edits, so it names all
+# three (3.3.1, final review OPS-m5: 3.3.0 wrote Write|Edit, which status
+# now reads as outdated).
+lg_matcher() {
+  case "$1" in
+    ledger-session-notices) echo "" ;;
+    *) echo "Write|Edit|MultiEdit" ;;
+  esac
+}
+
+# lg_sw_never_fires: config state_watch.paths names an entry while
+# state_watch.patterns names none (absent, null, not a list, or only empty
+# strings) — the state-watch hook then never fires (3.3.1, adopter finding:
+# patterns defaults to []). False when the config cannot be read.
+lg_sw_never_fires() {
+  jq -e '(.state_watch // {}) | if type == "object" then . else {} end
+    | ([.paths | arrays | .[] | strings | select(. != "")] | length) > 0
+      and ([.patterns | arrays | .[] | strings | select(. != "")] | length) == 0' "$LEDGER_CONFIG" >/dev/null 2>&1
+}
+
 # Every check before the first write. Installing either set needs the config
 # (one check for both flags, so the message names what was asked for).
 preflight_ledger_config() {
@@ -1347,7 +1380,7 @@ install_ledger_claude() {
   cur=$(settings_read) || settings_refuse "$cur"
   new=$(jq \
     --argjson ss "$(jq -cn --arg c "$(claude_cmd ledger-session-notices)" '{matcher: "", hooks: [{type: "command", command: $c, timeout: 10}]}')" \
-    --argjson sw "$(jq -cn --arg c "$(claude_cmd ledger-state-watch)" '{matcher: "Write|Edit", hooks: [{type: "command", command: $c, timeout: 10}]}')" \
+    --argjson sw "$(jq -cn --arg c "$(claude_cmd ledger-state-watch)" --arg m "$(lg_matcher ledger-state-watch)" '{matcher: $m, hooks: [{type: "command", command: $c, timeout: 10}]}')" \
     "$_CLAUDE_JQ_DEFS"'
     shape
     | .hooks = (.hooks // {})
@@ -1357,7 +1390,7 @@ install_ledger_claude() {
   printf '%s\n' "$new" | jq . > "$_TMP"
   commit_tmp "$SETTINGS_FILE" 644
   lg_upsert_block "$EXCLUDE_FILE" "$LG_EXCLUDE_BLOCK"
-  echo "Ledger Claude Code hooks: 2 installed (ledger-session-notices: SessionStart; ledger-state-watch: PostToolUse Write|Edit; their $CLAUDE_LIB.sh beside them)"
+  echo "Ledger Claude Code hooks: 2 installed (ledger-session-notices: SessionStart; ledger-state-watch: PostToolUse Write|Edit|MultiEdit; their $CLAUDE_LIB.sh beside them)"
   echo "  Scripts in $CLAUDE_HOOKS_DIR/, registered in $SETTINGS_FILE — per-user: both are excluded from git ($EXCLUDE_FILE)"
   claude_tracked_note --ledger-claude
 }
@@ -1470,12 +1503,15 @@ status_ledger() {
 status_ledger_claude() {
   local h ev reg="" any
   echo "Ledger Claude Code hooks (the opt-in --ledger-claude set, per-user; never part of --all or --claude):"
-  # Each registered entry of the set: "<event> <script> <command>".
+  # Each registered entry of the set: "<event> <script> <ok|old> <command>",
+  # ok when its group's matcher is the one install writes (lg_matcher).
   if [ -e "$SETTINGS_FILE" ]; then
-    reg=$(jq -r "$_CLAUDE_JQ_DEFS"'
-      [(.hooks // {}) | to_entries[] | select(.value | type == "array") | .key as $e
-       | .value[] | select(type == "object" and ((.hooks | type) == "array")) | .hooks[] | select(lg_ours)
-       | "\($e) \(.command | capture("doc-superpowers/(?<n>[a-z-]+)\\.sh").n) \(.command)"] | .[]' "$SETTINGS_FILE" 2>/dev/null) \
+    reg=$(jq -r --arg msw "$(lg_matcher ledger-state-watch)" --arg mss "$(lg_matcher ledger-session-notices)" "$_CLAUDE_JQ_DEFS"'
+      {"ledger-state-watch": $msw, "ledger-session-notices": $mss} as $want
+      | [(.hooks // {}) | to_entries[] | select(.value | type == "array") | .key as $e
+       | .value[] | select(type == "object" and ((.hooks | type) == "array")) | (.matcher // "") as $m | .hooks[] | select(lg_ours)
+       | (.command | capture("doc-superpowers/(?<n>[a-z-]+)\\.sh").n) as $n
+       | "\($e) \($n) \(if $m == $want[$n] then "ok" else "old" end) \(.command)"] | .[]' "$SETTINGS_FILE" 2>/dev/null) \
       || reg="?"
   fi
   any=0
@@ -1494,13 +1530,18 @@ status_ledger_claude() {
       printf "  ✗ %-22s not installed (install --ledger-claude)\n" "$h"
     elif [ ! -f "$CLAUDE_HOOKS_DIR/$h.sh" ]; then
       printf "  ⚠ %-22s in settings but script missing from %s/\n" "$h" "$CLAUDE_HOOKS_DIR"
-    elif ! grep -qxF "$ev $h $(claude_cmd "$h")" <<<"$reg"; then
+    elif ! grep -qxF -e "$ev $h ok $(claude_cmd "$h")" -e "$ev $h old $(claude_cmd "$h")" <<<"$reg"; then
       printf "  ⚠ %-22s outdated (registered with another command than %s): re-run install --ledger-claude\n" "$h" "$(claude_cmd "$h")"
+    elif ! grep -qxF "$ev $h ok $(claude_cmd "$h")" <<<"$reg"; then
+      printf "  ⚠ %-22s outdated (registered for other tools than matcher \"%s\"): re-run install --ledger-claude\n" "$h" "$(lg_matcher "$h")"
     elif ! render_matches "$CLAUDE_HOOKS_DIR/$h.sh" "$SCRIPT_DIR/claude/$h.sh" \
       || ! render_matches "$CLAUDE_HOOKS_DIR/$CLAUDE_LIB.sh" "$SCRIPT_DIR/claude/$CLAUDE_LIB.sh"; then
       printf "  ⚠ %-22s outdated (its script or %s.sh is another version's or install's): re-run install --ledger-claude\n" "$h" "$CLAUDE_LIB"
     else
       printf "  ✓ %-22s active (%s: script + settings)\n" "$h" "$ev"
+    fi
+    if [ "$h" = ledger-state-watch ] && grep -q "^$ev $h " <<<"$reg" && lg_sw_never_fires; then
+      echo "  ⚠ ledger-state-watch never fires: $LEDGER_CONFIG sets state_watch.paths but no state_watch.patterns (phrases such as \"next:\" or \"approved\"; a write must hold one)"
     fi
   done
 }
@@ -2239,6 +2280,13 @@ case "$COMMAND" in
   status)
     if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE; then
       DO_GIT=true DO_CLAUDE=true DO_CI=true DO_LEDGER=true DO_LEDGER_CLAUDE=true
+    fi
+    # status --claude: the ledger's Claude set lives in the same settings
+    # file, so once any of it is installed it is reported too (an install
+    # older than this one — a state-watch entry without MultiEdit — reads
+    # outdated there, naming install --ledger-claude).
+    if $DO_CLAUDE && ! $DO_LEDGER_CLAUDE && lg_claude_present; then
+      DO_LEDGER_CLAUDE=true
     fi
     echo ""
     echo "doc-superpowers hooks status"
