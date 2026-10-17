@@ -6947,7 +6947,7 @@ _tests_yml_drift_step() {
 }
 
 test_tests_yml_drift_step_covers_vendored_ledger() {
-  echo "test: tests.yml's self-install drift step checks a vendored ledger helper set against scripts/ledger/ and scripts/adapters/ (byte copies, scripts executable, none missing)"
+  echo "test: tests.yml's self-install drift step checks a vendored ledger helper set against scripts/ledger/ and scripts/adapters/ (byte copies, scripts executable, none missing; present beside a claims workflow)"
   setup
   local root step rt rc out
   root="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -6990,6 +6990,16 @@ test_tests_yml_drift_step_covers_vendored_ledger() {
   out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
   assert_eq "1" "$rc" "a vendored ledger script that is not executable fails it"
   assert_contains "$out" "::error file=.github/scripts/ledger/lib.sh::is not executable" "…naming it"
+  # A workflow running the claims step needs the ledger set beside the
+  # vendored doc-tools.sh (V5 reads ledger trackers through it).
+  "$BASH_BIN" scripts/doc-tools.sh tools install --helper ledger >/dev/null 2>&1
+  assert_true "precondition: this repo's choices install doc-freshness-schedule (it runs claims-check.sh)" \
+    test -f .github/workflows/doc-freshness-schedule.yml
+  rm -rf .github/scripts/ledger .github/scripts/adapters
+  rc=0
+  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a claims workflow without the vendored ledger set fails it"
+  assert_contains "$out" "::error file=.github/workflows/doc-freshness-schedule.yml::runs claims-check.sh without the vendored ledger helper set" "…naming the workflow"
   teardown
 }
 
