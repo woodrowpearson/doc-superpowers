@@ -10,8 +10,10 @@
 #
 # init runs without docs/ledger/config.json (doc-tools.sh _lg_enter exempts
 # it from the inert check): on the default config ({}). One mode per run:
-#   --report <file>     (this module) writes <file>, <file>.decisions.tsv and
-#                       docs/ledger/ledgers.proposed.json — nothing else
+#   --report <file>     (this module) writes <file> and, with no --registry,
+#                       docs/ledger/ledgers.proposed.json; with one,
+#                       <file>.decisions.tsv (the previous one kept as
+#                       <file>.decisions.tsv.bak) — nothing else
 #   --accept <tsv>      applies the decisions (see "--accept" below)
 #   --import            hosted items → file items, once (see "--import")
 #
@@ -1101,14 +1103,32 @@ _LG_JQ_ACCEPT_PLAN='
         {f: "a re-home would rewrite its aliases field, which the parser rejects (\([($it.fm_errors // [])[] | select(. as $e | any($AN[]; . as $n | $e | startswith($n + ": ")))] | join("; "))): fix it, then accept again"}
       else
         ($r.decision != "unassigned" and $cl == "open" and $kl != $r.decision) as $need
-        | {a: {path: $r.path, hosted: $hosted, class: $cl, decision: $r.decision,
+        # A field the parser rejected (a block scalar, a quoted value over
+        # several lines, …) is not missing: the item file holds text there
+        # that a write would replace (final review CORE-I1).
+        | (if $hosted then [] else ($it.fm_errors // []) end) as $FE
+        | def rej($l): [$FE[] | select(. as $e | any(($c.fields[$l] // $l | if type == "array" then .[] | strings else . end); . as $n | $e | startswith($n + ": ")))];
+        {a: {path: $r.path, hosted: $hosted, class: $cl, decision: $r.decision,
                date: ($it.date | if type == "string" and . != "" then . else "9999-12-31" end),
                key: $ok, need_key: $need, previous: (if $need and $ks != null then $ok else null end),
                set_ledger: (($it.ledger | if type == "string" then . else null end) != $r.decision),
                aliases: ($it.aliases // []),
-               summary: (if ($it.summary | lg_str) != null then null
+               summary: (if ($it.summary | lg_str) != null or (rej("summary") | length) > 0 then null
                          else (($BOLD[$r.path] | lg_str) // ($it.h1 | lg_str) // ($it.first_para | lg_str | if . == null then null else lg_sent end))
                               | if . == null then null else (lg_unlink | lg_str) end end)}}
+        # Every input the edits would die on is a finding here, before any
+        # write or key allocation (CORE-I2): an unterminated frontmatter
+        # block, a key or ledger field the parser rejected (a symbolic link:
+        # the caller, which tests the paths).
+        | .a.writes = (.a.need_key or .a.set_ledger or .a.summary != null)
+        | if (.a.writes | not) or $hosted then .
+          elif any($FE[]; startswith("unterminated frontmatter")) then
+            {f: "its frontmatter has no closing --- line, so its fields cannot be written: fix it, then accept again"}
+          elif .a.need_key and (rej("key") | length) > 0 then
+            {f: "its key field, which the run would write, is one the parser rejects (\(rej("key") | join("; "))): fix it, then accept again"}
+          elif .a.set_ledger and (rej("ledger") | length) > 0 then
+            {f: "its ledger field, which the run would write, is one the parser rejects (\(rej("ledger") | join("; "))): fix it, then accept again"}
+          else . end
       end
     | if .f then {finding: {line: $r.line, path: $r.path, decision: ($r.decision // null), detail: .f}} else . end ] as $X
 | {findings: [$X[] | .finding | select(. != null)],
@@ -1359,6 +1379,22 @@ _lg_init_accept() {
       "$s.plan" > "$s.plan2" || _lg_die "jq failed (stub findings)"
     mv -f "$s.plan2" "$s.plan" || _lg_die "cannot write $s.plan"
   fi
+  # An item file the run would edit that is a symbolic link: the edit
+  # refuses it (_tmp_beside), so a finding now (final review CORE-I2).
+  jq -r '.apply[] | select((.hosted | not) and .writes) | .path' "$s.plan" > "$s.wpaths" || _lg_die "jq failed (the paths to edit)"
+  : > "$s.links"
+  while IFS= read -r p; do
+    if [ -L "$p" ]; then printf '%s\n' "$p" >> "$s.links"; fi
+  done < "$s.wpaths"
+  if [ -s "$s.links" ]; then
+    # shellcheck disable=SC2016  # jq source
+    jq -c --rawfile u "$s.links" '
+      ([$u | split("\n")[] | select(. != "")]) as $L
+      | .findings += [.apply[] | select(.path as $p | $L | index([$p])) | {line: null, path, decision,
+          detail: "a symbolic link: its fields are not written through a link (edit or decide the file it points to)"}]' \
+      "$s.plan" > "$s.plan2" || _lg_die "jq failed (link findings)"
+    mv -f "$s.plan2" "$s.plan" || _lg_die "cannot write $s.plan"
+  fi
   if [ "$(jq '.findings | length' "$s.plan")" != 0 ]; then
     jq -r '.findings[] | "finding: \(.path)\(if .line then " (line \(.line))" else "" end): \(.detail)"' "$s.plan" | tr -d '\000-\010\013-\037' > "$s.lines" \
       || _lg_die "jq failed (findings)"
@@ -1426,6 +1462,27 @@ _lg_init_accept() {
       "$_LG_JQ_INDEX_DEFS$_LG_JQ_ACCEPT_FINAL" > "$s.final" || _lg_die "jq failed (the --accept edits)"
 
   _lg_init_accept_apply "$s" "$dry" "$lgpath" "$tsv"
+}
+
+# _lg_init_ci_note <out>: one "note: …" line into <out> (else nothing) when
+# a doc-superpowers workflow under .github/workflows/ runs the claims step
+# or names the vendored ledger helper set (doc-freshness-schedule,
+# doc-spec-verify, doc-ledger-publish) and .github/scripts/ledger/lib.sh is
+# absent: install --ci ships the set only once docs/ledger/config.json
+# exists (final review OPS-I1, ruled).
+_lg_init_ci_note() {
+  local f w=""
+  : > "$1"
+  [ ! -f .github/scripts/ledger/lib.sh ] || return 0
+  for f in .github/workflows/*.yml; do
+    [ -f "$f" ] || continue
+    if LC_ALL=C awk 'NR <= 5 && /doc-superpowers workflow v[0-9]/ { m = 1 }
+        !/^[ \t]*#/ && (index($0, ".github/scripts/doc-superpowers-steps/claims-check.sh") || index($0, ".github/scripts/ledger/")) { u = 1 }
+        END { exit !(m && u) }' "$f"; then
+      w="${w:+$w, }${f##*/}"
+    fi
+  done
+  [ -z "$w" ] || printf 'note: re-run scripts/hooks/install.sh install --ci and commit .github/scripts/ — %s read the ledger through the vendored helper set, which install --ci ships only once docs/ledger/config.json exists\n' "$w" > "$1"
 }
 
 # _lg_init_accept_apply <scratch> <dry 0|1> <legacy-path> <tsv>: the item
@@ -1573,10 +1630,15 @@ _lg_init_accept_apply() {
     + ([.keys[], (.stubs[] | select(.key != null))] | length | if . > 0 then "; \(.) key(s)" else "" end)
     + (if $dry == 1 then " — dry run: nothing was written" else "; review and commit the files above" end)' "$s.final" >> "$s.lines" \
     || _lg_die "jq failed (summary)"
+  # The CI tier vendors the ledger helper set only on a ledger host (final
+  # review OPS-I1): an installed claims or publish workflow without it
+  # needs one more install --ci now that the config exists.
+  _lg_init_ci_note "$s.note"
+  cat -- "$s.note" >> "$s.lines" || _lg_die "cannot write $s.lines"
   if [ "$_LG_FORMAT" = json ]; then
     # shellcheck disable=SC2016  # jq source
     jq -c --slurpfile p "$s.plan" --slurpfile n "$s.lnew" --arg d "$tsv" --argjson dry "$([ "$dry" = 1 ] && echo true || echo false)" \
-        --arg views "$views" --arg lg "$lgpath" --rawfile w "$s.written" --rawfile cr "$s.created" '
+        --arg views "$views" --arg lg "$lgpath" --rawfile w "$s.written" --rawfile cr "$s.created" --rawfile note "$s.note" '
       ($cr | split("\n") | map(select(. != ""))) as $c
       | {decisions: $d, dry_run: $dry, findings: [],
          written: ($w | split("\n") | map(select(. != "") | sub("^wrote "; "") | sub(" \\(.*$"; ""))),
@@ -1590,6 +1652,7 @@ _lg_init_accept_apply() {
          legacy: {path: (if $lg == "" then null else $lg end), added: ($n[0] | keys),
                   kept: ([$p[0].legacy[] | select(.kind == "kept")] | length)},
          skipped: $p[0].skipped,
+         notes: ($note | split("\n") | map(select(. != ""))),
          views: (if $views == "" then null else $views end)}' "$s.final" > "$s.payload" || _lg_die "jq failed (payload)"
     _lg_emit init 0 "$s.payload"
   fi

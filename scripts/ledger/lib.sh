@@ -1,7 +1,9 @@
 # shellcheck shell=bash
-# scripts/ledger/lib.sh — the work ledger's core, sourced by doc-tools.sh
-# (_lg_enter) only when a ledger verb runs in a repository that has
-# docs/ledger/config.json. Not executable on its own: it uses doc-tools.sh's
+# scripts/ledger/lib.sh — the work ledger's core, sourced by doc-tools.sh:
+# by _lg_enter when a ledger verb runs in a repository that has
+# docs/ledger/config.json — and for `ledger init`, which bootstraps one that
+# has none (on the default config) — and, in a subshell, by claims V5 to
+# read ledger trackers when the config exists. Not executable on its own: it uses doc-tools.sh's
 # globals and helpers (_SCRATCH, _scratch_init, _exit_ok, and the verdict
 # printers _lg_json_str, _lg_out, _lg_mark_emitted, _lg_fail, which live in
 # doc-tools.sh so its exit paths work before — or without — this file).
@@ -13,6 +15,12 @@ _LG_CFG=""           # the merged config (a file in $_SCRATCH): _lg_init
 _LG_ROOT=""          # the work tree's top level
 _LG_IX_NEED_CONTRACTS=""  # 1: the verb shows relations — a failing contracts
                           # adapter is fatal (index.sh _lg_ix_adapter_contracts)
+# A push refused for credentials or rights, in git's or curl's words (ERE;
+# grep -E): the counter CAS (keys.sh) and the in-flight push (inflight.sh)
+# both read it as "cannot write there" — provisional keys / a warning —
+# never as a refusal of the content (final review OPS-m9). A 403 only as an
+# HTTP status or "403 Forbidden", never a 403 in a URL's path or port.
+_LG_PERM_RE='Permission denied|Authentication failed|could not read Username|returned error: 403|HTTP 403|403 Forbidden|[Ff]orbidden'
 _LG_CACHE=""         # $(git rev-parse --git-common-dir)/doc-superpowers/ledger
                      # (absolute; created by whoever first writes to it:
                      # mkdir -p — the parse cache, parse.sh, is the first)

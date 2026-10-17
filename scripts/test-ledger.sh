@@ -1074,6 +1074,13 @@ src/**/x.js|x.js|0
 src/**|src/a|1
 src/**|src/a/b|1
 src/**|srcx/a|0
+docs/**/issues/*.md|docs/issues/a.md|1
+docs/**/issues/*.md|docs/x/y/issues/a.md|1
+docs/**/issues/*.md|docs/issues/x/a.md|0
+docs/**/issues/*.md|docsx/issues/a.md|0
+a**b|ab|1
+a**b|a/x/y/b|1
+a**b|a/x/y/c|0
 *.md|a.md|1
 *.md|d/a.md|0
 docs/*/a.md|docs/x/a.md|1
@@ -3102,7 +3109,8 @@ test_lg_cas_finalize_and_provisional_in_range() {
   git add -A && git commit -qm "provisional"
   lg_call _lg_provisional_in_range "$base..HEAD"
   assert_eq "0" "$LG_RC" "_lg_provisional_in_range exits 0"
-  assert_eq "$(printf 'x-~0000\tdocs/issues/r.md\nx-~%s\tdocs/issues/n.md\n' "$h" | sort)" \
+  # "key\twhere\tpath" (where: "" — the base, origin/main, carries neither).
+  assert_eq "$(printf 'x-~0000\t\tdocs/issues/r.md\nx-~%s\t\tdocs/issues/n.md\n' "$h" | sort)" \
     "$(printf '%s\n' "$LG_OUT" | sort)" "both provisional keys the range adds"
   lg_call _lg_provisional_in_range "HEAD..HEAD"
   assert_eq "0|" "$LG_RC|$LG_OUT" "an empty range adds none"
@@ -7047,17 +7055,18 @@ test_lg_inflight_anc_errors_uncached() {
   fake=$(harness_mktemp_d lg-fakegit)
   real=$(command -v git)
   # shellcheck disable=SC2016  # the fake's own $1 / $@
-  printf '#!/bin/sh\nif [ "$1" = merge-base ] && [ "$2" = --is-ancestor ]; then exit 128; fi\nexec "%s" "$@"\n' "$real" > "$fake/git"
+  # (a pair asked both ways is one merge-base --all: final review, Task 12 m)
+  printf '#!/bin/sh\nif [ "$1" = merge-base ] && { [ "$2" = --is-ancestor ] || [ "$2" = --all ]; }; then exit 128; fi\nexec "%s" "$@"\n' "$real" > "$fake/git"
   chmod +x "$fake/git"
   PATH="$fake:$PATH" lg inflight --fetch --format json
   assert_eq "0" "$LG_RC" "every ancestry check errors: exit 0"
   tr=$(harness_mktemp lg-gtrace)
   GIT_TRACE="$tr" lg inflight --format json
-  assert_eq "1" "$(if [ "$(grep -c 'is-ancestor' "$tr")" -gt 0 ]; then echo 1; else echo 0; fi)" "the errored verdicts were not cached: asked again"
+  assert_eq "1" "$(if [ "$(grep -c -e 'merge-base --is-ancestor' -e 'merge-base --all' "$tr")" -gt 0 ]; then echo 1; else echo 0; fi)" "the errored verdicts were not cached: asked again"
   assert_json_field "$LG_OUT" '.branches[] | select(.branch == "feat-a") | .oid' "$LG_A_TIP" "…the descendant wins"
   : > "$tr"
   GIT_TRACE="$tr" lg inflight --format json
-  assert_eq "0" "$(grep -c 'is-ancestor' "$tr")" "the 0/1 verdicts are cached"
+  assert_eq "0" "$(grep -c -e 'merge-base --is-ancestor' -e 'merge-base --all' "$tr")" "the 0/1 verdicts are cached"
   rm -rf "$tr" "$fake"
   lg_ifl_teardown
 }
@@ -7929,7 +7938,7 @@ test_lg_inflight_dedup_descendant_wins() {
   local tr
   tr=$(harness_mktemp lg-gtrace)
   GIT_TRACE="$tr" lg inflight --format json
-  assert_eq "0" "$(grep -c 'is-ancestor' "$tr")" "the verdicts are cached: no merge-base --is-ancestor the second time (R3-5)"
+  assert_eq "0" "$(grep -c -e 'merge-base --is-ancestor' -e 'merge-base --all' "$tr")" "the verdicts are cached: no ancestry check the second time (R3-5)"
   rm -f "$tr"
   lg_ifl_teardown
 }
@@ -10654,7 +10663,7 @@ test_lg_prov_key_long_forms() {
   assert_not_contains "$LG_OUT" "bad-key docs/issues/e.md" "8 hex: well-formed"
   git add -A && git commit -qm "long provisional keys" --no-verify
   lg_call _lg_provisional_in_range "$base..HEAD"
-  assert_eq "$(printf 'x-~0123abcd\tdocs/issues/e.md\nx-~abcdef\tdocs/issues/s.md\n')" \
+  assert_eq "$(printf 'x-~0123abcd\t\tdocs/issues/e.md\nx-~abcdef\t\tdocs/issues/s.md\n')" \
     "$(printf '%s\n' "$LG_OUT" | sort)" "_lg_provisional_in_range lists the 6- and 8-hex keys (not the 9-hex one)"
   lg validate --pushed "$base..HEAD"
   assert_eq "1" "$LG_RC" "validate --pushed (cas) blocks"
@@ -11398,6 +11407,209 @@ Contract-Change: field:s1 — kept"
   teardown
 }
 
+# --- Final review fixes (3.3.0) --------------------------------------------------
+
+test_lg_init_accept_rejected_summary_kept() {
+  echo "test: final CORE-I1 — --accept never writes a summary over one the parser rejected (a block scalar): the item's text is kept, its key and ledger are written"
+  lg_accept_fixture
+  local f=docs/issues/2026-01-03-order-sync.md
+  lg_add_fm "$f" '  A carefully written folded summary of the order sync drift.'
+  lg_add_fm "$f" 'summary: >'
+  lg_init_decide "$LG_DEC" "$f" orders
+  lg init --accept "$LG_DEC"
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_contains "$(cat "$f")" "summary: >" "the block scalar's header is kept"
+  assert_contains "$(cat "$f")" "  A carefully written folded summary of the order sync drift." "the authored text is kept"
+  assert_not_contains "$(cat "$f")" "summary: 2026-01-03-order-sync" "no mechanical summary over it"
+  assert_contains "$(lg_fmblock "$f")" "key: orders-1" "its key is written"
+  assert_contains "$(lg_fmblock "$f")" "ledger: orders" "its ledger is written"
+  assert_not_contains "$LG_OUT" "$f: key orders-1, ledger orders, summary" "stdout lists no summary write"
+  teardown
+}
+
+test_lg_init_accept_unwritable_items_findings() {
+  echo "test: final CORE-I2 — an item --accept would edit but cannot (unterminated frontmatter, a symbolic link, a rejected key or ledger field) is a finding before anything is written: exit 1, no counter, no file changed"
+  lg_accept_fixture
+  # order-sync: no closing --- line.
+  printf -- '---\nstatus: In Progress\n\nBody.\n' > docs/issues/2026-01-03-order-sync.md
+  # misc: a symbolic link to a file outside the items globs.
+  mkdir -p docs/real
+  cp docs/issues/2026-01-05-misc.md docs/real/misc.md
+  rm docs/issues/2026-01-05-misc.md
+  ln -s ../real/misc.md docs/issues/2026-01-05-misc.md
+  # sheet-flicker: a rejected (block scalar) ledger field the run would set.
+  lg_add_fm docs/issues/2026-01-02-sheet-flicker.md '  checkout'
+  lg_add_fm docs/issues/2026-01-02-sheet-flicker.md 'ledger: |'
+  git add -A && git commit -qm unwritable
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-01-cart-total.md checkout
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-03-order-sync.md orders
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-05-misc.md checkout
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-02-sheet-flicker.md checkout
+  local st
+  st=$(lg_init_status)
+  lg init --accept "$LG_DEC" --format json
+  assert_eq "1" "$LG_RC" "exits 1"
+  assert_json_field "$LG_OUT" '.findings | map(.path) | sort | join(",")' \
+    "docs/issues/2026-01-02-sheet-flicker.md,docs/issues/2026-01-03-order-sync.md,docs/issues/2026-01-05-misc.md" \
+    "one finding for each unwritable item"
+  assert_json_field "$LG_OUT" '.findings | map(.detail) | join("|") | test("closing --- line") and test("symbolic link") and test("ledger field")' \
+    "true" "the findings say why"
+  assert_eq "$st" "$(lg_init_status)" "nothing written"
+  assert_eq "absent" "$(lg_remote_counters)" "no key allocated"
+  teardown
+}
+
+test_lg_first_allocation_seeds_from_working_tree() {
+  echo "test: final CORE-I3 — the first allocation of a ledger seeds past the keys in the working tree too (not only the base's): an uncommitted checkout-1 is never issued again"
+  lg_accept_fixture
+  # cart-total carries checkout-1 in the working tree only (a migration
+  # script's edit, not committed); the counter ref does not exist yet.
+  lg_add_fm docs/issues/2026-01-01-cart-total.md 'key: checkout-1'
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-02-sheet-flicker.md checkout
+  lg init --accept "$LG_DEC"
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_contains "$(lg_fmblock docs/issues/2026-01-02-sheet-flicker.md)" "key: checkout-2" "sheet-flicker: checkout-2, past the working tree's checkout-1"
+  assert_eq '{"checkout":4}' "$(lg_remote_counters)" "counter: past checkout-1, sheet-flicker's 2 and the stub's 3"
+  lg validate --all --format json
+  assert_json_field "$LG_OUT" '[.findings[]? | select(.class == "duplicate-key")] | length' "0" "validate --all: no duplicate key"
+  teardown
+}
+
+test_lg_validate_pushed_new_branch_from_base() {
+  echo "test: final CORE-I4 — a new branch's push (zero remote oid) checks only the provisional keys the branch adds since config base: one already on the base never blocks it; with no base to compare, the base's key is refused and the detail names ledger finalize --all"
+  lg_keys_fixture
+  local h z=0000000000000000000000000000000000000000
+  # A provisional key reaches the base (a claude.ai/code session's PR).
+  h=$(lg_hex4 docs/issues/cloud.md)
+  lg_item docs/issues/cloud.md "key: x-~$h" "ledger: x" "status: Open" "summary: Filed in a cloud session"
+  git add -A && git commit -qm cloud
+  git push -q origin main
+  git fetch -q origin
+  git checkout -q -b feat/new
+  lg_item docs/issues/real.md "key: x-1" "ledger: x" "status: Open" "summary: A real key on the branch"
+  git add -A && git commit -qm real
+  lg validate --pushed "$z..HEAD" --format json
+  assert_eq "0" "$LG_RC" "a new branch adding no provisional key: exit 0 (the base's x-~$h is not this push's)"
+  assert_json_field "$LG_OUT" '.findings | length' "0" "no findings"
+  lg_item docs/issues/mine.md "key: x-~$(lg_hex4 docs/issues/mine.md)" "ledger: x" "status: Open" "summary: Filed offline on the branch"
+  git add -A && git commit -qm mine
+  lg validate --pushed "$z..HEAD" --format json
+  assert_eq "1" "$LG_RC" "the branch adds one: exit 1"
+  assert_eq "provisional-key block docs/issues/mine.md" "$(lg_vf)" "only the branch's key is refused"
+  # No base to compare (config base does not resolve): every provisional
+  # key at the tip; the base's own is named with finalize --all.
+  lg_enable '{"base":"origin/no-such-branch"}'
+  lg validate --pushed "$z..HEAD" --format json
+  assert_eq "1" "$LG_RC" "no base: exit 1"
+  assert_eq "provisional-key block docs/issues/cloud.md
+provisional-key block docs/issues/mine.md" "$(lg_vf)" "every provisional key at the tip"
+  assert_json_field "$LG_OUT" '.findings[] | select(.path == "docs/issues/cloud.md") | .detail | test("ledger finalize --all")' "true" \
+    "the base's key: the detail names ledger finalize --all"
+  teardown
+}
+
+test_lg_hook_clip_constants_pinned() {
+  echo "test: the ledger hook modes clip with hook-lib.sh's constants (HOOK_MAX_CHARS, HOOK_LINES_MAX): one changed without the other fails here"
+  local v lib lg
+  for v in MAX_CHARS LINES_MAX; do
+    lib=$(sed -n "s/^HOOK_$v=\([0-9][0-9]*\).*/\1/p" "$REPO_DIR/scripts/hooks/claude/hook-lib.sh")
+    lg=$(sed -n "s/^_LG_HOOK_$v=\([0-9][0-9]*\).*/\1/p" "$REPO_DIR/scripts/ledger/hooks.sh")
+    assert_eq "1" "$(printf '%s\n' "$lib" | grep -c .)" "hook-lib.sh sets HOOK_$v once"
+    assert_eq "$lib" "$lg" "scripts/ledger/hooks.sh _LG_HOOK_$v equals hook-lib.sh HOOK_$v"
+  done
+}
+
+test_lg_ifl_ancestry_one_direction_first() {
+  echo "test: final review (Task 12 m) — two copies of a branch at related tips cost one git merge-base on a cold cache (merge-base --all answers both directions), not one per direction"
+  lg_ifl_fixture
+  local ahead tr
+  ahead=$(git commit-tree -p "$LG_A_TIP" -m "ahead" -m "Ledger-Claims: app-5" "$LG_A_TIP^{tree}")
+  git push -q origin "$ahead:refs/doc-superpowers/inflight/hosta/feat-a"
+  tr=$(harness_mktemp lg-gtrace)
+  GIT_TRACE="$tr" lg inflight --fetch --format json
+  assert_json_field "$LG_OUT" '.branches[] | select(.branch == "feat-a") | .oid' "$ahead" "the descendant wins"
+  assert_eq "1" "$(grep 'built-in: git merge-base' "$tr" | grep -c -e "$ahead.*$LG_A_TIP" -e "$LG_A_TIP.*$ahead")" \
+    "one merge-base call answers the pair both ways"
+  rm -f "$tr"
+  lg_ifl_teardown
+}
+
+test_lg_init_accept_install_ci_note() {
+  echo "test: final OPS-I1 — init --accept, which writes the config, says to re-run install --ci when an installed doc-superpowers claims or publish workflow lacks the vendored ledger helper set; none without such a workflow"
+  lg_accept_fixture
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-01-cart-total.md checkout
+  printf '%s\n' '# doc-superpowers workflow v1' 'jobs:' '  claims:' '    steps:' '      - run: .github/scripts/doc-superpowers-steps/claims-check.sh' \
+    > .github/workflows/doc-freshness-schedule.yml
+  lg init --accept "$LG_DEC" --dry-run
+  assert_eq "0" "$LG_RC" "dry run exits 0"
+  lg init --accept "$LG_DEC"
+  assert_eq "0" "$LG_RC" "exits 0"
+  assert_contains "$LG_OUT" "note: re-run scripts/hooks/install.sh install --ci and commit .github/scripts/ — doc-freshness-schedule.yml read the ledger" \
+    "the note names install --ci and the workflow"
+  assert_eq "1" "$(grep -c '^note: ' <<<"$LG_OUT")" "one note line"
+  # The set vendored: nothing to say.
+  mkdir -p .github/scripts/ledger
+  : > .github/scripts/ledger/lib.sh
+  lg init --accept "$LG_DEC" --format json
+  assert_json_field "$LG_OUT" '.notes | length' "0" "the set vendored: no note"
+  teardown
+}
+
+
+test_lg_state_watch_absolute_entry_resolved() {
+  echo "test: final OPS-m3 — an absolute state_watch.paths entry is compared resolved too: an entry spelled through a symbolic link matches a write reported at the physical path, and the reverse"
+  lg_fixture
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[{"id":"x","title":"X","kind":"service","status":"active"}]}'
+  local lnk phys
+  lnk=$(harness_mktemp_d lg-abs)
+  mkdir -p "$lnk/real/notes"
+  phys=$(cd -P "$lnk/real" && pwd)
+  ln -s "$phys" "$lnk/alias"
+  # The entry through the link, the write physical (macOS: /tmp/notes vs
+  # /private/tmp/notes/a.md).
+  lg_enable "$(jq -cn --arg e "$lnk/alias/notes" '{state_watch: {paths: [$e], patterns: ["next:"]}}')"
+  lg_hook "$(lg_sw_payload Write "$phys/notes/a.md" "x-7 next: ship it")" state-watch --hook
+  assert_contains "$LG_OUT" "ledger note x-7" "entry through a link, file physical: matched"
+  # A globbed absolute entry through the link.
+  lg_enable "$(jq -cn --arg e "$lnk/alias/*" '{state_watch: {paths: [$e], patterns: ["next:"]}}')"
+  lg_hook "$(lg_sw_payload Write "$phys/notes/a.md" "x-7 next: ship it")" state-watch --hook
+  assert_contains "$LG_OUT" "ledger note x-7" "a globbed entry through a link, file physical: matched"
+  # The entry physical, the write through the link.
+  lg_enable "$(jq -cn --arg e "$phys/notes" '{state_watch: {paths: [$e], patterns: ["next:"]}}')"
+  lg_hook "$(lg_sw_payload Write "$lnk/alias/notes/a.md" "x-7 next: ship it")" state-watch --hook
+  assert_contains "$LG_OUT" "ledger note x-7" "entry physical, file through a link: matched"
+  lg_hook "$(lg_sw_payload Write "$phys/other/a.md" "x-7 next: ship it")" state-watch --hook
+  assert_eq "0|" "$LG_RC|$LG_OUT" "a file outside the entry: silent"
+  teardown
+}
+
+test_lg_alloc_permission_refusal_provisional() {
+  echo "test: final OPS-m9 — a counter push the remote refuses for permission (a 403 / Forbidden / Permission denied in git's words, as a cloud session's proxy may say it) gives a provisional key with a warning, as an unreachable remote does; the in-flight push reads the same words the same way (a warning, exit 0); a refusal for any other reason stays exit 2"
+  lg_keys_fixture
+  printf '#!/bin/sh\necho "error: 403 Forbidden (the session may not push here)" >&2\nexit 1\n' > "$LG_REMOTE/hooks/pre-receive"
+  chmod +x "$LG_REMOTE/hooks/pre-receive"
+  lg_call _lg_alloc x 1 docs/issues/n.md
+  assert_eq "0" "$LG_RC" "a 403-style refusal: rc 0"
+  assert_eq "x	x-~$(lg_hex4 docs/issues/n.md)" "$LG_OUT" "…a provisional key"
+  assert_contains "$LG_ERR" "permission" "…the warning says it is a permission failure"
+  assert_contains "$LG_ERR" "403" "…with git's words"
+  assert_eq "absent" "$(lg_remote_counters)" "nothing on the remote"
+  # The in-flight push: the same words, a warning, exit 0.
+  lg_enable '{"inflight":{"enabled":true,"host_id":"hosta"}}'
+  git checkout -q -b feat/p
+  git commit -q --allow-empty -m p
+  lg inflight --push
+  assert_eq "0" "$LG_RC" "in-flight push refused with 403: exit 0"
+  assert_contains "$LG_ERR" "permission failure" "…said as a permission failure"
+  # Another refusal: still rc 2 / exit 2.
+  printf '#!/bin/sh\necho "denied by policy" >&2\nexit 1\n' > "$LG_REMOTE/hooks/pre-receive"
+  lg_call _lg_alloc x 1 docs/issues/n.md
+  assert_eq "2" "$LG_RC" "a refusal for another reason: rc 2"
+  lg inflight --push
+  assert_eq "2" "$LG_RC" "…and the in-flight push exits 2"
+  teardown
+}
+
 run_tests() {
   echo "Running ledger tests..."
   echo ""
@@ -11788,6 +12000,16 @@ run_tests() {
   # --- Task 18a ---
   test_lg_status_class_helper
   test_lg_claims_counts
+  # --- Final review fixes ---
+  test_lg_init_accept_rejected_summary_kept
+  test_lg_init_accept_unwritable_items_findings
+  test_lg_first_allocation_seeds_from_working_tree
+  test_lg_validate_pushed_new_branch_from_base
+  test_lg_hook_clip_constants_pinned
+  test_lg_ifl_ancestry_one_direction_first
+  test_lg_init_accept_install_ci_note
+  test_lg_state_watch_absolute_entry_resolved
+  test_lg_alloc_permission_refusal_provisional
 
   print_summary
 }

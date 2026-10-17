@@ -890,7 +890,9 @@ _lg_validate_plan() {
 
 # _lg_validate_pushed <range> <findings.jsonl>: keys.mode cas — each
 # provisional key the commits of <a>..<b> introduce (_lg_provisional_in_range;
-# <a> all zeros: a new branch, every provisional key at <b>) blocks; merge
+# <a> all zeros: a new branch, the keys it adds since config base, or every
+# provisional key at <b> when there is no base to compare) blocks — the
+# detail names `ledger finalize --all` for a key the base carries too; merge
 # mode — none (provisional keys may reach the base). For pre-push hooks.
 _lg_validate_pushed() {
   local range="$1" out="$2" s
@@ -905,9 +907,13 @@ _lg_validate_pushed() {
   _lg_k_cfg
   [ "$_LG_K_MODE" = cas ] || return 0
   _lg_provisional_in_range "$range" > "$s.prov"
-  jq -R -c 'split("\t") | (.[0]) as $k | (.[1:] | join("\t")) as $p
+  # shellcheck disable=SC2016  # jq source
+  jq -R -c --arg base "$_LG_K_BASE" 'split("\t") | (.[0]) as $k | (.[1]) as $w | (.[2:] | join("\t")) as $p
+    | ($k | if (explode | any(. < 32 or . == 127)) then tojson else . end) as $ks
     | {class: "provisional-key", severity: "block", path: $p, key: $k,
-       detail: "\($k | if (explode | any(. < 32 or . == 127)) then tojson else . end) is provisional: run doc-tools.sh ledger finalize before pushing (keys.mode cas)"}' \
+       detail: (if $w == "base" then "\($ks) is provisional and on the base (\($base)) too: run doc-tools.sh ledger finalize --all before pushing (keys.mode cas)"
+                elif $w == "nobase" then "\($ks) is provisional: run doc-tools.sh ledger finalize before pushing (keys.mode cas; config base \($base | tojson) does not resolve here, so keys already on the base count too: ledger finalize --all replaces those)"
+                else "\($ks) is provisional: run doc-tools.sh ledger finalize before pushing (keys.mode cas)" end)}' \
     "$s.prov" > "$out" || _lg_die "jq failed (provisional keys)"
 }
 

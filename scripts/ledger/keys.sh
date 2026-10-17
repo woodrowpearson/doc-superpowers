@@ -58,8 +58,12 @@
 # already exists": a concurrent create; "incorrect old value provided" /
 # "reference does not exist": a concurrent update; deviation from the plan's
 # list, which predates them — observed in the race test on git 2.54); exit
-# 128 or no status line for the ref → 4 (transport); any other outcome (a
-# declining hook, a refused namespace, "+" …) → 2. Retrying is always safe:
+# 128 or no status line for the ref → 4 (transport), as is a refusal in
+# the words of a permission failure (lib.sh _LG_PERM_RE: "403 Forbidden",
+# "Permission denied", … — a claude.ai/code session's proxy; final review
+# OPS-m9), which then gives provisional keys as an unreachable remote does;
+# any other outcome (a declining hook, a refused namespace, "+" …) → 2.
+# Retrying is always safe:
 # only a push that exits 0 with one of the three flags hands out keys.
 # Known limit: two processes of ONE repository racing to create the counter
 # ref share its local copy (refs/doc-superpowers/ledger/counters-remote); the
@@ -367,7 +371,10 @@ _lg_k_fetch_base() {
 # _lg_k_read_merged <want-json|""> <out>: the counters (fetched) with seeds
 # put in: when a wanted ledger (or, with no want, any) is absent from them,
 # every ledger the base has keys for and the counters lack gets its highest
-# number + 1. rc as _lg_counter_fetch.
+# number + 1 — the highest over the base's keys and aliases and, when the
+# caller holds the run's index (_LG_K_IX: init --accept, new), its items'
+# too, so a key that sits only in the working tree or on this branch is
+# never issued again (final review CORE-I3). rc as _lg_counter_fetch.
 _lg_k_read_merged() {
   local want="$1" out="$2" rc=0 need d
   _lg_counter_fetch || rc=$?
@@ -387,7 +394,14 @@ _lg_k_read_merged() {
   _lg_k_fetch_base || rc=$?
   [ "$rc" = 0 ] || return "$rc"
   _lg_k_base_max "$d"
-  jq -c --slurpfile m "$d" '. as $c | reduce ($m[0] | to_entries[]) as $e ($c; if has($e.key) then . else .[$e.key] = $e.value + 1 end)' \
+  : > "$d.noix"
+  # shellcheck disable=SC2016  # jq source
+  jq -c --slurpfile m "$d" --slurpfile ix "${_LG_K_IX:-$d.noix}" "$_LG_JQ_KEYS_DEFS"'
+    . as $c
+    | (reduce ((($ix[0] // {}).items // [])[] | (.key, ((.aliases // []) | if type == "array" then .[] else empty end))
+               | lg_k_split | select(. != null)) as $x
+         ($m[0]; .[$x.l] = ([.[$x.l] // 0, $x.n] | max))) as $M
+    | reduce ($M | to_entries[]) as $e ($c; if has($e.key) then . else .[$e.key] = $e.value + 1 end)' \
     "$_LG_CTR_FILE" > "$out" || _lg_die "jq failed (seeding the counters)"
 }
 
@@ -482,6 +496,10 @@ _lg_counter_cas() {
   fi
   _LG_CAS_ERR="the push of $_LG_K_REF to '$_LG_K_REMOTE' was refused (exit $rc, '$flag' $summary)$(
     grep -v '^[[:space:]]*$' "$d/err" 2>/dev/null | grep -v '^error: failed to push' | head -n 2 | tr '\n' ' ' | sed 's/^/: /')"
+  if printf '%s\n' "$summary" | cat - "$d/err" 2>/dev/null | grep -Eq "$_LG_PERM_RE"; then
+    _LG_CAS_ERR="permission failure: $_LG_CAS_ERR"
+    return 4
+  fi
   return 2
 }
 
@@ -600,7 +618,7 @@ _lg_alloc_batch() {
       fi
       [ -n "$paths" ] || _lg_die "cannot reach '$_LG_K_REMOTE' for the counter ref (${_LG_CTR_ERR:-transport failure}), and no item paths were given for provisional keys"
       _lg_k_prov_lines "$paths" > "$d/prov" || _lg_die "cannot compute the provisional keys"
-      echo "ledger: warning: cannot reach '$_LG_K_REMOTE' (${_LG_CTR_ERR:-transport failure}) — provisional key(s) $(cut -f2 "$d/prov" | tr '\n' ' ')given; run \`doc-tools.sh ledger finalize\` once it is reachable (in keys.mode cas the pre-push hook refuses provisional keys)." >&2
+      echo "ledger: warning: cannot reach or write to '$_LG_K_REMOTE' (${_LG_CTR_ERR:-transport failure}) — provisional key(s) $(cut -f2 "$d/prov" | tr '\n' ' ')given; run \`doc-tools.sh ledger finalize\` once it is reachable (in keys.mode cas the pre-push hook refuses provisional keys)." >&2
       cat -- "$d/prov"
       return 0
     fi
@@ -1293,12 +1311,18 @@ cmd_ledger_finalize() {
 
 # --- Push range -------------------------------------------------------------------------------
 
-# _lg_provisional_in_range <a>..<b>: "key\tpath" for each provisional key
-# the range adds — the item keys at <b> (of the item files the range
+# _lg_provisional_in_range <a>..<b>: "key\twhere\tpath" for each provisional
+# key the range adds — the item keys at <b> (of the item files the range
 # changes) that no changed item had at <a>. <a> empty or all zeros (a new
-# branch): every provisional key at <b>.
+# branch): the keys <b> adds since config base (from git merge-base <b>
+# <base>, so a provisional key already on the base never blocks a new
+# branch: final review CORE-I4); with no base here (it does not resolve, or
+# shares no history with <b>), every provisional key at <b>. <where>:
+# "base" for a key the base's copy of that file also carries, "nobase" for
+# every key when there is no base to compare, else "" — `ledger finalize`
+# replaces only the keys the base lacks; `--all` the others too.
 _lg_provisional_in_range() {
-  local range="$1" a b ac="" bc d
+  local range="$1" a b ac="" bc d basec="" where="" k w p
   case "$range" in
     *..*) a=${range%%..*}; b=${range#*..} ;;
     *) _lg_die "internal: _lg_provisional_in_range takes <a>..<b> (got '$range')" ;;
@@ -1310,10 +1334,18 @@ _lg_provisional_in_range() {
     ''|*[!0]*) ;;
     *) a="" ;;
   esac
+  _lg_k_cfg
+  case "$_LG_K_BASE" in
+    ''|-*) ;;
+    *) basec=$(git rev-parse -q --verify "$_LG_K_BASE^{commit}" 2>/dev/null) || basec="" ;;
+  esac
   if [ -n "$a" ]; then
     case "$a" in -*) _lg_die "not a revision: '$a'" ;; esac
     ac=$(git rev-parse -q --verify "$a^{commit}" 2>/dev/null) || _lg_die "unknown revision: '$a'"
+  elif [ -n "$basec" ]; then
+    ac=$(git merge-base "$bc" "$basec" 2>/dev/null) || ac=""
   fi
+  [ -n "$ac" ] || [ -n "$basec" ] || where=nobase
   d=$(mktemp -d "$_SCRATCH/lg-kpr.XXXXXX") || _lg_die "mktemp failed"
   if [ -n "$ac" ]; then
     git diff --name-only -z --no-renames "$ac" "$bc" -- > "$d/changed.z" 2> "$d/err" \
@@ -1332,5 +1364,15 @@ _lg_provisional_in_range() {
     | [$a[] | (.fm // {}) | lg_fv($F; "key") | lg_k_prov | select(. != null)] as $old
     | inputs | . as $r | ((.fm // {}) | lg_fv($F; "key") | lg_k_prov) as $k
     | select($k != null and ($old | index([$k]) == null))
-    | "\($k)\t\($r.path)"' "$d/b.recs" || _lg_die "jq failed (provisional keys in $range)"
+    | "\($k)\t\($r.path)"' "$d/b.recs" > "$d/found" || _lg_die "jq failed (provisional keys in $range)"
+  # Which of them the base carries too: one blob read per refused key (a
+  # refused push is rare; an accepted one reads none).
+  while IFS=$'\t' read -r k p; do
+    w=$where
+    if [ -z "$w" ] && [ -n "$basec" ] \
+        && git cat-file -p "$basec:$p" 2>/dev/null | LC_ALL=C grep -qiF -- "$k"; then
+      w=base
+    fi
+    printf '%s\t%s\t%s\n' "$k" "$w" "$p"
+  done < "$d/found"
 }
