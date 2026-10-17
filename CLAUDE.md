@@ -23,7 +23,7 @@ doc-superpowers/
 │   └── INSTALL.md
 ├── .github/              # Self-installed CI tier (install.sh install --ci: installer output, never hand-edited)
 │   ├── scripts/          # Vendored byte copies: doc-tools.sh + doc-superpowers-steps/ (the step scripts the workflows run)
-│   │                     #   + ledger/ and adapters/ (the ledger helper set: doc-freshness-schedule runs the claims check)
+│   │                     #   (no ledger/ or adapters/: the ledger helper set ships only with docs/ledger/config.json)
 │   └── workflows/
 │       ├── doc-freshness-pr.yml       # The 2 default templates, rendered with the recorded choices
 │       ├── doc-freshness-schedule.yml
@@ -70,7 +70,7 @@ doc-superpowers/
 │           ├── doc-spec-verify.yml       # AI spec compliance on PRs
 │           ├── doc-pr-full-cycle.yml     # AI PR full cycle: review, update, diagram, sync
 │           ├── doc-pr-release.yml        # AI per-PR release-notes fragment producer
-│           ├── doc-ledger-publish.yml    # Work-ledger views publisher (every 30 min; vendors the ledger helper set)
+│           ├── doc-ledger-publish.yml    # Work-ledger views publisher (every 30 min; vendors the ledger helper set on a ledger host)
 │           ├── doc-pr-release/           # Helper scripts + fragment-format spec
 │           │   ├── extract-context.sh    # Build context.json for the agent
 │           │   ├── update-pr-body.sh     # Idempotent PR-body managed-section editor

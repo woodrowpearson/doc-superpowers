@@ -19,7 +19,7 @@ doc-superpowers/
 ├── .codex/               # Codex installation guide
 │   └── INSTALL.md
 ├── .github/              # This repo's own installed CI tier (install.sh install --ci) + tests.yml
-│   ├── scripts/          # Vendored by the installer: doc-tools.sh + doc-superpowers-steps/ + the ledger helper set, ledger/ and adapters/ (byte copies)
+│   ├── scripts/          # Vendored by the installer: doc-tools.sh + doc-superpowers-steps/ (byte copies; the ledger helper set, ledger/ and adapters/, only on a ledger host — not this repo)
 │   └── workflows/
 │       ├── doc-freshness-pr.yml       # The 2 default shell-based workflows, rendered with the recorded choices
 │       ├── doc-freshness-schedule.yml
@@ -83,7 +83,7 @@ doc-superpowers/
 │           ├── doc-release.yml            # AI release notes drafting (checked commit step opens a PR)
 │           ├── doc-spec-verify.yml        # AI spec compliance on PRs (scope-gated on indexed specs) + a `claims` job (no AI; same-repository, non-Dependabot PRs; inert without docs/spec-claims/)
 │           ├── doc-pr-full-cycle.yml      # AI PR full cycle: review, update, diagram, sync (scope-gated; checked commit step; shared write group)
-│           ├── doc-ledger-publish.yml     # Work-ledger views publisher (shell; every 30 min + dispatch; ledger-publish.sh; ships the ledger helper set)
+│           ├── doc-ledger-publish.yml     # Work-ledger views publisher (shell; every 30 min + dispatch; ledger-publish.sh; ships the ledger helper set on a ledger host)
 │           ├── doc-pr-release.yml         # AI per-PR release-notes fragment producer — drafts/maintains RELEASE-NOTES.next/PR-<N>.md and syncs a managed section in the PR body
 │           ├── doc-pr-release/            # Colocated shell helpers for doc-pr-release.yml
 │           │   ├── extract-context.sh         # Emits JSON context blob (PR body, existing fragment + its hash state, the PR's own commits since the last recorded sync)
