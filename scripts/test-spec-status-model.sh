@@ -429,7 +429,10 @@ _rm=$(git -C "$_rn" log -1 --format=%H --diff-filter=D -- docs/old.md 2>/dev/nul
 assert_true "the route's first command finds the renaming commit" test -n "$_rm"
 assert_true "…and its second reports the rename (R<score> old new)" \
   grep -qE '^R[0-9]+[[:space:]]+docs/old\.md[[:space:]]+docs/new\.md$' <<<"$(git -C "$_rn" show -M --name-status --format= "${_rm:-HEAD}" 2>/dev/null)"
-assert_contains "$_sync" "N/8 ci" "sync's hook summary counts the 8 CI templates"
+_nci=0
+for _f in "$REPO_ROOT"/scripts/hooks/ci/*.yml; do [ -f "$_f" ] && _nci=$((_nci + 1)); done
+assert_contains "$_sync" "N/$_nci ci" "sync's hook summary counts the CI templates ($_nci)"
+assert_contains "$_sync" "ledger N/3 git, N/2 claude" "sync's hook summary adds the ledger sets"
 assert_contains "$(_section "$ACTIONS" '### Plan Phase')" 'set-code-refs' "Task N+1 refines code_refs with set-code-refs"
 assert_contains "$(_section "$ACTIONS" '### Execute Phase')" 'set-code-refs' "execute phase refines code_refs with set-code-refs"
 
