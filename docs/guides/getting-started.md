@@ -229,6 +229,7 @@ $DOC_TOOLS ledger ls --ledger checkout --open      # one line per item
 $DOC_TOOLS ledger show checkout-14                 # one item in ≤ 25 lines
 $DOC_TOOLS ledger new --ledger checkout --summary "Totals round twice on refunds"   # a key for a new issue
 $DOC_TOOLS ledger note checkout-14 "repro on staging"                              # the one home for item state
+$DOC_TOOLS ledger suggest checkout-14              # contracts it might declare (writes nothing)
 $DOC_TOOLS ledger link checkout-14 --consumes field:order.total                    # declare a relation you confirmed
 $DOC_TOOLS ledger view all --html --open           # render the views locally
 $DOC_TOOLS ledger validate --all                   # every item and key (add --registry for the registry)
