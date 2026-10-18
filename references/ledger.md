@@ -89,7 +89,7 @@ Deep-merged over the defaults: an object merges key by key; an array, a scalar o
 | `adapters.pr` / `adapters.contracts` | `null` / `null` | the PR and contracts adapters |
 | `state_watch.paths` / `.patterns` | `[]` / `[]` | the state-watch hook (*Hooks*). A write fires it only when it holds one of `patterns`, so `paths` set with no `patterns` (absent, `null`, `[]` or only empty strings) never fires: `validate --all` reports it (class `config`, advisory) and `hooks status` warns where state-watch is installed |
 | `validate.require_relations` | `null` | `null` (off) or `"new"`: a new open item must declare its relations — `changes`, `consumes` or `relates` — or opt out with `relations: none` (*Validation*). Any other value, or a `validate` that is not an object, exits 2 in `validate --staged` / `--all` (the modes that read it) |
-| `init.stub_defaults` | `{}` | frontmatter fields `init --accept` writes into each stub it creates, `{"<field>": "<value>"}`: literal scalars, and the token `{today}` for the run's date; a field the stub already has wins (*Bootstrapping*) <!-- T3: verify against code --> |
+| `init.stub_defaults` | `{}` | frontmatter fields `init --accept` writes into each stub it creates (*Bootstrapping*): `{"<field>": <string \| number \| boolean>}`, in this order; `{today}` in a string is the run's local date (`YYYY-MM-DD`). The stub's own fields win (`status`, `key`, `ledger`, `summary`). A field name the parser would not read back (`^[A-Za-z0-9_][A-Za-z0-9_.-]*$`), a `null`, list or object value, a line break, or any `{…}` but `{today}` exits 2 — checked before anything is written, `--dry-run` included |
 | `legacy` | `"docs/ledger/legacy.json"` | the legacy map |
 | `legacy_ids` | `[]` | retired ledger ids: advisory on a modified item, blocking on an added one |
 | `legacy_ledgers` | `{}` | `{"<legacy id>": "<file>"}`: the hand-written ledgers `init` reads (when it names any, no other file is read for tables) |
@@ -140,7 +140,7 @@ Item frontmatter, read by awk: flat `key: value` scalars (plain, double- or sing
 | `severity` | — | sorted by `severity_order` |
 | `changes` / `consumes` | — | contract ids this item's fix changes / its premise depends on |
 | `relates` | — | `root-cause:<key>`, `depends-on:<key>`, `sibling:<key>` |
-| `relations` | — | `none` (any case) records that the item has no relation to declare: the opt-out `validate.require_relations` reads. Not a `fields` mapping: the frontmatter key is always `relations`, and any other value is no opt-out (and no finding) |
+| `relations` | — | `none` (any case) records that the item has no relation to declare: the opt-out `validate.require_relations` reads, written by `link <item> --relations none`. Not a `fields` mapping: the frontmatter key is always `relations`, and any other value is no opt-out (and no finding) |
 | `superseded_by` | iff superseded (on a closed-class item) | the replacing item's key |
 | `owed` | — | what remains after the code merged (`deploy`, `device pass`) |
 | `aliases` | tool-written | prior keys after a re-home |
@@ -183,10 +183,10 @@ Keys are `<legacy id>#<row>`; the legacy id is `legacy_ledgers`' name for the fi
 | `inflight [--branch <b>[@<host>]] [--fetch] [--push]` | the branches in flight, one line each (*In-flight work*); `--push` publishes this branch's in-flight ref | 1 unknown `--branch` · 2 offline `--fetch`, a refused push · 1 `pre_push_check` refusing |
 | `notices [--branch …] [--gate] [--fetch] \| --hook` | stop / heads-up / info notices for a branch (*In-flight work*) | 1 with `--gate` and an unacked `stop` · 2 a base or branch that does not resolve, offline `--fetch`, and with `--gate` an in-flight fetch that failed ("could not verify") |
 | `state-watch --hook` | the PostToolUse hook mode (*Hooks*) | always 0 |
-| `new --ledger <id\|unassigned> --summary <text> [--file <issue>] [--finalize]` | allocate a key and write `key`, `ledger`, `summary` into an issue (default: the one staged or untracked item file without a key); `unassigned` writes no key; prints `<key>  <path>` | 3 no single issue · 2 allocation failed |
+| `new --ledger <id\|unassigned> --summary <text> [--file <issue>] [--finalize] [--suggest-contracts]` | allocate a key and write `key`, `ledger`, `summary` into an issue (default: the one staged or untracked item file without a key); `unassigned` writes no key; prints `<key>  <path>`; `--suggest-contracts` then prints `suggest`'s candidates (writing no relation) | 3 no single issue · 2 allocation failed |
 | `assign <item> <ledger>` | a new key in that ledger; the old key is appended to `aliases` | 1 unknown |
-| `link <item> --consumes <c>[,<c>…] \| --changes <c>[,<c>…] \| --relates <kind>:<item>[,…]` | write confirmed relations into the item's lists (any of the three at once, each a comma list; one write) <!-- T3: verify against code --> | 1 a bad value, nothing written |
-| `suggest <item>` | candidate `changes` / `consumes` contracts for an item, from its `related` neighbours and the files it lists, each with its reason; prints them for the caller to confirm with `link` — never writes <!-- T3: verify against code --> | 1 unknown · 3 ambiguous |
+| `link <item> --consumes <c>[,…] \| --changes <c>[,…] \| --relates <kind>:<item>[,…] \| --relations none` | write confirmed relations into the item's lists (any of the three at once, each one value or a comma list — a `--relates` piece is a whole `<kind>:<item>`; one write, one index read). A comma list is split only when the whole value is not itself valid, so a single value — even a contract id holding a comma — is checked as before; blanks around commas are ignored, a repeat counts once, an empty piece is a bad value. `--relations none` writes `relations: none` (the opt-out `validate.require_relations` reads); refused beside another flag or when the item already names a relation; a later link that writes a relation removes it in the same write (JSON `removed`) | 1 a bad value, nothing written |
+| `suggest <item>` | contracts the item might declare, never written: `changes` candidates are the contracts whose `defined_in` matches a file the item lists; `consumes` candidates the contracts its related items (confirmed neighbours, and the open candidates `related` lists) change or consume; a contract it already declares on that side is left out. Ends `confirm with: ledger link <item> --changes a,b --consumes c` (or `(no contract candidates)`). `new --suggest-contracts` prints the same after its write | 1 unknown · 3 ambiguous or archived |
 | `note <item> <text> [--kind log\|ruling\|owed]` | the one home for item state: `- <date> <text>` under `log_heading`, `- <date> RULING: <text>` under `## Rulings`, or the `owed` field; nothing else in the file changes, nothing is staged; a hosted item goes through its adapter | 1 unknown · 3 several or a blank text · 2 adapter failing |
 | `view <ledger\|all> [--md] [--html] [--out <dir>] [--open] [--refresh]` | render the views from the working tree (uncommitted items included) | 2 `--refresh` failing |
 | `validate (--staged \| --all \| --plan <plan> [--strict] \| --pushed <a>..<b>) [--registry]`, or `validate --registry` alone | *Validation* | 1 a blocking finding |
@@ -217,7 +217,7 @@ Executables named in config `adapters.pr`, `adapters.contracts` and `items.adapt
 
 | Adapter | Contract |
 |---|---|
-| `contracts` | `list` → lines `{"id": "<kind>:<name>", "ledger": "<id>"\|null, "defined_in": [globs], "title"?: string\|null}`; `resolve <id>` → exit 0 / 1. A contract both the registry and the adapter declare is one contract: the registry's `ledger`, `defined_in` and `title` win. Needed by `show`, `related`, `recheck`, `sweep`, `link`, `view`, `publish` |
+| `contracts` | `list` → lines `{"id": "<kind>:<name>", "ledger": "<id>"\|null, "defined_in": [globs], "title"?: string\|null}`; `resolve <id>` → exit 0 / 1. A contract both the registry and the adapter declare is one contract: the registry's `ledger`, `defined_in` and `title` win. Needed by `show`, `related`, `recheck`, `suggest`, `sweep`, `link`, `view`, `publish` |
 | `pr` | `list` → lines `{"number", "head", "state": "open"\|"merged"\|"closed", "url"}`, optional `"cross"` (true: the head is a fork's branch, never resolved through a same-named branch of `keys.remote`) and `"head_oid"` (a merged PR is walked from it when the clone has it, never from its branch; absent: a merged PR adds nothing beyond the base's own claims). Reference: `doc-superpowers:ledger-pr-gh` — `gh pr list` for every open PR (it exits 2 rather than truncate at its limit of 1,000) and the 500 newest merged ones, adding `"merge_commit"` |
 | `items` | `list [--since <ts>]` → lines `{"ref": "<no whitespace>", "url": "<non-empty>", "status": "…", "fields": {…}}`, optional `"title"`, `"body_excerpt"`, `"updated"`, `"closed"` (strings or null; ISO 8601 times), `"labels"`, `"fm_errors"` (string lists); `get <ref>` → one `{"ref", "url", "title", "body", "created", "fields", "labels", "status"}` (`init --import`; exit 3 means "no get"); `write <ref> <field> <value>`; `note <ref> <text>`; `create --title <t> --body-file <f>` → `{"ref", "url"}`. Reference: `doc-superpowers:ledger-items-gh` |
 
@@ -238,7 +238,7 @@ Executables named in config `adapters.pr`, `adapters.contracts` and `items.adapt
   - **The finest registered contract**: `field:order.total` over `endpoint:orders` when the registry (or the contracts adapter) has both. A coarse contract makes everything that touches the area a sibling, and the notices noisy.
   - **No contract fits** (none is registered for it, or the dependency is on another item, not on a surface): `relates depends-on:<key>` — or `root-cause:<key>`, `sibling:<key>` — rather than a contract stretched to fit.
   - **Co-changers are siblings.** Two items that both change one contract are siblings: neither is downstream of the other, so `recheck` and the re-check markers never surface one when the other lands. When B must be re-verified after A lands, B consumes the contract too (or `relates depends-on:A`).
-  - **Nothing to declare**: frontmatter `relations: none` (with `validate.require_relations: "new"`, the opt-out the check reads), or a ruling that says why — `ledger note <item> "…" --kind ruling`.
+  - **Nothing to declare**: `ledger link <item> --relations none` writes `relations: none` (with `validate.require_relations: "new"`, the opt-out the check reads), and a ruling can say why — `ledger note <item> "…" --kind ruling`.
 - **Planning sweep.** `sweep --plan <plan>` reads the plan's backticked existing files, the contract ids and keys in its text and its own Related work rows, and prints the `## Related work` table for the author to mark `include` or `exclude: <reason>`. `validate --plan <plan>` checks every row carries a mark (advisory; `--strict` blocks). SKILL.md's `spec-inject --phase=plan` pastes it into a plan (`references/spec-lifecycle-actions.md`).
 
 ## In-flight work and notices (opt-in: `inflight.enabled`)
@@ -323,7 +323,7 @@ SKILL.md's `init` action runs it as its *Ledger (opt-in)* step; it also runs sta
    - The registry: `--registry <file>`, else `docs/ledger/ledgers.json`, else a proposal (one ledger per top-level code directory, the largest split per second-level directory when it holds over 40 % of the code; docs, CI, scripts and tests as `platform`). Its `validate --registry` findings are in the report.
    - Each item gets a suggested ledger — its `ledger` value when registered, then a hand-written ledger row, then the plurality owner of its paths, then a `ledger:<id>` label, else `unassigned` — never by keyword. The decisions file pre-fills the suggestion for terminal items and leaves open items' decision empty; a re-run keeps decisions already made.
 2. **Review**, in two parts on a repository without a registry: the host's owner edits `docs/ledger/ledgers.proposed.json` (ids, titles, kinds, paths, contracts; the report's findings), then the second pass, `init --report <file> --registry docs/ledger/ledgers.proposed.json`, writes `<file>.decisions.tsv`, whose decision column the owner fills. The decisions header records the registry and its sha256, and `--accept` installs that file as `ledgers.json` (or write `ledgers.json` by hand and run the report against it). With a registry already in place, the first pass writes the decisions file and only the second part applies. Nothing is assigned the owner did not decide.
-3. **`init --accept <decisions.tsv> [--dry-run]`** checks every decided row first (any failure: exit 1, one finding per row, nothing written), then writes `config.json` when absent, the registry, the keys (one counter commit, per ledger in item-date order; offline: provisional), the item fields (`ledger`; a mechanical `summary` when missing; `key`), stubs (`docs/issues/<today>-<slug>.md`) for the open rows of hand-written ledgers that link no item — each relative link re-expressed from the stub's directory, and config `init.stub_defaults`' fields added where the stub has none <!-- T3: verify against code --> — and `legacy.json` entries for every row (a row `legacy.json` already holds is left alone), then renders the views into the cache and prints the paths to review and commit. A second run changes nothing. `--dry-run` prints the plan only. It never writes through a symbolic link: a `legacy.json` (config `legacy`) that is a link, when the run has legacy entries to write, is a finding before anything is written (exit 1, no counter allocated, the link intact) — point `legacy` at the file it points to, or replace the link with that file; any other target that is a link exits 2 rather than be replaced by a regular file.
+3. **`init --accept <decisions.tsv> [--dry-run]`** checks every decided row first (any failure: exit 1, one finding per row, nothing written), then writes `config.json` when absent, the registry, the keys (one counter commit, per ledger in item-date order; offline: provisional), the item fields (`ledger`; a mechanical `summary` when missing; `key`), stubs (`docs/issues/<today>-<slug>.md`) for the open rows of hand-written ledgers that link no item — each relative link re-expressed from the stub's directory, and config `init.stub_defaults`' fields added where the stub has none (hosted stubs: one adapter write per field) — and `legacy.json` entries for every row (a row `legacy.json` already holds is left alone), then renders the views into the cache and prints the paths to review and commit. A second run changes nothing. `--dry-run` prints the plan only. It never writes through a symbolic link: a `legacy.json` (config `legacy`) that is a link, when the run has legacy entries to write, is a finding before anything is written (exit 1, no counter allocated, the link intact) — point `legacy` at the file it points to, or replace the link with that file; any other target that is a link exits 2 rather than be replaced by a regular file.
 
 **`init --import`** turns hosted items into `docs/issues/<created>-<slug>.md` files once (each linked back with a note; nothing closed), then sets `items.adapter` to `null`, for a host that chooses files as the source of truth.
 
@@ -349,12 +349,12 @@ The payloads a wrapper reads most:
 | `ls` | `items: [{key, path, ledger, severity, status, class, derived, display, cluster, date, summary, archived}]`, `pr_data` |
 | `find <words>…` | `matches`, `items: [{score, key, path, ledger, severity, derived, display, date, summary}]` |
 | `related <item>` | `item: {key, path, ledger, severity, display, summary}`, `depth`, `neighbours: [{kind: upstream\|downstream\|sibling, key, path, via, depth, through, display, summary}]`, `candidates: [{key, path, reasons, display, summary}]` |
-| `suggest <item>` | `item: {key, path, …}`, `candidates: [{field: "changes"\|"consumes", value: "<contract id>", reasons: [...]}]` — proposals only, nothing written <!-- T3: verify against code --> |
+| `suggest <item>` | `item: {key, path, ledger, severity, display, summary}`, `declared: {changes, consumes}`, `candidates: [{field: "changes"\|"consumes", contract, reasons, sources}]` — `reasons[i]` is the text of `sources[i]`, a source `{kind: "file", file}` or `{kind: "upstream"\|"downstream"\|"sibling"\|"candidate", key, path, side, why}`; exit 0 with candidates (proposals, not findings); unknown (exit 1): `item: null`, `ref` |
 | `recheck <item>` | `item`, `dependents: [{key, path, via, display, summary, actions}]` |
 | `sweep …` | `rows: [{key, path, confirmed, why}]`, `table` (the markdown) |
-| `new` | `path`, `ledger`, `key` (`null` for `unassigned`), `provisional` (`true`: an offline `<ledger>-~<hex>` key that `finalize` replaces) |
+| `new` | `path`, `ledger`, `key` (`null` for `unassigned`), `provisional` (`true`: an offline `<ledger>-~<hex>` key that `finalize` replaces); with `--suggest-contracts`, `candidates` in `suggest`'s shape |
 | `assign <item> <ledger>` | `path`, `ledger`, `key`, `previous`, `provisional` |
-| `link <item> …` | `path`, `key`, `added: [{field, value}]`, `present: [{field, value}]` (already there); a bad value (exit 1, nothing written): `problems: ["…"]` |
+| `link <item> …` | `path`, `key`, `added: [{field, value}]`, `present: [{field, value}]` (already there), `removed: [{field: "relations", value: "none"}]` only when a link dropped the opt-out; a bad value (exit 1, nothing written): `problems: ["…"]` |
 | `note <item> <text>` | `ref`, `path`, `kind`, `line` |
 | `validate …` | `findings: [{class, severity: "block"\|"advisory", path, key, detail}]` |
 | `notices` | `inflight_enabled`, `notices: [{id, urgency, other: {branch, host, pr}, overlap, what_changed, action}]`, `pr_data` |
@@ -373,10 +373,10 @@ What a wrapper does on each exit:
 
 Relations are declared by people, not inferred: the ledger proposes, the caller decides, `link` writes.
 
-1. **Candidates.** `suggest <item>` proposes `changes` / `consumes` contracts from the item's `related` neighbours and the files it lists <!-- T3: verify against code -->; `related <item>` adds the candidate items (shared files, a shared spec, a `defined_in` overlap) a `relates` may name.
+1. **Candidates.** `suggest <item>` (or `new … --suggest-contracts`, when filing) proposes `changes` contracts from the files the item lists and `consumes` contracts from its related items, each with its reasons; `related <item>` adds the candidate items (shared files, a shared spec, a `defined_in` overlap) a `relates` may name.
 2. **Confirm.** The wrapper shows them and asks; the user picks, adds or rejects, by the rules in *Relations* → **Declaring relations** (that section is the one statement of what to declare — a wrapper points to it rather than restate it).
-3. **Write.** One `link` call with comma lists: `link <item> --consumes a,b --changes a --relates depends-on:<key>` <!-- T3: verify against code -->. A value already there is reported in `present` and left alone; any bad value writes nothing (exit 1).
-4. **Nothing to declare.** Write `relations: none` into the item's frontmatter, or record why with `note <item> "…" --kind ruling`.
+3. **Write.** One `link` call with comma lists: `link <item> --consumes a,b --changes a --relates depends-on:<key>`. A value already there is reported in `present` and left alone; any bad value writes nothing (exit 1).
+4. **Nothing to declare.** `link <item> --relations none` — the sanctioned writer of the opt-out (refused when the item already names a relation; a later `link` that writes one removes it) — and, when the reason matters, `note <item> "…" --kind ruling`.
 
 With `validate.require_relations: "new"`, the pre-commit leg (`validate --staged`) refuses a commit that adds an open item with none of `changes`, `consumes`, `relates` and no `relations: none`, so a wrapper that skips step 3 or 4 is caught at commit (*Validation*).
 
@@ -386,20 +386,19 @@ With `validate.require_relations: "new"`, the pre-commit leg (`validate --staged
 # The wrapper wrote docs/issues/2026-10-17-refund-rounding.md (title, body, status and the
 # host's own fields), after asking the user. Now the ledger's part:
 out=$("$DOC_TOOLS" ledger new --ledger checkout --summary "Totals round twice on refunds" \
-        --file docs/issues/2026-10-17-refund-rounding.md --format json)
+        --file docs/issues/2026-10-17-refund-rounding.md --suggest-contracts --format json)
 case $? in
   0) ;;
   2) echo "ledger: could not allocate: $(jq -r .error <<<"$out")"; exit 2 ;;
   *) echo "ledger new: $out"; exit 1 ;;
 esac
-key=$(jq -r .key <<<"$out")              # provisional (offline) keys are fine: finalize replaces them
-"$DOC_TOOLS" ledger suggest "$key" --format json > /tmp/cand.json   # exit 2: say so, ask anyway
-# …show .candidates[] to the user; they confirm field:order.total (consumes and changes) and
+key=$(jq -r '.key // .path' <<<"$out")   # provisional (offline) keys are fine: finalize replaces them
+# …show .candidates[] ({field, contract, reasons}) to the user; they confirm field:order.total (consumes and changes) and
 #    field:refund.amount (consumes)…
 "$DOC_TOOLS" ledger link "$key" --consumes field:order.total,field:refund.amount \
   --changes field:order.total --format json
+# …or, nothing to declare: "$DOC_TOOLS" ledger link "$key" --relations none
 ```
-<!-- T3: verify against code -->
 
 ### Example: a backfill script
 
@@ -421,7 +420,7 @@ done < reviewed.tsv
 exit "$rc"
 ```
 
-To build the list, `ls --open --format json` gives the open items and `show <item> --format json` their `changes`, `consumes` and `relates`; `suggest` proposes the candidates for the reviewer <!-- T3: verify against code -->. Items with nothing to declare get `relations: none` by hand.
+To build the list, `ls --open --format json` gives the open items and `show <item> --format json` their `changes`, `consumes` and `relates`; `suggest <item> --format json` proposes the candidates for the reviewer. A row `<item>\t--relations\tnone` records an item with nothing to declare.
 
 ### What a wrapper owns
 
