@@ -223,7 +223,7 @@ def lg_v_none: type == "string" and (ascii_downcase | gsub("^[[:space:]]+|[[:spa
 def lg_v_norel_detail:
   "a new open item names no relation (config validate.require_relations \"new\"): "
   + "declare what it changes, consumes or relates to (ledger link <item> --changes C | --consumes C | --relates kind:key), "
-  + "or opt out with relations: none";
+  + "or opt out with relations: none (ledger link <item> --relations none)";
 # A parse record → the fields the checks read.
 def lg_v_rinfo($F; $CT; $EX):
   (.fm // {}) as $fm

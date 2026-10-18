@@ -1127,8 +1127,16 @@ _lg_k_summary_check() {
   [ "$n" -le 140 ] || _lg_usage "--summary is $n characters: at most 140"
 }
 
-# _lg_k_emit_lines <lines-file> <payload-json-file>: the run's output.
+# _lg_k_emit_lines <lines-file> <payload-json-file>: the run's output —
+# for ledger new --suggest-contracts, with the item's contract candidates
+# (relations.sh _lg_suggest_into; the payload's path is the item).
+# shellcheck disable=SC2154  # _OPT_* are set by _parse_args
 _lg_k_emit_lines() {
+  local p
+  if [ "$_LG_VERB" = new ] && [ "${_OPT_suggest_contracts:-}" = 1 ]; then
+    p=$(jq -r '.path' "$2") || _lg_die "jq failed (payload path)"
+    _lg_suggest_into "$p" "$1" "$2"
+  fi
   if [ "$_LG_FORMAT" = json ]; then _lg_emit "$_LG_VERB" 0 "$2"; fi
   _lg_out_file "$1"
   _lg_emit "$_LG_VERB" 0
@@ -1143,6 +1151,9 @@ cmd_ledger_new() {
   S=$_OPT_summary
   F=$_OPT_file
   fin=$_OPT_finalize
+  # --suggest-contracts reads the contracts: a failing contracts adapter
+  # stops the run (2) before anything is written.
+  if [ "$_OPT_suggest_contracts" = 1 ]; then _LG_IX_NEED_CONTRACTS=1; fi
   _lg_k_cfg
   if _opt_seen summary; then _lg_k_summary_check "$S"; fi
   if [ -n "$L" ]; then _lg_k_check_ledger "$L" 1; fi

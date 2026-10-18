@@ -27,6 +27,7 @@
   "adapters": { "pr": null, "contracts": null },
   "state_watch": { "paths": [], "patterns": [] },
   "validate": { "require_relations": null },
+  "init": { "stub_defaults": {} },
   "legacy": "docs/ledger/legacy.json",
   "legacy_ids": [],
   "legacy_ledgers": {}

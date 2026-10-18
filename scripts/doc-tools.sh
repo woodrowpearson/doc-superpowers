@@ -2501,8 +2501,8 @@ ledger state-watch|cmd_ledger_state_watch|repo|hook
   Otherwise nothing. Always exits 0, printing nothing else (as notices
   --hook); DOC_SUPERPOWERS_LEDGER_SKIP=1 or DOC_SUPERPOWERS_SKIP=1:
   silent.
-ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize format=
-  --ledger <id|unassigned> --summary <text> [--file <issue>] [--finalize] [--format text|json]
+ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize suggest-contracts format=
+  --ledger <id|unassigned> --summary <text> [--file <issue>] [--finalize] [--suggest-contracts] [--format text|json]
   Allocate an item key and write key, ledger and summary (at most 140
   characters, one line) into an issue: <issue> defaults to the one staged
   or untracked item file without a key (none or several: exit 3).
@@ -2514,20 +2514,51 @@ ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize format=
   repeat, and past the keys given before it in one batch (by path).
   --finalize allocates for real or fails (exit 2) — and, on an
   issue that has a provisional key, finalizes that one key (--ledger and
-  --summary optional). Prints "<key>  <path>".
+  --summary optional). Prints "<key>  <path>". --suggest-contracts then
+  prints the item's contract candidates as ledger suggest does (after the
+  write; JSON: "candidates", suggest's shape) and writes no relation.
 ledger assign|cmd_ledger_assign|repo|format=
   <item> <ledger> [--format text|json]
   Move an item to a ledger: a new key there; the previous key is appended
   to its aliases. <item> takes what show takes. Prints
   "<key>  <path>  (was <old key>)".
-ledger link|cmd_ledger_link|repo|consumes= changes= relates= format=
-  <item> (--consumes <contract> | --changes <contract> | --relates <kind>:<item>) [--format text|json]
+ledger suggest|cmd_ledger_suggest|repo|format=
+  <item> [--format text|json]
+  Propose contracts for an item to declare; writes nothing. changes
+  candidates: the contracts whose defined_in matches a file the item
+  lists (its paths field); consumes candidates: the contracts its related
+  items — confirmed neighbours (upstream, downstream, siblings) and the
+  open candidates related shows — change or consume. Contracts the item
+  already declares on that side are left out; only registry or contracts
+  adapter contracts are offered. Text: the item's line, then "<field>
+  <contract>  <reasons>" per candidate (changes first, then by the
+  number of reasons, then contract), then "confirm with: ledger link
+  <item> --changes a,b --consumes c" — or "(no contract candidates)".
+  JSON: {"item": {key, path, ledger, severity, display, summary},
+  "declared": {"changes": [...], "consumes": [...]}, "candidates":
+  [{"field": "changes"|"consumes", "contract", "reasons": [text...],
+  "sources": [{"kind": "file", "file"} | {"kind": "upstream"|
+  "downstream"|"sibling"|"candidate", "key", "path", "side":
+  "changes"|"consumes", "why"}]}]} (one source per reason, in the same
+  order; "pr_data"/"items_data" as show adds them). <item> takes what
+  show takes. Unknown: exit 1; several: exit 3. The caller decides, then
+  writes with ledger link.
+ledger link|cmd_ledger_link|repo|consumes= changes= relates= relations= format=
+  <item> (--consumes <contract>[,…] | --changes <contract>[,…] | --relates <kind>:<item>[,…] | --relations none) [--format text|json]
   Write confirmed relations into an item's frontmatter lists (consumes,
-  changes, relates; any of the three at once, in one write). A contract
-  must exist (registry or contracts adapter); a relates kind is
+  changes, relates; any of the three at once, in one write). Each flag
+  takes one value or a comma list (blanks around the commas ignored; a
+  value that is itself valid is never split; a repeat counts once). A
+  contract must exist (registry or contracts adapter); a relates kind is
   root-cause, depends-on or sibling and names another item that has a
-  key (written as its key). Any bad value: exit 1, nothing written. A
-  value already there is left as it is.
+  key (written as its key). Any bad value — an empty one in a list too:
+  exit 1, nothing written. A value already there is left as it is.
+  --relations none writes "relations: none", the opt-out config
+  validate.require_relations reads (alone: refused, exit 1, beside
+  another flag or when the item already names a relation; again: already
+  there). A link that writes a relation drops that marker in the same
+  write ("<item>  relations: none  (removed)"; JSON "removed"). One index
+  read per run, however many values.
 ledger note|cmd_ledger_note|repo|kind= format=
   <item> <text> [--kind log|ruling|owed] [--format text|json]
   The one deterministic home for an item's state. <item> takes what show
@@ -2718,7 +2749,11 @@ ledger init|cmd_ledger_init|repo|dry-run registry= report= accept= import source
   relative link that resolves from the ledger file re-expressed from the
   stub's directory — ?query and #fragment kept; URLs, #anchors, absolute
   and dead links as they were — or through the items
-  adapter's create when items.globs is []), legacy.json entries for every
+  adapter's create when items.globs is []; each stub also gets config
+  init.stub_defaults, an object of field → string, number or boolean
+  written after its own status, key, ledger and summary, which win —
+  "{today}" in a string is today's date, the one token; any other value,
+  token or field name exits 2 before anything is written), legacy.json entries for every
   row (<legacy-id>#<row> → key, item or archived; a row legacy.json
   already holds is left alone — no stub, no finding: pre-seeded entries
   are authoritative; its key is read as show reads one, so x#7 is the
@@ -2954,8 +2989,8 @@ Spec claims (claims validate, run, promote, render, gate, attest, rulings):
   built by a reviewed status edit), or retire it, first).
 
 Work ledger (ledger show, ls, find, related, sweep, recheck, inflight,
-notices, state-watch, new, assign, link, note, view, validate, publish,
-finalize, init):
+notices, state-watch, new, assign, suggest, link, note, view, validate,
+publish, finalize, init):
   Opt-in: docs/ledger/config.json turns it on (a key it omits takes its
   default; {} is a complete config). Without it every ledger verb except
   init prints "ledger: not enabled (no docs/ledger/config.json)" — with
@@ -2977,7 +3012,7 @@ finalize, init):
   doc-superpowers:<name> — scripts/adapters/<name>.sh beside this
   doc-tools.sh; one that fails or prints output that breaks its contract
   exits 2 for every verb that needs it (contracts: show, related, recheck,
-  sweep, link, view, publish). The pr adapter's list is cached for
+  sweep, suggest, link, view, publish). The pr adapter's list is cached for
   cache.remote_ttl_minutes; when it fails, the verbs serve the last copy
   (or none) with one stderr line and "pr_data" in --format json, and only
   --refresh and publish exit 2. DOC_TOOLS_LEDGER_OFFLINE=1 never runs it
