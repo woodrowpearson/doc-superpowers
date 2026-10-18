@@ -1,6 +1,6 @@
 # Work Ledger — `doc-tools.sh ledger`
 
-**Read by** SKILL.md — **REQUIRED** when `docs/ledger/config.json` exists (the `init` ledger step, `spec-inject --phase=plan`, the `hooks` ledger sets), and by anyone wiring the ledger into a host. `$DOC_TOOLS` is the `doc-tools.sh` SKILL.md's *Detect Bundled Tooling* resolved. `doc-tools.sh help ledger <verb>` (or `ledger <verb> --help`) prints each verb's own usage; this page is the reference those lines point to. The design record is `docs/superpowers/specs/2026-10-12-work-ledger-design.md`.
+**Read by** SKILL.md — **REQUIRED** when `docs/ledger/config.json` exists (the `init` ledger step, `spec-inject --phase=plan`, the `hooks` ledger sets), by anyone wiring the ledger into a host, and by authors of skills and scripts built on it (*Building on the ledger*). `$DOC_TOOLS` is the `doc-tools.sh` SKILL.md's *Detect Bundled Tooling* resolved. `doc-tools.sh help ledger <verb>` (or `ledger <verb> --help`) prints each verb's own usage; this page is the reference those lines point to. The design record is `docs/superpowers/specs/2026-10-12-work-ledger-design.md`.
 
 The work ledger keeps work items as issues — markdown files (default `docs/issues/*.md`) or a hosted tracker's issues reached through an adapter — and derives everything else from them: a stable key per item, ledger pages and one HTML file generated from the items, related work through named *contracts*, and the work in flight on other branches and machines. **The issue is the only source of truth**: no row, view or cache is ever edited by hand, so nothing can disagree with an item.
 
@@ -87,7 +87,9 @@ Deep-merged over the defaults: an object merges key by key; an array, a scalar o
 | `views.html` | `true` | `publish` renders `ledger.html` too |
 | `cache.remote_ttl_minutes` | `10` | how long network-derived data is reused |
 | `adapters.pr` / `adapters.contracts` | `null` / `null` | the PR and contracts adapters |
-| `state_watch.paths` / `.patterns` | `[]` / `[]` | the state-watch hook (*Hooks*) |
+| `state_watch.paths` / `.patterns` | `[]` / `[]` | the state-watch hook (*Hooks*). A write fires it only when it holds one of `patterns`, so `paths` set with no `patterns` (absent, `null`, `[]` or only empty strings) never fires: `validate --all` reports it (class `config`, advisory) and `hooks status` warns where state-watch is installed |
+| `validate.require_relations` | `null` | `null` (off) or `"new"`: a new open item must declare its relations — `changes`, `consumes` or `relates` — or opt out with `relations: none` (*Validation*). Any other value, or a `validate` that is not an object, exits 2 in `validate --staged` / `--all` (the modes that read it) |
+| `init.stub_defaults` | `{}` | frontmatter fields `init --accept` writes into each stub it creates, `{"<field>": "<value>"}`: literal scalars, and the token `{today}` for the run's date; a field the stub already has wins (*Bootstrapping*) <!-- T3: verify against code --> |
 | `legacy` | `"docs/ledger/legacy.json"` | the legacy map |
 | `legacy_ids` | `[]` | retired ledger ids: advisory on a modified item, blocking on an added one |
 | `legacy_ledgers` | `{}` | `{"<legacy id>": "<file>"}`: the hand-written ledgers `init` reads (when it names any, no other file is read for tables) |
@@ -138,6 +140,7 @@ Item frontmatter, read by awk: flat `key: value` scalars (plain, double- or sing
 | `severity` | — | sorted by `severity_order` |
 | `changes` / `consumes` | — | contract ids this item's fix changes / its premise depends on |
 | `relates` | — | `root-cause:<key>`, `depends-on:<key>`, `sibling:<key>` |
+| `relations` | — | `none` (any case) records that the item has no relation to declare: the opt-out `validate.require_relations` reads. Not a `fields` mapping: the frontmatter key is always `relations`, and any other value is no opt-out (and no finding) |
 | `superseded_by` | iff superseded (on a closed-class item) | the replacing item's key |
 | `owed` | — | what remains after the code merged (`deploy`, `device pass`) |
 | `aliases` | tool-written | prior keys after a re-home |
@@ -178,16 +181,17 @@ Keys are `<legacy id>#<row>`; the legacy id is `legacy_ledgers`' name for the fi
 | `sweep --plan <plan> \| --files <path>… \| --contracts <id>… \| --keys <item>…` | the planning sweep: a `## Related work` table, `\| Item \| Why related \| Mark \|`, confirmed relations first, then candidates, the Mark column empty | 3 unknown `--contracts` / `--keys` |
 | `recheck <item>` | the open items to re-check when `<item>` resolves or its contracts change, each `re-verify \| close as superseded by <item> \| reshape` | 1 unknown |
 | `inflight [--branch <b>[@<host>]] [--fetch] [--push]` | the branches in flight, one line each (*In-flight work*); `--push` publishes this branch's in-flight ref | 1 unknown `--branch` · 2 offline `--fetch`, a refused push · 1 `pre_push_check` refusing |
-| `notices [--branch …] [--gate] [--fetch] \| --hook` | stop / heads-up / info notices for a branch (*In-flight work*) | 1 with `--gate` and an unacked `stop` · 2 a base or branch that does not resolve, offline `--fetch` |
+| `notices [--branch …] [--gate] [--fetch] \| --hook` | stop / heads-up / info notices for a branch (*In-flight work*) | 1 with `--gate` and an unacked `stop` · 2 a base or branch that does not resolve, offline `--fetch`, and with `--gate` an in-flight fetch that failed ("could not verify") |
 | `state-watch --hook` | the PostToolUse hook mode (*Hooks*) | always 0 |
 | `new --ledger <id\|unassigned> --summary <text> [--file <issue>] [--finalize]` | allocate a key and write `key`, `ledger`, `summary` into an issue (default: the one staged or untracked item file without a key); `unassigned` writes no key; prints `<key>  <path>` | 3 no single issue · 2 allocation failed |
 | `assign <item> <ledger>` | a new key in that ledger; the old key is appended to `aliases` | 1 unknown |
-| `link <item> --consumes <c> \| --changes <c> \| --relates <kind>:<item>` | write confirmed relations into the item's lists (any of the three at once; one write) | 1 a bad value, nothing written |
+| `link <item> --consumes <c>[,<c>…] \| --changes <c>[,<c>…] \| --relates <kind>:<item>[,…]` | write confirmed relations into the item's lists (any of the three at once, each a comma list; one write) <!-- T3: verify against code --> | 1 a bad value, nothing written |
+| `suggest <item>` | candidate `changes` / `consumes` contracts for an item, from its `related` neighbours and the files it lists, each with its reason; prints them for the caller to confirm with `link` — never writes <!-- T3: verify against code --> | 1 unknown · 3 ambiguous |
 | `note <item> <text> [--kind log\|ruling\|owed]` | the one home for item state: `- <date> <text>` under `log_heading`, `- <date> RULING: <text>` under `## Rulings`, or the `owed` field; nothing else in the file changes, nothing is staged; a hosted item goes through its adapter | 1 unknown · 3 several or a blank text · 2 adapter failing |
 | `view <ledger\|all> [--md] [--html] [--out <dir>] [--open] [--refresh]` | render the views from the working tree (uncommitted items included) | 2 `--refresh` failing |
 | `validate (--staged \| --all \| --plan <plan> [--strict] \| --pushed <a>..<b>) [--registry]`, or `validate --registry` alone | *Validation* | 1 a blocking finding |
 | `publish [--dry-run]` | render from the remote base and push one commit to `views.branch` (*Views*) | 2 the branch moved, an adapter failing, offline |
-| `finalize [--all]` | replace provisional keys (*Keys*) | 2 remote unreachable (`cas`) |
+| `finalize [--all]` | replace provisional keys (*Keys*) | 2 remote unreachable (`cas`); the remote's base has commits this one lacks (`merge`) |
 | `init --report <file> [--registry <file>] [--sources files,github] \| --accept <decisions.tsv> [--dry-run] \| --import` | *Bootstrapping* | 1 a decision row failing · 2 could not run · 3 usage |
 
 ## Keys
@@ -195,8 +199,10 @@ Keys are `<legacy id>#<row>`; the legacy id is `legacy_ledgers`' name for the fi
 Keys are never renumbered or reused. A re-homed item gets a new key and keeps the old one in `aliases`; keys and aliases are globally unique (`validate`).
 
 - **`keys.mode: "cas"`** (the default, for teams that push to one remote). The counter ref on `keys.remote` is a commit whose tree holds one blob, `counters.json`, `{"<ledger>": <next number>}`. Allocation fetches it, writes a commit with the new numbers (and a random nonce) on top, and pushes it with `--force-with-lease=<ref>:<fetched oid>` and `--no-verify`: the remote's ref update is the atomic step, so two allocators never share a number. The loser retries (at most 8 times, 0.1–0.6 s jitter apart, re-reading each time), then exits 2 — never a silent provisional key, since the remote was reachable. The first allocation creates the ref, seeding each ledger after the highest key or alias already on the base and, for `new` and `init --accept`, in the working tree (the run's index), so a key that exists only on this branch or in an uncommitted file is never issued again. A batch (`init --accept`) is one counter commit.
-- **Offline: provisional keys.** When the remote cannot be reached (a transport failure) or refuses the push for permission (git's words for a 403, `Forbidden` or `Permission denied`), `new` and `init --accept` give `<ledger>-~<hex>` — the first 4 hex digits of sha256 of the item path, lengthened one digit at a time (8 at most) while the key would repeat a key, an alias, a `finalized.json` key or a key given earlier in the same batch (by path) — with a warning. In `cas` mode the pre-push leg refuses to push a provisional key the push adds (for a new branch: one it adds since config `base`, so a provisional key already on the base never blocks it; with no base to compare, every one at the tip); `finalize` (or `new --finalize` on that issue) replaces it once the remote is reachable, and `finalize --all` replaces one the base carries too (the refusal names it). `new --finalize` and `finalize` never fall back: unreachable is exit 2.
+- **Offline: provisional keys.** When the remote cannot be reached (a transport failure) or refuses the push for permission (git's words for a 403, `Forbidden` — capitalised, HTTP's reason phrase — or `Permission denied`; a hook's lowercase "forbidden by policy" refuses the content, and is exit 2, not a provisional key), `new` and `init --accept` give `<ledger>-~<hex>` — the first 4 hex digits of sha256 of the item path, lengthened one digit at a time (8 at most) while the key would repeat a key, an alias, a `finalized.json` key or a key given earlier in the same batch (by path) — with a warning. In `cas` mode the pre-push leg refuses to push a provisional key the branch adds — only the keys it adds since its merge-base with config `base`, for a new branch and for an existing one alike, so a provisional key that came from the base (a new branch forked after it landed, or an existing branch that merged the base since) never blocks it; with no base to compare, every one at a new branch's tip, or every one the range adds; `finalize` (or `new --finalize` on that issue) replaces it once the remote is reachable, and `finalize --all` replaces one the base carries too (the refusal names it). `new --finalize` and `finalize` never fall back: unreachable is exit 2.
 - **`keys.mode: "merge"`** (fork-and-PR repositories, whose contributors cannot push to the shared remote). Allocation never touches the network: every new item carries a provisional key, provisional keys may reach the base, and a maintainer runs `finalize` on the base, which numbers them after the highest key in the tree and commits the rewrite in one commit, `ledger: finalize N keys`.
+  - **Two maintainers.** Before it writes, `finalize` (and `new --finalize`) fetches the base's branch from its remote — config `base`'s remote and branch, or a local branch's upstream, else `keys.remote`'s branch of the same name — into a private ref, and refuses (exit 2, nothing written) when HEAD lacks its tip: another maintainer's finalize, or merges, landed there. **Pull, then run `finalize` again.** HEAD may be ahead of the remote (merges not yet pushed); it must not be behind. When the remote has no such branch, or `base` is a commit or a tag, there is nothing to compare; when the remote cannot be reached, or with `DOC_TOOLS_LEDGER_OFFLINE=1`, a warning, and `finalize` goes on unchecked.
+  - Two finalizers that pass the check within the same moments still race at the push: the loser's push is rejected (non-fast-forward). Pull: the merge stops on `finalized.json` (and pre-commit `validate --staged` blocks a duplicate key), so drop your own finalize commit for the remote's, then run `finalize` again on the result. **Never rebase a finalize commit**: a rebase carries a duplicate key through without a conflict (`validate --all` reports it).
 - **`finalize`** rewrites each provisional key in the item's `key` and in every `relates`, `superseded_by` and `aliases` that names it, and adds one line per key to `finalized.json`; nothing else. In `cas` mode it finalizes the provisional keys this branch added (`--all`: every one) in the working tree, committing nothing.
 
 **claude.ai/code sessions.** Its git proxy refuses (HTTP 403) every push under `refs/doc-superpowers/…` — create, force and delete — while under `refs/heads/…` it allows a create, a compare-and-swap, a stale-lease rejection and a force, but refuses deletes. Local hosts allow both. The default `keys.counter_ref` stays under `refs/doc-superpowers/`, so a cloud session cannot allocate: the counter push fails (a transport failure, or a refusal in a permission's words), and `new` gives a provisional key with a warning (`finalize` exits 2). `ledger finalize` on a local clone replaces it; one that reaches the base through a cloud session's PR never blocks another branch's push, and `finalize --all` replaces it there. A host whose sessions run mostly in claude.ai/code has two alternatives:
@@ -226,6 +232,13 @@ Executables named in config `adapters.pr`, `adapters.contracts` and `items.adapt
 - Through contracts: item A is **upstream** of B when A's `changes` meet B's `consumes`; **siblings** share a contract on the same side. Direct: `relates`.
 - **Candidates** are never asserted: open items sharing two or more listed files, a governing spec, or a file a named contract is defined in. `related` and `sweep` list them with the reason; `link` writes a confirmed one into the item.
 - **Re-check.** When an item reaches a terminal class on the base, or a base commit changes a contract an open item consumes, the downstream items read `re-check: <key> landed` (`recheck_after`) until a later commit on the base touches them. Computed; no state file.
+- **Declaring relations.** What an item declares decides what the ledger can tell its author later, so declare by these rules (`link` writes them; `suggest` and `related` propose candidates, never decide):
+  - **`consumes`: every contract the item's premise reads** — even one it also writes. A consumed contract is what makes an item downstream: `recheck`, and the `re-check: <key> landed` markers, reach it when another item changing that contract lands or a base commit changes it.
+  - **`changes`: every contract the fix moves**, derived fields included (a total recomputed from the line it changes is changed too).
+  - **The finest registered contract**: `field:order.total` over `endpoint:orders` when the registry (or the contracts adapter) has both. A coarse contract makes everything that touches the area a sibling, and the notices noisy.
+  - **No contract fits** (none is registered for it, or the dependency is on another item, not on a surface): `relates depends-on:<key>` — or `root-cause:<key>`, `sibling:<key>` — rather than a contract stretched to fit.
+  - **Co-changers are siblings.** Two items that both change one contract are siblings: neither is downstream of the other, so `recheck` and the re-check markers never surface one when the other lands. When B must be re-verified after A lands, B consumes the contract too (or `relates depends-on:A`).
+  - **Nothing to declare**: frontmatter `relations: none` (with `validate.require_relations: "new"`, the opt-out the check reads), or a ruling that says why — `ledger note <item> "…" --kind ruling`.
 - **Planning sweep.** `sweep --plan <plan>` reads the plan's backticked existing files, the contract ids and keys in its text and its own Related work rows, and prints the `## Related work` table for the author to mark `include` or `exclude: <reason>`. `validate --plan <plan>` checks every row carries a mark (advisory; `--strict` blocks). SKILL.md's `spec-inject --phase=plan` pastes it into a plan (`references/spec-lifecycle-actions.md`).
 
 ## In-flight work and notices (opt-in: `inflight.enabled`)
@@ -242,7 +255,7 @@ Scanned every run: local branches, every worktree's HEAD (a detached one as `(de
 | `heads-up` | another branch changes files this branch changes |
 | `info` | siblings of its claimed items are claimed elsewhere |
 
-One line each: `<urgency> <id> <other>[@<host>] <PR #n|no PR> <kind>:<values> — <what changed> → <action>`. The id is 12 hex of sha256(other, overlap, other's tip), with the other branch hashed as `<name>` on the shared remote and `<name>@<host>` otherwise, so every host computes one id and a notice fires again only when the other side moves (for the base: when the overlap's own state moves). **Ack** with a commit trailer `Ledger-Ack: <id> — <clause>` on the branch; there is no state file. `notices --gate` exits 1 on any unacked `stop`: the gate `spec-inject` injects at each chunk close.
+One line each: `<urgency> <id> <other>[@<host>] <PR #n|no PR> <kind>:<values> — <what changed> → <action>`. The id is 12 hex of sha256(other, overlap, other's tip), with the other branch hashed as `<name>` on the shared remote and `<name>@<host>` otherwise, so every host computes one id and a notice fires again only when the other side moves (for the base: when the overlap's own state moves). **Ack** with a commit trailer `Ledger-Ack: <id> — <clause>` on the branch; there is no state file. `notices --gate` exits 1 on any unacked `stop`: the gate `spec-inject` injects at each chunk close. A gate never passes on in-flight data it could not fetch: when the in-flight fetch failed (the refs here, or a stale copy, would decide) and no `stop` blocks anyway, `--gate` exits 2, `could not verify: <reason>` — `--fetch` retries now. A stop found on that data still exits 1. `DOC_TOOLS_LEDGER_OFFLINE=1` is a deliberate choice to decide on the refs here (exit 0, with a note); without `--gate`, a failed fetch is a note, and the hook mode always exits 0.
 
 **`trailers.since`** — a commit, `"adoption"` or `null` (every trailer counts). When set, the claim trailers (`claims`, `claims_by_path`, `claims_by_ref`) of every commit that does not descend from it — the commit itself, its ancestors, a branch forked before it, merged after it or still in flight — are ignored in every walk (the base's claims, the PR heads, the in-flight branches); `Contract-Change` and ack lines are unaffected. Use it when a host's commits carried a mapped trailer name before adoption. `"adoption"` is the **adoption commit**: the first commit on `base` to add `docs/ledger/config.json` (while there is none, no claim trailer counts). A `since` that names no commit here exits 2.
 
@@ -260,13 +273,18 @@ One line each: `<urgency> <id> <other>[@<host>] <PR #n|no PR> <kind>:<values> �
 |---|---|---|
 | on staged items only: a present key well formed and unique among keys and aliases · `ledger` registered and active, or `unassigned` · an added item carries `ledger` and `summary` · an item whose status moves into closed or won't fix has a resolution, and its `superseded_by` names an existing item with no cycle · `superseded_by` only on a closed item | blocking (on a modified item, a finding about what it already was at HEAD — and a `legacy_ids` or retired ledger — is advisory) | pre-commit, `validate --staged` |
 | the registry (schema, ids, statuses, kinds, contract ids, globs, overlap, unowned) | blocking when the registry is staged | `validate --staged`; `--registry` alone |
-| provisional keys a push adds | blocking in `cas`; passes in `merge` | pre-push, `validate --pushed <a>..<b>` |
+| an added open item naming no `changes`, `consumes` or `relates`, without `relations: none` (`no-relations`; only with `validate.require_relations: "new"`) | blocking | pre-commit, `validate --staged` |
+| provisional keys the branch adds since its merge-base with config `base` | blocking in `cas`; passes in `merge` | pre-push, `validate --pushed <a>..<b>` |
 | the same as `--staged` over every item, plus missing key / ledger / summary, weak summary, unassigned or contract-less open items, parse errors | advisories added | `validate --all` |
+| `no-relations` (with `validate.require_relations: "new"`) on an open file item new since adoption: its path is neither in the adoption commit's tree nor the new path of a rename from a file there (untracked files are new). With no adoption commit on the base yet, no item is new; a base that does not resolve, or an adoption commit beyond a shallow boundary, counts every one (fail-closed). Hosted items are not checked | advisory | `validate --all` |
+| `config`: `state_watch.paths` set while `state_watch.patterns` names nothing — the state-watch hook never fires | advisory | `validate --all` |
 | a missing resolution on a terminal item from before adoption ("terminal before adoption": the base has no adoption commit yet, or holds the item and no commit after adoption touched it — a merge counts with what it brings in; a pure rename does not touch the moved file) | advisory | `validate --all` |
 | sweep marks in a plan's Related work table | advisory (`--strict`: blocking) | `validate --plan` |
-| an unacked `stop` notice | blocking at chunk close | `notices --gate` |
+| an unacked `stop` notice; an in-flight fetch that failed ("could not verify", exit 2) | blocking at chunk close | `notices --gate` |
 
-Text output is one `<class> <path|key> <detail>` line per finding, ` (advisory)` after an advisory; exit 1 when any finding blocks.
+Text output is one `<class> <path|key> <detail>` line per finding, ` (advisory)` after an advisory; exit 1 when any finding blocks. With `--format json`, `{"findings": [{class, severity: "block"|"advisory", path, key, detail}]}`.
+
+`validate.require_relations: "new"` lets a host turn the rule on without turning its history red: `--staged` blocks only on items a commit adds, `--all` reports the new ones as advisories (as it reports a missing `ledger` or `summary`), and an item from before adoption is never reported. Items keep the `no-contract` advisory beside it.
 
 ## Hooks
 
@@ -274,24 +292,24 @@ Two opt-in installer sets, never part of `--all`; each refuses to install (exit 
 
 - **`hooks install --ledger`** — the git legs, as `# ledger-superpowers:begin` … `:end` blocks where git runs hooks:
   - pre-commit: `ledger validate --staged`; any non-zero exit — 1 or 2 — blocks the commit (unlike the git tier, whose failing check blocks only under `DOC_SUPERPOWERS_STRICT`).
-  - pre-push: `ledger validate --pushed <remote oid>..<local oid>` per pushed ref (from all zeros for a new branch, or a remote oid that is not here or not an ancestor: the keys the tip adds since config `base`); refuses a push that adds a provisional key in `cas` mode, and refuses when git's ref lines cannot be saved for the checks after it.
+  - pre-push: `ledger validate --pushed <remote oid>..<local oid>` per pushed ref (from all zeros for a new branch, or a remote oid that is not here or not an ancestor); refuses a push whose branch adds a provisional key in `cas` mode — only the keys it adds since its merge-base with config `base`, so a key an existing branch got by merging the base never blocks it — and refuses when git's ref lines cannot be saved for the checks after it.
   - post-commit: `ledger inflight --push` in the background, output to `<git common dir>/doc-superpowers/ledger/push.log`, never prompting (`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, ssh `BatchMode=yes`). It is the one leg with a network side effect: with `inflight.enabled`, it pushes this branch's in-flight ref.
 - **`hooks install --ledger-claude`** — two Claude Code events in `.claude/settings.local.json` (it never installs the general `--claude` tier):
   - `ledger-session-notices.sh` (SessionStart): `ledger notices --hook` — the unacked `stop` and `heads-up` notices for the session's branch, offline, at most 15 lines, under a 2 s budget; silent with none or with `inflight.enabled` off.
-  - `ledger-state-watch.sh` (PostToolUse, matcher `Write|Edit`): `ledger state-watch --hook` — when a write lands under a `state_watch.paths` entry (a leading `~/` is `$HOME`; an absolute entry is itself; any other is under the project; `*` within one segment; it matches the file and anything below; a path crossing a symbolic link is compared resolved) and what was written names an item key and holds one of `state_watch.patterns` (any case), one advisory line suggests `doc-tools.sh ledger note <key> "…"`. Never blocks. Hosts list their agent-memory and scratch directories in `paths` and phrases like `"next:"` or `"approved"` in `patterns`.
+  - `ledger-state-watch.sh` (PostToolUse, matcher `Write|Edit|MultiEdit`): `ledger state-watch --hook` — when a write lands under a `state_watch.paths` entry (a leading `~/` is `$HOME`; an absolute entry is itself; any other is under the project; `*` within one segment; it matches the file and anything below; a path crossing a symbolic link is compared resolved) and what was written (Write's content, Edit's `new_string`, MultiEdit's edits) names an item key and holds one of `state_watch.patterns` (any case), one advisory line suggests `doc-tools.sh ledger note <key> "…"`. Never blocks. Hosts list their agent-memory and scratch directories in `paths` and phrases like `"next:"` or `"approved"` in `patterns` — both: with `paths` and no `patterns` it never fires, which `validate --all` (class `config`) and `hooks status` (`⚠ ledger-state-watch never fires`) report.
 - **Hook modes.** `ledger notices --hook` and `ledger state-watch --hook` are the stable entry points: each reads the event on stdin, prints one hook object or nothing, never fetches, and always exits 0 (a usage error, no repository, no config: silent). A host that keeps its hooks in a committed `.claude/settings.json` (which, unlike the per-user `settings.local.json` `--ledger-claude` writes, travels to every worktree) registers them directly instead of `--ledger-claude`:
 
   ```json
   { "hooks": {
       "SessionStart": [ { "matcher": "", "hooks": [ { "type": "command", "timeout": 10,
         "command": "bash \"$CLAUDE_PROJECT_DIR\"/<path>/doc-tools.sh ledger notices --hook" } ] } ],
-      "PostToolUse": [ { "matcher": "Write|Edit", "hooks": [ { "type": "command", "timeout": 10,
+      "PostToolUse": [ { "matcher": "Write|Edit|MultiEdit", "hooks": [ { "type": "command", "timeout": 10,
         "command": "bash \"$CLAUDE_PROJECT_DIR\"/<path>/doc-tools.sh ledger state-watch --hook" } ] } ] } }
   ```
 
   `<path>` is a `doc-tools.sh` every worktree resolves, with its `ledger/` directory beside it. A direct registration has no 2 s watchdog (the entry's `timeout` bounds it), and registering both a mode and `--ledger-claude` for one event prints its notices twice. Details: `references/hooks.md` → *Registering the ledger hooks in your own settings.json*.
 - **Skipping.** `DOC_SUPERPOWERS_LEDGER_SKIP=1` skips every ledger leg and hook mode; `DOC_SUPERPOWERS_SKIP=1` (every doc-superpowers hook) does too. The pre-commit and pre-push legs print a line naming the variable; the others are silent.
-- **Upgrading.** `hooks status` reports each set in its own section; a block or script of another version reads `⚠ … outdated: re-run install --ledger` (or `--ledger-claude`).
+- **Upgrading.** `hooks status` reports each set in its own section; a block or script of another version reads `⚠ … outdated: re-run install --ledger` (or `--ledger-claude`). `status --claude` reports the `--ledger-claude` section too once any of that set is installed, since both live in one settings file (`status --all` still reports the three tiers only). A 3.3.0 `--ledger-claude` install registered state-watch for `Write|Edit` only: it reads `outdated (registered for other tools than matcher "Write|Edit|MultiEdit")` until `install --ledger-claude` is re-run, which replaces the entry in place. A host that registers `ledger state-watch --hook` in its own committed `.claude/settings.json` (the snippet above) changes that entry's matcher to `Write|Edit|MultiEdit` itself: `hooks status` never inspects such entries, so nothing flags the old `Write|Edit`.
 
 ## Bootstrapping — `ledger init`
 
@@ -305,11 +323,109 @@ SKILL.md's `init` action runs it as its *Ledger (opt-in)* step; it also runs sta
    - The registry: `--registry <file>`, else `docs/ledger/ledgers.json`, else a proposal (one ledger per top-level code directory, the largest split per second-level directory when it holds over 40 % of the code; docs, CI, scripts and tests as `platform`). Its `validate --registry` findings are in the report.
    - Each item gets a suggested ledger — its `ledger` value when registered, then a hand-written ledger row, then the plurality owner of its paths, then a `ledger:<id>` label, else `unassigned` — never by keyword. The decisions file pre-fills the suggestion for terminal items and leaves open items' decision empty; a re-run keeps decisions already made.
 2. **Review**, in two parts on a repository without a registry: the host's owner edits `docs/ledger/ledgers.proposed.json` (ids, titles, kinds, paths, contracts; the report's findings), then the second pass, `init --report <file> --registry docs/ledger/ledgers.proposed.json`, writes `<file>.decisions.tsv`, whose decision column the owner fills. The decisions header records the registry and its sha256, and `--accept` installs that file as `ledgers.json` (or write `ledgers.json` by hand and run the report against it). With a registry already in place, the first pass writes the decisions file and only the second part applies. Nothing is assigned the owner did not decide.
-3. **`init --accept <decisions.tsv> [--dry-run]`** checks every decided row first (any failure: exit 1, one finding per row, nothing written), then writes `config.json` when absent, the registry, the keys (one counter commit, per ledger in item-date order; offline: provisional), the item fields (`ledger`; a mechanical `summary` when missing; `key`), stubs (`docs/issues/<today>-<slug>.md`) for the open rows of hand-written ledgers that link no item — each relative link re-expressed from the stub's directory — and `legacy.json` entries for every row (a row `legacy.json` already holds is left alone), then renders the views into the cache and prints the paths to review and commit. A second run changes nothing. `--dry-run` prints the plan only.
+3. **`init --accept <decisions.tsv> [--dry-run]`** checks every decided row first (any failure: exit 1, one finding per row, nothing written), then writes `config.json` when absent, the registry, the keys (one counter commit, per ledger in item-date order; offline: provisional), the item fields (`ledger`; a mechanical `summary` when missing; `key`), stubs (`docs/issues/<today>-<slug>.md`) for the open rows of hand-written ledgers that link no item — each relative link re-expressed from the stub's directory, and config `init.stub_defaults`' fields added where the stub has none <!-- T3: verify against code --> — and `legacy.json` entries for every row (a row `legacy.json` already holds is left alone), then renders the views into the cache and prints the paths to review and commit. A second run changes nothing. `--dry-run` prints the plan only. It never writes through a symbolic link: a `legacy.json` (config `legacy`) that is a link, when the run has legacy entries to write, is a finding before anything is written (exit 1, no counter allocated, the link intact) — point `legacy` at the file it points to, or replace the link with that file; any other target that is a link exits 2 rather than be replaced by a regular file.
 
 **`init --import`** turns hosted items into `docs/issues/<created>-<slug>.md` files once (each linked back with a note; nothing closed), then sets `items.adapter` to `null`, for a host that chooses files as the source of truth.
 
 The ledger dispatches no agent: summaries are mechanical (the item's `summary`, else a hand-written row's bold lead, else its H1, else its first sentence).
+
+## Building on the ledger
+
+For authors of skills, routines and scripts on top of the ledger — a filing command, a triage routine, a backfill script.
+
+### The surface to script against
+
+- **The verbs and flags** `doc-tools.sh help ledger <verb>` lists, run from the repository's top level through the `doc-tools.sh` SKILL.md's *Detect Bundled Tooling* resolves (`$DOC_TOOLS`).
+- **`--format json`**, never the text: text is written for people and agents to read, and its wording changes. Every verb prints exactly one object, `{"verb": "ledger <sub>", "enabled": <bool>, "exit": <rc>, …payload}`, and exits with that `exit`. `enabled: false` (no `docs/ledger/config.json`) is exit 0 with no payload: a wrapper says the ledger is off and does nothing. Exit 2 and 3 carry `"error": "<message>"` instead of a payload.
+- **The item object** `show` returns (and the index carries) is `references/ledger-index.schema.json` (`ledger-index/1`).
+- **The hook modes** `notices --hook` and `state-watch --hook` (*Hooks*).
+- Not a surface: the cache under `<git common dir>/doc-superpowers/ledger/`, the scripts in `scripts/ledger/`, the text lines.
+
+The payloads a wrapper reads most:
+
+| Verb | Payload beyond the envelope |
+|---|---|
+| `show <item>` | `item` (the index item: `key`, `path`, `ledger`, `status`, `class`, `summary`, `changes`, `consumes`, `relates`, `paths`, `derived`, `neighbours`, `recheck_after`, …), `display`, `pr_data`; unknown (exit 1): `item: null`, `ref` |
+| `ls` | `items: [{key, path, ledger, severity, status, class, derived, display, cluster, date, summary, archived}]`, `pr_data` |
+| `find <words>…` | `matches`, `items: [{score, key, path, ledger, severity, derived, display, date, summary}]` |
+| `related <item>` | `item: {key, path, ledger, severity, display, summary}`, `depth`, `neighbours: [{kind: upstream\|downstream\|sibling, key, path, via, depth, through, display, summary}]`, `candidates: [{key, path, reasons, display, summary}]` |
+| `suggest <item>` | `item: {key, path, …}`, `candidates: [{field: "changes"\|"consumes", value: "<contract id>", reasons: [...]}]` — proposals only, nothing written <!-- T3: verify against code --> |
+| `recheck <item>` | `item`, `dependents: [{key, path, via, display, summary, actions}]` |
+| `sweep …` | `rows: [{key, path, confirmed, why}]`, `table` (the markdown) |
+| `new` | `path`, `ledger`, `key` (`null` for `unassigned`), `provisional` (`true`: an offline `<ledger>-~<hex>` key that `finalize` replaces) |
+| `assign <item> <ledger>` | `path`, `ledger`, `key`, `previous`, `provisional` |
+| `link <item> …` | `path`, `key`, `added: [{field, value}]`, `present: [{field, value}]` (already there); a bad value (exit 1, nothing written): `problems: ["…"]` |
+| `note <item> <text>` | `ref`, `path`, `kind`, `line` |
+| `validate …` | `findings: [{class, severity: "block"\|"advisory", path, key, detail}]` |
+| `notices` | `inflight_enabled`, `notices: [{id, urgency, other: {branch, host, pr}, overlap, what_changed, action}]`, `pr_data` |
+| `finalize` | `finalized: [{provisional, key, path}]` (`merge` mode: and `commit`) |
+
+What a wrapper does on each exit:
+
+| Exit | Means | The wrapper |
+|---|---|---|
+| `0` | done (inert included: check `enabled`) | reads the payload; advisories may still be in `findings` |
+| `1` | findings: a blocking check, an unknown item, a bad `link` value, an unacked `stop` | shows them and stops the step; nothing was written by a write verb that exits 1 |
+| `2` | could not run: an adapter, the remote, a base that does not resolve, an invalid config, "could not verify" | reports `error` and treats the step as **not done** — never as clean, never as findings; retry later, or with `--fetch` / `--refresh` |
+| `3` | usage: the wrapper's command line is wrong, or `show` named several items | a bug in the wrapper (or ask the user which item); do not retry the same line |
+
+### Suggest → confirm → link
+
+Relations are declared by people, not inferred: the ledger proposes, the caller decides, `link` writes.
+
+1. **Candidates.** `suggest <item>` proposes `changes` / `consumes` contracts from the item's `related` neighbours and the files it lists <!-- T3: verify against code -->; `related <item>` adds the candidate items (shared files, a shared spec, a `defined_in` overlap) a `relates` may name.
+2. **Confirm.** The wrapper shows them and asks; the user picks, adds or rejects, by the rules in *Relations* → **Declaring relations** (that section is the one statement of what to declare — a wrapper points to it rather than restate it).
+3. **Write.** One `link` call with comma lists: `link <item> --consumes a,b --changes a --relates depends-on:<key>` <!-- T3: verify against code -->. A value already there is reported in `present` and left alone; any bad value writes nothing (exit 1).
+4. **Nothing to declare.** Write `relations: none` into the item's frontmatter, or record why with `note <item> "…" --kind ruling`.
+
+With `validate.require_relations: "new"`, the pre-commit leg (`validate --staged`) refuses a commit that adds an open item with none of `changes`, `consumes`, `relates` and no `relations: none`, so a wrapper that skips step 3 or 4 is caught at commit (*Validation*).
+
+### Example: a filing wrapper
+
+```bash
+# The wrapper wrote docs/issues/2026-10-17-refund-rounding.md (title, body, status and the
+# host's own fields), after asking the user. Now the ledger's part:
+out=$("$DOC_TOOLS" ledger new --ledger checkout --summary "Totals round twice on refunds" \
+        --file docs/issues/2026-10-17-refund-rounding.md --format json)
+case $? in
+  0) ;;
+  2) echo "ledger: could not allocate: $(jq -r .error <<<"$out")"; exit 2 ;;
+  *) echo "ledger new: $out"; exit 1 ;;
+esac
+key=$(jq -r .key <<<"$out")              # provisional (offline) keys are fine: finalize replaces them
+"$DOC_TOOLS" ledger suggest "$key" --format json > /tmp/cand.json   # exit 2: say so, ask anyway
+# …show .candidates[] to the user; they confirm field:order.total (consumes and changes) and
+#    field:refund.amount (consumes)…
+"$DOC_TOOLS" ledger link "$key" --consumes field:order.total,field:refund.amount \
+  --changes field:order.total --format json
+```
+<!-- T3: verify against code -->
+
+### Example: a backfill script
+
+Declaring relations for existing open items in bulk, from a list a person reviewed. Exit 2 from any call is "could not run": the item is reported as not done and the script ends non-zero, never "all clean".
+
+```bash
+#!/usr/bin/env bash
+# reviewed.tsv: <item>\t<--consumes|--changes|--relates>\t<comma list>, one row per confirmed relation
+rc=0
+while IFS="$(printf '\t')" read -r item flag values; do
+  out=$("$DOC_TOOLS" ledger link "$item" "$flag" "$values" --format json)
+  case $? in
+    0) jq -r '"\(.key // .path): +\(.added | length) relations"' <<<"$out" ;;
+    1) echo "$item: refused: $(jq -r '.problems // [] | join("; ")' <<<"$out")"; [ "$rc" = 2 ] || rc=1 ;;
+    2) echo "$item: could not run: $(jq -r .error <<<"$out")"; rc=2 ;;
+    *) echo "$item: usage error: $out"; exit 3 ;;
+  esac
+done < reviewed.tsv
+exit "$rc"
+```
+
+To build the list, `ls --open --format json` gives the open items and `show <item> --format json` their `changes`, `consumes` and `relates`; `suggest` proposes the candidates for the reviewer <!-- T3: verify against code -->. Items with nothing to declare get `relations: none` by hand.
+
+### What a wrapper owns
+
+A wrapper owns **process**: asking the user, its own fields (title, body, `status`, `severity`, labels, the host's frontmatter), where the file goes, when to run. It never owns **keys** (`new`, `assign`, `finalize` allocate them; never write `key`, `aliases` or `finalized.json`), **views** (generated; never edited), or **relation semantics** (what `changes`, `consumes` and `relates` mean, and which to declare: *Relations* → **Declaring relations**). Item state goes through `note`.
 
 ## Spec claims (3.2.0) with the ledger on
 
@@ -323,7 +439,7 @@ With `docs/ledger/config.json` and `docs/spec-claims/`, check **V5** reads a cla
 
 | Variable | Effect |
 |---|---|
-| `DOC_TOOLS_LEDGER_OFFLINE=1` | no adapter runs and nothing is fetched or pushed by the remote cache or `inflight --push` (*Adapters*); key allocation is not covered (except `init --accept` with hosted items: exit 2) |
+| `DOC_TOOLS_LEDGER_OFFLINE=1` | no adapter runs and nothing is fetched or pushed by the remote cache or `inflight --push` (*Adapters*); key allocation is not covered (except `init --accept` with hosted items: exit 2), but `keys.mode: "merge"` `finalize` skips its check of the remote's base (a warning; *Keys*); `notices --gate` decides on the refs here rather than exit 2 |
 | `DOC_SUPERPOWERS_LEDGER_SKIP=1` | skips every ledger hook leg and hook mode |
 | `DOC_SUPERPOWERS_SKIP=1` | skips every doc-superpowers hook, the ledger legs included |
 | `LEDGER_GH_LEDGER_PREFIX`, `LEDGER_GH_SEV_PREFIX` | the GitHub items adapter's label prefixes (default `ledger:`, `sev:`) |
