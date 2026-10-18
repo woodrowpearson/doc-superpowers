@@ -1,5 +1,57 @@
 # Release Notes
 
+## v3.4.0 (2026-10-17)
+
+This release follows up the work ledger that 3.3.0 introduced. It adds opt-in help for declaring an item's relations: `ledger suggest` proposes contracts, `link` takes comma lists and `--relations none`, and the new `validate.require_relations` makes declaring them a pre-commit rule. It adds `init.stub_defaults` for the stubs `init --accept` creates. It also closes the gaps the 3.3.0 review left open: a gate that passed on stale in-flight data, a pre-push refusal of keys a branch got from its base, a merge-mode finalize race, a symlinked file `init` could replace, and a state-watch hook that never saw MultiEdit. A project without `docs/ledger/config.json` sees no change. A ledger host that sets none of the new keys sees the changes listed under *Changed (ledger hosts, without opting in)*. One of them can turn a passing step red: `notices --gate` now exits 2 when its in-flight fetch fails. The version is 3.4.0 rather than 3.3.1 because it adds flags and config keys (semver minor).
+
+### Upgrading from 3.3.0
+Nothing breaks if you skip these steps. What each host re-runs, and why:
+- **A per-user `--ledger-claude` install**: re-run `hooks install --ledger-claude`. The state-watch hook is now registered for `Write|Edit|MultiEdit`. Until the re-run, MultiEdit writes are not watched, and `hooks status` (and `status --claude`) reads `outdated (registered for other tools than matcher "Write|Edit|MultiEdit")`. The re-run replaces the entry in place.
+- **A host that registers `ledger state-watch --hook` (or its own wrapper) in a committed `.claude/settings.json`**: change that entry's matcher to `Write|Edit|MultiEdit` by hand. `hooks status` never inspects entries a host registers itself, so nothing will warn you. abundance is one such host: its committed `.claude/settings.json` registers `scripts/hooks/claude/ledger-state-watch.sh` with `Write|Edit`.
+- **A host with the CI tier or vendored copies** (`.github/scripts/doc-tools.sh`, `.github/scripts/ledger/`, `.github/scripts/adapters/`, or any committed copy its own hooks call): re-run `hooks install --ci` (or `tools install --helper ledger` for that set) and commit what it writes, so that CI and committed callers run 3.4.0.
+- **The `--ledger` git legs**: nothing to re-run. They are unchanged, and they run the newest plugin `doc-tools.sh`.
+- **Adopters of the new features**: a project that turns on `validate.require_relations`, or scripts `suggest`, `--top`, multi-value `link` or `--relations none`, needs every contributor and every vendored copy at 3.4.0 or later. Pin `>= 3.4.0`. A contributor still on 3.3.0 skips the `require_relations` check without a word. A script's new forms fail on 3.3.0: an unknown flag (`--top`, `--relations`, `--suggest-contracts`) exits 3, and a comma list is one bad value (exit 1).
+
+### Features (opt-in)
+- **`ledger suggest <item> [--top N]`** (read-only) and **`ledger new … --suggest-contracts [--top N]`** propose the contracts an item might declare:
+  - `changes` candidates are the contracts whose `defined_in` matches a file the item lists.
+  - `consumes` candidates are the contracts that its related items (confirmed neighbours and the open candidates `related` lists) change or consume.
+  - Each candidate comes with its reasons, and contracts the item already declares are left out.
+  - Candidates rank by evidence (the number of reasons), then by contract id. `--top N` keeps the first N: the default is 15, and `0` shows all.
+  - JSON: `{item, declared, total, truncated, candidates: [{field, contract, reasons, sources}]}`. The text output ends with a `confirm with: ledger link …` line and says `(showing N of M candidates; --top 0 shows all)` when some were left out.
+  - Nothing is written: the caller confirms and writes with `link`.
+- **Multi-value `link`**: `--consumes`, `--changes` and `--relates` each take a comma list, and any of the three can be given at once. A value that is itself valid is never split, so a contract id that contains a comma still works. Every value is checked first: one bad value means exit 1 and nothing is written. Otherwise the run makes one write and reads the index once.
+- **`link <item> --relations none`** writes `relations: none`, the opt-out that `validate.require_relations` reads. It is refused next to another relation flag, or when the item already names a relation. A later `link` that writes a relation removes the marker in the same write (JSON `removed`).
+- **`validate.require_relations: "new"`** (default `null`, off):
+  - `validate --staged` (the pre-commit leg) blocks an added open item that names no `changes`, `consumes` or `relates` and has no `relations: none` (`no-relations`).
+  - `validate --all` reports open items new since adoption as advisories. With no resolvable base, or an adoption commit beyond a shallow boundary, every open item counts.
+  - Any other value is a config error (exit 2).
+- **`init.stub_defaults`**: frontmatter fields that `init --accept` writes into each stub it creates. Each value is a string, number or boolean, and `{today}` in a string becomes the run's local date. The stub's own `status`, `key`, `ledger` and `summary` win.
+  - A string that a YAML loader would read as another type (`true`, `no`, `off`, `null`, `~`, `007`, `1e3`, …) is written double-quoted, so it stays a string. Dates are written bare.
+  - Bad values exit 2 before anything is written, `--dry-run` included.
+  - abundance can drop the stub fields it filled in by hand.
+  - With `require_relations` already on, add `"relations": "none"` here for an `init --accept` re-run, or the new stubs are blocked at commit.
+- **Silent state-watch warning**: when `state_watch.paths` is set but `state_watch.patterns` names nothing, the hook never fires. `validate --all` now adds a `config` advisory for this, and `hooks status` warns `ledger-state-watch never fires`.
+
+### Changed (ledger hosts, without opting in)
+- **`notices --gate` fails closed**: it now exits **2, "could not verify"**, when the in-flight fetch failed and no stop blocks. 3.3.0 passed on stale data. This change has no opt-in. Use `--fetch` to retry, or set `DOC_TOOLS_LEDGER_OFFLINE=1` to decide on local refs deliberately. Plans' `Ledger notices (chunk N)` tasks treat 2 as not green. An unacked stop found anyway still blocks (1). Hook mode and runs without `--gate` are unchanged.
+- **Pre-push exemption (`cas`)**: the pre-push leg no longer refuses an existing branch for a provisional key it got by merging the base. Only the keys the branch adds since its merge-base with config `base` are refused.
+- **Permission failures**: a refused counter push counts as a permission failure only on a capitalised `Forbidden` (HTTP's reason phrase), as well as the other permission wordings. A hook's lowercase "forbidden by policy" refuses the content, so it is now exit 2 instead of a provisional key.
+- **`keys.mode: "merge"` `finalize` refuses when the remote's base is ahead**: before it writes, `finalize` (and `new --finalize`) fetches the base's branch from its remote. When HEAD lacks the remote's tip, it refuses with exit 2 and writes nothing: pull, then run it again. If the remote cannot be reached, or with `DOC_TOOLS_LEDGER_OFFLINE=1`, it warns and goes on unchecked. Two finalizers can still pass the check in the same moment and race at the push. If your push is rejected, drop your own finalize commit (`git reset --hard HEAD~1`, after checking that `git log -1` reads `ledger: finalize N keys`), pull, run `finalize` again, then push. Never pull over or rebase a finalize commit. When the two `finalized.json` changes sort apart, a pull merges cleanly and carries a duplicate key through, and a rebase does the same. Only `validate --all` reports the result (`duplicate-key`; re-home one item with `assign`).
+- **`init --accept` never writes through a symbolic link**: a symlinked `docs/ledger/legacy.json` with entries to write is now a finding (exit 1, nothing written), including on a re-run that would write nothing new. `init`'s writer refuses any symlinked target (exit 2).
+- **MultiEdit**: `install --ledger-claude` registers the state-watch hook for `Write|Edit|MultiEdit`, the tools whose writes it reads. `status --ledger-claude` flags a 3.3.0 entry as outdated, and `status --claude` now also reports the ledger Claude set once any of it is installed. `status --all` still reports the three tiers only.
+
+### Fixes
+- `hooks status --claude`'s ledger section header says the set is "never installed by --all or --claude".
+
+### Documentation
+- `references/ledger.md` adds two sections. *Declaring relations* gives the rules for what an item declares. *Building on the ledger* covers the JSON surface of every verb, the suggest → confirm → link flow, and example filing and backfill scripts. It also covers the merge-mode finalize race and its recovery, `init.stub_defaults`, `validate.require_relations` and its rename caveats, and `finalize`'s JSON `commit` (`null` in `cas`).
+- SKILL.md routes filing agents to `ledger new --suggest-contracts`, `ledger suggest` and one `link` call, or `link --relations none`. `references/hooks.md` documents the MultiEdit matcher, the pre-push rule and the gate's exit 2.
+- The design spec (`docs/superpowers/specs/2026-10-12-work-ledger-design.md`) carries dated 3.4.0 amendments for every change above. README, CLAUDE.md, `docs/codebase-guide.md`, `docs/architecture/system-overview.md`, `docs/workflows/doc-superpowers.md` and `docs/guides/getting-started.md` name the `suggest` verb (19 ledger verbs). The `workflow-hooks` and `c4-container` diagrams are re-rendered.
+
+### Other
+- Seven suites, 11288 assertions, under bash 5.x and `/bin/bash` 3.2: `test-doc-tools.sh` 1435, `test-hooks.sh` 1485, `test-spec-status-model.sh` 670, `test-doc-pr-release.sh` 625, `test-merge-driver.sh` 600, `test-spec-claims.sh` 3269, `test-ledger.sh` 3204. The total goes from 10998 to 11288.
+
 ## v3.3.0 (2026-10-17)
 
 This release adds the work ledger. It keeps a repository's work items as issue files (or hosted GitHub issues), gives each item a stable key, relates the work that touches the same surface through named contracts, generates ledger pages and one HTML view from the items, and raises in-flight notices across branches and machines. The feature is opt-in: a project turns it on by creating `docs/ledger/config.json` (`{}` is a complete config). Without that file every `ledger` verb but `init` prints `ledger: not enabled (no docs/ledger/config.json)` and exits 0, and the hooks, CI templates, `spec-*` actions and claims checks reach the same outcomes as in 3.2.0. What does change for every project is listed under *Changed (all projects)* and *Fixes*: a pre-push block that now fails closed, two new `hooks status` sections, `tools install --with-helpers` vendoring one more set, and wording. Two re-installs follow from them, for hosts that have the git tier or the per-user Claude tier (*Upgrading from 3.2.0*).

@@ -12,7 +12,7 @@ source "$SCRIPT_DIR/test-helpers.sh"
 DOC_TOOLS="$(bash_bin_shim "$REPO_DIR/scripts/doc-tools.sh")"
 
 # The ledger sub-verbs (doc-tools.sh ledger <sub>), in verb-table order.
-LG_VERBS="show ls find related sweep recheck inflight notices state-watch new assign link note view validate publish finalize init"
+LG_VERBS="show ls find related sweep recheck inflight notices state-watch new assign suggest link note view validate publish finalize init"
 
 LG_INERT_LINE="ledger: not enabled (no docs/ledger/config.json)"
 
@@ -3765,7 +3765,7 @@ weak-summary advisory docs/issues/w.md" "$(lg_vf)" "each advisory class"
 }
 
 test_lg_validate_all_concurrent_merge_finalize_dup() {
-  echo "test: validate catches the duplicate two maintainers' concurrent merge-mode finalize leave behind"
+  echo "test: validate catches the duplicate two maintainers' concurrent merge-mode finalize leave behind (one finalized offline, unchecked)"
   lg_keys_fixture '{"base":"main","keys":{"mode":"merge"}}'
   local h1 h2 other
   lg_item docs/issues/a.md "key: x-3" "ledger: x" "status: Open" "summary: The highest key so far"
@@ -3790,8 +3790,11 @@ test_lg_validate_all_concurrent_merge_finalize_dup() {
   )
   cd "$other"
   h2=$(lg_hex4 docs/issues/o.md)
-  lg finalize
-  assert_eq "0" "$LG_RC" "maintainer 2 finalizes"
+  # Online, finalize refuses here (3.3.1 CORE-m2: the remote's base has
+  # maintainer 1's commit); offline it cannot check, warns and goes on.
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg finalize
+  assert_eq "0" "$LG_RC" "maintainer 2 finalizes (offline: unchecked)"
+  assert_contains "$LG_ERR" "warning" "…with a warning"
   assert_contains "$(cat docs/issues/o.md)" "key: x-4" "o.md → x-4 too"
   # Both wrote finalized.json: the pull stops on it; the items merge cleanly.
   git pull -q --no-rebase --no-edit --no-commit origin main > /dev/null 2>&1 || true
@@ -11519,6 +11522,670 @@ provisional-key block docs/issues/mine.md" "$(lg_vf)" "every provisional key at 
   teardown
 }
 
+test_lg_validate_pushed_existing_branch_merges_base() {
+  echo "test: 3.3.1 item 2 — an existing branch's push (remote oid known) that merged the base after a provisional key landed there is not refused for that key: only keys added since the branch's merge-base with the base are checked; a key the branch adds itself still is"
+  lg_keys_fixture
+  local h old
+  git checkout -q -b feat/old
+  lg_item docs/issues/real.md "key: x-1" "ledger: x" "status: Open" "summary: A real key on the branch"
+  git add -A && git commit -qm real
+  git push -q origin feat/old
+  old=$(git rev-parse HEAD)
+  # Meanwhile a provisional key reaches the base (a claude.ai/code session's PR).
+  git checkout -q main
+  h=$(lg_hex4 docs/issues/cloud.md)
+  lg_item docs/issues/cloud.md "key: x-~$h" "ledger: x" "status: Open" "summary: Filed in a cloud session"
+  git add -A && git commit -qm cloud
+  git push -q origin main
+  git fetch -q origin
+  # The existing branch merges the base, then pushes again.
+  git checkout -q feat/old
+  git merge -q --no-edit origin/main
+  lg validate --pushed "$old..HEAD" --format json
+  assert_eq "0" "$LG_RC" "the merged base's x-~$h is not this push's: exit 0"
+  assert_json_field "$LG_OUT" '.findings | length' "0" "no findings"
+  # The branch edits the base's item (its key kept): still the base's key.
+  printf '\nMore detail.\n' >> docs/issues/cloud.md
+  git add -A && git commit -qm "edit cloud"
+  lg validate --pushed "$old..HEAD" --format json
+  assert_eq "0" "$LG_RC" "an edit to the base's item keeps the key the base's: exit 0"
+  lg_item docs/issues/mine.md "key: x-~$(lg_hex4 docs/issues/mine.md)" "ledger: x" "status: Open" "summary: Filed offline on the branch"
+  git add -A && git commit -qm mine
+  lg validate --pushed "$old..HEAD" --format json
+  assert_eq "1" "$LG_RC" "the branch adds one: exit 1"
+  assert_eq "provisional-key block docs/issues/mine.md" "$(lg_vf)" "only the branch's key is refused"
+  # No base to compare: the range alone decides (3.3.0 behaviour), so the
+  # merged base key is refused too, and its detail names finalize --all.
+  lg_enable '{"base":"origin/no-such-branch"}'
+  lg validate --pushed "$old..HEAD" --format json
+  assert_eq "1" "$LG_RC" "no base: exit 1"
+  assert_eq "provisional-key block docs/issues/cloud.md
+provisional-key block docs/issues/mine.md" "$(lg_vf)" "no base: every key the range adds"
+  teardown
+}
+
+test_lg_notices_gate_fetch_failure_fails_closed() {
+  echo "test: 3.3.1 CORE-m1 — notices --gate never passes on in-flight data it could not verify: a failed fetch (a stale copy served, or none) is exit 2 'could not verify' unless a stop already blocks (1); without --gate, offline, and in hook mode nothing changes"
+  lg_ntc_fixture '{"base":"origin/main","inflight":{"enabled":true,"host_id":"hosta"},"cache":{"remote_ttl_minutes":0}}'
+  local x id good
+  good=$(git remote get-url origin)
+  # No fetch has ever succeeded: no copy at all (state none).
+  git remote set-url origin "$TEST_DIR/no-such-remote.git"
+  lg notices --gate
+  assert_eq "2" "$LG_RC" "the fetch failed, no copy: exit 2"
+  assert_contains "$LG_ERR" "could not verify" "…'could not verify'"
+  lg notices --gate --format json
+  assert_eq "2|1" "$LG_RC|$(json_count "$LG_OUT")" "json: exit 2, one object"
+  # A fetch succeeds (the copy is written), then the remote goes away: the
+  # gate would decide on the stale copy.
+  git remote set-url origin "$good"
+  lg notices --gate
+  assert_eq "0|" "$LG_RC|$LG_OUT" "a fresh fetch, nothing in flight: exit 0"
+  git remote set-url origin "$TEST_DIR/no-such-remote.git"
+  lg notices --gate
+  assert_eq "2" "$LG_RC" "the fetch failed, a stale copy served: exit 2 (never a clean gate)"
+  assert_contains "$LG_ERR" "could not verify" "…'could not verify'"
+  assert_contains "$LG_ERR" "--fetch" "…naming the retry"
+  # Without --gate: the note, exit 0 (3.3.0 behaviour).
+  lg notices
+  assert_eq "0" "$LG_RC" "no --gate: exit 0"
+  assert_contains "$LG_ERR" "in-flight refs not fetched" "…the note says the fetch failed"
+  # Deliberately offline: the refs here decide, as the note says.
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg notices --gate
+  assert_eq "0" "$LG_RC" "DOC_TOOLS_LEDGER_OFFLINE=1: the refs here decide, exit 0"
+  # An unacked stop still blocks as a stop (1), whatever the fetch did.
+  git commit -q --allow-empty -m "mine" -m "Ledger-Claims: app-1"
+  lg_ntc_branch x-total "touch the total" src/order/total.js more
+  x=$(git rev-parse x-total)
+  id=$(lg_ntc_id x-total@hosta contracts:field:order.total "$x")
+  lg notices --gate
+  assert_eq "1" "$LG_RC" "an unacked stop with the fetch failing: exit 1"
+  assert_contains "$LG_OUT" "stop $id x-total" "…listing it"
+  # Hook mode never fetches and always exits 0.
+  lg_hook "$LG_HOOK_SS" notices --hook
+  assert_eq "0|1" "$LG_RC|$(json_count "$LG_OUT")" "--hook: exit 0, its one object"
+  teardown
+}
+
+test_lg_init_accept_symlinked_legacy_finding() {
+  echo "test: 3.3.1 CORE-m5 — init --accept never replaces a symbolic link with a regular file: a symlinked legacy.json it would write is a finding before anything is written (exit 1, no counter, no file changed, the link intact)"
+  lg_accept_fixture
+  cat >> docs/ledgers/checkout-ledger.md <<'EOF'
+| 4 | Shipped thing | ~~Shipped~~ 2025 |
+EOF
+  mkdir -p docs/real
+  printf '{}\n' > docs/real/legacy.json
+  ln -s ../real/legacy.json docs/ledger/legacy.json
+  git add -A && git commit -qm "rows, linked legacy.json"
+  lg_init_decide "$LG_DEC" docs/issues/2026-01-02-sheet-flicker.md checkout
+  local st
+  st=$(lg_init_status)
+  lg init --accept "$LG_DEC" --format json
+  assert_eq "1" "$LG_RC" "exits 1"
+  assert_json_field "$LG_OUT" '[.findings[] | select(.path == "docs/ledger/legacy.json") | .detail | test("symbolic link")] | any' "true" \
+    "a finding names legacy.json: a symbolic link"
+  assert_eq "$st" "$(lg_init_status)" "nothing written"
+  assert_eq "absent" "$(lg_remote_counters)" "no key allocated"
+  assert_eq "../real/legacy.json" "$(readlink docs/ledger/legacy.json)" "the link is intact"
+  assert_eq "{}" "$(cat docs/real/legacy.json)" "its target unchanged"
+  teardown
+}
+
+test_lg_init_put_refuses_symlink() {
+  echo "test: 3.3.1 CORE-m5 — _lg_init_put (every init write) refuses a target that is a symbolic link, as _tmp_beside does: exit 2, the link and its target untouched"
+  lg_fixture
+  lg_enable
+  printf 'old\n' > real.json
+  ln -s real.json link.json
+  printf 'new\n' > src.json
+  lg_call _lg_init_put src.json link.json
+  assert_eq "2" "$LG_RC" "exit 2"
+  assert_contains "$LG_ERR" "symbolic link" "…saying so"
+  assert_eq "real.json" "$(readlink link.json)" "the link is intact"
+  assert_eq "old" "$(cat real.json)" "its target unchanged"
+  teardown
+}
+
+test_lg_merge_finalize_remote_recheck() {
+  echo "test: 3.3.1 CORE-m2 — keys.mode merge finalize re-checks the remote before it writes: when the remote's base has commits this base lacks (another maintainer's finalize), it refuses (exit 2, nothing written); after a pull it numbers past them; unreachable or offline: a warning, finalized as before"
+  lg_keys_fixture '{"base":"main","keys":{"mode":"merge"}}'
+  local h1 h2 other before
+  lg_item docs/issues/a.md "key: x-3" "ledger: x" "status: Open" "summary: The highest key so far"
+  git add -A && git commit -qm a && git push -q origin main
+  other="$(harness_mktemp_d other)/other clone"
+  lg_clone "$other"
+  # Maintainer 1 merges n.md, finalizes it and pushes.
+  h1=$(lg_hex4 docs/issues/n.md)
+  lg_item docs/issues/n.md "key: x-~$h1" "ledger: x" "status: Open" "summary: First new item, provisional"
+  git add -A && git commit -qm n
+  lg finalize
+  assert_eq "0" "$LG_RC" "maintainer 1 (the remote's base is in HEAD) finalizes"
+  assert_contains "$(cat docs/issues/n.md)" "key: x-4" "n.md → x-4"
+  git push -q origin main
+  # Maintainer 2, not yet pulled, merges o.md and finalizes it: refused.
+  cd "$other"
+  git config user.name Other && git config user.email other@example.com
+  h2=$(lg_hex4 docs/issues/o.md)
+  lg_item docs/issues/o.md "key: x-~$h2" "ledger: x" "status: Open" "summary: Second new item, provisional"
+  git add -A && git commit -qm o
+  before=$(git rev-parse HEAD)
+  lg finalize
+  assert_eq "2" "$LG_RC" "the remote's base has a commit HEAD lacks: exit 2"
+  assert_contains "$LG_ERR" "pull" "…the remedy: pull"
+  assert_eq "$before" "$(git rev-parse HEAD)" "…no commit"
+  assert_contains "$(cat docs/issues/o.md)" "key: x-~$h2" "…o.md keeps its provisional key"
+  assert_file_not_exists docs/ledger/finalized.json "…finalized.json not written"
+  lg new --finalize --file docs/issues/o.md
+  assert_eq "2" "$LG_RC" "new --finalize on the item: refused too (exit 2)"
+  assert_contains "$(cat docs/issues/o.md)" "key: x-~$h2" "…o.md unchanged"
+  # After the pull: numbered past maintainer 1's key.
+  git pull -q --no-rebase --no-edit origin main > /dev/null 2>&1
+  lg finalize
+  assert_eq "0" "$LG_RC" "after the pull: exit 0"
+  assert_contains "$(cat docs/issues/o.md)" "key: x-5" "o.md → x-5"
+  lg validate --all --format json
+  assert_json_field "$LG_OUT" '[.findings[]? | select(.class == "duplicate-key")] | length' "0" "no duplicate key"
+  # The remote cannot be reached: a warning, finalized as in 3.3.0.
+  lg_item docs/issues/p.md "key: x-~$(lg_hex4 docs/issues/p.md)" "ledger: x" "status: Open" "summary: Third new item, provisional"
+  git add -A && git commit -qm p
+  git remote set-url origin "$TEST_DIR/no-such-remote.git"
+  lg finalize
+  assert_eq "0" "$LG_RC" "unreachable: exit 0"
+  assert_contains "$LG_ERR" "warning" "…with a warning"
+  assert_contains "$(cat docs/issues/p.md)" "key: x-6" "p.md → x-6"
+  # Offline: no fetch, the same warning.
+  lg_item docs/issues/q.md "key: x-~$(lg_hex4 docs/issues/q.md)" "ledger: x" "status: Open" "summary: Fourth new item, provisional"
+  git add -A && git commit -qm q
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg finalize
+  assert_eq "0" "$LG_RC" "offline: exit 0"
+  assert_contains "$LG_ERR" "warning" "…with a warning"
+  assert_contains "$(cat docs/issues/q.md)" "key: x-7" "q.md → x-7"
+  teardown
+}
+
+test_lg_alloc_lowercase_forbidden_is_refusal() {
+  echo "test: 3.3.1 N1 — the permission pattern matches the capitalised Forbidden (HTTP's reason phrase) only: a hook's lowercase 'forbidden' is a refusal of the content (rc 2), not a permission failure; a bare Forbidden still gives a provisional key"
+  lg_keys_fixture
+  printf '#!/bin/sh\necho "pushes to this ref are forbidden by policy" >&2\nexit 1\n' > "$LG_REMOTE/hooks/pre-receive"
+  chmod +x "$LG_REMOTE/hooks/pre-receive"
+  lg_call _lg_alloc x 1 docs/issues/n.md
+  assert_eq "2" "$LG_RC" "lowercase 'forbidden' from a hook: rc 2"
+  assert_eq "absent" "$(lg_remote_counters)" "…nothing on the remote"
+  printf '#!/bin/sh\necho "remote: Forbidden" >&2\nexit 1\n' > "$LG_REMOTE/hooks/pre-receive"
+  lg_call _lg_alloc x 1 docs/issues/n.md
+  assert_eq "0|x	x-~$(lg_hex4 docs/issues/n.md)" "$LG_RC|$LG_OUT" "a capitalised Forbidden: a provisional key"
+  teardown
+}
+
+# --- 3.3.1 item 9: validate.require_relations ---
+
+# lg_vrel: the no-relations findings of the last JSON verdict (lg_vf).
+lg_vrel() {
+  lg_vf | grep '^no-relations ' || true
+}
+
+# lg_rr_fixture: an open item with no relation (old.md) before the ledger,
+# then the adoption commit (config base main, plus require_relations "new").
+lg_rr_fixture() {
+  lg_fixture
+  lg_registry "$LG_REG_XY"
+  lg_item docs/issues/old.md "key: x-1" "ledger: x" "status: Open" "summary: Open since before the ledger came here"
+  git add -A && git commit -qm "before the ledger"
+  lg_enable '{"base":"main","validate":{"require_relations":"new"}}'
+  git add -A && git commit -qm "adopt the ledger"
+}
+
+test_lg_validate_require_relations_staged() {
+  echo "test: 3.3.1 item 9 — config validate.require_relations \"new\": validate --staged blocks an added open item naming no changes, consumes or relates (no-relations), unless its frontmatter says relations: none; modified and terminal items, and hosts without the key, are unchanged"
+  lg_rr_fixture
+  lg_item docs/issues/n.md "key: x-2" "ledger: x" "status: Open" "summary: A new open item that names no relation"
+  git add -A
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "an added open item with no relation: exit 1"
+  assert_eq "no-relations block docs/issues/n.md" "$(lg_vrel)" "…a blocking no-relations finding"
+  assert_contains "$(jq -r '.findings[] | select(.class == "no-relations") | .detail' <<<"$LG_OUT")" "relations: none" "…naming the opt-out"
+  lg validate --staged
+  assert_contains "$LG_OUT" "no-relations docs/issues/n.md" "text: one line for it"
+  local f
+  for f in "consumes: [field:order.total]" "changes: [field:order.total]" "relates: [depends-on:x-1]" "relations: none" "relations: None"; do
+    lg_item docs/issues/n.md "key: x-2" "ledger: x" "status: Open" "summary: A new open item that names no relation" "$f"
+    git add -A
+    lg validate --staged --format json
+    assert_eq "0|" "$LG_RC|$(lg_vrel)" "$f: passes"
+  done
+  lg_item docs/issues/n.md "key: x-2" "ledger: x" "status: Open" "summary: A new open item that names no relation" "relations: later"
+  git add -A
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "relations: later is no opt-out: exit 1"
+  # A terminal added item, and a modified open one: no finding.
+  lg_item docs/issues/n.md "key: x-2" "ledger: x" "status: Closed" "summary: A new closed item that names no relation"
+  printf '\n## Resolution\n\nDone.\n' >> docs/issues/n.md
+  printf '\nA log line.\n' >> docs/issues/old.md
+  git add -A
+  lg validate --staged --format json
+  assert_eq "0|" "$LG_RC|$(lg_vrel)" "an added closed item and a modified open one (old.md): no finding"
+  # Off (the key absent or null): no finding, exit 0.
+  lg_item docs/issues/n.md "key: x-2" "ledger: x" "status: Open" "summary: A new open item that names no relation"
+  git add -A
+  for f in '{"base":"main"}' '{"base":"main","validate":{"require_relations":null}}' '{"base":"main","validate":{}}'; do
+    lg_enable "$f"
+    lg validate --staged --format json
+    assert_eq "0|" "$LG_RC|$(lg_vrel)" "$f: off — no finding"
+  done
+  teardown
+}
+
+test_lg_validate_require_relations_all() {
+  echo "test: 3.3.1 item 9 — validate --all with validate.require_relations \"new\": an open item whose file is new since the adoption commit (not in its tree, nor renamed from a file there) and names no relation is reported (no-relations, advisory); items from before adoption, renamed ones, opted-out ones and ones with a relation are not; before adoption none is; a base that does not resolve: every open item counts (fails closed)"
+  lg_rr_fixture
+  lg_item docs/issues/a.md "key: x-2" "ledger: x" "status: Open" "summary: Added on the base after the ledger came"
+  lg_item docs/issues/b.md "key: x-3" "ledger: x" "status: Open" "summary: Added after the ledger came, opted out" "relations: none"
+  lg_item docs/issues/c.md "key: x-4" "ledger: x" "status: Open" "summary: Added after the ledger came, with a relation" "consumes: [field:order.total]"
+  lg_item docs/issues/d.md "key: x-5" "ledger: x" "status: Closed" "summary: Added after the ledger came, already closed"
+  printf '\n## Resolution\n\nDone.\n' >> docs/issues/d.md
+  git add -A && git commit -qm "items after adoption"
+  git mv docs/issues/old.md docs/issues/old-renamed.md
+  git commit -qm "rename an old item"
+  lg_item docs/issues/u.md "key: x-6" "ledger: x" "status: Open" "summary: Untracked, in the working tree only"
+  lg validate --all --format json
+  assert_eq "0" "$LG_RC" "advisory only: exit 0"
+  assert_eq "no-relations advisory docs/issues/a.md
+no-relations advisory docs/issues/u.md" "$(lg_vrel)" "a.md (committed after adoption) and u.md (untracked) are reported; old-renamed.md, b.md, c.md, d.md are not"
+  lg validate --all
+  assert_contains "$LG_OUT" "no-relations docs/issues/a.md" "text: a line for a.md"
+  assert_contains "$LG_OUT" "relations: none" "…naming the opt-out"
+  # Off: no finding.
+  lg_enable '{"base":"main"}'
+  lg validate --all --format json
+  assert_eq "" "$(lg_vrel)" "the key absent: no finding"
+  # Before adoption (config base has no commit adding config.json): none.
+  git checkout -q -- docs/ledger/config.json
+  git checkout -q -b pre "HEAD~3"
+  lg_item docs/issues/p.md "key: x-7" "ledger: x" "status: Open" "summary: Added before the ledger reached the base"
+  lg_enable '{"base":"pre","validate":{"require_relations":"new"}}'
+  git add docs/issues/p.md && git commit -qm "p before adoption"
+  lg validate --all --format json
+  assert_eq "" "$(lg_vrel)" "config.json on no commit of the base: no item is new"
+  # A base that does not resolve: every open item counts.
+  lg_enable '{"base":"origin/nowhere","validate":{"require_relations":"new"}}'
+  lg validate --all --format json
+  assert_eq "no-relations advisory docs/issues/old.md
+no-relations advisory docs/issues/p.md
+no-relations advisory docs/issues/u.md" "$(lg_vrel)" "base unresolved: every open item with no relation (fails closed)"
+  teardown
+}
+
+test_lg_validate_require_relations_config() {
+  echo "test: 3.3.1 item 9 — validate.require_relations takes null (off, the default) or \"new\"; any other value, or a validate that is not an object, is a config error: validate --staged and --all exit 2 naming the key"
+  lg_rr_fixture
+  local c
+  for c in '{"validate":{"require_relations":"all"}}' '{"validate":{"require_relations":true}}' '{"validate":{"require_relations":["new"]}}' '{"validate":"new"}'; do
+    lg_enable "$c"
+    lg validate --staged
+    assert_eq "2" "$LG_RC" "$c: --staged exit 2"
+    assert_contains "$LG_ERR" "validate.require_relations" "…naming the key"
+    lg validate --all
+    assert_eq "2" "$LG_RC" "$c: --all exit 2"
+  done
+  lg_enable '{"validate":{"require_relations":null}}'
+  lg validate --all
+  assert_eq "0" "$LG_RC" "null: exit 0"
+  teardown
+}
+
+test_lg_validate_all_state_watch_paths_without_patterns() {
+  echo "test: 3.3.1 item 6 — validate --all reports config state_watch.paths set with state_watch.patterns empty or absent (the state-watch hook never fires): one advisory config finding on docs/ledger/config.json; none with patterns, or without paths"
+  lg_fixture
+  lg_registry "$LG_REG_XY"
+  local c
+  for c in '{"state_watch":{"paths":["~/notes"]}}' '{"state_watch":{"paths":["~/notes"],"patterns":[]}}' \
+      '{"state_watch":{"paths":["~/notes"],"patterns":[""]}}' '{"state_watch":{"paths":["~/notes"],"patterns":null}}'; do
+    lg_enable "$c"
+    lg validate --all --format json
+    assert_eq "0|config advisory docs/ledger/config.json" "$LG_RC|$(lg_vf | grep '^config ' || true)" "$c: one advisory config finding, exit 0"
+    assert_contains "$(jq -r '.findings[] | select(.class == "config") | .detail' <<<"$LG_OUT")" "state_watch.patterns" "…naming state_watch.patterns"
+  done
+  lg validate --all
+  assert_contains "$LG_OUT" "config docs/ledger/config.json state_watch.paths" "text: the config line"
+  for c in '{"state_watch":{"paths":["~/notes"],"patterns":["next:"]}}' '{}' '{"state_watch":{"paths":[],"patterns":[]}}' '{"state_watch":{"paths":[""]}}'; do
+    lg_enable "$c"
+    lg validate --all --format json
+    assert_eq "" "$(lg_vf | grep '^config ' || true)" "$c: no config finding"
+  done
+  teardown
+}
+
+# --- 3.4.0 Task 3: stub defaults, multi-value link, contract suggestions ------------
+
+# lg_stubdef_fixture <config>: one hand-written ledger (w) with an item row
+# and an open row tracked by a plan (a stub to be), the remote, the report
+# against a one-ledger registry; LG_DEC is its decisions file, LG_STUB the
+# stub's path.
+lg_stubdef_fixture() {
+  lg_fixture
+  lg_enable "$1"
+  lg_item work/items/a.md 'status: Open'
+  mkdir -p docs/ledgers docs/plans
+  printf -- '---\nstatus: active\n---\n# Plan\n' > docs/plans/p.md
+  cat > docs/ledgers/w-ledger.md <<'EOF'
+| # | Item | State |
+|---|------|-------|
+| 1 | [a](../../work/items/a.md) | open |
+| 2 | **Port the cart** — [plan](../plans/p.md) | open |
+EOF
+  git add -A && git commit -qm items
+  lg_accept_remote
+  lg_init_edit_reg '{"schema":"ledger-registry/1","ledgers":[{"id":"w","title":"W","kind":"service","status":"active","paths":["work/**"]}]}'
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  LG_DEC=docs/ledger/r.md.decisions.tsv
+  LG_STUB="work/items/$(lg_today)-port-the-cart.md"
+}
+
+test_lg_init_stub_defaults() {
+  echo "test: 3.4.0 item 1 — config init.stub_defaults: each field → scalar written into every file stub init --accept creates, after its own fields (which win), in the config's order; {today} is today's date; items that are not stubs untouched"
+  lg_stubdef_fixture '{"items":{"globs":["work/items/*.md"]},"init":{"stub_defaults":{"type":"bug","priority":"P2","date":"{today}","verify":"seen {today}: manual","status":"Closed","summary":"not this","n":3,"flag":true}}}'
+  local t
+  t=$(lg_today)
+  lg init --accept "$LG_DEC" --dry-run
+  assert_eq "0" "$LG_RC" "--dry-run: exits 0"
+  assert_true "--dry-run: no stub written" test ! -e "$LG_STUB"
+  lg init --accept "$LG_DEC"
+  assert_eq "0" "$LG_RC" "accept exits 0"
+  assert_file_exists "$LG_STUB" "the stub"
+  assert_eq "status: Open|key: w-1|ledger: w|summary: Port the cart|type: bug|priority: P2|date: $t|verify: \"seen $t: manual\"|n: 3|flag: true" \
+    "$(lg_fmblock "$LG_STUB")" "the stub's own fields, then the defaults in order ({today} substituted, a value with ': ' quoted); status and summary not overridden"
+  assert_eq "status: Open" "$(lg_fmblock work/items/a.md)" "an item that is not a stub: no defaults"
+  lg show w#2
+  assert_eq "0" "$LG_RC" "the stub is still an item"
+  teardown
+}
+
+test_lg_init_stub_defaults_yaml_typed_strings_quoted() {
+  echo "test: 3.4.0 — an init.stub_defaults string a YAML loader would type (true/false/yes/no/on/off/y/n, null/~, a number: 007, 1e3, 0x1F, .5, .inf) is written double-quoted, so it stays a string; empty is quoted too; other strings, a date ({today}) and JSON numbers / booleans stay bare"
+  lg_stubdef_fixture '{"items":{"globs":["work/items/*.md"]},"init":{"stub_defaults":{"a":"true","b":"False","c":"Yes","d":"no","e":"on","f":"OFF","g":"y","h":"null","i":"~","j":"007","k":"1e3","l":"0x1F","m":".5","n":"-12","o":".inf","p":"","q":"bug","r":"{today}","s":"1.2.3","t":"truely","u":7,"v":false}}}'
+  local t
+  t=$(lg_today)
+  lg init --accept "$LG_DEC"
+  assert_eq "0" "$LG_RC" "accept exits 0"
+  assert_eq "status: Open|key: w-1|ledger: w|summary: Port the cart|a: \"true\"|b: \"False\"|c: \"Yes\"|d: \"no\"|e: \"on\"|f: \"OFF\"|g: \"y\"|h: \"null\"|i: \"~\"|j: \"007\"|k: \"1e3\"|l: \"0x1F\"|m: \".5\"|n: \"-12\"|o: \".inf\"|p: \"\"|q: bug|r: $t|s: 1.2.3|t: truely|u: 7|v: false" \
+    "$(lg_fmblock "$LG_STUB")" "typed-looking strings quoted; plain strings, the date, a JSON number and boolean bare"
+  lg show w#2 --format json
+  assert_eq "0" "$LG_RC" "the stub is still an item"
+  teardown
+}
+
+test_lg_init_stub_defaults_hosted() {
+  echo "test: 3.4.0 item 1 — a hosted stub (items.globs [] with an items adapter) gets init.stub_defaults through the adapter's write, its own fields winning"
+  lg_init_fixture
+  lg_accept_remote
+  lg_fake_gh
+  lg_enable '{"items":{"globs":[],"adapter":"doc-superpowers:ledger-items-gh"},"legacy_ledgers":{"checkout":"docs/ledgers/checkout-ledger.md"},"init":{"stub_defaults":{"type":"bug","ledger":"nope"}}}'
+  lg_init_edit_reg
+  lg init --report docs/ledger/r.md --registry docs/ledger/edited.json
+  lg init --accept docs/ledger/r.md.decisions.tsv
+  assert_eq "0" "$LG_RC" "accept exits 0"
+  assert_contains "$(jq -r '.[0].body' "$LG_GH/issues.json")" "type: bug" "the default in the issue's block"
+  assert_eq "ledger:checkout" "$(jq -r '.[0] | [.labels[].name] | join(",")' "$LG_GH/issues.json")" "its own ledger wins"
+  lg_fake_gh_off
+  teardown
+}
+
+test_lg_init_stub_defaults_config_errors() {
+  echo "test: 3.4.0 item 1 — init.stub_defaults must be an object of field → string, number or boolean, with {today} the one token: anything else exits 2 before anything is written (--dry-run too); absent, null or {} change nothing"
+  local c
+  for c in '{"init":{"stub_defaults":{"type":{"a":1}}}}' '{"init":{"stub_defaults":{"type":["bug"]}}}' \
+      '{"init":{"stub_defaults":{"type":null}}}' '{"init":{"stub_defaults":{"date":"{tomorrow}"}}}' \
+      '{"init":{"stub_defaults":{"date":"x {} y"}}}' '{"init":{"stub_defaults":["type"]}}' '{"init":{"stub_defaults":"x"}}' \
+      '{"init":"x"}' '{"init":{"stub_defaults":{"bad name":"x"}}}' '{"init":{"stub_defaults":{"type":"a\nb"}}}'; do
+    lg_stubdef_fixture "$(jq -c '. + {"items":{"globs":["work/items/*.md"]}}' <<<"$c")"
+    lg init --accept "$LG_DEC" --dry-run
+    assert_eq "2" "$LG_RC" "$c: --dry-run exits 2"
+    assert_contains "$LG_ERR" "init.stub_defaults" "$c: …naming init.stub_defaults"
+    lg init --accept "$LG_DEC"
+    assert_eq "2" "$LG_RC" "$c: exits 2"
+    assert_true "$c: no stub written" test ! -e "$LG_STUB"
+    assert_true "$c: no ledgers.json written" test ! -e docs/ledger/ledgers.json
+    teardown
+  done
+  for c in '{"init":{"stub_defaults":null}}' '{"init":{"stub_defaults":{}}}' '{"init":null}'; do
+    lg_stubdef_fixture "$(jq -c '. + {"items":{"globs":["work/items/*.md"]}}' <<<"$c")"
+    lg init --accept "$LG_DEC"
+    assert_eq "0" "$LG_RC" "$c: exits 0"
+    assert_eq "status: Open|key: w-1|ledger: w|summary: Port the cart" "$(lg_fmblock "$LG_STUB")" "$c: the stub as without the key"
+    teardown
+  done
+}
+
+test_lg_link_multi_value() {
+  echo "test: 3.4.0 item 8 — ledger link takes comma-separated values per flag (spaces around them ignored): all checked first (one bad: exit 1, nothing written), then one write; a flow list, a block list and a missing field each get every new value; a repeat is one value"
+  lg_rel_fixture
+  local before
+  lg link core-3 --consumes "field:order.total, endpoint:create" --changes component:Sheet
+  assert_eq "0" "$LG_RC" "two consumes and a changes: exit 0"
+  assert_eq "core-3  consumes: field:order.total  (added)
+core-3  consumes: endpoint:create  (added)
+core-3  changes: component:Sheet  (added)" "$LG_OUT" "one line per value, in the order given"
+  assert_contains "$(cat docs/issues/i.md)" "consumes: [field:order.total, endpoint:create]" "both in the flow list"
+  lg link core-3 --consumes endpoint:create,field:order.total,endpoint:create --format json
+  assert_eq "0" "$LG_RC" "values already there: exit 0"
+  assert_json_field "$LG_OUT" '[(.added | length), (.present | map(.value) | join(","))] | tojson' '[0,"endpoint:create,field:order.total"]' \
+    "JSON: both present, the repeat once"
+  # A block list gets one line per new value.
+  printf -- '---\nkey: core-9\nledger: core\nstatus: Open\nsummary: Block list\nchanges:\n  - endpoint:create\n---\n# B\n' > docs/issues/z.md
+  lg link core-9 --changes field:order.total,component:Sheet --relates depends-on:app-1,sibling:APP-3
+  assert_eq "0" "$LG_RC" "block list: exit 0"
+  assert_eq "key: core-9|ledger: core|status: Open|summary: Block list|changes:|  - endpoint:create|  - \"field:order.total\"|  - \"component:Sheet\"|relates: [depends-on:app-1, sibling:app-3]" \
+    "$(lg_fmblock docs/issues/z.md)" "block list extended line by line (the writer quotes a block item holding ':'); relates values each <kind>:<item>"
+  before=$(hash_file docs/issues/z.md)
+  lg link core-9 --consumes field:order.total,field:nope,endpoint:nope
+  assert_eq "1" "$LG_RC" "one bad value among several: exit 1"
+  assert_contains "$LG_OUT" "link: --consumes \"field:nope\" is not a contract" "each bad value named"
+  assert_contains "$LG_OUT" "link: --consumes \"endpoint:nope\" is not a contract" "…every one"
+  lg link core-9 --relates depends-on:app-4,blocks:app-1
+  assert_eq "1" "$LG_RC" "a bad relates value among several: exit 1"
+  lg link core-9 --consumes field:order.total,
+  assert_eq "1" "$LG_RC" "an empty value in the list: exit 1"
+  assert_contains "$LG_OUT" "empty" "…said so"
+  assert_eq "$before" "$(hash_file docs/issues/z.md)" "nothing written by a failed multi-value link"
+  teardown
+}
+
+test_lg_link_relations_none() {
+  echo "test: 3.4.0 (controller addition) — ledger link <item> --relations none writes relations: none (the require_relations opt-out); idempotent; refused (exit 1, nothing written) when the item names a relation or with another relation flag; a later link adding a relation drops the marker in the same write"
+  lg_rel_fixture
+  local before
+  lg link core-3 --relations none
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "core-3  relations: none  (added)" "$LG_OUT" "said so"
+  assert_eq "key: core-3|ledger: core|status: Open|severity: P3|summary: Specified together|relations: none" "$(lg_fmblock docs/issues/i.md)" \
+    "relations: none written"
+  before=$(hash_file docs/issues/i.md)
+  lg link core-3 --relations NONE --format json
+  assert_eq "0" "$LG_RC" "again: exit 0"
+  assert_json_field "$LG_OUT" '[(.added | length), (.present | tojson)] | tojson' '[0,"[{\"field\":\"relations\",\"value\":\"none\"}]"]' \
+    "JSON: already there (any case)"
+  assert_eq "$before" "$(hash_file docs/issues/i.md)" "idempotent: the file unchanged"
+  lg link core-3 --relations some
+  assert_eq "1" "$LG_RC" "a value other than none: exit 1"
+  assert_contains "$LG_OUT" "link: --relations takes none" "…named"
+  lg link core-3 --relations none --consumes field:order.total
+  assert_eq "1" "$LG_RC" "with another relation flag: exit 1"
+  assert_contains "$LG_OUT" "cannot be given with" "…named"
+  lg link app-1 --relations none
+  assert_eq "1" "$LG_RC" "an item that names a relation: exit 1"
+  assert_contains "$LG_OUT" "already names" "…named"
+  assert_not_contains "$(cat docs/issues/a.md)" "relations:" "nothing written"
+  assert_eq "$before" "$(hash_file docs/issues/i.md)" "nothing written by the refused runs"
+  lg link core-3 --consumes field:order.total,endpoint:create --format json
+  assert_eq "0" "$LG_RC" "a relation added: exit 0"
+  assert_eq "key: core-3|ledger: core|status: Open|severity: P3|summary: Specified together|consumes: [field:order.total, endpoint:create]" \
+    "$(lg_fmblock docs/issues/i.md)" "the marker dropped in the same write"
+  assert_json_field "$LG_OUT" '.removed | tojson' '[{"field":"relations","value":"none"}]' "JSON: removed"
+  lg link core-3 --consumes field:order.total --format json
+  assert_json_field "$LG_OUT" 'has("removed")' "false" "no marker: no removed key (the 3.3 payload)"
+  lg link core-3 --relations none
+  assert_eq "1" "$LG_RC" "now that it consumes: refused"
+  teardown
+}
+
+test_lg_link_one_index_read() {
+  echo "test: 3.4.0 item 8 — ledger link reads the index once per run, however many values (a multi-value link costs one build on a large repository)"
+  lg_rel_fixture
+  local err n
+  err=$(harness_mktemp lg-trace)
+  DOC_TOOLS_LEDGER_TRACE=1 "$DOC_TOOLS" ledger link core-3 --consumes field:order.total,endpoint:create --changes component:Sheet \
+    > /dev/null 2> "$err" < /dev/null || true
+  n=$(grep -cE '^index-(hit|build) ' "$err" || true)
+  assert_eq "1" "$n" "one index read (index-hit or index-build) in the run"
+  assert_contains "$(cat docs/issues/i.md)" "consumes: [field:order.total, endpoint:create]" "…and the values written"
+  rm -f "$err"
+  teardown
+}
+
+test_lg_suggest_candidates() {
+  echo "test: 3.4.0 item 7 — ledger suggest <item>: changes candidates from the contracts whose defined_in matches a file it lists, consumes candidates from the contracts its related items (confirmed neighbours, candidates) change or consume, each with its reasons; declared ones left out; a link line to confirm with"
+  lg_rel_fixture
+  lg suggest app-6
+  assert_eq "0" "$LG_RC" "suggest: exit 0"
+  assert_contains "$(sed -n 1p <<<"$LG_OUT")" "app-6  app  P3" "the item's line first"
+  assert_eq "changes  field:order.total  lists src/order/total.js, which defines it" "$(lg_line "$LG_OUT" "changes  ")" \
+    "a listed file defining a contract: a changes candidate"
+  assert_contains "$(lg_line "$LG_OUT" "consumes  field:order.total")" \
+    "app-1 changes it (candidate: names field:order.total, defined in src/order/total.js (a file app-6 lists))" \
+    "a related candidate that changes the contract: a consumes candidate, with why"
+  assert_eq "confirm with: ledger link app-6 --changes field:order.total --consumes field:order.total" "$(tail -n 1 <<<"$LG_OUT")" \
+    "the link line last"
+  lg suggest core-2
+  assert_eq "consumes  field:order.total  app-1 changes it (upstream via depends-on); app-3 changes it (sibling); core-1 consumes it (upstream via root-cause)" \
+    "$(lg_line "$LG_OUT" "consumes  ")" "confirmed neighbours' contracts, one line per contract"
+  assert_eq "" "$(lg_line "$LG_OUT" "changes  ")" "no listed file defines a contract: no changes candidate"
+  lg suggest app-1
+  assert_eq "" "$(lg_line "$LG_OUT" "changes  ")" "a contract it changes already: not suggested for changes"
+  assert_contains "$(lg_line "$LG_OUT" "consumes  field:order.total")" "core-1 consumes it (downstream via field:order.total)" \
+    "…but suggested for consumes (consumes lists a contract it also writes)"
+  lg link core-3 --consumes field:order.total
+  lg suggest core-3
+  assert_eq "core-3  core  P3  spec'd — Specified together
+(no contract candidates)" "$LG_OUT" "every candidate declared: none, and no link line"
+  lg suggest docs/issues/h.md
+  assert_eq "0" "$LG_RC" "a path: as show takes"
+  lg suggest nope-9
+  assert_eq "1" "$LG_RC" "an unknown item: exit 1"
+  lg suggest
+  assert_eq "3" "$LG_RC" "no item: usage (3)"
+  teardown
+}
+
+test_lg_suggest_json_and_read_only() {
+  echo "test: 3.4.0 item 7 — ledger suggest --format json: {item, declared, candidates: [{field, contract, reasons, sources}]}; it writes nothing"
+  lg_rel_fixture
+  local before
+  before=$(cat docs/issues/*.md | cksum)
+  lg suggest app-6 --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "1" "$(json_count "$LG_OUT")" "one object"
+  assert_json_field "$LG_OUT" 'del(.pr_data, .items_data) | keys_unsorted | join(",")' "verb,enabled,exit,item,declared,total,truncated,candidates" \
+    "the top-level keys (pr_data / items_data as show adds them)"
+  assert_json_field "$LG_OUT" '.verb' "ledger suggest" "verb"
+  assert_json_field "$LG_OUT" '.item | [.key, .path] | join("|")' "app-6|docs/issues/h.md" "item"
+  assert_json_field "$LG_OUT" '.declared | tojson' '{"changes":[],"consumes":[]}' "declared"
+  assert_json_field "$LG_OUT" '[.candidates[] | "\(.field) \(.contract)"] | join(",")' "consumes field:order.total,changes field:order.total" \
+    "candidates ranked by evidence: four reasons before one"
+  assert_json_field "$LG_OUT" '[.total, .truncated] | tojson' '[2,false]' "total and truncated"
+  assert_json_field "$LG_OUT" '.candidates[0] | keys_unsorted | join(",")' "field,contract,reasons,sources" "a candidate's keys"
+  assert_json_field "$LG_OUT" '.candidates[1].sources | tojson' '[{"kind":"file","file":"src/order/total.js"}]' "a file source"
+  assert_json_field "$LG_OUT" '.candidates[0].sources | map("\(.kind)/\(.key)/\(.side)") | join(",")' \
+    "candidate/app-1/changes,candidate/app-2/consumes,candidate/app-3/changes,candidate/core-1/consumes" "related sources: kind, key, side"
+  assert_json_field "$LG_OUT" '.candidates[0].sources[0] | keys_unsorted | join(",")' "kind,key,path,side,why" "a related source's keys"
+  assert_json_field "$LG_OUT" '(.candidates[0].reasons | length) == (.candidates[0].sources | length)' "true" "one reason per source"
+  lg suggest core-2 --format json
+  assert_json_field "$LG_OUT" '.candidates[0].sources | map("\(.kind)/\(.key)/\(.why)") | join(",")' \
+    "upstream/app-1/depends-on,sibling/app-3/sibling,upstream/core-1/root-cause" "neighbour sources: their kind and via"
+  lg suggest nope-9 --format json
+  assert_eq "1" "$LG_RC" "an unknown item: exit 1"
+  assert_json_field "$LG_OUT" '[.item, .ref] | tojson' '[null,"nope-9"]' "…{item: null, ref}"
+  assert_eq "$before" "$(cat docs/issues/*.md | cksum)" "no item file changed"
+  teardown
+}
+
+test_lg_new_suggest_contracts() {
+  echo "test: 3.4.0 item 7 — ledger new --suggest-contracts: new's output, then the item's contract candidates (as suggest prints them); JSON adds candidates; nothing but new's own fields written"
+  lg_rel_fixture
+  lg_item docs/issues/n.md "status: Open" "related-files: [src/order/total.js]"
+  lg new --file docs/issues/n.md --ledger unassigned --summary "Total lint again" --suggest-contracts
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "unassigned  docs/issues/n.md" "$(sed -n 1p <<<"$LG_OUT")" "new's line first"
+  assert_eq "changes  field:order.total  lists src/order/total.js, which defines it" "$(lg_line "$LG_OUT" "changes  ")" "then the candidates"
+  assert_eq "confirm with: ledger link docs/issues/n.md --changes field:order.total --consumes field:order.total" "$(tail -n 1 <<<"$LG_OUT")" \
+    "the link line names the path of an item without a key"
+  assert_not_contains "$(cat docs/issues/n.md)" "changes:" "no relation written"
+  lg_item docs/issues/m.md "status: Open" "related-files: [src/order/total.js]"
+  lg new --file docs/issues/m.md --ledger app --summary "Total lint thrice" --suggest-contracts --format json
+  assert_eq "0" "$LG_RC" "with a key (provisional here: no remote): exit 0"
+  assert_json_field "$LG_OUT" '[.path, (.key | startswith("app-")), ([.candidates[] | "\(.field) \(.contract)"] | join(","))] | tojson' \
+    '["docs/issues/m.md",true,"consumes field:order.total,changes field:order.total"]' "JSON: new's payload plus candidates"
+  assert_json_field "$LG_OUT" '[.total, .truncated] | tojson' '[2,false]' "…with total and truncated"
+  lg_item docs/issues/o.md "status: Open"
+  lg new --file docs/issues/o.md --ledger unassigned --summary "No files"
+  assert_eq "unassigned  docs/issues/o.md" "$LG_OUT" "without the flag: new's output only"
+  teardown
+}
+
+test_lg_suggest_top() {
+  echo "test: 3.4.0 — ledger suggest --top N (and new --suggest-contracts --top N): the N candidates with the most evidence (ties by contract id), default 15, 0 all; JSON total and truncated; text \"showing N of M\"; a bad N or --top without --suggest-contracts: usage (3), nothing written"
+  lg_rel_fixture
+  lg suggest app-6 --top 1
+  assert_eq "0" "$LG_RC" "--top 1: exit 0"
+  assert_eq "consumes  field:order.total" "$(lg_line "$LG_OUT" "consumes  " | cut -c1-27)" "the candidate with the most reasons kept"
+  assert_eq "" "$(lg_line "$LG_OUT" "changes  ")" "…the one-reason candidate left out"
+  assert_eq "(showing 1 of 2 candidates; --top 0 shows all)" "$(lg_line "$LG_OUT" "(showing")" "the text says how many are shown"
+  assert_eq "confirm with: ledger link app-6 --consumes field:order.total" "$(tail -n 1 <<<"$LG_OUT")" "the link line names the shown ones"
+  lg suggest app-6 --top 1 --format json
+  assert_json_field "$LG_OUT" '[.total, .truncated, (.candidates | length), .candidates[0].field] | tojson' '[2,true,1,"consumes"]' \
+    "JSON: total 2, truncated, one candidate"
+  lg suggest app-6 --top 0 --format json
+  assert_json_field "$LG_OUT" '[.total, .truncated, (.candidates | length)] | tojson' '[2,false,2]' "--top 0: all"
+  lg suggest app-6 --top 2
+  assert_eq "" "$(lg_line "$LG_OUT" "(showing")" "nothing left out: no showing line"
+  lg suggest app-6 --top=007 --format json
+  assert_json_field "$LG_OUT" '[.total, .truncated] | tojson' '[2,false]' "leading zeros: a whole number"
+  local v
+  for v in -1 x 1.5 "" 1234567890; do
+    lg suggest app-6 --top "$v"
+    assert_eq "3" "$LG_RC" "--top '$v': usage (3)"
+  done
+  lg_item docs/issues/n.md "status: Open" "related-files: [src/order/total.js]"
+  local before
+  before=$(hash_file docs/issues/n.md)
+  lg new --file docs/issues/n.md --ledger unassigned --summary "Total lint again" --top 1
+  assert_eq "3" "$LG_RC" "new --top without --suggest-contracts: usage (3)"
+  lg new --file docs/issues/n.md --ledger unassigned --summary "Total lint again" --suggest-contracts --top x
+  assert_eq "3" "$LG_RC" "new --suggest-contracts --top x: usage (3)"
+  assert_eq "$before" "$(hash_file docs/issues/n.md)" "…nothing written by the refused runs"
+  lg new --file docs/issues/n.md --ledger unassigned --summary "Total lint again" --suggest-contracts --top 1 --format json
+  assert_eq "0" "$LG_RC" "new --suggest-contracts --top 1: exit 0"
+  assert_json_field "$LG_OUT" '[.path, .total, .truncated, ([.candidates[] | "\(.field) \(.contract)"] | join(","))] | tojson' \
+    '["docs/issues/n.md",2,true,"consumes field:order.total"]' "JSON: new's payload, the top candidate, total, truncated"
+  teardown
+  # Seventeen contracts the item's one file defines: one reason each, so the
+  # contract id breaks the tie; the default keeps 15.
+  lg_fixture
+  lg_enable '{"base":"main"}'
+  lg_registry "$(jq -cn '{schema: "ledger-registry/1", ledgers: [{id: "app", title: "App", kind: "service", status: "active",
+    contracts: [range(1; 18) | {id: "field:c\(if . < 10 then "0" else "" end)\(.)", defined_in: ["src/x.js"]}]}]}')"
+  lg_item docs/issues/a.md "key: app-1" "ledger: app" "status: Open" "summary: Many contracts" "related-files: [src/x.js]"
+  mkdir -p src && echo x > src/x.js
+  git add -A && git commit -qm many
+  lg suggest app-1 --format json
+  assert_json_field "$LG_OUT" '[.total, .truncated, (.candidates | length), .candidates[0].contract, .candidates[-1].contract] | tojson' \
+    '[17,true,15,"field:c01","field:c15"]' "default 15: c01..c15 of 17 (ties by contract id)"
+  lg suggest app-1
+  assert_eq "(showing 15 of 17 candidates; --top 0 shows all)" "$(lg_line "$LG_OUT" "(showing")" "text: showing 15 of 17"
+  lg suggest app-1 --top 0 --format json
+  assert_json_field "$LG_OUT" '[.total, .truncated, (.candidates | length)] | tojson' '[17,false,17]' "--top 0: all 17"
+  teardown
+}
+
 test_lg_hook_clip_constants_pinned() {
   echo "test: the ledger hook modes clip with hook-lib.sh's constants (HOOK_MAX_CHARS, HOOK_LINES_MAX): one changed without the other fails here"
   local v lib lg
@@ -12035,6 +12702,29 @@ run_tests() {
   test_lg_help_exit3_and_report_files
   test_lg_state_watch_absolute_entry_resolved
   test_lg_alloc_permission_refusal_provisional
+  # --- 3.3.1 ---
+  test_lg_validate_pushed_existing_branch_merges_base
+  test_lg_notices_gate_fetch_failure_fails_closed
+  test_lg_init_accept_symlinked_legacy_finding
+  test_lg_init_put_refuses_symlink
+  test_lg_merge_finalize_remote_recheck
+  test_lg_alloc_lowercase_forbidden_is_refusal
+  test_lg_validate_require_relations_staged
+  test_lg_validate_require_relations_all
+  test_lg_validate_require_relations_config
+  test_lg_validate_all_state_watch_paths_without_patterns
+  # --- 3.4.0 Task 3 ---
+  test_lg_init_stub_defaults
+  test_lg_init_stub_defaults_yaml_typed_strings_quoted
+  test_lg_init_stub_defaults_hosted
+  test_lg_init_stub_defaults_config_errors
+  test_lg_link_multi_value
+  test_lg_link_relations_none
+  test_lg_link_one_index_read
+  test_lg_suggest_candidates
+  test_lg_suggest_json_and_read_only
+  test_lg_new_suggest_contracts
+  test_lg_suggest_top
 
   print_summary
 }

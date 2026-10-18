@@ -913,6 +913,61 @@ _lg_k_merge_on_base() {
   _lg_die "$msg"
 }
 
+# _lg_k_merge_remote_check: keys.mode merge numbers keys after the highest
+# one in this base, so two maintainers finalizing different copies of the
+# base would give one number to two items, in different files git merges
+# without a conflict (final review CORE-m2). Before finalize writes, fetch
+# the base's branch from its remote — config base's remote and branch for a
+# remote-tracking ref, a local branch's upstream (else keys.remote's branch
+# of the same name) — into a private ref; HEAD must contain its tip, else
+# exit 2 (pull, then run finalize again). The remote has no such branch, or
+# config base is a commit or tag: nothing to compare. Unreachable, or
+# DOC_TOOLS_LEDGER_OFFLINE=1: a warning, and finalize goes on as before.
+_lg_k_merge_remote_check() {
+  local full rest rem="" best="" br="" mref url err d tip
+  if [ "${DOC_TOOLS_LEDGER_OFFLINE:-}" = 1 ]; then
+    echo "ledger: warning: offline (DOC_TOOLS_LEDGER_OFFLINE=1): finalize did not check the remote's base for another maintainer's finalize — pull before you push this one" >&2
+    return 0
+  fi
+  full=$(git rev-parse -q --verify --symbolic-full-name "$_LG_K_BASE" 2>/dev/null) || full=""
+  case "$full" in
+    refs/remotes/?*)
+      rest=${full#refs/remotes/}
+      for rem in $(git remote 2>/dev/null); do
+        case "$rest" in
+          "$rem"/?*) if [ "${#rem}" -gt "${#best}" ]; then best=$rem; fi ;;
+        esac
+      done
+      [ -n "$best" ] || return 0
+      rem=$best
+      br=${rest#"$best"/} ;;
+    refs/heads/?*)
+      br=${full#refs/heads/}
+      rem=$(git config --get "branch.$br.remote" 2>/dev/null) || rem=""
+      mref=$(git config --get "branch.$br.merge" 2>/dev/null) || mref=""
+      case "$rem:$mref" in
+        ?*:refs/heads/?*) br=${mref#refs/heads/} ;;
+        *) rem=$_LG_K_REMOTE ;;
+      esac
+      case "$rem" in .|'') return 0 ;; esac ;;
+    *) return 0 ;;
+  esac
+  url=$(git config --get "remote.$rem.url" 2>/dev/null) || url=$rem
+  d=$(mktemp "$_SCRATCH/lg-kmrc.XXXXXX") || _lg_die "mktemp failed"
+  if ! LC_ALL=C git fetch --quiet --no-tags --no-recurse-submodules "$url" \
+      "+refs/heads/$br:$_LG_BASE_REMOTE" < /dev/null > /dev/null 2> "$d"; then
+    err=$(grep -v '^[[:space:]]*$' "$d" 2>/dev/null | head -n 2 | tr '\n' ' ') || err=""
+    case "$err" in
+      *"couldn't find remote ref"*) return 0 ;;
+    esac
+    echo "ledger: warning: cannot fetch $br from '$rem' (${err:-the fetch failed}): finalize did not check the remote's base for another maintainer's finalize — pull before you push this one" >&2
+    return 0
+  fi
+  tip=$(git rev-parse -q --verify "$_LG_BASE_REMOTE^{commit}" 2>/dev/null) || _lg_die "the fetched base $_LG_BASE_REMOTE is not a commit"
+  git merge-base --is-ancestor "$tip" HEAD 2>/dev/null \
+    || _lg_die "keys.mode merge: $br on '$rem' has commits this base lacks (another maintainer's finalize, or merges): pull them, then run finalize again — finalizing two copies of the base would give one number to two items. Nothing was written."
+}
+
 # _lg_k_finalize <only-path|""> <all 0|1> <out-lines> <out-json> [off-base-rc]
 # [summary-field summary]: replace provisional keys — <only-path>'s; else
 # (cas) those this branch added (provisional keys the base's items do not
@@ -1004,6 +1059,7 @@ _lg_k_finalize() {
     touched=$(GIT_LITERAL_PATHSPECS=1 git status --porcelain -- "${files[@]}" 2>&1) || touched="(git status failed) $touched"
     [ -z "$touched" ] || _lg_die "keys.mode merge: commit or stash the changes to the files finalize rewrites first: $(printf '%s' "$touched" | tr '\n' ' ')"
   fi
+  if [ "$_LG_K_MODE" = merge ]; then _lg_k_merge_remote_check; fi
   # The keys: finalized.json's, else allocated (in "ledger\tpath" order).
   LC_ALL=C awk -F '\t' '$4 == "" { print $2 "\t" $3 }' "$d/todo" > "$d/paths" || _lg_die "cannot write $d/paths"
   : > "$d/keys"
@@ -1071,8 +1127,16 @@ _lg_k_summary_check() {
   [ "$n" -le 140 ] || _lg_usage "--summary is $n characters: at most 140"
 }
 
-# _lg_k_emit_lines <lines-file> <payload-json-file>: the run's output.
+# _lg_k_emit_lines <lines-file> <payload-json-file>: the run's output —
+# for ledger new --suggest-contracts, with the item's contract candidates
+# (relations.sh _lg_suggest_into; the payload's path is the item).
+# shellcheck disable=SC2154  # _OPT_* are set by _parse_args
 _lg_k_emit_lines() {
+  local p
+  if [ "$_LG_VERB" = new ] && [ "${_OPT_suggest_contracts:-}" = 1 ]; then
+    p=$(jq -r '.path' "$2") || _lg_die "jq failed (payload path)"
+    _lg_suggest_into "$p" "$1" "$2"
+  fi
   if [ "$_LG_FORMAT" = json ]; then _lg_emit "$_LG_VERB" 0 "$2"; fi
   _lg_out_file "$1"
   _lg_emit "$_LG_VERB" 0
@@ -1087,6 +1151,14 @@ cmd_ledger_new() {
   S=$_OPT_summary
   F=$_OPT_file
   fin=$_OPT_finalize
+  # --suggest-contracts reads the contracts: a failing contracts adapter
+  # stops the run (2) before anything is written.
+  if [ "$_OPT_suggest_contracts" = 1 ]; then _LG_IX_NEED_CONTRACTS=1; fi
+  # --top (relations.sh _lg_sg_top) only with --suggest-contracts.
+  if _opt_seen top && [ "$_OPT_suggest_contracts" != 1 ]; then
+    _lg_usage "--top goes with --suggest-contracts"
+  fi
+  _lg_sg_top
   _lg_k_cfg
   if _opt_seen summary; then _lg_k_summary_check "$S"; fi
   if [ -n "$L" ]; then _lg_k_check_ledger "$L" 1; fi
@@ -1313,16 +1385,21 @@ cmd_ledger_finalize() {
 
 # _lg_provisional_in_range <a>..<b>: "key\twhere\tpath" for each provisional
 # key the range adds — the item keys at <b> (of the item files the range
-# changes) that no changed item had at <a>. <a> empty or all zeros (a new
+# changes) that no changed item had at <a>, nor at git merge-base <b>
+# <base> (an existing branch that merged the base after a provisional key
+# landed there is not refused for it: 3.3.1). <a> empty or all zeros (a new
 # branch): the keys <b> adds since config base (from git merge-base <b>
 # <base>, so a provisional key already on the base never blocks a new
 # branch: final review CORE-I4); with no base here (it does not resolve, or
-# shares no history with <b>), every provisional key at <b>. <where>:
+# shares no history with <b>), every provisional key at <b> (a new branch)
+# or that the range adds (an existing one). <where>:
 # "base" for a key the base's copy of that file also carries, "nobase" for
-# every key when there is no base to compare, else "" — `ledger finalize`
-# replaces only the keys the base lacks; `--all` the others too.
+# every key when config base does not resolve here, else "" (a base that
+# resolves but shares no history with <b> is still compared file by file,
+# so its keys are "base") — `ledger finalize` replaces only the keys the
+# base lacks; `--all` the others too.
 _lg_provisional_in_range() {
-  local range="$1" a b ac="" bc d basec="" where="" k w p
+  local range="$1" a b ac="" bc d basec="" where="" k w p mb
   case "$range" in
     *..*) a=${range%%..*}; b=${range#*..} ;;
     *) _lg_die "internal: _lg_provisional_in_range takes <a>..<b> (got '$range')" ;;
@@ -1359,6 +1436,18 @@ _lg_provisional_in_range() {
   _lg_parse_blobs "$bc" "$d/paths.z" "$d/b.recs"
   : > "$d/a.recs"
   if [ -n "$ac" ]; then _lg_parse_blobs "$ac" "$d/paths.z" "$d/a.recs"; fi
+  # An existing branch (<a> given): a key the branch got from the base —
+  # one its merge-base with config base already carries — is not this
+  # push's either (3.3.1: a branch that merges the base after a provisional
+  # key lands there; CORE-I4 covered new branches). Only the keys the branch
+  # adds since that merge-base are checked.
+  if [ -n "$a" ] && [ -n "$basec" ]; then
+    mb=$(git merge-base "$bc" "$basec" 2>/dev/null) || mb=""
+    if [ -n "$mb" ] && [ "$mb" != "$ac" ]; then
+      _lg_parse_blobs "$mb" "$d/paths.z" "$d/m.recs"
+      cat "$d/m.recs" >> "$d/a.recs" || _lg_die "cannot write $d/a.recs"
+    fi
+  fi
   jq -L "$_LG_LIB" -n -r --slurpfile c "$_LG_CFG" --slurpfile a "$d/a.recs" "$_LG_JQ_INDEX_DEFS$_LG_JQ_KEYS_DEFS"'
     lg_fields($c[0]) as $F
     | [$a[] | (.fm // {}) | lg_fv($F; "key") | lg_k_prov | select(. != null)] as $old

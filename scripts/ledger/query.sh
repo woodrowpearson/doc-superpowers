@@ -296,7 +296,8 @@ cmd_ledger_find() {
 
 # --- link ------------------------------------------------------------------------
 
-# ledger link <ref> [--consumes C] [--changes C] [--relates <kind>:<item>]:
+# ledger link <ref> [--consumes C[,C…]] [--changes C[,C…]]
+# [--relates <kind>:<item>[,…]] | --relations none:
 # validate every value first — a contract must be one the index knows
 # (registry or contracts adapter); a relates kind is root-cause, depends-on
 # or sibling (case-insensitive) and names, as show resolves, one other item
@@ -304,10 +305,23 @@ cmd_ledger_find() {
 # write (parse.sh _lg_fm_op_list_add; a value already there stays). The
 # field is the first configured candidate name (config fields) the file
 # has, else the first candidate. A relates value is written "<kind>:<key>"
-# with the target's key as the item spells it. Text: "<item>  <field>:
-# <value>  (added | already there)" per value. Any bad value: one "link:
-# <problem>" line each, exit 1, nothing written. JSON: {path, key, added:
-# [{field, value}], present: [{field, value}]} or {problems: [...]}.
+# with the target's key as the item spells it.
+# Several values (3.4.0): a flag's value that is not itself one valid value
+# and holds a comma is a comma list — each piece, trimmed of surrounding
+# blanks, is a value (an empty piece is a bad value); a single value reads
+# as it did before. A value given twice in one run is one value.
+# --relations none (3.4.0; any case) writes "relations: none" — the opt-out
+# validate.require_relations reads — and nothing else: refused (a bad
+# value) beside another relation flag, or when the item already names a
+# changes, consumes or relates value. A link that writes a relation drops
+# a relations: none marker in the same write.
+# Text: "<item>  <field>: <value>  (added | already there)" per value,
+# then "<item>  relations: none  (removed)" when a marker was dropped. Any
+# bad value: one "link: <problem>" line each, exit 1, nothing written.
+# JSON: {path, key, added: [{field, value}], present: [{field, value}]}
+# (+ removed: [{field: "relations", value: "none"}] when a marker was
+# dropped) or {problems: [...]}. The index is read once per run (the
+# resolution of the item and every target happen in one jq pass).
 
 # shellcheck disable=SC2016  # jq source
 _LG_JQ_LINK="$_LG_JQ_RESOLVE_DEFS"'
@@ -319,32 +333,51 @@ _LG_JQ_LINK="$_LG_JQ_RESOLVE_DEFS"'
   else
     first($ix.items[] | select(.path == $R.v)) as $I
     | [($ix.contracts // [])[] | .id] as $ids
-    | [ ($ops[] | select(.f == "consumes" or .f == "changes") | . as $o
-         | if ($ids | index([$o.v])) != null then {f: $o.f, v: $o.v}
-           else {p: "--\($o.f) \($o.v | tojson) is not a contract (registry or contracts adapter)"} end),
-        ($ops[] | select(.f == "relates") | . as $o
-         | ($o.v | capture("^(?<k>[^:]*):(?<t>.+)$") // null) as $m
-         | if $m == null then {p: "--relates \($o.v | tojson) is not <kind>:<item>"}
-           elif (lg_rel_kinds | index([$m.k | ascii_downcase])) == null
-           then {p: "--relates kind \($m.k | tojson) is not root-cause, depends-on or sibling"}
-           else ($ix | lg_resolve($m.t; $c[0])) as $T
-             | if $T.r == "ambiguous" then {p: "--relates \($m.t | tojson) matches several items: \($T.v | join(", "))"}
-               elif $T.r != "item" then {p: "--relates \($m.t | tojson) is not an item"}
-               elif $T.v == $I.path then {p: "--relates \($m.t | tojson) is the item itself"}
-               else first($ix.items[] | select(.path == $T.v)) as $Y
-                 | if ($Y.key | type) != "string" then {p: "--relates \($m.t | tojson) (\($Y.path)) has no key"}
-                   else {f: "relates", v: "\($m.k | ascii_downcase):\($Y.key)"} end
-               end
-           end) ] as $V
+    | def check($f; $v):
+        if $f == "consumes" or $f == "changes" then
+          if ($ids | index([$v])) != null then {f: $f, v: $v}
+          else {p: "--\($f) \($v | tojson) is not a contract (registry or contracts adapter)"} end
+        else
+          ($v | capture("^(?<k>[^:]*):(?<t>.+)$") // null) as $m
+          | if $m == null then {p: "--relates \($v | tojson) is not <kind>:<item>"}
+            elif (lg_rel_kinds | index([$m.k | ascii_downcase])) == null
+            then {p: "--relates kind \($m.k | tojson) is not root-cause, depends-on or sibling"}
+            else ($ix | lg_resolve($m.t; $c[0])) as $T
+              | if $T.r == "ambiguous" then {p: "--relates \($m.t | tojson) matches several items: \($T.v | join(", "))"}
+                elif $T.r != "item" then {p: "--relates \($m.t | tojson) is not an item"}
+                elif $T.v == $I.path then {p: "--relates \($m.t | tojson) is the item itself"}
+                else first($ix.items[] | select(.path == $T.v)) as $Y
+                  | if ($Y.key | type) != "string" then {p: "--relates \($m.t | tojson) (\($Y.path)) has no key"}
+                    else {f: "relates", v: "\($m.k | ascii_downcase):\($Y.key)"} end
+                end
+            end
+        end;
+      def values($f; $v):
+        check($f; $v) as $w
+        | if ($w | has("p")) and ($v | contains(",")) then
+            ($v | split(",") | map(gsub("^\\s+|\\s+$"; ""))) as $ps
+            | if any($ps[]; . == "") then [{p: "--\($f) \($v | tojson) holds an empty value"}]
+              else [$ps[] | check($f; .)] end
+          else [$w] end;
+      ([$ops[] | select(.f != "relations")] | length) as $nrel
+    | [ ($ops[] | select(.f != "relations") | values(.f; .v)[]),
+        ($ops[] | select(.f == "relations") | .v as $v
+         | if ($v | ascii_downcase | gsub("^\\s+|\\s+$"; "")) != "none" then {p: "--relations takes none (got \($v | tojson))"}
+           elif $nrel > 0 then {p: "--relations none cannot be given with --changes, --consumes or --relates"}
+           elif ((($I.changes // []) | length) + (($I.consumes // []) | length) + (($I.relates // []) | length)) > 0
+           then {p: "--relations none: \(($I.key // $I.path)) already names relations (changes, consumes or relates)"}
+           else {f: "relations", v: "none"} end) ] as $V
     | ($V | map(select(has("p")) | .p)) as $P
     | if $P != [] then "bad", $P[]
-      else "ok", ($I.key // ""), ($V[] | "\(.f)\t\(.v)") end
+      else "ok", ($I.key // ""), $I.path,
+        ($V | reduce .[] as $x ([]; if index([$x]) != null then . else . + [$x] end) | .[] | "\(.f)\t\(.v)") end
   end
 '
 
 # _lg_link_names <file>: the frontmatter names of changes, consumes and
 # relates for <file> (the first configured candidate the file has, else the
-# first candidate) into _LG_LN_changes, _LG_LN_consumes, _LG_LN_relates.
+# first candidate) into _LG_LN_changes, _LG_LN_consumes, _LG_LN_relates;
+# _LG_LN_none: 1 when the file says relations: none (any case), else 0.
 _lg_link_names() {
   local d
   _lg_parse_prep
@@ -353,17 +386,19 @@ _lg_link_names() {
     || _lg_die "cannot parse $1"
   jq -L "$_LG_LIB" -r --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS"'
     lg_fields($c[0]) as $F | (.fm // {}) as $fm
-    | ("changes", "consumes", "relates") as $l
-    | ($F[$l] // []) as $cs
-    | (first($cs[] | select(. as $n | $fm | has($n))) // $cs[0] // $l)' "$d.rec" > "$d" \
+    | (("changes", "consumes", "relates") as $l
+       | ($F[$l] // []) as $cs
+       | (first($cs[] | select(. as $n | $fm | has($n))) // $cs[0] // $l)),
+      (if ($fm.relations | type) == "string" and ($fm.relations | ascii_downcase | gsub("^\\s+|\\s+$"; "")) == "none"
+       then "1" else "0" end)' "$d.rec" > "$d" \
     || _lg_die "jq failed (field names of $1)"
-  { IFS= read -r _LG_LN_changes; IFS= read -r _LG_LN_consumes; IFS= read -r _LG_LN_relates; } < "$d" \
+  { IFS= read -r _LG_LN_changes; IFS= read -r _LG_LN_consumes; IFS= read -r _LG_LN_relates; IFS= read -r _LG_LN_none; } < "$d" \
     || _lg_die "cannot read the field names of $1"
 }
 
 # shellcheck disable=SC2154  # _OPT_* and _ARGS are set by _parse_args
 cmd_ledger_link() {
-  local s ref a ops f v key path n field status
+  local s ref a ops f v key path field st linked=0 vals
   _lg_init link
   [ "${#_ARGS[@]}" -ge 1 ] || _lg_usage "give one item: a key, an alias, a legacy ref or a path"
   ref=${_ARGS[0]}
@@ -372,17 +407,18 @@ cmd_ledger_link() {
     _lg_k_multiword "$ref" || _lg_usage "give one item: a key, an alias, a legacy ref or a path (got ${#_ARGS[@]} arguments)"
   fi
   [ -n "$ref" ] || _lg_usage "the item is empty"
-  if [ -z "$_OPTSEEN_consumes$_OPTSEEN_changes$_OPTSEEN_relates" ]; then
-    _lg_usage "give --consumes <contract>, --changes <contract> or --relates <kind>:<item>"
+  if [ -z "$_OPTSEEN_consumes$_OPTSEEN_changes$_OPTSEEN_relates$_OPTSEEN_relations" ]; then
+    _lg_usage "give --consumes <contract>, --changes <contract>, --relates <kind>:<item> or --relations none"
   fi
-  for v in "$_OPT_consumes" "$_OPT_changes" "$_OPT_relates"; do
+  for v in "$_OPT_consumes" "$_OPT_changes" "$_OPT_relates" "$_OPT_relations"; do
     case "$v" in *[$'\n\r']*) _lg_usage "a value cannot hold a line break" ;; esac
   done
-  ops=$(jq -nc --arg cs "$_OPT_consumes" --arg ch "$_OPT_changes" --arg rl "$_OPT_relates" \
-    --arg scs "$_OPTSEEN_consumes" --arg sch "$_OPTSEEN_changes" --arg srl "$_OPTSEEN_relates" '
+  ops=$(jq -nc --arg cs "$_OPT_consumes" --arg ch "$_OPT_changes" --arg rl "$_OPT_relates" --arg rn "$_OPT_relations" \
+    --arg scs "$_OPTSEEN_consumes" --arg sch "$_OPTSEEN_changes" --arg srl "$_OPTSEEN_relates" --arg srn "$_OPTSEEN_relations" '
     [(if $scs == "1" then {f: "consumes", v: $cs} else empty end),
      (if $sch == "1" then {f: "changes", v: $ch} else empty end),
-     (if $srl == "1" then {f: "relates", v: $rl} else empty end)]') || _lg_die "jq failed (link values)"
+     (if $srl == "1" then {f: "relates", v: $rl} else empty end),
+     (if $srn == "1" then {f: "relations", v: $rn} else empty end)]') || _lg_die "jq failed (link values)"
   _LG_IX_NEED_CONTRACTS=1
   _lg_scratch_name
   s=$_LG_SN
@@ -409,41 +445,62 @@ cmd_ledger_link() {
     archived*) _lg_usage "'$ref' is an archived legacy row (${_LG_QHEAD#*	}): there is no item to link" ;;
     *) _lg_die "internal: ledger link: unexpected query result '$_LG_QHEAD'" ;;
   esac
-  _lg_resolve_into "$ref"
-  [ "$_LG_RES_KIND" = item ] || _lg_die "internal: ledger link: '$ref' no longer resolves"
-  path=$_LG_RES
+  # The item's key and path came with the check (one index read per run).
+  { IFS= read -r key; IFS= read -r path; cat > "$s.ops"; } < "$s.out"
+  [ -n "$path" ] || _lg_die "internal: ledger link: no path for '$ref'"
   [ -f "$path" ] || _lg_not_file_die "$path" link
-  { IFS= read -r key; cat > "$s.ops"; } < "$s.out"
   _lg_link_names "$path"
-  # One write: every value queued, then applied.
+  # One write: every value queued, then applied. The values of one field go
+  # in one _lg_fm_op_list_add call (queued adds each carry the list so far).
   _lg_fm_ops_reset
   : > "$s.res"
-  while IFS="$(printf '\t')" read -r f v; do
+  for f in changes consumes relates; do
     case "$f" in
       changes) field=$_LG_LN_changes ;;
       consumes) field=$_LG_LN_consumes ;;
       relates) field=$_LG_LN_relates ;;
-      *) _lg_die "internal: ledger link field '$f'" ;;
     esac
-    n=$_LG_FMO_N
-    _lg_fm_op_list_add "$path" "$field" "$v"
-    if [ "$_LG_FMO_N" -gt "$n" ]; then status=added; else status=present; fi
-    printf '%s\t%s\t%s\n' "$status" "$field" "$v" >> "$s.res"
+    vals=()
+    while IFS="$(printf '\t')" read -r a v; do
+      if [ "$a" = "$f" ]; then vals+=("$v"); fi
+    done < "$s.ops"
+    [ "${#vals[@]}" -gt 0 ] || continue
+    linked=1
+    _lg_fm_op_list_add "$path" "$field" "${vals[@]}"
+    printf '%s\n' "$_LG_FMO_LA" > "$s.st"
+    for v in "${vals[@]}"; do
+      IFS= read -r st
+      printf '%s\t%s\t%s\n' "$st" "$field" "$v"
+    done < "$s.st" > "$s.res.$f"
+  done
+  # The results in the order the values were given.
+  while IFS="$(printf '\t')" read -r a v; do
+    case "$a" in
+      changes|consumes|relates)
+        LG_LKV="$v" LC_ALL=C awk -F '\t' '$3 == ENVIRON["LG_LKV"] { print; exit }' "$s.res.$a" >> "$s.res" ;;
+      relations)
+        if [ "$_LG_LN_none" = 1 ]; then st=present; else st=added; _lg_fm_op set relations none; fi
+        printf '%s\trelations\tnone\n' "$st" >> "$s.res" ;;
+      *) _lg_die "internal: ledger link field '$a'" ;;
+    esac
   done < "$s.ops"
-  # Queued list adds read the file as it is now: two adds to one field
-  # would each rewrite the list from the same start — one op per field
-  # (the values of one field are never more than one per run).
+  # A relation written: the relations: none marker goes in the same write.
+  if [ "$linked" = 1 ] && [ "$_LG_LN_none" = 1 ]; then
+    _lg_fm_op del relations
+    printf 'removed\trelations\tnone\n' >> "$s.res"
+  fi
   _lg_fm_ops_apply "$path"
   if [ "$_LG_FORMAT" = json ]; then
     jq -R -n -c --arg p "$path" --arg k "$key" '
       [inputs | split("\t") | {s: .[0], field: .[1], value: .[2]}] as $r
       | {path: $p, key: (if $k == "" then null else $k end),
          added: [$r[] | select(.s == "added") | {field, value}],
-         present: [$r[] | select(.s == "present") | {field, value}]}' "$s.res" > "$s.json" \
+         present: [$r[] | select(.s == "present") | {field, value}]}
+      + ([$r[] | select(.s == "removed") | {field, value}] | if . == [] then {} else {removed: .} end)' "$s.res" > "$s.json" \
       || _lg_die "jq failed (payload)"
     _lg_emit link 0 "$s.json"
   fi
-  LC_ALL=C awk -F '\t' -v id="${key:-$path}" '{ print id "  " $2 ": " $3 "  (" ($1 == "added" ? "added" : "already there") ")" }' \
+  LC_ALL=C awk -F '\t' -v id="${key:-$path}" '{ print id "  " $2 ": " $3 "  (" ($1 == "added" ? "added" : ($1 == "removed" ? "removed" : "already there")) ")" }' \
     "$s.res" | tr -d '\000-\010\013-\037' > "$s.lines"
   _lg_out_file "$s.lines"
   _lg_emit link 0

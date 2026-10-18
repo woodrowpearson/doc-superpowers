@@ -706,40 +706,55 @@ _lg_fm_list_add() {
   _lg_fm_ops_apply "$1"
 }
 
-# _lg_fm_op_list_add <file> <field> <item>: queue _lg_fm_list_add's edit
-# (nothing when the item is there) — the list as the file holds it now.
+# _lg_fm_op_list_add <file> <field> <item>...: queue _lg_fm_list_add's edit
+# for each item (nothing for one that is there, or given before it) — the
+# list as the file holds it now. Several items: one add per new item, each
+# carrying the list so far (a block list gets one line each; a flow list or
+# a scalar is rewritten whole by each, the last holding every item), so the
+# items of one field must come in one call. _LG_FMO_LA: "added" or
+# "present" per item, one line each, in order.
+_LG_FMO_LA=""
 _lg_fm_op_list_add() {
-  local file="$1" field="$2" item="$3" rec res state count joined
+  local file="$1" field="$2" rec res state it n
+  shift 2
   _lg_fm_field_ok "$field"
   [ -f "$file" ] || _lg_die "cannot edit $file: no such file"
-  case "$item" in
-    *$'\001'*) _lg_die "a list item cannot hold a \\001 byte" ;;
-  esac
+  for it in "$@"; do
+    case "$it" in
+      *$'\001'*|*$'\002'*) _lg_die "a list item cannot hold a \\001 or \\002 byte" ;;
+    esac
+  done
   _lg_parse_prep
   rec=$(LC_ALL=C awk -v path=x "${_LG_PARSE_ARGS[@]}" -f "$_LG_LIB/frontmatter.awk" < "$file") \
     || _lg_die "cannot parse $file"
-  # state ("present" | "write" | "broken"), the count, the new list joined by
-  # \001 — one jq. A "." ends the output: $(…) strips trailing newlines,
-  # which would eat an empty last item or one ending in a newline.
-  res=$(jq -j --arg f "$field" --arg item "$item" '
-    if any(.fm_errors[]; startswith($f + ": ")) then "broken\n0\n"
+  # "broken\n", or per item "present\n" or "write\n<count>\n<the list so
+  # far joined by \001>\002" — one jq. A "." ends the output: $(…) strips
+  # trailing newlines, which would eat an empty last item.
+  res=$(jq -j --arg f "$field" '
+    if any(.fm_errors[]; startswith($f + ": ")) then "broken\n"
     else (.fm[$f]) as $v
       | (if $v == null then [] elif ($v | type) == "array" then $v elif $v == "" then [] else [$v] end) as $cur
-      | if any($cur[]; . == $item) then "present\n0\n"
-        else ($cur + [$item]) as $new
-          | "write\n\($new | length)\n" + ($new | join("\u0001"))
-        end
-    end + "."' <<<"$rec") || _lg_die "cannot read the frontmatter of $file"
+      | (reduce $ARGS.positional[] as $item ({cur: $cur, out: ""};
+           if any(.cur[]; . == $item) then .out += "present\n"
+           else .cur += [$item] | .out += "write\n\(.cur | length)\n" + (.cur | join("\u0001")) + "\u0002" end)).out
+    end + "."' --args "$@" <<<"$rec") || _lg_die "cannot read the frontmatter of $file"
   res=${res%.}
-  state=${res%%$'\n'*}
-  res=${res#*$'\n'}
-  count=${res%%$'\n'*}
-  joined=${res#*$'\n'}
-  case "$state" in
-    present) return 0 ;;
-    broken) _lg_die "cannot edit $field in $file: the parser rejects it (see its fm_errors)" ;;
-    write) ;;
-    *) _lg_die "internal: list add state '$state'" ;;
+  _LG_FMO_LA=""
+  case "$res" in
+    broken*) _lg_die "cannot edit $field in $file: the parser rejects it (see its fm_errors)" ;;
   esac
-  _lg_fm_op add "$field" "$item" "$joined" "$count"
+  for it in "$@"; do
+    state=${res%%$'\n'*}
+    res=${res#*$'\n'}
+    case "$state" in
+      present) _LG_FMO_LA="$_LG_FMO_LA${_LG_FMO_LA:+$'\n'}present" ;;
+      write)
+        n=${res%%$'\n'*}
+        res=${res#*$'\n'}
+        _lg_fm_op add "$field" "$it" "${res%%$'\002'*}" "$n"
+        res=${res#*$'\002'}
+        _LG_FMO_LA="$_LG_FMO_LA${_LG_FMO_LA:+$'\n'}added" ;;
+      *) _lg_die "internal: list add state '$state'" ;;
+    esac
+  done
 }
