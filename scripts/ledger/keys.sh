@@ -1154,6 +1154,11 @@ cmd_ledger_new() {
   # --suggest-contracts reads the contracts: a failing contracts adapter
   # stops the run (2) before anything is written.
   if [ "$_OPT_suggest_contracts" = 1 ]; then _LG_IX_NEED_CONTRACTS=1; fi
+  # --top (relations.sh _lg_sg_top) only with --suggest-contracts.
+  if _opt_seen top && [ "$_OPT_suggest_contracts" != 1 ]; then
+    _lg_usage "--top goes with --suggest-contracts"
+  fi
+  _lg_sg_top
   _lg_k_cfg
   if _opt_seen summary; then _lg_k_summary_check "$S"; fi
   if [ -n "$L" ]; then _lg_k_check_ledger "$L" 1; fi
