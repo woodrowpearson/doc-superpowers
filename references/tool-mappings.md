@@ -37,7 +37,7 @@ Use the tool that does the same job in your client. Only the skill's own referen
 | Git hook tier (`--git`) | yes | yes | yes | yes | yes |
 | Claude hook tier (`--claude`) | yes | unverified: Cursor runs Claude Code hooks from `.claude/settings.json` when *Include Third-Party Plugins, Skills, and Other Configs* is on; this tier writes `.claude/settings.local.json`, which Cursor's docs do not name | no | no | no |
 | Work-ledger git legs (`--ledger`) | yes | yes | yes | yes | yes |
-| Work-ledger Claude events (`--ledger-claude`: `SessionStart`, `PostToolUse` `Write\|Edit`) | yes | unverified, as for `--claude`; whether Cursor maps `SessionStart` is undocumented | no | no | no |
+| Work-ledger Claude events (`--ledger-claude`: `SessionStart`, `PostToolUse` `Write\|Edit\|MultiEdit`) | yes | unverified, as for `--claude`; whether Cursor maps `SessionStart` is undocumented | no | no | no |
 | CI tier (`--ci`) | yes | yes | yes | yes | yes |
 | Web search / fetch | yes | yes | search only, model-dependent | yes | yes |
 | Diagram PNGs (`diagram`) | with a Mermaid MCP server | with a Mermaid MCP server | with a Mermaid MCP server | with a Mermaid MCP server | with a Mermaid MCP server |
