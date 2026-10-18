@@ -1502,7 +1502,7 @@ status_ledger() {
 
 status_ledger_claude() {
   local h ev reg="" any
-  echo "Ledger Claude Code hooks (the opt-in --ledger-claude set, per-user; never part of --all or --claude):"
+  echo "Ledger Claude Code hooks (the opt-in --ledger-claude set, per-user; never installed by --all or --claude):"
   # Each registered entry of the set: "<event> <script> <ok|old> <command>",
   # ok when its group's matcher is the one install writes (lg_matcher).
   if [ -e "$SETTINGS_FILE" ]; then
