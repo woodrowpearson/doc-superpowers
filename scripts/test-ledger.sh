@@ -11900,6 +11900,20 @@ test_lg_init_stub_defaults() {
   teardown
 }
 
+test_lg_init_stub_defaults_yaml_typed_strings_quoted() {
+  echo "test: 3.4.0 — an init.stub_defaults string a YAML loader would type (true/false/yes/no/on/off/y/n, null/~, a number: 007, 1e3, 0x1F, .5, .inf) is written double-quoted, so it stays a string; empty is quoted too; other strings, a date ({today}) and JSON numbers / booleans stay bare"
+  lg_stubdef_fixture '{"items":{"globs":["work/items/*.md"]},"init":{"stub_defaults":{"a":"true","b":"False","c":"Yes","d":"no","e":"on","f":"OFF","g":"y","h":"null","i":"~","j":"007","k":"1e3","l":"0x1F","m":".5","n":"-12","o":".inf","p":"","q":"bug","r":"{today}","s":"1.2.3","t":"truely","u":7,"v":false}}}'
+  local t
+  t=$(lg_today)
+  lg init --accept "$LG_DEC"
+  assert_eq "0" "$LG_RC" "accept exits 0"
+  assert_eq "status: Open|key: w-1|ledger: w|summary: Port the cart|a: \"true\"|b: \"False\"|c: \"Yes\"|d: \"no\"|e: \"on\"|f: \"OFF\"|g: \"y\"|h: \"null\"|i: \"~\"|j: \"007\"|k: \"1e3\"|l: \"0x1F\"|m: \".5\"|n: \"-12\"|o: \".inf\"|p: \"\"|q: bug|r: $t|s: 1.2.3|t: truely|u: 7|v: false" \
+    "$(lg_fmblock "$LG_STUB")" "typed-looking strings quoted; plain strings, the date, a JSON number and boolean bare"
+  lg show w#2 --format json
+  assert_eq "0" "$LG_RC" "the stub is still an item"
+  teardown
+}
+
 test_lg_init_stub_defaults_hosted() {
   echo "test: 3.4.0 item 1 — a hosted stub (items.globs [] with an items adapter) gets init.stub_defaults through the adapter's write, its own fields winning"
   lg_init_fixture
@@ -12070,19 +12084,20 @@ test_lg_suggest_json_and_read_only() {
   lg suggest app-6 --format json
   assert_eq "0" "$LG_RC" "exit 0"
   assert_eq "1" "$(json_count "$LG_OUT")" "one object"
-  assert_json_field "$LG_OUT" 'del(.pr_data, .items_data) | keys_unsorted | join(",")' "verb,enabled,exit,item,declared,candidates" \
+  assert_json_field "$LG_OUT" 'del(.pr_data, .items_data) | keys_unsorted | join(",")' "verb,enabled,exit,item,declared,total,truncated,candidates" \
     "the top-level keys (pr_data / items_data as show adds them)"
   assert_json_field "$LG_OUT" '.verb' "ledger suggest" "verb"
   assert_json_field "$LG_OUT" '.item | [.key, .path] | join("|")' "app-6|docs/issues/h.md" "item"
   assert_json_field "$LG_OUT" '.declared | tojson' '{"changes":[],"consumes":[]}' "declared"
-  assert_json_field "$LG_OUT" '[.candidates[] | "\(.field) \(.contract)"] | join(",")' "changes field:order.total,consumes field:order.total" \
-    "candidates: changes first"
+  assert_json_field "$LG_OUT" '[.candidates[] | "\(.field) \(.contract)"] | join(",")' "consumes field:order.total,changes field:order.total" \
+    "candidates ranked by evidence: four reasons before one"
+  assert_json_field "$LG_OUT" '[.total, .truncated] | tojson' '[2,false]' "total and truncated"
   assert_json_field "$LG_OUT" '.candidates[0] | keys_unsorted | join(",")' "field,contract,reasons,sources" "a candidate's keys"
-  assert_json_field "$LG_OUT" '.candidates[0].sources | tojson' '[{"kind":"file","file":"src/order/total.js"}]' "a file source"
-  assert_json_field "$LG_OUT" '.candidates[1].sources | map("\(.kind)/\(.key)/\(.side)") | join(",")' \
+  assert_json_field "$LG_OUT" '.candidates[1].sources | tojson' '[{"kind":"file","file":"src/order/total.js"}]' "a file source"
+  assert_json_field "$LG_OUT" '.candidates[0].sources | map("\(.kind)/\(.key)/\(.side)") | join(",")' \
     "candidate/app-1/changes,candidate/app-2/consumes,candidate/app-3/changes,candidate/core-1/consumes" "related sources: kind, key, side"
-  assert_json_field "$LG_OUT" '.candidates[1].sources[0] | keys_unsorted | join(",")' "kind,key,path,side,why" "a related source's keys"
-  assert_json_field "$LG_OUT" '(.candidates[1].reasons | length) == (.candidates[1].sources | length)' "true" "one reason per source"
+  assert_json_field "$LG_OUT" '.candidates[0].sources[0] | keys_unsorted | join(",")' "kind,key,path,side,why" "a related source's keys"
+  assert_json_field "$LG_OUT" '(.candidates[0].reasons | length) == (.candidates[0].sources | length)' "true" "one reason per source"
   lg suggest core-2 --format json
   assert_json_field "$LG_OUT" '.candidates[0].sources | map("\(.kind)/\(.key)/\(.why)") | join(",")' \
     "upstream/app-1/depends-on,sibling/app-3/sibling,upstream/core-1/root-cause" "neighbour sources: their kind and via"
@@ -12108,10 +12123,66 @@ test_lg_new_suggest_contracts() {
   lg new --file docs/issues/m.md --ledger app --summary "Total lint thrice" --suggest-contracts --format json
   assert_eq "0" "$LG_RC" "with a key (provisional here: no remote): exit 0"
   assert_json_field "$LG_OUT" '[.path, (.key | startswith("app-")), ([.candidates[] | "\(.field) \(.contract)"] | join(","))] | tojson' \
-    '["docs/issues/m.md",true,"changes field:order.total,consumes field:order.total"]' "JSON: new's payload plus candidates"
+    '["docs/issues/m.md",true,"consumes field:order.total,changes field:order.total"]' "JSON: new's payload plus candidates"
+  assert_json_field "$LG_OUT" '[.total, .truncated] | tojson' '[2,false]' "…with total and truncated"
   lg_item docs/issues/o.md "status: Open"
   lg new --file docs/issues/o.md --ledger unassigned --summary "No files"
   assert_eq "unassigned  docs/issues/o.md" "$LG_OUT" "without the flag: new's output only"
+  teardown
+}
+
+test_lg_suggest_top() {
+  echo "test: 3.4.0 — ledger suggest --top N (and new --suggest-contracts --top N): the N candidates with the most evidence (ties by contract id), default 15, 0 all; JSON total and truncated; text \"showing N of M\"; a bad N or --top without --suggest-contracts: usage (3), nothing written"
+  lg_rel_fixture
+  lg suggest app-6 --top 1
+  assert_eq "0" "$LG_RC" "--top 1: exit 0"
+  assert_eq "consumes  field:order.total" "$(lg_line "$LG_OUT" "consumes  " | cut -c1-27)" "the candidate with the most reasons kept"
+  assert_eq "" "$(lg_line "$LG_OUT" "changes  ")" "…the one-reason candidate left out"
+  assert_eq "(showing 1 of 2 candidates; --top 0 shows all)" "$(lg_line "$LG_OUT" "(showing")" "the text says how many are shown"
+  assert_eq "confirm with: ledger link app-6 --consumes field:order.total" "$(tail -n 1 <<<"$LG_OUT")" "the link line names the shown ones"
+  lg suggest app-6 --top 1 --format json
+  assert_json_field "$LG_OUT" '[.total, .truncated, (.candidates | length), .candidates[0].field] | tojson' '[2,true,1,"consumes"]' \
+    "JSON: total 2, truncated, one candidate"
+  lg suggest app-6 --top 0 --format json
+  assert_json_field "$LG_OUT" '[.total, .truncated, (.candidates | length)] | tojson' '[2,false,2]' "--top 0: all"
+  lg suggest app-6 --top 2
+  assert_eq "" "$(lg_line "$LG_OUT" "(showing")" "nothing left out: no showing line"
+  lg suggest app-6 --top=007 --format json
+  assert_json_field "$LG_OUT" '[.total, .truncated] | tojson' '[2,false]' "leading zeros: a whole number"
+  local v
+  for v in -1 x 1.5 "" 1234567890; do
+    lg suggest app-6 --top "$v"
+    assert_eq "3" "$LG_RC" "--top '$v': usage (3)"
+  done
+  lg_item docs/issues/n.md "status: Open" "related-files: [src/order/total.js]"
+  local before
+  before=$(hash_file docs/issues/n.md)
+  lg new --file docs/issues/n.md --ledger unassigned --summary "Total lint again" --top 1
+  assert_eq "3" "$LG_RC" "new --top without --suggest-contracts: usage (3)"
+  lg new --file docs/issues/n.md --ledger unassigned --summary "Total lint again" --suggest-contracts --top x
+  assert_eq "3" "$LG_RC" "new --suggest-contracts --top x: usage (3)"
+  assert_eq "$before" "$(hash_file docs/issues/n.md)" "…nothing written by the refused runs"
+  lg new --file docs/issues/n.md --ledger unassigned --summary "Total lint again" --suggest-contracts --top 1 --format json
+  assert_eq "0" "$LG_RC" "new --suggest-contracts --top 1: exit 0"
+  assert_json_field "$LG_OUT" '[.path, .total, .truncated, ([.candidates[] | "\(.field) \(.contract)"] | join(","))] | tojson' \
+    '["docs/issues/n.md",2,true,"consumes field:order.total"]' "JSON: new's payload, the top candidate, total, truncated"
+  teardown
+  # Seventeen contracts the item's one file defines: one reason each, so the
+  # contract id breaks the tie; the default keeps 15.
+  lg_fixture
+  lg_enable '{"base":"main"}'
+  lg_registry "$(jq -cn '{schema: "ledger-registry/1", ledgers: [{id: "app", title: "App", kind: "service", status: "active",
+    contracts: [range(1; 18) | {id: "field:c\(if . < 10 then "0" else "" end)\(.)", defined_in: ["src/x.js"]}]}]}')"
+  lg_item docs/issues/a.md "key: app-1" "ledger: app" "status: Open" "summary: Many contracts" "related-files: [src/x.js]"
+  mkdir -p src && echo x > src/x.js
+  git add -A && git commit -qm many
+  lg suggest app-1 --format json
+  assert_json_field "$LG_OUT" '[.total, .truncated, (.candidates | length), .candidates[0].contract, .candidates[-1].contract] | tojson' \
+    '[17,true,15,"field:c01","field:c15"]' "default 15: c01..c15 of 17 (ties by contract id)"
+  lg suggest app-1
+  assert_eq "(showing 15 of 17 candidates; --top 0 shows all)" "$(lg_line "$LG_OUT" "(showing")" "text: showing 15 of 17"
+  lg suggest app-1 --top 0 --format json
+  assert_json_field "$LG_OUT" '[.total, .truncated, (.candidates | length)] | tojson' '[17,false,17]' "--top 0: all 17"
   teardown
 }
 
@@ -12644,6 +12715,7 @@ run_tests() {
   test_lg_validate_all_state_watch_paths_without_patterns
   # --- 3.4.0 Task 3 ---
   test_lg_init_stub_defaults
+  test_lg_init_stub_defaults_yaml_typed_strings_quoted
   test_lg_init_stub_defaults_hosted
   test_lg_init_stub_defaults_config_errors
   test_lg_link_multi_value
@@ -12652,6 +12724,7 @@ run_tests() {
   test_lg_suggest_candidates
   test_lg_suggest_json_and_read_only
   test_lg_new_suggest_contracts
+  test_lg_suggest_top
 
   print_summary
 }

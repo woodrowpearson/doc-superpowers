@@ -14,14 +14,16 @@
 #
 # -v status=<file>, -v bom=<the BOM's bytes>. The edits come through ENVIRON
 # (never -v, which processes backslashes), applied in order 1..LG_FMW_NOPS:
-#   LG_FMW_<k>_OP      set | setlist | add | del
+#   LG_FMW_<k>_OP      set | setq | setlist | add | del (setq: set, the value
+#                      always double-quoted — a string a YAML loader would
+#                      otherwise type, e.g. true or 007)
 #   LG_FMW_<k>_FIELD   the field name (the caller validated it)
 #   LG_FMW_<k>_VALUE   set: the scalar; add: the new item (a block list gets
 #                      it as one more "- item" line)
 #   LG_FMW_<k>_ITEMS, LG_FMW_<k>_NITEMS   setlist / add on a flow list or a
 #                      scalar: the whole new list, items joined by \001
 #
-# set / setlist replace the field's line and its continuation lines (the
+# set / setq / setlist replace the field's line and its continuation lines (the
 # indented, blank or "- " lines under it) at its first occurrence and drop any
 # later duplicate; a missing field is appended as the LAST frontmatter line.
 # setlist on a block list keeps the block form (its "key:" line as it was, one
@@ -119,6 +121,7 @@ function flow_line(   i, s) {
 
 function new_line() {
   if (OP == "set") return FIELD ": " fmt_scalar(VALUE)
+  if (OP == "setq") return FIELD ": " dq(VALUE)
   return flow_line()
 }
 

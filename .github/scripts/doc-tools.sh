@@ -2501,8 +2501,8 @@ ledger state-watch|cmd_ledger_state_watch|repo|hook
   Otherwise nothing. Always exits 0, printing nothing else (as notices
   --hook); DOC_SUPERPOWERS_LEDGER_SKIP=1 or DOC_SUPERPOWERS_SKIP=1:
   silent.
-ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize suggest-contracts format=
-  --ledger <id|unassigned> --summary <text> [--file <issue>] [--finalize] [--suggest-contracts] [--format text|json]
+ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize suggest-contracts top= format=
+  --ledger <id|unassigned> --summary <text> [--file <issue>] [--finalize] [--suggest-contracts [--top N]] [--format text|json]
   Allocate an item key and write key, ledger and summary (at most 140
   characters, one line) into an issue: <issue> defaults to the one staged
   or untracked item file without a key (none or several: exit 3).
@@ -2515,29 +2515,33 @@ ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize suggest-contracts
   --finalize allocates for real or fails (exit 2) — and, on an
   issue that has a provisional key, finalizes that one key (--ledger and
   --summary optional). Prints "<key>  <path>". --suggest-contracts then
-  prints the item's contract candidates as ledger suggest does (after the
-  write; JSON: "candidates", suggest's shape) and writes no relation.
+  prints the item's contract candidates as ledger suggest does, --top
+  included (after the write; JSON: "total", "truncated" and "candidates",
+  suggest's shape) and writes no relation; --top without it: exit 3.
 ledger assign|cmd_ledger_assign|repo|format=
   <item> <ledger> [--format text|json]
   Move an item to a ledger: a new key there; the previous key is appended
   to its aliases. <item> takes what show takes. Prints
   "<key>  <path>  (was <old key>)".
-ledger suggest|cmd_ledger_suggest|repo|format=
-  <item> [--format text|json]
+ledger suggest|cmd_ledger_suggest|repo|top= format=
+  <item> [--top N] [--format text|json]
   Propose contracts for an item to declare; writes nothing. changes
   candidates: the contracts whose defined_in matches a file the item
   lists (its paths field); consumes candidates: the contracts its related
   items — confirmed neighbours (upstream, downstream, siblings) and the
   open candidates related shows — change or consume. Contracts the item
   already declares on that side are left out; only registry or contracts
-  adapter contracts are offered. Text: the item's line, then "<field>
-  <contract>  <reasons>" per candidate (changes first, then by the
-  number of reasons, then contract), then "confirm with: ledger link
-  <item> --changes a,b --consumes c" — or "(no contract candidates)".
-  JSON: {"item": {key, path, ledger, severity, display, summary},
-  "declared": {"changes": [...], "consumes": [...]}, "candidates":
-  [{"field": "changes"|"consumes", "contract", "reasons": [text...],
-  "sources": [{"kind": "file", "file"} | {"kind": "upstream"|
+  adapter contracts are offered. Candidates rank by their evidence (the
+  number of reasons, most first), then contract id, then changes before
+  consumes; --top N keeps the first N (default 15; 0: all). Text: the
+  item's line, then "<field>  <contract>  <reasons>" per candidate, then
+  "(showing N of M candidates; --top 0 shows all)" when some were left
+  out, then "confirm with: ledger link <item> --changes a,b --consumes c"
+  — or "(no contract candidates)". JSON: {"item": {key, path, ledger,
+  severity, display, summary}, "declared": {"changes": [...],
+  "consumes": [...]}, "total": <every candidate>, "truncated": <bool>,
+  "candidates": [{"field": "changes"|"consumes", "contract", "reasons":
+  [text...], "sources": [{"kind": "file", "file"} | {"kind": "upstream"|
   "downstream"|"sibling"|"candidate", "key", "path", "side":
   "changes"|"consumes", "why"}]}]} (one source per reason, in the same
   order; "pr_data"/"items_data" as show adds them). <item> takes what

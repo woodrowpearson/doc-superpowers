@@ -1270,13 +1270,18 @@ _lg_init_glob_check() {
 # _lg_init_stub_defaults <today> <out> (3.4.0): config init.stub_defaults —
 # an object of frontmatter field → string, number or boolean (default {};
 # null or absent: none) — checked and resolved into <out>, one
-# "<field>\t<value>" line each in the config's order: a number or boolean as
-# its JSON text, every "{today}" in a string replaced by <today>
-# (YYYY-MM-DD, the local date). Anything else is a config error (2), before
-# init --accept writes anything: init or stub_defaults not an object, a
-# field name the frontmatter parser would not read back, another value
-# (null, a list, an object), a control character (a line break) in a
-# string, or a "{…}" token other than {today}. The stub writer
+# "<q|->\t<field>\t<value>" line each in the config's order: a number or
+# boolean as its JSON text, every "{today}" in a string replaced by <today>
+# (YYYY-MM-DD, the local date). "q" marks a string a YAML loader would read
+# as another type — true / false / yes / no / on / off / y / n, null / ~,
+# a number (007, 1e3, 0x1F, .5, .inf) — which the file stub writes
+# double-quoted (setq) so that it stays a string; a date (and {today}) is
+# left bare, a date being what such a field wants. Anything else is a
+# config error (2), before init --accept writes anything: init or
+# stub_defaults not an object, a field name the frontmatter parser would
+# not read back, another value (null, a list, an object), a control
+# character (a line break) in a string, or a "{…}" token other than
+# {today}. The stub writer
 # (_lg_init_accept_apply) applies them after a stub's own fields, which win.
 _lg_init_stub_defaults() {
   local v
@@ -1292,12 +1297,16 @@ _lg_init_stub_defaults() {
         else $d | to_entries[]
           | .key as $k | .value as $x
           | if ($k | test("^[A-Za-z0-9_][A-Za-z0-9_.-]*$") | not) then bad("init.stub_defaults: \($k | tojson) is not a frontmatter field name")
-            elif ($x | type) == "number" or ($x | type) == "boolean" then "\($k)\t\($x | tojson)"
+            elif ($x | type) == "number" or ($x | type) == "boolean" then "-\t\($k)\t\($x | tojson)"
             elif ($x | type) != "string" then bad("init.stub_defaults.\($k) is \($x | tojson): give a string, a number or a boolean")
             elif ($x | test("[\u0000-\u001f\u007f]")) then bad("init.stub_defaults.\($k) holds a control character (a line break?)")
             elif ([$x | scan("\\{[^{}]*\\}")] | map(select(. != "{today}")) | length) > 0
             then bad("init.stub_defaults.\($k): \([$x | scan("\\{[^{}]*\\}")] | map(select(. != "{today}"))[0] | tojson) is not a token (the one token is {today})")
-            else "\($k)\t\($x | gsub("\\{today\\}"; $today))" end
+            else ($x | gsub("\\{today\\}"; $today)) as $v
+              | (if ($v | test("^(y|n|yes|no|true|false|on|off|null|~)$"; "i"))
+                    or ($v | test("^[-+]?(0b[01_]+|0x[0-9a-f_]+|0o[0-7_]+|[0-9][0-9_]*(\\.[0-9_]*)?(e[-+]?[0-9]+)?|\\.[0-9][0-9_]*(e[-+]?[0-9]+)?|\\.(inf|nan))$"; "i"))
+                 then "q" else "-" end) as $q
+              | "\($q)\t\($k)\t\($v)" end
         end
       end' "$_LG_CFG") || _lg_die "jq failed (config init.stub_defaults)"
   case "$v" in
@@ -1547,7 +1556,7 @@ _lg_init_ci_note() {
 # writes, the stubs, legacy.json, the views, the output.
 _lg_init_accept_apply() {
   local s="$1" dry="$2" lgpath="$3" tsv="$4" rec path hosted key prev ledger summary nk nl ns na what
-  local file row id st sk sl ss text body out ref rc=0 views="" vdir a an aj lnk dn dv tab=$'\t'
+  local file row id st sk sl ss text body out ref rc=0 views="" vdir a an aj lnk dq dn dv tab=$'\t'
   vdir="$_LG_CACHE/views"
   [ -e "$s.written" ] || : > "$s.written"
   : > "$s.lines"
@@ -1633,7 +1642,7 @@ _lg_init_accept_apply() {
       [ -z "$key" ] || _lg_init_hosted_write "$ref" key "$key"
       # Config init.stub_defaults (_lg_init_stub_defaults): the stub's own
       # fields win.
-      while IFS="$tab" read -r dn dv <&3; do
+      while IFS="$tab" read -r dq dn dv <&3; do
         case "$dn" in status|key|ledger|summary|"$st"|"$sk"|"$sl"|"$ss") continue ;; esac
         _lg_init_hosted_write "$ref" "$dn" "$dv"
       done 3< "$s.sdef"
@@ -1646,9 +1655,9 @@ _lg_init_accept_apply() {
       [ -z "$key" ] || _lg_fm_op set "$sk" "$key"
       _lg_fm_op set "$sl" "$ledger"
       _lg_fm_op set "$ss" "$summary"
-      while IFS="$tab" read -r dn dv <&3; do
+      while IFS="$tab" read -r dq dn dv <&3; do
         case "$dn" in "$st"|"$sk"|"$sl"|"$ss") continue ;; esac
-        _lg_fm_op set "$dn" "$dv"
+        if [ "$dq" = q ]; then _lg_fm_op setq "$dn" "$dv"; else _lg_fm_op set "$dn" "$dv"; fi
       done 3< "$s.sdef"
       _lg_fm_ops_apply "$body"
       _lg_init_put "$body" "$path"
