@@ -164,8 +164,15 @@ _lg_validate_registry() {
 #                         item: nothing in effect replaces this one
 #   superseded-not-closed superseded_by on an item whose class is not closed
 #   parse-error           the item's frontmatter has errors (advisory)
+#   no-relations          (config validate.require_relations "new"; off by
+#                         default) an open item naming no changes, consumes
+#                         or relates, without the opt-out relations: none —
+#                         --staged: an added item, blocking; --all: an item
+#                         new since adoption, advisory (_lg_v_rr_all)
 #   --all only (advisory): weak-summary (< 20 characters), unassigned-open,
-#   no-contract (an open item with neither changes nor consumes)
+#   no-contract (an open item with neither changes nor consumes), config
+#   (docs/ledger/config.json: state_watch.paths set while state_watch.patterns
+#   names nothing — the state-watch hook never fires)
 #   registry              (--staged with the registry staged, or --registry
 #                         beside a mode) a `validate --registry` finding:
 #                         "registry <class> <detail>"
@@ -210,6 +217,13 @@ def lg_v_term: . == "closed" or . == "wontfix";
 def lg_v_keyform:
   type == "string" and (test("\\A[a-z0-9-]{1,16}-[1-9][0-9]*\\z") or test("\\A[a-z0-9-]{1,16}-~[0-9a-f]{4,8}\\z"));
 def lg_v_present: . != null and . != "" and . != [];
+# The relations opt-out (config validate.require_relations): frontmatter
+# relations: none, in any case.
+def lg_v_none: type == "string" and (ascii_downcase | gsub("^[[:space:]]+|[[:space:]]+$"; "")) == "none";
+def lg_v_norel_detail:
+  "a new open item names no relation (config validate.require_relations \"new\"): "
+  + "declare what it changes, consumes or relates to (ledger link <item> --changes C | --consumes C | --relates kind:key), "
+  + "or opt out with relations: none (ledger link <item> --relations none)";
 # A parse record → the fields the checks read.
 def lg_v_rinfo($F; $CT; $EX):
   (.fm // {}) as $fm
@@ -226,7 +240,9 @@ def lg_v_rinfo($F; $CT; $EX):
      resolution: (.resolution | if type == "string" and test("\\S") then . else null end),
      errors: (.fm_errors // []),
      changes: (($fm | lg_fv($F; "changes")) | lg_list),
-     consumes: (($fm | lg_fv($F; "consumes")) | lg_list)};
+     consumes: (($fm | lg_fv($F; "consumes")) | lg_list),
+     relates: (($fm | lg_fv($F; "relates")) | lg_list),
+     optout: ($fm.relations | lg_v_none)};
 # An index item → the same fields (hosted: a hosted item — config
 # items.adapter — whose adapter supplies no resolution).
 def lg_v_iinfo:
@@ -355,7 +371,8 @@ def lg_v_text:
 # The --staged join. Inputs (slurped): $c config, $reg the staged registry,
 # $fin the staged finalized map, $map the key map (records of every staged
 # item file, from git grep), $new the staged items' records, $old their
-# records at HEAD (by old path), $meta {"p","st":"A"|"M","old"}.
+# records at HEAD (by old path), $meta {"p","st":"A"|"M","old"}; --arg rr
+# config validate.require_relations ("" off, "new").
 # shellcheck disable=SC2016  # jq source
 _LG_JQ_VALIDATE_STAGED='
 $c[0] as $cfg
@@ -406,6 +423,10 @@ $c[0] as $cfg
       (if $i.sup != null and $i.class != "closed" then
          lg_v_f("superseded-not-closed"; lg_v_sev($supch or $o.class != $i.class); $i.path; $i.key;
            "superseded_by \($i.sup | lg_v_tok) on an item whose status is not closed (\($i.class))")
+       else empty end),
+      (if $rr == "new" and $added and $i.class == "open" and $i.changes == [] and $i.consumes == [] and $i.relates == []
+          and ($i.optout | not) then
+         lg_v_f("no-relations"; "block"; $i.path; $i.key; lg_v_norel_detail)
        else empty end),
       (if $i.errors != [] then lg_v_f("parse-error"; "advisory"; $i.path; $i.key; ($i.errors | join("; "))) else empty end)
   ][]
@@ -749,6 +770,7 @@ _lg_v_registry_into() {
 # shellcheck disable=SC2154  # _OPT_* are set by _parse_args
 _lg_validate_staged() {
   local out="$1" s reg
+  _lg_v_rr
   _lg_scratch_name
   s=$_LG_SN
   _lg_parse_prep
@@ -780,7 +802,7 @@ _lg_validate_staged() {
     "$s.fin" > "$s.fintsv" || _lg_die "jq failed (finalized map)"
   _lg_v_keymap "$s.toks" "$s.fintsv" "$s.globs" "$s.map"
   jq -L "$_LG_LIB" -n -c --slurpfile c "$_LG_CFG" --slurpfile reg "$reg" --slurpfile fin "$s.fin" \
-      --slurpfile map "$s.map" --slurpfile new "$s.new" --slurpfile old "$s.old" --slurpfile meta "$s.meta" \
+      --slurpfile map "$s.map" --slurpfile new "$s.new" --slurpfile old "$s.old" --slurpfile meta "$s.meta" --arg rr "$_LG_V_RR" \
       "$_LG_JQ_INDEX_DEFS$_LG_JQ_VALIDATE_DEFS$_LG_JQ_VALIDATE_STAGED" >> "$out" \
     || _lg_die "jq failed (validate --staged)"
 }
@@ -790,6 +812,7 @@ _lg_validate_staged() {
 # shellcheck disable=SC2154  # _OPT_* are set by _parse_args
 _lg_validate_all() {
   local out="$1" ix reg
+  _lg_v_rr
   # Hosted items (config items.adapter) through the items cache, fresh or
   # stale — the run's note says which; with no copy and the adapter
   # failing, exit 2 (index.sh _lg_ix_items_prepare).
@@ -808,6 +831,99 @@ _lg_validate_all() {
   fi
   jq -L "$_LG_LIB" -c --slurpfile c "$_LG_CFG" "$_LG_JQ_INDEX_DEFS$_LG_JQ_VALIDATE_DEFS$_LG_JQ_VALIDATE_ALL" "$ix" >> "$out" \
     || _lg_die "jq failed (validate --all)"
+  [ "$_LG_V_RR" != new ] || _lg_v_rr_all "$ix" "$out"
+  _lg_v_config_findings "$out"
+}
+
+# _lg_v_rr → _LG_V_RR: config validate.require_relations — "" (null or
+# absent: off, the default) or "new". Any other value, or a validate that is
+# not an object, is a config error (exit 2).
+_lg_v_rr() {
+  local v
+  v=$(_lg_cfg '(.validate // {}) | if type != "object" then "!validate is \(tojson), not an object"
+      else (.require_relations | if . == null then "-" elif . == "new" then "new" else "!\(tojson)" end) end') || exit "$?"
+  case "$v" in
+    -) _LG_V_RR="" ;;
+    new) _LG_V_RR=new ;;
+    *) _lg_die "config validate.require_relations must be \"new\" or null (got ${v#!})" ;;
+  esac
+}
+
+# _lg_v_rr_all <index> <findings.jsonl>: --all's no-relations findings
+# (config validate.require_relations "new"; advisory, as --all reports a
+# missing ledger or summary): an open file item (not hosted) whose changes,
+# consumes and relates are empty, whose frontmatter does not say
+# relations: none, and that is new since adoption — its path is neither in
+# the adoption commit's tree (_lg_adoption_commit: the first commit on
+# config base to add docs/ledger/config.json) nor the new path of a rename
+# from a file there (git diff -M from that commit to the working tree;
+# untracked files are new). Config base with no adoption commit yet: no item
+# is new. Fails closed — every such item counts — when config base does not
+# resolve or the adoption commit cannot be known (a shallow boundary).
+_lg_v_rr_all() {
+  local ix="$1" out="$2" s base A all=0 d
+  local specs=()
+  _lg_scratch_name
+  s=$_LG_SN
+  base=$(jq -r '.built.base // ""' "$ix") || _lg_die "jq failed (the index's base)"
+  : > "$s.old"
+  if [ -z "$base" ]; then
+    all=1
+  else
+    _lg_adoption_commit "$base"
+    A=$_LG_ADOPTC
+    case "$A" in
+      "") return 0 ;;
+      "?") all=1 ;;
+      *)
+        _lg_cfg '[(.items.globs // [])[]?, (.items.archive_globs // [])[]?] | .[] | strings | select(. != "")' > "$s.globs"
+        _lg_glob_dirs "$s.globs" "$s.dirs"
+        while IFS= read -r d; do
+          specs+=("$d")
+        done < "$s.dirs"
+        if ! GIT_LITERAL_PATHSPECS=1 git ls-tree -r -z --name-only "$A" -- ${specs[@]+"${specs[@]}"} > "$s.at" 2> "$s.err" \
+            || ! GIT_LITERAL_PATHSPECS=1 git diff -M -z --name-status --no-color --no-ext-diff --diff-filter=R "$A" \
+              -- ${specs[@]+"${specs[@]}"} > "$s.ren" 2>> "$s.err"; then
+          _lg_die "git failed (the items at the adoption commit): $(head -n 3 "$s.err" 2>/dev/null)"
+        fi
+        # The old paths, one per line (a newline in a name as \001): the
+        # adoption tree's, then each rename's new path (status, old, new).
+        { tr '\n\000' '\001\n' < "$s.at"
+          tr '\n\000' '\001\n' < "$s.ren" | LC_ALL=C awk 'NR % 3 == 0'; } > "$s.old" \
+          || _lg_die "cannot list the items at the adoption commit"
+        ;;
+    esac
+  fi
+  # The candidates (NUL-terminated paths), then their opt-outs from the
+  # working copies (the index carries no relations field).
+  # shellcheck disable=SC2016  # jq source
+  jq -c --rawfile old "$s.old" --argjson all "$all" '
+    (reduce ($old | split("\n")[] | select(. != "") | gsub("\u0001"; "\n")) as $p ({}; .[$p] = true)) as $O
+    | reduce (.items[] | select((.url | type) != "string" and .class == "open" and .changes == [] and .consumes == []
+        and ((.relates // []) | length) == 0 and ($all == 1 or ($O[.path] | not)))) as $i ({}; .[$i.path] = $i.key)' \
+    "$ix" > "$s.cand" || _lg_die "jq failed (no-relations candidates)"
+  jq -r -j 'keys_unsorted[] | . + "\u0000"' "$s.cand" > "$s.candz" || _lg_die "jq failed (no-relations candidates)"
+  [ -s "$s.candz" ] || return 0
+  _lg_parse_worktree "$s.candz" "$s.recs"
+  # shellcheck disable=SC2016  # jq source
+  jq -c --slurpfile k "$s.cand" "$_LG_JQ_VALIDATE_DEFS"'select((.fm // {}).relations | lg_v_none | not)
+    | lg_v_f("no-relations"; "advisory"; .path; $k[0][.path]; lg_v_norel_detail)' \
+    "$s.recs" >> "$out" || _lg_die "jq failed (no-relations findings)"
+}
+
+# _lg_v_config_findings <findings.jsonl>: --all's config findings
+# (advisory): state_watch.paths names an entry while state_watch.patterns
+# names none (absent, null, not a list, or only empty strings) — the
+# state-watch hook never fires (3.3.1, an adopter finding: patterns
+# defaults to []).
+_lg_v_config_findings() {
+  # shellcheck disable=SC2016  # jq source
+  jq -c '(.state_watch // {}) | if type == "object" then . else {} end
+    | select(([.paths | arrays | .[] | strings | select(. != "")] | length) > 0
+        and ([.patterns | arrays | .[] | strings | select(. != "")] | length) == 0)
+    | {class: "config", severity: "advisory", path: "docs/ledger/config.json", key: null,
+       detail: "state_watch.paths is set but state_watch.patterns names nothing: the state-watch hook never fires (add phrases such as \"next:\" or \"approved\"; a write must hold one)"}' \
+    "$_LG_CFG" >> "$1" || _lg_die "jq failed (config findings)"
 }
 
 # --- --plan, --pushed ---------------------------------------------------------------
@@ -890,8 +1006,9 @@ _lg_validate_plan() {
 
 # _lg_validate_pushed <range> <findings.jsonl>: keys.mode cas — each
 # provisional key the commits of <a>..<b> introduce (_lg_provisional_in_range;
-# <a> all zeros: a new branch, the keys it adds since config base, or every
-# provisional key at <b> when there is no base to compare) blocks — the
+# only the keys the branch adds since its merge-base with config base — <a>
+# all zeros (a new branch) or not; every provisional key at <b> for a new
+# branch when there is no base to compare) blocks — the
 # detail names `ledger finalize --all` for a key the base carries too; merge
 # mode — none (provisional keys may reach the base). For pre-push hooks.
 _lg_validate_pushed() {

@@ -743,6 +743,10 @@ EOS
 # gets under the umask (mktemp's 0600 would survive the mv).
 _lg_init_put() {
   local tmp mode
+  # A symbolic link is never replaced by a regular file (final review
+  # CORE-m5; _tmp_beside's rule). --accept reports the ones it would write
+  # as findings before writing anything; this is the backstop.
+  [ ! -L "$2" ] || _lg_die "$2 is a symbolic link: not replacing it (edit the file it points to)"
   tmp=$(mktemp "$(dirname -- "$2")/.lg-init.XXXXXX") || _lg_die "cannot create a temp file beside $2"
   mode=$(printf '%o' $(( 0666 & ~0$(umask) ))) || mode=644
   if ! cp -- "$1" "$tmp" || ! chmod "$mode" "$tmp" || ! mv -f -- "$tmp" "$2"; then
@@ -1263,6 +1267,57 @@ _lg_init_glob_check() {
 
 # _lg_init_accept <decisions.tsv>: the --accept mode (see above).
 # shellcheck disable=SC2154  # _OPT_* are set by _parse_args
+# _lg_init_stub_defaults <today> <out> (3.4.0): config init.stub_defaults —
+# an object of frontmatter field → string, number or boolean (default {};
+# null or absent: none) — checked and resolved into <out>, one
+# "<q|->\t<field>\t<value>" line each in the config's order: a number or
+# boolean as its JSON text, every "{today}" in a string replaced by <today>
+# (YYYY-MM-DD, the local date). "q" marks a string a YAML loader would read
+# as another type — true / false / yes / no / on / off / y / n, null / ~,
+# a number (007, 1e3, 0x1F, .5, .inf) — which the file stub writes
+# double-quoted (setq) so that it stays a string; a date (and {today}) is
+# left bare, a date being what such a field wants. Anything else is a
+# config error (2), before init --accept writes anything: init or
+# stub_defaults not an object, a field name the frontmatter parser would
+# not read back, another value (null, a list, an object), a control
+# character (a line break) in a string, or a "{…}" token other than
+# {today}. The stub writer
+# (_lg_init_accept_apply) applies them after a stub's own fields, which win.
+_lg_init_stub_defaults() {
+  local v
+  # shellcheck disable=SC2016  # jq source
+  v=$(jq -c -r --arg today "$1" '
+    def bad($m): "!" + $m;
+    (.init // null) as $i
+    | if $i == null then empty
+      elif ($i | type) != "object" then bad("init is \($i | tojson), not an object (holding init.stub_defaults)")
+      else ($i.stub_defaults // null) as $d
+      | if $d == null then empty
+        elif ($d | type) != "object" then bad("init.stub_defaults is \($d | tojson), not an object")
+        else $d | to_entries[]
+          | .key as $k | .value as $x
+          | if ($k | test("^[A-Za-z0-9_][A-Za-z0-9_.-]*$") | not) then bad("init.stub_defaults: \($k | tojson) is not a frontmatter field name")
+            elif ($x | type) == "number" or ($x | type) == "boolean" then "-\t\($k)\t\($x | tojson)"
+            elif ($x | type) != "string" then bad("init.stub_defaults.\($k) is \($x | tojson): give a string, a number or a boolean")
+            elif ($x | test("[\u0000-\u001f\u007f]")) then bad("init.stub_defaults.\($k) holds a control character (a line break?)")
+            elif ([$x | scan("\\{[^{}]*\\}")] | map(select(. != "{today}")) | length) > 0
+            then bad("init.stub_defaults.\($k): \([$x | scan("\\{[^{}]*\\}")] | map(select(. != "{today}"))[0] | tojson) is not a token (the one token is {today})")
+            else ($x | gsub("\\{today\\}"; $today)) as $v
+              | (if ($v | test("^(y|n|yes|no|true|false|on|off|null|~)$"; "i"))
+                    or ($v | test("^[-+]?(0b[01_]+|0x[0-9a-f_]+|0o[0-7_]+|[0-9][0-9_]*(\\.[0-9_]*)?(e[-+]?[0-9]+)?|\\.[0-9][0-9_]*(e[-+]?[0-9]+)?|\\.(inf|nan))$"; "i"))
+                 then "q" else "-" end) as $q
+              | "\($q)\t\($k)\t\($v)" end
+        end
+      end' "$_LG_CFG") || _lg_die "jq failed (config init.stub_defaults)"
+  case "$v" in
+    '!'*|*$'\n!'*)
+      v=$(printf '%s\n' "$v" | grep '^!' | head -n 1)
+      _lg_die "config ${v#!}" ;;
+  esac
+  printf '%s' "$v" > "$2" || _lg_die "cannot write $2"
+  [ -z "$v" ] || printf '\n' >> "$2"
+}
+
 _lg_init_accept() {
   local tsv="$1" dry=0 s hdr hp="" hsha="" reg install=0 cfgpath=docs/ledger/config.json host lgpath ix today
   local hstub=false nhosted want id slug hosted p base n taken nl
@@ -1322,6 +1377,7 @@ _lg_init_accept() {
     fi
   fi
   _lg_cfg_merge "$host" "$s.cfg" "the run's config"
+  _lg_init_stub_defaults "$today" "$s.sdef"
   [ "$nhosted" = 0 ] || _LG_IX_NEED_ITEMS=1
   if [ "$(_lg_cfg '((.items.globs // null) == []) and ((.items.adapter // "") | type == "string" and . != "")')" = true ]; then hstub=true; fi
 
@@ -1393,6 +1449,17 @@ _lg_init_accept() {
       | .findings += [.apply[] | select(.path as $p | $L | index([$p])) | {line: null, path, decision,
           detail: "a symbolic link: its fields are not written through a link (edit or decide the file it points to)"}]' \
       "$s.plan" > "$s.plan2" || _lg_die "jq failed (link findings)"
+    mv -f "$s.plan2" "$s.plan" || _lg_die "cannot write $s.plan"
+  fi
+  # The legacy map the run would write, a symbolic link: _lg_init_put
+  # refuses it, so a finding now (final review CORE-m5). (config.json is
+  # written only when absent, ledgers.json only when absent, and a stub
+  # path is never an existing name.)
+  if [ -n "$lgpath" ] && [ -L "$lgpath" ] && [ "$(jq '.legacy | length' "$s.plan")" != 0 ]; then
+    # shellcheck disable=SC2016  # jq source
+    jq -c --arg p "$lgpath" '.findings += [{line: null, path: $p,
+        detail: "a symbolic link: the legacy map is not written through a link (point config legacy at the file it points to, or replace the link with that file)"}]' \
+      "$s.plan" > "$s.plan2" || _lg_die "jq failed (legacy link finding)"
     mv -f "$s.plan2" "$s.plan" || _lg_die "cannot write $s.plan"
   fi
   if [ "$(jq '.findings | length' "$s.plan")" != 0 ]; then
@@ -1489,7 +1556,7 @@ _lg_init_ci_note() {
 # writes, the stubs, legacy.json, the views, the output.
 _lg_init_accept_apply() {
   local s="$1" dry="$2" lgpath="$3" tsv="$4" rec path hosted key prev ledger summary nk nl ns na what
-  local file row id st sk sl ss text body out ref rc=0 views="" vdir a an aj lnk
+  local file row id st sk sl ss text body out ref rc=0 views="" vdir a an aj lnk dq dn dv tab=$'\t'
   vdir="$_LG_CACHE/views"
   [ -e "$s.written" ] || : > "$s.written"
   : > "$s.lines"
@@ -1573,6 +1640,12 @@ _lg_init_accept_apply() {
       _lg_init_hosted_write "$ref" ledger "$ledger"
       _lg_init_hosted_write "$ref" summary "$summary"
       [ -z "$key" ] || _lg_init_hosted_write "$ref" key "$key"
+      # Config init.stub_defaults (_lg_init_stub_defaults): the stub's own
+      # fields win.
+      while IFS="$tab" read -r dq dn dv <&3; do
+        case "$dn" in status|key|ledger|summary|"$st"|"$sk"|"$sl"|"$ss") continue ;; esac
+        _lg_init_hosted_write "$ref" "$dn" "$dv"
+      done 3< "$s.sdef"
       printf 'created %s: %s\n' "$ref" "$what" >> "$s.lines"
     else
       mkdir -p "$(dirname -- "$path")" || _lg_die "cannot create $(dirname -- "$path")"
@@ -1582,6 +1655,10 @@ _lg_init_accept_apply() {
       [ -z "$key" ] || _lg_fm_op set "$sk" "$key"
       _lg_fm_op set "$sl" "$ledger"
       _lg_fm_op set "$ss" "$summary"
+      while IFS="$tab" read -r dq dn dv <&3; do
+        case "$dn" in "$st"|"$sk"|"$sl"|"$ss") continue ;; esac
+        if [ "$dq" = q ]; then _lg_fm_op setq "$dn" "$dv"; else _lg_fm_op set "$dn" "$dv"; fi
+      done 3< "$s.sdef"
       _lg_fm_ops_apply "$body"
       _lg_init_put "$body" "$path"
       printf 'created %s: %s\n' "$path" "$what" >> "$s.lines"

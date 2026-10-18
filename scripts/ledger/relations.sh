@@ -1,8 +1,8 @@
 # shellcheck shell=bash
 # scripts/ledger/relations.sh — related work (design §F): message trailers,
 # the re-check markers the index carries, and the verbs `ledger related`,
-# `ledger recheck`, `ledger sweep`. Sourced by lib.sh; uses lib.sh's
-# _lg_init, _lg_usage, _lg_die, _lg_emit, _lg_out_file, _lg_cfg, index.sh's
+# `ledger recheck`, `ledger sweep`, `ledger suggest`. Sourced by lib.sh;
+# uses lib.sh's _lg_init, _lg_usage, _lg_die, _lg_emit, _lg_out_file, _lg_cfg, index.sh's
 # _lg_index, _lg_ix_events and _LG_JQ_INDEX_DEFS, keys.sh's
 # _LG_JQ_RESOLVE_DEFS, glob.sh's _LG_AWK_GLOB / _lg_glob_dirs, parse.sh's
 # parsers. The relations themselves — neighbours, candidates — are jq, in
@@ -705,6 +705,136 @@ cmd_ledger_related() {
   s=$_LG_SN
   _lg_q_run "$_LG_JQ_RELATED" "$s.out" --arg ref "$_LG_RREF" --arg mode "$_LG_FORMAT" --argjson depth "$depth"
   _lg_r_finish related "$s.out"
+}
+
+# --- suggest ---------------------------------------------------------------------------
+
+# ledger suggest <ref> (3.4.0; ledger new --suggest-contracts runs the same
+# query after its write): contracts an item might declare — never written.
+#   changes   each contract whose defined_in matches a file the item lists
+#             (paths; the index's path_contracts): "lists <f>, which
+#             defines it";
+#   consumes  each contract a related item changes or consumes — its
+#             confirmed neighbours (upstream, downstream, siblings, any
+#             class) and the open candidates related lists (lg_r_candidates,
+#             lg_v_active): "<key> changes|consumes it (<kind> via <via>)"
+#             ("(<kind>)" when via is the kind), "… (candidate: <reasons>)".
+# A contract the item already declares on that side is left out; only index
+# contracts (registry or contracts adapter) are offered — what link takes.
+# One entry per (field, contract), its reasons and sources sorted by the
+# related item's key (or the file); entries ranked by their evidence — the
+# number of reasons (most first) — then contract id, then changes before
+# consumes. --top N (default 15; 0: all) keeps the first N: "total" counts
+# every candidate, "truncated" says whether any was left out, and the text
+# says "(showing N of M candidates; --top 0 shows all)".
+# Text: the item's line (as related), "<field>  <contract>  <reasons>" each
+# (reasons joined "; ", cut at 200), then "confirm with: ledger link <key
+# or path> --changes a,b --consumes c"; "(no contract candidates)" when
+# none. JSON: {item, declared: {changes, consumes}, total, truncated,
+# candidates: [{field, contract, reasons, sources: [{kind: "file", file} |
+# {kind, key, path, side, why}]}]}; unknown: {item: null, ref} (exit 1).
+
+# lg_sg_text($head): the text lines of a suggest object ($head: with the
+# item's line first).
+# shellcheck disable=SC2016  # jq source
+_LG_JQ_SG_TEXT_DEFS='
+def lg_sg_text($head):
+  . as $O
+  | (($O.item.key // $O.item.path) | lg_q_one) as $id
+  | (if $head then
+       "\($id)  \(($O.item.ledger // "—") | lg_q_one)  \(($O.item.severity // "—") | lg_q_one)  \($O.item.display) — \(($O.item.summary // "(no summary)") | lg_q_one | lg_q_cut(100))"
+     else empty end),
+    (if $O.candidates == [] then "(no contract candidates)"
+     else ($O.candidates[] | "\(.field)  \(.contract | lg_q_one)  \(.reasons | join("; ") | lg_q_one | lg_q_cut(200))"),
+       (if $O.truncated then "(showing \($O.candidates | length) of \($O.total) candidates; --top 0 shows all)" else empty end),
+       ("confirm with: ledger link \($id)"
+        + ([("changes", "consumes") as $f | [$O.candidates[] | select(.field == $f) | .contract] as $cs
+            | select($cs != []) | " --\($f) \($cs | join(",") | lg_q_one)"] | join("")))
+     end);
+'
+
+# shellcheck disable=SC2016  # jq source
+_LG_JQ_SUGGEST="$_LG_JQ_REL_HEAD$_LG_JQ_SG_TEXT_DEFS"'
+lg_resolve($ref; $c[0]) as $R
+| . as $ix
+| if $R.r == "ambiguous" then "ambiguous\t\($R.v | join(", "))"
+  elif $R.r == "archived" then "archived\t\($R.v)"
+  elif $R.r != "item" then "none", (if $mode == "json" then ({item: null, ref: $ref} | tojson) else empty end)
+  else
+    lg_r_maps($ix) as $M
+    | $M.BYP[$R.v] as $I
+    | [($ix.contracts // [])[] | .id] as $ids
+    | (($I.changes // []) | unique) as $dch
+    | (($I.consumes // []) | unique) as $dco
+    | ($I.neighbours // {}) as $n
+    | ([(($n.upstream // [])[] | . + {kind: "upstream"}), (($n.downstream // [])[] | . + {kind: "downstream"}),
+        (($n.siblings // [])[] | . + {kind: "sibling"})]
+       | map(($M.K2P[.key] // null) as $p | select($p != null and $p != $I.path) | {kind, p: $p, why: .via})) as $NB
+    | ($NB | map(.p)) as $nbp
+    | [lg_r_candidates($I; $M)[] | .p as $p | select($nbp | index([$p]) == null) | select($M.BYP[$p] | lg_v_active)
+       | {kind: "candidate", p: $p, why: (.reasons | join("; "))}] as $CA
+    | [ ((($I.paths // []) | unique)[] as $f | ($M.D[$f] // [])[]
+         | {field: "changes", contract: ., r: "lists \($f), which defines it", src: {kind: "file", file: $f}, o: $f}),
+        (($NB + $CA)[] as $e | $M.BYP[$e.p] as $Y | ($Y.key // $Y.path) as $yid
+         | ((($Y.changes // []) | unique)[] | {side: "changes", c: .}), ((($Y.consumes // []) | unique)[] | {side: "consumes", c: .})
+         | {field: "consumes", contract: .c,
+            r: "\($yid) \(.side) it (\(if $e.kind == "candidate" then "candidate: \($e.why)" elif $e.why == $e.kind then $e.kind else "\($e.kind) via \($e.why)" end))",
+            src: {kind: $e.kind, key: $Y.key, path: $Y.path, side: .side, why: $e.why}, o: $yid}) ]
+    | map(select(.contract as $k | ($ids | index([$k])) != null)
+          | select(.contract as $k | (if .field == "changes" then $dch else $dco end) | index([$k]) == null))
+    | group_by([.field, .contract])
+    | map(sort_by([.o, .src.kind]) | reduce .[] as $x ([]; if any(.[]; .r == $x.r) then . else . + [$x] end)
+          | {field: .[0].field, contract: .[0].contract, reasons: map(.r), sources: map(.src)})
+    | sort_by([-(.reasons | length), .contract, (if .field == "changes" then 0 else 1 end)]) as $CS
+    | (if $top == 0 then $CS else $CS[:$top] end) as $SH
+    | {item: lg_rr_item($I), declared: {changes: $dch, consumes: $dco},
+       total: ($CS | length), truncated: (($SH | length) < ($CS | length)), candidates: $SH} as $O
+    | "ok", (if $mode == "json" then ($O | tojson) else ($O | lg_sg_text(true)) end)
+  end
+'
+
+# _lg_sg_top: --top N (suggest, new --suggest-contracts) into _LG_SG_TOP —
+# a whole number, at most 9 digits (leading zeros dropped); default 15;
+# anything else is a usage error (3).
+# shellcheck disable=SC2154  # _OPT_top is set by _parse_args
+_lg_sg_top() {
+  _LG_SG_TOP=15
+  if _opt_seen top; then
+    case "$_OPT_top" in
+      ''|*[!0123456789]*|??????????*) _lg_usage "--top takes a whole number (0: all candidates; got '$_OPT_top')" ;;
+    esac
+    _LG_SG_TOP=$((10#$_OPT_top))
+  fi
+}
+
+# shellcheck disable=SC2154  # _ARGS is set by _parse_args
+cmd_ledger_suggest() {
+  local s
+  _lg_init suggest
+  _lg_r_ref
+  _lg_sg_top
+  _LG_IX_NEED_CONTRACTS=1
+  _lg_scratch_name
+  s=$_LG_SN
+  _lg_q_run "$_LG_JQ_SUGGEST" "$s.out" --arg ref "$_LG_RREF" --arg mode "$_LG_FORMAT" --argjson top "$_LG_SG_TOP"
+  _lg_r_finish suggest "$s.out"
+}
+
+# _lg_suggest_into <path> <lines-file> <payload-file> (ledger new
+# --suggest-contracts; --top as _lg_sg_top read it): the item's candidates
+# appended to <lines-file> (no item line) and added to the JSON payload as
+# "total", "truncated" and "candidates".
+_lg_suggest_into() {
+  local s
+  _lg_scratch_name
+  s=$_LG_SN
+  _lg_q_run "$_LG_JQ_SUGGEST" "$s.sg" --arg ref "$1" --arg mode json --argjson top "$_LG_SG_TOP"
+  [ "$_LG_QHEAD" = ok ] || _lg_die "internal: ledger new --suggest-contracts: '$1' did not resolve ($_LG_QHEAD)"
+  jq -L "$_LG_LIB" -r "$_LG_JQ_INCLUDE$_LG_JQ_SG_TEXT_DEFS"'lg_sg_text(false)' "$s.sg" | tr -d '\000-\010\013-\037' >> "$2" \
+    || _lg_die "jq failed (suggestions)"
+  if ! jq -c --slurpfile sg "$s.sg" '. + ($sg[0] | {total, truncated, candidates})' "$3" > "$3.sg" || ! mv -f -- "$3.sg" "$3"; then
+    _lg_die "jq failed (suggestions payload)"
+  fi
 }
 
 # --- recheck ---------------------------------------------------------------------------

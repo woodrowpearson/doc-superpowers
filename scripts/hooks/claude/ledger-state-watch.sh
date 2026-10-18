@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# doc-superpowers hook v1 — installed __INSTALL_DATE__ — Claude Code PostToolUse (Write|Edit) hook (work ledger)
+# doc-superpowers hook v1 — installed __INSTALL_DATE__ — Claude Code PostToolUse (Write|Edit|MultiEdit) hook (work ledger)
 # DO NOT EDIT — managed by doc-superpowers hooks installer (install.sh install --ledger-claude)
 #
 # `doc-tools.sh ledger note` is the one home for an item's state. When Claude
 # writes a file under one of config state_watch.paths (the host's agent-memory
 # and scratch directories) and what it wrote — Write's content, Edit's
-# new_string — names an item key and holds one of state_watch.patterns, one
-# advisory line (additionalContext, for Claude) suggests `doc-tools.sh ledger
-# note <key> "…"` instead.
+# new_string, MultiEdit's edits — names an item key and holds one of
+# state_watch.patterns (with none, nothing ever fires: validate --all and
+# install.sh status say so), one advisory line (additionalContext, for
+# Claude) suggests `doc-tools.sh ledger note <key> "…"` instead.
 #
 # A thin wrapper over `doc-tools.sh ledger state-watch --hook` (the stable
 # entry point a host may register in its own .claude/settings.json instead),

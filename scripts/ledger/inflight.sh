@@ -458,9 +458,14 @@ _lg_ifl_fetch_produce() {
 # _lg_ifl_fetch <force 0|1>: fetch through the remote cache (see the
 # header). For `ledger inflight`, writes $_SCRATCH/lg-ifl-data.json
 # {"state": fresh|stale|offline|none|unconfigured, "as_of", "error"}; a
-# failure is a note (_LG_IFL_NOTES), or — forced — exit 2.
+# failure is a note (_LG_IFL_NOTES), or — forced — exit 2. A failure that
+# was not a deliberate DOC_TOOLS_LEDGER_OFFLINE=1 (the refs here, or a
+# stale copy, serve) also sets _LG_IFL_UNVERIFIED to its reason, which
+# `notices --gate` refuses to pass on (3.3.1, final review CORE-m1).
+_LG_IFL_UNVERIFIED=""
 _lg_ifl_fetch() {
   local force="$1" rc=0 saved="${_LG_REMOTE_FORCE:-}" t state err
+  _LG_IFL_UNVERIFIED=""
   # Its push URL when set, else its URL (keys.sh _lg_k_url's choice).
   _LG_IFL_URL=$(git remote get-url --push "$_LG_IFL_REMOTE" 2>/dev/null) || _LG_IFL_URL=""
   if [ -z "$_LG_IFL_URL" ]; then
@@ -486,9 +491,11 @@ _lg_ifl_fetch() {
   fi
   if [ "$rc" != 0 ] && [ "$state" != offline ]; then
     _lg_ifl_note "in-flight refs not fetched (${err:-the fetch failed}): the refs here serve"
+    _LG_IFL_UNVERIFIED="in-flight refs not fetched (${err:-the fetch failed})"
   elif [ "$state" = stale ]; then
     t=$(jq -nr --argjson t "$_LG_RFETCHED" '$t | strftime("%Y-%m-%d %H:%M UTC")') || t="?"
     _lg_ifl_note "in-flight refs as of $t — the fetch failed: ${err:-?}"
+    _LG_IFL_UNVERIFIED="in-flight refs as of $t — the fetch failed: ${err:-?}"
   fi
   if [ "$state" = offline ]; then err=""; fi
   # Only `ledger inflight` reports it (inflight_data).
@@ -1554,7 +1561,8 @@ _lg_branch_facts() {
 # <kind>:<values> — <what_changed> → <action>" (the first three values,
 # then " (+n)"). JSON: {"notices": […], "pr_data"}. Exit 0; with --gate, 1
 # when a stop notice is not acked; 2 when it cannot run (a base that does
-# not resolve, a --branch naming no branch). DOC_TOOLS_LEDGER_OFFLINE=1:
+# not resolve, a --branch naming no branch) or — no stop found — when the
+# in-flight fetch failed (_LG_IFL_UNVERIFIED: "could not verify"). DOC_TOOLS_LEDGER_OFFLINE=1:
 # the refs and branch facts here, the note says so, nothing fetched
 # (--fetch: exit 2). Computed from the cached branch facts (_lg_ifl_resolve
 # with check 1, _lg_ifl_join) — never an index rebuild; the base's range
@@ -1942,6 +1950,13 @@ cmd_ledger_notices() {
     _lg_hook_done
   fi
   if [ -n "$_OPT_gate" ] && [ "$nstop" -gt 0 ] 2>/dev/null; then rc=1; fi
+  # A gate never passes on in-flight data it could not verify (CORE-m1): a
+  # failed fetch — not a deliberate DOC_TOOLS_LEDGER_OFFLINE=1 — with no
+  # stop to block on is "could not verify" (2). A stop found anyway blocks
+  # as a stop (1).
+  if [ -n "$_OPT_gate" ] && [ "$rc" = 0 ] && [ -n "$_LG_IFL_UNVERIFIED" ]; then
+    _lg_die "could not verify: $_LG_IFL_UNVERIFIED — notices --gate does not pass on in-flight data it could not fetch (--fetch retries now; DOC_TOOLS_LEDGER_OFFLINE=1 decides on the refs here)"
+  fi
   if [ "$_LG_FORMAT" = json ]; then
     printf '%s\n' "$payload" > "$s.json" || _lg_die "cannot write $s.json"
     _lg_pr_data_into "$s.json"

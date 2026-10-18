@@ -19,8 +19,10 @@ _LG_IX_NEED_CONTRACTS=""  # 1: the verb shows relations — a failing contracts
 # grep -E): the counter CAS (keys.sh) and the in-flight push (inflight.sh)
 # both read it as "cannot write there" — provisional keys / a warning —
 # never as a refusal of the content (final review OPS-m9). A 403 only as an
-# HTTP status or "403 Forbidden", never a 403 in a URL's path or port.
-_LG_PERM_RE='Permission denied|Authentication failed|could not read Username|returned error: 403|HTTP 403|403 Forbidden|[Ff]orbidden'
+# HTTP status or "403 Forbidden", never a 403 in a URL's path or port; and
+# "Forbidden" capitalised only (HTTP's reason phrase): a hook's lowercase
+# "forbidden by policy" refuses the content (3.3.1, final review N1).
+_LG_PERM_RE='Permission denied|Authentication failed|could not read Username|returned error: 403|HTTP 403|403 Forbidden|Forbidden'
 _LG_CACHE=""         # $(git rev-parse --git-common-dir)/doc-superpowers/ledger
                      # (absolute; created by whoever first writes to it:
                      # mkdir -p — the parse cache, parse.sh, is the first)
@@ -329,5 +331,5 @@ _lg_status_class() {
 # One per verb-table row (doc-tools.sh "ledger <sub>|cmd_ledger_<sub>|…"),
 # each in the module that defines it: show, ls, find, link, note: query.sh.
 # new, assign, finalize: keys.sh. view, publish: views.sh. related, sweep,
-# recheck: relations.sh. inflight, notices: inflight.sh. validate:
+# recheck, suggest: relations.sh. inflight, notices: inflight.sh. validate:
 # validate.sh. init: init.sh.
