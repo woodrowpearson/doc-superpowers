@@ -229,11 +229,12 @@ $DOC_TOOLS ledger ls --ledger checkout --open      # one line per item
 $DOC_TOOLS ledger show checkout-14                 # one item in ≤ 25 lines
 $DOC_TOOLS ledger new --ledger checkout --summary "Totals round twice on refunds"   # a key for a new issue
 $DOC_TOOLS ledger note checkout-14 "repro on staging"                              # the one home for item state
+$DOC_TOOLS ledger link checkout-14 --consumes field:order.total                    # declare a relation you confirmed
 $DOC_TOOLS ledger view all --html --open           # render the views locally
 $DOC_TOOLS ledger validate --all                   # every item and key (add --registry for the registry)
 ```
 
-Exit codes are the claims family: 0 ok, 1 findings, 2 could not run, 3 usage. With the ledger on, `spec-inject --phase=plan` also pastes a `## Related work` sweep into the plan and adds a `Ledger notices (chunk N)` gate to each chunk. Config keys, keys and provisional keys, adapters, the in-flight layer (it publishes local branch names to the remote: read the privacy note first) and the hooks are in `references/ledger.md`.
+Exit codes are the claims family: 0 ok, 1 findings, 2 could not run, 3 usage. With the ledger on, `spec-inject --phase=plan` also pastes a `## Related work` sweep into the plan and adds a `Ledger notices (chunk N)` gate to each chunk. Declare each new item's relations (*Relations* → **Declaring relations**; `validate.require_relations: "new"` makes the pre-commit leg insist). Config keys, keys and provisional keys, adapters, the in-flight layer (it publishes local branch names to the remote: read the privacy note first), the hooks, and the JSON surface for scripts built on the ledger are in `references/ledger.md`.
 
 For wrapper skill integration details, see `references/spec-lifecycle-protocol.md`.
 For code review and commit review integration, see `references/integration-patterns.md`.
