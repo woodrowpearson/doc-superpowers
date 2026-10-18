@@ -331,5 +331,5 @@ _lg_status_class() {
 # One per verb-table row (doc-tools.sh "ledger <sub>|cmd_ledger_<sub>|…"),
 # each in the module that defines it: show, ls, find, link, note: query.sh.
 # new, assign, finalize: keys.sh. view, publish: views.sh. related, sweep,
-# recheck: relations.sh. inflight, notices: inflight.sh. validate:
+# recheck, suggest: relations.sh. inflight, notices: inflight.sh. validate:
 # validate.sh. init: init.sh.
