@@ -302,7 +302,7 @@ Hooks are organized into three tiers, each independently installable, plus the w
 | Claude Code | `--claude` | pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh (and hook-lib.sh, which all three source, as does ledger-session-notices.sh) |
 | CI/CD | `--ci` | doc-freshness-pr.yml, doc-freshness-schedule.yml (the default set); doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml, doc-ledger-publish.yml (by name) |
 | Work-ledger git legs | `--ledger` | ledger-pre-commit, ledger-pre-push, ledger-post-commit, installed as `# ledger-superpowers:begin` … `:end` blocks in pre-commit, pre-push and post-commit |
-| Work-ledger Claude events | `--ledger-claude` | ledger-session-notices.sh (SessionStart), ledger-state-watch.sh (PostToolUse, matcher `Write\|Edit`), with hook-lib.sh |
+| Work-ledger Claude events | `--ledger-claude` | ledger-session-notices.sh (SessionStart), ledger-state-watch.sh (PostToolUse, matcher `Write\|Edit\|MultiEdit`), with hook-lib.sh |
 
 Use `--all` to install all three tiers at once. The ledger sets are never part of `--all`, each refuses to install without `docs/ledger/config.json` (exit 1, nothing written), and like the git and Claude tiers they are per-clone / per-user and never recorded in `installed.json`.
 
@@ -373,7 +373,7 @@ Every template in `scripts/hooks/ci/` follows these rules; `test-doc-pr-release.
 | `DOC_SUPERPOWERS_QUIET=1` | Suppress hook output while still enforcing (exit codes unchanged). The Claude gate's block reason (stderr on exit 2, Claude's feedback) is never suppressed |
 | `DOC_SUPERPOWERS_SKIP=1` | Bypass all hooks temporarily, the work ledger's legs and events included (its pre-commit and pre-push legs print a line naming the variable) |
 | `DOC_SUPERPOWERS_LEDGER_SKIP=1` | Bypass only the work ledger's legs and events (`--ledger`, `--ledger-claude`, and the hook modes) |
-| `DOC_TOOLS_LEDGER_OFFLINE=1` | No ledger adapter runs, nothing is fetched (a cached copy past its TTL is served stale; `--refresh` and `publish` exit 2) and `inflight --push` pushes nothing; the SessionStart event sets it. It does not cover key allocation: `new`, `assign`, `finalize` and `init --accept` still reach the counter ref (`init --accept` with hosted items to write needs the items adapter: exit 2) |
+| `DOC_TOOLS_LEDGER_OFFLINE=1` | No ledger adapter runs, nothing is fetched (a cached copy past its TTL is served stale; `--refresh` and `publish` exit 2) and `inflight --push` pushes nothing; the SessionStart event sets it. It does not cover key allocation: `new`, `assign`, `finalize` and `init --accept` still reach the counter ref (`init --accept` with hosted items to write needs the items adapter: exit 2), though `keys.mode: "merge"` `finalize` then skips its check of the remote's base (a warning), and `notices --gate` decides on the refs here instead of exiting 2 |
 | `DOC_SUPERPOWERS_CLAIMS_SKIP=1` | Turn off the git hooks' claims legs only: pre-commit's (blocking) and pre-push's (advisory), each of which runs only with `docs/spec-claims/`. The pre-commit leg blocks on a finding whatever `DOC_SUPERPOWERS_STRICT` says; a claims check that cannot run blocks only under STRICT |
 
 `DOC_TOOLS` overrides the path of `doc-tools.sh` a hook runs (tests use it). The index path is fixed: `docs/.doc-index.json`.
