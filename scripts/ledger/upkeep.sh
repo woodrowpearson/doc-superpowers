@@ -34,7 +34,8 @@
 #   exit 3), and only they are involved.
 # Touched contracts: an index contract whose defined_in matches a net-diff
 #   file upkeep.skip_globs does not match, or that a "Contract-Change: <id>
-#   [— <line>]" trailer in the range names.
+#   [— <line>]" trailer in the range names. Read contracts: an untouched one
+#   whose read_by matches such a file.
 # Proposals (changes): a touched contract an involved item declares in
 #   changes is covered — proposed to nobody. Every other one, except
 #   upkeep.skip_contracts, goes to exactly one involved item: the most
@@ -42,13 +43,23 @@
 #   are net-diff files; then the best rank; then key (else path) order. With
 #   no involved item it is unattributed. Evidence: "diff touches <f>
 #   (defined_in of <c>)" per file (3 at most, then "… and N more files"),
-#   then "Contract-Change: <c> — <line>" per trailer line. Per item: changes
-#   ranked Contract-Change first, then by evidence count (files and lines),
-#   then id; --top N (default 3; 0: all) keeps the first N (total,
-#   truncated). declared_untouched: the declared changes the range does not
-#   touch (informational). link: "ledger link <key|path> --changes a,b" for
-#   the shown proposals (a word quoted for the shell when it needs it), null
-#   without — printed, never run. upkeep writes nothing.
+#   then "Contract-Change: <c> — <line>" per trailer line.
+# Proposals (consumes): (a) a read contract, the same way — covered by an
+#   involved item's consumes, else attributed (read_by in place of
+#   defined_in) or unattributed; evidence "diff touches <f> (read_by of
+#   <c>)". (b) for an item of rank 2 or better (never one found by words
+#   alone): each untouched contract whose defined_in matches a paths entry
+#   the net diff does not hold — "the item lists <f> (defined_in of <c>),
+#   which the range does not change" — unless the item declares it in
+#   consumes or has it from (a). Never a skip_contracts id.
+# Per item: changes ranked Contract-Change first, then by evidence count
+#   (files and lines), then id; then consumes (a), then (b), each by
+#   evidence count, then id; --top N (default 3; 0: all) keeps the first N
+#   (total, truncated). declared_untouched: the declared changes the range
+#   does not touch (informational). link: "ledger link <key|path> --changes
+#   a,b --consumes c" for the shown proposals (a word quoted for the shell
+#   when it needs it), null without — printed, never run. upkeep writes
+#   nothing.
 # Output: JSON {range: "<a-oid>..<b-oid>", pr: null, files, commits, items:
 #   [{key, path, found_by, proposed: [{field, value, evidence}], total,
 #   truncated, declared_untouched, link}], unattributed_contracts:
@@ -130,12 +141,31 @@ def up_rank: if . == "named" then 0 elif startswith("trailer:") then 1 elif . ==
 def up_cc: (capture("^(?<w>[^ \t]*)(?<r>.*)$")) as $x
   | ($x.r | sub("^[ \t:]*"; "") | (if startswith("—") or startswith("–") then .[1:] else . end) | sub("^[ \t:-]*"; "")) as $l
   | {id: $x.w, line: $l};
+# Evidence per file: f of each of the first 3 of $fs, then "… and N more
+# files".
+def up_ev_files($fs; f):
+  ($fs | length) as $n | [($fs[0:3][] | f), (if $n > 3 then "… and \($n - 3) more files" else empty end)];
 # The evidence of a touched contract $t ({contract, files, cc}).
 def up_ev_changes($t):
-  ($t.files | length) as $n
-  | [($t.files[0:3][] | "diff touches \(.) (defined_in of \($t.contract))"),
-     (if $n > 3 then "… and \($n - 3) more files" else empty end),
-     ($t.cc[] | if . == "" then "Contract-Change: \($t.contract)" else "Contract-Change: \($t.contract) — \(.)" end)];
+  up_ev_files($t.files; "diff touches \(.) (defined_in of \($t.contract))")
+  + [$t.cc[] | if . == "" then "Contract-Change: \($t.contract)" else "Contract-Change: \($t.contract) — \(.)" end];
+# Attribution: each contract of $open ([{contract, …}]) to one item of $inv
+# (the involved, [{p, rank}]; $byp: {path: item}) — the most paths entries
+# $g ({file: [contract ids]}: the index path_contracts for defined_in, the
+# read_by map for a read contract) files under it; then the most paths
+# entries that are net-diff files ($ds); then the best rank; then key (else
+# path) order. → {item path: [the contracts it gets]}; {} without $inv.
+def up_attr($open; $inv; $byp; $g; $ds):
+  if $inv == [] then {}
+  else lg_lists($open[] | . as $t
+    | ($inv | map(. as $v | $byp[$v.p] as $I | (($I.paths // []) | unique) as $ps
+        | {p: $v.p,
+           n1: ([$ps[] | select((($g[.] // []) | index([$t.contract])) != null)] | length),
+           n2: ([$ps[] | select($ds[.] == true)] | length),
+           r: $v.rank, o: ($I.key // $I.path)})
+        | sort_by(-.n1, -.n2, .r, .o) | .[0].p) as $win
+    | {k: $win, v: $t})
+  end;
 # A word as the shell reads it: bare when safe, else single-quoted.
 def up_shq: if test("^[A-Za-z0-9_./:,@%+=-][A-Za-z0-9_./:,@%+=~-]*$") then . else @sh end;
 # The link line for item $I and its shown proposals $SH (null without).
@@ -151,13 +181,16 @@ def up_link($I; $SH):
 
 # _LG_JQ_UPKEEP: the core's one pass, over the index ($ix) — inputs $c
 # (config), $diff (the net-diff files, lines), $fc ({file: [contract ids]}
-# for the files skip_globs leaves), $tr (_lg_msg_claims' lines), $words (the
-# messages without their claim trailer lines), $body / $hasbody (the PR
-# body), $named / $hasnamed (--items' paths, lines), $a, $b, $commits, $top.
-# Stages: involvement ($INV), touched contracts ($TALL, $TCH), attribution
-# ($ATTR), proposals ($PROPS: [{p, field, value, evidence, _g, _cc, _n}] —
-# _g the group: 0 changes; a consumes group sorts after it), then per item
-# ranking, --top and the link line.
+# for the files skip_globs leaves, by defined_in), $rc (the same by
+# read_by), $rp ({paths entry: [contract ids]} by read_by, for the live
+# items; {} when $rc is), $tr (_lg_msg_claims' lines), $words (the messages
+# without their claim trailer lines), $body / $hasbody (the PR body), $named
+# / $hasnamed (--items' paths, lines), $a, $b, $commits, $top. Stages:
+# involvement ($INV), touched contracts ($TALL, $TCH), their attribution
+# ($ATTR), read contracts ($READ) and theirs ($RATTR), proposals ($PROPS:
+# [{p, field, value, evidence, _g, _cc, _n}] — _g the group: 0 changes, 1
+# consumes (a), 2 consumes (b)), then per item ranking, --top and the link
+# line.
 # shellcheck disable=SC2016  # jq source
 _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
 . as $ix
@@ -203,22 +236,42 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
 # Covered: an involved item declares it in changes.
 | lg_obj($INV[] | ($M.BYP[.p].changes // [])[] | strings | {(.): true}) as $COV
 | [$TCH[] | select($COV[.contract] != true)] as $OPEN
-# Attribution: each open contract to one involved item (item path → [touched]).
-| (if $INV == [] then {}
-   else lg_lists($OPEN[] | . as $t
-     | ($INV | map(. as $v | $M.BYP[$v.p] as $I | (($I.paths // []) | unique) as $ps
-         | {p: $v.p,
-            n1: ([$ps[] | select((($M.D[.] // []) | index([$t.contract])) != null)] | length),
-            n2: ([$ps[] | select($DS[.] == true)] | length),
-            r: $v.rank, o: ($I.key // $I.path)})
-         | sort_by(-.n1, -.n2, .r, .o) | .[0].p) as $win
-     | {k: $win, v: $t})
-   end) as $ATTR
-# Proposals: changes — each attributed contract the item does not declare.
-| [$INV[] | .p as $p | (($M.BYP[$p].changes // []) | map(strings)) as $dch
-   | ($ATTR[$p] // [])[] | select(.contract as $k | $dch | index([$k]) == null)
-   | {p: $p, field: "changes", value: .contract, evidence: up_ev_changes(.), _g: 0,
-      _cc: (if .cc != [] then 0 else 1 end), _n: ((.files | length) + (.cc | length))}] as $PROPS
+| up_attr($OPEN; $INV; $M.BYP; $M.D; $DS) as $ATTR
+# Read contracts: a non-skipped net-diff file their read_by matches ($rc),
+# and untouched (no defined_in file, no Contract-Change line); never a
+# skip_contracts id. Covered: an involved item declares it in consumes.
+# Attribution as for a touched one, read_by in place of defined_in ($rp:
+# {paths entry: [contracts whose read_by matches it]}).
+| lg_lists($rc[0] | to_entries[] | (.key | up_dec) as $f | .value[] | {k: ., v: $f}) as $RF
+| [($RF | keys)[] as $k | select($TOUCHED[$k] != true and ($skipc | index([$k])) == null)
+   | {contract: $k, files: ($RF[$k] | unique)}] as $READ
+| lg_obj($INV[] | ($M.BYP[.p].consumes // [])[] | strings | {(.): true}) as $RCOV
+| [$READ[] | select($RCOV[.contract] != true)] as $ROPEN
+| up_attr($ROPEN; $INV; $M.BYP; lg_obj($rp[0] | to_entries[] | {(.key | up_dec): .value}); $DS) as $RATTR
+# Proposals, per involved item (_g the group): 0 changes — each attributed
+# touched contract it does not declare; 1 consumes (a) — each attributed
+# read contract it does not declare; 2 consumes (b), only at rank 2 or
+# better — each untouched contract whose defined_in matches a paths entry
+# the diff does not hold, not declared, not in skip_contracts, not (a).
+| [$INV[] | . as $v | $M.BYP[$v.p] as $I
+   | (($I.changes // []) | map(strings)) as $dch
+   | (($I.consumes // []) | map(strings)) as $dcs
+   | [($ATTR[$v.p] // [])[] | select(.contract as $k | $dch | index([$k]) == null)
+      | {p: $v.p, field: "changes", value: .contract, evidence: up_ev_changes(.), _g: 0,
+         _cc: (if .cc != [] then 0 else 1 end), _n: ((.files | length) + (.cc | length))}] as $PC
+   | [($RATTR[$v.p] // [])[] | select(.contract as $k | $dcs | index([$k]) == null) | . as $t
+      | {p: $v.p, field: "consumes", value: $t.contract,
+         evidence: up_ev_files($t.files; "diff touches \(.) (read_by of \($t.contract))"),
+         _g: 1, _cc: 1, _n: ($t.files | length)}] as $PA
+   | (if $v.rank > 2 then {}
+      else lg_lists((($I.paths // []) | unique)[] | select($DS[.] != true) as $f | ($M.D[$f] // [])[] | {k: ., v: $f}) end) as $LB
+   | ($dcs + [$PA[].value]) as $NOTB
+   | $PC[], $PA[],
+     (($LB | keys)[] as $k
+      | select($TOUCHED[$k] != true and ($skipc | index([$k])) == null and ($NOTB | index([$k])) == null)
+      | {p: $v.p, field: "consumes", value: $k,
+         evidence: up_ev_files($LB[$k]; "the item lists \(.) (defined_in of \($k)), which the range does not change"),
+         _g: 2, _cc: 1, _n: ($LB[$k] | length)})] as $PROPS
 | lg_lists($PROPS[] | {k: .p, v: .}) as $PBY
 # Per item: rank its proposals, keep --top of them, the link line.
 | [$INV[] | . as $v | $M.BYP[$v.p] as $I
@@ -229,7 +282,7 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
       declared_untouched: [(($I.changes // []) | map(strings) | unique)[] | select($TOUCHED[.] != true)],
       link: up_link($I; $SH)}] as $ITEMS
 | {range: "\($a)..\($b)", files: ($DIFF | length), commits: $commits, items: $ITEMS,
-   unattributed_contracts: (if $INV == [] then [$OPEN[] | {contract, files}] else [] end),
+   unattributed_contracts: (if $INV == [] then [($OPEN[], $ROPEN[]) | {contract, files}] | sort_by(.contract) else [] end),
    touched: [$TCH[] | {contract, files, cc_line: (.cc[0] // null)}]}
 '
 
@@ -253,7 +306,7 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
 # _lg_up_index <b-oid>. Dies (2) on a git failure, a bad upkeep config or
 # glob, or a failing contracts adapter (with _LG_IX_NEED_CONTRACTS=1).
 _lg_up_core() {
-  local a="$1" b="$2" body="$3" named="$4" out="$5" s n="" hb=false hn=false msg=""
+  local a="$1" b="$2" body="$3" named="$4" out="$5" s n="" hb=false hn=false msg="" rd=""
   [ "$#" = 5 ] || _lg_die "internal: _lg_up_core <a> <b> <body-file|\"\"> <named-paths-file|\"\"> <out>"
   _lg_scratch_name
   s=$_LG_SN
@@ -283,6 +336,20 @@ _lg_up_core() {
   LC_ALL=C awk -v skip="$s.skip.l" 'BEGIN { while ((getline l < skip) > 0) S[l] = 1 } !($0 in S)' "$s.diff.l" > "$s.keep.l" \
     || _lg_die "cannot list the range's files"
   _lg_r_file_contracts "$_LG_UP_IX" "$s.keep.l" "$s.fc"
+  # The reader signal: the contracts whose read_by matches each of those
+  # files; when one does, also each live item's paths entry (the read
+  # contracts' attribution).
+  _lg_r_file_contracts "$_LG_UP_IX" "$s.keep.l" "$s.rc" read_by
+  IFS= read -r rd < "$s.rc" || rd=""
+  if [ "$rd" = "{}" ]; then
+    printf '{}\n' > "$s.rp" || _lg_die "cannot write $s.rp"
+  else
+    # shellcheck disable=SC2016  # jq source
+    jq -r '[.items[] | select(.archived != true) | (.paths // [])[] | strings] | unique[]
+      | if test("[\n\t]") then gsub("\n"; "\u0001") | gsub("\t"; "\u0002") else . end' "$_LG_UP_IX" > "$s.ip.l" \
+      || _lg_die "jq failed (the items' paths)"
+    _lg_r_file_contracts "$_LG_UP_IX" "$s.ip.l" "$s.rp" read_by
+  fi
   # The trailers; then the messages for the word scan, without the claim
   # trailer lines (claims, claims_by_path), and the number of commits.
   _lg_msg_claims "$a..$b" > "$s.tr"
@@ -302,7 +369,7 @@ _lg_up_core() {
   else
     : > "$s.named.l"
   fi
-  jq -L "$_LG_LIB" -c --slurpfile c "$_LG_CFG" --slurpfile fc "$s.fc" \
+  jq -L "$_LG_LIB" -c --slurpfile c "$_LG_CFG" --slurpfile fc "$s.fc" --slurpfile rc "$s.rc" --slurpfile rp "$s.rp" \
     --rawfile diff "$s.diff.l" --rawfile tr "$s.tr" --rawfile words "$s.words" \
     --rawfile body "$body" --argjson hasbody "$hb" --rawfile named "$s.named.l" --argjson hasnamed "$hn" \
     --arg a "$a" --arg b "$b" --argjson commits "$n" --argjson top "${_LG_UP_TOP:-3}" \
