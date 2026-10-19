@@ -17,7 +17,7 @@
 | D3 | #39 Q3 — review-pr leg vs "never run repository scripts" | **Run it, guarded.** review-pr runs `ledger upkeep --no-repo-adapters`; that flag makes upkeep refuse (exit 2, nothing run) when `adapters.contracts`, `adapters.pr` or `items.adapter` is anything but `null` or `doc-superpowers:<name>`. review-pr then prints a skipped section with the command for the user. Local only: in a CI workflow the step is skipped (the vendored copy carries no ledger; a CI job may run upkeep itself and post it). |
 | D4 | #39 Q4 — reader signal | **Registry `read_by` globs**: an optional per-contract list, also accepted from the contracts adapter's `list` lines (registry wins when non-empty, as for `defined_in`). |
 | D5 | #39 Q5 — propose `relates: depends-on:` between two involved items | Declined for now: no measured need; recorded on #39. |
-| D6 | A host config `"base": null` (found on abundance-mvp, 2026-10-19) | **Null means the default** (`origin/main`), fixed in config.jq: upkeep's all-zeros and open-PR ranges read `base`, and a null base today reads as `""` — `validate --pushed` from all zeros refuses every provisional key at a new branch's tip, `publish` dies. Not a decision of the owner's; proposed with the plan. |
+| D6 | A host config that writes `"base": null` explicitly (found while reviewing the abundance install, 2026-10-19; abundance-mvp has no `base` key) | **Null means the default** (`origin/main`), fixed in config.jq: upkeep's all-zeros and open-PR ranges read `base`, and a null base today reads as `""` — `validate --pushed` from all zeros refuses every provisional key at a new branch's tip, `publish` dies. Not a decision of the owner's; proposed with the plan. |
 
 ## 1. `ledger new --create`
 

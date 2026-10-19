@@ -35,7 +35,7 @@
 
 ### Task 0: A null config `base` means the default
 
-Found by the abundance install session (2026-10-19): a host config with `"base": null` replaces the default (`$d * $h`), so keys.sh, relations.sh, index.sh, inflight.sh and views.sh read base `""`. `validate --pushed 000..tip` on a new branch then refuses every provisional key already at the tip ("config base \"\" does not resolve here"), `publish` dies ("config base is not a revision: ''"), and `trailers.since: "adoption"` finds no adoption commit. Upkeep's all-zeros and `--pr` (open PR) ranges read the same base, so this lands first.
+Found while reviewing the abundance install (2026-10-19; abundance-mvp itself has no `base` key, so it is not affected): a host config that writes `"base": null` explicitly replaces the default (`$d * $h`), so keys.sh, relations.sh, index.sh, inflight.sh and views.sh read base `""`. `validate --pushed 000..tip` on a new branch then refuses every provisional key already at the tip ("config base \"\" does not resolve here"), `publish` dies ("config base is not a revision: ''"), and `trailers.since: "adoption"` finds no adoption commit. Upkeep's all-zeros and `--pr` (open PR) ranges read the same base, so this lands first.
 
 **Files:**
 - Modify: `scripts/ledger/config.jq` (after `$d * $h`: a null `base` takes `$d.base`; the header comment says so)
