@@ -3363,8 +3363,8 @@ _parse_args() {
 # (test-doc-tools.sh) still flags any other unassigned variable (SC2154).
 # A new option read as plain "$_OPT_x" goes in this list.
 _shellcheck_opt_names() {
-  _OPT_by="" _OPT_check="" _OPT_chunk="" _OPT_deep="" _OPT_final="" _OPT_range=""
-  _OPT_refs="" _OPT_reverify="" _OPT_scheduled="" _OPT_staged="" _OPT_superseded_by=""
+  _OPT_all="" _OPT_by="" _OPT_check="" _OPT_chunk="" _OPT_deep="" _OPT_final="" _OPT_range=""
+  _OPT_plan="" _OPT_refs="" _OPT_reverify="" _OPT_scheduled="" _OPT_staged="" _OPT_superseded_by=""
   _OPT_tag="" _OPT_tree="" _OPT_warn=""
   _OPTV_claims=() _OPTV_code_refs=() _OPTV_code_refs_from=() _OPTV_config=() _OPTV_helper=() _OPTV_holds=()
 }
