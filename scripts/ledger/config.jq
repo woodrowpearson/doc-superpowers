@@ -31,6 +31,9 @@
   "state_watch": { "paths": [], "patterns": [] },
   "validate": { "require_relations": null },
   "init": { "stub_defaults": {} },
+  "upkeep": { "skip_globs": ["docs/**", "**/*.md", "**/test/**", "**/tests/**", "**/__tests__/**", "**/*.test.*", "**/*.spec.*",
+                             "**/*_test.*", "**/Tests/**", "**/*Tests/**"],
+              "skip_contracts": [] },
   "legacy": "docs/ledger/legacy.json",
   "legacy_ids": [],
   "legacy_ledgers": {}
