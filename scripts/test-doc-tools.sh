@@ -7062,32 +7062,21 @@ test_vendored_ledger_runs() {
   teardown
 }
 
-# _tests_yml_drift_step <out>: the run: body of tests.yml's "Self-installed
-# CI tier matches its templates" step, as a script.
-_tests_yml_drift_step() {
-  awk '
-    /- name: Self-installed CI tier matches its templates/ { found = 1; next }
-    found && !inrun && /^[[:space:]]*run:[[:space:]]*[|]/ { match($0, /^[[:space:]]*/); ind = RLENGTH; inrun = 1; next }
-    inrun {
-      if ($0 ~ /^[[:space:]]*$/) { print ""; next }
-      match($0, /^[[:space:]]*/)
-      if (RLENGTH > ind) { print; next }
-      exit
-    }' "$SCRIPT_DIR/../.github/workflows/tests.yml" > "$1"
-}
-
 test_tests_yml_drift_step_covers_vendored_ledger() {
-  echo "test: tests.yml's self-install drift step checks a vendored ledger helper set against scripts/ledger/ and scripts/adapters/ (byte copies, scripts executable, none missing; present beside a claims workflow)"
+  echo "test: the self-install drift check (scripts/check-self-install.sh, run by tests.yml through check-ci.sh) checks a vendored ledger helper set against scripts/ledger/ and scripts/adapters/ (byte copies, scripts executable, none missing; present beside a claims workflow)"
   setup
-  local root step rt rc out
+  local root step rt rc out yml
   root="$(cd "$SCRIPT_DIR/.." && pwd)"
-  step=$(harness_mktemp drift-step)
-  _tests_yml_drift_step "$step"
-  assert_contains "$(cat "$step")" "cmp scripts/doc-tools.sh .github/scripts/doc-tools.sh" "the step body is extracted"
+  yml=$(cat "$root/.github/workflows/tests.yml")
+  # shellcheck disable=SC2016  # the workflow's literal text
+  assert_contains "$yml" 'scripts/check-ci.sh --bash "$BASH_BIN" --verbose self-install' \
+    "tests.yml runs the drift check through check-ci.sh"
+  assert_not_contains "$yml" "cmp scripts/doc-tools.sh" "…and carries no inline copy of it (#27: CI and check-ci.sh cannot drift apart)"
   # A copy of the plugin, its CI tier freshly installed with this repo's choices.
   mkdir -p scripts skills/doc-superpowers .claude/doc-superpowers
   cp -R "$root/scripts/ledger" "$root/scripts/adapters" "$root/scripts/hooks" scripts/
-  cp "$root/scripts/doc-tools.sh" "$root/scripts/merge-doc-index.sh" scripts/
+  cp "$root/scripts/doc-tools.sh" "$root/scripts/merge-doc-index.sh" "$root/scripts/check-self-install.sh" scripts/
+  step="$TEST_DIR/scripts/check-self-install.sh"
   cp "$root/skills/doc-superpowers/SKILL.md" skills/doc-superpowers/
   cp "$root/RELEASE-NOTES.md" "$root/.gitattributes" .
   cp "$root/.claude/doc-superpowers/installed.json" .claude/doc-superpowers/
@@ -7096,8 +7085,9 @@ test_tests_yml_drift_step_covers_vendored_ledger() {
   assert_eq "0" "$rc" "precondition: install --ci in the copy exits 0"
   rt=$(harness_mktemp_d drift-rt)
   rc=0
-  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
-  assert_eq "0" "$rc" "a fresh install passes the drift step"
+  out=$(cd "$SUITE_TMP" && RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "a fresh install passes the drift step (run from another directory: it checks its own checkout) ($(printf '%s' "$out" | grep -m1 '::error' || true))"
+  assert_contains "$out" "Self-installed CI tier matches its templates:" "…and says so"
   "$BASH_BIN" scripts/doc-tools.sh tools install --helper ledger >/dev/null 2>&1
   rc=0
   out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
