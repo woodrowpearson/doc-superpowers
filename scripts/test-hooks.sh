@@ -5886,6 +5886,10 @@ test_check_ci_runs_what_ci_runs() {
   assert_eq "2" "$CI_RC" "an unknown option: exit 2"
   ci_run -- --bash "$TEST_DIR/no-such-bash" merge-driver
   assert_eq "2" "$CI_RC" "--bash naming no bash: exit 2"
+  ci_run -- --bash bash merge-driver
+  assert_eq "0" "$CI_RC" "--bash bash (a bare name, as tests.yml's ubuntu leg passes it): exit 0"
+  assert_eq "merge-driver BASH_BIN=$_REAL_BIN/bash" "$(cut -d' ' -f1-2 "$CI_LOG")" "…looked up on PATH"
+  : > "$CI_LOG"
 
   ci_run -- --bash "$BASH_BIN" --bash "$b2" merge-driver hooks
   assert_eq "0" "$CI_RC" "two suites under two interpreters: exit 0"
