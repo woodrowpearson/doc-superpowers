@@ -4533,6 +4533,8 @@ test_i4_arity_errors_exit_2() {
       "set-implementation docs/architecture.md docs/x.md --ref PR:1 --status complete" \
       "set-code-refs" "set-code-refs docs/architecture.md" "set-code-refs --refs src/" \
       "set-code-refs docs/architecture.md docs/x.md --refs src/" "move-entry --stdin docs/architecture.md" \
+      "set-code-refs --stdin docs/architecture.md" "set-doc-type --stdin docs/architecture.md" \
+      "upgrade-entries" "upgrade-entries --all docs/architecture.md" \
       "check-version extra" "fragments list extra" "tools status extra" "help status extra"; do
     rc=0
     # shellcheck disable=SC2086  # $cmd is a fixed word list
@@ -7416,6 +7418,310 @@ test_rf_doc_commits_early_stop_with_sigpipe_ignored() {
 
 # --- Runner ---
 
+# --- Batch index verbs (GH #21 upgrade-entries, GH #23 --stdin forms) ---
+
+# "<status>|<commits_behind>|<code_refs_changed>" of every doc in a report, one
+# line per doc, sorted by key.
+_bv_verdicts() {
+  jq -r '.docs | to_entries | sort_by(.key)[]
+    | "\(.key) \(.value.status)|\(.value.commits_behind)|\(.value.code_refs_changed // [] | join(","))"' <<<"$1"
+}
+
+# Turn every entry of the index into a pre-v3 one: no code_oids, code_commit
+# the newest commit touching its refs at HEAD (what a v2 update-index stored),
+# a fixed last_verified, schema_version 2.
+_bv_make_legacy() {
+  local k refs cc map
+  map=$(while IFS= read -r k; do
+    refs=$(jq -r --arg k "$k" '.docs[$k].code_refs[]' docs/.doc-index.json)
+    cc=""
+    # shellcheck disable=SC2086  # refs are plain test paths
+    [ -z "$refs" ] || cc=$(git rev-list -1 HEAD -- $refs)
+    printf '%s\t%s\n' "$k" "$cc"
+  done < <(jq -r '.docs | keys_unsorted[]' docs/.doc-index.json) \
+    | jq -R -n '[inputs | split("\t") | {key: .[0], value: (if .[1] == "" then null else .[1] end)}] | from_entries')
+  # shellcheck disable=SC2016  # jq program
+  _i3_edit --argjson m "$map" '.schema_version = 2
+    | .docs |= with_entries(.value |= (del(.code_oids) | .last_verified = "2026-01-01T00:00:00Z"))
+    | .docs |= with_entries(.value.code_commit = $m[.key])'
+}
+
+test_gh21_upgrade_entries_fills_code_oids_without_a_baseline_reset() {
+  echo "test: GH #21: upgrade-entries fills code_oids from code_commit, keeps last_verified and every verdict, reports what it cannot fill"
+  setup
+  local k
+  printf 'a1\n' > src/a.js
+  printf 'b1\n' > src/b.js
+  for k in d e f g h i j n; do echo "# $k" > "docs/$k.md"; done
+  _i1_commit "docs and code"
+  printf '%s\n' docs/d.md:src/a.js:guide docs/e.md:src/,src/b.js:guide docs/f.md:src/a.js:guide \
+    docs/g.md:src/b.js:guide docs/h.md:src/a.js,src/nope.js:guide docs/i.md:docs/:guide \
+    docs/j.md:src/a.js:guide docs/n.md::guide | "$DOC_TOOLS" build-index 2>/dev/null
+  _bv_make_legacy
+  # f has no code_commit; g one this repository does not hold; j a glob ref
+  # (a v2 pathspec), which names nothing as a literal path.
+  # shellcheck disable=SC2016  # jq program
+  _i3_edit '.docs["docs/f.md"].code_commit = null
+    | .docs["docs/g.md"].code_commit = "0123456789abcdef0123456789abcdef01234567"
+    | .docs["docs/j.md"].code_refs = ["src/*.js"]'
+  _i1_commit "legacy index"
+  printf 'a2\n' > src/a.js
+  _i1_commit a2
+  local before cf_before rc=0 out json
+  before=$(cat docs/.doc-index.json)
+  cf_before=$("$DOC_TOOLS" check-freshness)
+  assert_eq "stale|1|src/a.js" "$(_i1_verdict "$cf_before" docs/d.md)" "precondition: the legacy d reads stale, 1 behind"
+  out=$("$DOC_TOOLS" upgrade-entries --all 2>&1) || rc=$?
+  assert_eq "1" "$rc" "--all with entries it cannot fill: exit 1 (the rest applied)"
+  assert_contains "$out" "Upgraded 4 entries (code_oids filled from code_commit; last_verified unchanged):" "reports the upgraded entries"
+  assert_contains "$out" "Could not upgrade 4 entries" "…and the ones it could not fill"
+  assert_contains "$out" "docs/f.md: no code_commit is recorded" "an entry without code_commit is named"
+  assert_contains "$out" "docs/g.md: its code_commit 0123456789abcdef0123456789abcdef01234567 is not a commit in this repository" \
+    "a code_commit the repository lacks is named"
+  assert_contains "$out" "docs/h.md: code ref 'src/nope.js' is missing at its code_commit" "a ref missing at code_commit is named"
+  assert_contains "$out" "docs/j.md: code ref 'src/*.js' is missing" "…a glob ref too"
+  json=$(cat docs/.doc-index.json)
+  local cc
+  cc=$(jq -r '.docs["docs/d.md"].code_commit' <<<"$json")
+  assert_json_field "$json" '.docs["docs/d.md"].code_oids["src/a.js"]' "$(git rev-parse "$cc:src/a.js")" \
+    "a ref's id is its content in code_commit's tree, not HEAD's"
+  cc=$(jq -r '.docs["docs/e.md"].code_commit' <<<"$json")
+  assert_json_field "$json" '.docs["docs/e.md"].code_oids | "\(.["src/"]) \(.["src/b.js"])"' \
+    "$(git rev-parse "$cc:src") $(git rev-parse "$cc:src/b.js")" "a directory ref records its tree, in ref order"
+  assert_json_field "$json" '.docs["docs/n.md"].code_oids | tojson' "{}" "an entry without refs gets empty code_oids"
+  assert_json_field "$json" '[.docs[] | select(has("code_oids"))] | length' "4" "exactly the fillable entries were written"
+  assert_eq "$(jq -c '.docs | map_values(del(.code_oids))' <<<"$before")" "$(jq -c '.docs | map_values(del(.code_oids))' <<<"$json")" \
+    "nothing but code_oids changed: last_verified, code_commit, code_refs, every field and key order kept"
+  assert_json_field "$json" '.schema_version' "3" "the write stamps schema_version 3"
+  # Not a baseline reset: every verdict a commit-model entry had, it keeps
+  # under the content model (i, whose ref covers the index, aside: the
+  # legacy model saw every index commit as a change to docs/).
+  local cf_after
+  cf_after=$("$DOC_TOOLS" check-freshness)
+  assert_eq "$(_bv_verdicts "$cf_before" | grep -v '^docs/i.md ')" "$(_bv_verdicts "$cf_after" | grep -v '^docs/i.md ')" \
+    "every verdict is unchanged (status, commits_behind, code_refs_changed)"
+  assert_eq "current|0|" "$(_i1_verdict "$cf_after" docs/i.md)" \
+    "a ref covering the doc-index is recorded without it (current, not stale on every index write)"
+  # Idempotent: a second run writes nothing.
+  cp docs/.doc-index.json docs/.idx.before
+  rc=0
+  out=$("$DOC_TOOLS" upgrade-entries --all 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a re-run still reports the unfillable entries (exit 1)"
+  assert_contains "$out" "Upgraded 0 entries" "…and upgrades nothing"
+  assert_exit_code 0 "…writing nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  rc=0
+  out=$("$DOC_TOOLS" upgrade-entries docs/d.md docs/e.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "named entries that have code_oids: exit 0"
+  assert_contains "$out" "Unchanged 2 entries (already has code_oids)" "…reported unchanged"
+  assert_exit_code 0 "…writing nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  # --stdin: doc paths, one per line; an unindexed one is reported (exit 1).
+  rc=0
+  out=$(printf 'docs/f.md\r\n\ndocs/nope.md\ndocs/d.md\n' | "$DOC_TOOLS" upgrade-entries --stdin 2>&1) || rc=$?
+  assert_eq "1" "$rc" "--stdin with an unindexed path and an unfillable entry: exit 1"
+  assert_contains "$out" "'docs/nope.md' not found in index" "the unindexed path is named"
+  assert_contains "$out" "docs/f.md: no code_commit is recorded" "the unfillable entry is named"
+  assert_exit_code 0 "…and nothing was written" cmp -s docs/.idx.before docs/.doc-index.json
+  # Usage.
+  rc=0
+  "$DOC_TOOLS" upgrade-entries >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "no target: exit 2 (usage)"
+  rc=0
+  "$DOC_TOOLS" upgrade-entries --all docs/d.md >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "--all with a path: exit 2"
+  rc=0
+  "$DOC_TOOLS" upgrade-entries --all --stdin </dev/null >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "--all with --stdin: exit 2"
+  out=$("$DOC_TOOLS" --help 2>&1) || true
+  assert_contains "$out" "upgrade-entries <doc_path>... | --stdin < doc paths | --all" "--help lists upgrade-entries"
+  rm -f docs/.idx.before
+  teardown
+}
+
+# The upgrade is batched (one jq pass, one batch-check, one _oid_lookup, one
+# write) — and so are the --stdin forms: 500 entries well inside a bound
+# that a per-entry process would blow on a slow runner.
+test_gh21_gh23_batches_scale() {
+  echo "test: GH #21/#23: upgrade-entries --all, set-doc-type --stdin and set-code-refs --stdin on 500 entries"
+  setup
+  local i
+  for i in $(seq 1 25); do printf 'm%s\n' "$i" > "src/m$i.js"; done
+  _i1_commit modules
+  local head
+  head=$(git rev-parse HEAD)
+  # 500 pre-v3 entries, two refs each (docs need not exist on disk here).
+  # shellcheck disable=SC2016  # jq program
+  jq -n --arg cc "$head" '{schema_version: 2, generated_at: "2026-01-01T00:00:00Z",
+      docs: ([range(1; 501) as $i | {key: "docs/d\($i).md", value: {content_hash: null,
+        code_refs: ["src/m\($i % 25 + 1).js", "src/"], code_commit: $cc, doc_type: "spec",
+        replaces: null, superseded_by: null, last_verified: "2026-01-01T00:00:00Z"}}] | from_entries)}' \
+    > docs/.doc-index.json
+  _i1_commit "legacy index"
+  local t0 rc=0 out el1 el2 el3
+  t0=$SECONDS
+  out=$("$DOC_TOOLS" upgrade-entries --all 2>&1) || rc=$?
+  el1=$((SECONDS - t0))
+  assert_eq "0" "$rc" "upgrade-entries --all on 500 entries exits 0 (${el1}s; output: ${out:0:200})"
+  assert_json_field "$(cat docs/.doc-index.json)" '[.docs[] | select((.code_oids | length) == 2)] | length' "500" "…and fills every one"
+  assert_true "…within 60 s (took ${el1}s)" test "$el1" -lt 60
+  rc=0
+  t0=$SECONDS
+  out=$(for i in $(seq 1 500); do printf 'docs/d%s.md\tdesign-spec\n' "$i"; done | "$DOC_TOOLS" set-doc-type --stdin 2>&1) || rc=$?
+  el2=$((SECONDS - t0))
+  assert_eq "0" "$rc" "set-doc-type --stdin on 500 lines exits 0 (${el2}s)"
+  assert_json_field "$(cat docs/.doc-index.json)" '[.docs[] | select(.doc_type == "design-spec")] | length' "500" "…and retypes every one"
+  assert_true "…within 60 s (took ${el2}s)" test "$el2" -lt 60
+  rc=0
+  t0=$SECONDS
+  out=$(for i in $(seq 1 500); do printf 'docs/d%s.md\tsrc/m%s.js\n' "$i" "$((i % 25 + 1))"; done | "$DOC_TOOLS" set-code-refs --stdin 2>&1) || rc=$?
+  el3=$((SECONDS - t0))
+  assert_eq "0" "$rc" "set-code-refs --stdin on 500 lines exits 0 (${el3}s)"
+  assert_json_field "$(cat docs/.doc-index.json)" '[.docs[] | select(.code_refs | length == 1)] | length' "500" "…and sets every one"
+  assert_true "…within 120 s (took ${el3}s)" test "$el3" -lt 120
+  echo "  timing: upgrade-entries ${el1}s, set-doc-type --stdin ${el2}s, set-code-refs --stdin ${el3}s (500 entries)"
+  teardown
+}
+
+test_gh23_set_doc_type_stdin() {
+  echo "test: GH #23: set-doc-type --stdin retypes a batch in one write, all or nothing, exactly as the single form"
+  setup
+  local k
+  for k in a b c; do echo "# $k" > "docs/$k.md"; done
+  _i1_commit docs
+  printf '%s\n' docs/architecture.md:src/:architecture docs/a.md:src/:spec docs/b.md:src/:plan docs/c.md:src/:spec \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  "$DOC_TOOLS" update-index docs/a.md >/dev/null 2>&1
+  _i1_commit index
+  local single
+  single=$(harness_mktemp_d gh23-sdt)
+  cp -R . "$single/repo"
+  (
+    cd "$single/repo" || exit 1
+    "$DOC_TOOLS" set-doc-type docs/a.md design-spec >/dev/null 2>&1
+    "$DOC_TOOLS" set-doc-type docs/b.md guide >/dev/null 2>&1
+  )
+  local out rc=0
+  out=$(printf 'docs/a.md\tdesign-spec\r\n\n  docs/b.md\t guide \ndocs/c.md\tspec\ndocs/a.md\tdesign-spec\n' \
+          | "$DOC_TOOLS" set-doc-type --stdin 2>&1) || rc=$?
+  assert_eq "0" "$rc" "set-doc-type --stdin exits 0 (output: ${out:0:300})"
+  assert_contains "$out" "Set doc_type of 2 entries:" "reports the batch"
+  assert_contains "$out" "  docs/a.md (spec → design-spec)" "…entry by entry, old → new"
+  assert_contains "$out" "Unchanged 1 entry (doc_type already 'spec'; nothing written)" "an entry already of its type is unchanged"
+  assert_contains "$out" "'docs/a.md' is listed more than once with the same doc_type" "a repeated line is applied once"
+  assert_contains "$out" "NOTE: 'docs/a.md' is now a record doc" "…with the record-doc note"
+  assert_contains "$out" "NOTE: 'docs/b.md' is now a living doc" "…and the living-doc note"
+  assert_eq "$(jq -c '.docs' "$single/repo/docs/.doc-index.json")" "$(jq -c '.docs' docs/.doc-index.json)" \
+    "the batch leaves exactly the index the single form leaves"
+  # All or nothing: every problem is reported, and nothing is written.
+  cp docs/.doc-index.json docs/.idx.before
+  rc=0
+  out=$(printf 'docs/c.md\tguide\ndocs/nope.md\tplan\ndocs/architecture.md\tdesign_spec\n%s\ndocs/b.md\tplan\ndocs/b.md\tissue\ndocs/c.md\t\n' \
+          "docs/a.md guide" | "$DOC_TOOLS" set-doc-type --stdin 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a batch with bad lines exits 1"
+  assert_exit_code 0 "…and writes nothing, not even its good line" cmp -s docs/.idx.before docs/.doc-index.json
+  assert_contains "$out" "'docs/nope.md' not found in index" "an unindexed doc is reported"
+  assert_contains "$out" "unknown doc_type 'design_spec' for 'docs/architecture.md'" "an unknown type is reported"
+  assert_contains "$out" "line 4" "a line without a TAB is reported by number"
+  assert_contains "$out" "'docs/b.md' is listed more than once with different doc_types" "a doc given two types is reported"
+  assert_contains "$out" "nothing written" "…and the batch is refused as a whole"
+  # An empty batch is a no-op; --stdin takes no arguments.
+  rc=0
+  out=$("$DOC_TOOLS" set-doc-type --stdin </dev/null 2>&1) || rc=$?
+  assert_eq "0" "$rc" "an empty batch exits 0"
+  assert_exit_code 0 "…and writes nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  rc=0
+  "$DOC_TOOLS" set-doc-type --stdin docs/a.md plan </dev/null >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "--stdin with arguments is a usage error"
+  rm -f docs/.idx.before
+  teardown
+}
+
+test_gh23_set_code_refs_stdin() {
+  echo "test: GH #23: set-code-refs --stdin sets a batch in one write (TAB lines, or --null records), all or nothing"
+  setup
+  local k
+  printf 'a1\n' > src/a.js
+  printf 'b1\n' > src/b.js
+  mkdir -p "src/x,y"
+  printf 'c1\n' > "src/x,y/c.js"
+  for k in d e f g; do echo "# $k" > "docs/$k.md"; done
+  _i1_commit "docs written"
+  printf 'b2\n' > src/b.js
+  _i1_commit b2
+  printf '%s\n' docs/d.md:src/a.js:guide docs/e.md:src/a.js,src/b.js:guide docs/f.md:src/:guide \
+    docs/g.md:src/a.js:guide | "$DOC_TOOLS" build-index 2>/dev/null
+  # e and f pre-v3 entries (a kept ref keeps what code_commit recorded).
+  # shellcheck disable=SC2016  # jq program
+  _i3_edit --arg ab "$(git rev-list -1 HEAD -- src/a.js src/b.js)" --arg s "$(git rev-list -1 HEAD -- src/)" '
+    .docs["docs/e.md"] |= (del(.code_oids) | .code_commit = $ab | .last_verified = "2026-01-01T00:00:00Z")
+    | .docs["docs/f.md"] |= (del(.code_oids) | .code_commit = $s | .last_verified = "2026-01-01T00:00:00Z")'
+  "$DOC_TOOLS" update-index docs/d.md >/dev/null 2>&1
+  _i1_commit index
+  printf 'a2\n' > src/a.js
+  _i1_commit a2
+  local single
+  single=$(harness_mktemp_d gh23-scr)
+  cp -R . "$single/repo"
+  (
+    cd "$single/repo" || exit 1
+    "$DOC_TOOLS" set-code-refs docs/d.md --refs src/a.js,src/b.js >/dev/null 2>&1
+    "$DOC_TOOLS" set-code-refs docs/e.md --refs src/b.js,src/index.js >/dev/null 2>&1
+    "$DOC_TOOLS" set-code-refs docs/f.md --refs ./src >/dev/null 2>&1
+    "$DOC_TOOLS" set-code-refs docs/g.md --refs '' >/dev/null 2>&1
+  )
+  local out rc=0 json
+  out=$(printf 'docs/d.md\tsrc/a.js, src/b.js\r\n\ndocs/e.md\tsrc/b.js,src/index.js\ndocs/f.md\t./src\ndocs/g.md\t\n' \
+          | "$DOC_TOOLS" set-code-refs --stdin 2>&1) || rc=$?
+  assert_eq "0" "$rc" "set-code-refs --stdin exits 0 (output: ${out:0:300})"
+  assert_contains "$out" "Set code_refs of 3 entries:" "reports the entries it set"
+  assert_contains "$out" "Unchanged 1 entry (code_refs already as given; nothing written)" "…and the one already as given"
+  json=$(cat docs/.doc-index.json)
+  assert_eq "$(jq -c '.docs' "$single/repo/docs/.doc-index.json")" "$(jq -c '.docs' <<<"$json")" \
+    "the batch leaves exactly the index the single form leaves (kept refs, new refs, code_commit, positions)"
+  assert_json_field "$json" '.docs["docs/e.md"].last_verified' "2026-01-01T00:00:00Z" "last_verified is untouched"
+  # --null: records "<doc>\0<ref>\0...\0\0", each ref taken whole (a ',' in a path).
+  rc=0
+  out=$(printf 'docs/d.md\0src/x,y/c.js\0src/a.js\0\0docs/g.md\0src/x,y\0\0' \
+          | "$DOC_TOOLS" set-code-refs --stdin --null 2>&1) || rc=$?
+  assert_eq "0" "$rc" "--stdin --null exits 0 (output: ${out:0:300})"
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/d.md"].code_refs | join("|")' "src/x,y/c.js|src/a.js" "a ref holding ',' is stored whole"
+  assert_json_field "$json" '.docs["docs/d.md"].code_oids["src/x,y/c.js"]' "$(git rev-parse 'HEAD:src/x,y/c.js')" "…and looked up whole"
+  assert_json_field "$json" '.docs["docs/g.md"].code_oids["src/x,y"]' "$(git rev-parse 'HEAD:src/x,y')" "…a directory too"
+  # All or nothing: every problem is reported, and nothing is written.
+  cp docs/.doc-index.json docs/.idx.before
+  rc=0
+  out=$(printf 'docs/d.md\tsrc/b.js\ndocs/nope.md\tsrc/a.js\ndocs/e.md\t-x\n%s\ndocs/f.md\tsrc/a.js\ndocs/f.md\tsrc/b.js\n' \
+          "docs/g.md src/a.js" | "$DOC_TOOLS" set-code-refs --stdin 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a batch with bad lines exits 1"
+  assert_exit_code 0 "…and writes nothing, not even its good line" cmp -s docs/.idx.before docs/.doc-index.json
+  assert_contains "$out" "'docs/nope.md' not found in index" "an unindexed doc is reported"
+  assert_contains "$out" "starts with '-'" "a ref that cannot be a key is reported"
+  assert_contains "$out" "line 3" "…by line number"
+  assert_contains "$out" "line 4" "a line without a TAB is reported by number"
+  assert_contains "$out" "'docs/f.md' is listed more than once with different refs" "a doc given two ref lists is reported"
+  rc=0
+  out=$(printf 'docs/d.md\0src/a.js\0' | "$DOC_TOOLS" set-code-refs --stdin --null 2>&1) || rc=$?
+  assert_eq "1" "$rc" "an unterminated --null record exits 1"
+  assert_contains "$out" "record 1 is not terminated" "…saying so"
+  assert_exit_code 0 "…writing nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  # Usage.
+  rc=0
+  "$DOC_TOOLS" set-code-refs --stdin docs/d.md </dev/null >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "--stdin with a path is a usage error"
+  rc=0
+  "$DOC_TOOLS" set-code-refs --stdin --refs src/a.js </dev/null >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "--stdin with --refs is a usage error"
+  rc=0
+  "$DOC_TOOLS" set-code-refs docs/d.md --refs src/a.js --null >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "--null without --stdin is a usage error"
+  rc=0
+  out=$("$DOC_TOOLS" set-code-refs --stdin </dev/null 2>&1) || rc=$?
+  assert_eq "0" "$rc" "an empty batch exits 0"
+  assert_exit_code 0 "…and writes nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  rm -f docs/.idx.before
+  teardown
+}
+
 run_tests() {
   echo "=== doc-tools.sh test suite ==="
   echo ""
@@ -7697,6 +8003,12 @@ run_tests() {
   # --- Residual fix after the fix-wave re-review ---
   test_rf_tracked_quoted_name_postdating_the_doc_is_not_unmatched
   test_rf_doc_commits_early_stop_with_sigpipe_ignored
+
+  # --- Batch index verbs (GH #21 upgrade-entries, GH #23 --stdin forms) ---
+  test_gh21_upgrade_entries_fills_code_oids_without_a_baseline_reset
+  test_gh21_gh23_batches_scale
+  test_gh23_set_doc_type_stdin
+  test_gh23_set_code_refs_stdin
 
   print_summary
 }
