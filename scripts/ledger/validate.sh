@@ -14,8 +14,8 @@
 # --registry: the registry docs/ledger/ledgers.json against the tracked
 # files (the index). Findings ({"class","detail"}), each blocking (rc 1):
 #   schema              .schema is not "ledger-registry/1"
-#   shape               paths / residual_paths / defined_in not a list of
-#                       strings; contracts not a list of objects
+#   shape               paths / residual_paths / defined_in / read_by not a
+#                       list of strings; contracts not a list of objects
 #   id                  a ledger id not [a-z0-9-]{1,16}, or "unassigned" or
 #                       "readme" (reserved: the views write README.md)
 #   duplicate-id        an id two ledgers carry
@@ -69,10 +69,12 @@ _lg_registry_findings() {
             else (if (.id | type) != "string" or (.id | test($cre) | not)
                   then f("contract-id"; "\($n): \(.id | tojson) is not <kind>:<name>") else empty end),
                  (if has("defined_in") and (.defined_in | strlist | not)
-                  then f("shape"; "\($n): \(.id | tojson) defined_in is not a list of strings") else empty end)
+                  then f("shape"; "\($n): \(.id | tojson) defined_in is not a list of strings") else empty end),
+                 (if has("read_by") and (.read_by | strlist | not)
+                  then f("shape"; "\($n): \(.id | tojson) read_by is not a list of strings") else empty end)
             end
         end),
-       ([(.paths, .residual_paths, ((.contracts | arrays | .[] | objects | .defined_in)))
+       ([(.paths, .residual_paths, ((.contracts | arrays | .[] | objects | (.defined_in, .read_by))))
          | arrays | .[] | strings | select(explode | any(. < 32))][]
         | f("glob"; "\($n): \(tojson) holds a control character"))),
     ([.ledgers[] | .id | strings] | group_by(.) | map(select(length > 1))[]
@@ -83,7 +85,7 @@ _lg_registry_findings() {
      | f("duplicate-contract"; "\(.[0].id) is declared by \(map(.l) | join(", "))"))
   ' "$reg" > "$out" || _lg_die "jq failed (registry checks)"
 
-  # Globs the grammar rejects (every list, defined_in included).
+  # Globs the grammar rejects (every list, defined_in and read_by included).
   _lg_registry_globs "$reg" "$s.globs"
   LC_ALL=C awk "$_LG_AWK_JS$_LG_AWK_GLOB"'
     BEGIN { js_init() }

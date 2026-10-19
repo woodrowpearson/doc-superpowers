@@ -110,11 +110,11 @@ There is no `ledger: none`: an item whose home is undecided says `ledger: unassi
 
 - `id`: `^[a-z0-9-]{1,16}$`, unique, never `unassigned`. `kind`: `service` | `platform` (a label). `status`: `active` | `retired` — a retired ledger owns no paths and takes no new items; its keys keep resolving.
 - `paths` / `residual_paths`: globs owning code (*Globs* below; a leading `!` makes one an exclusion; a residual glob claims only files no ordinary glob does). They power suggestions and in-flight attribution; they never assign an item. `validate --registry` reports a tracked file claimed by two ledgers and, once any ledger declares paths, a tracked file outside `docs/` that none claims.
-- `contracts[]`: `{"id": "<kind>:<name>", "defined_in": [globs], "title"?}` — ids match `^[a-z][a-z0-9_-]*:[^[:space:]]+$`; a diff touching `defined_in` changes the contract. Kinds are the host's (`field:`, `endpoint:`, `component:`, `flag:`, `spec:` …).
+- `contracts[]`: `{"id": "<kind>:<name>", "defined_in": [globs], "read_by"?: [globs], "title"?}` — ids match `^[a-z][a-z0-9_-]*:[^[:space:]]+$`; a diff touching `defined_in` changes the contract. `read_by` (optional, same glob grammar; the index always carries a list) names the files that read it: the reader signal merge-time upkeep uses (`validate --registry` checks it like `defined_in`). Kinds are the host's (`field:`, `endpoint:`, `component:`, `flag:`, `spec:` …).
 
 ### Globs
 
-One grammar for `items.globs` / `archive_globs`, the registry's `paths` / `residual_paths` and contracts' `defined_in`. A glob matches a whole path, relative to the top level, byte by byte (a unicode name is matched as its bytes):
+One grammar for `items.globs` / `archive_globs`, the registry's `paths` / `residual_paths` and contracts' `defined_in` / `read_by`. A glob matches a whole path, relative to the top level, byte by byte (a unicode name is matched as its bytes):
 
 | Form | Matches |
 |---|---|
@@ -217,7 +217,7 @@ Executables named in config `adapters.pr`, `adapters.contracts` and `items.adapt
 
 | Adapter | Contract |
 |---|---|
-| `contracts` | `list` → lines `{"id": "<kind>:<name>", "ledger": "<id>"\|null, "defined_in": [globs], "title"?: string\|null}`; `resolve <id>` → exit 0 / 1. A contract both the registry and the adapter declare is one contract: the registry's `ledger`, `defined_in` and `title` win. Needed by `show`, `related`, `recheck`, `suggest`, `sweep`, `link`, `view`, `publish` |
+| `contracts` | `list` → lines `{"id": "<kind>:<name>", "ledger": "<id>"\|null, "defined_in": [globs], "read_by"?: [globs], "title"?: string\|null}` (`read_by` absent: none; present, it must be a string list); `resolve <id>` → exit 0 / 1. A contract both the registry and the adapter declare is one contract: the registry's `ledger`, `defined_in`, `read_by` and `title` win (an empty registry list leaves `defined_in` and `read_by` to the adapter's). Needed by `show`, `related`, `recheck`, `suggest`, `sweep`, `link`, `view`, `publish` |
 | `pr` | `list` → lines `{"number", "head", "state": "open"\|"merged"\|"closed", "url"}`, optional `"cross"` (true: the head is a fork's branch, never resolved through a same-named branch of `keys.remote`) and `"head_oid"` (a merged PR is walked from it when the clone has it, never from its branch; absent: a merged PR adds nothing beyond the base's own claims). Reference: `doc-superpowers:ledger-pr-gh` — `gh pr list` for every open PR (it exits 2 rather than truncate at its limit of 1,000) and the 500 newest merged ones, adding `"merge_commit"` |
 | `items` | `list [--since <ts>]` → lines `{"ref": "<no whitespace>", "url": "<non-empty>", "status": "…", "fields": {…}}`, optional `"title"`, `"body_excerpt"`, `"updated"`, `"closed"` (strings or null; ISO 8601 times), `"labels"`, `"fm_errors"` (string lists); `get <ref>` → one `{"ref", "url", "title", "body", "created", "fields", "labels", "status"}` (`init --import`; exit 3 means "no get"); `write <ref> <field> <value>`; `note <ref> <text>`; `create --title <t> --body-file <f>` → `{"ref", "url"}`. Reference: `doc-superpowers:ledger-items-gh` |
 

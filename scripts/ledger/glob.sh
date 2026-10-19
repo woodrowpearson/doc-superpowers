@@ -164,7 +164,8 @@ _lg_paths_filter() {
 # _lg_registry_globs <registry> <out.tsv> [active]: every string glob of the
 # registry (with "active": of the ledgers whose status is not "retired")
 # as "<ledger-index>\t<ledger-id>\t<list>\t<neg>\t<glob>" — list P (paths),
-# R (residual_paths) or D (a contract's defined_in); neg 1 for a "!"
+# R (residual_paths) or D (a contract's defined_in or read_by: validate checks
+# both, neither owns anything); neg 1 for a "!"
 # exclusion in P or R (the "!" removed). A ledger without a string id (or
 # with a control character in it) is shown as "#<index>". Globs holding a control character are left out
 # (validate reports them).
@@ -179,7 +180,7 @@ _lg_registry_globs() {
     | ((.paths | strs | select(ok) | ["P", .]),
        (.residual_paths | strs | select(ok) | ["R", .]),
        (if (.contracts | type) == "array" then .contracts[] | select(type == "object")
-          | .defined_in | strs | select(ok) | ["D", .] else empty end))
+          | (.defined_in, .read_by) | strs | select(ok) | ["D", .] else empty end))
     | if .[0] != "D" and (.[1] | startswith("!"))
       then "\($i)\t\($id)\t\(.[0])\t1\t\(.[1][1:])"
       else "\($i)\t\($id)\t\(.[0])\t0\t\(.[1])" end

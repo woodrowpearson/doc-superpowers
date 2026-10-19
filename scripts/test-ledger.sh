@@ -12345,6 +12345,110 @@ provisional-key block docs/issues/mine.md" "$(lg_vf)" "…every provisional key 
   teardown
 }
 
+# lg_read_by_reg <extra-json>: the relations registry's shape with the extra
+# members (e.g. '"read_by":["src/cart/*.js"]'; empty for none) on
+# field:order.total.
+lg_read_by_reg() {
+  local rb=""
+  if [ -n "$1" ]; then rb=",$1"; fi
+  printf '{"schema":"ledger-registry/1","ledgers":[
+  {"id":"app","title":"App","kind":"service","status":"active",
+   "contracts":[{"id":"field:order.total","defined_in":["src/order/*.js"]%s},
+                {"id":"component:Sheet","defined_in":["src/sheet/**"]}]},
+  {"id":"core","title":"Core","kind":"platform","status":"active",
+   "contracts":[{"id":"endpoint:create","defined_in":["server/create.js"]}]}]}' "$rb"
+}
+
+test_lg_contract_read_by_index() {
+  echo "test: #39 — contracts[].read_by: registry globs reach the index (always a list); the adapter's fill an empty registry list"
+  lg_rel_fixture '{"base":"main","adapters":{"contracts":"tools/contracts.sh"}}'
+  lg_registry "$(lg_read_by_reg '"read_by":["src/cart/*.js"]')"
+  # shellcheck disable=SC2016  # the adapter's own shell text
+  lg_contracts_adapter 'case "$1" in
+list) echo "{\"id\":\"field:order.total\",\"ledger\":null,\"defined_in\":[],\"read_by\":[\"x/**\"]}"
+      echo "{\"id\":\"component:Sheet\",\"ledger\":null,\"defined_in\":[],\"read_by\":[\"src/ui/**\"]}"
+      echo "{\"id\":\"flag:new\",\"ledger\":null,\"defined_in\":[\"flags/*.json\"]}" ;;
+esac'
+  lg_rel_ix
+  assert_eq "0" "$LG_RC" "the index builds"
+  assert_json_field "$(cat "$LG_IX")" '.contracts[] | select(.id == "field:order.total") | .read_by | tojson' '["src/cart/*.js"]' \
+    "a non-empty registry read_by wins over the adapter's"
+  assert_json_field "$(cat "$LG_IX")" '.contracts[] | select(.id == "component:Sheet") | .read_by | tojson' '["src/ui/**"]' \
+    "a registry contract without read_by: the adapter's fills"
+  assert_json_field "$(cat "$LG_IX")" '.contracts[] | select(.id == "endpoint:create") | .read_by | tojson' '[]' \
+    "neither declares one: []"
+  assert_json_field "$(cat "$LG_IX")" '.contracts[] | select(.id == "flag:new") | .read_by | tojson' '[]' \
+    "an adapter-only contract without read_by: []"
+  assert_json_field "$(cat "$LG_IX")" '[.contracts[] | select(.read_by | type != "array")] | length' '0' \
+    "every contract carries a list"
+  # An empty registry list also yields to the adapter's.
+  lg_registry "$(lg_read_by_reg '"read_by":[]')"
+  lg_rel_ix
+  assert_json_field "$(cat "$LG_IX")" '.contracts[] | select(.id == "field:order.total") | .read_by | tojson' '["x/**"]' \
+    "an empty registry read_by: the adapter's fills"
+  # No adapter at all: the registry's alone, [] elsewhere.
+  lg_enable '{"base":"main"}'
+  lg_registry "$(lg_read_by_reg '"read_by":["src/cart/*.js"]')"
+  lg_rel_ix
+  assert_json_field "$(cat "$LG_IX")" '[.contracts[] | "\(.id)=\(.read_by | join(","))"] | join(" ")' \
+    'component:Sheet= endpoint:create= field:order.total=src/cart/*.js' "no adapter: the registry's, else []"
+  teardown
+}
+
+test_lg_registry_read_by_shape() {
+  echo "test: #39 — validate --registry: read_by not a list of strings is a shape finding; a bad glob in it is reported like defined_in's"
+  lg_fixture
+  lg_enable
+  lg_registry "$(lg_read_by_reg '"read_by":"src/x.js"')"
+  lg validate --registry --format json
+  assert_eq "1" "$LG_RC" "a string read_by: findings exit 1"
+  assert_eq "shape" "$(lg_classes "$LG_OUT")" "…one shape finding"
+  assert_contains "$(jq -r '.findings[] | select(.class == "shape") | .detail' <<<"$LG_OUT")" 'read_by is not a list of strings' \
+    "…saying so"
+  assert_contains "$(jq -r '.findings[] | select(.class == "shape") | .detail' <<<"$LG_OUT")" '"field:order.total"' \
+    "…naming the contract"
+  lg_registry "$(lg_read_by_reg '"read_by":["ok/*.js", 7]')"
+  lg validate --registry --format json
+  assert_eq "shape" "$(lg_classes "$LG_OUT")" "a non-string entry is a shape finding too"
+  lg_registry "$(lg_read_by_reg '"read_by":["src/{a"]')"
+  lg validate --registry --format json
+  assert_eq "1" "$LG_RC" "a bad glob: exit 1"
+  assert_eq "glob" "$(lg_classes "$LG_OUT")" "…a glob finding"
+  local rb
+  rb=$(jq -r '.findings[] | select(.class == "glob") | .detail' <<<"$LG_OUT")
+  lg_registry "$(lg_read_by_reg '' | sed 's|"src/order/\*.js"|"src/{a"|')"
+  lg validate --registry --format json
+  assert_eq "$rb" "$(jq -r '.findings[] | select(.class == "glob") | .detail' <<<"$LG_OUT")" \
+    "…worded exactly as the same bad glob in defined_in"
+  lg_registry "$(lg_read_by_reg '"read_by":["src/a\u0001b"]')"
+  lg validate --registry --format json
+  assert_eq "glob" "$(lg_classes "$LG_OUT")" "a control character in read_by: a glob finding"
+  lg_registry "$(lg_read_by_reg '"read_by":["src/cart/*.js","src/cart/**/x.js"]')"
+  lg validate --registry --format json
+  assert_eq "0" "$LG_RC" "a good list: clean"
+  teardown
+}
+
+test_lg_adapter_read_by_contract() {
+  echo "test: #39 — a contracts adapter line whose read_by is not a string list breaks the contract: exit 2 (show)"
+  lg_rel_fixture '{"base":"main","adapters":{"contracts":"tools/contracts.sh"}}'
+  lg_contracts_adapter 'echo "{\"id\":\"flag:a\",\"ledger\":null,\"defined_in\":[],\"read_by\":[\"ok/**\"]}"'
+  lg show app-1
+  assert_eq "0" "$LG_RC" "a string-list read_by: exit 0"
+  lg_contracts_adapter 'echo "{\"id\":\"flag:a\",\"ledger\":null,\"defined_in\":[],\"read_by\":\"src/x.js\"}"'
+  lg show app-1
+  assert_eq "2" "$LG_RC" "a string read_by: exit 2"
+  assert_contains "$LG_ERR" "contracts contract" "…the contract it breaks"
+  assert_contains "$LG_ERR" "line 1" "…naming the line"
+  lg_contracts_adapter 'echo "{\"id\":\"flag:a\",\"ledger\":null,\"defined_in\":[],\"read_by\":[\"ok/**\",3]}"'
+  lg show app-1
+  assert_eq "2" "$LG_RC" "a non-string entry: exit 2"
+  lg_contracts_adapter 'echo "{\"id\":\"flag:a\",\"ledger\":null,\"defined_in\":[],\"read_by\":null}"'
+  lg show app-1
+  assert_eq "2" "$LG_RC" "a null read_by: exit 2 (absent is the way to say none)"
+  teardown
+}
+
 run_tests() {
   echo "Running ledger tests..."
   echo ""
@@ -12771,6 +12875,9 @@ run_tests() {
   test_lg_suggest_top
   # --- upkeep / filing (#36, #39) ---
   test_lg_config_base_null_is_default
+  test_lg_contract_read_by_index
+  test_lg_registry_read_by_shape
+  test_lg_adapter_read_by_contract
 
   print_summary
 }
