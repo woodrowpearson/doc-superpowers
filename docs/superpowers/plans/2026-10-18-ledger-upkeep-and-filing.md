@@ -33,6 +33,34 @@
 
 ---
 
+### Task 0: A null config `base` means the default
+
+Found by the abundance install session (2026-10-19): a host config with `"base": null` replaces the default (`$d * $h`), so keys.sh, relations.sh, index.sh, inflight.sh and views.sh read base `""`. `validate --pushed 000..tip` on a new branch then refuses every provisional key already at the tip ("config base \"\" does not resolve here"), `publish` dies ("config base is not a revision: ''"), and `trailers.since: "adoption"` finds no adoption commit. Upkeep's all-zeros and `--pr` (open PR) ranges read the same base, so this lands first.
+
+**Files:**
+- Modify: `scripts/ledger/config.jq` (after `$d * $h`: a null `base` takes `$d.base`; the header comment says so)
+- Modify: `references/ledger.md` (*Config* `base` row: "`null` is the default")
+- Test: `scripts/test-ledger.sh`
+
+- [ ] **Step 1: Write the failing tests**
+
+```bash
+test_lg_config_base_null_is_default() {
+  echo "test: a host config \"base\": null means the default origin/main (not no base)"
+  # config {"base": null, keys cas}; main carries an item with a provisional key, pushed to the bare remote;
+  # a new branch off it adds nothing: validate --pushed 0000000000000000000000000000000000000000..HEAD → rc 0
+  # the same with "base": "origin/main" → rc 0 (unchanged); with "base": "nope/x" → the nobase refusal (rc 1, unchanged)
+  # ledger show <item> --format json: .item still resolves (no "not a revision" die)
+}
+```
+
+- [ ] **Step 2: Run** the suite — Expected: the new test FAILs (rc 1 with base null).
+- [ ] **Step 3: Implement** in config.jq.
+- [ ] **Step 4: Run** the suite — Expected: all pass.
+- [ ] **Step 5: Commit** `fix(ledger): a null config base means the default (origin/main)`
+
+---
+
 ### Task 1: Contract `read_by` (registry, adapter, index)
 
 **Files:**
