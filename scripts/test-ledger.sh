@@ -12,7 +12,7 @@ source "$SCRIPT_DIR/test-helpers.sh"
 DOC_TOOLS="$(bash_bin_shim "$REPO_DIR/scripts/doc-tools.sh")"
 
 # The ledger sub-verbs (doc-tools.sh ledger <sub>), in verb-table order.
-LG_VERBS="show ls find related sweep recheck inflight notices state-watch new assign suggest link note view validate publish finalize init"
+LG_VERBS="show ls find related sweep recheck upkeep inflight notices state-watch new assign suggest link note view validate publish finalize init"
 
 LG_INERT_LINE="ledger: not enabled (no docs/ledger/config.json)"
 
@@ -4542,6 +4542,34 @@ lg_nb() {
 # lg_rc_of <key>: the item's recheck_after, joined by spaces, from LG_IX.
 lg_rc_of() {
   jq -r --arg k "$1" '.items[] | select(.key == $k) | .recheck_after | join(" ")' "$LG_IX"
+}
+
+# lg_upkeep_fixture [config]: lg_rel_fixture plus the files upkeep's ranges
+# edit, committed on main — src/order/total.test.js, "src/order/total
+# two.js" (a space), src/cart/badge.js, docs/notes.md (src/order/total.js,
+# src/util/a.js and server/create.js are lg_rel_fixture's) — and core-3
+# gains the alias ORD-9; then on a new branch feat, for the test's own
+# commits (lg_up_commit).
+lg_upkeep_fixture() {
+  lg_rel_fixture "$@"
+  lg_files src/order/total.test.js "src/order/total two.js" src/cart/badge.js
+  printf '# Notes\n' > docs/notes.md
+  lg_item docs/issues/i.md "key: core-3" "ledger: core" "status: Open" "severity: P3" "summary: Specified together" \
+    "aliases: [ORD-9]"
+  git add -A && git commit -qm "upkeep corpus"
+  git checkout -q -b feat
+}
+
+# lg_up_commit <message> <file>…: append a line to each file (created when
+# absent) and commit them all with <message>.
+lg_up_commit() {
+  local msg="$1" f
+  shift
+  for f in "$@"; do
+    mkdir -p "$(dirname "$f")"
+    printf 'edit\n' >> "$f"
+  done
+  git add -A && git commit -qm "$msg"
 }
 
 test_lg_contract_upstream_downstream() {
@@ -12636,6 +12664,332 @@ test_lg_new_create_glob_mismatch() {
   teardown
 }
 
+# lg_up_vals <key|path>: the values the item's shown proposals name, as
+# "field:value field:value …", from LG_OUT (upkeep --format json).
+lg_up_vals() {
+  jq -r --arg k "$1" '.items[] | select(.key == $k or .path == $k) | [.proposed[] | "\(.field) \(.value)"] | join(", ")' <<<"$LG_OUT"
+}
+
+test_lg_upkeep_changes_proposal() {
+  echo "test: #39 — upkeep: a range whose commit claims app-6 (Ledger-Claims) and edits src/order/total.js proposes changes field:order.total to app-6, with evidence and a link line"
+  lg_upkeep_fixture
+  local a b
+  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  a=$(git rev-parse main)
+  b=$(git rev-parse feat)
+  lg upkeep --range main..feat --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "1" "$(json_count "$LG_OUT")" "JSON: one object"
+  assert_json_field "$LG_OUT" '[keys_unsorted[]] | join(",")' "verb,enabled,exit,range,pr,files,commits,items,unattributed_contracts,pr_data" \
+    "the payload: spec §4's fields (no touched, no rank), then pr_data as other verbs add it"
+  assert_json_field "$LG_OUT" '[.verb, .exit, .range, .pr, .files, .commits] | tojson' \
+    "[\"ledger upkeep\",0,\"$a..$b\",null,1,1]" "verb, exit, range (the oids), pr null, files, commits"
+  assert_json_field "$LG_OUT" '.items | length' "1" "one involved item"
+  assert_json_field "$LG_OUT" '.items[0] | [.key, .path, (.found_by | join(","))] | join("|")' "app-6|docs/issues/h.md|trailer:claims" \
+    "app-6, found by its claim trailer (the key in the trailer line is no key-in-message)"
+  assert_json_field "$LG_OUT" '.items[0].proposed[0] | tojson' \
+    '{"field":"changes","value":"field:order.total","evidence":["diff touches src/order/total.js (defined_in of field:order.total)"]}' \
+    "the proposal, with its evidence"
+  assert_json_field "$LG_OUT" '.items[0] | [.total, .truncated, .declared_untouched] | tojson' '[1,false,[]]' "total, truncated, declared_untouched"
+  assert_json_field "$LG_OUT" '.items[0].link' "ledger link app-6 --changes field:order.total" "the ready link line"
+  assert_json_field "$LG_OUT" '.items[0] | keys | join(",")' "declared_untouched,found_by,key,link,path,proposed,total,truncated" \
+    "an item's fields (no rank)"
+  assert_json_field "$LG_OUT" '.unattributed_contracts | tojson' "[]" "nothing unattributed"
+  lg upkeep --range main..feat
+  assert_eq "0" "$LG_RC" "text: exit 0"
+  assert_eq "range ${a:0:12}..${b:0:12}  1 files, 1 commits" "$(sed -n 1p <<<"$LG_OUT")" "line 1: the range (12 hex each), files, commits"
+  assert_contains "$LG_OUT" "app-6  found by trailer:claims" "the item's line"
+  assert_contains "$LG_OUT" "  + changes field:order.total  — diff touches src/order/total.js (defined_in of field:order.total)" "the proposal's line"
+  assert_contains "$LG_OUT" "  link: ledger link app-6 --changes field:order.total" "the link line"
+  assert_not_contains "$LG_OUT" "(no proposals)" "proposals: no '(no proposals)'"
+  assert_eq "" "$(git status --porcelain)" "upkeep writes nothing"
+  teardown
+}
+
+test_lg_upkeep_covered_and_untouched() {
+  echo "test: #39 — a contract an involved item already declares in changes is proposed to nobody; declared changes the range misses are declared_untouched"
+  lg_upkeep_fixture
+  lg_up_commit $'totals\n\nLedger-Claims: app-1, app-6' src/order/total.js
+  lg upkeep --range main..feat --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_json_field "$LG_OUT" '[.items[] | "\(.key)/\(.proposed | length)/\(.link)"] | join(" ")' "app-1/0/null app-6/0/null" \
+    "app-1 declares changes field:order.total: proposed to nobody (not app-6, whose paths list its definition)"
+  assert_json_field "$LG_OUT" '.items[0].declared_untouched | tojson' "[]" "app-1's declared contract is touched"
+  lg upkeep --range main..feat
+  assert_contains "$LG_OUT" "(no proposals)" "text: (no proposals)"
+  assert_not_contains "$LG_OUT" "link:" "…and no link line"
+  git checkout -q -b feat2 main
+  lg_up_commit $'util\n\nLedger-Claims: app-1' src/util/a.js
+  lg upkeep --range main..feat2 --format json
+  assert_json_field "$LG_OUT" '.items[0] | [.key, (.declared_untouched | join(","))] | join("|")' "app-1|field:order.total" \
+    "a declared contract the range does not touch: declared_untouched"
+  lg upkeep --range main..feat2
+  assert_contains "$LG_OUT" "  declared, untouched: field:order.total" "text: declared, untouched"
+  teardown
+}
+
+test_lg_upkeep_found_by_signals() {
+  echo "test: #39 — found_by: trailer:claims_by_path, item-file-edited, key-in-message (an alias too), ranked; --items restricts to named items"
+  lg_upkeep_fixture '{"base":"main","trailers":{"claims_by_path":["Doc-Fixes"]}}'
+  local a b
+  lg_up_commit $'docs for app-6\n\nDoc-Fixes: docs/issues/h.md' docs/notes.md
+  lg_up_commit "touch g" docs/issues/g.md
+  lg_up_commit "see APP-4 for context; follow-up to ord-9" docs/notes.md
+  # An archived item: edited and named, never involved.
+  lg_item docs/archive/issues/old.md "key: app-9" "ledger: app" "status: Closed" "summary: Old"
+  lg_up_commit "archive app-9" docs/archive/issues/old.md
+  lg upkeep --range main..feat --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_json_field "$LG_OUT" '[.items[] | "\(.key):\(.found_by | join(","))"] | join(" ")' \
+    "app-6:trailer:claims_by_path,key-in-message app-5:item-file-edited app-4:key-in-message core-3:key-in-message" \
+    "each item's signals, in rank order; items by rank, then key (an alias, any case, counts)"
+  assert_json_field "$LG_OUT" '.commits' "4" "four commits"
+  lg upkeep --range main..feat
+  assert_contains "$LG_OUT" "app-6  found by trailer:claims_by_path, key-in-message" "text: found by, comma-joined"
+  lg upkeep --range main..feat --items APP-4 --format json
+  assert_eq "0" "$LG_RC" "--items: exit 0"
+  assert_json_field "$LG_OUT" '[.items[] | "\(.key):\(.found_by | join(","))"] | join(" ")' "app-4:named" \
+    "--items: only the named items, found by named"
+  lg upkeep --range main..feat --items app-4 core-3 --format json
+  assert_json_field "$LG_OUT" '[.items[].key] | join(",")' "app-4,core-3" "--items takes several"
+  lg upkeep --range main..feat --items nope-9
+  assert_eq "3" "$LG_RC" "--items naming no item: usage (3)"
+  assert_contains "$LG_ERR" "nope-9" "…naming it"
+  lg upkeep --range main..feat --items docs/archive/issues/old.md
+  assert_eq "3" "$LG_RC" "--items naming an archived item: usage (3)"
+  assert_contains "$LG_ERR" "archived item" "…saying so"
+  # The PR body (Task 5 passes it): key-in-pr-body, through the core.
+  a=$(git rev-parse main)
+  b=$(git rev-parse feat)
+  printf 'Closes the APP-1 work\n' > "$TEST_DIR/body.txt"
+  LG_SUB=upkeep lg_call _lg_up_core "$a" "$b" "$TEST_DIR/body.txt" "" "$TEST_DIR/core.json"
+  assert_eq "0" "$LG_RC" "the core with a body: rc 0"
+  assert_json_field "$(cat "$TEST_DIR/core.json" 2>/dev/null)" '[.items[] | select(.key == "app-1") | .found_by[]] | join(",")' "key-in-pr-body" \
+    "a key in the PR body: key-in-pr-body"
+  assert_json_field "$(cat "$TEST_DIR/core.json" 2>/dev/null)" '[.items[] | "\(.key)/\(.rank)"] | join(" ")' \
+    "app-6/1 app-5/2 app-4/3 core-3/3 app-1/4" "the core keeps each item's rank (stripped from the verb's payload)"
+  teardown
+}
+
+test_lg_upkeep_claim_forms() {
+  echo "test: #39 — claim trailers: several keys (commas, blanks, any case), a provisional key finalized.json maps on, and Fixes #N naming the one hosted item whose ref ends in #N"
+  lg_items_fixture '{"base":"origin/main","items":{"adapter":"doc-superpowers:ledger-items-gh"}}'
+  git checkout -q -b fix-12
+  printf '{"x-~ab12": "x-1"}\n' > docs/ledger/finalized.json
+  git add -A
+  git commit -qm "fix it" -m "Fixes #12
+Closes #99
+Ledger-Claims: X-~AB12 Y-13"
+  lg upkeep --range main..fix-12 --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_json_field "$LG_OUT" '[.items[] | "\(.path):\(.found_by | join(","))"] | join(" ")' \
+    "docs/issues/a.md:trailer:claims gh#12:trailer:claims_by_ref gh#13:trailer:claims" \
+    "x-1 through its finalized provisional key, gh#12 by Fixes #12 (#99 names none), y-13 by key (any case)"
+  lg_items_teardown
+}
+
+test_lg_upkeep_attribution() {
+  echo "test: #39 — several involved items: the contract goes to the one whose paths overlap its defined_in most (then diff overlap, rank, key)"
+  lg_upkeep_fixture
+  lg_up_commit $'totals\n\nLedger-Claims: app-4, app-6' src/order/total.js
+  lg upkeep --range main..feat --format json
+  assert_eq "app-4=|app-6=changes field:order.total" "app-4=$(lg_up_vals app-4)|app-6=$(lg_up_vals app-6)" \
+    "app-6 lists src/order/total.js (defined_in): field:order.total goes to app-6 only"
+  # endpoint:create (server/create.js): no item lists it.
+  git checkout -q -b t-diff main
+  lg_up_commit $'create\n\nLedger-Claims: app-5, app-6' server/create.js src/order/total.js
+  lg upkeep --range main..t-diff --format json
+  assert_eq "app-5=|app-6=changes endpoint:create, changes field:order.total" "app-5=$(lg_up_vals app-5)|app-6=$(lg_up_vals app-6)" \
+    "a tie on defined_in: the item listing more net-diff files wins (app-6 over app-5, before key order)"
+  git checkout -q -b t-rank main
+  lg_up_commit $'create\n\nLedger-Claims: app-6\n\nunlike app-5' server/create.js
+  lg upkeep --range main..t-rank --format json
+  assert_eq "app-5=|app-6=changes endpoint:create" "app-5=$(lg_up_vals app-5)|app-6=$(lg_up_vals app-6)" \
+    "then the better found_by rank (a trailer over a message word)"
+  git checkout -q -b t-key main
+  lg_up_commit $'create\n\nLedger-Claims: app-5, app-4' server/create.js
+  lg upkeep --range main..t-key --format json
+  assert_eq "app-4=changes endpoint:create|app-5=" "app-4=$(lg_up_vals app-4)|app-5=$(lg_up_vals app-5)" "then key order"
+  teardown
+}
+
+test_lg_upkeep_skip_globs_and_contracts() {
+  echo "test: #39 — a contract touched only through skip_globs files (a .test.js, a .md) is not touched; upkeep.skip_contracts ids are never proposed"
+  local out
+  out=$(jq -nc --argjson h '{}' -f "$REPO_DIR/scripts/ledger/config.jq" 2>&1) || out="<jq failed: $out>"
+  assert_json_field "$out" '.upkeep | tojson' \
+    '{"skip_globs":["docs/**","**/*.md","**/test/**","**/tests/**","**/__tests__/**","**/*.test.*","**/*.spec.*","**/*_test.*","**/Tests/**","**/*Tests/**"],"skip_contracts":[]}' \
+    "config defaults: upkeep.skip_globs (spec §4, verbatim), skip_contracts []"
+  lg_upkeep_fixture
+  lg_up_commit $'tests\n\nLedger-Claims: app-6' src/order/total.test.js src/sheet/README.md
+  lg upkeep --range main..feat --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_json_field "$LG_OUT" '[.files, (.items[0].proposed | length), (.unattributed_contracts | length)] | tojson' '[2,0,0]' \
+    "a .test.js under src/order/ and a .md under src/sheet/: two files, nothing touched"
+  lg_enable '{"base":"main","upkeep":{"skip_globs":[]}}'
+  lg upkeep --range main..feat --format json
+  assert_eq "changes component:Sheet, changes field:order.total" "$(lg_up_vals app-6)" "skip_globs [] (the host's list replaces the default): both touch"
+  lg_enable '{"base":"main","upkeep":{"skip_globs":[],"skip_contracts":["field:order.total"]}}'
+  lg upkeep --range main..feat --format json
+  assert_eq "changes component:Sheet" "$(lg_up_vals app-6)" "skip_contracts: never proposed"
+  lg_enable '{"base":"main","upkeep":{"skip_globs":"docs/**"}}'
+  lg upkeep --range main..feat
+  assert_eq "2" "$LG_RC" "skip_globs not a list: exit 2"
+  lg_enable '{"base":"main","upkeep":{"skip_globs":["src/{a"]}}'
+  lg upkeep --range main..feat
+  assert_eq "2" "$LG_RC" "a bad glob in skip_globs: exit 2"
+  teardown
+}
+
+test_lg_upkeep_contract_change_trailer() {
+  echo "test: #39 — a Contract-Change: endpoint:create — <line> trailer touches the contract with that evidence, ranked first"
+  lg_upkeep_fixture
+  lg_up_commit $'create\n\nLedger-Claims: app-6\nContract-Change: field:order.total \xe2\x80\x94 totals now round half-even\nContract-Change: flag:nope \xe2\x80\x94 not a contract' \
+    server/create.js
+  lg upkeep --range main..feat --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "changes field:order.total, changes endpoint:create" "$(lg_up_vals app-6)" \
+    "the Contract-Change contract first (before id order); a trailer naming no contract is ignored"
+  assert_json_field "$LG_OUT" '.items[0].proposed[0].evidence | tojson' '["Contract-Change: field:order.total — totals now round half-even"]' \
+    "its evidence: the trailer's line"
+  assert_json_field "$LG_OUT" '.items[0].link' "ledger link app-6 --changes field:order.total,endpoint:create" "the link names both"
+  assert_not_contains "$LG_OUT" "flag:nope" "flag:nope nowhere"
+  lg upkeep --range main..feat
+  assert_contains "$LG_OUT" "  + changes field:order.total  — Contract-Change: field:order.total — totals now round half-even" "text"
+  # The core's touched list (validate --pushed reads it): files, cc_line.
+  LG_SUB=upkeep lg_call _lg_up_core "$(git rev-parse main)" "$(git rev-parse feat)" "" "" "$TEST_DIR/core.json"
+  assert_json_field "$(cat "$TEST_DIR/core.json" 2>/dev/null)" '.touched | tojson' \
+    '[{"contract":"endpoint:create","files":["server/create.js"],"cc_line":null},{"contract":"field:order.total","files":[],"cc_line":"totals now round half-even"}]' \
+    "the core's touched: {contract, files, cc_line}"
+  teardown
+}
+
+test_lg_upkeep_unattributed() {
+  echo "test: #39 — no involved item: unattributed_contracts [{contract, files}] and '(no proposals)'"
+  lg_upkeep_fixture
+  lg_up_commit "tidy" src/order/total.js server/create.js
+  lg upkeep --range main..feat --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_json_field "$LG_OUT" '.items | length' "0" "no involved item"
+  assert_json_field "$LG_OUT" '.unattributed_contracts | tojson' \
+    '[{"contract":"endpoint:create","files":["server/create.js"]},{"contract":"field:order.total","files":["src/order/total.js"]}]' \
+    "every touched contract, unattributed, with its files"
+  lg upkeep --range main..feat
+  assert_contains "$LG_OUT" "unattributed: endpoint:create (server/create.js)" "text: an unattributed line"
+  assert_contains "$LG_OUT" "(no proposals)" "text: (no proposals)"
+  lg upkeep --range main..feat --strict
+  assert_eq "0" "$LG_RC" "--strict: unattributed contracts are no proposals (exit 0)"
+  teardown
+}
+
+test_lg_upkeep_three_dot_and_merge() {
+  echo "test: #39 — --range main...feat after main moved and was merged into feat: only feat's own files count"
+  lg_upkeep_fixture
+  local mb
+  lg_up_commit $'totals\n\nLedger-Claims: app-6' src/order/total.js
+  git checkout -q main
+  lg_up_commit "server" server/create.js
+  mb=$(git rev-parse HEAD)
+  git checkout -q feat
+  git merge -q --no-edit main
+  git checkout -q main
+  lg_up_commit "server again" server/create.js
+  git checkout -q feat
+  lg upkeep --range main...feat --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_json_field "$LG_OUT" '[.range, .files, .commits] | tojson' "[\"$mb..$(git rev-parse feat)\",1,2]" \
+    "the range starts at the merge base; feat's one file; its commit and the merge"
+  assert_eq "changes field:order.total" "$(lg_up_vals app-6)" "trunk's server/create.js does not count"
+  assert_not_contains "$LG_OUT" "endpoint:create" "endpoint:create nowhere"
+  lg upkeep --range main..feat --format json
+  assert_json_field "$LG_OUT" '.files' "2" "main..feat as given: the net diff from main's tip (2 files)"
+  teardown
+}
+
+test_lg_upkeep_spaced_path() {
+  echo "test: #39 — a diff file with a space (src/order/total two.js) matches defined_in src/order/*.js and is printed whole in evidence and JSON"
+  lg_upkeep_fixture
+  lg_up_commit $'spaced\n\nLedger-Claims: app-6' "src/order/total two.js" "src/order/t$(printf '\303\266')tal.js"
+  lg upkeep --range main..feat --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_json_field "$LG_OUT" '.items[0].proposed[0].evidence | tojson' \
+    "[\"diff touches src/order/total two.js (defined_in of field:order.total)\",\"diff touches src/order/t$(printf '\303\266')tal.js (defined_in of field:order.total)\"]" \
+    "the spaced and the unicode name, whole"
+  lg upkeep --range main..feat
+  assert_contains "$LG_OUT" "diff touches src/order/total two.js (defined_in of field:order.total); diff touches src/order/t$(printf '\303\266')tal.js" \
+    "text: whole"
+  # An item whose paths hold the spaced name, and whose own path has a space.
+  git checkout -q -b feat2 main
+  lg_item "docs/issues/odd name.md" "status: Open" "summary: Spaced" "related-files: [src/order/total two.js]"
+  lg_up_commit $'odd\n\nLedger-Claims: app-6' "src/order/total two.js"
+  lg upkeep --range main..feat2 --format json
+  assert_json_field "$LG_OUT" '[.items[] | "\(.path):\(.found_by | join(","))"] | join(" ")' \
+    "docs/issues/h.md:trailer:claims docs/issues/odd name.md:item-file-edited" "the new item, found by its file"
+  assert_eq "app-6=|odd=changes field:order.total" "app-6=$(lg_up_vals app-6)|odd=$(lg_up_vals "docs/issues/odd name.md")" \
+    "its spaced paths entry matches defined_in and is in the diff: it wins over app-6 (diff overlap before rank)"
+  assert_json_field "$LG_OUT" '.items[1] | [.key, .link] | tojson' \
+    "[null,\"ledger link 'docs/issues/odd name.md' --changes field:order.total\"]" "no key: the link names the path, quoted"
+  # From main (not the range's tip): the index is the tip's own.
+  git checkout -q main
+  lg upkeep --range main..feat2 --format json
+  assert_eq "0|changes field:order.total" "$LG_RC|$(lg_up_vals "docs/issues/odd name.md")" \
+    "run from main: the item the range adds still counts (the index is feat2's)"
+  teardown
+}
+
+test_lg_upkeep_top_strict_exits() {
+  echo "test: #39 — --top 1 truncates (total/truncated, 'showing 1 of 2'); --strict with proposals exit 1, without 0; bad range exit 2; neither/both --range/--pr, --top x: exit 3"
+  lg_upkeep_fixture
+  lg_up_commit $'two\n\nLedger-Claims: app-6' src/order/total.js "src/order/total two.js" src/order/x.js src/order/y.js server/create.js
+  lg upkeep --range main..feat --top 1 --format json
+  assert_eq "0" "$LG_RC" "--top 1: exit 0"
+  assert_json_field "$LG_OUT" '.items[0] | [(.proposed | map(.value)), .total, .truncated, .link] | tojson' \
+    '[["field:order.total"],2,true,"ledger link app-6 --changes field:order.total"]' \
+    "--top 1: the first (most evidence), total 2, truncated; the link names the shown one"
+  assert_json_field "$LG_OUT" '.items[0].proposed[0].evidence | tojson' \
+    '["diff touches src/order/total two.js (defined_in of field:order.total)","diff touches src/order/total.js (defined_in of field:order.total)","diff touches src/order/x.js (defined_in of field:order.total)","… and 1 more files"]' \
+    "at most 3 files, then … and N more files"
+  lg upkeep --range main..feat --top 1
+  assert_contains "$LG_OUT" "  (showing 1 of 2; --top 0 shows all)" "text: showing N of M"
+  lg upkeep --range main..feat --top 0 --format json
+  assert_json_field "$LG_OUT" '.items[0] | [(.proposed | map(.value)), .truncated, .link] | tojson' \
+    '[["field:order.total","endpoint:create"],false,"ledger link app-6 --changes field:order.total,endpoint:create"]' \
+    "--top 0: all, by evidence count (before id order)"
+  lg upkeep --range main..feat --format json
+  assert_json_field "$LG_OUT" '.items[0].proposed | length' "2" "default --top 3: both"
+  lg upkeep --range main..feat --strict --format json
+  assert_eq "1" "$LG_RC" "--strict with proposals: exit 1"
+  assert_json_field "$LG_OUT" '.exit' "1" "….exit 1"
+  lg upkeep --range feat..feat --strict
+  assert_eq "0" "$LG_RC" "--strict without proposals: exit 0"
+  lg upkeep --range main..nope
+  assert_eq "2" "$LG_RC" "an end that does not resolve: exit 2"
+  lg upkeep --range nope...feat --format json
+  assert_eq "2" "$LG_RC" "… either end, ... too: exit 2"
+  assert_eq "1" "$(json_count "$LG_OUT")" "…one JSON object"
+  lg upkeep
+  assert_eq "3" "$LG_RC" "neither --range nor --pr: usage (3)"
+  lg upkeep --range main
+  assert_eq "3" "$LG_RC" "a --range that is no range: usage (3)"
+  lg upkeep --range main..
+  assert_eq "3" "$LG_RC" "an empty end: usage (3)"
+  lg upkeep --range main..feat --top x
+  assert_eq "3" "$LG_RC" "--top x: usage (3)"
+  lg upkeep --range main..feat --top -1
+  assert_eq "3" "$LG_RC" "--top -1: usage (3)"
+  lg upkeep --range main..feat extra
+  assert_eq "3" "$LG_RC" "an argument: usage (3)"
+  lg upkeep --pr 5
+  assert_eq "3" "$LG_RC" "--pr (Task 5): usage (3)"
+  assert_contains "$LG_ERR" "ledger upkeep: --pr is not available yet" "…not available yet"
+  lg upkeep --range main..feat --pr 5
+  assert_eq "3" "$LG_RC" "both --range and --pr: usage (3)"
+  lg upkeep --range main..feat --no-repo-adapters
+  assert_eq "3" "$LG_RC" "--no-repo-adapters (Task 5): usage (3)"
+  assert_contains "$LG_ERR" "ledger upkeep: --no-repo-adapters is not available yet" "…not available yet"
+  teardown
+}
+
 run_tests() {
   echo "Running ledger tests..."
   echo ""
@@ -13070,6 +13424,17 @@ run_tests() {
   test_lg_new_create_no_file_on_failure
   test_lg_new_create_suggest_contracts
   test_lg_new_create_glob_mismatch
+  test_lg_upkeep_changes_proposal
+  test_lg_upkeep_covered_and_untouched
+  test_lg_upkeep_found_by_signals
+  test_lg_upkeep_claim_forms
+  test_lg_upkeep_attribution
+  test_lg_upkeep_skip_globs_and_contracts
+  test_lg_upkeep_contract_change_trailer
+  test_lg_upkeep_unattributed
+  test_lg_upkeep_three_dot_and_merge
+  test_lg_upkeep_spaced_path
+  test_lg_upkeep_top_strict_exits
 
   print_summary
 }

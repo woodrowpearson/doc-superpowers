@@ -1,0 +1,403 @@
+# shellcheck shell=bash
+# scripts/ledger/upkeep.sh — merge-time upkeep (#39; design 2026-10-18 §4):
+# `ledger upkeep`, the declarations a range's diff says its items are
+# missing — proposed, never written. Sourced by lib.sh; uses lib.sh's
+# _lg_init, _lg_usage, _lg_die, _lg_emit, _lg_out_file, _lg_cfg, index.sh's
+# _lg_index and _LG_JQ_INCLUDE, keys.sh's _LG_JQ_RESOLVE_DEFS (lg_resolve),
+# relations.sh's _lg_msg_claims, _lg_trailers, _LG_AWK_TRAILER and
+# _lg_r_file_contracts, glob.sh's _lg_paths_filter, query.sh's
+# _lg_pr_data_into, parse.sh's _lg_scratch_name; defs.jq's lg_r_maps.
+#
+# ledger upkeep --range <a>..<b> | --range <a>...<b> [--items <item>…]
+#   [--top N] [--strict] [--format text|json]
+# (--pr <n> and --no-repo-adapters are usage errors, exit 3, until Task 5.)
+#
+# Range: <a>..<b> as given; <a>...<b> is merge-base(a, b)..b — trunk merged
+#   into the branch never counts. An end that does not resolve to a commit
+#   here: exit 2. The net diff is `git diff <a> <b>` (no renames: a moved
+#   file is its old path and its new one); the commits, `git log <a>..<b>`.
+# Involved items, each with found_by (in this rank order; archived items
+#   never):
+#   1 trailer:claims / trailer:claims_by_path / trailer:claims_by_ref —
+#     _lg_msg_claims "<a>..<b>" (trailers.since honoured): a claims value
+#     split on commas and blanks, each a key or an alias (any case; a
+#     provisional key finalized.json maps on counts), a claims_by_path value
+#     an item path ("./" dropped), a claims_by_ref "#N" the one hosted item
+#     whose ref ends in #N;
+#   2 item-file-edited — a net-diff file that is an item;
+#   3 key-in-message — a key or alias as a word (sweep's word scan: split
+#     on [^A-Za-z0-9_-], any case) in a commit message of the range, its
+#     claims and claims_by_path trailer lines left out (they are signal 1);
+#   4 key-in-pr-body — the same in the PR body (_lg_up_core's <body-file>).
+#   --items <item>… names them instead (found_by ["named"], rank 0): each
+#   must resolve, as show resolves, to one item that is not archived (else
+#   exit 3), and only they are involved.
+# Touched contracts: an index contract whose defined_in matches a net-diff
+#   file upkeep.skip_globs does not match, or that a "Contract-Change: <id>
+#   [— <line>]" trailer in the range names.
+# Proposals (changes): a touched contract an involved item declares in
+#   changes is covered — proposed to nobody. Every other one, except
+#   upkeep.skip_contracts, goes to exactly one involved item: the most
+#   paths entries its defined_in matches; then the most paths entries that
+#   are net-diff files; then the best rank; then key (else path) order. With
+#   no involved item it is unattributed. Evidence: "diff touches <f>
+#   (defined_in of <c>)" per file (3 at most, then "… and N more files"),
+#   then "Contract-Change: <c> — <line>" per trailer line. Per item: changes
+#   ranked Contract-Change first, then by evidence count (files and lines),
+#   then id; --top N (default 3; 0: all) keeps the first N (total,
+#   truncated). declared_untouched: the declared changes the range does not
+#   touch (informational). link: "ledger link <key|path> --changes a,b" for
+#   the shown proposals (a word quoted for the shell when it needs it), null
+#   without — printed, never run. upkeep writes nothing.
+# Output: JSON {range: "<a-oid>..<b-oid>", pr: null, files, commits, items:
+#   [{key, path, found_by, proposed: [{field, value, evidence}], total,
+#   truncated, declared_untouched, link}], unattributed_contracts:
+#   [{contract, files}]} (+ pr_data / items_data). Text: "range <a12>..<b12>
+#   <n> files, <m> commits"; per item "<key|path>  found by <signals>",
+#   "  + <field> <value>  — <evidence; …>", "  (showing N of M; --top 0
+#   shows all)", "  declared, untouched: a, b", "  link: ledger link …";
+#   then "unattributed: <c> (<files>)"; "(no proposals)" when no item has
+#   one. Exit 0 (proposals are advisory); 1 with --strict and a proposal; 2
+#   a range that does not resolve, a failing contracts adapter, a bad
+#   upkeep config; 3 usage. Cost: one index build, one git diff-tree, two
+#   git log walks (_lg_msg_claims' and the word scan's).
+
+_LG_UP_TOP=3   # proposals kept per item (0: all) — the verb's --top
+_LG_UP_IX=""   # _lg_up_index: the index upkeep reads …
+_LG_UP_IXB=""  # … and the commit it was chosen for
+
+# _lg_up_range <spec> → _LG_UP_A, _LG_UP_B: the range's two commits (full
+# ids); for <a>...<b>, _LG_UP_A is merge-base(a, b). A spec that is no range,
+# or one with an empty end: usage (3). An end that does not resolve to a
+# commit here, or two ends without a merge base: exit 2.
+_lg_up_range() {
+  local spec="$1" a b x
+  case "$spec" in
+    *...*) a=${spec%%...*}; b=${spec#*...} ;;
+    *..*) a=${spec%%..*}; b=${spec#*..} ;;
+    *) _lg_usage "--range takes <a>..<b> or <a>...<b> (got '$spec')" ;;
+  esac
+  if [ -z "$a" ] || [ -z "$b" ]; then
+    _lg_usage "--range takes <a>..<b> or <a>...<b>, both ends named (got '$spec')"
+  fi
+  for x in "$a" "$b"; do
+    case "$x" in
+      -*|*$'\n'*) _lg_die "--range: '$x' does not resolve to a commit here" ;;
+    esac
+  done
+  _LG_UP_A=$(git rev-parse -q --verify "$a^{commit}" 2>/dev/null) || _lg_die "--range: '$a' does not resolve to a commit here"
+  _LG_UP_B=$(git rev-parse -q --verify "$b^{commit}" 2>/dev/null) || _lg_die "--range: '$b' does not resolve to a commit here"
+  case "$spec" in
+    *...*)
+      _LG_UP_A=$(git merge-base "$_LG_UP_A" "$_LG_UP_B" 2>/dev/null) \
+        || _lg_die "--range: '$a' and '$b' have no merge base here" ;;
+  esac
+}
+
+# _lg_up_index <b-oid> → _LG_UP_IX: the index upkeep reads, built once per
+# run — the working tree's when <b-oid> is HEAD's commit (a relation just
+# written with ledger link counts before it is committed), else <b-oid>'s
+# own (--rev: an item the range adds counts wherever upkeep runs from). The
+# caller sets _LG_IX_NEED_CONTRACTS (the verb: 1, a failing contracts
+# adapter exits 2).
+_lg_up_index() {
+  local head
+  if [ -n "$_LG_UP_IX" ] && [ "$_LG_UP_IXB" = "$1" ]; then return 0; fi
+  head=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || head=""
+  if [ "$1" = "$head" ]; then
+    _LG_UP_IX=$(_lg_index) || exit "$?"
+  else
+    _LG_UP_IX=$(_lg_index --rev "$1") || exit "$?"
+  fi
+  _LG_UP_IXB=$1
+}
+
+# The core's jq helpers. Path lists reach jq one per line, a newline in a
+# name as \001 and a tab as \002 (up_dec takes them back).
+# shellcheck disable=SC2016  # jq source
+_LG_JQ_UP_DEFS='
+def up_dec: if test("[\u0001\u0002]") then gsub("\u0001"; "\n") | gsub("\u0002"; "\t") else . end;
+def up_lines: split("\n") | map(select(. != "") | up_dec);
+def up_ordered_unique: reduce .[] as $x ([]; if index([$x]) != null then . else . + [$x] end);
+# The word scan (sweep): words of [A-Za-z0-9_-], lower case, once each.
+def up_words: [splits("[^A-Za-z0-9_-]+") | select(. != "") | ascii_downcase] | unique;
+def up_signals: ["named", "trailer:claims", "trailer:claims_by_path", "trailer:claims_by_ref",
+                 "item-file-edited", "key-in-message", "key-in-pr-body"];
+def up_rank: if . == "named" then 0 elif startswith("trailer:") then 1 elif . == "item-file-edited" then 2
+             elif . == "key-in-message" then 3 else 4 end;
+# A Contract-Change value: its id (the first word), and the rest without
+# the separator (":", "—", "–", "-") — as the in-flight scan reads it.
+def up_cc: (capture("^(?<w>[^ \t]*)(?<r>.*)$")) as $x
+  | ($x.r | sub("^[ \t:]*"; "") | (if startswith("—") or startswith("–") then .[1:] else . end) | sub("^[ \t:-]*"; "")) as $l
+  | {id: $x.w, line: $l};
+# The evidence of a touched contract $t ({contract, files, cc}).
+def up_ev_changes($t):
+  ($t.files | length) as $n
+  | [($t.files[0:3][] | "diff touches \(.) (defined_in of \($t.contract))"),
+     (if $n > 3 then "… and \($n - 3) more files" else empty end),
+     ($t.cc[] | if . == "" then "Contract-Change: \($t.contract)" else "Contract-Change: \($t.contract) — \(.)" end)];
+# A word as the shell reads it: bare when safe, else single-quoted.
+def up_shq: if test("^[A-Za-z0-9_./:,@%+=-][A-Za-z0-9_./:,@%+=~-]*$") then . else @sh end;
+# The link line for item $I and its shown proposals $SH (null without).
+def up_link($I; $SH):
+  if $SH == [] then null
+  else (($I.key // ($I.path | if startswith("-") then "./" + . else . end)) | up_shq) as $ref
+    | ("ledger link \($ref)"
+       + ([("changes", "consumes") as $f | [$SH[] | select(.field == $f) | .value] as $vs
+           | select($vs != []) | " --\($f) \($vs | join(",") | up_shq)"] | join("")))
+    | lg_q_one
+  end;
+'
+
+# _LG_JQ_UPKEEP: the core's one pass, over the index ($ix) — inputs $c
+# (config), $diff (the net-diff files, lines), $fc ({file: [contract ids]}
+# for the files skip_globs leaves), $tr (_lg_msg_claims' lines), $words (the
+# messages without their claim trailer lines), $body / $hasbody (the PR
+# body), $named / $hasnamed (--items' paths, lines), $a, $b, $commits, $top.
+# Stages: involvement ($INV), touched contracts ($TALL, $TCH), attribution
+# ($ATTR), proposals ($PROPS: [{p, field, value, evidence, _g, _cc, _n}] —
+# _g the group: 0 changes; a consumes group sorts after it), then per item
+# ranking, --top and the link line.
+# shellcheck disable=SC2016  # jq source
+_LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
+. as $ix
+| lg_r_maps($ix) as $M
+| $c[0].upkeep.skip_contracts as $skipc
+| [$ix.items[] | select(.archived != true)] as $LIVE
+| lg_obj($LIVE[] | {(.path): true}) as $LP
+| (reduce $LIVE[] as $i ({}; reduce ([$i.key] + ($i.aliases // []) | .[] | strings | ascii_downcase) as $k
+     (.; if has($k) then . else .[$k] = $i.path end))) as $KM
+| (($ix.finalized // {}) | if type == "object" then . else {} end) as $FIN
+| lg_lists($LIVE[] | select((.url | type) == "string")
+           | (.path | capture("(?<n>#[0-9]+)$").n // empty) as $n | {k: $n, v: .path}) as $HM
+| ($diff | up_lines) as $DIFF
+| lg_obj($DIFF[] | {(.): true}) as $DS
+| [$tr | split("\n")[] | select(. != "") | split("\t") | {k: .[1], v: (.[2:] | join("\t"))}] as $TR
+# Involvement: one {p, s} per signal, then per item its found_by and rank.
+| (if $hasnamed then [$named | up_lines | .[] | {p: ., s: "named"}]
+   else
+     [ ($TR[] | select(.k == "claims") | .v | splits("[, \t]+") | select(. != "") as $w
+        | ($KM[$w | ascii_downcase]
+           // (($FIN[$w] // $FIN[$w | ascii_downcase]) | if type == "string" then $KM[ascii_downcase] else null end)
+           // empty)
+        | {p: ., s: "trailer:claims"}),
+       ($TR[] | select(.k == "claims_by_path") | .v | sub("^\\./"; "") | select($LP[.] == true) | {p: ., s: "trailer:claims_by_path"}),
+       ($TR[] | select(.k == "claims_by_ref") | ($HM[.v] // []) | select(length == 1) | {p: .[0], s: "trailer:claims_by_ref"}),
+       ($DIFF[] | select($LP[.] == true) | {p: ., s: "item-file-edited"}),
+       ($words | up_words[] | ($KM[.] // empty) | {p: ., s: "key-in-message"}),
+       (if $hasbody then ($body | up_words[] | ($KM[.] // empty) | {p: ., s: "key-in-pr-body"}) else empty end) ]
+   end) as $SIG
+| [$SIG | group_by(.p)[] | .[0].p as $p | $M.BYP[$p] as $I | (map(.s) | unique) as $ss
+   | {p: $p, key: $I.key, found_by: [up_signals[] as $x | select($ss | index([$x]) != null) | $x],
+      rank: ([$ss[] | up_rank] | min)}]
+  | sort_by(.rank, (.key // .p)) as $INV
+# Touched contracts: by a net-diff file (skip_globs left out: $fc) or by a
+# Contract-Change line; $TALL every one, $TCH those upkeep may propose.
+| lg_lists($fc[0] | to_entries[] | (.key | up_dec) as $f | .value[] | {k: ., v: $f}) as $CF
+| lg_obj(($ix.contracts // [])[] | {(.id): true}) as $ISC
+| lg_lists($TR[] | select(.k == "contract_change") | .v | up_cc | select($ISC[.id] == true) | {k: .id, v: .line}) as $CCL
+| [(($CF | keys) + ($CCL | keys) | unique)[] as $k
+   | {contract: $k, files: (($CF[$k] // []) | unique), cc: (($CCL[$k] // []) | up_ordered_unique)}] as $TALL
+| lg_obj($TALL[] | {(.contract): true}) as $TOUCHED
+| [$TALL[] | select(.contract as $k | $skipc | index([$k]) == null)] as $TCH
+# Covered: an involved item declares it in changes.
+| lg_obj($INV[] | ($M.BYP[.p].changes // [])[] | strings | {(.): true}) as $COV
+| [$TCH[] | select($COV[.contract] != true)] as $OPEN
+# Attribution: each open contract to one involved item (item path → [touched]).
+| (if $INV == [] then {}
+   else lg_lists($OPEN[] | . as $t
+     | ($INV | map(. as $v | $M.BYP[$v.p] as $I | (($I.paths // []) | unique) as $ps
+         | {p: $v.p,
+            n1: ([$ps[] | select((($M.D[.] // []) | index([$t.contract])) != null)] | length),
+            n2: ([$ps[] | select($DS[.] == true)] | length),
+            r: $v.rank, o: ($I.key // $I.path)})
+         | sort_by(-.n1, -.n2, .r, .o) | .[0].p) as $win
+     | {k: $win, v: $t})
+   end) as $ATTR
+# Proposals: changes — each attributed contract the item does not declare.
+| [$INV[] | .p as $p | (($M.BYP[$p].changes // []) | map(strings)) as $dch
+   | ($ATTR[$p] // [])[] | select(.contract as $k | $dch | index([$k]) == null)
+   | {p: $p, field: "changes", value: .contract, evidence: up_ev_changes(.), _g: 0,
+      _cc: (if .cc != [] then 0 else 1 end), _n: ((.files | length) + (.cc | length))}] as $PROPS
+| lg_lists($PROPS[] | {k: .p, v: .}) as $PBY
+# Per item: rank its proposals, keep --top of them, the link line.
+| [$INV[] | . as $v | $M.BYP[$v.p] as $I
+   | (($PBY[$v.p] // []) | sort_by(._g, ._cc, -._n, .value)) as $R
+   | (if $top == 0 then $R else $R[:$top] end) as $SH
+   | {key: $I.key, path: $I.path, found_by: $v.found_by, rank: $v.rank,
+      proposed: [$SH[] | {field, value, evidence}], total: ($R | length), truncated: (($SH | length) < ($R | length)),
+      declared_untouched: [(($I.changes // []) | map(strings) | unique)[] | select($TOUCHED[.] != true)],
+      link: up_link($I; $SH)}] as $ITEMS
+| {range: "\($a)..\($b)", files: ($DIFF | length), commits: $commits, items: $ITEMS,
+   unattributed_contracts: (if $INV == [] then [$OPEN[] | {contract, files}] else [] end),
+   touched: [$TCH[] | {contract, files, cc_line: (.cc[0] // null)}]}
+'
+
+# _lg_up_core <a-oid> <b-oid> <body-file|""> <named-paths-file|""> <out.json>:
+# upkeep's computation for the range <a-oid>..<b-oid> (full ids; the caller
+# resolves "..." and all-zeros ends), written to <out.json> as one object
+#   {range: "<a>..<b>", files: <n>, commits: <n>,
+#    items: [{key, path, found_by, rank, proposed: [{field, value,
+#             evidence}], total, truncated, declared_untouched, link}],
+#    unattributed_contracts: [{contract, files}],
+#    touched: [{contract, files, cc_line}]}
+# rank (0 named … 4 key-in-pr-body) and touched are for callers
+# (validate --pushed); the verb's payload leaves them out. touched: every
+# contract touched — through non-skipped files or a Contract-Change line —
+# but upkeep.skip_contracts, sorted by id; files the non-skipped net-diff
+# files its defined_in matches; cc_line the first Contract-Change line's
+# text ("" for a bare one), null without. <body-file>: the PR body
+# (key-in-pr-body). <named-paths-file>: a NUL-terminated list of item paths
+# (--items, resolved): only they are involved. Keeps _LG_UP_TOP proposals
+# per item (0: all; a caller that needs every attribution sets 0). Index:
+# _lg_up_index <b-oid>. Dies (2) on a git failure, a bad upkeep config or
+# glob, or a failing contracts adapter (with _LG_IX_NEED_CONTRACTS=1).
+_lg_up_core() {
+  local a="$1" b="$2" body="$3" named="$4" out="$5" s n="" hb=false hn=false msg=""
+  [ "$#" = 5 ] || _lg_die "internal: _lg_up_core <a> <b> <body-file|\"\"> <named-paths-file|\"\"> <out>"
+  _lg_scratch_name
+  s=$_LG_SN
+  # The config: upkeep.skip_globs (one per line) and skip_contracts, checked.
+  # shellcheck disable=SC2016  # jq source
+  _lg_cfg '.upkeep as $u
+    | if ($u | type) != "object" then "bad\tconfig upkeep must be an object"
+      elif ($u.skip_globs | type) != "array" or any($u.skip_globs[]; type != "string" or test("[\n\r]"))
+      then "bad\tconfig upkeep.skip_globs must be a list of globs"
+      elif ($u.skip_contracts | type) != "array" or any($u.skip_contracts[]; type != "string")
+      then "bad\tconfig upkeep.skip_contracts must be a list of contract ids"
+      else "ok", $u.skip_globs[] end' > "$s.cfg"
+  IFS= read -r msg < "$s.cfg" || msg=""
+  case "$msg" in
+    ok) ;;
+    bad*) _lg_die "${msg#bad	}" ;;
+    *) _lg_die "internal: upkeep config read as '$msg'" ;;
+  esac
+  tail -n +2 "$s.cfg" > "$s.skipg" || _lg_die "cannot write $s.skipg"
+  _lg_up_index "$b"
+  # The net diff (NUL-terminated), the files skip_globs matches, the rest.
+  git diff-tree -r --name-only -z --no-renames "$a" "$b" -- > "$s.diff" 2> "$s.err" \
+    || _lg_die "git diff-tree $a $b failed: $(head -n 3 "$s.err" 2>/dev/null)"
+  _lg_paths_filter "$s.diff" "$s.skipg" "$s.skip"
+  tr '\n\t\000' '\001\002\n' < "$s.diff" > "$s.diff.l" || _lg_die "cannot read the net diff"
+  tr '\n\t\000' '\001\002\n' < "$s.skip" > "$s.skip.l" || _lg_die "cannot read the skipped files"
+  LC_ALL=C awk -v skip="$s.skip.l" 'BEGIN { while ((getline l < skip) > 0) S[l] = 1 } !($0 in S)' "$s.diff.l" > "$s.keep.l" \
+    || _lg_die "cannot list the range's files"
+  _lg_r_file_contracts "$_LG_UP_IX" "$s.keep.l" "$s.fc"
+  # The trailers; then the messages for the word scan, without the claim
+  # trailer lines (claims, claims_by_path), and the number of commits.
+  _lg_msg_claims "$a..$b" > "$s.tr"
+  _lg_trailers "$s.trn"
+  git -c log.showSignature=false log --no-color --format='%x01%H%n%B' "$a..$b" -- > "$s.msg" 2> "$s.err" \
+    || _lg_die "git log failed: $(head -n 3 "$s.err" 2>/dev/null)"
+  LC_ALL=C awk -v tr="$s.trn" -v cnt="$s.n" "$_LG_AWK_TRAILER"'
+    BEGIN { tr_load(tr) }
+    substr($0, 1, 1) == "\001" { n++; next }
+    { tr_match($0); for (i = 1; i <= TRM; i++) if (TRMK[i] == "claims" || TRMK[i] == "claims_by_path") next; print }
+    END { print n + 0 > cnt }' "$s.msg" > "$s.words" || _lg_die "cannot read the range's messages"
+  IFS= read -r n < "$s.n" || n=0
+  if [ -n "$body" ]; then hb=true; else body=/dev/null; fi
+  if [ -n "$named" ]; then
+    hn=true
+    tr '\n\t\000' '\001\002\n' < "$named" > "$s.named.l" || _lg_die "cannot read $named"
+  else
+    : > "$s.named.l"
+  fi
+  jq -L "$_LG_LIB" -c --slurpfile c "$_LG_CFG" --slurpfile fc "$s.fc" \
+    --rawfile diff "$s.diff.l" --rawfile tr "$s.tr" --rawfile words "$s.words" \
+    --rawfile body "$body" --argjson hasbody "$hb" --rawfile named "$s.named.l" --argjson hasnamed "$hn" \
+    --arg a "$a" --arg b "$b" --argjson commits "$n" --argjson top "${_LG_UP_TOP:-3}" \
+    "$_LG_JQ_INCLUDE$_LG_JQ_UPKEEP" "$_LG_UP_IX" > "$out" || _lg_die "jq failed (ledger upkeep)"
+}
+
+# _lg_up_top: --top N into _LG_UP_TOP — a whole number, at most 9 digits
+# (leading zeros dropped); default 3; anything else is a usage error (3).
+# shellcheck disable=SC2154  # _OPT_top is set by _parse_args
+_lg_up_top() {
+  _LG_UP_TOP=3
+  if _opt_seen top; then
+    case "$_OPT_top" in
+      ''|*[!0123456789]*|??????????*) _lg_usage "--top takes a whole number (0: all proposals; got '$_OPT_top')" ;;
+    esac
+    _LG_UP_TOP=$((10#$_OPT_top))
+  fi
+}
+
+# _lg_up_named <out>: the --items values resolved as show resolves them,
+# against the index upkeep reads (_lg_up_index), into <out>: their item
+# paths, NUL-terminated, in order (a repeat once). A value that names no
+# item, several, an archived legacy row or an archived item: usage (3).
+# shellcheck disable=SC2154  # _OPTV_items is set by _parse_args
+_lg_up_named() {
+  local s m
+  _lg_scratch_name
+  s=$_LG_SN
+  _lg_up_index "$_LG_UP_B"
+  # shellcheck disable=SC2016  # jq source
+  jq -L "$_LG_LIB" -r --slurpfile c "$_LG_CFG" \
+    --argjson refs "$(jq -nc '$ARGS.positional' --args "${_OPTV_items[@]}")" \
+    "$_LG_JQ_INCLUDE$_LG_JQ_RESOLVE_DEFS"'
+    . as $ix
+    | [$refs[] as $r | {v: $r, r: ($ix | lg_resolve($r; $c[0]))}] as $R
+    | ([$R[] | select(.r.r != "item")
+        | "bad\t--items \(.v | tojson) is not one item" + (if .r.r == "ambiguous" then " (several: \(.r.v | join(", ")))" else "" end)]
+       + [$R[] | select(.r.r == "item") | .r.v as $p | select(any($ix.items[]; .path == $p and .archived == true))
+          | "bad\t--items \(.v | tojson) is an archived item: upkeep never involves one"]) as $bad
+    | if $bad != [] then $bad[]
+      else ([$R[].r.v] | reduce .[] as $p ([]; if index([$p]) != null then . else . + [$p] end))[]
+        | "ok\t\(gsub("\n"; "\u0001"))" end' "$_LG_UP_IX" > "$s.r" || _lg_die "jq failed (--items)"
+  if grep -q '^bad	' "$s.r"; then
+    m=$(grep '^bad	' "$s.r" | head -n 1 | cut -f 2-)
+    _lg_usage "$m"
+  fi
+  cut -f 2- "$s.r" | tr '\n\001' '\000\n' > "$1" || _lg_die "cannot write $1"
+}
+
+# The text lines of the verb's payload.
+# shellcheck disable=SC2016  # jq source
+_LG_JQ_UP_TEXT='
+def up_files($fs): ($fs | length) as $n | ($fs[0:3] | join(", ")) + (if $n > 3 then ", … and \($n - 3) more files" else "" end);
+. as $O
+| "range \($O.range | split("..") | map(.[0:12]) | join(".."))  \($O.files) files, \($O.commits) commits",
+  ($O.items[]
+   | "\((.key // .path) | lg_q_one)  found by \(.found_by | join(", "))",
+     (.proposed[] | "  + \(.field) \(.value | lg_q_one)  — \(.evidence | join("; ") | lg_q_one)"),
+     (if .truncated then "  (showing \(.proposed | length) of \(.total); --top 0 shows all)" else empty end),
+     (if .declared_untouched != [] then "  declared, untouched: \(.declared_untouched | join(", ") | lg_q_one)" else empty end),
+     (if .link != null then "  link: \(.link)" else empty end)),
+  ($O.unattributed_contracts[]
+   | "unattributed: \(.contract | lg_q_one) (\(if .files == [] then "Contract-Change" else up_files(.files) | lg_q_one end))"),
+  (if all($O.items[]; .total == 0) then "(no proposals)" else empty end)
+'
+
+# shellcheck disable=SC2154  # _OPT_*, _OPTV_* and _ARGS are set by _parse_args
+cmd_ledger_upkeep() {
+  local s named="" rc=0 n
+  _lg_init upkeep
+  [ "${#_ARGS[@]}" = 0 ] || _lg_usage "unexpected argument '${_ARGS[0]}' (give --range <a>..<b>)"
+  if [ "$_OPT_no_repo_adapters" = 1 ]; then _lg_usage "--no-repo-adapters is not available yet"; fi
+  if _opt_seen pr; then _lg_usage "--pr is not available yet"; fi
+  _opt_seen range || _lg_usage "give --range <a>..<b> or --range <a>...<b>"
+  _lg_up_top
+  _lg_up_range "$_OPT_range"
+  _LG_IX_NEED_CONTRACTS=1
+  _lg_scratch_name
+  s=$_LG_SN
+  if [ "${#_OPTV_items[@]}" -gt 0 ]; then
+    _lg_up_named "$s.named"
+    named="$s.named"
+  fi
+  _lg_up_core "$_LG_UP_A" "$_LG_UP_B" "" "$named" "$s.core"
+  # The payload: spec §4's fields — rank and touched stay the core's.
+  jq -c '{range, pr: null, files, commits, items: [.items[] | del(.rank)], unattributed_contracts}' "$s.core" > "$s.out" \
+    || _lg_die "jq failed (ledger upkeep payload)"
+  n=$(jq '[.items[].total] | add // 0' "$s.out") || _lg_die "jq failed (ledger upkeep proposals)"
+  if [ "$_OPT_strict" = 1 ] && [ "$n" -gt 0 ]; then rc=1; fi
+  if [ "$_LG_FORMAT" = json ]; then
+    _lg_pr_data_into "$s.out"
+    _lg_emit upkeep "$rc" "$s.out"
+  fi
+  jq -L "$_LG_LIB" -r "$_LG_JQ_INCLUDE$_LG_JQ_UP_TEXT" "$s.out" | tr -d '\000-\010\013-\037' > "$s.txt" \
+    || _lg_die "jq failed (ledger upkeep text)"
+  _lg_out_file "$s.txt"
+  _lg_emit upkeep "$rc"
+}

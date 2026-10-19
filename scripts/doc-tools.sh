@@ -2457,6 +2457,26 @@ ledger recheck|cmd_ledger_recheck|repo|format=
   "re-verify | close as superseded by <item> | reshape". The index marks
   them (re-check: <item> landed) once it reaches a terminal class on the
   base, until a later commit on the base touches them.
+ledger upkeep|cmd_ledger_upkeep|repo|range= pr= items+ top= strict no-repo-adapters format=
+  (--range <a>..<b> | --range <a>...<b> | --pr <n>) [--items <item>...] [--top N] [--strict] [--no-repo-adapters] [--format text|json]
+  Merge-time upkeep: the changes relations a range's items are missing,
+  proposed with their evidence and a ready "ledger link" line — never
+  written. <a>...<b> is merge-base(a, b)..b (trunk merged into the branch
+  never counts). Involved items, each with how it was found: a claim
+  trailer (claims, claims_by_path, claims_by_ref), an item file the net
+  diff edits, a key or alias as a word in a commit message; --items names
+  them instead. A contract is touched by a net-diff file its defined_in
+  matches (unless upkeep.skip_globs matches the file) or by a
+  Contract-Change line. One an involved item already declares in changes
+  is proposed to nobody; each other one goes to one item — the most paths
+  entries its defined_in matches, then the most paths in the diff, then
+  how it was found, then key — or, with no involved item, is listed as
+  unattributed; upkeep.skip_contracts are never proposed. --top N (default
+  3; 0: all) proposals per item. Exit 0 (advisory); 1 with --strict and a
+  proposal; 2 a range end that does not resolve, a failing contracts
+  adapter or a bad upkeep config; 3 an --items value naming no item (or an
+  archived one). --pr and --no-repo-adapters are not available yet (exit
+  3).
 ledger inflight|cmd_ledger_inflight|repo|branch= fetch push format=
   [--branch <name>|<name>@<host>] [--fetch] [--push] [--format text|json]
   Work in flight (config inflight.enabled): local branches, worktrees
@@ -3052,9 +3072,9 @@ Spec claims (claims validate, run, promote, render, gate, attest, rulings):
   (fix the code and promote it (a lint, log or judge claim: move it to
   built by a reviewed status edit), or retire it, first).
 
-Work ledger (ledger show, ls, find, related, sweep, recheck, inflight,
-notices, state-watch, new, assign, suggest, link, note, view, validate,
-publish, finalize, init):
+Work ledger (ledger show, ls, find, related, sweep, recheck, upkeep,
+inflight, notices, state-watch, new, assign, suggest, link, note, view,
+validate, publish, finalize, init):
   Opt-in: docs/ledger/config.json turns it on (a key it omits takes its
   default; {} is a complete config). Without it every ledger verb except
   init prints "ledger: not enabled (no docs/ledger/config.json)" — with
@@ -3076,8 +3096,8 @@ publish, finalize, init):
   doc-superpowers:<name> — scripts/adapters/<name>.sh beside this
   doc-tools.sh; one that fails or prints output that breaks its contract
   exits 2 for every verb that needs it (contracts: show, related, recheck,
-  sweep, suggest, link, view, publish). The pr adapter's list is cached for
-  cache.remote_ttl_minutes; when it fails, the verbs serve the last copy
+  sweep, suggest, upkeep, link, view, publish). The pr adapter's list is
+  cached for cache.remote_ttl_minutes; when it fails, the verbs serve the last copy
   (or none) with one stderr line and "pr_data" in --format json, and only
   --refresh and publish exit 2. DOC_TOOLS_LEDGER_OFFLINE=1 never runs it
   (for hooks that must not reach the network): a copy past its TTL is
@@ -3394,7 +3414,8 @@ _shellcheck_opt_names() {
   _OPT_plan="" _OPT_refs="" _OPT_reverify="" _OPT_scheduled="" _OPT_staged="" _OPT_superseded_by=""
   _OPT_tag="" _OPT_tree="" _OPT_warn=""
   _OPT_create="" _OPT_title="" _OPT_body_file="" _OPT_paths="" _OPT_sev=""
-  _OPTV_claims=() _OPTV_code_refs=() _OPTV_code_refs_from=() _OPTV_config=() _OPTV_helper=() _OPTV_holds=()
+  _OPT_no_repo_adapters="" _OPT_strict="" _OPT_top=""
+  _OPTV_items=() _OPTV_claims=() _OPTV_code_refs=() _OPTV_code_refs_from=() _OPTV_config=() _OPTV_helper=() _OPTV_holds=()
 }
 
 # Repository verbs run only inside a git work tree, at its top level. Checked
