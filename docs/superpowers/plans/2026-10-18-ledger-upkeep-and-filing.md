@@ -19,7 +19,9 @@
 - Comment density and naming follow the surrounding module (`_lg_<area>_<name>` functions, `_LG_JQ_<NAME>` jq programs, a header comment per function stating inputs/outputs).
 - Never write `key`, `aliases`, `finalized.json` by hand; `link` writes relations; upkeep and review-pr write nothing.
 - Not in this branch: RELEASE-NOTES.md, version bumps, `scripts/hooks/install.sh`, CI templates (a parallel session owns them).
-- Test counts live only in CLAUDE.md → *Testing* (update in Task 8).
+- Test counts live only in CLAUDE.md → *Testing* (update in Task 8; base is v3.5.0's 11942).
+- shellcheck at warning severity is a gate (`test-doc-tools.sh`): a new option a handler reads as plain `"$_OPT_x"` / `"${_OPTV_x[@]}"` without a default goes in doc-tools.sh's `_shellcheck_opt_names` (`_OPT_range` is already there); a finding is fixed, or disabled on its own line with a reason.
+- The pre-PR gate is `bash scripts/check-ci.sh` (all seven suites under both detected interpreters, self-install drift, check-version); `bash scripts/check-ci.sh --bash /bin/bash ledger` runs one.
 
 ## Review Focus
 
@@ -323,4 +325,4 @@ No shipped files except what the findings force (tuning defaults, fixes) and the
 - [ ] **Step 3: Upkeep replay:** for the 50 most recent merged PRs (`GH_REPO=woodrowpearson/abundance-mvp gh pr list --state merged --limit 50 --json number,mergeCommit`), in a detached worktree of `$S/ab` at each merge commit: `$DT ledger upkeep --range <m>^1..<m> --format json`; collect per PR proposals, run time; precision proxy = proposals whose (item, field, value) the item declares at `origin/main` now; median proposals per PR; write `$S/upkeep-replay.md`.
 - [ ] **Step 4: Tune** only through defaults the spec names (`--top` default, `skip_globs` default, the rank rule) if the replay shows a clear win; each change gets its unit test and a commit `fix(ledger): upkeep defaults from the abundance replay`.
 - [ ] **Step 5: Delete the throwaway**: remove `$S/ab`, its worktrees and `$S/ab-remote.git`; confirm `~/code/abundance-mvp` `git status` and refs are unchanged (`git -C ~/code/abundance-mvp for-each-ref refs/doc-superpowers refs/heads/doc-superpowers` identical to before Step 1).
-- [ ] **Step 6: Close out:** `bash scripts/hooks/install.sh install --ci` (doc-tools.sh changed → vendored copy) and commit what it writes; refresh the doc index for touched docs (`scripts/doc-tools.sh check-freshness` then `update-index` per stale entry); update CLAUDE.md → *Testing* counts from the suites' Results lines; run all seven suites under `/usr/local/bin/bash` and `/bin/bash`; commit `docs(index): counts and index after upkeep/filing`.
+- [ ] **Step 6: Close out:** `bash scripts/hooks/install.sh install --ci` (doc-tools.sh changed → vendored copy) and commit what it writes; refresh the doc index for touched docs (`scripts/doc-tools.sh check-freshness` then `update-index` per stale entry); update CLAUDE.md → *Testing* counts from the suites' Results lines; run `bash scripts/check-ci.sh` (both interpreters; plugin-validate may SKIP); commit `docs(index): counts and index after upkeep/filing`.
