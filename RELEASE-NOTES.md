@@ -1,5 +1,37 @@
 # Release Notes
 
+## v3.5.0 (2026-10-19)
+
+This release works through the pre-ledger issue backlog (#20, #21, #23, #24, #27–#31, #33). For large consumer indexes it adds a non-attesting upgrade of v2-era entries, batch forms of the per-entry writers, time-bounded git hooks and a driver-only git tier with a machine-readable status. The index merge driver now carries a change across a re-key. For this repository's maintainers it adds one local command that runs what CI runs, a release-tag check, a leak scan and new packaging gates.
+
+### Upgrading from 3.4.0
+Nothing breaks if you skip these steps. What each host re-runs, and why:
+- **The git and Claude tiers**: re-run `hooks install --git` and `hooks install --claude`. The hook scripts and `hook-lib.sh` changed (budgets, advice setting, scoped pre-commit check); until the re-run, `hooks status` reads them `outdated` and the old, unbounded hooks keep running.
+- **A host with the CI tier or vendored copies**: re-run `hooks install --ci` (or `tools install`) and commit what it writes, so CI and committed callers run 3.5.0.
+- **A large v2-era index**: run `scripts/doc-tools.sh upgrade-entries --all` once. It fills `code_oids` without re-verifying anything, which takes `check-freshness` from the commit comparison to the content comparison (on a 5,000-entry index here: under 20 s for the upgrade).
+- **A host that adopted only the merge driver by copying `merge.doc-index.*` keys**: `hooks install --git --merge-driver-only` is now the supported route, and `install.sh status --git --merge-driver-only --json` the self-heal check.
+
+### Features
+- **`upgrade-entries <doc>… | --stdin | --all`** (#21): fills `code_oids` on pre-v3 entries from each ref's object at the entry's stored `code_commit`. It writes only `code_oids` (never `last_verified`, `code_commit` or the verdict), is idempotent and makes one index write. Entries it cannot fill (no `code_commit`, a commit this clone lacks, a ref missing at that commit) are listed and left alone; the rest are applied and it exits 1. A ref changed and later reverted since `code_commit` now reads current, as content.
+- **`set-doc-type --stdin`** (`<doc>\t<type>` lines) and **`set-code-refs --stdin`** (`<doc>\t<csv refs>` lines, or `--null` records `doc\0ref\0…\0\0` for paths with commas) (#23): one locked write per batch, the single form's checks on every line, all or nothing like `move-entry --stdin`. The single forms run through the same engine as a batch of one.
+- **`hooks install|uninstall|status --git --merge-driver-only`** (#20): only the `merge.doc-index.*` config and the `.gitattributes` block, never a hook. It exits 1 when `merge-doc-index.sh` is missing. `install.sh print-merge-driver` prints the driver value.
+- **`install.sh status --json`** (#20): schema `doc-superpowers-hooks-status/1`, per tier and component (`references/hooks.md` → *Machine-readable status*). The human output is unchanged.
+- **Git-hook budgets** (#24): pre-commit, prepare-commit-msg, post-merge and post-checkout run their checks under a budget (default 20 s; `DOC_SUPERPOWERS_HOOK_BUDGET` or `hook_budget` in `.claude/doc-superpowers/hooks.conf`; `0` = none; values over 86400 read as none). Past it the check is killed, the hook prints `check skipped (budget)` with the command to run by hand, and git carries on; under `DOC_SUPERPOWERS_STRICT=1` pre-commit blocks. A signal to the hook stops the check and its watchdog with it.
+- **Scoped pre-commit check** (#24): when the staged index adds entries, pre-commit and the Claude gate check those entries against their own code refs instead of the whole index (a full check only when an added entry has no refs).
+- **Advice setting** (#24): `DOC_SUPERPOWERS_ADVICE` or `advice` in `hooks.conf` replaces (`{action}` template) or drops (`off`) the `/doc-superpowers …` lines in git and Claude hook output.
+
+### Changed
+- **The index merge driver carries a change across a re-key** (#33). When one side moved `k` to `n` (`move-entry`) and the other changed `k`, the change lands on `n` instead of stopping with `deleted on one side, changed on the other`. Only an unambiguous match merges: one new key, equal to the base's verified `k` in all but `content_hash`; anything else still conflicts. And when `last_verified` orders the sides, both sides' `code_refs` merge as substitutions before the newer side's list wins, so a repoint is no longer lost (the doc reads stale until `update-index`). `references/doc-spec.md` → *Re-keys in a merge*. `audit-merges` replays through the same driver; an older hand-resolved merge of this shape is now compared entry by entry instead of reported `refused`.
+
+### Maintainer tooling (this repository)
+- **`scripts/check-ci.sh`** (#27) runs what `tests.yml` runs: the seven suites under both interpreters, the toolchain check, the self-install drift check (now `scripts/check-self-install.sh`, which `tests.yml` calls), `check-version`, the tag check and, locally, `claude plugin validate`. `--fast`, `--bash`, `--list` and a check name. `scripts/install-maintainer-hooks.sh` installs an opt-in pre-push hook that runs `check-ci.sh --fast`.
+- **`check-version --tag [--remote <name>] [--warn]`** (#28) requires `v<version>` on the remote, on a commit whose `RELEASE-NOTES.md` names that version. Run on pushes to `main` and by the release flow, which now tags the release commit and pushes the tag before merging.
+- **Leak scan** (#29, `scripts/leak-scan.sh`): home-directory and volume paths, emails and token-shaped strings in tracked files, with an allowlist for historical records (paths only).
+- **Footprint ceiling** (#30): the OpenCode plugin's emitted text is measured under node and capped at 12,000 characters. **SKILL.md frontmatter** (#31): exactly `name` and `description`, no block scalars, description at most 1,536 characters; every path SKILL.md names exists. **shellcheck** at warning severity gates the shipped scripts (`DOC_SP_REQUIRE_SHELLCHECK`).
+
+### Other
+- Seven suites, __TOTAL__ assertions, under bash 5.x and `/bin/bash` 3.2: __COUNTS__. The total goes from 11288 to __TOTAL__.
+
 ## v3.4.0 (2026-10-17)
 
 This release follows up the work ledger that 3.3.0 introduced. It adds opt-in help for declaring an item's relations: `ledger suggest` proposes contracts, `link` takes comma lists and `--relations none`, and the new `validate.require_relations` makes declaring them a pre-commit rule. It adds `init.stub_defaults` for the stubs `init --accept` creates. It also closes the gaps the 3.3.0 review left open: a gate that passed on stale in-flight data, a pre-push refusal of keys a branch got from its base, a merge-mode finalize race, a symlinked file `init` could replace, and a state-watch hook that never saw MultiEdit. A project without `docs/ledger/config.json` sees no change. A ledger host that sets none of the new keys sees the changes listed under *Changed (ledger hosts, without opting in)*. One of them can turn a passing step red: `notices --gate` now exits 2 when its in-flight fetch fails. The version is 3.4.0 rather than 3.3.1 because it adds flags and config keys (semver minor).
