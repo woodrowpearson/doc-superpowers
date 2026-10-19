@@ -491,6 +491,55 @@ test_update_index_when_every_target_is_skipped() {
   teardown
 }
 
+# shellcheck as a gate (#31), at warning severity, over every shell script the
+# plugin ships and this repository's maintainer scripts. A finding is fixed,
+# or disabled on its own line with the reason beside it — never file-wide.
+# No shellcheck: a loud SKIP locally, a FAIL under DOC_SP_REQUIRE_SHELLCHECK=1
+# (tests.yml, check-ci.sh).
+test_shipped_scripts_pass_shellcheck() {
+  echo "test: the shipped shell scripts (and the maintainer scripts) pass shellcheck at warning severity"
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    if [ "${DOC_SP_REQUIRE_SHELLCHECK:-0}" = 1 ]; then
+      TESTS_RUN=$((TESTS_RUN + 1))
+      FAIL=$((FAIL + 1))
+      # shellcheck disable=SC2059
+      printf "${RED}  FAIL${NC}: shellcheck gate — shellcheck not found and DOC_SP_REQUIRE_SHELLCHECK=1\n"
+    else
+      record_skip "shellcheck gate — shellcheck not found (install shellcheck to run it)"
+    fi
+    return 0
+  fi
+  local root rc out f n=0 legs=()
+  local targets=()
+  root="$(cd "$SCRIPT_DIR/.." && pwd)"
+  # Paths relative to the root, so `-x` follows the scripts' source
+  # directives the way they are written.
+  local s="$root/scripts"
+  for f in "$s"/doc-tools.sh "$s"/merge-doc-index.sh "$s"/ledger/*.sh "$s"/adapters/*.sh \
+    "$s"/hooks/*.sh "$s"/hooks/claude/*.sh "$s"/hooks/ci/doc-pr-release/*.sh \
+    "$s"/hooks/ci/doc-superpowers-steps/*.sh "$s"/hooks/git/* \
+    "$s"/check-ci.sh "$s"/check-self-install.sh "$s"/leak-scan.sh "$s"/install-maintainer-hooks.sh; do
+    [ -f "$f" ] || continue
+    f="${f#"$root"/}"
+    case "$f" in
+      # The ledger legs have no #! line: install.sh wraps them into a hook,
+      # as POSIX sh.
+      scripts/hooks/git/ledger-*) legs+=("$f") ;;
+      *) targets+=("$f") ;;
+    esac
+    n=$((n + 1))
+  done
+  assert_true "the gate covers the shipped scripts ($n found)" test "$n" -ge 40
+  rc=0
+  out=$(cd "$root" && shellcheck -S warning -x "${targets[@]}" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "shellcheck -S warning: no finding in ${#targets[@]} scripts${out:+ —
+$(head -n 40 <<<"$out")}"
+  rc=0
+  out=$(cd "$root" && shellcheck -S warning -s sh ${legs[@]+"${legs[@]}"} 2>&1) || rc=$?
+  assert_eq "0" "$rc" "shellcheck -S warning -s sh: no finding in the ${#legs[@]} ledger hook legs${out:+ —
+$(head -n 40 <<<"$out")}"
+}
+
 test_scripts_are_free_of_bash4_only_constructs() {
   # `local -A` (bash 4.0+) shipped in cmd_fragments_merge and aborted every
   # doc-tools.sh invocation under macOS's /bin/bash 3.2 with
@@ -6523,6 +6572,87 @@ test_i10_check_version_reads_the_first_release_heading() {
   teardown
 }
 
+# check-version --tag (#28): the version RELEASE-NOTES.md names must have its
+# v<version> tag on the remote — the v3 AI workflow templates clone that tag
+# (prepare-agent.sh), so a release whose tag never reached origin breaks every
+# consumer's AI workflows. A local bare repository stands in for origin.
+test_check_version_tag_on_origin() {
+  echo "test: check-version --tag fails when v<version> is not a tag on origin (--warn: a warning; --remote names another remote)"
+  setup
+  setup_version_files
+  local origin rc out
+  origin=$(harness_mktemp_d origin)
+  git init -q --bare "$origin"
+  git remote add origin "$origin"
+  git add -A && git commit -qm "release: v1.0.0"
+  git push -q origin main 2>/dev/null
+
+  rc=0
+  out=$("$DOC_TOOLS" check-version 2>&1) || rc=$?
+  assert_eq "0" "$rc" "without --tag: the manifests alone (no remote is read)"
+  assert_not_contains "$out" "tag" "…and nothing is said about tags"
+
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "1" "$rc" "--tag, no tag on origin: exit 1"
+  assert_contains "$out" "v1.0.0 is not a tag on origin" "…naming the tag and the remote"
+  assert_contains "$out" "git push origin v1.0.0" "…and how to push it"
+
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag --warn 2>&1) || rc=$?
+  assert_eq "0" "$rc" "--tag --warn: a missing tag does not fail"
+  assert_contains "$out" "WARN" "…but is reported as a warning"
+  assert_contains "$out" "v1.0.0 is not a tag on origin" "…naming the tag"
+
+  git tag v1.0.0
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a local tag only: still exit 1 (origin is what consumers clone)"
+
+  git push -q origin v1.0.0 2>/dev/null
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "0" "$rc" "the tag pushed: exit 0"
+  assert_contains "$out" "tag v1.0.0 on origin" "…reported as ok"
+
+  # An annotated tag counts; a tag that only starts with the name does not.
+  "$DOC_TOOLS" bump-version 1.1.0 >/dev/null 2>&1
+  printf '%s\n' '# Release Notes' '' '## v1.1.0 (2026-02-01)' '' '## v1.0.0 (2026-01-01)' > RELEASE-NOTES.md
+  git add -A && git commit -qm "release: v1.1.0"
+  git tag v1.1.0-rc.1 && git push -q origin v1.1.0-rc.1 2>/dev/null
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "1" "$rc" "only v1.1.0-rc.1 on origin: v1.1.0 is missing (exact name)"
+  git tag -a v1.1.0 -m "v1.1.0" && git push -q origin v1.1.0 2>/dev/null
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "0" "$rc" "an annotated v1.1.0 on origin: exit 0"
+
+  # A manifest mismatch still fails with the tag present.
+  echo '{"name":"test","version":"1.0.9"}' > gemini-extension.json
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a manifest mismatch fails even with the tag on origin"
+  assert_contains "$out" "MISMATCH" "…naming the mismatch"
+  "$DOC_TOOLS" bump-version 1.1.0 >/dev/null 2>&1
+
+  # --remote: another remote; one that cannot be read fails (--warn: warns).
+  git remote add upstream "$SUITE_TMP/no-such-remote.git"
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag --remote upstream 2>&1) || rc=$?
+  assert_eq "1" "$rc" "an unreadable remote: exit 1, never a vacuous pass"
+  assert_contains "$out" "cannot read the tags of upstream" "…saying so"
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag --warn --remote upstream 2>&1) || rc=$?
+  assert_eq "0" "$rc" "an unreadable remote with --warn: exit 0"
+  assert_contains "$out" "WARN" "…as a warning"
+
+  # --warn and --remote only qualify --tag.
+  assert_exit_code "2" "--warn without --tag: a usage error" "$DOC_TOOLS" check-version --warn
+  assert_exit_code "2" "--remote without --tag: a usage error" "$DOC_TOOLS" check-version --remote origin
+  teardown
+}
+
 test_i10_version_verbs_need_a_manifest() {
   echo "test: bump-version / check-version fail when no manifest is found (run outside the repo root)"
   setup
@@ -6934,32 +7064,21 @@ test_vendored_ledger_runs() {
   teardown
 }
 
-# _tests_yml_drift_step <out>: the run: body of tests.yml's "Self-installed
-# CI tier matches its templates" step, as a script.
-_tests_yml_drift_step() {
-  awk '
-    /- name: Self-installed CI tier matches its templates/ { found = 1; next }
-    found && !inrun && /^[[:space:]]*run:[[:space:]]*[|]/ { match($0, /^[[:space:]]*/); ind = RLENGTH; inrun = 1; next }
-    inrun {
-      if ($0 ~ /^[[:space:]]*$/) { print ""; next }
-      match($0, /^[[:space:]]*/)
-      if (RLENGTH > ind) { print; next }
-      exit
-    }' "$SCRIPT_DIR/../.github/workflows/tests.yml" > "$1"
-}
-
 test_tests_yml_drift_step_covers_vendored_ledger() {
-  echo "test: tests.yml's self-install drift step checks a vendored ledger helper set against scripts/ledger/ and scripts/adapters/ (byte copies, scripts executable, none missing; present beside a claims workflow)"
+  echo "test: the self-install drift check (scripts/check-self-install.sh, run by tests.yml through check-ci.sh) checks a vendored ledger helper set against scripts/ledger/ and scripts/adapters/ (byte copies, scripts executable, none missing; present beside a claims workflow)"
   setup
-  local root step rt rc out
+  local root step rt rc out yml
   root="$(cd "$SCRIPT_DIR/.." && pwd)"
-  step=$(harness_mktemp drift-step)
-  _tests_yml_drift_step "$step"
-  assert_contains "$(cat "$step")" "cmp scripts/doc-tools.sh .github/scripts/doc-tools.sh" "the step body is extracted"
+  yml=$(cat "$root/.github/workflows/tests.yml")
+  # shellcheck disable=SC2016  # the workflow's literal text
+  assert_contains "$yml" 'scripts/check-ci.sh --bash "$BASH_BIN" --verbose self-install' \
+    "tests.yml runs the drift check through check-ci.sh"
+  assert_not_contains "$yml" "cmp scripts/doc-tools.sh" "…and carries no inline copy of it (#27: CI and check-ci.sh cannot drift apart)"
   # A copy of the plugin, its CI tier freshly installed with this repo's choices.
   mkdir -p scripts skills/doc-superpowers .claude/doc-superpowers
   cp -R "$root/scripts/ledger" "$root/scripts/adapters" "$root/scripts/hooks" scripts/
-  cp "$root/scripts/doc-tools.sh" "$root/scripts/merge-doc-index.sh" scripts/
+  cp "$root/scripts/doc-tools.sh" "$root/scripts/merge-doc-index.sh" "$root/scripts/check-self-install.sh" scripts/
+  step="$TEST_DIR/scripts/check-self-install.sh"
   cp "$root/skills/doc-superpowers/SKILL.md" skills/doc-superpowers/
   cp "$root/RELEASE-NOTES.md" "$root/.gitattributes" .
   cp "$root/.claude/doc-superpowers/installed.json" .claude/doc-superpowers/
@@ -6968,8 +7087,9 @@ test_tests_yml_drift_step_covers_vendored_ledger() {
   assert_eq "0" "$rc" "precondition: install --ci in the copy exits 0"
   rt=$(harness_mktemp_d drift-rt)
   rc=0
-  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
-  assert_eq "0" "$rc" "a fresh install passes the drift step"
+  out=$(cd "$SUITE_TMP" && RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "a fresh install passes the drift step (run from another directory: it checks its own checkout) ($(printf '%s' "$out" | grep -m1 '::error' || true))"
+  assert_contains "$out" "Self-installed CI tier matches its templates:" "…and says so"
   "$BASH_BIN" scripts/doc-tools.sh tools install --helper ledger >/dev/null 2>&1
   rc=0
   out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
@@ -7769,6 +7889,7 @@ run_tests() {
 
   # --- cross-platform regression guards (CI matrix: bash 5.x + bash 3.2) ---
   test_scripts_are_free_of_bash4_only_constructs
+  test_shipped_scripts_pass_shellcheck
   test_shipped_jq_is_free_of_jq17_only_forms
   test_build_index_accepts_entry_with_no_code_refs
   test_update_index_when_every_target_is_skipped
@@ -7969,6 +8090,7 @@ run_tests() {
   test_i10_fence_indent_and_paragraph_end
   test_i10_implementation_status_filter_is_gone
   test_i10_check_version_reads_the_first_release_heading
+  test_check_version_tag_on_origin
   test_i10_version_verbs_need_a_manifest
   test_i10_bump_version_is_all_or_nothing_and_keeps_modes
   test_i12_claude_code_json_is_not_a_version_file

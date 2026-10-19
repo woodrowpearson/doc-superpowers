@@ -5687,6 +5687,272 @@ test_ledger_status_reports_set
 test_ledger_state_watch_matcher_multiedit
 test_ledger_status_state_watch_paths_without_patterns
 
+# --- Maintainer tooling (#27): scripts/check-ci.sh and the opt-in pre-push ---
+#
+# Both are for this repository's contributors, not shipped to a consuming
+# project. Each runs from a fixture's scripts/ (they resolve the checkout from
+# their own location), against stub suites / a stub check-ci.sh that log what
+# they were run with.
+
+MT_BEGIN="# doc-superpowers-maintainer:begin"
+
+# mt_fixture: a repo with origin (a bare remote holding main), the maintainer
+# hook installer, and a stub check-ci.sh: it logs its arguments and whether
+# its stdin had a line to .git/check-ci.log, and exits $STUB_RC (default 0).
+mt_fixture() {
+  setup
+  mkdir -p scripts
+  cp "$SCRIPT_DIR/install-maintainer-hooks.sh" scripts/
+  # shellcheck disable=SC2016  # the stub's own code
+  printf '%s\n' '#!/bin/sh' \
+    'log="$(git rev-parse --show-toplevel)/.git/check-ci.log"' \
+    'echo "check-ci $*" >> "$log"' \
+    'if IFS= read -r l; then echo "stdin: $l" >> "$log"; fi' \
+    'exit "${STUB_RC:-0}"' > scripts/check-ci.sh
+  printf 'scripts/\n' >> .git/info/exclude
+  MT_REMOTE=$(harness_mktemp_d mt-remote)
+  git init -q --bare "$MT_REMOTE"
+  git remote add origin "$MT_REMOTE"
+  git push -q origin main 2>/dev/null
+}
+
+# mt_inst <command>: the maintainer installer; sets MT_RC and MT_OUT.
+mt_inst() {
+  MT_RC=0
+  MT_OUT=$(PATH="$REAL_PATH" "$BASH_BIN" scripts/install-maintainer-hooks.sh "$@" 2>&1) || MT_RC=$?
+}
+
+# mt_push [VAR=value…]: commit, then push main as a user would (git runs the
+# hook); sets MT_RC and MT_OUT.
+mt_push() {
+  echo "$RANDOM" >> src/index.js
+  git commit -qam "change"
+  MT_RC=0
+  MT_OUT=$(env PATH="$REAL_PATH" "$@" git push origin main 2>&1) || MT_RC=$?
+}
+
+test_maintainer_hook_install_push_uninstall() {
+  echo "test: maintainer pre-push: install writes a hook that runs check-ci.sh --fast (stdin /dev/null) and refuses the push when it fails; DOC_SP_SKIP_CHECK_CI=1 skips it; re-install keeps one block; uninstall removes the file it wrote"
+  mt_fixture
+  mt_inst install
+  assert_eq "0" "$MT_RC" "install exits 0"
+  assert_true "the hook is executable" test -x .git/hooks/pre-push
+  assert_eq "#!/bin/sh" "$(head -n 1 .git/hooks/pre-push)" "…a POSIX sh hook"
+  assert_contains "$(cat .git/hooks/pre-push)" "$MT_BEGIN" "…holding the marked block"
+  mt_inst status
+  assert_contains "$MT_OUT" "maintainer pre-push: installed" "status: installed"
+  mt_push
+  assert_eq "0" "$MT_RC" "a push with check-ci passing goes through"
+  assert_eq "check-ci --fast" "$(cat .git/check-ci.log)" "…having run check-ci.sh --fast, with nothing on its stdin"
+  mt_push STUB_RC=1
+  assert_eq "1" "$MT_RC" "check-ci failing: the push is refused"
+  assert_contains "$MT_OUT" "push refused" "…saying so"
+  assert_true "…and nothing reached origin" test "$(git rev-parse HEAD)" != "$(git --git-dir="$MT_REMOTE" rev-parse main)"
+  mt_push STUB_RC=1 DOC_SP_SKIP_CHECK_CI=1
+  assert_eq "0" "$MT_RC" "DOC_SP_SKIP_CHECK_CI=1: the push goes through"
+  assert_contains "$MT_OUT" "check-ci skipped (DOC_SP_SKIP_CHECK_CI=1)" "…naming the variable"
+  mt_inst install
+  assert_eq "1" "$(grep -cF "$MT_BEGIN" .git/hooks/pre-push)" "re-install: one block"
+  mt_inst uninstall
+  assert_eq "0" "$MT_RC" "uninstall exits 0"
+  assert_file_not_exists .git/hooks/pre-push "…and removes the hook it wrote"
+  mt_inst status
+  assert_contains "$MT_OUT" "not installed" "status: not installed"
+  teardown
+}
+
+test_maintainer_hook_coexists_with_other_hooks() {
+  echo "test: maintainer pre-push: goes after the #! line of a shell hook of yours (which still reads git's ref lines; uninstall restores it byte-for-byte), refuses the git tier's whole-file hook and a non-shell hook (changing nothing), and a later install --git integrates into it: both run, uninstall --git keeps it"
+  mt_fixture
+  local orig
+  orig=$(harness_mktemp mt-orig)
+  # shellcheck disable=SC2016  # the hook's own code
+  printf '%s\n' '#!/bin/sh' 'while read -r lr lo rr ro; do echo "yours: $lr" >> .git/yours.log; done' 'exit 0' > .git/hooks/pre-push
+  chmod 750 .git/hooks/pre-push
+  cp -p .git/hooks/pre-push "$orig"
+  mt_inst install
+  assert_eq "0" "$MT_RC" "a shell hook of yours: install exits 0"
+  assert_eq "#!/bin/sh" "$(head -n 1 .git/hooks/pre-push)" "…your #! line stays first"
+  assert_contains "$(sed -n 2p .git/hooks/pre-push)" "$MT_BEGIN" "…the block right after it"
+  assert_eq "$(ls -l "$orig" | cut -c1-10)" "$(ls -l .git/hooks/pre-push | cut -c1-10)" "…the mode is kept"
+  mt_push
+  assert_eq "0" "$MT_RC" "the push goes through"
+  assert_eq "check-ci --fast" "$(cat .git/check-ci.log)" "…check-ci ran"
+  assert_eq "yours: refs/heads/main" "$(cat .git/yours.log)" "…and your hook still read git's ref line"
+  mt_inst uninstall
+  assert_true "uninstall restores your hook byte-for-byte" cmp -s "$orig" .git/hooks/pre-push
+
+  printf '%s\n' '#!/usr/bin/env python3' 'print("hi")' > .git/hooks/pre-push
+  cp -p .git/hooks/pre-push "$orig"
+  mt_inst install
+  assert_eq "1" "$MT_RC" "a python hook: refused"
+  assert_contains "$MT_OUT" "not a shell script" "…saying why"
+  assert_true "…and it is unchanged" cmp -s "$orig" .git/hooks/pre-push
+  rm -f .git/hooks/pre-push
+
+  install_tiers --git
+  assert_contains "$(head -n 5 .git/hooks/pre-push)" "doc-superpowers hook v" "precondition: the git tier's own pre-push"
+  cp -p .git/hooks/pre-push "$orig"
+  mt_inst install
+  assert_eq "1" "$MT_RC" "the git tier's whole-file hook: refused"
+  assert_contains "$MT_OUT" "uninstall --git" "…with the order that runs both"
+  assert_true "…and it is unchanged" cmp -s "$orig" .git/hooks/pre-push
+  PATH="$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --git >/dev/null 2>&1
+
+  mt_inst install
+  install_tiers --git
+  assert_contains "$(cat .git/hooks/pre-push)" "$MT_BEGIN" "install --git after it: the maintainer block is kept"
+  assert_contains "$(cat .git/hooks/pre-push)" "# doc-superpowers:begin" "…and the git tier integrated its block"
+  assert_true "…the tier's own copy beside it" test -f .git/hooks/.doc-superpowers-pre-push
+  : > .git/check-ci.log
+  mt_push
+  assert_eq "0" "$MT_RC" "the push goes through"
+  assert_eq "check-ci --fast" "$(cat .git/check-ci.log)" "…check-ci ran, its stdin still /dev/null"
+  PATH="$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --git >/dev/null 2>&1
+  assert_contains "$(cat .git/hooks/pre-push 2>/dev/null)" "$MT_BEGIN" "uninstall --git keeps the maintainer block"
+  assert_not_contains "$(cat .git/hooks/pre-push 2>/dev/null)" "# doc-superpowers:begin" "…and removes its own"
+  teardown
+}
+
+test_maintainer_hook_refuses_global_hooks_path() {
+  echo "test: maintainer pre-push: a core.hooksPath from the global config is refused (it would run in every repository)"
+  mt_fixture
+  local gcfg
+  gcfg=$(harness_mktemp mt-gitconfig)
+  printf '[core]\n\thooksPath = %s\n' "$TEST_DIR/global-hooks" > "$gcfg"
+  MT_RC=0
+  MT_OUT=$(GIT_CONFIG_GLOBAL="$gcfg" PATH="$REAL_PATH" "$BASH_BIN" scripts/install-maintainer-hooks.sh install 2>&1) || MT_RC=$?
+  assert_eq "1" "$MT_RC" "exit 1"
+  assert_contains "$MT_OUT" "global git config" "…naming the scope"
+  assert_true "…and nothing is written there" test ! -e "$TEST_DIR/global-hooks/pre-push"
+  teardown
+}
+
+# ci_fixture: scripts/check-ci.sh with stub suites, check-self-install.sh,
+# doc-tools.sh and claude: each logs "<name> <args> BASH_BIN=… NODE=… YAML=…
+# SHELLCHECK=…" to $CI_LOG and exits $STUB_RC_<name> (default 0); a suite
+# prints a harness result line.
+ci_fixture() {
+  setup
+  mkdir -p scripts stubbin
+  cp "$SCRIPT_DIR/check-ci.sh" scripts/
+  CI_LOG="$TEST_DIR/ci.log"
+  : > "$CI_LOG"
+  local s
+  for s in doc-tools hooks spec-status-model doc-pr-release merge-driver spec-claims ledger; do
+    # shellcheck disable=SC2016  # the stub's own code
+    printf '%s\n' '#!/bin/sh' \
+      "n=$s" 'v=$(echo "$n" | tr - _)' \
+      'echo "$n BASH_BIN=$BASH_BIN NODE=$DOC_SP_REQUIRE_NODE YAML=$DOC_SP_REQUIRE_YAML_PARSER SHELLCHECK=$DOC_SP_REQUIRE_SHELLCHECK" >> "'"$CI_LOG"'"' \
+      'eval "rc=\${STUB_RC_$v:-0}"' \
+      '[ "$rc" = 0 ] || echo "  FAIL: stub $n failed on purpose"' \
+      'echo "Results: 3 passed, $rc failed, 3 total"' 'exit "$rc"' > "scripts/test-$s.sh"
+  done
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/bin/sh' 'echo "self-install BASH_BIN=$BASH_BIN" >> "'"$CI_LOG"'"' 'exit "${STUB_RC_self_install:-0}"' > scripts/check-self-install.sh
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/bin/sh' 'echo "doc-tools.sh $*" >> "'"$CI_LOG"'"' 'exit 0' > scripts/doc-tools.sh
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/bin/sh' 'echo "claude $*" >> "'"$CI_LOG"'"' 'exit 0' > stubbin/claude
+  chmod +x stubbin/claude
+}
+
+# ci_run [VAR=value…] -- <args…>: check-ci.sh; sets CI_RC and CI_OUT.
+ci_run() {
+  local envs=()
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    envs+=("$1")
+    shift
+  done
+  [ "$#" -gt 0 ] && shift
+  CI_RC=0
+  CI_OUT=$(cd "$SUITE_TMP" && env PATH="$TEST_DIR/stubbin:$REAL_PATH" ${envs[@]+"${envs[@]}"} \
+    "$BASH_BIN" "$TEST_DIR/scripts/check-ci.sh" "$@" 2>&1) || CI_RC=$?
+}
+
+test_check_ci_runs_what_ci_runs() {
+  echo "test: check-ci.sh: each suite under each --bash with BASH_BIN and the three DOC_SP_REQUIRE_* flags at 1 (unless exported 0), a summary line per run, exit 1 naming a failed suite; usage errors exit 2"
+  ci_fixture
+  local b2
+  b2=$(harness_mktemp_d ci-bash2)/bash
+  ln -s "$(type -P "$BASH_BIN" || printf '%s' "$BASH_BIN")" "$b2"
+  ci_run -- --list
+  assert_eq "0" "$CI_RC" "--list exits 0"
+  assert_eq "toolchain doc-tools hooks spec-status-model doc-pr-release merge-driver spec-claims ledger self-install check-version tag plugin-validate" \
+    "$(printf '%s' "$CI_OUT" | tr '\n' ' ' | sed 's/ $//')" "…the checks: the seven suites among them"
+  ci_run -- nope
+  assert_eq "2" "$CI_RC" "an unknown check: exit 2"
+  ci_run -- --nope
+  assert_eq "2" "$CI_RC" "an unknown option: exit 2"
+  ci_run -- --bash "$TEST_DIR/no-such-bash" merge-driver
+  assert_eq "2" "$CI_RC" "--bash naming no bash: exit 2"
+  ci_run -- --bash bash merge-driver
+  assert_eq "0" "$CI_RC" "--bash bash (a bare name, as tests.yml's ubuntu leg passes it): exit 0"
+  assert_eq "merge-driver BASH_BIN=$_REAL_BIN/bash" "$(cut -d' ' -f1-2 "$CI_LOG")" "…looked up on PATH"
+  : > "$CI_LOG"
+
+  ci_run -- --bash "$BASH_BIN" --bash "$b2" merge-driver hooks
+  assert_eq "0" "$CI_RC" "two suites under two interpreters: exit 0"
+  assert_eq "merge-driver BASH_BIN=$BASH_BIN NODE=1 YAML=1 SHELLCHECK=1
+merge-driver BASH_BIN=$b2 NODE=1 YAML=1 SHELLCHECK=1
+hooks BASH_BIN=$BASH_BIN NODE=1 YAML=1 SHELLCHECK=1
+hooks BASH_BIN=$b2 NODE=1 YAML=1 SHELLCHECK=1" "$(cat "$CI_LOG")" \
+    "…each suite under each interpreter, BASH_BIN set, the tools required as in CI"
+  assert_contains "$CI_OUT" "PASS  test-hooks.sh  [$b2]  Results: 3 passed, 0 failed, 3 total" "…a summary line per run, with its result line"
+
+  : > "$CI_LOG"
+  ci_run DOC_SP_REQUIRE_NODE=0 STUB_RC_merge_driver=1 -- --bash "$BASH_BIN" merge-driver hooks
+  assert_eq "1" "$CI_RC" "a failing suite: exit 1"
+  assert_contains "$CI_OUT" "FAIL  test-merge-driver.sh  [$BASH_BIN]" "…naming it in the summary"
+  assert_contains "$CI_OUT" "FAIL: stub merge-driver failed on purpose" "…with its FAIL lines"
+  assert_contains "$CI_OUT" "PASS  test-hooks.sh" "…and the next suite still ran"
+  assert_contains "$(cat "$CI_LOG")" "NODE=0" "an exported DOC_SP_REQUIRE_NODE=0 is kept (a local SKIP accepted)"
+
+  : > "$CI_LOG"
+  ci_run -- --bash "$BASH_BIN" --verbose spec-status-model
+  assert_contains "$CI_OUT" "Results: 3 passed, 0 failed, 3 total" "--verbose streams the suite's output"
+  teardown
+}
+
+test_check_ci_modes() {
+  echo "test: check-ci.sh: --fast runs one interpreter, the quick suites, self-install and check-version; the default run is everything, the tag with --warn; a named tag is strict; plugin-validate runs claude plugin validate ."
+  ci_fixture
+  ci_run -- --fast
+  assert_eq "0" "$CI_RC" "--fast exits 0"
+  assert_eq "spec-status-model doc-pr-release merge-driver self-install doc-tools.sh" \
+    "$(awk '{ print $1 }' "$CI_LOG" | tr '\n' ' ' | sed 's/ $//')" "…the quick suites, then self-install and check-version, each once (one interpreter)"
+  if [ "$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null)" = 3 ]; then
+    assert_contains "$(head -n 1 "$CI_LOG")" "BASH_BIN=/bin/bash" "…that interpreter: bash 3.2, the floor, when the host has it"
+  fi
+
+  : > "$CI_LOG"
+  ci_run -- --bash "$BASH_BIN"
+  assert_eq "doc-tools hooks spec-status-model doc-pr-release merge-driver spec-claims ledger self-install doc-tools.sh doc-tools.sh claude" \
+    "$(awk '{ print $1 }' "$CI_LOG" | tr '\n' ' ' | sed 's/ $//')" "the default run: the seven suites, self-install, check-version, the tag, plugin-validate"
+  assert_contains "$(cat "$CI_LOG")" "doc-tools.sh check-version --tag --warn" "…the tag as a warning (CI checks it on main only)"
+  assert_contains "$(cat "$CI_LOG")" "claude plugin validate ." "…and claude plugin validate ."
+  # (PASS or FAIL: whether this host has every tool is not this test's business)
+  assert_true "…after the toolchain check" grep -qE '^(PASS|FAIL)  toolchain' <<<"$CI_OUT"
+
+  : > "$CI_LOG"
+  ci_run -- tag
+  assert_eq "doc-tools.sh check-version --tag" "$(cat "$CI_LOG")" "a named tag check: strict, as CI on main"
+  : > "$CI_LOG"
+  ci_run STUB_RC_self_install=1 -- self-install check-version
+  assert_eq "1" "$CI_RC" "a failing self-install: exit 1"
+  assert_contains "$CI_OUT" "FAIL  self-install" "…named in the summary"
+  assert_contains "$(cat "$CI_LOG")" "doc-tools.sh check-version" "…and check-version still ran"
+  teardown
+}
+
+echo ""
+echo "=== Maintainer tooling: check-ci.sh and the maintainer pre-push hook ==="
+test_maintainer_hook_install_push_uninstall
+test_maintainer_hook_coexists_with_other_hooks
+test_maintainer_hook_refuses_global_hooks_path
+test_check_ci_runs_what_ci_runs
+test_check_ci_modes
+
 test_claude_hook_contract_held() {
   echo "test: every Claude hook run above held the contract (exit 0, or 2 only under STRICT; stdout one JSON object or nothing)"
   assert_true "Claude hook runs checked: $CLAUDE_HOOK_RUNS (the suite makes over 50)" test "$CLAUDE_HOOK_RUNS" -ge 50

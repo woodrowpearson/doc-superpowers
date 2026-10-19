@@ -1562,7 +1562,7 @@ valid_cron() {
 
 # Parse a --workflows CSV into CSV_NAMES: trimmed, de-duplicated, validated.
 parse_workflow_csv() {
-  local raw="$1" n IFS_save="$IFS"
+  local raw="$1" n k IFS_save="$IFS"
   CSV_NAMES=""
   IFS=','
   set -f
@@ -1582,7 +1582,7 @@ parse_workflow_csv() {
       {
         echo "ERROR: unknown workflow name: $n"
         echo "Valid names:"
-        for n in $KNOWN_WORKFLOWS; do echo "  - $n"; done
+        for k in $KNOWN_WORKFLOWS; do echo "  - $k"; done
       } >&2
       exit 1
     fi
