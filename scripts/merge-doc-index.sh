@@ -25,8 +25,10 @@
 #       but for content_hash, or is once that side's own unambiguous re-keys
 #       are applied to it as move-entry repoints. Then the other side's change
 #       is merged into n by the field rules below (the mover's content_hash
-#       read as the base's and written back; conflict when it differs and the
-#       other side re-verified), and the old key is dropped. Two candidate
+#       read as the base's and written back only when the move changed it;
+#       conflict when it differs and the other side re-verified; a pure
+#       rename takes the merged hash, so a re-verify lands whole), and the
+#       old key is dropped. Two candidate
 #       keys, a key two old ones match, or n on both sides stays a conflict.
 #     - both kept it -> merged field by field, the same rule per field: the
 #       side that changed a field wins. When both changed a field to
@@ -375,8 +377,10 @@ def rekey_of($bd; $x; $y; $m; $k):
   | . as $n | if $n != null and ($y | has($n)) then null else $n end;
 # Merge the other side change of $k into $x re-keyed entry: the ordinary
 # field rules on (base $k, $x[$n], $y[$k]), with $x content_hash read as the
-# base one and put back after. A re-hash beside a re-verify of $k conflicts:
-# it would pair a doc hash with a record nobody verified together.
+# base one and put back after only when the move re-hashed it (a pure rename
+# keeps the merged hash, so a re-verify of $k lands whole). A re-hash beside a
+# re-verify of $k conflicts: it would pair a doc hash with a record nobody
+# verified together.
 def rekey_merge($bk; $xn; $yk; $xours):
   ($bk | norm) as $b | ($xn | norm) as $x | ($yk | norm) as $y
   | def rec($e): [w($e; "content_hash"), w($e; "code_commit"), w($e; "last_verified")];
@@ -387,6 +391,7 @@ def rekey_merge($bk; $xn; $yk; $xours):
     | (if $xours then merge_fields($b; $x0; $y) else merge_fields($b; $y; $x0) end) as $m
     | if ($m.c | length) > 0
       then {c: "both sides changed \($m.c | join(", ")), and last_verified does not say which is newer"}
+      elif w($x; "content_hash") == w($b; "content_hash") then {v: [$m.e]}
       else {v: [$m.e | if $x | has("content_hash") then .content_hash = $x.content_hash else del(.content_hash) end]} end
   end;
 
