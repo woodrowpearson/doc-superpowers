@@ -18,7 +18,16 @@
 #   o == b  -> t          (only theirs changed it: taken, deletions included)
 #   t == b  -> o          (only ours changed it)
 #   otherwise, both changed it:
-#     - one side deleted the entry, the other changed it -> conflict (exit 1)
+#     - one side deleted the entry, the other changed it -> conflict (exit 1),
+#       unless the deleting side RE-KEYED it (GH #33: git mv + move-entry):
+#       it added exactly one key n, absent from the base and from the other
+#       side, whose entry is the base's (verified: last_verified non-null)
+#       but for content_hash, or is once that side's own unambiguous re-keys
+#       are applied to it as move-entry repoints. Then the other side's change
+#       is merged into n by the field rules below (the mover's content_hash
+#       read as the base's and written back; conflict when it differs and the
+#       other side re-verified), and the old key is dropped. Two candidate
+#       keys, a key two old ones match, or n on both sides stays a conflict.
 #     - both kept it -> merged field by field, the same rule per field: the
 #       side that changed a field wins. When both changed a field to
 #       different values, last_verified decides: the entry whose
@@ -40,7 +49,7 @@
 #         refs moved by move-entry repoints or added by set-code-refs —
 #         code_oids is merged key by key, three-way. Two re-verifications
 #         that tie are still a conflict;
-#       * code_refs that both sides changed, when last_verified ties, merge as
+#       * code_refs that both sides changed merge as
 #         in-place substitutions: position by position when both kept the
 #         base's length, or one side's substitutions (a move-entry repoint)
 #         applied to the other side's list when only that side kept it — but
@@ -50,7 +59,9 @@
 #         (GH #22), while a remove plus an add at one position, or two
 #         set-code-refs edits whose result is not the set merge, still
 #         conflicts. When last_verified does order the sides (one
-#         re-verified), the newer side's whole list wins, as for any field;
+#         re-verified), the same substitution merge is tried first (GH #33),
+#         and only when it fails does the newer side's whole list win, as for
+#         any field (the record still comes whole from the newer side);
 #       * deprecated wins: a status both sides changed resolves to
 #         "deprecated" if either side has it, and superseded_by (when both
 #         changed it) goes with the status the merge kept — so a revert that
@@ -290,10 +301,11 @@ def merge_fields($b; $o; $t):
          elif $f == "superseded_by" then $sup
          elif $vi != null then (if $ver == null then [] else $ver[$vi] end)
          elif $f == "code_refs"
-           then (pick3(w($b; $f); w($o; $f); w($t; $f)) // newer(w($o; $f); w($t; $f))
-                 // (if $ord == null and ($b | has($f)) and ($o | has($f)) and ($t | has($f))
+           then (pick3(w($b; $f); w($o; $f); w($t; $f))
+                 // (if ($b | has($f)) and ($o | has($f)) and ($t | has($f))
                      then (refs3($b[$f]; $o[$f]; $t[$f]) | if . == null then null else [.] end)
-                     else null end))
+                     else null end)
+                 // newer(w($o; $f); w($t; $f)))
          else (pick3(w($b; $f); w($o; $f); w($t; $f)) // newer(w($o; $f); w($t; $f)))
          end) as $v
       | if $v == null then .c += [$f]
@@ -317,12 +329,92 @@ def merge_entry($b; $o; $t):
           else {v: [$m.e]} end
     else {c: "not an object on every side"} end;
 
+# Re-keys (GH #33). Side $x re-keyed base key $k to $n (git mv + move-entry)
+# when $x dropped $k and added $n, and $x[$n] is the base $k but for
+# content_hash (move-entry re-hashes the moved doc): the identity below.
+def DELCHANGED: "deleted on one side, changed on the other";
+def strip: norm | if type == "object" then del(.content_hash) else . end;
+# Only a verified entry (last_verified set; move-entry keeps it) is matched:
+# remove-entry + add-entry of another doc writes a null one.
+def verified: type == "object" and (.last_verified | type) == "string";
+def added($bd; $x): [$x | keys_unsorted[] | select(. as $n | $bd | has($n) | not)];
+def strict($bd; $x; $k; $add):
+  ($bd[$k] | strip) as $s | [$add[] | select(. as $n | ($x[$n] | type) == "object" and ($x[$n] | strip) == $s)];
+# $x re-keys that are unambiguous both ways ({old: new}): one new key for the
+# old one, claimed by no other old key.
+def rekeys($bd; $x):
+  added($bd; $x) as $add
+  | [$bd | keys_unsorted[] | select(. as $k | ($x | has($k) | not) and ($bd[$k] | verified))
+     | {k: ., c: strict($bd; $x; .; $add)} | select((.c | length) == 1)] as $p
+  | [$p[].c[0]] as $hits
+  | reduce ($p[] | select(.c[0] as $n | [$hits[] | select(. == $n)] | length == 1)) as $q ({}; . + {($q.k): $q.c[0]});
+# An entry with the re-keys $m applied the way move-entry repoints a citing
+# entry (replaces, superseded_by, code_refs in place, code_oids keys).
+def repoint($m):
+  if type != "object" then . else
+    (.replaces as $r | if ($r | type) == "string" and ($m | has($r)) then .replaces = $m[$r] else . end)
+    | (.superseded_by as $r | if ($r | type) == "string" and ($m | has($r)) then .superseded_by = $m[$r] else . end)
+    | (if (.code_refs | strs) then .code_refs = apply_subs($m; .code_refs) else . end)
+    | (if (.code_oids | type) == "object"
+       then .code_oids |= ([to_entries[] | .key as $f | {k: ($m[$f] // $f), v: .value, moved: ($m | has($f))}] as $p
+             | reduce $p[] as $e ({}; if has($e.k) and $e.moved then . else .[$e.k] = $e.v end))
+       else . end)
+  end;
+# The one key $x re-keyed $k to, or null: a strict match, else (none) a match
+# once $x own other re-keys $m are applied to the base entry (a batch move of
+# $k and a doc it cites). The other side $y must not have that key.
+def rekey_of($bd; $x; $y; $m; $k):
+  added($bd; $x) as $add
+  | (if ($bd[$k] | verified | not) then null
+     elif (strict($bd; $x; $k; $add) | length) > 0 then $m[$k]
+     else [$m[]] as $used | ($bd[$k] | norm | repoint($m) | strip) as $s
+       | [$add[] | select(. as $n | ($used | index([$n])) == null
+                    and ($x[$n] | type) == "object" and ($x[$n] | strip) == $s)]
+       | if length == 1 then .[0] else null end
+     end)
+  | . as $n | if $n != null and ($y | has($n)) then null else $n end;
+# Merge the other side change of $k into $x re-keyed entry: the ordinary
+# field rules on (base $k, $x[$n], $y[$k]), with $x content_hash read as the
+# base one and put back after. A re-hash beside a re-verify of $k conflicts:
+# it would pair a doc hash with a record nobody verified together.
+def rekey_merge($bk; $xn; $yk; $xours):
+  ($bk | norm) as $b | ($xn | norm) as $x | ($yk | norm) as $y
+  | def rec($e): [w($e; "content_hash"), w($e; "code_commit"), w($e; "last_verified")];
+  if ($y | type) != "object" then {c: "not an object on every side"}
+  elif w($x; "content_hash") != w($b; "content_hash") and rec($y) != rec($b)
+  then {c: "re-hashed by the move on one side, re-verified on the other"}
+  else ($x | if $b | has("content_hash") then .content_hash = $b.content_hash else del(.content_hash) end) as $x0
+    | (if $xours then merge_fields($b; $x0; $y) else merge_fields($b; $y; $x0) end) as $m
+    | if ($m.c | length) > 0
+      then {c: "both sides changed \($m.c | join(", ")), and last_verified does not say which is newer"}
+      else {v: [$m.e | if $x | has("content_hash") then .content_hash = $x.content_hash else del(.content_hash) end]} end
+  end;
+
 ($B[0] // {}) as $base | $O[0] as $ours | $T[0] as $theirs
 | ($base.docs // {}) as $bd | $ours.docs as $od | $theirs.docs as $td
-| [ukeys($od; $td)[] as $k | merge_entry(w($bd; $k); w($od; $k); w($td; $k)) + {k: $k}] as $rows
-| [$rows[] | select(.c) | "\(.k): \(.c)"] as $conflicts
+| rekeys($bd; $od) as $mo | rekeys($bd; $td) as $mt
+| [ukeys($od; $td)[] as $k | merge_entry(w($bd; $k); w($od; $k); w($td; $k)) + {k: $k}
+   | if .c == DELCHANGED
+     then (if $od | has($k) then rekey_of($bd; $td; $od; $mt; $k) else rekey_of($bd; $od; $td; $mo; $k) end) as $n
+       | if $n == null then .c += " (and no single re-key of it was found on the deleting side)"
+         else (if $od | has($k)
+               then rekey_merge($bd[$k]; $td[$n]; $od[$k]; false)
+               else rekey_merge($bd[$k]; $od[$n]; $td[$k]; true) end)
+           | {k: $k, n: $n, nv: (.v // null), c: (.c // null), v: []}
+           | if .c == null then del(.c) else . end
+         end
+     else . end] as $rows0
+# A new key two re-keys claim is no re-key of either.
+| [$rows0[] | select(.n != null) | .n] as $claims
+| [$rows0[] | . as $r
+   | if $r.n != null and ([$claims[] | select(. == $r.n)] | length) > 1
+     then {k: $r.k, c: DELCHANGED + " (and no single re-key of it was found on the deleting side)"}
+     else $r end] as $rows
+| [$rows[] | select(.c) | if .n != null then "\(.k) (re-keyed to \(.n)): \(.c)" else "\(.k): \(.c)" end] as $conflicts
 | if ($conflicts | length) > 0 then error($conflicts | join("\n")) else . end
-| (reduce ($rows[] | select(.v != [])) as $r ({}; . + {($r.k): $r.v[0]})) as $docs
+| (reduce ($rows[] | select(.n != null)) as $r ({}; . + {($r.n): $r.nv[0]})) as $moved
+| (reduce ($rows[] | select(.k as $kk | .v != [] or ($moved | has($kk))))
+     as $r ({}; . + {($r.k): (if $moved | has($r.k) then $moved[$r.k] else $r.v[0] end)})) as $docs
 | reduce ukeys($ours; $theirs)[] as $k ({};
     if $k == "docs" then . + {docs: $docs}
     else (pick3(w($base; $k); w($ours; $k); w($theirs; $k)) // w($ours; $k)) as $v
