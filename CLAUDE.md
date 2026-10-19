@@ -65,6 +65,7 @@ doc-superpowers/
 │       ├── git/              # Git hook scripts (the --git tier's 5) + ledger-{pre-commit,pre-push,post-commit} (--ledger blocks)
 │       ├── claude/           # Claude Code hook scripts (the --claude tier's 3) + ledger-{session-notices,state-watch}.sh (--ledger-claude),
 │       │                     #   and hook-lib.sh, which the 3 tier scripts and ledger-session-notices.sh source
+│       │                     #   (its "shared hook settings" region — budget watchdog, hooks.conf reader, advice — is copied byte for byte into each git hook)
 │       └── ci/               # GitHub Actions workflow templates
 │           ├── doc-freshness-pr.yml      # PR freshness check (shell-based; fails closed)
 │           ├── doc-freshness-schedule.yml # Weekly audit cron (shell-based; fails closed)
@@ -145,7 +146,7 @@ doc-superpowers/
 | `scripts/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md` | Fragment-format spec — producer/consumer contract for `RELEASE-NOTES.next/PR-*.md` | Changing fragment markers, hash protocol, or consumer rules |
 | `scripts/merge-doc-index.sh` | Custom git merge driver for .doc-index.json — base-aware per-key three-way merge during merge/rebase/revert; conflict markers + exit 1 when it cannot decide | Changing merge conflict resolution logic |
 | `scripts/test-merge-driver.sh` | Test suite for merge-doc-index.sh | Adding tests for merge driver features |
-| `scripts/hooks/install.sh` | Hook installer — install/uninstall/status for all tiers (including merge driver registration), and the work ledger's two opt-in sets (`--ledger`: marked blocks in pre-commit, pre-push, post-commit; `--ledger-claude`: SessionStart and PostToolUse `Write\|Edit\|MultiEdit`; never in `--all`, refused without `docs/ledger/config.json`, never recorded in `installed.json`; `uninstall --claude` keeps `hook-lib.sh` while a ledger script needs it); ships the ledger helper set with `doc-ledger-publish` and every claims-running workflow | Adding hook tiers or sets, changing installer logic |
+| `scripts/hooks/install.sh` | Hook installer — install/uninstall/status for all tiers (including merge driver registration), and the work ledger's two opt-in sets (`--ledger`: marked blocks in pre-commit, pre-push, post-commit; `--ledger-claude`: SessionStart and PostToolUse `Write\|Edit\|MultiEdit`; never in `--all`, refused without `docs/ledger/config.json`, never recorded in `installed.json`; `uninstall --claude` keeps `hook-lib.sh` while a ledger script needs it); ships the ledger helper set with `doc-ledger-publish` and every claims-running workflow; `--merge-driver-only` (the git tier's driver registration and `.gitattributes` block alone), `status --json` (schema `doc-superpowers-hooks-status/1`) and `print-merge-driver` | Adding hook tiers or sets, changing installer logic or the JSON status shape (with `references/hooks.md`) |
 | `scripts/hooks/state.sh` | Install-state tracking shared by install.sh — reads/writes `.claude/doc-superpowers/installed.json` (committed, so install choices persist across contributors) | Changing state schema, the known-workflow list, or state-respect rules |
 | `references/doc-spec.md` | Doc templates, Mermaid syntax, naming conventions, schema reference | Adding doc types, changing templates |
 | `references/agent-prompt-template.md` | Review agent prompt template + scope-specific focus areas | Changing agent review instructions or adding project signals |
@@ -182,9 +183,9 @@ doc-superpowers/
 - `/doc-superpowers update [scope] [--report=<path>]` — Execute doc updates from an audit report (default: this session's audit, else `check-freshness`)
 - `/doc-superpowers diagram [scope]` — Regenerate diagrams
 - `/doc-superpowers sync` — Sync doc index with filesystem
-- `/doc-superpowers hooks install [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude]` — Install workflow hooks (`--ledger` / `--ledger-claude`: the work ledger's opt-in sets, never in `--all`)
-- `/doc-superpowers hooks status [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude]` — Show installed hooks
-- `/doc-superpowers hooks uninstall [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude]` — Remove installed hooks
+- `/doc-superpowers hooks install [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude]` — Install workflow hooks (`--ledger` / `--ledger-claude`: the work ledger's opt-in sets, never in `--all`; `--merge-driver-only`: the git tier's merge driver alone, no hook)
+- `/doc-superpowers hooks status [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--json]` — Show installed hooks (`--json`: the git, Claude and CI tiers as one JSON object, `references/hooks.md` → *Machine-readable status*)
+- `/doc-superpowers hooks uninstall [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude]` — Remove installed hooks
 - `/doc-superpowers release [--from=<ref>]` — Draft release notes entry from git history (`--from` overrides the range start)
 - `/doc-superpowers spec-generate --design-doc=<path>` — Generate formal specs from design doc
 - `/doc-superpowers spec-inject --phase=plan|execute --specs=<paths> [--plan=<path>]` — Inject spec tasks into the plan (`--plan` required) or track drift after a chunk

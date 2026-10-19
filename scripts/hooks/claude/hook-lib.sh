@@ -8,6 +8,9 @@
 # session-summary.sh and the work ledger's ledger-session-notices.sh, which
 # set HOOK_EVENT, have_jq and (for _bounded) BUDGET and work first. One copy,
 # so they cannot drift apart. (ledger-state-watch.sh does not source it.)
+# The "shared hook settings" region at its end (_hook_conf, _advice,
+# _hook_budget, _bounded, _why) is also carried, byte for byte, by every git
+# hook, which must run without this library (the git tier ships alone).
 #
 # Claude Code keeps each hook string (systemMessage, additionalContext, the
 # stderr of a blocking exit 2) inline only up to 10,000 characters; past that
@@ -98,15 +101,63 @@ _budget_line() {
   printf '%s' "doc-superpowers: check skipped (budget): the doc freshness check took longer than ${BUDGET}s (run 'doc-tools.sh check-freshness' to see it)"
 }
 
+# >>> shared hook settings: one text in every git hook and in hook-lib.sh (test-hooks.sh pins the copies) >>>
+# _hook_conf <key>: <key>'s value in .claude/doc-superpowers/hooks.conf (a
+# "key = value" file: # comments, the last line for a key wins), "" when
+# unset. Read by awk, never sourced; relative to the repository top, where
+# every hook runs. No file, no process.
+_hook_conf() {
+  [ -f .claude/doc-superpowers/hooks.conf ] || return 0
+  awk -v k="$1" '
+    /^[ \t]*#/ { next }
+    { i = index($0, "="); if (i == 0) next
+      key = substr($0, 1, i - 1); gsub(/^[ \t]+|[ \t\r]+$/, "", key)
+      if (key != k) next
+      v = substr($0, i + 1); gsub(/^[ \t]+|[ \t\r]+$/, "", v); val = v; seen = 1 }
+    END { if (seen) print val }' .claude/doc-superpowers/hooks.conf 2>/dev/null
+}
+
+# _advice <action>: the command the hooks' advice names for <action>:
+# '/doc-superpowers <action>' by default; "" when DOC_SUPERPOWERS_ADVICE
+# (else hooks.conf's advice key) is off; any other value is a template, its
+# every {action} replaced by <action> (on or default: the default).
+_advice() {
+  local t="${DOC_SUPERPOWERS_ADVICE:-}"
+  [ -n "$t" ] || t=$(_hook_conf advice)
+  t="${t//[$'\n\r']/ }"
+  case "$t" in
+    "" | on | default) printf '/doc-superpowers %s' "$1" ;;
+    off) ;;
+    *) printf '%s' "${t//\{action\}/$1}" ;;
+  esac
+}
+
+# _hook_budget: the git hooks' freshness-check budget in seconds:
+# DOC_SUPERPOWERS_HOOK_BUDGET, else hooks.conf's hook_budget, else 20; 0 is
+# no budget, and a value that is not digits reads as the default.
+_hook_budget() {
+  local b="${DOC_SUPERPOWERS_HOOK_BUDGET:-}"
+  [ -n "$b" ] || b=$(_hook_conf hook_budget)
+  case "$b" in
+    "" | *[!0-9]*) b=20 ;;
+  esac
+  printf '%s' "$((10#$b))"
+}
+
 # _bounded <function>: run <function> in its own process group, its stdout to
 # $work/out and stderr to $work/err, with a watchdog that, after BUDGET
 # seconds, first leaves a marker and then kills the whole group. Neither job
 # keeps the hook's stdout open. The watchdog is always killed and reaped
 # before the verdict: whether it fired is read from the marker, never from
 # whether it is still alive (it can be alive between its kill and its exit).
-# Returns <function>'s status, or 124 when it was cut short.
+# Returns <function>'s status, or 124 when it was cut short. BUDGET 0: no
+# watchdog.
 _bounded() {
   local pid wd rc=0
+  if [ "${BUDGET:-0}" = 0 ]; then
+    "$1" >"$work/out" 2>"$work/err" </dev/null || rc=$?
+    return "$rc"
+  fi
   set -m
   "$1" >"$work/out" 2>"$work/err" </dev/null &
   pid=$!
@@ -131,3 +182,4 @@ _why() {
   why="${why#ERROR: }"
   printf '%s' "${why%.}"
 }
+# <<< shared hook settings <<<

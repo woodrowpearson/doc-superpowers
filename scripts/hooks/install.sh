@@ -133,9 +133,10 @@ usage() {
 doc-superpowers hooks installer
 
 Usage:
-  install.sh install   [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [CI options]
-  install.sh uninstall [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--workflows=<csv|all|none>] [--transient]
-  install.sh status    [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude]
+  install.sh install   [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [CI options]
+  install.sh uninstall [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--workflows=<csv|all|none>] [--transient]
+  install.sh status    [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--json]
+  install.sh print-merge-driver
   install.sh help
 
 Every command acts on the repository holding the current directory, at its
@@ -157,6 +158,14 @@ Tiers:
             A hook of yours is kept: when it is a shell script, a marked block
             that runs ours (with git's arguments) goes right after its #! line.
             A core.hooksPath from your global or system git config is refused.
+            The freshness checks get DOC_SUPERPOWERS_HOOK_BUDGET seconds (default
+            20; 0: no budget), else the hook_budget key of
+            .claude/doc-superpowers/hooks.conf; past it they say "check skipped
+            (budget)" (STRICT: the pre-commit blocks).
+  --merge-driver-only
+            With --git: only the merge driver (merge.doc-index.* git config and
+            the .gitattributes block), never a hook — install, uninstall and
+            status alike (hooks already there are left as they are).
   --claude  Claude Code hooks, per-user: registered in .claude/settings.local.json,
             both it and .claude/hooks/doc-superpowers/ excluded from git through
             git's info/exclude; commands run "\$CLAUDE_PROJECT_DIR"/.claude/hooks/…:
@@ -192,6 +201,17 @@ Tiers:
             install --ledger-claude is re-run). DOC_SUPERPOWERS_LEDGER_SKIP=1
             skips every leg of both, and DOC_SUPERPOWERS_SKIP=1 (every
             hook) does too.
+
+Machine-readable:
+  status --json       the git, Claude and CI tiers (all, or those named) as one
+                      JSON object (schema doc-superpowers-hooks-status/1;
+                      references/hooks.md lists every state); exit 0
+  print-merge-driver  the merge.doc-index.driver value install --git registers
+
+Hook output: DOC_SUPERPOWERS_ADVICE (else the advice key of
+.claude/doc-superpowers/hooks.conf) replaces the '/doc-superpowers <action>'
+the git and Claude hooks advise: off drops it, any other text is used with
+{action} replaced (update, audit, release, hooks install --git).
 
 CI options (install --ci / --all):
   --workflows=<csv|all|none>
@@ -836,6 +856,13 @@ $BLOCK_END"
 
 preflight_git() {
   local hook dest
+  # --merge-driver-only writes no hook: only .gitattributes is checked (the
+  # merge.doc-index.* keys are git config's to write).
+  if $DRIVER_ONLY; then
+    safe_dest .gitattributes
+    check_blocks .gitattributes
+    return 0
+  fi
   check_hooks_path_scope
   safe_dest "$HOOKS_DIR"
   for hook in $GIT_HOOKS; do
@@ -854,6 +881,11 @@ preflight_git() {
 
 install_git() {
   local hook src dest copy rendered installed=0 integrated=0 skipped=0
+  if $DRIVER_ONLY; then
+    install_merge_driver
+    echo "Git hooks: none touched (--merge-driver-only)"
+    return 0
+  fi
   ensure_dir "$HOOKS_DIR"
   echo "  Hooks directory: $HOOKS_DIR"
   for hook in $GIT_HOOKS; do
@@ -892,9 +924,15 @@ install_git() {
     fi
   done
 
-  # The three-way merge driver for docs/.doc-index.json (merge_driver_cmd:
-  # resolved at merge time, path quoted). Re-running install replaces an
-  # older, pinned registration.
+  install_merge_driver
+  echo "Git hooks: $installed installed, $integrated integrated, $skipped skipped"
+}
+
+# The three-way merge driver for docs/.doc-index.json (merge_driver_cmd:
+# resolved at merge time, path quoted): the merge.doc-index.* git config and
+# the marked .gitattributes block — all that --merge-driver-only installs.
+# Re-running install replaces an older, pinned registration.
+install_merge_driver() {
   if [[ -f "$SKILL_DIR/scripts/merge-doc-index.sh" ]]; then
     git config --local merge.doc-index.name "doc-superpowers index merger"
     git config --local merge.doc-index.driver "$(merge_driver_cmd)"
@@ -904,12 +942,15 @@ install_git() {
     upsert_block .gitattributes "$ATTR_BLOCK" 644
     echo "  Registered merge driver: doc-index (a merge runs: $(merge_driver_resolved))"
   fi
-
-  echo "Git hooks: $installed installed, $integrated integrated, $skipped skipped"
 }
 
 uninstall_git() {
   local hook dest copy removed=0
+  if $DRIVER_ONLY; then
+    uninstall_merge_driver
+    echo "Git hooks: none touched (--merge-driver-only)"
+    return 0
+  fi
   for hook in $GIT_HOOKS; do
     dest="$HOOKS_DIR/$hook"
     copy="$HOOKS_DIR/.doc-superpowers-$hook"
@@ -932,7 +973,13 @@ uninstall_git() {
       remove_file "$copy"
     fi
   done
+  uninstall_merge_driver
+  echo "Git hooks: $removed removed (from $HOOKS_DIR)"
+}
 
+# The merge driver's git config and .gitattributes block, removed — all that
+# uninstall --merge-driver-only removes.
+uninstall_merge_driver() {
   if git config --local --get merge.doc-index.driver >/dev/null 2>&1 \
     || git config --local --get merge.doc-index.name >/dev/null 2>&1; then
     git config --local --unset merge.doc-index.name 2>/dev/null || true
@@ -946,72 +993,149 @@ uninstall_git() {
     remove_block .gitattributes
     echo "  Removed merge driver from .gitattributes"
   fi
+}
 
-  echo "Git hooks: $removed removed (from $HOOKS_DIR)"
+# --- Status: one classification, two renderings ---------------------------------------
+#
+# Each status_* classifies every component once, then either prints its human
+# line (the default: the text earlier versions printed) or, under status
+# --json, adds a record to ST_REC — "<kind> US <field>…" lines that
+# status_json turns into one JSON object (references/hooks.md → *Machine-
+# readable status*).
+ST_REC=""
+st_rec() {
+  local IFS="$_SEP"
+  ST_REC="$ST_REC$*"$'\n'
+}
+
+# git_hook_status <hook>: GS_STATE — installed | not-executable | outdated |
+# integrated | integrated-copy-outdated | integrated-block-outdated |
+# ledger-only (a hook holding only the --ledger set's block) | foreign (a hook
+# of yours, without our block) | absent — and GS_DATE, a hook of ours'
+# install date ("" otherwise).
+git_hook_status() {
+  local dest="$HOOKS_DIR/$1"
+  GS_DATE=""
+  case "$(hook_state "$1")" in
+    ours)
+      GS_DATE=$(head -3 "$dest" | sed -n 's/.*installed \([0-9-]*\).*/\1/p')
+      if [ ! -x "$dest" ]; then
+        GS_STATE=not-executable
+      elif ! render_matches "$dest" "$SCRIPT_DIR/git/$1"; then
+        GS_STATE=outdated
+      else
+        GS_STATE=installed
+      fi
+      ;;
+    current)
+      if render_matches "$HOOKS_DIR/.doc-superpowers-$1" "$SCRIPT_DIR/git/$1"; then
+        GS_STATE=integrated
+      else
+        GS_STATE="integrated-copy-outdated"
+      fi
+      ;;
+    outdated) GS_STATE="integrated-block-outdated" ;;
+    *)
+      if [ ! -e "$dest" ]; then
+        GS_STATE=absent
+      elif lg_only "$dest"; then
+        GS_STATE=ledger-only
+      else
+        GS_STATE=foreign
+      fi
+      ;;
+  esac
+}
+
+# merge_driver_status: MD_STATE — registered | script-missing | pinned |
+# other (registered by another install) | absent — and MD_PATH: the script a
+# merge runs (registered), the pinned path (pinned), the path that is gone
+# (script-missing), else "". The registration is compared with the one this
+# install would write rather than parsed: the path is quoted and resolved at
+# merge time. A pre-3.0 registration is "<unquoted path> %O %A %B"; its path
+# is everything before that suffix (it may contain spaces).
+merge_driver_status() {
+  local registered
+  MD_STATE=absent MD_PATH=""
+  registered=$(git config --local --get merge.doc-index.driver 2>/dev/null) || return 0
+  if [[ "$registered" == "$(merge_driver_cmd)" ]]; then
+    MD_PATH=$(merge_driver_resolved)
+    if [[ -n "$MD_PATH" ]]; then
+      MD_STATE=registered
+    else
+      MD_STATE=script-missing MD_PATH=$(merge_driver_target)
+    fi
+  elif [[ "$registered" == *" %O %A %B" && "$registered" != "t='"* ]]; then
+    MD_PATH="${registered% %O %A %B}"
+    if [[ -f "$MD_PATH" ]]; then
+      MD_STATE=pinned
+    else
+      MD_STATE=script-missing
+    fi
+  else
+    MD_STATE=other
+  fi
+}
+
+# The merge attribute docs/.doc-index.json gets: configured (doc-index) |
+# absent (unset) | other (another driver, or merge unset with -merge).
+attr_status() {
+  local v
+  v=$(git check-attr merge -- docs/.doc-index.json 2>/dev/null)
+  case "$v" in
+    "docs/.doc-index.json: merge: doc-index") printf configured ;;
+    "docs/.doc-index.json: merge: unspecified" | "") printf absent ;;
+    *) printf other ;;
+  esac
 }
 
 status_git() {
-  local hook dest scope st install_date
+  local hook dest scope foreign=false st_attr
   scope=$(hooks_path_scope)
   if [ -n "$scope" ] && [ "$scope" != local ] && [ "$scope" != worktree ]; then
+    foreign=true
+  fi
+  if $JSON; then
+    st_rec git.dir "$HOOKS_DIR" "$scope" "$foreign" "$DRIVER_ONLY"
+  elif $foreign; then
     echo "Git Hooks (dir: $HOOKS_DIR — from your $scope core.hooksPath: not this repository's; install --git refuses it):"
   else
     echo "Git Hooks (dir: $HOOKS_DIR):"
   fi
   for hook in $GIT_HOOKS; do
+    $DRIVER_ONLY && break
     dest="$HOOKS_DIR/$hook"
-    st=$(hook_state "$hook")
-    case "$st" in
-      ours)
-        install_date=$(head -3 "$dest" | sed -n 's/.*installed \([0-9-]*\).*/\1/p')
-        if [ ! -x "$dest" ]; then
-          printf "  ⚠ %-22s installed but not executable (git skips it): chmod +x %s\n" "$hook" "$dest"
-        elif ! render_matches "$dest" "$SCRIPT_DIR/git/$hook"; then
-          printf "  ⚠ %-22s outdated (installed %s by another doc-superpowers version or install): re-run install --git\n" "$hook" "${install_date:-unknown}"
-        else
-          printf "  ✓ %-22s installed %s\n" "$hook" "${install_date:-unknown}"
-        fi
-        ;;
-      current)
-        if render_matches "$HOOKS_DIR/.doc-superpowers-$hook" "$SCRIPT_DIR/git/$hook"; then
-          printf "  ✓ %-22s integrated (a block in your hook runs ours)\n" "$hook"
-        else
-          printf "  ⚠ %-22s integrated, but the copy it runs (.doc-superpowers-%s) is outdated: re-run install --git\n" "$hook" "$hook"
-        fi
-        ;;
-      outdated) printf "  ⚠ %-22s integrated with an outdated block (or its copy is missing): re-run install --git\n" "$hook" ;;
+    git_hook_status "$hook"
+    if $JSON; then
+      st_rec git.hook "$hook" "$GS_STATE" "$GS_DATE"
+      continue
+    fi
+    case "$GS_STATE" in
+      not-executable) printf "  ⚠ %-22s installed but not executable (git skips it): chmod +x %s\n" "$hook" "$dest" ;;
+      outdated) printf "  ⚠ %-22s outdated (installed %s by another doc-superpowers version or install): re-run install --git\n" "$hook" "${GS_DATE:-unknown}" ;;
+      installed) printf "  ✓ %-22s installed %s\n" "$hook" "${GS_DATE:-unknown}" ;;
+      integrated) printf "  ✓ %-22s integrated (a block in your hook runs ours)\n" "$hook" ;;
+      integrated-copy-outdated) printf "  ⚠ %-22s integrated, but the copy it runs (.doc-superpowers-%s) is outdated: re-run install --git\n" "$hook" "$hook" ;;
+      integrated-block-outdated) printf "  ⚠ %-22s integrated with an outdated block (or its copy is missing): re-run install --git\n" "$hook" ;;
       *) printf "  ✗ %-22s not installed\n" "$hook" ;;
     esac
   done
 
-  # Merge driver status. The registration is compared with the one this
-  # install would write rather than parsed: the path is quoted and resolved at
-  # merge time. A pre-3.0 registration is "<unquoted path> %O %A %B"; its path
-  # is everything before that suffix (it may contain spaces).
-  local registered
-  if registered=$(git config --local --get merge.doc-index.driver 2>/dev/null); then
-    local resolved legacy
-    if [[ "$registered" == "$(merge_driver_cmd)" ]]; then
-      resolved=$(merge_driver_resolved)
-      if [[ -n "$resolved" ]]; then
-        printf "  ✓ %-22s registered (a merge runs %s)\n" "merge-driver" "$resolved"
-      else
-        printf "  ⚠ %-22s registered but script missing: %s\n" "merge-driver" "$(merge_driver_target)"
-      fi
-    elif [[ "$registered" == *" %O %A %B" && "$registered" != "t='"* ]]; then
-      legacy="${registered% %O %A %B}"
-      if [[ -f "$legacy" ]]; then
-        printf "  ⚠ %-22s registered at a pinned path (%s); re-run install --git\n" "merge-driver" "$legacy"
-      else
-        printf "  ⚠ %-22s registered but script missing: %s\n" "merge-driver" "$legacy"
-      fi
-    else
-      printf "  ⚠ %-22s registered by another install; re-run install --git\n" "merge-driver"
-    fi
-  else
-    printf "  ✗ %-22s not registered\n" "merge-driver"
+  merge_driver_status
+  st_attr=$(attr_status)
+  if $JSON; then
+    st_rec git.driver "$MD_STATE" "$MD_PATH"
+    st_rec git.attr "$st_attr"
+    return 0
   fi
-  if [ "$(git check-attr merge -- docs/.doc-index.json 2>/dev/null)" = "docs/.doc-index.json: merge: doc-index" ]; then
+  case "$MD_STATE" in
+    registered) printf "  ✓ %-22s registered (a merge runs %s)\n" "merge-driver" "$MD_PATH" ;;
+    script-missing) printf "  ⚠ %-22s registered but script missing: %s\n" "merge-driver" "$MD_PATH" ;;
+    pinned) printf "  ⚠ %-22s registered at a pinned path (%s); re-run install --git\n" "merge-driver" "$MD_PATH" ;;
+    other) printf "  ⚠ %-22s registered by another install; re-run install --git\n" "merge-driver" ;;
+    *) printf "  ✗ %-22s not registered\n" "merge-driver" ;;
+  esac
+  if [ "$st_attr" = configured ]; then
     printf "  ✓ %-22s configured\n" ".gitattributes"
   else
     printf "  ✗ %-22s not configured\n" ".gitattributes"
@@ -1187,8 +1311,8 @@ uninstall_claude() {
 }
 
 status_claude() {
-  local h reg="" ev
-  echo "Claude Code Hooks (per-user: $SETTINGS_FILE):"
+  local h reg="" ev st readable=true
+  $JSON || echo "Claude Code Hooks (per-user: $SETTINGS_FILE):"
   # Each registered entry of ours: "<event> <hook> <cmd>", cmd "ok" when its
   # command is the one this install writes (an older one — v2 ran the script
   # by a relative path — is outdated).
@@ -1200,31 +1324,45 @@ status_claude() {
        | .value[] | select(type == "object" and ((.hooks | type) == "array")) | .hooks[] | select(ours)
        | (.command | capture("doc-superpowers/(?<n>[a-z-]+)\\.sh").n) as $n
        | "\($e) \($n) \(if .command == $want[$n] then "ok" else "old" end)"] | .[]' "$SETTINGS_FILE" 2>/dev/null) \
-      || echo "  ⚠ $SETTINGS_FILE cannot be read as JSON"
+      || { readable=false; $JSON || echo "  ⚠ $SETTINGS_FILE cannot be read as JSON"; }
   fi
+  $JSON && st_rec claude.settings "$SETTINGS_FILE" "$([ -e "$SETTINGS_FILE" ] && echo true || echo false)" "$readable"
   for h in $CLAUDE_HOOKS; do
     case "$h" in
       pre-commit-gate) ev=PreToolUse ;;
       post-commit-sync) ev=PostToolUse ;;
       *) ev=Stop ;;
     esac
-    if grep -q "^$ev $h " <<<"$reg"; then
-      if [ ! -f "$CLAUDE_HOOKS_DIR/$h.sh" ]; then
-        printf "  ⚠ %-22s in settings but script missing from %s/\n" "$h" "$CLAUDE_HOOKS_DIR"
-      elif ! grep -qxF "$ev $h ok" <<<"$reg"; then
-        printf "  ⚠ %-22s outdated (registered with another version's command, not %s): re-run install --claude\n" "$h" "$(claude_cmd "$h")"
-      elif ! render_matches "$CLAUDE_HOOKS_DIR/$h.sh" "$SCRIPT_DIR/claude/$h.sh"; then
-        printf "  ⚠ %-22s outdated (its script is another doc-superpowers version's or install's): re-run install --claude\n" "$h"
-      elif [ ! -f "$CLAUDE_HOOKS_DIR/$CLAUDE_LIB.sh" ]; then
-        printf "  ⚠ %-22s its shared library %s.sh is missing from %s/: re-run install --claude\n" "$h" "$CLAUDE_LIB" "$CLAUDE_HOOKS_DIR"
-      elif ! render_matches "$CLAUDE_HOOKS_DIR/$CLAUDE_LIB.sh" "$SCRIPT_DIR/claude/$CLAUDE_LIB.sh"; then
-        printf "  ⚠ %-22s outdated (its shared library %s.sh is another version's or install's): re-run install --claude\n" "$h" "$CLAUDE_LIB"
-      else
-        printf "  ✓ %-22s active (%s: script + settings)\n" "$h" "$ev"
-      fi
+    # active | script-missing | outdated-command | outdated-script |
+    # lib-missing | lib-outdated | absent
+    if ! grep -q "^$ev $h " <<<"$reg"; then
+      st=absent
+    elif [ ! -f "$CLAUDE_HOOKS_DIR/$h.sh" ]; then
+      st=script-missing
+    elif ! grep -qxF "$ev $h ok" <<<"$reg"; then
+      st=outdated-command
+    elif ! render_matches "$CLAUDE_HOOKS_DIR/$h.sh" "$SCRIPT_DIR/claude/$h.sh"; then
+      st=outdated-script
+    elif [ ! -f "$CLAUDE_HOOKS_DIR/$CLAUDE_LIB.sh" ]; then
+      st=lib-missing
+    elif ! render_matches "$CLAUDE_HOOKS_DIR/$CLAUDE_LIB.sh" "$SCRIPT_DIR/claude/$CLAUDE_LIB.sh"; then
+      st=lib-outdated
     else
-      printf "  ✗ %-22s not installed\n" "$h"
+      st=active
     fi
+    if $JSON; then
+      st_rec claude.hook "$h" "$st" "$ev"
+      continue
+    fi
+    case "$st" in
+      script-missing) printf "  ⚠ %-22s in settings but script missing from %s/\n" "$h" "$CLAUDE_HOOKS_DIR" ;;
+      outdated-command) printf "  ⚠ %-22s outdated (registered with another version's command, not %s): re-run install --claude\n" "$h" "$(claude_cmd "$h")" ;;
+      outdated-script) printf "  ⚠ %-22s outdated (its script is another doc-superpowers version's or install's): re-run install --claude\n" "$h" ;;
+      lib-missing) printf "  ⚠ %-22s its shared library %s.sh is missing from %s/: re-run install --claude\n" "$h" "$CLAUDE_LIB" "$CLAUDE_HOOKS_DIR" ;;
+      lib-outdated) printf "  ⚠ %-22s outdated (its shared library %s.sh is another version's or install's): re-run install --claude\n" "$h" "$CLAUDE_LIB" ;;
+      active) printf "  ✓ %-22s active (%s: script + settings)\n" "$h" "$ev" ;;
+      *) printf "  ✗ %-22s not installed\n" "$h" ;;
+    esac
   done
 }
 
@@ -2015,39 +2153,63 @@ uninstall_ci() {
 }
 
 status_ci() {
-  local w line state_ok=1 on_disk
-  echo "CI/CD Workflows:"
+  local w line state_ok=1 on_disk st
+  $JSON || echo "CI/CD Workflows:"
   if ! state_load; then
     state_ok=0
-    echo "  ⚠ $STATE_FILE cannot be read ($STATE_ERROR): resolve it, or move it aside to $STATE_CORRUPT"
+    $JSON || echo "  ⚠ $STATE_FILE cannot be read ($STATE_ERROR): resolve it, or move it aside to $STATE_CORRUPT"
+  fi
+  if $JSON; then
+    st_rec ci.state "$STATE_FILE" "$([ "$state_ok" = 1 ] && echo true || echo false)" "$STATE_ERROR"
   fi
   on_disk=$(disk_workflows)
   for w in $KNOWN_WORKFLOWS; do
+    # installed | uninstalled-intentional | uninstalled-transient |
+    # recorded-missing | absent
+    WF_STATE=""
     if in_list "$w" "$on_disk"; then
-      printf "  ✓ %-26s installed\n" "$w.yml"
+      st=installed
+    else
+      if [ "$state_ok" = 1 ]; then
+        state_wf_get "$w" || true
+      fi
+      if [ "$WF_STATE" = uninstalled ] && [ "$WF_INTENT" = true ]; then
+        st=uninstalled-intentional
+      elif [ "$WF_STATE" = uninstalled ]; then
+        st=uninstalled-transient
+      elif [ "$WF_STATE" = installed ]; then
+        st=recorded-missing
+      else
+        st=absent
+      fi
+    fi
+    if $JSON; then
+      st_rec ci.wf "$w" "$st"
       continue
     fi
-    WF_STATE=""
-    if [ "$state_ok" = 1 ]; then
-      state_wf_get "$w" || true
-    fi
-    if [ "$WF_STATE" = uninstalled ] && [ "$WF_INTENT" = true ]; then
-      printf "  ✗ %-26s uninstalled (intentional)\n" "$w.yml"
-    elif [ "$WF_STATE" = uninstalled ]; then
-      printf "  ✗ %-26s uninstalled (transient)\n" "$w.yml"
-    elif [ "$WF_STATE" = installed ]; then
-      printf "  ⚠ %-26s recorded installed but missing: the next install --ci restores it\n" "$w.yml"
-    else
-      printf "  ✗ %-26s not installed\n" "$w.yml"
-    fi
+    case "$st" in
+      installed) printf "  ✓ %-26s installed\n" "$w.yml" ;;
+      uninstalled-intentional) printf "  ✗ %-26s uninstalled (intentional)\n" "$w.yml" ;;
+      uninstalled-transient) printf "  ✗ %-26s uninstalled (transient)\n" "$w.yml" ;;
+      recorded-missing) printf "  ⚠ %-26s recorded installed but missing: the next install --ci restores it\n" "$w.yml" ;;
+      *) printf "  ✗ %-26s not installed\n" "$w.yml" ;;
+    esac
   done
   for w in $RETIRED_WORKFLOWS; do
     if is_managed_workflow ".github/workflows/$w.yml"; then
-      printf "  ⚠ %-26s retired: the next install --ci (or uninstall --ci) removes it\n" "$w.yml"
+      if $JSON; then
+        st_rec ci.retired "$w"
+      else
+        printf "  ⚠ %-26s retired: the next install --ci (or uninstall --ci) removes it\n" "$w.yml"
+      fi
     fi
   done
   if [ "$state_ok" = 1 ] && [ "$STATE_HAS_CI" = 1 ]; then
-    echo "  choices: base branch ${STATE_BASE:-main}, cron '${STATE_CRON:-0 9 * * 1}', strict ${STATE_STRICT:-false} ($STATE_FILE)"
+    if $JSON; then
+      st_rec ci.choices "${STATE_BASE:-main}" "${STATE_CRON:-0 9 * * 1}" "${STATE_STRICT:-false}"
+    else
+      echo "  choices: base branch ${STATE_BASE:-main}, cron '${STATE_CRON:-0 9 * * 1}', strict ${STATE_STRICT:-false} ($STATE_FILE)"
+    fi
   fi
   # On a ledger host, a claims workflow without the ledger set beside
   # doc-tools.sh (installed before the config, or the set removed by hand):
@@ -2056,7 +2218,11 @@ status_ci() {
   for w in $on_disk; do
     [ -f "$LEDGER_CONFIG" ] || break
     if workflow_runs_claims ".github/workflows/$w.yml" && [ ! -f "$VENDOR_DEST/ledger/lib.sh" ]; then
-      printf "  ⚠ %s runs claims-check.sh without the ledger helper set (%s/ledger/): claims V5 cannot read ledger trackers there; re-run install --ci\n" "$w.yml" "$VENDOR_DEST"
+      if $JSON; then
+        st_rec ci.ledger_gap "$w"
+      else
+        printf "  ⚠ %s runs claims-check.sh without the ledger helper set (%s/ledger/): claims V5 cannot read ledger trackers there; re-run install --ci\n" "$w.yml" "$VENDOR_DEST"
+      fi
     fi
   done
   local d n f label
@@ -2071,14 +2237,61 @@ status_ci() {
         n=$((n + 1))
       fi
     done
+    if $JSON; then
+      st_rec ci.helpers "$d" "$n"
+      continue
+    fi
     label="$d helpers"
     [ "$d" != adapters ] || label="ledger adapters"
     echo "  $label: $n in $VENDOR_DEST/$d/"
   done
   if [ -f "$VENDOR_DEST/doc-tools.sh" ]; then
-    echo "  doc-tools.sh: vendored at $VENDOR_DEST/doc-tools.sh"
+    if $JSON; then
+      st_rec ci.vendored "$VENDOR_DEST/doc-tools.sh"
+    else
+      echo "  doc-tools.sh: vendored at $VENDOR_DEST/doc-tools.sh"
+    fi
   fi
   return 0
+}
+
+# status --json: ST_REC as one JSON object (references/hooks.md →
+# *Machine-readable status*; schema "doc-superpowers-hooks-status/1"). A tier
+# not asked for is absent from .tiers.
+# shellcheck disable=SC2016  # jq program
+_STATUS_JSON_JQ='
+  def n: if . == "" then null else . end;
+  reduce ($rec | split("\n")[] | select(. != "") | split("\u001f")) as $r (
+    {schema: "doc-superpowers-hooks-status/1", repo: $repo, plugin: $plugin, tiers: {}};
+    if $r[0] == "git.dir" then
+      .tiers.git = {hooks_dir: $r[1], hooks_path_scope: ($r[2] // "" | n),
+                    hooks_path_foreign: ($r[3] == "true"), merge_driver_only: ($r[4] == "true")}
+      | if $r[4] == "true" then . else .tiers.git.hooks = {} end
+    elif $r[0] == "git.hook" then .tiers.git.hooks[$r[1]] = {state: $r[2], installed: ($r[3] // "" | n)}
+    elif $r[0] == "git.driver" then .tiers.git.merge_driver = {state: $r[1], path: ($r[2] // "" | n)}
+    elif $r[0] == "git.attr" then .tiers.git.gitattributes = {state: $r[1]}
+    elif $r[0] == "claude.settings" then
+      .tiers.claude = {settings: $r[1], settings_present: ($r[2] == "true"), settings_readable: ($r[3] == "true"), hooks: {}}
+    elif $r[0] == "claude.hook" then .tiers.claude.hooks[$r[1]] = {state: $r[2], event: $r[3]}
+    elif $r[0] == "ci.state" then
+      .tiers.ci = {state_file: $r[1], state_readable: ($r[2] == "true"), state_error: ($r[3] // "" | n),
+                   workflows: {}, retired: [], choices: null, claims_without_ledger_helpers: [],
+                   helpers: {}, doc_tools_vendored: null}
+    elif $r[0] == "ci.wf" then .tiers.ci.workflows[$r[1]] = {state: $r[2]}
+    elif $r[0] == "ci.retired" then .tiers.ci.retired += [$r[1]]
+    elif $r[0] == "ci.choices" then .tiers.ci.choices = {base_branch: $r[1], cron: $r[2], ci_strict: ($r[3] == "true")}
+    elif $r[0] == "ci.ledger_gap" then .tiers.ci.claims_without_ledger_helpers += [$r[1]]
+    elif $r[0] == "ci.helpers" then .tiers.ci.helpers[$r[1]] = ($r[2] | tonumber)
+    elif $r[0] == "ci.vendored" then .tiers.ci.doc_tools_vendored = $r[1]
+    else . end)
+  | .env = {DOC_SUPERPOWERS_STRICT: ($strict | n), DOC_SUPERPOWERS_SKIP: ($skip | n),
+            DOC_SUPERPOWERS_QUIET: ($quiet | n), DOC_SUPERPOWERS_HOOK_BUDGET: ($budget | n),
+            DOC_SUPERPOWERS_ADVICE: ($advice | n)}'
+status_json() {
+  jq -n --arg rec "$ST_REC" --arg repo "$TOP_ABS" --arg plugin "$SKILL_DIR" \
+    --arg strict "${DOC_SUPERPOWERS_STRICT:-}" --arg skip "${DOC_SUPERPOWERS_SKIP:-}" \
+    --arg quiet "${DOC_SUPERPOWERS_QUIET:-}" --arg budget "${DOC_SUPERPOWERS_HOOK_BUDGET:-}" \
+    --arg advice "${DOC_SUPERPOWERS_ADVICE:-}" "$_STATUS_JSON_JQ"
 }
 
 # --- Main ------------------------------------------------------------------------------
@@ -2095,6 +2308,13 @@ case "$COMMAND" in
     exit 0
     ;;
   install | uninstall | status) ;;
+  print-merge-driver)
+    # The merge.doc-index.driver value install --git registers, for a host
+    # that registers the driver itself. Needs no repository.
+    [ $# -eq 0 ] || usage_error "print-merge-driver takes no options (got: $1)"
+    printf '%s\n' "$(merge_driver_cmd)"
+    exit 0
+    ;;
   *)
     echo "Unknown command: $COMMAND" >&2
     usage >&2
@@ -2117,11 +2337,15 @@ CLAUDE_NAMED=false
 OPT_BASE="" OPT_CRON="" OPT_STRICT="" HELPERS=true FORCE=false TRANSIENT=false
 WF_MODE=plain CSV_NAMES=""
 SEEN_CI_OPTS=""
+# --merge-driver-only: the git tier is the merge driver alone (no hook).
+# --json: status as one JSON object.
+DRIVER_ONLY=false JSON=false
 
 # Which command takes which flag (anything else: exit 2).
 allowed() {
   case "$COMMAND:$1" in
-    *:--git | *:--claude | *:--ci | *:--all | *:--ledger | *:--ledger-claude) return 0 ;;
+    *:--git | *:--claude | *:--ci | *:--all | *:--ledger | *:--ledger-claude | *:--merge-driver-only) return 0 ;;
+    status:--json) return 0 ;;
     install:--workflows | install:--base-branch | install:--cron | install:--ci-strict | install:--helpers | install:--force) return 0 ;;
     uninstall:--workflows | uninstall:--transient) return 0 ;;
   esac
@@ -2137,7 +2361,7 @@ while [ $# -gt 0 ]; do
     *) value="" has_value=0 ;;
   esac
   case "$name" in
-    --git | --claude | --ci | --all | --ledger | --ledger-claude | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient) ;;
+    --git | --claude | --ci | --all | --ledger | --ledger-claude | --merge-driver-only | --json | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient) ;;
     *) usage_error "unknown option: $arg" ;;
   esac
   allowed "$name" || usage_error "$name does not apply to $COMMAND"
@@ -2159,6 +2383,8 @@ while [ $# -gt 0 ]; do
     --all) DO_GIT=true DO_CLAUDE=true DO_CI=true ;;
     --ledger) DO_LEDGER=true ;;
     --ledger-claude) DO_LEDGER_CLAUDE=true ;;
+    --merge-driver-only) DRIVER_ONLY=true ;;
+    --json) JSON=true ;;
     --base-branch)
       valid_branch "$value" || die "invalid --base-branch '$value': a branch name of letters, digits and . _ / - that git accepts"
       OPT_BASE="$value"
@@ -2198,6 +2424,12 @@ while [ $# -gt 0 ]; do
 done
 if [ -n "$SEEN_CI_OPTS" ] && [ "$DO_CI" != true ] && [ "$COMMAND" != status ]; then
   usage_error "${SEEN_CI_OPTS%% *} applies to the CI tier: add --ci (or --all)"
+fi
+if $DRIVER_ONLY && ! $DO_GIT; then
+  usage_error "--merge-driver-only applies to the git tier: add --git (or --all)"
+fi
+if $JSON && { $DO_LEDGER || $DO_LEDGER_CLAUDE; }; then
+  usage_error "--json reports the git, Claude and CI tiers; the ledger sets have no JSON status (drop --ledger / --ledger-claude)"
 fi
 
 enter_repo
@@ -2280,6 +2512,18 @@ case "$COMMAND" in
     ;;
 
   status)
+    if $JSON; then
+      # The three tiers (all of them, or those named), one JSON object on
+      # stdout, exit 0: the states are the verdict.
+      if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI; then
+        DO_GIT=true DO_CLAUDE=true DO_CI=true
+      fi
+      if $DO_GIT; then status_git; fi
+      if $DO_CLAUDE; then status_claude; fi
+      if $DO_CI; then status_ci; fi
+      status_json
+      exit 0
+    fi
     if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE; then
       DO_GIT=true DO_CLAUDE=true DO_CI=true DO_LEDGER=true DO_LEDGER_CLAUDE=true
     fi

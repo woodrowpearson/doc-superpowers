@@ -5953,6 +5953,444 @@ test_maintainer_hook_refuses_global_hooks_path
 test_check_ci_runs_what_ci_runs
 test_check_ci_modes
 
+
+# --- install --git --merge-driver-only, status --json, print-merge-driver (#20) ---
+
+# The hooks in .git/hooks that are not git's samples, one per line.
+real_hooks() {
+  find .git/hooks -maxdepth 1 -type f ! -name '*.sample' 2>/dev/null | LC_ALL=C sort
+}
+
+test_driver_only_install_uninstall() {
+  echo "test: #20 install --git --merge-driver-only registers the driver and the .gitattributes block, no hook; uninstall removes only those"
+  setup
+  # A hook of the user's, which neither command may touch.
+  printf '#!/bin/sh\necho mine\nexit 0\n' > .git/hooks/pre-commit
+  chmod 755 .git/hooks/pre-commit
+  local before
+  before=$(cksum < .git/hooks/pre-commit)
+  inst install --git --merge-driver-only
+  assert_eq "0" "$IRC" "install --git --merge-driver-only: exit 0"
+  assert_contains "$IOUT" "none touched (--merge-driver-only)" "…says no hook was touched"
+  assert_eq ".git/hooks/pre-commit" "$(real_hooks)" "…no hook written (the user's alone is there)"
+  assert_eq "$before" "$(cksum < .git/hooks/pre-commit)" "…the user's hook byte-for-byte"
+  assert_file_not_exists ".git/hooks/.doc-superpowers-pre-commit" "…no local copy"
+  inst print-merge-driver
+  assert_eq "0" "$IRC" "print-merge-driver: exit 0"
+  assert_eq "$IOUT" "$(git config --local --get merge.doc-index.driver)" "the registered driver is the one print-merge-driver prints"
+  assert_eq "doc-superpowers index merger" "$(git config --local --get merge.doc-index.name)" "the driver's name is registered"
+  assert_eq "docs/.doc-index.json: merge: doc-index" "$(git check-attr merge -- docs/.doc-index.json)" ".gitattributes routes the index to it"
+  inst status --git --merge-driver-only
+  assert_contains "$IOUT" "✓ merge-driver" "status --git --merge-driver-only: the driver ✓"
+  assert_contains "$IOUT" "✓ .gitattributes" "….gitattributes ✓"
+  assert_not_contains "$IOUT" "pre-commit" "…no hook line"
+  # Next to a full git tier, uninstall --merge-driver-only keeps the hooks.
+  rm -f .git/hooks/pre-commit
+  inst install --git
+  inst uninstall --git --merge-driver-only
+  assert_eq "0" "$IRC" "uninstall --git --merge-driver-only: exit 0"
+  assert_true "…the driver is unregistered" test -z "$(git config --local --get-regexp '^merge\.doc-index\.' || true)"
+  assert_file_not_exists ".gitattributes" "…the .gitattributes it created is gone"
+  assert_true "…the hooks stay" grep -q "doc-superpowers hook v" .git/hooks/pre-commit
+  inst status --git
+  assert_contains "$IOUT" "✓ pre-commit" "…status: the hooks ✓"
+  assert_contains "$IOUT" "✗ merge-driver" "…the driver ✗"
+  teardown
+}
+
+test_driver_only_flag_rules() {
+  echo "test: #20 --merge-driver-only needs the git tier; --json is status's; --json and a ledger set exit 2"
+  setup
+  inst install --merge-driver-only
+  assert_eq "2" "$IRC" "--merge-driver-only without --git: exit 2"
+  assert_contains "$IOUT" "add --git" "…naming the fix"
+  inst install --claude --merge-driver-only
+  assert_eq "2" "$IRC" "--merge-driver-only with --claude alone: exit 2"
+  inst install --git --json
+  assert_eq "2" "$IRC" "install --json: exit 2"
+  inst status --json --ledger
+  assert_eq "2" "$IRC" "status --json --ledger: exit 2"
+  inst print-merge-driver --git
+  assert_eq "2" "$IRC" "print-merge-driver takes no option: exit 2"
+  assert_true "nothing was written" test -z "$(real_hooks)$(git config --local --get-regexp '^merge\.doc-index\.' || true)"
+  # print-merge-driver needs no repository.
+  local out
+  out=$(cd "$SUITE_TMP" && PATH="$REAL_PATH" GIT_CEILING_DIRECTORIES="$SUITE_TMP" "$BASH_BIN" "$HOOKS_DIR/install.sh" print-merge-driver 2>&1) || out="FAILED: $out"
+  assert_contains "$out" "merge-doc-index.sh" "print-merge-driver outside a repository: the driver command"
+  assert_contains "$out" "%O %A %B" "…with git's placeholders"
+  teardown
+}
+
+test_driver_only_ignores_foreign_hooks_path() {
+  echo "test: #20 --merge-driver-only installs no hook, so a global core.hooksPath (which install --git refuses) does not stop it"
+  setup
+  local gcfg
+  gcfg=$(harness_mktemp gitconfig)
+  printf '[core]\n\thooksPath = %s/elsewhere\n' "$TEST_DIR" > "$gcfg"
+  IRC=0
+  IOUT=$(GIT_CONFIG_GLOBAL="$gcfg" PATH="$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/install.sh" install --git 2>&1) || IRC=$?
+  assert_eq "1" "$IRC" "install --git: refused (the global hooks path)"
+  IRC=0
+  IOUT=$(GIT_CONFIG_GLOBAL="$gcfg" PATH="$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/install.sh" install --git --merge-driver-only 2>&1) || IRC=$?
+  assert_eq "0" "$IRC" "install --git --merge-driver-only: exit 0"
+  assert_true "…the driver is registered" test -n "$(git config --local --get merge.doc-index.driver)"
+  assert_file_not_exists "$TEST_DIR/elsewhere/pre-commit" "…and no hook went to the global hooks path"
+  teardown
+}
+
+# The value of <jq-path> in $IOUT ("" when it is not JSON).
+json_at() {
+  jq -r "$1" <<<"$IOUT" 2>/dev/null || true
+}
+
+test_status_json_states() {
+  echo "test: #20 status --json: one JSON object, every component's state, exit 0; the human status is unchanged"
+  hooked_fixture
+  inst status --json
+  assert_eq "0" "$IRC" "status --json: exit 0"
+  assert_eq "true" "$(jq -cs 'length == 1 and (.[0] | type == "object")' <<<"$IOUT" 2>/dev/null)" "…one JSON object on stdout"
+  assert_eq "doc-superpowers-hooks-status/1" "$(json_at .schema)" "…its schema"
+  assert_eq "installed" "$(json_at '.tiers.git.hooks["pre-commit"].state')" "a hook of ours: installed"
+  assert_true "…with its install date" grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' <<<"$(json_at '.tiers.git.hooks["pre-commit"].installed')"
+  assert_eq "registered" "$(json_at .tiers.git.merge_driver.state)" "the driver: registered"
+  assert_contains "$(json_at .tiers.git.merge_driver.path)" "merge-doc-index.sh" "…with the script a merge runs"
+  assert_eq "configured" "$(json_at .tiers.git.gitattributes.state)" ".gitattributes: configured"
+  assert_eq "false" "$(json_at .tiers.git.hooks_path_foreign)" "the hooks path is this repository's"
+  assert_eq "active" "$(json_at '.tiers.claude.hooks["pre-commit-gate"].state')" "a Claude hook: active"
+  assert_eq "PreToolUse" "$(json_at '.tiers.claude.hooks["pre-commit-gate"].event')" "…with its event"
+  assert_eq "absent" "$(json_at '.tiers.ci.workflows["doc-freshness-pr"].state')" "a workflow not installed: absent"
+  assert_eq "null" "$(json_at '.tiers.ledger // .tiers["ledger-claude"] // null')" "no ledger set in the JSON"
+  inst status --git --json
+  assert_eq "git" "$(json_at '.tiers | keys | join(",")')" "status --git --json: the git tier alone"
+  inst status --git --merge-driver-only --json
+  assert_eq "null" "$(json_at '.tiers.git.hooks')" "--merge-driver-only: no hooks object"
+  assert_eq "true" "$(json_at '.tiers.git.merge_driver_only')" "…and says so"
+  # Every merge-driver state.
+  local drv
+  drv=$(git config --local --get merge.doc-index.driver)
+  git config --local merge.doc-index.driver "$TEST_DIR/src/util.js %O %A %B"
+  inst status --git --json
+  assert_eq "pinned" "$(json_at .tiers.git.merge_driver.state)" "a pre-3.0 registration whose script exists: pinned"
+  assert_eq "$TEST_DIR/src/util.js" "$(json_at .tiers.git.merge_driver.path)" "…with the pinned path"
+  git config --local merge.doc-index.driver "$TEST_DIR/gone.sh %O %A %B"
+  inst status --git --json
+  assert_eq "script-missing" "$(json_at .tiers.git.merge_driver.state)" "a pinned script that is gone: script-missing"
+  git config --local merge.doc-index.driver "my-own-driver %O %A %B --flag"
+  inst status --git --json
+  assert_eq "other" "$(json_at .tiers.git.merge_driver.state)" "another install's driver: other"
+  inst status --git
+  assert_contains "$IOUT" "registered by another install" "…the human line is the one it always was"
+  git config --local --unset merge.doc-index.driver
+  inst status --git --json
+  assert_eq "absent" "$(json_at .tiers.git.merge_driver.state)" "no registration: absent"
+  git config --local merge.doc-index.driver "$drv"
+  # Hook states: not executable, foreign, absent; .gitattributes overridden.
+  chmod 644 .git/hooks/post-merge
+  printf '#!/usr/bin/env python3\nprint("mine")\n' > .git/hooks/post-checkout
+  rm -f .git/hooks/pre-push
+  printf 'docs/.doc-index.json merge=union\n' > .gitattributes.tmp
+  cat .gitattributes .gitattributes.tmp > .gitattributes.new
+  mv .gitattributes.new .gitattributes
+  rm -f .gitattributes.tmp
+  inst status --git --json
+  assert_eq "not-executable" "$(json_at '.tiers.git.hooks["post-merge"].state')" "a hook of ours without +x: not-executable"
+  assert_eq "foreign" "$(json_at '.tiers.git.hooks["post-checkout"].state')" "a hook of the user's without our block: foreign"
+  assert_eq "absent" "$(json_at '.tiers.git.hooks["pre-push"].state')" "no hook: absent"
+  assert_eq "other" "$(json_at .tiers.git.gitattributes.state)" "another merge attribute wins: other"
+  inst status --git
+  assert_contains "$IOUT" "not executable" "the human status: unchanged wording (not executable)"
+  assert_contains "$(grep post-checkout <<<"$IOUT")" "✗" "…a foreign hook still reads not installed"
+  assert_not_contains "$IOUT" "{" "…and no JSON"
+  # Claude states.
+  rm -f .claude/hooks/doc-superpowers/session-summary.sh
+  inst status --claude --json
+  assert_eq "script-missing" "$(json_at '.tiers.claude.hooks["session-summary"].state')" "a registered hook without its script: script-missing"
+  echo "# edited" >> .claude/hooks/doc-superpowers/hook-lib.sh
+  inst status --claude --json
+  assert_eq "lib-outdated" "$(json_at '.tiers.claude.hooks["pre-commit-gate"].state')" "an edited hook-lib.sh: lib-outdated"
+  echo "{" > .claude/settings.local.json
+  inst status --claude --json
+  assert_eq "false" "$(json_at .tiers.claude.settings_readable)" "unreadable settings: settings_readable false"
+  assert_eq "absent" "$(json_at '.tiers.claude.hooks["pre-commit-gate"].state')" "…and no hook read as registered"
+  teardown
+}
+
+test_status_json_ci() {
+  echo "test: #20 status --json reports the CI tier's workflows, choices and vendored files"
+  setup
+  inst install --ci
+  inst uninstall --ci --workflows=doc-freshness-schedule
+  inst status --ci --json
+  assert_eq "0" "$IRC" "status --ci --json: exit 0"
+  assert_eq "installed" "$(json_at '.tiers.ci.workflows["doc-freshness-pr"].state')" "an installed workflow: installed"
+  assert_eq "uninstalled-intentional" "$(json_at '.tiers.ci.workflows["doc-freshness-schedule"].state')" "one removed on purpose: uninstalled-intentional"
+  assert_eq "main" "$(json_at .tiers.ci.choices.base_branch)" "the recorded choices"
+  assert_eq "false" "$(json_at .tiers.ci.choices.ci_strict)" "…strict as a boolean"
+  assert_eq ".github/scripts/doc-tools.sh" "$(json_at .tiers.ci.doc_tools_vendored)" "the vendored doc-tools.sh"
+  assert_true "the step-script helpers are counted" test "$(json_at '.tiers.ci.helpers["doc-superpowers-steps"]')" -gt 0
+  rm -f .github/workflows/doc-freshness-pr.yml
+  inst status --ci --json
+  assert_eq "recorded-missing" "$(json_at '.tiers.ci.workflows["doc-freshness-pr"].state')" "recorded installed, file gone: recorded-missing"
+  teardown
+}
+
+# --- Git hooks: the time budget, the scoped check, the advice (#24) ---
+
+# The shared settings region of <file>, markers included.
+settings_region() {
+  awk '/^# >>> shared hook settings/ { on = 1 } on { print } /^# <<< shared hook settings/ { exit }' "$1"
+}
+
+test_hook_settings_region_shared() {
+  echo "test: #24 every git hook and hook-lib.sh carry the one shared settings region (_hook_conf, _advice, _hook_budget, _bounded, _why), byte for byte"
+  local ref f
+  ref=$(settings_region "$HOOKS_DIR/claude/hook-lib.sh")
+  assert_contains "$ref" "_bounded() {" "hook-lib.sh: the region holds _bounded"
+  assert_contains "$ref" "_advice() {" "…and _advice"
+  assert_contains "$ref" "# <<< shared hook settings" "…and is closed"
+  for f in pre-commit post-merge post-checkout prepare-commit-msg pre-push; do
+    assert_eq "$ref" "$(settings_region "$HOOKS_DIR/git/$f")" "git/$f: the same region"
+  done
+  assert_eq "1" "$(grep -c '^_bounded() {' "$HOOKS_DIR/claude/hook-lib.sh")" "hook-lib.sh defines _bounded once (in the region)"
+}
+
+# A doc-tools.sh that sleeps <seconds>, then runs the real one.
+sleepy_doc_tools() {
+  printf '#!/bin/sh\nsleep %s\nexec "%s" "$@"\n' "$2" "$DOC_TOOLS" > "$1/doc-tools.sh"
+  chmod +x "$1/doc-tools.sh"
+}
+
+test_git_pre_commit_budget() {
+  echo "test: #24 git pre-commit gives up past its budget (env or hooks.conf), says so, and commits; STRICT blocks; 0 is no budget"
+  hooked_fixture
+  local stub start elapsed head
+  stage_stale_change
+  stub=$(harness_mktemp_d slow-git-pre-commit)
+  slow_doc_tools "$stub"
+  start=$SECONDS
+  run_hooked DOC_TOOLS="$stub/doc-tools.sh" DOC_SUPERPOWERS_HOOK_BUDGET=1 -- git commit -qm budget
+  elapsed=$((SECONDS - start))
+  assert_eq "0" "$RUN_RC" "over budget: the commit goes on"
+  assert_true "…promptly (took ${elapsed}s, the check sleeps 30 s)" test "$elapsed" -lt 15
+  assert_contains "$RUN_ERR" "pre-commit: check skipped (budget)" "…and says the check was skipped"
+  assert_contains "$RUN_ERR" "longer than 1s" "…naming the budget"
+  assert_contains "$RUN_ERR" "check-freshness" "…and the command to run by hand"
+  assert_contains "$RUN_ERR" "DOC_SUPERPOWERS_HOOK_BUDGET" "…and the knob"
+  assert_eq "1" "$(line_count "$RUN_ERR")" "…in one line"
+  assert_child_gone "$stub" "git pre-commit"
+
+  stage_stale_change again
+  head=$(git rev-parse HEAD)
+  stub=$(harness_mktemp_d slow-git-strict)
+  slow_doc_tools "$stub"
+  run_hooked DOC_TOOLS="$stub/doc-tools.sh" DOC_SUPERPOWERS_HOOK_BUDGET=1 DOC_SUPERPOWERS_STRICT=1 -- git commit -qm strict
+  assert_eq "1" "$RUN_RC" "STRICT, over budget: the commit is blocked (a check that cannot finish, as one that cannot run)"
+  assert_eq "$head" "$(git rev-parse HEAD)" "…nothing committed"
+  assert_contains "$RUN_ERR" "budget" "…the reason names the budget"
+  assert_contains "$RUN_ERR" "DOC_SUPERPOWERS_SKIP=1" "…and the bypass"
+  assert_child_gone "$stub" "git pre-commit STRICT"
+
+  run_hooked DOC_TOOLS="$stub/doc-tools.sh" DOC_SUPERPOWERS_HOOK_BUDGET=1 DOC_SUPERPOWERS_QUIET=1 -- git commit -qm quiet
+  assert_eq "0" "$RUN_RC" "QUIET, over budget: committed"
+  assert_eq "" "$RUN_ERR" "…silently"
+
+  # The budget from hooks.conf, the env overriding it.
+  stage_stale_change conf
+  mkdir -p .claude/doc-superpowers
+  printf '# team settings\nhook_budget = 1\n' > .claude/doc-superpowers/hooks.conf
+  stub=$(harness_mktemp_d slow-git-conf)
+  sleepy_doc_tools "$stub" 3
+  run_hooked DOC_TOOLS="$stub/doc-tools.sh" -- git commit -qm conf
+  assert_contains "$RUN_ERR" "check skipped (budget): the doc freshness check took longer than 1s" "hooks.conf's hook_budget is the budget"
+  stage_stale_change env
+  run_hooked DOC_TOOLS="$stub/doc-tools.sh" DOC_SUPERPOWERS_HOOK_BUDGET=0 -- git commit -qm unbounded
+  assert_eq "0" "$RUN_RC" "DOC_SUPERPOWERS_HOOK_BUDGET=0: committed"
+  assert_not_contains "$RUN_ERR" "budget" "…0 is no budget, over hooks.conf's: the slow check finishes"
+  assert_contains "$RUN_OUT$RUN_ERR" "stale doc(s) in this commit" "…and reports"
+  rm -f .claude/doc-superpowers/hooks.conf
+  teardown
+}
+
+test_git_post_merge_and_checkout_budget() {
+  echo "test: #24 post-merge and post-checkout give up past their budget and say so; never block"
+  hooked_fixture
+  local stub
+  git checkout -qb feature
+  echo "feature" > src/index.js
+  git add src/index.js
+  fixture_commit "feature code"
+  git checkout -q main
+  stub=$(harness_mktemp_d slow-merge)
+  slow_doc_tools "$stub"
+  run_hooked DOC_TOOLS="$stub/doc-tools.sh" DOC_SUPERPOWERS_HOOK_BUDGET=1 -- git merge -q --no-ff feature -m "merge"
+  assert_eq "0" "$RUN_RC" "post-merge over budget: the merge exits 0"
+  assert_contains "$RUN_ERR" "post-merge: check skipped (budget)" "…and says the check was skipped"
+  assert_child_gone "$stub" "post-merge"
+  stub=$(harness_mktemp_d slow-checkout)
+  slow_doc_tools "$stub"
+  git checkout -q -b other HEAD~1 2>/dev/null || git checkout -q -b other
+  run_hooked DOC_TOOLS="$stub/doc-tools.sh" DOC_SUPERPOWERS_HOOK_BUDGET=1 -- git checkout -q main
+  assert_eq "0" "$RUN_RC" "post-checkout over budget: the checkout exits 0"
+  assert_contains "$RUN_ERR" "post-checkout: check skipped (budget)" "…and says the check was skipped"
+  assert_child_gone "$stub" "post-checkout"
+  teardown
+}
+
+test_git_prepare_commit_msg_budget() {
+  echo "test: #24 prepare-commit-msg past its budget adds one comment line saying so"
+  hooked_fixture
+  local stub msg
+  stage_stale_change
+  stub=$(harness_mktemp_d slow-pcm)
+  slow_doc_tools "$stub"
+  msg=$(harness_mktemp msg)
+  : > "$msg"
+  run_hooked DOC_TOOLS="$stub/doc-tools.sh" DOC_SUPERPOWERS_HOOK_BUDGET=1 -- "$BASH_BIN" .git/hooks/prepare-commit-msg "$msg"
+  assert_eq "0" "$RUN_RC" "exit 0"
+  assert_contains "$(cat "$msg")" "# doc-superpowers: cannot check doc freshness: check skipped (budget)" "one comment line names the budget"
+  assert_eq "1" "$(line_count "$(cat "$msg")")" "…one line"
+  assert_child_gone "$stub" "prepare-commit-msg"
+  teardown
+}
+
+test_git_pre_commit_scopes_added_entries() {
+  echo "test: #24 the entries a commit's index adds are judged scoped to their own code refs; unscoped only when one has none"
+  hooked_fixture
+  local log wrap
+  log=$(harness_mktemp argv)
+  wrap=$(argv_logging_doc_tools "$log")
+  echo "# New" > docs/new.md
+  echo "docs/new.md:src/util.js:guide" | "$DOC_TOOLS" add-entry >/dev/null 2>&1
+  git add docs/.doc-index.json docs/new.md
+  run_hooked DOC_TOOLS="$wrap" -- git commit -qm added
+  assert_eq "0" "$RUN_RC" "committed"
+  assert_eq "2" "$(grep -c '^check-freshness' "$log")" "two checks: the staged paths, then the added entry"
+  assert_eq "0" "$(grep -cx 'check-freshness --tree [0-9a-f]*' "$log")" "…neither unscoped"
+  # An added entry without a code ref: no filter keeps it, so unscoped.
+  : > "$log"
+  echo "# Bare" > docs/bare.md
+  echo "docs/bare.md:src/util.js:guide" | "$DOC_TOOLS" add-entry >/dev/null 2>&1
+  jq '.docs["docs/bare.md"].code_refs = []' docs/.doc-index.json > docs/idx.tmp && mv docs/idx.tmp docs/.doc-index.json
+  git add docs/.doc-index.json
+  run_hooked DOC_TOOLS="$wrap" DOC_SUPERPOWERS_STRICT=1 -- git commit -qm bare
+  assert_eq "1" "$(grep -cx 'check-freshness --tree [0-9a-f]*' "$log")" "an added entry with no code ref: the unscoped check"
+  assert_contains "$RUN_OUT$RUN_ERR" "docs/bare.md" "…which judges it (not in this commit)"
+  teardown
+}
+
+test_advice_setting_git_hooks() {
+  echo "test: #24 DOC_SUPERPOWERS_ADVICE / hooks.conf advice replaces or drops the git hooks' '/doc-superpowers …' advice"
+  hooked_fixture
+  stage_stale_change
+  run_pre_commit
+  assert_contains "$RUN_OUT" "Run '/doc-superpowers update' to refresh" "default: the skill's command"
+  run_pre_commit DOC_SUPERPOWERS_ADVICE=off
+  assert_not_contains "$RUN_OUT" "/doc-superpowers" "off: no skill command"
+  assert_contains "$RUN_OUT" "DOC_SUPERPOWERS_SKIP=1 bypasses." "…the bypass stays"
+  assert_contains "$RUN_OUT" "stale doc(s) in this commit" "…and the report"
+  run_pre_commit DOC_SUPERPOWERS_ADVICE='make docs-{action}'
+  assert_contains "$RUN_OUT" "Run 'make docs-update' to refresh" "a template: {action} replaced"
+  run_pre_commit DOC_SUPERPOWERS_ADVICE=off DOC_SUPERPOWERS_STRICT=1
+  assert_contains "$RUN_OUT" "Commit blocked (DOC_SUPERPOWERS_STRICT=1). DOC_SUPERPOWERS_SKIP=1 bypasses." "off, STRICT: the block line without the command"
+  mkdir -p .claude/doc-superpowers
+  printf 'advice = ./tools/docs.sh {action}\n' > .claude/doc-superpowers/hooks.conf
+  run_pre_commit
+  assert_contains "$RUN_OUT" "Run './tools/docs.sh update' to refresh" "hooks.conf's advice key"
+  run_pre_commit DOC_SUPERPOWERS_ADVICE=on
+  assert_contains "$RUN_OUT" "Run '/doc-superpowers update'" "the env overrides hooks.conf (on: the default)"
+  # prepare-commit-msg names the command in its comment block.
+  local msg
+  msg=$(harness_mktemp msg)
+  : > "$msg"
+  run_hooked -- "$BASH_BIN" .git/hooks/prepare-commit-msg "$msg"
+  assert_contains "$(cat "$msg")" "Update them with ./tools/docs.sh update, then re-verify" "prepare-commit-msg: the template"
+  : > "$msg"
+  run_hooked DOC_SUPERPOWERS_ADVICE=off -- "$BASH_BIN" .git/hooks/prepare-commit-msg "$msg"
+  assert_contains "$(cat "$msg")" "Update them, then re-verify" "prepare-commit-msg off: no command"
+  rm -f .claude/doc-superpowers/hooks.conf
+  # post-merge / post-checkout: the audit line.
+  git commit -qm stale >/dev/null 2>&1 || DOC_SUPERPOWERS_SKIP=1 git commit -qm stale
+  local prev
+  prev=$(git rev-parse HEAD~1)
+  run_hooked -- "$BASH_BIN" .git/hooks/post-checkout "$prev" "$(git rev-parse HEAD)" 1
+  assert_contains "$RUN_OUT" "Run '/doc-superpowers audit' to review." "post-checkout default"
+  run_hooked DOC_SUPERPOWERS_ADVICE='x {action}' -- "$BASH_BIN" .git/hooks/post-checkout "$prev" "$(git rev-parse HEAD)" 1
+  assert_contains "$RUN_OUT" "Run 'x audit' to review." "post-checkout template"
+  run_hooked DOC_SUPERPOWERS_ADVICE=off -- "$BASH_BIN" .git/hooks/post-checkout "$prev" "$(git rev-parse HEAD)" 1
+  assert_not_contains "$RUN_OUT" "to review" "post-checkout off: the line is dropped"
+  assert_contains "$RUN_OUT" "stale doc(s) on this branch" "…the report stays"
+  git update-ref ORIG_HEAD "$prev"
+  run_hooked DOC_SUPERPOWERS_ADVICE=off -- "$BASH_BIN" .git/hooks/post-merge 0
+  assert_not_contains "$RUN_OUT" "to review" "post-merge off: the line is dropped"
+  assert_contains "$RUN_OUT" "became stale after merge" "…the report stays"
+  run_hooked DOC_SUPERPOWERS_ADVICE='x {action}' -- "$BASH_BIN" .git/hooks/post-merge 0
+  assert_contains "$RUN_OUT" "Run 'x audit' to review." "post-merge template"
+  # pre-push: the release reminder.
+  git tag v0.0.1 HEAD~1
+  DOC_SUPERPOWERS_SKIP=1 commit_n 6
+  run_pre_push "$(push_line main)" DOC_SUPERPOWERS_ADVICE=off
+  assert_contains "$RUN_OUT" "commits since v0.0.1" "pre-push off: the count stays"
+  assert_not_contains "$RUN_OUT" "Consider running" "…the suggestion is dropped"
+  run_pre_push "$(push_line main)" DOC_SUPERPOWERS_ADVICE='x {action}'
+  assert_contains "$RUN_OUT" "Consider running 'x release'" "pre-push template"
+  teardown
+}
+
+test_advice_setting_claude_hooks() {
+  echo "test: #24 the advice setting reaches the Claude hooks (gate, sync, summary)"
+  hooked_fixture
+  stage_stale_change
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m x')"
+  assert_contains "$(out_field .hookSpecificOutput.additionalContext)" "Consider running '/doc-superpowers update'" "gate default"
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m x')" DOC_SUPERPOWERS_ADVICE=off
+  assert_not_contains "$(out_field .hookSpecificOutput.additionalContext)" "/doc-superpowers" "gate off: no skill command"
+  assert_contains "$(out_field .hookSpecificOutput.additionalContext)" "docs/architecture.md" "…the report stays"
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m x')" DOC_SUPERPOWERS_ADVICE='/team-docs {action}'
+  assert_contains "$(out_field .hookSpecificOutput.additionalContext)" "Consider running '/team-docs update'" "gate template"
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m x')" DOC_SUPERPOWERS_ADVICE=off DOC_SUPERPOWERS_STRICT=1
+  assert_eq "2" "$RUN_RC" "gate STRICT: blocked"
+  assert_not_contains "$RUN_ERR" "/doc-superpowers" "gate STRICT off: no skill command"
+  assert_contains "$RUN_ERR" "update the docs and re-verify them" "…the instruction stays"
+  # The defer note names the git tier's install command.
+  rm -f .git/hooks/pre-commit
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -am x')" DOC_SUPERPOWERS_ADVICE='/team-docs {action}'
+  assert_contains "$(out_field .hookSpecificOutput.additionalContext)" "(install the git tier: /team-docs hooks install --git)" "gate defer note: the template"
+  run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -am x')" DOC_SUPERPOWERS_ADVICE=off
+  assert_not_contains "$(out_field .hookSpecificOutput.additionalContext)" "install the git tier" "gate defer note off: dropped"
+  DOC_SUPERPOWERS_SKIP=1 git commit -qm code
+  mkdir -p .claude/doc-superpowers
+  printf 'advice = off\n' > .claude/doc-superpowers/hooks.conf
+  run_claude_hook PostToolUse post-commit-sync "$(posttool_json 'git commit -m code')"
+  assert_not_contains "$(out_field .hookSpecificOutput.additionalContext)" "/doc-superpowers" "post-commit-sync, hooks.conf off: no skill command"
+  assert_contains "$(out_field .hookSpecificOutput.additionalContext)" "Refresh stale documentation, then re-verify" "…the instruction stays"
+  printf 'advice = /team-docs {action}\n' > .claude/doc-superpowers/hooks.conf
+  run_claude_hook PostToolUse post-commit-sync "$(posttool_json 'git commit -m code')"
+  assert_contains "$(out_field .hookSpecificOutput.additionalContext)" "Run '/team-docs update' to refresh" "post-commit-sync: hooks.conf's template"
+  echo "again" > src/index.js
+  run_claude_hook Stop session-summary "$STOP_JSON"
+  assert_contains "$(out_field .systemMessage)" "Update them (/team-docs update)" "session-summary: the template"
+  run_claude_hook Stop session-summary "$STOP_JSON" DOC_SUPERPOWERS_ADVICE=off
+  assert_contains "$(out_field .systemMessage)" "Update them and re-verify" "session-summary off"
+  assert_not_contains "$(out_field .systemMessage)" "/doc-superpowers" "…no skill command"
+  rm -f .claude/doc-superpowers/hooks.conf
+  teardown
+}
+
+echo ""
+echo "=== install --git --merge-driver-only, status --json (#20); hook budgets and advice (#24) ==="
+test_driver_only_install_uninstall
+test_driver_only_flag_rules
+test_driver_only_ignores_foreign_hooks_path
+test_status_json_states
+test_status_json_ci
+test_hook_settings_region_shared
+test_git_pre_commit_budget
+test_git_post_merge_and_checkout_budget
+test_git_prepare_commit_msg_budget
+test_git_pre_commit_scopes_added_entries
+test_advice_setting_git_hooks
+test_advice_setting_claude_hooks
+
 test_claude_hook_contract_held() {
   echo "test: every Claude hook run above held the contract (exit 0, or 2 only under STRICT; stdout one JSON object or nothing)"
   assert_true "Claude hook runs checked: $CLAUDE_HOOK_RUNS (the suite makes over 50)" test "$CLAUDE_HOOK_RUNS" -ge 50
