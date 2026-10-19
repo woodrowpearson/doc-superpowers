@@ -1103,6 +1103,11 @@ const original = output.system;
 const transform = hooks["experimental.chat.system.transform"];
 try {
   await transform({ sessionID: "s1", model: {} }, output);
+  // The always-on footprint (#30): what the transform ADDED, measured on the
+  // emitted text in characters (UTF-16 code units), not on any source file.
+  r.emitted = Array.isArray(output.system)
+    ? output.system.slice(1).reduce((n, s) => n + String(s).length, 0)
+    : -1;
   r.isArray = Array.isArray(output.system);
   r.sameArray = output.system === original;
   // Another plugin that pushes, running after this one.
@@ -1133,6 +1138,19 @@ JS
       "opencode ($_mode): the array keeps its entries and gains the mappings once"
   done
   assert_json_field "$_js" '.skillsPaths | tojson' "[\"$_oc_real\"]" "opencode: the config hook registers the plugin root as a skills path"
+  # Always-on footprint ceiling (#30). The plugin adds its text to EVERY
+  # OpenCode system prompt, so its size is a per-request cost on every
+  # consumer, and nothing else bounds it: references/tool-mappings.md grew
+  # from 3,112 to 10,143 chars in two days (2026-09-27/28). Measured on what
+  # the transform emits (above), never on the source file — the hook-output
+  # bug of v3.0.1 was missed exactly by measuring a source. 10,590 chars at
+  # 3.4.0; the ceiling, 12,000, leaves ~13% for a real addition and fails
+  # another jump like that one. Raise it only on purpose, saying why in the
+  # commit.
+  _oc_ceiling=12000
+  _oc_emitted=$(jq -r '.emitted' <<<"$_js")
+  assert_true "opencode: the transform emits text (${_oc_emitted} chars)" test "$_oc_emitted" -gt 0
+  assert_true "opencode: always-on footprint ${_oc_emitted} chars <= ceiling ${_oc_ceiling} (#30)" test "$_oc_emitted" -le "$_oc_ceiling"
 fi
 
 # --- Cursor: manifest and install path ---
@@ -1605,5 +1623,116 @@ if [ -f "$_sc_ref" ]; then
     done
   fi
 fi
+
+# =============================================================================
+echo "--- SKILL.md: frontmatter and the paths it names (#31) ---"
+# Claude Code loads every skill's name and description at startup, always on:
+# the description is capped (1,536 chars, the limit the skill loader
+# documents) and must be one plain or quoted line — a block scalar (| or >)
+# is easy to grow without noticing and parsed differently by some clients.
+_skill="$REPO_ROOT/skills/doc-superpowers/SKILL.md"
+# The frontmatter: the lines between a first-line '---' and the next '---'.
+_fm=$(awk 'NR == 1 { if ($0 != "---") exit; next } /^---[[:space:]]*$/ { exit } { print }' "$_skill")
+assert_true "SKILL.md opens with a YAML frontmatter block" test -n "$_fm"
+assert_eq "description name" "$(awk -F: '/^[A-Za-z_-]+:/ { print $1 }' <<<"$_fm" | sort | tr '\n' ' ' | sed 's/ $//')" \
+  "…holding exactly name and description"
+assert_eq "doc-superpowers" "$(awk '/^name:/ { sub(/^name:[[:space:]]*/, ""); print }' <<<"$_fm")" "…name: doc-superpowers"
+_desc_line=$(grep -E '^description:' <<<"$_fm" || true)
+assert_true "…description is not a block scalar (| or >)" \
+  test -z "$(grep -E '^description:[[:space:]]*[|>]' <<<"$_desc_line" || true)"
+assert_eq "" "$(grep -E '^[[:space:]]' <<<"$_fm" || true)" "…and no key continues onto an indented line (each value is one line)"
+# Its length in characters (it holds em dashes, so not bytes), parsed as YAML
+# by ruby's psych or PyYAML, whichever is here; without either, the one line
+# read with its quotes removed and counted in bytes (an over-count: never a
+# false pass).
+_desc_chars=""
+if command -v ruby >/dev/null 2>&1 && ruby -ryaml -e 'exit 0' >/dev/null 2>&1; then
+  _desc_chars=$(printf '%s\n' "$_fm" | ruby -ryaml -e 'd = YAML.safe_load($stdin.read)["description"]; print(d.is_a?(String) ? d.length : 0)')
+elif python3 -c 'import yaml' >/dev/null 2>&1; then
+  _desc_chars=$(printf '%s\n' "$_fm" | python3 -c 'import sys, yaml; d = yaml.safe_load(sys.stdin.read()).get("description"); print(len(d) if isinstance(d, str) else 0)')
+else
+  _desc_chars=$(sed -e 's/^description:[[:space:]]*//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\\1/" <<<"$_desc_line" | tr -d '\n' | wc -c | tr -d ' ')
+fi
+assert_true "…description is a non-empty string (${_desc_chars:-?} chars)" test "${_desc_chars:-0}" -gt 0
+assert_true "…description is at most 1,536 chars (${_desc_chars})" test "$_desc_chars" -le 1536
+
+# Every references/… and scripts/… path SKILL.md names exists in the plugin
+# (a path in another project — .github/scripts/… — or a glob/placeholder,
+# scripts/*validate_docs*, is not one of the plugin's).
+_missing=""
+_npaths=0
+for _p in $(grep -oE '(^|[^A-Za-z0-9_./-])(references|scripts)/[A-Za-z0-9_./*<>{}-]*' "$_skill" \
+  | sed -E 's/^[^rs]//; s/[.,;:]+$//' | sort -u); do
+  case "$_p" in *[*\<\>{}]*) continue ;; esac
+  _npaths=$((_npaths + 1))
+  [ -e "$REPO_ROOT/$_p" ] || _missing="$_missing $_p"
+done
+assert_true "SKILL.md names references/ and scripts/ paths ($_npaths checked)" test "$_npaths" -ge 10
+assert_eq "" "$_missing" "…and every one exists"
+
+# =============================================================================
+echo "--- leak scan: tracked files ship to every install (#29) ---"
+# scripts/leak-scan.sh, first against a fixture holding one leak of each class
+# and each allowlisted form (the leaks are assembled here, so this file holds
+# none), then over this checkout.
+_LEAK="$REPO_ROOT/scripts/leak-scan.sh"
+_lk=$(harness_mktemp_d leak-fixture)
+(
+  cd "$_lk" || exit 1
+  git init -q
+  mkdir -p docs/plans docs/issues docs/archive docs/superpowers/plans src
+  _U="/Us""ers" _H="/ho""me" _V="/Vol""umes"
+  _g="gh""p_$(printf 'a%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36)"
+  _ak="AK""IAABCDEFGHIJKLMNOP"
+  _sk="sk-""ant-api03-$(printf 'x%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24)"
+  _pem="-----BEGIN RSA PRI""VATE KEY-----"
+  _em="jane.doe""@corp.io"
+  {
+    echo "a home path: $_U/jdoe/proj/x"
+    echo "a linux home: $_H/jdoe/src"
+    echo "a volume: $_V/scratch/wt"
+    echo "an email: $_em"
+    echo "a token: $_g"
+    echo "an aws key: $_ak"
+    echo "a key: $_sk"
+    echo "$_pem"
+  } > src/leaks.md
+  {
+    echo "placeholders: $_U/me/proj $_H/runner/work $_H/linuxbrew/.linuxbrew/bin/bash"
+    echo "a nested segment: \$HOME$_H/notes and \${dir}$_U/x"
+    echo "examples: bob""@example.com, noreply""@anthropic.com, test""@test.com, x""@foo.invalid, git""@github.com:o/r.git"
+    echo "skipped on purpose: $_U/jdoe/kept  # leak-scan:allow (a recorded path)"
+  } > src/fine.md
+  echo "recorded: $_U/jdoe/wt and $_V/scratch" > docs/plans/2026-01-01-plan.md
+  echo "recorded: $_U/jdoe/wt" > docs/issues/2026-01-02-issue.md
+  echo "recorded: $_U/jdoe/wt" > docs/archive/old.md
+  echo "recorded: $_U/jdoe/wt" > docs/superpowers/plans/p.md
+  echo "a record with a secret: $_g" > docs/plans/2026-01-03-secret.md
+  echo "undated: $_U/jdoe/wt" > docs/plans/undated.md
+  echo "untracked: $_g" > untracked.md
+  git add src docs
+) || true
+_rc=0
+_out=$("$BASH_BIN" "$_LEAK" "$_lk" 2>&1) || _rc=$?
+assert_eq "1" "$_rc" "leak-scan: a fixture with leaks exits 1"
+for _want in "src/leaks.md:1: home-path: /Us""ers/jdoe" "src/leaks.md:2: home-path: /ho""me/jdoe" \
+  "src/leaks.md:3: volume: /Vol""umes/scratch" "src/leaks.md:4: email: jane.doe""@corp.io" \
+  "src/leaks.md:5: token: gh""p_" "src/leaks.md:6: token: AK""IA" "src/leaks.md:7: token: sk-""ant-" \
+  "src/leaks.md:8: token: -----BEGIN RSA PRI""VATE KEY-----" \
+  "docs/plans/2026-01-03-secret.md:1: token: gh""p_" "docs/plans/undated.md:1: home-path: /Us""ers/jdoe"; do
+  assert_contains "$_out" "$_want" "leak-scan: reports $_want"
+done
+assert_eq "10" "$(grep -cE ': (home-path|volume|email|token): ' <<<"$_out")" \
+  "leak-scan: …and nothing else: placeholders, nested segments, example emails, the marker, dated/archived records (paths only) and untracked files pass"
+assert_not_contains "$_out" "fine.md" "leak-scan: src/fine.md has no finding"
+assert_not_contains "$_out" "untracked.md" "leak-scan: an untracked file is not scanned"
+_rc=0
+_out=$("$BASH_BIN" "$_LEAK" "$SUITE_TMP" 2>&1) || _rc=$?
+assert_eq "2" "$_rc" "leak-scan: not a git work tree: exit 2"
+_rc=0
+_out=$("$BASH_BIN" "$_LEAK" "$REPO_ROOT" 2>&1) || _rc=$?
+_msg="leak-scan: this checkout's tracked files have no finding"
+[ "$_rc" = 0 ] || _msg="$_msg — $(tail -n 12 <<<"$_out" | tr '\n' ' ')"
+assert_eq "0" "$_rc" "$_msg"
 
 print_summary

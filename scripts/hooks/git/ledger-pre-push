@@ -34,6 +34,7 @@ elif [ -f docs/ledger/config.json ]; then
   else
     rm -f "$DOC_SP_LG_IN"
     DOC_SP_LG_RC=0
+    # shellcheck disable=SC2034  # the remote ref and any extra field are read past, not used
     while read -r DOC_SP_LG_LR DOC_SP_LG_LO DOC_SP_LG_RR DOC_SP_LG_RO DOC_SP_LG_X <&9 || [ -n "${DOC_SP_LG_LR:-}" ]; do
       case "$DOC_SP_LG_LO" in
         *[!0]*) ;;

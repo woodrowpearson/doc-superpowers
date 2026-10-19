@@ -23,7 +23,7 @@ doc-superpowers/
 │   └── workflows/
 │       ├── doc-freshness-pr.yml       # The 2 default shell-based workflows, rendered with the recorded choices
 │       ├── doc-freshness-schedule.yml
-│       └── tests.yml     # This repo only: every test suite (CLAUDE.md → Conventions lists them) under bash 5.x and /bin/bash 3.2, check-version, and the self-install drift check
+│       └── tests.yml     # This repo only: every test suite (CLAUDE.md → Conventions lists them) under bash 5.x and /bin/bash 3.2, the self-install drift check, check-version, the release tag on main — each step a scripts/check-ci.sh call
 ├── .opencode/            # OpenCode plugin + installation guide
 │   ├── INSTALL.md
 │   └── plugins/
@@ -51,6 +51,10 @@ doc-superpowers/
 │   ├── adapters/         # Reference ledger adapters (doc-superpowers:<name>): ledger-pr-gh.sh (pr list), ledger-items-gh.sh (GitHub issues as items), both via gh
 │   ├── test-ledger.sh    # Test suite for the `ledger` verb group: every verb, the inert contract, keys racing a local bare remote, in-flight fixtures, fake gh, hook modes, a 300-item smoke
 │   ├── bench-ledger.sh   # The ledger's full performance check on a synthetic corpus (bench-ledger.sh 3000); not in CI
+│   ├── check-ci.sh       # Maintainer: runs locally exactly what tests.yml runs (tests.yml calls it per check); --fast, --bash PATH, <check>
+│   ├── check-self-install.sh # Maintainer: the self-installed CI tier and the .gitattributes block match what the installer writes
+│   ├── install-maintainer-hooks.sh # Maintainer: install | uninstall | status of the opt-in pre-push hook (check-ci.sh --fast)
+│   ├── leak-scan.sh      # Machine paths, emails and token-shaped strings in tracked files (records allowlisted for paths)
 │   ├── test-doc-tools.sh # Test suite for doc-tools.sh
 │   ├── test-doc-pr-release.sh # Test suite for the per-PR release-notes fragment producer workflow + helpers
 │   ├── test-spec-status-model.sh # Test suite for the canonical Spec Status Model + call sites
@@ -172,7 +176,9 @@ doc-superpowers/
 | `README.md` | User-facing documentation: installation, usage examples, feature descriptions | After feature additions, new actions, changed behavior |
 | `CLAUDE.md` | Quick-reference for AI sessions: directory structure, commands, conventions | After structural changes, new conventions |
 | `RELEASE-NOTES.md` | Version history with features, fixes, lineage | Every release |
-| `.github/workflows/tests.yml` | This repo's CI: every suite (CLAUDE.md → Conventions) under bash 5.x and `/bin/bash` 3.2, `check-version`, and the step that fails when a self-installed file drifts from its template | Adding a suite or a CI requirement |
+| `.github/workflows/tests.yml` | This repo's CI: every suite (CLAUDE.md → Conventions) under bash 5.x and `/bin/bash` 3.2, the step that fails when a self-installed file drifts from its template, `check-version`, and on pushes to `main` `check-version --tag` — each step `scripts/check-ci.sh <check>`, no check body of its own | Adding a suite or a CI requirement (in `check-ci.sh` first) |
+| `scripts/check-ci.sh` | The one local command for what CI runs: the toolchain, the seven suites under each bash it detects (or `--bash PATH`), `self-install` (`scripts/check-self-install.sh`), `check-version`, `tag` (`--warn` in a full local run), `plugin-validate` (`claude plugin validate .`, local only); the three `DOC_SP_REQUIRE_*` flags default to 1; `--fast` is the quick part, run by the opt-in pre-push hook `scripts/install-maintainer-hooks.sh` installs | Adding a CI check |
+| `scripts/leak-scan.sh` | Leak scan over `git ls-files` (home-dir and `/Volumes/` paths, emails, tokens), with the records allowlist and the `leak-scan:allow` line marker; run by `test-spec-status-model.sh` | Changing a leak class or the allowlist |
 | `.github/workflows/doc-freshness-*.yml`, `.github/scripts/`, `.claude/doc-superpowers/installed.json` | This repo's own installed CI tier — installer output | Never by hand: re-run `bash scripts/hooks/install.sh install --ci` after changing a CI template, `doc-tools.sh` or a CI helper, and commit the result (tests.yml fails on drift) |
 | `.gitattributes` | The git tier's one committed piece: the `docs/.doc-index.json` merge-driver block — installer output | Never by hand: `bash scripts/hooks/install.sh install --git` writes it (tests.yml's drift step fails without it, and names `install --git`) |
 | `evals/evals.json`, `evals/fixtures/` | Skill evals with machine-checkable fields; the scenario of each eval that needs one built by `fixtures/<scenario>/setup.sh` (15 of 23) | Adding or changing an eval (`test-spec-status-model.sh` validates both) |
@@ -212,7 +218,7 @@ doc-superpowers/
 | Release-notes fragment parsing | `scripts/doc-tools.sh fragments` — one grammar (`_FRAG_AWK`) for `list` (JSON: hash state, sections, no-notes, the problem that keeps a fragment from being consumed), `validate <path>` (exit 0/1/2), and `merge <start|ROOT> <end> [--paths-out <file>] [--remove]` (markdown sections for insertion under a `## vX.Y.Z` header, from every fragment present at `<end>`; lossless or skipped with a warning; refuses when an earlier release's commit has not reached `<end>`) |
 | Hook test suite | `scripts/test-hooks.sh` |
 | Hooks action routing | `skills/doc-superpowers/SKILL.md` Section 1 "`hooks`" (the non-negotiables) → `references/hooks.md` (the procedure) |
-| This repo's own installed tiers, and the check that they match their templates | `.github/workflows/` + `.github/scripts/` + `.claude/doc-superpowers/installed.json` + `.gitattributes`; `.github/workflows/tests.yml` step "Self-installed CI tier matches its templates" |
+| This repo's own installed tiers, and the check that they match their templates | `.github/workflows/` + `.github/scripts/` + `.claude/doc-superpowers/installed.json` + `.gitattributes`; `scripts/check-self-install.sh`, run by `.github/workflows/tests.yml` step "Self-installed CI tier matches its templates" (`check-ci.sh self-install`) |
 | Spec lifecycle routing | `skills/doc-superpowers/SKILL.md` "Spec Lifecycle Routing" diagram + Section 1 "Spec Lifecycle Actions" (quick routing, the `:amends` role, `--plan`) → `references/spec-lifecycle-actions.md` (the procedures) |
 | Spec lifecycle integration guide | `references/spec-lifecycle-protocol.md` — wrapper author contracts, integration patterns, the claims **Direction protocol** |
 | Spec status transitions | `references/spec-lifecycle-actions.md` **Spec Status Model** section — canonical ladder, exemptions, and roles |
@@ -360,7 +366,7 @@ User invokes /doc-superpowers release [--from=<ref>]
     → Sync CLAUDE.md and README.md per references/doc-spec.md rules
       → Catches drift accumulated across the released commits
     → Commit the release: entry + fragment deletions + manifests + CLAUDE.md/README.md in ONE commit
-    → Offer git tag on the release commit — prompt "Create git tag vX.Y.Z?"
+    → Offer git tag on the release commit — prompt "Create git tag vX.Y.Z?"; push it, then `doc-tools.sh check-version --tag` (exit 1 while vX.Y.Z is not a tag on origin)
       → If older untagged versions exist, offer to backfill
       → The release commit must reach main (merge the release branch, or cherry-pick it); until then the next release refuses
 ```

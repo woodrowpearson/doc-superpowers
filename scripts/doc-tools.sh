@@ -638,7 +638,7 @@ _worktree_tree() {
 # passes, not a lookup per doc.
 _last_commits() {
   local in="$1" out="$2" starts="${3:-}" ids="$_SCRATCH/lc.ids" sets="$_SCRATCH/lc.sets" res="$_SCRATCH/lc.res"
-  local set c start refs=()
+  local set c start ref_list=()
   : > "$out"
   [ -s "$in" ] || return 0
   : > "$sets"
@@ -662,9 +662,9 @@ _last_commits() {
     set="${set#*$'\035'}"
     [ -n "$start" ] || start="$_HEAD"
     if [ -n "$set" ] && [ -n "$start" ] && [ "$_SHALLOW" != true ]; then
-      IFS=$'\x1f' read -r -a refs <<<"$set"
-      c=$(git --literal-pathspecs rev-list -1 "$start" -- "${refs[@]}") \
-        || _die "git rev-list failed for code refs: ${refs[*]}"
+      IFS=$'\x1f' read -r -a ref_list <<<"$set"
+      c=$(git --literal-pathspecs rev-list -1 "$start" -- "${ref_list[@]}") \
+        || _die "git rev-list failed for code refs: ${ref_list[*]}"
     fi
     printf '%s\n' "$c"
   done < "$sets" > "$res"
@@ -1541,14 +1541,14 @@ _on_exit() {
       emitted=1
       erc="$_CL_EMITTED_RC"
     else
-      marker=cl-emitted
+      marker="cl-emitted"
     fi
   elif [ "$_LG_ACTIVE" = 1 ]; then
     if [ "$_LG_EMITTED" = 1 ]; then
       emitted=1
       erc="$_LG_EMITTED_RC"
     else
-      marker=lg-emitted
+      marker="lg-emitted"
     fi
   fi
   if [ -n "$marker" ] && [ -n "$_SCRATCH" ] && [ -e "$_SCRATCH/$marker" ]; then
@@ -2243,12 +2243,17 @@ bump-version|cmd_bump_version|deps|
   All or nothing: every manifest found is read first, and one that is not
   valid JSON writes nothing (exit 1); so does finding none (run it from the
   repo root). Each file keeps its mode.
-check-version|cmd_check_version|deps|
-  -
+check-version|cmd_check_version|deps|tag warn remote=
+  [--tag [--remote <name>] [--warn]]
   Verify that every manifest carries RELEASE-NOTES.md's version: its first
   release heading, a line "## vMAJOR.MINOR.PATCH …" outside code fences (a
   pre-release suffix is refused, not skipped). Exits 1 on a mismatch, a
   manifest that is not valid JSON, or no manifest found.
+  --tag also requires the tag v<version> on the remote (--remote, default
+  origin), read with git ls-remote: a local tag is not enough, since a
+  consumer's AI workflows clone the tag of the version they installed. A
+  missing tag, or a remote that cannot be read, exits 1; with --warn it is
+  a WARN line and the exit status is the manifests' alone.
 implementation-status|cmd_implementation_status|deps|
   <path>...
   Report ADR/SPEC realization state (read-only): each doc's
@@ -3352,6 +3357,18 @@ _parse_args() {
   done
 }
 
+# Never called. _parse_args sets every _OPT_<name> / _OPTV_<name> by name
+# (printf -v, eval), which shellcheck cannot follow: the ones a handler reads
+# without a default are assigned here so the shellcheck gate
+# (test-doc-tools.sh) still flags any other unassigned variable (SC2154).
+# A new option read as plain "$_OPT_x" goes in this list.
+_shellcheck_opt_names() {
+  _OPT_by="" _OPT_check="" _OPT_chunk="" _OPT_deep="" _OPT_final="" _OPT_range=""
+  _OPT_refs="" _OPT_reverify="" _OPT_scheduled="" _OPT_staged="" _OPT_superseded_by=""
+  _OPT_tag="" _OPT_tree="" _OPT_warn=""
+  _OPTV_claims=() _OPTV_code_refs=() _OPTV_code_refs_from=() _OPTV_config=() _OPTV_helper=() _OPTV_holds=()
+}
+
 # Repository verbs run only inside a git work tree, at its top level. Checked
 # ONCE, up front: per-call `2>/dev/null || true` used to turn "not a
 # repository" into "no history", and check-freshness reported every doc
@@ -3554,10 +3571,10 @@ _entry_from_line() {
 # both stored as code_refs and handed to git. Returns 1, having said why (and
 # <where>, e.g. "line 3") on stderr, for a ref that cannot be a key.
 _refs_from_csv() {
-  local csv="$1" where="${2:-}" r raw=()
+  local csv="$1" where="${2:-}" r raw_refs=()
   _E_REFS=()
-  IFS=, read -r -a raw <<<"$csv"
-  for r in ${raw[@]+"${raw[@]}"}; do
+  IFS=, read -r -a raw_refs <<<"$csv"
+  for r in ${raw_refs[@]+"${raw_refs[@]}"}; do
     _trim "$r"
     r="$_TRIMMED"
     case "$r" in
@@ -4128,16 +4145,16 @@ cmd_remove_entry() {
   # That is a SKIP, not a failure (exit 0): the entry being absent is the end
   # state asked for — the one documented exception to "a key not in the
   # index exits 1".
-  local removed=() i=0
+  local removed_keys=() i=0
   while [ "$i" -lt "${#targets[@]}" ]; do
     if [ "${_INDEX_CLASSES:$i:1}" = c ]; then
-      removed+=("${targets[$i]}")
+      removed_keys+=("${targets[$i]}")
     else
       echo "SKIP: '${targets[$i]}' not found in index." >&2
     fi
     i=$((i + 1))
   done
-  _report_keys "Removed" "" "${removed[@]+"${removed[@]}"}"
+  _report_keys "Removed" "" "${removed_keys[@]+"${removed_keys[@]}"}"
 }
 
 # move-entry --stdin: read "<old>\t<new>" lines from stdin into _MV_OLD /
@@ -5711,6 +5728,11 @@ cmd_check_version() {
   if [ $# -gt 0 ]; then
     _usage_error check-version "takes no arguments (got '$1')"
   fi
+  local tag="$_OPT_tag" warn_only="$_OPT_warn" remote="${_OPT_remote:-origin}"
+  if [ "$tag" != 1 ]; then
+    [ "$warn_only" != 1 ] || _usage_error check-version "--warn qualifies --tag (give both)"
+    ! _opt_seen remote || _usage_error check-version "--remote qualifies --tag (give both)"
+  fi
   local canonical
   canonical=$(_release_notes_version RELEASE-NOTES.md) || exit 1
 
@@ -5740,13 +5762,49 @@ cmd_check_version() {
 
   [ "$checked" -gt 0 ] || _no_manifest_error check-version
 
+  local tag_fail=0
+  [ "$tag" != 1 ] || _check_version_tag "v$canonical" "$remote" "$warn_only" || tag_fail=1
+
   if [[ "$mismatched" -gt 0 ]]; then
     echo "FAIL: $mismatched/$checked file(s) have mismatched versions"
     echo "  Run: doc-tools.sh bump-version $canonical"
     exit 1
   fi
+  if [ "$tag_fail" = 1 ]; then
+    echo "FAIL: tag v$canonical is not verified on $remote"
+    exit 1
+  fi
 
   echo "PASS: all $checked file(s) match v$canonical"
+}
+
+# _check_version_tag <tag> <remote> <warn>: whether refs/tags/<tag> is on
+# <remote> (git ls-remote: what a clone of it sees). Missing, or a remote that
+# cannot be read: a MISSING / ERROR line and return 1, or with <warn> 1 a WARN
+# line and return 0.
+_check_version_tag() {
+  local t="$1" remote="$2" warn_only="$3" ls_out sha
+  if ! ls_out=$(git ls-remote --tags "$remote" "refs/tags/$t" 2>/dev/null </dev/null); then
+    if [ "$warn_only" = 1 ]; then
+      echo "  WARN:     cannot read the tags of $remote (git ls-remote failed), so tag $t is unverified"
+      return 0
+    fi
+    echo "  ERROR:    cannot read the tags of $remote (git ls-remote failed), so tag $t is unverified"
+    return 1
+  fi
+  sha=$(awk -v r="refs/tags/$t" '$2 == r { print $1; exit }' <<<"$ls_out")
+  if [ -n "$sha" ]; then
+    echo "  ok:       tag $t on $remote ($sha)"
+    return 0
+  fi
+  if [ "$warn_only" = 1 ]; then
+    echo "  WARN:     $t is not a tag on $remote"
+  else
+    echo "  MISSING:  $t is not a tag on $remote"
+  fi
+  echo "            A consumer's AI workflows clone the tag of the version they installed."
+  echo "            Tag the release commit and push it: git tag $t <release commit> && git push $remote $t"
+  [ "$warn_only" = 1 ]
 }
 
 # --- Fragments: RELEASE-NOTES.next/PR-<N>.md ----------------------------------
@@ -5942,9 +6000,9 @@ _frag_n() {
 # _frag_stored_hash <file>: set _FRAG_STORED to the hash on line 2 ("" when
 # line 2 is not a hash marker). A trailing CR and blanks are ignored.
 _frag_stored_hash() {
-  local l1="" l2="" re="$_FRAG_HASH_RE"
+  local l2="" re="$_FRAG_HASH_RE"
   _FRAG_STORED=""
-  { IFS= read -r l1 || true; IFS= read -r l2 || true; } < "$1"
+  { IFS= read -r _ || true; IFS= read -r l2 || true; } < "$1"
   l2="${l2%$'\r'}"
   while :; do
     case "$l2" in
@@ -6816,8 +6874,11 @@ cmd_tools_uninstall() {
       p="$SCRIPT_DIR/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md"
       if [ -f "$f" ] && [ ! -L "$f" ] && [ -f "$p" ] && cmp -s "$p" "$f"; then
         _tools_no_link "$f"
-        local others
-        others=$(cd RELEASE-NOTES.next && ls -A | grep -vxF README.md) || others=""
+        local others="" e
+        for e in RELEASE-NOTES.next/* RELEASE-NOTES.next/.[!.]* RELEASE-NOTES.next/..?*; do
+          [ -e "$e" ] || [ -L "$e" ] || continue
+          [ "$e" = "$f" ] || { others=1; break; }
+        done
         if [ -z "$others" ]; then
           rm -f "$f" || _die "cannot remove $f"
           rmdir RELEASE-NOTES.next 2>/dev/null || true
