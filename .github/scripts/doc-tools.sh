@@ -2132,8 +2132,8 @@ move-entry|cmd_move_entry|repo|stdin
   pair per line (blank lines skipped, a trailing CR removed), taken as one
   simultaneous rename, so a path one pair vacates may be another's target.
   Every pair is checked first; one bad pair writes nothing (exit 1).
-set-code-refs|cmd_set_code_refs|repo|refs=
-  <doc_path> --refs <ref>[,<ref>...]
+set-code-refs|cmd_set_code_refs|repo|refs= stdin null
+  <doc_path> --refs <ref>[,<ref>...] | --stdin [--null] < batch
   Replace an indexed doc's code_refs in place (--refs '' leaves none); the
   same refs (compared as paths) write nothing. Not a baseline reset: the
   entry keeps its position and every other field (last_verified,
@@ -2150,8 +2150,16 @@ set-code-refs|cmd_set_code_refs|repo|refs=
   ancestor of HEAD — so commits_behind may over-count but is never a
   masked 0.
   Refs are parsed like a mapping line's; their order is kept.
-set-doc-type|cmd_set_doc_type|repo|
-  <doc_path> <doc_type>
+  --stdin sets a batch in one index write, each entry exactly as the
+  single form sets it: one "<doc_path><TAB><ref>[,<ref>...]" line per doc
+  (blank lines skipped, a trailing CR removed; an empty refs field leaves
+  none), or with --null NUL-separated records for paths holding ',':
+  "<doc_path>\0<ref>\0...<ref>\0\0" (each field taken whole, an empty field
+  ends the record; "<doc_path>\0\0" leaves none). All or nothing: every
+  line is checked first, and one bad line (malformed, an unindexed doc, a
+  doc listed twice with different refs) writes nothing (exit 1).
+set-doc-type|cmd_set_doc_type|repo|stdin
+  <doc_path> <doc_type> | --stdin < <doc_path><TAB><doc_type> lines
   Change an indexed doc's doc_type in place: the entry keeps its key
   position and every other field (last_verified, code_oids, status, …);
   the same type writes nothing. Not a baseline reset. doc_type decides
@@ -2162,7 +2170,27 @@ set-doc-type|cmd_set_doc_type|repo|
   adr, plan, issue, audit or design-spec — or one this index already
   uses (a project's own vocabulary); anything else (a typo) exits 1,
   writing nothing. Use it, not remove-entry + add-entry, which would drop
-  the entry's baseline, deprecation and links.
+  the entry's baseline, deprecation and links. --stdin retypes a batch in
+  one index write: one "<doc_path><TAB><doc_type>" line per doc (blank
+  lines skipped, a trailing CR removed). All or nothing, like move-entry
+  --stdin: one bad line (malformed, an unindexed doc, an unknown type, a
+  doc listed twice with different types) writes nothing (exit 1).
+upgrade-entries|cmd_upgrade_entries|repo|stdin all
+  <doc_path>... | --stdin < doc paths | --all
+  Fill code_oids on entries written before schema 3 (they have
+  code_commit but no code_oids, and keep the slow pre-v3 commit
+  comparison until then) WITHOUT a baseline reset: each ref's code_oids is
+  its object id in the tree of the entry's recorded code_commit, the
+  content it was re-baselined against. Nothing else is written:
+  last_verified, code_commit, code_refs, status and every other field stay.
+  --all upgrades every pre-v3 entry; --stdin reads doc paths, one per line.
+  Idempotent: an entry that has code_oids is left as it is. One locked
+  index write for the batch. An entry it cannot fill is reported and left
+  as it is: no code_commit (or not an object id), a code_commit this
+  repository does not hold (a shallow clone, a deleted branch), or a ref
+  missing at that commit (a typo, or a glob: refs are literal paths since
+  schema 3). The others are still applied, and the run exits 1; so does a
+  path not in the index.
 deprecate-entry|cmd_deprecate_entry|repo|superseded-by=
   [--superseded-by <doc_path>] <doc_path>...
   Mark entries deprecated, optionally naming the doc that supersedes them;
@@ -3072,7 +3100,10 @@ Exit status:
      outside the repo, a key not in the index, an unknown doc_type,
      build-index over a non-empty index without --force, …).
      update-index and deprecate-entry report and skip a path not in the
-     index, apply the rest, then exit 1. audit-merges exits 1 on any
+     index, apply the rest, then exit 1; upgrade-entries does the same for
+     an entry it cannot fill. The --stdin batches of move-entry,
+     set-code-refs and set-doc-type are all or nothing: one bad line writes
+     nothing, exit 1. audit-merges exits 1 on any
      finding (its JSON is on stdout) and on any failure (no JSON: a
      non-commit argument, the merge driver not beside doc-tools.sh, a jq
      failure). The one exception: remove-entry
@@ -4407,10 +4438,226 @@ cmd_move_entry() {
   fi
 }
 
+# --- Batch forms (GH #21, #23) -------------------------------------------------
+#
+# set-code-refs --stdin and set-doc-type --stdin apply a batch in ONE locked
+# index write, with exactly the single form's checks and result per entry.
+# Like move-entry --stdin they are all-or-nothing: every line is checked
+# first, every problem is reported, and one bad line writes nothing (exit 1).
+
+# _commits_present <in-file> <out-file>
+# One line of <out-file> per line of <in-file> (a stored code_commit): 1 when
+# it is a full object id naming a commit this repository holds, else 0. ONE
+# git cat-file --batch-check for all of them; a value that is not an object
+# id never reaches git (see _is_oid).
+_commits_present() {
+  local in="$1" out="$2"
+  : > "$out"
+  [ -s "$in" ] || return 0
+  awk '{ if ((length($0) == 40 || length($0) == 64) && $0 !~ /[^0123456789abcdef]/) print $0 "^{commit}"; else print "" }' "$in" \
+    | git cat-file --batch-check='%(objecttype)' \
+    | awk '{ print ($0 == "commit") ? "1" : "0" }' > "$out" || _die "git cat-file --batch-check failed"
+}
+
+# _read_tab_lines <verb> <second-field-name>
+# Read "<doc_path><TAB><value>" lines from stdin (blank lines skipped, a
+# trailing CR removed, each field trimmed) into _TL_KEYS (normalized doc
+# paths), _TL_VALS and _TL_LINES (line numbers). A line without exactly one
+# TAB, or whose doc path cannot be a key, is reported by number and counted in
+# _TL_BAD.
+_read_tab_lines() {
+  local verb="$1" what="$2" lineno=0 line
+  _TL_KEYS=() _TL_VALS=() _TL_LINES=() _TL_BAD=0
+  if [ -t 0 ]; then
+    echo "$verb: reading <doc_path><TAB><$what> lines from stdin; end with Ctrl-D." >&2
+  fi
+  # stdin → fd 3, fd 0 → /dev/null: no child process can eat the lines.
+  exec 3<&0 0</dev/null
+  while IFS= read -r line <&3 || [ -n "$line" ]; do
+    lineno=$((lineno + 1))
+    line="${line%$'\r'}"
+    _trim "$line"
+    [ -n "$_TRIMMED" ] || continue
+    case "$line" in
+      *$'\t'*$'\t'*)
+        _line_error "$lineno" "$line" "more than one TAB; expected <doc_path><TAB><$what>"
+        _TL_BAD=$((_TL_BAD + 1)); continue ;;
+      *$'\t'*) ;;
+      *)
+        _line_error "$lineno" "$line" "no TAB; expected <doc_path><TAB><$what>"
+        _TL_BAD=$((_TL_BAD + 1)); continue ;;
+    esac
+    case "$line" in
+      *$'\x1f'*)
+        _line_error "$lineno" "$line" "contains a 0x1f control character"
+        _TL_BAD=$((_TL_BAD + 1)); continue ;;
+    esac
+    _trim "${line%%$'\t'*}"
+    if ! _norm_path "$_TRIMMED"; then
+      echo "       (line $lineno)" >&2
+      _TL_BAD=$((_TL_BAD + 1)); continue
+    fi
+    _TL_KEYS+=("$_NORM")
+    _trim "${line#*$'\t'}"
+    _TL_VALS+=("$_TRIMMED")
+    _TL_LINES+=("$lineno")
+  done
+  exec 3<&-
+}
+
+# _batch_once <noun>
+# A key the batch lists twice: with the same value it is applied once (a
+# warning); with another value it is an error, counted in _BO_BAD. Reads and
+# rewrites _BO_KEYS / _BO_VALS (values hold no newline or 0x1f).
+_batch_once() {
+  local noun="$1" pairs=() dups r i=0
+  _BO_BAD=0
+  [ ${#_BO_KEYS[@]} -gt 1 ] || return 0
+  while [ "$i" -lt "${#_BO_KEYS[@]}" ]; do
+    pairs+=("${_BO_KEYS[$i]}"$'\x1f'"${_BO_VALS[$i]}")
+    i=$((i + 1))
+  done
+  dups=$(_repeated "${pairs[@]}")
+  if [ -n "$dups" ]; then
+    while IFS= read -r r; do
+      echo "WARNING: '${r%%$'\x1f'*}' is listed more than once with the same $noun; applying it once." >&2
+    done <<<"$dups"
+  fi
+  _first_occurrences "$dups" "${pairs[@]}"
+  _BO_KEYS=() _BO_VALS=()
+  for r in "${_FIRST[@]}"; do
+    _BO_KEYS+=("${r%%$'\x1f'*}")
+    _BO_VALS+=("${r#*$'\x1f'}")
+  done
+  dups=$(_repeated "${_BO_KEYS[@]}")
+  if [ -n "$dups" ]; then
+    while IFS= read -r r; do
+      echo "ERROR: '$r' is listed more than once with different ${noun}s." >&2
+      _BO_BAD=$((_BO_BAD + 1))
+    done <<<"$dups"
+  fi
+}
+
+# _batch_refused <problems>: with any, say the batch wrote nothing; exit 1.
+_batch_refused() {
+  [ "$1" -gt 0 ] || return 0
+  echo "ERROR: $1 $([ "$1" -eq 1 ] && echo problem || echo problems) in the batch; nothing written, $INDEX_FILE is unchanged." >&2
+  exit 1
+}
+
+# set-code-refs --stdin: "<doc_path><TAB><ref>[,<ref>...]" lines, or with
+# --null NUL-separated records "<doc_path>\0<ref>\0...<ref>\0\0" (each ref
+# taken whole: a path holding ',' or a TAB, and no trimming; an empty field
+# ends the record, so a doc with no refs is "<doc_path>\0\0"). Into _SCR_KEYS
+# and _SCR_SETS (\x1f-joined normalized refs); a bad line or record is
+# reported and counted in _SCR_BAD.
+_read_code_refs_batch() {
+  local joined r i=0 where
+  _SCR_KEYS=() _SCR_SETS=() _SCR_BAD=0
+  if _opt_seen null; then
+    _read_code_refs_records
+  else
+    _read_tab_lines set-code-refs "ref>[,<ref>...]"
+    _SCR_BAD="$_TL_BAD"
+    while [ "$i" -lt "${#_TL_KEYS[@]}" ]; do
+      if _refs_from_csv "${_TL_VALS[$i]}" "line ${_TL_LINES[$i]}"; then
+        joined=""
+        for r in ${_E_REFS[@]+"${_E_REFS[@]}"}; do
+          joined="${joined:+$joined$'\x1f'}$r"
+        done
+        _SCR_KEYS+=("${_TL_KEYS[$i]}")
+        _SCR_SETS+=("$joined")
+      else
+        _SCR_BAD=$((_SCR_BAD + 1))
+      fi
+      i=$((i + 1))
+    done
+  fi
+}
+
+_read_code_refs_records() {
+  local rec=0 field state=doc key="" joined="" bad=0 r
+  if [ -t 0 ]; then
+    echo "set-code-refs: reading NUL-separated <doc_path>\\0<ref>\\0...\\0\\0 records from stdin; end with Ctrl-D." >&2
+  fi
+  exec 3<&0 0</dev/null
+  while IFS= read -r -d '' field <&3 || [ -n "$field" ]; do
+    if [ "$state" = doc ]; then
+      [ -n "$field" ] || continue       # a stray empty field between records
+      rec=$((rec + 1))
+      state=refs key="" joined="" bad=0
+      case "$field" in
+        *$'\n'*|*$'\x1f'*)
+          echo "ERROR: record $rec: the doc path holds a newline or a 0x1f control character." >&2
+          bad=1 ;;
+        *)
+          if _norm_path "$field"; then key="$_NORM"; else echo "       (record $rec)" >&2; bad=1; fi ;;
+      esac
+      continue
+    fi
+    if [ -z "$field" ]; then            # the record's end
+      if [ "$bad" = 0 ]; then
+        _SCR_KEYS+=("$key")
+        _SCR_SETS+=("$joined")
+      else
+        _SCR_BAD=$((_SCR_BAD + 1))
+      fi
+      state=doc
+      continue
+    fi
+    [ "$bad" = 0 ] || continue
+    case "$field" in
+      *$'\n'*|*$'\x1f'*)
+        echo "ERROR: record $rec: a ref holds a newline or a 0x1f control character; a ref cannot." >&2
+        bad=1; continue ;;
+      .|./) r=. ;;
+      *)
+        if ! _norm_path "$field" "code ref"; then
+          echo "       (record $rec)" >&2
+          bad=1; continue
+        fi
+        r="$_NORM"
+        ;;
+    esac
+    joined="${joined:+$joined$'\x1f'}$r"
+  done
+  exec 3<&-
+  if [ "$state" = refs ]; then
+    echo "ERROR: record $rec is not terminated: end each record with an empty field (<doc_path>\\0<ref>\\0...\\0\\0)." >&2
+    _SCR_BAD=$((_SCR_BAD + 1))
+  fi
+}
+
 # set-code-refs (GH #18): the one supported way to change which code an
 # indexed doc covers. remove-entry + add-entry dropped the entry's metadata
 # and moved it to the end of .docs; update-index keeps code_refs as stored.
+# --stdin (GH #23) applies a batch through the same engine, in one write.
 cmd_set_code_refs() {
+  if _opt_seen stdin; then
+    [ $# -eq 0 ] || _usage_error set-code-refs "--stdin reads <doc_path><TAB><refs> lines from stdin and takes no doc path argument (got '$1')"
+    ! _opt_seen refs || _usage_error set-code-refs "--stdin takes each doc's refs from its line; --refs is for the single form"
+    if [ ! -f "$INDEX_FILE" ]; then
+      echo "ERROR: doc-index.json not found at $INDEX_FILE. Run build-index first." >&2
+      exit 1
+    fi
+    _read_code_refs_batch
+    _BO_KEYS=(${_SCR_KEYS[@]+"${_SCR_KEYS[@]}"})
+    _BO_VALS=(${_SCR_SETS[@]+"${_SCR_SETS[@]}"})
+    _batch_once "refs"
+    _SCR_BAD=$((_SCR_BAD + _BO_BAD))
+    _SCR_KEYS=(${_BO_KEYS[@]+"${_BO_KEYS[@]}"})
+    _SCR_SETS=(${_BO_VALS[@]+"${_BO_VALS[@]}"})
+    if [ ${#_SCR_KEYS[@]} -eq 0 ]; then
+      _batch_refused "$_SCR_BAD"
+      _report_keys "Set code_refs of" ""
+      return 0
+    fi
+    # The parsed lines are still checked against the index, so every
+    # problem of the batch is reported before it is refused.
+    _set_code_refs_apply 1 "$_SCR_BAD"
+    return 0
+  fi
+  ! _opt_seen null || _usage_error set-code-refs "--null reads records from stdin: it needs --stdin"
   [ $# -gt 0 ] || _usage_error set-code-refs "requires a doc path argument"
   [ $# -eq 1 ] || _usage_error set-code-refs "takes exactly one doc path (got $#)"
   _opt_seen refs || _usage_error set-code-refs "requires --refs <ref>[,<ref>...] (--refs '' for none)"
@@ -4430,96 +4677,180 @@ cmd_set_code_refs() {
   for r in ${_E_REFS[@]+"${_E_REFS[@]}"}; do
     joined="${joined:+$joined$'\x1f'}$r"
   done
+  _SCR_KEYS=("$doc_path")
+  _SCR_SETS=("$joined")
+  _set_code_refs_apply 0 0
+}
 
+# _set_code_refs_apply <batch 0|1> <problems found while parsing>
+# Set each _SCR_KEYS[i]'s code_refs to _SCR_SETS[i] (\x1f-joined, normalized,
+# in order) — the single form is a batch of one. Every git and jq step runs
+# once for the whole batch; only an entry whose refs mix two baselines costs
+# its own git merge-base.
+_set_code_refs_apply() {
+  local batch="$1" bad="$2" n=${#_SCR_KEYS[@]} i j
   _scratch_init
   _index_now
-  # The entry's current code_oids decide what is kept, so they are read under
-  # the lock the write then takes (re-entrant): nothing can change in between.
+  # The entries' current code_oids decide what is kept, so they are read
+  # under the lock the write then takes (re-entrant): nothing can change in
+  # between.
   _index_lock
-  local snap
+  local snap req="$_SCRATCH/set-code-refs.req" plan="$_SCRATCH/set-code-refs.plan"
   snap=$(_index_load) || exit 1
-  if ! jq -e --arg k "$doc_path" '.docs | has($k)' < "$snap" >/dev/null; then
-    echo "ERROR: '$doc_path' not found in index. Use add-entry to index it." >&2
-    exit 1
-  fi
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    _rec_put "${_SCR_KEYS[$i]}" "${_SCR_SETS[$i]}"
+    i=$((i + 1))
+  done > "$req"
 
-  # What the entry has: its refs compared as paths ("src" is a stored
+  # What each entry has: its refs compared as paths ("src" is a stored
   # "src/"; a legacy "" is no ref), whether it records code_oids (else it is
   # a pre-v3 entry), and its code_commit — then one flag per new ref: 1 if
   # the entry already had it. The same list is a no-op: nothing is written.
-  local plan="$_SCRATCH/set-code-refs.plan" verdict mode cc flag kept=() i=0
+  # NUL-framed: <indexed 0|1> <noop|write> <oids|legacy> <code_commit> <flags>.
   # shellcheck disable=SC2016  # jq program, not shell expansion
-  jq -r --arg k "$doc_path" --arg refs "$joined" "$_JQ_CODE_OIDS"'
+  jq -j -n -R --slurpfile idx "$snap" "$_JQ_REC_FIELDS$_JQ_CODE_OIDS"'
     def segs: split("/") | map(select(. != "" and . != "."));
     def normref: segs | if length == 0 then "." else join("/") end;
-    .docs[$k] as $e
-    | ($refs | fields_list) as $R
-    | [($e.code_refs // []) | if type == "array" then .[] else empty end
-       | select(type == "string" and . != "") | normref] as $S
-    | (reduce $S[] as $s ({}; .[$s] = true)) as $has
-    | (if ($R | map(normref)) == $S then "noop" else "write" end),
-      (if ($e.code_oids | type) == "object" then "oids" else "legacy" end),
-      ($e.code_commit // "" | tostring | split("\n") | join(" ")),
-      ($R[] | if $has[normref] then "1" else "0" end)' < "$snap" > "$plan" \
-    || _die "cannot read '$doc_path' from $INDEX_FILE"
-  {
-    IFS= read -r verdict
-    IFS= read -r mode
-    IFS= read -r cc
-    while IFS= read -r flag; do
-      [ "$flag" != 1 ] || kept+=("${_E_REFS[$i]}")
-      i=$((i + 1))
-    done
-  } < "$plan"
-  if [ "$verdict" = noop ]; then
-    _report_keys "Unchanged" "(code_refs already as given; nothing written)" "$doc_path"
+    def clean: tostring | split("\n") | join(" ") | split("\u0000") | join(" ");
+    $idx[0].docs as $d
+    | rec_fields as $f
+    | range(0; $f | length; 2) as $i
+    | $f[$i] as $k
+    | ($f[$i + 1] | fields_list) as $R
+    | if ($d | has($k)) | not then "0\u0000\u0000\u0000\u0000\u0000"
+      else $d[$k] as $e
+      | [($e.code_refs // []) | if type == "array" then .[] else empty end
+         | select(type == "string" and . != "") | normref] as $S
+      | (reduce $S[] as $s ({}; .[$s] = true)) as $has
+      | "1\u0000"
+        + (if ($R | map(normref)) == $S then "noop" else "write" end) + "\u0000"
+        + (if ($e.code_oids | type) == "object" then "oids" else "legacy" end) + "\u0000"
+        + ($e.code_commit // "" | clean) + "\u0000"
+        + ([$R[] | if $has[normref] then "1" else "0" end] | join("")) + "\u0000"
+      end' < "$req" > "$plan" || _die "cannot read the entries from $INDEX_FILE"
+
+  local has verdict mode cc flags noop=() w=() wmode=() wcc=() wflags=()
+  exec 4< "$plan"
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    IFS= read -r -d '' has <&4
+    IFS= read -r -d '' verdict <&4
+    IFS= read -r -d '' mode <&4
+    IFS= read -r -d '' cc <&4
+    IFS= read -r -d '' flags <&4
+    if [ "$has" != 1 ]; then
+      echo "ERROR: '${_SCR_KEYS[$i]}' not found in index. Use add-entry to index it." >&2
+      bad=$((bad + 1))
+    elif [ "$verdict" = noop ]; then
+      noop+=("${_SCR_KEYS[$i]}")
+    else
+      w+=("$i")
+      wmode+=("$mode")
+      wcc+=("$cc")
+      wflags+=("$flags")
+    fi
+    i=$((i + 1))
+  done
+  exec 4<&-
+  if [ "$bad" -gt 0 ]; then
+    [ "$batch" = 0 ] || _batch_refused "$bad"
+    exit 1
+  fi
+  if [ ${#noop[@]} -gt 0 ]; then
+    _report_keys "Unchanged" "(code_refs already as given; nothing written)" "${noop[@]}"
+  fi
+  local m=${#w[@]}
+  if [ "$m" -eq 0 ]; then
+    [ "$batch" = 0 ] || _report_keys "Set code_refs of" ""
     return 0
   fi
 
   # A new ref is recorded as add-entry records one: as of the doc's own last
   # commit (the working tree for a doc git has never committed). The entry is
-  # not re-baselined, so nothing else about it changes.
-  _FACT_KEYS=("$doc_path")
-  _FACT_REFSETS=("$joined")
+  # not re-baselined, so nothing else about it changes. One batch for all.
+  _FACT_KEYS=() _FACT_REFSETS=()
+  j=0
+  while [ "$j" -lt "$m" ]; do
+    _FACT_KEYS+=("${_SCR_KEYS[${w[$j]}]}")
+    _FACT_REFSETS+=("${_SCR_SETS[${w[$j]}]}")
+    j=$((j + 1))
+  done
   _entry_facts 1 doc
+
+  # Whether each stored code_commit names a commit here: one batch-check.
+  local ccs="$_SCRATCH/set-code-refs.ccs" cpres="$_SCRATCH/set-code-refs.ccs.ok" present=()
+  printf '%s\n' "${wcc[@]}" > "$ccs"
+  _commits_present "$ccs" "$cpres"
+  while IFS= read -r has; do present+=("$has"); done < "$cpres"
 
   # A ref the entry already had keeps its recorded content (it may have been
   # re-baselined): its code_oids id, or — for a pre-v3 entry, which records
   # content only as code_commit (the newest commit touching the refs when it
   # was re-baselined) — its object id in that commit's tree, looked up the way
-  # every ref is (_oid_lookup). Without a usable code_commit (absent, not an
-  # object id, not in this repository) it is recorded like a new ref.
-  local lrefs="" loids="" lfile="$_SCRATCH/set-code-refs.kept" lout="$_SCRATCH/set-code-refs.kept.oids" x
-  if [ "$mode" = legacy ] && [ ${#kept[@]} -gt 0 ] && _is_oid "$cc" \
-      && git cat-file -e "$cc^{commit}" 2>/dev/null; then
-    printf '%s\n' "${kept[@]}" > "$lfile"
-    _oid_lookup "$cc" "$lfile" "$lout" 1
-    for x in "${kept[@]}"; do
-      lrefs="${lrefs:+$lrefs$'\x1f'}$x"
+  # every ref is (_oid_lookup, one batch for every such entry). Without a
+  # usable code_commit (absent, not an object id, not in this repository) it
+  # is recorded like a new ref.
+  local lfile="$_SCRATCH/set-code-refs.kept" ltrees="$_SCRATCH/set-code-refs.kept.trees"
+  local lout="$_SCRATCH/set-code-refs.kept.oids" kept_refs=() kcount=() rlist=() x k
+  : > "$lfile"
+  : > "$ltrees"
+  j=0
+  while [ "$j" -lt "$m" ]; do
+    kept_refs=()
+    if [ "${wmode[$j]}" = legacy ] && [ "${present[$j]}" = 1 ]; then
+      IFS=$'\x1f' read -r -a rlist <<<"${_SCR_SETS[${w[$j]}]}"
+      k=0
+      while [ "$k" -lt "${#rlist[@]}" ]; do
+        [ "${wflags[$j]:$k:1}" != 1 ] || kept_refs+=("${rlist[$k]}")
+        k=$((k + 1))
+      done
+    fi
+    kcount+=("${#kept_refs[@]}")
+    for x in ${kept_refs[@]+"${kept_refs[@]}"}; do
+      printf '%s\n' "$x" >&5
+      printf '%s\n' "${wcc[$j]}" >&6
     done
-    while IFS= read -r x; do
-      loids="${loids:+$loids$'\x1f'}$x"
-    done < "$lout"
-  fi
+    j=$((j + 1))
+  done 5>> "$lfile" 6>> "$ltrees"
+  _oid_lookup - "$lfile" "$lout" 1 "$ltrees"
 
   # code_refs replaced in place (a `+=` merge keeps every field's position);
   # code_oids re-derived: a kept ref keeps its recorded content, and a new
   # one takes the object id just derived from the doc's last commit. The jq
-  # pass prints where the refs' contents now come from — keep (all recorded:
-  # refs only removed, re-spelled or reordered), fresh (all from the doc's
-  # last commit) or mixed — then the patch row.
-  local plan2="$_SCRATCH/set-code-refs.rows" patch="$_SCRATCH/set-code-refs.jsonl" ccmode row newcc=""
+  # pass prints, per entry, where the refs' contents now come from — keep
+  # (all recorded: refs only removed, re-spelled or reordered), fresh (all
+  # from the doc's last commit) or mixed — then its patch row.
+  local rows="$_SCRATCH/set-code-refs.rows" lrefs loids c
+  exec 7< "$lfile" 8< "$lout"
+  j=0
+  while [ "$j" -lt "$m" ]; do
+    lrefs="" loids=""
+    c=0
+    while [ "$c" -lt "${kcount[$j]}" ]; do
+      IFS= read -r x <&7
+      lrefs="${lrefs:+$lrefs$'\x1f'}$x"
+      IFS= read -r x <&8
+      loids="${loids:+$loids$'\x1f'}$x"
+      c=$((c + 1))
+    done
+    _rec_put "${_SCR_KEYS[${w[$j]}]}" "${_SCR_SETS[${w[$j]}]}" "${_FACT_OIDS[$j]}" "$lrefs" "$loids"
+    j=$((j + 1))
+  done > "$rows.req"
+  exec 7<&- 8<&-
   # shellcheck disable=SC2016  # jq program, not shell expansion
-  jq -r -n --arg k "$doc_path" --arg refs "$joined" --arg oids "${_FACT_OIDS[0]}" \
-    --arg lrefs "$lrefs" --arg loids "$loids" --slurpfile idx "$snap" \
-    "$_JQ_CODE_OIDS"'
+  jq -r -n -R --slurpfile idx "$snap" "$_JQ_REC_FIELDS$_JQ_CODE_OIDS"'
     def segs: split("/") | map(select(. != "" and . != "."));
     def normref: segs | if length == 0 then "." else join("/") end;
-    ($refs | fields_list) as $R
-    | ($oids | fields_list) as $O
-    | ($lrefs | fields_list) as $LR
-    | ($loids | fields_list) as $LO
-    | ($idx[0].docs[$k]) as $e
+    $idx[0].docs as $d
+    | rec_fields as $f
+    | range(0; $f | length; 5) as $i
+    | $f[$i] as $k
+    | ($f[$i + 1] | fields_list) as $R
+    | ($f[$i + 2] | fields_list) as $O
+    | ($f[$i + 3] | fields_list) as $LR
+    | ($f[$i + 4] | fields_list) as $LO
+    | $d[$k] as $e
     | (if ($e.code_oids | type) == "object"
        then reduce ($e.code_oids | to_entries[] | select((.value | type) == "string")) as $x
               ({}; if has($x.key | normref) then . else .[$x.key | normref] = $x.value end)
@@ -4530,8 +4861,7 @@ cmd_set_code_refs() {
        elif all($rows[]; .kept == null) then "fresh" else "mixed" end),
       ({key: $k, merge: {code_refs: $R,
           code_oids: ([$rows[] | {key: .key, value: (.kept // .fresh)}] | from_entries)}} | tojson)' \
-    > "$plan2" || _die "cannot assemble the update; $INDEX_FILE is unchanged."
-  { IFS= read -r ccmode; IFS= read -r row; } < "$plan2"
+    < "$rows.req" > "$rows" || _die "cannot assemble the update; $INDEX_FILE is unchanged."
 
   # code_commit is the commits_behind baseline, so it must be no newer than
   # the content of ANY ref, or a change in between goes uncounted: a masked
@@ -4551,28 +4881,78 @@ cmd_set_code_refs() {
   #          null; its merge-base with the derived one would count from a
   #          commit before changes it never saw — a masked 0.
   _head_init
-  case "$ccmode" in
-    keep) printf '%s\n' "$row" > "$patch" ;;
-    fresh|mixed)
-      if [ "$ccmode" = fresh ]; then
-        newcc="${_FACT_COMMIT[0]}"
-      elif [ -n "${_FACT_COMMIT[0]}" ] && [ -n "$_HEAD" ] && _is_oid "$cc" \
-          && git cat-file -e "$cc^{commit}" 2>/dev/null \
-          && git merge-base --is-ancestor "$cc" "$_HEAD" 2>/dev/null; then
-        newcc=$(git merge-base "$cc" "${_FACT_COMMIT[0]}" 2>/dev/null) || newcc=""
-        _is_oid "$newcc" || newcc=""
-      fi
-      # shellcheck disable=SC2016  # jq program, not shell expansion
-      jq -c --arg cc "$newcc" '.merge += {code_commit: (if $cc == "" then null else $cc end)}' \
-        <<<"$row" > "$patch" || _die "cannot assemble the update; $INDEX_FILE is unchanged."
-      ;;
-    *) _die "cannot assemble the update; $INDEX_FILE is unchanged." ;;
-  esac
+  local patch="$_SCRATCH/set-code-refs.jsonl" ccmode row newcc anc_yes=" " anc_no=" " mb_cache=$'\n'
+  exec 7< "$rows"
+  j=0
+  while [ "$j" -lt "$m" ]; do
+    IFS= read -r ccmode <&7
+    IFS= read -r row <&7
+    newcc=""
+    case "$ccmode" in
+      keep) ;;
+      fresh) newcc="${_FACT_COMMIT[$j]}" ;;
+      mixed)
+        cc="${wcc[$j]}"
+        if [ -n "${_FACT_COMMIT[$j]}" ] && [ -n "$_HEAD" ] && [ "${present[$j]}" = 1 ]; then
+          # Both answers are kept per commit (pair), so a batch whose entries
+          # share a few baselines costs a few git calls, not two per entry.
+          case "$anc_yes$anc_no" in
+            *" $cc "*) ;;
+            *)
+              if git merge-base --is-ancestor "$cc" "$_HEAD" 2>/dev/null; then
+                anc_yes="$anc_yes $cc "
+              else
+                anc_no="$anc_no $cc "
+              fi
+              ;;
+          esac
+          case "$anc_yes" in
+            *" $cc "*)
+              case "$mb_cache" in
+                *$'\n'"$cc ${_FACT_COMMIT[$j]} "*)
+                  newcc="${mb_cache#*$'\n'"$cc ${_FACT_COMMIT[$j]} "}"
+                  newcc="${newcc%%$'\n'*}"
+                  ;;
+                *)
+                  newcc=$(git merge-base "$cc" "${_FACT_COMMIT[$j]}" 2>/dev/null) || newcc=""
+                  _is_oid "$newcc" || newcc=""
+                  mb_cache="$mb_cache$cc ${_FACT_COMMIT[$j]} $newcc"$'\n'
+                  ;;
+              esac
+              ;;
+          esac
+        fi
+        ;;
+      *) _die "cannot assemble the update; $INDEX_FILE is unchanged." ;;
+    esac
+    _rec_put "$ccmode" "$row" "$newcc"
+    j=$((j + 1))
+  done > "$patch.req"
+  exec 7<&-
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  jq -c -n -R "$_JQ_REC_FIELDS"'rec_fields as $f
+    | range(0; $f | length; 3) as $i
+    | ($f[$i + 1] | fromjson)
+    | if $f[$i] == "keep" then .
+      else .merge += {code_commit: (if $f[$i + 2] == "" then null else $f[$i + 2] end)} end' \
+    < "$patch.req" > "$patch" || _die "cannot assemble the update; $INDEX_FILE is unchanged."
   _index_apply --report "$_INDEX_PATCH" --slurpfile patch "$patch"
-  case "${_INDEX_CLASSES:0:1}" in
-    c) _report_keys "Set code_refs of" "" "$doc_path" ;;
-    *) _report_keys "Unchanged" "(code_refs already as given)" "$doc_path" ;;
-  esac
+
+  local setk=() same=()
+  j=0
+  while [ "$j" -lt "$m" ]; do
+    case "${_INDEX_CLASSES:$j:1}" in
+      c) setk+=("${_SCR_KEYS[${w[$j]}]}") ;;
+      *) same+=("${_SCR_KEYS[${w[$j]}]}") ;;
+    esac
+    j=$((j + 1))
+  done
+  if [ ${#setk[@]} -gt 0 ] || [ "$batch" = 1 ]; then
+    _report_keys "Set code_refs of" "" "${setk[@]+"${setk[@]}"}"
+  fi
+  if [ ${#same[@]} -gt 0 ]; then
+    _report_keys "Unchanged" "(code_refs already as given)" "${same[@]}"
+  fi
 }
 
 # The documented doc_type vocabulary: one living type per doc-spec.md
@@ -4586,64 +4966,382 @@ _DOC_TYPES_RECORD="plan issue audit design-spec"
 # entry keeps its key position and every other field. doc_type decides
 # whether a doc is a record (see _JQ_FRESH_EXTRACT): the only other way to
 # change it was remove-entry + add-entry, which drops the entry's
-# baseline, deprecation and links.
+# baseline, deprecation and links. --stdin (GH #23): a batch of
+# "<doc_path><TAB><doc_type>" lines through the same checks, in one write.
 cmd_set_doc_type() {
-  [ $# -eq 2 ] || _usage_error set-doc-type "takes exactly <doc_path> <doc_type> (got $# arguments)"
+  if _opt_seen stdin; then
+    [ $# -eq 0 ] || _usage_error set-doc-type "--stdin reads <doc_path><TAB><doc_type> lines from stdin and takes no arguments (got '$1')"
+    if [ ! -f "$INDEX_FILE" ]; then
+      echo "ERROR: doc-index.json not found at $INDEX_FILE. Run build-index first." >&2
+      exit 1
+    fi
+    _read_tab_lines set-doc-type doc_type
+    _BO_KEYS=(${_TL_KEYS[@]+"${_TL_KEYS[@]}"})
+    _BO_VALS=(${_TL_VALS[@]+"${_TL_VALS[@]}"})
+    _batch_once "doc_type"
+    _SDT_KEYS=(${_BO_KEYS[@]+"${_BO_KEYS[@]}"})
+    _SDT_TYPES=(${_BO_VALS[@]+"${_BO_VALS[@]}"})
+    if [ ${#_SDT_KEYS[@]} -eq 0 ]; then
+      _batch_refused $((_TL_BAD + _BO_BAD))
+      _report_keys "Set doc_type of" ""
+      return 0
+    fi
+    # The parsed lines are still checked against the index, so every
+    # problem of the batch is reported before it is refused.
+    _set_doc_type_apply 1 $((_TL_BAD + _BO_BAD))
+    return 0
+  fi
+  [ $# -eq 2 ] || _usage_error set-doc-type "takes exactly <doc_path> <doc_type> (got $# arguments), or --stdin with <doc_path><TAB><doc_type> lines"
   if [ ! -f "$INDEX_FILE" ]; then
     echo "ERROR: doc-index.json not found at $INDEX_FILE. Run build-index first." >&2
     exit 1
   fi
-  local doc_path type="$2"
+  local doc_path
   doc_path=$(normalize_doc_path "$1") || exit 1
+  _SDT_KEYS=("$doc_path")
+  _SDT_TYPES=("$2")
+  _set_doc_type_apply 0 0
+}
 
+# _set_doc_type_apply <batch 0|1> <problems found while parsing>: retype
+# each _SDT_KEYS[i] to _SDT_TYPES[i].
+_set_doc_type_apply() {
+  local batch="$1" bad="$2" n=${#_SDT_KEYS[@]} i
   _scratch_init
   _index_now
-  # What the entry holds and which types this index uses are read under the
+  # What each entry holds and which types this index uses are read under the
   # lock the write then takes (re-entrant): nothing changes in between.
   _index_lock
-  local snap facts="$_SCRATCH/set-doc-type" has old known
+  local snap req="$_SCRATCH/set-doc-type.req" facts="$_SCRATCH/set-doc-type" has old known
   snap=$(_index_load) || exit 1
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    _rec_put "${_SDT_KEYS[$i]}" "${_SDT_TYPES[$i]}"
+    i=$((i + 1))
+  done > "$req"
+  # Per entry, NUL-framed: <indexed 0|1> <its doc_type> <type known 0|1>.
   # shellcheck disable=SC2016  # jq program, not shell expansion
-  jq -j --arg k "$doc_path" --arg t "$type" --arg vocab "$_DOC_TYPES_LIVING $_DOC_TYPES_RECORD" '
-    .docs as $d
+  jq -j -n -R --slurpfile idx "$snap" --arg vocab "$_DOC_TYPES_LIVING $_DOC_TYPES_RECORD" "$_JQ_REC_FIELDS"'
+    $idx[0].docs as $d
+    | ([$d[] | select(type == "object") | .doc_type | select(type == "string")]
+       + ($vocab | split(" ")) | map({key: ., value: true}) | from_entries) as $known
+    | rec_fields as $f
+    | range(0; $f | length; 2) as $i
+    | $f[$i] as $k | $f[$i + 1] as $t
     | (if ($d | has($k)) then "1" else "0" end) + "\u0000"
-      + (if ($d | has($k)) and ($d[$k] | type) == "object" then ($d[$k].doc_type // "" | tostring) else "" end) + "\u0000"
-      + (if $t != "" and (($vocab | split(" ") | any(.[]; . == $t))
-                          or any($d[]; type == "object" and .doc_type == $t))
-         then "1" else "0" end) + "\u0000"' < "$snap" > "$facts" || _die "cannot read $INDEX_FILE"
-  { IFS= read -r -d '' has; IFS= read -r -d '' old; IFS= read -r -d '' known; } < "$facts"
-  if [ "$has" != 1 ]; then
-    echo "ERROR: '$doc_path' not found in index. Use add-entry to index it." >&2
+      + (if ($d | has($k)) and ($d[$k] | type) == "object"
+         then ($d[$k].doc_type // "" | tostring | split("\u0000") | join(" ")) else "" end) + "\u0000"
+      + (if $t != "" and ($known[$t] // false) then "1" else "0" end) + "\u0000"' \
+    < "$req" > "$facts" || _die "cannot read $INDEX_FILE"
+
+  local olds=() change=() patch="$_SCRATCH/set-doc-type.jsonl"
+  exec 4< "$facts"
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    IFS= read -r -d '' has <&4
+    IFS= read -r -d '' old <&4
+    IFS= read -r -d '' known <&4
+    olds+=("$old")
+    if [ "$has" != 1 ]; then
+      echo "ERROR: '${_SDT_KEYS[$i]}' not found in index. Use add-entry to index it." >&2
+      bad=$((bad + 1))
+    elif [ "$known" != 1 ]; then
+      echo "ERROR: unknown doc_type '${_SDT_TYPES[$i]}' for '${_SDT_KEYS[$i]}'. Known: $_DOC_TYPES_LIVING (living docs), $_DOC_TYPES_RECORD (record docs, never reported stale) — or a type this index already uses. Nothing was written." >&2
+      bad=$((bad + 1))
+    elif [ "$old" = "${_SDT_TYPES[$i]}" ]; then
+      _report_keys "Unchanged" "(doc_type already '$old'; nothing written)" "${_SDT_KEYS[$i]}"
+    else
+      change+=("$i")
+    fi
+    i=$((i + 1))
+  done
+  exec 4<&-
+  if [ "$bad" -gt 0 ]; then
+    [ "$batch" = 0 ] || _batch_refused "$bad"
     exit 1
   fi
-  if [ "$known" != 1 ]; then
-    echo "ERROR: unknown doc_type '$type' for '$doc_path'. Known: $_DOC_TYPES_LIVING (living docs), $_DOC_TYPES_RECORD (record docs, never reported stale) — or a type this index already uses. Nothing was written." >&2
-    exit 1
-  fi
-  if [ "$old" = "$type" ]; then
-    _report_keys "Unchanged" "(doc_type already '$type'; nothing written)" "$doc_path"
+  if [ ${#change[@]} -eq 0 ]; then
+    [ "$batch" = 0 ] || _report_keys "Set doc_type of" ""
     return 0
   fi
 
-  local patch="$_SCRATCH/set-doc-type.jsonl"
-  jq -nc --arg k "$doc_path" --arg t "$type" '{key: $k, merge: {doc_type: $t}}' > "$patch" \
-    || _die "cannot assemble the update; $INDEX_FILE is unchanged."
+  for i in "${change[@]}"; do
+    _rec_put "${_SDT_KEYS[$i]}" "${_SDT_TYPES[$i]}"
+  done > "$patch.req"
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  jq -c -n -R "$_JQ_REC_FIELDS"'rec_fields as $f
+    | range(0; $f | length; 2) as $i | {key: $f[$i], merge: {doc_type: $f[$i + 1]}}' \
+    < "$patch.req" > "$patch" || _die "cannot assemble the update; $INDEX_FILE is unchanged."
   _index_apply --report "$_INDEX_PATCH" --slurpfile patch "$patch"
-  case "${_INDEX_CLASSES:0:1}" in
-    c) _report_keys "Set doc_type of" "(${old:-none} → $type)" "$doc_path" ;;
-    *) _report_keys "Unchanged" "(doc_type already '$type'; nothing written)" "$doc_path"; return 0 ;;
-  esac
-  # Whether it is a record changes what check-freshness says about it.
-  case "$doc_path" in
-    docs/archive/*) return 0 ;;
-  esac
-  local was=0 now=0
-  case " $_DOC_TYPES_RECORD " in *" $old "*) was=1 ;; esac
-  case " $_DOC_TYPES_RECORD " in *" $type "*) now=1 ;; esac
-  if [ "$was" = 0 ] && [ "$now" = 1 ]; then
-    echo "NOTE: '$doc_path' is now a record doc: check-freshness reports it current and never compares it with its code." >&2
-  elif [ "$was" = 1 ] && [ "$now" = 0 ]; then
-    echo "NOTE: '$doc_path' is now a living doc: check-freshness compares it with its code again (update-index it once you have read it against that code)." >&2
+
+  # Report per entry; whether it is a record changes what check-freshness
+  # says about it.
+  local j=0 key type was now setk=() setnotes=()
+  for i in "${change[@]}"; do
+    key="${_SDT_KEYS[$i]}" type="${_SDT_TYPES[$i]}" old="${olds[$i]}"
+    case "${_INDEX_CLASSES:$j:1}" in
+      c) ;;
+      *)
+        _report_keys "Unchanged" "(doc_type already '$type'; nothing written)" "$key"
+        j=$((j + 1))
+        continue
+        ;;
+    esac
+    j=$((j + 1))
+    if [ "$batch" = 0 ]; then
+      _report_keys "Set doc_type of" "(${old:-none} → $type)" "$key"
+    else
+      setk+=("$key (${old:-none} → $type)")
+    fi
+    case "$key" in
+      docs/archive/*) continue ;;
+    esac
+    was=0 now=0
+    case " $_DOC_TYPES_RECORD " in *" $old "*) was=1 ;; esac
+    case " $_DOC_TYPES_RECORD " in *" $type "*) now=1 ;; esac
+    if [ "$was" = 0 ] && [ "$now" = 1 ]; then
+      setnotes+=("NOTE: '$key' is now a record doc: check-freshness reports it current and never compares it with its code.")
+    elif [ "$was" = 1 ] && [ "$now" = 0 ]; then
+      setnotes+=("NOTE: '$key' is now a living doc: check-freshness compares it with its code again (update-index it once you have read it against that code).")
+    fi
+  done
+  [ "$batch" = 0 ] || _report_keys "Set doc_type of" "" "${setk[@]+"${setk[@]}"}"
+  for i in ${setnotes[@]+"${setnotes[@]}"}; do
+    printf '%s\n' "$i" >&2
+  done
+}
+
+# upgrade-entries (GH #21): fill code_oids on pre-v3 entries WITHOUT a
+# baseline reset. A pre-v3 entry records its baseline only as code_commit, the
+# newest commit touching its refs when it was re-baselined, so the content it
+# was read against is each ref's object in that commit's tree — exactly what
+# set-code-refs keeps for a pre-v3 entry's kept refs. Only code_oids is
+# written: last_verified, code_commit, code_refs and every other field stay.
+# One jq pass, one cat-file batch-check for the commits, one _oid_lookup for
+# every ref of every entry, one locked write.
+cmd_upgrade_entries() {
+  local all=0 bad=0
+  _TARGETS=()
+  if _opt_seen all; then
+    [ $# -eq 0 ] || _usage_error upgrade-entries "--all takes no doc path arguments (got '$1')"
+    ! _opt_seen stdin || _usage_error upgrade-entries "give --all or --stdin, not both"
+    all=1
+  elif _opt_seen stdin; then
+    [ $# -eq 0 ] || _usage_error upgrade-entries "--stdin reads doc paths from stdin and takes no path arguments (got '$1')"
+  else
+    [ $# -gt 0 ] || _usage_error upgrade-entries "requires <doc_path>..., --stdin or --all"
+  fi
+  if [ ! -f "$INDEX_FILE" ]; then
+    echo "ERROR: doc-index.json not found at $INDEX_FILE. Run build-index first." >&2
+    exit 1
+  fi
+  if [ "$all" = 0 ] && _opt_seen stdin; then
+    local lineno=0 line upaths=()
+    if [ -t 0 ]; then
+      echo "upgrade-entries: reading doc paths from stdin, one per line; end with Ctrl-D." >&2
+    fi
+    exec 3<&0 0</dev/null
+    while IFS= read -r line <&3 || [ -n "$line" ]; do
+      lineno=$((lineno + 1))
+      _trim "${line%$'\r'}"
+      [ -n "$_TRIMMED" ] || continue
+      if _norm_path "$_TRIMMED"; then
+        upaths+=("$_NORM")
+      else
+        echo "       (line $lineno)" >&2
+        bad=$((bad + 1))
+      fi
+    done
+    exec 3<&-
+    if [ ${#upaths[@]} -gt 0 ]; then
+      _first_occurrences "$(_repeated "${upaths[@]}")" "${upaths[@]}"
+      _TARGETS=("${_FIRST[@]}")
+    fi
+  elif [ "$all" = 0 ]; then
+    _targets_from_args "$@"
+    set --
+  fi
+
+  _scratch_init
+  _index_now
+  _index_lock
+  local snap req="$_SCRATCH/upgrade.req" info="$_SCRATCH/upgrade.info"
+  snap=$(_index_load) || exit 1
+  _rec_put ${_TARGETS[@]+"${_TARGETS[@]}"} > "$req"
+  # Per entry, NUL-framed: <kind> <key>, and for a pre-v3 entry (kind l) then
+  # <code_commit> <n> <ref>… — the refs as check-freshness reads them (the
+  # stored strings, minus empties). Kinds: u not indexed, x not an object,
+  # d has code_oids already (--all skips those), l pre-v3.
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  jq -j -n -R --arg all "$all" --slurpfile idx "$snap" "$_JQ_REC_FIELDS"'
+    def clean: tostring | split("\u0000") | join(" ");
+    $idx[0].docs as $d
+    | (if $all == "1" then ($d | keys_unsorted[]) else rec_fields[] end) as $k
+    | $d[$k] as $e
+    | if ($d | has($k)) | not then "u\u0000\($k)\u0000"
+      elif ($e | type) != "object" then "x\u0000\($k)\u0000"
+      elif ($e.code_oids | type) == "object" then (if $all == "1" then empty else "d\u0000\($k)\u0000" end)
+      else [($e.code_refs // []) | if type == "array" then .[] else empty end
+            | select(type == "string" and . != "") | clean] as $r
+        | "l\u0000\($k)\u0000" + ($e.code_commit // "" | clean) + "\u0000"
+          + "\($r | length)\u0000" + ([$r[] | . + "\u0000"] | add // "")
+      end' < "$req" > "$info" || _die "cannot read $INDEX_FILE"
+
+  # Sort the entries: the pre-v3 ones with a code_commit that is an object
+  # id are candidates (their refs in one flat array, bash 3.2 having no
+  # arrays of arrays); the rest are decided here.
+  local kind key cc n k ref unknown=0
+  local done_keys=() unfilled=() why=() fill_oids=() fill_keys=() fill_refs=()
+  local cands=() cand_cc=() cand_start=() cand_n=() ref_all=()
+  exec 4< "$info"
+  while IFS= read -r -d '' kind <&4; do
+    IFS= read -r -d '' key <&4
+    case "$kind" in
+      u)
+        echo "ERROR: '$key' not found in index; skipped." >&2
+        unknown=$((unknown + 1))
+        ;;
+      x) unfilled+=("$key"); why+=("the entry is not an object") ;;
+      d) done_keys+=("$key") ;;
+      l)
+        IFS= read -r -d '' cc <&4
+        IFS= read -r -d '' n <&4
+        local start=${#ref_all[@]} odd=0 rset=""
+        k=0
+        while [ "$k" -lt "$n" ]; do
+          IFS= read -r -d '' ref <&4
+          case "$ref" in *$'\x1f'*) odd=1 ;; esac
+          ref_all+=("$ref")
+          rset="${rset:+$rset$'\x1f'}$ref"
+          k=$((k + 1))
+        done
+        if [ "$n" -eq 0 ]; then
+          # No refs: nothing to look up; its code_oids is {}.
+          fill_keys+=("$key"); fill_refs+=(""); fill_oids+=("")
+        elif [ "$odd" = 1 ]; then
+          unfilled+=("$key"); why+=("a code ref holds a 0x1f control character")
+        elif [ -z "$cc" ]; then
+          unfilled+=("$key"); why+=("no code_commit is recorded")
+        elif ! _is_oid "$cc"; then
+          unfilled+=("$key"); why+=("its code_commit '$cc' is not an object id")
+        else
+          cands+=("$key"); cand_cc+=("$cc"); cand_start+=("$start"); cand_n+=("$n")
+        fi
+        ;;
+      *) _die "cannot read $INDEX_FILE" ;;
+    esac
+  done
+  exec 4<&-
+
+  # Which code_commits this repository holds (one batch-check), then every
+  # ref of every candidate looked up in its own code_commit's tree (one
+  # _oid_lookup; a ref covering the doc-index is looked up without it, as
+  # every writer records it).
+  local ccs="$_SCRATCH/upgrade.ccs" cpres="$_SCRATCH/upgrade.ccs.ok" present=()
+  local rfile="$_SCRATCH/upgrade.refs" rtrees="$_SCRATCH/upgrade.trees" rout="$_SCRATCH/upgrade.oids"
+  local c=0 p
+  : > "$ccs"
+  [ ${#cands[@]} -eq 0 ] || printf '%s\n' "${cand_cc[@]}" > "$ccs"
+  _commits_present "$ccs" "$cpres"
+  while IFS= read -r p; do present+=("$p"); done < "$cpres"
+  : > "$rfile"
+  : > "$rtrees"
+  while [ "$c" -lt "${#cands[@]}" ]; do
+    if [ "${present[$c]}" = 1 ]; then
+      k=0
+      while [ "$k" -lt "${cand_n[$c]}" ]; do
+        ref="${ref_all[$((cand_start[c] + k))]}"
+        # A ref holding a newline cannot be one line of the lookup: ".." is
+        # unaddressable, so it reads missing (as update-index records it).
+        case "$ref" in *$'\n'*) ref=.. ;; esac
+        printf '%s\n' "$ref" >&5
+        printf '%s\n' "${cand_cc[$c]}" >&6
+        k=$((k + 1))
+      done
+    fi
+    c=$((c + 1))
+  done 5>> "$rfile" 6>> "$rtrees"
+  _oid_lookup - "$rfile" "$rout" 1 "$rtrees"
+
+  local oid oids missing
+  exec 7< "$rout"
+  c=0
+  while [ "$c" -lt "${#cands[@]}" ]; do
+    key="${cands[$c]}"
+    if [ "${present[$c]}" != 1 ]; then
+      unfilled+=("$key")
+      why+=("its code_commit ${cand_cc[$c]} is not a commit in this repository (a shallow clone, or a deleted branch?)")
+      c=$((c + 1))
+      continue
+    fi
+    oids="" missing="" rset=""
+    k=0
+    while [ "$k" -lt "${cand_n[$c]}" ]; do
+      ref="${ref_all[$((cand_start[c] + k))]}"
+      IFS= read -r oid <&7
+      [ "$oid" != missing ] || missing="${missing:+$missing, }'$ref'"
+      oids="${oids:+$oids$'\x1f'}$oid"
+      rset="${rset:+$rset$'\x1f'}$ref"
+      k=$((k + 1))
+    done
+    if [ -n "$missing" ]; then
+      unfilled+=("$key")
+      why+=("code ref $missing is missing at its code_commit ${cand_cc[$c]:0:12} (a typo, a glob — refs are literal upaths since schema 3 — or a path created later)")
+    else
+      fill_keys+=("$key"); fill_refs+=("$rset"); fill_oids+=("$oids")
+    fi
+    c=$((c + 1))
+  done
+  exec 7<&-
+
+  # Patch rows: code_oids alone, merged into the entry (a `+=` merge keeps
+  # every other field and its position). Not a baseline reset.
+  local patch="$_SCRATCH/upgrade.jsonl" upgraded=() unchanged=()
+  if [ ${#fill_keys[@]} -gt 0 ]; then
+    c=0
+    while [ "$c" -lt "${#fill_keys[@]}" ]; do
+      _rec_put "${fill_keys[$c]}" "${fill_refs[$c]}" "${fill_oids[$c]}"
+      c=$((c + 1))
+    done > "$patch.req"
+    # shellcheck disable=SC2016  # jq program, not shell expansion
+    jq -c -n -R "$_JQ_REC_FIELDS$_JQ_CODE_OIDS"'rec_fields as $f
+      | range(0; $f | length; 3) as $i
+      | {key: $f[$i], merge: {code_oids: code_oids($f[$i + 1] | fields_list; $f[$i + 2] | fields_list)}}' \
+      < "$patch.req" > "$patch" || _die "cannot assemble the update; $INDEX_FILE is unchanged."
+    _index_apply --report "$_INDEX_PATCH" --slurpfile patch "$patch"
+    c=0
+    while [ "$c" -lt "${#fill_keys[@]}" ]; do
+      case "${_INDEX_CLASSES:$c:1}" in
+        c) upgraded+=("${fill_keys[$c]}") ;;
+        *) unchanged+=("${fill_keys[$c]}") ;;
+      esac
+      c=$((c + 1))
+    done
+  fi
+  _index_unlock
+
+  _report_keys "Upgraded" "(code_oids filled from code_commit; last_verified unchanged)" \
+    ${upgraded[@]+"${upgraded[@]}"}
+  if [ ${#done_keys[@]} -gt 0 ] || [ ${#unchanged[@]} -gt 0 ]; then
+    _report_keys "Unchanged" "(already has code_oids)" ${done_keys[@]+"${done_keys[@]}"} \
+      ${unchanged[@]+"${unchanged[@]}"}
+  fi
+  if [ ${#unfilled[@]} -gt 0 ]; then
+    echo "Could not upgrade ${#unfilled[@]} $([ ${#unfilled[@]} -eq 1 ] && echo entry || echo entries) (each keeps the pre-v3 commit comparison until update-index re-baselines it after a review, or set-code-refs fixes its refs):" >&2
+    c=0
+    while [ "$c" -lt "${#unfilled[@]}" ]; do
+      echo "  ${unfilled[$c]}: ${why[$c]}" >&2
+      c=$((c + 1))
+    done
+  fi
+  if [ "$bad" -gt 0 ]; then
+    echo "Rejected $bad invalid doc $([ "$bad" -eq 1 ] && echo path || echo paths) (see above)." >&2
+  fi
+  if [ "$unknown" -gt 0 ]; then
+    echo "$unknown $([ "$unknown" -eq 1 ] && echo path was || echo paths were) not in the index (see above)." >&2
+  fi
+  if [ ${#unfilled[@]} -gt 0 ] || [ "$bad" -gt 0 ] || [ "$unknown" -gt 0 ]; then
+    exit 1
   fi
 }
 
