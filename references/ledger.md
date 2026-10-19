@@ -52,12 +52,12 @@ The ledger never writes `docs/.doc-index.json`: it reads it (doc types, `depreca
 
 ### Config — `docs/ledger/config.json`
 
-Deep-merged over the defaults: an object merges key by key; an array, a scalar or `null` the host gives replaces the default (so `fields.severity` may be one name where the default is a list).
+Deep-merged over the defaults: an object merges key by key; an array, a scalar or `null` the host gives replaces the default (so `fields.severity` may be one name where the default is a list), except `base`: a `null` there is the default.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `schema` | `"ledger-config/1"` | |
-| `base` | `"origin/main"` | the comparison base: merge-bases, adoption, `publish`, in-flight "merged" |
+| `base` | `"origin/main"` | the comparison base: merge-bases, adoption, `publish`, in-flight "merged"; `null` is the default |
 | `items.globs` | `["docs/issues/*.md"]` | the item files (globs: *Globs* below) |
 | `items.archive_globs` | `["docs/archive/issues/*.md"]` | archived items: still resolved, never open |
 | `items.adapter` | `null` | the items adapter for hosted items (*Adapters*) |
