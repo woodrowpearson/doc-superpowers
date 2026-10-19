@@ -7664,6 +7664,7 @@ test_gh21_upgrade_entries_fills_code_oids_without_a_baseline_reset() {
   assert_contains "$out" "docs/g.md: its code_commit 0123456789abcdef0123456789abcdef01234567 is not a commit in this repository" \
     "a code_commit the repository lacks is named"
   assert_contains "$out" "docs/h.md: code ref 'src/nope.js' is missing at its code_commit" "a ref missing at code_commit is named"
+  assert_contains "$out" "refs are literal paths since schema 3" "…with why a glob no longer matches (literal paths)"
   assert_contains "$out" "docs/j.md: code ref 'src/*.js' is missing" "…a glob ref too"
   json=$(cat docs/.doc-index.json)
   local cc

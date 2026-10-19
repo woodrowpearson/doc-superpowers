@@ -5307,7 +5307,7 @@ cmd_upgrade_entries() {
     done
     if [ -n "$missing" ]; then
       unfilled+=("$key")
-      why+=("code ref $missing is missing at its code_commit ${cand_cc[$c]:0:12} (a typo, a glob — refs are literal upaths since schema 3 — or a path created later)")
+      why+=("code ref $missing is missing at its code_commit ${cand_cc[$c]:0:12} (a typo, a glob — refs are literal paths since schema 3 — or a path created later)")
     else
       fill_keys+=("$key"); fill_refs+=("$rset"); fill_oids+=("$oids")
     fi
