@@ -24,8 +24,9 @@
 # The contract a list output is checked against (_LG_ADAPTER_REQ: every line
 # one JSON object holding these fields):
 #   contracts list   "id" a contract id (<kind>:<name>), "ledger" a string
-#                    or null, "defined_in" a list of strings; "title", when
-#                    present, a string or null
+#                    or null, "defined_in" a list of strings; "read_by",
+#                    when present, a list of strings (absent: none);
+#                    "title", when present, a string or null
 #   pr list          "number", "head", "state", "url"; optional "cross"
 #                    (true: the head is a fork's branch — never resolved
 #                    through a same-named branch of keys.remote; absent:
@@ -98,6 +99,7 @@ _lg_adapter_path() {
 _LG_ADAPTER_REQ_contracts='(.id | type == "string" and test("\\A[a-z][a-z0-9_-]*:[^[:space:]]+\\z"))
   and has("ledger") and (.ledger == null or (.ledger | type) == "string")
   and (.defined_in | type == "array" and all(.[]; type == "string"))
+  and ((has("read_by") | not) or (.read_by | type == "array" and all(.[]; type == "string")))
   and ((has("title") | not) or .title == null or (.title | type) == "string")'
 # shellcheck disable=SC2016  # jq source
 _LG_ADAPTER_REQ_pr='has("number") and has("head") and has("state") and has("url")'

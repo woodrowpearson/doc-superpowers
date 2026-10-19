@@ -1148,8 +1148,9 @@ $c[0] as $cfg
 
 # The contracts (design §G): the registry's (ledgers[].contracts[], with
 # their ledger) and the contracts adapter's list, one per id, sorted by id —
-# an id in both is one contract: the registry's ledger, defined_in and
-# title win, the adapter's fill only what the registry leaves empty. A
+# an id in both is one contract: the registry's ledger, defined_in, read_by
+# and title win, the adapter's fill only what the registry leaves empty
+# (read_by, like defined_in: empty counts as left empty; always a list). A
 # registry contract whose id is not <kind>:<name> is left out (validate
 # --registry reports it). Inputs: $reg (slurped registry), $adc (slurped
 # adapter lines), $re (_LG_CONTRACT_RE).
@@ -1160,13 +1161,14 @@ def lg_ct_list: if type == "array" then [.[] | strings | select(. != "")] else [
 [ ($reg[0].ledgers // [])[] | objects | (.id | lg_ct_str) as $lid
   | (.contracts // []) | if type == "array" then .[] else empty end | objects
   | select(.id | type == "string" and test($re))
-  | {id, ledger: $lid, defined_in: (.defined_in | lg_ct_list), title: (.title | lg_ct_str)} ] as $R
-| [ $adc[] | {id, ledger: (.ledger | lg_ct_str), defined_in: (.defined_in | lg_ct_list), title: (.title | lg_ct_str)} ] as $A
+  | {id, ledger: $lid, defined_in: (.defined_in | lg_ct_list), read_by: (.read_by | lg_ct_list), title: (.title | lg_ct_str)} ] as $R
+| [ $adc[] | {id, ledger: (.ledger | lg_ct_str), defined_in: (.defined_in | lg_ct_list), read_by: (.read_by | lg_ct_list), title: (.title | lg_ct_str)} ] as $A
 | (reduce $A[] as $a ({}; if has($a.id) then . else .[$a.id] = $a end)) as $AM
 | (reduce $R[] as $r ({}; if has($r.id) then . else .[$r.id] = $r end)) as $RM
 | [ ($RM[] | . as $r | ($AM[$r.id] // {}) as $a
      | {id: $r.id, ledger: ($r.ledger // $a.ledger // null),
         defined_in: (if ($r.defined_in | length) > 0 then $r.defined_in else ($a.defined_in // []) end),
+        read_by: (if ($r.read_by | length) > 0 then $r.read_by else ($a.read_by // []) end),
         title: ($r.title // $a.title // null)}),
     ($AM[] | select($RM[.id] == null)) ]
 | sort_by(.id)
