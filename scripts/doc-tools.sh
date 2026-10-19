@@ -638,7 +638,7 @@ _worktree_tree() {
 # passes, not a lookup per doc.
 _last_commits() {
   local in="$1" out="$2" starts="${3:-}" ids="$_SCRATCH/lc.ids" sets="$_SCRATCH/lc.sets" res="$_SCRATCH/lc.res"
-  local set c start refs=()
+  local set c start ref_list=()
   : > "$out"
   [ -s "$in" ] || return 0
   : > "$sets"
@@ -662,9 +662,9 @@ _last_commits() {
     set="${set#*$'\035'}"
     [ -n "$start" ] || start="$_HEAD"
     if [ -n "$set" ] && [ -n "$start" ] && [ "$_SHALLOW" != true ]; then
-      IFS=$'\x1f' read -r -a refs <<<"$set"
-      c=$(git --literal-pathspecs rev-list -1 "$start" -- "${refs[@]}") \
-        || _die "git rev-list failed for code refs: ${refs[*]}"
+      IFS=$'\x1f' read -r -a ref_list <<<"$set"
+      c=$(git --literal-pathspecs rev-list -1 "$start" -- "${ref_list[@]}") \
+        || _die "git rev-list failed for code refs: ${ref_list[*]}"
     fi
     printf '%s\n' "$c"
   done < "$sets" > "$res"
@@ -1541,14 +1541,14 @@ _on_exit() {
       emitted=1
       erc="$_CL_EMITTED_RC"
     else
-      marker=cl-emitted
+      marker="cl-emitted"
     fi
   elif [ "$_LG_ACTIVE" = 1 ]; then
     if [ "$_LG_EMITTED" = 1 ]; then
       emitted=1
       erc="$_LG_EMITTED_RC"
     else
-      marker=lg-emitted
+      marker="lg-emitted"
     fi
   fi
   if [ -n "$marker" ] && [ -n "$_SCRATCH" ] && [ -e "$_SCRATCH/$marker" ]; then
@@ -3326,6 +3326,18 @@ _parse_args() {
   done
 }
 
+# Never called. _parse_args sets every _OPT_<name> / _OPTV_<name> by name
+# (printf -v, eval), which shellcheck cannot follow: the ones a handler reads
+# without a default are assigned here so the shellcheck gate
+# (test-doc-tools.sh) still flags any other unassigned variable (SC2154).
+# A new option read as plain "$_OPT_x" goes in this list.
+_shellcheck_opt_names() {
+  _OPT_by="" _OPT_check="" _OPT_chunk="" _OPT_deep="" _OPT_final="" _OPT_range=""
+  _OPT_refs="" _OPT_reverify="" _OPT_scheduled="" _OPT_staged="" _OPT_superseded_by=""
+  _OPT_tag="" _OPT_tree="" _OPT_warn=""
+  _OPTV_claims=() _OPTV_code_refs=() _OPTV_code_refs_from=() _OPTV_config=() _OPTV_helper=() _OPTV_holds=()
+}
+
 # Repository verbs run only inside a git work tree, at its top level. Checked
 # ONCE, up front: per-call `2>/dev/null || true` used to turn "not a
 # repository" into "no history", and check-freshness reported every doc
@@ -3528,10 +3540,10 @@ _entry_from_line() {
 # both stored as code_refs and handed to git. Returns 1, having said why (and
 # <where>, e.g. "line 3") on stderr, for a ref that cannot be a key.
 _refs_from_csv() {
-  local csv="$1" where="${2:-}" r raw=()
+  local csv="$1" where="${2:-}" r raw_refs=()
   _E_REFS=()
-  IFS=, read -r -a raw <<<"$csv"
-  for r in ${raw[@]+"${raw[@]}"}; do
+  IFS=, read -r -a raw_refs <<<"$csv"
+  for r in ${raw_refs[@]+"${raw_refs[@]}"}; do
     _trim "$r"
     r="$_TRIMMED"
     case "$r" in
@@ -4102,16 +4114,16 @@ cmd_remove_entry() {
   # That is a SKIP, not a failure (exit 0): the entry being absent is the end
   # state asked for — the one documented exception to "a key not in the
   # index exits 1".
-  local removed=() i=0
+  local removed_keys=() i=0
   while [ "$i" -lt "${#targets[@]}" ]; do
     if [ "${_INDEX_CLASSES:$i:1}" = c ]; then
-      removed+=("${targets[$i]}")
+      removed_keys+=("${targets[$i]}")
     else
       echo "SKIP: '${targets[$i]}' not found in index." >&2
     fi
     i=$((i + 1))
   done
-  _report_keys "Removed" "" "${removed[@]+"${removed[@]}"}"
+  _report_keys "Removed" "" "${removed_keys[@]+"${removed_keys[@]}"}"
 }
 
 # move-entry --stdin: read "<old>\t<new>" lines from stdin into _MV_OLD /
@@ -4452,7 +4464,7 @@ cmd_set_code_refs() {
   # "src/"; a legacy "" is no ref), whether it records code_oids (else it is
   # a pre-v3 entry), and its code_commit — then one flag per new ref: 1 if
   # the entry already had it. The same list is a no-op: nothing is written.
-  local plan="$_SCRATCH/set-code-refs.plan" verdict mode cc flag kept=() i=0
+  local plan="$_SCRATCH/set-code-refs.plan" verdict mode cc flag kept_refs=() i=0
   # shellcheck disable=SC2016  # jq program, not shell expansion
   jq -r --arg k "$doc_path" --arg refs "$joined" "$_JQ_CODE_OIDS"'
     def segs: split("/") | map(select(. != "" and . != "."));
@@ -4472,7 +4484,7 @@ cmd_set_code_refs() {
     IFS= read -r mode
     IFS= read -r cc
     while IFS= read -r flag; do
-      [ "$flag" != 1 ] || kept+=("${_E_REFS[$i]}")
+      [ "$flag" != 1 ] || kept_refs+=("${_E_REFS[$i]}")
       i=$((i + 1))
     done
   } < "$plan"
@@ -4495,11 +4507,11 @@ cmd_set_code_refs() {
   # every ref is (_oid_lookup). Without a usable code_commit (absent, not an
   # object id, not in this repository) it is recorded like a new ref.
   local lrefs="" loids="" lfile="$_SCRATCH/set-code-refs.kept" lout="$_SCRATCH/set-code-refs.kept.oids" x
-  if [ "$mode" = legacy ] && [ ${#kept[@]} -gt 0 ] && _is_oid "$cc" \
+  if [ "$mode" = legacy ] && [ ${#kept_refs[@]} -gt 0 ] && _is_oid "$cc" \
       && git cat-file -e "$cc^{commit}" 2>/dev/null; then
-    printf '%s\n' "${kept[@]}" > "$lfile"
+    printf '%s\n' "${kept_refs[@]}" > "$lfile"
     _oid_lookup "$cc" "$lfile" "$lout" 1
-    for x in "${kept[@]}"; do
+    for x in "${kept_refs[@]}"; do
       lrefs="${lrefs:+$lrefs$'\x1f'}$x"
     done
     while IFS= read -r x; do
@@ -5290,9 +5302,9 @@ _frag_n() {
 # _frag_stored_hash <file>: set _FRAG_STORED to the hash on line 2 ("" when
 # line 2 is not a hash marker). A trailing CR and blanks are ignored.
 _frag_stored_hash() {
-  local l1="" l2="" re="$_FRAG_HASH_RE"
+  local l2="" re="$_FRAG_HASH_RE"
   _FRAG_STORED=""
-  { IFS= read -r l1 || true; IFS= read -r l2 || true; } < "$1"
+  { IFS= read -r _ || true; IFS= read -r l2 || true; } < "$1"
   l2="${l2%$'\r'}"
   while :; do
     case "$l2" in
@@ -6164,8 +6176,11 @@ cmd_tools_uninstall() {
       p="$SCRIPT_DIR/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md"
       if [ -f "$f" ] && [ ! -L "$f" ] && [ -f "$p" ] && cmp -s "$p" "$f"; then
         _tools_no_link "$f"
-        local others
-        others=$(cd RELEASE-NOTES.next && ls -A | grep -vxF README.md) || others=""
+        local others="" e
+        for e in RELEASE-NOTES.next/* RELEASE-NOTES.next/.[!.]* RELEASE-NOTES.next/..?*; do
+          [ -e "$e" ] || [ -L "$e" ] || continue
+          [ "$e" = "$f" ] || { others=1; break; }
+        done
         if [ -z "$others" ]; then
           rm -f "$f" || _die "cannot remove $f"
           rmdir RELEASE-NOTES.next 2>/dev/null || true
