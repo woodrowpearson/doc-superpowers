@@ -481,6 +481,27 @@ assert_ways_same_docs "rename plus edit vs repoint"
 teardown
 
 echo ""
+echo "--- a pure rename vs a re-verify after a doc and code edit: B's whole record lands on the new key (GH #33) ---"
+cite_repo
+git checkout -q -b A
+git mv docs/d.md docs/d2.md && git commit -qm "A: move d"
+dt "$T2" move-entry docs/d.md docs/d2.md
+commit_all "A: re-key d (content_hash unchanged)"
+git checkout -q -b B main
+echo "more" >> docs/d.md && echo "// c changed" >> src/c.js && git add -A && git commit -qm "B: edit d and c.js"
+dt "$T3" update-index docs/d.md
+commit_all "B: re-verify d"
+SORTED='to_entries | sort_by(.key) | from_entries | tojson'
+B_REC=$(jq -r ".docs[\"docs/d.md\"] | $SORTED" docs/.doc-index.json)
+assert_true "fixture: B's re-verify changed d's content_hash" \
+  test "$(jq -r '.content_hash' <<<"$B_REC")" != "$(git show main:docs/.doc-index.json | jq -r '.docs["docs/d.md"].content_hash')"
+run_ways
+assert_ways '.docs | has("docs/d.md")' "false" "old key dropped"
+assert_ways ".docs[\"docs/d2.md\"] | $SORTED" "$B_REC" "B's whole re-verified record (its content_hash too) on d2"
+assert_ways_same_docs "pure rename vs re-verify"
+teardown
+
+echo ""
 echo "--- a batch move of a citing doc and a doc it cites vs a move of another cited doc (GH #33) ---"
 cite_repo
 git checkout -q -b A
@@ -924,6 +945,15 @@ for way in drive drive_swapped; do
   assert_eq "0" "$DRV_RC" "a pure re-key vs a re-verify ($way): exit 0"
   assert_json_field "$DRV_OUT" '.docs | "\(has("docs/a.md")) \(.["docs/a2.md"].last_verified) \(.["docs/a2.md"].code_oids["src/a.js"])"' \
     "false 2026-01-01T00:00:05Z oid1" "a pure re-key vs a re-verify ($way): the record lands on the new key"
+done
+# a pure rename vs a re-verify after a doc edit (theirs' content_hash moved
+# too): the whole re-verified record, hash included, lands on the new key
+derive "$T" '.docs["docs/a.md"] += {content_hash: "sha256:h2", code_oids: {"src/a.js": "oid1"}, code_commit: "c1", last_verified: "2026-01-01T00:00:05Z"}'
+for way in drive drive_swapped; do
+  "$way"
+  assert_eq "0" "$DRV_RC" "a pure re-key vs a re-hashing re-verify ($way): exit 0"
+  assert_json_field "$DRV_OUT" '.docs | "\(has("docs/a.md")) \(.["docs/a2.md"] | [.content_hash, .code_oids["src/a.js"], .code_commit, .last_verified] | join(" "))"' \
+    "false sha256:h2 oid1 c1 2026-01-01T00:00:05Z" "a pure re-key vs a re-hashing re-verify ($way): the whole record, its hash too, on the new key"
 done
 # both sides re-keyed the same entry to different keys: neither changed the
 # old key, so this is not the shape; the deletion agrees and each new key is a
