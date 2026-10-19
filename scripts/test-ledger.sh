@@ -12301,6 +12301,50 @@ test_lg_alloc_permission_refusal_provisional() {
   teardown
 }
 
+test_lg_config_base_null_is_default() {
+  echo "test: a host config \"base\": null means the default origin/main (not no base): validate --pushed from all zeros, show; an explicit base and an unresolvable one are unchanged"
+  lg_keys_fixture '{"base":null}'
+  local h z=0000000000000000000000000000000000000000
+  # main carries an item with a provisional key and one with a real key, both
+  # pushed to the bare remote (so origin/main, the default base, holds them).
+  h=$(lg_hex4 docs/issues/cloud.md)
+  lg_item docs/issues/cloud.md "key: x-~$h" "ledger: x" "status: Open" "summary: Filed in a cloud session"
+  lg_item docs/issues/real.md "key: x-1" "ledger: x" "status: Open" "summary: A real key on the base"
+  git add -A && git commit -qm items
+  git push -q origin main
+  git fetch -q origin
+  # A new branch off it adds nothing.
+  git checkout -q -b feat/new
+  git commit -q --allow-empty -m "nothing"
+  lg validate --pushed "$z..HEAD" --format json
+  assert_eq "0" "$LG_RC" "\"base\": null: a new branch adding no provisional key: exit 0 (the base's x-~$h is not this push's)"
+  assert_json_field "$LG_OUT" '.findings | length' "0" "…no findings"
+  lg show x-1 --format json
+  assert_eq "0" "$LG_RC" "show: exit 0 (no \"not a revision\" die)"
+  assert_json_field "$LG_OUT" '.item.key' "x-1" "…the item still resolves"
+  lg publish --dry-run
+  assert_eq "0" "$LG_RC" "publish --dry-run: exit 0 (no \"config base is not a revision: ''\" die)"
+  # The branch adds a provisional key: refused, as with the default.
+  lg_item docs/issues/mine.md "key: x-~$(lg_hex4 docs/issues/mine.md)" "ledger: x" "status: Open" "summary: Filed offline on the branch"
+  git add -A && git commit -qm mine
+  lg validate --pushed "$z..HEAD" --format json
+  assert_eq "1" "$LG_RC" "the branch adds one: exit 1"
+  assert_eq "provisional-key block docs/issues/mine.md" "$(lg_vf)" "only the branch's key is refused"
+  # An explicit "origin/main": the same (unchanged).
+  lg_enable '{"base":"origin/main"}'
+  lg validate --pushed "$z..HEAD" --format json
+  assert_eq "1" "$LG_RC" "base origin/main: the branch's key refused (exit 1)"
+  assert_eq "provisional-key block docs/issues/mine.md" "$(lg_vf)" "…only the branch's key"
+  # A base that does not resolve: the no-base refusal (unchanged) — every
+  # provisional key at the tip, the base's own included.
+  lg_enable '{"base":"nope/x"}'
+  lg validate --pushed "$z..HEAD" --format json
+  assert_eq "1" "$LG_RC" "base nope/x: exit 1"
+  assert_eq "provisional-key block docs/issues/cloud.md
+provisional-key block docs/issues/mine.md" "$(lg_vf)" "…every provisional key at the tip"
+  teardown
+}
+
 run_tests() {
   echo "Running ledger tests..."
   echo ""
@@ -12725,6 +12769,8 @@ run_tests() {
   test_lg_suggest_json_and_read_only
   test_lg_new_suggest_contracts
   test_lg_suggest_top
+  # --- upkeep / filing (#36, #39) ---
+  test_lg_config_base_null_is_default
 
   print_summary
 }

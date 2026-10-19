@@ -4,6 +4,9 @@
 # jq's `*`: objects merge key by key, recursively; arrays and scalars
 # (including null) in the host replace the default, so a host may give a
 # `fields` value as one name where the default is a list of candidates.
+# One exception: a null `base` takes the default (origin/main) — every reader
+# maps a non-string base to "" (no base), which is never what an explicit
+# `"base": null` means.
 {
   "schema": "ledger-config/1",
   "base": "origin/main",
@@ -32,4 +35,4 @@
   "legacy_ids": [],
   "legacy_ledgers": {}
 } as $d
-| $d * $h
+| ($d * $h) | if .base == null then .base = $d.base else . end
