@@ -2215,12 +2215,17 @@ bump-version|cmd_bump_version|deps|
   All or nothing: every manifest found is read first, and one that is not
   valid JSON writes nothing (exit 1); so does finding none (run it from the
   repo root). Each file keeps its mode.
-check-version|cmd_check_version|deps|
-  -
+check-version|cmd_check_version|deps|tag warn remote=
+  [--tag [--remote <name>] [--warn]]
   Verify that every manifest carries RELEASE-NOTES.md's version: its first
   release heading, a line "## vMAJOR.MINOR.PATCH …" outside code fences (a
   pre-release suffix is refused, not skipped). Exits 1 on a mismatch, a
   manifest that is not valid JSON, or no manifest found.
+  --tag also requires the tag v<version> on the remote (--remote, default
+  origin), read with git ls-remote: a local tag is not enough, since a
+  consumer's AI workflows clone the tag of the version they installed. A
+  missing tag, or a remote that cannot be read, exits 1; with --warn it is
+  a WARN line and the exit status is the manifests' alone.
 implementation-status|cmd_implementation_status|deps|
   <path>...
   Report ADR/SPEC realization state (read-only): each doc's
@@ -5013,6 +5018,11 @@ cmd_check_version() {
   if [ $# -gt 0 ]; then
     _usage_error check-version "takes no arguments (got '$1')"
   fi
+  local tag="$_OPT_tag" warn_only="$_OPT_warn" remote="${_OPT_remote:-origin}"
+  if [ "$tag" != 1 ]; then
+    [ "$warn_only" != 1 ] || _usage_error check-version "--warn qualifies --tag (give both)"
+    ! _opt_seen remote || _usage_error check-version "--remote qualifies --tag (give both)"
+  fi
   local canonical
   canonical=$(_release_notes_version RELEASE-NOTES.md) || exit 1
 
@@ -5042,13 +5052,49 @@ cmd_check_version() {
 
   [ "$checked" -gt 0 ] || _no_manifest_error check-version
 
+  local tag_fail=0
+  [ "$tag" != 1 ] || _check_version_tag "v$canonical" "$remote" "$warn_only" || tag_fail=1
+
   if [[ "$mismatched" -gt 0 ]]; then
     echo "FAIL: $mismatched/$checked file(s) have mismatched versions"
     echo "  Run: doc-tools.sh bump-version $canonical"
     exit 1
   fi
+  if [ "$tag_fail" = 1 ]; then
+    echo "FAIL: tag v$canonical is not verified on $remote"
+    exit 1
+  fi
 
   echo "PASS: all $checked file(s) match v$canonical"
+}
+
+# _check_version_tag <tag> <remote> <warn>: whether refs/tags/<tag> is on
+# <remote> (git ls-remote: what a clone of it sees). Missing, or a remote that
+# cannot be read: a MISSING / ERROR line and return 1, or with <warn> 1 a WARN
+# line and return 0.
+_check_version_tag() {
+  local t="$1" remote="$2" warn_only="$3" ls_out sha
+  if ! ls_out=$(git ls-remote --tags "$remote" "refs/tags/$t" 2>/dev/null </dev/null); then
+    if [ "$warn_only" = 1 ]; then
+      echo "  WARN:     cannot read the tags of $remote (git ls-remote failed), so tag $t is unverified"
+      return 0
+    fi
+    echo "  ERROR:    cannot read the tags of $remote (git ls-remote failed), so tag $t is unverified"
+    return 1
+  fi
+  sha=$(awk -v r="refs/tags/$t" '$2 == r { print $1; exit }' <<<"$ls_out")
+  if [ -n "$sha" ]; then
+    echo "  ok:       tag $t on $remote ($sha)"
+    return 0
+  fi
+  if [ "$warn_only" = 1 ]; then
+    echo "  WARN:     $t is not a tag on $remote"
+  else
+    echo "  MISSING:  $t is not a tag on $remote"
+  fi
+  echo "            A consumer's AI workflows clone the tag of the version they installed."
+  echo "            Tag the release commit and push it: git tag $t <release commit> && git push $remote $t"
+  [ "$warn_only" = 1 ]
 }
 
 # --- Fragments: RELEASE-NOTES.next/PR-<N>.md ----------------------------------
