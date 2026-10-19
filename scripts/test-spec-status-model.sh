@@ -1698,7 +1698,7 @@ _lk=$(harness_mktemp_d leak-fixture)
     echo "$_pem"
   } > src/leaks.md
   {
-    echo "placeholders: $_U/me/proj $_H/runner/work"
+    echo "placeholders: $_U/me/proj $_H/runner/work $_H/linuxbrew/.linuxbrew/bin/bash"
     echo "a nested segment: \$HOME$_H/notes and \${dir}$_U/x"
     echo "examples: bob""@example.com, noreply""@anthropic.com, test""@test.com, x""@foo.invalid, git""@github.com:o/r.git"
     echo "skipped on purpose: $_U/jdoe/kept  # leak-scan:allow (a recorded path)"

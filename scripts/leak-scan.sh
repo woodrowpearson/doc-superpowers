@@ -12,7 +12,7 @@
 #   home-path  /Users/<name> or /home/<name> starting a path (not "$x/home/…").
 #              Placeholder names are fine: me, you, user, username, name,
 #              example, alice, bob, jane, john, someone, runner (GitHub's
-#              runner home), ubuntu.
+#              runner home), ubuntu, linuxbrew (Homebrew on Linux).
 #   volume     /Volumes/<name> (a machine's mounted disk or worktree volume).
 #   email      an address, unless its domain is reserved for examples
 #              (example.com/.org/.net, *.example, *.invalid, *.test,
@@ -79,7 +79,7 @@ awk -F '\t' -v allowf="$work/allow" '
       # "<file>:<line>:<text>": keep "<file>:<line>"
       if (match(l, /^[^:]*:[0-9]+:/)) ok[substr(l, 1, RLENGTH - 1)] = 1
     }
-    split("me you user username name example alice bob jane john someone runner ubuntu", p, " ")
+    split("me you user username name example alice bob jane john someone runner ubuntu linuxbrew", p, " ")
     for (i in p) placeholder[p[i]] = 1
   }
   {
