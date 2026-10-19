@@ -7,7 +7,9 @@
 # deletion), counts the commits since the newest tag it contains, and past 5
 # suggests drafting release notes. Never blocks.
 # The skill being absent is silent. DOC_SUPERPOWERS_QUIET=1 silences it;
-# DOC_SUPERPOWERS_SKIP=1 turns it off.
+# DOC_SUPERPOWERS_SKIP=1 turns it off. DOC_SUPERPOWERS_ADVICE (else
+# .claude/doc-superpowers/hooks.conf's advice) replaces or drops the
+# '/doc-superpowers release' it suggests.
 #
 # With docs/spec-claims/ present, a claims leg (advisory) runs for every
 # branch pushed, tagged or not: `doc-tools.sh claims run --planes-of` over the
@@ -22,11 +24,97 @@
 # the finding lines; the exit code never changes.
 # DOC_SUPERPOWERS_CLAIMS_SKIP=1 turns the leg off.
 
+# The shared settings region below is every git hook's; this one runs no
+# freshness check, so its watchdog, budget and _why go unused.
+# shellcheck disable=SC2329,SC2154
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
 [[ "${DOC_SUPERPOWERS_QUIET:-}" == "1" ]] && exit 0
 
 [[ -n "${DOC_TOOLS:-}" ]] || DOC_TOOLS=$(__DOC_TOOLS_RESOLVE__)
 [[ -f "$DOC_TOOLS" ]] || exit 0
+
+# >>> shared hook settings: one text in every git hook and in hook-lib.sh (test-hooks.sh pins the copies) >>>
+# _hook_conf <key>: <key>'s value in .claude/doc-superpowers/hooks.conf (a
+# "key = value" file: # comments, the last line for a key wins), "" when
+# unset. Read by awk, never sourced; relative to the repository top, where
+# every hook runs. No file, no process.
+_hook_conf() {
+  [ -f .claude/doc-superpowers/hooks.conf ] || return 0
+  awk -v k="$1" '
+    /^[ \t]*#/ { next }
+    { i = index($0, "="); if (i == 0) next
+      key = substr($0, 1, i - 1); gsub(/^[ \t]+|[ \t\r]+$/, "", key)
+      if (key != k) next
+      v = substr($0, i + 1); gsub(/^[ \t]+|[ \t\r]+$/, "", v); val = v; seen = 1 }
+    END { if (seen) print val }' .claude/doc-superpowers/hooks.conf 2>/dev/null
+}
+
+# _advice <action>: the command the hooks' advice names for <action>:
+# '/doc-superpowers <action>' by default; "" when DOC_SUPERPOWERS_ADVICE
+# (else hooks.conf's advice key) is off; any other value is a template, its
+# every {action} replaced by <action> (on or default: the default).
+_advice() {
+  local t="${DOC_SUPERPOWERS_ADVICE:-}"
+  [ -n "$t" ] || t=$(_hook_conf advice)
+  t="${t//[$'\n\r']/ }"
+  case "$t" in
+    "" | on | default) printf '/doc-superpowers %s' "$1" ;;
+    off) ;;
+    *) printf '%s' "${t//\{action\}/$1}" ;;
+  esac
+}
+
+# _hook_budget: the git hooks' freshness-check budget in seconds:
+# DOC_SUPERPOWERS_HOOK_BUDGET, else hooks.conf's hook_budget, else 20; 0 is
+# no budget, and a value that is not digits reads as the default.
+_hook_budget() {
+  local b="${DOC_SUPERPOWERS_HOOK_BUDGET:-}"
+  [ -n "$b" ] || b=$(_hook_conf hook_budget)
+  case "$b" in
+    "" | *[!0-9]*) b=20 ;;
+  esac
+  printf '%s' "$((10#$b))"
+}
+
+# _bounded <function>: run <function> in its own process group, its stdout to
+# $work/out and stderr to $work/err, with a watchdog that, after BUDGET
+# seconds, first leaves a marker and then kills the whole group. Neither job
+# keeps the hook's stdout open. The watchdog is always killed and reaped
+# before the verdict: whether it fired is read from the marker, never from
+# whether it is still alive (it can be alive between its kill and its exit).
+# Returns <function>'s status, or 124 when it was cut short. BUDGET 0: no
+# watchdog.
+_bounded() {
+  local pid wd rc=0
+  if [ "${BUDGET:-0}" = 0 ]; then
+    "$1" >"$work/out" 2>"$work/err" </dev/null || rc=$?
+    return "$rc"
+  fi
+  set -m
+  "$1" >"$work/out" 2>"$work/err" </dev/null &
+  pid=$!
+  ( sleep "$BUDGET"; : > "$work/timedout"; kill -TERM -- "-$pid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
+  wd=$!
+  set +m
+  wait "$pid" 2>/dev/null || rc=$?
+  kill -TERM -- "-$wd" 2>/dev/null
+  wait "$wd" 2>/dev/null
+  # A check that finished cleanly is used even if the watchdog fired after it.
+  if [[ "$rc" != 0 && -e "$work/timedout" ]]; then
+    rc=124
+  fi
+  return "$rc"
+}
+
+# Why a check failed: the first ERROR: line of $work/err, else its first
+# other non-NOTE line, without the ERROR: prefix or a final period.
+_why() {
+  local why
+  why=$(awk '/^ERROR: / { print; e = 1; exit } NF && !/^NOTE: / && o == "" { o = $0 } END { if (!e) print o }' "$work/err")
+  why="${why#ERROR: }"
+  printf '%s' "${why%.}"
+}
+# <<< shared hook settings <<<
 
 # --- Spec claims (advisory) ---
 # Every doc-tools call reads /dev/null: the ref lines are the loop's stdin.
@@ -90,6 +178,8 @@ _claims_push() {
 }
 # attest judges HEAD: run once per push, for the first ref pushing HEAD's oid.
 claims_attested=0
+# The release reminder's command ("" when the advice is off).
+adv=$(_advice release)
 
 while read -r local_ref local_oid remote_ref remote_oid _ || [[ -n "${local_ref:-}" ]]; do
   case "$local_ref" in
@@ -109,7 +199,7 @@ while read -r local_ref local_oid remote_ref remote_oid _ || [[ -n "${local_ref:
   [[ "$commit_count" -le 5 ]] && continue
   echo ""
   echo "doc-superpowers: $commit_count commits since $latest_tag on ${remote_ref#refs/heads/}"
-  echo "  Consider running '/doc-superpowers release' to draft release notes."
+  [[ -z "$adv" ]] || echo "  Consider running '$adv' to draft release notes."
   echo ""
 done
 
