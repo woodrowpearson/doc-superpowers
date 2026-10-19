@@ -102,6 +102,7 @@ After `init` completes, set up automated freshness monitoring:
 
 # Or pick specific tiers
 /doc-superpowers hooks install --git           # Git hooks only
+/doc-superpowers hooks install --git --merge-driver-only  # Only the doc-index merge driver, no hooks
 /doc-superpowers hooks install --claude        # Claude Code hooks only (per-user)
 /doc-superpowers hooks install --ci            # GitHub Actions: the 2 shell workflows
 
@@ -116,7 +117,7 @@ After `init` completes, set up automated freshness monitoring:
 
 The installer acts on the repository's top level from any subdirectory, puts git hooks where git runs them, keeps a hook of yours (a marked block after its `#!` line runs ours), and refuses — writing nothing — a symbolic link on a path it would write or a global or system `core.hooksPath`. The Claude tier is per-user: `.claude/settings.local.json` and `.claude/hooks/doc-superpowers/` are excluded from git through git's `info/exclude` (`git rev-parse --git-path info/exclude`, which is not `.git/info/exclude` in a linked worktree or a submodule).
 
-**Upgrading from 2.x?** Re-run every tier you use (`/doc-superpowers hooks status` marks each hook, script or setting another version installed `⚠ … outdated`), and read the README's [Upgrading from 2.x](../../README.md#upgrading-from-2x): v2's AI workflows stay installed until you remove them, the Claude tier's files must be untracked (each teammate then re-runs `install --claude`), and design specs typed `spec` are retyped with `set-doc-type`.
+**Upgrading from 2.x?** Re-run every tier you use (`/doc-superpowers hooks status` marks each hook, script or setting another version installed `⚠ … outdated`), and read the README's [Upgrading from 2.x](../../README.md#upgrading-from-2x): v2's AI workflows stay installed until you remove them, the Claude tier's files must be untracked (each teammate then re-runs `install --claude`), design specs typed `spec` are retyped with `set-doc-type` (`--stdin` for many), and `doc-tools.sh upgrade-entries --all` fills a v2 index's `code_oids` without re-baselining any doc.
 
 The CI tier records its choices — the workflow set, `--base-branch`, `--cron`, `--ci-strict` — in `.claude/doc-superpowers/installed.json` (commit it); a plain `install --ci` reproduces them. A workflow you uninstalled with `/doc-superpowers hooks uninstall --ci --workflows=doc-release` is NOT re-added on the next no-flag `install --ci` — re-add it with `--workflows=doc-release` (explicit beats state) or `--force` (bypass state-respect). Use `--transient` on uninstall to mark "remove for now but re-add automatically next time."
 

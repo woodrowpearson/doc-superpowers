@@ -491,6 +491,55 @@ test_update_index_when_every_target_is_skipped() {
   teardown
 }
 
+# shellcheck as a gate (#31), at warning severity, over every shell script the
+# plugin ships and this repository's maintainer scripts. A finding is fixed,
+# or disabled on its own line with the reason beside it — never file-wide.
+# No shellcheck: a loud SKIP locally, a FAIL under DOC_SP_REQUIRE_SHELLCHECK=1
+# (tests.yml, check-ci.sh).
+test_shipped_scripts_pass_shellcheck() {
+  echo "test: the shipped shell scripts (and the maintainer scripts) pass shellcheck at warning severity"
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    if [ "${DOC_SP_REQUIRE_SHELLCHECK:-0}" = 1 ]; then
+      TESTS_RUN=$((TESTS_RUN + 1))
+      FAIL=$((FAIL + 1))
+      # shellcheck disable=SC2059
+      printf "${RED}  FAIL${NC}: shellcheck gate — shellcheck not found and DOC_SP_REQUIRE_SHELLCHECK=1\n"
+    else
+      record_skip "shellcheck gate — shellcheck not found (install shellcheck to run it)"
+    fi
+    return 0
+  fi
+  local root rc out f n=0 legs=()
+  local targets=()
+  root="$(cd "$SCRIPT_DIR/.." && pwd)"
+  # Paths relative to the root, so `-x` follows the scripts' source
+  # directives the way they are written.
+  local s="$root/scripts"
+  for f in "$s"/doc-tools.sh "$s"/merge-doc-index.sh "$s"/ledger/*.sh "$s"/adapters/*.sh \
+    "$s"/hooks/*.sh "$s"/hooks/claude/*.sh "$s"/hooks/ci/doc-pr-release/*.sh \
+    "$s"/hooks/ci/doc-superpowers-steps/*.sh "$s"/hooks/git/* \
+    "$s"/check-ci.sh "$s"/check-self-install.sh "$s"/leak-scan.sh "$s"/install-maintainer-hooks.sh; do
+    [ -f "$f" ] || continue
+    f="${f#"$root"/}"
+    case "$f" in
+      # The ledger legs have no #! line: install.sh wraps them into a hook,
+      # as POSIX sh.
+      scripts/hooks/git/ledger-*) legs+=("$f") ;;
+      *) targets+=("$f") ;;
+    esac
+    n=$((n + 1))
+  done
+  assert_true "the gate covers the shipped scripts ($n found)" test "$n" -ge 40
+  rc=0
+  out=$(cd "$root" && shellcheck -S warning -x "${targets[@]}" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "shellcheck -S warning: no finding in ${#targets[@]} scripts${out:+ —
+$(head -n 40 <<<"$out")}"
+  rc=0
+  out=$(cd "$root" && shellcheck -S warning -s sh ${legs[@]+"${legs[@]}"} 2>&1) || rc=$?
+  assert_eq "0" "$rc" "shellcheck -S warning -s sh: no finding in the ${#legs[@]} ledger hook legs${out:+ —
+$(head -n 40 <<<"$out")}"
+}
+
 test_scripts_are_free_of_bash4_only_constructs() {
   # `local -A` (bash 4.0+) shipped in cmd_fragments_merge and aborted every
   # doc-tools.sh invocation under macOS's /bin/bash 3.2 with
@@ -4533,6 +4582,8 @@ test_i4_arity_errors_exit_2() {
       "set-implementation docs/architecture.md docs/x.md --ref PR:1 --status complete" \
       "set-code-refs" "set-code-refs docs/architecture.md" "set-code-refs --refs src/" \
       "set-code-refs docs/architecture.md docs/x.md --refs src/" "move-entry --stdin docs/architecture.md" \
+      "set-code-refs --stdin docs/architecture.md" "set-doc-type --stdin docs/architecture.md" \
+      "upgrade-entries" "upgrade-entries --all docs/architecture.md" \
       "check-version extra" "fragments list extra" "tools status extra" "help status extra"; do
     rc=0
     # shellcheck disable=SC2086  # $cmd is a fixed word list
@@ -6521,6 +6572,152 @@ test_i10_check_version_reads_the_first_release_heading() {
   teardown
 }
 
+# check-version --tag (#28): the version RELEASE-NOTES.md names must have its
+# v<version> tag on the remote — the v3 AI workflow templates clone that tag
+# (prepare-agent.sh), so a release whose tag never reached origin breaks every
+# consumer's AI workflows. A local bare repository stands in for origin.
+test_check_version_tag_on_origin() {
+  echo "test: check-version --tag fails when v<version> is not a tag on origin (--warn: a warning; --remote names another remote)"
+  setup
+  setup_version_files
+  local origin rc out
+  origin=$(harness_mktemp_d origin)
+  git init -q --bare "$origin"
+  git remote add origin "$origin"
+  git add -A && git commit -qm "release: v1.0.0"
+  git push -q origin main 2>/dev/null
+
+  rc=0
+  out=$("$DOC_TOOLS" check-version 2>&1) || rc=$?
+  assert_eq "0" "$rc" "without --tag: the manifests alone (no remote is read)"
+  assert_not_contains "$out" "tag" "…and nothing is said about tags"
+
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "1" "$rc" "--tag, no tag on origin: exit 1"
+  assert_contains "$out" "v1.0.0 is not a tag on origin" "…naming the tag and the remote"
+  assert_contains "$out" "git push origin v1.0.0" "…and how to push it"
+
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag --warn 2>&1) || rc=$?
+  assert_eq "0" "$rc" "--tag --warn: a missing tag does not fail"
+  assert_contains "$out" "WARN" "…but is reported as a warning"
+  assert_contains "$out" "v1.0.0 is not a tag on origin" "…naming the tag"
+
+  git tag v1.0.0
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a local tag only: still exit 1 (origin is what consumers clone)"
+
+  git push -q origin v1.0.0 2>/dev/null
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "0" "$rc" "the tag pushed: exit 0"
+  assert_contains "$out" "tag v1.0.0 on origin" "…reported as ok"
+
+  # An annotated tag counts; a tag that only starts with the name does not.
+  "$DOC_TOOLS" bump-version 1.1.0 >/dev/null 2>&1
+  printf '%s\n' '# Release Notes' '' '## v1.1.0 (2026-02-01)' '' '## v1.0.0 (2026-01-01)' > RELEASE-NOTES.md
+  git add -A && git commit -qm "release: v1.1.0"
+  git tag v1.1.0-rc.1 && git push -q origin v1.1.0-rc.1 2>/dev/null
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "1" "$rc" "only v1.1.0-rc.1 on origin: v1.1.0 is missing (exact name)"
+  git tag -a v1.1.0 -m "v1.1.0" && git push -q origin v1.1.0 2>/dev/null
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "0" "$rc" "an annotated v1.1.0 on origin: exit 0"
+
+  # A manifest mismatch still fails with the tag present.
+  echo '{"name":"test","version":"1.0.9"}' > gemini-extension.json
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a manifest mismatch fails even with the tag on origin"
+  assert_contains "$out" "MISMATCH" "…naming the mismatch"
+  "$DOC_TOOLS" bump-version 1.1.0 >/dev/null 2>&1
+
+  # --remote: another remote; one that cannot be read fails (--warn: warns).
+  git remote add upstream "$SUITE_TMP/no-such-remote.git"
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag --remote upstream 2>&1) || rc=$?
+  assert_eq "1" "$rc" "an unreadable remote: exit 1, never a vacuous pass"
+  assert_contains "$out" "cannot read the tags of upstream" "…saying so"
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag --warn --remote upstream 2>&1) || rc=$?
+  assert_eq "0" "$rc" "an unreadable remote with --warn: exit 0"
+  assert_contains "$out" "WARN" "…as a warning"
+
+  # --warn and --remote only qualify --tag.
+  assert_exit_code "2" "--warn without --tag: a usage error" "$DOC_TOOLS" check-version --warn
+  assert_exit_code "2" "--remote without --tag: a usage error" "$DOC_TOOLS" check-version --remote origin
+  teardown
+}
+
+# check-version --tag (#28): the tag must also point at a commit whose
+# RELEASE-NOTES.md names that version first — a tag placed on the pre-bump
+# commit is a release consumers clone with the old version's files.
+test_check_version_tag_points_at_release() {
+  echo "test: check-version --tag fails when the tag points at a commit whose RELEASE-NOTES.md first release heading is another version (a commit missing locally: a warning)"
+  setup
+  setup_version_files
+  local origin rc out pre
+  origin=$(harness_mktemp_d origin-placed)
+  git init -q --bare "$origin"
+  git remote add origin "$origin"
+  git add -A && git commit -qm "release: v1.0.0"
+  pre=$(git rev-parse HEAD)
+  "$DOC_TOOLS" bump-version 1.1.0 >/dev/null 2>&1
+  printf '%s\n' '# Release Notes' '' '## v1.1.0 (2026-02-01)' '' '## v1.0.0 (2026-01-01)' > RELEASE-NOTES.md
+  git add -A && git commit -qm "release: v1.1.0"
+  git push -q origin main 2>/dev/null
+
+  # Misplaced: v1.1.0 on the pre-bump commit (lightweight, then annotated).
+  git tag v1.1.0 "$pre" && git push -q origin v1.1.0 2>/dev/null
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a tag on the pre-bump commit: exit 1"
+  assert_contains "$out" "MISPLACED" "…reported as misplaced"
+  assert_contains "$out" "v1.0.0" "…naming the version that commit's RELEASE-NOTES.md carries"
+  assert_contains "$out" "${pre:0:12}" "…and the commit"
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag --warn 2>&1) || rc=$?
+  assert_eq "0" "$rc" "misplaced with --warn: exit 0"
+  assert_contains "$out" "WARN" "…as a warning"
+  git push -q --delete origin v1.1.0 2>/dev/null && git tag -d v1.1.0 >/dev/null
+  git tag -a v1.1.0 -m "v1.1.0" "$pre" && git push -q origin v1.1.0 2>/dev/null
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "1" "$rc" "an annotated tag on the pre-bump commit: exit 1 (the tag object is peeled to its commit)"
+  assert_contains "$out" "MISPLACED" "…misplaced"
+
+  # Placed on the release commit: ok.
+  git push -q --delete origin v1.1.0 2>/dev/null && git tag -d v1.1.0 >/dev/null
+  git tag -a v1.1.0 -m "v1.1.0" && git push -q origin v1.1.0 2>/dev/null
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "0" "$rc" "the tag on the release commit: exit 0"
+  assert_not_contains "$out" "MISPLACED" "…not misplaced"
+
+  # The tag's commit is not in this clone: a warning, never a failure.
+  local other
+  other=$(harness_mktemp_d other-clone)
+  git clone -q "$origin" "$other/w" 2>/dev/null
+  (
+    cd "$other/w"
+    git -c user.name=t -c user.email=t@t commit -q --allow-empty -m "elsewhere"
+    git push -q --delete origin v1.1.0 2>/dev/null && git tag -d v1.1.0 >/dev/null
+    git -c user.name=t -c user.email=t@t tag -a v1.1.0 -m "v1.1.0 elsewhere"
+    git push -q origin v1.1.0 2>/dev/null
+  )
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "0" "$rc" "the tag's commit not in this clone: exit 0"
+  assert_contains "$out" "WARN" "…a warning"
+  assert_contains "$out" "not in this clone" "…saying the commit is unavailable here"
+  assert_contains "$out" "git fetch origin tag v1.1.0" "…and how to fetch it"
+  teardown
+}
+
 test_i10_version_verbs_need_a_manifest() {
   echo "test: bump-version / check-version fail when no manifest is found (run outside the repo root)"
   setup
@@ -6932,32 +7129,21 @@ test_vendored_ledger_runs() {
   teardown
 }
 
-# _tests_yml_drift_step <out>: the run: body of tests.yml's "Self-installed
-# CI tier matches its templates" step, as a script.
-_tests_yml_drift_step() {
-  awk '
-    /- name: Self-installed CI tier matches its templates/ { found = 1; next }
-    found && !inrun && /^[[:space:]]*run:[[:space:]]*[|]/ { match($0, /^[[:space:]]*/); ind = RLENGTH; inrun = 1; next }
-    inrun {
-      if ($0 ~ /^[[:space:]]*$/) { print ""; next }
-      match($0, /^[[:space:]]*/)
-      if (RLENGTH > ind) { print; next }
-      exit
-    }' "$SCRIPT_DIR/../.github/workflows/tests.yml" > "$1"
-}
-
 test_tests_yml_drift_step_covers_vendored_ledger() {
-  echo "test: tests.yml's self-install drift step checks a vendored ledger helper set against scripts/ledger/ and scripts/adapters/ (byte copies, scripts executable, none missing; present beside a claims workflow)"
+  echo "test: the self-install drift check (scripts/check-self-install.sh, run by tests.yml through check-ci.sh) checks a vendored ledger helper set against scripts/ledger/ and scripts/adapters/ (byte copies, scripts executable, none missing; present beside a claims workflow)"
   setup
-  local root step rt rc out
+  local root step rt rc out yml
   root="$(cd "$SCRIPT_DIR/.." && pwd)"
-  step=$(harness_mktemp drift-step)
-  _tests_yml_drift_step "$step"
-  assert_contains "$(cat "$step")" "cmp scripts/doc-tools.sh .github/scripts/doc-tools.sh" "the step body is extracted"
+  yml=$(cat "$root/.github/workflows/tests.yml")
+  # shellcheck disable=SC2016  # the workflow's literal text
+  assert_contains "$yml" 'scripts/check-ci.sh --bash "$BASH_BIN" --verbose self-install' \
+    "tests.yml runs the drift check through check-ci.sh"
+  assert_not_contains "$yml" "cmp scripts/doc-tools.sh" "…and carries no inline copy of it (#27: CI and check-ci.sh cannot drift apart)"
   # A copy of the plugin, its CI tier freshly installed with this repo's choices.
   mkdir -p scripts skills/doc-superpowers .claude/doc-superpowers
   cp -R "$root/scripts/ledger" "$root/scripts/adapters" "$root/scripts/hooks" scripts/
-  cp "$root/scripts/doc-tools.sh" "$root/scripts/merge-doc-index.sh" scripts/
+  cp "$root/scripts/doc-tools.sh" "$root/scripts/merge-doc-index.sh" "$root/scripts/check-self-install.sh" scripts/
+  step="$TEST_DIR/scripts/check-self-install.sh"
   cp "$root/skills/doc-superpowers/SKILL.md" skills/doc-superpowers/
   cp "$root/RELEASE-NOTES.md" "$root/.gitattributes" .
   cp "$root/.claude/doc-superpowers/installed.json" .claude/doc-superpowers/
@@ -6966,8 +7152,9 @@ test_tests_yml_drift_step_covers_vendored_ledger() {
   assert_eq "0" "$rc" "precondition: install --ci in the copy exits 0"
   rt=$(harness_mktemp_d drift-rt)
   rc=0
-  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
-  assert_eq "0" "$rc" "a fresh install passes the drift step"
+  out=$(cd "$SUITE_TMP" && RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "a fresh install passes the drift step (run from another directory: it checks its own checkout) ($(printf '%s' "$out" | grep -m1 '::error' || true))"
+  assert_contains "$out" "Self-installed CI tier matches its templates:" "…and says so"
   "$BASH_BIN" scripts/doc-tools.sh tools install --helper ledger >/dev/null 2>&1
   rc=0
   out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
@@ -7416,6 +7603,311 @@ test_rf_doc_commits_early_stop_with_sigpipe_ignored() {
 
 # --- Runner ---
 
+# --- Batch index verbs (GH #21 upgrade-entries, GH #23 --stdin forms) ---
+
+# "<status>|<commits_behind>|<code_refs_changed>" of every doc in a report, one
+# line per doc, sorted by key.
+_bv_verdicts() {
+  jq -r '.docs | to_entries | sort_by(.key)[]
+    | "\(.key) \(.value.status)|\(.value.commits_behind)|\(.value.code_refs_changed // [] | join(","))"' <<<"$1"
+}
+
+# Turn every entry of the index into a pre-v3 one: no code_oids, code_commit
+# the newest commit touching its refs at HEAD (what a v2 update-index stored),
+# a fixed last_verified, schema_version 2.
+_bv_make_legacy() {
+  local k refs cc map
+  map=$(while IFS= read -r k; do
+    refs=$(jq -r --arg k "$k" '.docs[$k].code_refs[]' docs/.doc-index.json)
+    cc=""
+    # shellcheck disable=SC2086  # refs are plain test paths
+    [ -z "$refs" ] || cc=$(git rev-list -1 HEAD -- $refs)
+    printf '%s\t%s\n' "$k" "$cc"
+  done < <(jq -r '.docs | keys_unsorted[]' docs/.doc-index.json) \
+    | jq -R -n '[inputs | split("\t") | {key: .[0], value: (if .[1] == "" then null else .[1] end)}] | from_entries')
+  # shellcheck disable=SC2016  # jq program
+  _i3_edit --argjson m "$map" '.schema_version = 2
+    | .docs |= with_entries(.value |= (del(.code_oids) | .last_verified = "2026-01-01T00:00:00Z"))
+    | .docs |= with_entries(.value.code_commit = $m[.key])'
+}
+
+test_gh21_upgrade_entries_fills_code_oids_without_a_baseline_reset() {
+  echo "test: GH #21: upgrade-entries fills code_oids from code_commit, keeps last_verified and every verdict, reports what it cannot fill"
+  setup
+  local k
+  printf 'a1\n' > src/a.js
+  printf 'b1\n' > src/b.js
+  for k in d e f g h i j n; do echo "# $k" > "docs/$k.md"; done
+  _i1_commit "docs and code"
+  printf '%s\n' docs/d.md:src/a.js:guide docs/e.md:src/,src/b.js:guide docs/f.md:src/a.js:guide \
+    docs/g.md:src/b.js:guide docs/h.md:src/a.js,src/nope.js:guide docs/i.md:docs/:guide \
+    docs/j.md:src/a.js:guide docs/n.md::guide | "$DOC_TOOLS" build-index 2>/dev/null
+  _bv_make_legacy
+  # f has no code_commit; g one this repository does not hold; j a glob ref
+  # (a v2 pathspec), which names nothing as a literal path.
+  # shellcheck disable=SC2016  # jq program
+  _i3_edit '.docs["docs/f.md"].code_commit = null
+    | .docs["docs/g.md"].code_commit = "0123456789abcdef0123456789abcdef01234567"
+    | .docs["docs/j.md"].code_refs = ["src/*.js"]'
+  _i1_commit "legacy index"
+  printf 'a2\n' > src/a.js
+  _i1_commit a2
+  local before cf_before rc=0 out json
+  before=$(cat docs/.doc-index.json)
+  cf_before=$("$DOC_TOOLS" check-freshness)
+  assert_eq "stale|1|src/a.js" "$(_i1_verdict "$cf_before" docs/d.md)" "precondition: the legacy d reads stale, 1 behind"
+  out=$("$DOC_TOOLS" upgrade-entries --all 2>&1) || rc=$?
+  assert_eq "1" "$rc" "--all with entries it cannot fill: exit 1 (the rest applied)"
+  assert_contains "$out" "Upgraded 4 entries (code_oids filled from code_commit; last_verified unchanged):" "reports the upgraded entries"
+  assert_contains "$out" "Could not upgrade 4 entries" "…and the ones it could not fill"
+  assert_contains "$out" "docs/f.md: no code_commit is recorded" "an entry without code_commit is named"
+  assert_contains "$out" "docs/g.md: its code_commit 0123456789abcdef0123456789abcdef01234567 is not a commit in this repository" \
+    "a code_commit the repository lacks is named"
+  assert_contains "$out" "docs/h.md: code ref 'src/nope.js' is missing at its code_commit" "a ref missing at code_commit is named"
+  assert_contains "$out" "refs are literal paths since schema 3" "…with why a glob no longer matches (literal paths)"
+  assert_contains "$out" "docs/j.md: code ref 'src/*.js' is missing" "…a glob ref too"
+  json=$(cat docs/.doc-index.json)
+  local cc
+  cc=$(jq -r '.docs["docs/d.md"].code_commit' <<<"$json")
+  assert_json_field "$json" '.docs["docs/d.md"].code_oids["src/a.js"]' "$(git rev-parse "$cc:src/a.js")" \
+    "a ref's id is its content in code_commit's tree, not HEAD's"
+  cc=$(jq -r '.docs["docs/e.md"].code_commit' <<<"$json")
+  assert_json_field "$json" '.docs["docs/e.md"].code_oids | "\(.["src/"]) \(.["src/b.js"])"' \
+    "$(git rev-parse "$cc:src") $(git rev-parse "$cc:src/b.js")" "a directory ref records its tree, in ref order"
+  assert_json_field "$json" '.docs["docs/n.md"].code_oids | tojson' "{}" "an entry without refs gets empty code_oids"
+  assert_json_field "$json" '[.docs[] | select(has("code_oids"))] | length' "4" "exactly the fillable entries were written"
+  assert_eq "$(jq -c '.docs | map_values(del(.code_oids))' <<<"$before")" "$(jq -c '.docs | map_values(del(.code_oids))' <<<"$json")" \
+    "nothing but code_oids changed: last_verified, code_commit, code_refs, every field and key order kept"
+  assert_json_field "$json" '.schema_version' "3" "the write stamps schema_version 3"
+  # Not a baseline reset: every verdict a commit-model entry had, it keeps
+  # under the content model (i, whose ref covers the index, aside: the
+  # legacy model saw every index commit as a change to docs/).
+  local cf_after
+  cf_after=$("$DOC_TOOLS" check-freshness)
+  assert_eq "$(_bv_verdicts "$cf_before" | grep -v '^docs/i.md ')" "$(_bv_verdicts "$cf_after" | grep -v '^docs/i.md ')" \
+    "every verdict is unchanged (status, commits_behind, code_refs_changed)"
+  assert_eq "current|0|" "$(_i1_verdict "$cf_after" docs/i.md)" \
+    "a ref covering the doc-index is recorded without it (current, not stale on every index write)"
+  # Idempotent: a second run writes nothing.
+  cp docs/.doc-index.json docs/.idx.before
+  rc=0
+  out=$("$DOC_TOOLS" upgrade-entries --all 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a re-run still reports the unfillable entries (exit 1)"
+  assert_contains "$out" "Upgraded 0 entries" "…and upgrades nothing"
+  assert_exit_code 0 "…writing nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  rc=0
+  out=$("$DOC_TOOLS" upgrade-entries docs/d.md docs/e.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "named entries that have code_oids: exit 0"
+  assert_contains "$out" "Unchanged 2 entries (already has code_oids)" "…reported unchanged"
+  assert_exit_code 0 "…writing nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  # --stdin: doc paths, one per line; an unindexed one is reported (exit 1).
+  rc=0
+  out=$(printf 'docs/f.md\r\n\ndocs/nope.md\ndocs/d.md\n' | "$DOC_TOOLS" upgrade-entries --stdin 2>&1) || rc=$?
+  assert_eq "1" "$rc" "--stdin with an unindexed path and an unfillable entry: exit 1"
+  assert_contains "$out" "'docs/nope.md' not found in index" "the unindexed path is named"
+  assert_contains "$out" "docs/f.md: no code_commit is recorded" "the unfillable entry is named"
+  assert_exit_code 0 "…and nothing was written" cmp -s docs/.idx.before docs/.doc-index.json
+  # Usage.
+  rc=0
+  "$DOC_TOOLS" upgrade-entries >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "no target: exit 2 (usage)"
+  rc=0
+  "$DOC_TOOLS" upgrade-entries --all docs/d.md >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "--all with a path: exit 2"
+  rc=0
+  "$DOC_TOOLS" upgrade-entries --all --stdin </dev/null >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "--all with --stdin: exit 2"
+  out=$("$DOC_TOOLS" --help 2>&1) || true
+  assert_contains "$out" "upgrade-entries <doc_path>... | --stdin < doc paths | --all" "--help lists upgrade-entries"
+  rm -f docs/.idx.before
+  teardown
+}
+
+# The upgrade is batched (one jq pass, one batch-check, one _oid_lookup, one
+# write) — and so are the --stdin forms: 500 entries well inside a bound
+# that a per-entry process would blow on a slow runner.
+test_gh21_gh23_batches_scale() {
+  echo "test: GH #21/#23: upgrade-entries --all, set-doc-type --stdin and set-code-refs --stdin on 500 entries"
+  setup
+  local i
+  for i in $(seq 1 25); do printf 'm%s\n' "$i" > "src/m$i.js"; done
+  _i1_commit modules
+  local head
+  head=$(git rev-parse HEAD)
+  # 500 pre-v3 entries, two refs each (docs need not exist on disk here).
+  # shellcheck disable=SC2016  # jq program
+  jq -n --arg cc "$head" '{schema_version: 2, generated_at: "2026-01-01T00:00:00Z",
+      docs: ([range(1; 501) as $i | {key: "docs/d\($i).md", value: {content_hash: null,
+        code_refs: ["src/m\($i % 25 + 1).js", "src/"], code_commit: $cc, doc_type: "spec",
+        replaces: null, superseded_by: null, last_verified: "2026-01-01T00:00:00Z"}}] | from_entries)}' \
+    > docs/.doc-index.json
+  _i1_commit "legacy index"
+  local t0 rc=0 out el1 el2 el3
+  t0=$SECONDS
+  out=$("$DOC_TOOLS" upgrade-entries --all 2>&1) || rc=$?
+  el1=$((SECONDS - t0))
+  assert_eq "0" "$rc" "upgrade-entries --all on 500 entries exits 0 (${el1}s; output: ${out:0:200})"
+  assert_json_field "$(cat docs/.doc-index.json)" '[.docs[] | select((.code_oids | length) == 2)] | length' "500" "…and fills every one"
+  assert_true "…within 60 s (took ${el1}s)" test "$el1" -lt 60
+  rc=0
+  t0=$SECONDS
+  out=$(for i in $(seq 1 500); do printf 'docs/d%s.md\tdesign-spec\n' "$i"; done | "$DOC_TOOLS" set-doc-type --stdin 2>&1) || rc=$?
+  el2=$((SECONDS - t0))
+  assert_eq "0" "$rc" "set-doc-type --stdin on 500 lines exits 0 (${el2}s)"
+  assert_json_field "$(cat docs/.doc-index.json)" '[.docs[] | select(.doc_type == "design-spec")] | length' "500" "…and retypes every one"
+  assert_true "…within 60 s (took ${el2}s)" test "$el2" -lt 60
+  rc=0
+  t0=$SECONDS
+  out=$(for i in $(seq 1 500); do printf 'docs/d%s.md\tsrc/m%s.js\n' "$i" "$((i % 25 + 1))"; done | "$DOC_TOOLS" set-code-refs --stdin 2>&1) || rc=$?
+  el3=$((SECONDS - t0))
+  assert_eq "0" "$rc" "set-code-refs --stdin on 500 lines exits 0 (${el3}s)"
+  assert_json_field "$(cat docs/.doc-index.json)" '[.docs[] | select(.code_refs | length == 1)] | length' "500" "…and sets every one"
+  assert_true "…within 120 s (took ${el3}s)" test "$el3" -lt 120
+  echo "  timing: upgrade-entries ${el1}s, set-doc-type --stdin ${el2}s, set-code-refs --stdin ${el3}s (500 entries)"
+  teardown
+}
+
+test_gh23_set_doc_type_stdin() {
+  echo "test: GH #23: set-doc-type --stdin retypes a batch in one write, all or nothing, exactly as the single form"
+  setup
+  local k
+  for k in a b c; do echo "# $k" > "docs/$k.md"; done
+  _i1_commit docs
+  printf '%s\n' docs/architecture.md:src/:architecture docs/a.md:src/:spec docs/b.md:src/:plan docs/c.md:src/:spec \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  "$DOC_TOOLS" update-index docs/a.md >/dev/null 2>&1
+  _i1_commit index
+  local single
+  single=$(harness_mktemp_d gh23-sdt)
+  cp -R . "$single/repo"
+  (
+    cd "$single/repo" || exit 1
+    "$DOC_TOOLS" set-doc-type docs/a.md design-spec >/dev/null 2>&1
+    "$DOC_TOOLS" set-doc-type docs/b.md guide >/dev/null 2>&1
+  )
+  local out rc=0
+  out=$(printf 'docs/a.md\tdesign-spec\r\n\n  docs/b.md\t guide \ndocs/c.md\tspec\ndocs/a.md\tdesign-spec\n' \
+          | "$DOC_TOOLS" set-doc-type --stdin 2>&1) || rc=$?
+  assert_eq "0" "$rc" "set-doc-type --stdin exits 0 (output: ${out:0:300})"
+  assert_contains "$out" "Set doc_type of 2 entries:" "reports the batch"
+  assert_contains "$out" "  docs/a.md (spec → design-spec)" "…entry by entry, old → new"
+  assert_contains "$out" "Unchanged 1 entry (doc_type already 'spec'; nothing written)" "an entry already of its type is unchanged"
+  assert_contains "$out" "'docs/a.md' is listed more than once with the same doc_type" "a repeated line is applied once"
+  assert_contains "$out" "NOTE: 'docs/a.md' is now a record doc" "…with the record-doc note"
+  assert_contains "$out" "NOTE: 'docs/b.md' is now a living doc" "…and the living-doc note"
+  assert_eq "$(jq -c '.docs' "$single/repo/docs/.doc-index.json")" "$(jq -c '.docs' docs/.doc-index.json)" \
+    "the batch leaves exactly the index the single form leaves"
+  # All or nothing: every problem is reported, and nothing is written.
+  cp docs/.doc-index.json docs/.idx.before
+  rc=0
+  out=$(printf 'docs/c.md\tguide\ndocs/nope.md\tplan\ndocs/architecture.md\tdesign_spec\n%s\ndocs/b.md\tplan\ndocs/b.md\tissue\ndocs/c.md\t\n' \
+          "docs/a.md guide" | "$DOC_TOOLS" set-doc-type --stdin 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a batch with bad lines exits 1"
+  assert_exit_code 0 "…and writes nothing, not even its good line" cmp -s docs/.idx.before docs/.doc-index.json
+  assert_contains "$out" "'docs/nope.md' not found in index" "an unindexed doc is reported"
+  assert_contains "$out" "unknown doc_type 'design_spec' for 'docs/architecture.md'" "an unknown type is reported"
+  assert_contains "$out" "line 4" "a line without a TAB is reported by number"
+  assert_contains "$out" "'docs/b.md' is listed more than once with different doc_types" "a doc given two types is reported"
+  assert_contains "$out" "nothing written" "…and the batch is refused as a whole"
+  # An empty batch is a no-op; --stdin takes no arguments.
+  rc=0
+  out=$("$DOC_TOOLS" set-doc-type --stdin </dev/null 2>&1) || rc=$?
+  assert_eq "0" "$rc" "an empty batch exits 0"
+  assert_exit_code 0 "…and writes nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  rc=0
+  "$DOC_TOOLS" set-doc-type --stdin docs/a.md plan </dev/null >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "--stdin with arguments is a usage error"
+  rm -f docs/.idx.before
+  teardown
+}
+
+test_gh23_set_code_refs_stdin() {
+  echo "test: GH #23: set-code-refs --stdin sets a batch in one write (TAB lines, or --null records), all or nothing"
+  setup
+  local k
+  printf 'a1\n' > src/a.js
+  printf 'b1\n' > src/b.js
+  mkdir -p "src/x,y"
+  printf 'c1\n' > "src/x,y/c.js"
+  for k in d e f g; do echo "# $k" > "docs/$k.md"; done
+  _i1_commit "docs written"
+  printf 'b2\n' > src/b.js
+  _i1_commit b2
+  printf '%s\n' docs/d.md:src/a.js:guide docs/e.md:src/a.js,src/b.js:guide docs/f.md:src/:guide \
+    docs/g.md:src/a.js:guide | "$DOC_TOOLS" build-index 2>/dev/null
+  # e and f pre-v3 entries (a kept ref keeps what code_commit recorded).
+  # shellcheck disable=SC2016  # jq program
+  _i3_edit --arg ab "$(git rev-list -1 HEAD -- src/a.js src/b.js)" --arg s "$(git rev-list -1 HEAD -- src/)" '
+    .docs["docs/e.md"] |= (del(.code_oids) | .code_commit = $ab | .last_verified = "2026-01-01T00:00:00Z")
+    | .docs["docs/f.md"] |= (del(.code_oids) | .code_commit = $s | .last_verified = "2026-01-01T00:00:00Z")'
+  "$DOC_TOOLS" update-index docs/d.md >/dev/null 2>&1
+  _i1_commit index
+  printf 'a2\n' > src/a.js
+  _i1_commit a2
+  local single
+  single=$(harness_mktemp_d gh23-scr)
+  cp -R . "$single/repo"
+  (
+    cd "$single/repo" || exit 1
+    "$DOC_TOOLS" set-code-refs docs/d.md --refs src/a.js,src/b.js >/dev/null 2>&1
+    "$DOC_TOOLS" set-code-refs docs/e.md --refs src/b.js,src/index.js >/dev/null 2>&1
+    "$DOC_TOOLS" set-code-refs docs/f.md --refs ./src >/dev/null 2>&1
+    "$DOC_TOOLS" set-code-refs docs/g.md --refs '' >/dev/null 2>&1
+  )
+  local out rc=0 json
+  out=$(printf 'docs/d.md\tsrc/a.js, src/b.js\r\n\ndocs/e.md\tsrc/b.js,src/index.js\ndocs/f.md\t./src\ndocs/g.md\t\n' \
+          | "$DOC_TOOLS" set-code-refs --stdin 2>&1) || rc=$?
+  assert_eq "0" "$rc" "set-code-refs --stdin exits 0 (output: ${out:0:300})"
+  assert_contains "$out" "Set code_refs of 3 entries:" "reports the entries it set"
+  assert_contains "$out" "Unchanged 1 entry (code_refs already as given; nothing written)" "…and the one already as given"
+  json=$(cat docs/.doc-index.json)
+  assert_eq "$(jq -c '.docs' "$single/repo/docs/.doc-index.json")" "$(jq -c '.docs' <<<"$json")" \
+    "the batch leaves exactly the index the single form leaves (kept refs, new refs, code_commit, positions)"
+  assert_json_field "$json" '.docs["docs/e.md"].last_verified' "2026-01-01T00:00:00Z" "last_verified is untouched"
+  # --null: records "<doc>\0<ref>\0...\0\0", each ref taken whole (a ',' in a path).
+  rc=0
+  out=$(printf 'docs/d.md\0src/x,y/c.js\0src/a.js\0\0docs/g.md\0src/x,y\0\0' \
+          | "$DOC_TOOLS" set-code-refs --stdin --null 2>&1) || rc=$?
+  assert_eq "0" "$rc" "--stdin --null exits 0 (output: ${out:0:300})"
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/d.md"].code_refs | join("|")' "src/x,y/c.js|src/a.js" "a ref holding ',' is stored whole"
+  assert_json_field "$json" '.docs["docs/d.md"].code_oids["src/x,y/c.js"]' "$(git rev-parse 'HEAD:src/x,y/c.js')" "…and looked up whole"
+  assert_json_field "$json" '.docs["docs/g.md"].code_oids["src/x,y"]' "$(git rev-parse 'HEAD:src/x,y')" "…a directory too"
+  # All or nothing: every problem is reported, and nothing is written.
+  cp docs/.doc-index.json docs/.idx.before
+  rc=0
+  out=$(printf 'docs/d.md\tsrc/b.js\ndocs/nope.md\tsrc/a.js\ndocs/e.md\t-x\n%s\ndocs/f.md\tsrc/a.js\ndocs/f.md\tsrc/b.js\n' \
+          "docs/g.md src/a.js" | "$DOC_TOOLS" set-code-refs --stdin 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a batch with bad lines exits 1"
+  assert_exit_code 0 "…and writes nothing, not even its good line" cmp -s docs/.idx.before docs/.doc-index.json
+  assert_contains "$out" "'docs/nope.md' not found in index" "an unindexed doc is reported"
+  assert_contains "$out" "starts with '-'" "a ref that cannot be a key is reported"
+  assert_contains "$out" "line 3" "…by line number"
+  assert_contains "$out" "line 4" "a line without a TAB is reported by number"
+  assert_contains "$out" "'docs/f.md' is listed more than once with different refs" "a doc given two ref lists is reported"
+  rc=0
+  out=$(printf 'docs/d.md\0src/a.js\0' | "$DOC_TOOLS" set-code-refs --stdin --null 2>&1) || rc=$?
+  assert_eq "1" "$rc" "an unterminated --null record exits 1"
+  assert_contains "$out" "record 1 is not terminated" "…saying so"
+  assert_exit_code 0 "…writing nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  # Usage.
+  rc=0
+  "$DOC_TOOLS" set-code-refs --stdin docs/d.md </dev/null >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "--stdin with a path is a usage error"
+  rc=0
+  "$DOC_TOOLS" set-code-refs --stdin --refs src/a.js </dev/null >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "--stdin with --refs is a usage error"
+  rc=0
+  "$DOC_TOOLS" set-code-refs docs/d.md --refs src/a.js --null >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "--null without --stdin is a usage error"
+  rc=0
+  out=$("$DOC_TOOLS" set-code-refs --stdin </dev/null 2>&1) || rc=$?
+  assert_eq "0" "$rc" "an empty batch exits 0"
+  assert_exit_code 0 "…and writes nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  rm -f docs/.idx.before
+  teardown
+}
+
 run_tests() {
   echo "=== doc-tools.sh test suite ==="
   echo ""
@@ -7463,6 +7955,7 @@ run_tests() {
 
   # --- cross-platform regression guards (CI matrix: bash 5.x + bash 3.2) ---
   test_scripts_are_free_of_bash4_only_constructs
+  test_shipped_scripts_pass_shellcheck
   test_shipped_jq_is_free_of_jq17_only_forms
   test_build_index_accepts_entry_with_no_code_refs
   test_update_index_when_every_target_is_skipped
@@ -7663,6 +8156,8 @@ run_tests() {
   test_i10_fence_indent_and_paragraph_end
   test_i10_implementation_status_filter_is_gone
   test_i10_check_version_reads_the_first_release_heading
+  test_check_version_tag_on_origin
+  test_check_version_tag_points_at_release
   test_i10_version_verbs_need_a_manifest
   test_i10_bump_version_is_all_or_nothing_and_keeps_modes
   test_i12_claude_code_json_is_not_a_version_file
@@ -7697,6 +8192,12 @@ run_tests() {
   # --- Residual fix after the fix-wave re-review ---
   test_rf_tracked_quoted_name_postdating_the_doc_is_not_unmatched
   test_rf_doc_commits_early_stop_with_sigpipe_ignored
+
+  # --- Batch index verbs (GH #21 upgrade-entries, GH #23 --stdin forms) ---
+  test_gh21_upgrade_entries_fills_code_oids_without_a_baseline_reset
+  test_gh21_gh23_batches_scale
+  test_gh23_set_doc_type_stdin
+  test_gh23_set_code_refs_stdin
 
   print_summary
 }

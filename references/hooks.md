@@ -7,10 +7,12 @@ installer, `$DOC_TOOLS` = `$ROOT/scripts/doc-tools.sh`).
 Scaffolding command — installs opt-in hooks into the target project for automated freshness monitoring. No discovery phase needed.
 
 ```
-/doc-superpowers hooks install [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude]
-/doc-superpowers hooks status [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude]
-/doc-superpowers hooks uninstall [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude]
+/doc-superpowers hooks install [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude]
+/doc-superpowers hooks status [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--json]
+/doc-superpowers hooks uninstall [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude]
 ```
+
+(`install.sh print-merge-driver` prints the driver command; see *Merge driver only* below.)
 
 Routes to `"$ROOT/scripts/hooks/install.sh" <subcommand> [flags]` (`install.sh help` lists every hook and workflow). `--ledger` and `--ledger-claude` are the work ledger's opt-in sets, never part of `--all` (*Ledger sets* below). A flag the subcommand does not take exits 2; CI options (`--workflows`, `--base-branch`, `--cron`, `--ci-strict`, `--helpers`, `--force`, `--transient`) need `--ci` or `--all`.
 
@@ -61,7 +63,63 @@ Routes to `"$ROOT/scripts/hooks/install.sh" <subcommand> [flags]` (`install.sh h
   `<path>` is a `doc-tools.sh` that every worktree resolves, with its `ledger/` directory beside it (a committed copy of the skill's `scripts/`, or an absolute path in place of `"$CLAUDE_PROJECT_DIR"/<path>`). Each mode reads the event on stdin (an event that is not one JSON object: silent), cds to the top level, prints one hook object or nothing, never fetches, takes no other option and always exits 0 — a usage error, no repository, no `docs/ledger/config.json`, `DOC_SUPERPOWERS_LEDGER_SKIP=1` and `DOC_SUPERPOWERS_SKIP=1` all print nothing. `notices --hook` prints the same object as `ledger-session-notices.sh`, with nothing printed when `inflight.enabled` is off; `state-watch --hook` the same as `ledger-state-watch.sh`. What a direct registration lacks is the wrapper's 2-second watchdog: the entry's `timeout` bounds it instead. Do not register both a mode and `--ledger-claude` for the same event: each would print its notices. `status` never inspects entries you register yourself, so an upgrade is yours to make: a state-watch entry registered for `Write|Edit` (before 3.4.0) misses MultiEdit's writes until you change its matcher to `Write|Edit|MultiEdit`.
 - `uninstall --ledger` and `uninstall --ledger-claude` each remove their own set (`--all` removes neither); `status` reports each set in its own section (plain `status` shows them after the tiers; `status --ledger` / `--ledger-claude` show one; `status --claude` also shows the `--ledger-claude` section once any of that set is installed, as both live in one settings file; `status --all` shows the three tiers only).
 
-**Status and upgrades.** `status` compares each installed git hook, the local copy an integrated hook runs, each Claude script and each settings command with what this install would write (the install date on line 2 aside). A hook of another doc-superpowers version carries the same marker, so anything else reads `⚠ … outdated: re-run install --git` (or `--claude`): re-run that tier. The ledger sets say the same in their own sections — `re-run install --ledger` for an outdated block, `re-run install --ledger-claude` for an outdated script, command or matcher. A 3.3.0 `--ledger-claude` install registered state-watch for `Write|Edit`: it reads `outdated (registered for other tools than matcher "Write|Edit|MultiEdit")` until `install --ledger-claude` is re-run, which replaces the entry in place. An integrated pre-push block from before 3.3.0 (which let a push through when it could not copy git's ref lines) reads outdated until `install --git` is re-run; so do the 3.2.0 Claude tier's scripts (their shared `hook-lib.sh` changed) until `install --claude` is. In a repository without `docs/ledger/config.json` where nothing of a ledger set is installed, that set's section is one plain `not enabled` line, no warning; an installed leg there reads `⚠ docs/ledger/config.json is missing`. After upgrading from 2.x, walk the user through `$ROOT/README.md` → *Upgrading from 2.x* (v2's AI workflows, the per-user Claude tier, hooks in unconfigured directories, retyping design specs).
+**Status and upgrades.** (`status --json` gives the same verdicts machine-readably: *Machine-readable status* below.) `status` compares each installed git hook, the local copy an integrated hook runs, each Claude script and each settings command with what this install would write (the install date on line 2 aside). A hook of another doc-superpowers version carries the same marker, so anything else reads `⚠ … outdated: re-run install --git` (or `--claude`): re-run that tier. The ledger sets say the same in their own sections — `re-run install --ledger` for an outdated block, `re-run install --ledger-claude` for an outdated script, command or matcher. A 3.3.0 `--ledger-claude` install registered state-watch for `Write|Edit`: it reads `outdated (registered for other tools than matcher "Write|Edit|MultiEdit")` until `install --ledger-claude` is re-run, which replaces the entry in place. An integrated pre-push block from before 3.3.0 (which let a push through when it could not copy git's ref lines) reads outdated until `install --git` is re-run; so do the 3.2.0 Claude tier's scripts (their shared `hook-lib.sh` changed) until `install --claude` is. In a repository without `docs/ledger/config.json` where nothing of a ledger set is installed, that set's section is one plain `not enabled` line, no warning; an installed leg there reads `⚠ docs/ledger/config.json is missing`. After upgrading from 2.x, walk the user through `$ROOT/README.md` → *Upgrading from 2.x* (v2's AI workflows, the per-user Claude tier, hooks in unconfigured directories, retyping design specs).
+
+**Merge driver only** (`--merge-driver-only`, with `--git` or `--all`; without the git tier it exits 2). For a host that runs its own git hooks and wants only the `docs/.doc-index.json` merge driver: `install --git --merge-driver-only` registers the `merge.doc-index.*` git config and writes the marked `.gitattributes` block, and nothing else — no hook, no local copy, and hooks already there (yours, or the git tier's) are left as they are. It writes no hook, so a global `core.hooksPath` does not refuse it. Run from a plugin copy without `scripts/merge-doc-index.sh` beside it, it has nothing to register: it exits 1, naming the missing script, and writes nothing. `uninstall --git --merge-driver-only` removes only those two (the hooks stay); `status --git --merge-driver-only` reports only the driver and `.gitattributes` lines. Nothing about the git tier is recorded in `installed.json` (per clone), so a driver-only install is not either. A host that registers the driver itself gets the exact value from `install.sh print-merge-driver` (one line; no repository needed): `git config merge.doc-index.name "doc-superpowers index merger"` and `git config merge.doc-index.driver "$(install.sh print-merge-driver)"`, plus a `docs/.doc-index.json merge=doc-index` attribute. The value resolves the driver when a merge runs (the newest plugin-cache version, or the checkout's pinned script), so it survives plugin updates; `status` reads a registration equal to it as `registered`.
+
+**Machine-readable status** (`status --json`). One JSON object on stdout and exit 0 (a usage error still exits 2): the states are the verdict, so a host's self-heal check reads them instead of grepping the human lines, which stay as they were (`status` without `--json` prints them unchanged). It covers the git, Claude and CI tiers — all three, or those named (`--git`, `--claude`, `--ci`, `--all`; `--merge-driver-only` narrows the git tier); the ledger sets have no JSON status, and `--json` with `--ledger` or `--ledger-claude` exits 2. A tier not asked for is absent from `.tiers`. Shape (schema `doc-superpowers-hooks-status/1`; a later version adds keys, and a changed meaning gets a new schema string):
+
+```json
+{
+  "schema": "doc-superpowers-hooks-status/1",
+  "repo": "/abs/top/level",
+  "plugin": "/abs/plugin/root",
+  "tiers": {
+    "git": {
+      "hooks_dir": ".git/hooks",
+      "hooks_path_scope": null,
+      "hooks_path_foreign": false,
+      "merge_driver_only": false,
+      "hooks": { "pre-commit": { "state": "installed", "installed": "2026-10-18" }, "...": {} },
+      "merge_driver": { "state": "registered", "path": "/abs/…/merge-doc-index.sh" },
+      "gitattributes": { "state": "configured" }
+    },
+    "claude": {
+      "settings": ".claude/settings.local.json", "settings_present": true, "settings_readable": true,
+      "hooks": { "pre-commit-gate": { "state": "active", "event": "PreToolUse" }, "...": {} }
+    },
+    "ci": {
+      "state_file": ".claude/doc-superpowers/installed.json", "state_readable": true, "state_error": null,
+      "workflows": { "doc-freshness-pr": { "state": "installed" }, "...": {} },
+      "retired": [], "choices": { "base_branch": "main", "cron": "0 9 * * 1", "ci_strict": false },
+      "claims_without_ledger_helpers": [], "helpers": { "doc-superpowers-steps": 11 },
+      "doc_tools_vendored": ".github/scripts/doc-tools.sh"
+    }
+  },
+  "env": { "DOC_SUPERPOWERS_STRICT": null, "DOC_SUPERPOWERS_SKIP": null, "DOC_SUPERPOWERS_QUIET": null,
+           "DOC_SUPERPOWERS_HOOK_BUDGET": null, "DOC_SUPERPOWERS_ADVICE": null }
+}
+```
+
+| Key | States (or value) |
+|---|---|
+| `git.hooks.<hook>.state` (the five hooks; no `hooks` key under `--merge-driver-only`) | `installed` (ours, current) · `not-executable` · `outdated` (another version's or install's: re-run `install --git`) · `integrated` (a current block in your hook runs a current copy) · `integrated-copy-outdated` · `integrated-block-outdated` (an old block, or its copy missing) · `ledger-only` (a hook holding only the `--ledger` block) · `foreign` (a hook of yours without our block) · `absent`. `installed`: the install date of a hook of ours, else `null` |
+| `git.merge_driver.state` | `registered` (this install's command; `path` = the script a merge runs) · `script-missing` (registered, but the script it names is gone; `path` = that path) · `pinned` (a pre-3.0 `<path> %O %A %B` registration whose script exists; `path` = it) · `other` (registered by another install: a value that is neither) · `absent` |
+| `git.gitattributes.state` | `configured` (`git check-attr` gives the index `merge=doc-index`) · `other` (another merge attribute wins) · `absent` |
+| `git.hooks_path_scope`, `hooks_path_foreign` | the config scope `core.hooksPath` comes from (`null` when unset); `true` when it is not this repository's (`install --git` refuses it) |
+| `claude.hooks.<hook>.state` | `active` · `script-missing` · `outdated-command` (registered with another version's command) · `outdated-script` · `lib-missing` · `lib-outdated` (`hook-lib.sh`) · `absent` (not registered; also when the settings file cannot be read: `settings_readable` is then `false`) |
+| `ci.workflows.<name>.state` | `installed` · `uninstalled-intentional` · `uninstalled-transient` · `recorded-missing` (recorded installed, file gone: the next `install --ci` restores it) · `absent`. `retired`: managed copies of retired workflows still on disk; `choices`: `null` when nothing is recorded; `helpers`: file count per vendored helper directory; `doc_tools_vendored`: its path, or `null` |
+
+A self-heal check for the driver: `install.sh status --git --merge-driver-only --json | jq -e '.tiers.git.merge_driver.state == "registered" and .tiers.git.gitattributes.state == "configured"'`.
+
+**Hook budgets and advice** (the git and Claude tiers; one optional, committed file, `.claude/doc-superpowers/hooks.conf`, `key = value` lines, `#` comments, the last line for a key wins — read with `awk`, never sourced; an environment variable overrides its key):
+
+| Knob | Env | `hooks.conf` key | Default | Effect |
+|---|---|---|---|---|
+| Git-hook check budget | `DOC_SUPERPOWERS_HOOK_BUDGET` | `hook_budget` | `20` (seconds) | The freshness check of pre-commit, prepare-commit-msg, post-merge and post-checkout runs under a watchdog (the Claude tier's: its own process group, killed with everything it started). Past the budget the hook prints one line — `doc-superpowers: <hook>: check skipped (budget): … run 'doc-tools.sh check-freshness' by hand …` (prepare-commit-msg: a comment line) — and lets git go on; under `DOC_SUPERPOWERS_STRICT=1` the pre-commit blocks instead, as for a check that cannot run. `0` is no budget; a value that is not digits reads as the default, and one past a day (more than `86400`, or more than six digits once leading zeros are dropped) reads as `0`, no budget, since `sleep` may not take it (macOS's rejects 4294967295 s and up) and a watchdog whose sleep fails must not fire at once (one whose sleep fails for any reason never fires). A hook interrupted mid-check (`INT`, `TERM`, `HUP`: a ^C at the terminal does not reach the check's own process group) kills the check's group and the watchdog, then dies of that signal (exit 128+n). The Claude tier keeps its fixed budgets (7 s, 2 s), inside the timeout the installer registers |
+| Advice | `DOC_SUPERPOWERS_ADVICE` | `advice` | `/doc-superpowers <action>` | The command the git and Claude hooks advise (`update`, `audit`, `release`, and the gate's `hooks install --git`): `off` drops it (a line that is only advice goes, a line that also says something else keeps the rest, e.g. `DOC_SUPERPOWERS_SKIP=1 bypasses.`); any other text is a template whose every `{action}` becomes the action (`make docs-{action}` → `make docs-update`; a template without `{action}` is used as is); `on` (or unset) is the default |
+
+The git hooks are also scoped where scoping is exact: pre-commit (and the Claude gate) judge the entries a staged index adds against their own code refs rather than the whole index (unscoped only when an added entry has no code ref, which no filter keeps); post-merge and post-checkout were already scoped to the files the merge or switch changed, which on a large merge can still reach most of the index — the budget is their backstop. Each git hook carries the watchdog and the settings readers itself (a region kept byte-identical with `hook-lib.sh`, pinned by `test-hooks.sh`), so the git tier works without the Claude tier. Changing these hooks makes earlier installs read `outdated`: re-run `install --git` (and `install --claude`, whose `hook-lib.sh` changed).
 
 **Consent before `--ci`.** Before installing workflows, show the user what each one may do in their repository and get a yes — permissions come from the workflow's `permissions:` block:
 

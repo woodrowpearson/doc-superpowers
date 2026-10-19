@@ -14,6 +14,9 @@
 # killed (with everything it started) and a one-line note says so.
 # The skill or the doc-index being absent is silent; the check failing (jq
 # missing, a corrupt index) is said in one line.
+# DOC_SUPERPOWERS_ADVICE (else .claude/doc-superpowers/hooks.conf's advice;
+# hook-lib.sh: _advice) replaces or drops the '/doc-superpowers update' it
+# advises.
 # DOC_SUPERPOWERS_QUIET=1 silences it; DOC_SUPERPOWERS_SKIP=1 turns it off.
 
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
@@ -144,6 +147,12 @@ report=$(_report_jq '
 { IFS= read -r counts; IFS= read -r summary; report=$(cat); } <<<"$report"
 [[ "$counts" == "0 0" ]] && exit 0
 
+adv=$(_advice update)
+if [[ -n "$adv" ]]; then
+  adv="Run '$adv' to refresh stale documentation, then re-verify"
+else
+  adv="Refresh stale documentation, then re-verify"
+fi
 _emit "$summary" "$report
-  Run '/doc-superpowers update' to refresh stale documentation, then re-verify each doc you reviewed (doc-tools.sh update-index <doc>)."
+  $adv each doc you reviewed (doc-tools.sh update-index <doc>)."
 exit 0

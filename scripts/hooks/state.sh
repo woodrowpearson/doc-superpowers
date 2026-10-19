@@ -84,6 +84,7 @@ state_load() {
   STATE_BASE="" STATE_CRON="" STATE_STRICT="" STATE_WF=""
   if [ ! -e "$STATE_FILE" ] && [ ! -L "$STATE_FILE" ]; then
     if [ -e "$STATE_CORRUPT" ]; then
+      # shellcheck disable=SC2034  # read by install.sh, which sources this file
       STATE_RECOVERY=1
     fi
     return 0
@@ -115,6 +116,7 @@ state_wf_get() {
   while IFS= read -r l; do
     case "$l" in
       "$1$_SEP"*)
+        # shellcheck disable=SC2034  # WF_INTENT is read by install.sh, which sources this file
         IFS="$_SEP" read -r _ WF_STATE WF_INTENT WF_AT <<<"$l"
         return 0
         ;;
