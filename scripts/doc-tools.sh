@@ -2459,19 +2459,25 @@ ledger recheck|cmd_ledger_recheck|repo|format=
   base, until a later commit on the base touches them.
 ledger upkeep|cmd_ledger_upkeep|repo|range= pr= items+ top= strict no-repo-adapters format=
   (--range <a>..<b> | --range <a>...<b> | --pr <n>) [--items <item>...] [--top N] [--strict] [--no-repo-adapters] [--format text|json]
-  Merge-time upkeep: the changes relations a range's items are missing,
-  proposed with their evidence and a ready "ledger link" line — never
-  written. <a>...<b> is merge-base(a, b)..b (trunk merged into the branch
-  never counts). Involved items, each with how it was found: a claim
-  trailer (claims, claims_by_path, claims_by_ref), an item file the net
-  diff edits, a key or alias as a word in a commit message; --items names
-  them instead. A contract is touched by a net-diff file its defined_in
-  matches (unless upkeep.skip_globs matches the file) or by a
-  Contract-Change line. One an involved item already declares in changes
-  is proposed to nobody; each other one goes to one item — the most paths
-  entries its defined_in matches, then the most paths in the diff, then
-  how it was found, then key — or, with no involved item, is listed as
-  unattributed; upkeep.skip_contracts are never proposed. --top N (default
+  Merge-time upkeep: the changes and consumes relations a range's items
+  are missing, proposed with their evidence and a ready "ledger link"
+  line — never written. <a>...<b> is merge-base(a, b)..b (trunk merged
+  into the branch never counts). Involved items, each with how it was
+  found: a claim trailer (claims, claims_by_path, claims_by_ref), an item
+  file the net diff edits, a key or alias as a word in a commit message;
+  --items names them instead. A contract is touched by a net-diff file
+  its defined_in matches (unless upkeep.skip_globs matches the file) or by
+  a Contract-Change line. One an involved item already declares in
+  changes is proposed to nobody; each other one goes to one item — the
+  most paths entries its defined_in matches, then the most paths in the
+  diff, then how it was found, then key — or, with no involved item, is
+  listed as unattributed; upkeep.skip_contracts are never proposed. A
+  contract nothing touches is read when a net-diff file its read_by
+  matches (skip_globs aside): consumes, covered by an involved item's
+  consumes and attributed in the same way with read_by. An item found by a
+  trailer, its file or --items also gets consumes for each untouched
+  contract whose defined_in matches a file it lists that the range does
+  not change. Per item: changes first, then consumes; --top N (default
   3; 0: all) proposals per item. Exit 0 (advisory); 1 with --strict and a
   proposal; 2 a range end that does not resolve, a failing contracts
   adapter or a bad upkeep config; 3 an --items value naming no item (or an

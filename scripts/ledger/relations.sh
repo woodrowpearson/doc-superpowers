@@ -965,13 +965,14 @@ _lg_r_plan_scan() {
     }' "$1"
 }
 
-# _lg_r_file_contracts <index> <files-lines> <out.json>: {file: [contract
-# ids]} — the index contracts whose defined_in matches each file.
+# _lg_r_file_contracts <index> <files-lines> <out.json> [<field>]: {file:
+# [contract ids]} — the index contracts whose <field> globs (defined_in, the
+# default; or read_by) match each file.
 _lg_r_file_contracts() {
-  local ix="$1" files="$2" out="$3" s
+  local ix="$1" files="$2" out="$3" field="${4:-defined_in}" s
   _lg_scratch_name
   s=$_LG_SN
-  jq -r '(.contracts // [])[] | .id as $i | (.defined_in // [])[] | select(test("[[:cntrl:]]") | not) | "\($i)\u0001\(.)"' \
+  jq -r --arg f "$field" '(.contracts // [])[] | .id as $i | (.[$f] // [])[] | select(test("[[:cntrl:]]") | not) | "\($i)\u0001\(.)"' \
     "$ix" > "$s.g" || _lg_die "jq failed (contract globs)"
   LC_ALL=C awk -v globs="$s.g" "$_LG_AWK_GLOB"'
     BEGIN { while ((getline l < globs) > 0) { t = index(l, "\001"); k++; if (gx_add(k, substr(l, t + 1))) ID[k] = substr(l, 1, t - 1) } }
