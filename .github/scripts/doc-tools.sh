@@ -2251,9 +2251,13 @@ check-version|cmd_check_version|deps|tag warn remote=
   manifest that is not valid JSON, or no manifest found.
   --tag also requires the tag v<version> on the remote (--remote, default
   origin), read with git ls-remote: a local tag is not enough, since a
-  consumer's AI workflows clone the tag of the version they installed. A
-  missing tag, or a remote that cannot be read, exits 1; with --warn it is
-  a WARN line and the exit status is the manifests' alone.
+  consumer's AI workflows clone the tag of the version they installed. The
+  tag must point at the release commit: one (an annotated tag peeled) whose
+  RELEASE-NOTES.md first release heading is that version. A missing or
+  misplaced tag, or a remote that cannot be read, exits 1; with --warn it is
+  a WARN line and the exit status is the manifests' alone. A tag whose
+  commit this clone does not hold is a WARN line either way (git fetch
+  <remote> tag v<version> to verify it).
 implementation-status|cmd_implementation_status|deps|
   <path>...
   Report ADR/SPEC realization state (read-only): each doc's
@@ -5779,12 +5783,16 @@ cmd_check_version() {
 }
 
 # _check_version_tag <tag> <remote> <warn>: whether refs/tags/<tag> is on
-# <remote> (git ls-remote: what a clone of it sees). Missing, or a remote that
-# cannot be read: a MISSING / ERROR line and return 1, or with <warn> 1 a WARN
-# line and return 0.
+# <remote> (git ls-remote: what a clone of it sees), and points at a commit
+# (an annotated tag peeled) whose RELEASE-NOTES.md first release heading is
+# <tag>'s version. Missing, misplaced, or a remote that cannot be read: a
+# MISSING / MISPLACED / ERROR line and return 1, or with <warn> 1 a WARN line
+# and return 0. A tag whose commit this clone does not hold is a WARN line and
+# return 0 either way: present on the remote, its placement unverified here.
+# Call in the main shell (it may create the scratch dir).
 _check_version_tag() {
-  local t="$1" remote="$2" warn_only="$3" ls_out sha
-  if ! ls_out=$(git ls-remote --tags "$remote" "refs/tags/$t" 2>/dev/null </dev/null); then
+  local t="$1" remote="$2" warn_only="$3" ls_out sha commit
+  if ! ls_out=$(git ls-remote --tags "$remote" "refs/tags/$t" "refs/tags/$t^{}" 2>/dev/null </dev/null); then
     if [ "$warn_only" = 1 ]; then
       echo "  WARN:     cannot read the tags of $remote (git ls-remote failed), so tag $t is unverified"
       return 0
@@ -5794,8 +5802,10 @@ _check_version_tag() {
   fi
   sha=$(awk -v r="refs/tags/$t" '$2 == r { print $1; exit }' <<<"$ls_out")
   if [ -n "$sha" ]; then
-    echo "  ok:       tag $t on $remote ($sha)"
-    return 0
+    commit=$(awk -v r="refs/tags/$t^{}" '$2 == r { print $1; exit }' <<<"$ls_out")
+    [ -n "$commit" ] || commit="$sha"
+    _check_version_tag_commit "$t" "$remote" "$warn_only" "$sha" "$commit"
+    return
   fi
   if [ "$warn_only" = 1 ]; then
     echo "  WARN:     $t is not a tag on $remote"
@@ -5804,6 +5814,42 @@ _check_version_tag() {
   fi
   echo "            A consumer's AI workflows clone the tag of the version they installed."
   echo "            Tag the release commit and push it: git tag $t <release commit> && git push $remote $t"
+  [ "$warn_only" = 1 ]
+}
+
+# _check_version_tag_commit <tag> <remote> <warn> <tag-id> <commit>: the
+# placement half of _check_version_tag — <commit>'s RELEASE-NOTES.md (the one
+# at this path, relative to the current directory) must name <tag>'s version
+# in its first release heading.
+_check_version_tag_commit() {
+  local t="$1" remote="$2" warn_only="$3" sha="$4" commit="$5" want="${1#v}" got why label
+  if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
+    echo "  WARN:     tag $t is on $remote ($sha), but its commit $commit is not in this clone,"
+    echo "            so whether it is the v$want release commit is unverified (git fetch $remote tag $t, then re-run)"
+    return 0
+  fi
+  _scratch_init
+  label="$commit:RELEASE-NOTES.md"
+  if git show "$commit:./RELEASE-NOTES.md" > "$_SCRATCH/tag-release-notes.md" 2>/dev/null; then
+    if got=$(_release_notes_version "$_SCRATCH/tag-release-notes.md" 2> "$_SCRATCH/tag-release-notes.err"); then
+      if [ "$got" = "$want" ]; then
+        echo "  ok:       tag $t on $remote ($sha), at the v$want release commit ${commit:0:12}"
+        return 0
+      fi
+      why="its RELEASE-NOTES.md first release heading is v$got"
+    else
+      why="its RELEASE-NOTES.md has no usable release heading ($(head -n 1 "$_SCRATCH/tag-release-notes.err" | sed -e 's/^ERROR: //' -e "s|$_SCRATCH/tag-release-notes.md|$label|"))"
+    fi
+  else
+    why="it has no RELEASE-NOTES.md"
+  fi
+  if [ "$warn_only" = 1 ]; then
+    echo "  WARN:     tag $t on $remote points at ${commit:0:12}, which is not the v$want release commit: $why"
+  else
+    echo "  MISPLACED: tag $t on $remote points at ${commit:0:12}, which is not the v$want release commit: $why"
+  fi
+  echo "            A consumer's AI workflows clone the tag of the version they installed, and get that commit's files."
+  echo "            Move it to the release commit: git tag -f $t <release commit> && git push -f $remote $t"
   [ "$warn_only" = 1 ]
 }
 

@@ -6653,6 +6653,71 @@ test_check_version_tag_on_origin() {
   teardown
 }
 
+# check-version --tag (#28): the tag must also point at a commit whose
+# RELEASE-NOTES.md names that version first — a tag placed on the pre-bump
+# commit is a release consumers clone with the old version's files.
+test_check_version_tag_points_at_release() {
+  echo "test: check-version --tag fails when the tag points at a commit whose RELEASE-NOTES.md first release heading is another version (a commit missing locally: a warning)"
+  setup
+  setup_version_files
+  local origin rc out pre
+  origin=$(harness_mktemp_d origin-placed)
+  git init -q --bare "$origin"
+  git remote add origin "$origin"
+  git add -A && git commit -qm "release: v1.0.0"
+  pre=$(git rev-parse HEAD)
+  "$DOC_TOOLS" bump-version 1.1.0 >/dev/null 2>&1
+  printf '%s\n' '# Release Notes' '' '## v1.1.0 (2026-02-01)' '' '## v1.0.0 (2026-01-01)' > RELEASE-NOTES.md
+  git add -A && git commit -qm "release: v1.1.0"
+  git push -q origin main 2>/dev/null
+
+  # Misplaced: v1.1.0 on the pre-bump commit (lightweight, then annotated).
+  git tag v1.1.0 "$pre" && git push -q origin v1.1.0 2>/dev/null
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a tag on the pre-bump commit: exit 1"
+  assert_contains "$out" "MISPLACED" "…reported as misplaced"
+  assert_contains "$out" "v1.0.0" "…naming the version that commit's RELEASE-NOTES.md carries"
+  assert_contains "$out" "${pre:0:12}" "…and the commit"
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag --warn 2>&1) || rc=$?
+  assert_eq "0" "$rc" "misplaced with --warn: exit 0"
+  assert_contains "$out" "WARN" "…as a warning"
+  git push -q --delete origin v1.1.0 2>/dev/null && git tag -d v1.1.0 >/dev/null
+  git tag -a v1.1.0 -m "v1.1.0" "$pre" && git push -q origin v1.1.0 2>/dev/null
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "1" "$rc" "an annotated tag on the pre-bump commit: exit 1 (the tag object is peeled to its commit)"
+  assert_contains "$out" "MISPLACED" "…misplaced"
+
+  # Placed on the release commit: ok.
+  git push -q --delete origin v1.1.0 2>/dev/null && git tag -d v1.1.0 >/dev/null
+  git tag -a v1.1.0 -m "v1.1.0" && git push -q origin v1.1.0 2>/dev/null
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "0" "$rc" "the tag on the release commit: exit 0"
+  assert_not_contains "$out" "MISPLACED" "…not misplaced"
+
+  # The tag's commit is not in this clone: a warning, never a failure.
+  local other
+  other=$(harness_mktemp_d other-clone)
+  git clone -q "$origin" "$other/w" 2>/dev/null
+  (
+    cd "$other/w"
+    git -c user.name=t -c user.email=t@t commit -q --allow-empty -m "elsewhere"
+    git push -q --delete origin v1.1.0 2>/dev/null && git tag -d v1.1.0 >/dev/null
+    git -c user.name=t -c user.email=t@t tag -a v1.1.0 -m "v1.1.0 elsewhere"
+    git push -q origin v1.1.0 2>/dev/null
+  )
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "0" "$rc" "the tag's commit not in this clone: exit 0"
+  assert_contains "$out" "WARN" "…a warning"
+  assert_contains "$out" "not in this clone" "…saying the commit is unavailable here"
+  assert_contains "$out" "git fetch origin tag v1.1.0" "…and how to fetch it"
+  teardown
+}
+
 test_i10_version_verbs_need_a_manifest() {
   echo "test: bump-version / check-version fail when no manifest is found (run outside the repo root)"
   setup
@@ -8091,6 +8156,7 @@ run_tests() {
   test_i10_implementation_status_filter_is_gone
   test_i10_check_version_reads_the_first_release_heading
   test_check_version_tag_on_origin
+  test_check_version_tag_points_at_release
   test_i10_version_verbs_need_a_manifest
   test_i10_bump_version_is_all_or_nothing_and_keeps_modes
   test_i12_claude_code_json_is_not_a_version_file
