@@ -8,6 +8,9 @@
 # session-summary.sh and the work ledger's ledger-session-notices.sh, which
 # set HOOK_EVENT, have_jq and (for _bounded) BUDGET and work first. One copy,
 # so they cannot drift apart. (ledger-state-watch.sh does not source it.)
+# The "shared hook settings" region at its end (_hook_conf, _advice,
+# _hook_budget, _bounded, _why) is also carried, byte for byte, by every git
+# hook, which must run without this library (the git tier ships alone).
 #
 # Claude Code keeps each hook string (systemMessage, additionalContext, the
 # stderr of a blocking exit 2) inline only up to 10,000 characters; past that
@@ -98,22 +101,84 @@ _budget_line() {
   printf '%s' "doc-superpowers: check skipped (budget): the doc freshness check took longer than ${BUDGET}s (run 'doc-tools.sh check-freshness' to see it)"
 }
 
+# >>> shared hook settings: one text in every git hook and in hook-lib.sh (test-hooks.sh pins the copies) >>>
+# _hook_conf <key>: <key>'s value in .claude/doc-superpowers/hooks.conf (a
+# "key = value" file: # comments, the last line for a key wins), "" when
+# unset. Read by awk, never sourced; relative to the repository top, where
+# every hook runs. No file, no process.
+_hook_conf() {
+  [ -f .claude/doc-superpowers/hooks.conf ] || return 0
+  awk -v k="$1" '
+    /^[ \t]*#/ { next }
+    { i = index($0, "="); if (i == 0) next
+      key = substr($0, 1, i - 1); gsub(/^[ \t]+|[ \t\r]+$/, "", key)
+      if (key != k) next
+      v = substr($0, i + 1); gsub(/^[ \t]+|[ \t\r]+$/, "", v); val = v; seen = 1 }
+    END { if (seen) print val }' .claude/doc-superpowers/hooks.conf 2>/dev/null
+}
+
+# _advice <action>: the command the hooks' advice names for <action>:
+# '/doc-superpowers <action>' by default; "" when DOC_SUPERPOWERS_ADVICE
+# (else hooks.conf's advice key) is off; any other value is a template, its
+# every {action} replaced by <action> (on or default: the default).
+_advice() {
+  local t="${DOC_SUPERPOWERS_ADVICE:-}"
+  [ -n "$t" ] || t=$(_hook_conf advice)
+  t="${t//[$'\n\r']/ }"
+  case "$t" in
+    "" | on | default) printf '/doc-superpowers %s' "$1" ;;
+    off) ;;
+    *) printf '%s' "${t//\{action\}/$1}" ;;
+  esac
+}
+
+# _hook_budget: the git hooks' freshness-check budget in seconds:
+# DOC_SUPERPOWERS_HOOK_BUDGET, else hooks.conf's hook_budget, else 20; 0 is
+# no budget, and a value that is not digits reads as the default. Past a day
+# (86400) — more than six digits once leading zeros are dropped, or a value
+# sleep cannot take — it reads as 0, no budget: never a watchdog that fires
+# at once.
+_hook_budget() {
+  local b="${DOC_SUPERPOWERS_HOOK_BUDGET:-}"
+  [ -n "$b" ] || b=$(_hook_conf hook_budget)
+  case "$b" in
+    "" | *[!0-9]*) b=20 ;;
+  esac
+  b="${b#"${b%%[!0]*}"}"
+  if [ -z "$b" ] || [ "${#b}" -gt 6 ] || [ "$b" -gt 86400 ]; then
+    b=0
+  fi
+  printf '%s' "$b"
+}
+
 # _bounded <function>: run <function> in its own process group, its stdout to
 # $work/out and stderr to $work/err, with a watchdog that, after BUDGET
 # seconds, first leaves a marker and then kills the whole group. Neither job
 # keeps the hook's stdout open. The watchdog is always killed and reaped
 # before the verdict: whether it fired is read from the marker, never from
 # whether it is still alive (it can be alive between its kill and its exit).
-# Returns <function>'s status, or 124 when it was cut short.
+# A watchdog whose sleep fails never fires. Returns <function>'s status, or
+# 124 when it was cut short. BUDGET 0: no watchdog. The hook interrupted
+# (INT, TERM, HUP) while the check runs kills both groups (the check's own
+# group is out of reach of the terminal's ^C), then dies of that signal
+# (128+n).
 _bounded() {
-  local pid wd rc=0
+  local pid="" wd="" rc=0
+  if [ "${BUDGET:-0}" = 0 ]; then
+    "$1" >"$work/out" 2>"$work/err" </dev/null || rc=$?
+    return "$rc"
+  fi
+  trap '_bounded_stop HUP 1' HUP
+  trap '_bounded_stop INT 2' INT
+  trap '_bounded_stop TERM 15' TERM
   set -m
   "$1" >"$work/out" 2>"$work/err" </dev/null &
   pid=$!
-  ( sleep "$BUDGET"; : > "$work/timedout"; kill -TERM -- "-$pid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
+  ( sleep "$BUDGET" && { : > "$work/timedout"; kill -TERM -- "-$pid" 2>/dev/null; } ) >/dev/null 2>&1 </dev/null &
   wd=$!
   set +m
   wait "$pid" 2>/dev/null || rc=$?
+  trap - HUP INT TERM
   kill -TERM -- "-$wd" 2>/dev/null
   wait "$wd" 2>/dev/null
   # A check that finished cleanly is used even if the watchdog fired after it.
@@ -121,6 +186,18 @@ _bounded() {
     rc=124
   fi
   return "$rc"
+}
+
+# _bounded_stop <signal> <number>: _bounded's handler: kill the check's and
+# the watchdog's groups (_bounded's pid and wd), then re-raise the signal
+# (the EXIT trap still runs), exiting 128+<number> should it return.
+# shellcheck disable=SC2329  # run by _bounded's traps
+_bounded_stop() {
+  trap - HUP INT TERM
+  [ -z "${pid:-}" ] || kill -TERM -- "-$pid" 2>/dev/null
+  [ -z "${wd:-}" ] || kill -TERM -- "-$wd" 2>/dev/null
+  kill -s "$1" "$$"
+  exit $((128 + $2))
 }
 
 # Why a check failed: the first ERROR: line of $work/err, else its first
@@ -131,3 +208,4 @@ _why() {
   why="${why#ERROR: }"
   printf '%s' "${why%.}"
 }
+# <<< shared hook settings <<<

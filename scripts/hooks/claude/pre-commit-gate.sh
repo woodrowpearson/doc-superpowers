@@ -23,6 +23,8 @@
 # missing, a corrupt index, the budget) is said, and blocks only under STRICT.
 # DOC_SUPERPOWERS_QUIET=1 silences the advisory output, never a block's
 # reason or the exit code; DOC_SUPERPOWERS_SKIP=1 turns the hook off.
+# DOC_SUPERPOWERS_ADVICE (else .claude/doc-superpowers/hooks.conf's advice;
+# hook-lib.sh: _advice) replaces or drops the '/doc-superpowers …' it advises.
 
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
 
@@ -126,7 +128,8 @@ if [[ $command_str =~ $re_stages || $command_str =~ $re_commit_stages ]]; then
       && [[ -f "${hk%/*}/.doc-superpowers-pre-commit" ]]; }; }; then
     _emit "" "$note The doc-superpowers git pre-commit hook checks the staged tree when git runs it."
   else
-    note="$note And no doc-superpowers git pre-commit hook is installed, so nothing checks this commit's docs (install the git tier: /doc-superpowers hooks install --git)."
+    adv=$(_advice "hooks install --git")
+    note="$note And no doc-superpowers git pre-commit hook is installed, so nothing checks this commit's docs${adv:+ (install the git tier: $adv)}."
     if _strict; then
       _emit "doc-superpowers: DOC_SUPERPOWERS_STRICT=1 cannot hold for this commit: it stages as it commits, and no doc-superpowers git pre-commit hook is installed." "$note"
     else
@@ -154,21 +157,30 @@ tree=$(GIT_INDEX_FILE="$idx" git write-tree 2>/dev/null) \
 # on stdout, a failure's reason on stderr.
 # shellcheck disable=SC2329  # run by _bounded
 _check() {
-  local result added wide
+  local result added refs wide
   # Each run's stderr is passed on only when that run fails, so the reason
   # _why reads is the failing run's.
   result=$(printf '%s\n' "$staged" | "$DOC_TOOLS" check-freshness --tree "$tree" --code-refs-from - 2>"$work/err.scoped") \
     || { cat "$work/err.scoped" >&2; return 1; }
   # The scope reaches a doc through its code refs only, so the entries the
-  # staged index adds (its keys minus HEAD's) are judged unscoped, and their
-  # verdicts join the scoped ones — the git pre-commit hook's rule.
+  # staged index adds (its keys minus HEAD's) are judged too, scoped to their
+  # own code refs (unscoped when one has none, which no filter keeps), and
+  # their verdicts join the scoped ones — the git pre-commit hook's rule.
   if grep -qxF docs/.doc-index.json <<<"$staged"; then
     added=$( { git cat-file blob "$tree:docs/.doc-index.json" \
       && { git cat-file blob HEAD:docs/.doc-index.json 2>/dev/null || echo '{}'; }; } 2>/dev/null \
       | jq -cs '((.[0].docs // {}) | keys) - ((.[1].docs // {}) | keys)' 2>/dev/null) || added='[]'
     if [[ -n "$added" && "$added" != "[]" ]]; then
-      wide=$("$DOC_TOOLS" check-freshness --tree "$tree" 2>"$work/err.wide") \
-        || { cat "$work/err.wide" >&2; return 1; }
+      refs=$(git cat-file blob "$tree:docs/.doc-index.json" 2>/dev/null | jq -r --argjson a "$added" '
+        [.docs[$a[]] | [(.code_refs // []) | if type == "array" then .[] else empty end | strings | select(. != "")]]
+        | if any(.[]; length == 0) then empty else .[][] end' 2>/dev/null) || refs=""
+      if [[ -n "$refs" ]]; then
+        wide=$(printf '%s\n' "$refs" | "$DOC_TOOLS" check-freshness --tree "$tree" --code-refs-from - 2>"$work/err.wide") \
+          || { cat "$work/err.wide" >&2; return 1; }
+      else
+        wide=$("$DOC_TOOLS" check-freshness --tree "$tree" 2>"$work/err.wide") \
+          || { cat "$work/err.wide" >&2; return 1; }
+      fi
       result=$(printf '%s\n%s\n%s\n' "$added" "$result" "$wide" | jq -cs '
         (reduce .[0][] as $k ({}; .[$k] = true)) as $a
         | .[2].docs as $w
@@ -242,12 +254,16 @@ report=$(printf '%s\n%s\n' "$result" "$ondisk" | _report_jq '
 
 # A block's stderr is Claude's feedback: QUIET silences the advisory only.
 # The report is held under the limit with room for that last line.
+adv=$(_advice update)
 if _strict; then
   _clip "$report" $((HOOK_MAX_CHARS - 400)) >&2
-  echo "  Commit blocked by DOC_SUPERPOWERS_STRICT=1: update the docs ('/doc-superpowers update') and re-verify them (doc-tools.sh update-index <doc>), or set DOC_SUPERPOWERS_SKIP=1 to bypass." >&2
+  how=""
+  [[ -z "$adv" ]] || how=" ('$adv')"
+  echo "  Commit blocked by DOC_SUPERPOWERS_STRICT=1: update the docs$how and re-verify them (doc-tools.sh update-index <doc>), or set DOC_SUPERPOWERS_SKIP=1 to bypass." >&2
   exit 2
 fi
 _quiet && exit 0
-_emit "$summary" "$report
-  Consider running '/doc-superpowers update' before committing."
+[[ -z "$adv" ]] || report="$report
+  Consider running '$adv' before committing."
+_emit "$summary" "$report"
 exit 0
