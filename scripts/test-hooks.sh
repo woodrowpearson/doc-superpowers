@@ -5998,6 +5998,23 @@ test_driver_only_install_uninstall() {
   teardown
 }
 
+test_driver_only_missing_driver() {
+  echo "test: #20 install --git --merge-driver-only with no merge-doc-index.sh beside the skill exits 1, says why, and writes nothing"
+  setup
+  local root before
+  root="$(harness_mktemp_d no-driver)/plugin"
+  plugin_copy "$root"
+  rm -f "$root/scripts/merge-doc-index.sh"
+  before=$(_tree_state)
+  inst --from "$root/scripts/hooks/install.sh" install --git --merge-driver-only
+  assert_eq "1" "$IRC" "the driver missing: exit 1"
+  assert_contains "$IOUT" "merge-doc-index.sh" "…naming the missing script"
+  assert_contains "$IOUT" "plugin/scripts/merge-doc-index.sh" "…where it was looked for"
+  assert_not_contains "$IOUT" "none touched" "…never the success line"
+  assert_eq "$before" "$(_tree_state)" "…nothing written (no git config, no .gitattributes)"
+  teardown
+}
+
 test_driver_only_flag_rules() {
   echo "test: #20 --merge-driver-only needs the git tier; --json is status's; --json and a ledger set exit 2"
   setup
@@ -6494,6 +6511,7 @@ test_advice_setting_claude_hooks() {
 echo ""
 echo "=== install --git --merge-driver-only, status --json (#20); hook budgets and advice (#24) ==="
 test_driver_only_install_uninstall
+test_driver_only_missing_driver
 test_driver_only_flag_rules
 test_driver_only_ignores_foreign_hooks_path
 test_status_json_states

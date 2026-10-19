@@ -165,7 +165,8 @@ Tiers:
   --merge-driver-only
             With --git: only the merge driver (merge.doc-index.* git config and
             the .gitattributes block), never a hook — install, uninstall and
-            status alike (hooks already there are left as they are).
+            status alike (hooks already there are left as they are). Install
+            exits 1 when merge-doc-index.sh is not beside the installer's skill.
   --claude  Claude Code hooks, per-user: registered in .claude/settings.local.json,
             both it and .claude/hooks/doc-superpowers/ excluded from git through
             git's info/exclude; commands run "\$CLAUDE_PROJECT_DIR"/.claude/hooks/…:
@@ -2463,6 +2464,10 @@ case "$COMMAND" in
     $DO_LEDGER && preflight_ledger
     $DO_LEDGER_CLAUDE && preflight_ledger_claude
     $DO_GIT && preflight_git
+    # --merge-driver-only installs the driver alone: without it, nothing to do.
+    if $DO_GIT && $DRIVER_ONLY && [[ ! -f "$SKILL_DIR/scripts/merge-doc-index.sh" ]]; then
+      die "--merge-driver-only: no merge driver to register: $SKILL_DIR/scripts/merge-doc-index.sh is missing (a partial or vendored copy of the plugin?); install from a full plugin checkout or the plugin cache"
+    fi
     $DO_CLAUDE && preflight_claude
     $DO_CI && preflight_ci
     echo ""
