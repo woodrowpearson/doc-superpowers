@@ -99,7 +99,7 @@ is_shell() {
 }
 
 # The git tier's whole-file hook (install.sh: is_our_hook).
-is_tier_hook() { head -n 5 "$1" | grep -qF "doc-superpowers hook v"; }
+is_tier_hook() { awk 'NR <= 5 && index($0, "doc-superpowers hook v") { m = 1 } END { exit !m }' "$1"; }
 
 # Write <content-file> to the hook: an existing hook keeps its mode, a new
 # one is 755.

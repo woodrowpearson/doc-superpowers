@@ -127,8 +127,15 @@ detect_bashes() {
 }
 
 if [ -n "$BASHES" ]; then
-  for b in $BASHES; do
+  given="$BASHES" BASHES=""
+  for b in $given; do
+    # A bare name (tests.yml's ubuntu leg passes "bash") is looked up on PATH.
+    case "$b" in
+      */*) ;;
+      *) b=$(command -v "$b" 2>/dev/null || printf '%s' "$b") ;;
+    esac
     bash_major "$b" >/dev/null || { err "--bash $b: not an executable bash"; exit 2; }
+    BASHES="$BASHES $b"
   done
 else
   BASHES=$(detect_bashes)
