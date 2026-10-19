@@ -183,7 +183,7 @@ Keys are `<legacy id>#<row>`; the legacy id is `legacy_ledgers`' name for the fi
 | `inflight [--branch <b>[@<host>]] [--fetch] [--push]` | the branches in flight, one line each (*In-flight work*); `--push` publishes this branch's in-flight ref | 1 unknown `--branch` · 2 offline `--fetch`, a refused push · 1 `pre_push_check` refusing |
 | `notices [--branch …] [--gate] [--fetch] \| --hook` | stop / heads-up / info notices for a branch (*In-flight work*) | 1 with `--gate` and an unacked `stop` · 2 a base or branch that does not resolve, offline `--fetch`, and with `--gate` an in-flight fetch that failed ("could not verify") |
 | `state-watch --hook` | the PostToolUse hook mode (*Hooks*) | always 0 |
-| `new --ledger <id\|unassigned> --summary <text> [--file <issue>] [--finalize] [--suggest-contracts [--top N]]` | allocate a key and write `key`, `ledger`, `summary` into an issue (default: the one staged or untracked item file without a key); `unassigned` writes no key; prints `<key>  <path>`; `--suggest-contracts` then prints `suggest`'s candidates, `--top` included (writing no relation) | 3 no single issue, `--top` without `--suggest-contracts` · 2 allocation failed |
+| `new --ledger <id\|unassigned> --summary <text> [--file <issue> \| --create --title <text> [--sev <value>] [--paths <a,b,…>] [--body-file <file>]] [--finalize] [--suggest-contracts [--top N]]` | allocate a key and write `key`, `ledger`, `summary` into an issue (default: the one staged or untracked item file without a key); `unassigned` writes no key; prints `<key>  <path>`; `--suggest-contracts` then prints `suggest`'s candidates, `--top` included (writing no relation). `--create` writes the issue itself, once and complete (any exit but 0 leaves no file; the key is allocated from its path first): `<dir>/<YYYY-MM-DD>-<slug>.md` — `<dir>` the literal directory of the first `items.globs` entry `<dir>/<pattern>.md` (else `docs/issues`), `<slug>` the title lowercased with every run of other characters than `a-z0-9` one `-` (≤ 50; `item` when empty), a taken name `-2` … `-99`; frontmatter status (`status.open[0]`), date (today), severity (`--sev`), paths (`--paths`, a flow list), the `init.stub_defaults` fields it does not set, then key, ledger, summary; body `# <title>`, a blank line, the `--body-file` bytes; prints `created <path>` first (JSON `"created": true`) | 3 no single issue, `--top` without `--suggest-contracts`; with `--create`: `--file`, a missing, blank or multi-line `--title`, a `--body-file` that is not a readable file, an empty `--paths` piece, `--sev` outside a non-empty `severity_order`, `items.adapter` set (hosted items), a path `items.globs` do not match (give `--file`); `--title`, `--sev`, `--paths` or `--body-file` without `--create` · 2 allocation failed, every name to `-99` taken |
 | `assign <item> <ledger>` | a new key in that ledger; the old key is appended to `aliases` | 1 unknown |
 | `link <item> --consumes <c>[,…] \| --changes <c>[,…] \| --relates <kind>:<item>[,…] \| --relations none` | write confirmed relations into the item's lists (any of the three at once, each one value or a comma list — a `--relates` piece is a whole `<kind>:<item>`; one write, one index read). A comma list is split only when the whole value is not itself valid, so a single value — even a contract id holding a comma — is checked as before; blanks around commas are ignored, a repeat counts once, an empty piece is a bad value. `--relations none` writes `relations: none` (the opt-out `validate.require_relations` reads); refused beside another flag or when the item already names a relation; a later link that writes a relation removes it in the same write (JSON `removed`) | 1 a bad value, nothing written |
 | `suggest <item> [--top N]` | contracts the item might declare, never written: `changes` candidates are the contracts whose `defined_in` matches a file the item lists; `consumes` candidates the contracts its related items (confirmed neighbours, and the open candidates `related` lists) change or consume; a contract it already declares on that side is left out. Candidates rank by their evidence — the number of reasons, most first — then contract id (then `changes` before `consumes`); `--top N` keeps the first N (default 15, `0`: all), and when some are left out a line says `(showing N of M candidates; --top 0 shows all)`. Ends `confirm with: ledger link <item> --changes a,b --consumes c` naming the shown ones (or `(no contract candidates)`). `new --suggest-contracts` prints the same after its write | 1 unknown · 3 ambiguous or archived, a `--top` that is not a whole number |
@@ -385,15 +385,18 @@ With `validate.require_relations: "new"`, the pre-commit leg (`validate --staged
 ### Example: a filing wrapper
 
 ```bash
-# The wrapper wrote docs/issues/2026-10-17-refund-rounding.md (title, body, status and the
-# host's own fields), after asking the user. Now the ledger's part:
-out=$("$DOC_TOOLS" ledger new --ledger checkout --summary "Totals round twice on refunds" \
-        --file docs/issues/2026-10-17-refund-rounding.md --suggest-contracts --top 10 --format json)
+# The wrapper asked the user for the title, summary, ledger, severity, files and body (body.md).
+# One call writes the item file (its path, frontmatter, key and body: all or nothing), then
+# proposes its contracts:
+out=$("$DOC_TOOLS" ledger new --create --title "Refund totals round twice" --ledger checkout \
+        --summary "Totals round twice on refunds" --sev P1 --paths src/order/total.js,src/refund/amount.js \
+        --body-file body.md --suggest-contracts --top 10 --format json)
 case $? in
   0) ;;
-  2) echo "ledger: could not allocate: $(jq -r .error <<<"$out")"; exit 2 ;;
+  2) echo "ledger: could not file it, nothing was written: $(jq -r .error <<<"$out")"; exit 2 ;;
   *) echo "ledger new: $out"; exit 1 ;;
 esac
+path=$(jq -r .path <<<"$out")            # docs/issues/<today>-refund-totals-round-twice.md
 key=$(jq -r '.key // .path' <<<"$out")   # provisional (offline) keys are fine: finalize replaces them
 # …show .candidates[] ({field, contract, reasons}, best-evidenced first) to the user — when .truncated, say
 #    "showing N of .total" and offer the rest (ledger suggest "$key" --top 0 --format json); they confirm field:order.total (consumes and changes) and
@@ -401,6 +404,7 @@ key=$(jq -r '.key // .path' <<<"$out")   # provisional (offline) keys are fine: 
 "$DOC_TOOLS" ledger link "$key" --consumes field:order.total,field:refund.amount \
   --changes field:order.total --format json
 # …or, nothing to declare: "$DOC_TOOLS" ledger link "$key" --relations none
+echo "filed $path ($key)"   # nothing is committed: the user commits the new file
 ```
 
 ### Example: a backfill script

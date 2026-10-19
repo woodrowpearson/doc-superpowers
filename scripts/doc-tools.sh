@@ -1534,6 +1534,7 @@ _LG_VERB=""          # the ledger sub-verb ("ls", …); "ledger" when none
 _LG_FORMAT=text      # text | json (--format)
 _LG_HOOK=0           # 1: a hook mode (ledger notices|state-watch --hook): exit 0, stdout the hook's
 _LG_HOOK_FAIL=""     # a hook mode's failure handler (scripts/ledger/hooks.sh), once it is set
+_LG_UNDO_FILE=""     # a file this run wrote whole (ledger new --create): removed when the run ends ≠ 0
 _on_exit() {
   local rc=$? emitted=0 erc="" marker=""
   if [ "$_CL_ACTIVE" = 1 ]; then
@@ -1593,6 +1594,9 @@ _on_exit() {
         ;;
     esac
   fi
+  # ledger new --create is all or nothing: the item file it wrote goes when
+  # the run ends otherwise than 0 (scripts/ledger/keys.sh _lg_k_create).
+  if [ "$rc" != 0 ] && [ -n "$_LG_UNDO_FILE" ]; then rm -f -- "$_LG_UNDO_FILE"; fi
   # A hook mode (Task 16c U4) never fails its session: whatever happened —
   # a usage error, no repository, a crash — it ends 0.
   if [ "$_LG_HOOK" = 1 ]; then rc=0; fi
@@ -2538,8 +2542,8 @@ ledger state-watch|cmd_ledger_state_watch|repo|hook
   Otherwise nothing. Always exits 0, printing nothing else (as notices
   --hook); DOC_SUPERPOWERS_LEDGER_SKIP=1 or DOC_SUPERPOWERS_SKIP=1:
   silent.
-ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize suggest-contracts top= format=
-  --ledger <id|unassigned> --summary <text> [--file <issue>] [--finalize] [--suggest-contracts [--top N]] [--format text|json]
+ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize suggest-contracts top= create title= body-file= paths= sev= format=
+  --ledger <id|unassigned> --summary <text> [--file <issue> | --create --title <text> [--sev <value>] [--paths <a,b,…>] [--body-file <file>]] [--finalize] [--suggest-contracts [--top N]] [--format text|json]
   Allocate an item key and write key, ledger and summary (at most 140
   characters, one line) into an issue: <issue> defaults to the one staged
   or untracked item file without a key (none or several: exit 3).
@@ -2555,6 +2559,25 @@ ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize suggest-contracts
   prints the item's contract candidates as ledger suggest does, --top
   included (after the write; JSON: "total", "truncated" and "candidates",
   suggest's shape) and writes no relation; --top without it: exit 3.
+  --create writes the issue itself, once and complete (any exit but 0
+  leaves no file; the key is allocated from its path first):
+  <dir>/<YYYY-MM-DD>-<slug>.md, <dir> the literal directory of the first
+  items.globs entry shaped <dir>/<pattern>.md (else docs/issues), <slug>
+  the title lowercased, every run of characters other than a-z and 0-9
+  one "-", at most 50 ("item" when empty); a taken name gets -2 … -99
+  (all taken: exit 2); a path items.globs do not match: exit 3 (write the
+  file, then --file). Its frontmatter, in order: the status field =
+  status.open[0], the date field = today, the severity field = --sev and
+  the paths field = --paths as a flow list (blanks around the commas
+  ignored), when given, then the config init.stub_defaults fields it
+  does not set (quoted as init quotes them), then key, ledger and
+  summary; its body "# <title>", a blank line, then the --body-file
+  bytes. Usage (exit 3): --create with --file; --title, --sev, --paths or
+  --body-file without --create; a missing, blank or multi-line --title;
+  a --body-file that is not a readable file; an empty --paths piece;
+  --sev not in a non-empty severity_order; config items.adapter set
+  (hosted items: create the issue through the adapter). Prints "created
+  <path>" before new's line; JSON adds "created": true.
 ledger assign|cmd_ledger_assign|repo|format=
   <item> <ledger> [--format text|json]
   Move an item to a ledger: a new key there; the previous key is appended
@@ -3370,6 +3393,7 @@ _shellcheck_opt_names() {
   _OPT_all="" _OPT_by="" _OPT_check="" _OPT_chunk="" _OPT_deep="" _OPT_final="" _OPT_range=""
   _OPT_plan="" _OPT_refs="" _OPT_reverify="" _OPT_scheduled="" _OPT_staged="" _OPT_superseded_by=""
   _OPT_tag="" _OPT_tree="" _OPT_warn=""
+  _OPT_create="" _OPT_title="" _OPT_body_file="" _OPT_paths="" _OPT_sev=""
   _OPTV_claims=() _OPTV_code_refs=() _OPTV_code_refs_from=() _OPTV_config=() _OPTV_helper=() _OPTV_holds=()
 }
 

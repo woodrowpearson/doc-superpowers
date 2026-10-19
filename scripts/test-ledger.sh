@@ -12449,6 +12449,193 @@ test_lg_adapter_read_by_contract() {
   teardown
 }
 
+# lg_body <file>: its lines after the frontmatter (after the second --- line).
+lg_body() {
+  awk 'f >= 2 { print; next } /^---$/ { f++ }' "$1"
+}
+
+# lg_new_files: the item files git does not track yet, one per line.
+lg_new_files() {
+  git ls-files -o --exclude-standard docs/issues
+}
+
+test_lg_new_create_writes_item() {
+  echo "test: #36 — ledger new --create: <dir>/<today>-<slug>.md with status (status.open[0]), date, severity, paths, stub_defaults, then key/ledger/summary; H1 + body"
+  lg_rel_fixture '{"base":"main","keys":{"mode":"merge"},"init":{"stub_defaults":{"type":"bug","verify":"code"}}}'
+  local today p key
+  today=$(lg_today)
+  p="docs/issues/$today-refund-totals-round-twice.md"
+  printf 'Steps:\n1. refund\n' > body.md
+  lg new --create --title "Refund totals round twice!" --ledger app --summary "Totals round twice on refunds" \
+     --sev P1 --paths src/order/total.js,src/cart/badge.js --body-file body.md --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_json_field "$LG_OUT" '.created' "true" "JSON: created true"
+  assert_json_field "$LG_OUT" '.path' "$p" "the path: <dir>/<today>-<slug of the title>.md"
+  key=$(jq -r '.key' <<<"$LG_OUT")
+  assert_eq "app-~" "$(printf '%s' "$key" | sed -n 's/^\(app-~\)[0-9a-f]\{4,8\}$/\1/p')" "keys.mode merge: a provisional key in app ($key)"
+  assert_json_field "$LG_OUT" '[.ledger, .provisional] | tojson' '["app",true]' "…new's payload"
+  assert_eq "status: open|date: $today|severity: P1|related-files: [src/order/total.js, src/cart/badge.js]|type: bug|verify: code|key: $key|ledger: app|summary: Totals round twice on refunds" \
+    "$(lg_fmblock "$p")" "frontmatter: status, date, severity, paths, stub_defaults, then key, ledger, summary"
+  assert_eq "# Refund totals round twice!
+
+Steps:
+1. refund" "$(lg_body "$p")" "body: the H1, a blank line, the --body-file bytes"
+  assert_eq "---" "$(head -n 1 "$p")" "the file opens with its frontmatter"
+  lg new --create --title "Refund totals round twice!" --ledger app --summary "Totals round twice on refunds" \
+     --sev P1 --paths src/order/total.js,src/cart/badge.js --body-file body.md --format json
+  assert_json_field "$LG_OUT" '.path' "docs/issues/$today-refund-totals-round-twice-2.md" "the name taken: -2"
+  lg new --create --title "Refund totals round twice!" --ledger app --summary "Totals round twice on refunds"
+  assert_eq "0" "$LG_RC" "text mode: exit 0"
+  p="docs/issues/$today-refund-totals-round-twice-3.md"
+  key=$(sed -n 's/^key: //p' "$p" 2>/dev/null | head -n 1 || true)
+  assert_eq "created $p" "$(sed -n 1p <<<"$LG_OUT")" "text: \"created <path>\" first"
+  assert_eq "$key  $p" "$(sed -n 2p <<<"$LG_OUT")" "…then new's line"
+  assert_eq "status: open|date: $today|type: bug|verify: code|key: $key|ledger: app|summary: Totals round twice on refunds" \
+    "$(lg_fmblock "$p")" "no --sev, no --paths: neither field"
+  assert_eq "# Refund totals round twice!" "$(lg_body "$p")" "no --body-file: the H1 alone"
+  # stub_defaults: a field the item sets (any of its candidate names) is
+  # not repeated; YAML-typed strings quoted as init quotes them; {today};
+  # --ledger unassigned: no key; severity_order [] takes any --sev.
+  lg_enable '{"base":"main","keys":{"mode":"merge"},"severity_order":[],"status":{"open":["triage"]},
+    "init":{"stub_defaults":{"status":"open","priority":"P3","code_refs":"x","owner":"no","n":"007","seen":"{today}","pts":3}}}'
+  lg new --create --title "  Ünïcode / spaces & CAPS  " --ledger unassigned --summary "Unhomed" --sev "High" \
+     --paths " a.js , b c.js " --format json
+  assert_eq "0" "$LG_RC" "unassigned: exit 0"
+  p="docs/issues/$today-n-code-spaces-caps.md"
+  assert_json_field "$LG_OUT" '[.path, .ledger, .key, .provisional, .created] | tojson' "[\"$p\",\"unassigned\",null,false,true]" \
+    "unassigned: no key; the slug lowercases and folds every other run to -"
+  assert_eq "status: triage|date: $today|severity: High|related-files: [a.js, b c.js]|owner: \"no\"|n: \"007\"|seen: $today|pts: 3|ledger: unassigned|summary: Unhomed" \
+    "$(lg_fmblock "$p")" "status.open[0]; stub_defaults after, quoted when YAML-typed, skipping the fields the item sets"
+  assert_eq "# Ünïcode / spaces & CAPS" "$(lg_body "$p")" "the H1: the title, blanks at its ends trimmed"
+  lg new --create --title "!!!" --ledger unassigned --summary "No slug"
+  assert_eq "created docs/issues/$today-item.md" "$(sed -n 1p <<<"$LG_OUT")" "an empty slug: item"
+  # Without --create: no created field.
+  lg_item docs/issues/z.md "status: Open"
+  lg new --file docs/issues/z.md --ledger unassigned --summary "Old way" --format json
+  assert_json_field "$LG_OUT" 'has("created")' "false" "without --create: no created field"
+  teardown
+}
+
+test_lg_new_create_usage() {
+  echo "test: #36 — --create usage: with --file, flags without --create, empty or multi-line title, unreadable --body-file, items.adapter set, --sev outside severity_order: exit 3, no file"
+  lg_rel_fixture '{"base":"main","keys":{"mode":"merge"}}'
+  local c=(--ledger app --summary S)
+  mkdir bodydir
+  lg new --create --title T "${c[@]}" --file docs/issues/a.md
+  assert_eq "3" "$LG_RC" "--create with --file: usage (3)"
+  lg new --title T "${c[@]}" --file docs/issues/a.md
+  assert_eq "3" "$LG_RC" "--title without --create: usage (3)"
+  assert_contains "$LG_ERR" "--create" "…naming --create"
+  lg new --sev P1 "${c[@]}"
+  assert_eq "3" "$LG_RC" "--sev without --create: usage (3)"
+  lg new --paths a.js "${c[@]}"
+  assert_eq "3" "$LG_RC" "--paths without --create: usage (3)"
+  lg new --body-file body.md "${c[@]}"
+  assert_eq "3" "$LG_RC" "--body-file without --create: usage (3)"
+  lg new --create "${c[@]}"
+  assert_eq "3" "$LG_RC" "--create without --title: usage (3)"
+  lg new --create --title "" "${c[@]}"
+  assert_eq "3" "$LG_RC" "an empty --title: usage (3)"
+  lg new --create --title "   " "${c[@]}"
+  assert_eq "3" "$LG_RC" "a blank --title: usage (3)"
+  lg new --create --title "two
+lines" "${c[@]}"
+  assert_eq "3" "$LG_RC" "a multi-line --title: usage (3)"
+  lg new --create --title T "${c[@]}" --body-file nope.md
+  assert_eq "3" "$LG_RC" "a --body-file that does not exist: usage (3)"
+  lg new --create --title T "${c[@]}" --body-file bodydir
+  assert_eq "3" "$LG_RC" "a --body-file that is a directory: usage (3)"
+  lg new --create --title T "${c[@]}" --sev P9 --format json
+  assert_eq "3" "$LG_RC" "--sev outside severity_order: usage (3)"
+  assert_json_field "$LG_OUT" '.error | contains("P0, P1, P2, P3")' "true" "…naming the order"
+  lg new --create --title T "${c[@]}" --paths "a.js,,b.js"
+  assert_eq "3" "$LG_RC" "an empty piece in --paths: usage (3)"
+  lg new --create --title T --summary S
+  assert_eq "3" "$LG_RC" "--create without --ledger: usage (3)"
+  lg new --create --title T --ledger app
+  assert_eq "3" "$LG_RC" "--create without --summary: usage (3)"
+  lg new --create --title T --ledger nope --summary S
+  assert_eq "3" "$LG_RC" "--create into an unknown ledger: usage (3)"
+  lg_enable '{"base":"main","items":{"adapter":"tools/items.sh"}}'
+  lg new --create --title T "${c[@]}" --format json
+  assert_eq "3" "$LG_RC" "--create with items.adapter set: usage (3)"
+  assert_json_field "$LG_OUT" '.error | contains("hosted items: create the issue through the adapter")' "true" "…saying so"
+  assert_eq "" "$(git status --porcelain docs/issues)" "no file written by any of them"
+  teardown
+}
+
+test_lg_new_create_no_file_on_failure() {
+  echo "test: #36 — --create --finalize with an unreachable remote (cas): exit 2 and no file written; every name to -99 taken: exit 2"
+  lg_rel_fixture '{"base":"main","keys":{"mode":"cas"}}'
+  git remote add origin "$TEST_DIR/none.git"
+  lg new --create --finalize --title "Filed offline" --ledger app --summary "Needs a real key"
+  assert_eq "2" "$LG_RC" "--finalize, the remote unreachable: exit 2"
+  assert_contains "$LG_ERR" "cannot reach" "…saying why"
+  assert_eq "" "$(lg_new_files)" "…no file written"
+  lg new --create --title "Filed offline" --ledger app --summary "A provisional key" --format json
+  assert_eq "0" "$LG_RC" "without --finalize: a provisional key (exit 0)"
+  assert_json_field "$LG_OUT" '.provisional' "true" "…provisional"
+  assert_eq "docs/issues/$(lg_today)-filed-offline.md" "$(lg_new_files)" "…the one file"
+  git add -A && git commit -q --allow-empty -m filed
+  # A failure after the write — the --suggest-contracts read, the contracts
+  # adapter failing its second run — takes the file back.
+  lg_enable '{"base":"main","keys":{"mode":"merge"},"adapters":{"contracts":"tools/contracts.sh"}}'
+  lg_contracts_adapter 'n=$(cat "'"$TEST_DIR"'/runs" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "'"$TEST_DIR"'/runs"
+[ "$n" -lt 2 ] || { echo "contracts: flaky" >&2; exit 1; }
+echo "{\"id\":\"flag:a\",\"ledger\":null,\"defined_in\":[]}"'
+  lg new --create --title "Flaky" --ledger unassigned --summary "Suggest fails after the write" --suggest-contracts
+  assert_eq "2|2" "$LG_RC|$(cat runs)" "the second adapter run (after the write) fails: exit 2"
+  assert_eq "" "$(lg_new_files)" "…and the file it wrote is taken back"
+  lg_enable '{"base":"main","keys":{"mode":"cas"}}'
+  # Every name taken: <base>.md, then -2 … -99 (a dangling link counts).
+  local b n
+  b="docs/issues/$(lg_today)-busy"
+  ln -s nowhere "$b.md"
+  for n in $(seq 2 98); do printf 'x\n' > "$b-$n.md"; done
+  lg new --create --title Busy --ledger unassigned --summary "Almost full"
+  assert_eq "0|created $b-99.md" "$LG_RC|$(sed -n 1p <<<"$LG_OUT")" "-99 is the last free name"
+  lg new --create --title Busy --ledger unassigned --summary "Full"
+  assert_eq "2" "$LG_RC" "every name to -99 taken: exit 2"
+  assert_contains "$LG_ERR" "$b-99.md" "…naming the last one tried"
+  assert_eq "99" "$(lg_new_files | grep -c busy)" "…no file written (the link, -2 … -99)"
+  teardown
+}
+
+test_lg_new_create_suggest_contracts() {
+  echo "test: #36 — --create --suggest-contracts: the new item's candidates (changes field:order.total from its listed src/order/total.js)"
+  lg_rel_fixture '{"base":"main","keys":{"mode":"merge"}}'
+  lg new --create --title "Total lint" --ledger app --summary "The total file fails lint" --paths src/order/total.js \
+     --suggest-contracts --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_json_field "$LG_OUT" '.created' "true" "created"
+  assert_json_field "$LG_OUT" '.candidates[] | select(.field == "changes") | {field, contract, sources} | tojson' \
+    '{"field":"changes","contract":"field:order.total","sources":[{"kind":"file","file":"src/order/total.js"}]}' \
+    "the changes candidate from its listed file"
+  assert_json_field "$LG_OUT" '[.total, .truncated] | tojson' '[2,false]' "…with total and truncated"
+  lg new --create --title "Total lint" --ledger app --summary "Again" --paths src/order/total.js --suggest-contracts --top 1
+  assert_eq "0" "$LG_RC" "text, --top 1: exit 0"
+  assert_eq "created docs/issues/$(lg_today)-total-lint-2.md" "$(sed -n 1p <<<"$LG_OUT")" "created first"
+  assert_eq "(showing 1 of 2 candidates; --top 0 shows all)" "$(lg_line "$LG_OUT" "(showing")" "…then suggest's lines"
+  teardown
+}
+
+test_lg_new_create_glob_mismatch() {
+  echo "test: #36 — items.globs whose first entry is not <dir>/<pattern>.md and docs/issues/*.md not matched: exit 3 naming --file"
+  lg_fixture
+  lg_enable '{"base":"main","keys":{"mode":"merge"},"items":{"globs":["notes/**/issue-*.md"]}}'
+  git add -A && git commit -qm config
+  lg new --create --title "Lost" --ledger unassigned --summary "Nowhere to go"
+  assert_eq "3" "$LG_RC" "the path the globs do not match: usage (3)"
+  assert_contains "$LG_ERR" "docs/issues/$(lg_today)-lost.md" "…naming the path"
+  assert_contains "$LG_ERR" "--file" "…and --file"
+  assert_eq "" "$(git status --porcelain)" "no file written"
+  # The first glob shaped <dir>/<pattern>.md decides the directory.
+  lg_enable '{"base":"main","keys":{"mode":"merge"},"items":{"globs":["notes/**/issue-*.md","tracker/*.md"]}}'
+  lg new --create --title "Found" --ledger unassigned --summary "Somewhere to go"
+  assert_eq "0|created tracker/$(lg_today)-found.md" "$LG_RC|$(sed -n 1p <<<"$LG_OUT")" "…tracker/ (created)"
+  teardown
+}
+
 run_tests() {
   echo "Running ledger tests..."
   echo ""
@@ -12878,6 +13065,11 @@ run_tests() {
   test_lg_contract_read_by_index
   test_lg_registry_read_by_shape
   test_lg_adapter_read_by_contract
+  test_lg_new_create_writes_item
+  test_lg_new_create_usage
+  test_lg_new_create_no_file_on_failure
+  test_lg_new_create_suggest_contracts
+  test_lg_new_create_glob_mismatch
 
   print_summary
 }

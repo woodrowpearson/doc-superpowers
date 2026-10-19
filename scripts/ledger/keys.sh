@@ -1142,15 +1142,205 @@ _lg_k_emit_lines() {
   _lg_emit "$_LG_VERB" 0
 }
 
+# _lg_k_new_alloc <ledger> <path> <finalize> <index> <scratch>: ledger new's
+# one key for <path> into _LG_KA_KEY — keys.mode merge with --finalize: a
+# real key only on the base, numbered there (off the base: exit 2);
+# --finalize: from the counter ref, or exit 2; else from the counter ref,
+# a provisional key when the remote cannot be reached (_lg_alloc). <path>
+# need not exist yet (new --create): a provisional key's hex is its name's.
+_lg_k_new_alloc() {
+  local out
+  if [ -n "$3" ] && [ "$_LG_K_MODE" = merge ]; then
+    _lg_k_merge_on_base 2
+    printf '%s\t%s\n' "$1" "$2" > "$5/paths" || _lg_die "cannot write $5/paths"
+    out=$(_lg_k_local_alloc "$5/paths" "$4") || exit "$?"
+  elif [ -n "$3" ]; then
+    out=$(_LG_ALLOC_STRICT=1 _lg_alloc "$1" 1 "$2") || exit "$?"
+  else
+    out=$(_lg_alloc "$1" 1 "$2") || exit "$?"
+  fi
+  _LG_KA_KEY=${out#*$'\t'}
+}
+
+# --- new --create ------------------------------------------------------------------------------
+
+# _lg_k_create_args: ledger new's --create flags checked before anything is
+# read (usage, 3): --create with --file; --title, --sev, --paths or
+# --body-file without --create; a missing, blank or multi-line --title; a
+# --body-file that is not a readable file; an empty --paths piece. Sets
+# _LG_KC (1 with --create, else 0), _LG_KC_TITLE (blanks at its ends
+# trimmed), _LG_KC_NPATHS and _LG_KC_PATHS (the --paths pieces, blanks
+# around the commas trimmed, joined by \001 as _lg_fm_op setlist takes them).
+# shellcheck disable=SC2154  # _OPT_* are set by _parse_args
+_lg_k_create_args() {
+  local o t out
+  _LG_KC=0
+  if [ "$_OPT_create" != 1 ]; then
+    for o in title sev paths body-file; do
+      if _opt_seen "$o"; then _lg_usage "--$o goes with --create"; fi
+    done
+    return 0
+  fi
+  _LG_KC=1
+  if _opt_seen file; then _lg_usage "--create writes a new item file: it takes no --file"; fi
+  _opt_seen title || _lg_usage "--create needs --title <text> (the item's H1 and file name)"
+  t=$_OPT_title
+  t=${t#"${t%%[![:space:]]*}"}
+  t=${t%"${t##*[![:space:]]}"}
+  [ -n "$t" ] || _lg_usage "--title is empty"
+  case "$t" in
+    *$'\n'*|*$'\r'*) _lg_usage "--title must be one line" ;;
+  esac
+  _LG_KC_TITLE=$t
+  if _opt_seen body-file && { [ ! -f "$_OPT_body_file" ] || [ ! -r "$_OPT_body_file" ]; }; then
+    _lg_usage "--body-file '$_OPT_body_file' is not a readable file"
+  fi
+  _LG_KC_NPATHS=0
+  _LG_KC_PATHS=""
+  if _opt_seen paths; then
+    # shellcheck disable=SC2016  # jq source
+    out=$(jq -n -r --arg p "$_OPT_paths" '$p | split(",") | map(sub("^\\s+"; "") | sub("\\s+$"; ""))
+        | if any(. == "") then "!" else "\(length)\u0001\(join("\u0001"))" end') || _lg_die "jq failed (--paths)"
+    [ "$out" != "!" ] || _lg_usage "--paths '$_OPT_paths' has an empty piece (give a,b,…)"
+    _LG_KC_NPATHS=${out%%$'\001'*}
+    _LG_KC_PATHS=${out#*$'\001'}
+  fi
+}
+
+# _lg_k_create_cfg <out>: --create's config, read once (lg_fields): usage
+# (3) when items.adapter is set (hosted items) or --sev is not in a
+# non-empty severity_order; a config without a status.open[0] dies (2).
+# Sets _LG_KC_OPEN (status.open[0]) and the names to write — the first
+# candidate of each logical field (else the logical name):
+# _LG_KC_N_STATUS, _LG_KC_N_DATE, _LG_KC_N_SEV, _LG_KC_N_PATHS, and
+# _LG_KN_KEY, _LG_KN_LEDGER, _LG_KN_SUMMARY (as _lg_k_names would for a
+# file that has none). <out>: the names init.stub_defaults must not repeat,
+# one per line — every candidate of status, date, key, ledger, summary and
+# aliases, and of severity and paths when --sev / --paths set them.
+# shellcheck disable=SC2154  # _OPT_* are set by _parse_args
+_lg_k_create_cfg() {
+  local out="$1" ad sv
+  # shellcheck disable=SC2016  # jq source
+  jq -L "$_LG_LIB" -r --arg sev "$_OPT_sev" --arg sevs "$(_opt_seen sev && echo 1 || echo 0)" \
+      --arg ps "$(_opt_seen paths && echo 1 || echo 0)" "$_LG_JQ_INDEX_DEFS"'
+    lg_fields(.) as $F
+    | def nm($l): (($F[$l] // [])[0]) // $l;
+      def one: gsub("[\r\n]"; " ");
+    ((.items.adapter // "") | if . == "" then "0" else "1" end),
+    ([(.severity_order // [])? | if type == "array" then .[] | strings else empty end] as $o
+      | if $sevs == "0" or ($o | length) == 0 or ($o | index([$sev])) != null then "ok" else "!\($o | join(", "))" end),
+    ((.status.open // null) | if type == "array" and (.[0] | type) == "string" and .[0] != "" then .[0] | one else "!" end),
+    (nm("status"), nm("date"), nm("severity"), nm("paths"), nm("key"), nm("ledger"), nm("summary") | one),
+    ((["status", "date", "key", "ledger", "summary", "aliases"]
+      + (if $sevs == "1" then ["severity"] else [] end) + (if $ps == "1" then ["paths"] else [] end))[] as $l
+      | (($F[$l] // []) + [nm($l)])[] | one)' "$_LG_CFG" > "$out.all" || _lg_die "jq failed (config, new --create)"
+  { IFS= read -r ad; IFS= read -r sv; IFS= read -r _LG_KC_OPEN
+    IFS= read -r _LG_KC_N_STATUS; IFS= read -r _LG_KC_N_DATE; IFS= read -r _LG_KC_N_SEV; IFS= read -r _LG_KC_N_PATHS
+    IFS= read -r _LG_KN_KEY; IFS= read -r _LG_KN_LEDGER; IFS= read -r _LG_KN_SUMMARY; } < "$out.all" \
+    || _lg_die "cannot read the config (new --create)"
+  tail -n +11 "$out.all" > "$out" || _lg_die "cannot write $out"
+  [ "$ad" = 0 ] || _lg_usage "--create with config items.adapter set: hosted items: create the issue through the adapter"
+  [ "$sv" = ok ] || _lg_usage "--sev '$_OPT_sev' is not in config severity_order (${sv#!})"
+  [ "$_LG_KC_OPEN" != "!" ] || _lg_die "config status.open has no first status (a list of strings): new --create has no status to write"
+}
+
+# _lg_k_create_path <title>: the free path of a new item file into
+# _LG_KC_PATH — <dir>/<today>-<slug>.md, <dir> the item directory (init.sh
+# _lg_init_item_dir), <slug> defs.jq lg_stubslug of <title>; a taken name
+# (a file, a directory or a link, a dangling one too) gets -2 … -99; all
+# taken: dies (2). _LG_KC_TODAY: today (YYYY-MM-DD, the local date).
+_lg_k_create_path() {
+  local slug base p n=2
+  _LG_KC_TODAY=$(date +%Y-%m-%d) || _lg_die "date failed"
+  # shellcheck disable=SC2016  # jq source
+  slug=$(jq -L "$_LG_LIB" -n -r --arg t "$1" "$_LG_JQ_INCLUDE"'$t | lg_stubslug') || _lg_die "jq failed (the slug of the title)"
+  _lg_init_item_dir
+  base="$_LG_INIT_IDIR/$_LG_KC_TODAY-$slug"
+  p="$base.md"
+  while [ -e "$p" ] || [ -L "$p" ]; do
+    [ "$n" -le 99 ] || _lg_die "cannot name the new item: $base.md and $base-2.md … $base-99.md are all taken"
+    p="$base-$n.md"
+    n=$((n + 1))
+  done
+  _LG_KC_PATH=$p
+}
+
+# _lg_k_create <ledger> <summary> <finalize> <index> <scratch>: ledger new
+# --create, after _lg_k_create_args and _lg_k_create_cfg. The path first
+# (_lg_k_create_path: a provisional key's hex comes from it), checked
+# against items.globs (usage, 3, naming --file); init.stub_defaults read
+# (a config error dies before anything is allocated); the key allocated as
+# new allocates it (none for unassigned); the whole file built in <scratch>
+# — "# <title>", a blank line and the --body-file bytes, then ONE
+# frontmatter pass: status, date, severity, paths, the stub defaults the
+# item does not set (init.sh _lg_init_stub_defaults; "q": setq), key,
+# ledger, summary — and moved into place once (init.sh _lg_init_put, which
+# never writes through a link). Any exit but 0 leaves no file. Prints
+# "created <path>" and new's line; the payload adds "created": true. Ends
+# the run.
+# shellcheck disable=SC2154  # _OPT_* are set by _parse_args
+_lg_k_create() {
+  local L="$1" S="$2" fin="$3" ix="$4" s="$5" F key="" prov=false skip nl=$'\n' tab=$'\t' dq dn dv
+  _lg_k_create_path "$_LG_KC_TITLE"
+  F=$_LG_KC_PATH
+  printf '%s\n' "$F" > "$s/cpath" || _lg_die "cannot write $s/cpath"
+  _lg_init_glob_check "$s/cpath" "$s/cunmatched"
+  if [ -s "$s/cunmatched" ]; then
+    _lg_usage "--create: $F would not be an item: config items.globs $(_lg_cfg '.items.globs | tojson') do not match it (new items go in the directory of the first <dir>/<pattern>.md glob) — write the file, then give --file <path>"
+  fi
+  _lg_init_stub_defaults "$_LG_KC_TODAY" "$s/sdef"
+  skip="$nl$(cat "$s/cskip")$nl"
+  { printf '# %s\n' "$_LG_KC_TITLE"
+    if _opt_seen body-file; then printf '\n' && cat -- "$_OPT_body_file"; fi
+  } > "$s/new.md" || _lg_die "cannot write $s/new.md"
+  if [ "$L" != unassigned ]; then
+    _lg_k_new_alloc "$L" "$F" "$fin" "$ix" "$s"
+    key=$_LG_KA_KEY
+    case "$key" in *-~*) prov=true ;; esac
+  fi
+  _lg_fm_ops_reset
+  _lg_fm_op set "$_LG_KC_N_STATUS" "$_LG_KC_OPEN"
+  _lg_fm_op set "$_LG_KC_N_DATE" "$_LG_KC_TODAY"
+  if _opt_seen sev; then _lg_fm_op set "$_LG_KC_N_SEV" "$_OPT_sev"; fi
+  if _opt_seen paths; then _lg_fm_op setlist "$_LG_KC_N_PATHS" "" "$_LG_KC_PATHS" "$_LG_KC_NPATHS"; fi
+  while IFS="$tab" read -r dq dn dv; do
+    case "$skip" in *"$nl$dn$nl"*) continue ;; esac
+    if [ "$dq" = q ]; then _lg_fm_op setq "$dn" "$dv"; else _lg_fm_op set "$dn" "$dv"; fi
+  done < "$s/sdef"
+  [ -z "$key" ] || _lg_fm_op set "$_LG_KN_KEY" "$key"
+  _lg_fm_op set "$_LG_KN_LEDGER" "$L"
+  _lg_fm_op set "$_LG_KN_SUMMARY" "$S"
+  _lg_fm_ops_apply "$s/new.md"
+  mkdir -p -- "$(dirname -- "$F")" || _lg_die "cannot create $(dirname -- "$F")"
+  if [ -e "$F" ] || [ -L "$F" ]; then
+    _lg_die "$F appeared while the item was being written: nothing written (run it again)"
+  fi
+  _lg_init_put "$s/new.md" "$F"
+  # Written. A run that still fails — the --suggest-contracts read, a
+  # signal — takes it back: doc-tools.sh _on_exit removes _LG_UNDO_FILE when
+  # the run ends with any exit but 0.
+  _LG_UNDO_FILE=$PWD/$F
+  if [ -n "$key" ]; then
+    printf 'created %s\n%s  %s\n' "$F" "$key" "$F" > "$s/lines"
+  else
+    printf 'created %s\nunassigned  %s\n' "$F" "$F" > "$s/lines"
+  fi
+  jq -nc --arg p "$F" --arg l "$L" --arg k "$key" --argjson prov "$prov" \
+    '{path: $p, ledger: $l, key: (if $k == "" then null else $k end), provisional: $prov, created: true}' > "$s/payload" \
+    || _lg_die "jq failed (payload)"
+  _lg_k_emit_lines "$s/lines" "$s/payload"
+}
+
 # shellcheck disable=SC2154  # _OPT_* and _ARGS are set by _parse_args
 cmd_ledger_new() {
-  local L S F fin ix s cands n out key prov=false
+  local L S F fin ix s cands n key prov=false
   _lg_init new
   [ "${#_ARGS[@]}" = 0 ] || _lg_usage "unexpected argument '${_ARGS[0]}' (the item is --file <path>)"
   L=$_OPT_ledger
   S=$_OPT_summary
   F=$_OPT_file
   fin=$_OPT_finalize
+  _lg_k_create_args
   # --suggest-contracts reads the contracts: a failing contracts adapter
   # stops the run (2) before anything is written.
   if [ "$_OPT_suggest_contracts" = 1 ]; then _LG_IX_NEED_CONTRACTS=1; fi
@@ -1163,8 +1353,16 @@ cmd_ledger_new() {
   if _opt_seen summary; then _lg_k_summary_check "$S"; fi
   if [ -n "$L" ]; then _lg_k_check_ledger "$L" 1; fi
   s=$(mktemp -d "$_SCRATCH/lg-new.XXXXXX") || _lg_die "mktemp failed"
+  if [ "$_LG_KC" = 1 ]; then
+    # --create: every usage check before the index is read (a hosted
+    # items.adapter is never run).
+    [ -n "$L" ] || _lg_usage "give --ledger <id> (or unassigned)"
+    _opt_seen summary || _lg_usage "give --summary \"<why it matters, ≤ 140 characters>\""
+    _lg_k_create_cfg "$s/cskip"
+  fi
   ix=$(_lg_index) || exit "$?"
   _LG_K_IX=$ix
+  if [ "$_LG_KC" = 1 ]; then _lg_k_create "$L" "$S" "$fin" "$ix" "$s"; fi
   if [ -n "$F" ]; then
     _lg_k_item_path "$F"
     F=$_LG_KP
@@ -1211,17 +1409,8 @@ cmd_ledger_new() {
       || _lg_die "jq failed (payload)"
     _lg_k_emit_lines "$s/lines" "$s/payload"
   fi
-  if [ -n "$fin" ] && [ "$_LG_K_MODE" = merge ]; then
-    # keys.mode merge: a real key only on the base, numbered there.
-    _lg_k_merge_on_base 2
-    printf '%s\t%s\n' "$L" "$F" > "$s/paths"
-    out=$(_lg_k_local_alloc "$s/paths" "$ix") || exit "$?"
-  elif [ -n "$fin" ]; then
-    out=$(_LG_ALLOC_STRICT=1 _lg_alloc "$L" 1 "$F") || exit "$?"
-  else
-    out=$(_lg_alloc "$L" 1 "$F") || exit "$?"
-  fi
-  key=${out#*$'\t'}
+  _lg_k_new_alloc "$L" "$F" "$fin" "$ix" "$s"
+  key=$_LG_KA_KEY
   case "$key" in *-~*) prov=true ;; esac
   # One pass: key, ledger and summary land together.
   _lg_fm_ops_reset
