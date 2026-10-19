@@ -30,7 +30,7 @@ Nothing breaks if you skip these steps. What each host re-runs, and why:
 - **Footprint ceiling** (#30): the OpenCode plugin's emitted text is measured under node and capped at 12,000 characters. **SKILL.md frontmatter** (#31): exactly `name` and `description`, no block scalars, description at most 1,536 characters; every path SKILL.md names exists. **shellcheck** at warning severity gates the shipped scripts (`DOC_SP_REQUIRE_SHELLCHECK`).
 
 ### Other
-- Seven suites, __TOTAL__ assertions, under bash 5.x and `/bin/bash` 3.2: __COUNTS__. The total goes from 11288 to __TOTAL__.
+- Seven suites, 11942 assertions, under bash 5.x and `/bin/bash` 3.2: `test-doc-tools.sh` 1561, `test-hooks.sh` 1742, `test-spec-status-model.sh` 697, `test-doc-pr-release.sh` 625, `test-merge-driver.sh` 844, `test-spec-claims.sh` 3269, `test-ledger.sh` 3204. The total goes from 11288 to 11942.
 
 ## v3.4.0 (2026-10-17)
 
