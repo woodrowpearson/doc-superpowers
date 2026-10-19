@@ -6521,6 +6521,87 @@ test_i10_check_version_reads_the_first_release_heading() {
   teardown
 }
 
+# check-version --tag (#28): the version RELEASE-NOTES.md names must have its
+# v<version> tag on the remote — the v3 AI workflow templates clone that tag
+# (prepare-agent.sh), so a release whose tag never reached origin breaks every
+# consumer's AI workflows. A local bare repository stands in for origin.
+test_check_version_tag_on_origin() {
+  echo "test: check-version --tag fails when v<version> is not a tag on origin (--warn: a warning; --remote names another remote)"
+  setup
+  setup_version_files
+  local origin rc out
+  origin=$(harness_mktemp_d origin)
+  git init -q --bare "$origin"
+  git remote add origin "$origin"
+  git add -A && git commit -qm "release: v1.0.0"
+  git push -q origin main 2>/dev/null
+
+  rc=0
+  out=$("$DOC_TOOLS" check-version 2>&1) || rc=$?
+  assert_eq "0" "$rc" "without --tag: the manifests alone (no remote is read)"
+  assert_not_contains "$out" "tag" "…and nothing is said about tags"
+
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "1" "$rc" "--tag, no tag on origin: exit 1"
+  assert_contains "$out" "v1.0.0 is not a tag on origin" "…naming the tag and the remote"
+  assert_contains "$out" "git push origin v1.0.0" "…and how to push it"
+
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag --warn 2>&1) || rc=$?
+  assert_eq "0" "$rc" "--tag --warn: a missing tag does not fail"
+  assert_contains "$out" "WARN" "…but is reported as a warning"
+  assert_contains "$out" "v1.0.0 is not a tag on origin" "…naming the tag"
+
+  git tag v1.0.0
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a local tag only: still exit 1 (origin is what consumers clone)"
+
+  git push -q origin v1.0.0 2>/dev/null
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "0" "$rc" "the tag pushed: exit 0"
+  assert_contains "$out" "tag v1.0.0 on origin" "…reported as ok"
+
+  # An annotated tag counts; a tag that only starts with the name does not.
+  "$DOC_TOOLS" bump-version 1.1.0 >/dev/null 2>&1
+  printf '%s\n' '# Release Notes' '' '## v1.1.0 (2026-02-01)' '' '## v1.0.0 (2026-01-01)' > RELEASE-NOTES.md
+  git add -A && git commit -qm "release: v1.1.0"
+  git tag v1.1.0-rc.1 && git push -q origin v1.1.0-rc.1 2>/dev/null
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "1" "$rc" "only v1.1.0-rc.1 on origin: v1.1.0 is missing (exact name)"
+  git tag -a v1.1.0 -m "v1.1.0" && git push -q origin v1.1.0 2>/dev/null
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "0" "$rc" "an annotated v1.1.0 on origin: exit 0"
+
+  # A manifest mismatch still fails with the tag present.
+  echo '{"name":"test","version":"1.0.9"}' > gemini-extension.json
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a manifest mismatch fails even with the tag on origin"
+  assert_contains "$out" "MISMATCH" "…naming the mismatch"
+  "$DOC_TOOLS" bump-version 1.1.0 >/dev/null 2>&1
+
+  # --remote: another remote; one that cannot be read fails (--warn: warns).
+  git remote add upstream "$SUITE_TMP/no-such-remote.git"
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag --remote upstream 2>&1) || rc=$?
+  assert_eq "1" "$rc" "an unreadable remote: exit 1, never a vacuous pass"
+  assert_contains "$out" "cannot read the tags of upstream" "…saying so"
+  rc=0
+  out=$("$DOC_TOOLS" check-version --tag --warn --remote upstream 2>&1) || rc=$?
+  assert_eq "0" "$rc" "an unreadable remote with --warn: exit 0"
+  assert_contains "$out" "WARN" "…as a warning"
+
+  # --warn and --remote only qualify --tag.
+  assert_exit_code "2" "--warn without --tag: a usage error" "$DOC_TOOLS" check-version --warn
+  assert_exit_code "2" "--remote without --tag: a usage error" "$DOC_TOOLS" check-version --remote origin
+  teardown
+}
+
 test_i10_version_verbs_need_a_manifest() {
   echo "test: bump-version / check-version fail when no manifest is found (run outside the repo root)"
   setup
@@ -7663,6 +7744,7 @@ run_tests() {
   test_i10_fence_indent_and_paragraph_end
   test_i10_implementation_status_filter_is_gone
   test_i10_check_version_reads_the_first_release_heading
+  test_check_version_tag_on_origin
   test_i10_version_verbs_need_a_manifest
   test_i10_bump_version_is_all_or_nothing_and_keeps_modes
   test_i12_claude_code_json_is_not_a_version_file
