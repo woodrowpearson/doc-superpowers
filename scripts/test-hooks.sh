@@ -6211,6 +6211,121 @@ test_git_pre_commit_budget() {
   teardown
 }
 
+# _hook_budget <value>: the shared region's reading of DOC_SUPERPOWERS_HOOK_BUDGET.
+hook_budget_of() {
+  local region
+  region=$(settings_region "$HOOKS_DIR/git/pre-commit")
+  DOC_SUPERPOWERS_HOOK_BUDGET="$1" "$BASH_BIN" -c 'eval "$1"; _hook_budget' _ "$region" 2>&1
+}
+
+# A `sleep` for PATH in <dir> that, as macOS /bin/sleep does, rejects (exit 1
+# at once) a negative or non-numeric value or one of 4294967295 s or more —
+# whichever sleep the host puts first on PATH.
+macos_sleep_shim() {
+  cat > "$1/sleep" <<EOF
+#!/bin/sh
+case "\$1" in "" | *[!0-9.]*) echo "sleep: invalid time interval: \$1" >&2; exit 1 ;; esac
+i=\${1%%.*}
+i=\$(printf '%s' "\$i" | sed 's/^0*//')
+if [ \${#i} -gt 10 ] || { [ \${#i} -eq 10 ] && [ "\$i" -ge 4294967295 ]; }; then
+  echo "sleep: invalid time interval: \$1" >&2; exit 1
+fi
+exec "$(command -v sleep)" "\$@"
+EOF
+  chmod +x "$1/sleep"
+}
+
+test_git_hook_budget_clamp() {
+  echo "test: #24 a budget too large for sleep (over 86400 s, or over 6 digits) reads as no budget: the check runs to completion, never skipped at once"
+  local v
+  assert_eq "20" "$(hook_budget_of 20)" "20 reads as 20"
+  assert_eq "20" "$(hook_budget_of 0020)" "leading zeros: 0020 reads as 20"
+  assert_eq "86400" "$(hook_budget_of 86400)" "86400 (a day) is the largest budget"
+  assert_eq "20" "$(hook_budget_of 2x)" "not digits: the default"
+  for v in 86401 999999 1000000 4294967295 99999999999 99999999999999999999 0000086401; do
+    assert_eq "0" "$(hook_budget_of "$v")" "$v reads as 0 (no budget)"
+  done
+  assert_eq "5" "$(hook_budget_of 000000000000000000000000005)" "many leading zeros: still the value (5)"
+  assert_eq "0" "$(hook_budget_of 0000)" "all zeros: 0"
+  hooked_fixture
+  local stub
+  stub=$(harness_mktemp_d sleepy-huge-budget)
+  sleepy_doc_tools "$stub" 2
+  macos_sleep_shim "$stub"
+  for v in 4294967295 99999999999999999999; do
+    stage_stale_change "$v"
+    run_hooked DOC_TOOLS="$stub/doc-tools.sh" PATH="$stub:$REAL_PATH" DOC_SUPERPOWERS_HOOK_BUDGET="$v" -- git commit -qm "huge $v"
+    assert_eq "0" "$RUN_RC" "budget $v: committed"
+    assert_not_contains "$RUN_ERR" "check skipped (budget)" "budget $v: the check is not skipped at once"
+    assert_contains "$RUN_OUT$RUN_ERR" "stale doc(s) in this commit" "budget $v: the check ran to completion and reported"
+  done
+  # A watchdog whose sleep fails (whatever the reason) never fires.
+  stub=$(harness_mktemp_d failing-watchdog-sleep)
+  sleepy_doc_tools "$stub" 2
+  printf '#!/bin/sh
+[ "$1" = 5 ] && exit 1
+exec "%s" "$@"
+' "$(command -v sleep)" > "$stub/sleep"
+  chmod +x "$stub/sleep"
+  stage_stale_change failing-sleep
+  run_hooked DOC_TOOLS="$stub/doc-tools.sh" PATH="$stub:$REAL_PATH" DOC_SUPERPOWERS_HOOK_BUDGET=5 -- git commit -qm "failing sleep"
+  assert_eq "0" "$RUN_RC" "the watchdog's sleep fails: committed"
+  assert_not_contains "$RUN_ERR" "check skipped (budget)" "the watchdog's sleep fails: the check is not skipped"
+  assert_contains "$RUN_OUT$RUN_ERR" "stale doc(s) in this commit" "the watchdog's sleep fails: the check ran to completion"
+  teardown
+}
+
+# A `sleep` for PATH that records its PID in <dir>/wd.pid when asked to sleep
+# <seconds> (the watchdog's budget), then becomes the real sleep.
+watchdog_sleep_shim() {
+  printf '#!/bin/sh\n[ "$1" = "%s" ] && echo $$ > "%s/wd.pid"\nexec "%s" "$@"\n' "$2" "$1" "$(command -v sleep)" > "$1/sleep"
+  chmod +x "$1/sleep"
+}
+
+# assert_pid_gone <pidfile> <label>: the process it names has exited.
+assert_pid_gone() {
+  local pid gone=no i
+  pid=$(cat "$1" 2>/dev/null || echo "")
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then gone=yes; break; fi
+    sleep 0.2
+  done
+  [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+  assert_eq "yes" "$gone" "$2"
+}
+
+test_git_hook_signal_kills_check() {
+  echo "test: #24 a git hook signalled mid-check (INT, TERM, HUP) kills the check's process group and the watchdog, and exits 128+n"
+  hooked_fixture
+  local sig num stub hook rc i
+  for sig in INT TERM HUP; do
+    case "$sig" in INT) num=2 ;; TERM) num=15 ;; HUP) num=1 ;; esac
+    stage_stale_change "$sig"
+    stub=$(harness_mktemp_d "signal-$sig")
+    slow_doc_tools "$stub"
+    watchdog_sleep_shim "$stub" 777
+    rc=0
+    # Job control on, so the hook (a background job here) does not start with
+    # SIGINT ignored, as an interactive git commit would not.
+    set -m
+    env DOC_TOOLS="$stub/doc-tools.sh" PATH="$stub:$REAL_PATH" DOC_SUPERPOWERS_HOOK_BUDGET=777 \
+      "$BASH_BIN" .git/hooks/pre-commit </dev/null >/dev/null 2>&1 &
+    hook=$!
+    set +m
+    for i in $(seq 1 50); do
+      [ -s "$stub/child.pid" ] && [ -s "$stub/wd.pid" ] && break
+      sleep 0.2
+    done
+    assert_true "$sig: fixture: the check and the watchdog started" test -s "$stub/child.pid" -a -s "$stub/wd.pid"
+    kill -s "$sig" "$hook"
+    wait "$hook" || rc=$?
+    assert_eq "$((128 + num))" "$rc" "$sig: the hook exits 128+$num"
+    assert_child_gone "$stub" "$sig"
+    assert_pid_gone "$stub/wd.pid" "$sig: the watchdog's sleep is killed too"
+  done
+  teardown
+}
+
 test_git_post_merge_and_checkout_budget() {
   echo "test: #24 post-merge and post-checkout give up past their budget and say so; never block"
   hooked_fixture
@@ -6385,6 +6500,8 @@ test_status_json_states
 test_status_json_ci
 test_hook_settings_region_shared
 test_git_pre_commit_budget
+test_git_hook_budget_clamp
+test_git_hook_signal_kills_check
 test_git_post_merge_and_checkout_budget
 test_git_prepare_commit_msg_budget
 test_git_pre_commit_scopes_added_entries
