@@ -491,6 +491,55 @@ test_update_index_when_every_target_is_skipped() {
   teardown
 }
 
+# shellcheck as a gate (#31), at warning severity, over every shell script the
+# plugin ships and this repository's maintainer scripts. A finding is fixed,
+# or disabled on its own line with the reason beside it — never file-wide.
+# No shellcheck: a loud SKIP locally, a FAIL under DOC_SP_REQUIRE_SHELLCHECK=1
+# (tests.yml, check-ci.sh).
+test_shipped_scripts_pass_shellcheck() {
+  echo "test: the shipped shell scripts (and the maintainer scripts) pass shellcheck at warning severity"
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    if [ "${DOC_SP_REQUIRE_SHELLCHECK:-0}" = 1 ]; then
+      TESTS_RUN=$((TESTS_RUN + 1))
+      FAIL=$((FAIL + 1))
+      # shellcheck disable=SC2059
+      printf "${RED}  FAIL${NC}: shellcheck gate — shellcheck not found and DOC_SP_REQUIRE_SHELLCHECK=1\n"
+    else
+      record_skip "shellcheck gate — shellcheck not found (install shellcheck to run it)"
+    fi
+    return 0
+  fi
+  local root rc out f n=0 legs=()
+  local targets=()
+  root="$(cd "$SCRIPT_DIR/.." && pwd)"
+  # Paths relative to the root, so `-x` follows the scripts' source
+  # directives the way they are written.
+  local s="$root/scripts"
+  for f in "$s"/doc-tools.sh "$s"/merge-doc-index.sh "$s"/ledger/*.sh "$s"/adapters/*.sh \
+    "$s"/hooks/*.sh "$s"/hooks/claude/*.sh "$s"/hooks/ci/doc-pr-release/*.sh \
+    "$s"/hooks/ci/doc-superpowers-steps/*.sh "$s"/hooks/git/* \
+    "$s"/check-ci.sh "$s"/check-self-install.sh "$s"/leak-scan.sh "$s"/install-maintainer-hooks.sh; do
+    [ -f "$f" ] || continue
+    f="${f#"$root"/}"
+    case "$f" in
+      # The ledger legs have no #! line: install.sh wraps them into a hook,
+      # as POSIX sh.
+      scripts/hooks/git/ledger-*) legs+=("$f") ;;
+      *) targets+=("$f") ;;
+    esac
+    n=$((n + 1))
+  done
+  assert_true "the gate covers the shipped scripts ($n found)" test "$n" -ge 40
+  rc=0
+  out=$(cd "$root" && shellcheck -S warning -x "${targets[@]}" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "shellcheck -S warning: no finding in ${#targets[@]} scripts${out:+ —
+$(head -n 40 <<<"$out")}"
+  rc=0
+  out=$(cd "$root" && shellcheck -S warning -s sh ${legs[@]+"${legs[@]}"} 2>&1) || rc=$?
+  assert_eq "0" "$rc" "shellcheck -S warning -s sh: no finding in the ${#legs[@]} ledger hook legs${out:+ —
+$(head -n 40 <<<"$out")}"
+}
+
 test_scripts_are_free_of_bash4_only_constructs() {
   # `local -A` (bash 4.0+) shipped in cmd_fragments_merge and aborted every
   # doc-tools.sh invocation under macOS's /bin/bash 3.2 with
@@ -7544,6 +7593,7 @@ run_tests() {
 
   # --- cross-platform regression guards (CI matrix: bash 5.x + bash 3.2) ---
   test_scripts_are_free_of_bash4_only_constructs
+  test_shipped_scripts_pass_shellcheck
   test_shipped_jq_is_free_of_jq17_only_forms
   test_build_index_accepts_entry_with_no_code_refs
   test_update_index_when_every_target_is_skipped

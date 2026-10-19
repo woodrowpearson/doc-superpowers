@@ -65,6 +65,7 @@ frag_sha256() {
 frag_lines() {
   local l1="" l2=""
   { IFS= read -r l1 || true; IFS= read -r l2 || true; } < "$1"
+  # shellcheck disable=SC2034  # read by the helpers that source this file
   FRAG_L1=$(frag_trimmed "$l1")
   FRAG_L2=$(frag_trimmed "$l2")
 }
