@@ -346,7 +346,7 @@ doc-superpowers/
 │   └── workflows/
 │       ├── doc-freshness-pr.yml
 │       ├── doc-freshness-schedule.yml
-│       └── tests.yml     # This repo only: every test suite (bash 5.x + 3.2), check-version, self-install check
+│       └── tests.yml     # This repo only: every test suite (bash 5.x + 3.2), check-version, self-install check, release tag (main); each step is scripts/check-ci.sh
 ├── .opencode/            # OpenCode plugin + installation guide
 │   ├── INSTALL.md
 │   └── plugins/
@@ -368,6 +368,10 @@ doc-superpowers/
 │   ├── test-doc-pr-release.sh    # Test suite for doc-pr-release helpers
 │   ├── test-ledger.sh            # Test suite for the work ledger (doc-tools.sh ledger, adapters, hook modes)
 │   ├── bench-ledger.sh           # Work-ledger performance check on a synthetic corpus (not run in CI)
+│   ├── check-ci.sh               # Maintainer: run locally what tests.yml runs (--fast for the quick part)
+│   ├── check-self-install.sh     # Maintainer: the self-installed CI tier matches the installer
+│   ├── install-maintainer-hooks.sh # Maintainer: opt-in pre-push hook running check-ci.sh --fast
+│   ├── leak-scan.sh              # Machine paths, emails and tokens in tracked files
 │   ├── ledger/                   # The work ledger's modules (lib.sh + sourced *.sh, *.jq, *.awk)
 │   ├── adapters/                 # Reference ledger adapters (ledger-pr-gh.sh, ledger-items-gh.sh; GitHub via gh)
 │   ├── merge-doc-index.sh        # Custom git merge driver for .doc-index.json
