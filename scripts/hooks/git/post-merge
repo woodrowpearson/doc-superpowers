@@ -5,8 +5,12 @@
 # Reports the docs a merge (or pull) left stale or missing, scoped to the files
 # it changed (ORIG_HEAD..HEAD, both sides of a rename). Never blocks.
 # The skill or the doc-index being absent, or no ORIG_HEAD, is silent; the
-# check failing prints one line on stderr. DOC_SUPERPOWERS_QUIET=1 silences it;
-# DOC_SUPERPOWERS_SKIP=1 turns it off.
+# check failing prints one line on stderr. The check gets
+# DOC_SUPERPOWERS_HOOK_BUDGET seconds (else hooks.conf's hook_budget, else
+# 20; 0: none): past that it is killed, with everything it started, and one
+# line says "check skipped (budget)". DOC_SUPERPOWERS_ADVICE (else hooks.conf's
+# advice) replaces or drops the '/doc-superpowers audit' it advises.
+# DOC_SUPERPOWERS_QUIET=1 silences it; DOC_SUPERPOWERS_SKIP=1 turns it off.
 
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
 [[ "${DOC_SUPERPOWERS_QUIET:-}" == "1" ]] && exit 0
@@ -15,39 +19,133 @@
 [[ -f "$DOC_TOOLS" ]] || exit 0
 [[ -f docs/.doc-index.json ]] || exit 0
 
+# >>> shared hook settings: one text in every git hook and in hook-lib.sh (test-hooks.sh pins the copies) >>>
+# _hook_conf <key>: <key>'s value in .claude/doc-superpowers/hooks.conf (a
+# "key = value" file: # comments, the last line for a key wins), "" when
+# unset. Read by awk, never sourced; relative to the repository top, where
+# every hook runs. No file, no process.
+_hook_conf() {
+  [ -f .claude/doc-superpowers/hooks.conf ] || return 0
+  awk -v k="$1" '
+    /^[ \t]*#/ { next }
+    { i = index($0, "="); if (i == 0) next
+      key = substr($0, 1, i - 1); gsub(/^[ \t]+|[ \t\r]+$/, "", key)
+      if (key != k) next
+      v = substr($0, i + 1); gsub(/^[ \t]+|[ \t\r]+$/, "", v); val = v; seen = 1 }
+    END { if (seen) print val }' .claude/doc-superpowers/hooks.conf 2>/dev/null
+}
+
+# _advice <action>: the command the hooks' advice names for <action>:
+# '/doc-superpowers <action>' by default; "" when DOC_SUPERPOWERS_ADVICE
+# (else hooks.conf's advice key) is off; any other value is a template, its
+# every {action} replaced by <action> (on or default: the default).
+_advice() {
+  local t="${DOC_SUPERPOWERS_ADVICE:-}"
+  [ -n "$t" ] || t=$(_hook_conf advice)
+  t="${t//[$'\n\r']/ }"
+  case "$t" in
+    "" | on | default) printf '/doc-superpowers %s' "$1" ;;
+    off) ;;
+    *) printf '%s' "${t//\{action\}/$1}" ;;
+  esac
+}
+
+# _hook_budget: the git hooks' freshness-check budget in seconds:
+# DOC_SUPERPOWERS_HOOK_BUDGET, else hooks.conf's hook_budget, else 20; 0 is
+# no budget, and a value that is not digits reads as the default.
+_hook_budget() {
+  local b="${DOC_SUPERPOWERS_HOOK_BUDGET:-}"
+  [ -n "$b" ] || b=$(_hook_conf hook_budget)
+  case "$b" in
+    "" | *[!0-9]*) b=20 ;;
+  esac
+  printf '%s' "$((10#$b))"
+}
+
+# _bounded <function>: run <function> in its own process group, its stdout to
+# $work/out and stderr to $work/err, with a watchdog that, after BUDGET
+# seconds, first leaves a marker and then kills the whole group. Neither job
+# keeps the hook's stdout open. The watchdog is always killed and reaped
+# before the verdict: whether it fired is read from the marker, never from
+# whether it is still alive (it can be alive between its kill and its exit).
+# Returns <function>'s status, or 124 when it was cut short. BUDGET 0: no
+# watchdog.
+_bounded() {
+  local pid wd rc=0
+  if [ "${BUDGET:-0}" = 0 ]; then
+    "$1" >"$work/out" 2>"$work/err" </dev/null || rc=$?
+    return "$rc"
+  fi
+  set -m
+  "$1" >"$work/out" 2>"$work/err" </dev/null &
+  pid=$!
+  ( sleep "$BUDGET"; : > "$work/timedout"; kill -TERM -- "-$pid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
+  wd=$!
+  set +m
+  wait "$pid" 2>/dev/null || rc=$?
+  kill -TERM -- "-$wd" 2>/dev/null
+  wait "$wd" 2>/dev/null
+  # A check that finished cleanly is used even if the watchdog fired after it.
+  if [[ "$rc" != 0 && -e "$work/timedout" ]]; then
+    rc=124
+  fi
+  return "$rc"
+}
+
+# Why a check failed: the first ERROR: line of $work/err, else its first
+# other non-NOTE line, without the ERROR: prefix or a final period.
+_why() {
+  local why
+  why=$(awk '/^ERROR: / { print; e = 1; exit } NF && !/^NOTE: / && o == "" { o = $0 } END { if (!e) print o }' "$work/err")
+  why="${why#ERROR: }"
+  printf '%s' "${why%.}"
+}
+# <<< shared hook settings <<<
+
 _fail() {
   echo "doc-superpowers: post-merge: cannot check doc freshness: $1 — check skipped" >&2
   exit 0
 }
 
 # Scope the check to the files this merge brought in: a full-index walk here
-# would freeze the terminal on a large index.
+# would freeze the terminal on a large index. A large merge can still reach
+# most of the index, so the check runs under the watchdog (_bounded).
 changed=$(git -c core.quotePath=false diff --name-only --no-renames ORIG_HEAD HEAD 2>/dev/null)
 [[ -z "$changed" ]] && exit 0
 
+BUDGET=$(_hook_budget)
+work=$(mktemp -d "${TMPDIR:-/tmp}/doc-sp-post-merge.XXXXXX") || _fail "mktemp failed"
+trap 'rm -rf "$work"' EXIT
+
+# shellcheck disable=SC2329  # run by _bounded
 _check() { printf '%s\n' "$changed" | "$DOC_TOOLS" check-freshness --code-refs-from -; }
-if ! result=$(_check 2>/dev/null); then
-  why=$(_check 2>&1 >/dev/null | awk '/^ERROR: / { print; e = 1; exit } NF && !/^NOTE: / && o == "" { o = $0 } END { if (!e) print o }')
-  why="${why#ERROR: }"
-  why="${why%.}"
+rc=0
+_bounded _check || rc=$?
+if [[ "$rc" == 124 ]]; then
+  echo "doc-superpowers: post-merge: check skipped (budget): the doc freshness check took longer than ${BUDGET}s; run 'doc-tools.sh check-freshness' by hand (DOC_SUPERPOWERS_HOOK_BUDGET=<seconds> changes the budget, 0 removes it)" >&2
+  exit 0
+fi
+if [[ "$rc" != 0 ]]; then
+  why=$(_why)
   _fail "${why:-doc-tools.sh check-freshness failed}"
 fi
 
-report=$(jq -r --arg move "  Run 'doc-tools.sh move-entry <old> <new>' if it was renamed, or 'remove-entry'/'deprecate-entry' to clean up." '
+adv=$(_advice audit)
+report=$(jq -r --arg adv "$adv" --arg move "  Run 'doc-tools.sh move-entry <old> <new>' if it was renamed, or 'remove-entry'/'deprecate-entry' to clean up." '
   [.docs | to_entries[] | select(.value.status == "stale")] as $s
   | [.docs | to_entries[] | select(.value.status == "missing")] as $m
   | (if ($s | length) > 0 then
        "doc-superpowers: \($s | length) doc(s) became stale after merge",
        ($s[] | "  \(.key) — \(.value.reason // "stale")"
          + (if ((.value.code_refs_changed // []) | length) > 0 then ": \(.value.code_refs_changed | join(", "))" else "" end)),
-       "  Run '\''/doc-superpowers audit'\'' to review."
+       (if $adv != "" then "  Run '\''\($adv)'\'' to review." else empty end)
      else empty end),
     (if ($m | length) > 0 then
        "doc-superpowers: \($m | length) indexed doc(s) missing from disk",
        ($m[] | "  \(.key)"),
        $move
      else empty end)
-' <<<"$result" 2>/dev/null) || _fail "cannot read the freshness report"
+' < "$work/out" 2>/dev/null) || _fail "cannot read the freshness report"
 [[ -z "$report" ]] && exit 0
 
 echo ""

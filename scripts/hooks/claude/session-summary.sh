@@ -16,7 +16,10 @@
 # held under Claude Code's 10,000-char hook-output limit (hook-lib.sh, sourced
 # from beside this script). The skill or the doc-index being absent
 # is silent; the check failing (jq missing, a corrupt index) is said in one
-# line. DOC_SUPERPOWERS_QUIET=1 silences it; DOC_SUPERPOWERS_SKIP=1 turns it off.
+# line. DOC_SUPERPOWERS_ADVICE (else .claude/doc-superpowers/hooks.conf's
+# advice; hook-lib.sh: _advice) replaces or drops the '/doc-superpowers
+# update' it advises.
+# DOC_SUPERPOWERS_QUIET=1 silences it; DOC_SUPERPOWERS_SKIP=1 turns it off.
 
 [[ "${DOC_SUPERPOWERS_SKIP:-}" == "1" ]] && exit 0
 
@@ -110,13 +113,14 @@ fi
 
 # Every list is capped (hook-lib.sh: dsp_list).
 # shellcheck disable=SC2016  # jq program, not shell expansion
+adv=$(_advice update)
 summary=$(_report_jq '
   [.docs | to_entries[] | select(.value.status == "stale") | .key] as $s
   | [.docs | to_entries[] | select(.value.status == "missing") | .key] as $m
   | [if ($s | length) > 0 then "\($s | length) doc(s) cite code changed in the working tree and are not re-verified: \($s | dsp_list | join(", "))" else empty end,
      if ($m | length) > 0 then "\($m | length) indexed doc(s) missing from disk: \($m | dsp_list | join(", "))" else empty end]
-  | if length > 0 then "doc-superpowers: " + join("; ") + ". Update them (/doc-superpowers update) and re-verify each one you reviewed (doc-tools.sh update-index <doc>)." else "" end
-' -r < "$work/out" 2>/dev/null) || _fail "cannot read the freshness report"
+  | if length > 0 then "doc-superpowers: " + join("; ") + ". Update them\(if $adv != "" then " (\($adv))" else "" end) and re-verify each one you reviewed (doc-tools.sh update-index <doc>)." else "" end
+' -r --arg adv "$adv" < "$work/out" 2>/dev/null) || _fail "cannot read the freshness report"
 
 [[ -z "$summary" ]] && exit 0
 _emit "$summary"
