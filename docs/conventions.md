@@ -62,7 +62,7 @@ Version consistency is managed via `doc-tools.sh`:
 
 - **`bump-version VERSION`** — updates the version string in all 5 manifest files simultaneously
 - **`check-version`** — verifies that each manifest carries `RELEASE-NOTES.md`'s version (exit 1 on any mismatch, invalid JSON, or no manifest)
-- **`check-version --tag`** — also requires the tag `v<version>` on origin (`git ls-remote`; `--remote <name>`, `--warn` to only warn). A release is tagged and the tag pushed before the release commit reaches `main`: `tests.yml` runs it on every push to `main`, because the AI workflow templates clone the plugin at `v<installed version>`
+- **`check-version --tag`** — also requires the tag `v<version>` on origin (`git ls-remote`; `--remote <name>`, `--warn` to only warn), on the release commit: the commit it points at (an annotated tag peeled) must have that version as its RELEASE-NOTES.md first release heading, so a tag left on the pre-bump commit fails (`MISPLACED`). A tag whose commit the clone does not hold (a shallow CI checkout past it) is a warning, not a failure. A release is tagged and the tag pushed before the release commit reaches `main`: `tests.yml` runs it on every push to `main`, because the AI workflow templates clone the plugin at `v<installed version>`
 
 Manifest files managed: `package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.cursor-plugin/plugin.json`, `gemini-extension.json`.
 
