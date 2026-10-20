@@ -183,6 +183,21 @@ class IndexPool:
         with self._lock:
             return self._result(entry)
 
+    def peek(self, worktree: Path | str) -> WorktreeIndexes | Building | None:
+        """What `get` would answer for a worktree that is in memory, without using it.
+
+        A read-only look: the entry is not moved in the LRU order, no build or refresh is started and
+        nothing waits. None when the worktree is not resident (it is never loaded for a peek).
+        """
+        with self._lock:
+            entry = self._entries.get(Path(worktree).resolve())
+            return self._result(entry) if entry is not None else None
+
+    @property
+    def max_worktrees(self) -> int:
+        """How many worktrees' index pairs stay in memory (a running build can briefly exceed it)."""
+        return self._max
+
     def indexed_files(self, worktree: Path | str, kind: Kind) -> set[str]:
         """The repo-relative paths with at least one chunk in the worktree's `kind` index.
 
