@@ -72,6 +72,10 @@ class CloudLeg(Protocol):
         """Up to `limit` ranked doc chunks for `query`, never from outside `allowed`, and a header note or None."""
         ...
 
+    def status_lines(self, worktree: Path) -> list[str]:
+        """The `status` tool's cloud lines for `worktree`. Reads the meta document at most, never scans a collection."""
+        ...
+
 
 def identifier_tokens(query: str) -> list[str]:
     """The words of `query` that look like identifiers: ids, keys, file names, paths.
@@ -262,7 +266,7 @@ class Searcher:
         else:
             final = interleave_with_floor(docs_fused, code_leg, limit, docs_scores=docs_scores)
 
-        hits = [self._enrich(hit, corpus) for hit in final]
+        hits = [enrich_hit(hit, corpus) for hit in final]
         header = HeaderInfo(
             docs_model=model_label(self.cfg.docs.model),
             code=self._pool.semble_version() if code.usable or code.building else "off",
@@ -516,23 +520,27 @@ class Searcher:
                 self._rows.popitem(last=False)
         return entry.rows
 
-    # -- enrichment --------------------------------------------------------------------------------
 
-    def _enrich(self, hit: Hit, corpus: Corpus) -> Hit:
-        if hit.kind == "code":
-            return replace(hit, links=tuple(corpus.docindex.docs_covering(hit.path)))
-        if not corpus.contains(hit.path):
-            return hit  # corpus.meta serves any path: doc metadata is for corpus files only
-        meta = corpus.meta(hit.path)
-        if meta is None:
-            return hit
-        return replace(
-            hit,
-            heading_path=corpus.heading_path_at(hit.path, hit.start_line),
-            doc_type=meta.doc_type,
-            status=meta.status,
-            links=meta.code_refs,
-        )
+def enrich_hit(hit: Hit, corpus: Corpus) -> Hit:
+    """A hit with its heading path, doc type, status and cross-links, from the corpus and its doc-index.
+
+    A code hit gets the docs that cover its file; a doc hit gets its metadata, but only for a path of the
+    corpus (`Corpus.meta` serves any path, so a non-corpus file under a doc's name must not read as a doc).
+    """
+    if hit.kind == "code":
+        return replace(hit, links=tuple(corpus.docindex.docs_covering(hit.path)))
+    if not corpus.contains(hit.path):
+        return hit
+    meta = corpus.meta(hit.path)
+    if meta is None:
+        return hit
+    return replace(
+        hit,
+        heading_path=corpus.heading_path_at(hit.path, hit.start_line),
+        doc_type=meta.doc_type,
+        status=meta.status,
+        links=meta.code_refs,
+    )
 
 
 def _building_line(got: WorktreeIndexes | Building, worktree: Path) -> str:
