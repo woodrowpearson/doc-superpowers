@@ -66,6 +66,15 @@ def test_discovery_defaults(git_repo) -> None:
     assert not corpus.contains("src/x.py")
 
 
+def test_in_scope_is_the_globs_alone(git_repo) -> None:
+    repo = git_repo()
+    corpus = make_corpus(repo, {"docs": {"include": ["docs/**/*.md"], "exclude": ["docs/archive/**"]}})
+
+    assert corpus.in_scope("docs/a.md") and corpus.in_scope("./docs/deep/er.md")
+    assert not corpus.in_scope("docs/archive/a.md") and not corpus.in_scope("src/x.py")
+    assert corpus.in_scope("docs/never/existed.md"), "the disk and git are not consulted"
+
+
 def test_discovery_honours_include_and_exclude(git_repo) -> None:
     repo = git_repo()
     repo.write("README.md", "# Readme\n")

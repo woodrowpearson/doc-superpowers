@@ -256,6 +256,14 @@ class Corpus:
         with self._lock:
             return norm_rel(path) in self._current()[1]
 
+    def in_scope(self, path: str) -> bool:
+        """True when `path` matches `docs.include` and not `docs.exclude`. Neither the disk nor git is asked,
+        so it also answers for a path that no longer exists (a deletion's)."""
+        return self._matches(norm_rel(path))
+
+    def _matches(self, path: str) -> bool:
+        return bool(self._include.match_file(path)) and not self._exclude.match_file(path)
+
     def _current(self) -> tuple[list[str], frozenset[str]]:
         if self._listing is None or time.monotonic() - self._listed_at >= self._cfg.search.rescan_seconds:
             self._listing = self._scan()
@@ -263,11 +271,7 @@ class Corpus:
         return self._listing
 
     def _scan(self) -> tuple[list[str], frozenset[str]]:
-        found = sorted(
-            path
-            for path in ls_files(self._top)
-            if self._include.match_file(path) and not self._exclude.match_file(path) and self._usable(path)
-        )
+        found = sorted(path for path in ls_files(self._top) if self._matches(path) and self._usable(path))
         keep = frozenset(found)
         for cache in (self._heads, self._outlines, self._skipped):
             for path in [p for p in cache if p not in keep]:

@@ -33,12 +33,12 @@ class _Done(NamedTuple):
     err: str
 
 
-def _run(top: Path, args: tuple[str, ...]) -> _Done:
+def _exec(top: Path, args: tuple[str, ...]) -> subprocess.CompletedProcess[bytes]:
     env = {key: value for key, value in os.environ.items() if key not in _DISCOVERY_VARS}
     env["GIT_OPTIONAL_LOCKS"] = "0"
     env["GIT_TERMINAL_PROMPT"] = "0"
     try:
-        done = subprocess.run(
+        return subprocess.run(
             ["git", *args],
             cwd=top,
             env=env,
@@ -51,6 +51,10 @@ def _run(top: Path, args: tuple[str, ...]) -> _Done:
         raise GitError(f"git {' '.join(args)} timed out after {GIT_TIMEOUT_SECONDS}s") from err
     except OSError as err:  # no git binary, or no such directory
         raise GitError(f"cannot run git in {top}: {err}") from err
+
+
+def _run(top: Path, args: tuple[str, ...]) -> _Done:
+    done = _exec(top, args)
     return _Done(done.returncode, done.stdout.decode("utf-8", "replace"), done.stderr.decode("utf-8", "replace"))
 
 
@@ -60,6 +64,16 @@ def git(top: Path, *args: str) -> str:
     if done.rc != 0:
         raise GitError(f"git {' '.join(args)} failed ({done.rc}): {done.err.strip()}")
     return done.out
+
+
+def git_bytes(top: Path, *args: str) -> bytes:
+    """Run `git <args>` in `top` and return stdout undecoded (a blob's bytes). Raises GitError on a non-zero exit."""
+    done = _exec(Path(top), args)
+    if done.returncode != 0:
+        raise GitError(
+            f"git {' '.join(args)} failed ({done.returncode}): {done.stderr.decode('utf-8', 'replace').strip()}"
+        )
+    return done.stdout
 
 
 def norm_rel(path: str) -> str:

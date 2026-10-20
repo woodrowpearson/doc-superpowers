@@ -14,6 +14,7 @@ from doc_search.repo import (
     confine,
     diff_names,
     git,
+    git_bytes,
     is_ancestor,
     ls_files,
     norm_rel,
@@ -265,3 +266,17 @@ def test_diff_names_missing_commit_is_none(git_repo) -> None:
     assert diff_names(repo.root, "no-such-ref") is None
     assert diff_names(repo.root, "--output=pwned") is None
     assert not (repo.root / "pwned").exists()
+
+
+def test_git_bytes_is_stdout_undecoded(git_repo) -> None:
+    repo = git_repo()
+    raw = b"caf\xc3\xa9\r\n\xff\xfe not utf-8\n"
+    (repo.root / "a.bin").write_bytes(raw)
+    repo.commit("raw")
+
+    assert git_bytes(repo.root, "cat-file", "blob", "HEAD:a.bin") == raw
+    assert git(repo.root, "cat-file", "blob", "HEAD:a.bin") != raw.decode("latin-1"), (
+        "git() decodes, git_bytes() does not"
+    )
+    with pytest.raises(GitError, match="missing"):
+        git_bytes(repo.root, "cat-file", "blob", "HEAD:missing")

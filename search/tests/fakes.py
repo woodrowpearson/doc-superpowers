@@ -15,6 +15,7 @@ import re
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -94,8 +95,9 @@ class FakeGenai:
 
 
 class FakeSnapshot:
-    def __init__(self, doc_id: str, data: dict[str, Any] | None) -> None:
+    def __init__(self, doc_id: str, data: dict[str, Any] | None, reference: FakeDocumentRef | None = None) -> None:
         self.id = doc_id
+        self.reference = reference
         self._data = data
         self.exists = data is not None
 
@@ -117,8 +119,10 @@ class FakeDocumentRef:
         self._fs._maybe_fail("document_get")
         return FakeSnapshot(self.id, self._collection.docs.get(self.id))
 
-    def set(self, data: dict[str, Any], merge: bool = False) -> None:
+    def set(self, data: dict[str, Any], merge: bool = False, retry: Any = _UNSET, timeout: Any = _UNSET) -> None:
         self._fs._count("document_set")
+        self._fs._record("document_set", retry, timeout)
+        self._fs._maybe_fail("document_set")
         self._collection._write(self.id, data, merge)
 
     def update(self, data: dict[str, Any]) -> None:
@@ -166,9 +170,17 @@ class FakeVectorQuery:
 
 
 class FakeQuery:
-    def __init__(self, collection: FakeCollection, filters: list[Any]) -> None:
+    def __init__(
+        self,
+        collection: FakeCollection,
+        filters: list[Any],
+        limit: int | None = None,
+        projection: list[str] | None = None,
+    ) -> None:
         self.collection = collection
         self.filters = filters
+        self._limit = limit
+        self._projection = projection
 
     def where(
         self, field_path: str | None = None, op_string: str | None = None, value: Any = None, *, filter: Any = None
@@ -177,7 +189,14 @@ class FakeQuery:
             filter = SimpleNamespace(field_path=field_path, op_string=op_string, value=value)
         if filter.op_string not in ("==", "in"):
             raise NotImplementedError(f"FakeFirestore does not model {filter.op_string!r} filters")
-        return FakeQuery(self.collection, [*self.filters, filter])
+        return FakeQuery(self.collection, [*self.filters, filter], self._limit, self._projection)
+
+    def limit(self, count: int) -> FakeQuery:
+        return FakeQuery(self.collection, self.filters, count, self._projection)
+
+    def select(self, field_paths: Iterable[str]) -> FakeQuery:
+        """Only these fields come back (none: the documents' names alone), as with the real projection."""
+        return FakeQuery(self.collection, self.filters, self._limit, list(field_paths))
 
     def matching(self) -> list[tuple[str, dict[str, Any]]]:
         def keep(data: dict[str, Any]) -> bool:
@@ -209,11 +228,18 @@ class FakeQuery:
         }
         return FakeVectorQuery(self.collection.fs, self, args)
 
-    def stream(self, **_: Any) -> Iterator[FakeSnapshot]:
-        self.collection.fs._count("stream")
-        self.collection.fs._maybe_fail("stream")
-        for doc_id, data in self.matching():
-            yield FakeSnapshot(doc_id, data)
+    def stream(
+        self, transaction: Any = None, retry: Any = _UNSET, timeout: Any = _UNSET, **_: Any
+    ) -> Iterator[FakeSnapshot]:
+        fs = self.collection.fs
+        fs._count("stream")
+        fs._record("stream", retry, timeout)
+        fs._maybe_fail("stream")
+        rows = self.matching()[: self._limit]
+        for doc_id, data in rows:
+            if self._projection is not None:
+                data = {key: data[key] for key in self._projection if key in data}
+            yield FakeSnapshot(doc_id, data, self.collection.document(doc_id))
 
 
 class FakeCollection(FakeQuery):
@@ -227,14 +253,17 @@ class FakeCollection(FakeQuery):
         return FakeDocumentRef(self.fs, self, doc_id)
 
     def _write(self, doc_id: str, data: dict[str, Any], merge: bool) -> None:
+        data = self.fs._resolve_server_time(copy.deepcopy(data))
         if merge and doc_id in self.docs:
-            self.docs[doc_id] = {**self.docs[doc_id], **copy.deepcopy(data)}
+            self.docs[doc_id] = {**self.docs[doc_id], **data}
         else:
-            self.docs[doc_id] = copy.deepcopy(data)
+            self.docs[doc_id] = data
 
 
 class FakeBatch:
-    """A `WriteBatch`: operations are applied together at `commit`."""
+    """A `WriteBatch`: operations are applied together at `commit`, which the real one limits to 500."""
+
+    MAX_OPS = 500
 
     def __init__(self, fs: FakeFirestore, kind: str = "batch") -> None:
         self._fs = fs
@@ -253,7 +282,12 @@ class FakeBatch:
     def __len__(self) -> int:
         return len(self.ops)
 
-    def commit(self) -> list[None]:
+    def commit(self, retry: Any = _UNSET, timeout: Any = _UNSET) -> list[None]:
+        if len(self.ops) > self.MAX_OPS:
+            raise ValueError(f"a batch commits at most {self.MAX_OPS} operations, not {len(self.ops)}")
+        if self._kind == "batch":  # a transaction commits through `_commit`, which takes no options
+            self._fs._record("batch_commit", retry, timeout)
+        self._fs._maybe_fail(f"{self._kind}_commit")
         for op, ref, data, merge in self.ops:
             if op == "delete":
                 ref._collection.docs.pop(ref.id, None)
@@ -261,18 +295,72 @@ class FakeBatch:
                 ref._collection._write(ref.id, data or {}, merge)
         self._fs._count(f"{self._kind}_commit")
         self._fs.commit_sizes.append(len(self.ops))
+        if self._kind == "batch":
+            self._fs.commit_log.append([(op, ref.id) for op, ref, _, _ in self.ops])
         self.ops = []
         return []
 
 
 class FakeTransaction(FakeBatch):
-    """A `Transaction` without retries: reads see the store, writes land at `commit`."""
+    """A `Transaction` as far as `@firestore.transactional` drives it: `_begin`, `_commit`, `_rollback`,
+    `_clean_up`, `in_progress` and the attempt limit. Reads see the store, writes land at `_commit`.
 
-    def __init__(self, fs: FakeFirestore) -> None:
+    A commit raises the next exception of `fs.commit_conflicts` first (an `Aborted` from contention), leaving
+    the transaction in progress as the real one does; the decorator then starts it again.
+    `commit()` is the plain call (no begin needed) for tests that use a transaction by hand.
+    """
+
+    def __init__(self, fs: FakeFirestore, max_attempts: int = 5, read_only: bool = False) -> None:
         super().__init__(fs, "transaction")
+        self._max_attempts = max_attempts
+        self._read_only = read_only
+        self._id: bytes | None = None
+
+    @property
+    def in_progress(self) -> bool:
+        return self._id is not None
+
+    def _add_write(self) -> None:
+        if self._read_only:
+            raise ValueError("Cannot perform write operation in read-only transaction.")
+
+    def set(self, ref: FakeDocumentRef, data: dict[str, Any], merge: bool = False) -> None:
+        self._add_write()
+        super().set(ref, data, merge)
+
+    def delete(self, ref: FakeDocumentRef) -> None:
+        self._add_write()
+        super().delete(ref)
 
     def get(self, ref: FakeDocumentRef) -> FakeSnapshot:
         return ref.get(transaction=self)
+
+    def _clean_up(self) -> None:
+        self.ops = []
+        self._id = None
+
+    def _begin(self, retry_id: bytes | None = None) -> None:
+        if self.in_progress:
+            raise ValueError(f"Transaction already begun: {self._id!r}")
+        self._fs.transaction_serial += 1
+        self._id = f"txn-{self._fs.transaction_serial}".encode()
+        self._fs.transaction_begins.append(retry_id)
+        self._fs._count("transaction_begin")
+
+    def _commit(self) -> list[None]:
+        if not self.in_progress:
+            raise ValueError("Transaction not begun")
+        if self._fs.commit_conflicts:
+            raise self._fs.commit_conflicts.pop(0)
+        written = self.commit()
+        self._id = None
+        return written
+
+    def _rollback(self) -> None:
+        if not self.in_progress:
+            raise ValueError("Transaction not begun")
+        self._fs._count("transaction_rollback")
+        self._clean_up()
 
 
 class FakeFirestore:
@@ -280,7 +368,9 @@ class FakeFirestore:
 
     `calls` counts operations by name (`find_nearest`, `stream`, `document_get`, `batch_commit`, ...).
     `request_options` records the `retry` / `timeout` each read was called with (only those passed).
-    `fail` maps an operation (`find_nearest`, `document_get`, `stream`) to an exception it raises.
+    `fail` maps an operation (`find_nearest`, `document_get`, `stream`, `batch_commit`) to an exception it raises
+    every time, `fail_once` the same for the next call only. `commit_conflicts` holds exceptions the next
+    transaction commits raise. A server timestamp is replaced by `server_time` when it is written.
     `reject_filtered` is raised by a vector query that has a `where` filter (a missing prefixed index).
     """
 
@@ -290,7 +380,13 @@ class FakeFirestore:
         self.vector_queries: list[dict[str, Any]] = []
         self.request_options: list[tuple[str, dict[str, Any]]] = []  # (operation, the retry/timeout it was given)
         self.commit_sizes: list[int] = []
+        self.commit_log: list[list[tuple[str, str]]] = []  # per batch commit: (operation, document id) in order
         self.fail: dict[str, Exception] = {}
+        self.fail_once: dict[str, Exception] = {}
+        self.commit_conflicts: list[Exception] = []
+        self.transaction_serial = 0
+        self.transaction_begins: list[bytes | None] = []
+        self.server_time = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
         self.reject_filtered: Exception | None = None
 
     def _count(self, op: str) -> None:
@@ -301,8 +397,18 @@ class FakeFirestore:
         self.request_options.append((op, {key: value for key, value in given.items() if value is not _UNSET}))
 
     def _maybe_fail(self, op: str) -> None:
+        if op in self.fail_once:
+            raise self.fail_once.pop(op)
         if op in self.fail:
             raise self.fail[op]
+
+    def _resolve_server_time(self, data: dict[str, Any]) -> dict[str, Any]:
+        """`firestore.SERVER_TIMESTAMP` becomes `server_time`, as the server would stamp it (top-level fields)."""
+        try:
+            from google.cloud.firestore_v1.transforms import SERVER_TIMESTAMP
+        except ImportError:  # no cloud extra: nothing writes a sentinel
+            return data
+        return {key: self.server_time if value is SERVER_TIMESTAMP else value for key, value in data.items()}
 
     def collection(self, name: str) -> FakeCollection:
         if name not in self.collections:
@@ -314,7 +420,7 @@ class FakeFirestore:
 
     def transaction(self, max_attempts: int = 5, read_only: bool = False) -> FakeTransaction:
         self._count("transaction")
-        return FakeTransaction(self)
+        return FakeTransaction(self, max_attempts, read_only)
 
     # -- test helpers ----------------------------------------------------------------------
 
