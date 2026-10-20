@@ -5,6 +5,13 @@ recently used goes first; a worktree whose build is still running is never the v
 the pool may briefly hold more). The first `get` for a worktree starts one thread per kind; a call
 waits for those threads up to `wait_s`, then answers `Building` and the builds carry on.
 
+semble builds run one at a time across the pool (MAX_CONCURRENT_BUILDS), every worktree and kind:
+a build's memory peaks high (~5 GB measured for a large repository's two builds in parallel), and
+serial builds lower the peak. Each thread takes its place in line when it starts, so a worktree's
+docs build goes before its code build, and the worktrees go in the order they were asked for. A
+thread that finds a valid cache loads it without queueing; one that waits for its turn is still
+running, so `get` reads it as building.
+
 Loading follows semble's own cache: a cache that still matches the tree is loaded from disk
 (`get_validated_cache` then `SembleIndex.load_from_disk`), anything else is rebuilt through
 `SembleIndex.from_path`, which re-indexes incrementally, and saved with
@@ -12,8 +19,9 @@ Loading follows semble's own cache: a cache that still matches the tree is loade
 
 A kind is checked again once its last check is older than
 `max(search.rescan_seconds, 3 x its last build seconds)`, the cooldown semble's own server
-uses. The recheck runs in a thread too, and the call that triggered it waits for it within
-`wait_s`; a refresh that outlasts the wait, or fails, leaves the previous index serving.
+uses. The recheck runs in a thread too, and every call that finds a refresh running (the one
+that started it included) waits for it within `wait_s`; a refresh that outlasts the wait, or
+fails, leaves the previous index serving.
 
 Nothing here raises to a caller: a build exception is recorded in `WorktreeIndexes.error`.
 All times (`built_at`, `build_seconds`, the cooldown) are in units of the injected clock.
@@ -24,7 +32,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,6 +55,9 @@ REVALIDATE_FACTOR = 3
 # How long a command-line verb waits for a build: effectively forever (a finite value, because
 # `threading.Event.wait` rejects infinity). The server's calls wait 20 s instead.
 FOREGROUND_WAIT_S = 7 * 24 * 3600.0
+
+# How many `SembleIndex.from_path` builds a pool runs at once, across its worktrees and kinds.
+MAX_CONCURRENT_BUILDS = 1
 
 
 @dataclass
@@ -90,6 +101,56 @@ class _Outcome:
     files: frozenset[str] = frozenset()
     changed: bool = False
     error: str | None = None
+
+
+class _BuildLine:
+    """At most `slots` semble builds at once, granted in the order the places were taken (first in, first out)."""
+
+    def __init__(self, slots: int) -> None:
+        self._cond = threading.Condition()
+        self._slots = slots
+        self._active = 0
+        self._waiting: deque[_Place] = deque()
+
+    def place(self) -> _Place:
+        """A place at the back of the line. Its holder builds inside `with place:`, and calls `leave` in any case."""
+        place = _Place(self)
+        with self._cond:
+            self._waiting.append(place)
+        return place
+
+
+class _Place:
+    """One build thread's place in a `_BuildLine`: `queued`, then `held` while it builds, then `left`."""
+
+    def __init__(self, line: _BuildLine) -> None:
+        self._line = line
+        self._state = "queued"
+
+    def __enter__(self) -> _Place:
+        """Wait until this place is first in line and a slot is free, then hold the slot."""
+        line = self._line
+        with line._cond:
+            line._cond.wait_for(lambda: line._waiting[0] is self and line._active < line._slots)
+            line._waiting.popleft()
+            line._active += 1
+            self._state = "held"
+            line._cond.notify_all()  # the next place may fit in another slot
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.leave()
+
+    def leave(self) -> None:
+        """Give the slot back, or the place in line when it never built. Safe to call again."""
+        line = self._line
+        with line._cond:
+            if self._state == "held":
+                line._active -= 1
+            elif self._state == "queued":
+                line._waiting.remove(self)
+            self._state = "left"
+            line._cond.notify_all()
 
 
 class _State:
@@ -162,6 +223,7 @@ class IndexPool:
         self.clock = clock
         self._lock = threading.RLock()
         self._entries: OrderedDict[Path, _Entry] = OrderedDict()  # least recently used first
+        self._builds = _BuildLine(MAX_CONCURRENT_BUILDS)
 
     # -- public ------------------------------------------------------------------------
 
@@ -334,18 +396,24 @@ class IndexPool:
     # -- build threads -----------------------------------------------------------------
 
     def _start(self, entry: _Entry, state: _State) -> None:
-        """Start a build thread for `state`. The caller holds the lock and has seen it idle."""
+        """Start a build thread for `state`. The caller holds the lock and has seen it idle.
+
+        The thread's place in the build line is taken here, in the caller's order (docs, then code), not
+        when the thread gets round to it.
+        """
         state.running = True
         state.settled.clear()
+        place = self._builds.place()
         thread = threading.Thread(
             target=self._run,
-            args=(entry.worktree, state, state.index, state.token),
+            args=(entry.worktree, state, state.index, state.token, place),
             name=f"doc-search-{state.name}-{entry.worktree.name}",
             daemon=True,
         )
         try:
             thread.start()
         except RuntimeError as err:  # no thread could be started: settle as a failure, never hang
+            place.leave()
             self._settle(state, _Outcome(error=_describe(err)), 0.0)
 
     def _run(
@@ -354,15 +422,17 @@ class IndexPool:
         state: _State,
         current: SembleIndex | None,
         current_token: tuple[int, int] | None,
+        place: _Place,
     ) -> None:
         start = self.clock()
         outcome = _Outcome(error="build thread ended abnormally")
         try:
-            outcome = self._refresh(worktree, state, current, current_token)
+            outcome = self._refresh(worktree, state, current, current_token, place)
         except Exception as err:  # noqa: BLE001 - a build failure is data, not an exception
             outcome = _Outcome(error=_describe(err))
             logger.debug("doc-search: %s index of %s failed", state.name, worktree, exc_info=True)
         finally:
+            place.leave()  # a thread that loaded the cache never built: its place goes to the next in line
             with self._lock:
                 self._settle(state, outcome, self.clock() - start)
 
@@ -372,6 +442,7 @@ class IndexPool:
         state: _State,
         current: SembleIndex | None,
         current_token: tuple[int, int] | None,
+        place: _Place,
     ) -> _Outcome:
         path = str(worktree)
         cached = get_validated_cache(path, state.model, state.content)
@@ -381,7 +452,8 @@ class IndexPool:
                 return _Outcome(index=current, token=token)  # the cache is what we already hold
             index = SembleIndex.load_from_disk(cached)
             return _Outcome(index=index, token=token, files=_files_of(index), changed=True)
-        index = SembleIndex.from_path(path, content=list(state.content), model_path=state.model)
+        with place:  # one semble build at a time, pool-wide
+            index = SembleIndex.from_path(path, content=list(state.content), model_path=state.model)
         try:
             save_index_to_cache(index, path)
         except Exception as err:  # noqa: BLE001 - an index that cannot be cached still serves
