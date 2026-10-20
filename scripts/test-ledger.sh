@@ -11919,8 +11919,8 @@ EOF
 }
 
 test_lg_init_stub_defaults() {
-  echo "test: 3.4.0 item 1 — config init.stub_defaults: each field → scalar written into every file stub init --accept creates, after its own fields (which win), in the config's order; {today} is today's date; items that are not stubs untouched"
-  lg_stubdef_fixture '{"items":{"globs":["work/items/*.md"]},"init":{"stub_defaults":{"type":"bug","priority":"P2","date":"{today}","verify":"seen {today}: manual","status":"Closed","summary":"not this","n":3,"flag":true}}}'
+  echo "test: 3.4.0 item 1 — config init.stub_defaults: each field → scalar written into every file stub init --accept creates, after its own fields (which win), in the config's order; {today} is today's date; a relations default is written too (only new --create leaves it out, ruling R26); items that are not stubs untouched"
+  lg_stubdef_fixture '{"items":{"globs":["work/items/*.md"]},"init":{"stub_defaults":{"type":"bug","priority":"P2","date":"{today}","verify":"seen {today}: manual","status":"Closed","summary":"not this","n":3,"flag":true,"relations":"none"}}}'
   local t
   t=$(lg_today)
   lg init --accept "$LG_DEC" --dry-run
@@ -11929,8 +11929,8 @@ test_lg_init_stub_defaults() {
   lg init --accept "$LG_DEC"
   assert_eq "0" "$LG_RC" "accept exits 0"
   assert_file_exists "$LG_STUB" "the stub"
-  assert_eq "status: Open|key: w-1|ledger: w|summary: Port the cart|type: bug|priority: P2|date: $t|verify: \"seen $t: manual\"|n: 3|flag: true" \
-    "$(lg_fmblock "$LG_STUB")" "the stub's own fields, then the defaults in order ({today} substituted, a value with ': ' quoted); status and summary not overridden"
+  assert_eq "status: Open|key: w-1|ledger: w|summary: Port the cart|type: bug|priority: P2|date: $t|verify: \"seen $t: manual\"|n: 3|flag: true|relations: none" \
+    "$(lg_fmblock "$LG_STUB")" "the stub's own fields, then the defaults in order ({today} substituted, a value with ': ' quoted, relations kept); status and summary not overridden"
   assert_eq "status: Open" "$(lg_fmblock work/items/a.md)" "an item that is not a stub: no defaults"
   lg show w#2
   assert_eq "0" "$LG_RC" "the stub is still an item"

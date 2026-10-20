@@ -233,7 +233,7 @@ $DOC_TOOLS ledger new --create --title "Refund totals round twice" --ledger chec
 $DOC_TOOLS ledger note checkout-14 "repro on staging"                              # the one home for item state
 $DOC_TOOLS ledger suggest checkout-14              # contracts it might declare (writes nothing)
 $DOC_TOOLS ledger link checkout-14 --consumes field:order.total                    # declare a relation you confirmed
-$DOC_TOOLS ledger upkeep --range main...HEAD     # the changes / consumes a branch's items are missing (writes nothing)
+$DOC_TOOLS ledger upkeep --range main...HEAD       # the changes / consumes a branch's items are missing (writes nothing)
 $DOC_TOOLS ledger view all --html --open           # render the views locally
 $DOC_TOOLS ledger validate --all                   # every item and key (add --registry for the registry)
 ```
