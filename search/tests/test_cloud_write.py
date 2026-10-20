@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
+import socket
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -167,7 +170,7 @@ def put_stamp(w: World, commit: str | None = None, **fields: Any) -> None:
 
 
 def make_world(
-    git_repo, files: dict[str, str] | None = None, *, base_ref: str | None = "main", holder: str = "a:1"
+    git_repo, files: dict[str, str] | None = None, *, base_ref: str | None = "main", holder: str | None = "a:1"
 ) -> World:
     repo = git_repo()
     cloud: dict[str, Any] = {"vertex": {"project": "p"}, "firestore": {"project": "p", "base_ref": base_ref}}
@@ -272,6 +275,21 @@ def test_lease_held_and_expired(git_repo) -> None:
     assert during[0]["expires_at"] == w.clock.at(+1800), "for 1800 seconds"
     assert set(during[0]) == {"holder", "acquired_at", "expires_at"}
     assert w.lease() is None, "and released at the end"
+
+
+def test_the_default_holder_is_host_pid_and_a_random_suffix(git_repo) -> None:
+    """`host:pid` alone is not unique (containers reuse a pid on one host name): a random suffix makes it so."""
+    seen: list[str] = []
+    for _ in range(2):
+        w = make_world(git_repo, holder=None)
+        during: list[dict[str, Any] | None] = []
+        w.genai.on_call = lambda w=w, during=during: during.append(w.lease())
+        assert w.run("full").stamped
+        seen.append(during[0]["holder"])
+
+    for holder in seen:
+        assert re.fullmatch(rf"{re.escape(socket.gethostname())}:{os.getpid()}:[0-9a-f]{{8}}", holder), holder
+    assert seen[0] != seen[1], "two runs of one process are two holders"
 
 
 def test_a_lease_without_a_usable_expiry_is_live(git_repo) -> None:

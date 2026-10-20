@@ -5771,7 +5771,7 @@ test_launcher_resolution_order() {
   mkdir -p "$cache/mkt/doc-superpowers/11.0.0"
   srl_run -- serve
   assert_eq "0" "$RUN_RC" "the plugin cache under HOME: exit 0"
-  assert_eq "uv run --project $cache/mkt/doc-superpowers/10.0.0/search --frozen doc-search serve" "$RUN_OUT" "…10.0.0 beats 9.9.9 (numeric order), skips a pre-release name, a non-numeric name and 11.0.0 (no search/)"
+  assert_eq "uv run --project $cache/mkt/doc-superpowers/10.0.0/search --frozen --no-dev doc-search serve" "$RUN_OUT" "…10.0.0 beats 9.9.9 (numeric order), skips a pre-release name, a non-numeric name and 11.0.0 (no search/)"
   srl_root "$cache/mkt/doc-superpowers/11.0.0"
   srl_run -- serve
   assert_contains "$RUN_OUT" "$cache/mkt/doc-superpowers/11.0.0/search" "…once 11.0.0 has search/pyproject.toml it wins"
@@ -5779,11 +5779,11 @@ test_launcher_resolution_order() {
   srl_root "$envroot/cache/m/doc-superpowers/3.1.2"
   srl_root "$envroot/cache/m/doc-superpowers/3.10.0"
   srl_run CLAUDE_PLUGIN_CACHE="$envroot/cache" -- serve
-  assert_eq "uv run --project $envroot/cache/m/doc-superpowers/3.10.0/search --frozen doc-search serve" "$RUN_OUT" "CLAUDE_PLUGIN_CACHE: 3.10.0 beats 3.1.2 (minor, numerically)"
+  assert_eq "uv run --project $envroot/cache/m/doc-superpowers/3.10.0/search --frozen --no-dev doc-search serve" "$RUN_OUT" "CLAUDE_PLUGIN_CACHE: 3.10.0 beats 3.1.2 (minor, numerically)"
   srl_root "$envroot/cache/n/doc-superpowers/3.10.2"
   srl_root "$envroot/cache/n/doc-superpowers/3.10.10"
   srl_run CLAUDE_PLUGIN_CACHE="$envroot/cache" -- serve
-  assert_eq "uv run --project $envroot/cache/n/doc-superpowers/3.10.10/search --frozen doc-search serve" "$RUN_OUT" "…3.10.10 beats 3.10.2 (patch, numerically), across marketplaces"
+  assert_eq "uv run --project $envroot/cache/n/doc-superpowers/3.10.10/search --frozen --no-dev doc-search serve" "$RUN_OUT" "…3.10.10 beats 3.10.2 (patch, numerically), across marketplaces"
   # This repository, when it is doc-superpowers itself (search/ and scripts/doc-tools.sh).
   srl_root "$top"
   srl_run -- serve
@@ -5791,21 +5791,21 @@ test_launcher_resolution_order() {
   mkdir -p scripts
   : > scripts/doc-tools.sh
   srl_run -- serve
-  assert_eq "uv run --project $top/search --frozen doc-search serve" "$RUN_OUT" "this repository (search/pyproject.toml and scripts/doc-tools.sh) beats the cache"
+  assert_eq "uv run --project $top/search --frozen --no-dev doc-search serve" "$RUN_OUT" "this repository (search/pyproject.toml and scripts/doc-tools.sh) beats the cache"
   mkdir -p sub
   (cd sub && srl_run -- serve && echo "$RUN_OUT" > "$top/sub.out")
-  assert_eq "uv run --project $top/search --frozen doc-search serve" "$(cat sub.out)" "…from a subdirectory too (the repository top)"
+  assert_eq "uv run --project $top/search --frozen --no-dev doc-search serve" "$(cat sub.out)" "…from a subdirectory too (the repository top)"
   rm -f sub.out
   # DOC_SUPERPOWERS_ROOT wins over both, when it holds search/pyproject.toml.
   srl_root "$envroot"
   srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
-  assert_eq "uv run --project $envroot/search --frozen doc-search serve" "$RUN_OUT" "DOC_SUPERPOWERS_ROOT wins over this repository and the cache"
+  assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search serve" "$RUN_OUT" "DOC_SUPERPOWERS_ROOT wins over this repository and the cache"
   srl_run DOC_SUPERPOWERS_ROOT="$envroot/missing" -- serve
   assert_contains "$RUN_OUT" "$top/search" "…but not when it has no search/pyproject.toml (the next rule applies)"
   # The launcher's arguments reach doc-search whole.
   srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- query "a b" --limit 3
-  assert_eq "uv run --project $envroot/search --frozen doc-search query a b --limit 3" "$RUN_OUT" "arguments are passed on after doc-search"
-  assert_eq "9" "$(cat "$SRL_BIN/argc")" "…each as one word (\"a b\" is not split)"
+  assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search query a b --limit 3" "$RUN_OUT" "arguments are passed on after doc-search"
+  assert_eq "10" "$(cat "$SRL_BIN/argc")" "…each as one word (\"a b\" is not split)"
   teardown
 }
 
@@ -5816,13 +5816,13 @@ test_launcher_cloud_extra() {
   envroot=$(harness_mktemp_d envroot)
   srl_root "$envroot"
   srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
-  assert_eq "uv run --project $envroot/search --frozen --extra cloud doc-search serve" "$RUN_OUT" "a cloud object: --extra cloud, between --frozen and doc-search"
+  assert_eq "uv run --project $envroot/search --frozen --no-dev --extra cloud doc-search serve" "$RUN_OUT" "a cloud object: --extra cloud, between --no-dev and doc-search"
   mkdir -p src/deep
   (cd src/deep && srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve && echo "$RUN_OUT" > "$envroot/deep.out")
   assert_contains "$(cat "$envroot/deep.out")" "--extra cloud" "…read from the repository top, whatever the cwd"
   printf '{"cloud":null}\n' > docs/search/config.json
   srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
-  assert_eq "uv run --project $envroot/search --frozen doc-search serve" "$RUN_OUT" "cloud null: no extra"
+  assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search serve" "$RUN_OUT" "cloud null: no extra"
   printf '{}\n' > docs/search/config.json
   srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
   assert_not_contains "$RUN_OUT" "extra" "cloud absent: no extra"
@@ -5832,14 +5832,14 @@ test_launcher_cloud_extra() {
   assert_not_contains "$RUN_OUT" "extra" "…with no extra"
   rm -f docs/search/config.json
   srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
-  assert_eq "uv run --project $envroot/search --frozen doc-search serve" "$RUN_OUT" "no config: no extra"
+  assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search serve" "$RUN_OUT" "no config: no extra"
   # No jq on PATH: every extra.
   nojq=$(make_nojq_path)
   cp "$SRL_BIN/uv" "$nojq/uv"
   IRC=0
   IOUT=$(env DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= PATH="$nojq" /bin/sh "$SCRIPT_DIR/search/launch.sh" serve 2>&1) || IRC=$?
   assert_eq "0" "$IRC" "without jq: exit 0"
-  assert_eq "uv run --project $envroot/search --frozen --all-extras doc-search serve" "$IOUT" "…--all-extras"
+  assert_eq "uv run --project $envroot/search --frozen --no-dev --all-extras doc-search serve" "$IOUT" "…--all-extras"
   teardown
 }
 

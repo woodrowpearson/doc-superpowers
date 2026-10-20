@@ -54,6 +54,7 @@ import logging
 import os
 import socket
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -238,7 +239,8 @@ class CloudIndexer:
     """Writes the cloud docs corpus for the checkout at `top`.
 
     `embedder` embeds the chunks. `client` stands in for `firestore.Client` (tests); otherwise one is built on
-    first use. `clock` (epoch seconds) times the lease; `holder` names this run in it, by default `host:pid`.
+    first use. `clock` (epoch seconds) times the lease; `holder` names this run in it, by default
+    `host:pid:<8 random hex digits>`.
     """
 
     def __init__(
@@ -263,7 +265,8 @@ class CloudIndexer:
         self._embedder = embedder
         self._db = LazyClient(self._make_db) if client is None else LazyClient(lambda: client)
         self._clock = clock
-        self._holder = holder or f"{socket.gethostname()}:{os.getpid()}"
+        # host:pid is not unique on its own (containers reuse pids under one host name): a random suffix makes it so
+        self._holder = holder or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self._checked_at = 0.0  # when this run last confirmed its lease
 
     def _make_db(self) -> Any:

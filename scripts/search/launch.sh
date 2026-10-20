@@ -17,7 +17,8 @@
 #
 # Extras: --extra cloud when docs/search/config.json (at the repository top)
 # has a non-null "cloud"; --all-extras when jq is missing, since the config
-# cannot be read then; none otherwise.
+# cannot be read then; none otherwise. --no-dev: the dev group (pytest) is
+# never installed for a user.
 #
 # Failures are one stderr line and exit 2.
 
@@ -67,4 +68,4 @@ else
 fi
 
 # shellcheck disable=SC2086  # $EXTRAS is a fixed flag list, empty or one or two words
-exec uv run --project "$ROOT/search" --frozen $EXTRAS doc-search "$@"
+exec uv run --project "$ROOT/search" --frozen --no-dev $EXTRAS doc-search "$@"
