@@ -10,7 +10,8 @@ a build's memory peaks high (~5 GB measured for a large repository's two builds 
 serial builds lower the peak. Each thread takes its place in line when it starts, so a worktree's
 docs build goes before its code build, and the worktrees go in the order they were asked for. A
 thread that finds a valid cache loads it without queueing; one that waits for its turn is still
-running, so `get` reads it as building.
+running, so `get` reads a first build in line as building. A refresh in line is not waited for: the
+previous index serves until the rebuild gets its slot.
 
 Loading follows semble's own cache: a cache that still matches the tree is loaded from disk
 (`get_validated_cache` then `SembleIndex.load_from_disk`), anything else is rebuilt through
@@ -20,11 +21,12 @@ Loading follows semble's own cache: a cache that still matches the tree is loade
 A kind is checked again once its last check is older than
 `max(search.rescan_seconds, 3 x its last build seconds)`, the cooldown semble's own server
 uses. The recheck runs in a thread too, and every call that finds a refresh running (the one
-that started it included) waits for it within `wait_s`; a refresh that outlasts the wait, or
-fails, leaves the previous index serving.
+that started it included) waits for it within `wait_s`, unless it waits in line behind another
+build; a refresh that is in line, outlasts the wait, or fails, leaves the previous index serving.
 
 Nothing here raises to a caller: a build exception is recorded in `WorktreeIndexes.error`.
-All times (`built_at`, `build_seconds`, the cooldown) are in units of the injected clock.
+All times (`built_at`, `build_seconds`, the cooldown) are in units of the injected clock. A build
+is timed from when it gets its slot: time in line is not build time.
 """
 
 from __future__ import annotations
@@ -106,15 +108,19 @@ class _Outcome:
 class _BuildLine:
     """At most `slots` semble builds at once, granted in the order the places were taken (first in, first out)."""
 
-    def __init__(self, slots: int) -> None:
+    def __init__(self, slots: int, clock: Callable[[], float]) -> None:
         self._cond = threading.Condition()
         self._slots = slots
+        self._clock = clock
         self._active = 0
         self._waiting: deque[_Place] = deque()
 
-    def place(self) -> _Place:
-        """A place at the back of the line. Its holder builds inside `with place:`, and calls `leave` in any case."""
-        place = _Place(self)
+    def place(self, in_line: threading.Event | None = None) -> _Place:
+        """A place at the back of the line. Its holder builds inside `with place:`, and calls `leave` in any case.
+
+        `in_line`, when given, is set while the holder waits for its turn, and cleared when it gets the slot.
+        """
+        place = _Place(self, in_line)
         with self._cond:
             self._waiting.append(place)
         return place
@@ -123,20 +129,32 @@ class _BuildLine:
 class _Place:
     """One build thread's place in a `_BuildLine`: `queued`, then `held` while it builds, then `left`."""
 
-    def __init__(self, line: _BuildLine) -> None:
+    def __init__(self, line: _BuildLine, in_line: threading.Event | None) -> None:
         self._line = line
+        self._in_line = in_line
         self._state = "queued"
+        self.held_at: float | None = None  # when the slot was granted, on the line's clock
 
     def __enter__(self) -> _Place:
         """Wait until this place is first in line and a slot is free, then hold the slot."""
         line = self._line
         with line._cond:
-            line._cond.wait_for(lambda: line._waiting[0] is self and line._active < line._slots)
+            if not self._turn():
+                if self._in_line is not None:
+                    self._in_line.set()
+                line._cond.wait_for(self._turn)
+                if self._in_line is not None:
+                    self._in_line.clear()
             line._waiting.popleft()
             line._active += 1
             self._state = "held"
+            self.held_at = line._clock()
             line._cond.notify_all()  # the next place may fit in another slot
         return self
+
+    def _turn(self) -> bool:
+        line = self._line
+        return line._waiting[0] is self and line._active < line._slots
 
     def __exit__(self, *exc: object) -> None:
         self.leave()
@@ -160,8 +178,9 @@ class _State:
         self.name = name
         self.content = content
         self.model = model
-        self.settled = threading.Event()  # set while no build thread is running
-        self.settled.set()
+        # set while a get need not wait: no build thread runs, or its build is in line while an index serves
+        self.answerable = threading.Event()
+        self.answerable.set()
         self.running = False
         self.index: SembleIndex | None = None
         self.token: tuple[int, int] | None = None  # the on-disk cache state `index` corresponds to
@@ -223,7 +242,7 @@ class IndexPool:
         self.clock = clock
         self._lock = threading.RLock()
         self._entries: OrderedDict[Path, _Entry] = OrderedDict()  # least recently used first
-        self._builds = _BuildLine(MAX_CONCURRENT_BUILDS)
+        self._builds = _BuildLine(MAX_CONCURRENT_BUILDS, clock)
 
     # -- public ------------------------------------------------------------------------
 
@@ -232,7 +251,8 @@ class IndexPool:
 
         Returns `Building` only while a kind has never finished a build (its `partial` holds
         the kinds that have); once every kind has (even with an error) the answer is a
-        `WorktreeIndexes`, stale if a refresh is still running. Safe to call from several threads.
+        `WorktreeIndexes`, stale if a refresh is still running. A refresh whose build waits in line
+        behind another is not waited for. Safe to call from several threads.
         """
         top = Path(worktree).resolve()
         deadline = time.monotonic() + max(0.0, wait_s)  # real time: the injected clock may not move
@@ -244,7 +264,7 @@ class IndexPool:
                 if not state.running and self._due(state, now):
                     self._start(entry, state)
                 if state.running:
-                    waiting.append(state.settled)
+                    waiting.append(state.answerable)
         for event in waiting:
             event.wait(max(0.0, deadline - time.monotonic()))
         with self._lock:
@@ -399,11 +419,11 @@ class IndexPool:
         """Start a build thread for `state`. The caller holds the lock and has seen it idle.
 
         The thread's place in the build line is taken here, in the caller's order (docs, then code), not
-        when the thread gets round to it.
+        when the thread gets round to it. A kind with an index to serve lets its callers go while it is in line.
         """
         state.running = True
-        state.settled.clear()
-        place = self._builds.place()
+        state.answerable.clear()
+        place = self._builds.place(state.answerable if state.index is not None else None)
         thread = threading.Thread(
             target=self._run,
             args=(entry.worktree, state, state.index, state.token, place),
@@ -433,6 +453,8 @@ class IndexPool:
             logger.debug("doc-search: %s index of %s failed", state.name, worktree, exc_info=True)
         finally:
             place.leave()  # a thread that loaded the cache never built: its place goes to the next in line
+            if place.held_at is not None:  # a build is timed from its slot, not from its place in line
+                start = place.held_at
             with self._lock:
                 self._settle(state, outcome, self.clock() - start)
 
@@ -478,4 +500,4 @@ class IndexPool:
                 state.built_at = state.checked_at
                 state.build_seconds = elapsed
                 state.cool_seconds = elapsed
-        state.settled.set()
+        state.answerable.set()

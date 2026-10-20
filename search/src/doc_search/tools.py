@@ -447,8 +447,9 @@ def cloud_status_lines(cloud: CloudLeg, tree: Path, budget_s: float = STATUS_CLO
 def _locate(worktree: Path, path: str) -> tuple[str, Path]:
     """The normalised repo-relative path and the real file or directory behind it, confined to `worktree`.
 
-    What git ignores is refused (`.env`, an ignored directory): only a tracked path, or an untracked one
-    no ignore rule matches, is served. The rule is applied to what would be read, the symlink's target.
+    What git ignores is refused (`.env`, an ignored directory): only a tracked path (that exact path, never
+    one a glob character in the name matches), or an untracked one no ignore rule matches, is served. The
+    rule is applied to what would be read, the symlink's target.
     """
     raw = norm_rel(path) if isinstance(path, str) else ""
     try:

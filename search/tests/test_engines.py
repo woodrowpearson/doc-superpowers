@@ -627,6 +627,103 @@ def test_a_refresh_that_loads_the_cache_does_not_queue(
     assert [start for start in probe.starts if start[0] == str(other)] == []
 
 
+def test_a_queued_refresh_serves_the_current_index(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A serving worktree whose rebuild waits behind another's long build answers at once, with the index it has."""
+    repo = git_repo()
+    seed(repo)
+    other = repo.add_worktree("other", "branch-other")
+    cfg = make_cfg(repo, tiny_model)
+    clock = FakeClock()
+    pool = IndexPool(cfg, clock=clock)
+    before = ready(pool.get(other, wait_s=60))
+    edited = other / "docs/refunds.md"
+    edited.write_text(REFUNDS_MD + "\nRefunds are issued in the order currency.\n", encoding="utf-8")
+    stat = edited.stat()
+    os.utime(edited, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))  # other's docs need a rebuild
+
+    probe = BuildProbe(monkeypatch, delay=0.0, hold=str(repo.root))
+    try:
+        assert isinstance(pool.get(repo.root, wait_s=0), Building)  # its first build holds the one slot
+        deadline = time.monotonic() + 30
+        while (str(repo.root), "docs") not in probe.starts and time.monotonic() < deadline:
+            time.sleep(0.01)
+        clock.advance(3600)  # other's cooldown is over: this get starts its rebuild, which queues
+        started = time.monotonic()
+        result = pool.get(other, wait_s=10)
+        took = time.monotonic() - started
+        assert [start for start in probe.starts if start[0] == str(other)] == [], "it has not started: it is queued"
+    finally:
+        probe.gate.set()  # no build thread outlives the test
+        ready(pool.get(repo.root, wait_s=60))
+
+    assert took < 5.0, f"the call waited {took:.1f} s for a rebuild still in line"
+    served = ready(result)
+    assert served.docs is before.docs and served.error == {}
+    # the rebuild runs once the slot frees, and replaces the index
+    deadline = time.monotonic() + 60
+    while ready(pool.peek(other) or Building(other, False, False)).docs is before.docs and time.monotonic() < deadline:
+        time.sleep(0.01)
+    after = ready(pool.get(other, wait_s=60))
+    assert after.docs is not None and after.docs is not before.docs
+    assert "currency" in top_hit_text(after.docs, "order currency")
+    assert probe.peak == 1
+
+
+def test_build_time_starts_when_the_build_gets_its_slot(
+    git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Time in line is not build time: `build_seconds` and the cooldown count from the slot."""
+    repo = git_repo()
+    seed(repo)
+    other = repo.add_worktree("other", "branch-other")
+    cfg = make_cfg(repo, tiny_model)
+    clock = FakeClock()
+    pool = IndexPool(cfg, clock=clock)
+    gate = threading.Event()  # root's docs build waits here, holding the slot
+    asked: list[float] = []  # when other's docs thread checked its cache: it has started, and queues next
+    original_build = SembleIndex.from_path
+    original_check = engines_module.get_validated_cache
+
+    def build(cls, path, content=(), *args, **kwargs):
+        if list(content) == [ContentType.DOCS]:
+            if str(path) == str(repo.root):
+                gate.wait(30)
+            elif str(path) == str(other):
+                clock.advance(10)  # other's docs build "takes" 10 clock seconds
+        return original_build(path, content, *args, **kwargs)
+
+    def check(path, *args, **kwargs):
+        found = original_check(path, *args, **kwargs)
+        if str(path) == str(other) and list(args[1] if len(args) > 1 else kwargs["content"]) == [ContentType.DOCS]:
+            asked.append(clock())
+        return found
+
+    monkeypatch.setattr(SembleIndex, "from_path", classmethod(build))
+    monkeypatch.setattr(engines_module, "get_validated_cache", check)
+    try:
+        assert isinstance(pool.get(repo.root, wait_s=0), Building)  # first in line
+        assert isinstance(pool.get(other, wait_s=0), Building)  # behind root's two builds
+        deadline = time.monotonic() + 30
+        while not asked and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert asked, "other's docs thread never started"
+        clock.advance(100)  # 100 clock seconds in line behind root's build
+    finally:
+        gate.set()
+    first = ready(pool.get(other, wait_s=60))
+    ready(pool.get(repo.root, wait_s=60))
+    assert first.build_seconds["docs"] == 10, "the time in line counted as build time"
+
+    # the cooldown is 3 x the 10 s build, not 3 x 110
+    checks = len(asked)
+    clock.advance(29)
+    ready(pool.get(other, wait_s=60))
+    assert len(asked) == checks, "rechecked inside the cooldown"
+    clock.advance(2)
+    ready(pool.get(other, wait_s=60))
+    assert len(asked) == checks + 1, "not rechecked once 3 x the build time had passed"
+
+
 def test_code_content_all_expands(git_repo, tiny_model: str) -> None:
     """Config accepts code.content ["all"] and semble's enum has no such member: expand it, as semble's CLI does."""
     repo = git_repo()

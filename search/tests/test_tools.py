@@ -399,6 +399,29 @@ def test_fetch_and_related_refuse_what_git_ignores(git_repo, tiny_model: str) ->
     world.settle()
 
 
+def test_fetch_refuses_an_ignored_name_that_glob_matches_a_tracked_one(git_repo, tiny_model: str) -> None:
+    """`?.secret` is not `x.secret`: a glob character in an ignored name never borrows a tracked path's exemption."""
+    repo = git_repo()
+    seed(repo)
+    repo.write(".gitignore", "*.secret\n.env*\n")
+    repo.write("x.secret", "forced\n")
+    repo.write(".envrc", "forced\n")
+    repo.git("add", "-f", "x.secret", ".envrc")
+    repo.commit("ignore")
+    for name in ("?.secret", "[x].secret", ".env*", ".env??"):
+        repo.write(name, "TOP-SECRET\n")
+    world = make_world(repo, tiny_model)
+    top = repo.root
+
+    for name in ("?.secret", "[x].secret", ".env*", ".env??"):
+        for tool, text in (("fetch", world.tools.fetch(name, top)), ("related", world.tools.related(name, top))):
+            assert text == f"doc-search: {name} is ignored by git; not served", (tool, name, text)
+    # the tracked files those names glob-match are still served, although their names are ignored
+    assert world.tools.fetch("x.secret", top) == "x.secret:1-1 of 1 lines\nforced"
+    assert world.tools.fetch(".envrc", top) == ".envrc:1-1 of 1 lines\nforced"
+    world.settle()
+
+
 def test_other_worktrees_are_refused_through_the_server(git_repo, tiny_model: str, tmp_path: Path) -> None:
     repo = git_repo()
     seed(repo)

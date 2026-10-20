@@ -200,11 +200,18 @@ def is_ignored(top: Path, rel: str) -> bool:
     """True when git ignores the repo-relative path `rel` in `top`: untracked and matched by an ignore rule.
 
     A tracked file is never ignored (whatever the rules say), nor is an untracked one no rule matches.
-    The path is literal: check-ignore reads glob characters as themselves, and the `./` keeps a leading
-    `:` from being read as pathspec magic (it refuses `--literal-pathspecs`). Raises GitError when git
+    The path is literal. Tracked means ls-files prints exactly `rel` for a `:(literal)` pathspec: plain
+    check-ignore matches the path against the index as a glob, so `?.secret` would pass as a tracked
+    `x.secret`. The rules are then asked with `--no-index`, where the `./` keeps a leading `:` from
+    being read as pathspec magic (check-ignore refuses `--literal-pathspecs`). Raises GitError when git
     cannot answer.
     """
-    done = _run(Path(top), ("check-ignore", "-q", "--", f"./{rel}"))
+    tracked = _run(Path(top), ("ls-files", "--cached", "-z", "--", f":(literal){rel}"))
+    if tracked.rc != 0:
+        raise GitError(f"git ls-files {rel} failed ({tracked.rc}): {tracked.err.strip()}")
+    if rel in tracked.out.split("\0"):
+        return False
+    done = _run(Path(top), ("check-ignore", "--no-index", "-q", "--", f"./{rel}"))
     if done.rc in (0, 1):  # 0: ignored, 1: not ignored
         return done.rc == 0
     raise GitError(f"git check-ignore {rel} failed ({done.rc}): {done.err.strip()}")
