@@ -8,6 +8,12 @@ docs leg alone serves it. That needs the stamp commit locally; without it the le
 note, and so is it, with the reason, when the cloud cannot answer at all. The local legs always
 answer.
 
+The leg runs inline in a search, so it is bounded three ways: every call to Vertex or Firestore has a
+timeout and no library retry (CLOUD_TIMEOUT_S), the whole leg gets a wall-clock deadline
+(CLOUD_DEADLINE_S, enforced on a worker thread, because a credential refresh is not covered by
+the call timeouts), and a failure is remembered for FAILURE_MEMORY_S so that the next searches skip the
+cloud at once instead of waiting for it to fail again.
+
 `status_lines` reads the stamp document and git, never the collection.
 """
 
@@ -26,13 +32,15 @@ from ..config import CloudCfg
 from ..corpus import Corpus
 from ..repo import GitError, confine, diff_names, git, is_ancestor, norm_rel, rev_parse
 from ..types import Hit
-from . import CloudUnavailable, LazyClient, describe, has_class_named, import_module
-from .vertex import VertexEmbedder
+from . import CLOUD_TIMEOUT_S, CloudUnavailable, LazyClient, describe, has_class_named, import_module
+from .vertex import VertexEmbedder, rejected
 
 logger = logging.getLogger(__name__)
 
 STAMP_DOC = "index"
 STAMP_TTL_S = 60.0  # the stamp document is read at most this often
+CLOUD_DEADLINE_S = 20.0  # the longest a search waits for the whole leg
+FAILURE_MEMORY_S = 60.0  # after a failure the cloud is not asked again for this long
 CHANGED_TTL_S = 5.0  # the branch-changed set is recomputed at most this often (the local legs rescan on this scale)
 CHANGED_ENTRIES = 8
 MAX_FIRESTORE_LIMIT = 1000  # find_nearest's own cap
@@ -103,7 +111,7 @@ class CloudLeg:
 
     `embedder` embeds the query; `client` stands in for `firestore.Client` (tests), otherwise one is
     built on first use. `corpus_for` (the server's) lets `status` count only the doc files among the
-    branch-changed paths. `clock` times the caches.
+    branch-changed paths. `clock` times the caches and `deadline_s` is how long `hits` waits for the cloud.
     """
 
     def __init__(
@@ -114,6 +122,7 @@ class CloudLeg:
         *,
         corpus_for: Callable[[Path], Corpus] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        deadline_s: float = CLOUD_DEADLINE_S,
     ) -> None:
         if not cfg.firestore.project:
             raise CloudUnavailable("no project (set cloud.firestore.project or GOOGLE_CLOUD_PROJECT)")
@@ -124,9 +133,13 @@ class CloudLeg:
         self._db = LazyClient(self._make_db, clock=clock) if client is None else LazyClient(lambda: client)
         self._corpus_for = corpus_for
         self._clock = clock
+        self._deadline_s = deadline_s
         self._lock = threading.Lock()
         self._stamp: CorpusStamp | None = None
         self._stamp_at: float | None = None
+        self._stamp_failure: tuple[float, str] | None = None  # (when, why) of the last failed read
+        self._down: tuple[float, str] | None = None  # (when, header note) of the last failed search
+        self._prefilter_off = False  # the collection has no docType-prefixed vector index
         self._changed: OrderedDict[tuple[Path, str], _Changed] = OrderedDict()
 
     def _make_db(self) -> Any:
@@ -136,15 +149,26 @@ class CloudLeg:
     # -- the corpus stamp ----------------------------------------------------------------------
 
     def stamp(self) -> CorpusStamp | None:
-        """The stamp document's content, read at most every 60 s. None when there is no usable stamp."""
+        """The stamp document's content, read at most every 60 s. None when there is no usable stamp.
+
+        A failed read is remembered for FAILURE_MEMORY_S and raised again, as CloudUnavailable, until then.
+        """
         now = self._clock()
         with self._lock:
             if self._stamp_at is not None and now - self._stamp_at < STAMP_TTL_S:
                 return self._stamp
-        snapshot = self._db.get().collection(self._cfg.firestore.meta_collection).document(STAMP_DOC).get()
+            if self._stamp_failure is not None and now - self._stamp_failure[0] < FAILURE_MEMORY_S:
+                raise CloudUnavailable(self._stamp_failure[1])
+        try:
+            document = self._db.get().collection(self._cfg.firestore.meta_collection).document(STAMP_DOC)
+            snapshot = document.get(timeout=CLOUD_TIMEOUT_S, retry=None)
+        except Exception as err:
+            with self._lock:
+                self._stamp_failure = (self._clock(), describe(err))
+            raise
         stamp = _parse_stamp(snapshot.to_dict() if snapshot.exists else None)
         with self._lock:
-            self._stamp, self._stamp_at = stamp, now
+            self._stamp, self._stamp_at, self._stamp_failure = stamp, now, None
         return stamp
 
     def changed_paths(self, worktree: Path, stamp: CorpusStamp) -> frozenset[str] | None:
@@ -186,12 +210,46 @@ class CloudLeg:
         Never from outside `allowed`, and never for a path that differs from the stamp commit in
         `worktree`. `limit` is the number of chunks to ask the collection for. A single entry in
         `doc_types` also filters the collection on `docType`. Any failure is a note, not an error.
+
+        The wait is bounded by `deadline_s`. After a failure (a timeout, a 5xx, no credentials, ...; not a
+        400 about this one request) the cloud is not asked again for FAILURE_MEMORY_S: the same note comes
+        back at once.
         """
+        with self._lock:
+            down = self._down
+        if down is not None and self._clock() - down[0] < FAILURE_MEMORY_S:
+            return [], down[1]
         try:
-            return self._hits(query, allowed, Path(worktree), limit, tuple(doc_types))
+            return self._within_deadline(lambda: self._hits(query, allowed, Path(worktree), limit, tuple(doc_types)))
         except Exception as err:  # noqa: BLE001 - the remote leg degrades to a note, it never takes the search down
             logger.debug("doc-search: cloud leg failed", exc_info=True)
-            return [], f"cloud failed: {describe(err)}"
+            note = f"cloud failed: {describe(err)}"
+            if not rejected(err):
+                with self._lock:
+                    self._down = (self._clock(), note)
+            return [], note
+
+    def _within_deadline(self, work: Callable[[], tuple[list[Hit], str | None]]) -> tuple[list[Hit], str | None]:
+        """`work()` on a daemon thread, waited for at most `deadline_s`; TimeoutError when it is still running.
+
+        A call stuck in a library (a credential refresh has no timeout of ours) is left behind, not killed.
+        """
+        outcome: dict[str, Any] = {}
+
+        def run() -> None:
+            try:
+                outcome["value"] = work()
+            except Exception as err:  # noqa: BLE001 - handed to the caller's thread
+                outcome["error"] = err
+
+        worker = threading.Thread(target=run, name="doc-search-cloud", daemon=True)
+        worker.start()
+        worker.join(self._deadline_s)
+        if worker.is_alive():
+            raise TimeoutError(f"no answer within {self._deadline_s:g} s")
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["value"]
 
     def _hits(
         self, query: str, allowed: set[str], worktree: Path, limit: int, doc_types: tuple[str, ...]
@@ -223,15 +281,18 @@ class CloudLeg:
 
     def _nearest(self, vector: Any, limit: int, doc_types: tuple[str, ...]) -> list[dict[str, Any]]:
         collection = self._db.get().collection(self._cfg.firestore.collection)
-        doc_type = doc_types[0].lower() if len(doc_types) == 1 else None
+        doc_type = doc_types[0].lower() if len(doc_types) == 1 and not self._prefilter_off else None
         try:
             return self._query(collection, vector, limit, doc_type)
         except Exception as err:
             # the prefilter needs a vector index prefixed by docType; without one the exact filter by
-            # the allowed set (applied by the caller) does the same work on a wider result
+            # the allowed set (applied by the caller) does the same work on a wider result, and the
+            # collection is not asked for the prefilter again
             if doc_type is None or not has_class_named(err, "FailedPrecondition"):
                 raise
-            return self._query(collection, vector, limit, None)
+            rows = self._query(collection, vector, limit, None)
+            self._prefilter_off = True
+            return rows
 
     @staticmethod
     def _query(collection: Any, vector: Any, limit: int, doc_type: str | None) -> list[dict[str, Any]]:
@@ -248,7 +309,7 @@ class CloudLeg:
             limit=limit,
             distance_result_field="vector_distance",
         )
-        return [snapshot.to_dict() or {} for snapshot in nearest.get()]
+        return [snapshot.to_dict() or {} for snapshot in nearest.get(timeout=CLOUD_TIMEOUT_S, retry=None)]
 
     # -- status --------------------------------------------------------------------------------
 
@@ -315,7 +376,13 @@ class CloudLeg:
 def _lines(row: dict[str, Any]) -> tuple[int | None, int]:
     """The chunk's own `startLine` / `endLine` when both are sane integers, else (None, 0)."""
     start, end = row.get("startLine"), row.get("endLine")
-    if all(isinstance(n, int) and not isinstance(n, bool) for n in (start, end)) and 1 <= start <= end:
+    if (
+        isinstance(start, int)
+        and isinstance(end, int)
+        and not isinstance(start, bool)
+        and not isinstance(end, bool)
+        and 1 <= start <= end
+    ):
         return start, end
     return None, 0
 
@@ -371,5 +438,5 @@ def build_cloud_leg(cfg: CloudCfg, *, corpus_for: Callable[[Path], Corpus] | Non
     """
     try:
         return CloudLeg(cfg, VertexEmbedder(cfg), corpus_for=corpus_for)
-    except CloudUnavailable as err:
+    except Exception as err:  # noqa: BLE001 - a leg that cannot be built must not stop the server
         return DegradedLeg(describe(err))

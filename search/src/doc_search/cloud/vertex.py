@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 
 from ..config import CloudCfg
-from . import CloudUnavailable, LazyClient, import_module
+from . import CLOUD_TIMEOUT_S, CloudUnavailable, LazyClient, import_module
 
 BATCH_SIZE = 200
 RETRIES = 3
@@ -31,7 +31,10 @@ class VertexEmbedder:
     """Unit-length embeddings of queries and documents.
 
     `client` stands in for `genai.Client` (tests); without it the client is built on first use, with
-    Application Default Credentials. `sleep` and `jitter` are the retry delays' clock and random source.
+    Application Default Credentials. `sleep`, `jitter` and `clock` are the retries' delay, random source and time.
+
+    Every call to the API is cut off after CLOUD_TIMEOUT_S. A query is embedded while a search waits, so
+    its retries share one budget of that length: a timed-out call is not tried again, a quick 429 or 503 is.
     """
 
     def __init__(
@@ -42,6 +45,7 @@ class VertexEmbedder:
         sleep: Callable[[float], None] = time.sleep,
         jitter: Callable[[], float] = random.random,
         backoff_s: float = BACKOFF_S,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         vertex = cfg.vertex
         if not vertex.project:
@@ -53,17 +57,24 @@ class VertexEmbedder:
         self._sleep = sleep
         self._jitter = jitter
         self._backoff_s = backoff_s
+        self._clock = clock
         self.id = f"vertex:{vertex.model}/{vertex.dimensions}"
 
     def _make_client(self) -> Any:
         genai = import_module("google.genai")
-        return genai.Client(vertexai=True, project=self._vertex.project, location=self._vertex.location)
+        types = import_module("google.genai.types")
+        return genai.Client(
+            vertexai=True,
+            project=self._vertex.project,
+            location=self._vertex.location,
+            http_options=types.HttpOptions(timeout=int(CLOUD_TIMEOUT_S * 1000)),  # milliseconds
+        )
 
     # -- public ------------------------------------------------------------------------------
 
     def embed_query(self, text: str) -> np.ndarray:
         """The unit vector of one query, shape (dimensions,)."""
-        return self._embed([text], QUERY_TASK)[0]
+        return self._embed([text], QUERY_TASK, budget_s=CLOUD_TIMEOUT_S)[0]
 
     def embed_documents(self, texts: Sequence[str]) -> np.ndarray:
         """The unit vectors of `texts`, shape (len(texts), dimensions), embedded 200 at a time."""
@@ -75,12 +86,12 @@ class VertexEmbedder:
 
     # -- one batch ---------------------------------------------------------------------------
 
-    def _embed(self, batch: list[str], task_type: str) -> np.ndarray:
+    def _embed(self, batch: list[str], task_type: str, budget_s: float | None = None) -> np.ndarray:
         types = import_module("google.genai.types")
         config = types.EmbedContentConfig(task_type=task_type, output_dimensionality=self._vertex.dimensions)
         client = self._client.get()
         response = self._with_retries(
-            lambda: client.models.embed_content(model=self._vertex.model, contents=batch, config=config)
+            lambda: client.models.embed_content(model=self._vertex.model, contents=batch, config=config), budget_s
         )
         vectors = [list(item.values) for item in (response.embeddings or [])]
         if len(vectors) != len(batch):
@@ -94,14 +105,18 @@ class VertexEmbedder:
         norms[norms == 0] = 1.0  # an all-zero vector stays zero
         return matrix / norms
 
-    def _with_retries(self, call: Callable[[], Any]) -> Any:
+    def _with_retries(self, call: Callable[[], Any], budget_s: float | None) -> Any:
+        started = self._clock()
         for attempt in range(RETRIES + 1):
             try:
                 return call()
             except Exception as err:  # noqa: BLE001 - only the transient kinds are retried, the rest re-raised
                 if attempt == RETRIES or not _transient(err):
                     raise
-                self._sleep(min(BACKOFF_CAP_S, self._backoff_s * 2**attempt) + self._jitter() * self._backoff_s)
+                delay = min(BACKOFF_CAP_S, self._backoff_s * 2**attempt) + self._jitter() * self._backoff_s
+                if budget_s is not None and self._clock() - started + delay >= budget_s:
+                    raise
+                self._sleep(delay)
         raise AssertionError("unreachable")  # pragma: no cover
 
 
@@ -111,10 +126,22 @@ def _transient(err: BaseException) -> bool:
         return True
     try:
         errors = import_module("google.genai.errors")
-        import httpx  # a dependency of google-genai
-    except (CloudUnavailable, ImportError):
+    except CloudUnavailable:
         return False
     if isinstance(err, errors.APIError):
         code = err.code
         return isinstance(code, int) and (code == 429 or code >= 500)
+    try:
+        import httpx  # a dependency of google-genai
+    except ImportError:
+        return False
     return isinstance(err, httpx.TimeoutException)
+
+
+def rejected(err: BaseException) -> bool:
+    """True for a 400 the API answered for this request alone: the service itself is reachable and well."""
+    try:
+        errors = import_module("google.genai.errors")
+    except CloudUnavailable:
+        return False
+    return isinstance(err, errors.ClientError) and err.code == 400

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -16,7 +18,7 @@ import numpy as np
 import pytest
 from fakes import DIMS, FakeFirestore, FakeGenai, text_vector, unit
 
-from doc_search.cloud import CloudUnavailable
+from doc_search.cloud import CLOUD_TIMEOUT_S, CloudUnavailable
 from doc_search.cloud.read import CloudLeg, CorpusStamp, DegradedLeg, build_cloud_leg, resolve_base_ref
 from doc_search.cloud.vertex import VertexEmbedder
 from doc_search.config import CloudCfg, Config, FirestoreCfg, VertexCfg, load_config
@@ -144,6 +146,31 @@ def test_vertex_retry_policy() -> None:
     assert len(genai.calls) == 1 and slept == []
 
 
+def test_a_query_embedding_retries_within_one_budget() -> None:
+    clock = Clock()
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.now += seconds
+
+    def embedder(genai: FakeGenai) -> VertexEmbedder:
+        genai.on_call = lambda: setattr(clock, "now", clock.now + 5)  # every attempt takes 5 s
+        return VertexEmbedder(cloud_cfg(), client=genai, sleep=sleep, jitter=lambda: 0.0, clock=clock)
+
+    # a search is waiting: one more try fits in the budget (5 s + 1 s), a second does not (11 s + 2 s)
+    genai = FakeGenai(script=[api_error(503, "UNAVAILABLE")] * 4)
+    with pytest.raises(errors.ServerError):
+        embedder(genai).embed_query("q")
+    assert len(genai.calls) == 2 and slept == [1.0]
+
+    # indexing documents has no such budget
+    slept.clear()
+    genai = FakeGenai(script=[api_error(503, "UNAVAILABLE")] * 3)
+    assert embedder(genai).embed_documents(["a"]).shape == (1, DIMS)
+    assert len(genai.calls) == 4 and slept == [1.0, 2.0, 4.0]
+
+
 def test_vertex_unavailable_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(CloudUnavailable, match="no project"):
         VertexEmbedder(cloud_cfg(project=None), client=FakeGenai())
@@ -174,7 +201,10 @@ def test_vertex_builds_its_client_on_first_use(monkeypatch: pytest.MonkeyPatch) 
     embedder.embed_query("q")
     embedder.embed_query("q")
 
-    assert built == [{"vertexai": True, "project": "proj", "location": "europe-west4"}]
+    (kwargs,) = built
+    http_options = kwargs.pop("http_options")
+    assert kwargs == {"vertexai": True, "project": "proj", "location": "europe-west4"}
+    assert http_options.timeout == int(CLOUD_TIMEOUT_S * 1000), "genai counts HttpOptions.timeout in milliseconds"
 
 
 def test_fake_firestore_models_the_client_surface() -> None:
@@ -302,6 +332,10 @@ def test_doc_type_prefilter_falls_back_without_a_prefixed_index(git_repo) -> Non
     assert note is None and [h.path for h in hits] == [SPEC_PATH]
     assert [q["filters"] for q in w.fs.vector_queries] == [[("docType", "==", "spec")], []]
 
+    # the collection is not asked for the prefilter again
+    w.leg.hits("refund rounding", {SPEC_PATH}, w.root, 30, doc_types=("spec",))
+    assert [q["filters"] for q in w.fs.vector_queries][2:] == [[]]
+
 
 def test_unusable_line_ranges_are_located_in_the_file(git_repo) -> None:
     repo = git_repo()
@@ -314,6 +348,7 @@ def test_unusable_line_ranges_are_located_in_the_file(git_repo) -> None:
     fs.add_chunk("docs/ranges.md", "two\nthree", start=0, end=3)  # start below 1
     fs.add_chunk("docs/ranges.md", "one", index=1, start=5, end=2)  # end before start
     fs.add_chunk("docs/ranges.md", "three", index=2, start=4, end=4)  # sane: kept as given
+    fs.add_chunk("docs/ranges.md", "two", index=3, start=True, end=True)  # booleans are not line numbers
     leg = CloudLeg(cfg, VertexEmbedder(cfg, client=FakeGenai()), client=fs)
 
     hits, note = leg.hits("one two three first second line", {"docs/crlf.md", "docs/ranges.md"}, repo.root, 30)
@@ -325,6 +360,7 @@ def test_unusable_line_ranges_are_located_in_the_file(git_repo) -> None:
         ("docs/ranges.md", "two\nthree"): (4, 5),
         ("docs/ranges.md", "one"): (3, 3),
         ("docs/ranges.md", "three"): (4, 4),
+        ("docs/ranges.md", "two"): (4, 4),
     }
 
 
@@ -361,6 +397,37 @@ def test_stamp_is_cached_for_sixty_seconds(git_repo) -> None:
     assert w.leg.stamp() == CorpusStamp(
         w.stamp, "2026-01-01T00:00:00Z", "catch-up", f"vertex:gemini-embedding-001/{DIMS}"
     )
+
+
+def test_cloud_reads_have_a_timeout_and_no_library_retry(git_repo) -> None:
+    w = scene(git_repo)
+
+    w.leg.hits("refund", ALL, w.root, 30)
+
+    # firestore's own default retries ServiceUnavailable for up to 300 s: a read must not inherit it
+    assert 0 < CLOUD_TIMEOUT_S <= 10
+    assert w.fs.request_options == [
+        ("document_get", {"retry": None, "timeout": CLOUD_TIMEOUT_S}),
+        ("find_nearest", {"retry": None, "timeout": CLOUD_TIMEOUT_S}),
+    ]
+
+
+def test_a_failed_stamp_read_is_remembered(git_repo) -> None:
+    w = scene(git_repo)
+    w.fs.fail["document_get"] = ConnectionError("unreachable")
+    unreadable = "cloud: corpus stamp unreadable (ConnectionError: unreachable)"
+
+    with pytest.raises(ConnectionError):
+        w.leg.stamp()
+    with pytest.raises(CloudUnavailable, match="ConnectionError: unreachable"):
+        w.leg.stamp()
+    assert w.leg.status_lines(w.root)[-1] == unreadable
+    assert w.fs.calls["document_get"] == 1, "the failed read is not repeated by every caller"
+
+    w.clock.now += 61
+    w.fs.fail.clear()
+    assert w.leg.stamp() is not None
+    assert w.fs.calls["document_get"] == 2
 
 
 def test_status_says_when_the_stamp_embedder_differs(git_repo) -> None:
@@ -580,6 +647,54 @@ def test_client_construction_failure_is_remembered(git_repo, monkeypatch: pytest
     clock.now += 301
     assert leg.hits("refund", ALL, repo.root, 30) == ([], note)
     assert len(built) == 2
+
+
+def test_a_failure_is_remembered_but_a_rejected_request_is_not(git_repo) -> None:
+    w = scene(git_repo)
+    w.genai.script = [api_error(503, "UNAVAILABLE")] * 4
+
+    hits, note = w.leg.hits("refund", ALL, w.root, 30)
+
+    assert hits == [] and note is not None and note.startswith("cloud failed: ServerError: 503")
+    asked = len(w.genai.calls)
+    assert w.leg.hits("refund", ALL, w.root, 30) == ([], note), "the same note, from memory"
+    assert len(w.genai.calls) == asked and w.fs.calls["find_nearest"] == 0, "the cloud was not asked"
+    w.clock.now += 61
+    hits, note = w.leg.hits("refund", ALL, w.root, 30)
+    assert note is None and hits, "asked again after a minute"
+
+    # a 400 is about this query alone: the next one goes through
+    other = scene(git_repo)
+    other.genai.script = [api_error(400, "INVALID_ARGUMENT")]
+    hits, note = other.leg.hits("refund", ALL, other.root, 30)
+    assert hits == [] and note is not None and note.startswith("cloud failed: ClientError: 400")
+    hits, note = other.leg.hits("refund", ALL, other.root, 30)
+    assert note is None and hits
+
+
+def test_a_stuck_cloud_cannot_hold_a_search(git_repo) -> None:
+    w = scene(git_repo)
+    release = threading.Event()
+
+    class Stuck:  # a credential refresh inside the library has no timeout of ours
+        id = "vertex:stuck/1"
+
+        def embed_query(self, text: str):
+            release.wait(30)
+            raise RuntimeError("released")
+
+    leg = CloudLeg(cloud_cfg(), Stuck(), client=w.fs, clock=w.clock, deadline_s=0.2)
+    started = time.monotonic()
+    try:
+        hits, note = leg.hits("refund", ALL, w.root, 30)
+        waited = time.monotonic() - started
+        again = leg.hits("refund", ALL, w.root, 30)
+    finally:
+        release.set()  # let the abandoned worker finish
+
+    assert (hits, note) == ([], "cloud failed: TimeoutError: no answer within 0.2 s")
+    assert waited < 5
+    assert again == ([], note), "and it is not waited for again at once"
 
 
 # --- building the leg for the server ---------------------------------------------------------------------

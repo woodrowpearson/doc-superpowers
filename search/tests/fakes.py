@@ -13,12 +13,14 @@ import hashlib
 import math
 import re
 from collections import Counter
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
 DIMS = 128
+
+_UNSET: Any = object()  # "not passed", to tell it from an explicit None
 
 
 def text_vector(text: str, dims: int = DIMS) -> list[float]:
@@ -56,11 +58,13 @@ class FakeGenai:
     """`genai.Client` as far as the embedder uses it: `client.models.embed_content(...)`.
 
     `script` is a list of exceptions: each call first pops one and raises it, until the list is empty.
+    `on_call` runs at the start of every call (a test's way to let time pass).
     """
 
     def __init__(self, dims: int = DIMS, script: Iterable[Exception] = ()) -> None:
         self.dims = dims
         self.script = list(script)
+        self.on_call: Callable[[], None] | None = None
         self.calls: list[EmbedCall] = []
         self.models = SimpleNamespace(embed_content=self._embed_content)
 
@@ -72,6 +76,8 @@ class FakeGenai:
             dims=getattr(config, "output_dimensionality", None),
         )
         self.calls.append(call)
+        if self.on_call:
+            self.on_call()
         if self.script:
             call.failed = True
             raise self.script.pop(0)
@@ -103,8 +109,11 @@ class FakeDocumentRef:
         self._collection = collection
         self.id = doc_id
 
-    def get(self, field_paths: Any = None, transaction: Any = None, **_: Any) -> FakeSnapshot:
+    def get(
+        self, field_paths: Any = None, transaction: Any = None, retry: Any = _UNSET, timeout: Any = _UNSET, **_: Any
+    ) -> FakeSnapshot:
         self._fs._count("document_get")
+        self._fs._record("document_get", retry, timeout)
         self._fs._maybe_fail("document_get")
         return FakeSnapshot(self.id, self._collection.docs.get(self.id))
 
@@ -129,9 +138,10 @@ class FakeVectorQuery:
         self._source = source
         self._args = args
 
-    def get(self, **_: Any) -> list[FakeSnapshot]:
+    def get(self, transaction: Any = None, retry: Any = _UNSET, timeout: Any = _UNSET, **_: Any) -> list[FakeSnapshot]:
         fs, args = self._fs, self._args
         fs._count("find_nearest")
+        fs._record("find_nearest", retry, timeout)
         fs._maybe_fail("find_nearest")
         filters = [(f.field_path, f.op_string, f.value) for f in self._source.filters]
         fs.vector_queries.append({**args, "filters": filters, "collection": self._source.collection.name})
@@ -269,6 +279,7 @@ class FakeFirestore:
     """`firestore.Client` with in-memory collections and call counters.
 
     `calls` counts operations by name (`find_nearest`, `stream`, `document_get`, `batch_commit`, ...).
+    `request_options` records the `retry` / `timeout` each read was called with (only those passed).
     `fail` maps an operation (`find_nearest`, `document_get`, `stream`) to an exception it raises.
     `reject_filtered` is raised by a vector query that has a `where` filter (a missing prefixed index).
     """
@@ -277,12 +288,17 @@ class FakeFirestore:
         self.collections: dict[str, FakeCollection] = {}
         self.calls: Counter[str] = Counter()
         self.vector_queries: list[dict[str, Any]] = []
+        self.request_options: list[tuple[str, dict[str, Any]]] = []  # (operation, the retry/timeout it was given)
         self.commit_sizes: list[int] = []
         self.fail: dict[str, Exception] = {}
         self.reject_filtered: Exception | None = None
 
     def _count(self, op: str) -> None:
         self.calls[op] += 1
+
+    def _record(self, op: str, retry: Any, timeout: Any) -> None:
+        given = {"retry": retry, "timeout": timeout}
+        self.request_options.append((op, {key: value for key, value in given.items() if value is not _UNSET}))
 
     def _maybe_fail(self, op: str) -> None:
         if op in self.fail:
