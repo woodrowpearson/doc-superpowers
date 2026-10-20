@@ -57,7 +57,11 @@ ARCHIVE_PREFIX = "docs/archive/"
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _ATX = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*$")
 _CLOSING_HASHES = re.compile(r"(?:^|[ \t]+)#+$")
-_BOLD_STATUS = re.compile(r"^\s*(?:[-*+>]\s+)*\*\*status(?::\*\*|\*\*\s*:)\s*[*_`\[(]*([a-z][\w-]*)", re.IGNORECASE)
+# A status is its first word, lowercased, past any opening markup: `**Status:** Draft — 2026-10-19` is
+# `draft`, and front matter `status: superseded by ADR-0005` (MADR) is `superseded`.
+_STATUS_WORD = r"[*_`\[(]*([a-z][\w-]*)"
+_BOLD_STATUS = re.compile(r"^\s*(?:[-*+>]\s+)*\*\*status(?::\*\*|\*\*\s*:)\s*" + _STATUS_WORD, re.IGNORECASE)
+_FM_STATUS = re.compile(r"\s*" + _STATUS_WORD, re.IGNORECASE)
 _FM_KEY = re.compile(r"^([A-Za-z_][\w-]*)[ \t]*:(.*)$")
 _FM_COMMENT = re.compile(r"[ \t]+#")
 
@@ -203,6 +207,12 @@ def _parse_outline(text: str) -> tuple[tuple[int, int, str], ...]:
 # --- the corpus -----------------------------------------------------------------------
 
 
+def _status_word(value: str | None) -> str | None:
+    """The first word of a front-matter status, lowercased; None when it has none."""
+    found = _FM_STATUS.match(value) if value else None
+    return found.group(1).lower() if found else None
+
+
 def is_terminal(meta: DocMeta, cfg: Config) -> bool:
     """A doc whose status is terminal (`search.terminal_statuses`) or that lives under docs/archive/."""
     terminal = {status.lower() for status in cfg.search.terminal_statuses}
@@ -328,10 +338,8 @@ class Corpus:
                 status: str | None = "deprecated"
             elif superseded_by:
                 status = "superseded"
-            elif fields.get("status"):
-                status = fields["status"].lower()
-            else:
-                status = head.bold_status
+            else:  # the front matter's first word, else the `**Status:**` line's
+                status = _status_word(fields.get("status")) or head.bold_status
             return DocMeta(
                 path=path,
                 title=head.title,

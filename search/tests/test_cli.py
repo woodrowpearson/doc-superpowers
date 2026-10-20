@@ -465,6 +465,45 @@ def test_status_with_code_off(git_repo, tiny_model: str, monkeypatch: pytest.Mon
     assert run("status").lines[-2:] == ["docs cache: valid", "code cache: off"]
 
 
+class SlowCloudLeg:
+    """A cloud leg whose `status_lines` hangs for up to 10 s (until `gate` is set), as a stamp read can."""
+
+    def __init__(self) -> None:
+        self.gate = threading.Event()
+
+    def hits(self, *args, **kwargs):  # pragma: no cover - status never searches
+        raise AssertionError("status must not search the cloud")
+
+    def status_lines(self, worktree: Path) -> list[str]:
+        self.gate.wait(10)
+        return ["cloud: late"]
+
+
+@pytest.mark.parametrize("fmt", ["text", "json"])
+def test_status_bounds_the_cloud_lines(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch, run, fmt) -> None:
+    made = git_repo()
+    seed(made, tiny_model, cloud=CLOUD)
+    monkeypatch.chdir(made.root)
+    leg = SlowCloudLeg()
+    monkeypatch.setattr("doc_search.server.build_cloud_leg", lambda cfg, corpus_for=None: leg)
+    try:
+        start = time.monotonic()
+        done = run("status", "--format", fmt)
+        took = time.monotonic() - start
+    finally:
+        leg.gate.set()
+
+    assert took < 4.0, f"status took {took:.1f} s"
+    assert done.code == 0
+    line = "cloud: status unavailable (timed out after 3 s)"
+    if fmt == "text":
+        assert line in done.lines and "cloud: late" not in done.out
+    else:
+        payload = json.loads(done.out)
+        assert payload["cloud"] == {"configured": True, "lines": [line]}
+        assert payload["ready"] is False and payload["cache"] == {"docs": "absent", "code": "absent"}
+
+
 # --- index --cloud: the exit-code mapping ----------------------------------------------------------------
 
 

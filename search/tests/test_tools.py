@@ -361,6 +361,44 @@ def test_fetch_and_related_confined(git_repo, tiny_model: str, tmp_path: Path) -
     world.settle()
 
 
+def test_fetch_and_related_refuse_what_git_ignores(git_repo, tiny_model: str) -> None:
+    """Only tracked files and untracked-but-not-ignored ones are served: never `.env`, never an ignored directory."""
+    repo = git_repo()
+    seed(repo)
+    repo.write(".gitignore", ".env\nsecrets/\n*.local.md\n:magic.txt\n")
+    repo.write(".env", "API_KEY=TOP-SECRET\n")
+    repo.write(":magic.txt", "TOP-SECRET\n")  # a leading colon is pathspec magic to git, unless kept literal
+    repo.write("secrets/key.txt", "TOP-SECRET\n")
+    repo.write("docs/notes.local.md", "# Notes\n\nTOP-SECRET\n")
+    repo.write("docs/forced.local.md", "# Forced\n\nTracked although its name is ignored.\n")
+    repo.git("add", "-f", "docs/forced.local.md")
+    repo.commit("ignore")
+    repo.write("docs/draft.md", "# Draft\n\nUntracked, not ignored.\n")
+    (repo.root / "env-link.txt").symlink_to(".env")  # not ignored itself, but what it reads is
+    world = make_world(repo, tiny_model)
+    top = repo.root
+
+    for path, shown in (
+        (".env", ".env"),
+        ("./.env", ".env"),
+        ("secrets/key.txt", "secrets/key.txt"),
+        ("secrets", "secrets"),
+        ("docs/notes.local.md", "docs/notes.local.md"),
+        ("env-link.txt", "env-link.txt"),
+        (":magic.txt", ":magic.txt"),
+    ):
+        for name, text in (("fetch", world.tools.fetch(path, top)), ("related", world.tools.related(path, top))):
+            assert text == f"doc-search: {shown} is ignored by git; not served", (name, path, text)
+
+    # tracked (although the name is ignored) and untracked-but-not-ignored files are served
+    assert world.tools.fetch("docs/forced.local.md", top).startswith("docs/forced.local.md:1-3 of 3 lines")
+    assert world.tools.fetch("docs/draft.md", top).startswith("docs/draft.md:1-3 of 3 lines")
+    assert world.tools.related("docs/draft.md", top).startswith("related · docs/draft.md · doc")
+    # a path git would read as a pathspec is a literal path
+    assert world.tools.fetch("docs/*.md", top) == "doc-search: no such file: docs/*.md"
+    world.settle()
+
+
 def test_other_worktrees_are_refused_through_the_server(git_repo, tiny_model: str, tmp_path: Path) -> None:
     repo = git_repo()
     seed(repo)
@@ -946,6 +984,38 @@ def test_status_has_a_hook_for_cloud_lines(git_repo, tiny_model: str) -> None:
     lines = world.tools.status(repo.root).splitlines()
     world.settle()
     assert "cloud: status failed (RuntimeError)" in lines
+
+
+class SlowCloud(FakeCloud):
+    """A leg whose stamp read hangs on the network: `status_lines` blocks for up to 10 s (until `release`)."""
+
+    def __init__(self) -> None:
+        super().__init__(["cloud: late"])
+        self.gate = threading.Event()
+
+    def status_lines(self, worktree: Path) -> list[str]:
+        self.gate.wait(10)
+        return super().status_lines(worktree)
+
+
+def test_status_bounds_the_cloud_lines(git_repo, tiny_model: str) -> None:
+    """A cloud leg that blocks (a client build without credentials, a slow stamp read) cannot hold status up."""
+    repo = git_repo()
+    seed(repo)
+    cloud = SlowCloud()
+    world = make_world(repo, tiny_model, cloud=cloud)
+    try:
+        start = time.monotonic()
+        lines = world.tools.status(repo.root).splitlines()
+        took = time.monotonic() - start
+    finally:
+        cloud.gate.set()  # the worker left behind ends now, not 10 s later
+        world.settle()
+
+    assert took < 4.0, f"status took {took:.1f} s"
+    assert "cloud: status unavailable (timed out after 3 s)" in lines
+    assert "cloud: late" not in lines
+    assert "docs index: ready" in lines, "the local lines are all there"
 
 
 # --- through the server ------------------------------------------------------------------------------

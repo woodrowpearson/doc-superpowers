@@ -45,6 +45,7 @@ from .config import DEADLINE_GRACE_S, DEFAULT_TIMEOUT_S, Config
 from .corpus import Corpus
 from .engines import Building, IndexPool, WorktreeIndexes
 from .fusion import fuse_by_file, interleave_with_floor
+from .render import flat
 from .repo import GitError, RepoInfo, norm_rel
 from .types import HeaderInfo, Hit, SearchRequest, SearchResponse
 
@@ -234,7 +235,7 @@ class Searcher:
         try:
             return self._search(req, Path(worktree))
         except GitError as err:
-            return f"doc-search: git failed: {err}"
+            return f"doc-search: git failed: {flat(err)}"  # git's stderr can run to several lines
 
     def _search(self, req: SearchRequest, worktree: Path) -> SearchResponse | str:
         query = req.query.strip()

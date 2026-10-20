@@ -3,8 +3,10 @@
 `fetch` reads one file of the working tree, confined to the worktree top, and answers at most
 FETCH_MAX_LINES lines in all (the location line, the doc header and the truncation note included).
 `related` moves between a document and the code it covers: the doc-index supplies the references,
-semble's `find_related` the similar passages. `status` says what is indexed and what is not; it never
-waits for a build and never reads a cloud collection.
+semble's `find_related` the similar passages. Both serve only what git does not ignore (a tracked file,
+or an untracked one no ignore rule matches). `status` says what is indexed and what is not; it never
+waits for a build, never reads a cloud collection, and waits for the cloud leg's lines at most
+STATUS_CLOUD_BUDGET_S.
 
 Every answer is text. What cannot be answered is one line starting `doc-search:`; a path or a message
 with a line break in it is flattened first, so repository content cannot start a line of its own.
@@ -13,10 +15,12 @@ with a line break in it is flattened first, so repository content cannot start a
 from __future__ import annotations
 
 import posixpath
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from semble import SembleIndex
 from semble.types import Chunk
@@ -26,7 +30,7 @@ from .config import CONFIG_REL, Config
 from .corpus import Corpus
 from .engines import Building, IndexPool, Kind, WorktreeIndexes
 from .render import INDENT, LINK_LIMIT, SEP, fit_to_cap, flat, render_hits
-from .repo import GitError, RepoInfo, confine, norm_rel
+from .repo import GitError, RepoInfo, confine, is_ignored, norm_rel
 from .searcher import CloudLeg, enrich_hit
 from .types import DocMeta, Hit
 
@@ -40,6 +44,9 @@ MAX_LIMIT = 50
 RELATED_FETCH = 3  # the over-fetch for "see also", which drops the doc's own chunks and non-corpus files
 RELATED_MAX_FETCH = 1000
 LISTED = 5  # status: how many unindexed or skipped files it names
+# status: how long it waits for the cloud leg's lines, all worktrees together. A stamp read can block on the
+# network (building the Firestore client takes ~10 s without credentials, then a read of up to cloud.timeout_s).
+STATUS_CLOUD_BUDGET_S = 3
 
 State = Literal["off", "building", "ready", "failed", "unloaded"]
 
@@ -290,6 +297,7 @@ class DocTools:
 
     def _status(self, worktree: Path, warm: bool = True) -> str:
         top = worktree.resolve()
+        cloud_by = time.monotonic() + STATUS_CLOUD_BUDGET_S  # one budget for every worktree's cloud lines
         docs_model = flat(self.cfg.docs.model or resolve_model_name())
         code_model = flat(self.cfg.code.model or resolve_model_name()) if self.cfg.code.enabled else "off"
         out = [
@@ -300,14 +308,14 @@ class DocTools:
             f"semble {IndexPool.semble_version()}",
             "",
             f"worktree: {top}",
-            *self._worktree_lines(top, self._asked(top, warm)),
+            *self._worktree_lines(top, self._asked(top, warm), cloud_by),
         ]
         for tree in self._pool.resident():  # read after the asked worktree's call: that may have changed it
             if tree == top:
                 continue
             got = self._pool.peek(tree)  # a look, not a use: the LRU order and the builds stay as they were
             if got is not None:  # None: evicted since resident() was read
-                out += ["", f"worktree: {tree}", *self._worktree_lines(tree, got)]
+                out += ["", f"worktree: {tree}", *self._worktree_lines(tree, got, cloud_by)]
         return "\n".join(out)
 
     def _asked(self, top: Path, warm: bool = True) -> WorktreeIndexes | Building | None:
@@ -323,7 +331,7 @@ class DocTools:
             got = self._pool.get(top, wait_s=0)
         return got
 
-    def _worktree_lines(self, tree: Path, got: WorktreeIndexes | Building | None) -> list[str]:
+    def _worktree_lines(self, tree: Path, got: WorktreeIndexes | Building | None, cloud_by: float) -> list[str]:
         docs, code = self._view(got, "docs"), self._view(got, "code")
         out = self._index_lines(tree, docs) + self._index_lines(tree, code)
         corpus = self._corpus_for(tree)
@@ -339,10 +347,7 @@ class DocTools:
         else:
             out.append("doc-index: absent (no docs/.doc-index.json: code refs and cross-links are omitted)")
         if self._cloud is not None:
-            try:
-                out += [flat(line) for line in self._cloud.status_lines(tree)]
-            except Exception as err:  # noqa: BLE001 - the remote leg must never take status down
-                out.append(f"cloud: status failed ({type(err).__name__})")
+            out += cloud_status_lines(self._cloud, tree, cloud_by - time.monotonic())
         return out
 
     def _index_lines(self, tree: Path, view: _View) -> list[str]:
@@ -416,8 +421,35 @@ class DocTools:
 # -- helpers ----------------------------------------------------------------------------------------
 
 
+def cloud_status_lines(cloud: CloudLeg, tree: Path, budget_s: float = STATUS_CLOUD_BUDGET_S) -> list[str]:
+    """The cloud leg's `status` lines for `tree`, flattened, waited for at most `budget_s`. Never raises.
+
+    They run on a daemon worker: past the budget the answer is a timeout line and the worker is left to
+    finish (a stamp it reads is cached by the leg, so a later status is quick). The CLI's probe uses it too.
+    """
+    timed_out = [f"cloud: status unavailable (timed out after {STATUS_CLOUD_BUDGET_S:g} s)"]
+    if budget_s <= 0:
+        return timed_out
+    outcome: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            outcome["lines"] = [flat(line) for line in cloud.status_lines(tree)]
+        except Exception as err:  # noqa: BLE001 - the remote leg must never take status down
+            outcome["lines"] = [f"cloud: status failed ({type(err).__name__})"]
+
+    worker = threading.Thread(target=run, name="doc-search-cloud-status", daemon=True)
+    worker.start()
+    worker.join(budget_s)
+    return outcome.get("lines", timed_out) if not worker.is_alive() else timed_out
+
+
 def _locate(worktree: Path, path: str) -> tuple[str, Path]:
-    """The normalised repo-relative path and the real file or directory behind it, confined to `worktree`."""
+    """The normalised repo-relative path and the real file or directory behind it, confined to `worktree`.
+
+    What git ignores is refused (`.env`, an ignored directory): only a tracked path, or an untracked one
+    no ignore rule matches, is served. The rule is applied to what would be read, the symlink's target.
+    """
     raw = norm_rel(path) if isinstance(path, str) else ""
     try:
         real = confine(worktree, raw)
@@ -426,6 +458,9 @@ def _locate(worktree: Path, path: str) -> tuple[str, Path]:
     rel = posixpath.normpath(raw)
     if not real.exists():
         raise _refuse(f"no such file: {rel}")
+    target = real.relative_to(Path(worktree).resolve()).as_posix()
+    if target != "." and is_ignored(worktree, target):
+        raise _refuse(f"{rel} is ignored by git; not served")
     return rel, real
 
 

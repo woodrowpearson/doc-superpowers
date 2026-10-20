@@ -196,6 +196,20 @@ def is_ancestor(top: Path, a: str, b: str) -> bool:
     return _run(Path(top), ("merge-base", "--is-ancestor", a, b)).rc == 0
 
 
+def is_ignored(top: Path, rel: str) -> bool:
+    """True when git ignores the repo-relative path `rel` in `top`: untracked and matched by an ignore rule.
+
+    A tracked file is never ignored (whatever the rules say), nor is an untracked one no rule matches.
+    The path is literal: check-ignore reads glob characters as themselves, and the `./` keeps a leading
+    `:` from being read as pathspec magic (it refuses `--literal-pathspecs`). Raises GitError when git
+    cannot answer.
+    """
+    done = _run(Path(top), ("check-ignore", "-q", "--", f"./{rel}"))
+    if done.rc in (0, 1):  # 0: ignored, 1: not ignored
+        return done.rc == 0
+    raise GitError(f"git check-ignore {rel} failed ({done.rc}): {done.err.strip()}")
+
+
 def ls_files(top: Path) -> set[str]:
     """Tracked and untracked-but-not-ignored paths, relative to `top`."""
     out = git(top, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
