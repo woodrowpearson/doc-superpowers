@@ -291,7 +291,7 @@ Search-enabled projects only: `docs/search/config.json` turns doc-search on, and
 | The MCP server and its tools | server `doc-search` (the `.mcp.json` key); tools `search`, `fetch`, `related`, `status` |
 | CLI verbs | `doc-search serve`, `init`, `index` (`--cloud` for the cloud write path), `query`, `status`, `eval` |
 | Environment | `DOC_SEARCH_CLOUD=0` (turns the cloud leg off on one machine; nothing turns it on), `DOC_SEARCH_LIVE=1` (live tests only) |
-| Cloud corpus | Firestore collection `doc_chunks`, meta collection `corpus_meta` with the stamp `index` and the lease `catch_up_lease` (all configurable) |
+| Cloud corpus | Firestore collection `doc_chunks` and meta collection `corpus_meta` (both configurable: `cloud.firestore.collection`, `cloud.firestore.meta_collection`); in the meta collection, the stamp document `index` and the lease document `catch_up_lease` (fixed ids) |
 
 ### This repo's exemptions from the Scope → Generated Docs Matrix
 
