@@ -308,3 +308,21 @@ def test_is_ignored(git_repo, tmp_path: Path) -> None:
     plain.mkdir()
     with pytest.raises(GitError):
         is_ignored(plain, "a.txt")
+
+
+def test_is_ignored_reads_glob_characters_literally_against_the_index(git_repo) -> None:
+    """An ignored name that glob-matches a tracked path is still ignored: only the exact tracked path is exempt."""
+    repo = git_repo()
+    repo.write(".gitignore", "*.secret\n.env*\n:odd*\n")
+    repo.write("x.secret", "tracked\n")
+    repo.write(".envrc", "tracked\n")
+    repo.write(":odd1", "tracked\n")
+    repo.git("add", "-f", "x.secret", ".envrc", "./:odd1")
+    repo.commit("base")
+    for name in ("?.secret", "[x].secret", "*.secret", ".env*", ".env??", ":odd?"):
+        repo.write(name, "untracked\n")
+
+    for name in ("?.secret", "[x].secret", "*.secret", ".env*", ".env??", ":odd?"):
+        assert is_ignored(repo.root, name), f"{name} glob-matches a tracked path, but is not it"
+    for name in ("x.secret", ".envrc", ":odd1"):
+        assert not is_ignored(repo.root, name), f"{name} is tracked, although its name is ignored"
