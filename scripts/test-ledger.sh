@@ -13344,20 +13344,31 @@ test_lg_upkeep_names_glob_and_literals() {
 }
 
 test_lg_upkeep_names_binary_deleted_space() {
-  echo "test: #39 D7 — a binary defined_in file has no changed line (nothing proposed, rc 0); a deleted file's removed lines name the contract; a path with a space, or with a quote git C-quotes, is read whole"
+  echo "test: #39 D7 — a binary or mode-only defined_in file has no changed line (nothing proposed, rc 0; not even flag:*, whose name matches any text); a deleted file's removed lines name the contract; a path with a space, or with a quote git C-quotes, is read whole"
   lg_upkeep_fixture
   git checkout -q main
+  lg_registry "$(jq -c '.ledgers[0].contracts += [{id: "flag:*", defined_in: ["src/bin/*"]}]' <<<"$LG_REG_REL")"
   printf 'legacy = order.total\n' > src/order/old.js
   printf 'blob order.total\000\001\n' > src/order/blob.js
-  git add -A && git commit -qm "old and blob"
+  mkdir -p src/bin
+  printf 'star\000\001\n' > src/bin/b.dat
+  printf 'mode\n' > src/bin/m.sh
+  git add -A && git commit -qm "old, blobs, flag:*"
   git checkout -q -B feat
   printf 'blob order.total\000\002 order.total\n' > src/order/blob.js
+  printf 'star\000\002\n' > src/bin/b.dat
+  chmod +x src/bin/m.sh
   git add -A && git commit -qm $'blob\n\nLedger-Claims: app-5'
   lg upkeep --range main..feat --format json
-  assert_eq "0|1|" "$LG_RC|$(jq -r '.files' <<<"$LG_OUT")|$(lg_up_vals app-5)" "a binary src/order/blob.js changes: exit 0, one file, nothing proposed"
+  assert_eq "0|3|" "$LG_RC|$(jq -r '.files' <<<"$LG_OUT")|$(lg_up_vals app-5)" \
+    "binary src/order/blob.js and src/bin/b.dat, mode-only src/bin/m.sh: exit 0, three files, nothing proposed (flag:* neither)"
   LG_SUB=upkeep lg_call _lg_up_core "$(git rev-parse main)" "$(git rev-parse feat)" "" "" "$TEST_DIR/core.json"
   assert_eq "0" "$LG_RC" "…the core: rc 0"
   assert_json_field "$(cat "$TEST_DIR/core.json" 2>/dev/null)" '.touched | tojson' "[]" "…touched: []"
+  git checkout -q -B t-star main
+  lg_up_commit --line 'mode' $'star\n\nLedger-Claims: app-5' src/bin/m.sh
+  lg upkeep --range main..t-star --format json
+  assert_eq "0|changes flag:*" "$LG_RC|$(lg_up_vals app-5)" "…the control: a text line in src/bin/m.sh names flag:*"
   git checkout -q -B t-del main
   git rm -q src/order/old.js
   git commit -qm $'drop old\n\nLedger-Claims: app-5'
@@ -13403,6 +13414,78 @@ test_lg_upkeep_read_needs_a_naming_line() {
   assert_json_field "$LG_OUT" '.items[0].proposed | tojson' \
     '[{"field":"consumes","value":"field:order.total","evidence":["diff names field:order.total in src/cart/badge.js (read_by of field:order.total)"]}]' \
     "a changed line naming it: consumes field:order.total"
+  teardown
+}
+
+test_lg_upkeep_names_hunk_header_case_one_file() {
+  echo "test: #39 D7 — Names: a hunk header's function context (@@ -2 +2 @@ sum = order.total) names nothing; ORDER.TOTAL does not name field:order.total (case-sensitive); of two defined_in files only the one whose changed line names it is evidence"
+  lg_upkeep_fixture
+  git checkout -q main
+  printf 'sum = order.total\nx\n' > src/order/total.js
+  git commit -qam "main names it, first line"
+  git checkout -q -B feat
+  printf 'sum = order.total\ny\n' > src/order/total.js
+  git commit -qam $'edit\n\nLedger-Claims: app-6'
+  assert_eq "@@ -2 +2 @@ sum = order.total" "$(git diff-tree -p -U0 main feat | grep '^@@')" "the fixture: git puts the naming line in the hunk header"
+  lg upkeep --range main..feat --format json
+  assert_eq "0|" "$LG_RC|$(lg_up_vals app-6)" "…which is no changed line: nothing proposed"
+  git checkout -q -B t-case main
+  lg_up_commit --line 'z = ORDER.TOTAL' $'case\n\nLedger-Claims: app-6' src/order/total.js
+  lg upkeep --range main..t-case --format json
+  assert_eq "0|" "$LG_RC|$(lg_up_vals app-6)" "ORDER.TOTAL: case-sensitive, nothing proposed"
+  git checkout -q -B t-one main
+  printf 'n = order.total\n' >> src/order/total.js
+  printf 'edit\n' >> src/order/x.js
+  git add -A && git commit -qm $'one of two\n\nLedger-Claims: app-6'
+  lg upkeep --range main..t-one --format json
+  assert_json_field "$LG_OUT" '.items[0].proposed | tojson' \
+    '[{"field":"changes","value":"field:order.total","evidence":["diff names field:order.total in src/order/total.js (defined_in of field:order.total)"]}]' \
+    "two defined_in files changed, one naming it: the evidence lists that one only"
+  teardown
+}
+
+# lg_up_core_paths_max <bytes> <_lg_up_core args…>: _lg_up_core with its
+# pathspec cap (_LG_UP_PATHS_MAX) lowered — for lg_call.
+lg_up_core_paths_max() {
+  _LG_UP_PATHS_MAX=$1
+  shift
+  _lg_up_core "$@"
+}
+
+test_lg_upkeep_long_path_list_diffs_the_range() {
+  echo "test: #39 D7 — candidate file names past _LG_UP_PATHS_MAX bytes (lowered here): one git diff-tree -p of the whole range with no pathspec (a command line that long fails, E2BIG), and the same result — the awk keeps only the candidate files"
+  lg_upkeep_fixture
+  local a b
+  lg_up_commit --line "$LG_UP_NAMES" $'many\n\nLedger-Claims: app-6' src/order/total.js "src/order/total two.js" src/order/total.test.js docs/notes.md
+  a=$(git rev-parse main)
+  b=$(git rev-parse feat)
+  GIT_TRACE="$TEST_DIR/paths.trace" LG_SUB=upkeep lg_call _lg_up_core "$a" "$b" "" "" "$TEST_DIR/paths.json"
+  assert_eq "0" "$LG_RC" "under the cap: rc 0"
+  GIT_TRACE="$TEST_DIR/range.trace" LG_SUB=upkeep lg_call lg_up_core_paths_max 10 "$a" "$b" "" "" "$TEST_DIR/range.json"
+  assert_eq "0" "$LG_RC" "over a 10-byte cap: rc 0"
+  assert_json_field "$(cat "$TEST_DIR/range.json" 2>/dev/null)" '.touched | tojson' \
+    '[{"contract":"field:order.total","files":["src/order/total two.js","src/order/total.js"],"cc_line":null}]' \
+    "…touched by the two candidate files (not the skipped total.test.js, nor docs/notes.md)"
+  assert_eq "$(cat "$TEST_DIR/paths.json" 2>/dev/null)" "$(cat "$TEST_DIR/range.json" 2>/dev/null)" "…the core's whole object as under the cap"
+  assert_eq "1|1" "$(grep -c 'trace: built-in: git diff-tree .*-p ' "$TEST_DIR/paths.trace" 2>/dev/null)|$(grep 'trace: built-in: git diff-tree .*-p ' "$TEST_DIR/paths.trace" 2>/dev/null | grep -c ' -- ')" \
+    "under the cap: one git diff-tree -p, with the files as pathspecs"
+  assert_eq "1|0" "$(grep -c 'trace: built-in: git diff-tree .*-p ' "$TEST_DIR/range.trace" 2>/dev/null)|$(grep 'trace: built-in: git diff-tree .*-p ' "$TEST_DIR/range.trace" 2>/dev/null | grep -c ' -- ')" \
+    "over it: one git diff-tree -p, no pathspec"
+  teardown
+}
+
+test_lg_upkeep_long_diff_linear_time() {
+  echo "test: #39 D7 — a 50,001-line diff of one defined_in file, one line naming field:order.total: proposed, within 8 s (the changed lines are gathered in linear time; jq's join took 13 s here)"
+  lg_upkeep_fixture
+  local start took
+  LC_ALL=C awk 'BEGIN { for (i = 0; i < 50000; i++) printf "line %d value_%d = compute(%d) // padding padding padding\n", i, i, i; print "use order.total here" }' \
+    > src/order/big.js
+  git add -A && git commit -qm $'generated\n\nLedger-Claims: app-6'
+  start=$SECONDS
+  lg upkeep --range main..feat --top 0 --format json
+  took=$((SECONDS - start))
+  assert_eq "0|changes field:order.total" "$LG_RC|$(lg_up_vals app-6)" "exit 0, the one named contract proposed"
+  assert_true "…within 8 s (took ${took} s)" test "$took" -le 8
   teardown
 }
 
@@ -14616,6 +14699,9 @@ run_tests() {
   test_lg_upkeep_names_binary_deleted_space
   test_lg_upkeep_contract_change_without_naming
   test_lg_upkeep_read_needs_a_naming_line
+  test_lg_upkeep_names_hunk_header_case_one_file
+  test_lg_upkeep_long_path_list_diffs_the_range
+  test_lg_upkeep_long_diff_linear_time
   test_lg_upkeep_pr_merged_and_open
   test_lg_upkeep_pr_rebase_merged
   test_lg_upkeep_pr_failures
