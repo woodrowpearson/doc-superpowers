@@ -487,6 +487,30 @@ assert_true "review-pr with no base ref stops non-zero (rc $_rp_rc)…" test "$_
 assert_contains "$_rp_out" "not found" "…saying the base was not found, never 'nothing to review'"
 assert_not_contains "$_rp_out" "no changes against" "…and never reports an empty review"
 
+# The work ledger's filing flow and review-pr's ledger leg (design
+# 2026-10-18 §2, §6): step 9 runs upkeep over the PR's range, guarded so that
+# it runs no repository script, and only outside CI; the ledger action routes
+# /doc-superpowers ledger file to references/ledger.md's procedure.
+echo "--- review-pr's ledger leg; the ledger filing flow ---"
+assert_contains "$_review" 'ledger upkeep --range "$BASE...HEAD" --no-repo-adapters' \
+  "review-pr step 9 runs ledger upkeep over the PR's range with --no-repo-adapters"
+assert_contains "$_review" 'not in a CI run' "…and is skipped in a CI run"
+assert_contains "$_review" '"could not run: <error>"' "…an upkeep that could not run is said so…"
+assert_contains "$_review" 'never "none missing"' "…never as 'none missing'"
+assert_contains "$_review" '`git status --porcelain` stays empty' "…and the step edits nothing"
+_ledger_act=$(_section "$SKILLMD" '### `ledger`')
+assert_contains "$_ledger_act" '/doc-superpowers ledger file [<title>]' "the ledger action routes /doc-superpowers ledger file…"
+assert_contains "$_ledger_act" 'new --create' "…through ledger new --create…"
+assert_contains "$_ledger_act" '→ **Filing an item**' "…by references/ledger.md's Filing an item"
+LEDGERREF="$(_read "$REPO_ROOT/references/ledger.md")"
+assert_line_matches "$LEDGERREF" '^### Filing an item$' "references/ledger.md has the Filing an item procedure…"
+_filing=$(_section "$LEDGERREF" '### Filing an item')
+assert_contains "$_filing" 'ledger find' "…duplicates first (ledger find)…"
+assert_contains "$_filing" 'ledger new --create' "…one ledger new --create…"
+assert_contains "$_filing" 'Never commit' "…and it never commits"
+assert_line_matches "$LEDGERREF" '^## Merge-time upkeep' "references/ledger.md has the Merge-time upkeep section"
+assert_line_matches "$LEDGERREF" '^\| `upkeep ' "…and an upkeep row in its Verbs table"
+
 echo "--- I-11: code_refs are pathspecs; init's own output is never a ref ---"
 assert_not_contains "$ACTIONS" "module names" "spec-generate no longer allows module names as code_refs"
 assert_line_matches "$ACTIONS" '^7\. \*\*Populate `code_refs`\*\*.*`<spec-path>::spec`.*set-code-refs' \
