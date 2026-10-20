@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from doc_search.fusion import collapse_by_file, interleave_with_floor, rrf
+from doc_search.fusion import collapse_by_file, fuse_by_file, interleave_with_floor, rrf
 from doc_search.types import Hit
 
 
@@ -151,3 +151,70 @@ def test_limit_one_and_short_lists() -> None:
 def test_scores_must_match_the_docs() -> None:
     with pytest.raises(ValueError):
         interleave_with_floor([doc("a.md")], [], 3, docs_scores=[1.0, 2.0])
+
+
+# --- fuse_by_file ----------------------------------------------------------------------------------
+
+
+def chunk(path: str, start: int, leg: str) -> Hit:
+    text = f"{leg}:{path}:{start}"
+    return Hit(kind="doc", path=path, start_line=start, end_line=start + 5, snippet=text, legs=(leg,))
+
+
+def test_fuse_by_file_ranks_files_not_chunks() -> None:
+    """A file with many chunks in a leg is one entry there: it does not push the other files down."""
+    docs = [chunk("a.md", 1, "docs"), chunk("a.md", 20, "docs"), chunk("b.md", 1, "docs"), chunk("a.md", 40, "docs")]
+    docs.append(chunk("c.md", 1, "docs"))
+    hits, scores = fuse_by_file({"docs": docs}, rank_order=["docs"], prefer=["docs"])
+    assert [h.path for h in hits] == ["a.md", "b.md", "c.md"]
+    assert scores == pytest.approx([1 / 61, 1 / 62, 1 / 63])
+    assert (hits[0].start_line, hits[0].more_in_file) == (1, 2), "the best chunk stays, the others are counted"
+    assert hits[1].more_in_file == 0
+
+
+def test_fuse_by_file_legs_agree_on_a_file_whatever_the_chunk_lines() -> None:
+    docs = [chunk("a.md", 1, "docs"), chunk("b.md", 1, "docs")]
+    cloud = [chunk("b.md", 300, "cloud"), chunk("c.md", 1, "cloud")]  # the cloud chunker cuts elsewhere
+    order = ["docs", "cloud"]
+    hits, scores = fuse_by_file({"docs": docs, "cloud": cloud}, rank_order=order, prefer=order)
+    assert [h.path for h in hits] == ["b.md", "a.md", "c.md"]
+    assert scores == pytest.approx([1 / 62 + 1 / 61, 1 / 61, 1 / 62])
+    assert (hits[0].start_line, hits[0].legs) == (1, ("docs", "cloud")), "the local chunk represents the file"
+
+
+def test_fuse_by_file_representative_follows_the_preference_not_the_rank_order() -> None:
+    ident = [chunk("a.md", 1, "ident"), chunk("b.md", 1, "ident")]
+    docs = [chunk("b.md", 7, "docs")]
+    cloud = [chunk("a.md", 90, "cloud")]
+    hits, scores = fuse_by_file(
+        {"ident": ident, "docs": docs, "cloud": cloud},
+        rank_order=["ident", "docs", "cloud"],
+        prefer=["docs", "cloud", "ident"],
+    )
+    by_path = {h.path: h for h in hits}
+    assert (by_path["b.md"].start_line, by_path["b.md"].legs) == (7, ("docs", "ident"))
+    assert (by_path["a.md"].start_line, by_path["a.md"].legs) == (90, ("cloud", "ident"))
+    # a ties with b? a: ident 1 + cloud 1 = 1/61 + 1/61; b: ident 2 + docs 1 = 1/62 + 1/61
+    assert [h.path for h in hits] == ["a.md", "b.md"]
+    assert scores == pytest.approx([2 / 61, 1 / 62 + 1 / 61])
+
+
+def test_fuse_by_file_ties_go_to_the_earlier_rank_order_leg() -> None:
+    ident = [chunk("x.md", 1, "ident")]
+    docs = [chunk("y.md", 1, "docs")]
+    hits, _ = fuse_by_file({"ident": ident, "docs": docs}, rank_order=["ident", "docs"], prefer=["docs", "ident"])
+    assert [h.path for h in hits] == ["x.md", "y.md"]
+
+
+def test_fuse_by_file_missing_and_empty_legs() -> None:
+    assert fuse_by_file({}, rank_order=["docs", "cloud"], prefer=["docs", "cloud"]) == ([], [])
+    hits, scores = fuse_by_file(
+        {"cloud": [chunk("c.md", 3, "cloud")]}, rank_order=["docs", "cloud"], prefer=["docs", "cloud"]
+    )
+    assert [(h.path, h.legs) for h in hits] == [("c.md", ("cloud",))]
+    assert scores == pytest.approx([1 / 61])
+
+
+def test_fuse_by_file_needs_a_preference_for_every_leg() -> None:
+    with pytest.raises(ValueError):
+        fuse_by_file({}, rank_order=["docs", "cloud"], prefer=["docs"])

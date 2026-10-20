@@ -6,7 +6,7 @@ RRF is rank-based, so semble's fused scores and cosine similarities never have t
 from __future__ import annotations
 
 import math
-from collections.abc import Hashable, Sequence
+from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import replace
 from typing import TypeVar
 
@@ -50,6 +50,44 @@ def collapse_by_file(hits: list[Hit]) -> list[Hit]:
         legs = kept.legs + tuple(leg for leg in hit.legs if leg not in kept.legs)
         best[hit.path] = replace(kept, more_in_file=kept.more_in_file + 1 + hit.more_in_file, legs=legs)
     return list(best.values())
+
+
+def fuse_by_file(
+    legs: Mapping[str, Sequence[Hit]],
+    *,
+    rank_order: Sequence[str],
+    prefer: Sequence[str],
+) -> tuple[list[Hit], list[float]]:
+    """RRF over the legs at file level: each leg is collapsed to its files first, then fused by path.
+
+    Chunkers differ between legs (their chunks rarely share line ranges), so agreement can only be
+    counted per file. Each leg contributes one rank per file, from its best chunk (its other
+    chunks of the file become `more_in_file`), so a file with many chunks in a leg does not push
+    the other files down, and a file found by one leg scores 1 / (60 + its place in that leg),
+    the scale of a code hit at the same place.
+
+    `legs` maps a leg name to its hits, best first; a missing leg is empty. `rank_order` is the
+    order the legs enter the RRF (the earlier leg wins an exact tie); `prefer` is the order in
+    which a leg's chunk represents the file (the hit returned), and must name the same legs.
+    The result is the files best first, each hit naming all the legs that found it, with the
+    fused scores in step.
+    """
+    if set(prefer) != set(rank_order) or len(prefer) != len(rank_order):
+        raise ValueError("prefer must name each leg of rank_order exactly once")
+    collapsed = {name: collapse_by_file(list(legs.get(name, ()))) for name in rank_order}
+    by_path = {name: {hit.path: hit for hit in collapsed[name]} for name in rank_order}
+    fused = rrf([[hit.path for hit in collapsed[name]] for name in rank_order])
+    hits: list[Hit] = []
+    scores: list[float] = []
+    for path, score in fused:
+        found = [by_path[name][path] for name in prefer if path in by_path[name]]
+        rep = found[0]
+        named = list(rep.legs)
+        for other in found[1:]:
+            named += [leg for leg in other.legs if leg not in named]
+        hits.append(replace(rep, legs=tuple(named)) if len(found) > 1 else rep)
+        scores.append(score)
+    return hits, scores
 
 
 def interleave_with_floor(
