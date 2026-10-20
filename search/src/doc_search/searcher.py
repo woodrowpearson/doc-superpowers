@@ -27,7 +27,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
@@ -68,8 +68,19 @@ _TOKEN_MARKS = frozenset("-_./")
 class CloudLeg(Protocol):
     """The optional remote docs leg (Task 7)."""
 
-    def hits(self, query: str, allowed: set[str], worktree: Path, limit: int) -> tuple[list[Hit], str | None]:
-        """Up to `limit` ranked doc chunks for `query`, never from outside `allowed`, and a header note or None."""
+    def hits(
+        self,
+        query: str,
+        allowed: set[str],
+        worktree: Path,
+        limit: int,
+        doc_types: Sequence[str] = (),
+    ) -> tuple[list[Hit], str | None]:
+        """Up to `limit` ranked doc chunks for `query`, never from outside `allowed`, and a header note or None.
+
+        `doc_types` is the request's own `doc_type` filter, for a remote leg that can pre-filter on it;
+        `allowed` already holds the exact result, so a leg may ignore it.
+        """
         ...
 
     def status_lines(self, worktree: Path) -> list[str]:
@@ -241,7 +252,7 @@ class Searcher:
         if scope != "code" and docs.usable:
             docs_leg = self._docs_leg(query, limit, docs.index, allowed, worktree)
             if self._cloud is not None and allowed:
-                cloud_leg, note = self._cloud_leg(query, limit, allowed, worktree)
+                cloud_leg, note = self._cloud_leg(query, limit, allowed, worktree, req.doc_type)
                 if note:
                     notes.append(note)
         ident_leg = self._ident_leg(query, limit, allowed, corpus, docs.index, docs_leg, worktree)
@@ -376,10 +387,10 @@ class Searcher:
         ]
 
     def _cloud_leg(
-        self, query: str, limit: int, allowed: frozenset[str], worktree: Path
+        self, query: str, limit: int, allowed: frozenset[str], worktree: Path, doc_types: tuple[str, ...]
     ) -> tuple[list[Hit], str | None]:
         try:
-            hits, note = self._cloud.hits(query, set(allowed), worktree, limit * DOCS_FETCH)
+            hits, note = self._cloud.hits(query, set(allowed), worktree, limit * DOCS_FETCH, doc_types=doc_types)
         except Exception as err:  # noqa: BLE001 - the remote leg must never take local search down
             logger.debug("doc-search: cloud leg failed", exc_info=True)
             return [], f"cloud leg failed ({type(err).__name__})"
