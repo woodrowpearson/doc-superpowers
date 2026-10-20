@@ -260,7 +260,7 @@ Declarations drift as code moves: a fix edits a contract's `defined_in` without 
 Where else the comparison runs:
 - **pre-push**: `validate --pushed` reports each touched contract no involved item declares as the advisory `undeclared-contract-change` (*Validation* has its range and rules), naming `ledger upkeep --range <a>..<b>`; it never refuses a push. It costs an index build and a run of the contracts adapter per pushed ref; it runs offline (`DOC_TOOLS_LEDGER_OFFLINE=1` for the check alone: no PR or items adapter, no fetch), and not at all for an empty range or a tip config `base` already holds. Config `validate.undeclared_contract_change: false` turns it off.
 - **`review-pr`** (SKILL.md, step 9): `ledger upkeep --range "$BASE...HEAD" --no-repo-adapters --format json` on a ledger host, not in a CI run — read-only: a refusal is a skipped section with the command for the user to run, and the step edits nothing.
-- **CI**: no doc-superpowers template runs it (none grants an agent a ledger verb); a host's own job may run `upkeep` with the ledger helper set vendored (*Vendored copies*) and post what it proposes.
+- **CI**: no doc-superpowers template runs it (none grants an agent a ledger verb); a host's own job may run `upkeep` with the ledger helper set vendored (*Vendored copies*) and post what it proposes. `--no-repo-adapters` does not keep such a job from running repository files: `doc-superpowers:<name>` adapters resolve beside the running `doc-tools.sh` (*Adapters*), so a job that runs the repository's vendored `.github/scripts/doc-tools.sh` runs the repository's copies of the tool, the ledger modules and those adapters — the flag refuses only the adapters config names by path.
 
 ## In-flight work and notices (opt-in: `inflight.enabled`)
 
@@ -304,7 +304,7 @@ One line each: `<urgency> <id> <other>[@<host>] <PR #n|no PR> <kind>:<values> �
 | sweep marks in a plan's Related work table | advisory (`--strict`: blocking) | `validate --plan` |
 | an unacked `stop` notice; an in-flight fetch that failed ("could not verify", exit 2) | blocking at chunk close | `notices --gate` |
 
-Text output is one `<class> <path|key> <detail>` line per finding, ` (advisory)` after an advisory; exit 1 when any finding blocks. With `--format json`, `{"findings": [{class, severity: "block"|"advisory", path, key, detail}]}`.
+Text output is one `<class> <path|key> <detail>` line per finding, ` (advisory)` after an advisory (an `undeclared-contract-change` detail starts with its path, so its line prints the path once); exit 1 when any finding blocks. With `--format json`, `{"findings": [{class, severity: "block"|"advisory", path, key, detail}]}`.
 
 `validate.require_relations: "new"` lets a host turn the rule on without turning its history red: `--staged` blocks only on items a commit adds, `--all` reports the new ones as advisories (as it reports a missing `ledger` or `summary`), and an item from before adoption is never reported (except fail-closed, above: with no resolvable base, or an adoption commit beyond a shallow boundary, every open item counts). Items keep the `no-contract` advisory beside it, `relations: none` ones included.
 

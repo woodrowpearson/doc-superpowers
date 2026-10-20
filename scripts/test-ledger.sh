@@ -13578,6 +13578,48 @@ test_lg_upkeep_no_repo_adapters() {
   teardown
 }
 
+# lg_tree_state: the working tree and git dir as text — git status
+# --porcelain (untracked and ignored files too), a checksum per working
+# tree file, and the names of the files under the git dir but the ledger
+# cache (doc-superpowers/ledger/).
+lg_tree_state() {
+  git status --porcelain --ignored
+  echo "--"
+  find . -path ./.git -prune -o -type f -print | LC_ALL=C sort | while IFS= read -r f; do cksum < "$f" | sed "s|\$| $f|"; done
+  echo "--"
+  (cd "$(git rev-parse --git-dir)" && find . -path ./doc-superpowers/ledger -prune -o -type f -print | LC_ALL=C sort)
+}
+
+test_lg_upkeep_review_pr_step9_read_only() {
+  echo "test: #39 recommendation 2 — review-pr step 9 as SKILL.md runs it, ledger upkeep --range \"\$BASE...HEAD\" --no-repo-adapters --format json, on a branch with work in its tree: git status --porcelain, every working-tree file and every git-dir file outside the ledger cache unchanged"
+  lg_upkeep_fixture
+  local BASE=main before after cache o
+  o=$(harness_mktemp_d lg-s9)
+  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  before=$(git status --porcelain)
+  "$DOC_TOOLS" ledger upkeep --range "$BASE...HEAD" --no-repo-adapters --format json > "$o/s9.json" 2> "$o/s9.err" < /dev/null \
+    || echo "rc $?" >> "$o/s9.err"
+  assert_eq "" "$before$(git status --porcelain)" "a clean tree: git status --porcelain stays empty"
+  assert_json_field "$(cat "$o/s9.json")" '[.exit, .items[0].key, .items[0].link] | tojson' '[0,"app-6","ledger link app-6 --changes field:order.total"]' \
+    "…the step's payload: exit 0, the proposal and its link line"
+  # Work in the tree: a modified file, a staged one, an untracked one, an ignored one.
+  printf 'wip\n' >> src/util/a.js
+  printf 'staged\n' >> server/create.js
+  git add server/create.js
+  printf 'scratch\n' > scratch.txt
+  printf '*.log\n' > .git/info/exclude
+  printf 'log\n' > build.log
+  before=$(lg_tree_state)
+  "$DOC_TOOLS" ledger upkeep --range "$BASE...HEAD" --no-repo-adapters --format json > "$o/s9.json" 2> "$o/s9.err" < /dev/null \
+    || echo "rc $?" >> "$o/s9.err"
+  after=$(lg_tree_state)
+  assert_eq "" "$(cat "$o/s9.err")" "with work in the tree: exit 0, nothing on stderr"
+  assert_eq "$before" "$after" "…status, every working-tree file and every git-dir file outside the ledger cache unchanged"
+  cache=$(git rev-parse --git-common-dir)/doc-superpowers/ledger
+  assert_eq "yes" "$(if [ -d "$cache" ]; then echo yes; else echo no; fi)" "…the one place it writes: the ledger cache ($cache)"
+  teardown
+}
+
 test_lg_pr_adapter_view() {
   echo "test: ledger-pr-gh.sh view <n> — gh pr view <n> --json number,body as one compact line; gh failing: exit 2; usage: exit 3"
   lg_fixture
@@ -13635,7 +13677,8 @@ test_lg_validate_pushed_undeclared_contract_change() {
     "one finding: path the file, key the item upkeep proposes it to, the detail naming ledger upkeep --range (12 hex each end)"
   assert_eq "" "$LG_ERR" "nothing on stderr"
   lg validate --pushed "$a..$b"
-  assert_eq "0|undeclared-contract-change src/order/total.js $d (advisory)" "$LG_RC|$LG_OUT" "text: the one line, exit 0"
+  assert_eq "0|undeclared-contract-change $d (advisory)" "$LG_RC|$LG_OUT" "text: the one line, exit 0 — the path once, the detail's (R35)"
+  assert_eq "1" "$(grep -o 'src/order/total\.js' <<<"$LG_OUT" | wc -l | tr -d ' ')" "…src/order/total.js appears once in the line"
   DOC_TOOLS_LEDGER_TRACE=1 lg validate --pushed "$a..$b"
   assert_contains "$LG_ERR" "index-" "the guarded check's stderr (its trace lines) reaches stderr"
   lg_enable '{"base":"main","keys":{"mode":"merge"}}'
@@ -13662,6 +13705,9 @@ test_lg_validate_pushed_undeclared_contract_change() {
   assert_json_field "$LG_OUT" '.findings | map([.path, .key, .detail] | join("|")) | join(" ")' \
     "src/order/total two.js|app-6|src/order/total two.js and 1 more change field:order.total, which no item this push involves declares (changes): ledger upkeep --range $r proposes the link" \
     "two files: path the first (by name), detail '<f> and 1 more'"
+  lg validate --pushed "HEAD~1..HEAD"
+  assert_eq "undeclared-contract-change src/order/total two.js and 1 more change field:order.total, which no item this push involves declares (changes): ledger upkeep --range $r proposes the link (advisory)" \
+    "$LG_OUT" "…text: the path once (a space in it), then the rest of the detail"
   # Covered: an involved item (app-1) declares it.
   lg_up_commit $'totals\n\nLedger-Claims: app-1, app-6' src/order/total.js
   lg validate --pushed "HEAD~1..HEAD" --format json
@@ -14418,6 +14464,7 @@ run_tests() {
   test_lg_upkeep_pr_rebase_merged
   test_lg_upkeep_pr_failures
   test_lg_upkeep_no_repo_adapters
+  test_lg_upkeep_review_pr_step9_read_only
   test_lg_pr_adapter_view
   test_lg_validate_pushed_undeclared_contract_change
   test_lg_validate_pushed_advisory_zero_range_and_cap

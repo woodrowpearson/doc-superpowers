@@ -2739,7 +2739,8 @@ ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed
   base, <b>)..<b>; a file counts only when it also differs between that
   merge base and <b>, so a base merged in adds nothing) that no item the
   range involves declares in changes,
-  naming ledger upkeep --range <a>..<b>; none when it involves no item;
+  naming ledger upkeep --range <a>..<b> (the detail starts with the
+  path, which the text line prints once); none when it involves no item;
   at most 10, then "… N more contracts". It costs an index build and a
   contracts adapter run, offline (DOC_TOOLS_LEDGER_OFFLINE=1 for the
   check alone: no PR or items adapter), and nothing runs for an empty
