@@ -12674,6 +12674,30 @@ test_lg_new_create_glob_mismatch() {
   teardown
 }
 
+test_lg_new_create_no_relations_default() {
+  echo "test: #36 (ruling R26) — new --create never copies an init.stub_defaults relations field (the other stub defaults it does): with validate.require_relations \"new\" the new item is blocked at commit (no-relations) until ledger link writes a relation or --relations none"
+  lg_rel_fixture '{"base":"main","keys":{"mode":"merge"},"validate":{"require_relations":"new"},"init":{"stub_defaults":{"type":"bug","relations":"none","verify":"code"}}}'
+  local today p key
+  today=$(lg_today)
+  p="docs/issues/$today-filed-without-a-link.md"
+  lg new --create --title "Filed without a link" --ledger app --summary "Nothing linked yet" --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  key=$(jq -r '.key' <<<"$LG_OUT")
+  assert_eq "status: open|date: $today|type: bug|verify: code|key: $key|ledger: app|summary: Nothing linked yet" \
+    "$(lg_fmblock "$p")" "the stub defaults but relations: no relations line"
+  git add -A
+  lg validate --staged --format json
+  assert_eq "1" "$LG_RC" "validate --staged: exit 1"
+  assert_eq "no-relations block $p" "$(lg_vrel)" "…no-relations on the new item"
+  lg link "$p" --relations none --format json
+  assert_eq "0" "$LG_RC" "link --relations none: exit 0"
+  assert_json_field "$LG_OUT" '.added | tojson' '[{"field":"relations","value":"none"}]' "…writes the opt-out"
+  git add -A
+  lg validate --staged --format json
+  assert_eq "0|" "$LG_RC|$(lg_vrel)" "after link --relations none: exit 0"
+  teardown
+}
+
 # lg_up_vals <key|path>: the values the item's shown proposals name, as
 # "field:value field:value …", from LG_OUT (upkeep --format json).
 lg_up_vals() {
@@ -14153,6 +14177,7 @@ run_tests() {
   test_lg_new_create_no_file_on_failure
   test_lg_new_create_suggest_contracts
   test_lg_new_create_glob_mismatch
+  test_lg_new_create_no_relations_default
   test_lg_upkeep_changes_proposal
   test_lg_upkeep_covered_and_untouched
   test_lg_upkeep_found_by_signals

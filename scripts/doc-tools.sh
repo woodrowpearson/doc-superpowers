@@ -2608,7 +2608,8 @@ ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize suggest-contracts
   status.open[0], the date field = today, the severity field = --sev and
   the paths field = --paths as a flow list (blanks around the commas
   ignored), when given, then the config init.stub_defaults fields it
-  does not set (quoted as init quotes them), then key, ledger and
+  does not set (quoted as init quotes them; never relations: link
+  writes relations, or --relations none), then key, ledger and
   summary; its body "# <title>", a blank line, then the --body-file
   bytes. Usage (exit 3): --create with --file; --title, --sev, --paths or
   --body-file without --create; a missing, blank or multi-line --title;
