@@ -502,9 +502,10 @@ search(query, scope, limit, doc_type, path_prefix, include_terminal, worktree)
   → limit None → search.default_limit; a blank doc_type value or path_prefix is dropped
   → resolve_worktree (one of git worktree list, else refused) → IndexPool.get(wait ≤ 20 s): the docs + code
     pair (loaded from semble's cache when valid, else SembleIndex.from_path, one build at a time pool-wide,
-    docs first; revalidated after max(rescan_seconds, 3 × build seconds)); a pair still building (or
-    queued) → partial answer with a note, or "index building … retry shortly" when the scope's own index
-    is not ready
+    docs first; revalidated after max(rescan_seconds, 3 × build seconds), build seconds timed from the build
+    slot); an index already serving keeps serving while its rebuild waits for the slot; a first build still
+    running (or queued) → partial answer with a note, or "index building … retry shortly" when the scope's
+    own index is not ready
   → allowed = corpus files passing doc_type, path_prefix and the terminal filter
   → cloud leg on its own thread (stamp → branch-changed paths → Vertex RETRIEVAL_QUERY → Firestore
     find_nearest, bounded by cloud.timeout_s + 5 s) while the local legs run:
