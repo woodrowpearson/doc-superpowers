@@ -111,7 +111,7 @@ After `init` completes, set up automated freshness monitoring:
 /doc-superpowers hooks install --ci --workflows=none                 # vendor doc-tools.sh only
 
 # With a work ledger (docs/ledger/config.json): its opt-in sets, never part of --all
-/doc-superpowers hooks install --ledger        # pre-commit validate, pre-push provisional-key check (+ undeclared-contract-change advisories), post-commit in-flight push
+/doc-superpowers hooks install --ledger        # pre-commit validate, pre-push provisional-key check (+ undeclared-contract-change advisories, unless validate.undeclared_contract_change is false), post-commit in-flight push
 /doc-superpowers hooks install --ledger-claude # Claude Code: SessionStart notices, the state-watch hook (per-user)
 ```
 

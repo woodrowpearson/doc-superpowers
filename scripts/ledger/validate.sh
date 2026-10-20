@@ -180,7 +180,8 @@ _lg_validate_registry() {
 #                         beside a mode) a `validate --registry` finding:
 #                         "registry <class> <detail>"
 #   --plan: unmarked, bad-mark, no-related-work · --pushed: provisional-key,
-#   undeclared-contract-change (advisory) (_lg_validate_plan,
+#   undeclared-contract-change (advisory; config
+#   validate.undeclared_contract_change false: off) (_lg_validate_plan,
 #   _lg_validate_pushed, _lg_v_undeclared)
 #
 # --staged severities. An added item (a rename from outside the item globs
@@ -841,14 +842,18 @@ _lg_validate_all() {
 
 # _lg_v_rr → _LG_V_RR: config validate.require_relations — "" (null or
 # absent: off, the default) or "new". Any other value, or a validate that is
-# not an object, is a config error (exit 2).
+# not an object, is a config error (exit 2) — as is a
+# validate.undeclared_contract_change (--pushed's advisory switch, ruling
+# R33) that is not true or false.
 _lg_v_rr() {
   local v
-  v=$(_lg_cfg '(.validate // {}) | if type != "object" then "!validate is \(tojson), not an object"
+  v=$(_lg_cfg '(.validate // {undeclared_contract_change: true}) | if type != "object" then "!validate is \(tojson), not an object"
+      elif (.undeclared_contract_change | type) != "boolean" then "?\(.undeclared_contract_change | tojson)"
       else (.require_relations | if . == null then "-" elif . == "new" then "new" else "!\(tojson)" end) end') || exit "$?"
   case "$v" in
     -) _LG_V_RR="" ;;
     new) _LG_V_RR=new ;;
+    \?*) _lg_die "config validate.undeclared_contract_change must be true or false (got ${v#\?})" ;;
     *) _lg_die "config validate.require_relations must be \"new\" or null (got ${v#!})" ;;
   esac
 }
@@ -1015,8 +1020,8 @@ _lg_validate_plan() {
 # branch when there is no base to compare) blocks — the
 # detail names `ledger finalize --all` for a key the base carries too; merge
 # mode — none (provisional keys may reach the base). Then, in both modes,
-# the undeclared-contract-change advisories (_lg_v_undeclared). For
-# pre-push hooks.
+# the undeclared-contract-change advisories (_lg_v_undeclared; none with
+# config validate.undeclared_contract_change false). For pre-push hooks.
 _lg_validate_pushed() {
   local range="$1" out="$2" s
   _lg_scratch_name
@@ -1052,7 +1057,15 @@ _lg_validate_pushed() {
 # reuse its files), and _LG_FAIL_REC set, so a _lg_die there records
 # "<rc>\t<message>" in <s>.fail instead of printing a verdict. Whatever
 # stops the child — a die, a failed command — is one advisory of the
-# class, path and key null, detail "could not check: <message>".
+# class, path and key null, detail "could not check: <message>". The
+# child alone runs offline (DOC_TOOLS_LEDGER_OFFLINE=1, ruling R31): the
+# check reads no PR data, so its index build runs neither remote adapter
+# (pr, items: hosted items come from the last copy, when there is one)
+# and fetches nothing — a pre-push leg never waits on the network for
+# it; the contracts adapter, a local script, still runs. The build's
+# "ledger:" note (the PR data's and hosted items' state, offline by
+# design here) is held (_LG_NOTE_DEFER, index.sh _lg_ix_pr_note) and
+# never printed, so a push prints no data-state line per ref.
 _lg_v_undeclared() {
   local range="$1" out="$2" s rc msg=""
   _lg_scratch_name
@@ -1063,6 +1076,9 @@ _lg_v_undeclared() {
     set -e
     _LG_FAIL_REC=$s.fail
     _LG_PARSE_N=$((_LG_PARSE_N + 200000))
+    DOC_TOOLS_LEDGER_OFFLINE=1
+    export DOC_TOOLS_LEDGER_OFFLINE
+    _LG_NOTE_DEFER=advisory
     _lg_v_undeclared_run "$range" "$s.adv"
   ) < /dev/null > /dev/null 9> /dev/null 2> "$s.err"
   rc=$?
@@ -1120,23 +1136,38 @@ $core[0] as $C
 
 # _lg_v_undeclared_run <a>..<b> <out.jsonl>: _lg_v_undeclared's work, in its
 # guarded child (any failure dies). Needs _lg_k_cfg to have run (it reads
-# _LG_K_BASE). The range: <b> empty is HEAD; <a> empty or all zeros (a new
-# branch) is merge-base(config base, <b>) — a base that does not resolve
-# here, or shares no history with <b>, dies. Upkeep's core over it
-# (_LG_UP_TOP 0: every attribution), on upkeep's index (_lg_up_index;
-# _LG_IX_NEED_CONTRACTS unset, so a failing contracts adapter is the
-# index's built.contracts_error — died with here). The base's own changes
-# never count: with a non-zero <a>, a touched contract's file counts only
-# when it also differs between merge-base(config base, <b>) and <b> (a
-# base merged into the branch brings the base's changes into <a>..<b>) —
-# one more git diff-tree, run only when the range involves an item and
-# touches a contract, and only when that merge base exists and is not <a>
-# (then the filter changes nothing); no filter when the base does not
-# resolve. The detail's range: both ends as git rev-parse --short=12.
+# _LG_K_BASE). Config validate.undeclared_contract_change first (ruling
+# R33): false — nothing runs; true (the default; a null validate is the
+# defaults, as _lg_v_rr reads it) — the check; anything else, a validate
+# that is not an object included — dies. The range: <b>
+# empty is HEAD; <a> empty or all zeros (a new branch) is
+# merge-base(config base, <b>) — a base that does not resolve here, or
+# shares no history with <b>, dies. An empty range (<b> reachable from
+# <a>) or a tip config base already holds reports nothing (ruling R24),
+# so it returns before any index build or adapter run (R32). Upkeep's
+# core over it (_LG_UP_TOP 0: every attribution), on upkeep's index
+# (_lg_up_index; _LG_IX_NEED_CONTRACTS unset, so a failing contracts
+# adapter is the index's built.contracts_error — died with here). The
+# base's own changes never count: with a non-zero <a>, a touched
+# contract's file counts only when it also differs between
+# merge-base(config base, <b>) and <b> (a base merged into the branch
+# brings the base's changes into <a>..<b>) — one more git diff-tree, run
+# only when the range involves an item and touches a contract, and only
+# when that merge base exists and is not <a> (then the filter changes
+# nothing); no filter when the base does not resolve. The detail's range:
+# both ends as git rev-parse --short=12.
 _lg_v_undeclared_run() {
-  local range="$1" out="$2" s a b x ac bc base cerr r mb="" hasf=false
+  local range="$1" out="$2" s a b x ac bc base="" cerr r mb="" hasf=false
   _lg_scratch_name
   s=$_LG_SN
+  : > "$out"
+  x=$(_lg_cfg '(.validate // {undeclared_contract_change: true}) | if type == "object" then .undeclared_contract_change else null end
+    | if . == true then "on" elif . == false then "off" else "bad" end') || exit "$?"
+  case "$x" in
+    on) ;;
+    off) return 0 ;;
+    *) _lg_die "validate.undeclared_contract_change must be true or false" ;;
+  esac
   a=${range%%..*}
   b=${range#*..}
   [ -n "$b" ] || b=HEAD
@@ -1150,16 +1181,22 @@ _lg_v_undeclared_run() {
     esac
   done
   bc=$(git rev-parse -q --verify "$b^{commit}" 2>/dev/null) || _lg_die "'$b' does not resolve to a commit here"
+  # Config base, resolved once ("" when it does not resolve here).
+  case "$_LG_K_BASE" in
+    ''|-*) ;;
+    *) base=$(git rev-parse -q --verify "$_LG_K_BASE^{commit}" 2>/dev/null) || base="" ;;
+  esac
   if [ -n "$a" ]; then
     ac=$(git rev-parse -q --verify "$a^{commit}" 2>/dev/null) || _lg_die "'$a' does not resolve to a commit here"
   else
     _lg_json_str "$_LG_K_BASE"
-    case "$_LG_K_BASE" in
-      ''|-*) _lg_die "config base $_LG_JS does not resolve here" ;;
-    esac
-    base=$(git rev-parse -q --verify "$_LG_K_BASE^{commit}" 2>/dev/null) || _lg_die "config base $_LG_JS does not resolve here"
+    [ -n "$base" ] || _lg_die "config base $_LG_JS does not resolve here"
     ac=$(git merge-base "$base" "$bc" 2>/dev/null) || _lg_die "config base $_LG_JS and '$b' have no merge base here"
   fi
+  # Nothing to report, so nothing runs: an empty range (an all-zeros <a>
+  # whose tip the base holds lands here too), or a tip the base holds.
+  if git merge-base --is-ancestor "$bc" "$ac" 2>/dev/null; then return 0; fi
+  if [ -n "$base" ] && git merge-base --is-ancestor "$bc" "$base" 2>/dev/null; then return 0; fi
   x=$(git rev-parse --short=12 "$ac") || _lg_die "git rev-parse --short $ac failed"
   r=$(git rev-parse --short=12 "$bc") || _lg_die "git rev-parse --short $bc failed"
   r="$x..$r"
@@ -1172,12 +1209,8 @@ _lg_v_undeclared_run() {
   : > "$s.mb.l"
   if [ -n "$a" ]; then
     x=$(jq -r 'if .items != [] and .touched != [] then "y" else "" end' "$s.core") || _lg_die "jq failed (the touched contracts)"
-    if [ -n "$x" ]; then
-      case "$_LG_K_BASE" in
-        ''|-*) ;;
-        *) base=$(git rev-parse -q --verify "$_LG_K_BASE^{commit}" 2>/dev/null) || base=""
-           if [ -n "$base" ]; then mb=$(git merge-base "$base" "$bc" 2>/dev/null) || mb=""; fi ;;
-      esac
+    if [ -n "$x" ] && [ -n "$base" ]; then
+      mb=$(git merge-base "$base" "$bc" 2>/dev/null) || mb=""
     fi
     if [ -n "$mb" ] && [ "$mb" != "$ac" ]; then
       git diff-tree -r --name-only -z --no-renames "$mb" "$bc" -- > "$s.mb" 2> "$s.err" \
