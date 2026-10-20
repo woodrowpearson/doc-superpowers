@@ -24,7 +24,7 @@ from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
 from . import __version__
-from .cloud.read import build_cloud_leg
+from .cloud.read import CloudLeg, DegradedLeg, build_cloud_leg
 from .config import INERT_LINE, Config, ConfigError, load_config
 from .corpus import Corpus
 from .docindex import DocIndex
@@ -80,19 +80,23 @@ class _Refusal(Exception):
     """A request that gets a one-line answer instead of a result."""
 
 
-class _Runtime:
+class Runtime:
     """What the tools share: the launch worktree, the config, the pool and the searcher.
 
+    The command line builds the same object (`doc_search.cli`), so `query`, `status` and `eval` behave as the tools do.
+
     `fixed` is the one line every tool answers when doc-search is not enabled here (inert, invalid
-    config, not a git work tree); otherwise it is None and `searcher` and `tools` are set.
+    config, not a git work tree); otherwise it is None and `searcher` and `tools` are set. `warm`
+    starts the launch worktree's builds at once; the CLI turns it off and asks for them itself.
     """
 
-    def __init__(self, cwd: Path, pool: IndexPool | None, wait_s: float) -> None:
+    def __init__(self, cwd: Path, pool: IndexPool | None, wait_s: float, *, warm: bool = True) -> None:
         self.repo: RepoInfo | None = None
         self.cfg: Config | None = None
         self.pool: IndexPool | None = None
         self.searcher: Searcher | None = None
         self.tools: DocTools | None = None
+        self.cloud: CloudLeg | DegradedLeg | None = None
         self.fixed: str | None = None
         self._lock = threading.Lock()
         self._corpora: dict[Path, Corpus] = {}
@@ -121,10 +125,11 @@ class _Runtime:
         self.pool = pool if pool is not None else IndexPool(self.cfg)
         # The same cloud leg serves `search` and `status`. It is built without touching the network; one that
         # cannot be built (no cloud extra, no project) is a leg that says so, never a crash.
-        cloud = build_cloud_leg(self.cfg.cloud, corpus_for=self.corpus_for) if self.cfg.cloud else None
+        cloud = self.cloud = build_cloud_leg(self.cfg.cloud, corpus_for=self.corpus_for) if self.cfg.cloud else None
         self.searcher = Searcher(self.cfg, self.repo, self.pool, self.corpus_for, cloud=cloud, wait_s=wait_s)
         self.tools = DocTools(self.cfg, self.repo, self.pool, self.corpus_for, cloud=cloud, wait_s=wait_s)
-        self.pool.get(self.repo.top, wait_s=0)  # start the builds now; the first call finds them under way
+        if warm:
+            self.pool.get(self.repo.top, wait_s=0)  # start the builds now; the first call finds them under way
 
     # -- shared by the tools ----------------------------------------------------------------
 
@@ -190,7 +195,7 @@ def build_server(cwd: Path, *, pool: IndexPool | None = None, wait_s: float = 20
     `pool` is for tests that need to see the indexes; `wait_s` is how long a call waits for a first
     build before it answers that the index is building (design section 7: 20 s).
     """
-    rt = _Runtime(cwd, pool, wait_s)
+    rt = Runtime(cwd, pool, wait_s)
     server = MCPServer("doc-search", version=__version__, instructions=INSTRUCTIONS)
 
     @server.tool(name="search", description=SEARCH_DESCRIPTION)
