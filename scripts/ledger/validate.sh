@@ -365,11 +365,18 @@ def lg_v_dup_f($i; $R; $had):
 def lg_v_registry_sets($reg):
   {active: [$reg.ledgers[] | select(.status != "retired") | .id | strings],
    retired: [$reg.ledgers[] | select(.status == "retired") | .id | strings]};
+# An undeclared-contract-change detail starts with its path ("<f> changes
+# <c>, …"): its text line prints that path once (ruling R35; the JSON
+# detail keeps it).
 def lg_v_text:
-  .class
+  . as $f
+  | .class
   + (if (.path | type) == "string" then " " + (.path | lg_v_tok)
      elif (.key | type) == "string" then " " + (.key | lg_v_tok) else "" end)
-  + " " + (.detail | lg_v_tok)
+  + " " + (.detail
+           | if $f.class == "undeclared-contract-change" and ($f.path | type) == "string" and type == "string"
+             then ltrimstr($f.path + " ") else . end
+           | lg_v_tok)
   + (if .severity == "advisory" then " (advisory)" else "" end);
 '
 
