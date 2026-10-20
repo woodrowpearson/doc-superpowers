@@ -509,7 +509,7 @@ assert_contains "$_filing" 'ledger find' "…duplicates first (ledger find)…"
 assert_contains "$_filing" 'ledger new --create' "…one ledger new --create…"
 assert_contains "$_filing" 'Never commit' "…and it never commits"
 assert_line_matches "$LEDGERREF" '^## Merge-time upkeep' "references/ledger.md has the Merge-time upkeep section"
-assert_line_matches "$LEDGERREF" '^\| `upkeep ' "…and an upkeep row in its Verbs table"
+assert_line_matches "$LEDGERREF" '^\| `upkeep \(--range' "…and an upkeep row in its Verbs table"
 
 echo "--- I-11: code_refs are pathspecs; init's own output is never a ref ---"
 assert_not_contains "$ACTIONS" "module names" "spec-generate no longer allows module names as code_refs"
@@ -527,7 +527,7 @@ assert_not_contains "$_init" 'docs/architecture.md:SKILL.md' "init's mapping exa
 # decisions file (scripts/ledger/init.sh: the proposal only); step 12b runs a
 # second --report against the edited proposal before anyone fills decisions.
 assert_contains "$_init" 'ledger init --report <report> --registry docs/ledger/ledgers.proposed.json' "init 12b: a second report against the edited proposal writes the decisions file"
-assert_contains "$(_read "$REPO_ROOT/references/ledger.md")" 'and **no decisions file**' "ledger.md: a report without a registry writes no decisions file"
+assert_contains "$LEDGERREF" 'and **no decisions file**' "ledger.md: a report without a registry writes no decisions file"
 
 echo "--- I-11: safety ---"
 assert_no_line_matches "$PROMPTS" 'uv run scripts/' "no repository script is run by the prompt layer"
