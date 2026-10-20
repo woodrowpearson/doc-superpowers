@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-10-20T19:38:43Z",
+  "generated_at": "2026-10-20T23:53:45Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -778,7 +778,7 @@
       "last_verified": null
     },
     "references/search.md": {
-      "content_hash": "sha256:592910d9644658f10beb0eeea8233132f026fb01b1c7806bb3391911453ae930",
+      "content_hash": "sha256:01c4bc59e6c309b03aeff032a2223a3ed878f810091fa627f21180ded665cc88",
       "code_refs": [
         "search/",
         "scripts/search/"
@@ -791,7 +791,7 @@
       "doc_type": "guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-20T19:38:43Z",
+      "last_verified": "2026-10-20T23:53:45Z",
       "implementation": []
     }
   }
