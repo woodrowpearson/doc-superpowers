@@ -4560,14 +4560,27 @@ lg_upkeep_fixture() {
   git checkout -q -b feat
 }
 
-# lg_up_commit <message> <file>…: append a line to each file (created when
-# absent) and commit them all with <message>.
+# LG_UP_NAMES: a line naming the upkeep corpus's three contracts —
+# field:order.total, component:Sheet, endpoint:create. A contract counts as
+# touched (or read) only when a changed line of its defined_in (or read_by)
+# file names it (D7), so a commit that should touch what its files define
+# appends this line.
+LG_UP_NAMES='total = order.total; <Sheet />; create()'
+
+# lg_up_commit [--line <text>] <message> <file>…: append a line to each file
+# (created when absent) — <text>, else "edit", which names no contract — and
+# commit them all with <message>.
 lg_up_commit() {
-  local msg="$1" f
+  local line=edit msg f
+  if [ "$1" = --line ]; then
+    line=$2
+    shift 2
+  fi
+  msg=$1
   shift
   for f in "$@"; do
     mkdir -p "$(dirname "$f")"
-    printf 'edit\n' >> "$f"
+    printf '%s\n' "$line" >> "$f"
   done
   git add -A && git commit -qm "$msg"
 }
@@ -12754,7 +12767,7 @@ test_lg_upkeep_changes_proposal() {
   echo "test: #39 — upkeep: a range whose commit claims app-6 (Ledger-Claims) and edits src/order/total.js proposes changes field:order.total to app-6, with evidence and a link line"
   lg_upkeep_fixture
   local a b
-  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
   a=$(git rev-parse main)
   b=$(git rev-parse feat)
   lg upkeep --range main..feat --format json
@@ -12768,7 +12781,7 @@ test_lg_upkeep_changes_proposal() {
   assert_json_field "$LG_OUT" '.items[0] | [.key, .path, (.found_by | join(","))] | join("|")' "app-6|docs/issues/h.md|trailer:claims" \
     "app-6, found by its claim trailer (the key in the trailer line is no key-in-message)"
   assert_json_field "$LG_OUT" '.items[0].proposed[0] | tojson' \
-    '{"field":"changes","value":"field:order.total","evidence":["diff touches src/order/total.js (defined_in of field:order.total)"]}' \
+    '{"field":"changes","value":"field:order.total","evidence":["diff names field:order.total in src/order/total.js (defined_in of field:order.total)"]}' \
     "the proposal, with its evidence"
   assert_json_field "$LG_OUT" '.items[0] | [.total, .truncated, .declared_untouched] | tojson' '[1,false,[]]' "total, truncated, declared_untouched"
   assert_json_field "$LG_OUT" '.items[0].link' "ledger link app-6 --changes field:order.total" "the ready link line"
@@ -12779,7 +12792,7 @@ test_lg_upkeep_changes_proposal() {
   assert_eq "0" "$LG_RC" "text: exit 0"
   assert_eq "range ${a:0:12}..${b:0:12}  1 files, 1 commits" "$(sed -n 1p <<<"$LG_OUT")" "line 1: the range (12 hex each), files, commits"
   assert_contains "$LG_OUT" "app-6  found by trailer:claims" "the item's line"
-  assert_contains "$LG_OUT" "  + changes field:order.total  — diff touches src/order/total.js (defined_in of field:order.total)" "the proposal's line"
+  assert_contains "$LG_OUT" "  + changes field:order.total  — diff names field:order.total in src/order/total.js (defined_in of field:order.total)" "the proposal's line"
   assert_contains "$LG_OUT" "  link: ledger link app-6 --changes field:order.total" "the link line"
   assert_not_contains "$LG_OUT" "(no proposals)" "proposals: no '(no proposals)'"
   assert_eq "" "$(git status --porcelain)" "upkeep writes nothing"
@@ -12789,7 +12802,7 @@ test_lg_upkeep_changes_proposal() {
 test_lg_upkeep_covered_and_untouched() {
   echo "test: #39 — a contract an involved item already declares in changes is proposed to nobody; declared changes the range misses are declared_untouched"
   lg_upkeep_fixture
-  lg_up_commit $'totals\n\nLedger-Claims: app-1, app-6' src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'totals\n\nLedger-Claims: app-1, app-6' src/order/total.js
   lg upkeep --range main..feat --format json
   assert_eq "0" "$LG_RC" "exit 0"
   assert_json_field "$LG_OUT" '[.items[] | "\(.key)/\(.proposed | length)/\(.link)"] | join(" ")' "app-1/0/null app-6/0/null" \
@@ -12881,23 +12894,23 @@ Ledger-Claims: X-~AB12 Y-13"
 test_lg_upkeep_attribution() {
   echo "test: #39 — several involved items: the contract goes to the one whose paths overlap its defined_in most (then diff overlap, rank, key)"
   lg_upkeep_fixture
-  lg_up_commit $'totals\n\nLedger-Claims: app-4, app-6' src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'totals\n\nLedger-Claims: app-4, app-6' src/order/total.js
   lg upkeep --range main..feat --format json
   assert_eq "app-4=|app-6=changes field:order.total" "app-4=$(lg_up_vals app-4)|app-6=$(lg_up_vals app-6)" \
     "app-6 lists src/order/total.js (defined_in): field:order.total goes to app-6 only"
   # endpoint:create (server/create.js): no item lists it.
   git checkout -q -b t-diff main
-  lg_up_commit $'create\n\nLedger-Claims: app-5, app-6' server/create.js src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'create\n\nLedger-Claims: app-5, app-6' server/create.js src/order/total.js
   lg upkeep --range main..t-diff --format json
   assert_eq "app-5=|app-6=changes endpoint:create, changes field:order.total" "app-5=$(lg_up_vals app-5)|app-6=$(lg_up_vals app-6)" \
     "a tie on defined_in: the item listing more net-diff files wins (app-6 over app-5, before key order)"
   git checkout -q -b t-rank main
-  lg_up_commit $'create\n\nLedger-Claims: app-6\n\nunlike app-5' server/create.js
+  lg_up_commit --line "$LG_UP_NAMES" $'create\n\nLedger-Claims: app-6\n\nunlike app-5' server/create.js
   lg upkeep --range main..t-rank --format json
   assert_eq "app-5=|app-6=changes endpoint:create, consumes field:order.total" "app-5=$(lg_up_vals app-5)|app-6=$(lg_up_vals app-6)" \
     "then the better found_by rank (a trailer over a message word); app-6's unchanged src/order/total.js: consumes"
   git checkout -q -b t-key main
-  lg_up_commit $'create\n\nLedger-Claims: app-5, app-4' server/create.js
+  lg_up_commit --line "$LG_UP_NAMES" $'create\n\nLedger-Claims: app-5, app-4' server/create.js
   lg upkeep --range main..t-key --format json
   assert_eq "app-4=changes endpoint:create|app-5=" "app-4=$(lg_up_vals app-4)|app-5=$(lg_up_vals app-5)" "then key order"
   teardown
@@ -12911,7 +12924,7 @@ test_lg_upkeep_skip_globs_and_contracts() {
     '{"skip_globs":["docs/**","**/*.md","**/test/**","**/tests/**","**/__tests__/**","**/*.test.*","**/*.spec.*","**/*_test.*","**/Tests/**","**/*Tests/**"],"skip_contracts":[]}' \
     "config defaults: upkeep.skip_globs (spec §4, verbatim), skip_contracts []"
   lg_upkeep_fixture
-  lg_up_commit $'tests\n\nLedger-Claims: app-6' src/order/total.test.js src/sheet/README.md
+  lg_up_commit --line "$LG_UP_NAMES" $'tests\n\nLedger-Claims: app-6' src/order/total.test.js src/sheet/README.md
   lg upkeep --range main..feat --format json
   assert_eq "0" "$LG_RC" "exit 0"
   assert_json_field "$LG_OUT" '[.files, ([.items[0].proposed[] | select(.field == "changes")] | length), (.unattributed_contracts | length)] | tojson' '[2,0,0]' \
@@ -12935,7 +12948,7 @@ test_lg_upkeep_skip_globs_and_contracts() {
 test_lg_upkeep_contract_change_trailer() {
   echo "test: #39 — a Contract-Change: endpoint:create — <line> trailer touches the contract with that evidence, ranked first"
   lg_upkeep_fixture
-  lg_up_commit $'create\n\nLedger-Claims: app-6\nContract-Change: field:order.total \xe2\x80\x94 totals now round half-even\nContract-Change: flag:nope \xe2\x80\x94 not a contract' \
+  lg_up_commit --line "$LG_UP_NAMES" $'create\n\nLedger-Claims: app-6\nContract-Change: field:order.total \xe2\x80\x94 totals now round half-even\nContract-Change: flag:nope \xe2\x80\x94 not a contract' \
     server/create.js
   lg upkeep --range main..feat --format json
   assert_eq "0" "$LG_RC" "exit 0"
@@ -12958,7 +12971,7 @@ test_lg_upkeep_contract_change_trailer() {
 test_lg_upkeep_unattributed() {
   echo "test: #39 — no involved item: unattributed_contracts [{contract, files}] and '(no proposals)'"
   lg_upkeep_fixture
-  lg_up_commit "tidy" src/order/total.js server/create.js
+  lg_up_commit --line "$LG_UP_NAMES" "tidy" src/order/total.js server/create.js
   lg upkeep --range main..feat --format json
   assert_eq "0" "$LG_RC" "exit 0"
   assert_json_field "$LG_OUT" '.items | length' "0" "no involved item"
@@ -12977,14 +12990,14 @@ test_lg_upkeep_three_dot_and_merge() {
   echo "test: #39 — --range main...feat after main moved and was merged into feat: only feat's own files count"
   lg_upkeep_fixture
   local mb
-  lg_up_commit $'totals\n\nLedger-Claims: app-6' src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'totals\n\nLedger-Claims: app-6' src/order/total.js
   git checkout -q main
-  lg_up_commit "server" server/create.js
+  lg_up_commit --line "$LG_UP_NAMES" "server" server/create.js
   mb=$(git rev-parse HEAD)
   git checkout -q feat
   git merge -q --no-edit main
   git checkout -q main
-  lg_up_commit "server again" server/create.js
+  lg_up_commit --line "$LG_UP_NAMES" "server again" server/create.js
   git checkout -q feat
   lg upkeep --range main...feat --format json
   assert_eq "0" "$LG_RC" "exit 0"
@@ -13000,19 +13013,19 @@ test_lg_upkeep_three_dot_and_merge() {
 test_lg_upkeep_spaced_path() {
   echo "test: #39 — a diff file with a space (src/order/total two.js) matches defined_in src/order/*.js and is printed whole in evidence and JSON"
   lg_upkeep_fixture
-  lg_up_commit $'spaced\n\nLedger-Claims: app-6' "src/order/total two.js" "src/order/t$(printf '\303\266')tal.js"
+  lg_up_commit --line "$LG_UP_NAMES" $'spaced\n\nLedger-Claims: app-6' "src/order/total two.js" "src/order/t$(printf '\303\266')tal.js"
   lg upkeep --range main..feat --format json
   assert_eq "0" "$LG_RC" "exit 0"
   assert_json_field "$LG_OUT" '.items[0].proposed[0].evidence | tojson' \
-    "[\"diff touches src/order/total two.js (defined_in of field:order.total)\",\"diff touches src/order/t$(printf '\303\266')tal.js (defined_in of field:order.total)\"]" \
+    "[\"diff names field:order.total in src/order/total two.js (defined_in of field:order.total)\",\"diff names field:order.total in src/order/t$(printf '\303\266')tal.js (defined_in of field:order.total)\"]" \
     "the spaced and the unicode name, whole"
   lg upkeep --range main..feat
-  assert_contains "$LG_OUT" "diff touches src/order/total two.js (defined_in of field:order.total); diff touches src/order/t$(printf '\303\266')tal.js" \
+  assert_contains "$LG_OUT" "diff names field:order.total in src/order/total two.js (defined_in of field:order.total); diff names field:order.total in src/order/t$(printf '\303\266')tal.js" \
     "text: whole"
   # An item whose paths hold the spaced name, and whose own path has a space.
   git checkout -q -b feat2 main
   lg_item "docs/issues/odd name.md" "status: Open" "summary: Spaced" "related-files: [src/order/total two.js]"
-  lg_up_commit $'odd\n\nLedger-Claims: app-6' "src/order/total two.js"
+  lg_up_commit --line "$LG_UP_NAMES" $'odd\n\nLedger-Claims: app-6' "src/order/total two.js"
   lg upkeep --range main..feat2 --format json
   assert_json_field "$LG_OUT" '[.items[] | "\(.path):\(.found_by | join(","))"] | join(" ")' \
     "docs/issues/h.md:trailer:claims docs/issues/odd name.md:item-file-edited" "the new item, found by its file"
@@ -13031,14 +13044,14 @@ test_lg_upkeep_spaced_path() {
 test_lg_upkeep_top_strict_exits() {
   echo "test: #39 — --top 1 truncates (total/truncated, 'showing 1 of 2'); --strict with proposals exit 1, without 0; bad range exit 2; neither/both --range/--pr, --top x, --pr x: exit 3"
   lg_upkeep_fixture
-  lg_up_commit $'two\n\nLedger-Claims: app-6' src/order/total.js "src/order/total two.js" src/order/x.js src/order/y.js server/create.js
+  lg_up_commit --line "$LG_UP_NAMES" $'two\n\nLedger-Claims: app-6' src/order/total.js "src/order/total two.js" src/order/x.js src/order/y.js server/create.js
   lg upkeep --range main..feat --top 1 --format json
   assert_eq "0" "$LG_RC" "--top 1: exit 0"
   assert_json_field "$LG_OUT" '.items[0] | [(.proposed | map(.value)), .total, .truncated, .link] | tojson' \
     '[["field:order.total"],2,true,"ledger link app-6 --changes field:order.total"]' \
     "--top 1: the first (most evidence), total 2, truncated; the link names the shown one"
   assert_json_field "$LG_OUT" '.items[0].proposed[0].evidence | tojson' \
-    '["diff touches src/order/total two.js (defined_in of field:order.total)","diff touches src/order/total.js (defined_in of field:order.total)","diff touches src/order/x.js (defined_in of field:order.total)","… and 1 more files"]' \
+    '["diff names field:order.total in src/order/total two.js (defined_in of field:order.total)","diff names field:order.total in src/order/total.js (defined_in of field:order.total)","diff names field:order.total in src/order/x.js (defined_in of field:order.total)","… and 1 more files"]' \
     "at most 3 files, then … and N more files"
   lg upkeep --range main..feat --top 1
   assert_contains "$LG_OUT" "  (showing 1 of 2; --top 0 shows all)" "text: showing N of M"
@@ -13095,19 +13108,19 @@ lg_up_read_by_fixture() {
 }
 
 test_lg_upkeep_consumes_read_by() {
-  echo "test: #39 — a range touching a read_by file (src/cart/badge.js, read_by of field:order.total) and no defined_in file proposes consumes field:order.total, evidence 'diff touches src/cart/badge.js (read_by of field:order.total)'"
+  echo "test: #39 — a range whose read_by file (src/cart/badge.js, read_by of field:order.total) names the contract, and no defined_in file proposes consumes field:order.total, evidence 'diff names field:order.total in src/cart/badge.js (read_by of field:order.total)'"
   lg_up_read_by_fixture
-  lg_up_commit $'badge\n\nLedger-Claims: app-5' src/cart/badge.js
+  lg_up_commit --line "$LG_UP_NAMES" $'badge\n\nLedger-Claims: app-5' src/cart/badge.js
   lg upkeep --range main..feat --format json
   assert_eq "0" "$LG_RC" "exit 0"
   assert_json_field "$LG_OUT" '.items[0] | [.key, (.found_by | join(","))] | join("|")' "app-5|trailer:claims" "app-5, claimed"
   assert_json_field "$LG_OUT" '.items[0].proposed | tojson' \
-    '[{"field":"consumes","value":"field:order.total","evidence":["diff touches src/cart/badge.js (read_by of field:order.total)"]}]' \
+    '[{"field":"consumes","value":"field:order.total","evidence":["diff names field:order.total in src/cart/badge.js (read_by of field:order.total)"]}]' \
     "consumes field:order.total, its evidence the reader file"
   assert_json_field "$LG_OUT" '.items[0] | [.total, .truncated, .link] | tojson' '[1,false,"ledger link app-5 --consumes field:order.total"]' \
     "total, truncated, the link line (--consumes)"
   lg upkeep --range main..feat
-  assert_contains "$LG_OUT" "  + consumes field:order.total  — diff touches src/cart/badge.js (read_by of field:order.total)" "text: the proposal"
+  assert_contains "$LG_OUT" "  + consumes field:order.total  — diff names field:order.total in src/cart/badge.js (read_by of field:order.total)" "text: the proposal"
   assert_contains "$LG_OUT" "  link: ledger link app-5 --consumes field:order.total" "text: the link"
   # The core's touched list (validate --pushed reads it) stays the changes side.
   LG_SUB=upkeep lg_call _lg_up_core "$(git rev-parse main)" "$(git rev-parse feat)" "" "" "$TEST_DIR/core.json"
@@ -13118,35 +13131,35 @@ test_lg_upkeep_consumes_read_by() {
   lg_enable '{"base":"main"}'
   # Covered: an involved item already consumes it.
   git checkout -q -b t-cov main
-  lg_up_commit $'badge\n\nLedger-Claims: app-2, app-5' src/cart/badge.js
+  lg_up_commit --line "$LG_UP_NAMES" $'badge\n\nLedger-Claims: app-2, app-5' src/cart/badge.js
   lg upkeep --range main..t-cov --format json
   assert_json_field "$LG_OUT" '[.items[] | "\(.key)/\(.proposed | length)"] | join(" ")' "app-2/0 app-5/0" \
     "app-2 consumes field:order.total: proposed to nobody (not app-5 either)"
   # Read only while defined_in is untouched: with src/order/total.js, changes.
   git checkout -q -b t-both main
-  lg_up_commit $'both\n\nLedger-Claims: app-5' src/cart/badge.js src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'both\n\nLedger-Claims: app-5' src/cart/badge.js src/order/total.js
   lg upkeep --range main..t-both --format json
   assert_eq "changes field:order.total" "$(lg_up_vals app-5)" "a defined_in file in the diff too: changes, not consumes"
   # … and while no Contract-Change line names it.
   git checkout -q -b t-cc main
-  lg_up_commit $'cc\n\nLedger-Claims: app-5\nContract-Change: field:order.total \xe2\x80\x94 rounds' src/cart/badge.js
+  lg_up_commit --line "$LG_UP_NAMES" $'cc\n\nLedger-Claims: app-5\nContract-Change: field:order.total \xe2\x80\x94 rounds' src/cart/badge.js
   lg upkeep --range main..t-cc --format json
   assert_eq "changes field:order.total" "$(lg_up_vals app-5)" "a Contract-Change line naming it: changes, not consumes"
   # A reader file skip_globs matches reads nothing.
   git checkout -q -b t-skip main
-  lg_up_commit $'test\n\nLedger-Claims: app-5' src/cart/badge.test.js
+  lg_up_commit --line "$LG_UP_NAMES" $'test\n\nLedger-Claims: app-5' src/cart/badge.test.js
   lg upkeep --range main..t-skip --format json
   assert_eq "0|" "$LG_RC|$(lg_up_vals app-5)" "src/cart/badge.test.js (a skip glob) reads nothing"
   # One proposal per value: app-6 also lists src/order/total.js, unchanged.
   git checkout -q -b t-one main
-  lg_up_commit $'badge\n\nLedger-Claims: app-6' src/cart/badge.js
+  lg_up_commit --line "$LG_UP_NAMES" $'badge\n\nLedger-Claims: app-6' src/cart/badge.js
   lg upkeep --range main..t-one --format json
   assert_json_field "$LG_OUT" '.items[0].proposed | tojson' \
-    '[{"field":"consumes","value":"field:order.total","evidence":["diff touches src/cart/badge.js (read_by of field:order.total)"]}]' \
+    '[{"field":"consumes","value":"field:order.total","evidence":["diff names field:order.total in src/cart/badge.js (read_by of field:order.total)"]}]' \
     "read, and listed and unchanged: one consumes proposal, the read one"
   # No involved item: unattributed, with its reader files.
   git checkout -q -b t-none main
-  lg_up_commit "badge" src/cart/badge.js
+  lg_up_commit --line "$LG_UP_NAMES" "badge" src/cart/badge.js
   lg upkeep --range main..t-none --format json
   assert_json_field "$LG_OUT" '.unattributed_contracts | tojson' '[{"contract":"field:order.total","files":["src/cart/badge.js"]}]' \
     "no involved item: the read contract is unattributed"
@@ -13155,7 +13168,7 @@ test_lg_upkeep_consumes_read_by() {
   lg_item docs/issues/k.md "key: app-7" "ledger: app" "status: Open" "severity: P3" "summary: Cart list" "related-files: [src/cart/list.js]"
   git add -A && git commit -qm "app-7"
   git checkout -q -b t-attr
-  lg_up_commit $'cart\n\nLedger-Claims: app-5, app-7' src/cart/badge.js src/util/a.js
+  lg_up_commit --line "$LG_UP_NAMES" $'cart\n\nLedger-Claims: app-5, app-7' src/cart/badge.js src/util/a.js
   lg upkeep --range main..t-attr --format json
   assert_eq "app-5=|app-7=consumes field:order.total" "app-5=$(lg_up_vals app-5)|app-7=$(lg_up_vals app-7)" \
     "a read contract goes to the item whose paths its read_by matches most (before diff overlap and key order)"
@@ -13193,7 +13206,7 @@ test_lg_upkeep_consumes_listed_unchanged() {
   assert_json_field "$LG_OUT" '[.items[] | "\(.key)/\(.proposed | length)"] | join(" ")' "app-6/0" "app-6 declares consumes field:order.total: not proposed"
   # The range changes the contract through another of its files.
   git checkout -q -b t-other main
-  lg_up_commit $'x\n\nLedger-Claims: app-6' src/order/x.js
+  lg_up_commit --line "$LG_UP_NAMES" $'x\n\nLedger-Claims: app-6' src/order/x.js
   lg upkeep --range main..t-other --format json
   assert_eq "changes field:order.total" "$(lg_up_vals app-6)" \
     "src/order/x.js changes field:order.total: changes, not also consumes for the unchanged src/order/total.js"
@@ -13245,7 +13258,7 @@ test_lg_upkeep_ranking_and_cap() {
     "related-files: [src/flags/a.js, src/flags/b.js, src/flags/c.js, src/flags/d.js, server/list.js]"
   git add -A && git commit -qm "app-7"
   git checkout -q -B feat
-  lg_up_commit $'work\n\nLedger-Claims: app-7' src/sheet/a.js src/sheet/b.js server/create.js src/cart/badge.js
+  lg_up_commit --line "$LG_UP_NAMES" $'work\n\nLedger-Claims: app-7' src/sheet/a.js src/sheet/b.js server/create.js src/cart/badge.js
   lg upkeep --range main..feat --top 0 --format json
   assert_eq "0" "$LG_RC" "--top 0: exit 0"
   assert_eq "changes component:Sheet, changes endpoint:create, consumes field:order.total, consumes flag:beta, consumes endpoint:list" \
@@ -13266,6 +13279,130 @@ test_lg_upkeep_ranking_and_cap() {
   assert_contains "$LG_OUT" "  (showing 3 of 5; --top 0 shows all)" "text: showing 3 of 5"
   lg upkeep --range main..feat --top 2 --format json
   assert_json_field "$LG_OUT" '.items[0].link' "ledger link app-7 --changes component:Sheet,endpoint:create" "--top 2: the changes only, no --consumes"
+  teardown
+}
+
+test_lg_upkeep_touched_needs_a_naming_line() {
+  echo "test: #39 D7 — a contract is touched only when a changed line of its defined_in file names it: a comment-only edit proposes nothing; an added or a removed line naming order.total proposes changes field:order.total ('diff names field:order.total in <f> (defined_in of field:order.total)'); orderXtotal, order.totals and xorder.total do not name it"
+  lg_upkeep_fixture
+  local w
+  lg_up_commit --line '// tidy the comment' $'tidy\n\nLedger-Claims: app-6' src/order/total.js
+  lg upkeep --range main..feat --format json
+  assert_eq "0|app-6|" "$LG_RC|$(jq -r '[.items[].key] | join(",")' <<<"$LG_OUT")|$(lg_up_vals app-6)" \
+    "a comment-only edit of src/order/total.js: exit 0, app-6 involved, nothing proposed"
+  LG_SUB=upkeep lg_call _lg_up_core "$(git rev-parse main)" "$(git rev-parse feat)" "" "" "$TEST_DIR/core.json"
+  assert_json_field "$(cat "$TEST_DIR/core.json" 2>/dev/null)" '.touched | tojson' "[]" "…the core's touched (validate --pushed reads it): []"
+  git checkout -q -b t-add main
+  lg_up_commit --line 'total = order.total + tax' $'tax\n\nLedger-Claims: app-6' src/order/total.js
+  lg upkeep --range main..t-add --format json
+  assert_json_field "$LG_OUT" '.items[0].proposed | tojson' \
+    '[{"field":"changes","value":"field:order.total","evidence":["diff names field:order.total in src/order/total.js (defined_in of field:order.total)"]}]' \
+    "an added line naming it: changes field:order.total, the evidence naming the contract and the file"
+  lg upkeep --range main..t-add
+  assert_contains "$LG_OUT" "  + changes field:order.total  — diff names field:order.total in src/order/total.js (defined_in of field:order.total)" \
+    "text: the proposal's line"
+  for w in orderXtotal order.totals xorder.total; do
+    git checkout -q -B t-near main
+    lg_up_commit --line "x = $w" $'near\n\nLedger-Claims: app-6' src/order/total.js
+    lg upkeep --range main..t-near --format json
+    assert_eq "0|" "$LG_RC|$(lg_up_vals app-6)" "'x = $w' does not name field:order.total: nothing proposed"
+  done
+  # A removed line names it too: main gains a line naming it, the branch drops it.
+  git checkout -q main
+  printf 'sum = order.total\n' >> src/order/total.js
+  git commit -qam "main names it"
+  git checkout -q -b t-rm
+  printf 'total\n' > src/order/total.js
+  git commit -qam $'drop the sum\n\nLedger-Claims: app-6'
+  lg upkeep --range main..t-rm --format json
+  assert_eq "0|changes field:order.total" "$LG_RC|$(lg_up_vals app-6)" "a removed line naming it: changes field:order.total"
+  teardown
+}
+
+test_lg_upkeep_names_glob_and_literals() {
+  echo "test: #39 D7 — Names: a * in the name is any run of [A-Za-z0-9_.-] (--mock-users names flag:--mock-*); regex metacharacters are literal (flag:a+b, flag:g(x): no error, and aab, gx name neither)"
+  lg_upkeep_fixture
+  git checkout -q main
+  lg_registry "$(jq -c '.ledgers[0].contracts += [{id: "flag:--mock-*", defined_in: ["src/flags/*.js"]},
+    {id: "flag:a+b", defined_in: ["src/flags/*.js"]}, {id: "flag:g(x)", defined_in: ["src/flags/*.js"]}]' <<<"$LG_REG_REL")"
+  git add -A && git commit -qm "flags"
+  git checkout -q -B feat
+  lg_up_commit --line 'run --mock-users' $'mock\n\nLedger-Claims: app-5' src/flags/m.js
+  lg upkeep --range main..feat --format json
+  assert_eq "0|changes flag:--mock-*" "$LG_RC|$(lg_up_vals app-5)" "--mock-users names flag:--mock-* (and neither literal flag)"
+  assert_json_field "$LG_OUT" '.items[0].proposed[0].evidence | tojson' '["diff names flag:--mock-* in src/flags/m.js (defined_in of flag:--mock-*)"]' \
+    "…its evidence"
+  git checkout -q -B t-lit main
+  lg_up_commit --line 'x = aab + gx' $'lit\n\nLedger-Claims: app-5' src/flags/m.js
+  lg upkeep --range main..t-lit --format json
+  assert_eq "0||" "$LG_RC|$(lg_up_vals app-5)|$LG_ERR" "aab and gx: no regex error (exit 0, nothing on stderr), neither flag:a+b nor flag:g(x) named"
+  git checkout -q -B t-lit2 main
+  lg_up_commit --line 'x = a+b; y = g(x)' $'lit\n\nLedger-Claims: app-5' src/flags/m.js
+  lg upkeep --range main..t-lit2 --format json
+  assert_eq "0|changes flag:a+b, changes flag:g(x)" "$LG_RC|$(lg_up_vals app-5)" "a+b and g(x), spelled out: both named"
+  teardown
+}
+
+test_lg_upkeep_names_binary_deleted_space() {
+  echo "test: #39 D7 — a binary defined_in file has no changed line (nothing proposed, rc 0); a deleted file's removed lines name the contract; a path with a space, or with a quote git C-quotes, is read whole"
+  lg_upkeep_fixture
+  git checkout -q main
+  printf 'legacy = order.total\n' > src/order/old.js
+  printf 'blob order.total\000\001\n' > src/order/blob.js
+  git add -A && git commit -qm "old and blob"
+  git checkout -q -B feat
+  printf 'blob order.total\000\002 order.total\n' > src/order/blob.js
+  git add -A && git commit -qm $'blob\n\nLedger-Claims: app-5'
+  lg upkeep --range main..feat --format json
+  assert_eq "0|1|" "$LG_RC|$(jq -r '.files' <<<"$LG_OUT")|$(lg_up_vals app-5)" "a binary src/order/blob.js changes: exit 0, one file, nothing proposed"
+  LG_SUB=upkeep lg_call _lg_up_core "$(git rev-parse main)" "$(git rev-parse feat)" "" "" "$TEST_DIR/core.json"
+  assert_eq "0" "$LG_RC" "…the core: rc 0"
+  assert_json_field "$(cat "$TEST_DIR/core.json" 2>/dev/null)" '.touched | tojson' "[]" "…touched: []"
+  git checkout -q -B t-del main
+  git rm -q src/order/old.js
+  git commit -qm $'drop old\n\nLedger-Claims: app-5'
+  lg upkeep --range main..t-del --format json
+  assert_json_field "$LG_OUT" '.items[0].proposed | tojson' \
+    '[{"field":"changes","value":"field:order.total","evidence":["diff names field:order.total in src/order/old.js (defined_in of field:order.total)"]}]' \
+    "a deleted file whose removed lines name it: changes field:order.total"
+  git checkout -q -B t-odd main
+  lg_up_commit --line 'n = order.total' $'odd\n\nLedger-Claims: app-5' "src/order/total two.js" 'src/order/q"t.js' server/create.js
+  GIT_TRACE="$TEST_DIR/git.trace" lg upkeep --range main..t-odd --top 0 --format json
+  assert_json_field "$LG_OUT" '.items[0].proposed[0].evidence | tojson' \
+    '["diff names field:order.total in src/order/q\"t.js (defined_in of field:order.total)","diff names field:order.total in src/order/total two.js (defined_in of field:order.total)"]' \
+    "a space and a quote in a path (git quotes the second): both files name it, printed whole"
+  assert_eq "1" "$(grep -c 'trace: built-in: git diff-tree .*-p ' "$TEST_DIR/git.trace" 2>/dev/null)" \
+    "one git diff-tree -p for the range's three candidate files (never one per file)"
+  teardown
+}
+
+test_lg_upkeep_contract_change_without_naming() {
+  echo "test: #39 D7 — a Contract-Change: field:order.total — <line> trailer touches the contract when no changed line names it (a contract the code never spells)"
+  lg_upkeep_fixture
+  lg_up_commit $'rounding\n\nLedger-Claims: app-6\nContract-Change: field:order.total \xe2\x80\x94 totals now round half-even' src/order/total.js
+  lg upkeep --range main..feat --format json
+  assert_json_field "$LG_OUT" '.items[0].proposed | tojson' \
+    '[{"field":"changes","value":"field:order.total","evidence":["Contract-Change: field:order.total — totals now round half-even"]}]' \
+    "changes field:order.total, its one evidence the trailer line (the edit of src/order/total.js does not name it)"
+  LG_SUB=upkeep lg_call _lg_up_core "$(git rev-parse main)" "$(git rev-parse feat)" "" "" "$TEST_DIR/core.json"
+  assert_json_field "$(cat "$TEST_DIR/core.json" 2>/dev/null)" '.touched | tojson' \
+    '[{"contract":"field:order.total","files":[],"cc_line":"totals now round half-even"}]' "the core's touched: the line, no file"
+  teardown
+}
+
+test_lg_upkeep_read_needs_a_naming_line() {
+  echo "test: #39 D7 R44 — a read contract too: a read_by file's edit that does not name field:order.total proposes no consumes; one that names it does ('diff names field:order.total in src/cart/badge.js (read_by of field:order.total)')"
+  lg_up_read_by_fixture
+  lg_up_commit $'badge\n\nLedger-Claims: app-5' src/cart/badge.js
+  lg upkeep --range main..feat --format json
+  assert_eq "0|app-5|" "$LG_RC|$(jq -r '[.items[].key] | join(",")' <<<"$LG_OUT")|$(lg_up_vals app-5)" \
+    "src/cart/badge.js edited without naming it: app-5 involved, no consumes"
+  git checkout -q -b t-names main
+  lg_up_commit --line 'badge(order.total)' $'badge\n\nLedger-Claims: app-5' src/cart/badge.js
+  lg upkeep --range main..t-names --format json
+  assert_json_field "$LG_OUT" '.items[0].proposed | tojson' \
+    '[{"field":"consumes","value":"field:order.total","evidence":["diff names field:order.total in src/cart/badge.js (read_by of field:order.total)"]}]' \
+    "a changed line naming it: consumes field:order.total"
   teardown
 }
 
@@ -13298,7 +13435,7 @@ test_lg_upkeep_pr_merged_and_open() {
   lg_upkeep_fixture '{"base":"main","adapters":{"pr":"tools/pr.sh"}}'
   local d f m p1 f2
   d=$(harness_mktemp_d lg-uppr)
-  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
   f=$(git rev-parse HEAD)
   git checkout -q main
   git merge -q --no-ff feat -m "Merge pull request #7"
@@ -13361,7 +13498,7 @@ test_lg_upkeep_pr_rebase_merged() {
   local d n fp h mc mp
   d=$(harness_mktemp_d lg-uppr)
   fp=$(git rev-parse main)
-  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
   lg_up_commit "tidy" src/util/a.js
   lg_up_commit "notes" docs/notes.md
   h=$(git rev-parse HEAD)
@@ -13526,7 +13663,7 @@ test_lg_upkeep_no_repo_adapters() {
     printf '#!/bin/sh\necho "%s $*" >> "%s/ran"\n' "$a" "$mark" > "tools/$a.sh"
     chmod +x "tools/$a.sh"
   done
-  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
   f=$(git rev-parse HEAD)
   lg upkeep --range main..feat --format json
   assert_eq "0" "$LG_RC" "without the flag the repository's contracts adapter runs: exit 0"
@@ -13595,7 +13732,7 @@ test_lg_upkeep_review_pr_step9_read_only() {
   lg_upkeep_fixture
   local BASE=main before after cache o
   o=$(harness_mktemp_d lg-s9)
-  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
   before=$(git status --porcelain)
   "$DOC_TOOLS" ledger upkeep --range "$BASE...HEAD" --no-repo-adapters --format json > "$o/s9.json" 2> "$o/s9.err" < /dev/null \
     || echo "rc $?" >> "$o/s9.err"
@@ -13664,7 +13801,7 @@ test_lg_validate_pushed_undeclared_contract_change() {
   echo "test: #39 — validate --pushed: a pushed range involving app-6 that changes field:order.total → one advisory undeclared-contract-change (exit 0), detail names ledger upkeep --range; a range involving no item: no finding"
   lg_upkeep_fixture
   local a b r d
-  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
   a=$(git rev-parse main)
   b=$(git rev-parse HEAD)
   r="$(git rev-parse --short=12 main)..$(git rev-parse --short=12 HEAD)"
@@ -13695,11 +13832,11 @@ test_lg_validate_pushed_undeclared_contract_change() {
   lg validate --pushed "$a..$b" --format json
   assert_eq "0|" "$LG_RC|$(lg_vfd)" "a skip_contracts id: no finding"
   lg_enable '{"base":"main"}'
-  lg_up_commit $'tests\n\nLedger-Claims: app-6' src/order/total.test.js
+  lg_up_commit --line "$LG_UP_NAMES" $'tests\n\nLedger-Claims: app-6' src/order/total.test.js
   lg validate --pushed "HEAD~1..HEAD" --format json
   assert_eq "0|" "$LG_RC|$(lg_vfd)" "a file skip_globs matches (a test) touches nothing: no finding"
   # Two files: the first, " and 1 more".
-  lg_up_commit $'two\n\nLedger-Claims: app-6' src/order/total.js "src/order/total two.js"
+  lg_up_commit --line "$LG_UP_NAMES" $'two\n\nLedger-Claims: app-6' src/order/total.js "src/order/total two.js"
   r="$(git rev-parse --short=12 HEAD~1)..$(git rev-parse --short=12 HEAD)"
   lg validate --pushed "HEAD~1..HEAD" --format json
   assert_json_field "$LG_OUT" '.findings | map([.path, .key, .detail] | join("|")) | join(" ")' \
@@ -13709,11 +13846,11 @@ test_lg_validate_pushed_undeclared_contract_change() {
   assert_eq "undeclared-contract-change src/order/total two.js and 1 more change field:order.total, which no item this push involves declares (changes): ledger upkeep --range $r proposes the link (advisory)" \
     "$LG_OUT" "…text: the path once (a space in it), then the rest of the detail"
   # Covered: an involved item (app-1) declares it.
-  lg_up_commit $'totals\n\nLedger-Claims: app-1, app-6' src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'totals\n\nLedger-Claims: app-1, app-6' src/order/total.js
   lg validate --pushed "HEAD~1..HEAD" --format json
   assert_eq "0|" "$LG_RC|$(lg_vfd)" "an involved item declares it in changes: no finding"
   # No item involved: nothing, though two contracts are touched.
-  lg_up_commit "tidy" src/order/total.js server/create.js
+  lg_up_commit --line "$LG_UP_NAMES" "tidy" src/order/total.js server/create.js
   lg validate --pushed "HEAD~1..HEAD" --format json
   assert_eq "0|" "$LG_RC|$(lg_vfd)" "a range involving no item: no finding"
   lg validate --pushed "HEAD~1..HEAD"
@@ -13737,10 +13874,10 @@ test_lg_validate_pushed_advisory_zero_range_and_cap() {
   local z=0000000000000000000000000000000000000000 m r reg base n
   local -a files=()
   m=$(git rev-parse main)
-  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
   # main moves on (server/create.js: endpoint:create), not merged into feat.
   git checkout -q main
-  lg_up_commit "server" server/create.js
+  lg_up_commit --line "$LG_UP_NAMES" "server" server/create.js
   git checkout -q feat
   r="$(git rev-parse --short=12 "$m")..$(git rev-parse --short=12 HEAD)"
   lg validate --pushed "$z..HEAD" --format json
@@ -13785,7 +13922,7 @@ test_lg_validate_pushed_advisory_zero_range_and_cap() {
   git add -A && git commit -qm "twelve flags"
   base=$(git rev-parse HEAD)
   for n in 01 02 03 04 05 06 07 08 09 10 11 12; do files+=("flags/r$n.json"); done
-  lg_up_commit $'flags\n\nLedger-Claims: app-6' "${files[@]}"
+  lg_up_commit --line 'f01 f02 f03 f04 f05 f06 f07 f08 f09 f10 f11 f12' $'flags\n\nLedger-Claims: app-6' "${files[@]}"
   lg validate --pushed "$base..HEAD" --format json
   assert_eq "0" "$LG_RC" "twelve undeclared contracts: exit 0"
   assert_json_field "$LG_OUT" '.findings | length' "11" "ten findings and one more"
@@ -13807,15 +13944,15 @@ test_lg_validate_pushed_advisory_skips_base_merge() {
   echo "test: #39 R22 — a branch pushed at <a> that then merges the base: the push <a>..<b> reports none of the base's own contract changes, and still the branch's own"
   lg_upkeep_fixture
   local a r d
-  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
   a=$(git rev-parse HEAD)
   # The base moves on: server/create.js (endpoint:create) and "src/order/total
   # two.js" (field:order.total); the branch merges it, then commits again.
   git checkout -q main
-  lg_up_commit "server" server/create.js "src/order/total two.js"
+  lg_up_commit --line "$LG_UP_NAMES" "server" server/create.js "src/order/total two.js"
   git checkout -q feat
   git merge -q --no-edit main
-  lg_up_commit $'more totals\n\nLedger-Claims: app-6' src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'more totals\n\nLedger-Claims: app-6' src/order/total.js
   r="$(git rev-parse --short=12 "$a")..$(git rev-parse --short=12 HEAD)"
   d="src/order/total.js changes field:order.total, which no item this push involves declares (changes): ledger upkeep --range $r proposes the link"
   lg validate --pushed "$a..HEAD" --format json
@@ -13843,7 +13980,7 @@ test_lg_validate_pushed_advisory_empty_range_runs_nothing() {
   # claims it, field:order.total changes, a Contract-Change line names
   # endpoint:create.
   git checkout -q main
-  lg_up_commit $'fix totals\n\nLedger-Claims: app-6\nContract-Change: endpoint:create \xe2\x80\x94 a new route' src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'fix totals\n\nLedger-Claims: app-6\nContract-Change: endpoint:create \xe2\x80\x94 a new route' src/order/total.js
   git checkout -q feat
   lg_contracts_adapter "echo \"contracts \$*\" >> '$mark/ran'"
   lg validate --pushed "$z..main" --format json
@@ -13855,7 +13992,7 @@ test_lg_validate_pushed_advisory_empty_range_runs_nothing() {
   lg validate --pushed "main..main~1" --format json
   assert_eq "0|" "$LG_RC|$(lg_vfd)" "a range whose tip is behind <a> (empty): no finding"
   assert_file_not_exists "$mark/ran" "…the contracts adapter never ran"
-  lg_up_commit $'more totals\n\nLedger-Claims: app-6' src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'more totals\n\nLedger-Claims: app-6' src/order/total.js
   lg validate --pushed "HEAD..HEAD" --format json
   assert_eq "0|" "$LG_RC|$(lg_vfd)" "<a> = <b> on a branch: no finding"
   assert_file_not_exists "$mark/ran" "…the contracts adapter never ran"
@@ -13879,7 +14016,7 @@ test_lg_validate_pushed_advisory_offline() {
     printf '#!/bin/sh\necho "%s $*" >> "%s/ran"\n' "$a" "$mark" > "tools/$a.sh"
     chmod +x "tools/$a.sh"
   done
-  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
   lg validate --pushed "main..HEAD" --format json
   assert_eq "0|undeclared-contract-change|advisory|src/order/total.js|app-6" "$LG_RC|$(lg_vfd)" "the advisory reports as before, exit 0"
   assert_eq "" "$LG_ERR" "…stderr: nothing (no offline data-state note: the check reads no PR data)"
@@ -13901,7 +14038,7 @@ test_lg_validate_pushed_advisory_opt_out() {
   local mark p v msg="could not check: validate.undeclared_contract_change must be true or false"
   mark=$(harness_mktemp_d lg-mark)
   lg_contracts_adapter "echo \"contracts \$*\" >> '$mark/ran'"
-  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  lg_up_commit --line "$LG_UP_NAMES" $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
   lg validate --pushed "main..HEAD" --format json
   assert_eq "0|" "$LG_RC|$(lg_vfd)" "false: no advisory, exit 0"
   assert_file_not_exists "$mark/ran" "…no index built: the contracts adapter never ran"
@@ -14006,6 +14143,20 @@ test_lg_validate_pushed_adapter_failure_never_blocks() {
   lg_enable '{"base":"main"}'
   lg validate --pushed "no-such-rev..HEAD" --format json
   assert_eq "2|1" "$LG_RC|$(json_count "$LG_OUT")" "cas, an end that does not resolve: the provisional check's exit 2 (one object)"
+  teardown
+}
+
+test_lg_validate_pushed_advisory_needs_a_naming_line() {
+  echo "test: #39 D7 — validate --pushed: a push that edits src/order/total.js without naming field:order.total reports no undeclared-contract-change; one whose changed line names it, the advisory"
+  lg_upkeep_fixture
+  lg_up_commit $'lint\n\nLedger-Claims: app-6' src/order/total.js
+  lg validate --pushed "main..HEAD" --format json
+  assert_eq "0|" "$LG_RC|$(lg_vfd)" "no changed line names it: exit 0, no finding"
+  lg validate --pushed "main..HEAD"
+  assert_eq "0|" "$LG_RC|$LG_OUT" "…text: nothing printed"
+  lg_up_commit --line 'total = order.total + tax' $'tax\n\nLedger-Claims: app-6' src/order/total.js
+  lg validate --pushed "HEAD~1..HEAD" --format json
+  assert_eq "0|undeclared-contract-change|advisory|src/order/total.js|app-6" "$LG_RC|$(lg_vfd)" "a changed line names it: the advisory, exit 0"
   teardown
 }
 
@@ -14460,6 +14611,11 @@ run_tests() {
   test_lg_upkeep_consumes_listed_unchanged
   test_lg_upkeep_message_only_no_listed_consumes
   test_lg_upkeep_ranking_and_cap
+  test_lg_upkeep_touched_needs_a_naming_line
+  test_lg_upkeep_names_glob_and_literals
+  test_lg_upkeep_names_binary_deleted_space
+  test_lg_upkeep_contract_change_without_naming
+  test_lg_upkeep_read_needs_a_naming_line
   test_lg_upkeep_pr_merged_and_open
   test_lg_upkeep_pr_rebase_merged
   test_lg_upkeep_pr_failures
@@ -14473,6 +14629,7 @@ run_tests() {
   test_lg_validate_pushed_advisory_offline
   test_lg_validate_pushed_advisory_opt_out
   test_lg_validate_pushed_adapter_failure_never_blocks
+  test_lg_validate_pushed_advisory_needs_a_naming_line
 
   print_summary
 }
