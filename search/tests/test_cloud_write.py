@@ -338,8 +338,8 @@ def test_a_lease_lost_mid_run_stops_the_remaining_writes(git_repo) -> None:
     with pytest.raises(LeaseLost) as lost:
         w.run("full")
 
-    assert lost.value.report.files_written == 1 and len(w.genai.calls) == 1, "the next file never started"
-    assert w.stamp() is None
+    assert lost.value.report.files_written == 0 and len(w.genai.calls) == 1, "the file in flight is not written"
+    assert w.paths() == set() and w.stamp() is None
 
 
 def test_the_lease_is_renewed_every_five_minutes(git_repo) -> None:
@@ -385,33 +385,37 @@ def test_a_vanished_lease_is_lost_not_taken_again(git_repo) -> None:
         w.run("full")
 
     assert lost.value.holder is None
-    assert lost.value.report.files_written == 1 and len(w.genai.calls) == 1, "the next file never started"
-    assert w.stamp() is None and w.lease() is None, "nothing stamped, and the lease document was not re-created"
+    assert lost.value.report.files_written == 0 and len(w.genai.calls) == 1, "the file in flight is not written"
+    assert w.paths() == set() and w.stamp() is None
+    assert w.lease() is None, "nothing stamped, and the lease document was not re-created"
 
 
 def test_a_run_that_stalled_past_its_lease_stops(git_repo) -> None:
     """The laptop sleeps: our lease expires, host B takes it, catches up, stamps its newer HEAD and releases."""
     w = make_world(git_repo)
     newer = "f" * 40
+    stamp_of_b: list[dict[str, Any]] = []
 
     def stall_while_b_runs() -> None:
         w.clock.now += 2000
         w.fs.set_stamp(newer, embedder_id=EMBEDDER_ID, repo_id=w.repo_id, chunker_version=CHUNKER_VERSION)
         w.fs.collection("corpus_meta").docs.pop("catch_up_lease", None)  # B released it
+        stamp_of_b.append(dict(w.stamp()))
 
     w.genai.on_call = stall_while_b_runs
-    stamp_of_b = dict(w.fs.collection("corpus_meta").docs.get("index") or {})
 
     with pytest.raises(LeaseLost) as lost:
         w.run("full")
 
-    assert lost.value.holder is None and len(w.genai.calls) == 1, "no further writes"
-    assert w.stamp()["built_from_commit"] == newer != stamp_of_b.get("built_from_commit"), "B's stamp is untouched"
+    assert lost.value.holder is None and len(w.genai.calls) == 1, "no further embedding"
+    assert lost.value.report.files_written == 0 and w.paths() == set(), "the file whose embed stalled is not written"
+    assert stamp_of_b[0]["built_from_commit"] == newer and w.stamp() == stamp_of_b[0], "B's stamp is untouched"
     assert w.lease() is None
 
-    # the same stall in the last file of a catch-up: the check before the stamp is what catches it
+    # the same stall in the only file of a catch-up: its older chunks do not land under a newer stamp
     last = make_world(git_repo)
     last.run("full")
+    old_text = last.chunks(GUIDE_PATH)[0]["text"]
     last.commit({GUIDE_PATH: GUIDE + "\nMore.\n"})
     last.genai.on_call = lambda: (
         setattr(last.clock, "now", last.clock.now + 2000),
@@ -419,10 +423,59 @@ def test_a_run_that_stalled_past_its_lease_stops(git_repo) -> None:
     )
     before = dict(last.stamp())
 
-    with pytest.raises(LeaseLost, match="lease vanished"):
+    with pytest.raises(LeaseLost, match="lease vanished") as lost:
         last.run("catch-up")
 
+    assert lost.value.report.files_written == 0 and last.chunks(GUIDE_PATH)[0]["text"] == old_text
     assert last.stamp() == before
+
+    # the lease vanishing without the clock moving is caught by the check before the stamp
+    quiet = make_world(git_repo)
+    quiet.run("full")
+    quiet.commit({GUIDE_PATH: GUIDE + "\nMore.\n"})
+    quiet.genai.on_call = lambda: quiet.fs.collection("corpus_meta").docs.pop("catch_up_lease", None)
+    before = dict(quiet.stamp())
+
+    with pytest.raises(LeaseLost, match="lease vanished") as lost:
+        quiet.run("catch-up")
+
+    assert lost.value.report.files_written == 1, "nothing told this run to look earlier"
+    assert quiet.stamp() == before
+
+
+def test_a_stall_before_a_purge_stops_it(git_repo, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A file that can no longer be indexed has its chunks purged, and that is a write like any other."""
+    w = make_world(git_repo, {GUIDE_PATH: GUIDE})
+    w.run("full")
+    (w.repo.root / GUIDE_PATH).write_bytes(b"# Setup\n\xff\xfe not utf-8\n")
+    w.commit({})
+    is_current = w.indexer._is_current
+
+    def stalled(db: Any, path: str, sha: str) -> bool:
+        w.clock.now += 2000
+        w.fs.collection("corpus_meta").docs.pop("catch_up_lease", None)
+        return is_current(db, path, sha)
+
+    monkeypatch.setattr(w.indexer, "_is_current", stalled)
+
+    with pytest.raises(LeaseLost, match="lease vanished"):
+        w.run("catch-up")
+
+    assert w.chunks(GUIDE_PATH), "its chunks were not purged under a lease this run no longer holds"
+
+
+def test_lease_transaction_retries_on_contention(git_repo) -> None:
+    """The lease is a real `@firestore.transactional` over the fake's transaction protocol."""
+    w = make_world(git_repo)
+    w.fs.commit_conflicts = [Aborted("contention")]
+
+    report = w.run("full")
+
+    assert report.stamped
+    assert w.fs.transaction_begins[:2] == [None, b"txn-1"], "the retry names the first attempt"
+    assert w.fs.calls["transaction_begin"] >= 4 and w.fs.calls["transaction_commit"] == 3, (
+        "three commits: acquire, the check before the stamp, release"
+    )
 
 
 # --- what a run writes ---------------------------------------------------------------------------------
