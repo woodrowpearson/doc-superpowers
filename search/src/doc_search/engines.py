@@ -43,6 +43,10 @@ Kind = Literal["docs", "code"]
 # semble's own server rechecks a path no sooner than this many times its last build took.
 REVALIDATE_FACTOR = 3
 
+# How long a command-line verb waits for a build: effectively forever (a finite value, because
+# `threading.Event.wait` rejects infinity). The server's calls wait 20 s instead.
+FOREGROUND_WAIT_S = 7 * 24 * 3600.0
+
 
 @dataclass
 class WorktreeIndexes:
