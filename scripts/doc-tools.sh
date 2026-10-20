@@ -2475,26 +2475,30 @@ ledger upkeep|cmd_ledger_upkeep|repo|range= pr= items+ top= strict no-repo-adapt
   net diff edits, a key or alias as a word in a commit message, then in
   the PR body; --items names them instead. A contract is touched by a
   net-diff file its defined_in matches (unless upkeep.skip_globs matches
-  the file) or by a Contract-Change line. One an involved item already
+  the file) when an added or removed line of that file names it — the id
+  after its first ":", with no [A-Za-z0-9_] just before or after, a * in
+  it any run of [A-Za-z0-9_.-] — or by a Contract-Change line (the way to
+  declare a contract the code never spells). One an involved item already
   declares in changes is proposed to nobody; each other one goes to one item — the
   most paths entries its defined_in matches, then the most paths in the
   diff, then how it was found, then key — or, with no involved item, is
   listed as unattributed; upkeep.skip_contracts are never proposed. A
   contract nothing touches is read when a net-diff file its read_by
-  matches (skip_globs aside): consumes, covered by an involved item's
-  consumes and attributed in the same way with read_by. An item found by a
-  trailer, its file or --items also gets consumes for each untouched
-  contract whose defined_in matches a file it lists that the range does
-  not change. Per item: changes first, then consumes; --top N (default
-  3; 0: all) proposals per item. --no-repo-adapters (a review that must
-  not run repository scripts) refuses, exit 2 and nothing run, when
-  adapters.contracts, adapters.pr or items.adapter is anything but null
-  or doc-superpowers:<name>. Exit 0 (advisory); 1 with --strict and a
-  proposal; 2 a range end that does not resolve, a failing contracts
-  adapter, a bad upkeep config, --pr without adapters.pr or with its list
-  or view failing, a PR not usable here, or a --no-repo-adapters refusal;
-  3 usage: neither or both of --range and --pr, a bad --top or --pr, an
-  --items value naming no item (or an archived one).
+  matches (skip_globs aside) has a changed line naming it: consumes,
+  covered by an involved item's consumes and attributed in the same way
+  with read_by. An item found by a trailer, its file or --items also gets
+  consumes for each untouched contract whose defined_in matches a file it
+  lists that the range does not change. Per item: changes first, then
+  consumes; --top N (default 3; 0: all) proposals per item.
+  --no-repo-adapters (a review that must not run repository scripts)
+  refuses, exit 2 and nothing run, when adapters.contracts, adapters.pr
+  or items.adapter is anything but null or doc-superpowers:<name>. Exit
+  0 (advisory); 1 with --strict and a proposal; 2 a range end that does
+  not resolve, a failing contracts adapter, a bad upkeep config, --pr
+  without adapters.pr or with its list or view failing, a PR not usable
+  here, or a --no-repo-adapters refusal; 3 usage: neither or both of
+  --range and --pr, a bad --top or --pr, an --items value naming no item
+  (or an archived one).
 ledger inflight|cmd_ledger_inflight|repo|branch= fetch push format=
   [--branch <name>|<name>@<host>] [--fetch] [--push] [--format text|json]
   Work in flight (config inflight.enabled): local branches, worktrees
