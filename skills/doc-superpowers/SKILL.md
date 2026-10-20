@@ -1,6 +1,6 @@
 ---
 name: doc-superpowers
-description: Use when documentation is missing, stale, or inconsistent with code — or when auditing doc freshness, reviewing PR doc impact, managing formal specs/ADRs, setting up doc automation hooks, drafting release notes, or keeping a work ledger of issue files. Also use when the user mentions doc quality, stale docs, architecture docs, spec tracking, design-to-spec conversion, release notes, work items or issue keys, ledger views, related work, or in-flight branches.
+description: Use when documentation is missing, stale, or inconsistent with code — or when auditing doc freshness, reviewing PR doc impact, managing formal specs/ADRs, setting up doc automation hooks, drafting release notes, keeping a work ledger of issue files, or setting up doc-search (one MCP server over the docs and the code). Also use when the user mentions doc quality, stale docs, architecture docs, spec tracking, design-to-spec conversion, release notes, work items or issue keys, ledger views, related work, or in-flight branches.
 ---
 
 # doc-superpowers
@@ -27,7 +27,7 @@ flowchart TD
 | `update` | Apply fixes from an audit report | `--report=<path>`, this session's audit, or `check-freshness`; optional `[scope]` |
 | `diagram` | Regenerate Mermaid diagrams | Existing docs, optional `[scope]` |
 | `sync` | Sync doc index with filesystem | `docs/.doc-index.json` |
-| `hooks` | Install git/Claude/CI hooks | `--git`, `--claude`, `--ci`, `--all`; the work ledger's opt-in sets `--ledger`, `--ledger-claude` (never in `--all`) |
+| `hooks` | Install git/Claude/CI hooks | `--git`, `--claude`, `--ci`, `--all`; the opt-in sets — the work ledger's `--ledger`, `--ledger-claude` and doc-search's MCP server `--search` (never in `--all`) |
 | `spec-generate` | Design doc → formal specs | `--design-doc=<path>` |
 | `spec-inject` | Inject spec tasks into plans | `--phase=plan\|execute` |
 | `spec-verify` | Verify spec compliance | `--mode=post-execute\|review` |
@@ -46,6 +46,7 @@ flowchart TD
 | `references/spec-lifecycle-actions.md` | **REQUIRED** for `spec-generate` / `spec-inject` / `spec-verify` — procedures and the Spec Status Model |
 | `references/spec-claims.md` | **REQUIRED** when `docs/spec-claims/` exists — claim schema, checks, adapters, direction policy |
 | `references/ledger.md` | **REQUIRED** for `ledger`, and when `docs/ledger/config.json` exists — config, verbs and exit codes, keys, adapters, declaring relations, in-flight notices, hooks, `ledger init`, building skills and scripts on the ledger; the index shape is `references/ledger-index.schema.json` |
+| `references/search.md` | **REQUIRED** when `docs/search/config.json` exists — doc-search, the MCP server over the docs and the code: turning it on, config, CLI and exit codes, the four tools, the cloud leg, other clients, troubleshooting |
 | `references/integration-patterns.md` | How code review, commit review, and wrapper skills call doc-superpowers |
 | `references/tool-mappings.md` | **Read it in any client other than Claude Code** — that client's tool for each tool named here, what it supports, and how it resolves `$ROOT` |
 
@@ -393,6 +394,7 @@ Audit never edits, creates or deletes a doc: the one file it writes is its repor
    - Existing docs in this scope (architecture, specs, ADRs) — full content
    - The freshness report for this scope from `doc-tools.sh`
    - Naming conventions (SPEC-{CAT}-NNN, ADR-NNN, diagram co-location)
+   - Advisory: when the `doc-search` MCP server is connected (`references/search.md`), its `search` and `related` tools find the docs that cover a scope's code and the code a doc describes faster than grepping — leads to read, never evidence on their own
 
    **ANALYZE**: For each doc in scope:
    - Read the doc completely
@@ -430,7 +432,7 @@ Review-pr is an **orchestrator** like `audit`, scoped to PR changes, and read-on
    ```
    `origin/HEAD` is unset in many clones (`actions/checkout` among them), hence the `origin/main` fallback. **A base that does not exist stops the review**: ask the user for it — never read a failed diff as "no changes". **An empty list ends the review**: report "No changes against <base> — nothing to review" and stop. Never run the scoped check on an empty list and call its result a review.
 3. **Scope the freshness check** to that list: `"$DOC_TOOLS" check-freshness --code-refs-from - < "$CHANGED"`, through the discovery `jq` filter — the path-segment match described under *Scoping by changed files*.
-4. **Map changed files to affected scopes**. `$CHANGED` is NUL-separated, for step 3's check; to read the list, run `git diff --name-only --no-renames <base>...HEAD` with the base step 2 printed (or the range the caller named) — the form a doc-superpowers CI workflow grants (`tr` is not granted there, nor a `<` redirect). git quotes an unusual name in that list, which is fine for reading.
+4. **Map changed files to affected scopes**. Advisory: when the `doc-search` MCP server is already connected, `related` on a changed file lists the docs that cover it (confirm against the doc-index's `code_refs`); never start the server for a review, since its launcher is a file of the PR's checkout. `$CHANGED` is NUL-separated, for step 3's check; to read the list, run `git diff --name-only --no-renames <base>...HEAD` with the base step 2 printed (or the range the caller named) — the form a doc-superpowers CI workflow grants (`tr` is not granted there, nor a `<` redirect). git quotes an unusual name in that list, which is fine for reading.
 5. **For each affected scope**, dispatch a scope agent per the read-only orchestrator pattern (same gather→analyze→report cycle as `audit`, same `references/agent-prompt-template.md`). **Isolation**: each agent receives context ONLY for its scope — no cross-scope context. The scope agent receives:
    - The scope name and its `code_refs`
    - Changed files relevant to this scope (from PR diff)
@@ -540,6 +542,7 @@ Update is the **write counterpart** to audit's analysis (audit edits no doc; its
 - Never pass `--force` unless the user asked for exactly that.
 - A project that runs its own git hooks and wants only the index merge driver: `install --git --merge-driver-only` (no hook is written). For a state a script reads, use `status --json`, never the human lines; the git hooks' time budget and the advice the hooks print are set by `DOC_SUPERPOWERS_HOOK_BUDGET` / `DOC_SUPERPOWERS_ADVICE` or `.claude/doc-superpowers/hooks.conf` (`$ROOT/references/hooks.md` → *Hook budgets and advice*).
 - The work ledger's sets (`--ledger`, `--ledger-claude`) are opt-in, never part of `--all`, refused without `docs/ledger/config.json`, and not recorded in `installed.json`; `$ROOT/references/hooks.md` → *Ledger sets*. Before `--ci --workflows=doc-ledger-publish`, show its consent row like any other workflow's.
+- doc-search's set (`--search`: a committed launcher and the project's `.mcp.json` entry) is opt-in in the same way and refused without `docs/search/config.json`; `$ROOT/references/hooks.md` → *doc-search set*, and `$ROOT/references/search.md` for turning the server on.
 - An install another version made (2.x included) reads `⚠ … outdated` in `install.sh status`: re-run that tier (a ledger set: `install --ledger` or `--ledger-claude`), and walk the user through `$ROOT/README.md` → *Upgrading from 2.x* (v2's AI workflows, the per-user Claude tier, hooks in unconfigured directories, retyping design specs).
 
 ### `ledger` — Work Ledger (opt-in)
