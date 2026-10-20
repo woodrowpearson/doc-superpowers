@@ -99,7 +99,8 @@
 #   view failing, a PR not usable, a --no-repo-adapters refusal; 3 usage.
 #   Cost: one index build, one git diff-tree of the names and one git
 #   diff-tree -p -U0 of the files a defined_in or read_by matches (none
-#   without such a file), two git log walks (_lg_msg_claims' and the word
+#   without such a file; the whole range when their names pass
+#   _LG_UP_PATHS_MAX bytes), two git log walks (_lg_msg_claims' and the word
 #   scan's); with --pr, the list (cached) and one view.
 
 _LG_UP_TOP=3   # proposals kept per item (0: all) — the verb's --top
@@ -108,6 +109,8 @@ _LG_UP_IXB=""  # … and the commit it was chosen for
 _LG_UP_PR=null # the payload's pr: null, or {number, state, body_scanned}
 _LG_UP_BODY="" # the PR body's file (_lg_up_pr); "" when none was read
 _LG_UP_FH=""   # _lg_up_pr_fetch_hint's command
+_LG_UP_PATHS_MAX=100000 # bytes of candidate file names _lg_up_core hands git as
+                        # pathspecs; more, the whole range's diff (tests lower it)
 
 # _lg_up_no_repo: --no-repo-adapters — exit 2, before anything runs, when
 # config adapters.contracts, adapters.pr or items.adapter names anything
@@ -327,20 +330,21 @@ def up_cc: (capture("^(?<w>[^ \t]*)(?<r>.*)$")) as $x
 # before or after it; "" for an empty name. up_names($c): the input text
 # (one line, or several joined with "\n": a line end bounds a name as any
 # character outside [A-Za-z0-9_] does) → true when it names the contract id
-# $c, else false. It is the single "does this change touch this contract"
+# $c, else false; an empty text names nothing (not even an all-"*" name).
+# It is the single "does this change touch this contract"
 # test upkeep and the validate --pushed advisory share: a future
 # code-intelligence adapter (a deterministic symbol/edge model) may replace
 # it with a changed-symbol test when one is configured.
 def up_name_re: sub("^[^:]*:"; "")
   | if . == "" then ""
     else "(^|[^A-Za-z0-9_])" + (split("*") | map(lg_q_re) | join("[A-Za-z0-9_.-]*")) + "($|[^A-Za-z0-9_])" end;
-def up_names($c): ($c | up_name_re) as $re | $re != "" and test($re);
+def up_names($c): . != "" and (($c | up_name_re) as $re | $re != "" and test($re));
 # The pairs of $m ({file: [contract ids]}, a file as the path lists carry
 # it) whose file has a changed line naming the contract ($cl: {file: its
-# changed lines, joined with "\n"}) → {contract: [files]}, the files
-# decoded.
+# changed lines, each ended by "\n"}; a file with none, binary or a mode
+# change, is skipped) → {contract: [files]}, the files decoded.
 def up_named($m; $cl):
-  lg_lists($m | to_entries[] | .key as $e | ($e | up_dec) as $f | ($cl[$e] // "") as $t
+  lg_lists($m | to_entries[] | .key as $e | ($cl[$e] // empty) as $t | ($e | up_dec) as $f
            | .value[] | select(. as $k | $t | up_names($k)) | {k: ., v: $f});
 # Evidence per file: f of each of the first 3 of $fs, then "… and N more
 # files".
@@ -429,10 +433,12 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
   | sort_by(.rank, (.key // .p)) as $INV
 # Touched contracts: by a net-diff file (skip_globs left out: $fc) with a
 # changed line that names the contract ($CL: each file, its changed lines
-# joined), or by a Contract-Change line; $TALL every one, $TCH those upkeep
-# may propose.
-| (lg_lists($dl | split("\n")[] | select(. != "") | split("\t") | {k: .[0], v: (.[1:] | join("\t"))})
-   | map_values(join("\n"))) as $CL
+# each ended by "\n" — map(. + "\n") | add, linear where join is quadratic
+# in jq: one 50,000-line file took 13 s), or by a Contract-Change line;
+# $TALL every one, $TCH those upkeep may propose.
+| (lg_lists($dl | split("\n")[] | select(. != "") | split("\t")
+            | {k: .[0], v: (if length == 2 then .[1] else .[1:] | join("\t") end)})
+   | map_values(map(. + "\n") | add)) as $CL
 | up_named($fc[0]; $CL) as $CF
 | lg_obj(($ix.contracts // [])[] | {(.id): true}) as $ISC
 | lg_lists($TR[] | select(.k == "contract_change") | .v | up_cc | select($ISC[.id] == true) | {k: .id, v: .line}) as $CCL
@@ -605,16 +611,22 @@ _lg_up_core() {
   # contract's defined_in or read_by matches (pathspecs taken literally;
   # plumbing, so no user diff config — an external diff, colour, prefixes,
   # textconv — changes what it prints), read by _LG_AWK_UP_LINES. None of
-  # those files: no diff.
+  # those files: no diff. Their names over _LG_UP_PATHS_MAX bytes: the
+  # whole range's diff, no pathspec (a command line that long fails, E2BIG)
+  # — the awk keeps the same files.
   jq -r -s '(.[0] + .[1]) | keys[]' "$s.fc" "$s.rc" > "$s.cand.l" || _lg_die "jq failed (the contracts' files)"
   : > "$s.dl"
   if [ -s "$s.cand.l" ]; then
-    tr '\001\002\n' '\n\t\000' < "$s.cand.l" > "$s.cand" || _lg_die "cannot read the contracts' files"
-    while IFS= read -r -d '' x; do
-      cf+=("$x")
-    done < "$s.cand"
+    x=$(wc -c < "$s.cand.l") || _lg_die "cannot read the contracts' files"
+    if [ "$((x))" -le "$_LG_UP_PATHS_MAX" ]; then
+      tr '\001\002\n' '\n\t\000' < "$s.cand.l" > "$s.cand" || _lg_die "cannot read the contracts' files"
+      cf=(--)
+      while IFS= read -r -d '' x; do
+        cf+=("$x")
+      done < "$s.cand"
+    fi
     git -c core.quotePath=false --literal-pathspecs diff-tree -r -p -U0 --no-renames --no-color --no-ext-diff \
-      --no-textconv --src-prefix=a/ --dst-prefix=b/ "$a" "$b" -- "${cf[@]}" > "$s.patch" 2> "$s.err" \
+      --no-textconv --src-prefix=a/ --dst-prefix=b/ "$a" "$b" ${cf[@]+"${cf[@]}"} > "$s.patch" 2> "$s.err" \
       || _lg_die "git diff-tree -p $a $b failed: $(head -n 3 "$s.err" 2>/dev/null)"
     LC_ALL=C awk -v cand="$s.cand.l" "$_LG_AWK_UP_LINES" "$s.patch" > "$s.dl" || _lg_die "cannot read the range's changed lines"
   fi
