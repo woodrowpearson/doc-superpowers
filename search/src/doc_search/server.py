@@ -104,6 +104,10 @@ class _Runtime:
             self.fixed = f"doc-search: {err}"
         try:
             self.cfg = load_config(top)
+            if self.cfg is not None and self.repo is not None:
+                # load_config does not compile the globs; the corpus does. Build the launch worktree's
+                # now, so a bad pattern is an invalid-config line for every tool, not a crash in one.
+                self.corpus_for(self.repo.top)
         except ConfigError as err:
             self.fixed = f"doc-search: invalid config: {err}"
             return
@@ -146,6 +150,8 @@ class _Runtime:
                 return job()
             except _Refusal as refusal:
                 return str(refusal)
+            except ConfigError as err:  # a corpus built lazily (another worktree) rejected the config
+                return f"doc-search: invalid config: {err}"
 
         return await anyio.to_thread.run_sync(guarded)
 

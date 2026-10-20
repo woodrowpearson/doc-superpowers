@@ -18,7 +18,7 @@ from mcp.client.client import Client
 from mcp.client.stdio import StdioServerParameters
 from semble import SembleIndex
 
-from doc_search.config import INERT_LINE, load_config
+from doc_search.config import INERT_LINE, ConfigError, load_config
 from doc_search.engines import IndexPool, WorktreeIndexes
 from doc_search.server import DATA_NOTE, build_server
 
@@ -142,6 +142,53 @@ def test_invalid_config_line(git_repo) -> None:
         assert text.startswith("doc-search: invalid config: "), (name, text)
         assert "\n" not in text
         assert "malformed JSON" in text
+
+
+@pytest.mark.parametrize(
+    "docs",
+    [
+        {"include": ["!"]},
+        {"exclude": ["\\"]},
+        {"types": [{"glob": "[z-a]", "type": "x"}]},
+    ],
+    ids=["include-bang", "exclude-backslash", "types-bad-range"],
+)
+def test_bad_glob_is_the_invalid_config_line(git_repo, tiny_model: str, docs: dict) -> None:
+    """A pattern the config loader accepts but the corpus cannot compile: every tool says so, none crashes."""
+    repo = git_repo()
+    repo.write("docs/a.md", "# A\n")
+    repo.write("docs/search/config.json", json.dumps({"docs": {"model": tiny_model, **docs}}))
+    repo.commit("seed")
+    server = build_server(repo.root)
+
+    for name, args in (
+        ("search", {"query": "a doc"}),
+        ("fetch", {"path": "docs/a.md"}),
+        ("related", {"path": "docs/a.md"}),
+        ("status", {}),
+    ):
+        text = call(server, name, args)
+        assert text.startswith("doc-search: invalid config: docs."), (name, text)
+        assert "\n" not in text
+
+
+def test_config_error_while_building_another_corpus_is_a_line(
+    git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ConfigError that surfaces lazily (a corpus built for another worktree) answers a line, not a traceback."""
+    repo, pool, server = enabled(git_repo, tiny_model)
+    other = repo.add_worktree("c", "branch-c")
+
+    def broken(*args, **kwargs):
+        raise ConfigError("docs.include has an invalid pattern: boom")
+
+    monkeypatch.setattr("doc_search.server.Corpus", broken)
+    try:
+        text = call(server, "search", {"query": "refund", "worktree": str(other)})
+    finally:
+        ready(pool, repo.root)
+
+    assert text == "doc-search: invalid config: docs.include has an invalid pattern: boom"
 
 
 def test_search_tool_end_to_end(git_repo, tiny_model: str) -> None:
