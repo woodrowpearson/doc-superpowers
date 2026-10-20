@@ -270,18 +270,37 @@ class Corpus:
         return found, keep
 
     def _usable(self, rel: str) -> bool:
+        """A listed path counts only if it is a regular file (or resolves to one) inside the worktree.
+
+        git lists the index (`--cached`) whatever the working tree looks like, so a directory
+        swapped for a symlink out of the worktree still has its files listed: check the path itself.
+        """
+        plain = self._plain(rel)
         try:
-            st = os.lstat(self._top / rel)
-        except OSError:
-            return False
-        if stat.S_ISREG(st.st_mode):
-            return True
-        if not stat.S_ISLNK(st.st_mode):
-            return False
-        try:
+            if plain is not None:
+                return stat.S_ISREG(os.lstat(plain).st_mode)
             return confine(self._top, rel).is_file()
         except (ValueError, OSError):
             return False
+
+    def _plain(self, rel: str) -> Path | None:
+        """`top/rel` when no component is a symlink, `..` or `.git`; otherwise None.
+
+        Such a path is physically inside `top`, so it needs no resolution. This costs one
+        `lstat` per component, against the dozen or so that `confine` spends resolving the
+        whole path; anything it does not clear goes through `confine`.
+        """
+        full = self._top
+        for part in rel.split("/"):
+            if part in ("", ".", "..") or part.lower() == ".git":
+                return None
+            full = full / part
+            try:
+                if stat.S_ISLNK(os.lstat(full).st_mode):
+                    return None
+            except OSError:
+                return None
+        return full
 
     # enrichment
 
@@ -365,9 +384,10 @@ class Corpus:
     def skipped(self) -> dict[str, str]:
         """Corpus files that could not be read as text, path to reason.
 
-        Reasons: `not-utf8` (also binary), `too-large` (over 1 MiB), `vanished` (gone, or not a
-        regular file, since discovery) and `unreadable` (an OS error). The corpus as last listed
-        is checked first, so the answer does not depend on who asked about which file.
+        Reasons: `not-utf8` (also binary), `too-large` (over 1 MiB), `vanished` (gone, not a
+        regular file, or no longer safely inside the worktree, since discovery) and `unreadable`
+        (an OS error). The corpus as last listed is checked first, so the answer does not
+        depend on who asked about which file.
         """
         with self._lock:
             for path in self._current()[0]:
@@ -399,24 +419,17 @@ class Corpus:
     def _openable(self, path: str) -> Path:
         """Where to open `path`. ValueError when it is not safely inside the worktree.
 
-        A corpus file that is not a symlink was vetted when it was listed (git never lists a
-        path through a symlinked directory), so it skips the costly resolution that `confine`
-        does. Everything else, symlinks and paths nobody listed, is confined.
+        Checked on every call, not once per listing: the working tree can change under a listing.
         """
-        if self._listing is not None and path in self._listing[1]:
-            full = self._top / path
-            try:
-                if not stat.S_ISLNK(os.lstat(full).st_mode):
-                    return full
-            except OSError:
-                return full  # gone or unreadable: _target classifies it
-        return confine(self._top, path)
+        plain = self._plain(path)
+        return plain if plain is not None else confine(self._top, path)
 
     def _target(self, path: str) -> tuple[Path, Sig] | None:
         """The real file behind `path` and its (size, mtime_ns), or None (recording why)."""
         try:
             real = self._openable(path)
-        except ValueError:  # not a path we serve; not a corpus matter either
+        except ValueError:  # outside the worktree: for a listed file it has gone bad since the listing
+            self._skip(path, VANISHED)
             return None
         try:
             st = real.stat()

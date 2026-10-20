@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -609,3 +610,67 @@ def test_directory_named_like_a_doc_is_not_a_file(git_repo) -> None:
     # only corpus files are reported, not whatever a caller asked about
     assert corpus.meta("docs/nope.md") is None
     assert corpus.skipped() == {}
+
+
+# --- a parent directory swapped for a symlink ------------------------------------------
+
+
+def _swap_docs_for_symlink(repo, target: Path) -> None:
+    """Replace the tracked `docs/` with a symlink to `target`; the index still lists docs/a.md."""
+    shutil.rmtree(repo.root / "docs")
+    (repo.root / "docs").symlink_to(target)
+
+
+def _outside_docs(tmp_path: Path) -> Path:
+    outside = tmp_path / "outside-docs"
+    outside.mkdir()
+    (outside / "a.md").write_text("# Outside title\n\n**Status:** Accepted\n\n## Outside section\n", encoding="utf-8")
+    return outside
+
+
+def test_parent_symlinked_out_of_the_worktree_is_not_listed(git_repo, tmp_path: Path) -> None:
+    repo = git_repo()
+    repo.write("docs/a.md", "# Inside title\n")
+    repo.write("README.md", "# Readme\n")
+    repo.commit("base")
+    corpus = make_corpus(repo, {"search": {"rescan_seconds": 0}})
+    assert corpus.files() == ["README.md", "docs/a.md"]
+
+    _swap_docs_for_symlink(repo, _outside_docs(tmp_path))
+
+    # `git ls-files --cached` still names docs/a.md; the working tree no longer has it
+    assert corpus.files() == ["README.md"]
+    assert corpus.meta("docs/a.md") is None
+    assert corpus.heading_path_at("docs/a.md", 5) == ()
+    assert corpus.allowed((), None, True) == ["README.md"]
+
+
+def test_parent_swapped_for_a_symlink_after_listing_is_refused(git_repo, tmp_path: Path) -> None:
+    repo = git_repo()
+    repo.write("docs/a.md", "# Inside title\n")
+    repo.commit("base")
+    corpus = make_corpus(repo, {"search": {"rescan_seconds": 3600}})
+    assert corpus.files() == ["docs/a.md"]
+    assert meta_of(corpus, "docs/a.md").title == "Inside title"
+
+    _swap_docs_for_symlink(repo, _outside_docs(tmp_path))
+
+    # the listing is stale, but nothing is read through the symlink
+    assert corpus.files() == ["docs/a.md"]
+    assert corpus.meta("docs/a.md") is None
+    assert corpus.heading_path_at("docs/a.md", 5) == ()
+    assert corpus.allowed((), None, True) == []
+    assert corpus.skipped() == {"docs/a.md": "vanished"}
+
+
+def test_parent_symlinked_inside_the_worktree_is_read_through(git_repo) -> None:
+    repo = git_repo()
+    repo.write("docs/a.md", "# Inside title\n\n## Part\n")
+    repo.commit("base")
+    corpus = make_corpus(repo, {"search": {"rescan_seconds": 0}})
+    (repo.root / "docs").rename(repo.root / "docs-real")
+    (repo.root / "docs").symlink_to("docs-real")
+
+    assert corpus.files() == ["docs-real/a.md", "docs/a.md"]
+    assert meta_of(corpus, "docs/a.md").title == "Inside title"
+    assert corpus.heading_path_at("docs/a.md", 3) == ("Inside title", "Part")
