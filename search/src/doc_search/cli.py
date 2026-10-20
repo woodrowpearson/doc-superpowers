@@ -4,9 +4,9 @@ Exit codes: 0 ok (inert included), 1 findings, 2 could not run, 3 usage. When se
 and 2 over 0. Without `docs/search/config.json` every verb but `init` prints the inert line and exits 0; with
 an invalid one it prints `doc-search: invalid config: <message>` on stderr and exits 2.
 
-The verbs that search (`query`, `status`, `eval`) use the same `Runtime` as the MCP tools, with a wait for a
-first build that is effectively unbounded: this is a foreground process, and a build that is cached once is
-fast the next time.
+The verbs that search (`query`, `status`, `eval`) use the same `Runtime` as the MCP tools. `index`, `query` and
+`eval` are foreground work and wait for a build without a bound (a build that is cached once is fast the next
+time). `status` is the readiness probe and never waits: it reports what is built and says `building` for the rest.
 """
 
 from __future__ import annotations
@@ -114,7 +114,7 @@ def _build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argumen
     query.add_argument("--worktree", default=None, help="another worktree of this repository")
     query.add_argument("--format", choices=("text", "json"), default="text")
 
-    status = verb("status", "How doc-search is set up here and the state of the indexes.")
+    status = verb("status", "How doc-search is set up here and the state of the indexes (never waits for a build).")
     status.add_argument("--format", choices=("text", "json"), default="text")
 
     ev = verb("eval", "Known-answer evaluation: recall@k and MRR per leg, and the semble-single decision.")
@@ -157,17 +157,24 @@ def _runtime(*, as_json: bool = False) -> Any:
     """
     from .server import Runtime  # the MCP SDK is only needed once something is searched
 
-    repo = RepoInfo.from_cwd(Path.cwd())
+    try:
+        repo = RepoInfo.from_cwd(Path.cwd())
+    except NotARepo as err:
+        return _could_not_run(f"doc-search: {err}", as_json)
     rt = Runtime(repo.top, None, FOREGROUND_WAIT_S, warm=False)
     if rt.fixed is None:
         return rt
-    if as_json:
-        print(json.dumps({"enabled": False, "message": rt.fixed}, indent=2))
     if rt.fixed == INERT_LINE:
-        if not as_json:
-            print(INERT_LINE)
+        print(json.dumps({"enabled": False, "message": INERT_LINE}, indent=2) if as_json else INERT_LINE)
         return 0
-    return _fail(EXIT_COULD_NOT_RUN, rt.fixed)
+    return _could_not_run(rt.fixed, as_json)
+
+
+def _could_not_run(line: str, as_json: bool) -> int:
+    """Exit 2 with the one-line reason on stderr; a JSON probe also gets `{"enabled": false, "error": <line>}`."""
+    if as_json:
+        print(json.dumps({"enabled": False, "error": " ".join(line.split())}, indent=2))
+    return _fail(EXIT_COULD_NOT_RUN, line)
 
 
 # -- serve ---------------------------------------------------------------------------------------------------
@@ -340,10 +347,10 @@ def _status(args: argparse.Namespace) -> int:
     if isinstance(rt, int):
         return rt
     top = rt.repo.top
-    got = rt.pool.get(top, wait_s=FOREGROUND_WAIT_S)  # a fresh process has nothing built: wait, then report
     if not as_json:
-        print(rt.status())
+        print(rt.status())  # never waits: what is not built yet reads `building`
         return 0
+    got = rt.pool.get(top, wait_s=0)  # starts the builds if nothing is loaded, waits for none of them
     kinds = {kind: _kind_status(rt, got, kind) for kind in ("docs", "code")}
     cloud = None
     if rt.cloud is not None:

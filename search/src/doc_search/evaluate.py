@@ -16,7 +16,8 @@ Legs, in the order they are reported:
  - `semble-single`: one semble index over docs and code (`docs.model`), queried at `k x 3` chunks and collapsed
    per file.
 
-A leg that cannot answer (its index is off or failed) is reported as skipped with the reason, not scored 0.
+A leg that cannot answer (its index is off or failed, or the cloud failed every query) is reported as skipped
+with the reason, not scored 0.
 The last line applies the decision rule of section 3(b): semble-single is a candidate for the default when it
 comes within 0.02 of the joined result on recall@k and MRR. Within means not worse by more than 0.02; a
 single index that scores higher qualifies a fortiori.
@@ -210,6 +211,10 @@ class _Skip(Exception):
     """The leg cannot answer; the message says why."""
 
 
+class _Unanswered(Exception):
+    """One query the leg could not answer; the message says why. The leg is skipped only when every query is."""
+
+
 Ranker = Callable[[str], tuple[list[str], list[str]]]  # query -> (distinct paths in rank order, header notes)
 
 
@@ -261,16 +266,23 @@ def _run_leg(name: str, make: Callable[[], Ranker], cases: Sequence[EvalCase], k
     notes: dict[str, None] = {}
     rows: list[tuple[float, float]] = []
     kinds: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    unanswered: list[str] = []
     try:
         rank = make()
         for case in cases:
-            ranked, case_notes = rank(case.query)
+            try:
+                ranked, case_notes = rank(case.query)
+            except _Unanswered as why:  # scored as an empty answer, unless nothing was answered at all
+                unanswered.append(str(why))
+                ranked, case_notes = [], [str(why)]
             notes.update(dict.fromkeys(case_notes))
             row = score_ranking(ranked, case.expect, k)
             rows.append(row)
             kinds[case.kind or NO_KIND].append(row)
     except _Skip as skip:
         return LegResult(name, None, skipped=str(skip))
+    if len(unanswered) == len(cases):
+        return LegResult(name, None, skipped=unanswered[0])
     by_kind = {kind: _average(found) for kind, found in sorted(kinds.items())}
     return LegResult(name, _average(rows), by_kind, list(notes))
 
@@ -289,7 +301,9 @@ def _cloud_ranker(cloud: CloudLeg, corpus_for: Callable[[Path], Corpus] | None, 
         try:
             hits, note = cloud.hits(query, allowed, worktree, k * SINGLE_FETCH)
         except Exception as err:  # noqa: BLE001 - a remote leg that fails is a note, as in search
-            return [], [f"cloud leg failed ({describe(err)})"]
+            raise _Unanswered(f"cloud leg failed ({describe(err)})") from err
+        if note and not hits:  # a degraded leg, or one with no stamp to read: it said why it has nothing
+            raise _Unanswered(note)
         return _distinct([hit.path for hit in hits if hit.path in allowed]), [note] if note else []
 
     return rank
