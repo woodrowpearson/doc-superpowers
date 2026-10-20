@@ -251,6 +251,7 @@ doc-superpowers/
 | Work ledger tests and bench | `scripts/test-ledger.sh`; `scripts/bench-ledger.sh` |
 | doc-search (the MCP server) | `search/src/doc_search/` — `server.py` (tools), `cli.py` (verbs, exit codes), `searcher.py` (legs and fusion), `engines.py` (semble index pairs), `cloud/` (read and write paths); reference `references/search.md`; design `docs/superpowers/specs/2026-10-19-doc-search-design.md` |
 | doc-search install set | `scripts/hooks/install.sh` `# --- doc-search's set (--search)` (`install_search`, `uninstall_search`, `status_search`, `search_state`); the launcher `scripts/search/launch.sh` |
+| doc-search names and setup | `docs/conventions.md` → *doc-search names* (config path, launcher, server and tool names, CLI verbs, `DOC_SEARCH_CLOUD`); `docs/guides/getting-started.md` → *doc-search (opt-in)*; the containers in `docs/architecture/system-overview.md` |
 | doc-search tests | `search/tests/` (pytest; `bash scripts/check-ci.sh search` runs `uv run --project search --frozen --all-extras pytest -q`); the `--search` set in `scripts/test-hooks.sh` |
 | Work ledger reference | `references/ledger.md`; the index shape `references/ledger-index.schema.json`; the design `docs/superpowers/specs/2026-10-12-work-ledger-design.md` |
 | Spec supersession logic | `references/spec-lifecycle-actions.md` `spec-generate` overlap check — `deprecate-entry <old> --superseded-by <new>` writes `superseded_by` and the successor's `replaces` |
