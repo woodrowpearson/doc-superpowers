@@ -6,15 +6,19 @@ making the import fail, which is also what the base install does.
 
 from __future__ import annotations
 
+import importlib
 import json
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import anyio
 import pytest
 from mcp.client.client import Client
 
+import doc_search.cloud as cloud_pkg
+import doc_search.cloud.read as cloud_read
 from doc_search.cloud import CloudUnavailable
 from doc_search.cloud.read import DegradedLeg, build_cloud_leg
 from doc_search.cloud.vertex import VertexEmbedder
@@ -24,6 +28,7 @@ from doc_search.server import build_server
 
 NO_PROJECT = "no project (set cloud.vertex.project or GOOGLE_CLOUD_PROJECT)"
 NO_EXTRA = "cloud extra not installed (uv sync --extra cloud)"
+BROKEN = "google libraries failed to load: TypeError: Descriptors cannot be created directly."
 
 SPEC = """# Refunds
 
@@ -39,11 +44,33 @@ def cloud_cfg(**vertex) -> CloudCfg:
     return CloudCfg(vertex=replace(base, **vertex), firestore=firestore)
 
 
+GOOGLE_MODULES = ("google.genai", "google.genai.types", "google.genai.errors", "google.cloud.firestore")
+
+
+def hide_google(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The google modules of the cloud extra cannot be imported."""
+    for name in GOOGLE_MODULES:
+        monkeypatch.setitem(sys.modules, name, None)
+
+
+def break_google(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Importing a google module raises what a broken install raises (a protobuf mismatch), not ImportError."""
+    real = importlib.import_module
+
+    def broken(name: str, package: str | None = None):
+        if name == "google" or name.startswith("google."):
+            raise TypeError(
+                "Descriptors cannot be created directly.\nIf this call came from a _pb2.py file, "
+                "your generated code is out of date and must be regenerated with protoc >= 3.19.0."
+            )
+        return real(name, package)
+
+    monkeypatch.setattr(cloud_pkg, "importlib", SimpleNamespace(import_module=broken))
+
+
 @pytest.fixture
 def no_extra(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The google modules of the cloud extra cannot be imported."""
-    for name in ("google.genai", "google.genai.types", "google.genai.errors", "google.cloud.firestore"):
-        monkeypatch.setitem(sys.modules, name, None)
+    hide_google(monkeypatch)
 
 
 def test_no_project_is_a_degraded_leg() -> None:
@@ -65,6 +92,29 @@ def test_missing_extra_is_a_degraded_leg(no_extra: None) -> None:
 
     assert isinstance(leg, DegradedLeg)
     assert leg.hits("q", {"a.md"}, Path("."), 30) == ([], f"cloud failed: {NO_EXTRA}")
+
+
+def test_a_broken_install_is_a_degraded_leg(monkeypatch: pytest.MonkeyPatch) -> None:
+    break_google(monkeypatch)
+
+    with pytest.raises(CloudUnavailable, match="google libraries failed to load: TypeError"):
+        VertexEmbedder(cloud_cfg())
+    leg = build_cloud_leg(cloud_cfg())
+
+    assert isinstance(leg, DegradedLeg)
+    note = leg.hits("q", {"a.md"}, Path("."), 30)[1]
+    assert note is not None and note.startswith(f"cloud failed: {BROKEN}") and "\n" not in note
+
+
+def test_any_failure_to_build_the_leg_is_a_degraded_leg(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*args, **kwargs):
+        raise RuntimeError("cannot build\nanything")
+
+    monkeypatch.setattr(cloud_read, "VertexEmbedder", boom)
+
+    leg = build_cloud_leg(cloud_cfg())
+
+    assert isinstance(leg, DegradedLeg) and leg.reason == "RuntimeError: cannot build anything"
 
 
 def serve(git_repo, tiny_model: str, cloud: dict):
@@ -89,17 +139,22 @@ def ask(server, tool: str, args: dict) -> str:
 
 
 @pytest.mark.parametrize(
-    ("cloud", "reason", "extra_missing"),
-    [({}, NO_PROJECT, False), ({"vertex": {"project": "p"}, "firestore": {"project": "p"}}, NO_EXTRA, True)],
-    ids=["no-project", "no-extra"],
+    ("cloud", "mode", "reason"),
+    [
+        ({}, "no-project", NO_PROJECT),
+        ({"vertex": {"project": "p"}, "firestore": {"project": "p"}}, "no-extra", NO_EXTRA),
+        ({"vertex": {"project": "p"}, "firestore": {"project": "p"}}, "broken-install", BROKEN),
+    ],
+    ids=["no-project", "no-extra", "broken-install"],
 )
 def test_server_still_answers(
-    git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch, cloud: dict, reason: str, extra_missing: bool
+    git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch, cloud: dict, mode: str, reason: str
 ) -> None:
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
-    if extra_missing:
-        for name in ("google.genai", "google.genai.types", "google.genai.errors", "google.cloud.firestore"):
-            monkeypatch.setitem(sys.modules, name, None)
+    if mode == "no-extra":
+        hide_google(monkeypatch)
+    elif mode == "broken-install":
+        break_google(monkeypatch)
     repo, pool, server = serve(git_repo, tiny_model, cloud)
 
     try:
