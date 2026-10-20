@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -19,9 +20,10 @@ from semble import SembleIndex
 from doc_search import cli
 from doc_search.cli import main
 from doc_search.cloud import CloudUnavailable
+from doc_search.cloud.read import DegradedLeg
 from doc_search.cloud.write import BaseRefError, CorpusRefused, IndexReport, LeaseHeld, LeaseLost
-from doc_search.config import CONFIG_REL, DEFAULTS, INERT_LINE
-from doc_search.engines import IndexPool
+from doc_search.config import CONFIG_REL, DEFAULTS, INERT_LINE, load_config
+from doc_search.engines import IndexPool, WorktreeIndexes
 from doc_search.evaluate import EvalFileError, run_eval, score_ranking
 from doc_search.types import Hit
 
@@ -96,6 +98,23 @@ def run(capsys):
     return go
 
 
+def settle(timeout: float = 60.0) -> None:
+    """Wait for every build thread a verb left behind: none may outlive its test (and the tmp dirs it reads)."""
+    for thread in threading.enumerate():
+        if thread.name.startswith("doc-search-"):
+            thread.join(timeout)
+    assert [t.name for t in threading.enumerate() if t.name.startswith("doc-search-")] == []
+
+
+@pytest.fixture
+def warm_pool(repo, monkeypatch: pytest.MonkeyPatch) -> IndexPool:
+    """The repository's indexes already built, and the one pool every verb of the test gets."""
+    pool = IndexPool(load_config(repo.root, {}))
+    assert isinstance(pool.get(repo.root, wait_s=60), WorktreeIndexes)
+    monkeypatch.setattr("doc_search.server.IndexPool", lambda cfg: pool)
+    return pool
+
+
 def cases_file(tmp_path: Path, *lines: object, name: str = "known.jsonl") -> Path:
     path = tmp_path / name
     path.write_text("\n".join(line if isinstance(line, str) else json.dumps(line) for line in lines) + "\n")
@@ -129,6 +148,9 @@ def test_exit_codes(git_repo, tiny_model: str, tmp_path: Path, monkeypatch: pyte
     outside = run("status")
     assert outside.code == 2 and outside.out == ""
     assert outside.err.startswith("doc-search: not inside a git work tree") and outside.err.count("\n") == 1
+    probe = run("status", "--format", "json")  # a JSON probe still gets JSON
+    assert probe.code == 2 and probe.err == outside.err
+    assert json.loads(probe.out) == {"enabled": False, "error": outside.err.strip()}
 
     # inert: every verb but init prints the one line and exits 0
     inert = git_repo()
@@ -152,6 +174,9 @@ def test_exit_codes(git_repo, tiny_model: str, tmp_path: Path, monkeypatch: pyte
         assert done.code == 2 and done.out == "", argv
         assert done.err.startswith("doc-search: invalid config: ") and "malformed JSON" in done.err
         assert done.err.count("\n") == 1
+    probe = run("status", "--format", "json")
+    assert probe.code == 2 and probe.err.startswith("doc-search: invalid config: ")
+    assert json.loads(probe.out) == {"enabled": False, "error": probe.err.strip()}
 
     bad_glob = git_repo()
     bad_glob.write(CONFIG_REL, json.dumps({"docs": {"model": tiny_model, "include": ["!"]}}))
@@ -209,8 +234,7 @@ def test_init_writes_once(git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert (sub.root / CONFIG_REL).is_file() and not (sub.root / "src" / "docs").exists()
 
     # the file it wrote enables doc-search with no further edit
-    monkeypatch.chdir(sub.root)
-    assert run("status", "--format", "json").code == 0
+    assert load_config(sub.root, {}) is not None
 
     outside = tmp_path / "plain"
     outside.mkdir()
@@ -325,7 +349,7 @@ def test_index_build_error_is_exit_2(repo, run, monkeypatch: pytest.MonkeyPatch)
 # --- status ----------------------------------------------------------------------------------------------
 
 
-def test_status_text_and_json(repo, run) -> None:
+def test_status_text_and_json(repo, run, warm_pool: IndexPool) -> None:
     text = run("status")
     assert text.code == 0 and text.err == ""
     assert text.lines[0] == "doc-search status"
@@ -343,6 +367,35 @@ def test_status_text_and_json(repo, run) -> None:
     assert payload["corpus_files"] == 2
     assert payload["cloud"] is None
     assert isinstance(payload["semble"], str)
+
+
+def test_status_does_not_wait_for_a_cold_build(repo, run, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The readiness probe answers at once with `building`, whatever the first build costs."""
+    gate = threading.Event()
+    real = SembleIndex.from_path.__func__
+
+    def gated(cls, *args, **kwargs):
+        gate.wait(60)
+        return real(cls, *args, **kwargs)
+
+    monkeypatch.setattr(SembleIndex, "from_path", classmethod(gated))
+    try:
+        start = time.monotonic()
+        text = run("status")
+        as_text = time.monotonic() - start
+        start = time.monotonic()
+        as_json = run("status", "--format", "json")
+        json_took = time.monotonic() - start
+
+        assert as_text < 2.0 and json_took < 2.0, f"status waited: {as_text:.1f} s, {json_took:.1f} s"
+        assert text.code == 0 and "docs index: building" in text.out and "code index: building" in text.out
+        payload = json.loads(as_json.out)
+        assert as_json.code == 0 and payload["enabled"] is True and payload["ready"] is False
+        assert payload["docs"]["state"] == "building" and payload["code"]["state"] == "building"
+        assert payload["docs"]["chunks"] == 0 and payload["corpus_files"] == 2
+    finally:
+        gate.set()
+        settle()
 
 
 # --- index --cloud: the exit-code mapping ----------------------------------------------------------------
@@ -786,6 +839,69 @@ def test_run_eval_single_leg_is_one_index_asked_for_three_times_k(repo, tmp_path
     )
 
 
+class ScriptedCloud:
+    """A cloud leg that answers each call from a script: an exception to raise, or (paths, note)."""
+
+    def __init__(self, *script) -> None:
+        self.script = list(script)
+
+    def hits(self, query, allowed, worktree, limit, doc_types=()):
+        step = self.script.pop(0)
+        if isinstance(step, BaseException):
+            raise step
+        paths, note = step
+        return [Hit("doc", p, 1, 3, "text", legs=("cloud",)) for p in paths], note
+
+    def status_lines(self, worktree):
+        return []
+
+
+def test_cloud_leg_that_answers_no_query_is_skipped_not_scored_zero(repo, tmp_path: Path) -> None:
+    _, info, pool, corpus_for, searcher = eval_parts(repo)  # the searcher has no cloud: only the leg alone asks it
+    path = cases_file(tmp_path, KNOWN[0], KNOWN[2])
+    no_stamp = "cloud skipped: no corpus stamp (corpus_meta/index)"
+    for cloud, reason in (
+        (ScriptedCloud(RuntimeError("boom"), RuntimeError("later")), "cloud leg failed (RuntimeError: boom)"),
+        (DegradedLeg("no credentials"), "cloud failed: no credentials"),
+        (ScriptedCloud(([], no_stamp), ([], no_stamp)), no_stamp),
+    ):
+        report = run_eval(searcher, pool, path, 10, info.top, cloud=cloud, corpus_for=corpus_for)
+
+        leg = report.leg("cloud")
+        assert leg.overall is None and leg.skipped == reason, reason
+        assert re.search(rf"^cloud\s+skipped: {re.escape(reason)}$", report.render(), re.M)
+        assert report.leg("all").overall is not None, "the other legs are scored as usual"
+
+
+def test_cloud_leg_that_fails_some_queries_is_scored_with_a_note(repo, tmp_path: Path) -> None:
+    _, info, pool, corpus_for, searcher = eval_parts(repo)
+    path = cases_file(tmp_path, KNOWN[0], KNOWN[2])
+    cloud = ScriptedCloud(RuntimeError("boom"), ([SHIPPING_PATH], None))
+
+    report = run_eval(searcher, pool, path, 10, info.top, cloud=cloud, corpus_for=corpus_for)
+
+    leg = report.leg("cloud")
+    assert leg.skipped is None and (leg.overall.recall, leg.overall.mrr) == (0.5, 0.5)
+    assert leg.notes == ["cloud leg failed (RuntimeError: boom)"]
+
+    nothing = ScriptedCloud(([], None), ([], None))  # an empty answer with no note is an answer
+    empty = run_eval(searcher, pool, path, 10, info.top, cloud=nothing, corpus_for=corpus_for).leg("cloud")
+    assert empty.skipped is None and (empty.overall.recall, empty.overall.mrr) == (0.0, 0.0)
+
+
+def test_eval_cloud_leg_that_cannot_answer_through_the_cli(git_repo, tiny_model: str, tmp_path, monkeypatch, run):
+    made = git_repo()
+    seed(made, tiny_model, cloud=CLOUD)
+    monkeypatch.chdir(made.root)
+    monkeypatch.setattr("doc_search.server.build_cloud_leg", lambda cfg, corpus_for=None: DegradedLeg("no creds"))
+
+    done = run("eval", str(cases_file(tmp_path, KNOWN[0], KNOWN[2])))
+
+    assert done.code == 0
+    assert re.search(r"^cloud\s+skipped: cloud failed: no creds$", done.out, re.M)
+    assert list(rows(done.out)) == ["docs", "code", "all", "semble-single"]
+
+
 def test_eval_cloud_leg_through_the_cli(git_repo, tiny_model: str, tmp_path: Path, monkeypatch, run) -> None:
     made = git_repo()
     seed(made, tiny_model, cloud=CLOUD)
@@ -806,11 +922,12 @@ def test_eval_cloud_leg_through_the_cli(git_repo, tiny_model: str, tmp_path: Pat
 
     off = run("status", "--format", "json")
     assert json.loads(off.out)["cloud"] == {"configured": True, "lines": ["cloud: stub"]}
+    settle()  # status started the builds and did not wait for them
 
 
 def test_nothing_is_left_building(repo, run, tmp_path: Path) -> None:
-    """Every verb returns with its build threads finished: none may outlive the test (and its tmp dirs)."""
-    for argv in (("status",), ("query", "refund"), ("eval", str(cases_file(tmp_path, KNOWN[0])))):
+    """The verbs that build return with their build threads finished (`status` is the one that does not wait)."""
+    for argv in (("index",), ("query", "refund"), ("eval", str(cases_file(tmp_path, KNOWN[0])))):
         assert run(*argv).code == 0
     alive = [t.name for t in threading.enumerate() if t.name.startswith("doc-search-")]
     assert alive == []
