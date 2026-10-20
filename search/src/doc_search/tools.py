@@ -117,9 +117,13 @@ class DocTools:
         """For a doc: its metadata and similar passages. For code: the docs covering it and similar code."""
         return self._answer(lambda: self._related(path, Path(worktree), line, limit))
 
-    def status(self, worktree: Path) -> str:
-        """The setup and the index state of `worktree` first, then of the other worktrees in memory."""
-        return self._answer(lambda: self._status(Path(worktree)))
+    def status(self, worktree: Path, *, warm: bool = True) -> str:
+        """The setup and the index state of `worktree` first, then of the other worktrees in memory.
+
+        `warm` (the server's behaviour) starts the builds of an asked worktree that is not in memory;
+        the command line asks for `warm=False` and only looks.
+        """
+        return self._answer(lambda: self._status(Path(worktree), warm))
 
     @staticmethod
     def _answer(job: Callable[[], str]) -> str:
@@ -284,7 +288,7 @@ class DocTools:
 
     # -- status ----------------------------------------------------------------------------------
 
-    def _status(self, worktree: Path) -> str:
+    def _status(self, worktree: Path, warm: bool = True) -> str:
         top = worktree.resolve()
         docs_model = flat(self.cfg.docs.model or resolve_model_name())
         code_model = flat(self.cfg.code.model or resolve_model_name()) if self.cfg.code.enabled else "off"
@@ -296,7 +300,7 @@ class DocTools:
             f"semble {IndexPool.semble_version()}",
             "",
             f"worktree: {top}",
-            *self._worktree_lines(top, self._asked(top)),
+            *self._worktree_lines(top, self._asked(top, warm)),
         ]
         for tree in self._pool.resident():  # read after the asked worktree's call: that may have changed it
             if tree == top:
@@ -306,15 +310,16 @@ class DocTools:
                 out += ["", f"worktree: {tree}", *self._worktree_lines(tree, got)]
         return "\n".join(out)
 
-    def _asked(self, top: Path) -> WorktreeIndexes | Building | None:
+    def _asked(self, top: Path, warm: bool = True) -> WorktreeIndexes | Building | None:
         """The asked worktree's indexes without disturbing the pool; None when they are not loaded.
 
         One in memory is only looked at. One that is not is loaded (`get`, which starts the builds
         and never waits) so a first status call warms it, unless the pool is full: loading it would
-        evict another worktree's warm indexes, and `status` must not do that.
+        evict another worktree's warm indexes, and `status` must not do that. Nor does it when `warm`
+        is off.
         """
         got = self._pool.peek(top)
-        if got is None and len(self._pool.resident()) < self._pool.max_worktrees:
+        if got is None and warm and len(self._pool.resident()) < self._pool.max_worktrees:
             got = self._pool.get(top, wait_s=0)
         return got
 
@@ -346,7 +351,7 @@ class DocTools:
         if view.state == "building":
             return [f"{view.kind} index: building (first build not finished)"]
         if view.state == "unloaded":
-            return [f"{view.kind} index: not loaded (the pool is full; a search of this worktree loads it)"]
+            return [f"{view.kind} index: not loaded (status does not load it; a search of this worktree does)"]
         state = (
             "ready (refresh failed; serving the previous index)" if view.state == "ready" and view.error else view.state
         )

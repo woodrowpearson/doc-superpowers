@@ -6,7 +6,8 @@ an invalid one it prints `doc-search: invalid config: <message>` on stderr and e
 
 The verbs that search (`query`, `status`, `eval`) use the same `Runtime` as the MCP tools. `index`, `query` and
 `eval` are foreground work and wait for a build without a bound (a build that is cached once is fast the next
-time). `status` is the readiness probe and never waits: it reports what is built and says `building` for the rest.
+time). `status` is the readiness probe: it never builds, loads or waits, and says whether semble's saved index
+of each kind is `valid`, `stale` or `absent` on disk.
 """
 
 from __future__ import annotations
@@ -114,7 +115,7 @@ def _build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argumen
     query.add_argument("--worktree", default=None, help="another worktree of this repository")
     query.add_argument("--format", choices=("text", "json"), default="text")
 
-    status = verb("status", "How doc-search is set up here and the state of the indexes (never waits for a build).")
+    status = verb("status", "How doc-search is set up here and whether the saved indexes are valid (builds nothing).")
     status.add_argument("--format", choices=("text", "json"), default="text")
 
     ev = verb("eval", "Known-answer evaluation: recall@k and MRR per leg, and the semble-single decision.")
@@ -342,15 +343,26 @@ def _query(args: argparse.Namespace) -> int:
 
 
 def _status(args: argparse.Namespace) -> int:
+    """The probe: what is set up, what this process holds (nothing, when it is fresh) and what is on disk.
+
+    It never builds, loads or waits. The disk is asked through `IndexPool.cache_state`: `valid` (a build would
+    load it), `stale` (a rebuild is due) or `absent`.
+    """
     as_json = args.format == "json"
     rt = _runtime(as_json=as_json)
     if isinstance(rt, int):
         return rt
     top = rt.repo.top
+    cache = {
+        "docs": rt.pool.cache_state(top, "docs"),
+        "code": rt.pool.cache_state(top, "code") if rt.cfg.code.enabled else "off",
+    }
     if not as_json:
-        print(rt.status())  # never waits: what is not built yet reads `building`
+        print(rt.status(warm=False))  # the tool's text, without starting the builds it would start for a server
+        for kind, state in cache.items():
+            print(f"{kind} cache: {state}")
         return 0
-    got = rt.pool.get(top, wait_s=0)  # starts the builds if nothing is loaded, waits for none of them
+    got = rt.pool.peek(top)  # in memory only: None in a fresh process; it starts and waits for nothing
     kinds = {kind: _kind_status(rt, got, kind) for kind in ("docs", "code")}
     cloud = None
     if rt.cloud is not None:
@@ -361,11 +373,12 @@ def _status(args: argparse.Namespace) -> int:
         cloud = {"configured": True, "lines": lines}
     payload = {
         "enabled": True,
-        "ready": all(info["state"] in ("ready", "off") and not info["error"] for info in kinds.values()),
+        "ready": all(_ready(kinds[kind], cache[kind]) for kind in kinds),
         "worktree": str(top),
         "config": str(top / CONFIG_REL),
         "semble": IndexPool.semble_version(),
         **kinds,
+        "cache": cache,
         "corpus_files": len(rt.corpus_for(top).files()),
         "cloud": cloud,
     }
@@ -373,10 +386,25 @@ def _status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _kind_status(rt: Any, got: WorktreeIndexes | Building, kind: str) -> dict[str, Any]:
+def _ready(info: dict[str, Any], cache: str) -> bool:
+    """A kind is ready when its saved index is valid (or it is off), or this process already holds it without error."""
+    return cache in ("valid", "off") or (info["state"] == "ready" and not info["error"])
+
+
+def _kind_status(rt: Any, got: WorktreeIndexes | Building | None, kind: str) -> dict[str, Any]:
     cfg: Config = rt.cfg
     if kind == "code" and not cfg.code.enabled:
         return {"model": None, "state": "off", "chunks": 0, "files": 0, "build_seconds": None, "error": None}
+    model = (cfg.docs.model if kind == "docs" else cfg.code.model) or resolve_model_name()
+    if got is None:  # not in memory: the `cache` member says what is on disk
+        return {
+            "model": model,
+            "state": "unloaded",
+            "chunks": None,
+            "files": None,
+            "build_seconds": None,
+            "error": None,
+        }
     finished = True
     seen = got
     if isinstance(got, Building):
@@ -384,7 +412,7 @@ def _kind_status(rt: Any, got: WorktreeIndexes | Building, kind: str) -> dict[st
         seen = got.partial or WorktreeIndexes()
     index = seen.docs if kind == "docs" else seen.code
     return {
-        "model": (cfg.docs.model if kind == "docs" else cfg.code.model) or resolve_model_name(),
+        "model": model,
         "state": "building" if not finished else "ready" if index is not None else "failed",
         "chunks": len(index.chunks) if index is not None else 0,
         "files": len(rt.pool.indexed_files(rt.repo.top, kind)),
