@@ -606,6 +606,159 @@ def test_cloud_not_called_when_nothing_is_allowed_or_for_code(git_repo, tiny_mod
     assert cloud.calls == []
 
 
+@dataclass
+class SlowCloud(FakeCloud):
+    """A cloud leg that takes `delay` seconds to answer, and says when it was asked."""
+
+    delay: float = 0.5
+    asked: threading.Event = field(default_factory=threading.Event)
+    threads: list[str] = field(default_factory=list)
+
+    def hits(self, query, allowed, worktree, limit, doc_types=()):
+        self.asked.set()
+        self.threads.append(threading.current_thread().name)
+        time.sleep(self.delay)
+        return super().hits(query, allowed, worktree, limit, doc_types)
+
+
+def slow_local_search(monkeypatch: pytest.MonkeyPatch, delay: float, *, before=None) -> None:
+    """Every semble search (the docs and code legs) takes `delay` seconds longer; `before` runs first."""
+    real = SembleIndex.search
+
+    def slow(self, *args, **kwargs):
+        if before is not None:
+            before()
+        time.sleep(delay)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(SembleIndex, "search", slow)
+
+
+def test_the_cloud_leg_runs_while_the_local_legs_do(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = git_repo()
+    seed(repo)
+    plain = make_world(repo, tiny_model, code={"enabled": False})
+    last = plain.search("shipping fee flat rate", scope="docs", limit=10).hits[-1]
+    cloud = SlowCloud(answer=[replace(last, start_line=100, end_line=130, snippet="remote", legs=("cloud",))])
+    world = make_world(repo, tiny_model, cloud=cloud, code={"enabled": False})
+    slow_local_search(monkeypatch, 0.5)  # the one local leg takes as long as the cloud
+
+    started = time.monotonic()
+    resp = world.search("shipping fee flat rate", scope="docs", limit=10)
+    took = time.monotonic() - started
+
+    assert 0.5 <= took < 0.9, f"max(local, cloud), not their sum: {took:.2f} s"
+    assert resp.hits[0].path == last.path and resp.hits[0].legs == ("docs", "cloud"), "the cloud hits are fused"
+    assert cloud.threads == ["doc-search-cloud-leg"], "off the searching thread"
+
+
+def test_the_cloud_leg_starts_before_the_local_legs(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = git_repo()
+    seed(repo)
+    cloud = SlowCloud(delay=0.0)
+    world = make_world(repo, tiny_model, cloud=cloud)
+    seen: list[bool] = []
+    slow_local_search(monkeypatch, 0.0, before=lambda: seen.append(cloud.asked.wait(2)))
+
+    world.search("shipping fee flat rate", scope="all")
+
+    assert seen and all(seen), "the cloud had been asked by the time each local leg ran"
+
+
+def test_a_cloud_leg_that_never_answers_is_a_note_after_its_deadline(
+    git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = git_repo()
+    seed(repo)
+    world = make_world(repo, tiny_model)
+    release = threading.Event()
+
+    class Hung:
+        def hits(self, query, allowed, worktree, limit, doc_types=()):
+            release.wait(30)
+            return [cloud_hit("docs/shipping.md")], None
+
+    searcher = Searcher(
+        world.cfg,
+        RepoInfo(top=repo.root, common_dir=repo.root / ".git"),
+        world.pool,
+        lambda top: world.corpus,
+        cloud=Hung(),
+        cloud_wait_s=0.2,
+    )
+    try:
+        started = time.monotonic()
+        resp = searcher.search(SearchRequest(query="refund rounding", scope="docs"), repo.root)
+        took = time.monotonic() - started
+    finally:
+        release.set()  # let the abandoned worker finish
+
+    assert isinstance(resp, SearchResponse) and resp.hits, "the local legs answered"
+    assert resp.header.notes == ("cloud failed: TimeoutError: no answer within 0.2 s",), "as the leg words its own"
+    assert all(hit.legs != ("cloud",) for hit in resp.hits)
+    assert took < 5
+
+
+def test_a_huge_cloud_wait_is_not_an_overflow(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    world = make_world(repo, tiny_model)
+    cloud = FakeCloud(answer=[cloud_hit("docs/shipping.md")])
+    searcher = Searcher(
+        world.cfg,
+        RepoInfo(top=repo.root, common_dir=repo.root / ".git"),
+        world.pool,
+        lambda top: world.corpus,
+        cloud=cloud,
+        cloud_wait_s=1e300,  # what a `cloud.timeout_s` of 1e300 amounts to: valid, if absurd
+    )
+
+    resp = searcher.search(SearchRequest(query="shipping fee", scope="docs"), repo.root)
+
+    assert isinstance(resp, SearchResponse) and resp.header.notes == ()
+    assert "docs/shipping.md" in paths(resp)
+
+
+def test_the_cloud_wait_follows_the_configured_timeout(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    world = make_world(repo, tiny_model)
+    info = RepoInfo(top=repo.root, common_dir=repo.root / ".git")
+
+    def waits(cfg: Config) -> float:
+        return Searcher(cfg, info, world.pool, lambda top: world.corpus, cloud=FakeCloud()).cloud_wait_s
+
+    configured = make_cfg(
+        repo, tiny_model, cloud={"timeout_s": 12, "vertex": {"project": "p"}, "firestore": {"project": "p"}}
+    )
+    assert configured.cloud.deadline_s == 17
+    # the leg's own deadline (timeout + 5 s) fires first, so its note is the one a search reports
+    assert waits(configured) == 18
+    assert waits(world.cfg) == 26, "no cloud config: the default timeout"
+
+
+def test_code_hits_for_a_doc_the_cloud_shows_are_not_repeated(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    for i in range(4):
+        repo.write(f"docs/d{i}.md", f"# Doc {i}\n\nrefund rounding {i}.\n")
+        repo.write(f"src/c{i}.py", f"def refund_{i}():\n    return {i}\n")
+    repo.commit("many")
+    cfg = make_cfg(repo, tiny_model)
+    docs = FakeIndex([FakeChunk("docs/d0.md", 1, 3, "d0 local")])
+    # the code index holds a corpus file: d3 comes back from it too, and only the cloud shows d3 otherwise
+    code = FakeIndex([FakeChunk("docs/d3.md", 1, 3, "d3 via code"), FakeChunk("src/c0.py", 1, 2, "c0")])
+    cloud = FakeCloud(answer=[cloud_hit("docs/d3.md", 40, 60)])
+    searcher = fake_searcher(repo, cfg, docs, code, cloud=cloud)
+
+    resp = searcher.search(SearchRequest(query="refund rounding", limit=10), repo.root)
+
+    assert isinstance(resp, SearchResponse)
+    assert paths(resp).count("docs/d3.md") == 1
+    d3 = next(h for h in resp.hits if h.path == "docs/d3.md")
+    assert d3.legs == ("cloud",) and d3.snippet == "cloud text of docs/d3.md"
+    assert "src/c0.py" in paths(resp)
+
+
 # --- fusion across kinds ----------------------------------------------------------------------------
 
 
@@ -1015,6 +1168,27 @@ def test_a_dot_slash_path_matches_the_file(git_repo, tiny_model: str) -> None:
         assert ident_paths(world, query) == ["docs/guides/setup-notes.md"], query
 
 
+def test_english_hyphenated_words_do_not_trip_the_ident_leg(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    write_notes(repo)
+    repo.write("docs/guides/end-to-end-testing.md", "# End-to-end testing\n\nqueue event handler.\n")
+    repo.write("docs/guides/sign-in.md", "# Sign-in\n\nqueue event handler.\n")
+    repo.commit("guides")
+    world = make_world(repo, tiny_model)
+
+    # a hyphen alone is how English writes a compound word, not an identifier
+    assert ident_paths(world, "how does end-to-end sign-in work") == []
+    assert ident_paths(world, "read-only multi-provider access") == []
+    # a path that names the file is one, hyphens and all
+    assert ident_paths(world, "docs/guides/sign-in.md") == ["docs/guides/sign-in.md"]
+    # and so is a hyphenated key with a number
+    repo.write("docs/items/a.md", "---\nkey: chat-70\n---\n# Streaming replies\n\nevent handler.\n")
+    repo.commit("item")
+    world = make_world(repo, tiny_model)
+    assert ident_paths(world, "sign-in for chat-70") == ["docs/items/a.md"]
+
+
 class FrontMatterCountingCorpus(Corpus):
     head_calls = 0  # title and front matter in one read
     separate_calls = 0  # a front_matter() call on its own
@@ -1088,8 +1262,16 @@ def test_ident_shares_the_docs_leg_chunk_when_there_is_one(git_repo, tiny_model:
         ("ADR-114", ["ADR-114"]),
         ('see "ADR-114", and (SPEC-DATA-005).', ["ADR-114", "SPEC-DATA-005"]),
         ("refund rounding total", []),
-        ("a-b x1 ab", []),  # under 4 characters, or no digit and no - _ . /
+        ("a-b x1 ab", []),  # under 4 characters, or no digit and no _ . /
         ("ab-1 v1.2 tool_x src/a.py", ["ab-1", "v1.2", "tool_x", "src/a.py"]),
+        # a hyphen alone does not make an identifier: it is how English compounds are written
+        ("end-to-end sign-in read-only multi-provider", []),
+        ("an end-to-end, read-only (multi-provider) sign-in.", []),
+        ("SPEC-OPS-021 chat-70 import.meta.env /run snake_case_name docs/a.md", [
+            "SPEC-OPS-021", "chat-70", "import.meta.env", "/run", "snake_case_name", "docs/a.md",
+        ]),  # fmt: skip
+        ("sign-in for chat-70", ["chat-70"]),
+        ("the /run command, not /ru", ["/run"]),  # four characters is enough, three is not
         ("chat-70 CHAT-70 chat-70", ["chat-70"]),  # once, whatever the case
         ("./docs/a.md", ["docs/a.md"]),
         ("'./docs/a.md', ././docs/b.md.", ["docs/a.md", "docs/b.md"]),

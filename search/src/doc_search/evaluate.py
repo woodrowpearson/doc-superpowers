@@ -16,6 +16,10 @@ Legs, in the order they are reported:
  - `semble-single`: one semble index over docs and code (`docs.model`), queried at `k x 3` chunks and collapsed
    per file.
 
+semble-single cannot tell a deprecated doc from a current one, so the legs it is compared with cannot either: the
+`docs` and `all` legs (and the allowed set of the `cloud` leg) include the terminal docs (deprecated, superseded,
+archived), as `include_terminal=true` does for a search. The report says so on its first line.
+
 A leg that cannot answer (its index is off or failed, or the cloud failed every query) is reported as skipped
 with the reason, not scored 0.
 The last line applies the decision rule of section 3(b): semble-single is a candidate for the default when it
@@ -49,6 +53,7 @@ TOLERANCE = 0.02  # the decision rule of section 3(b)
 SINGLE_FETCH = 3  # semble-single is asked for k x 3 chunks: collapsing them per file leaves fewer
 LEG_ORDER = ("docs", "code", "cloud", "all", "semble-single")
 NO_KIND = "(no kind)"
+TERMINAL_NOTE = "(terminal docs included)"  # on the report's first line: the docs and all legs search terminal docs
 EPSILON = 1e-9
 
 
@@ -121,7 +126,7 @@ class EvalReport:
         """The report as text; the decision line is the last."""
         k = self.k
         name_width = max(len(leg.name) for leg in self.legs) + 2
-        out = [f"doc-search eval · {self.path} · {self.queries} queries · k={k}"]
+        out = [f"doc-search eval · {self.path} · {self.queries} queries · k={k} {TERMINAL_NOTE}"]
         notes: dict[str, list[str]] = {}  # a note once, with the legs whose answers carried it
         for leg in self.legs:
             if leg.overall is None:
@@ -242,7 +247,13 @@ def run_eval(
 
     def searched(scope: str) -> Ranker:
         def rank(query: str) -> tuple[list[str], list[str]]:
-            answer = searcher.search(SearchRequest(query=query, scope=scope, limit=k), worktree)  # type: ignore[arg-type]
+            request = SearchRequest(
+                query=query,
+                scope=scope,  # type: ignore[arg-type]
+                limit=k,
+                include_terminal=scope != "code",  # the code leg never reads the allowed set
+            )
+            answer = searcher.search(request, worktree)
             if isinstance(answer, str):
                 raise _Skip(_reason(answer))
             return _distinct([hit.path for hit in answer.hits]), list(answer.header.notes)
@@ -295,7 +306,7 @@ def _reason(line: str) -> str:
 def _cloud_ranker(cloud: CloudLeg, corpus_for: Callable[[Path], Corpus] | None, worktree: Path, k: int) -> Ranker:
     if corpus_for is None:
         raise _Skip("no corpus to name the allowed files")
-    allowed = set(corpus_for(worktree).allowed((), None, False))
+    allowed = set(corpus_for(worktree).allowed((), None, True))  # terminal docs too, as the docs and all legs
 
     def rank(query: str) -> tuple[list[str], list[str]]:
         try:

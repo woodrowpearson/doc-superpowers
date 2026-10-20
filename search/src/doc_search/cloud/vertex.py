@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 
 from ..config import CloudCfg
-from . import CLOUD_TIMEOUT_S, CloudUnavailable, LazyClient, import_module
+from . import CloudUnavailable, LazyClient, import_module
 
 BATCH_SIZE = 200
 RETRIES = 3
@@ -33,7 +33,7 @@ class VertexEmbedder:
     `client` stands in for `genai.Client` (tests); without it the client is built on first use, with
     Application Default Credentials. `sleep`, `jitter` and `clock` are the retries' delay, random source and time.
 
-    Every call to the API is cut off after CLOUD_TIMEOUT_S. A query is embedded while a search waits, so
+    Every call to the API is cut off after `cloud.timeout_s`. A query is embedded while a search waits, so
     its retries share one budget of that length: a timed-out call is not tried again, a quick 429 or 503 is.
     """
 
@@ -53,6 +53,7 @@ class VertexEmbedder:
         if client is None:
             import_module("google.genai")  # a missing extra is known now, credentials only at the first call
         self._vertex = vertex
+        self._timeout_s = cfg.timeout_s
         self._client = LazyClient(self._make_client) if client is None else LazyClient(lambda: client)
         self._sleep = sleep
         self._jitter = jitter
@@ -67,14 +68,14 @@ class VertexEmbedder:
             vertexai=True,
             project=self._vertex.project,
             location=self._vertex.location,
-            http_options=types.HttpOptions(timeout=int(CLOUD_TIMEOUT_S * 1000)),  # milliseconds
+            http_options=types.HttpOptions(timeout=max(1, int(self._timeout_s * 1000))),  # milliseconds
         )
 
     # -- public ------------------------------------------------------------------------------
 
     def embed_query(self, text: str) -> np.ndarray:
         """The unit vector of one query, shape (dimensions,)."""
-        return self._embed([text], QUERY_TASK, budget_s=CLOUD_TIMEOUT_S)[0]
+        return self._embed([text], QUERY_TASK, budget_s=self._timeout_s)[0]
 
     def embed_documents(self, texts: Sequence[str]) -> np.ndarray:
         """The unit vectors of `texts`, shape (len(texts), dimensions), embedded 200 at a time."""

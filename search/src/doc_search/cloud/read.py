@@ -8,11 +8,11 @@ docs leg alone serves it. That needs the stamp commit locally; without it the le
 note, and so is it, with the reason, when the cloud cannot answer at all. The local legs always
 answer.
 
-The leg runs inline in a search, so it is bounded three ways: every call to Vertex or Firestore has a
-timeout and no library retry (CLOUD_TIMEOUT_S), the whole leg gets a wall-clock deadline
-(CLOUD_DEADLINE_S, enforced on a worker thread, because a credential refresh is not covered by
-the call timeouts), and a failure is remembered for FAILURE_MEMORY_S so that the next searches skip the
-cloud at once instead of waiting for it to fail again.
+The leg runs inside a search (alongside the local legs, on its own thread), so it is bounded three ways:
+every call to Vertex or Firestore has a timeout and no library retry (`cloud.timeout_s`, 20 s by default),
+the whole leg gets a wall-clock deadline (`cloud.timeout_s` and 5 s more, enforced on a worker thread, because
+a credential refresh is not covered by the call timeouts), and a failure is remembered for FAILURE_MEMORY_S so
+that the next searches skip the cloud at once instead of waiting for it to fail again.
 
 `status_lines` reads the stamp document and git, never the collection.
 """
@@ -32,14 +32,13 @@ from ..config import CloudCfg
 from ..corpus import Corpus
 from ..repo import GitError, confine, diff_names, git, is_ancestor, norm_rel, rev_parse
 from ..types import Hit
-from . import CLOUD_TIMEOUT_S, CloudUnavailable, LazyClient, describe, has_class_named, import_module
+from . import CloudUnavailable, LazyClient, describe, has_class_named, import_module
 from .vertex import VertexEmbedder, rejected
 
 logger = logging.getLogger(__name__)
 
 STAMP_DOC = "index"
 STAMP_TTL_S = 60.0  # the stamp document is read at most this often
-CLOUD_DEADLINE_S = 20.0  # the longest a search waits for the whole leg
 FAILURE_MEMORY_S = 60.0  # after a failure the cloud is not asked again for this long
 CHANGED_TTL_S = 5.0  # the branch-changed set is recomputed at most this often (the local legs rescan on this scale)
 CHANGED_ENTRIES = 8
@@ -119,7 +118,8 @@ class CloudLeg:
 
     `embedder` embeds the query; `client` stands in for `firestore.Client` (tests), otherwise one is
     built on first use. `corpus_for` (the server's) lets `status` count only the doc files among the
-    branch-changed paths. `clock` times the caches and `deadline_s` is how long `hits` waits for the cloud.
+    branch-changed paths. `clock` times the caches and `deadline_s` is how long `hits` waits for the cloud
+    (default: `cfg.deadline_s`, the config's `timeout_s` and 5 s more).
     """
 
     def __init__(
@@ -130,7 +130,7 @@ class CloudLeg:
         *,
         corpus_for: Callable[[Path], Corpus] | None = None,
         clock: Callable[[], float] = time.monotonic,
-        deadline_s: float = CLOUD_DEADLINE_S,
+        deadline_s: float | None = None,
     ) -> None:
         if not cfg.firestore.project:
             raise CloudUnavailable("no project (set cloud.firestore.project or GOOGLE_CLOUD_PROJECT)")
@@ -141,7 +141,7 @@ class CloudLeg:
         self._db = LazyClient(self._make_db, clock=clock) if client is None else LazyClient(lambda: client)
         self._corpus_for = corpus_for
         self._clock = clock
-        self._deadline_s = deadline_s
+        self._deadline_s = cfg.deadline_s if deadline_s is None else deadline_s
         self._lock = threading.Lock()
         self._stamp: CorpusStamp | None = None
         self._stamp_at: float | None = None
@@ -149,6 +149,11 @@ class CloudLeg:
         self._down: tuple[float, str] | None = None  # (when, header note) of the last failed search
         self._prefilter_off = False  # the collection has no docType-prefixed vector index
         self._changed: OrderedDict[tuple[Path, str], _Changed] = OrderedDict()
+
+    @property
+    def deadline_s(self) -> float:
+        """How long `hits` waits for the whole leg."""
+        return self._deadline_s
 
     def _make_db(self) -> Any:
         firestore = import_module("google.cloud.firestore")
@@ -169,7 +174,7 @@ class CloudLeg:
                 raise CloudUnavailable(self._stamp_failure[1])
         try:
             document = self._db.get().collection(self._cfg.firestore.meta_collection).document(STAMP_DOC)
-            snapshot = document.get(timeout=CLOUD_TIMEOUT_S, retry=None)
+            snapshot = document.get(timeout=self._cfg.timeout_s, retry=None)
         except Exception as err:
             with self._lock:
                 self._stamp_failure = (self._clock(), describe(err))
@@ -252,7 +257,7 @@ class CloudLeg:
 
         worker = threading.Thread(target=run, name="doc-search-cloud", daemon=True)
         worker.start()
-        worker.join(self._deadline_s)
+        worker.join(min(self._deadline_s, threading.TIMEOUT_MAX))  # a huge `cloud.timeout_s` is valid, an overflow is not
         if worker.is_alive():
             raise TimeoutError(f"no answer within {self._deadline_s:g} s")
         if "error" in outcome:
@@ -302,8 +307,7 @@ class CloudLeg:
             self._prefilter_off = True
             return rows
 
-    @staticmethod
-    def _query(collection: Any, vector: Any, limit: int, doc_type: str | None) -> list[dict[str, Any]]:
+    def _query(self, collection: Any, vector: Any, limit: int, doc_type: str | None) -> list[dict[str, Any]]:
         base_query = import_module("google.cloud.firestore_v1.base_query")
         distance = import_module("google.cloud.firestore_v1.base_vector_query")
         vectors = import_module("google.cloud.firestore_v1.vector")
@@ -317,7 +321,7 @@ class CloudLeg:
             limit=limit,
             distance_result_field="vector_distance",
         )
-        return [snapshot.to_dict() or {} for snapshot in nearest.get(timeout=CLOUD_TIMEOUT_S, retry=None)]
+        return [snapshot.to_dict() or {} for snapshot in nearest.get(timeout=self._cfg.timeout_s, retry=None)]
 
     # -- status --------------------------------------------------------------------------------
 

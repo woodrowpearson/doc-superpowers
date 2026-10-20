@@ -8,6 +8,7 @@ scalars replace) and every value is checked, so a bad config fails loudly and na
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -19,6 +20,12 @@ INERT_LINE = "doc-search: not enabled (no docs/search/config.json)"
 CONFIG_REL = "docs/search/config.json"
 
 CONTENT_VALUES = ("code", "config", "docs", "all")
+
+# `cloud.timeout_s`: the longest any one call to Vertex or Firestore may take. 20 s because a flat
+# (unindexed) nearest-neighbour query over a large collection measured 3 to 14 s. The cloud leg of a
+# search is cut off DEADLINE_GRACE_S after that: a credential refresh has no timeout of ours.
+DEFAULT_TIMEOUT_S = 20.0
+DEADLINE_GRACE_S = 5.0
 
 DEFAULTS: dict[str, Any] = {
     "docs": {
@@ -38,6 +45,7 @@ DEFAULTS: dict[str, Any] = {
 
 # What `cloud` merges over when the config gives an object.
 CLOUD_DEFAULTS: dict[str, Any] = {
+    "timeout_s": DEFAULT_TIMEOUT_S,
     "vertex": {
         "project": None,
         "location": "us-central1",
@@ -94,6 +102,12 @@ class FirestoreCfg:
 class CloudCfg:
     vertex: VertexCfg
     firestore: FirestoreCfg
+    timeout_s: float = DEFAULT_TIMEOUT_S  # per call to Vertex or Firestore; none is retried by the library
+
+    @property
+    def deadline_s(self) -> float:
+        """How long a search waits for the whole cloud leg: one call's timeout, and a grace for what has none."""
+        return self.timeout_s + DEADLINE_GRACE_S
 
 
 @dataclass(frozen=True)
@@ -183,6 +197,20 @@ def _int(value: Any, key: str, *, minimum: int) -> int:
     return value
 
 
+def _seconds(value: Any, key: str) -> float:
+    """A duration: a number above zero and finite (a bool is an int subclass, and `true` is not a duration)."""
+    message = f"{key} must be a number > 0 (seconds)"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(message)
+    try:
+        seconds = float(value)  # an integer too large for a float overflows here
+    except OverflowError:
+        raise ConfigError(message) from None
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ConfigError(message)
+    return seconds
+
+
 def _docs(section: Mapping[str, Any]) -> DocsCfg:
     types = section["types"]
     if not isinstance(types, list):
@@ -249,4 +277,5 @@ def _cloud(value: Any, env_project: str | None) -> CloudCfg | None:
             meta_collection=_str(firestore["meta_collection"], "cloud.firestore.meta_collection"),
             base_ref=_str(firestore["base_ref"], "cloud.firestore.base_ref", nullable=True),
         ),
+        timeout_s=_seconds(merged["timeout_s"], "cloud.timeout_s"),
     )

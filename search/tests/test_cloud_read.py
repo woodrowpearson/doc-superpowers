@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 from fakes import DIMS, FakeFirestore, FakeGenai, text_vector, unit
 
-from doc_search.cloud import CLOUD_TIMEOUT_S, CloudUnavailable
+from doc_search.cloud import CloudUnavailable
 from doc_search.cloud.read import CloudLeg, CorpusStamp, DegradedLeg, build_cloud_leg, resolve_base_ref
 from doc_search.cloud.vertex import VertexEmbedder
 from doc_search.config import CloudCfg, Config, FirestoreCfg, VertexCfg, load_config
@@ -71,12 +71,13 @@ SHIPPING_CHUNK = "Orders ship from the nearest warehouse. The shipping fee is a 
 NO_PROJECT = "no project (set cloud.vertex.project or GOOGLE_CLOUD_PROJECT)"
 
 
-def cloud_cfg(*, base_ref: str | None = None, **vertex) -> CloudCfg:
+def cloud_cfg(*, base_ref: str | None = None, timeout_s: float | None = None, **vertex) -> CloudCfg:
     base = VertexCfg(project="p", location="us-central1", model="gemini-embedding-001", dimensions=DIMS)
     firestore = FirestoreCfg(
         project="p", database="(default)", collection="doc_chunks", meta_collection="corpus_meta", base_ref=base_ref
     )
-    return CloudCfg(vertex=replace(base, **vertex), firestore=firestore)
+    options = {} if timeout_s is None else {"timeout_s": timeout_s}  # unset: the config's own default
+    return CloudCfg(vertex=replace(base, **vertex), firestore=firestore, **options)
 
 
 def no_sleep(_: float) -> None:
@@ -154,15 +155,24 @@ def test_a_query_embedding_retries_within_one_budget() -> None:
         slept.append(seconds)
         clock.now += seconds
 
-    def embedder(genai: FakeGenai) -> VertexEmbedder:
+    def embedder(genai: FakeGenai, timeout_s: float = 12) -> VertexEmbedder:
         genai.on_call = lambda: setattr(clock, "now", clock.now + 5)  # every attempt takes 5 s
-        return VertexEmbedder(cloud_cfg(), client=genai, sleep=sleep, jitter=lambda: 0.0, clock=clock)
+        cfg = cloud_cfg(timeout_s=timeout_s)
+        return VertexEmbedder(cfg, client=genai, sleep=sleep, jitter=lambda: 0.0, clock=clock)
 
-    # a search is waiting: one more try fits in the budget (5 s + 1 s), a second does not (11 s + 2 s)
+    # a search is waiting, and the budget is `cloud.timeout_s` (12 s here): one more try fits in it
+    # (5 s + 1 s), a second does not (11 s + 2 s)
     genai = FakeGenai(script=[api_error(503, "UNAVAILABLE")] * 4)
     with pytest.raises(errors.ServerError):
         embedder(genai).embed_query("q")
     assert len(genai.calls) == 2 and slept == [1.0]
+
+    # a longer timeout leaves room for every retry
+    slept.clear()
+    genai = FakeGenai(script=[api_error(503, "UNAVAILABLE")] * 4)
+    with pytest.raises(errors.ServerError):
+        embedder(genai, timeout_s=60).embed_query("q")
+    assert len(genai.calls) == 4 and slept == [1.0, 2.0, 4.0]
 
     # indexing documents has no such budget
     slept.clear()
@@ -185,7 +195,10 @@ def test_vertex_unavailable_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
         VertexEmbedder(cloud_cfg(), client=short).embed_query("q")
 
 
-def test_vertex_builds_its_client_on_first_use(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(("timeout_s", "milliseconds"), [(None, 20_000), (7.5, 7_500), (3, 3_000)])
+def test_vertex_builds_its_client_on_first_use(
+    monkeypatch: pytest.MonkeyPatch, timeout_s: float | None, milliseconds: int
+) -> None:
     from google import genai
 
     built: list[dict] = []
@@ -195,7 +208,7 @@ def test_vertex_builds_its_client_on_first_use(monkeypatch: pytest.MonkeyPatch) 
         return FakeGenai()
 
     monkeypatch.setattr(genai, "Client", fake_client)
-    embedder = VertexEmbedder(cloud_cfg(project="proj", location="europe-west4"))
+    embedder = VertexEmbedder(cloud_cfg(project="proj", location="europe-west4", timeout_s=timeout_s))
     assert built == [], "constructing the embedder loads no credentials"
 
     embedder.embed_query("q")
@@ -204,7 +217,7 @@ def test_vertex_builds_its_client_on_first_use(monkeypatch: pytest.MonkeyPatch) 
     (kwargs,) = built
     http_options = kwargs.pop("http_options")
     assert kwargs == {"vertexai": True, "project": "proj", "location": "europe-west4"}
-    assert http_options.timeout == int(CLOUD_TIMEOUT_S * 1000), "genai counts HttpOptions.timeout in milliseconds"
+    assert http_options.timeout == milliseconds, "genai counts HttpOptions.timeout in milliseconds"
 
 
 def test_fake_firestore_models_the_client_surface() -> None:
@@ -399,17 +412,36 @@ def test_stamp_is_cached_for_sixty_seconds(git_repo) -> None:
     )
 
 
-def test_cloud_reads_have_a_timeout_and_no_library_retry(git_repo) -> None:
-    w = scene(git_repo)
+@pytest.mark.parametrize(("timeout_s", "expected"), [(None, 20.0), (3, 3), (45.5, 45.5)])
+def test_cloud_reads_have_a_timeout_and_no_library_retry(git_repo, timeout_s: float | None, expected: float) -> None:
+    w = scene(git_repo, timeout_s=timeout_s)
 
     w.leg.hits("refund", ALL, w.root, 30)
 
-    # firestore's own default retries ServiceUnavailable for up to 300 s: a read must not inherit it
-    assert 0 < CLOUD_TIMEOUT_S <= 10
+    # firestore's own default retries ServiceUnavailable for up to 300 s: a read must not inherit it.
+    # The timeout is the config's `cloud.timeout_s` (20 s unless it says otherwise), for each call
     assert w.fs.request_options == [
-        ("document_get", {"retry": None, "timeout": CLOUD_TIMEOUT_S}),
-        ("find_nearest", {"retry": None, "timeout": CLOUD_TIMEOUT_S}),
+        ("document_get", {"retry": None, "timeout": expected}),
+        ("find_nearest", {"retry": None, "timeout": expected}),
     ]
+
+
+@pytest.mark.parametrize(("timeout_s", "deadline"), [(None, 25.0), (3, 8.0), (40, 45.0)])
+def test_the_legs_deadline_is_the_timeout_and_five_seconds(git_repo, timeout_s: float | None, deadline: float) -> None:
+    w = scene(git_repo, timeout_s=timeout_s)
+
+    assert w.leg.deadline_s == deadline
+    # an explicit deadline (tests, a caller) still wins
+    cfg = cloud_cfg(timeout_s=timeout_s)
+    assert CloudLeg(cfg, VertexEmbedder(cfg, client=FakeGenai()), client=w.fs, deadline_s=1.5).deadline_s == 1.5
+
+
+def test_a_huge_timeout_is_not_an_overflow(git_repo) -> None:
+    w = scene(git_repo, timeout_s=1e300)  # valid, if absurd: the wait on the worker thread must not overflow
+
+    hits, note = w.leg.hits("refund", ALL, w.root, 30)
+
+    assert note is None and hits
 
 
 def test_a_failed_stamp_read_is_remembered(git_repo) -> None:

@@ -26,7 +26,7 @@ from doc_search.cloud.write import BaseRefError, CorpusRefused, IndexReport, Lea
 from doc_search.config import CONFIG_REL, DEFAULTS, INERT_LINE, load_config
 from doc_search.engines import IndexPool, WorktreeIndexes
 from doc_search.evaluate import EvalFileError, run_eval, score_ranking
-from doc_search.types import Hit
+from doc_search.types import Hit, SearchRequest
 
 SPEC_PATH = "docs/specs/SPEC-PAY-004.md"
 SHIPPING_PATH = "docs/shipping.md"
@@ -666,6 +666,56 @@ def test_eval_legs_and_decision_line(repo, run, tmp_path: Path) -> None:
     # per-kind breakdown under each leg
     for kind in ("paraphrase", "identifier", "legacy", "code"):
         assert sum(1 for line in done.lines if re.match(rf"\s+{kind}\s+\(1\)\s+recall@10 ", line)) == 4, kind
+
+
+OLD_PATH = "docs/old-gateway.md"
+OLD = "---\nstatus: deprecated\n---\n# Legacy gateway\n\nThe legacy gateway was retired after the migration.\n"
+SUPERSEDED_PATH = "docs/older-gateway.md"
+SUPERSEDED = "---\nstatus: superseded\n---\n# Older gateway\n\nThe older gateway notes of 2025.\n"
+
+
+def test_eval_scores_terminal_docs_on_the_docs_and_joined_legs(repo, run, tmp_path: Path) -> None:
+    """semble-single cannot filter on status, so the docs and all legs do not either: the comparison is fair."""
+    repo.write(OLD_PATH, OLD)
+    repo.write(SUPERSEDED_PATH, SUPERSEDED)
+    repo.commit("a deprecated doc and a superseded one")
+    path = cases_file(
+        tmp_path,
+        {"query": "legacy gateway retired migration", "expect": [OLD_PATH]},
+        {"query": "older gateway notes", "expect": [SUPERSEDED_PATH]},
+    )
+
+    done = run("eval", str(path), "--k", "10")
+
+    assert done.code == 0
+    assert "(terminal docs included)" in done.lines[0], done.lines[0]
+    scored = rows(done.out)
+    assert scored["docs"][0] == 1.0, "a deprecated and a superseded doc are found by the docs leg"
+    assert scored["all"][0] == 1.0
+    assert scored["semble-single"][0] == 1.0
+    # an ordinary search still hides them: only the eval widens the allowed set
+    hidden = run("query", "legacy gateway retired migration", "--scope", "docs")
+    assert OLD_PATH not in hidden.out and SUPERSEDED_PATH not in hidden.out
+
+
+def test_run_eval_asks_for_terminal_docs_and_the_cloud_alone_is_allowed_them(repo, tmp_path: Path) -> None:
+    repo.write(OLD_PATH, OLD)
+    repo.commit("a deprecated doc")
+    _, info, pool, corpus_for, searcher = eval_parts(repo)
+    cloud = StubCloud([OLD_PATH, SPEC_PATH])
+    asked: list[SearchRequest] = []
+    real = searcher.search
+    searcher.search = lambda req, worktree: asked.append(req) or real(req, worktree)  # type: ignore[method-assign]
+    path = cases_file(tmp_path, {"query": "legacy gateway", "expect": [OLD_PATH]})
+
+    report = run_eval(searcher, pool, path, 10, info.top, cloud=cloud, corpus_for=corpus_for)
+
+    by_scope = {req.scope: req.include_terminal for req in asked}
+    assert by_scope == {"docs": True, "code": False, "all": True}
+    assert report.recall("docs") == 1.0 and report.recall("all") == 1.0
+    assert report.recall("cloud") == 1.0, "the cloud leg alone is allowed the deprecated doc"
+    assert cloud.asked == [("legacy gateway", 3, 30)], "its allowed set holds all three docs, the deprecated one too"
+    assert "(terminal docs included)" in report.render().splitlines()[0]
 
 
 def test_eval_identifier_ranks_first(repo, run, tmp_path: Path) -> None:

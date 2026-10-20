@@ -16,7 +16,6 @@ from types import ModuleType
 from typing import Any
 
 EXTRA_HINT = "cloud extra not installed (uv sync --extra cloud)"
-CLOUD_TIMEOUT_S = 8.0  # the longest any one call to Vertex or Firestore may take; none is retried by the library
 CLIENT_RETRY_S = 300.0  # a failed client construction is not retried sooner: credential discovery can take ~10 s
 REASON_CHARS = 200
 
