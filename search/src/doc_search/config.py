@@ -3,6 +3,8 @@
 Without the file doc-search is inert (`load_config` returns None). With it, `{}` is a
 complete config: the file deep-merges over DEFAULTS (objects merge key by key, arrays and
 scalars replace) and every value is checked, so a bad config fails loudly and names its key.
+A key the defaults do not have, at any level, is an error too (`unknown key cloud.firestore.databse`):
+a misspelled key must not silently keep its default.
 """
 
 from __future__ import annotations
@@ -20,6 +22,8 @@ INERT_LINE = "doc-search: not enabled (no docs/search/config.json)"
 CONFIG_REL = "docs/search/config.json"
 
 CONTENT_VALUES = ("code", "config", "docs", "all")
+
+MAX_LIMIT = 50  # `search.default_limit`'s ceiling: the tools clamp a limit to 1-50
 
 # `cloud.timeout_s`: the longest any one call to Vertex or Firestore may take. 20 s because a flat
 # (unindexed) nearest-neighbour query over a large collection measured 3 to 14 s. The cloud leg of a
@@ -114,7 +118,7 @@ class CloudCfg:
 class SearchCfg:
     default_limit: int
     terminal_statuses: tuple[str, ...]
-    rescan_seconds: int | float
+    rescan_seconds: float
 
 
 @dataclass(frozen=True)
@@ -148,6 +152,7 @@ def load_config(top: Path, env: Mapping[str, str] = os.environ) -> Config | None
     if not isinstance(raw, dict):
         raise ConfigError(f"{CONFIG_REL}: the top level must be an object")
 
+    _reject_unknown(raw, DEFAULTS, "")
     merged = _merge(DEFAULTS, raw)
     docs = _docs(_section(merged, "docs"))
     code = _code(_section(merged, "code"))
@@ -167,6 +172,31 @@ def _merge(base: Mapping[str, Any], over: Mapping[str, Any]) -> dict[str, Any]:
         else:
             out[key] = value
     return out
+
+
+# The keys of one `docs.types` rule.
+_TYPE_RULE_KEYS = {"glob": None, "type": None}
+
+
+def _reject_unknown(given: Mapping[str, Any], known: Mapping[str, Any], prefix: str) -> None:
+    """Raise ConfigError naming the first key of `given` (dotted from the top) that `known` does not have.
+
+    Recurses into every object both sides have as an object; `cloud` (null in DEFAULTS) is checked
+    against CLOUD_DEFAULTS, and each `docs.types` rule against its two keys. A value of the wrong type is
+    left for the type checks, which name it.
+    """
+    for key, value in given.items():
+        if key not in known:
+            raise ConfigError(f"unknown key {prefix}{key}")
+        dotted = f"{prefix}{key}"
+        if dotted == "cloud" and isinstance(value, dict):
+            _reject_unknown(value, CLOUD_DEFAULTS, "cloud.")
+        elif dotted == "docs.types" and isinstance(value, list):
+            for i, rule in enumerate(value):
+                if isinstance(rule, dict):
+                    _reject_unknown(rule, _TYPE_RULE_KEYS, f"docs.types[{i}].")
+        elif isinstance(value, dict) and isinstance(known[key], dict):
+            _reject_unknown(value, known[key], f"{dotted}.")
 
 
 def _section(root: Mapping[str, Any], key: str, label: str | None = None) -> Mapping[str, Any]:
@@ -190,23 +220,28 @@ def _str_list(value: Any, key: str) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _int(value: Any, key: str, *, minimum: int) -> int:
+def _int(value: Any, key: str, *, minimum: int, maximum: int | None = None) -> int:
     # bool is an int subclass, and `true` is not a limit
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise ConfigError(f"{key} must be an integer >= {minimum}")
+    wrong = isinstance(value, bool) or not isinstance(value, int)
+    if wrong or value < minimum or (maximum is not None and value > maximum):
+        bounds = f">= {minimum}" if maximum is None else f"from {minimum} to {maximum}"
+        raise ConfigError(f"{key} must be an integer {bounds}")
     return value
 
 
-def _seconds(value: Any, key: str) -> float:
-    """A duration: a number above zero and finite (a bool is an int subclass, and `true` is not a duration)."""
-    message = f"{key} must be a number > 0 (seconds)"
+def _seconds(value: Any, key: str, *, zero: bool = False) -> float:
+    """A duration: a finite number above zero (or zero too, with `zero`).
+
+    A bool is an int subclass, and `true` is not a duration.
+    """
+    message = f"{key} must be a number {'>=' if zero else '>'} 0 (seconds)"
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigError(message)
     try:
         seconds = float(value)  # an integer too large for a float overflows here
     except OverflowError:
         raise ConfigError(message) from None
-    if not math.isfinite(seconds) or seconds <= 0:
+    if not math.isfinite(seconds) or seconds < 0 or (seconds == 0 and not zero):
         raise ConfigError(message)
     return seconds
 
@@ -245,13 +280,10 @@ def _code(section: Mapping[str, Any]) -> CodeCfg:
 
 
 def _search(section: Mapping[str, Any]) -> SearchCfg:
-    rescan = section["rescan_seconds"]
-    if isinstance(rescan, bool) or not isinstance(rescan, (int, float)) or rescan < 0:
-        raise ConfigError("search.rescan_seconds must be a number >= 0")
     return SearchCfg(
-        default_limit=_int(section["default_limit"], "search.default_limit", minimum=1),
+        default_limit=_int(section["default_limit"], "search.default_limit", minimum=1, maximum=MAX_LIMIT),
         terminal_statuses=_str_list(section["terminal_statuses"], "search.terminal_statuses"),
-        rescan_seconds=rescan,
+        rescan_seconds=_seconds(section["rescan_seconds"], "search.rescan_seconds", zero=True),
     )
 
 

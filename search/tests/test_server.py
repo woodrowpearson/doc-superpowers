@@ -215,6 +215,81 @@ def test_search_tool_end_to_end(git_repo, tiny_model: str) -> None:
     assert "docs/shipping.md" not in call(server, "search", {"query": "refund", "doc_type": "spec", "scope": "docs"})
 
 
+def hit_count(text: str) -> int:
+    """How many numbered hits a search answer lists."""
+    return sum(1 for line in text.splitlines() if line[:1].isdigit() and ". [" in line)
+
+
+def test_search_limit_defaults_to_the_config(git_repo, tiny_model: str) -> None:
+    """No `limit`: the config's `search.default_limit`; an explicit one still wins (and is clamped)."""
+    repo = git_repo()
+    seed(repo, tiny_model)
+    repo.write(
+        "docs/search/config.json",
+        json.dumps({"docs": {"model": tiny_model}, "code": {"model": tiny_model}, "search": {"default_limit": 1}}),
+    )
+    repo.commit("limit 1")
+    cfg = load_config(repo.root, {})
+    pool = IndexPool(cfg)
+    server = build_server(repo.root, pool=pool)
+    try:
+        default = call(server, "search", {"query": "refund rounding half up"})
+        explicit = call(server, "search", {"query": "refund rounding half up", "limit": 3})
+    finally:
+        ready(pool, repo.root)
+
+    assert hit_count(default) == 1, default
+    assert " · 1 hit" in default.splitlines()[0], default
+    assert hit_count(explicit) == 3, explicit
+
+
+def test_search_limit_schema_has_no_fixed_default(git_repo, tiny_model: str) -> None:
+    repo, pool, server = enabled(git_repo, tiny_model)
+
+    async def go():
+        async with Client(server) as client:
+            return await client.list_tools()
+
+    listed = anyio.run(go)
+    ready(pool, repo.root)
+    search = next(tool for tool in listed.tools if tool.name == "search")
+    limit = search.input_schema["properties"]["limit"]
+    assert limit.get("default") is None, limit
+    assert "search.default_limit" in limit["description"]
+
+
+@pytest.mark.parametrize(
+    "filters",
+    [
+        {"doc_type": ""},
+        {"doc_type": "   "},
+        {"doc_type": ["", " "]},
+        {"path_prefix": ""},
+        {"path_prefix": "  "},
+        {"doc_type": [""], "path_prefix": " "},
+    ],
+    ids=["type-empty", "type-blank", "type-list-blank", "prefix-empty", "prefix-blank", "both"],
+)
+def test_blank_filters_are_no_filter(git_repo, tiny_model: str, filters: dict) -> None:
+    """An empty or blank `doc_type` / `path_prefix` filters nothing out, where it used to filter every doc out."""
+    repo, pool, server = enabled(git_repo, tiny_model)
+    ready(pool, repo.root)
+
+    text = call(server, "search", {"query": "refund rounding half up", "scope": "docs", **filters})
+
+    assert "[doc] docs/specs/SPEC-PAY-004.md" in text, text
+
+
+def test_blank_doc_type_beside_a_real_one_keeps_the_real_one(git_repo, tiny_model: str) -> None:
+    repo, pool, server = enabled(git_repo, tiny_model)
+    ready(pool, repo.root)
+
+    text = call(server, "search", {"query": "refund shipping order", "scope": "docs", "doc_type": ["", "spec"]})
+
+    assert "docs/specs/SPEC-PAY-004.md" in text
+    assert "docs/shipping.md" not in text
+
+
 def test_search_one_line_answers_pass_through(git_repo, tiny_model: str) -> None:
     repo, pool, server = enabled(git_repo, tiny_model)
     ready(pool, repo.root)
