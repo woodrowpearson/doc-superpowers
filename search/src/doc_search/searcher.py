@@ -1,12 +1,19 @@
 """The join: one request in, ranked docs and code hits out (design section 6).
 
-Three legs feed a response. The *docs leg* is semble's docs index searched with an exact
-pre-filter: the corpus files that pass `doc_type`, `path_prefix` and the terminal filter, among the
-files that index holds. The *code leg* is the code index; its hits under corpus paths become doc
-hits when they pass the filters and are dropped otherwise, the rest stay code. The optional *cloud
-leg* is another ranked list of doc chunks. Docs are fused by RRF over the docs and cloud legs and
-collapsed to one hit per file; with `scope=all` they are interleaved with the code leg under a
-per-kind floor. Only the hits that are returned are enriched (heading path, doc type, status,
+Legs feed a response. The *docs leg* is semble's docs index searched with an exact pre-filter: the
+corpus files that pass `doc_type`, `path_prefix` and the terminal filter, among the files that index
+holds. The *ident leg* ranks the allowed files whose path, title or front matter spells an
+identifier of the query (`ADR-114`, `chat-70`): semble's BM25 drops tokens that start with a digit,
+so the number of an id is invisible to it. The optional *cloud leg* is another ranked list of doc
+chunks. The *code leg* is the code index; its hits under corpus paths become doc hits when they
+pass the filters and are dropped otherwise, the rest stay code (with `scope=docs` the code index is
+asked only about the allowed files it holds, which reaches corpus files of a code type such as
+`.jsx` wireframes).
+
+Docs are fused at file level (`fusion.fuse_by_file`): every leg is collapsed to one rank per file,
+RRF runs over those rankings, and a file is shown by its best local docs chunk, else the cloud's
+chunk. With `scope=all` the fused docs are interleaved with the code leg under a per-kind floor, on
+the same score scale. Only the hits that are returned are enriched (heading path, doc type, status,
 cross-links), and doc metadata is only ever read for paths of the corpus.
 
 A first build can outlast the wait; the pool then says which half is ready and the answer comes
@@ -25,12 +32,13 @@ from pathlib import Path
 from typing import Protocol
 
 from semble import SembleIndex
+from semble.types import Chunk
 from semble.utils import resolve_model_name
 
 from .config import Config
 from .corpus import Corpus
 from .engines import Building, IndexPool, WorktreeIndexes
-from .fusion import collapse_by_file, interleave_with_floor, rrf
+from .fusion import fuse_by_file, interleave_with_floor
 from .repo import GitError, RepoInfo, norm_rel
 from .types import HeaderInfo, Hit, SearchRequest, SearchResponse
 
@@ -41,6 +49,16 @@ MAX_LIMIT = 50
 DOCS_FETCH = 3  # the docs and cloud legs fetch limit x 3 chunks, the code leg limit x 2
 CODE_FETCH = 2
 MEMO_ENTRIES = 32
+MEMO_WORKTREES = 4
+MAX_IDENT_TOKENS = 8
+
+# docs legs, in the order they enter the RRF (the earlier leg wins an exact tie: an exact identifier
+# match beats a file that only ranks first by similarity) and in the order a leg's chunk represents a file
+RANK_ORDER = ("ident", "docs", "cloud", "code")
+PREFER = ("docs", "cloud", "code", "ident")
+
+_TOKEN_STRIP = "\"'`,;:!?()[]{}<>.\u201c\u201d\u2018\u2019"
+_TOKEN_MARKS = frozenset("-_./")
 
 
 class CloudLeg(Protocol):
@@ -49,6 +67,24 @@ class CloudLeg(Protocol):
     def hits(self, query: str, allowed: set[str], worktree: Path, limit: int) -> tuple[list[Hit], str | None]:
         """Up to `limit` ranked doc chunks for `query`, never from outside `allowed`, and a header note or None."""
         ...
+
+
+def identifier_tokens(query: str) -> list[str]:
+    """The words of `query` that look like identifiers: ids, keys, file names, paths.
+
+    A word qualifies when, with the punctuation around it stripped (quotes, commas, brackets, a
+    final full stop), it has at least 4 characters and contains a digit or one of `- _ . /`.
+    Each token once whatever its case, first spelling kept, at most MAX_IDENT_TOKENS.
+    """
+    found: dict[str, str] = {}
+    for word in query.split():
+        token = word.strip(_TOKEN_STRIP)
+        if len(token) < 4 or not (any(c.isdigit() for c in token) or _TOKEN_MARKS & set(token)):
+            continue
+        found.setdefault(token.lower(), token)
+        if len(found) == MAX_IDENT_TOKENS:
+            break
+    return list(found.values())
 
 
 def model_label(model: str | None) -> str:
@@ -75,11 +111,37 @@ class _Engine:
         return self.problem or "no index"
 
 
+@dataclass(frozen=True)
+class _Row:
+    """What the ident leg matches an allowed file on, lowercased once."""
+
+    path: str
+    path_l: str
+    title: str
+    title_l: str
+    values: frozenset[str]  # the scalar front-matter values
+
+    def tier(self, token: str) -> int | None:
+        """0 when `token` is in the path, 1 in the title, 2 when it is a front-matter value, else None."""
+        if token in self.path_l:
+            return 0
+        if token in self.title_l:
+            return 1
+        return 2 if token in self.values else None
+
+
 @dataclass
 class _Memo:
     at: float
     listing: list[str]
     allowed: frozenset[str]
+
+
+@dataclass
+class _RowsMemo:
+    at: float
+    listing: list[str]
+    rows: tuple[_Row, ...]
 
 
 class Searcher:
@@ -109,6 +171,7 @@ class Searcher:
         self._clock = clock
         self._lock = threading.Lock()
         self._memo: OrderedDict[tuple, _Memo] = OrderedDict()
+        self._rows: OrderedDict[Path, _RowsMemo] = OrderedDict()  # per worktree: the ident leg's view of the corpus
 
     # -- entry point ---------------------------------------------------------------------
 
@@ -155,13 +218,21 @@ class Searcher:
                 cloud_leg, note = self._cloud_leg(query, limit, allowed, worktree)
                 if note:
                     notes.append(note)
-        docs_fused, docs_scores = _fuse_docs(docs_leg, cloud_leg)
+        ident_leg = self._ident_leg(query, limit, allowed, corpus, docs.index, docs_leg, worktree)
 
         code_leg: list[Hit] = []
-        if scope != "docs" and code.usable:
-            shown = {hit.path for hit in docs_fused}
+        code_docs: list[Hit] = []  # scope=docs: corpus files the code index holds, as one more docs leg
+        if code.usable and scope != "docs":
+            shown = {hit.path for hit in docs_leg + cloud_leg + ident_leg}
             code_leg = self._code_leg(query, limit, code.index, scope, corpus, allowed, shown, req, worktree)
+        elif code.usable and allowed:
+            code_docs = self._code_leg(query, limit, code.index, scope, corpus, allowed, set(), req, worktree)
 
+        docs_fused, docs_scores = fuse_by_file(
+            {"ident": ident_leg, "docs": docs_leg, "cloud": cloud_leg, "code": code_docs},
+            rank_order=RANK_ORDER,
+            prefer=PREFER,
+        )
         if scope == "docs":
             final = docs_fused[:limit]
         elif scope == "code":
@@ -300,32 +371,114 @@ class Searcher:
         req: SearchRequest,
         worktree: Path,
     ) -> list[Hit]:
+        """The code index's hits for a scope.
+
+        `code` and `all`: code hits stay code; a hit under a corpus path is dropped for `code`, and
+        for `all` becomes one doc hit per file when the file is allowed and no other leg shows it.
+        `docs`: the index is asked about the allowed files it holds and nothing else, and every hit
+        is a doc hit (one per file).
+        """
         options: dict = {}
-        if req.path_prefix:
+        if scope == "docs":
+            held = sorted(allowed & self._pool.indexed_files(worktree, "code"))
+            if not held:  # see _docs_leg: an empty filter must not reach semble
+                return []
+            options["filter_paths"] = held
+        elif req.path_prefix:
             prefix = norm_rel(req.path_prefix)
             under = sorted(p for p in self._pool.indexed_files(worktree, "code") if p.startswith(prefix))
-            if not under:  # see _docs_leg: an empty filter must not reach semble
+            if not under:
                 return []
             options["filter_paths"] = under
         out: list[Hit] = []
         converted: dict[str, int] = {}  # corpus path -> its place in `out`
         for r in index.search(query, top_k=limit * CODE_FETCH, **options):
             chunk = r.chunk
-            if not corpus.contains(chunk.file_path):
-                out.append(
-                    Hit("code", chunk.file_path, chunk.start_line, chunk.end_line, chunk.content, legs=("code",))
-                )
-            elif scope == "all" and chunk.file_path in allowed and chunk.file_path not in shown_docs:
-                # a corpus file the docs index did not return: it is a doc, once per file
-                place = converted.get(chunk.file_path)
+            path = chunk.file_path
+            if not corpus.contains(path):
+                if scope != "docs":
+                    out.append(Hit("code", path, chunk.start_line, chunk.end_line, chunk.content, legs=("code",)))
+            elif scope != "code" and path in allowed and (scope == "docs" or path not in shown_docs):
+                place = converted.get(path)
                 if place is None:
-                    converted[chunk.file_path] = len(out)
-                    out.append(
-                        Hit("doc", chunk.file_path, chunk.start_line, chunk.end_line, chunk.content, legs=("code",))
-                    )
+                    converted[path] = len(out)
+                    out.append(Hit("doc", path, chunk.start_line, chunk.end_line, chunk.content, legs=("code",)))
                 else:
                     out[place] = replace(out[place], more_in_file=out[place].more_in_file + 1)
         return out
+
+    def _ident_leg(
+        self,
+        query: str,
+        limit: int,
+        allowed: frozenset[str],
+        corpus: Corpus,
+        index: SembleIndex | None,
+        docs_leg: list[Hit],
+        worktree: Path,
+    ) -> list[Hit]:
+        """The allowed files that spell an identifier of the query, best first.
+
+        Tokens are matched without case: first the files whose path holds one (shorter path first,
+        then path order), then the files whose title holds one, then those with a front-matter value
+        equal to one. Nothing reads file contents here: path, title and front matter come from the
+        corpus's cached parse, gathered once per corpus listing and `search.rescan_seconds`.
+
+        A file is shown by the docs leg's best chunk of it when there is one, else by its first chunk
+        in the docs index, else by a stand-in at line 1 with the title as the text.
+        """
+        tokens = [token.lower() for token in identifier_tokens(query)]
+        if not tokens or not allowed:
+            return []
+        matches: list[tuple[int, int, str, _Row]] = []
+        for row in self._ident_rows(corpus, worktree):
+            if row.path not in allowed:
+                continue
+            tiers = [tier for tier in (row.tier(token) for token in tokens) if tier is not None]
+            if tiers:
+                matches.append((min(tiers), len(row.path), row.path, row))
+        matches.sort(key=lambda match: match[:3])
+        rows = [match[3] for match in matches[: limit * DOCS_FETCH]]
+
+        best_local: dict[str, Hit] = {}
+        for hit in docs_leg:
+            best_local.setdefault(hit.path, hit)
+        wanted = {row.path for row in rows if row.path not in best_local}
+        first = _first_chunks(index, wanted & self._pool.indexed_files(worktree, "docs")) if index and wanted else {}
+        out: list[Hit] = []
+        for row in rows:
+            local = best_local.get(row.path)
+            chunk = first.get(row.path)
+            if local is not None:
+                out.append(replace(local, legs=("ident",), more_in_file=0))
+            elif chunk is not None:
+                out.append(Hit("doc", row.path, chunk.start_line, chunk.end_line, chunk.content, legs=("ident",)))
+            else:
+                out.append(Hit("doc", row.path, 1, 1, row.title, legs=("ident",)))
+        return out
+
+    def _ident_rows(self, corpus: Corpus, worktree: Path) -> tuple[_Row, ...]:
+        """A row per corpus file, whatever the filters: shared by every query of the worktree."""
+        listing = corpus.files()
+        now = self._clock()
+        with self._lock:
+            memo = self._rows.get(worktree)
+            if memo and now - memo.at < self.cfg.search.rescan_seconds and memo.listing == listing:
+                return memo.rows
+        built = []
+        for path in listing:
+            meta = corpus.meta(path)
+            if meta is None:
+                continue
+            values = frozenset(value.strip().lower() for value in corpus.front_matter(path).values())
+            built.append(_Row(path, path.lower(), meta.title, meta.title.lower(), values))
+        entry = _RowsMemo(at=now, listing=listing, rows=tuple(built))
+        with self._lock:
+            self._rows[worktree] = entry
+            self._rows.move_to_end(worktree)
+            while len(self._rows) > MEMO_WORKTREES:
+                self._rows.popitem(last=False)
+        return entry.rows
 
     # -- enrichment --------------------------------------------------------------------------------
 
@@ -355,24 +508,14 @@ def _building_line(got: WorktreeIndexes | Building, worktree: Path) -> str:
     )
 
 
-def _fuse_docs(docs_leg: list[Hit], cloud_leg: list[Hit]) -> tuple[list[Hit], list[float]]:
-    """RRF over the docs and cloud legs, one hit per file, with each kept hit's fused score."""
-    by_key: dict[tuple[str, int, int], Hit] = {}
-    ranked: list[list[tuple[str, int, int]]] = []
-    for leg in (docs_leg, cloud_leg):
-        keys = []
-        for hit in leg:
-            key = (hit.path, hit.start_line, hit.end_line)
-            seen = by_key.get(key)
-            if seen is None:
-                by_key[key] = hit
-            else:  # the same chunk from both legs: the first leg's text, both legs named
-                by_key[key] = replace(seen, legs=seen.legs + tuple(leg for leg in hit.legs if leg not in seen.legs))
-            keys.append(key)
-        ranked.append(keys)
-    fused = rrf(ranked)
-    hits = collapse_by_file([by_key[key] for key, _ in fused])
-    best: dict[str, float] = {}
-    for key, score in fused:
-        best.setdefault(key[0], score)
-    return hits, [best[hit.path] for hit in hits]
+def _first_chunks(index: SembleIndex, paths: set[str]) -> dict[str, Chunk]:
+    """The chunk of each of `paths` that starts first, in one pass over the index."""
+    found: dict[str, Chunk] = {}
+    if not paths:
+        return found
+    for chunk in index.chunks:
+        if chunk.file_path in paths:
+            seen = found.get(chunk.file_path)
+            if seen is None or chunk.start_line < seen.start_line:
+                found[chunk.file_path] = chunk
+    return found

@@ -531,15 +531,13 @@ def test_cloud_leg_is_fused_filtered_and_noted(git_repo, tiny_model: str) -> Non
     seed(repo)
     plain = make_world(repo, tiny_model)
     base = plain.search("shipping fee flat rate", scope="docs", limit=10)
-    first = base.hits[0]
-    # the cloud finds the very chunk the local docs leg ranks LAST, and one path the filters forbid
-    last = base.hits[-1]
+    first, last = base.hits[0], base.hits[-1]
     assert last.path != first.path
+    # the cloud finds the file the local docs leg ranks LAST, in a chunk with other lines (its chunker
+    # cuts differently), and one path the filters forbid
+    remote = replace(last, start_line=100, end_line=130, snippet="remote copy", legs=("cloud",))
     cloud = FakeCloud(
-        answer=[
-            cloud_hit("docs/not-allowed.md"),
-            replace(last, snippet="remote copy", legs=("cloud",), heading_path=(), doc_type=None, links=()),
-        ],
+        answer=[cloud_hit("docs/not-allowed.md"), remote],
         note="cloud leg skipped 3 branch-changed paths",
     )
     world = make_world(repo, tiny_model, cloud=cloud)
@@ -551,10 +549,12 @@ def test_cloud_leg_is_fused_filtered_and_noted(git_repo, tiny_model: str) -> Non
     assert allowed == {"docs/specs/SPEC-PAY-004.md", "docs/specs/SPEC-PAY-005.md", "docs/shipping.md"}
     assert worktree == repo.root and fetch == 30  # limit x 3
     assert "docs/not-allowed.md" not in paths(resp)
-    # found by both legs, so it climbs above the chunks only the docs leg found
+    assert len(set(paths(resp))) == len(resp.hits)
+    # both legs name the file, so it climbs above the files only the docs leg found
     assert resp.hits[0].path == last.path
     assert resp.hits[0].legs == ("docs", "cloud")
-    assert resp.hits[0].snippet == last.snippet, "the local chunk wins the text"
+    assert (resp.hits[0].start_line, resp.hits[0].snippet) == (last.start_line, last.snippet), "the local chunk wins"
+    assert resp.hits[0].more_in_file == last.more_in_file
     assert resp.header.notes == ("cloud leg skipped 3 branch-changed paths",)
     assert resp.header.cloud == "cloud"  # no cloud config: the label is generic
     assert render_search(resp).splitlines()[0].count("(+cloud: cloud)") == 1
@@ -686,3 +686,371 @@ def test_status_edit_is_seen_after_the_rescan_interval(git_repo, tiny_model: str
     clock.now += 6
     assert "docs/shipping.md" not in paths(world.search("shipping", scope="docs"))
     assert "docs/shipping.md" in paths(world.search("shipping", scope="docs", include_terminal=True))
+
+
+# --- file-level fusion ---------------------------------------------------------------------------------
+
+
+@dataclass
+class FakeChunk:
+    file_path: str
+    start_line: int
+    end_line: int
+    content: str
+
+
+@dataclass
+class FakeResult:
+    chunk: FakeChunk
+    score: float = 0.0
+
+
+class FakeIndex:
+    """A semble-shaped index that answers in a fixed order and records its calls."""
+
+    def __init__(self, chunks: list[FakeChunk]) -> None:
+        self.chunks = chunks
+        self.calls: list[tuple[str, int, list[str] | None]] = []
+
+    def search(self, query, top_k=10, filter_paths=None, **kwargs):
+        self.calls.append((query, top_k, None if filter_paths is None else list(filter_paths)))
+        found = [FakeResult(c) for c in self.chunks if filter_paths is None or c.file_path in filter_paths]
+        return found[:top_k]
+
+
+def fake_searcher(repo, cfg: Config, docs: FakeIndex | None, code: FakeIndex | None, **kw) -> Searcher:
+    indexes = WorktreeIndexes(docs=docs, code=code)
+    pool = FakePool(
+        indexes,
+        docs={c.file_path for c in docs.chunks} if docs else (),
+        code={c.file_path for c in code.chunks} if code else (),
+    )
+    return stub_searcher(cfg, repo, pool, **kw)
+
+
+def test_a_long_doc_does_not_push_docs_below_their_fair_share(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    for i in range(10):
+        repo.write(f"docs/d{i}.md", f"# Doc {i}\n\nrefund rounding {i}.\n")
+        repo.write(f"src/c{i}.py", f"def refund_{i}():\n    return {i}\n")
+    repo.commit("many")
+    cfg = make_cfg(repo, tiny_model)
+    # d0 has three chunks among the top ones: by chunk rank d1 would be 4th and d2 6th
+    docs = FakeIndex(
+        [
+            FakeChunk("docs/d0.md", 1, 3, "d0 a"),
+            FakeChunk("docs/d0.md", 4, 6, "d0 b"),
+            FakeChunk("docs/d1.md", 1, 3, "d1 a"),
+            FakeChunk("docs/d0.md", 7, 9, "d0 c"),
+            FakeChunk("docs/d2.md", 1, 3, "d2 a"),
+        ]
+        + [FakeChunk(f"docs/d{i}.md", 1, 3, f"d{i} a") for i in range(3, 10)]
+    )
+    code = FakeIndex([FakeChunk(f"src/c{i}.py", 1, 2, f"c{i}") for i in range(10)])
+    searcher = fake_searcher(repo, cfg, docs, code)
+
+    resp = searcher.search(SearchRequest(query="refund rounding", limit=10), repo.root)
+
+    assert isinstance(resp, SearchResponse)
+    assert paths(resp) == [
+        "docs/d0.md", "src/c0.py", "docs/d1.md", "src/c1.py", "docs/d2.md",
+        "src/c2.py", "docs/d3.md", "src/c3.py", "docs/d4.md", "src/c4.py",
+    ]  # fmt: skip
+    assert len(paths(resp, "doc")) == len(paths(resp, "code")) == 5
+    assert resp.hits[0].more_in_file == 2 and resp.hits[0].snippet == "d0 a"
+
+
+def test_cloud_agreement_counts_per_file_in_scope_all(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    for i in range(6):
+        repo.write(f"docs/d{i}.md", f"# Doc {i}\n\nrefund rounding {i}.\n")
+        repo.write(f"src/c{i}.py", f"def refund_{i}():\n    return {i}\n")
+    repo.commit("many")
+    cfg = make_cfg(repo, tiny_model)
+    docs = FakeIndex([FakeChunk(f"docs/d{i}.md", 1, 3, f"d{i} local") for i in range(6)])
+    code = FakeIndex([FakeChunk(f"src/c{i}.py", 1, 2, f"c{i}") for i in range(6)])
+    # the cloud's chunk of d3 has other lines than the local one, and its rank is 1
+    cloud = FakeCloud(answer=[cloud_hit("docs/d3.md", 40, 60), cloud_hit("docs/d1.md", 70, 90)])
+    searcher = fake_searcher(repo, cfg, docs, code, cloud=cloud)
+
+    resp = searcher.search(SearchRequest(query="refund rounding", limit=6), repo.root)
+
+    assert isinstance(resp, SearchResponse)
+    docs_hits = [h for h in resp.hits if h.kind == "doc"]
+    # d1 (docs rank 2, cloud rank 2: 2/62) and d3 (docs rank 4, cloud rank 1: 1/64 + 1/61) rise above d0 (1/61)
+    assert [h.path for h in docs_hits][:3] == ["docs/d1.md", "docs/d3.md", "docs/d0.md"]
+    assert {h.path: h.legs for h in docs_hits}["docs/d3.md"] == ("docs", "cloud")
+    assert {h.path: h.start_line for h in docs_hits}["docs/d3.md"] == 1, "the local chunk represents the file"
+
+
+# --- the exact-identifier docs leg ---------------------------------------------------------------------
+
+
+def write_notes(repo, count: int = 6) -> None:
+    for i in range(count):
+        repo.write(f"docs/note{i}.md", f"# Note {i}\n\nqueue event handler {i}.\n")
+
+
+@pytest.mark.parametrize("scope", ["docs", "all"])
+@pytest.mark.parametrize("limit", [1, 10])
+def test_ident_in_a_filename_only(git_repo, tiny_model: str, scope: str, limit: int) -> None:
+    repo = git_repo()
+    seed(repo)
+    write_notes(repo)
+    repo.write("docs/adr/ADR-114-foo.md", "# Caching decision\n\nWe use a queue for the event handler.\n")
+    repo.commit("adr")
+    world = make_world(repo, tiny_model)
+
+    resp = world.search("ADR-114", scope=scope, limit=limit)
+
+    assert resp.hits[0].path == "docs/adr/ADR-114-foo.md"
+    assert "ident" in resp.hits[0].legs
+    assert resp.hits[0].doc_type == "adr"
+
+
+def test_ident_in_the_title_only(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    write_notes(repo)
+    repo.write("docs/retention.md", "# SPEC-DATA-005: data retention\n\nWe keep the data for a year.\n")
+    repo.write("docs/other.md", "# SPEC-DATA-006: other data\n\nWe keep the data for a year.\n")
+    repo.commit("titles")
+    world = make_world(repo, tiny_model)
+
+    for limit in (1, 10):
+        resp = world.search("spec-data-005", scope="docs", limit=limit)
+        assert resp.hits[0].path == "docs/retention.md"
+        assert "ident" in resp.hits[0].legs
+
+
+def test_ident_in_front_matter_only(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    write_notes(repo)
+    repo.write("docs/items/a.md", "---\nkey: chat-70\nstatus: open\n---\n# Streaming replies\n\nevent handler.\n")
+    repo.write("docs/items/b.md", "---\nkey: chat-700\n---\n# Other\n\nevent handler.\n")
+    repo.write("docs/items/c.md", "---\nkey: chat-71\n---\n# Another\n\nevent handler.\n")
+    repo.commit("items")
+    world = make_world(repo, tiny_model)
+
+    resp = world.search("chat-70", scope="docs", limit=1)
+    assert [h.path for h in resp.hits] == ["docs/items/a.md"]
+    assert "ident" in resp.hits[0].legs
+    # equality, not substring: chat-700 and chat-71 are other keys
+    everything = world.search("chat-70", scope="docs", limit=10)
+    idents = [h.path for h in everything.hits if "ident" in h.legs]
+    assert idents == ["docs/items/a.md"]
+
+
+def test_ident_plain_words_add_nothing(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    repo.write("docs/adr/ADR-114-foo.md", "# Caching decision\n\nWe use a queue.\n")
+    repo.commit("adr")
+    world = make_world(repo, tiny_model)
+
+    for scope in ("docs", "all"):
+        resp = world.search("refund rounding total of the order", scope=scope, limit=10)
+        assert resp.hits
+        assert all("ident" not in hit.legs for hit in resp.hits)
+
+
+def test_ident_respects_the_filters(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    repo.write("docs/adr/ADR-114-foo.md", "---\nstatus: deprecated\n---\n# Caching decision\n\nWe use a queue.\n")
+    repo.commit("adr")
+    world = make_world(repo, tiny_model)
+    adr = "docs/adr/ADR-114-foo.md"
+
+    def ids(**kw) -> list[str]:
+        resp = world.search("ADR-114", scope="docs", limit=10, **kw)
+        return [h.path for h in resp.hits if "ident" in h.legs]
+
+    assert ids() == [], "a deprecated doc is out unless terminal docs are asked for"
+    assert ids(include_terminal=True) == [adr]
+    assert ids(include_terminal=True, doc_type=("adr",)) == [adr]
+    assert ids(include_terminal=True, doc_type=("spec",)) == []
+    assert ids(include_terminal=True, path_prefix="docs/adr/") == [adr]
+    assert ids(include_terminal=True, path_prefix="docs/specs/") == []
+
+
+def test_ident_tiers_then_shorter_path_then_path_order(git_repo, tiny_model: str, monkeypatch) -> None:
+    repo = git_repo()
+    seed(repo)
+    names = ["docs/zed-9.md", "docs/y/zed-9.md", "docs/x/zed-9.md", "docs/zed-9-longer-name.md"]
+    for name in names:
+        repo.write(name, f"# Page {name}\n\nqueue event handler.\n")
+    repo.write("docs/title-hit.md", "# About ZED-9\n\nqueue event handler.\n")
+    repo.write("docs/fm-hit.md", "---\nkey: Zed-9\n---\n# Front matter\n\nqueue event handler.\n")
+    repo.write("docs/miss.md", "# Nothing\n\nqueue event handler zed.\n")
+    repo.commit("zed")
+    world = make_world(repo, tiny_model)
+    original = SembleIndex.search
+
+    def docs_say_nothing(self, query, *args, **kwargs):  # the docs leg out of the way: only the ident leg speaks
+        return [] if ContentType.CODE not in self.content else original(self, query, *args, **kwargs)
+
+    monkeypatch.setattr(SembleIndex, "search", docs_say_nothing)
+
+    resp = world.search("ZED-9", scope="docs", limit=10)
+
+    assert paths(resp) == [
+        "docs/zed-9.md",
+        "docs/x/zed-9.md",
+        "docs/y/zed-9.md",
+        "docs/zed-9-longer-name.md",
+        "docs/title-hit.md",
+        "docs/fm-hit.md",
+    ]
+    assert all(hit.legs == ("ident",) for hit in resp.hits)
+    # no docs-leg chunk: the file's first chunk from the docs index stands in
+    first = next(h for h in resp.hits if h.path == "docs/title-hit.md")
+    assert (first.start_line, first.snippet.splitlines()[0]) == (1, "# About ZED-9")
+    assert first.heading_path == ("About ZED-9",)
+
+
+class FrontMatterCountingCorpus(Corpus):
+    front_matter_calls = 0
+
+    def front_matter(self, path):
+        type(self).front_matter_calls += 1
+        return super().front_matter(path)
+
+
+def test_ident_view_of_the_corpus_is_shared_by_the_filters_and_refreshes_with_the_interval(
+    git_repo, tiny_model: str
+) -> None:
+    repo = git_repo()
+    seed(repo)
+    clock = FakeClock()
+    FrontMatterCountingCorpus.front_matter_calls = 0
+    world = make_world(repo, tiny_model, corpus_cls=FrontMatterCountingCorpus, clock=clock)
+    calls = lambda: FrontMatterCountingCorpus.front_matter_calls  # noqa: E731
+    files = len(world.corpus.files())
+
+    world.search("zed-9", scope="docs")
+    assert calls() == files, "one front-matter read per corpus file"
+    world.search("zed-9 again", scope="docs", include_terminal=True)
+    world.search("zed-9", scope="docs", doc_type=("spec",))
+    world.search("refund rounding", scope="docs")  # no identifier: nothing gathered
+    assert calls() == files, "other filters and other queries reuse it"
+
+    repo.write("docs/items.md", "---\nkey: zed-9\n---\n# Items\n\nevent handler.\n")
+    clock.now += 6  # past search.rescan_seconds
+    world.corpus._listed_at = 0.0  # let the corpus see the new file now (its own clock is real time)
+    resp = world.search("zed-9", scope="docs")
+    assert calls() == 2 * files + 1
+    assert [h.path for h in resp.hits if "ident" in h.legs] == ["docs/items.md"]
+
+
+def test_ident_hit_for_a_doc_the_index_lacks_is_synthetic(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    world = make_world(repo, tiny_model, search={"rescan_seconds": 3600})
+    repo.write("docs/ZED-9-new.md", "# Brand new page\n\nnot indexed yet\n")  # after the build
+
+    resp = world.search("zed-9", scope="docs")
+
+    hit = resp.hits[0]
+    assert hit.path == "docs/ZED-9-new.md"
+    assert (hit.start_line, hit.end_line, hit.snippet, hit.legs) == (1, 1, "Brand new page", ("ident",))
+    assert hit.heading_path == ("Brand new page",)
+
+
+def test_ident_shares_the_docs_leg_chunk_when_there_is_one(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    world = make_world(repo, tiny_model)
+
+    resp = world.search("SPEC-PAY-004 rounding", scope="docs")
+
+    spec = next(h for h in resp.hits if h.path == "docs/specs/SPEC-PAY-004.md")
+    assert spec.legs == ("docs", "ident")
+    index = world.pool.get(repo.root, wait_s=30).docs
+    assert any(c.content == spec.snippet for c in index.chunks if c.file_path == spec.path)
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("ADR-114", ["ADR-114"]),
+        ('see "ADR-114", and (SPEC-DATA-005).', ["ADR-114", "SPEC-DATA-005"]),
+        ("refund rounding total", []),
+        ("a-b x1 ab", []),  # under 4 characters, or no digit and no - _ . /
+        ("ab-1 v1.2 tool_x src/a.py", ["ab-1", "v1.2", "tool_x", "src/a.py"]),
+        ("chat-70 CHAT-70 chat-70", ["chat-70"]),  # once, whatever the case
+        ("  ", []),
+    ],
+)
+def test_identifier_tokens(query: str, expected: list[str]) -> None:
+    from doc_search.searcher import identifier_tokens
+
+    assert identifier_tokens(query) == expected
+
+
+def test_identifier_tokens_are_capped() -> None:
+    from doc_search.searcher import MAX_IDENT_TOKENS, identifier_tokens
+
+    many = " ".join(f"id-{i}" for i in range(50))
+    assert len(identifier_tokens(many)) == MAX_IDENT_TOKENS
+
+
+# --- scope=docs also looks at corpus files with a code file type ------------------------------------------
+
+
+def test_scope_docs_reaches_a_corpus_file_the_code_index_holds(git_repo, tiny_model: str, monkeypatch) -> None:
+    repo = git_repo()
+    seed(repo)
+    repo.write("docs/wire.jsx", "export const wire = () => refund;\n")
+    repo.commit("jsx")
+    world = make_world(
+        repo,
+        tiny_model,
+        docs={"include": ["docs/**/*.md", "docs/**/*.jsx"], "types": [{"glob": "docs/wire.jsx", "type": "ui"}]},
+    )
+    calls: list[tuple[frozenset, object]] = []
+    original = SembleIndex.search
+
+    def spy(self, query, *args, **kwargs):
+        calls.append((frozenset(self.content), kwargs.get("filter_paths")))
+        return original(self, query, *args, **kwargs)
+
+    monkeypatch.setattr(SembleIndex, "search", spy)
+
+    resp = world.search("wire refund", scope="docs")
+
+    wire = [h for h in resp.hits if h.path == "docs/wire.jsx"]
+    assert len(wire) == 1
+    assert (wire[0].kind, wire[0].legs, wire[0].doc_type) == ("doc", ("code",), "ui")
+    assert all(h.kind == "doc" for h in resp.hits)
+    # the code index saw exactly the corpus files it holds: nothing else of the repo
+    assert [paths for content, paths in calls if content == frozenset({ContentType.CODE})] == [["docs/wire.jsx"]]
+
+    # the filters still apply: not a spec, not under the prefix
+    assert "docs/wire.jsx" not in paths(world.search("wire refund", scope="docs", doc_type=("spec",)))
+    assert "docs/wire.jsx" not in paths(world.search("wire refund", scope="docs", path_prefix="docs/specs/"))
+    # scope=code stays code only
+    assert "docs/wire.jsx" not in paths(world.search("wire refund", scope="code"))
+
+
+def test_scope_docs_never_calls_the_code_index_with_an_empty_selection(
+    git_repo, tiny_model: str, monkeypatch
+) -> None:
+    repo = git_repo()
+    seed(repo)  # every corpus file is markdown: none is in the code index
+    world = make_world(repo, tiny_model)
+    calls = []
+    original = SembleIndex.search
+
+    def spy(self, query, *args, **kwargs):
+        calls.append(frozenset(self.content))
+        return original(self, query, *args, **kwargs)
+
+    monkeypatch.setattr(SembleIndex, "search", spy)
+
+    assert world.search("refund", scope="docs").hits
+    assert calls == [frozenset({ContentType.DOCS})]
+    calls.clear()
+    assert world.search("refund", scope="docs", doc_type=("adr",)).hits == []  # nothing allowed at all
+    assert calls == []

@@ -341,6 +341,17 @@ class Corpus:
                 superseded_by=superseded_by,
             )
 
+    def front_matter(self, path: str) -> dict[str, str]:
+        """The simple `key: value` fields of a doc's front matter, keys lowercased; {} when it has none.
+
+        From the same cached parse of the first 64 KiB that `meta()` uses, so it costs a `stat`.
+        Lists, nested values and block scalars are not among the fields. The dict is a copy.
+        """
+        path = norm_rel(path)
+        with self._lock:
+            head = self._head(path)
+            return dict(head.fields) if head is not None else {}
+
     def heading_path_at(self, path: str, line: int) -> tuple[str, ...]:
         """The title, then the headings that enclose `line` (1-based), outermost first.
 

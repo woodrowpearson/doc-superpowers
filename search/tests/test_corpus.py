@@ -674,3 +674,24 @@ def test_parent_symlinked_inside_the_worktree_is_read_through(git_repo) -> None:
     assert corpus.files() == ["docs-real/a.md", "docs/a.md"]
     assert meta_of(corpus, "docs/a.md").title == "Inside title"
     assert corpus.heading_path_at("docs/a.md", 3) == ("Inside title", "Part")
+
+
+def test_front_matter_scalars_from_the_cached_head(git_repo) -> None:
+    repo = git_repo()
+    repo.write(
+        "docs/a.md",
+        "---\nKey: chat-70\nstatus: 'Accepted'  # note\ntags: [x, y]\nnested:\n  inner: 1\nowner: \"w\"\n---\n# T\n",
+    )
+    repo.write("docs/plain.md", "# No front matter\n")
+    repo.write("docs/bin.md", "\x00\x01 not text")
+    repo.commit("base")
+    corpus = make_corpus(repo)
+
+    assert corpus.front_matter("docs/a.md") == {"key": "chat-70", "status": "Accepted", "owner": "w"}
+    assert corpus.front_matter("./docs/a.md") == corpus.front_matter("docs/a.md")
+    assert corpus.front_matter("docs/plain.md") == {}
+    assert corpus.front_matter("docs/bin.md") == {}
+    assert corpus.front_matter("docs/missing.md") == {}
+    # a caller cannot change the cached parse
+    corpus.front_matter("docs/a.md")["key"] = "changed"
+    assert corpus.front_matter("docs/a.md")["key"] == "chat-70"
