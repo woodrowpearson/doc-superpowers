@@ -13212,7 +13212,7 @@ EOF
 }
 
 test_lg_upkeep_pr_merged_and_open() {
-  echo "test: #39 — --pr N: merged → merge_commit^1..merge_commit; open → merge-base(base, head_oid)..head_oid; the body's keys are key-in-pr-body"
+  echo "test: #39 — --pr N: merged → merge-base(merge_commit^1, head_oid)..head_oid (head_oid here), else merge_commit^1..merge_commit; open → merge-base(base, head_oid)..head_oid; the body's keys are key-in-pr-body"
   lg_upkeep_fixture '{"base":"main","adapters":{"pr":"tools/pr.sh"}}'
   local d f m p1 f2
   d=$(harness_mktemp_d lg-uppr)
@@ -13231,17 +13231,19 @@ test_lg_upkeep_pr_merged_and_open() {
   cat > "$d/list" <<EOF
 {"number":7,"head":"feat","state":"merged","url":"u7","head_oid":"$f","merge_commit":"$m"}
 {"number":8,"head":"feat2","state":"open","url":"u8","head_oid":"$f2"}
+{"number":9,"head":"feat","state":"merged","url":"u9","merge_commit":"$m"}
 EOF
   printf '{"number":7,"body":"Totals, merged."}\n' > "$d/view-7"
   printf '{"number":8,"body":"Fixes the badge (app-5)"}\n' > "$d/view-8"
+  printf '{"number":9,"body":""}\n' > "$d/view-9"
   lg_up_pr_stub "$d"
   lg upkeep --pr 7 --format json
   assert_eq "0" "$LG_RC" "--pr 7 (merged): exit 0"
   assert_eq "1" "$(json_count "$LG_OUT")" "…one JSON object"
   assert_json_field "$LG_OUT" '[keys_unsorted[]] | join(",")' "verb,enabled,exit,range,pr,files,commits,items,unattributed_contracts,pr_data" \
     "the payload's fields, as with --range"
-  assert_json_field "$LG_OUT" '[.range, .files, .commits] | tojson' "[\"$p1..$m\",1,2]" \
-    "merged: <merge_commit>^1..<merge_commit> (the PR's one file; its commit and the merge)"
+  assert_json_field "$LG_OUT" '[.range, .files, .commits] | tojson' "[\"$p1..$f\",1,1]" \
+    "merged, head_oid here: merge-base(<merge_commit>^1, head_oid)..head_oid (the PR's one file and commit; the merge commit is not the PR's)"
   assert_json_field "$LG_OUT" '.pr | tojson' '{"number":7,"state":"merged","body_scanned":true}' "pr: number, state, body_scanned"
   assert_json_field "$LG_OUT" '.items[0] | [.key, (.found_by | join(",")), .link] | join("|")' \
     "app-6|trailer:claims|ledger link app-6 --changes field:order.total" "the PR's claim, and its proposal"
@@ -13250,7 +13252,7 @@ EOF
     "one list call (the index build reads the copy --pr fetched: the remote cache) and one view"
   lg upkeep --pr 7
   assert_eq "0" "$LG_RC" "text: exit 0"
-  assert_eq "range ${p1:0:12}..${m:0:12}  1 files, 2 commits" "$(sed -n 1p <<<"$LG_OUT")" "text: the range line, as with --range"
+  assert_eq "range ${p1:0:12}..${f:0:12}  1 files, 1 commits" "$(sed -n 1p <<<"$LG_OUT")" "text: the range line, as with --range"
   lg upkeep --pr 8 --format json
   assert_eq "0" "$LG_RC" "--pr 8 (open): exit 0"
   assert_json_field "$LG_OUT" '[.range, .files, .commits] | tojson' "[\"$m..$f2\",1,1]" \
@@ -13263,6 +13265,54 @@ EOF
   lg upkeep --pr 8
   assert_contains "$LG_OUT" "app-5  found by key-in-pr-body" "text: found by key-in-pr-body"
   assert_contains "$LG_OUT" "(no proposals)" "…a body-only item gets no listed-file consumes"
+  lg upkeep --pr 9 --format json
+  assert_eq "0" "$LG_RC" "--pr 9 (the same merge, no head_oid): exit 0"
+  assert_json_field "$LG_OUT" '[.range, .files, .commits, (.items[0] | .key, (.found_by | join(",")))] | tojson' \
+    "[\"$p1..$m\",1,2,\"app-6\",\"trailer:claims\"]" \
+    "merged, no head_oid: <merge_commit>^1..<merge_commit> (a merge commit: the PR's file, its commit and the merge)"
+  teardown
+}
+
+test_lg_upkeep_pr_rebase_merged() {
+  echo "test: #39 R15 — a rebase-merged PR (merge_commit its last rebased commit): walked from head_oid when the clone has it (all its commits, the claim on the first); head_oid absent or not here: <merge_commit>^1..<merge_commit>, the last commit only"
+  lg_upkeep_fixture '{"base":"main","adapters":{"pr":"tools/pr.sh"}}'
+  local d n fp h mc mp
+  d=$(harness_mktemp_d lg-uppr)
+  fp=$(git rev-parse main)
+  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  lg_up_commit "tidy" src/util/a.js
+  lg_up_commit "notes" docs/notes.md
+  h=$(git rev-parse HEAD)
+  # main moves on; the PR is rebased onto it and fast-forwarded (GitHub's
+  # "Rebase and merge": its merge_commit is the last rebased commit).
+  git checkout -q main
+  lg_up_commit "later on main" server/create.js
+  git checkout -q -b rebased feat
+  git rebase -q main
+  git checkout -q main
+  git merge -q --ff-only rebased
+  mc=$(git rev-parse HEAD)
+  mp=$(git rev-parse HEAD^1)
+  cat > "$d/list" <<EOF
+{"number":7,"head":"feat","state":"merged","url":"u7","head_oid":"$h","merge_commit":"$mc"}
+{"number":6,"head":"feat","state":"merged","url":"u6","merge_commit":"$mc"}
+{"number":5,"head":"feat","state":"merged","url":"u5","head_oid":"89abcdef0123456789abcdef0123456789abcdef","merge_commit":"$mc"}
+EOF
+  for n in 5 6 7; do printf '{"number":%s,"body":""}\n' "$n" > "$d/view-$n"; done
+  lg_up_pr_stub "$d"
+  lg upkeep --pr 7 --format json
+  assert_eq "0" "$LG_RC" "head_oid here: exit 0"
+  assert_json_field "$LG_OUT" '[.range, .files, .commits] | tojson' "[\"$fp..$h\",3,3]" \
+    "merge-base(<merge_commit>^1, head_oid)..head_oid: the PR's three commits and files (main's later commit not among them)"
+  assert_json_field "$LG_OUT" '.items[0] | [.key, (.found_by | join(",")), .link] | join("|")' \
+    "app-6|trailer:claims|ledger link app-6 --changes field:order.total" "the claim on the PR's first commit, and its proposal"
+  lg upkeep --pr 6 --format json
+  assert_eq "0" "$LG_RC" "no head_oid: exit 0"
+  assert_json_field "$LG_OUT" '[.range, .files, .commits, (.items | length)] | tojson' "[\"$mp..$mc\",1,1,0]" \
+    "…<merge_commit>^1..<merge_commit>: the last commit only (the claim is lost)"
+  lg upkeep --pr 5 --format json
+  assert_eq "0" "$LG_RC" "a head_oid this clone does not have: exit 0"
+  assert_json_field "$LG_OUT" '[.range, .commits] | tojson' "[\"$mp..$mc\",1]" "…the same fallback"
   teardown
 }
 
@@ -13898,6 +13948,7 @@ run_tests() {
   test_lg_upkeep_message_only_no_listed_consumes
   test_lg_upkeep_ranking_and_cap
   test_lg_upkeep_pr_merged_and_open
+  test_lg_upkeep_pr_rebase_merged
   test_lg_upkeep_pr_failures
   test_lg_upkeep_no_repo_adapters
   test_lg_pr_adapter_view

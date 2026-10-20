@@ -2464,9 +2464,11 @@ ledger upkeep|cmd_ledger_upkeep|repo|range= pr= items+ top= strict no-repo-adapt
   line — never written. <a>...<b> is merge-base(a, b)..b (trunk merged
   into the branch never counts). --pr <n> reads PR <n> from the pr
   adapter's list (config adapters.pr; cached, as for every verb): merged,
-  <merge_commit>^1..<merge_commit>; open, merge-base(config base,
-  head_oid)..head_oid — the commit must be in this clone (else exit 2,
-  with the fetch command). Its body comes from the adapter's optional
+  merge-base(<merge_commit>^1, head_oid)..head_oid when this clone has
+  head_oid (the PR's own commits, for any merge strategy), else
+  <merge_commit>^1..<merge_commit> (a rebase merge: its last commit
+  only); open, merge-base(config base, head_oid)..head_oid — the commit
+  must be in this clone (else exit 2, with the fetch command). Its body comes from the adapter's optional
   `view <n>` ({"number","body"}; exit 3: no view, "pr": {…,
   "body_scanned": false}). Involved items, each with how it was found: a
   claim trailer (claims, claims_by_path, claims_by_ref), an item file the

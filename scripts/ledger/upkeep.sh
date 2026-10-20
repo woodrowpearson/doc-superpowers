@@ -20,10 +20,12 @@
 #   --pr <n> (config adapters.pr, else exit 2): PR <n> from the adapter's
 #   list, read through the remote cache as every verb reads it (the index
 #   build then reads the same copy). Merged, its merge_commit here:
-#   <merge_commit>^1..<merge_commit>; open, its head_oid here: merge-base(
-#   config base, head_oid)..head_oid. Closed, not in the list, its commit
-#   or the base not here: exit 2 (with the fetch command). The PR body: the
-#   adapter's optional `view <n>` ({"number", "body"}; never cached) — its
+#   merge-base(<merge_commit>^1, head_oid)..head_oid when head_oid is here
+#   too, else <merge_commit>^1..<merge_commit> (for a rebase merge, its
+#   last commit only); open, its head_oid here: merge-base(config base,
+#   head_oid)..head_oid. Closed, not in the list, its commit or the base
+#   not here: exit 2 (with the fetch command). The PR body: the adapter's
+#   optional `view <n>` ({"number", "body"}; never cached) — its
 #   exit 3, or DOC_TOOLS_LEDGER_OFFLINE=1, is no body (pr.body_scanned
 #   false); any other failure, exit 2.
 # --no-repo-adapters (review contexts that must not run repository
@@ -121,15 +123,18 @@ _lg_up_no_repo() {
 # and _LG_UP_BODY (<body-out>, or "" when the body was not read): PR <n> from
 # config adapters.pr's list, through the remote cache (index.sh
 # _lg_ix_pr_fetch: a stale or offline copy serves, as for every verb).
-# Merged, with its merge_commit here: <merge_commit>^1..<merge_commit>;
-# open, with its head_oid here: merge-base(config base, head_oid)..head_oid.
+# Merged, with its merge_commit here: merge-base(<merge_commit>^1,
+# head_oid)..head_oid when head_oid is here too (the PR's own commits, for
+# any merge strategy), else <merge_commit>^1..<merge_commit> (for a rebase
+# merge, its last commit only); without a merge_commit, exit 2. Open, with
+# its head_oid here: merge-base(config base, head_oid)..head_oid.
 # The body: the adapter's view <n> into <body-out>; its exit 3 (no view) or
 # DOC_TOOLS_LEDGER_OFFLINE=1 reads none (body_scanned false). Exit 2: no
 # adapters.pr, the list failing with no copy, a number the list does not
 # hold, a PR neither merged nor open, its commit or the base not here (with
 # the fetch command), view failing or breaking its contract.
 _lg_up_pr() {
-  local n="$1" bodyf="$2" s cfg st mc ho base x rc=0 scanned=true
+  local n="$1" bodyf="$2" s cfg st mc ho h base x rc=0 scanned=true
   _lg_scratch_name
   s=$_LG_SN
   _lg_adapter_path pr || _lg_die "--pr: $_LG_ADP_ERR"
@@ -162,6 +167,14 @@ _lg_up_pr() {
       fi
       _LG_UP_A=$(git rev-parse -q --verify "$_LG_UP_B^1" 2>/dev/null) \
         || _lg_die "--pr: PR #$n's merge commit ${mc:0:12} has no parent"
+      # The merged head here: the PR's own commits, whatever the merge
+      # (a rebase merge's merge_commit is its last rebased commit alone).
+      if printf '%s\n' "$ho" | LC_ALL=C grep -Eqx '[0-9a-f]{40}([0-9a-f]{24})?' \
+          && h=$(git rev-parse -q --verify "$ho^{commit}" 2>/dev/null); then
+        _LG_UP_A=$(git merge-base "$_LG_UP_A" "$h" 2>/dev/null) \
+          || _lg_die "--pr: PR #$n's head ${ho:0:12} and its merge commit's first parent have no merge base here"
+        _LG_UP_B=$h
+      fi
       ;;
     open)
       case "$ho" in

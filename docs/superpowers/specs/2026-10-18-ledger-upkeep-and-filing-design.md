@@ -56,7 +56,7 @@ The *Example: a filing wrapper* script switches to `--create`.
 
 ### Range
 - `<a>..<b>`: as given; `<a>...<b>`: merge-base(a, b)..b. Either end not resolving: exit 2.
-- `--pr <n>` (needs `adapters.pr`, else exit 2): the PR from the adapter's list (cached, as other verbs). Merged with `merge_commit` here: `<merge_commit>^1..<merge_commit>`; open with `head_oid` here: `merge-base(<config base>, head_oid)..head_oid`; closed, unknown, or the commit missing locally: exit 2 with the fetch command. Body: the adapter's optional `view <n>` → `{"number", "body"}`; exit 3 from it = unsupported (no body scan, JSON `pr.body_scanned: false`); any other failure: exit 2. The reference `ledger-pr-gh` gains `view`.
+- `--pr <n>` (needs `adapters.pr`, else exit 2): the PR from the adapter's list (cached, as other verbs). Merged with `merge_commit` here: `merge-base(<merge_commit>^1, head_oid)..head_oid` when `head_oid` is here too (the PR's own commits, for any merge strategy), else `<merge_commit>^1..<merge_commit>` — for a rebase merge, its last commit only (ruling R15); open with `head_oid` here: `merge-base(<config base>, head_oid)..head_oid`; closed, unknown, or the commit missing locally: exit 2 with the fetch command. Body: the adapter's optional `view <n>` → `{"number", "body"}`; exit 3 from it = unsupported (no body scan, JSON `pr.body_scanned: false`); any other failure: exit 2. The reference `ledger-pr-gh` gains `view`.
 
 ### Involved items (D2), each with `found_by` (ordered by this rank)
 1. `trailer:claims` / `trailer:claims_by_path` / `trailer:claims_by_ref` — `_lg_msg_claims "<a>..<b>"` lines (honouring `trailers.since`).
