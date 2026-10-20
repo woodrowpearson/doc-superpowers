@@ -1,7 +1,8 @@
 """The semble engines: a docs index and a code index per worktree, built in the background.
 
 An `IndexPool` keeps the index pair of at most `max_worktrees` worktrees in memory (least
-recently used goes first). The first `get` for a worktree starts one thread per kind; a call
+recently used goes first; a worktree whose build is still running is never the victim, so
+the pool may briefly hold more). The first `get` for a worktree starts one thread per kind; a call
 waits for those threads up to `wait_s`, then answers `Building` and the builds carry on.
 
 Loading follows semble's own cache: a cache that still matches the tree is loaded from disk
@@ -24,7 +25,7 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -100,12 +101,24 @@ class _State:
         self.error: str | None = None
         self.checked_at: float | None = None  # when the last build thread finished
         self.cool_seconds = 0.0  # what the cooldown scales: the last build, or the slowest recent failure
+        self.fatal = False  # a config error: no build can fix it, so none is ever started
 
 
 class _Entry:
     def __init__(self, worktree: Path, states: dict[Kind, _State]) -> None:
         self.worktree = worktree
         self.states = states
+
+    def building(self) -> bool:
+        return any(state.running for state in self.states.values())
+
+
+def _content_types(values: Iterable[str]) -> tuple[ContentType, ...]:
+    """`code.content` as semble content types. "all" is every type, as in semble's own CLI."""
+    values = tuple(values)
+    if "all" in values:
+        return (ContentType.CODE, ContentType.DOCS, ContentType.CONFIG)
+    return tuple(dict.fromkeys(ContentType(value) for value in values))
 
 
 def _stamp(index_dir: Path) -> tuple[int, int] | None:
@@ -199,19 +212,32 @@ class IndexPool:
         if entry is None:
             entry = self._entries[top] = _Entry(top, self._states())
         self._entries.move_to_end(top)
-        while len(self._entries) > self._max:
-            self._entries.popitem(last=False)  # a running build finishes into an entry nobody reads
+        # Evict least recently used first, but never an entry that is still building: dropping it
+        # would let a later get start a second build into the same semble cache directory.
+        for path, other in list(self._entries.items()):
+            if len(self._entries) <= self._max:
+                break
+            if path != top and not other.building():
+                del self._entries[path]
         return entry
 
     def _states(self) -> dict[Kind, _State]:
         cfg = self._cfg
         states: dict[Kind, _State] = {"docs": _State("docs", (ContentType.DOCS,), cfg.docs.model)}
         if cfg.code.enabled:
-            content = tuple(ContentType(value) for value in cfg.code.content)
-            states["code"] = _State("code", content, cfg.code.model)
+            try:
+                states["code"] = _State("code", _content_types(cfg.code.content), cfg.code.model)
+            except ValueError as err:  # a config value semble has no content type for
+                broken = _State("code", (), cfg.code.model)
+                broken.fatal = True
+                broken.error = f"invalid code.content: {err}"
+                broken.checked_at = self.clock()
+                states["code"] = broken
         return states
 
     def _due(self, state: _State, now: float) -> bool:
+        if state.fatal:
+            return False
         if state.checked_at is None:
             return True
         cooldown = max(self._cfg.search.rescan_seconds, REVALIDATE_FACTOR * state.cool_seconds)

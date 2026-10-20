@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,13 +43,23 @@ TINY_MODEL_DIM = 16
 
 
 @pytest.fixture(autouse=True)
-def semble_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point semble's cache at a per-test directory and forbid hub traffic."""
+def semble_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """Point semble's cache at a per-test directory and forbid hub traffic.
+
+    The isolation is checked again when the test ends. A test that calls `monkeypatch.undo()`
+    reverts these variables too, and every index it builds from then on is written to the
+    developer's real semble cache. Scope such patches with `monkeypatch.context()` instead.
+    """
     cache = tmp_path / "semble-cache"
     cache.mkdir()
     monkeypatch.setenv("SEMBLE_CACHE_LOCATION", str(cache))
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    return cache
+    yield cache
+    assert os.environ.get("SEMBLE_CACHE_LOCATION") == str(cache), (
+        "SEMBLE_CACHE_LOCATION changed during the test (monkeypatch.undo()?): "
+        "its indexes may have reached the real semble cache"
+    )
+    assert os.environ.get("HF_HUB_OFFLINE") == "1", "HF_HUB_OFFLINE changed during the test (monkeypatch.undo()?)"
 
 
 @pytest.fixture(scope="session")
