@@ -16,12 +16,13 @@
 #     adapter shipped beside this copy of doc-tools.sh (<adapter>:
 #     [a-z0-9_-]+, nothing that leaves the directory).
 # Absent (null, "" or no such key) → rc 0, no output. A value that is not a
-# string, a file that is missing or not executable, a non-zero exit, or
-# output that breaks the adapter's contract → rc 2, with one message on
-# stderr that carries the adapter's own stderr (its first lines). Otherwise
-# the output, one JSON object per line, compact, on stdout (rc 0).
+# string, a file that is missing or not executable, a non-zero exit (pr
+# view's exit 3 aside, below), or output that breaks the adapter's contract
+# → rc 2, with one message on stderr that carries the adapter's own stderr
+# (its first lines). Otherwise the output, one JSON object per line,
+# compact, on stdout (rc 0).
 #
-# The contract a list output is checked against (_LG_ADAPTER_REQ: every line
+# The contract an output is checked against (_LG_ADAPTER_REQ: every line
 # one JSON object holding these fields):
 #   contracts list   "id" a contract id (<kind>:<name>), "ledger" a string
 #                    or null, "defined_in" a list of strings; "read_by",
@@ -45,6 +46,11 @@
 #                    "labels" and "fm_errors", when present, lists of
 #                    strings. The reference adapter is
 #                    scripts/adapters/ledger-items-gh.sh (GitHub issues)
+#   pr view <n>      optional (ledger upkeep --pr): exactly one object,
+#                    "number" <n> (a number, or its digits as a string) and
+#                    "body" a string (the PR's description, "" for none).
+#                    An exit 3 is "this adapter has no view": rc 3, with
+#                    no message (the caller goes on without the body)
 # Other subcommands (contracts resolve <id>: exit 0/1; items write <ref>
 # <field> <value>, items note <ref> <text>, items create --title <t>
 # --body-file <f> → {"ref", "url"}; items get <ref> → one object {"ref",
@@ -109,40 +115,51 @@ _LG_ADAPTER_REQ_items='(.ref | type == "string" and test("\\A[^\\s]+\\z"))
   and (.status | type == "string") and (.fields | type == "object")
   and all(.title, .body_excerpt, .updated, .closed; . == null or type == "string")
   and all(.labels, .fm_errors; . == null or (type == "array" and all(.[]; type == "string")))'
+# pr view <n>: $a1 is <n> (one object only: checked after the lines).
+# shellcheck disable=SC2016  # jq source
+_LG_ADAPTER_REQ_pr_view='(.number | (type == "number" or type == "string") and tostring == $a1)
+  and (.body | type == "string")'
 
 _lg_adapter() {
-  local name="$1" s rc=0 req=""
+  local name="$1" s rc=0 req="" one="" what
   shift
   _lg_adapter_path "$name" || { printf '%s\n' "$_LG_ADP_ERR" >&2; return 2; }
   [ -n "$_LG_ADP" ] || return 0
   _lg_scratch_name
   s=$_LG_SN
   ( cd "$_LG_ROOT" && "$_LG_ADP" "$@" ) < /dev/null > "$s.aout" 2> "$s.aerr" || rc=$?
+  # pr view is optional: its exit 3 is "no view" (not a failure).
+  if [ "$rc" = 3 ] && [ "$name ${1:-}" = "pr view" ]; then return 3; fi
   if [ "$rc" != 0 ]; then
     printf 'adapter %s (%s %s) exited %s: %s\n' "$name" "$_LG_ADP" "$*" "$rc" \
       "$(head -n 5 "$s.aerr" | tr '\n' ' ' | tr -d '\000-\010\013-\037')" >&2
     return 2
   fi
-  if [ "${1:-}" = list ]; then
-    case "$name" in
-      contracts) req=$_LG_ADAPTER_REQ_contracts ;;
-      pr) req=$_LG_ADAPTER_REQ_pr ;;
-      items) req=$_LG_ADAPTER_REQ_items ;;
-    esac
-  fi
+  what=$name
+  case "$name ${1:-}" in
+    "contracts list") req=$_LG_ADAPTER_REQ_contracts ;;
+    "pr list") req=$_LG_ADAPTER_REQ_pr ;;
+    "items list") req=$_LG_ADAPTER_REQ_items ;;
+    "pr view") req=$_LG_ADAPTER_REQ_pr_view; one=1; what="pr view" ;;
+  esac
   [ -n "$req" ] || { cat -- "$s.aout"; return 0; }
   # Each line on its own (fromjson per raw line), so the message names the
   # first line that breaks the contract; empty lines are skipped.
-  if ! jq -R -r "
+  if ! jq -R -r --arg a1 "${2:-}" "
       (input_line_number) as \$n
       | if test(\"^\\\\s*\$\") then empty
         else (try fromjson catch null) as \$o
           | if (\$o | type) == \"object\" and (\$o | $req) then \$o | tojson
             else error(\"line \\(\$n): \\(.[0:200])\") end
         end" "$s.aout" > "$s.aok" 2> "$s.ajq"; then
-    printf 'adapter %s (%s %s): output breaks the %s contract — %s%s\n' "$name" "$_LG_ADP" "$*" "$name" \
+    printf 'adapter %s (%s %s): output breaks the %s contract — %s%s\n' "$name" "$_LG_ADP" "$*" "$what" \
       "$(sed -n 's/^jq: error ([^)]*): //p; s/^jq: error: //p' "$s.ajq" | head -n 1 | tr -d '\000-\010\013-\037')" \
       "$(if [ -s "$s.aerr" ]; then printf ' (stderr: %s)' "$(head -n 3 "$s.aerr" | tr '\n' ' ' | tr -d '\000-\010\013-\037')"; fi)" >&2
+    return 2
+  fi
+  if [ -n "$one" ] && [ "$(LC_ALL=C awk 'END { print NR }' "$s.aok")" != 1 ]; then
+    printf 'adapter %s (%s %s): output breaks the %s contract — %s objects, not one\n' "$name" "$_LG_ADP" "$*" "$what" \
+      "$(LC_ALL=C awk 'END { print NR }' "$s.aok")" >&2
     return 2
   fi
   cat -- "$s.aok"

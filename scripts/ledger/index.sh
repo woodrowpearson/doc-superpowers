@@ -1485,6 +1485,27 @@ _lg_ix_pr_numbers() {
   printf '%s' "$nums"
 }
 
+# _lg_ix_pr_fetch: the pr adapter's list through the remote cache, keyed by
+# the adapter and keys.remote's url — the one fetch path (_lg_ix_pr_prepare,
+# and upkeep --pr before its index build, which then reads the same copy).
+# Needs _LG_ADP (_lg_adapter_path pr, an adapter configured). Sets
+# _LG_IX_PR_REMOTE (keys.remote, default origin), _LG_IX_PR_PULL ("1" with
+# inflight.pull_refs, else "") and the cache's globals (_LG_RSNAP,
+# _LG_RSTATE, … — _lg_remote_cache); returns its rc.
+_lg_ix_pr_fetch() {
+  local s url rc=0
+  _lg_scratch_name
+  s=$_LG_SN
+  _lg_cfg '(.keys.remote | if type == "string" and . != "" then . else "origin" end), ('"$_LG_RTTL_JQ"'),
+    (.inflight.pull_refs | if type == "string" and . != "" then "1" else "" end)' > "$s.cfg"
+  { IFS= read -r _LG_IX_PR_REMOTE; IFS= read -r _LG_RTTL; IFS= read -r _LG_IX_PR_PULL; } < "$s.cfg" \
+    || _lg_die "cannot read the config"
+  url=$(git config --get "remote.$_LG_IX_PR_REMOTE.url" 2>/dev/null) || url=""
+  _lg_remote_cache pr "$(printf 'pr\n%s\n%s' "$_LG_ADP" "$url")" _lg_adapter pr list || rc=$?
+  _LG_RTTL=""
+  return "$rc"
+}
+
 # _lg_ix_pr_prepare <base|""> <prefix>: the PR data for an index build
 # (worktree or --rev): <prefix>.prl the adapter's lines (from the remote
 # cache's snapshot; empty without), <prefix>.prheads "<n>\t<head>\t<oid>\t
@@ -1502,7 +1523,7 @@ _lg_ix_pr_numbers() {
 # (stderr, one line): the data's state, the open heads not fetched, the
 # cross-repository open PRs not compared.
 _lg_ix_pr_prepare() {
-  local base="$1" p="$2" s remote url rc=0 state note="" mark="" missing=0 cross=0 t ol err pull="" nums
+  local base="$1" p="$2" s remote rc=0 state note="" mark="" missing=0 cross=0 t ol err pull="" nums
   : > "$p.prl"
   : > "$p.prheads"
   : > "$_SCRATCH/lg-pr.mark"
@@ -1517,12 +1538,9 @@ _lg_ix_pr_prepare() {
       _lg_ix_pr_note ""
       return 0
     fi
-    _lg_cfg '(.keys.remote | if type == "string" and . != "" then . else "origin" end), ('"$_LG_RTTL_JQ"'),
-      (.inflight.pull_refs | if type == "string" and . != "" then "1" else "" end)' > "$s.cfg"
-    { IFS= read -r remote; IFS= read -r _LG_RTTL; IFS= read -r pull; } < "$s.cfg" || _lg_die "cannot read the config"
-    url=$(git config --get "remote.$remote.url" 2>/dev/null) || url=""
-    _lg_remote_cache pr "$(printf 'pr\n%s\n%s' "$_LG_ADP" "$url")" _lg_adapter pr list || rc=$?
-    _LG_RTTL=""
+    _lg_ix_pr_fetch || rc=$?
+    remote=$_LG_IX_PR_REMOTE
+    pull=$_LG_IX_PR_PULL
   else
     remote=$(_lg_cfg '.keys.remote | if type == "string" and . != "" then . else "origin" end') || exit "$?"
     rc=2

@@ -6,16 +6,30 @@
 # _lg_index and _LG_JQ_INCLUDE, keys.sh's _LG_JQ_RESOLVE_DEFS (lg_resolve),
 # relations.sh's _lg_msg_claims, _lg_trailers, _LG_AWK_TRAILER and
 # _lg_r_file_contracts, glob.sh's _lg_paths_filter, query.sh's
-# _lg_pr_data_into, parse.sh's _lg_scratch_name; defs.jq's lg_r_maps.
+# _lg_pr_data_into, parse.sh's _lg_scratch_name; defs.jq's lg_r_maps;
+# adapters.sh's _lg_adapter / _lg_adapter_path, index.sh's _lg_ix_pr_fetch.
 #
-# ledger upkeep --range <a>..<b> | --range <a>...<b> [--items <item>…]
-#   [--top N] [--strict] [--format text|json]
-# (--pr <n> and --no-repo-adapters are usage errors, exit 3, until Task 5.)
+# ledger upkeep (--range <a>..<b> | --range <a>...<b> | --pr <n>)
+#   [--items <item>…] [--top N] [--strict] [--no-repo-adapters]
+#   [--format text|json]
 #
 # Range: <a>..<b> as given; <a>...<b> is merge-base(a, b)..b — trunk merged
 #   into the branch never counts. An end that does not resolve to a commit
 #   here: exit 2. The net diff is `git diff <a> <b>` (no renames: a moved
 #   file is its old path and its new one); the commits, `git log <a>..<b>`.
+#   --pr <n> (config adapters.pr, else exit 2): PR <n> from the adapter's
+#   list, read through the remote cache as every verb reads it (the index
+#   build then reads the same copy). Merged, its merge_commit here:
+#   <merge_commit>^1..<merge_commit>; open, its head_oid here: merge-base(
+#   config base, head_oid)..head_oid. Closed, not in the list, its commit
+#   or the base not here: exit 2 (with the fetch command). The PR body: the
+#   adapter's optional `view <n>` ({"number", "body"}; never cached) — its
+#   exit 3, or DOC_TOOLS_LEDGER_OFFLINE=1, is no body (pr.body_scanned
+#   false); any other failure, exit 2.
+# --no-repo-adapters (review contexts that must not run repository
+#   scripts): exit 2, before any adapter runs, when config
+#   adapters.contracts, adapters.pr or items.adapter is anything but null
+#   ("" or absent alike) or doc-superpowers:<name>.
 # Involved items, each with found_by (in this rank order; archived items
 #   never):
 #   1 trailer:claims / trailer:claims_by_path / trailer:claims_by_ref —
@@ -28,7 +42,8 @@
 #   3 key-in-message — a key or alias as a word (sweep's word scan: split
 #     on [^A-Za-z0-9_-], any case) in a commit message of the range, its
 #     claims and claims_by_path trailer lines left out (they are signal 1);
-#   4 key-in-pr-body — the same in the PR body (_lg_up_core's <body-file>).
+#   4 key-in-pr-body — the same in the PR body (--pr; _lg_up_core's
+#     <body-file>).
 #   --items <item>… names them instead (found_by ["named"], rank 0): each
 #   must resolve, as show resolves, to one item that is not archived (else
 #   exit 3), and only they are involved.
@@ -60,7 +75,8 @@
 #   a,b --consumes c" for the shown proposals (a word quoted for the shell
 #   when it needs it), null without — printed, never run. upkeep writes
 #   nothing.
-# Output: JSON {range: "<a-oid>..<b-oid>", pr: null, files, commits, items:
+# Output: JSON {range: "<a-oid>..<b-oid>", pr: null (--range) | {number,
+#   state, body_scanned} (--pr), files, commits, items:
 #   [{key, path, found_by, proposed: [{field, value, evidence}], total,
 #   truncated, declared_untouched, link}], unattributed_contracts:
 #   [{contract, files}]} (+ pr_data / items_data). Text: "range <a12>..<b12>
@@ -70,12 +86,119 @@
 #   then "unattributed: <c> (<files>)"; "(no proposals)" when no item has
 #   one. Exit 0 (proposals are advisory); 1 with --strict and a proposal; 2
 #   a range that does not resolve, a failing contracts adapter, a bad
-#   upkeep config; 3 usage. Cost: one index build, one git diff-tree, two
-#   git log walks (_lg_msg_claims' and the word scan's).
+#   upkeep config, --pr without adapters.pr, its list failing (no copy) or
+#   view failing, a PR not usable, a --no-repo-adapters refusal; 3 usage.
+#   Cost: one index build, one git diff-tree, two git log walks
+#   (_lg_msg_claims' and the word scan's); with --pr, the list (cached)
+#   and one view.
 
 _LG_UP_TOP=3   # proposals kept per item (0: all) — the verb's --top
 _LG_UP_IX=""   # _lg_up_index: the index upkeep reads …
 _LG_UP_IXB=""  # … and the commit it was chosen for
+_LG_UP_PR=null # the payload's pr: null, or {number, state, body_scanned}
+_LG_UP_BODY="" # the PR body's file (_lg_up_pr); "" when none was read
+
+# _lg_up_no_repo: --no-repo-adapters — exit 2, before anything runs, when
+# config adapters.contracts, adapters.pr or items.adapter names anything
+# but null ("" or absent alike: none) or doc-superpowers:<name> (an adapter
+# shipped beside doc-tools.sh): a repository's own script, which a review
+# context must not run. The message names each, with its value.
+_lg_up_no_repo() {
+  local m
+  # shellcheck disable=SC2016  # jq source
+  m=$(_lg_cfg 'def at($o; $k): if ($o | type) == "object" then $o[$k] else null end;
+    [["adapters.contracts", at(.adapters; "contracts")], ["adapters.pr", at(.adapters; "pr")],
+     ["items.adapter", at(.items; "adapter")]]
+    | map(select(.[1] != null and .[1] != ""
+                 and ((.[1] | type) != "string" or (.[1] | test("\\Adoc-superpowers:[a-z0-9_-]+\\z") | not)))
+          | "\(.[0]) (\(.[1] | tojson | .[0:200]))")
+    | join(", ")') || exit "$?"
+  [ -n "$m" ] || return 0
+  _lg_die "--no-repo-adapters: a repository script is configured (not null or doc-superpowers:<name>): $m — nothing was run (run ledger upkeep without --no-repo-adapters yourself)"
+}
+
+# _lg_up_pr <n> <body-out> → _LG_UP_A, _LG_UP_B (as _lg_up_range), _LG_UP_PR
+# and _LG_UP_BODY (<body-out>, or "" when the body was not read): PR <n> from
+# config adapters.pr's list, through the remote cache (index.sh
+# _lg_ix_pr_fetch: a stale or offline copy serves, as for every verb).
+# Merged, with its merge_commit here: <merge_commit>^1..<merge_commit>;
+# open, with its head_oid here: merge-base(config base, head_oid)..head_oid.
+# The body: the adapter's view <n> into <body-out>; its exit 3 (no view) or
+# DOC_TOOLS_LEDGER_OFFLINE=1 reads none (body_scanned false). Exit 2: no
+# adapters.pr, the list failing with no copy, a number the list does not
+# hold, a PR neither merged nor open, its commit or the base not here (with
+# the fetch command), view failing or breaking its contract.
+_lg_up_pr() {
+  local n="$1" bodyf="$2" s cfg st mc ho base x rc=0 scanned=true
+  _lg_scratch_name
+  s=$_LG_SN
+  _lg_adapter_path pr || _lg_die "--pr: $_LG_ADP_ERR"
+  [ -n "$_LG_ADP" ] || _lg_die "--pr needs a PR adapter (config adapters.pr), none is set — give --range <a>..<b> instead"
+  _lg_ix_pr_fetch || rc=$?
+  if [ "$rc" != 0 ]; then
+    _lg_die "--pr: the pr adapter's list is unavailable: ${_LG_RERR:-the pr adapter failed}"
+  fi
+  # The PR's state, merge_commit and head_oid, one line each ("" for a
+  # value that is no string; the oids are checked as hex below), from the
+  # snapshot (its header line has no number: never a match).
+  # shellcheck disable=SC2016  # jq source
+  jq -n -r --arg n "$n" '
+    def s: if type == "string" then gsub("[\\n\\r]"; " ") else "" end;
+    first(inputs | select(type == "object" and (.number | tostring) == $n))
+    | (.state | s), (.merge_commit | s), (.head_oid | s)' "$_LG_RSNAP" > "$s.pr" 2> "$s.err" \
+    || _lg_die "--pr: cannot read the pr adapter's list: $(head -n 1 "$s.err")"
+  [ -s "$s.pr" ] || _lg_die "--pr: no PR #$n in the pr adapter's list (ledger ls --refresh reads the list again)"
+  { IFS= read -r st; IFS= read -r mc; IFS= read -r ho; } < "$s.pr" || _lg_die "cannot read $s.pr"
+  cfg=$(_lg_cfg '.base | if type == "string" then gsub("\n"; " ") else "" end') || exit "$?"
+  x="git fetch $_LG_IX_PR_REMOTE"
+  case "$st" in
+    merged)
+      case "$mc" in
+        '') _lg_die "--pr: PR #$n is merged, but the pr adapter gives no merge_commit — give --range <a>..<b>" ;;
+      esac
+      if ! printf '%s\n' "$mc" | LC_ALL=C grep -Eqx '[0-9a-f]{40}([0-9a-f]{24})?' \
+          || ! _LG_UP_B=$(git rev-parse -q --verify "$mc^{commit}" 2>/dev/null); then
+        _lg_die "--pr: PR #$n's merge commit ${mc:0:12} is not in this clone ($x)"
+      fi
+      _LG_UP_A=$(git rev-parse -q --verify "$_LG_UP_B^1" 2>/dev/null) \
+        || _lg_die "--pr: PR #$n's merge commit ${mc:0:12} has no parent"
+      ;;
+    open)
+      case "$ho" in
+        '') _lg_die "--pr: PR #$n is open, but the pr adapter gives no head_oid — give --range <base>...<head>" ;;
+      esac
+      if ! printf '%s\n' "$ho" | LC_ALL=C grep -Eqx '[0-9a-f]{40}([0-9a-f]{24})?' \
+          || ! _LG_UP_B=$(git rev-parse -q --verify "$ho^{commit}" 2>/dev/null); then
+        _lg_die "--pr: PR #$n's head ${ho:0:12} is not in this clone ($x)"
+      fi
+      case "$cfg" in
+        '') _lg_die "--pr: PR #$n is open and config base is empty: no merge base to start from" ;;
+        -*) _lg_die "--pr: config base '$cfg' does not resolve to a commit here ($x)" ;;
+      esac
+      base=$(git rev-parse -q --verify "$cfg^{commit}" 2>/dev/null) \
+        || _lg_die "--pr: config base '$cfg' does not resolve to a commit here ($x)"
+      _LG_UP_A=$(git merge-base "$base" "$_LG_UP_B" 2>/dev/null) \
+        || _lg_die "--pr: config base '$cfg' and PR #$n's head ${ho:0:12} have no merge base here"
+      ;;
+    *) _lg_die "--pr: PR #$n is ${st:-of no state}, neither merged nor open: no range to read" ;;
+  esac
+  # The body (view is optional and never cached; offline, it never runs).
+  _LG_UP_BODY=""
+  if [ "${DOC_TOOLS_LEDGER_OFFLINE:-}" = 1 ]; then
+    scanned=false
+  else
+    rc=0
+    _lg_adapter pr view "$n" > "$s.view" 2> "$s.verr" || rc=$?
+    case "$rc" in
+      0) jq -j '.body' "$s.view" > "$bodyf" || _lg_die "jq failed (the PR body)"
+         _LG_UP_BODY=$bodyf ;;
+      3) scanned=false ;;
+      *) _lg_die "--pr: the pr adapter's view $n failed: $(head -n 1 "$s.verr" | tr -d '\000-\010\013-\037')" ;;
+    esac
+  fi
+  _LG_UP_PR=$(jq -nc --argjson n "$n" --arg st "$st" --argjson b "$scanned" '{number: $n, state: $st, body_scanned: $b}') \
+    || _lg_die "jq failed (the pr object)"
+}
 
 # _lg_up_range <spec> → _LG_UP_A, _LG_UP_B: the range's two commits (full
 # ids); for <a>...<b>, _LG_UP_A is merge-base(a, b). A spec that is no range,
@@ -438,24 +561,35 @@ def up_files($fs): ($fs | length) as $n | ($fs[0:3] | join(", ")) + (if $n > 3 t
 
 # shellcheck disable=SC2154  # _OPT_*, _OPTV_* and _ARGS are set by _parse_args
 cmd_ledger_upkeep() {
-  local s named="" rc=0 n
+  local s named="" rc=0 n pr=""
   _lg_init upkeep
-  [ "${#_ARGS[@]}" = 0 ] || _lg_usage "unexpected argument '${_ARGS[0]}' (give --range <a>..<b>)"
-  if [ "$_OPT_no_repo_adapters" = 1 ]; then _lg_usage "--no-repo-adapters is not available yet"; fi
-  if _opt_seen pr; then _lg_usage "--pr is not available yet"; fi
-  _opt_seen range || _lg_usage "give --range <a>..<b> or --range <a>...<b>"
+  [ "${#_ARGS[@]}" = 0 ] || _lg_usage "unexpected argument '${_ARGS[0]}' (give --range <a>..<b> or --pr <n>)"
+  if _opt_seen range && _opt_seen pr; then _lg_usage "give --range or --pr, not both"; fi
+  if ! _opt_seen range && ! _opt_seen pr; then _lg_usage "give --range <a>..<b>, --range <a>...<b> or --pr <n>"; fi
+  if _opt_seen pr; then
+    case "$_OPT_pr" in
+      ''|*[!0123456789]*|??????????*) _lg_usage "--pr takes a PR number (got '$_OPT_pr')" ;;
+    esac
+    pr=$((10#$_OPT_pr))
+  fi
   _lg_up_top
-  _lg_up_range "$_OPT_range"
-  _LG_IX_NEED_CONTRACTS=1
+  # Before anything that could run an adapter (the PR list, the index).
+  if [ "$_OPT_no_repo_adapters" = 1 ]; then _lg_up_no_repo; fi
   _lg_scratch_name
   s=$_LG_SN
+  if [ -n "$pr" ]; then
+    _lg_up_pr "$pr" "$s.body"
+  else
+    _lg_up_range "$_OPT_range"
+  fi
+  _LG_IX_NEED_CONTRACTS=1
   if [ "${#_OPTV_items[@]}" -gt 0 ]; then
     _lg_up_named "$s.named"
     named="$s.named"
   fi
-  _lg_up_core "$_LG_UP_A" "$_LG_UP_B" "" "$named" "$s.core"
+  _lg_up_core "$_LG_UP_A" "$_LG_UP_B" "$_LG_UP_BODY" "$named" "$s.core"
   # The payload: spec §4's fields — rank and touched stay the core's.
-  jq -c '{range, pr: null, files, commits, items: [.items[] | del(.rank)], unattributed_contracts}' "$s.core" > "$s.out" \
+  jq -c --argjson pr "$_LG_UP_PR" '{range, pr: $pr, files, commits, items: [.items[] | del(.rank)], unattributed_contracts}' "$s.core" > "$s.out" \
     || _lg_die "jq failed (ledger upkeep payload)"
   n=$(jq '[.items[].total] | add // 0' "$s.out") || _lg_die "jq failed (ledger upkeep proposals)"
   if [ "$_OPT_strict" = 1 ] && [ "$n" -gt 0 ]; then rc=1; fi

@@ -5399,7 +5399,10 @@ test_lg_shallow_deepen_rebuilds_caches() {
 # prints that file on stderr and exits 1 for every command. `gh pr list`:
 # counts the PR adapter's runs (LG_GH/calls: its `--state open` calls —
 # ledger-pr-gh.sh makes one per run) and prints the PRs of LG_GH/prs.json
-# in the asked --state (all when none). The issue commands (Task 13) keep
+# in the asked --state (all when none); `gh pr view <n>` (#39: upkeep --pr)
+# prints that PR's {number, body} as gh's --json does (pretty-printed,
+# body "" when absent), and fails for a number LG_GH/prs.json does not
+# hold. The issue commands (Task 13) keep
 # LG_GH/issues.json as the repository's issues: `issue list` prints it
 # (LG_GH/icalls counts the calls), `issue view <n>` the issue, `issue edit
 # <n>` applies --add-label / --remove-label (comma lists) and --body-file to
@@ -5438,6 +5441,11 @@ case "$1 $2" in
   "repo view")
     if [ -f "$d/fail" ]; then cat "$d/fail" >&2; exit 1; fi
     if [ -f "$d/issues-off" ]; then echo '{"hasIssuesEnabled":false}'; else echo '{"hasIssuesEnabled":true}'; fi
+    exit 0 ;;
+  "pr view")
+    if [ -f "$d/fail" ]; then cat "$d/fail" >&2; exit 1; fi
+    jq -e --argjson n "$3" '.[] | select(.number == $n) | {number, body: (.body // "")}' "$d/prs.json" \
+      || { echo "GraphQL: Could not resolve to a PullRequest with the number of $3. (repository.pullRequest)" >&2; exit 1; }
     exit 0 ;;
   "issue list")
     n=$(cat "$d/icalls" 2>/dev/null || echo 0)
@@ -12758,7 +12766,7 @@ test_lg_upkeep_found_by_signals() {
   lg upkeep --range main..feat --items docs/archive/issues/old.md
   assert_eq "3" "$LG_RC" "--items naming an archived item: usage (3)"
   assert_contains "$LG_ERR" "archived item" "…saying so"
-  # The PR body (Task 5 passes it): key-in-pr-body, through the core.
+  # The PR body (--pr passes it): key-in-pr-body, through the core.
   a=$(git rev-parse main)
   b=$(git rev-parse feat)
   printf 'Closes the APP-1 work\n' > "$TEST_DIR/body.txt"
@@ -12939,7 +12947,7 @@ test_lg_upkeep_spaced_path() {
 }
 
 test_lg_upkeep_top_strict_exits() {
-  echo "test: #39 — --top 1 truncates (total/truncated, 'showing 1 of 2'); --strict with proposals exit 1, without 0; bad range exit 2; neither/both --range/--pr, --top x: exit 3"
+  echo "test: #39 — --top 1 truncates (total/truncated, 'showing 1 of 2'); --strict with proposals exit 1, without 0; bad range exit 2; neither/both --range/--pr, --top x, --pr x: exit 3"
   lg_upkeep_fixture
   lg_up_commit $'two\n\nLedger-Claims: app-6' src/order/total.js "src/order/total two.js" src/order/x.js src/order/y.js server/create.js
   lg upkeep --range main..feat --top 1 --format json
@@ -12980,14 +12988,16 @@ test_lg_upkeep_top_strict_exits() {
   assert_eq "3" "$LG_RC" "--top -1: usage (3)"
   lg upkeep --range main..feat extra
   assert_eq "3" "$LG_RC" "an argument: usage (3)"
-  lg upkeep --pr 5
-  assert_eq "3" "$LG_RC" "--pr (Task 5): usage (3)"
-  assert_contains "$LG_ERR" "ledger upkeep: --pr is not available yet" "…not available yet"
   lg upkeep --range main..feat --pr 5
   assert_eq "3" "$LG_RC" "both --range and --pr: usage (3)"
+  lg upkeep --pr x
+  assert_eq "3" "$LG_RC" "--pr x: usage (3)"
+  lg upkeep --pr 1x
+  assert_eq "3" "$LG_RC" "--pr 1x: usage (3)"
+  lg upkeep --pr 1234567890
+  assert_eq "3" "$LG_RC" "--pr with ten digits: usage (3)"
   lg upkeep --range main..feat --no-repo-adapters
-  assert_eq "3" "$LG_RC" "--no-repo-adapters (Task 5): usage (3)"
-  assert_contains "$LG_ERR" "ledger upkeep: --no-repo-adapters is not available yet" "…not available yet"
+  assert_eq "0" "$LG_RC" "--no-repo-adapters with no adapter configured: it runs (exit 0)"
   teardown
 }
 
@@ -13174,6 +13184,267 @@ test_lg_upkeep_ranking_and_cap() {
   assert_contains "$LG_OUT" "  (showing 3 of 5; --top 0 shows all)" "text: showing 3 of 5"
   lg upkeep --range main..feat --top 2 --format json
   assert_json_field "$LG_OUT" '.items[0].link' "ledger link app-7 --changes component:Sheet,endpoint:create" "--top 2: the changes only, no --consumes"
+  teardown
+}
+
+# lg_up_pr_stub <dir>: tools/pr.sh, a /bin/sh PR adapter driven by the files
+# of <dir> — `list` prints <dir>/list (fails, "PR service down", while
+# <dir>/list-fail exists); `view <n>` prints <dir>/view-<n> (exits 1 without
+# one; while <dir>/view-rc exists, exits with the number it holds after a
+# "view failed" line on stderr). Each call is logged to <dir>/calls.
+lg_up_pr_stub() {
+  mkdir -p tools
+  printf "#!/bin/sh\nd='%s'\n" "$1" > tools/pr.sh
+  # shellcheck disable=SC2016  # the adapter's own shell text
+  cat >> tools/pr.sh <<'EOF'
+echo "$*" >> "$d/calls"
+case "$1" in
+  list)
+    if [ -f "$d/list-fail" ]; then echo "PR service down" >&2; exit 1; fi
+    cat "$d/list" ;;
+  view)
+    if [ -f "$d/view-rc" ]; then echo "view failed" >&2; exit "$(cat "$d/view-rc")"; fi
+    if [ -f "$d/view-$2" ]; then cat "$d/view-$2"; else echo "no PR $2" >&2; exit 1; fi ;;
+  *) exit 3 ;;
+esac
+EOF
+  chmod +x tools/pr.sh
+}
+
+test_lg_upkeep_pr_merged_and_open() {
+  echo "test: #39 — --pr N: merged → merge_commit^1..merge_commit; open → merge-base(base, head_oid)..head_oid; the body's keys are key-in-pr-body"
+  lg_upkeep_fixture '{"base":"main","adapters":{"pr":"tools/pr.sh"}}'
+  local d f m p1 f2
+  d=$(harness_mktemp_d lg-uppr)
+  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  f=$(git rev-parse HEAD)
+  git checkout -q main
+  git merge -q --no-ff feat -m "Merge pull request #7"
+  m=$(git rev-parse HEAD)
+  p1=$(git rev-parse HEAD^1)
+  git checkout -q -b feat2
+  lg_up_commit "tidy the util" src/util/a.js
+  f2=$(git rev-parse HEAD)
+  # main moves on: the open PR's range starts at the merge base, not at main.
+  git checkout -q main
+  lg_up_commit "later on main" server/create.js
+  cat > "$d/list" <<EOF
+{"number":7,"head":"feat","state":"merged","url":"u7","head_oid":"$f","merge_commit":"$m"}
+{"number":8,"head":"feat2","state":"open","url":"u8","head_oid":"$f2"}
+EOF
+  printf '{"number":7,"body":"Totals, merged."}\n' > "$d/view-7"
+  printf '{"number":8,"body":"Fixes the badge (app-5)"}\n' > "$d/view-8"
+  lg_up_pr_stub "$d"
+  lg upkeep --pr 7 --format json
+  assert_eq "0" "$LG_RC" "--pr 7 (merged): exit 0"
+  assert_eq "1" "$(json_count "$LG_OUT")" "…one JSON object"
+  assert_json_field "$LG_OUT" '[keys_unsorted[]] | join(",")' "verb,enabled,exit,range,pr,files,commits,items,unattributed_contracts,pr_data" \
+    "the payload's fields, as with --range"
+  assert_json_field "$LG_OUT" '[.range, .files, .commits] | tojson' "[\"$p1..$m\",1,2]" \
+    "merged: <merge_commit>^1..<merge_commit> (the PR's one file; its commit and the merge)"
+  assert_json_field "$LG_OUT" '.pr | tojson' '{"number":7,"state":"merged","body_scanned":true}' "pr: number, state, body_scanned"
+  assert_json_field "$LG_OUT" '.items[0] | [.key, (.found_by | join(",")), .link] | join("|")' \
+    "app-6|trailer:claims|ledger link app-6 --changes field:order.total" "the PR's claim, and its proposal"
+  assert_json_field "$LG_OUT" '.pr_data.state' "fresh" "pr_data, as other verbs add it"
+  assert_eq "1|1" "$(grep -c '^list$' "$d/calls")|$(grep -c '^view 7$' "$d/calls")" \
+    "one list call (the index build reads the copy --pr fetched: the remote cache) and one view"
+  lg upkeep --pr 7
+  assert_eq "0" "$LG_RC" "text: exit 0"
+  assert_eq "range ${p1:0:12}..${m:0:12}  1 files, 2 commits" "$(sed -n 1p <<<"$LG_OUT")" "text: the range line, as with --range"
+  lg upkeep --pr 8 --format json
+  assert_eq "0" "$LG_RC" "--pr 8 (open): exit 0"
+  assert_json_field "$LG_OUT" '[.range, .files, .commits] | tojson' "[\"$m..$f2\",1,1]" \
+    "open: merge-base(config base, head_oid)..head_oid — main's later commit is not in it"
+  assert_json_field "$LG_OUT" '.pr | tojson' '{"number":8,"state":"open","body_scanned":true}' "pr: open, its body scanned"
+  assert_json_field "$LG_OUT" '[.items[] | "\(.key):\(.found_by | join(","))"] | join(" ")' "app-5:key-in-pr-body" \
+    "app-5, named in the body only: key-in-pr-body"
+  assert_eq "1|1" "$(grep -c '^list$' "$d/calls")|$(grep -c '^view 8$' "$d/calls")" \
+    "within the TTL the list comes from the cache; the body is read every run (view is never cached)"
+  lg upkeep --pr 8
+  assert_contains "$LG_OUT" "app-5  found by key-in-pr-body" "text: found by key-in-pr-body"
+  assert_contains "$LG_OUT" "(no proposals)" "…a body-only item gets no listed-file consumes"
+  teardown
+}
+
+test_lg_upkeep_pr_failures() {
+  echo "test: #39 — --pr without adapters.pr, an adapter failing, an unknown number, a closed PR, a merge_commit not here: exit 2 (never '(no proposals)'); view exit 3: body_scanned false, rc 0"
+  lg_upkeep_fixture
+  local d f mb
+  d=$(harness_mktemp_d lg-uppr)
+  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  f=$(git rev-parse HEAD)
+  mb=$(git merge-base main feat)
+  lg upkeep --pr 8 --format json
+  assert_eq "2" "$LG_RC" "--pr without adapters.pr: exit 2"
+  assert_json_field "$LG_OUT" '.exit' "2" "…one JSON object, exit 2"
+  assert_contains "$LG_ERR" "adapters.pr" "…naming the config key"
+  lg upkeep --pr 8
+  assert_eq "2" "$LG_RC" "text: exit 2"
+  assert_not_contains "$LG_OUT" "(no proposals)" "…never '(no proposals)'"
+  # TTL 0: every run asks the adapter, so a failure is never served a copy.
+  lg_enable '{"base":"main","adapters":{"pr":"tools/pr.sh"},"cache":{"remote_ttl_minutes":0}}'
+  lg_up_pr_stub "$d"
+  cat > "$d/list" <<EOF
+{"number":8,"head":"feat","state":"open","url":"u8","head_oid":"$f"}
+{"number":4,"head":"gone","state":"closed","url":"u4"}
+{"number":5,"head":"done","state":"merged","url":"u5","head_oid":"$f","merge_commit":"0123456789abcdef0123456789abcdef01234567"}
+{"number":6,"head":"done2","state":"merged","url":"u6","head_oid":"$f","merge_commit":null}
+{"number":9,"head":"elsewhere","state":"open","url":"u9","head_oid":"89abcdef0123456789abcdef0123456789abcdef"}
+EOF
+  printf '{"number":8,"body":"see app-5"}\n' > "$d/view-8"
+  : > "$d/list-fail"
+  lg upkeep --pr 8 --format json
+  assert_eq "2" "$LG_RC" "the adapter failing, no copy: exit 2"
+  assert_contains "$LG_ERR" "PR service down" "…with its stderr"
+  lg upkeep --pr 8
+  assert_eq "2" "$LG_RC" "text: exit 2"
+  assert_not_contains "$LG_OUT" "(no proposals)" "…never '(no proposals)'"
+  rm -f "$d/list-fail"
+  lg upkeep --pr 99
+  assert_eq "2" "$LG_RC" "a number the list does not hold: exit 2"
+  assert_contains "$LG_ERR" "#99" "…naming it"
+  lg upkeep --pr 4
+  assert_eq "2" "$LG_RC" "a closed PR: exit 2"
+  assert_contains "$LG_ERR" "closed" "…saying so"
+  lg upkeep --pr 5 --format json
+  assert_eq "2" "$LG_RC" "a merge_commit this clone does not have: exit 2"
+  assert_contains "$LG_ERR" "git fetch origin" "…with the fetch command"
+  assert_not_contains "$LG_OUT" "(no proposals)" "…never '(no proposals)'"
+  lg upkeep --pr 6
+  assert_eq "2" "$LG_RC" "a merged PR without a merge_commit: exit 2"
+  lg upkeep --pr 9
+  assert_eq "2" "$LG_RC" "an open PR whose head_oid this clone does not have: exit 2"
+  assert_contains "$LG_ERR" "git fetch origin" "…with the fetch command"
+  lg upkeep --pr 8 --format json
+  assert_eq "0" "$LG_RC" "the open PR: exit 0"
+  assert_json_field "$LG_OUT" '[.range, (.pr | tojson), ([.items[] | "\(.key):\(.found_by | join(","))"] | join(" "))] | join("|")' \
+    "$mb..$f|{\"number\":8,\"state\":\"open\",\"body_scanned\":true}|app-6:trailer:claims app-5:key-in-pr-body" \
+    "…its range, its pr object, the body's key"
+  printf '3\n' > "$d/view-rc"
+  lg upkeep --pr 8 --format json
+  assert_eq "0" "$LG_RC" "view exits 3 (the adapter has no view): exit 0"
+  assert_json_field "$LG_OUT" '[(.pr | tojson), ([.items[].key] | join(","))] | join("|")' \
+    '{"number":8,"state":"open","body_scanned":false}|app-6' "…body_scanned false, and no body key"
+  printf '1\n' > "$d/view-rc"
+  lg upkeep --pr 8
+  assert_eq "2" "$LG_RC" "view failing otherwise: exit 2"
+  assert_contains "$LG_ERR" "view failed" "…with its stderr"
+  assert_not_contains "$LG_OUT" "(no proposals)" "…never '(no proposals)'"
+  rm -f "$d/view-rc"
+  printf '{"number":7,"body":"x"}\n' > "$d/view-8"
+  lg upkeep --pr 8
+  assert_eq "2" "$LG_RC" "view printing another PR: exit 2 (it breaks the contract)"
+  printf '{"number":8}\n' > "$d/view-8"
+  lg upkeep --pr 8
+  assert_eq "2" "$LG_RC" "view without a body: exit 2"
+  printf '{"number":8,"body":"a"}\n{"number":8,"body":"b"}\n' > "$d/view-8"
+  lg upkeep --pr 8
+  assert_eq "2" "$LG_RC" "view printing two objects: exit 2"
+  printf '{"number":8,"body":"see app-5"}\n' > "$d/view-8"
+  DOC_TOOLS_LEDGER_OFFLINE=1 lg upkeep --pr 8 --format json
+  assert_eq "0|false" "$LG_RC|$(jq -r '.pr.body_scanned' <<<"$LG_OUT")" \
+    "DOC_TOOLS_LEDGER_OFFLINE=1: the list's last copy serves; view never runs (body_scanned false)"
+  lg_enable '{"base":"nope/x","adapters":{"pr":"tools/pr.sh"},"cache":{"remote_ttl_minutes":0}}'
+  lg upkeep --pr 8
+  assert_eq "2" "$LG_RC" "an open PR, config base not resolving: exit 2"
+  assert_contains "$LG_ERR" "nope/x" "…naming it"
+  teardown
+}
+
+test_lg_upkeep_no_repo_adapters() {
+  echo "test: #39 — --no-repo-adapters: exit 2 naming the adapter when adapters.contracts / adapters.pr / items.adapter is a repository path; null or doc-superpowers:<name> runs; the refusing run executes no adapter"
+  lg_upkeep_fixture '{"base":"main","adapters":{"contracts":"tools/contracts.sh"}}'
+  local mark a f
+  mark=$(harness_mktemp_d lg-mark)
+  mkdir -p tools
+  # Each stub prints nothing (an empty list) and leaves a mark when run.
+  for a in contracts pr items; do
+    printf '#!/bin/sh\necho "%s $*" >> "%s/ran"\n' "$a" "$mark" > "tools/$a.sh"
+    chmod +x "tools/$a.sh"
+  done
+  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  f=$(git rev-parse HEAD)
+  lg upkeep --range main..feat --format json
+  assert_eq "0" "$LG_RC" "without the flag the repository's contracts adapter runs: exit 0"
+  assert_contains "$(cat "$mark/ran" 2>/dev/null)" "contracts list" "…and the stub leaves its mark"
+  rm -f "$mark/ran"
+  lg upkeep --range main..feat --no-repo-adapters --format json
+  assert_eq "2" "$LG_RC" "adapters.contracts a repository path: exit 2"
+  assert_json_field "$LG_OUT" '.exit' "2" "…one JSON object, exit 2"
+  assert_contains "$LG_ERR" 'adapters.contracts ("tools/contracts.sh")' "…naming the adapter and its value"
+  assert_file_not_exists "$mark/ran" "…and no adapter ran"
+  lg_enable '{"base":"main","adapters":{"pr":"tools/pr.sh"}}'
+  lg upkeep --pr 8 --no-repo-adapters
+  assert_eq "2" "$LG_RC" "adapters.pr a repository path, with --pr: exit 2"
+  assert_contains "$LG_ERR" 'adapters.pr ("tools/pr.sh")' "…naming it"
+  assert_not_contains "$LG_OUT" "(no proposals)" "…never '(no proposals)'"
+  assert_file_not_exists "$mark/ran" "…the PR list never fetched"
+  lg_enable "{\"base\":\"main\",\"items\":{\"adapter\":\"$TEST_DIR/tools/items.sh\"}}"
+  lg upkeep --range main..feat --no-repo-adapters
+  assert_eq "2" "$LG_RC" "items.adapter an absolute path: exit 2"
+  assert_contains "$LG_ERR" "items.adapter" "…naming it"
+  assert_file_not_exists "$mark/ran" "…and no adapter ran"
+  lg_enable '{"base":"main","adapters":{"contracts":"tools/contracts.sh","pr":"tools/pr.sh"},"items":{"adapter":"tools/items.sh"}}'
+  lg upkeep --range main..feat --no-repo-adapters
+  assert_eq "2" "$LG_RC" "all three repository paths: exit 2"
+  assert_contains "$LG_ERR" 'adapters.contracts ("tools/contracts.sh"), adapters.pr ("tools/pr.sh"), items.adapter ("tools/items.sh")' \
+    "…naming each"
+  assert_file_not_exists "$mark/ran" "…and no adapter ran"
+  lg_enable '{"base":"main","adapters":{"pr":"doc-superpowers:../../tools/pr"}}'
+  lg upkeep --range main..feat --no-repo-adapters
+  assert_eq "2" "$LG_RC" "doc-superpowers: with a name outside [a-z0-9_-]+: exit 2"
+  assert_file_not_exists "$mark/ran" "…and no adapter ran"
+  # null, absent or doc-superpowers:<name>: it runs (the shipped PR
+  # adapter, over a fake gh, gives the list and the body).
+  lg_fake_gh
+  printf '[{"number":7,"headRefName":"feat","headRefOid":"%s","state":"OPEN","url":"https://github.com/o/r/pull/7","mergeCommit":null,"isCrossRepository":false,"body":"Totals for app-1"}]\n' \
+    "$f" > "$LG_GH/prs.json"
+  lg_enable '{"base":"main","adapters":{"contracts":null,"pr":"doc-superpowers:ledger-pr-gh"},"items":{"adapter":null}}'
+  lg upkeep --range main..feat --no-repo-adapters --format json
+  assert_eq "0" "$LG_RC" "null and doc-superpowers:<name>: exit 0"
+  assert_json_field "$LG_OUT" '[.pr, .items[0].key, .items[0].link] | tojson' '[null,"app-6","ledger link app-6 --changes field:order.total"]' \
+    "…the --range run as without the flag"
+  lg upkeep --pr 7 --no-repo-adapters --format json
+  assert_eq "0" "$LG_RC" "--pr through doc-superpowers:ledger-pr-gh: exit 0"
+  assert_json_field "$LG_OUT" '[(.pr | tojson), ([.items[] | "\(.key):\(.found_by | join(","))"] | join(" "))] | join("|")' \
+    '{"number":7,"state":"open","body_scanned":true}|app-6:trailer:claims app-1:key-in-pr-body' \
+    "…its body read through the reference adapter's view"
+  assert_file_not_exists "$mark/ran" "…no repository script ran"
+  lg_fake_gh_off
+  teardown
+}
+
+test_lg_pr_adapter_view() {
+  echo "test: ledger-pr-gh.sh view <n> — gh pr view <n> --json number,body as one compact line; gh failing: exit 2; usage: exit 3"
+  lg_fixture
+  lg_fake_gh
+  cat > "$LG_GH/prs.json" <<'EOF'
+[{"number":12,"headRefName":"feat","state":"OPEN","url":"https://github.com/o/r/pull/12","mergeCommit":null,"body":"Line one\nFixes app-5 — ünï"},
+ {"number":13,"headRefName":"feat2","state":"OPEN","url":"https://github.com/o/r/pull/13","mergeCommit":null}]
+EOF
+  local out a rc=0
+  out=$("$BASH_BIN" "$REPO_DIR/scripts/adapters/ledger-pr-gh.sh" view 12 2>&1) || rc=$?
+  assert_eq "0" "$rc" "exit 0"
+  assert_eq '{"number":12,"body":"Line one\nFixes app-5 — ünï"}' "$out" "one compact line {number, body}"
+  assert_eq "pr view 12 --json number,body" "$(cat "$LG_GH/args")" "the gh call"
+  out=$("$BASH_BIN" "$REPO_DIR/scripts/adapters/ledger-pr-gh.sh" view 13 2>&1) || rc=$?
+  assert_eq '0|{"number":13,"body":""}' "$rc|$out" "a PR without a body: body \"\""
+  out=$("$BASH_BIN" "$REPO_DIR/scripts/adapters/ledger-pr-gh.sh" view 99 2>&1) || rc=$?
+  assert_eq "2" "$rc" "a PR gh does not find: exit 2"
+  assert_contains "$out" "Could not resolve to a PullRequest" "…with gh's stderr"
+  rc=0
+  printf 'HTTP 401: Bad credentials\n' > "$LG_GH/fail"
+  out=$("$BASH_BIN" "$REPO_DIR/scripts/adapters/ledger-pr-gh.sh" view 12 2>&1 >/dev/null) || rc=$?
+  assert_eq "2" "$rc" "gh failing: exit 2"
+  assert_contains "$out" "HTTP 401: Bad credentials" "…with gh's stderr"
+  rm -f "$LG_GH/fail"
+  for a in "view" "view x" "view 12 13" "view -1"; do
+    rc=0
+    # shellcheck disable=SC2086  # the words on purpose
+    "$BASH_BIN" "$REPO_DIR/scripts/adapters/ledger-pr-gh.sh" $a >/dev/null 2>&1 || rc=$?
+    assert_eq "3" "$rc" "'$a': usage (3)"
+  done
+  lg_fake_gh_off
   teardown
 }
 
@@ -13626,6 +13897,10 @@ run_tests() {
   test_lg_upkeep_consumes_listed_unchanged
   test_lg_upkeep_message_only_no_listed_consumes
   test_lg_upkeep_ranking_and_cap
+  test_lg_upkeep_pr_merged_and_open
+  test_lg_upkeep_pr_failures
+  test_lg_upkeep_no_repo_adapters
+  test_lg_pr_adapter_view
 
   print_summary
 }
