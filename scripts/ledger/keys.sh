@@ -1216,7 +1216,9 @@ _lg_k_create_args() {
 # _LG_KN_KEY, _LG_KN_LEDGER, _LG_KN_SUMMARY (as _lg_k_names would for a
 # file that has none). <out>: the names init.stub_defaults must not repeat,
 # one per line — every candidate of status, date, key, ledger, summary and
-# aliases, and of severity and paths when --sev / --paths set them.
+# aliases, of severity and paths when --sev / --paths set them, and
+# relations: the relations opt-out is never a default here — link writes
+# relations, or --relations none (filing step 6); init's stubs still take it.
 # shellcheck disable=SC2154  # _OPT_* are set by _parse_args
 _lg_k_create_cfg() {
   local out="$1" ad sv
@@ -1233,7 +1235,8 @@ _lg_k_create_cfg() {
     (nm("status"), nm("date"), nm("severity"), nm("paths"), nm("key"), nm("ledger"), nm("summary") | one),
     ((["status", "date", "key", "ledger", "summary", "aliases"]
       + (if $sevs == "1" then ["severity"] else [] end) + (if $ps == "1" then ["paths"] else [] end))[] as $l
-      | (($F[$l] // []) + [nm($l)])[] | one)' "$_LG_CFG" > "$out.all" || _lg_die "jq failed (config, new --create)"
+      | (($F[$l] // []) + [nm($l)])[] | one),
+    "relations"' "$_LG_CFG" > "$out.all" || _lg_die "jq failed (config, new --create)"
   { IFS= read -r ad; IFS= read -r sv; IFS= read -r _LG_KC_OPEN
     IFS= read -r _LG_KC_N_STATUS; IFS= read -r _LG_KC_N_DATE; IFS= read -r _LG_KC_N_SEV; IFS= read -r _LG_KC_N_PATHS
     IFS= read -r _LG_KN_KEY; IFS= read -r _LG_KN_LEDGER; IFS= read -r _LG_KN_SUMMARY; } < "$out.all" \
@@ -1273,7 +1276,8 @@ _lg_k_create_path() {
 # new allocates it (none for unassigned); the whole file built in <scratch>
 # — "# <title>", a blank line and the --body-file bytes, then ONE
 # frontmatter pass: status, date, severity, paths, the stub defaults the
-# item does not set (init.sh _lg_init_stub_defaults; "q": setq), key,
+# item does not set, relations never (init.sh _lg_init_stub_defaults; "q":
+# setq; the names _lg_k_create_cfg lists are skipped), key,
 # ledger, summary — and moved into place once (init.sh _lg_init_put, which
 # never writes through a link). Any exit but 0 leaves no file. Prints
 # "created <path>" and new's line; the payload adds "created": true. Ends
