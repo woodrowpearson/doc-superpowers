@@ -13324,28 +13324,99 @@ test_lg_upkeep_consumes_b_reads_b_not_worktree() {
   teardown
 }
 
-test_lg_upkeep_consumes_b_hosted_item() {
-  echo "test: #39 D7 — consumes (b) for a hosted item, which has no file: its title, summary and body excerpt are its text (the excerpt names order.total: proposed; order.tax, named nowhere: not)"
+# lg_up_hosted_fixture <first paragraph>: hosted items (lg_items_fixture,
+# the gh items adapter) where server/orders/model.js defines
+# field:order.total, field:order.tax and field:order.tot; the only issue,
+# gh#12 (key x-12, title "Totals drift"), lists that file, its body's first
+# paragraph the one given; then on a branch fix-12, one commit "Fixes #12"
+# that edits src/x.js (gh#12 found by trailer:claims_by_ref, rank 1).
+lg_up_hosted_fixture() {
   lg_items_fixture '{"base":"origin/main","items":{"adapter":"doc-superpowers:ledger-items-gh"}}'
   # shellcheck disable=SC2016  # JSON
   lg_registry '{"schema":"ledger-registry/1","ledgers":[
   {"id":"x","title":"X","kind":"service","status":"active",
    "contracts":[{"id":"field:order.total","defined_in":["server/orders/model.js"]},
-                {"id":"field:order.tax","defined_in":["server/orders/model.js"]}]},
+                {"id":"field:order.tax","defined_in":["server/orders/model.js"]},
+                {"id":"field:order.tot","defined_in":["server/orders/model.js"]}]},
   {"id":"y","title":"Y","kind":"service","status":"active"}]}'
   mkdir -p server/orders
   printf 'total\ntax\n' > server/orders/model.js
   git add -A && git commit -qm "contracts"
-  cat > "$LG_GH/issues.json" <<'EOF'
-[{"number":12,"title":"Totals drift","body":"The order.total is wrong after an edit.\n\n<!-- doc-superpowers-ledger\nkey: x-12\nsummary: Totals drift when the cart is edited\nrelated-files: [server/orders/model.js]\n-->\n","state":"OPEN","stateReason":"","labels":[{"name":"ledger:x"},{"name":"sev:P1"}],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/12"}]
-EOF
+  # shellcheck disable=SC2016  # jq source
+  jq -n --arg p "$1" '[{number: 12, title: "Totals drift",
+    body: ($p + "\n\n<!-- doc-superpowers-ledger\nkey: x-12\nsummary: Totals drift when the cart is edited\nrelated-files: [server/orders/model.js]\n-->\n"),
+    state: "OPEN", stateReason: "", labels: [{name: "ledger:x"}, {name: "sev:P1"}],
+    updatedAt: "2026-10-01T10:00:00Z", url: "https://github.com/o/r/issues/12"}]' > "$LG_GH/issues.json"
   git checkout -q -b fix-12
   lg_up_commit $'fix it\n\nFixes #12' src/x.js
+}
+
+test_lg_upkeep_consumes_b_hosted_item() {
+  echo "test: #39 D7 — consumes (b) for a hosted item, which has no file: its title, summary and body excerpt are its text (the excerpt names order.total: proposed; order.tax, named nowhere: not)"
+  lg_up_hosted_fixture "The order.total is wrong after an edit."
   lg upkeep --range main..fix-12 --format json
   assert_eq "0" "$LG_RC" "exit 0"
   assert_json_field "$LG_OUT" '.items[] | select(.path == "gh#12") | [(.found_by | join(",")), (.proposed | map("\(.field) \(.value)") | join(", "))] | join("|")' \
     "trailer:claims_by_ref|consumes field:order.total" "gh#12 (Fixes #12): consumes field:order.total, which its excerpt names — not field:order.tax"
   lg_items_teardown
+}
+
+test_lg_upkeep_consumes_b_hosted_excerpt_cut() {
+  echo "test: #39 D7 — a hosted excerpt the items adapter cut mid-name (280 characters ending in '…'): the partial word before the '…' names nothing — 'order.tot…', cut from order.total, does not name field:order.tot; order.tax, whole earlier in it, still counts"
+  local p="order.tax rounds. " i=0
+  while [ "$i" -lt 42 ]; do
+    p="${p}words "
+    i=$((i + 1))
+  done
+  lg_up_hosted_fixture "${p}order.total is wrong after an edit."
+  lg show x-12 --format json
+  assert_json_field "$LG_OUT" '.item.first_para | [length, endswith("order.tot…")] | tojson' "[280,true]" \
+    "the premise: the index's excerpt is cut inside order.total"
+  lg upkeep --range main..fix-12 --format json
+  assert_eq "0|consumes field:order.tax" "$LG_RC|$(lg_up_vals x-12)" "consumes field:order.tax only — not field:order.tot, which only the cut word spells"
+  lg_items_teardown
+}
+
+test_lg_upkeep_consumes_b_cat_file_failure() {
+  echo "test: #39 D7 — git cat-file failing to read an item's text at <b> (not HEAD) is a git failure: upkeep exits 2 naming it; validate --pushed reports it as its one 'could not check' advisory, the push's exit unchanged (R16)"
+  lg_up_text_fixture
+  local x shim
+  lg_up_commit "lint" docs/issues/a.md
+  x=$(git rev-parse HEAD)
+  lg_up_commit "util" src/util/a.js
+  shim=$(harness_mktemp_d lg-gitshim)
+  # shellcheck disable=SC2016  # shell source
+  printf '#!/bin/sh\nif [ "$1" = cat-file ] && [ "$2" = blob ]; then\n  case "$3" in *:docs/issues/*) echo "fatal: simulated" >&2; exit 128 ;; esac\nfi\nexec %s "$@"\n' \
+    "$(command -v git)" > "$shim/git"
+  chmod +x "$shim/git"
+  PATH="$shim:$PATH" lg upkeep --range "main..$x" --format json
+  assert_eq "2|1" "$LG_RC|$(json_count "$LG_OUT")" "upkeep: exit 2, one JSON object"
+  assert_contains "$LG_OUT" "git cat-file $x:docs/issues/a.md failed: fatal: simulated" "…naming the read and git's message"
+  PATH="$shim:$PATH" lg validate --pushed "main..$x" --format json
+  assert_eq "0|undeclared-contract-change|advisory|null|null" "$LG_RC|$(lg_vfd)" "validate --pushed: exit 0, one advisory"
+  assert_json_field "$LG_OUT" ".findings[0].detail | startswith(\"could not check: git cat-file $x:docs/issues/a.md failed\")" "true" \
+    "…could not check, naming the git failure"
+  assert_eq "" "$LG_ERR" "…stderr: nothing"
+  teardown
+}
+
+test_lg_upkeep_consumes_b_item_path_space_dash() {
+  echo "test: #39 D7 — consumes (b) reads the text of an item whose file name holds a space and starts with '-' (docs/issues/-order total.md): at <b> (not HEAD: git cat-file) and from the working tree (<b> HEAD)"
+  lg_up_text_fixture
+  local p="docs/issues/-order total.md" b
+  lg_item "$p" "key: app-8" "ledger: app" "status: Open" "severity: P3" "summary: Tax drift" \
+    "related-files: [server/orders/model.js]"
+  printf '\nThe export reads order.tax.\n' >> "$p"
+  git add -A && git commit -qm "file the export item"
+  b=$(git rev-parse HEAD)
+  lg_up_commit "util" src/util/a.js
+  lg upkeep --range "main..$b" --format json
+  assert_eq "0|app-8:item-file-edited|consumes field:order.tax" \
+    "$LG_RC|$(jq -r '[.items[] | "\(.key):\(.found_by | join(","))"] | join(" ")' <<<"$LG_OUT")|$(lg_up_vals app-8)" \
+    "<b> is not HEAD: its body, read at <b>, names order.tax"
+  lg upkeep --range main..HEAD --format json
+  assert_eq "0|consumes field:order.tax" "$LG_RC|$(lg_up_vals app-8)" "<b> is HEAD: its body, read from the working tree, names order.tax"
+  teardown
 }
 
 test_lg_upkeep_ranking_and_cap() {
@@ -14805,6 +14876,9 @@ run_tests() {
   test_lg_upkeep_consumes_b_ignores_relation_lists
   test_lg_upkeep_consumes_b_reads_b_not_worktree
   test_lg_upkeep_consumes_b_hosted_item
+  test_lg_upkeep_consumes_b_hosted_excerpt_cut
+  test_lg_upkeep_consumes_b_cat_file_failure
+  test_lg_upkeep_consumes_b_item_path_space_dash
   test_lg_upkeep_ranking_and_cap
   test_lg_upkeep_touched_needs_a_naming_line
   test_lg_upkeep_names_glob_and_literals
