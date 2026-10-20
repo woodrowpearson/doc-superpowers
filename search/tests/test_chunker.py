@@ -7,6 +7,7 @@ pieces that share its line number.
 
 from __future__ import annotations
 
+from doc_search import chunker
 from doc_search.chunker import CloudChunk, chunk_lines, chunk_markdown
 
 
@@ -253,3 +254,20 @@ def test_chunk_lines_windows() -> None:
     for before, after in zip(chunks, chunks[1:], strict=False):
         assert after.start_line == before.end_line
     assert {c.heading_path for c in chunks} == {("run.sh",)}
+
+
+def test_the_sizes_and_the_version_move_together() -> None:
+    """The stamp records CHUNKER_VERSION: a stamp from another version makes the next run a full rebuild.
+
+    This pins the sizes and rules next to the version. Changing one means changing this test, which is the
+    moment to bump CHUNKER_VERSION in chunker.py.
+    """
+    sizes = (
+        chunker.TARGET,
+        chunker.HEADING_LEVEL,
+        chunker.MERGE_BELOW,
+        chunker.OVERLAP,
+        chunker.FENCE_CAP,
+        chunker.MAX_HEADING,
+    )
+    assert (sizes, chunker.CHUNKER_VERSION) == ((1600, 3, 0.25, 0.15, 6000, 200), 1)
