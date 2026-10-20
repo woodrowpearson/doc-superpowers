@@ -120,8 +120,12 @@ class GitRepo:
 
 
 @pytest.fixture
-def git_repo(tmp_path: Path) -> Callable[..., GitRepo]:
-    """Factory: `git_repo()` makes an initialised repository on branch `main`."""
+def git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., GitRepo]:
+    """Factory: `git_repo()` makes an initialised repository on branch `main`.
+
+    The process environment is isolated too (not just the fixture's own git calls), so the
+    git helpers under test see no user config either.
+    """
     home = tmp_path / "git-home"
     home.mkdir()
     env = {
@@ -145,6 +149,9 @@ def git_repo(tmp_path: Path) -> Callable[..., GitRepo]:
         "GIT_CONFIG_PARAMETERS",
     ):
         env.pop(leaked, None)
+        monkeypatch.delenv(leaked, raising=False)
+    for key in ("HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT"):
+        monkeypatch.setenv(key, env[key])
     made = 0
 
     def make(name: str | None = None) -> GitRepo:
