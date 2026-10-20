@@ -372,6 +372,42 @@ def test_get_returns_building_after_wait(git_repo, tiny_model: str, monkeypatch:
     assert counter.count == 2, "a second call must wait on the running build, not start another"
 
 
+def test_building_carries_the_ready_half(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """While one kind is still on its first build, `Building.partial` holds the kind that is done."""
+    repo = git_repo()
+    seed(repo)
+    cfg = make_cfg(repo, tiny_model)
+    original = SembleIndex.from_path
+    gate = threading.Event()  # the code build waits here
+
+    def gated_code(cls, path, content=(), *args, **kwargs):
+        if ContentType.CODE in (content if isinstance(content, (list, tuple)) else [content]):
+            gate.wait(30)
+        return original(path, content, *args, **kwargs)
+
+    monkeypatch.setattr(SembleIndex, "from_path", classmethod(gated_code))
+    pool = IndexPool(cfg)
+
+    try:
+        cold = pool.get(repo.root, wait_s=0)
+        assert isinstance(cold, Building) and cold.partial is None  # nothing is ready yet
+
+        result = cold
+        deadline = time.monotonic() + 30
+        while isinstance(result, Building) and not result.docs_ready and time.monotonic() < deadline:
+            result = pool.get(repo.root, wait_s=0.2)
+        assert isinstance(result, Building)
+        assert (result.docs_ready, result.code_ready) == (True, False)
+        assert result.partial is not None
+        assert result.partial.docs is not None and result.partial.code is None
+        assert result.partial.docs.search("refund rounding", top_k=1)[0].chunk.file_path == "docs/refunds.md"
+        assert set(result.partial.built_at) == {"docs"}
+    finally:
+        gate.set()  # let the build finish inside this test, so no thread outlives it
+    done = ready(pool.get(repo.root, wait_s=30))
+    assert done.docs is not None and done.code is not None
+
+
 def test_wait_zero_never_blocks(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = git_repo()
     seed(repo)
