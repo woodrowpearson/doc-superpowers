@@ -29,7 +29,7 @@ from .config import INERT_LINE, Config, ConfigError, load_config
 from .corpus import Corpus
 from .docindex import DocIndex
 from .engines import IndexPool
-from .render import render_search
+from .render import flat, render_search
 from .repo import GitError, NotARepo, RepoInfo, resolve_worktree
 from .searcher import Searcher
 from .tools import FETCH_CONTEXT, DocTools
@@ -59,7 +59,8 @@ FETCH_DESCRIPTION = (
     "Read a file of the repository from the working tree, by line range (`start_line` and `end_line`) or "
     "around one line (`line` with `context` lines either side, default 20). Use it to expand a `search` hit "
     "past its snippet. At most 400 lines are returned; paths are relative to the worktree top and cannot leave "
-    "it. A document comes with a header: title, type, status and the code it references. " + DATA_NOTE
+    "it, and only tracked files and untracked files git does not ignore are served. A document comes with a "
+    "header: title, type, status and the code it references. " + DATA_NOTE
 )
 
 RELATED_DESCRIPTION = (
@@ -107,7 +108,7 @@ class Runtime:
             top = self.repo.top
         except NotARepo as err:
             top = cwd
-            self.fixed = f"doc-search: {err}"
+            self.fixed = f"doc-search: {flat(err)}"
         try:
             self.cfg = load_config(top)
             if self.cfg is not None and self.repo is not None:
@@ -115,7 +116,7 @@ class Runtime:
                 # now, so a bad pattern is an invalid-config line for every tool, not a crash in one.
                 self.corpus_for(self.repo.top)
         except ConfigError as err:
-            self.fixed = f"doc-search: invalid config: {err}"
+            self.fixed = f"doc-search: invalid config: {flat(err)}"
             return
         if self.cfg is None:
             self.fixed = INERT_LINE
@@ -146,9 +147,9 @@ class Runtime:
         try:
             return resolve_worktree(self.repo, requested)
         except ValueError as err:
-            raise _Refusal(f"doc-search: {err}") from err
-        except GitError as err:
-            raise _Refusal(f"doc-search: git failed: {err}") from err
+            raise _Refusal(f"doc-search: {flat(err)}") from err
+        except GitError as err:  # git's stderr can run to several lines
+            raise _Refusal(f"doc-search: git failed: {flat(err)}") from err
 
     async def run(self, job: Callable[[], str]) -> str:
         """Answer with the fixed line, or the text `job` returns on a worker thread."""
@@ -161,7 +162,7 @@ class Runtime:
             except _Refusal as refusal:
                 return str(refusal)
             except ConfigError as err:  # a corpus built lazily (another worktree) rejected the config
-                return f"doc-search: invalid config: {err}"
+                return f"doc-search: invalid config: {flat(err)}"
 
         return await anyio.to_thread.run_sync(guarded)
 

@@ -20,6 +20,7 @@ from semble import SembleIndex
 
 from doc_search.config import INERT_LINE, ConfigError, load_config
 from doc_search.engines import IndexPool, WorktreeIndexes
+from doc_search.repo import GitError
 from doc_search.server import DATA_NOTE, build_server
 
 SPEC = """---
@@ -322,6 +323,25 @@ def test_worktree_param(git_repo, tiny_model: str, tmp_path: Path) -> None:
     assert "\n" not in refused
     assert "not a worktree of this repository" in call(server, "fetch", {"path": "docs/a.md", "worktree": "/"})
     assert "not a worktree of this repository" in call(server, "related", {"path": "docs/a.md", "worktree": "/"})
+
+
+def test_git_failure_resolving_a_worktree_is_one_line(
+    git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, pool, server = enabled(git_repo, tiny_model)
+    ready(pool, repo.root)
+
+    def broken(repo_info, requested):
+        raise GitError("git worktree list failed (128): fatal: bad object\nhint: run git fsck")
+
+    monkeypatch.setattr("doc_search.server.resolve_worktree", broken)
+    for name, args in (
+        ("search", {"query": "refund", "worktree": "elsewhere"}),
+        ("fetch", {"path": "docs/shipping.md", "worktree": "elsewhere"}),
+        ("related", {"path": "docs/shipping.md", "worktree": "elsewhere"}),
+    ):
+        text = call(server, name, args)
+        assert text == "doc-search: git failed: git worktree list failed (128): fatal: bad object hint: run git fsck"
 
 
 def test_first_build_bounded_wait(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch) -> None:

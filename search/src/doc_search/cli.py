@@ -32,6 +32,7 @@ from .engines import FOREGROUND_WAIT_S, Building, IndexPool, WorktreeIndexes
 from .evaluate import EvalFileError, run_eval
 from .render import render_search
 from .repo import GitError, NotARepo, RepoInfo, resolve_worktree
+from .tools import cloud_status_lines
 from .types import SearchRequest
 
 EXIT_FINDINGS = 1
@@ -365,11 +366,8 @@ def _status(args: argparse.Namespace) -> int:
     got = rt.pool.peek(top)  # in memory only: None in a fresh process; it starts and waits for nothing
     kinds = {kind: _kind_status(rt, got, kind) for kind in ("docs", "code")}
     cloud = None
-    if rt.cloud is not None:
-        try:
-            lines = [" ".join(line.split()) for line in rt.cloud.status_lines(top)]
-        except Exception as err:  # noqa: BLE001 - the remote leg must never take status down
-            lines = [f"cloud: status failed ({type(err).__name__})"]
+    if rt.cloud is not None:  # bounded: the probe answers at once, whatever the network does
+        lines = [" ".join(line.split()) for line in cloud_status_lines(rt.cloud, top)]
         cloud = {"configured": True, "lines": lines}
     payload = {
         "enabled": True,

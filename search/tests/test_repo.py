@@ -16,6 +16,7 @@ from doc_search.repo import (
     git,
     git_bytes,
     is_ancestor,
+    is_ignored,
     ls_files,
     norm_rel,
     resolve_worktree,
@@ -280,3 +281,30 @@ def test_git_bytes_is_stdout_undecoded(git_repo) -> None:
     )
     with pytest.raises(GitError, match="missing"):
         git_bytes(repo.root, "cat-file", "blob", "HEAD:missing")
+
+
+def test_is_ignored(git_repo, tmp_path: Path) -> None:
+    repo = git_repo()
+    repo.write(".gitignore", ".env\nbuild/\n:odd\n")
+    repo.write("kept.txt", "k\n")
+    repo.commit("base")
+    repo.write(".env", "x\n")
+    repo.write("build/out.txt", "x\n")
+    repo.write(":odd", "x\n")
+    repo.write("draft.txt", "x\n")
+
+    assert is_ignored(repo.root, ".env")
+    assert is_ignored(repo.root, "build/out.txt")
+    assert is_ignored(repo.root, "build")
+    assert is_ignored(repo.root, ":odd"), "a leading colon is a name, not pathspec magic"
+    assert not is_ignored(repo.root, "kept.txt"), "tracked"
+    assert not is_ignored(repo.root, "draft.txt"), "untracked, no rule matches"
+    assert not is_ignored(repo.root, "b*.txt"), "glob characters are literal"
+
+    repo.write(".gitignore", ".env\nbuild/\n:odd\nkept.txt\n")
+    assert not is_ignored(repo.root, "kept.txt"), "a tracked file is never ignored, whatever the rules say"
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(GitError):
+        is_ignored(plain, "a.txt")

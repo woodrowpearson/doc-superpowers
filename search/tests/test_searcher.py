@@ -525,6 +525,25 @@ class FakeCloud:
         return list(self.answer), self.note
 
 
+def test_git_failure_with_multiline_stderr_is_one_line(git_repo, tiny_model: str) -> None:
+    """git's stderr can hold several lines (`fatal:` and `hint:`); the answer stays one line."""
+    repo = git_repo()
+    seed(repo)
+
+    class Broken(Corpus):
+        def files(self):
+            raise GitError("git ls-files failed (128): fatal: not a git repository\nhint: run it in a work tree")
+
+        def allowed(self, *args, **kwargs):
+            raise GitError("git ls-files failed (128): fatal: not a git repository\nhint: run it in a work tree")
+
+    world = make_world(repo, tiny_model, corpus_cls=Broken)
+    answer = world.searcher.search(SearchRequest(query="refund", scope="docs"), repo.root)
+    assert answer == (
+        "doc-search: git failed: git ls-files failed (128): fatal: not a git repository hint: run it in a work tree"
+    )
+
+
 def cloud_hit(path: str, start: int = 1, end: int = 5, **kw) -> Hit:
     text = f"cloud text of {path}"
     return Hit(kind="doc", path=path, start_line=start, end_line=end, snippet=text, legs=("cloud",), **kw)

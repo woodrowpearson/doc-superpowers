@@ -267,6 +267,30 @@ def test_status_sources(git_repo) -> None:
     }
 
 
+def test_front_matter_status_is_its_first_word(git_repo) -> None:
+    """MADR's `status: superseded by ADR-0005` is `superseded` (terminal), as the `**Status:**` line already reads."""
+    repo = git_repo()
+    repo.write("docs/madr.md", "---\nstatus: superseded by ADR-0005\n---\n# Madr\n")
+    repo.write("docs/dated.md", "---\nstatus: Accepted (2026-10-19)\n---\n# Dated\n")
+    repo.write("docs/marked.md", "---\nstatus: '`Deprecated`: see ADR-9'\n---\n# Marked\n")
+    repo.write("docs/dash.md", "---\nstatus: in-progress since May\n---\n# Dash\n")
+    repo.write("docs/wordless.md", "---\nstatus: '2026'\n---\n# Wordless\n\n**Status:** Draft\n")
+    repo.commit("base")
+
+    corpus = make_corpus(repo)
+    statuses = {path: meta_of(corpus, path).status for path in corpus.files()}
+
+    assert statuses == {
+        "docs/dash.md": "in-progress",
+        "docs/dated.md": "accepted",
+        "docs/madr.md": "superseded",
+        "docs/marked.md": "deprecated",
+        "docs/wordless.md": "draft",  # no word in the front matter: the `**Status:**` line answers
+    }
+    assert is_terminal(meta_of(corpus, "docs/madr.md"), corpus._cfg)
+    assert "docs/madr.md" not in corpus.allowed((), None, include_terminal=False)
+
+
 def test_meta_title_and_index_fields(git_repo) -> None:
     repo = git_repo()
     repo.write("docs/h1.md", "---\ntitle: Front Title\n---\n\n# Real Heading #\n\n## Sub\n")
