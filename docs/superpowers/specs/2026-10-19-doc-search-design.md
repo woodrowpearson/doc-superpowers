@@ -287,9 +287,9 @@ The meta document `<meta_collection>/index` (default `corpus_meta`) holds `{buil
   |---|---|---|
   | no stamp | a full run | runs |
   | S not in this clone | refused, exit 2: `git fetch` first | refused unless `--allow-off-base` |
-  | S == HEAD | nothing to do | runs |
+  | S == HEAD | nothing to do, unless the chunker or embedder changed, which forces a full run | runs |
   | HEAD a strict ancestor of S | nothing to do: "corpus is ahead of HEAD; pull" | refused unless `--allow-off-base` |
-  | S an ancestor of HEAD | a catch-up from S | runs |
+  | S an ancestor of HEAD | a catch-up from S (a full run when the chunker or embedder changed) | runs |
   | the histories diverged | a full run | runs |
 
   A refusal or a no-op writes nothing, not even the lease.
@@ -297,7 +297,7 @@ The meta document `<meta_collection>/index` (default `corpus_meta`) holds `{buil
 - **Per file:** compares sha256 with the stored chunk 0's `fileSha256`, then delete-then-write. *(rev 3)* The indexer reads **HEAD's blobs** (`git ls-tree`, `git cat-file`), not the working tree: the stamp says "built from this commit", and a dirty checkout must not put its edits in the shared corpus under it. `docType` is written lowercase, so the read path's `docType` prefilter matches.
 - **Deletes:** a deletion is confirmed by `git ls-tree HEAD`.
 - **Orphans:** corpus paths minus `git ls-files`. *(rev 3)* The prune is capped at max(20, 10% of the indexed paths, measured **before** the run writes anything): more than that is not a cleanup but a corpus that does not match this repository. A capped run deletes none, does not stamp, and reports `orphans_pending` (exit 1). `--force` bypasses only the identity refusal and this cap.
-- *(rev 3)* **Lease checks.** The run checks its lease again before the prune and before the stamp, renews it every 5 minutes, and checks it between each file's embedding and its write (a stall during an embedding must not land that file under a newer host's stamp). A lease another host took, or one that vanished (only a holder deletes it), ends the run without a stamp: exit 2.
+- *(rev 3)* **Lease checks.** The run renews or checks its lease when due (every 5 minutes) — before each file, and again after each file's embedding, before its write (a stall during an embedding must not land that file under a newer host's stamp) — and always checks it before the prune and before the stamp. A lease another host took, or one that vanished (only a holder deletes it), ends the run without a stamp: exit 2.
 - **Stamp:** written only when no file failed *(rev 3: and no orphan is pending)*.
 - **Chunking and embedding:**
   - The write path uses doc-search's own heading-bounded chunker: stdlib, about 1,600 characters, about 15% overlap, front matter stripped, true 1-based line ranges.
