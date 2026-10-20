@@ -2462,13 +2462,19 @@ ledger upkeep|cmd_ledger_upkeep|repo|range= pr= items+ top= strict no-repo-adapt
   Merge-time upkeep: the changes and consumes relations a range's items
   are missing, proposed with their evidence and a ready "ledger link"
   line — never written. <a>...<b> is merge-base(a, b)..b (trunk merged
-  into the branch never counts). Involved items, each with how it was
-  found: a claim trailer (claims, claims_by_path, claims_by_ref), an item
-  file the net diff edits, a key or alias as a word in a commit message;
-  --items names them instead. A contract is touched by a net-diff file
-  its defined_in matches (unless upkeep.skip_globs matches the file) or by
-  a Contract-Change line. One an involved item already declares in
-  changes is proposed to nobody; each other one goes to one item — the
+  into the branch never counts). --pr <n> reads PR <n> from the pr
+  adapter's list (config adapters.pr; cached, as for every verb): merged,
+  <merge_commit>^1..<merge_commit>; open, merge-base(config base,
+  head_oid)..head_oid — the commit must be in this clone (else exit 2,
+  with the fetch command). Its body comes from the adapter's optional
+  `view <n>` ({"number","body"}; exit 3: no view, "pr": {…,
+  "body_scanned": false}). Involved items, each with how it was found: a
+  claim trailer (claims, claims_by_path, claims_by_ref), an item file the
+  net diff edits, a key or alias as a word in a commit message, then in
+  the PR body; --items names them instead. A contract is touched by a
+  net-diff file its defined_in matches (unless upkeep.skip_globs matches
+  the file) or by a Contract-Change line. One an involved item already
+  declares in changes is proposed to nobody; each other one goes to one item — the
   most paths entries its defined_in matches, then the most paths in the
   diff, then how it was found, then key — or, with no involved item, is
   listed as unattributed; upkeep.skip_contracts are never proposed. A
@@ -2478,11 +2484,15 @@ ledger upkeep|cmd_ledger_upkeep|repo|range= pr= items+ top= strict no-repo-adapt
   trailer, its file or --items also gets consumes for each untouched
   contract whose defined_in matches a file it lists that the range does
   not change. Per item: changes first, then consumes; --top N (default
-  3; 0: all) proposals per item. Exit 0 (advisory); 1 with --strict and a
+  3; 0: all) proposals per item. --no-repo-adapters (a review that must
+  not run repository scripts) refuses, exit 2 and nothing run, when
+  adapters.contracts, adapters.pr or items.adapter is anything but null
+  or doc-superpowers:<name>. Exit 0 (advisory); 1 with --strict and a
   proposal; 2 a range end that does not resolve, a failing contracts
-  adapter or a bad upkeep config; 3 an --items value naming no item (or an
-  archived one). --pr and --no-repo-adapters are not available yet (exit
-  3).
+  adapter, a bad upkeep config, --pr without adapters.pr or with its list
+  or view failing, a PR not usable here, or a --no-repo-adapters refusal;
+  3 usage: neither or both of --range and --pr, a bad --top or --pr, an
+  --items value naming no item (or an archived one).
 ledger inflight|cmd_ledger_inflight|repo|branch= fetch push format=
   [--branch <name>|<name>@<host>] [--fetch] [--push] [--format text|json]
   Work in flight (config inflight.enabled): local branches, worktrees
@@ -3105,7 +3115,8 @@ validate, publish, finalize, init):
   sweep, suggest, upkeep, link, view, publish). The pr adapter's list is
   cached for cache.remote_ttl_minutes; when it fails, the verbs serve the last copy
   (or none) with one stderr line and "pr_data" in --format json, and only
-  --refresh and publish exit 2. DOC_TOOLS_LEDGER_OFFLINE=1 never runs it
+  --refresh and publish exit 2 (upkeep --pr too, with no copy).
+  DOC_TOOLS_LEDGER_OFFLINE=1 never runs it
   (for hooks that must not reach the network): a copy past its TTL is
   served as "PR data as of …", no copy is "—", and --refresh / publish
   exit 2 ("offline: DOC_TOOLS_LEDGER_OFFLINE=1"). Hosted items (config
@@ -3420,7 +3431,7 @@ _shellcheck_opt_names() {
   _OPT_plan="" _OPT_refs="" _OPT_reverify="" _OPT_scheduled="" _OPT_staged="" _OPT_superseded_by=""
   _OPT_tag="" _OPT_tree="" _OPT_warn=""
   _OPT_create="" _OPT_title="" _OPT_body_file="" _OPT_paths="" _OPT_sev=""
-  _OPT_no_repo_adapters="" _OPT_strict="" _OPT_top=""
+  _OPT_no_repo_adapters="" _OPT_strict="" _OPT_top="" _OPT_pr=""
   _OPTV_items=() _OPTV_claims=() _OPTV_code_refs=() _OPTV_code_refs_from=() _OPTV_config=() _OPTV_helper=() _OPTV_holds=()
 }
 
