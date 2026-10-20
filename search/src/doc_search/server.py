@@ -24,6 +24,7 @@ from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
 from . import __version__
+from .cloud.read import build_cloud_leg
 from .config import INERT_LINE, Config, ConfigError, load_config
 from .corpus import Corpus
 from .docindex import DocIndex
@@ -118,8 +119,9 @@ class _Runtime:
         if self.repo is None:
             return  # enabled, but there is no repository to search
         self.pool = pool if pool is not None else IndexPool(self.cfg)
-        # Cloud leg: wired in by Task 7; None until then. The same leg serves `search` and `status`.
-        cloud = None
+        # The same cloud leg serves `search` and `status`. It is built without touching the network; one that
+        # cannot be built (no cloud extra, no project) is a leg that says so, never a crash.
+        cloud = build_cloud_leg(self.cfg.cloud, corpus_for=self.corpus_for) if self.cfg.cloud else None
         self.searcher = Searcher(self.cfg, self.repo, self.pool, self.corpus_for, cloud=cloud, wait_s=wait_s)
         self.tools = DocTools(self.cfg, self.repo, self.pool, self.corpus_for, cloud=cloud, wait_s=wait_s)
         self.pool.get(self.repo.top, wait_s=0)  # start the builds now; the first call finds them under way

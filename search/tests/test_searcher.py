@@ -513,9 +513,13 @@ class FakeCloud:
     note: str | None = None
     raises: Exception | None = None
     calls: list[tuple] = field(default_factory=list)
+    doc_types: list[tuple[str, ...]] = field(default_factory=list)
 
-    def hits(self, query: str, allowed: set[str], worktree: Path, limit: int) -> tuple[list[Hit], str | None]:
+    def hits(
+        self, query: str, allowed: set[str], worktree: Path, limit: int, doc_types: tuple[str, ...] = ()
+    ) -> tuple[list[Hit], str | None]:
         self.calls.append((query, set(allowed), worktree, limit))
+        self.doc_types.append(tuple(doc_types))
         if self.raises:
             raise self.raises
         return list(self.answer), self.note
@@ -548,6 +552,7 @@ def test_cloud_leg_is_fused_filtered_and_noted(git_repo, tiny_model: str) -> Non
     _, allowed, worktree, fetch = cloud.calls[0]
     assert allowed == {"docs/specs/SPEC-PAY-004.md", "docs/specs/SPEC-PAY-005.md", "docs/shipping.md"}
     assert worktree == repo.root and fetch == 30  # limit x 3
+    assert cloud.doc_types == [()], "the request's own doc_type filter goes along (none here)"
     assert "docs/not-allowed.md" not in paths(resp)
     assert len(set(paths(resp))) == len(resp.hits)
     # both legs name the file, so it climbs above the files only the docs leg found
