@@ -73,7 +73,7 @@ def _spec(patterns: tuple[str, ...]) -> PathSpec:
 def _compile(patterns: tuple[str, ...], where: str) -> PathSpec:
     try:
         return _spec(patterns)
-    except ValueError as err:
+    except (ValueError, re.error) as err:  # pathspec: a malformed pattern, or one that makes a bad regex (`[z-a]`)
         raise ConfigError(f"{where} has an invalid pattern: {err}") from err
 
 

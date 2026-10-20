@@ -135,6 +135,17 @@ def test_invalid_glob_is_a_config_error(git_repo) -> None:
         make_corpus(repo, {"docs": {"types": [{"glob": "!", "type": "x"}]}})
 
 
+def test_regex_failure_in_a_glob_is_a_config_error(git_repo) -> None:
+    """pathspec turns some globs into a bad regex (`[z-a]`): that is `re.error`, not `ValueError`."""
+    repo = git_repo()
+    with pytest.raises(ConfigError, match=r"docs\.include .*z-a"):
+        make_corpus(repo, {"docs": {"include": ["[z-a]"]}})
+    with pytest.raises(ConfigError, match=r"docs\.exclude"):
+        make_corpus(repo, {"docs": {"exclude": ["[z-a]"]}})
+    with pytest.raises(ConfigError, match=r"docs\.types\[0\]"):
+        make_corpus(repo, {"docs": {"types": [{"glob": "[z-a]", "type": "x"}]}})
+
+
 # --- doc_type -------------------------------------------------------------------------
 
 
