@@ -1,6 +1,7 @@
 # Design: doc-search — one MCP over semble's docs and code indexes, with an optional cloud docs leg
 
-**Status:** Draft rev 3, 2026-10-20.
+**Status:** Draft rev 4, 2026-10-20.
+- **Rev 4 (gte measured), 2026-10-20:** §4's decision rule run on the full abundance corpus on M-series (a gte-modernbert encoder in semble, against semble's default docs leg, with and without the cloud leg). The rule is met, so the follow-up is a design note: `2026-10-20-doc-search-local-transformer-design.md`. Changes §4 and §12 only.
 - **Rev 3 (build rulings), 2026-10-20:** the rulings made while building it, folded into the sections they change: §5 (`*.md` matches at any depth), §6 (file-keyed docs fusion, the exact-identifier leg, `scope=docs` reaching code-typed docs, `path_prefix` on the code leg, the empty allowed set, the concurrent cloud leg), §7 (partial results while one index of a pair builds; a `status` that never builds), §8 (`cloud.timeout_s`; the write path's catch-up decision table, repository identity and chunker version in the stamp, the prune cap, the lease checks, HEAD's blobs), §9 (`timeout_s`, `init` writing the defaults verbatim, the eval's scoring), and the eval's results in place of its plan (§3(b), §4, §12). Where this text and the code disagree, the code (`search/src/doc_search/`) is right and `references/search.md` documents it.
 - **Origin:** the owner asked for a project-agnostic version of abundance-mvp's `abundance-docs` MCP, shipped with doc-superpowers as an optional configuration. It combines documentation embeddings with semble's local code embeddings, keeps abundance's cloud setup (Vertex embeddings, Firestore store) working as an option, offers a local alternative, and justifies any single-store design against the current split.
 - **Rev 2 follows the owner's direction:**
@@ -154,7 +155,7 @@ The single store would have bought one call and one ranking. Both are properties
   3. +7 packages and ~3 GB of peak memory per indexing process.
 - **What it buys is unmeasured on docs.** On code, semble's hybrid with a static model already beats a transformer alone, and BM25 plus reranking carries most of the quality.
 
-**Verdict:** not in v1. The decision rule: **if transformer embeddings beat the semble docs leg by ≥ 0.05 recall@10 or MRR**, the follow-up is the opt-in lever `docs.model: "transformer:gte-modernbert-base"`, in a `local-transformer` extra, with a content-addressed encode cache, and an upstream pluggable-encoder PR to semble offered at the same time. The eval (§12) measured it twice (recall@10 / MRR, k = 10):
+**Verdict:** not in v1. The decision rule: **if transformer embeddings beat the semble docs leg by ≥ 0.05 recall@10 or MRR**, the follow-up is the opt-in lever `docs.model: "transformer:gte-modernbert-base"`, in a `local-transformer` extra, with a content-addressed encode cache, and an upstream pluggable-encoder PR to semble offered at the same time. The eval (§12) measured it three times (recall@10 / MRR, k = 10). Only the third run tested the rule directly:
 - **Subset spike** (524 abundance docs, 14,830 semble chunks; the gte adapter as a throwaway spike): semble's default model 0.9495 / 0.8706, potion-retrieval-32M 0.9268 / 0.8044, gte-in-semble 0.9646 / 0.8699. gte's build took 4,116 s (3.59 chunks/s on the Intel host) against semble's 10.4 s. The subset saturated paraphrase recall (1.0 for every leg), so it could not separate static from transformer embeddings: gte's +0.015 recall did not meet the rule there.
 - **Full abundance corpus** (6,513 docs, 193,799 semble doc chunks; the code index 140,590 chunks; both built in 187 s wall on the Intel host, peak RSS 5.1 GB, cache 785 MB), 66 queries, terminal docs included:
 
@@ -166,8 +167,60 @@ The single store would have bought one call and one ranking. Both are properties
   | `semble-single` | 0.783 | 0.558 |
 
   Firestore's flat KNN took 2.7 s p50 warm, and up to 14 s cold.
-- **Revised verdict:** on the full corpus, transformer-grade dense embeddings (Gemini's) beat semble's static ones on paraphrase queries by +0.11 recall and +0.19 MRR — above the 0.05 bar. A local transformer lever (gte-modernbert through a semble encoder adapter with a content-addressed encode cache, measured on M-series) is therefore a justified **follow-up, not v1**. Until it exists, a project that wants transformer-grade docs semantics turns on the cloud leg; for abundance, the fused cloud leg is the best result measured.
-- **A cheaper lever to try first** (unverified): `docs.model` can name a Model2Vec model distilled from gte-modernbert (`model2vec.distill`, which needs torch only at distill time, once). It adds zero runtime dependencies.
+- **Rev 3's verdict:** on the full corpus, transformer-grade dense embeddings (Gemini's, through the cloud leg) beat semble's static ones on paraphrase queries by +0.11 recall and +0.19 MRR. That justified measuring a *local* transformer lever on M-series, the run below.
+- **gte-in-semble on the full corpus, M-series** *(rev 4)*:
+  - **Host and setup:** an Apple M1 Pro (8 performance + 2 efficiency cores, 16 GB), in use for other work during the run.
+    - The same abundance commit as the run above (`b8c7f61e5e`, 6,301 corpus docs), with the cutover's `.sembleignore` (docs indexed, `docs/archive/` left out). semble 0.7.0, default config.
+    - The semble docs index: 194,564 chunks over 6,537 files. That includes 12.7k chunks from HTML wireframes, which the corpus filter drops from results.
+    - The encoder: gte-modernbert-base int8 ONNX on onnxruntime 1.31.0 (CPU), CLS pooling, L2-normalized, batch 16 sorted by length, at most 1,024 tokens, 6 threads.
+    - It runs inside semble through the adapter described above (`_load_cached` returns an object with `encode` and `dim`), with a sqlite encode cache keyed by sha256(model ‖ text).
+  - **Eval set:** a new set of 65 queries; the 66-query set was lost with its scratchpad.
+    - 50 paraphrase queries over a seeded, stratified sample: specs and ADRs; issues; plans, design specs and handoffs; runbooks, rules and skills; reports, research, conformance rulings and READMEs outside `docs/`.
+    - 10 identifier queries and abundance's 5 known-answer pairs.
+    - 16 queries carry two or three co-answers.
+    - It is harder than the lost set: the semble local docs leg scores 0.687 here against 0.823 there.
+  - **Results** (k = 10, terminal docs included; per kind as recall / MRR):
+
+    | Leg | semble default | gte-in-semble | Δ |
+    |---|---|---|---|
+    | **local docs leg** (semble + ident) | 0.687 / 0.531 | **0.841 / 0.622** | **+0.154 / +0.091** |
+    | · paraphrase (50) | 0.650 / 0.453 | 0.850 / 0.612 | +0.200 / +0.159 |
+    | · identifier (10) | 1.000 / 0.858 | 1.000 / 0.883 | 0 / +0.025 |
+    | · legacy (5) | 0.433 / 0.660 | 0.433 / 0.202 | 0 / −0.458 |
+    | **fused docs leg** (+ cloud) | 0.887 / 0.647 | **0.880 / 0.744** | −0.008 / **+0.097** |
+    | · paraphrase (50) | 0.900 / 0.657 | 0.890 / 0.781 | −0.010 / +0.124 |
+    | cloud alone (Gemini, Firestore) | 0.764 / 0.634 | (same leg) | |
+    | `scope=all`, cloud on (code index joined) | 0.841 / 0.641 | not run (code off in the gte worktree) | |
+    | `semble-single` | 0.564 / 0.391 | not run | |
+
+    - **Per query (local docs leg):** gte is better on 29 queries, worse on 11 and unchanged on 25.
+    - **The losses:** most are a rank-1 hit dropping to rank 2. Two lose recall. One is a keyword-list query, "brand palette (salmon sage peach cream)", which is where static and lexical embeddings are strongest. Its legacy row averages only 5 queries.
+    - **Against Gemini:** local gte beats the cloud leg alone on recall (0.841 vs 0.764) and nearly matches it on MRR (0.622 vs 0.634).
+  - **Cost** (same host, same corpus):
+
+    | | gte-in-semble | semble default |
+    |---|---|---|
+    | First docs build per host | 186,752 distinct chunk texts encoded at **16.3 chunks/s ≈ 3.2 h** (the encode cache absorbed 7.8k duplicate chunks) | **63 s** |
+    | Docs build in another worktree, warm encode cache | **55 s** (every chunk a cache hit) | 63 s (semble's cache is per path) |
+    | Resume after a killed build | Resumed from the 22,196 vectors already cached | n/a |
+    | Peak RSS while building | 4.7 GB (7.8 GB peak footprint) | 3.9 GB (docs and code) |
+    | Query, `scope=docs` end to end, p50 / p95 (fresh query cache) | 76 / 83 ms | 45 / 120 ms |
+    | Disk | encode cache 764 MB per host, plus a 845 MB docs index per worktree | 465 MB docs index per worktree |
+    | Added packages (arm64, macOS ≥ 14) | **+3**: onnxruntime, flatbuffers, protobuf (protobuf already arrives with the `cloud` extra) | 0 |
+    | Download | 150 MB (int8) | 33 MB |
+
+    - **Encoder settings:**
+      - int8 on the CPU is the fastest setting: 14.9 chunks/s on 6 threads in a micro-benchmark, against 5.5 for fp32.
+      - Threads on the efficiency cores slow it down: 10 threads give 8.1 chunks/s, 8 threads 14.1.
+      - onnxruntime's CoreML provider is unusable: it splits the graph into 155 partitions and runs at about 1 chunk/s.
+    - **The Intel host:** it tops out at onnxruntime 1.23.2 (+7 packages) and 3.6 chunks/s, so the same first build would take about 14 h.
+- **Decision** *(rev 4)*: **the rule is met**. gte-in-semble beats the semble docs leg by **+0.154 recall@10 and +0.091 MRR** on the full corpus, both above 0.05.
+  - **Next step:** the opt-in `local-transformer` lever. It is proposed in `docs/superpowers/specs/2026-10-20-doc-search-local-transformer-design.md`, with an upstream pluggable-encoder issue for semble drafted there (not filed without the owner).
+  - **What it buys:**
+    - For a project **without** the cloud leg, it is the largest local gain measured.
+    - **With** the cloud leg, recall is unchanged and MRR rises by about 0.10. The cloud leg already supplies transformer-grade recall, so the lever is optional there.
+  - **What it costs:** one ~3 h build per M-series host, after which each worktree reuses the vectors and builds in about a minute. It is not a lever for the Intel host.
+- **A cheaper lever, still unmeasured:** `docs.model` can name a Model2Vec model distilled from gte-modernbert (`model2vec.distill`, which needs torch only at distill time, once). It adds zero runtime dependencies. The design note measures it first: if it keeps most of the +0.154, it replaces the transformer lever.
 
 ## 5. The docs corpus and what a docs hit carries
 
@@ -393,10 +446,10 @@ The meta document `<meta_collection>/index` (default `corpus_meta`) holds `{buil
 
 ## 12. Verification and the eval
 
-**Eval set** (66 queries):
+**Eval set** (66 queries; rev 4 re-authored it as 65, §4):
 - abundance's five live known-answer pairs (`test_known_answers.py`), plus authored queries.
 - The authored queries are paraphrased questions over a stratified sample of specs, ADRs, runbooks, plans and issues, plus identifier queries (spec IDs, issue keys).
-- They live in the scratchpad and are not committed to doc-superpowers.
+- They are not committed to doc-superpowers: they quote abundance's content. The 66-query set lived in a scratchpad and was lost. The 65-query set is kept outside the repository, with the session notes of the run.
 
 **Legs, as run** *(rev 3: the results replace the plan)*:
 - **gte spike**: the §4 adapter over a docs **subset** (every expected doc plus seeded random distractors: 524 files), with semble's default model and potion-retrieval-32M scored on the same subset. Result in §4: the subset saturated paraphrase recall, so it could not decide.
@@ -411,9 +464,10 @@ The meta document `<meta_collection>/index` (default `corpus_meta`) holds `{buil
   | semble + ident, local only | 0.687 | 0.531 | 0.65 / 0.45 | 1.00 / 0.86 |
   | `semble-single` | 0.564 | 0.391 | 0.62 / 0.43 | 0.30 / 0.15 |
 
-  The joined `scope=all` leg was skipped there: a git subprocess died while the gte build loaded the host. gte-modernbert int8 ONNX measured **15.5–15.7 chunks/s** on the M1 Pro CPU (10 threads, batch 16), about 3.5 h for the full docs corpus per host. That replaces §4's 1–3 h estimate. The gte-in-semble eval on this host is tracked in woodrowpearson/doc-superpowers#45, which also covers the per-host content-addressed encode cache.
+  The joined `scope=all` leg was skipped there: a git subprocess died while the gte build loaded the host. gte-modernbert int8 ONNX measured **15.5–15.7 chunks/s** on the M1 Pro CPU (10 threads, batch 16), about 3.5 h for the full docs corpus per host. That replaces §4's 1–3 h estimate. The gte-in-semble eval on this host is the next bullet.
+- **gte, full corpus, M-series** *(rev 4)*: two scratch clones of abundance at the same commit, on an M1 Pro. One has semble's default docs model with the code index; the other has `docs.model: "transformer:gte-modernbert-base"` through the §4 adapter, with code off. Each is scored with and without the cloud leg, on the 65-query set. Results and costs in §4: gte's local docs leg 0.841 / 0.622 against semble's 0.687 / 0.531.
 
-**Decision rules:** §3(b) (not met: two indexes stay) and §4 (met on the full corpus: a local transformer lever is a follow-up). The results are evidence rather than gates.
+**Decision rules:** §3(b) (not met: two indexes stay) and §4 (met: rev 3 on Gemini's embeddings through the cloud leg; rev 4 directly, gte-in-semble +0.154 recall@10 and +0.091 MRR over the semble docs leg. The follow-up is the local-transformer design note). The results are evidence rather than gates.
 
 ## 13. Left to the builder
 
