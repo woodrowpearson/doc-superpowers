@@ -212,3 +212,84 @@ def test_unreadable_config_raises(tmp_path: Path) -> None:
     (tmp_path / "docs" / "search" / "config.json").mkdir(parents=True)
     with pytest.raises(ConfigError):
         load_config(tmp_path, {})
+
+
+@pytest.mark.parametrize(
+    ("value", "dotted"),
+    [
+        ({"serach": {}}, "serach"),
+        ({"docs": {"inclde": ["docs/**/*.md"]}}, "docs.inclde"),
+        ({"docs": {"types": [{"glob": "x/**", "type": "spec", "tpye": "adr"}]}}, "docs.types[0].tpye"),
+        ({"code": {"enable": False}}, "code.enable"),
+        ({"search": {"default_limt": 5}}, "search.default_limt"),
+        ({"cloud": {"timeout": 5}}, "cloud.timeout"),
+        ({"cloud": {"vertx": {}}}, "cloud.vertx"),
+        ({"cloud": {"vertex": {"dimension": 768}}}, "cloud.vertex.dimension"),
+        ({"cloud": {"firestore": {"databse": "corpus"}}}, "cloud.firestore.databse"),
+    ],
+)
+def test_unknown_keys_are_rejected_at_every_level(tmp_path: Path, value: object, dotted: str) -> None:
+    """A misspelled key is an error naming it, never a silent default (a typo'd database would write to `(default)`)."""
+    write_config(tmp_path, value)
+    with pytest.raises(ConfigError) as err:
+        load_config(tmp_path, {})
+    assert str(err.value) == f"unknown key {dotted}"
+
+
+def test_unknown_cloud_keys_are_rejected_even_when_the_env_turns_cloud_off(tmp_path: Path) -> None:
+    write_config(tmp_path, {"cloud": {"firestore": {"databse": "corpus"}}})
+    with pytest.raises(ConfigError, match=r"^unknown key cloud\.firestore\.databse$"):
+        load_config(tmp_path, {"DOC_SEARCH_CLOUD": "0"})
+
+
+def test_every_known_key_is_accepted(tmp_path: Path) -> None:
+    """The full §9 key set, every key given: none is unknown."""
+    full = {
+        "docs": {
+            "include": ["docs/**/*.md"],
+            "exclude": [],
+            "types": [{"glob": "a/**", "type": "spec"}],
+            "model": None,
+        },
+        "code": {"enabled": True, "content": ["code"], "model": None},
+        "cloud": {
+            "timeout_s": 20,
+            "vertex": {"project": "p", "location": "us-central1", "model": "gemini-embedding-001", "dimensions": 768},
+            "firestore": {
+                "project": "p",
+                "database": "corpus",
+                "collection": "doc_chunks",
+                "meta_collection": "corpus_meta",
+                "base_ref": "origin/main",
+            },
+        },
+        "search": {"default_limit": 50, "terminal_statuses": ["archived"], "rescan_seconds": 0},
+    }
+    cfg = load(tmp_path, full)
+    assert cfg.cloud is not None and cfg.cloud.firestore.database == "corpus"
+    assert cfg.search.default_limit == 50 and cfg.search.rescan_seconds == 0
+
+
+@pytest.mark.parametrize("bad", [51, 1000])
+def test_default_limit_is_capped_at_fifty(tmp_path: Path, bad: int) -> None:
+    write_config(tmp_path, {"search": {"default_limit": bad}})
+    with pytest.raises(ConfigError) as err:
+        load_config(tmp_path, {})
+    assert "search.default_limit" in str(err.value) and "50" in str(err.value)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [-1, -0.5, float("nan"), float("inf"), float("-inf"), pytest.param(10**400, id="huge-int"), "5", True, None, [5]],
+)
+def test_rescan_seconds_must_be_finite_and_not_negative(tmp_path: Path, bad: object) -> None:
+    # json.dumps writes NaN / Infinity, and json.loads reads them back: a config file can hold them
+    write_config(tmp_path, {"search": {"rescan_seconds": bad}})
+    with pytest.raises(ConfigError) as err:
+        load_config(tmp_path, {})
+    assert "search.rescan_seconds" in str(err.value)
+
+
+@pytest.mark.parametrize("good", [0, 0.5, 5, 30])
+def test_rescan_seconds_allows_zero(tmp_path: Path, good: float) -> None:
+    assert load(tmp_path, {"search": {"rescan_seconds": good}}).search.rescan_seconds == good

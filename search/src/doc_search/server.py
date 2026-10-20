@@ -209,8 +209,12 @@ def build_server(cwd: Path, *, pool: IndexPool | None = None, wait_s: float = 20
             Field(description="all: docs and code in one list. docs: documentation only. code: code only."),
         ] = "all",
         limit: Annotated[
-            int, Field(description="How many hits to return. Default 10; values outside 1-50 are clamped.")
-        ] = 10,
+            int | None,
+            Field(
+                description="How many hits to return. Default: the config's search.default_limit (10 unless set); "
+                "values outside 1-50 are clamped."
+            ),
+        ] = None,
         doc_type: Annotated[
             str | list[str] | None,
             Field(description="Only docs of this type (spec, adr, plan, guide, ...), one value or a list."),
@@ -228,16 +232,24 @@ def build_server(cwd: Path, *, pool: IndexPool | None = None, wait_s: float = 20
             Field(description="Path of another worktree of this repository to search. Default: the launch one."),
         ] = None,
     ) -> str:
+        # An empty or blank filter value is no filter: `doc_type=""` would otherwise match no doc at all.
         types = (doc_type,) if isinstance(doc_type, str) else tuple(doc_type or ())
-        request = SearchRequest(
-            query=query,
-            scope=scope,
-            limit=limit,
-            doc_type=types,
-            path_prefix=path_prefix,
-            include_terminal=include_terminal,
-        )
-        return await rt.run(partial(rt.search, request, worktree))
+        types = tuple(value for value in types if value.strip())
+        prefix = path_prefix if path_prefix and path_prefix.strip() else None
+
+        def job() -> str:
+            # built here, on the worker: `rt.cfg` is None when doc-search is inert, and then no job runs
+            request = SearchRequest(
+                query=query,
+                scope=scope,
+                limit=rt.cfg.search.default_limit if limit is None else limit,
+                doc_type=types,
+                path_prefix=prefix,
+                include_terminal=include_terminal,
+            )
+            return rt.search(request, worktree)
+
+        return await rt.run(job)
 
     @server.tool(name="fetch", description=FETCH_DESCRIPTION)
     async def fetch(
