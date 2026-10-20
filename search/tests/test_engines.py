@@ -509,12 +509,122 @@ def test_eviction_waits_for_a_build_in_flight(git_repo, tiny_model: str, monkeyp
 
     done = ready(pool.get(repo.root, wait_s=30))  # the same build, not a second one
     assert done.docs is not None and done.code is not None
-    assert sorted(counter.paths) == sorted([str(repo.root)] * 2 + [str(other)] * 2)
+    assert counter.paths.count(str(repo.root)) == 2
 
-    # once nothing is in flight the pool shrinks back on the next use
+    # once nothing is in flight the pool shrinks back on the next use (other's builds ran after root's)
     ready(pool.get(other, wait_s=30))
     assert pool.resident() == [other]
-    assert len(counter.paths) == 4
+    assert sorted(counter.paths) == sorted([str(repo.root)] * 2 + [str(other)] * 2)
+
+
+class BuildProbe:
+    """Wraps SembleIndex.from_path: records each build's start (worktree, kind) and the peak of builds at once.
+
+    `hold` (a worktree path) makes that worktree's docs build wait on `gate` before it builds.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, delay: float = 0.3, hold: str | None = None) -> None:
+        self.starts: list[tuple[str, str]] = []
+        self.active = 0
+        self.peak = 0
+        self.gate = threading.Event()
+        lock = threading.Lock()
+        original = SembleIndex.from_path
+        probe = self
+
+        def wrapper(cls, path, content=(), *args, **kwargs):
+            kind = "docs" if list(content) == [ContentType.DOCS] else "code"
+            with lock:
+                probe.active += 1
+                probe.peak = max(probe.peak, probe.active)
+                probe.starts.append((str(path), kind))
+            try:
+                if hold is not None and str(path) == hold and kind == "docs":
+                    probe.gate.wait(30)
+                time.sleep(delay)
+                return original(path, content, *args, **kwargs)
+            finally:
+                with lock:
+                    probe.active -= 1
+
+        monkeypatch.setattr(SembleIndex, "from_path", classmethod(wrapper))
+
+
+def test_one_build_at_a_time_docs_first(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Builds never overlap, across worktrees and kinds; a worktree's docs build starts before its code build."""
+    repo = git_repo()
+    seed(repo)
+    other = repo.add_worktree("other", "branch-other")
+    cfg = make_cfg(repo, tiny_model)
+    probe = BuildProbe(monkeypatch)
+    pool = IndexPool(cfg)
+
+    assert engines_module.MAX_CONCURRENT_BUILDS == 1
+    assert isinstance(pool.get(repo.root, wait_s=0), Building)
+    assert isinstance(pool.get(other, wait_s=0), Building)
+    ready(pool.get(repo.root, wait_s=60))
+    ready(pool.get(other, wait_s=60))
+
+    assert probe.peak == 1, f"{probe.peak} builds ran at once"
+    root, wt = str(repo.root), str(other)
+    assert probe.starts == [(root, "docs"), (root, "code"), (wt, "docs"), (wt, "code")]
+
+
+def test_a_queued_build_reads_as_building(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A worktree whose builds wait behind another's is `Building` after the bounded wait, not a hang."""
+    repo = git_repo()
+    seed(repo)
+    other = repo.add_worktree("other", "branch-other")
+    cfg = make_cfg(repo, tiny_model)
+    probe = BuildProbe(monkeypatch, delay=0.0, hold=str(repo.root))
+    pool = IndexPool(cfg)
+    try:
+        assert isinstance(pool.get(repo.root, wait_s=0), Building)
+        started = time.monotonic()
+        queued = pool.get(other, wait_s=0.3)
+        took = time.monotonic() - started
+
+        assert took < 2.0, f"the call waited {took:.1f} s"
+        assert queued == Building(other, docs_ready=False, code_ready=False)
+        assert queued.partial is None
+        assert pool.peek(other) == Building(other, docs_ready=False, code_ready=False)
+        assert [start for start in probe.starts if start[0] == str(other)] == [], "it has not started: it is queued"
+    finally:
+        probe.gate.set()  # no build thread outlives the test
+        ready(pool.get(repo.root, wait_s=60))
+        ready(pool.get(other, wait_s=60))
+    assert probe.peak == 1
+
+
+def test_a_refresh_that_loads_the_cache_does_not_queue(
+    git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a semble build takes the slot: a revalidation that loads a valid cache answers during another's build."""
+    repo = git_repo()
+    seed(repo)
+    other = repo.add_worktree("other", "branch-other")
+    cfg = make_cfg(repo, tiny_model)
+    clock = FakeClock()
+    pool = IndexPool(cfg, clock=clock)
+    ready(pool.get(other, wait_s=60))  # other's indexes are built and cached
+
+    probe = BuildProbe(monkeypatch, delay=0.0, hold=str(repo.root))
+    try:
+        assert isinstance(pool.get(repo.root, wait_s=0), Building)  # holds the one build slot
+        deadline = time.monotonic() + 30
+        while (str(repo.root), "docs") not in probe.starts and time.monotonic() < deadline:
+            time.sleep(0.01)
+        clock.advance(3600)  # other's cooldown is over: this get revalidates it
+        started = time.monotonic()
+        result = pool.get(other, wait_s=10)
+        took = time.monotonic() - started
+    finally:
+        probe.gate.set()
+        ready(pool.get(repo.root, wait_s=60))
+
+    assert isinstance(result, WorktreeIndexes) and result.docs is not None and not result.error
+    assert took < 5.0, f"the revalidation waited {took:.1f} s behind another worktree's build"
+    assert [start for start in probe.starts if start[0] == str(other)] == []
 
 
 def test_code_content_all_expands(git_repo, tiny_model: str) -> None:
