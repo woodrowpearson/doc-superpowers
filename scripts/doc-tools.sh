@@ -2488,8 +2488,10 @@ ledger upkeep|cmd_ledger_upkeep|repo|range= pr= items+ top= strict no-repo-adapt
   covered by an involved item's consumes and attributed in the same way
   with read_by. An item found by a trailer, its file or --items also gets
   consumes for each untouched contract whose defined_in matches a file it
-  lists that the range does not change. Per item: changes first, then
-  consumes; --top N (default 3; 0: all) proposals per item.
+  lists that the range does not change, when its own text names the
+  contract (its title, summary and body; never its relation lists — read
+  from the working tree when <b> is HEAD, else at <b>). Per item: changes
+  first, then consumes; --top N (default 3; 0: all) proposals per item.
   --no-repo-adapters (a review that must not run repository scripts)
   refuses, exit 2 and nothing run, when adapters.contracts, adapters.pr
   or items.adapter is anything but null or doc-superpowers:<name>. Exit

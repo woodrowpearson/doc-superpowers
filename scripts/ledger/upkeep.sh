@@ -73,9 +73,14 @@
 #   defined_in) or unattributed; evidence "diff names <c> in <f> (read_by
 #   of <c>)". (b) for an item of rank 2 or better (never one found by words
 #   alone): each untouched contract whose defined_in matches a paths entry
-#   the net diff does not hold — "the item lists <f> (defined_in of <c>),
-#   which the range does not change" — unless the item declares it in
-#   consumes or has it from (a). Never a skip_contracts id.
+#   the net diff does not hold and that the item's own text names (Names) —
+#   its title and summary (the index's h1 and fields.summary) and the body
+#   of its file without the frontmatter, so never its relation lists (a
+#   hosted item: its body excerpt), read where the index is (the working
+#   tree when <b> is HEAD, else <b>): "the item names <c> and lists <f>
+#   (defined_in of <c>), which the range does not change" — unless the
+#   item declares it in consumes or has it from (a). Never a skip_contracts
+#   id.
 # Per item: changes ranked Contract-Change first, then by evidence count
 #   (files and lines), then id; then consumes (a), then (b), each by
 #   evidence count, then id; --top N (default 3; 0: all) keeps the first N
@@ -101,11 +106,14 @@
 #   diff-tree -p -U0 of the files a defined_in or read_by matches (none
 #   without such a file; the whole range when their names pass
 #   _LG_UP_PATHS_MAX bytes), two git log walks (_lg_msg_claims' and the word
-#   scan's); with --pr, the list (cached) and one view.
+#   scan's); the text of the items with a consumes (b) candidate, once
+#   (from the working tree, or one git cat-file per item at <b>); with
+#   --pr, the list (cached) and one view.
 
 _LG_UP_TOP=3   # proposals kept per item (0: all) — the verb's --top
 _LG_UP_IX=""   # _lg_up_index: the index upkeep reads …
 _LG_UP_IXB=""  # … and the commit it was chosen for
+_LG_UP_IXWT="" # … and 1 when it is the working tree's (<b> is HEAD)
 _LG_UP_PR=null # the payload's pr: null, or {number, state, body_scanned}
 _LG_UP_BODY="" # the PR body's file (_lg_up_pr); "" when none was read
 _LG_UP_FH=""   # _lg_up_pr_fetch_hint's command
@@ -288,18 +296,21 @@ _lg_up_range() {
 
 # _lg_up_index <b-oid> → _LG_UP_IX: the index upkeep reads, built once per
 # run — the working tree's when <b-oid> is HEAD's commit (a relation just
-# written with ledger link counts before it is committed), else <b-oid>'s
-# own (--rev: an item the range adds counts wherever upkeep runs from). The
-# caller sets _LG_IX_NEED_CONTRACTS (the verb: 1, a failing contracts
-# adapter exits 2).
+# written with ledger link counts before it is committed; _LG_UP_IXWT 1),
+# else <b-oid>'s own (--rev: an item the range adds counts wherever upkeep
+# runs from; _LG_UP_IXWT ""). The item text consumes (b) reads comes from
+# the same place (_lg_up_texts). The caller sets _LG_IX_NEED_CONTRACTS (the
+# verb: 1, a failing contracts adapter exits 2).
 _lg_up_index() {
   local head
   if [ -n "$_LG_UP_IX" ] && [ "$_LG_UP_IXB" = "$1" ]; then return 0; fi
   head=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || head=""
   if [ "$1" = "$head" ]; then
     _LG_UP_IX=$(_lg_index) || exit "$?"
+    _LG_UP_IXWT=1
   else
     _LG_UP_IX=$(_lg_index --rev "$1") || exit "$?"
+    _LG_UP_IXWT=""
   fi
   _LG_UP_IXB=$1
 }
@@ -391,13 +402,13 @@ def up_link($I; $SH):
 # _LG_AWK_UP_LINES), $rp ({paths entry: [contract ids]} by read_by, for
 # the live items; {} when $rc is), $tr (_lg_msg_claims' lines), $words
 # (the messages without their claim trailer lines), $body / $hasbody (the
-# PR body), $named / $hasnamed (--items' paths, lines), $a, $b, $commits,
-# $top. Stages:
-# involvement ($INV), touched contracts ($TALL, $TCH), their attribution
-# ($ATTR), read contracts ($READ) and theirs ($RATTR), proposals ($PROPS:
-# [{p, field, value, evidence, _g, _cc, _n}] — _g the group: 0 changes, 1
-# consumes (a), 2 consumes (b)), then per item ranking, --top and the link
-# line.
+# PR body), $named / $hasnamed (--items' paths, lines), $a, $b, $commits.
+# Stages: involvement ($INV), touched contracts ($TALL, $TCH), their
+# attribution ($ATTR), read contracts ($READ) and theirs ($RATTR),
+# proposals ($PROPS: [{p, field, value, evidence, _g, _cc, _n}] — _g the
+# group: 0 changes, 1 consumes (a), 2 consumes (b), a candidate until
+# _LG_JQ_UP_RANK reads the item's text), then per item the object
+# _LG_JQ_UP_RANK finishes.
 # shellcheck disable=SC2016  # jq source
 _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
 . as $ix
@@ -434,11 +445,13 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
 # Touched contracts: by a net-diff file (skip_globs left out: $fc) with a
 # changed line that names the contract ($CL: each file, its changed lines
 # each ended by "\n" — map(. + "\n") | add, linear where join is quadratic
-# in jq: one 50,000-line file took 13 s), or by a Contract-Change line;
-# $TALL every one, $TCH those upkeep may propose.
+# in jq: one 50,000-line file took 13 s; and with_entries over the files,
+# linear where map_values is quadratic in jq 1.6: 20,000 files took 13.6 s),
+# or by a Contract-Change line; $TALL every one, $TCH those upkeep may
+# propose.
 | (lg_lists($dl | split("\n")[] | select(. != "") | split("\t")
             | {k: .[0], v: (if length == 2 then .[1] else .[1:] | join("\t") end)})
-   | map_values(map(. + "\n") | add)) as $CL
+   | with_entries(.value |= (map(. + "\n") | add))) as $CL
 | up_named($fc[0]; $CL) as $CF
 | lg_obj(($ix.contracts // [])[] | {(.id): true}) as $ISC
 | lg_lists($TR[] | select(.k == "contract_change") | .v | up_cc | select($ISC[.id] == true) | {k: .id, v: .line}) as $CCL
@@ -466,7 +479,8 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
 # touched contract it does not declare; 1 consumes (a) — each attributed
 # read contract it does not declare; 2 consumes (b), only at rank 2 or
 # better — each untouched contract whose defined_in matches a paths entry
-# the diff does not hold, not declared, not in skip_contracts, not (a).
+# the diff does not hold, not declared, not in skip_contracts, not (a): a
+# candidate, kept by _LG_JQ_UP_RANK when the text of the item names it.
 | [$INV[] | . as $v | $M.BYP[$v.p] as $I
    | (($I.changes // []) | map(strings)) as $dch
    | (($I.consumes // []) | map(strings)) as $dcs
@@ -484,20 +498,44 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
      (($LB | keys)[] as $k
       | select($TOUCHED[$k] != true and ($skipc | index([$k])) == null and ($NOTB | index([$k])) == null)
       | {p: $v.p, field: "consumes", value: $k,
-         evidence: up_ev_files($LB[$k]; "the item lists \(.) (defined_in of \($k)), which the range does not change"),
+         evidence: up_ev_files($LB[$k]; "the item names \($k) and lists \(.) (defined_in of \($k)), which the range does not change"),
          _g: 2, _cc: 1, _n: ($LB[$k] | length)})] as $PROPS
 | lg_lists($PROPS[] | {k: .p, v: .}) as $PBY
-# Per item: rank its proposals, keep --top of them, the link line.
-| [$INV[] | . as $v | $M.BYP[$v.p] as $I
-   | (($PBY[$v.p] // []) | sort_by(._g, ._cc, -._n, .value)) as $R
-   | (if $top == 0 then $R else $R[:$top] end) as $SH
-   | {key: $I.key, path: $I.path, found_by: $v.found_by, rank: $v.rank,
-      proposed: [$SH[] | {field, value, evidence}], total: ($R | length), truncated: (($SH | length) < ($R | length)),
+# Per item, for _LG_JQ_UP_RANK: its proposals (_props) and, when one is a
+# consumes (b) candidate, the text the index holds (_t: the title — h1 —
+# and summary; a hosted item, which has no file, its body excerpt too)
+# and whether the body of its file is read as well (_f).
+| [$INV[] | . as $v | $M.BYP[$v.p] as $I | ($PBY[$v.p] // []) as $P
+   | any($P[]; ._g == 2) as $hasb | (($I.url | type) == "string") as $hosted
+   | {key: $I.key, path: $I.path, found_by: $v.found_by, rank: $v.rank, _props: $P,
       declared_untouched: [(($I.changes // []) | map(strings) | unique)[] | select($TOUCHED[.] != true)],
-      link: up_link($I; $SH)}] as $ITEMS
+      _t: (if $hasb then [$I.h1, $I.summary, (if $hosted then $I.first_para else empty end)] | map(strings) | join("\n")
+           else null end),
+      _f: ($hasb and ($hosted | not))}] as $ITEMS
 | {range: "\($a)..\($b)", files: ($DIFF | length), commits: $commits, items: $ITEMS,
    unattributed_contracts: (if $INV == [] then [($OPEN[], $ROPEN[]) | {contract, files}] | sort_by(.contract) else [] end),
    touched: [$TCH[] | {contract, files, cc_line: (.cc[0] // null)}]}
+'
+
+# _LG_JQ_UP_RANK: _LG_JQ_UPKEEP's object finished, per item — inputs $it
+# (the body lines of the items whose files _lg_up_texts read:
+# _LG_AWK_UP_TEXT's) and $top. A consumes (b) candidate is kept when the
+# item's own text names it (Names, up_names): its _t, then its file's body
+# (design §4: the title, summary and body — never the frontmatter's
+# relation lists). Then its proposals ranked — changes (Contract-Change
+# first), consumes (a), consumes (b), each by evidence count, then id —
+# --top of them kept, and the link line.
+# shellcheck disable=SC2016  # jq source
+_LG_JQ_UP_RANK="$_LG_JQ_UP_DEFS"'
+(lg_lists($it | split("\n")[] | select(. != "") | split("\t")
+          | {k: (.[0] | up_dec), v: (if length == 2 then .[1] else .[1:] | join("\t") end)})
+ | with_entries(.value |= (map(. + "\n") | add))) as $BT
+| .items |= [.[] | . as $v
+   | (if $v._t == null then "" else $v._t + "\n" + ($BT[$v.path] // "") end) as $T
+   | ([$v._props[] | select(._g != 2 or (.value as $k | $T | up_names($k)))] | sort_by(._g, ._cc, -._n, .value)) as $R
+   | (if $top == 0 then $R else $R[:$top] end) as $SH
+   | {key, path, found_by, rank, proposed: [$SH[] | {field, value, evidence}], total: ($R | length),
+      truncated: (($SH | length) < ($R | length)), declared_untouched, link: up_link($v; $SH)}]
 '
 
 # _LG_AWK_UP_LINES: the changed lines (design §4 Names) of a git diff-tree
@@ -541,6 +579,60 @@ BEGIN { while ((getline l < cand) > 0) C[l] = 1 }
 hunk && keep && /^[-+]/ { print f "\t" substr($0, 2) }
 '
 
+# _LG_AWK_UP_TEXT: the body lines of item files (design §4 consumes (b):
+# the item's own text), after frontmatter.awk run with mode=lib — its
+# doc_begin and doc_line read each file, so the frontmatter left out is
+# the one the index parses (line 1 "---", after an optional BOM, to the
+# next "---" line; an unterminated block is body text) and every other
+# line is body. Input: item paths, one per line (none holding a newline);
+# each is read from that path, or with -v blobs from the file <blobs><its
+# line number>; one that cannot be read has no lines. Prints
+# "<path>\t<line>" per body line, a tab in <path> as \002 (the path
+# lists' form), the line as the file holds it (a CR or a BOM is no name
+# character).
+# shellcheck disable=SC2016  # awk source
+_LG_AWK_UP_TEXT='
+{
+  ut_f = (blobs != "") ? blobs NR : $0
+  ut_p = $0; gsub(/\t/, "\002", ut_p)
+  doc_begin()
+  while ((getline ut_l < ut_f) > 0) {
+    ut_s = state
+    doc_line(ut_l)
+    if (ut_s == "body" || (ut_s == "start" && state == "body")) print ut_p "\t" ut_l
+  }
+  close(ut_f)
+  if (state == "fm") for (ut_i = 1; ut_i <= nL; ut_i++) print ut_p "\t" L[ut_i]
+}
+'
+
+# _lg_up_texts <in.json> <b-oid> <out>: the body lines (_LG_AWK_UP_TEXT's)
+# of the file items of <in.json> (_LG_JQ_UPKEEP's object) whose file
+# consumes (b) reads (_f) — read once per core run, from the working tree
+# when the index upkeep reads is the working tree's (_LG_UP_IXWT: <b> is
+# HEAD), else as <b-oid> holds them (git cat-file blob, one per item; a
+# path <b-oid> does not hold as a file has no text).
+_lg_up_texts() {
+  local in="$1" b="$2" out="$3" s p n=0 blobs=""
+  _lg_scratch_name
+  s=$_LG_SN
+  jq -r '.items[] | select(._f == true) | .path | select(test("\n") | not)' "$in" > "$s.paths" \
+    || _lg_die "jq failed (the items whose text consumes (b) reads)"
+  : > "$out" || _lg_die "cannot write $out"
+  [ -s "$s.paths" ] || return 0
+  if [ "$_LG_UP_IXWT" != 1 ]; then
+    blobs="$s.b"
+    while IFS= read -r p; do
+      n=$((n + 1))
+      git cat-file blob "$b:$p" > "$blobs$n" 2>/dev/null || : > "$blobs$n" || _lg_die "cannot write $blobs$n"
+    done < "$s.paths"
+  fi
+  printf '%s\n' "$_LG_AWK_UP_TEXT" > "$s.awk" || _lg_die "cannot write $s.awk"
+  _lg_awkv "$blobs"
+  LC_ALL=C awk -v mode=lib -v bom="$_LG_BOM" -v blobs="$_LG_AV" -f "$_LG_LIB/frontmatter.awk" -f "$s.awk" "$s.paths" > "$out" \
+    || _lg_die "cannot read the items' text"
+}
+
 # _lg_up_core <a-oid> <b-oid> <body-file|""> <named-paths-file|""> <out.json>:
 # upkeep's computation for the range <a-oid>..<b-oid> (full ids; the caller
 # resolves "..." and all-zeros ends), written to <out.json> as one object
@@ -559,7 +651,8 @@ hunk && keep && /^[-+]/ { print f "\t" substr($0, 2) }
 # (key-in-pr-body). <named-paths-file>: a NUL-terminated list of item paths
 # (--items, resolved): only they are involved. Keeps _LG_UP_TOP proposals
 # per item (0: all; a caller that needs every attribution sets 0). Index:
-# _lg_up_index <b-oid>. Dies (2) on a git failure, a bad upkeep config or
+# _lg_up_index <b-oid>; the item text consumes (b) reads, from the same
+# place (_lg_up_texts). Dies (2) on a git failure, a bad upkeep config or
 # glob, or a failing contracts adapter (with _LG_IX_NEED_CONTRACTS=1).
 _lg_up_core() {
   local a="$1" b="$2" body="$3" named="$4" out="$5" s n="" hb=false hn=false msg="" rd="" x
@@ -652,8 +745,12 @@ _lg_up_core() {
   jq -L "$_LG_LIB" -c --slurpfile c "$_LG_CFG" --slurpfile fc "$s.fc" --slurpfile rc "$s.rc" --slurpfile rp "$s.rp" \
     --rawfile diff "$s.diff.l" --rawfile dl "$s.dl" --rawfile tr "$s.tr" --rawfile words "$s.words" \
     --rawfile body "$body" --argjson hasbody "$hb" --rawfile named "$s.named.l" --argjson hasnamed "$hn" \
-    --arg a "$a" --arg b "$b" --argjson commits "$n" --argjson top "${_LG_UP_TOP:-3}" \
-    "$_LG_JQ_INCLUDE$_LG_JQ_UPKEEP" "$_LG_UP_IX" > "$out" || _lg_die "jq failed (ledger upkeep)"
+    --arg a "$a" --arg b "$b" --argjson commits "$n" \
+    "$_LG_JQ_INCLUDE$_LG_JQ_UPKEEP" "$_LG_UP_IX" > "$s.up" || _lg_die "jq failed (ledger upkeep)"
+  # consumes (b): the text of the items with a candidate, then the ranking.
+  _lg_up_texts "$s.up" "$b" "$s.it"
+  jq -L "$_LG_LIB" -c --rawfile it "$s.it" --argjson top "${_LG_UP_TOP:-3}" \
+    "$_LG_JQ_INCLUDE$_LG_JQ_UP_RANK" "$s.up" > "$out" || _lg_die "jq failed (ledger upkeep ranking)"
 }
 
 # _lg_up_top: --top N into _LG_UP_TOP — a whole number, at most 9 digits

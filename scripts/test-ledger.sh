@@ -4547,15 +4547,17 @@ lg_rc_of() {
 # lg_upkeep_fixture [config]: lg_rel_fixture plus the files upkeep's ranges
 # edit, committed on main — src/order/total.test.js, "src/order/total
 # two.js" (a space), src/cart/badge.js, docs/notes.md (src/order/total.js,
-# src/util/a.js and server/create.js are lg_rel_fixture's) — and core-3
-# gains the alias ORD-9; then on a new branch feat, for the test's own
-# commits (lg_up_commit).
+# src/util/a.js and server/create.js are lg_rel_fixture's) — core-3 gains
+# the alias ORD-9, and app-6's body names order.total (the item text
+# consumes (b) reads for the src/order/total.js it lists); then on a new
+# branch feat, for the test's own commits (lg_up_commit).
 lg_upkeep_fixture() {
   lg_rel_fixture "$@"
   lg_files src/order/total.test.js "src/order/total two.js" src/cart/badge.js
   printf '# Notes\n' > docs/notes.md
   lg_item docs/issues/i.md "key: core-3" "ledger: core" "status: Open" "severity: P3" "summary: Specified together" \
     "aliases: [ORD-9]"
+  printf '\nThe lint fails where order.total is computed.\n' >> docs/issues/h.md
   git add -A && git commit -qm "upkeep corpus"
   git checkout -q -b feat
 }
@@ -13176,17 +13178,17 @@ test_lg_upkeep_consumes_read_by() {
 }
 
 test_lg_upkeep_consumes_listed_unchanged() {
-  echo "test: #39 — an involved item listing src/order/total.js that the range does not change gets consumes field:order.total ('the item lists src/order/total.js (defined_in of field:order.total), which the range does not change')"
+  echo "test: #39 — an involved item whose text names order.total, listing src/order/total.js that the range does not change, gets consumes field:order.total ('the item names field:order.total and lists src/order/total.js (defined_in of field:order.total), which the range does not change')"
   lg_upkeep_fixture
   lg_up_commit $'util\n\nLedger-Claims: app-6' src/util/a.js
   lg upkeep --range main..feat --format json
   assert_eq "0" "$LG_RC" "exit 0"
   assert_json_field "$LG_OUT" '.items[0].proposed | tojson' \
-    '[{"field":"consumes","value":"field:order.total","evidence":["the item lists src/order/total.js (defined_in of field:order.total), which the range does not change"]}]' \
-    "app-6 (claimed) lists src/order/total.js, which the range does not change: consumes field:order.total"
+    '[{"field":"consumes","value":"field:order.total","evidence":["the item names field:order.total and lists src/order/total.js (defined_in of field:order.total), which the range does not change"]}]' \
+    "app-6 (claimed) names order.total and lists src/order/total.js, which the range does not change: consumes field:order.total"
   assert_json_field "$LG_OUT" '.items[0].link' "ledger link app-6 --consumes field:order.total" "the link line"
   lg upkeep --range main..feat
-  assert_contains "$LG_OUT" "  + consumes field:order.total  — the item lists src/order/total.js (defined_in of field:order.total), which the range does not change" \
+  assert_contains "$LG_OUT" "  + consumes field:order.total  — the item names field:order.total and lists src/order/total.js (defined_in of field:order.total), which the range does not change" \
     "text: the proposal"
   lg upkeep --range main..feat --strict
   assert_eq "1" "$LG_RC" "--strict: a consumes proposal counts (exit 1)"
@@ -13241,6 +13243,111 @@ test_lg_upkeep_message_only_no_listed_consumes() {
   teardown
 }
 
+# lg_up_text_fixture [<frontmatter line>…]: lg_upkeep_fixture, then on main
+# (feat restarts there) server/orders/model.js, the defined_in of
+# field:order.total and field:order.tax, and app-1 rewritten to list only
+# that file, with the lines given, and a body that names order.total —
+# consumes (b)'s item text (design §4).
+lg_up_text_fixture() {
+  lg_upkeep_fixture
+  git checkout -q main
+  # shellcheck disable=SC2016  # JSON
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[
+  {"id":"app","title":"App","kind":"service","status":"active",
+   "contracts":[{"id":"field:order.total","defined_in":["src/order/*.js","server/orders/model.js"]},
+                {"id":"field:order.tax","defined_in":["server/orders/model.js"]},
+                {"id":"component:Sheet","defined_in":["src/sheet/**"]}]},
+  {"id":"core","title":"Core","kind":"platform","status":"active",
+   "contracts":[{"id":"endpoint:create","defined_in":["server/create.js"]}]}]}'
+  lg_item docs/issues/a.md "key: app-1" "ledger: app" "status: Open" "severity: P1" "summary: Totals are wrong" \
+    "related-files: [server/orders/model.js]" "$@"
+  printf '\nThe checkout reads order.total from the model.\n' >> docs/issues/a.md
+  mkdir -p server/orders
+  printf 'total\ntax\n' > server/orders/model.js
+  git add -A && git commit -qm "item text"
+  git checkout -q -B feat
+}
+
+test_lg_upkeep_consumes_b_needs_item_text() {
+  echo "test: #39 D7 — consumes (b) needs the item's own text to name the contract: app-1 lists server/orders/model.js (defined_in of field:order.total and field:order.tax) and its body names order.total; a range that edits app-1's file and not model.js proposes consumes field:order.total only ('the item names field:order.total and lists server/orders/model.js (defined_in of field:order.total), which the range does not change')"
+  lg_up_text_fixture
+  lg_up_commit "lint" docs/issues/a.md
+  lg upkeep --range main..feat --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_json_field "$LG_OUT" '[.items[] | "\(.key):\(.found_by | join(","))"] | join(" ")' "app-1:item-file-edited" \
+    "app-1, found by its edited file (rank 2)"
+  assert_json_field "$LG_OUT" '.items[0].proposed | tojson' \
+    '[{"field":"consumes","value":"field:order.total","evidence":["the item names field:order.total and lists server/orders/model.js (defined_in of field:order.total), which the range does not change"]}]' \
+    "consumes field:order.total, which its body names — not field:order.tax, which its text never names"
+  assert_json_field "$LG_OUT" '.items[0] | [.total, .truncated, .link] | tojson' '[1,false,"ledger link app-1 --consumes field:order.total"]' \
+    "total 1, the link line"
+  lg upkeep --range main..feat
+  assert_contains "$LG_OUT" "  + consumes field:order.total  — the item names field:order.total and lists server/orders/model.js (defined_in of field:order.total), which the range does not change" \
+    "text: the proposal, with the spec's evidence"
+  teardown
+}
+
+test_lg_upkeep_consumes_b_ignores_relation_lists() {
+  echo "test: #39 D7 — consumes (b): a name only in the item's relation lists (changes: [field:order.tax]) is not its text, so no consumes field:order.tax; its summary naming order.tax is"
+  lg_up_text_fixture "changes: [field:order.tax]"
+  lg_up_commit "lint" docs/issues/a.md
+  lg upkeep --range main..feat --format json
+  assert_eq "0|consumes field:order.total" "$LG_RC|$(lg_up_vals app-1)" "order.tax only in changes: no consumes (b) for it"
+  git checkout -q -b t-sum main
+  lg_item docs/issues/a.md "key: app-1" "ledger: app" "status: Open" "severity: P1" "summary: order.tax rounds twice" \
+    "related-files: [server/orders/model.js]" "changes: [field:order.tax]"
+  git add -A && git commit -qm "summary"
+  lg upkeep --range main..t-sum --format json
+  assert_eq "consumes field:order.tax" "$(lg_up_vals app-1)" "…named by the summary (the body no longer names order.total): consumes field:order.tax only"
+  teardown
+}
+
+test_lg_upkeep_consumes_b_reads_b_not_worktree() {
+  echo "test: #39 D7 (ruling R7) — consumes (b) reads the item's text where the index comes from: at <b> when <b> is not HEAD (a working-tree edit that adds the name does not count; <b>'s name counts while the working tree lacks it), the working tree when <b> is HEAD"
+  lg_up_text_fixture
+  local z
+  lg_item docs/issues/a.md "key: app-1" "ledger: app" "status: Open" "severity: P1" "summary: Totals are wrong" \
+    "related-files: [server/orders/model.js]"
+  git add -A && git commit -qm "no name"
+  lg_up_commit "util" src/util/a.js
+  printf 'Reads order.total.\n' >> docs/issues/a.md
+  lg upkeep --range main..HEAD~1 --format json
+  assert_eq "0|app-1:item-file-edited|" "$LG_RC|$(jq -r '[.items[] | "\(.key):\(.found_by | join(","))"] | join(" ")' <<<"$LG_OUT")|$(lg_up_vals app-1)" \
+    "<b> is not HEAD: its text names nothing — the working tree's name does not count"
+  lg upkeep --range main..HEAD --format json
+  assert_eq "0|consumes field:order.total" "$LG_RC|$(lg_up_vals app-1)" "<b> is HEAD: the working tree's text counts"
+  git commit -qam "name it"
+  z=$(git rev-parse HEAD)
+  git checkout -q --detach HEAD~1
+  lg upkeep --range "main..$z" --format json
+  assert_eq "0|consumes field:order.total" "$LG_RC|$(lg_up_vals app-1)" "<b> names it and is not HEAD: counts, while the working tree lacks the name"
+  teardown
+}
+
+test_lg_upkeep_consumes_b_hosted_item() {
+  echo "test: #39 D7 — consumes (b) for a hosted item, which has no file: its title, summary and body excerpt are its text (the excerpt names order.total: proposed; order.tax, named nowhere: not)"
+  lg_items_fixture '{"base":"origin/main","items":{"adapter":"doc-superpowers:ledger-items-gh"}}'
+  # shellcheck disable=SC2016  # JSON
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[
+  {"id":"x","title":"X","kind":"service","status":"active",
+   "contracts":[{"id":"field:order.total","defined_in":["server/orders/model.js"]},
+                {"id":"field:order.tax","defined_in":["server/orders/model.js"]}]},
+  {"id":"y","title":"Y","kind":"service","status":"active"}]}'
+  mkdir -p server/orders
+  printf 'total\ntax\n' > server/orders/model.js
+  git add -A && git commit -qm "contracts"
+  cat > "$LG_GH/issues.json" <<'EOF'
+[{"number":12,"title":"Totals drift","body":"The order.total is wrong after an edit.\n\n<!-- doc-superpowers-ledger\nkey: x-12\nsummary: Totals drift when the cart is edited\nrelated-files: [server/orders/model.js]\n-->\n","state":"OPEN","stateReason":"","labels":[{"name":"ledger:x"},{"name":"sev:P1"}],"updatedAt":"2026-10-01T10:00:00Z","url":"https://github.com/o/r/issues/12"}]
+EOF
+  git checkout -q -b fix-12
+  lg_up_commit $'fix it\n\nFixes #12' src/x.js
+  lg upkeep --range main..fix-12 --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_json_field "$LG_OUT" '.items[] | select(.path == "gh#12") | [(.found_by | join(",")), (.proposed | map("\(.field) \(.value)") | join(", "))] | join("|")' \
+    "trailer:claims_by_ref|consumes field:order.total" "gh#12 (Fixes #12): consumes field:order.total, which its excerpt names — not field:order.tax"
+  lg_items_teardown
+}
+
 test_lg_upkeep_ranking_and_cap() {
   echo "test: #39 — per item: changes before consumes; default --top 3 keeps three, total counts all"
   lg_upkeep_fixture
@@ -13256,6 +13363,7 @@ test_lg_upkeep_ranking_and_cap() {
                 {"id":"endpoint:list","defined_in":["server/list.js"]}]}]}'
   lg_item docs/issues/k.md "key: app-7" "ledger: app" "status: Open" "severity: P3" "summary: Beta flags" \
     "related-files: [src/flags/a.js, src/flags/b.js, src/flags/c.js, src/flags/d.js, server/list.js]"
+  printf '\nThe beta flag gates the list endpoint.\n' >> docs/issues/k.md
   git add -A && git commit -qm "app-7"
   git checkout -q -B feat
   lg_up_commit --line "$LG_UP_NAMES" $'work\n\nLedger-Claims: app-7' src/sheet/a.js src/sheet/b.js server/create.js src/cart/badge.js
@@ -13265,7 +13373,7 @@ test_lg_upkeep_ranking_and_cap() {
     "$(lg_up_vals app-7)" \
     "changes, then consumes read (field:order.total), then listed (flag:beta's 4 files before endpoint:list's 1): group, then evidence count, then id"
   assert_json_field "$LG_OUT" '.items[0].proposed[3].evidence | tojson' \
-    '["the item lists src/flags/a.js (defined_in of flag:beta), which the range does not change","the item lists src/flags/b.js (defined_in of flag:beta), which the range does not change","the item lists src/flags/c.js (defined_in of flag:beta), which the range does not change","… and 1 more files"]' \
+    '["the item names flag:beta and lists src/flags/a.js (defined_in of flag:beta), which the range does not change","the item names flag:beta and lists src/flags/b.js (defined_in of flag:beta), which the range does not change","the item names flag:beta and lists src/flags/c.js (defined_in of flag:beta), which the range does not change","… and 1 more files"]' \
     "listed evidence: at most 3 files, then … and N more files"
   assert_json_field "$LG_OUT" '.items[0] | [.total, .truncated, .link] | tojson' \
     '[5,false,"ledger link app-7 --changes component:Sheet,endpoint:create --consumes field:order.total,flag:beta,endpoint:list"]' \
@@ -14693,6 +14801,10 @@ run_tests() {
   test_lg_upkeep_consumes_read_by
   test_lg_upkeep_consumes_listed_unchanged
   test_lg_upkeep_message_only_no_listed_consumes
+  test_lg_upkeep_consumes_b_needs_item_text
+  test_lg_upkeep_consumes_b_ignores_relation_lists
+  test_lg_upkeep_consumes_b_reads_b_not_worktree
+  test_lg_upkeep_consumes_b_hosted_item
   test_lg_upkeep_ranking_and_cap
   test_lg_upkeep_touched_needs_a_naming_line
   test_lg_upkeep_names_glob_and_literals
