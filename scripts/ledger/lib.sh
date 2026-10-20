@@ -15,6 +15,8 @@ _LG_CFG=""           # the merged config (a file in $_SCRATCH): _lg_init
 _LG_ROOT=""          # the work tree's top level
 _LG_IX_NEED_CONTRACTS=""  # 1: the verb shows relations — a failing contracts
                           # adapter is fatal (index.sh _lg_ix_adapter_contracts)
+_LG_FAIL_REC=""      # set in a guarded child only: the file its _lg_fail
+                     # records "<rc>\t<message>" in (doc-tools.sh), no verdict
 # A push refused for credentials or rights, in git's or curl's words (ERE;
 # grep -E): the counter CAS (keys.sh) and the in-flight push (inflight.sh)
 # both read it as "cannot write there" — provisional keys / a warning —
