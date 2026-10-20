@@ -341,16 +341,23 @@ class Corpus:
                 superseded_by=superseded_by,
             )
 
-    def front_matter(self, path: str) -> dict[str, str]:
-        """The simple `key: value` fields of a doc's front matter, keys lowercased; {} when it has none.
+    def title_and_front_matter(self, path: str) -> tuple[str, dict[str, str]] | None:
+        """A doc's title (as `meta()` has it) and the simple `key: value` fields of its front matter.
 
-        From the same cached parse of the first 64 KiB that `meta()` uses, so it costs a `stat`.
-        Lists, nested values and block scalars are not among the fields. The dict is a copy.
+        One read of the cached parse of the first 64 KiB: one `stat` and the symlink checks, where
+        `meta()` and `front_matter()` together would pay them twice. Field keys are lowercased;
+        lists, nested values and block scalars are not among the fields, and the dict is a copy.
+        None when the file cannot be read as text (see `skipped()`).
         """
         path = norm_rel(path)
         with self._lock:
             head = self._head(path)
-            return dict(head.fields) if head is not None else {}
+            return (head.title, dict(head.fields)) if head is not None else None
+
+    def front_matter(self, path: str) -> dict[str, str]:
+        """The front-matter fields of `title_and_front_matter`; {} when there are none or the file is unreadable."""
+        found = self.title_and_front_matter(path)
+        return found[1] if found else {}
 
     def heading_path_at(self, path: str, line: int) -> tuple[str, ...]:
         """The title, then the headings that enclose `line` (1-based), outermost first.
