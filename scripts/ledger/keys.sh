@@ -1268,6 +1268,54 @@ _lg_k_create_path() {
   _LG_KC_PATH=$p
 }
 
+# _lg_k_create_put <src> <target>: new --create's write — <target> becomes
+# a copy of <src> and never replaces anything (init.sh _lg_init_put's
+# mv -f would replace a name another writer takes after _lg_k_create's
+# check). A temp file beside <target>, with the mode a new file gets under
+# the umask, is hard-linked to <target> — link(2) fails on a name already
+# there, a dangling link included — then removed; when a directory took
+# the name, ln linked into it: that link is removed. A filesystem without
+# hard links (ln fails, the name still free): an exclusive create (set -C:
+# O_EXCL), then the bytes. The name taken: dies "<target> appeared while
+# the item was being written: nothing written"; any other failure:
+# "cannot write <target>". DOC_TOOLS_LEDGER_SELFTEST=create-race |
+# create-race-dir (scripts/test-ledger.sh only): another writer takes the
+# name — a file, a directory — just before the link.
+_lg_k_create_put() {
+  local src="$1" F="$2" tmp mode
+  tmp=$(mktemp "$(dirname -- "$F")/.lg-create.XXXXXX") || _lg_die "cannot create a temp file beside $F"
+  mode=$(printf '%o' $(( 0666 & ~0$(umask) ))) || mode=644
+  if ! cp -- "$src" "$tmp" || ! chmod "$mode" "$tmp"; then
+    rm -f -- "$tmp"
+    _lg_die "cannot write $F"
+  fi
+  case "${DOC_TOOLS_LEDGER_SELFTEST:-}" in
+    create-race) printf 'another writer\n' > "$F" ;;
+    create-race-dir) mkdir -- "$F" ;;
+  esac
+  if ln -- "$tmp" "$F" 2>/dev/null; then
+    if [ "$F" -ef "$tmp" ]; then
+      rm -f -- "$tmp"
+      return 0
+    fi
+    # A directory took the name: ln made its link inside it.
+    if [ -d "$F" ] && [ "$F/${tmp##*/}" -ef "$tmp" ]; then rm -f -- "$F/${tmp##*/}"; fi
+  elif [ ! -e "$F" ] && [ ! -L "$F" ] && (set -C && : > "$F") 2>/dev/null; then
+    # No hard link here: the name is this run's now (O_EXCL), then the bytes.
+    if cat -- "$tmp" > "$F"; then
+      rm -f -- "$tmp"
+      return 0
+    fi
+    rm -f -- "$F" "$tmp"
+    _lg_die "cannot write $F"
+  fi
+  rm -f -- "$tmp"
+  if [ -e "$F" ] || [ -L "$F" ]; then
+    _lg_die "$F appeared while the item was being written: nothing written (run it again)"
+  fi
+  _lg_die "cannot write $F"
+}
+
 # _lg_k_create <ledger> <summary> <finalize> <index> <scratch>: ledger new
 # --create, after _lg_k_create_args and _lg_k_create_cfg. The path first
 # (_lg_k_create_path: a provisional key's hex comes from it), checked
@@ -1278,8 +1326,8 @@ _lg_k_create_path() {
 # frontmatter pass: status, date, severity, paths, the stub defaults the
 # item does not set, relations never (init.sh _lg_init_stub_defaults; "q":
 # setq; the names _lg_k_create_cfg lists are skipped), key,
-# ledger, summary — and moved into place once (init.sh _lg_init_put, which
-# never writes through a link). Any exit but 0 leaves no file. Prints
+# ledger, summary — and put in place once, never over anything
+# (_lg_k_create_put). Any exit but 0 leaves no file. Prints
 # "created <path>" and new's line; the payload adds "created": true. Ends
 # the run.
 # shellcheck disable=SC2154  # _OPT_* are set by _parse_args
@@ -1319,7 +1367,7 @@ _lg_k_create() {
   if [ -e "$F" ] || [ -L "$F" ]; then
     _lg_die "$F appeared while the item was being written: nothing written (run it again)"
   fi
-  _lg_init_put "$s/new.md" "$F"
+  _lg_k_create_put "$s/new.md" "$F"
   # Written. A run that still fails — the --suggest-contracts read, a
   # signal — takes it back: doc-tools.sh _on_exit removes _LG_UNDO_FILE when
   # the run ends with any exit but 0.

@@ -2603,7 +2603,8 @@ ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize suggest-contracts
   items.globs entry shaped <dir>/<pattern>.md (else docs/issues), <slug>
   the title lowercased, every run of characters other than a-z and 0-9
   one "-", at most 50 ("item" when empty); a taken name gets -2 … -99
-  (all taken: exit 2); a path items.globs do not match: exit 3 (write the
+  (all taken: exit 2; a name another writer takes meanwhile is never
+  replaced: exit 2); a path items.globs do not match: exit 3 (write the
   file, then --file). Its frontmatter, in order: the status field =
   status.open[0], the date field = today, the severity field = --sev and
   the paths field = --paths as a flow list (blanks around the commas

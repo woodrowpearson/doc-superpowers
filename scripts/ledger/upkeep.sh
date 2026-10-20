@@ -99,6 +99,7 @@ _LG_UP_IX=""   # _lg_up_index: the index upkeep reads …
 _LG_UP_IXB=""  # … and the commit it was chosen for
 _LG_UP_PR=null # the payload's pr: null, or {number, state, body_scanned}
 _LG_UP_BODY="" # the PR body's file (_lg_up_pr); "" when none was read
+_LG_UP_FH=""   # _lg_up_pr_fetch_hint's command
 
 # _lg_up_no_repo: --no-repo-adapters — exit 2, before anything runs, when
 # config adapters.contracts, adapters.pr or items.adapter names anything
@@ -119,6 +120,32 @@ _lg_up_no_repo() {
   _lg_die "--no-repo-adapters: a repository script is configured (not null or doc-superpowers:<name>): $m — nothing was run (run ledger upkeep without --no-repo-adapters yourself)"
 }
 
+# _lg_up_pr_fetch_hint <n> <url> → _LG_UP_FH: the command that fetches
+# open PR <n>'s head into this clone (after _lg_ix_pr_fetch: the remote is
+# _LG_IX_PR_REMOTE) — git fetch <remote> <ref>: the ref config
+# inflight.pull_refs names, the number in place of its one * (the host's
+# PR-head refs, which the in-flight scan fetches), else pull/<n>/head when
+# the PR's url is a pull URL (…/pull/<n>, …/pulls/<n>: GitHub's, Gitea's
+# — hosts that publish refs/pull/<n>/head); else git fetch <remote> alone
+# (host-neutral: the adapter gives no ref to name).
+_lg_up_pr_fetch_hint() {
+  local n="$1" url="$2" pat
+  pat=$(_lg_cfg '.inflight.pull_refs | if type == "string" then gsub("[\\n\\r]"; " ") else "" end') || exit "$?"
+  case "$pat" in
+    *[[:space:]]*|*\**\**) pat="" ;;
+    refs/*\**) ;;
+    *) pat="" ;;
+  esac
+  if [ -n "$pat" ]; then
+    _LG_UP_FH="git fetch $_LG_IX_PR_REMOTE ${pat%%\**}$n${pat#*\*}"
+    return 0
+  fi
+  case "$url" in
+    */pull/"$n"|*/pulls/"$n") _LG_UP_FH="git fetch $_LG_IX_PR_REMOTE pull/$n/head" ;;
+    *) _LG_UP_FH="git fetch $_LG_IX_PR_REMOTE" ;;
+  esac
+}
+
 # _lg_up_pr <n> <body-out> → _LG_UP_A, _LG_UP_B (as _lg_up_range), _LG_UP_PR
 # and _LG_UP_BODY (<body-out>, or "" when the body was not read): PR <n> from
 # config adapters.pr's list, through the remote cache (index.sh
@@ -132,9 +159,11 @@ _lg_up_no_repo() {
 # DOC_TOOLS_LEDGER_OFFLINE=1 reads none (body_scanned false). Exit 2: no
 # adapters.pr, the list failing with no copy, a number the list does not
 # hold, a PR neither merged nor open, its commit or the base not here (with
-# the fetch command), view failing or breaking its contract.
+# the fetch command: _lg_up_pr_fetch_hint for an open PR's head; a merge
+# commit with no parent names git fetch --unshallow in a shallow clone),
+# view failing or breaking its contract.
 _lg_up_pr() {
-  local n="$1" bodyf="$2" s cfg st mc ho h base x rc=0 scanned=true
+  local n="$1" bodyf="$2" s cfg st mc ho url h base x rc=0 scanned=true
   _lg_scratch_name
   s=$_LG_SN
   _lg_adapter_path pr || _lg_die "--pr: $_LG_ADP_ERR"
@@ -143,17 +172,17 @@ _lg_up_pr() {
   if [ "$rc" != 0 ]; then
     _lg_die "--pr: the pr adapter's list is unavailable: ${_LG_RERR:-the pr adapter failed}"
   fi
-  # The PR's state, merge_commit and head_oid, one line each ("" for a
+  # The PR's state, merge_commit, head_oid and url, one line each ("" for a
   # value that is no string; the oids are checked as hex below), from the
   # snapshot (its header line has no number: never a match).
   # shellcheck disable=SC2016  # jq source
   jq -n -r --arg n "$n" '
     def s: if type == "string" then gsub("[\\n\\r]"; " ") else "" end;
     first(inputs | select(type == "object" and (.number | tostring) == $n))
-    | (.state | s), (.merge_commit | s), (.head_oid | s)' "$_LG_RSNAP" > "$s.pr" 2> "$s.err" \
+    | (.state | s), (.merge_commit | s), (.head_oid | s), (.url | s)' "$_LG_RSNAP" > "$s.pr" 2> "$s.err" \
     || _lg_die "--pr: cannot read the pr adapter's list: $(head -n 1 "$s.err")"
   [ -s "$s.pr" ] || _lg_die "--pr: no PR #$n in the pr adapter's list (ledger ls --refresh reads the list again)"
-  { IFS= read -r st; IFS= read -r mc; IFS= read -r ho; } < "$s.pr" || _lg_die "cannot read $s.pr"
+  { IFS= read -r st; IFS= read -r mc; IFS= read -r ho; IFS= read -r url; } < "$s.pr" || _lg_die "cannot read $s.pr"
   cfg=$(_lg_cfg '.base | if type == "string" then gsub("\n"; " ") else "" end') || exit "$?"
   x="git fetch $_LG_IX_PR_REMOTE"
   case "$st" in
@@ -165,8 +194,12 @@ _lg_up_pr() {
           || ! _LG_UP_B=$(git rev-parse -q --verify "$mc^{commit}" 2>/dev/null); then
         _lg_die "--pr: PR #$n's merge commit ${mc:0:12} is not in this clone ($x)"
       fi
-      _LG_UP_A=$(git rev-parse -q --verify "$_LG_UP_B^1" 2>/dev/null) \
-        || _lg_die "--pr: PR #$n's merge commit ${mc:0:12} has no parent"
+      if ! _LG_UP_A=$(git rev-parse -q --verify "$_LG_UP_B^1" 2>/dev/null); then
+        if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+          _lg_die "--pr: PR #$n's merge commit ${mc:0:12} has no parent here: this clone is shallow (git fetch --unshallow)"
+        fi
+        _lg_die "--pr: PR #$n's merge commit ${mc:0:12} has no parent"
+      fi
       # The merged head here: the PR's own commits, whatever the merge
       # (a rebase merge's merge_commit is its last rebased commit alone).
       if printf '%s\n' "$ho" | LC_ALL=C grep -Eqx '[0-9a-f]{40}([0-9a-f]{24})?' \
@@ -182,7 +215,8 @@ _lg_up_pr() {
       esac
       if ! printf '%s\n' "$ho" | LC_ALL=C grep -Eqx '[0-9a-f]{40}([0-9a-f]{24})?' \
           || ! _LG_UP_B=$(git rev-parse -q --verify "$ho^{commit}" 2>/dev/null); then
-        _lg_die "--pr: PR #$n's head ${ho:0:12} is not in this clone ($x)"
+        _lg_up_pr_fetch_hint "$n" "$url"
+        _lg_die "--pr: PR #$n's head ${ho:0:12} is not in this clone ($_LG_UP_FH)"
       fi
       case "$cfg" in
         '') _lg_die "--pr: PR #$n is open and config base is empty: no merge base to start from" ;;
@@ -529,18 +563,21 @@ _lg_up_top() {
 # against the index upkeep reads (_lg_up_index), into <out>: their item
 # paths, NUL-terminated, in order (a repeat once). A value that names no
 # item, several, an archived legacy row or an archived item: usage (3).
+# The values reach jq as a file (NUL-separated), never as argv: jq reads
+# an option-like value (--items -x) as an option even after --args.
 # shellcheck disable=SC2154  # _OPTV_items is set by _parse_args
 _lg_up_named() {
   local s m
   _lg_scratch_name
   s=$_LG_SN
   _lg_up_index "$_LG_UP_B"
+  { [ "${#_OPTV_items[@]}" = 0 ] || printf '%s\0' "${_OPTV_items[@]}"; } > "$s.refs" || _lg_die "cannot write $s.refs"
+  jq -Rsc 'split("\u0000")[:-1]' "$s.refs" > "$s.refs.json" || _lg_die "jq failed (--items)"
   # shellcheck disable=SC2016  # jq source
-  jq -L "$_LG_LIB" -r --slurpfile c "$_LG_CFG" \
-    --argjson refs "$(jq -nc '$ARGS.positional' --args "${_OPTV_items[@]}")" \
+  jq -L "$_LG_LIB" -r --slurpfile c "$_LG_CFG" --slurpfile refs "$s.refs.json" \
     "$_LG_JQ_INCLUDE$_LG_JQ_RESOLVE_DEFS"'
     . as $ix
-    | [$refs[] as $r | {v: $r, r: ($ix | lg_resolve($r; $c[0]))}] as $R
+    | [$refs[0][] as $r | {v: $r, r: ($ix | lg_resolve($r; $c[0]))}] as $R
     | ([$R[] | select(.r.r != "item")
         | "bad\t--items \(.v | tojson) is not one item" + (if .r.r == "ambiguous" then " (several: \(.r.v | join(", ")))" else "" end)]
        + [$R[] | select(.r.r == "item") | .r.v as $p | select(any($ix.items[]; .path == $p and .archived == true))
