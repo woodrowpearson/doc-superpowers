@@ -34,4 +34,5 @@ packages = ["src/doc_search"]
 testpaths = ["tests"]
 markers = [
     "slow: spawns the real console script in a subprocess (still part of the default run)",
+    "live: touches the network (semble's default model from Hugging Face); skipped unless DOC_SEARCH_LIVE=1",
 ]

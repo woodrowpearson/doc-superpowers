@@ -39,16 +39,16 @@ doc-superpowers/
 │   ├── pyproject.toml    # runtime: semble>=0.7,<0.8, mcp>=2.3,<3, pathspec; extra cloud: google-genai, google-cloud-firestore; dev: pytest; console script doc-search
 │   ├── uv.lock           # Locked (the launcher and CI run with --frozen); no torch, no onnxruntime
 │   ├── src/doc_search/
-│   │   ├── config.py     # docs/search/config.json: defaults, deep merge, validation, DOC_SEARCH_CLOUD=0; INERT_LINE
+│   │   ├── config.py     # docs/search/config.json: defaults, deep merge, validation (unknown keys refused), DOC_SEARCH_CLOUD=0; INERT_LINE
 │   │   ├── repo.py corpus.py docindex.py  # git plumbing, worktrees, path confinement; the docs corpus (globs, enrichment, terminal filter); the doc-index join
-│   │   ├── engines.py    # IndexPool: the semble docs + code index pair per worktree, background builds, revalidation, LRU of 2, on-disk cache state
+│   │   ├── engines.py    # IndexPool: the semble docs + code index pair per worktree, background builds (one at a time, docs first), revalidation, LRU of 2, on-disk cache state
 │   │   ├── searcher.py fusion.py render.py  # the legs (docs, ident, code, cloud) and file-keyed RRF with the per-kind floor; the markdown answer
 │   │   ├── tools.py      # fetch, related, status
 │   │   ├── server.py     # the MCP server (MCPServer, SDK v2): four tools over one Runtime; cli.py builds the same Runtime
 │   │   ├── cli.py evaluate.py  # doc-search serve | init | index | query | status | eval; known-answer evaluation
 │   │   ├── chunker.py    # the cloud write path's heading-bounded chunker
 │   │   └── cloud/        # read.py (the cloud leg: Vertex query → Firestore find_nearest, branch-changed suppression), write.py (the guarded indexer), vertex.py (google-genai embeddings)
-│   └── tests/            # pytest: never the network (a test-built Model2Vec model, fake Firestore and Vertex); live tests only under DOC_SEARCH_LIVE=1
+│   └── tests/            # pytest: never the network (a test-built Model2Vec model, fake Firestore and Vertex); the live test (test_live.py: semble's default model, end to end) only under DOC_SEARCH_LIVE=1
 ├── scripts/
 │   ├── doc-tools.sh      # Bundled freshness tooling (build-index, check-freshness, update-index, add-entry, remove-entry, move-entry, set-code-refs, set-doc-type, upgrade-entries, deprecate-entry, status, audit-merges, bump-version, check-version, implementation-status, set-implementation, fragments {list, validate, merge}, tools {install, uninstall, status, version}, claims {validate, run, promote, render, gate, attest, rulings}, ledger {show, ls, find, related, suggest, sweep, recheck, inflight, notices, state-watch, new, assign, link, note, view, validate, publish, finalize, init})
 │   ├── ledger/           # The work ledger, sourced by doc-tools.sh (_lg_enter) for a ledger verb in a repository with docs/ledger/config.json, for ledger init without one, and by claims V5 on a ledger host
@@ -74,7 +74,7 @@ doc-superpowers/
 │   ├── test-spec-status-model.sh # Test suite for the canonical Spec Status Model + call sites
 │   ├── test-spec-claims.sh # Test suite for the `claims` verb group: a fixture per check, the gate flows, /bin/sh stub adapters
 │   ├── test-helpers.sh   # Shared test harness (isolated git env, scratch root, pipefail-safe asserts) sourced by every suite
-│   ├── search/launch.sh  # doc-search's launcher (POSIX sh): finds doc-superpowers at run time, then uv run --project <root>/search --frozen [--extra cloud] doc-search; install --search copies it to .claude/doc-superpowers/search-mcp.sh
+│   ├── search/launch.sh  # doc-search's launcher (POSIX sh): finds doc-superpowers at run time, then uv run --project <root>/search --frozen --no-dev [--extra cloud] doc-search; install --search copies it to .claude/doc-superpowers/search-mcp.sh
 │   ├── merge-doc-index.sh  # Custom git merge driver for .doc-index.json
 │   ├── test-merge-driver.sh # Test suite for merge driver
 │   ├── test-hooks.sh     # Test suite for hooks installer and hook scripts
@@ -493,16 +493,18 @@ The server is the uv package `search/`, started by the client through the commit
 ```
 .mcp.json → sh .claude/doc-superpowers/search-mcp.sh serve
   → launch.sh: find doc-superpowers ($DOC_SUPERPOWERS_ROOT → this checkout → newest plugin-cache version);
-    exec uv run --project <root>/search --frozen [--extra cloud] doc-search serve
+    exec uv run --project <root>/search --frozen --no-dev [--extra cloud] doc-search serve
   → server.build_server → Runtime: RepoInfo.from_cwd, load_config (absent: every tool answers the inert
     line; invalid: "invalid config"), the corpus of the launch worktree, IndexPool, the cloud leg (built
     without the network; one that cannot be built answers with its reason), then the launch worktree's
     builds start in the background
 search(query, scope, limit, doc_type, path_prefix, include_terminal, worktree)
+  → limit None → search.default_limit; a blank doc_type value or path_prefix is dropped
   → resolve_worktree (one of git worktree list, else refused) → IndexPool.get(wait ≤ 20 s): the docs + code
-    pair (loaded from semble's cache when valid, else SembleIndex.from_path; revalidated after
-    max(rescan_seconds, 3 × build seconds)); a pair still building → partial answer with a note, or
-    "index building … retry shortly" when the scope's own index is not ready
+    pair (loaded from semble's cache when valid, else SembleIndex.from_path, one build at a time pool-wide,
+    docs first; revalidated after max(rescan_seconds, 3 × build seconds)); a pair still building (or
+    queued) → partial answer with a note, or "index building … retry shortly" when the scope's own index
+    is not ready
   → allowed = corpus files passing doc_type, path_prefix and the terminal filter
   → cloud leg on its own thread (stamp → branch-changed paths → Vertex RETRIEVAL_QUERY → Firestore
     find_nearest, bounded by cloud.timeout_s + 5 s) while the local legs run:
