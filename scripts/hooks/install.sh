@@ -39,6 +39,9 @@ set -euo pipefail
 #     and those scripts (hook-lib.sh stays while any script that sources it
 #     does). Its markers and the git tier's never match each other: each
 #     uninstall takes its own.
+#   - doc-search's opt-in set (--search, never part of --all): the launcher
+#     .claude/doc-superpowers/search-mcp.sh and the "doc-search" key of
+#     .mcpServers in .mcp.json (the rest of that file is the project's).
 #
 # STATE — the CI tier's choices (workflow set, base branch, cron, strict) are
 # recorded in .claude/doc-superpowers/installed.json (state.sh), so a plain
@@ -78,6 +81,13 @@ LG_END="# ledger-superpowers:end"
 LEDGER_CONFIG="docs/ledger/config.json"
 LEDGER_GIT_HOOKS="pre-commit pre-push post-commit"
 LEDGER_CLAUDE_HOOKS="ledger-session-notices ledger-state-watch"
+# doc-search's set (--search): a committed launcher, and its MCP server entry.
+SEARCH_CONFIG="docs/search/config.json"
+SEARCH_LAUNCHER_DEST=".claude/doc-superpowers/search-mcp.sh"
+SEARCH_LAUNCHER_SRC="$SKILL_DIR/scripts/search/launch.sh"
+MCP_FILE=".mcp.json"
+SEARCH_SERVER="doc-search"
+SEARCH_ENTRY='{"command":"sh","args":[".claude/doc-superpowers/search-mcp.sh","serve"]}'
 
 # The workflow templates, once (a membership test is a string match).
 KNOWN_WORKFLOWS=""
@@ -133,9 +143,9 @@ usage() {
 doc-superpowers hooks installer
 
 Usage:
-  install.sh install   [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [CI options]
-  install.sh uninstall [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--workflows=<csv|all|none>] [--transient]
-  install.sh status    [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--json]
+  install.sh install   [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [CI options]
+  install.sh uninstall [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--workflows=<csv|all|none>] [--transient]
+  install.sh status    [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--json]
   install.sh print-merge-driver
   install.sh help
 
@@ -202,11 +212,24 @@ Tiers:
             install --ledger-claude is re-run). DOC_SUPERPOWERS_LEDGER_SKIP=1
             skips every leg of both, and DOC_SUPERPOWERS_SKIP=1 (every
             hook) does too.
+  --search  doc-search's MCP server, an opt-in set of its own, never part of
+            --all, that needs docs/search/config.json (doc-search init):
+              .claude/doc-superpowers/search-mcp.sh   the launcher, a copy of the
+                                  plugin's scripts/search/launch.sh (commit it)
+              .mcp.json           the "doc-search" server, merged into the
+                                  project's mcpServers (the rest is kept; a file
+                                  that is not one JSON object is refused)
+            uninstall --search removes that key and the launcher, and .mcp.json
+            itself when it is left as {"mcpServers":{}}. Nothing of it is
+            recorded in installed.json. status --json reports it, under
+            .tiers.search, only when --search is named.
 
 Machine-readable:
   status --json       the git, Claude and CI tiers (all, or those named) as one
                       JSON object (schema doc-superpowers-hooks-status/1;
-                      references/hooks.md lists every state); exit 0
+                      references/hooks.md lists every state); exit 0.
+                      --search adds the doc-search set (alone, when it is the
+                      only one named)
   print-merge-driver  the merge.doc-index.driver value install --git registers
 
 Hook output: DOC_SUPERPOWERS_ADVICE (else the advice key of
@@ -1685,6 +1708,157 @@ status_ledger_claude() {
   done
 }
 
+# --- doc-search's set (--search) -----------------------------------------------------
+#
+# An opt-in set of its own, never part of --all and, like the ledger's, never
+# recorded in installed.json. Two things, both meant to be committed:
+#   - the launcher: a byte copy of the plugin's scripts/search/launch.sh at
+#     .claude/doc-superpowers/search-mcp.sh. It holds no machine path: it finds
+#     the plugin when it runs;
+#   - the "doc-search" key of .mcp.json's mcpServers, merged per key, so every
+#     other server and key of the file is kept. A file that is not one JSON
+#     object (or whose mcpServers is not an object) is refused, never rewritten.
+# Install needs docs/search/config.json. Uninstall removes that key and the
+# launcher, and .mcp.json itself when that leaves it exactly {"mcpServers":{}}.
+
+# preflight_search_config: installing the set needs the config.
+preflight_search_config() {
+  [ "$COMMAND" = install ] || return 0
+  [ ! -f "$SEARCH_CONFIG" ] || return 0
+  echo "ERROR: install --search needs $SEARCH_CONFIG, which this repository does not have: doc-search is not enabled here (doc-search init sets it up). Nothing was changed." >&2
+  exit 1
+}
+
+# mcp_problem: why .mcp.json cannot be edited, on stdout; nothing when it is
+# absent, or one JSON object whose mcpServers (if any) is an object.
+mcp_problem() {
+  [ -e "$MCP_FILE" ] || return 0
+  if ! jq -s -e 'length == 1 and (.[0] | type) == "object"' "$MCP_FILE" >/dev/null 2>&1; then
+    echo "is not one JSON object"
+  elif ! jq -e '(.mcpServers // {}) | type == "object"' "$MCP_FILE" >/dev/null 2>&1; then
+    echo "has an mcpServers that is not an object"
+  fi
+}
+
+# Every check before the first write (install and uninstall alike).
+preflight_search() {
+  local why
+  command -v jq >/dev/null 2>&1 \
+    || die "the --search set edits $MCP_FILE with jq, which is not on PATH: install jq and re-run. Nothing was changed."
+  safe_dest "$SEARCH_LAUNCHER_DEST"
+  safe_dest "$MCP_FILE"
+  if [ "$COMMAND" = install ] && [ ! -f "$SEARCH_LAUNCHER_SRC" ]; then
+    die "the plugin's $SEARCH_LAUNCHER_SRC is missing. Nothing was changed."
+  fi
+  why=$(mcp_problem)
+  [ -z "$why" ] || die "$MCP_FILE $why: fix it by hand, then re-run. Nothing was changed."
+}
+
+# search_state: SR_LAUNCHER — installed (the plugin's copy, byte for byte) |
+# outdated (anything else) | absent — and SR_ENTRY — registered (this
+# install's entry) | different-command (a doc-search server with another
+# definition) | absent. An .mcp.json that cannot be read has no entry.
+search_state() {
+  if [ ! -f "$SEARCH_LAUNCHER_DEST" ]; then
+    SR_LAUNCHER=absent
+  elif cmp -s "$SEARCH_LAUNCHER_DEST" "$SEARCH_LAUNCHER_SRC"; then
+    SR_LAUNCHER=installed
+  else
+    SR_LAUNCHER=outdated
+  fi
+  SR_ENTRY=absent
+  if [ -f "$MCP_FILE" ]; then
+    SR_ENTRY=$(jq -r --arg k "$SEARCH_SERVER" --argjson e "$SEARCH_ENTRY" '
+      (try .mcpServers[$k] catch null) as $x
+      | if $x == null then "absent" elif $x == $e then "registered" else "different-command" end' "$MCP_FILE" 2>/dev/null) \
+      || SR_ENTRY=absent
+    case "$SR_ENTRY" in
+      registered | different-command) ;;
+      *) SR_ENTRY=absent ;;
+    esac
+  fi
+}
+
+install_search() {
+  local new
+  tmp_beside "$SEARCH_LAUNCHER_DEST"
+  cat "$SEARCH_LAUNCHER_SRC" > "$_TMP"
+  commit_tmp "$SEARCH_LAUNCHER_DEST" 755 1
+  if [ ! -e "$MCP_FILE" ]; then
+    new=$(jq -n --arg k "$SEARCH_SERVER" --argjson e "$SEARCH_ENTRY" '{mcpServers: {($k): $e}}') \
+      || die "cannot build $MCP_FILE"
+  elif jq -e --arg k "$SEARCH_SERVER" --argjson e "$SEARCH_ENTRY" '(.mcpServers // {})[$k] == $e' "$MCP_FILE" >/dev/null 2>&1; then
+    # Already right: the file is the project's, leave its formatting alone.
+    new=""
+  else
+    new=$(jq --arg k "$SEARCH_SERVER" --argjson e "$SEARCH_ENTRY" '.mcpServers = ((.mcpServers // {}) | .[$k] = $e)' "$MCP_FILE") \
+      || die "cannot edit $MCP_FILE"
+  fi
+  if [ -n "$new" ]; then
+    tmp_beside "$MCP_FILE"
+    printf '%s\n' "$new" > "$_TMP"
+    commit_tmp "$MCP_FILE" 644
+  fi
+  echo "doc-search MCP: launcher $SEARCH_LAUNCHER_DEST and the \"$SEARCH_SERVER\" server in $MCP_FILE installed"
+  echo "  Commit both: a teammate with uv gets the server (the launcher finds doc-superpowers through DOC_SUPERPOWERS_ROOT, this checkout, or the plugin cache)"
+}
+
+uninstall_search() {
+  local new any=0
+  if [ -f "$MCP_FILE" ] && jq -e --arg k "$SEARCH_SERVER" '(.mcpServers // {}) | has($k)' "$MCP_FILE" >/dev/null 2>&1; then
+    new=$(jq -c --arg k "$SEARCH_SERVER" 'del(.mcpServers[$k])' "$MCP_FILE") || die "cannot edit $MCP_FILE"
+    if [ "$new" = '{"mcpServers":{}}' ]; then
+      remove_file "$MCP_FILE"
+    else
+      tmp_beside "$MCP_FILE"
+      jq --arg k "$SEARCH_SERVER" 'del(.mcpServers[$k])' "$MCP_FILE" > "$_TMP"
+      commit_tmp "$MCP_FILE" 644
+    fi
+    any=1
+  fi
+  if [ -f "$SEARCH_LAUNCHER_DEST" ]; then
+    remove_file "$SEARCH_LAUNCHER_DEST"
+    any=1
+  fi
+  remove_dir_if_empty "${SEARCH_LAUNCHER_DEST%/*}"
+  remove_dir_if_empty .claude
+  if [ "$any" = 1 ]; then
+    echo "doc-search MCP: removed (the \"$SEARCH_SERVER\" server from $MCP_FILE, the launcher $SEARCH_LAUNCHER_DEST)"
+  else
+    echo "doc-search MCP: nothing to uninstall"
+  fi
+}
+
+# status_search: the human lines, or (--json) one search.state record.
+status_search() {
+  search_state
+  if $JSON; then
+    st_rec search.state "$SR_LAUNCHER" "$SR_ENTRY"
+    return 0
+  fi
+  echo "doc-search MCP (the opt-in --search set):"
+  if [ ! -f "$SEARCH_CONFIG" ]; then
+    if [ "$SR_LAUNCHER" = absent ] && [ "$SR_ENTRY" = absent ]; then
+      echo "  not enabled (no $SEARCH_CONFIG); nothing of this set is installed"
+      return 0
+    fi
+    echo "  ⚠ $SEARCH_CONFIG is missing: doc-search is not enabled here, so the installed server answers \"not enabled\""
+  fi
+  case "$SR_LAUNCHER" in
+    installed) echo "  ✓ launcher: installed ($SEARCH_LAUNCHER_DEST)" ;;
+    outdated) echo "  ⚠ launcher: outdated: differs from the plugin's scripts/search/launch.sh (re-run install --search)" ;;
+    *) echo "  ✗ launcher: not installed (install --search)" ;;
+  esac
+  case "$SR_ENTRY" in
+    registered) echo "  ✓ entry: registered ($MCP_FILE: $SEARCH_SERVER)" ;;
+    different-command) echo "  ⚠ entry: registered with a different command (re-run install --search)" ;;
+    *) echo "  ✗ entry: not registered (install --search)" ;;
+  esac
+  if [ -n "$(mcp_problem)" ]; then
+    echo "  ⚠ $MCP_FILE $(mcp_problem): no server can be read from it"
+  fi
+}
+
 # --- CI tier -------------------------------------------------------------------------
 
 # Branch names: what git accepts AND what a workflow line takes as is (the
@@ -2284,6 +2458,7 @@ _STATUS_JSON_JQ='
     elif $r[0] == "ci.ledger_gap" then .tiers.ci.claims_without_ledger_helpers += [$r[1]]
     elif $r[0] == "ci.helpers" then .tiers.ci.helpers[$r[1]] = ($r[2] | tonumber)
     elif $r[0] == "ci.vendored" then .tiers.ci.doc_tools_vendored = $r[1]
+    elif $r[0] == "search.state" then .tiers.search = {launcher: $r[1], mcp_entry: $r[2]}
     else . end)
   | .env = {DOC_SUPERPOWERS_STRICT: ($strict | n), DOC_SUPERPOWERS_SKIP: ($skip | n),
             DOC_SUPERPOWERS_QUIET: ($quiet | n), DOC_SUPERPOWERS_HOOK_BUDGET: ($budget | n),
@@ -2332,7 +2507,7 @@ case "$SKILL_DIR" in
   *$'\n'*) die "the skill path holds a line break, which no hook line can carry: $SKILL_DIR" ;;
 esac
 
-DO_GIT=false DO_CLAUDE=false DO_CI=false DO_LEDGER=false DO_LEDGER_CLAUDE=false
+DO_GIT=false DO_CLAUDE=false DO_CI=false DO_LEDGER=false DO_LEDGER_CLAUDE=false DO_SEARCH=false
 # --claude named itself (not through --all, which never reports a ledger set).
 CLAUDE_NAMED=false
 OPT_BASE="" OPT_CRON="" OPT_STRICT="" HELPERS=true FORCE=false TRANSIENT=false
@@ -2345,7 +2520,7 @@ DRIVER_ONLY=false JSON=false
 # Which command takes which flag (anything else: exit 2).
 allowed() {
   case "$COMMAND:$1" in
-    *:--git | *:--claude | *:--ci | *:--all | *:--ledger | *:--ledger-claude | *:--merge-driver-only) return 0 ;;
+    *:--git | *:--claude | *:--ci | *:--all | *:--ledger | *:--ledger-claude | *:--search | *:--merge-driver-only) return 0 ;;
     status:--json) return 0 ;;
     install:--workflows | install:--base-branch | install:--cron | install:--ci-strict | install:--helpers | install:--force) return 0 ;;
     uninstall:--workflows | uninstall:--transient) return 0 ;;
@@ -2362,7 +2537,7 @@ while [ $# -gt 0 ]; do
     *) value="" has_value=0 ;;
   esac
   case "$name" in
-    --git | --claude | --ci | --all | --ledger | --ledger-claude | --merge-driver-only | --json | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient) ;;
+    --git | --claude | --ci | --all | --ledger | --ledger-claude | --search | --merge-driver-only | --json | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient) ;;
     *) usage_error "unknown option: $arg" ;;
   esac
   allowed "$name" || usage_error "$name does not apply to $COMMAND"
@@ -2384,6 +2559,7 @@ while [ $# -gt 0 ]; do
     --all) DO_GIT=true DO_CLAUDE=true DO_CI=true ;;
     --ledger) DO_LEDGER=true ;;
     --ledger-claude) DO_LEDGER_CLAUDE=true ;;
+    --search) DO_SEARCH=true ;;
     --merge-driver-only) DRIVER_ONLY=true ;;
     --json) JSON=true ;;
     --base-branch)
@@ -2437,7 +2613,7 @@ enter_repo
 
 case "$COMMAND" in
   install)
-    if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE; then
+    if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE && ! $DO_SEARCH; then
       if [[ -t 0 ]]; then
         echo "doc-superpowers hooks installer"
         echo ""
@@ -2447,7 +2623,7 @@ case "$COMMAND" in
         echo "  [3] CI/CD workflows: $SHELL_WORKFLOWS"
         echo "      (the others are opt-in by name — $SHELL_OPTIN_WORKFLOWS (no AI) and the Claude-powered ones: install.sh install --ci --workflows=<names>; install.sh help lists them)"
         echo "  [a] All of the above"
-        echo "  (The work ledger's hooks are sets of their own: install.sh install --ledger and/or --ledger-claude.)"
+        echo "  (The work ledger's hooks and doc-search's MCP server are sets of their own: install.sh install --ledger, --ledger-claude and/or --search.)"
         echo ""
         read -rp "Select (comma-separated, e.g. 1,2): " selection
         [[ "$selection" == *1* ]] && DO_GIT=true
@@ -2461,8 +2637,10 @@ case "$COMMAND" in
     fi
     # Every check first: a refusal writes nothing.
     { $DO_LEDGER || $DO_LEDGER_CLAUDE; } && preflight_ledger_config
+    $DO_SEARCH && preflight_search_config
     $DO_LEDGER && preflight_ledger
     $DO_LEDGER_CLAUDE && preflight_ledger_claude
+    $DO_SEARCH && preflight_search
     $DO_GIT && preflight_git
     # --merge-driver-only installs the driver alone: without it, nothing to do.
     if $DO_GIT && $DRIVER_ONLY && [[ ! -f "$SKILL_DIR/scripts/merge-doc-index.sh" ]]; then
@@ -2479,12 +2657,13 @@ case "$COMMAND" in
     $DO_LEDGER && install_ledger
     # After install_claude: the settings it wrote are the ones extended.
     $DO_LEDGER_CLAUDE && install_ledger_claude
+    $DO_SEARCH && install_search
     echo ""
     echo "Done."
     ;;
 
   uninstall)
-    if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE; then
+    if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE && ! $DO_SEARCH; then
       if [[ -t 0 ]]; then
         read -rp "No tier specified. Uninstall all tiers? [y/N] " confirm
         if [[ "$confirm" =~ ^[Yy] ]]; then
@@ -2494,12 +2673,13 @@ case "$COMMAND" in
           exit 0
         fi
       else
-        echo "ERROR: specify tier flags (--git, --claude, --ci, --all, --ledger, --ledger-claude)" >&2
+        echo "ERROR: specify tier flags (--git, --claude, --ci, --all, --ledger, --ledger-claude, --search)" >&2
         exit 1
       fi
     fi
     $DO_LEDGER && preflight_ledger
     $DO_LEDGER_CLAUDE && preflight_ledger_claude
+    $DO_SEARCH && preflight_search
     $DO_GIT && preflight_git
     $DO_CLAUDE && preflight_uninstall_claude
     $DO_CI && preflight_uninstall_ci
@@ -2512,6 +2692,7 @@ case "$COMMAND" in
     $DO_LEDGER && uninstall_ledger
     # After uninstall_claude: a hook-lib.sh it kept for the set goes now.
     $DO_LEDGER_CLAUDE && uninstall_ledger_claude
+    $DO_SEARCH && uninstall_search
     echo ""
     echo "Done."
     ;;
@@ -2519,18 +2700,21 @@ case "$COMMAND" in
   status)
     if $JSON; then
       # The three tiers (all of them, or those named), one JSON object on
-      # stdout, exit 0: the states are the verdict.
-      if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI; then
+      # stdout, exit 0: the states are the verdict. --search adds doc-search's
+      # set (never part of the default, or of --all; the only member when it
+      # is the only one named).
+      if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_SEARCH; then
         DO_GIT=true DO_CLAUDE=true DO_CI=true
       fi
       if $DO_GIT; then status_git; fi
       if $DO_CLAUDE; then status_claude; fi
       if $DO_CI; then status_ci; fi
+      if $DO_SEARCH; then status_search; fi
       status_json
       exit 0
     fi
-    if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE; then
-      DO_GIT=true DO_CLAUDE=true DO_CI=true DO_LEDGER=true DO_LEDGER_CLAUDE=true
+    if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE && ! $DO_SEARCH; then
+      DO_GIT=true DO_CLAUDE=true DO_CI=true DO_LEDGER=true DO_LEDGER_CLAUDE=true DO_SEARCH=true
     fi
     # status --claude: the ledger's Claude set lives in the same settings
     # file, so once any of it is installed it is reported too (an install
@@ -2561,6 +2745,10 @@ case "$COMMAND" in
     fi
     if $DO_LEDGER_CLAUDE; then
       status_ledger_claude
+      echo ""
+    fi
+    if $DO_SEARCH; then
+      status_search
       echo ""
     fi
     echo "Env overrides: DOC_SUPERPOWERS_STRICT=${DOC_SUPERPOWERS_STRICT:-unset} DOC_SUPERPOWERS_SKIP=${DOC_SUPERPOWERS_SKIP:-unset} DOC_SUPERPOWERS_LEDGER_SKIP=${DOC_SUPERPOWERS_LEDGER_SKIP:-unset}"
