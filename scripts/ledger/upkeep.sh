@@ -76,11 +76,11 @@
 #   the net diff does not hold and that the item's own text names (Names) —
 #   its title and summary (the index's h1 and fields.summary) and the body
 #   of its file without the frontmatter, so never its relation lists (a
-#   hosted item: its body excerpt), read where the index is (the working
-#   tree when <b> is HEAD, else <b>): "the item names <c> and lists <f>
-#   (defined_in of <c>), which the range does not change" — unless the
-#   item declares it in consumes or has it from (a). Never a skip_contracts
-#   id.
+#   hosted item: its body excerpt, less a word the adapter's cut ends
+#   inside), read where the index is (the working tree when <b> is HEAD,
+#   else <b>): "the item names <c> and lists <f> (defined_in of <c>),
+#   which the range does not change" — unless the item declares it in
+#   consumes or has it from (a). Never a skip_contracts id.
 # Per item: changes ranked Contract-Change first, then by evidence count
 #   (files and lines), then id; then consumes (a), then (b), each by
 #   evidence count, then id; --top N (default 3; 0: all) keeps the first N
@@ -350,6 +350,15 @@ def up_name_re: sub("^[^:]*:"; "")
   | if . == "" then ""
     else "(^|[^A-Za-z0-9_])" + (split("*") | map(lg_q_re) | join("[A-Za-z0-9_.-]*")) + "($|[^A-Za-z0-9_])" end;
 def up_names($c): . != "" and (($c | up_name_re) as $re | $re != "" and test($re));
+# up_by_file(kf): "<file>\t<line>" lines (the input text; a line may hold
+# more tabs) → {<file> | kf: its lines, each ended by "\n"} — the text
+# up_names reads. Linear: map(. + "\n") | add, where join is quadratic in
+# jq (one 50,000-line file took 13 s), and with_entries, where map_values
+# is quadratic in jq 1.6 (20,000 files took 13.6 s).
+def up_by_file(kf):
+  lg_lists(split("\n")[] | select(. != "") | split("\t")
+           | {k: (.[0] | kf), v: (if length == 2 then .[1] else .[1:] | join("\t") end)})
+  | with_entries(.value |= (map(. + "\n") | add));
 # The pairs of $m ({file: [contract ids]}, a file as the path lists carry
 # it) whose file has a changed line naming the contract ($cl: {file: its
 # changed lines, each ended by "\n"}; a file with none, binary or a mode
@@ -395,7 +404,8 @@ def up_link($I; $SH):
   end;
 '
 
-# _LG_JQ_UPKEEP: the core's one pass, over the index ($ix) — inputs $c
+# _LG_JQ_UPKEEP: the first of the core's two jq passes (_LG_JQ_UP_RANK, over
+# its object, is the second), over the index ($ix) — inputs $c
 # (config), $diff (the net-diff files, lines), $fc ({file: [contract ids]}
 # for the files skip_globs leaves, by defined_in), $rc (the same by
 # read_by), $dl (the changed lines of the files $fc and $rc hold:
@@ -443,15 +453,10 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
       rank: ([$ss[] | up_rank] | min)}]
   | sort_by(.rank, (.key // .p)) as $INV
 # Touched contracts: by a net-diff file (skip_globs left out: $fc) with a
-# changed line that names the contract ($CL: each file, its changed lines
-# each ended by "\n" — map(. + "\n") | add, linear where join is quadratic
-# in jq: one 50,000-line file took 13 s; and with_entries over the files,
-# linear where map_values is quadratic in jq 1.6: 20,000 files took 13.6 s),
-# or by a Contract-Change line; $TALL every one, $TCH those upkeep may
-# propose.
-| (lg_lists($dl | split("\n")[] | select(. != "") | split("\t")
-            | {k: .[0], v: (if length == 2 then .[1] else .[1:] | join("\t") end)})
-   | with_entries(.value |= (map(. + "\n") | add))) as $CL
+# changed line that names the contract ($CL: each file, as the path lists
+# carry it, its changed lines: up_by_file), or by a Contract-Change line;
+# $TALL every one, $TCH those upkeep may propose.
+| ($dl | up_by_file(.)) as $CL
 | up_named($fc[0]; $CL) as $CF
 | lg_obj(($ix.contracts // [])[] | {(.id): true}) as $ISC
 | lg_lists($TR[] | select(.k == "contract_change") | .v | up_cc | select($ISC[.id] == true) | {k: .id, v: .line}) as $CCL
@@ -503,13 +508,21 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
 | lg_lists($PROPS[] | {k: .p, v: .}) as $PBY
 # Per item, for _LG_JQ_UP_RANK: its proposals (_props) and, when one is a
 # consumes (b) candidate, the text the index holds (_t: the title — h1 —
-# and summary; a hosted item, which has no file, its body excerpt too)
+# and summary; a hosted item, which has no file, its body excerpt too —
+# one the items adapter cut, 280 characters ending in "…", without the
+# partial word before the "…", whose prefix may be a shorter contract id)
 # and whether the body of its file is read as well (_f).
 | [$INV[] | . as $v | $M.BYP[$v.p] as $I | ($PBY[$v.p] // []) as $P
    | any($P[]; ._g == 2) as $hasb | (($I.url | type) == "string") as $hosted
    | {key: $I.key, path: $I.path, found_by: $v.found_by, rank: $v.rank, _props: $P,
       declared_untouched: [(($I.changes // []) | map(strings) | unique)[] | select($TOUCHED[.] != true)],
-      _t: (if $hasb then [$I.h1, $I.summary, (if $hosted then $I.first_para else empty end)] | map(strings) | join("\n")
+      _t: (if $hasb
+           then [$I.h1, $I.summary,
+                 (if $hosted
+                  then $I.first_para
+                       | if type == "string" and length == 280 and endswith("…") then sub("[A-Za-z0-9_]+…$"; "…") else . end
+                  else empty end)]
+                | map(strings) | join("\n")
            else null end),
       _f: ($hasb and ($hosted | not))}] as $ITEMS
 | {range: "\($a)..\($b)", files: ($DIFF | length), commits: $commits, items: $ITEMS,
@@ -527,9 +540,7 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
 # --top of them kept, and the link line.
 # shellcheck disable=SC2016  # jq source
 _LG_JQ_UP_RANK="$_LG_JQ_UP_DEFS"'
-(lg_lists($it | split("\n")[] | select(. != "") | split("\t")
-          | {k: (.[0] | up_dec), v: (if length == 2 then .[1] else .[1:] | join("\t") end)})
- | with_entries(.value |= (map(. + "\n") | add))) as $BT
+($it | up_by_file(up_dec)) as $BT
 | .items |= [.[] | . as $v
    | (if $v._t == null then "" else $v._t + "\n" + ($BT[$v.path] // "") end) as $T
    | ([$v._props[] | select(._g != 2 or (.value as $k | $T | up_names($k)))] | sort_by(._g, ._cc, -._n, .value)) as $R
@@ -610,8 +621,10 @@ _LG_AWK_UP_TEXT='
 # of the file items of <in.json> (_LG_JQ_UPKEEP's object) whose file
 # consumes (b) reads (_f) — read once per core run, from the working tree
 # when the index upkeep reads is the working tree's (_LG_UP_IXWT: <b> is
-# HEAD), else as <b-oid> holds them (git cat-file blob, one per item; a
-# path <b-oid> does not hold as a file has no text).
+# HEAD), else as <b-oid> holds them (git cat-file blob, one per item: the
+# index built at <b-oid> lists only paths <b-oid> holds as files, so a
+# failure is git's own — exit 2, which validate --pushed reports as its
+# "could not check" advisory).
 _lg_up_texts() {
   local in="$1" b="$2" out="$3" s p n=0 blobs=""
   _lg_scratch_name
@@ -624,7 +637,8 @@ _lg_up_texts() {
     blobs="$s.b"
     while IFS= read -r p; do
       n=$((n + 1))
-      git cat-file blob "$b:$p" > "$blobs$n" 2>/dev/null || : > "$blobs$n" || _lg_die "cannot write $blobs$n"
+      git cat-file blob "$b:$p" > "$blobs$n" 2> "$s.err" \
+        || _lg_die "git cat-file $b:$p failed: $(head -n 3 "$s.err" 2>/dev/null)"
     done < "$s.paths"
   fi
   printf '%s\n' "$_LG_AWK_UP_TEXT" > "$s.awk" || _lg_die "cannot write $s.awk"
@@ -770,16 +784,19 @@ _lg_up_top() {
 # against the index upkeep reads (_lg_up_index), into <out>: their item
 # paths, NUL-terminated, in order (a repeat once). A value that names no
 # item, several, an archived legacy row or an archived item: usage (3).
-# The values reach jq as a file (NUL-separated), never as argv: jq reads
-# an option-like value (--items -x) as an option even after --args.
+# The values reach jq as a file, never as argv (jq reads an option-like
+# value, --items -x, as an option even after --args): NUL-terminated, each
+# NUL as \001, as the path lists reach jq — jq 1.6 drops the NUL that ends
+# raw input, so the last value would be lost.
 # shellcheck disable=SC2154  # _OPTV_items is set by _parse_args
 _lg_up_named() {
   local s m
   _lg_scratch_name
   s=$_LG_SN
   _lg_up_index "$_LG_UP_B"
-  { [ "${#_OPTV_items[@]}" = 0 ] || printf '%s\0' "${_OPTV_items[@]}"; } > "$s.refs" || _lg_die "cannot write $s.refs"
-  jq -Rsc 'split("\u0000")[:-1]' "$s.refs" > "$s.refs.json" || _lg_die "jq failed (--items)"
+  { [ "${#_OPTV_items[@]}" = 0 ] || printf '%s\0' "${_OPTV_items[@]}"; } | tr '\000' '\001' > "$s.refs" \
+    || _lg_die "cannot write $s.refs"
+  jq -Rsc 'split("\u0001")[:-1]' "$s.refs" > "$s.refs.json" || _lg_die "jq failed (--items)"
   # shellcheck disable=SC2016  # jq source
   jq -L "$_LG_LIB" -r --slurpfile c "$_LG_CFG" --slurpfile refs "$s.refs.json" \
     "$_LG_JQ_INCLUDE$_LG_JQ_RESOLVE_DEFS"'
