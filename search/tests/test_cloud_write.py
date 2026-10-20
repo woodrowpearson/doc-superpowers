@@ -15,8 +15,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import doc_search.cloud.write as write
 import pytest
+from fakes import FakeFirestore, FakeGenai
+
+import doc_search.cloud.write as write
 from doc_search.chunker import CHUNKER_VERSION
 from doc_search.cloud import CloudUnavailable
 from doc_search.cloud.vertex import VertexEmbedder
@@ -32,7 +34,6 @@ from doc_search.cloud.write import (
 )
 from doc_search.config import Config, load_config
 from doc_search.repo import GitError
-from fakes import FakeFirestore, FakeGenai
 
 pytest.importorskip("google.genai")
 firestore = pytest.importorskip("google.cloud.firestore")
@@ -204,13 +205,16 @@ def test_refuses_off_base(git_repo) -> None:
 
 def test_head_may_be_base_or_behind_it(git_repo) -> None:
     w = make_world(git_repo)
-    first = w.head
     w.commit({GUIDE_PATH: GUIDE + "\nMore.\n"})
-    w.repo.git("checkout", "-q", "--detach", first)
 
-    report = w.run("full")
+    assert w.run("full").stamp == w.head, "HEAD is the base"
 
-    assert report.stamp == first, "HEAD is an ancestor of the base"
+    behind = make_world(git_repo)
+    first = behind.head
+    behind.commit({GUIDE_PATH: GUIDE + "\nMore.\n"})
+    behind.repo.git("checkout", "-q", "--detach", first)
+
+    assert behind.run("full").stamp == first, "HEAD is an ancestor of the base"
 
 
 def test_base_ref_must_resolve(git_repo) -> None:
@@ -367,34 +371,58 @@ def test_the_lease_is_renewed_every_five_minutes(git_repo) -> None:
     assert len(set(seen_quick)) == 1, "no renewal inside five minutes"
 
 
-def test_a_vanished_lease_is_taken_again(git_repo) -> None:
+def test_a_vanished_lease_is_lost_not_taken_again(git_repo) -> None:
+    """Only a holder deletes the document, so a missing one mid-run means another run held and released it."""
     w = make_world(git_repo)
-    during: list[dict[str, Any] | None] = []
 
     def vanish() -> None:
-        during.append(w.lease())
         w.fs.collection("corpus_meta").docs.pop("catch_up_lease", None)
         w.clock.now += 400
 
     w.genai.on_call = vanish
-    report = w.run("full")
 
-    assert report.stamped and w.lease() is None
-    assert during[0]["holder"] == "a:1" and during[1]["holder"] == "a:1", "retaken at the next check, not lost"
+    with pytest.raises(LeaseLost, match="lease vanished; another run may have written") as lost:
+        w.run("full")
+
+    assert lost.value.holder is None
+    assert lost.value.report.files_written == 1 and len(w.genai.calls) == 1, "the next file never started"
+    assert w.stamp() is None and w.lease() is None, "nothing stamped, and the lease document was not re-created"
 
 
-def test_lease_transaction_retries_on_contention(git_repo) -> None:
-    """The lease is a real `@firestore.transactional` over the fake's transaction protocol."""
+def test_a_run_that_stalled_past_its_lease_stops(git_repo) -> None:
+    """The laptop sleeps: our lease expires, host B takes it, catches up, stamps its newer HEAD and releases."""
     w = make_world(git_repo)
-    w.fs.commit_conflicts = [Aborted("contention")]
+    newer = "f" * 40
 
-    report = w.run("full")
+    def stall_while_b_runs() -> None:
+        w.clock.now += 2000
+        w.fs.set_stamp(newer, embedder_id=EMBEDDER_ID, repo_id=w.repo_id, chunker_version=CHUNKER_VERSION)
+        w.fs.collection("corpus_meta").docs.pop("catch_up_lease", None)  # B released it
 
-    assert report.stamped
-    assert w.fs.transaction_begins[:2] == [None, b"txn-1"], "the retry names the first attempt"
-    assert w.fs.calls["transaction_begin"] >= 4 and w.fs.calls["transaction_commit"] == 3, (
-        "three commits: acquire, the check before the stamp, release"
+    w.genai.on_call = stall_while_b_runs
+    stamp_of_b = dict(w.fs.collection("corpus_meta").docs.get("index") or {})
+
+    with pytest.raises(LeaseLost) as lost:
+        w.run("full")
+
+    assert lost.value.holder is None and len(w.genai.calls) == 1, "no further writes"
+    assert w.stamp()["built_from_commit"] == newer != stamp_of_b.get("built_from_commit"), "B's stamp is untouched"
+    assert w.lease() is None
+
+    # the same stall in the last file of a catch-up: the check before the stamp is what catches it
+    last = make_world(git_repo)
+    last.run("full")
+    last.commit({GUIDE_PATH: GUIDE + "\nMore.\n"})
+    last.genai.on_call = lambda: (
+        setattr(last.clock, "now", last.clock.now + 2000),
+        last.fs.collection("corpus_meta").docs.pop("catch_up_lease", None),
     )
+    before = dict(last.stamp())
+
+    with pytest.raises(LeaseLost, match="lease vanished"):
+        last.run("catch-up")
+
+    assert last.stamp() == before
 
 
 # --- what a run writes ---------------------------------------------------------------------------------
@@ -876,6 +904,7 @@ def test_prune_cap(git_repo) -> None:
     report = w.run("prune-orphans")
 
     assert report.orphans_removed == 0 and report.orphans_pending == 35
+    assert "stamped" not in report.notes[0], "prune-orphans never stamps: its note does not say so"
     assert report.orphans_sample == gone[:10], "the first ten, in order"
     assert not report.stamped and set(gone) <= w.paths(), "nothing was deleted"
 
@@ -896,6 +925,25 @@ def test_prune_cap(git_repo) -> None:
     seed_cloud(w, 0, 21)
     capped = w.run("prune-orphans")
     assert capped.orphans_removed == 0 and capped.orphans_pending == 21 and len(capped.orphans_sample) == 10
+
+
+def test_the_prune_cap_measures_the_corpus_as_it_was_before_the_run(git_repo) -> None:
+    # another repository's 25 docs share the collection, there is no stamp to name an owner, and this repository
+    # has 300 docs: measured after the run writes them the cap would be 32.5, before it is 20
+    w = make_world(git_repo, known_docs(300))
+    foreign = seed_cloud(w, 0, 25)
+
+    report = w.run("catch-up")
+
+    assert report.mode == "full" and report.files_written == 300 and report.files_failed == {}
+    assert report.orphans_pending == 25 and report.orphans_removed == 0
+    assert not report.stamped and w.stamp() is None
+    assert set(foreign) <= w.paths(), "the other repository's docs are still there"
+    assert "nothing stamped" in report.notes[0]
+
+    forced = w.run("full", force=True)
+
+    assert forced.orphans_removed == 25 and forced.stamped
 
 
 def test_a_capped_run_writes_everything_else_but_does_not_stamp(git_repo) -> None:

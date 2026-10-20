@@ -21,15 +21,18 @@ One run, in this order (abundance's guarantees, carried over, plus the checks of
  4. Lease: a transactional lease document (`<meta>/catch_up_lease`, 1800 s) keeps two hosts from rewriting the
     same files at once. It is released in `finally`, renewed every 5 minutes, and checked again before orphans
     are deleted and before the stamp. A lease another host took ends the run (`LeaseLost`): no more writes, no
-    stamp.
+    stamp. So does a lease document that is gone: only a holder deletes it, so another run took ours (it
+    expired while this one stalled), finished and released it, and may have written. Only the first
+    acquisition creates the document.
  5. The file set: every in-scope file of HEAD for `full`; the files changed from the stamp to HEAD for
     `catch-up`. `prune-orphans` indexes nothing.
  6. Per file: sha256 against the stored chunk 0's `fileSha256`, then chunk, embed (`RETRIEVAL_DOCUMENT`), and
     replace the file's chunks in batches of at most 500 operations.
  7. A deleted file's chunks go only when `git ls-tree HEAD -- <path>` says it is gone.
  8. Orphans (`full`, `prune-orphans`): corpus paths git no longer knows. More than max(20, 10% of the corpus's
-    paths) are not pruned without `force`: that many means this is not the repository the corpus was built
-    from. The run reports them (`orphans_pending`) and is not stamped.
+    paths) are not pruned without `force` (the corpus measured as it was before this run wrote anything): that
+    many means this is not the repository the corpus was built from. The run reports them
+    (`orphans_pending`) and is not stamped.
  9. The stamp (`<meta>/index`) is written only when no file failed and nothing is pending: it is the lower
     bound of the next catch-up, so stamping over a failure would drop that file from every later run's range.
 
@@ -106,15 +109,17 @@ class CorpusRefused(Exception):
 
 
 class LeaseLost(Exception):
-    """Another host holds the lease this run took: the remaining writes were abandoned and nothing was stamped.
+    """The lease this run took is no longer its own: the remaining writes were abandoned and nothing was stamped.
 
-    `report` is what the run had done by then.
+    `holder` is who has it now, or None when the lease document is gone: only a holder deletes it, so another
+    run took it (this one stalled past the TTL) and has finished, and may have written. `report` is what the
+    run had done by then.
     """
 
     def __init__(self, holder: str | None, report: IndexReport | None = None) -> None:
         self.holder = holder
         self.report = report
-        super().__init__(f"lease lost to {holder or 'an unknown holder'}")
+        super().__init__(f"lease lost to {holder}" if holder else "lease vanished; another run may have written")
 
 
 @dataclass
@@ -182,11 +187,20 @@ class _Plan:
 
 
 def _lease_rival(data: dict[str, Any] | None, me: str) -> tuple[str | None, datetime | None] | None:
-    """Who holds the lease instead of `me` now; None when it is `me`'s (or nobody's: it is taken again)."""
-    if not data or data.get("holder") == me:
-        return None
+    """Who holds the lease instead of `me` now; None only when it is still `me`'s.
+
+    A missing (or empty) document is `(None, None)`: this run held the lease, and only a holder deletes it, so
+    another run took it and released it. It is not taken again; only the first acquisition creates the document.
+    """
+    if not data:
+        return None, None
     holder, expires = data.get("holder"), data.get("expires_at")
-    return (holder if isinstance(holder, str) else None), (expires if isinstance(expires, datetime) else None)
+    if holder == me:
+        return None
+    return (
+        holder if isinstance(holder, str) and holder else "an unknown holder",
+        expires if isinstance(expires, datetime) else None,
+    )
 
 
 def _lease_blocker(data: dict[str, Any] | None, me: str, now: datetime) -> tuple[str | None, datetime | None] | None:
@@ -335,10 +349,12 @@ class CloudIndexer:
     def _work(self, db: Any, plan: _Plan, head: str, repo_id: str | None, force: bool, report: IndexReport) -> None:
         tree = self._head_tree(head)
         if plan.mode == "prune-orphans":
-            self._prune_orphans(db, tree, report, force)
+            self._prune_orphans(db, tree, self._indexed_paths(db), report, force)
             return
 
         corpus = Corpus(self._top, self._cfg, DocIndex(self._top))
+        # the corpus as it was before this run: the prune cap measures it, and the files written below are not in it
+        indexed = self._indexed_paths(db) if plan.mode == "full" else set()
         if plan.mode == "full":
             todo = sorted(path for path in tree.regular if corpus.in_scope(path))
             deletions: list[str] = []
@@ -357,7 +373,7 @@ class CloudIndexer:
             self._tick(db)
             self._guarded(report, path, lambda path=path: self._delete_file(db, head, path, report))
         if plan.mode == "full":
-            self._prune_orphans(db, tree, report, force)
+            self._prune_orphans(db, tree, indexed, report, force)
 
         if not report.files_failed and not report.orphans_pending:
             self._check_lease(db)
@@ -424,8 +440,8 @@ class CloudIndexer:
         """Take the lease (`taking`), or confirm it is still ours and extend it by the TTL.
 
         Taking fails with LeaseHeld while another host's lease is live. Confirming fails with LeaseLost when
-        another host holds the document at all: ours expired and was taken, and whoever has it may be at work.
-        A lease document that vanished is simply taken again.
+        another host holds the document at all (ours expired and was taken, and whoever has it may be at work),
+        and when the document is gone (it was taken and released: the corpus may have moved on without us).
         """
         firestore = import_module("google.cloud.firestore")
         ref, me, now = self._lease_ref(db), self._holder, self._now()
@@ -436,7 +452,7 @@ class CloudIndexer:
             data = snapshot.to_dict() if snapshot.exists else None
             rival = _lease_blocker(data, me, now) if taking else _lease_rival(data, me)
             if rival is None:
-                since = (data or {}).get("acquired_at") if not taking and data else None
+                since = (data or {}).get("acquired_at") if not taking else None
                 txn.set(
                     ref,
                     {"holder": me, "acquired_at": since or now, "expires_at": now + timedelta(seconds=LEASE_TTL_S)},
@@ -608,8 +624,20 @@ class CloudIndexer:
 
     # -- step 7: orphans ------------------------------------------------------------------------
 
-    def _prune_orphans(self, db: Any, tree: _Tree, report: IndexReport, force: bool) -> None:
-        """Delete the chunks of paths git no longer knows: absent from HEAD and from the index.
+    def _indexed_paths(self, db: Any) -> set[str]:
+        """Every distinct path the collection holds (the `path` field alone is read)."""
+        indexed: set[str] = set()
+        for snapshot in self._collection(db).select(["path"]).stream(timeout=SCAN_TIMEOUT_S):
+            value = (snapshot.to_dict() or {}).get("path")
+            if isinstance(value, str):
+                indexed.add(value)
+        return indexed
+
+    def _prune_orphans(self, db: Any, tree: _Tree, indexed: set[str], report: IndexReport, force: bool) -> None:
+        """Delete the chunks of the paths in `indexed` that git no longer knows: absent from HEAD and the index.
+
+        `indexed` is the corpus as it was before this run wrote anything. The cap is measured against it: a run
+        that has just written every file of HEAD must not count them as the corpus it is pruning.
 
         The test is "the file is gone", not "the file is out of scope": an archived doc that still exists keeps
         its chunks (they are what `include_terminal` searches). More orphans than the cap is not a cleanup but a
@@ -617,11 +645,6 @@ class CloudIndexer:
         reported, not deleted, unless `force`.
         """
         known = tree.everything | {p for p in git(self._top, "ls-files", "-z").split("\0") if p}
-        indexed: set[str] = set()
-        for snapshot in self._collection(db).select(["path"]).stream(timeout=SCAN_TIMEOUT_S):
-            value = (snapshot.to_dict() or {}).get("path")
-            if isinstance(value, str):
-                indexed.add(value)
         orphans = sorted(indexed - known)
         if not orphans:
             return
@@ -629,8 +652,9 @@ class CloudIndexer:
         if len(orphans) > cap and not force:
             report.orphans_pending = len(orphans)
             report.orphans_sample = orphans[:PENDING_SAMPLE]
+            unstamped = "" if report.mode == "prune-orphans" else ", nothing stamped"
             report.notes.append(
-                f"{len(orphans)} orphaned paths exceed the prune cap of {int(cap)}: none deleted, nothing stamped "
+                f"{len(orphans)} orphaned paths exceed the prune cap of {int(cap)}: none deleted{unstamped} "
                 "(a corpus of another repository? use force if these really are gone)"
             )
             return
