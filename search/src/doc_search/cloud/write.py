@@ -280,7 +280,8 @@ class CloudIndexer:
 
         Raises BaseRefError, CorpusRefused and LeaseHeld before anything is written; CloudUnavailable when the
         cloud cannot be used at all (no extra, no credentials); LeaseLost when another host took the lease
-        mid-run. A file that fails is reported in `files_failed`, not raised. A run with nothing to do returns a
+        mid-run, or the lease document vanished (another run took it after ours expired, finished and released
+        it). A file that fails is reported in `files_failed`, not raised. A run with nothing to do returns a
         report with a note.
         """
         if mode not in MODES:
@@ -535,10 +536,14 @@ class CloudIndexer:
         if not chunks:
             # a content defect (binary, not UTF-8, too large, empty) fails identically on every run, so it is
             # not a failure; but the cloud must not keep serving an older version of what it cannot hold now
+            self._tick(db)
             if self._purge(db, path):
                 report.files_deleted += 1
             return
         vectors = self._embedder.embed_documents([chunk.text for chunk in chunks])
+        # the embedding is the slow, retried part (and where a sleeping laptop loses its lease): look again before
+        # this file's chunks land, or they would sit under a newer stamp another run has written meanwhile
+        self._tick(db)
         meta = corpus.meta(path)
         doc_type = ((meta.doc_type if meta else None) or "other").lower()
         self._replace(db, path, sha, doc_type, chunks, vectors)
