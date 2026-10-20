@@ -1046,12 +1046,13 @@ _lg_validate_pushed() {
 # undeclared-contract-change advisories (design 2026-10-18 §5;
 # _lg_v_undeclared_run computes them). They never block, and nothing that
 # stops their check ends the run: it runs in a guarded child — errexit
-# live (never the left side of ||), stdin closed, stdout and fd 9 to
-# /dev/null, stderr (trace lines, notes) into <s>.err, copied to stderr
-# after, and _LG_FAIL_REC set, so a _lg_die there records "<rc>\t<message>"
-# in <s>.fail instead of printing a verdict. Whatever stops the child — a
-# die, a failed command — is one advisory of the class, path and key null,
-# detail "could not check: <message>".
+# live (never the left side of ||), stdin from /dev/null, stdout and fd 9
+# to /dev/null, stderr (trace lines, notes) into <s>.err, copied to stderr
+# after, its scratch names numbered apart (the run's later names never
+# reuse its files), and _LG_FAIL_REC set, so a _lg_die there records
+# "<rc>\t<message>" in <s>.fail instead of printing a verdict. Whatever
+# stops the child — a die, a failed command — is one advisory of the
+# class, path and key null, detail "could not check: <message>".
 _lg_v_undeclared() {
   local range="$1" out="$2" s rc msg=""
   _lg_scratch_name
@@ -1061,6 +1062,7 @@ _lg_v_undeclared() {
   (
     set -e
     _LG_FAIL_REC=$s.fail
+    _LG_PARSE_N=$((_LG_PARSE_N + 200000))
     _lg_v_undeclared_run "$range" "$s.adv"
   ) < /dev/null > /dev/null 9> /dev/null 2> "$s.err"
   rc=$?
@@ -1081,25 +1083,35 @@ _lg_v_undeclared() {
 
 # _LG_JQ_V_UNDECLARED: the findings, over the index upkeep read — $core:
 # _lg_up_core's object (every proposal kept), $r: the range the detail
-# names. None when the range involves no item. A touched contract (upkeep's:
-# through a non-skipped net-diff file or a Contract-Change line, never a
-# skip_contracts id) that no involved item declares in changes (the index)
-# is one finding: path its first file (null when only a Contract-Change
-# line touched it), key the key of the item upkeep proposes it to; the
-# first 10 by contract id, then one "… N more contracts".
+# names, $hasf / $mbd: the branch's own files (lines, \001 for a newline
+# in a name, \002 for a tab), when they filter. None when the range
+# involves no item. A touched contract (upkeep's: through a non-skipped
+# net-diff file or a Contract-Change line, never a skip_contracts id), its
+# files only the branch's own with $hasf — one left with none and no
+# Contract-Change line is dropped — that no involved item declares in
+# changes (the index) is one finding: path its first file (null when only
+# a Contract-Change line touches it), key the key of the item upkeep
+# proposes it to; the first 10 by contract id, then one "… N more
+# contracts".
 # shellcheck disable=SC2016  # jq source
 _LG_JQ_V_UNDECLARED='
+def v_dec: if test("[\u0001\u0002]") then gsub("\u0001"; "\n") | gsub("\u0002"; "\t") else . end;
 $core[0] as $C
 | if $C.items == [] then empty
   else
     [$C.items[].path] as $P
     | [.items[] | select(.path as $p | $P | index([$p]) != null) | (.changes // [])[] | strings] as $D
-    | [$C.touched[] | select(.contract as $k | $D | index([$k]) == null)] as $U
+    | (if $hasf then reduce ($mbd | split("\n")[] | select(. != "") | v_dec) as $f ({}; .[$f] = true) else null end) as $MB
+    | [$C.touched[]
+       | (if $MB == null then . else .files |= map(select($MB[.] == true)) end)
+       | select(.files != [] or .cc_line != null)
+       | select(.contract as $k | $D | index([$k]) == null)] as $U
     | ($U[0:10][] | . as $t | ((.files | length) - 1) as $n
        | {class: "undeclared-contract-change", severity: "advisory", path: (.files[0] // null),
           key: (first($C.items[] | select(any(.proposed[]; .field == "changes" and .value == $t.contract)) | .key) // null),
-          detail: ((if .files == [] then "a Contract-Change line" else .files[0] + (if $n > 0 then " and \($n) more" else "" end) end)
-                   + " change \(.contract), which no item this push involves declares (changes): ledger upkeep --range \($r) proposes the link")}),
+          detail: ((if .files == [] then "a Contract-Change line changes" elif $n > 0 then "\(.files[0]) and \($n) more change"
+                    else "\(.files[0]) changes" end)
+                   + " \(.contract), which no item this push involves declares (changes): ledger upkeep --range \($r) proposes the link")}),
       (if ($U | length) > 10
        then {class: "undeclared-contract-change", severity: "advisory", path: null, key: null, detail: "… \(($U | length) - 10) more contracts"}
        else empty end)
@@ -1107,15 +1119,22 @@ $core[0] as $C
 '
 
 # _lg_v_undeclared_run <a>..<b> <out.jsonl>: _lg_v_undeclared's work, in its
-# guarded child (any failure dies). The range: <b> empty is HEAD; <a> empty
-# or all zeros (a new branch) is merge-base(config base, <b>) — a base that
-# does not resolve here, or shares no history with <b>, dies. Upkeep's core
-# over it (_LG_UP_TOP 0: every attribution), on upkeep's index
-# (_lg_up_index; _LG_IX_NEED_CONTRACTS unset, so a failing contracts
-# adapter is the index's built.contracts_error — died with here). The
-# detail's range: both ends as git rev-parse --short=12.
+# guarded child (any failure dies). Needs _lg_k_cfg to have run (it reads
+# _LG_K_BASE). The range: <b> empty is HEAD; <a> empty or all zeros (a new
+# branch) is merge-base(config base, <b>) — a base that does not resolve
+# here, or shares no history with <b>, dies. Upkeep's core over it
+# (_LG_UP_TOP 0: every attribution), on upkeep's index (_lg_up_index;
+# _LG_IX_NEED_CONTRACTS unset, so a failing contracts adapter is the
+# index's built.contracts_error — died with here). The base's own changes
+# never count: with a non-zero <a>, a touched contract's file counts only
+# when it also differs between merge-base(config base, <b>) and <b> (a
+# base merged into the branch brings the base's changes into <a>..<b>) —
+# one more git diff-tree, run only when the range involves an item and
+# touches a contract, and only when that merge base exists and is not <a>
+# (then the filter changes nothing); no filter when the base does not
+# resolve. The detail's range: both ends as git rev-parse --short=12.
 _lg_v_undeclared_run() {
-  local range="$1" out="$2" s a b x ac bc base cerr r
+  local range="$1" out="$2" s a b x ac bc base cerr r mb="" hasf=false
   _lg_scratch_name
   s=$_LG_SN
   a=${range%%..*}
@@ -1149,8 +1168,26 @@ _lg_v_undeclared_run() {
   cerr=$(jq -r '.built.contracts_error // empty' "$_LG_UP_IX") || _lg_die "jq failed (the index's contracts_error)"
   [ -z "$cerr" ] || _lg_die "$cerr"
   _lg_up_core "$ac" "$bc" "" "" "$s.core"
-  jq -c --slurpfile core "$s.core" --arg r "$r" "$_LG_JQ_V_UNDECLARED" "$_LG_UP_IX" > "$out" \
-    || _lg_die "jq failed (undeclared-contract-change)"
+  # The branch's own files: merge-base(config base, <b>)..<b>.
+  : > "$s.mb.l"
+  if [ -n "$a" ]; then
+    x=$(jq -r 'if .items != [] and .touched != [] then "y" else "" end' "$s.core") || _lg_die "jq failed (the touched contracts)"
+    if [ -n "$x" ]; then
+      case "$_LG_K_BASE" in
+        ''|-*) ;;
+        *) base=$(git rev-parse -q --verify "$_LG_K_BASE^{commit}" 2>/dev/null) || base=""
+           if [ -n "$base" ]; then mb=$(git merge-base "$base" "$bc" 2>/dev/null) || mb=""; fi ;;
+      esac
+    fi
+    if [ -n "$mb" ] && [ "$mb" != "$ac" ]; then
+      git diff-tree -r --name-only -z --no-renames "$mb" "$bc" -- > "$s.mb" 2> "$s.err" \
+        || _lg_die "git diff-tree $mb $bc failed: $(head -n 3 "$s.err" 2>/dev/null)"
+      tr '\n\t\000' '\001\002\n' < "$s.mb" > "$s.mb.l" || _lg_die "cannot read the branch's files"
+      hasf=true
+    fi
+  fi
+  jq -c --slurpfile core "$s.core" --arg r "$r" --argjson hasf "$hasf" --rawfile mbd "$s.mb.l" \
+    "$_LG_JQ_V_UNDECLARED" "$_LG_UP_IX" > "$out" || _lg_die "jq failed (undeclared-contract-change)"
 }
 
 # _lg_v_finish <findings.jsonl>: print the findings (sorted: the registry's,

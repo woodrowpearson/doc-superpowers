@@ -13514,7 +13514,7 @@ test_lg_validate_pushed_undeclared_contract_change() {
   a=$(git rev-parse main)
   b=$(git rev-parse HEAD)
   r="$(git rev-parse --short=12 main)..$(git rev-parse --short=12 HEAD)"
-  d="src/order/total.js change field:order.total, which no item this push involves declares (changes): ledger upkeep --range $r proposes the link"
+  d="src/order/total.js changes field:order.total, which no item this push involves declares (changes): ledger upkeep --range $r proposes the link"
   lg validate --pushed "$a..$b" --format json
   assert_eq "0" "$LG_RC" "cas, no provisional key: exit 0 (the advisory never blocks)"
   assert_eq "1" "$(json_count "$LG_OUT")" "JSON: one object"
@@ -13529,6 +13529,12 @@ test_lg_validate_pushed_undeclared_contract_change() {
   lg_enable '{"base":"main","keys":{"mode":"merge"}}'
   lg validate --pushed "$a..$b" --format json
   assert_eq "0|undeclared-contract-change|advisory|src/order/total.js|app-6" "$LG_RC|$(lg_vfd)" "merge mode: the same advisory, exit 0"
+  # The tip is HEAD: upkeep's working-tree index — an uncommitted link counts (R21).
+  lg link app-6 --changes field:order.total
+  assert_eq "0" "$LG_RC" "ledger link app-6 --changes field:order.total (uncommitted): exit 0"
+  lg validate --pushed "$a..$b" --format json
+  assert_eq "0|" "$LG_RC|$(lg_vfd)" "…then the HEAD-tip advisory is gone"
+  git checkout -q -- docs/issues/h.md
   # Upkeep's touched contracts: skip_contracts and skip_globs count (R3).
   lg_enable '{"base":"main","upkeep":{"skip_contracts":["field:order.total"]}}'
   lg validate --pushed "$a..$b" --format json
@@ -13557,7 +13563,7 @@ test_lg_validate_pushed_undeclared_contract_change() {
   # Only a Contract-Change line touches it (R18): path null, the line in place of the file.
   lg_up_commit $'route\n\nLedger-Claims: app-6\nContract-Change: endpoint:create \xe2\x80\x94 a new route' docs/notes.md
   r="$(git rev-parse --short=12 HEAD~1)..$(git rev-parse --short=12 HEAD)"
-  d="a Contract-Change line change endpoint:create, which no item this push involves declares (changes): ledger upkeep --range $r proposes the link"
+  d="a Contract-Change line changes endpoint:create, which no item this push involves declares (changes): ledger upkeep --range $r proposes the link"
   lg validate --pushed "HEAD~1..HEAD" --format json
   assert_json_field "$LG_OUT" '.findings | tojson' \
     "[{\"class\":\"undeclared-contract-change\",\"severity\":\"advisory\",\"path\":null,\"key\":\"app-6\",\"detail\":\"$d\"}]" \
@@ -13583,11 +13589,11 @@ test_lg_validate_pushed_advisory_zero_range_and_cap() {
   assert_eq "0|undeclared-contract-change|advisory|src/order/total.js|app-6" "$LG_RC|$(lg_vfd)" \
     "from all zeros: merge-base(config base, HEAD)..HEAD — main's own server/create.js is not this push's"
   assert_json_field "$LG_OUT" '.findings[0].detail' \
-    "src/order/total.js change field:order.total, which no item this push involves declares (changes): ledger upkeep --range $r proposes the link" \
+    "src/order/total.js changes field:order.total, which no item this push involves declares (changes): ledger upkeep --range $r proposes the link" \
     "the detail names the effective range: the merge base, 12 hex"
   lg validate --pushed "main..HEAD" --format json
-  assert_json_field "$LG_OUT" '[.findings[] | .detail | split(" change ")[1] | split(",")[0]] | join(" ")' "endpoint:create field:order.total" \
-    "<a>..<b> as given: main's tip against HEAD (server/create.js differs too)"
+  assert_json_field "$LG_OUT" '[.findings[] | .detail | capture(" changes? (?<c>[^,]+), which").c] | join(" ")' "field:order.total" \
+    "<a>..<b> as given, from main's moved tip: server/create.js differs only because the base moved — not the branch's own file (R22)"
   # A config base that does not resolve (R4): one "could not check", in cas and merge.
   lg_enable '{"base":"origin/no-such-branch"}'
   lg validate --pushed "$z..HEAD" --format json
@@ -13595,10 +13601,21 @@ test_lg_validate_pushed_advisory_zero_range_and_cap() {
   assert_json_field "$LG_OUT" '.findings | tojson' \
     '[{"class":"undeclared-contract-change","severity":"advisory","path":null,"key":null,"detail":"could not check: config base \"origin/no-such-branch\" does not resolve here"}]' \
     "…one advisory: could not check, the base JSON-quoted"
+  lg validate --pushed "main..HEAD" --format json
+  assert_json_field "$LG_OUT" '[.findings[] | .detail | capture(" changes? (?<c>[^,]+), which").c] | join(" ")' "endpoint:create field:order.total" \
+    "…from a non-zero <a>, nothing to filter by: the range as given (server/create.js too)"
   lg_enable '{"base":"origin/no-such-branch","keys":{"mode":"merge"}}'
   lg validate --pushed "$z..HEAD"
   assert_eq "0|undeclared-contract-change could not check: config base \"origin/no-such-branch\" does not resolve here (advisory)" "$LG_RC|$LG_OUT" \
     "merge mode, text: the same line, exit 0"
+  # A config base sharing no history with <b>: could not check (no merge base).
+  git branch -q unrelated "$(git commit-tree "$(git mktree < /dev/null)" -m unrelated)"
+  lg_enable '{"base":"unrelated","keys":{"mode":"merge"}}'
+  lg validate --pushed "$z..HEAD" --format json
+  assert_eq "0|1" "$LG_RC|$(json_count "$LG_OUT")" "a base with no merge base: exit 0, one object"
+  assert_json_field "$LG_OUT" '.findings | tojson' \
+    '[{"class":"undeclared-contract-change","severity":"advisory","path":null,"key":null,"detail":"could not check: config base \"unrelated\" and '"'HEAD'"' have no merge base here"}]' \
+    "…one advisory: could not check, no merge base"
   # Twelve contracts, their defined_in in the reverse of their id order:
   # the ten kept are the first ten by id (flag:f01 … f10 = flags/r12 …
   # r03), printed by path, then one "… 2 more contracts" last (R19).
@@ -13614,7 +13631,7 @@ test_lg_validate_pushed_advisory_zero_range_and_cap() {
   lg validate --pushed "$base..HEAD" --format json
   assert_eq "0" "$LG_RC" "twelve undeclared contracts: exit 0"
   assert_json_field "$LG_OUT" '.findings | length' "11" "ten findings and one more"
-  assert_json_field "$LG_OUT" '[.findings[0:10][] | .detail | split(" change ")[1] | split(",")[0]] | sort | join(" ")' \
+  assert_json_field "$LG_OUT" '[.findings[0:10][] | .detail | capture(" changes? (?<c>[^,]+), which").c] | sort | join(" ")' \
     "flag:f01 flag:f02 flag:f03 flag:f04 flag:f05 flag:f06 flag:f07 flag:f08 flag:f09 flag:f10" "the first ten by contract id"
   assert_json_field "$LG_OUT" '[.findings[0:10][] | .path] | join(" ")' \
     "flags/r03.json flags/r04.json flags/r05.json flags/r06.json flags/r07.json flags/r08.json flags/r09.json flags/r10.json flags/r11.json flags/r12.json" \
@@ -13625,6 +13642,37 @@ test_lg_validate_pushed_advisory_zero_range_and_cap() {
   lg validate --pushed "$base..HEAD"
   assert_eq "11" "$(wc -l <<<"$LG_OUT" | tr -d ' ')" "text: eleven lines"
   assert_eq "undeclared-contract-change … 2 more contracts (advisory)" "$(tail -n 1 <<<"$LG_OUT")" "…the last: '… 2 more contracts'"
+  teardown
+}
+
+test_lg_validate_pushed_advisory_skips_base_merge() {
+  echo "test: #39 R22 — a branch pushed at <a> that then merges the base: the push <a>..<b> reports none of the base's own contract changes, and still the branch's own"
+  lg_upkeep_fixture
+  local a r d
+  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  a=$(git rev-parse HEAD)
+  # The base moves on: server/create.js (endpoint:create) and "src/order/total
+  # two.js" (field:order.total); the branch merges it, then commits again.
+  git checkout -q main
+  lg_up_commit "server" server/create.js "src/order/total two.js"
+  git checkout -q feat
+  git merge -q --no-edit main
+  lg_up_commit $'more totals\n\nLedger-Claims: app-6' src/order/total.js
+  r="$(git rev-parse --short=12 "$a")..$(git rev-parse --short=12 HEAD)"
+  d="src/order/total.js changes field:order.total, which no item this push involves declares (changes): ledger upkeep --range $r proposes the link"
+  lg validate --pushed "$a..HEAD" --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_json_field "$LG_OUT" '.findings | map([.path, .key, .detail] | join("|")) | join(" ")' "src/order/total.js|app-6|$d" \
+    "only the branch's own change: not the base's endpoint:create, nor its src/order/total two.js (one file: '<f> changes')"
+  lg_enable '{"base":"main","keys":{"mode":"merge"}}'
+  lg validate --pushed "$a..HEAD" --format json
+  assert_eq "0|undeclared-contract-change|advisory|src/order/total.js|app-6" "$LG_RC|$(lg_vfd)" "merge mode: the same"
+  # No base to filter by: the range as given, the base's changes included.
+  lg_enable '{"base":"origin/no-such-branch","keys":{"mode":"merge"}}'
+  lg validate --pushed "$a..HEAD" --format json
+  assert_json_field "$LG_OUT" '.findings | map(.detail | capture("^(?<f>.*) (?<v>changes?) (?<c>[^,]+), which") | "\(.f)|\(.v)|\(.c)") | join(" ")' \
+    "server/create.js|changes|endpoint:create src/order/total two.js and 1 more|change|field:order.total" \
+    "a base that does not resolve: nothing filtered ('<f> and 1 more change')"
   teardown
 }
 
@@ -14127,6 +14175,7 @@ run_tests() {
   test_lg_pr_adapter_view
   test_lg_validate_pushed_undeclared_contract_change
   test_lg_validate_pushed_advisory_zero_range_and_cap
+  test_lg_validate_pushed_advisory_skips_base_merge
   test_lg_validate_pushed_adapter_failure_never_blocks
 
   print_summary
