@@ -8,6 +8,7 @@ repository. Local builds run on the tiny test model. The cloud write path is rea
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -96,14 +97,6 @@ def run(capsys):
         return Ran(code, out, err)
 
     return go
-
-
-def settle(timeout: float = 60.0) -> None:
-    """Wait for every build thread a verb left behind: none may outlive its test (and the tmp dirs it reads)."""
-    for thread in threading.enumerate():
-        if thread.name.startswith("doc-search-"):
-            thread.join(timeout)
-    assert [t.name for t in threading.enumerate() if t.name.startswith("doc-search-")] == []
 
 
 @pytest.fixture
@@ -349,11 +342,38 @@ def test_index_build_error_is_exit_2(repo, run, monkeypatch: pytest.MonkeyPatch)
 # --- status ----------------------------------------------------------------------------------------------
 
 
+class BuildSpy:
+    """Counts every call that would build or load an index: `status` must make none."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.calls: list[str] = []
+        for name in ("from_path", "load_from_disk"):
+            real = getattr(SembleIndex, name)  # a bound classmethod
+
+            def spy(cls, *args, _real=real, _name=name, **kwargs):
+                self.calls.append(_name)
+                return _real(*args, **kwargs)
+
+            monkeypatch.setattr(SembleIndex, name, classmethod(spy))
+
+
+def build_threads() -> list[str]:
+    return [t.name for t in threading.enumerate() if t.name.startswith("doc-search-")]
+
+
+def touch(path: Path) -> None:
+    """Change a file the way an edit does: new content and an mtime that cannot equal the old one."""
+    stat = path.stat()
+    path.write_text(path.read_text() + "\nAn edit.\n")
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
+
+
 def test_status_text_and_json(repo, run, warm_pool: IndexPool) -> None:
     text = run("status")
     assert text.code == 0 and text.err == ""
     assert text.lines[0] == "doc-search status"
     assert "docs index: ready" in text.out and "code index: ready" in text.out
+    assert text.lines[-2:] == ["docs cache: valid", "code cache: valid"]
 
     done = run("status", "--format", "json")
     payload = json.loads(done.out)
@@ -364,38 +384,85 @@ def test_status_text_and_json(repo, run, warm_pool: IndexPool) -> None:
     assert payload["docs"]["state"] == "ready" and payload["docs"]["chunks"] >= 1
     assert payload["code"]["state"] == "ready" and payload["code"]["files"] >= 1
     assert payload["docs"]["error"] is None
+    assert payload["cache"] == {"docs": "valid", "code": "valid"}
     assert payload["corpus_files"] == 2
     assert payload["cloud"] is None
     assert isinstance(payload["semble"], str)
 
 
-def test_status_does_not_wait_for_a_cold_build(repo, run, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The readiness probe answers at once with `building`, whatever the first build costs."""
-    gate = threading.Event()
-    real = SembleIndex.from_path.__func__
+def test_status_in_memory_ready_counts_even_when_the_disk_is_stale(repo, run, warm_pool: IndexPool) -> None:
+    touch(repo.root / SHIPPING_PATH)  # the pool holds the indexes it built; the saved ones no longer validate
 
-    def gated(cls, *args, **kwargs):
-        gate.wait(60)
-        return real(cls, *args, **kwargs)
+    payload = json.loads(run("status", "--format", "json").out)
 
-    monkeypatch.setattr(SembleIndex, "from_path", classmethod(gated))
-    try:
-        start = time.monotonic()
-        text = run("status")
-        as_text = time.monotonic() - start
-        start = time.monotonic()
-        as_json = run("status", "--format", "json")
-        json_took = time.monotonic() - start
+    assert payload["cache"]["docs"] == "stale"
+    assert payload["docs"]["state"] == "ready" and payload["ready"] is True
 
-        assert as_text < 2.0 and json_took < 2.0, f"status waited: {as_text:.1f} s, {json_took:.1f} s"
-        assert text.code == 0 and "docs index: building" in text.out and "code index: building" in text.out
-        payload = json.loads(as_json.out)
-        assert as_json.code == 0 and payload["enabled"] is True and payload["ready"] is False
-        assert payload["docs"]["state"] == "building" and payload["code"]["state"] == "building"
-        assert payload["docs"]["chunks"] == 0 and payload["corpus_files"] == 2
-    finally:
-        gate.set()
-        settle()
+
+def test_status_of_a_fresh_process_without_a_cache(repo, run, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing saved: `absent`, not ready, and nothing built, loaded or started, so it answers at once."""
+    spy = BuildSpy(monkeypatch)
+
+    start = time.monotonic()
+    text = run("status")
+    as_json = run("status", "--format", "json")
+    took = time.monotonic() - start
+
+    assert took < 2.0, f"status took {took:.1f} s"
+    assert text.code == 0 and "docs cache: absent" in text.lines and "code cache: absent" in text.lines
+    assert "docs index: not loaded" in text.out and "building" not in text.out
+    payload = json.loads(as_json.out)
+    assert as_json.code == 0 and payload["enabled"] is True and payload["ready"] is False
+    assert payload["cache"] == {"docs": "absent", "code": "absent"}
+    assert payload["docs"]["state"] == "unloaded" and payload["docs"]["chunks"] is None
+    assert payload["corpus_files"] == 2
+    assert spy.calls == [] and build_threads() == []
+
+
+def test_status_after_index_is_valid_and_ready(repo, run, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert run("index").code == 0  # another process saved the indexes
+    spy = BuildSpy(monkeypatch)
+
+    text = run("status")
+    payload = json.loads(run("status", "--format", "json").out)
+
+    assert text.lines[-2:] == ["docs cache: valid", "code cache: valid"]
+    assert payload["cache"] == {"docs": "valid", "code": "valid"}
+    assert payload["ready"] is True
+    assert payload["docs"]["state"] == "unloaded", "ready from the disk: this process loaded nothing"
+    assert spy.calls == [] and build_threads() == [], "valid is read from the cache, not by loading the index"
+
+
+def test_status_after_a_change_is_stale(repo, run) -> None:
+    assert run("index").code == 0
+
+    touch(repo.root / SHIPPING_PATH)  # a doc edited since the indexes were saved
+    payload = json.loads(run("status", "--format", "json").out)
+    assert payload["cache"] == {"docs": "stale", "code": "valid"}
+    assert payload["ready"] is False
+    assert run("status").lines[-2:] == ["docs cache: stale", "code cache: valid"]
+
+    assert run("index").code == 0  # refreshing makes them valid again
+    assert json.loads(run("status", "--format", "json").out)["ready"] is True
+
+    repo.write("src/other.py", "def other():\n    return 1\n")  # a new code file
+    payload = json.loads(run("status", "--format", "json").out)
+    assert payload["cache"] == {"docs": "valid", "code": "stale"} and payload["ready"] is False
+
+
+def test_status_with_code_off(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch, run) -> None:
+    made = git_repo()
+    seed(made, tiny_model, code={"enabled": False})
+    monkeypatch.chdir(made.root)
+    before = json.loads(run("status", "--format", "json").out)
+    assert before["cache"] == {"docs": "absent", "code": "off"} and before["ready"] is False
+
+    assert run("index").code == 0
+    payload = json.loads(run("status", "--format", "json").out)
+
+    assert payload["cache"] == {"docs": "valid", "code": "off"} and payload["code"]["state"] == "off"
+    assert payload["ready"] is True
+    assert run("status").lines[-2:] == ["docs cache: valid", "code cache: off"]
 
 
 # --- index --cloud: the exit-code mapping ----------------------------------------------------------------
@@ -922,12 +989,11 @@ def test_eval_cloud_leg_through_the_cli(git_repo, tiny_model: str, tmp_path: Pat
 
     off = run("status", "--format", "json")
     assert json.loads(off.out)["cloud"] == {"configured": True, "lines": ["cloud: stub"]}
-    settle()  # status started the builds and did not wait for them
+    assert build_threads() == [], "status starts no build"
 
 
 def test_nothing_is_left_building(repo, run, tmp_path: Path) -> None:
-    """The verbs that build return with their build threads finished (`status` is the one that does not wait)."""
+    """The verbs that build return with their build threads finished (`status` builds nothing)."""
     for argv in (("index",), ("query", "refund"), ("eval", str(cases_file(tmp_path, KNOWN[0])))):
         assert run(*argv).code == 0
-    alive = [t.name for t in threading.enumerate() if t.name.startswith("doc-search-")]
-    assert alive == []
+    assert build_threads() == []

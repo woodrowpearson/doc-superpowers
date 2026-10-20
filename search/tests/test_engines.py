@@ -588,3 +588,74 @@ def test_indexed_files_and_version(git_repo, tiny_model: str) -> None:
     assert "mutated" not in pool.indexed_files(repo.root, "docs")
 
     assert pool.semble_version() == importlib.metadata.version("semble")
+
+
+# --- cache_state: what is saved on disk, without using it ---------------------------------------------------
+
+
+def touch(path) -> None:
+    stat = path.stat()
+    path.write_text(path.read_text() + "\nAn edit.\n")
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))  # never the same mtime
+
+
+def test_cache_state_absent_valid_and_stale(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = git_repo()
+    seed(repo)
+    cfg = make_cfg(repo, tiny_model)
+    assert IndexPool(cfg).cache_state(repo.root, "docs") == "absent"
+    assert IndexPool(cfg).cache_state(repo.root, "code") == "absent"
+    ready(IndexPool(cfg).get(repo.root, wait_s=60))  # builds and saves both
+
+    counter = CountingFromPath(monkeypatch)
+    loads: list[str] = []
+    real_load = SembleIndex.load_from_disk
+    monkeypatch.setattr(
+        SembleIndex, "load_from_disk", classmethod(lambda cls, *a, **k: (loads.append("load"), real_load(*a, **k))[1])
+    )
+    threads = threading.active_count()
+    fresh = IndexPool(cfg)
+
+    assert fresh.cache_state(repo.root, "docs") == "valid"
+    assert fresh.cache_state(repo.root, "code") == "valid"
+    assert fresh.cache_state(str(repo.root), "docs") == "valid", "a path or a string"
+    assert counter.count == 0 and loads == [], "nothing built, nothing loaded"
+    assert threading.active_count() == threads and fresh.resident() == [], "no thread, no entry in the pool"
+
+    touch(repo.root / "docs" / "refunds.md")  # a doc edited since the save
+    assert fresh.cache_state(repo.root, "docs") == "stale"
+    assert fresh.cache_state(repo.root, "code") == "valid", "the code index does not read docs"
+    repo.write("src/other.py", "def other():\n    return 1\n")  # a file the code index would add
+    assert fresh.cache_state(repo.root, "code") == "stale"
+    assert counter.count == 0 and loads == [] and fresh.resident() == []
+
+    ready(fresh.get(repo.root, wait_s=60))  # a build refreshes what was stale
+    assert (fresh.cache_state(repo.root, "docs"), fresh.cache_state(repo.root, "code")) == ("valid", "valid")
+
+
+def test_cache_state_asks_for_what_the_pool_builds(git_repo, tiny_model: str) -> None:
+    """Another model, or other content types, is another saved index: the helper and the builds read one spec."""
+    repo = git_repo()
+    seed(repo)
+    cfg = make_cfg(repo, tiny_model, code={"content": ["code", "config"]})
+    ready(IndexPool(cfg).get(repo.root, wait_s=60))
+    assert IndexPool(cfg).cache_state(repo.root, "code") == "valid"
+
+    other_content = make_cfg(repo, tiny_model, code={"content": ["code"]})
+    assert IndexPool(other_content).cache_state(repo.root, "code") == "absent"  # the content selects the saved index
+
+    other_model = make_cfg(repo, tiny_model, docs={"model": tiny_model + "/"})
+    assert IndexPool(other_model).cache_state(repo.root, "docs") == "stale"  # saved for another model id
+
+
+def test_cache_state_code_off_and_unusable_content(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    off = make_cfg(repo, tiny_model, code={"enabled": False})
+    with pytest.raises(ValueError, match="code index is off"):
+        IndexPool(off).cache_state(repo.root, "code")
+    assert IndexPool(off).cache_state(repo.root, "docs") == "absent"
+
+    cfg = make_cfg(repo, tiny_model)
+    forged = dataclasses.replace(cfg, code=dataclasses.replace(cfg.code, content=("bogus",)))
+    assert IndexPool(forged).cache_state(repo.root, "code") == "absent", "a question about the cache never raises"

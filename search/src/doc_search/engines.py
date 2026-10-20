@@ -39,6 +39,7 @@ from .config import Config
 logger = logging.getLogger(__name__)
 
 Kind = Literal["docs", "code"]
+CacheState = Literal["valid", "stale", "absent"]
 
 # semble's own server rechecks a path no sooner than this many times its last build took.
 REVALIDATE_FACTOR = 3
@@ -244,12 +245,23 @@ class IndexPool:
                 del self._entries[path]
         return entry
 
+    def _spec(self, kind: Kind) -> tuple[tuple[ContentType, ...], str | None]:
+        """What semble is asked for in `kind`'s index: its content types and model.
+
+        The one place both are decided: the builds and `cache_state` read it, so they cannot drift.
+        Raises ValueError for a `code.content` value semble has no content type for.
+        """
+        cfg = self._cfg
+        if kind == "docs":
+            return (ContentType.DOCS,), cfg.docs.model
+        return _content_types(cfg.code.content), cfg.code.model
+
     def _states(self) -> dict[Kind, _State]:
         cfg = self._cfg
-        states: dict[Kind, _State] = {"docs": _State("docs", (ContentType.DOCS,), cfg.docs.model)}
+        states: dict[Kind, _State] = {"docs": _State("docs", *self._spec("docs"))}
         if cfg.code.enabled:
             try:
-                states["code"] = _State("code", _content_types(cfg.code.content), cfg.code.model)
+                states["code"] = _State("code", *self._spec("code"))
             except ValueError as err:  # a config value semble has no content type for
                 broken = _State("code", (), cfg.code.model)
                 broken.fatal = True
@@ -257,6 +269,28 @@ class IndexPool:
                 broken.checked_at = self.clock()
                 states["code"] = broken
         return states
+
+    def cache_state(self, worktree: Path | str, kind: Kind) -> CacheState:
+        """Whether semble's saved index of `kind` for `worktree` could be used as it is, without using it.
+
+        `valid`: `get_validated_cache` accepts it, so a build would load it from disk. `stale`: a complete
+        saved index for this path and content exists but does not validate (a file changed, was added or
+        removed, another model, a damaged file). `absent`: there is none (or this process cannot tell).
+        Reads the cache and walks the worktree the way a revalidation does; it builds nothing, loads no
+        index, starts no thread and does not touch the pool's entries. The code index must be switched on.
+        """
+        if kind == "code" and not self._cfg.code.enabled:
+            raise ValueError("the code index is off (code.enabled is false)")
+        path = str(Path(worktree).resolve())
+        try:
+            content, model = self._spec(kind)
+            if get_validated_cache(path, model, content) is not None:
+                return "valid"
+            saved = PersistencePath.from_path(find_index_from_cache_folder(path, content))
+            return "absent" if saved.non_existing() else "stale"
+        except Exception:  # noqa: BLE001 - a question about the cache must not raise (an unusable code.content, a vanished tree)
+            logger.debug("doc-search: cannot tell the %s cache of %s", kind, worktree, exc_info=True)
+            return "absent"
 
     def _due(self, state: _State, now: float) -> bool:
         if state.fatal:

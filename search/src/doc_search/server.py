@@ -185,8 +185,8 @@ class Runtime:
     def related(self, path: str, line: int | None, limit: int, worktree: str | None) -> str:
         return self.tools.related(path, self.worktree(worktree), line, limit)
 
-    def status(self) -> str:
-        return self.tools.status(self.repo.top)
+    def status(self, *, warm: bool = True) -> str:
+        return self.tools.status(self.repo.top, warm=warm)
 
 
 def build_server(cwd: Path, *, pool: IndexPool | None = None, wait_s: float = 20.0) -> MCPServer:

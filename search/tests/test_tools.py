@@ -847,7 +847,7 @@ def test_status_leaves_the_pool_alone_when_the_asked_worktree_was_evicted(git_re
     assert sections(text) == [f"worktree: {repo.root}", f"worktree: {tree_a}", f"worktree: {tree_b}"]
     lines = text.splitlines()
     launch, rest = lines[: lines.index(f"worktree: {tree_a}")], lines[lines.index(f"worktree: {tree_a}") :]
-    assert "docs index: not loaded (the pool is full; a search of this worktree loads it)" in launch
+    assert "docs index: not loaded (status does not load it; a search of this worktree does)" in launch
     assert any("unknown (docs index not loaded)" in line for line in launch)
     assert rest.count("docs index: ready") == 2 and rest.count("code index: ready") == 2
     for tree in (tree_a, tree_b):  # the same warm indexes, not ones reloaded from disk
