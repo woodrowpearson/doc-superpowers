@@ -111,7 +111,7 @@ After `init` completes, set up automated freshness monitoring:
 /doc-superpowers hooks install --ci --workflows=none                 # vendor doc-tools.sh only
 
 # With a work ledger (docs/ledger/config.json): its opt-in sets, never part of --all
-/doc-superpowers hooks install --ledger        # pre-commit validate, pre-push provisional-key check, post-commit in-flight push
+/doc-superpowers hooks install --ledger        # pre-commit validate, pre-push provisional-key check (+ undeclared-contract-change advisories), post-commit in-flight push
 /doc-superpowers hooks install --ledger-claude # Claude Code: SessionStart notices, the state-watch hook (per-user)
 ```
 
@@ -229,9 +229,11 @@ Everyday verbs:
 $DOC_TOOLS ledger ls --ledger checkout --open      # one line per item
 $DOC_TOOLS ledger show checkout-14                 # one item in ≤ 25 lines
 $DOC_TOOLS ledger new --ledger checkout --summary "Totals round twice on refunds"   # a key for a new issue
+$DOC_TOOLS ledger new --create --title "Refund totals round twice" --ledger checkout --summary "…" --suggest-contracts   # write the issue file too
 $DOC_TOOLS ledger note checkout-14 "repro on staging"                              # the one home for item state
 $DOC_TOOLS ledger suggest checkout-14              # contracts it might declare (writes nothing)
 $DOC_TOOLS ledger link checkout-14 --consumes field:order.total                    # declare a relation you confirmed
+$DOC_TOOLS ledger upkeep --range main...HEAD     # the changes / consumes a branch's items are missing (writes nothing)
 $DOC_TOOLS ledger view all --html --open           # render the views locally
 $DOC_TOOLS ledger validate --all                   # every item and key (add --registry for the registry)
 ```
