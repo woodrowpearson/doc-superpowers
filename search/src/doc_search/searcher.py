@@ -16,6 +16,10 @@ chunk. With `scope=all` the fused docs are interleaved with the code leg under a
 the same score scale. Only the hits that are returned are enriched (heading path, doc type, status,
 cross-links), and doc metadata is only ever read for paths of the corpus.
 
+The cloud leg is slow (a network round trip or three), so it starts on its own thread before the local
+legs run and is joined after them: a search costs the slower of the two, not their sum. It is waited for
+at most `cloud_wait_s`; past that the search answers from the local legs with a note.
+
 A first build can outlast the wait; the pool then says which half is ready and the answer comes
 from that half with a note, unless the half the scope needs is the one still building.
 """
@@ -36,7 +40,8 @@ from semble import SembleIndex
 from semble.types import Chunk
 from semble.utils import resolve_model_name
 
-from .config import Config
+from .cloud import describe
+from .config import DEADLINE_GRACE_S, DEFAULT_TIMEOUT_S, Config
 from .corpus import Corpus
 from .engines import Building, IndexPool, WorktreeIndexes
 from .fusion import fuse_by_file, interleave_with_floor
@@ -61,8 +66,12 @@ IDENT_MAX_FILES = 10
 RANK_ORDER = ("ident", "docs", "cloud", "code")
 PREFER = ("docs", "cloud", "code", "ident")
 
+CLOUD_JOIN_MARGIN_S = 1.0  # a search waits this much longer than the cloud leg's own deadline, so its note comes first
+
 _TOKEN_STRIP = "\"'`,;:!?()[]{}<>\u201c\u201d\u2018\u2019"  # not ".": a name can start with one
-_TOKEN_MARKS = frozenset("-_./")
+# A hyphen is not here: `end-to-end`, `sign-in`, `read-only` are English. A hyphenated id has a number
+# (`ADR-114`, `chat-70`), and one without is rarely the subject of a query.
+_TOKEN_MARKS = frozenset("_./")
 
 
 class CloudLeg(Protocol):
@@ -92,7 +101,8 @@ def identifier_tokens(query: str) -> list[str]:
     """The words of `query` that look like identifiers: ids, keys, file names, paths.
 
     A word qualifies when, with what surrounds it stripped (quotes, commas, brackets, a final full
-    stop, a leading `./`), it has at least 4 characters and contains a digit or one of `- _ . /`.
+    stop, a leading `./`), it has at least 4 characters and contains a digit or one of `_ . /`. A hyphen
+    alone does not make an identifier (`end-to-end`), a hyphen and a number do (`chat-70`).
     Each token once whatever its case, first spelling kept, at most MAX_IDENT_TOKENS.
     """
     found: dict[str, str] = {}
@@ -185,7 +195,9 @@ class Searcher:
     """Answers `SearchRequest`s for the worktrees of `repo`.
 
     `corpus_for(worktree)` supplies the worktree's `Corpus` (its doc-index included); the
-    caller owns that cache. `search` may be called from several threads.
+    caller owns that cache. `wait_s` is how long a call waits for a first index build and `cloud_wait_s`
+    how long it waits for the cloud leg (by default the config's cloud deadline and a second more).
+    `search` may be called from several threads.
     """
 
     def __init__(
@@ -197,6 +209,7 @@ class Searcher:
         cloud: CloudLeg | None = None,
         *,
         wait_s: float = 20.0,
+        cloud_wait_s: float | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.cfg = cfg
@@ -205,6 +218,10 @@ class Searcher:
         self._corpus_for = corpus_for
         self._cloud = cloud
         self._wait_s = wait_s
+        if cloud_wait_s is None:  # the cloud leg's own deadline, and a margin for it to report itself
+            deadline = cfg.cloud.deadline_s if cfg.cloud else DEFAULT_TIMEOUT_S + DEADLINE_GRACE_S
+            cloud_wait_s = deadline + CLOUD_JOIN_MARGIN_S
+        self.cloud_wait_s = cloud_wait_s
         self._clock = clock
         self._lock = threading.Lock()
         self._memo: OrderedDict[tuple, _Memo] = OrderedDict()
@@ -248,22 +265,31 @@ class Searcher:
 
         allowed = self._allowed(corpus, worktree, req) if scope != "code" else frozenset()
         docs_leg: list[Hit] = []
-        cloud_leg: list[Hit] = []
+        cloud_run: _Background | None = None
         if scope != "code" and docs.usable:
+            if self._cloud is not None and allowed:  # first: it is the slow one, and the local legs run meanwhile
+                cloud_run = _Background(
+                    lambda: self._cloud_leg(query, limit, allowed, worktree, req.doc_type), "doc-search-cloud-leg"
+                )
             docs_leg = self._docs_leg(query, limit, docs.index, allowed, worktree)
-            if self._cloud is not None and allowed:
-                cloud_leg, note = self._cloud_leg(query, limit, allowed, worktree, req.doc_type)
-                if note:
-                    notes.append(note)
         ident_leg = self._ident_leg(query, limit, allowed, corpus, docs.index, docs_leg, worktree)
 
         code_leg: list[Hit] = []
         code_docs: list[Hit] = []  # scope=docs: corpus files the code index holds, as one more docs leg
         if code.usable and scope != "docs":
-            shown = {hit.path for hit in docs_leg + cloud_leg + ident_leg}
+            shown = {hit.path for hit in docs_leg + ident_leg}
             code_leg = self._code_leg(query, limit, code.index, scope, corpus, allowed, shown, req, worktree)
         elif code.usable and allowed:
             code_docs = self._code_leg(query, limit, code.index, scope, corpus, allowed, set(), req, worktree)
+
+        cloud_leg: list[Hit] = []
+        if cloud_run is not None:
+            cloud_leg, note = cloud_run.result(self.cloud_wait_s)
+            if note:
+                notes.append(note)
+            # the code leg ran without knowing what the cloud shows: a doc shown by the cloud is not shown twice
+            cloud_paths = {hit.path for hit in cloud_leg}
+            code_leg = [hit for hit in code_leg if hit.kind == "code" or hit.path not in cloud_paths]
 
         docs_fused, docs_scores = fuse_by_file(
             {"ident": ident_leg, "docs": docs_leg, "cloud": cloud_leg, "code": code_docs},
@@ -530,6 +556,30 @@ class Searcher:
             while len(self._rows) > MEMO_WORKTREES:
                 self._rows.popitem(last=False)
         return entry.rows
+
+
+class _Background:
+    """`work()` running on a daemon thread from the moment of construction, until `result` collects it.
+
+    `work` is `Searcher._cloud_leg`: it turns any failure into a note, so there is always an outcome.
+    A call stuck in a library is left behind when its wait is over, not killed.
+    """
+
+    def __init__(self, work: Callable[[], tuple[list[Hit], str | None]], name: str) -> None:
+        self._work = work
+        self._outcome: tuple[list[Hit], str | None] | None = None
+        self._thread = threading.Thread(target=self._run, name=name, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        self._outcome = self._work()
+
+    def result(self, wait_s: float) -> tuple[list[Hit], str | None]:
+        """The outcome, waiting at most `wait_s`; no hits and the same note a leg's own deadline gives otherwise."""
+        self._thread.join(min(wait_s, threading.TIMEOUT_MAX))  # a huge `cloud.timeout_s` is valid, an overflow is not
+        if self._thread.is_alive() or self._outcome is None:
+            return [], f"cloud failed: {describe(TimeoutError(f'no answer within {wait_s:g} s'))}"
+        return self._outcome
 
 
 def enrich_hit(hit: Hit, corpus: Corpus) -> Hit:

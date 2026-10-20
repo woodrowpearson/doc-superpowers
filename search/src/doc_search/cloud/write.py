@@ -66,7 +66,7 @@ from ..config import Config
 from ..corpus import Corpus
 from ..docindex import DocIndex
 from ..repo import git, git_bytes, is_ancestor, rev_parse
-from . import CLOUD_TIMEOUT_S, CloudUnavailable, LazyClient, describe, import_module
+from . import CloudUnavailable, LazyClient, describe, import_module
 from .read import STAMP_DOC, CorpusStamp, _parse_stamp, resolve_base_ref
 from .vertex import VertexEmbedder
 
@@ -258,6 +258,7 @@ class CloudIndexer:
             import_module("google.cloud.firestore")
         self._cfg = cfg
         self._fs = cfg.cloud.firestore
+        self._timeout_s = cfg.cloud.timeout_s  # the reads' timeout: the same lever as the read path's
         self._top = Path(top)
         self._embedder = embedder
         self._db = LazyClient(self._make_db) if client is None else LazyClient(lambda: client)
@@ -449,7 +450,7 @@ class CloudIndexer:
 
         @firestore.transactional
         def attempt(txn: Any) -> tuple[str | None, datetime | None] | None:
-            snapshot = ref.get(transaction=txn, timeout=CLOUD_TIMEOUT_S)
+            snapshot = ref.get(transaction=txn, timeout=self._timeout_s)
             data = snapshot.to_dict() if snapshot.exists else None
             rival = _lease_blocker(data, me, now) if taking else _lease_rival(data, me)
             if rival is None:
@@ -482,7 +483,7 @@ class CloudIndexer:
 
             @firestore.transactional
             def drop(txn: Any) -> None:
-                snapshot = ref.get(transaction=txn, timeout=CLOUD_TIMEOUT_S)
+                snapshot = ref.get(transaction=txn, timeout=self._timeout_s)
                 if snapshot.exists and (snapshot.to_dict() or {}).get("holder") != me:
                     return  # ours expired and another host took it: it is not ours to delete
                 txn.delete(ref)
@@ -509,7 +510,7 @@ class CloudIndexer:
         return _Tree(regular, frozenset(everything))
 
     def _read_stamp(self, db: Any) -> CorpusStamp | None:
-        snapshot = db.collection(self._fs.meta_collection).document(STAMP_DOC).get(timeout=CLOUD_TIMEOUT_S)
+        snapshot = db.collection(self._fs.meta_collection).document(STAMP_DOC).get(timeout=self._timeout_s)
         return _parse_stamp(snapshot.to_dict() if snapshot.exists else None)
 
     def _changed(self, base: str, head: str) -> list[str]:

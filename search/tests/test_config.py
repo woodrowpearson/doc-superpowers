@@ -104,6 +104,26 @@ def test_cloud_defaults_fill(tmp_path: Path) -> None:
     )
 
 
+def test_cloud_timeout_defaults_to_twenty_seconds_and_is_a_lever(tmp_path: Path) -> None:
+    assert load(tmp_path, {"cloud": {}}).cloud.timeout_s == 20.0
+    assert load(tmp_path, {"cloud": {"timeout_s": 45}}).cloud.timeout_s == 45.0
+    assert load(tmp_path, {"cloud": {"timeout_s": 2.5}}).cloud.timeout_s == 2.5
+    # the other cloud keys are untouched by it
+    cfg = load(tmp_path, {"cloud": {"timeout_s": 7, "vertex": {"project": "p"}}}).cloud
+    assert cfg.timeout_s == 7.0 and cfg.vertex.project == "p" and cfg.firestore.collection == "doc_chunks"
+    # the read leg's wall-clock deadline is the timeout and five seconds more
+    assert cfg.deadline_s == 12.0
+    assert CloudCfg(vertex=cfg.vertex, firestore=cfg.firestore).timeout_s == 20.0, "a CloudCfg built by hand too"
+
+
+@pytest.mark.parametrize("bad", [0, -1, -0.5, float("nan"), float("inf"), "x", "20", True, None, [20], {"s": 20}])
+def test_cloud_timeout_must_be_a_positive_finite_number(tmp_path: Path, bad: object) -> None:
+    write_config(tmp_path, {"cloud": {"timeout_s": bad}})
+    with pytest.raises(ConfigError) as err:
+        load_config(tmp_path, {})
+    assert "cloud.timeout_s" in str(err.value)
+
+
 def test_cloud_object_may_omit_both_sections(tmp_path: Path) -> None:
     cfg = load(tmp_path, {"cloud": {}}, {"GOOGLE_CLOUD_PROJECT": "envp"})
     assert cfg.cloud is not None
