@@ -13700,6 +13700,138 @@ test_lg_validate_pushed_advisory_skips_base_merge() {
   teardown
 }
 
+test_lg_validate_pushed_advisory_empty_range_runs_nothing() {
+  echo "test: #39 R32 — the advisory returns before any index build or adapter run when the effective range is empty or the pushed tip is already in the base (R24: nothing to report): a marker contracts adapter never runs"
+  lg_upkeep_fixture '{"base":"main","adapters":{"contracts":"tools/contracts.sh"}}'
+  local z=0000000000000000000000000000000000000000 mark
+  mark=$(harness_mktemp_d lg-mark)
+  # The base gains a commit that, in a branch's range, is a finding: app-6
+  # claims it, field:order.total changes, a Contract-Change line names
+  # endpoint:create.
+  git checkout -q main
+  lg_up_commit $'fix totals\n\nLedger-Claims: app-6\nContract-Change: endpoint:create \xe2\x80\x94 a new route' src/order/total.js
+  git checkout -q feat
+  lg_contracts_adapter "echo \"contracts \$*\" >> '$mark/ran'"
+  lg validate --pushed "$z..main" --format json
+  assert_eq "0|" "$LG_RC|$(lg_vfd)" "all-zeros <a>, a tip the base is (an empty effective range): exit 0, no finding"
+  assert_file_not_exists "$mark/ran" "…and no index was built: the contracts adapter never ran"
+  lg validate --pushed "main~1..main" --format json
+  assert_eq "0|" "$LG_RC|$(lg_vfd)" "a non-zero <a> whose tip the base already contains: no finding (not even its Contract-Change line)"
+  assert_file_not_exists "$mark/ran" "…the contracts adapter never ran"
+  lg validate --pushed "main..main~1" --format json
+  assert_eq "0|" "$LG_RC|$(lg_vfd)" "a range whose tip is behind <a> (empty): no finding"
+  assert_file_not_exists "$mark/ran" "…the contracts adapter never ran"
+  lg_up_commit $'more totals\n\nLedger-Claims: app-6' src/order/total.js
+  lg validate --pushed "HEAD..HEAD" --format json
+  assert_eq "0|" "$LG_RC|$(lg_vfd)" "<a> = <b> on a branch: no finding"
+  assert_file_not_exists "$mark/ran" "…the contracts adapter never ran"
+  # The control: the branch's own range runs the check, and the adapter.
+  lg validate --pushed "$z..HEAD" --format json
+  assert_eq "0|undeclared-contract-change|advisory|src/order/total.js|app-6" "$LG_RC|$(lg_vfd)" \
+    "a branch tip from all zeros: the advisory runs (its own change only)"
+  assert_contains "$(cat "$mark/ran" 2>/dev/null)" "contracts list" "…and its index runs the contracts adapter"
+  teardown
+}
+
+test_lg_validate_pushed_advisory_offline() {
+  echo "test: #39 R31 — the advisory's guarded child runs with DOC_TOOLS_LEDGER_OFFLINE=1: no pr or items adapter runs during validate --pushed, the advisory still reports, the contracts adapter (local) still runs"
+  # TTL 0: every run that may fetch asks the adapters (no copy serves).
+  lg_upkeep_fixture '{"base":"main","adapters":{"pr":"tools/pr.sh","contracts":"tools/contracts.sh"},"items":{"adapter":"tools/items.sh"},"cache":{"remote_ttl_minutes":0}}'
+  local mark a
+  mark=$(harness_mktemp_d lg-mark)
+  mkdir -p tools
+  # Each stub prints nothing (an empty list) and leaves a mark when run.
+  for a in contracts pr items; do
+    printf '#!/bin/sh\necho "%s $*" >> "%s/ran"\n' "$a" "$mark" > "tools/$a.sh"
+    chmod +x "tools/$a.sh"
+  done
+  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  lg validate --pushed "main..HEAD" --format json
+  assert_eq "0|undeclared-contract-change|advisory|src/order/total.js|app-6" "$LG_RC|$(lg_vfd)" "the advisory reports as before, exit 0"
+  assert_eq "" "$LG_ERR" "…stderr: nothing (no offline data-state note: the check reads no PR data)"
+  assert_contains "$(cat "$mark/ran" 2>/dev/null)" "contracts list" "the contracts adapter (a local script) runs"
+  assert_not_contains "$(cat "$mark/ran" 2>/dev/null)" "pr " "the pr adapter never runs (offline)"
+  assert_not_contains "$(cat "$mark/ran" 2>/dev/null)" "items " "the items adapter never runs (offline)"
+  # The parent is not offline: ledger upkeep over the same range, run as a
+  # verb, lists the PRs and the hosted items.
+  rm -f "$mark/ran"
+  lg upkeep --range main..HEAD --format json
+  assert_eq "0" "$LG_RC" "upkeep over the range: exit 0"
+  assert_contains "$(cat "$mark/ran" 2>/dev/null)" "pr list" "…a verb outside the advisory runs the pr adapter"
+  teardown
+}
+
+test_lg_validate_pushed_advisory_opt_out() {
+  echo "test: #39 R33 — config validate.undeclared_contract_change false skips the advisory (no index, no adapter) and cas's provisional check still blocks; a value not a boolean is one advisory 'could not check: …' (exit unchanged), and exit 2 in --staged / --all"
+  lg_upkeep_fixture '{"base":"main","validate":{"undeclared_contract_change":false},"adapters":{"contracts":"tools/contracts.sh"}}'
+  local mark p v msg="could not check: validate.undeclared_contract_change must be true or false"
+  mark=$(harness_mktemp_d lg-mark)
+  lg_contracts_adapter "echo \"contracts \$*\" >> '$mark/ran'"
+  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  lg validate --pushed "main..HEAD" --format json
+  assert_eq "0|" "$LG_RC|$(lg_vfd)" "false: no advisory, exit 0"
+  assert_file_not_exists "$mark/ran" "…no index built: the contracts adapter never ran"
+  # cas: a provisional key the range adds still blocks, alone.
+  p="app-~$(lg_hex4 docs/issues/p.md)"
+  lg_item docs/issues/p.md "key: $p" "ledger: app" "status: Open" "summary: Filed offline on the branch"
+  git add -A && git commit -qm p --no-verify
+  lg validate --pushed "main..HEAD" --format json
+  assert_eq "1|provisional-key|block|docs/issues/p.md|$p" "$LG_RC|$(lg_vfd)" "false, cas: the provisional key still blocks (exit 1), no advisory beside it"
+  assert_file_not_exists "$mark/ran" "…and the contracts adapter never ran"
+  # true (the default, given): the advisory runs beside the block.
+  lg_enable '{"base":"main","validate":{"undeclared_contract_change":true},"adapters":{"contracts":"tools/contracts.sh"}}'
+  lg validate --pushed "main..HEAD" --format json
+  assert_eq "1|provisional-key|block|docs/issues/p.md|$p undeclared-contract-change|advisory|src/order/total.js|app-6" "$LG_RC|$(lg_vfd)" \
+    "true: the block and the advisory"
+  assert_contains "$(cat "$mark/ran" 2>/dev/null)" "contracts list" "…the advisory's index runs the contracts adapter"
+  rm -f "$mark/ran"
+  # Not a boolean (null included): one advisory, the exit unchanged; the
+  # provisional check still runs.
+  for v in '"no"' 'null' '0' '{}'; do
+    lg_enable "{\"base\":\"main\",\"validate\":{\"undeclared_contract_change\":$v},\"adapters\":{\"contracts\":\"tools/contracts.sh\"}}"
+    lg validate --pushed "main..HEAD" --format json
+    assert_eq "1|1|provisional-key|block|docs/issues/p.md|$p undeclared-contract-change|advisory|null|null" \
+      "$LG_RC|$(json_count "$LG_OUT")|$(lg_vfd)" "$v, cas: exit 1 (the block), one object, one advisory beside it"
+    assert_json_field "$LG_OUT" '[.findings[] | select(.class == "undeclared-contract-change") | .detail] | join(" ")' "$msg" \
+      "…its detail: $msg"
+  done
+  assert_file_not_exists "$mark/ran" "…the contracts adapter never ran"
+  lg_enable '{"base":"main","keys":{"mode":"merge"},"validate":{"undeclared_contract_change":"no"}}'
+  lg validate --pushed "main..HEAD"
+  assert_eq "0|undeclared-contract-change $msg (advisory)" "$LG_RC|$LG_OUT" "merge mode, text: the one line, exit 0"
+  assert_eq "" "$LG_ERR" "…stderr: nothing"
+  lg_enable '{"base":"main","keys":{"mode":"merge"},"validate":"off"}'
+  lg validate --pushed "main..HEAD" --format json
+  assert_eq "0|undeclared-contract-change|advisory|null|null" "$LG_RC|$(lg_vfd)" "a validate that is not an object: the same one advisory, exit 0"
+  # --staged and --all read the validate object: there a value that is
+  # not a boolean is a config error (2), as for require_relations.
+  lg_enable '{"base":"main","validate":{"undeclared_contract_change":"no"}}'
+  lg validate --staged
+  assert_eq "2" "$LG_RC" "--staged, \"no\": exit 2"
+  assert_contains "$LG_ERR" 'config validate.undeclared_contract_change must be true or false (got "no")' "…naming the key and the value"
+  lg validate --all --format json
+  assert_eq "2|1" "$LG_RC|$(json_count "$LG_OUT")" "--all, \"no\": exit 2, one object"
+  assert_contains "$LG_ERR" "validate.undeclared_contract_change must be true or false" "…naming the key"
+  lg_enable '{"base":"main","validate":{"undeclared_contract_change":null}}'
+  lg validate --staged
+  assert_eq "2" "$LG_RC" "--staged, null: exit 2"
+  for v in true false; do
+    lg_enable "{\"base\":\"main\",\"validate\":{\"undeclared_contract_change\":$v}}"
+    lg validate --staged
+    assert_eq "0" "$LG_RC" "--staged, $v: exit 0"
+    lg validate --all
+    assert_eq "0" "$LG_RC" "--all, $v: exit 0"
+  done
+  # A null validate is the defaults (as require_relations reads it): the
+  # advisory runs, --staged passes.
+  lg_enable '{"base":"main","keys":{"mode":"merge"},"validate":null}'
+  lg validate --staged
+  assert_eq "0" "$LG_RC" "validate null, --staged: exit 0"
+  lg validate --pushed "main..HEAD" --format json
+  assert_eq "0|undeclared-contract-change|advisory|src/order/total.js|app-6" "$LG_RC|$(lg_vfd)" "validate null, --pushed: the advisory runs"
+  teardown
+}
+
 test_lg_validate_pushed_adapter_failure_never_blocks() {
   echo "test: #39 — a failing contracts adapter: one advisory 'could not check: …', exit 0; a provisional key in cas still blocks (exit 1) alongside it"
   lg_upkeep_fixture '{"base":"main","adapters":{"contracts":"tools/contracts.sh"}}'
@@ -14201,6 +14333,9 @@ run_tests() {
   test_lg_validate_pushed_undeclared_contract_change
   test_lg_validate_pushed_advisory_zero_range_and_cap
   test_lg_validate_pushed_advisory_skips_base_merge
+  test_lg_validate_pushed_advisory_empty_range_runs_nothing
+  test_lg_validate_pushed_advisory_offline
+  test_lg_validate_pushed_advisory_opt_out
   test_lg_validate_pushed_adapter_failure_never_blocks
 
   print_summary

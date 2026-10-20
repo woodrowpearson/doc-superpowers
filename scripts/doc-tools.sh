@@ -2702,7 +2702,9 @@ ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed
   advisory); superseded_by only on a closed item. On a
   modified item a finding about what it already was at HEAD is advisory
   (a legacy_ids or retired ledger likewise); the registry is checked when
-  it is staged. With config validate.require_relations "new" (default
+  it is staged (config validate.undeclared_contract_change not true or
+  false exits 2 here and in --all). With config
+  validate.require_relations "new" (default
   null: off; any other value exits 2), an added open item naming no
   changes, consumes or relates blocks (no-relations) unless its
   frontmatter says relations: none. --all: the same over every item of
@@ -2737,9 +2739,14 @@ ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed
   merge base and <b>, so a base merged in adds nothing) that no item the
   range involves declares in changes,
   naming ledger upkeep --range <a>..<b>; none when it involves no item;
-  at most 10, then "… N more contracts". A check that cannot run (a
-  failing contracts adapter, a config base that does not resolve) is one
-  such advisory, "could not check: <message>". --registry
+  at most 10, then "… N more contracts". It costs an index build and a
+  contracts adapter run, offline (DOC_TOOLS_LEDGER_OFFLINE=1 for the
+  check alone: no PR or items adapter), and nothing runs for an empty
+  range or a tip config base already holds; config
+  validate.undeclared_contract_change false turns it off (default true).
+  A check that cannot run (a failing contracts adapter, a config base
+  that does not resolve, an undeclared_contract_change not true or false)
+  is one such advisory, "could not check: <message>". --registry
   checks docs/ledger/ledgers.json: schema, ledger ids, statuses, kinds,
   contract ids, globs, and that no tracked file is claimed by two ledgers
   (overlap) or, once any ledger declares paths, that every tracked file

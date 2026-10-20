@@ -29,7 +29,7 @@
   "cache": { "remote_ttl_minutes": 10 },
   "adapters": { "pr": null, "contracts": null },
   "state_watch": { "paths": [], "patterns": [] },
-  "validate": { "require_relations": null },
+  "validate": { "require_relations": null, "undeclared_contract_change": true },
   "init": { "stub_defaults": {} },
   "upkeep": { "skip_globs": ["docs/**", "**/*.md", "**/test/**", "**/tests/**", "**/__tests__/**", "**/*.test.*", "**/*.spec.*",
                              "**/*_test.*", "**/Tests/**", "**/*Tests/**"],
