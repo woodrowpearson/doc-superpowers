@@ -12,17 +12,27 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
-import pytest
-from fakes import FakeFirestore, FakeGenai
-
 import doc_search.cloud.write as write
+import pytest
+from doc_search.chunker import CHUNKER_VERSION
 from doc_search.cloud import CloudUnavailable
 from doc_search.cloud.vertex import VertexEmbedder
-from doc_search.cloud.write import BaseRefError, CloudIndexer, IndexReport, LeaseHeld
+from doc_search.cloud.write import (
+    MODES,
+    BaseRefError,
+    CloudIndexer,
+    CorpusRefused,
+    IndexReport,
+    LeaseHeld,
+    LeaseLost,
+    repo_identity,
+)
 from doc_search.config import Config, load_config
 from doc_search.repo import GitError
+from fakes import FakeFirestore, FakeGenai
 
 pytest.importorskip("google.genai")
 firestore = pytest.importorskip("google.cloud.firestore")
@@ -65,6 +75,8 @@ FIELDS = {
 }
 LEASE_PATH = ("corpus_meta", "catch_up_lease")
 EMBEDDER_ID = "vertex:gemini-embedding-001/768"
+UNKNOWN_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+GONE: Any = object()  # a stamp field to leave out
 
 
 class Clock:
@@ -114,6 +126,21 @@ class World:
         """Every text sent to the embedder, in order."""
         return [text for call in self.genai.calls if not call.failed for text in call.texts]
 
+    @property
+    def repo_id(self) -> str:
+        """The root commit(s) of the test repository, as the stamp names them."""
+        return self.repo.git("rev-list", "--max-parents=0", "HEAD").strip()
+
+    def writes(self) -> tuple[int, int, int, int]:
+        """What a run could change or spend: lease transactions, batches, documents set, embeddings."""
+        calls = self.fs.calls
+        return calls["transaction"], calls["batch_commit"], calls["document_set"], len(self.genai.calls)
+
+    def steal_lease(self, holder: str = "b:2", *, wait: float = 0.0) -> None:
+        """Another host takes the lease now (and `wait` seconds pass)."""
+        self.fs.put("corpus_meta", "catch_up_lease", {"holder": holder, "expires_at": self.clock.at(+900)})
+        self.clock.now += wait
+
     def commit(self, files: dict[str, str | None], msg: str = "change") -> str:
         for path, text in files.items():
             if text is None:
@@ -122,6 +149,20 @@ class World:
                 self.repo.write(path, text)
         self.head = self.repo.commit(msg)
         return self.head
+
+
+def put_stamp(w: World, commit: str | None = None, **fields: Any) -> None:
+    """The corpus stamp as this indexer writes it. A field given as GONE is left out (an older indexer's stamp)."""
+    doc = {
+        "built_from_commit": commit or w.head,
+        "built_at": w.fs.server_time,
+        "mode": "full",
+        "embedder_id": EMBEDDER_ID,
+        "repo_id": w.repo_id,
+        "chunker_version": CHUNKER_VERSION,
+        **fields,
+    }
+    w.fs.put("corpus_meta", "index", {key: value for key, value in doc.items() if value is not GONE})
 
 
 def make_world(
@@ -165,9 +206,8 @@ def test_head_may_be_base_or_behind_it(git_repo) -> None:
     w = make_world(git_repo)
     first = w.head
     w.commit({GUIDE_PATH: GUIDE + "\nMore.\n"})
-    assert w.run("full").stamp == w.head, "HEAD is the base"
-
     w.repo.git("checkout", "-q", "--detach", first)
+
     report = w.run("full")
 
     assert report.stamp == first, "HEAD is an ancestor of the base"
@@ -259,16 +299,88 @@ def test_lease_is_released_when_the_run_dies(git_repo) -> None:
     assert w.stamp() is None
 
 
-def test_release_leaves_a_lease_someone_else_took(git_repo) -> None:
+def test_a_lease_lost_before_the_orphan_prune_stops_the_run(git_repo) -> None:
     w = make_world(git_repo)
+    w.fs.add_chunk("docs/gone.md", "a doc deleted long ago")
+    w.genai.on_call = w.steal_lease
 
-    def expire_and_steal() -> None:
-        w.fs.put("corpus_meta", "catch_up_lease", {"holder": "b:2", "expires_at": w.clock.at(+900)})
+    with pytest.raises(LeaseLost) as lost:
+        w.run("full")
 
-    w.genai.on_call = expire_and_steal
+    assert lost.value.holder == "b:2" and str(lost.value) == "lease lost to b:2"
+    assert lost.value.report.files_written == 4 and not lost.value.report.stamped
+    assert "docs/gone.md" in w.paths(), "the prune did not run"
+    assert w.stamp() is None, "and nothing was stamped"
+    assert w.lease()["holder"] == "b:2", "the release leaves a lease another host took"
+
+
+def test_a_lease_lost_before_the_stamp_stops_the_run(git_repo) -> None:
+    w = make_world(git_repo)
     w.run("full")
+    w.commit({GUIDE_PATH: GUIDE + "\nMore.\n"})
+    stamp = dict(w.stamp())
+    w.genai.on_call = w.steal_lease
 
-    assert w.lease()["holder"] == "b:2"
+    with pytest.raises(LeaseLost, match="lease lost to b:2"):
+        w.run("catch-up")
+
+    assert w.stamp() == stamp and w.lease()["holder"] == "b:2"
+
+
+def test_a_lease_lost_mid_run_stops_the_remaining_writes(git_repo) -> None:
+    w = make_world(git_repo)
+    w.genai.on_call = lambda: w.steal_lease(wait=400)
+
+    with pytest.raises(LeaseLost) as lost:
+        w.run("full")
+
+    assert lost.value.report.files_written == 1 and len(w.genai.calls) == 1, "the next file never started"
+    assert w.stamp() is None
+
+
+def test_the_lease_is_renewed_every_five_minutes(git_repo) -> None:
+    w = make_world(git_repo)
+    seen: list[tuple[float, datetime]] = []
+
+    def tick() -> None:
+        seen.append((w.clock.now, w.lease()["expires_at"]))
+        w.clock.now += 400
+
+    w.genai.on_call = tick
+    assert w.run("full").stamped
+
+    assert len(seen) == 4
+    first_now, first_expiry = seen[0]
+    assert first_expiry == datetime.fromtimestamp(first_now + 1800, UTC)
+    for now, expiry in seen[1:]:
+        assert expiry == datetime.fromtimestamp(now + 1800, UTC), "renewed before each file, 400 s after the last"
+
+    quick = make_world(git_repo)
+    seen_quick: list[datetime] = []
+
+    def quick_tick() -> None:
+        seen_quick.append(quick.lease()["expires_at"])
+        quick.clock.now += 10
+
+    quick.genai.on_call = quick_tick
+    assert quick.run("full").stamped
+    assert len(set(seen_quick)) == 1, "no renewal inside five minutes"
+
+
+def test_a_vanished_lease_is_taken_again(git_repo) -> None:
+    w = make_world(git_repo)
+    during: list[dict[str, Any] | None] = []
+
+    def vanish() -> None:
+        during.append(w.lease())
+        w.fs.collection("corpus_meta").docs.pop("catch_up_lease", None)
+        w.clock.now += 400
+
+    w.genai.on_call = vanish
+    report = w.run("full")
+
+    assert report.stamped and w.lease() is None
+    assert during[0]["holder"] == "a:1" and during[1]["holder"] == "a:1", "retaken at the next check, not lost"
 
 
 def test_lease_transaction_retries_on_contention(git_repo) -> None:
@@ -280,8 +392,8 @@ def test_lease_transaction_retries_on_contention(git_repo) -> None:
 
     assert report.stamped
     assert w.fs.transaction_begins[:2] == [None, b"txn-1"], "the retry names the first attempt"
-    assert w.fs.calls["transaction_begin"] >= 3 and w.fs.calls["transaction_commit"] == 2, (
-        "two commits: acquire, release"
+    assert w.fs.calls["transaction_begin"] >= 4 and w.fs.calls["transaction_commit"] == 3, (
+        "three commits: acquire, the check before the stamp, release"
     )
 
 
@@ -329,6 +441,8 @@ def test_schema_fields_exact(git_repo) -> None:
         "built_at": w.fs.server_time,
         "mode": "full",
         "embedder_id": EMBEDDER_ID,
+        "repo_id": w.repo_id,
+        "chunker_version": CHUNKER_VERSION,
     }
     # the sha is of the file's bytes: a file with CRLF line ends hashes as it is, not as the chunker reads it
     w.commit({GUIDE_PATH: "# Setup\r\n\r\nInstall it.\r\n"})
@@ -381,7 +495,8 @@ def test_full_then_catch_up_only_changed(git_repo) -> None:
     assert w.stamp()["built_from_commit"] == w.head and w.stamp()["mode"] == "catch-up"
 
     nothing = w.run("catch-up")
-    assert (nothing.files_written, nothing.files_deleted, nothing.stamped) == (0, 0, True)
+    assert (nothing.files_written, nothing.files_deleted, nothing.stamped) == (0, 0, False)
+    assert nothing.notes == ["corpus is at HEAD"], "the stamp is already HEAD: there is nothing to do"
 
 
 def test_catch_up_falls_back_without_stamp(git_repo) -> None:
@@ -392,25 +507,91 @@ def test_catch_up_falls_back_without_stamp(git_repo) -> None:
     assert report.mode == "full", "no stamp: a full run"
     assert report.files_written == 4 and w.stamp()["mode"] == "full"
 
-    # a stamp this tree does not have (or one that is not an ancestor of HEAD) is no stamp either
-    w.fs.set_stamp("0123456789abcdef0123456789abcdef01234567", embedder_id=EMBEDDER_ID)
-    w.commit({GUIDE_PATH: GUIDE + "\nMore.\n"})
-    again = w.run("catch-up")
-    assert again.mode == "full" and again.files_written == 1 and again.files_skipped == 3
 
-    w.repo.git("checkout", "-q", "-b", "side", "HEAD~1")
-    w.commit({"docs/side.md": "# Side\n\nOn a side branch.\n"}, "side")
-    side = w.head
+def test_catch_up_refuses_a_stamp_this_clone_does_not_have(git_repo) -> None:
+    w = make_world(git_repo)
+    w.run("full")
+    put_stamp(w, UNKNOWN_COMMIT)
+    before, stamp = w.writes(), dict(w.stamp())
+
+    with pytest.raises(CorpusRefused, match="stamp 0123456 is not in this clone; git fetch first"):
+        w.run("catch-up")
+    with pytest.raises(CorpusRefused, match="stamp 0123456 is not in this clone; git fetch first"):
+        w.run("catch-up", allow_off_base=True)  # a catch-up has nothing to diff from, whatever is allowed
+    with pytest.raises(CorpusRefused, match="not in this clone"):
+        w.run("full", force=True)  # force is for the identity and the prune cap only
+    with pytest.raises(CorpusRefused, match="not in this clone"):
+        w.run("prune-orphans")
+
+    assert w.writes() == before and w.stamp() == stamp, "no lease, no embedding, no write"
+
+    report = w.run("full", allow_off_base=True)  # the explicit override of an explicit full run
+
+    assert report.stamped and w.stamp()["built_from_commit"] == w.head
+
+
+def test_catch_up_at_the_stamp_is_a_no_op(git_repo) -> None:
+    w = make_world(git_repo)
+    w.run("full")
+    before, stamp = w.writes(), dict(w.stamp())
+
+    report = w.run("catch-up")
+
+    assert report.notes == ["corpus is at HEAD"] and report.mode == "catch-up"
+    assert not report.stamped and report.stamp is None and report.files_failed == {}
+    assert w.writes() == before and w.stamp() == stamp, "nothing written, not even the lease"
+
+    assert w.run("full").stamped, "an explicit full run at the stamp still verifies the corpus"
+
+
+def test_catch_up_behind_the_corpus_is_a_no_op_and_full_refuses(git_repo) -> None:
+    w = make_world(git_repo)
+    first = w.head
+    newer = w.commit({GUIDE_PATH: GUIDE + "\nNewer.\n"})
+    w.run("full")
+    w.repo.git("checkout", "-q", "--detach", first)  # fetched, not pulled: HEAD is behind the corpus
+    before, stamp = w.writes(), dict(w.stamp())
+    note = f"corpus is ahead of HEAD ({newer[:7]}); pull to catch up"
+
+    assert w.run("catch-up").notes == [note]
+    put_stamp(w, newer, embedder_id="vertex:gemini-embedding-001/256")
+    assert w.run("catch-up").notes == [note], "not even another embedder's stamp rolls the corpus back"
+    put_stamp(w, newer)
+    for mode in ("full", "prune-orphans"):
+        with pytest.raises(CorpusRefused, match=rf"ahead of HEAD \({newer[:7]}\).*--allow-off-base"):
+            w.run(mode)
+
+    assert w.writes() == before and w.stamp() == stamp
+    assert "Newer" in w.chunks(GUIDE_PATH)[0]["text"], "the newer content is still there"
+
+    report = w.run("full", allow_off_base=True)  # rolling back is possible, on purpose
+
+    assert report.stamped and w.stamp()["built_from_commit"] == first
+    assert "Newer" not in w.chunks(GUIDE_PATH)[0]["text"]
+
+
+def test_catch_up_over_diverged_histories_is_a_full_run(git_repo) -> None:
+    w = make_world(git_repo)
+    w.run("full")
+    w.fs.add_chunk("docs/gone.md", "a doc deleted long ago")
+    w.repo.git("checkout", "-q", "-b", "side")
+    side = w.commit({"docs/side.md": "# Side\n\nOn a side branch.\n"}, "side")
     w.repo.git("checkout", "-q", "main")
-    w.fs.set_stamp(side, embedder_id=EMBEDDER_ID)
-    assert w.run("catch-up").mode == "full", "a stamp on a branch HEAD does not contain"
+    w.commit({GUIDE_PATH: GUIDE + "\nMore.\n"})
+    put_stamp(w, side)
+
+    report = w.run("catch-up")
+
+    assert report.mode == "full" and report.stamped and report.stamp == w.head
+    assert report.files_written == 1 and report.files_skipped == 3 and report.orphans_removed == 1
+    assert w.stamp()["mode"] == "full"
 
 
 def test_catch_up_from_a_stamp_of_another_embedder_is_a_full_rebuild(git_repo) -> None:
     w = make_world(git_repo)
     w.run("full")
     calls = len(w.genai.calls)
-    w.fs.set_stamp(w.head, embedder_id="vertex:gemini-embedding-001/256")
+    put_stamp(w, embedder_id="vertex:gemini-embedding-001/256")
 
     report = w.run("catch-up")
 
@@ -420,7 +601,27 @@ def test_catch_up_from_a_stamp_of_another_embedder_is_a_full_rebuild(git_repo) -
 
     # a stamp that names no embedder (abundance's) is taken as compatible
     w.fs.put("corpus_meta", "index", {"built_from_commit": w.head, "mode": "catch-up"})
+    assert w.run("catch-up").notes == ["corpus is at HEAD"]
+    w.commit({GUIDE_PATH: GUIDE + "\nMore.\n"})
     assert w.run("catch-up").mode == "catch-up"
+
+
+def test_a_chunker_change_forces_a_full_rebuild(git_repo) -> None:
+    w = make_world(git_repo)
+    w.run("full")
+
+    put_stamp(w, chunker_version=CHUNKER_VERSION + 1)
+    report = w.run("catch-up")
+    assert report.mode == "full" and report.files_written == 4 and report.files_skipped == 0
+    assert w.stamp()["chunker_version"] == CHUNKER_VERSION
+
+    put_stamp(w, chunker_version=GONE)  # a stamp this indexer wrote, from before it named a version
+    report = w.run("full")
+    assert report.files_written == 4 and report.files_skipped == 0, "an explicit full run trusts no sha either"
+
+    put_stamp(w, chunker_version=GONE, embedder_id=GONE, repo_id=GONE)  # abundance's stamp names none of them
+    report = w.run("catch-up")
+    assert report.mode == "catch-up" and report.notes == ["corpus is at HEAD"]
 
 
 def test_same_sha_skipped(git_repo) -> None:
@@ -525,7 +726,7 @@ def test_orphans_reconciled(git_repo) -> None:
 
 def test_no_stamp_on_failure(git_repo) -> None:
     w = make_world(git_repo)
-    w.fs.set_stamp("0" * 40, embedder_id=EMBEDDER_ID)
+    put_stamp(w)
     before = dict(w.stamp())
     w.genai.script = [ValueError("boom")]
 
@@ -594,6 +795,131 @@ def test_batches_hold_at_most_500_operations(git_repo) -> None:
 
     assert len(w.chunks("docs/big.md")) == 1 and max(w.fs.commit_sizes) <= 500
     assert sum(w.fs.commit_sizes) >= report.chunks_written, "every stale chunk was deleted, in several batches"
+
+
+# --- whose corpus it is, and how much a prune may take ---------------------------------------------------
+
+
+def test_a_corpus_of_another_repository_is_refused(git_repo) -> None:
+    w = make_world(git_repo)
+    w.run("full")
+    assert w.stamp()["repo_id"] == w.repo_id and w.stamp()["chunker_version"] == CHUNKER_VERSION
+    put_stamp(w, repo_id="1" * 40 + "," + "2" * 40)
+    before, stamp = w.writes(), dict(w.stamp())
+
+    for mode in MODES:
+        with pytest.raises(
+            CorpusRefused,
+            match=(
+                r"corpus belongs to another repository \(repo_id 1111111,2222222\); "
+                r"use a different collection or force"
+            ),
+        ):
+            w.run(mode)
+    assert w.writes() == before and w.stamp() == stamp, "refused before anything is written"
+
+    report = w.run("full", force=True)
+
+    assert report.stamped and w.stamp()["repo_id"] == w.repo_id, "forced: the corpus is now this repository's"
+
+
+def test_a_stamp_without_a_repo_id_is_accepted_and_the_next_stamp_names_the_repository(git_repo) -> None:
+    w = make_world(git_repo)
+    w.fs.put("corpus_meta", "index", {"built_from_commit": w.head, "built_at": "2026-01-01", "mode": "catch-up"})
+    w.commit({GUIDE_PATH: GUIDE + "\nMore.\n"})
+
+    report = w.run("catch-up")
+
+    assert report.mode == "catch-up" and report.files_written == 1 and report.stamped
+    assert w.stamp()["repo_id"] == w.repo_id and w.stamp()["chunker_version"] == CHUNKER_VERSION
+
+
+def test_repo_identity(git_repo, tmp_path: Path) -> None:
+    w = make_world(git_repo)
+    root = w.head
+    assert repo_identity(w.repo.root, w.head) == root == w.repo_id
+
+    # a repository with two roots: both, sorted
+    w.repo.git("checkout", "-q", "--orphan", "other")
+    w.repo.git("rm", "-rfq", ".")
+    w.repo.write("other.md", "# Other\n")
+    other_root = w.repo.commit("other root")
+    w.repo.git("checkout", "-q", "main")
+    w.repo.git("merge", "-q", "--allow-unrelated-histories", "-m", "merge", "other")
+    merged = w.repo.git("rev-parse", "HEAD").strip()
+    assert repo_identity(w.repo.root, merged) == ",".join(sorted([root, other_root]))
+
+    # a shallow clone cannot know its roots: no identity, so nothing to compare
+    clone = tmp_path / "shallow"
+    w.repo.git("clone", "-q", "--depth", "1", f"file://{w.repo.root}", str(clone))
+    assert repo_identity(clone, "HEAD") is None
+
+
+def known_docs(count: int) -> dict[str, str]:
+    return {f"docs/n/{i:03d}.md": f"# Note {i}\n\nBody {i}.\n" for i in range(count)}
+
+
+def seed_cloud(w: World, known: int, orphans: int) -> list[str]:
+    for i in range(known):
+        w.fs.add_chunk(f"docs/n/{i:03d}.md", f"# Note {i}", start=1, end=1)
+    gone = [f"docs/gone/{i:02d}.md" for i in range(orphans)]
+    for path in gone:
+        w.fs.add_chunk(path, "a doc deleted long ago")
+    return gone
+
+
+def test_prune_cap(git_repo) -> None:
+    # 35 orphans among 335 paths: the cap is max(20, 10%) = 33.5
+    w = make_world(git_repo, known_docs(300))
+    gone = seed_cloud(w, 300, 35)
+
+    report = w.run("prune-orphans")
+
+    assert report.orphans_removed == 0 and report.orphans_pending == 35
+    assert report.orphans_sample == gone[:10], "the first ten, in order"
+    assert not report.stamped and set(gone) <= w.paths(), "nothing was deleted"
+
+    forced = w.run("prune-orphans", force=True)
+
+    assert forced.orphans_removed == 35 and forced.orphans_pending == 0 and not set(gone) & w.paths()
+
+    # 25 orphans among 325 paths: more than 20, but under 10% (32.5)
+    w = make_world(git_repo, known_docs(300))
+    seed_cloud(w, 300, 25)
+    assert w.run("prune-orphans").orphans_removed == 25
+
+    # in a small corpus the floor of 20 applies: 20 go, 21 do not
+    w = make_world(git_repo)
+    seed_cloud(w, 0, 20)
+    assert w.run("prune-orphans").orphans_removed == 20
+    w = make_world(git_repo)
+    seed_cloud(w, 0, 21)
+    capped = w.run("prune-orphans")
+    assert capped.orphans_removed == 0 and capped.orphans_pending == 21 and len(capped.orphans_sample) == 10
+
+
+def test_a_capped_run_writes_everything_else_but_does_not_stamp(git_repo) -> None:
+    w = make_world(git_repo)
+    seed_cloud(w, 0, 21)
+
+    report = w.run("full")
+
+    assert report.files_written == 4 and report.files_failed == {}, "the rest of the run went through"
+    assert report.orphans_pending == 21 and report.orphans_removed == 0
+    assert not report.stamped and report.stamp is None and w.stamp() is None
+
+    report = w.run("full", force=True)
+
+    assert report.orphans_removed == 21 and report.orphans_pending == 0 and report.stamped
+
+
+def test_force_does_not_bypass_the_base_guard(git_repo) -> None:
+    w = make_world(git_repo)
+    w.repo.git("checkout", "-q", "-b", "feature")
+    w.commit({GUIDE_PATH: GUIDE + "\nMore.\n"})
+
+    with pytest.raises(BaseRefError):
+        w.run("full", force=True)
 
 
 def test_construction_and_modes_are_checked(git_repo) -> None:

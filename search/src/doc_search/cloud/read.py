@@ -55,6 +55,8 @@ class CorpusStamp:
     built_at: str | None
     mode: str | None
     embedder_id: str | None
+    repo_id: str | None = None  # the root commit(s) of the repository that wrote it (the write path's, optional)
+    chunker_version: int | None = None
 
     @property
     def short(self) -> str:
@@ -67,8 +69,14 @@ def _parse_stamp(data: dict[str, Any] | None) -> CorpusStamp | None:
     commit = data.get("built_from_commit")
     if not isinstance(commit, str) or not commit.strip():
         return None
+    version = data.get("chunker_version")
     return CorpusStamp(
-        commit.strip(), _text(data.get("built_at")), _text(data.get("mode")), _text(data.get("embedder_id"))
+        commit.strip(),
+        _text(data.get("built_at")),
+        _text(data.get("mode")),
+        _text(data.get("embedder_id")),
+        _text(data.get("repo_id")),
+        version if isinstance(version, int) and not isinstance(version, bool) else None,
     )
 
 

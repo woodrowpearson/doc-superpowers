@@ -25,6 +25,10 @@ import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
+# The cloud stamp records this. A corpus stamped with another version was cut by other rules, so the next run
+# rebuilds it whole. Bump it whenever a size below or a rule of the cut changes (a test pins them together).
+CHUNKER_VERSION = 1
+
 TARGET = 1600
 HEADING_LEVEL = 3
 MERGE_BELOW = 0.25  # a section under this share of the target joins its next sibling

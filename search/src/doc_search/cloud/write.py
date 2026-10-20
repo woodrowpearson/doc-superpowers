@@ -1,20 +1,37 @@
 """The cloud docs leg, write path (design section 8): the guarded indexer. Only the CLI runs it, never the server.
 
-One run, in this order (abundance's guarantees, carried over):
+One run, in this order (abundance's guarantees, carried over, plus the checks of the review):
 
  1. `base_ref` is resolved: the configured value, else `origin/<the remote's default branch>`.
  2. Base guard: HEAD must be `base_ref` or an ancestor of it. The collection is one shared corpus with one
     stamp, so a branch must not write it; `allow_off_base` is the explicit override.
- 3. Lease: a transactional lease document (`<meta>/catch_up_lease`, 1800 s) keeps two hosts from rewriting the
-    same files at once. It is released in `finally`.
- 4. The file set: every in-scope file of HEAD for `full`; the files changed from the stamp to HEAD for
-    `catch-up` (a full run when there is no usable stamp). `prune-orphans` indexes nothing.
- 5. Per file: sha256 against the stored chunk 0's `fileSha256`, then chunk, embed (`RETRIEVAL_DOCUMENT`), and
+ 3. The stamp is read (no write yet) and decides what the run is, in this order:
+    - a stamp naming another repository (`repo_id`, the root commit(s)) is refused unless `force`; a stamp
+      without one (abundance's) is accepted;
+    - no stamp: a full run;
+    - the stamp's commit S is not in this clone: refused (`git fetch`); `allow_off_base` opens an explicit
+      `full` or `prune-orphans`, never a catch-up;
+    - HEAD is a strict ancestor of S (fetched, not pulled): the corpus is ahead. A catch-up does nothing and
+      says so; an explicit `full` or `prune-orphans` is refused unless `allow_off_base`. Nothing rolls the
+      corpus back by accident;
+    - S == HEAD: a catch-up does nothing; S an ancestor of HEAD: a catch-up from S; histories that diverged:
+      a full run. Another embedder or chunker version in the stamp makes a catch-up a full run that trusts no
+      sha.
+    A refusal or a no-op writes nothing, not even the lease.
+ 4. Lease: a transactional lease document (`<meta>/catch_up_lease`, 1800 s) keeps two hosts from rewriting the
+    same files at once. It is released in `finally`, renewed every 5 minutes, and checked again before orphans
+    are deleted and before the stamp. A lease another host took ends the run (`LeaseLost`): no more writes, no
+    stamp.
+ 5. The file set: every in-scope file of HEAD for `full`; the files changed from the stamp to HEAD for
+    `catch-up`. `prune-orphans` indexes nothing.
+ 6. Per file: sha256 against the stored chunk 0's `fileSha256`, then chunk, embed (`RETRIEVAL_DOCUMENT`), and
     replace the file's chunks in batches of at most 500 operations.
- 6. A deleted file's chunks go only when `git ls-tree HEAD -- <path>` says it is gone.
- 7. Orphans (`full`, `prune-orphans`): corpus paths git no longer knows.
- 8. The stamp (`<meta>/index`) is written only when no file failed: it is the lower bound of the next
-    catch-up, so stamping over a failure would drop that file from every later run's range.
+ 7. A deleted file's chunks go only when `git ls-tree HEAD -- <path>` says it is gone.
+ 8. Orphans (`full`, `prune-orphans`): corpus paths git no longer knows. More than max(20, 10% of the corpus's
+    paths) are not pruned without `force`: that many means this is not the repository the corpus was built
+    from. The run reports them (`orphans_pending`) and is not stamped.
+ 9. The stamp (`<meta>/index`) is written only when no file failed and nothing is pending: it is the lower
+    bound of the next catch-up, so stamping over a failure would drop that file from every later run's range.
 
 What is indexed is what HEAD holds, not the working tree: the stamp says "built from this commit", and a
 dirty checkout must not put its edits in the shared corpus under that commit. The files come from
@@ -41,7 +58,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
-from ..chunker import CloudChunk, chunk_lines, chunk_markdown
+from ..chunker import CHUNKER_VERSION, CloudChunk, chunk_lines, chunk_markdown
 from ..config import Config
 from ..corpus import Corpus
 from ..docindex import DocIndex
@@ -57,6 +74,10 @@ MODES: tuple[str, ...] = ("catch-up", "full", "prune-orphans")
 
 LEASE_DOC = "catch_up_lease"
 LEASE_TTL_S = 1800
+LEASE_RENEW_S = 300  # a run checks and extends its lease at least this often
+PRUNE_CAP_MIN = 20  # orphans are pruned without force up to max(PRUNE_CAP_MIN, PRUNE_CAP_RATIO of the corpus's paths)
+PRUNE_CAP_RATIO = 0.10
+PENDING_SAMPLE = 10  # how many pending orphans a report names
 BATCH_OPS = 500  # Firestore's limit for one batch
 READ_TIMEOUT_S = 60.0  # one small query
 SCAN_TIMEOUT_S = 300.0  # the query that lists every path of the corpus
@@ -80,6 +101,22 @@ class LeaseHeld(Exception):
         super().__init__(f"the corpus lease is held by {holder or 'an unknown holder'} {until}")
 
 
+class CorpusRefused(Exception):
+    """The corpus is not in a state this HEAD may write: another repository's, or a stamp commit not fetched."""
+
+
+class LeaseLost(Exception):
+    """Another host holds the lease this run took: the remaining writes were abandoned and nothing was stamped.
+
+    `report` is what the run had done by then.
+    """
+
+    def __init__(self, holder: str | None, report: IndexReport | None = None) -> None:
+        self.holder = holder
+        self.report = report
+        super().__init__(f"lease lost to {holder or 'an unknown holder'}")
+
+
 @dataclass
 class IndexReport:
     """What a run did. `mode` is the mode that ran: a catch-up with no usable stamp reports `full`.
@@ -87,6 +124,8 @@ class IndexReport:
     `files_written` and `files_skipped` (sha unchanged) count files, `chunks_written` counts chunk documents.
     `files_deleted` counts files whose chunks were removed because the file is gone or cannot be indexed,
     `orphans_removed` the paths pruned. `files_failed` maps a path to why it failed; with any, nothing is stamped.
+    `orphans_pending` counts orphans left alone because they exceed the prune cap (`orphans_sample`: the first
+    ten); a run with any is not stamped. `notes` say why a run did nothing, or skipped a step.
     """
 
     mode: str
@@ -98,6 +137,9 @@ class IndexReport:
     stamp: str | None = None
     files_skipped: int = 0
     chunks_written: int = 0
+    orphans_pending: int = 0
+    orphans_sample: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -111,6 +153,40 @@ class _Tree:
 def chunk_id(path: str, ordinal: int) -> str:
     """The document id of a chunk: stable, and safe whatever the path holds (Firestore ids cannot hold `/`)."""
     return f"{hashlib.sha256(path.encode()).hexdigest()[:24]}-{ordinal}"
+
+
+def repo_identity(top: Path, head: str) -> str | None:
+    """Which repository `head` belongs to: its root commit(s), sorted and comma-joined.
+
+    None for a shallow clone, whose roots are only where the history was cut.
+    """
+    if git(top, "rev-parse", "--is-shallow-repository").strip() == "true":
+        return None
+    roots = sorted(set(git(top, "rev-list", "--max-parents=0", head).split()))
+    return ",".join(roots) or None
+
+
+def _short_ids(repo_id: str) -> str:
+    return ",".join(part[:7] for part in repo_id.split(","))
+
+
+@dataclass(frozen=True)
+class _Plan:
+    """What a run will do: `mode` is the mode that runs, `base` the commit a catch-up diffs from, `rewrite` that no
+    stored sha is trusted, `noop` the note of a run with nothing to do."""
+
+    mode: str
+    base: str | None = None
+    rewrite: bool = False
+    noop: str | None = None
+
+
+def _lease_rival(data: dict[str, Any] | None, me: str) -> tuple[str | None, datetime | None] | None:
+    """Who holds the lease instead of `me` now; None when it is `me`'s (or nobody's: it is taken again)."""
+    if not data or data.get("holder") == me:
+        return None
+    holder, expires = data.get("holder"), data.get("expires_at")
+    return (holder if isinstance(holder, str) else None), (expires if isinstance(expires, datetime) else None)
 
 
 def _lease_blocker(data: dict[str, Any] | None, me: str, now: datetime) -> tuple[str | None, datetime | None] | None:
@@ -173,6 +249,7 @@ class CloudIndexer:
         self._db = LazyClient(self._make_db) if client is None else LazyClient(lambda: client)
         self._clock = clock
         self._holder = holder or f"{socket.gethostname()}:{os.getpid()}"
+        self._checked_at = 0.0  # when this run last confirmed its lease
 
     def _make_db(self) -> Any:
         firestore = import_module("google.cloud.firestore")
@@ -180,61 +257,119 @@ class CloudIndexer:
 
     # -- one run -------------------------------------------------------------------------------
 
-    def run(self, mode: Mode, allow_off_base: bool = False) -> IndexReport:
+    def run(self, mode: Mode, allow_off_base: bool = False, force: bool = False) -> IndexReport:
         """Index (or prune) the corpus; see the module docstring for the steps.
 
-        Raises BaseRefError and LeaseHeld before anything is written, CloudUnavailable when the cloud cannot be
-        used at all (no extra, no credentials). A file that fails is reported in `files_failed`, not raised.
+        `allow_off_base` lets HEAD write from off the base branch, and an explicit `full` / `prune-orphans`
+        write when the corpus is ahead of HEAD or its stamp commit is not fetched. `force` bypasses the
+        repository-identity refusal and the prune cap, and nothing else.
+
+        Raises BaseRefError, CorpusRefused and LeaseHeld before anything is written; CloudUnavailable when the
+        cloud cannot be used at all (no extra, no credentials); LeaseLost when another host took the lease
+        mid-run. A file that fails is reported in `files_failed`, not raised. A run with nothing to do returns a
+        report with a note.
         """
         if mode not in MODES:
             raise ValueError(f"unknown mode {mode!r} (expected one of {', '.join(MODES)})")
         head = self._check_base(allow_off_base)
         db = self._db.get()
+        repo_id = repo_identity(self._top, head)
+        plan = self._plan(db, mode, head, repo_id, allow_off_base, force)  # reads only
+        if plan.noop is not None:
+            return IndexReport(mode, notes=[plan.noop])
         with self._leased(db):
-            return self._run(db, mode, head)
+            plan = self._plan(db, mode, head, repo_id, allow_off_base, force)  # the stamp may have moved meanwhile
+            if plan.noop is not None:
+                return IndexReport(mode, notes=[plan.noop])
+            return self._run(db, plan, head, repo_id, force)
 
-    def _run(self, db: Any, mode: str, head: str) -> IndexReport:
+    def _plan(self, db: Any, mode: str, head: str, repo_id: str | None, allow_off_base: bool, force: bool) -> _Plan:
+        """What `mode` means against the corpus's stamp (step 3 of the module docstring). Writes nothing."""
+        stamp = self._read_stamp(db)
+        if stamp is None:
+            return _Plan("full" if mode == "catch-up" else mode)
+        if stamp.repo_id and repo_id and stamp.repo_id != repo_id and not force:
+            raise CorpusRefused(
+                f"corpus belongs to another repository (repo_id {_short_ids(stamp.repo_id)}); "
+                "use a different collection or force"
+            )
+        other_embedder = bool(stamp.embedder_id and stamp.embedder_id != self._embedder.id)
+        # a stamp this indexer wrote (it names an embedder) names the chunker too; abundance's names neither
+        other_chunker = (
+            stamp.chunker_version != CHUNKER_VERSION if stamp.chunker_version is not None else bool(stamp.embedder_id)
+        )
+        rewrite = other_embedder or other_chunker  # the stored vectors or cuts are not this run's: trust no sha
+        sha = rev_parse(self._top, stamp.built_from_commit)
+        if sha is None:
+            if mode == "catch-up" or not allow_off_base:
+                raise CorpusRefused(f"stamp {stamp.short} is not in this clone; git fetch first")
+            return _Plan(mode, rewrite=rewrite and mode == "full")
+        if sha != head and is_ancestor(self._top, head, sha):  # HEAD is behind the corpus
+            if mode == "catch-up":
+                return _Plan(mode, noop=f"corpus is ahead of HEAD ({stamp.short}); pull to catch up")
+            if not allow_off_base:
+                raise CorpusRefused(
+                    f"corpus is ahead of HEAD ({stamp.short}): pull first, or pass --allow-off-base to write "
+                    "from an older commit"
+                )
+            return _Plan(mode, rewrite=rewrite and mode == "full")
+        if mode != "catch-up":
+            return _Plan(mode, rewrite=rewrite and mode == "full")
+        if rewrite:
+            return _Plan("full", rewrite=True)
+        if sha == head:
+            return _Plan(mode, noop="corpus is at HEAD")
+        if is_ancestor(self._top, sha, head):
+            return _Plan("catch-up", base=sha)
+        return _Plan("full")  # the histories diverged
+
+    def _run(self, db: Any, plan: _Plan, head: str, repo_id: str | None, force: bool) -> IndexReport:
+        report = IndexReport(plan.mode)
+        try:
+            self._work(db, plan, head, repo_id, force, report)
+        except LeaseLost as err:
+            err.report = report
+            raise
+        return report
+
+    def _work(self, db: Any, plan: _Plan, head: str, repo_id: str | None, force: bool, report: IndexReport) -> None:
         tree = self._head_tree(head)
-        if mode == "prune-orphans":
-            report = IndexReport(mode)
-            self._prune_orphans(db, tree, report)
-            return report
+        if plan.mode == "prune-orphans":
+            self._prune_orphans(db, tree, report, force)
+            return
 
         corpus = Corpus(self._top, self._cfg, DocIndex(self._top))
-        stamp = self._read_stamp(db)
-        other_embedder = bool(stamp and stamp.embedder_id and stamp.embedder_id != self._embedder.id)
-        base = self._catch_up_base(stamp, head) if mode == "catch-up" and not other_embedder else None
-        effective = "catch-up" if base else "full"
-        report = IndexReport(effective)
-        if effective == "full":
+        if plan.mode == "full":
             todo = sorted(path for path in tree.regular if corpus.in_scope(path))
             deletions: list[str] = []
         else:
-            assert base is not None
-            changed = self._changed(base, head)
+            assert plan.base is not None
+            changed = self._changed(plan.base, head)
             todo = [path for path in changed if path in tree.regular and corpus.in_scope(path)]
             deletions = [path for path in changed if path not in tree.everything and corpus.in_scope(path)]
 
         for path in todo:
+            self._tick(db)
             self._guarded(
-                report, path, lambda path=path: self._index_file(db, corpus, tree, path, report, other_embedder)
+                report, path, lambda path=path: self._index_file(db, corpus, tree, path, report, plan.rewrite)
             )
         for path in deletions:
+            self._tick(db)
             self._guarded(report, path, lambda path=path: self._delete_file(db, head, path, report))
-        if effective == "full":
-            self._prune_orphans(db, tree, report)
+        if plan.mode == "full":
+            self._prune_orphans(db, tree, report, force)
 
-        if not report.files_failed:
-            self._write_stamp(db, head, effective)
+        if not report.files_failed and not report.orphans_pending:
+            self._check_lease(db)
+            self._write_stamp(db, head, plan.mode, repo_id)
             report.stamped, report.stamp = True, head
-        return report
 
     @staticmethod
     def _guarded(report: IndexReport, path: str, work: Callable[[], None]) -> None:
         """Run one file's work; a failure is recorded against the path, except one that stops the whole run."""
         try:
             work()
-        except CloudUnavailable:
+        except (CloudUnavailable, LeaseLost):
             raise  # no extra, no credentials, a broken response: every other file would fail the same way
         except Exception as err:  # noqa: BLE001 - one bad file must not stop the others, or the report
             logger.warning("doc-search index: %s failed: %s", path, describe(err))
@@ -275,7 +410,8 @@ class CloudIndexer:
 
     @contextmanager
     def _leased(self, db: Any) -> Iterator[None]:
-        self._take_lease(db)
+        self._hold_lease(db, taking=True)
+        self._checked_at = self._clock()
         try:
             yield
         finally:
@@ -284,21 +420,41 @@ class CloudIndexer:
     def _lease_ref(self, db: Any) -> Any:
         return db.collection(self._fs.meta_collection).document(LEASE_DOC)
 
-    def _take_lease(self, db: Any) -> None:
+    def _hold_lease(self, db: Any, *, taking: bool) -> None:
+        """Take the lease (`taking`), or confirm it is still ours and extend it by the TTL.
+
+        Taking fails with LeaseHeld while another host's lease is live. Confirming fails with LeaseLost when
+        another host holds the document at all: ours expired and was taken, and whoever has it may be at work.
+        A lease document that vanished is simply taken again.
+        """
         firestore = import_module("google.cloud.firestore")
         ref, me, now = self._lease_ref(db), self._holder, self._now()
 
         @firestore.transactional
         def attempt(txn: Any) -> tuple[str | None, datetime | None] | None:
             snapshot = ref.get(transaction=txn, timeout=CLOUD_TIMEOUT_S)
-            held = _lease_blocker(snapshot.to_dict() if snapshot.exists else None, me, now)
-            if held is None:
-                txn.set(ref, {"holder": me, "acquired_at": now, "expires_at": now + timedelta(seconds=LEASE_TTL_S)})
-            return held
+            data = snapshot.to_dict() if snapshot.exists else None
+            rival = _lease_blocker(data, me, now) if taking else _lease_rival(data, me)
+            if rival is None:
+                since = (data or {}).get("acquired_at") if not taking and data else None
+                txn.set(
+                    ref,
+                    {"holder": me, "acquired_at": since or now, "expires_at": now + timedelta(seconds=LEASE_TTL_S)},
+                )
+            return rival
 
-        held = attempt(db.transaction())
-        if held is not None:
-            raise LeaseHeld(*held)
+        rival = attempt(db.transaction())
+        if rival is not None:
+            raise LeaseHeld(*rival) if taking else LeaseLost(rival[0])
+
+    def _check_lease(self, db: Any) -> None:
+        self._hold_lease(db, taking=False)
+        self._checked_at = self._clock()
+
+    def _tick(self, db: Any) -> None:
+        """Between files: renew the lease when it has been LEASE_RENEW_S since it was last checked."""
+        if self._clock() - self._checked_at >= LEASE_RENEW_S:
+            self._check_lease(db)
 
     def _drop_lease(self, db: Any) -> None:
         """Delete the lease if it is still ours. A failure is logged, never raised: the run's own outcome
@@ -338,13 +494,6 @@ class CloudIndexer:
     def _read_stamp(self, db: Any) -> CorpusStamp | None:
         snapshot = db.collection(self._fs.meta_collection).document(STAMP_DOC).get(timeout=CLOUD_TIMEOUT_S)
         return _parse_stamp(snapshot.to_dict() if snapshot.exists else None)
-
-    def _catch_up_base(self, stamp: CorpusStamp | None, head: str) -> str | None:
-        """The stamp's commit when a catch-up can start from it: present here and an ancestor of HEAD."""
-        if stamp is None:
-            return None
-        sha = rev_parse(self._top, stamp.built_from_commit)
-        return sha if sha and is_ancestor(self._top, sha, head) else None
 
     def _changed(self, base: str, head: str) -> list[str]:
         out = git(self._top, "diff", "--name-only", "--no-renames", "-z", base, head, "--")
@@ -459,11 +608,13 @@ class CloudIndexer:
 
     # -- step 7: orphans ------------------------------------------------------------------------
 
-    def _prune_orphans(self, db: Any, tree: _Tree, report: IndexReport) -> None:
+    def _prune_orphans(self, db: Any, tree: _Tree, report: IndexReport, force: bool) -> None:
         """Delete the chunks of paths git no longer knows: absent from HEAD and from the index.
 
         The test is "the file is gone", not "the file is out of scope": an archived doc that still exists keeps
-        its chunks (they are what `include_terminal` searches).
+        its chunks (they are what `include_terminal` searches). More orphans than the cap is not a cleanup but a
+        sign that the corpus and the repository do not match (a shared collection, the wrong checkout): they are
+        reported, not deleted, unless `force`.
         """
         known = tree.everything | {p for p in git(self._top, "ls-files", "-z").split("\0") if p}
         indexed: set[str] = set()
@@ -471,7 +622,21 @@ class CloudIndexer:
             value = (snapshot.to_dict() or {}).get("path")
             if isinstance(value, str):
                 indexed.add(value)
-        for path in sorted(indexed - known):
+        orphans = sorted(indexed - known)
+        if not orphans:
+            return
+        cap = max(PRUNE_CAP_MIN, PRUNE_CAP_RATIO * len(indexed))
+        if len(orphans) > cap and not force:
+            report.orphans_pending = len(orphans)
+            report.orphans_sample = orphans[:PENDING_SAMPLE]
+            report.notes.append(
+                f"{len(orphans)} orphaned paths exceed the prune cap of {int(cap)}: none deleted, nothing stamped "
+                "(a corpus of another repository? use force if these really are gone)"
+            )
+            return
+        self._check_lease(db)
+        for path in orphans:
+            self._tick(db)
             self._guarded(report, path, lambda path=path: self._drop_orphan(db, path, report))
 
     def _drop_orphan(self, db: Any, path: str, report: IndexReport) -> None:
@@ -480,15 +645,15 @@ class CloudIndexer:
 
     # -- step 8: the stamp ----------------------------------------------------------------------
 
-    def _write_stamp(self, db: Any, head: str, mode: str) -> None:
+    def _write_stamp(self, db: Any, head: str, mode: str, repo_id: str | None) -> None:
         firestore = import_module("google.cloud.firestore")
-        db.collection(self._fs.meta_collection).document(STAMP_DOC).set(
-            {
-                "built_from_commit": head,
-                "built_at": firestore.SERVER_TIMESTAMP,
-                "mode": mode,
-                "embedder_id": self._embedder.id,
-            },
-            merge=True,
-            timeout=COMMIT_TIMEOUT_S,
-        )
+        stamp: dict[str, Any] = {
+            "built_from_commit": head,
+            "built_at": firestore.SERVER_TIMESTAMP,
+            "mode": mode,
+            "embedder_id": self._embedder.id,
+            "chunker_version": CHUNKER_VERSION,
+        }
+        if repo_id:  # unknown in a shallow clone: leave what the stamp already says
+            stamp["repo_id"] = repo_id
+        db.collection(self._fs.meta_collection).document(STAMP_DOC).set(stamp, merge=True, timeout=COMMIT_TIMEOUT_S)

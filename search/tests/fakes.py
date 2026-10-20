@@ -462,11 +462,13 @@ class FakeFirestore:
         mode: str = "full",
         embedder_id: str = f"vertex:gemini-embedding-001/{DIMS}",
         built_at: str = "2026-01-01T00:00:00Z",
+        **extra: Any,
     ) -> None:
+        """The stamp document; `extra` adds fields (`repo_id`, `chunker_version`) the read path ignores."""
         self.put(
             meta,
             "index",
-            {"built_from_commit": commit, "built_at": built_at, "mode": mode, "embedder_id": embedder_id},
+            {"built_from_commit": commit, "built_at": built_at, "mode": mode, "embedder_id": embedder_id, **extra},
         )
 
 
