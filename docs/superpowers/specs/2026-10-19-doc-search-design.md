@@ -402,6 +402,17 @@ The meta document `<meta_collection>/index` (default `corpus_meta`) holds `{buil
 - **gte spike**: the §4 adapter over a docs **subset** (every expected doc plus seeded random distractors: 524 files), with semble's default model and potion-retrieval-32M scored on the same subset. Result in §4: the subset saturated paraphrase recall, so it could not decide.
 - **Full corpus**: a scratch worktree of abundance's `origin/main` (6,513 docs), with the docs legs, `cloud` (abundance's existing Firestore corpus, read-only), joined `scope=all` and `semble-single`, k = 10, terminal docs included. Results in §4: the fused docs leg 0.927 / 0.764 against the cloud leg alone at 0.889 / 0.740, so doc-search with the cloud leg fused beats abundance-docs on its own corpus.
 
+- **Second set, M1 Pro host** (2026-10-20): a fresh 65-query set (50 paraphrase, 10 identifier, 5 legacy) over abundance main, k = 10, terminal docs included. It is harder than the first set, and the ranking holds:
+
+  | Docs leg | recall@10 | MRR | paraphrase | identifier |
+  |---|---|---|---|---|
+  | semble + ident + cloud, fused | 0.887 | 0.647 | 0.90 / 0.66 | 1.00 / 0.65 |
+  | cloud alone (≈ abundance-docs) | 0.764 | 0.634 | 0.82 / 0.72 | 0.60 / 0.39 |
+  | semble + ident, local only | 0.687 | 0.531 | 0.65 / 0.45 | 1.00 / 0.86 |
+  | `semble-single` | 0.564 | 0.391 | 0.62 / 0.43 | 0.30 / 0.15 |
+
+  The joined `scope=all` leg was skipped there: a git subprocess died while the gte build loaded the host. gte-modernbert int8 ONNX measured **15.5–15.7 chunks/s** on the M1 Pro CPU (10 threads, batch 16), about 3.5 h for the full docs corpus per host. That replaces §4's 1–3 h estimate. The gte-in-semble eval on this host is tracked in woodrowpearson/doc-superpowers#45, which also covers the per-host content-addressed encode cache.
+
 **Decision rules:** §3(b) (not met: two indexes stay) and §4 (met on the full corpus: a local transformer lever is a follow-up). The results are evidence rather than gates.
 
 ## 13. Left to the builder
