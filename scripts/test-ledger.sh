@@ -11552,7 +11552,8 @@ test_lg_validate_pushed_new_branch_from_base() {
   lg validate --pushed "$z..HEAD" --format json
   assert_eq "1" "$LG_RC" "no base: exit 1"
   assert_eq "provisional-key block docs/issues/cloud.md
-provisional-key block docs/issues/mine.md" "$(lg_vf)" "every provisional key at the tip"
+provisional-key block docs/issues/mine.md
+undeclared-contract-change advisory null" "$(lg_vf)" "every provisional key at the tip (and the contract advisory's could not check: no base)"
   assert_json_field "$LG_OUT" '.findings[] | select(.path == "docs/issues/cloud.md") | .detail | test("ledger finalize --all")' "true" \
     "the base's key: the detail names ledger finalize --all"
   teardown
@@ -12377,7 +12378,8 @@ test_lg_config_base_null_is_default() {
   lg validate --pushed "$z..HEAD" --format json
   assert_eq "1" "$LG_RC" "base nope/x: exit 1"
   assert_eq "provisional-key block docs/issues/cloud.md
-provisional-key block docs/issues/mine.md" "$(lg_vf)" "…every provisional key at the tip"
+provisional-key block docs/issues/mine.md
+undeclared-contract-change advisory null" "$(lg_vf)" "…every provisional key at the tip (and the contract advisory's could not check: no base)"
   teardown
 }
 
@@ -13498,6 +13500,177 @@ EOF
   teardown
 }
 
+# lg_vfd: the findings of the last JSON verdict as "<class>|<severity>|<path>|<key>"
+# words, in their printed order.
+lg_vfd() {
+  jq -r '.findings | map("\(.class)|\(.severity)|\(.path)|\(.key)") | join(" ")' <<<"$LG_OUT" 2>/dev/null || echo invalid
+}
+
+test_lg_validate_pushed_undeclared_contract_change() {
+  echo "test: #39 — validate --pushed: a pushed range involving app-6 that changes field:order.total → one advisory undeclared-contract-change (exit 0), detail names ledger upkeep --range; a range involving no item: no finding"
+  lg_upkeep_fixture
+  local a b r d
+  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  a=$(git rev-parse main)
+  b=$(git rev-parse HEAD)
+  r="$(git rev-parse --short=12 main)..$(git rev-parse --short=12 HEAD)"
+  d="src/order/total.js change field:order.total, which no item this push involves declares (changes): ledger upkeep --range $r proposes the link"
+  lg validate --pushed "$a..$b" --format json
+  assert_eq "0" "$LG_RC" "cas, no provisional key: exit 0 (the advisory never blocks)"
+  assert_eq "1" "$(json_count "$LG_OUT")" "JSON: one object"
+  assert_json_field "$LG_OUT" '.findings | tojson' \
+    "[{\"class\":\"undeclared-contract-change\",\"severity\":\"advisory\",\"path\":\"src/order/total.js\",\"key\":\"app-6\",\"detail\":\"$d\"}]" \
+    "one finding: path the file, key the item upkeep proposes it to, the detail naming ledger upkeep --range (12 hex each end)"
+  assert_eq "" "$LG_ERR" "nothing on stderr"
+  lg validate --pushed "$a..$b"
+  assert_eq "0|undeclared-contract-change src/order/total.js $d (advisory)" "$LG_RC|$LG_OUT" "text: the one line, exit 0"
+  DOC_TOOLS_LEDGER_TRACE=1 lg validate --pushed "$a..$b"
+  assert_contains "$LG_ERR" "index-" "the guarded check's stderr (its trace lines) reaches stderr"
+  lg_enable '{"base":"main","keys":{"mode":"merge"}}'
+  lg validate --pushed "$a..$b" --format json
+  assert_eq "0|undeclared-contract-change|advisory|src/order/total.js|app-6" "$LG_RC|$(lg_vfd)" "merge mode: the same advisory, exit 0"
+  # Upkeep's touched contracts: skip_contracts and skip_globs count (R3).
+  lg_enable '{"base":"main","upkeep":{"skip_contracts":["field:order.total"]}}'
+  lg validate --pushed "$a..$b" --format json
+  assert_eq "0|" "$LG_RC|$(lg_vfd)" "a skip_contracts id: no finding"
+  lg_enable '{"base":"main"}'
+  lg_up_commit $'tests\n\nLedger-Claims: app-6' src/order/total.test.js
+  lg validate --pushed "HEAD~1..HEAD" --format json
+  assert_eq "0|" "$LG_RC|$(lg_vfd)" "a file skip_globs matches (a test) touches nothing: no finding"
+  # Two files: the first, " and 1 more".
+  lg_up_commit $'two\n\nLedger-Claims: app-6' src/order/total.js "src/order/total two.js"
+  r="$(git rev-parse --short=12 HEAD~1)..$(git rev-parse --short=12 HEAD)"
+  lg validate --pushed "HEAD~1..HEAD" --format json
+  assert_json_field "$LG_OUT" '.findings | map([.path, .key, .detail] | join("|")) | join(" ")' \
+    "src/order/total two.js|app-6|src/order/total two.js and 1 more change field:order.total, which no item this push involves declares (changes): ledger upkeep --range $r proposes the link" \
+    "two files: path the first (by name), detail '<f> and 1 more'"
+  # Covered: an involved item (app-1) declares it.
+  lg_up_commit $'totals\n\nLedger-Claims: app-1, app-6' src/order/total.js
+  lg validate --pushed "HEAD~1..HEAD" --format json
+  assert_eq "0|" "$LG_RC|$(lg_vfd)" "an involved item declares it in changes: no finding"
+  # No item involved: nothing, though two contracts are touched.
+  lg_up_commit "tidy" src/order/total.js server/create.js
+  lg validate --pushed "HEAD~1..HEAD" --format json
+  assert_eq "0|" "$LG_RC|$(lg_vfd)" "a range involving no item: no finding"
+  lg validate --pushed "HEAD~1..HEAD"
+  assert_eq "0|" "$LG_RC|$LG_OUT" "…text: nothing printed"
+  # Only a Contract-Change line touches it (R18): path null, the line in place of the file.
+  lg_up_commit $'route\n\nLedger-Claims: app-6\nContract-Change: endpoint:create \xe2\x80\x94 a new route' docs/notes.md
+  r="$(git rev-parse --short=12 HEAD~1)..$(git rev-parse --short=12 HEAD)"
+  d="a Contract-Change line change endpoint:create, which no item this push involves declares (changes): ledger upkeep --range $r proposes the link"
+  lg validate --pushed "HEAD~1..HEAD" --format json
+  assert_json_field "$LG_OUT" '.findings | tojson' \
+    "[{\"class\":\"undeclared-contract-change\",\"severity\":\"advisory\",\"path\":null,\"key\":\"app-6\",\"detail\":\"$d\"}]" \
+    "a Contract-Change line only: path null, key app-6, 'a Contract-Change line' in the detail"
+  lg validate --pushed "HEAD~1..HEAD"
+  assert_eq "undeclared-contract-change app-6 $d (advisory)" "$LG_OUT" "…text: the key in the path's place"
+  teardown
+}
+
+test_lg_validate_pushed_advisory_zero_range_and_cap() {
+  echo "test: #39 — all-zeros <a>: merge-base(base, b)..b; more than 10 contracts: 10 findings and one '… N more contracts'"
+  lg_upkeep_fixture
+  local z=0000000000000000000000000000000000000000 m r reg base n
+  local -a files=()
+  m=$(git rev-parse main)
+  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  # main moves on (server/create.js: endpoint:create), not merged into feat.
+  git checkout -q main
+  lg_up_commit "server" server/create.js
+  git checkout -q feat
+  r="$(git rev-parse --short=12 "$m")..$(git rev-parse --short=12 HEAD)"
+  lg validate --pushed "$z..HEAD" --format json
+  assert_eq "0|undeclared-contract-change|advisory|src/order/total.js|app-6" "$LG_RC|$(lg_vfd)" \
+    "from all zeros: merge-base(config base, HEAD)..HEAD — main's own server/create.js is not this push's"
+  assert_json_field "$LG_OUT" '.findings[0].detail' \
+    "src/order/total.js change field:order.total, which no item this push involves declares (changes): ledger upkeep --range $r proposes the link" \
+    "the detail names the effective range: the merge base, 12 hex"
+  lg validate --pushed "main..HEAD" --format json
+  assert_json_field "$LG_OUT" '[.findings[] | .detail | split(" change ")[1] | split(",")[0]] | join(" ")' "endpoint:create field:order.total" \
+    "<a>..<b> as given: main's tip against HEAD (server/create.js differs too)"
+  # A config base that does not resolve (R4): one "could not check", in cas and merge.
+  lg_enable '{"base":"origin/no-such-branch"}'
+  lg validate --pushed "$z..HEAD" --format json
+  assert_eq "0" "$LG_RC" "a base that does not resolve, cas (no provisional key): exit 0"
+  assert_json_field "$LG_OUT" '.findings | tojson' \
+    '[{"class":"undeclared-contract-change","severity":"advisory","path":null,"key":null,"detail":"could not check: config base \"origin/no-such-branch\" does not resolve here"}]' \
+    "…one advisory: could not check, the base JSON-quoted"
+  lg_enable '{"base":"origin/no-such-branch","keys":{"mode":"merge"}}'
+  lg validate --pushed "$z..HEAD"
+  assert_eq "0|undeclared-contract-change could not check: config base \"origin/no-such-branch\" does not resolve here (advisory)" "$LG_RC|$LG_OUT" \
+    "merge mode, text: the same line, exit 0"
+  # Twelve contracts, their defined_in in the reverse of their id order:
+  # the ten kept are the first ten by id (flag:f01 … f10 = flags/r12 …
+  # r03), printed by path, then one "… 2 more contracts" last (R19).
+  lg_enable '{"base":"main"}'
+  # shellcheck disable=SC2016  # jq source
+  reg=$(jq -c '.ledgers[0].contracts += [range(1; 13) as $i
+      | {id: "flag:f\(if $i < 10 then "0" else "" end)\($i)", defined_in: ["flags/r\(if $i > 3 then "0" else "" end)\(13 - $i).json"]}]' <<<"$LG_REG_REL")
+  lg_registry "$reg"
+  git add -A && git commit -qm "twelve flags"
+  base=$(git rev-parse HEAD)
+  for n in 01 02 03 04 05 06 07 08 09 10 11 12; do files+=("flags/r$n.json"); done
+  lg_up_commit $'flags\n\nLedger-Claims: app-6' "${files[@]}"
+  lg validate --pushed "$base..HEAD" --format json
+  assert_eq "0" "$LG_RC" "twelve undeclared contracts: exit 0"
+  assert_json_field "$LG_OUT" '.findings | length' "11" "ten findings and one more"
+  assert_json_field "$LG_OUT" '[.findings[0:10][] | .detail | split(" change ")[1] | split(",")[0]] | sort | join(" ")' \
+    "flag:f01 flag:f02 flag:f03 flag:f04 flag:f05 flag:f06 flag:f07 flag:f08 flag:f09 flag:f10" "the first ten by contract id"
+  assert_json_field "$LG_OUT" '[.findings[0:10][] | .path] | join(" ")' \
+    "flags/r03.json flags/r04.json flags/r05.json flags/r06.json flags/r07.json flags/r08.json flags/r09.json flags/r10.json flags/r11.json flags/r12.json" \
+    "…printed by path (flags/r01, r02: flag:f12, f11, not kept)"
+  assert_json_field "$LG_OUT" '.findings[10] | tojson' \
+    '{"class":"undeclared-contract-change","severity":"advisory","path":null,"key":null,"detail":"… 2 more contracts"}' \
+    "then one '… 2 more contracts', last"
+  lg validate --pushed "$base..HEAD"
+  assert_eq "11" "$(wc -l <<<"$LG_OUT" | tr -d ' ')" "text: eleven lines"
+  assert_eq "undeclared-contract-change … 2 more contracts (advisory)" "$(tail -n 1 <<<"$LG_OUT")" "…the last: '… 2 more contracts'"
+  teardown
+}
+
+test_lg_validate_pushed_adapter_failure_never_blocks() {
+  echo "test: #39 — a failing contracts adapter: one advisory 'could not check: …', exit 0; a provisional key in cas still blocks (exit 1) alongside it"
+  lg_upkeep_fixture '{"base":"main","adapters":{"contracts":"tools/contracts.sh"}}'
+  lg_contracts_adapter 'echo "registry server down" >&2; exit 3'
+  lg_up_commit $'fix totals\n\nLedger-Claims: app-6' src/order/total.js
+  lg validate --pushed "main..HEAD" --format json
+  assert_eq "0" "$LG_RC" "a failing contracts adapter: exit 0, never 2"
+  assert_eq "1" "$(json_count "$LG_OUT")" "JSON: one object (no error verdict beside it)"
+  assert_eq "undeclared-contract-change|advisory|null|null" "$(lg_vfd)" "one advisory, path and key null"
+  assert_json_field "$LG_OUT" '.findings[0].detail | startswith("could not check: ") and test("registry server down") and test("exited 3")' "true" \
+    "the detail: could not check: <the adapter's failure>"
+  assert_eq "" "$LG_ERR" "stderr: nothing (the guarded child prints no ERROR line)"
+  lg validate --pushed "main..HEAD"
+  assert_eq "0" "$LG_RC" "text: exit 0"
+  assert_contains "$LG_OUT" "undeclared-contract-change could not check: " "text: the one line"
+  assert_eq "" "$LG_ERR" "…stderr: nothing"
+  # cas: a provisional key the range adds still blocks, the advisory beside it.
+  lg_item docs/issues/p.md "key: app-~$(lg_hex4 docs/issues/p.md)" "ledger: app" "status: Open" "summary: Filed offline on the branch"
+  git add -A && git commit -qm p --no-verify
+  lg validate --pushed "main..HEAD" --format json
+  assert_eq "1" "$LG_RC" "a provisional key (cas): exit 1"
+  assert_eq "1" "$(json_count "$LG_OUT")" "…one JSON object"
+  assert_eq "provisional-key|block|docs/issues/p.md|app-~$(lg_hex4 docs/issues/p.md) undeclared-contract-change|advisory|null|null" "$(lg_vfd)" \
+    "…the block first, the advisory beside it"
+  lg_enable '{"base":"main","keys":{"mode":"merge"},"adapters":{"contracts":"tools/contracts.sh"}}'
+  lg validate --pushed "main..HEAD" --format json
+  assert_eq "0|undeclared-contract-change|advisory|null|null" "$LG_RC|$(lg_vfd)" "merge mode: the advisory alone, exit 0"
+  # Any other failure of the check (R16) is the same one advisory, never exit 2.
+  lg validate --pushed "no-such-rev..HEAD" --format json
+  assert_eq "0|1" "$LG_RC|$(json_count "$LG_OUT")" "merge mode, an end that does not resolve: exit 0, one object"
+  assert_json_field "$LG_OUT" '.findings | map(.detail) | join(" ")' "could not check: 'no-such-rev' does not resolve to a commit here" "…could not check, naming it"
+  lg_enable '{"base":"main","keys":{"mode":"merge"},"upkeep":{"skip_globs":"docs/**"}}'
+  lg validate --pushed "main..HEAD" --format json
+  assert_eq "0|undeclared-contract-change|advisory|null|null" "$LG_RC|$(lg_vfd)" "a bad upkeep config: exit 0, one advisory"
+  assert_json_field "$LG_OUT" '.findings[0].detail' "could not check: config upkeep.skip_globs must be a list of globs" "…naming the config"
+  assert_eq "" "$LG_ERR" "…stderr: nothing"
+  # cas: an end that does not resolve is still the provisional check's own exit 2.
+  lg_enable '{"base":"main"}'
+  lg validate --pushed "no-such-rev..HEAD" --format json
+  assert_eq "2|1" "$LG_RC|$(json_count "$LG_OUT")" "cas, an end that does not resolve: the provisional check's exit 2 (one object)"
+  teardown
+}
+
 run_tests() {
   echo "Running ledger tests..."
   echo ""
@@ -13952,6 +14125,9 @@ run_tests() {
   test_lg_upkeep_pr_failures
   test_lg_upkeep_no_repo_adapters
   test_lg_pr_adapter_view
+  test_lg_validate_pushed_undeclared_contract_change
+  test_lg_validate_pushed_advisory_zero_range_and_cap
+  test_lg_validate_pushed_adapter_failure_never_blocks
 
   print_summary
 }

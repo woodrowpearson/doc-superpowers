@@ -2729,7 +2729,14 @@ ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed
   since its merge-base with config base: a new branch's all-zeros <a>, and
   a branch that merged the base after a provisional key landed there; a
   key the base carries too is named with ledger finalize --all); merge
-  mode passes. --registry
+  mode passes. In both modes --pushed adds undeclared-contract-change
+  advisories (never blocking): each contract the range changes (ledger
+  upkeep's touched contracts; from an all-zeros <a>, merge-base(config
+  base, <b>)..<b>) that no item the range involves declares in changes,
+  naming ledger upkeep --range <a>..<b>; none when it involves no item;
+  at most 10, then "… N more contracts". A check that cannot run (a
+  failing contracts adapter, a config base that does not resolve) is one
+  such advisory, "could not check: <message>". --registry
   checks docs/ledger/ledgers.json: schema, ledger ids, statuses, kinds,
   contract ids, globs, and that no tracked file is claimed by two ledgers
   (overlap) or, once any ledger declares paths, that every tracked file
@@ -13136,12 +13143,14 @@ _lg_verb_json() {
 # "enabled" says whether docs/ledger/config.json is present here.
 _lg_fail() {
   local rc="$1" msg="$2" uverb="${3:-}" verb enabled=false prev=""
-  # The in-flight scan's background child (scripts/ledger/inflight.sh)
-  # prints no verdict: it leaves its failure for the run to raise.
-  # (The first failure wins: a later one never overwrites it.)
-  if [ -n "${_LG_IFL_CHILD:-}" ]; then
-    if [ ! -e "$_SCRATCH/lg-ifl.fail" ]; then
-      printf '%s\t%s\n' "$rc" "$msg" > "$_SCRATCH/lg-ifl.fail" 2>/dev/null || true
+  # A guarded child — the in-flight scan's background child (scripts/
+  # ledger/inflight.sh), validate --pushed's advisory (validate.sh) —
+  # prints no verdict: it leaves "<rc>\t<message>" in the file
+  # _LG_FAIL_REC names, for its parent to read. (The first failure wins:
+  # a later one never overwrites it.)
+  if [ -n "${_LG_FAIL_REC:-}" ]; then
+    if [ ! -e "$_LG_FAIL_REC" ]; then
+      printf '%s\t%s\n' "$rc" "$msg" > "$_LG_FAIL_REC" 2>/dev/null || true
     fi
     exit "$rc"
   fi

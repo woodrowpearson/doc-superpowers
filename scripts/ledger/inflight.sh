@@ -1186,7 +1186,7 @@ _lg_ifl_refs_note() {
 # pays for the scan's git calls in parallel, not in sequence). The settings
 # are read here first (their errors die in this shell), and the shallow tag
 # (one git call either side would make). The child:
-#   - prints no verdict: _LG_IFL_CHILD makes its _lg_fail (doc-tools.sh)
+#   - prints no verdict: _LG_FAIL_REC makes its _lg_fail (doc-tools.sh)
 #     leave "<rc>\t<message>" in $_SCRATCH/lg-ifl.fail and exit; the wait
 #     raises it here, the run's one verdict;
 #   - holds none of this run's output: its stdout and fd 9 go to
@@ -1201,7 +1201,6 @@ _lg_ifl_refs_note() {
 # DOC_TOOLS_LEDGER_SELFTEST=ifl-pidfile (scripts/test-ledger.sh only): the
 # child's pid into $DOC_TOOLS_LEDGER_SELFTEST_PIDFILE.
 _LG_IFL_PID=""
-_LG_IFL_CHILD=""
 _lg_ifl_prepare_bg() {
   _LG_IFL_PID=""
   _lg_ifl_load
@@ -1209,7 +1208,7 @@ _lg_ifl_prepare_bg() {
   _lg_ix_shallow
   rm -f -- "$_SCRATCH/lg-ifl.state" "$_SCRATCH/lg-ifl.fail" "$_SCRATCH/lg-ifl.err"
   (
-    _LG_IFL_CHILD=1
+    _LG_FAIL_REC="$_SCRATCH/lg-ifl.fail"
     exec > /dev/null 9> /dev/null 2> "$_SCRATCH/lg-ifl.err"
     _LG_PARSE_N=$((_LG_PARSE_N + 100000))
     _lg_ifl_prepare 0
