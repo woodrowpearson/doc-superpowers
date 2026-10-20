@@ -2732,7 +2732,9 @@ ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed
   mode passes. In both modes --pushed adds undeclared-contract-change
   advisories (never blocking): each contract the range changes (ledger
   upkeep's touched contracts; from an all-zeros <a>, merge-base(config
-  base, <b>)..<b>) that no item the range involves declares in changes,
+  base, <b>)..<b>; a file counts only when it also differs between that
+  merge base and <b>, so a base merged in adds nothing) that no item the
+  range involves declares in changes,
   naming ledger upkeep --range <a>..<b>; none when it involves no item;
   at most 10, then "… N more contracts". A check that cannot run (a
   failing contracts adapter, a config base that does not resolve) is one
