@@ -23,7 +23,7 @@ doc-superpowers/
 │   └── workflows/
 │       ├── doc-freshness-pr.yml       # The 2 default shell-based workflows, rendered with the recorded choices
 │       ├── doc-freshness-schedule.yml
-│       └── tests.yml     # This repo only: every test suite (CLAUDE.md → Conventions lists them) under bash 5.x and /bin/bash 3.2, the self-install drift check, check-version, the release tag on main — each step a scripts/check-ci.sh call
+│       └── tests.yml     # This repo only: every shell suite (CLAUDE.md → Conventions lists them) under bash 5.x and /bin/bash 3.2, the doc-search pytest suite (after astral-sh/setup-uv, pinned by sha), the self-install drift check, check-version, the release tag on main — each step a scripts/check-ci.sh call
 ├── .opencode/            # OpenCode plugin + installation guide
 │   ├── INSTALL.md
 │   └── plugins/
@@ -35,6 +35,20 @@ doc-superpowers/
 ├── GEMINI.md             # Gemini CLI context redirect
 ├── gemini-extension.json # Gemini CLI extension manifest
 ├── package.json          # npm/OpenCode package metadata
+├── search/               # doc-search: the opt-in MCP server over docs and code — a uv project (Python ≥ 3.11, .python-version 3.12); inert without docs/search/config.json
+│   ├── pyproject.toml    # runtime: semble>=0.7,<0.8, mcp>=2.3,<3, pathspec; extra cloud: google-genai, google-cloud-firestore; dev: pytest; console script doc-search
+│   ├── uv.lock           # Locked (the launcher and CI run with --frozen); no torch, no onnxruntime
+│   ├── src/doc_search/
+│   │   ├── config.py     # docs/search/config.json: defaults, deep merge, validation, DOC_SEARCH_CLOUD=0; INERT_LINE
+│   │   ├── repo.py corpus.py docindex.py  # git plumbing, worktrees, path confinement; the docs corpus (globs, enrichment, terminal filter); the doc-index join
+│   │   ├── engines.py    # IndexPool: the semble docs + code index pair per worktree, background builds, revalidation, LRU of 2, on-disk cache state
+│   │   ├── searcher.py fusion.py render.py  # the legs (docs, ident, code, cloud) and file-keyed RRF with the per-kind floor; the markdown answer
+│   │   ├── tools.py      # fetch, related, status
+│   │   ├── server.py     # the MCP server (MCPServer, SDK v2): four tools over one Runtime; cli.py builds the same Runtime
+│   │   ├── cli.py evaluate.py  # doc-search serve | init | index | query | status | eval; known-answer evaluation
+│   │   ├── chunker.py    # the cloud write path's heading-bounded chunker
+│   │   └── cloud/        # read.py (the cloud leg: Vertex query → Firestore find_nearest, branch-changed suppression), write.py (the guarded indexer), vertex.py (google-genai embeddings)
+│   └── tests/            # pytest: never the network (a test-built Model2Vec model, fake Firestore and Vertex); live tests only under DOC_SEARCH_LIVE=1
 ├── scripts/
 │   ├── doc-tools.sh      # Bundled freshness tooling (build-index, check-freshness, update-index, add-entry, remove-entry, move-entry, set-code-refs, set-doc-type, upgrade-entries, deprecate-entry, status, audit-merges, bump-version, check-version, implementation-status, set-implementation, fragments {list, validate, merge}, tools {install, uninstall, status, version}, claims {validate, run, promote, render, gate, attest, rulings}, ledger {show, ls, find, related, suggest, sweep, recheck, inflight, notices, state-watch, new, assign, link, note, view, validate, publish, finalize, init})
 │   ├── ledger/           # The work ledger, sourced by doc-tools.sh (_lg_enter) for a ledger verb in a repository with docs/ledger/config.json, for ledger init without one, and by claims V5 on a ledger host
@@ -60,6 +74,7 @@ doc-superpowers/
 │   ├── test-spec-status-model.sh # Test suite for the canonical Spec Status Model + call sites
 │   ├── test-spec-claims.sh # Test suite for the `claims` verb group: a fixture per check, the gate flows, /bin/sh stub adapters
 │   ├── test-helpers.sh   # Shared test harness (isolated git env, scratch root, pipefail-safe asserts) sourced by every suite
+│   ├── search/launch.sh  # doc-search's launcher (POSIX sh): finds doc-superpowers at run time, then uv run --project <root>/search --frozen [--extra cloud] doc-search; install --search copies it to .claude/doc-superpowers/search-mcp.sh
 │   ├── merge-doc-index.sh  # Custom git merge driver for .doc-index.json
 │   ├── test-merge-driver.sh # Test suite for merge driver
 │   ├── test-hooks.sh     # Test suite for hooks installer and hook scripts
@@ -108,6 +123,7 @@ doc-superpowers/
 │   ├── spec-claims.md             # Spec claims (opt-in): claim schema, checks V1–V12, adapters, gates, the direction policy keys
 │   ├── ledger.md                  # Work ledger (opt-in): config, verbs + exit codes, keys, adapters, in-flight, hooks, init (REQUIRED for the ledger)
 │   ├── ledger-index.schema.json   # The ledger index's shape (ledger-index/1)
+│   ├── search.md                  # doc-search (opt-in): turning it on, config, CLI + exit codes, tools, cloud leg, other clients (REQUIRED with docs/search/config.json)
 │   └── tool-mappings.md           # The one capability matrix: per-client tool names + capabilities, tool resolution
 ├── docs/                 # Documentation about this skill (you are here)
 │   ├── architecture/
@@ -157,7 +173,7 @@ doc-superpowers/
 | `scripts/test-helpers.sh` | Shared test harness sourced by every suite: private scratch root cleaned on EXIT/INT/TERM, isolated git environment (`GIT_CONFIG_GLOBAL=/dev/null`, private `HOME`), pipefail-safe asserts, `assert_true`, SKIP and known-bug (XFAIL) reporting | Adding shared test utilities or assertions |
 | `scripts/hooks/install.sh` | Hook installer engine — install/uninstall/status for git, Claude Code, and CI tiers. Registers 3 Claude Code hooks (PreToolUse, PostToolUse, Stop) and 5 git hooks, and the work ledger's two opt-in sets: `--ledger` (marked blocks in pre-commit, pre-push and post-commit) and `--ledger-claude` (SessionStart, PostToolUse `Write|Edit|MultiEdit`) — never in `--all`, refused without `docs/ledger/config.json`, not recorded in the state; `uninstall --claude` keeps `hook-lib.sh` while a ledger script sources it. The `--git` tier also registers a custom merge driver for `.doc-index.json` conflict resolution; `--git --merge-driver-only` installs, removes or reports that driver alone (no hook), and `print-merge-driver` prints its command. `status --json` reports the git, Claude and CI tiers as one JSON object (schema `doc-superpowers-hooks-status/1`, every state listed in `references/hooks.md`); the human `status` output is unchanged. CI tier: the 2 shell workflows by default, the AI ones by name via `--workflows=<csv\|all\|none>`, plus `--force` (bypass state-respect), `--transient` (uninstall without marking intentional) and the deprecated `--helpers=<bool>` (inert, except that `false` is refused while `doc-pr-release` is selected or installed); vendoring through `doc-tools.sh tools install\|uninstall --helper` (the `ledger` set with `doc-ledger-publish` and every claims-running workflow). `status` flags an install another version made (outdated hooks, local copies, Claude scripts or settings commands, and a ledger state-watch entry registered without `MultiEdit`); `status --claude` also reports the `--ledger-claude` set once any of it is installed, and warns when state-watch can never fire (`state_watch.paths` set, no `state_watch.patterns`). Places everything with git plumbing (`--show-toplevel`, `--git-path hooks`), refuses symlinked write targets and a `core.hooksPath` that is not this repository's (a global or system one; a worktree's own is fine), owns only marked blocks / its own settings entries, and runs every check before the first write. Sources `state.sh` for install-state tracking | Adding hook tiers, changing installer logic, adding new hook scripts, changing install-state semantics |
 | `scripts/hooks/state.sh` | CI-tier install state — `.claude/doc-superpowers/installed.json` (schema 2): the workflow set and the choices (`base_branch`, `cron`, `ci_strict`) a plain `install --ci` reproduces. One `state_load`, in-memory marks, one `state_flush` (only when the content changed; before any deletion); an unreadable file is refused, never overwritten (`installed.json.corrupt` is the recovery path). It takes no lock: concurrent installer runs are not coordinated | Changing install-state schema, bootstrap logic, or workflow-name resolution |
-| `scripts/test-hooks.sh` | Test suite for hooks installer and all hook scripts — covers install, uninstall, status, and per-hook behavior, the ledger sets and their legs included | Adding tests for new hooks or installer features |
+| `scripts/test-hooks.sh` | Test suite for hooks installer and all hook scripts — covers install, uninstall, status, and per-hook behavior, the ledger sets and their legs and doc-search's `--search` set included | Adding tests for new hooks or installer features |
 | `scripts/merge-doc-index.sh` | Custom git merge driver for `.doc-index.json` — a base-aware, per-key three-way merge in jq during merge/rebase/cherry-pick/revert. An entry both sides changed is merged field by field; the verification record is one unit (except that `code_oids` merges key by key when neither side re-baselined the entry); `code_refs` repoints on both sides merge as substitutions when the result is the three-way set merge (before the newer `last_verified` side's list would win); a change of an entry the other side re-keyed with `move-entry` lands on the new key; deprecated wins. A same-field change that `last_verified` does not order, delete vs modify (no single re-key found), a malformed side and a signal each get `git merge-file` conflict markers and exit 1, with the key and field named. Ours' top level and key order are kept. The header comment is the specification | Changing merge conflict resolution logic |
 | `scripts/test-merge-driver.sh` | Test suite for `merge-doc-index.sh` and its registration. Fixtures are built with the real doc-tools verbs on a controlled clock, merged with real `git merge`/`git rebase` in both directions (plus `git revert`), and asserted against the base. It also has direct per-rule cases, and install.sh registration cases: a path with a space, a version bump without re-install, and no driver | Adding tests for merge driver features |
 | `references/doc-spec.md` | Templates for doc types + agentic workflow extension + Mermaid diagram syntax + CLAUDE.md rules + naming conventions + doc-index schema | Adding new doc types, changing template structure, updating Mermaid syntax |
@@ -168,6 +184,9 @@ doc-superpowers/
 | `references/spec-lifecycle-actions.md` | Detailed procedures for spec-generate, spec-inject, spec-verify actions | Changing spec action steps or adding new spec actions |
 | `references/spec-claims.md` | Spec claims (opt-in, enabled by `docs/spec-claims/`): sidecar and claim schema, `config.json`, checks V1–V12, exit codes, adapter contracts, gates and records, the direction policy keys (config `policy`), reference pytest/jest helpers | Changing a `claims` verb, check, adapter contract or the claims policy |
 | `references/spec-lifecycle-protocol.md` | Wrapper author integration guide — input/output contracts for spec-generate, spec-inject, spec-verify; integration patterns for calling skills; the claims **Direction protocol** (`CODE-DIVERGES`, `DOC-STALE`, `RETIRE`, its policy keys and their defaults) | Adding integration patterns, changing action contracts, changing the direction protocol |
+| `search/` | doc-search, the opt-in MCP server over docs and code: a uv package (`src/doc_search/`, `tests/`), its own Python toolchain, never needed by the rest of doc-superpowers. Inert without `docs/search/config.json` | Changing the server, a tool, the CLI, the config, the fusion or the cloud leg (with `references/search.md`; tests: `bash scripts/check-ci.sh search`) |
+| `scripts/search/launch.sh` | doc-search's POSIX-sh launcher, vendored byte for byte to `.claude/doc-superpowers/search-mcp.sh` by `install --search` | Changing how the server is found or started (installed copies then read `outdated`) |
+| `references/search.md` | doc-search's reference: inert contract, config keys and environment, CLI verbs and exit codes, the four tools, the cloud leg's setup and write-path guards, other clients' snippets, performance, privacy, troubleshooting | Changing any of those (pinned by `test-spec-status-model.sh`: its ten sections, the inert line, the verbs) |
 | `references/tool-mappings.md` | The one capability matrix — per-client tool names and capabilities (INSTALL files, AGENTS.md and GEMINI.md link here), tool resolution | Adding framework support, tool name or capability changes |
 | `AGENTS.md` | Cross-client agent instructions | Adding commands, changing project orientation |
 | `.opencode/plugins/doc-superpowers.js` | OpenCode ESM plugin | Changing skill registration or tool mapping injection |
@@ -176,8 +195,8 @@ doc-superpowers/
 | `README.md` | User-facing documentation: installation, usage examples, feature descriptions | After feature additions, new actions, changed behavior |
 | `CLAUDE.md` | Quick-reference for AI sessions: directory structure, commands, conventions | After structural changes, new conventions |
 | `RELEASE-NOTES.md` | Version history with features, fixes, lineage | Every release |
-| `.github/workflows/tests.yml` | This repo's CI: every suite (CLAUDE.md → Conventions) under bash 5.x and `/bin/bash` 3.2, the step that fails when a self-installed file drifts from its template, `check-version`, and on pushes to `main` `check-version --tag` — each step `scripts/check-ci.sh <check>`, no check body of its own | Adding a suite or a CI requirement (in `check-ci.sh` first) |
-| `scripts/check-ci.sh` | The one local command for what CI runs: the toolchain, the seven suites under each bash it detects (or `--bash PATH`), `self-install` (`scripts/check-self-install.sh`), `check-version`, `tag` (`--warn` in a full local run), `plugin-validate` (`claude plugin validate .`, local only); the three `DOC_SP_REQUIRE_*` flags default to 1; `--fast` is the quick part, run by the opt-in pre-push hook `scripts/install-maintainer-hooks.sh` installs | Adding a CI check |
+| `.github/workflows/tests.yml` | This repo's CI: every shell suite (CLAUDE.md → Conventions) under bash 5.x and `/bin/bash` 3.2, the doc-search pytest suite on both legs (after `astral-sh/setup-uv`, pinned by sha), the step that fails when a self-installed file drifts from its template, `check-version`, and on pushes to `main` `check-version --tag` — each step `scripts/check-ci.sh <check>`, no check body of its own | Adding a suite or a CI requirement (in `check-ci.sh` first) |
+| `scripts/check-ci.sh` | The one local command for what CI runs: the toolchain, the seven suites under each bash it detects (or `--bash PATH`), `search` (the doc-search pytest suite: `uv run --project search --frozen --all-extras pytest -q`; not in `--fast`), `self-install` (`scripts/check-self-install.sh`), `check-version`, `tag` (`--warn` in a full local run), `plugin-validate` (`claude plugin validate .`, local only); the four `DOC_SP_REQUIRE_*` flags (YAML parser, node, shellcheck, uv) default to 1; `--fast` is the quick part, run by the opt-in pre-push hook `scripts/install-maintainer-hooks.sh` installs | Adding a CI check |
 | `scripts/leak-scan.sh` | Leak scan over `git ls-files` (home-dir and `/Volumes/` paths, emails, tokens), with the records allowlist and the `leak-scan:allow` line marker; run by `test-spec-status-model.sh` | Changing a leak class or the allowlist |
 | `.github/workflows/doc-freshness-*.yml`, `.github/scripts/`, `.claude/doc-superpowers/installed.json` | This repo's own installed CI tier — installer output | Never by hand: re-run `bash scripts/hooks/install.sh install --ci` after changing a CI template, `doc-tools.sh` or a CI helper, and commit the result (tests.yml fails on drift) |
 | `.gitattributes` | The git tier's one committed piece: the `docs/.doc-index.json` merge-driver block — installer output | Never by hand: `bash scripts/hooks/install.sh install --git` writes it (tests.yml's drift step fails without it, and names `install --git`) |
@@ -230,6 +249,9 @@ doc-superpowers/
 | Work ledger adapters | `scripts/ledger/adapters.sh` (`_lg_adapter`, `_lg_adapter_path`: `doc-superpowers:<name>` → `scripts/adapters/<name>.sh`; the JSON-lines contracts); `scripts/adapters/` |
 | Work ledger hook legs | `scripts/hooks/git/ledger-*`, `scripts/hooks/claude/ledger-*.sh`; the hook modes in `scripts/ledger/hooks.sh` and `inflight.sh`; installer: `scripts/hooks/install.sh` (`LG_BEGIN`/`LG_END`, `LEDGER_GIT_HOOKS`, `LEDGER_CLAUDE_HOOKS`) |
 | Work ledger tests and bench | `scripts/test-ledger.sh`; `scripts/bench-ledger.sh` |
+| doc-search (the MCP server) | `search/src/doc_search/` — `server.py` (tools), `cli.py` (verbs, exit codes), `searcher.py` (legs and fusion), `engines.py` (semble index pairs), `cloud/` (read and write paths); reference `references/search.md`; design `docs/superpowers/specs/2026-10-19-doc-search-design.md` |
+| doc-search install set | `scripts/hooks/install.sh` `# --- doc-search's set (--search)` (`install_search`, `uninstall_search`, `status_search`, `search_state`); the launcher `scripts/search/launch.sh` |
+| doc-search tests | `search/tests/` (pytest; `bash scripts/check-ci.sh search` runs `uv run --project search --frozen --all-extras pytest -q`); the `--search` set in `scripts/test-hooks.sh` |
 | Work ledger reference | `references/ledger.md`; the index shape `references/ledger-index.schema.json`; the design `docs/superpowers/specs/2026-10-12-work-ledger-design.md` |
 | Spec supersession logic | `references/spec-lifecycle-actions.md` `spec-generate` overlap check — `deprecate-entry <old> --superseded-by <new>` writes `superseded_by` and the successor's `replaces` |
 | Release action routing | `skills/doc-superpowers/SKILL.md` Section 1 "`release`" (summary) → `references/release.md` steps 1–12 — range start, fragment merge, semver bump, drafting agent, RELEASE-NOTES.md prepend, one release commit |
@@ -419,6 +441,14 @@ User invokes /doc-superpowers hooks install --ledger [--ledger-claude] (never pa
     exclude both through its own info/exclude block
   → Not recorded in installed.json; status reports each set in its own section (status --claude too, once
     any of the --ledger-claude set is installed; a matcher other than lg_matcher's reads outdated)
+
+User invokes /doc-superpowers hooks install --search (never part of --all)
+  → No docs/search/config.json: refuse, exit 1, nothing written; no jq, a symlinked target, or an .mcp.json
+    that is not one object (or whose mcpServers is not one): refuse, nothing written
+  → Copy scripts/search/launch.sh to .claude/doc-superpowers/search-mcp.sh (byte for byte, mode 755)
+  → Merge mcpServers["doc-search"] = {command: sh, args: [.claude/doc-superpowers/search-mcp.sh, serve]} into
+    .mcp.json per key (created when absent; left untouched when the entry is already exact)
+  → Not recorded in installed.json; status --search [--json] reports launcher + entry (.tiers.search)
 ```
 
 ### Work ledger (every `ledger` verb)
@@ -454,6 +484,34 @@ doc-tools.sh ledger <verb> [options] [args]
     plumbing (private GIT_INDEX_FILE) and pushes views.branch without force
   → text, or one verdict object on fd 9; exit 1 (findings) > 2 (could not run) > 0
 ```
+
+### doc-search (a `search` call)
+
+The server is the uv package `search/`, started by the client through the committed launcher; the contract is `references/search.md`.
+
+```
+.mcp.json → sh .claude/doc-superpowers/search-mcp.sh serve
+  → launch.sh: find doc-superpowers ($DOC_SUPERPOWERS_ROOT → this checkout → newest plugin-cache version);
+    exec uv run --project <root>/search --frozen [--extra cloud] doc-search serve
+  → server.build_server → Runtime: RepoInfo.from_cwd, load_config (absent: every tool answers the inert
+    line; invalid: "invalid config"), the corpus of the launch worktree, IndexPool, the cloud leg (built
+    without the network; one that cannot be built answers with its reason), then the launch worktree's
+    builds start in the background
+search(query, scope, limit, doc_type, path_prefix, include_terminal, worktree)
+  → resolve_worktree (one of git worktree list, else refused) → IndexPool.get(wait ≤ 20 s): the docs + code
+    pair (loaded from semble's cache when valid, else SembleIndex.from_path; revalidated after
+    max(rescan_seconds, 3 × build seconds)); a pair still building → partial answer with a note, or
+    "index building … retry shortly" when the scope's own index is not ready
+  → allowed = corpus files passing doc_type, path_prefix and the terminal filter
+  → cloud leg on its own thread (stamp → branch-changed paths → Vertex RETRIEVAL_QUERY → Firestore
+    find_nearest, bounded by cloud.timeout_s + 5 s) while the local legs run:
+    docs (filter_paths = allowed ∩ indexed; empty → no semble call), ident (exact identifiers),
+    code (path_prefix applied; corpus paths become doc hits; scope=docs: the allowed code-typed files)
+  → fuse_by_file (RRF k = 60 over per-file ranks) → interleave_with_floor (scope=all, ⌈limit/3⌉ per kind)
+  → enrich the returned hits (heading path, type, status, code_refs / documented by) → render (≤ 8,000 chars)
+```
+
+`doc-search index --cloud` is the only writer of the cloud corpus (`cloud/write.py`): base guard, the stamp's decision table, the lease, per-file sha skip, HEAD's blobs, the prune cap, then the stamp.
 
 ### Typical `spec-generate` flow
 
