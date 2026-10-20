@@ -30,3 +30,8 @@ node_modules/
 
 # Environment variables
 .env
+
+# doc-search (search/): the uv virtualenv, bytecode and pytest cache
+search/.venv/
+search/**/__pycache__/
+search/.pytest_cache/
