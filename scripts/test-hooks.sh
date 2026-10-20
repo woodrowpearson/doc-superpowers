@@ -6350,6 +6350,35 @@ ci_fixture() {
   # shellcheck disable=SC2016
   printf '%s\n' '#!/bin/sh' 'echo "claude $*" >> "'"$CI_LOG"'"' 'exit 0' > stubbin/claude
   chmod +x stubbin/claude
+  # uv, in a directory of its own so a run can leave it off PATH. A pytest run
+  # logs its arguments and where it ran (the project's pytest.ini_options are
+  # found from the cwd), prints pytest's closing line, and exits $STUB_RC_search.
+  mkdir -p uvbin search
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/bin/sh' 'echo "uv $* PWD=$PWD UV=$DOC_SP_REQUIRE_UV" >> "'"$CI_LOG"'"' \
+    '[ "${STUB_RC_search:-0}" = 0 ] || echo "FAILED tests/test_stub.py::test_on_purpose"' \
+    'echo "3 passed in 0.12s"' 'exit "${STUB_RC_search:-0}"' > uvbin/uv
+  chmod +x uvbin/uv
+}
+
+# path_without <tool>: $REAL_PATH with <tool> hidden. Every directory holding it
+# is replaced by a directory of symlinks to everything else in it.
+path_without() {
+  local tool="$1" shadow out="" d f n=0
+  shadow=$(harness_mktemp_d no-"$tool")
+  local IFS=:
+  for d in $REAL_PATH; do
+    if [ -x "$d/$tool" ]; then
+      n=$((n + 1))
+      mkdir -p "$shadow/$n"
+      for f in "$d"/*; do
+        [ "${f##*/}" = "$tool" ] || ln -s "$f" "$shadow/$n/" 2>/dev/null || true
+      done
+      d="$shadow/$n"
+    fi
+    out="${out:+$out:}$d"
+  done
+  printf '%s' "$out"
 }
 
 # ci_run [VAR=value…] -- <args…>: check-ci.sh; sets CI_RC and CI_OUT.
@@ -6361,7 +6390,7 @@ ci_run() {
   done
   [ "$#" -gt 0 ] && shift
   CI_RC=0
-  CI_OUT=$(cd "$SUITE_TMP" && env PATH="$TEST_DIR/stubbin:$REAL_PATH" ${envs[@]+"${envs[@]}"} \
+  CI_OUT=$(cd "$SUITE_TMP" && env PATH="$TEST_DIR/stubbin:$TEST_DIR/uvbin:$REAL_PATH" ${envs[@]+"${envs[@]}"} \
     "$BASH_BIN" "$TEST_DIR/scripts/check-ci.sh" "$@" 2>&1) || CI_RC=$?
 }
 
@@ -6373,8 +6402,8 @@ test_check_ci_runs_what_ci_runs() {
   ln -s "$(type -P "$BASH_BIN" || printf '%s' "$BASH_BIN")" "$b2"
   ci_run -- --list
   assert_eq "0" "$CI_RC" "--list exits 0"
-  assert_eq "toolchain doc-tools hooks spec-status-model doc-pr-release merge-driver spec-claims ledger self-install check-version tag plugin-validate" \
-    "$(printf '%s' "$CI_OUT" | tr '\n' ' ' | sed 's/ $//')" "…the checks: the seven suites among them"
+  assert_eq "toolchain doc-tools hooks spec-status-model doc-pr-release merge-driver spec-claims ledger search self-install check-version tag plugin-validate" \
+    "$(printf '%s' "$CI_OUT" | tr '\n' ' ' | sed 's/ $//')" "…the checks: the seven suites among them, then search (the doc-search pytest suite)"
   ci_run -- nope
   assert_eq "2" "$CI_RC" "an unknown check: exit 2"
   ci_run -- --nope
@@ -6415,15 +6444,15 @@ test_check_ci_modes() {
   ci_run -- --fast
   assert_eq "0" "$CI_RC" "--fast exits 0"
   assert_eq "spec-status-model doc-pr-release merge-driver self-install doc-tools.sh" \
-    "$(awk '{ print $1 }' "$CI_LOG" | tr '\n' ' ' | sed 's/ $//')" "…the quick suites, then self-install and check-version, each once (one interpreter)"
+    "$(awk '{ print $1 }' "$CI_LOG" | tr '\n' ' ' | sed 's/ $//')" "…the quick suites, then self-install and check-version, each once (one interpreter); no search (pytest)"
   if [ "$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null)" = 3 ]; then
     assert_contains "$(head -n 1 "$CI_LOG")" "BASH_BIN=/bin/bash" "…that interpreter: bash 3.2, the floor, when the host has it"
   fi
 
   : > "$CI_LOG"
   ci_run -- --bash "$BASH_BIN"
-  assert_eq "doc-tools hooks spec-status-model doc-pr-release merge-driver spec-claims ledger self-install doc-tools.sh doc-tools.sh claude" \
-    "$(awk '{ print $1 }' "$CI_LOG" | tr '\n' ' ' | sed 's/ $//')" "the default run: the seven suites, self-install, check-version, the tag, plugin-validate"
+  assert_eq "doc-tools hooks spec-status-model doc-pr-release merge-driver spec-claims ledger uv self-install doc-tools.sh doc-tools.sh claude" \
+    "$(awk '{ print $1 }' "$CI_LOG" | tr '\n' ' ' | sed 's/ $//')" "the default run: the seven suites, search (pytest), self-install, check-version, the tag, plugin-validate"
   assert_contains "$(cat "$CI_LOG")" "doc-tools.sh check-version --tag --warn" "…the tag as a warning (CI checks it on main only)"
   assert_contains "$(cat "$CI_LOG")" "claude plugin validate ." "…and claude plugin validate ."
   # (PASS or FAIL: whether this host has every tool is not this test's business)
@@ -6440,6 +6469,49 @@ test_check_ci_modes() {
   teardown
 }
 
+test_check_ci_search() {
+  echo "test: check-ci.sh search: the doc-search pytest suite runs once, from search/, through uv; a missing uv FAILs unless DOC_SP_REQUIRE_UV=0 (a loud SKIP); a failing run exits 1"
+  ci_fixture
+  local b2 nouv
+  b2=$(harness_mktemp_d ci-bash2)/bash
+  ln -s "$(type -P "$BASH_BIN" || printf '%s' "$BASH_BIN")" "$b2"
+  nouv=$(path_without uv)
+
+  ci_run -- --bash "$BASH_BIN" --bash "$b2" search
+  assert_eq "0" "$CI_RC" "search under two interpreters: exit 0"
+  assert_eq "uv run --project $TEST_DIR/search --frozen --all-extras pytest -q PWD=$TEST_DIR/search UV=1" "$(cat "$CI_LOG")" \
+    "…uv run on the search project, once (not per interpreter), from search/, DOC_SP_REQUIRE_UV at 1"
+  assert_contains "$CI_OUT" "PASS  search (pytest)  3 passed in 0.12s" "…a PASS summary line carrying pytest's own closing line"
+
+  : > "$CI_LOG"
+  ci_run -- --bash "$BASH_BIN" --verbose search
+  assert_contains "$CI_OUT" "3 passed in 0.12s" "--verbose streams pytest's output"
+
+  : > "$CI_LOG"
+  ci_run STUB_RC_search=1 -- --bash "$BASH_BIN" search
+  assert_eq "1" "$CI_RC" "a failing pytest run: exit 1"
+  assert_contains "$CI_OUT" "FAIL  search (pytest)" "…named in the summary"
+  assert_contains "$CI_OUT" "FAILED tests/test_stub.py::test_on_purpose" "…with the failures shown (not just the log's path)"
+
+  : > "$CI_LOG"
+  ci_run PATH="$TEST_DIR/stubbin:$nouv" -- --bash "$BASH_BIN" search
+  assert_eq "1" "$CI_RC" "no uv on PATH: exit 1 (DOC_SP_REQUIRE_UV defaults to 1)"
+  assert_contains "$CI_OUT" "uv not found" "…saying so"
+  assert_contains "$CI_OUT" "FAIL  search (pytest)" "…a FAIL summary line"
+  assert_eq "" "$(cat "$CI_LOG")" "…and nothing ran"
+
+  ci_run DOC_SP_REQUIRE_UV=0 PATH="$TEST_DIR/stubbin:$nouv" -- --bash "$BASH_BIN" search
+  assert_eq "0" "$CI_RC" "no uv, DOC_SP_REQUIRE_UV=0: exit 0"
+  assert_contains "$CI_OUT" "SKIP: uv not on PATH" "…a loud SKIP"
+  assert_contains "$CI_OUT" "SKIP  search (pytest)" "…a SKIP summary line"
+  assert_eq "" "$(cat "$CI_LOG")" "…and nothing ran"
+
+  ci_run DOC_SP_REQUIRE_UV=0 -- --bash "$BASH_BIN" search
+  assert_contains "$CI_OUT" "PASS  search (pytest)" "DOC_SP_REQUIRE_UV=0 with uv present: the suite runs"
+  assert_contains "$(cat "$CI_LOG")" "UV=0" "…the exported 0 is kept"
+  teardown
+}
+
 echo ""
 echo "=== Maintainer tooling: check-ci.sh and the maintainer pre-push hook ==="
 test_maintainer_hook_install_push_uninstall
@@ -6447,6 +6519,7 @@ test_maintainer_hook_coexists_with_other_hooks
 test_maintainer_hook_refuses_global_hooks_path
 test_check_ci_runs_what_ci_runs
 test_check_ci_modes
+test_check_ci_search
 
 
 # --- install --git --merge-driver-only, status --json, print-merge-driver (#20) ---
