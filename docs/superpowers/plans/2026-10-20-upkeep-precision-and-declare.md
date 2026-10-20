@@ -8,7 +8,7 @@
 
 **Tech Stack:** bash 3.2+, jq ≥ 1.6, POSIX awk, git.
 
-**Spec:** `docs/superpowers/specs/2026-10-18-ledger-upkeep-and-filing-design.md`, amended 2026-10-20. D7 covers §4 *Touched contracts* (the **Names** rule), *Proposals* (the attribution of range-added items, and consumes (b)) and *Acceptance*; D8 is §7 `ledger declare`. Every exact string is in the spec.
+**Spec:** `docs/superpowers/specs/2026-10-18-ledger-upkeep-and-filing-design.md`, amended 2026-10-20. D7 covers §4 *Touched contracts* (the **Names** rule), *Proposals* (the attribution of range-added items, and consumes (b)) and *Acceptance*; D8 is §7 `ledger declare`; D9 (spec and ADR amendments to their owner, `plan-link`) is §4 *Document-defined contracts* — Task 3b. Every exact string is in the spec.
 
 ## Global Constraints
 
@@ -111,6 +111,39 @@
 
 ---
 
+### Task 3b: Spec and ADR amendments go to the item that owns them (D9)
+
+**Files:**
+- Modify: `scripts/ledger/upkeep.sh`. All of the following follow spec §4: *Touched contracts* → **Document-defined contracts**, *Proposals* → **Document-defined contracts**, *Involved items* 4 (`plan-link`), and the `unattributed_contracts` `cites` field.
+  - A document-defined contract is touched by any edit of its own document, exempt from `skip_globs`, with no name test.
+  - Read the pointers: plans named in the document's changed lines, and the claim trailers of the commits that edit the document (`git log --format=%B <a>..<b> -- <doc>` per touched document).
+  - Resolve plan links strictly: `include` rows, or a frontmatter scalar or list value equal to a key, alias or item path.
+  - Add `plan-link` involvement for plans the range adds or modifies.
+  - Rank pointed items right after n1.
+  - Unresolved citations go to `cites`.
+  - Use the spec's evidence strings.
+  - Reuse the in-flight plan detection (`doc_columns.plan` types and globs); do not reuse its link test, which matches any key word.
+- Modify: `references/ledger.md`, in *Merge-time upkeep* (Involved items, Touched contracts, Proposals) and the payload row (`cites`).
+- Test: `scripts/test-ledger.sh`.
+
+- [ ] **Step 1: Write the failing tests.** Fixture: a spec `docs/specs/SPEC-A.md` (`spec:SPEC-A`, `defined_in: ["docs/specs/SPEC-A.md"]`), a plan `docs/plans/p1.md` of doc type `plan`, and items app-1 and app-2.
+  - `test_lg_upkeep_amendment_cites_plan`: the range edits SPEC-A with a line `Landed by docs/plans/p1.md Task 2`. p1's `## Related work` has `| app-2 | … | include |`. app-1 is involved by key-in-message.
+    - Expect `changes spec:SPEC-A` on app-2, with evidence `diff amends docs/specs/SPEC-A.md, which cites docs/plans/p1.md (links app-2)`.
+    - Expect app-2 involved with `found_by` `plan-cited`.
+  - `test_lg_upkeep_amendment_plan_frontmatter_link`: the same, but p1's frontmatter has `issue: app-2`, and a second case uses `issues: [app-2]`. Expect app-2.
+  - `test_lg_upkeep_amendment_body_keys_do_not_link`: p1's body names app-2 as a word, with no `include` row and no frontmatter. Expect the contract in `unattributed_contracts`, with `cites: ["docs/plans/p1.md"]` and no proposal.
+  - `test_lg_upkeep_amendment_trailer_on_document`: the commit that edits SPEC-A carries `Ledger-Claims: app-2`, and another commit claims app-1. Expect app-2 to get it, with evidence `<commit12> (Ledger-Claims) amends docs/specs/SPEC-A.md`.
+  - `test_lg_upkeep_amendment_no_pointer`: the edit cites nothing. Expect the normal attribution, with evidence `diff amends docs/specs/SPEC-A.md (defined_in of spec:SPEC-A)`.
+  - `test_lg_upkeep_amendment_paths_still_win`: app-1's `paths` list `docs/specs/SPEC-A.md`, and the edit cites p1, which links app-2. Expect app-1 to get it (n1 first).
+  - `test_lg_upkeep_plan_link_involvement`: the range edits p1, which has an `include` row for app-2, and edits code naming `field:order.total`, which app-2's paths cover. Expect app-2 involved by `plan-link` and given the change.
+  - `test_lg_upkeep_amendment_skip_globs_exempt`: SPEC-A is under the default `docs/**` skip glob and is still touched.
+- [ ] **Step 2: Run** the tests. Expected: they FAIL.
+- [ ] **Step 3: Implement.** Use one `git log` per touched document, and read each cited or modified plan once per run.
+- [ ] **Step 4: Run** `test-ledger.sh` under both bashes. Expected: all pass.
+- [ ] **Step 5: Commit** `fix(ledger): upkeep gives spec and ADR amendments to the item their plan or trailer names`.
+
+---
+
 ### Task 4: `/doc-superpowers ledger declare`, the confirm-and-link flow
 
 **Files:**
@@ -119,7 +152,7 @@
   - Point the *Merge-time upkeep* bullet at the new flow.
   - In `review-pr` step 9, when proposals exist, end the section with `/doc-superpowers ledger declare` (plus `--range <range>` when the range is not the default `"$BASE...HEAD"`).
   - Add the flow to the Usage and Quick Reference lines.
-- Modify `references/ledger.md`: add `### Declaring after a change` after **Filing an item**, with spec §7 steps 1–7, and an "offered from" line in *Merge-time upkeep* → *Where else the comparison runs*.
+- Modify `references/ledger.md`: add `### Declaring after a change` after **Filing an item**, with spec §7 steps 1–7, and an "offered from" line in *Merge-time upkeep* → *Where else the comparison runs*. Step 5 handles an unattributed contract with `ledger link <key> --changes <contract>` for that contract alone. Never use a re-run with `--items`.
 - Modify CLAUDE.md (Commands), README.md (the ledger feature bullet), and `docs/workflows/doc-superpowers.md` (the ledger flows; review-pr step 9).
 - Modify `scripts/test-spec-status-model.sh` to pin the flow, next to the filing pins:
   - SKILL.md's `ledger` action names `ledger declare` and `Declaring after a change`;
@@ -143,7 +176,7 @@ The throwaway `$S/ab2` already exists from P0. Its GitHub main is fetched as `gh
   - `validate --pushed` for the two extra pushes (all-zeros at #3016's head and at #3020's head).
 
   Record proposals, `unattributed_contracts`, advisories and run time.
-- [ ] **Step 2: Compare with P0's simulation.** For each PR, diff the real `--top 0` proposals against `$S/precision/sim2.py`'s `C1+B3/A2` output. Explain every difference: A2 (the simulation) versus the spec's "only when no other item is involved" is one expected source.
+- [ ] **Step 2: Compare with the simulations.** For each PR, diff the real `--top 0` proposals against the simulated output of the spec's rules: P0b's `C1d+S3n+S4+S5c+S6t [R+F]` in `$S/precision/p0b_simlib.py` / `p0b-one.py`, whose code-contract part is `sim2.py`'s `C1+B3/A2`. Explain every difference. One expected source is A2 in the simulation versus the spec's "only when no other item is involved".
 - [ ] **Step 3: Build the judging set.** Write `$S/precision/judge2-set.jsonl` in the exact format of `$S/precision/judge-set.jsonl`, holding every distinct real `--top 0` proposal.
   - Write `$S/precision/judge2-reuse.json`, mapping each entry whose (pr, item, field, contract) is identical to an entry of the first set to that entry's id.
   - Write `$S/precision/judge2-key.json`, listing which entries are in the default `--top` output.
