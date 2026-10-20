@@ -5687,6 +5687,501 @@ test_ledger_status_reports_set
 test_ledger_state_watch_matcher_multiedit
 test_ledger_status_state_watch_paths_without_patterns
 
+# --- doc-search: the launcher and the opt-in --search set ---------------------
+#
+# scripts/search/launch.sh (POSIX sh) starts the doc-search MCP server through
+# uv; install --search copies it to .claude/doc-superpowers/search-mcp.sh and
+# registers a "doc-search" server in the project's .mcp.json. Never part of
+# --all, refused without docs/search/config.json. No test needs a real uv or
+# the real plugin cache: a fake uv prints its arguments, and the plugin cache
+# is a directory under the fixture's HOME (or CLAUDE_PLUGIN_CACHE).
+
+SRH_ENTRY='{"command":"sh","args":[".claude/doc-superpowers/search-mcp.sh","serve"]}'
+SRH_LAUNCHER=".claude/doc-superpowers/search-mcp.sh"
+
+# srh_fixture [config]: setup, then doc-search enabled — docs/search/config.json
+# (default {}) — committed.
+srh_fixture() {
+  local c='{}'
+  if [ $# -gt 0 ]; then c=$1; fi
+  setup
+  mkdir -p docs/search
+  printf '%s\n' "$c" > docs/search/config.json
+  git add -A && git commit -qm search
+}
+
+# srh_json <jq filter>: a value of the JSON in $IOUT ("" when it is not JSON).
+srh_json() {
+  jq -r "$1" <<<"$IOUT" 2>/dev/null || true
+}
+
+# srh_mode <file>: its octal permission bits.
+srh_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
+
+# srh_mcp <jq filter>: a value of .mcp.json.
+srh_mcp() {
+  jq -c "$1" .mcp.json 2>/dev/null || echo "ERR"
+}
+
+# A fake uv: prints "uv <its arguments>" and exits 0. SRL_BIN is the directory
+# holding it, put in front of the launcher's PATH.
+SRL_BIN=$(harness_mktemp_d fakeuv)
+printf '#!/bin/sh\nprintf "uv %%s\\n" "$*"\necho "$#" > "$(dirname "$0")/argc"\n' > "$SRL_BIN/uv"
+chmod +x "$SRL_BIN/uv"
+
+# srl_root <dir>: <dir> as a doc-superpowers root (a search/pyproject.toml).
+srl_root() {
+  mkdir -p "$1/search"
+  : > "$1/search/pyproject.toml"
+}
+
+# srl_run [VAR=value …] -- <launcher args…>: run the launcher (under /bin/sh)
+# in the cwd with the fake uv in front. DOC_SUPERPOWERS_ROOT and
+# CLAUDE_PLUGIN_CACHE are empty unless given. Sets RUN_RC and RUN_OUT
+# (stdout + stderr).
+srl_run() {
+  local envs=()
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    envs+=("$1")
+    shift
+  done
+  [ "$#" -gt 0 ] && shift
+  RUN_RC=0
+  RUN_OUT=$(env DOC_SUPERPOWERS_ROOT= CLAUDE_PLUGIN_CACHE= PATH="$SRL_BIN:$REAL_PATH" ${envs[@]+"${envs[@]}"} \
+    /bin/sh "$SCRIPT_DIR/search/launch.sh" "$@" 2>&1) || RUN_RC=$?
+}
+
+test_launcher_resolution_order() {
+  echo "test: launcher: root resolution — DOC_SUPERPOWERS_ROOT, then this repository when it is doc-superpowers, then the newest numeric version in the plugin cache; none: exit 2"
+  setup
+  local envroot top cache c
+  envroot=$(harness_mktemp_d envroot)
+  top=$(pwd -P)
+  # No root anywhere (an empty plugin cache too).
+  srl_run -- serve
+  assert_eq "2" "$RUN_RC" "no root: exit 2"
+  assert_eq "doc-search: cannot find doc-superpowers (set DOC_SUPERPOWERS_ROOT)" "$RUN_OUT" "…one stderr line, naming the variable"
+  # The plugin cache: the newest numeric version dir with search/pyproject.toml.
+  cache="$HOME/.claude/plugins/cache"
+  for c in mkt/doc-superpowers/9.9.9 mkt/doc-superpowers/10.0.0 mkt/doc-superpowers/10.0.0-rc1 mkt/doc-superpowers/latest other/doc-superpowers/2.0.0; do
+    srl_root "$cache/$c"
+  done
+  mkdir -p "$cache/mkt/doc-superpowers/11.0.0"
+  srl_run -- serve
+  assert_eq "0" "$RUN_RC" "the plugin cache under HOME: exit 0"
+  assert_eq "uv run --project $cache/mkt/doc-superpowers/10.0.0/search --frozen doc-search serve" "$RUN_OUT" "…10.0.0 beats 9.9.9 (numeric order), skips a pre-release name, a non-numeric name and 11.0.0 (no search/)"
+  srl_root "$cache/mkt/doc-superpowers/11.0.0"
+  srl_run -- serve
+  assert_contains "$RUN_OUT" "$cache/mkt/doc-superpowers/11.0.0/search" "…once 11.0.0 has search/pyproject.toml it wins"
+  # CLAUDE_PLUGIN_CACHE replaces the default location.
+  srl_root "$envroot/cache/m/doc-superpowers/3.1.2"
+  srl_root "$envroot/cache/m/doc-superpowers/3.10.0"
+  srl_run CLAUDE_PLUGIN_CACHE="$envroot/cache" -- serve
+  assert_eq "uv run --project $envroot/cache/m/doc-superpowers/3.10.0/search --frozen doc-search serve" "$RUN_OUT" "CLAUDE_PLUGIN_CACHE: 3.10.0 beats 3.1.2 (minor, numerically)"
+  srl_root "$envroot/cache/n/doc-superpowers/3.10.2"
+  srl_root "$envroot/cache/n/doc-superpowers/3.10.10"
+  srl_run CLAUDE_PLUGIN_CACHE="$envroot/cache" -- serve
+  assert_eq "uv run --project $envroot/cache/n/doc-superpowers/3.10.10/search --frozen doc-search serve" "$RUN_OUT" "…3.10.10 beats 3.10.2 (patch, numerically), across marketplaces"
+  # This repository, when it is doc-superpowers itself (search/ and scripts/doc-tools.sh).
+  srl_root "$top"
+  srl_run -- serve
+  assert_contains "$RUN_OUT" "$cache/mkt/doc-superpowers/11.0.0/search" "search/ alone is not doc-superpowers: the cache still wins"
+  mkdir -p scripts
+  : > scripts/doc-tools.sh
+  srl_run -- serve
+  assert_eq "uv run --project $top/search --frozen doc-search serve" "$RUN_OUT" "this repository (search/pyproject.toml and scripts/doc-tools.sh) beats the cache"
+  mkdir -p sub
+  (cd sub && srl_run -- serve && echo "$RUN_OUT" > "$top/sub.out")
+  assert_eq "uv run --project $top/search --frozen doc-search serve" "$(cat sub.out)" "…from a subdirectory too (the repository top)"
+  rm -f sub.out
+  # DOC_SUPERPOWERS_ROOT wins over both, when it holds search/pyproject.toml.
+  srl_root "$envroot"
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "uv run --project $envroot/search --frozen doc-search serve" "$RUN_OUT" "DOC_SUPERPOWERS_ROOT wins over this repository and the cache"
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot/missing" -- serve
+  assert_contains "$RUN_OUT" "$top/search" "…but not when it has no search/pyproject.toml (the next rule applies)"
+  # The launcher's arguments reach doc-search whole.
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- query "a b" --limit 3
+  assert_eq "uv run --project $envroot/search --frozen doc-search query a b --limit 3" "$RUN_OUT" "arguments are passed on after doc-search"
+  assert_eq "9" "$(cat "$SRL_BIN/argc")" "…each as one word (\"a b\" is not split)"
+  teardown
+}
+
+test_launcher_cloud_extra() {
+  echo "test: launcher: --extra cloud when docs/search/config.json has a non-null cloud; --all-extras when jq is missing; nothing extra otherwise"
+  srh_fixture '{"cloud":{"project":"p"}}'
+  local envroot nojq
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "uv run --project $envroot/search --frozen --extra cloud doc-search serve" "$RUN_OUT" "a cloud object: --extra cloud, between --frozen and doc-search"
+  mkdir -p src/deep
+  (cd src/deep && srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve && echo "$RUN_OUT" > "$envroot/deep.out")
+  assert_contains "$(cat "$envroot/deep.out")" "--extra cloud" "…read from the repository top, whatever the cwd"
+  printf '{"cloud":null}\n' > docs/search/config.json
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "uv run --project $envroot/search --frozen doc-search serve" "$RUN_OUT" "cloud null: no extra"
+  printf '{}\n' > docs/search/config.json
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_not_contains "$RUN_OUT" "extra" "cloud absent: no extra"
+  printf '{"cloud":\n' > docs/search/config.json
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "0" "$RUN_RC" "an invalid config: the launcher still starts doc-search (it reports the config itself)"
+  assert_not_contains "$RUN_OUT" "extra" "…with no extra"
+  rm -f docs/search/config.json
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "uv run --project $envroot/search --frozen doc-search serve" "$RUN_OUT" "no config: no extra"
+  # No jq on PATH: every extra.
+  nojq=$(make_nojq_path)
+  cp "$SRL_BIN/uv" "$nojq/uv"
+  IRC=0
+  IOUT=$(env DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= PATH="$nojq" /bin/sh "$SCRIPT_DIR/search/launch.sh" serve 2>&1) || IRC=$?
+  assert_eq "0" "$IRC" "without jq: exit 0"
+  assert_eq "uv run --project $envroot/search --frozen --all-extras doc-search serve" "$IOUT" "…--all-extras"
+  teardown
+}
+
+test_launcher_without_uv() {
+  echo "test: launcher: no uv on PATH — one stderr line, exit 2"
+  setup
+  local envroot nouv
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  nouv=$(make_nojq_path)
+  IRC=0
+  IOUT=$(env DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= PATH="$nouv" /bin/sh "$SCRIPT_DIR/search/launch.sh" serve 2>&1) || IRC=$?
+  assert_eq "2" "$IRC" "exit 2"
+  assert_eq "doc-search: uv not found (https://docs.astral.sh/uv/)" "$IOUT" "…the message, naming where to get uv"
+  teardown
+}
+
+test_launcher_is_posix_sh() {
+  echo "test: launcher: a POSIX sh script — #!/bin/sh, no bashism; runs under every sh on this host"
+  assert_eq "#!/bin/sh" "$(sed -n 1p "$SCRIPT_DIR/search/launch.sh")" "the shebang is /bin/sh"
+  assert_true "it holds no bash-only construct ([[, arrays, \${//}, <<<, \$'…')" \
+    test -z "$(grep -nE '\[\[|<<<|\$'"'"'|\$\{[A-Za-z_]+(//|,,|\^\^|/)|^[[:space:]]*(declare|local -a|mapfile|readarray)[[:space:]]' "$SCRIPT_DIR/search/launch.sh" || true)"
+  local sh
+  for sh in /bin/sh dash bash; do
+    command -v "$sh" >/dev/null 2>&1 || continue
+    assert_true "$sh -n parses it" "$sh" -n "$SCRIPT_DIR/search/launch.sh"
+  done
+}
+
+test_search_install_refused_without_config() {
+  echo "test: search: install --search refuses without docs/search/config.json (exit 1, the message, nothing written, with any other tier too); uninstall does not need it"
+  setup
+  local before want
+  want="ERROR: install --search needs docs/search/config.json, which this repository does not have: doc-search is not enabled here (doc-search init sets it up). Nothing was changed."
+  before=$(_tree_state)
+  inst install --search
+  assert_eq "1" "$IRC" "install --search without the config: exit 1"
+  assert_eq "$want" "$IOUT" "…the message, whole"
+  inst install --git --claude --search
+  assert_eq "1" "$IRC" "install --git --claude --search without it: exit 1 too"
+  assert_eq "$before" "$(_tree_state)" "…and no tier wrote anything"
+  mkdir -p docs/ledger
+  printf '{}\n' > docs/ledger/config.json
+  before=$(_tree_state)
+  inst install --ledger --search
+  assert_eq "1" "$IRC" "install --ledger --search, the ledger enabled, doc-search not: exit 1"
+  assert_eq "$before" "$(_tree_state)" "…the ledger block is not written either (every check runs first)"
+  inst uninstall --search
+  assert_eq "0" "$IRC" "uninstall --search without the config: exit 0"
+  teardown
+}
+
+test_search_install_writes_launcher_and_entry() {
+  echo "test: search: install --search copies the launcher (755, byte for byte) and sets the doc-search entry in .mcp.json — created when absent, merged per key when present"
+  srh_fixture
+  inst install --search
+  assert_eq "0" "$IRC" "install --search (no .mcp.json): exit 0"
+  assert_true "the launcher is the plugin's scripts/search/launch.sh, byte for byte" cmp -s "$SRH_LAUNCHER" "$SCRIPT_DIR/search/launch.sh"
+  assert_true "…executable" test -x "$SRH_LAUNCHER"
+  assert_eq "755" "$(srh_mode "$SRH_LAUNCHER")" "…mode 755"
+  assert_eq "{\"mcpServers\":{\"doc-search\":$SRH_ENTRY}}" "$(srh_mcp .)" ".mcp.json is created with the one entry"
+  assert_eq "?? .claude/doc-superpowers/search-mcp.sh
+?? .mcp.json" "$(git status --porcelain -uall)" "…and those two files are all it wrote"
+  assert_not_contains "$(cat "$SRH_LAUNCHER")" "$TEST_DIR" "the committed copy holds no machine path"
+  assert_not_contains "$(cat "$SRH_LAUNCHER")" "$HOME" "…nor the home directory"
+  # Another server and other keys survive, in their order.
+  inst uninstall --search
+  printf '%s\n' '{"mcpServers":{"other":{"command":"x","args":["a","b"],"env":{"K":"v"}}},"extra":[1,{"y":null}]}' | jq . > .mcp.json
+  inst install --search
+  assert_eq "0" "$IRC" "install --search into an existing .mcp.json: exit 0"
+  assert_eq '{"command":"x","args":["a","b"],"env":{"K":"v"}}' "$(srh_mcp '.mcpServers.other')" "another server is untouched"
+  assert_eq '[1,{"y":null}]' "$(srh_mcp .extra)" "…and so is another top-level key"
+  assert_eq "$SRH_ENTRY" "$(srh_mcp '.mcpServers["doc-search"]')" "the entry is set"
+  assert_eq '["other","doc-search"]' "$(srh_mcp '.mcpServers | keys_unsorted')" "…after the existing server"
+  # An existing doc-search entry (another command) is replaced in place.
+  jq '.mcpServers["doc-search"] = {"command":"uvx","args":["x"]} | .mcpServers.z = {"command":"z"}' .mcp.json > .mcp.tmp && mv .mcp.tmp .mcp.json
+  inst install --search
+  assert_eq "$SRH_ENTRY" "$(srh_mcp '.mcpServers["doc-search"]')" "a doc-search entry with another command: replaced"
+  assert_eq '["other","doc-search","z"]' "$(srh_mcp '.mcpServers | keys_unsorted')" "…in its place, the others kept"
+  # An mcpServers that is null counts as absent; an outdated launcher is restored.
+  printf '{"mcpServers":null,"k":1}\n' > .mcp.json
+  echo "# edited" >> "$SRH_LAUNCHER"
+  inst install --search
+  assert_eq "0" "$IRC" "mcpServers null: exit 0"
+  assert_eq "{\"mcpServers\":{\"doc-search\":$SRH_ENTRY},\"k\":1}" "$(srh_mcp .)" "…treated as {}"
+  assert_true "an edited launcher is restored" cmp -s "$SRH_LAUNCHER" "$SCRIPT_DIR/search/launch.sh"
+  teardown
+}
+
+test_search_install_idempotent() {
+  echo "test: search: install --search twice changes nothing (byte for byte, mtimes too); an entry already right leaves a hand-formatted .mcp.json alone"
+  srh_fixture
+  local a b m1 m2
+  inst install --search
+  a=$(_tree_state)
+  m1=$(stat -c %Y .mcp.json 2>/dev/null || stat -f %m .mcp.json)
+  sleep 1
+  inst install --search
+  assert_eq "0" "$IRC" "second install: exit 0"
+  b=$(_tree_state)
+  m2=$(stat -c %Y .mcp.json 2>/dev/null || stat -f %m .mcp.json)
+  assert_eq "$a" "$b" "the tree is byte for byte the same"
+  assert_eq "$m1" "$m2" "….mcp.json was not even rewritten"
+  inst uninstall --search
+  printf '{ "mcpServers": { "doc-search": {"args": [".claude/doc-superpowers/search-mcp.sh", "serve"], "command": "sh"},\n   "o": {"command":"o"} }\n}\n' > .mcp.json
+  a=$(cksum < .mcp.json)
+  inst install --search
+  assert_eq "$a" "$(cksum < .mcp.json)" "a hand-formatted .mcp.json whose entry is already right: untouched"
+  inst install --search
+  assert_eq "$a" "$(cksum < .mcp.json)" "…every time"
+  teardown
+}
+
+test_search_install_refuses_non_object_mcp_json() {
+  echo "test: search: a .mcp.json that is not one JSON object (or whose mcpServers is not an object) is refused, exit 1, nothing changed — install and uninstall alike"
+  srh_fixture
+  local before c
+  for c in '[]' '"x"' 'null' '3' '{} {}' 'not json' '' '{"mcpServers":[]}' '{"mcpServers":"x"}'; do
+    printf '%s' "$c" > .mcp.json
+    before=$(_tree_state)
+    inst install --search
+    assert_eq "1" "$IRC" "install --search, .mcp.json '$c': exit 1"
+    assert_contains "$IOUT" ".mcp.json" "…naming .mcp.json"
+    assert_contains "$IOUT" "Nothing was changed" "…and saying nothing was"
+    assert_eq "$before" "$(_tree_state)" "…the launcher not written either"
+    inst uninstall --search
+    assert_eq "1" "$IRC" "uninstall --search, .mcp.json '$c': exit 1"
+    assert_eq "$before" "$(_tree_state)" "…nothing changed"
+  done
+  rm -f .mcp.json
+  mkdir .mcp.json
+  inst install --search
+  assert_eq "1" "$IRC" ".mcp.json a directory: exit 1"
+  rmdir .mcp.json
+  ln -s elsewhere.json .mcp.json
+  inst install --search
+  assert_eq "1" "$IRC" ".mcp.json a symbolic link: exit 1"
+  assert_contains "$IOUT" "symbolic link" "…the installer never writes through one"
+  assert_file_not_exists "$SRH_LAUNCHER" "…nothing written"
+  teardown
+}
+
+test_search_needs_jq() {
+  echo "test: search: without jq on PATH install and uninstall --search stop first (exit 1, naming jq, nothing written, not the launcher alone)"
+  srh_fixture
+  local before nojq
+  nojq=$(make_nojq_path)
+  before=$(_tree_state)
+  IRC=0
+  IOUT=$(PATH="$nojq" "$BASH_BIN" "$HOOKS_DIR/install.sh" install --search 2>&1) || IRC=$?
+  assert_eq "1" "$IRC" "install --search without jq: exit 1"
+  assert_contains "$IOUT" "jq" "…naming jq"
+  assert_contains "$IOUT" "Nothing was changed" "…and saying nothing was"
+  assert_eq "$before" "$(_tree_state)" "…no launcher, no .mcp.json"
+  IRC=0
+  IOUT=$(PATH="$nojq" "$BASH_BIN" "$HOOKS_DIR/install.sh" uninstall --search 2>&1) || IRC=$?
+  assert_eq "1" "$IRC" "uninstall --search without jq: exit 1"
+  teardown
+}
+
+test_search_never_writes_through_links() {
+  echo "test: search: a symbolic link at .claude, .claude/doc-superpowers or the launcher is refused (exit 1, nothing written) — install and uninstall"
+  srh_fixture
+  local before elsewhere
+  elsewhere=$(harness_mktemp_d elsewhere)
+  ln -s "$elsewhere" .claude
+  before=$(_tree_state)
+  inst install --search
+  assert_eq "1" "$IRC" ".claude a link: install exit 1"
+  assert_contains "$IOUT" "symbolic link" "…named as one"
+  assert_eq "$before" "$(_tree_state)" "…nothing written"
+  assert_eq "" "$(ls -A "$elsewhere")" "…and nothing through it"
+  inst uninstall --search
+  assert_eq "1" "$IRC" ".claude a link: uninstall exit 1"
+  rm .claude
+  mkdir .claude
+  ln -s "$elsewhere" .claude/doc-superpowers
+  inst install --search
+  assert_eq "1" "$IRC" ".claude/doc-superpowers a link: install exit 1"
+  assert_eq "" "$(ls -A "$elsewhere")" "…nothing through it"
+  rm .claude/doc-superpowers
+  mkdir .claude/doc-superpowers
+  ln -s "$elsewhere/launcher.sh" "$SRH_LAUNCHER"
+  inst install --search
+  assert_eq "1" "$IRC" "the launcher a link: install exit 1"
+  assert_eq "" "$(ls -A "$elsewhere")" "…nothing through it"
+  assert_file_not_exists .mcp.json "…and no .mcp.json written before the refusal"
+  teardown
+}
+
+test_search_not_in_all() {
+  echo "test: search: --all includes the --search set neither way (install --all adds none of it, uninstall --all keeps it, status --all and status --json skip it)"
+  srh_fixture
+  inst install --all
+  assert_eq "0" "$IRC" "install --all: exit 0"
+  assert_file_not_exists "$SRH_LAUNCHER" "…no launcher"
+  assert_file_not_exists .mcp.json "…no .mcp.json"
+  inst install --search
+  assert_eq "0" "$IRC" "install --search: exit 0"
+  inst uninstall --all
+  assert_eq "0" "$IRC" "uninstall --all: exit 0"
+  assert_file_exists "$SRH_LAUNCHER" "uninstall --all keeps the launcher"
+  assert_eq "$SRH_ENTRY" "$(srh_mcp '.mcpServers["doc-search"]')" "…and the entry"
+  inst status --all
+  assert_not_contains "$IOUT" "doc-search MCP" "status --all (the three tiers): no search section"
+  inst status
+  assert_contains "$IOUT" "doc-search MCP (the opt-in --search set):" "plain status: its section, beside the ledger sets"
+  inst status --json
+  assert_eq "git,claude,ci" "$(srh_json '.tiers | keys_unsorted | join(",")')" "status --json: the three tiers, not the search set"
+  inst status --all --json
+  assert_eq "null" "$(srh_json '.tiers.search')" "status --all --json: not in it either"
+  inst install --all --search
+  assert_eq "0" "$IRC" "install --all --search: exit 0 (both)"
+  assert_file_exists .git/hooks/pre-commit "…the tiers"
+  assert_file_exists "$SRH_LAUNCHER" "…and the set"
+  teardown
+}
+
+test_search_uninstall_removes_only_ours() {
+  echo "test: search: uninstall --search removes the doc-search key and the launcher and nothing else; .mcp.json goes only when it becomes exactly {\"mcpServers\":{}}"
+  srh_fixture
+  local before
+  # Created by the install: gone with it, and the directories it made.
+  before=$(_tree_state)
+  inst install --search
+  inst uninstall --search
+  assert_eq "0" "$IRC" "uninstall --search: exit 0"
+  assert_eq "$before" "$(_tree_state)" "…the tree as before the install (.mcp.json gone, .claude/ gone)"
+  # Another server, another key, a neighbour of the launcher.
+  printf '%s\n' '{"mcpServers":{"other":{"command":"x"}},"extra":{"a":[1]}}' | jq . > .mcp.json
+  mkdir -p .claude/doc-superpowers
+  printf 'advice = off\n' > .claude/doc-superpowers/hooks.conf
+  before=$(_tree_state)
+  inst install --search
+  assert_eq "0" "$IRC" "install --search beside other things: exit 0"
+  inst uninstall --search
+  assert_eq "0" "$IRC" "uninstall --search: exit 0"
+  assert_eq "$before" "$(_tree_state)" "other servers and keys, and hooks.conf beside the launcher, exactly as they were"
+  assert_file_exists .claude/doc-superpowers/hooks.conf "…its directory stays while it holds something"
+  # An .mcp.json with only an empty mcpServers left: removed; with another key left: kept.
+  printf '{"mcpServers":{},"k":1}\n' > .mcp.json
+  inst install --search
+  inst uninstall --search
+  assert_eq '{"mcpServers":{},"k":1}' "$(srh_mcp .)" "an emptied mcpServers with another key: .mcp.json kept"
+  printf '{"mcpServers":{}}\n' > .mcp.json
+  inst install --search
+  inst uninstall --search
+  assert_file_not_exists .mcp.json "exactly {\"mcpServers\":{}} afterwards: .mcp.json removed"
+  # Uninstalling twice, and with nothing installed.
+  inst uninstall --search
+  assert_eq "0" "$IRC" "uninstall --search again: exit 0"
+  assert_contains "$IOUT" "nothing to uninstall" "…saying so"
+  # A doc-search entry of any command goes (the key is the set's); the launcher too.
+  printf '{"mcpServers":{"doc-search":{"command":"mine"},"o":{"command":"o"}}}\n' > .mcp.json
+  inst uninstall --search
+  assert_eq '{"mcpServers":{"o":{"command":"o"}}}' "$(srh_mcp .)" "the doc-search key is removed whatever it ran"
+  teardown
+}
+
+test_search_status_and_json() {
+  echo "test: search: status reports the launcher (installed / outdated / not installed) and the entry (registered / registered with a different command / not registered), as text and as .tiers.search in status --json"
+  setup
+  inst status --search
+  assert_eq "0" "$IRC" "status --search: exit 0"
+  assert_contains "$IOUT" "doc-search MCP (the opt-in --search set):" "its header"
+  assert_contains "$IOUT" "not enabled (no docs/search/config.json)" "no config, nothing installed: one plain line"
+  assert_not_contains "$IOUT" "⚠" "…no warning"
+  assert_not_contains "$IOUT" "Git Hooks" "…and no tier"
+  teardown
+  srh_fixture
+  inst status --search
+  assert_contains "$IOUT" "launcher: not installed" "config, nothing installed: the launcher"
+  assert_contains "$IOUT" "entry: not registered" "…and the entry"
+  inst status --search --json
+  assert_eq "search" "$(srh_json '.tiers | keys | join(",")')" "status --search --json: the search member alone"
+  assert_eq "absent" "$(srh_json .tiers.search.launcher)" "…launcher absent"
+  assert_eq "absent" "$(srh_json .tiers.search.mcp_entry)" "…mcp_entry absent"
+  assert_eq "doc-superpowers-hooks-status/1" "$(srh_json .schema)" "…the schema unchanged"
+  inst install --search
+  inst status --search
+  assert_contains "$IOUT" "launcher: installed" "installed: the launcher"
+  assert_contains "$IOUT" "entry: registered" "…the entry"
+  assert_contains "$IOUT" "✓" "…✓"
+  assert_not_contains "$IOUT" "⚠" "…no warning"
+  inst status --search --json
+  assert_eq "installed" "$(srh_json .tiers.search.launcher)" "JSON: launcher installed"
+  assert_eq "registered" "$(srh_json .tiers.search.mcp_entry)" "…mcp_entry registered"
+  inst status --git --search --json
+  assert_eq "git,search" "$(srh_json '.tiers | keys | join(",")')" "--git --search --json: both, nothing else"
+  # An outdated launcher.
+  echo "# edited" >> "$SRH_LAUNCHER"
+  inst status --search
+  assert_contains "$IOUT" "launcher: outdated: differs from the plugin's scripts/search/launch.sh" "an edited launcher: outdated, saying against what"
+  assert_contains "$IOUT" "install --search" "…and what fixes it"
+  inst status --search --json
+  assert_eq "outdated" "$(srh_json .tiers.search.launcher)" "JSON: outdated"
+  inst install --search
+  # A different command, then none.
+  jq '.mcpServers["doc-search"].command = "uvx"' .mcp.json > .mcp.tmp && mv .mcp.tmp .mcp.json
+  inst status --search
+  assert_contains "$IOUT" "entry: registered with a different command" "another command: said so"
+  inst status --search --json
+  assert_eq "different-command" "$(srh_json .tiers.search.mcp_entry)" "JSON: different-command"
+  jq 'del(.mcpServers["doc-search"])' .mcp.json > .mcp.tmp && mv .mcp.tmp .mcp.json
+  inst status --search
+  assert_contains "$IOUT" "entry: not registered" "the key removed: not registered"
+  assert_contains "$IOUT" "launcher: installed" "…the launcher still installed"
+  printf '[1]' > .mcp.json
+  inst status --search
+  assert_eq "0" "$IRC" "an .mcp.json that is not an object: status still exits 0"
+  assert_contains "$IOUT" "entry: not registered" "…and reads the entry as not registered"
+  inst status --search --json
+  assert_eq "absent" "$(srh_json .tiers.search.mcp_entry)" "JSON: absent"
+  # Installed, but the config gone.
+  rm -f .mcp.json
+  inst install --search
+  rm -f docs/search/config.json
+  inst status --search
+  assert_contains "$IOUT" "⚠ docs/search/config.json is missing" "installed without the config: ⚠ (the server answers 'not enabled')"
+  inst status --search --json
+  assert_eq "installed" "$(srh_json .tiers.search.launcher)" "…and JSON still reports the files"
+  inst install --search --json
+  assert_eq "2" "$IRC" "install --search --json: exit 2 (--json is status's)"
+  teardown
+}
+
+echo ""
+echo "=== doc-search: the launcher and the opt-in --search set ==="
+test_launcher_resolution_order
+test_launcher_cloud_extra
+test_launcher_without_uv
+test_launcher_is_posix_sh
+test_search_install_refused_without_config
+test_search_install_writes_launcher_and_entry
+test_search_install_idempotent
+test_search_install_refuses_non_object_mcp_json
+test_search_needs_jq
+test_search_never_writes_through_links
+test_search_not_in_all
+test_search_uninstall_removes_only_ours
+test_search_status_and_json
+
 # --- Maintainer tooling (#27): scripts/check-ci.sh and the opt-in pre-push ---
 #
 # Both are for this repository's contributors, not shipped to a consuming

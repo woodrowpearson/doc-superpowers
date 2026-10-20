@@ -515,7 +515,7 @@ test_shipped_scripts_pass_shellcheck() {
   # Paths relative to the root, so `-x` follows the scripts' source
   # directives the way they are written.
   local s="$root/scripts"
-  for f in "$s"/doc-tools.sh "$s"/merge-doc-index.sh "$s"/ledger/*.sh "$s"/adapters/*.sh \
+  for f in "$s"/doc-tools.sh "$s"/merge-doc-index.sh "$s"/ledger/*.sh "$s"/adapters/*.sh "$s"/search/*.sh \
     "$s"/hooks/*.sh "$s"/hooks/claude/*.sh "$s"/hooks/ci/doc-pr-release/*.sh \
     "$s"/hooks/ci/doc-superpowers-steps/*.sh "$s"/hooks/git/* \
     "$s"/check-ci.sh "$s"/check-self-install.sh "$s"/leak-scan.sh "$s"/install-maintainer-hooks.sh; do
@@ -566,6 +566,7 @@ test_scripts_are_free_of_bash4_only_constructs() {
     "$repo_root"/scripts/merge-doc-index.sh \
     "$repo_root"/scripts/ledger/*.sh \
     "$repo_root"/scripts/adapters/*.sh \
+    "$repo_root"/scripts/search/*.sh \
     "$repo_root"/scripts/hooks/*.sh \
     "$repo_root"/scripts/hooks/claude/*.sh \
     "$repo_root"/scripts/hooks/ci/doc-pr-release/*.sh \
@@ -829,6 +830,7 @@ test_shipped_jq_is_free_of_jq17_only_forms() {
     "$repo_root"/scripts/merge-doc-index.sh \
     "$repo_root"/scripts/ledger/*.sh \
     "$repo_root"/scripts/adapters/*.sh \
+    "$repo_root"/scripts/search/*.sh \
     "$repo_root"/scripts/hooks/*.sh \
     "$repo_root"/scripts/hooks/claude/*.sh \
     "$repo_root"/scripts/hooks/ci/doc-pr-release/*.sh \
