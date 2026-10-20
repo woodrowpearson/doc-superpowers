@@ -16,6 +16,7 @@ import time
 import pytest
 from semble import ContentType, SembleIndex
 
+from doc_search import engines as engines_module
 from doc_search.config import Config, load_config
 from doc_search.engines import Building, IndexPool, WorktreeIndexes
 
@@ -249,6 +250,75 @@ def test_lru_two_worktrees(git_repo, tiny_model: str, monkeypatch: pytest.Monkey
     docs_a = ready(pool.get(wt_a)).docs
     assert docs_a is not None
     assert docs_a.search("refund rounding", top_k=1)[0].chunk.file_path == "docs/refunds.md"
+
+
+def test_peek_is_a_look_not_a_use(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = git_repo()
+    seed(repo)
+    wt_a = repo.add_worktree("a", "branch-a")
+    wt_b = repo.add_worktree("b", "branch-b")
+    cfg = make_cfg(repo, tiny_model)
+    counter = CountingFromPath(monkeypatch)
+    pool = IndexPool(cfg, max_worktrees=2)
+    assert pool.max_worktrees == 2
+
+    # a worktree that is not in memory is not loaded for a peek
+    assert pool.peek(repo.root) is None
+    assert pool.resident() == [] and counter.count == 0
+
+    for top in (repo.root, wt_a):
+        ready(pool.get(top))
+    built = counter.count
+    assert pool.resident() == [repo.root, wt_a]
+
+    # it answers what get would, the very same indexes, and the entry is not used by it
+    seen = ready(pool.peek(repo.root))
+    assert seen.docs is not None and seen.code is not None
+    assert seen.docs is ready(pool.peek(repo.root)).docs
+    assert seen.docs is ready(pool.get(repo.root)).docs
+    assert pool.resident() == [wt_a, repo.root]  # the get above was a use, the peeks before it were not
+
+    ready(pool.get(wt_a))
+    assert pool.resident() == [repo.root, wt_a]
+    pool.peek(repo.root)
+    ready(pool.get(wt_b))  # root, only peeked at, is still the least recently used one
+    assert pool.resident() == [wt_a, wt_b]
+    assert pool.peek(repo.root) is None
+    assert counter.count == built + 2
+
+
+def test_peek_starts_nothing_and_does_not_wait(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = git_repo()
+    seed(repo)
+    cfg = make_cfg(repo, tiny_model)
+    CountingFromPath(monkeypatch, delay=0.5)
+    pool = IndexPool(cfg)
+
+    assert isinstance(pool.get(repo.root, wait_s=0), Building)
+    started = time.monotonic()
+    seen = pool.peek(repo.root)
+    assert time.monotonic() - started < 0.3
+    assert seen == Building(repo.root, docs_ready=False, code_ready=False)
+    ready(pool.get(repo.root, wait_s=30))  # let the builds finish inside this test
+
+    # a due revalidation is not started by a peek, but is by a get
+    clock = FakeClock()
+    checks: list[str] = []
+    original = engines_module.get_validated_cache
+
+    def counting(path, *args, **kwargs):
+        checks.append(str(path))
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(engines_module, "get_validated_cache", counting)
+    pool = IndexPool(cfg, clock=clock)
+    ready(pool.get(repo.root, wait_s=30))
+    settled = len(checks)
+    clock.advance(1000)
+    assert isinstance(pool.peek(repo.root), WorktreeIndexes)
+    assert len(checks) == settled, "a peek must not start a revalidation"
+    ready(pool.get(repo.root, wait_s=30))
+    assert len(checks) > settled, "a get after the cooldown does"
 
 
 def test_code_disabled(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch) -> None:

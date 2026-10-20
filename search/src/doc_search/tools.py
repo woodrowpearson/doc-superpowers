@@ -41,7 +41,7 @@ RELATED_FETCH = 3  # the over-fetch for "see also", which drops the doc's own ch
 RELATED_MAX_FETCH = 1000
 LISTED = 5  # status: how many unindexed or skipped files it names
 
-State = Literal["off", "building", "ready", "failed"]
+State = Literal["off", "building", "ready", "failed", "unloaded"]
 
 
 class _Refuse(Exception):
@@ -69,7 +69,9 @@ class _View:
             return "code.enabled is false"
         if self.state == "building":
             return f"{self.kind} index building"
-        return f"index failed: {self.error}" if self.error else "no index"
+        if self.state == "unloaded":
+            return f"{self.kind} index not loaded"
+        return f"index failed: {flat(self.error)}" if self.error else "no index"
 
 
 class DocTools:
@@ -284,20 +286,39 @@ class DocTools:
 
     def _status(self, worktree: Path) -> str:
         top = worktree.resolve()
-        code_model = (self.cfg.code.model or resolve_model_name()) if self.cfg.code.enabled else "off"
+        docs_model = flat(self.cfg.docs.model or resolve_model_name())
+        code_model = flat(self.cfg.code.model or resolve_model_name()) if self.cfg.code.enabled else "off"
         out = [
             "doc-search status",
             f"config: {self.repo.top / CONFIG_REL}",
-            f"docs model: {self.cfg.docs.model or resolve_model_name()}",
+            f"docs model: {docs_model}",
             f"code model: {code_model}",
             f"semble {IndexPool.semble_version()}",
+            "",
+            f"worktree: {top}",
+            *self._worktree_lines(top, self._asked(top)),
         ]
-        for tree in [top, *(path for path in self._pool.resident() if path != top)]:
-            out += ["", f"worktree: {tree}", *self._worktree_lines(tree)]
+        for tree in self._pool.resident():  # read after the asked worktree's call: that may have changed it
+            if tree == top:
+                continue
+            got = self._pool.peek(tree)  # a look, not a use: the LRU order and the builds stay as they were
+            if got is not None:  # None: evicted since resident() was read
+                out += ["", f"worktree: {tree}", *self._worktree_lines(tree, got)]
         return "\n".join(out)
 
-    def _worktree_lines(self, tree: Path) -> list[str]:
-        got = self._pool.get(tree, wait_s=0)  # starts a due build or refresh, never waits for one
+    def _asked(self, top: Path) -> WorktreeIndexes | Building | None:
+        """The asked worktree's indexes without disturbing the pool; None when they are not loaded.
+
+        One in memory is only looked at. One that is not is loaded (`get`, which starts the builds
+        and never waits) so a first status call warms it, unless the pool is full: loading it would
+        evict another worktree's warm indexes, and `status` must not do that.
+        """
+        got = self._pool.peek(top)
+        if got is None and len(self._pool.resident()) < self._pool.max_worktrees:
+            got = self._pool.get(top, wait_s=0)
+        return got
+
+    def _worktree_lines(self, tree: Path, got: WorktreeIndexes | Building | None) -> list[str]:
         docs, code = self._view(got, "docs"), self._view(got, "code")
         out = self._index_lines(tree, docs) + self._index_lines(tree, code)
         corpus = self._corpus_for(tree)
@@ -324,6 +345,8 @@ class DocTools:
             return [f"{view.kind} index: off ({view.why()})"]
         if view.state == "building":
             return [f"{view.kind} index: building (first build not finished)"]
+        if view.state == "unloaded":
+            return [f"{view.kind} index: not loaded (the pool is full; a search of this worktree loads it)"]
         state = (
             "ready (refresh failed; serving the previous index)" if view.state == "ready" and view.error else view.state
         )
@@ -340,7 +363,7 @@ class DocTools:
         files = corpus.files()
         count = f"corpus files: {len(files)}; not in semble's docs index: "
         if docs.index is None:
-            out = [count + f"unknown (docs index {docs.state})"]
+            out = [count + f"unknown (docs index {'not loaded' if docs.state == 'unloaded' else docs.state})"]
         else:
             missing = sorted(set(files) - self._pool.indexed_files(tree, "docs"))
             held = self._pool.indexed_files(tree, "code") if code.index is not None else set()
@@ -348,7 +371,9 @@ class DocTools:
             if missing:
                 names = [flat(p) + (" [in code index]" if p in held else "") for p in missing[:LISTED]]
                 more = f", +{len(missing) - LISTED} more" if len(missing) > LISTED else ""
-                out[0] += f" ({', '.join(names)}{more}); check .sembleignore"
+                # a file the code index reads is findable; the hint is for the ones nothing indexes
+                hint = "; check .sembleignore" if any(p not in held for p in missing) else ""
+                out[0] += f" ({', '.join(names)}{more}){hint}"
         skipped = corpus.skipped()
         if skipped:
             shown = [f"{flat(path)}: {reason}" for path, reason in list(skipped.items())[:LISTED]]
@@ -360,9 +385,11 @@ class DocTools:
 
     # -- the indexes ------------------------------------------------------------------------------
 
-    def _view(self, got: WorktreeIndexes | Building, kind: Kind) -> _View:
+    def _view(self, got: WorktreeIndexes | Building | None, kind: Kind) -> _View:
         if kind == "code" and not self.cfg.code.enabled:
             return _View(kind, "off")
+        if got is None:
+            return _View(kind, "unloaded")
         if isinstance(got, Building):
             if not (got.docs_ready if kind == "docs" else got.code_ready):
                 return _View(kind, "building")
