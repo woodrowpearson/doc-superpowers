@@ -6,6 +6,7 @@ cooldown is driven by a fake clock; the bounded wait is real time.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.metadata
 import json
 import os
@@ -74,12 +75,14 @@ class CountingFromPath:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, delay: float = 0.0) -> None:
         self.calls: list[tuple[str, ...]] = []
+        self.paths: list[str] = []
         self._lock = threading.Lock()
         original = SembleIndex.from_path
         counter = self
 
         def wrapper(cls, path, content=(), *args, **kwargs):
             with counter._lock:
+                counter.paths.append(str(path))
                 counter.calls.append(tuple(c.value for c in ([content] if hasattr(content, "value") else content)))
             if delay:
                 time.sleep(delay)
@@ -202,9 +205,9 @@ def test_cooldown_scales_with_build_time(git_repo, tiny_model: str, monkeypatch:
             clock.advance(10)  # the docs build "takes" 10 clock seconds
         return real_from_path(path, content, *args, **kwargs)
 
-    monkeypatch.setattr(SembleIndex, "from_path", classmethod(slow_docs_build))
-    first = ready(pool.get(repo.root))
-    monkeypatch.undo()
+    with monkeypatch.context() as scoped:  # never monkeypatch.undo(): it would revert the cache isolation too
+        scoped.setattr(SembleIndex, "from_path", classmethod(slow_docs_build))
+        first = ready(pool.get(repo.root))
     assert first.build_seconds["docs"] == 10
 
     edited = repo.write("docs/shipping.md", SHIPPING_MD + "\nShipping fee currency.\n")
@@ -271,8 +274,11 @@ def test_code_disabled_counts_as_ready_while_building(git_repo, tiny_model: str,
     cfg = make_cfg(repo, tiny_model, code={"enabled": False})
     CountingFromPath(monkeypatch, delay=0.5)
 
-    building = IndexPool(cfg).get(repo.root, wait_s=0.05)
+    pool = IndexPool(cfg)
+    building = pool.get(repo.root, wait_s=0.05)
     assert building == Building(repo.root, docs_ready=False, code_ready=True)
+    # let the build finish inside this test, so no thread outlives it
+    assert isinstance(pool.get(repo.root, wait_s=30), WorktreeIndexes)
 
 
 def test_build_error_captured(git_repo, tiny_model: str) -> None:
@@ -372,10 +378,64 @@ def test_wait_zero_never_blocks(git_repo, tiny_model: str, monkeypatch: pytest.M
     cfg = make_cfg(repo, tiny_model)
     CountingFromPath(monkeypatch, delay=0.5)
 
+    pool = IndexPool(cfg)
     started = time.monotonic()
-    result = IndexPool(cfg).get(repo.root, wait_s=0)
+    result = pool.get(repo.root, wait_s=0)
     assert time.monotonic() - started < 0.4
     assert isinstance(result, Building)
+    # let the builds finish inside this test, so no thread outlives it
+    assert isinstance(pool.get(repo.root, wait_s=30), WorktreeIndexes)
+
+
+def test_eviction_waits_for_a_build_in_flight(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An entry whose build is running is never the eviction victim: a re-get must not start a second build."""
+    repo = git_repo()
+    seed(repo)
+    other = repo.add_worktree("other", "branch-other")
+    cfg = make_cfg(repo, tiny_model)
+    counter = CountingFromPath(monkeypatch, delay=0.5)
+    pool = IndexPool(cfg, max_worktrees=1)
+
+    assert isinstance(pool.get(repo.root, wait_s=0.05), Building)
+    assert isinstance(pool.get(other, wait_s=0), Building)
+    # both are building, so neither can go: a temporary overshoot of max_worktrees
+    assert pool.resident() == [repo.root, other]
+
+    done = ready(pool.get(repo.root, wait_s=30))  # the same build, not a second one
+    assert done.docs is not None and done.code is not None
+    assert sorted(counter.paths) == sorted([str(repo.root)] * 2 + [str(other)] * 2)
+
+    # once nothing is in flight the pool shrinks back on the next use
+    ready(pool.get(other, wait_s=30))
+    assert pool.resident() == [other]
+    assert len(counter.paths) == 4
+
+
+def test_code_content_all_expands(git_repo, tiny_model: str) -> None:
+    """Config accepts code.content ["all"] and semble's enum has no such member: expand it, as semble's CLI does."""
+    repo = git_repo()
+    seed(repo)
+    cfg = make_cfg(repo, tiny_model, code={"content": ["all"]})
+
+    result = ready(IndexPool(cfg).get(repo.root))
+    assert result.error == {}
+    assert result.code is not None
+    assert {c.value for c in result.code.content} == {"code", "docs", "config"}
+
+
+def test_unusable_code_content_is_an_error_not_an_exception(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    cfg = make_cfg(repo, tiny_model)
+    forged = dataclasses.replace(cfg, code=dataclasses.replace(cfg.code, content=("bogus",)))
+    pool = IndexPool(forged)
+
+    result = ready(pool.get(repo.root))  # must not raise
+    assert result.docs is not None
+    assert result.code is None
+    assert "bogus" in result.error["code"]
+    assert "docs" not in result.error
+    assert ready(pool.get(repo.root)).error.keys() == {"code"}, "a config error does not clear itself"
 
 
 def test_concurrent_gets_share_one_build(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch) -> None:
