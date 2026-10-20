@@ -12566,10 +12566,13 @@ test_lg_new_create_usage() {
   assert_contains "$LG_ERR" "--create" "…naming --create"
   lg new --sev P1 "${c[@]}"
   assert_eq "3" "$LG_RC" "--sev without --create: usage (3)"
+  assert_contains "$LG_ERR" "--sev goes with --create" "…from the --create check"
   lg new --paths a.js "${c[@]}"
   assert_eq "3" "$LG_RC" "--paths without --create: usage (3)"
+  assert_contains "$LG_ERR" "--paths goes with --create" "…from the --create check"
   lg new --body-file body.md "${c[@]}"
   assert_eq "3" "$LG_RC" "--body-file without --create: usage (3)"
+  assert_contains "$LG_ERR" "--body-file goes with --create" "…from the --create check"
   lg new --create "${c[@]}"
   assert_eq "3" "$LG_RC" "--create without --title: usage (3)"
   lg new --create --title "" "${c[@]}"
@@ -12636,6 +12639,49 @@ echo "{\"id\":\"flag:a\",\"ledger\":null,\"defined_in\":[]}"'
   assert_eq "2" "$LG_RC" "every name to -99 taken: exit 2"
   assert_contains "$LG_ERR" "$b-99.md" "…naming the last one tried"
   assert_eq "99" "$(lg_new_files | grep -c busy)" "…no file written (the link, -2 … -99)"
+  teardown
+}
+
+test_lg_new_create_never_overwrites() {
+  echo "test: #36 final review m4 — new --create's write never replaces a name another writer takes after its check (DOC_TOOLS_LEDGER_SELFTEST=create-race: a file just before the write; create-race-dir: a directory): exit 2 'appeared', the other writer's file kept, no temp file left"
+  lg_rel_fixture '{"base":"main","keys":{"mode":"merge"}}'
+  local p
+  p="docs/issues/$(lg_today)-raced.md"
+  DOC_TOOLS_LEDGER_SELFTEST=create-race lg new --create --title Raced --ledger app --summary "Another writer wins" --format json
+  assert_eq "2|1" "$LG_RC|$(json_count "$LG_OUT")" "a file takes the name just before the write: exit 2, one JSON object"
+  assert_contains "$LG_ERR" "$p appeared while the item was being written: nothing written" "…the 'appeared' error"
+  assert_eq "another writer" "$(cat "$p" 2>/dev/null)" "…the other writer's file kept, not replaced"
+  assert_eq "" "$(ls -A docs/issues | grep '^\.lg-' || true)" "…no temp file left beside it"
+  rm -f "$p"
+  DOC_TOOLS_LEDGER_SELFTEST=create-race-dir lg new --create --title Raced --ledger app --summary "A directory takes the name"
+  assert_eq "2" "$LG_RC" "a directory takes the name just before the write: exit 2"
+  assert_contains "$LG_ERR" "$p appeared while the item was being written: nothing written" "…the 'appeared' error"
+  assert_eq "" "$(ls -A "$p" 2>/dev/null)" "…nothing written inside the directory"
+  assert_eq "" "$(ls -A docs/issues | grep '^\.lg-' || true)" "…no temp file left"
+  rmdir "$p" 2>/dev/null || rm -rf "$p"
+  lg new --create --title Raced --ledger app --summary "No race" --format json
+  assert_eq "0|$p" "$LG_RC|$(jq -r '.path' <<<"$LG_OUT")" "no race: exit 0, the file written"
+  assert_eq "# Raced" "$(lg_body "$p")" "…whole"
+  : > "$TEST_DIR/umask-ref"
+  assert_eq "$(ls -l "$TEST_DIR/umask-ref" | cut -c1-10)" "$(ls -l "$p" | cut -c1-10)" "…with the mode a new file gets under the umask"
+  assert_eq "" "$(ls -A docs/issues | grep '^\.lg-' || true)" "…no temp file left"
+  # A filesystem without hard links (an ln that always fails): an exclusive
+  # create, then the bytes — still never over another writer's file.
+  local nol q
+  nol=$(harness_mktemp_d lg-noln)
+  printf '#!/bin/sh\necho "ln: not supported" >&2\nexit 1\n' > "$nol/ln"
+  chmod +x "$nol/ln"
+  q="docs/issues/$(lg_today)-no-links.md"
+  PATH="$nol:$PATH" lg new --create --title "No links" --ledger app --summary "Written without ln" --format json
+  assert_eq "0|$q" "$LG_RC|$(jq -r '.path' <<<"$LG_OUT")" "ln failing, the name free: exit 0, the file written"
+  assert_eq "# No links" "$(lg_body "$q")" "…whole"
+  assert_eq "$(ls -l "$TEST_DIR/umask-ref" | cut -c1-10)" "$(ls -l "$q" | cut -c1-10)" "…with the umask's mode"
+  assert_eq "" "$(ls -A docs/issues | grep '^\.lg-' || true)" "…no temp file left"
+  DOC_TOOLS_LEDGER_SELFTEST=create-race PATH="$nol:$PATH" lg new --create --title "Raced again" --ledger app --summary "Another writer wins"
+  assert_eq "2" "$LG_RC" "ln failing and the name taken: exit 2"
+  assert_contains "$LG_ERR" "appeared while the item was being written: nothing written" "…the 'appeared' error"
+  assert_eq "another writer" "$(cat "docs/issues/$(lg_today)-raced-again.md" 2>/dev/null)" "…the other writer's file kept"
+  assert_eq "" "$(ls -A docs/issues | grep '^\.lg-' || true)" "…no temp file left"
   teardown
 }
 
@@ -12792,6 +12838,16 @@ test_lg_upkeep_found_by_signals() {
   lg upkeep --range main..feat --items docs/archive/issues/old.md
   assert_eq "3" "$LG_RC" "--items naming an archived item: usage (3)"
   assert_contains "$LG_ERR" "archived item" "…saying so"
+  # A value with a leading '-' is a value, never a jq option: usage (3).
+  lg upkeep --range main..feat --items -x --format json
+  assert_eq "3|1" "$LG_RC|$(json_count "$LG_OUT")" "--items -x: usage (3), one JSON object"
+  assert_contains "$LG_ERR" '--items "-x" is not one item' "…naming the value"
+  lg upkeep --range main..feat --items=-x
+  assert_eq "3" "$LG_RC" "--items=-x: usage (3)"
+  assert_contains "$LG_ERR" '--items "-x" is not one item' "…naming the value"
+  lg upkeep --range main..feat --items app-4 --items=--arg
+  assert_eq "3" "$LG_RC" "--items app-4 --items=--arg: usage (3)"
+  assert_contains "$LG_ERR" '--items "--arg" is not one item' "…naming the value"
   # The PR body (--pr passes it): key-in-pr-body, through the core.
   a=$(git rev-parse main)
   b=$(git rev-parse feat)
@@ -13366,6 +13422,8 @@ test_lg_upkeep_pr_failures() {
 {"number":5,"head":"done","state":"merged","url":"u5","head_oid":"$f","merge_commit":"0123456789abcdef0123456789abcdef01234567"}
 {"number":6,"head":"done2","state":"merged","url":"u6","head_oid":"$f","merge_commit":null}
 {"number":9,"head":"elsewhere","state":"open","url":"u9","head_oid":"89abcdef0123456789abcdef0123456789abcdef"}
+{"number":10,"head":"fork","state":"open","url":"https://github.com/o/r/pull/10","head_oid":"89abcdef0123456789abcdef0123456789abcdef","cross":true}
+{"number":11,"head":"first","state":"merged","url":"u11","merge_commit":"$(git rev-list --max-parents=0 HEAD | head -n 1)"}
 EOF
   printf '{"number":8,"body":"see app-5"}\n' > "$d/view-8"
   : > "$d/list-fail"
@@ -13384,13 +13442,29 @@ EOF
   assert_contains "$LG_ERR" "closed" "…saying so"
   lg upkeep --pr 5 --format json
   assert_eq "2" "$LG_RC" "a merge_commit this clone does not have: exit 2"
-  assert_contains "$LG_ERR" "git fetch origin" "…with the fetch command"
+  assert_contains "$LG_ERR" "is not in this clone (git fetch origin)" "…with the fetch command"
   assert_not_contains "$LG_OUT" "(no proposals)" "…never '(no proposals)'"
   lg upkeep --pr 6
   assert_eq "2" "$LG_RC" "a merged PR without a merge_commit: exit 2"
   lg upkeep --pr 9
   assert_eq "2" "$LG_RC" "an open PR whose head_oid this clone does not have: exit 2"
-  assert_contains "$LG_ERR" "git fetch origin" "…with the fetch command"
+  assert_contains "$LG_ERR" "PR #9's head 89abcdef0123 is not in this clone (git fetch origin)" \
+    "…the fetch command, host-neutral (the url names no pull ref)"
+  lg upkeep --pr 10
+  assert_eq "2" "$LG_RC" "an open PR (a fork's) whose head_oid this clone does not have: exit 2"
+  assert_contains "$LG_ERR" "PR #10's head 89abcdef0123 is not in this clone (git fetch origin pull/10/head)" \
+    "…a pull URL: the fetch names pull/<n>/head"
+  lg upkeep --pr 11
+  assert_eq "2" "$LG_RC" "a merge_commit with no parent (a root commit): exit 2"
+  assert_contains "$LG_ERR" "PR #11's merge commit $(git rev-list --max-parents=0 HEAD | head -n 1 | cut -c1-12) has no parent" "…saying so"
+  assert_not_contains "$LG_ERR" "unshallow" "…not a shallow clone: no --unshallow"
+  lg_enable '{"base":"main","adapters":{"pr":"tools/pr.sh"},"cache":{"remote_ttl_minutes":0},"inflight":{"pull_refs":"refs/pull/*/head"}}'
+  lg upkeep --pr 9
+  assert_eq "2" "$LG_RC" "inflight.pull_refs set, the head not here: exit 2"
+  assert_contains "$LG_ERR" "is not in this clone (git fetch origin refs/pull/9/head)" "…the fetch names the host's pull ref"
+  lg upkeep --pr 10
+  assert_contains "$LG_ERR" "is not in this clone (git fetch origin refs/pull/10/head)" "…the config's form before the url's"
+  lg_enable '{"base":"main","adapters":{"pr":"tools/pr.sh"},"cache":{"remote_ttl_minutes":0}}'
   lg upkeep --pr 8 --format json
   assert_eq "0" "$LG_RC" "the open PR: exit 0"
   assert_json_field "$LG_OUT" '[.range, (.pr | tojson), ([.items[] | "\(.key):\(.found_by | join(","))"] | join(" "))] | join("|")' \
@@ -13424,6 +13498,20 @@ EOF
   lg upkeep --pr 8
   assert_eq "2" "$LG_RC" "an open PR, config base not resolving: exit 2"
   assert_contains "$LG_ERR" "nope/x" "…naming it"
+  # A shallow clone (depth 1 at feat): the merge commit's parent is past
+  # its boundary — the message names git fetch --unshallow.
+  local sh
+  sh=$(harness_mktemp_d lg-shallow)
+  git clone -q --depth 1 "file://$TEST_DIR" "$sh/c" 2>/dev/null
+  printf '{"number":12,"head":"feat","state":"merged","url":"u12","merge_commit":"%s"}\n' "$f" > "$d/list"
+  cd "$sh/c"
+  lg_enable '{"base":"main","adapters":{"pr":"tools/pr.sh"},"cache":{"remote_ttl_minutes":0}}'
+  lg_up_pr_stub "$d"
+  lg upkeep --pr 12
+  cd "$TEST_DIR"
+  assert_eq "2" "$LG_RC" "a shallow clone, the merge commit's parent past its boundary: exit 2"
+  assert_contains "$LG_ERR" "PR #12's merge commit ${f:0:12} has no parent here: this clone is shallow (git fetch --unshallow)" \
+    "…naming git fetch --unshallow"
   teardown
 }
 
@@ -14307,6 +14395,7 @@ run_tests() {
   test_lg_new_create_writes_item
   test_lg_new_create_usage
   test_lg_new_create_no_file_on_failure
+  test_lg_new_create_never_overwrites
   test_lg_new_create_suggest_contracts
   test_lg_new_create_glob_mismatch
   test_lg_new_create_no_relations_default
