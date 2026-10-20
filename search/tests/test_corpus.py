@@ -695,3 +695,22 @@ def test_front_matter_scalars_from_the_cached_head(git_repo) -> None:
     # a caller cannot change the cached parse
     corpus.front_matter("docs/a.md")["key"] = "changed"
     assert corpus.front_matter("docs/a.md")["key"] == "chat-70"
+
+
+def test_title_and_front_matter_in_one_read(git_repo) -> None:
+    repo = git_repo()
+    repo.write("docs/a.md", "---\nkey: chat-70\n---\n# The Title\n\n## Part\n")
+    repo.write("docs/plain.md", "no heading at all\n")
+    repo.write("docs/bin.md", "\x00\x01 not text")
+    repo.commit("base")
+    corpus = make_corpus(repo)
+
+    assert corpus.title_and_front_matter("docs/a.md") == ("The Title", {"key": "chat-70"})
+    assert corpus.title_and_front_matter("./docs/a.md") == ("The Title", {"key": "chat-70"})
+    assert corpus.title_and_front_matter("docs/plain.md") == ("plain", {})  # no H1: the file name, as for meta
+    assert corpus.title_and_front_matter("docs/bin.md") is None
+    assert corpus.title_and_front_matter("docs/missing.md") is None
+    assert corpus.title_and_front_matter("docs/a.md")[0] == meta_of(corpus, "docs/a.md").title
+    title, fields = corpus.title_and_front_matter("docs/a.md")
+    fields["key"] = "changed"
+    assert corpus.title_and_front_matter("docs/a.md")[1] == {"key": "chat-70"}

@@ -896,12 +896,12 @@ def test_ident_tiers_then_shorter_path_then_path_order(git_repo, tiny_model: str
     resp = world.search("ZED-9", scope="docs", limit=10)
 
     assert paths(resp) == [
-        "docs/zed-9.md",
+        "docs/fm-hit.md",  # a front-matter value equal to the token: an explicit key
+        "docs/zed-9.md",  # then the path, shorter first, then in path order
         "docs/x/zed-9.md",
         "docs/y/zed-9.md",
         "docs/zed-9-longer-name.md",
-        "docs/title-hit.md",
-        "docs/fm-hit.md",
+        "docs/title-hit.md",  # then the title
     ]
     assert all(hit.legs == ("ident",) for hit in resp.hits)
     # no docs-leg chunk: the file's first chunk from the docs index stands in
@@ -910,11 +910,116 @@ def test_ident_tiers_then_shorter_path_then_path_order(git_repo, tiny_model: str
     assert first.heading_path == ("About ZED-9",)
 
 
+def ident_paths(world: World, query: str, **kw) -> list[str]:
+    resp = world.search(query, scope="docs", limit=kw.pop("limit", 10), **kw)
+    return [h.path for h in resp.hits if "ident" in h.legs]
+
+
+def test_ident_matches_whole_identifiers_not_substrings(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    write_notes(repo)
+    # the sibling with the shorter name would win a substring match
+    repo.write("docs/adr/ADR-114.md", "# Other decision\n\nWe use a queue.\n")
+    repo.write("docs/adr/ADR-11-caching-layer-decision.md", "# Caching layer\n\nWe use a cache.\n")
+    repo.write("docs/specs/SPEC-OPS-021-ledger.md", "# Ledger\n\nqueue event handler.\n")
+    repo.write("docs/titles.md", "# ADR-1140: a title\n\nqueue event handler.\n")
+    repo.commit("adrs")
+    world = make_world(repo, tiny_model)
+
+    assert ident_paths(world, "ADR-11") == ["docs/adr/ADR-11-caching-layer-decision.md"]
+    assert ident_paths(world, "adr-114") == ["docs/adr/ADR-114.md"]  # not ADR-1140 in a title either
+    assert ident_paths(world, "spec-ops-021") == ["docs/specs/SPEC-OPS-021-ledger.md"]
+    first = world.search("ADR-11", scope="docs", limit=1)
+    assert [h.path for h in first.hits] == ["docs/adr/ADR-11-caching-layer-decision.md"]
+    # a boundary is a non-alphanumeric character or an end: letters and digits do not make one
+    assert ident_paths(world, "dr-114") == []
+
+
+def test_ident_title_matches_at_boundaries_too(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    repo.write("docs/t1.md", "# Decision (ADR-114) on caching\n\nqueue.\n")
+    repo.write("docs/t2.md", "# Decision ADR-1141 on caching\n\nqueue.\n")
+    repo.commit("titles")
+    world = make_world(repo, tiny_model)
+    assert ident_paths(world, "ADR-114") == ["docs/t1.md"]
+
+
+def test_a_front_matter_key_beats_a_path_collision(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    write_notes(repo)
+    repo.write("docs/plans/chat-700.md", "# Plan 700\n\nqueue event handler.\n")
+    repo.write("docs/plans/chat-70-notes.md", "# Notes\n\nqueue event handler.\n")  # a path hit of the same token
+    repo.write("docs/items/a.md", "---\nkey: chat-70\n---\n# Streaming replies\n\nevent handler.\n")
+    repo.commit("items")
+    world = make_world(repo, tiny_model)
+
+    assert ident_paths(world, "chat-70") == ["docs/items/a.md", "docs/plans/chat-70-notes.md"]
+    assert [h.path for h in world.search("chat-70", scope="docs", limit=1).hits] == ["docs/items/a.md"]
+    assert "docs/plans/chat-700.md" not in ident_paths(world, "chat-70")
+
+
+def test_a_token_that_matches_many_files_is_dropped(git_repo, tiny_model: str) -> None:
+    from doc_search.searcher import IDENT_MAX_FILES
+
+    repo = git_repo()
+    seed(repo)
+    for i in range(IDENT_MAX_FILES + 2):
+        repo.write(f"docs/plans/2026-01-{i + 1:02d}-plan.md", f"# Plan {i}\n\nqueue event handler {i}.\n")
+    repo.commit("dated")
+    world = make_world(repo, tiny_model)
+
+    for scope in ("docs", "all"):
+        resp = world.search("2026 pricing model", scope=scope, limit=1)
+        assert all("ident" not in hit.legs for hit in resp.hits)
+    assert ident_paths(world, "2026 pricing model") == []
+    # the count is over the allowed files: a filter that leaves few of them makes the token selective
+    assert len(ident_paths(world, "2026", limit=50, path_prefix="docs/plans/2026-01-0")) == 9
+    # the other tokens of the query still count: SPEC-PAY-004 is selective
+    assert ident_paths(world, "2026 SPEC-PAY-004") == ["docs/specs/SPEC-PAY-004.md"]
+    # path-like tokens that name a whole directory go the same way
+    for i in range(IDENT_MAX_FILES + 1):
+        repo.write(f"docs/specs/SPEC-X-{i:03d}.md", f"# Spec {i}\n\nqueue.\n")
+    repo.commit("specs")
+    world = make_world(repo, tiny_model)
+    assert ident_paths(world, "docs/ docs/specs") == []
+
+
+def test_a_token_matching_exactly_the_limit_is_kept(git_repo, tiny_model: str) -> None:
+    from doc_search.searcher import IDENT_MAX_FILES
+
+    repo = git_repo()
+    seed(repo)
+    for i in range(IDENT_MAX_FILES):
+        repo.write(f"docs/plans/2026-01-{i + 1:02d}-plan.md", f"# Plan {i}\n\nqueue event handler {i}.\n")
+    repo.commit("dated")
+    world = make_world(repo, tiny_model)
+
+    assert len(ident_paths(world, "2026", limit=50)) == IDENT_MAX_FILES
+
+
+def test_a_dot_slash_path_matches_the_file(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    repo.write("docs/guides/setup-notes.md", "# Setup\n\nqueue event handler.\n")
+    repo.commit("guide")
+    world = make_world(repo, tiny_model)
+    for query in ("./docs/guides/setup-notes.md", "see './docs/guides/setup-notes.md'.", "docs/guides/setup-notes.md"):
+        assert ident_paths(world, query) == ["docs/guides/setup-notes.md"], query
+
+
 class FrontMatterCountingCorpus(Corpus):
-    front_matter_calls = 0
+    head_calls = 0  # title and front matter in one read
+    separate_calls = 0  # a front_matter() call on its own
+
+    def title_and_front_matter(self, path):
+        type(self).head_calls += 1
+        return super().title_and_front_matter(path)
 
     def front_matter(self, path):
-        type(self).front_matter_calls += 1
+        type(self).separate_calls += 1
         return super().front_matter(path)
 
 
@@ -924,13 +1029,13 @@ def test_ident_view_of_the_corpus_is_shared_by_the_filters_and_refreshes_with_th
     repo = git_repo()
     seed(repo)
     clock = FakeClock()
-    FrontMatterCountingCorpus.front_matter_calls = 0
+    FrontMatterCountingCorpus.head_calls = FrontMatterCountingCorpus.separate_calls = 0
     world = make_world(repo, tiny_model, corpus_cls=FrontMatterCountingCorpus, clock=clock)
-    calls = lambda: FrontMatterCountingCorpus.front_matter_calls  # noqa: E731
+    calls = lambda: FrontMatterCountingCorpus.head_calls  # noqa: E731
     files = len(world.corpus.files())
 
     world.search("zed-9", scope="docs")
-    assert calls() == files, "one front-matter read per corpus file"
+    assert calls() == files, "one head read per corpus file"
     world.search("zed-9 again", scope="docs", include_terminal=True)
     world.search("zed-9", scope="docs", doc_type=("spec",))
     world.search("refund rounding", scope="docs")  # no identifier: nothing gathered
@@ -942,6 +1047,7 @@ def test_ident_view_of_the_corpus_is_shared_by_the_filters_and_refreshes_with_th
     resp = world.search("zed-9", scope="docs")
     assert calls() == 2 * files + 1
     assert [h.path for h in resp.hits if "ident" in h.legs] == ["docs/items.md"]
+    assert FrontMatterCountingCorpus.separate_calls == 0, "title and front matter come from one head read"
 
 
 def test_ident_hit_for_a_doc_the_index_lacks_is_synthetic(git_repo, tiny_model: str) -> None:
@@ -980,6 +1086,11 @@ def test_ident_shares_the_docs_leg_chunk_when_there_is_one(git_repo, tiny_model:
         ("a-b x1 ab", []),  # under 4 characters, or no digit and no - _ . /
         ("ab-1 v1.2 tool_x src/a.py", ["ab-1", "v1.2", "tool_x", "src/a.py"]),
         ("chat-70 CHAT-70 chat-70", ["chat-70"]),  # once, whatever the case
+        ("./docs/a.md", ["docs/a.md"]),
+        ("'./docs/a.md', ././docs/b.md.", ["docs/a.md", "docs/b.md"]),
+        ("see ./docs/a.md.", ["docs/a.md"]),
+        ("(\"ADR-114\".)", ["ADR-114"]),
+        (".github/ci.yml ...", [".github/ci.yml"]),  # a leading dot of a name stays
         ("  ", []),
     ],
 )

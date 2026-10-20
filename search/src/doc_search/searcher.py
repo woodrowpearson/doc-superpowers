@@ -2,9 +2,9 @@
 
 Legs feed a response. The *docs leg* is semble's docs index searched with an exact pre-filter: the
 corpus files that pass `doc_type`, `path_prefix` and the terminal filter, among the files that index
-holds. The *ident leg* ranks the allowed files whose path, title or front matter spells an
-identifier of the query (`ADR-114`, `chat-70`): semble's BM25 drops tokens that start with a digit,
-so the number of an id is invisible to it. The optional *cloud leg* is another ranked list of doc
+holds. The *ident leg* ranks the allowed files whose front matter, path or title names an
+identifier of the query (`ADR-114`, `chat-70`) as a whole (`adr-11` is not `ADR-114`): semble's BM25
+drops tokens that start with a digit, so the number of an id is invisible to it. The optional *cloud leg* is another ranked list of doc
 chunks. The *code leg* is the code index; its hits under corpus paths become doc hits when they
 pass the filters and are dropped otherwise, the rest stay code (with `scope=docs` the code index is
 asked only about the allowed files it holds, which reaches corpus files of a code type such as
@@ -23,6 +23,7 @@ from that half with a note, unless the half the scope needs is the one still bui
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -51,13 +52,16 @@ CODE_FETCH = 2
 MEMO_ENTRIES = 32
 MEMO_WORKTREES = 4
 MAX_IDENT_TOKENS = 8
+# An identifier is selective. A token that matches more than this many allowed files is not one
+# (`2026`, `docs/`, `docs/specs`) and the ident leg ignores it, so it cannot flood the other legs.
+IDENT_MAX_FILES = 10
 
 # docs legs, in the order they enter the RRF (the earlier leg wins an exact tie: an exact identifier
 # match beats a file that only ranks first by similarity) and in the order a leg's chunk represents a file
 RANK_ORDER = ("ident", "docs", "cloud", "code")
 PREFER = ("docs", "cloud", "code", "ident")
 
-_TOKEN_STRIP = "\"'`,;:!?()[]{}<>.\u201c\u201d\u2018\u2019"
+_TOKEN_STRIP = "\"'`,;:!?()[]{}<>\u201c\u201d\u2018\u2019"  # not ".": a name can start with one
 _TOKEN_MARKS = frozenset("-_./")
 
 
@@ -72,19 +76,30 @@ class CloudLeg(Protocol):
 def identifier_tokens(query: str) -> list[str]:
     """The words of `query` that look like identifiers: ids, keys, file names, paths.
 
-    A word qualifies when, with the punctuation around it stripped (quotes, commas, brackets, a
-    final full stop), it has at least 4 characters and contains a digit or one of `- _ . /`.
+    A word qualifies when, with what surrounds it stripped (quotes, commas, brackets, a final full
+    stop, a leading `./`), it has at least 4 characters and contains a digit or one of `- _ . /`.
     Each token once whatever its case, first spelling kept, at most MAX_IDENT_TOKENS.
     """
     found: dict[str, str] = {}
     for word in query.split():
-        token = word.strip(_TOKEN_STRIP)
+        token = _clean_token(word)
         if len(token) < 4 or not (any(c.isdigit() for c in token) or _TOKEN_MARKS & set(token)):
             continue
         found.setdefault(token.lower(), token)
         if len(found) == MAX_IDENT_TOKENS:
             break
     return list(found.values())
+
+
+def _clean_token(word: str) -> str:
+    token = word
+    while True:
+        cleaned = token.strip(_TOKEN_STRIP).rstrip(".")
+        while cleaned.startswith("./"):
+            cleaned = cleaned[2:]
+        if cleaned == token:
+            return token
+        token = cleaned
 
 
 def model_label(model: str | None) -> str:
@@ -121,13 +136,20 @@ class _Row:
     title_l: str
     values: frozenset[str]  # the scalar front-matter values
 
-    def tier(self, token: str) -> int | None:
-        """0 when `token` is in the path, 1 in the title, 2 when it is a front-matter value, else None."""
-        if token in self.path_l:
+    def tier(self, token: str, boundary: re.Pattern[str]) -> int | None:
+        """How `token` (lowercase) names this file, strongest first, else None.
+
+        0: a front-matter value equal to it, an explicit key. 1: it occurs in the path, 2: in the
+        title, with a non-alphanumeric character or an end on both sides (`boundary`), so `adr-11`
+        is not in `ADR-114` and `chat-70` is not in `chat-700`.
+        """
+        if token in self.values:
             return 0
-        if token in self.title_l:
+        if token in self.path_l and boundary.search(self.path_l):
             return 1
-        return 2 if token in self.values else None
+        if token in self.title_l and boundary.search(self.title_l):
+            return 2
+        return None
 
 
 @dataclass
@@ -417,12 +439,15 @@ class Searcher:
         docs_leg: list[Hit],
         worktree: Path,
     ) -> list[Hit]:
-        """The allowed files that spell an identifier of the query, best first.
+        """The allowed files named by an identifier of the query, best first.
 
-        Tokens are matched without case: first the files whose path holds one (shorter path first,
-        then path order), then the files whose title holds one, then those with a front-matter value
-        equal to one. Nothing reads file contents here: path, title and front matter come from the
-        corpus's cached parse, gathered once per corpus listing and `search.rescan_seconds`.
+        Tokens (`identifier_tokens`) are matched without case, as whole identifiers: a front-matter
+        value equal to the token (tier 0), the token in the path (1) or in the title (2) between
+        non-alphanumeric characters or ends. A file takes its best tier over the tokens; within a
+        tier the shorter path comes first, then path order. A token that matches more than
+        IDENT_MAX_FILES allowed files is dropped. Nothing reads file contents here: title and front
+        matter come from the corpus's cached head parse, gathered once per corpus listing and
+        `search.rescan_seconds`.
 
         A file is shown by the docs leg's best chunk of it when there is one, else by its first chunk
         in the docs index, else by a stand-in at line 1 with the title as the text.
@@ -430,15 +455,25 @@ class Searcher:
         tokens = [token.lower() for token in identifier_tokens(query)]
         if not tokens or not allowed:
             return []
-        matches: list[tuple[int, int, str, _Row]] = []
+        patterns = [re.compile(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])") for token in tokens]
+        per_token: list[list[tuple[int, _Row]]] = [[] for _ in tokens]
         for row in self._ident_rows(corpus, worktree):
             if row.path not in allowed:
                 continue
-            tiers = [tier for tier in (row.tier(token) for token in tokens) if tier is not None]
-            if tiers:
-                matches.append((min(tiers), len(row.path), row.path, row))
-        matches.sort(key=lambda match: match[:3])
-        rows = [match[3] for match in matches[: limit * DOCS_FETCH]]
+            for found, token, pattern in zip(per_token, tokens, patterns, strict=True):
+                tier = row.tier(token, pattern)
+                if tier is not None:
+                    found.append((tier, row))
+        best: dict[str, tuple[int, int, str, _Row]] = {}
+        for found in per_token:
+            if not found or len(found) > IDENT_MAX_FILES:
+                continue
+            for tier, row in found:
+                kept = best.get(row.path)
+                if kept is None or tier < kept[0]:
+                    best[row.path] = (tier, len(row.path), row.path, row)
+        ranked = sorted(best.values(), key=lambda match: match[:3])
+        rows = [match[3] for match in ranked[: limit * DOCS_FETCH]]
 
         best_local: dict[str, Hit] = {}
         for hit in docs_leg:
@@ -467,11 +502,12 @@ class Searcher:
                 return memo.rows
         built = []
         for path in listing:
-            meta = corpus.meta(path)
-            if meta is None:
+            head = corpus.title_and_front_matter(path)  # one read per file: title and front matter together
+            if head is None:
                 continue
-            values = frozenset(value.strip().lower() for value in corpus.front_matter(path).values())
-            built.append(_Row(path, path.lower(), meta.title, meta.title.lower(), values))
+            title, fields = head
+            values = frozenset(value.strip().lower() for value in fields.values())
+            built.append(_Row(path, path.lower(), title, title.lower(), values))
         entry = _RowsMemo(at=now, listing=listing, rows=tuple(built))
         with self._lock:
             self._rows[worktree] = entry
