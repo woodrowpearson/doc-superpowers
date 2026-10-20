@@ -235,6 +235,11 @@ class Corpus:
         self._outlines: dict[str, tuple[Sig, tuple[tuple[int, int, str], ...]]] = {}
         self._skipped: dict[str, str] = {}
 
+    @property
+    def docindex(self) -> DocIndex:
+        """The doc-index this corpus reads, shared so a caller's cross-links agree with its metadata."""
+        return self._docindex
+
     # discovery
 
     def files(self) -> list[str]:

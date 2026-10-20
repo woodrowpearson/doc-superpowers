@@ -65,11 +65,15 @@ class Building:
     """`get` ran out of time: at least one kind has not finished its first build.
 
     A kind that is switched off counts as ready, there being nothing to wait for.
+    `partial` carries the kinds that did finish (an index, or the error that ended its build),
+    so a caller can answer from the ready half; it is None when no kind has finished. It takes
+    no part in equality or hashing.
     """
 
     worktree: Path
     docs_ready: bool
     code_ready: bool
+    partial: WorktreeIndexes | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -159,9 +163,9 @@ class IndexPool:
     def get(self, worktree: Path | str, wait_s: float = 20.0) -> WorktreeIndexes | Building:
         """The worktree's indexes, revalidated if due, waiting up to `wait_s` seconds for builds.
 
-        Returns `Building` only while a kind has never finished a build; once every kind has
-        (even with an error) the answer is a `WorktreeIndexes`, stale if a refresh is still
-        running. Safe to call from several threads.
+        Returns `Building` only while a kind has never finished a build (its `partial` holds
+        the kinds that have); once every kind has (even with an error) the answer is a
+        `WorktreeIndexes`, stale if a refresh is still running. Safe to call from several threads.
         """
         top = Path(worktree).resolve()
         deadline = time.monotonic() + max(0.0, wait_s)  # real time: the injected clock may not move
@@ -249,10 +253,20 @@ class IndexPool:
             state = entry.states.get(name)
             return state is None or state.checked_at is not None
 
-        if not (ready("docs") and ready("code")):
-            return Building(entry.worktree, docs_ready=ready("docs"), code_ready=ready("code"))
+        docs_ready, code_ready = ready("docs"), ready("code")
+        if docs_ready and code_ready:
+            return IndexPool._snapshot(entry)
+        finished = IndexPool._snapshot(entry)
+        some = any(state.checked_at is not None for state in entry.states.values())
+        return Building(entry.worktree, docs_ready, code_ready, partial=finished if some else None)
+
+    @staticmethod
+    def _snapshot(entry: _Entry) -> WorktreeIndexes:
+        """The indexes of the kinds that have finished a build; a kind still on its first build is left out."""
         out = WorktreeIndexes()
         for name, state in entry.states.items():
+            if state.checked_at is None:
+                continue
             if name == "docs":
                 out.docs = state.index
             else:
