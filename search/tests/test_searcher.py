@@ -20,7 +20,7 @@ from doc_search.repo import GitError, RepoInfo
 from doc_search.searcher import Searcher, model_label
 from doc_search.transformer import TransformerSpec
 from doc_search.types import Hit, SearchRequest, SearchResponse
-from fakes_transformer import fake_encoder, release_builds, wait_until
+from fakes_transformer import fake_encoder, wait_until
 
 SPEC = """---
 status: accepted
@@ -1396,13 +1396,6 @@ def test_scope_docs_never_calls_the_code_index_with_an_empty_selection(
 # --- a transformer docs model ---------------------------------------------------------------------------
 
 FALLBACK_NOTE = "docs: semble's static index while the transformer index builds (see status)"
-
-
-@pytest.fixture
-def spec(fake_transformer: TransformerSpec):
-    """The fake transformer's spec; at the end every held encode is let go and every build thread joined."""
-    yield fake_transformer
-    release_builds()
 
 
 def test_header_names_the_static_model_while_the_transformer_index_builds(

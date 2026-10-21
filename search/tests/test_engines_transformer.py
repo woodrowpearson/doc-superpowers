@@ -3,7 +3,7 @@
 Real semble builds the static indexes (the fallback and the code index) on the tiny offline model;
 the transformer is the fake encoder of tests/fakes_transformer.py, whose `gate` holds a transformer
 build mid-encode. The cooldown runs on a fake clock where a test needs it; every wait is bounded,
-and no build thread outlives its test (the `spec` fixture opens the gates and joins them).
+and no build thread outlives its test (conftest's `spec` fixture opens the gates and joins them).
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import threading
 import time
 import weakref
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
@@ -38,7 +38,7 @@ from doc_search.engines import (
     WorktreeIndexes,
 )
 from doc_search.transformer import BATCH, MISSING_EXTRA, TransformerSpec
-from fakes_transformer import FakeEncoder, fake_encoder
+from fakes_transformer import FakeEncoder, fake_encoder, release_builds
 
 T = TypeVar("T")
 
@@ -193,31 +193,6 @@ class FromPathProbe:
     def static_docs(self) -> list[tuple[str, tuple[str, ...], str | None]]:
         """The calls that built a static docs index (the fallback's)."""
         return [call for call in self.calls if call[1] == ("docs",) and call[2] is None]
-
-
-BUILD_THREADS = ("doc-search-docs", "doc-search-code", "doc-search-static", "doc-search-transformer")
-
-
-def build_threads() -> list[threading.Thread]:
-    return [thread for thread in threading.enumerate() if thread.name.startswith(BUILD_THREADS)]
-
-
-def join_builds(timeout: float = 60.0) -> None:
-    deadline = time.monotonic() + timeout
-    for thread in build_threads():
-        thread.join(max(0.0, deadline - time.monotonic()))
-    alive = [thread.name for thread in build_threads() if thread.is_alive()]
-    assert not alive, f"build threads still running: {alive}"
-
-
-@pytest.fixture
-def spec(fake_transformer: TransformerSpec) -> Iterator[TransformerSpec]:
-    """The fake transformer's spec; at the end, every held encode is let go and every build thread joined."""
-    yield fake_transformer
-    for encoder in list(transformer._encoders.values()):
-        if isinstance(encoder, FakeEncoder):
-            encoder.gate.set()
-    join_builds()
 
 
 # -- the fallback and the swap ------------------------------------------------------------------------
@@ -435,7 +410,7 @@ def test_fallback_save_never_overwrites_transformer(
     finally:
         probe.release.set()
     assert probe.returned.wait(30)
-    join_builds()
+    release_builds()
     assert saved_docs_model(top) == spec.model_path, "the late static save overwrote the transformer index"
     skipped = [record for record in caplog.records if "is not saved" in record.getMessage()]
     assert skipped, "the fallback refresh never reached its save"
@@ -617,7 +592,7 @@ def test_intel_warning_once_per_pool(
     other = repo.add_worktree("b", "branch-b")
     cfg = make_cfg(repo, tiny_model)
     caplog.set_level(logging.WARNING, logger="doc_search.engines")
-    monkeypatch.setattr(engines_module, "_intel_mac", lambda: True)
+    monkeypatch.setattr(engines_module, "intel_mac", lambda: True)
     pool = IndexPool(cfg)
     for top in (repo.root, other):
         wait_until(swapped(pool, top), "the transformer index")
@@ -641,7 +616,7 @@ def test_intel_warning_once_per_pool(
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
     caplog.clear()
-    monkeypatch.setattr(engines_module, "_intel_mac", lambda: False)
+    monkeypatch.setattr(engines_module, "intel_mac", lambda: False)
     third = repo.add_worktree("c", "branch-c")
     wait_until(swapped(IndexPool(cfg), third), "a first build off Intel")
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
@@ -1007,3 +982,263 @@ def test_a_fallback_thread_that_cannot_start(
     encoder.gate.set()
     built = wait_until(swapped(pool, top), "the transformer index")
     assert built.docs is not None and built.docs.model is encoder and built.error == {}
+
+
+# -- the encoder session, the host lock's bounded wait, the back-off, the dropped fallback ----------
+
+
+def test_the_encoder_session_is_released_when_a_transformer_build_ends(
+    git_repo, tiny_model: str, spec: TransformerSpec
+) -> None:
+    repo = git_repo()
+    seed(repo)
+    cfg = make_cfg(repo, tiny_model)
+    top = repo.root
+    encoder = fake_encoder(spec)
+    built = wait_until(swapped(IndexPool(cfg), top), "the transformer index")
+    assert encoder.releases == 1, "released before the built index was announced"
+    assert built.docs.search("refund rounding", top_k=3), "a query after the release still answers"
+
+    transformer._reset_encoders()  # a new process: its build loads the valid saved index, encoding nothing
+    encoder = fake_encoder(spec)
+    clock = FakeClock()
+    pool = IndexPool(cfg, clock=clock)
+    loaded = ready(pool.get(top, wait_s=30))
+    assert loaded.docs is not None and loaded.docs.loaded_from_disk
+    assert encoder.releases == 1, "a thread that only loaded the index releases the session the load made"
+
+    touch(top / "docs" / "guide-07.md")
+    encoder.nan = True  # the refresh fails
+    clock.advance(3600)
+    wait_until(lambda: (g := ready(pool.get(top, wait_s=0.2))).transformer_error and pool.progress(top) is None and g,
+               "the refresh to fail")
+    assert encoder.releases == 2, "a failed build releases it too"
+
+
+def hold_host_lock(spec: TransformerSpec) -> tuple[threading.Event, threading.Thread]:
+    """Another process's encoder lock: held by a thread of this one (another open of the lock file) until the
+    returned event is set."""
+    from doc_search import encode_cache
+
+    held, release = threading.Event(), threading.Event()
+
+    def holder() -> None:
+        with encode_cache.host_lock(spec):
+            held.set()
+            release.wait(60)
+
+    thread = threading.Thread(target=holder, name="test-host-lock-holder", daemon=True)
+    thread.start()
+    assert held.wait(10)
+    return release, thread
+
+
+def test_a_refresh_waits_for_another_process_lock_only_so_long(
+    git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A refresh of a saved transformer index waits HOST_LOCK_REFRESH_WAIT_S for the lock, then encodes without it."""
+    assert engines_module.HOST_LOCK_REFRESH_WAIT_S == 10.0
+    monkeypatch.setattr(engines_module, "HOST_LOCK_REFRESH_WAIT_S", 0.5)
+    repo = git_repo()
+    seed(repo)
+    cfg = make_cfg(repo, tiny_model)
+    top = repo.root
+    clock = FakeClock()
+    pool = IndexPool(cfg, clock=clock)
+    built = wait_until(swapped(pool, top), "the transformer index")
+
+    caplog.set_level(logging.INFO, logger="doc_search.encode_cache")
+    release, holder = hold_host_lock(spec)
+    try:
+        touch(top / "docs" / "guide-10.md")
+        clock.advance(3600)
+        ready(pool.get(top, wait_s=0))
+        wait_until(phase(pool, top, "waiting"), "the refresh to wait for the lock")
+
+        def refreshed():
+            got = ready(pool.get(top, wait_s=0.2))
+            return got if got.docs is not built.docs and pool.progress(top) is None else None
+
+        after = wait_until(refreshed, "the refresh, without the lock", timeout=15)
+        assert holder.is_alive(), "the other process still holds the lock: the refresh ran without it"
+    finally:
+        release.set()
+        holder.join(10)
+    assert any("order currency" in text for text in chunk_texts(after.docs))
+    assert after.transformer_error is None and not after.docs_fallback
+    said = [r.getMessage() for r in caplog.records if r.name == "doc_search.encode_cache"]
+    assert len(said) == 1 and said[0].endswith(f"is still held by pid {os.getpid()} after 0.5 s: encoding without it")
+    assert caplog.records[-1].levelno == logging.INFO
+
+
+def test_a_first_build_waits_for_another_process_lock_however_long(
+    git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(engines_module, "HOST_LOCK_REFRESH_WAIT_S", 0.2)  # a first build ignores it
+    repo = git_repo()
+    seed(repo)
+    cfg = make_cfg(repo, tiny_model)
+    top = repo.root
+    encoder = fake_encoder(spec)
+    release, holder = hold_host_lock(spec)
+    try:
+        pool = IndexPool(cfg)
+        served = ready(pool.get(top, wait_s=30))
+        assert served.docs_fallback, "the static index serves while the first build waits"
+        wait_until(phase(pool, top, "waiting"), "the first build to wait for the lock")
+        time.sleep(1.5)  # many times the refresh's bound
+        assert pool.progress(top).phase == "waiting", "a first build gave up waiting for the lock"
+        assert ready(pool.get(top, wait_s=0)).docs_fallback
+        assert not any(batch for batch in encoder.forwarded), "nothing was encoded while the lock was held"
+    finally:
+        release.set()
+        holder.join(10)
+    built = wait_until(swapped(pool, top), "the first build, once the lock is free")
+    assert built.docs.model is encoder
+
+
+def test_failures_in_a_row_back_off(git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch) -> None:
+    """Each failure in a row doubles the capped cooldown base (60, 120, 240 s: 3 x that between checks), up to
+    TRANSFORMER_BACKOFF_CAP_S; a success starts again from the cap."""
+    repo = git_repo()
+    seed(repo)
+    cfg = make_cfg(repo, tiny_model)
+    top = repo.root
+    encoder = fake_encoder(spec)
+    clock = FakeClock()
+    real_from_path = SembleIndex.from_path
+
+    def slow_encode(cls, path, content=(), *args, **kwargs):
+        if kwargs.get("model_path") == spec.model_path:
+            clock.advance(1000)  # every transformer build "takes" 1000 clock seconds: the base is the 60 s cap
+        return real_from_path(path, content, *args, **kwargs)
+
+    monkeypatch.setattr(SembleIndex, "from_path", classmethod(slow_encode))
+    checks: list[str] = []
+    original = engines_module.get_validated_cache
+
+    def counting(path, model, content):
+        if model == spec.model_path:
+            checks.append(str(path))
+        return original(path, model, content)
+
+    monkeypatch.setattr(engines_module, "get_validated_cache", counting)
+    pool = IndexPool(cfg, clock=clock)
+    wait_until(swapped(pool, top), "the transformer index")
+
+    def recheck_after(seconds: float) -> bool:
+        before = len(checks)
+        clock.advance(seconds)
+        ready(pool.get(top, wait_s=0))
+        return len(checks) > before
+
+    def settled(what: str, failed: bool) -> None:
+        def check():
+            got = ready(pool.get(top, wait_s=0.2))
+            return got if pool.progress(top) is None and bool(got.transformer_error) is failed else None
+
+        wait_until(check, what)
+
+    touch(top / "docs" / "guide-11.md")
+    encoder.nan = True
+    assert not recheck_after(179) and recheck_after(2), "a success: 3 x 60 s"
+    settled("failure 1", failed=True)
+    assert not recheck_after(179) and recheck_after(2), "one failure: 3 x 60 s"
+    settled("failure 2", failed=True)
+    assert not recheck_after(359) and recheck_after(2), "two in a row: 3 x 120 s"
+    settled("failure 3", failed=True)
+    assert not recheck_after(719) and recheck_after(2), "three in a row: 3 x 240 s"
+    settled("failure 4", failed=True)
+    encoder.nan = False
+    assert not recheck_after(1439) and recheck_after(2), "four in a row: 3 x 480 s"
+    settled("the success", failed=False)
+    touch(top / "docs" / "guide-12.md")
+    assert not recheck_after(179) and recheck_after(2), "a success starts again: 3 x 60 s"
+    settled("the next refresh", failed=False)
+
+    state = pool._entries[top].states["docs"]
+    assert engines_module.TRANSFORMER_BACKOFF_CAP_S == 3600.0
+    state.failures = 400  # long past the cap: no overflow either
+    assert not pool._due(state, state.checked_at + 3 * 3600 - 1)
+    assert pool._due(state, state.checked_at + 3 * 3600)
+
+
+def go_offline(monkeypatch: pytest.MonkeyPatch) -> dict[str, bool]:
+    """A new process whose model files are gone until the returned switch's "on" is set False."""
+    transformer._reset_encoders()
+    make = transformer._make_encoder
+    offline = {"on": True}
+
+    def no_model_files(model: TransformerSpec, threads: int):
+        if offline["on"]:
+            raise OSError("no model files (offline)")
+        return make(model, threads)
+
+    monkeypatch.setattr(transformer, "_make_encoder", no_model_files)
+    return offline
+
+
+def test_a_stale_transformer_index_that_serves_drops_the_fallback(
+    git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fallback left by a run whose saved index did not load is dropped once that index serves stale."""
+    repo = git_repo()
+    seed(repo)
+    cfg = make_cfg(repo, tiny_model)
+    top = repo.root
+    wait_until(swapped(IndexPool(cfg), top), "the transformer index")
+    touch(top / "docs" / "guide-13.md")  # stale
+    offline = go_offline(monkeypatch)
+    probe = FromPathProbe(monkeypatch)
+    clock = FakeClock()
+    pool = IndexPool(cfg, clock=clock)
+    wait_until(lambda: (g := ready(pool.get(top, wait_s=0.2))).transformer_error and pool.progress(top) is None and g,
+               "the transformer build to fail")
+    assert pool._entries[top].fallback is not None and len(probe.static_docs()) == 1
+
+    offline["on"] = False
+    encoder = fake_encoder(spec)
+    encoder.gate.clear()  # the refresh holds mid-encode while the stale index serves
+    clock.advance(3600)
+    stale = wait_until(lambda: (g := ready(pool.get(top, wait_s=0.2))).docs is not None and not g.docs_fallback and g,
+                       "the stale transformer index to serve")
+    wait_until(phase(pool, top, "encoding"), "its refresh to encode")
+    assert pool._entries[top].fallback is None, "the fallback was not dropped when the stale index began serving"
+    clock.advance(3600)  # the fallback's own cooldown is long past: it would refresh if it were still there
+    assert ready(pool.get(top, wait_s=0.5)).docs is stale.docs
+    assert len(probe.static_docs()) == 1
+
+    encoder.gate.set()
+    after = wait_until(lambda: (g := ready(pool.get(top, wait_s=0.2))).docs is not stale.docs and g, "the refresh")
+    assert any("order currency" in text for text in chunk_texts(after.docs))
+    assert len(probe.static_docs()) == 1
+
+
+def test_a_fallback_never_rebuilds_while_a_transformer_index_is_saved(
+    git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its saved transformer index does not load: the fallback serves, and an edit does not rebuild it (a static
+    index that would never be saved, built again on every cooldown)."""
+    repo = git_repo()
+    seed(repo)
+    cfg = make_cfg(repo, tiny_model)
+    top = repo.root
+    wait_until(swapped(IndexPool(cfg), top), "the transformer index")
+    go_offline(monkeypatch)
+    probe = FromPathProbe(monkeypatch)
+    clock = FakeClock()
+    pool = IndexPool(cfg, clock=clock)
+    first = wait_until(lambda: (g := ready(pool.get(top, wait_s=0.2))).transformer_error and pool.progress(top) is None
+                       and g, "the transformer build to fail")
+    assert first.docs_fallback and len(probe.static_docs()) == 1
+
+    for doc in ("guide-14.md", "guide-15.md"):  # two rounds of an edit and the cooldowns passing
+        touch(top / "docs" / doc)
+        clock.advance(3600)
+        again = ready(pool.get(top, wait_s=5))
+        release_builds()  # the fallback's check and the transformer retry are done
+        again = ready(pool.get(top, wait_s=0))
+        assert again.docs is first.docs and again.docs_fallback, "the fallback keeps serving as it is"
+        assert "no model files" in again.transformer_error, "the transformer build was retried"
+    assert len(probe.static_docs()) == 1, "the fallback was rebuilt while the docs folder held a transformer index"
+    assert saved_docs_model(top) == spec.model_path

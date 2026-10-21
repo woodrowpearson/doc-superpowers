@@ -137,6 +137,17 @@ def fake_transformer(monkeypatch: pytest.MonkeyPatch, tiny_model: str) -> Iterat
     transformer._reset_encoders()
 
 
+@pytest.fixture
+def spec(fake_transformer: TransformerSpec) -> Iterator[TransformerSpec]:
+    """The fake transformer's spec, for the tests of what a pool does with it; at the end every held encode is let
+    go and every build thread joined (`fakes_transformer.release_builds`). test_transformer.py, which runs the
+    real encoder, has a `spec` of its own (the tiny ONNX model's)."""
+    from fakes_transformer import release_builds
+
+    yield fake_transformer
+    release_builds()
+
+
 @dataclass
 class GitRepo:
     """A throwaway git repository with its own HOME and no inherited git config."""

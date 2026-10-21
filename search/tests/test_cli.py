@@ -113,13 +113,6 @@ def warm_pool(repo, monkeypatch: pytest.MonkeyPatch) -> IndexPool:
 
 
 @pytest.fixture
-def spec(fake_transformer: TransformerSpec):
-    """The fake transformer's spec; at the end every held encode is let go and every build thread joined."""
-    yield fake_transformer
-    release_builds()
-
-
-@pytest.fixture
 def tx_repo(git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch):
     """An enabled repository whose docs model is the fake transformer, as the process's working directory."""
     made = git_repo()
@@ -405,7 +398,11 @@ def test_foreground_verbs_print_the_transformer_build_progress(
     opener.join(5)
 
     assert done.code == 0, done
-    assert "doc-search: docs: transformer index building, 0 chunks encoded" in done.err.splitlines()
+    # no static docs index saved (the command line builds none): the line says why it has no total
+    assert (
+        "doc-search: docs: transformer index building, 0 chunks encoded "
+        "(total unknown until a static docs index is saved)"
+    ) in done.err.splitlines()
     assert all(line.startswith("doc-search: docs: transformer index") for line in done.err.splitlines()), done.err
     assert [t.name for t in threading.enumerate() if t.name == "doc-search-progress"] == [], "stopped with the verb"
 
@@ -413,12 +410,22 @@ def test_foreground_verbs_print_the_transformer_build_progress(
 def test_foreground_progress_stops_when_the_verb_returns(
     tx_repo, spec: TransformerSpec, run, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A build done before the first interval: the printer never printed, and it is gone when the verb returns."""
     monkeypatch.setattr(cli, "PROGRESS_EVERY_S", 0.02)
+    started: list[str] = []
+    real_start = threading.Thread.start
+
+    def start(self: threading.Thread) -> None:
+        started.append(self.name)
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
     assert run("index").code == 0  # nothing held: the build is done in moments
     capsys.readouterr()
 
-    time.sleep(0.2)  # many intervals pass; the printer must be gone
-
+    assert "doc-search-progress" in started, "the printer ran for a transformer docs model"
+    assert [t.name for t in threading.enumerate() if t.name == "doc-search-progress"] == [], "joined by the verb"
+    time.sleep(0.2)  # many intervals pass: nothing prints
     assert capsys.readouterr().err == ""
 
 
@@ -572,6 +579,30 @@ def test_status_transformer_before_anything_is_built(tx_repo, spec: TransformerS
     assert payload["encode_cache"] == {"path": str(encode_cache_path(spec)), "bytes": None}
     assert payload["cache"] == {"docs": "absent", "code": "absent", "docs_fallback": "absent"}
     assert payload["ready"] is False
+
+
+def test_status_with_a_transformer_builds_and_loads_nothing(
+    tx_repo, spec: TransformerSpec, run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe makes no encoder (no model load), no build and no thread, before a build and after one saved."""
+    from doc_search import transformer
+
+    for when in ("nothing saved", "a transformer index saved"):
+        if when == "a transformer index saved":
+            assert run("index").code == 0  # another process built and saved it
+            release_builds()  # its threads are done
+            transformer._reset_encoders()  # a new process
+        spy = BuildSpy(monkeypatch)  # a fresh count (a second spy wraps the first: harmless)
+        text = run("status")
+        as_json = run("status", "--format", "json")
+        assert text.code == 0 and as_json.code == 0, when
+        assert spy.calls == [], f"{when}: status built or loaded an index"
+        assert build_threads() == [], f"{when}: status started a build"
+        assert transformer._encoders == {}, f"{when}: status made an encoder"
+        payload = json.loads(as_json.out)
+        assert payload["docs"]["state"] == "unloaded"
+        if when == "a transformer index saved":
+            assert payload["cache"]["docs"] == "valid" and "docs cache: valid" in text.lines
 
 
 def test_status_reads_the_build_another_process_publishes(tx_repo, spec: TransformerSpec, run) -> None:

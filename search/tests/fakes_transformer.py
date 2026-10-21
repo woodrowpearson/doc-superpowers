@@ -52,7 +52,8 @@ class FakeEncoder(Encoder):
       so a search of the previous index answers while a refresh is held.
     - `nan`: `_forward` returns NaN rows (a broken model), for queries too.
     - `forwarded`: every batch `_forward` ran, in order, queries included; `calls`: every `encode`
-      call, `(texts, kwargs)`.
+      call, `(texts, kwargs)`; `releases`: how many times the pool released its session (it has
+      none: `_forward` never needs one).
     """
 
     def __init__(self, spec: TransformerSpec, cache: EncodeCache | None, *, threads: int = 1) -> None:
@@ -67,7 +68,15 @@ class FakeEncoder(Encoder):
         self.forwarded: list[list[str]] = []
         self.calls: list[tuple[list[str], dict[str, Any]]] = []
         self.retired = False
+        self.releases = 0
+        self._session = None
+        self._session_lock = threading.Lock()
         self._local = threading.local()  # `indexing`: this thread's encode call is an indexing one
+
+    def release_session(self) -> None:
+        with self._session_lock:
+            self.releases += 1
+        super().release_session()
 
     def encode(self, sentences: str | Sequence[str], **kwargs: Any) -> np.ndarray:
         self.calls.append(([sentences] if isinstance(sentences, str) else list(sentences), dict(kwargs)))

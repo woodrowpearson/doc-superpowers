@@ -210,7 +210,9 @@ def test_the_sample_window_stays_bounded(worktree: Path) -> None:
     for second in range(1, 3601):
         clock.t = float(second)
         p.add(16)
+        p.add(100, cached=True)
     assert len(p._samples) <= RATE_WINDOW_S + 1
+    assert len(p._flow) <= 2 * (RATE_WINDOW_S + 1)  # an encoded add and a cached one a second
     assert p.view().rate == 16.0
 
 
@@ -271,7 +273,20 @@ def test_no_rate_without_elapsed_time(worktree: Path) -> None:
     assert p.view().rate is None
 
 
-def test_eta_is_remaining_over_rate(worktree: Path) -> None:
+def test_eta_of_a_cold_build_is_remaining_over_the_encoders_rate(worktree: Path) -> None:
+    """Nothing from the cache: the build's pace is its encoder's, and the ETA is what it always was."""
+    clock = Clock(0.0)
+    p = BuildProgress(worktree, "test-tiny", clock=clock)
+    p.total = 1000
+    for t in (2.0, 4.0, 6.0, 8.0, 10.0):
+        clock.t = t
+        p.add(32)
+    v = p.view()
+    assert v.rate == 16.0
+    assert v.eta_s == (1000 - 160) / 16.0
+
+
+def test_eta_counts_the_cache_hits_done_and_their_pace(worktree: Path) -> None:
     clock = Clock(0.0)
     p = BuildProgress(worktree, "test-tiny", clock=clock)
     p.total = 1000
@@ -279,8 +294,46 @@ def test_eta_is_remaining_over_rate(worktree: Path) -> None:
     clock.t = 10.0
     p.add(160)
     v = p.view()
-    assert v.rate == 16.0
-    assert v.eta_s == (1000 - 200) / 16.0  # the cache hits are done too
+    assert v.rate == 16.0  # the encoder's: the hits say nothing about it
+    assert v.eta_s == (1000 - 200) / 20.0  # 200 chunks done in 10 s, hits included
+
+
+def test_eta_of_a_mostly_cached_build_is_its_real_pace(worktree: Path) -> None:
+    """A second worktree: semble's calls of ~1,000 chunks are each a burst of hits and a few misses to encode.
+    The ETA is the minutes that pace leaves, not the hours the encoder's rate would."""
+    clock = Clock(0.0)
+    p = BuildProgress(worktree, "test-tiny", clock=clock)
+    p.total = 194_564
+    p.phase = "encoding"
+    for call in range(30):  # one call a second: 1,000 hits read, then 16 misses encoded
+        clock.t = call + 0.1
+        p.add(1000, cached=True)
+        clock.t = call + 1.0
+        p.add(16)
+    v = p.view()
+    assert v.done == 30 * 1016 and v.from_cache == 30_000
+    assert v.rate == 16.0, "the rate shown stays the encoder's"
+    assert v.eta_s == (194_564 - 30 * 1016) / 1016.0  # about 2 min 41 s
+    assert v.line() == (
+        "docs: transformer index building, 30,480 / 194,564 chunks encoded, ETA 2 min "
+        "(16.0 chunks/s; 30,000 from the encode cache)"
+    )
+    clock.t = 30.0 + RATE_WINDOW_S + 1  # a minute without anything done: no rate, no ETA
+    assert (p.view().rate, p.view().eta_s) == (None, None)
+
+
+def test_eta_without_a_rate_when_only_the_cache_answers(worktree: Path) -> None:
+    """Every chunk a hit for a minute: no encoder rate to show, but the build moves and has an ETA."""
+    clock = Clock(0.0)
+    p = BuildProgress(worktree, "test-tiny", clock=clock)
+    p.total = 10_000
+    p.phase = "encoding"
+    for second in range(1, 4):
+        clock.t = float(second)
+        p.add(1000, cached=True)
+    v = p.view()
+    assert v.rate is None
+    assert v.eta_s == (10_000 - 3000) / 1000.0
 
 
 def test_eta_needs_a_total_and_a_rate(worktree: Path) -> None:
@@ -377,10 +430,24 @@ def test_line_encoding_first_window_has_no_rate_and_no_eta() -> None:
 
 
 def test_line_encoding_unknown_total_has_no_denominator_and_no_eta() -> None:
+    """A first build without a static docs index to count from (the command line's, on a cold worktree) says so."""
     assert view(total=None, rate=16.1, from_cache=1203).line() == (
-        "docs: transformer index building, 12,345 chunks encoded (16.1 chunks/s; 1,203 from the encode cache)"
+        "docs: transformer index building, 12,345 chunks encoded (16.1 chunks/s; 1,203 from the encode cache; "
+        "total unknown until a static docs index is saved)"
     )
-    assert view(total=None).line() == "docs: transformer index building, 12,345 chunks encoded"
+    assert view(total=None).line() == (
+        "docs: transformer index building, 12,345 chunks encoded (total unknown until a static docs index is saved)"
+    )
+    assert progress.NO_TOTAL == "total unknown until a static docs index is saved"
+
+
+def test_line_encoding_of_a_refresh_has_no_total_and_says_nothing_of_it() -> None:
+    """A refresh encodes what changed: its total is unknown by nature, and no static index would tell it."""
+    assert view(total=None, first=False).line() == "docs: transformer index building, 12,345 chunks encoded"
+    assert view(total=None, first=False, rate=16.1).line() == (
+        "docs: transformer index building, 12,345 chunks encoded (16.1 chunks/s)"
+    )
+    assert "total unknown" not in view(first=True).line(), "a first build with a total has nothing to explain"
 
 
 def test_line_encoding_rate_one_decimal_and_short_eta() -> None:
@@ -390,12 +457,12 @@ def test_line_encoding_rate_one_decimal_and_short_eta() -> None:
 
 
 QUEUED_ARM = (
-    "docs: transformer index queued; at most 3 h 22 min for 194,564 chunks at ~16 chunks/s on this host "
+    "docs: transformer index queued; about 3 h 22 min for 194,564 chunks at ~16 chunks/s on this host "
     "(less for chunks already in the encode cache)"
 )
 
 
-def test_line_queued_is_an_upper_bound_from_the_real_formula(worktree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_line_queued_is_the_estimate_from_the_real_formula(worktree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """total / arch rate, rounded down by fmt_duration: 194,564 / 16.0 is 12,160 s, 3 h 22 min."""
     monkeypatch.setattr(progress, "arch_rate", lambda: 16.0)
     p = BuildProgress(worktree, "test-tiny", clock=Clock())
@@ -409,7 +476,7 @@ def test_line_queued_with_the_intel_rate_shows_it_unrounded(worktree: Path, monk
     p = BuildProgress(worktree, "test-tiny", clock=Clock())
     p.total = 194_564
     assert p.view().line() == (
-        "docs: transformer index queued; at most 15 h for 194,564 chunks at ~3.6 chunks/s on this host "
+        "docs: transformer index queued; about 15 h for 194,564 chunks at ~3.6 chunks/s on this host "
         "(less for chunks already in the encode cache)"
     )
 
@@ -419,7 +486,7 @@ def test_line_queued_from_a_view() -> None:
     assert v.line() == QUEUED_ARM
     v = view(phase="queued", done=0, total=3600, estimate_s=1000.0)  # 3.6 chunks/s, the Intel rate
     assert v.line() == (
-        "docs: transformer index queued; at most 16 min for 3,600 chunks at ~3.6 chunks/s on this host "
+        "docs: transformer index queued; about 16 min for 3,600 chunks at ~3.6 chunks/s on this host "
         "(less for chunks already in the encode cache)"
     )
 
@@ -464,6 +531,7 @@ def test_as_dict_holds_every_field() -> None:
         "estimate_s": 20.0,
         "holder_pid": 7,
         "pid": 4242,
+        "first": True,
     }
     assert ProgressView(**json.loads(json.dumps(d))) == v
 
@@ -485,16 +553,18 @@ def test_progress_path_is_per_resolved_worktree(worktree: Path, tmp_path: Path) 
     assert not cache_root().exists()  # a path is only computed, never created
 
 
-def test_publish_then_read_round_trips(worktree: Path) -> None:
+@pytest.mark.parametrize("first", [True, False], ids=["first", "refresh"])
+def test_publish_then_read_round_trips(worktree: Path, first: bool) -> None:
     clock = Clock(0.0)
-    p = BuildProgress(worktree, "gte-modernbert-base", clock=clock)
-    p.total = 1000
+    p = BuildProgress(worktree, "gte-modernbert-base", clock=clock, first=first)
+    p.total = 1000 if first else None
     p.phase = "encoding"
     p.add(40, cached=True)
     clock.t = 10.0
     p.add(160)
     expected = p.view()
-    assert expected.rate == 16.0 and expected.eta_s is not None
+    assert expected.rate == 16.0 and expected.first is first
+    assert (expected.eta_s is not None) is first
     assert read_progress(worktree) is None  # nothing published yet
     p.publish()
     assert read_progress(worktree) == expected
@@ -754,6 +824,9 @@ def test_read_progress_none_for_undecodable_bytes(worktree: Path) -> None:
         ("pid", 0),
         ("pid", -1),
         ("pid", 2**70),
+        ("first", 1),
+        ("first", None),
+        ("first", "yes"),
     ],
 )
 def test_read_progress_none_for_a_field_of_the_wrong_type(worktree: Path, key: str, value: object) -> None:
@@ -764,10 +837,11 @@ def test_read_progress_none_for_a_field_of_the_wrong_type(worktree: Path, key: s
     assert read_progress(worktree) is None
 
 
-def test_read_progress_none_for_a_missing_field(worktree: Path) -> None:
+@pytest.mark.parametrize("key", ["from_cache", "first"])
+def test_read_progress_none_for_a_missing_field(worktree: Path, key: str) -> None:
     _, path = _published(worktree)
     data = json.loads(path.read_text(encoding="utf-8"))
-    del data["from_cache"]
+    del data[key]
     path.write_text(json.dumps(data), encoding="utf-8")
     assert read_progress(worktree) is None
 

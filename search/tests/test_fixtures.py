@@ -67,7 +67,6 @@ def test_semble_runs_offline_with_an_isolated_cache(semble_cache: Path) -> None:
     assert semble_cache.is_absolute()
 
 
-
 def test_fake_transformer_gate_holds_indexing_only(fake_transformer) -> None:
     """A cleared gate holds a build mid-encode while a search, on the same encoder, still answers."""
     from fakes_transformer import fake_encoder

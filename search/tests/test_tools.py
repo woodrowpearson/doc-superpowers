@@ -24,7 +24,7 @@ from doc_search.repo import RepoInfo
 from doc_search.server import build_server
 from doc_search.tools import FETCH_MAX_LINES, DocTools
 from doc_search.transformer import TransformerSpec, default_threads
-from fakes_transformer import fake_encoder, release_builds, wait_until
+from fakes_transformer import fake_encoder, wait_until
 
 SPEC = """---
 status: accepted
@@ -975,13 +975,6 @@ TRANSFORMER_DOCS = {"model": "transformer:test-tiny"}
 STATIC_WHILE_BUILDING = "docs index: ready (semble's static index, while the transformer index builds)"
 
 
-@pytest.fixture
-def spec(fake_transformer: TransformerSpec):
-    """The fake transformer's spec; at the end every held encode is let go and every build thread joined."""
-    yield fake_transformer
-    release_builds()
-
-
 def encoding(pool: IndexPool, top: Path):
     """A `wait_until` check: the worktree's transformer build is encoding (returns its progress view)."""
 
@@ -997,7 +990,7 @@ def test_status_shows_the_static_index_serving_and_the_transformer_progress(
 ) -> None:
     repo = git_repo()
     seed(repo)
-    monkeypatch.setattr("doc_search.tools._intel_mac", lambda: False)
+    monkeypatch.setattr("doc_search.tools.intel_mac", lambda: False)
     fake_encoder(spec).gate.clear()  # the transformer build holds mid-encode
     world = make_world(repo, tiny_model, build=False, docs={**TRANSFORMER_DOCS, "threads": 3})
     top = repo.root
@@ -1032,10 +1025,10 @@ def test_status_model_line_threads_and_the_intel_note(
     source = "doc-search-tests/test-tiny, fake ONNX, 16-d"
     head = f"docs model: transformer:test-tiny ({source}, {default_threads()} threads)"
 
-    monkeypatch.setattr("doc_search.tools._intel_mac", lambda: False)
+    monkeypatch.setattr("doc_search.tools.intel_mac", lambda: False)
     assert head in world.tools.status(repo.root, warm=False).splitlines()
 
-    monkeypatch.setattr("doc_search.tools._intel_mac", lambda: True)
+    monkeypatch.setattr("doc_search.tools.intel_mac", lambda: True)
     intel = world.tools.status(repo.root, warm=False).splitlines()
     assert head + "; Intel: ~3.6 chunks/s against ~16 on M-series" in intel
 
@@ -1056,7 +1049,7 @@ def test_status_encode_cache_size(
 ) -> None:
     repo = git_repo()
     seed(repo)
-    monkeypatch.setattr("doc_search.tools._intel_mac", lambda: False)
+    monkeypatch.setattr("doc_search.tools.intel_mac", lambda: False)
     world = make_world(repo, tiny_model, build=False, docs=TRANSFORMER_DOCS)
     path = encode_cache_path(spec)
     if size is not None:
@@ -1091,7 +1084,7 @@ def test_status_survives_a_cache_location_it_cannot_read(
 def test_status_names_a_queued_transformer_build(
     git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A second worktree waits for the transformer lane: its block carries the queued line, with the upper bound."""
+    """A second worktree waits for the transformer lane: its block carries the queued line, with the estimate."""
     repo = git_repo()
     seed(repo)
     monkeypatch.setattr("doc_search.progress.arch_rate", lambda *args, **kwargs: 4.0)
@@ -1107,7 +1100,7 @@ def test_status_names_a_queued_transformer_build(
         return view if view is not None and view.phase == "queued" and view.total else None
 
     view = wait_until(queued, "the second worktree's transformer build to queue")
-    assert "at most" in view.line() and "estimated" not in view.line()
+    assert "queued; about " in view.line() and "at most" not in view.line()
     assert f"{view.total:,} chunks at ~4 chunks/s" in view.line()
 
     text = world.tools.status(top)

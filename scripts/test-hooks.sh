@@ -5810,7 +5810,7 @@ test_launcher_resolution_order() {
 }
 
 test_launcher_cloud_extra() {
-  echo "test: launcher: --extra cloud when docs/search/config.json has a non-null cloud; --all-extras when jq is missing; nothing extra otherwise"
+  echo "test: launcher: --extra cloud when docs/search/config.json has a non-null cloud; without jq, --all-extras --no-extra local-transformer; nothing extra otherwise"
   srh_fixture '{"cloud":{"project":"p"}}'
   local envroot nojq
   envroot=$(harness_mktemp_d envroot)
@@ -5833,20 +5833,24 @@ test_launcher_cloud_extra() {
   rm -f docs/search/config.json
   srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
   assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search serve" "$RUN_OUT" "no config: no extra"
-  # No jq on PATH: every extra.
+  # No jq on PATH: every extra but the transformer's (its onnxruntime has no wheel on older hosts).
   nojq=$(make_nojq_path)
   cp "$SRL_BIN/uv" "$nojq/uv"
   IRC=0
   IOUT=$(env DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= PATH="$nojq" /bin/sh "$SCRIPT_DIR/search/launch.sh" serve 2>&1) || IRC=$?
   assert_eq "0" "$IRC" "without jq: exit 0"
-  assert_eq "uv run --project $envroot/search --frozen --no-dev --all-extras doc-search serve" "$IOUT" "…--all-extras"
+  assert_eq "uv run --project $envroot/search --frozen --no-dev --all-extras --no-extra local-transformer doc-search serve" "$IOUT" "…no config: --all-extras --no-extra local-transformer"
+  printf '{"cloud":{"project":"p"}}\n' > docs/search/config.json
+  IRC=0
+  IOUT=$(env DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= PATH="$nojq" /bin/sh "$SCRIPT_DIR/search/launch.sh" serve 2>&1) || IRC=$?
+  assert_eq "uv run --project $envroot/search --frozen --no-dev --all-extras --no-extra local-transformer doc-search serve" "$IOUT" "…a cloud config: the cloud extra (in --all-extras), not the transformer's"
   teardown
 }
 
 test_launcher_transformer_extra() {
-  echo "test: launcher: --extra local-transformer when docs.model starts with transformer:, after --extra cloud when both; nothing extra for another or a non-string model"
+  echo "test: launcher: --extra local-transformer when docs.model starts with transformer:, after --extra cloud when both; nothing extra for another or a non-string model; without jq, --all-extras only when grep finds a transformer: model"
   srh_fixture '{"docs":{"model":"transformer:gte-modernbert-base"}}'
-  local envroot
+  local envroot nojq
   envroot=$(harness_mktemp_d envroot)
   srl_root "$envroot"
   srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
@@ -5874,6 +5878,20 @@ test_launcher_transformer_extra() {
   printf '{"docs":{"model":null},"code":{"model":"transformer:gte-modernbert-base"}}\n' > docs/search/config.json
   srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
   assert_not_contains "$RUN_OUT" "extra" "a transformer: only under code.model (which refuses it): no extra"
+  # No jq on PATH: grep looks for a "model" key whose value starts transformer:.
+  nojq=$(make_nojq_path)
+  cp "$SRL_BIN/uv" "$nojq/uv"
+  printf '{\n  "docs": {\n    "model": "transformer:gte-modernbert-base"\n  }\n}\n' > docs/search/config.json
+  IRC=0
+  IOUT=$(env DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= PATH="$nojq" /bin/sh "$SCRIPT_DIR/search/launch.sh" serve 2>&1) || IRC=$?
+  assert_eq "0" "$IRC" "without jq, a transformer docs.model: exit 0"
+  assert_eq "uv run --project $envroot/search --frozen --no-dev --all-extras doc-search serve" "$IOUT" "…--all-extras (the transformer's extra included)"
+  printf '{"docs":{"model" : "transformer:gte-modernbert-base"},"cloud":{"project":"p"}}\n' > docs/search/config.json
+  IOUT=$(env DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= PATH="$nojq" /bin/sh "$SCRIPT_DIR/search/launch.sh" serve 2>&1) || true
+  assert_eq "uv run --project $envroot/search --frozen --no-dev --all-extras doc-search serve" "$IOUT" "…on one line, spaced around the colon, beside a cloud object"
+  printf '{"docs":{"model":"minishlab/potion-base-8M"}}\n' > docs/search/config.json
+  IOUT=$(env DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= PATH="$nojq" /bin/sh "$SCRIPT_DIR/search/launch.sh" serve 2>&1) || true
+  assert_eq "uv run --project $envroot/search --frozen --no-dev --all-extras --no-extra local-transformer doc-search serve" "$IOUT" "…a static docs.model: every extra but the transformer's"
   teardown
 }
 
