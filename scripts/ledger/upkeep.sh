@@ -63,11 +63,14 @@
 # Touched contracts: an index contract whose defined_in matches a net-diff
 #   file upkeep.skip_globs does not match, when a changed line of that file
 #   names it, or that a "Contract-Change: <id> [— <line>]" trailer in the
-#   range names. A document-defined contract (design §4 D9: its defined_in
-#   is one markdown document — one entry ending in ".md", up_docdef) is
-#   touched by any net-diff edit of its document, skip_globs
-#   notwithstanding, with no name test. Read contracts: an untouched one
-#   whose read_by matches such a file with a changed line that names it.
+#   range names. A document-defined contract (design §4 D9, ruling R65:
+#   its defined_in is one literal markdown path — one entry ending in
+#   ".md", no glob metacharacter, up_docdef — that no other contract's
+#   defined_in names or matches) is touched by any net-diff edit of its
+#   document, skip_globs notwithstanding, with no name test; any other
+#   contract, one of a shared document included, as above. Read
+#   contracts: an untouched one whose read_by matches such a file with a
+#   changed line that names it.
 #   Names (design §4, D7): a
 #   changed line is an added or removed line of the net diff (git diff -U0;
 #   a binary file has none, a deleted file's removed lines count); it names
@@ -385,11 +388,15 @@ def up_claimed($KM; $FIN; $LP; $HM):
 # (any case), or its path ("./" dropped); else nothing.
 def up_item_ref($KM; $LP):
   . as $s | ($KM[$s | ascii_downcase] // ($s | sub("^\\./"; "") | select($LP[.] == true)) // empty);
-# Document-defined (design §4 D9): a contract whose defined_in is one
-# markdown document (a spec, an ADR) — its one entry ends in ".md".
+# Document-defined (design §4 D9, ruling R65), as far as the contract alone
+# tells: its defined_in is one literal markdown path (a spec, an ADR) — one
+# entry, ending in ".md", with no glob metacharacter (*, ?, {, }, \). The
+# core also needs no other contract to name or match that document.
 def up_docdef:
   (.defined_in | type) == "array" and (.defined_in | length) == 1
-  and (.defined_in[0] | type == "string" and endswith(".md"));
+  and (.defined_in[0] | type == "string" and endswith(".md") and (test("[*?{}\\\\]") | not));
+# A path as the path lists carry it (a newline as \001, a tab as \002).
+def up_enc: if test("[\n\t]") then gsub("\n"; "\u0001") | gsub("\t"; "\u0002") else . end;
 # A Contract-Change value: its id (the first word), and the rest without
 # the separator (":", "—", "–", "-") — as the in-flight scan reads it.
 def up_cc: (capture("^(?<w>[^ \t]*)(?<r>.*)$")) as $x
@@ -489,7 +496,7 @@ def up_link($I; $SH):
 # read_by), $dl (the changed lines of the files $fc and $rc hold:
 # _LG_AWK_UP_LINES), $rp ({paths entry: [contract ids]} by read_by, for
 # the live items; {} when $rc is), $dd ("<file>\t<id>": each net-diff file
-# a document-defined contract's defined_in matches, skip_globs aside), $pl
+# that is a document-defined contract's document, skip_globs aside), $pl
 # (the plans: "C\t<document>\t<plan>" for each one a document's changed
 # lines name, "M\t<plan>" for each in the net diff — _LG_AWK_UP_PLANS),
 # $plk (what each plan links: _LG_AWK_UP_PLAN_LINKS), $dtr ("<document>\t
@@ -526,9 +533,9 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
 # by any net-diff edit of its document ($DF), with no name test; or by a
 # Contract-Change line. $TALL every one, $TCH those upkeep may propose.
 | ($dl | up_by_file(.)) as $CL
-| lg_obj(($ix.contracts // [])[] | select(up_docdef) | {(.id): true}) as $DOCC
-| (up_named($fc[0]; $CL) | with_entries(select($DOCC[.key] != true))) as $CF
 | lg_lists($dd | split("\n")[] | select(. != "") | split("\t") | {k: .[1], v: (.[0] | up_dec)}) as $DF
+| lg_obj($DF | keys[] | {(.): true}) as $DOCC
+| (up_named($fc[0]; $CL) | with_entries(select($DOCC[.key] != true))) as $CF
 | lg_obj(($ix.contracts // [])[] | {(.id): true}) as $ISC
 | lg_lists($TR[] | select(.k == "contract_change") | .v | up_cc | select($ISC[.id] == true) | {k: .id, v: .line}) as $CCL
 | [(($CF | keys) + ($DF | keys) + ($CCL | keys) | unique)[] as $k
@@ -1025,24 +1032,29 @@ _lg_up_core() {
       || _lg_die "jq failed (the items' paths)"
     _lg_r_file_contracts "$_LG_UP_IX" "$s.ip.l" "$s.rp" read_by
   fi
-  # The document-defined contracts' documents (design §4 D9): "<file>\t<id>"
-  # for each net-diff file — skip_globs notwithstanding — the one defined_in
-  # entry of such a contract matches. That entry ends in ".md", and so does
-  # every plan: without a markdown file in the net diff (md ""), neither
-  # documents nor plans are looked for.
+  # The document-defined contracts' documents (design §4 D9, ruling R65):
+  # "<file>\t<id>" for each net-diff file — skip_globs notwithstanding —
+  # that is the one defined_in entry of a contract, a literal markdown path
+  # (up_docdef), and that no other contract's defined_in names or matches:
+  # by defined_in, the contracts of that file ($s.fc for a file skip_globs
+  # leaves, $s.fcm for a markdown file it matches) are that one alone.
+  # Without a markdown file in the net diff (md ""), no document and no
+  # plan is looked for.
   if LC_ALL=C grep -q '\.md$' "$s.diff.l"; then md=1; fi
   : > "$s.dd"
   if [ -n "$md" ]; then
-    # shellcheck disable=SC2016  # jq source
-    jq -L "$_LG_LIB" -r "$_LG_JQ_INCLUDE$_LG_JQ_UP_DEFS"'(.contracts // [])[] | select(up_docdef) | .id as $i
-      | .defined_in[0] | select(test("[[:cntrl:]]") | not) | "\($i)\u0001\(.)"' "$_LG_UP_IX" > "$s.ddg" \
-      || _lg_die "jq failed (the document-defined contracts)"
-    if [ -s "$s.ddg" ]; then
-      LC_ALL=C awk -v globs="$s.ddg" "$_LG_AWK_GLOB"'
-        BEGIN { while ((getline l < globs) > 0) { t = index(l, "\001"); k++; if (gx_add(k, substr(l, t + 1))) ID[k] = substr(l, 1, t - 1) } }
-        { gx_match($0); for (i = 1; i <= GX_MN; i++) print $0 "\t" ID[GX_M[i]] }' "$s.diff.l" > "$s.dd" \
-        || _lg_die "cannot match the range's files against the documents"
+    LC_ALL=C awk '/\.md$/' "$s.skip.l" > "$s.skipm.l" || _lg_die "cannot list the range's markdown files"
+    if [ -s "$s.skipm.l" ]; then
+      _lg_r_file_contracts "$_LG_UP_IX" "$s.skipm.l" "$s.fcm"
+    else
+      printf '{}\n' > "$s.fcm" || _lg_die "cannot write $s.fcm"
     fi
+    # shellcheck disable=SC2016  # jq source
+    jq -L "$_LG_LIB" -r --slurpfile fc "$s.fc" --slurpfile fm "$s.fcm" "$_LG_JQ_INCLUDE$_LG_JQ_UP_DEFS"'
+      ($fc[0] + $fm[0]) as $FA
+      | (.contracts // [])[] | select(up_docdef) | .id as $i
+      | .defined_in[0] | up_enc | select(($FA[.] // []) == [$i]) | "\(.)\t\($i)"' "$_LG_UP_IX" > "$s.dd" \
+      || _lg_die "jq failed (the document-defined contracts)"
   fi
   # The changed lines (Names; a document's, for the plans it cites): one git
   # diff-tree -p -U0 over the files a contract's defined_in or read_by
