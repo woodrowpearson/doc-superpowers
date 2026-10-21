@@ -1001,11 +1001,18 @@ def counting_checks(monkeypatch: pytest.MonkeyPatch, spec: TransformerSpec) -> l
     return checks
 
 
+def bump_mtime(path: Path) -> None:
+    """Change a file's mtime only: semble re-chunks it, and every chunk text is one the encode cache holds."""
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
+
+
 def test_the_session_is_released_only_after_the_threads_own_encode(
     git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A build or a refresh that encoded releases the session once, built or failed; a load or a recheck of an
-    unchanged index never does (the next query would pay a new session for nothing)."""
+    """A build or a refresh that ran a forward batch releases the session once, built or failed; a load, a recheck
+    of an unchanged index or a refresh served entirely from the encode cache never does (the next query would
+    pay a new session for nothing)."""
     repo = git_repo()
     seed(repo)
     cfg = make_cfg(repo, tiny_model)
@@ -1035,6 +1042,15 @@ def test_the_session_is_released_only_after_the_threads_own_encode(
     release_builds()
     assert encoder.releases == 0, "a thread that only loaded the index released the session the queries use"
 
+    bump_mtime(top / "docs" / "guide-07.md")  # a refresh whose chunks are all in the encode cache
+    clock.advance(3600)
+    wait_until(lambda: (g := ready(pool.get(top, wait_s=0.2))).docs is not loaded.docs and pool.progress(top) is None
+               and g, "the all-hits refresh")
+    release_builds()
+    assert encoder.forwarded == [], "the refresh read every chunk from the encode cache"
+    assert encoder.releases == 0, "a refresh served entirely from the encode cache released the session"
+    hits = ready(pool.get(top, wait_s=5))
+
     touch(top / "docs" / "guide-07.md")
     encoder.nan = True  # the refresh encodes, and fails validation
     clock.advance(3600)
@@ -1044,8 +1060,10 @@ def test_the_session_is_released_only_after_the_threads_own_encode(
     encoder.nan = False
     clock.advance(3600)
     wait_until(lambda: (g := ready(pool.get(top, wait_s=0.2))).transformer_error is None and pool.progress(top) is None
-               and g.docs is not loaded.docs and g, "the retry to land")
-    assert encoder.releases == 2, "the refresh that landed released it once"
+               and g.docs is not hits.docs and g, "the retry to land")
+    release_builds()
+    assert len(encoder.forwarded) >= 1, "the retry encoded the edited chunks (a NaN vector is never cached)"
+    assert encoder.releases == 2, "the refresh that encoded released it once"
 
 
 def test_a_recheck_of_one_worktree_leaves_another_worktrees_encode_its_session(
@@ -1115,7 +1133,6 @@ def test_a_refresh_waits_for_another_process_lock_only_so_long(
     built = wait_until(swapped(pool, top), "the transformer index")
 
     caplog.set_level(logging.INFO, logger="doc_search.encode_cache")
-    caplog.set_level(logging.INFO, logger="doc_search.engines")
     release, holder = hold_host_lock(spec)
     try:
         touch(top / "docs" / "guide-10.md")
@@ -1129,8 +1146,7 @@ def test_a_refresh_waits_for_another_process_lock_only_so_long(
 
         after = wait_until(refreshed, "the refresh, without the lock", timeout=15)
         assert holder.is_alive(), "the other process still holds the lock: the refresh ran without it"
-        # ...and may be saving this worktree's folder: the refreshed index serves, unsaved
-        assert pool.cache_state(top, "docs") == "stale", "an unlocked refresh saved beside the lock's holder"
+        assert pool.cache_state(top, "docs") == "valid", "it saved without the lock too"
     finally:
         release.set()
         holder.join(10)
@@ -1138,53 +1154,7 @@ def test_a_refresh_waits_for_another_process_lock_only_so_long(
     assert after.transformer_error is None and not after.docs_fallback
     said = [r.getMessage() for r in caplog.records if r.name == "doc_search.encode_cache"]
     assert len(said) == 1 and said[0].endswith(f"is still held by pid {os.getpid()} after 0.5 s: encoding without it")
-    unsaved = [r for r in caplog.records if r.name == "doc_search.engines" and "serves unsaved" in r.getMessage()]
-    assert len(unsaved) == 1 and unsaved[0].levelno == logging.INFO
-    assert unsaved[0].getMessage() == (
-        f"doc-search: the refreshed transformer docs index of {top} serves unsaved: another process still holds "
-        "the encoder lock (the next recheck refreshes it again)"
-    )
-
-    clock.advance(3600)  # the lock is free now: the next recheck refreshes again (from the cache) and saves
-    wait_until(lambda: ready(pool.get(top, wait_s=0.2)) and pool.progress(top) is None
-               and pool.cache_state(top, "docs") == "valid", "the saved refresh")
-    assert any("order currency" in text for text in chunk_texts(ready(pool.get(top, wait_s=5)).docs))
-
-
-def test_an_unlocked_refresh_saves_once_the_holder_lets_go(
-    git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The refresh gave up waiting and encodes; the holder lets go before it saves: it takes the lock and saves."""
-    monkeypatch.setattr(engines_module, "HOST_LOCK_REFRESH_WAIT_S", 0.3)
-    repo = git_repo()
-    seed(repo)
-    cfg = make_cfg(repo, tiny_model)
-    top = repo.root
-    encoder = fake_encoder(spec)
-    clock = FakeClock()
-    pool = IndexPool(cfg, clock=clock)
-    built = wait_until(swapped(pool, top), "the transformer index")
-
-    caplog.set_level(logging.INFO)
-    release, holder = hold_host_lock(spec)
-    try:
-        encoder.gate.clear()  # the unlocked refresh holds mid-encode
-        touch(top / "docs" / "guide-00.md")
-        clock.advance(3600)
-        ready(pool.get(top, wait_s=0))
-        wait_until(phase(pool, top, "encoding"), "the refresh to encode without the lock", timeout=15)
-    finally:
-        release.set()
-        holder.join(10)
-    encoder.gate.set()
-
-    def refreshed():
-        got = ready(pool.get(top, wait_s=0.2))
-        return got if got.docs is not built.docs and pool.progress(top) is None else None
-
-    wait_until(refreshed, "the refresh")
-    assert pool.cache_state(top, "docs") == "valid", "the lock came free before the save: it took it and saved"
-    assert not [r for r in caplog.records if "serves unsaved" in r.getMessage()]
+    assert caplog.records[-1].levelno == logging.INFO
 
 
 def test_a_first_build_waits_for_another_process_lock_however_long(
