@@ -104,7 +104,7 @@ def warm_pool(repo, monkeypatch: pytest.MonkeyPatch) -> IndexPool:
     """The repository's indexes already built, and the one pool every verb of the test gets."""
     pool = IndexPool(load_config(repo.root, {}))
     assert isinstance(pool.get(repo.root, wait_s=60), WorktreeIndexes)
-    monkeypatch.setattr("doc_search.server.IndexPool", lambda cfg: pool)
+    monkeypatch.setattr("doc_search.server.IndexPool", lambda cfg, **kwargs: pool)  # kwargs: fallback=False
     return pool
 
 
