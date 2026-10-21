@@ -95,7 +95,7 @@ chore: <maintenance task>
 release: vX.Y.Z
 ```
 
-An unscoped form (`docs: …`) is fine for a change with no single area. A project with a work ledger (`docs/ledger/config.json`, `references/ledger.md`) also reads these trailers from any line of a commit message (`[* ]<Trailer>: <value>`, so squash merges keep them): `Ledger-Claims: <key>` (config `trailers.claims`) claims an item for the branch; `Fixes` / `Closes` / `Resolves #<n>` (`trailers.claims_by_ref`) claims a hosted item; `Contract-Change: <contract-id> — <one line>` says a commit changes a contract; `Ledger-Ack: <notice id> — <clause>` acks an in-flight notice. This repository has no ledger. `release: vX.Y.Z` is the `release` action's one commit (`references/release.md`, step 11).
+An unscoped form (`docs: …`) is fine for a change with no single area. A project with a work ledger (`docs/ledger/config.json`, `references/ledger.md`) also reads these trailers from any line of a commit message (`[* ]<Trailer>: <value>`, so squash merges keep them): `Ledger-Claims: <key>` (config `trailers.claims`) claims an item for the branch; `Fixes` / `Closes` / `Resolves #<n>` (`trailers.claims_by_ref`) claims a hosted item; `Contract-Change: <contract-id> — <one line>` says a commit changes a contract (a contract the code never spells, a component or a pattern, counts as touched by `ledger upkeep` only through this line); a claim trailer on a commit that edits a spec or ADR names the item that owns the amendment (`ledger upkeep`); `Ledger-Ack: <notice id> — <clause>` acks an in-flight notice. This repository has no ledger. `release: vX.Y.Z` is the `release` action's one commit (`references/release.md`, step 11).
 
 ### Pull Requests
 
@@ -277,7 +277,7 @@ Ledger-enabled projects only: `docs/ledger/config.json` turns the work ledger on
 | Remote refs | the counter `refs/doc-superpowers/ledger/counters`, in-flight refs `refs/doc-superpowers/inflight/<host>/<branch>`, the views branch `doc-ledger-views` (all configurable) |
 | Cache (local, never committed) | `$(git rev-parse --git-common-dir)/doc-superpowers/ledger/` |
 | Index shape | `references/ledger-index.schema.json` (`ledger-index/1`) |
-| Plan task | `Ledger notices (chunk <n>)`, and a plan's `## Related work` table |
+| Plan task | `Ledger notices (chunk <n>)`, and a plan's `## Related work` table, its Mark column `include` or `exclude: <reason>` (an `include` row is how a plan links an item for `ledger upkeep`) |
 
 ### doc-search names
 

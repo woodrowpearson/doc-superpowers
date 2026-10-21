@@ -57,8 +57,8 @@ doc-superpowers/
 │   │   ├── index.sh            # The index build, its joins (registry, doc-index, git, PRs, claims) and caches; derived status
 │   │   ├── keys.sh             # Resolution, the counter ref and its CAS, allocation, provisional keys, finalize; new, assign, finalize
 │   │   ├── validate.sh query.sh   # validate --staged|--all|--plan|--pushed|--registry; show, ls, find, new, link, note
-│   │   ├── relations.sh        # Contracts, neighbours, candidates, related, recheck, suggest, sweep, commit-trailer parsing
-│   │   ├── upkeep.sh           # ledger upkeep: a range's involved items, touched and read contracts, the changes/consumes proposals (and validate --pushed's advisory)
+│   │   ├── relations.sh        # Contracts, neighbours, candidates, related, recheck, suggest, sweep, commit-trailer parsing; the one Related work reader (_LG_AWK_RW) that validate --plan, sweep --plan and upkeep share
+│   │   ├── upkeep.sh           # ledger upkeep: a range's involved items, the contracts it touches (a changed line names one; a spec's or ADR's own edit touches the contract that document alone defines) and reads, the changes/consumes proposals, unattributed_contracts (and validate --pushed's advisory)
 │   │   ├── views.sh adapters.sh   # view and publish; adapter calls, JSON-lines validation, the remote cache (TTL)
 │   │   ├── inflight.sh         # Branch scan, in-flight refs and facts, inflight, notices, acks, push, prune
 │   │   ├── init.sh hooks.sh    # ledger init (report, accept, import); the hook modes (notices --hook, state-watch --hook)
@@ -246,6 +246,8 @@ doc-superpowers/
 | Spec claims tests | `scripts/test-spec-claims.sh` |
 | Work ledger dispatch | `scripts/doc-tools.sh` `# --- Work ledger: dispatch, inert check, verdict helpers` section and `_lg_enter` (the inert check, then sourcing `scripts/ledger/lib.sh`); the `ledger <verb>` rows of `_VERBS`; the "Work ledger" help section in `_USAGE_NOTES` |
 | Work ledger modules | `scripts/ledger/lib.sh` (the module list, `_lg_init`, the config merge with `config.jq`); one module per concern (see the directory map) |
+| Work ledger upkeep | `scripts/ledger/upkeep.sh` (`_lg_up_core`: involved items, touched and read contracts, proposals, `unattributed_contracts`; `validate --pushed` calls it for its advisory); the Related work reader it shares with `validate --plan` and `sweep --plan`, `_LG_AWK_RW` in `scripts/ledger/relations.sh`; the rules in `references/ledger.md` → *Merge-time upkeep*, the design in `docs/superpowers/specs/2026-10-18-ledger-upkeep-and-filing-design.md` §4 |
+| Work ledger skill flows | SKILL.md's `ledger` action: `file` and `declare` are procedures over the verbs, not verbs — `references/ledger.md` → *Building on the ledger* (**Filing an item**, **Declaring after a change**); `review-pr` step 9 runs `upkeep` read-only and names `declare` |
 | Work ledger cache | `$(git rev-parse --git-common-dir)/doc-superpowers/ledger/` (`_LG_CACHE`, `lib.sh`): parse cache, indexes, remote cache, views, `push.log` |
 | Work ledger adapters | `scripts/ledger/adapters.sh` (`_lg_adapter`, `_lg_adapter_path`: `doc-superpowers:<name>` → `scripts/adapters/<name>.sh`; the JSON-lines contracts); `scripts/adapters/` |
 | Work ledger hook legs | `scripts/hooks/git/ledger-*`, `scripts/hooks/claude/ledger-*.sh`; the hook modes in `scripts/ledger/hooks.sh` and `inflight.sh`; installer: `scripts/hooks/install.sh` (`LG_BEGIN`/`LG_END`, `LEDGER_GIT_HOOKS`, `LEDGER_CLAUDE_HOOKS`) |
@@ -480,6 +482,17 @@ doc-tools.sh ledger <verb> [options] [args]
     provisional keys a branch adds since its merge-base with config base
   → in flight (inflight.sh): local, worktree, remote and <ref_prefix>/<host>/<branch> refs; fetch into
     refs/doc-superpowers/inflight-fetch/*; --push forced, --no-verify, after inflight.pre_push_check
+  → upkeep (upkeep.sh, `<a>..<b>`; the net diff without renames, the index of <b>: the working tree's
+    when <b> is HEAD): the items involved (claim trailers, an item file in the diff, a key in a message,
+    an item a plan the range adds or modifies links through an `include` Related work row, read by
+    relations.sh's _LG_AWK_RW) → the contracts touched (a changed line names the contract, or a
+    Contract-Change trailer; a spec's or ADR's own edit touches the contract that document alone
+    defines) and read (read_by) → each one no involved item declares goes to one item, as changes or
+    consumes with its evidence (an item the range adds takes contracts only when no other item is
+    involved, unless a claim trailer or --items names it; an amendment's contract goes first to the
+    item its cited plan or a claim trailer names, and to unattributed_contracts, with the plans it
+    cites, when a plan is cited and none reaches an involved item); writes nothing: the declare flow
+    confirms with a person, and `link` writes what was confirmed
   → adapters: doc-superpowers:<name> → scripts/adapters/<name>.sh; absolute or top-level paths; output
     checked line by line; non-zero or a broken line → exit 2
   → views (views.sh): render-md.jq / render-html.jq over the index; publish builds its commit with git

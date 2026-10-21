@@ -118,7 +118,8 @@ Does not use discovery:
   hooks          → scaffolding command, routes directly to install.sh
   release        → analyzes git history, not documentation scopes
   ledger         → routes directly to doc-tools.sh ledger (init's ledger step and
-                   ledger init read items, not scopes: their own sources and registry proposal)
+                   ledger init read items, not scopes: their own sources and registry proposal);
+                   ledger file and ledger declare are skill flows over its verbs
 ```
 
 ## Canonical Reference Files
@@ -603,7 +604,7 @@ The numbers and task names are those of `references/spec-lifecycle-actions.md`. 
 
 1. Read the plan document and identify chunk boundaries (`## Chunk N:` or `### Task N:` headings)
 1b. **Claims lines** — give each implementation task a `**Claims:**` line naming the claims it builds (or `**Claims:** none — <reason>`)
-1c. **Related work** — before the first task, paste `ledger sweep --plan <plan>` as the plan's `## Related work` table (confirmed relations, then candidates); the author marks each row `include` or `exclude: <reason>`, and `ledger validate --plan <plan>` checks the marks (advisory; `--strict` blocks). Routed on the ledger's 0/1/2/3 exit family
+1c. **Related work** — before the first task, paste `ledger sweep --plan <plan>` as the plan's `## Related work` table (confirmed relations, then candidates); the author marks each row `include` or `exclude: <reason>`, and `ledger validate --plan <plan>` checks the marks (advisory; `--strict` blocks). An `include` row also links the plan to that item for `ledger upkeep` (a spec or ADR amendment that cites the plan goes to the item it links). Routed on the ledger's 0/1/2/3 exit family
 2. **`Task N+1`, per chunk** — append a **guarded** spec update task — read the spec's current `Status` first, then apply the **Spec Status Model**; verify Implementation Notes, refine `code_refs` (`set-code-refs`), run `update-index`
 2b. **`Task N+1g`, Claims gate (chunk N)** — in each chunk, before its `Task N+1`: `claims gate --plan <plan> --chunk <N>`, run by the orchestrating agent, which promotes what the chunk built — a test claim through `claims promote`, a lint, log or judge claim by a reviewed status edit — and reconciles every red claim through the direction protocol before the next chunk starts
 2c. **`Task N+1n`, Ledger notices (chunk N)** — at the end of each chunk: `ledger notices --gate`, run by the orchestrating agent; an unacked `stop` (exit 1) is reconciled, or acked with a `Ledger-Ack: <id> — <clause>` trailer, before the next chunk starts; exit 2 — including "could not verify", when the in-flight fetch failed and only a stale copy or the refs here could decide — is never green
@@ -817,6 +818,7 @@ Claims are enabled when `docs/spec-claims/` exists. The chunk gate and the final
 | `/doc-superpowers spec-verify --mode=post-execute --specs=<paths> --design-doc=<path> [--plan=<path>]` | Final compliance check with PASS/FAIL verdict (`--plan`: full amendment landed-check) |
 | `/doc-superpowers spec-verify --mode=review --changed-files=<paths> [--specs=<paths>] [--plan=<path>]` | Spec coverage findings for code review |
 | `/doc-superpowers ledger <verb> [args]` | The work ledger, `doc-tools.sh ledger <verb>` (inert without `docs/ledger/config.json`, except `init`) |
+| `/doc-superpowers ledger file [<title>]` | A skill flow over the verbs, not a verb: duplicates first (`ledger find`), one question round, `ledger new --create --suggest-contracts` (the item file, all or nothing), then the relations the user confirmed with one `ledger link` (never commits unless asked) |
 | `/doc-superpowers ledger declare [--range <a>..<b> \| --range <a>...<b> \| --pr <n>] [--items <item>…]` | A skill flow over `ledger upkeep`, not a verb: confirm with the user the `changes` / `consumes` a range's items are missing, then write only what was confirmed with `ledger link` (attended, never in a CI run; never commits unless asked) |
 
 `hooks` takes the tier and CI flags listed under **Process: `hooks`**, and `[scope]` is read by `audit`, `update` and `diagram` only.
@@ -893,7 +895,7 @@ The phases are the three of the pipeline flowchart above.
 | 2 Action Execution | Draft release notes (`release`) | One general-purpose drafting agent | Release notes entry |
 | 2 Action Execution | Spec lifecycle (`spec-generate`, `spec-inject`, `spec-verify`) | The invoking agent runs the spec actions inline (no sub-agent dispatch; a claims gate task the plan carries may dispatch a judge, see **Sub-Agents**) | Formal specs, plan tasks, compliance reports |
 | 2 Action Execution | Install hooks (scaffolding) | `scripts/hooks/install.sh` | Git/Claude/CI hooks, the ledger sets |
-| 2 Action Execution | Work ledger (`ledger`; `init` step 12b; the `spec-inject` ledger tasks) | `doc-tools.sh ledger <verb>`, run inline (no agent) | Item fields and keys, `docs/ledger/` files, rendered views, notices |
+| 2 Action Execution | Work ledger (`ledger`, with its `file` and `declare` flows; `init` step 12b; the `spec-inject` ledger tasks) | `doc-tools.sh ledger <verb>`, run inline (no agent) | Item fields and keys, `docs/ledger/` files, rendered views, notices |
 | 3 Verification | Verify correctness | Verification gate function | Evidence-confirmed results |
 | 3 Verification | Human review | Developer approval | Approved changes |
 
@@ -928,6 +930,7 @@ The phases are the three of the pipeline flowchart above.
 | Missing review base | `review-pr` step 2, when the base (`origin/HEAD`, else `origin/main`) does not exist | Name the base to diff against | The review runs against that base; never a failed diff read as "no changes" |
 | Deprecation notices | `spec-generate` step 5b, after the stale content scan | "Apply deprecation notices now?" | Notices prepended to the affected sections, or deferred to `spec-inject` (execute) |
 | Spec drift review | After spec-inject (execute) | Review deviation flags | Decision to fix or accept |
+| Ledger filing | Ledger-enabled projects: `ledger file` (attended) | Say whether a listed match already tracks the work; answer one round (title, summary, ledger, severity, files, body); confirm the proposed contracts and related items | One `ledger new --create` and one `ledger link`; nothing committed unless asked |
 | Ledger declarations | Ledger-enabled projects: `ledger declare` (attended; `review-pr` step 9 names it) | Confirm each item's proposed `changes` / `consumes` (a multi-select; add values, or reject with a reason), and assign an unattributed contract to an item or leave it | One `ledger link` per item with what was confirmed; a rejected proposal is written nowhere; nothing committed unless asked |
 | Related work marks | Ledger-enabled projects: the plan's `## Related work` table (`spec-inject` step 1c) | Mark each row `include` or `exclude: <reason>` | `ledger validate --plan` passes; included candidates may be confirmed with `ledger link` |
 | Ledger notices gate | Ledger-enabled projects: the plan's `Ledger notices (chunk N)` task | Reconcile each unacked `stop`, or ack it with a `Ledger-Ack: <id> — <clause>` trailer; on exit 2 ("could not verify": the in-flight fetch failed) fix the fetch and re-run (`--fetch`) | `ledger notices --gate` exits 0; the next chunk starts |
