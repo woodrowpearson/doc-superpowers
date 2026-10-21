@@ -94,6 +94,7 @@ An unknown key, at any level, is an error that names it (`doc-search: invalid co
 | `SEMBLE_CACHE_LOCATION` | Where semble keeps its indexes (an absolute path); default the OS cache directory (`~/Library/Caches/semble` on macOS, `$XDG_CACHE_HOME/semble` or `~/.cache/semble` on Linux) |
 | `SEMBLE_MODEL_NAME` | semble's own default model, used where `docs.model` / `code.model` is `null` |
 | `HF_HOME` | Where model downloads are kept (Hugging Face's) |
+| `GRPC_ENABLE_FORK_SUPPORT` | doc-search sets it to `false` before the cloud extra loads, unless it is already set: with gRPC's default fork support, a git child forked while the cloud client is live sometimes died before exec |
 | `DOC_SUPERPOWERS_ROOT`, `CLAUDE_PLUGIN_CACHE` | Where the launcher looks for doc-superpowers (*Turning it on*) |
 
 ## CLI
