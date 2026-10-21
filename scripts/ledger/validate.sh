@@ -5,8 +5,9 @@
 # _LG_AWK_GLOB, parse.sh's _LG_AWK_JS, _lg_scratch_name, _lg_parse_prep,
 # _lg_parse_finish / _lg_parse_batch and frontmatter.awk (its functions,
 # mode=lib), index.sh's _lg_index, _lg_ix_json_obj and _LG_JQ_INDEX_DEFS,
-# keys.sh's _lg_k_cfg / _lg_provisional_in_range, and upkeep.sh's
-# _lg_up_index / _lg_up_core (validate --pushed's advisory).
+# keys.sh's _lg_k_cfg / _lg_provisional_in_range, relations.sh's _LG_AWK_RW
+# (validate --plan's Related work reader), and upkeep.sh's _lg_up_index /
+# _lg_up_core (validate --pushed's advisory).
 #
 # Modes (one of them; --registry may join any): --staged, --all, --plan
 # <plan> [--strict], --pushed <a>..<b> (their findings below, "Item

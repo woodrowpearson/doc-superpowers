@@ -144,7 +144,8 @@ _lg_glob_dirs() {
 # _lg_paths_filter <in-nul> <globs-file> <out-nul> [lines]: the paths of
 # <in-nul> (in order) that match one of the globs (one per line). A bad glob
 # dies. With "lines", <in> and <out> are path lines instead (a newline in a
-# name as \001, as the awk programs read them), and nothing is converted.
+# name as \001, as the awk programs read them; a tab travels as \002, so a
+# glob holding a literal tab matches nothing in this mode).
 _lg_paths_filter() {
   local in="$1" globs="$2" out="$3" msg rc=0 lst hit
   _lg_scratch_name
