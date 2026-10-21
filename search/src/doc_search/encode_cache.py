@@ -88,13 +88,17 @@ def encode_cache_path(spec: TransformerSpec) -> Path:
 
 
 def cache_size(path: Path) -> int | None:
-    """Bytes the cache takes on disk (the database and its `-wal` and `-shm` files); None when it does not exist."""
+    """Bytes the cache takes on disk (the database and its `-wal` and `-shm` files).
+
+    None when it does not exist or cannot be looked at (a directory in the way that is a file, one that
+    may not be read): `status` asks, and must never raise because of the cache location.
+    """
     try:
         total = path.stat().st_size
-    except FileNotFoundError:
+    except OSError:
         return None
     for suffix in ("-wal", "-shm"):
-        with suppress(FileNotFoundError):
+        with suppress(OSError):
             total += path.with_name(path.name + suffix).stat().st_size
     return total
 

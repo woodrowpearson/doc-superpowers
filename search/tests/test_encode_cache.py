@@ -282,6 +282,24 @@ def test_cache_size(tmp_path: Path, open_cache):
         assert size >= path.stat().st_size + wal.stat().st_size
 
 
+def test_cache_size_never_raises_for_an_odd_location(tmp_path: Path):
+    """`status` asks the size of a path it only names: a component that is a file, or a directory it may not read."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where a directory is expected")
+    assert cache_size(blocker / "encode" / "enc.sqlite") is None  # NotADirectoryError, not FileNotFoundError
+
+    if os.name == "posix" and os.geteuid() != 0:  # root reads anything
+        closed = tmp_path / "closed"
+        closed.mkdir()
+        (closed / "enc.sqlite").write_bytes(b"x" * 10)
+        closed.chmod(0)
+        try:
+            assert cache_size(closed / "enc.sqlite") is None  # PermissionError
+        finally:
+            closed.chmod(0o700)
+        assert cache_size(closed / "enc.sqlite") == 10
+
+
 @pytest.mark.parametrize("broken", ["directory", "garbage"])
 def test_unusable_cache_degrades(tmp_path: Path, broken: str, caplog: pytest.LogCaptureFixture):
     path = tmp_path / "enc.sqlite"

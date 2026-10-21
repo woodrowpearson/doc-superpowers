@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import platform
 import threading
-from collections.abc import Sequence
-from typing import Any
+import time
+from collections.abc import Callable, Sequence
+from typing import Any, TypeVar
 
 import numpy as np
 
@@ -32,6 +33,11 @@ TEST_SPEC = TransformerSpec(
     dim=16,
     max_tokens=512,
 )
+
+T = TypeVar("T")
+
+# The names of a pool's build threads (engines.py), for a test to join before it ends.
+BUILD_THREADS = ("doc-search-docs", "doc-search-code", "doc-search-static", "doc-search-transformer")
 
 # How long `_forward` waits for a closed gate before it fails: a test that never opens it fails
 # its build instead of hanging the run.
@@ -106,3 +112,28 @@ def fake_encoder(spec: TransformerSpec = TEST_SPEC) -> FakeEncoder:
     encoder = transformer._encoder_for(spec)
     assert isinstance(encoder, FakeEncoder), "fake_encoder() needs the fake_transformer fixture"
     return encoder
+
+
+def wait_until(check: Callable[[], T | None], what: str, timeout: float = 30.0) -> T:
+    """Poll `check` until it returns something truthy, and return that; fail after `timeout` seconds."""
+    deadline = time.monotonic() + timeout
+    while True:
+        value = check()
+        if value:
+            return value
+        if time.monotonic() > deadline:
+            raise AssertionError(f"timed out after {timeout:g} s waiting for {what}")
+        time.sleep(0.01)
+
+
+def release_builds(timeout: float = 60.0) -> None:
+    """End of a test: every fake encoder's gate is opened and the pools' build threads are joined."""
+    for encoder in list(transformer._encoders.values()):
+        if isinstance(encoder, FakeEncoder):
+            encoder.gate.set()
+    deadline = time.monotonic() + timeout
+    for thread in threading.enumerate():
+        if thread.name.startswith(BUILD_THREADS):
+            thread.join(max(0.0, deadline - time.monotonic()))
+    alive = [thread.name for thread in threading.enumerate() if thread.name.startswith(BUILD_THREADS)]
+    assert not alive, f"build threads still running: {alive}"

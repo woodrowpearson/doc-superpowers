@@ -14,7 +14,7 @@ Legs, in the order they are reported:
  - `cloud`: the cloud leg alone, asked directly with the allowed set (only when a cloud leg is given).
  - `all`: `scope=all`, the joined result.
  - `semble-single`: one semble index over docs and code (`docs.model`), queried at `k x 3` chunks and collapsed
-   per file.
+   per file. It is skipped for a transformer `docs.model`: the single index would encode the code with it.
 
 semble-single cannot tell a deprecated doc from a current one, so the legs it is compared with cannot either: the
 `docs` and `all` legs (and the allowed set of the `cloud` leg) include the terminal docs (deprecated, superseded,
@@ -323,6 +323,8 @@ def _cloud_ranker(cloud: CloudLeg, corpus_for: Callable[[Path], Corpus] | None, 
 def _single_ranker(cfg: Config, worktree: Path, k: int) -> Ranker:
     if not cfg.code.enabled:
         raise _Skip("code.enabled is false: there is no code index to join")
+    if cfg.docs.transformer is not None:  # one index has one model; the code index is static (code.model refuses this)
+        raise _Skip("docs.model is a transformer model: the single index would encode the code with it")
     try:
         index = SembleIndex.from_path(
             str(worktree), content=[ContentType.DOCS, ContentType.CODE], model_path=cfg.docs.model
