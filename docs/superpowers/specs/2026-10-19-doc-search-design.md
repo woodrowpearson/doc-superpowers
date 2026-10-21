@@ -220,7 +220,7 @@ The single store would have bought one call and one ranking. Both are properties
     - For a project **without** the cloud leg, it is the largest local gain measured.
     - **With** the cloud leg, recall is unchanged and MRR rises by about 0.10. The cloud leg already supplies transformer-grade recall, so the lever is optional there.
   - **What it costs:** one ~3 h build per M-series host, after which each worktree reuses the vectors and builds in about a minute. It is not a lever for the Intel host.
-- **A cheaper lever, still unmeasured:** `docs.model` can name a Model2Vec model distilled from gte-modernbert (`model2vec.distill`, which needs torch only at distill time, once). It adds zero runtime dependencies. The design note measures it first: if it keeps most of the +0.154, it replaces the transformer lever.
+- **The cheaper lever, measured:** `docs.model` can name a Model2Vec model distilled from gte-modernbert (`model2vec.distill`, torch at distill time only). Distilled at 256-d and 512-d, it scores 0.690 / 0.502 and 0.690 / 0.513 on the local docs leg, only +0.003 recall@10 over semble's default against the +0.10 its rule asks for, so it does not replace the transformer lever. Details are in the design note's §4.
 
 ## 5. The docs corpus and what a docs hit carries
 

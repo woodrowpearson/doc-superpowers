@@ -757,14 +757,14 @@
       "last_verified": null
     },
     "docs/superpowers/specs/2026-10-19-doc-search-design.md": {
-      "content_hash": "sha256:be4bda2e84e6a9508afe13f4a181186025e9ea30065308e2631f30206abf1709",
+      "content_hash": "sha256:d492602d1da56d685cd1c1ae27ef9516f49bc0dfbfcc71117034f4308b09f08a",
       "code_refs": [],
       "code_oids": {},
       "code_commit": null,
       "doc_type": "design-spec",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-20T23:31:17Z",
+      "last_verified": "2026-10-21T00:30:09Z",
       "implementation": []
     },
     "docs/superpowers/plans/2026-10-19-doc-search.md": {
@@ -795,14 +795,15 @@
       "implementation": []
     },
     "docs/superpowers/specs/2026-10-20-doc-search-local-transformer-design.md": {
-      "content_hash": "sha256:7d1c8703027e294904ca62459dba5f2911b6b74ab5c39d85250f4c8cb1bfa8d0",
+      "content_hash": "sha256:de35aac3d91817f87071e73e91f5cb566d1e59eabe03709ab945afbcdcc1185e",
       "code_refs": [],
       "code_oids": {},
       "code_commit": null,
       "doc_type": "design-spec",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": null
+      "last_verified": "2026-10-21T00:30:26Z",
+      "implementation": []
     }
   }
 }
