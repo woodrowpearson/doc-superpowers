@@ -1,5 +1,43 @@
 # Release Notes
 
+## v3.7.0 (2026-10-21)
+
+This release covers the two work-ledger use cases in #36 and #39: filing an item, and keeping items' relations up to date at merge time. `ledger new --create` writes the item file itself, and `/doc-superpowers ledger file` wraps it in a filing flow: duplicates first, then one question round, then the confirmed relations. `ledger upkeep` reads a range or a PR and proposes the `changes` / `consumes` relations its items are missing, each with evidence and a ready `ledger link` line. It never writes them. `/doc-superpowers ledger declare` confirms those proposals with a person and links them. On pre-push, `validate --pushed` gains an advisory for contracts a push touches that no involved item declares. It never blocks. On 23 real abundance-mvp PRs, two blind judges rated 0.78 / 0.74 of upkeep's proposals correct at `--top 0` (0.74 / 0.68 at the default `--top 3`), against a bar of 0.6. The design spec's *Acceptance* section has the details. A project without `docs/ledger/config.json` sees no change.
+
+### Upgrading from 3.6.0
+Nothing breaks. On a ledger host:
+- **Pre-push gets slower.** The ledger pre-push leg now runs the `undeclared-contract-change` advisory. It is skipped for an empty range and for a tip the base already holds. On abundance-mvp, the first push of a branch takes about 25 s cold and 6–7 s warm; a per-PR `upkeep` takes about 22 s cold and 4 s warm. To opt out, set `validate.undeclared_contract_change: false`. Any other non-default value gives one `could not check` advisory.
+- **Touched means named.** A contract counts as touched only when an added or removed line of its `defined_in` file names it. A contract the code never spells out (a component, a pattern) needs a `Contract-Change: <id> — <line>` trailer.
+- **Spec and ADR amendments raise advisories (D9).** Some contracts are defined by one document: a literal path, or a glob that matches exactly one file, that no other contract shares. Any edit of that document touches the contract. The amendment's owner comes from:
+  - the plans its changed lines cite, by repo path or relative link;
+  - the claims trailers on the commits that edit it.
+
+  When neither reaches an item, the contract is listed in `unattributed_contracts` with `cites`; it is never guessed.
+- **Plan convention.** A plan links an item through a frontmatter value (or list element) that is the item's key, alias or path, or through a Related work row marked exactly `include`. Key words in the plan body don't count. New plans should carry frontmatter `issue: <key>`. If your plans record their item only in host-specific fields, add an `issue:` line. For example, abundance-mvp's `ledger:` + `ledger-row:` plans get theirs from `docs/ledger/legacy.json`: `{"key": K}` → `issue: K`, `{"item": P}` → `issue: P`, archived → skip, no entry → list it for a human.
+- **Plans are found through the doc-index** (`doc_columns.plan` types and globs). A `docs/.doc-index.json` that is present but invalid makes `upkeep` exit 2 whenever the net diff holds a `.md` file, and the advisory reports `could not check`.
+- **In-flight caches** are recomputed once after the upgrade, because their signature changed.
+- **Known limitation (B1).** When `<b>` is not HEAD (`--pr` from another checkout, or `ledger declare --pr`), contracts from `adapters.contracts` come from the checked-out tree. Run from the PR's head.
+
+### Features
+- **`ledger upkeep (--range <a>..<b> | --range <a>...<b> | --pr <n>) [--items <item>…] [--top N] [--strict] [--no-repo-adapters] [--format text|json]`** (#39). It proposes:
+  - `changes`, from the contracts the range's diff touches;
+  - `consumes`, from `read_by` globs, and from listed but unchanged files whose contracts the item's own text names.
+
+  Each proposal carries `found_by` (including the new `plan-cited` and `plan-link`) and evidence. Contracts it cannot attribute are listed in `unattributed_contracts`. `--pr` walks merged and open PRs, and takes keys from the PR body. `--no-repo-adapters` refuses repository-provided adapters. `review-pr` step 9 runs `upkeep --no-repo-adapters` read-only on a ledger host and names the declare flow.
+- **`validate --pushed` advisory `undeclared-contract-change`** (#39). It runs offline, never changes the exit code, skips the base's own changes, and is opted out with `validate.undeclared_contract_change: false`.
+- **`ledger new --create --title <text> [--sev <value>] [--paths <a,b,…>] [--body-file <file>]`** (#36). It writes the item file in one all-or-nothing write and never overwrites. `--suggest-contracts [--top N]` proposes contracts at filing time. Relations are left to `ledger link`.
+- **`/doc-superpowers ledger file [<title>]`** (#36): the filing flow (new → suggest → confirm → link).
+- **`/doc-superpowers ledger declare [--range … | --pr <n>] [--items …]`**: the attended confirm-and-link flow over `upkeep`'s proposals. It never runs in CI.
+- **Contracts carry `read_by` globs**, in the registry, the contracts adapter and the index.
+
+### Changed
+- **A null config `base` means the default (`origin/main`)**. Before, an explicit `"base": null` read as no base in `keys.sh`, `relations.sh`, `index.sh` and `inflight.sh`, and made `publish` exit.
+- **One Related work reader** now serves `validate --plan`, `sweep --plan` and `upkeep`.
+
+### Other
+- Seven suites, 12831 assertions, under bash 5.x and `/bin/bash` 3.2: `test-doc-tools.sh` 1561, `test-hooks.sh` 1948, `test-spec-status-model.sh` 747, `test-doc-pr-release.sh` 625, `test-merge-driver.sh` 844, `test-spec-claims.sh` 3269, `test-ledger.sh` 3837. The total goes from 12169 to 12831. The ledger suite also passes in full under jq 1.6. doc-search's pytest suite is unchanged.
+- Design spec `docs/superpowers/specs/2026-10-18-ledger-upkeep-and-filing-design.md`; plans `docs/superpowers/plans/2026-10-18-ledger-upkeep-and-filing.md` and `docs/superpowers/plans/2026-10-20-upkeep-precision-and-declare.md`. The reference is `references/ledger.md` → *Merge-time upkeep*, *Filing an item*, *Declaring after a change*.
+
 ## v3.6.0 (2026-10-20)
 
 This release adds **doc-search**, an opt-in MCP server that answers "where is this specified, and where is it implemented" with one ranked list of docs and code. It keeps two semble indexes per worktree (docs and code), adds an exact-identifier docs leg and, optionally, a Vertex + Firestore cloud docs leg, fuses them by file, and puts the doc-index's cross-links on each hit. On abundance-mvp's corpus (6,513 docs, 66 known-answer queries) the fused docs search scored recall@10 0.927 / MRR 0.764, against 0.889 / 0.740 for the cloud-only search it replaces and 0.783 / 0.558 for one shared index (design spec §12). A project that does not turn it on sees no change, and the doc-superpowers core still needs no Python.
