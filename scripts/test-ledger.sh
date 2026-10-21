@@ -14185,7 +14185,7 @@ test_lg_upkeep_long_diff_linear_time() {
 }
 
 test_lg_upkeep_long_messages_linear_time() {
-  echo "test: #39 C1 — a range whose message is about 200 KB of words, app-5 named last: found by key-in-message within 8 s (the words come from awk; jq's splits took 25 s on jq 1.8 and 550 s on jq 1.6 here)"
+  echo "test: #39 C1 — a range whose message is about 200 KB of words, app-5 named last: found by key-in-message within 8 s (the words come from awk; jq's splits took 29 s on jq 1.8 and 840 s on jq 1.6 here)"
   lg_upkeep_fixture
   local start took
   LC_ALL=C awk 'BEGIN { print "a long message"; print ""; for (i = 0; i < 4000; i++) printf "word%d alpha beta gamma delta epsilon zeta eta\n", i; print "see APP-5" }' \

@@ -748,8 +748,8 @@ hunk && keep && /^[-+]/ { print f "\t" substr($0, 2) }
 # _LG_AWK_UP_WORDS: the word scan (sweep's) of the messages and the PR body
 # (key-in-message, key-in-pr-body): up_words(s) prints each word of s — a
 # run of [A-Za-z0-9_-] — lower-cased, once per run of the program. awk, in
-# linear time: jq's splits over the whole text is superlinear (200 KB of
-# messages took 25 s on jq 1.8 and about 550 s on jq 1.6).
+# linear time: jq's splits over the whole text is superlinear (195 KB of
+# messages took 29 s on jq 1.8 and 840 s on jq 1.6).
 # shellcheck disable=SC2016  # awk source
 _LG_AWK_UP_WORDS='
 function up_words(s,   n, i, w, W) {
