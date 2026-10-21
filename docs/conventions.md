@@ -290,7 +290,8 @@ Search-enabled projects only: `docs/search/config.json` turns doc-search on, and
 | The launcher | `scripts/search/launch.sh`, committed in a project as `.claude/doc-superpowers/search-mcp.sh` by `install.sh install --search` |
 | The MCP server and its tools | server `doc-search` (the `.mcp.json` key); tools `search`, `fetch`, `related`, `status` |
 | CLI verbs | `doc-search serve`, `init`, `index` (`--cloud` for the cloud write path), `query`, `status`, `eval` |
-| Environment | `DOC_SEARCH_CLOUD=0` (turns the cloud leg off on one machine; nothing turns it on), `DOC_SEARCH_LIVE=1` (live tests only) |
+| The local transformer | `docs.model: "transformer:<name>"` (one registry entry, `gte-modernbert-base`), `docs.threads`; the uv extra `local-transformer`; the encode cache `<cache root>/encode/<name>.sqlite` and its lock `<name>.lock` |
+| Environment | `DOC_SEARCH_CLOUD=0` (turns the cloud leg off on one machine; nothing turns it on), `DOC_SEARCH_CACHE_LOCATION` (the cache root for the encode cache, the host lock and build progress; an absolute path), `DOC_SEARCH_LIVE=1` (live tests only) |
 | Cloud corpus | Firestore collection `doc_chunks` and meta collection `corpus_meta` (both configurable: `cloud.firestore.collection`, `cloud.firestore.meta_collection`); in the meta collection, the stamp document `index` and the lease document `catch_up_lease` (fixed ids) |
 
 ### This repo's exemptions from the Scope → Generated Docs Matrix

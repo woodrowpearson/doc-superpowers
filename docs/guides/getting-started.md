@@ -244,14 +244,14 @@ Exit codes are the claims family: 0 ok, 1 findings, 2 could not run, 3 usage. Wi
 
 ### doc-search (opt-in)
 
-doc-search is an MCP server that searches a repository's docs and code in one ranked list — semble indexes of each worktree's docs and code, joined with the doc-index's cross-links — with an optional cloud docs leg (Vertex AI + Firestore). It is off until `docs/search/config.json` exists: without it every tool and CLI verb (except `init`) answers `doc-search: not enabled (no docs/search/config.json)`. It needs `uv` (*Prerequisites*); the rest of doc-superpowers does not.
+doc-search is an MCP server that searches a repository's docs and code in one ranked list — semble indexes of each worktree's docs and code, joined with the doc-index's cross-links — with an optional cloud docs leg (Vertex AI + Firestore) and an optional local transformer docs model (`docs.model: "transformer:gte-modernbert-base"`, a first build of hours per host: `references/search.md` → *Modes*). It is off until `docs/search/config.json` exists: without it every tool and CLI verb (except `init`) answers `doc-search: not enabled (no docs/search/config.json)`. It needs `uv` (*Prerequisites*); the rest of doc-superpowers does not.
 
 ```bash
 # 1. Write docs/search/config.json (the defaults) and commit it; it prints how many docs it would index
 uv run --project "$ROOT/search" --frozen doc-search init       # $ROOT: the plugin's root
 # 2. Register the server: the launcher and the project's .mcp.json entry; commit both
 /doc-superpowers hooks install --search
-# 3. Optional: build both indexes now (a first build of a large repository takes minutes)
+# 3. Optional: build both indexes now (a first build of a large repository takes minutes; with a transformer docs model, hours)
 sh .claude/doc-superpowers/search-mcp.sh index
 ```
 

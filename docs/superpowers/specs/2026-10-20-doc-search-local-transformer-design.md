@@ -1,7 +1,7 @@
 # Design note: doc-search's opt-in local-transformer docs embedder
 
-**Status:** Proposal, 2026-10-20. Not built. The §4 distillation check ran on 2026-10-20 and did not meet its rule, so §2 is the lever. Tracking issue: woodrowpearson/doc-superpowers#45.
-**Parent:** `2026-10-19-doc-search-design.md` §4. That section holds the decision rule, the measurement, and every number quoted here.
+**Status:** Built, 2026-10-21, on the branch `claude/mystifying-rosalind-516af1` (plan: `docs/superpowers/plans/2026-10-20-doc-search-local-transformer.md`); not yet released. The §4 distillation check ran on 2026-10-20 and did not meet its rule, so §2 is the lever. §8 records what the build decided beyond §2. Tracking issue: woodrowpearson/doc-superpowers#45.
+**Parent:** `2026-10-19-doc-search-design.md` §4. That section holds the decision rule, the measurement, and every number quoted here. The user-facing reference is `references/search.md`.
 **Target version:** after 3.7.0, as additive and opt-in. This note changes no release files.
 
 ## 1. Why
@@ -18,6 +18,8 @@
 - **Who it serves:** projects that do not run the cloud leg get the most from it. For abundance, which does, it is a ranking improvement.
 
 ## 2. What it would be
+
+This section is the proposal; the build kept it as written except where §8 says otherwise.
 
 - **Config:** `docs.model: "transformer:gte-modernbert-base"`.
   - The `transformer:` prefix names an entry in a small built-in registry. v1 has one entry: `Alibaba-NLP/gte-modernbert-base`, `onnx/model_int8.onnx`, CLS pooling, L2-normalized, 768-d, at most 1,024 tokens.
@@ -138,3 +140,25 @@ To be filed only with the owner's OK.
 - **abundance:** turn the lever on alongside the cloud leg? It costs one ~3 h build per M-series host and gives about +0.10 MRR at equal recall. Or keep abundance on cloud + static, and leave the lever to projects without a cloud leg?
 - **Upstream:** file the §6 semble issue, and offer the PR?
 - **Order:** the §4 distillation check ran first. It does not meet its rule (+0.003 recall@10), so the choice is between §2 and no local lever at all.
+
+## 8. As built
+
+The code is in `search/src/doc_search/` (`transformer.py`, `encode_cache.py`, `progress.py`, `engines.py`, `tools.py`, `cli.py`); `references/search.md` describes it for users. §2 held, with these differences and additions. The numbers in §1 and §3 are the spike's; they are not re-measured on the built code yet.
+
+- **Builds run in a lane of their own.** A transformer docs build does not take a place in the pool's build line (one semble build at a time, a worktree's docs before its code). It runs in a second lane, one build at a time per pool, so the code index and other worktrees' static builds never wait behind an encode that takes hours. §2 had said only that the pool builds in the background.
+- **One encoder per host.** An `flock` per model (`<cache root>/encode/<model>.lock`, holding the owner's pid) lets one process encode at a time: two sessions, or two worktrees' servers, would otherwise encode the same chunks on the same cores. A second process serves its static index while it waits (`status`: `docs: transformer index waiting for another doc-search process on this host (pid N) to finish encoding`), then checks for a saved index and otherwise builds from the cache the first process filled. Validation and saving happen inside the lock so that the waiter finds the saved index. Where `flock` is missing (Windows) or the lock cannot be set up, the build runs unlocked after one warning.
+- **The model path carries the revision.** semble records `transformer:gte-modernbert-base@e7f32e3c00f9` (the first 12 characters of the registry's revision), not the bare name. A registry change to a new revision invalidates every saved transformer index (the saved path no longer matches), and the loader refuses a path no current entry has. §2's cache key already held the revision (as the model id), so the encode cache misses too.
+- **A stale saved transformer index serves while it refreshes.** A restart behind another worktree's first build would otherwise leave docs building for hours. A transformer refresh is rechecked at most every ~3 min: the cooldown is 3 times the last build's seconds, with those seconds capped at 60 (`TRANSFORMER_COOLDOWN_CAP_S`), because a 3.2 h first build would otherwise delay a doc-edit refresh by about 10 h, and a refresh from the encode cache takes about a minute. A saved index that does not load (model files missing, say) falls back to the static index.
+- **Evicting a worktree cancels its queued transformer build.** A build that waits for the static builds or for a place in the lane gives its places back and leaves; one that holds the lane or the host lock, or is saving, keeps the worktree resident until it ends.
+- **The command line builds in the foreground, with no fallback.** `index`, `query` and `eval` build the transformer index themselves (the fallback is the server's), and print `doc-search: docs: transformer index …` progress lines on stderr every 30 s. The `semble-single` eval leg is skipped for a transformer docs model, since one index would encode the code with it.
+- **Status.** Copy and fields, as built:
+  - `docs: transformer index building, N / M chunks encoded, ETA … (R chunks/s; K from the encode cache)`, with the rate over the last minute of encoding.
+  - Before the build starts, `queued` shows an upper bound: `docs: transformer index queued; at most 3 h 22 min for 194,564 chunks at ~16 chunks/s on this host (less for chunks already in the encode cache)`. It counts every chunk, ignores cache hits, and rounds down. Only arm64 macOS (16 chunks/s) and Intel macOS (3.6) have a rate; Linux gets no estimate until it is measured.
+  - A build in another process is read from a file it publishes under `<cache root>/encode/progress/` (at most once a second; removed when the build ends, ignored when its process is gone).
+  - The status JSON gains `docs.transformer` (`model`, `progress`), `cache.docs_fallback` and a top-level `encode_cache` (`path`, `bytes`).
+  - `ready` counts a valid static fallback as ready. It describes what the MCP server can answer now; the command line instead builds the transformer index, so `cache.docs` is the key that says the transformer index exists.
+- **The encode cache is a rowid table.** `vectors (key BLOB PRIMARY KEY, vec BLOB NOT NULL)`, WAL. The first design was `WITHOUT ROWID`; with ~3 KB vector rows that overflows the table's pages, and reading the 194,564 keys of abundance took 115 to 125 s, against 2.5 to 6 s as a rowid table. The cache is 764 MB for abundance's 183,970 distinct chunk texts (194,564 chunks). A cache location that cannot be written degrades the cache, the host lock and the progress file to nothing, with one warning each, and never fails a build. The key is the sha256 of the model id (source and revision), the ONNX variant, the token limit, the onnxruntime version, the CPU architecture and the text. Query strings are never stored.
+- **Packaging.** The extra is `onnxruntime`, `flatbuffers` and `protobuf`, with onnxruntime pinned by marker: 1.31 on arm64 macOS (macOS ≥ 14) and Linux, 1.23.2 on Intel macOS, which has no Python 3.14 wheel (so Python 3.11 to 3.13 there; the package's `.python-version` is 3.12). The launcher adds `--extra local-transformer` when `docs.model` is a string starting `transformer:` (after `--extra cloud` when both apply), and `--all-extras` when `jq` is missing. Without the extra, the docs index fails with `docs.model transformer:gte-modernbert-base needs the local-transformer extra` (shown by `status`; no build, no fallback).
+- **Config and environment.** `docs.threads` (1 to 256, or `null` for the performance cores less two, at least 2) and `DOC_SEARCH_CACHE_LOCATION` (an absolute path for the cache root) are new. An unknown name in `docs.model` is `invalid config: docs.model: unknown transformer model …`.
+- **The Intel warning** is logged once per pool, for a first build; `status`'s model line names the Intel rate there.
+- **Not yet done.** Re-measuring the first build, the warm second worktree, memory and query latency on the built code, on a quiet M-series host, and the live test (`search/tests/test_live.py`, `DOC_SEARCH_LIVE=1`) on that host. The numbers in `references/search.md` are §1's and §3's until then.

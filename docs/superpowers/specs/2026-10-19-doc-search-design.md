@@ -10,7 +10,7 @@
   - Minimum hardware is an M-series MacBook. Older Intel Macs are supported but slower, through Docker if a wheel is missing.
   - The owner is away (afk), so every other decision is marked *(my call)*.
 
-**Target version:** 3.7.0. It is additive and opt-in: inert without `docs/search/config.json`. 3.6.0 belongs to the ledger upkeep/filing release, so this branch stays free of `RELEASE-NOTES.md`, version strings and tags until 3.7.0 is cut.
+**Target version:** 3.6.0, shipped as v3.6.0 on 2026-10-20. It is additive and opt-in: inert without `docs/search/config.json`.
 
 **Evidence:** research briefs from 2026-10-19 on the abundance-docs server (abundance-mvp HEAD `b8c7f61e5e`), on semble (v0.5.1 running, v0.7.0 latest, read from the installed package), and on local embedding models and stores. There are also two measurements taken on the Intel host (§4). *Est.* marks an estimate.
 
@@ -435,7 +435,7 @@ The meta document `<meta_collection>/index` (default `corpus_meta`) holds `{buil
   - Firestore and Vertex are fakes.
   - Live tests run only under `DOC_SEARCH_LIVE=1`.
 
-## 11. Abundance cutover (abundance-side work, after 3.7.0)
+## 11. Abundance cutover (abundance-side work, after 3.6.0)
 
 1. **`.sembleignore`:** stop excluding `docs/` and the doc parts of `.claude/`. doc-search now classifies hits by path, so code results stay free of prose by construction. Keep `docs/archive/` and the other non-authoritative paths excluded.
 2. **`docs/search/config.json`:** `docs.include` set to its `INDEXED_GLOBS`, `docs.types` set to its `_DOCTYPE_RULES`, and a `cloud` object for `abundance-mvp`, `us-west1`, and the existing `doc_chunks` / `corpus_meta`. That last one is parity, and *(rev 3)* the eval kept it: fused with the local legs it is the best leg measured (§4).
@@ -491,4 +491,4 @@ The meta document `<meta_collection>/index` (default `corpus_meta`) holds `{buil
 - The names `doc-search`, `search/`, `docs/search/config.json`, and the tools `search` / `fetch` / `related` / `status`
 - Installer registration through a committed launcher plus `.mcp.json`
 - RRF k = 60; the per-kind floor of ⌈limit/3⌉
-- Target version 3.7.0
+- Target version 3.6.0

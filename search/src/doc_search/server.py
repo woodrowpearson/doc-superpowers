@@ -72,8 +72,9 @@ RELATED_DESCRIPTION = (
 
 STATUS_DESCRIPTION = (
     "Report how doc-search is set up here: the config, the docs and code models, the semble version, the index "
-    "state of each worktree, the docs semble has not indexed, and whether a doc-index is present. Use it when "
-    "`search` answers that an index is building or off, or finds fewer docs than expected. " + DATA_NOTE
+    "state of each worktree, the docs semble has not indexed, and whether a doc-index is present. With a local "
+    "transformer docs model it also reports that build's progress and ETA. Use it when `search` answers that an "
+    "index is building or off, or finds fewer docs than expected. " + DATA_NOTE
 )
 
 
