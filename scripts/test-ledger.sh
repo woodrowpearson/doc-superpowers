@@ -12918,6 +12918,67 @@ test_lg_upkeep_attribution() {
   teardown
 }
 
+# lg_up_added_item <paths entry> [<message>]: on feat, file app-9 (a new
+# item, docs/issues/n.md, listing the paths entry) and edit that file with a
+# line naming the corpus's contracts, in one commit — its message the one
+# given, else "fix totals".
+lg_up_added_item() {
+  lg_item docs/issues/n.md "key: app-9" "ledger: app" "status: Open" "severity: P3" "summary: Follow-up: rounding" \
+    "related-files: [$1]"
+  lg_up_commit --line "$LG_UP_NAMES" "${2:-fix totals}" "$1"
+}
+
+test_lg_upkeep_added_item_yields_to_others() {
+  echo "test: #39 D7 — an item the range adds (app-9, listing src/order/total.js) that no claim trailer names yields to another involved item: the range edits a line naming order.total in src/order/total.js and its message names app-5 (which lists nothing relevant) — changes field:order.total goes to app-5, not app-9; the read attribution alike; --items too (named is no claim trailer)"
+  lg_up_read_by_fixture
+  lg_up_added_item src/order/total.js "fix totals; see app-5"
+  lg upkeep --range main..feat --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_json_field "$LG_OUT" '[.items[] | "\(.key):\(.found_by | join(","))"] | join(" ")' "app-9:item-file-edited app-5:key-in-message" \
+    "the premise: app-9 by its added file, app-5 by its key in the message"
+  assert_eq "app-5=changes field:order.total|app-9=" "app-5=$(lg_up_vals app-5)|app-9=$(lg_up_vals app-9)" \
+    "changes field:order.total goes to app-5 — not app-9, whose paths list its defined_in"
+  git checkout -q -b t-read main
+  lg_up_added_item src/cart/badge.js "badge; see app-5"
+  lg upkeep --range main..t-read --format json
+  assert_eq "app-5=consumes field:order.total|app-9=" "app-5=$(lg_up_vals app-5)|app-9=$(lg_up_vals app-9)" \
+    "a read contract (src/cart/badge.js, its read_by) goes to app-5 too — not app-9, whose paths list the reader"
+  lg upkeep --range main..feat --items app-9 app-5 --format json
+  assert_eq "app-5=changes field:order.total|app-9=" "app-5=$(lg_up_vals app-5)|app-9=$(lg_up_vals app-9)" \
+    "--items app-9 app-5: app-9 still yields (named by --items, not by a claim trailer)"
+  teardown
+}
+
+test_lg_upkeep_added_item_claimed_by_trailer() {
+  echo "test: #39 D7 — the same range with Ledger-Claims: app-9: an added item a claim trailer names stays a candidate, and gets changes field:order.total (its paths list the defined_in)"
+  lg_upkeep_fixture
+  lg_up_added_item src/order/total.js $'fix totals; see app-5\n\nLedger-Claims: app-9'
+  lg upkeep --range main..feat --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_json_field "$LG_OUT" '[.items[] | "\(.key):\(.found_by | join(","))"] | join(" ")' "app-9:trailer:claims,item-file-edited app-5:key-in-message" \
+    "the premise: app-9 claimed (and its file added), app-5 by its key in the message"
+  assert_eq "app-5=|app-9=changes field:order.total" "app-5=$(lg_up_vals app-5)|app-9=$(lg_up_vals app-9)" \
+    "claimed by a trailer: app-9 gets changes field:order.total"
+  teardown
+}
+
+test_lg_upkeep_added_item_alone() {
+  echo "test: #39 D7 — the same range without the app-5 mention: the added item is the only one involved, so it is a candidate and gets changes field:order.total; two added items and no other: both stay candidates"
+  lg_upkeep_fixture
+  lg_up_added_item src/order/total.js
+  lg upkeep --range main..feat --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_json_field "$LG_OUT" '[.items[] | "\(.key):\(.found_by | join(","))"] | join(" ")' "app-9:item-file-edited" "the premise: app-9 alone"
+  assert_eq "changes field:order.total" "$(lg_up_vals app-9)" "the only involved item: app-9 gets changes field:order.total"
+  lg_item docs/issues/o.md "key: app-10" "ledger: app" "status: Open" "severity: P3" "summary: Another follow-up" \
+    "related-files: [src/util/a.js]"
+  git add -A && git commit -qm "another"
+  lg upkeep --range main..feat --format json
+  assert_eq "app-10=|app-9=changes field:order.total" "app-10=$(lg_up_vals app-10)|app-9=$(lg_up_vals app-9)" \
+    "every involved item added: none yields — the normal order (app-9's paths list the defined_in)"
+  teardown
+}
+
 test_lg_upkeep_skip_globs_and_contracts() {
   echo "test: #39 — a contract touched only through skip_globs files (a .test.js, a .md) is not touched; upkeep.skip_contracts ids are never proposed"
   local out
@@ -13014,7 +13075,7 @@ test_lg_upkeep_three_dot_and_merge() {
 
 test_lg_upkeep_spaced_path() {
   echo "test: #39 — a diff file with a space (src/order/total two.js) matches defined_in src/order/*.js and is printed whole in evidence and JSON"
-  lg_upkeep_fixture
+  lg_upkeep_fixture '{"base":"main","trailers":{"claims_by_path":["Doc-Fixes"]}}'
   lg_up_commit --line "$LG_UP_NAMES" $'spaced\n\nLedger-Claims: app-6' "src/order/total two.js" "src/order/t$(printf '\303\266')tal.js"
   lg upkeep --range main..feat --format json
   assert_eq "0" "$LG_RC" "exit 0"
@@ -13024,13 +13085,14 @@ test_lg_upkeep_spaced_path() {
   lg upkeep --range main..feat
   assert_contains "$LG_OUT" "diff names field:order.total in src/order/total two.js (defined_in of field:order.total); diff names field:order.total in src/order/t$(printf '\303\266')tal.js" \
     "text: whole"
-  # An item whose paths hold the spaced name, and whose own path has a space.
+  # An item whose paths hold the spaced name, and whose own path has a space
+  # (filed in the range, so a claim trailer names it: it does not yield).
   git checkout -q -b feat2 main
   lg_item "docs/issues/odd name.md" "status: Open" "summary: Spaced" "related-files: [src/order/total two.js]"
-  lg_up_commit --line "$LG_UP_NAMES" $'odd\n\nLedger-Claims: app-6' "src/order/total two.js"
+  lg_up_commit --line "$LG_UP_NAMES" $'odd\n\nLedger-Claims: app-6\nDoc-Fixes: docs/issues/odd name.md' "src/order/total two.js"
   lg upkeep --range main..feat2 --format json
   assert_json_field "$LG_OUT" '[.items[] | "\(.path):\(.found_by | join(","))"] | join(" ")' \
-    "docs/issues/h.md:trailer:claims docs/issues/odd name.md:item-file-edited" "the new item, found by its file"
+    "docs/issues/h.md:trailer:claims docs/issues/odd name.md:trailer:claims_by_path,item-file-edited" "the new item, found by its path's trailer and its file"
   assert_eq "app-6=|odd=changes field:order.total" "app-6=$(lg_up_vals app-6)|odd=$(lg_up_vals "docs/issues/odd name.md")" \
     "its spaced paths entry matches defined_in and is in the diff: it wins over app-6 (diff overlap before rank)"
   assert_json_field "$LG_OUT" '.items[1] | [.key, .link] | tojson' \
@@ -14871,6 +14933,9 @@ run_tests() {
   test_lg_upkeep_found_by_signals
   test_lg_upkeep_claim_forms
   test_lg_upkeep_attribution
+  test_lg_upkeep_added_item_yields_to_others
+  test_lg_upkeep_added_item_claimed_by_trailer
+  test_lg_upkeep_added_item_alone
   test_lg_upkeep_skip_globs_and_contracts
   test_lg_upkeep_contract_change_trailer
   test_lg_upkeep_unattributed

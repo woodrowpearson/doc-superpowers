@@ -2481,8 +2481,10 @@ ledger upkeep|cmd_ledger_upkeep|repo|range= pr= items+ top= strict no-repo-adapt
   declare a contract the code never spells). One an involved item already
   declares in changes is proposed to nobody; each other one goes to one item — the
   most paths entries its defined_in matches, then the most paths in the
-  diff, then how it was found, then key — or, with no involved item, is
-  listed as unattributed; upkeep.skip_contracts are never proposed. A
+  diff, then how it was found, then key; an item the range adds that no
+  claim trailer names is one only when every involved item is — or, with
+  no involved item, is listed as unattributed; upkeep.skip_contracts are
+  never proposed. A
   contract nothing touches is read when a net-diff file its read_by
   matches (skip_globs aside) has a changed line naming it: consumes,
   covered by an involved item's consumes and attributed in the same way
