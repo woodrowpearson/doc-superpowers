@@ -8013,6 +8013,28 @@ test_lg_ifl_facts_sig_in_name() {
   lg_ifl_teardown
 }
 
+# lg_ifl_sig_of [<text>]: the in-flight facts signature, computed afresh,
+# with <text> appended to the plan test (_LG_AWK_IFL_PLAN) — for lg_call.
+lg_ifl_sig_of() {
+  _LG_AWK_IFL_PLAN="$_LG_AWK_IFL_PLAN${1:-}"
+  _LG_IFL_SIG=""
+  _lg_ifl_sig
+  printf '%s\n' "$_LG_IFL_SIG"
+}
+
+test_lg_ifl_facts_sig_covers_plan_test() {
+  echo "test: the in-flight facts signature covers the plan test (_LG_AWK_IFL_PLAN, which upkeep shares): another plan test is another signature, so no cached facts outlive a change to it"
+  lg_ifl_fixture
+  local a
+  lg_call lg_ifl_sig_of
+  a=$LG_OUT
+  assert_eq "0|16" "$LG_RC|${#a}" "the signature: 16 hex"
+  lg_call lg_ifl_sig_of "# another plan test"
+  assert_eq "0|different" "$LG_RC|$(if [ "$LG_OUT" != "$a" ] && [ -n "$LG_OUT" ]; then echo different; else echo same; fi)" \
+    "another plan test: another signature"
+  lg_ifl_teardown
+}
+
 # --- Task 16b (U7): the plan words' `git cat-file --batch` reader -------------
 
 # lg_ifl_plan_file <path> <filler-lines> <last-line-format>: a plan — a
@@ -12929,11 +12951,13 @@ lg_up_added_item() {
 }
 
 test_lg_upkeep_added_item_yields_to_others() {
-  echo "test: #39 D7 — an item the range adds (app-9, listing src/order/total.js) that no claim trailer names yields to another involved item: the range edits a line naming order.total in src/order/total.js and its message names app-5 (which lists nothing relevant) — changes field:order.total goes to app-5, not app-9; the read attribution alike; --items too (named is no claim trailer)"
+  echo "test: #39 D7 — an item the range adds (app-9, listing src/order/total.js) that no claim trailer names yields to another involved item: the range edits a line naming order.total in src/order/total.js and its message names app-5 (which lists nothing relevant) — changes field:order.total goes to app-5, not app-9; the read attribution alike; the added files come from the one diff-tree of the names"
   lg_up_read_by_fixture
   lg_up_added_item src/order/total.js "fix totals; see app-5"
-  lg upkeep --range main..feat --format json
+  GIT_TRACE="$TEST_DIR/names.trace" lg upkeep --range main..feat --format json
   assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "1|0" "$(grep -c 'trace: built-in: git diff-tree -r --name' "$TEST_DIR/names.trace" 2>/dev/null)|$(grep -c 'git diff-tree .*--diff-filter' "$TEST_DIR/names.trace" 2>/dev/null)" \
+    "one git diff-tree of the names gives the net diff and its added files (spec §4 Cost)"
   assert_json_field "$LG_OUT" '[.items[] | "\(.key):\(.found_by | join(","))"] | join(" ")' "app-9:item-file-edited app-5:key-in-message" \
     "the premise: app-9 by its added file, app-5 by its key in the message"
   assert_eq "app-5=changes field:order.total|app-9=" "app-5=$(lg_up_vals app-5)|app-9=$(lg_up_vals app-9)" \
@@ -12943,9 +12967,17 @@ test_lg_upkeep_added_item_yields_to_others() {
   lg upkeep --range main..t-read --format json
   assert_eq "app-5=consumes field:order.total|app-9=" "app-5=$(lg_up_vals app-5)|app-9=$(lg_up_vals app-9)" \
     "a read contract (src/cart/badge.js, its read_by) goes to app-5 too — not app-9, whose paths list the reader"
+  teardown
+}
+
+test_lg_upkeep_added_item_named_by_items() {
+  echo "test: #39 D7 (ruling R63) — an added item named by --items is exempt from the added-item rule, as one a claim trailer names is: --items app-9 app-5 over the range that files app-9 gives app-9 changes field:order.total (its paths list the defined_in)"
+  lg_upkeep_fixture
+  lg_up_added_item src/order/total.js "fix totals; see app-5"
   lg upkeep --range main..feat --items app-9 app-5 --format json
-  assert_eq "app-5=changes field:order.total|app-9=" "app-5=$(lg_up_vals app-5)|app-9=$(lg_up_vals app-9)" \
-    "--items app-9 app-5: app-9 still yields (named by --items, not by a claim trailer)"
+  assert_eq "0|app-5:named app-9:named" "$LG_RC|$(lg_up_found "$LG_OUT")" "the premise: both named"
+  assert_eq "app-5=|app-9=changes field:order.total" "app-5=$(lg_up_vals app-5)|app-9=$(lg_up_vals app-9)" \
+    "named by --items: app-9 stays a candidate and gets it"
   teardown
 }
 
@@ -13755,6 +13787,16 @@ test_lg_upkeep_amendment_cites_plan() {
   assert_contains "$LG_OUT" "app-2  found by plan-cited" "text: the item line"
   assert_contains "$LG_OUT" "  + changes spec:SPEC-A  — diff amends docs/specs/SPEC-A.md, which cites docs/plans/p1.md (links app-2)" "text: the proposal"
   assert_contains "$LG_OUT" "  link: ledger link app-2 --changes spec:SPEC-A" "text: the link line"
+  # <b> is not HEAD: the plan and the doc-index are read as <b> holds them
+  # (git cat-file), and the working tree's — p1 without app-2's row, a
+  # doc-index with no plan — do not count.
+  git checkout -q main
+  printf '# Plan p1\n' > docs/plans/p1.md
+  printf '{"docs":{}}\n' > docs/.doc-index.json
+  lg upkeep --range main..feat --format json
+  assert_eq "0|app-1:key-in-message app-2:plan-cited|changes spec:SPEC-A" "$LG_RC|$(lg_up_found "$LG_OUT")|$(lg_up_vals app-2)" \
+    "run from main (feat not checked out): the same, read at <b>"
+  git checkout -q -- docs/plans/p1.md docs/.doc-index.json
   # A pointed item the range adds is exempt from the added-item rule: the
   # range files app-9 and its plan p2 (an include row for app-9), and the
   # amendment cites p2.
@@ -15025,6 +15067,7 @@ run_tests() {
   test_lg_inflight_raw_oid_base
   test_lg_inflight_dedup_descendant_wins
   test_lg_ifl_facts_sig_in_name
+  test_lg_ifl_facts_sig_covers_plan_test
 
   # --- Task 11 fix round 3 ---
   test_lg_inflight_scan_children_reaped
@@ -15230,6 +15273,7 @@ run_tests() {
   test_lg_upkeep_added_item_yields_to_others
   test_lg_upkeep_added_item_claimed_by_trailer
   test_lg_upkeep_added_item_alone
+  test_lg_upkeep_added_item_named_by_items
   test_lg_upkeep_skip_globs_and_contracts
   test_lg_upkeep_contract_change_trailer
   test_lg_upkeep_unattributed
