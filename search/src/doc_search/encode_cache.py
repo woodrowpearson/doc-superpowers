@@ -6,8 +6,11 @@ key hashes the text with everything that changes the vector (the model revision,
 variant, the token budget, the onnxruntime version, the CPU architecture), so a model or runtime
 change misses instead of serving a stale vector. One sqlite file per model under the cache root,
 shared by every worktree and process on the host (WAL, so a reader and a writer do not block
-each other). A cache that cannot be opened or breaks later is dropped for the rest of the run
-with one warning: the build encodes without it rather than fail.
+each other). Its one table, `vectors (key BLOB PRIMARY KEY, vec BLOB NOT NULL)`, is a rowid table,
+not WITHOUT ROWID: a row is a 32-byte key and a ~3 KB vector, and rows that large overflow a
+WITHOUT ROWID table's pages (reads 20-50 times slower). A cache that cannot be opened or breaks
+later is dropped for the rest of the run with one warning: the build encodes without it rather
+than fail.
 
 `host_lock` keeps two builds of two processes (two sessions, two worktrees) from running the
 encoder at once; the builds of one process are already serial (engines.py). It degrades the same
@@ -137,7 +140,10 @@ class EncodeCache:
             conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("CREATE TABLE IF NOT EXISTS vectors (key BLOB PRIMARY KEY, vec BLOB NOT NULL) WITHOUT ROWID")
+            # A rowid table on purpose: a row is a 32-byte key and a ~3 KB vector (768 float32), and rows that
+            # size overflow the 4 KB pages of a WITHOUT ROWID table (get_many over 194,564 keys took 115-125 s
+            # there, 2.5-6 s here). WITHOUT ROWID suits small rows.
+            conn.execute("CREATE TABLE IF NOT EXISTS vectors (key BLOB PRIMARY KEY, vec BLOB NOT NULL)")
             conn.commit()
         except (sqlite3.Error, OSError) as err:
             self._fail(err)

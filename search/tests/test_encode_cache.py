@@ -151,6 +151,22 @@ def test_round_trip_and_wal(tmp_path: Path, open_cache):
         conn.close()
 
 
+def test_vectors_table_is_a_rowid_table(tmp_path: Path, open_cache):
+    # ~3 KB vectors overflow the 4 KB pages of a WITHOUT ROWID table (get_many over 194,564 keys took
+    # 115-125 s there, 2.5-6 s as a rowid table): the layout is pinned
+    path = tmp_path / "enc.sqlite"
+    cache = open_cache(path)
+    cache.put_many([(cache.key("one"), vec(1))])
+
+    conn = sqlite3.connect(path)
+    try:
+        (sql,) = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'vectors'").fetchone()
+        assert "WITHOUT ROWID" not in sql.upper()
+        assert conn.execute("SELECT rowid FROM vectors LIMIT 1").fetchone() is not None
+    finally:
+        conn.close()
+
+
 def test_put_many_commits_every_call(tmp_path: Path, open_cache):
     # a build killed between batches keeps every finished batch: the rows are visible to another
     # connection (another process) while the writer is still open
