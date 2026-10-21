@@ -36,7 +36,7 @@ doc-superpowers/
 ├── gemini-extension.json # Gemini CLI extension manifest
 ├── package.json          # npm/OpenCode package metadata
 ├── search/               # doc-search: the opt-in MCP server over docs and code — a uv project (Python ≥ 3.11, .python-version 3.12); inert without docs/search/config.json
-│   ├── pyproject.toml    # runtime: semble>=0.7,<0.8, mcp>=2.3,<3, pathspec; extra cloud: google-genai, google-cloud-firestore; extra local-transformer: onnxruntime (1.31; 1.23.2 on Intel macOS), flatbuffers, protobuf; dev: pytest; console script doc-search
+│   ├── pyproject.toml    # runtime: semble>=0.7,<0.8, mcp>=2.3,<3, pathspec; extra cloud: google-genai, google-cloud-firestore; extra local-transformer: onnxruntime (1.31; 1.23.2 on Intel macOS), flatbuffers, protobuf, and tokenizers + huggingface-hub (declared; semble already installs them); dev: pytest; console script doc-search
 │   ├── uv.lock           # Locked (the launcher and CI run with --frozen); no torch; onnxruntime only in the local-transformer extra
 │   ├── src/doc_search/
 │   │   ├── config.py     # docs/search/config.json: defaults, deep merge, validation (unknown keys refused; docs.model transformer:<name> against the registry, docs.threads, code.model refuses the prefix), DOC_SEARCH_CLOUD=0; INERT_LINE
@@ -75,7 +75,7 @@ doc-superpowers/
 │   ├── test-spec-status-model.sh # Test suite for the canonical Spec Status Model + call sites
 │   ├── test-spec-claims.sh # Test suite for the `claims` verb group: a fixture per check, the gate flows, /bin/sh stub adapters
 │   ├── test-helpers.sh   # Shared test harness (isolated git env, scratch root, pipefail-safe asserts) sourced by every suite
-│   ├── search/launch.sh  # doc-search's launcher (POSIX sh): finds doc-superpowers at run time, then uv run --project <root>/search --frozen --no-dev [--extra cloud] [--extra local-transformer] doc-search (the second extra when docs.model starts transformer:; --all-extras without jq); install --search copies it to .claude/doc-superpowers/search-mcp.sh
+│   ├── search/launch.sh  # doc-search's launcher (POSIX sh): finds doc-superpowers at run time, then uv run --project <root>/search --frozen --no-dev [--extra cloud] [--extra local-transformer] doc-search (the second extra when docs.model starts transformer:; without jq, --all-extras --no-extra local-transformer, or --all-extras when grep finds a transformer: model); install --search copies it to .claude/doc-superpowers/search-mcp.sh
 │   ├── merge-doc-index.sh  # Custom git merge driver for .doc-index.json
 │   ├── test-merge-driver.sh # Test suite for merge driver
 │   ├── test-hooks.sh     # Test suite for hooks installer and hook scripts
@@ -518,7 +518,7 @@ search(query, scope, limit, doc_type, path_prefix, include_terminal, worktree)
 
 `doc-search index --cloud` is the only writer of the cloud corpus (`cloud/write.py`): base guard, the stamp's decision table, the lease, per-file sha skip, HEAD's blobs, the prune cap, then the stamp.
 
-With `docs.model: "transformer:<name>"` the docs kind changes (`engines.py`; the contract is `references/search.md` → *Modes* → *Local transformer*): `IndexPool` calls `transformer.install`, which routes semble's model loader (`semble.index.dense._load_cached`, pinned by `tests/test_semble_seam.py`) to the ONNX `Encoder`. The docs build then runs in the transformer lane (not the build line), under `encode_cache.host_lock` (one encoder per host), and `Encoder.encode` reads and writes `EncodeCache` batch by batch while `progress.BuildProgress` counts. A validated index is saved and replaces the static one. Until then a hidden static docs state answers docs (`WorktreeIndexes.docs_fallback`; the note `docs: semble's static index while the transformer index builds (see status)`) in the server; the CLI verbs build with `fallback=False`, in the foreground, and print the progress lines.
+With `docs.model: "transformer:<name>"` the docs kind changes (`engines.py`; the contract is `references/search.md` → *Modes* → *Local transformer*): `IndexPool` calls `transformer.install`, which routes semble's model loader (`semble.index.dense._load_cached`, pinned by `tests/test_semble_seam.py`) to the ONNX `Encoder`. The docs build then runs in the transformer lane (not the build line), under `encode_cache.host_lock` (one encoder per host), and `Encoder.encode` reads and writes `EncodeCache` batch by batch while `progress.BuildProgress` counts. A validated index is saved and replaces the static one, and when the build thread ends the pool drops the encoder's onnxruntime session (`transformer.release_session`; the next encode makes a new one). Until then a hidden static docs state answers docs (`WorktreeIndexes.docs_fallback`; the note `docs: semble's static index while the transformer index builds (see status)`) in the server; the CLI verbs build with `fallback=False`, in the foreground, and print the progress lines.
 
 ### Typical `spec-generate` flow
 
