@@ -4,11 +4,19 @@ The google libraries belong to the `cloud` extra. Nothing in this package import
 package is imported: `import_module` loads one on first use and turns a missing extra into
 `CloudUnavailable`, so the base install never touches them and a server without the extra still
 starts, answering from its local legs with a note.
+
+`import_module` also turns gRPC's fork support off (unless the environment already says) before the
+first google module loads, since gRPC reads the setting once. grpcio's POSIX wheels have it on by
+default: its `pthread_atfork` handlers then restart gRPC's threads in every forked child, and the local
+legs fork git (CPython's subprocess forks on macOS) while the cloud leg's client is live. Those threads
+ran between fork and exec and sometimes killed the git child (SIGTRAP, SIGPIPE). Nothing here forks
+a process that goes on to use gRPC, which is all fork support is for.
 """
 
 from __future__ import annotations
 
 import importlib
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -26,6 +34,7 @@ class CloudUnavailable(Exception):
 
 def import_module(name: str) -> ModuleType:
     """A google module of the `cloud` extra, or CloudUnavailable when it is not installed."""
+    os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "false")  # before grpc loads: see the module docstring
     try:
         return importlib.import_module(name)
     except ImportError as err:
