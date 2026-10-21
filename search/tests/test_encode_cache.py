@@ -588,57 +588,6 @@ def test_host_lock_with_a_timeout_runs_unlocked_once_it_passes(caplog: pytest.Lo
     assert warnings_of(caplog) == []
 
 
-def lock_taken_by_another(lock_file: Path) -> bool:
-    """Whether another open of the lock file is refused (someone holds the lock)."""
-    probe = os.open(lock_file, os.O_RDWR)
-    try:
-        encode_cache.fcntl.flock(probe, encode_cache.fcntl.LOCK_EX | encode_cache.fcntl.LOCK_NB)
-    except BlockingIOError:
-        return True
-    finally:
-        os.close(probe)
-    return False
-
-
-def test_try_again_after_a_timeout_takes_the_lock_only_once_it_is_free():
-    """An unlocked body tries once more before it writes: refused while the holder holds it, taken once it lets go
-    (and held, with this pid in the file, until the body ends)."""
-    held, release = threading.Event(), threading.Event()
-    lock_file = cache_root() / "encode" / "gte-modernbert-base.lock"
-
-    def holder() -> None:
-        with host_lock(SPEC):
-            held.set()
-            release.wait(30)
-
-    a = threading.Thread(target=holder)
-    a.start()
-    try:
-        assert held.wait(10)
-        with host_lock(SPEC, timeout=0.2) as lock:
-            assert lock.timed_out and not lock.held
-            assert lock.try_again() is False, "taken while the holder still holds it"
-            assert not lock.held
-            release.set()
-            a.join(10)
-            assert lock.try_again() is True and lock.held
-            assert lock_file.read_text().strip() == str(os.getpid())
-            assert lock_taken_by_another(lock_file), "try_again took the lock: nobody else may have it now"
-            assert lock.try_again() is True, "a second try holds it already"
-        assert not lock_taken_by_another(lock_file), "let go when the body ended"
-    finally:
-        release.set()
-        a.join(10)
-
-
-def test_try_again_without_a_timeout_never_refuses(monkeypatch: pytest.MonkeyPatch):
-    with host_lock(SPEC) as lock:  # uncontended: held
-        assert lock.held and not lock.timed_out and lock.try_again() is True
-    monkeypatch.setattr(encode_cache, "fcntl", None)
-    with host_lock(SPEC, timeout=0.1) as lock:  # no flock on this platform: nothing to take, nothing to wait for
-        assert not lock.held and not lock.timed_out and lock.try_again() is True
-
-
 def test_host_lock_with_a_timeout_takes_the_lock_freed_in_time():
     held, release, got_it = threading.Event(), threading.Event(), threading.Event()
     order: list[str] = []

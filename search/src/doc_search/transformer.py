@@ -206,9 +206,10 @@ class Encoder:
     The session keeps the memory its largest batches needed once a build has run through it (a
     process held 3.75 GB after encoding a large corpus's longest chunks, 2.7 GB once the session
     was dropped; turning onnxruntime's arena off did not help), so the pool calls `release_session`
-    once a build's own encode has run, and `_forward` makes a new session on the next encode: the
-    first query after a build pays for it (0.63 s measured on an Intel Mac, against 11 ms for the
-    query's encode). A load or a recheck that encodes nothing never releases. Both take the session
+    once a build's own encode has run at least one forward batch, and `_forward` makes a new session
+    on the next encode: the first query after a build pays for it (0.63 s measured on an Intel Mac,
+    against 11 ms for the query's encode). A load, or a recheck or refresh that reads every chunk
+    from the encode cache, never releases. Both take the session
     lock, so encodes that start together make one session.
     """
 
