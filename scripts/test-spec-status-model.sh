@@ -516,7 +516,7 @@ _upkeep_bullet=$(grep -F -- '- **Merge-time upkeep**' <<<"$_ledger_act")
 assert_contains "$_upkeep_bullet" '/doc-superpowers ledger declare' "the Merge-time upkeep bullet points at the declare flow"
 _step9=$(grep -F -- '9. **Ledger declarations**' <<<"$_review")
 assert_contains "$_step9" '/doc-superpowers ledger declare' "review-pr step 9 names /doc-superpowers ledger declare…"
-assert_contains "$_step9" 'never run' "…and only names it: the link lines are printed, never run"
+assert_contains "$_step9" 'never runs it' "…and only names it: the link lines are printed, never run"
 assert_line_matches "$LEDGERREF" '^### Declaring after a change$' "references/ledger.md has the Declaring after a change procedure…"
 _declaring=$(_section "$LEDGERREF" '### Declaring after a change')
 assert_contains "$_declaring" 'never in a CI run' "…never in a CI run or for an unattended caller…"
