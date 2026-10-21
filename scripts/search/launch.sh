@@ -70,7 +70,7 @@ if command -v jq >/dev/null 2>&1; then
   if jq -e '(.docs.model | type) == "string" and (.docs.model | startswith("transformer:"))' "${TOP:-.}/docs/search/config.json" >/dev/null 2>&1; then
     EXTRAS="${EXTRAS:+$EXTRAS }--extra local-transformer"
   fi
-elif grep -Eq '"model"[[:space:]]*:[[:space:]]*"transformer:' "${TOP:-.}/docs/search/config.json" 2>/dev/null; then
+elif grep -Eq '"model"[^",]*:[^",]*"transformer:' "${TOP:-.}/docs/search/config.json" 2>/dev/null; then
   EXTRAS="--all-extras"
 else
   EXTRAS="--all-extras --no-extra local-transformer"
