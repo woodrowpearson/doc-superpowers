@@ -2481,7 +2481,8 @@ ledger upkeep|cmd_ledger_upkeep|repo|range= pr= items+ top= strict no-repo-adapt
   after its first ":", with no [A-Za-z0-9_] just before or after, a * in
   it any run of [A-Za-z0-9_.-] — or by a Contract-Change line (the way to
   declare a contract the code never spells); one whose defined_in is one
-  markdown document (a spec, an ADR) by any edit of it, skip_globs or not,
+  literal markdown path no other contract names or matches (a spec, an
+  ADR) by any edit of it, skip_globs or not,
   and its owner is first the item a plan its changed lines cite links, or
   that a claim trailer of a commit editing it names (a cited plan linking
   none: unattributed, with cites). One an involved item already

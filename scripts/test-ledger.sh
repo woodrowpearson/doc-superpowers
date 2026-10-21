@@ -13901,6 +13901,59 @@ test_lg_upkeep_amendment_skip_globs_exempt() {
   teardown
 }
 
+# lg_up_shared_reg: the amendment corpus's registry with docs/specs/SPEC-A.md
+# the one defined_in of two contracts (spec:SPEC-A and endpoint:rounding),
+# and pattern:adrs defined by a glob ending in .md (docs/adr/*.md).
+lg_up_shared_reg() {
+  # shellcheck disable=SC2016  # JSON
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[
+  {"id":"app","title":"App","kind":"service","status":"active",
+   "contracts":[{"id":"field:order.total","defined_in":["src/order/*.js"]},
+                {"id":"spec:SPEC-A","defined_in":["docs/specs/SPEC-A.md"]},
+                {"id":"endpoint:rounding","defined_in":["docs/specs/SPEC-A.md"]},
+                {"id":"pattern:adrs","defined_in":["docs/adr/*.md"]}]},
+  {"id":"core","title":"Core","kind":"platform","status":"active",
+   "contracts":[{"id":"endpoint:create","defined_in":["server/create.js"]}]}]}'
+}
+
+test_lg_upkeep_amendment_shared_document() {
+  echo "test: #39 D9 (ruling R65) — a document that is the one defined_in of two contracts (spec:SPEC-A, endpoint:rounding) defines neither as a document: an edit naming none touches nothing (its skip globs hold, as for any contract); with skip_globs [], a line naming SPEC-A touches spec:SPEC-A only (the Names test)"
+  lg_up_amend_fixture
+  git checkout -q main
+  lg_up_shared_reg
+  git add -A && git commit -qm "shared document"
+  git checkout -q -B feat
+  lg_up_commit --line "typo fix" "typo; see app-1" docs/specs/SPEC-A.md
+  lg upkeep --range main..feat --top 0 --format json
+  assert_eq "0|app-1:key-in-message||[]" "$LG_RC|$(lg_up_found "$LG_OUT")|$(lg_up_vals app-1)|$(jq -c .unattributed_contracts <<<"$LG_OUT")" \
+    "a typo fix in the shared document: nothing proposed, nothing unattributed"
+  git checkout -q -b t-names main
+  lg_up_commit --line "SPEC-A rounds once." "amend; see app-1" docs/specs/SPEC-A.md
+  lg_enable '{"base":"main","upkeep":{"skip_globs":[]}}'
+  lg upkeep --range main..t-names --top 0 --format json
+  assert_eq '[{"field":"changes","value":"spec:SPEC-A","evidence":["diff names spec:SPEC-A in docs/specs/SPEC-A.md (defined_in of spec:SPEC-A)"]}]' \
+    "$(lg_up_props app-1)" "skip_globs []: the line names SPEC-A, so spec:SPEC-A only — not endpoint:rounding (Names evidence)"
+  teardown
+}
+
+test_lg_upkeep_amendment_glob_not_document_defined() {
+  echo "test: #39 D9 (ruling R65) — a defined_in that is a glob ending in .md (pattern:adrs, docs/adr/*.md) is no document-defined contract: an edit of docs/adr/ADR-1.md naming nothing touches nothing"
+  lg_up_amend_fixture
+  git checkout -q main
+  lg_up_shared_reg
+  mkdir -p docs/adr
+  printf '# ADR-1\n' > docs/adr/ADR-1.md
+  git add -A && git commit -qm "an ADR"
+  git checkout -q -B feat
+  lg_up_commit --line "typo fix" "typo; see app-1" docs/adr/ADR-1.md
+  lg upkeep --range main..feat --top 0 --format json
+  assert_eq "0|app-1:key-in-message||[]" "$LG_RC|$(lg_up_found "$LG_OUT")|$(lg_up_vals app-1)|$(jq -c .unattributed_contracts <<<"$LG_OUT")" \
+    "nothing proposed, nothing unattributed"
+  LG_SUB=upkeep lg_call _lg_up_core "$(git rev-parse main)" "$(git rev-parse feat)" "" "" "$TEST_DIR/core.json"
+  assert_json_field "$(cat "$TEST_DIR/core.json" 2>/dev/null)" '.touched | tojson' "[]" "the core's touched: none"
+  teardown
+}
+
 # lg_up_core_paths_max <bytes> <_lg_up_core args…>: _lg_up_core with its
 # pathspec cap (_LG_UP_PATHS_MAX) lowered — for lg_call.
 lg_up_core_paths_max() {
@@ -15208,6 +15261,8 @@ run_tests() {
   test_lg_upkeep_amendment_paths_still_win
   test_lg_upkeep_plan_link_involvement
   test_lg_upkeep_amendment_skip_globs_exempt
+  test_lg_upkeep_amendment_shared_document
+  test_lg_upkeep_amendment_glob_not_document_defined
   test_lg_upkeep_long_path_list_diffs_the_range
   test_lg_upkeep_long_diff_linear_time
   test_lg_upkeep_pr_merged_and_open
