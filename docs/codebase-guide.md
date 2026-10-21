@@ -47,7 +47,7 @@ doc-superpowers/
 │   │   ├── server.py     # the MCP server (MCPServer, SDK v2): four tools over one Runtime; cli.py builds the same Runtime
 │   │   ├── cli.py evaluate.py  # doc-search serve | init | index | query | status | eval; known-answer evaluation
 │   │   ├── chunker.py    # the cloud write path's heading-bounded chunker
-│   │   └── cloud/        # read.py (the cloud leg: Vertex query → Firestore find_nearest, branch-changed suppression), write.py (the guarded indexer), vertex.py (google-genai embeddings)
+│   │   └── cloud/        # read.py (the cloud leg: Vertex query → Firestore find_nearest, branch-changed suppression), write.py (the guarded indexer), vertex.py (google-genai embeddings), __init__.py (the one gateway to the extra's modules: CloudUnavailable without it; gRPC fork support off before they load)
 │   └── tests/            # pytest: never the network (a test-built Model2Vec model, fake Firestore and Vertex); the live test (test_live.py: semble's default model, end to end) only under DOC_SEARCH_LIVE=1
 ├── scripts/
 │   ├── doc-tools.sh      # Bundled freshness tooling (build-index, check-freshness, update-index, add-entry, remove-entry, move-entry, set-code-refs, set-doc-type, upgrade-entries, deprecate-entry, status, audit-merges, bump-version, check-version, implementation-status, set-implementation, fragments {list, validate, merge}, tools {install, uninstall, status, version}, claims {validate, run, promote, render, gate, attest, rulings}, ledger {show, ls, find, related, suggest, sweep, recheck, inflight, notices, state-watch, new, assign, link, note, view, validate, publish, finalize, init})
