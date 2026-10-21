@@ -908,7 +908,8 @@ function ifl_plan(p,   d) {
 # The signature covers what facts depend on beyond the two commits: the
 # trailer names, the plan directories (the source's doc-index), and the
 # parser programs (_LG_AWK_TRAILER — the closing-keyword rule included —,
-# the walk, the plan words, the plan test _LG_AWK_IFL_PLAN).
+# the walk, the plan words, the plan test _LG_AWK_IFL_PLAN and the glob
+# grammar _LG_AWK_GLOB it matches plan globs with).
 _LG_IFL_SRC=worktree
 _LG_IFL_SIGSRC=""
 _lg_ifl_sig() {
@@ -920,7 +921,7 @@ _lg_ifl_sig() {
   _lg_tr_since
   _lg_ifl_plans "$_LG_IFL_SRC" "$_SCRATCH/lg-ifl-plans"
   { printf '%s\n' "$_LG_IFL_FACTS"; cat "$_SCRATCH/lg-ifl-tr"; printf 'since %s\nplans\n' "$_LG_TR_SINCE"; cat "$_SCRATCH/lg-ifl-plans"
-    printf 'parsers\n%s\n%s\n%s\n%s\n' "$_LG_AWK_TRAILER" "$_LG_AWK_IFL_WALK" "$_LG_AWK_IFL_WORDS" "$_LG_AWK_IFL_PLAN"; } > "$s.sig" \
+    printf 'parsers\n%s\n%s\n%s\n%s\n%s\n' "$_LG_AWK_TRAILER" "$_LG_AWK_IFL_WALK" "$_LG_AWK_IFL_WORDS" "$_LG_AWK_IFL_PLAN" "$_LG_AWK_GLOB"; } > "$s.sig" \
     || _lg_die "cannot write $s.sig"
   _hash_one "$s.sig"
   _LG_IFL_SIG=${_HASH#sha256:}

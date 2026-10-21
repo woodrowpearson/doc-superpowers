@@ -8013,10 +8013,15 @@ test_lg_ifl_facts_sig_in_name() {
   lg_ifl_teardown
 }
 
-# lg_ifl_sig_of [<text>]: the in-flight facts signature, computed afresh,
-# with <text> appended to the plan test (_LG_AWK_IFL_PLAN) — for lg_call.
+# lg_ifl_sig_of [<text> [glob]]: the in-flight facts signature, computed
+# afresh, with <text> appended to the plan test (_LG_AWK_IFL_PLAN), or with
+# "glob" to the glob grammar (_LG_AWK_GLOB) — for lg_call.
 lg_ifl_sig_of() {
-  _LG_AWK_IFL_PLAN="$_LG_AWK_IFL_PLAN${1:-}"
+  if [ "${2:-}" = glob ]; then
+    _LG_AWK_GLOB="$_LG_AWK_GLOB${1:-}"
+  else
+    _LG_AWK_IFL_PLAN="$_LG_AWK_IFL_PLAN${1:-}"
+  fi
   _LG_IFL_SIG=""
   _lg_ifl_sig
   printf '%s\n' "$_LG_IFL_SIG"
@@ -8032,6 +8037,18 @@ test_lg_ifl_facts_sig_covers_plan_test() {
   lg_call lg_ifl_sig_of "# another plan test"
   assert_eq "0|different" "$LG_RC|$(if [ "$LG_OUT" != "$a" ] && [ -n "$LG_OUT" ]; then echo different; else echo same; fi)" \
     "another plan test: another signature"
+  lg_ifl_teardown
+}
+
+test_lg_ifl_facts_sig_covers_glob() {
+  echo "test: the in-flight facts signature covers the glob grammar (_LG_AWK_GLOB, with which the plan test matches doc_columns.plan.globs; final review M4): another grammar is another signature"
+  lg_ifl_fixture
+  local a
+  lg_call lg_ifl_sig_of
+  a=$LG_OUT
+  lg_call lg_ifl_sig_of "# another glob grammar" glob
+  assert_eq "0|16|different" "$LG_RC|${#LG_OUT}|$(if [ "$LG_OUT" != "$a" ] && [ -n "$a" ]; then echo different; else echo same; fi)" \
+    "another glob grammar: another 16-hex signature"
   lg_ifl_teardown
 }
 
@@ -13075,6 +13092,7 @@ test_lg_upkeep_unattributed() {
     "every touched contract, unattributed, with its files"
   lg upkeep --range main..feat
   assert_contains "$LG_OUT" "unattributed: endpoint:create (server/create.js)" "text: an unattributed line"
+  assert_eq "1" "$(grep -cxF 'unattributed: endpoint:create (server/create.js)' <<<"$LG_OUT")" "…the whole line: no cites, no suffix"
   assert_contains "$LG_OUT" "(no proposals)" "text: (no proposals)"
   lg upkeep --range main..feat --strict
   assert_eq "0" "$LG_RC" "--strict: unattributed contracts are no proposals (exit 0)"
@@ -13839,7 +13857,8 @@ test_lg_upkeep_amendment_body_keys_do_not_link() {
   assert_json_field "$LG_OUT" '.unattributed_contracts | tojson' \
     '[{"contract":"spec:SPEC-A","files":["docs/specs/SPEC-A.md"],"cites":["docs/plans/p1.md"]}]' "unattributed, with the plan it cites"
   lg upkeep --range main..feat
-  assert_contains "$LG_OUT" "unattributed: spec:SPEC-A (docs/specs/SPEC-A.md)" "text: the unattributed line"
+  assert_eq "1" "$(grep -cxF 'unattributed: spec:SPEC-A (docs/specs/SPEC-A.md) — cites docs/plans/p1.md' <<<"$LG_OUT")" \
+    "text: the unattributed line names the plan it cites (final review M1)"
   teardown
 }
 
@@ -15208,6 +15227,7 @@ run_tests() {
   test_lg_inflight_dedup_descendant_wins
   test_lg_ifl_facts_sig_in_name
   test_lg_ifl_facts_sig_covers_plan_test
+  test_lg_ifl_facts_sig_covers_glob
 
   # --- Task 11 fix round 3 ---
   test_lg_inflight_scan_children_reaped

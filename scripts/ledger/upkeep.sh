@@ -140,8 +140,9 @@
 #   <n> files, <m> commits"; per item "<key|path>  found by <signals>",
 #   "  + <field> <value>  — <evidence; …>", "  (showing N of M; --top 0
 #   shows all)", "  declared, untouched: a, b", "  link: ledger link …";
-#   then "unattributed: <c> (<files>)"; "(no proposals)" when no item has
-#   one. Exit 0 (proposals are advisory); 1 with --strict and a proposal; 2
+#   then "unattributed: <c> (<files>)" (+ " — cites <plan>, …" with cites);
+#   "(no proposals)" when no item has one. Exit 0 (proposals are
+#   advisory); 1 with --strict and a proposal; 2
 #   a range that does not resolve, a failing contracts adapter, a bad
 #   upkeep config, --pr without adapters.pr, its list failing (no copy) or
 #   view failing, a PR not usable, a --no-repo-adapters refusal; 3 usage.
@@ -1240,7 +1241,8 @@ def up_files($fs): ($fs | length) as $n | ($fs[0:3] | join(", ")) + (if $n > 3 t
      (if .declared_untouched != [] then "  declared, untouched: \(.declared_untouched | join(", ") | lg_q_one)" else empty end),
      (if .link != null then "  link: \(.link)" else empty end)),
   ($O.unattributed_contracts[]
-   | "unattributed: \(.contract | lg_q_one) (\(if .files == [] then "Contract-Change" else up_files(.files) | lg_q_one end))"),
+   | "unattributed: \(.contract | lg_q_one) (\(if .files == [] then "Contract-Change" else up_files(.files) | lg_q_one end))"
+     + (if (.cites // []) != [] then " — cites \(.cites | join(", ") | lg_q_one)" else "" end)),
   (if all($O.items[]; .total == 0) then "(no proposals)" else empty end)
 '
 
