@@ -117,14 +117,26 @@ def default_threads(sys_platform: str = sys.platform) -> int:
     a CPU-bound encode down (on an M1 Pro: 6 threads ran 14.9 chunks/s, 8 ran 14.1, and 10, the
     efficiency cores included, 8.1). macOS counts its performance cores in
     `hw.perflevel0.physicalcpu` (since macOS 12; `hw.physicalcpu` where it is absent); elsewhere
-    `os.cpu_count()` is what there is.
+    the CPUs this process may run on are what there is (`_usable_cpus`).
     """
     cores = None
     if sys_platform == "darwin":
         cores = _sysctl_int("hw.perflevel0.physicalcpu") or _sysctl_int("hw.physicalcpu")
     if not cores:
-        cores = os.cpu_count() or 0
+        cores = _usable_cpus()
     return max(2, cores - 2)
+
+
+def _usable_cpus() -> int:
+    """The CPUs this process may run on: its affinity mask where the OS has one (Linux: a container or
+    `taskset` limits it below the machine's count), else `os.cpu_count()`; 0 when neither says."""
+    affinity = getattr(os, "sched_getaffinity", None)
+    if affinity is not None:
+        try:
+            return len(affinity(0))
+        except OSError:
+            pass
+    return os.cpu_count() or 0
 
 
 def _sysctl_int(name: str) -> int | None:
@@ -190,6 +202,13 @@ class Encoder:
     `encode` holds the rest (the encode cache, the length-sorted batches, the progress reports),
     so a test double replaces the first two and keeps the third. One encoder serves every build
     and query of its model in the process; the cache it is given stays open as long as it lives.
+
+    The session keeps the memory its largest batches needed once a build has run through it (a
+    process held 3.75 GB after encoding a large corpus's longest chunks, 2.7 GB once the session
+    was dropped; turning onnxruntime's arena off did not help), so the pool calls `release_session`
+    when a build ends, and `_forward` makes a new session on the next encode (a query, say: a
+    one-off of a second or two). Both take the session lock, so encodes that start together make
+    one session.
     """
 
     def __init__(self, spec: TransformerSpec, threads: int, cache: EncodeCache | None) -> None:
@@ -212,11 +231,37 @@ class Encoder:
         options.intra_op_num_threads = threads
         options.inter_op_num_threads = 1
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        self._session = ort.InferenceSession(
-            _model_file(spec, spec.onnx_file), sess_options=options, providers=["CPUExecutionProvider"]
-        )
-        self._inputs = {i.name for i in self._session.get_inputs()}
-        self._output = self._session.get_outputs()[0].name
+        self._options = options
+        self._onnx_path = _model_file(spec, spec.onnx_file)  # resolved once: a new session needs no download
+        self._session_lock = threading.Lock()
+        session = self._new_session()
+        self._session: Any = session  # None once released, until the next encode makes another
+        self._inputs = {i.name for i in session.get_inputs()}
+        self._output = session.get_outputs()[0].name
+
+    def _new_session(self) -> Any:
+        import onnxruntime as ort
+
+        return ort.InferenceSession(self._onnx_path, sess_options=self._options, providers=["CPUExecutionProvider"])
+
+    def _live_session(self) -> Any:
+        """The session, made again (under the lock, so once) when it was released."""
+        session = self._session
+        if session is None:
+            with self._session_lock:
+                session = self._session
+                if session is None:
+                    session = self._session = self._new_session()
+        return session
+
+    def release_session(self) -> None:
+        """Drop the onnxruntime session and the memory it holds; the next forward pass makes a new one.
+
+        A forward pass under way finishes on the session it started with (its memory goes when it returns);
+        a batch after it, of the same encode or another, makes the new one.
+        """
+        with self._session_lock:
+            self._session = None
 
     def encode(self, sentences: str | Sequence[str], **kwargs: Any) -> np.ndarray:
         """The unit vectors of `sentences`, float32 `(n, dim)`, in input order.
@@ -279,7 +324,8 @@ class Encoder:
             ids[row, : len(encoding.ids)] = encoding.ids
             mask[row, : len(encoding.ids)] = 1
         feed = {"input_ids": ids, "attention_mask": mask, "token_type_ids": np.zeros_like(ids)}
-        (hidden,) = self._session.run([self._output], {k: v for k, v in feed.items() if k in self._inputs})
+        session = self._live_session()
+        (hidden,) = session.run([self._output], {k: v for k, v in feed.items() if k in self._inputs})
         cls = np.asarray(hidden[:, 0, :], dtype=np.float32)
         return cls / np.maximum(np.linalg.norm(cls, axis=1, keepdims=True), _NORM_EPSILON)
 
@@ -329,6 +375,17 @@ def _encoder_for(spec: TransformerSpec) -> Encoder:
             encoder = _make_encoder(spec, _threads or default_threads())
             _encoders[spec.model_path] = encoder
         return encoder
+
+
+def release_session(spec: TransformerSpec) -> None:
+    """Drop the onnxruntime session of the process's encoder for `spec`, when one was made (none is made here).
+
+    The pool calls it when a transformer build ends; the encoder makes a new session on its next encode.
+    """
+    with _encoders_lock:
+        encoder = _encoders.get(spec.model_path)
+    if encoder is not None:
+        encoder.release_session()
 
 
 def _load(model_path: str) -> Any:

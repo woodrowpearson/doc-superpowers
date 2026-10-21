@@ -31,38 +31,52 @@ A transformer docs model (`docs.model: "transformer:<name>"`, transformer.py) ch
   other worktrees' static builds must not wait behind it. Inside its slot a build holds the host's
   encoder lock (`encode_cache.host_lock`, one encoder per host across processes; a build waiting
   for another process reads `waiting`), and it is timed from the lock: waiting is not build time.
-  A build that had to wait checks the cache again once it holds the lock, and loads what the
-  holder saved for this worktree instead of encoding it again.
+  A first build waits for the lock however long another process holds it; a refresh of a saved
+  transformer index of this model waits at most HOST_LOCK_REFRESH_WAIT_S, then encodes without it
+  (one info line: an incremental encode is small, and an edit must not wait hours behind another
+  worktree's first build). A build that had to wait checks the cache again once it holds the lock
+  (or gave up on it), and loads what the holder saved for this worktree instead of encoding it again.
 - *What serves while it builds.* The docs thread loads a transformer index saved for the worktree:
   a valid one is the answer (no lane); a stale one serves while its refresh, incremental, queues in
   the lane. When none is saved (nothing is, or semble's docs folder holds another model's), or the
   saved one does not load (its model files missing, say), and none is in memory, a pool with
   `fallback` on (a server; the command line builds what the config names, in the foreground) starts
-  a hidden static docs state (semble's default model, kept on the entry, building in the place the
-  docs state reserved in the build line when it started, so before the code build), waits for its
-  first build and the code index's, then queues in the lane. While the transformer index builds,
-  the static one answers for docs (`WorktreeIndexes.docs_fallback`) and refreshes on its own
-  cooldown. While an index serves docs, a `get` waits at most TRANSFORMER_REFRESH_WAIT_S for a
-  transformer build, and not at all while it waits in the lane or for another process's lock.
+  a hidden static docs state (semble's default model, kept on the entry), waits for its first build
+  and the code index's, then queues in the lane. The fallback builds in the place the docs state
+  reserved in the build line when it started with nothing to serve (so before the code build), or,
+  when that place was given back (a stale saved index that then did not load), at the back of the
+  line. While the transformer index builds, the static one answers for docs
+  (`WorktreeIndexes.docs_fallback`) and refreshes on its own cooldown, except that it is never
+  rebuilt while semble's docs folder holds a transformer index (one that does not load): it keeps
+  serving as it is. While an index serves docs, a `get` waits at most TRANSFORMER_REFRESH_WAIT_S
+  for a transformer build, and not at all while it waits in the lane or for another process's lock.
 - *The swap.* A built transformer index is validated (chunks, `(chunks, dim)` vectors, all finite)
   before it serves. It is then saved before the encoder lock is let go (so a build of the same
   worktree in another process, waiting for the lock, loads it), which replaces the static index
-  (semble keeps one docs folder per worktree, whatever the model), and the fallback is dropped.
-  The two save under the entry's `save_lock`, and a static save is skipped once a transformer index
-  is saved, so a late static refresh never overwrites it. A failed or invalid build is recorded
-  (`transformer_error`; a failed validation is also a warning in the log), the fallback keeps
-  serving, the static index stays on disk, and the build is retried on the cooldown, whose base is
-  capped at TRANSFORMER_COOLDOWN_CAP_S (a first encode takes hours; a refresh from the encode cache,
-  about a minute).
+  (semble keeps one docs folder per worktree, whatever the model). The two save under the entry's
+  `save_lock`, and a static save is skipped once a transformer index is saved, so a late static
+  refresh never overwrites it. Once a transformer index serves (a built one, a loaded one, or a
+  stale saved one while it refreshes) the fallback is dropped, never to refresh again. A failed or
+  invalid build is recorded (`transformer_error`; a failed validation is also a warning in the
+  log), the fallback keeps serving, the static index stays on disk, and the build is retried on
+  the cooldown, whose base is capped at TRANSFORMER_COOLDOWN_CAP_S (a first encode takes hours; a
+  refresh from the encode cache, about a minute) and doubles with each failure in a row, up to
+  TRANSFORMER_BACKOFF_CAP_S (a success starts it again from the cap).
 - *Eviction.* Only a transformer build that holds its lane slot (encoding, or waiting there for the
-  host lock) or saves keeps its worktree resident. One still waiting for the static builds or in
-  the lane is cancelled by an eviction: its places are given back, its thread wakes and leaves
-  without building, and the evicted indexes go with it.
+  host lock) or saves keeps its worktree resident. One waiting in the lane is cancelled by an
+  eviction (as is the build-line place it reserved for a fallback that has not started): its places
+  are given back, its thread wakes and leaves without building, and the evicted indexes go with it.
+  While it waits for the static builds it cannot be evicted: those builds keep the worktree
+  resident themselves.
+- *Memory.* When a transformer build thread ends (built, loaded, failed or cancelled), the pool
+  drops the encoder's onnxruntime session (`transformer.release_session`), which keeps GBs after an
+  encode; the next encode, a query or a build, makes a new one.
 - *Progress.* Each transformer build has its own `progress.BuildProgress` (queued, waiting,
   encoding, saving), published for other processes and retired when the build ends; `progress()`
-  and `WorktreeIndexes.transformer` read it. Its total is known for a first build only (an
-  incremental refresh encodes what changed). Its rate and ETA run on real time, not the pool clock.
-  The first first-build of a pool on an Intel Mac logs a warning.
+  and `WorktreeIndexes.transformer` read it. Its total is known for a first build only, and only
+  from a static docs index (the fallback's, or one saved before); an incremental refresh encodes
+  what changed. Its rate and ETA run on real time, not the pool clock. The first first-build of a
+  pool on an Intel Mac logs a warning.
 
 Nothing here raises to a caller: a build exception is recorded in `WorktreeIndexes.error` (a
 transformer docs build's in `WorktreeIndexes.transformer_error`).
@@ -74,15 +88,15 @@ and is never held while a thread waits for a build, a first build, the encoder l
 under it a thread takes only a line's condition (to take or give back a place) or a progress's own
 lock (for a view). The others nest in one order only: a lane slot, then the host's encoder lock (a
 transformer build validates and saves before it lets the lock go), then an entry's `save_lock`,
-which a static fallback save takes alone. So no two threads can wait on each other's locks.
+which a static fallback save takes alone. The encoder's own locks (transformer.py: its registry's,
+its session's) are taken inside a build or a query and hold nothing else. So no two threads can
+wait on each other's locks.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import platform
-import sys
 import threading
 import time
 from collections import OrderedDict, deque
@@ -99,7 +113,7 @@ from semble.utils import resolve_model_name
 
 from . import encode_cache, transformer
 from .config import Config
-from .progress import BuildProgress, ProgressView
+from .progress import BuildProgress, ProgressView, intel_mac
 from .transformer import MISSING_EXTRA, TransformerSpec
 
 logger = logging.getLogger(__name__)
@@ -125,15 +139,19 @@ TRANSFORMER_REFRESH_WAIT_S = 2.0
 # encode takes hours, and 3 x that would hold a docs edit back for most of a day.
 TRANSFORMER_COOLDOWN_CAP_S = 60.0
 
+# Each transformer build that fails in a row doubles that base (60, 120, 240 ... s), up to this: a
+# build that keeps failing (offline, a broken model file) is not retried every 3 min for days.
+TRANSFORMER_BACKOFF_CAP_S = 3600.0
+
+# How long a refresh of a saved transformer index waits for another process's encoder lock before it
+# encodes without it. A first build waits however long it takes: one cold encoder per host.
+HOST_LOCK_REFRESH_WAIT_S = 10.0
+
 INTEL_WARNING = (
     "doc-search: the transformer docs model runs ~3.6 chunks/s on Intel (M-series: ~16); this first build may take hours"
 )
 
 _UNLOADABLE = "doc-search: the saved transformer docs index of %s does not load (%s): the static index serves meanwhile"
-
-
-def _intel_mac() -> bool:
-    return sys.platform == "darwin" and platform.machine() == "x86_64"
 
 
 class _Cancelled(Exception):
@@ -288,6 +306,7 @@ class _State:
         self.error: str | None = None
         self.checked_at: float | None = None  # when the last build thread finished
         self.cool_seconds = 0.0  # what the cooldown scales: the last build, or the slowest recent failure
+        self.failures = 0  # build threads that failed in a row (a transformer docs state's back off)
         self.fatal = False  # a config error: no build can fix it, so none is ever started
         self.spec: TransformerSpec | None = None  # a transformer docs state: it builds in the transformer lane
         self.progress: BuildProgress | None = None  # that state's build under way
@@ -632,6 +651,8 @@ class IndexPool:
         cool = state.cool_seconds
         if state.spec is not None:  # a first encode takes hours; a refresh, from the encode cache, does not
             cool = min(cool, TRANSFORMER_COOLDOWN_CAP_S)
+            if state.failures > 1:  # failing in a row: back off, doubling (the exponent bounded: no overflow)
+                cool = min(cool * 2 ** min(state.failures - 1, 32), TRANSFORMER_BACKOFF_CAP_S)
         cooldown = max(self._cfg.search.rescan_seconds, REVALIDATE_FACTOR * cool)
         return now - state.checked_at >= cooldown
 
@@ -761,20 +782,35 @@ class IndexPool:
                 return _Outcome(index=current, token=token)  # the cache is what we already hold
             index = SembleIndex.load_from_disk(cached)
             return _Outcome(index=index, token=token, files=_files_of(index), changed=True)
+        if state.is_fallback and current is not None and IndexPool._holds_transformer(entry, path):
+            # The folder holds a transformer index (one that does not load, or the fallback would be gone):
+            # a static rebuild would never be saved, and the fallback serves only until that index loads.
+            return _Outcome(index=current, token=current_token)
         with place:  # one semble build at a time, pool-wide
             index = SembleIndex.from_path(path, content=list(state.content), model_path=state.model)
         if not state.is_fallback:
             IndexPool._save(state, index, path)
             token = _stamp(find_index_from_cache_folder(path, index.content))
             return _Outcome(index=index, token=token, files=_files_of(index), changed=True)
-        spec = entry.states["docs"].spec
         with entry.save_lock:  # the static index never replaces a saved transformer index
-            if entry.transformer_saved or (spec is not None and _saved_docs(path)[0] == spec.model_path):
+            if IndexPool._holds_transformer(entry, path, locked=True):
                 logger.debug("doc-search: the static docs index of %s is not saved: a transformer index is", worktree)
                 return _Outcome(index=index, files=_files_of(index), changed=True)
             IndexPool._save(state, index, path)
             token = _stamp(find_index_from_cache_folder(path, index.content))
         return _Outcome(index=index, token=token, files=_files_of(index), changed=True)
+
+    @staticmethod
+    def _holds_transformer(entry: _Entry, path: str, *, locked: bool = False) -> bool:
+        """Whether semble's docs folder for the worktree holds a transformer index: one this pool saved or
+        found, or one of the docs model on disk. `locked`: the caller holds the entry's `save_lock`."""
+        spec = entry.states["docs"].spec
+        if locked:
+            saved = entry.transformer_saved
+        else:
+            with entry.save_lock:
+                saved = entry.transformer_saved
+        return saved or (spec is not None and _saved_docs(path)[0] == spec.model_path)
 
     @staticmethod
     def _save(state: _State, index: SembleIndex, path: str) -> bool:
@@ -802,10 +838,20 @@ class IndexPool:
             logger.debug("doc-search: transformer docs index of %s failed", entry.worktree, exc_info=True)
         finally:
             self._give_back(state)
+            self._release(state)
             for build in builds:
                 build.retire()
             with self._lock:
                 self._settle(entry, state, outcome, self.clock() - (began[0] if began else start))
+
+    @staticmethod
+    def _release(state: _State) -> None:
+        """Drop the encoder's onnxruntime session once a build thread is done with it (never raises)."""
+        try:
+            if state.spec is not None:
+                transformer.release_session(state.spec)
+        except Exception:  # noqa: BLE001 - memory, not correctness: a session that stays is no failure
+            logger.debug("doc-search: the encoder session was not released", exc_info=True)
 
     def _give_back(self, state: _State) -> None:
         """Leave the places a transformer build no longer needs: the fallback's reserved one, a lane place never entered."""
@@ -854,12 +900,12 @@ class IndexPool:
             self._give_back(state)  # a stale transformer index serves instead of a fallback, if it loads
             current = self._serve_stale(entry, state, path)
 
-        build = BuildProgress(entry.worktree, spec.model_path)
+        build = BuildProgress(entry.worktree, spec.model_path, first=first)
         builds.append(build)
         with self._lock:
             self._check(entry)
             state.progress = build
-            warn = first and not self._intel_warned and _intel_mac()
+            warn = first and not self._intel_warned and intel_mac()
             self._intel_warned = self._intel_warned or warn
         if warn:
             logger.warning(INTEL_WARNING)
@@ -910,7 +956,10 @@ class IndexPool:
                 state.lane_place = None
                 self._check(entry)
                 state.busy = True  # from here an eviction waits for this build instead of cancelling it
-            with encode_cache.host_lock(spec, on_wait=on_wait):  # and one encoder on this host
+            # One encoder on this host: a first build waits for it as long as it takes, a refresh at most
+            # HOST_LOCK_REFRESH_WAIT_S (then it encodes without it).
+            wait_s = None if first else HOST_LOCK_REFRESH_WAIT_S
+            with encode_cache.host_lock(spec, on_wait=on_wait, timeout=wait_s):
                 began.append(self.clock())
                 if in_line is not None:
                     with self._lock:
@@ -966,6 +1015,7 @@ class IndexPool:
             state.built_at = self.clock()
             state.build_seconds = state.built_at - started
             state.answerable.set()  # it answers from here on
+            entry.fallback = None  # a transformer index serves: a fallback left by an earlier run is dropped
         return index
 
     def _settle(self, entry: _Entry, state: _State, outcome: _Outcome, elapsed: float) -> None:
@@ -976,8 +1026,10 @@ class IndexPool:
             # keep any previous index serving; a slow failure slows the retries
             state.error = outcome.error
             state.cool_seconds = max(state.cool_seconds, elapsed)
+            state.failures += 1
         else:
             state.error = None
+            state.failures = 0
             if outcome.changed:
                 state.index = outcome.index
                 state.token = outcome.token
@@ -988,9 +1040,9 @@ class IndexPool:
         if state.spec is not None:
             state.progress = None
             state.busy = False
-            if state.index is not None and outcome.error is None:
-                # The swap: the transformer index serves. A fallback build still running settles into its
-                # own state, which nothing refers to any more.
+            if state.index is not None:
+                # The swap: a transformer index serves (a refresh that failed keeps the previous one serving).
+                # A fallback build still running settles into its own state, which nothing refers to any more.
                 entry.fallback = None
         state.settled.set()
         state.answerable.set()

@@ -14,7 +14,8 @@ than fail.
 
 `host_lock` keeps two builds of two processes (two sessions, two worktrees) from running the
 encoder at once; the builds of one process are already serial (engines.py). It degrades the same
-way: a lock that cannot be set up is a warning and an unlocked run.
+way: a lock that cannot be set up is a warning and an unlocked run. A caller may bound its wait
+(`timeout`): past it, the body runs unlocked, with one info line.
 
 Nothing here that only names a path (`cache_root`, `encode_cache_path`) creates a directory or
 can raise: a directory is created where something is written to it, inside the guarded open of
@@ -32,6 +33,7 @@ import os
 import sqlite3
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -56,6 +58,9 @@ _warned_relative: set[str] = set()
 # SQLite's default limit on bound parameters is 999 in older builds; stay well under it.
 _CHUNK = 500
 _BUSY_TIMEOUT_MS = 60_000
+
+# How often a bounded wait for the host lock tries it again, in seconds.
+_LOCK_POLL_S = 0.1
 
 
 def cache_root() -> Path:
@@ -227,8 +232,24 @@ def _holder_pid(fd: int) -> int | None:
         return None
 
 
-def _acquire(spec: TransformerSpec, on_wait: Callable[[int | None], None] | None) -> int | None:
-    """Take the lock; return its file descriptor, or None when it cannot be set up (one warning)."""
+def _try_until(fd: int, deadline: float) -> bool:
+    """Try the lock without blocking until it is taken (True) or `deadline` (time.monotonic) passes (False)."""
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            time.sleep(min(_LOCK_POLL_S, left))
+
+
+def _acquire(
+    spec: TransformerSpec, on_wait: Callable[[int | None], None] | None, timeout: float | None
+) -> int | None:
+    """Take the lock; return its file descriptor, or None when it cannot be set up (one warning) or `timeout`
+    seconds pass while another holds it (one info line)."""
     path = cache_root() / "encode" / f"{spec.name}.lock"
     fd: int | None = None
     try:
@@ -237,12 +258,25 @@ def _acquire(spec: TransformerSpec, on_wait: Callable[[int | None], None] | None
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
+            holder = _holder_pid(fd)
             if on_wait is not None:
                 try:
-                    on_wait(_holder_pid(fd))
+                    on_wait(holder)
                 except Exception as err:  # the notice is informational: failing to deliver it keeps the lock
                     logger.warning("doc-search: encoder lock wait notice failed (%s: %s)", type(err).__name__, err)
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            if timeout is None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            elif not _try_until(fd, time.monotonic() + max(0.0, timeout)):
+                os.close(fd)
+                fd = None
+                who = "another process" if holder is None else f"pid {holder}"
+                logger.info(
+                    "doc-search: the encoder lock %s is still held by %s after %g s: encoding without it",
+                    path,
+                    who,
+                    timeout,
+                )
+                return None
     except BaseException as err:
         if fd is not None:
             with suppress(OSError):
@@ -259,19 +293,25 @@ def _acquire(spec: TransformerSpec, on_wait: Callable[[int | None], None] | None
 
 
 @contextmanager
-def host_lock(spec: TransformerSpec, on_wait: Callable[[int | None], None] | None = None) -> Iterator[None]:
+def host_lock(
+    spec: TransformerSpec,
+    on_wait: Callable[[int | None], None] | None = None,
+    timeout: float | None = None,
+) -> Iterator[None]:
     """Hold the host-wide encoder lock for `spec` (an exclusive `flock` on a file under the cache root).
 
     Taken without blocking first. When another process (or another open of the file) holds it,
-    `on_wait(pid)` is called with the holder's pid (None when unreadable), then this blocks until
-    the holder lets go. Once held, the lock file records this process's pid.
+    `on_wait(pid)` is called with the holder's pid (None when unreadable), then this waits until
+    the holder lets go: for ever when `timeout` is None, else at most `timeout` seconds, after
+    which the body runs without the lock (one info line says so). Once held, the lock file
+    records this process's pid.
 
     The lock is a convenience, never a reason to fail a build: where `fcntl` is missing (Windows)
     it is a no-op, and when it cannot be set up (the cache location is unwritable, the filesystem
     has no flock) the body runs without it after one warning. A failing `on_wait` is a warning
     too, and the wait goes on.
     """
-    fd = _acquire(spec, on_wait) if fcntl is not None else None
+    fd = _acquire(spec, on_wait, timeout) if fcntl is not None else None
     try:
         yield
     finally:
