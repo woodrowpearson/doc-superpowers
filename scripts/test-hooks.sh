@@ -5843,6 +5843,40 @@ test_launcher_cloud_extra() {
   teardown
 }
 
+test_launcher_transformer_extra() {
+  echo "test: launcher: --extra local-transformer when docs.model starts with transformer:, after --extra cloud when both; nothing extra for another or a non-string model"
+  srh_fixture '{"docs":{"model":"transformer:gte-modernbert-base"}}'
+  local envroot
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "uv run --project $envroot/search --frozen --no-dev --extra local-transformer doc-search serve" "$RUN_OUT" "a transformer: docs.model: --extra local-transformer, between --no-dev and doc-search"
+  mkdir -p src/deep
+  (cd src/deep && srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve && echo "$RUN_OUT" > "$envroot/deep.out")
+  assert_contains "$(cat "$envroot/deep.out")" "--extra local-transformer" "…read from the repository top, whatever the cwd"
+  printf '{"docs":{"model":"transformer:gte-modernbert-base"},"cloud":{"project":"p"}}\n' > docs/search/config.json
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "uv run --project $envroot/search --frozen --no-dev --extra cloud --extra local-transformer doc-search serve" "$RUN_OUT" "with a cloud object too: --extra cloud, then --extra local-transformer"
+  printf '{"docs":{"model":"transformer:gte-modernbert-base"},"cloud":null}\n' > docs/search/config.json
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "uv run --project $envroot/search --frozen --no-dev --extra local-transformer doc-search serve" "$RUN_OUT" "cloud null: the transformer extra alone"
+  printf '{"docs":{"model":"minishlab/potion-base-8M"}}\n' > docs/search/config.json
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search serve" "$RUN_OUT" "a model2vec docs.model: no extra"
+  printf '{"docs":{"model":7}}\n' > docs/search/config.json
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "0" "$RUN_RC" "a non-string docs.model: the launcher still starts doc-search (it reports the config itself)"
+  assert_not_contains "$RUN_OUT" "extra" "…with no extra"
+  printf '{"docs":"transformer:x"}\n' > docs/search/config.json
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "0" "$RUN_RC" "a docs that is not an object: exit 0"
+  assert_not_contains "$RUN_OUT" "extra" "…with no extra"
+  printf '{"docs":{"model":null},"code":{"model":"transformer:gte-modernbert-base"}}\n' > docs/search/config.json
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_not_contains "$RUN_OUT" "extra" "a transformer: only under code.model (which refuses it): no extra"
+  teardown
+}
+
 test_launcher_without_uv() {
   echo "test: launcher: no uv on PATH — one stderr line, exit 2"
   setup
@@ -6170,6 +6204,7 @@ echo ""
 echo "=== doc-search: the launcher and the opt-in --search set ==="
 test_launcher_resolution_order
 test_launcher_cloud_extra
+test_launcher_transformer_extra
 test_launcher_without_uv
 test_launcher_is_posix_sh
 test_search_install_refused_without_config
