@@ -5,7 +5,8 @@
 # _lg_init, _lg_usage, _lg_die, _lg_emit, _lg_out_file, _lg_cfg,
 # _lg_src_cat, index.sh's _lg_index and _LG_JQ_INCLUDE, keys.sh's
 # _LG_JQ_RESOLVE_DEFS (lg_resolve), relations.sh's _lg_msg_claims,
-# _lg_trailers, _lg_tr_incl, _LG_AWK_TRAILER and _lg_r_file_contracts,
+# _lg_trailers, _lg_tr_incl, _LG_AWK_TRAILER, _LG_AWK_RW (the Related work
+# reader) and _lg_r_file_contracts,
 # glob.sh's _lg_paths_filter and _LG_AWK_GLOB, inflight.sh's _lg_ifl_plans
 # and _LG_AWK_IFL_PLAN (what a plan is), query.sh's _lg_pr_data_into,
 # parse.sh's _lg_scratch_name; defs.jq's lg_r_maps; adapters.sh's
@@ -820,70 +821,30 @@ BEGIN {
 ifl_plan($0) { print "M\t" $0 }
 '
 
-# _LG_AWK_UP_PLAN_LINKS: what each plan links (design §4 D9), after
-# frontmatter.awk run with mode=lib — its doc_begin and doc_line read each
-# plan, so its frontmatter is parsed as an item's is (FK, FV: each key and
-# its value as JSON; an unterminated block has none, its lines are body
-# text). Input: plan paths, one per line; each read from that path, or with
-# -v blobs from the file <blobs><its line number>; one that cannot be read
-# has no lines. Prints "<plan>\tF\t<json>" per frontmatter value, and
-# "<plan>\tR\t<item>" per data row marked include of a Related work table,
-# read as validate --plan reads one: the section a heading of any level
-# named "Related work" (any case) opens, to the next heading of the same
-# or a higher level, fenced blocks skipped; a table's first row is its
-# header, whose "Mark" column (else its last) holds the mark — "include",
-# any case, once surrounding `, * and _ are dropped — and a separator row
-# is skipped; <item> is the row's first cell without its surrounding `, *
-# and _ (as sweep --plan writes and reads it).
+# _LG_AWK_UP_PLAN_LINKS (after relations.sh's _LG_AWK_RW, the Related work
+# reader sweep --plan and validate --plan use): what each plan links
+# (design §4 D9), with frontmatter.awk run with mode=lib — its doc_begin
+# and doc_line read each plan, so its frontmatter is parsed as an item's
+# is (FK, FV: each key and its value as JSON; an unterminated block has
+# none, its lines are body text). Input: plan paths, one per line; each
+# read from that path, or with -v blobs from the file <blobs><its line
+# number>; one that cannot be read has no lines. Prints "<plan>\tF\t<json>"
+# per frontmatter value, and "<plan>\tR\t<item>" per data row of a Related
+# work table in its body whose mark is "include" (any case, once its
+# surrounding `, * and _ are dropped) — <item> the row's first cell, less
+# its surrounding `, * and _.
 # shellcheck disable=SC2016  # awk source
 _LG_AWK_UP_PLAN_LINKS='
-function up_trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
-function up_bare(s) {
-  s = up_trim(s)
-  while (s ~ /^[`*_]/) s = substr(s, 2)
-  while (s ~ /[`*_]$/) s = substr(s, 1, length(s) - 1)
-  return up_trim(s)
-}
-function up_cells(line,   n, i) {
-  gsub(/\\\|/, "\001", line)
-  line = up_trim(line)
-  if (substr(line, 1, 1) == "|") line = substr(line, 2)
-  if (substr(line, length(line), 1) == "|") line = substr(line, 1, length(line) - 1)
-  n = 0
-  while ((i = index(line, "|")) > 0) { UC[++n] = up_trim(rep(substr(line, 1, i - 1), "\001", "|")); line = substr(line, i + 1) }
-  UC[++n] = up_trim(rep(line, "\001", "|"))
-  return n
-}
-function up_body(line,   lvl, h, n, i, c) {
+function up_body(line,   c) {
   sub(/\r$/, "", line)
-  if (UF != "") { if (index(up_trim(line), UF) == 1) UF = ""; return }
-  if (match(up_trim(line), /^(```|~~~)/)) { UF = substr(up_trim(line), 1, 3); UT = 0; return }
-  if (match(line, /^#+[ \t]/)) {
-    lvl = RLENGTH - 1
-    h = tolower(up_trim(substr(line, RLENGTH + 1))); sub(/[ \t]*#*[ \t]*$/, "", h)
-    if (UIN && lvl <= ULV) UIN = 0
-    if (!UIN && h == "related work") { UIN = 1; ULV = lvl }
-    UT = 0
-    return
-  }
-  if (!UIN) return
-  if (line !~ /^[ \t]*\|/) { UT = 0; return }
-  UT++
-  n = up_cells(line)
-  if (UT == 1) {
-    UMC = n
-    for (i = 1; i <= n; i++) if (tolower(UC[i]) == "mark") { UMC = i; break }
-    return
-  }
-  if (UT == 2 && line ~ /^[ \t]*\|?[ \t]*:?-+/) return
-  if (UMC > n || tolower(up_bare(UC[UMC])) != "include") return
-  c = up_bare(UC[1]); gsub(/\t/, " ", c)
+  if (rw_line(line) != 1 || RW_MC > RW_N || tolower(rw_trim(rw_bare(RW_C[RW_MC]))) != "include") return
+  c = rw_trim(rw_bare(RW_C[1])); gsub(/\t/, " ", c)
   if (c != "") print UP "\tR\t" c
 }
 {
   uf = (blobs != "") ? blobs NR : $0
-  UP = $0; UF = ""; UIN = 0; UT = 0
-  doc_begin()
+  UP = $0
+  doc_begin(); rw_begin()
   while ((getline ul < uf) > 0) {
     us = state
     doc_line(ul)
@@ -916,7 +877,7 @@ _lg_up_plans() {
       _lg_src_cat "$b" "$p" "$blobs$n" || : > "$blobs$n" || _lg_die "cannot write $blobs$n"
     done < "$s.paths"
   fi
-  printf '%s\n' "$_LG_AWK_UP_PLAN_LINKS" > "$s.awk" || _lg_die "cannot write $s.awk"
+  printf '%s\n' "$_LG_AWK_RW$_LG_AWK_UP_PLAN_LINKS" > "$s.awk" || _lg_die "cannot write $s.awk"
   _lg_awkv "$blobs"
   LC_ALL=C awk -v mode=lib -v bom="$_LG_BOM" -v blobs="$_LG_AV" -f "$_LG_LIB/frontmatter.awk" -f "$s.awk" "$s.paths" > "$out" \
     || _lg_die "cannot read the plans"

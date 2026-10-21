@@ -920,49 +920,86 @@ cmd_ledger_recheck() {
 # the heading, a blank line and the table — nothing else (paste it into the
 # plan). JSON: {rows: [{key, path, confirmed, why}], table}.
 
+# The Related work reader (awk), shared by sweep --plan (_lg_r_plan_scan),
+# validate --plan (_lg_validate_plan) and upkeep's plans
+# (_LG_AWK_UP_PLAN_LINKS): rw_begin() before a document, then rw_line(line)
+# for each of its lines, a CR already dropped. The section is the one a
+# heading of any level named "Related work" (any case, trailing #s aside)
+# opens, to the next heading of the same or a higher level; a fenced block
+# (``` or ~~~) is skipped; in the section, a table's first row is its
+# header, whose "Mark" column (any case; else its last) holds the marks,
+# and a separator row right after it is skipped. rw_line returns -1 for a
+# fence line (one that opens, is inside or closes a fenced block), 1 for a
+# data row of such a table — RW_N cells in RW_C[1..RW_N], each trimmed, a
+# "\|" in it read as "|", and RW_MC the Mark column — and 0 for any other
+# line. RW_FOUND: a Related work heading was seen. rw_trim(s): s without
+# its surrounding blanks; rw_bare(s): without its surrounding `, * and _.
+# shellcheck disable=SC2016  # awk source
+_LG_AWK_RW='
+function rw_trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+function rw_bare(s) {
+  while (s ~ /^[`*_]/) s = substr(s, 2)
+  while (s ~ /[`*_]$/) s = substr(s, 1, length(s) - 1)
+  return s
+}
+function rw_begin() { RW_IN = 0; RW_LV = 0; RW_FOUND = 0; RW_F = ""; RW_T = 0; RW_MC = 0; RW_N = 0 }
+function rw_cell(s) { gsub(/\001/, "|", s); return rw_trim(s) }
+function rw_cells(line,   i) {
+  gsub(/\\\|/, "\001", line)
+  line = rw_trim(line)
+  if (substr(line, 1, 1) == "|") line = substr(line, 2)
+  if (substr(line, length(line), 1) == "|") line = substr(line, 1, length(line) - 1)
+  RW_N = 0
+  while ((i = index(line, "|")) > 0) { RW_C[++RW_N] = rw_cell(substr(line, 1, i - 1)); line = substr(line, i + 1) }
+  RW_C[++RW_N] = rw_cell(line)
+}
+function rw_line(line,   lvl, h, i) {
+  if (RW_F != "") { if (index(rw_trim(line), RW_F) == 1) RW_F = ""; return -1 }
+  if (match(rw_trim(line), /^(```|~~~)/)) { RW_F = substr(rw_trim(line), 1, 3); RW_T = 0; return -1 }
+  if (match(line, /^#+[ \t]/)) {
+    lvl = RLENGTH - 1
+    h = tolower(rw_trim(substr(line, RLENGTH + 1))); sub(/[ \t]*#*[ \t]*$/, "", h)
+    if (RW_IN && lvl <= RW_LV) RW_IN = 0
+    if (!RW_IN && h == "related work") { RW_IN = 1; RW_FOUND = 1; RW_LV = lvl }
+    RW_T = 0
+    return 0
+  }
+  if (!RW_IN) return 0
+  if (line !~ /^[ \t]*\|/) { RW_T = 0; return 0 }
+  RW_T++
+  rw_cells(line)
+  if (RW_T == 1) {
+    RW_MC = RW_N
+    for (i = 1; i <= RW_N; i++) if (tolower(RW_C[i]) == "mark") { RW_MC = i; break }
+    return 0
+  }
+  if (RW_T == 2 && line ~ /^[ \t]*\|?[ \t]*:?-+/) return 0
+  return 1
+}
+'
+
 # _lg_r_plan_scan <plan> <spans-out> <cells-out>: the plan's inline code
 # spans (outside fenced blocks), one per line, and the first cells of the
-# data rows of its "Related work" tables.
+# data rows of its "Related work" tables (_LG_AWK_RW), less their
+# surrounding `, * and _.
 _lg_r_plan_scan() {
-  LC_ALL=C awk -v spans="$2" -v cells="$3" '
-    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
-    BEGIN { printf "" > spans; printf "" > cells; fence = "" }
+  LC_ALL=C awk -v spans="$2" -v cells="$3" "$_LG_AWK_RW"'
+    BEGIN { printf "" > spans; printf "" > cells; rw_begin() }
     {
       sub(/\r$/, "")
       line = $0
-      if (fence != "") { if (index(trim(line), fence) == 1) fence = ""; next }
-      if (match(trim(line), /^(```|~~~)/)) { fence = substr(trim(line), 1, 3); tbl = 0; next }
+      r = rw_line(line)
+      if (r < 0) next
       rest = line
       while ((i = index(rest, "`")) > 0) {
         rest = substr(rest, i + 1)
         j = index(rest, "`")
         if (j == 0) break
-        span = trim(substr(rest, 1, j - 1))
+        span = rw_trim(substr(rest, 1, j - 1))
         if (span != "") print span > spans
         rest = substr(rest, j + 1)
       }
-      if (match(line, /^#+[ \t]/)) {
-        lvl = RLENGTH - 1
-        h = tolower(trim(substr(line, RLENGTH + 1))); sub(/[ \t]*#*[ \t]*$/, "", h)
-        if (insec && lvl <= seclvl) insec = 0
-        if (!insec && h == "related work") { insec = 1; seclvl = lvl }
-        tbl = 0
-        next
-      }
-      if (!insec) next
-      if (line !~ /^[ \t]*\|/) { tbl = 0; next }
-      tbl++
-      if (tbl == 1) next
-      if (tbl == 2 && line ~ /^[ \t]*\|?[ \t]*:?-+/) next
-      c = trim(line)
-      if (substr(c, 1, 1) == "|") c = substr(c, 2)
-      gsub(/\\\|/, "\001", c)
-      k = index(c, "|"); if (k) c = substr(c, 1, k - 1)
-      gsub(/\001/, "|", c)
-      c = trim(c)
-      while (c ~ /^[`*_]/) c = substr(c, 2)
-      while (c ~ /[`*_]$/) c = substr(c, 1, length(c) - 1)
-      if (c != "") print c > cells
+      if (r == 1) { c = rw_bare(RW_C[1]); if (c != "") print c > cells }
     }' "$1"
 }
 
