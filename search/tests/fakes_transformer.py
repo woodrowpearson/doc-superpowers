@@ -41,9 +41,12 @@ GATE_TIMEOUT_S = 60.0
 class FakeEncoder(Encoder):
     """An `Encoder` whose forward pass is a hash. A test steers it through three attributes:
 
-    - `gate`: `_forward` waits for it first (set by default; clear it to hold a build mid-encode).
-    - `nan`: `_forward` returns NaN rows (a broken model).
-    - `forwarded`: every batch `_forward` ran, in order; `calls`: every `encode` call, `(texts, kwargs)`.
+    - `gate`: an indexing call's `_forward` waits for it first (set by default; clear it to hold a
+      build mid-encode). Queries never wait: one encoder serves its model's builds and searches,
+      so a search of the previous index answers while a refresh is held.
+    - `nan`: `_forward` returns NaN rows (a broken model), for queries too.
+    - `forwarded`: every batch `_forward` ran, in order, queries included; `calls`: every `encode`
+      call, `(texts, kwargs)`.
     """
 
     def __init__(self, spec: TransformerSpec, cache: EncodeCache | None, *, threads: int = 1) -> None:
@@ -58,13 +61,18 @@ class FakeEncoder(Encoder):
         self.forwarded: list[list[str]] = []
         self.calls: list[tuple[list[str], dict[str, Any]]] = []
         self.retired = False
+        self._local = threading.local()  # `indexing`: this thread's encode call is an indexing one
 
     def encode(self, sentences: str | Sequence[str], **kwargs: Any) -> np.ndarray:
         self.calls.append(([sentences] if isinstance(sentences, str) else list(sentences), dict(kwargs)))
-        return super().encode(sentences, **kwargs)
+        self._local.indexing = "use_multiprocessing" in kwargs  # the Encoder's own test for an indexing call
+        try:
+            return super().encode(sentences, **kwargs)
+        finally:
+            self._local.indexing = False
 
     def _forward(self, texts: list[str]) -> np.ndarray:
-        if not self.gate.wait(GATE_TIMEOUT_S):
+        if getattr(self._local, "indexing", False) and not self.gate.wait(GATE_TIMEOUT_S):
             raise TimeoutError(f"FakeEncoder gate still closed after {GATE_TIMEOUT_S:.0f} s")
         if self.retired:
             raise RuntimeError("FakeEncoder used after its test ended")

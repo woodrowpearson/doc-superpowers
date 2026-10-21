@@ -1,9 +1,10 @@
-"""The offline fixtures: a tiny Model2Vec model and git repositories drive real semble."""
+"""The offline fixtures: a tiny Model2Vec model, a fake transformer and git repositories drive real semble."""
 
 from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 from semble import ContentType, SembleIndex
@@ -64,6 +65,25 @@ def test_semble_runs_offline_with_an_isolated_cache(semble_cache: Path) -> None:
     assert os.environ["HF_HUB_OFFLINE"] == "1"
     assert Path(os.environ["SEMBLE_CACHE_LOCATION"]) == semble_cache
     assert semble_cache.is_absolute()
+
+
+
+def test_fake_transformer_gate_holds_indexing_only(fake_transformer) -> None:
+    """A cleared gate holds a build mid-encode while a search, on the same encoder, still answers."""
+    from fakes_transformer import fake_encoder
+
+    encoder = fake_encoder(fake_transformer)
+    encoder.gate.clear()
+    build = threading.Thread(target=encoder.encode, args=(["refund total"],), kwargs={"use_multiprocessing": False})
+    build.start()
+    build.join(0.2)
+    assert build.is_alive() and encoder.forwarded == []  # held at the gate
+    assert encoder.encode(["refund"]).shape == (1, fake_transformer.dim)  # a query does not wait
+    assert encoder.forwarded == [["refund"]]
+    encoder.gate.set()
+    build.join(10)
+    assert not build.is_alive()
+    assert encoder.forwarded == [["refund"], ["refund total"]]
 
 
 def test_git_repo_is_isolated_from_user_config(git_repo) -> None:

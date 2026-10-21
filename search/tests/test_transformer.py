@@ -8,10 +8,12 @@ real tokenizer, session and pooling path without a model download.
 from __future__ import annotations
 
 import dataclasses
+import platform
 import sys
 import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -145,12 +147,32 @@ def test_encoder_contract(spec: TransformerSpec, tiny: tuple[Path, np.ndarray]) 
     assert encoder.encode([], use_multiprocessing=False).shape == (0, DIM)
 
 
-def test_padding_does_not_change_vectors(spec: TransformerSpec) -> None:
+class RecordingSession:
+    """An onnxruntime session that records every feed it is run with (the tiny graph never reads the mask)."""
+
+    def __init__(self, session: Any) -> None:
+        self._session = session
+        self.feeds: list[dict[str, np.ndarray]] = []
+
+    def run(self, outputs: Any, feed: dict[str, np.ndarray]) -> Any:
+        self.feeds.append({name: value.copy() for name, value in feed.items()})
+        return self._session.run(outputs, feed)
+
+
+def test_padding_does_not_change_vectors(monkeypatch: pytest.MonkeyPatch, spec: TransformerSpec) -> None:
     encoder = Encoder(spec, 1, None)
-    long = " ".join(WORDS[:20])
+    session = RecordingSession(encoder._session)
+    monkeypatch.setattr(encoder, "_session", session)
+    long = " ".join(WORDS[1:21])  # 20 tokens
     alone = encoder.encode(["tax"], use_multiprocessing=False)
-    together = encoder.encode(["tax", long], use_multiprocessing=False)  # one batch: "tax" padded to 20 tokens
-    np.testing.assert_allclose(together[0], alone[0], rtol=1e-6)
+    together = encoder.encode([long, "tax"], use_multiprocessing=False)  # one batch: "tax" padded to 20 tokens
+    np.testing.assert_allclose(together[1], alone[0], rtol=1e-6)
+    feed = session.feeds[-1]
+    assert sorted(feed) == ["attention_mask", "input_ids"]  # only what the graph declares: no token_type_ids
+    np.testing.assert_array_equal(feed["attention_mask"], [[1] + [0] * 19, [1] * 20])  # shortest first
+    np.testing.assert_array_equal(feed["input_ids"][0], [ID["tax"]] + [ID["[PAD]"]] * 19)
+    np.testing.assert_array_equal(feed["input_ids"][1], [ID[word] for word in WORDS[1:21]])
+    assert feed["input_ids"].dtype == feed["attention_mask"].dtype == np.int64
 
 
 def test_length_sorted_batches(monkeypatch: pytest.MonkeyPatch, spec: TransformerSpec) -> None:
@@ -297,6 +319,47 @@ def test_session_options(monkeypatch: pytest.MonkeyPatch, spec: TransformerSpec,
     assert options.inter_op_num_threads == 1
     assert options.graph_optimization_level == onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
     assert kwargs["providers"] == ["CPUExecutionProvider"]
+
+
+def test_make_encoder_keys_its_cache_to_this_host(
+    monkeypatch: pytest.MonkeyPatch, spec: TransformerSpec
+) -> None:
+    """The real `_make_encoder` (patched elsewhere): the cache at its path, keyed with onnxruntime and the CPU."""
+    import onnxruntime
+
+    from doc_search import encode_cache
+
+    encoder = transformer._make_encoder(spec, 1)
+    try:
+        assert isinstance(encoder, Encoder) and encoder.threads == 1
+        assert encoder.cache is not None and encoder.cache.usable
+        assert encoder.cache.path == encode_cache.encode_cache_path(spec)
+        keyed = {
+            "model_id": spec.model_id,
+            "variant": spec.variant,
+            "max_tokens": spec.max_tokens,
+            "arch": platform.machine(),
+            "dim": spec.dim,
+        }
+        here = EncodeCache(Path(encoder.cache.path), ort_version=onnxruntime.__version__, **keyed)
+        other = EncodeCache(Path(encoder.cache.path), ort_version="0.0.0", **keyed)
+        assert encoder.cache.key("refund") == here.key("refund") != other.key("refund")
+        here.close()
+        other.close()
+    finally:
+        encoder.close()
+
+    made: list[EncodeCache] = []
+
+    class Recorded(EncodeCache):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            made.append(self)
+
+    monkeypatch.setattr(encode_cache, "EncodeCache", Recorded)
+    with pytest.raises(ValueError, match="pooling"):
+        transformer._make_encoder(dataclasses.replace(spec, pooling="mean"), 1)
+    assert len(made) == 1 and not made[0].usable  # the encoder failed: its cache is closed, not leaked
 
 
 def test_files_from_the_hub(monkeypatch: pytest.MonkeyPatch, tiny: tuple[Path, np.ndarray]) -> None:

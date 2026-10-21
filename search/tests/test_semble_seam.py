@@ -4,7 +4,8 @@ doc-search puts its encoder in at `semble.index.dense._load_cached`, private API
 indexing call from a query by how semble calls the model: `embed_chunks` passes
 `use_multiprocessing`, a search passes the query text alone. semble is pinned `<0.8` for this;
 an upgrade that moves any of it fails here, by name, instead of building a docs index that is
-silently static or uncached.
+silently static or uncached. Build progress relies on one more: semble embeds on the thread that
+calls `from_path`, where `report_to` set the sink.
 """
 
 from __future__ import annotations
@@ -36,6 +37,16 @@ DOCS = {
 }
 
 
+class Sink:
+    """A progress sink that records every `add`."""
+
+    def __init__(self) -> None:
+        self.adds: list[tuple[int, bool]] = []
+
+    def add(self, n: int, *, cached: bool = False) -> None:
+        self.adds.append((n, cached))
+
+
 def docs_tree(root: Path) -> Path:
     for rel, text in DOCS.items():
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -55,7 +66,10 @@ def test_seam_pins(tmp_path: Path, fake_transformer: TransformerSpec) -> None:
 
     transformer.install()
     tree = docs_tree(tmp_path / "tree")
-    index = SembleIndex.from_path(tree, content=[ContentType.DOCS], model_path=spec.model_path)
+    sink = Sink()
+    with transformer.report_to(sink):  # thread-local: semble must embed on the thread that builds
+        index = SembleIndex.from_path(tree, content=[ContentType.DOCS], model_path=spec.model_path)
+    assert sum(n for n, _ in sink.adds) == len(index.chunks)
     encoder = fake_encoder(spec)
     assert index.model is encoder  # load_model reads _load_cached as a module global, at call time
     indexing = [texts for texts, kwargs in encoder.calls if "use_multiprocessing" in kwargs]
