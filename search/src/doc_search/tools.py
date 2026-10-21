@@ -16,9 +16,7 @@ with a line break in it is flattened first, so repository content cannot start a
 
 from __future__ import annotations
 
-import platform
 import posixpath
-import sys
 import threading
 import time
 from collections.abc import Callable
@@ -34,7 +32,7 @@ from .config import CONFIG_REL, Config
 from .corpus import Corpus
 from .encode_cache import cache_size, encode_cache_path
 from .engines import Building, IndexPool, Kind, WorktreeIndexes
-from .progress import ARCH_RATES
+from .progress import ARCH_RATES, intel_mac
 from .render import INDENT, LINK_LIMIT, SEP, fit_to_cap, flat, render_hits
 from .repo import GitError, RepoInfo, confine, is_ignored, norm_rel
 from .searcher import CloudLeg, enrich_hit
@@ -334,7 +332,7 @@ class DocTools:
         threads = self.cfg.docs.threads or default_threads()
         how = f"{flat(spec.source)}, {spec.variant} ONNX, {spec.dim}-d, {threads} threads"
         line = f"docs model: {PREFIX}{spec.name} ({how})"
-        if _intel_mac():
+        if intel_mac():
             intel, arm = ARCH_RATES[("darwin", "x86_64")], ARCH_RATES[("darwin", "arm64")]
             line += f"; Intel: ~{intel:g} chunks/s against ~{arm:g} on M-series"
         path = encode_cache_path(spec)
@@ -617,10 +615,6 @@ def _with_hits(head: list[str], label: str, hits: list[Hit]) -> str:
         blocks[0] = f"{label}\n{blocks[0]}"
         return fit_to_cap("\n".join(head), blocks)
     return "\n".join([*head, f"{label[:-1]}: none"])
-
-
-def _intel_mac() -> bool:
-    return sys.platform == "darwin" and platform.machine() == "x86_64"
 
 
 def _size_text(size: int | None) -> str:

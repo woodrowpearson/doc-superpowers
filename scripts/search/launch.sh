@@ -17,9 +17,12 @@
 #
 # Extras: --extra cloud when docs/search/config.json (at the repository top)
 # has a non-null "cloud"; --extra local-transformer (after cloud) when its
-# docs.model is a string starting "transformer:"; --all-extras when jq is
-# missing, since the config cannot be read then; none otherwise. --no-dev: the
-# dev group (pytest) is never installed for a user.
+# docs.model is a string starting "transformer:"; none otherwise. Without jq
+# the config cannot be parsed: --all-extras --no-extra local-transformer
+# (onnxruntime has no wheel for older macOS or glibc, so a static config must
+# not need it), or --all-extras when grep finds a "model" key whose value
+# starts "transformer:". --no-dev: the dev group (pytest) is never installed
+# for a user.
 #
 # Failures are one stderr line and exit 2.
 
@@ -67,9 +70,11 @@ if command -v jq >/dev/null 2>&1; then
   if jq -e '(.docs.model | type) == "string" and (.docs.model | startswith("transformer:"))' "${TOP:-.}/docs/search/config.json" >/dev/null 2>&1; then
     EXTRAS="${EXTRAS:+$EXTRAS }--extra local-transformer"
   fi
-else
+elif grep -Eq '"model"[[:space:]]*:[[:space:]]*"transformer:' "${TOP:-.}/docs/search/config.json" 2>/dev/null; then
   EXTRAS="--all-extras"
+else
+  EXTRAS="--all-extras --no-extra local-transformer"
 fi
 
-# shellcheck disable=SC2086  # $EXTRAS is a fixed flag list: empty, or up to two --extra pairs
+# shellcheck disable=SC2086  # $EXTRAS is a fixed flag list: empty, up to two --extra pairs, or --all-extras [--no-extra local-transformer]
 exec uv run --project "$ROOT/search" --frozen --no-dev $EXTRAS doc-search "$@"

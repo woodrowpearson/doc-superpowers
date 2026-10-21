@@ -430,9 +430,11 @@ cloud = [
 ]
 local-transformer = [
     { name = "flatbuffers" },
+    { name = "huggingface-hub" },
     { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
     { name = "onnxruntime", version = "1.31.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
     { name = "protobuf" },
+    { name = "tokenizers" },
 ]
 
 [package.dev-dependencies]
@@ -445,12 +447,14 @@ requires-dist = [
     { name = "flatbuffers", marker = "extra == 'local-transformer'" },
     { name = "google-cloud-firestore", marker = "extra == 'cloud'" },
     { name = "google-genai", marker = "extra == 'cloud'" },
+    { name = "huggingface-hub", marker = "extra == 'local-transformer'" },
     { name = "mcp", specifier = ">=2.3,<3" },
     { name = "onnxruntime", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'local-transformer'", specifier = ">=1.23.2,<1.24" },
     { name = "onnxruntime", marker = "(platform_machine != 'x86_64' and extra == 'local-transformer') or (sys_platform != 'darwin' and extra == 'local-transformer')", specifier = ">=1.24" },
     { name = "pathspec" },
     { name = "protobuf", marker = "extra == 'local-transformer'" },
     { name = "semble", specifier = ">=0.7,<0.8" },
+    { name = "tokenizers", marker = "extra == 'local-transformer'" },
 ]
 provides-extras = ["cloud", "local-transformer"]
 

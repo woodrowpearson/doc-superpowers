@@ -19,6 +19,9 @@ local-transformer = [
     "onnxruntime>=1.24; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "flatbuffers",
     "protobuf",
+    # imported by transformer.py; semble already installs both, so they add no package
+    "tokenizers",
+    "huggingface-hub",
 ]
 
 [project.scripts]
@@ -40,5 +43,5 @@ packages = ["src/doc_search"]
 testpaths = ["tests"]
 markers = [
     "slow: spawns the real console script in a subprocess (still part of the default run)",
-    "live: touches the network (semble's default model from Hugging Face); skipped unless DOC_SEARCH_LIVE=1",
+    "live: touches the network (semble's default model, and the gte-modernbert-base ONNX model and tokenizer, from Hugging Face); skipped unless DOC_SEARCH_LIVE=1",
 ]
