@@ -2472,13 +2472,19 @@ ledger upkeep|cmd_ledger_upkeep|repo|range= pr= items+ top= strict no-repo-adapt
   `view <n>` ({"number","body"}; exit 3: no view, "pr": {…,
   "body_scanned": false}). Involved items, each with how it was found: a
   claim trailer (claims, claims_by_path, claims_by_ref), an item file the
-  net diff edits, a key or alias as a word in a commit message, then in
-  the PR body; --items names them instead. A contract is touched by a
-  net-diff file its defined_in matches (unless upkeep.skip_globs matches
-  the file) when an added or removed line of that file names it — the id
+  net diff edits, a key or alias as a word in a commit message, a plan in
+  the net diff that links it (a Related work row marked include, or a
+  frontmatter value, naming it), then the PR body; --items names them
+  instead. A contract is touched by a net-diff file its defined_in
+  matches (unless upkeep.skip_globs matches the file) when an added or
+  removed line of that file names it — the id
   after its first ":", with no [A-Za-z0-9_] just before or after, a * in
   it any run of [A-Za-z0-9_.-] — or by a Contract-Change line (the way to
-  declare a contract the code never spells). One an involved item already
+  declare a contract the code never spells); one whose defined_in is one
+  markdown document (a spec, an ADR) by any edit of it, skip_globs or not,
+  and its owner is first the item a plan its changed lines cite links, or
+  that a claim trailer of a commit editing it names (a cited plan linking
+  none: unattributed, with cites). One an involved item already
   declares in changes is proposed to nobody; each other one goes to one item — the
   most paths entries its defined_in matches, then the most paths in the
   diff, then how it was found, then key; an item the range adds that no

@@ -60,7 +60,8 @@
 
 # The trailer matcher (awk), shared by _lg_msg_claims and the re-check
 # program: tr_load(file) reads "<kind>\t<name>" lines; tr_match(line) sets
-# TRM (the number of matches) and TRMK[i] / TRMV[i] (kind, value).
+# TRM (the number of matches) and TRMK[i] / TRMV[i] / TRMN[i] (kind, value,
+# and the name as config writes it — upkeep's evidence names the trailer).
 # A claims_by_ref name is a closing keyword (GitHub's form, "Fixes #123"):
 # at the line start (after the same blanks / "*" / "-" a trailer may have),
 # in any case, then ":" and optional blanks or blanks alone ("Fixes:#12",
@@ -89,7 +90,7 @@ function tr_cut(c,   i, j) {
   j = 0
   for (i = 1; i <= TRM; i++) {
     if (TRMK[i] == "claims" || TRMK[i] == "claims_by_path" || TRMK[i] == "claims_by_ref") continue
-    j++; TRMK[j] = TRMK[i]; TRMV[j] = TRMV[i]
+    j++; TRMK[j] = TRMK[i]; TRMV[j] = TRMV[i]; TRMN[j] = TRMN[i]
   }
   TRM = j
 }
@@ -113,14 +114,14 @@ function tr_match(line,   s, i, L, v, ls) {
       else if (v !~ /^[ \t\v\f]+#[1-9][0-9]*([^A-Za-z0-9_]|$)/) continue
       sub(/^[ \t\v\f]+/, "", v)
       match(v, /^#[1-9][0-9]*/)
-      TRM++; TRMK[TRM] = TRK[i]; TRMV[TRM] = substr(v, 1, RLENGTH)
+      TRM++; TRMK[TRM] = TRK[i]; TRMV[TRM] = substr(v, 1, RLENGTH); TRMN[TRM] = TRT[i]
       continue
     }
     if (substr(s, 1, L + 1) != TRT[i] ":") continue
     v = substr(s, L + 2)
     if (v !~ /^[ \t\v\f]+[^ \t\v\f]/) continue
     sub(/^[ \t\v\f]+/, "", v); sub(/[ \t\v\f]+$/, "", v); gsub(/\t/, " ", v)
-    TRM++; TRMK[TRM] = TRK[i]; TRMV[TRM] = v
+    TRM++; TRMK[TRM] = TRK[i]; TRMV[TRM] = v; TRMN[TRM] = TRT[i]
   }
 }
 '
