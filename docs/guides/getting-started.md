@@ -163,7 +163,7 @@ This scans all docs against current code and produces a severity-ranked report (
 /doc-superpowers review-pr
 ```
 
-Maps your changed files to affected documentation and reports what needs updating.
+Maps your changed files to affected documentation and reports what needs updating. On a work-ledger host it also lists, read-only, the `changes` / `consumes` the branch's items are missing, and names `/doc-superpowers ledger declare` to confirm them.
 
 ### Draft release notes
 
@@ -241,6 +241,8 @@ $DOC_TOOLS ledger upkeep --range main...HEAD       # the changes / consumes a br
 $DOC_TOOLS ledger view all --html --open           # render the views locally
 $DOC_TOOLS ledger validate --all                   # every item and key (add --registry for the registry)
 ```
+
+Two flows in the skill sit over these verbs (they are not verbs). `/doc-superpowers ledger file [<title>]` checks for duplicates first, asks one round of questions, writes the item with `ledger new --create` and links the relations you confirm. `/doc-superpowers ledger declare [--range <a>..<b> | --pr <n>] [--items <item>…]` runs `ledger upkeep` over the range (default `<base>...HEAD`), asks you to confirm each item's proposals (and which item an unattributed contract belongs to), and writes only what you confirmed with `ledger link`; it is for a person, never a CI run, and commits nothing unless you ask. `upkeep` counts a contract as touched when a changed line names it (a spec's or ADR's own edit counts for the contract that document alone defines), so a proposal comes with its evidence.
 
 Exit codes are the claims family: 0 ok, 1 findings, 2 could not run, 3 usage. With the ledger on, `spec-inject --phase=plan` also pastes a `## Related work` sweep into the plan and adds a `Ledger notices (chunk N)` gate to each chunk. Declare each new item's relations (*Relations* → **Declaring relations**; `validate.require_relations: "new"` makes the pre-commit leg insist). Config keys, keys and provisional keys, adapters, the in-flight layer (it publishes local branch names to the remote: read the privacy note first), the hooks, and the JSON surface for scripts built on the ledger are in `references/ledger.md`.
 
