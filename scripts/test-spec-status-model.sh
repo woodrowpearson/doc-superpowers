@@ -1668,6 +1668,48 @@ if [ -f "$_sc_ref" ]; then
 fi
 
 # =============================================================================
+echo "--- doc-search: the reference and its wiring ---"
+# doc-search (search/, the opt-in MCP server) is documented in one reference,
+# which SKILL.md names. Its ten sections are the plan's, in order; the strings
+# an agent or a probe acts on are read from the code, so the reference cannot
+# drift from what ships.
+_ds_ref="$REPO_ROOT/references/search.md"
+_ds_src="$REPO_ROOT/search/src/doc_search"
+assert_true "references/search.md exists" test -f "$_ds_ref"
+_ds=$(_read "$_ds_ref")
+assert_contains "$SKILLMD" '`references/search.md`' "SKILL.md's references table names references/search.md"
+assert_eq "## Turning it on
+## Modes
+## Configuration
+## CLI
+## Tools
+## Cloud leg
+## Other clients
+## Hardware and performance
+## Privacy
+## Troubleshooting" "$(grep -E '^## ' <<<"$_ds" || true)" "search.md: the ten sections, in order, and no other"
+# shellcheck disable=SC2016  # the command is literal text
+assert_contains "$_ds" 'gcloud firestore indexes composite create --collection-group=doc_chunks --query-scope=COLLECTION --field-config=field-path=embedding,vector-config='"'"'{"dimension":"768","flat":"{}"}'"'"' --database=<db>' \
+  "search.md: the cloud leg's vector-index command"
+_ds_inert=$(sed -n 's/^INERT_LINE = "\(.*\)"$/\1/p' "$_ds_src/config.py")
+assert_true "config.py defines INERT_LINE" test -n "$_ds_inert"
+assert_contains "$_ds" "$_ds_inert" "search.md: the inert line is config.py's"
+# The CLI verbs: the keys of cli.py's _VERBS table.
+_ds_verbs=$(awk '/^_VERBS = \{/ { s = 1; next } s && /^\}/ { exit } s { gsub(/[" :,]/, " "); print $1 }' "$_ds_src/cli.py" \
+  | tr '\n' ' ' | sed 's/ $//')
+assert_eq "serve init index query status eval" "$_ds_verbs" "cli.py: the six verbs"
+for _v in $_ds_verbs; do
+  assert_contains "$(_section "$_ds" '## CLI')" "\`$_v" "search.md: CLI names \`$_v\`"
+done
+for _t in search fetch related status; do
+  assert_contains "$(_section "$_ds" '## Tools')" "\`$_t\`" "search.md: Tools names \`$_t\`"
+done
+assert_contains "$(_section "$_ds" '## Configuration')" '`timeout_s`' "search.md: the cloud.timeout_s lever is documented"
+assert_contains "$HOOKSREF" '--search' "hooks.md documents the --search set"
+assert_contains "$HOOKSREF" '.tiers.search' "hooks.md documents status --json's .tiers.search"
+assert_contains "$(_section "$MAPPINGS" "## Capabilities")" 'doc-search' "tool-mappings: a capability row for the doc-search MCP server"
+
+# =============================================================================
 echo "--- SKILL.md: frontmatter and the paths it names (#31) ---"
 # Claude Code loads every skill's name and description at startup, always on:
 # the description is capped (1,536 chars, the limit the skill loader

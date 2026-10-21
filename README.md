@@ -19,6 +19,7 @@ doc-superpowers is a Claude Code skill that treats documentation as a first-clas
 - **Tracks specifications** through implementation with formal spec lifecycle (`spec-generate`, `spec-inject`, `spec-verify`)
 - **Checks spec claims** (opt-in, with `docs/spec-claims/`): executable claims quoted from a spec's normative text, each bound to a check, run by `doc-tools.sh claims` and gated through the spec actions and the hooks
 - **Keeps a work ledger** (opt-in, with `docs/ledger/config.json`): issue files get stable keys, ledger pages and one HTML view are generated from them, related work is found through named contracts, and work in flight on other branches and machines raises notices (`ledger`, `doc-tools.sh ledger`)
+- **Searches docs and code together** (opt-in, with `docs/search/config.json`): doc-search, an MCP server over two local semble indexes — the docs and the code — that answers one ranked list with the doc-index's cross-links on every hit, and can fuse an optional cloud docs leg (Vertex embeddings over Firestore)
 - **Drafts release notes** from git history with agent-assisted diff review (`release`)
 - **Syncs CLAUDE.md and README.md** automatically in the actions that write docs (`init`, `update`, `sync`, `release`, `spec-generate`) to prevent drift; in a CI workflow `update` and `sync` report the change instead of editing them
 - **Tracks freshness** via bundled `scripts/doc-tools.sh` — content hashing for docs, content identity (git object ids per code ref) for code
@@ -117,7 +118,7 @@ Scopes:  all | one scope from Detect Scopes (application, api-contracts, data-la
 | `update` | Apply fixes from an audit report (`--report=<path>`; else this session's audit, else the freshness check), then archive the applied report | After audit identifies stale docs |
 | `diagram` | Regenerate architecture diagrams | After structural changes |
 | `sync` | Sync doc index with filesystem, check CLAUDE.md and README.md currency | After adding/removing doc files |
-| `hooks` | Install workflow hooks (git, Claude Code, CI/CD) | Setting up automated freshness monitoring |
+| `hooks` | Install workflow hooks (git, Claude Code, CI/CD), and the opt-in sets (the work ledger's, doc-search's MCP server) | Setting up automated freshness monitoring |
 | `release` | Draft release notes entry from git history | Cutting a new version |
 | `spec-generate` | Generate formal specs from design doc; scans overlapping specs for stale content | After brainstorming produces a design spec |
 | `spec-inject` | Inject spec tasks into plans, track during execution | During plan writing and after each chunk executes |
@@ -193,6 +194,20 @@ Projects that track work as markdown issue files (`docs/issues/*.md`) — or as 
 
 It is **inert without `docs/ledger/config.json`**: every verb but `init` prints `ledger: not enabled (no docs/ledger/config.json)` and exits 0. Everything — config keys and defaults, keys and provisional keys, adapter contracts, how to declare relations, privacy of in-flight refs, the hooks, and the JSON surface and exit codes to build skills and scripts on — is in [`references/ledger.md`](references/ledger.md).
 
+### doc-search (opt-in)
+
+Projects that want to search their docs and code together can turn on **doc-search**, an MCP server shipped as the uv package `search/` (Python; the doc-superpowers core stays bash + jq, and only a project that turns this on needs `uv`). One `search` call ranks docs and code in one list — semble's hybrid search over each, an exact-identifier leg for ids like `ADR-114`, fused per file — and every hit carries its cross-links from the doc-index: a doc's `code_refs`, a code file's covering docs. `fetch` reads a hit's lines, `related` moves between a doc and its code, `status` reports the indexes. Both indexes are local and built from each worktree's working tree, so a branch's own docs are searchable before they merge; code never leaves the machine. An optional `cloud` object adds Vertex `gemini-embedding-001` queries over a shared Firestore corpus of the base branch's docs, fused with the local legs, written by a guarded `doc-search index --cloud`.
+
+```bash
+# $ROOT is the plugin's root (the directory holding search/ and scripts/)
+uv run --project "$ROOT/search" --frozen doc-search init   # writes docs/search/config.json (the defaults); commit it
+/doc-superpowers hooks install --search                     # the launcher + the .mcp.json "doc-search" entry; commit both
+sh .claude/doc-superpowers/search-mcp.sh index              # optional: build both indexes now
+sh .claude/doc-superpowers/search-mcp.sh query "how are refunds rounded" --scope docs
+```
+
+It is **inert without `docs/search/config.json`**: every tool answers `doc-search: not enabled (no docs/search/config.json)`, and every CLI verb but `init` prints it and exits 0. Configuration, the CLI and its exit codes, the tools, the cloud leg's setup and write-path guards, snippets for Cursor, Codex, Gemini CLI and OpenCode, hardware and measured performance, privacy and troubleshooting are in [`references/search.md`](references/search.md).
+
 ### Workflow Integration
 
 Install opt-in hooks for automated freshness monitoring:
@@ -209,6 +224,9 @@ Install opt-in hooks for automated freshness monitoring:
 # The work ledger's opt-in sets (need docs/ledger/config.json; never part of --all)
 /doc-superpowers hooks install --ledger        # git legs: pre-commit validate, pre-push provisional-key check, post-commit in-flight push
 /doc-superpowers hooks install --ledger-claude # Claude Code: SessionStart notices, PostToolUse state-watch (per-user)
+
+# doc-search's MCP server (needs docs/search/config.json; never part of --all)
+/doc-superpowers hooks install --search        # .claude/doc-superpowers/search-mcp.sh + the .mcp.json entry (commit both)
 
 # Claude-powered workflows are opt-in by name
 /doc-superpowers hooks install --ci --workflows=doc-pr-release,doc-review-pr
@@ -231,15 +249,16 @@ $DOC_TOOLS tools install --helper ledger       # + the work ledger's modules and
 $DOC_TOOLS tools status                        # present? matches the plugin? which version?
 $DOC_TOOLS tools uninstall                     # removes only files identical to the plugin's
 
-# Check what's installed (optionally one tier: --git / --claude / --ci, or --all; the ledger
-# sets with --ledger / --ledger-claude, each in its own section after the tiers);
-# "⚠ … outdated: re-run install --git|--claude|--ledger|--ledger-claude" marks another version's install
+# Check what's installed (optionally one tier: --git / --claude / --ci, or --all; the opt-in
+# sets with --ledger / --ledger-claude / --search, each in its own section after the tiers);
+# "⚠ … outdated: re-run install --git|--claude|--ledger|--ledger-claude|--search" marks another version's install
 /doc-superpowers hooks status
 
 # Remove hooks
 /doc-superpowers hooks uninstall --all
 /doc-superpowers hooks uninstall --ci --workflows=doc-release  # remove ONE workflow
 /doc-superpowers hooks uninstall --ledger --ledger-claude      # the ledger sets (--all removes neither)
+/doc-superpowers hooks uninstall --search                      # doc-search's launcher and .mcp.json entry
 ```
 
 The installer works from anywhere in the repository (it acts on the top level; a linked worktree or submodule is its own top level) and puts git hooks where git runs them (`git rev-parse --git-path hooks`). It refuses, writing nothing, when `core.hooksPath` comes from your global/system git config, or when a file it would write — or a directory on the way — is a symbolic link. It owns only what it marks: a hook of yours is kept, with a marked POSIX block after its `#!` line that runs ours (skipped if the hook is not a shell script); its `.gitattributes` and `info/exclude` entries are marked blocks; in `.claude/settings.local.json` it touches only the entries that run its own scripts. The work ledger's sets mark theirs `# ledger-superpowers:begin` … `:end` (a hook the set created holds only `#!/bin/sh` and that block), and neither set's markers match the other's. `uninstall` puts all of that back as it was. The Claude tier is **per-user**: its settings file and scripts are excluded from git through `.git/info/exclude`, and its commands run `"$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/…`.
@@ -350,7 +369,7 @@ doc-superpowers/
 │   └── workflows/
 │       ├── doc-freshness-pr.yml
 │       ├── doc-freshness-schedule.yml
-│       └── tests.yml     # This repo only: every test suite (bash 5.x + 3.2), check-version, self-install check, release tag (main); each step is scripts/check-ci.sh
+│       └── tests.yml     # This repo only: every shell test suite (bash 5.x + 3.2), the doc-search pytest suite, check-version, self-install check, release tag (main); each step is scripts/check-ci.sh
 ├── .opencode/            # OpenCode plugin + installation guide
 │   ├── INSTALL.md
 │   └── plugins/
@@ -362,6 +381,11 @@ doc-superpowers/
 ├── GEMINI.md             # Gemini CLI context redirect
 ├── gemini-extension.json # Gemini CLI extension manifest
 ├── package.json          # npm/OpenCode package metadata
+├── search/               # doc-search: the opt-in MCP server over docs and code (a uv Python package)
+│   ├── pyproject.toml    # semble, mcp, pathspec; the cloud extra (google-genai, google-cloud-firestore)
+│   ├── uv.lock
+│   ├── src/doc_search/   # server, CLI, searcher, semble engines, cloud leg (read and write paths)
+│   └── tests/            # pytest suite (no network: a tiny test-built model, fake cloud clients)
 ├── scripts/
 │   ├── doc-tools.sh      # Bundled freshness tooling
 │   ├── test-doc-tools.sh # Test suite for doc-tools.sh
@@ -378,6 +402,7 @@ doc-superpowers/
 │   ├── leak-scan.sh              # Machine paths, emails and tokens in tracked files
 │   ├── ledger/                   # The work ledger's modules (lib.sh + sourced *.sh, *.jq, *.awk)
 │   ├── adapters/                 # Reference ledger adapters (ledger-pr-gh.sh, ledger-items-gh.sh; GitHub via gh)
+│   ├── search/launch.sh          # doc-search's launcher (POSIX sh), copied to .claude/doc-superpowers/search-mcp.sh by install --search
 │   ├── merge-doc-index.sh        # Custom git merge driver for .doc-index.json
 │   ├── test-merge-driver.sh      # Test suite for merge driver
 │   └── hooks/
@@ -397,6 +422,7 @@ doc-superpowers/
 │   ├── spec-claims.md             # Spec claims (opt-in): schema, checks, adapters, gates
 │   ├── ledger.md                  # Work ledger (opt-in): config, verbs, keys, adapters, hooks, init
 │   ├── ledger-index.schema.json   # The work-ledger index shape (ledger-index/1)
+│   ├── search.md                  # doc-search (opt-in): config, CLI, tools, cloud leg, other clients
 │   ├── integration-patterns.md    # Code review, commit review, wrapper skill integration
 │   └── tool-mappings.md           # Per-client tool names and capabilities
 ├── evals/                # Evaluation test cases
@@ -436,6 +462,7 @@ The skill runs the bundled tooling in `scripts/` and reads `references/` from it
 | `git` | Yes; **≥ 2.36** in a claims-enabled project | Already required by doc-superpowers. A claims check over a commit range that holds a merge reads the merge with `git show --remerge-diff` (git 2.36+); an older git makes that check indeterminate (exit 2) |
 | `jq` | Yes, **≥ 1.6** | `brew install jq` / `apt install jq`. 1.6 is the floor: the index writers use `--args` / `$ARGS.positional`. `doc-tools.sh` refuses an older jq with a clear error |
 | `sha256sum` or `shasum` | Yes | Standard on Linux/macOS respectively |
+| `uv` | Only for doc-search (a project with `docs/search/config.json`) | It runs the `search/` package (Python 3.12, which uv fetches if missing); see `references/search.md` |
 | `gh` (GitHub CLI), authenticated | Only for the work ledger's GitHub adapters | `doc-superpowers:ledger-pr-gh`, `doc-superpowers:ledger-items-gh` and `ledger init --sources github`, when a project's `docs/ledger/config.json` names them |
 
 Everything else is the POSIX userland (`awk`, `sed`, `grep`, `mktemp`, …) as stock macOS and Linux ship it: no GNU-only tool (GNU sed, ripgrep) is needed. Where `awk` is mawk (Debian, Ubuntu), it must be 1.3.4 or newer: older mawk lacks the POSIX character classes (`[[:space:]]`) the tools use.
