@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -213,6 +214,56 @@ def test_the_sample_window_stays_bounded(worktree: Path) -> None:
     assert p.view().rate == 16.0
 
 
+def test_the_rate_window_starts_when_encoding_starts(worktree: Path) -> None:
+    """Queueing, the host lock and loading the model are not the encoder's speed: the first rate leaves them out."""
+    clock = Clock(0.0)
+    p = BuildProgress(worktree, "test-tiny", clock=clock)
+    clock.t = 30.0  # 30 s of waiting and model loading
+    p.phase = "encoding"
+    assert p.view().rate is None  # a fresh window has one sample
+    clock.t = 40.0
+    p.add(160)
+    assert p.view().rate == 16.0  # not 160 / 40
+
+
+def test_a_long_wait_before_encoding_does_not_lower_the_first_rate(worktree: Path) -> None:
+    clock = Clock(0.0)
+    p = BuildProgress(worktree, "test-tiny", clock=clock)
+    p.phase = "waiting"
+    clock.t = 50.0  # inside one window of the start: without the restart it would still count
+    p.phase = "encoding"
+    clock.t = 60.0
+    p.add(160)
+    assert p.view().rate == 16.0
+
+
+def test_the_restart_keeps_the_chunks_already_encoded(worktree: Path) -> None:
+    clock = Clock(0.0)
+    p = BuildProgress(worktree, "test-tiny", clock=clock)
+    clock.t = 5.0
+    p.add(10)  # encoded before the phase was set
+    clock.t = 30.0
+    p.phase = "encoding"
+    clock.t = 40.0
+    p.add(160)
+    assert p.view().rate == 16.0  # (170 - 10) / 10
+
+
+def test_only_the_move_into_encoding_restarts_the_window(worktree: Path) -> None:
+    clock = Clock(0.0)
+    p = BuildProgress(worktree, "test-tiny", clock=clock)
+    p.phase = "encoding"
+    clock.t = 10.0
+    p.add(160)
+    p.phase = "encoding"  # set again: no restart
+    assert p.view().rate == 16.0
+    p.phase = "saving"
+    assert p.view().rate == 16.0
+    assert p.view().phase == "saving"
+    p.phase = "encoding"  # back in: the encoder starts again, so does the window
+    assert p.view().rate is None
+
+
 def test_no_rate_without_elapsed_time(worktree: Path) -> None:
     p = BuildProgress(worktree, "test-tiny", clock=Clock())
     p.add(16)
@@ -275,26 +326,29 @@ def test_concurrent_adds_lose_nothing(worktree: Path) -> None:
     assert p.view().done == 8000
 
 
-def test_cached_add_is_applied_whole(worktree: Path) -> None:
-    """done and from_cache move together: a view never sees one without the other."""
+@pytest.mark.parametrize("action", ["add", "add_cached", "view", "phase"])
+def test_add_view_and_phase_wait_for_the_lock(worktree: Path, action: str) -> None:
+    """The lock is what makes an add (and a phase change) atomic to a view: each one waits while it is held."""
     p = BuildProgress(worktree, "test-tiny", clock=Clock())
-    stop = threading.Event()
-    torn: list[tuple[int, int]] = []
+    actions = {
+        "add": lambda: p.add(1),
+        "add_cached": lambda: p.add(1, cached=True),
+        "view": p.view,
+        "phase": lambda: setattr(p, "phase", "encoding"),
+    }
+    finished = threading.Event()
 
-    def watch() -> None:
-        while not stop.is_set():
-            v = p.view()
-            if v.done != v.from_cache:
-                torn.append((v.done, v.from_cache))
+    def run() -> None:
+        actions[action]()
+        finished.set()
 
-    watcher = threading.Thread(target=watch)
-    watcher.start()
-    for _ in range(5000):
-        p.add(1, cached=True)
-    stop.set()
-    watcher.join()
-    assert torn == []
-    assert p.view().done == p.view().from_cache == 5000
+    worker = threading.Thread(target=run, daemon=True)
+    with p._lock:
+        worker.start()
+        assert not finished.wait(0.2)  # blocked on the lock
+    assert finished.wait(5)
+    worker.join(5)
+    assert not worker.is_alive()
 
 
 # -- the status line copy ----------------------------------------------------------------------
@@ -335,17 +389,39 @@ def test_line_encoding_rate_one_decimal_and_short_eta() -> None:
     assert view(rate=16.0, eta_s=3 * 3600).line().endswith("ETA 3 h (16.0 chunks/s)")
 
 
-def test_line_queued_with_estimate() -> None:
-    v = view(phase="queued", done=0, estimate_s=3 * 3600 + 23 * 60 + 1.0, total=194_564)
-    # 194,564 chunks in 12,181 s is 15.97 chunks/s: shown as the integer rate, ~16
-    assert v.line() == (
-        "docs: transformer index queued; estimated 3 h 23 min for 194,564 chunks at ~16 chunks/s on this host"
+QUEUED_ARM = (
+    "docs: transformer index queued; at most 3 h 22 min for 194,564 chunks at ~16 chunks/s on this host "
+    "(less for chunks already in the encode cache)"
+)
+
+
+def test_line_queued_is_an_upper_bound_from_the_real_formula(worktree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """total / arch rate, rounded down by fmt_duration: 194,564 / 16.0 is 12,160 s, 3 h 22 min."""
+    monkeypatch.setattr(progress, "arch_rate", lambda: 16.0)
+    p = BuildProgress(worktree, "test-tiny", clock=Clock())
+    p.total = 194_564
+    assert p.view().line() == QUEUED_ARM
+
+
+def test_line_queued_with_the_intel_rate_shows_it_unrounded(worktree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    p = BuildProgress(worktree, "test-tiny", clock=Clock())
+    p.total = 194_564
+    assert p.view().line() == (
+        "docs: transformer index queued; at most 15 h for 194,564 chunks at ~3.6 chunks/s on this host "
+        "(less for chunks already in the encode cache)"
     )
 
 
-def test_line_queued_estimate_rate_is_an_integer() -> None:
+def test_line_queued_from_a_view() -> None:
+    v = view(phase="queued", done=0, total=194_564, estimate_s=194_564 / 16.0)
+    assert v.line() == QUEUED_ARM
     v = view(phase="queued", done=0, total=3600, estimate_s=1000.0)  # 3.6 chunks/s, the Intel rate
-    assert v.line() == "docs: transformer index queued; estimated 16 min for 3,600 chunks at ~4 chunks/s on this host"
+    assert v.line() == (
+        "docs: transformer index queued; at most 16 min for 3,600 chunks at ~3.6 chunks/s on this host "
+        "(less for chunks already in the encode cache)"
+    )
 
 
 def test_line_queued_without_an_estimate() -> None:
@@ -543,6 +619,91 @@ def test_read_progress_probes_with_signal_zero(worktree: Path, monkeypatch: pyte
     assert probes == [(os.getpid(), 0)]
 
 
+def test_pid_alive_asks_the_windows_probe_on_win32_and_never_kills(monkeypatch: pytest.MonkeyPatch) -> None:
+    """os.kill(pid, 0) terminates the process on Windows: the probe there is another one."""
+    asked: list[int] = []
+    answers = iter([True, False])
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(progress, "_pid_alive_windows", lambda pid: asked.append(pid) or next(answers))
+
+    def kill(pid: int, sig: int) -> None:
+        raise AssertionError("os.kill on Windows would terminate the process")
+
+    monkeypatch.setattr(os, "kill", kill)
+    assert progress._pid_alive(1234) is True
+    assert progress._pid_alive(1234) is False
+    assert asked == [1234, 1234]
+
+
+def test_read_progress_uses_the_windows_probe_on_win32(worktree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _published(worktree)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(os, "kill", lambda pid, sig: pytest.fail("os.kill on Windows"))
+    monkeypatch.setattr(progress, "_pid_alive_windows", lambda pid: True)
+    assert read_progress(worktree) is not None
+    monkeypatch.setattr(progress, "_pid_alive_windows", lambda pid: False)
+    assert read_progress(worktree) is None
+
+
+def _fake_kernel32(
+    monkeypatch: pytest.MonkeyPatch, *, handle: int, last_error: int = 0, exit_code: int | None = 259
+) -> SimpleNamespace:
+    """ctypes.WinDLL("kernel32") as a stub (the real one exists only on Windows): records what was asked."""
+    import ctypes
+
+    k = SimpleNamespace(opened=[], closed=[], loaded=[])
+
+    def OpenProcess(access: int, inherit: bool, pid: int) -> int:  # noqa: N802
+        k.opened.append((access, inherit, pid))
+        return handle
+
+    def GetExitCodeProcess(h: int, ref: object) -> int:  # noqa: N802
+        if exit_code is None:
+            return 0
+        ref._obj.value = exit_code  # type: ignore[attr-defined]
+        return 1
+
+    def CloseHandle(h: int) -> int:  # noqa: N802
+        k.closed.append(h)
+        return 1
+
+    k.OpenProcess, k.GetExitCodeProcess, k.CloseHandle = OpenProcess, GetExitCodeProcess, CloseHandle
+
+    def win_dll(name: str, use_last_error: bool = False) -> SimpleNamespace:
+        k.loaded.append((name, use_last_error))
+        return k
+
+    monkeypatch.setattr(ctypes, "WinDLL", win_dll, raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: last_error, raising=False)
+    return k
+
+
+@pytest.mark.parametrize(
+    ("handle", "last_error", "exit_code", "alive", "closed"),
+    [
+        (0, 5, None, True, []),  # ERROR_ACCESS_DENIED: another user's process, it exists
+        (0, 87, None, False, []),  # ERROR_INVALID_PARAMETER: no such process
+        (7, 0, 259, True, [7]),  # STILL_ACTIVE
+        (7, 0, 0, False, [7]),  # exited
+        (7, 0, None, True, [7]),  # the exit code could not be read: do not claim it is gone
+    ],
+)
+def test_windows_probe(
+    monkeypatch: pytest.MonkeyPatch, handle: int, last_error: int, exit_code: int | None, alive: bool, closed: list[int]
+) -> None:
+    k = _fake_kernel32(monkeypatch, handle=handle, last_error=last_error, exit_code=exit_code)
+    assert progress._pid_alive_windows(4242) is alive
+    assert k.loaded == [("kernel32", True)]  # use_last_error, so get_last_error is the error of OpenProcess
+    assert k.opened == [(0x1000, False, 4242)]  # PROCESS_QUERY_LIMITED_INFORMATION
+    assert k.closed == closed
+
+
+def test_windows_probe_off_windows_does_not_claim_the_process_is_gone() -> None:
+    if hasattr(__import__("ctypes"), "WinDLL"):
+        pytest.skip("this is Windows")
+    assert progress._pid_alive_windows(4242) is True
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -722,3 +883,57 @@ def test_a_failed_publish_is_throttled_like_a_good_one(worktree: Path, monkeypat
     clock.t += 1.5
     p.publish()
     assert len(calls) == 2
+
+
+def test_retire_leaves_another_processes_file(worktree: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """An older server's finally must not delete the file a newer server published for the same worktree."""
+    p, path = _published(worktree)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["pid"] = os.getpid() + 1
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="doc_search.progress"):
+        p.retire()
+    assert json.loads(path.read_text(encoding="utf-8"))["pid"] == os.getpid() + 1
+    assert caplog.records == []
+    p.publish(force=True)  # and it is retired all the same
+    assert json.loads(path.read_text(encoding="utf-8"))["pid"] == os.getpid() + 1
+
+
+@pytest.mark.parametrize("text", ["", "not json", "[]", '{"pid": "x"}', '{"phase": "encoding"}'])
+def test_retire_removes_a_file_that_names_no_other_process(worktree: Path, text: str) -> None:
+    p, path = _published(worktree)
+    path.write_text(text, encoding="utf-8")
+    p.retire()
+    assert not path.exists()
+
+
+def test_swallowed_publish_failures_keep_their_traceback_at_debug(
+    worktree: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def replace(src: object, dst: object) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(os, "replace", replace)
+    p = BuildProgress(worktree, "m", clock=Clock())
+    with caplog.at_level(logging.DEBUG, logger="doc_search.progress"):
+        p.publish(force=True)
+        p.publish(force=True)
+    debug = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert len(debug) == 2  # every failure, the warning only once
+    assert all(r.exc_info is not None and isinstance(r.exc_info[1], PermissionError) for r in debug)
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
+def test_swallowed_retire_failures_keep_their_traceback_at_debug(
+    worktree: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    p, _ = _published(worktree)
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with caplog.at_level(logging.DEBUG, logger="doc_search.progress"):
+        p.retire()
+    debug = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert len(debug) == 1 and isinstance(debug[0].exc_info[1], PermissionError)  # type: ignore[index]
