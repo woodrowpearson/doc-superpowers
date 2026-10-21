@@ -946,7 +946,8 @@ _lg_v_config_findings() {
 
 # _lg_validate_plan <plan> <findings.jsonl>: the plan's "Related work"
 # section (a heading of any level named "Related work", case-insensitive, to
-# the next heading of the same or a higher level; fenced blocks skipped):
+# the next heading of the same or a higher level; fenced blocks skipped;
+# relations.sh's _LG_AWK_RW reads it, as sweep --plan and upkeep do):
 # each table's data rows (after its header and separator rows) need a mark
 # in the column headed "Mark" (else the last column): "include", or
 # "exclude: <reason>" (case-insensitive; surrounding backticks, * and _
@@ -963,57 +964,24 @@ _lg_validate_plan() {
   cat -- "$plan" > "$s.plan" 2>/dev/null || _lg_die "cannot read the plan '$1'"
   if [ "$_OPT_strict" = 1 ]; then sev=block; fi
   _lg_awkv "$1"
-  LC_ALL=C awk -v plan="$_LG_AV" -v sev="$sev" "$_LG_AWK_JS"'
-    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+  LC_ALL=C awk -v plan="$_LG_AV" -v sev="$sev" "$_LG_AWK_JS$_LG_AWK_RW"'
     function f(c, k, d) {
       print "{\"class\":\"" c "\",\"severity\":\"" sev "\",\"path\":" js(plan) ",\"key\":" (k == "" ? "null" : js(k)) ",\"detail\":" js(d) "}"
     }
-    function cells(line,   n, i, c, r) {
-      gsub(/\\\|/, "\001", line)
-      line = trim(line)
-      if (substr(line, 1, 1) == "|") line = substr(line, 2)
-      if (substr(line, length(line), 1) == "|") line = substr(line, 1, length(line) - 1)
-      n = 0
-      while ((i = index(line, "|")) > 0) { C[++n] = trim(rep(substr(line, 1, i - 1), "\001", "|")); line = substr(line, i + 1) }
-      C[++n] = trim(rep(line, "\001", "|"))
-      return n
-    }
-    BEGIN { js_init(); insec = 0; found = 0; fence = ""; row = 0 }
+    BEGIN { js_init(); rw_begin() }
     {
       sub(/\r$/, "")
-      line = $0
-      if (fence != "") { if (index(trim(line), fence) == 1) fence = ""; next }
-      if (match(trim(line), /^(```|~~~)/)) { fence = substr(trim(line), 1, 3); tbl = 0; next }
-      if (match(line, /^#+[ \t]/)) {
-        lvl = RLENGTH - 1
-        h = tolower(trim(substr(line, RLENGTH + 1))); sub(/[ \t]*#*[ \t]*$/, "", h)
-        if (insec && lvl <= seclvl) insec = 0
-        if (!insec && h == "related work") { insec = 1; found = 1; seclvl = lvl }
-        tbl = 0
-        next
-      }
-      if (!insec) next
-      if (line !~ /^[ \t]*\|/) { tbl = 0; next }
-      tbl++
-      n = cells(line)
-      if (tbl == 1) {
-        mc = n
-        for (i = 1; i <= n; i++) if (tolower(C[i]) == "mark") { mc = i; break }
-        next
-      }
-      if (tbl == 2 && line ~ /^[ \t]*\|?[ \t]*:?-+/) next
-      item = C[1]; m = (mc <= n) ? C[mc] : ""
-      while (m ~ /^[`*_]/) m = substr(m, 2)
-      while (m ~ /[`*_]$/) m = substr(m, 1, length(m) - 1)
-      m = trim(m); lm = tolower(m)
+      if (rw_line($0) != 1) next
+      item = RW_C[1]; m = (RW_MC <= RW_N) ? RW_C[RW_MC] : ""
+      m = rw_trim(rw_bare(m)); lm = tolower(m)
       if (m == "") f("unmarked", item, "line " NR ": " item ": no mark (include | exclude: <reason>)")
       else if (lm == "include") ;
-      else if (substr(lm, 1, 8) == "exclude:" && trim(substr(m, 9)) != "") ;
+      else if (substr(lm, 1, 8) == "exclude:" && rw_trim(substr(m, 9)) != "") ;
       else if (substr(lm, 1, 7) == "exclude") f("bad-mark", item, "line " NR ": " item ": exclude needs a reason (exclude: <reason>)")
       else f("bad-mark", item, "line " NR ": " item ": " js(m) " is not include | exclude: <reason>")
     }
     END {
-      if (!found) {
+      if (!RW_FOUND) {
         printf "{\"class\":\"no-related-work\",\"severity\":\"%s\",\"path\":%s,\"key\":null,\"detail\":%s}\n", sev, js(plan),
           js("no \"Related work\" section (ledger sweep --plan <plan> writes one)")
       }
