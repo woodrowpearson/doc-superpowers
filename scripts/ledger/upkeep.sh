@@ -47,8 +47,10 @@
 #   3 key-in-message — a key or alias as a word (sweep's word scan: split
 #     on [^A-Za-z0-9_-], any case) in a commit message of the range, its
 #     claims and claims_by_path trailer lines left out (they are signal 1);
-#     plan-cited / trailer-on-document — an item no other signal involves
-#     that a document-defined contract's pointer reaches (Proposals);
+#     plan-cited — an item no other signal involves that a plan cited by
+#     a document-defined contract's document links (Proposals; one its
+#     other pointer, a trailer of a commit editing the document, names is
+#     always found by that claim trailer);
 #   4 plan-link — an item a plan in the net diff (one the range adds or
 #     modifies) links: a Related work row marked include names it (its
 #     key, an alias or its path), or a frontmatter value (a scalar, or an
@@ -84,9 +86,10 @@
 #   upkeep.skip_contracts, goes to exactly one involved item: the most
 #   paths entries its defined_in matches; then the most paths entries that
 #   are net-diff files; then the best rank; then key (else path) order. An
-#   item the range adds (its file added in the net diff) that no claim
-#   trailer names is a candidate only when every involved item is one (D7:
-#   a follow-up filed in the range never takes the work's own contracts).
+#   item the range adds (its file added in the net diff) that neither a
+#   claim trailer nor --items names (ruling R63) is a candidate only when
+#   every involved item is one (D7: a follow-up filed in the range never
+#   takes the work's own contracts).
 #   With no involved item it is unattributed. Evidence: "diff names <c> in
 #   <f> (defined_in of <c>)" per file (3 at most, then "… and N more
 #   files"), then "Contract-Change: <c> — <line>" per trailer line.
@@ -138,12 +141,12 @@
 #   a range that does not resolve, a failing contracts adapter, a bad
 #   upkeep config, --pr without adapters.pr, its list failing (no copy) or
 #   view failing, a PR not usable, a --no-repo-adapters refusal; 3 usage.
-#   Cost: one index build, two git diff-tree of the names (all, and the
-#   added ones) and one git diff-tree -p -U0 of the files a defined_in or
-#   read_by matches (none without such a file; the whole range when their
-#   names pass _LG_UP_PATHS_MAX bytes), two git log walks (_lg_msg_claims'
-#   and the word scan's) and one more per document a document-defined
-#   contract's defined_in matches; with a markdown file in the net diff,
+#   Cost: one index build, one git diff-tree of the names (with their
+#   status: the added ones) and one git diff-tree -p -U0 of the files a
+#   defined_in or read_by matches (none without such a file; the whole
+#   range when their names pass _LG_UP_PATHS_MAX bytes), two git log walks
+#   (_lg_msg_claims' and the word scan's) and one more per document of a
+#   document-defined contract in the net diff; with a markdown file in it,
 #   the doc-index read once and each plan cited or in the net diff once
 #   (from the working tree, or one git cat-file per plan at <b>); the text
 #   of the items with a consumes (b) candidate, once (likewise); with --pr,
@@ -364,10 +367,9 @@ def up_ordered_unique: reduce .[] as $x ([]; if index([$x]) != null then . else 
 # The word scan (sweep): words of [A-Za-z0-9_-], lower case, once each.
 def up_words: [splits("[^A-Za-z0-9_-]+") | select(. != "") | ascii_downcase] | unique;
 def up_signals: ["named", "trailer:claims", "trailer:claims_by_path", "trailer:claims_by_ref",
-                 "item-file-edited", "key-in-message", "plan-cited", "trailer-on-document", "plan-link",
-                 "key-in-pr-body"];
+                 "item-file-edited", "key-in-message", "plan-cited", "plan-link", "key-in-pr-body"];
 def up_rank: if . == "named" then 0 elif startswith("trailer:") then 1 elif . == "item-file-edited" then 2
-             elif . == "key-in-message" or . == "plan-cited" or . == "trailer-on-document" then 3
+             elif . == "key-in-message" or . == "plan-cited" then 3
              elif . == "plan-link" then 4 else 5 end;
 # The items a claim trailer line ({k: its kind, v: its value}) names, as
 # paths ($KM: {lower-case key or alias: path}; $FIN: finalized.json; $LP:
@@ -458,10 +460,10 @@ def up_ev_changes($t; $p):
 # pointed item (ptr: the involved items the pointers of a document-defined
 # contract reach, design §4 D9) before one not; then the most paths entries
 # that are net-diff files ($ds); then the best rank; then key (else path)
-# order. An item that yields (y: the range adds its file and no claim
-# trailer names it — a follow-up the work filed, D7) is a candidate only
-# when every involved item yields, or when it is pointed. → {item path:
-# [the contracts it gets]}; {} without $inv.
+# order. An item that yields (y: the range adds its file and neither a
+# claim trailer nor --items names it — a follow-up the work filed, D7) is
+# a candidate only when every involved item yields, or when it is
+# pointed. → {item path: [the contracts it gets]}; {} without $inv.
 def up_attr($open; $inv; $byp; $g; $ds):
   if $inv == [] then {}
   else ($inv | map(select(.y != true)) | if . == [] then $inv else . end) as $cand
@@ -549,11 +551,12 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
 # each first cell of a Related work row marked include ("R") that is the
 # key, an alias or the path of an item (up_item_ref), never a key word in
 # the body; $CITE: {document: [the plans its changed lines name]}; $PMOD:
-# the plans in the net diff; $DTRM: {document: [{p, e, s}]} — the items the
-# claim trailers of the commits that edit it name. $PTR: {document-defined
-# touched contract: its pointers [{p, e, s}]} (the item, the evidence, the
-# signal that involves an item with no other one); $CITES: {that
-# contract: [the plans its documents cite]}.
+# the plans in the net diff; $DTRM: {document: [{p, e}]} — the items the
+# claim trailers of the commits that edit it name (each is trailer:claims*
+# already: _lg_msg_claims reads every commit of the range). $PTR:
+# {document-defined touched contract: its pointers [{p, e, s?}]} (the item,
+# the evidence; s "plan-cited", the signal that involves an item with no
+# other one); $CITES: {that contract: [the plans its documents cite]}.
 | lg_lists($plk | split("\n")[] | select(. != "") | split("\t") as $x | ($x[2:] | join("\t")) as $v
            | (if $x[1] == "F" then $v | fromjson | (if type == "array" then .[] else . end) | strings else $v end)
            | up_item_ref($KM; $LP) | {k: $x[0], v: .}) as $PLK
@@ -562,7 +565,7 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
 | [$PL[] | select(.[0] == "M") | .[1]] as $PMOD
 | lg_lists($dtr | split("\n")[] | select(. != "") | split("\t") as $x | ($x[0] | up_dec) as $f
            | {k: $x[2], v: ($x[4:] | join("\t"))} | up_claimed($KM; $FIN; $LP; $HM)
-           | {k: $f, v: {p: ., e: "\($x[1][0:12]) (\($x[3])) amends \($f)", s: "trailer-on-document"}}) as $DTRM
+           | {k: $f, v: {p: ., e: "\($x[1][0:12]) (\($x[3])) amends \($f)"}}) as $DTRM
 | lg_obj($TCH[] | select(.doc) | . as $t
          | {(.contract): [$t.files[] as $f
              | ((($CITE[$f] // [])[] as $P | ($PLK[$P] // [])[]
@@ -570,8 +573,8 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
                 ($DTRM[$f] // [])[])]}) as $PTR
 | lg_obj($TCH[] | select(.doc) | . as $t | {(.contract): ([$t.files[] as $f | ($CITE[$f] // [])[]] | unique)}) as $CITES
 # Involvement: one {p, s} per signal, then per item its found_by and rank;
-# an item a pointer reaches that no other signal involves is involved by
-# the pointer (plan-cited, trailer-on-document). --items: the named only.
+# an item a cited plan links that no other signal involves is involved as
+# plan-cited. --items: the named only.
 | (if $hasnamed then [$named | up_lines | .[] | {p: ., s: "named"}]
    else
      [ ($TR[] | . as $t | up_claimed($KM; $FIN; $LP; $HM) | {p: ., s: "trailer:\($t.k)"}),
@@ -579,14 +582,14 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
        ($words | up_words[] | ($KM[.] // empty) | {p: ., s: "key-in-message"}),
        ($PMOD[] as $P | ($PLK[$P] // [])[] | {p: ., s: "plan-link"}),
        (if $hasbody then ($body | up_words[] | ($KM[.] // empty) | {p: ., s: "key-in-pr-body"}) else empty end) ]
-     | . + (lg_obj(.[] | {(.p): true}) as $H | [$PTR[][] | select($H[.p] != true) | {p, s}])
+     | . + (lg_obj(.[] | {(.p): true}) as $H | [$PTR[][] | select(.s == "plan-cited" and $H[.p] != true) | {p, s}])
    end) as $SIG
 # y: the item yields in attribution (up_attr) — the range adds its file and
-# no claim trailer names it.
+# neither a claim trailer nor --items names it (ruling R63).
 | lg_obj($add | up_lines | .[] | {(.): true}) as $ADD
 | [$SIG | group_by(.p)[] | .[0].p as $p | $M.BYP[$p] as $I | (map(.s) | unique) as $ss
    | {p: $p, key: $I.key, found_by: [up_signals[] as $x | select($ss | index([$x]) != null) | $x],
-      rank: ([$ss[] | up_rank] | min), y: ($ADD[$p] == true and all($ss[]; startswith("trailer:") | not))}]
+      rank: ([$ss[] | up_rank] | min), y: ($ADD[$p] == true and all($ss[]; (startswith("trailer:") or . == "named") | not))}]
   | sort_by(.rank, (.key // .p)) as $INV
 | lg_obj($INV[] | {(.p): true}) as $INVP
 # Covered: an involved item declares it in changes. A document-defined
@@ -965,19 +968,26 @@ _lg_up_core() {
   esac
   tail -n +2 "$s.cfg" > "$s.skipg" || _lg_die "cannot write $s.skipg"
   _lg_up_index "$b"
-  # The net diff (NUL-terminated), the files skip_globs matches, the rest.
-  git diff-tree -r --name-only -z --no-renames "$a" "$b" -- > "$s.diff" 2> "$s.err" \
+  # The net diff: one git diff-tree of the names, each record its status,
+  # then its name (each NUL-ended), read as lines (a newline in a name as
+  # \001, a tab as \002) — the net-diff files, the ones it adds (an item
+  # filed in the range yields in attribution: up_attr), and md 1 when one
+  # is a markdown file; then the files skip_globs matches, the rest (keep),
+  # and the skipped markdown files.
+  git diff-tree -r --name-status -z --no-renames "$a" "$b" -- > "$s.ns" 2> "$s.err" \
     || _lg_die "git diff-tree $a $b failed: $(head -n 3 "$s.err" 2>/dev/null)"
-  _lg_paths_filter "$s.diff" "$s.skipg" "$s.skip"
-  tr '\n\t\000' '\001\002\n' < "$s.diff" > "$s.diff.l" || _lg_die "cannot read the net diff"
-  # The files the net diff adds (an item filed in the range yields in
-  # attribution: up_attr).
-  git diff-tree -r --name-only -z --no-renames --diff-filter=A "$a" "$b" -- > "$s.add" 2> "$s.err" \
-    || _lg_die "git diff-tree --diff-filter=A $a $b failed: $(head -n 3 "$s.err" 2>/dev/null)"
-  tr '\n\t\000' '\001\002\n' < "$s.add" > "$s.add.l" || _lg_die "cannot read the net diff's added files"
-  tr '\n\t\000' '\001\002\n' < "$s.skip" > "$s.skip.l" || _lg_die "cannot read the skipped files"
-  LC_ALL=C awk -v skip="$s.skip.l" 'BEGIN { while ((getline l < skip) > 0) S[l] = 1 } !($0 in S)' "$s.diff.l" > "$s.keep.l" \
-    || _lg_die "cannot list the range's files"
+  tr '\n\t\000' '\001\002\n' < "$s.ns" > "$s.ns.l" || _lg_die "cannot read the net diff"
+  LC_ALL=C awk -v diff="$s.diff.l" -v add="$s.add.l" '
+    BEGIN { printf "" > diff; printf "" > add }
+    NR % 2 { st = $0; next }
+    { print > diff; if (st == "A") print > add; if ($0 ~ /\.md$/) md = 1 }
+    END { print (md ? 1 : "") }' "$s.ns.l" > "$s.md" || _lg_die "cannot read the net diff"
+  IFS= read -r md < "$s.md" || md=""
+  _lg_paths_filter "$s.diff.l" "$s.skipg" "$s.skip.l" lines
+  LC_ALL=C awk -v skip="$s.skip.l" -v skipm="$s.skipm.l" '
+    BEGIN { printf "" > skipm; while ((getline l < skip) > 0) S[l] = 1 }
+    ($0 in S) { if ($0 ~ /\.md$/) print > skipm; next }
+    { print }' "$s.diff.l" > "$s.keep.l" || _lg_die "cannot list the range's files"
   _lg_r_file_contracts "$_LG_UP_IX" "$s.keep.l" "$s.fc"
   # The reader signal: the contracts whose read_by matches each of those
   # files; when one does, also each live item's paths entry (the read
@@ -1001,10 +1011,8 @@ _lg_up_core() {
   # leaves, $s.fcm for a markdown file it matches) are that one alone.
   # Without a markdown file in the net diff (md ""), no document and no
   # plan is looked for.
-  if LC_ALL=C grep -q '\.md$' "$s.diff.l"; then md=1; fi
   : > "$s.dd"
   if [ -n "$md" ]; then
-    LC_ALL=C awk '/\.md$/' "$s.skip.l" > "$s.skipm.l" || _lg_die "cannot list the range's markdown files"
     if [ -s "$s.skipm.l" ]; then
       _lg_r_file_contracts "$_LG_UP_IX" "$s.skipm.l" "$s.fcm"
     else
@@ -1024,7 +1032,8 @@ _lg_up_core() {
   # read by _LG_AWK_UP_LINES. None of those files: no diff. Their names
   # over _LG_UP_PATHS_MAX bytes: the whole range's diff, no pathspec (a
   # command line that long fails, E2BIG) — the awk keeps the same files.
-  { jq -r -s '(.[0] + .[1]) | keys[]' "$s.fc" "$s.rc" && cut -f 1 "$s.dd"; } > "$s.cand.l" || _lg_die "jq failed (the contracts' files)"
+  jq -r -s --rawfile dd "$s.dd" '((.[0] + .[1]) | keys[]), ($dd | split("\n")[] | select(. != "") | split("\t")[0])' \
+    "$s.fc" "$s.rc" > "$s.cand.l" || _lg_die "jq failed (the contracts' files)"
   : > "$s.dl"
   if [ -s "$s.cand.l" ]; then
     x=$(wc -c < "$s.cand.l") || _lg_die "cannot read the contracts' files"
