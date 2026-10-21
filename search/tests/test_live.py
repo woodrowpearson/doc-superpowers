@@ -116,7 +116,8 @@ def test_transformer_docs_model_end_to_end(git_repo, monkeypatch: pytest.MonkeyP
     """The docs index on gte-modernbert: the CLI builds it in the foreground (there is no static fallback)."""
     spec = transformer.REGISTRY["gte-modernbert-base"]
     repo = git_repo()
-    config = {"docs": {"model": f"transformer:{spec.name}"}, "code": {"enabled": False}}  # the code index stays static
+    # the code index is off: this test is the docs model's (code.model refuses a transformer: it is always static)
+    config = {"docs": {"model": f"transformer:{spec.name}"}, "code": {"enabled": False}}
     seed(repo, json.dumps(config))
     monkeypatch.chdir(repo.root)
     monkeypatch.delenv("SEMBLE_MODEL_NAME", raising=False)

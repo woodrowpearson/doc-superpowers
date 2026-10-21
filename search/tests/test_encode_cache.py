@@ -9,6 +9,7 @@ import os
 import sqlite3
 import sys
 import threading
+import time
 from types import SimpleNamespace
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -549,6 +550,99 @@ def test_host_lock_contention():
         b.join(10)
     assert got_it.is_set()
     assert order == ["A out", "B in"]
+
+
+def test_host_lock_with_a_timeout_runs_unlocked_once_it_passes(caplog: pytest.LogCaptureFixture):
+    """A bounded wait (a refresh's): past the timeout the body runs without the lock, which its holder keeps."""
+    held, release = threading.Event(), threading.Event()
+    lock_file = cache_root() / "encode" / "gte-modernbert-base.lock"
+
+    def holder() -> None:
+        with host_lock(SPEC):
+            held.set()
+            release.wait(30)
+
+    caplog.set_level(logging.INFO, logger="doc_search.encode_cache")
+    a = threading.Thread(target=holder)
+    a.start()
+    try:
+        assert held.wait(10)
+        waited_for: list[int | None] = []
+        started = time.monotonic()
+        with host_lock(SPEC, waited_for.append, timeout=0.4):
+            took = time.monotonic() - started
+            assert lock_file.read_text().strip() == str(os.getpid())  # the holder's pid: nothing was written
+            with pytest.raises(BlockingIOError):  # the holder still has it
+                probe = os.open(lock_file, os.O_RDWR)
+                try:
+                    encode_cache.fcntl.flock(probe, encode_cache.fcntl.LOCK_EX | encode_cache.fcntl.LOCK_NB)
+                finally:
+                    os.close(probe)
+        assert 0.35 <= took < 5, f"the bounded wait took {took:.2f} s"
+        assert waited_for == [os.getpid()], "the wait notice still comes first"
+    finally:
+        release.set()
+        a.join(10)
+    infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert infos == [f"doc-search: the encoder lock {lock_file} is still held by pid {os.getpid()} after 0.4 s: encoding without it"]
+    assert warnings_of(caplog) == []
+
+
+def test_host_lock_with_a_timeout_takes_the_lock_freed_in_time():
+    held, release, got_it = threading.Event(), threading.Event(), threading.Event()
+    order: list[str] = []
+
+    def holder() -> None:
+        with host_lock(SPEC):
+            held.set()
+            release.wait(30)
+            order.append("A out")
+
+    def contender() -> None:
+        with host_lock(SPEC, lambda pid: None, timeout=20):
+            order.append("B in")
+            got_it.set()
+
+    a = threading.Thread(target=holder)
+    a.start()
+    assert held.wait(10)
+    b = threading.Thread(target=contender)
+    b.start()
+    try:
+        assert not got_it.wait(0.3), "B went in while A held the lock"
+    finally:
+        release.set()
+        a.join(10)
+        b.join(30)
+    assert order == ["A out", "B in"], "inside its timeout B waits, and takes the lock once it is free"
+
+
+def test_host_lock_without_a_timeout_waits_however_long(monkeypatch: pytest.MonkeyPatch):
+    """A first build's wait: no timeout, so a short poll interval never makes it give up."""
+    monkeypatch.setattr(encode_cache, "_LOCK_POLL_S", 0.01)
+    held, release, got_it = threading.Event(), threading.Event(), threading.Event()
+
+    def holder() -> None:
+        with host_lock(SPEC):
+            held.set()
+            release.wait(30)
+
+    def contender() -> None:
+        with host_lock(SPEC, lambda pid: None):
+            got_it.set()
+
+    a = threading.Thread(target=holder)
+    a.start()
+    assert held.wait(10)
+    b = threading.Thread(target=contender)
+    b.start()
+    try:
+        assert not got_it.wait(1.0), "a wait without a timeout went in while the lock was held"
+    finally:
+        release.set()
+        a.join(10)
+        b.join(30)
+    assert got_it.is_set()
 
 
 def test_host_lock_uncontended_writes_pid_and_releases(doc_search_cache: Path):

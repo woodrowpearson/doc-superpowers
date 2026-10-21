@@ -11,6 +11,7 @@ import dataclasses
 import platform
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -379,6 +380,7 @@ def test_files_from_the_hub(monkeypatch: pytest.MonkeyPatch, tiny: tuple[Path, n
 
 
 def test_default_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delattr(transformer.os, "sched_getaffinity", raising=False)  # macOS's os has none
     sysctl: dict[str, int] = {}
     monkeypatch.setattr(transformer, "_sysctl_int", sysctl.get)
     sysctl.update({"hw.perflevel0.physicalcpu": 8, "hw.physicalcpu": 10})
@@ -399,6 +401,26 @@ def test_default_threads(monkeypatch: pytest.MonkeyPatch) -> None:
     assert default_threads("linux") == 2
 
 
+def test_default_threads_off_macos_count_the_cpus_this_process_may_use(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Linux: the affinity mask (a container or taskset) where there is one, else the CPU count; less two, at least 2."""
+    monkeypatch.setattr(transformer.os, "cpu_count", lambda: 12)
+    monkeypatch.setattr(transformer.os, "sched_getaffinity", lambda pid: set(range(8)), raising=False)
+    assert default_threads("linux") == 6, "8 CPUs allowed of 12"
+    monkeypatch.setattr(transformer.os, "sched_getaffinity", lambda pid: {0, 1, 2}, raising=False)
+    assert default_threads("linux") == 2
+
+    def unreadable(pid: int) -> set[int]:
+        raise OSError("no affinity here")
+
+    monkeypatch.setattr(transformer.os, "sched_getaffinity", unreadable, raising=False)
+    assert default_threads("linux") == 10, "an unreadable mask: the CPU count"
+    monkeypatch.delattr(transformer.os, "sched_getaffinity")
+    assert default_threads("linux") == 10, "no affinity call: the CPU count"
+    monkeypatch.setattr(transformer, "_sysctl_int", lambda name: None)
+    monkeypatch.setattr(transformer.os, "sched_getaffinity", lambda pid: set(range(4)), raising=False)
+    assert default_threads("darwin") == 2, "macOS without its sysctls falls back the same way"
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="sysctlbyname is macOS's")
 def test_sysctl_reads_this_mac() -> None:
     cores = transformer._sysctl_int("hw.physicalcpu")
@@ -415,6 +437,121 @@ def test_missing_extra_line(monkeypatch: pytest.MonkeyPatch) -> None:
     assert extra_missing() is False  # the test run has the extra
     monkeypatch.setitem(sys.modules, "onnxruntime", None)
     assert extra_missing() is True
+
+
+# -- the session, released after a build and made again on the next encode -----------------------------
+
+
+def count_sessions(monkeypatch: pytest.MonkeyPatch, delay: float = 0.0) -> list[str]:
+    """Record the thread of every onnxruntime session made from now on (each made `delay` seconds slower)."""
+    import onnxruntime
+
+    made: list[str] = []
+    real = onnxruntime.InferenceSession
+
+    def counting(*args: object, **kwargs: object) -> object:
+        made.append(threading.current_thread().name)
+        if delay:
+            time.sleep(delay)  # a window for the encodes that start together to meet
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(onnxruntime, "InferenceSession", counting)
+    return made
+
+
+def test_release_session_drops_it_and_the_next_encode_makes_another(
+    monkeypatch: pytest.MonkeyPatch, spec: TransformerSpec
+) -> None:
+    made = count_sessions(monkeypatch)
+    encoder = Encoder(spec, 1, None)
+    texts = mixed_texts(20)
+    built = encoder.encode(texts, use_multiprocessing=False)
+    query = encoder.encode("refund rounding")
+    assert len(made) == 1
+    encoder.release_session()
+    assert encoder._session is None
+    encoder.release_session()  # twice is fine
+    np.testing.assert_array_equal(encoder.encode("refund rounding"), query)  # a query makes it again
+    assert encoder._session is not None and len(made) == 2
+    encoder.release_session()
+    np.testing.assert_array_equal(encoder.encode(texts, use_multiprocessing=False), built)  # and a build
+    assert len(made) == 3
+    np.testing.assert_array_equal(encoder.encode(texts, use_multiprocessing=False), built)
+    assert len(made) == 3, "a session is made only when there is none"
+
+
+def test_encodes_that_start_together_after_a_release_make_one_session(
+    monkeypatch: pytest.MonkeyPatch, spec: TransformerSpec
+) -> None:
+    encoder = Encoder(spec, 1, None)
+    texts = mixed_texts(40)
+    expected = encoder.encode(texts, use_multiprocessing=False)
+    encoder.release_session()
+    made = count_sessions(monkeypatch, delay=0.2)
+    start = threading.Barrier(8)
+    results: dict[int, np.ndarray] = {}
+    errors: list[BaseException] = []
+
+    def run(i: int) -> None:
+        try:
+            start.wait(10)
+            results[i] = encoder.encode(texts if i % 2 else "refund total", use_multiprocessing=False)
+        except BaseException as err:  # noqa: BLE001 - reported to the test thread
+            errors.append(err)
+
+    workers = [threading.Thread(target=run, args=(i,), name=f"encode-{i}") for i in range(8)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(30)
+    assert not any(worker.is_alive() for worker in workers)
+    assert errors == []
+    assert len(made) == 1, f"sessions made: {made}"
+    for i, vectors in results.items():
+        if i % 2:
+            np.testing.assert_array_equal(vectors, expected)
+        else:
+            np.testing.assert_array_equal(vectors, encoder.encode("refund total", use_multiprocessing=False))
+
+
+def test_an_encode_under_way_keeps_its_session_through_a_release(spec: TransformerSpec) -> None:
+    encoder = Encoder(spec, 1, None)
+    texts = mixed_texts(10)  # one batch
+    expected = encoder.encode(texts, use_multiprocessing=False)
+
+    class Held:
+        """The real session, whose `run` waits for `go` (a release lands while it runs)."""
+
+        def __init__(self, inner: Any) -> None:
+            self.inner, self.entered, self.go = inner, threading.Event(), threading.Event()
+
+        def run(self, *args: Any, **kwargs: Any) -> Any:
+            self.entered.set()
+            assert self.go.wait(30)
+            return self.inner.run(*args, **kwargs)
+
+    held = encoder._session = Held(encoder._session)
+    out: list[np.ndarray] = []
+    worker = threading.Thread(target=lambda: out.append(encoder.encode(texts, use_multiprocessing=False)))
+    worker.start()
+    try:
+        assert held.entered.wait(30)
+        encoder.release_session()
+        assert encoder._session is None
+    finally:
+        held.go.set()
+        worker.join(30)
+    assert len(out) == 1
+    np.testing.assert_array_equal(out[0], expected)
+    assert encoder._session is None, "the encode that was running did not bring the released session back"
+
+
+def test_release_session_of_a_model_never_loaded_makes_no_encoder(fake_transformer: TransformerSpec) -> None:
+    transformer.release_session(fake_transformer)
+    assert transformer._encoders == {}
+    encoder = fake_encoder(fake_transformer)
+    transformer.release_session(fake_transformer)
+    assert encoder.releases == 1 and encoder._session is None
 
 
 def test_install_threads_apply_to_new_encoders(
