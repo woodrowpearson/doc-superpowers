@@ -378,7 +378,7 @@ doc-superpowers/
 ├── gemini-extension.json # Gemini CLI extension manifest
 ├── package.json          # npm/OpenCode package metadata
 ├── search/               # doc-search: the opt-in MCP server over docs and code (a uv Python package)
-│   ├── pyproject.toml    # semble, mcp, pathspec; the cloud extra (google-genai, google-cloud-firestore) and the local-transformer extra (onnxruntime, flatbuffers, protobuf)
+│   ├── pyproject.toml    # semble, mcp, pathspec; the cloud extra (google-genai, google-cloud-firestore) and the local-transformer extra (onnxruntime, flatbuffers, protobuf; tokenizers and huggingface-hub, which semble already brings)
 │   ├── uv.lock
 │   ├── src/doc_search/   # server, CLI, searcher, semble engines, the local transformer docs embedder, cloud leg (read and write paths)
 │   └── tests/            # pytest suite (no network: a tiny test-built model, fake cloud clients)
