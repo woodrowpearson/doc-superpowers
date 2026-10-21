@@ -24,9 +24,13 @@ from doc_search.cloud import CloudUnavailable
 from doc_search.cloud.read import DegradedLeg
 from doc_search.cloud.write import BaseRefError, CorpusRefused, IndexReport, LeaseHeld, LeaseLost
 from doc_search.config import CONFIG_REL, DEFAULTS, INERT_LINE, load_config
+from doc_search.encode_cache import encode_cache_path
 from doc_search.engines import IndexPool, WorktreeIndexes
 from doc_search.evaluate import EvalFileError, run_eval, score_ranking
+from doc_search.progress import read_progress
+from doc_search.transformer import TransformerSpec
 from doc_search.types import Hit, SearchRequest
+from fakes_transformer import fake_encoder, release_builds, wait_until
 
 SPEC_PATH = "docs/specs/SPEC-PAY-004.md"
 SHIPPING_PATH = "docs/shipping.md"
@@ -106,6 +110,38 @@ def warm_pool(repo, monkeypatch: pytest.MonkeyPatch) -> IndexPool:
     assert isinstance(pool.get(repo.root, wait_s=60), WorktreeIndexes)
     monkeypatch.setattr("doc_search.server.IndexPool", lambda cfg, **kwargs: pool)  # kwargs: fallback=False
     return pool
+
+
+@pytest.fixture
+def spec(fake_transformer: TransformerSpec):
+    """The fake transformer's spec; at the end every held encode is let go and every build thread joined."""
+    yield fake_transformer
+    release_builds()
+
+
+@pytest.fixture
+def tx_repo(git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch):
+    """An enabled repository whose docs model is the fake transformer, as the process's working directory."""
+    made = git_repo()
+    seed(made, tiny_model, docs={"model": "transformer:test-tiny"})
+    monkeypatch.chdir(made.root)
+    return made
+
+
+def build_held_elsewhere(made, spec: TransformerSpec) -> tuple[IndexPool, WorktreeIndexes]:
+    """A server's pool, standing in for another process: the static index built and saved, the transformer build held
+    mid-encode with its progress published (the command line's fresh process reads it from the file)."""
+    fake_encoder(spec).gate.clear()
+    pool = IndexPool(load_config(made.root, {}))
+    served = pool.get(made.root, wait_s=60)
+    assert isinstance(served, WorktreeIndexes) and served.docs_fallback
+
+    def published():
+        view = read_progress(made.root)
+        return view if view is not None and view.phase == "encoding" else None
+
+    wait_until(published, "the held build to publish that it encodes")
+    return pool, served
 
 
 def cases_file(tmp_path: Path, *lines: object, name: str = "known.jsonl") -> Path:
@@ -340,6 +376,52 @@ def test_index_build_error_is_exit_2(repo, run, monkeypatch: pytest.MonkeyPatch)
     assert "code index failed" in done.err
 
 
+@pytest.mark.parametrize("verb", ["index", "query", "eval"])
+def test_foreground_verbs_print_the_transformer_build_progress(
+    tx_repo, spec: TransformerSpec, run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verb: str
+) -> None:
+    argv = {
+        "index": ("index",),
+        "query": ("query", "refund rounding"),
+        "eval": ("eval", str(cases_file(tmp_path, KNOWN[0]))),
+    }[verb]
+    assert cli.PROGRESS_EVERY_S == 30.0
+    monkeypatch.setattr(cli, "PROGRESS_EVERY_S", 0.05)
+    encoder = fake_encoder(spec)
+    encoder.gate.clear()  # the build holds mid-encode until a progress line has been printed
+    encoding = threading.Event()
+    printed = cli._print_progress
+
+    def spy(line: str) -> None:
+        printed(line)
+        if "chunks encoded" in line:
+            encoding.set()
+
+    monkeypatch.setattr(cli, "_print_progress", spy)
+    opener = threading.Thread(target=lambda: (encoding.wait(30), encoder.gate.set()), name="test-opener", daemon=True)
+    opener.start()
+
+    done = run(*argv)
+    opener.join(5)
+
+    assert done.code == 0, done
+    assert "doc-search: docs: transformer index building, 0 chunks encoded" in done.err.splitlines()
+    assert all(line.startswith("doc-search: docs: transformer index") for line in done.err.splitlines()), done.err
+    assert [t.name for t in threading.enumerate() if t.name == "doc-search-progress"] == [], "stopped with the verb"
+
+
+def test_foreground_progress_stops_when_the_verb_returns(
+    tx_repo, spec: TransformerSpec, run, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "PROGRESS_EVERY_S", 0.02)
+    assert run("index").code == 0  # nothing held: the build is done in moments
+    capsys.readouterr()
+
+    time.sleep(0.2)  # many intervals pass; the printer must be gone
+
+    assert capsys.readouterr().err == ""
+
+
 # --- status ----------------------------------------------------------------------------------------------
 
 
@@ -385,7 +467,8 @@ def test_status_text_and_json(repo, run, warm_pool: IndexPool) -> None:
     assert payload["docs"]["state"] == "ready" and payload["docs"]["chunks"] >= 1
     assert payload["code"]["state"] == "ready" and payload["code"]["files"] >= 1
     assert payload["docs"]["error"] is None
-    assert payload["cache"] == {"docs": "valid", "code": "valid"}
+    assert payload["cache"] == {"docs": "valid", "code": "valid", "docs_fallback": None}
+    assert payload["docs"]["transformer"] is None and payload["encode_cache"] is None
     assert payload["corpus_files"] == 2
     assert payload["cloud"] is None
     assert isinstance(payload["semble"], str)
@@ -414,7 +497,7 @@ def test_status_of_a_fresh_process_without_a_cache(repo, run, monkeypatch: pytes
     assert "docs index: not loaded" in text.out and "building" not in text.out
     payload = json.loads(as_json.out)
     assert as_json.code == 0 and payload["enabled"] is True and payload["ready"] is False
-    assert payload["cache"] == {"docs": "absent", "code": "absent"}
+    assert payload["cache"] == {"docs": "absent", "code": "absent", "docs_fallback": None}
     assert payload["docs"]["state"] == "unloaded" and payload["docs"]["chunks"] is None
     assert payload["corpus_files"] == 2
     assert spy.calls == [] and build_threads() == []
@@ -428,7 +511,7 @@ def test_status_after_index_is_valid_and_ready(repo, run, monkeypatch: pytest.Mo
     payload = json.loads(run("status", "--format", "json").out)
 
     assert text.lines[-2:] == ["docs cache: valid", "code cache: valid"]
-    assert payload["cache"] == {"docs": "valid", "code": "valid"}
+    assert payload["cache"] == {"docs": "valid", "code": "valid", "docs_fallback": None}
     assert payload["ready"] is True
     assert payload["docs"]["state"] == "unloaded", "ready from the disk: this process loaded nothing"
     assert spy.calls == [] and build_threads() == [], "valid is read from the cache, not by loading the index"
@@ -439,7 +522,7 @@ def test_status_after_a_change_is_stale(repo, run) -> None:
 
     touch(repo.root / SHIPPING_PATH)  # a doc edited since the indexes were saved
     payload = json.loads(run("status", "--format", "json").out)
-    assert payload["cache"] == {"docs": "stale", "code": "valid"}
+    assert payload["cache"] == {"docs": "stale", "code": "valid", "docs_fallback": None}
     assert payload["ready"] is False
     assert run("status").lines[-2:] == ["docs cache: stale", "code cache: valid"]
 
@@ -448,7 +531,7 @@ def test_status_after_a_change_is_stale(repo, run) -> None:
 
     repo.write("src/other.py", "def other():\n    return 1\n")  # a new code file
     payload = json.loads(run("status", "--format", "json").out)
-    assert payload["cache"] == {"docs": "valid", "code": "stale"} and payload["ready"] is False
+    assert payload["cache"] == {"docs": "valid", "code": "stale", "docs_fallback": None} and payload["ready"] is False
 
 
 def test_status_with_code_off(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch, run) -> None:
@@ -456,14 +539,79 @@ def test_status_with_code_off(git_repo, tiny_model: str, monkeypatch: pytest.Mon
     seed(made, tiny_model, code={"enabled": False})
     monkeypatch.chdir(made.root)
     before = json.loads(run("status", "--format", "json").out)
-    assert before["cache"] == {"docs": "absent", "code": "off"} and before["ready"] is False
+    assert before["cache"] == {"docs": "absent", "code": "off", "docs_fallback": None} and before["ready"] is False
 
     assert run("index").code == 0
     payload = json.loads(run("status", "--format", "json").out)
 
-    assert payload["cache"] == {"docs": "valid", "code": "off"} and payload["code"]["state"] == "off"
+    assert payload["cache"] == {"docs": "valid", "code": "off", "docs_fallback": None}
+    assert payload["code"]["state"] == "off"
     assert payload["ready"] is True
     assert run("status").lines[-2:] == ["docs cache: valid", "code cache: off"]
+
+
+def test_status_static_config_has_no_transformer_members(repo, run, warm_pool: IndexPool) -> None:
+    payload = json.loads(run("status", "--format", "json").out)
+
+    assert payload["docs"]["transformer"] is None and payload["encode_cache"] is None
+    assert payload["cache"]["docs_fallback"] is None
+    text = run("status")
+    assert "encode cache" not in text.out and "docs fallback cache" not in text.out
+
+
+def test_status_transformer_before_anything_is_built(tx_repo, spec: TransformerSpec, run) -> None:
+    text = run("status")
+    payload = json.loads(run("status", "--format", "json").out)
+
+    assert text.code == 0 and text.err == ""
+    assert text.lines[-3:] == ["docs cache: absent", "docs fallback cache: absent", "code cache: absent"]
+    assert "docs model: transformer:test-tiny (" in text.out
+    assert f"encode cache: {encode_cache_path(spec)} (empty)" in text.lines
+    assert payload["docs"]["transformer"] == {"model": spec.model_path, "progress": None}
+    assert payload["docs"]["model"] == "transformer:test-tiny" and payload["docs"]["state"] == "unloaded"
+    assert payload["encode_cache"] == {"path": str(encode_cache_path(spec)), "bytes": None}
+    assert payload["cache"] == {"docs": "absent", "code": "absent", "docs_fallback": "absent"}
+    assert payload["ready"] is False
+
+
+def test_status_reads_the_build_another_process_publishes(tx_repo, spec: TransformerSpec, run) -> None:
+    pool, served = build_held_elsewhere(tx_repo, spec)
+    chunks = len(served.docs.chunks)
+
+    text = run("status")
+    payload = json.loads(run("status", "--format", "json").out)
+
+    # the text: the tool's, then the caches (the transformer's and the static fallback's), then the other process's line
+    progress = f"docs: transformer index building, 0 / {chunks} chunks encoded"
+    assert text.code == 0 and text.err == ""
+    assert text.lines[-4:] == ["docs cache: absent", "docs fallback cache: valid", "code cache: valid", progress]
+    assert "docs index: not loaded (status does not load it; a search of this worktree does)" in text.lines
+
+    # the JSON: the same facts as members
+    assert payload["docs"]["transformer"]["model"] == spec.model_path
+    shown = payload["docs"]["transformer"]["progress"]
+    assert shown["phase"] == "encoding" and shown["total"] == chunks and shown["done"] == 0
+    assert shown["pid"] == os.getpid() and set(shown) == set(pool.progress(tx_repo.root).as_dict())
+    assert payload["encode_cache"]["path"] == str(encode_cache_path(spec))
+    assert isinstance(payload["encode_cache"]["bytes"], int)
+    assert payload["cache"] == {"docs": "absent", "code": "valid", "docs_fallback": "valid"}
+    assert payload["ready"] is True, "the static index is valid on disk, so a search answers"
+    assert payload["docs"]["state"] == "unloaded" and payload["docs"]["error"] is None
+
+
+def test_status_in_a_process_that_builds_names_the_build_once(tx_repo, spec: TransformerSpec, run, monkeypatch) -> None:
+    """The pool holds the build itself: the tool's text has its line, and the file it publishes is not read twice."""
+    pool, served = build_held_elsewhere(tx_repo, spec)
+    monkeypatch.setattr("doc_search.server.IndexPool", lambda cfg, **kwargs: pool)
+
+    text = run("status")
+    payload = json.loads(run("status", "--format", "json").out)
+
+    line = f"docs: transformer index building, 0 / {len(served.docs.chunks)} chunks encoded"
+    assert text.lines.count(line) == 1
+    assert "docs index: ready (semble's static index, while the transformer index builds)" in text.lines
+    assert payload["docs"]["transformer"]["progress"]["phase"] == "encoding"
+    assert payload["docs"]["state"] == "ready"
 
 
 class SlowCloudLeg:
@@ -502,7 +650,8 @@ def test_status_bounds_the_cloud_lines(git_repo, tiny_model: str, monkeypatch: p
     else:
         payload = json.loads(done.out)
         assert payload["cloud"] == {"configured": True, "lines": [line]}
-        assert payload["ready"] is False and payload["cache"] == {"docs": "absent", "code": "absent"}
+        assert payload["ready"] is False
+        assert payload["cache"] == {"docs": "absent", "code": "absent", "docs_fallback": None}
 
 
 # --- index --cloud: the exit-code mapping ----------------------------------------------------------------
@@ -799,6 +948,29 @@ def test_eval_skips_the_legs_that_cannot_answer(repo, run, tmp_path: Path, monke
 
     unchecked = run("eval", str(path), "--min-recall", "0.5")
     assert unchecked.code == 2 and "`all` leg did not run" in unchecked.err
+
+
+def test_eval_skips_the_single_index_for_a_transformer_model(
+    tx_repo, spec: TransformerSpec, run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One index over docs and code would encode the code with the transformer: the leg says so, and builds nothing."""
+    built: list[tuple[str, ...]] = []
+    real = SembleIndex.from_path.__func__
+
+    def from_path(cls, path, *args, **kwargs):
+        built.append(tuple(c.name for c in kwargs.get("content", ())))
+        return real(cls, path, *args, **kwargs)
+
+    monkeypatch.setattr(SembleIndex, "from_path", classmethod(from_path))
+
+    done = run("eval", str(cases_file(tmp_path, KNOWN[0])))
+
+    assert done.code == 0, done
+    reason = "docs.model is a transformer model: the single index would encode the code with it"
+    assert re.search(rf"^semble-single\s+skipped: {re.escape(reason)}$", done.out, re.M), done.out
+    assert ("DOCS", "CODE") not in built and ("DOCS",) in built
+    assert set(rows(done.out)) == {"docs", "code", "all"}
+    assert done.lines[-1] == "semble-single within 0.02 of joined (recall@k and MRR): no"
 
 
 def test_eval_decision_rule(repo, tmp_path: Path) -> None:
