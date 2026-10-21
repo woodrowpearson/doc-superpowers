@@ -260,6 +260,7 @@ Declarations drift as code moves: a fix edits a contract's `defined_in` without 
 Where else the comparison runs:
 - **pre-push**: `validate --pushed` reports each touched contract no involved item declares as the advisory `undeclared-contract-change` (*Validation* has its range and rules), naming `ledger upkeep --range <a>..<b>`; it never refuses a push. It costs an index build and a run of the contracts adapter per pushed ref; it runs offline (`DOC_TOOLS_LEDGER_OFFLINE=1` for the check alone: no PR or items adapter, no fetch), and not at all for an empty range or a tip config `base` already holds. Config `validate.undeclared_contract_change: false` turns it off.
 - **`review-pr`** (SKILL.md, step 9): `ledger upkeep --range "$BASE...HEAD" --no-repo-adapters --format json` on a ledger host, not in a CI run — read-only: a refusal is a skipped section with the command for the user to run, and the step edits nothing.
+- **`/doc-superpowers ledger declare`**: the attended flow that confirms the proposals with a person and links only what was confirmed (*Building on the ledger* → **Declaring after a change**); offered from `review-pr` step 9 (a section with proposals ends with the command, and `--range <range>` when the range is not the default `"$BASE...HEAD"`) and from SKILL.md's *Merge-time upkeep* bullet, never run by `review-pr` and never in a CI run.
 - **CI**: no doc-superpowers template runs it (none grants an agent a ledger verb); a host's own job may run `upkeep` with the ledger helper set vendored (*Vendored copies*) and post what it proposes. `--no-repo-adapters` does not keep such a job from running repository files: `doc-superpowers:<name>` adapters resolve beside the running `doc-tools.sh` (*Adapters*), so a job that runs the repository's vendored `.github/scripts/doc-tools.sh` runs the repository's copies of the tool, the ledger modules and those adapters — the flag refuses only the adapters config names by path.
 
 ## In-flight work and notices (opt-in: `inflight.enabled`)
@@ -441,6 +442,18 @@ key=$(jq -r '.key // .path' <<<"$out")   # provisional (offline) keys are fine: 
 # …or, nothing to declare: "$DOC_TOOLS" ledger link "$key" --relations none
 echo "filed $path ($key)"   # nothing is committed: the user commits the new file
 ```
+
+### Declaring after a change
+
+SKILL.md's `/doc-superpowers ledger declare [--range <a>..<b> | --range <a>...<b> | --pr <n>] [--items <item>…]`: the attended confirm-and-link step over `upkeep` (there is no `ledger declare` verb), each call with `--format json` and routed on its exit (*What a wrapper does on each exit*):
+
+1. **Enabled?** As filing step 1: `"enabled": false` from the first call (`ledger: not enabled …`): say so, offer SKILL.md `init`'s *Ledger (opt-in)* step, and stop.
+2. **Attended only.** A person answers it: never in a CI run or for an unattended caller. There, run `ledger upkeep` and report what it proposes; write nothing.
+3. **Range.** As given (`--range` or `--pr`); else `"$BASE...HEAD"` with `review-pr` step 2's base (`origin/HEAD`, else `origin/main`; neither found: ask which base). `ledger upkeep --range <range> [--items <item>…] --format json`. Exit 2: report `error` and stop — never "none missing"; exit 3: fix the command line.
+4. **Nothing proposed.** No item has a proposal and `unattributed_contracts` is empty: say "Ledger declarations: none missing", and stop.
+5. **Confirm**, in one question round (`AskUserQuestion`; another client's tool: `references/tool-mappings.md`): per item (`key`, else `path`, and its `found_by`), its `proposed` relations as a multi-select, one option per proposal — `+ <field> <value> — <evidence>` — by *Relations* → **Declaring relations**; the person may add values. When an item is `truncated`, say "showing N of `total`" and offer the same call with `--top 0`. Show each of `unattributed_contracts` with its `files` and any `cites`; for one the person assigns to an item, the confirmed value is `ledger link <key> --changes <contract>` for that contract alone — never a re-run with `--items`, which would hand every contract the range touches to that item.
+6. **Link.** Per item with a confirmed value, one `ledger link <key|path> --changes … --consumes …` built from what was confirmed (the payload's `link` line only when every proposal shown was). Exit 1: a bad value, nothing written — show `problems` and ask again. A rejected proposal is written nowhere; `ledger note <item> "<why>" --kind ruling` when the person gives a reason.
+7. **Report** what was written per item (`added`, and `present` for what was already there). Never commits unless asked: on a branch, the declarations then land with the change they describe.
 
 ### Example: a backfill script
 

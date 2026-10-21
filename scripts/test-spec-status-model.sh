@@ -508,6 +508,25 @@ _filing=$(_section "$LEDGERREF" '### Filing an item')
 assert_contains "$_filing" 'ledger find' "…duplicates first (ledger find)…"
 assert_contains "$_filing" 'ledger new --create' "…one ledger new --create…"
 assert_contains "$_filing" 'Never commit' "…and it never commits"
+# The declare flow (design 2026-10-18 §7): the attended confirm-and-link step
+# over upkeep. A skill flow, not a verb; review-pr step 9 only names it.
+assert_contains "$_ledger_act" '/doc-superpowers ledger declare' "the ledger action routes /doc-superpowers ledger declare…"
+assert_contains "$_ledger_act" '→ **Declaring after a change**' "…by references/ledger.md's Declaring after a change"
+_upkeep_bullet=$(grep -F -- '- **Merge-time upkeep**' <<<"$_ledger_act")
+assert_contains "$_upkeep_bullet" '/doc-superpowers ledger declare' "the Merge-time upkeep bullet points at the declare flow"
+_step9=$(grep -F -- '9. **Ledger declarations**' <<<"$_review")
+assert_contains "$_step9" '/doc-superpowers ledger declare' "review-pr step 9 names /doc-superpowers ledger declare…"
+assert_contains "$_step9" 'never run' "…and only names it: the link lines are printed, never run"
+assert_line_matches "$LEDGERREF" '^### Declaring after a change$' "references/ledger.md has the Declaring after a change procedure…"
+_declaring=$(_section "$LEDGERREF" '### Declaring after a change')
+assert_contains "$_declaring" 'never in a CI run' "…never in a CI run or for an unattended caller…"
+assert_contains "$_declaring" 'never "none missing"' "…an upkeep that failed is never 'none missing'…"
+assert_contains "$_declaring" '--top 0' "…a truncated item offers the same call with --top 0…"
+assert_contains "$_declaring" 'ledger link <key> --changes <contract>' "…an unattributed contract the person assigns is linked alone…"
+assert_contains "$_declaring" 'never a re-run with `--items`' "…never a re-run with --items…"
+assert_contains "$_declaring" 'built from what was confirmed' "…one ledger link per item, built from what was confirmed…"
+assert_contains "$_declaring" 'Never commits unless asked' "…and it never commits unless asked"
+assert_contains "$(_section "$LEDGERREF" '## Merge-time upkeep')" '- **`/doc-superpowers ledger declare`**' "ledger.md: the upkeep section offers the declare flow"
 assert_line_matches "$LEDGERREF" '^## Merge-time upkeep' "references/ledger.md has the Merge-time upkeep section"
 assert_line_matches "$LEDGERREF" '^\| `upkeep \(--range' "…and an upkeep row in its Verbs table"
 
