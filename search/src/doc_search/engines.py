@@ -34,8 +34,12 @@ A transformer docs model (`docs.model: "transformer:<name>"`, transformer.py) ch
   A first build waits for the lock however long another process holds it; a refresh of a saved
   transformer index of this model waits at most HOST_LOCK_REFRESH_WAIT_S, then encodes without it
   (one info line: an incremental encode is small, and an edit must not wait hours behind another
-  worktree's first build). A build that had to wait checks the cache again once it holds the lock
-  (or gave up on it), and loads what the holder saved for this worktree instead of encoding it again.
+  worktree's first build). Before such a refresh saves, it tries the lock once more without
+  blocking: while the other process still holds it (and may be saving this worktree's docs folder
+  too: semble's save is several files, not atomic), the new index serves unsaved, with one info line,
+  and the next recheck refreshes again. A build that had to wait checks the cache again once it
+  holds the lock (or gave up on it), and loads what the holder saved for this worktree instead of
+  encoding it again.
 - *What serves while it builds.* The docs thread loads a transformer index saved for the worktree:
   a valid one is the answer (no lane); a stale one serves while its refresh, incremental, queues in
   the lane. When none is saved (nothing is, or semble's docs folder holds another model's), or the
@@ -60,17 +64,21 @@ A transformer docs model (`docs.model: "transformer:<name>"`, transformer.py) ch
   invalid build is recorded (`transformer_error`; a failed validation is also a warning in the
   log), the fallback keeps serving, the static index stays on disk, and the build is retried on
   the cooldown, whose base is capped at TRANSFORMER_COOLDOWN_CAP_S (a first encode takes hours; a
-  refresh from the encode cache, about a minute) and doubles with each failure in a row, up to
-  TRANSFORMER_BACKOFF_CAP_S (a success starts it again from the cap).
+  refresh from the encode cache, about a minute). After a failure the base is that cap, however
+  quickly the build failed, doubled with each further failure in a row (60, 120, 240 ... s), up to
+  TRANSFORMER_BACKOFF_CAP_S; a success returns it to the build's own seconds.
 - *Eviction.* Only a transformer build that holds its lane slot (encoding, or waiting there for the
   host lock) or saves keeps its worktree resident. One waiting in the lane is cancelled by an
   eviction (as is the build-line place it reserved for a fallback that has not started): its places
   are given back, its thread wakes and leaves without building, and the evicted indexes go with it.
   While it waits for the static builds it cannot be evicted: those builds keep the worktree
   resident themselves.
-- *Memory.* When a transformer build thread ends (built, loaded, failed or cancelled), the pool
-  drops the encoder's onnxruntime session (`transformer.release_session`), which keeps GBs after an
-  encode; the next encode, a query or a build, makes a new one.
+- *Memory.* Once a transformer build thread's own encode has run (`SembleIndex.from_path`, whether it
+  succeeded or failed), the pool drops the encoder's onnxruntime session
+  (`transformer.release_session`), which keeps GBs after an encode; the next encode, the first query
+  after the build or the next build, makes a new one. A thread that only loads a saved index, or
+  rechecks one that has not changed, releases nothing: the session serves the queries, and another
+  worktree's build may be encoding on it.
 - *Progress.* Each transformer build has its own `progress.BuildProgress` (queued, waiting,
   encoding, saving), published for other processes and retired when the build ends; `progress()`
   and `WorktreeIndexes.transformer` read it. Its total is known for a first build only, and only
@@ -532,8 +540,9 @@ class IndexPool:
         self._entries.move_to_end(top)
         # Evict least recently used first, but never an entry that is still building: dropping it
         # would let a later get start a second build into the same semble cache directory. A
-        # transformer build that only waits (in the lane, for the static builds) does not hold its
-        # worktree for hours: the eviction cancels it.
+        # transformer build waiting in the lane does not hold its worktree for hours: the eviction
+        # cancels it. (One waiting for the static builds is never a candidate: those builds keep the
+        # entry building.)
         for path, other in list(self._entries.items()):
             if len(self._entries) <= self._max:
                 break
@@ -651,8 +660,8 @@ class IndexPool:
         cool = state.cool_seconds
         if state.spec is not None:  # a first encode takes hours; a refresh, from the encode cache, does not
             cool = min(cool, TRANSFORMER_COOLDOWN_CAP_S)
-            if state.failures > 1:  # failing in a row: back off, doubling (the exponent bounded: no overflow)
-                cool = min(cool * 2 ** min(state.failures - 1, 32), TRANSFORMER_BACKOFF_CAP_S)
+            if state.failures:  # failing: back off from the cap, doubling per failure in a row (exponent bounded)
+                cool = min(TRANSFORMER_COOLDOWN_CAP_S * 2 ** min(state.failures - 1, 32), TRANSFORMER_BACKOFF_CAP_S)
         cooldown = max(self._cfg.search.rescan_seconds, REVALIDATE_FACTOR * cool)
         return now - state.checked_at >= cooldown
 
@@ -838,7 +847,6 @@ class IndexPool:
             logger.debug("doc-search: transformer docs index of %s failed", entry.worktree, exc_info=True)
         finally:
             self._give_back(state)
-            self._release(state)
             for build in builds:
                 build.retire()
             with self._lock:
@@ -846,7 +854,7 @@ class IndexPool:
 
     @staticmethod
     def _release(state: _State) -> None:
-        """Drop the encoder's onnxruntime session once a build thread is done with it (never raises)."""
+        """Drop the encoder's onnxruntime session once this thread's own encode has run (never raises)."""
         try:
             if state.spec is not None:
                 transformer.release_session(state.spec)
@@ -959,7 +967,7 @@ class IndexPool:
             # One encoder on this host: a first build waits for it as long as it takes, a refresh at most
             # HOST_LOCK_REFRESH_WAIT_S (then it encodes without it).
             wait_s = None if first else HOST_LOCK_REFRESH_WAIT_S
-            with encode_cache.host_lock(spec, on_wait=on_wait, timeout=wait_s):
+            with encode_cache.host_lock(spec, on_wait=on_wait, timeout=wait_s) as lock:
                 began.append(self.clock())
                 if in_line is not None:
                     with self._lock:
@@ -970,8 +978,11 @@ class IndexPool:
                     build.holder_pid = None
                     build.phase = "encoding"
                     build.publish(force=True)
-                    with transformer.report_to(_Reporter(build)):
-                        index = SembleIndex.from_path(path, content=list(state.content), model_path=spec.model_path)
+                    try:
+                        with transformer.report_to(_Reporter(build)):
+                            index = SembleIndex.from_path(path, content=list(state.content), model_path=spec.model_path)
+                    finally:
+                        self._release(state)  # this thread encoded: its session's memory goes (built or failed)
                     problem = _invalid(index, spec)
                     if problem is not None:  # never served, never saved: the static index stays, on disk and serving
                         logger.warning(
@@ -981,6 +992,13 @@ class IndexPool:
                             problem,
                         )
                         return _Outcome(error=f"transformer index failed validation: {problem}")
+                    if not lock.try_again():  # a refresh that gave up waiting: the holder may be saving this folder
+                        logger.info(
+                            "doc-search: the refreshed transformer docs index of %s serves unsaved: another process "
+                            "still holds the encoder lock (the next recheck refreshes it again)",
+                            entry.worktree,
+                        )
+                        return _Outcome(index=index, files=_files_of(index), changed=True)
                     # Saved before the encoder lock is let go, so a build of this worktree that waited for the
                     # lock (another process) finds it and loads it.
                     build.phase = "saving"

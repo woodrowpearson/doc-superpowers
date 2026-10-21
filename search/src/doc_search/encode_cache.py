@@ -15,7 +15,8 @@ than fail.
 `host_lock` keeps two builds of two processes (two sessions, two worktrees) from running the
 encoder at once; the builds of one process are already serial (engines.py). It degrades the same
 way: a lock that cannot be set up is a warning and an unlocked run. A caller may bound its wait
-(`timeout`): past it, the body runs unlocked, with one info line.
+(`timeout`): past it, the body runs unlocked, with one info line, and may try the lock once more
+before it writes what the holder may be writing too (`HostLock.try_again`).
 
 Nothing here that only names a path (`cache_root`, `encode_cache_path`) creates a directory or
 can raise: a directory is created where something is written to it, inside the guarded open of
@@ -245,12 +246,26 @@ def _try_until(fd: int, deadline: float) -> bool:
             time.sleep(min(_LOCK_POLL_S, left))
 
 
+def _lock_path(spec: TransformerSpec) -> Path:
+    return cache_root() / "encode" / f"{spec.name}.lock"
+
+
+def _record_pid(fd: int) -> None:
+    with suppress(OSError):  # the pid is informational: a full disk does not cost the lock
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode())
+
+
+class _TimedOut(Exception):
+    """`_acquire`'s bounded wait ran out while another process held the lock."""
+
+
 def _acquire(
     spec: TransformerSpec, on_wait: Callable[[int | None], None] | None, timeout: float | None
 ) -> int | None:
-    """Take the lock; return its file descriptor, or None when it cannot be set up (one warning) or `timeout`
-    seconds pass while another holds it (one info line)."""
-    path = cache_root() / "encode" / f"{spec.name}.lock"
+    """Take the lock; return its file descriptor, or None when it cannot be set up (one warning). Raises
+    `_TimedOut` when `timeout` seconds pass while another holds it (one info line)."""
+    path = _lock_path(spec)
     fd: int | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -276,7 +291,9 @@ def _acquire(
                     who,
                     timeout,
                 )
-                return None
+                raise _TimedOut
+    except _TimedOut:
+        raise
     except BaseException as err:
         if fd is not None:
             with suppress(OSError):
@@ -286,10 +303,45 @@ def _acquire(
         reason = f"{path}: {type(err).__name__}: {err}"
         logger.warning("doc-search: encoder lock unavailable (%s): encoding without it", reason)
         return None
-    with suppress(OSError):  # the pid is informational: a full disk does not cost the lock
-        os.ftruncate(fd, 0)
-        os.write(fd, f"{os.getpid()}\n".encode())
+    _record_pid(fd)
     return fd
+
+
+class HostLock:
+    """What `host_lock` yields: whether its body holds the lock, and one more try after a wait that timed out."""
+
+    def __init__(self, spec: TransformerSpec, fd: int | None, timed_out: bool) -> None:
+        self._spec = spec
+        self.fd = fd
+        self.timed_out = timed_out  # the bounded wait ran out while another process held the lock
+
+    @property
+    def held(self) -> bool:
+        return self.fd is not None
+
+    def try_again(self) -> bool:
+        """Try the lock once without blocking, after a wait that timed out: True when the body holds it now (until
+        the `with` ends), False while another process still does (or it cannot be told). True without trying when
+        the wait did not time out: the body holds the lock, or there is none to take (no fcntl, a lock that
+        cannot be set up)."""
+        if not self.timed_out or self.fd is not None:
+            return True
+        fd: int | None = None
+        try:
+            fd = os.open(_lock_path(self._spec), os.O_RDWR | os.O_CREAT, 0o644)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BaseException as err:
+            if fd is not None:
+                with suppress(OSError):
+                    os.close(fd)
+            if not isinstance(err, OSError):  # an interrupt: not ours to absorb
+                raise
+            if not isinstance(err, BlockingIOError):
+                logger.debug("doc-search: the encoder lock could not be tried again", exc_info=err)
+            return False
+        _record_pid(fd)
+        self.fd = fd
+        return True
 
 
 @contextmanager
@@ -297,25 +349,33 @@ def host_lock(
     spec: TransformerSpec,
     on_wait: Callable[[int | None], None] | None = None,
     timeout: float | None = None,
-) -> Iterator[None]:
+) -> Iterator[HostLock]:
     """Hold the host-wide encoder lock for `spec` (an exclusive `flock` on a file under the cache root).
 
     Taken without blocking first. When another process (or another open of the file) holds it,
     `on_wait(pid)` is called with the holder's pid (None when unreadable), then this waits until
     the holder lets go: for ever when `timeout` is None, else at most `timeout` seconds, after
-    which the body runs without the lock (one info line says so). Once held, the lock file
-    records this process's pid.
+    which the body runs without the lock (one info line says so; the `HostLock` it yields has
+    `timed_out` set, and its `try_again` takes the lock if it has come free). Once held, the lock
+    file records this process's pid.
 
     The lock is a convenience, never a reason to fail a build: where `fcntl` is missing (Windows)
     it is a no-op, and when it cannot be set up (the cache location is unwritable, the filesystem
     has no flock) the body runs without it after one warning. A failing `on_wait` is a warning
     too, and the wait goes on.
     """
-    fd = _acquire(spec, on_wait, timeout) if fcntl is not None else None
+    timed_out = False
+    fd: int | None = None
+    if fcntl is not None:
+        try:
+            fd = _acquire(spec, on_wait, timeout)
+        except _TimedOut:
+            timed_out = True
+    lock = HostLock(spec, fd, timed_out)
     try:
-        yield
+        yield lock
     finally:
-        if fd is not None:
+        if lock.fd is not None:
             with suppress(OSError):
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+                fcntl.flock(lock.fd, fcntl.LOCK_UN)
+            os.close(lock.fd)
