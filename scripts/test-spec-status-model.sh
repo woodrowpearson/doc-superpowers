@@ -523,6 +523,7 @@ assert_contains "$_declaring" 'never in a CI run' "…never in a CI run or for a
 assert_contains "$_declaring" 'never "none missing"' "…an upkeep that failed is never 'none missing'…"
 assert_contains "$_declaring" '--top 0' "…a truncated item offers the same call with --top 0…"
 assert_contains "$_declaring" 'ledger link <key> --changes <contract>' "…an unattributed contract the person assigns is linked alone…"
+assert_contains "$_declaring" 'or `--consumes` for one the range only reads' "…or with --consumes, for one the range only reads (final review M2)…"
 assert_contains "$_declaring" 'never a re-run with `--items`' "…never a re-run with --items…"
 assert_contains "$_declaring" 'built from what was confirmed' "…one ledger link per item, built from what was confirmed…"
 assert_contains "$_declaring" 'Never commits unless asked' "…and it never commits unless asked"
