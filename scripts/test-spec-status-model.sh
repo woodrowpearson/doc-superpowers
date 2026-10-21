@@ -487,6 +487,50 @@ assert_true "review-pr with no base ref stops non-zero (rc $_rp_rc)…" test "$_
 assert_contains "$_rp_out" "not found" "…saying the base was not found, never 'nothing to review'"
 assert_not_contains "$_rp_out" "no changes against" "…and never reports an empty review"
 
+# The work ledger's filing flow and review-pr's ledger leg (design
+# 2026-10-18 §2, §6): step 9 runs upkeep over the PR's range, guarded so that
+# it runs no repository script, and only outside CI; the ledger action routes
+# /doc-superpowers ledger file to references/ledger.md's procedure.
+echo "--- review-pr's ledger leg; the ledger filing flow ---"
+assert_contains "$_review" 'ledger upkeep --range "$BASE...HEAD" --no-repo-adapters' \
+  "review-pr step 9 runs ledger upkeep over the PR's range with --no-repo-adapters"
+assert_contains "$_review" 'not in a CI run' "…and is skipped in a CI run"
+assert_contains "$_review" '"could not run: <error>"' "…an upkeep that could not run is said so…"
+assert_contains "$_review" 'never "none missing"' "…never as 'none missing'"
+assert_contains "$_review" '`git status --porcelain` stays empty' "…and the step edits nothing"
+_ledger_act=$(_section "$SKILLMD" '### `ledger`')
+assert_contains "$_ledger_act" '/doc-superpowers ledger file [<title>]' "the ledger action routes /doc-superpowers ledger file…"
+assert_contains "$_ledger_act" 'new --create' "…through ledger new --create…"
+assert_contains "$_ledger_act" '→ **Filing an item**' "…by references/ledger.md's Filing an item"
+LEDGERREF="$(_read "$REPO_ROOT/references/ledger.md")"
+assert_line_matches "$LEDGERREF" '^### Filing an item$' "references/ledger.md has the Filing an item procedure…"
+_filing=$(_section "$LEDGERREF" '### Filing an item')
+assert_contains "$_filing" 'ledger find' "…duplicates first (ledger find)…"
+assert_contains "$_filing" 'ledger new --create' "…one ledger new --create…"
+assert_contains "$_filing" 'Never commit' "…and it never commits"
+# The declare flow (design 2026-10-18 §7): the attended confirm-and-link step
+# over upkeep. A skill flow, not a verb; review-pr step 9 only names it.
+assert_contains "$_ledger_act" '/doc-superpowers ledger declare' "the ledger action routes /doc-superpowers ledger declare…"
+assert_contains "$_ledger_act" '→ **Declaring after a change**' "…by references/ledger.md's Declaring after a change"
+_upkeep_bullet=$(grep -F -- '- **Merge-time upkeep**' <<<"$_ledger_act")
+assert_contains "$_upkeep_bullet" '/doc-superpowers ledger declare' "the Merge-time upkeep bullet points at the declare flow"
+_step9=$(grep -F -- '9. **Ledger declarations**' <<<"$_review")
+assert_contains "$_step9" '/doc-superpowers ledger declare' "review-pr step 9 names /doc-superpowers ledger declare…"
+assert_contains "$_step9" 'never runs it' "…and only names it: the link lines are printed, never run"
+assert_line_matches "$LEDGERREF" '^### Declaring after a change$' "references/ledger.md has the Declaring after a change procedure…"
+_declaring=$(_section "$LEDGERREF" '### Declaring after a change')
+assert_contains "$_declaring" 'never in a CI run' "…never in a CI run or for an unattended caller…"
+assert_contains "$_declaring" 'never "none missing"' "…an upkeep that failed is never 'none missing'…"
+assert_contains "$_declaring" '--top 0' "…a truncated item offers the same call with --top 0…"
+assert_contains "$_declaring" 'ledger link <key> --changes <contract>' "…an unattributed contract the person assigns is linked alone…"
+assert_contains "$_declaring" 'or `--consumes` for one the range only reads' "…or with --consumes, for one the range only reads (final review M2)…"
+assert_contains "$_declaring" 'never a re-run with `--items`' "…never a re-run with --items…"
+assert_contains "$_declaring" 'built from what was confirmed' "…one ledger link per item, built from what was confirmed…"
+assert_contains "$_declaring" 'Never commits unless asked' "…and it never commits unless asked"
+assert_contains "$(_section "$LEDGERREF" '## Merge-time upkeep')" '- **`/doc-superpowers ledger declare`**' "ledger.md: the upkeep section offers the declare flow"
+assert_line_matches "$LEDGERREF" '^## Merge-time upkeep' "references/ledger.md has the Merge-time upkeep section"
+assert_line_matches "$LEDGERREF" '^\| `upkeep \(--range' "…and an upkeep row in its Verbs table"
+
 echo "--- I-11: code_refs are pathspecs; init's own output is never a ref ---"
 assert_not_contains "$ACTIONS" "module names" "spec-generate no longer allows module names as code_refs"
 assert_line_matches "$ACTIONS" '^7\. \*\*Populate `code_refs`\*\*.*`<spec-path>::spec`.*set-code-refs' \
@@ -503,7 +547,7 @@ assert_not_contains "$_init" 'docs/architecture.md:SKILL.md' "init's mapping exa
 # decisions file (scripts/ledger/init.sh: the proposal only); step 12b runs a
 # second --report against the edited proposal before anyone fills decisions.
 assert_contains "$_init" 'ledger init --report <report> --registry docs/ledger/ledgers.proposed.json' "init 12b: a second report against the edited proposal writes the decisions file"
-assert_contains "$(_read "$REPO_ROOT/references/ledger.md")" 'and **no decisions file**' "ledger.md: a report without a registry writes no decisions file"
+assert_contains "$LEDGERREF" 'and **no decisions file**' "ledger.md: a report without a registry writes no decisions file"
 
 echo "--- I-11: safety ---"
 assert_no_line_matches "$PROMPTS" 'uv run scripts/' "no repository script is run by the prompt layer"

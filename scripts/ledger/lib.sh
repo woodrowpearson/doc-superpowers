@@ -15,6 +15,8 @@ _LG_CFG=""           # the merged config (a file in $_SCRATCH): _lg_init
 _LG_ROOT=""          # the work tree's top level
 _LG_IX_NEED_CONTRACTS=""  # 1: the verb shows relations — a failing contracts
                           # adapter is fatal (index.sh _lg_ix_adapter_contracts)
+_LG_FAIL_REC=""      # set in a guarded child only: the file its _lg_fail
+                     # records "<rc>\t<message>" in (doc-tools.sh), no verdict
 # A push refused for credentials or rights, in git's or curl's words (ERE;
 # grep -E): the counter CAS (keys.sh) and the in-flight push (inflight.sh)
 # both read it as "cannot write there" — provisional keys / a warning —
@@ -46,6 +48,8 @@ _LG_CACHE=""         # $(git rev-parse --git-common-dir)/doc-superpowers/ledger
 . "$_LG_LIB/adapters.sh"
 # shellcheck source=scripts/ledger/relations.sh
 . "$_LG_LIB/relations.sh"
+# shellcheck source=scripts/ledger/upkeep.sh
+. "$_LG_LIB/upkeep.sh"
 # shellcheck source=scripts/ledger/inflight.sh
 . "$_LG_LIB/inflight.sh"
 # shellcheck source=scripts/ledger/init.sh
@@ -331,5 +335,5 @@ _lg_status_class() {
 # One per verb-table row (doc-tools.sh "ledger <sub>|cmd_ledger_<sub>|…"),
 # each in the module that defines it: show, ls, find, link, note: query.sh.
 # new, assign, finalize: keys.sh. view, publish: views.sh. related, sweep,
-# recheck, suggest: relations.sh. inflight, notices: inflight.sh. validate:
-# validate.sh. init: init.sh.
+# recheck, suggest: relations.sh. upkeep: upkeep.sh. inflight, notices:
+# inflight.sh. validate: validate.sh. init: init.sh.

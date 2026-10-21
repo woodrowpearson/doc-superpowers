@@ -95,7 +95,7 @@ chore: <maintenance task>
 release: vX.Y.Z
 ```
 
-An unscoped form (`docs: …`) is fine for a change with no single area. A project with a work ledger (`docs/ledger/config.json`, `references/ledger.md`) also reads these trailers from any line of a commit message (`[* ]<Trailer>: <value>`, so squash merges keep them): `Ledger-Claims: <key>` (config `trailers.claims`) claims an item for the branch; `Fixes` / `Closes` / `Resolves #<n>` (`trailers.claims_by_ref`) claims a hosted item; `Contract-Change: <contract-id> — <one line>` says a commit changes a contract; `Ledger-Ack: <notice id> — <clause>` acks an in-flight notice. This repository has no ledger. `release: vX.Y.Z` is the `release` action's one commit (`references/release.md`, step 11).
+An unscoped form (`docs: …`) is fine for a change with no single area. A project with a work ledger (`docs/ledger/config.json`, `references/ledger.md`) also reads these trailers from any line of a commit message (`[* ]<Trailer>: <value>`, so squash merges keep them): `Ledger-Claims: <key>` (config `trailers.claims`) claims an item for the branch; `Fixes` / `Closes` / `Resolves #<n>` (`trailers.claims_by_ref`) claims a hosted item; `Contract-Change: <contract-id> — <one line>` says a commit changes a contract (a contract the code never spells, a component or a pattern, counts as touched by `ledger upkeep` only through this line); a claim trailer on a commit that edits a spec or ADR names the item that owns the amendment (`ledger upkeep`); `Ledger-Ack: <notice id> — <clause>` acks an in-flight notice. This repository has no ledger. `release: vX.Y.Z` is the `release` action's one commit (`references/release.md`, step 11).
 
 ### Pull Requests
 
@@ -277,7 +277,7 @@ Ledger-enabled projects only: `docs/ledger/config.json` turns the work ledger on
 | Remote refs | the counter `refs/doc-superpowers/ledger/counters`, in-flight refs `refs/doc-superpowers/inflight/<host>/<branch>`, the views branch `doc-ledger-views` (all configurable) |
 | Cache (local, never committed) | `$(git rev-parse --git-common-dir)/doc-superpowers/ledger/` |
 | Index shape | `references/ledger-index.schema.json` (`ledger-index/1`) |
-| Plan task | `Ledger notices (chunk <n>)`, and a plan's `## Related work` table |
+| Plan task | `Ledger notices (chunk <n>)`, and a plan's `## Related work` table, its Mark column `include` or `exclude: <reason>` (an `include` row is how a plan links an item for `ledger upkeep`) |
 
 ### doc-search names
 
@@ -391,7 +391,7 @@ Every template in `scripts/hooks/ci/` follows these rules; `test-doc-pr-release.
 | `DOC_SUPERPOWERS_QUIET=1` | Suppress hook output while still enforcing (exit codes unchanged). The Claude gate's block reason (stderr on exit 2, Claude's feedback) is never suppressed |
 | `DOC_SUPERPOWERS_SKIP=1` | Bypass all hooks temporarily, the work ledger's legs and events included (its pre-commit and pre-push legs print a line naming the variable) |
 | `DOC_SUPERPOWERS_LEDGER_SKIP=1` | Bypass only the work ledger's legs and events (`--ledger`, `--ledger-claude`, and the hook modes) |
-| `DOC_TOOLS_LEDGER_OFFLINE=1` | No ledger adapter runs, nothing is fetched (a cached copy past its TTL is served stale; `--refresh` and `publish` exit 2) and `inflight --push` pushes nothing; the SessionStart event sets it. It does not cover key allocation: `new`, `assign`, `finalize` and `init --accept` still reach the counter ref (`init --accept` with hosted items to write needs the items adapter: exit 2), though `keys.mode: "merge"` `finalize` then skips its check of the remote's base (a warning), and `notices --gate` decides on the refs here instead of exiting 2 |
+| `DOC_TOOLS_LEDGER_OFFLINE=1` | The ledger's remote adapters (`pr`, `items`) do not run, nothing is fetched (a cached copy past its TTL is served stale; `--refresh` and `publish` exit 2) and `inflight --push` pushes nothing; the `contracts` adapter, a local script, still runs; the SessionStart event sets it, and so does `validate --pushed` for its `undeclared-contract-change` check alone. It does not cover key allocation: `new`, `assign`, `finalize` and `init --accept` still reach the counter ref (`init --accept` with hosted items to write needs the items adapter: exit 2), though `keys.mode: "merge"` `finalize` then skips its check of the remote's base (a warning), and `notices --gate` decides on the refs here instead of exiting 2 |
 | `DOC_SUPERPOWERS_CLAIMS_SKIP=1` | Turn off the git hooks' claims legs only: pre-commit's (blocking) and pre-push's (advisory), each of which runs only with `docs/spec-claims/`. The pre-commit leg blocks on a finding whatever `DOC_SUPERPOWERS_STRICT` says; a claims check that cannot run blocks only under STRICT |
 
 `DOC_TOOLS` overrides the path of `doc-tools.sh` a hook runs (tests use it). The index path is fixed: `docs/.doc-index.json`.

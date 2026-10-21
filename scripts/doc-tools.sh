@@ -1534,6 +1534,7 @@ _LG_VERB=""          # the ledger sub-verb ("ls", …); "ledger" when none
 _LG_FORMAT=text      # text | json (--format)
 _LG_HOOK=0           # 1: a hook mode (ledger notices|state-watch --hook): exit 0, stdout the hook's
 _LG_HOOK_FAIL=""     # a hook mode's failure handler (scripts/ledger/hooks.sh), once it is set
+_LG_UNDO_FILE=""     # a file this run wrote whole (ledger new --create): removed when the run ends ≠ 0
 _on_exit() {
   local rc=$? emitted=0 erc="" marker=""
   if [ "$_CL_ACTIVE" = 1 ]; then
@@ -1593,6 +1594,9 @@ _on_exit() {
         ;;
     esac
   fi
+  # ledger new --create is all or nothing: the item file it wrote goes when
+  # the run ends otherwise than 0 (scripts/ledger/keys.sh _lg_k_create).
+  if [ "$rc" != 0 ] && [ -n "$_LG_UNDO_FILE" ]; then rm -f -- "$_LG_UNDO_FILE"; fi
   # A hook mode (Task 16c U4) never fails its session: whatever happened —
   # a usage error, no repository, a crash — it ends 0.
   if [ "$_LG_HOOK" = 1 ]; then rc=0; fi
@@ -2453,6 +2457,61 @@ ledger recheck|cmd_ledger_recheck|repo|format=
   "re-verify | close as superseded by <item> | reshape". The index marks
   them (re-check: <item> landed) once it reaches a terminal class on the
   base, until a later commit on the base touches them.
+ledger upkeep|cmd_ledger_upkeep|repo|range= pr= items+ top= strict no-repo-adapters format=
+  (--range <a>..<b> | --range <a>...<b> | --pr <n>) [--items <item>...] [--top N] [--strict] [--no-repo-adapters] [--format text|json]
+  Merge-time upkeep: the changes and consumes relations a range's items
+  are missing, proposed with their evidence and a ready "ledger link"
+  line — never written. <a>...<b> is merge-base(a, b)..b (trunk merged
+  into the branch never counts). --pr <n> reads PR <n> from the pr
+  adapter's list (config adapters.pr; cached, as for every verb): merged,
+  merge-base(<merge_commit>^1, head_oid)..head_oid when this clone has
+  head_oid (the PR's own commits, for any merge strategy), else
+  <merge_commit>^1..<merge_commit> (a rebase merge: its last commit
+  only); open, merge-base(config base, head_oid)..head_oid — the commit
+  must be in this clone (else exit 2, with the fetch command). Its body comes from the adapter's optional
+  `view <n>` ({"number","body"}; exit 3: no view, "pr": {…,
+  "body_scanned": false}). Involved items, each with how it was found: a
+  claim trailer (claims, claims_by_path, claims_by_ref), an item file the
+  net diff edits, a key or alias as a word in a commit message, a plan in
+  the net diff that links it (a Related work row marked include, or a
+  frontmatter value, naming it), then the PR body; --items names them
+  instead. A contract is touched by a net-diff file its defined_in
+  matches (unless upkeep.skip_globs matches the file) when an added or
+  removed line of that file names it — the id
+  after its first ":", with no [A-Za-z0-9_] just before or after, a * in
+  it any run of [A-Za-z0-9_.-] — or by a Contract-Change line (the way to
+  declare a contract the code never spells); one whose one defined_in
+  entry, a markdown path or glob, matches exactly one .md file in <b>'s
+  tree (or the range's deleted files) that no other contract names or
+  matches (a spec, an ADR) by any edit of it, skip_globs or not,
+  and its owner is first the item a plan its changed lines cite links, or
+  that a claim trailer of a commit editing it names (a cited plan linking
+  none: unattributed, with cites). One an involved item already
+  declares in changes is proposed to nobody; each other one goes to one item — the
+  most paths entries its defined_in matches, then the most paths in the
+  diff, then how it was found, then key; an item the range adds that no
+  claim trailer (nor --items) names is one only when every involved item
+  is — or, with
+  no involved item, is listed as unattributed; upkeep.skip_contracts are
+  never proposed. A
+  contract nothing touches is read when a net-diff file its read_by
+  matches (skip_globs aside) has a changed line naming it: consumes,
+  covered by an involved item's consumes and attributed in the same way
+  with read_by. An item found by a trailer, its file or --items also gets
+  consumes for each untouched contract whose defined_in matches a file it
+  lists that the range does not change, when its own text names the
+  contract (its title, summary and body; never its relation lists — read
+  from the working tree when <b> is HEAD, else at <b>). Per item: changes
+  first, then consumes; --top N (default 3; 0: all) proposals per item.
+  --no-repo-adapters (a review that must not run repository scripts)
+  refuses, exit 2 and nothing run, when adapters.contracts, adapters.pr
+  or items.adapter is anything but null or doc-superpowers:<name>. Exit
+  0 (advisory); 1 with --strict and a proposal; 2 a range end that does
+  not resolve, a failing contracts adapter, a bad upkeep config, --pr
+  without adapters.pr or with its list or view failing, a PR not usable
+  here, or a --no-repo-adapters refusal; 3 usage: neither or both of
+  --range and --pr, a bad --top or --pr, an --items value naming no item
+  (or an archived one).
 ledger inflight|cmd_ledger_inflight|repo|branch= fetch push format=
   [--branch <name>|<name>@<host>] [--fetch] [--push] [--format text|json]
   Work in flight (config inflight.enabled): local branches, worktrees
@@ -2538,8 +2597,8 @@ ledger state-watch|cmd_ledger_state_watch|repo|hook
   Otherwise nothing. Always exits 0, printing nothing else (as notices
   --hook); DOC_SUPERPOWERS_LEDGER_SKIP=1 or DOC_SUPERPOWERS_SKIP=1:
   silent.
-ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize suggest-contracts top= format=
-  --ledger <id|unassigned> --summary <text> [--file <issue>] [--finalize] [--suggest-contracts [--top N]] [--format text|json]
+ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize suggest-contracts top= create title= body-file= paths= sev= format=
+  --ledger <id|unassigned> --summary <text> [--file <issue> | --create --title <text> [--sev <value>] [--paths <a,b,…>] [--body-file <file>]] [--finalize] [--suggest-contracts [--top N]] [--format text|json]
   Allocate an item key and write key, ledger and summary (at most 140
   characters, one line) into an issue: <issue> defaults to the one staged
   or untracked item file without a key (none or several: exit 3).
@@ -2555,6 +2614,27 @@ ledger new|cmd_ledger_new|repo|ledger= summary= file= finalize suggest-contracts
   prints the item's contract candidates as ledger suggest does, --top
   included (after the write; JSON: "total", "truncated" and "candidates",
   suggest's shape) and writes no relation; --top without it: exit 3.
+  --create writes the issue itself, once and complete (any exit but 0
+  leaves no file; the key is allocated from its path first):
+  <dir>/<YYYY-MM-DD>-<slug>.md, <dir> the literal directory of the first
+  items.globs entry shaped <dir>/<pattern>.md (else docs/issues), <slug>
+  the title lowercased, every run of characters other than a-z and 0-9
+  one "-", at most 50 ("item" when empty); a taken name gets -2 … -99
+  (all taken: exit 2; a name another writer takes meanwhile is never
+  replaced: exit 2); a path items.globs do not match: exit 3 (write the
+  file, then --file). Its frontmatter, in order: the status field =
+  status.open[0], the date field = today, the severity field = --sev and
+  the paths field = --paths as a flow list (blanks around the commas
+  ignored), when given, then the config init.stub_defaults fields it
+  does not set (quoted as init quotes them; never relations: link
+  writes relations, or --relations none), then key, ledger and
+  summary; its body "# <title>", a blank line, then the --body-file
+  bytes. Usage (exit 3): --create with --file; --title, --sev, --paths or
+  --body-file without --create; a missing, blank or multi-line --title;
+  a --body-file that is not a readable file; an empty --paths piece;
+  --sev not in a non-empty severity_order; config items.adapter set
+  (hosted items: create the issue through the adapter). Prints "created
+  <path>" before new's line; JSON adds "created": true.
 ledger assign|cmd_ledger_assign|repo|format=
   <item> <ledger> [--format text|json]
   Move an item to a ledger: a new key there; the previous key is appended
@@ -2640,7 +2720,9 @@ ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed
   advisory); superseded_by only on a closed item. On a
   modified item a finding about what it already was at HEAD is advisory
   (a legacy_ids or retired ledger likewise); the registry is checked when
-  it is staged. With config validate.require_relations "new" (default
+  it is staged (config validate.undeclared_contract_change not true or
+  false exits 2 here and in --all). With config
+  validate.require_relations "new" (default
   null: off; any other value exits 2), an added open item naming no
   changes, consumes or relates blocks (no-relations) unless its
   frontmatter says relations: none. --all: the same over every item of
@@ -2668,7 +2750,23 @@ ledger validate|cmd_ledger_validate|repo|staged all registry plan= strict pushed
   since its merge-base with config base: a new branch's all-zeros <a>, and
   a branch that merged the base after a provisional key landed there; a
   key the base carries too is named with ledger finalize --all); merge
-  mode passes. --registry
+  mode passes. In both modes --pushed adds undeclared-contract-change
+  advisories (never blocking): each contract the range changes (ledger
+  upkeep's touched contracts; from an all-zeros <a>, merge-base(config
+  base, <b>)..<b>; a file counts only when the branch itself also
+  changes it, differing between that merge base and <b>: by file, so a
+  merged base adds no file of its own) that no item the range involves
+  declares in changes,
+  naming ledger upkeep --range <a>..<b> (the detail starts with the
+  path, which the text line prints once); none when it involves no item;
+  at most 10, then "… N more contracts". It costs an index build and a
+  contracts adapter run, offline (DOC_TOOLS_LEDGER_OFFLINE=1 for the
+  check alone: no PR or items adapter), and nothing runs for an empty
+  range or a tip config base already holds; config
+  validate.undeclared_contract_change false turns it off (default true).
+  A check that cannot run (a failing contracts adapter, a config base
+  that does not resolve, an undeclared_contract_change not true or false)
+  is one such advisory, "could not check: <message>". --registry
   checks docs/ledger/ledgers.json: schema, ledger ids, statuses, kinds,
   contract ids, globs, and that no tracked file is claimed by two ledgers
   (overlap) or, once any ledger declares paths, that every tracked file
@@ -3029,9 +3127,9 @@ Spec claims (claims validate, run, promote, render, gate, attest, rulings):
   (fix the code and promote it (a lint, log or judge claim: move it to
   built by a reviewed status edit), or retire it, first).
 
-Work ledger (ledger show, ls, find, related, sweep, recheck, inflight,
-notices, state-watch, new, assign, suggest, link, note, view, validate,
-publish, finalize, init):
+Work ledger (ledger show, ls, find, related, sweep, recheck, upkeep,
+inflight, notices, state-watch, new, assign, suggest, link, note, view,
+validate, publish, finalize, init):
   Opt-in: docs/ledger/config.json turns it on (a key it omits takes its
   default; {} is a complete config). Without it every ledger verb except
   init prints "ledger: not enabled (no docs/ledger/config.json)" — with
@@ -3053,10 +3151,11 @@ publish, finalize, init):
   doc-superpowers:<name> — scripts/adapters/<name>.sh beside this
   doc-tools.sh; one that fails or prints output that breaks its contract
   exits 2 for every verb that needs it (contracts: show, related, recheck,
-  sweep, suggest, link, view, publish). The pr adapter's list is cached for
-  cache.remote_ttl_minutes; when it fails, the verbs serve the last copy
+  sweep, suggest, upkeep, link, view, publish). The pr adapter's list is
+  cached for cache.remote_ttl_minutes; when it fails, the verbs serve the last copy
   (or none) with one stderr line and "pr_data" in --format json, and only
-  --refresh and publish exit 2. DOC_TOOLS_LEDGER_OFFLINE=1 never runs it
+  --refresh and publish exit 2 (upkeep --pr too, with no copy).
+  DOC_TOOLS_LEDGER_OFFLINE=1 never runs it
   (for hooks that must not reach the network): a copy past its TTL is
   served as "PR data as of …", no copy is "—", and --refresh / publish
   exit 2 ("offline: DOC_TOOLS_LEDGER_OFFLINE=1"). Hosted items (config
@@ -3370,7 +3469,9 @@ _shellcheck_opt_names() {
   _OPT_all="" _OPT_by="" _OPT_check="" _OPT_chunk="" _OPT_deep="" _OPT_final="" _OPT_range=""
   _OPT_plan="" _OPT_refs="" _OPT_reverify="" _OPT_scheduled="" _OPT_staged="" _OPT_superseded_by=""
   _OPT_tag="" _OPT_tree="" _OPT_warn=""
-  _OPTV_claims=() _OPTV_code_refs=() _OPTV_code_refs_from=() _OPTV_config=() _OPTV_helper=() _OPTV_holds=()
+  _OPT_create="" _OPT_title="" _OPT_body_file="" _OPT_paths="" _OPT_sev=""
+  _OPT_no_repo_adapters="" _OPT_strict="" _OPT_top="" _OPT_pr=""
+  _OPTV_items=() _OPTV_claims=() _OPTV_code_refs=() _OPTV_code_refs_from=() _OPTV_config=() _OPTV_helper=() _OPTV_holds=()
 }
 
 # Repository verbs run only inside a git work tree, at its top level. Checked
@@ -13072,12 +13173,14 @@ _lg_verb_json() {
 # "enabled" says whether docs/ledger/config.json is present here.
 _lg_fail() {
   local rc="$1" msg="$2" uverb="${3:-}" verb enabled=false prev=""
-  # The in-flight scan's background child (scripts/ledger/inflight.sh)
-  # prints no verdict: it leaves its failure for the run to raise.
-  # (The first failure wins: a later one never overwrites it.)
-  if [ -n "${_LG_IFL_CHILD:-}" ]; then
-    if [ ! -e "$_SCRATCH/lg-ifl.fail" ]; then
-      printf '%s\t%s\n' "$rc" "$msg" > "$_SCRATCH/lg-ifl.fail" 2>/dev/null || true
+  # A guarded child — the in-flight scan's background child (scripts/
+  # ledger/inflight.sh), validate --pushed's advisory (validate.sh) —
+  # prints no verdict: it leaves "<rc>\t<message>" in the file
+  # _LG_FAIL_REC names, for its parent to read. (The first failure wins:
+  # a later one never overwrites it.)
+  if [ -n "${_LG_FAIL_REC:-}" ]; then
+    if [ ! -e "$_LG_FAIL_REC" ]; then
+      printf '%s\t%s\n' "$rc" "$msg" > "$_LG_FAIL_REC" 2>/dev/null || true
     fi
     exit "$rc"
   fi
