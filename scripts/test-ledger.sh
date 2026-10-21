@@ -13362,7 +13362,7 @@ test_lg_upkeep_consumes_b_hosted_item() {
 }
 
 test_lg_upkeep_consumes_b_hosted_excerpt_cut() {
-  echo "test: #39 D7 — a hosted excerpt the items adapter cut mid-name (280 characters ending in '…'): the partial word before the '…' names nothing — 'order.tot…', cut from order.total, does not name field:order.tot; order.tax, whole earlier in it, still counts"
+  echo "test: #39 D7 (ruling R61) — a hosted excerpt an items adapter cut mid-name (ending in '…', at any length): the partial word before the '…' names nothing — 'order.tot…', cut from order.total, does not name field:order.tot; order.tax, whole earlier in it, still counts"
   local p="order.tax rounds. " i=0
   while [ "$i" -lt 42 ]; do
     p="${p}words "
@@ -13374,6 +13374,14 @@ test_lg_upkeep_consumes_b_hosted_excerpt_cut() {
     "the premise: the index's excerpt is cut inside order.total"
   lg upkeep --range main..fix-12 --format json
   assert_eq "0|consumes field:order.tax" "$LG_RC|$(lg_up_vals x-12)" "consumes field:order.tax only — not field:order.tot, which only the cut word spells"
+  lg_items_teardown
+  # Another adapter's cut: a short excerpt (not the reference adapter's 280).
+  lg_up_hosted_fixture "order.tax rounds; the total reads order.tot…"
+  lg show x-12 --format json
+  assert_json_field "$LG_OUT" '.item.first_para | [length < 280, endswith("order.tot…")] | tojson' "[true,true]" \
+    "the premise: a short excerpt ending in 'order.tot…'"
+  lg upkeep --range main..fix-12 --format json
+  assert_eq "0|consumes field:order.tax" "$LG_RC|$(lg_up_vals x-12)" "a cut at any length: the word before the '…' names nothing (no field:order.tot)"
   lg_items_teardown
 }
 

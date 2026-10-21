@@ -509,9 +509,10 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
 # Per item, for _LG_JQ_UP_RANK: its proposals (_props) and, when one is a
 # consumes (b) candidate, the text the index holds (_t: the title — h1 —
 # and summary; a hosted item, which has no file, its body excerpt too —
-# one the items adapter cut, 280 characters ending in "…", without the
-# partial word before the "…", whose prefix may be a shorter contract id)
-# and whether the body of its file is read as well (_f).
+# one an items adapter cut, ending in "…" (at whatever length the adapter
+# cuts), without the partial word before the "…", whose prefix may be a
+# shorter contract id) and whether the body of its file is read as well
+# (_f).
 | [$INV[] | . as $v | $M.BYP[$v.p] as $I | ($PBY[$v.p] // []) as $P
    | any($P[]; ._g == 2) as $hasb | (($I.url | type) == "string") as $hosted
    | {key: $I.key, path: $I.path, found_by: $v.found_by, rank: $v.rank, _props: $P,
@@ -520,7 +521,7 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
            then [$I.h1, $I.summary,
                  (if $hosted
                   then $I.first_para
-                       | if type == "string" and length == 280 and endswith("…") then sub("[A-Za-z0-9_]+…$"; "…") else . end
+                       | if type == "string" and endswith("…") then sub("[A-Za-z0-9_]+…$"; "…") else . end
                   else empty end)]
                 | map(strings) | join("\n")
            else null end),
