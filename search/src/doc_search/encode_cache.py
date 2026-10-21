@@ -10,7 +10,13 @@ each other). A cache that cannot be opened or breaks later is dropped for the re
 with one warning: the build encodes without it rather than fail.
 
 `host_lock` keeps two builds of two processes (two sessions, two worktrees) from running the
-encoder at once; the builds of one process are already serial (engines.py).
+encoder at once; the builds of one process are already serial (engines.py). It degrades the same
+way: a lock that cannot be set up is a warning and an unlocked run.
+
+Nothing here that only names a path (`cache_root`, `encode_cache_path`) creates a directory or
+can raise: a directory is created where something is written to it, inside the guarded open of
+an `EncodeCache` and inside `host_lock`, so an unwritable cache location degrades those two and
+nothing else.
 
 numpy is the only heavy import here; it is a semble dependency.
 """
@@ -41,22 +47,28 @@ logger = logging.getLogger(__name__)
 CACHE_ENV = "DOC_SEARCH_CACHE_LOCATION"
 APP_DIR = "doc-search"
 
+# Relative DOC_SEARCH_CACHE_LOCATION values already warned about: the warning is once per process.
+_warned_relative: set[str] = set()
+
 # SQLite's default limit on bound parameters is 999 in older builds; stay well under it.
 _CHUNK = 500
 _BUSY_TIMEOUT_MS = 60_000
 
 
 def cache_root() -> Path:
-    """doc-search's cache directory, created on demand: `DOC_SEARCH_CACHE_LOCATION`, else the platform default.
+    """doc-search's cache directory: `DOC_SEARCH_CACHE_LOCATION`, else the platform default.
 
-    The resolution mirrors semble's `resolve_cache_folder`, under the name `doc-search`.
+    The resolution mirrors semble's `resolve_cache_folder`, under the name `doc-search`. It only
+    computes the path: the directory is not created (the writers create what they write into),
+    so an unwritable location is not an error here.
     """
     value = os.environ.get(CACHE_ENV)
     root: Path | None = None
     if value:
         if Path(value).is_absolute():
             root = Path(value)
-        else:
+        elif value not in _warned_relative:
+            _warned_relative.add(value)
             logger.warning("doc-search: %s is not an absolute path, ignored: %s", CACHE_ENV, value)
     if root is None:
         if sys.platform == "win32":
@@ -67,12 +79,11 @@ def cache_root() -> Path:
         else:
             xdg = os.getenv("XDG_CACHE_HOME")
             root = (Path(xdg) if xdg else Path.home() / ".cache") / APP_DIR
-    root.mkdir(parents=True, exist_ok=True)
     return root
 
 
 def encode_cache_path(spec: TransformerSpec) -> Path:
-    """The sqlite file holding `spec`'s cached vectors."""
+    """The sqlite file holding `spec`'s cached vectors (a name only: `EncodeCache` creates its directory)."""
     return cache_root() / "encode" / f"{spec.name}.sqlite"
 
 
@@ -92,7 +103,8 @@ class EncodeCache:
     """Vectors by content key. Thread-safe; any sqlite or file error makes it unusable (one warning), never raise.
 
     `put_many` commits every call: the encoder calls it once per batch, so a build that is killed
-    keeps every batch it finished. A stored blob that is not `dim` float32 values reads as a miss.
+    keeps every batch it finished, and it stores only vectors of `dim` values. A stored value that
+    is not `dim` float32 values (a blob of another length, another type) reads as a miss.
     """
 
     def __init__(
@@ -145,7 +157,7 @@ class EncodeCache:
                     chunk = keys[start : start + _CHUNK]
                     marks = ",".join("?" * len(chunk))
                     for key, blob in conn.execute(f"SELECT key, vec FROM vectors WHERE key IN ({marks})", chunk):
-                        if len(blob) == width:
+                        if isinstance(blob, bytes) and len(blob) == width:  # a foreign writer may store any type
                             found[bytes(key)] = np.frombuffer(blob, dtype=np.float32).copy()
             except (sqlite3.Error, OSError) as err:
                 self._fail(err)
@@ -156,7 +168,15 @@ class EncodeCache:
         """Store `(key, vector)` rows, replacing any with the same key, and commit."""
         if not rows:
             return
-        data = [(key, np.ascontiguousarray(vector, dtype=np.float32).tobytes()) for key, vector in rows]
+        data: list[tuple[bytes, bytes]] = []
+        for key, vector in rows:
+            values = np.ascontiguousarray(vector, dtype=np.float32)
+            if values.size == self.dim:
+                data.append((key, values.tobytes()))
+        if len(data) < len(rows):
+            logger.debug("doc-search: encode cache skipped %d vectors not of size %d", len(rows) - len(data), self.dim)
+        if not data:
+            return
         with self._lock:
             conn = self._conn
             if not self.usable or conn is None:
@@ -168,7 +188,7 @@ class EncodeCache:
                 self._fail(err)
 
     def close(self) -> None:
-        """Close the connection. Safe to call twice; a closed cache is unusable and answers as a miss."""
+        """Close the connection (safe to call twice). A closed cache reads as unusable: `usable` is False."""
         with self._lock:
             conn, self._conn = self._conn, None
             self.usable = False
@@ -197,32 +217,55 @@ def _holder_pid(fd: int) -> int | None:
         return None
 
 
+def _acquire(spec: TransformerSpec, on_wait: Callable[[int | None], None] | None) -> int | None:
+    """Take the lock; return its file descriptor, or None when it cannot be set up (one warning)."""
+    path = cache_root() / "encode" / f"{spec.name}.lock"
+    fd: int | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            if on_wait is not None:
+                try:
+                    on_wait(_holder_pid(fd))
+                except Exception as err:  # the notice is informational: failing to deliver it keeps the lock
+                    logger.warning("doc-search: encoder lock wait notice failed (%s: %s)", type(err).__name__, err)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+    except BaseException as err:
+        if fd is not None:
+            with suppress(OSError):
+                os.close(fd)
+        if not isinstance(err, OSError):  # an interrupt: not ours to absorb
+            raise
+        reason = f"{path}: {type(err).__name__}: {err}"
+        logger.warning("doc-search: encoder lock unavailable (%s): encoding without it", reason)
+        return None
+    with suppress(OSError):  # the pid is informational: a full disk does not cost the lock
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode())
+    return fd
+
+
 @contextmanager
 def host_lock(spec: TransformerSpec, on_wait: Callable[[int | None], None] | None = None) -> Iterator[None]:
     """Hold the host-wide encoder lock for `spec` (an exclusive `flock` on a file under the cache root).
 
     Taken without blocking first. When another process (or another open of the file) holds it,
     `on_wait(pid)` is called with the holder's pid (None when unreadable), then this blocks until
-    the holder lets go. Once held, the lock file records this process's pid. Where `fcntl` is
-    missing (Windows) the lock is a no-op.
+    the holder lets go. Once held, the lock file records this process's pid.
+
+    The lock is a convenience, never a reason to fail a build: where `fcntl` is missing (Windows)
+    it is a no-op, and when it cannot be set up (the cache location is unwritable, the filesystem
+    has no flock) the body runs without it after one warning. A failing `on_wait` is a warning
+    too, and the wait goes on.
     """
-    if fcntl is None:
-        yield
-        return
-    path = cache_root() / "encode" / f"{spec.name}.lock"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    fd = _acquire(spec, on_wait) if fcntl is not None else None
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            if on_wait is not None:
-                on_wait(_holder_pid(fd))
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        os.ftruncate(fd, 0)
-        os.write(fd, f"{os.getpid()}\n".encode())
         yield
     finally:
-        with suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+        if fd is not None:
+            with suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
