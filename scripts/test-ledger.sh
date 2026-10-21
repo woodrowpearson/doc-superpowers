@@ -13979,13 +13979,14 @@ test_lg_upkeep_amendment_shared_document() {
 }
 
 test_lg_upkeep_amendment_glob_not_document_defined() {
-  echo "test: #39 D9 (ruling R65) — a defined_in that is a glob ending in .md (pattern:adrs, docs/adr/*.md) is no document-defined contract: an edit of docs/adr/ADR-1.md naming nothing touches nothing"
+  echo "test: #39 D9 (rulings R65, R68) — a defined_in glob ending in .md that matches several documents at <b> (pattern:adrs, docs/adr/*.md: ADR-1 and ADR-2) is no document-defined contract: an edit of docs/adr/ADR-1.md naming nothing touches nothing"
   lg_up_amend_fixture
   git checkout -q main
   lg_up_shared_reg
   mkdir -p docs/adr
   printf '# ADR-1\n' > docs/adr/ADR-1.md
-  git add -A && git commit -qm "an ADR"
+  printf '# ADR-2\n' > docs/adr/ADR-2.md
+  git add -A && git commit -qm "two ADRs"
   git checkout -q -B feat
   lg_up_commit --line "typo fix" "typo; see app-1" docs/adr/ADR-1.md
   lg upkeep --range main..feat --top 0 --format json
@@ -13993,6 +13994,88 @@ test_lg_upkeep_amendment_glob_not_document_defined() {
     "nothing proposed, nothing unattributed"
   LG_SUB=upkeep lg_call _lg_up_core "$(git rev-parse main)" "$(git rev-parse feat)" "" "" "$TEST_DIR/core.json"
   assert_json_field "$(cat "$TEST_DIR/core.json" 2>/dev/null)" '.touched | tojson' "[]" "the core's touched: none"
+  teardown
+}
+
+# lg_up_glob_fixture <file>…: lg_up_amend_fixture with spec:SPEC-A defined
+# by the glob docs/specs/SPEC-A-*.md (in place of its literal path), and
+# each file given created on main (feat restarts there).
+lg_up_glob_fixture() {
+  local f
+  lg_up_amend_fixture
+  git checkout -q main
+  # shellcheck disable=SC2016  # JSON
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[
+  {"id":"app","title":"App","kind":"service","status":"active",
+   "contracts":[{"id":"field:order.total","defined_in":["src/order/*.js"]},
+                {"id":"spec:SPEC-A","defined_in":["docs/specs/SPEC-A-*.md"]}]},
+  {"id":"core","title":"Core","kind":"platform","status":"active",
+   "contracts":[{"id":"endpoint:create","defined_in":["server/create.js"]}]}]}'
+  for f in "$@"; do
+    printf '# %s\n\nThe order total is rounded.\n' "$f" > "$f"
+  done
+  git add -A && git commit -qm "SPEC-A by a glob"
+  git checkout -q -B feat
+}
+
+test_lg_upkeep_amendment_one_file_glob() {
+  echo "test: #39 D9 (ruling R68) — defined_in docs/specs/SPEC-A-*.md matching one file at <b> (docs/specs/SPEC-A-rounding.md): its document, like a literal path — an edit naming nothing touches spec:SPEC-A, skip_globs notwithstanding, and the pointers apply (the cited p1 links app-2)"
+  lg_up_glob_fixture docs/specs/SPEC-A-rounding.md
+  lg_up_commit --line "Landed by docs/plans/p1.md Task 2" "amend the spec; see app-1" docs/specs/SPEC-A-rounding.md
+  lg upkeep --range main..feat --format json
+  assert_eq "0|app-1:key-in-message app-2:plan-cited" "$LG_RC|$(lg_up_found "$LG_OUT")" "exit 0, app-2 reached through the cited plan"
+  assert_eq '[{"field":"changes","value":"spec:SPEC-A","evidence":["diff amends docs/specs/SPEC-A-rounding.md, which cites docs/plans/p1.md (links app-2)"]}]' \
+    "$(lg_up_props app-2)" "changes spec:SPEC-A on app-2, with the pointer's evidence"
+  # Both pointers through the glob, keyed on the document it matches: the
+  # commit that edits it cites p1 and carries Ledger-Claims: app-2.
+  local c r
+  git checkout -q -b t-both main
+  lg_up_commit --line "Landed by docs/plans/p1.md Task 2" $'amend the spec\n\nLedger-Claims: app-2' docs/specs/SPEC-A-rounding.md
+  c=$(git rev-parse HEAD)
+  lg upkeep --range main..t-both --format json
+  assert_eq "[{\"field\":\"changes\",\"value\":\"spec:SPEC-A\",\"evidence\":[\"diff amends docs/specs/SPEC-A-rounding.md, which cites docs/plans/p1.md (links app-2)\",\"${c:0:12} (Ledger-Claims) amends docs/specs/SPEC-A-rounding.md\"]}]" \
+    "$(lg_up_props app-2)" "the cited plan and the trailer on the document's commit, each naming the document"
+  # <b>'s committed tree counts: an uncommitted second spec the glob matches
+  # changes nothing (<b> is HEAD here); and the advisory's file is the
+  # document, not the glob.
+  printf '# SPEC-A-tax\n' > docs/specs/SPEC-A-tax.md
+  lg upkeep --range main..t-both --format json
+  assert_eq "changes spec:SPEC-A" "$(lg_up_vals app-2)" "an uncommitted docs/specs/SPEC-A-tax.md: still SPEC-A's document"
+  r="$(git rev-parse --short=12 main)..$(git rev-parse --short=12 HEAD)"
+  lg validate --pushed "main..HEAD" --format json
+  assert_eq "0|undeclared-contract-change|advisory|docs/specs/SPEC-A-rounding.md|app-2" "$LG_RC|$(lg_vfd)" \
+    "validate --pushed: one advisory, its path the document"
+  assert_json_field "$LG_OUT" '.findings[0].detail' \
+    "docs/specs/SPEC-A-rounding.md changes spec:SPEC-A, which no item this push involves declares (changes): ledger upkeep --range $r proposes the link" \
+    "…the detail names the document"
+  rm -f docs/specs/SPEC-A-tax.md
+  teardown
+}
+
+test_lg_upkeep_amendment_glob_two_files() {
+  echo "test: #39 D9 (ruling R68) — the same glob matching two files at <b> (SPEC-A-rounding.md, SPEC-A-tax.md; only one edited) defines no document: an edit naming nothing touches nothing; with skip_globs [], a line naming SPEC-A touches it by the Names test"
+  lg_up_glob_fixture docs/specs/SPEC-A-rounding.md docs/specs/SPEC-A-tax.md
+  lg_up_commit --line "Landed by docs/plans/p1.md Task 2" "amend the spec; see app-1" docs/specs/SPEC-A-rounding.md
+  lg upkeep --range main..feat --top 0 --format json
+  assert_eq "0|app-1:key-in-message||[]" "$LG_RC|$(lg_up_found "$LG_OUT")|$(lg_up_vals app-1)|$(jq -c .unattributed_contracts <<<"$LG_OUT")" \
+    "two documents at <b>: nothing touched, nobody pointed"
+  git checkout -q -b t-names main
+  lg_up_commit --line "SPEC-A rounds once." "amend; see app-1" docs/specs/SPEC-A-rounding.md
+  lg_enable '{"base":"main","upkeep":{"skip_globs":[]}}'
+  lg upkeep --range main..t-names --top 0 --format json
+  assert_eq '[{"field":"changes","value":"spec:SPEC-A","evidence":["diff names spec:SPEC-A in docs/specs/SPEC-A-rounding.md (defined_in of spec:SPEC-A)"]}]' \
+    "$(lg_up_props app-1)" "skip_globs []: the Names test (its evidence)"
+  teardown
+}
+
+test_lg_upkeep_amendment_deleted_document() {
+  echo "test: #39 D9 (ruling R68) — the range deletes docs/specs/SPEC-A-rounding.md, the one file docs/specs/SPEC-A-*.md matched at <a>: a range's deleted files count with <b>'s, so it is still SPEC-A's document, and touched"
+  lg_up_glob_fixture docs/specs/SPEC-A-rounding.md
+  git rm -q docs/specs/SPEC-A-rounding.md
+  git commit -qm "drop the spec; see app-1"
+  lg upkeep --range main..feat --format json
+  assert_eq '0|[{"field":"changes","value":"spec:SPEC-A","evidence":["diff amends docs/specs/SPEC-A-rounding.md (defined_in of spec:SPEC-A)"]}]' \
+    "$LG_RC|$(lg_up_props app-1)" "changes spec:SPEC-A on app-1, the deleted document's evidence"
   teardown
 }
 
@@ -15307,6 +15390,9 @@ run_tests() {
   test_lg_upkeep_amendment_skip_globs_exempt
   test_lg_upkeep_amendment_shared_document
   test_lg_upkeep_amendment_glob_not_document_defined
+  test_lg_upkeep_amendment_one_file_glob
+  test_lg_upkeep_amendment_glob_two_files
+  test_lg_upkeep_amendment_deleted_document
   test_lg_upkeep_long_path_list_diffs_the_range
   test_lg_upkeep_long_diff_linear_time
   test_lg_upkeep_pr_merged_and_open

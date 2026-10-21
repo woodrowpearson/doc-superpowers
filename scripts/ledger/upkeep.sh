@@ -6,9 +6,9 @@
 # _lg_src_cat, index.sh's _lg_index and _LG_JQ_INCLUDE, keys.sh's
 # _LG_JQ_RESOLVE_DEFS (lg_resolve), relations.sh's _lg_msg_claims,
 # _lg_trailers, _lg_tr_incl, _LG_AWK_TRAILER, _LG_AWK_RW (the Related work
-# reader) and _lg_r_file_contracts,
-# glob.sh's _lg_paths_filter and _LG_AWK_GLOB, inflight.sh's _lg_ifl_plans
-# and _LG_AWK_IFL_PLAN (what a plan is), query.sh's _lg_pr_data_into,
+# reader) and _lg_r_file_contracts, glob.sh's _lg_paths_filter,
+# _lg_glob_dirs and _LG_AWK_GLOB, inflight.sh's _lg_ifl_plans and
+# _LG_AWK_IFL_PLAN (what a plan is), query.sh's _lg_pr_data_into,
 # parse.sh's _lg_scratch_name; defs.jq's lg_r_maps; adapters.sh's
 # _lg_adapter / _lg_adapter_path, index.sh's _lg_ix_pr_fetch.
 #
@@ -66,12 +66,13 @@
 # Touched contracts: an index contract whose defined_in matches a net-diff
 #   file upkeep.skip_globs does not match, when a changed line of that file
 #   names it, or that a "Contract-Change: <id> [— <line>]" trailer in the
-#   range names. A document-defined contract (design §4 D9, ruling R65:
-#   its defined_in is one literal markdown path — one entry ending in
-#   ".md", no glob metacharacter, up_docdef — that no other contract's
-#   defined_in names or matches) is touched by any net-diff edit of its
-#   document, skip_globs notwithstanding, with no name test; any other
-#   contract, one of a shared document included, as above. Read
+#   range names. A document-defined contract (design §4 D9, ruling R68:
+#   its one defined_in entry, a markdown path or glob — ending in ".md",
+#   up_docdef — matches exactly one .md file in <b>'s tree (or the range's
+#   deleted files), and no other contract's defined_in names or matches it)
+#   is touched by any net-diff edit of its document, skip_globs
+#   notwithstanding, with no name test; any other contract — a glob of
+#   several documents, a shared document — as above. Read
 #   contracts: an untouched one whose read_by matches such a file with a
 #   changed line that names it.
 #   Names (design §4, D7): a
@@ -147,8 +148,9 @@
 #   range when their names pass _LG_UP_PATHS_MAX bytes), two git log walks
 #   (_lg_msg_claims' and the word scan's) and one more per document of a
 #   document-defined contract in the net diff; with a markdown file in it,
-#   the doc-index read once and each plan cited or in the net diff once
-#   (from the working tree, or one git cat-file per plan at <b>); the text
+#   the doc-index read once, each plan cited or in the net diff once (from
+#   the working tree, or one git cat-file per plan at <b>), and one git
+#   ls-tree of <b> when a glob may define a document; the text
 #   of the items with a consumes (b) candidate, once (likewise); with --pr,
 #   the list (cached) and one view.
 
@@ -391,13 +393,16 @@ def up_claimed($KM; $FIN; $LP; $HM):
 # (any case), or its path ("./" dropped); else nothing.
 def up_item_ref($KM; $LP):
   . as $s | ($KM[$s | ascii_downcase] // ($s | sub("^\\./"; "") | select($LP[.] == true)) // empty);
-# Document-defined (design §4 D9, ruling R65), as far as the contract alone
-# tells: its defined_in is one literal markdown path (a spec, an ADR) — one
-# entry, ending in ".md", with no glob metacharacter (*, ?, {, }, \). The
-# core also needs no other contract to name or match that document.
+# Document-defined (design §4 D9, ruling R68), as far as the contract alone
+# tells: its defined_in is one markdown path or glob (a spec, an ADR) — one
+# entry, ending in ".md". The core also needs it to match exactly one .md
+# file in the tree of <b> (or among the files the range deletes) that no
+# other contract names or matches. up_glob: the entry holds a glob
+# metacharacter (*, ?, {, }, \).
 def up_docdef:
   (.defined_in | type) == "array" and (.defined_in | length) == 1
-  and (.defined_in[0] | type == "string" and endswith(".md") and (test("[*?{}\\\\]") | not));
+  and (.defined_in[0] | type == "string" and endswith(".md"));
+def up_glob: test("[*?{}\\\\]");
 # A path as the path lists carry it (a newline as \001, a tab as \002).
 def up_enc: if test("[\n\t]") then gsub("\n"; "\u0001") | gsub("\t"; "\u0002") else . end;
 # A Contract-Change value: its id (the first word), and the rest without
@@ -947,7 +952,7 @@ _lg_up_doc_trailers() {
 # (with _LG_IX_NEED_CONTRACTS=1).
 _lg_up_core() {
   local a="$1" b="$2" body="$3" named="$4" out="$5" s n="" hb=false hn=false msg="" rd="" md="" x
-  local cf=()
+  local cf=() gd=()
   [ "$#" = 5 ] || _lg_die "internal: _lg_up_core <a> <b> <body-file|\"\"> <named-paths-file|\"\"> <out>"
   _lg_scratch_name
   s=$_LG_SN
@@ -971,16 +976,16 @@ _lg_up_core() {
   # The net diff: one git diff-tree of the names, each record its status,
   # then its name (each NUL-ended), read as lines (a newline in a name as
   # \001, a tab as \002) — the net-diff files, the ones it adds (an item
-  # filed in the range yields in attribution: up_attr), and md 1 when one
-  # is a markdown file; then the files skip_globs matches, the rest (keep),
-  # and the skipped markdown files.
+  # filed in the range yields in attribution: up_attr), the markdown files
+  # it deletes, and md 1 when one is a markdown file; then the files
+  # skip_globs matches, the rest (keep), and the skipped markdown files.
   git diff-tree -r --name-status -z --no-renames "$a" "$b" -- > "$s.ns" 2> "$s.err" \
     || _lg_die "git diff-tree $a $b failed: $(head -n 3 "$s.err" 2>/dev/null)"
   tr '\n\t\000' '\001\002\n' < "$s.ns" > "$s.ns.l" || _lg_die "cannot read the net diff"
-  LC_ALL=C awk -v diff="$s.diff.l" -v add="$s.add.l" '
-    BEGIN { printf "" > diff; printf "" > add }
+  LC_ALL=C awk -v diff="$s.diff.l" -v add="$s.add.l" -v del="$s.del.l" '
+    BEGIN { printf "" > diff; printf "" > add; printf "" > del }
     NR % 2 { st = $0; next }
-    { print > diff; if (st == "A") print > add; if ($0 ~ /\.md$/) md = 1 }
+    { print > diff; if (st == "A") print > add; if ($0 ~ /\.md$/) { md = 1; if (st == "D") print > del } }
     END { print (md ? 1 : "") }' "$s.ns.l" > "$s.md" || _lg_die "cannot read the net diff"
   IFS= read -r md < "$s.md" || md=""
   _lg_paths_filter "$s.diff.l" "$s.skipg" "$s.skip.l" lines
@@ -1003,14 +1008,21 @@ _lg_up_core() {
       || _lg_die "jq failed (the items' paths)"
     _lg_r_file_contracts "$_LG_UP_IX" "$s.ip.l" "$s.rp" read_by
   fi
-  # The document-defined contracts' documents (design §4 D9, ruling R65):
+  # The document-defined contracts' documents (design §4 D9, ruling R68):
   # "<file>\t<id>" for each net-diff file — skip_globs notwithstanding —
-  # that is the one defined_in entry of a contract, a literal markdown path
-  # (up_docdef), and that no other contract's defined_in names or matches:
-  # by defined_in, the contracts of that file ($s.fc for a file skip_globs
-  # leaves, $s.fcm for a markdown file it matches) are that one alone.
-  # Without a markdown file in the net diff (md ""), no document and no
-  # plan is looked for.
+  # that a contract's one defined_in entry, a markdown path or glob
+  # (up_docdef), matches alone among the .md files in <b>'s committed tree
+  # (never the working tree's) and the range's deleted files, and that no
+  # other contract's defined_in names or matches. The document is the key
+  # every later step reads (the trailer walk, the citations, the touched
+  # files), a glob's matched path, never the glob. By defined_in, the contracts of the net diff's markdown files
+  # ($s.fc for a file skip_globs leaves, $s.fcm for one it matches) give
+  # each candidate's net-diff files: one, holding that contract alone. A
+  # literal path needs nothing more ("D" lines); a glob ("G" lines) must
+  # match no other file at <b> — one git ls-tree of <b> under the globs'
+  # literal directories, matched with the deleted ones by
+  # _lg_r_file_contracts, counts. Without a markdown file in the net diff
+  # (md ""), no document and no plan is looked for.
   : > "$s.dd"
   if [ -n "$md" ]; then
     if [ -s "$s.skipm.l" ]; then
@@ -1021,9 +1033,31 @@ _lg_up_core() {
     # shellcheck disable=SC2016  # jq source
     jq -L "$_LG_LIB" -r --slurpfile fc "$s.fc" --slurpfile fm "$s.fcm" "$_LG_JQ_INCLUDE$_LG_JQ_UP_DEFS"'
       ($fc[0] + $fm[0]) as $FA
-      | (.contracts // [])[] | select(up_docdef) | .id as $i
-      | .defined_in[0] | up_enc | select(($FA[.] // []) == [$i]) | "\(.)\t\($i)"' "$_LG_UP_IX" > "$s.dd" \
+      | lg_lists($FA | to_entries[] | .key as $f | .value[] | {k: ., v: $f}) as $FOF
+      | (.contracts // [])[] | select(up_docdef) | .id as $i | .defined_in[0] as $e | ($FOF[$i] // []) as $fs
+      | select(($fs | length) == 1 and $FA[$fs[0]] == [$i])
+      | if ($e | up_glob) then "G\t\($fs[0])\t\($i)\t\($e)" else "D\t\($fs[0])\t\($i)" end' "$_LG_UP_IX" > "$s.ddc" \
       || _lg_die "jq failed (the document-defined contracts)"
+    LC_ALL=C awk -F '\t' -v dd="$s.dd" -v gl="$s.ddg.l" '
+      BEGIN { printf "" > dd; printf "" > gl }
+      $1 == "D" { print $2 "\t" $3 > dd; next }
+      !($4 in S) { S[$4] = 1; print $4 > gl }' "$s.ddc" || _lg_die "cannot read the document-defined contracts"
+    if [ -s "$s.ddg.l" ]; then
+      _lg_glob_dirs "$s.ddg.l" "$s.ddg.d"
+      while IFS= read -r x; do
+        gd+=("$x")
+      done < "$s.ddg.d"
+      git --literal-pathspecs ls-tree -r --name-only -z "$b" -- ${gd[@]+"${gd[@]}"} > "$s.bt" 2> "$s.err" \
+        || _lg_die "git ls-tree $b failed: $(head -n 3 "$s.err" 2>/dev/null)"
+      tr '\n\t\000' '\001\002\n' < "$s.bt" > "$s.bt.l" || _lg_die "cannot read the documents at $b"
+      cat "$s.del.l" >> "$s.bt.l" || _lg_die "cannot write $s.bt.l"
+      _lg_r_file_contracts "$_LG_UP_IX" "$s.bt.l" "$s.fcb"
+      # shellcheck disable=SC2016  # jq source
+      jq -n -r --slurpfile fb "$s.fcb" --rawfile g "$s.ddc" '
+        (reduce ($fb[0][][]) as $c ({}; .[$c] += 1)) as $N
+        | $g | split("\n")[] | select(startswith("G\t")) | split("\t") | select($N[.[2]] == 1) | "\(.[1])\t\(.[2])"' \
+        >> "$s.dd" || _lg_die "jq failed (the documents a glob defines)"
+    fi
   fi
   # The changed lines (Names; a document's, for the plans it cites): one git
   # diff-tree -p -U0 over the files a contract's defined_in or read_by
