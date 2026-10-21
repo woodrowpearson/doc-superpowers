@@ -814,6 +814,36 @@
       "replaces": null,
       "superseded_by": null,
       "last_verified": null
+    },
+    "docs/superpowers/plans/2026-10-18-ledger-upkeep-and-filing.md": {
+      "content_hash": "sha256:3eeefc9fb0fe341a9200a6f22f706b1d4c6bc93ffcec56f8c23182e4708c5ef6",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/superpowers/specs/2026-10-18-ledger-upkeep-and-filing-design.md": {
+      "content_hash": "sha256:f50bcafa4c254b0e02104a2a0bc214b1cf8802e7ca0d8e02ca5f028e24ba4952",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "design-spec",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/superpowers/plans/2026-10-20-upkeep-precision-and-declare.md": {
+      "content_hash": "sha256:60f9fd9b1b266092f4eba544522ece0d22bbf8dc81a70065030755a77ef859db",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
     }
   }
 }

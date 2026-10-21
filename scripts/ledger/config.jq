@@ -4,6 +4,9 @@
 # jq's `*`: objects merge key by key, recursively; arrays and scalars
 # (including null) in the host replace the default, so a host may give a
 # `fields` value as one name where the default is a list of candidates.
+# One exception: a null `base` takes the default (origin/main) — every reader
+# maps a non-string base to "" (no base), which is never what an explicit
+# `"base": null` means.
 {
   "schema": "ledger-config/1",
   "base": "origin/main",
@@ -26,10 +29,13 @@
   "cache": { "remote_ttl_minutes": 10 },
   "adapters": { "pr": null, "contracts": null },
   "state_watch": { "paths": [], "patterns": [] },
-  "validate": { "require_relations": null },
+  "validate": { "require_relations": null, "undeclared_contract_change": true },
   "init": { "stub_defaults": {} },
+  "upkeep": { "skip_globs": ["docs/**", "**/*.md", "**/test/**", "**/tests/**", "**/__tests__/**", "**/*.test.*", "**/*.spec.*",
+                             "**/*_test.*", "**/Tests/**", "**/*Tests/**"],
+              "skip_contracts": [] },
   "legacy": "docs/ledger/legacy.json",
   "legacy_ids": [],
   "legacy_ledgers": {}
 } as $d
-| $d * $h
+| ($d * $h) | if .base == null then .base = $d.base else . end

@@ -141,22 +141,32 @@ _lg_glob_dirs() {
     }' "$1") || _lg_die "${msg:-cannot read the globs $1}"
 }
 
-# _lg_paths_filter <in-nul> <globs-file> <out-nul>: the paths of <in-nul>
-# (in order) that match one of the globs (one per line). A bad glob dies.
+# _lg_paths_filter <in-nul> <globs-file> <out-nul> [lines]: the paths of
+# <in-nul> (in order) that match one of the globs (one per line). A bad glob
+# dies. With "lines", <in> and <out> are path lines instead (a newline in a
+# name as \001, as the awk programs read them; a tab travels as \002, so a
+# glob holding a literal tab matches nothing in this mode).
 _lg_paths_filter() {
-  local in="$1" globs="$2" out="$3" msg rc=0
+  local in="$1" globs="$2" out="$3" msg rc=0 lst hit
   _lg_scratch_name
-  tr '\n\000' '\001\n' < "$in" > "$_LG_SN.lst" || _lg_die "cannot read the path list $in"
-  msg=$(LC_ALL=C awk -v globs="$globs" -v out="$_LG_SN.hit" -v q="'" "$_LG_AWK_GLOB"'
+  if [ "${4:-}" = lines ]; then
+    lst=$in
+    hit=$out
+  else
+    lst="$_LG_SN.lst"
+    hit="$_LG_SN.hit"
+    tr '\n\000' '\001\n' < "$in" > "$lst" || _lg_die "cannot read the path list $in"
+  fi
+  msg=$(LC_ALL=C awk -v globs="$globs" -v out="$hit" -v q="'" "$_LG_AWK_GLOB"'
     BEGIN {
       printf "" > out
       while ((getline g < globs) > 0) {
         if (!gx_add(++k, g)) { print "bad glob " q g q ": " GLOB_ERR; exit 1 }
       }
     }
-    { gx_match($0); if (GX_MN) print > out }' "$_LG_SN.lst") || rc=$?
+    { gx_match($0); if (GX_MN) print > out }' "$lst") || rc=$?
   [ "$rc" = 0 ] || _lg_die "${msg:-cannot match the path list $in}"
-  tr '\n\001' '\000\n' < "$_LG_SN.hit" > "$out" || _lg_die "cannot write $out"
+  [ "${4:-}" = lines ] || tr '\n\001' '\000\n' < "$hit" > "$out" || _lg_die "cannot write $out"
 }
 
 # --- The ownership map -------------------------------------------------------
@@ -164,7 +174,8 @@ _lg_paths_filter() {
 # _lg_registry_globs <registry> <out.tsv> [active]: every string glob of the
 # registry (with "active": of the ledgers whose status is not "retired")
 # as "<ledger-index>\t<ledger-id>\t<list>\t<neg>\t<glob>" — list P (paths),
-# R (residual_paths) or D (a contract's defined_in); neg 1 for a "!"
+# R (residual_paths) or D (a contract's defined_in or read_by: validate checks
+# both, neither owns anything); neg 1 for a "!"
 # exclusion in P or R (the "!" removed). A ledger without a string id (or
 # with a control character in it) is shown as "#<index>". Globs holding a control character are left out
 # (validate reports them).
@@ -179,7 +190,7 @@ _lg_registry_globs() {
     | ((.paths | strs | select(ok) | ["P", .]),
        (.residual_paths | strs | select(ok) | ["R", .]),
        (if (.contracts | type) == "array" then .contracts[] | select(type == "object")
-          | .defined_in | strs | select(ok) | ["D", .] else empty end))
+          | (.defined_in, .read_by) | strs | select(ok) | ["D", .] else empty end))
     | if .[0] != "D" and (.[1] | startswith("!"))
       then "\($i)\t\($id)\t\(.[0])\t1\t\(.[1][1:])"
       else "\($i)\t\($id)\t\(.[0])\t0\t\(.[1])" end

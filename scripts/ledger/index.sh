@@ -1148,8 +1148,9 @@ $c[0] as $cfg
 
 # The contracts (design §G): the registry's (ledgers[].contracts[], with
 # their ledger) and the contracts adapter's list, one per id, sorted by id —
-# an id in both is one contract: the registry's ledger, defined_in and
-# title win, the adapter's fill only what the registry leaves empty. A
+# an id in both is one contract: the registry's ledger, defined_in, read_by
+# and title win, the adapter's fill only what the registry leaves empty
+# (read_by, like defined_in: empty counts as left empty; always a list). A
 # registry contract whose id is not <kind>:<name> is left out (validate
 # --registry reports it). Inputs: $reg (slurped registry), $adc (slurped
 # adapter lines), $re (_LG_CONTRACT_RE).
@@ -1160,13 +1161,14 @@ def lg_ct_list: if type == "array" then [.[] | strings | select(. != "")] else [
 [ ($reg[0].ledgers // [])[] | objects | (.id | lg_ct_str) as $lid
   | (.contracts // []) | if type == "array" then .[] else empty end | objects
   | select(.id | type == "string" and test($re))
-  | {id, ledger: $lid, defined_in: (.defined_in | lg_ct_list), title: (.title | lg_ct_str)} ] as $R
-| [ $adc[] | {id, ledger: (.ledger | lg_ct_str), defined_in: (.defined_in | lg_ct_list), title: (.title | lg_ct_str)} ] as $A
+  | {id, ledger: $lid, defined_in: (.defined_in | lg_ct_list), read_by: (.read_by | lg_ct_list), title: (.title | lg_ct_str)} ] as $R
+| [ $adc[] | {id, ledger: (.ledger | lg_ct_str), defined_in: (.defined_in | lg_ct_list), read_by: (.read_by | lg_ct_list), title: (.title | lg_ct_str)} ] as $A
 | (reduce $A[] as $a ({}; if has($a.id) then . else .[$a.id] = $a end)) as $AM
 | (reduce $R[] as $r ({}; if has($r.id) then . else .[$r.id] = $r end)) as $RM
 | [ ($RM[] | . as $r | ($AM[$r.id] // {}) as $a
      | {id: $r.id, ledger: ($r.ledger // $a.ledger // null),
         defined_in: (if ($r.defined_in | length) > 0 then $r.defined_in else ($a.defined_in // []) end),
+        read_by: (if ($r.read_by | length) > 0 then $r.read_by else ($a.read_by // []) end),
         title: ($r.title // $a.title // null)}),
     ($AM[] | select($RM[.id] == null)) ]
 | sort_by(.id)
@@ -1483,6 +1485,27 @@ _lg_ix_pr_numbers() {
   printf '%s' "$nums"
 }
 
+# _lg_ix_pr_fetch: the pr adapter's list through the remote cache, keyed by
+# the adapter and keys.remote's url — the one fetch path (_lg_ix_pr_prepare,
+# and upkeep --pr before its index build, which then reads the same copy).
+# Needs _LG_ADP (_lg_adapter_path pr, an adapter configured). Sets
+# _LG_IX_PR_REMOTE (keys.remote, default origin), _LG_IX_PR_PULL ("1" with
+# inflight.pull_refs, else "") and the cache's globals (_LG_RSNAP,
+# _LG_RSTATE, … — _lg_remote_cache); returns its rc.
+_lg_ix_pr_fetch() {
+  local s url rc=0
+  _lg_scratch_name
+  s=$_LG_SN
+  _lg_cfg '(.keys.remote | if type == "string" and . != "" then . else "origin" end), ('"$_LG_RTTL_JQ"'),
+    (.inflight.pull_refs | if type == "string" and . != "" then "1" else "" end)' > "$s.cfg"
+  { IFS= read -r _LG_IX_PR_REMOTE; IFS= read -r _LG_RTTL; IFS= read -r _LG_IX_PR_PULL; } < "$s.cfg" \
+    || _lg_die "cannot read the config"
+  url=$(git config --get "remote.$_LG_IX_PR_REMOTE.url" 2>/dev/null) || url=""
+  _lg_remote_cache pr "$(printf 'pr\n%s\n%s' "$_LG_ADP" "$url")" _lg_adapter pr list || rc=$?
+  _LG_RTTL=""
+  return "$rc"
+}
+
 # _lg_ix_pr_prepare <base|""> <prefix>: the PR data for an index build
 # (worktree or --rev): <prefix>.prl the adapter's lines (from the remote
 # cache's snapshot; empty without), <prefix>.prheads "<n>\t<head>\t<oid>\t
@@ -1500,7 +1523,7 @@ _lg_ix_pr_numbers() {
 # (stderr, one line): the data's state, the open heads not fetched, the
 # cross-repository open PRs not compared.
 _lg_ix_pr_prepare() {
-  local base="$1" p="$2" s remote url rc=0 state note="" mark="" missing=0 cross=0 t ol err pull="" nums
+  local base="$1" p="$2" s remote rc=0 state note="" mark="" missing=0 cross=0 t ol err pull="" nums
   : > "$p.prl"
   : > "$p.prheads"
   : > "$_SCRATCH/lg-pr.mark"
@@ -1515,12 +1538,9 @@ _lg_ix_pr_prepare() {
       _lg_ix_pr_note ""
       return 0
     fi
-    _lg_cfg '(.keys.remote | if type == "string" and . != "" then . else "origin" end), ('"$_LG_RTTL_JQ"'),
-      (.inflight.pull_refs | if type == "string" and . != "" then "1" else "" end)' > "$s.cfg"
-    { IFS= read -r remote; IFS= read -r _LG_RTTL; IFS= read -r pull; } < "$s.cfg" || _lg_die "cannot read the config"
-    url=$(git config --get "remote.$remote.url" 2>/dev/null) || url=""
-    _lg_remote_cache pr "$(printf 'pr\n%s\n%s' "$_LG_ADP" "$url")" _lg_adapter pr list || rc=$?
-    _LG_RTTL=""
+    _lg_ix_pr_fetch || rc=$?
+    remote=$_LG_IX_PR_REMOTE
+    pull=$_LG_IX_PR_PULL
   else
     remote=$(_lg_cfg '.keys.remote | if type == "string" and . != "" then . else "origin" end') || exit "$?"
     rc=2

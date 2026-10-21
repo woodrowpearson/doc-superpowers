@@ -22,6 +22,10 @@ def lg_lists(s): [s] | group_by(.k) | map({(.[0].k): map(.v)}) | add // {};
 # lg_lower: ascii_downcase, skipped when there is nothing to lower (it is
 # jq-defined and slow; test is C).
 def lg_lower: if test("[A-Z]") then ascii_downcase else . end;
+# lg_stubslug: a title → the slug of a new item file's name (init's stubs and
+# imports, new --create): lowercase, every run of non-[a-z0-9] one "-", none
+# at either end, at most 50 characters; "item" when nothing is left.
+def lg_stubslug: ascii_downcase | gsub("[^a-z0-9]+"; "-") | sub("^-+"; "") | .[0:50] | sub("-+$"; "") | if . == "" then "item" else . end;
 
 # --- Display (query.sh, the renderers) ----------------------------------------
 
