@@ -366,8 +366,6 @@ _LG_JQ_UP_DEFS='
 def up_dec: if test("[\u0001\u0002]") then gsub("\u0001"; "\n") | gsub("\u0002"; "\t") else . end;
 def up_lines: split("\n") | map(select(. != "") | up_dec);
 def up_ordered_unique: reduce .[] as $x ([]; if index([$x]) != null then . else . + [$x] end);
-# The word scan (sweep): words of [A-Za-z0-9_-], lower case, once each.
-def up_words: [splits("[^A-Za-z0-9_-]+") | select(. != "") | ascii_downcase] | unique;
 def up_signals: ["named", "trailer:claims", "trailer:claims_by_path", "trailer:claims_by_ref",
                  "item-file-edited", "key-in-message", "plan-cited", "plan-link", "key-in-pr-body"];
 def up_rank: if . == "named" then 0 elif startswith("trailer:") then 1 elif . == "item-file-edited" then 2
@@ -510,8 +508,9 @@ def up_link($I; $SH):
 # $plk (what each plan links: _LG_AWK_UP_PLAN_LINKS), $dtr ("<document>\t
 # <commit>\t<kind>\t<name>\t<value>": the claim trailers of the commits
 # that edit each document), $tr (_lg_msg_claims' lines), $words (the
-# messages without their claim trailer lines), $body / $hasbody (the PR
-# body), $named / $hasnamed (--items' paths, lines), $a, $b, $commits.
+# words of the messages without their claim trailer lines, one per line:
+# _LG_AWK_UP_WORDS), $body / $hasbody (the PR body's words likewise),
+# $named / $hasnamed (--items' paths, lines), $a, $b, $commits.
 # Stages: touched contracts ($TALL, $TCH), the plans and the pointers of
 # the document-defined ones ($PLK, $PTR), involvement ($INV), the
 # attribution of the touched ones ($ATTR; $UNRES the unresolved), read
@@ -584,9 +583,9 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
    else
      [ ($TR[] | . as $t | up_claimed($KM; $FIN; $LP; $HM) | {p: ., s: "trailer:\($t.k)"}),
        ($DIFF[] | select($LP[.] == true) | {p: ., s: "item-file-edited"}),
-       ($words | up_words[] | ($KM[.] // empty) | {p: ., s: "key-in-message"}),
+       ($words | split("\n")[] | select(. != "") | ($KM[.] // empty) | {p: ., s: "key-in-message"}),
        ($PMOD[] as $P | ($PLK[$P] // [])[] | {p: ., s: "plan-link"}),
-       (if $hasbody then ($body | up_words[] | ($KM[.] // empty) | {p: ., s: "key-in-pr-body"}) else empty end) ]
+       (if $hasbody then ($body | split("\n")[] | select(. != "") | ($KM[.] // empty) | {p: ., s: "key-in-pr-body"}) else empty end) ]
      | . + (lg_obj(.[] | {(.p): true}) as $H | [$PTR[][] | select(.s == "plan-cited" and $H[.p] != true) | {p, s}])
    end) as $SIG
 # y: the item yields in attribution (up_attr) — the range adds its file and
@@ -734,6 +733,23 @@ BEGIN { while ((getline l < cand) > 0) C[l] = 1 }
 }
 /^@@/ { hunk = 1; next }
 hunk && keep && /^[-+]/ { print f "\t" substr($0, 2) }
+'
+
+# _LG_AWK_UP_WORDS: the word scan (sweep's) of the messages and the PR body
+# (key-in-message, key-in-pr-body): up_words(s) prints each word of s — a
+# run of [A-Za-z0-9_-] — lower-cased, once per run of the program. awk, in
+# linear time: jq's splits over the whole text is superlinear (200 KB of
+# messages took 25 s on jq 1.8 and about 550 s on jq 1.6).
+# shellcheck disable=SC2016  # awk source
+_LG_AWK_UP_WORDS='
+function up_words(s,   n, i, w, W) {
+  n = split(s, W, /[^A-Za-z0-9_-]+/)
+  for (i = 1; i <= n; i++) {
+    if (W[i] == "") continue
+    w = tolower(W[i])
+    if (!(w in UPW)) { UPW[w] = 1; print w }
+  }
+}
 '
 
 # _LG_AWK_UP_TEXT: the body lines of item files (design §4 consumes (b):
@@ -1099,19 +1115,25 @@ _lg_up_core() {
   fi
   _lg_up_plans "$s.pl" "$b" "$s.plk"
   _lg_up_doc_trailers "$a" "$b" "$s.dd" "$s.dtr"
-  # The trailers; then the messages for the word scan, without the claim
-  # trailer lines (claims, claims_by_path), and the number of commits.
+  # The trailers; then the words of the messages (_LG_AWK_UP_WORDS), their
+  # claim trailer lines (claims, claims_by_path) left out, and the number
+  # of commits; the PR body's words likewise.
   _lg_msg_claims "$a..$b" > "$s.tr"
   _lg_trailers "$s.trn"
   git -c log.showSignature=false log --no-color --format='%x01%H%n%B' "$a..$b" -- > "$s.msg" 2> "$s.err" \
     || _lg_die "git log failed: $(head -n 3 "$s.err" 2>/dev/null)"
-  LC_ALL=C awk -v tr="$s.trn" -v cnt="$s.n" "$_LG_AWK_TRAILER"'
+  LC_ALL=C awk -v tr="$s.trn" -v cnt="$s.n" "$_LG_AWK_TRAILER$_LG_AWK_UP_WORDS"'
     BEGIN { tr_load(tr) }
     substr($0, 1, 1) == "\001" { n++; next }
-    { tr_match($0); for (i = 1; i <= TRM; i++) if (TRMK[i] == "claims" || TRMK[i] == "claims_by_path") next; print }
+    { tr_match($0); for (i = 1; i <= TRM; i++) if (TRMK[i] == "claims" || TRMK[i] == "claims_by_path") next; up_words($0) }
     END { print n + 0 > cnt }' "$s.msg" > "$s.words" || _lg_die "cannot read the range's messages"
   IFS= read -r n < "$s.n" || n=0
-  if [ -n "$body" ]; then hb=true; else body=/dev/null; fi
+  if [ -n "$body" ]; then
+    hb=true
+    LC_ALL=C awk "$_LG_AWK_UP_WORDS"'{ up_words($0) }' "$body" > "$s.bwords" || _lg_die "cannot read the PR body"
+  else
+    : > "$s.bwords"
+  fi
   if [ -n "$named" ]; then
     hn=true
     tr '\n\t\000' '\001\002\n' < "$named" > "$s.named.l" || _lg_die "cannot read $named"
@@ -1121,7 +1143,7 @@ _lg_up_core() {
   jq -L "$_LG_LIB" -c --slurpfile c "$_LG_CFG" --slurpfile fc "$s.fc" --slurpfile rc "$s.rc" --slurpfile rp "$s.rp" \
     --rawfile diff "$s.diff.l" --rawfile add "$s.add.l" --rawfile dl "$s.dl" --rawfile tr "$s.tr" --rawfile words "$s.words" \
     --rawfile dd "$s.dd" --rawfile pl "$s.pl" --rawfile plk "$s.plk" --rawfile dtr "$s.dtr" \
-    --rawfile body "$body" --argjson hasbody "$hb" --rawfile named "$s.named.l" --argjson hasnamed "$hn" \
+    --rawfile body "$s.bwords" --argjson hasbody "$hb" --rawfile named "$s.named.l" --argjson hasnamed "$hn" \
     --arg a "$a" --arg b "$b" --argjson commits "$n" \
     "$_LG_JQ_INCLUDE$_LG_JQ_UPKEEP" "$_LG_UP_IX" > "$s.up" || _lg_die "jq failed (ledger upkeep)"
   # consumes (b): the text of the items with a candidate, then the ranking.

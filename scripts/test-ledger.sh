@@ -14124,6 +14124,22 @@ test_lg_upkeep_long_diff_linear_time() {
   teardown
 }
 
+test_lg_upkeep_long_messages_linear_time() {
+  echo "test: #39 C1 — a range whose message is about 200 KB of words, app-5 named last: found by key-in-message within 8 s (the words come from awk; jq's splits took 25 s on jq 1.8 and 550 s on jq 1.6 here)"
+  lg_upkeep_fixture
+  local start took
+  LC_ALL=C awk 'BEGIN { print "a long message"; print ""; for (i = 0; i < 4000; i++) printf "word%d alpha beta gamma delta epsilon zeta eta\n", i; print "see APP-5" }' \
+    > "$TEST_DIR/long.msg"
+  lg_up_commit --line "$LG_UP_NAMES" "placeholder" src/util/a.js
+  git commit -q --amend -F "$TEST_DIR/long.msg"
+  start=$SECONDS
+  lg upkeep --range main..feat --top 0 --format json
+  took=$((SECONDS - start))
+  assert_eq "0|app-5:key-in-message" "$LG_RC|$(lg_up_found "$LG_OUT")" "exit 0, the word found (any case)"
+  assert_true "…within 8 s (took ${took} s)" test "$took" -le 8
+  teardown
+}
+
 # lg_up_pr_stub <dir>: tools/pr.sh, a /bin/sh PR adapter driven by the files
 # of <dir> — `list` prints <dir>/list (fails, "PR service down", while
 # <dir>/list-fail exists); `view <n>` prints <dir>/view-<n> (exits 1 without
@@ -15395,6 +15411,7 @@ run_tests() {
   test_lg_upkeep_amendment_deleted_document
   test_lg_upkeep_long_path_list_diffs_the_range
   test_lg_upkeep_long_diff_linear_time
+  test_lg_upkeep_long_messages_linear_time
   test_lg_upkeep_pr_merged_and_open
   test_lg_upkeep_pr_rebase_merged
   test_lg_upkeep_pr_failures
