@@ -39,6 +39,7 @@ Use the tool that does the same job in your client. Only the skill's own referen
 | Work-ledger git legs (`--ledger`) | yes | yes | yes | yes | yes |
 | Work-ledger Claude events (`--ledger-claude`: `SessionStart`, `PostToolUse` `Write\|Edit\|MultiEdit`) | yes | unverified, as for `--claude`; whether Cursor maps `SessionStart` is undocumented | no | no | no |
 | CI tier (`--ci`) | yes | yes | yes | yes | yes |
+| doc-search MCP server (`--search`; snippets in `references/search.md`) | `.mcp.json`, by the installer | `.cursor/mcp.json` by hand; unverified | `config.toml` `[mcp_servers]` by hand; unverified | `opencode.json` `mcp` by hand; unverified | `.gemini/settings.json` by hand; unverified |
 | Web search / fetch | yes | yes | search only, model-dependent | yes | yes |
 | Diagram PNGs (`diagram`) | with a Mermaid MCP server | with a Mermaid MCP server | with a Mermaid MCP server | with a Mermaid MCP server | with a Mermaid MCP server |
 
