@@ -24,25 +24,35 @@
 #     last commit — a merged PR is walked from it, never from its branch,
 #     which may have moved on since).
 #
-# Exit: 0 listed · 2 could not list — gh missing, gh failing (its stderr is
-# passed through), output that is not gh's JSON list, or the open list at
-# its limit · 3 usage. The ledger caches the list (cache.remote_ttl_minutes;
-# scripts/ledger/adapters.sh _lg_remote_cache), so gh runs at most once per
-# TTL.
+#   ledger-pr-gh.sh view <number>
+#     The PR's description (ledger upkeep --pr scans it for item keys):
+#     `gh pr view <number> --json number,body`, printed as one compact line
+#       {"number": <n>, "body": <body>}   ("" when the PR has none)
+#     Never cached: upkeep reads it once per run.
+#
+# Exit: 0 listed / viewed · 2 could not — gh missing, gh failing (its
+# stderr is passed through; a PR gh does not find too), output that is not
+# gh's JSON, or the open list at its limit · 3 usage. The ledger caches the
+# list (cache.remote_ttl_minutes; scripts/ledger/adapters.sh
+# _lg_remote_cache), so gh lists at most once per TTL.
 #
 # bash 3.2 + jq >= 1.6.
 set -euo pipefail
 
-case "${1:-}" in
-  list) ;;
-  *)
-    echo "usage: ledger-pr-gh.sh list" >&2
-    exit 3 ;;
-esac
-if [ "$#" -ne 1 ]; then
-  echo "usage: ledger-pr-gh.sh list" >&2
+usage() {
+  echo "usage: ledger-pr-gh.sh list | view <number>" >&2
   exit 3
-fi
+}
+
+case "${1:-}" in
+  list) [ "$#" -eq 1 ] || usage ;;
+  view)
+    [ "$#" -eq 2 ] || usage
+    case "$2" in
+      ''|*[!0123456789]*) usage ;;
+    esac ;;
+  *) usage ;;
+esac
 
 if ! command -v gh >/dev/null 2>&1; then
   echo "ledger-pr-gh: gh (the GitHub CLI) is not on PATH — install it and run 'gh auth login'" >&2
@@ -51,6 +61,21 @@ fi
 if ! command -v jq >/dev/null 2>&1; then
   echo "ledger-pr-gh: jq is not on PATH" >&2
   exit 2
+fi
+
+if [ "$1" = view ]; then
+  if ! json=$(gh pr view "$2" --json number,body < /dev/null); then
+    echo "ledger-pr-gh: gh pr view $2 failed" >&2
+    exit 2
+  fi
+  # shellcheck disable=SC2016  # jq source
+  if ! printf '%s\n' "$json" | jq -c '
+      if type != "object" or (.number | type) != "number" then error("gh pr view did not print a PR")
+      else {number: .number, body: (.body // "" | tostring)} end'; then
+    echo "ledger-pr-gh: cannot use gh's output for pr view $2" >&2
+    exit 2
+  fi
+  exit 0
 fi
 
 OPEN_LIMIT=1000

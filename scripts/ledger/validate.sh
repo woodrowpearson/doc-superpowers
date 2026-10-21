@@ -5,7 +5,9 @@
 # _LG_AWK_GLOB, parse.sh's _LG_AWK_JS, _lg_scratch_name, _lg_parse_prep,
 # _lg_parse_finish / _lg_parse_batch and frontmatter.awk (its functions,
 # mode=lib), index.sh's _lg_index, _lg_ix_json_obj and _LG_JQ_INDEX_DEFS,
-# and keys.sh's _lg_k_cfg / _lg_provisional_in_range.
+# keys.sh's _lg_k_cfg / _lg_provisional_in_range, relations.sh's _LG_AWK_RW
+# (validate --plan's Related work reader), and upkeep.sh's _lg_up_index /
+# _lg_up_core (validate --pushed's advisory).
 #
 # Modes (one of them; --registry may join any): --staged, --all, --plan
 # <plan> [--strict], --pushed <a>..<b> (their findings below, "Item
@@ -14,8 +16,8 @@
 # --registry: the registry docs/ledger/ledgers.json against the tracked
 # files (the index). Findings ({"class","detail"}), each blocking (rc 1):
 #   schema              .schema is not "ledger-registry/1"
-#   shape               paths / residual_paths / defined_in not a list of
-#                       strings; contracts not a list of objects
+#   shape               paths / residual_paths / defined_in / read_by not a
+#                       list of strings; contracts not a list of objects
 #   id                  a ledger id not [a-z0-9-]{1,16}, or "unassigned" or
 #                       "readme" (reserved: the views write README.md)
 #   duplicate-id        an id two ledgers carry
@@ -69,10 +71,12 @@ _lg_registry_findings() {
             else (if (.id | type) != "string" or (.id | test($cre) | not)
                   then f("contract-id"; "\($n): \(.id | tojson) is not <kind>:<name>") else empty end),
                  (if has("defined_in") and (.defined_in | strlist | not)
-                  then f("shape"; "\($n): \(.id | tojson) defined_in is not a list of strings") else empty end)
+                  then f("shape"; "\($n): \(.id | tojson) defined_in is not a list of strings") else empty end),
+                 (if has("read_by") and (.read_by | strlist | not)
+                  then f("shape"; "\($n): \(.id | tojson) read_by is not a list of strings") else empty end)
             end
         end),
-       ([(.paths, .residual_paths, ((.contracts | arrays | .[] | objects | .defined_in)))
+       ([(.paths, .residual_paths, ((.contracts | arrays | .[] | objects | (.defined_in, .read_by))))
          | arrays | .[] | strings | select(explode | any(. < 32))][]
         | f("glob"; "\($n): \(tojson) holds a control character"))),
     ([.ledgers[] | .id | strings] | group_by(.) | map(select(length > 1))[]
@@ -83,7 +87,7 @@ _lg_registry_findings() {
      | f("duplicate-contract"; "\(.[0].id) is declared by \(map(.l) | join(", "))"))
   ' "$reg" > "$out" || _lg_die "jq failed (registry checks)"
 
-  # Globs the grammar rejects (every list, defined_in included).
+  # Globs the grammar rejects (every list, defined_in and read_by included).
   _lg_registry_globs "$reg" "$s.globs"
   LC_ALL=C awk "$_LG_AWK_JS$_LG_AWK_GLOB"'
     BEGIN { js_init() }
@@ -176,8 +180,10 @@ _lg_validate_registry() {
 #   registry              (--staged with the registry staged, or --registry
 #                         beside a mode) a `validate --registry` finding:
 #                         "registry <class> <detail>"
-#   --plan: unmarked, bad-mark, no-related-work · --pushed: provisional-key
-#   (_lg_validate_plan, _lg_validate_pushed)
+#   --plan: unmarked, bad-mark, no-related-work · --pushed: provisional-key,
+#   undeclared-contract-change (advisory; config
+#   validate.undeclared_contract_change false: off) (_lg_validate_plan,
+#   _lg_validate_pushed, _lg_v_undeclared)
 #
 # --staged severities. An added item (a rename from outside the item globs
 # counts as added) is held to everything. A modified item (a rename within
@@ -360,11 +366,18 @@ def lg_v_dup_f($i; $R; $had):
 def lg_v_registry_sets($reg):
   {active: [$reg.ledgers[] | select(.status != "retired") | .id | strings],
    retired: [$reg.ledgers[] | select(.status == "retired") | .id | strings]};
+# An undeclared-contract-change detail starts with its path ("<f> changes
+# <c>, …"): its text line prints that path once (ruling R35; the JSON
+# detail keeps it).
 def lg_v_text:
-  .class
+  . as $f
+  | .class
   + (if (.path | type) == "string" then " " + (.path | lg_v_tok)
      elif (.key | type) == "string" then " " + (.key | lg_v_tok) else "" end)
-  + " " + (.detail | lg_v_tok)
+  + " " + (.detail
+           | if $f.class == "undeclared-contract-change" and ($f.path | type) == "string" and type == "string"
+             then ltrimstr($f.path + " ") else . end
+           | lg_v_tok)
   + (if .severity == "advisory" then " (advisory)" else "" end);
 '
 
@@ -837,14 +850,18 @@ _lg_validate_all() {
 
 # _lg_v_rr → _LG_V_RR: config validate.require_relations — "" (null or
 # absent: off, the default) or "new". Any other value, or a validate that is
-# not an object, is a config error (exit 2).
+# not an object, is a config error (exit 2) — as is a
+# validate.undeclared_contract_change (--pushed's advisory switch, ruling
+# R33) that is not true or false.
 _lg_v_rr() {
   local v
-  v=$(_lg_cfg '(.validate // {}) | if type != "object" then "!validate is \(tojson), not an object"
+  v=$(_lg_cfg '(.validate // {undeclared_contract_change: true}) | if type != "object" then "!validate is \(tojson), not an object"
+      elif (.undeclared_contract_change | type) != "boolean" then "?\(.undeclared_contract_change | tojson)"
       else (.require_relations | if . == null then "-" elif . == "new" then "new" else "!\(tojson)" end) end') || exit "$?"
   case "$v" in
     -) _LG_V_RR="" ;;
     new) _LG_V_RR=new ;;
+    \?*) _lg_die "config validate.undeclared_contract_change must be true or false (got ${v#\?})" ;;
     *) _lg_die "config validate.require_relations must be \"new\" or null (got ${v#!})" ;;
   esac
 }
@@ -930,7 +947,8 @@ _lg_v_config_findings() {
 
 # _lg_validate_plan <plan> <findings.jsonl>: the plan's "Related work"
 # section (a heading of any level named "Related work", case-insensitive, to
-# the next heading of the same or a higher level; fenced blocks skipped):
+# the next heading of the same or a higher level; fenced blocks skipped;
+# relations.sh's _LG_AWK_RW reads it, as sweep --plan and upkeep do):
 # each table's data rows (after its header and separator rows) need a mark
 # in the column headed "Mark" (else the last column): "include", or
 # "exclude: <reason>" (case-insensitive; surrounding backticks, * and _
@@ -947,57 +965,24 @@ _lg_validate_plan() {
   cat -- "$plan" > "$s.plan" 2>/dev/null || _lg_die "cannot read the plan '$1'"
   if [ "$_OPT_strict" = 1 ]; then sev=block; fi
   _lg_awkv "$1"
-  LC_ALL=C awk -v plan="$_LG_AV" -v sev="$sev" "$_LG_AWK_JS"'
-    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+  LC_ALL=C awk -v plan="$_LG_AV" -v sev="$sev" "$_LG_AWK_JS$_LG_AWK_RW"'
     function f(c, k, d) {
       print "{\"class\":\"" c "\",\"severity\":\"" sev "\",\"path\":" js(plan) ",\"key\":" (k == "" ? "null" : js(k)) ",\"detail\":" js(d) "}"
     }
-    function cells(line,   n, i, c, r) {
-      gsub(/\\\|/, "\001", line)
-      line = trim(line)
-      if (substr(line, 1, 1) == "|") line = substr(line, 2)
-      if (substr(line, length(line), 1) == "|") line = substr(line, 1, length(line) - 1)
-      n = 0
-      while ((i = index(line, "|")) > 0) { C[++n] = trim(rep(substr(line, 1, i - 1), "\001", "|")); line = substr(line, i + 1) }
-      C[++n] = trim(rep(line, "\001", "|"))
-      return n
-    }
-    BEGIN { js_init(); insec = 0; found = 0; fence = ""; row = 0 }
+    BEGIN { js_init(); rw_begin() }
     {
       sub(/\r$/, "")
-      line = $0
-      if (fence != "") { if (index(trim(line), fence) == 1) fence = ""; next }
-      if (match(trim(line), /^(```|~~~)/)) { fence = substr(trim(line), 1, 3); tbl = 0; next }
-      if (match(line, /^#+[ \t]/)) {
-        lvl = RLENGTH - 1
-        h = tolower(trim(substr(line, RLENGTH + 1))); sub(/[ \t]*#*[ \t]*$/, "", h)
-        if (insec && lvl <= seclvl) insec = 0
-        if (!insec && h == "related work") { insec = 1; found = 1; seclvl = lvl }
-        tbl = 0
-        next
-      }
-      if (!insec) next
-      if (line !~ /^[ \t]*\|/) { tbl = 0; next }
-      tbl++
-      n = cells(line)
-      if (tbl == 1) {
-        mc = n
-        for (i = 1; i <= n; i++) if (tolower(C[i]) == "mark") { mc = i; break }
-        next
-      }
-      if (tbl == 2 && line ~ /^[ \t]*\|?[ \t]*:?-+/) next
-      item = C[1]; m = (mc <= n) ? C[mc] : ""
-      while (m ~ /^[`*_]/) m = substr(m, 2)
-      while (m ~ /[`*_]$/) m = substr(m, 1, length(m) - 1)
-      m = trim(m); lm = tolower(m)
+      if (rw_line($0) != 1) next
+      item = RW_C[1]; m = (RW_MC <= RW_N) ? RW_C[RW_MC] : ""
+      m = rw_trim(rw_bare(m)); lm = tolower(m)
       if (m == "") f("unmarked", item, "line " NR ": " item ": no mark (include | exclude: <reason>)")
       else if (lm == "include") ;
-      else if (substr(lm, 1, 8) == "exclude:" && trim(substr(m, 9)) != "") ;
+      else if (substr(lm, 1, 8) == "exclude:" && rw_trim(substr(m, 9)) != "") ;
       else if (substr(lm, 1, 7) == "exclude") f("bad-mark", item, "line " NR ": " item ": exclude needs a reason (exclude: <reason>)")
       else f("bad-mark", item, "line " NR ": " item ": " js(m) " is not include | exclude: <reason>")
     }
     END {
-      if (!found) {
+      if (!RW_FOUND) {
         printf "{\"class\":\"no-related-work\",\"severity\":\"%s\",\"path\":%s,\"key\":null,\"detail\":%s}\n", sev, js(plan),
           js("no \"Related work\" section (ledger sweep --plan <plan> writes one)")
       }
@@ -1010,7 +995,9 @@ _lg_validate_plan() {
 # all zeros (a new branch) or not; every provisional key at <b> for a new
 # branch when there is no base to compare) blocks — the
 # detail names `ledger finalize --all` for a key the base carries too; merge
-# mode — none (provisional keys may reach the base). For pre-push hooks.
+# mode — none (provisional keys may reach the base). Then, in both modes,
+# the undeclared-contract-change advisories (_lg_v_undeclared; none with
+# config validate.undeclared_contract_change false). For pre-push hooks.
 _lg_validate_pushed() {
   local range="$1" out="$2" s
   _lg_scratch_name
@@ -1022,20 +1009,201 @@ _lg_validate_pushed() {
   esac
   : > "$out"
   _lg_k_cfg
-  [ "$_LG_K_MODE" = cas ] || return 0
-  _lg_provisional_in_range "$range" > "$s.prov"
+  if [ "$_LG_K_MODE" = cas ]; then
+    _lg_provisional_in_range "$range" > "$s.prov"
+    # shellcheck disable=SC2016  # jq source
+    jq -R -c --arg base "$_LG_K_BASE" 'split("\t") | (.[0]) as $k | (.[1]) as $w | (.[2:] | join("\t")) as $p
+      | ($k | if (explode | any(. < 32 or . == 127)) then tojson else . end) as $ks
+      | {class: "provisional-key", severity: "block", path: $p, key: $k,
+         detail: (if $w == "base" then "\($ks) is provisional and on the base (\($base)) too: run doc-tools.sh ledger finalize --all before pushing (keys.mode cas)"
+                  elif $w == "nobase" then "\($ks) is provisional: run doc-tools.sh ledger finalize before pushing (keys.mode cas; config base \($base | tojson) does not resolve here, so keys already on the base count too: ledger finalize --all replaces those)"
+                  else "\($ks) is provisional: run doc-tools.sh ledger finalize before pushing (keys.mode cas)" end)}' \
+      "$s.prov" > "$out" || _lg_die "jq failed (provisional keys)"
+  fi
+  _lg_v_undeclared "$range" "$out"
+}
+
+# _lg_v_undeclared <a>..<b> <findings.jsonl>: append validate --pushed's
+# undeclared-contract-change advisories (design 2026-10-18 §5;
+# _lg_v_undeclared_run computes them). They never block, and nothing that
+# stops their check ends the run: it runs in a guarded child — errexit
+# live (never the left side of ||), stdin from /dev/null, stdout and fd 9
+# to /dev/null, stderr (trace lines, notes) into <s>.err, copied to stderr
+# after, its scratch names numbered apart (the run's later names never
+# reuse its files), and _LG_FAIL_REC set, so a _lg_die there records
+# "<rc>\t<message>" in <s>.fail instead of printing a verdict. Whatever
+# stops the child — a die, a failed command — is one advisory of the
+# class, path and key null, detail "could not check: <message>". The
+# child alone runs offline (DOC_TOOLS_LEDGER_OFFLINE=1, ruling R31): the
+# check reads no PR data, so its index build runs neither remote adapter
+# (pr, items: hosted items come from the last copy, when there is one)
+# and fetches nothing — a pre-push leg never waits on the network for
+# it; the contracts adapter, a local script, still runs. The build's
+# "ledger:" note (the PR data's and hosted items' state, offline by
+# design here) is held (_LG_NOTE_DEFER, index.sh _lg_ix_pr_note) and
+# never printed, so a push prints no data-state line per ref.
+_lg_v_undeclared() {
+  local range="$1" out="$2" s rc msg=""
+  _lg_scratch_name
+  s=$_LG_SN
+  rm -f -- "$s.fail"
+  set +e
+  (
+    set -e
+    _LG_FAIL_REC=$s.fail
+    _LG_PARSE_N=$((_LG_PARSE_N + 200000))
+    DOC_TOOLS_LEDGER_OFFLINE=1
+    export DOC_TOOLS_LEDGER_OFFLINE
+    _LG_NOTE_DEFER=advisory
+    _lg_v_undeclared_run "$range" "$s.adv"
+  ) < /dev/null > /dev/null 9> /dev/null 2> "$s.err"
+  rc=$?
+  set -e
+  if [ -s "$s.err" ]; then cat -- "$s.err" >&2 || true; fi
+  if [ "$rc" = 0 ]; then
+    cat -- "$s.adv" >> "$out" || _lg_die "cannot write $out"
+    return 0
+  fi
+  if [ -s "$s.fail" ]; then msg=$(cat -- "$s.fail") || msg=""; fi
+  msg=${msg#*$'\t'}
+  [ -n "$msg" ] || msg="internal: the check exited $rc"
   # shellcheck disable=SC2016  # jq source
-  jq -R -c --arg base "$_LG_K_BASE" 'split("\t") | (.[0]) as $k | (.[1]) as $w | (.[2:] | join("\t")) as $p
-    | ($k | if (explode | any(. < 32 or . == 127)) then tojson else . end) as $ks
-    | {class: "provisional-key", severity: "block", path: $p, key: $k,
-       detail: (if $w == "base" then "\($ks) is provisional and on the base (\($base)) too: run doc-tools.sh ledger finalize --all before pushing (keys.mode cas)"
-                elif $w == "nobase" then "\($ks) is provisional: run doc-tools.sh ledger finalize before pushing (keys.mode cas; config base \($base | tojson) does not resolve here, so keys already on the base count too: ledger finalize --all replaces those)"
-                else "\($ks) is provisional: run doc-tools.sh ledger finalize before pushing (keys.mode cas)" end)}' \
-    "$s.prov" > "$out" || _lg_die "jq failed (provisional keys)"
+  jq -nc --arg d "could not check: $msg" \
+    '{class: "undeclared-contract-change", severity: "advisory", path: null, key: null, detail: $d}' >> "$out" \
+    || _lg_die "jq failed (undeclared-contract-change)"
+}
+
+# _LG_JQ_V_UNDECLARED: the findings, over the index upkeep read — $core:
+# _lg_up_core's object (every proposal kept), $r: the range the detail
+# names, $hasf / $mbd: the branch's own files (lines, \001 for a newline
+# in a name, \002 for a tab), when they filter. None when the range
+# involves no item. A touched contract (upkeep's: through a non-skipped
+# net-diff file with a changed line that names it, a document-defined
+# one's document, or a Contract-Change line; never a skip_contracts id), its
+# files only the branch's own with $hasf — one left with none and no
+# Contract-Change line is dropped — that no involved item declares in
+# changes (the index) is one finding: path its first file (null when only
+# a Contract-Change line touches it), key the key of the item upkeep
+# proposes it to; the first 10 by contract id, then one "… N more
+# contracts".
+# shellcheck disable=SC2016  # jq source
+_LG_JQ_V_UNDECLARED='
+def v_dec: if test("[\u0001\u0002]") then gsub("\u0001"; "\n") | gsub("\u0002"; "\t") else . end;
+$core[0] as $C
+| if $C.items == [] then empty
+  else
+    [$C.items[].path] as $P
+    | [.items[] | select(.path as $p | $P | index([$p]) != null) | (.changes // [])[] | strings] as $D
+    | (if $hasf then reduce ($mbd | split("\n")[] | select(. != "") | v_dec) as $f ({}; .[$f] = true) else null end) as $MB
+    | [$C.touched[]
+       | (if $MB == null then . else .files |= map(select($MB[.] == true)) end)
+       | select(.files != [] or .cc_line != null)
+       | select(.contract as $k | $D | index([$k]) == null)] as $U
+    | ($U[0:10][] | . as $t | ((.files | length) - 1) as $n
+       | {class: "undeclared-contract-change", severity: "advisory", path: (.files[0] // null),
+          key: (first($C.items[] | select(any(.proposed[]; .field == "changes" and .value == $t.contract)) | .key) // null),
+          detail: ((if .files == [] then "a Contract-Change line changes" elif $n > 0 then "\(.files[0]) and \($n) more change"
+                    else "\(.files[0]) changes" end)
+                   + " \(.contract), which no item this push involves declares (changes): ledger upkeep --range \($r) proposes the link")}),
+      (if ($U | length) > 10
+       then {class: "undeclared-contract-change", severity: "advisory", path: null, key: null, detail: "… \(($U | length) - 10) more contracts"}
+       else empty end)
+  end
+'
+
+# _lg_v_undeclared_run <a>..<b> <out.jsonl>: _lg_v_undeclared's work, in its
+# guarded child (any failure dies). Needs _lg_k_cfg to have run (it reads
+# _LG_K_BASE). Config validate.undeclared_contract_change first (ruling
+# R33): false — nothing runs; true (the default; a null validate is the
+# defaults, as _lg_v_rr reads it) — the check; anything else, a validate
+# that is not an object included — dies. The range: <b>
+# empty is HEAD; <a> empty or all zeros (a new branch) is
+# merge-base(config base, <b>) — a base that does not resolve here, or
+# shares no history with <b>, dies. An empty range (<b> reachable from
+# <a>) or a tip config base already holds reports nothing (ruling R24),
+# so it returns before any index build or adapter run (R32). Upkeep's
+# core over it (_LG_UP_TOP 0: every attribution), on upkeep's index
+# (_lg_up_index; _LG_IX_NEED_CONTRACTS unset, so a failing contracts
+# adapter is the index's built.contracts_error — died with here). The
+# base's own changes never count: with a non-zero <a>, a touched
+# contract's file counts only when it also differs between
+# merge-base(config base, <b>) and <b> (a base merged into the branch
+# brings the base's changes into <a>..<b>) — one more git diff-tree, run
+# only when the range involves an item and touches a contract, and only
+# when that merge base exists and is not <a> (then the filter changes
+# nothing); no filter when the base does not resolve. The detail's range:
+# both ends as git rev-parse --short=12.
+_lg_v_undeclared_run() {
+  local range="$1" out="$2" s a b x ac bc base="" cerr r mb="" hasf=false
+  _lg_scratch_name
+  s=$_LG_SN
+  : > "$out"
+  x=$(_lg_cfg '(.validate // {undeclared_contract_change: true}) | if type == "object" then .undeclared_contract_change else null end
+    | if . == true then "on" elif . == false then "off" else "bad" end') || exit "$?"
+  case "$x" in
+    on) ;;
+    off) return 0 ;;
+    *) _lg_die "validate.undeclared_contract_change must be true or false" ;;
+  esac
+  a=${range%%..*}
+  b=${range#*..}
+  [ -n "$b" ] || b=HEAD
+  case "$a" in
+    ''|*[!0]*) ;;
+    *) a="" ;;
+  esac
+  for x in "$a" "$b"; do
+    case "$x" in
+      -*|*$'\n'*) _lg_die "'$x' does not resolve to a commit here" ;;
+    esac
+  done
+  bc=$(git rev-parse -q --verify "$b^{commit}" 2>/dev/null) || _lg_die "'$b' does not resolve to a commit here"
+  # Config base, resolved once ("" when it does not resolve here).
+  case "$_LG_K_BASE" in
+    ''|-*) ;;
+    *) base=$(git rev-parse -q --verify "$_LG_K_BASE^{commit}" 2>/dev/null) || base="" ;;
+  esac
+  if [ -n "$a" ]; then
+    ac=$(git rev-parse -q --verify "$a^{commit}" 2>/dev/null) || _lg_die "'$a' does not resolve to a commit here"
+  else
+    _lg_json_str "$_LG_K_BASE"
+    [ -n "$base" ] || _lg_die "config base $_LG_JS does not resolve here"
+    ac=$(git merge-base "$base" "$bc" 2>/dev/null) || _lg_die "config base $_LG_JS and '$b' have no merge base here"
+  fi
+  # Nothing to report, so nothing runs: an empty range (an all-zeros <a>
+  # whose tip the base holds lands here too), or a tip the base holds.
+  if git merge-base --is-ancestor "$bc" "$ac" 2>/dev/null; then return 0; fi
+  if [ -n "$base" ] && git merge-base --is-ancestor "$bc" "$base" 2>/dev/null; then return 0; fi
+  x=$(git rev-parse --short=12 "$ac") || _lg_die "git rev-parse --short $ac failed"
+  r=$(git rev-parse --short=12 "$bc") || _lg_die "git rev-parse --short $bc failed"
+  r="$x..$r"
+  _LG_UP_TOP=0
+  _lg_up_index "$bc"
+  cerr=$(jq -r '.built.contracts_error // empty' "$_LG_UP_IX") || _lg_die "jq failed (the index's contracts_error)"
+  [ -z "$cerr" ] || _lg_die "$cerr"
+  _lg_up_core "$ac" "$bc" "" "" "$s.core"
+  # The branch's own files: merge-base(config base, <b>)..<b>.
+  : > "$s.mb.l"
+  if [ -n "$a" ]; then
+    x=$(jq -r 'if .items != [] and .touched != [] then "y" else "" end' "$s.core") || _lg_die "jq failed (the touched contracts)"
+    if [ -n "$x" ] && [ -n "$base" ]; then
+      mb=$(git merge-base "$base" "$bc" 2>/dev/null) || mb=""
+    fi
+    if [ -n "$mb" ] && [ "$mb" != "$ac" ]; then
+      git diff-tree -r --name-only -z --no-renames "$mb" "$bc" -- > "$s.mb" 2> "$s.err" \
+        || _lg_die "git diff-tree $mb $bc failed: $(head -n 3 "$s.err" 2>/dev/null)"
+      tr '\n\t\000' '\001\002\n' < "$s.mb" > "$s.mb.l" || _lg_die "cannot read the branch's files"
+      hasf=true
+    fi
+  fi
+  jq -c --slurpfile core "$s.core" --arg r "$r" --argjson hasf "$hasf" --rawfile mbd "$s.mb.l" \
+    "$_LG_JQ_V_UNDECLARED" "$_LG_UP_IX" > "$out" || _lg_die "jq failed (undeclared-contract-change)"
 }
 
 # _lg_v_finish <findings.jsonl>: print the findings (sorted: the registry's,
-# then blocking, then by path, class) and end the run — rc 1 when any blocks.
+# then blocking, then by path (else key; one with neither — validate
+# --pushed's "… N more contracts" — last: [] sorts after every string),
+# class) and end the run — rc 1 when any blocks.
 _lg_v_finish() {
   local f="$1" s rc
   _lg_scratch_name
@@ -1043,7 +1211,7 @@ _lg_v_finish() {
   # Line 1: the exit code; then the payload (JSON) or the text lines.
   jq -s -r --arg fmt "$_LG_FORMAT" "$_LG_JQ_VALIDATE_DEFS"'
     sort_by([(if .class == "registry" then 0 else 1 end), (if .severity == "block" then 0 else 1 end),
-             (.path // .key // ""), .class, .detail])
+             (.path // .key // []), .class, .detail])
     | (if any(.[]; .severity == "block") then 1 else 0 end),
       (if $fmt == "json" then {findings: .} | tojson else .[] | lg_v_text end)' "$f" > "$s.res" \
     || _lg_die "jq failed (findings)"

@@ -858,25 +858,15 @@ END {
   if (left != -1 || (getline r < req) > 0) exit 3
 }'
 
-# _lg_ifl_sig: the facts signature into _LG_IFL_SIG (16 hex, part of every
-# facts file's name) and the plan directories / globs into
-# $_SCRATCH/lg-ifl-plans (lines "d\t<dir/>", "g\t<glob>"), and the trailer
-# names into $_SCRATCH/lg-ifl-tr — once per source (_LG_IFL_SRC: the
-# working tree, or the commit an index is built from — publish's base).
-# The signature covers what facts depend on beyond the two commits: the
-# trailer names, the plan directories (the source's doc-index), and the
-# parser programs (_LG_AWK_TRAILER — the closing-keyword rule included —,
-# the walk, the plan words).
-_LG_IFL_SRC=worktree
-_LG_IFL_SIGSRC=""
-_lg_ifl_sig() {
-  local di s
-  [ -z "${_LG_IFL_SIG:-}" ] || [ "$_LG_IFL_SIGSRC" != "$_LG_IFL_SRC" ] || return 0
-  _lg_scratch_name
-  s=$_LG_SN
-  _lg_trailers "$_SCRATCH/lg-ifl-tr"
-  _lg_tr_since
-  di=$(_lg_doc_index "$_LG_IFL_SRC") || exit "$?"
+# _lg_ifl_plans <src> <out>: which files are plans, as lines "d\t<dir/>"
+# (the directory of each entry of the doc-index <src> holds — the working
+# tree, or a commit — whose doc_type is a doc_columns.plan type) and
+# "g\t<glob>" (each doc_columns.plan.globs entry), for _LG_AWK_IFL_PLAN.
+# In-flight's plan claims and upkeep's plans (design 2026-10-18 §4 D9)
+# find plans this way; each has its own link test.
+_lg_ifl_plans() {
+  local di
+  di=$(_lg_doc_index "$1") || exit "$?"
   # shellcheck disable=SC2016  # jq source
   jq -r --slurpfile c "$_LG_CFG" '
     ($c[0].doc_columns.plan // null) as $pc
@@ -885,9 +875,53 @@ _lg_ifl_sig() {
         | .key | select(test("[\\n\\t]") | not) | (split("/") | .[0:-1] | join("/")) | if . == "" then "" else . + "/" end]
        | unique[] | "d\t\(.)"),
       ($pc | if type == "object" then ((.globs // [])[] | strings | select(test("[\\n\\t]") | not) | "g\t\(.)") else empty end)' \
-    "$di" > "$_SCRATCH/lg-ifl-plans" || _lg_die "jq failed (the plan directories)"
+    "$di" > "$2" || _lg_die "jq failed (the plan directories)"
+}
+
+# The plan test (awk, after _LG_AWK_GLOB): ifl_plans(file) reads
+# _lg_ifl_plans' lines; ifl_plan(p) is 1 when path p (a newline in it as
+# \001, a tab as \002: never a plan) is a .md file in one of those
+# directories, or matches one of the globs; else 0.
+# shellcheck disable=SC2016  # awk source
+_LG_AWK_IFL_PLAN='
+function ifl_plans(f,   l, t, k, v) {
+  while ((getline l < f) > 0) {
+    t = index(l, "\t"); k = substr(l, 1, t - 1); v = substr(l, t + 1)
+    if (k == "d") IFL_PD[v] = 1; else if (k == "g") { IFL_NG++; gx_add(IFL_NG, v) }
+  }
+  close(f)
+}
+function ifl_plan(p,   d) {
+  if (p !~ /\.md$/ || index(p, "\001") || index(p, "\002")) return 0
+  d = p; sub(/[^\/]*$/, "", d)
+  if (d in IFL_PD) return 1
+  if (IFL_NG > 0) { gx_match(p); return GX_MN > 0 }
+  return 0
+}
+'
+
+# _lg_ifl_sig: the facts signature into _LG_IFL_SIG (16 hex, part of every
+# facts file's name) and the plan directories / globs into
+# $_SCRATCH/lg-ifl-plans (lines "d\t<dir/>", "g\t<glob>"), and the trailer
+# names into $_SCRATCH/lg-ifl-tr — once per source (_LG_IFL_SRC: the
+# working tree, or the commit an index is built from — publish's base).
+# The signature covers what facts depend on beyond the two commits: the
+# trailer names, the plan directories (the source's doc-index), and the
+# parser programs (_LG_AWK_TRAILER — the closing-keyword rule included —,
+# the walk, the plan words, the plan test _LG_AWK_IFL_PLAN and the glob
+# grammar _LG_AWK_GLOB it matches plan globs with).
+_LG_IFL_SRC=worktree
+_LG_IFL_SIGSRC=""
+_lg_ifl_sig() {
+  local s
+  [ -z "${_LG_IFL_SIG:-}" ] || [ "$_LG_IFL_SIGSRC" != "$_LG_IFL_SRC" ] || return 0
+  _lg_scratch_name
+  s=$_LG_SN
+  _lg_trailers "$_SCRATCH/lg-ifl-tr"
+  _lg_tr_since
+  _lg_ifl_plans "$_LG_IFL_SRC" "$_SCRATCH/lg-ifl-plans"
   { printf '%s\n' "$_LG_IFL_FACTS"; cat "$_SCRATCH/lg-ifl-tr"; printf 'since %s\nplans\n' "$_LG_TR_SINCE"; cat "$_SCRATCH/lg-ifl-plans"
-    printf 'parsers\n%s\n%s\n%s\n' "$_LG_AWK_TRAILER" "$_LG_AWK_IFL_WALK" "$_LG_AWK_IFL_WORDS"; } > "$s.sig" \
+    printf 'parsers\n%s\n%s\n%s\n%s\n%s\n' "$_LG_AWK_TRAILER" "$_LG_AWK_IFL_WALK" "$_LG_AWK_IFL_WORDS" "$_LG_AWK_IFL_PLAN" "$_LG_AWK_GLOB"; } > "$s.sig" \
     || _lg_die "cannot write $s.sig"
   _hash_one "$s.sig"
   _LG_IFL_SIG=${_HASH#sha256:}
@@ -957,21 +991,10 @@ _lg_ifl_cold() {
   fi
   # The plans each modifies (.md files in a plan directory, or matching a
   # plan glob), read in one cat-file batch.
-  LC_ALL=C awk -v plans="$_SCRATCH/lg-ifl-plans" "$_LG_AWK_GLOB"'
-    BEGIN {
-      while ((getline l < plans) > 0) {
-        t = index(l, "\t"); k = substr(l, 1, t - 1); v = substr(l, t + 1)
-        if (k == "d") PD[v] = 1; else if (k == "g") { g++; gx_add(g, v) }
-      }
-    }
-    {
-      split($0, a, "\t"); p = a[3]
-      if (p !~ /\.md$/ || index(p, "\001") || index(p, "\002")) next
-      d = p; sub(/[^\/]*$/, "", d)
-      ok = (d in PD)
-      if (!ok && g > 0) { gx_match(p); ok = GX_MN > 0 }
-      if (ok) print a[2] ":" p
-    }' "$s.diff" > "$s.preq" || _lg_die "cannot list the in-flight plans"
+  LC_ALL=C awk -v plans="$_SCRATCH/lg-ifl-plans" "$_LG_AWK_GLOB$_LG_AWK_IFL_PLAN"'
+    BEGIN { ifl_plans(plans) }
+    { split($0, a, "\t"); if (ifl_plan(a[3])) print a[2] ":" a[3] }' "$s.diff" > "$s.preq" \
+    || _lg_die "cannot list the in-flight plans"
   : > "$s.words"
   if [ -s "$s.preq" ]; then
     git cat-file --batch < "$s.preq" 2> "$s.err" | tr '\000' '\001' \
@@ -1186,7 +1209,7 @@ _lg_ifl_refs_note() {
 # pays for the scan's git calls in parallel, not in sequence). The settings
 # are read here first (their errors die in this shell), and the shallow tag
 # (one git call either side would make). The child:
-#   - prints no verdict: _LG_IFL_CHILD makes its _lg_fail (doc-tools.sh)
+#   - prints no verdict: _LG_FAIL_REC makes its _lg_fail (doc-tools.sh)
 #     leave "<rc>\t<message>" in $_SCRATCH/lg-ifl.fail and exit; the wait
 #     raises it here, the run's one verdict;
 #   - holds none of this run's output: its stdout and fd 9 go to
@@ -1201,7 +1224,6 @@ _lg_ifl_refs_note() {
 # DOC_TOOLS_LEDGER_SELFTEST=ifl-pidfile (scripts/test-ledger.sh only): the
 # child's pid into $DOC_TOOLS_LEDGER_SELFTEST_PIDFILE.
 _LG_IFL_PID=""
-_LG_IFL_CHILD=""
 _lg_ifl_prepare_bg() {
   _LG_IFL_PID=""
   _lg_ifl_load
@@ -1209,7 +1231,7 @@ _lg_ifl_prepare_bg() {
   _lg_ix_shallow
   rm -f -- "$_SCRATCH/lg-ifl.state" "$_SCRATCH/lg-ifl.fail" "$_SCRATCH/lg-ifl.err"
   (
-    _LG_IFL_CHILD=1
+    _LG_FAIL_REC="$_SCRATCH/lg-ifl.fail"
     exec > /dev/null 9> /dev/null 2> "$_SCRATCH/lg-ifl.err"
     _LG_PARSE_N=$((_LG_PARSE_N + 100000))
     _lg_ifl_prepare 0
