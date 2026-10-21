@@ -13887,6 +13887,21 @@ test_lg_upkeep_amendment_paths_still_win() {
   teardown
 }
 
+test_lg_upkeep_plan_cited_competes_only_for_its_amendment() {
+  echo "test: #39 D9 (final review I1) — a plan-cited item is a candidate only for the amendment whose pointer reached it: the range files app-9 alone (it lists src/order/total.js, edited with a line naming order.total) and amends SPEC-A citing p1 (its include row names app-2) — field:order.total stays app-9's, spec:SPEC-A goes to app-2, and the advisory's key follows"
+  lg_up_amend_fixture
+  lg_up_added_item src/order/total.js "fix totals"
+  lg_up_commit --line "Landed by docs/plans/p1.md Task 2" "amend the spec" docs/specs/SPEC-A.md
+  lg upkeep --range main..feat --top 0 --format json
+  assert_eq "0|app-9:item-file-edited app-2:plan-cited" "$LG_RC|$(lg_up_found "$LG_OUT")" "the premise: app-9 filed alone, app-2 reached only through the cited plan"
+  assert_eq "app-2=changes spec:SPEC-A|app-9=changes field:order.total" "app-2=$(lg_up_vals app-2)|app-9=$(lg_up_vals app-9)" \
+    "app-9 keeps field:order.total (app-2 counts for no other contract, nor as another item); app-2 gets the amendment"
+  lg validate --pushed "main..HEAD" --format json
+  assert_eq "0|app-9" "$LG_RC|$(jq -r '[.findings[] | select(.detail | contains("field:order.total")) | .key] | join(",")' <<<"$LG_OUT")" \
+    "validate --pushed: the advisory's key for field:order.total is app-9"
+  teardown
+}
+
 test_lg_upkeep_plan_link_involvement() {
   echo "test: #39 D9 — a range that edits p1 (its include row names app-2) and code naming field:order.total, which app-2's paths cover: app-2 is involved by plan-link and gets the change; a plan the range adds links the same way"
   lg_up_amend_fixture
@@ -15403,6 +15418,7 @@ run_tests() {
   test_lg_upkeep_amendment_no_pointer
   test_lg_upkeep_amendment_paths_still_win
   test_lg_upkeep_plan_link_involvement
+  test_lg_upkeep_plan_cited_competes_only_for_its_amendment
   test_lg_upkeep_amendment_skip_globs_exempt
   test_lg_upkeep_amendment_shared_document
   test_lg_upkeep_amendment_glob_not_document_defined

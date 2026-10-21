@@ -50,7 +50,8 @@
 #     plan-cited — an item no other signal involves that a plan cited by
 #     a document-defined contract's document links (Proposals; one its
 #     other pointer, a trailer of a commit editing the document, names is
-#     always found by that claim trailer);
+#     always found by that claim trailer), a candidate for that contract
+#     only (for another, only when no other item is involved);
 #   4 plan-link — an item a plan in the net diff (one the range adds or
 #     modifies) links: a Related work row marked include names it (its
 #     key, an alias or its path), or a frontmatter value (a scalar, or an
@@ -457,19 +458,22 @@ def up_ev_changes($t; $p):
    else up_ev_files($t.files; "diff names \($t.contract) in \(.) (defined_in of \($t.contract))") end)
   + [$t.cc[] | if . == "" then "Contract-Change: \($t.contract)" else "Contract-Change: \($t.contract) — \(.)" end];
 # Attribution: each contract of $open ([{contract, ptr?, …}]) to one item of
-# $inv (the involved, [{p, rank, y}]; $byp: {path: item}) — the most paths
-# entries $g ({file: [contract ids]}: the index path_contracts for
+# $inv (the involved, [{p, rank, y, pc}]; $byp: {path: item}) — the most
+# paths entries $g ({file: [contract ids]}: the index path_contracts for
 # defined_in, the read_by map for a read contract) files under it; then a
 # pointed item (ptr: the involved items the pointers of a document-defined
 # contract reach, design §4 D9) before one not; then the most paths entries
 # that are net-diff files ($ds); then the best rank; then key (else path)
-# order. An item that yields (y: the range adds its file and neither a
-# claim trailer nor --items names it — a follow-up the work filed, D7) is
-# a candidate only when every involved item yields, or when it is
-# pointed. → {item path: [the contracts it gets]}; {} without $inv.
+# order. The candidates are the first non-empty of: the items that neither
+# yield (y: the range adds its file and neither a claim trailer nor --items
+# names it — a follow-up the work filed, D7) nor are plan-cited only (pc:
+# involved by a cited plan alone, final review I1); then those not pc;
+# then every one — and a pointed item joins its own contract.
+# → {item path: [the contracts it gets]}; {} without $inv.
 def up_attr($open; $inv; $byp; $g; $ds):
   if $inv == [] then {}
-  else ($inv | map(select(.y != true)) | if . == [] then $inv else . end) as $cand
+  else ($inv | map(select(.y != true and .pc != true))
+        | if . != [] then . else ($inv | map(select(.pc != true)) | if . != [] then . else $inv end) end) as $cand
   | lg_lists($open[] | . as $t | ($t.ptr // []) as $pt
     | (if $pt == [] then $cand else $cand + [$inv[] | select(.p as $p | $pt | index([$p]) != null)] | unique_by(.p) end
        | map(. as $v | $byp[$v.p] as $I | (($I.paths // []) | unique) as $ps
@@ -589,11 +593,14 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
      | . + (lg_obj(.[] | {(.p): true}) as $H | [$PTR[][] | select(.s == "plan-cited" and $H[.p] != true) | {p, s}])
    end) as $SIG
 # y: the item yields in attribution (up_attr) — the range adds its file and
-# neither a claim trailer nor --items names it (ruling R63).
+# neither a claim trailer nor --items names it (ruling R63); pc: its only
+# signal is plan-cited, so it is a candidate for the amendment that cites
+# its plan alone (final review I1).
 | lg_obj($add | up_lines | .[] | {(.): true}) as $ADD
 | [$SIG | group_by(.p)[] | .[0].p as $p | $M.BYP[$p] as $I | (map(.s) | unique) as $ss
    | {p: $p, key: $I.key, found_by: [up_signals[] as $x | select($ss | index([$x]) != null) | $x],
-      rank: ([$ss[] | up_rank] | min), y: ($ADD[$p] == true and all($ss[]; (startswith("trailer:") or . == "named") | not))}]
+      rank: ([$ss[] | up_rank] | min), y: ($ADD[$p] == true and all($ss[]; (startswith("trailer:") or . == "named") | not)),
+      pc: ($ss == ["plan-cited"])}]
   | sort_by(.rank, (.key // .p)) as $INV
 | lg_obj($INV[] | {(.p): true}) as $INVP
 # Covered: an involved item declares it in changes. A document-defined
