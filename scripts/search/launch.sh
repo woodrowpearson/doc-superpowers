@@ -16,9 +16,10 @@
 #      that has search/pyproject.toml
 #
 # Extras: --extra cloud when docs/search/config.json (at the repository top)
-# has a non-null "cloud"; --all-extras when jq is missing, since the config
-# cannot be read then; none otherwise. --no-dev: the dev group (pytest) is
-# never installed for a user.
+# has a non-null "cloud"; --extra local-transformer (after cloud) when its
+# docs.model is a string starting "transformer:"; --all-extras when jq is
+# missing, since the config cannot be read then; none otherwise. --no-dev: the
+# dev group (pytest) is never installed for a user.
 #
 # Failures are one stderr line and exit 2.
 
@@ -63,9 +64,12 @@ if command -v jq >/dev/null 2>&1; then
   if jq -e '.cloud != null' "${TOP:-.}/docs/search/config.json" >/dev/null 2>&1; then
     EXTRAS="--extra cloud"
   fi
+  if jq -e '(.docs.model | type) == "string" and (.docs.model | startswith("transformer:"))' "${TOP:-.}/docs/search/config.json" >/dev/null 2>&1; then
+    EXTRAS="${EXTRAS:+$EXTRAS }--extra local-transformer"
+  fi
 else
   EXTRAS="--all-extras"
 fi
 
-# shellcheck disable=SC2086  # $EXTRAS is a fixed flag list, empty or one or two words
+# shellcheck disable=SC2086  # $EXTRAS is a fixed flag list: empty, or up to two --extra pairs
 exec uv run --project "$ROOT/search" --frozen --no-dev $EXTRAS doc-search "$@"
