@@ -126,8 +126,8 @@ class ProgressView:
             if self.total and _finite(self.estimate_s) and self.estimate_s > 0:
                 rate = self.total / self.estimate_s
                 return (
-                    f"{head} queued; estimated {fmt_duration(self.estimate_s)} for {self.total:,} chunks "
-                    f"at ~{rate:.0f} chunks/s on this host"
+                    f"{head} queued; at most {fmt_duration(self.estimate_s)} for {self.total:,} chunks "
+                    f"at ~{rate:g} chunks/s on this host (less for chunks already in the encode cache)"
                 )
             return f"{head} queued"
         if self.phase == "waiting":
@@ -150,20 +150,23 @@ class BuildProgress:
     so a view never shows half an add.
 
     The rate comes from the encoded chunks (not the cache hits, which arrive at once and say
-    nothing about the encoder) over the samples of the last `RATE_WINDOW_S`; the clock starts with
-    the object, so the first batch already has a rate. A window with one sample has none, and a
-    build that has not encoded for a minute loses its rate rather than keep a stale one.
+    nothing about the encoder) over the samples of the last `RATE_WINDOW_S`. The window starts with
+    the object and starts again when `phase` becomes `encoding` (the time before it is queueing,
+    the host lock and model loading, not encoding), so the first batch already has a rate and it is
+    the encoder's. A window with one sample has none, and a build that has not encoded for a minute
+    loses its rate rather than keep a stale one.
 
     `publish` writes the view for other processes (see `read_progress`) and `retire` removes it
     when the build ends; a retired build publishes no more, so a late publish from another thread
-    cannot bring a finished build's file back.
+    cannot bring a finished build's file back. It removes only a file this process wrote, so an
+    older server's late `retire` cannot delete a newer server's file.
     """
 
     def __init__(self, worktree: Path, model: str, clock: Callable[[], float] = time.monotonic) -> None:
         self.worktree = Path(worktree)
         self.model = model
         self.total: int | None = None
-        self.phase = "queued"
+        self._phase = "queued"
         self.holder_pid: int | None = None
         self.done = 0
         self.from_cache = 0
@@ -177,6 +180,20 @@ class BuildProgress:
         self._retired = False
         self._warned = False
         self._path: Path | None = None
+
+    @property
+    def phase(self) -> str:
+        return self._phase
+
+    @phase.setter
+    def phase(self, value: str) -> None:
+        with self._lock:
+            if value == "encoding" and self._phase != "encoding":
+                # The encoder starts now: what came before (queueing, the host lock, loading the
+                # model) is not its speed, so the rate window starts again from here.
+                self._samples.clear()
+                self._samples.append((self._clock(), self._encoded))
+            self._phase = value
 
     def add(self, n: int, *, cached: bool = False) -> None:
         now = self._clock()
@@ -194,7 +211,7 @@ class BuildProgress:
     def view(self) -> ProgressView:
         now = self._clock()
         with self._lock:
-            total, phase, holder_pid = self.total, self.phase, self.holder_pid
+            total, phase, holder_pid = self.total, self._phase, self.holder_pid
             done, from_cache = self.done, self.from_cache
             recent = [s for s in self._samples if s[0] >= now - RATE_WINDOW_S]
         rate: float | None = None
@@ -246,23 +263,34 @@ class BuildProgress:
                         os.unlink(tmp)
                     raise
             except Exception as err:  # a side channel: whatever goes wrong here must not fail the build
-                self._warn_once("build progress not written", err)
+                self._failed("build progress not written", err)
 
     def retire(self) -> None:
-        """Remove the progress file (the build ended) and publish no more. Never raises; no file is fine."""
+        """Remove this process's progress file (the build ended) and publish no more. Never raises; no file is fine."""
         with self._file_lock:
             self._retired = True
             try:
-                self._target().unlink(missing_ok=True)
+                path = self._target()
+                try:
+                    owner = json.loads(path.read_text(encoding="utf-8")).get("pid")
+                except FileNotFoundError:
+                    return
+                except (OSError, ValueError, AttributeError):
+                    owner = None  # unreadable or not ours to read: nothing says it is another process's
+                if _is_pid(owner) and owner != os.getpid():
+                    return  # a newer server's file for this worktree: not ours to remove
+                path.unlink(missing_ok=True)
             except Exception as err:
-                self._warn_once("build progress file not removed", err)
+                self._failed("build progress file not removed", err)
 
     def _target(self) -> Path:
         if self._path is None:
             self._path = progress_path(self.worktree)
         return self._path
 
-    def _warn_once(self, what: str, err: BaseException) -> None:
+    def _failed(self, what: str, err: BaseException) -> None:
+        """Record a swallowed failure: its traceback at DEBUG every time, one warning per build."""
+        logger.debug("doc-search: %s", what, exc_info=err)
         if not self._warned:
             self._warned = True
             logger.warning("doc-search: %s (%s: %s)", what, type(err).__name__, err)
@@ -361,17 +389,25 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _pid_alive_windows(pid: int) -> bool:  # pragma: no cover - not exercised off Windows
+def _pid_alive_windows(pid: int) -> bool:
     """On Windows `os.kill(pid, 0)` would terminate the process, so ask the process table instead."""
     try:
         import ctypes
+        from ctypes import wintypes
 
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
         handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
         if not handle:
-            return ctypes.GetLastError() == 5  # ERROR_ACCESS_DENIED: it exists, we may not look
+            # ERROR_ACCESS_DENIED means it exists and we may not look; anything else, it is gone
+            return ctypes.get_last_error() == 5  # type: ignore[attr-defined]
         try:
-            code = ctypes.c_ulong()
+            code = wintypes.DWORD()
             if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
                 return code.value == 259  # STILL_ACTIVE
             return True
