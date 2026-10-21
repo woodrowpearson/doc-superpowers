@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import errno
+import hashlib
 import logging
 import os
 import sqlite3
 import sys
 import threading
+from types import SimpleNamespace
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -39,6 +42,12 @@ def vec(seed: int, dim: int = DIM) -> np.ndarray:
     return np.random.default_rng(seed).standard_normal(dim).astype(np.float32)
 
 
+@pytest.fixture(autouse=True)
+def fresh_relative_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The relative-path warning is once per process: each test starts without having warned."""
+    monkeypatch.setattr(encode_cache, "_warned_relative", set())
+
+
 @pytest.fixture
 def open_cache(tmp_path: Path) -> Iterator[Callable[..., EncodeCache]]:
     """Factory for caches that are closed when the test ends (an open sqlite connection is a ResourceWarning)."""
@@ -64,22 +73,25 @@ def test_cache_root_env_and_default(
         m.setattr(sys, "platform", "darwin")
         m.setenv("HOME", str(home))
 
-        # set to an absolute path: that path, created on demand
+        # set to an absolute path: that path (only named: nothing is created)
         explicit = tmp_path / "somewhere" / "deep"
         m.setenv(CACHE_ENV, str(explicit))
         assert cache_root() == explicit
-        assert explicit.is_dir()
+        assert not explicit.exists()
 
         # unset: the platform default
         m.delenv(CACHE_ENV)
         assert cache_root() == home / "Library" / "Caches" / "doc-search"
-        assert (home / "Library" / "Caches" / "doc-search").is_dir()
+        assert not (home / "Library").exists()
 
-        # a relative value is ignored, with a warning, and the default stands
+        # a relative value is ignored, with one warning however often it is read, and the default stands
         m.setenv(CACHE_ENV, "relative/cache")
         with caplog.at_level(logging.WARNING, logger="doc_search.encode_cache"):
-            assert cache_root() == home / "Library" / "Caches" / "doc-search"
-        assert [r.getMessage() for r in caplog.records if CACHE_ENV in r.getMessage()]
+            for _ in range(3):
+                assert cache_root() == home / "Library" / "Caches" / "doc-search"
+        warned = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warned) == 1
+        assert CACHE_ENV in warned[0] and "relative/cache" in warned[0]
         assert not Path("relative/cache").exists()
 
 
@@ -107,6 +119,14 @@ def test_cache_root_other_platforms(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
 def test_encode_cache_path_is_per_model(doc_search_cache: Path):
     assert encode_cache_path(SPEC) == doc_search_cache / "encode" / "gte-modernbert-base.sqlite"
+    assert not doc_search_cache.exists()  # a name only
+
+
+def test_cache_creates_its_own_directory(tmp_path: Path, open_cache):
+    path = tmp_path / "not" / "yet" / "enc.sqlite"
+    cache = open_cache(path)
+    assert cache.usable
+    assert path.is_file()
 
 
 def test_round_trip_and_wal(tmp_path: Path, open_cache):
@@ -188,20 +208,65 @@ def test_key_material(open_cache, tmp_path: Path):
     assert base.key("broken \ud800 text") != base.key("broken  text")
 
 
+def test_key_known_answers(open_cache):
+    # the on-disk key formula, pinned: a change here orphans every cache on every host
+    cache = open_cache()
+    parts = [PARAMS["model_id"], PARAMS["variant"], str(PARAMS["max_tokens"]), PARAMS["ort_version"], PARAMS["arch"]]
+    prefix = b"\0".join(p.encode("utf-8") for p in parts) + b"\0"
+    assert cache.key("hello") == hashlib.sha256(prefix + b"hello").digest()
+    assert cache.key("hello").hex() == "6356003d556408bc1020d330960b1d4f95a0128856325b13237ada508c0927c6"
+    # non-ASCII text is utf-8; a lone surrogate is surrogatepass (the three bytes ED A0 80)
+    assert cache.key("naïve \u2603").hex() == "01ca20f3eb9ddae12a75942567193c9f6be68ae15c5a3dcd9e2dfca93133feed"
+    assert cache.key("\ud800") == hashlib.sha256(prefix + b"\xed\xa0\x80").digest()
+    assert cache.key("\ud800").hex() == "572b24fda6eae9f8029aafd2cd284bb4c5d937dad42ffb63cf0b480bed746bf0"
+
+
 def test_wrong_length_blob_is_a_miss(tmp_path: Path, open_cache):
     path = tmp_path / "enc.sqlite"
     cache = open_cache(path)
     good, short, long = cache.key("good"), cache.key("short"), cache.key("long")
-    cache.put_many([(good, vec(1)), (short, vec(2, DIM - 1)), (long, vec(3, DIM + 1))])
-    # the same bytes in a differently sized model's cache never come back as a vector
-    assert set(cache.get_many([good, short, long])) == {good}
+    cache.put_many([(good, vec(1))])
     conn = sqlite3.connect(path)
-    try:
-        conn.execute("INSERT OR REPLACE INTO vectors VALUES (?, ?)", (good, b"\x00" * 5))
+    try:  # rows written by something else (another model's dim, an older format)
+        conn.execute("INSERT INTO vectors VALUES (?, ?)", (short, vec(2, DIM - 1).tobytes()))
+        conn.execute("INSERT INTO vectors VALUES (?, ?)", (long, vec(3, DIM + 1).tobytes()))
         conn.commit()
     finally:
         conn.close()
-    assert cache.get_many([good]) == {}
+    assert set(cache.get_many([good, short, long])) == {good}
+
+
+def test_non_blob_value_is_a_miss(tmp_path: Path, open_cache):
+    path = tmp_path / "enc.sqlite"
+    cache = open_cache(path)
+    keys = {name: cache.key(name) for name in ("good", "integer", "float", "text of the right length")}
+    cache.put_many([(keys["good"], vec(1))])
+    conn = sqlite3.connect(path)
+    try:  # the column has no type affinity: a foreign writer's INTEGER, REAL and TEXT are stored as they came
+        conn.execute("INSERT INTO vectors VALUES (?, ?)", (keys["integer"], 12345))
+        conn.execute("INSERT INTO vectors VALUES (?, ?)", (keys["float"], 1.5))
+        conn.execute("INSERT INTO vectors VALUES (?, ?)", (keys["text of the right length"], "x" * (DIM * 4)))
+        conn.commit()
+    finally:
+        conn.close()
+    got = cache.get_many(list(keys.values()))
+    assert set(got) == {keys["good"]}
+    assert cache.usable
+
+
+def test_put_many_skips_vectors_of_the_wrong_size(tmp_path: Path, open_cache):
+    path = tmp_path / "enc.sqlite"
+    cache = open_cache(path)
+    good, short, long = cache.key("good"), cache.key("short"), cache.key("long")
+    cache.put_many([(short, vec(2, DIM - 1)), (long, vec(3, DIM + 1))])  # nothing to store at all
+    cache.put_many([(good, vec(1)), (short, vec(2, DIM - 1)), (long, vec(3, DIM + 1))])
+    assert set(cache.get_many([good, short, long])) == {good}
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0] == 1
+    finally:
+        conn.close()
+    assert cache.usable
 
 
 def test_cache_size(tmp_path: Path, open_cache):
@@ -258,6 +323,137 @@ def test_cache_that_fails_later_degrades_once(tmp_path: Path, open_cache, caplog
         cache.put_many([(key, vec(2))])
         assert cache.get_many([key]) == {}
     assert len([r for r in caplog.records if r.levelno >= logging.WARNING]) == 1
+
+
+@pytest.fixture(params=["file", "read-only"])
+def unwritable_root(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Path]:
+    """A cache location nothing can be created in: an existing file, or a directory without write permission."""
+    root = tmp_path / "unwritable"
+    if request.param == "file":
+        root.write_text("not a directory")
+        yield root
+        return
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    root.mkdir()
+    root.chmod(0o500)
+    try:
+        yield root
+    finally:
+        root.chmod(0o700)  # so pytest can remove it
+
+
+def lowest_free_fd() -> int:
+    fd = os.open(os.devnull, os.O_RDONLY)
+    os.close(fd)
+    return fd
+
+
+def warnings_of(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_unwritable_cache_location_degrades_everywhere(
+    unwritable_root: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    with monkeypatch.context() as m:
+        m.setenv(CACHE_ENV, str(unwritable_root))
+        caplog.set_level(logging.WARNING, logger="doc_search.encode_cache")
+
+        # naming the paths never raises and creates nothing
+        assert cache_root() == unwritable_root
+        path = encode_cache_path(SPEC)
+        assert path == unwritable_root / "encode" / "gte-modernbert-base.sqlite"
+        assert warnings_of(caplog) == []
+
+        # the encode cache degrades: unusable, one warning, every call a miss / no-op
+        cache = EncodeCache(path, dim=DIM, **PARAMS)
+        try:
+            assert cache.usable is False
+            key = cache.key("text")
+            cache.put_many([(key, vec(1))])
+            assert cache.get_many([key]) == {}
+        finally:
+            cache.close()
+        assert len(warnings_of(caplog)) == 1
+        assert warnings_of(caplog)[0].startswith("doc-search: encode cache unusable")
+
+        # the host lock degrades: the body runs, one warning, nothing leaked
+        caplog.clear()
+        before = lowest_free_fd()
+        ran = []
+        with host_lock(SPEC, ran.append):
+            ran.append("body")
+        assert ran == ["body"]
+        assert len(warnings_of(caplog)) == 1
+        assert warnings_of(caplog)[0].startswith("doc-search: encoder lock unavailable")
+        assert lowest_free_fd() == before
+
+
+def test_host_lock_degrades_when_flock_is_unsupported(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+):
+    def no_locks(fd: int, op: int) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(encode_cache, "fcntl", SimpleNamespace(LOCK_EX=2, LOCK_NB=4, LOCK_UN=8, flock=no_locks))
+    before = lowest_free_fd()
+    ran = []
+    with caplog.at_level(logging.WARNING, logger="doc_search.encode_cache"):
+        with host_lock(SPEC):
+            ran.append("body")
+    assert ran == ["body"]
+    assert len(warnings_of(caplog)) == 1
+    assert lowest_free_fd() == before
+
+
+def test_host_lock_ignores_a_pid_that_cannot_be_written(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    def disk_full(fd: int, length: int) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    ran = []
+    with caplog.at_level(logging.WARNING, logger="doc_search.encode_cache"):
+        with monkeypatch.context() as m:
+            m.setattr(os, "ftruncate", disk_full)
+            with host_lock(SPEC):
+                ran.append("body")
+    assert ran == ["body"]
+    assert warnings_of(caplog) == []
+
+
+def test_host_lock_keeps_waiting_when_the_wait_notice_fails(caplog: pytest.LogCaptureFixture):
+    held, release, waiting, got_it = (threading.Event() for _ in range(4))
+
+    def holder() -> None:
+        with host_lock(SPEC):
+            held.set()
+            release.wait(10)
+
+    def broken_notice(pid: int | None) -> None:
+        waiting.set()
+        raise OSError(errno.ENOSPC, "progress file cannot be written")
+
+    def contender() -> None:
+        with host_lock(SPEC, broken_notice):
+            got_it.set()
+
+    caplog.set_level(logging.WARNING, logger="doc_search.encode_cache")
+    a = threading.Thread(target=holder)
+    a.start()
+    assert held.wait(10)
+    b = threading.Thread(target=contender)
+    b.start()
+    try:
+        assert waiting.wait(10)
+        assert not got_it.wait(0.3), "the lock was skipped because the notice failed"
+    finally:
+        release.set()
+        a.join(10)
+        b.join(10)
+    assert got_it.is_set()
+    assert len(warnings_of(caplog)) == 1
 
 
 def test_threads_share_one_cache(open_cache):
