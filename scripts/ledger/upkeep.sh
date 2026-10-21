@@ -64,10 +64,13 @@
 #   changes is covered — proposed to nobody. Every other one, except
 #   upkeep.skip_contracts, goes to exactly one involved item: the most
 #   paths entries its defined_in matches; then the most paths entries that
-#   are net-diff files; then the best rank; then key (else path) order. With
-#   no involved item it is unattributed. Evidence: "diff names <c> in <f>
-#   (defined_in of <c>)" per file (3 at most, then "… and N more files"),
-#   then "Contract-Change: <c> — <line>" per trailer line.
+#   are net-diff files; then the best rank; then key (else path) order. An
+#   item the range adds (its file added in the net diff) that no claim
+#   trailer names is a candidate only when every involved item is one (D7:
+#   a follow-up filed in the range never takes the work's own contracts).
+#   With no involved item it is unattributed. Evidence: "diff names <c> in
+#   <f> (defined_in of <c>)" per file (3 at most, then "… and N more
+#   files"), then "Contract-Change: <c> — <line>" per trailer line.
 # Proposals (consumes): (a) a read contract, the same way — covered by an
 #   involved item's consumes, else attributed (read_by in place of
 #   defined_in) or unattributed; evidence "diff names <c> in <f> (read_by
@@ -102,13 +105,13 @@
 #   a range that does not resolve, a failing contracts adapter, a bad
 #   upkeep config, --pr without adapters.pr, its list failing (no copy) or
 #   view failing, a PR not usable, a --no-repo-adapters refusal; 3 usage.
-#   Cost: one index build, one git diff-tree of the names and one git
-#   diff-tree -p -U0 of the files a defined_in or read_by matches (none
-#   without such a file; the whole range when their names pass
-#   _LG_UP_PATHS_MAX bytes), two git log walks (_lg_msg_claims' and the word
-#   scan's); the text of the items with a consumes (b) candidate, once
-#   (from the working tree, or one git cat-file per item at <b>); with
-#   --pr, the list (cached) and one view.
+#   Cost: one index build, two git diff-tree of the names (all, and the
+#   added ones) and one git diff-tree -p -U0 of the files a defined_in or
+#   read_by matches (none without such a file; the whole range when their
+#   names pass _LG_UP_PATHS_MAX bytes), two git log walks (_lg_msg_claims'
+#   and the word scan's); the text of the items with a consumes (b)
+#   candidate, once (from the working tree, or one git cat-file per item at
+#   <b>); with --pr, the list (cached) and one view.
 
 _LG_UP_TOP=3   # proposals kept per item (0: all) — the verb's --top
 _LG_UP_IX=""   # _lg_up_index: the index upkeep reads …
@@ -375,15 +378,19 @@ def up_ev_changes($t):
   up_ev_files($t.files; "diff names \($t.contract) in \(.) (defined_in of \($t.contract))")
   + [$t.cc[] | if . == "" then "Contract-Change: \($t.contract)" else "Contract-Change: \($t.contract) — \(.)" end];
 # Attribution: each contract of $open ([{contract, …}]) to one item of $inv
-# (the involved, [{p, rank}]; $byp: {path: item}) — the most paths entries
+# (the involved, [{p, rank, y}]; $byp: {path: item}) — the most paths entries
 # $g ({file: [contract ids]}: the index path_contracts for defined_in, the
 # read_by map for a read contract) files under it; then the most paths
 # entries that are net-diff files ($ds); then the best rank; then key (else
-# path) order. → {item path: [the contracts it gets]}; {} without $inv.
+# path) order. An item that yields (y: the range adds its file and no claim
+# trailer names it — a follow-up the work filed, design §4 D7) is a
+# candidate only when every involved item yields. → {item path: [the
+# contracts it gets]}; {} without $inv.
 def up_attr($open; $inv; $byp; $g; $ds):
   if $inv == [] then {}
-  else lg_lists($open[] | . as $t
-    | ($inv | map(. as $v | $byp[$v.p] as $I | (($I.paths // []) | unique) as $ps
+  else ($inv | map(select(.y != true)) | if . == [] then $inv else . end) as $cand
+  | lg_lists($open[] | . as $t
+    | ($cand | map(. as $v | $byp[$v.p] as $I | (($I.paths // []) | unique) as $ps
         | {p: $v.p,
            n1: ([$ps[] | select((($g[.] // []) | index([$t.contract])) != null)] | length),
            n2: ([$ps[] | select($ds[.] == true)] | length),
@@ -406,7 +413,8 @@ def up_link($I; $SH):
 
 # _LG_JQ_UPKEEP: the first of the core's two jq passes (_LG_JQ_UP_RANK, over
 # its object, is the second), over the index ($ix) — inputs $c
-# (config), $diff (the net-diff files, lines), $fc ({file: [contract ids]}
+# (config), $diff (the net-diff files, lines), $add (those the net diff
+# adds, lines), $fc ({file: [contract ids]}
 # for the files skip_globs leaves, by defined_in), $rc (the same by
 # read_by), $dl (the changed lines of the files $fc and $rc hold:
 # _LG_AWK_UP_LINES), $rp ({paths entry: [contract ids]} by read_by, for
@@ -448,9 +456,12 @@ _LG_JQ_UPKEEP="$_LG_JQ_UP_DEFS"'
        ($words | up_words[] | ($KM[.] // empty) | {p: ., s: "key-in-message"}),
        (if $hasbody then ($body | up_words[] | ($KM[.] // empty) | {p: ., s: "key-in-pr-body"}) else empty end) ]
    end) as $SIG
+# y: the item yields in attribution (up_attr) — the range adds its file and
+# no claim trailer names it.
+| lg_obj($add | up_lines | .[] | {(.): true}) as $ADD
 | [$SIG | group_by(.p)[] | .[0].p as $p | $M.BYP[$p] as $I | (map(.s) | unique) as $ss
    | {p: $p, key: $I.key, found_by: [up_signals[] as $x | select($ss | index([$x]) != null) | $x],
-      rank: ([$ss[] | up_rank] | min)}]
+      rank: ([$ss[] | up_rank] | min), y: ($ADD[$p] == true and all($ss[]; startswith("trailer:") | not))}]
   | sort_by(.rank, (.key // .p)) as $INV
 # Touched contracts: by a net-diff file (skip_globs left out: $fc) with a
 # changed line that names the contract ($CL: each file, as the path lists
@@ -697,6 +708,11 @@ _lg_up_core() {
     || _lg_die "git diff-tree $a $b failed: $(head -n 3 "$s.err" 2>/dev/null)"
   _lg_paths_filter "$s.diff" "$s.skipg" "$s.skip"
   tr '\n\t\000' '\001\002\n' < "$s.diff" > "$s.diff.l" || _lg_die "cannot read the net diff"
+  # The files the net diff adds (an item filed in the range yields in
+  # attribution: up_attr).
+  git diff-tree -r --name-only -z --no-renames --diff-filter=A "$a" "$b" -- > "$s.add" 2> "$s.err" \
+    || _lg_die "git diff-tree --diff-filter=A $a $b failed: $(head -n 3 "$s.err" 2>/dev/null)"
+  tr '\n\t\000' '\001\002\n' < "$s.add" > "$s.add.l" || _lg_die "cannot read the net diff's added files"
   tr '\n\t\000' '\001\002\n' < "$s.skip" > "$s.skip.l" || _lg_die "cannot read the skipped files"
   LC_ALL=C awk -v skip="$s.skip.l" 'BEGIN { while ((getline l < skip) > 0) S[l] = 1 } !($0 in S)' "$s.diff.l" > "$s.keep.l" \
     || _lg_die "cannot list the range's files"
@@ -758,7 +774,7 @@ _lg_up_core() {
     : > "$s.named.l"
   fi
   jq -L "$_LG_LIB" -c --slurpfile c "$_LG_CFG" --slurpfile fc "$s.fc" --slurpfile rc "$s.rc" --slurpfile rp "$s.rp" \
-    --rawfile diff "$s.diff.l" --rawfile dl "$s.dl" --rawfile tr "$s.tr" --rawfile words "$s.words" \
+    --rawfile diff "$s.diff.l" --rawfile add "$s.add.l" --rawfile dl "$s.dl" --rawfile tr "$s.tr" --rawfile words "$s.words" \
     --rawfile body "$body" --argjson hasbody "$hb" --rawfile named "$s.named.l" --argjson hasnamed "$hn" \
     --arg a "$a" --arg b "$b" --argjson commits "$n" \
     "$_LG_JQ_INCLUDE$_LG_JQ_UPKEEP" "$_LG_UP_IX" > "$s.up" || _lg_die "jq failed (ledger upkeep)"
