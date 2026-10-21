@@ -96,10 +96,12 @@
 #   <f> (defined_in of <c>)" per file (3 at most, then "… and N more
 #   files"), then "Contract-Change: <c> — <line>" per trailer line.
 #   A document-defined contract's owner comes from the amendment's
-#   pointers (D9): the items each plan its document's changed lines name by
-#   path links (as plan-link reads a plan), and the items the claim
-#   trailers of the commits that edit the document name (git log <a>..<b>
-#   -- <doc>, one per document). The pointed items that are involved join
+#   pointers (D9): the items each plan its document's changed lines name
+#   links — by path from the top level, or by a relative link resolved
+#   against the document's directory (as plan-link reads a plan) — and
+#   the items the claim trailers of the commits that edit the document
+#   name (git log <a>..<b> -- <doc>, one per document). The pointed items
+#   that are involved join
 #   the candidates, an added one too, right after the defined_in count
 #   (pointed before not, then the rest of the order), with the evidence
 #   "diff amends <doc>, which cites <plan> (links <key>)" / "<commit12>
@@ -822,13 +824,30 @@ _lg_up_texts() {
 # \001, a tab as \002); -v plans (_lg_ifl_plans' lines), dd ("<file>\t<id>"
 # lines: the documents of the document-defined contracts) and dl
 # (_LG_AWK_UP_LINES' "<file>\t<line>" lines). Prints "C\t<document>\t<plan>"
-# for each plan a changed line of a document names by its path — a run of
-# [A-Za-z0-9_./-] ending in ".md" and followed by no [A-Za-z0-9_], a
-# leading "./" or "/" dropped; one with a "." or ".." segment (a relative
-# link) names none — once per document; then "M\t<plan>" for each net-diff
-# file that is a plan.
+# for each plan a changed line of a document names — a run of
+# [A-Za-z0-9_./-] ending in ".md" and followed by no [A-Za-z0-9_] (so a
+# link's "#fragment" or "?query" is left out), its path from the top level
+# (a leading "/" dropped) or, when it starts with "./" or "../", relative
+# to the document's directory (final review I2); its "." and ".."
+# segments resolved (up_norm), and one that climbs above the top level
+# names none — once per document; then "M\t<plan>" for each net-diff file
+# that is a plan.
 # shellcheck disable=SC2016  # awk source
 _LG_AWK_UP_PLANS='
+# up_norm(p): path p with its empty and "." segments dropped and each ".."
+# taking the segment before it away; "" when one climbs above the top.
+function up_norm(p,   n, i, k, o, S, O) {
+  n = split(p, S, /\//)
+  k = 0
+  for (i = 1; i <= n; i++) {
+    if (S[i] == "" || S[i] == ".") continue
+    if (S[i] == "..") { if (k == 0) return ""; k--; continue }
+    O[++k] = S[i]
+  }
+  o = ""
+  for (i = 1; i <= k; i++) o = o (i > 1 ? "/" : "") O[i]
+  return o
+}
 BEGIN {
   ifl_plans(plans)
   while ((getline l < dd) > 0) UPD[substr(l, 1, index(l, "\t") - 1)] = 1
@@ -841,9 +860,9 @@ BEGIN {
     while (match(s, re)) {
       p = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH)
       if (substr(s, 1, 1) ~ /[A-Za-z0-9_]/) continue
-      while (substr(p, 1, 2) == "./") p = substr(p, 3)
-      while (substr(p, 1, 1) == "/") p = substr(p, 2)
-      if (("/" p "/") ~ /\/[.][.]?\//) continue
+      if (substr(p, 1, 2) == "./" || substr(p, 1, 3) == "../") { d = f; sub(/[^\/]*$/, "", d); p = d p }
+      p = up_norm(p)
+      if (p == "") continue
       if (ifl_plan(p) && !((f, p) in UPS)) { UPS[f, p] = 1; print "C\t" f "\t" p }
     }
   }

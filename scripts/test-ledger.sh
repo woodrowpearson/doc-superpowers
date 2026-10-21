@@ -13887,6 +13887,32 @@ test_lg_upkeep_amendment_paths_still_win() {
   teardown
 }
 
+test_lg_upkeep_amendment_relative_link() {
+  echo "test: #39 D9 (final review I2) — an amendment's relative link cites its plan: 'Landed by [p1](../plans/p1.md)' in docs/specs/SPEC-A.md resolves against the document's directory to docs/plans/p1.md (its include row names app-2); a #fragment resolves without it"
+  lg_up_amend_fixture
+  lg_up_commit --line "Landed by [p1](../plans/p1.md) Task 2" "amend the spec; see app-1" docs/specs/SPEC-A.md
+  lg upkeep --range main..feat --format json
+  assert_eq "0|app-1:key-in-message app-2:plan-cited" "$LG_RC|$(lg_up_found "$LG_OUT")" "app-2, reached through the relative link"
+  assert_eq '[{"field":"changes","value":"spec:SPEC-A","evidence":["diff amends docs/specs/SPEC-A.md, which cites docs/plans/p1.md (links app-2)"]}]' \
+    "$(lg_up_props app-2)" "the evidence names the plan by its path"
+  git checkout -q -b t-frag main
+  lg_up_commit --line "See [Task 2](./../plans/p1.md#task-2)." "amend the spec; see app-1" docs/specs/SPEC-A.md
+  lg upkeep --range main..t-frag --format json
+  assert_eq "changes spec:SPEC-A" "$(lg_up_vals app-2)" "./../plans/p1.md#task-2: the same plan"
+  teardown
+}
+
+test_lg_upkeep_amendment_relative_link_above_top() {
+  echo "test: #39 D9 (final review I2) — a relative link that climbs above the repository's top level (../../../plans/p1.md from docs/specs/) cites nothing: the normal attribution, no cites"
+  lg_up_amend_fixture
+  lg_up_commit --line "Landed by [p1](../../../plans/p1.md)" "amend the spec; see app-1" docs/specs/SPEC-A.md
+  lg upkeep --range main..feat --format json
+  assert_eq "0|app-1:key-in-message|[]" "$LG_RC|$(lg_up_found "$LG_OUT")|$(jq -c .unattributed_contracts <<<"$LG_OUT")" "no plan cited, nothing unattributed"
+  assert_eq '[{"field":"changes","value":"spec:SPEC-A","evidence":["diff amends docs/specs/SPEC-A.md (defined_in of spec:SPEC-A)"]}]' \
+    "$(lg_up_props app-1)" "the normal attribution, the document's evidence"
+  teardown
+}
+
 test_lg_upkeep_plan_cited_competes_only_for_its_amendment() {
   echo "test: #39 D9 (final review I1) — a plan-cited item is a candidate only for the amendment whose pointer reached it: the range files app-9 alone (it lists src/order/total.js, edited with a line naming order.total) and amends SPEC-A citing p1 (its include row names app-2) — field:order.total stays app-9's, spec:SPEC-A goes to app-2, and the advisory's key follows"
   lg_up_amend_fixture
@@ -15419,6 +15445,8 @@ run_tests() {
   test_lg_upkeep_amendment_paths_still_win
   test_lg_upkeep_plan_link_involvement
   test_lg_upkeep_plan_cited_competes_only_for_its_amendment
+  test_lg_upkeep_amendment_relative_link
+  test_lg_upkeep_amendment_relative_link_above_top
   test_lg_upkeep_amendment_skip_globs_exempt
   test_lg_upkeep_amendment_shared_document
   test_lg_upkeep_amendment_glob_not_document_defined
