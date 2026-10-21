@@ -987,32 +987,99 @@ def test_a_fallback_thread_that_cannot_start(
 # -- the encoder session, the host lock's bounded wait, the back-off, the dropped fallback ----------
 
 
-def test_the_encoder_session_is_released_when_a_transformer_build_ends(
-    git_repo, tiny_model: str, spec: TransformerSpec
+def counting_checks(monkeypatch: pytest.MonkeyPatch, spec: TransformerSpec) -> list[str]:
+    """Record the worktree of every validation of a saved transformer index (a recheck, a load, a build's start)."""
+    checks: list[str] = []
+    original = engines_module.get_validated_cache
+
+    def counting(path, model, content):
+        if model == spec.model_path:
+            checks.append(str(path))
+        return original(path, model, content)
+
+    monkeypatch.setattr(engines_module, "get_validated_cache", counting)
+    return checks
+
+
+def test_the_session_is_released_only_after_the_threads_own_encode(
+    git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A build or a refresh that encoded releases the session once, built or failed; a load or a recheck of an
+    unchanged index never does (the next query would pay a new session for nothing)."""
     repo = git_repo()
     seed(repo)
     cfg = make_cfg(repo, tiny_model)
     top = repo.root
     encoder = fake_encoder(spec)
-    built = wait_until(swapped(IndexPool(cfg), top), "the transformer index")
-    assert encoder.releases == 1, "released before the built index was announced"
+    checks = counting_checks(monkeypatch, spec)
+    clock = FakeClock()
+    pool = IndexPool(cfg, clock=clock)
+    built = wait_until(swapped(pool, top), "the transformer index")
+    assert encoder.releases == 1, "released once the build's encode ran, before the index was announced"
     assert built.docs.search("refund rounding", top_k=3), "a query after the release still answers"
 
-    transformer._reset_encoders()  # a new process: its build loads the valid saved index, encoding nothing
+    for n in range(5):  # rechecks with nothing changed: each finds the saved index as it holds it
+        before = len(checks)
+        clock.advance(3600)
+        assert ready(pool.get(top, wait_s=5)).docs is built.docs
+        release_builds()
+        assert len(checks) == before + 1, f"recheck {n} did not run"
+    assert encoder.releases == 1, "a recheck that encoded nothing released the session"
+
+    transformer._reset_encoders()  # a new process: its thread loads the valid saved index, encoding nothing
     encoder = fake_encoder(spec)
     clock = FakeClock()
     pool = IndexPool(cfg, clock=clock)
     loaded = ready(pool.get(top, wait_s=30))
     assert loaded.docs is not None and loaded.docs.loaded_from_disk
-    assert encoder.releases == 1, "a thread that only loaded the index releases the session the load made"
+    release_builds()
+    assert encoder.releases == 0, "a thread that only loaded the index released the session the queries use"
 
     touch(top / "docs" / "guide-07.md")
-    encoder.nan = True  # the refresh fails
+    encoder.nan = True  # the refresh encodes, and fails validation
     clock.advance(3600)
     wait_until(lambda: (g := ready(pool.get(top, wait_s=0.2))).transformer_error and pool.progress(top) is None and g,
                "the refresh to fail")
-    assert encoder.releases == 2, "a failed build releases it too"
+    assert encoder.releases == 1, "a failed encode releases it too"
+    encoder.nan = False
+    clock.advance(3600)
+    wait_until(lambda: (g := ready(pool.get(top, wait_s=0.2))).transformer_error is None and pool.progress(top) is None
+               and g.docs is not loaded.docs and g, "the retry to land")
+    assert encoder.releases == 2, "the refresh that landed released it once"
+
+
+def test_a_recheck_of_one_worktree_leaves_another_worktrees_encode_its_session(
+    git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = git_repo()
+    seed(repo)
+    other = repo.add_worktree("b", "branch-b")
+    cfg = make_cfg(repo, tiny_model)
+    top = repo.root
+    encoder = fake_encoder(spec)
+    clock = FakeClock()
+    pool = IndexPool(cfg, clock=clock)
+    built = wait_until(swapped(pool, top), "worktree A's transformer index")
+    assert encoder.releases == 1
+    checks = counting_checks(monkeypatch, spec)
+
+    (other / "docs" / "b-only.md").write_text(guide(98), encoding="utf-8")  # texts the cache lacks: B encodes
+    encoder.gate.clear()  # B's first build holds mid-encode, on the session A's queries share
+    assert ready(pool.get(other, wait_s=30)).docs_fallback
+    wait_until(phase(pool, other, "encoding"), "B's build to encode")
+    for _ in range(3):  # A is rechecked meanwhile: its saved index has not changed
+        clock.advance(3600)
+        assert ready(pool.get(top, wait_s=5)).docs is built.docs
+    wait_until(lambda: checks.count(str(top)) >= 3, "A's rechecks")
+    wait_until(lambda: not any(t.name == f"doc-search-transformer-{top.name}" for t in threading.enumerate()),
+               "A's recheck threads to end")
+    assert encoder.releases == 1, "a recheck of A dropped the session under B's encode"
+    assert pool.progress(other).phase == "encoding"
+
+    encoder.gate.set()
+    wait_until(swapped(pool, other), "B's transformer index")
+    release_builds()
+    assert encoder.releases == 2, "B's own encode released it, once"
 
 
 def hold_host_lock(spec: TransformerSpec) -> tuple[threading.Event, threading.Thread]:
@@ -1048,6 +1115,7 @@ def test_a_refresh_waits_for_another_process_lock_only_so_long(
     built = wait_until(swapped(pool, top), "the transformer index")
 
     caplog.set_level(logging.INFO, logger="doc_search.encode_cache")
+    caplog.set_level(logging.INFO, logger="doc_search.engines")
     release, holder = hold_host_lock(spec)
     try:
         touch(top / "docs" / "guide-10.md")
@@ -1061,6 +1129,8 @@ def test_a_refresh_waits_for_another_process_lock_only_so_long(
 
         after = wait_until(refreshed, "the refresh, without the lock", timeout=15)
         assert holder.is_alive(), "the other process still holds the lock: the refresh ran without it"
+        # ...and may be saving this worktree's folder: the refreshed index serves, unsaved
+        assert pool.cache_state(top, "docs") == "stale", "an unlocked refresh saved beside the lock's holder"
     finally:
         release.set()
         holder.join(10)
@@ -1068,7 +1138,53 @@ def test_a_refresh_waits_for_another_process_lock_only_so_long(
     assert after.transformer_error is None and not after.docs_fallback
     said = [r.getMessage() for r in caplog.records if r.name == "doc_search.encode_cache"]
     assert len(said) == 1 and said[0].endswith(f"is still held by pid {os.getpid()} after 0.5 s: encoding without it")
-    assert caplog.records[-1].levelno == logging.INFO
+    unsaved = [r for r in caplog.records if r.name == "doc_search.engines" and "serves unsaved" in r.getMessage()]
+    assert len(unsaved) == 1 and unsaved[0].levelno == logging.INFO
+    assert unsaved[0].getMessage() == (
+        f"doc-search: the refreshed transformer docs index of {top} serves unsaved: another process still holds "
+        "the encoder lock (the next recheck refreshes it again)"
+    )
+
+    clock.advance(3600)  # the lock is free now: the next recheck refreshes again (from the cache) and saves
+    wait_until(lambda: ready(pool.get(top, wait_s=0.2)) and pool.progress(top) is None
+               and pool.cache_state(top, "docs") == "valid", "the saved refresh")
+    assert any("order currency" in text for text in chunk_texts(ready(pool.get(top, wait_s=5)).docs))
+
+
+def test_an_unlocked_refresh_saves_once_the_holder_lets_go(
+    git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The refresh gave up waiting and encodes; the holder lets go before it saves: it takes the lock and saves."""
+    monkeypatch.setattr(engines_module, "HOST_LOCK_REFRESH_WAIT_S", 0.3)
+    repo = git_repo()
+    seed(repo)
+    cfg = make_cfg(repo, tiny_model)
+    top = repo.root
+    encoder = fake_encoder(spec)
+    clock = FakeClock()
+    pool = IndexPool(cfg, clock=clock)
+    built = wait_until(swapped(pool, top), "the transformer index")
+
+    caplog.set_level(logging.INFO)
+    release, holder = hold_host_lock(spec)
+    try:
+        encoder.gate.clear()  # the unlocked refresh holds mid-encode
+        touch(top / "docs" / "guide-00.md")
+        clock.advance(3600)
+        ready(pool.get(top, wait_s=0))
+        wait_until(phase(pool, top, "encoding"), "the refresh to encode without the lock", timeout=15)
+    finally:
+        release.set()
+        holder.join(10)
+    encoder.gate.set()
+
+    def refreshed():
+        got = ready(pool.get(top, wait_s=0.2))
+        return got if got.docs is not built.docs and pool.progress(top) is None else None
+
+    wait_until(refreshed, "the refresh")
+    assert pool.cache_state(top, "docs") == "valid", "the lock came free before the save: it took it and saved"
+    assert not [r for r in caplog.records if "serves unsaved" in r.getMessage()]
 
 
 def test_a_first_build_waits_for_another_process_lock_however_long(
@@ -1097,9 +1213,12 @@ def test_a_first_build_waits_for_another_process_lock_however_long(
     assert built.docs.model is encoder
 
 
-def test_failures_in_a_row_back_off(git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch) -> None:
-    """Each failure in a row doubles the capped cooldown base (60, 120, 240 s: 3 x that between checks), up to
-    TRANSFORMER_BACKOFF_CAP_S; a success starts again from the cap."""
+@pytest.mark.parametrize("build_s", [1000.0, 0.0], ids=["slow", "fast"])
+def test_failures_in_a_row_back_off(
+    git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch, build_s: float
+) -> None:
+    """A failure backs off from the 60 s cap, however fast it failed, doubling per failure in a row (60, 120, 240 s:
+    3 x that between checks), up to TRANSFORMER_BACKOFF_CAP_S; a success returns to the build's own seconds."""
     repo = git_repo()
     seed(repo)
     cfg = make_cfg(repo, tiny_model)
@@ -1108,23 +1227,16 @@ def test_failures_in_a_row_back_off(git_repo, tiny_model: str, spec: Transformer
     clock = FakeClock()
     real_from_path = SembleIndex.from_path
 
-    def slow_encode(cls, path, content=(), *args, **kwargs):
+    def timed_encode(cls, path, content=(), *args, **kwargs):
         if kwargs.get("model_path") == spec.model_path:
-            clock.advance(1000)  # every transformer build "takes" 1000 clock seconds: the base is the 60 s cap
+            clock.advance(build_s)  # every transformer build "takes" build_s clock seconds
         return real_from_path(path, content, *args, **kwargs)
 
-    monkeypatch.setattr(SembleIndex, "from_path", classmethod(slow_encode))
-    checks: list[str] = []
-    original = engines_module.get_validated_cache
-
-    def counting(path, model, content):
-        if model == spec.model_path:
-            checks.append(str(path))
-        return original(path, model, content)
-
-    monkeypatch.setattr(engines_module, "get_validated_cache", counting)
+    monkeypatch.setattr(SembleIndex, "from_path", classmethod(timed_encode))
+    checks = counting_checks(monkeypatch, spec)
     pool = IndexPool(cfg, clock=clock)
     wait_until(swapped(pool, top), "the transformer index")
+    after_success = 3 * 60 if build_s else cfg.search.rescan_seconds  # 3 x the capped build, or the rescan floor
 
     def recheck_after(seconds: float) -> bool:
         before = len(checks)
@@ -1141,7 +1253,7 @@ def test_failures_in_a_row_back_off(git_repo, tiny_model: str, spec: Transformer
 
     touch(top / "docs" / "guide-11.md")
     encoder.nan = True
-    assert not recheck_after(179) and recheck_after(2), "a success: 3 x 60 s"
+    assert not recheck_after(after_success - 1) and recheck_after(2), "after a success: the build's own seconds"
     settled("failure 1", failed=True)
     assert not recheck_after(179) and recheck_after(2), "one failure: 3 x 60 s"
     settled("failure 2", failed=True)
@@ -1153,7 +1265,7 @@ def test_failures_in_a_row_back_off(git_repo, tiny_model: str, spec: Transformer
     assert not recheck_after(1439) and recheck_after(2), "four in a row: 3 x 480 s"
     settled("the success", failed=False)
     touch(top / "docs" / "guide-12.md")
-    assert not recheck_after(179) and recheck_after(2), "a success starts again: 3 x 60 s"
+    assert not recheck_after(after_success - 1) and recheck_after(2), "a success returns to the build's own seconds"
     settled("the next refresh", failed=False)
 
     state = pool._entries[top].states["docs"]
