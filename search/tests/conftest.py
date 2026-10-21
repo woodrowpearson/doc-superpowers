@@ -62,6 +62,22 @@ def semble_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pa
     assert os.environ.get("HF_HUB_OFFLINE") == "1", "HF_HUB_OFFLINE changed during the test (monkeypatch.undo()?)"
 
 
+@pytest.fixture(autouse=True)
+def doc_search_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """Point doc-search's own cache (the encode cache, the host lock, the build progress) at a per-test directory.
+
+    Checked again when the test ends, like `semble_cache`: a test that needs another value scopes
+    the patch with `monkeypatch.context()`.
+    """
+    cache = tmp_path / "doc-search-cache"
+    monkeypatch.setenv("DOC_SEARCH_CACHE_LOCATION", str(cache))
+    yield cache
+    assert os.environ.get("DOC_SEARCH_CACHE_LOCATION") == str(cache), (
+        "DOC_SEARCH_CACHE_LOCATION changed during the test (monkeypatch.undo()?): "
+        "its encode cache may have reached the real doc-search cache"
+    )
+
+
 @pytest.fixture(scope="session")
 def tiny_model(tmp_path_factory: pytest.TempPathFactory) -> str:
     """A Model2Vec StaticModel built in-process: seeded random 16-d vectors over VOCAB."""
