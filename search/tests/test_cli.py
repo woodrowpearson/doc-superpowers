@@ -209,6 +209,7 @@ def test_init_writes_once(git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert done.lines[-1] == "corpus: 3 files would be indexed"
     assert any(line.startswith("docs.include") and "docs/**/*.md" in line for line in done.lines)
     assert any(line.startswith("cloud") and "off" in line for line in done.lines)
+    assert "docs.threads: auto" in done.lines
     assert len(done.lines) >= 6  # one line per choice
 
     (fresh.root / CONFIG_REL).write_text('{"search": {"default_limit": 3}}\n')  # an edit init must not touch
