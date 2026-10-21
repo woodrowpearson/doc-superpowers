@@ -163,7 +163,8 @@ def _runtime(*, as_json: bool = False) -> Any:
         repo = RepoInfo.from_cwd(Path.cwd())
     except NotARepo as err:
         return _could_not_run(f"doc-search: {err}", as_json)
-    rt = Runtime(repo.top, None, FOREGROUND_WAIT_S, warm=False)
+    # the command line builds what the config names, in the foreground: no static docs fallback
+    rt = Runtime(repo.top, None, FOREGROUND_WAIT_S, warm=False, fallback=False)
     if rt.fixed is None:
         return rt
     if rt.fixed == INERT_LINE:
