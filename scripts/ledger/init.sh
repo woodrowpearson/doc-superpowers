@@ -1008,7 +1008,8 @@ def lg_bl_weak:
   | ($t | test("^P[0-9]$")) or ($t | test("^[0-9]+$")) or ($t | length) < 12 or ($t | test("^[A-Z][A-Z0-9_-]*$"));
 # lg_bl_pick: of a row'"'"'s bold spans, the first that is no tag ("" none).
 def lg_bl_pick: first(.[] | strings | select(lg_bl_weak | not)) // "";
-def lg_stubslug: ascii_downcase | gsub("[^a-z0-9]+"; "-") | sub("^-+"; "") | .[0:50] | sub("-+$"; "") | if . == "" then "item" else . end;
+# lg_stubslug (the slug of a stub file name) lives in defs.jq, shared with new
+# --create: the programs using these definitions include it.
 # A State cell is done (Task 16b U6, fix round 1) when its words
 # (lg_dwords: lower case; ~~, *, ` and apostrophes, ASCII and U+2019,
 # dropped; split at every other run of non-alphanumerics) begin with the words
@@ -1398,7 +1399,7 @@ _lg_init_accept() {
   # Phase 1: validate and plan.
   jq -L "$_LG_LIB" -n -c --slurpfile c "$_LG_CFG" --slurpfile ix "$ix" --slurpfile reg "$reg" --slurpfile d "$s.dec" \
       --slurpfile scan "$s.scan" --slurpfile lgy "$s.lgy" --argjson hstub "$hstub" \
-      "$_LG_JQ_INIT_DEFS$_LG_JQ_KEYS_DEFS$_LG_JQ_RESOLVE_DEFS$_LG_JQ_ACCEPT_DEFS$_LG_JQ_ACCEPT_PLAN" > "$s.plan" \
+      "$_LG_JQ_INCLUDE$_LG_JQ_INIT_DEFS$_LG_JQ_KEYS_DEFS$_LG_JQ_RESOLVE_DEFS$_LG_JQ_ACCEPT_DEFS$_LG_JQ_ACCEPT_PLAN" > "$s.plan" \
     || _lg_die "jq failed (the --accept plan)"
 
   # Phase 2: the stubs' paths (the item directory, _lg_init_item_dir; a

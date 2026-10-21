@@ -60,7 +60,8 @@
 
 # The trailer matcher (awk), shared by _lg_msg_claims and the re-check
 # program: tr_load(file) reads "<kind>\t<name>" lines; tr_match(line) sets
-# TRM (the number of matches) and TRMK[i] / TRMV[i] (kind, value).
+# TRM (the number of matches) and TRMK[i] / TRMV[i] / TRMN[i] (kind, value,
+# and the name as config writes it — upkeep's evidence names the trailer).
 # A claims_by_ref name is a closing keyword (GitHub's form, "Fixes #123"):
 # at the line start (after the same blanks / "*" / "-" a trailer may have),
 # in any case, then ":" and optional blanks or blanks alone ("Fixes:#12",
@@ -89,7 +90,7 @@ function tr_cut(c,   i, j) {
   j = 0
   for (i = 1; i <= TRM; i++) {
     if (TRMK[i] == "claims" || TRMK[i] == "claims_by_path" || TRMK[i] == "claims_by_ref") continue
-    j++; TRMK[j] = TRMK[i]; TRMV[j] = TRMV[i]
+    j++; TRMK[j] = TRMK[i]; TRMV[j] = TRMV[i]; TRMN[j] = TRMN[i]
   }
   TRM = j
 }
@@ -113,14 +114,14 @@ function tr_match(line,   s, i, L, v, ls) {
       else if (v !~ /^[ \t\v\f]+#[1-9][0-9]*([^A-Za-z0-9_]|$)/) continue
       sub(/^[ \t\v\f]+/, "", v)
       match(v, /^#[1-9][0-9]*/)
-      TRM++; TRMK[TRM] = TRK[i]; TRMV[TRM] = substr(v, 1, RLENGTH)
+      TRM++; TRMK[TRM] = TRK[i]; TRMV[TRM] = substr(v, 1, RLENGTH); TRMN[TRM] = TRT[i]
       continue
     }
     if (substr(s, 1, L + 1) != TRT[i] ":") continue
     v = substr(s, L + 2)
     if (v !~ /^[ \t\v\f]+[^ \t\v\f]/) continue
     sub(/^[ \t\v\f]+/, "", v); sub(/[ \t\v\f]+$/, "", v); gsub(/\t/, " ", v)
-    TRM++; TRMK[TRM] = TRK[i]; TRMV[TRM] = v
+    TRM++; TRMK[TRM] = TRK[i]; TRMV[TRM] = v; TRMN[TRM] = TRT[i]
   }
 }
 '
@@ -919,59 +920,97 @@ cmd_ledger_recheck() {
 # the heading, a blank line and the table — nothing else (paste it into the
 # plan). JSON: {rows: [{key, path, confirmed, why}], table}.
 
+# The Related work reader (awk), shared by sweep --plan (_lg_r_plan_scan),
+# validate --plan (_lg_validate_plan) and upkeep's plans
+# (_LG_AWK_UP_PLAN_LINKS): rw_begin() before a document, then rw_line(line)
+# for each of its lines, a CR already dropped. The section is the one a
+# heading of any level named "Related work" (any case, trailing #s aside)
+# opens, to the next heading of the same or a higher level; a fenced block
+# (``` or ~~~) is skipped; in the section, a table's first row is its
+# header, whose "Mark" column (any case; else its last) holds the marks,
+# and a separator row right after it is skipped. rw_line returns -1 for a
+# fence line (one that opens, is inside or closes a fenced block), 1 for a
+# data row of such a table — RW_N cells in RW_C[1..RW_N], each trimmed, a
+# "\|" in it read as "|", and RW_MC the Mark column — and 0 for any other
+# line. RW_FOUND: a Related work heading was seen. rw_trim(s): s without
+# its surrounding blanks; rw_bare(s): without its surrounding `, * and _.
+# shellcheck disable=SC2016  # awk source
+_LG_AWK_RW='
+function rw_trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+function rw_bare(s) {
+  while (s ~ /^[`*_]/) s = substr(s, 2)
+  while (s ~ /[`*_]$/) s = substr(s, 1, length(s) - 1)
+  return s
+}
+function rw_begin() { RW_IN = 0; RW_LV = 0; RW_FOUND = 0; RW_F = ""; RW_T = 0; RW_MC = 0; RW_N = 0 }
+function rw_cell(s) { gsub(/\001/, "|", s); return rw_trim(s) }
+function rw_cells(line,   i) {
+  gsub(/\\\|/, "\001", line)
+  line = rw_trim(line)
+  if (substr(line, 1, 1) == "|") line = substr(line, 2)
+  if (substr(line, length(line), 1) == "|") line = substr(line, 1, length(line) - 1)
+  RW_N = 0
+  while ((i = index(line, "|")) > 0) { RW_C[++RW_N] = rw_cell(substr(line, 1, i - 1)); line = substr(line, i + 1) }
+  RW_C[++RW_N] = rw_cell(line)
+}
+function rw_line(line,   lvl, h, i) {
+  if (RW_F != "") { if (index(rw_trim(line), RW_F) == 1) RW_F = ""; return -1 }
+  if (match(rw_trim(line), /^(```|~~~)/)) { RW_F = substr(rw_trim(line), 1, 3); RW_T = 0; return -1 }
+  if (match(line, /^#+[ \t]/)) {
+    lvl = RLENGTH - 1
+    h = tolower(rw_trim(substr(line, RLENGTH + 1))); sub(/[ \t]*#*[ \t]*$/, "", h)
+    if (RW_IN && lvl <= RW_LV) RW_IN = 0
+    if (!RW_IN && h == "related work") { RW_IN = 1; RW_FOUND = 1; RW_LV = lvl }
+    RW_T = 0
+    return 0
+  }
+  if (!RW_IN) return 0
+  if (line !~ /^[ \t]*\|/) { RW_T = 0; return 0 }
+  RW_T++
+  rw_cells(line)
+  if (RW_T == 1) {
+    RW_MC = RW_N
+    for (i = 1; i <= RW_N; i++) if (tolower(RW_C[i]) == "mark") { RW_MC = i; break }
+    return 0
+  }
+  if (RW_T == 2 && line ~ /^[ \t]*\|?[ \t]*:?-+/) return 0
+  return 1
+}
+'
+
 # _lg_r_plan_scan <plan> <spans-out> <cells-out>: the plan's inline code
 # spans (outside fenced blocks), one per line, and the first cells of the
-# data rows of its "Related work" tables.
+# data rows of its "Related work" tables (_LG_AWK_RW), less their
+# surrounding `, * and _.
 _lg_r_plan_scan() {
-  LC_ALL=C awk -v spans="$2" -v cells="$3" '
-    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
-    BEGIN { printf "" > spans; printf "" > cells; fence = "" }
+  LC_ALL=C awk -v spans="$2" -v cells="$3" "$_LG_AWK_RW"'
+    BEGIN { printf "" > spans; printf "" > cells; rw_begin() }
     {
       sub(/\r$/, "")
       line = $0
-      if (fence != "") { if (index(trim(line), fence) == 1) fence = ""; next }
-      if (match(trim(line), /^(```|~~~)/)) { fence = substr(trim(line), 1, 3); tbl = 0; next }
+      r = rw_line(line)
+      if (r < 0) next
       rest = line
       while ((i = index(rest, "`")) > 0) {
         rest = substr(rest, i + 1)
         j = index(rest, "`")
         if (j == 0) break
-        span = trim(substr(rest, 1, j - 1))
+        span = rw_trim(substr(rest, 1, j - 1))
         if (span != "") print span > spans
         rest = substr(rest, j + 1)
       }
-      if (match(line, /^#+[ \t]/)) {
-        lvl = RLENGTH - 1
-        h = tolower(trim(substr(line, RLENGTH + 1))); sub(/[ \t]*#*[ \t]*$/, "", h)
-        if (insec && lvl <= seclvl) insec = 0
-        if (!insec && h == "related work") { insec = 1; seclvl = lvl }
-        tbl = 0
-        next
-      }
-      if (!insec) next
-      if (line !~ /^[ \t]*\|/) { tbl = 0; next }
-      tbl++
-      if (tbl == 1) next
-      if (tbl == 2 && line ~ /^[ \t]*\|?[ \t]*:?-+/) next
-      c = trim(line)
-      if (substr(c, 1, 1) == "|") c = substr(c, 2)
-      gsub(/\\\|/, "\001", c)
-      k = index(c, "|"); if (k) c = substr(c, 1, k - 1)
-      gsub(/\001/, "|", c)
-      c = trim(c)
-      while (c ~ /^[`*_]/) c = substr(c, 2)
-      while (c ~ /[`*_]$/) c = substr(c, 1, length(c) - 1)
-      if (c != "") print c > cells
+      if (r == 1) { c = rw_bare(RW_C[1]); if (c != "") print c > cells }
     }' "$1"
 }
 
-# _lg_r_file_contracts <index> <files-lines> <out.json>: {file: [contract
-# ids]} — the index contracts whose defined_in matches each file.
+# _lg_r_file_contracts <index> <files-lines> <out.json> [<field>]: {file:
+# [contract ids]} — the index contracts whose <field> globs (defined_in, the
+# default; or read_by) match each file.
 _lg_r_file_contracts() {
-  local ix="$1" files="$2" out="$3" s
+  local ix="$1" files="$2" out="$3" field="${4:-defined_in}" s
   _lg_scratch_name
   s=$_LG_SN
-  jq -r '(.contracts // [])[] | .id as $i | (.defined_in // [])[] | select(test("[[:cntrl:]]") | not) | "\($i)\u0001\(.)"' \
+  jq -r --arg f "$field" '(.contracts // [])[] | .id as $i | (.[$f] // [])[] | select(test("[[:cntrl:]]") | not) | "\($i)\u0001\(.)"' \
     "$ix" > "$s.g" || _lg_die "jq failed (contract globs)"
   LC_ALL=C awk -v globs="$s.g" "$_LG_AWK_GLOB"'
     BEGIN { while ((getline l < globs) > 0) { t = index(l, "\001"); k++; if (gx_add(k, substr(l, t + 1))) ID[k] = substr(l, 1, t - 1) } }
