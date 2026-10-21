@@ -220,6 +220,7 @@ def _init(args: argparse.Namespace) -> int:
     print(f"docs.exclude: {', '.join(cfg.docs.exclude)}")
     print(f"docs.types: {types}")
     print(f"docs.model: {cfg.docs.model or default}")
+    print(f"docs.threads: {cfg.docs.threads or 'auto'}")
     print(f"code: {code}")
     print(f"cloud: {'on' if cfg.cloud else 'off'}")
     print(
