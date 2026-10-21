@@ -15,6 +15,11 @@
 #   ledger             the seven suites, scripts/test-<name>.sh, each run under
 #                      every interpreter (BASH_BIN set, so the scripts under
 #                      test run under it too)
+#   search             the doc-search pytest suite (search/, a uv Python
+#                      package): `uv run --project search --frozen
+#                      --all-extras pytest -q`, run once whatever the
+#                      interpreters (it does not use them). It takes a minute
+#                      or three and never touches the network. Not in --fast.
 #   self-install       the self-installed CI tier and the .gitattributes block
 #                      match what the installer writes (check-self-install.sh)
 #   check-version      the five manifests carry RELEASE-NOTES.md's version
@@ -40,9 +45,10 @@
 #               each suite's output goes to a log, and only its result line —
 #               and its FAIL lines, on a failure — is printed.
 #
-# As in CI, DOC_SP_REQUIRE_YAML_PARSER, DOC_SP_REQUIRE_NODE and
-# DOC_SP_REQUIRE_SHELLCHECK default to 1, so a missing tool is a FAIL, never a
-# SKIP. Export one as 0 to accept that SKIP locally.
+# As in CI, DOC_SP_REQUIRE_YAML_PARSER, DOC_SP_REQUIRE_NODE,
+# DOC_SP_REQUIRE_SHELLCHECK and DOC_SP_REQUIRE_UV default to 1, so a missing
+# tool is a FAIL, never a SKIP. Export one as 0 to accept that SKIP locally
+# (DOC_SP_REQUIRE_UV=0: a host without uv skips the search check, loudly).
 #
 # Exit status: 0 when every check passed, 1 when one failed, 2 on a usage
 # error.
@@ -51,11 +57,12 @@ set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SUITES="doc-tools hooks spec-status-model doc-pr-release merge-driver spec-claims ledger"
 FAST_SUITES="spec-status-model doc-pr-release merge-driver"
-CHECKS="toolchain $SUITES self-install check-version tag plugin-validate"
+CHECKS="toolchain $SUITES search self-install check-version tag plugin-validate"
 
 export DOC_SP_REQUIRE_YAML_PARSER="${DOC_SP_REQUIRE_YAML_PARSER:-1}"
 export DOC_SP_REQUIRE_NODE="${DOC_SP_REQUIRE_NODE:-1}"
 export DOC_SP_REQUIRE_SHELLCHECK="${DOC_SP_REQUIRE_SHELLCHECK:-1}"
+export DOC_SP_REQUIRE_UV="${DOC_SP_REQUIRE_UV:-1}"
 
 usage() {
   awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
@@ -147,7 +154,7 @@ if [ -n "$NAMED" ]; then
 elif [ "$FAST" = 1 ]; then
   RUN="$FAST_SUITES self-install check-version"
 else
-  RUN="toolchain $SUITES self-install check-version tag plugin-validate"
+  RUN="$CHECKS"
 fi
 
 LOGS=$(mktemp -d "${TMPDIR:-/tmp}/doc-sp-check-ci.XXXXXX") || { err "mktemp failed"; exit 1; }
@@ -210,6 +217,43 @@ run_suite() {
   fi
 }
 
+# run_search: the doc-search pytest suite, once. pytest runs in search/, where
+# its pytest.ini_options (testpaths) are found. uv missing is a FAIL, or a loud
+# SKIP under DOC_SP_REQUIRE_UV=0.
+run_search() {
+  local name="search (pytest)" log="$LOGS/search.log" rc=0 line
+  echo "--- $name"
+  if ! command -v uv >/dev/null 2>&1; then
+    if [ "$DOC_SP_REQUIRE_UV" = 0 ]; then
+      echo "SKIP: uv not on PATH — the doc-search pytest suite did not run"
+      record "SKIP  $name (no uv on PATH)"
+    else
+      err "uv not found — the doc-search pytest suite would not run (DOC_SP_REQUIRE_UV=0 accepts the SKIP)"
+      record "FAIL  $name (no uv on PATH)"
+      FAILED=1
+    fi
+    return 0
+  fi
+  if [ "$VERBOSE" = 1 ]; then
+    (cd "$ROOT/search" && uv run --project "$ROOT/search" --frozen --all-extras pytest -q) 2>&1 | tee "$log"
+    rc=${PIPESTATUS[0]}
+  else
+    (cd "$ROOT/search" && uv run --project "$ROOT/search" --frozen --all-extras pytest -q) > "$log" 2>&1 || rc=$?
+  fi
+  # pytest's closing line: "270 passed, 1 warning in 53.12s"
+  line=$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -aE '^[0-9]+ (passed|failed|error|skipped|deselected)|^no tests ran' | tail -n 1)
+  [ -n "$line" ] || line="(no result line: see $log)"
+  if [ "$rc" = 0 ]; then
+    record "PASS  $name  $line"
+  else
+    if [ "$VERBOSE" = 0 ]; then
+      sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -aE '^(FAILED|ERROR) ' | head -n 60
+    fi
+    record "FAIL  $name  $line  (exit $rc, log: $log)"
+    FAILED=1
+  fi
+}
+
 # run_check <name> <command…>
 run_check() {
   local name="$1" rc=0
@@ -229,6 +273,7 @@ for c in $RUN; do
     toolchain) run_check toolchain check_toolchain ;;
     self-install) run_check self-install env BASH_BIN="$FIRST_BASH" "$FIRST_BASH" scripts/check-self-install.sh ;;
     check-version) run_check check-version "$FIRST_BASH" scripts/doc-tools.sh check-version ;;
+    search) run_search ;;
     tag)
       if [ -n "$NAMED" ]; then
         run_check tag "$FIRST_BASH" scripts/doc-tools.sh check-version --tag

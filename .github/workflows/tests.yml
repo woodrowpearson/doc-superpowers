@@ -1,6 +1,7 @@
-# Shell test suites — the seven suites that gate changes to this repo — and the
-# check that this repo's own self-installed CI tier is what the installer
-# would write today.
+# Shell test suites — the seven suites that gate changes to this repo — the
+# doc-search pytest suite (search/, a uv Python package), and the check that
+# this repo's own self-installed CI tier is what the installer would write
+# today.
 #
 # Every step runs scripts/check-ci.sh, which runs the same checks locally
 # (`bash scripts/check-ci.sh`: both interpreters, every check; --fast for the
@@ -77,6 +78,9 @@ jobs:
       # test-doc-tools.sh gates the shipped scripts on shellcheck (warning
       # severity). Without shellcheck that is a loud SKIP locally; here a FAIL.
       DOC_SP_REQUIRE_SHELLCHECK: "1"
+      # The doc-search pytest suite runs through uv (search/uv.lock, --frozen).
+      # Without uv the search check is a loud SKIP locally; here a FAIL.
+      DOC_SP_REQUIRE_UV: "1"
 
     steps:
       # No suite reads this repo's history — they each build throwaway git
@@ -90,6 +94,12 @@ jobs:
       - name: Install shellcheck
         run: |
           command -v shellcheck >/dev/null 2>&1 || brew install shellcheck
+
+      # uv for the doc-search pytest suite (the search check). It installs the
+      # Python that search/.python-version names and the locked dependencies
+      # itself; the suite never touches the network once they are in.
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
       # Fail loudly here rather than midway through a suite if an image change
       # ever drops one of these: jq and git (the hard dependencies), a YAML
@@ -143,6 +153,13 @@ jobs:
       - name: test-ledger.sh
         run: |
           "$BASH_BIN" scripts/check-ci.sh --bash "$BASH_BIN" --verbose ledger
+
+      # The doc-search pytest suite (search/, the opt-in MCP server), run once
+      # per leg. check-ci.sh runs `uv run --project search --frozen
+      # --all-extras pytest -q` for it; it does not depend on the bash under test.
+      - name: doc-search pytest suite
+        run: |
+          "$BASH_BIN" scripts/check-ci.sh --bash "$BASH_BIN" --verbose search
 
       # This repository installs its own CI tier (scripts/hooks/install.sh
       # install --ci): every self-installed file must be exactly what the

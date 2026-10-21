@@ -1,5 +1,27 @@
 # Release Notes
 
+## v3.6.0 (2026-10-20)
+
+This release adds **doc-search**, an opt-in MCP server that answers "where is this specified, and where is it implemented" with one ranked list of docs and code. It keeps two semble indexes per worktree (docs and code), adds an exact-identifier docs leg and, optionally, a Vertex + Firestore cloud docs leg, fuses them by file, and puts the doc-index's cross-links on each hit. On abundance-mvp's corpus (6,513 docs, 66 known-answer queries) the fused docs search scored recall@10 0.927 / MRR 0.764, against 0.889 / 0.740 for the cloud-only search it replaces and 0.783 / 0.558 for one shared index (design spec §12). A project that does not turn it on sees no change, and the doc-superpowers core still needs no Python.
+
+### Upgrading from 3.5.0
+Nothing breaks and nothing needs re-running: no hook script, CI template or vendored script changed. `install.sh status --json` gains `.tiers.search`, only when `--search` is named (the schema stays `doc-superpowers-hooks-status/1`). To turn doc-search on, see `references/search.md` → *Turning it on* (it needs `uv`).
+
+### Features
+- **doc-search** (`search/`, a uv package on the MCP Python SDK v2: `semble`, `mcp`, `pathspec`; no torch, no onnxruntime). `docs/search/config.json` turns it on per repository; `{}` is a complete config, and an unknown key is an error that names it. Without the config every tool and CLI verb is inert. `references/search.md` is the reference.
+  - **Tools:** `search` (docs, code or both; `doc_type`, `path_prefix`, `include_terminal`, `worktree`), `fetch` (a line range of a file in the worktree; git-ignored files are never served), `related` (the code a doc describes, the docs that cover a code file, similar passages) and `status`.
+  - **CLI:** `doc-search init | index | query | status | eval | serve`, through the committed launcher. `status --format json` is a readiness probe (`ready`, each cache `valid` / `stale` / `absent`) that never builds or waits. `eval` scores recall@k and MRR over a JSONL of known-answer queries, with a one-shared-index leg for comparison.
+  - **Local legs:** two semble 0.7 indexes per worktree, built from the working tree and refreshed incrementally; an exact-identifier docs leg (spec IDs, issue keys, file names; front matter, then path, then title); reciprocal-rank fusion by file with a per-kind floor, so neither kind crowds the other out. At most two worktrees' indexes stay in memory and one build runs at a time; a search during a build answers from what is ready and says so.
+  - **Cloud leg** (the `cloud` extra: `google-genai`, `google-cloud-firestore`): Vertex `gemini-embedding-001` query embeddings and Firestore `find_nearest` over a `doc_chunks` collection compatible with abundance-mvp's. It runs beside the local legs under `cloud.timeout_s` (default 20); hits on files this branch changed are dropped so the local legs serve them fresh; a failure is remembered for 60 s. It turns gRPC's fork support off (`GRPC_ENABLE_FORK_SUPPORT=false`, unless already set), since with it on a git child forked while the client was live sometimes died before exec. `DOC_SEARCH_CLOUD=0` turns it off on one machine.
+  - **Cloud write path** (`index --cloud`, the CLI only): it indexes HEAD's blobs, from the base branch only. The corpus stamp decides between a catch-up and a full run, so a stale clone never rolls the shared corpus back. The stamp records `repo_id` and `chunker_version`; a transactional 30-minute lease keeps two hosts from writing at once; orphan pruning stops at max(20, 10% of the corpus).
+- **`hooks install | uninstall | status --search`**: the opt-in doc-search set (never in `--all`; refused without `docs/search/config.json`). It writes a committed POSIX launcher, `.claude/doc-superpowers/search-mcp.sh`, which finds doc-superpowers at run time (`$DOC_SUPERPOWERS_ROOT`, this repository, or the newest plugin-cache version), and a `doc-search` entry in `.mcp.json`. `references/search.md` has snippets for Cursor, Codex, OpenCode and Gemini CLI (unverified).
+- **Skill wiring:** SKILL.md reads `references/search.md` when `docs/search/config.json` exists. `audit` and `review-pr` use a connected server's `search` and `related` as leads to read, never as evidence.
+- **Hardware:** an Apple-silicon Mac is the minimum supported host; Intel Macs and Linux work, slower. On an Intel mini, both indexes of a ~6.5k-doc, ~5.7k-code-file repository build in about 3 minutes; a query takes milliseconds.
+
+### Maintainer tooling (this repository)
+- **`check-ci.sh search`** runs doc-search's pytest suite (`uv run --frozen`). `DOC_SP_REQUIRE_UV` (default 1) makes a missing `uv` a FAIL; `0` turns it into a loud SKIP. `tests.yml` runs the check after `astral-sh/setup-uv`, pinned by sha.
+- The design spec (`docs/superpowers/specs/2026-10-19-doc-search-design.md`, with the eval in §12) and the plan (`docs/superpowers/plans/2026-10-19-doc-search.md`). A local transformer leg (gte-modernbert inside semble) is tracked in #45.
+
 ## v3.5.0 (2026-10-19)
 
 This release works through the pre-ledger issue backlog (#20, #21, #23, #24, #27–#31, #33). For large consumer indexes it adds a non-attesting upgrade of v2-era entries, batch forms of the per-entry writers, time-bounded git hooks and a driver-only git tier with a machine-readable status. The index merge driver now carries a change across a re-key. For this repository's maintainers it adds one local command that runs what CI runs, a release-tag check, a leak scan and new packaging gates.
