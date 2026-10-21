@@ -1,6 +1,6 @@
 # Design note: doc-search's opt-in local-transformer docs embedder
 
-**Status:** Proposal, 2026-10-20. Not built. Tracking issue: woodrowpearson/doc-superpowers#45.
+**Status:** Proposal, 2026-10-20. Not built. The §4 distillation check ran on 2026-10-20 and did not meet its rule, so §2 is the lever. Tracking issue: woodrowpearson/doc-superpowers#45.
 **Parent:** `2026-10-19-doc-search-design.md` §4. That section holds the decision rule, the measurement, and every number quoted here.
 **Target version:** after 3.7.0, as additive and opt-in. This note changes no release files.
 
@@ -71,6 +71,36 @@ From parent §4, same host and corpus:
    - If it keeps at least two-thirds of the gain (≥ +0.10 recall@10 over semble's default), ship it as a documented `docs.model` value and close #45 without the extra.
    - Otherwise, build §2.
 
+**Result, 2026-10-20: the rule is not met, so §2 stands.** A distilled gte keeps none of the gain: +0.003 recall@10 at both widths, and MRR falls.
+- **Setup:** the M1 Pro of parent §4, in a venv of its own: model2vec 0.10.0 with the `distill` extra (torch 2.14.1, transformers 5.3.0).
+  - `distill("Alibaba-NLP/gte-modernbert-base", pca_dims=256)`, and again with `pca_dims=512`. Everything else was left at the defaults: mean pooling, SIF 1e-4, float16, gte's 50,254-token vocabulary.
+  - One more run used CLS pooling (`pooling="first"`, 256-d), because gte is trained with CLS pooling.
+  - Each model got a fresh clone of abundance at `b8c7f61e5e`, with the cutover's `.sembleignore`, `docs.model` set to the model's path, `code.enabled: false`, and its own semble cache.
+  - Scoring used the same 65 queries, k = 10, terminal docs included.
+
+| Local docs leg | recall@10 | MRR | paraphrase (50) | Δ vs semble default |
+|---|---|---|---|---|
+| semble default (potion-code-16M-v2) | 0.687 | 0.531 | 0.650 / 0.453 | |
+| distilled gte, 256-d | 0.690 | 0.502 | 0.650 / 0.438 | +0.003 / −0.029 |
+| distilled gte, 512-d | 0.690 | 0.513 | 0.660 / 0.447 | +0.003 / −0.018 |
+| distilled gte, 256-d, CLS pooling | 0.685 | 0.475 | 0.660 / 0.418 | −0.003 / −0.056 |
+| gte-in-semble (§1) | **0.841** | **0.622** | 0.850 / 0.612 | +0.154 / +0.091 |
+
+| Fused docs leg (+ cloud) | recall@10 | MRR |
+|---|---|---|
+| semble default | 0.887 | 0.647 |
+| distilled gte, 256-d | 0.874 | 0.660 |
+| distilled gte, 512-d | 0.874 | 0.686 |
+| gte-in-semble | 0.880 | **0.744** |
+
+- **Per query (512-d against semble's default):** better on 19, worse on 15, unchanged on 31. gte-in-semble improves 29 queries over the default; the distilled model improves 16 of those. The CLS-pooling model was scored on the local leg only.
+- **Cost:**
+  - **Distilling:** about 4 min per model, once, on 4 CPU threads (model2vec skips MPS on torch ≥ 2.8), at 1.5–1.9 GB peak RSS. The models are 26 MB (256-d) and 51 MB (512-d).
+  - **Docs build:** 77 s (256-d) and 75 s (512-d), at 2.3 and 2.9 GB peak RSS. semble's default takes 63 s.
+  - **Query:** p50 46 ms for the 256-d model, against 45 ms for the default. The 512-d measurement ran under heavy load and is not quoted.
+- **Why it fails:** a distilled model embeds each vocabulary token once, with no context, and averages the tokens of a chunk. gte's gain is on paraphrase queries, which depend on the context that a forward pass over the whole chunk supplies.
+- **Not tried:** tokenlearn training on top of the distilled model, and a corpus vocabulary. Training on gte's outputs needs gte to encode a training corpus, which costs a transformer pass over that corpus, so it is not the cheap lever this check was looking for.
+
 ## 5. Verification
 
 - **Eval:** the 65-query set on the full corpus, local and fused, as in parent §4. The lever ships only if it still meets the rule.
@@ -107,4 +137,4 @@ To be filed only with the owner's OK.
 
 - **abundance:** turn the lever on alongside the cloud leg? It costs one ~3 h build per M-series host and gives about +0.10 MRR at equal recall. Or keep abundance on cloud + static, and leave the lever to projects without a cloud leg?
 - **Upstream:** file the §6 semble issue, and offer the PR?
-- **Order:** run the §4 distillation check first, as proposed?
+- **Order:** the §4 distillation check ran first. It does not meet its rule (+0.003 recall@10), so the choice is between §2 and no local lever at all.
