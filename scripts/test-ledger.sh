@@ -12872,7 +12872,7 @@ test_lg_upkeep_found_by_signals() {
   assert_json_field "$(cat "$TEST_DIR/core.json" 2>/dev/null)" '[.items[] | select(.key == "app-1") | .found_by[]] | join(",")' "key-in-pr-body" \
     "a key in the PR body: key-in-pr-body"
   assert_json_field "$(cat "$TEST_DIR/core.json" 2>/dev/null)" '[.items[] | "\(.key)/\(.rank)"] | join(" ")' \
-    "app-6/1 app-5/2 app-4/3 core-3/3 app-1/4" "the core keeps each item's rank (stripped from the verb's payload)"
+    "app-6/1 app-5/2 app-4/3 core-3/3 app-1/5" "the core keeps each item's rank (stripped from the verb's payload; key-in-pr-body 5, after plan-link)"
   teardown
 }
 
@@ -13294,14 +13294,14 @@ test_lg_upkeep_message_only_no_listed_consumes() {
   lg_up_commit $'util\n\nLedger-Claims: app-5\n\nunlike app-6' src/util/a.js
   lg upkeep --range main..t-mixed --format json
   assert_eq "app-5=|app-6=" "app-5=$(lg_up_vals app-5)|app-6=$(lg_up_vals app-6)" "beside a claimed item: still nothing for app-6"
-  # The PR body (rank 4), through the core: the same.
+  # The PR body (rank 5), through the core: the same.
   git checkout -q -b t-body main
   lg_up_commit $'util\n\nLedger-Claims: app-5' src/util/a.js
   printf 'Follows app-6\n' > "$TEST_DIR/body.txt"
   LG_SUB=upkeep lg_call _lg_up_core "$(git rev-parse main)" "$(git rev-parse t-body)" "$TEST_DIR/body.txt" "" "$TEST_DIR/core.json"
   assert_eq "0" "$LG_RC" "the core with a body: rc 0"
   assert_json_field "$(cat "$TEST_DIR/core.json" 2>/dev/null)" '[.items[] | "\(.key):\(.found_by | join(","))/\(.proposed | length)"] | join(" ")' \
-    "app-5:trailer:claims/0 app-6:key-in-pr-body/0" "app-6 in the PR body only (rank 4): nothing"
+    "app-5:trailer:claims/0 app-6:key-in-pr-body/0" "app-6 in the PR body only (rank 5): nothing"
   teardown
 }
 
@@ -13690,6 +13690,214 @@ test_lg_upkeep_names_hunk_header_case_one_file() {
   assert_json_field "$LG_OUT" '.items[0].proposed | tojson' \
     '[{"field":"changes","value":"field:order.total","evidence":["diff names field:order.total in src/order/total.js (defined_in of field:order.total)"]}]' \
     "two defined_in files changed, one naming it: the evidence lists that one only"
+  teardown
+}
+
+# The amendment corpus's plan p1, by default: a Related work table whose
+# include row names app-2 (as sweep --plan writes it).
+LG_UP_P1='# Plan p1
+
+Fix the total rounding.
+
+## Related work
+
+| Item | Why related | Mark |
+|---|---|---|
+| app-2 | reads the total | include |
+'
+
+# lg_up_amend_fixture [<p1 text>]: lg_upkeep_fixture, then on main (feat
+# restarts there) the document-defined contract spec:SPEC-A (defined_in
+# ["docs/specs/SPEC-A.md"], one markdown document: design §4 D9) and its
+# document, and the plan docs/plans/p1.md (doc-index doc_type plan) with
+# the text given, else LG_UP_P1.
+lg_up_amend_fixture() {
+  lg_upkeep_fixture
+  git checkout -q main
+  # shellcheck disable=SC2016  # JSON
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[
+  {"id":"app","title":"App","kind":"service","status":"active",
+   "contracts":[{"id":"field:order.total","defined_in":["src/order/*.js"]},
+                {"id":"component:Sheet","defined_in":["src/sheet/**"],"title":"The sheet"},
+                {"id":"spec:SPEC-A","defined_in":["docs/specs/SPEC-A.md"]}]},
+  {"id":"core","title":"Core","kind":"platform","status":"active",
+   "contracts":[{"id":"endpoint:create","defined_in":["server/create.js"]}]}]}'
+  mkdir -p docs/plans
+  printf '# SPEC-A\n\nThe order total is rounded.\n' > docs/specs/SPEC-A.md
+  printf '%s' "${1-$LG_UP_P1}" > docs/plans/p1.md
+  printf '{"docs":{"docs/specs/s.md":{"doc_type":"spec"},"docs/plans/p1.md":{"doc_type":"plan"}}}\n' > docs/.doc-index.json
+  git add -A && git commit -qm "amendment corpus"
+  git checkout -q -B feat
+}
+
+# lg_up_found <out>: "<key|path>:<found_by, comma>" per item, space-joined.
+lg_up_found() {
+  jq -r '[.items[] | "\(.key // .path):\(.found_by | join(","))"] | join(" ")' <<<"$1"
+}
+
+# lg_up_props <key|path>: the item's shown proposals, as JSON, from LG_OUT.
+lg_up_props() {
+  jq -c --arg k "$1" '[.items[] | select(.key == $k or .path == $k) | .proposed[]]' <<<"$LG_OUT"
+}
+
+test_lg_upkeep_amendment_cites_plan() {
+  echo "test: #39 D9 — a range that edits SPEC-A's own document with a line 'Landed by docs/plans/p1.md Task 2' (p1's Related work include row names app-2; app-1 is involved by its key in the message): changes spec:SPEC-A goes to app-2, which the cited plan links, involved by plan-cited"
+  lg_up_amend_fixture
+  lg_up_commit --line "Landed by docs/plans/p1.md Task 2" "amend the spec; see app-1" docs/specs/SPEC-A.md
+  lg upkeep --range main..feat --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "app-1:key-in-message app-2:plan-cited" "$(lg_up_found "$LG_OUT")" "app-2, reached only through the cited plan: found by plan-cited"
+  assert_eq '[{"field":"changes","value":"spec:SPEC-A","evidence":["diff amends docs/specs/SPEC-A.md, which cites docs/plans/p1.md (links app-2)"]}]' \
+    "$(lg_up_props app-2)" "changes spec:SPEC-A on app-2, with the pointer's evidence"
+  assert_eq "" "$(lg_up_vals app-1)" "…not on app-1"
+  assert_json_field "$LG_OUT" '.unattributed_contracts | tojson' "[]" "nothing unattributed"
+  lg upkeep --range main..feat
+  assert_contains "$LG_OUT" "app-2  found by plan-cited" "text: the item line"
+  assert_contains "$LG_OUT" "  + changes spec:SPEC-A  — diff amends docs/specs/SPEC-A.md, which cites docs/plans/p1.md (links app-2)" "text: the proposal"
+  assert_contains "$LG_OUT" "  link: ledger link app-2 --changes spec:SPEC-A" "text: the link line"
+  # A pointed item the range adds is exempt from the added-item rule: the
+  # range files app-9 and its plan p2 (an include row for app-9), and the
+  # amendment cites p2.
+  git checkout -q -b t-added main
+  lg_item docs/issues/n.md "key: app-9" "ledger: app" "status: Open" "severity: P3" "summary: The rounding work"
+  printf '# Plan p2\n\n## Related work\n\n| Item | Why related | Mark |\n|---|---|---|\n| app-9 | the work | include |\n' > docs/plans/p2.md
+  lg_up_commit --line "Landed by docs/plans/p2.md Task 1" "amend the spec; see app-1" docs/specs/SPEC-A.md
+  lg upkeep --range main..t-added --format json
+  assert_eq "app-9:item-file-edited,plan-link app-1:key-in-message" "$(lg_up_found "$LG_OUT")" "the premise: app-9 added (and linked by its added plan)"
+  assert_eq '[{"field":"changes","value":"spec:SPEC-A","evidence":["diff amends docs/specs/SPEC-A.md, which cites docs/plans/p2.md (links app-9)"]}]' \
+    "$(lg_up_props app-9)" "pointed, the added app-9 is still a candidate, and wins"
+  teardown
+}
+
+test_lg_upkeep_amendment_plan_frontmatter_link() {
+  echo "test: #39 D9 — the cited plan links the item through its frontmatter: a scalar (issue: app-2), an element of a list (issues: [app-2]), or the item's path (related: [docs/issues/c.md]) — app-2 gets changes spec:SPEC-A; a backticked citation in an AMENDED line counts"
+  local f
+  lg_up_amend_fixture
+  for f in "issue: app-2" "issues: [app-2]" "related: [docs/issues/c.md]"; do
+    git checkout -q main
+    printf -- '---\n%s\n---\n# Plan p1\n\nFix the total rounding.\n' "$f" > docs/plans/p1.md
+    git add -A && git commit -qm "p1: $f"
+    git checkout -q -B feat
+    lg_up_commit --line '> **AMENDED 2026-10-20 — rounding.** Landed by `docs/plans/p1.md` Task 2.' "amend; see app-1" docs/specs/SPEC-A.md
+    lg upkeep --range main..feat --format json
+    assert_eq "0|app-1:key-in-message app-2:plan-cited|changes spec:SPEC-A|" \
+      "$LG_RC|$(lg_up_found "$LG_OUT")|$(lg_up_vals app-2)|$(lg_up_vals app-1)" "frontmatter $f: app-2 gets changes spec:SPEC-A"
+  done
+  teardown
+}
+
+test_lg_upkeep_amendment_body_keys_do_not_link() {
+  echo "test: #39 D9 — a cited plan whose body names app-2 as a word (no include row — app-3's row is an exclude — and no frontmatter) links no item: spec:SPEC-A is unattributed with cites [docs/plans/p1.md], proposed to nobody"
+  lg_up_amend_fixture $'# Plan p1\n\nThis plan follows up app-2.\n\n## Related work\n\n| Item | Why related | Mark |\n|---|---|---|\n| app-3 | tax rounding | exclude: later |\n'
+  lg_up_commit --line "Landed by docs/plans/p1.md Task 2" "amend the spec; see app-1" docs/specs/SPEC-A.md
+  lg upkeep --range main..feat --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "app-1:key-in-message" "$(lg_up_found "$LG_OUT")" "only app-1 is involved (the plan's words and its exclude row link nothing)"
+  assert_eq "" "$(lg_up_vals app-1)" "no proposal to app-1 (never the normal winner)"
+  assert_json_field "$LG_OUT" '.unattributed_contracts | tojson' \
+    '[{"contract":"spec:SPEC-A","files":["docs/specs/SPEC-A.md"],"cites":["docs/plans/p1.md"]}]' "unattributed, with the plan it cites"
+  lg upkeep --range main..feat
+  assert_contains "$LG_OUT" "unattributed: spec:SPEC-A (docs/specs/SPEC-A.md)" "text: the unattributed line"
+  teardown
+}
+
+test_lg_upkeep_amendment_trailer_on_document() {
+  echo "test: #39 D9 — the commit that edits SPEC-A carries Ledger-Claims: app-2, another commit claims app-1 (and edits a file app-1 lists): app-2 gets changes spec:SPEC-A, evidence '<commit12> (Ledger-Claims) amends docs/specs/SPEC-A.md'"
+  lg_up_amend_fixture
+  local c
+  lg_up_commit $'util\n\nLedger-Claims: app-1' src/util/a.js
+  lg_up_commit --line "The total is rounded once." $'amend the spec\n\nLedger-Claims: app-2' docs/specs/SPEC-A.md
+  c=$(git rev-parse HEAD)
+  lg upkeep --range main..feat --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "app-1:trailer:claims app-2:trailer:claims" "$(lg_up_found "$LG_OUT")" "the premise: both claimed"
+  assert_eq "[{\"field\":\"changes\",\"value\":\"spec:SPEC-A\",\"evidence\":[\"${c:0:12} (Ledger-Claims) amends docs/specs/SPEC-A.md\"]}]" \
+    "$(lg_up_props app-2)" "app-2, which the editing commit's trailer names, gets it — before app-1's diff overlap"
+  assert_eq "" "$(lg_up_vals app-1)" "…not app-1"
+  teardown
+}
+
+test_lg_upkeep_amendment_no_pointer() {
+  echo "test: #39 D9 — an edit of SPEC-A's document that cites nothing (no plan, no trailer on its commit): the normal attribution, evidence 'diff amends docs/specs/SPEC-A.md (defined_in of spec:SPEC-A)' — no line names SPEC-A, and none needs to"
+  lg_up_amend_fixture
+  lg_up_commit --line "The total is rounded once." "amend the spec; see app-1" docs/specs/SPEC-A.md
+  lg upkeep --range main..feat --format json
+  assert_eq "0|app-1:key-in-message" "$LG_RC|$(lg_up_found "$LG_OUT")" "exit 0, app-1 involved"
+  assert_eq '[{"field":"changes","value":"spec:SPEC-A","evidence":["diff amends docs/specs/SPEC-A.md (defined_in of spec:SPEC-A)"]}]' \
+    "$(lg_up_props app-1)" "changes spec:SPEC-A on app-1, the document's evidence"
+  teardown
+}
+
+test_lg_upkeep_amendment_paths_still_win() {
+  echo "test: #39 D9 — app-1's paths list docs/specs/SPEC-A.md and the edit cites p1, which links app-2: app-1 gets it (the defined_in count before the pointer)"
+  lg_up_amend_fixture
+  git checkout -q main
+  lg_item docs/issues/a.md "key: app-1" "ledger: app" "status: Open" "severity: P1" "summary: Totals are wrong" \
+    "changes: [field:order.total]" "related-files: [docs/specs/SPEC-A.md]"
+  git add -A && git commit -qm "app-1 lists the spec"
+  git checkout -q -B feat
+  lg_up_commit --line "Landed by docs/plans/p1.md Task 2" "amend the spec; see app-1" docs/specs/SPEC-A.md
+  lg upkeep --range main..feat --format json
+  assert_eq "0|app-1:key-in-message app-2:plan-cited" "$LG_RC|$(lg_up_found "$LG_OUT")" "exit 0, app-2 pointed (plan-cited)"
+  assert_eq '[{"field":"changes","value":"spec:SPEC-A","evidence":["diff amends docs/specs/SPEC-A.md (defined_in of spec:SPEC-A)"]}]' \
+    "$(lg_up_props app-1)" "app-1, whose paths list the document, gets it, with the document's evidence"
+  assert_eq "" "$(lg_up_vals app-2)" "…not app-2"
+  teardown
+}
+
+test_lg_upkeep_plan_link_involvement() {
+  echo "test: #39 D9 — a range that edits p1 (its include row names app-2) and code naming field:order.total, which app-2's paths cover: app-2 is involved by plan-link and gets the change; a plan the range adds links the same way"
+  lg_up_amend_fixture
+  git checkout -q main
+  lg_item docs/issues/c.md "key: app-2" "ledger: app" "status: Open" "severity: P2" "summary: Cart badge reads the total" \
+    "consumes: [field:order.total]" "related-files: [src/order/total.js]"
+  git add -A && git commit -qm "app-2 lists the total"
+  git checkout -q -B feat
+  lg_up_commit "plan: next step" docs/plans/p1.md
+  lg_up_commit --line "$LG_UP_NAMES" "totals; see app-5" src/order/total.js
+  lg upkeep --range main..feat --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_eq "app-5:key-in-message app-2:plan-link" "$(lg_up_found "$LG_OUT")" "app-2 by plan-link (ranked after key-in-message)"
+  assert_eq "app-2=changes field:order.total|app-5=" "app-2=$(lg_up_vals app-2)|app-5=$(lg_up_vals app-5)" \
+    "app-2, whose paths list the defined_in, gets changes field:order.total"
+  git checkout -q -b t-add main
+  printf '%s' "$LG_UP_P1" > docs/plans/p2.md
+  lg_up_commit --line "$LG_UP_NAMES" "totals; see app-5" src/order/total.js
+  lg upkeep --range main..t-add --format json
+  assert_eq "app-5:key-in-message app-2:plan-link|changes field:order.total" "$(lg_up_found "$LG_OUT")|$(lg_up_vals app-2)" \
+    "a plan the range adds (docs/plans/p2.md, a plan directory's): plan-link too"
+  git checkout -q -b t-del main
+  git rm -q docs/plans/p1.md
+  lg_up_commit --line "$LG_UP_NAMES" "totals; see app-5" src/order/total.js
+  lg upkeep --range main..t-del --format json
+  assert_eq "0|app-5:key-in-message" "$LG_RC|$(lg_up_found "$LG_OUT")" "a plan the range deletes links nothing"
+  teardown
+}
+
+test_lg_upkeep_amendment_skip_globs_exempt() {
+  echo "test: #39 D9 — SPEC-A's document is under the default skip globs (docs/**, **/*.md) and is still touched; a contract whose defined_in also names a code file is no document-defined one (its docs/notes.md edit stays skipped); an untouched document touches nothing"
+  lg_up_amend_fixture
+  git checkout -q main
+  # shellcheck disable=SC2016  # JSON
+  lg_registry '{"schema":"ledger-registry/1","ledgers":[
+  {"id":"app","title":"App","kind":"service","status":"active",
+   "contracts":[{"id":"field:order.total","defined_in":["src/order/*.js"]},
+                {"id":"spec:SPEC-A","defined_in":["docs/specs/SPEC-A.md"]},
+                {"id":"spec:SPEC-B","defined_in":["docs/specs/SPEC-B.md"]},
+                {"id":"field:note.text","defined_in":["docs/notes.md","src/notes.js"]}]},
+  {"id":"core","title":"Core","kind":"platform","status":"active",
+   "contracts":[{"id":"endpoint:create","defined_in":["server/create.js"]}]}]}'
+  printf '# SPEC-B\n' > docs/specs/SPEC-B.md
+  git add -A && git commit -qm "more contracts"
+  git checkout -q -B feat
+  lg_up_commit --line "The note.text and the total are rounded once." "amend" docs/specs/SPEC-A.md docs/notes.md
+  lg upkeep --range main..feat --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_json_field "$LG_OUT" '.unattributed_contracts | tojson' '[{"contract":"spec:SPEC-A","files":["docs/specs/SPEC-A.md"]}]' \
+    "spec:SPEC-A touched through its skipped document (no item involved: unattributed, no cites); not field:note.text, nor spec:SPEC-B"
+  LG_SUB=upkeep lg_call _lg_up_core "$(git rev-parse main)" "$(git rev-parse feat)" "" "" "$TEST_DIR/core.json"
+  assert_json_field "$(cat "$TEST_DIR/core.json" 2>/dev/null)" '.touched | tojson' \
+    '[{"contract":"spec:SPEC-A","files":["docs/specs/SPEC-A.md"],"cc_line":null}]' "the core's touched (validate --pushed reads it): spec:SPEC-A, its document"
   teardown
 }
 
@@ -14492,6 +14700,39 @@ test_lg_validate_pushed_advisory_needs_a_naming_line() {
   teardown
 }
 
+test_lg_validate_pushed_advisory_document_contract() {
+  echo "test: #39 D9 (ruling R62) — validate --pushed: a push that edits SPEC-A's own document (skip_globs notwithstanding), involving app-1 and no item declaring changes spec:SPEC-A: exactly one undeclared-contract-change for spec:SPEC-A, exit 0; declared, none; the base's own amendment, merged into the branch, none (R22)"
+  lg_up_amend_fixture
+  local r d a
+  lg_up_commit --line "The total is rounded once." "amend the spec; see app-1" docs/specs/SPEC-A.md
+  r="$(git rev-parse --short=12 main)..$(git rev-parse --short=12 HEAD)"
+  d="docs/specs/SPEC-A.md changes spec:SPEC-A, which no item this push involves declares (changes): ledger upkeep --range $r proposes the link"
+  lg validate --pushed "main..HEAD" --format json
+  assert_eq "0|undeclared-contract-change|advisory|docs/specs/SPEC-A.md|app-1" "$LG_RC|$(lg_vfd)" "one advisory: path the document, key app-1, exit 0"
+  assert_json_field "$LG_OUT" '.findings[0].detail' "$d" "…the detail"
+  lg link app-1 --changes spec:SPEC-A
+  assert_eq "0" "$LG_RC" "ledger link app-1 --changes spec:SPEC-A (uncommitted): exit 0"
+  lg validate --pushed "main..HEAD" --format json
+  assert_eq "0|" "$LG_RC|$(lg_vfd)" "app-1 declares it: no finding"
+  git checkout -q -- docs/issues/a.md
+  # R22: the branch's own range never counts the base's amendment.
+  git checkout -q -b t-r22 main
+  lg_up_commit "util; see app-1" src/util/a.js
+  a=$(git rev-parse HEAD)
+  git checkout -q main
+  lg_up_commit --line "The total is rounded twice." "amend on the base" docs/specs/SPEC-A.md
+  git checkout -q t-r22
+  git merge -q --no-edit main
+  lg_up_commit "more util; see app-1" src/util/a.js
+  lg validate --pushed "$a..HEAD" --format json
+  assert_eq "0|" "$LG_RC|$(lg_vfd)" "the base's amendment, merged into the branch: no finding"
+  lg_enable '{"base":"origin/no-such-branch","keys":{"mode":"merge"}}'
+  lg validate --pushed "$a..HEAD" --format json
+  assert_eq "0|undeclared-contract-change|advisory|docs/specs/SPEC-A.md|app-1" "$LG_RC|$(lg_vfd)" \
+    "the control: no base to filter by, the merged amendment counts"
+  teardown
+}
+
 run_tests() {
   echo "Running ledger tests..."
   echo ""
@@ -14959,6 +15200,14 @@ run_tests() {
   test_lg_upkeep_contract_change_without_naming
   test_lg_upkeep_read_needs_a_naming_line
   test_lg_upkeep_names_hunk_header_case_one_file
+  test_lg_upkeep_amendment_cites_plan
+  test_lg_upkeep_amendment_plan_frontmatter_link
+  test_lg_upkeep_amendment_body_keys_do_not_link
+  test_lg_upkeep_amendment_trailer_on_document
+  test_lg_upkeep_amendment_no_pointer
+  test_lg_upkeep_amendment_paths_still_win
+  test_lg_upkeep_plan_link_involvement
+  test_lg_upkeep_amendment_skip_globs_exempt
   test_lg_upkeep_long_path_list_diffs_the_range
   test_lg_upkeep_long_diff_linear_time
   test_lg_upkeep_pr_merged_and_open
@@ -14975,6 +15224,7 @@ run_tests() {
   test_lg_validate_pushed_advisory_opt_out
   test_lg_validate_pushed_adapter_failure_never_blocks
   test_lg_validate_pushed_advisory_needs_a_naming_line
+  test_lg_validate_pushed_advisory_document_contract
 
   print_summary
 }

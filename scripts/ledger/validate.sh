@@ -1109,8 +1109,8 @@ _lg_v_undeclared() {
 # names, $hasf / $mbd: the branch's own files (lines, \001 for a newline
 # in a name, \002 for a tab), when they filter. None when the range
 # involves no item. A touched contract (upkeep's: through a non-skipped
-# net-diff file with a changed line that names it, or a Contract-Change
-# line; never a skip_contracts id), its
+# net-diff file with a changed line that names it, a document-defined
+# one's document, or a Contract-Change line; never a skip_contracts id), its
 # files only the branch's own with $hasf — one left with none and no
 # Contract-Change line is dropped — that no involved item declares in
 # changes (the index) is one finding: path its first file (null when only

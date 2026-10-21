@@ -858,6 +858,48 @@ END {
   if (left != -1 || (getline r < req) > 0) exit 3
 }'
 
+# _lg_ifl_plans <src> <out>: which files are plans, as lines "d\t<dir/>"
+# (the directory of each entry of the doc-index <src> holds — the working
+# tree, or a commit — whose doc_type is a doc_columns.plan type) and
+# "g\t<glob>" (each doc_columns.plan.globs entry), for _LG_AWK_IFL_PLAN.
+# In-flight's plan claims and upkeep's plans (design 2026-10-18 §4 D9)
+# find plans this way; each has its own link test.
+_lg_ifl_plans() {
+  local di
+  di=$(_lg_doc_index "$1") || exit "$?"
+  # shellcheck disable=SC2016  # jq source
+  jq -r --slurpfile c "$_LG_CFG" '
+    ($c[0].doc_columns.plan // null) as $pc
+    | ($pc | if type == "array" then . elif type == "object" then (.doc_types // []) else [] end | [.[] | strings]) as $types
+    | ([.docs | to_entries[] | select((.value | type) == "object" and ((.value.doc_type // null) as $t | $types | index([$t])))
+        | .key | select(test("[\\n\\t]") | not) | (split("/") | .[0:-1] | join("/")) | if . == "" then "" else . + "/" end]
+       | unique[] | "d\t\(.)"),
+      ($pc | if type == "object" then ((.globs // [])[] | strings | select(test("[\\n\\t]") | not) | "g\t\(.)") else empty end)' \
+    "$di" > "$2" || _lg_die "jq failed (the plan directories)"
+}
+
+# The plan test (awk, after _LG_AWK_GLOB): ifl_plans(file) reads
+# _lg_ifl_plans' lines; ifl_plan(p) is 1 when path p (a newline in it as
+# \001, a tab as \002: never a plan) is a .md file in one of those
+# directories, or matches one of the globs; else 0.
+# shellcheck disable=SC2016  # awk source
+_LG_AWK_IFL_PLAN='
+function ifl_plans(f,   l, t, k, v) {
+  while ((getline l < f) > 0) {
+    t = index(l, "\t"); k = substr(l, 1, t - 1); v = substr(l, t + 1)
+    if (k == "d") IFL_PD[v] = 1; else if (k == "g") { IFL_NG++; gx_add(IFL_NG, v) }
+  }
+  close(f)
+}
+function ifl_plan(p,   d) {
+  if (p !~ /\.md$/ || index(p, "\001") || index(p, "\002")) return 0
+  d = p; sub(/[^\/]*$/, "", d)
+  if (d in IFL_PD) return 1
+  if (IFL_NG > 0) { gx_match(p); return GX_MN > 0 }
+  return 0
+}
+'
+
 # _lg_ifl_sig: the facts signature into _LG_IFL_SIG (16 hex, part of every
 # facts file's name) and the plan directories / globs into
 # $_SCRATCH/lg-ifl-plans (lines "d\t<dir/>", "g\t<glob>"), and the trailer
@@ -870,22 +912,13 @@ END {
 _LG_IFL_SRC=worktree
 _LG_IFL_SIGSRC=""
 _lg_ifl_sig() {
-  local di s
+  local s
   [ -z "${_LG_IFL_SIG:-}" ] || [ "$_LG_IFL_SIGSRC" != "$_LG_IFL_SRC" ] || return 0
   _lg_scratch_name
   s=$_LG_SN
   _lg_trailers "$_SCRATCH/lg-ifl-tr"
   _lg_tr_since
-  di=$(_lg_doc_index "$_LG_IFL_SRC") || exit "$?"
-  # shellcheck disable=SC2016  # jq source
-  jq -r --slurpfile c "$_LG_CFG" '
-    ($c[0].doc_columns.plan // null) as $pc
-    | ($pc | if type == "array" then . elif type == "object" then (.doc_types // []) else [] end | [.[] | strings]) as $types
-    | ([.docs | to_entries[] | select((.value | type) == "object" and ((.value.doc_type // null) as $t | $types | index([$t])))
-        | .key | select(test("[\\n\\t]") | not) | (split("/") | .[0:-1] | join("/")) | if . == "" then "" else . + "/" end]
-       | unique[] | "d\t\(.)"),
-      ($pc | if type == "object" then ((.globs // [])[] | strings | select(test("[\\n\\t]") | not) | "g\t\(.)") else empty end)' \
-    "$di" > "$_SCRATCH/lg-ifl-plans" || _lg_die "jq failed (the plan directories)"
+  _lg_ifl_plans "$_LG_IFL_SRC" "$_SCRATCH/lg-ifl-plans"
   { printf '%s\n' "$_LG_IFL_FACTS"; cat "$_SCRATCH/lg-ifl-tr"; printf 'since %s\nplans\n' "$_LG_TR_SINCE"; cat "$_SCRATCH/lg-ifl-plans"
     printf 'parsers\n%s\n%s\n%s\n' "$_LG_AWK_TRAILER" "$_LG_AWK_IFL_WALK" "$_LG_AWK_IFL_WORDS"; } > "$s.sig" \
     || _lg_die "cannot write $s.sig"
@@ -957,21 +990,10 @@ _lg_ifl_cold() {
   fi
   # The plans each modifies (.md files in a plan directory, or matching a
   # plan glob), read in one cat-file batch.
-  LC_ALL=C awk -v plans="$_SCRATCH/lg-ifl-plans" "$_LG_AWK_GLOB"'
-    BEGIN {
-      while ((getline l < plans) > 0) {
-        t = index(l, "\t"); k = substr(l, 1, t - 1); v = substr(l, t + 1)
-        if (k == "d") PD[v] = 1; else if (k == "g") { g++; gx_add(g, v) }
-      }
-    }
-    {
-      split($0, a, "\t"); p = a[3]
-      if (p !~ /\.md$/ || index(p, "\001") || index(p, "\002")) next
-      d = p; sub(/[^\/]*$/, "", d)
-      ok = (d in PD)
-      if (!ok && g > 0) { gx_match(p); ok = GX_MN > 0 }
-      if (ok) print a[2] ":" p
-    }' "$s.diff" > "$s.preq" || _lg_die "cannot list the in-flight plans"
+  LC_ALL=C awk -v plans="$_SCRATCH/lg-ifl-plans" "$_LG_AWK_GLOB$_LG_AWK_IFL_PLAN"'
+    BEGIN { ifl_plans(plans) }
+    { split($0, a, "\t"); if (ifl_plan(a[3])) print a[2] ":" a[3] }' "$s.diff" > "$s.preq" \
+    || _lg_die "cannot list the in-flight plans"
   : > "$s.words"
   if [ -s "$s.preq" ]; then
     git cat-file --batch < "$s.preq" 2> "$s.err" | tr '\000' '\001' \
