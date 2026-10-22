@@ -42,6 +42,7 @@ doc-superpowers/
 │   │   ├── config.py     # docs/search/config.json: defaults, deep merge, validation (unknown keys refused), DOC_SEARCH_CLOUD=0; INERT_LINE
 │   │   ├── repo.py corpus.py docindex.py  # git plumbing, worktrees, path confinement; the docs corpus (globs, enrichment, terminal filter); the doc-index join
 │   │   ├── engines.py    # IndexPool: the semble docs + code index pair per worktree, background builds (one at a time, docs first), revalidation, LRU of 2, on-disk cache state
+│   │   ├── buildlock.py  # the cross-process build lock: an flock beside each semble index directory (physical path), so one server per host builds an index and the others load it
 │   │   ├── searcher.py fusion.py render.py  # the legs (docs, ident, code, cloud) and file-keyed RRF with the per-kind floor; the markdown answer
 │   │   ├── tools.py      # fetch, related, status
 │   │   ├── server.py     # the MCP server (MCPServer, SDK v2): four tools over one Runtime; cli.py builds the same Runtime
