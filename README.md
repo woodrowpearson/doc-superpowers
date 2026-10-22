@@ -19,7 +19,7 @@ doc-superpowers is a Claude Code skill that treats documentation as a first-clas
 - **Tracks specifications** through implementation with formal spec lifecycle (`spec-generate`, `spec-inject`, `spec-verify`)
 - **Checks spec claims** (opt-in, with `docs/spec-claims/`): executable claims quoted from a spec's normative text, each bound to a check, run by `doc-tools.sh claims` and gated through the spec actions and the hooks
 - **Keeps a work ledger** (opt-in, with `docs/ledger/config.json`): issue files get stable keys, ledger pages and one HTML view are generated from them, related work is found through named contracts, and work in flight on other branches and machines raises notices (`ledger`, `doc-tools.sh ledger`)
-- **Searches docs and code together** (opt-in, with `docs/search/config.json`): doc-search, an MCP server over two local semble indexes — the docs and the code — that answers one ranked list with the doc-index's cross-links on every hit, and can fuse an optional cloud docs leg (Vertex embeddings over Firestore)
+- **Searches docs and code together** (opt-in, with `docs/search/config.json`): doc-search, an MCP server over two local semble indexes — the docs and the code — that answers one ranked list with the doc-index's cross-links on every hit, and can fuse an optional cloud docs leg (Vertex embeddings over Firestore) or run the docs index on an opt-in local transformer model
 - **Drafts release notes** from git history with agent-assisted diff review (`release`)
 - **Syncs CLAUDE.md and README.md** automatically in the actions that write docs (`init`, `update`, `sync`, `release`, `spec-generate`) to prevent drift; in a CI workflow `update` and `sync` report the change instead of editing them
 - **Tracks freshness** via bundled `scripts/doc-tools.sh` — content hashing for docs, content identity (git object ids per code ref) for code
@@ -196,7 +196,7 @@ It is **inert without `docs/ledger/config.json`**: every verb but `init` prints 
 
 ### doc-search (opt-in)
 
-Projects that want to search their docs and code together can turn on **doc-search**, an MCP server shipped as the uv package `search/` (Python; the doc-superpowers core stays bash + jq, and only a project that turns this on needs `uv`). One `search` call ranks docs and code in one list — semble's hybrid search over each, an exact-identifier leg for ids like `ADR-114`, fused per file — and every hit carries its cross-links from the doc-index: a doc's `code_refs`, a code file's covering docs. `fetch` reads a hit's lines, `related` moves between a doc and its code, `status` reports the indexes. Both indexes are local and built from each worktree's working tree, so a branch's own docs are searchable before they merge; code never leaves the machine. An optional `cloud` object adds Vertex `gemini-embedding-001` queries over a shared Firestore corpus of the base branch's docs, fused with the local legs, written by a guarded `doc-search index --cloud`.
+Projects that want to search their docs and code together can turn on **doc-search**, an MCP server shipped as the uv package `search/` (Python; the doc-superpowers core stays bash + jq, and only a project that turns this on needs `uv`). One `search` call ranks docs and code in one list — semble's hybrid search over each, an exact-identifier leg for ids like `ADR-114`, fused per file — and every hit carries its cross-links from the doc-index: a doc's `code_refs`, a code file's covering docs. `fetch` reads a hit's lines, `related` moves between a doc and its code, `status` reports the indexes. Both indexes are local and built from each worktree's working tree, so a branch's own docs are searchable before they merge; code never leaves the machine. An optional `cloud` object adds Vertex `gemini-embedding-001` queries over a shared Firestore corpus of the base branch's docs, fused with the local legs, written by a guarded `doc-search index --cloud`. A project that cannot send its docs to the cloud can instead opt in to a **local transformer** docs model (`"docs": {"model": "transformer:gte-modernbert-base"}`): better on questions put in the user's own words, at the price of a first build of hours per host (about 3 h on an M-series Mac) and more memory; the launcher adds the `local-transformer` extra, and a static docs index answers while the first build runs.
 
 ```bash
 # $ROOT is the plugin's root (the directory holding search/ and scripts/)
@@ -382,9 +382,9 @@ doc-superpowers/
 ├── gemini-extension.json # Gemini CLI extension manifest
 ├── package.json          # npm/OpenCode package metadata
 ├── search/               # doc-search: the opt-in MCP server over docs and code (a uv Python package)
-│   ├── pyproject.toml    # semble, mcp, pathspec; the cloud extra (google-genai, google-cloud-firestore)
+│   ├── pyproject.toml    # semble, mcp, pathspec; the cloud extra (google-genai, google-cloud-firestore) and the local-transformer extra (onnxruntime, flatbuffers, protobuf; tokenizers and huggingface-hub, which semble already brings)
 │   ├── uv.lock
-│   ├── src/doc_search/   # server, CLI, searcher, semble engines, cloud leg (read and write paths)
+│   ├── src/doc_search/   # server, CLI, searcher, semble engines, the local transformer docs embedder, cloud leg (read and write paths)
 │   └── tests/            # pytest suite (no network: a tiny test-built model, fake cloud clients)
 ├── scripts/
 │   ├── doc-tools.sh      # Bundled freshness tooling

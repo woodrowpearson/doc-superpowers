@@ -1,4 +1,4 @@
-"""Shared fixtures: offline semble, a tiny Model2Vec model, and isolated git repositories.
+"""Shared fixtures: offline semble, a tiny Model2Vec model, a fake transformer model, and isolated git repositories.
 
 Tests never touch the network, the user's semble cache, or the user's git config.
 """
@@ -10,8 +10,12 @@ import subprocess
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from doc_search.transformer import TransformerSpec
 
 # huggingface_hub reads HF_HUB_OFFLINE once, at import. conftest loads before any test
 # module (and so before semble and model2vec), so setting it here makes it stick.
@@ -62,6 +66,22 @@ def semble_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pa
     assert os.environ.get("HF_HUB_OFFLINE") == "1", "HF_HUB_OFFLINE changed during the test (monkeypatch.undo()?)"
 
 
+@pytest.fixture(autouse=True)
+def doc_search_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """Point doc-search's own cache (the encode cache, the host lock, the build progress) at a per-test directory.
+
+    Checked again when the test ends, like `semble_cache`: a test that needs another value scopes
+    the patch with `monkeypatch.context()`.
+    """
+    cache = tmp_path / "doc-search-cache"
+    monkeypatch.setenv("DOC_SEARCH_CACHE_LOCATION", str(cache))
+    yield cache
+    assert os.environ.get("DOC_SEARCH_CACHE_LOCATION") == str(cache), (
+        "DOC_SEARCH_CACHE_LOCATION changed during the test (monkeypatch.undo()?): "
+        "its encode cache may have reached the real doc-search cache"
+    )
+
+
 @pytest.fixture(scope="session")
 def tiny_model(tmp_path_factory: pytest.TempPathFactory) -> str:
     """A Model2Vec StaticModel built in-process: seeded random 16-d vectors over VOCAB."""
@@ -80,6 +100,52 @@ def tiny_model(tmp_path_factory: pytest.TempPathFactory) -> str:
     path = tmp_path_factory.mktemp("tiny-model")
     model.save_pretrained(path)
     return str(path)
+
+
+@pytest.fixture
+def fake_transformer(monkeypatch: pytest.MonkeyPatch, tiny_model: str) -> Iterator[TransformerSpec]:
+    """A transformer docs model that loads nothing: yields its spec, `test-tiny` (16-d).
+
+    The spec is in the registry for the test's lifetime, and the encoder loader makes a
+    `FakeEncoder` for it over a real encode cache (`fakes_transformer.fake_encoder()` returns the
+    one a build uses). semble's default model is the tiny static one, so a static build works
+    offline. The process's encoders are dropped before and after (each test starts as a new
+    process would), any build still held at a gate is let go to fail, and semble's own loader is
+    put back.
+    """
+    import semble.index.dense as dense
+
+    from doc_search import transformer
+    from fakes_transformer import TEST_SPEC, FakeEncoder, fake_cache
+
+    made: list[FakeEncoder] = []
+
+    def make(spec: TransformerSpec, threads: int) -> FakeEncoder:
+        encoder = FakeEncoder(spec, fake_cache(spec), threads=threads)
+        made.append(encoder)
+        return encoder
+
+    monkeypatch.setattr(transformer, "REGISTRY", {**transformer.REGISTRY, TEST_SPEC.name: TEST_SPEC})
+    monkeypatch.setattr(transformer, "_make_encoder", make)
+    monkeypatch.setattr(transformer, "_threads", None)
+    monkeypatch.setattr(dense, "_load_cached", dense._load_cached)  # undone at the end: semble's loader is back
+    monkeypatch.setenv("SEMBLE_MODEL_NAME", tiny_model)
+    transformer._reset_encoders()
+    yield TEST_SPEC
+    for encoder in made:
+        encoder.retire()
+    transformer._reset_encoders()
+
+
+@pytest.fixture
+def spec(fake_transformer: TransformerSpec) -> Iterator[TransformerSpec]:
+    """The fake transformer's spec, for the tests of what a pool does with it; at the end every held encode is let
+    go and every build thread joined (`fakes_transformer.release_builds`). test_transformer.py, which runs the
+    real encoder, has a `spec` of its own (the tiny ONNX model's)."""
+    from fakes_transformer import release_builds
+
+    yield fake_transformer
+    release_builds()
 
 
 @dataclass

@@ -36,19 +36,20 @@ doc-superpowers/
 ├── gemini-extension.json # Gemini CLI extension manifest
 ├── package.json          # npm/OpenCode package metadata
 ├── search/               # doc-search: the opt-in MCP server over docs and code — a uv project (Python ≥ 3.11, .python-version 3.12); inert without docs/search/config.json
-│   ├── pyproject.toml    # runtime: semble>=0.7,<0.8, mcp>=2.3,<3, pathspec; extra cloud: google-genai, google-cloud-firestore; dev: pytest; console script doc-search
-│   ├── uv.lock           # Locked (the launcher and CI run with --frozen); no torch, no onnxruntime
+│   ├── pyproject.toml    # runtime: semble>=0.7,<0.8, mcp>=2.3,<3, pathspec; extra cloud: google-genai, google-cloud-firestore; extra local-transformer: onnxruntime (1.31; 1.23.2 on Intel macOS), flatbuffers, protobuf, and tokenizers + huggingface-hub (declared; semble already installs them); dev: pytest; console script doc-search
+│   ├── uv.lock           # Locked (the launcher and CI run with --frozen); no torch; onnxruntime only in the local-transformer extra
 │   ├── src/doc_search/
-│   │   ├── config.py     # docs/search/config.json: defaults, deep merge, validation (unknown keys refused), DOC_SEARCH_CLOUD=0; INERT_LINE
+│   │   ├── config.py     # docs/search/config.json: defaults, deep merge, validation (unknown keys refused; docs.model transformer:<name> against the registry, docs.threads, code.model refuses the prefix), DOC_SEARCH_CLOUD=0; INERT_LINE
 │   │   ├── repo.py corpus.py docindex.py  # git plumbing, worktrees, path confinement; the docs corpus (globs, enrichment, terminal filter); the doc-index join
-│   │   ├── engines.py    # IndexPool: the semble docs + code index pair per worktree, background builds (one at a time, docs first), revalidation, LRU of 2, on-disk cache state
+│   │   ├── engines.py    # IndexPool: the semble docs + code index pair per worktree, background builds (one at a time, docs first), revalidation, LRU of 2, on-disk cache state; with a transformer docs model also the lane of its own, the static fallback that serves while it builds, the swap, eviction
+│   │   ├── transformer.py encode_cache.py progress.py  # the opt-in local docs embedder: the model registry, the ONNX encoder and its seam at semble's model loader; the per-host vector cache (sqlite) and the host encoder lock; build progress, ETA and the file other processes read
 │   │   ├── searcher.py fusion.py render.py  # the legs (docs, ident, code, cloud) and file-keyed RRF with the per-kind floor; the markdown answer
 │   │   ├── tools.py      # fetch, related, status
 │   │   ├── server.py     # the MCP server (MCPServer, SDK v2): four tools over one Runtime; cli.py builds the same Runtime
 │   │   ├── cli.py evaluate.py  # doc-search serve | init | index | query | status | eval; known-answer evaluation
 │   │   ├── chunker.py    # the cloud write path's heading-bounded chunker
 │   │   └── cloud/        # read.py (the cloud leg: Vertex query → Firestore find_nearest, branch-changed suppression), write.py (the guarded indexer), vertex.py (google-genai embeddings), __init__.py (the one gateway to the extra's modules: CloudUnavailable without it; gRPC fork support off before they load)
-│   └── tests/            # pytest: never the network (a test-built Model2Vec model, fake Firestore and Vertex); the live test (test_live.py: semble's default model, end to end) only under DOC_SEARCH_LIVE=1
+│   └── tests/            # pytest: never the network (a test-built Model2Vec model, a fake transformer and a tiny ONNX graph, fake Firestore and Vertex); the live tests (test_live.py: semble's default model, and the gte-modernbert docs model, end to end) only under DOC_SEARCH_LIVE=1
 ├── scripts/
 │   ├── doc-tools.sh      # Bundled freshness tooling (build-index, check-freshness, update-index, add-entry, remove-entry, move-entry, set-code-refs, set-doc-type, upgrade-entries, deprecate-entry, status, audit-merges, bump-version, check-version, implementation-status, set-implementation, fragments {list, validate, merge}, tools {install, uninstall, status, version}, claims {validate, run, promote, render, gate, attest, rulings}, ledger {show, ls, find, related, suggest, sweep, recheck, upkeep, inflight, notices, state-watch, new, assign, link, note, view, validate, publish, finalize, init})
 │   ├── ledger/           # The work ledger, sourced by doc-tools.sh (_lg_enter) for a ledger verb in a repository with docs/ledger/config.json, for ledger init without one, and by claims V5 on a ledger host
@@ -75,7 +76,7 @@ doc-superpowers/
 │   ├── test-spec-status-model.sh # Test suite for the canonical Spec Status Model + call sites
 │   ├── test-spec-claims.sh # Test suite for the `claims` verb group: a fixture per check, the gate flows, /bin/sh stub adapters
 │   ├── test-helpers.sh   # Shared test harness (isolated git env, scratch root, pipefail-safe asserts) sourced by every suite
-│   ├── search/launch.sh  # doc-search's launcher (POSIX sh): finds doc-superpowers at run time, then uv run --project <root>/search --frozen --no-dev [--extra cloud] doc-search; install --search copies it to .claude/doc-superpowers/search-mcp.sh
+│   ├── search/launch.sh  # doc-search's launcher (POSIX sh): finds doc-superpowers at run time, then uv run --project <root>/search --frozen --no-dev [--extra cloud] [--extra local-transformer] doc-search (the second extra when docs.model starts transformer:; without jq, --all-extras --no-extra local-transformer, or --all-extras when grep finds a transformer: model); install --search copies it to .claude/doc-superpowers/search-mcp.sh
 │   ├── merge-doc-index.sh  # Custom git merge driver for .doc-index.json
 │   ├── test-merge-driver.sh # Test suite for merge driver
 │   ├── test-hooks.sh     # Test suite for hooks installer and hook scripts
@@ -185,8 +186,8 @@ doc-superpowers/
 | `references/spec-lifecycle-actions.md` | Detailed procedures for spec-generate, spec-inject, spec-verify actions | Changing spec action steps or adding new spec actions |
 | `references/spec-claims.md` | Spec claims (opt-in, enabled by `docs/spec-claims/`): sidecar and claim schema, `config.json`, checks V1–V12, exit codes, adapter contracts, gates and records, the direction policy keys (config `policy`), reference pytest/jest helpers | Changing a `claims` verb, check, adapter contract or the claims policy |
 | `references/spec-lifecycle-protocol.md` | Wrapper author integration guide — input/output contracts for spec-generate, spec-inject, spec-verify; integration patterns for calling skills; the claims **Direction protocol** (`CODE-DIVERGES`, `DOC-STALE`, `RETIRE`, its policy keys and their defaults) | Adding integration patterns, changing action contracts, changing the direction protocol |
-| `search/` | doc-search, the opt-in MCP server over docs and code: a uv package (`src/doc_search/`, `tests/`), its own Python toolchain, never needed by the rest of doc-superpowers. Inert without `docs/search/config.json` | Changing the server, a tool, the CLI, the config, the fusion or the cloud leg (with `references/search.md`; tests: `bash scripts/check-ci.sh search`) |
-| `scripts/search/launch.sh` | doc-search's POSIX-sh launcher, vendored byte for byte to `.claude/doc-superpowers/search-mcp.sh` by `install --search` | Changing how the server is found or started (installed copies then read `outdated`) |
+| `search/` | doc-search, the opt-in MCP server over docs and code: a uv package (`src/doc_search/`, `tests/`), its own Python toolchain, never needed by the rest of doc-superpowers. Inert without `docs/search/config.json` | Changing the server, a tool, the CLI, the config, the fusion, the cloud leg or the local transformer (with `references/search.md`; tests: `bash scripts/check-ci.sh search`) |
+| `scripts/search/launch.sh` | doc-search's POSIX-sh launcher, vendored byte for byte to `.claude/doc-superpowers/search-mcp.sh` by `install --search`; it picks the uv extras from the config (`cloud`, `local-transformer`) | Changing how the server is found or started, or which extras it adds (installed copies then read `outdated`) |
 | `references/search.md` | doc-search's reference: inert contract, config keys and environment, CLI verbs and exit codes, the four tools, the cloud leg's setup and write-path guards, other clients' snippets, performance, privacy, troubleshooting | Changing any of those (pinned by `test-spec-status-model.sh`: its ten sections, the inert line, the verbs) |
 | `references/tool-mappings.md` | The one capability matrix — per-client tool names and capabilities (INSTALL files, AGENTS.md and GEMINI.md link here), tool resolution | Adding framework support, tool name or capability changes |
 | `AGENTS.md` | Cross-client agent instructions | Adding commands, changing project orientation |
@@ -252,7 +253,7 @@ doc-superpowers/
 | Work ledger adapters | `scripts/ledger/adapters.sh` (`_lg_adapter`, `_lg_adapter_path`: `doc-superpowers:<name>` → `scripts/adapters/<name>.sh`; the JSON-lines contracts); `scripts/adapters/` |
 | Work ledger hook legs | `scripts/hooks/git/ledger-*`, `scripts/hooks/claude/ledger-*.sh`; the hook modes in `scripts/ledger/hooks.sh` and `inflight.sh`; installer: `scripts/hooks/install.sh` (`LG_BEGIN`/`LG_END`, `LEDGER_GIT_HOOKS`, `LEDGER_CLAUDE_HOOKS`) |
 | Work ledger tests and bench | `scripts/test-ledger.sh`; `scripts/bench-ledger.sh` |
-| doc-search (the MCP server) | `search/src/doc_search/` — `server.py` (tools), `cli.py` (verbs, exit codes), `searcher.py` (legs and fusion), `engines.py` (semble index pairs), `cloud/` (read and write paths); reference `references/search.md`; design `docs/superpowers/specs/2026-10-19-doc-search-design.md` |
+| doc-search (the MCP server) | `search/src/doc_search/` — `server.py` (tools), `cli.py` (verbs, exit codes), `searcher.py` (legs and fusion), `engines.py` (semble index pairs), `transformer.py` `encode_cache.py` `progress.py` (the opt-in local docs embedder), `cloud/` (read and write paths); reference `references/search.md`; design `docs/superpowers/specs/2026-10-19-doc-search-design.md` |
 | doc-search install set | `scripts/hooks/install.sh` `# --- doc-search's set (--search)` (`install_search`, `uninstall_search`, `status_search`, `search_state`); the launcher `scripts/search/launch.sh` |
 | doc-search names and setup | `docs/conventions.md` → *doc-search names* (config path, launcher, server and tool names, CLI verbs, `DOC_SEARCH_CLOUD`); `docs/guides/getting-started.md` → *doc-search (opt-in)*; the containers in `docs/architecture/system-overview.md` |
 | doc-search tests | `search/tests/` (pytest; `bash scripts/check-ci.sh search` runs `uv run --project search --frozen --all-extras pytest -q`); the `--search` set in `scripts/test-hooks.sh` |
@@ -507,7 +508,7 @@ The server is the uv package `search/`, started by the client through the commit
 ```
 .mcp.json → sh .claude/doc-superpowers/search-mcp.sh serve
   → launch.sh: find doc-superpowers ($DOC_SUPERPOWERS_ROOT → this checkout → newest plugin-cache version);
-    exec uv run --project <root>/search --frozen --no-dev [--extra cloud] doc-search serve
+    exec uv run --project <root>/search --frozen --no-dev [--extra cloud] [--extra local-transformer] doc-search serve
   → server.build_server → Runtime: RepoInfo.from_cwd, load_config (absent: every tool answers the inert
     line; invalid: "invalid config"), the corpus of the launch worktree, IndexPool, the cloud leg (built
     without the network; one that cannot be built answers with its reason), then the launch worktree's
@@ -530,6 +531,8 @@ search(query, scope, limit, doc_type, path_prefix, include_terminal, worktree)
 ```
 
 `doc-search index --cloud` is the only writer of the cloud corpus (`cloud/write.py`): base guard, the stamp's decision table, the lease, per-file sha skip, HEAD's blobs, the prune cap, then the stamp.
+
+With `docs.model: "transformer:<name>"` the docs kind changes (`engines.py`; the contract is `references/search.md` → *Modes* → *Local transformer*): `IndexPool` calls `transformer.install`, which routes semble's model loader (`semble.index.dense._load_cached`, pinned by `tests/test_semble_seam.py`) to the ONNX `Encoder`. The docs build then runs in the transformer lane (not the build line), under `encode_cache.host_lock` (one encoder per host), and `Encoder.encode` reads and writes `EncodeCache` batch by batch while `progress.BuildProgress` counts. A validated index is saved and replaces the static one, and once the thread's own encode has run at least one forward batch (built or failed) the pool drops the encoder's onnxruntime session (`transformer.release_session`; the first query after it makes a new one; a load, a no-op recheck or an all-cache-hits refresh releases nothing). Until then a hidden static docs state answers docs (`WorktreeIndexes.docs_fallback`; the note `docs: semble's static index while the transformer index builds (see status)`) in the server; the CLI verbs build with `fallback=False`, in the foreground, and print the progress lines.
 
 ### Typical `spec-generate` flow
 

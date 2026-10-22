@@ -18,10 +18,13 @@ from semble import ContentType, SembleIndex
 from doc_search.config import Config, load_config
 from doc_search.corpus import Corpus
 from doc_search.docindex import DocIndex
+from doc_search.encode_cache import encode_cache_path
 from doc_search.engines import IndexPool, WorktreeIndexes
 from doc_search.repo import RepoInfo
 from doc_search.server import build_server
 from doc_search.tools import FETCH_MAX_LINES, DocTools
+from doc_search.transformer import TransformerSpec, default_threads
+from fakes_transformer import fake_encoder, wait_until
 
 SPEC = """---
 status: accepted
@@ -964,6 +967,171 @@ def test_status_flattens_repository_text(git_repo, tiny_model: str) -> None:
     for answer in (text, related):
         assert not any(line.startswith("IGNORE") for line in answer.splitlines())
     assert any(line.startswith("see also: unavailable (index failed: ") for line in related.splitlines())
+
+
+# --- status with a transformer docs model ---------------------------------------------------------------
+
+TRANSFORMER_DOCS = {"model": "transformer:test-tiny"}
+STATIC_WHILE_BUILDING = "docs index: ready (semble's static index, while the transformer index builds)"
+
+
+def encoding(pool: IndexPool, top: Path):
+    """A `wait_until` check: the worktree's transformer build is encoding (returns its progress view)."""
+
+    def check():
+        view = pool.progress(top)
+        return view if view is not None and view.phase == "encoding" else None
+
+    return check
+
+
+def test_status_shows_the_static_index_serving_and_the_transformer_progress(
+    git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = git_repo()
+    seed(repo)
+    monkeypatch.setattr("doc_search.tools.intel_mac", lambda: False)
+    fake_encoder(spec).gate.clear()  # the transformer build holds mid-encode
+    world = make_world(repo, tiny_model, build=False, docs={**TRANSFORMER_DOCS, "threads": 3})
+    top = repo.root
+    served = world.pool.get(top, wait_s=60)
+    assert isinstance(served, WorktreeIndexes) and served.docs_fallback
+    wait_until(encoding(world.pool, top), "the transformer build to encode")
+    chunks = len(served.docs.chunks)
+
+    text = world.tools.status(top)
+    lines = text.splitlines()
+
+    model_at = lines.index("docs model: transformer:test-tiny (doc-search-tests/test-tiny, fake ONNX, 16-d, 3 threads)")
+    cache_line = lines[model_at + 1]
+    assert cache_line.startswith(f"encode cache: {encode_cache_path(spec)} (") and cache_line.endswith(")")
+    assert not cache_line.endswith("(empty)"), "the build opened the encode cache"
+    assert lines[model_at + 2] == f"code model: {tiny_model}"
+    at = lines.index(STATIC_WHILE_BUILDING)
+    got = fields(text, "docs index:")
+    assert list(got) == ["chunks", "files", "last build", "build seconds", "error"]
+    assert got["chunks"] == str(chunks) and got["error"] == "none"
+    assert lines[at + 6] == f"docs: transformer index building, 0 / {chunks} chunks encoded", "after the detail lines"
+    assert "code index: ready" in lines
+    assert not any("failed" in line for line in lines)
+
+
+def test_status_model_line_threads_and_the_intel_note(
+    git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = git_repo()
+    seed(repo)
+    world = make_world(repo, tiny_model, build=False, docs=TRANSFORMER_DOCS)  # docs.threads not set
+    source = "doc-search-tests/test-tiny, fake ONNX, 16-d"
+    head = f"docs model: transformer:test-tiny ({source}, {default_threads()} threads)"
+
+    monkeypatch.setattr("doc_search.tools.intel_mac", lambda: False)
+    assert head in world.tools.status(repo.root, warm=False).splitlines()
+
+    monkeypatch.setattr("doc_search.tools.intel_mac", lambda: True)
+    intel = world.tools.status(repo.root, warm=False).splitlines()
+    assert head + "; Intel: ~3.6 chunks/s against ~16 on M-series" in intel
+
+
+SIZES = [
+    (None, "empty"),
+    (0, "empty"),
+    (512, "512 B"),
+    (12_345, "12.3 kB"),
+    (764_100_000, "764.1 MB"),
+    (2_500_000_000, "2.5 GB"),
+]
+
+
+@pytest.mark.parametrize(("size", "shown"), SIZES)
+def test_status_encode_cache_size(
+    git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch, size: int | None, shown: str
+) -> None:
+    repo = git_repo()
+    seed(repo)
+    monkeypatch.setattr("doc_search.tools.intel_mac", lambda: False)
+    world = make_world(repo, tiny_model, build=False, docs=TRANSFORMER_DOCS)
+    path = encode_cache_path(spec)
+    if size is not None:
+        path.parent.mkdir(parents=True)
+        with path.open("wb") as handle:
+            handle.truncate(size)  # sparse: no disk is used
+
+    lines = world.tools.status(repo.root, warm=False).splitlines()
+
+    assert f"encode cache: {path} ({shown})" in lines
+    assert "docs index: not loaded (status does not load it; a search of this worktree does)" in lines
+
+
+def test_status_survives_a_cache_location_it_cannot_read(
+    git_repo, tiny_model: str, spec: TransformerSpec, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cache directory is a file: status names the path and says nothing is there, and does not raise."""
+    repo = git_repo()
+    seed(repo)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    world = make_world(repo, tiny_model, build=False, docs=TRANSFORMER_DOCS)
+    with monkeypatch.context() as scoped:
+        scoped.setenv("DOC_SEARCH_CACHE_LOCATION", str(blocker))
+        path = encode_cache_path(spec)
+        lines = world.tools.status(repo.root, warm=False).splitlines()
+
+    assert path.parts[: len(blocker.parts)] == blocker.parts
+    assert f"encode cache: {path} (empty)" in lines
+
+
+def test_status_names_a_queued_transformer_build(
+    git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second worktree waits for the transformer lane: its block carries the queued line, with the estimate."""
+    repo = git_repo()
+    seed(repo)
+    monkeypatch.setattr("doc_search.progress.arch_rate", lambda *args, **kwargs: 4.0)
+    fake_encoder(spec).gate.clear()
+    world = make_world(repo, tiny_model, build=False, docs=TRANSFORMER_DOCS)
+    top, other = repo.root, repo.add_worktree("b", "branch-b")
+    assert isinstance(world.pool.get(top, wait_s=60), WorktreeIndexes)
+    wait_until(encoding(world.pool, top), "the first worktree's transformer build to encode")
+    assert isinstance(world.pool.get(other, wait_s=60), WorktreeIndexes)
+
+    def queued():
+        view = world.pool.progress(other)
+        return view if view is not None and view.phase == "queued" and view.total else None
+
+    view = wait_until(queued, "the second worktree's transformer build to queue")
+    assert "queued; about " in view.line() and "at most" not in view.line()
+    assert f"{view.total:,} chunks at ~4 chunks/s" in view.line()
+
+    text = world.tools.status(top)
+    first, _, second = text.partition(f"worktree: {other}")
+    assert view.line() in second.splitlines()
+    assert STATIC_WHILE_BUILDING in second.splitlines()
+    assert any("chunks encoded" in line for line in first.splitlines()), "the first worktree is encoding"
+
+
+def test_status_names_a_failed_transformer_build_by_its_own_error(
+    git_repo, tiny_model: str, spec: TransformerSpec
+) -> None:
+    repo = git_repo()
+    seed(repo)
+    fake_encoder(spec).nan = True  # a broken model: the build fails validation
+    world = make_world(repo, tiny_model, build=False, docs=TRANSFORMER_DOCS)
+    top = repo.root
+
+    def failed():
+        got = world.pool.get(top, wait_s=0.2)
+        return got if isinstance(got, WorktreeIndexes) and got.transformer_error else None
+
+    after = wait_until(failed, "the transformer build to fail")
+    assert after.docs_fallback and after.error == {}
+
+    lines = world.tools.status(top).splitlines()
+
+    assert f"docs: transformer index failed: {after.transformer_error} (the static index serves)" in lines
+    assert STATIC_WHILE_BUILDING in lines
+    assert fields("\n".join(lines), "docs index:")["error"] == "none", "the served index has no error of its own"
+    assert not any("chunks encoded" in line for line in lines), "no build is running"
 
 
 class FakeCloud:
