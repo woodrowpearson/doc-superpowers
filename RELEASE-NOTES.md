@@ -1,5 +1,30 @@
 # Release Notes
 
+## v3.8.1 (2026-10-22)
+
+This release keeps the doc-search servers on one host from rebuilding the same index at once (#50). Every client session runs its own `doc-search serve`, and the servers over a worktree share semble's cache. After a ~320-commit fast-forward of abundance-mvp's main checkout on an Intel Mac, all 7 servers over it rebuilt the same docs and code indexes together: combined RSS went 10.6 → 12.9 GB in 40 s, swap reached 28.2 GB and the root disk fell to 228 MB free. Now one server builds each index and the others load what it saved.
+
+### Upgrading from 3.8.0
+Nothing breaks, and no config, hook, CI template or vendored script changed. `scripts/search/launch.sh` is unchanged, so an installed `--search` launcher stays `current`; servers pick 3.8.1 up at their next start.
+- **What a waiting server answers.** A first build waiting for another server's build of the same index answers `doc-search: index building … retry shortly`, the same line as any first build, until the holder has saved; then it loads the saved index. A rebuild waiting for it is not waited for: the previous index serves. A readiness probe (abundance-mvp's `docs/runbooks/mcp-readiness-gate.md`) therefore sees "building" for the length of one build, not N concurrent ones.
+- **A new file beside each index:** `<index dir>.lock` in semble's cache, a few bytes holding the holder's pid. Do not delete it while servers run.
+- **A new warning** in a server's log when a holder is alive but stuck for an hour: `doc-search: the build lock <path>.lock is still held by pid <n> after 3600 s: building without it`.
+
+### Fixes
+- **One static build per index per host** (#50; `references/search.md` → *Hardware and performance* → *One build per index per host*):
+  - **The lock.** A build holds an exclusive `flock` on `<index dir>.lock` from its slot until it has saved and stamped the index. It covers every static build: the docs index, the code index, and the static docs fallback a transformer build serves meanwhile. A transformer docs build keeps 3.8.0's host encoder lock.
+  - **One lock per physical directory.** The lock path is resolved through symlinks each time the lock is taken, so a cache reached through a link (`~/Library/Caches/semble` → another volume) or named by `SEMBLE_CACHE_LOCATION` keys one lock.
+  - **No duplicate build after a wait.** Inside the lock the cache is checked again: when another process saved it meanwhile, the index is loaded, not rebuilt. Build seconds, and so the recheck cooldown, count from the lock.
+  - **Holders that crash or hang.** A holder that dies releases the lock with its process. One that is alive but stuck is waited for at most an hour, then the waiter builds without the lock. Where `fcntl` is missing (Windows), or the lock cannot be set up (an unwritable cache, a filesystem without `flock`), the build runs without it after one warning.
+  - **Lock order:** a slot, then the cross-process lock, then the entry's `save_lock` (the static fallback's save now runs inside its build lock).
+- **A built index is stamped inside its lock.** Before, the stamp was read after the save, so a save by another process in between could lend an older in-memory index the newer stamp, and the next recheck kept it as current.
+
+### Other
+- Seven suites, 12860 assertions, under bash 5.x and `/bin/bash` 3.2, unchanged. doc-search's pytest suite goes from 761 to 768 tests (`search/tests/test_buildlock.py`).
+- Not built:
+  - **Locking the transformer validate-and-save** with the per-index lock. It would close 3.8.0's known window where a static fallback save in one process overwrites a transformer index another process just saved; this self-heals from the encode cache.
+  - **Sharing an index between processes.** Each server still holds its own copy, 0.4–2.1 GB each measured on that host. Only `vectors.npy` could be memory-mapped; the BM25 archive and the chunk objects cannot be shared.
+
 ## v3.8.0 (2026-10-21)
 
 This release gives doc-search an opt-in local transformer for its docs leg (#45): `docs.model: "transformer:gte-modernbert-base"`. It runs `Alibaba-NLP/gte-modernbert-base` (int8 ONNX, onnxruntime CPU) on the host, with a per-host encode cache keyed by each chunk's text, so a new worktree reuses every vector the host already encoded. On abundance-mvp's docs (194,564 chunks, 65 known-answer queries, k = 10) the local docs leg scores recall@10 0.846 / MRR 0.635, against 0.687 / 0.531 with semble's static model; fused with the cloud leg, 0.880 / 0.743. The launcher also sources a per-user env hook at every launch (#48), so a per-host cache location (`SEMBLE_CACHE_LOCATION`, `DOC_SEARCH_CACHE_LOCATION`, `HF_HOME`) reaches a server an MCP client starts without the shell profile. Static semble stays the default: a project that sets neither sees no change.
