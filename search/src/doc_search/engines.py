@@ -522,7 +522,8 @@ class IndexPool:
                     logger.warning(
                         "doc-search: could not cache the %s index of %s: %s", state.name, worktree, _describe(err)
                     )
-        token = _stamp(find_index_from_cache_folder(path, index.content))
+                # stamped before the lock goes: a later save by another process must not lend this index its stamp
+                token = _stamp(find_index_from_cache_folder(path, index.content))
         return _Outcome(index=index, token=token, files=_files_of(index), changed=True)
 
     def _settle(self, state: _State, outcome: _Outcome, elapsed: float) -> None:
