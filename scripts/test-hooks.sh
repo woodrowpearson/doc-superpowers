@@ -5869,6 +5869,64 @@ test_launcher_is_posix_sh() {
   done
 }
 
+test_launcher_env_hook() {
+  echo "test: launcher: the per-user env hook — \$DOC_SEARCH_ENV_FILE, else \$XDG_CONFIG_HOME/doc-search/env.sh, sourced at every launch before the root is resolved; absent: nothing; unparseable: skipped with one stderr line"
+  setup
+  local envroot other hookdir bin out
+  envroot=$(harness_mktemp_d envroot)
+  other=$(harness_mktemp_d other)
+  srl_root "$envroot"
+  srl_root "$other"
+  hookdir="$XDG_CONFIG_HOME/doc-search"
+  # No hook anywhere: the launch is unchanged.
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search serve" "$RUN_OUT" "no hook: unchanged"
+  # The default location: it runs before the root is resolved, so what it sets is used.
+  mkdir -p "$hookdir"
+  printf 'DOC_SUPERPOWERS_ROOT=%s\n' "$other" > "$hookdir/env.sh"
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "0" "$RUN_RC" "the default hook: exit 0"
+  assert_eq "uv run --project $other/search --frozen --no-dev doc-search serve" "$RUN_OUT" "…\$XDG_CONFIG_HOME/doc-search/env.sh is sourced before the root is resolved"
+  srl_run XDG_CONFIG_HOME= DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search serve" "$RUN_OUT" "…an empty XDG_CONFIG_HOME means \$HOME/.config, where there is none"
+  mkdir -p "$HOME/.config/doc-search"
+  cp "$hookdir/env.sh" "$HOME/.config/doc-search/env.sh"
+  srl_run XDG_CONFIG_HOME= DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_contains "$RUN_OUT" "$other/search" "…and \$HOME/.config/doc-search/env.sh is read then"
+  rm -rf "$HOME/.config"
+  # DOC_SEARCH_ENV_FILE replaces the default; empty is unset; a missing file is skipped.
+  printf 'DOC_SUPERPOWERS_ROOT=%s\n' "$envroot" > "$other/hook.sh"
+  srl_run DOC_SEARCH_ENV_FILE="$other/hook.sh" -- serve
+  assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search serve" "$RUN_OUT" "DOC_SEARCH_ENV_FILE names the hook (the default one is not read)"
+  srl_run DOC_SEARCH_ENV_FILE= -- serve
+  assert_contains "$RUN_OUT" "$other/search" "an empty DOC_SEARCH_ENV_FILE is unset: the default hook"
+  srl_run DOC_SEARCH_ENV_FILE="$other/missing.sh" DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search serve" "$RUN_OUT" "a missing DOC_SEARCH_ENV_FILE: skipped, no message"
+  (cd "$other" && srl_run DOC_SEARCH_ENV_FILE=hook.sh -- serve && echo "$RUN_OUT" > "$other/bare.out")
+  assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search serve" "$(cat "$other/bare.out")" "a bare file name is the one in the cwd (not searched for on PATH)"
+  # What it exports reaches doc-search; it is decided at each launch (a marker here).
+  bin=$(harness_mktemp_d envuv)
+  printf '#!/bin/sh\nprintf "cache=%%s\\n" "${SEMBLE_CACHE_LOCATION:-unset}"\n' > "$bin/uv"
+  chmod +x "$bin/uv"
+  printf 'if [ -e "%s/ready" ]; then export SEMBLE_CACHE_LOCATION=%s/semble; fi\n' "$other" "$other" > "$hookdir/env.sh"
+  srl_run SEMBLE_CACHE_LOCATION= DOC_SUPERPOWERS_ROOT="$envroot" PATH="$bin:$REAL_PATH" -- serve
+  assert_eq "cache=unset" "$RUN_OUT" "an export the hook skips: doc-search keeps its default"
+  : > "$other/ready"
+  srl_run SEMBLE_CACHE_LOCATION= DOC_SUPERPOWERS_ROOT="$envroot" PATH="$bin:$REAL_PATH" -- serve
+  assert_eq "cache=$other/semble" "$RUN_OUT" "…the next launch reads the hook again and exports it"
+  # Its output never reaches stdout (the MCP stream).
+  printf 'echo hook-says-hi\nexport SEMBLE_CACHE_LOCATION=/x\n' > "$hookdir/env.sh"
+  out=$(env DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= PATH="$bin:$REAL_PATH" /bin/sh "$SCRIPT_DIR/search/launch.sh" serve 2>/dev/null)
+  assert_eq "cache=/x" "$out" "the hook's output goes to stderr, not stdout"
+  # A hook that does not parse: skipped, one stderr line, doc-search still starts.
+  printf 'if then fi\nDOC_SUPERPOWERS_ROOT=%s\n' "$other" > "$hookdir/env.sh"
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "0" "$RUN_RC" "an unparseable hook: exit 0"
+  assert_eq "doc-search: ignoring the env hook $hookdir/env.sh (it does not parse)
+uv run --project $envroot/search --frozen --no-dev doc-search serve" "$RUN_OUT" "…one stderr line naming it, and nothing of it is applied"
+  teardown
+}
+
 test_search_install_refused_without_config() {
   echo "test: search: install --search refuses without docs/search/config.json (exit 1, the message, nothing written, with any other tier too); uninstall does not need it"
   setup
@@ -6172,6 +6230,7 @@ test_launcher_resolution_order
 test_launcher_cloud_extra
 test_launcher_without_uv
 test_launcher_is_posix_sh
+test_launcher_env_hook
 test_search_install_refused_without_config
 test_search_install_writes_launcher_and_entry
 test_search_install_idempotent
