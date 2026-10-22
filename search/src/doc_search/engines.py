@@ -13,6 +13,14 @@ thread that finds a valid cache loads it without queueing; one that waits for it
 running, so `get` reads a first build in line as building. A refresh in line is not waited for: the
 previous index serves until the rebuild gets its slot.
 
+Across processes (every session runs its own server over one semble cache), a build holds the
+index's build lock (`buildlock.index_lock`, a `flock` beside the index directory) from its slot
+until it has saved, so one process builds an index and the others wait, then load what it saved.
+The lock is taken inside the slot (slot, then lock: a holder never waits for anything else, so
+no two processes can wait on each other), its wait reads like a wait in line (a refresh with an
+index to serve lets its callers go), and the build is timed from the lock. A waiter gives up after
+`build_lock_wait_s` and builds without it; a holder that dies lets go at once.
+
 Loading follows semble's own cache: a cache that still matches the tree is loaded from disk
 (`get_validated_cache` then `SembleIndex.load_from_disk`), anything else is rebuilt through
 `SembleIndex.from_path`, which re-indexes incrementally, and saved with
@@ -44,6 +52,7 @@ from semble import ContentType, SembleIndex
 from semble.cache import find_index_from_cache_folder, get_validated_cache, save_index_to_cache
 from semble.index.types import PersistencePath
 
+from . import buildlock
 from .config import Config
 
 logger = logging.getLogger(__name__)
@@ -60,6 +69,10 @@ FOREGROUND_WAIT_S = 7 * 24 * 3600.0
 
 # How many `SembleIndex.from_path` builds a pool runs at once, across its worktrees and kinds.
 MAX_CONCURRENT_BUILDS = 1
+
+# How long a build waits for another process's build of the same index before it builds anyway: a
+# holder that died has let go already, so this only bounds one that is alive but stuck.
+BUILD_LOCK_WAIT_S = 3600.0
 
 
 @dataclass
@@ -159,6 +172,17 @@ class _Place:
     def __exit__(self, *exc: object) -> None:
         self.leave()
 
+    def wait_elsewhere(self, _holder: int | None = None) -> None:
+        """The holder waits, slot in hand, for another process's build: it reads as a wait in line."""
+        if self._in_line is not None:
+            self._in_line.set()
+
+    def resume(self) -> None:
+        """The other process let go: the build starts now, and is timed from here."""
+        if self._in_line is not None:
+            self._in_line.clear()
+        self.held_at = self._line._clock()
+
     def leave(self) -> None:
         """Give the slot back, or the place in line when it never built. Safe to call again."""
         line = self._line
@@ -234,6 +258,7 @@ class IndexPool:
         cfg: Config,
         max_worktrees: int = 2,
         clock: Callable[[], float] = time.monotonic,
+        build_lock_wait_s: float = BUILD_LOCK_WAIT_S,
     ) -> None:
         if max_worktrees < 1:
             raise ValueError("max_worktrees must be at least 1")
@@ -243,6 +268,7 @@ class IndexPool:
         self._lock = threading.RLock()
         self._entries: OrderedDict[Path, _Entry] = OrderedDict()  # least recently used first
         self._builds = _BuildLine(MAX_CONCURRENT_BUILDS, clock)
+        self._lock_wait_s = build_lock_wait_s
 
     # -- public ------------------------------------------------------------------------
 
@@ -447,7 +473,7 @@ class IndexPool:
         start = self.clock()
         outcome = _Outcome(error="build thread ended abnormally")
         try:
-            outcome = self._refresh(worktree, state, current, current_token, place)
+            outcome = self._refresh(worktree, state, current, current_token, place, self._lock_wait_s)
         except Exception as err:  # noqa: BLE001 - a build failure is data, not an exception
             outcome = _Outcome(error=_describe(err))
             logger.debug("doc-search: %s index of %s failed", state.name, worktree, exc_info=True)
@@ -465,21 +491,37 @@ class IndexPool:
         current: SembleIndex | None,
         current_token: tuple[int, int] | None,
         place: _Place,
+        lock_wait_s: float = BUILD_LOCK_WAIT_S,
     ) -> _Outcome:
         path = str(worktree)
-        cached = get_validated_cache(path, state.model, state.content)
-        if cached is not None:
+
+        def load(cached: Path) -> _Outcome:
             token = _stamp(cached)
             if current is not None and token is not None and token == current_token:
                 return _Outcome(index=current, token=token)  # the cache is what we already hold
             index = SembleIndex.load_from_disk(cached)
             return _Outcome(index=index, token=token, files=_files_of(index), changed=True)
+
+        cached = get_validated_cache(path, state.model, state.content)
+        if cached is not None:
+            return load(cached)
+        index_dir = find_index_from_cache_folder(path, state.content)
         with place:  # one semble build at a time, pool-wide
-            index = SembleIndex.from_path(path, content=list(state.content), model_path=state.model)
-        try:
-            save_index_to_cache(index, path)
-        except Exception as err:  # noqa: BLE001 - an index that cannot be cached still serves
-            logger.warning("doc-search: could not cache the %s index of %s: %s", state.name, worktree, _describe(err))
+            # and one build of this index at a time, host-wide: held until it is saved
+            with buildlock.index_lock(index_dir, lock_wait_s, on_wait=place.wait_elsewhere) as waited:
+                if waited:
+                    place.resume()
+                # checked again: while this waited (in line, or for the lock) another process may have saved it
+                cached = get_validated_cache(path, state.model, state.content)
+                if cached is not None:
+                    return load(cached)
+                index = SembleIndex.from_path(path, content=list(state.content), model_path=state.model)
+                try:
+                    save_index_to_cache(index, path)
+                except Exception as err:  # noqa: BLE001 - an index that cannot be cached still serves
+                    logger.warning(
+                        "doc-search: could not cache the %s index of %s: %s", state.name, worktree, _describe(err)
+                    )
         token = _stamp(find_index_from_cache_folder(path, index.content))
         return _Outcome(index=index, token=token, files=_files_of(index), changed=True)
 
