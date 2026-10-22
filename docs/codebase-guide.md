@@ -43,6 +43,7 @@ doc-superpowers/
 │   │   ├── repo.py corpus.py docindex.py  # git plumbing, worktrees, path confinement; the docs corpus (globs, enrichment, terminal filter); the doc-index join
 │   │   ├── engines.py    # IndexPool: the semble docs + code index pair per worktree, background builds (one at a time, docs first), revalidation, LRU of 2, on-disk cache state; with a transformer docs model also the lane of its own, the static fallback that serves while it builds, the swap, eviction
 │   │   ├── transformer.py encode_cache.py progress.py  # the opt-in local docs embedder: the model registry, the ONNX encoder and its seam at semble's model loader; the per-host vector cache (sqlite) and the host encoder lock; build progress, ETA and the file other processes read
+│   │   ├── buildlock.py  # the cross-process build lock: an flock beside each semble index directory (physical path), so one server per host builds an index and the others load it
 │   │   ├── searcher.py fusion.py render.py  # the legs (docs, ident, code, cloud) and file-keyed RRF with the per-kind floor; the markdown answer
 │   │   ├── tools.py      # fetch, related, status
 │   │   ├── server.py     # the MCP server (MCPServer, SDK v2): four tools over one Runtime; cli.py builds the same Runtime
@@ -517,7 +518,8 @@ search(query, scope, limit, doc_type, path_prefix, include_terminal, worktree)
   → limit None → search.default_limit; a blank doc_type value or path_prefix is dropped
   → resolve_worktree (one of git worktree list, else refused) → IndexPool.get(wait ≤ 20 s): the docs + code
     pair (loaded from semble's cache when valid, else SembleIndex.from_path, one build at a time pool-wide,
-    docs first; revalidated after max(rescan_seconds, 3 × build seconds), build seconds timed from the build
+    docs first, and one per index host-wide under its build lock (buildlock.py; a waiter loads what the
+    holder saved); revalidated after max(rescan_seconds, 3 × build seconds), build seconds timed from the build
     slot); an index already serving keeps serving while its rebuild waits for the slot; a first build still
     running (or queued) → partial answer with a note, or "index building … retry shortly" when the scope's
     own index is not ready

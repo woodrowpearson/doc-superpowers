@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-10-22T03:52:05Z",
+  "generated_at": "2026-10-22T07:34:11Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -14,23 +14,23 @@
         ".github/workflows/tests.yml",
         "search/"
       ],
-      "code_commit": "5c634c2b4f19a7d505190f526c6c7e6237961fc4",
+      "code_commit": "196093fd090a26baa81c15094cd8e868aa4c501b",
       "doc_type": "architecture",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-22T03:52:05Z",
+      "last_verified": "2026-10-22T07:34:11Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "ef5d209863a2bfd52878b236dabd38b48dca7eac",
         "scripts/": "ccea5f79d26e46fbaa9a73a2a6af0ca5cf4d0983",
-        "references/": "eea99f753a2879e1937a66474a8cc6f59acb2969",
+        "references/": "a52af0735913248fc9a153d04e5471f0d9e9532a",
         "evals/": "fb1628d44093505ceb4ff2cb377ddc90d39974ee",
         ".github/workflows/tests.yml": "037e02b53d730919f5d9d5cb24be5cd0d287b433",
-        "search/": "dc420c59586898e77b719a53a38de6ba75c381c7"
+        "search/": "0d442c3447a98f0641fb8aedfcbbff98f5ec01e6"
       }
     },
     "docs/codebase-guide.md": {
-      "content_hash": "sha256:6596fdb54d2a11d3ac294e1c1d5c7b2e7483bb8c50ec62a4c7a35153db6f99ad",
+      "content_hash": "sha256:d6031b1d9d23190220355c440f3ea8841fead9d7a3b952716ba3ff5b71d63b7f",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/",
@@ -39,19 +39,19 @@
         ".github/workflows/tests.yml",
         "search/"
       ],
-      "code_commit": "5c634c2b4f19a7d505190f526c6c7e6237961fc4",
+      "code_commit": "196093fd090a26baa81c15094cd8e868aa4c501b",
       "doc_type": "codebase-guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-22T03:52:05Z",
+      "last_verified": "2026-10-22T07:34:11Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "ef5d209863a2bfd52878b236dabd38b48dca7eac",
         "scripts/": "ccea5f79d26e46fbaa9a73a2a6af0ca5cf4d0983",
-        "references/": "eea99f753a2879e1937a66474a8cc6f59acb2969",
+        "references/": "a52af0735913248fc9a153d04e5471f0d9e9532a",
         "evals/": "fb1628d44093505ceb4ff2cb377ddc90d39974ee",
         ".github/workflows/tests.yml": "037e02b53d730919f5d9d5cb24be5cd0d287b433",
-        "search/": "dc420c59586898e77b719a53a38de6ba75c381c7"
+        "search/": "0d442c3447a98f0641fb8aedfcbbff98f5ec01e6"
       }
     },
     "docs/conventions.md": {
@@ -105,16 +105,16 @@
         "scripts/",
         "references/"
       ],
-      "code_commit": "5c634c2b4f19a7d505190f526c6c7e6237961fc4",
+      "code_commit": "196093fd090a26baa81c15094cd8e868aa4c501b",
       "doc_type": "workflows",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-22T03:52:05Z",
+      "last_verified": "2026-10-22T07:34:11Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "ef5d209863a2bfd52878b236dabd38b48dca7eac",
         "scripts/": "ccea5f79d26e46fbaa9a73a2a6af0ca5cf4d0983",
-        "references/": "eea99f753a2879e1937a66474a8cc6f59acb2969"
+        "references/": "a52af0735913248fc9a153d04e5471f0d9e9532a"
       }
     },
     "docs/plans/2026-03-26-audit-report.md": {
@@ -756,6 +756,26 @@
       "superseded_by": null,
       "last_verified": null
     },
+    "docs/superpowers/plans/2026-10-18-ledger-upkeep-and-filing.md": {
+      "content_hash": "sha256:3eeefc9fb0fe341a9200a6f22f706b1d4c6bc93ffcec56f8c23182e4708c5ef6",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/superpowers/specs/2026-10-18-ledger-upkeep-and-filing-design.md": {
+      "content_hash": "sha256:f50bcafa4c254b0e02104a2a0bc214b1cf8802e7ca0d8e02ca5f028e24ba4952",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "design-spec",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
     "docs/superpowers/specs/2026-10-19-doc-search-design.md": {
       "content_hash": "sha256:5c09df8a6894704002cf0ad3795f853b7d79ae923ee2d193d1c612b826c04830",
       "code_refs": [],
@@ -778,21 +798,31 @@
       "last_verified": null
     },
     "references/search.md": {
-      "content_hash": "sha256:24a2c7faa2d36a019e02a829b7d9a5a113989144e8e13e715767ebadf37ea5d4",
+      "content_hash": "sha256:aa9f4f613a402908c3752f63cb2193e9b850f2b1b1ab74df0438e631a257073d",
       "code_refs": [
         "search/",
         "scripts/search/"
       ],
       "code_oids": {
-        "search/": "dc420c59586898e77b719a53a38de6ba75c381c7",
+        "search/": "0d442c3447a98f0641fb8aedfcbbff98f5ec01e6",
         "scripts/search/": "052959db6879144594ce8ad7031e808c2d554aff"
       },
-      "code_commit": "5c634c2b4f19a7d505190f526c6c7e6237961fc4",
+      "code_commit": "6e846bb9e3cffe3df0c03b7cc5dad41cd6b47bec",
       "doc_type": "guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-22T03:52:05Z",
+      "last_verified": "2026-10-22T07:34:11Z",
       "implementation": []
+    },
+    "docs/superpowers/plans/2026-10-20-upkeep-precision-and-declare.md": {
+      "content_hash": "sha256:60f9fd9b1b266092f4eba544522ece0d22bbf8dc81a70065030755a77ef859db",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
     },
     "docs/superpowers/specs/2026-10-20-doc-search-local-transformer-design.md": {
       "content_hash": "sha256:60ee7dfe6cd767a8ffc4999813bdc9aadfec047bfa38e8f1abed48264d24df8f",
@@ -807,36 +837,6 @@
     },
     "docs/superpowers/plans/2026-10-20-doc-search-local-transformer.md": {
       "content_hash": "sha256:b8b37080710b1f685dd4527cdc03a132886a38c70e0efa582ce3ac027538c3e3",
-      "code_refs": [],
-      "code_oids": {},
-      "code_commit": null,
-      "doc_type": "plan",
-      "replaces": null,
-      "superseded_by": null,
-      "last_verified": null
-    },
-    "docs/superpowers/plans/2026-10-18-ledger-upkeep-and-filing.md": {
-      "content_hash": "sha256:3eeefc9fb0fe341a9200a6f22f706b1d4c6bc93ffcec56f8c23182e4708c5ef6",
-      "code_refs": [],
-      "code_oids": {},
-      "code_commit": null,
-      "doc_type": "plan",
-      "replaces": null,
-      "superseded_by": null,
-      "last_verified": null
-    },
-    "docs/superpowers/specs/2026-10-18-ledger-upkeep-and-filing-design.md": {
-      "content_hash": "sha256:f50bcafa4c254b0e02104a2a0bc214b1cf8802e7ca0d8e02ca5f028e24ba4952",
-      "code_refs": [],
-      "code_oids": {},
-      "code_commit": null,
-      "doc_type": "design-spec",
-      "replaces": null,
-      "superseded_by": null,
-      "last_verified": null
-    },
-    "docs/superpowers/plans/2026-10-20-upkeep-precision-and-declare.md": {
-      "content_hash": "sha256:60f9fd9b1b266092f4eba544522ece0d22bbf8dc81a70065030755a77ef859db",
       "code_refs": [],
       "code_oids": {},
       "code_commit": null,
