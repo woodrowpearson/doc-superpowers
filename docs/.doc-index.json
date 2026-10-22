@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-10-22T03:52:05Z",
+  "generated_at": "2026-10-22T21:59:31Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -851,6 +851,16 @@
       "code_oids": {},
       "code_commit": null,
       "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
+    },
+    "docs/superpowers/specs/2026-10-22-setup-and-help-design.md": {
+      "content_hash": "sha256:eac1b7bc923c5eec38dbabf73b041580bd0f4d247bbe942687df4b8dbf1dc0f5",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "design-spec",
       "replaces": null,
       "superseded_by": null,
       "last_verified": null
