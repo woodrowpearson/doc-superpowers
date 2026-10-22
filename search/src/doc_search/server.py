@@ -72,8 +72,9 @@ RELATED_DESCRIPTION = (
 
 STATUS_DESCRIPTION = (
     "Report how doc-search is set up here: the config, the docs and code models, the semble version, the index "
-    "state of each worktree, the docs semble has not indexed, and whether a doc-index is present. Use it when "
-    "`search` answers that an index is building or off, or finds fewer docs than expected. " + DATA_NOTE
+    "state of each worktree, the docs semble has not indexed, and whether a doc-index is present. With a local "
+    "transformer docs model it also reports that build's progress and ETA. Use it when `search` answers that an "
+    "index is building or off, or finds fewer docs than expected. " + DATA_NOTE
 )
 
 
@@ -89,9 +90,13 @@ class Runtime:
     `fixed` is the one line every tool answers when doc-search is not enabled here (inert, invalid
     config, not a git work tree); otherwise it is None and `searcher` and `tools` are set. `warm`
     starts the launch worktree's builds at once; the CLI turns it off and asks for them itself.
+    `fallback` goes to the pool this builds: with a transformer docs model, semble's static docs
+    index serves while the transformer one builds; the CLI turns it off and builds in the foreground.
     """
 
-    def __init__(self, cwd: Path, pool: IndexPool | None, wait_s: float, *, warm: bool = True) -> None:
+    def __init__(
+        self, cwd: Path, pool: IndexPool | None, wait_s: float, *, warm: bool = True, fallback: bool = True
+    ) -> None:
         self.repo: RepoInfo | None = None
         self.cfg: Config | None = None
         self.pool: IndexPool | None = None
@@ -123,7 +128,7 @@ class Runtime:
             return
         if self.repo is None:
             return  # enabled, but there is no repository to search
-        self.pool = pool if pool is not None else IndexPool(self.cfg)
+        self.pool = pool if pool is not None else IndexPool(self.cfg, fallback=fallback)
         # The same cloud leg serves `search` and `status`. It is built without touching the network; one that
         # cannot be built (no cloud extra, no project) is a leg that says so, never a crash.
         cloud = self.cloud = build_cloud_leg(self.cfg.cloud, corpus_for=self.corpus_for) if self.cfg.cloud else None

@@ -17,8 +17,10 @@ from doc_search.docindex import DocIndex
 from doc_search.engines import Building, IndexPool, WorktreeIndexes
 from doc_search.render import render_search
 from doc_search.repo import GitError, RepoInfo
-from doc_search.searcher import Searcher
+from doc_search.searcher import Searcher, model_label
+from doc_search.transformer import TransformerSpec
 from doc_search.types import Hit, SearchRequest, SearchResponse
+from fakes_transformer import fake_encoder, wait_until
 
 SPEC = """---
 status: accepted
@@ -150,6 +152,24 @@ def test_scope_all_returns_both_kinds_with_links(git_repo, tiny_model: str) -> N
     assert resp.header.cloud is None and resp.header.notes == () and not resp.header.truncated
     text = render_search(resp)
     assert text.splitlines()[0].startswith(f"doc-search · docs: semble {Path(tiny_model).name} · code: semble ")
+
+
+@pytest.mark.parametrize(
+    ("model", "label"),
+    [
+        ("transformer:gte-modernbert-base@e7f32e3c00f9", "transformer:gte-modernbert-base"),
+        ("transformer:gte-modernbert-base", "transformer:gte-modernbert-base"),
+        ("minishlab/potion-base-8M", "potion-base-8M"),
+        ("/models/tiny/", "tiny"),
+    ],
+)
+def test_model_label(model: str, label: str) -> None:
+    assert model_label(model) == label
+
+
+def test_model_label_of_the_default_model(tiny_model: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SEMBLE_MODEL_NAME", tiny_model)  # semble's default model, as `resolve_model_name` reads it
+    assert model_label(None) == Path(tiny_model).name
 
 
 def test_identifier_query_hits_doc(git_repo, tiny_model: str) -> None:
@@ -1371,3 +1391,46 @@ def test_scope_docs_never_calls_the_code_index_with_an_empty_selection(
     calls.clear()
     assert world.search("refund", scope="docs", doc_type=("adr",)).hits == []  # nothing allowed at all
     assert calls == []
+
+
+# --- a transformer docs model ---------------------------------------------------------------------------
+
+FALLBACK_NOTE = "docs: semble's static index while the transformer index builds (see status)"
+
+
+def test_header_names_the_static_model_while_the_transformer_index_builds(
+    git_repo, tiny_model: str, spec: TransformerSpec
+) -> None:
+    repo = git_repo()
+    seed(repo)
+    encoder = fake_encoder(spec)
+    encoder.gate.clear()  # the transformer build holds mid-encode
+    world = make_world(repo, tiny_model, build=False, docs={"model": "transformer:test-tiny"})
+    top = repo.root
+    served = world.pool.get(top, wait_s=60)
+    assert isinstance(served, WorktreeIndexes) and served.docs_fallback
+
+    resp = world.search("refund rounding total")
+
+    static = Path(tiny_model).name  # semble's default model: the static index answers
+    assert resp.header.docs_model == static and resp.header.notes == (FALLBACK_NOTE,)
+    assert paths(resp, "doc"), "docs answer from the static index"
+    lines = render_search(resp).splitlines()
+    assert lines[0].startswith(f"doc-search · docs: semble {static} · code: semble ")
+    assert f"note: {FALLBACK_NOTE}" in lines
+    docs_only = world.search("refund rounding total", scope="docs")
+    assert docs_only.header.docs_model == static and docs_only.header.notes == (FALLBACK_NOTE,)
+    code_only = world.search("refund rounding total", scope="code")
+    assert code_only.header.notes == (), "a code search does not touch the docs index"
+
+    encoder.gate.set()  # the transformer index validates and replaces the static one
+
+    def swapped():
+        got = world.pool.get(top, wait_s=0.2)
+        return isinstance(got, WorktreeIndexes) and got.docs is not None and not got.docs_fallback
+
+    wait_until(swapped, "the swap")
+    done = world.search("refund rounding total")
+    assert done.header.docs_model == "transformer:test-tiny" and done.header.notes == ()
+    head = render_search(done).splitlines()[0]
+    assert head.startswith("doc-search · docs: semble transformer:test-tiny · code: semble ")

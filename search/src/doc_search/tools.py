@@ -6,7 +6,9 @@ FETCH_MAX_LINES lines in all (the location line, the doc header and the truncati
 semble's `find_related` the similar passages. Both serve only what git does not ignore (a tracked file,
 or an untracked one no ignore rule matches). `status` says what is indexed and what is not; it never
 waits for a build, never reads a cloud collection, and waits for the cloud leg's lines at most
-STATUS_CLOUD_BUDGET_S.
+STATUS_CLOUD_BUDGET_S. With a transformer docs model it also says how that model is set up, how big
+its encode cache is, whether semble's static index serves while the transformer index builds, and how
+the build is getting on (chunks encoded, ETA, or the estimate for one still queued).
 
 Every answer is text. What cannot be answered is one line starting `doc-search:`; a path or a message
 with a line break in it is flattened first, so repository content cannot start a line of its own.
@@ -28,10 +30,13 @@ from semble.utils import resolve_model_name
 
 from .config import CONFIG_REL, Config
 from .corpus import Corpus
+from .encode_cache import cache_size, encode_cache_path
 from .engines import Building, IndexPool, Kind, WorktreeIndexes
+from .progress import ARCH_RATES, intel_mac
 from .render import INDENT, LINK_LIMIT, SEP, fit_to_cap, flat, render_hits
 from .repo import GitError, RepoInfo, confine, is_ignored, norm_rel
 from .searcher import CloudLeg, enrich_hit
+from .transformer import PREFIX, default_threads
 from .types import DocMeta, Hit
 
 FETCH_MAX_LINES = 400  # the whole answer: location line, doc header, file lines and truncation note
@@ -69,6 +74,8 @@ class _View:
     error: str | None = None
     built_at: float | None = None
     build_seconds: float | None = None
+    fallback: bool = False  # docs only: `index` is semble's static one, serving while the transformer index builds
+    transformer_error: str | None = None  # docs only: the last transformer build's error (not the served index's)
 
     def why(self) -> str:
         """Why there is no index to ask (for the states without one)."""
@@ -298,12 +305,11 @@ class DocTools:
     def _status(self, worktree: Path, warm: bool = True) -> str:
         top = worktree.resolve()
         cloud_by = time.monotonic() + STATUS_CLOUD_BUDGET_S  # one budget for every worktree's cloud lines
-        docs_model = flat(self.cfg.docs.model or resolve_model_name())
         code_model = flat(self.cfg.code.model or resolve_model_name()) if self.cfg.code.enabled else "off"
         out = [
             "doc-search status",
             f"config: {self.repo.top / CONFIG_REL}",
-            f"docs model: {docs_model}",
+            *self._docs_model_lines(),
             f"code model: {code_model}",
             f"semble {IndexPool.semble_version()}",
             "",
@@ -317,6 +323,20 @@ class DocTools:
             if got is not None:  # None: evicted since resident() was read
                 out += ["", f"worktree: {tree}", *self._worktree_lines(tree, got, cloud_by)]
         return "\n".join(out)
+
+    def _docs_model_lines(self) -> list[str]:
+        """The docs model; for a transformer model also how it runs and the size of its encode cache."""
+        spec = self.cfg.docs.transformer
+        if spec is None:
+            return [f"docs model: {flat(self.cfg.docs.model or resolve_model_name())}"]
+        threads = self.cfg.docs.threads or default_threads()
+        how = f"{flat(spec.source)}, {spec.variant} ONNX, {spec.dim}-d, {threads} threads"
+        line = f"docs model: {PREFIX}{spec.name} ({how})"
+        if intel_mac():
+            intel, arm = ARCH_RATES[("darwin", "x86_64")], ARCH_RATES[("darwin", "arm64")]
+            line += f"; Intel: ~{intel:g} chunks/s against ~{arm:g} on M-series"
+        path = encode_cache_path(spec)
+        return [line, f"encode cache: {flat(path)} ({_size_text(cache_size(path))})"]
 
     def _asked(self, top: Path, warm: bool = True) -> WorktreeIndexes | Building | None:
         """The asked worktree's indexes without disturbing the pool; None when they are not loaded.
@@ -351,15 +371,27 @@ class DocTools:
         return out
 
     def _index_lines(self, tree: Path, view: _View) -> list[str]:
+        out = self._state_lines(tree, view)
+        if view.kind == "docs" and self.cfg.docs.transformer is not None:
+            out += self._transformer_lines(tree, view)
+        return out
+
+    def _state_lines(self, tree: Path, view: _View) -> list[str]:
         if view.state == "off":
             return [f"{view.kind} index: off ({view.why()})"]
         if view.state == "building":
             return [f"{view.kind} index: building (first build not finished)"]
         if view.state == "unloaded":
             return [f"{view.kind} index: not loaded (status does not load it; a search of this worktree does)"]
-        state = (
-            "ready (refresh failed; serving the previous index)" if view.state == "ready" and view.error else view.state
-        )
+        state = view.state
+        if view.state == "ready":
+            notes = []
+            if view.fallback:
+                notes.append("semble's static index, while the transformer index builds")
+            if view.error:
+                notes.append("refresh failed; serving the previous index")
+            if notes:
+                state = f"ready ({'; '.join(notes)})"
         return [
             f"{view.kind} index: {state}",
             f"  chunks: {len(view.index.chunks) if view.index is not None else 0}",
@@ -368,6 +400,17 @@ class DocTools:
             f"  build seconds: {view.build_seconds:.2f}" if view.build_seconds is not None else "  build seconds: n/a",
             f"  error: {flat(view.error) if view.error else 'none'}",
         ]
+
+    def _transformer_lines(self, tree: Path, view: _View) -> list[str]:
+        """What the transformer docs build did and does: its last failure while the static index serves, and
+        the progress of the build under way in this process (another process's is the command line's to read)."""
+        out = []
+        if view.fallback and view.transformer_error:  # not `error`: that is the static index's own
+            out.append(f"docs: transformer index failed: {flat(view.transformer_error)} (the static index serves)")
+        progress = self._pool.progress(tree)
+        if progress is not None:
+            out.append(progress.line())
+        return out
 
     def _corpus_lines(self, tree: Path, corpus: Corpus, docs: _View, code: _View) -> list[str]:
         files = corpus.files()
@@ -415,6 +458,8 @@ class DocTools:
             error=error,
             built_at=seen.built_at.get(kind),
             build_seconds=seen.build_seconds.get(kind),
+            fallback=kind == "docs" and seen.docs_fallback,
+            transformer_error=seen.transformer_error if kind == "docs" else None,
         )
 
 
@@ -570,6 +615,20 @@ def _with_hits(head: list[str], label: str, hits: list[Hit]) -> str:
         blocks[0] = f"{label}\n{blocks[0]}"
         return fit_to_cap("\n".join(head), blocks)
     return "\n".join([*head, f"{label[:-1]}: none"])
+
+
+def _size_text(size: int | None) -> str:
+    """`empty` for no cache (or an empty file), else bytes in SI units: `512 B`, `12.3 kB`, `764.1 MB`, `2.5 GB`."""
+    if not size:
+        return "empty"
+    if size < 1000:
+        return f"{size} B"
+    value = size / 1000
+    for unit in ("kB", "MB"):
+        if round(value, 1) < 1000:
+            return f"{value:.1f} {unit}"
+        value /= 1000
+    return f"{value:.1f} GB"
 
 
 def _age(seconds: float) -> str:
