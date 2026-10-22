@@ -6,16 +6,22 @@ an invalid one it prints `doc-search: invalid config: <message>` on stderr and e
 
 The verbs that search (`query`, `status`, `eval`) use the same `Runtime` as the MCP tools. `index`, `query` and
 `eval` are foreground work and wait for a build without a bound (a build that is cached once is fast the next
-time). `status` is the readiness probe: it never builds, loads or waits, and says whether semble's saved index
-of each kind is `valid`, `stale` or `absent` on disk.
+time). With a transformer docs model a first build takes hours, so these verbs print the build's progress on
+stderr every PROGRESS_EVERY_S seconds. `status` is the readiness probe: it never builds, loads or waits, and says
+whether semble's saved index of each kind is `valid`, `stale` or `absent` on disk (for a transformer docs model also
+the static index that serves while it builds), and, from the progress file a live build publishes, how that build
+is getting on.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
-from collections.abc import Sequence
+import threading
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, NoReturn
@@ -28,16 +34,23 @@ from .cloud.write import BaseRefError, CloudIndexer, CorpusRefused, IndexReport,
 from .config import CONFIG_REL, DEFAULTS, INERT_LINE, Config, ConfigError, load_config
 from .corpus import Corpus
 from .docindex import DocIndex
+from .encode_cache import cache_size, encode_cache_path
 from .engines import FOREGROUND_WAIT_S, Building, IndexPool, WorktreeIndexes
 from .evaluate import EvalFileError, run_eval
+from .progress import ProgressView, read_progress
 from .render import render_search
 from .repo import GitError, NotARepo, RepoInfo, resolve_worktree
 from .tools import cloud_status_lines
 from .types import SearchRequest
 
+logger = logging.getLogger(__name__)
+
 EXIT_FINDINGS = 1
 EXIT_COULD_NOT_RUN = 2
 EXIT_USAGE = 3
+
+# How often a foreground verb prints the progress of a transformer docs build, in seconds.
+PROGRESS_EVERY_S = 30.0
 
 INVALID_REQUEST = "doc-search: invalid request:"
 ORPHAN_LIST = 10
@@ -163,7 +176,8 @@ def _runtime(*, as_json: bool = False) -> Any:
         repo = RepoInfo.from_cwd(Path.cwd())
     except NotARepo as err:
         return _could_not_run(f"doc-search: {err}", as_json)
-    rt = Runtime(repo.top, None, FOREGROUND_WAIT_S, warm=False)
+    # the command line builds what the config names, in the foreground: no static docs fallback
+    rt = Runtime(repo.top, None, FOREGROUND_WAIT_S, warm=False, fallback=False)
     if rt.fixed is None:
         return rt
     if rt.fixed == INERT_LINE:
@@ -177,6 +191,42 @@ def _could_not_run(line: str, as_json: bool) -> int:
     if as_json:
         print(json.dumps({"enabled": False, "error": " ".join(line.split())}, indent=2))
     return _fail(EXIT_COULD_NOT_RUN, line)
+
+
+def _print_progress(line: str) -> None:
+    print(f"doc-search: {line}", file=sys.stderr, flush=True)
+
+
+@contextmanager
+def _progress_lines(rt: Any, worktree: Path) -> Iterator[None]:
+    """While a foreground verb waits for the indexes, say on stderr how a transformer docs build is getting on.
+
+    Every PROGRESS_EVERY_S seconds the build of `worktree` in this process, if there is one, prints its line
+    (`ProgressView.line`) as `doc-search: <line>`. The first build of a transformer docs index takes hours, and a
+    verb that prints nothing for that long looks hung. It starts nothing for a static docs model and stops when
+    the verb returns.
+    """
+    if rt.cfg.docs.transformer is None:
+        yield
+        return
+    stop = threading.Event()
+
+    def say() -> None:
+        while not stop.wait(PROGRESS_EVERY_S):
+            try:
+                view = rt.pool.progress(worktree)
+                if view is not None:
+                    _print_progress(view.line())
+            except Exception:  # noqa: BLE001 - a side channel: a line that cannot be printed must not end the verb
+                logger.debug("doc-search: build progress not printed", exc_info=True)
+
+    thread = threading.Thread(target=say, name="doc-search-progress", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(5)
 
 
 # -- serve ---------------------------------------------------------------------------------------------------
@@ -220,6 +270,7 @@ def _init(args: argparse.Namespace) -> int:
     print(f"docs.exclude: {', '.join(cfg.docs.exclude)}")
     print(f"docs.types: {types}")
     print(f"docs.model: {cfg.docs.model or default}")
+    print(f"docs.threads: {cfg.docs.threads or 'auto'}")
     print(f"code: {code}")
     print(f"cloud: {'on' if cfg.cloud else 'off'}")
     print(
@@ -241,7 +292,8 @@ def _index(args: argparse.Namespace) -> int:
 
 
 def _index_local(rt: Any) -> int:
-    got = rt.pool.get(rt.repo.top, wait_s=FOREGROUND_WAIT_S)
+    with _progress_lines(rt, rt.repo.top):
+        got = rt.pool.get(rt.repo.top, wait_s=FOREGROUND_WAIT_S)
     if isinstance(got, Building):  # not reachable with this wait; never a hang or a traceback if it is
         return _fail(EXIT_COULD_NOT_RUN, "doc-search: the indexes are still building")
     failed = False
@@ -324,7 +376,8 @@ def _query(args: argparse.Namespace) -> int:
         path_prefix=args.path_prefix,
         include_terminal=args.include_terminal,
     )
-    answer = rt.searcher.search(request, worktree)
+    with _progress_lines(rt, worktree):
+        answer = rt.searcher.search(request, worktree)
     if isinstance(answer, str):  # a one-line answer: the search could not be made
         return _fail(EXIT_USAGE if answer.startswith(INVALID_REQUEST) else EXIT_COULD_NOT_RUN, answer)
     if args.format == "json":
@@ -347,7 +400,9 @@ def _status(args: argparse.Namespace) -> int:
     """The probe: what is set up, what this process holds (nothing, when it is fresh) and what is on disk.
 
     It never builds, loads or waits. The disk is asked through `IndexPool.cache_state`: `valid` (a build would
-    load it), `stale` (a rebuild is due) or `absent`.
+    load it), `stale` (a rebuild is due) or `absent`. With a transformer docs model `docs` is the transformer
+    index's state and `docs_fallback` the static index's, which serves while the transformer one builds (None
+    for a static model); a build running in another process is read from the progress file it publishes.
     """
     as_json = args.format == "json"
     rt = _runtime(as_json=as_json)
@@ -357,26 +412,37 @@ def _status(args: argparse.Namespace) -> int:
     cache = {
         "docs": rt.pool.cache_state(top, "docs"),
         "code": rt.pool.cache_state(top, "code") if rt.cfg.code.enabled else "off",
+        "docs_fallback": rt.pool.fallback_cache_state(top),
     }
+    progress = rt.pool.progress(top)  # a build of this process, if the pool holds one (a fresh process holds none)
     if not as_json:
         print(rt.status(warm=False))  # the tool's text, without starting the builds it would start for a server
-        for kind, state in cache.items():
-            print(f"{kind} cache: {state}")
+        print(f"docs cache: {cache['docs']}")
+        if cache["docs_fallback"] is not None:
+            print(f"docs fallback cache: {cache['docs_fallback']}")
+        print(f"code cache: {cache['code']}")
+        if rt.cfg.docs.transformer is not None and progress is None:  # the text above has this process's own
+            other = read_progress(top)
+            if other is not None:
+                print(other.line())
         return 0
     got = rt.pool.peek(top)  # in memory only: None in a fresh process; it starts and waits for nothing
     kinds = {kind: _kind_status(rt, got, kind) for kind in ("docs", "code")}
+    kinds["docs"]["transformer"] = _transformer_status(rt.cfg, top, progress)
+    fallback = {"docs": cache["docs_fallback"]}
     cloud = None
     if rt.cloud is not None:  # bounded: the probe answers at once, whatever the network does
         lines = [" ".join(line.split()) for line in cloud_status_lines(rt.cloud, top)]
         cloud = {"configured": True, "lines": lines}
     payload = {
         "enabled": True,
-        "ready": all(_ready(kinds[kind], cache[kind]) for kind in kinds),
+        "ready": all(_ready(kinds[kind], cache[kind], fallback.get(kind)) for kind in kinds),
         "worktree": str(top),
         "config": str(top / CONFIG_REL),
         "semble": IndexPool.semble_version(),
         **kinds,
         "cache": cache,
+        "encode_cache": _encode_cache_status(rt.cfg),
         "corpus_files": len(rt.corpus_for(top).files()),
         "cloud": cloud,
     }
@@ -384,9 +450,30 @@ def _status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _ready(info: dict[str, Any], cache: str) -> bool:
-    """A kind is ready when its saved index is valid (or it is off), or this process already holds it without error."""
-    return cache in ("valid", "off") or (info["state"] == "ready" and not info["error"])
+def _transformer_status(cfg: Config, top: Path, progress: ProgressView | None) -> dict[str, Any] | None:
+    """`docs.transformer`: the model and the build under way (this process's, else the one a live process publishes)."""
+    spec = cfg.docs.transformer
+    if spec is None:
+        return None
+    shown = progress or read_progress(top)
+    return {"model": spec.model_path, "progress": shown.as_dict() if shown is not None else None}
+
+
+def _encode_cache_status(cfg: Config) -> dict[str, Any] | None:
+    """`encode_cache`: where the transformer's vectors are cached and how big the cache is (null: none yet)."""
+    spec = cfg.docs.transformer
+    if spec is None:
+        return None
+    path = encode_cache_path(spec)
+    return {"path": str(path), "bytes": cache_size(path)}
+
+
+def _ready(info: dict[str, Any], cache: str, fallback: str | None = None) -> bool:
+    """A kind is ready when its saved index is valid (or it is off), or this process already holds it without error.
+
+    Docs with a transformer model are also ready while the static index that serves meanwhile is valid (`fallback`).
+    """
+    return cache in ("valid", "off") or fallback == "valid" or (info["state"] == "ready" and not info["error"])
 
 
 def _kind_status(rt: Any, got: WorktreeIndexes | Building | None, kind: str) -> dict[str, Any]:
@@ -427,9 +514,10 @@ def _eval(args: argparse.Namespace) -> int:
     if isinstance(rt, int):
         return rt
     try:
-        report = run_eval(
-            rt.searcher, rt.pool, Path(args.file), args.k, rt.repo.top, cloud=rt.cloud, corpus_for=rt.corpus_for
-        )
+        with _progress_lines(rt, rt.repo.top):
+            report = run_eval(
+                rt.searcher, rt.pool, Path(args.file), args.k, rt.repo.top, cloud=rt.cloud, corpus_for=rt.corpus_for
+            )
     except EvalFileError as err:
         where = f"{args.file} {err}" if err.line else f"{args.file}: {err}"
         return _fail(EXIT_USAGE, f"doc-search: eval: {where}")

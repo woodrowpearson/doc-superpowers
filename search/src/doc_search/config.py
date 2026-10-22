@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .transformer import PREFIX, TransformerSpec, UnknownTransformer, parse_model
+
 INERT_LINE = "doc-search: not enabled (no docs/search/config.json)"
 
 CONFIG_REL = "docs/search/config.json"
@@ -24,6 +26,8 @@ CONFIG_REL = "docs/search/config.json"
 CONTENT_VALUES = ("code", "config", "docs", "all")
 
 MAX_LIMIT = 50  # `search.default_limit`'s ceiling: the tools clamp a limit to 1-50
+
+MAX_THREADS = 256  # `docs.threads`'s ceiling
 
 # `cloud.timeout_s`: the longest any one call to Vertex or Firestore may take. 20 s because a flat
 # (unindexed) nearest-neighbour query over a large collection measured 3 to 14 s. The cloud leg of a
@@ -37,6 +41,7 @@ DEFAULTS: dict[str, Any] = {
         "exclude": ["docs/archive/**", "docs/.doc-index.json"],
         "types": [],
         "model": None,
+        "threads": None,
     },
     "code": {"enabled": True, "content": ["code"], "model": None},
     "cloud": None,
@@ -76,6 +81,8 @@ class DocsCfg:
     exclude: tuple[str, ...]
     types: tuple[tuple[str, str], ...]
     model: str | None
+    threads: int | None  # encoder threads for a transformer model; None = by core count
+    transformer: TransformerSpec | None  # the registry entry `model` names, when it is `transformer:<name>`
 
 
 @dataclass(frozen=True)
@@ -257,11 +264,19 @@ def _docs(section: Mapping[str, Any]) -> DocsCfg:
         if not (isinstance(glob, str) and glob and isinstance(doc_type, str) and doc_type):
             raise ConfigError(f'docs.types[{i}] must be an object with a non-empty "glob" and "type"')
         rules.append((glob, doc_type))
+    model = _str(section["model"], "docs.model", nullable=True)
+    try:
+        transformer = parse_model(model)
+    except UnknownTransformer as err:
+        raise ConfigError(f"docs.model: {err}") from err
+    threads = section["threads"]
     return DocsCfg(
         include=_str_list(section["include"], "docs.include"),
         exclude=_str_list(section["exclude"], "docs.exclude"),
         types=tuple(rules),
-        model=_str(section["model"], "docs.model", nullable=True),
+        model=model,
+        threads=None if threads is None else _int(threads, "docs.threads", minimum=1, maximum=MAX_THREADS),
+        transformer=transformer,
     )
 
 
@@ -269,6 +284,9 @@ def _code(section: Mapping[str, Any]) -> CodeCfg:
     enabled = section["enabled"]
     if not isinstance(enabled, bool):
         raise ConfigError("code.enabled must be true or false")
+    model = _str(section["model"], "code.model", nullable=True)
+    if model is not None and model.startswith(PREFIX):
+        raise ConfigError("code.model cannot be a transformer model (transformer:…): the code index stays static")
     content = _str_list(section["content"], "code.content")
     allowed = ", ".join(CONTENT_VALUES)
     if not content:
@@ -276,7 +294,7 @@ def _code(section: Mapping[str, Any]) -> CodeCfg:
     for value in content:
         if value not in CONTENT_VALUES:
             raise ConfigError(f"code.content has an unknown value {value!r} (allowed: {allowed})")
-    return CodeCfg(enabled=enabled, content=content, model=_str(section["model"], "code.model", nullable=True))
+    return CodeCfg(enabled=enabled, content=content, model=model)
 
 
 def _search(section: Mapping[str, Any]) -> SearchCfg:

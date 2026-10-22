@@ -47,6 +47,7 @@ from .engines import Building, IndexPool, WorktreeIndexes
 from .fusion import fuse_by_file, interleave_with_floor
 from .render import flat
 from .repo import GitError, RepoInfo, norm_rel
+from .transformer import PREFIX
 from .types import HeaderInfo, Hit, SearchRequest, SearchResponse
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,7 @@ IDENT_MAX_FILES = 10
 RANK_ORDER = ("ident", "docs", "cloud", "code")
 PREFER = ("docs", "cloud", "code", "ident")
 
+FALLBACK_NOTE = "docs: semble's static index while the transformer index builds (see status)"
 CLOUD_JOIN_MARGIN_S = 1.0  # a search waits this much longer than the cloud leg's own deadline, so its note comes first
 
 _TOKEN_STRIP = "\"'`,;:!?()[]{}<>\u201c\u201d\u2018\u2019"  # not ".": a name can start with one
@@ -129,8 +131,13 @@ def _clean_token(word: str) -> str:
 
 
 def model_label(model: str | None) -> str:
-    """A model's short name for the header: the last path segment of its id or directory."""
+    """A model's short name for the header: the last path segment of its id or directory.
+
+    A transformer model is `transformer:<name>`: the revision semble records after an `@` is left out.
+    """
     name = model or resolve_model_name()
+    if name.startswith(PREFIX):
+        return name.split("@", 1)[0]
     return name.rstrip("/").rsplit("/", 1)[-1] or name
 
 
@@ -264,6 +271,13 @@ class Searcher:
             elif engine.stale:
                 notes.append(f"{kind} index refresh failed, serving the previous one ({engine.stale})")
 
+        # With a transformer docs model, semble's static index answers for docs until the transformer one is built:
+        # the header names the model that answers, and a search that reads docs says why.
+        seen = got.partial if isinstance(got, Building) else got
+        static = seen if seen is not None and seen.docs_fallback else None
+        if static is not None and scope != "code":
+            notes.append(FALLBACK_NOTE)
+
         allowed = self._allowed(corpus, worktree, req) if scope != "code" else frozenset()
         docs_leg: list[Hit] = []
         cloud_run: _Background | None = None
@@ -306,7 +320,7 @@ class Searcher:
 
         hits = [enrich_hit(hit, corpus) for hit in final]
         header = HeaderInfo(
-            docs_model=model_label(self.cfg.docs.model),
+            docs_model=model_label(static.docs_model if static is not None else self.cfg.docs.model),
             code=self._pool.semble_version() if code.usable or code.building else "off",
             cloud=self._cloud_label(),
             notes=tuple(notes),
