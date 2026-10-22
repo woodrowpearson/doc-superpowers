@@ -778,20 +778,20 @@
       "last_verified": null
     },
     "references/search.md": {
-      "content_hash": "sha256:fba6c4c843cffb22db84b078f5783f2ce0b382527de0401069b61e5ee085f108",
+      "content_hash": "sha256:e5edf496a88db304918201210231018b8eb03b62579457a3bab129e845794386",
       "code_refs": [
         "search/",
         "scripts/search/"
       ],
       "code_oids": {
-        "search/": "dc420c59586898e77b719a53a38de6ba75c381c7",
-        "scripts/search/": "d0414ce561dbafef4df936c877b26667c398c671"
+        "search/": "ce6dcaae271138a57608dbd9e9f1676666bb2b9e",
+        "scripts/search/": "f32b6597ebe9a722aadb97f0c9de3dda4e9ab782"
       },
-      "code_commit": "3565fe58142e48ee4f0ef93044904cff0ed49c9f",
+      "code_commit": "751bdaf14b136fdb28528b40a315df36792e3d4c",
       "doc_type": "guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-21T20:28:04Z",
+      "last_verified": "2026-10-22T01:27:10Z",
       "implementation": []
     },
     "docs/superpowers/specs/2026-10-20-doc-search-local-transformer-design.md": {

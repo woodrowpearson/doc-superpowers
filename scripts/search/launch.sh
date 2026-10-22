@@ -24,12 +24,38 @@
 # starts "transformer:". --no-dev: the dev group (pytest) is never installed
 # for a user.
 #
+# The per-user env hook: a POSIX sh file sourced before anything else, so the
+# variables it sets reach doc-search and the launcher itself (SEMBLE_CACHE_LOCATION,
+# DOC_SEARCH_CACHE_LOCATION, HF_HOME, PATH, DOC_SUPERPOWERS_ROOT, …). It is read
+# at every launch, so it can decide them then: a cache on a volume that is not
+# always mounted, say. An MCP client starts the server without the user's shell
+# profile, so this is where such a choice reaches it. $DOC_SEARCH_ENV_FILE names
+# the file (empty is unset), else ${XDG_CONFIG_HOME:-$HOME/.config}/doc-search/env.sh.
+# A missing file is skipped; one that does not parse is skipped with one stderr
+# line, so a broken hook never keeps doc-search from starting. Its output goes
+# to stderr (stdout is the MCP stream). It runs in this shell: it should only
+# set variables, and an `exit` in it ends the launcher.
+#
 # Failures are one stderr line and exit 2.
 
 fail() {
   echo "doc-search: $*" >&2
   exit 2
 }
+
+ENV_HOOK=${DOC_SEARCH_ENV_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/doc-search/env.sh}
+case $ENV_HOOK in
+  */*) ;;
+  *) ENV_HOOK=./$ENV_HOOK ;; # `.` searches PATH for a bare name
+esac
+if [ -f "$ENV_HOOK" ] && [ -r "$ENV_HOOK" ]; then
+  if sh -n "$ENV_HOOK" 2>/dev/null; then
+    # shellcheck disable=SC1090  # the per-user hook; its path is known only at run time
+    . "$ENV_HOOK" >&2
+  else
+    echo "doc-search: ignoring the env hook $ENV_HOOK (it does not parse)" >&2
+  fi
+fi
 
 # The repository top (empty outside a repository): where the config lives.
 TOP=$(git rev-parse --show-toplevel 2>/dev/null) || TOP=""
