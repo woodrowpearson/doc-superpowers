@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-10-21T07:38:00Z",
+  "generated_at": "2026-10-22T01:27:10Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -798,20 +798,20 @@
       "last_verified": null
     },
     "references/search.md": {
-      "content_hash": "sha256:da91a664db468d8902202c12f78108d183b98a2e26af97b78fb84945b0da947f",
+      "content_hash": "sha256:e5edf496a88db304918201210231018b8eb03b62579457a3bab129e845794386",
       "code_refs": [
         "search/",
         "scripts/search/"
       ],
       "code_oids": {
         "search/": "ce6dcaae271138a57608dbd9e9f1676666bb2b9e",
-        "scripts/search/": "5de0cbb4d616ad02350cede9d257d8bda87b107c"
+        "scripts/search/": "f32b6597ebe9a722aadb97f0c9de3dda4e9ab782"
       },
       "code_commit": "751bdaf14b136fdb28528b40a315df36792e3d4c",
       "doc_type": "guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-21T00:11:43Z",
+      "last_verified": "2026-10-22T01:27:10Z",
       "implementation": []
     },
     "docs/superpowers/plans/2026-10-20-upkeep-precision-and-declare.md": {
