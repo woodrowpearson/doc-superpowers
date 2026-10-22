@@ -46,6 +46,7 @@ case $ENV_HOOK in
 esac
 if [ -f "$ENV_HOOK" ] && [ -r "$ENV_HOOK" ]; then
   if sh -n "$ENV_HOOK" 2>/dev/null; then
+    # shellcheck disable=SC1090  # the per-user hook; its path is known only at run time
     . "$ENV_HOOK" >&2
   else
     echo "doc-search: ignoring the env hook $ENV_HOOK (it does not parse)" >&2
