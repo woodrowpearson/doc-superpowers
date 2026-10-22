@@ -13,6 +13,15 @@ for. A thread that finds a valid cache loads it without queueing; one that waits
 still running, so `get` reads a first build in line as building. A refresh in line is not waited
 for: the previous index serves until the rebuild gets its slot.
 
+Across processes (every session runs its own server over one semble cache), a static build (the
+docs or code index, or the static docs fallback) holds the index's build lock (`buildlock.index_lock`, a `flock` beside the index directory) from its slot
+until it has saved, so one process builds an index and the others wait, then load what it saved.
+The lock is taken inside the slot (slot, then lock: a holder never waits for anything else, so
+no two processes can wait on each other), its wait reads like a wait in line (a refresh with an
+index to serve lets its callers go), and the build is timed from the lock. A waiter gives up after
+`build_lock_wait_s` and builds without it; a holder that dies lets go at once. A transformer build
+takes the host's encoder lock instead (below).
+
 Loading follows semble's own cache: a cache that still matches the tree is loaded from disk
 (`get_validated_cache` then `SembleIndex.load_from_disk`), anything else is rebuilt through
 `SembleIndex.from_path`, which re-indexes incrementally, and saved with
@@ -90,11 +99,12 @@ All times (`built_at`, `build_seconds`, the cooldown) are in units of the inject
 is timed from when it gets its slot: time in line is not build time.
 
 Locks: the pool lock (an RLock) guards every `_State` and `_Entry` field except `transformer_saved`,
-and is never held while a thread waits for a build, a first build, the encoder lock or a save;
+and is never held while a thread waits for a build, a first build, a build lock, the encoder lock or a save;
 under it a thread takes only a line's condition (to take or give back a place) or a progress's own
-lock (for a view). The others nest in one order only: a lane slot, then the host's encoder lock (a
-transformer build validates and saves before it lets the lock go), then an entry's `save_lock`,
-which a static fallback save takes alone. The encoder's own locks (transformer.py: its registry's,
+lock (for a view). The others nest in one order only: a slot (a lane slot, or a build-line slot), then a
+cross-process lock (the host's encoder lock for a transformer build, which validates and saves before
+it lets the lock go; the index's build lock for a static build, held until it has saved), then an
+entry's `save_lock`, which a static fallback save takes inside its build lock. The encoder's own locks (transformer.py: its registry's,
 its session's) are taken inside a build or a query and hold nothing else. So no two threads can
 wait on each other's locks.
 """
@@ -117,7 +127,7 @@ from semble.cache import find_index_from_cache_folder, get_validated_cache, save
 from semble.index.types import PersistencePath
 from semble.utils import resolve_model_name
 
-from . import encode_cache, transformer
+from . import buildlock, encode_cache, transformer
 from .config import Config
 from .progress import BuildProgress, ProgressView, intel_mac
 from .transformer import MISSING_EXTRA, TransformerSpec
@@ -136,6 +146,10 @@ FOREGROUND_WAIT_S = 7 * 24 * 3600.0
 
 # How many `SembleIndex.from_path` builds a pool runs at once, across its worktrees and kinds.
 MAX_CONCURRENT_BUILDS = 1
+
+# How long a build waits for another process's build of the same index before it builds anyway: a
+# holder that died has let go already, so this only bounds one that is alive but stuck.
+BUILD_LOCK_WAIT_S = 3600.0
 
 # How long a `get` waits for a transformer docs refresh when an index already serves (the previous
 # transformer index, or the static fallback): an encode can take hours, and the answer is there.
@@ -278,6 +292,17 @@ class _Place:
 
     def __exit__(self, *exc: object) -> None:
         self.leave()
+
+    def wait_elsewhere(self, _holder: int | None = None) -> None:
+        """The holder waits, slot in hand, for another process's build: it reads as a wait in line."""
+        if self._in_line is not None:
+            self._in_line.set()
+
+    def resume(self) -> None:
+        """The other process let go: the build starts now, and is timed from here."""
+        if self._in_line is not None:
+            self._in_line.clear()
+        self.held_at = self._line._clock()
 
     def leave(self) -> None:
         """Give the slot back, or the place in line when it never built. Safe to call again."""
@@ -429,6 +454,7 @@ class IndexPool:
         clock: Callable[[], float] = time.monotonic,
         *,
         fallback: bool = True,
+        build_lock_wait_s: float = BUILD_LOCK_WAIT_S,
     ) -> None:
         """`fallback` (with a transformer docs model): serve semble's static docs index while the transformer one
         builds. The server keeps it on; the command line turns it off and waits for the transformer build."""
@@ -441,6 +467,7 @@ class IndexPool:
         self._lock = threading.RLock()
         self._entries: OrderedDict[Path, _Entry] = OrderedDict()  # least recently used first
         self._builds = _BuildLine(MAX_CONCURRENT_BUILDS, clock)
+        self._lock_wait_s = build_lock_wait_s
         self._lane = _BuildLine(1, clock)  # the transformer lane
         self._intel_warned = False
         spec = cfg.docs.transformer
@@ -765,7 +792,7 @@ class IndexPool:
         start = self.clock()
         outcome = _Outcome(error="build thread ended abnormally")
         try:
-            outcome = self._refresh(entry, state, current, current_token, place)
+            outcome = self._refresh(entry, state, current, current_token, place, self._lock_wait_s)
         except Exception as err:  # noqa: BLE001 - a build failure is data, not an exception
             outcome = _Outcome(error=_describe(err))
             logger.debug("doc-search: %s index of %s failed", state.name, entry.worktree, exc_info=True)
@@ -783,32 +810,50 @@ class IndexPool:
         current: SembleIndex | None,
         current_token: tuple[int, int] | None,
         place: _Place,
+        lock_wait_s: float = BUILD_LOCK_WAIT_S,
     ) -> _Outcome:
         worktree = entry.worktree
         path = str(worktree)
-        cached = get_validated_cache(path, state.model, state.content)
-        if cached is not None:
+
+        def load(cached: Path) -> _Outcome:
             token = _stamp(cached)
             if current is not None and token is not None and token == current_token:
                 return _Outcome(index=current, token=token)  # the cache is what we already hold
             index = SembleIndex.load_from_disk(cached)
             return _Outcome(index=index, token=token, files=_files_of(index), changed=True)
+
+        cached = get_validated_cache(path, state.model, state.content)
+        if cached is not None:
+            return load(cached)
         if state.is_fallback and current is not None and IndexPool._holds_transformer(entry, path):
             # The folder holds a transformer index (one that does not load, or the fallback would be gone):
             # a static rebuild would never be saved, and the fallback serves only until that index loads.
             return _Outcome(index=current, token=current_token)
+        index_dir = find_index_from_cache_folder(path, state.content)
         with place:  # one semble build at a time, pool-wide
-            index = SembleIndex.from_path(path, content=list(state.content), model_path=state.model)
-        if not state.is_fallback:
-            IndexPool._save(state, index, path)
-            token = _stamp(find_index_from_cache_folder(path, index.content))
-            return _Outcome(index=index, token=token, files=_files_of(index), changed=True)
-        with entry.save_lock:  # the static index never replaces a saved transformer index
-            if IndexPool._holds_transformer(entry, path, locked=True):
-                logger.debug("doc-search: the static docs index of %s is not saved: a transformer index is", worktree)
-                return _Outcome(index=index, files=_files_of(index), changed=True)
-            IndexPool._save(state, index, path)
-            token = _stamp(find_index_from_cache_folder(path, index.content))
+            # and one build of this index at a time, host-wide: held until it is saved
+            with buildlock.index_lock(index_dir, lock_wait_s, on_wait=place.wait_elsewhere) as waited:
+                if waited:
+                    place.resume()
+                # checked again: while this waited (in line, or for the lock) another process may have saved it
+                cached = get_validated_cache(path, state.model, state.content)
+                if cached is not None:
+                    return load(cached)
+                index = SembleIndex.from_path(path, content=list(state.content), model_path=state.model)
+                # saved and stamped before the lock goes: a later save by another process must not lend
+                # this index its stamp
+                if not state.is_fallback:
+                    IndexPool._save(state, index, path)
+                    token = _stamp(find_index_from_cache_folder(path, index.content))
+                    return _Outcome(index=index, token=token, files=_files_of(index), changed=True)
+                with entry.save_lock:  # the static index never replaces a saved transformer index
+                    if IndexPool._holds_transformer(entry, path, locked=True):
+                        logger.debug(
+                            "doc-search: the static docs index of %s is not saved: a transformer index is", worktree
+                        )
+                        return _Outcome(index=index, files=_files_of(index), changed=True)
+                    IndexPool._save(state, index, path)
+                    token = _stamp(find_index_from_cache_folder(path, index.content))
         return _Outcome(index=index, token=token, files=_files_of(index), changed=True)
 
     @staticmethod
