@@ -1,5 +1,41 @@
 # Release Notes
 
+## v3.8.0 (2026-10-21)
+
+This release gives doc-search an opt-in local transformer for its docs leg (#45): `docs.model: "transformer:gte-modernbert-base"`. It runs `Alibaba-NLP/gte-modernbert-base` (int8 ONNX, onnxruntime CPU) on the host, with a per-host encode cache keyed by each chunk's text, so a new worktree reuses every vector the host already encoded. On abundance-mvp's docs (194,564 chunks, 65 known-answer queries, k = 10) the local docs leg scores recall@10 0.846 / MRR 0.635, against 0.687 / 0.531 with semble's static model; fused with the cloud leg, 0.880 / 0.743. The launcher also sources a per-user env hook at every launch (#48), so a per-host cache location (`SEMBLE_CACHE_LOCATION`, `DOC_SEARCH_CACHE_LOCATION`, `HF_HOME`) reaches a server an MCP client starts without the shell profile. Static semble stays the default: a project that sets neither sees no change.
+
+### Upgrading from 3.7.0
+Nothing breaks, and the cloud leg is untouched: same chunker version, same embedder, so no cloud corpus needs re-embedding. No git hook, Claude hook, CI template or vendored CI script changed.
+- **Projects with `--search` installed:** `scripts/search/launch.sh` changed, so the committed `.claude/doc-superpowers/search-mcp.sh` reads `outdated` in `hooks status --search`. Re-run `hooks install --search` to get the env hook and the `local-transformer` extra.
+- **Turning the transformer on** is a config change, `"docs": {"model": "transformer:gte-modernbert-base"}`. Expect:
+  - **A first build of hours per host.** On an M1 Pro, 3–5 h for abundance's docs (16 chunks/s quiet, 10 under heavy load). On an Intel Mac about 3.6 chunks/s, roughly 15 h. A static docs index serves meanwhile, and `status` shows progress and an ETA. Run `doc-search index` once with the static model before switching, so the first transformer build has a total to estimate from.
+  - **A warm second worktree takes about two minutes on a loaded M1 Pro**: 99–117 s, every vector read from the encode cache (a quiet-host re-measure is pending).
+  - **About 3.4 GB peak memory during a first build.** The ONNX session is dropped after each build that encoded something.
+  - **onnxruntime 1.31**, or 1.23.2 on Intel macOS, where the extra needs Python 3.11–3.13.
+- **Where the caches go:** the encode cache (`encode/<name>.sqlite`, about 764 MB for abundance), the host encoder lock and build progress live under `DOC_SEARCH_CACHE_LOCATION`, default the OS cache directory (`~/Library/Caches/doc-search` on macOS). semble's indexes stay under `SEMBLE_CACHE_LOCATION`. Set either per host in the env hook (below), not in a committed config.
+- **After an onnxruntime upgrade,** stop doc-search and delete the encode cache file. onnxruntime's version is part of the cache key, so the old vectors would only miss.
+- **A project whose cloud catch-up runs one pinned doc-superpowers version** (abundance-mvp's does): install 3.8.0 on every writer host before bumping the pin.
+- **`status --format json`** gains `docs.transformer` (`model`, `progress`), `cache.docs_fallback` and a top-level `encode_cache` (`path`, `bytes`). `ready` still describes what the server can answer now, so it counts a valid static fallback; `cache.docs` says whether the transformer index exists.
+
+### Features
+- **Local transformer docs model** (#45; `references/search.md` → *Modes* → *Local transformer*):
+  - **Config.** `docs.model: "transformer:<name>"` against a built-in registry, with one entry, `gte-modernbert-base`, at a pinned revision. `code.model` refuses the prefix. `docs.threads` takes 1–256, or `null` for the performance cores less two (at least 2).
+  - **The `local-transformer` extra** (onnxruntime, flatbuffers, protobuf). The launcher adds it when `docs.model` starts `transformer:`.
+  - **Encoder.** It plugs in at semble's model loader. The saved index records the model with its revision (`transformer:gte-modernbert-base@e7f32e3c00f9`), so a registry change invalidates every saved transformer index.
+  - **Encode cache.** A sqlite rowid table keyed by the sha256 of model id, variant, token limit, onnxruntime version, CPU architecture and text; query strings are never stored. A cache location that cannot be written degrades to no cache, with one warning, and never fails a build.
+  - **One encoder per host.** A per-model `flock` lets one process encode at a time; another process serves its static index while it waits. A refresh waits at most 10 s for the lock, then encodes without it.
+  - **Builds run in a lane of their own,** so code and other worktrees' static builds never wait behind an encode. A stale saved transformer index serves while it refreshes. The recheck cooldown is capped (60 s base); failures in a row back off 60, 120, 240 … s, up to 1 h. Evicting a worktree cancels its queued transformer build.
+  - **Progress.** `status` shows chunks encoded, the encoder's rate, an ETA from the build's overall pace (cache hits included) and, before a build starts, a per-architecture estimate. A build in another process is read from a progress file. `index`, `query` and `eval` build in the foreground and print a progress line on stderr every 30 s.
+- **The launcher's env hook** (#48). `launch.sh` sources `$DOC_SEARCH_ENV_FILE`, else `${XDG_CONFIG_HOME:-~/.config}/doc-search/env.sh`, before it resolves anything, so the hook may also set `DOC_SUPERPOWERS_ROOT` and `PATH`. It is read at every launch, so it can decide then: export a cache location only while its volume is mounted, say. A missing file is skipped. One that does not parse is skipped with one stderr line, and doc-search still starts. Its output goes to stderr.
+
+### Other
+- Seven suites, 12860 assertions, under bash 5.x and `/bin/bash` 3.2: `test-doc-tools.sh` 1561, `test-hooks.sh` 1977, `test-spec-status-model.sh` 747, `test-doc-pr-release.sh` 625, `test-merge-driver.sh` 844, `test-spec-claims.sh` 3269, `test-ledger.sh` 3837. doc-search's pytest suite goes from 500 to 761 tests. The 2 live tests (semble's default model, and gte-modernbert end to end) passed on an M1 Pro.
+- Measured on an M1 Pro under heavy unrelated load:
+  - a first build of abundance's 194,564 chunks: 18,581 s;
+  - a warm second worktree: 116.75 s, against 78.9 s for the static model;
+  - encode-cache reads of all 194,564 keys: 15.6 s with a cold page cache, 1.2–1.4 s warm.
+- Design note `docs/superpowers/specs/2026-10-20-doc-search-local-transformer-design.md` (§8 *As built*); plan `docs/superpowers/plans/2026-10-20-doc-search-local-transformer.md`. A draft upstream semble issue for a pluggable encoder (design note §6) has not been filed.
+
 ## v3.7.0 (2026-10-21)
 
 This release covers the two work-ledger use cases in #36 and #39: filing an item, and keeping items' relations up to date at merge time. `ledger new --create` writes the item file itself, and `/doc-superpowers ledger file` wraps it in a filing flow: duplicates first, then one question round, then the confirmed relations. `ledger upkeep` reads a range or a PR and proposes the `changes` / `consumes` relations its items are missing, each with evidence and a ready `ledger link` line. It never writes them. `/doc-superpowers ledger declare` confirms those proposals with a person and links them. On pre-push, `validate --pushed` gains an advisory for contracts a push touches that no involved item declares. It never blocks. On 23 real abundance-mvp PRs, two blind judges rated 0.78 / 0.74 of upkeep's proposals correct at `--top 0` (0.74 / 0.68 at the default `--top 3`), against a bar of 0.6. The design spec's *Acceptance* section has the details. A project without `docs/ledger/config.json` sees no change.

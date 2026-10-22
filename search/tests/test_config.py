@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,6 +18,7 @@ from doc_search.config import (
     VertexCfg,
     load_config,
 )
+from doc_search.transformer import REGISTRY, spec_for_path
 
 
 def write_config(top: Path, value: object) -> None:
@@ -46,6 +49,8 @@ def test_empty_object_gets_defaults(tmp_path: Path) -> None:
     assert cfg.docs.exclude == ("docs/archive/**", "docs/.doc-index.json")
     assert cfg.docs.types == ()
     assert cfg.docs.model is None
+    assert cfg.docs.threads is None
+    assert cfg.docs.transformer is None
     assert cfg.code.enabled is True
     assert cfg.code.content == ("code",)
     assert cfg.code.model is None
@@ -88,6 +93,62 @@ def test_scalars_replace(tmp_path: Path) -> None:
     assert cfg.docs.model == "some/model"
     assert cfg.code.enabled is False
     assert cfg.search.rescan_seconds == 30
+
+
+def test_docs_model_transformer(tmp_path: Path) -> None:
+    cfg = load(tmp_path, {"docs": {"model": "transformer:gte-modernbert-base"}})
+    assert cfg.docs.model == "transformer:gte-modernbert-base"
+    assert cfg.docs.transformer is not None
+    assert cfg.docs.transformer.name == "gte-modernbert-base"
+    assert cfg.docs.transformer.dim == 768
+    assert cfg.docs.transformer.max_tokens == 1024
+    assert cfg.docs.transformer.onnx_file == "onnx/model_int8.onnx"
+    assert cfg.docs.transformer.model_path == "transformer:gte-modernbert-base@e7f32e3c00f9"
+
+
+def test_docs_model_unknown_transformer(tmp_path: Path) -> None:
+    write_config(tmp_path, {"docs": {"model": "transformer:nope"}})
+    with pytest.raises(ConfigError) as err:
+        load_config(tmp_path, {})
+    assert "docs.model" in str(err.value) and "gte-modernbert-base" in str(err.value)
+
+
+@pytest.mark.parametrize("model", ["minishlab/potion-base-8M", None])
+def test_docs_model_static_has_no_transformer(tmp_path: Path, model: str | None) -> None:
+    cfg = load(tmp_path, {"docs": {"model": model}})
+    assert cfg.docs.model == model
+    assert cfg.docs.transformer is None
+
+
+def test_code_model_refuses_transformer(tmp_path: Path) -> None:
+    write_config(tmp_path, {"code": {"model": "transformer:gte-modernbert-base"}})
+    with pytest.raises(ConfigError) as err:
+        load_config(tmp_path, {})
+    assert "code.model" in str(err.value)
+
+
+def test_spec_for_path_round_trips_the_registry() -> None:
+    for spec in REGISTRY.values():
+        assert spec_for_path(spec.model_path) is spec
+    with pytest.raises(ValueError, match="not a current transformer model path"):
+        spec_for_path("transformer:gte-modernbert-base@000000000000")  # a retired revision
+
+
+def test_config_does_not_import_onnxruntime() -> None:
+    """config.py imports the registry: the encoder's heavy imports must stay out of that module's top level."""
+    code = "import sys, doc_search.config; sys.exit('onnxruntime' in sys.modules)"
+    assert subprocess.run([sys.executable, "-c", code], check=False).returncode == 0
+
+
+def test_docs_threads(tmp_path: Path) -> None:
+    assert load(tmp_path, {}).docs.threads is None
+    assert load(tmp_path, {"docs": {"threads": 4}}).docs.threads == 4
+    assert load(tmp_path, {"docs": {"threads": 256}}).docs.threads == 256
+    for bad in (0, 257, True, "4", 2.5):
+        write_config(tmp_path, {"docs": {"threads": bad}})
+        with pytest.raises(ConfigError) as err:
+            load_config(tmp_path, {})
+        assert "docs.threads" in str(err.value)
 
 
 def test_cloud_defaults_fill(tmp_path: Path) -> None:
@@ -250,6 +311,7 @@ def test_every_known_key_is_accepted(tmp_path: Path) -> None:
             "exclude": [],
             "types": [{"glob": "a/**", "type": "spec"}],
             "model": None,
+            "threads": 4,
         },
         "code": {"enabled": True, "content": ["code"], "model": None},
         "cloud": {
@@ -268,6 +330,7 @@ def test_every_known_key_is_accepted(tmp_path: Path) -> None:
     cfg = load(tmp_path, full)
     assert cfg.cloud is not None and cfg.cloud.firestore.database == "corpus"
     assert cfg.search.default_limit == 50 and cfg.search.rescan_seconds == 0
+    assert cfg.docs.threads == 4
 
 
 @pytest.mark.parametrize("bad", [51, 1000])
