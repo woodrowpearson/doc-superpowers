@@ -844,6 +844,16 @@
       "replaces": null,
       "superseded_by": null,
       "last_verified": null
+    },
+    "docs/superpowers/plans/2026-10-21-backlog-releases-whats-next.md": {
+      "content_hash": "sha256:32b28009c0675bba9d737f1d659f557c067f65eb14447830e8ec03f1716b8406",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "plan",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": null
     }
   }
 }
