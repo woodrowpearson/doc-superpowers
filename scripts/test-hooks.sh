@@ -7519,14 +7519,25 @@ test_setup_set_validation() {
   run_setup -- --list --set search=on --set harness=codex
   assert_eq "1" "$RUN_RC" "harness without claude-code while doc-search is on: refused (exit 1)"
   assert_contains "$RUN_ERR" "claude-code" "…saying why"
-  for f in --build --for-team --link-bin --no-link-bin --plain; do
+  # --build and --for-team are the non-interactive answers: the interactive UI
+  # asks both questions itself.
+  for f in --build --for-team; do
     run_setup -- "$f"
-    assert_eq "3" "$RUN_RC" "$f: exit 3 until its task"
-    assert_contains "$RUN_ERR" "setup: $f: not implemented yet" "$f: says so"
+    assert_eq "3" "$RUN_RC" "$f with no mode (the interactive UI): exit 3"
+    assert_contains "$RUN_ERR" "setup: $f " "$f: named"
+    assert_contains "$RUN_ERR" "the interactive UI asks" "$f: …saying the UI asks"
   done
-  run_setup --
-  assert_eq "3" "$RUN_RC" "no flag (the interactive UI): exit 3 until its task"
-  assert_contains "$RUN_ERR" "not implemented yet" "…says so"
+  run_setup -- --link-bin --no-link-bin
+  assert_eq "3" "$RUN_RC" "--link-bin with --no-link-bin: exit 3"
+  local before
+  before=$(setup_snapshot)
+  for f in "" --plain --link-bin --no-link-bin; do
+    run_setup -- ${f:+"$f"}
+    assert_eq "0" "$RUN_RC" "interactive${f:+ $f}, no input: exit 0 (stderr: $RUN_ERR)"
+    assert_not_contains "$RUN_ERR" "not implemented yet" "interactive${f:+ $f}: implemented"
+    assert_contains "$RUN_OUT" "nothing was written" "interactive${f:+ $f}, no input: quits, nothing written"
+  done
+  assert_eq "$before" "$(setup_snapshot)" "…and nothing was"
   teardown
 }
 
@@ -8652,9 +8663,6 @@ test_setup_yes_refusals() {
   assert_contains "$SL_OUT" "setup: no-such-op: not implemented yet" "exec_plan: an op without its op_ function is named"
   assert_contains "$SL_OUT" "rc=1" "…exit 1"
   assert_eq "$before" "$(setup_snapshot)" "…checked before the first step: nothing written (record-team came first)"
-  run_setup -- --yes --set bin=on
-  assert_eq "1" "$RUN_RC" "--yes --set bin=on: exit 1"
-  assert_contains "$RUN_ERR" "setup: bin-link: not implemented yet" "…naming bin-link"
   run_setup -- --dry-run --yes
   assert_eq "3" "$RUN_RC" "--dry-run --yes: exit 3"
   assert_contains "$RUN_ERR" "--dry-run" "…naming both"
@@ -10083,6 +10091,370 @@ test_setup_hints_never_change_defaults() {
   teardown
 }
 
+
+# --- setup: the terminal command and the plain-prompt UI (#51) ----------------
+
+# run_setup_prompt <answers> [VAR=value …] -- <args…>: run_setup with
+# <answers> (printf's format, so \n separates them) on stdin: a file, not a
+# TTY, so the interactive mode is the prompt UI.
+run_setup_prompt() {
+  local answers="$1"
+  shift
+  RUN_STDIN=$(harness_mktemp answers)
+  # shellcheck disable=SC2059  # the answers are a printf format: \n ends each
+  printf "$answers" > "$RUN_STDIN"
+  run_setup "$@"
+  rm -f "$RUN_STDIN"
+  RUN_STDIN=/dev/null
+}
+
+# setup_bin_home: a private HOME with a space in its path (Review Focus 4),
+# kept out of git like the harness's own.
+setup_bin_home() {
+  export HOME="$TEST_DIR/my home"
+  mkdir -p "$HOME"
+  printf 'my home/\n' >> .git/info/exclude
+}
+
+# setup_bin_copy <dir> <overview text>: a plugin copy holding what the shim
+# runs: scripts/doc-superpowers and scripts/help, its overview replaced.
+setup_bin_copy() {
+  mkdir -p "$1/scripts"
+  cp "$SETUP_ROOT/scripts/doc-superpowers" "$1/scripts/"
+  cp -R "$SETUP_ROOT/scripts/help" "$1/scripts/"
+  printf '%s\n' "$2" > "$1/scripts/help/overview.txt"
+}
+
+# run_shim [VAR=value …] -- <args…>: the terminal command, as a terminal runs
+# it (PATH="$REAL_PATH", no DOC_SUPERPOWERS_ROOT unless given), from a
+# directory outside any repository. RUN_RC, RUN_OUT, RUN_ERR.
+run_shim() {
+  local errf envs=()
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    envs+=("$1")
+    shift
+  done
+  [ "$#" -gt 0 ] && shift
+  errf=$(harness_mktemp shim.err)
+  RUN_RC=0
+  RUN_OUT=$(cd "$SUITE_TMP" && env -u DOC_SUPERPOWERS_ROOT -u CLAUDE_PLUGIN_CACHE PATH="$REAL_PATH" \
+    ${envs[@]+"${envs[@]}"} "$HOME/.local/bin/doc-superpowers" "$@" </dev/null 2>"$errf") || RUN_RC=$?
+  RUN_ERR=$(cat "$errf")
+  rm -f "$errf"
+}
+
+test_setup_bin_shim() {
+  echo "test: #51 the terminal command (design §4.2): --yes --link-bin writes ~/.local/bin/doc-superpowers (mode 755, the marker on line 2), as the review listed it, outside the repository, and prints the PATH line when ~/.local/bin is not on PATH; the shim runs this plugin's help; it resolves DOC_SUPERPOWERS_ROOT, then the clone root baked in, then the newest numeric version under the plugin cache (paths with spaces in HOME, the cache and the plugin root); none: exit 2, one line; --no-link-bin removes ours and writes nothing else; a file that is not ours is refused (exit 1) and left alone, before any step"
+  setup
+  setup_bin_home
+  local shim="$HOME/.local/bin/doc-superpowers" pc before h plug
+  run_setup -- --dry-run --link-bin
+  assert_eq "0" "$RUN_RC" "--dry-run --link-bin: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "$shim" "$(review_paths 'Local to you (outside the repository):')" "the review lists the shim, outside the repository"
+  assert_contains "$(review_section 'Steps:')" "write the terminal command $shim" "…and the step"
+  run_setup -- --yes --link-bin
+  assert_eq "0" "$RUN_RC" "--yes --link-bin: exit 0 (stderr: $RUN_ERR)"
+  assert_true "the shim is written" test -f "$shim"
+  assert_true "…executable" test -x "$shim"
+  assert_eq "# doc-superpowers terminal shim v1" "$(sed -n 2p "$shim" 2>&1)" "…the marker on line 2"
+  assert_eq "755" "$(stat -c '%a' "$shim" 2>/dev/null || stat -f '%Lp' "$shim")" "…mode 755"
+  assert_true "it passes sh -n" sh -n "$shim"
+  assert_eq "clone_root='$SETUP_ROOT'" "$(grep '^clone_root=' "$shim")" "a run from a clone bakes the clone's root in, sh-quoted"
+  assert_contains "$RUN_OUT" 'add ~/.local/bin to your PATH: export PATH="$HOME/.local/bin:$PATH"' "~/.local/bin not on PATH: the line to add"
+  assert_contains "$(review_section 'Then commit:')" "git add" "the team's files are on the git add line"
+  assert_not_contains "$(review_section 'Then commit:')" ".local/bin" "…the shim is not (outside the repository)"
+  run_setup -- --dry-run --link-bin
+  assert_eq "(nothing)" "$(review_paths 'Local to you (outside the repository):')" "in place: nothing outside the repository to write"
+  run_shim -- help
+  assert_eq "0" "$RUN_RC" "the shim: help exits 0 (stderr: $RUN_ERR)"
+  assert_eq "$(cat "$SETUP_ROOT/scripts/help/overview.txt")" "$RUN_OUT" "the shim runs this plugin's help (overview.txt)"
+  setup_assert_noop "the shim in place"
+  # ~/.local/bin on PATH: no PATH line.
+  rm -f "$shim"
+  run_setup PATH="$HOME/.local/bin:${SETUP_PATH:-$REAL_PATH}" -- --yes --link-bin
+  assert_eq "0" "$RUN_RC" "~/.local/bin on PATH: exit 0 (stderr: $RUN_ERR)"
+  assert_true "…the shim written again" test -f "$shim"
+  assert_not_contains "$RUN_OUT" "add ~/.local/bin to your PATH" "…and no PATH line"
+  # --no-link-bin removes ours, and nothing else.
+  run_setup -- --yes --no-link-bin
+  assert_eq "0" "$RUN_RC" "--no-link-bin: exit 0 (stderr: $RUN_ERR)"
+  assert_true "…the shim removed" test ! -e "$shim"
+  assert_true "…the folder kept" test -d "$HOME/.local/bin"
+  assert_contains "$RUN_OUT" "remove the terminal command" "…the step said so"
+  run_setup -- --yes --link-bin --no-link-bin
+  assert_eq "3" "$RUN_RC" "--link-bin with --no-link-bin: exit 3"
+  # A file of the user's: refused, left alone.
+  printf '#!/bin/sh\necho mine\n' > "$shim"
+  h=$(hash_file "$shim")
+  before=$(setup_snapshot)
+  run_setup -- --yes --link-bin
+  assert_eq "1" "$RUN_RC" "a file of the user's at ~/.local/bin/doc-superpowers: --link-bin exits 1"
+  assert_contains "$RUN_ERR" "not setup's shim" "…saying why"
+  assert_eq "$h" "$(hash_file "$shim")" "…the file unchanged"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
+  run_setup -- --yes --no-link-bin
+  assert_eq "0" "$RUN_RC" "--no-link-bin over the user's file: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "$h" "$(hash_file "$shim")" "…the user's file left alone"
+  # The executor's own check, before the first step: the file appears after
+  # the plan was made.
+  rm -f "$shim"
+  before=$(setup_snapshot)
+  # shellcheck disable=SC2016  # the snippet runs in the child bash
+  setup_lib 'source "$ROOT/scripts/setup/lib-plan.sh"
+    source "$ROOT/scripts/setup/lib-exec.sh"
+    probe_run
+    model_base_init
+    model_set bin on
+    model_set claude off
+    plan_build
+    printf "#!/bin/sh\necho mine\n" > "$HOME/.local/bin/doc-superpowers"
+    rc=0
+    exec_plan || rc=$?
+    echo "rc=$rc"'
+  assert_contains "$SL_OUT" "rc=1" "op_bin_link's check: a file of the user's that appeared after the plan: refused (1)"
+  assert_contains "$SL_OUT" "not setup's shim" "…saying why"
+  assert_eq "#!/bin/sh|echo mine" "$(tr '\n' '|' <"$shim" | sed 's/|$//')" "…the file left as the user wrote it"
+  rm -f "$shim"
+  assert_eq "$before" "$(setup_snapshot)" "…and no step ran (claude-uninstall came first)"
+  teardown
+
+  # A fresh repository: --no-link-bin writes nothing outside it; --link-bin
+  # writes what its review listed, and nothing else.
+  setup
+  setup_bin_home
+  run_setup -- --yes --no-link-bin
+  assert_eq "0" "$RUN_RC" "a fresh repository, --yes --no-link-bin: exit 0 (stderr: $RUN_ERR)"
+  assert_true "…no ~/.local/bin" test ! -e "$HOME/.local/bin"
+  teardown
+  setup
+  setup_yes_as_reviewed "--link-bin" --link-bin
+  assert_true "…the shim written" test -f "$HOME/.local/bin/doc-superpowers"
+  teardown
+
+  # Resolution: written from under the plugin cache (no clone root baked
+  # in), then run against another cache holding 3.9.0 and 3.10.0.
+  setup
+  setup_bin_home
+  shim="$HOME/.local/bin/doc-superpowers"
+  setup_cache_root
+  SETUP_CMD="$SETUP_PCACHE_CMD"
+  run_setup CLAUDE_PLUGIN_CACHE="$SETUP_PCACHE" -- --yes --link-bin
+  unset SETUP_CMD
+  assert_eq "0" "$RUN_RC" "from the plugin cache: --yes --link-bin exits 0 (stderr: $RUN_ERR)"
+  assert_eq "clone_root=''" "$(grep '^clone_root=' "$shim")" "…no clone root baked in"
+  pc="$(harness_mktemp_d pc)/plugin cache"
+  setup_bin_copy "$pc/m/doc-superpowers/3.9.0" "OLDER"
+  setup_bin_copy "$pc/m/doc-superpowers/3.10.0" "NEWEST"
+  setup_bin_copy "$pc/m/doc-superpowers/3.11.0-rc1" "NOT A VERSION"
+  setup_bin_copy "$pc/m/doc-superpowers/latest" "NOT A VERSION"
+  mkdir -p "$pc/m/doc-superpowers/4.0.0"
+  run_shim CLAUDE_PLUGIN_CACHE="$pc" -- help
+  assert_eq "0|NEWEST" "$RUN_RC|$RUN_OUT" "the newest numeric version (3.10.0 over 3.9.0; not 3.11.0-rc1, latest, or a 4.0.0 without the dispatcher), the cache path with a space (stderr: $RUN_ERR)"
+  run_shim CLAUDE_PLUGIN_CACHE="$pc" DOC_SUPERPOWERS_ROOT="$pc/m/doc-superpowers/3.9.0" -- help
+  assert_eq "0|OLDER" "$RUN_RC|$RUN_OUT" "DOC_SUPERPOWERS_ROOT first (stderr: $RUN_ERR)"
+  run_shim CLAUDE_PLUGIN_CACHE="$pc" DOC_SUPERPOWERS_ROOT="$pc/nowhere" -- help
+  assert_eq "0|NEWEST" "$RUN_RC|$RUN_OUT" "a DOC_SUPERPOWERS_ROOT without scripts/doc-superpowers is passed over"
+  setup_bin_copy "$HOME/.claude/plugins/cache/m/doc-superpowers/3.10.1" "HOME CACHE"
+  run_shim -- help
+  assert_eq "0|HOME CACHE" "$RUN_RC|$RUN_OUT" "no CLAUDE_PLUGIN_CACHE: ~/.claude/plugins/cache (a HOME with a space) (stderr: $RUN_ERR)"
+  run_shim CLAUDE_PLUGIN_CACHE="$(harness_mktemp_d empty-cache)" -- help
+  assert_eq "2" "$RUN_RC" "no root anywhere: exit 2"
+  assert_eq "" "$RUN_OUT" "…nothing on stdout"
+  assert_eq "1" "$(printf '%s\n' "$RUN_ERR" | grep -c .)" "…one line on stderr"
+  assert_contains "$RUN_ERR" "DOC_SUPERPOWERS_ROOT" "…naming the variable"
+  teardown
+
+  # A clone root with a space in it, baked in.
+  setup
+  setup_bin_home
+  shim="$HOME/.local/bin/doc-superpowers"
+  plug="$(harness_mktemp_d plug)/plugin root"
+  ln -s "$SETUP_ROOT" "$plug"
+  SETUP_CMD=$(harness_mktemp plugcmd)
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$BASH_BIN" "$plug/scripts/doc-superpowers" > "$SETUP_CMD"
+  chmod +x "$SETUP_CMD"
+  run_setup -- --yes --link-bin
+  rm -f "$SETUP_CMD"
+  unset SETUP_CMD
+  assert_eq "0" "$RUN_RC" "from a clone whose path holds a space: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "clone_root='$plug'" "$(grep '^clone_root=' "$shim")" "…its root baked in, quoted"
+  run_shim CLAUDE_PLUGIN_CACHE="$(harness_mktemp_d empty-cache)" -- help
+  assert_eq "0" "$RUN_RC" "the baked root with a space: help exits 0 (stderr: $RUN_ERR)"
+  assert_eq "$(cat "$SETUP_ROOT/scripts/help/overview.txt")" "$RUN_OUT" "…this plugin's help"
+  # A quote in the root too: the rendered line still reads back as the path.
+  plug="$(harness_mktemp_d plug)/it's a root"
+  ln -s "$SETUP_ROOT" "$plug"
+  export PLUG="$plug"
+  # shellcheck disable=SC2016  # the snippet runs in the child bash, in the fixture
+  setup_lib 'source "$ROOT/scripts/setup/lib-plan.sh"
+    source "$ROOT/scripts/setup/lib-exec.sh"
+    ROOT="$PLUG"
+    exec_shim_render > rendered'
+  unset PLUG
+  assert_eq "0" "$SL_RC" "exec_shim_render with a quote in the root: rc 0 ($SL_OUT)"
+  assert_true "…the shim passes sh -n" sh -n "$TEST_DIR/rendered"
+  grep '^clone_root=' "$TEST_DIR/rendered" > "$TEST_DIR/rendered.line"
+  # shellcheck disable=SC2016  # expanded by the sh that reads the line
+  assert_eq "$plug" "$(sh -c '. "$1"; printf "%s" "$clone_root"' _ "$TEST_DIR/rendered.line")" "…its clone_root reads back as the path"
+  teardown
+}
+
+test_setup_prompt_defaults() {
+  echo "test: #51 the prompt UI (stdin not a TTY): 'a' then 'o' (Write only) writes exactly what --yes writes; the summary offers [a]pply [c]ustomize [s]how details [q]uit, the review [o] write only [b]ack and no Write and build (nothing builds); no per-user question without a team record; the terminal command is not written"
+  local prompt yes
+  setup
+  run_setup_prompt 'a\no\n' --
+  assert_eq "0" "$RUN_RC" "a, o: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "[x] Harness  claude-code" "the summary first"
+  assert_contains "$RUN_OUT" "[a]pply  [c]ustomize  [s]how details  [q]uit" "…then its actions"
+  assert_contains "$RUN_OUT" "Committed for the team:" "a: the review"
+  assert_contains "$RUN_OUT" "[o] write only  [b]ack" "…then its actions"
+  assert_not_contains "$RUN_OUT" "[w]rite and build" "…no Write and build: nothing builds"
+  assert_not_contains "$RUN_OUT" "Save the per-user changes" "no team record: no per-user question"
+  assert_contains "$RUN_OUT" "Then commit:" "o: the steps ran, then the git add line"
+  assert_true "no ~/.local/bin" test ! -e "$HOME/.local/bin"
+  prompt=$(setup_fs_state)
+  teardown
+  setup
+  run_setup -- --yes
+  assert_eq "0" "$RUN_RC" "--yes: exit 0 (stderr: $RUN_ERR)"
+  yes=$(setup_fs_state)
+  assert_eq "$yes" "$prompt" "the prompt's a, o wrote the same files, byte for byte, as --yes"
+  teardown
+  # --plain and DOC_SP_SETUP_UI=prompt are the same UI.
+  setup
+  run_setup_prompt 'q\n' -- --plain
+  assert_eq "0" "$RUN_RC" "--plain, q: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "[a]pply  [c]ustomize  [s]how details  [q]uit" "--plain: the prompt UI"
+  run_setup_prompt 'q\n' DOC_SP_SETUP_UI=prompt --
+  assert_contains "$RUN_OUT" "[a]pply  [c]ustomize  [s]how details  [q]uit" "DOC_SP_SETUP_UI=prompt: the prompt UI"
+  run_setup_prompt 'q\n' DOC_SP_SETUP_UI=bogus --
+  assert_eq "3" "$RUN_RC" "DOC_SP_SETUP_UI=bogus: exit 3"
+  teardown
+}
+
+test_setup_prompt_customize() {
+  echo "test: #51 the prompt UI's Customize: the groups numbered in GROUPS order (doc-search = 2), a group's items in catalog order (search = 1); a number toggles; an empty line goes up one level; c 2 1 <empty> <empty> a o writes what --yes --set search=on writes"
+  local prompt yes
+  setup
+  run_setup_prompt 'c\n2\n1\n\n\na\no\n' --
+  assert_eq "0" "$RUN_RC" "c 2 1 _ _ a o: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "  1) [x] Harness  claude-code" "the groups, numbered: 1 Harness"
+  assert_contains "$RUN_OUT" "  2) [ ] doc-search  off" "…2 doc-search"
+  assert_contains "$RUN_OUT" "  8) [ ] Terminal command  off" "…8 Terminal command"
+  assert_contains "$RUN_OUT" "  1) [ ] doc-search (one MCP server over the docs and the code) -- committed for the team" "doc-search's items: 1 the switch, with its scope"
+  assert_contains "$RUN_OUT" "  3) [ ] Index cache location: host -- local to you" "…3 the cache, a value item"
+  assert_contains "$RUN_OUT" "  1) [x] doc-search (one MCP server over the docs and the code) -- committed for the team (changed)" "1 toggled it on, marked changed"
+  assert_contains "$RUN_OUT" "  2) [x] doc-search  on, static model (changed)" "back in the groups: doc-search on"
+  assert_contains "$RUN_OUT" "[x] doc-search  on, static model (changed)" "back in the summary: changed"
+  assert_contains "$RUN_OUT" "[w]rite and build  [o] write only  [b]ack" "doc-search on: the review offers Write and build"
+  prompt=$(setup_fs_state)
+  teardown
+  setup
+  run_setup -- --yes --set search=on
+  assert_eq "0" "$RUN_RC" "--yes --set search=on: exit 0 (stderr: $RUN_ERR)"
+  yes=$(setup_fs_state)
+  assert_eq "$yes" "$prompt" "the prompt wrote the same files as --yes --set search=on"
+  teardown
+}
+
+test_setup_prompt_items() {
+  echo "test: #51 the prompt UI's items: a multi's options toggled by number; a choice chosen by number; a value item read as a line, an invalid value saying why and asking again; d <n> shows an item's details, scope and undo; s shows help setup; an unknown answer asks again; a disabled or locked item says why when chosen; the terminal command ticked is written"
+  setup
+  setup_bin_home
+  # Harness: codex ticked; Git hooks: merge driver; CI: a bad cron, then a good one.
+  run_setup_prompt 'x\ns\nc\n1\n1\n2\n\n\n3\n1\n2\n\n5\n3\nnot a cron\n0 6 * * 1\nd 2\n\n\nb\na\no\n' --
+  assert_eq "0" "$RUN_RC" "exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "answer a, c, s or q" "an unknown answer: asked again"
+  assert_contains "$RUN_OUT" "$(head -n 1 "$SETUP_ROOT/scripts/help/setup.txt")" "s: help setup"
+  assert_contains "$RUN_OUT" "  2) [ ] codex" "the harness options, numbered"
+  assert_contains "$RUN_OUT" "  2) [x] codex" "…2 ticked codex"
+  assert_contains "$RUN_OUT" "  2) ( ) merge-driver" "the git options"
+  assert_contains "$RUN_OUT" "ci.cron takes" "a bad cron: the reason"
+  assert_contains "$RUN_OUT" "Base branch" "d 2: the item"
+  assert_contains "$RUN_OUT" "Undo: " "…how to undo it"
+  assert_eq '["claude-code","codex"]' "$(jq -c .setup.harnesses .claude/doc-superpowers/installed.json 2>&1)" "the record: claude-code and codex"
+  assert_eq '"merge-driver"' "$(jq -c .setup.git .claude/doc-superpowers/installed.json 2>&1)" "…git: the merge driver"
+  assert_eq "0 6 * * 1" "$(jq -r .tiers.ci.cron .claude/doc-superpowers/installed.json 2>&1)" "…the cron the second answer gave (CI turned on with it)"
+  assert_true "no .git/hooks/pre-commit (merge driver only)" test ! -e .git/hooks/pre-commit
+  # The terminal command, ticked: written.
+  run_setup_prompt 'c\n8\n1\n\n\na\no\n' --
+  assert_eq "0" "$RUN_RC" "the terminal command ticked: exit 0 (stderr: $RUN_ERR)"
+  assert_true "…the shim written" test -f "$HOME/.local/bin/doc-superpowers"
+  assert_contains "$(review_section 'Local to you (outside the repository):')" "$HOME/.local/bin/doc-superpowers" "…the review listed it outside the repository"
+  # A disabled item says why.
+  printf '#!/bin/sh\necho mine\n' > "$HOME/.local/bin/doc-superpowers"
+  run_setup_prompt 'c\n8\n1\n' --
+  assert_eq "0" "$RUN_RC" "a disabled item chosen, then EOF: exit 0"
+  assert_contains "$RUN_OUT" "not setup's shim" "…the reason, when chosen"
+  assert_contains "$RUN_OUT" "  1) [ ] Terminal command (~/.local/bin/doc-superpowers) -- local to you (outside the repository) (off here)" "…marked off here"
+  # A locked item says why.
+  mkdir -p docs/ledger
+  echo '{}' > docs/ledger/config.json
+  run_setup_prompt 'c\n6\n1\n' --
+  assert_contains "$RUN_OUT" "cannot be turned off here" "a locked item chosen: the reason"
+  teardown
+}
+
+test_setup_prompt_eof_quits() {
+  echo "test: #51 the prompt UI: end of input at any prompt quits and writes nothing (summary, groups, items, a value, the review, the build question), and so does q"
+  local before a
+  setup
+  before=$(setup_snapshot)
+  for a in '' 'c\n' 'c\n2\n' 'c\n5\n3\n' 'c\n2\n1\n\n\na\n' 'c\n2\n1\n\n\na\nw\n' 'q\n' 'c\n2\n1\n\n\nq\n'; do
+    run_setup_prompt "$a" --
+    assert_eq "0" "$RUN_RC" "answers '$a' then EOF: exit 0 (stderr: $RUN_ERR)"
+    assert_contains "$RUN_OUT" "nothing was written" "…says nothing was written"
+    assert_eq "$before" "$(setup_snapshot)" "…and nothing was"
+  done
+  teardown
+}
+
+test_setup_prompt_build_consent() {
+  echo "test: #51 the prompt UI's Write and build asks 'This downloads <what>. Continue? [y/N]': n writes and builds nothing (the uv stub not run), an empty answer is no, y builds (the uv stub, once)"
+  setup
+  safety_stubs_on
+  run_setup_prompt 'c\n2\n1\n\n\na\nw\nn\n' --
+  assert_eq "0" "$RUN_RC" "w, n: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "This downloads " "w asks"
+  assert_contains "$RUN_OUT" "MB" "…naming the size"
+  assert_contains "$RUN_OUT" ". Continue? [y/N]" "…default no"
+  assert_true "…n: written (the config)" test -f docs/search/config.json
+  assert_eq "" "$(cat "$STUBLOG")" "…and not built: no uv"
+  run_setup_prompt 'a\nw\n\n' --
+  assert_eq "0" "$RUN_RC" "w, an empty answer: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "" "$(cat "$STUBLOG")" "…an empty answer is no: no uv"
+  run_setup_prompt 'a\nw\ny\n' --
+  assert_eq "0" "$RUN_RC" "w, y: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "1" "$(grep -c . "$STUBLOG")" "…y: the uv stub ran once"
+  assert_contains "$(cat "$STUBLOG")" "doc-search index" "…the build"
+  assert_eq "" "$(safety_gitlog_remote)" "git: no remote verb"
+  safety_stubs_off
+  teardown
+}
+
+test_setup_prompt_peruser_question() {
+  echo "test: #51 the prompt UI asks once, with a team record and a per-user item changed: 'Save the per-user changes for: [y]ou only  [t]he team' (default y): y (or an empty answer) records your own override, t the team's choice"
+  setup
+  setup_applied_defaults
+  run_setup_prompt 'c\n4\n1\n\n\na\n\no\n' --
+  assert_eq "0" "$RUN_RC" "claude off, you only (the default): exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "Save the per-user changes for: [y]ou only  [t]he team" "the question"
+  assert_eq "1" "$(grep -c 'Save the per-user changes for' <<<"$RUN_OUT")" "…asked once"
+  assert_eq "false|true" "$(jq -r .overrides.claude .claude/doc-superpowers/installed.local.json 2>&1)|$(jq -r .setup.claude .claude/doc-superpowers/installed.json 2>&1)" \
+    "…your override, the team's record unchanged"
+  teardown
+  setup
+  setup_applied_defaults
+  run_setup_prompt 'c\n4\n1\n\n\na\nt\no\n' --
+  assert_eq "0" "$RUN_RC" "claude off, the team: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "false" "$(jq -r .setup.claude .claude/doc-superpowers/installed.json 2>&1)" "…the team's record says claude off"
+  assert_true "…no local record" test ! -e .claude/doc-superpowers/installed.local.json
+  run_setup_prompt 'a\no\n' --
+  assert_not_contains "$RUN_OUT" "Save the per-user changes" "nothing per-user changed: no question"
+  teardown
+}
+
 echo ""
 echo "=== setup: model, probe, --list (#51) ==="
 test_setup_catalog
@@ -10148,6 +10520,13 @@ test_setup_codex_untick_user_subtable
 test_setup_host_checks
 test_setup_host_disabled_option_in_record
 test_setup_hints_never_change_defaults
+test_setup_bin_shim
+test_setup_prompt_defaults
+test_setup_prompt_customize
+test_setup_prompt_items
+test_setup_prompt_eof_quits
+test_setup_prompt_build_consent
+test_setup_prompt_peruser_question
 
 test_claude_hook_contract_held() {
   echo "test: every Claude hook run above held the contract (exit 0, or 2 only under STRICT; stdout one JSON object or nothing)"

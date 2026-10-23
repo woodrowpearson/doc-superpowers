@@ -522,21 +522,23 @@ test_shipped_scripts_pass_shellcheck() {
     [ -f "$f" ] || continue
     f="${f#"$root"/}"
     case "$f" in
-      # The ledger legs have no #! line: install.sh wraps them into a hook,
-      # as POSIX sh.
-      scripts/hooks/git/ledger-*) legs+=("$f") ;;
+      # POSIX sh, checked as sh: the ledger legs (no #! line: install.sh
+      # wraps them into a hook) and the terminal shim setup renders into
+      # ~/.local/bin (a template: @CLONE_ROOT@ is a plain word until then).
+      scripts/hooks/git/ledger-* | scripts/setup/shim.sh) legs+=("$f") ;;
       *) targets+=("$f") ;;
     esac
     n=$((n + 1))
   done
   assert_true "the gate covers the shipped scripts ($n found)" test "$n" -ge 40
+  assert_true "the terminal shim is checked as POSIX sh" grep -qxF scripts/setup/shim.sh <<<"$(printf '%s\n' ${legs[@]+"${legs[@]}"})"
   rc=0
   out=$(cd "$root" && shellcheck -S warning -x "${targets[@]}" 2>&1) || rc=$?
   assert_eq "0" "$rc" "shellcheck -S warning: no finding in ${#targets[@]} scripts${out:+ —
 $(head -n 40 <<<"$out")}"
   rc=0
   out=$(cd "$root" && shellcheck -S warning -s sh ${legs[@]+"${legs[@]}"} 2>&1) || rc=$?
-  assert_eq "0" "$rc" "shellcheck -S warning -s sh: no finding in the ${#legs[@]} ledger hook legs${out:+ —
+  assert_eq "0" "$rc" "shellcheck -S warning -s sh: no finding in the ${#legs[@]} POSIX sh scripts (the ledger hook legs, the terminal shim)${out:+ —
 $(head -n 40 <<<"$out")}"
 }
 

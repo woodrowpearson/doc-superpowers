@@ -936,40 +936,49 @@ _plan_group_notes() {
   done
 }
 
-# plan_render_summary: one line per group, in order: "[x] <Group>  <value
-# text>" or "[ ] <Group>  off", then " (changed)" when the group differs from
-# the base and " (already installed)" when it is ticked, in place, and no step
-# acts on it. Under a group, what this host cannot offer in it. After the
-# groups, the scan hints ("  hint: <Group>: <text>"): shown, never applied.
+# plan_group_line <group>: PLAN_GROUP_LINE, the group's summary line: "[x]
+# <Group>  <value text>" or "[ ] <Group>  off", then " (changed)" when the
+# group differs from the base and " (already installed)" when it is ticked, in
+# place, and no step acts on it (plan_build first); PLAN_GROUP_TICKED is 1
+# when its first item is ticked. Returns 1 for a group with no item. The
+# summary prints it; a UI's group list can too.
+plan_group_line() {
+  local g="$1" i=0 first=-1 changed=0 line
+  PLAN_GROUP_LINE="" PLAN_GROUP_TICKED=0
+  while [ "$i" -lt "$CAT_N" ]; do
+    if [ "${CAT_GROUP[i]}" = "$g" ]; then
+      [ "$first" -ge 0 ] || first=$i
+      [ "${SEL[i]}" = "${BASE[i]}" ] || changed=1
+    fi
+    i=$((i + 1))
+  done
+  [ "$first" -ge 0 ] || return 1
+  if model_is_on "${CAT_ID[first]}"; then
+    PLAN_GROUP_TICKED=1
+    _plan_group_text "$first"
+    line="[x] $g  $_PG_TEXT"
+  else
+    line="[ ] $g  off"
+  fi
+  [ "$changed" = 0 ] || line="$line (changed)"
+  if [ "$PLAN_GROUP_TICKED" = 1 ] && ! _model_is_off "$first" "$(probe_installed "${CAT_ID[first]}")"; then
+    case "$_PLAN_GROUPS" in
+      *"|$g|"*) ;;
+      *) line="$line (already installed)" ;;
+    esac
+  fi
+  PLAN_GROUP_LINE="$line"
+}
+
+# plan_render_summary: one line per group, in order (plan_group_line). Under
+# a group, what this host cannot offer in it. After the groups, the scan
+# hints ("  hint: <Group>: <text>"): shown, never applied.
 plan_render_summary() {
-  local g i first changed line ticked
+  local g i
   for g in "${GROUPS[@]}"; do
-    first=-1 changed=0 i=0
-    while [ "$i" -lt "$CAT_N" ]; do
-      if [ "${CAT_GROUP[i]}" = "$g" ]; then
-        [ "$first" -ge 0 ] || first=$i
-        [ "${SEL[i]}" = "${BASE[i]}" ] || changed=1
-      fi
-      i=$((i + 1))
-    done
-    [ "$first" -ge 0 ] || continue
-    if model_is_on "${CAT_ID[first]}"; then
-      _plan_group_text "$first"
-      line="[x] $g  $_PG_TEXT"
-    else
-      line="[ ] $g  off"
-    fi
-    [ "$changed" = 0 ] || line="$line (changed)"
-    if model_is_on "${CAT_ID[first]}" && ! _model_is_off "$first" "$(probe_installed "${CAT_ID[first]}")"; then
-      case "$_PLAN_GROUPS" in
-        *"|$g|"*) ;;
-        *) line="$line (already installed)" ;;
-      esac
-    fi
-    printf '%s\n' "$line"
-    ticked=0
-    if model_is_on "${CAT_ID[first]}"; then ticked=1; fi
-    _plan_group_notes "$g" "$ticked"
+    plan_group_line "$g" || continue
+    printf '%s\n' "$PLAN_GROUP_LINE"
+    _plan_group_notes "$g" "$PLAN_GROUP_TICKED"
   done
   i=0
   while [ "$i" -lt "$CAT_N" ]; do
@@ -1111,4 +1120,80 @@ plan_render_review() {
     printf '  git add%s --%s\n' "$all" "$paths"
   fi
   plan_render_harness_notes
+}
+
+# --- For the interactive UIs (lib-prompt.sh; the TUI) ----------------------------
+#
+# The UIs change SEL through model_set only, show the summary
+# (plan_render_summary, or plan_group_line per group) and the review
+# (plan_render_review) after plan_build, and hand setup.sh a result: write,
+# build, or quit. These answer their other questions the same way for each.
+
+# plan_scope_text <i>: item i's scope, in words.
+plan_scope_text() {
+  case "${CAT_SCOPE[$1]}" in
+    team) printf '%s' "committed for the team" ;;
+    local) printf '%s' "local to you" ;;
+    outside) printf '%s' "local to you (outside the repository)" ;;
+    mixed) printf '%s' "the merge driver committed for the team, the hooks local to you" ;;
+    *) printf '%s' "${CAT_SCOPE[$1]}" ;;
+  esac
+}
+
+# plan_peruser_changes: PLAN_PERUSER_IDS, the per-user items (git, claude,
+# ledger.git, ledger.claude) the selection changes against the base,
+# space-separated. Returns 0 when a team record exists and there is one at
+# least: the UI then asks whose they are ("Save the per-user changes for:
+# [y]ou only  [t]he team") and passes the answer to plan_for_team.
+plan_peruser_changes() {
+  local i=0
+  PLAN_PERUSER_IDS=""
+  while [ "$i" -lt "$CAT_N" ]; do
+    if [ "${CAT_PERUSER[i]}" = 1 ] && [ "${SEL[i]}" != "${BASE[i]}" ]; then
+      PLAN_PERUSER_IDS="${PLAN_PERUSER_IDS:+$PLAN_PERUSER_IDS }${CAT_ID[i]}"
+    fi
+    i=$((i + 1))
+  done
+  [ -n "$PROBE_TEAM" ] && [ -n "$PLAN_PERUSER_IDS" ]
+}
+
+# plan_for_team <0|1>: the answer to that question: 1 (the team) makes the
+# per-user changes (PLAN_PERUSER_IDS) the team's, as --for-team does; 0 (you
+# only) keeps them yours. plan_build reads it.
+plan_for_team() {
+  if [ "$1" = 1 ]; then
+    PLAN_FOR_TEAM=1
+    PLAN_FOR_TEAM_IDS="$PLAN_PERUSER_IDS"
+  else
+    PLAN_FOR_TEAM=0
+    PLAN_FOR_TEAM_IDS=""
+  fi
+}
+
+# plan_can_build: 0 when "Write and build" is offered: doc-search is ticked
+# and this host can build (uv found). Else PLAN_NO_BUILD says why when
+# doc-search is ticked (empty when nothing would build).
+# shellcheck disable=SC2034  # PLAN_NO_BUILD is the UIs' to show
+plan_can_build() {
+  PLAN_NO_BUILD=""
+  model_is_on search || return 1
+  if [ -n "${HOST_NO_BUILD:-}" ]; then
+    PLAN_NO_BUILD="$HOST_NO_BUILD"
+    return 1
+  fi
+  return 0
+}
+
+# plan_download_text: PLAN_DOWNLOAD, what "Write and build" downloads, for its
+# question "This downloads <what>. Continue? [y/N]" (plan_build first).
+# shellcheck disable=SC2034  # PLAN_DOWNLOAD is the UIs' to show
+plan_download_text() {
+  local e what
+  PLAN_DOWNLOAD=""
+  for e in ${DL[@]+"${DL[@]}"}; do
+    what="${e%%"$_PLAN_T"*}"
+    PLAN_DOWNLOAD="${what##*: }, ${e#*"$_PLAN_T"}"
+    return 0
+  done
+  return 1
 }

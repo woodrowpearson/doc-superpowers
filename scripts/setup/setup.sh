@@ -41,8 +41,20 @@
 #                       team's, in the team record (any other override of
 #                       yours stays yours); without it, once a team record
 #                       exists, they are yours (installed.local.json)
-#   --link-bin --no-link-bin --plain, and --build or --for-team with no mode
-#   (the interactive UI): not implemented yet (exit 3)
+#   --link-bin          tick the terminal command (~/.local/bin/doc-superpowers,
+#                       design §4.2): --set bin=on, but refused with
+#                       --no-link-bin; with any mode, --apply included (the
+#                       shim is outside the repository, never the team's)
+#   --no-link-bin       untick it (setup removes its own shim, never a file
+#                       of yours)
+#   --plain             the interactive UI as plain line prompts, on a TTY too
+#   (no mode)           interactive: the prompt UI (lib-prompt.sh) when stdin
+#                       or stdout is not a TTY, TERM is dumb or unset, or with
+#                       --plain; else the TUI (Task 10; until then the prompt
+#                       UI). DOC_SP_SETUP_UI=prompt|tui (internal, for tests)
+#                       picks one. It asks before it writes: q, or the end of
+#                       input, writes nothing (exit 0). --build and --for-team
+#                       are refused there (exit 3): the UI asks both questions
 # --list, --dry-run, --yes and --apply are modes: one at a time, except
 # --apply --dry-run.
 #
@@ -69,6 +81,8 @@ source "$ROOT/scripts/setup/lib-probe.sh"
 source "$ROOT/scripts/setup/lib-plan.sh"
 # shellcheck source=scripts/setup/lib-exec.sh
 source "$ROOT/scripts/setup/lib-exec.sh"
+# shellcheck source=scripts/setup/lib-prompt.sh
+source "$ROOT/scripts/setup/lib-prompt.sh"
 
 die() {
   echo "setup: $1" >&2
@@ -78,15 +92,13 @@ usage_error() {
   echo "setup: $1" >&2
   exit 3
 }
-not_yet() {
-  echo "setup: $1: not implemented yet" >&2
-  exit 3
-}
 
 MODE=""
 APPLY=0
 BUILD=0
 FOR_TEAM=0
+PLAIN=0
+BIN_SET=""
 SETS=()
 # set_mode <mode>: one mode per run (--dry-run --yes would otherwise write).
 set_mode() {
@@ -107,9 +119,13 @@ while [ "$#" -gt 0 ]; do
     --apply) APPLY=1 ;;
     --build) BUILD=1 ;;
     --for-team) FOR_TEAM=1 ;;
-    --link-bin) not_yet --link-bin ;;
-    --no-link-bin) not_yet --no-link-bin ;;
-    --plain) not_yet --plain ;;
+    --link-bin | --no-link-bin)
+      _b=on
+      [ "$1" = --link-bin ] || _b=off
+      [ -z "$BIN_SET" ] || [ "$BIN_SET" = "$_b" ] || usage_error "--link-bin and --no-link-bin cannot be used together"
+      BIN_SET="$_b"
+      ;;
+    --plain) PLAIN=1 ;;
     *) usage_error "unknown flag '$1' (doc-superpowers help setup lists the flags)" ;;
   esac
   shift
@@ -129,15 +145,37 @@ fi
 # shows the build in the review.
 case "$MODE" in
   dry-run | yes | apply) ;;
-  *) [ "$BUILD" = 0 ] || not_yet --build ;;
+  *)
+    [ "$BUILD" = 0 ] || [ -n "$MODE" ] \
+      || usage_error "--build goes with --yes or --apply (the download consent; --dry-run shows it): the interactive UI asks before it builds"
+    [ "$BUILD" = 0 ] || usage_error "--build does not apply to --$MODE"
+    ;;
 esac
 # --for-team makes the per-user values the team's (--yes), or shows that
 # plan (--dry-run).
 case "$MODE" in
   dry-run | yes) ;;
   list) [ "$FOR_TEAM" = 0 ] || usage_error "--for-team does not apply to --list" ;;
-  *) [ "$FOR_TEAM" = 0 ] || not_yet --for-team ;;
+  "") [ "$FOR_TEAM" = 0 ] || usage_error "--for-team goes with --yes or --dry-run: the interactive UI asks whose the per-user changes are" ;;
+  *) [ "$FOR_TEAM" = 0 ] || usage_error "--for-team does not apply to --$MODE" ;;
 esac
+# The interactive UI: the prompt UI when there is no terminal to draw on.
+UI=""
+if [ -z "$MODE" ]; then
+  case "${DOC_SP_SETUP_UI:-}" in
+    "" | prompt | tui) ;;
+    *) usage_error "DOC_SP_SETUP_UI takes prompt or tui, not '${DOC_SP_SETUP_UI}'" ;;
+  esac
+  if [ -n "${DOC_SP_SETUP_UI:-}" ]; then
+    UI="$DOC_SP_SETUP_UI"
+  elif [ "$PLAIN" = 1 ] || [ ! -t 0 ] || [ ! -t 1 ] || [ "${TERM:-dumb}" = dumb ]; then
+    UI=prompt
+  else
+    UI=tui
+  fi
+  # The TUI is Task 10's (lib-tui.sh); until it lands, the prompt UI.
+  [ "$UI" != tui ] || UI=prompt
+fi
 
 command -v jq >/dev/null 2>&1 || die "jq is needed (1.6 or later); nothing was changed"
 model_load_catalog "$ROOT/scripts/setup/catalog.json" || die "$MODEL_ERROR" 2
@@ -151,11 +189,6 @@ for _s in ${SETS[@]+"${SETS[@]}"}; do
   model_check "${_s%%=*}" "${_s#*=}" || usage_error "--set $_s: $MODEL_ERROR"
 done
 
-case "$MODE" in
-  list | dry-run | yes | apply) ;;
-  *) not_yet "interactive mode" ;;
-esac
-
 _top=$(git rev-parse --show-toplevel 2>/dev/null) || _top=""
 [ -n "$_top" ] || die "not a git repository (run setup inside a repository's work tree)"
 cd "$_top"
@@ -168,6 +201,12 @@ model_base_init || die "$MODEL_ERROR; nothing was changed"
 for _s in ${SETS[@]+"${SETS[@]}"}; do
   model_set "${_s%%=*}" "${_s#*=}" || die "--set $_s: $MODEL_ERROR"
 done
+# --link-bin / --no-link-bin: the terminal command, as --set bin=on|off.
+if [ -n "$BIN_SET" ]; then
+  _f=--link-bin
+  [ "$BIN_SET" = on ] || _f=--no-link-bin
+  model_set bin "$BIN_SET" || die "$_f: $MODEL_ERROR"
+fi
 # The items this host's checks disable: with --apply, skipped (left as they
 # are); otherwise the options the base fell back from (a hooks mode this host
 # cannot offer), listed with the reason; named last.
@@ -205,6 +244,31 @@ if [ "$MODE" = yes ] || [ "$MODE" = apply ]; then
   PLAN_FOR_TEAM="$FOR_TEAM"
   plan_build || die "$PLAN_ERROR; nothing was changed"
   EXEC_SHOW_OUTSIDE="$APPLY"
+  _rc=0
+  exec_plan || _rc=$?
+  [ "$_rc" = 1 ] || print_skipped
+  exit "$_rc"
+fi
+
+# Interactive: the UI asks (nothing is written before its last answer), then
+# its result runs as --yes would: Write only, or Write and build.
+if [ -z "$MODE" ]; then
+  PLAN_FOR_TEAM=0
+  PLAN_FOR_TEAM_IDS=""
+  # The answers come from fd 3; no command the UI starts can read one.
+  prompt_run 3<&0 </dev/null
+  case "$PROMPT_RESULT" in
+    write) PLAN_BUILD_REQUESTED=0 ;;
+    build) PLAN_BUILD_REQUESTED=1 ;;
+    *)
+      echo "Quit: nothing was written."
+      exit 0
+      ;;
+  esac
+  echo ""
+  plan_build || die "$PLAN_ERROR; nothing was changed"
+  # What the host made the selection fall back from, as the UI left it.
+  model_host_skips
   _rc=0
   exec_plan || _rc=$?
   [ "$_rc" = 1 ] || print_skipped
