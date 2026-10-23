@@ -10494,6 +10494,397 @@ test_setup_prompt_peruser_question() {
   teardown
 }
 
+# --- setup: the TUI (#51) -----------------------------------------------------
+
+# run_setup_tui <keys> [VAR=value …] -- <args…>: run_setup with <keys>
+# (printf's format: \033 is Esc, \033[A an arrow, \n enter) on stdin, a file,
+# and the TUI forced (DOC_SP_SETUP_UI=tui) with no colour and a 100x30
+# terminal, unless a VAR=value pair says otherwise. Off a terminal the TUI
+# touches no stty and starts each frame with a form-feed line.
+run_setup_tui() {
+  local keys="$1" envs=(DOC_SP_SETUP_UI=tui NO_COLOR=1 COLUMNS=100 LINES=30)
+  shift
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    envs+=("$1")
+    shift
+  done
+  RUN_STDIN=$(harness_mktemp keys)
+  # shellcheck disable=SC2059  # the keys are a printf format
+  printf "$keys" > "$RUN_STDIN"
+  run_setup "${envs[@]}" "$@"
+  rm -f "$RUN_STDIN"
+  RUN_STDIN=/dev/null
+}
+
+# tui_frame <n|last>: frame <n> (1-based) of $RUN_OUT: the lines after its
+# form-feed line, up to the next one (the last frame runs to the end).
+tui_frame() {
+  awk -v want="$1" '/^\f$/ { n++; next } n > 0 { a[n] = a[n] $0 "\n" } END { if (want == "last") want = n; printf "%s", a[want] }' <<<"$RUN_OUT"
+}
+
+# tui_max_width <text>: its longest line, in characters (a UTF-8 continuation
+# byte is not one; a form feed neither).
+tui_max_width() {
+  printf '%s\n' "$1" | LC_ALL=C tr -d '\200-\277\f' | LC_ALL=C awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }'
+}
+
+# tui_line_no <text> <fixed string>: the number of <text>'s first line that
+# holds <fixed string>, or 0.
+tui_line_no() {
+  awk -v s="$2" 'index($0, s) { print NR; f = 1; exit } END { if (!f) print 0 }' <<<"$1"
+}
+
+# tui_state_untimed: setup_fs_state, installed.json's line replaced by its
+# content without the CI tier's install times (a CI install stamps the time).
+tui_state_untimed() {
+  setup_fs_state | grep -v '^\.claude/doc-superpowers/installed\.json	'
+  jq -S 'del(.. | .installed_at?)' .claude/doc-superpowers/installed.json 2>&1
+}
+
+# tui_downs <n>: <n> down arrows, as run_setup_tui's keys.
+tui_downs() {
+  local i=0 s=""
+  while [ "$i" -lt "$1" ]; do
+    s="$s\\033[B"
+    i=$((i + 1))
+  done
+  printf '%s' "$s"
+}
+
+test_setup_tui_defaults_write_only() {
+  echo "test: #51 the TUI (keys piped): enter on the summary (Apply these), enter on the review (Write only) write what --yes writes; the summary's actions are Apply these, Customize..., Show what each does, Cancel, the cursor on Apply these; the review's Write and build (only when something builds), Write only, Back, the cursor on Write only"
+  local tui yes f
+  setup
+  run_setup_tui '\n\n' --
+  assert_eq "0" "$RUN_RC" "enter, enter: exit 0 (stderr: $RUN_ERR)"
+  f=$(tui_frame 1)
+  assert_contains "$f" "[x] Harness  claude-code" "frame 1: the summary"
+  assert_contains "$f" "> Apply these" "…the cursor on Apply these"
+  assert_contains "$f" "  Customize" "…Customize…"
+  assert_contains "$f" "  Show what each does" "…Show what each does"
+  assert_contains "$f" "  Cancel" "…Cancel"
+  assert_true "…in that order" test "$(tui_line_no "$f" "Apply these")" -lt "$(tui_line_no "$f" "Customize")" \
+    -a "$(tui_line_no "$f" "Customize")" -lt "$(tui_line_no "$f" "Show what each does")" \
+    -a "$(tui_line_no "$f" "Show what each does")" -lt "$(tui_line_no "$f" "Cancel")"
+  f=$(tui_frame 2)
+  assert_contains "$f" "Committed for the team:" "frame 2: the review"
+  assert_contains "$f" "> Write only" "…the cursor on Write only"
+  assert_contains "$f" "Back" "…and Back"
+  assert_not_contains "$f" "Write and build" "…no Write and build: nothing builds"
+  assert_contains "$RUN_OUT" "Then commit:" "Write only: the steps ran, then the git add line"
+  assert_eq "" "$RUN_ERR" "nothing on stderr"
+  tui=$(setup_fs_state)
+  teardown
+  setup
+  run_setup -- --yes
+  assert_eq "0" "$RUN_RC" "--yes: exit 0 (stderr: $RUN_ERR)"
+  yes=$(setup_fs_state)
+  assert_eq "$yes" "$tui" "the TUI's enter, enter wrote the same files, byte for byte, as --yes"
+  # Something builds: Write and build is offered, the cursor still on Write only.
+  run_setup_tui '\n' -- --set search=on
+  assert_eq "0" "$RUN_RC" "--set search=on, enter, then the end of input: exit 0 (stderr: $RUN_ERR)"
+  f=$(tui_frame 2)
+  assert_contains "$f" "Write and build" "search on: the review offers Write and build"
+  assert_contains "$f" "> Write only" "…the cursor still on Write only: a build is never the default"
+  assert_not_contains "$f" "> Write and build" "…not on Write and build"
+  assert_eq "$yes" "$(setup_fs_state)" "…and the end of input wrote nothing"
+  teardown
+}
+
+test_setup_tui_customize_esc_changed() {
+  echo "test: #51 the TUI: Customize... opens the tree, collapsed; down to doc-search, space ticks it; Esc goes back to the summary, whose doc-search line says (changed), the cursor on Apply these; q quits and writes nothing"
+  local before f
+  setup
+  before=$(setup_snapshot)
+  run_setup_tui '\033[B\n\033[B \033q' --
+  assert_eq "0" "$RUN_RC" "down, enter, down, space, Esc, q: exit 0 (stderr: $RUN_ERR)"
+  f=$(tui_frame 2)
+  assert_contains "$f" "> Customize" "frame 2: the cursor on Customize..."
+  f=$(tui_frame 4)
+  assert_contains "$f" "[ ] doc-search  off" "frame 4: the tree, doc-search unticked"
+  assert_contains "$(grep -F 'doc-search  off' <<<"$f")" ">" "…the cursor on it"
+  assert_contains "$f" "[ ] Terminal command  off" "…every group shown"
+  f=$(tui_frame 5)
+  assert_contains "$f" "[x] doc-search  on, static model (changed)" "frame 5: space ticked doc-search"
+  f=$(tui_frame last)
+  assert_contains "$(grep -F 'doc-search' <<<"$f" | head -n 1)" "(changed)" "the last frame, the summary: its doc-search line says (changed)"
+  assert_contains "$f" "> Apply these" "…the cursor back on Apply these"
+  assert_contains "$RUN_OUT" "Quit: nothing was written." "q: quit"
+  assert_eq "$before" "$(setup_snapshot)" "…and nothing was written"
+  teardown
+}
+
+test_setup_tui_arrow_vs_esc() {
+  echo "test: #51 the TUI's key reader: \\033[A is up and \\033[B down (not Esc then [ and a letter); \\033q is Esc, then q; DOC_SP_SETUP_DEBUG=1 prints one line per key, its screen and cursor index"
+  setup
+  run_setup_tui '\033[B\n\033[B\033[B\033[A\033q' DOC_SP_SETUP_DEBUG=1 --
+  assert_eq "0" "$RUN_RC" "exit 0 (stderr: $RUN_ERR)"
+  assert_eq "tui: key=down screen=summary cur=1
+tui: key=enter screen=tree cur=0
+tui: key=down screen=tree cur=1
+tui: key=down screen=tree cur=2
+tui: key=up screen=tree cur=1
+tui: key=esc screen=summary cur=0
+tui: key=char:q screen=summary cur=0" "$(grep '^tui: ' <<<"$RUN_ERR")" "the keys read: down, enter, down, down, up, Esc, q"
+  assert_contains "$RUN_OUT" "Quit: nothing was written." "q quit"
+  run_setup_tui 'kjjkbq' DOC_SP_SETUP_DEBUG=1 --
+  assert_eq "tui: key=up screen=summary cur=0
+tui: key=down screen=summary cur=1
+tui: key=down screen=summary cur=2
+tui: key=up screen=summary cur=1
+tui: key=esc screen=summary cur=1
+tui: key=char:q screen=summary cur=1" "$(grep '^tui: ' <<<"$RUN_ERR")" "k and j are up and down, b is Esc"
+  run_setup_tui '\n\n' --
+  assert_not_contains "$RUN_ERR" "tui: key=" "without DOC_SP_SETUP_DEBUG: no debug line"
+  teardown
+}
+
+test_setup_tui_narrow() {
+  echo "test: #51 the TUI's size (Review Focus 5): at 100 columns the details pane is beside the tree; at 70 it comes under the tree and no line is longer than 70; below 60x16 the prompt UI runs, after one line saying the terminal is too small; under LC_ALL=C every byte is ASCII, in a UTF-8 locale the groups open with a triangle"
+  local f n
+  setup
+  # Two panes: the details' first line on the tree's first row.
+  run_setup_tui '\033[B\n\033[B' --
+  assert_eq "0" "$RUN_RC" "100 columns: exit 0 (stderr: $RUN_ERR)"
+  f=$(tui_frame last)
+  assert_contains "$(grep -F 'Harness' <<<"$f" | head -n 1)" "doc-search (one" "100 columns: the details beside the tree (doc-search's, on the Harness row)"
+  n=$(tui_max_width "$RUN_OUT")
+  assert_true "…no line longer than 100 ($n)" test "$n" -le 100
+  # Stacked: the details after the tree's last row.
+  run_setup_tui '\033[B\n\033[B' COLUMNS=70 --
+  assert_eq "0" "$RUN_RC" "70 columns: exit 0 (stderr: $RUN_ERR)"
+  n=$(tui_max_width "$RUN_OUT")
+  assert_true "…no line longer than 70 ($n)" test "$n" -le 70
+  f=$(tui_frame last)
+  assert_true "…the details (doc-search's) under the tree's last row (Terminal command)" \
+    test "$(tui_line_no "$f" "doc-search (one")" -gt "$(tui_line_no "$f" "Terminal command")"
+  assert_true "…the tree first" test "$(tui_line_no "$f" "Terminal command")" -gt 0
+  # Too small: the prompt UI, after one line saying why.
+  run_setup_tui 'q\n' COLUMNS=50 LINES=12 --
+  assert_eq "0" "$RUN_RC" "50x12: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$(head -n 1 <<<"$RUN_OUT")" "terminal too small" "…the first line says the terminal is too small"
+  assert_contains "$RUN_OUT" "[a]pply  [c]ustomize  [s]how details  [q]uit" "…then the prompt UI"
+  assert_true "…its summary after that line" test "$(tui_line_no "$RUN_OUT" "[x] Harness")" -gt 1
+  run_setup_tui 'q\n' COLUMNS=100 LINES=15 --
+  assert_contains "$RUN_OUT" "terminal too small" "100x15: too few lines"
+  run_setup_tui 'q\n' COLUMNS=60 LINES=16 --
+  assert_not_contains "$RUN_OUT" "terminal too small" "60x16: the TUI"
+  # ASCII under LC_ALL=C; a group opened.
+  run_setup_tui '\033[B\n\033[B\n\033[B' LC_ALL=C --
+  assert_eq "0" "$RUN_RC" "LC_ALL=C: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "0" "$(LC_ALL=C tr -d '\000-\177' <<<"$RUN_OUT" | wc -c | tr -d ' ')" "…no byte of 0x80 or more"
+  assert_contains "$RUN_OUT" "- [ ] doc-search  off" "…an open group is '-'"
+  assert_contains "$RUN_OUT" "+ [x] Git hooks" "…a closed one '+'"
+  run_setup_tui '\033[B\n\033[B\n\033[B' LC_ALL= LC_CTYPE=en_US.UTF-8 --
+  assert_contains "$RUN_OUT" "$(printf '\342\226\276') [ ] doc-search" "LC_CTYPE=en_US.UTF-8: an open group is a down triangle"
+  teardown
+}
+
+test_setup_tui_eof_quits() {
+  echo "test: #51 the TUI: the end of input quits and writes nothing, on every screen (summary, tree, a value being edited, the review, the build question); so does q, and Cancel"
+  local before k
+  setup
+  before=$(setup_snapshot)
+  for k in '' '\033[B\n' '\n' 'q' '\033[B\nq' '\033[B\033[B\033[B\n' "\\033[B\\n$(tui_downs 4)\\n$(tui_downs 12)e"; do
+    run_setup_tui "$k" --
+    assert_eq "0" "$RUN_RC" "keys '$k' then the end of input: exit 0 (stderr: $RUN_ERR)"
+    assert_contains "$RUN_OUT" "Quit: nothing was written." "…says nothing was written"
+    assert_eq "$before" "$(setup_snapshot)" "…and nothing was"
+  done
+  run_setup_tui '\n\033[D\n' -- --set search=on
+  assert_eq "0" "$RUN_RC" "the build question, then the end of input: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$(tui_frame last)" ". Continue? [y/N]" "…the build question was asked"
+  assert_contains "$RUN_OUT" "Quit: nothing was written." "…then quit"
+  assert_eq "$before" "$(setup_snapshot)" "…and nothing was written"
+  teardown
+}
+
+test_setup_tui_same_plan() {
+  echo "test: #51 the TUI changes the selection as --set does: space on doc-search writes what --yes --set search=on writes; a choice's option chosen with enter, a value edited with e (a line read), a multi's option ticked with space write what the same --set values write"
+  local tui yes
+  setup
+  run_setup_tui '\033[B\n\033[B \033\n\n' --
+  assert_eq "0" "$RUN_RC" "doc-search ticked, Esc, Apply these, Write only: exit 0 (stderr: $RUN_ERR)"
+  tui=$(setup_fs_state)
+  teardown
+  setup
+  run_setup -- --yes --set search=on
+  yes=$(setup_fs_state)
+  assert_eq "$yes" "$tui" "…the same files as --yes --set search=on"
+  teardown
+  # Git hooks opened (row 2): merge-driver (row 5) chosen; CI workflows (row 8)
+  # opened: the cron (row 20) edited, doc-spec-verify (row 18) ticked.
+  setup
+  run_setup_tui "\\033[B\\n$(tui_downs 2)\\n$(tui_downs 3)\\n$(tui_downs 3)\\n$(tui_downs 12)e0 6 * * 1\\n\\033[A\\033[A \\033\\n\\n" --
+  assert_eq "0" "$RUN_RC" "git, the cron, a workflow: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "(*) merge-driver" "the choice's options shown, merge-driver chosen"
+  assert_contains "$RUN_OUT" "Schedule (cron): 0 6 * * 1 (changed)" "the value edited"
+  assert_contains "$RUN_OUT" "[x] doc-spec-verify" "the multi's option ticked"
+  tui=$(tui_state_untimed)
+  teardown
+  setup
+  run_setup -- --yes --set git=merge-driver --set 'ci.cron=0 6 * * 1' --set ci.workflows=doc-freshness-pr,doc-freshness-schedule,doc-spec-verify
+  assert_eq "0" "$RUN_RC" "--yes with the same --set values: exit 0 (stderr: $RUN_ERR)"
+  yes=$(tui_state_untimed)
+  assert_eq "$yes" "$tui" "…the same files as --yes with those --set values (the CI record's install times aside)"
+  # An invalid value says why and changes nothing; ? shows the item's help.
+  run_setup_tui "\\033[B\\n$(tui_downs 4)\\n$(tui_downs 12)enot a cron\\n?" --
+  assert_contains "$RUN_OUT" "ci.cron takes" "an invalid cron: the reason"
+  assert_contains "$(tui_frame last)" "Undo: " "?: the item's help, its undo"
+  # A locked item says why.
+  mkdir -p docs/ledger
+  echo '{}' > docs/ledger/config.json
+  run_setup_tui "\\033[B\\n$(tui_downs 5) " --
+  assert_contains "$RUN_OUT" "cannot be turned off here" "space on a locked item: the reason"
+  teardown
+}
+
+test_setup_tui_scope_and_build() {
+  echo "test: #51 the TUI asks whose the per-user changes are when a team record exists (You only, the default; The team), turns away the merge driver's removal as yours (back to the summary, saying why), and asks 'This downloads <what>. Continue? [y/N]' before Write and build: n or enter writes only, y builds"
+  local f before
+  setup
+  setup_applied_defaults
+  # Claude hooks (row 3) unticked, Esc, Apply these: the question; enter: you only.
+  run_setup_tui "\\033[B\\n$(tui_downs 3) \\033\\n\\n\\n" --
+  assert_eq "0" "$RUN_RC" "claude off, you only: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "Save the per-user changes for:" "the question"
+  assert_contains "$RUN_OUT" "> You only" "…the cursor on You only"
+  assert_contains "$RUN_OUT" "  The team" "…and The team"
+  assert_eq "false|true" "$(jq -r .overrides.claude .claude/doc-superpowers/installed.local.json 2>&1)|$(jq -r .setup.claude .claude/doc-superpowers/installed.json 2>&1)" \
+    "…your override; the team's record unchanged"
+  teardown
+  setup
+  setup_applied_defaults
+  run_setup_tui "\\033[B\\n$(tui_downs 3) \\033\\nt\\n" --
+  assert_eq "0" "$RUN_RC" "claude off, t: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "false" "$(jq -r .setup.claude .claude/doc-superpowers/installed.json 2>&1)" "…the team's record says claude off"
+  assert_true "…no local record" test ! -e .claude/doc-superpowers/installed.local.json
+  teardown
+  # git off as yours would drop the team's merge driver (R9): refused, saying so.
+  setup
+  setup_applied_defaults
+  before=$(setup_snapshot)
+  run_setup_tui "\\033[B\\n$(tui_downs 2) \\033\\n\\nq" --
+  assert_eq "0" "$RUN_RC" "git off, you only, q: exit 0 (stderr: $RUN_ERR)"
+  f=$(tui_frame last)
+  assert_contains "$f" "removes the merge driver" "…back on the summary, saying why"
+  assert_contains "$f" "The team" "…and how: The team"
+  assert_contains "$f" "> Apply these" "…the summary"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
+  teardown
+  # Write and build: the question first.
+  setup
+  safety_stubs_on
+  run_setup_tui '\033[B\n\033[B \033\n\033[D\nn' --
+  assert_eq "0" "$RUN_RC" "Write and build, n: exit 0 (stderr: $RUN_ERR)"
+  f=$(tui_frame last)
+  assert_contains "$f" "This downloads " "the question"
+  assert_contains "$f" "MB" "…naming the size"
+  assert_contains "$f" ". Continue? [y/N]" "…default no"
+  assert_true "…n: written (the config)" test -f docs/search/config.json
+  assert_eq "" "$(cat "$STUBLOG")" "…and not built: no uv"
+  run_setup_tui '\n\033[D\n\n' --
+  assert_eq "0" "$RUN_RC" "Write and build, enter: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "" "$(cat "$STUBLOG")" "…enter is no: no uv"
+  run_setup_tui '\n\033[D\ny' --
+  assert_eq "0" "$RUN_RC" "Write and build, y: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "1" "$(grep -c . "$STUBLOG")" "…y: the uv stub ran once"
+  assert_contains "$(cat "$STUBLOG")" "doc-search index" "…the build"
+  assert_eq "" "$(safety_gitlog_remote)" "git: no remote verb"
+  safety_stubs_off
+  teardown
+}
+
+# tty_settings <stty -a file>: its settings, one a line, sorted, without
+# pendin (see test_setup_tui_tty_restore).
+tty_settings() {
+  { tr -s ' \t;' '\n' < "$1" | grep -v -x -e pendin -e -pendin | sed '/^$/d' | LC_ALL=C sort; } 2>/dev/null || true
+}
+
+test_setup_tui_tty_restore() {
+  echo "test: #51 the TUI on a real terminal (Review Focus 2; script(1)'s pseudo-terminal): chosen with no DOC_SP_SETUP_UI; it enters the alternate screen and hides the cursor; keys are read unechoed, one at a time (stty -echo -icanon); a SIGINT to its process group (^C) restores the terminal settings (stty), the cursor and the main screen, and nothing is written"
+  local kind="" d before out rest i pg bg
+  if script -q /dev/null true </dev/null >/dev/null 2>&1; then
+    kind=bsd
+  elif script -qc true /dev/null </dev/null >/dev/null 2>&1; then
+    kind=util
+  else
+    record_skip "the TUI's terminal restore: no script(1) here"
+    return 0
+  fi
+  # A suite started with '&' inherits SIGINT ignored, which no trap can undo
+  # (see test-doc-tools.sh's harness self-test): nothing to deliver then.
+  if [ "$("$BASH_BIN" -c 'kill -INT $$; echo ALIVE' 2>/dev/null)" = ALIVE ]; then
+    record_skip "the TUI's terminal restore: SIGINT is ignored in this run (the suite was started in the background with '&') — run the suite in the foreground to cover it"
+    return 0
+  fi
+  setup
+  d=$(harness_mktemp_d tty)
+  cat > "$d/wrap.sh" <<'WRAP'
+tty > "$D/tty"
+ps -o pgid= -p $$ | tr -d ' ' > "$D/pgid"
+stty -a > "$D/before"
+trap ': interrupted' INT
+"$SETUP" setup 2> "$D/err"
+echo $? > "$D/rc"
+stty -a > "$D/after"
+WRAP
+  before=$(setup_snapshot)
+  # The ^C comes from a helper in the background; script(1) runs in the
+  # foreground, since an asynchronous command starts with SIGINT ignored, and
+  # a signal ignored on entry cannot be trapped.
+  (
+    i=0
+    while [ "$i" -lt 200 ] && ! grep -q '\[?1049h' "$d/out" 2>/dev/null; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    sleep 1
+    # The settings while the TUI waits for a key, read through the pty's name
+    # (GNU stty takes -F, BSD stty -f).
+    stty -F "$(cat "$d/tty")" -a > "$d/during" 2>/dev/null \
+      || stty -f "$(cat "$d/tty")" -a > "$d/during" 2>/dev/null || true
+    pg=$(cat "$d/pgid" 2>/dev/null || true)
+    # Only the pseudo-terminal's own group: never this suite's.
+    [ -n "$pg" ] && [ "$pg" != "$(ps -o pgid= -p $$ | tr -d ' ')" ] || pg=""
+    [ -z "$pg" ] || kill -INT -- "-$pg" 2>/dev/null || true
+    i=0
+    while [ "$i" -lt 100 ] && [ ! -s "$d/after" ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    [ -s "$d/after" ] || [ -z "$pg" ] || kill -TERM -- "-$pg" 2>/dev/null || true
+    kill "$(cat "$d/sleep" 2>/dev/null)" 2>/dev/null || true
+  ) &
+  bg=$!
+  { sleep 60 & echo $! > "$d/sleep"; wait; } | if [ "$kind" = bsd ]; then
+    env -u DOC_SP_SETUP_UI -u DOC_SP_SETUP_DEBUG TERM=xterm COLUMNS=100 LINES=30 NO_COLOR=1 PATH="$REAL_PATH" D="$d" SETUP="$SETUP" \
+      script -q /dev/null /bin/sh "$d/wrap.sh"
+  else
+    env -u DOC_SP_SETUP_UI -u DOC_SP_SETUP_DEBUG TERM=xterm COLUMNS=100 LINES=30 NO_COLOR=1 PATH="$REAL_PATH" D="$d" SETUP="$SETUP" \
+      script -qc "/bin/sh $(printf '%q' "$d/wrap.sh")" /dev/null
+  fi > "$d/out" 2>&1 || true
+  wait "$bg" 2>/dev/null || true
+  out=$(cat "$d/out")
+  assert_contains "$out" $'\033[?1049h' "the TUI was chosen on a terminal: it entered the alternate screen"
+  assert_contains "$out" $'\033[?25l' "…and hid the cursor"
+  tty_settings "$d/during" > "$d/during.lst"
+  assert_true "while it waits for a key: -icanon" grep -qx -- -icanon "$d/during.lst"
+  assert_true "…and -echo" grep -qx -- -echo "$d/during.lst"
+  assert_eq "130" "$(cat "$d/rc" 2>/dev/null)" "^C: setup exits 130"
+  # stty -a, a setting a line, PENDIN aside: a BSD kernel sets PENDIN itself
+  # whenever a terminal goes back to canonical mode (any read -n does that),
+  # until the next read.
+  assert_eq "$(tty_settings "$d/before")" "$(tty_settings "$d/after")" "…the terminal settings after equal those before"
+  assert_true "…which were read" test -s "$d/after"
+  rest="${out##*$'\033[?1049h'}"
+  assert_contains "$rest" $'\033[?1049l' "…the main screen restored"
+  assert_contains "$rest" $'\033[?25h' "…the cursor shown"
+  assert_contains "$(cat "$d/err" 2>/dev/null)" "nothing was written" "…it says nothing was written"
+  assert_eq "$before" "$(setup_snapshot)" "…and nothing was"
+  teardown
+}
+
 echo ""
 echo "=== setup: model, probe, --list (#51) ==="
 test_setup_catalog
@@ -10566,6 +10957,14 @@ test_setup_prompt_items
 test_setup_prompt_eof_quits
 test_setup_prompt_build_consent
 test_setup_prompt_peruser_question
+test_setup_tui_defaults_write_only
+test_setup_tui_customize_esc_changed
+test_setup_tui_arrow_vs_esc
+test_setup_tui_narrow
+test_setup_tui_eof_quits
+test_setup_tui_same_plan
+test_setup_tui_scope_and_build
+test_setup_tui_tty_restore
 
 test_claude_hook_contract_held() {
   echo "test: every Claude hook run above held the contract (exit 0, or 2 only under STRICT; stdout one JSON object or nothing)"
