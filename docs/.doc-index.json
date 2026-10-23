@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-10-23T21:38:19Z",
+  "generated_at": "2026-10-23T22:16:58Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -876,14 +876,14 @@
       "last_verified": null
     },
     "references/setup.md": {
-      "content_hash": "sha256:fad2169bd75cc2b1c73fe542117445542d39921ebb8ba92f18e233038e5d5bab",
+      "content_hash": "sha256:af5d901305529dbc92648c9abc157ec6016194f641bfdd9fb98cbccc7b833ec7",
       "code_refs": [
         "scripts/setup/",
         "scripts/doc-superpowers",
         "scripts/help/"
       ],
       "code_oids": {
-        "scripts/setup/": "f85da88e57dc790ac364c309673a0108833ecb10",
+        "scripts/setup/": "fbd198fdd050e05a561cf026701ca0a74aea53fd",
         "scripts/doc-superpowers": "e2af8bdd7aea965adf8a6c46c3b8f0271a4b8a7e",
         "scripts/help/": "0c6e254f295df162f80a998e03d143c79c2dc90f"
       },
@@ -891,7 +891,7 @@
       "doc_type": "reference",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-10-23T21:36:09Z",
+      "last_verified": "2026-10-23T22:16:58Z",
       "implementation": []
     }
   }

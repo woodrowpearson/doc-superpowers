@@ -7474,6 +7474,7 @@ test_setup_list_record_base() {
   mkdir -p .claude/doc-superpowers
   printf '%s\n' '{"schema_version":2,"setup":{"format":1,"harnesses":["codex","claude-code"],"git":"merge-driver","claude":false,"search":{"model":"transformer:gte-modernbert-base"},"ledger":{"git":true,"claude":false},"claims":true}}' \
     > .claude/doc-superpowers/installed.json
+  host_stubs Darwin arm64 14.5
   run_setup -- --list
   assert_eq "0" "$RUN_RC" "exit 0 (stderr: $RUN_ERR)"
   assert_eq "claude-code,codex|merge-driver|off|on|gte|host|on|on|off|on" \
@@ -7488,6 +7489,7 @@ test_setup_list_record_base() {
     > .claude/doc-superpowers/installed.json
   run_setup -- --list
   assert_eq "claude-code,codex" "$(list_val harness)" "a record with doc-search on and no claude-code: the base keeps claude-code (install --search registers it)"
+  SETUP_PATH=""
   teardown
 }
 
@@ -7495,9 +7497,11 @@ test_setup_set_validation() {
   echo "test: #51 setup --set: values checked against the item's kind and options (exit 3 naming the item and the value), requires applied; flags of later tasks exit 3"
   setup
   local spec f
+  host_stubs Darwin arm64 14.5
   run_setup -- --list --set search.model=gte
   assert_eq "0" "$RUN_RC" "--set search.model=gte: exit 0 (stderr: $RUN_ERR)"
   assert_eq "on|gte" "$(list_val search)|$(list_val search.model)" "search.model=gte turns search on"
+  SETUP_PATH=""
   run_setup -- --list --set=harness=gemini,claude-code --set git=merge-driver
   assert_eq "claude-code,gemini|merge-driver" "$(list_val harness)|$(list_val git)" "--set=<id>=<value>, repeatable; a CSV in catalog order"
   for spec in "nosuch=1" "git=bogus" "ci.cron=1 2" "search.cache=relative/path" "ci.base_branch=a..b" "search=maybe" "ci.workflows=doc-nosuch" \
@@ -7816,6 +7820,7 @@ test_setup_dry_run_writes_nothing() {
   local before
   # --build is planned only with a uv on the host: the stub stands in for one.
   safety_stubs_on
+  host_stubs Darwin arm64 14.5
   before=$(setup_snapshot)
   run_setup -- --dry-run
   assert_eq "0" "$RUN_RC" "defaults: exit 0 (stderr: $RUN_ERR)"
@@ -7851,6 +7856,7 @@ test_setup_dry_run_search_static() {
   local p team dl sp
   # --build is planned only with a uv on the host: the stub stands in for one.
   safety_stubs_on
+  host_stubs Darwin arm64 14.5
   run_setup -- --dry-run --set search=on
   assert_eq "0" "$RUN_RC" "exit 0 (stderr: $RUN_ERR)"
   team=$(review_paths 'Committed for the team:')
@@ -8086,6 +8092,7 @@ record-local" "$SL_OUT" "the override dropped: install --claude, the local recor
 test_setup_plan_order() {
   echo "test: #51 the plan's order: the switches (the installer reads them), the installer steps (git, claude, ci, search, ledger), the harness entries, the env hook, the exclude block, the terminal command, the records, and the build last; a transition uninstalls first"
   setup
+  host_stubs Darwin arm64 14.5
   local team p
   plan_ops 'model_set search.model gte; model_set search.cache "/abs/my cache"; model_set harness claude-code,codex,gemini
     model_set ci.workflows doc-review-pr; model_set ledger.git on; model_set ledger.claude on; model_set claims on
@@ -8158,6 +8165,7 @@ git-install|merge-driver" "hooks to merge driver: uninstall --git, then install 
 ledger-claude-uninstall" "the ledger sets unticked: uninstalled"
   assert_contains "$SL_OUT" "bin-unlink" "the terminal command unticked: removed"
   assert_not_contains "$SL_OUT" "ledger-config" "the ledger's config is there: not written"
+  SETUP_PATH=""
   teardown
 }
 
@@ -8199,7 +8207,7 @@ test_setup_dry_run_release_notes_readme() {
 }
 
 test_setup_plan_merge_driver_is_teams() {
-  echo "test: #51 the merge driver is the team's: with a team record, a per-user git value that adds or removes it is refused (exit 1, nothing written, naming --for-team); hooks <-> merge-driver stays a per-user override; --for-team makes it the team's"
+  echo "test: #51 the merge driver is the team's: with a team record, a per-user git value set in this run that adds or removes it is refused (exit 1, nothing written, naming --for-team), and a stored override that does is dropped (R18); hooks <-> merge-driver stays a per-user override; --for-team makes it the team's"
   setup
   local before msg_off="git=off removes the merge driver, which is the team's (.gitattributes): pass --for-team to change the team's choice"
   setup_applied_defaults
@@ -8231,8 +8239,8 @@ record-local
 {\"git\":\"merge-driver\"}" "$SL_OUT" "…a per-user override in the local record; the team record unchanged"
   printf '%s\n' '{"format":1,"overrides":{"git":"off"},"search":{"cache":null}}' > .claude/doc-superpowers/installed.local.json
   run_setup -- --dry-run
-  assert_eq "1" "$RUN_RC" "a local record overriding git=off against the team's hooks: refused too"
-  assert_contains "$RUN_ERR" "--for-team" "…naming --for-team"
+  assert_eq "0" "$RUN_RC" "a stored local override git=off against the team's hooks (R18): exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "setup: your git override (off) conflicts with the team's choice (hooks): dropped" "…dropped, in one line"
   rm -f .claude/doc-superpowers/installed.local.json
   inst uninstall --git
   setup_applied_defaults '{"format":1,"harnesses":["claude-code"],"git":"off","claude":true,"search":null,"ledger":null,"claims":false}'
@@ -8794,6 +8802,7 @@ test_setup_search_write_only_safety() {
 test_setup_search_gte_and_cache() {
   echo "test: #51 doc-search's gte model and a cache path (with a space): the config's docs.model; the env hook block, sh -n clean, exporting the cache lines and DOC_SUPERPOWERS_ROOT, the user's lines kept, a re-run byte-identical; per variable: '-' keeps a line, a cache path set back to host drops the cache lines, the block goes only when it would hold no line; an existing config gets docs.model alone"
   setup
+  host_stubs Darwin arm64 14.5
   local env="$XDG_CONFIG_HOME/doc-search/env.sh" h got
   mkdir -p "$XDG_CONFIG_HOME/doc-search"
   printf 'export FOO=1\n' > "$env"
@@ -8865,6 +8874,7 @@ export DOC_SUPERPOWERS_ROOT='$SETUP_ROOT'
   assert_contains "$SL_OUT" "sh -n" "…saying why"
   assert_eq "$h" "$(hash_file "$env")" "…the file unchanged"
   assert_eq "" "$(find "$XDG_CONFIG_HOME/doc-search" -name '.env.sh.*')" "…no temp file left"
+  SETUP_PATH=""
   teardown
 }
 
@@ -9813,8 +9823,11 @@ test_setup_codex_untick_user_subtable() {
 # --- setup: host checks and scan hints (#51) ----------------------------------
 
 # host_stubs <os> <arch> <macOS version>: SETUP_PATH = a directory of stubs
-# first (uname, sw_vers, uv), so that a run sees that host. "fail" as the os
-# makes uname and sw_vers fail (a check that cannot decide).
+# first (uname, sw_vers, uv), so that a run sees that host, before the
+# SETUP_PATH already set (the safety stubs) or $REAL_PATH. "fail" as the os
+# makes uname and sw_vers fail (a check that cannot decide). A test that
+# selects gte runs under host_stubs Darwin arm64 14.5, so that it passes on
+# any host (gte is off on arm64 macOS 13).
 host_stubs() {
   local dir
   dir=$(harness_mktemp_d hoststubs)
@@ -9827,7 +9840,7 @@ host_stubs() {
   fi
   printf '#!/bin/sh\nexit 0\n' > "$dir/uv"
   chmod +x "$dir"/uname "$dir"/sw_vers "$dir"/uv
-  SETUP_PATH="$dir:$REAL_PATH"
+  SETUP_PATH="$dir:${SETUP_PATH:-$REAL_PATH}"
 }
 
 # A global git config that sets core.hooksPath: its path.
@@ -10016,7 +10029,7 @@ test_setup_host_checks() {
 }
 
 test_setup_host_disabled_option_in_record() {
-  echo "test: #51 a team record holding gte on a host that cannot run it: --apply installs the rest, keeps the installed value (static), names the option last (skipped: search.model: gte: <reason>) and exits 0; a plain --yes does the same and leaves the record saying gte; --set of the option is refused"
+  echo "test: #51 a team record holding gte on a host that cannot run it: --apply installs the rest, writes the missing config with the record's model (gte, R15a), names the option last (skipped: search.model: gte: <reason>) and exits 0; a plain --yes does the same and leaves the record saying gte; --set of the option is refused once the config no longer holds it"
   setup
   local rec before f=.claude/doc-superpowers/installed.json
   rec='{"format":1,"harnesses":["claude-code"],"git":"hooks","claude":true,"search":{"model":"transformer:gte-modernbert-base"},"ledger":null,"claims":false}'
@@ -10028,7 +10041,7 @@ test_setup_host_disabled_option_in_record() {
   run_setup -- --apply
   assert_eq "0" "$RUN_RC" "--apply: exit 0 (stderr: $RUN_ERR)"
   assert_contains "$(tail -n 1 <<<"$RUN_OUT")" "skipped: search.model: gte: onnxruntime 1.31 needs macOS 14" "…the last line names the option and the reason"
-  assert_eq "null" "$(jq '.docs.model' docs/search/config.json 2>&1)" "…the config written holds the static model"
+  assert_eq "$SETUP_GTE_MODEL" "$(jq -r '.docs.model' docs/search/config.json 2>&1)" "…the config written holds the record's model (gte), not this host's fallback"
   assert_eq "$rec" "$(jq -c .setup "$f")" "…the team record untouched"
   run_setup -- --apply
   assert_eq "0" "$RUN_RC" "…--apply again: exit 0"
@@ -10037,13 +10050,168 @@ test_setup_host_disabled_option_in_record() {
   run_setup -- --yes
   assert_eq "0" "$RUN_RC" "a plain --yes: exit 0 (stderr: $RUN_ERR)"
   assert_eq "$rec" "$(jq -c .setup "$f")" "…the record still says gte"
-  assert_eq "static" "$(jq -r '.docs.model // "static"' docs/search/config.json)" "…and the config still holds the static model"
+  assert_eq "$SETUP_GTE_MODEL" "$(jq -r '.docs.model' docs/search/config.json)" "…and the config still holds the record's model"
   assert_contains "$(tail -n 1 <<<"$RUN_OUT")" "skipped: search.model: gte: " "…the skipped line is there too"
   before=$(setup_snapshot)
   run_setup -- --yes --set search.model=gte
-  assert_eq "1" "$RUN_RC" "--yes --set search.model=gte: exit 1"
+  assert_eq "0" "$RUN_RC" "--yes --set search.model=gte, which the config already holds: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "nothing to do" "…nothing to do"
   assert_eq "$before" "$(setup_snapshot)" "…nothing written"
+  run_setup -- --yes --set search.model=static
+  assert_eq "0" "$RUN_RC" "--set search.model=static: exit 0 (stderr: $RUN_ERR)"
+  run_setup -- --yes --set search.model=gte
+  assert_eq "1" "$RUN_RC" "then --yes --set search.model=gte, a new selection of the disabled option: exit 1"
   SETUP_PATH=""
+  teardown
+}
+
+test_setup_host_fallback_config_keeps_record() {
+  echo "test: #51 R15a: a team record holding gte on a host that cannot run it, and no docs/search/config.json: --yes writes the config with the record's model (gte), not this host's fallback; the skipped line names gte; --build is refused (exit 1, nothing written); --set search=off then names no stale gte skip"
+  setup
+  local rec before f=.claude/doc-superpowers/installed.json
+  rec='{"format":1,"harnesses":["claude-code"],"git":"hooks","claude":true,"search":{"model":"transformer:gte-modernbert-base"},"ledger":null,"claims":false}'
+  mkdir -p .claude/doc-superpowers
+  printf '{"schema_version":2,"setup":%s}\n' "$rec" > "$f"
+  host_stubs Darwin arm64 13.6
+  before=$(setup_snapshot)
+  run_setup -- --yes --build
+  assert_eq "1" "$RUN_RC" "--yes --build with the config going to hold gte: exit 1"
+  assert_contains "$RUN_ERR" "gte" "…naming the gte model"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
+  run_setup -- --yes
+  assert_eq "0" "$RUN_RC" "--yes: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "$SETUP_GTE_MODEL" "$(jq -r '.docs.model' docs/search/config.json 2>&1)" "…the config written holds the record's model, gte"
+  assert_eq "$rec" "$(jq -c .setup "$f")" "…the record still says gte"
+  assert_contains "$(tail -n 1 <<<"$RUN_OUT")" "skipped: search.model: gte: onnxruntime 1.31 needs macOS 14" "…and gte is named as skipped here"
+  run_setup -- --yes
+  assert_eq "0" "$RUN_RC" "--yes again: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "nothing to do" "…nothing to do"
+  assert_contains "$(tail -n 1 <<<"$RUN_OUT")" "skipped: search.model: gte: " "…still naming gte"
+  run_setup -- --apply
+  assert_eq "0" "$RUN_RC" "--apply: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$(tail -n 1 <<<"$RUN_OUT")" "skipped: search.model: gte: " "…--apply names it too"
+  teardown
+
+  # Task 8 (a): turning doc-search off leaves no stale gte skip behind.
+  setup
+  mkdir -p .claude/doc-superpowers
+  printf '{"schema_version":2,"setup":%s}\n' "$rec" > "$f"
+  host_stubs Darwin arm64 13.6
+  run_setup -- --dry-run --set search=off
+  assert_eq "0" "$RUN_RC" "record gte, --set search=off: exit 0 (stderr: $RUN_ERR)"
+  run_setup -- --yes --set search=off
+  assert_eq "0" "$RUN_RC" "--yes --set search=off: exit 0 (stderr: $RUN_ERR)"
+  assert_not_contains "$RUN_OUT" "skipped: search.model" "…no stale skipped line for search.model"
+  assert_eq "null" "$(jq -c .setup.search "$f")" "…the record: doc-search off"
+  SETUP_PATH=""
+  teardown
+}
+
+test_setup_child_default_parent_off() {
+  echo "test: #51 R19: --set <child>=<its default> while its parent is off changes nothing (the catalog's undo lines: search.cache=host, search.model=static, ci.base_branch=main, ci.cron='0 9 * * 1'): nothing to do, no byte changed; a child set to another value still turns its parent on"
+  setup
+  local before spec
+  run_setup -- --yes
+  assert_eq "0" "$RUN_RC" "a default run first: exit 0 (stderr: $RUN_ERR)"
+  before=$(setup_snapshot)
+  for spec in "search.cache=host" "search.model=static" "ci.base_branch=main" "ci.cron=0 9 * * 1"; do
+    run_setup -- --yes --set "$spec"
+    assert_eq "0|nothing to do" "$RUN_RC|$RUN_OUT" "parent off, --set $spec (its default): nothing to do (stderr: $RUN_ERR)"
+    assert_eq "$before" "$(setup_snapshot)" "…no byte changed"
+    run_setup -- --list --set "$spec"
+    assert_eq "off|none" "$(list_val search)|$(list_val ci.workflows)" "…--list: the parents stay off"
+  done
+  assert_file_not_exists docs/search/config.json "no doc-search config"
+  assert_true "no workflow" test ! -e .github/workflows
+  run_setup -- --list --set search.cache=/abs/my-cache
+  assert_eq "on|/abs/my-cache" "$(list_val search)|$(list_val search.cache)" "a non-default child value turns its parent on"
+  run_setup -- --list --set 'ci.cron=0 3 * * 2'
+  assert_eq "doc-freshness-pr,doc-freshness-schedule|0 3 * * 2" "$(list_val ci.workflows)|$(list_val ci.cron)" "…ci.cron too (the installer's default set)"
+  run_setup -- --list --set search=on --set search.cache=host
+  assert_eq "on|host" "$(list_val search)|$(list_val search.cache)" "with the parent on, the default is simply set"
+  teardown
+}
+
+test_setup_stale_git_override_dropped() {
+  echo "test: #51 R18: a stored per-user git override that the team's later choice turns into an R9 conflict (yours merge-driver, the team's off) is dropped with one line; --dry-run, --yes and --apply exit 0, the team's value is applied, and the local record loses the override (listed under Local to you)"
+  setup
+  local f=.claude/doc-superpowers/installed.json l=.claude/doc-superpowers/installed.local.json saved
+  local msg="setup: your git override (merge-driver) conflicts with the team's choice (off): dropped"
+  setup_applied_defaults
+  run_setup -- --yes --set git=merge-driver
+  assert_eq "0" "$RUN_RC" "the user's override git=merge-driver: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "merge-driver" "$(jq -r .overrides.git "$l")" "…recorded as theirs"
+  # The team records git=off (--for-team, elsewhere); the user pulls it.
+  saved=$(jq -c '.setup.git = "off"' "$f")
+  printf '%s\n' "$saved" > "$f"
+  run_setup -- --dry-run
+  assert_eq "0" "$RUN_RC" "--dry-run: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "$msg" "…the one line"
+  assert_contains "$(review_paths 'Local to you:')" "$l" "…the local record under Local to you"
+  run_setup -- --apply
+  assert_eq "0" "$RUN_RC" "--apply: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "1" "$(grep -cxF "$msg" <<<"$RUN_OUT")" "…the line, once"
+  assert_eq "null" "$(jq -c '.overrides.git // null' "$l")" "…the override is gone from the local record"
+  assert_eq "" "$(git config --get merge.doc-index.driver)" "…the team's off applied: no merge driver"
+  assert_eq "off" "$(jq -r .setup.git "$f")" "…the team record untouched"
+  run_setup -- --yes
+  assert_eq "0|nothing to do" "$RUN_RC|$RUN_OUT" "then --yes: nothing to do (stderr: $RUN_ERR)"
+  run_setup -- --yes --set git=merge-driver
+  assert_eq "1" "$RUN_RC" "a git=merge-driver set this run is still refused (R9)"
+  assert_contains "$RUN_ERR" "pass --for-team" "…naming --for-team"
+  teardown
+}
+
+test_setup_ignored_team_path_warned() {
+  echo "test: #51 a team path git ignores: the review and the run each print one warning line naming it (commit it with git add -f, or un-ignore it); none when nothing is ignored"
+  setup
+  local w="warning: .claude/doc-superpowers/installed.json is ignored by git: commit it with git add -f, or un-ignore it"
+  run_setup -- --dry-run
+  assert_not_contains "$RUN_OUT" "warning:" "nothing ignored: no warning"
+  printf '.claude/\n' > .gitignore
+  run_setup -- --dry-run
+  assert_eq "0" "$RUN_RC" "--dry-run: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "1" "$(grep -cxF "$w" <<<"$RUN_OUT")" "the review warns, once, naming the path"
+  assert_not_contains "$RUN_OUT" "warning: .gitattributes" "…not a path git does not ignore"
+  run_setup -- --yes
+  assert_eq "0" "$RUN_RC" "--yes: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "1" "$(grep -cxF "$w" <<<"$RUN_OUT")" "the run warns too, once"
+  teardown
+}
+
+test_setup_unreadable_catalog() {
+  echo "test: #51 an unreadable scripts/setup/catalog.json: setup is refused (exit 1, the catalog named, nothing written)"
+  setup
+  local r before
+  r=$(harness_mktemp_d catroot)
+  mkdir -p "$r/scripts"
+  cp "$SETUP_ROOT/scripts/doc-superpowers" "$r/scripts/"
+  cp -R "$SETUP_ROOT/scripts/setup" "$r/scripts/"
+  printf '{not json\n' > "$r/scripts/setup/catalog.json"
+  before=$(setup_snapshot)
+  # Its own shim (bash_bin_shim's is named after the script, and $SETUP is one).
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$BASH_BIN" "$r/scripts/doc-superpowers" > "$r/dsp"
+  chmod +x "$r/dsp"
+  SETUP_CMD="$r/dsp"
+  run_setup -- --dry-run
+  unset SETUP_CMD
+  assert_eq "1" "$RUN_RC" "exit 1 (refused), not 2"
+  assert_contains "$RUN_ERR" "setup: cannot read the catalog $r/scripts/setup/catalog.json" "…naming the catalog"
+  assert_contains "$RUN_ERR" "nothing was changed" "…nothing was changed"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
+  teardown
+}
+
+test_setup_envhook_needs_home() {
+  echo "test: #51 the env hook without HOME (and no XDG_CONFIG_HOME or DOC_SEARCH_ENV_FILE): refused before any step (exit 1, HOME named, nothing written)"
+  setup
+  local before
+  before=$(setup_snapshot)
+  run_setup HOME= XDG_CONFIG_HOME= DOC_SEARCH_ENV_FILE= -- --yes --set search=on --set "search.cache=$TEST_DIR/cache"
+  assert_eq "1" "$RUN_RC" "exit 1"
+  assert_contains "$RUN_ERR" "HOME is not set" "…naming HOME"
+  assert_eq "" "$RUN_OUT" "…no step ran"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
   teardown
 }
 
@@ -11004,6 +11172,12 @@ test_setup_installed_union_removes_nothing
 test_setup_codex_untick_user_subtable
 test_setup_host_checks
 test_setup_host_disabled_option_in_record
+test_setup_host_fallback_config_keeps_record
+test_setup_child_default_parent_off
+test_setup_stale_git_override_dropped
+test_setup_ignored_team_path_warned
+test_setup_envhook_needs_home
+test_setup_unreadable_catalog
 test_setup_hints_never_change_defaults
 test_setup_bin_shim
 test_setup_prompt_defaults

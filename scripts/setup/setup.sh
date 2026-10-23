@@ -187,7 +187,7 @@ if [ -z "$MODE" ]; then
 fi
 
 command -v jq >/dev/null 2>&1 || die "jq is needed (1.6 or later); nothing was changed"
-model_load_catalog "$ROOT/scripts/setup/catalog.json" || die "$MODEL_ERROR" 2
+model_load_catalog "$ROOT/scripts/setup/catalog.json" || die "$MODEL_ERROR; nothing was changed"
 
 # Every --set is checked against the catalog before anything is read.
 for _s in ${SETS[@]+"${SETS[@]}"}; do
@@ -206,6 +206,12 @@ probe_run || die "$PROBE_ERROR"
 [ -z "$PROBE_RECORD_ERROR" ] || die "$PROBE_RECORD_ERROR; nothing was changed"
 # --apply reproduces a recorded team setup: a CI-only record holds none.
 [ "$APPLY" = 0 ] || [ -n "$PROBE_TEAM" ] || die "no team setup recorded: run doc-superpowers setup"
+# R18: a stored git override the team's choice now conflicts with is dropped.
+# Printed now in the modes that run at once, after its answers in the UIs.
+plan_drop_stale_git_override
+case "$MODE" in
+  dry-run | yes | apply) [ -z "$PLAN_DROPPED" ] || echo "$PLAN_DROPPED" ;;
+esac
 model_base_init || die "$MODEL_ERROR; nothing was changed"
 for _s in ${SETS[@]+"${SETS[@]}"}; do
   model_set "${_s%%=*}" "${_s#*=}" || die "--set $_s: $MODEL_ERROR"
@@ -281,6 +287,7 @@ if [ -z "$MODE" ]; then
       ;;
   esac
   echo ""
+  [ -z "$PLAN_DROPPED" ] || echo "$PLAN_DROPPED"
   plan_build || die "$PLAN_ERROR; nothing was changed"
   # What the host made the selection fall back from, as the UI left it.
   model_host_skips

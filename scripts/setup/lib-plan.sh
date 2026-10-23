@@ -78,6 +78,7 @@ PLAN_FOR_TEAM=0
 PLAN_FOR_TEAM_IDS=""
 PLAN_APPLY=0
 PLAN=() W_TEAM=() W_LOCAL=() W_OUTSIDE=() NET=() DL=() PLAN_HNOTES=() PLAN_HFOREIGN=()
+PLAN_DROPPED=""
 PLAN_TEAM_SETUP="" PLAN_LOCAL_RECORD="" PLAN_TEAM_CHANGED=0 PLAN_LOCAL_CHANGED=0 PLAN_ERROR=""
 
 # Set by plan_build: every write as "<scope>TAB<path>TAB<what>", the groups a
@@ -537,6 +538,58 @@ _plan_rec() {
   if model_hostfall "$1"; then _PS="$MODEL_WISH"; fi
 }
 
+# plan_drop_stale_git_override (before model_base_init): a stored per-user git
+# override that the team's recorded choice turns into a merge-driver conflict
+# (R9: one of the two is off, the other keeps the driver) was not made in this
+# run: the team's value wins. The override leaves PROBE_LOCAL_VALUES (so the
+# local record is written without it), and PLAN_DROPPED says so in one line.
+# A git value set in this run is still refused by plan_build without
+# --for-team.
+# shellcheck disable=SC2034  # PLAN_DROPPED is setup.sh's to print
+plan_drop_stale_git_override() {
+  local line t="" o="" rest=""
+  PLAN_DROPPED=""
+  [ -n "$PROBE_TEAM" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      git=*) t="${line#git=}" ;;
+    esac
+  done <<<"$PROBE_TEAM_VALUES"
+  while IFS= read -r line; do
+    case "$line" in
+      git=*) o="${line#git=}" ;;
+      "") ;;
+      *) rest="$rest$line"$'\n' ;;
+    esac
+  done <<<"$PROBE_LOCAL_VALUES"
+  [ -n "$t" ] && [ -n "$o" ] || return 0
+  case "$t:$o" in
+    off:hooks | off:merge-driver | hooks:off | merge-driver:off) ;;
+    *) return 0 ;;
+  esac
+  PROBE_LOCAL_VALUES="${rest%$'\n'}"
+  PLAN_DROPPED="setup: your git override ($o) conflicts with the team's choice ($t): dropped"
+}
+
+# _plan_cfg_model: _PS = the docs model docs/search/config.json holds after
+# this run: the selection; but a config setup writes from scratch while
+# search.model sits on a host fallback gets the record's model (the team's
+# wish, _plan_rec), since one host's quirk is not the team's setting.
+_plan_cfg_model() {
+  if [ -f "$TOP/docs/search/config.json" ]; then
+    _plan_sel search.model
+  else
+    _plan_rec search.model
+  fi
+}
+
+# _plan_gte_unrunnable: 0, with MODEL_OPT_REASON, when the config holds gte
+# after this run (_plan_cfg_model) and this host cannot run it: no build.
+_plan_gte_unrunnable() {
+  _plan_cfg_model
+  [ "$_PS" = gte ] && model_option_disabled search.model gte
+}
+
 # _plan_promoted <id>: --for-team makes this run's value of <id> the team's:
 # PLAN_FOR_TEAM, and <id> named in PLAN_FOR_TEAM_IDS or changed against the
 # base. A per-user value this run does not set stays as it is: the record's
@@ -671,6 +724,8 @@ plan_build() {
   # per-user git value that adds or removes it, against the team record, would
   # flip that block for everyone. Only the team's choice may (--for-team);
   # hooks and merge-driver both keep the driver, so either is a user's own.
+  # A stored override in that conflict never reaches here: setup.sh drops it
+  # first (plan_drop_stale_git_override), so this refuses a change of this run.
   if [ -n "$PROBE_TEAM" ] && ! _plan_promoted git; then
     _plan_team_value git
     _plan_sel git
@@ -702,7 +757,7 @@ plan_build() {
 
   # 1. The switches the installer reads.
   if model_is_on search; then
-    _plan_sel search.model
+    _plan_cfg_model
     m="$_PS"
     if [ ! -f "$TOP/docs/search/config.json" ] || [ "$(probe_installed search.model)" != "$m" ]; then
       _plan_op search search-config "$m"
@@ -832,6 +887,10 @@ plan_build() {
   if [ "$PLAN_BUILD_REQUESTED" = 1 ] && model_is_on search; then
     if [ -n "${HOST_NO_BUILD:-}" ]; then
       PLAN_ERROR="--build: doc-search's build needs uv: $HOST_NO_BUILD (without --build, setup writes doc-search's files and builds nothing)"
+      return 1
+    fi
+    if _plan_gte_unrunnable; then
+      PLAN_ERROR="--build: docs/search/config.json holds the gte docs model, which this host cannot run: $MODEL_OPT_REASON (without --build, setup writes doc-search's files and builds nothing)"
       return 1
     fi
     _plan_op search build
@@ -1119,7 +1178,25 @@ plan_render_review() {
   else
     printf '  git add%s --%s\n' "$all" "$paths"
   fi
+  plan_warn_ignored
   plan_render_harness_notes
+}
+
+# plan_warn_ignored: one warning line per team path (W_TEAM) that git ignores
+# (and does not track): the git add line would refuse it, and the team's file
+# would never ship. A path a step deletes is left out.
+plan_warn_ignored() {
+  local e p
+  for e in ${W_TEAM[@]+"${W_TEAM[@]}"}; do
+    p="${e%%"$_PLAN_T"*}"
+    case "$_PLAN_GONE" in
+      *"|$p|"*) continue ;;
+    esac
+    [ "$p" = / ] || p="${p%/}"
+    if (cd "$TOP" && git check-ignore -q -- "$p") >/dev/null 2>&1; then
+      printf 'warning: %s is ignored by git: commit it with git add -f, or un-ignore it\n' "$p"
+    fi
+  done
 }
 
 # --- For the interactive UIs (lib-prompt.sh, lib-tui.sh) ------------------------
@@ -1177,7 +1254,8 @@ plan_for_team() {
 }
 
 # plan_can_build: 0 when "Write and build" is offered: doc-search is ticked
-# and this host can build (uv found). Else PLAN_NO_BUILD says why when
+# and this host can build (uv found, and not a config holding gte where gte
+# cannot run). Else PLAN_NO_BUILD says why when
 # doc-search is ticked (empty when nothing would build).
 # shellcheck disable=SC2034  # PLAN_NO_BUILD is the UIs' to show
 plan_can_build() {
@@ -1185,6 +1263,10 @@ plan_can_build() {
   model_is_on search || return 1
   if [ -n "${HOST_NO_BUILD:-}" ]; then
     PLAN_NO_BUILD="$HOST_NO_BUILD"
+    return 1
+  fi
+  if _plan_gte_unrunnable; then
+    PLAN_NO_BUILD="docs/search/config.json holds the gte docs model: $MODEL_OPT_REASON"
     return 1
   fi
   return 0
