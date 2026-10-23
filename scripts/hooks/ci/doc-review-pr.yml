@@ -26,6 +26,7 @@ on:
 
 env:
   DOC_SUPERPOWERS_VERSION: "__VERSION__"
+  DOC_SUPERPOWERS_MARKETPLACE_URL: "__MARKETPLACE_URL__"
 
 jobs:
   review-docs:
