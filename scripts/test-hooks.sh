@@ -10230,6 +10230,24 @@ test_setup_bin_shim() {
   setup_yes_as_reviewed "--link-bin" --link-bin
   assert_true "…the shim written" test -f "$HOME/.local/bin/doc-superpowers"
   teardown
+  # A ~/.local/bin that is a symbolic link, or a shim path that is one: the
+  # probe disables the item, before any UI is shown.
+  setup
+  mkdir -p "$HOME/.local" "$TEST_DIR/real-bin"
+  ln -s "$TEST_DIR/real-bin" "$HOME/.local/bin"
+  run_setup -- --list
+  assert_contains "$(list_field bin 5)" "~/.local/bin is a symbolic link" "a linked ~/.local/bin: bin disabled, with the reason"
+  before=$(setup_snapshot)
+  run_setup -- --yes --link-bin
+  assert_eq "1" "$RUN_RC" "…--yes --link-bin: exit 1"
+  assert_contains "$RUN_ERR" "symbolic link" "…saying why"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
+  rm "$HOME/.local/bin"
+  mkdir -p "$HOME/.local/bin"
+  ln -s "$TEST_DIR/real-bin/x" "$HOME/.local/bin/doc-superpowers"
+  run_setup -- --list
+  assert_contains "$(list_field bin 5)" "doc-superpowers is a symbolic link" "a linked shim path: bin disabled, with the reason"
+  teardown
 
   # Resolution: written from under the plugin cache (no clone root baked
   # in), then run against another cache holding 3.9.0 and 3.10.0.
@@ -10393,6 +10411,27 @@ test_setup_prompt_items() {
   echo '{}' > docs/ledger/config.json
   run_setup_prompt 'c\n6\n1\n' --
   assert_contains "$RUN_OUT" "cannot be turned off here" "a locked item chosen: the reason"
+  teardown
+  # Numbers with leading zeros are decimal (bash reads 08 as octal in an
+  # index); 0, a huge number and a word are asked again; nothing falls through
+  # to --list's catalog.
+  setup
+  run_setup_prompt 'c\n08\n01\n\n\na\no\n' --
+  assert_eq "0" "$RUN_RC" "c 08 01: exit 0 (stderr: $RUN_ERR)"
+  assert_true "…08 opened the Terminal command group, 01 ticked it: the shim written" test -f "$HOME/.local/bin/doc-superpowers"
+  assert_not_contains "$RUN_ERR" "value too great" "…no octal error"
+  assert_not_contains "$RUN_OUT" "harness=claude-code" "…and no --list catalog"
+  run_setup_prompt 'c\n5\n1\n09\n0\n99999999999999999999\nx\n\n\n\nq\n' --
+  assert_eq "0" "$RUN_RC" "the CI multi: 09, 0, a huge number, a word, then q: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "  9) [x] doc-spec-verify" "…09 ticked the 9th workflow"
+  assert_eq "3" "$(grep -c 'answer a number from 1 to 9, or an empty line' <<<"$RUN_OUT")" "…0, the huge number and the word asked again"
+  assert_eq "" "$RUN_ERR" "…nothing on stderr (no integer expression error)"
+  assert_contains "$RUN_OUT" "Quit: nothing was written." "…q quit"
+  assert_not_contains "$RUN_OUT" "harness=claude-code" "…and no --list catalog"
+  run_setup_prompt 'c\n3\n1\n3\n' --
+  assert_contains "$RUN_OUT" "  1) [ ] Git hooks and the merge driver: off" "a choice set to off shows unticked"
+  run_setup_prompt 'c\n5\n' --
+  assert_contains "$RUN_OUT" "  2) [ ] Base branch: main" "a value item under an unticked parent shows unticked"
   teardown
 }
 

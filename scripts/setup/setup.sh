@@ -275,6 +275,10 @@ if [ -z "$MODE" ]; then
   exit "$_rc"
 fi
 
+# Only --list is left. The interactive block exits on every path; should a
+# shell error abort it, stop here rather than print the catalog with exit 0.
+[ "$MODE" = list ] || die "the interactive UI stopped without a result; nothing more was done" 2
+
 # --list: one line per item, in catalog order. A reason is one line.
 _i=0
 while [ "$_i" -lt "$CAT_N" ]; do
