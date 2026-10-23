@@ -8983,7 +8983,7 @@ test_setup_harness_entries() {
     "$(jq -c . .cursor/mcp.json)" ".cursor/mcp.json: the sh -c 'cd \"\$1\" && …' sh \${workspaceFolder} form"
   assert_eq '{"mcpServers":{"doc-search":{"command":"sh","args":[".claude/doc-superpowers/search-mcp.sh","serve"]}}}' \
     "$(jq -c . .gemini/settings.json)" ".gemini/settings.json: mcpServers"
-  assert_eq '{"$schema":"https://opencode.ai/config.json","mcp":{"doc-search":{"type":"local","command":["sh",".claude/doc-superpowers/search-mcp.sh","serve"],"timeout":60000}}}' \
+  assert_eq '{"$schema":"https://opencode.ai/config.json","mcp":{"doc-search":{"type":"local","command":["sh","-c","cd \"$(git rev-parse --show-toplevel)\" && exec sh .claude/doc-superpowers/search-mcp.sh serve"],"timeout":60000}}}' \
     "$(jq -c . opencode.json)" "opencode.json: mcp, and \$schema (setup created the file)"
   out=$(harness_states)
   for h in claude-code codex cursor opencode gemini; do
@@ -9026,7 +9026,7 @@ test_setup_harness_keeps_other_content() {
     "$(jq -c . .cursor/mcp.json)" ".cursor/mcp.json: other server and key kept, doc-search added"
   assert_eq '{"general":{"vimMode":true},"mcpServers":{"other":{"url":"https://example.invalid/mcp"},"doc-search":{"command":"sh","args":[".claude/doc-superpowers/search-mcp.sh","serve"]}}}' \
     "$(jq -c . .gemini/settings.json)" ".gemini/settings.json: other keys kept"
-  assert_eq '{"model":"m","mcp":{"other":{"type":"remote","url":"https://example.invalid/mcp"},"doc-search":{"type":"local","command":["sh",".claude/doc-superpowers/search-mcp.sh","serve"],"timeout":60000}}}' \
+  assert_eq '{"model":"m","mcp":{"other":{"type":"remote","url":"https://example.invalid/mcp"},"doc-search":{"type":"local","command":["sh","-c","cd \"$(git rev-parse --show-toplevel)\" && exec sh .claude/doc-superpowers/search-mcp.sh serve"],"timeout":60000}}}' \
     "$(jq -c . opencode.json)" "opencode.json: other keys kept, no \$schema added to an existing file"
   assert_true ".codex/config.toml: every original byte comes first" cmp -s "$orig" <(head -c "$(wc -c < "$orig")" .codex/config.toml)
   assert_eq "$SETUP_CODEX_BLOCK" "$(tail -n 6 .codex/config.toml)" "…then the block"

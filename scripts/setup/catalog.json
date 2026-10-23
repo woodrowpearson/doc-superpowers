@@ -25,7 +25,7 @@
         "claude-code": "Claude Code: the doc-search entry in .mcp.json, written by install --search.",
         "codex": "Codex: a marked [mcp_servers.doc-search] block in .codex/config.toml, which changes to the repository top first. Loaded: verified (codex-cli 0.163.0), only for a trusted project; started: unverified.",
         "cursor": "Cursor: the doc-search entry in .cursor/mcp.json (unverified: no CLI to check it with).",
-        "opencode": "OpenCode: the doc-search entry under mcp in opencode.json. Loaded and started: verified (opencode 1.19.4) from the repository top; a server starts in the launch directory, so it fails from a subdirectory.",
+        "opencode": "OpenCode: the doc-search entry under mcp in opencode.json. Loaded and started: verified (opencode 1.19.4), from the repository top and from a subdirectory: the command changes to the repository top first, because OpenCode starts a server in its launch directory.",
         "gemini": "Gemini CLI: the doc-search entry under mcpServers in .gemini/settings.json. Loaded and started: verified (gemini 0.65.0) from the repository top in a trusted folder; not read from a subdirectory."
       },
       "undo": "doc-superpowers setup --yes --set harness=claude-code",
