@@ -1,0 +1,24 @@
+doc-superpowers: keep a project's docs true to their code
+Agent: /doc-superpowers <action>      Terminal: doc-superpowers <command>
+  init           write the doc suite from scratch
+  audit          check the docs against the code; write a report
+  review-pr      review the docs a PR leaves stale (read-only)
+  update         apply the fixes an audit found
+  diagram        redraw the Mermaid diagrams
+  sync           bring the doc index in line with the files
+  release        draft the next release notes entry          help release
+  spec-generate  turn a design doc into formal specs
+  spec-inject    put spec tasks into a plan
+  spec-verify    check the code against its specs            help claims
+  setup          choose what to turn on, in one pass         help setup
+  hooks          git and Claude hooks that report drift      help hooks
+  ci             GitHub workflows (off by default)           help ci
+  search         an MCP server over docs and code (off)      help search
+  ledger         keyed work items (off by default)           help ledger
+  claims         executable spec claims (off by default)     help claims
+  help [topic]   this page, or one topic; also: version, tools <args>
+
+In a terminal: setup, hooks, search, tools, version, help. The rest: agent.
+New here: doc-superpowers setup, then /doc-superpowers init
+doc-superpowers help <topic>
+  (topics: setup search hooks ci ledger claims release)

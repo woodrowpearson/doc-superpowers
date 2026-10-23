@@ -1757,6 +1757,266 @@ assert_true "SKILL.md names references/ and scripts/ paths ($_npaths checked)" t
 assert_eq "" "$_missing" "…and every one exists"
 
 # =============================================================================
+echo "--- setup and help: the help text and the dispatcher ---"
+# scripts/doc-superpowers is the dispatcher (help, version, hooks, tools, search,
+# setup); scripts/help/*.txt is the one source of the terminal's help and of the
+# skill's `help` action. The dispatcher runs through bash_bin_shim, so the
+# interpreter under test is the one that runs it. Its routes are checked against
+# stub plugin roots (a copy of the dispatcher beside stub sub-scripts that print
+# how they were run), so no real installer, doc-tools.sh or setup.sh is needed.
+_DSP="$REPO_ROOT/scripts/doc-superpowers"
+_HELPD="$REPO_ROOT/scripts/help"
+_DS="$(bash_bin_shim "$_DSP")"
+_TOPICS="setup search hooks ci ledger claims release"
+
+# _ds_run <cmd…>: run it, keeping stdout, stderr and the status in _DS_OUT,
+# _DS_ERR and _DS_RC. Under set -e a missing dispatcher must fail a test, not
+# abort the suite.
+_ds_run() {
+  local _ef
+  _ef="$(harness_mktemp ds-err)"
+  _DS_RC=0
+  _DS_OUT="$("$@" 2>"$_ef")" || _DS_RC=$?
+  _DS_ERR="$(cat "$_ef")"
+}
+# _ds_same <expected-file> <cmd…>: the command's stdout is the file, byte for byte.
+_ds_same() {
+  local _want="$1" _got
+  shift
+  _got="$(harness_mktemp ds-out)"
+  "$@" >"$_got" 2>/dev/null || true
+  cmp -s "$_want" "$_got"
+}
+# _ds_lines <file>: its line count, or 999 when it is missing.
+_ds_lines() {
+  local _n
+  _n="$(wc -l 2>/dev/null <"$1" | tr -d ' ' || true)"
+  printf '%s' "${_n:-999}"
+}
+# _ds_stub <dir>: a minimal plugin root around a copy of the dispatcher. Each
+# sub-script prints "<tag>|<BASH_VERSION>|<$0>|<arg>|<arg>…" and exits with
+# $STUB_RC (default 0); the overview is a marker, so a run that reads the real
+# checkout's help instead of the stub's is seen.
+_ds_stub_script() {
+  mkdir -p "$(dirname "$1")"
+  cat >"$1" <<EOF
+printf '%s' "$2|\${BASH_VERSION:-nobash}|\$0"
+for _a in "\$@"; do printf '|%s' "\$_a"; done
+printf '\n'
+exit \${STUB_RC:-0}
+EOF
+}
+_ds_stub() {
+  mkdir -p "$1/scripts/help"
+  # (|| true: with the dispatcher missing, the tests below fail instead of aborting the suite)
+  cp "$_DSP" "$1/scripts/doc-superpowers" 2>/dev/null || true
+  chmod +x "$1/scripts/doc-superpowers" 2>/dev/null || true
+  printf 'STUB OVERVIEW\n' >"$1/scripts/help/overview.txt"
+  _ds_stub_script "$1/scripts/doc-tools.sh" doc-tools
+  _ds_stub_script "$1/scripts/hooks/install.sh" install
+  _ds_stub_script "$1/scripts/setup/setup.sh" setup
+  _ds_stub_script "$1/scripts/search/launch.sh" launch
+}
+# _ds_fld <n>: field n of the last _ds_run's stdout.
+_ds_fld() { printf '%s' "$_DS_OUT" | cut -d'|' -f"$1"; }
+_BV="$("$BASH_BIN" -c 'printf %s "$BASH_VERSION"')"
+
+# --- the files ---
+assert_true "scripts/doc-superpowers exists and is executable" test -x "$_DSP"
+assert_eq '#!/usr/bin/env bash' "$(head -n 1 "$_DSP" 2>/dev/null || true)" "…and starts with the env-bash shebang"
+for _t in overview $_TOPICS; do
+  assert_file_exists "$_HELPD/$_t.txt" "scripts/help/$_t.txt exists"
+done
+assert_eq "8" "$(ls "$_HELPD"/*.txt 2>/dev/null | wc -l | tr -d ' ')" "scripts/help holds exactly the overview and the 7 topics"
+
+# --- help prints the files, byte for byte ---
+for _a in help -h --help; do
+  assert_true "doc-superpowers $_a prints scripts/help/overview.txt, byte for byte" \
+    _ds_same "$_HELPD/overview.txt" "$_DS" "$_a"
+done
+assert_true "doc-superpowers with no command prints the overview" _ds_same "$_HELPD/overview.txt" "$_DS"
+_ds_run "$_DS" help
+assert_eq "0" "$_DS_RC" "help exits 0"
+assert_eq "" "$_DS_ERR" "…and writes nothing to stderr"
+for _t in $_TOPICS; do
+  assert_true "help $_t prints scripts/help/$_t.txt, byte for byte" \
+    _ds_same "$_HELPD/$_t.txt" "$_DS" help "$_t"
+done
+assert_true "-h <topic> prints the topic" _ds_same "$_HELPD/search.txt" "$_DS" -h search
+assert_true "--help <topic> prints the topic" _ds_same "$_HELPD/ci.txt" "$_DS" --help ci
+assert_true "help works from any directory (the root is the script's, not the cwd's)" \
+  _ds_same "$_HELPD/overview.txt" sh -c 'cd / && exec "$0" help' "$_DS"
+
+# --- the limits ---
+_ov="$(cat "$_HELPD/overview.txt" 2>/dev/null || true)"
+_n="$(_ds_lines "$_HELPD/overview.txt")"
+assert_true "overview.txt is at most 24 lines ($_n)" test "$_n" -le 24
+for _t in $_TOPICS; do
+  _n="$(_ds_lines "$_HELPD/$_t.txt")"
+  assert_true "$_t.txt is at most 50 lines ($_n)" test "$_n" -le 50
+done
+assert_eq "" "$(awk 'length > 80 { print FILENAME ":" FNR ": " length }' "$_HELPD"/*.txt 2>/dev/null || true)" \
+  "no help line is wider than 80 columns"
+assert_eq "0" "$(cat "$_HELPD"/*.txt 2>/dev/null | grep -c $'\033' || true)" "no help file holds an ANSI escape"
+assert_eq "0" "$(cat "$_HELPD"/*.txt 2>/dev/null | LC_ALL=C grep -c '[^[:print:]]' || true)" \
+  "…or a tab or a non-ASCII byte (so a line's length is its width)"
+assert_eq "0" "$(cat "$_HELPD"/*.txt 2>/dev/null | grep -Eic 'abundance|w-mm|w-mbp' || true)" \
+  "…or the name of a private repository or host"
+
+# --- the overview ---
+for _w in init audit review-pr update diagram sync release spec-generate spec-inject spec-verify ledger hooks setup help; do
+  assert_true "overview.txt has a line for $_w" grep -Eq "^  $_w( |\$)" "$_HELPD/overview.txt"
+done
+for _t in $_TOPICS; do
+  assert_contains "$_ov" "help $_t" "overview.txt points to help $_t"
+done
+assert_contains "$(tail -n 2 "$_HELPD/overview.txt" 2>/dev/null || true)" "doc-superpowers help <topic>" \
+  "overview.txt ends with the help-topic line…"
+assert_contains "$(tail -n 2 "$_HELPD/overview.txt" 2>/dev/null || true)" "(topics: setup search hooks ci ledger claims release)" \
+  "…listing the 7 topics in order"
+
+# --- the topics ---
+_ds_ref() {
+  case "$1" in
+    ci) echo hooks.md ;;
+    claims) echo spec-claims.md ;;
+    *) echo "$1.md" ;;
+  esac
+}
+for _t in $_TOPICS; do
+  _tx="$(cat "$_HELPD/$_t.txt" 2>/dev/null || true)"
+  assert_contains "$(head -n 1 "$_HELPD/$_t.txt" 2>/dev/null || true)" "$_t" "$_t.txt: the first line names the topic"
+  for _l in "Default:" "Terminal:" "Skill:" "Committed:" "Local:" "Undo:" "Reference:"; do
+    assert_true "$_t.txt has a $_l line" grep -q "^$_l" "$_HELPD/$_t.txt"
+  done
+  assert_true "$_t.txt: its Terminal line gives a doc-superpowers command" \
+    grep -Eq '^Terminal:.* doc-superpowers ' "$_HELPD/$_t.txt"
+  assert_true "$_t.txt: its Skill line gives a /doc-superpowers action" \
+    grep -Eq '^Skill:.* /doc-superpowers' "$_HELPD/$_t.txt"
+  _r="references/$(_ds_ref "$_t")"
+  assert_true "$_t.txt: its Reference line names $_r" grep -q "^Reference:.*$_r" "$_HELPD/$_t.txt"
+  # references/setup.md is written by the skill-and-docs task; check the file
+  # exists once it does (SKILL.md's own path check then covers it too).
+  if [ "$_r" != "references/setup.md" ] || [ -e "$REPO_ROOT/$_r" ]; then
+    assert_true "$_t.txt: $_r exists" test -f "$REPO_ROOT/$_r"
+  fi
+done
+# setup's fixed defaults, verbatim (the lines may wrap: compare flattened)
+_st="$(tr '\n' ' ' 2>/dev/null <"$_HELPD/setup.txt" | tr -s ' ' || true)"
+assert_contains "$_st" "On: the merge driver, the 5 report-only git hooks, the 3 Claude hooks, harness claude-code" \
+  "setup.txt states what is on by default"
+assert_contains "$_st" "Off: doc-search, CI, the ledger, spec claims and the terminal command" \
+  "…and what is off"
+for _f in --dry-run --yes --apply --build --set --list --for-team --link-bin --plain; do
+  assert_contains "$_st" "$_f" "setup.txt names the $_f flag"
+done
+assert_contains "$_st" ".claude/doc-superpowers/installed.json" "setup.txt names the team record"
+assert_contains "$_st" ".claude/doc-superpowers/installed.local.json" "…and the local one"
+assert_contains "$_st" "~/.local/bin/doc-superpowers" "…and the terminal command it can write"
+# a few facts the other topics must keep right
+assert_contains "$(cat "$_HELPD/ci.txt" 2>/dev/null || true)" "doc-freshness-pr" "ci.txt names the default workflows"
+assert_contains "$(cat "$_HELPD/search.txt" 2>/dev/null || true)" "docs/search/config.json" "search.txt names the switch"
+assert_contains "$(cat "$_HELPD/ledger.txt" 2>/dev/null || true)" "docs/ledger/config.json" "ledger.txt names the switch"
+assert_contains "$(cat "$_HELPD/claims.txt" 2>/dev/null || true)" "docs/spec-claims/" "claims.txt names the switch"
+
+# --- errors ---
+_ds_run "$_DS" help nosuch
+assert_eq "3" "$_DS_RC" "help <unknown topic> exits 3"
+assert_eq "" "$_DS_OUT" "…printing nothing on stdout"
+assert_contains "$_DS_ERR" "nosuch" "…naming the topic it did not know on stderr"
+for _t in $_TOPICS; do
+  assert_contains "$_DS_ERR" "$_t" "…and listing $_t"
+done
+_ds_run "$_DS" help setup extra
+assert_eq "3" "$_DS_RC" "help with two topics exits 3"
+_ds_run "$_DS" nosuch
+assert_eq "3" "$_DS_RC" "an unknown command exits 3"
+assert_eq "" "$_DS_OUT" "…printing nothing on stdout"
+assert_eq "doc-superpowers: unknown command 'nosuch' (doc-superpowers help)" "$_DS_ERR" "…and saying so on stderr"
+
+# --- version and the hooks pass-through, against the real files ---
+_ver="$(awk '/^## v[0-9]/ { sub(/^## v/, ""); sub(/[^0-9.].*/, ""); print; exit }' "$REPO_ROOT/RELEASE-NOTES.md")"
+assert_true "RELEASE-NOTES.md gives a version to compare with ($_ver)" test -n "$_ver"
+_ds_run "$_DS" version
+assert_eq "$_ver" "$_DS_OUT" "version prints RELEASE-NOTES.md's latest version"
+assert_eq "0" "$_DS_RC" "…and exits 0"
+_ih="$(harness_mktemp ds-install-help)"
+"$(bash_bin_shim "$REPO_ROOT/scripts/hooks/install.sh")" help >"$_ih" 2>/dev/null || true
+assert_true "install.sh help prints something to compare with" test -s "$_ih"
+assert_true "hooks help prints install.sh help, byte for byte" _ds_same "$_ih" "$_DS" hooks help
+
+# --- a symlink to the dispatcher ---
+_sl="$(harness_mktemp_d ds-link)"
+ln -s "$_DSP" "$_sl/abs-link"
+ln -s abs-link "$_sl/chain-link"
+assert_true "help works from a symlink to the dispatcher" \
+  _ds_same "$_HELPD/overview.txt" "$BASH_BIN" "$_sl/abs-link" help
+assert_true "…and from a symlink to a symlink" \
+  _ds_same "$_HELPD/ci.txt" "$BASH_BIN" "$_sl/chain-link" help ci
+
+# --- the routes, against a stub plugin root (also one whose path has spaces) ---
+_stub="$_sl/plugin root"
+_ds_stub "$_stub"
+_sd="$_stub/scripts/doc-superpowers"
+_ds_run "$BASH_BIN" "$_sd" help
+assert_eq "STUB OVERVIEW" "$_DS_OUT" "the root is the dispatcher's own: a copy reads its own scripts/help"
+_ds_run "$BASH_BIN" "$_sd" version
+assert_eq "doc-tools|$_BV|$_stub/scripts/doc-tools.sh|tools|version" "$_DS_OUT" \
+  "version runs doc-tools.sh tools version, under the interpreter that runs the dispatcher"
+_ds_run "$BASH_BIN" "$_sd" hooks install --git --merge-driver-only
+assert_eq "install|$_BV|$_stub/scripts/hooks/install.sh|install|--git|--merge-driver-only" "$_DS_OUT" \
+  "hooks … runs install.sh with the rest of the arguments"
+_ds_run "$BASH_BIN" "$_sd" tools check-freshness "a b" ""
+assert_eq "doc-tools|$_BV|$_stub/scripts/doc-tools.sh|check-freshness|a b|" "$_DS_OUT" \
+  "tools … runs doc-tools.sh, every argument intact (a space, an empty one)"
+_ds_run "$BASH_BIN" "$_sd" setup --dry-run --set search=on
+assert_eq "setup|$_BV|$_stub/scripts/setup/setup.sh|--dry-run|--set|search=on" "$_DS_OUT" \
+  "setup … runs scripts/setup/setup.sh under the same interpreter, with the flags"
+_ds_run env STUB_RC=7 "$BASH_BIN" "$_sd" setup --yes
+assert_eq "7" "$_DS_RC" "setup's exit status is the dispatcher's"
+_ds_run env STUB_RC=5 "$BASH_BIN" "$_sd" tools x
+assert_eq "5" "$_DS_RC" "tools' exit status is the dispatcher's"
+_ds_run env STUB_RC=2 "$BASH_BIN" "$_sd" hooks status
+assert_eq "2" "$_DS_RC" "hooks' exit status is the dispatcher's"
+
+# --- the root keeps the path it was reached by (a symlinked plugin-cache directory) ---
+ln -s "$_stub" "$_sl/cache link"
+_ds_run "$BASH_BIN" "$_sl/cache link/scripts/doc-superpowers" setup --dry-run
+assert_eq "setup|$_BV|$_sl/cache link/scripts/setup/setup.sh|--dry-run" "$_DS_OUT" \
+  "run through a symlinked directory, the root is the symlink's path, not its target's"
+# a symlink to the dispatcher file resolves to the root it lives in
+ln -s "$_sd" "$_sl/ds-abs"
+_ds_run "$BASH_BIN" "$_sl/ds-abs" version
+assert_eq "doc-tools|$_BV|$_stub/scripts/doc-tools.sh|tools|version" "$_DS_OUT" \
+  "an absolute symlink to the dispatcher resolves to its plugin root"
+mkdir -p "$_stub/bin"
+ln -s ../scripts/doc-superpowers "$_stub/bin/ds-rel"
+_stub_real="$(cd "$_stub" && pwd -P)"
+_ds_run "$BASH_BIN" "$_stub/bin/ds-rel" version
+assert_eq "doc-tools|$_BV|$_stub_real/scripts/doc-tools.sh|tools|version" "$_DS_OUT" \
+  "a relative symlink to the dispatcher resolves (from the link's own directory) to its plugin root"
+ln -s ds-abs "$_sl/ds-chain"
+_ds_run "$BASH_BIN" "$_sl/ds-chain" hooks status
+assert_eq "install|$_BV|$_stub/scripts/hooks/install.sh|status" "$_DS_OUT" \
+  "a chain of symlinks resolves to its plugin root"
+
+# --- search: the committed launcher at the repository top, else the plugin's own ---
+_repo="$(harness_mktemp_d ds-repo)"
+git -C "$_repo" init -q
+mkdir -p "$_repo/sub/dir"
+_repo_real="$(cd "$_repo" && pwd -P)"
+_ds_run env GIT_CEILING_DIRECTORIES="$(dirname "$_repo")" sh -c 'cd "$1" && exec "$2" "$3" search status' _ "$_repo/sub/dir" "$BASH_BIN" "$_sd"
+assert_eq "launch" "$(_ds_fld 1)" "search with no committed launcher runs the plugin's scripts/search/launch.sh…"
+assert_eq "$_stub/scripts/search/launch.sh|status" "$(_ds_fld 3-)" "…with the arguments"
+_ds_stub_script "$_repo/.claude/doc-superpowers/search-mcp.sh" repo-launcher
+_ds_run env GIT_CEILING_DIRECTORIES="$(dirname "$_repo")" sh -c 'cd "$1" && exec "$2" "$3" search query "two words"' _ "$_repo/sub/dir" "$BASH_BIN" "$_sd"
+assert_eq "repo-launcher" "$(_ds_fld 1)" "search runs the committed launcher found at the repository top, from a subdirectory…"
+assert_eq "$_repo_real/.claude/doc-superpowers/search-mcp.sh|query|two words" "$(_ds_fld 3-)" "…with the arguments intact"
+_out_repo="$(harness_mktemp_d ds-norepo)"
+_ds_run env GIT_CEILING_DIRECTORIES="$(dirname "$_out_repo")" sh -c 'cd "$1" && exec "$2" "$3" search index' _ "$_out_repo" "$BASH_BIN" "$_sd"
+assert_eq "launch" "$(_ds_fld 1)" "search outside a repository runs the plugin's launcher"
+
+# =============================================================================
 echo "--- leak scan: tracked files ship to every install (#29) ---"
 # scripts/leak-scan.sh, first against a fixture holding one leak of each class
 # and each allowlisted form (the leaks are assembled here, so this file holds

@@ -1,0 +1,26 @@
+doc-superpowers help hooks: git and Claude hooks that report drift
+
+Hooks tell you, as you work, which docs a change leaves stale. They report
+and never write the doc index. They block only with DOC_SUPERPOWERS_STRICT=1,
+or when docs/spec-claims/ exists (then a claims finding blocks a commit).
+
+Default:    setup turns on the merge driver, the 5 git hooks (pre-commit,
+            post-merge, post-checkout, prepare-commit-msg, pre-push) and the
+            3 Claude hooks (commit gate, commit sync, session summary).
+            The installer on its own installs only the tiers you name.
+Terminal:   doc-superpowers hooks install [--git] [--claude] [--ci] [--all]
+            doc-superpowers hooks install --git --merge-driver-only
+            doc-superpowers hooks status [--json]    (same flags)
+            doc-superpowers hooks uninstall [--git] [--claude] [--ci] [--all]
+            doc-superpowers hooks help        every flag, hook and variable
+Skill:      /doc-superpowers hooks install|status|uninstall [flags]
+Committed:  .gitattributes (the doc-index merge-driver block).
+Local:      the git hooks and the merge.doc-index.* git config;
+            .claude/settings.local.json and .claude/hooks/doc-superpowers/,
+            both kept out of git: each contributor installs their own.
+Undo:       doc-superpowers hooks uninstall --git --claude
+Opt-in sets (never in --all): --ledger and --ledger-claude (help ledger),
+            --search (help search).
+Quiet or skip: DOC_SUPERPOWERS_QUIET=1 hides output, DOC_SUPERPOWERS_SKIP=1
+            bypasses every hook.
+Reference:  references/hooks.md

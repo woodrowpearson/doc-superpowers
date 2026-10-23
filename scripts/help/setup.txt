@@ -1,0 +1,33 @@
+doc-superpowers help setup: choose what to turn on, in one pass
+
+Setup scans this repository, shows the choices as a checklist, and lists
+every write before it makes one. Nothing is written until you confirm.
+
+Default:    On:  the merge driver, the 5 report-only git hooks, the 3 Claude
+                 hooks, harness claude-code.
+            Off: doc-search, CI, the ledger, spec claims and the terminal
+                 command.
+            Nothing downloads without "Write and build" and a yes.
+Terminal:   doc-superpowers setup       the full-screen picker on a terminal
+              --plain         ask questions instead of the picker
+              --dry-run       print the plan and the review; write nothing
+              --list          every item with its value, scope and any reason
+              --set id=value  change one item, repeatable (search=on)
+              --yes           apply the selection without asking (base + --set)
+              --apply         install the team's recorded setup in this clone
+              --build         with --yes or --apply: allow the downloads
+              --for-team      make per-user --set values the team's choice
+              --link-bin      write the terminal command (--no-link-bin: skip)
+Skill:      /doc-superpowers setup   (the same engine, driven with the flags)
+Committed:  .claude/doc-superpowers/installed.json (the team's choice),
+            .gitattributes (the merge driver), and the files of each item you
+            turn on: see the other topics.
+Local:      .claude/doc-superpowers/installed.local.json (your overrides),
+            the git and Claude hooks, the search cache. Outside the
+            repository, only if you tick them: ~/.config/doc-search/env.sh
+            and ~/.local/bin/doc-superpowers (the terminal command).
+Undo:       run setup again and untick an item: its installer's uninstall
+            runs. setup never deletes team files it did not create.
+Exit:       0 done or nothing to do, 1 refused (nothing written), 2 a step
+            failed (re-run to finish), 3 usage.
+Reference:  references/setup.md
