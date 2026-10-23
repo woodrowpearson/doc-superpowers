@@ -1122,12 +1122,18 @@ plan_render_review() {
   plan_render_harness_notes
 }
 
-# --- For the interactive UIs (lib-prompt.sh; the TUI) ----------------------------
+# --- For the interactive UIs (lib-prompt.sh, lib-tui.sh) ------------------------
 #
 # The UIs change SEL through model_set only, show the summary
 # (plan_render_summary, or plan_group_line per group) and the review
 # (plan_render_review) after plan_build, and hand setup.sh a result: write,
-# build, or quit. These answer their other questions the same way for each.
+# build, or quit. These answer their other questions the same way for each:
+# the plan behind the summary (plan_build_preview) and the review's
+# (plan_review_build, which says when only the team can make a change), the
+# per-user question (plan_peruser_changes, plan_peruser_text, plan_for_team),
+# Write and build (plan_can_build, plan_build_question), and an item as
+# both UIs show it (plan_group_items, plan_item_box, plan_item_marks,
+# plan_item_details, plan_multi_toggle, plan_scope_text).
 
 # plan_scope_text <i>: item i's scope, in words.
 plan_scope_text() {
@@ -1196,4 +1202,148 @@ plan_download_text() {
     return 0
   done
   return 1
+}
+
+# plan_build_preview: plan_build for what the summary and the groups show (the
+# "already installed" marks). A per-user change the team's record allows only
+# as the team's (the merge driver, R9) is previewed as the team's: the review
+# asks whose it is, and turns it away there as yours.
+plan_build_preview() {
+  local ft="$PLAN_FOR_TEAM" ids="$PLAN_FOR_TEAM_IDS"
+  PLAN_BUILD_REQUESTED=0
+  plan_build && return 0
+  plan_peruser_changes || true
+  PLAN_FOR_TEAM=1 PLAN_FOR_TEAM_IDS="$PLAN_PERUSER_IDS"
+  plan_build || true
+  PLAN_FOR_TEAM="$ft" PLAN_FOR_TEAM_IDS="$ids"
+}
+
+# plan_review_build: plan_build for the review (no build). Returns 1, with
+# PLAN_ERROR, when it refuses; PLAN_NEEDS_TEAM is then 1 when the refusal is a
+# per-user change only the team can make (the merge driver, R9), so the UI
+# can say to answer "the team" to the per-user question.
+# shellcheck disable=SC2034  # PLAN_NEEDS_TEAM is the UIs' to show
+plan_review_build() {
+  PLAN_NEEDS_TEAM=0
+  PLAN_BUILD_REQUESTED=0
+  plan_build && return 0
+  case "$PLAN_ERROR" in
+    *--for-team*) PLAN_NEEDS_TEAM=1 ;;
+  esac
+  return 1
+}
+
+# plan_build_question: PLAN_BUILD_QUESTION, Write and build's question: "This
+# downloads <what>. Continue? [y/N]" (a plan_build with the build, then the
+# build request back off).
+# shellcheck disable=SC2034  # PLAN_BUILD_QUESTION is the UIs' to show
+plan_build_question() {
+  PLAN_BUILD_REQUESTED=1
+  plan_build || true
+  plan_download_text || PLAN_DOWNLOAD="doc-search's Python packages and models"
+  PLAN_BUILD_REQUESTED=0
+  PLAN_BUILD_QUESTION="This downloads $PLAN_DOWNLOAD. Continue? [y/N]"
+}
+
+# plan_peruser_text: PLAN_PERUSER_TEXT, the per-user question's lead-in, which
+# names the items plan_peruser_changes found (run it first).
+# shellcheck disable=SC2034  # PLAN_PERUSER_TEXT is the UIs' to show
+plan_peruser_text() {
+  local id labels=""
+  for id in $PLAN_PERUSER_IDS; do
+    _model_i "$id" || continue
+    labels="${labels:+$labels, }${CAT_LABEL[_MI]}"
+  done
+  PLAN_PERUSER_TEXT="Per-user items changed: $labels. The team record holds the team's choice; yours can differ."
+}
+
+# plan_group_items <group>: PLAN_ITEMS, the catalog indexes of the group's
+# items, in catalog order.
+plan_group_items() {
+  local i=0
+  PLAN_ITEMS=()
+  while [ "$i" -lt "$CAT_N" ]; do
+    [ "${CAT_GROUP[i]}" != "$1" ] || PLAN_ITEMS+=("$i")
+    i=$((i + 1))
+  done
+}
+
+# plan_parent_off <i>: item i requires a parent that is unticked.
+plan_parent_off() {
+  local pid="${CAT_REQUIRES[$1]%%=*}"
+  [ -n "$pid" ] && ! model_is_on "$pid"
+}
+
+# plan_item_box <i>: PLAN_BOX, "[x]" when the selection ticks item i (a
+# toggle or multi that is on; a choice or value item whose parent is ticked
+# and whose value is not its off value), else "[ ]".
+# shellcheck disable=SC2034  # PLAN_BOX is the UIs' to show
+plan_item_box() {
+  local i="$1"
+  PLAN_BOX="[ ]"
+  case "${CAT_KIND[i]}" in
+    toggle | multi) if model_is_on "${CAT_ID[i]}"; then PLAN_BOX="[x]"; fi ;;
+    *) if ! plan_parent_off "$i" && ! _model_is_off "$i" "${SEL[i]}"; then PLAN_BOX="[x]"; fi ;;
+  esac
+}
+
+# plan_item_marks <i>: PLAN_MARKS, item i's marks: " (changed)" against the
+# base, " (locked)", " (off here)" (this host's checks disable it).
+plan_item_marks() {
+  local i="$1"
+  PLAN_MARKS=""
+  [ "${SEL[i]}" = "${BASE[i]}" ] || PLAN_MARKS="$PLAN_MARKS (changed)"
+  [ -z "${LOCKED[i]}" ] || PLAN_MARKS="$PLAN_MARKS (locked)"
+  [ -z "${DISABLED[i]}" ] || PLAN_MARKS="$PLAN_MARKS (off here)"
+}
+
+# plan_multi_toggle <i> <option>: PLAN_VALUE, multi item i's value with
+# <option> ticked, or unticked when it is (catalog order; none when empty),
+# for model_set.
+# shellcheck disable=SC2034  # PLAN_VALUE is the UIs' to pass to model_set
+plan_multi_toggle() {
+  local i="$1" o="$2" p csv=""
+  if _model_csv_has "${SEL[i]}" "$o"; then
+    for p in ${CAT_OPTIONS[i]//,/ }; do
+      if [ "$p" != "$o" ] && _model_csv_has "${SEL[i]}" "$p"; then csv="${csv:+$csv,}$p"; fi
+    done
+  else
+    csv="${SEL[i]},$o"
+    [ "${SEL[i]}" != none ] || csv="$o"
+  fi
+  PLAN_VALUE="${csv:-none}"
+}
+
+# plan_item_details <i>: item i's details, one line each: "<label> (<id>)",
+# its text, "Scope:", "Writes:" (a path each), "Undo:", "Locked:", "Off here:"
+# (the item, or one of its options), "Hint:", and for a per-user item once a
+# team record exists, "Team: <value>; you: <value>".
+plan_item_details() {
+  local i="$1" w line ws
+  printf '%s (%s)\n' "${CAT_LABEL[i]}" "${CAT_ID[i]}"
+  printf '%s\n' "${CAT_DETAILS[i]}"
+  printf 'Scope: %s\n' "$(plan_scope_text "$i")"
+  if [ "${CAT_PERUSER[i]}" = 1 ] && [ -n "$PROBE_TEAM" ]; then
+    _plan_team_value "${CAT_ID[i]}"
+    printf 'Team: %s; you: %s\n' "$_PTV" "${SEL[i]}"
+  fi
+  ws=()
+  IFS=, read -r -a ws <<<"${CAT_WRITES[i]}"
+  for w in ${ws[@]+"${ws[@]}"}; do
+    printf 'Writes: %s\n' "$(plan_write_path "${w#*:}")"
+  done
+  printf 'Undo: %s\n' "${CAT_UNDO[i]}"
+  [ -z "${LOCKED[i]}" ] || printf 'Locked: %s\n' "${LOCKED[i]}"
+  [ -z "${DISABLED[i]}" ] || printf 'Off here: %s\n' "${DISABLED[i]}"
+  if [ -n "$DISABLED_OPT" ]; then
+    while IFS= read -r line; do
+      case "$line" in
+        "${CAT_ID[i]}="*)
+          line="${line#*=}"
+          printf 'Off here: %s: %s\n' "${line%%"$_PLAN_T"*}" "${line#*"$_PLAN_T"}"
+          ;;
+      esac
+    done <<<"$DISABLED_OPT"
+  fi
+  [ -z "${HINT[i]}" ] || printf 'Hint: %s\n' "${HINT[i]}"
 }

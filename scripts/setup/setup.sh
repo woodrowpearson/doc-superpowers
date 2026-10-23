@@ -50,8 +50,9 @@
 #   --plain             the interactive UI as plain line prompts, on a TTY too
 #   (no mode)           interactive: the prompt UI (lib-prompt.sh) when stdin
 #                       or stdout is not a TTY, TERM is dumb or unset, or with
-#                       --plain; else the TUI (Task 10; until then the prompt
-#                       UI). DOC_SP_SETUP_UI=prompt|tui (internal, for tests)
+#                       --plain; else the TUI (lib-tui.sh), or, on a terminal
+#                       smaller than 60x16, one line saying so and the prompt
+#                       UI. DOC_SP_SETUP_UI=prompt|tui (internal, for tests)
 #                       picks one. It asks before it writes: q, or the end of
 #                       input, writes nothing (exit 0). --build and --for-team
 #                       are refused there (exit 3): the UI asks both questions
@@ -83,6 +84,8 @@ source "$ROOT/scripts/setup/lib-plan.sh"
 source "$ROOT/scripts/setup/lib-exec.sh"
 # shellcheck source=scripts/setup/lib-prompt.sh
 source "$ROOT/scripts/setup/lib-prompt.sh"
+# shellcheck source=scripts/setup/lib-tui.sh
+source "$ROOT/scripts/setup/lib-tui.sh"
 
 die() {
   echo "setup: $1" >&2
@@ -173,8 +176,14 @@ if [ -z "$MODE" ]; then
   else
     UI=tui
   fi
-  # The TUI is Task 10's (lib-tui.sh); until it lands, the prompt UI.
-  [ "$UI" != tui ] || UI=prompt
+  # The TUI needs 60x16: on a smaller terminal, one line, then the prompts.
+  if [ "$UI" = tui ]; then
+    tui_size
+    if ! tui_fits; then
+      echo "$TUI_SMALL"
+      UI=prompt
+    fi
+  fi
 fi
 
 command -v jq >/dev/null 2>&1 || die "jq is needed (1.6 or later); nothing was changed"
@@ -255,9 +264,15 @@ fi
 if [ -z "$MODE" ]; then
   PLAN_FOR_TEAM=0
   PLAN_FOR_TEAM_IDS=""
-  # The answers come from fd 3; no command the UI starts can read one.
-  prompt_run 3<&0 </dev/null
-  case "$PROMPT_RESULT" in
+  # The answers (keys) come from fd 3; no command the UI starts can read one.
+  if [ "$UI" = tui ]; then
+    tui_run 3<&0 </dev/null
+    _result="$TUI_RESULT"
+  else
+    prompt_run 3<&0 </dev/null
+    _result="$PROMPT_RESULT"
+  fi
+  case "$_result" in
     write) PLAN_BUILD_REQUESTED=0 ;;
     build) PLAN_BUILD_REQUESTED=1 ;;
     *)

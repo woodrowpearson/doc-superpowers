@@ -33,7 +33,6 @@
 
 PROMPT_RESULT=""
 _PR_LINE="" _PR_NEXT="" _PR_EOF=0 _PR_GROUP="" _PR_N=""
-_PR_ITEMS=()
 
 # _prompt_read [prompt]: _PR_LINE, the next answer (fd 3), spaces around it
 # and a CR dropped; the prompt is "> " unless given. Returns 1 at the end of
@@ -75,79 +74,15 @@ _prompt_number() {
   _PR_N="$v"
 }
 
-# _prompt_plan: plan_build for the summary and the groups (what is already
-# installed). A per-user change the team's record allows only as the team's
-# (the merge driver) is shown as the team's: the review asks whose it is.
-_prompt_plan() {
-  local ft="$PLAN_FOR_TEAM" ids="$PLAN_FOR_TEAM_IDS"
-  PLAN_BUILD_REQUESTED=0
-  plan_build && return 0
-  plan_peruser_changes || true
-  PLAN_FOR_TEAM=1 PLAN_FOR_TEAM_IDS="$PLAN_PERUSER_IDS"
-  plan_build || true
-  PLAN_FOR_TEAM="$ft" PLAN_FOR_TEAM_IDS="$ids"
-}
-
-# _prompt_group_items <group>: _PR_ITEMS, the catalog indexes of the group's
-# items, in catalog order.
-_prompt_group_items() {
-  local i=0
-  _PR_ITEMS=()
-  while [ "$i" -lt "$CAT_N" ]; do
-    [ "${CAT_GROUP[i]}" != "$1" ] || _PR_ITEMS+=("$i")
-    i=$((i + 1))
-  done
-}
-
-# _prompt_parent_off <i>: item i requires a parent that is unticked.
-_prompt_parent_off() {
-  local pid="${CAT_REQUIRES[$1]%%=*}"
-  [ -n "$pid" ] && ! model_is_on "$pid"
-}
-
 # _prompt_item_line <n> <i>: "  n) [x] <label>[: <value>] -- <scope>" and
-# its marks.
+# its marks (plan_item_box, plan_item_marks).
 _prompt_item_line() {
-  local i="$2" box="[ ]" line
-  case "${CAT_KIND[i]}" in
-    toggle | multi) if model_is_on "${CAT_ID[i]}"; then box="[x]"; fi ;;
-    *) if ! _prompt_parent_off "$i" && ! _model_is_off "$i" "${SEL[i]}"; then box="[x]"; fi ;;
-  esac
-  line="  $1) $box ${CAT_LABEL[i]}"
+  local i="$2" line
+  plan_item_box "$i"
+  plan_item_marks "$i"
+  line="  $1) $PLAN_BOX ${CAT_LABEL[i]}"
   [ "${CAT_KIND[i]}" = toggle ] || line="$line: ${SEL[i]}"
-  line="$line -- $(plan_scope_text "$i")"
-  [ "${SEL[i]}" = "${BASE[i]}" ] || line="$line (changed)"
-  [ -z "${LOCKED[i]}" ] || line="$line (locked)"
-  [ -z "${DISABLED[i]}" ] || line="$line (off here)"
-  printf '%s\n' "$line"
-}
-
-# _prompt_details <i>: the item's details pane, as text.
-_prompt_details() {
-  local i="$1" w line ws
-  echo ""
-  printf '%s (%s)\n' "${CAT_LABEL[i]}" "${CAT_ID[i]}"
-  printf '%s\n' "${CAT_DETAILS[i]}"
-  printf 'Scope: %s\n' "$(plan_scope_text "$i")"
-  ws=()
-  IFS=, read -r -a ws <<<"${CAT_WRITES[i]}"
-  for w in ${ws[@]+"${ws[@]}"}; do
-    printf 'Writes: %s\n' "$(plan_write_path "${w#*:}")"
-  done
-  printf 'Undo: %s\n' "${CAT_UNDO[i]}"
-  [ -z "${LOCKED[i]}" ] || printf 'Locked: %s\n' "${LOCKED[i]}"
-  [ -z "${DISABLED[i]}" ] || printf 'Off here: %s\n' "${DISABLED[i]}"
-  if [ -n "$DISABLED_OPT" ]; then
-    while IFS= read -r line; do
-      case "$line" in
-        "${CAT_ID[i]}="*)
-          line="${line#*=}"
-          printf 'Off here: %s: %s\n' "${line%%"$_PLAN_T"*}" "${line#*"$_PLAN_T"}"
-          ;;
-      esac
-    done <<<"$DISABLED_OPT"
-  fi
-  [ -z "${HINT[i]}" ] || printf 'Hint: %s\n' "${HINT[i]}"
+  printf '%s -- %s%s\n' "$line" "$(plan_scope_text "$i")" "$PLAN_MARKS"
 }
 
 # _prompt_set <id> <value>: model_set, or its reason printed. Returns its rc.
@@ -159,7 +94,7 @@ _prompt_set() {
 
 # _prompt_multi <i>: a multi's options, ticked and unticked by number.
 _prompt_multi() {
-  local i="$1" n o p opts csv
+  local i="$1" n o opts
   while :; do
     echo ""
     printf '%s: a number ticks or unticks one; an empty line goes back.\n' "${CAT_LABEL[i]}"
@@ -176,18 +111,10 @@ _prompt_multi() {
       printf '  answer a number from 1 to %d, or an empty line\n' "$n"
       continue
     fi
-    opts=() csv=""
+    opts=()
     for o in ${CAT_OPTIONS[i]//,/ }; do opts+=("$o"); done
-    o="${opts[_PR_N - 1]}"
-    if _model_csv_has "${SEL[i]}" "$o"; then
-      for p in "${opts[@]}"; do
-        if [ "$p" != "$o" ] && _model_csv_has "${SEL[i]}" "$p"; then csv="${csv:+$csv,}$p"; fi
-      done
-    else
-      csv="${SEL[i]},$o"
-      [ "${SEL[i]}" != none ] || csv="$o"
-    fi
-    _prompt_set "${CAT_ID[i]}" "${csv:-none}" || true
+    plan_multi_toggle "$i" "${opts[_PR_N - 1]}"
+    _prompt_set "${CAT_ID[i]}" "$PLAN_VALUE" || true
   done
 }
 
@@ -246,7 +173,7 @@ _prompt_item() {
 }
 
 _prompt_summary() {
-  _prompt_plan
+  plan_build_preview
   echo ""
   plan_render_summary
   echo ""
@@ -274,7 +201,7 @@ _prompt_summary() {
 
 _prompt_groups() {
   local g n
-  _prompt_plan
+  plan_build_preview
   echo ""
   echo "Customize: a number opens a group; an empty line goes back."
   n=0
@@ -300,11 +227,11 @@ _prompt_groups() {
 
 _prompt_items() {
   local n k
-  _prompt_group_items "$_PR_GROUP"
+  plan_group_items "$_PR_GROUP"
   echo ""
   printf '%s: a number toggles an item or asks for its value; d <n> shows its details; an empty line goes back.\n' "$_PR_GROUP"
   n=0
-  for k in "${_PR_ITEMS[@]}"; do
+  for k in "${PLAN_ITEMS[@]}"; do
     n=$((n + 1))
     _prompt_item_line "$n" "$k"
   done
@@ -319,14 +246,15 @@ _prompt_items() {
         k="${_PR_LINE#??}"
         k="${k#"${k%%[![:space:]]*}"}"
         if _prompt_number "$k" "$n"; then
-          _prompt_details "${_PR_ITEMS[_PR_N - 1]}"
+          echo ""
+          plan_item_details "${PLAN_ITEMS[_PR_N - 1]}"
           _PR_NEXT=items
           return 0
         fi
         ;;
       *)
         if _prompt_number "$_PR_LINE" "$n"; then
-          _prompt_item "${_PR_ITEMS[_PR_N - 1]}" || return 1
+          _prompt_item "${PLAN_ITEMS[_PR_N - 1]}" || return 1
           _PR_NEXT=items
           return 0
         fi
@@ -337,14 +265,11 @@ _prompt_items() {
 }
 
 _prompt_review() {
-  local build=0 id labels=""
+  local build=0
   if plan_peruser_changes; then
-    for id in $PLAN_PERUSER_IDS; do
-      _model_i "$id"
-      labels="${labels:+$labels, }${CAT_LABEL[_MI]}"
-    done
+    plan_peruser_text
     echo ""
-    printf 'Per-user items changed: %s. The team record holds the team'"'"'s choice; yours can differ.\n' "$labels"
+    printf '%s\n' "$PLAN_PERUSER_TEXT"
     echo "Save the per-user changes for: [y]ou only  [t]he team"
     while :; do
       _prompt_read || return 1
@@ -361,12 +286,9 @@ _prompt_review() {
   else
     plan_for_team 0
   fi
-  PLAN_BUILD_REQUESTED=0
-  if ! plan_build; then
+  if ! plan_review_build; then
     printf '  %s\n' "$PLAN_ERROR"
-    case "$PLAN_ERROR" in
-      *--for-team*) echo "  (here: answer t, the team, when the review asks whose the per-user changes are)" ;;
-    esac
+    [ "$PLAN_NEEDS_TEAM" = 0 ] || echo "  (here: answer t, the team, when the review asks whose the per-user changes are)"
     _PR_NEXT=summary
     return 0
   fi
@@ -404,15 +326,11 @@ _prompt_review() {
 }
 
 # _prompt_confirm_build: "This downloads <what>. Continue? [y/N]": y builds,
-# n or an empty answer writes only.
-# shellcheck disable=SC2034  # PLAN_BUILD_REQUESTED is lib-plan.sh's input
+# n or an empty answer writes only (plan_build_question).
 _prompt_confirm_build() {
-  PLAN_BUILD_REQUESTED=1
-  plan_build || true
-  plan_download_text || PLAN_DOWNLOAD="doc-search's Python packages and models"
-  PLAN_BUILD_REQUESTED=0
+  plan_build_question
   while :; do
-    _prompt_read "This downloads $PLAN_DOWNLOAD. Continue? [y/N] " || return 1
+    _prompt_read "$PLAN_BUILD_QUESTION " || return 1
     case "$_PR_LINE" in
       y | Y | yes | YES | Yes) _PR_NEXT=build ;;
       "" | n | N | no | NO | No) _PR_NEXT="write" ;;
