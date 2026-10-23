@@ -7206,6 +7206,473 @@ test_git_pre_commit_scopes_added_entries
 test_advice_setting_git_hooks
 test_advice_setting_claude_hooks
 
+# --- setup: the catalog, the model, the probe, --list (#51) -------------------
+#
+# setup runs as a user runs it: through the dispatcher, shimmed, so that it and
+# every sub-script it starts with "$BASH" run under $BASH_BIN.
+SETUP="$(bash_bin_shim "$SCRIPT_DIR/doc-superpowers")"
+SETUP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# run_setup [VAR=value ...] -- <args...>: run `doc-superpowers setup <args>`
+# from the cwd, with PATH="$REAL_PATH" (a VAR=value pair adds to or overrides
+# the environment) and stdin from $RUN_STDIN. Sets RUN_RC, RUN_OUT (stdout) and
+# RUN_ERR (stderr), like run_hooked.
+run_setup() {
+  local errf envs=()
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    envs+=("$1")
+    shift
+  done
+  [ "$#" -gt 0 ] && shift
+  errf=$(harness_mktemp setup.err)
+  RUN_RC=0
+  RUN_OUT=$(env PATH="$REAL_PATH" ${envs[@]+"${envs[@]}"} "$SETUP" setup "$@" <"$RUN_STDIN" 2>"$errf") || RUN_RC=$?
+  RUN_ERR=$(cat "$errf")
+  rm -f "$errf"
+}
+
+# The value --list gave <id> in $RUN_OUT (the text after "<id>=" in field 1).
+list_val() {
+  awk -F'\t' -v id="$1" 'index($1, id "=") == 1 { print substr($1, length(id) + 2); exit }' <<<"$RUN_OUT"
+}
+
+# Field <n> (1-based, tab-separated) of <id>'s --list line in $RUN_OUT.
+list_field() {
+  awk -F'\t' -v id="$1" -v n="$2" 'index($1, id "=") == 1 { print $n; exit }' <<<"$RUN_OUT"
+}
+
+# Every path under the fixture ($TEST_DIR: the work tree, .git minus its index,
+# HOME and XDG_CONFIG_HOME), each file with its hash, each link with its
+# target: equal before and after means nothing was written.
+setup_snapshot() {
+  local f
+  find "$TEST_DIR" -path "$TEST_DIR/.git/index" -prune -o -print | LC_ALL=C sort | while IFS= read -r f; do
+    if [ -L "$f" ]; then
+      printf 'L %s -> %s\n' "$f" "$(readlink "$f")"
+    elif [ -f "$f" ]; then
+      printf 'F %s %s\n' "$f" "$(hash_file "$f")"
+    else
+      printf 'D %s\n' "$f"
+    fi
+  done
+}
+
+# setup_lib <snippet>: run <snippet> under $BASH_BIN (set -euo pipefail, cwd
+# the fixture) with setup's libraries sourced and the catalog loaded, as
+# setup.sh does. Sets SL_RC and SL_OUT (stdout and stderr).
+setup_lib() {
+  SL_RC=0
+  # shellcheck disable=SC2016  # the snippet runs in the child bash
+  SL_OUT=$(PATH="$REAL_PATH" "$BASH_BIN" -c 'set -euo pipefail
+    ROOT="$1"
+    source "$ROOT/scripts/setup/lib-model.sh"
+    source "$ROOT/scripts/setup/lib-probe.sh"
+    model_load_catalog "$ROOT/scripts/setup/catalog.json"
+    eval "$2"' _ "$SETUP_ROOT" "$1" 2>&1) || SL_RC=$?
+}
+
+test_setup_catalog() {
+  echo "test: #51 setup's catalog: the 15 items of the shared table, in order, with their groups, kinds, options, defaults, scopes and per-user flags; ci.workflows is install.sh's 9 workflows in its order; every item says its scope, whether it blocks a commit and whether it reaches the network, and how to undo it"
+  local cat="$SETUP_ROOT/scripts/setup/catalog.json" got want wf_help id
+  assert_true "catalog.json is one JSON object" jq -e 'type == "object"' "$cat"
+  got=$(jq -r '[.items[].id] | join(" ")' "$cat" 2>/dev/null || true)
+  assert_eq "harness search search.model search.cache git claude ci.workflows ci.base_branch ci.cron ci.strict ledger ledger.git ledger.claude claims bin" \
+    "$got" "the 15 ids, in the shared table's order"
+  got=$(jq -r '.groups | join("|")' "$cat" 2>/dev/null || true)
+  assert_eq "Harness|doc-search|Git hooks|Claude hooks|CI workflows|Work ledger|Spec claims|Terminal command" "$got" "the 8 groups, in order"
+  got=$(jq -r '.items[] | [.id, .group, .kind, .default, .scope, (.per_user | tostring), (.requires // "-")] | join(" | ")' "$cat" 2>/dev/null || true)
+  want="harness | Harness | multi | claude-code | team | false | -
+search | doc-search | toggle | off | team | false | -
+search.model | doc-search | choice | static | team | false | search=on
+search.cache | doc-search | value | host | local | false | search=on
+git | Git hooks | choice | hooks | mixed | true | -
+claude | Claude hooks | toggle | on | local | true | -
+ci.workflows | CI workflows | multi | none | team | false | -
+ci.base_branch | CI workflows | value | main | team | false | ci.workflows=doc-freshness-pr,doc-freshness-schedule
+ci.cron | CI workflows | value | 0 9 * * 1 | team | false | ci.workflows=doc-freshness-pr,doc-freshness-schedule
+ci.strict | CI workflows | toggle | off | team | false | ci.workflows=doc-freshness-pr,doc-freshness-schedule
+ledger | Work ledger | toggle | off | team | false | -
+ledger.git | Work ledger | toggle | off | local | true | ledger=on
+ledger.claude | Work ledger | toggle | off | local | true | ledger=on
+claims | Spec claims | toggle | off | team | false | -
+bin | Terminal command | toggle | off | outside | false | -"
+  assert_eq "$want" "$got" "id | group | kind | default | scope | per_user | requires, per item"
+  got=$(jq -r '.items[] | select(.kind != "value") | "\(.id): \(.options | join(","))"' "$cat" 2>/dev/null || true)
+  wf_help=$(PATH="$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/install.sh" help \
+    | awk '/^Workflows \(--workflows= names\):/ { f = 1; next } f && /^    [a-z]/ { printf "%s%s", s, $1; s = "," }')
+  want="harness: claude-code,codex,cursor,opencode,gemini
+search: on,off
+search.model: static,gte
+git: hooks,merge-driver,off
+claude: on,off
+ci.workflows: $wf_help
+ci.strict: on,off
+ledger: on,off
+ledger.git: on,off
+ledger.claude: on,off
+claims: on,off
+bin: on,off"
+  assert_eq "$want" "$got" "the options of every toggle, choice and multi (ci.workflows: install.sh help's list)"
+  assert_eq "9" "$(tr ',' '\n' <<<"$wf_help" | grep -c .)" "install.sh lists 9 workflows"
+  for id in $(jq -r '.items[].id' "$cat" 2>/dev/null); do
+    got=$(jq -r --arg id "$id" '.items[] | select(.id == $id) | .details' "$cat")
+    case "$(jq -r --arg id "$id" '.items[] | select(.id == $id) | .scope' "$cat")" in
+      team) assert_contains "$got" "committed for the team" "$id: details say its scope" ;;
+      local) assert_contains "$got" "local to you" "$id: details say its scope" ;;
+      mixed)
+        assert_contains "$got" "committed for the team" "$id: details say its team part"
+        assert_contains "$got" "local to you" "$id: details say its local part"
+        ;;
+      outside) assert_contains "$got" "outside the repository" "$id: details say its scope" ;;
+    esac
+    assert_true "$id: details say whether it can block a commit" grep -qiE 'block' <<<"$got"
+    assert_true "$id: details say whether it can reach the network" grep -qiE 'network' <<<"$got"
+    got=$(jq -r --arg id "$id" '.items[] | select(.id == $id) | .undo' "$cat")
+    assert_true "$id: undo is a command ($got)" grep -qE '^(doc-superpowers |git rm )' <<<"$got"
+    got=$(jq -r --arg id "$id" '.items[] | select(.id == $id) | .label' "$cat")
+    assert_eq "$got" "$(printf '%s' "$got" | tr -d '\t\n')" "$id: a label without a tab or a newline"
+    assert_true "$id: a label" test -n "$got"
+  done
+  got=$(jq -r '[.items[] | select(.id == "ci.workflows") | .option_details | keys_unsorted[]] | join(",")' "$cat" 2>/dev/null || true)
+  assert_eq "$wf_help" "$got" "ci.workflows: a consent row per workflow, in order"
+  got=$(jq -r '.items[] | select(.id == "ci.workflows") | .option_details["doc-review-pr"]' "$cat" 2>/dev/null || true)
+  assert_contains "$got" "pull-requests + issues: write" "doc-review-pr's row: its permissions (references/hooks.md, Consent before --ci)"
+  got=$(jq -r '.items[] | select(.id == "harness") | .details' "$cat" 2>/dev/null || true)
+  assert_contains "$got" "claude-code stays on while doc-search is on" "harness: the Claude Code lock is explained"
+  assert_eq "doc-superpowers hooks uninstall --claude" "$(jq -r '.items[] | select(.id == "claude") | .undo' "$cat")" "claude: the exact undo command"
+}
+
+test_setup_model() {
+  echo "test: #51 the model: the catalog in bash 3.2 arrays; model_set validates, normalises a CSV to catalog order, applies requires (a child turns its parent on, a parent turned off resets its children), keeps claude-code while doc-search is on, and refuses a disabled item"
+  setup
+  setup_lib '
+    echo "n=$CAT_N groups=${#GROUPS[@]}:${GROUPS[0]}:${GROUPS[7]}"
+    echo "lens=${#CAT_ID[@]} ${#CAT_GROUP[@]} ${#CAT_KIND[@]} ${#CAT_OPTIONS[@]} ${#CAT_DEFAULT[@]} ${#CAT_SCOPE[@]} ${#CAT_PERUSER[@]} ${#CAT_LABEL[@]} ${#CAT_DETAILS[@]} ${#CAT_UNDO[@]} ${#CAT_WRITES[@]} ${#CAT_REQUIRES[@]} ${#DISABLED[@]} ${#HINT[@]}"
+    echo "git: ${CAT_KIND[4]} ${CAT_OPTIONS[4]} ${CAT_SCOPE[4]} ${CAT_PERUSER[4]}"
+    case "${CAT_DETAILS[6]}" in *"
+doc-review-pr: "*) echo "ci details: one line per workflow" ;; esac
+    probe_run
+    model_base_init
+    echo "base: $(model_get git) $(model_get harness) $(model_get search)"
+    model_changed search && echo "changed early" || echo "unchanged: search"
+    model_set search.model gte; echo "a: $(model_get search)/$(model_get search.model)"
+    model_changed search && echo "changed: search"
+    model_set search off; echo "b: $(model_get search)/$(model_get search.model)"
+    model_set harness "gemini, codex,claude-code,codex"; echo "c: $(model_get harness)"
+    model_set harness ""; echo "d: $(model_get harness)"
+    model_set search on; echo "e: $(model_get harness)"
+    model_set harness codex || echo "f: refused: $MODEL_ERROR"
+    echo "g: $(model_get harness)"
+    model_set harness codex,claude-code; echo "g2: $(model_get harness)"
+    model_set ci.cron "0 1 * * *"; echo "h: $(model_get ci.workflows) / $(model_get ci.cron)"
+    model_set ci.workflows none; echo "i: $(model_get ci.cron)"
+    model_set ledger.git off; model_set ci.strict off; echo "k0: $(model_get ledger) $(model_get ci.workflows)"
+    model_set ci.workflows doc-review-pr,doc-freshness-pr; echo "p: $(model_get ci.workflows)"
+    model_set ledger.claude on; echo "k: $(model_get ledger)/$(model_get ledger.claude)"
+    model_set git bogus || echo "l: $MODEL_ERROR"
+    model_set ci.base_branch "two words" || echo "l2: $MODEL_ERROR"
+    model_set search.cache /abs/cache; echo "l3: $(model_get search.cache)"
+    model_idx nosuch || echo "m: no index"
+    echo "n: $(model_idx harness) $(model_idx bin)"
+    DISABLED[$(model_idx claims)]="a test reason"
+    model_set claims on || echo "o: $MODEL_ERROR"
+    model_set claims off && echo "o2: off is not forcing it"'
+  assert_eq "0" "$SL_RC" "the snippet ran (output: $(head -c 400 <<<"$SL_OUT"))"
+  assert_contains "$SL_OUT" "n=15 groups=8:Harness:Terminal command" "CAT_N = 15; GROUPS in order"
+  assert_contains "$SL_OUT" "lens=15 15 15 15 15 15 15 15 15 15 15 15 15 15" "every CAT_* array, DISABLED and HINT hold CAT_N entries"
+  assert_contains "$SL_OUT" "git: choice hooks,merge-driver,off mixed 1" "git: kind, options CSV, scope, per-user"
+  assert_contains "$SL_OUT" "ci details: one line per workflow" "ci.workflows' details carry its consent rows"
+  assert_contains "$SL_OUT" "base: hooks claude-code off" "the base of a fresh repository: the defaults"
+  assert_contains "$SL_OUT" "unchanged: search" "model_changed: not changed before a set"
+  assert_contains "$SL_OUT" "a: on/gte" "search.model=gte turns search on (requires)"
+  assert_contains "$SL_OUT" "changed: search" "model_changed: SEL differs from BASE"
+  assert_contains "$SL_OUT" "b: off/static" "search=off resets search.model to its default"
+  assert_contains "$SL_OUT" "c: claude-code,codex,gemini" "a CSV is trimmed, de-duplicated and put in catalog order"
+  assert_contains "$SL_OUT" "d: none" "an empty CSV is none"
+  assert_contains "$SL_OUT" "e: claude-code" "search=on puts claude-code in the harnesses"
+  assert_contains "$SL_OUT" "f: refused: " "a harness set without claude-code while search is on is refused"
+  assert_contains "$SL_OUT" "install --search" "…and MODEL_ERROR says why"
+  assert_contains "$SL_OUT" "g: claude-code" "…and the selection is unchanged"
+  assert_contains "$SL_OUT" "g2: claude-code,codex" "with claude-code kept it is accepted"
+  assert_contains "$SL_OUT" "h: doc-freshness-pr,doc-freshness-schedule / 0 1 * * *" "ci.cron turns CI on, with install.sh's default workflows"
+  assert_contains "$SL_OUT" "i: 0 9 * * 1" "ci.workflows=none resets ci.cron"
+  assert_contains "$SL_OUT" "p: doc-freshness-pr,doc-review-pr" "ci.workflows in catalog order"
+  assert_contains "$SL_OUT" "k0: off none" "a child set off (ledger.git=off, ci.strict=off) leaves its parent off"
+  assert_contains "$SL_OUT" "k: on/on" "ledger.claude=on turns ledger on"
+  assert_true "git=bogus is refused, naming the item and the value" grep -qE '^l: .*git.*bogus' <<<"$SL_OUT"
+  assert_true "ci.base_branch='two words' is refused" grep -qE '^l2: .*ci\.base_branch' <<<"$SL_OUT"
+  assert_contains "$SL_OUT" "l3: /abs/cache" "search.cache takes an absolute path"
+  assert_contains "$SL_OUT" "m: no index" "model_idx returns 1 for an unknown id"
+  assert_contains "$SL_OUT" "n: 0 14" "model_idx: harness 0, bin 14"
+  assert_contains "$SL_OUT" "o: claims: a test reason" "a disabled item is refused with its reason"
+  assert_contains "$SL_OUT" "o2: off is not forcing it" "…but setting it off is not forcing it"
+  teardown
+}
+
+test_setup_list_defaults() {
+  echo "test: #51 setup --list in a fresh repository: the fixed defaults (merge driver + 5 hooks, 3 Claude hooks, claude-code; nothing else), one line per item (<id>=<value>, scope, label, options, disabled reason), exit 0, nothing written"
+  setup
+  local before after kv
+  before=$(setup_snapshot)
+  run_setup -- --list
+  assert_eq "0" "$RUN_RC" "exit 0 (stderr: $RUN_ERR)"
+  assert_eq "" "$RUN_ERR" "nothing on stderr"
+  for kv in git=hooks claude=on harness=claude-code search=off ci.workflows=none ledger=off claims=off bin=off \
+    search.model=static search.cache=host ci.base_branch=main "ci.cron=0 9 * * 1" ci.strict=off ledger.git=off ledger.claude=off; do
+    assert_eq "${kv#*=}" "$(list_val "${kv%%=*}")" "--list: $kv"
+  done
+  assert_eq "15" "$(grep -c . <<<"$RUN_OUT")" "one line per item"
+  assert_eq "" "$(awk -F'\t' 'NF != 5' <<<"$RUN_OUT")" "every line has 5 tab-separated fields"
+  assert_eq "mixed|hooks,merge-driver,off|" "$(list_field git 2)|$(list_field git 4)|$(list_field git 5)" "git: scope, options, no disabled reason"
+  assert_eq "team|claude-code,codex,cursor,opencode,gemini" "$(list_field harness 2)|$(list_field harness 4)" "harness: scope, options"
+  assert_eq "outside" "$(list_field bin 2)" "bin: outside the repository"
+  assert_eq "local" "$(list_field search.cache 2)" "search.cache: local"
+  assert_true "harness has a label" test -n "$(list_field harness 3)"
+  assert_eq "" "$(git status --porcelain)" "git status --porcelain is empty"
+  after=$(setup_snapshot)
+  assert_eq "$before" "$after" "no file under the work tree, .git or HOME changed"
+  teardown
+}
+
+test_setup_list_installed_union() {
+  echo "test: #51 with no record, the base is the defaults plus what is already installed (a default run must never remove anything)"
+  setup
+  inst install --ci
+  assert_eq "0" "$IRC" "install --ci (output: $IOUT)"
+  run_setup -- --list
+  assert_eq "0" "$RUN_RC" "exit 0 (stderr: $RUN_ERR)"
+  assert_eq "doc-freshness-pr,doc-freshness-schedule" "$(list_val ci.workflows)" "the installed workflows are ticked"
+  assert_eq "hooks|on|claude-code" "$(list_val git)|$(list_val claude)|$(list_val harness)" "the defaults stay ticked"
+  inst install --git --merge-driver-only
+  run_setup -- --list
+  assert_eq "hooks" "$(list_val git)" "merge driver installed: git stays hooks (hooks includes the driver)"
+  inst install --ci --ci-strict --cron '0 3 * * 2' --base-branch develop
+  run_setup -- --list
+  assert_eq "on|0 3 * * 2|develop" "$(list_val ci.strict)|$(list_val ci.cron)|$(list_val ci.base_branch)" "the recorded CI choices"
+  mkdir -p docs/search docs/ledger docs/spec-claims
+  echo '{"docs":{"model":"transformer:gte-modernbert-base"}}' > docs/search/config.json
+  echo '{}' > docs/ledger/config.json
+  run_setup -- --list
+  assert_eq "on|gte|on|on" "$(list_val search)|$(list_val search.model)|$(list_val ledger)|$(list_val claims)" \
+    "the switches on disk: docs/search/config.json (and its model), docs/ledger/config.json, docs/spec-claims/"
+  teardown
+}
+
+test_setup_list_record_base() {
+  echo "test: #51 with a team record, the base is the record (team part, then this user's local overrides), not defaults plus installed"
+  setup
+  inst install --claude
+  mkdir -p .claude/doc-superpowers
+  printf '%s\n' '{"schema_version":2,"setup":{"format":1,"harnesses":["codex","claude-code"],"git":"merge-driver","claude":false,"search":{"model":"transformer:gte-modernbert-base"},"ledger":{"git":true,"claude":false},"claims":true}}' \
+    > .claude/doc-superpowers/installed.json
+  run_setup -- --list
+  assert_eq "0" "$RUN_RC" "exit 0 (stderr: $RUN_ERR)"
+  assert_eq "claude-code,codex|merge-driver|off|on|gte|host|on|on|off|on" \
+    "$(list_val harness)|$(list_val git)|$(list_val claude)|$(list_val search)|$(list_val search.model)|$(list_val search.cache)|$(list_val ledger)|$(list_val ledger.git)|$(list_val ledger.claude)|$(list_val claims)" \
+    "the record's values (claude=off although the Claude tier is installed)"
+  printf '%s\n' '{"format":1,"overrides":{"claude":true,"git":"hooks","ledger.claude":true},"search":{"cache":"/abs/my cache"}}' \
+    > .claude/doc-superpowers/installed.local.json
+  run_setup -- --list
+  assert_eq "on|hooks|on|/abs/my cache" "$(list_val claude)|$(list_val git)|$(list_val ledger.claude)|$(list_val search.cache)" \
+    "the local overrides win, and the local cache path"
+  printf '%s\n' '{"schema_version":2,"setup":{"format":1,"harnesses":["codex"],"git":"hooks","claude":true,"search":{"model":"static"},"ledger":null,"claims":false}}' \
+    > .claude/doc-superpowers/installed.json
+  run_setup -- --list
+  assert_eq "claude-code,codex" "$(list_val harness)" "a record with doc-search on and no claude-code: the base keeps claude-code (install --search registers it)"
+  teardown
+}
+
+test_setup_set_validation() {
+  echo "test: #51 setup --set: values checked against the item's kind and options (exit 3 naming the item and the value), requires applied; flags of later tasks exit 3"
+  setup
+  local spec f
+  run_setup -- --list --set search.model=gte
+  assert_eq "0" "$RUN_RC" "--set search.model=gte: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "on|gte" "$(list_val search)|$(list_val search.model)" "search.model=gte turns search on"
+  run_setup -- --list --set=harness=gemini,claude-code --set git=merge-driver
+  assert_eq "claude-code,gemini|merge-driver" "$(list_val harness)|$(list_val git)" "--set=<id>=<value>, repeatable; a CSV in catalog order"
+  for spec in "nosuch=1" "git=bogus" "ci.cron=1 2" "search.cache=relative/path" "ci.base_branch=a..b" "search=maybe" "ci.workflows=doc-nosuch"; do
+    run_setup -- --list --set "$spec"
+    assert_eq "3" "$RUN_RC" "--set '$spec': exit 3"
+    assert_contains "$RUN_ERR" "${spec%%=*}" "--set '$spec': stderr names the item"
+    assert_contains "$RUN_ERR" "${spec#*=}" "--set '$spec': stderr names the value"
+    assert_eq "" "$RUN_OUT" "--set '$spec': nothing on stdout"
+  done
+  run_setup -- --list --set novalue
+  assert_eq "3" "$RUN_RC" "--set without = : exit 3"
+  run_setup -- --list --set
+  assert_eq "3" "$RUN_RC" "--set without an argument: exit 3"
+  run_setup -- --list --bogus
+  assert_eq "3" "$RUN_RC" "an unknown flag: exit 3"
+  assert_contains "$RUN_ERR" "--bogus" "…named"
+  run_setup -- --list --set search=on --set harness=codex
+  assert_eq "1" "$RUN_RC" "harness without claude-code while doc-search is on: refused (exit 1)"
+  assert_contains "$RUN_ERR" "claude-code" "…saying why"
+  for f in --dry-run --yes --apply --build --for-team --link-bin --no-link-bin --plain; do
+    run_setup -- "$f"
+    assert_eq "3" "$RUN_RC" "$f: exit 3 until its task"
+    assert_contains "$RUN_ERR" "setup: $f: not implemented yet" "$f: says so"
+  done
+  run_setup --
+  assert_eq "3" "$RUN_RC" "no flag (the interactive UI): exit 3 until its task"
+  assert_contains "$RUN_ERR" "not implemented yet" "…says so"
+  teardown
+}
+
+test_setup_outside_repo() {
+  echo "test: #51 setup outside a git work tree exits 1 with one line"
+  local d
+  d=$(harness_mktemp_d norepo)
+  cd "$d"
+  run_setup GIT_CEILING_DIRECTORIES="$SUITE_TMP" -- --list
+  assert_eq "1" "$RUN_RC" "exit 1"
+  assert_contains "$RUN_ERR" "not a git repository" "stderr says so"
+  assert_eq "1" "$(grep -c . <<<"$RUN_ERR")" "one line"
+  assert_eq "" "$RUN_OUT" "nothing on stdout"
+  assert_eq "" "$(ls -A "$d")" "nothing written"
+  cd "$SUITE_TMP"
+}
+
+test_setup_subdir() {
+  echo "test: #51 setup acts on the repository top from a subdirectory, and on a linked worktree's own top"
+  setup
+  local top sub wt
+  inst install --ci
+  run_setup -- --list
+  top="$RUN_OUT"
+  cd src
+  run_setup -- --list
+  sub="$RUN_OUT"
+  cd "$TEST_DIR"
+  assert_eq "0" "$RUN_RC" "from src/: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "$top" "$sub" "from src/, --list is the top's"
+  wt="$(harness_mktemp_d wt)/tree"
+  git worktree add -q -b wt-branch "$wt"
+  mkdir -p "$wt/docs/search"
+  echo '{}' > "$wt/docs/search/config.json"
+  cd "$wt/docs"
+  run_setup -- --list
+  assert_eq "on" "$(list_val search)" "in the linked worktree: its own docs/search/config.json"
+  cd "$TEST_DIR"
+  run_setup -- --list
+  assert_eq "off" "$(list_val search)" "in the main worktree: not that one"
+  git worktree remove --force "$wt"
+  teardown
+}
+
+test_setup_refuses_bad_record() {
+  echo "test: #51 a record setup cannot use (refused by state.sh, a .setup it cannot read, a local record that is not JSON) makes setup refuse with the reason (exit 1), writing nothing"
+  setup
+  local before rec=.claude/doc-superpowers/installed.json
+  mkdir -p .claude/doc-superpowers
+  echo '{"schema_version":3}' > "$rec"
+  before=$(setup_snapshot)
+  run_setup -- --list
+  assert_eq "1" "$RUN_RC" "schema_version 3: exit 1"
+  assert_contains "$RUN_ERR" "newer doc-superpowers installer" "…with state.sh's reason"
+  assert_contains "$RUN_ERR" "$rec" "…naming the file"
+  assert_eq "" "$RUN_OUT" "…nothing on stdout"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
+  echo 'not json {' > "$rec"
+  run_setup -- --list
+  assert_eq "1" "$RUN_RC" "not JSON: exit 1"
+  echo '{"schema_version":2,"setup":{"format":2}}' > "$rec"
+  run_setup -- --list
+  assert_eq "1" "$RUN_RC" ".setup.format 2: exit 1"
+  assert_contains "$RUN_ERR" "newer" "…a newer setup wrote it"
+  echo '{"schema_version":2,"setup":"yes"}' > "$rec"
+  run_setup -- --list
+  assert_eq "1" "$RUN_RC" ".setup not an object: exit 1"
+  echo '{"schema_version":2,"setup":{"format":1,"git":"bogus"}}' > "$rec"
+  run_setup -- --list
+  assert_eq "1" "$RUN_RC" ".setup.git bogus: exit 1"
+  assert_contains "$RUN_ERR" "bogus" "…naming the value"
+  rm -f "$rec"
+  echo 'nope' > .claude/doc-superpowers/installed.local.json
+  run_setup -- --list
+  assert_eq "1" "$RUN_RC" "a local record that is not JSON: exit 1"
+  assert_contains "$RUN_ERR" "installed.local.json" "…naming it"
+  echo '{"format":1,"search":{"cache":"relative"}}' > .claude/doc-superpowers/installed.local.json
+  run_setup -- --list
+  assert_eq "1" "$RUN_RC" "a local cache path that is not absolute: exit 1"
+  teardown
+}
+
+test_setup_probe_states() {
+  echo "test: #51 the probe: probe_installed (the value in the item's space) and probe_state (current | outdated | absent), from install.sh status --json and the files on disk"
+  setup
+  local ids="harness search search.model git claude ci.workflows ci.strict ledger ledger.git ledger.claude claims bin"
+  local snip='probe_run; echo "top=$TOP team=[$PROBE_TEAM] local=[$PROBE_LOCAL] err=[$PROBE_RECORD_ERROR]"
+    for id in '"$ids"'; do echo "$id=$(probe_installed "$id")/$(probe_state "$id")"; done'
+  setup_lib "$snip"
+  assert_eq "0" "$SL_RC" "probe ran (output: $(head -c 300 <<<"$SL_OUT"))"
+  assert_contains "$SL_OUT" "top=$(pwd -P) team=[] local=[] err=[]" "TOP is the repository top; no record"
+  assert_contains "$SL_OUT" "harness=none/absent" "fresh: harness"
+  assert_contains "$SL_OUT" "search=off/absent" "fresh: search"
+  assert_contains "$SL_OUT" "git=off/absent" "fresh: git"
+  assert_contains "$SL_OUT" "claude=off/absent" "fresh: claude"
+  assert_contains "$SL_OUT" "ci.workflows=none/absent" "fresh: ci.workflows"
+  assert_contains "$SL_OUT" "ledger=off/absent" "fresh: ledger"
+  assert_contains "$SL_OUT" "claims=off/absent" "fresh: claims"
+  assert_contains "$SL_OUT" "bin=off/absent" "fresh: bin"
+  inst install --git --merge-driver-only
+  setup_lib "$snip"
+  assert_contains "$SL_OUT" "git=merge-driver/current" "the merge driver alone: merge-driver, current"
+  inst install --git
+  setup_lib "$snip"
+  assert_contains "$SL_OUT" "git=hooks/current" "the 5 hooks and the driver: hooks, current"
+  echo "# edited" >> .git/hooks/post-merge
+  setup_lib "$snip"
+  assert_contains "$SL_OUT" "git=hooks/outdated" "an edited hook of ours: hooks, outdated"
+  inst install --claude
+  setup_lib "$snip"
+  assert_contains "$SL_OUT" "claude=on/current" "the Claude tier: on, current"
+  inst install --ci --ci-strict
+  setup_lib "$snip"
+  assert_contains "$SL_OUT" "ci.workflows=doc-freshness-pr,doc-freshness-schedule/current" "CI: the installed workflows"
+  assert_contains "$SL_OUT" "ci.strict=on/current" "CI: the recorded strict choice"
+  mkdir -p docs/search
+  echo '{}' > docs/search/config.json
+  setup_lib "$snip"
+  assert_contains "$SL_OUT" "search=on/outdated" "the config without the launcher and entry: on, outdated"
+  assert_contains "$SL_OUT" "search.model=static/" "an empty config: the static model"
+  inst install --search
+  setup_lib "$snip"
+  assert_contains "$SL_OUT" "search=on/current" "install --search: on, current"
+  assert_contains "$SL_OUT" "harness=claude-code/current" "…and the Claude Code entry is present"
+  mkdir -p docs/ledger docs/spec-claims
+  echo '{}' > docs/ledger/config.json
+  setup_lib "$snip"
+  assert_contains "$SL_OUT" "ledger=on/current" "docs/ledger/config.json: ledger on"
+  assert_contains "$SL_OUT" "ledger.git=off/absent" "…its git set not installed"
+  assert_contains "$SL_OUT" "claims=on/current" "docs/spec-claims/: claims on"
+  inst install --ledger --ledger-claude
+  setup_lib "$snip"
+  assert_contains "$SL_OUT" "ledger.git=on/current" "install --ledger: on, current"
+  assert_contains "$SL_OUT" "ledger.claude=on/current" "install --ledger-claude: on, current"
+  mkdir -p "$HOME/.local/bin"
+  printf '#!/bin/sh\n# doc-superpowers terminal shim v1\n' > "$HOME/.local/bin/doc-superpowers"
+  setup_lib "$snip"
+  assert_contains "$SL_OUT" "bin=on/current" "a shim with the marker on line 2: on"
+  printf '#!/bin/sh\necho mine\n' > "$HOME/.local/bin/doc-superpowers"
+  setup_lib "$snip"
+  assert_contains "$SL_OUT" "bin=off/absent" "a file of the user's there: not ours"
+  teardown
+}
+
+echo ""
+echo "=== setup: model, probe, --list (#51) ==="
+test_setup_catalog
+test_setup_model
+test_setup_list_defaults
+test_setup_list_installed_union
+test_setup_list_record_base
+test_setup_set_validation
+test_setup_outside_repo
+test_setup_subdir
+test_setup_refuses_bad_record
+test_setup_probe_states
+
 test_claude_hook_contract_held() {
   echo "test: every Claude hook run above held the contract (exit 0, or 2 only under STRICT; stdout one JSON object or nothing)"
   assert_true "Claude hook runs checked: $CLAUDE_HOOK_RUNS (the suite makes over 50)" test "$CLAUDE_HOOK_RUNS" -ge 50
