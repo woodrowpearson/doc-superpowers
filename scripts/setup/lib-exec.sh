@@ -22,13 +22,26 @@
 # changed (W_TEAM, those whose content changed), or "  (nothing)". An empty
 # plan prints "nothing to do" and returns 0.
 #
-# The steps (Tasks 5-7 add the rest of lib-plan.sh's ops):
+# The steps (Tasks 6-7 add the rest of lib-plan.sh's ops):
+#   search-config <static|gte>          docs/search/config.json, setup's own
+#                                       copy of doc-search init's defaults
+#                                       (search-config.json; gte: docs.model
+#                                       set), or docs.model alone in an
+#                                       existing one; never through uv
 #   git-install <hooks|merge-driver>    install --git [--merge-driver-only]
 #   git-uninstall <hooks|merge-driver>  uninstall --git [--merge-driver-only]
 #   claude-install / claude-uninstall   install / uninstall --claude
+#   search-install / search-uninstall   install / uninstall --search (the
+#                                       config is left in place, and said so)
+#   envhook <cache|-|host> <root|->     the doc-superpowers block of the env
+#                                       hook (plan_envhook_merge), sh -n
+#                                       checked before the mv
 #   exclude-local                       setup's own block in git's info/exclude
 #   record-team                         installed.json's .setup = PLAN_TEAM_SETUP
 #   record-local                        installed.local.json = PLAN_LOCAL_RECORD
+#   build                               sh .claude/doc-superpowers/search-mcp.sh
+#                                       index, in the foreground (a download:
+#                                       planned only with --build)
 # The installer runs as "$BASH" install.sh, under the interpreter running
 # setup, with stdin from /dev/null. A file setup writes itself goes through
 # _exec_write: a temp file beside it, then mv; never through a symbolic link;
@@ -90,10 +103,12 @@ _exec_writable() {
   return 0
 }
 
-# _exec_write <path> <content>: <path> holds <content> and a newline: a temp
-# file beside it, then mv (an existing file keeps its mode, a new one is
-# 644); refused through a link; skipped when the content is the same.
-# EXEC_WROTE is 1 when it wrote.
+# _exec_write <path> <content> [check]: <path> holds <content> and a
+# newline: a temp file beside it, then mv (an existing file keeps its mode, a
+# new one is 644); refused through a link; skipped when the content is the
+# same. <check>, a function, is run on the temp file before the mv: when it
+# fails (EXEC_ERROR says why) the temp file is removed and nothing is
+# written. EXEC_WROTE is 1 when it wrote.
 # shellcheck disable=SC2034  # EXEC_WROTE is the writers' interface, read by their callers
 _exec_write() {
   local f="$1" dir mode=644 m
@@ -116,7 +131,19 @@ _exec_write() {
     echo "setup: cannot create a temp file beside $f" >&2
     return 1
   fi
-  if printf '%s\n' "$2" > "$_EXEC_TMP" && chmod "$mode" "$_EXEC_TMP" && mv -f "$_EXEC_TMP" "$f"; then
+  if ! printf '%s\n' "$2" > "$_EXEC_TMP"; then
+    rm -f "$_EXEC_TMP"
+    _EXEC_TMP=""
+    echo "setup: cannot write $f" >&2
+    return 1
+  fi
+  if [ -n "${3:-}" ] && ! "$3" "$_EXEC_TMP"; then
+    rm -f "$_EXEC_TMP"
+    _EXEC_TMP=""
+    echo "setup: $f: $EXEC_ERROR; not written" >&2
+    return 1
+  fi
+  if chmod "$mode" "$_EXEC_TMP" && mv -f "$_EXEC_TMP" "$f"; then
     _EXEC_TMP=""
     EXEC_WROTE=1
     return 0
@@ -124,6 +151,14 @@ _exec_write() {
   rm -f "$_EXEC_TMP"
   _EXEC_TMP=""
   echo "setup: cannot write $f" >&2
+  return 1
+}
+
+# _exec_sh_n <file>: <file> parses as sh (sh -n), a check for _exec_write.
+_exec_sh_n() {
+  local out
+  if out=$(sh -n "$1" 2>&1); then return 0; fi
+  EXEC_ERROR="the result does not parse as sh (sh -n: ${out%%$'\n'*})"
   return 1
 }
 
@@ -167,6 +202,28 @@ op_claude_uninstall() {
   _exec_installer uninstall --claude
 }
 
+# install --search refuses without docs/search/config.json: search-config
+# runs first.
+op_search_install() {
+  _exec_installer install --search
+}
+
+# uninstall --search removes the launcher and the .mcp.json entry; the
+# config, the team's switch, stays (setup never removes a switch).
+op_search_uninstall() {
+  _exec_installer uninstall --search || return 1
+  [ ! -f docs/search/config.json ] \
+    || echo "docs/search/config.json is left in place (git rm docs/search/config.json removes it)"
+}
+
+# build: doc-search's first index build through the committed launcher, in
+# the foreground: uv resolves and downloads first. The launcher runs the
+# plugin running setup (DOC_SUPERPOWERS_ROOT, unless already set; the env
+# hook, which the launcher sources, may still name another).
+op_build() {
+  DOC_SUPERPOWERS_ROOT="${DOC_SUPERPOWERS_ROOT:-$ROOT}" sh .claude/doc-superpowers/search-mcp.sh index </dev/null
+}
+
 # --- The files setup writes itself ------------------------------------------------
 
 # exclude-local: the local record kept out of git by setup's own block in
@@ -201,6 +258,137 @@ op_exclude_local() {
   _exec_write "$f" "$cur$sep$PLAN_EXCLUDE_BEGIN
 $PROBE_LOCAL_FILE
 $PLAN_EXCLUDE_END"
+}
+
+# search-config <static|gte>: docs/search/config.json. Absent: setup's copy
+# of doc-search init's defaults (scripts/setup/search-config.json, which
+# search/tests/test_setup_config.py keeps equal to them), docs.model set for
+# gte. Present: docs.model alone, and only when it differs; every other key
+# kept (in jq's layout). uv never runs.
+_EXEC_SEARCH_CFG="docs/search/config.json"
+opcheck_search_config() {
+  _exec_writable "$_EXEC_SEARCH_CFG" || return 1
+  if [ -e "$_EXEC_SEARCH_CFG" ] \
+    && ! jq -e 'type == "object" and ((.docs // {}) | type == "object")' "$_EXEC_SEARCH_CFG" >/dev/null 2>&1; then
+    EXEC_ERROR="$_EXEC_SEARCH_CFG is not a JSON object with a docs object: setup sets docs.model in it, and edits nothing else"
+    return 1
+  fi
+  return 0
+}
+op_search_config() {
+  local f="$_EXEC_SEARCH_CFG" m new
+  case "$1" in
+    static) m=null ;;
+    gte) m="\"$PROBE_GTE_MODEL\"" ;;
+    *)
+      echo "setup: search-config: unknown model '$1'" >&2
+      return 1
+      ;;
+  esac
+  if [ -e "$f" ] || [ -L "$f" ]; then
+    if jq -e --argjson m "$m" '.docs.model == $m' "$f" >/dev/null 2>&1; then return 0; fi
+    new=$(jq --argjson m "$m" '.docs.model = $m' "$f") || {
+      echo "setup: cannot update $f" >&2
+      return 1
+    }
+  elif [ "$1" = static ]; then
+    new=$(cat "$ROOT/scripts/setup/search-config.json") || return 1
+  else
+    new=$(jq --argjson m "$m" '.docs.model = $m' "$ROOT/scripts/setup/search-config.json") || return 1
+  fi
+  _exec_write "$f" "$new"
+}
+
+# envhook <cache|-|host> <root|->: the doc-superpowers block of the env hook
+# (plan_envhook_file) becomes plan_envhook_merge's, in place; a new block
+# goes after the file's own lines; no line left: the block goes (and the
+# file, when nothing else is in it). The user's lines outside the block are
+# kept byte for byte (a last line without a newline gets one). The result
+# must pass sh -n before the mv.
+_exec_envhook_split() {
+  # _EXEC_PRE / _EXEC_POST: the file's text ($1) before and after the block;
+  # returns 1 when there is no block, 2 when it has no end marker.
+  local cur="$1" rest nl=$'\n' b="$PLAN_ENVHOOK_BEGIN" e="$PLAN_ENVHOOK_END"
+  _EXEC_PRE="" _EXEC_POST=""
+  if [[ "$cur" == "$b$nl"* || "$cur" == "$b" ]]; then
+    rest="${cur#"$b"}"
+  elif [[ "$cur" == *"$nl$b$nl"* || "$cur" == *"$nl$b" ]]; then
+    _EXEC_PRE="${cur%%"$nl$b"*}$nl"
+    rest="${cur#*"$nl$b"}"
+  else
+    return 1
+  fi
+  # rest: "" or "\n…", the block's lines up to its end marker.
+  if [[ "$rest" == *"$nl$e$nl"* ]]; then
+    _EXEC_POST="${rest#*"$nl$e$nl"}"
+  elif [[ "$rest" == *"$nl$e" ]]; then
+    _EXEC_POST=""
+  else
+    return 2
+  fi
+  return 0
+}
+_exec_envhook_read() {
+  # _EXEC_CUR: the env hook's bytes, trailing newlines included ("" when absent).
+  _EXEC_CUR=""
+  [ -f "$1" ] || return 0
+  _EXEC_CUR=$(cat "$1" && printf x) || return 1
+  _EXEC_CUR="${_EXEC_CUR%x}"
+}
+opcheck_envhook() {
+  local f rc=0
+  f=$(plan_envhook_file)
+  _exec_writable "$f" || return 1
+  _exec_envhook_read "$f" || {
+    EXEC_ERROR="cannot read $f"
+    return 1
+  }
+  _exec_envhook_split "$_EXEC_CUR" || rc=$?
+  if [ "$rc" = 2 ]; then
+    EXEC_ERROR="$f: the doc-superpowers block has no end marker ($PLAN_ENVHOOK_END): fix it by hand"
+    return 1
+  fi
+  return 0
+}
+op_envhook() {
+  local f block new rc=0
+  f=$(plan_envhook_file)
+  _PLAN_ENVFILE="$f"
+  _exec_envhook_read "$f" || {
+    echo "setup: cannot read $f" >&2
+    return 1
+  }
+  block=$(plan_envhook_merge "$1" "$2")
+  _exec_envhook_split "$_EXEC_CUR" || rc=$?
+  case "$rc" in
+    0)
+      new="$_EXEC_PRE${block:+$block$'\n'}$_EXEC_POST"
+      ;;
+    1)
+      [ -n "$block" ] || return 0
+      new="$_EXEC_CUR"
+      case "$new" in
+        "" | *$'\n') ;;
+        *) new="$new"$'\n' ;;
+      esac
+      new="$new$block"$'\n'
+      ;;
+    *)
+      echo "setup: $f: the doc-superpowers block has no end marker ($PLAN_ENVHOOK_END)" >&2
+      return 1
+      ;;
+  esac
+  if [ -z "$new" ]; then
+    # Nothing left: the file held setup's block alone.
+    if ! _exec_writable "$f"; then
+      echo "setup: $EXEC_ERROR" >&2
+      return 1
+    fi
+    rm -f "$f"
+    return 0
+  fi
+  # _exec_write adds the last newline back.
+  _exec_write "$f" "${new%$'\n'}" _exec_sh_n
 }
 
 # record-team: installed.json's .setup becomes PLAN_TEAM_SETUP, set with jq

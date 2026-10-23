@@ -23,6 +23,10 @@
 #   PROBE_LOCAL_VALUES  the local record's overrides, as "<id>=<value>" lines
 #   PROBE_ERROR         why probe_run returned 1 (not a work tree; the
 #                       installer's status failed)
+#   HOST_NO_BUILD       why this host cannot build doc-search's indexes
+#                       ("uv not found"), or empty. It disables the build, not
+#                       the doc-search item: setup writes the config, the
+#                       launcher and the entries without uv.
 # Then, from what status --json and the files on disk say:
 #   probe_installed <id>  the installed value, in the item's value space (the
 #                         default for a value nothing records)
@@ -38,6 +42,7 @@ PROBE_GTE_MODEL="transformer:gte-modernbert-base"
 TOP=""
 PROBE_STATUS="" PROBE_TEAM="" PROBE_LOCAL="" PROBE_RECORD_ERROR="" PROBE_ERROR=""
 PROBE_TEAM_VALUES="" PROBE_LOCAL_VALUES=""
+HOST_NO_BUILD=""
 
 # The facts probe_installed and probe_state read (set by probe_run).
 _PB_GIT_HOOKS=""     # "<hook>:<state> ..." (references/hooks.md lists the states)
@@ -296,6 +301,10 @@ probe_run() {
   # The ledger's two hook sets.
   out=$(cd "$TOP" && "$BASH" "$ROOT/scripts/hooks/install.sh" status --ledger --ledger-claude </dev/null 2>/dev/null) || out=""
   _probe_ledger_parse "$out"
+
+  # The host checks: the build runs doc-search through uv.
+  HOST_NO_BUILD=""
+  command -v uv >/dev/null 2>&1 || HOST_NO_BUILD="uv not found"
   return 0
 }
 

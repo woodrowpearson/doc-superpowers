@@ -15,10 +15,13 @@
 #                       then the git add line of the team's paths that
 #                       changed, or "nothing to do". Write only: nothing
 #                       downloads
-#   --build             with --dry-run: the review includes the build
+#   --build             the download consent: with --yes, doc-search's
+#                       first index build runs last (through uv; refused
+#                       with exit 1, nothing written, when the host has no
+#                       uv); with --dry-run, the review includes it
 #   --for-team          with --dry-run: the per-user values are the team's
-#   --apply --link-bin --no-link-bin --plain, and --build or --for-team
-#                       without --dry-run: not implemented yet (exit 3)
+#   --apply --link-bin --no-link-bin --plain, --build without --dry-run or
+#   --yes, and --for-team without --dry-run: not implemented yet (exit 3)
 # --list, --dry-run and --yes are modes: one at a time.
 #
 # The layers (design §5): lib-model.sh (the catalog, the selection, --set and
@@ -88,9 +91,9 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
-# --build is the download consent of --yes and --apply (later tasks); with
-# --dry-run it shows the build in the review.
-[ "$BUILD" = 0 ] || [ "$MODE" = dry-run ] || not_yet --build
+# --build is the download consent of --yes (and of --apply, a later task's);
+# with --dry-run it shows the build in the review.
+[ "$BUILD" = 0 ] || [ "$MODE" = dry-run ] || [ "$MODE" = yes ] || not_yet --build
 # --for-team makes the per-user values the team's (the --yes flow is a later
 # task's); with --dry-run the review shows that plan.
 [ "$FOR_TEAM" = 0 ] || [ "$MODE" = dry-run ] || not_yet --for-team
@@ -135,9 +138,10 @@ if [ "$MODE" = dry-run ]; then
   exit 0
 fi
 
-# --yes: the plan's steps (Write only), then the git add line.
+# --yes: the plan's steps (Write only; with --build, the build last), then
+# the git add line.
 if [ "$MODE" = yes ]; then
-  PLAN_BUILD_REQUESTED=0
+  PLAN_BUILD_REQUESTED="$BUILD"
   PLAN_FOR_TEAM=0
   plan_build || die "$PLAN_ERROR; nothing was changed"
   _rc=0
