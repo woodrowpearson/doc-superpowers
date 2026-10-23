@@ -11,9 +11,12 @@
 #                                .gemini/settings.json
 #   harness_entry_state <h>      registered | different | absent | unreadable
 #                                (reads TOP/<file>)
-#   harness_entry_present <h>    setup's entry is there: the Codex block, or
-#                                the "doc-search" key of a JSON harness (an
-#                                unmarked Codex table is not setup's)
+#   harness_entry_present <h>    setup's entry is in place: the Codex block
+#                                (whatever it holds), or a JSON harness's
+#                                "doc-search" entry exactly as setup writes
+#                                it. Anything else that defines doc-search (an
+#                                unmarked Codex definition, a JSON entry that
+#                                differs) is the user's, not setup's
 #   harness_entry_check add|remove <h>
 #                                0, or 1 with HARNESS_ERROR: the refusals
 #                                (what a step's opcheck_ runs, before any
@@ -26,18 +29,25 @@
 # install.sh status, add and remove run install and uninstall --search.
 #
 # The JSON harnesses (Cursor, Gemini CLI, OpenCode) are merged with jq: every
-# other key stays (in jq's layout); a file that is not a JSON object, or
-# whose server table is not an object, is refused untouched. A new
-# opencode.json gets "$schema"; an existing one does not. Removal takes out
-# the entry, then the server table when it is left empty, and the file when
-# nothing but setup's own is left (and its directory, when empty).
+# other key stays (in jq's layout). Refused untouched: a file that is not a
+# JSON object (comments included), a server table that is not an object, and
+# a "doc-search" entry that setup did not write (one that differs from the
+# entry setup writes: it is the user's). A new opencode.json gets "$schema";
+# an existing one does not. Removal takes out the "doc-search" key of a
+# registered entry and nothing else: never the server table, never the file
+# or its directory, even when setup created them.
 #
 # Codex: TOML has no jq, so the entry is setup's marked block, appended after
-# the file's own lines (a missing final newline gets one first). The block is
-# replaced in place when it differs, removed exactly (every other byte stays;
-# a file left empty goes). An [mcp_servers.doc-search] table outside the
-# block is refused (TOML forbids a duplicate table), and so are markers that
-# do not form one block; nothing else of the file is read.
+# the file's own lines. The block is replaced in place when it differs and
+# removed exactly: every other byte stays, the file's own ending included (a
+# file without a final newline gets the block after one newline and no
+# newline of its own, so removal gives the original bytes back). A line
+# outside the block that defines doc-search is refused (TOML allows a
+# definition once): a [mcp_servers.doc-search] (or quoted, or a subtable)
+# header, a doc-search key (dotted keys too) under [mcp_servers], a top-level
+# mcp_servers.doc-search key, or a top-level mcp_servers = {…} inline table
+# (which no later table may extend). Markers that do not form one block are
+# refused too. Nothing else of the file is read.
 
 HARNESS_ERROR=""
 HARNESS_CODEX_BEGIN="# doc-superpowers setup:begin doc-search"
@@ -93,28 +103,80 @@ _harness_codex_block() {
     "$HARNESS_CODEX_END"
 }
 
-# _harness_codex_scan <file>: _HC_NB (blocks), _HC_UN (doc-search tables
-# outside a block) and _HC_BAD (0; 1 a second begin marker; 2 an end marker
-# with no begin; 3 a begin marker with no end).
+# _harness_codex_scan <file>: _HC_NB (blocks), _HC_UN (definitions of
+# doc-search outside a block, see the top) and _HC_BAD (0; 1 a second begin
+# marker; 2 an end marker with no begin; 3 a begin marker with no end).
+# Names are compared without spaces and quotes; the current table is the last
+# header line seen (a comment or blank line defines nothing).
 _harness_codex_scan() {
   local out
   _HC_NB=0 _HC_UN=0 _HC_BAD=0
   [ -f "$1" ] || return 0
   out=$(awk -v b="$HARNESS_CODEX_BEGIN" -v e="$HARNESS_CODEX_END" '
+    function norm(s) { gsub(/[[:space:]]/, "", s); gsub(/"/, "", s); gsub(q, "", s); return s }
+    function starts(s, p) { return index(s, p) == 1 }
+    BEGIN { q = sprintf("%c", 39); tbl = "" }
     $0 == b { if (inb || nb) bad = 1; inb = 1; nb++; next }
     $0 == e { if (!inb) { bad = 2 } else { inb = 0 }; next }
     inb { next }
-    /^[[:space:]]*\[[[:space:]]*mcp_servers[[:space:]]*\.[[:space:]]*("doc-search"|doc-search)[[:space:]]*\][[:space:]]*(#.*)?$/ { un++ }
+    /^[[:space:]]*(#|$)/ { next }
+    /^[[:space:]]*\[/ {
+      line = $0
+      sub(/^[[:space:]]*\[+/, "", line)
+      sub(/\].*$/, "", line)
+      tbl = norm(line)
+      if (tbl == "mcp_servers.doc-search" || starts(tbl, "mcp_servers.doc-search.")) un++
+      next
+    }
+    /=/ {
+      key = $0
+      sub(/=.*$/, "", key)
+      key = norm(key)
+      if (tbl == "mcp_servers" && (key == "doc-search" || starts(key, "doc-search."))) un++
+      if (tbl == "" && (key == "mcp_servers" || key == "mcp_servers.doc-search" || starts(key, "mcp_servers.doc-search."))) un++
+    }
     END { if (inb && !bad) bad = 3; print nb + 0, un + 0, bad + 0 }' "$1" 2>/dev/null) || out="0 0 3"
   read -r _HC_NB _HC_UN _HC_BAD <<<"$out"
 }
 
-# _harness_codex_why: HARNESS_ERROR for a bad scan.
+# _harness_codex_why <file>: HARNESS_ERROR for a bad scan.
 _harness_codex_why() {
   case "$_HC_BAD" in
     3) HARNESS_ERROR="$1 has setup's begin marker ($HARNESS_CODEX_BEGIN) but no end marker ($HARNESS_CODEX_END): fix it by hand" ;;
     *) HARNESS_ERROR="$1: setup's markers ($HARNESS_CODEX_BEGIN, $HARNESS_CODEX_END) do not form one block: fix it by hand" ;;
   esac
+}
+
+# _harness_codex_split <text>: the text around its one block: _HS_PRE (before
+# the begin line), _HS_POST (after the end line and its newline) and _HS_NOEOL
+# (1 when the end line is the last and has no newline). Returns 1 when it
+# finds no block. The begin line is the first line that IS the marker.
+_harness_codex_split() {
+  local cur="$1" nl=$'\n' b="$HARNESS_CODEX_BEGIN" e="$HARNESS_CODEX_END" rest tail after
+  _HS_PRE="" _HS_POST="" _HS_NOEOL=0
+  if [[ "$cur" == "$b$nl"* || "$cur" == "$b" ]]; then
+    rest="${cur#"$b"}"
+  else
+    tail="$cur"
+    while :; do
+      [[ "$tail" == *"$nl$b"* ]] || return 1
+      after="${tail#*"$nl$b"}"
+      _HS_PRE="$_HS_PRE${tail%%"$nl$b"*}$nl"
+      if [[ -z "$after" || "$after" == "$nl"* ]]; then
+        rest="$after"
+        break
+      fi
+      _HS_PRE="$_HS_PRE$b"
+      tail="$after"
+    done
+  fi
+  if [[ "$rest" == *"$nl$e$nl"* ]]; then
+    _HS_POST="${rest#*"$nl$e$nl"}"
+  elif [[ "$rest" == *"$nl$e" ]]; then
+    _HS_NOEOL=1
+  else
+    return 1
+  fi
 }
 
 # _harness_json_state <h>: _HJ_STATE (absent | registered | different |
@@ -183,8 +245,9 @@ harness_entry_state() {
   esac
 }
 
-# harness_entry_present <h>: setup's entry is in place (registered, or
-# different: edited by hand or an older one), which an untick removes.
+# harness_entry_present <h>: setup's entry is in place: the Codex block
+# (registered, or edited), or a JSON entry exactly as setup writes it. What
+# an untick removes.
 harness_entry_present() {
   local f
   case "$1" in
@@ -195,10 +258,7 @@ harness_entry_present() {
       [ "$_HC_BAD" = 0 ] && [ "$_HC_NB" = 1 ]
       ;;
     claude-code | cursor | opencode | gemini)
-      case "$(harness_entry_state "$1")" in
-        registered | different) return 0 ;;
-      esac
-      return 1
+      [ "$(harness_entry_state "$1")" = registered ]
       ;;
     *) return 1 ;;
   esac
@@ -229,7 +289,7 @@ harness_entry_check() {
       return 1
     fi
     if [ "$op" = add ] && [ "$_HC_UN" != 0 ]; then
-      HARNESS_ERROR="$f already defines [mcp_servers.doc-search] outside setup's block (TOML allows a table once, and setup edits only what it wrote): move it into a block between '$HARNESS_CODEX_BEGIN' and '$HARNESS_CODEX_END', or remove it, and run setup again"
+      HARNESS_ERROR="$f already defines [mcp_servers.doc-search] outside setup's block (or defines mcp_servers as an inline table); TOML allows it once, and setup edits only what it wrote: move it into a block between '$HARNESS_CODEX_BEGIN' and '$HARNESS_CODEX_END', or remove it, and run setup again"
       return 1
     fi
     return 0
@@ -237,6 +297,10 @@ harness_entry_check() {
   _harness_json_state "$h"
   if [ "$_HJ_STATE" = unreadable ]; then
     HARNESS_ERROR="$f $_HJ_WHY"
+    return 1
+  fi
+  if [ "$op" = add ] && [ "$_HJ_STATE" = different ]; then
+    HARNESS_ERROR="$f has a \"doc-search\" entry under \"$(_harness_key "$h")\" that is not the one setup writes (references/search.md, Other clients): setup does not replace an entry it did not write; remove it or make it match, and run setup again"
     return 1
   fi
   return 0
@@ -262,67 +326,58 @@ _harness_read() {
   _HR_CUR="${_HR_CUR%x}"
 }
 
-# _harness_delete <file>: the file, and its directory when that is left empty.
-_harness_delete() {
-  local d
-  rm -f "$1"
-  d=$(dirname "$1")
-  [ "$d" = . ] || rmdir "$d" 2>/dev/null || true
-}
-
 _harness_codex_add() {
-  local f block new cur
+  local f block new nl=$'\n'
   f=$(harness_file codex)
   block=$(_harness_codex_block)
   if [ ! -e "$f" ]; then
-    new="$block"
+    new="$block$nl"
   else
     _harness_read "$f" || {
       HARNESS_ERROR="cannot read $f"
       return 1
     }
-    cur="$_HR_CUR"
     _harness_codex_scan "$f"
     if [ "$_HC_NB" = 1 ]; then
-      new=$(HBLK="$block" awk -v b="$HARNESS_CODEX_BEGIN" -v e="$HARNESS_CODEX_END" '
-        $0 == b { if (!done) { print ENVIRON["HBLK"]; done = 1 }; skip = 1; next }
-        skip { if ($0 == e) skip = 0; next }
-        { print }' "$f" && printf x) || {
-        HARNESS_ERROR="cannot edit $f"
+      _harness_codex_split "$_HR_CUR" || {
+        HARNESS_ERROR="cannot find setup's block in $f"
         return 1
       }
-      new="${new%x}"
-      new="${new%$'\n'}"
+      if [ "$_HS_NOEOL" = 1 ]; then
+        new="$_HS_PRE$block"
+      else
+        new="$_HS_PRE$block$nl$_HS_POST"
+      fi
     else
-      case "$cur" in
-        "" | *$'\n') ;;
-        *) cur="$cur"$'\n' ;;
+      case "$_HR_CUR" in
+        "" | *"$nl") new="$_HR_CUR$block$nl" ;;
+        *) new="$_HR_CUR$nl$block" ;;
       esac
-      new="$cur$block"
     fi
   fi
-  _exec_write "$f" "$new" _harness_check_toml
+  _exec_write "$f" "$new" _harness_check_toml exact
 }
 
 _harness_codex_remove() {
-  local f new
+  local f new nl=$'\n'
   f=$(harness_file codex)
   [ -f "$f" ] || return 0
   _harness_codex_scan "$f"
   [ "$_HC_NB" = 1 ] || return 0
-  new=$(awk -v b="$HARNESS_CODEX_BEGIN" -v e="$HARNESS_CODEX_END" '
-    $0 == b { skip = 1; next }
-    skip { if ($0 == e) skip = 0; next }
-    { print }' "$f" && printf x) || {
-    HARNESS_ERROR="cannot edit $f"
+  _harness_read "$f" || {
+    HARNESS_ERROR="cannot read $f"
     return 1
   }
-  new="${new%x}"
-  if [ -z "$new" ]; then
-    _harness_delete "$f"
-    return 0
+  _harness_codex_split "$_HR_CUR" || {
+    HARNESS_ERROR="cannot find setup's block in $f"
+    return 1
+  }
+  if [ "$_HS_NOEOL" = 1 ]; then
+    new="${_HS_PRE%"$nl"}"
+  else
+    new="$_HS_PRE$_HS_POST"
   fi
-  _exec_write "$f" "${new%$'\n'}" _harness_check_toml
+  _exec_write "$f" "$new" _harness_check_toml exact
 }
 
 _harness_json_add() {
@@ -345,24 +400,17 @@ _harness_json_add() {
   _exec_write "$f" "$new" _harness_check_json
 }
 
+# The "doc-search" key of a registered entry, and nothing else.
 _harness_json_remove() {
   local h="$1" f key new
   f=$(harness_file "$h")
   key=$(_harness_key "$h")
   _harness_json_state "$h"
-  case "$_HJ_STATE" in
-    registered | different) ;;
-    *) return 0 ;;
-  esac
-  new=$(jq --arg k "$key" 'del(.[$k]["doc-search"]) | if (.[$k] | type) == "object" and (.[$k] | length) == 0 then del(.[$k]) else . end' "$f") || {
+  [ "$_HJ_STATE" = registered ] || return 0
+  new=$(jq --arg k "$key" 'del(.[$k]["doc-search"])' "$f") || {
     HARNESS_ERROR="cannot update $f"
     return 1
   }
-  # Nothing but setup's own left: the file goes.
-  if jq -e --arg s "$HARNESS_OPENCODE_SCHEMA" 'length == 0 or ($s as $u | . == {"$schema": $u})' <<<"$new" >/dev/null 2>&1; then
-    _harness_delete "$f"
-    return 0
-  fi
   _exec_write "$f" "$new" _harness_check_json
 }
 

@@ -108,21 +108,24 @@ _exec_writable() {
   return 0
 }
 
-# _exec_write <path> <content> [check]: <path> holds <content> and a
-# newline: a temp file beside it, then mv (an existing file keeps its mode, a
+# _exec_write <path> <content> [check] [exact]: <path> holds <content> and a
+# newline (with "exact" as the fourth argument, <content> alone: its own bytes,
+# a missing final newline included): a temp file beside it, then mv (an existing file keeps its mode, a
 # new one is 644); refused through a link; skipped when the content is the
 # same. <check>, a function, is run on the temp file before the mv: when it
 # fails (EXEC_ERROR says why) the temp file is removed and nothing is
 # written. EXEC_WROTE is 1 when it wrote.
 # shellcheck disable=SC2034  # EXEC_WROTE is the writers' interface, read by their callers
 _exec_write() {
-  local f="$1" dir mode=644 m
+  local f="$1" dir mode=644 m nl='\n'
+  [ "${4:-}" != exact ] || nl=''
   EXEC_WROTE=0
   if ! _exec_writable "$f"; then
     echo "setup: $EXEC_ERROR" >&2
     return 1
   fi
-  if [ -f "$f" ] && printf '%s\n' "$2" | cmp -s - "$f"; then
+  # shellcheck disable=SC2059  # nl is "\n" or empty: the format's own newline
+  if [ -f "$f" ] && printf "%s$nl" "$2" | cmp -s - "$f"; then
     return 0
   fi
   dir=$(dirname "$f")
@@ -136,7 +139,8 @@ _exec_write() {
     echo "setup: cannot create a temp file beside $f" >&2
     return 1
   fi
-  if ! printf '%s\n' "$2" > "$_EXEC_TMP"; then
+  # shellcheck disable=SC2059  # nl is "\n" or empty: the format's own newline
+  if ! printf "%s$nl" "$2" > "$_EXEC_TMP"; then
     rm -f "$_EXEC_TMP"
     _EXEC_TMP=""
     echo "setup: cannot write $f" >&2

@@ -28,6 +28,10 @@
 #   PLAN_HNOTES        the non-Claude harnesses this run newly ticks (a name
 #                      each): plan_render_harness_notes points them to their
 #                      INSTALL guides
+#   PLAN_HFOREIGN      the ticked harnesses whose project file already defines
+#                      doc-search in a way that is not setup's (a JSON entry
+#                      that differs, an unmarked Codex definition): the step
+#                      that would add the entry refuses, and the review says so
 #   PLAN_TEAM_SETUP    the .setup object record-team writes (compact JSON)
 #   PLAN_LOCAL_RECORD  the file record-local writes (compact JSON)
 #   PLAN_TEAM_CHANGED PLAN_LOCAL_CHANGED
@@ -63,7 +67,7 @@ PLAN_EXCLUDE_END="# doc-superpowers setup:end"
 
 PLAN_BUILD_REQUESTED=0
 PLAN_FOR_TEAM=0
-PLAN=() W_TEAM=() W_LOCAL=() W_OUTSIDE=() NET=() DL=() PLAN_HNOTES=()
+PLAN=() W_TEAM=() W_LOCAL=() W_OUTSIDE=() NET=() DL=() PLAN_HNOTES=() PLAN_HFOREIGN=()
 PLAN_TEAM_SETUP="" PLAN_LOCAL_RECORD="" PLAN_TEAM_CHANGED=0 PLAN_LOCAL_CHANGED=0 PLAN_ERROR=""
 
 # Set by plan_build: every write as "<scope>TAB<path>TAB<what>", the groups a
@@ -285,6 +289,13 @@ _plan_harness_guide() {
 # written. Nothing when there is none.
 plan_render_harness_notes() {
   local h
+  if [ "${#PLAN_HFOREIGN[@]}" -gt 0 ]; then
+    echo "Not setup's, so not touched (--yes refuses until you move or fix it):"
+    for h in "${PLAN_HFOREIGN[@]}"; do
+      _plan_harness "$h"
+      printf '  %s: it already defines doc-search in a way setup did not write (or cannot be read)\n' "$_PH_FILE"
+    done
+  fi
   [ "${#PLAN_HNOTES[@]}" -gt 0 ] || return 0
   echo "Harness skill install steps (doc-superpowers help setup has the rest):"
   for h in "${PLAN_HNOTES[@]}"; do
@@ -446,9 +457,14 @@ _plan_op_writes() {
       _plan_w local .claude/hooks/doc-superpowers/ "the ledger's Claude Code hook scripts$gone"
       _plan_w local "$_PLAN_EXCLUDE" "keeps the ledger's Claude Code hook files out of git"
       ;;
-    harness-add | harness-remove)
+    harness-add)
       _plan_harness "$a"
-      _plan_w team "$_PH_FILE" "the doc-search server entry for $_PH_NAME$gone" "$g"
+      _plan_w team "$_PH_FILE" "the doc-search server entry for $_PH_NAME"
+      ;;
+    harness-remove)
+      # The entry alone goes: the file stays, so it is not one that is gone.
+      _plan_harness "$a"
+      _plan_w team "$_PH_FILE" "the doc-search server entry for $_PH_NAME, removed (the file stays)"
       ;;
     envhook)
       _plan_w outside "$_PLAN_ENVFILE" "your env hook's doc-superpowers block (doc-search's cache path, DOC_SUPERPOWERS_ROOT): per user and per host, read in every repository on this host"
@@ -615,8 +631,8 @@ _plan_net_dl() {
 # plan_build: PLAN and the review's lists, from SEL against the probed state.
 # shellcheck disable=SC2034  # PLAN_* are the plan's interface, read by setup.sh and the executor
 plan_build() {
-  local out sel inst st x y rm add h m cache hroot strict b c rec new
-  PLAN=() W_TEAM=() W_LOCAL=() W_OUTSIDE=() NET=() DL=() PLAN_HNOTES=() _PLAN_W=()
+  local out sel inst st x y rm add h m cache hroot strict b c rec new hbase search_off=0
+  PLAN=() W_TEAM=() W_LOCAL=() W_OUTSIDE=() NET=() DL=() PLAN_HNOTES=() PLAN_HFOREIGN=() _PLAN_W=()
   _PLAN_GROUPS="|" _PLAN_GONE="|" PLAN_ERROR=""
   PLAN_TEAM_SETUP="" PLAN_LOCAL_RECORD="" PLAN_TEAM_CHANGED=0 PLAN_LOCAL_CHANGED=0
   # The merge driver is the team's (its .gitattributes block is committed): a
@@ -714,6 +730,7 @@ plan_build() {
   elif [ "$_PLAN_LAUNCHER" != absent ] || [ "$_PLAN_ENTRY" != absent ]; then
     # docs/search/config.json stays: setup never removes a switch.
     _plan_op search search-uninstall
+    search_off=1
   fi
   _plan_set ledger.git ledger-install ledger-uninstall
   _plan_set ledger.claude ledger-claude-install ledger-claude-uninstall
@@ -724,6 +741,7 @@ plan_build() {
   x="$_PS"
   y=$(probe_installed harness)
   _model_i harness
+  hbase="${BASE[_MI]}"
   rec=$(_plan_recorded_harnesses)
   for h in ${CAT_OPTIONS[_MI]//,/ }; do
     [ "$h" != claude-code ] || continue
@@ -731,11 +749,21 @@ plan_build() {
     _model_csv_has "$x" "$h" && ! _model_csv_has "$rec" "$h" && new=1
     if model_is_on search && _model_csv_has "$x" "$h"; then
       if ! _model_csv_has "$y" "$h"; then
+        # Not setup's entry yet. One that is not setup's own (a definition of
+        # the user's) is refused when the step runs, and said so here.
         _plan_op harness harness-add "$h"
         new=1
+        [ "$(harness_entry_state "$h")" = absent ] || PLAN_HFOREIGN+=("$h")
+      elif [ "$h" = codex ] && [ "$(harness_entry_state codex)" = different ]; then
+        # Setup's block, edited or older than this one: refreshed.
+        _plan_op harness harness-add "$h"
       fi
     elif _model_csv_has "$y" "$h"; then
-      _plan_op harness harness-remove "$h"
+      # Only what this run unticks, or what leaves with doc-search itself: an
+      # entry that is merely there is not a reason to remove it.
+      if [ "$search_off" = 1 ] || { _model_csv_has "$hbase" "$h" && ! _model_csv_has "$x" "$h"; }; then
+        _plan_op harness harness-remove "$h"
+      fi
     fi
     [ "$new" = 0 ] || PLAN_HNOTES+=("$h")
   done
@@ -928,12 +956,16 @@ _plan_op_text() {
     ledger-claude-uninstall) printf '%s' "remove the ledger's Claude Code hooks (doc-superpowers hooks uninstall --ledger-claude)" ;;
     harness-add)
       _plan_harness "$a"
-      printf '%s' "add the doc-search server entry for $_PH_NAME to $_PH_FILE"
+      if harness_entry_present "$a"; then
+        printf '%s' "refresh the doc-search server entry for $_PH_NAME in $_PH_FILE (setup's block, as this version writes it)"
+      else
+        printf '%s' "add the doc-search server entry for $_PH_NAME to $_PH_FILE"
+      fi
       [ "$a" != codex ] || printf '%s' " (Codex loads it only for a trusted project)"
       ;;
     harness-remove)
       _plan_harness "$a"
-      printf '%s' "remove the doc-search server entry for $_PH_NAME from $_PH_FILE"
+      printf '%s' "remove the doc-search server entry for $_PH_NAME from $_PH_FILE (the entry alone: the file, and anything else in it, stays)"
       ;;
     envhook)
       case "$a" in
