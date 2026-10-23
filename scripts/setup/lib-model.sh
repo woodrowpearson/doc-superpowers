@@ -13,6 +13,10 @@
 # and GROUPS (the group names, in order; bash's own GROUPS, the user's group
 # ids, is unset first). DISABLED[i] (a reason, or empty) and HINT[i] (a hint,
 # or empty) start empty: the host checks and the scan hints fill them.
+# LOCKED[i] (a reason, or empty): model_base_init locks the ledger and spec
+# claims on while their switch exists (docs/ledger/config.json,
+# docs/spec-claims/), the team's data, which setup never removes (design
+# §5.2): such an item is ticked, and model_set refuses to untick it.
 #
 # The selection: BASE[i], what the run starts from (model_base_init, design
 # §5.2), and SEL[i], BASE plus the user's changes (model_set); both are the
@@ -30,6 +34,11 @@
 # One more rule: while search is on, harness holds claude-code, since
 # install --search always registers the Claude Code entry in .mcp.json.
 #
+# model_apply_skips (setup --apply): every ticked item this host's checks
+# disable is left as it is installed, and named in MODEL_SKIPPED
+# ("<id>TAB<reason>" lines): the teammate did not choose the record, so one
+# unusable item must not block the rest.
+#
 # Every function that can refuse returns 1 with MODEL_ERROR set, and then has
 # changed nothing.
 
@@ -39,6 +48,7 @@ _MODEL_RS=$'\036'
 CAT_N=0
 MODEL_ERROR=""
 MODEL_VALUE=""
+MODEL_SKIPPED=()
 
 # One jq pass: the groups line, then one line per item, fields separated by
 # US; a newline inside a text becomes RS, and any other control character is
@@ -70,7 +80,7 @@ model_load_catalog() {
   esac
   CAT_ID=() CAT_GROUP=() CAT_KIND=() CAT_OPTIONS=() CAT_DEFAULT=() CAT_SCOPE=()
   CAT_PERUSER=() CAT_LABEL=() CAT_DETAILS=() CAT_UNDO=() CAT_WRITES=() CAT_REQUIRES=()
-  DISABLED=() HINT=() BASE=() SEL=()
+  DISABLED=() HINT=() LOCKED=() BASE=() SEL=()
   # GROUPS is a bash special variable (the user's group ids): an assignment to
   # it has no effect until it is unset.
   unset GROUPS
@@ -93,6 +103,7 @@ model_load_catalog() {
     CAT_REQUIRES[i]="$f_req"
     DISABLED[i]=""
     HINT[i]=""
+    LOCKED[i]=""
     BASE[i]="$f_def"
     SEL[i]="$f_def"
     i=$((i + 1))
@@ -286,8 +297,9 @@ model_check() {
 # model_set <id> <value>: change SEL of <id>, applying requires (a child turns
 # its parent on; a parent turned off resets its children) and the claude-code
 # rule. Refuses (1, MODEL_ERROR) an invalid value, a disabled item (unless
-# the value leaves it unticked or unchanged), a child of a disabled parent,
-# and a harness set without claude-code while search is on.
+# the value leaves it unticked or unchanged), a locked item set off, a child
+# of a disabled parent, and a harness set without claude-code while search is
+# on.
 model_set() {
   local id="$1" i v pid="" pval pi j
   model_check "$id" "$2" || return 1
@@ -296,6 +308,10 @@ model_set() {
   i=$_MI
   if [ -n "${DISABLED[i]}" ] && [ "$v" != "${SEL[i]}" ] && ! _model_is_off "$i" "$v"; then
     MODEL_ERROR="$id: ${DISABLED[i]}"
+    return 1
+  fi
+  if [ -n "${LOCKED[i]}" ] && _model_is_off "$i" "$v"; then
+    MODEL_ERROR="$id cannot be turned off here: ${LOCKED[i]}"
     return 1
   fi
   # A child ticked or given a value turns its parent on; one set off does not.
@@ -425,6 +441,9 @@ model_base_init() {
     _model_apply_lines ".claude/doc-superpowers/installed.json (.setup)" "$PROBE_TEAM_VALUES" || return 1
     _model_apply_lines ".claude/doc-superpowers/installed.local.json (overrides)" "$PROBE_LOCAL_VALUES" || return 1
   fi
+  # The switches the team committed lock their items on, whatever a record
+  # says (the record follows the switch on its next write).
+  _model_locks
   # The claude-code rule holds in the base too (a record may say otherwise:
   # install --search registers the Claude Code entry whatever it says).
   if _model_i search && [ "${BASE[_MI]}" = on ] && _model_i harness && ! _model_csv_has "${BASE[_MI]}" claude-code; then
@@ -439,6 +458,46 @@ model_base_init() {
   i=0
   while [ "$i" -lt "$CAT_N" ]; do
     SEL[i]="${BASE[i]}"
+    i=$((i + 1))
+  done
+  return 0
+}
+
+# _model_locks: LOCKED and BASE of the ledger and spec claims, from their
+# switches on disk (probe_installed: on while the switch exists).
+_model_locks() {
+  local id
+  for id in ledger claims; do
+    _model_i "$id" || continue
+    LOCKED[_MI]=""
+    [ "$(probe_installed "$id")" = on ] || continue
+    case "$id" in
+      ledger) LOCKED[_MI]="docs/ledger/config.json exists, the team's switch, which setup never removes: to turn the ledger off, git rm docs/ledger/config.json, then doc-superpowers setup --yes --set ledger=off, and commit both" ;;
+      claims) LOCKED[_MI]="docs/spec-claims/ exists, the team's switch, which setup never removes: to turn spec claims off, git rm -r docs/spec-claims, then doc-superpowers setup --yes --set claims=off, and commit both" ;;
+    esac
+    BASE[_MI]=on
+  done
+}
+
+# model_apply_skips: every ticked item that DISABLED names is left as it is
+# installed (off when it is not: its children then go back to their
+# defaults), and MODEL_SKIPPED gets "<id>TAB<reason>" for it, in catalog
+# order. Needs model_base_init (and probe_run) first.
+model_apply_skips() {
+  local i=0 inst off
+  MODEL_SKIPPED=()
+  while [ "$i" -lt "$CAT_N" ]; do
+    if [ -n "${DISABLED[i]}" ] && ! _model_is_off "$i" "${SEL[i]}"; then
+      inst=$(probe_installed "${CAT_ID[i]}") || inst="${CAT_DEFAULT[i]}"
+      off=off
+      [ "${CAT_KIND[i]}" != multi ] || off=none
+      if _model_is_off "$i" "$inst" && model_set "${CAT_ID[i]}" "$off"; then
+        :
+      else
+        SEL[i]="$inst"
+      fi
+      MODEL_SKIPPED+=("${CAT_ID[i]}"$'\t'"${DISABLED[i]}")
+    fi
     i=$((i + 1))
   done
   return 0

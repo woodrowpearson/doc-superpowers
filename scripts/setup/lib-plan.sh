@@ -15,6 +15,9 @@
 #                         ledger.claude) are the team's (--for-team); else,
 #                         once a team record exists, a departure from it is
 #                         this user's own (the local record's overrides)
+#   PLAN_APPLY            1: setup --apply, which reproduces the recorded team
+#                         setup and never changes the team record: no
+#                         record-team step, whatever the record's content
 # It fills:
 #   PLAN               the steps in run order, one op line each, fields
 #                      separated by TAB (the shared definitions' plan ops)
@@ -67,6 +70,7 @@ PLAN_EXCLUDE_END="# doc-superpowers setup:end"
 
 PLAN_BUILD_REQUESTED=0
 PLAN_FOR_TEAM=0
+PLAN_APPLY=0
 PLAN=() W_TEAM=() W_LOCAL=() W_OUTSIDE=() NET=() DL=() PLAN_HNOTES=() PLAN_HFOREIGN=()
 PLAN_TEAM_SETUP="" PLAN_LOCAL_RECORD="" PLAN_TEAM_CHANGED=0 PLAN_LOCAL_CHANGED=0 PLAN_ERROR=""
 
@@ -793,8 +797,8 @@ plan_build() {
   fi
   _plan_set bin bin-link bin-unlink
 
-  # 4. The records. 5. The build.
-  [ "$PLAN_TEAM_CHANGED" != 1 ] || _plan_op "" record-team
+  # 4. The records (--apply never writes the team's). 5. The build.
+  [ "$PLAN_TEAM_CHANGED" != 1 ] || [ "$PLAN_APPLY" = 1 ] || _plan_op "" record-team
   [ "$PLAN_LOCAL_CHANGED" != 1 ] || _plan_op "" record-local
   _PLAN_BUILD=0
   if [ "$PLAN_BUILD_REQUESTED" = 1 ] && model_is_on search; then

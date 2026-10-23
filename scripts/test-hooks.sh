@@ -7519,7 +7519,7 @@ test_setup_set_validation() {
   run_setup -- --list --set search=on --set harness=codex
   assert_eq "1" "$RUN_RC" "harness without claude-code while doc-search is on: refused (exit 1)"
   assert_contains "$RUN_ERR" "claude-code" "…saying why"
-  for f in --apply --build --for-team --link-bin --no-link-bin --plain; do
+  for f in --build --for-team --link-bin --no-link-bin --plain; do
     run_setup -- "$f"
     assert_eq "3" "$RUN_RC" "$f: exit 3 until its task"
     assert_contains "$RUN_ERR" "setup: $f: not implemented yet" "$f: says so"
@@ -8652,9 +8652,9 @@ test_setup_yes_refusals() {
   assert_contains "$SL_OUT" "setup: no-such-op: not implemented yet" "exec_plan: an op without its op_ function is named"
   assert_contains "$SL_OUT" "rc=1" "…exit 1"
   assert_eq "$before" "$(setup_snapshot)" "…checked before the first step: nothing written (record-team came first)"
-  run_setup -- --yes --set ci.workflows=doc-review-pr
-  assert_eq "1" "$RUN_RC" "--yes --set ci.workflows=doc-review-pr: exit 1"
-  assert_contains "$RUN_ERR" "setup: ci-install: not implemented yet" "…naming ci-install"
+  run_setup -- --yes --set bin=on
+  assert_eq "1" "$RUN_RC" "--yes --set bin=on: exit 1"
+  assert_contains "$RUN_ERR" "setup: bin-link: not implemented yet" "…naming bin-link"
   run_setup -- --dry-run --yes
   assert_eq "3" "$RUN_RC" "--dry-run --yes: exit 3"
   assert_contains "$RUN_ERR" "--dry-run" "…naming both"
@@ -9431,6 +9431,328 @@ export BAZ=3" "$(cat "$env")" "the user's marker-prefixed line and its neighbour
   teardown
 }
 
+# --- setup: CI, the ledger and claims, per-user overrides, --apply (#51) -------
+
+# The states status --json gives the git and Claude tiers, on one line:
+# "<5 hook states>|<driver>|<.gitattributes>|<3 Claude hook states>".
+setup_tier_states() {
+  inst status --json --git --claude
+  jq -r '[([.tiers.git.hooks[].state] | join(" ")), .tiers.git.merge_driver.state, .tiers.git.gitattributes.state, ([.tiers.claude.hooks[].state] | join(" "))] | join("|")' <<<"$IOUT" 2>&1
+}
+SETUP_TIERS_ALL="installed installed installed installed installed|registered|configured|active active active"
+
+test_setup_ci_opt_in() {
+  echo "test: #51 CI is opt-in through setup: --set ci.workflows=doc-freshness-pr --set ci.strict=on runs install --ci with those choices (the workflow file, .tiers.ci strict and the workflow installed), writing what the review listed; a re-run has nothing to do; --set ci.workflows=none runs uninstall --ci for it, and the team record stays"
+  setup
+  local f=.claude/doc-superpowers/installed.json
+  setup_yes_as_reviewed "CI opt-in" --set ci.workflows=doc-freshness-pr --set ci.strict=on
+  assert_contains "$RUN_OUT" "install --ci --workflows=doc-freshness-pr --base-branch main --cron '0 9 * * 1' --ci-strict=true" \
+    "the step runs install --ci with the chosen flags"
+  assert_true ".github/workflows/doc-freshness-pr.yml written" test -f .github/workflows/doc-freshness-pr.yml
+  assert_true "…and only that workflow" test ! -e .github/workflows/doc-freshness-schedule.yml
+  assert_eq "true" "$(jq .tiers.ci.ci_strict "$f" 2>&1)" ".tiers.ci.ci_strict is true"
+  assert_eq "installed" "$(jq -r '.tiers.ci.workflows["doc-freshness-pr"].state' "$f" 2>&1)" ".tiers.ci: doc-freshness-pr installed"
+  assert_eq "$SETUP_DEFAULT_RECORD" "$(jq -c .setup "$f" 2>&1)" "the team record: the defaults (CI stays in .tiers.ci)"
+  setup_assert_noop "after the CI opt-in"
+  run_setup -- --yes --set ci.workflows=none
+  assert_eq "0" "$RUN_RC" "--set ci.workflows=none: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "uninstall --ci --workflows=doc-freshness-pr" "…the step runs uninstall --ci for it"
+  assert_true "…the workflow file is gone" test ! -e .github/workflows/doc-freshness-pr.yml
+  assert_eq "$SETUP_DEFAULT_RECORD" "$(jq -c .setup "$f" 2>&1)" "…and .setup is still there"
+  setup_assert_noop "after CI was turned off"
+  teardown
+}
+
+test_setup_ledger_claims() {
+  echo "test: #51 the ledger and spec claims through setup: their switches written by setup ({} and {\"schema\": 1}, only when absent), install --ledger's pre-commit block, the record; while a switch exists the item cannot be unticked (exit 1 naming the file to git rm, nothing written; model_set returns 1 with MODEL_ERROR) and --list shows it locked, a record saying otherwise included; its hook sets can still go"
+  setup
+  local f=.claude/doc-superpowers/installed.json before
+  setup_yes_as_reviewed "ledger, its git hooks, claims" --set ledger=on --set ledger.git=on --set claims=on
+  assert_eq "{}" "$(cat docs/ledger/config.json 2>&1)" "docs/ledger/config.json is {}"
+  assert_eq '{"schema": 1}' "$(cat docs/spec-claims/config.json 2>&1)" "docs/spec-claims/config.json is {\"schema\": 1}"
+  assert_true "the ledger's pre-commit block" grep -qF 'ledger-superpowers:begin' .git/hooks/pre-commit
+  assert_eq '{"git":true,"claude":false}|true' "$(jq -c '.setup.ledger' "$f")|$(jq -c '.setup.claims' "$f")" \
+    "the team record: the ledger with its git hooks, claims on"
+  assert_contains "$(review_section 'Then commit:')" "docs/ledger/config.json" "the git add line names the ledger's switch"
+  assert_contains "$(review_section 'Then commit:')" "docs/spec-claims/config.json" "…and claims'"
+  setup_assert_noop "after the ledger and claims"
+  before=$(setup_snapshot)
+  run_setup -- --yes --set ledger=off
+  assert_eq "1" "$RUN_RC" "--set ledger=off while docs/ledger/config.json exists: exit 1"
+  assert_contains "$RUN_ERR" "docs/ledger/config.json" "…stderr names the switch"
+  assert_contains "$RUN_ERR" "git rm docs/ledger/config.json" "…and the manual step"
+  assert_eq "" "$RUN_OUT" "…no step ran"
+  run_setup -- --dry-run --set claims=off
+  assert_eq "1" "$RUN_RC" "--set claims=off while docs/spec-claims/ exists: exit 1 (--dry-run too)"
+  assert_contains "$RUN_ERR" "git rm -r docs/spec-claims" "…naming the manual step"
+  assert_eq "$before" "$(setup_snapshot)" "nothing written by either"
+  run_setup -- --list
+  assert_eq "on" "$(list_val ledger)" "--list: ledger on"
+  assert_contains "$(list_field ledger 5)" "(locked: " "--list: the ledger is locked"
+  assert_contains "$(list_field ledger 5)" "docs/ledger/config.json" "…naming its switch"
+  assert_contains "$(list_field claims 5)" "(locked: " "--list: claims are locked"
+  assert_eq "" "$(list_field ledger.git 5)" "--list: the ledger's hook sets are not locked"
+  # shellcheck disable=SC2016  # the snippet runs in the child bash
+  setup_lib 'probe_run
+    model_base_init
+    rc=0; model_set ledger off || rc=$?
+    echo "rc=$rc ledger=$(model_get ledger) err=$MODEL_ERROR"
+    rc=0; model_set ledger on || rc=$?
+    echo "on=$rc"'
+  assert_contains "$SL_OUT" "rc=1 ledger=on err=" "model_set ledger off: 1, the selection unchanged"
+  assert_contains "$SL_OUT" "git rm docs/ledger/config.json" "…MODEL_ERROR names the manual step"
+  assert_contains "$SL_OUT" "on=0" "model_set ledger on: 0"
+  run_setup -- --yes --set ledger.git=off
+  assert_eq "0" "$RUN_RC" "--set ledger.git=off: exit 0 (stderr: $RUN_ERR)"
+  assert_true "…the ledger's pre-commit block is gone" test -z "$(grep -F 'ledger-superpowers:begin' .git/hooks/pre-commit 2>/dev/null)"
+  assert_eq "{}" "$(cat docs/ledger/config.json 2>&1)" "…the switch stays"
+  # A record that says the ledger is off while its switch is there: the
+  # switch wins (shown on, locked).
+  jq -c '.setup.ledger = null | .setup.claims = false' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  run_setup -- --list
+  assert_eq "on|on" "$(list_val ledger)|$(list_val claims)" "a record saying off, the switches there: on"
+  assert_contains "$(list_field ledger 5)" "(locked: " "…and locked"
+  teardown
+  setup
+  mkdir -p docs/ledger
+  printf '{"base": "trunk"}\n' > docs/ledger/config.json
+  # shellcheck disable=SC2016  # the snippet runs in the child bash
+  setup_lib 'source "$ROOT/scripts/setup/lib-plan.sh"
+    source "$ROOT/scripts/setup/lib-exec.sh"
+    probe_run
+    op_ledger_config; echo "ledger rc=$? wrote=$EXEC_WROTE"
+    mkdir -p docs/spec-claims; printf "{\"schema\": 1, \"base\": \"x\"}\n" > docs/spec-claims/config.json
+    op_claims_config; echo "claims rc=$? wrote=$EXEC_WROTE"'
+  assert_contains "$SL_OUT" "ledger rc=0 wrote=0" "op_ledger_config: an existing config is not written"
+  assert_contains "$SL_OUT" "claims rc=0 wrote=0" "op_claims_config: an existing config is not written"
+  assert_eq '{"base": "trunk"}' "$(cat docs/ledger/config.json)" "…the ledger's config unchanged"
+  assert_eq '{"schema": 1, "base": "x"}' "$(cat docs/spec-claims/config.json)" "…claims' unchanged"
+  teardown
+  # The manual step the lock names: the switch removed, then --set off.
+  setup
+  run_setup -- --yes --set claims=on
+  assert_eq "0" "$RUN_RC" "claims on: exit 0 (stderr: $RUN_ERR)"
+  rm -r docs/spec-claims
+  run_setup -- --dry-run
+  assert_contains "$RUN_OUT" "write docs/spec-claims/config.json" "the switch removed by hand: the record still says on, so a plain run would write it back"
+  run_setup -- --yes --set claims=off
+  assert_eq "0" "$RUN_RC" "…--set claims=off (the step the lock names): exit 0 (stderr: $RUN_ERR)"
+  assert_eq "false" "$(jq .setup.claims .claude/doc-superpowers/installed.json 2>&1)" "…the record says off"
+  assert_true "…and the switch is not written back" test ! -e docs/spec-claims
+  setup_assert_noop "after claims went off"
+  teardown
+}
+
+test_setup_apply_no_record() {
+  echo "test: #51 setup --apply with no team setup recorded exits 1 with one line (no team setup recorded: run doc-superpowers setup), writing nothing: a fresh repository, and one whose installed.json holds only the CI tier (install --ci); --apply --dry-run too"
+  setup
+  local before
+  before=$(setup_snapshot)
+  run_setup -- --apply
+  assert_eq "1" "$RUN_RC" "a fresh repository: exit 1"
+  assert_eq "setup: no team setup recorded: run doc-superpowers setup" "$RUN_ERR" "…one line saying so"
+  assert_eq "" "$RUN_OUT" "…nothing on stdout"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
+  inst install --ci
+  assert_eq "0" "$IRC" "install --ci (output: $(head -c 300 <<<"$IOUT"))"
+  before=$(setup_snapshot)
+  run_setup -- --apply
+  assert_eq "1" "$RUN_RC" "a CI-only record: exit 1"
+  assert_eq "setup: no team setup recorded: run doc-superpowers setup" "$RUN_ERR" "…the same line"
+  run_setup -- --apply --dry-run
+  assert_eq "1" "$RUN_RC" "--apply --dry-run: exit 1"
+  assert_contains "$RUN_ERR" "no team setup recorded: run doc-superpowers setup" "…the same line"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
+  teardown
+}
+
+test_setup_apply_fresh_clone() {
+  echo "test: #51 setup --apply in a fresh clone reproduces the team's setup: repository A runs --yes --set search=on and commits everything; a clone B with a new HOME runs --apply: the 5 git hooks installed, the merge driver registered, the 3 Claude hooks active, the env hook listed under Local to you (outside the repository), no committed file changed, the team record not rewritten; a second --apply has nothing to do"
+  setup
+  local a="$TEST_DIR" b
+  run_setup -- --yes --set search=on
+  assert_eq "0" "$RUN_RC" "A: --yes --set search=on: exit 0 (stderr: $RUN_ERR)"
+  git add -A && git commit -qm "the team's setup"
+  b=$(harness_mktemp_d clone)
+  rm -rf "$b"
+  git clone -q "$a" "$b"
+  export HOME="$a/home-b" XDG_CONFIG_HOME="$a/xdg-b"
+  mkdir -p "$HOME" "$XDG_CONFIG_HOME"
+  cd "$b"
+  run_setup -- --apply
+  assert_eq "0" "$RUN_RC" "B: --apply: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "$SETUP_TIERS_ALL" "$(setup_tier_states)" "B: the 5 git hooks installed, the driver registered, .gitattributes configured, the 3 Claude hooks active"
+  assert_eq "" "$(git status --porcelain)" "B: no committed file changed, nothing new to commit"
+  assert_not_contains "$RUN_OUT" "record the team's setup" "B: --apply never writes the team record"
+  assert_contains "$RUN_OUT" "Local to you (outside the repository):" "B: the writes outside the repository are listed"
+  assert_contains "$(review_section 'Local to you (outside the repository):')" "$XDG_CONFIG_HOME/doc-search/env.sh" "…the env hook among them"
+  assert_true "B: the env hook written in B's HOME" test -f "$XDG_CONFIG_HOME/doc-search/env.sh"
+  run_setup -- --apply
+  assert_eq "0" "$RUN_RC" "B: --apply again: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "nothing to do" "$RUN_OUT" "B: …nothing to do"
+  cd "$a"
+  rm -rf "$b"
+  teardown
+}
+
+test_setup_apply_modes() {
+  echo "test: #51 setup --apply takes no --set and no --for-team, and is a mode of its own (exit 3); --apply --dry-run prints what --apply would do and writes nothing; --apply installs the recorded per-user parts and never writes the team record, even where a plain --yes would"
+  setup
+  local f=.claude/doc-superpowers/installed.json before rec
+  for args in "--apply --set claude=off" "--apply --for-team" "--apply --yes" "--yes --apply" "--apply --list"; do
+    # shellcheck disable=SC2086  # the flags, split on purpose
+    run_setup -- $args
+    assert_eq "3" "$RUN_RC" "$args: exit 3"
+  done
+  run_setup -- --apply --set claude=off
+  assert_contains "$RUN_ERR" "--set" "--apply --set: stderr names --set"
+  run_setup -- --apply --for-team
+  assert_contains "$RUN_ERR" "--for-team" "--apply --for-team: stderr names --for-team"
+  # A record without its claims key: a plain --yes would add it; --apply does not.
+  rec='{"format":1,"harnesses":["claude-code"],"git":"hooks","claude":true,"search":null,"ledger":null}'
+  mkdir -p .claude/doc-superpowers
+  printf '{"schema_version":2,"setup":%s}\n' "$rec" > "$f"
+  before=$(setup_snapshot)
+  for args in "--apply --dry-run" "--dry-run --apply"; do
+    # shellcheck disable=SC2086  # the flags, split on purpose
+    run_setup -- $args
+    assert_eq "0" "$RUN_RC" "$args: exit 0 (stderr: $RUN_ERR)"
+    assert_contains "$(review_section 'Steps:')" "install --git" "$args: the git tier's install listed"
+    assert_contains "$(review_section 'Steps:')" "install --claude" "$args: …and the Claude tier's"
+    assert_not_contains "$RUN_OUT" "record the team's setup" "$args: no team record step"
+    assert_eq "$before" "$(setup_snapshot)" "$args: nothing written"
+  done
+  run_setup -- --dry-run
+  assert_contains "$RUN_OUT" "record the team's setup" "(a plain --dry-run would write the team record)"
+  run_setup -- --apply
+  assert_eq "0" "$RUN_RC" "--apply: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "$SETUP_TIERS_ALL" "$(setup_tier_states)" "…the git and Claude tiers installed"
+  assert_eq "$rec" "$(jq -c .setup "$f")" "…the team record as it was"
+  assert_eq "  (nothing)" "$(review_section 'Local to you (outside the repository):')" "…nothing outside the repository, and it says so"
+  assert_not_contains "$RUN_OUT" "skipped:" "…nothing skipped"
+  run_setup -- --apply
+  assert_eq "nothing to do" "$RUN_OUT" "--apply again: nothing to do"
+  teardown
+}
+
+test_setup_apply_skips_disabled() {
+  echo "test: #51 --apply skips an item this host's checks disable (model_apply_skips): the item is left as it is installed, MODEL_SKIPPED names it with its reason, the plan acts on the rest"
+  setup
+  mkdir -p .claude/doc-superpowers
+  printf '{"schema_version":2,"setup":%s}\n' "$SETUP_DEFAULT_RECORD" > .claude/doc-superpowers/installed.json
+  # shellcheck disable=SC2016  # the snippet runs in the child bash
+  plan_ops 'DISABLED[$(model_idx claude)]="no hooks here (a test reason)"
+    model_apply_skips
+    printf "skip=%s\n" "${MODEL_SKIPPED[@]}" | tr "\t" "|"
+    echo "claude=$(model_get claude)"
+    PLAN_APPLY=1'
+  assert_eq "0" "$SL_RC" "the snippet ran (output: $(head -c 300 <<<"$SL_OUT"))"
+  assert_contains "$SL_OUT" "skip=claude|no hooks here (a test reason)" "MODEL_SKIPPED: the item and its reason"
+  assert_contains "$SL_OUT" "claude=off" "…left as installed (not installed: off)"
+  assert_contains "$SL_OUT" "git-install|hooks" "the rest is applied"
+  assert_not_contains "$SL_OUT" "claude-install" "…the skipped item is not"
+  assert_not_contains "$SL_OUT" "record-team" "…and --apply plans no team record"
+  teardown
+}
+
+test_setup_peruser_override() {
+  echo "test: #51 per-user items: with a team record, --yes --set claude=off uninstalls the Claude tier for you only (installed.local.json overrides.claude false, .setup.claude still true, the local record excluded from git); --for-team (now with --yes) makes it the team's; with no team record yet, the first record takes the selection"
+  setup
+  local f=.claude/doc-superpowers/installed.json l=.claude/doc-superpowers/installed.local.json
+  setup_applied_defaults
+  run_setup -- --yes --set claude=off
+  assert_eq "0" "$RUN_RC" "--yes --set claude=off: exit 0 (stderr: $RUN_ERR)"
+  inst status --json --claude
+  assert_eq "absent absent absent" "$(jq -r '[.tiers.claude.hooks[].state] | join(" ")' <<<"$IOUT" 2>&1)" "…the Claude tier uninstalled"
+  assert_eq "false" "$(jq '.overrides.claude' "$l" 2>&1)" "installed.local.json: overrides.claude false"
+  assert_eq "true" "$(jq '.setup.claude' "$f" 2>&1)" "the team record: .setup.claude still true"
+  assert_true "installed.local.json is excluded from git" git check-ignore -q -- "$l"
+  run_setup -- --yes --set claude=off --for-team
+  assert_eq "0" "$RUN_RC" "--yes --set claude=off --for-team: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "false" "$(jq '.setup.claude' "$f" 2>&1)" "….setup.claude is false"
+  assert_eq "null" "$(jq '.overrides.claude' "$l" 2>&1)" "…no override left (it is the team's value now)"
+  assert_contains "$(review_section 'Then commit:')" "$f" "…the team record on the git add line"
+  setup_assert_noop "after --for-team"
+  teardown
+  setup
+  run_setup -- --yes --set claude=off
+  assert_eq "0" "$RUN_RC" "no team record, --set claude=off: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "false" "$(jq '.setup.claude' "$f" 2>&1)" "…the first record seeds the team's value"
+  assert_true "…no local record" test ! -e "$l"
+  teardown
+}
+
+test_setup_exclude_survives_claude_uninstall() {
+  echo "test: #51 after a per-user override, install.sh uninstall --claude (the Claude tier's own block removed) leaves installed.local.json excluded from git"
+  setup
+  setup_applied_defaults
+  run_setup -- --yes --set claude=off
+  assert_eq "0" "$RUN_RC" "--yes --set claude=off: exit 0 (stderr: $RUN_ERR)"
+  inst install --claude
+  inst uninstall --claude
+  assert_eq "0" "$IRC" "uninstall --claude (output: $(head -c 300 <<<"$IOUT"))"
+  assert_true "installed.local.json still excluded" git check-ignore -q .claude/doc-superpowers/installed.local.json
+  teardown
+}
+
+test_setup_migrates_ci_only_record() {
+  echo "test: #51 a v2 CI-only record (install --ci) is migrated by the first --yes: .tiers.ci byte for byte, .setup added, schema_version 2; install --ci (3.8.0's code path in this tree) afterwards keeps .setup unchanged"
+  setup
+  local f=.claude/doc-superpowers/installed.json ci setup_before
+  inst install --ci
+  assert_eq "0" "$IRC" "install --ci (output: $(head -c 300 <<<"$IOUT"))"
+  ci=$(jq '.tiers.ci' "$f")
+  run_setup -- --yes
+  assert_eq "0" "$RUN_RC" "--yes: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "$ci" "$(jq '.tiers.ci' "$f" 2>&1)" ".tiers.ci byte for byte"
+  assert_eq "$SETUP_DEFAULT_RECORD" "$(jq -c .setup "$f" 2>&1)" ".setup added"
+  assert_eq "2" "$(jq .schema_version "$f" 2>&1)" "schema_version 2"
+  setup_before=$(jq .setup "$f")
+  inst install --ci
+  assert_eq "0" "$IRC" "install --ci again (output: $(head -c 300 <<<"$IOUT"))"
+  assert_eq "$setup_before" "$(jq .setup "$f" 2>&1)" "install --ci keeps .setup unchanged"
+  teardown
+}
+
+test_setup_installed_union_removes_nothing() {
+  echo "test: #51 with things installed and no record, a plain --yes removes nothing: the workflows and the ledger's git hooks stay, and the record holds them"
+  setup
+  local f=.claude/doc-superpowers/installed.json
+  inst install --ci --workflows=doc-freshness-pr,doc-review-pr
+  assert_eq "0" "$IRC" "install --ci (output: $(head -c 300 <<<"$IOUT"))"
+  mkdir -p docs/ledger
+  printf '{}\n' > docs/ledger/config.json
+  inst install --ledger
+  assert_eq "0" "$IRC" "install --ledger (output: $(head -c 300 <<<"$IOUT"))"
+  run_setup -- --yes
+  assert_eq "0" "$RUN_RC" "--yes: exit 0 (stderr: $RUN_ERR)"
+  assert_not_contains "$RUN_OUT" "uninstall" "no step uninstalls anything"
+  assert_true "doc-freshness-pr.yml still there" test -f .github/workflows/doc-freshness-pr.yml
+  assert_true "doc-review-pr.yml still there" test -f .github/workflows/doc-review-pr.yml
+  assert_true "the ledger's pre-commit block still there" grep -qF 'ledger-superpowers:begin' .git/hooks/pre-commit
+  assert_true "the record's .setup exists" jq -e '.setup | type == "object"' "$f"
+  assert_eq '{"git":true,"claude":false}' "$(jq -c .setup.ledger "$f" 2>&1)" "…holding the ledger and its git hooks"
+  teardown
+}
+
+test_setup_codex_untick_user_subtable() {
+  echo "test: #51 unticking Codex while the user's own subtable of setup's table ([mcp_servers.doc-search.env]) sits outside setup's block is refused before any step (exit 1, naming the subtable), nothing written: removing the block would leave the subtable without its table"
+  setup
+  local before
+  run_setup -- --yes --set search=on --set harness=claude-code,codex
+  assert_eq "0" "$RUN_RC" "doc-search with Codex: exit 0 (stderr: $RUN_ERR)"
+  printf '\n[mcp_servers.doc-search.env]\nA = "1"\n' >> .codex/config.toml
+  before=$(setup_snapshot)
+  run_setup -- --yes --set harness=claude-code
+  assert_eq "1" "$RUN_RC" "untick Codex: exit 1"
+  assert_contains "$RUN_ERR" "subtable" "…stderr says a subtable of setup's table is defined outside the block"
+  assert_contains "$RUN_ERR" ".codex/config.toml" "…naming the file"
+  assert_contains "$RUN_ERR" "nothing was changed" "…and that nothing was changed"
+  assert_eq "" "$RUN_OUT" "…no step ran"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
+  teardown
+}
+
 echo ""
 echo "=== setup: model, probe, --list (#51) ==="
 test_setup_catalog
@@ -9481,6 +9803,17 @@ test_setup_codex_block_idempotent
 test_setup_harness_space_path
 test_setup_harness_notes
 test_setup_envhook_marker_prefix_line
+test_setup_ci_opt_in
+test_setup_ledger_claims
+test_setup_apply_no_record
+test_setup_apply_fresh_clone
+test_setup_apply_modes
+test_setup_apply_skips_disabled
+test_setup_peruser_override
+test_setup_exclude_survives_claude_uninstall
+test_setup_migrates_ci_only_record
+test_setup_installed_union_removes_nothing
+test_setup_codex_untick_user_subtable
 
 test_claude_hook_contract_held() {
   echo "test: every Claude hook run above held the contract (exit 0, or 2 only under STRICT; stdout one JSON object or nothing)"
