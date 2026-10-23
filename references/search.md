@@ -247,9 +247,11 @@ The run prints its report: mode, files written / skipped / deleted, chunks writt
 
 ## Other clients
 
-The launcher is a plain stdio command, so any MCP client can run it: `sh .claude/doc-superpowers/search-mcp.sh serve`, **started inside the repository** (the server and the launcher find the repository from the working directory). Claude Code gets it from `install --search`. For the others, the configuration shapes below were checked against each client's documentation on 2026-10-20, but none has been run against the client: each is *unverified*. A client that times out the first start (the first run syncs the Python environment) succeeds once `sh .claude/doc-superpowers/search-mcp.sh status` has been run by hand. What else each client supports is in `references/tool-mappings.md`.
+The launcher is a plain stdio command, so any MCP client can run it: `sh .claude/doc-superpowers/search-mcp.sh serve`, **started inside the repository** (the server and the launcher find the repository from the working directory). Claude Code gets it from `install --search`; `doc-superpowers setup` writes the entries below for the other clients, exactly as shown. The entries were checked against each client's documentation on 2026-10-20, and three of them against the client itself (below); each client says what was *verified* and what is *unverified*. A client that times out the first start (the first run syncs the Python environment) succeeds once `sh .claude/doc-superpowers/search-mcp.sh status` has been run by hand. What else each client supports is in `references/tool-mappings.md`.
 
-**Cursor** — `.cursor/mcp.json` in the project (*unverified*). Cursor substitutes `${workspaceFolder}` (the folder holding `.cursor/mcp.json`) in `args`; its documentation does not say which directory a server starts in, so the command changes to the project first:
+How the checks were made: each CLI was installed into a scratch directory with a scratch home and no login, and its own listing command (`codex mcp list`, `gemini mcp list`, `opencode mcp list`) was run in a throwaway repository holding setup's entry, once at the repository top and once in a subdirectory. No model was called. *Loaded* means the client's listing shows the entry from the project file. *Started* means the client connected to the server: Gemini CLI and OpenCode start the servers to list them, Codex does not, so for Codex *started* is unverified. These checks ran with the Python environment already synced, so a first start that has to sync it was not exercised.
+
+**Cursor** — `.cursor/mcp.json` in the project (*unverified*: there is no CLI to check it with, and nothing was run). Cursor substitutes `${workspaceFolder}` (the folder holding `.cursor/mcp.json`) in `args`; its documentation does not say which directory a server starts in, so the command changes to the project first:
 
 ```json
 {
@@ -262,16 +264,18 @@ The launcher is a plain stdio command, so any MCP client can run it: `sh .claude
 }
 ```
 
-**Codex** — `.codex/config.toml` in the project, whose servers start in the project root (*unverified*); in the user's `~/.codex/config.toml`, start Codex from the repository:
+**Codex** — `.codex/config.toml` in the project. *Loaded: verified* (2026-10-22, codex-cli 0.163.0): Codex reads the project file only when the project is trusted, and then sees it from a subdirectory too. *Started: unverified* (`codex mcp list` does not start servers). By Codex's source (read, not run), a server starts in the directory Codex was launched from, not the project root, so the command changes to the repository top first; that is the block `setup` writes between its two marker comments:
 
 ```toml
+# doc-superpowers setup:begin doc-search
 [mcp_servers.doc-search]
 command = "sh"
-args = [".claude/doc-superpowers/search-mcp.sh", "serve"]
+args = ["-c", "cd \"$(git rev-parse --show-toplevel)\" && exec sh .claude/doc-superpowers/search-mcp.sh serve"]
 startup_timeout_sec = 60
+# doc-superpowers setup:end doc-search
 ```
 
-**Gemini CLI** — `.gemini/settings.json` in the project; start Gemini from the repository (*unverified*):
+**Gemini CLI** — `.gemini/settings.json` in the project. *Loaded and started: verified* (2026-10-23, gemini 0.65.0), from the repository top in a trusted folder: `gemini mcp list` printed `✓ doc-search: sh .claude/doc-superpowers/search-mcp.sh serve (stdio) - Connected`. Two conditions matter. In a folder Gemini does not trust, the entry is listed as `Disabled` (with the warning "MCP servers are configured but disabled because this folder is untrusted"). And Gemini reads the project file from the directory it is started in only: from a subdirectory of the repository the list was `No MCP servers configured`. Start Gemini from the repository top, in a trusted folder:
 
 ```json
 {
@@ -284,7 +288,7 @@ startup_timeout_sec = 60
 }
 ```
 
-**OpenCode** — `opencode.json` in the project; a local server starts in the workspace directory, and `timeout` (5 s by default) covers listing the tools, which a first start can exceed (*unverified*):
+**OpenCode** — `opencode.json` in the project; `timeout` (5 s by default) covers listing the tools, which a first start can exceed. *Loaded and started: verified* from the repository top (2026-10-23, opencode 1.19.4): `opencode mcp list` printed `✓ doc-search connected`. OpenCode finds `opencode.json` from a subdirectory too, but starts a local server in the directory it was launched from, not where the file is: from a subdirectory the entry below was listed as `✗ doc-search failed` (`MCP error -32000: Connection closed`), because `.claude/doc-superpowers/search-mcp.sh` is not there. Start OpenCode from the repository top. A `command` that changes to the top first, `["sh", "-c", "cd \"$(git rev-parse --show-toplevel)\" && exec sh .claude/doc-superpowers/search-mcp.sh serve"]`, was listed `connected` from a subdirectory as well; `setup` does not write that form:
 
 ```json
 {
