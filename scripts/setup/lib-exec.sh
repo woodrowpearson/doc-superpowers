@@ -459,6 +459,12 @@ _exec_envhook_read() {
 }
 opcheck_envhook() {
   local f rc=0
+  # Without HOME (and no XDG_CONFIG_HOME or DOC_SEARCH_ENV_FILE) the hook's
+  # path would be /.config/doc-search/env.sh: refused, as the shim is.
+  if [ -z "${DOC_SEARCH_ENV_FILE:-}" ] && [ -z "${XDG_CONFIG_HOME:-}" ] && [ -z "${HOME:-}" ]; then
+    EXEC_ERROR="HOME is not set: the env hook goes in ~/.config/doc-search/env.sh (or set XDG_CONFIG_HOME or DOC_SEARCH_ENV_FILE)"
+    return 1
+  fi
   f=$(plan_envhook_file)
   _exec_writable "$f" || return 1
   _exec_envhook_read "$f" || {
@@ -758,6 +764,7 @@ exec_plan() {
   else
     printf '  git add%s --%s\n' "$all" "$paths"
   fi
+  plan_warn_ignored
   plan_render_harness_notes
   return 0
 }

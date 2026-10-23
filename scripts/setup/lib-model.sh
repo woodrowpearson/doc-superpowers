@@ -29,8 +29,10 @@
 #           (install.sh's valid_cron)
 # requires: an item with CAT_REQUIRES = <parent>=<value> is a child. Setting
 # a child (to anything but off) while its parent is off (off, or none for a
-# multi) sets the parent to <value>; setting a parent off resets its children
-# to their defaults.
+# multi) sets the parent to <value>, except that a child set to its default
+# while its parent is off changes nothing (the catalog's undo lines are such
+# sets); setting a parent off resets its children to their defaults (and drops
+# their host fallback wishes: a child of an off parent has none).
 # One more rule: while search is on, harness holds claude-code, since
 # install --search always registers the Claude Code entry in .mcp.json.
 #
@@ -315,7 +317,8 @@ model_check() {
 }
 
 # model_set <id> <value>: change SEL of <id>, applying requires (a child turns
-# its parent on; a parent turned off resets its children) and the claude-code
+# its parent on, but a child set to its default while its parent is off
+# changes nothing; a parent turned off resets its children) and the claude-code
 # rule. Refuses (1, MODEL_ERROR) an invalid value, a disabled item (unless
 # the value leaves it unticked or unchanged), a locked item set off, a child
 # of a disabled parent, and a harness set without claude-code while search is
@@ -326,6 +329,12 @@ model_set() {
   v="$MODEL_VALUE"
   _model_i "$id"
   i=$_MI
+  # A child set to its default while its parent is off changes nothing (the
+  # catalog's undo lines are such sets: they must not turn the parent on).
+  if [ -n "${CAT_REQUIRES[i]}" ] && [ "$v" = "${CAT_DEFAULT[i]}" ] \
+    && _model_i "${CAT_REQUIRES[i]%%=*}" && _model_is_off "$_MI" "${SEL[_MI]}"; then
+    return 0
+  fi
   if [ -n "${DISABLED[i]}" ] && [ "$v" != "${SEL[i]}" ] && ! _model_is_off "$i" "$v"; then
     MODEL_ERROR="$id: ${DISABLED[i]}"
     return 1
@@ -380,7 +389,10 @@ model_set() {
     j=0
     while [ "$j" -lt "$CAT_N" ]; do
       case "${CAT_REQUIRES[j]}" in
-        "$id="*) SEL[j]="${CAT_DEFAULT[j]}" ;;
+        "$id="*)
+          SEL[j]="${CAT_DEFAULT[j]}"
+          HOSTWISH[j]=""
+          ;;
       esac
       j=$((j + 1))
     done
@@ -534,17 +546,30 @@ model_hostfall() {
 }
 
 # model_host_skips: MODEL_SKIPPED = the items that sit on a host fallback,
-# as "<id>TAB<option>: <reason>", in catalog order.
+# and those kept on an option this host disables (installed before: a config
+# holding gte, written by the team), as "<id>TAB<option>: <reason>", in
+# catalog order. A child of an off parent is never named.
 model_host_skips() {
   local i=0
   MODEL_SKIPPED=()
   while [ "$i" -lt "$CAT_N" ]; do
-    if model_hostfall "${CAT_ID[i]}" && model_option_disabled "${CAT_ID[i]}" "$MODEL_WISH"; then
+    if ! _model_parent_on "$i"; then
+      :
+    elif model_hostfall "${CAT_ID[i]}" && model_option_disabled "${CAT_ID[i]}" "$MODEL_WISH"; then
       MODEL_SKIPPED+=("${CAT_ID[i]}"$'\t'"$MODEL_WISH: $MODEL_OPT_REASON")
+    elif [ "${SEL[i]}" = "${BASE[i]}" ] && _model_sel_opt_disabled "$i"; then
+      MODEL_SKIPPED+=("${CAT_ID[i]}"$'\t'"$_MSO_WHY")
     fi
     i=$((i + 1))
   done
   return 0
+}
+
+# _model_parent_on <i>: item i has no parent, or its parent is ticked.
+_model_parent_on() {
+  [ -n "${CAT_REQUIRES[$1]}" ] || return 0
+  _model_i "${CAT_REQUIRES[$1]%%=*}" || return 0
+  ! _model_is_off "$_MI" "${SEL[_MI]}"
 }
 
 # _model_locks: LOCKED and BASE of the ledger and spec claims, from their
