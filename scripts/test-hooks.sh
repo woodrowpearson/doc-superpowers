@@ -3229,6 +3229,11 @@ test_install_ci_version_comes_from_doc_tools() {
   assert_eq "0" "$exit_code" "install exits 0"
   assert_contains "$(cat .github/workflows/doc-release.yml 2>/dev/null)" 'DOC_SUPERPOWERS_VERSION: "v1.2.3"' \
     "the version is the first release heading at a line start, outside a fence"
+  # The same fallback for the marketplace URL: this plugin copy has no
+  # .claude-plugin/plugin.json, so no repository to fetch from.
+  assert_contains "$(cat .github/workflows/doc-release.yml 2>/dev/null)" 'DOC_SUPERPOWERS_MARKETPLACE_URL: ""' \
+    "a plugin.json naming no repository: an empty marketplace URL, never an abort"
+  assert_eq "1" "$(grep -c 'WARN.*DOC_SUPERPOWERS_MARKETPLACE_URL' <<<"$out" || true)" "…one WARN about it"
   rm -rf .github .claude "$root/RELEASE-NOTES.md"
   exit_code=0
   out=$("$BASH_BIN" "$root/scripts/hooks/install.sh" install --ci --workflows=doc-release 2>&1) || exit_code=$?
@@ -4391,6 +4396,159 @@ test_i8_default_set_ships_its_step_scripts() {
   teardown
 }
 
+# The value of <jq-path> in $IOUT ("" when it is not JSON); json_at's twin,
+# which is defined after these tests run.
+_ci_json_at() {
+  jq -r "$1" <<<"$IOUT" 2>/dev/null || true
+}
+
+# _steps_vendored: the step scripts in .github/scripts/doc-superpowers-steps/,
+# one line, sorted ("" when none).
+_steps_vendored() {
+  local f out=""
+  for f in .github/scripts/doc-superpowers-steps/*.sh; do
+    [ -f "$f" ] || continue
+    out="${out:+$out }${f##*/}"
+  done
+  printf '%s' "$out"
+}
+
+# The GitHub account the plugin's own repository lives under (plugin.json's
+# repository): a personal one, which no file a project receives may name.
+_plugin_owner() {
+  jq -r '.repository' "$SCRIPT_DIR/../.claude-plugin/plugin.json" | sed -E 's#^https://github\.com/([^/]+)/.*#\1#'
+}
+
+test_ci_steps_follow_the_workflows() {
+  # The step scripts are vendored one by one: each one an installed workflow
+  # runs, with the sibling step scripts it runs (prepare-agent.sh snapshots
+  # commit-changes.sh), and no other.
+  echo "test: install --ci vendors exactly the step scripts the installed workflows run (doc-ledger-publish alone: no prepare-agent.sh)"
+  setup
+  mkdir -p docs/ledger
+  printf '{}\n' > docs/ledger/config.json
+  inst install --ci --workflows=doc-ledger-publish
+  assert_eq "0" "$IRC" "install --ci --workflows=doc-ledger-publish exits 0"
+  assert_eq "ledger-publish.sh" "$(_steps_vendored)" "doc-ledger-publish alone: its publish step script, and no other"
+  assert_file_not_exists ".github/scripts/doc-superpowers-steps/prepare-agent.sh" "…no prepare-agent.sh"
+  _assert_installed_workflows_wired "install --ci --workflows=doc-ledger-publish"
+  inst install --ci --workflows=doc-review-pr
+  assert_eq "0" "$IRC" "install --ci --workflows=doc-review-pr exits 0"
+  assert_eq "commit-changes.sh freshness-check.sh ledger-publish.sh pr-guard.sh prepare-agent.sh resolve-auth.sh" "$(_steps_vendored)" \
+    "+ doc-review-pr: its scope gate, fork guard, auth and plugin steps, and the checker prepare-agent.sh snapshots"
+  _assert_installed_workflows_wired "install --ci --workflows=doc-ledger-publish,doc-review-pr"
+  inst install --ci --workflows=doc-pr-full-cycle
+  assert_eq "0" "$IRC" "install --ci --workflows=doc-pr-full-cycle exits 0"
+  _assert_installed_workflows_wired "+ doc-pr-full-cycle"
+  inst uninstall --ci --workflows=doc-review-pr
+  assert_eq "0" "$IRC" "uninstall --ci --workflows=doc-review-pr exits 0"
+  assert_eq "commit-changes.sh freshness-check.sh ledger-publish.sh prepare-agent.sh resolve-auth.sh" "$(_steps_vendored)" \
+    "without doc-review-pr: its fork guard goes, what doc-pr-full-cycle runs stays"
+  _assert_installed_workflows_wired "doc-ledger-publish + doc-pr-full-cycle"
+  inst uninstall --ci --workflows=doc-pr-full-cycle
+  assert_eq "ledger-publish.sh" "$(_steps_vendored)" "without the AI workflows: prepare-agent.sh and the scripts only they ran go"
+  teardown
+}
+
+test_ci_upgrade_prunes_unused_step_scripts() {
+  # A 3.8.1 (or older) install vendored every step script. The next install
+  # --ci removes those no installed workflow runs (byte-identical only); status
+  # --ci reports one it cannot remove, as removable.
+  echo "test: install --ci removes the unused step scripts an older install vendored; status --ci reports a kept one as removable"
+  setup
+  mkdir -p docs/ledger
+  printf '{}\n' > docs/ledger/config.json
+  inst install --ci --workflows=doc-ledger-publish
+  "$BASH_BIN" "$SCRIPT_DIR/doc-tools.sh" tools install --helper doc-superpowers-steps >/dev/null 2>&1
+  assert_file_exists ".github/scripts/doc-superpowers-steps/prepare-agent.sh" "fixture: every step script vendored, as before"
+  inst status --ci
+  assert_contains "$IOUT" "prepare-agent.sh" "status --ci names an unused step script"
+  assert_contains "$(grep -F "prepare-agent.sh" <<<"$IOUT" || true)" "removable" "…as removable"
+  assert_eq "" "$(grep -F "removable" <<<"$IOUT" | grep -F "ledger-publish.sh" || true)" "…never one an installed workflow runs"
+  inst status --ci --json
+  assert_eq "true" "$(_ci_json_at '.tiers.ci.removable_vendored | index(".github/scripts/doc-superpowers-steps/prepare-agent.sh") != null')" \
+    "status --ci --json lists it in .tiers.ci.removable_vendored"
+  assert_eq "false" "$(_ci_json_at '.tiers.ci.removable_vendored | index(".github/scripts/doc-superpowers-steps/ledger-publish.sh") != null')" \
+    "…and not the publish step script"
+  echo "# a local edit" >> .github/scripts/doc-superpowers-steps/pr-guard.sh
+  inst install --ci
+  assert_eq "0" "$IRC" "a plain install --ci exits 0"
+  assert_eq "ledger-publish.sh pr-guard.sh" "$(_steps_vendored)" "it removes every unused, unmodified step script"
+  assert_contains "$IOUT" "Kept .github/scripts/doc-superpowers-steps/pr-guard.sh" "…keeps an edited one and says so"
+  inst status --ci
+  assert_contains "$(grep -F "pr-guard.sh" <<<"$IOUT" || true)" "removable" "status --ci reports the kept one as removable"
+  assert_eq "" "$(grep -F "prepare-agent.sh" <<<"$IOUT" || true)" "…and no longer the removed one"
+  inst status --ci --json
+  assert_eq '[".github/scripts/doc-superpowers-steps/pr-guard.sh"]' "$(_ci_json_at '.tiers.ci.removable_vendored' | jq -c . 2>/dev/null)" \
+    ".tiers.ci.removable_vendored: the kept one"
+  teardown
+}
+
+test_ci_no_personal_url_in_installed_files() {
+  # Nothing install --ci writes names the plugin owner's GitHub account
+  # unless it is needed and asked for: the AI workflows' marketplace URL is
+  # rendered at install time (default: the plugin's own repository, from
+  # plugin.json), and --marketplace-url replaces it (recorded).
+  echo "test: install --ci — no vendored file holds a personal URL; the marketplace URL is rendered, overridable, recorded"
+  local owner mirror=https://git.example.com/acme/doc-superpowers.git repo hits
+  owner=$(_plugin_owner)
+  repo=$(jq -r '.repository' "$SCRIPT_DIR/../.claude-plugin/plugin.json")
+  assert_true "fixture: plugin.json names a GitHub owner ($owner)" test -n "$owner" -a "$owner" != "$repo"
+  setup
+  mkdir -p docs/ledger
+  printf '{}\n' > docs/ledger/config.json
+  inst install --ci --workflows=all
+  assert_eq "0" "$IRC" "install --ci --workflows=all exits 0"
+  hits=$(grep -rliF -- "$owner" .github/scripts RELEASE-NOTES.next .claude/doc-superpowers 2>/dev/null || true)
+  assert_eq "" "$hits" "no vendored file (nor the state file) names $owner"
+  hits=$(grep -rhiF -- "$owner" .github/workflows 2>/dev/null | grep -vxF "  DOC_SUPERPOWERS_MARKETPLACE_URL: \"$repo.git\"" || true)
+  assert_eq "" "$hits" "the workflows name it only as the rendered marketplace URL (the plugin's repository)"
+  hits=$(grep -liF -- "$owner" .github/workflows/doc-freshness-pr.yml .github/workflows/doc-freshness-schedule.yml .github/workflows/doc-ledger-publish.yml 2>/dev/null || true)
+  assert_eq "" "$hits" "…and the shell workflows not at all"
+  assert_contains "$(cat .github/workflows/doc-review-pr.yml)" "DOC_SUPERPOWERS_MARKETPLACE_URL: \"$repo.git\"" \
+    "an AI workflow fetches the plugin from where it always did (its repository, the old default)"
+  inst install --ci --marketplace-url "$mirror"
+  assert_eq "0" "$IRC" "install --ci --marketplace-url <mirror> exits 0"
+  hits=$(grep -rliF -- "$owner" .github .claude/doc-superpowers RELEASE-NOTES.next 2>/dev/null || true)
+  assert_eq "" "$hits" "with a mirror, nothing install --ci wrote names $owner"
+  assert_contains "$(cat .github/workflows/doc-pr-full-cycle.yml)" "DOC_SUPERPOWERS_MARKETPLACE_URL: \"$mirror\"" "the AI workflows fetch from the mirror"
+  assert_eq "$mirror" "$(jq -r '.tiers.ci.marketplace_url' .claude/doc-superpowers/installed.json)" "…recorded in installed.json"
+  inst install --ci
+  assert_contains "$(cat .github/workflows/doc-release.yml)" "DOC_SUPERPOWERS_MARKETPLACE_URL: \"$mirror\"" "a plain install --ci keeps the recorded mirror"
+  inst status --ci
+  assert_contains "$IOUT" "marketplace $mirror" "status --ci shows the recorded marketplace"
+  inst status --ci --json
+  assert_eq "$mirror" "$(_ci_json_at .tiers.ci.choices.marketplace_url)" "…and status --json, under choices"
+  local before
+  before=$(_tree_state)
+  inst install --ci --marketplace-url 'https://x.example/a b.git'
+  assert_eq "1" "$IRC" "a marketplace URL with a space is refused"
+  inst install --ci '--marketplace-url=https://x.example/"q".git'
+  assert_eq "1" "$IRC" "…and one with a quote"
+  inst install --ci '--marketplace-url=${{ secrets.X }}'
+  assert_eq "1" "$IRC" "…and an expression"
+  assert_eq "$before" "$(_tree_state)" "…writing nothing"
+  inst install --ci --marketplace-url=
+  assert_eq "0" "$IRC" "--marketplace-url= (empty) exits 0"
+  assert_eq "null" "$(jq -r '.tiers.ci.marketplace_url' .claude/doc-superpowers/installed.json)" "…and clears the record"
+  assert_contains "$(cat .github/workflows/doc-release.yml)" "DOC_SUPERPOWERS_MARKETPLACE_URL: \"$repo.git\"" "…back to the plugin's repository"
+  inst install --marketplace-url "$mirror" --git
+  assert_eq "2" "$IRC" "--marketplace-url without --ci is a usage error"
+  teardown
+}
+
+test_install_ci_marketplace_url_only_when_rendered() {
+  # The derived URL is never recorded: a project that installs no AI workflow
+  # holds no marketplace URL anywhere.
+  echo "test: install --ci with no AI workflow records and renders no marketplace URL"
+  setup
+  inst install --ci
+  assert_eq "0" "$IRC" "install --ci exits 0"
+  assert_eq "false" "$(jq '.tiers.ci | has("marketplace_url")' .claude/doc-superpowers/installed.json)" "installed.json records none"
+  assert_eq "" "$(grep -rlF DOC_SUPERPOWERS_MARKETPLACE_URL .github 2>/dev/null || true)" "…and no installed file names one"
+  teardown
+}
+
 echo ""
 echo "=== CI templates: retired doc-index-update, step scripts (I-8) ==="
 test_i8_doc_index_update_retired
@@ -4399,6 +4557,10 @@ test_i8_retired_foreign_file_kept
 test_i8_retired_status_and_uninstall
 test_i8_no_placeholder_survives_install_all
 test_i8_default_set_ships_its_step_scripts
+test_ci_steps_follow_the_workflows
+test_ci_upgrade_prunes_unused_step_scripts
+test_ci_no_personal_url_in_installed_files
+test_install_ci_marketplace_url_only_when_rendered
 
 
 # --- Final review fix wave: installer + hooks ---------------------------------

@@ -239,12 +239,14 @@ Install opt-in hooks for automated freshness monitoring:
 /doc-superpowers hooks install --ci --base-branch develop   # target branch (default: main)
 /doc-superpowers hooks install --ci --cron "0 6 * * 1"      # weekly audit schedule (default: 0 9 * * 1)
 /doc-superpowers hooks install --ci --ci-strict             # PR checks fail on stale docs, and on a freshness or claims check that cannot run (--ci-strict=false undoes it)
+/doc-superpowers hooks install --ci --workflows=doc-review-pr --marketplace-url https://git.example.com/acme/doc-superpowers.git  # AI workflows fetch the plugin from your mirror (recorded; default: the plugin's own repository)
 
 # Standalone tool install (v2.12.0+) — doc-tools.sh only, no workflows
 # ($DOC_TOOLS is the plugin's scripts/doc-tools.sh: see docs/guides/getting-started.md, "Independent of hooks")
 $DOC_TOOLS tools install                       # → .github/scripts/doc-tools.sh
 $DOC_TOOLS tools install --with-helpers        # + every helper the CI templates run
 $DOC_TOOLS tools install --helper doc-superpowers-steps  # + only the named helper set(s)
+$DOC_TOOLS tools install --step freshness-check.sh  # + only the named step script(s), as install --ci vendors them
 $DOC_TOOLS tools install --helper ledger       # + the work ledger's modules and adapters (ledger/, adapters/)
 $DOC_TOOLS tools status                        # present? matches the plugin? which version?
 $DOC_TOOLS tools uninstall                     # removes only files identical to the plugin's
