@@ -5,7 +5,9 @@
 # worktree is its own top level); outside a work tree it exits 1.
 #
 #   --list              print every item: <id>=<value> TAB <scope> TAB <label>
-#                       TAB <options> TAB <disabled reason>
+#                       TAB <options> TAB <disabled reason, or "(locked:
+#                       <reason>)" for the ledger and spec claims while their
+#                       switch exists>
 #   --set <id>=<value>  change one item (repeatable; --set=<id>=<value> too)
 #   --dry-run           print the summary, a blank line, then the review (the
 #                       plan's steps, what they write, the network, the
@@ -15,14 +17,32 @@
 #                       then the git add line of the team's paths that
 #                       changed, or "nothing to do". Write only: nothing
 #                       downloads
-#   --build             the download consent: with --yes, doc-search's
-#                       first index build runs last (through uv; refused
-#                       with exit 1, nothing written, when the host has no
-#                       uv); with --dry-run, the review includes it
-#   --for-team          with --dry-run: the per-user values are the team's
-#   --apply --link-bin --no-link-bin --plain, --build without --dry-run or
-#   --yes, and --for-team without --dry-run: not implemented yet (exit 3)
-# --list, --dry-run and --yes are modes: one at a time.
+#   --apply             reproduce the recorded team setup (the team record,
+#                       your local overrides, .tiers.ci's workflows and
+#                       choices) without asking: the per-user installs and
+#                       any missing team file; never the team record. Exit 1
+#                       with "no team setup recorded: run doc-superpowers
+#                       setup" when installed.json has no .setup (a CI-only
+#                       record included). An item this host's checks disable
+#                       is skipped: "skipped: <id>: <reason>", printed last,
+#                       and the run still exits 0. The writes outside the
+#                       repository are listed under "Local to you (outside
+#                       the repository):". With --dry-run: what --apply
+#                       would do, nothing written. Takes no --set and no
+#                       --for-team (exit 3)
+#   --build             the download consent: with --yes or --apply,
+#                       doc-search's first index build runs last (through
+#                       uv; refused with exit 1, nothing written, when the
+#                       host has no uv); with --dry-run, the review includes
+#                       it
+#   --for-team          with --dry-run or --yes: the per-user values (git,
+#                       claude, the ledger's hook sets) are the team's, in
+#                       the team record; without it, once a team record
+#                       exists, they are yours (installed.local.json)
+#   --link-bin --no-link-bin --plain, and --build or --for-team with no mode
+#   (the interactive UI): not implemented yet (exit 3)
+# --list, --dry-run, --yes and --apply are modes: one at a time, except
+# --apply --dry-run.
 #
 # The layers (design §5): lib-model.sh (the catalog, the selection, --set and
 # requires), lib-probe.sh (installer status, the records, what is installed),
@@ -62,6 +82,7 @@ not_yet() {
 }
 
 MODE=""
+APPLY=0
 BUILD=0
 FOR_TEAM=0
 SETS=()
@@ -81,7 +102,7 @@ while [ "$#" -gt 0 ]; do
     --set=*) SETS+=("${1#--set=}") ;;
     --dry-run) set_mode dry-run ;;
     --yes) set_mode yes ;;
-    --apply) not_yet --apply ;;
+    --apply) APPLY=1 ;;
     --build) BUILD=1 ;;
     --for-team) FOR_TEAM=1 ;;
     --link-bin) not_yet --link-bin ;;
@@ -91,12 +112,30 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
-# --build is the download consent of --yes (and of --apply, a later task's);
-# with --dry-run it shows the build in the review.
-[ "$BUILD" = 0 ] || [ "$MODE" = dry-run ] || [ "$MODE" = yes ] || not_yet --build
-# --for-team makes the per-user values the team's (the --yes flow is a later
-# task's); with --dry-run the review shows that plan.
-[ "$FOR_TEAM" = 0 ] || [ "$MODE" = dry-run ] || not_yet --for-team
+# --apply: the recorded setup as it is, so no --set and no --for-team; a
+# mode of its own, which --dry-run previews.
+if [ "$APPLY" = 1 ]; then
+  [ "${#SETS[@]}" -eq 0 ] || usage_error "--apply reproduces the recorded team setup: it takes no --set (run setup --yes --set … to change it)"
+  [ "$FOR_TEAM" = 0 ] || usage_error "--apply never changes the team record: it takes no --for-team"
+  case "$MODE" in
+    "") MODE=apply ;;
+    dry-run) ;;
+    *) usage_error "--apply and --$MODE cannot be used together" ;;
+  esac
+fi
+# --build is the download consent of --yes and --apply; with --dry-run it
+# shows the build in the review.
+case "$MODE" in
+  dry-run | yes | apply) ;;
+  *) [ "$BUILD" = 0 ] || not_yet --build ;;
+esac
+# --for-team makes the per-user values the team's (--yes), or shows that
+# plan (--dry-run).
+case "$MODE" in
+  dry-run | yes) ;;
+  list) [ "$FOR_TEAM" = 0 ] || usage_error "--for-team does not apply to --list" ;;
+  *) [ "$FOR_TEAM" = 0 ] || not_yet --for-team ;;
+esac
 
 command -v jq >/dev/null 2>&1 || die "jq is needed (1.6 or later); nothing was changed"
 model_load_catalog "$ROOT/scripts/setup/catalog.json" || die "$MODEL_ERROR" 2
@@ -111,7 +150,7 @@ for _s in ${SETS[@]+"${SETS[@]}"}; do
 done
 
 case "$MODE" in
-  list | dry-run | yes) ;;
+  list | dry-run | yes | apply) ;;
   *) not_yet "interactive mode" ;;
 esac
 
@@ -121,10 +160,22 @@ cd "$_top"
 
 probe_run || die "$PROBE_ERROR"
 [ -z "$PROBE_RECORD_ERROR" ] || die "$PROBE_RECORD_ERROR; nothing was changed"
+# --apply reproduces a recorded team setup: a CI-only record holds none.
+[ "$APPLY" = 0 ] || [ -n "$PROBE_TEAM" ] || die "no team setup recorded: run doc-superpowers setup"
 model_base_init || die "$MODEL_ERROR; nothing was changed"
 for _s in ${SETS[@]+"${SETS[@]}"}; do
   model_set "${_s%%=*}" "${_s#*=}" || die "--set $_s: $MODEL_ERROR"
 done
+# --apply: the items this host's checks disable are skipped (left as they
+# are), named last.
+if [ "$APPLY" = 1 ]; then model_apply_skips; fi
+print_skipped() {
+  local e
+  for e in ${MODEL_SKIPPED[@]+"${MODEL_SKIPPED[@]}"}; do
+    printf 'skipped: %s: %s\n' "${e%%$'\t'*}" "${e#*$'\t'}"
+  done
+}
+PLAN_APPLY="$APPLY"
 
 # --dry-run: the summary, a blank line, the review; nothing written.
 if [ "$MODE" = dry-run ]; then
@@ -135,24 +186,30 @@ if [ "$MODE" = dry-run ]; then
   echo ""
   plan_render_review
   if plan_is_empty; then echo "nothing to do"; fi
+  print_skipped
   exit 0
 fi
 
-# --yes: the plan's steps (Write only; with --build, the build last), then
-# the git add line.
-if [ "$MODE" = yes ]; then
+# --yes and --apply: the plan's steps (Write only; with --build, the build
+# last), then the git add line (--apply: the writes outside the repository
+# first, and the skipped items last).
+if [ "$MODE" = yes ] || [ "$MODE" = apply ]; then
   PLAN_BUILD_REQUESTED="$BUILD"
-  PLAN_FOR_TEAM=0
+  PLAN_FOR_TEAM="$FOR_TEAM"
   plan_build || die "$PLAN_ERROR; nothing was changed"
+  EXEC_SHOW_OUTSIDE="$APPLY"
   _rc=0
   exec_plan || _rc=$?
+  [ "$_rc" = 1 ] || print_skipped
   exit "$_rc"
 fi
 
 # --list: one line per item, in catalog order. A reason is one line.
 _i=0
 while [ "$_i" -lt "$CAT_N" ]; do
-  _reason="${DISABLED[_i]//$'\t'/ }"
+  _reason="${DISABLED[_i]}"
+  [ -n "$_reason" ] || [ -z "${LOCKED[_i]}" ] || _reason="(locked: ${LOCKED[_i]})"
+  _reason="${_reason//$'\t'/ }"
   _reason="${_reason//$'\n'/ }"
   printf '%s=%s\t%s\t%s\t%s\t%s\n' "${CAT_ID[_i]}" "${SEL[_i]}" "${CAT_SCOPE[_i]}" "${CAT_LABEL[_i]}" \
     "${CAT_OPTIONS[_i]}" "$_reason"

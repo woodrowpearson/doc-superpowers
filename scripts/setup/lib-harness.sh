@@ -47,7 +47,10 @@
 # header, a doc-search key (dotted keys too) under [mcp_servers], a top-level
 # mcp_servers.doc-search key, or a top-level mcp_servers = {…} inline table
 # (which no later table may extend). Markers that do not form one block are
-# refused too. Nothing else of the file is read.
+# refused too, and so is removing setup's block while a line of the user's
+# outside it extends the block's table (a [mcp_servers.doc-search.env]
+# subtable): it would be left without its table. Nothing else of the file is
+# read.
 
 HARNESS_ERROR=""
 HARNESS_CODEX_BEGIN="# doc-superpowers setup:begin doc-search"
@@ -290,6 +293,14 @@ harness_entry_check() {
     fi
     if [ "$op" = add ] && [ "$_HC_UN" != 0 ]; then
       HARNESS_ERROR="$f already defines [mcp_servers.doc-search] outside setup's block (or defines mcp_servers as an inline table); TOML allows it once, and setup edits only what it wrote: move it into a block between '$HARNESS_CODEX_BEGIN' and '$HARNESS_CODEX_END', or remove it, and run setup again"
+      return 1
+    fi
+    # Setup's block holds the [mcp_servers.doc-search] table; a line of the
+    # user's outside it that extends that table (a subtable such as
+    # [mcp_servers.doc-search.env], or a doc-search key) would be left
+    # without it. With no block, a remove has nothing to do.
+    if [ "$op" = remove ] && [ "$_HC_NB" != 0 ] && [ "$_HC_UN" != 0 ]; then
+      HARNESS_ERROR="$f defines part of setup's [mcp_servers.doc-search] table outside setup's block (a subtable such as [mcp_servers.doc-search.env], or a doc-search key of its own): removing the block would leave it without its table; move it into the block between '$HARNESS_CODEX_BEGIN' and '$HARNESS_CODEX_END', or remove it, and run setup again"
       return 1
     fi
     return 0

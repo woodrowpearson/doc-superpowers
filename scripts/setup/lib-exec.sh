@@ -18,21 +18,35 @@
 # the installer's own output passes through. A step that fails stops the run:
 # "setup: step <n> (<op>) failed; done: <ops>; re-run to finish" on stderr,
 # return 2 (each step is idempotent: a re-run plans and finishes the rest).
-# At the end: "Then commit:" and the git add line of the team's paths the run
-# changed (W_TEAM, those whose content changed), or "  (nothing)". An empty
-# plan prints "nothing to do" and returns 0.
+# At the end: with EXEC_SHOW_OUTSIDE=1 (setup --apply), "Local to you
+# (outside the repository):" and the plan's W_OUTSIDE lines (or
+# "  (nothing)"); then "Then commit:" and the git add line of the team's paths
+# the run changed (W_TEAM, those whose content changed), or "  (nothing)". An
+# empty plan prints "nothing to do" and returns 0.
 #
-# The steps (Task 7 adds the rest of lib-plan.sh's ops):
+# The steps (bin-link and bin-unlink are a later task's):
 #   search-config <static|gte>          docs/search/config.json, setup's own
 #                                       copy of doc-search init's defaults
 #                                       (search-config.json; gte: docs.model
 #                                       set), or docs.model alone in an
 #                                       existing one; never through uv
+#   ledger-config                       docs/ledger/config.json = {}, only
+#                                       when absent
+#   claims-config                       docs/spec-claims/config.json =
+#                                       {"schema": 1}, only when absent
 #   git-install <hooks|merge-driver>    install --git [--merge-driver-only]
 #   git-uninstall <hooks|merge-driver>  uninstall --git [--merge-driver-only]
 #   claude-install / claude-uninstall   install / uninstall --claude
+#   ci-install <csv> <base> <cron> <true|false>
+#                                       install --ci --workflows=<csv>
+#                                       --base-branch <base> --cron <cron>
+#                                       --ci-strict=<true|false>
+#   ci-uninstall <csv>                  uninstall --ci --workflows=<csv>
 #   search-install / search-uninstall   install / uninstall --search (the
 #                                       config is left in place, and said so)
+#   ledger-install / ledger-uninstall   install / uninstall --ledger
+#   ledger-claude-install / ledger-claude-uninstall
+#                                       install / uninstall --ledger-claude
 #   harness-add <h> / harness-remove <h>
 #                                       a harness's doc-search entry in its
 #                                       project file (lib-harness.sh: the
@@ -54,6 +68,7 @@
 
 EXEC_ERROR=""
 EXEC_WROTE=0
+EXEC_SHOW_OUTSIDE=0
 _EXEC_TMP="" _EXEC_N=0 _EXEC_OP="" _EXEC_DONE=""
 
 # _exec_installer <args…>: install.sh, under the interpreter running setup.
@@ -211,6 +226,33 @@ op_claude_uninstall() {
   _exec_installer uninstall --claude
 }
 
+# ci-install <csv> <base> <cron> <true|false>: the whole selected set, with
+# the team's choices (install --ci records them in .tiers.ci).
+op_ci_install() {
+  _exec_installer install --ci "--workflows=$1" --base-branch "$2" --cron "$3" "--ci-strict=$4"
+}
+
+# ci-uninstall <csv>: the workflows unticked (install --ci records them as
+# removed in .tiers.ci).
+op_ci_uninstall() {
+  _exec_installer uninstall --ci "--workflows=$1"
+}
+
+# The ledger's two hook sets. install --ledger and --ledger-claude refuse
+# without docs/ledger/config.json: ledger-config runs first.
+op_ledger_install() {
+  _exec_installer install --ledger
+}
+op_ledger_uninstall() {
+  _exec_installer uninstall --ledger
+}
+op_ledger_claude_install() {
+  _exec_installer install --ledger-claude
+}
+op_ledger_claude_uninstall() {
+  _exec_installer uninstall --ledger-claude
+}
+
 # install --search refuses without docs/search/config.json: search-config
 # runs first.
 op_search_install() {
@@ -306,6 +348,30 @@ op_search_config() {
     new=$(jq --argjson m "$m" '.docs.model = $m' "$ROOT/scripts/setup/search-config.json") || return 1
   fi
   _exec_write "$f" "$new"
+}
+
+# ledger-config / claims-config: the two switches, written only when absent
+# (an existing one is the team's: never rewritten). The ledger's is {} (a
+# complete config: every key has a default); spec claims' is {"schema": 1}.
+_EXEC_LEDGER_CFG="docs/ledger/config.json"
+_EXEC_CLAIMS_CFG="docs/spec-claims/config.json"
+opcheck_ledger_config() {
+  _exec_no_link "$_EXEC_LEDGER_CFG"
+}
+# shellcheck disable=SC2034  # EXEC_WROTE is the writers' interface, read by their callers
+op_ledger_config() {
+  EXEC_WROTE=0
+  if [ -e "$_EXEC_LEDGER_CFG" ] || [ -L "$_EXEC_LEDGER_CFG" ]; then return 0; fi
+  _exec_write "$_EXEC_LEDGER_CFG" "{}"
+}
+opcheck_claims_config() {
+  _exec_no_link "$_EXEC_CLAIMS_CFG"
+}
+# shellcheck disable=SC2034  # EXEC_WROTE is the writers' interface, read by their callers
+op_claims_config() {
+  EXEC_WROTE=0
+  if [ -e "$_EXEC_CLAIMS_CFG" ] || [ -L "$_EXEC_CLAIMS_CFG" ]; then return 0; fi
+  _exec_write "$_EXEC_CLAIMS_CFG" '{"schema": 1}'
 }
 
 # harness-add <h> / harness-remove <h>: lib-harness.sh. A refusal (a file that
@@ -569,6 +635,11 @@ exec_plan() {
     _EXEC_DONE="${_EXEC_DONE:+$_EXEC_DONE, }$op"
   done
   trap - INT TERM
+
+  if [ "$EXEC_SHOW_OUTSIDE" = 1 ]; then
+    echo ""
+    _plan_print_section "Local to you (outside the repository):" path ${W_OUTSIDE[@]+"${W_OUTSIDE[@]}"}
+  fi
 
   # The git add line, as the review prints it: a path that is gone goes on it
   # only when git tracks it (then -A stages the deletion).
