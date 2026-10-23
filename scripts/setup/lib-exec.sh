@@ -22,7 +22,7 @@
 # changed (W_TEAM, those whose content changed), or "  (nothing)". An empty
 # plan prints "nothing to do" and returns 0.
 #
-# The steps (Tasks 6-7 add the rest of lib-plan.sh's ops):
+# The steps (Task 7 adds the rest of lib-plan.sh's ops):
 #   search-config <static|gte>          docs/search/config.json, setup's own
 #                                       copy of doc-search init's defaults
 #                                       (search-config.json; gte: docs.model
@@ -33,6 +33,11 @@
 #   claude-install / claude-uninstall   install / uninstall --claude
 #   search-install / search-uninstall   install / uninstall --search (the
 #                                       config is left in place, and said so)
+#   harness-add <h> / harness-remove <h>
+#                                       a harness's doc-search entry in its
+#                                       project file (lib-harness.sh: the
+#                                       Codex block, a jq merge into the JSON
+#                                       files); claude-code's is search-install
 #   envhook <cache|-|host> <root|->     the doc-superpowers block of the env
 #                                       hook (plan_envhook_merge), sh -n
 #                                       checked before the mv
@@ -299,6 +304,30 @@ op_search_config() {
   _exec_write "$f" "$new"
 }
 
+# harness-add <h> / harness-remove <h>: lib-harness.sh. A refusal (a file that
+# is not the expected shape, an [mcp_servers.doc-search] table of the user's,
+# a link) is found by the opcheck_, before the first step runs.
+opcheck_harness_add() {
+  harness_entry_check add "$1" && return 0
+  EXEC_ERROR="$HARNESS_ERROR"
+  return 1
+}
+op_harness_add() {
+  harness_entry_add "$1" && return 0
+  [ -z "$HARNESS_ERROR" ] || echo "setup: $HARNESS_ERROR" >&2
+  return 1
+}
+opcheck_harness_remove() {
+  harness_entry_check remove "$1" && return 0
+  EXEC_ERROR="$HARNESS_ERROR"
+  return 1
+}
+op_harness_remove() {
+  harness_entry_remove "$1" && return 0
+  [ -z "$HARNESS_ERROR" ] || echo "setup: $HARNESS_ERROR" >&2
+  return 1
+}
+
 # envhook <cache|-|host> <root|->: the doc-superpowers block of the env hook
 # (plan_envhook_file) becomes plan_envhook_merge's, in place; a new block
 # goes after the file's own lines; no line left: the block goes (and the
@@ -308,15 +337,26 @@ op_search_config() {
 _exec_envhook_split() {
   # _EXEC_PRE / _EXEC_POST: the file's text ($1) before and after the block;
   # returns 1 when there is no block, 2 when it has no end marker.
-  local cur="$1" rest nl=$'\n' b="$PLAN_ENVHOOK_BEGIN" e="$PLAN_ENVHOOK_END"
+  local cur="$1" rest nl=$'\n' b="$PLAN_ENVHOOK_BEGIN" e="$PLAN_ENVHOOK_END" tail after
   _EXEC_PRE="" _EXEC_POST=""
   if [[ "$cur" == "$b$nl"* || "$cur" == "$b" ]]; then
     rest="${cur#"$b"}"
-  elif [[ "$cur" == *"$nl$b$nl"* || "$cur" == *"$nl$b" ]]; then
-    _EXEC_PRE="${cur%%"$nl$b"*}$nl"
-    rest="${cur#*"$nl$b"}"
   else
-    return 1
+    # The first line that IS the begin marker (the condition
+    # _plan_envhook_current uses): a user's line that only starts with the
+    # marker's text stays in the text before the block.
+    tail="$cur"
+    while :; do
+      [[ "$tail" == *"$nl$b"* ]] || return 1
+      after="${tail#*"$nl$b"}"
+      _EXEC_PRE="$_EXEC_PRE${tail%%"$nl$b"*}$nl"
+      if [[ -z "$after" || "$after" == "$nl"* ]]; then
+        rest="$after"
+        break
+      fi
+      _EXEC_PRE="$_EXEC_PRE$b"
+      tail="$after"
+    done
   fi
   # rest: "" or "\n…", the block's lines up to its end marker.
   if [[ "$rest" == *"$nl$e$nl"* ]]; then
@@ -548,5 +588,6 @@ exec_plan() {
   else
     printf '  git add%s --%s\n' "$all" "$paths"
   fi
+  plan_render_harness_notes
   return 0
 }
