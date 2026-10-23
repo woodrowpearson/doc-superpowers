@@ -7372,6 +7372,9 @@ doc-review-pr: "*) echo "ci details: one line per workflow" ;; esac
     model_set git bogus || echo "l: $MODEL_ERROR"
     model_set ci.base_branch "two words" || echo "l2: $MODEL_ERROR"
     model_set search.cache /abs/cache; echo "l3: $(model_get search.cache)"
+    model_check git "hooks,merge-driver" || echo "q1: refused"
+    _model_csv_has "on,off" "on,off" || echo "q2: not a run of options"
+    _model_csv_has "on,off" "" || echo "q3: not an empty name"
     model_idx nosuch || echo "m: no index"
     echo "n: $(model_idx harness) $(model_idx bin)"
     DISABLED[$(model_idx claims)]="a test reason"
@@ -7402,6 +7405,9 @@ doc-review-pr: "*) echo "ci details: one line per workflow" ;; esac
   assert_true "git=bogus is refused, naming the item and the value" grep -qE '^l: .*git.*bogus' <<<"$SL_OUT"
   assert_true "ci.base_branch='two words' is refused" grep -qE '^l2: .*ci\.base_branch' <<<"$SL_OUT"
   assert_contains "$SL_OUT" "l3: /abs/cache" "search.cache takes an absolute path"
+  assert_contains "$SL_OUT" "q1: refused" "model_check: two choice options joined by a comma are not a value"
+  assert_contains "$SL_OUT" "q2: not a run of options" "_model_csv_has: a name holding a comma is never a member"
+  assert_contains "$SL_OUT" "q3: not an empty name" "_model_csv_has: an empty name is never a member"
   assert_contains "$SL_OUT" "m: no index" "model_idx returns 1 for an unknown id"
   assert_contains "$SL_OUT" "n: 0 14" "model_idx: harness 0, bin 14"
   assert_contains "$SL_OUT" "o: claims: a test reason" "a disabled item is refused with its reason"
@@ -7491,7 +7497,9 @@ test_setup_set_validation() {
   assert_eq "on|gte" "$(list_val search)|$(list_val search.model)" "search.model=gte turns search on"
   run_setup -- --list --set=harness=gemini,claude-code --set git=merge-driver
   assert_eq "claude-code,gemini|merge-driver" "$(list_val harness)|$(list_val git)" "--set=<id>=<value>, repeatable; a CSV in catalog order"
-  for spec in "nosuch=1" "git=bogus" "ci.cron=1 2" "search.cache=relative/path" "ci.base_branch=a..b" "search=maybe" "ci.workflows=doc-nosuch"; do
+  for spec in "nosuch=1" "git=bogus" "ci.cron=1 2" "search.cache=relative/path" "ci.base_branch=a..b" "search=maybe" "ci.workflows=doc-nosuch" \
+    "search=on,off" "git=merge-driver,off" "claude=on,off" "ci.strict=on,off" "search.model=static,gte" \
+    "harness=claude" "harness=code" "ci.workflows=doc-freshness" "ci.workflows=pr"; do
     run_setup -- --list --set "$spec"
     assert_eq "3" "$RUN_RC" "--set '$spec': exit 3"
     assert_contains "$RUN_ERR" "${spec%%=*}" "--set '$spec': stderr names the item"
@@ -7587,7 +7595,23 @@ test_setup_refuses_bad_record() {
   run_setup -- --list
   assert_eq "1" "$RUN_RC" ".setup.git bogus: exit 1"
   assert_contains "$RUN_ERR" "bogus" "…naming the value"
+  echo '{"schema_version":2,"setup":{"format":1,"git":"merge-driver,off"}}' > "$rec"
+  run_setup -- --list
+  assert_eq "1" "$RUN_RC" ".setup.git \"merge-driver,off\" (two options joined): exit 1"
+  assert_contains "$RUN_ERR" "installed.json" "…naming the record"
+  assert_contains "$RUN_ERR" "merge-driver,off" "…and the value"
+  assert_eq "" "$RUN_OUT" "…nothing listed"
+  echo '{"schema_version":2,"setup":{"format":1,"claude":true,"harnesses":["claude-code,codex"]}}' > "$rec"
+  run_setup -- --list
+  assert_eq "1" "$RUN_RC" ".setup.harnesses holding \"claude-code,codex\" as one name: exit 1"
+  assert_contains "$RUN_ERR" "installed.json" "…naming the record"
   rm -f "$rec"
+  echo '{"format":1,"overrides":{"git":"hooks,merge-driver"}}' > .claude/doc-superpowers/installed.local.json
+  run_setup -- --list
+  assert_eq "1" "$RUN_RC" "a local override git \"hooks,merge-driver\": exit 1"
+  assert_contains "$RUN_ERR" "installed.local.json" "…naming the local record"
+  assert_contains "$RUN_ERR" "hooks,merge-driver" "…and the value"
+  rm -f .claude/doc-superpowers/installed.local.json
   echo 'nope' > .claude/doc-superpowers/installed.local.json
   run_setup -- --list
   assert_eq "1" "$RUN_RC" "a local record that is not JSON: exit 1"

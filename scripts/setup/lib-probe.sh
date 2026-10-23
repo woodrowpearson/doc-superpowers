@@ -97,9 +97,9 @@ _PROBE_TEAM_JQ='
       ($s | tojson),
       (if $s | has("harnesses") then
          ($s.harnesses
-          | if type == "array" and all(.[]; type == "string")
+          | if type == "array" and all(.[]; type == "string" and (contains(",") | not))
             then "harness=" + (if length == 0 then "none" else join(",") end)
-            else bad("harnesses is not a list of names") end)
+            else bad("harnesses is not a list of names (\(tojson))") end)
        else empty end),
       (if $s | has("git") then
          ($s.git | if type == "string" then "git=" + . else bad("git is not a string") end)
