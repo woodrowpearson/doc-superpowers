@@ -25,6 +25,9 @@
 #   NET                "<item id>TAB<what>": every ticked item that can reach
 #                      a remote (design §5.5), installed by this run or not
 #   DL                 "<what>TAB<size or estimate>": the downloads
+#   PLAN_HNOTES        the non-Claude harnesses this run newly ticks (a name
+#                      each): plan_render_harness_notes points them to their
+#                      INSTALL guides
 #   PLAN_TEAM_SETUP    the .setup object record-team writes (compact JSON)
 #   PLAN_LOCAL_RECORD  the file record-local writes (compact JSON)
 #   PLAN_TEAM_CHANGED PLAN_LOCAL_CHANGED
@@ -60,7 +63,7 @@ PLAN_EXCLUDE_END="# doc-superpowers setup:end"
 
 PLAN_BUILD_REQUESTED=0
 PLAN_FOR_TEAM=0
-PLAN=() W_TEAM=() W_LOCAL=() W_OUTSIDE=() NET=() DL=()
+PLAN=() W_TEAM=() W_LOCAL=() W_OUTSIDE=() NET=() DL=() PLAN_HNOTES=()
 PLAN_TEAM_SETUP="" PLAN_LOCAL_RECORD="" PLAN_TEAM_CHANGED=0 PLAN_LOCAL_CHANGED=0 PLAN_ERROR=""
 
 # Set by plan_build: every write as "<scope>TAB<path>TAB<what>", the groups a
@@ -246,6 +249,53 @@ _plan_harness() {
     gemini) _PH_FILE=.gemini/settings.json _PH_NAME="Gemini CLI" ;;
     *) _PH_FILE="" _PH_NAME="$1" ;;
   esac
+}
+
+# _plan_recorded_harnesses: the harnesses the team record lists (a CSV, or
+# none); without a record, the ones whose entry is in place.
+_plan_recorded_harnesses() {
+  local line
+  if [ -n "$PROBE_TEAM" ]; then
+    while IFS= read -r line; do
+      case "$line" in
+        harness=*)
+          printf '%s' "${line#harness=}"
+          return 0
+          ;;
+      esac
+    done <<<"$PROBE_TEAM_VALUES"
+  fi
+  probe_installed harness
+}
+
+# _plan_harness_guide <h>: _PH_GUIDE, the harness's skill install guide.
+_plan_harness_guide() {
+  case "$1" in
+    codex) _PH_GUIDE=.codex/INSTALL.md ;;
+    cursor) _PH_GUIDE=.cursor-plugin/INSTALL.md ;;
+    opencode) _PH_GUIDE=.opencode/INSTALL.md ;;
+    gemini) _PH_GUIDE=GEMINI.md ;;
+    *) _PH_GUIDE="" ;;
+  esac
+}
+
+# plan_render_harness_notes: for each non-Claude harness this run newly ticks,
+# a pointer to its INSTALL guide (its skill install steps), and to the help
+# topic; Codex's names its trust requirement when its doc-search entry is
+# written. Nothing when there is none.
+plan_render_harness_notes() {
+  local h
+  [ "${#PLAN_HNOTES[@]}" -gt 0 ] || return 0
+  echo "Harness skill install steps (doc-superpowers help setup has the rest):"
+  for h in "${PLAN_HNOTES[@]}"; do
+    _plan_harness "$h"
+    _plan_harness_guide "$h"
+    printf '  %s: %s' "$_PH_NAME" "$_PH_GUIDE"
+    if [ "$h" = codex ] && model_is_on search; then
+      printf ' (Codex loads the project'"'"'s doc-search entry only for a trusted project)'
+    fi
+    echo ""
+  done
 }
 
 # _plan_cache_dirs: _PLAN_SEMBLE_CACHE and _PLAN_DS_CACHE, where a build
@@ -565,8 +615,8 @@ _plan_net_dl() {
 # plan_build: PLAN and the review's lists, from SEL against the probed state.
 # shellcheck disable=SC2034  # PLAN_* are the plan's interface, read by setup.sh and the executor
 plan_build() {
-  local out sel inst st x y rm add h m cache hroot strict b c
-  PLAN=() W_TEAM=() W_LOCAL=() W_OUTSIDE=() NET=() DL=() _PLAN_W=()
+  local out sel inst st x y rm add h m cache hroot strict b c rec new
+  PLAN=() W_TEAM=() W_LOCAL=() W_OUTSIDE=() NET=() DL=() PLAN_HNOTES=() _PLAN_W=()
   _PLAN_GROUPS="|" _PLAN_GONE="|" PLAN_ERROR=""
   PLAN_TEAM_SETUP="" PLAN_LOCAL_RECORD="" PLAN_TEAM_CHANGED=0 PLAN_LOCAL_CHANGED=0
   # The merge driver is the team's (its .gitattributes block is committed): a
@@ -674,13 +724,20 @@ plan_build() {
   x="$_PS"
   y=$(probe_installed harness)
   _model_i harness
+  rec=$(_plan_recorded_harnesses)
   for h in ${CAT_OPTIONS[_MI]//,/ }; do
     [ "$h" != claude-code ] || continue
+    new=0
+    _model_csv_has "$x" "$h" && ! _model_csv_has "$rec" "$h" && new=1
     if model_is_on search && _model_csv_has "$x" "$h"; then
-      _model_csv_has "$y" "$h" || _plan_op harness harness-add "$h"
+      if ! _model_csv_has "$y" "$h"; then
+        _plan_op harness harness-add "$h"
+        new=1
+      fi
     elif _model_csv_has "$y" "$h"; then
       _plan_op harness harness-remove "$h"
     fi
+    [ "$new" = 0 ] || PLAN_HNOTES+=("$h")
   done
   # The env hook, per variable (plan_envhook_merge): the cache when it is a
   # path, or when it goes back from a recorded path to the host default
@@ -950,7 +1007,8 @@ plan_render_review() {
   done
   if [ -z "$paths" ]; then
     echo "  (nothing)"
-    return 0
+  else
+    printf '  git add%s --%s\n' "$all" "$paths"
   fi
-  printf '  git add%s --%s\n' "$all" "$paths"
+  plan_render_harness_notes
 }

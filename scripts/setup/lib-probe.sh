@@ -33,6 +33,10 @@
 #   probe_state <id>      current | outdated (in place, but partly, or another
 #                         version's: an install refreshes it) | absent
 
+# The harness entries (what is present in each harness's project file).
+# shellcheck source=scripts/setup/lib-harness.sh
+source "$ROOT/scripts/setup/lib-harness.sh"
+
 _PROBE_US=$'\037'
 PROBE_STATE_FILE=".claude/doc-superpowers/installed.json"
 PROBE_LOCAL_FILE=".claude/doc-superpowers/installed.local.json"
@@ -166,11 +170,6 @@ _probe_jq_error() {
   printf '%s' "${m:-not valid JSON}"
 }
 
-# _probe_json_has <file> <jq path>: the file is JSON and the path is set.
-_probe_json_has() {
-  [ -f "$1" ] && jq -e "($2) != null" "$1" >/dev/null 2>&1
-}
-
 # The ledger sets have no JSON status (status --json refuses --ledger), so
 # their verdicts are read from status --ledger --ledger-claude's lines: per
 # hook, its first line in its section, by its glyph (a check mark: current; a
@@ -222,7 +221,7 @@ _probe_ledger_parse() {
 
 # shellcheck disable=SC2034  # PROBE_* are the probe's interface, read by setup.sh and lib-model.sh
 probe_run() {
-  local out line rest h
+  local out line rest h hh
   TOP="" PROBE_STATUS="" PROBE_TEAM="" PROBE_LOCAL="" PROBE_RECORD_ERROR="" PROBE_ERROR=""
   PROBE_TEAM_VALUES="" PROBE_LOCAL_VALUES=""
   if ! TOP=$(git rev-parse --show-toplevel 2>/dev/null) || [ -z "$TOP" ]; then
@@ -288,13 +287,12 @@ probe_run() {
   case "$_PB_MCP" in
     registered | different-command) h=claude-code ;;
   esac
-  if [ -f "$TOP/.codex/config.toml" ] \
-    && grep -q '^[[:space:]]*\[mcp_servers\.doc-search\][[:space:]]*$' "$TOP/.codex/config.toml" 2>/dev/null; then
-    h="$h,codex"
-  fi
-  if _probe_json_has "$TOP/.cursor/mcp.json" '.mcpServers["doc-search"]'; then h="$h,cursor"; fi
-  if _probe_json_has "$TOP/opencode.json" '.mcp["doc-search"]'; then h="$h,opencode"; fi
-  if _probe_json_has "$TOP/.gemini/settings.json" '.mcpServers["doc-search"]'; then h="$h,gemini"; fi
+  # The others, by lib-harness.sh: setup's own Codex block (an unmarked table
+  # is the user's, not an entry of ours) and the "doc-search" key of the JSON
+  # files.
+  for hh in codex cursor opencode gemini; do
+    if harness_entry_present "$hh"; then h="$h,$hh"; fi
+  done
   h="${h#,}"
   _PB_HARNESSES="${h:-none}"
 
