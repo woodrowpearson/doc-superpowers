@@ -84,12 +84,15 @@ _harness_key() {
 }
 
 # _harness_entry <h>: the JSON entry (references/search.md, Other clients).
+# OpenCode starts a local server in the directory it was launched from (it
+# finds opencode.json from a subdirectory too), so its command changes to the
+# repository top first.
 # shellcheck disable=SC2016  # JSON text: ${workspaceFolder} and \" are not shell
 _harness_entry() {
   case "$1" in
     cursor) printf '%s\n' '{"command":"sh","args":["-c","cd \"$1\" && exec sh .claude/doc-superpowers/search-mcp.sh serve","sh","${workspaceFolder}"]}' ;;
     gemini) printf '%s\n' '{"command":"sh","args":[".claude/doc-superpowers/search-mcp.sh","serve"]}' ;;
-    opencode) printf '%s\n' '{"type":"local","command":["sh",".claude/doc-superpowers/search-mcp.sh","serve"],"timeout":60000}' ;;
+    opencode) printf '%s\n' '{"type":"local","command":["sh","-c","cd \"$(git rev-parse --show-toplevel)\" && exec sh .claude/doc-superpowers/search-mcp.sh serve"],"timeout":60000}' ;;
     *) return 1 ;;
   esac
 }

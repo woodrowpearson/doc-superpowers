@@ -396,7 +396,7 @@ Setting a child turns its parent on. Turning a parent off resets its children to
   - The JSON entry bodies are exactly `references/search.md` → *Other clients*:
     - Cursor: the `sh -c 'cd "$1" && …' sh ${workspaceFolder}` form;
     - Gemini: `{"command":"sh","args":[".claude/doc-superpowers/search-mcp.sh","serve"]}` under `mcpServers`;
-    - OpenCode: `{"type":"local","command":["sh",".claude/doc-superpowers/search-mcp.sh","serve"],"timeout":60000}` under `mcp`, with `"$schema"` added only when the file is created.
+    - OpenCode: `{"type":"local","command":["sh","-c","cd \"$(git rev-parse --show-toplevel)\" && exec sh .claude/doc-superpowers/search-mcp.sh serve"],"timeout":60000}` under `mcp`, with `"$schema"` added only when the file is created.
   - Each harness ticked without doc-search prints only its skill install steps: a pointer to its INSTALL guide (`.codex/INSTALL.md` etc.) and `doc-superpowers help setup`.
 
 - [ ] **Step 1: Write the failing tests** (`test_setup_harness_entries`, `test_setup_harness_keeps_other_content`, `test_setup_harness_refuses`, `test_setup_codex_block_idempotent`):

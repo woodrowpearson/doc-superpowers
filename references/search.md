@@ -288,7 +288,7 @@ startup_timeout_sec = 60
 }
 ```
 
-**OpenCode** — `opencode.json` in the project; `timeout` (5 s by default) covers listing the tools, which a first start can exceed. *Loaded and started: verified* from the repository top (2026-10-23, opencode 1.19.4): `opencode mcp list` printed `✓ doc-search connected`. OpenCode finds `opencode.json` from a subdirectory too, but starts a local server in the directory it was launched from, not where the file is: from a subdirectory the entry below was listed as `✗ doc-search failed` (`MCP error -32000: Connection closed`), because `.claude/doc-superpowers/search-mcp.sh` is not there. Start OpenCode from the repository top. A `command` that changes to the top first, `["sh", "-c", "cd \"$(git rev-parse --show-toplevel)\" && exec sh .claude/doc-superpowers/search-mcp.sh serve"]`, was listed `connected` from a subdirectory as well; `setup` does not write that form:
+**OpenCode** — `opencode.json` in the project; `timeout` (5 s by default) covers listing the tools, which a first start can exceed. OpenCode finds `opencode.json` from a subdirectory too, but starts a local server in the directory it was launched from, not where the file is (a probe that wrote its working directory printed the subdirectory), so the command changes to the repository top first. *Loaded and started: verified* (2026-10-23, opencode 1.19.4), from the repository top and from a subdirectory: `opencode mcp list` printed `✓ doc-search connected` in both. (The earlier form, `["sh", ".claude/doc-superpowers/search-mcp.sh", "serve"]`, connected from the top only: from a subdirectory it was listed `✗ doc-search failed`, `MCP error -32000: Connection closed`.) This is the entry `setup` writes:
 
 ```json
 {
@@ -296,7 +296,7 @@ startup_timeout_sec = 60
   "mcp": {
     "doc-search": {
       "type": "local",
-      "command": ["sh", ".claude/doc-superpowers/search-mcp.sh", "serve"],
+      "command": ["sh", "-c", "cd \"$(git rev-parse --show-toplevel)\" && exec sh .claude/doc-superpowers/search-mcp.sh serve"],
       "timeout": 60000
     }
   }
