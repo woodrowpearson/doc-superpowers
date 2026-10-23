@@ -133,8 +133,13 @@ model_changed() {
   [ "${SEL[_MI]}" != "${BASE[_MI]}" ]
 }
 
-# _model_csv_has <csv> <name>
+# _model_csv_has <csv> <name>: <name> is one whole element of <csv>. A name
+# that is empty or holds a comma never is: "on,off" would otherwise match the
+# run of two options in ",on,off,".
 _model_csv_has() {
+  case "$2" in
+    "" | *,*) return 1 ;;
+  esac
   case ",$1," in
     *",$2,"*) return 0 ;;
     *) return 1 ;;
@@ -368,10 +373,11 @@ _model_union() {
   esac
 }
 
-# _model_apply_lines <what> <lines>: set BASE of each "<id>=<value>" line
-# (values checked as --set checks them).
+# _model_apply_lines <what> <lines> [check]: set BASE of each "<id>=<value>"
+# line; with "check", only validate them. Values are checked as --set checks
+# them, so a record holding a value --set refuses is refused too.
 _model_apply_lines() {
-  local what="$1" line id
+  local what="$1" mode="${3:-apply}" line id
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     id="${line%%=*}"
@@ -379,6 +385,7 @@ _model_apply_lines() {
       MODEL_ERROR="$what: $MODEL_ERROR"
       return 1
     fi
+    [ "$mode" = apply ] || continue
     _model_i "$id"
     BASE[_MI]="$MODEL_VALUE"
   done <<<"$2"
@@ -390,10 +397,12 @@ _model_apply_lines() {
 #     what it does not hold (CI, which stays in .tiers.ci; the cache path; the
 #     terminal command) as installed — then this user's local overrides
 #     (PROBE_LOCAL_VALUES).
-#   No team record: the defaults together with what is installed.
+#   No team record: the defaults together with what is installed; the local
+#     overrides are still checked (a record setup will merge into later).
 model_base_init() {
   local i inst
   MODEL_ERROR=""
+  _model_apply_lines ".claude/doc-superpowers/installed.local.json (overrides)" "$PROBE_LOCAL_VALUES" check || return 1
   i=0
   while [ "$i" -lt "$CAT_N" ]; do
     inst=$(probe_installed "${CAT_ID[i]}") || inst="${CAT_DEFAULT[i]}"
