@@ -2064,6 +2064,13 @@ for _f in --dry-run --list --yes --build --for-team; do
   assert_contains "$_su_setup" "$_f" "SKILL.md's setup section uses $_f"
 done
 assert_contains "$_su_setup" "background" "SKILL.md's setup section runs a build in the background"
+# --for-team changes the plan (the per-user change goes to the committed
+# record, and an R9 merge-driver change is refused without it): the user must
+# see that review before the write, so the flow previews it with --dry-run.
+assert_line_matches "$_su_setup" 'setup --dry-run --set [^`]*--for-team' \
+  "SKILL.md's setup section previews a for-the-team answer with --dry-run … --for-team"
+assert_line_matches "$_su_setup" 'names `--for-team`' \
+  "…and asks whose a change is when a --dry-run refusal names --for-team (R9)"
 # The reference's sections, in order.
 assert_eq "## What setup does
 ## The defaults

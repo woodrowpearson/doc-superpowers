@@ -90,7 +90,7 @@ setup shows a summary of what it would turn on, then a review of every file it w
 
 - **The defaults** are the same everywhere: the doc-index merge driver, the 5 report-only git hooks and the 3 Claude Code hooks. doc-search, CI, the work ledger, spec claims and the terminal command stay off until you tick them.
 - **The safety rule:** the defaults block no commit, download nothing, call no network and add no CI. Nothing downloads without *Write and build* and a yes.
-- **It never commits.** It ends with a `git add -- …` line: commit those files (`.gitattributes` and `.claude/doc-superpowers/installed.json`, the team's recorded choice). Each teammate then runs `doc-superpowers setup --apply` (or `/doc-superpowers setup`) in their clone to install their own per-user parts.
+- **It never commits.** It ends with a `git add -- …` line: commit those files (`.gitattributes` and `.claude/doc-superpowers/installed.json`, the team's recorded choice). Each teammate then runs `"$ROOT/scripts/doc-superpowers" setup --apply` (the bare `doc-superpowers setup --apply` once the terminal command is linked; or `/doc-superpowers setup`) in their clone to install their own per-user parts.
 - **Re-running is safe.** With nothing to change it says `nothing to do`; untick an item to remove it.
 
 `setup --dry-run` prints the summary and the review without writing; `setup --list` prints every item and its id for `--set <id>=<value>`. The full reference: [`references/setup.md`](../../references/setup.md).

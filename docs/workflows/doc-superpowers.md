@@ -343,7 +343,7 @@ Update is the **write counterpart** to audit's read-only analysis. It consumes a
 1. `setup --dry-run`: the summary and the review (what each step writes, committed for the team or local to you, the network, the downloads, the `git add` line), shown verbatim.
 2. Ask *Apply these* / *Customize* / *Cancel*.
 3. Customize: `setup --list`, one question round per group, then `setup --dry-run --set <id>=<value> …`.
-4. Ask *Write and build* (a second explicit yes to the download) / *Write only* / *Back*; with a team record and a per-user change, *for you only* / *for the team*.
+4. Ask *Write and build* (a second explicit yes to the download) / *Write only* / *Back*; with a team record and a per-user change, *for you only* / *for the team* (asked in step 3 already when a `--dry-run` refusal names `--for-team`). *For the team* changes the plan, so `setup --dry-run --set … --for-team` shows that review for the user to confirm first.
 5. `setup --yes --set … [--for-team] [--build] [--link-bin]` (a build in the background): the installer's steps and setup's own files, each step checked before the first runs (exit 1, nothing written), stopping at a failure (exit 2, a re-run finishes); the team record (`.setup` in `installed.json`) and the local one last; the build last of all.
 6. Show what was written and the `git add` line; never commit.
 

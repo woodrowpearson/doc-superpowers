@@ -40,7 +40,7 @@ A summary line reads `[x] <Group>  <value>` or `[ ] <Group>  off`, with ` (chang
 1. **Summary**: one line per group. *Apply these* → the review · *Customize…* → the tree · *Show what each does* (`help setup`) · *Cancel*.
 2. **Tree and details**: the groups, collapsible, pre-ticked from the summary; the details pane shows the highlighted item's text, its scope, how to undo it and any reason it is disabled or locked (beside the tree at 80 columns or more, under it below that).
 3. **Esc**: back to the summary, the changed groups marked `(changed)`.
-4. **Review**: what the plan writes, split by where, the network and the downloads (the review sections, *Flags and exit codes*). *Write and build* (only when something builds), *Write only* (the cursor's default), *Back*. *Write and build* asks once more: `This downloads <what>. Continue? [y/N]` — anything but `y` writes only.
+4. **Review**: what the plan writes, split by where, the network and the downloads (the review sections, *Flags and exit codes*). *Write and build* (only when something builds), *Write only* (the cursor's default), *Back*. *Write and build* asks once more: `This downloads <what>. Continue? [y/N]` — `y` builds, `n` or Enter writes only, Esc goes back to the review.
 
 | Key | Action |
 |---|---|
@@ -53,13 +53,13 @@ A summary line reads `[x] <Group>  <value>` or `[ ] <Group>  off`, with ` (chang
 | ? | The row's details in full |
 | q | Quit: nothing is written |
 
-**The prompts** (`--plain`, or when stdin or stdout is not a terminal, or `TERM` is `dumb` or unset): the summary, then `[a]pply  [c]ustomize  [s]how details  [q]uit`; Customize lists the groups, then a group's items as `n) [x] <label>[: <value>] -- <scope>` (a number toggles or asks for the value, `d <n>` shows the details, an empty line goes back); the review, then `[w]rite and build  [o] write only  [b]ack`. `q`, or the end of input, quits with nothing written (exit 0). Nothing is written before the last answer in either UI.
+**The prompts** (`--plain`, or when stdin or stdout is not a terminal, or `TERM` is `dumb` or unset): the summary, then `[a]pply  [c]ustomize  [s]how details  [q]uit`; Customize lists the groups, then a group's items as `n) [x] <label>[: <value>] -- <scope>` (a number toggles or asks for the value, `d <n>` shows the details, an empty line goes back); the review, then `[w]rite and build  [o] write only  [b]ack`, and `w` asks the same `[y/N]` question: `y` builds, `n` or an empty answer writes only, anything else asks again. `q`, or the end of input, quits with nothing written (exit 0). Nothing is written before the last answer in either UI.
 
 **From the skill** (the Bash tool has no terminal, so the skill drives the engine through flags, with the same screens):
 1. `"$ROOT/scripts/doc-superpowers" setup --dry-run` — the summary and the review, shown verbatim.
 2. One question: *Apply these* / *Customize* / *Cancel*.
-3. Customize: `setup --list` gives every item with its id, value, scope, options and any disabled or locked reason; one question round per group to change; then `setup --dry-run --set <id>=<value> …` prints the new review.
-4. One question: *Write and build* / *Write only* / *Back*. *Write and build* is offered only with doc-search on and when `setup --dry-run --set … --build` exits 0 (exit 1: this host has no `uv`), and needs a second, explicit yes to the download line that run printed. When a per-user item changed and a team record exists, the same round asks *for you only* (the default) / *for the team*.
+3. Customize: `setup --list` gives every item with its id, value, scope, options and any disabled or locked reason; one question round per group to change; then `setup --dry-run --set <id>=<value> …` prints the new review. When it exits 1 with a line naming `--for-team` (R9, below), the *for you only* / *for the team* question comes here.
+4. One question: *Write and build* / *Write only* / *Back*. *Write and build* is offered only with doc-search on and when `setup --dry-run --set … --build` exits 0 (exit 1: this host has no `uv`), and needs a second, explicit yes to the download line that run printed. When a per-user item changed and a team record exists, the same round asks *for you only* (the default) / *for the team*; *for the team* changes the plan (the change goes to `installed.json`), so `setup --dry-run --set … --for-team` shows that review and the user confirms it before step 5.
 5. `setup --yes --set … [--for-team] [--build] [--link-bin]`; with `--build`, in the background (a gte first build can take hours).
 6. What was written, and the `git add` line.
 
@@ -141,9 +141,9 @@ The review prints its sections in this order, each header on its own line and ` 
 | Exit | Meaning |
 |---|---|
 | `0` | Done, or `nothing to do` (a quit in the UIs too) |
-| `1` | Refused, nothing written: a disabled item forced with `--set`, `--apply` without a team record, a file setup will not change (a symbolic link on the way, a file that is not the expected shape, an entry of yours), a record `state.sh` refuses (its reason), the merge driver changed without `--for-team`. One line says why |
+| `1` | Refused, nothing written: outside a git work tree, no `jq`, a disabled item forced with `--set`, a locked item (the ledger, spec claims) turned off, `--apply` without a team record, a file setup will not change (a symbolic link on the way, a file that is not the expected shape, an entry of yours), a record `state.sh` refuses (its reason), the merge driver changed without `--for-team`. One line says why |
 | `2` | A step failed: `setup: step <n> (<op>) failed; done: <ops>; re-run to finish`. Each step is idempotent: a re-run finishes the job |
-| `3` | Usage: an unknown flag, two modes, a flag the mode does not take |
+| `3` | Usage: an unknown flag, two modes, a flag the mode does not take, a `--set` with an unknown id or a value the item does not take |
 
 ## The records
 
@@ -208,7 +208,7 @@ Written only with doc-search on, one per ticked harness, merged into the project
 | `opencode` | `opencode.json` | the same `cd` to the repository top, then the launcher; `timeout` 60000. A new file gets `$schema` |
 | `gemini` | `.gemini/settings.json` | `sh .claude/doc-superpowers/search-mcp.sh serve`. Start Gemini CLI from the repository top, in a trusted folder |
 
-Codex and OpenCode start a server in the directory they were launched from, so their entries change to the repository top first, which makes them work from a subdirectory.
+Codex and OpenCode start a server in the directory they were launched from, so their entries change to the repository top first. For OpenCode, starting from a subdirectory was verified; for Codex only *loaded* was (from the top and a subdirectory) — that its server starts from one is unverified.
 
 **What is setup's.** Only an entry exactly as setup writes it (a JSON `doc-search` entry) or setup's marked Codex block. An entry that differs is yours: setup leaves it alone, and ticking that harness is refused (exit 1) naming the file and key. setup removes an entry only when you untick its harness or turn doc-search off in that run, and then removes only the `doc-search` key or its block, never the file, its directory or the server table, even when setup created them.
 
@@ -235,4 +235,4 @@ It then runs `scripts/doc-superpowers` under the `bash` on `PATH`; with no candi
 - Limits (pinned by tests): the overview is at most 24 lines, a topic at most 50, every line at most 80 columns, plain text with no ANSI escapes.
 - An unknown topic, or more than one, prints the topic list on stderr and exits 3. An unknown command exits 3 too, pointing to `doc-superpowers help`.
 
-The dispatcher's other commands, so that every command `help` names runs from a terminal: `doc-superpowers version` (the plugin's version, `doc-tools.sh tools version`), `doc-superpowers hooks …` (`install.sh …`), `doc-superpowers tools …` (`doc-tools.sh …`) and `doc-superpowers search …` (doc-search's CLI, through the repository's committed launcher when it has one). Each runs under the interpreter that runs the dispatcher, and exits with the sub-command's status.
+The dispatcher's other commands, so that every command `help` names runs from a terminal: `doc-superpowers version` (the plugin's version, `doc-tools.sh tools version`), `doc-superpowers hooks …` (`install.sh …`), `doc-superpowers tools …` (`doc-tools.sh …`) and `doc-superpowers search …` (doc-search's CLI, through the repository's committed launcher when it has one). `version`, `hooks` and `tools` run under the interpreter that runs the dispatcher; `search` runs the launcher under `sh`. Each exits with the sub-command's status.
