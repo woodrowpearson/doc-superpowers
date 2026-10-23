@@ -12,9 +12,14 @@
 # current. Inputs (0 unless set):
 #   PLAN_BUILD_REQUESTED  1: plan the build (--build, or Write and build)
 #   PLAN_FOR_TEAM         1: the per-user values (git, claude, ledger.git,
-#                         ledger.claude) are the team's (--for-team); else,
-#                         once a team record exists, a departure from it is
-#                         this user's own (the local record's overrides)
+#                         ledger.claude) this run sets are the team's
+#                         (--for-team); else, once a team record exists, a
+#                         departure from it is this user's own (the local
+#                         record's overrides). "Sets": named in
+#                         PLAN_FOR_TEAM_IDS, or changed against the base; any
+#                         other per-user value keeps the record's value and
+#                         its override
+#   PLAN_FOR_TEAM_IDS     the ids this run names (--set), space-separated
 #   PLAN_APPLY            1: setup --apply, which reproduces the recorded team
 #                         setup and never changes the team record: no
 #                         record-team step, whatever the record's content
@@ -70,6 +75,7 @@ PLAN_EXCLUDE_END="# doc-superpowers setup:end"
 
 PLAN_BUILD_REQUESTED=0
 PLAN_FOR_TEAM=0
+PLAN_FOR_TEAM_IDS=""
 PLAN_APPLY=0
 PLAN=() W_TEAM=() W_LOCAL=() W_OUTSIDE=() NET=() DL=() PLAN_HNOTES=() PLAN_HFOREIGN=()
 PLAN_TEAM_SETUP="" PLAN_LOCAL_RECORD="" PLAN_TEAM_CHANGED=0 PLAN_LOCAL_CHANGED=0 PLAN_ERROR=""
@@ -522,13 +528,26 @@ _plan_set() {
   fi
 }
 
+# _plan_promoted <id>: --for-team makes this run's value of <id> the team's:
+# PLAN_FOR_TEAM, and <id> named in PLAN_FOR_TEAM_IDS or changed against the
+# base. A per-user value this run does not set stays as it is: the record's
+# for the team, an override for you.
+_plan_promoted() {
+  [ "$PLAN_FOR_TEAM" = 1 ] || return 1
+  case " $PLAN_FOR_TEAM_IDS " in
+    *" $1 "*) return 0 ;;
+  esac
+  model_changed "$1"
+}
+
 # _plan_team_value <id>: _PTV = the team's value of a per-user item: the team
-# record's, when there is one (and not PLAN_FOR_TEAM); else the selection.
+# record's, when there is one (and --for-team does not promote <id>); else
+# the selection.
 _plan_team_value() {
   local line
   _plan_sel "$1"
   _PTV="$_PS"
-  if [ -z "$PROBE_TEAM" ] || [ "$PLAN_FOR_TEAM" = 1 ]; then return 0; fi
+  if [ -z "$PROBE_TEAM" ] || _plan_promoted "$1"; then return 0; fi
   while IFS= read -r line; do
     case "$line" in
       "$1="*)
@@ -548,7 +567,7 @@ _plan_records() {
     _plan_team_value "$id"
     _plan_sel "$id"
     v=""
-    if [ -n "$PROBE_TEAM" ] && [ "$PLAN_FOR_TEAM" != 1 ] && [ "$_PTV" != "$_PS" ]; then v="$_PS"; fi
+    if [ -n "$PROBE_TEAM" ] && ! _plan_promoted "$id" && [ "$_PTV" != "$_PS" ]; then v="$_PS"; fi
     case "$id" in
       git) tgit="$_PTV" ogit="$v" ;;
       claude) tclaude="$_PTV" oclaude="$v" ;;
@@ -643,7 +662,7 @@ plan_build() {
   # per-user git value that adds or removes it, against the team record, would
   # flip that block for everyone. Only the team's choice may (--for-team);
   # hooks and merge-driver both keep the driver, so either is a user's own.
-  if [ -n "$PROBE_TEAM" ] && [ "$PLAN_FOR_TEAM" != 1 ]; then
+  if [ -n "$PROBE_TEAM" ] && ! _plan_promoted git; then
     _plan_team_value git
     _plan_sel git
     case "$_PTV:$_PS" in

@@ -36,8 +36,9 @@
 #                       host has no uv); with --dry-run, the review includes
 #                       it
 #   --for-team          with --dry-run or --yes: the per-user values (git,
-#                       claude, the ledger's hook sets) are the team's, in
-#                       the team record; without it, once a team record
+#                       claude, the ledger's hook sets) this run sets are the
+#                       team's, in the team record (any other override of
+#                       yours stays yours); without it, once a team record
 #                       exists, they are yours (installed.local.json)
 #   --link-bin --no-link-bin --plain, and --build or --for-team with no mode
 #   (the interactive UI): not implemented yet (exit 3)
@@ -176,6 +177,9 @@ print_skipped() {
   done
 }
 PLAN_APPLY="$APPLY"
+# --for-team promotes the per-user values this run names, not every one.
+PLAN_FOR_TEAM_IDS=""
+for _s in ${SETS[@]+"${SETS[@]}"}; do PLAN_FOR_TEAM_IDS="$PLAN_FOR_TEAM_IDS ${_s%%=*}"; done
 
 # --dry-run: the summary, a blank line, the review; nothing written.
 if [ "$MODE" = dry-run ]; then

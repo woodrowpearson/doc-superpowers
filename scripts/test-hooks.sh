@@ -9652,6 +9652,22 @@ test_setup_apply_skips_disabled() {
   assert_contains "$SL_OUT" "git-install|hooks" "the rest is applied"
   assert_not_contains "$SL_OUT" "claude-install" "…the skipped item is not"
   assert_not_contains "$SL_OUT" "record-team" "…and --apply plans no team record"
+  # An option this host disables (DISABLED_OPT, "<id>=<option>TAB<reason>"
+  # lines, Task 8's host checks): the item is skipped the same way.
+  # shellcheck disable=SC2016  # the snippet runs in the child bash
+  setup_lib 'probe_run
+    model_base_init
+    model_set search.model gte
+    DISABLED_OPT="search.model=gte	needs macOS 14 (a test reason)"
+    model_apply_skips
+    printf "skip=%s\n" "${MODEL_SKIPPED[@]}" | tr "\t" "|"
+    echo "model=$(model_get search.model) search=$(model_get search)"
+    rc=0; model_option_disabled search.model static || rc=$?
+    echo "static=$rc"'
+  assert_eq "0" "$SL_RC" "the option snippet ran (output: $(head -c 300 <<<"$SL_OUT"))"
+  assert_contains "$SL_OUT" "skip=search.model|gte: needs macOS 14 (a test reason)" "MODEL_SKIPPED: a disabled option, named with its reason"
+  assert_contains "$SL_OUT" "model=static search=on" "…the item left as installed (static: no config), the rest kept"
+  assert_contains "$SL_OUT" "static=1" "model_option_disabled: an option not listed is not disabled"
   teardown
 }
 
@@ -9674,11 +9690,44 @@ test_setup_peruser_override() {
   assert_contains "$(review_section 'Then commit:')" "$f" "…the team record on the git add line"
   setup_assert_noop "after --for-team"
   teardown
+  # --for-team promotes only what this run sets: another per-user override
+  # (git=merge-driver, yours) stays yours.
+  setup
+  setup_applied_defaults
+  run_setup -- --yes --set git=merge-driver
+  assert_eq "0" "$RUN_RC" "--yes --set git=merge-driver: exit 0 (stderr: $RUN_ERR)"
+  assert_eq '"merge-driver"' "$(jq '.overrides.git' "$l" 2>&1)" "…overrides.git merge-driver (yours)"
+  run_setup -- --yes --set claude=off --for-team
+  assert_eq "0" "$RUN_RC" "then --yes --set claude=off --for-team: exit 0 (stderr: $RUN_ERR)"
+  assert_eq '"hooks"|false' "$(jq '.setup.git' "$f" 2>&1)|$(jq '.setup.claude' "$f" 2>&1)" \
+    "…the team record: claude off (set this run), git still hooks (not set this run)"
+  assert_eq '"merge-driver"' "$(jq '.overrides.git' "$l" 2>&1)" "…overrides.git survives"
+  assert_eq "null" "$(jq '.overrides.claude' "$l" 2>&1)" "…no claude override (the team's value now)"
+  setup_assert_noop "after a targeted --for-team"
+  teardown
   setup
   run_setup -- --yes --set claude=off
   assert_eq "0" "$RUN_RC" "no team record, --set claude=off: exit 0 (stderr: $RUN_ERR)"
   assert_eq "false" "$(jq '.setup.claude' "$f" 2>&1)" "…the first record seeds the team's value"
   assert_true "…no local record" test ! -e "$l"
+  teardown
+}
+
+test_setup_for_team_merge_driver_yes() {
+  echo "test: #51 ruling R9 under --yes: with a team record, --yes --set git=off is refused (exit 1, nothing written); with --for-team it runs (exit 0) and the team record says git off"
+  setup
+  local f=.claude/doc-superpowers/installed.json before
+  setup_applied_defaults
+  before=$(setup_snapshot)
+  run_setup -- --yes --set git=off
+  assert_eq "1" "$RUN_RC" "--yes --set git=off: exit 1"
+  assert_contains "$RUN_ERR" "pass --for-team" "…naming --for-team"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
+  run_setup -- --yes --set git=off --for-team
+  assert_eq "0" "$RUN_RC" "--yes --set git=off --for-team: exit 0 (stderr: $RUN_ERR)"
+  assert_eq '"off"' "$(jq '.setup.git' "$f" 2>&1)" "….setup.git is off"
+  assert_true "…the merge driver's block is gone" test -z "$(grep -F doc-index .gitattributes 2>/dev/null)"
+  setup_assert_noop "after git=off for the team"
   teardown
 }
 
@@ -9810,6 +9859,7 @@ test_setup_apply_fresh_clone
 test_setup_apply_modes
 test_setup_apply_skips_disabled
 test_setup_peruser_override
+test_setup_for_team_merge_driver_yes
 test_setup_exclude_survives_claude_uninstall
 test_setup_migrates_ci_only_record
 test_setup_installed_union_removes_nothing

@@ -34,10 +34,15 @@
 # One more rule: while search is on, harness holds claude-code, since
 # install --search always registers the Claude Code entry in .mcp.json.
 #
+# DISABLED_OPT: the options this host's checks disable while the item stays
+# usable (gte while static works), one "<id>=<option>TAB<reason>" line each
+# (Task 8's host checks fill it; empty here). model_option_disabled <id>
+# <option> reads it.
+#
 # model_apply_skips (setup --apply): every ticked item this host's checks
-# disable is left as it is installed, and named in MODEL_SKIPPED
-# ("<id>TAB<reason>" lines): the teammate did not choose the record, so one
-# unusable item must not block the rest.
+# disable, or whose selected option they disable, is left as it is installed,
+# and named in MODEL_SKIPPED ("<id>TAB<reason>" lines): the teammate did not
+# choose the record, so one unusable item must not block the rest.
 #
 # Every function that can refuse returns 1 with MODEL_ERROR set, and then has
 # changed nothing.
@@ -49,6 +54,7 @@ CAT_N=0
 MODEL_ERROR=""
 MODEL_VALUE=""
 MODEL_SKIPPED=()
+DISABLED_OPT=""
 
 # One jq pass: the groups line, then one line per item, fields separated by
 # US; a newline inside a text becomes RS, and any other control character is
@@ -479,15 +485,53 @@ _model_locks() {
   done
 }
 
-# model_apply_skips: every ticked item that DISABLED names is left as it is
-# installed (off when it is not: its children then go back to their
-# defaults), and MODEL_SKIPPED gets "<id>TAB<reason>" for it, in catalog
-# order. Needs model_base_init (and probe_run) first.
+# model_option_disabled <id> <option>: 0, with MODEL_OPT_REASON, when a
+# DISABLED_OPT line disables <option> of <id>; else 1.
+model_option_disabled() {
+  local line
+  MODEL_OPT_REASON=""
+  while IFS= read -r line; do
+    case "$line" in
+      "$1=$2"$'\t'*)
+        MODEL_OPT_REASON="${line#*$'\t'}"
+        return 0
+        ;;
+    esac
+  done <<<"$DISABLED_OPT"
+  return 1
+}
+
+# _model_sel_opt_disabled <i>: 0, with _MSO_WHY ("<option>: <reason>"), when
+# an option item i selects (one of a multi's) is disabled.
+_model_sel_opt_disabled() {
+  local o
+  _MSO_WHY=""
+  [ -n "$DISABLED_OPT" ] || return 1
+  case "${CAT_KIND[$1]}" in
+    toggle | choice | multi) ;;
+    *) return 1 ;;
+  esac
+  for o in ${SEL[$1]//,/ }; do
+    if model_option_disabled "${CAT_ID[$1]}" "$o"; then
+      _MSO_WHY="$o: $MODEL_OPT_REASON"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# model_apply_skips: every ticked item that DISABLED names, or whose selected
+# option DISABLED_OPT names, is left as it is installed (off when it is not:
+# its children then go back to their defaults), and MODEL_SKIPPED gets
+# "<id>TAB<reason>" for it (an option's reason as "<option>: <reason>"), in
+# catalog order. Needs model_base_init (and probe_run) first.
 model_apply_skips() {
-  local i=0 inst off
+  local i=0 inst off why
   MODEL_SKIPPED=()
   while [ "$i" -lt "$CAT_N" ]; do
-    if [ -n "${DISABLED[i]}" ] && ! _model_is_off "$i" "${SEL[i]}"; then
+    why="${DISABLED[i]}"
+    if [ -z "$why" ] && _model_sel_opt_disabled "$i"; then why="$_MSO_WHY"; fi
+    if [ -n "$why" ] && ! _model_is_off "$i" "${SEL[i]}"; then
       inst=$(probe_installed "${CAT_ID[i]}") || inst="${CAT_DEFAULT[i]}"
       off=off
       [ "${CAT_KIND[i]}" != multi ] || off=none
@@ -496,7 +540,7 @@ model_apply_skips() {
       else
         SEL[i]="$inst"
       fi
-      MODEL_SKIPPED+=("${CAT_ID[i]}"$'\t'"${DISABLED[i]}")
+      MODEL_SKIPPED+=("${CAT_ID[i]}"$'\t'"$why")
     fi
     i=$((i + 1))
   done
