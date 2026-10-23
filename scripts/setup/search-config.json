@@ -1,0 +1,32 @@
+{
+  "docs": {
+    "include": [
+      "docs/**/*.md",
+      "*.md"
+    ],
+    "exclude": [
+      "docs/archive/**",
+      "docs/.doc-index.json"
+    ],
+    "types": [],
+    "model": null,
+    "threads": null
+  },
+  "code": {
+    "enabled": true,
+    "content": [
+      "code"
+    ],
+    "model": null
+  },
+  "cloud": null,
+  "search": {
+    "default_limit": 10,
+    "terminal_statuses": [
+      "deprecated",
+      "superseded",
+      "archived"
+    ],
+    "rescan_seconds": 5
+  }
+}

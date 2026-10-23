@@ -7216,8 +7216,9 @@ SETUP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # run_setup [VAR=value ...] -- <args...>: run `doc-superpowers setup <args>`
 # from the cwd, with PATH="$REAL_PATH" ($SETUP_PATH instead when set: the
 # safety stubs, safety_stubs_on; a VAR=value pair adds to or overrides the
-# environment) and stdin from $RUN_STDIN. Sets RUN_RC, RUN_OUT (stdout) and
-# RUN_ERR (stderr), like run_hooked.
+# environment) and stdin from $RUN_STDIN. The dispatcher is $SETUP, or
+# $SETUP_CMD when set (one reached through a plugin-cache path). Sets RUN_RC,
+# RUN_OUT (stdout) and RUN_ERR (stderr), like run_hooked.
 run_setup() {
   local errf envs=()
   while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
@@ -7227,7 +7228,7 @@ run_setup() {
   [ "$#" -gt 0 ] && shift
   errf=$(harness_mktemp setup.err)
   RUN_RC=0
-  RUN_OUT=$(env PATH="${SETUP_PATH:-$REAL_PATH}" ${envs[@]+"${envs[@]}"} "$SETUP" setup "$@" <"$RUN_STDIN" 2>"$errf") || RUN_RC=$?
+  RUN_OUT=$(env PATH="${SETUP_PATH:-$REAL_PATH}" ${envs[@]+"${envs[@]}"} "${SETUP_CMD:-$SETUP}" setup "$@" <"$RUN_STDIN" 2>"$errf") || RUN_RC=$?
   RUN_ERR=$(cat "$errf")
   rm -f "$errf"
 }
@@ -8634,9 +8635,6 @@ test_setup_yes_refusals() {
   assert_contains "$SL_OUT" "setup: no-such-op: not implemented yet" "exec_plan: an op without its op_ function is named"
   assert_contains "$SL_OUT" "rc=1" "…exit 1"
   assert_eq "$before" "$(setup_snapshot)" "…checked before the first step: nothing written (record-team came first)"
-  run_setup -- --yes --set search=on
-  assert_eq "1" "$RUN_RC" "--yes --set search=on: exit 1 until its steps exist"
-  assert_contains "$RUN_ERR" "setup: search-config: not implemented yet" "…naming the first such step"
   run_setup -- --yes --set ci.workflows=doc-review-pr
   assert_eq "1" "$RUN_RC" "--yes --set ci.workflows=doc-review-pr: exit 1"
   assert_contains "$RUN_ERR" "setup: ci-install: not implemented yet" "…naming ci-install"
@@ -8722,6 +8720,199 @@ test_setup_exclude_block() {
   teardown
 }
 
+# --- setup: doc-search: the config, the launcher, the env hook, the build (#51)
+
+# setup_cache_root: a plugin cache holding m/doc-superpowers/9.9.9, a symlink
+# to this checkout, and a shim running the dispatcher through that path under
+# $BASH_BIN. Sets SETUP_PCACHE (the cache) and SETUP_PCACHE_CMD (the shim):
+# with CLAUDE_PLUGIN_CACHE="$SETUP_PCACHE" and SETUP_CMD="$SETUP_PCACHE_CMD",
+# setup runs from under the plugin cache, as a marketplace install runs it
+# ($ROOT is logical: the link's path, not the checkout's).
+setup_cache_root() {
+  SETUP_PCACHE=$(harness_mktemp_d pcache)
+  mkdir -p "$SETUP_PCACHE/m/doc-superpowers"
+  ln -s "$SETUP_ROOT" "$SETUP_PCACHE/m/doc-superpowers/9.9.9"
+  SETUP_PCACHE_CMD="$SETUP_PCACHE/ds-shim"
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$BASH_BIN" "$SETUP_PCACHE/m/doc-superpowers/9.9.9/scripts/doc-superpowers" \
+    > "$SETUP_PCACHE_CMD"
+  chmod +x "$SETUP_PCACHE_CMD"
+}
+
+# The config setup writes for gte: its static config with docs.model set.
+SETUP_GTE_MODEL="transformer:gte-modernbert-base"
+
+test_setup_search_write_only_safety() {
+  echo "test: #51 the safety proof for doc-search, write only (design §10): setup --yes --set search=on under the stubs and the transport trap, run from under the plugin cache: no stub runs (uv neither), no remote verb; it writes the config (setup's copy of doc-search init's defaults), the launcher and .mcp.json, only the paths the review listed, and no env hook (the launcher finds the plugin cache)"
+  setup
+  setup_cache_root
+  export CLAUDE_PLUGIN_CACHE="$SETUP_PCACHE"
+  SETUP_CMD="$SETUP_PCACHE_CMD"
+  safety_stubs_on
+  setup_yes_as_reviewed "doc-search, write only" --set search=on
+  assert_eq "" "$(cat "$STUBLOG")" "no stub ran (uv, curl, … and the transport trap)"
+  assert_eq "" "$(safety_gitlog_remote)" "git: no remote verb"
+  assert_true "docs/search/config.json is setup's copy of doc-search init's defaults, byte for byte" \
+    cmp -s docs/search/config.json "$SETUP_ROOT/scripts/setup/search-config.json"
+  assert_true "the launcher" test -f .claude/doc-superpowers/search-mcp.sh
+  assert_eq "true" "$(jq '.mcpServers | has("doc-search")' .mcp.json 2>&1)" ".mcp.json holds the doc-search entry"
+  assert_true "no env hook: setup ran from under the plugin cache, with the host's cache" \
+    test ! -e "$XDG_CONFIG_HOME/doc-search/env.sh"
+  assert_eq '{"model":"static"}' "$(jq -c .setup.search .claude/doc-superpowers/installed.json 2>&1)" "the record: doc-search on, static"
+  assert_contains "$RUN_OUT" "doc-search init's defaults" "the step writes init's defaults (no config yet)"
+  assert_contains "$RUN_OUT" "  git add -- docs/search/config.json" "the git add line names the config"
+  setup_assert_noop "doc-search on, write only"
+  safety_stubs_off
+  unset CLAUDE_PLUGIN_CACHE SETUP_CMD
+  teardown
+}
+
+test_setup_search_gte_and_cache() {
+  echo "test: #51 doc-search's gte model and a cache path (with a space): the config's docs.model; the env hook block, sh -n clean, exporting the cache lines and DOC_SUPERPOWERS_ROOT, the user's lines kept, a re-run byte-identical; per variable: '-' keeps a line, a cache path set back to host drops the cache lines, the block goes only when it would hold no line; an existing config gets docs.model alone"
+  setup
+  local env="$XDG_CONFIG_HOME/doc-search/env.sh" h got
+  mkdir -p "$XDG_CONFIG_HOME/doc-search"
+  printf 'export FOO=1\n' > "$env"
+  run_setup -- --yes --set search.model=gte --set "search.cache=$TEST_DIR/my cache"
+  assert_eq "0" "$RUN_RC" "gte and a cache path: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "$SETUP_GTE_MODEL" "$(jq -r .docs.model docs/search/config.json 2>&1)" "the config's docs.model is gte"
+  assert_eq "$(jq --arg m "$SETUP_GTE_MODEL" '.docs.model = $m' "$SETUP_ROOT/scripts/setup/search-config.json")" \
+    "$(cat docs/search/config.json)" "…init's defaults with docs.model set, nothing else"
+  assert_true "the env hook passes sh -n" sh -n "$env"
+  # shellcheck disable=SC2016  # expanded by the sh that sources the hook
+  got=$(env -i PATH="$REAL_PATH" sh -c '. "$1"; printf "%s|%s|%s|%s" "$SEMBLE_CACHE_LOCATION" "$DOC_SEARCH_CACHE_LOCATION" "$DOC_SUPERPOWERS_ROOT" "$FOO"' _ "$env")
+  assert_eq "$TEST_DIR/my cache/semble|$TEST_DIR/my cache/doc-search|$SETUP_ROOT|1" "$got" \
+    "sourced in sh: the cache lines, DOC_SUPERPOWERS_ROOT (a run from a clone), and the user's FOO"
+  assert_eq "export FOO=1" "$(head -n 1 "$env")" "the user's line is kept, first"
+  assert_eq "1" "$(grep -c '^# doc-superpowers setup:begin (managed; edit with doc-superpowers setup)$' "$env")" "one block"
+  h=$(hash_file "$env")
+  run_setup -- --yes --set search.model=gte --set "search.cache=$TEST_DIR/my cache"
+  assert_eq "0|nothing to do" "$RUN_RC|$RUN_OUT" "a second run: nothing to do"
+  assert_eq "$h" "$(hash_file "$env")" "…the env hook byte-identical"
+  # A cache path set back to host: the cache lines go, the root line stays.
+  run_setup -- --yes --set search.cache=host
+  assert_eq "0" "$RUN_RC" "search.cache=host: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "export FOO=1
+# doc-superpowers setup:begin (managed; edit with doc-superpowers setup)
+export DOC_SUPERPOWERS_ROOT='$SETUP_ROOT'
+# doc-superpowers setup:end" "$(cat "$env")" "the cache lines removed, DOC_SUPERPOWERS_ROOT kept, the user's line kept"
+  assert_eq "null" "$(jq -c .search.cache .claude/doc-superpowers/installed.local.json 2>&1)" "the local record: the host's cache"
+  # From under the plugin cache: the root line is '-', kept as it is.
+  setup_cache_root
+  SETUP_CMD="$SETUP_PCACHE_CMD"
+  run_setup CLAUDE_PLUGIN_CACHE="$SETUP_PCACHE" -- --yes --set "search.cache=$TEST_DIR/c2"
+  assert_eq "0" "$RUN_RC" "from the plugin cache, a cache path: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "export FOO=1
+# doc-superpowers setup:begin (managed; edit with doc-superpowers setup)
+export SEMBLE_CACHE_LOCATION='$TEST_DIR/c2/semble'
+export DOC_SEARCH_CACHE_LOCATION='$TEST_DIR/c2/doc-search'
+export DOC_SUPERPOWERS_ROOT='$SETUP_ROOT'
+# doc-superpowers setup:end" "$(cat "$env")" "the cache lines written, the root line ('-') kept as it was"
+  # The root line gone by hand: setting the cache back to host leaves no line,
+  # so the block goes; the user's line stays.
+  sed -i.bak '/^export DOC_SUPERPOWERS_ROOT=/d' "$env"
+  rm -f "$env.bak"
+  run_setup CLAUDE_PLUGIN_CACHE="$SETUP_PCACHE" -- --yes --set search.cache=host
+  assert_eq "0" "$RUN_RC" "from the plugin cache, back to host: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "export FOO=1" "$(cat "$env")" "the block removed (it would hold no line); the user's line kept"
+  run_setup CLAUDE_PLUGIN_CACHE="$SETUP_PCACHE" -- --yes
+  assert_eq "0|nothing to do" "$RUN_RC|$RUN_OUT" "…and then nothing to do"
+  unset SETUP_CMD
+  # An existing config: docs.model alone changes; the review says so.
+  mkdir -p docs/search
+  printf '{"docs": {"model": "%s", "include": ["x.md"]}, "extra": 1}\n' "$SETUP_GTE_MODEL" > docs/search/config.json
+  run_setup -- --dry-run --set search.model=static
+  assert_contains "$(review_section 'Steps:')" "sets docs.model" "an existing config: the step sets docs.model"
+  assert_not_contains "$(review_section 'Steps:')" "init's defaults" "…and does not claim init's defaults"
+  run_setup -- --yes --set search.model=static
+  assert_eq "0" "$RUN_RC" "static over an existing gte config: exit 0 (stderr: $RUN_ERR)"
+  assert_eq '{"docs":{"model":null,"include":["x.md"]},"extra":1}' "$(jq -c . docs/search/config.json 2>&1)" \
+    "only docs.model changed (to the static model, null)"
+  # The env hook writer checks its result with sh -n before the mv.
+  printf 'export FOO=1\n' > "$env"
+  h=$(hash_file "$env")
+  # shellcheck disable=SC2016  # the snippet runs in the child bash
+  setup_lib 'source "$ROOT/scripts/setup/lib-plan.sh"
+    source "$ROOT/scripts/setup/lib-exec.sh"
+    rc=0
+    _exec_write "$XDG_CONFIG_HOME/doc-search/env.sh" "if then fi (" _exec_sh_n || rc=$?
+    echo "rc=$rc"'
+  assert_contains "$SL_OUT" "rc=1" "_exec_write with the sh -n check: a result that does not parse is refused"
+  assert_contains "$SL_OUT" "sh -n" "…saying why"
+  assert_eq "$h" "$(hash_file "$env")" "…the file unchanged"
+  assert_eq "" "$(find "$XDG_CONFIG_HOME/doc-search" -name '.env.sh.*')" "…no temp file left"
+  teardown
+}
+
+test_setup_build_needs_consent() {
+  echo "test: #51 nothing downloads without consent: setup --yes --set search=on runs no uv; --yes --set search=on --build runs the uv stub once, through the launcher (run --project … doc-search index); the review of a build names uv's cache, the plugin's search/.venv and the Hugging Face cache, with sizes"
+  setup
+  local out
+  safety_stubs_on
+  run_setup -- --yes --set search=on
+  assert_eq "0" "$RUN_RC" "--yes --set search=on: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "" "$(cat "$STUBLOG")" "…uv not invoked"
+  run_setup UV_CACHE_DIR= HF_HOME= XDG_CACHE_HOME= -- --dry-run --set search=on --build
+  assert_eq "0" "$RUN_RC" "--dry-run --build: exit 0 (stderr: $RUN_ERR)"
+  out=$(review_section 'Local to you (outside the repository):')
+  assert_contains "$out" "  $HOME/.cache/uv  " "the build's writes: uv's cache (its default)"
+  assert_contains "$out" "  $SETUP_ROOT/search/.venv  " "…the plugin's search/.venv"
+  assert_contains "$out" "  $HOME/.cache/huggingface  " "…the Hugging Face cache (its default)"
+  assert_contains "$out" "about" "…with sizes"
+  run_setup UV_CACHE_DIR="$TEST_DIR/uvc" HF_HOME="$TEST_DIR/hf" -- --dry-run --set search=on --build
+  out=$(review_paths 'Local to you (outside the repository):')
+  assert_true "UV_CACHE_DIR is followed" grep -qxF "$TEST_DIR/uvc" <<<"$out"
+  assert_true "HF_HOME is followed" grep -qxF "$TEST_DIR/hf" <<<"$out"
+  assert_eq "" "$(cat "$STUBLOG")" "the dry-runs ran no uv"
+  run_setup -- --yes --set search=on --build
+  assert_eq "0" "$RUN_RC" "--yes --set search=on --build: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "1" "$(grep -c . "$STUBLOG")" "the uv stub ran once, and no other stub"
+  out=$(cat "$STUBLOG")
+  assert_contains "$out" "/uv run --project $SETUP_ROOT/search " "…uv run --project <the plugin running setup>/search (DOC_SUPERPOWERS_ROOT)"
+  assert_contains "$out" "doc-search index" "…doc-search index"
+  assert_eq "" "$(safety_gitlog_remote)" "git: no remote verb"
+  safety_stubs_off
+  teardown
+}
+
+test_setup_search_untick_keeps_config() {
+  echo "test: #51 doc-search unticked: --yes --set search=off removes the launcher and the .mcp.json entry, keeps docs/search/config.json (setup never removes a switch), and says so"
+  setup
+  run_setup -- --yes --set search=on
+  assert_eq "0" "$RUN_RC" "search on: exit 0 (stderr: $RUN_ERR)"
+  run_setup -- --yes --set search=off
+  assert_eq "0" "$RUN_RC" "search off: exit 0 (stderr: $RUN_ERR)"
+  assert_true "the launcher removed" test ! -e .claude/doc-superpowers/search-mcp.sh
+  assert_eq "false" "$(if [ -f .mcp.json ]; then jq '.mcpServers // {} | has("doc-search")' .mcp.json; else echo false; fi)" \
+    "the .mcp.json entry removed"
+  assert_true "docs/search/config.json kept" test -f docs/search/config.json
+  assert_contains "$RUN_OUT" "docs/search/config.json is left in place" "…and setup says so"
+  assert_eq "null" "$(jq -c .setup.search .claude/doc-superpowers/installed.json 2>&1)" "the record: doc-search off"
+  run_setup -- --yes
+  assert_eq "0|nothing to do" "$RUN_RC|$RUN_OUT" "then nothing to do (the config left in place is not a step)"
+  teardown
+}
+
+test_setup_no_uv_build_refused() {
+  echo "test: #51 a host without uv: --yes --set search=on still writes (exit 0); --yes --set search=on --build is refused at plan time (exit 1, uv not found, nothing written); the item itself is not disabled"
+  setup
+  local before
+  SETUP_PATH=$(path_without uv)
+  before=$(setup_snapshot)
+  run_setup -- --yes --set search=on --build
+  assert_eq "1" "$RUN_RC" "--build without uv: exit 1"
+  assert_contains "$RUN_ERR" "uv not found" "…uv not found"
+  assert_contains "$RUN_ERR" "nothing was changed" "…nothing was changed"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
+  run_setup -- --list
+  assert_eq "" "$(list_field search 5)" "--list: doc-search has no disabled reason (no uv disables the build, not the item)"
+  run_setup -- --yes --set search=on
+  assert_eq "0" "$RUN_RC" "--yes --set search=on without uv: exit 0 (stderr: $RUN_ERR)"
+  assert_true "…the config written" test -f docs/search/config.json
+  assert_true "…the launcher" test -f .claude/doc-superpowers/search-mcp.sh
+  SETUP_PATH=""
+  teardown
+}
+
 echo ""
 echo "=== setup: model, probe, --list (#51) ==="
 test_setup_catalog
@@ -8754,6 +8945,11 @@ test_setup_refuses_links_on_step_paths
 test_setup_yes_refusals
 test_setup_record_writers
 test_setup_exclude_block
+test_setup_search_write_only_safety
+test_setup_search_gte_and_cache
+test_setup_build_needs_consent
+test_setup_search_untick_keeps_config
+test_setup_no_uv_build_refused
 
 test_claude_hook_contract_held() {
   echo "test: every Claude hook run above held the contract (exit 0, or 2 only under STRICT; stdout one JSON object or nothing)"

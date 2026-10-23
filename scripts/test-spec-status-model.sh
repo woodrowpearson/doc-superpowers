@@ -2015,6 +2015,17 @@ assert_eq "$_repo_real/.claude/doc-superpowers/search-mcp.sh|query|two words" "$
 _out_repo="$(harness_mktemp_d ds-norepo)"
 _ds_run env GIT_CEILING_DIRECTORIES="$(dirname "$_out_repo")" sh -c 'cd "$1" && exec "$2" "$3" search index' _ "$_out_repo" "$BASH_BIN" "$_sd"
 assert_eq "launch" "$(_ds_fld 1)" "search outside a repository runs the plugin's launcher"
+# search: the launcher runs with DOC_SUPERPOWERS_ROOT naming the plugin the
+# dispatcher belongs to (so it uses this install, not another one it would
+# find), unless the caller set one.
+# shellcheck disable=SC2016  # expanded by the stub launcher
+printf '%s\n' 'printf "root=%s\n" "${DOC_SUPERPOWERS_ROOT-unset}"' >"$_repo/.claude/doc-superpowers/search-mcp.sh"
+_ds_run env -u DOC_SUPERPOWERS_ROOT GIT_CEILING_DIRECTORIES="$(dirname "$_repo")" sh -c 'cd "$1" && exec "$2" "$3" search status' _ "$_repo/sub/dir" "$BASH_BIN" "$_sd"
+assert_eq "root=$_stub" "$_DS_OUT" "search exports DOC_SUPERPOWERS_ROOT=<the dispatcher's root> to the launcher"
+_ds_run env DOC_SUPERPOWERS_ROOT= GIT_CEILING_DIRECTORIES="$(dirname "$_repo")" sh -c 'cd "$1" && exec "$2" "$3" search status' _ "$_repo/sub/dir" "$BASH_BIN" "$_sd"
+assert_eq "root=$_stub" "$_DS_OUT" "…an empty DOC_SUPERPOWERS_ROOT counts as unset"
+_ds_run env DOC_SUPERPOWERS_ROOT="/an explicit/root" GIT_CEILING_DIRECTORIES="$(dirname "$_repo")" sh -c 'cd "$1" && exec "$2" "$3" search status' _ "$_repo/sub/dir" "$BASH_BIN" "$_sd"
+assert_eq "root=/an explicit/root" "$_DS_OUT" "…an explicit DOC_SUPERPOWERS_ROOT still wins"
 
 # =============================================================================
 echo "--- leak scan: tracked files ship to every install (#29) ---"

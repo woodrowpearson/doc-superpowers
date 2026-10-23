@@ -48,7 +48,8 @@
 # plan_render_summary and plan_render_review print what plan_build made (run
 # it first); plan_is_empty says whether there is anything to do;
 # plan_envhook_file and plan_envhook_block are the env hook's path and the
-# block setup owns there (the envhook step writes that block).
+# block setup owns there; plan_envhook_merge is the block the envhook step
+# writes (the current one, changed per variable).
 
 _PLAN_T=$'\t'
 PLAN_ENVHOOK_BEGIN="# doc-superpowers setup:begin (managed; edit with doc-superpowers setup)"
@@ -166,6 +167,42 @@ plan_envhook_block() {
     printf 'export DOC_SUPERPOWERS_ROOT=%s\n' "$(_plan_sh_quote "$2")"
   fi
   printf '%s\n' "$PLAN_ENVHOOK_END"
+}
+
+# plan_envhook_merge <cache|-|host> <root|->: the block the envhook step
+# leaves in the env hook, from the block it holds now, per variable: a path
+# writes that variable's line(s) (the cache: SEMBLE_CACHE_LOCATION and
+# DOC_SEARCH_CACHE_LOCATION under it); - keeps the line(s) there now as they
+# are; host (the cache set back from a recorded path to the host default)
+# drops the two cache lines. Any other line in the block is kept, after
+# them; an empty line is dropped. Nothing when the block would hold no line
+# (the envhook step then removes it).
+plan_envhook_merge() {
+  local cache="$1" rootv="$2" cur line cl="" rl="" other="" c
+  cur=$(_plan_envhook_current)
+  if [ -n "$cur" ]; then
+    while IFS= read -r line; do
+      case "$line" in
+        "" | "$PLAN_ENVHOOK_BEGIN" | "$PLAN_ENVHOOK_END") ;;
+        "export SEMBLE_CACHE_LOCATION="* | "export DOC_SEARCH_CACHE_LOCATION="*) cl="$cl$line"$'\n' ;;
+        "export DOC_SUPERPOWERS_ROOT="*) rl="$rl$line"$'\n' ;;
+        *) other="$other$line"$'\n' ;;
+      esac
+    done <<<"$cur"
+  fi
+  case "$cache" in
+    -) ;;
+    host) cl="" ;;
+    *)
+      c="$cache"
+      [ "$c" = / ] || c="${c%/}"
+      cl="export SEMBLE_CACHE_LOCATION=$(_plan_sh_quote "${c%/}/semble")"$'\n'
+      cl="${cl}export DOC_SEARCH_CACHE_LOCATION=$(_plan_sh_quote "${c%/}/doc-search")"$'\n'
+      ;;
+  esac
+  [ "$rootv" = - ] || rl="export DOC_SUPERPOWERS_ROOT=$(_plan_sh_quote "$rootv")"$'\n'
+  [ -n "$cl$rl$other" ] || return 0
+  printf '%s\n%s%s%s%s\n' "$PLAN_ENVHOOK_BEGIN" "$cl" "$rl" "$other" "$PLAN_ENVHOOK_END"
 }
 
 # _plan_envhook_current: the block the env hook holds now (from its begin
@@ -300,7 +337,11 @@ _plan_op_writes() {
   case "$op" in
     search-config)
       if [ "$a" = gte ]; then w="docs.model $PROBE_GTE_MODEL"; else w="the static docs model"; fi
-      _plan_w team docs/search/config.json "doc-search's config (doc-search init's defaults, $w)"
+      if [ -f "$TOP/docs/search/config.json" ]; then
+        _plan_w team docs/search/config.json "doc-search's config (sets docs.model: $w)"
+      else
+        _plan_w team docs/search/config.json "doc-search's config (doc-search init's defaults, $w)"
+      fi
       ;;
     ledger-config) _plan_w team docs/ledger/config.json "the work ledger's switch: {}" ;;
     claims-config) _plan_w team docs/spec-claims/config.json "spec claims' switch: {\"schema\": 1}" ;;
@@ -367,9 +408,17 @@ _plan_op_writes() {
     record-team) _plan_w team "$PROBE_STATE_FILE" "the team's setup (.setup)" ;;
     record-local) _plan_w local "$PROBE_LOCAL_FILE" "your own setup (untracked)" ;;
     build)
+      # uv run --project <ROOT>/search: uv's cache, then the project's own
+      # environment; semble's model and gte from the Hugging Face hub; the
+      # indexes in semble's cache (gte's vectors in doc-search's).
       _plan_cache_dirs
-      _plan_w outside "$_PLAN_SEMBLE_CACHE" "doc-search's indexes (semble's cache)"
       _plan_sel search.model
+      _plan_w outside "${UV_CACHE_DIR:-${XDG_CACHE_HOME:-${HOME:-}/.cache}/uv}" \
+        "uv's cache: doc-search's Python packages, about 40 MB$([ "$_PS" != gte ] || printf ' (and onnxruntime for gte)')"
+      _plan_w outside "$ROOT/search/.venv" "the plugin's Python environment for doc-search (uv run --project), about 150 MB"
+      _plan_w outside "${HF_HOME:-${XDG_CACHE_HOME:-${HOME:-}/.cache}/huggingface}" \
+        "the Hugging Face cache: semble's model, about 30 MB$([ "$_PS" != gte ] || printf ', and the gte model, about 150 MB')"
+      _plan_w outside "$_PLAN_SEMBLE_CACHE" "doc-search's indexes (semble's cache)"
       [ "$_PS" != gte ] || _plan_w outside "$_PLAN_DS_CACHE" "the gte encode cache"
       ;;
   esac
@@ -633,14 +682,22 @@ plan_build() {
       _plan_op harness harness-remove "$h"
     fi
   done
+  # The env hook, per variable (plan_envhook_merge): the cache when it is a
+  # path, or when it goes back from a recorded path to the host default
+  # (host); DOC_SUPERPOWERS_ROOT when setup runs from a clone; - leaves a
+  # variable's line as it is (the hook is per host: another repository's
+  # cache path stays).
   if model_is_on search; then
     _plan_sel search.cache
     cache="$_PS"
-    [ "$cache" != host ] || cache=-
+    if [ "$cache" = host ]; then
+      cache=-
+      [ "$(probe_installed search.cache)" = host ] || cache=host
+    fi
     hroot=-
     _plan_root_in_cache || hroot="$ROOT"
     if { [ "$cache" != - ] || [ "$hroot" != - ]; } \
-      && [ "$(_plan_envhook_current)" != "$(plan_envhook_block "$cache" "$hroot")" ]; then
+      && [ "$(_plan_envhook_current)" != "$(plan_envhook_merge "$cache" "$hroot")" ]; then
       _plan_op search.cache envhook "$cache" "$hroot"
     fi
   fi
@@ -656,6 +713,10 @@ plan_build() {
   [ "$PLAN_LOCAL_CHANGED" != 1 ] || _plan_op "" record-local
   _PLAN_BUILD=0
   if [ "$PLAN_BUILD_REQUESTED" = 1 ] && model_is_on search; then
+    if [ -n "${HOST_NO_BUILD:-}" ]; then
+      PLAN_ERROR="--build: doc-search's build needs uv: $HOST_NO_BUILD (without --build, setup writes doc-search's files and builds nothing)"
+      return 1
+    fi
     _plan_op search build
     _PLAN_BUILD=1
   fi
@@ -770,8 +831,13 @@ _plan_op_text() {
   IFS="$_PLAN_T" read -r op a b c d <<<"$1"
   case "$op" in
     search-config)
-      if [ "$a" = gte ]; then a="docs.model $PROBE_GTE_MODEL"; else a="the static docs model"; fi
-      printf '%s' "write docs/search/config.json: doc-search init's defaults, $a (setup writes it; uv does not run)"
+      if [ -f "$TOP/docs/search/config.json" ]; then
+        if [ "$a" = gte ]; then a="\"$PROBE_GTE_MODEL\""; else a="null (the static docs model)"; fi
+        printf '%s' "edit docs/search/config.json: sets docs.model to $a, nothing else (setup edits it; uv does not run)"
+      else
+        if [ "$a" = gte ]; then a="docs.model $PROBE_GTE_MODEL"; else a="the static docs model"; fi
+        printf '%s' "write docs/search/config.json: doc-search init's defaults, $a (setup writes it; uv does not run)"
+      fi
       ;;
     ledger-config) printf '%s' "write docs/ledger/config.json = {}: the work ledger on (doc-superpowers help ledger: ledger init)" ;;
     claims-config) printf '%s' "write docs/spec-claims/config.json = {\"schema\": 1}: spec claims on (its pre-commit leg blocks a commit on a finding)" ;;
@@ -813,8 +879,11 @@ _plan_op_text() {
       printf '%s' "remove the doc-search server entry for $_PH_NAME from $_PH_FILE"
       ;;
     envhook)
-      [ "$a" != - ] || a="the host default"
-      [ "$b" != - ] || b="none (the launcher finds the plugin cache)"
+      case "$a" in
+        -) a="as it is" ;;
+        host) a="the host default (its lines removed)" ;;
+      esac
+      [ "$b" != - ] || b="as it is (the launcher finds the plugin cache)"
       printf '%s' "write the doc-superpowers block of your env hook $_PLAN_ENVFILE: cache $a, DOC_SUPERPOWERS_ROOT $b"
       ;;
     exclude-local) printf '%s' "keep $PROBE_LOCAL_FILE out of git (a marked block in $_PLAN_EXCLUDE)" ;;

@@ -69,8 +69,11 @@ cmd_help() {
   cat "$ROOT/scripts/help/$file.txt"
 }
 
+# search: the launcher runs this plugin's doc-search (DOC_SUPERPOWERS_ROOT,
+# unless the caller set one), not whichever install it would find itself.
 cmd_search() {
   local top
+  export DOC_SUPERPOWERS_ROOT="${DOC_SUPERPOWERS_ROOT:-$ROOT}"
   top="$(git rev-parse --show-toplevel 2>/dev/null)" || top=""
   # A project that installed doc-search committed its own launcher.
   if [ -n "$top" ] && [ -f "$top/.claude/doc-superpowers/search-mcp.sh" ]; then
