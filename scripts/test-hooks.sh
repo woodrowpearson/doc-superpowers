@@ -7516,7 +7516,7 @@ test_setup_set_validation() {
   run_setup -- --list --set search=on --set harness=codex
   assert_eq "1" "$RUN_RC" "harness without claude-code while doc-search is on: refused (exit 1)"
   assert_contains "$RUN_ERR" "claude-code" "…saying why"
-  for f in --dry-run --yes --apply --build --for-team --link-bin --no-link-bin --plain; do
+  for f in --yes --apply --build --for-team --link-bin --no-link-bin --plain; do
     run_setup -- "$f"
     assert_eq "3" "$RUN_RC" "$f: exit 3 until its task"
     assert_contains "$RUN_ERR" "setup: $f: not implemented yet" "$f: says so"
@@ -7684,6 +7684,451 @@ test_setup_probe_states() {
   teardown
 }
 
+# --- setup: the plan and the review, --dry-run (#51) ---------------------------
+
+# review_section <header>: the lines under <header> in $RUN_OUT (each indented
+# two spaces), up to the next line that is not.
+review_section() {
+  awk -v h="$1" 'f && /^  / { print; next } f { exit } $0 == h { f = 1 }' <<<"$RUN_OUT"
+}
+
+# review_paths <header>: the path on each line under <header>: the text
+# between the indent and the next two spaces.
+review_paths() {
+  review_section "$1" | sed -e 's/^  //' -e 's/  .*//'
+}
+
+# plan_ops [snippet] [after]: the plan setup builds for the fixture, after the
+# base and <snippet> (model_set calls, PLAN_BUILD_REQUESTED=1, an export), one
+# op per line with TAB shown as "|"; or, with <after>, what <after> prints
+# once the plan is built. SL_RC and SL_OUT as setup_lib sets them.
+plan_ops() {
+  local after='if [ "${#PLAN[@]}" -gt 0 ]; then printf "%s\n" "${PLAN[@]}" | tr "\t" "|"; fi'
+  [ -z "${2:-}" ] || after="$2"
+  # shellcheck disable=SC2016  # the snippet runs in the child bash
+  setup_lib 'source "$ROOT/scripts/setup/lib-plan.sh"
+    probe_run
+    model_base_init
+    '"${1:-}"'
+    plan_build
+    '"$after"
+}
+
+# The .setup a default run records.
+SETUP_DEFAULT_RECORD='{"format":1,"harnesses":["claude-code"],"git":"hooks","claude":true,"search":null,"ledger":null,"claims":false}'
+
+# The state a default run leaves: the git and Claude tiers installed, and a
+# team record holding the defaults (<setup>, if given, replaces its .setup).
+setup_applied_defaults() {
+  inst install --git --claude
+  mkdir -p .claude/doc-superpowers
+  printf '{"schema_version":2,"setup":%s}\n' "${1:-$SETUP_DEFAULT_RECORD}" > .claude/doc-superpowers/installed.json
+}
+
+test_setup_model_is_on() {
+  echo "test: #51 model_is_on <id>: 0 when the selection ticks the item (not off, not none; a value item always is), 1 when it does not, 2 for an unknown id"
+  setup
+  setup_lib 'probe_run
+    model_base_init
+    for id in git claude harness search ci.workflows ledger ci.cron search.cache; do
+      if model_is_on "$id"; then echo "$id=on"; else echo "$id=off"; fi
+    done
+    model_set git off
+    model_is_on git || echo "git-off=$?"
+    model_set ci.workflows doc-review-pr
+    model_is_on ci.workflows && echo "ci=on"
+    model_is_on nosuch || echo "unknown=$?"'
+  assert_eq "0" "$SL_RC" "the snippet ran (output: $(head -c 300 <<<"$SL_OUT"))"
+  assert_contains "$SL_OUT" "git=on" "git=hooks: on"
+  assert_contains "$SL_OUT" "claude=on" "claude=on: on"
+  assert_contains "$SL_OUT" "harness=on" "harness=claude-code: on"
+  assert_contains "$SL_OUT" "search=off" "search=off: off"
+  assert_contains "$SL_OUT" "ci.workflows=off" "ci.workflows=none: off"
+  assert_contains "$SL_OUT" "ledger=off" "ledger=off: off"
+  assert_contains "$SL_OUT" "ci.cron=on" "a value item is always on"
+  assert_contains "$SL_OUT" "search.cache=on" "…search.cache too"
+  assert_contains "$SL_OUT" "git-off=1" "git=off: 1"
+  assert_contains "$SL_OUT" "ci=on" "a workflow ticked: on"
+  assert_contains "$SL_OUT" "unknown=2" "an unknown id: 2"
+  teardown
+}
+
+test_setup_dry_run_defaults() {
+  echo "test: #51 setup --dry-run in a fresh repository: the summary (one line per group), a blank line, then the review: the merge driver's block and the team record committed for the team, the git and Claude tiers local to you, no network, no download, and the git add line"
+  setup
+  local expect
+  run_setup -- --dry-run
+  assert_eq "0" "$RUN_RC" "exit 0 (stderr: $RUN_ERR)"
+  assert_eq "" "$RUN_ERR" "nothing on stderr"
+  expect='[x] Harness  claude-code
+[ ] doc-search  off
+[x] Git hooks  hooks + merge driver
+[x] Claude hooks  on (3 hooks)
+[ ] CI workflows  off
+[ ] Work ledger  off
+[ ] Spec claims  off
+[ ] Terminal command  off'
+  assert_eq "$expect" "$(head -n 8 <<<"$RUN_OUT")" "the summary: one line per group, in order"
+  assert_eq "" "$(sed -n 9p <<<"$RUN_OUT")" "a blank line after the summary"
+  assert_eq "Committed for the team:|Local to you:|Local to you (outside the repository):|Network:|Downloads:|Then commit:" \
+    "$(grep -xE 'Committed for the team:|Local to you:|Local to you \(outside the repository\):|Network:|Downloads:|Then commit:' <<<"$RUN_OUT" | paste -s -d '|' -)" \
+    "the six section headers, each once, in order"
+  assert_eq ".gitattributes
+.claude/doc-superpowers/installed.json" "$(review_paths 'Committed for the team:')" \
+    "committed for the team: .gitattributes and .claude/doc-superpowers/installed.json"
+  assert_eq "$(printf '%s\n' .claude/hooks/doc-superpowers/ .claude/settings.local.json .git/config .git/hooks/ .git/info/exclude | LC_ALL=C sort)" \
+    "$(review_paths 'Local to you:' | LC_ALL=C sort)" \
+    "local to you: .git/config, .git/hooks/, .git/info/exclude, .claude/settings.local.json, .claude/hooks/doc-superpowers/"
+  assert_eq "  (nothing)" "$(review_section 'Local to you (outside the repository):')" "nothing outside the repository"
+  assert_eq "  (nothing)" "$(review_section 'Network:')" "Network: (nothing)"
+  assert_eq "  (nothing)" "$(review_section 'Downloads:')" "Downloads: (nothing)"
+  assert_eq "  git add -- .gitattributes .claude/doc-superpowers/installed.json" "$(review_section 'Then commit:')" \
+    "Then commit: one git add line with the team's paths"
+  assert_not_contains "$RUN_OUT" "search-mcp.sh index" "no build"
+  plan_ops
+  assert_eq "0" "$SL_RC" "plan_build ran (output: $(head -c 300 <<<"$SL_OUT"))"
+  assert_eq "git-install|hooks
+claude-install
+record-team" "$SL_OUT" "the plan: install --git, install --claude, the team record"
+  plan_ops '' 'echo "$PLAN_TEAM_SETUP"; echo "team=$PLAN_TEAM_CHANGED local=$PLAN_LOCAL_CHANGED"'
+  assert_eq "$SETUP_DEFAULT_RECORD
+team=1 local=0" "$SL_OUT" "the team record it would write; no local record"
+  teardown
+}
+
+test_setup_dry_run_writes_nothing() {
+  echo "test: #51 setup --dry-run writes nothing, whatever the selection: the work tree, .git (minus its index), HOME and XDG_CONFIG_HOME are unchanged"
+  setup
+  local before
+  before=$(setup_snapshot)
+  run_setup -- --dry-run
+  assert_eq "0" "$RUN_RC" "defaults: exit 0 (stderr: $RUN_ERR)"
+  run_setup -- --dry-run --set search=on --set search.model=gte --set "search.cache=$TEST_DIR/my cache" \
+    --set harness=claude-code,codex,gemini --set bin=on
+  assert_eq "0" "$RUN_RC" "doc-search, gte, a cache path, harnesses, the terminal command: exit 0 (stderr: $RUN_ERR)"
+  run_setup -- --dry-run --set search=on --build
+  assert_eq "0" "$RUN_RC" "--build: exit 0 (stderr: $RUN_ERR)"
+  run_setup -- --dry-run --set ci.workflows=doc-review-pr,doc-freshness-pr --set ci.strict=on
+  assert_eq "0" "$RUN_RC" "CI: exit 0 (stderr: $RUN_ERR)"
+  run_setup -- --dry-run --set ledger=on --set ledger.git=on --set ledger.claude=on --set claims=on
+  assert_eq "0" "$RUN_RC" "the ledger and claims: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "$before" "$(setup_snapshot)" "a fresh repository: nothing written"
+  assert_eq "" "$(git status --porcelain)" "git status --porcelain is empty"
+  assert_true "no env hook written" test ! -e "$XDG_CONFIG_HOME/doc-search"
+  assert_true "no ~/.local/bin written" test ! -e "$HOME/.local/bin"
+  setup_applied_defaults
+  before=$(setup_snapshot)
+  run_setup -- --dry-run --set git=off --set claude=off
+  assert_eq "0" "$RUN_RC" "an applied repository, uninstalls planned: exit 0 (stderr: $RUN_ERR)"
+  run_setup -- --dry-run --set git=merge-driver --set search=on
+  assert_eq "0" "$RUN_RC" "a transition planned: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "$before" "$(setup_snapshot)" "an applied repository: nothing written"
+  teardown
+}
+
+test_setup_dry_run_search_static() {
+  echo "test: #51 setup --dry-run --set search=on: the config, the launcher and .mcp.json committed for the team, the env hook outside the repository for a run from a clone, a Downloads block for each contributor's client on its first start, and a build only with --build"
+  setup
+  local p team dl sp
+  run_setup -- --dry-run --set search=on
+  assert_eq "0" "$RUN_RC" "exit 0 (stderr: $RUN_ERR)"
+  team=$(review_paths 'Committed for the team:')
+  for p in docs/search/config.json .claude/doc-superpowers/search-mcp.sh .mcp.json .gitattributes .claude/doc-superpowers/installed.json; do
+    assert_true "committed for the team: $p" grep -qxF "$p" <<<"$team"
+  done
+  assert_eq "  git add -- docs/search/config.json .gitattributes .claude/doc-superpowers/search-mcp.sh .mcp.json .claude/doc-superpowers/installed.json" \
+    "$(review_section 'Then commit:')" "the git add line holds every team path, in plan order"
+  dl=$(review_section 'Downloads:')
+  assert_eq "1" "$(grep -c . <<<"$dl")" "Downloads: one line (no build)"
+  assert_contains "$dl" "first start" "Downloads: each contributor's client downloads on its first start of the server"
+  assert_contains "$dl" "approval" "…after that client's own approval prompt"
+  assert_contains "$dl" "MB" "…with a size"
+  assert_contains "$(review_section 'Network:')" "doc-search" "Network names doc-search"
+  assert_not_contains "$RUN_OUT" "search-mcp.sh index" "no build step without --build"
+  assert_eq "$XDG_CONFIG_HOME/doc-search/env.sh" "$(review_paths 'Local to you (outside the repository):')" \
+    "a run from a clone: the env hook (DOC_SUPERPOWERS_ROOT), outside the repository"
+  assert_contains "$(head -n 8 <<<"$RUN_OUT")" "[x] doc-search  on, static model (changed)" "the summary marks doc-search changed"
+  assert_contains "$(head -n 8 <<<"$RUN_OUT")" "[x] Harness  claude-code" "harness unchanged"
+  assert_not_contains "$(head -n 1 <<<"$RUN_OUT")" "(changed)" "…and not marked"
+  plan_ops 'model_set search on'
+  assert_eq "search-config|static
+git-install|hooks
+claude-install
+search-install
+envhook|-|$SETUP_ROOT
+record-team" "$SL_OUT" "the plan: the config first (install --search needs it), the installer steps, the env hook, the record; no build"
+  run_setup DOC_SEARCH_ENV_FILE="$TEST_DIR/my env.sh" -- --dry-run --set search=on
+  assert_eq "$TEST_DIR/my env.sh" "$(review_paths 'Local to you (outside the repository):')" "the env hook path follows DOC_SEARCH_ENV_FILE"
+  # shellcheck disable=SC2016  # the snippet runs in the child bash
+  setup_lib 'source "$ROOT/scripts/setup/lib-plan.sh"
+    i=$(model_idx search.cache)
+    w="${CAT_WRITES[i]##*outside:}"
+    echo "sym=$w"
+    echo "now=$(plan_write_path "$w")"
+    DOC_SEARCH_ENV_FILE="/e f.sh"
+    echo "env=$(plan_write_path "$w")"
+    echo "bin=$(plan_write_path "~/.local/bin/doc-superpowers")"
+    echo "repo=$(plan_write_path .mcp.json)"'
+  assert_eq "0" "$SL_RC" "plan_write_path ran (output: $SL_OUT)"
+  assert_contains "$SL_OUT" "sym=~/.config/doc-search/env.sh" "the catalog keeps the env hook's symbolic path"
+  assert_contains "$SL_OUT" "now=$XDG_CONFIG_HOME/doc-search/env.sh" "plan_write_path resolves it at render time: XDG_CONFIG_HOME"
+  assert_contains "$SL_OUT" "env=/e f.sh" "…DOC_SEARCH_ENV_FILE"
+  assert_contains "$SL_OUT" "bin=$HOME/.local/bin/doc-superpowers" "…another ~/ path: under HOME"
+  assert_contains "$SL_OUT" "repo=.mcp.json" "…a repository path: as given"
+  run_setup XDG_CONFIG_HOME="$TEST_DIR/other xdg" -- --dry-run --set search=on
+  assert_eq "$TEST_DIR/other xdg/doc-search/env.sh" "$(review_paths 'Local to you (outside the repository):')" "…and XDG_CONFIG_HOME"
+  run_setup CLAUDE_PLUGIN_CACHE="$(dirname "$SETUP_ROOT")" -- --dry-run --set search=on
+  assert_eq "  (nothing)" "$(review_section 'Local to you (outside the repository):')" \
+    "setup run from under the plugin cache, the host's cache: no env hook (the launcher finds the cache)"
+  run_setup CLAUDE_PLUGIN_CACHE="$(dirname "$SETUP_ROOT")/" -- --dry-run --set search=on
+  assert_eq "  (nothing)" "$(review_section 'Local to you (outside the repository):')" "…a trailing slash on CLAUDE_PLUGIN_CACHE too"
+  run_setup CLAUDE_PLUGIN_CACHE="$(dirname "$SETUP_ROOT")" -- --dry-run --set search=on --set "search.cache=$TEST_DIR/my cache"
+  assert_eq "$XDG_CONFIG_HOME/doc-search/env.sh" "$(review_paths 'Local to you (outside the repository):')" "a cache path: the env hook"
+  assert_true "…and the local record, local to you" grep -qxF .claude/doc-superpowers/installed.local.json <<<"$(review_paths 'Local to you:')"
+  # shellcheck disable=SC2016  # the snippet runs in the child bash
+  plan_ops 'export CLAUDE_PLUGIN_CACHE="$(dirname "$ROOT")"; model_set search.cache "'"$TEST_DIR"'/my cache"'
+  assert_eq "envhook|$TEST_DIR/my cache|-
+exclude-local
+record-team
+record-local" "$(tail -n 4 <<<"$SL_OUT")" "a cache path from the plugin cache: envhook <cache> -, the exclude block, then the records"
+  plan_ops 'model_set search.cache "'"$TEST_DIR"'/my cache"' 'echo "$PLAN_LOCAL_RECORD"'
+  assert_eq "{\"format\":1,\"overrides\":{},\"search\":{\"cache\":\"$TEST_DIR/my cache\"}}" "$SL_OUT" "the local record holds the cache path"
+  run_setup -- --dry-run --set search=on --build
+  assert_eq "0" "$RUN_RC" "--build: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "search-mcp.sh index" "with --build: the build step"
+  dl=$(review_section 'Downloads:')
+  assert_eq "2" "$(grep -c . <<<"$dl")" "Downloads: the contributors' first start, and this run"
+  assert_contains "$dl" "this run" "…this run's download is named"
+  plan_ops 'model_set search on; PLAN_BUILD_REQUESTED=1'
+  assert_eq "build" "$(tail -n 1 <<<"$SL_OUT")" "PLAN_BUILD_REQUESTED=1: the build, last"
+  plan_ops 'PLAN_BUILD_REQUESTED=1'
+  assert_not_contains "$SL_OUT" "build" "no build without doc-search"
+  run_setup -- --dry-run --set search.model=gte
+  assert_contains "$(review_section 'Downloads:')" "150 MB" "gte: about 150 MB more"
+  assert_contains "$(head -n 8 <<<"$RUN_OUT")" "[x] doc-search  on, gte model (changed)" "the summary names the gte model"
+  plan_ops 'model_set search.model gte'
+  assert_eq "search-config|gte" "$(head -n 1 <<<"$SL_OUT")" "search-config gte"
+  run_setup -- --dry-run --build
+  assert_eq "  (nothing)" "$(review_section 'Downloads:')" "--build without doc-search: nothing downloads"
+  # Review Focus 4: a repository path and a cache path with a space.
+  sp=$(harness_mktemp_d "with space")
+  cd "$sp"
+  git init -q -b main 2>/dev/null || { git init -q && git symbolic-ref HEAD refs/heads/main; }
+  git commit -q --allow-empty -m init
+  run_setup -- --dry-run --set search=on --set "search.cache=$sp/a cache"
+  assert_eq "0" "$RUN_RC" "a repository path with a space: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "  git add -- docs/search/config.json .gitattributes .claude/doc-superpowers/search-mcp.sh .mcp.json .claude/doc-superpowers/installed.json" \
+    "$(review_section 'Then commit:')" "…the same git add line (paths from the top)"
+  plan_ops 'model_set search.cache "'"$sp"'/a cache"'
+  assert_contains "$SL_OUT" "envhook|$sp/a cache|$SETUP_ROOT" "…the cache path, whole, in the envhook step"
+  cd "$TEST_DIR"
+  teardown
+}
+
+test_setup_dry_run_ci_consent() {
+  echo "test: #51 setup --dry-run --set ci.workflows=doc-review-pr: the workflow committed for the team, the review's Network names it with its permissions (its consent row); CI changes uninstall first"
+  setup
+  local team net
+  run_setup -- --dry-run --set ci.workflows=doc-review-pr
+  assert_eq "0" "$RUN_RC" "exit 0 (stderr: $RUN_ERR)"
+  team=$(review_paths 'Committed for the team:')
+  assert_true "committed for the team: .github/workflows/doc-review-pr.yml" grep -qxF .github/workflows/doc-review-pr.yml <<<"$team"
+  assert_true "…the vendored .github/scripts/" grep -qxF .github/scripts/ <<<"$team"
+  assert_true "…and the record" grep -qxF .claude/doc-superpowers/installed.json <<<"$team"
+  net=$(review_section 'Network:')
+  assert_eq "1" "$(grep -c . <<<"$net")" "Network: one line, the one workflow"
+  assert_contains "$net" "doc-review-pr" "Network names doc-review-pr"
+  assert_contains "$net" "GitHub" "…which runs on GitHub"
+  assert_contains "$net" "pull-requests + issues: write" "…with its permissions"
+  assert_contains "$(review_section 'Then commit:')" ".github/workflows/doc-review-pr.yml" "the git add line holds the workflow"
+  assert_contains "$(head -n 8 <<<"$RUN_OUT")" "[x] CI workflows  doc-review-pr; base main, cron '0 9 * * 1' (changed)" "the summary's CI line"
+  assert_contains "$(jq -r '.items[] | select(.id == "ci.workflows") | .option_details["doc-review-pr"]' "$SETUP_ROOT/scripts/setup/catalog.json")" \
+    "pull-requests + issues: write" "the item's details (catalog.json) carry the consent row"
+  plan_ops 'model_set ci.workflows doc-review-pr'
+  assert_contains "$SL_OUT" "ci-install|doc-review-pr|main|0 9 * * 1|false" "ci-install <csv> <base> <cron> <strict>"
+  run_setup -- --dry-run --set ci.workflows=doc-review-pr,doc-freshness-pr --set ci.strict=on
+  net=$(review_section 'Network:')
+  assert_eq "2" "$(grep -c . <<<"$net")" "two workflows: two Network lines"
+  assert_contains "$net" "doc-freshness-pr" "…doc-freshness-pr"
+  assert_contains "$(head -n 8 <<<"$RUN_OUT")" ", strict (changed)" "the summary says strict"
+  plan_ops 'model_set ci.workflows doc-review-pr,doc-freshness-pr; model_set ci.strict on'
+  assert_contains "$SL_OUT" "ci-install|doc-freshness-pr,doc-review-pr|main|0 9 * * 1|true" "strict: true, the CSV in catalog order"
+  inst install --ci
+  plan_ops
+  assert_not_contains "$SL_OUT" "ci-" "workflows installed, no record (base = defaults + installed), unchanged: no CI step"
+  plan_ops 'model_set ci.workflows doc-review-pr'
+  assert_contains "$SL_OUT" "ci-uninstall|doc-freshness-pr,doc-freshness-schedule
+ci-install|doc-review-pr|main|0 9 * * 1|false" "a changed set: the unticked ones uninstalled first, then the set installed"
+  plan_ops 'model_set ci.cron "0 3 * * 2"'
+  assert_contains "$SL_OUT" "ci-install|doc-freshness-pr,doc-freshness-schedule|main|0 3 * * 2|false" "a changed choice: the set installed again with it"
+  assert_not_contains "$SL_OUT" "ci-uninstall" "…nothing uninstalled"
+  plan_ops 'model_set ci.workflows none'
+  assert_contains "$SL_OUT" "ci-uninstall|doc-freshness-pr,doc-freshness-schedule" "ci.workflows=none: uninstalled"
+  assert_not_contains "$SL_OUT" "ci-install" "…and nothing installed"
+  teardown
+}
+
+test_setup_dry_run_ledger_network() {
+  echo "test: #51 setup --dry-run --set ledger=on --set ledger.git=on: the review's Network names the ledger (keys.mode cas) and its git set"
+  setup
+  local net
+  run_setup -- --dry-run --set ledger=on --set ledger.git=on
+  assert_eq "0" "$RUN_RC" "exit 0 (stderr: $RUN_ERR)"
+  net=$(review_section 'Network:')
+  assert_contains "$net" "keys.mode cas" "Network: keys.mode cas"
+  assert_contains "$net" "ledger git hooks" "Network names the ledger git set"
+  assert_contains "$net" "inflight.enabled" "…and its in-flight push"
+  assert_true "committed for the team: docs/ledger/config.json" grep -qxF docs/ledger/config.json <<<"$(review_paths 'Committed for the team:')"
+  assert_true "local to you: .git/hooks/" grep -qxF .git/hooks/ <<<"$(review_paths 'Local to you:')"
+  assert_contains "$(head -n 8 <<<"$RUN_OUT")" "[x] Work ledger  on, git hooks (changed)" "the summary's ledger line"
+  plan_ops 'model_set ledger.git on'
+  assert_eq "ledger-config" "$(head -n 1 <<<"$SL_OUT")" "the ledger's config first (install --ledger needs it)"
+  assert_contains "$SL_OUT" "claude-install
+ledger-install
+record-team" "ledger-install after the git and Claude tiers"
+  run_setup -- --dry-run --set ledger=on
+  net=$(review_section 'Network:')
+  assert_contains "$net" "keys.mode cas" "the ledger alone: keys.mode cas"
+  assert_not_contains "$net" "ledger git hooks" "…not the git set"
+  plan_ops 'model_set ledger.claude on'
+  assert_contains "$SL_OUT" "ledger-claude-install" "ledger.claude: ledger-claude-install"
+  assert_not_contains "$SL_OUT" "ledger-install" "…not the git set"
+  run_setup -- --dry-run --set claims=on
+  assert_true "claims: docs/spec-claims/config.json, committed for the team" grep -qxF docs/spec-claims/config.json <<<"$(review_paths 'Committed for the team:')"
+  assert_eq "  (nothing)" "$(review_section 'Network:')" "claims: no network of their own"
+  teardown
+}
+
+test_setup_plan_nothing_to_do() {
+  echo "test: #51 the plan diffs the selection against what is installed, not the base: in the state a run leaves, an unchanged selection plans nothing (nothing to do), doc-search unticked with its config left in place included; a per-user change with a team record goes to the local record"
+  setup
+  local local_rec='{"format":1,"overrides":{"claude":false},"search":{"cache":null}}'
+  setup_applied_defaults
+  run_setup -- --dry-run
+  assert_eq "0" "$RUN_RC" "exit 0 (stderr: $RUN_ERR)"
+  assert_eq "  (nothing)" "$(review_section 'Steps:')" "no step"
+  assert_eq "nothing to do" "$(tail -n 1 <<<"$RUN_OUT")" "…and it says nothing to do"
+  assert_eq "  (nothing)" "$(review_section 'Committed for the team:')" "nothing committed"
+  assert_eq "  (nothing)" "$(review_section 'Then commit:')" "nothing to commit"
+  assert_contains "$RUN_OUT" "[x] Git hooks  hooks + merge driver (already installed)" "the summary: git already installed"
+  assert_contains "$RUN_OUT" "[x] Claude hooks  on (3 hooks) (already installed)" "…the Claude hooks too"
+  assert_not_contains "$RUN_OUT" "(changed)" "…nothing changed"
+  plan_ops '' 'plan_is_empty && echo EMPTY'
+  assert_eq "EMPTY" "$SL_OUT" "plan_is_empty"
+  mkdir -p docs/search
+  echo '{}' > docs/search/config.json
+  plan_ops '' 'plan_is_empty && echo EMPTY'
+  assert_eq "EMPTY" "$SL_OUT" "doc-search off in the record, its config left in place, no launcher or entry: nothing to do"
+  inst install --search
+  setup_applied_defaults '{"format":1,"harnesses":["claude-code"],"git":"hooks","claude":true,"search":{"model":"static"},"ledger":null,"claims":false}'
+  # shellcheck disable=SC2016  # the snippet runs in the child bash
+  plan_ops 'export CLAUDE_PLUGIN_CACHE="$(dirname "$ROOT")"' 'plan_is_empty && echo EMPTY'
+  assert_eq "EMPTY" "$SL_OUT" "doc-search on and in place, run from the plugin cache: nothing to do"
+  plan_ops
+  assert_eq "envhook|-|$SETUP_ROOT" "$SL_OUT" "run from a clone: the env hook's DOC_SUPERPOWERS_ROOT"
+  mkdir -p "$XDG_CONFIG_HOME/doc-search"
+  echo 'export FOO=1' > "$XDG_CONFIG_HOME/doc-search/env.sh"
+  # shellcheck disable=SC2016  # the snippet runs in the child bash
+  setup_lib 'source "$ROOT/scripts/setup/lib-plan.sh"; plan_envhook_block - "$ROOT" >> "$XDG_CONFIG_HOME/doc-search/env.sh"'
+  assert_eq "0" "$SL_RC" "plan_envhook_block ran (output: $SL_OUT)"
+  plan_ops '' 'plan_is_empty && echo EMPTY'
+  assert_eq "EMPTY" "$SL_OUT" "…once the env hook holds that block: nothing to do"
+  plan_ops 'model_set search off'
+  assert_eq "search-uninstall
+record-team" "$SL_OUT" "doc-search unticked: install --search undone (the config stays), the record; no env hook"
+  run_setup -- --dry-run --set search=off
+  assert_contains "$RUN_OUT" "docs/search/config.json is left in place" "the review says the config stays"
+  plan_ops 'model_set claude off'
+  assert_eq "claude-uninstall
+exclude-local
+record-local" "$SL_OUT" "a per-user change with a team record: the local record (and its exclude block), not the team record"
+  plan_ops 'model_set claude off' 'echo "$PLAN_LOCAL_RECORD"'
+  assert_eq "$local_rec" "$SL_OUT" "…holding the override"
+  plan_ops 'model_set claude off; PLAN_FOR_TEAM=1'
+  assert_eq "claude-uninstall
+record-team" "$SL_OUT" "PLAN_FOR_TEAM=1: the team record instead"
+  inst uninstall --claude
+  printf '%s\n' "$local_rec" > .claude/doc-superpowers/installed.local.json
+  printf '# doc-superpowers setup:begin\n/.claude/doc-superpowers/installed.local.json\n# doc-superpowers setup:end\n' >> .git/info/exclude
+  plan_ops '' 'plan_is_empty && echo EMPTY'
+  assert_eq "EMPTY" "$SL_OUT" "the override in place: nothing to do"
+  run_setup -- --dry-run
+  assert_contains "$RUN_OUT" "[ ] Claude hooks  off" "the summary: claude off (the override)"
+  assert_eq "nothing to do" "$(tail -n 1 <<<"$RUN_OUT")" "--dry-run: nothing to do"
+  plan_ops 'model_set claude on'
+  assert_eq "claude-install
+record-local" "$SL_OUT" "the override dropped: install --claude, the local record"
+  teardown
+}
+
+test_setup_plan_order() {
+  echo "test: #51 the plan's order: the switches (the installer reads them), the installer steps (git, claude, ci, search, ledger), the harness entries, the env hook, the exclude block, the terminal command, the records, and the build last; a transition uninstalls first"
+  setup
+  local team p
+  plan_ops 'model_set search.model gte; model_set search.cache "/abs/my cache"; model_set harness claude-code,codex,gemini
+    model_set ci.workflows doc-review-pr; model_set ledger.git on; model_set ledger.claude on; model_set claims on
+    model_set bin on; PLAN_BUILD_REQUESTED=1'
+  assert_eq "0" "$SL_RC" "plan_build ran (output: $(head -c 300 <<<"$SL_OUT"))"
+  assert_eq "search-config|gte
+ledger-config
+claims-config
+git-install|hooks
+claude-install
+ci-install|doc-review-pr|main|0 9 * * 1|false
+search-install
+ledger-install
+ledger-claude-install
+harness-add|codex
+harness-add|gemini
+envhook|/abs/my cache|$SETUP_ROOT
+exclude-local
+bin-link
+record-team
+record-local
+build" "$SL_OUT" "every op, in order (no harness-add for claude-code: install --search writes it)"
+  run_setup -- --dry-run --set search=on --set harness=claude-code,codex,cursor,opencode,gemini --set bin=on
+  assert_eq "0" "$RUN_RC" "exit 0 (stderr: $RUN_ERR)"
+  team=$(review_paths 'Committed for the team:')
+  for p in .codex/config.toml .cursor/mcp.json opencode.json .gemini/settings.json; do
+    assert_true "committed for the team: $p" grep -qxF "$p" <<<"$team"
+  done
+  assert_true "outside the repository: the terminal command" grep -qxF "$HOME/.local/bin/doc-superpowers" <<<"$(review_paths 'Local to you (outside the repository):')"
+  inst install --git
+  plan_ops 'model_set git merge-driver'
+  assert_contains "$SL_OUT" "git-uninstall|hooks
+git-install|merge-driver" "hooks to merge driver: uninstall --git, then install --git --merge-driver-only"
+  plan_ops 'model_set git off'
+  assert_eq "git-uninstall|hooks" "$(head -n 1 <<<"$SL_OUT")" "hooks to off: uninstall --git"
+  assert_not_contains "$SL_OUT" "git-install" "…and no install"
+  inst uninstall --git
+  inst install --git --merge-driver-only
+  plan_ops 'model_set git off'
+  assert_eq "git-uninstall|merge-driver" "$(head -n 1 <<<"$SL_OUT")" "merge driver to off: uninstall --git --merge-driver-only"
+  plan_ops
+  assert_eq "git-install|hooks" "$(head -n 1 <<<"$SL_OUT")" "merge driver installed, hooks selected: install --git"
+  inst install --claude
+  plan_ops 'model_set claude off'
+  assert_contains "$SL_OUT" "claude-uninstall" "claude off: uninstall --claude"
+  mkdir -p .cursor
+  echo '{"mcpServers":{"doc-search":{"command":"sh"},"other":{"command":"x"}}}' > .cursor/mcp.json
+  plan_ops
+  assert_contains "$SL_OUT" "harness-remove|cursor" "a Cursor entry with doc-search off: removed"
+  plan_ops 'model_set search on; model_set harness claude-code'
+  assert_contains "$SL_OUT" "harness-remove|cursor" "Cursor unticked with doc-search on: removed"
+  plan_ops 'model_set search on'
+  assert_not_contains "$SL_OUT" "harness-" "Cursor ticked (base: installed) and present: no harness step"
+  mkdir -p docs/ledger "$HOME/.local/bin"
+  echo '{}' > docs/ledger/config.json
+  printf '#!/bin/sh\n# doc-superpowers terminal shim v1\n' > "$HOME/.local/bin/doc-superpowers"
+  inst install --ledger --ledger-claude
+  plan_ops 'model_set ledger.git off; model_set ledger.claude off; model_set bin off'
+  assert_contains "$SL_OUT" "ledger-uninstall
+ledger-claude-uninstall" "the ledger sets unticked: uninstalled"
+  assert_contains "$SL_OUT" "bin-unlink" "the terminal command unticked: removed"
+  assert_not_contains "$SL_OUT" "ledger-config" "the ledger's config is there: not written"
+  teardown
+}
+
 echo ""
 echo "=== setup: model, probe, --list (#51) ==="
 test_setup_catalog
@@ -7696,6 +8141,14 @@ test_setup_outside_repo
 test_setup_subdir
 test_setup_refuses_bad_record
 test_setup_probe_states
+test_setup_model_is_on
+test_setup_dry_run_defaults
+test_setup_dry_run_writes_nothing
+test_setup_dry_run_search_static
+test_setup_dry_run_ci_consent
+test_setup_dry_run_ledger_network
+test_setup_plan_nothing_to_do
+test_setup_plan_order
 
 test_claude_hook_contract_held() {
   echo "test: every Claude hook run above held the contract (exit 0, or 2 only under STRICT; stdout one JSON object or nothing)"
