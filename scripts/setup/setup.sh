@@ -10,16 +10,23 @@
 #   --dry-run           print the summary, a blank line, then the review (the
 #                       plan's steps, what they write, the network, the
 #                       downloads, the git add line); write nothing; exit 0
+#   --yes               apply the selection (the base and --set) without
+#                       asking: the plan's steps, as the review lists them,
+#                       then the git add line of the team's paths that
+#                       changed, or "nothing to do". Write only: nothing
+#                       downloads
 #   --build             with --dry-run: the review includes the build
 #   --for-team          with --dry-run: the per-user values are the team's
-#   --yes --apply --link-bin --no-link-bin --plain, and --build or --for-team
+#   --apply --link-bin --no-link-bin --plain, and --build or --for-team
 #                       without --dry-run: not implemented yet (exit 3)
+# --list, --dry-run and --yes are modes: one at a time.
 #
 # The layers (design §5): lib-model.sh (the catalog, the selection, --set and
-# requires), lib-probe.sh (installer status, the records, what is installed)
-# and lib-plan.sh (the selection against what is installed: the steps, the
-# summary and the review). Exit codes: 0 done; 1 refused, nothing written; 2
-# a step failed; 3 usage.
+# requires), lib-probe.sh (installer status, the records, what is installed),
+# lib-plan.sh (the selection against what is installed: the steps, the
+# summary and the review) and lib-exec.sh (running the steps). Exit codes: 0
+# done, or nothing to do; 1 refused, nothing written; 2 a step failed (the
+# steps that ran are listed; re-running finishes the job); 3 usage.
 set -euo pipefail
 unset CDPATH
 
@@ -35,6 +42,8 @@ source "$ROOT/scripts/setup/lib-model.sh"
 source "$ROOT/scripts/setup/lib-probe.sh"
 # shellcheck source=scripts/setup/lib-plan.sh
 source "$ROOT/scripts/setup/lib-plan.sh"
+# shellcheck source=scripts/setup/lib-exec.sh
+source "$ROOT/scripts/setup/lib-exec.sh"
 
 die() {
   echo "setup: $1" >&2
@@ -53,17 +62,22 @@ MODE=""
 BUILD=0
 FOR_TEAM=0
 SETS=()
+# set_mode <mode>: one mode per run (--dry-run --yes would otherwise write).
+set_mode() {
+  [ -z "$MODE" ] || [ "$MODE" = "$1" ] || usage_error "--$MODE and --$1 cannot be used together"
+  MODE="$1"
+}
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --list) MODE=list ;;
+    --list) set_mode list ;;
     --set)
       [ "$#" -ge 2 ] || usage_error "--set needs <id>=<value>"
       SETS+=("$2")
       shift
       ;;
     --set=*) SETS+=("${1#--set=}") ;;
-    --dry-run) MODE=dry-run ;;
-    --yes) not_yet --yes ;;
+    --dry-run) set_mode dry-run ;;
+    --yes) set_mode yes ;;
     --apply) not_yet --apply ;;
     --build) BUILD=1 ;;
     --for-team) FOR_TEAM=1 ;;
@@ -94,7 +108,7 @@ for _s in ${SETS[@]+"${SETS[@]}"}; do
 done
 
 case "$MODE" in
-  list | dry-run) ;;
+  list | dry-run | yes) ;;
   *) not_yet "interactive mode" ;;
 esac
 
@@ -119,6 +133,16 @@ if [ "$MODE" = dry-run ]; then
   plan_render_review
   if plan_is_empty; then echo "nothing to do"; fi
   exit 0
+fi
+
+# --yes: the plan's steps (Write only), then the git add line.
+if [ "$MODE" = yes ]; then
+  PLAN_BUILD_REQUESTED=0
+  PLAN_FOR_TEAM=0
+  plan_build || die "$PLAN_ERROR; nothing was changed"
+  _rc=0
+  exec_plan || _rc=$?
+  exit "$_rc"
 fi
 
 # --list: one line per item, in catalog order. A reason is one line.
