@@ -8265,49 +8265,85 @@ test_setup_review_lists_only_real_writes() {
 
 # --- setup: the executor, --yes, the safety proof (#51) ------------------------
 
-# safety_stubs_on: the safety proof's PATH (design §10). A directory first on
-# PATH holds a recording stub for each of $SAFETY_STUBS (#!/bin/sh: append
-# "$0 $*" to $STUBLOG, exit 0) and a git wrapper that appends its argv to
-# $GITLOG, exits 128 when any argument is fetch, push, pull, clone or
-# ls-remote, and otherwise execs the real git (found before PATH changes).
-# The log paths are written into the stubs, so a caller that clears the
-# environment is still logged. Sets SAFE_PATH (the stubs, then $REAL_PATH),
-# STUBLOG and GITLOG (exported; empty files), PATH="$SAFE_PATH" in this shell
-# (the test's own git commands go through the wrapper) and SETUP_PATH, so
-# every run_setup (setup_yes_as_reviewed's too) runs under the stubs.
-# run_hooked and run_claude_hook set PATH themselves: pass them
-# PATH="$SAFE_PATH". safety_stubs_off restores PATH and clears SETUP_PATH.
+# safety_stubs_on: the safety proof's stubs (design §10), for the fixture in
+# the cwd. A directory holds:
+#   - a recording stub for each of $SAFETY_STUBS (#!/bin/sh: append "$0 $*"
+#     to $STUBLOG, exit 0);
+#   - a git wrapper: it appends its argv to $GITLOG, exits 128 when an
+#     argument is fetch, push, pull, clone, ls-remote, fetch-pack, send-pack,
+#     submodule or --remote[=…], or is update, show or prune after "remote",
+#     and otherwise execs the real git (found before any PATH change);
+#   - a transport trap, git-remote-sptrap: it appends "$0 $*" to $STUBLOG and
+#     exits 128. The fixture's config rewrites every https://, http://,
+#     ssh://, git:// and git@ URL to sptrap::…, so any git that reaches for a
+#     remote runs the trap, git inside a git hook included: git puts its
+#     exec-path first on a hook's PATH, so a hook's git never meets the
+#     wrapper (git resolves git-remote-<name> in its exec-path, then PATH).
+# origin is set to https://example.invalid/x.git, a URL that fails if
+# contacted, when the fixture has none. The log paths are written into the
+# stubs, so a caller that clears the environment is still logged. Sets
+# STUBLOG and GITLOG (exported; empty files), SAFE_PATH (the stubs, then
+# $REAL_PATH) and SETUP_PATH="$SAFE_PATH", so every run_setup
+# (setup_yes_as_reviewed's too) runs under the stubs; run_hooked and
+# run_claude_hook set PATH themselves: pass them PATH="$SAFE_PATH". The test
+# shell's own commands keep their PATH, so GITLOG holds only what ran under
+# the stubs. safety_stubs_off clears SETUP_PATH.
 SAFETY_STUBS="curl wget uv gh npm pip pip3 python3 node ssh nc"
-_SAFETY_SAVED_PATH="" SETUP_PATH=""
+SETUP_PATH=""
 safety_stubs_on() {
-  local dir real_git s
+  local dir real_git s u
   real_git=$(type -P git)
   dir=$(harness_mktemp_d stubs)
   STUBLOG=$(harness_mktemp stub.log)
   GITLOG=$(harness_mktemp git.log)
   export STUBLOG GITLOG
+  # shellcheck disable=SC2016  # $0 and $* belong to the stubs
   for s in $SAFETY_STUBS; do
-    # shellcheck disable=SC2016  # $0 and $* belong to the stub
     printf '#!/bin/sh\necho "$0 $*" >> '\''%s'\''\nexit 0\n' "$STUBLOG" > "$dir/$s"
     chmod +x "$dir/$s"
   done
-  # shellcheck disable=SC2016  # $* $@ and $a belong to the wrapper
-  printf '#!/bin/sh\necho "$*" >> '\''%s'\''\nfor a in "$@"; do\n  case "$a" in\n    fetch | push | pull | clone | ls-remote)\n      echo "git wrapper: refused: git $a (this test contacts no remote)" >&2\n      exit 128\n      ;;\n  esac\ndone\nexec '\''%s'\'' "$@"\n' \
-    "$GITLOG" "$real_git" > "$dir/git"
+  # shellcheck disable=SC2016  # $0 and $* belong to the trap
+  printf '#!/bin/sh\necho "$0 $*" >> '\''%s'\''\nexit 128\n' "$STUBLOG" > "$dir/git-remote-sptrap"
+  chmod +x "$dir/git-remote-sptrap"
+  {
+    # shellcheck disable=SC2016  # $* belongs to the wrapper
+    printf '#!/bin/sh\necho "$*" >> '\''%s'\''\n' "$GITLOG"
+    cat <<'WRAPPER'
+p=""
+for a in "$@"; do
+  case "$a" in
+    fetch | push | pull | clone | ls-remote | fetch-pack | send-pack | submodule | --remote | --remote=*) r=1 ;;
+    *) r=0 ;;
+  esac
+  case "$p $a" in
+    "remote update" | "remote show" | "remote prune") r=1 ;;
+  esac
+  if [ "$r" = 1 ]; then
+    echo "git wrapper: refused: git $* (this test contacts no remote)" >&2
+    exit 128
+  fi
+  p="$a"
+done
+WRAPPER
+    # shellcheck disable=SC2016  # $@ belongs to the wrapper
+    printf 'exec '\''%s'\'' "$@"\n' "$real_git"
+  } > "$dir/git"
   chmod +x "$dir/git"
+  "$real_git" remote get-url origin >/dev/null 2>&1 || "$real_git" remote add origin https://example.invalid/x.git
+  "$real_git" config --unset-all url.sptrap::.insteadOf >/dev/null 2>&1 || true
+  for u in https:// http:// ssh:// git:// git@; do
+    "$real_git" config --add url.sptrap::.insteadOf "$u"
+  done
   SAFE_PATH="$dir:$REAL_PATH"
-  _SAFETY_SAVED_PATH="$PATH"
-  PATH="$SAFE_PATH"
   SETUP_PATH="$SAFE_PATH"
 }
 safety_stubs_off() {
-  [ -z "$_SAFETY_SAVED_PATH" ] || PATH="$_SAFETY_SAVED_PATH"
-  _SAFETY_SAVED_PATH="" SETUP_PATH=""
+  SETUP_PATH=""
 }
 
 # The git calls in $GITLOG that would reach a remote (none may).
 safety_gitlog_remote() {
-  grep -E '(^| )(fetch|push|pull|clone|ls-remote)( |$)' "$GITLOG" || true
+  grep -E '(^| )(fetch|push|pull|clone|ls-remote|fetch-pack|send-pack|submodule|--remote(=[^ ]*)?)( |$)|(^| )remote (update|show|prune)( |$)' "$GITLOG" || true
 }
 
 # setup_fs_state: "<path>TAB<x|->TAB<hash or link target>" for every file and
@@ -8396,27 +8432,33 @@ setup_yes_as_reviewed() {
 }
 
 test_setup_yes_defaults_safety() {
-  echo "test: #51 the safety proof (design §10): a default setup --yes, then a commit that leaves a doc stale, with a recording stub for every downloader and network client first on PATH and a git wrapper refusing every remote verb (origin set to a URL that fails): no stub runs, no remote is contacted, only the paths the review listed are written, no .github/, no tiers.ci, the defaults recorded, the Claude gate and the commit exit 0, the env hook and ~/.local/bin untouched"
+  echo "test: #51 the safety proof (design §10): a default setup --yes, then a commit that leaves a doc stale, under safety_stubs_on (a recording stub for every downloader and network client, a git wrapper refusing every remote verb, and a transport trap that every git URL is rewritten to, git inside the hooks included; origin set to a URL that fails): no stub and no trap runs, the wrapper sees no remote verb, only the paths the review listed are written, no .github/, no tiers.ci, the defaults recorded; the three Claude hooks and the commit exit 0, the hooks resolving doc-tools.sh themselves; the env hook and ~/.local/bin untouched"
   indexed_fixture
   safety_stubs_on
-  git remote add origin https://example.invalid/x.git
   setup_yes_as_reviewed "a default run under the stubs"
+  assert_true "the wrapper logged --yes's own git calls (install --git registering the merge driver): the check is not vacuous" \
+    grep -qF 'config --local merge.doc-index.name' "$GITLOG"
   git add -A
   echo changed >> src/util.js
   git add src/util.js
-  # The Claude gate judges the commit about to be made (the change staged).
-  RUN_RC=99 RUN_OUT="" RUN_ERR="no .claude/settings.local.json: the Claude hooks are not installed"
+  assert_true "the Claude hooks are registered" test -f .claude/settings.local.json
   if [ -f .claude/settings.local.json ]; then
-    run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m code')" PATH="$SAFE_PATH"
+    # The gate judges the commit about to be made (the change staged).
+    run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m code')" PATH="$SAFE_PATH" DOC_TOOLS=
+    assert_eq "0" "$RUN_RC" "the Claude gate on that commit: exit 0, DOC_SUPERPOWERS_STRICT unset (stderr: $RUN_ERR)"
+    assert_contains "$RUN_OUT$RUN_ERR" "docs/architecture.md" "…it ran, and named the doc the commit leaves stale"
   fi
-  assert_eq "0" "$RUN_RC" "the Claude gate on that commit: exit 0, DOC_SUPERPOWERS_STRICT unset (stderr: $RUN_ERR)"
-  assert_contains "$RUN_OUT$RUN_ERR" "docs/architecture.md" "…it ran, and named the doc the commit leaves stale"
-  run_hooked PATH="$SAFE_PATH" -- git commit -qam code
+  run_hooked PATH="$SAFE_PATH" DOC_TOOLS= -- git commit -qam code
   assert_eq "0" "$RUN_RC" "the commit, leaving docs/architecture.md stale: exit 0 (stderr: $RUN_ERR)"
   assert_contains "$RUN_ERR" "docs/architecture.md" "…the pre-commit hook setup installed ran, and reported the stale doc"
-  assert_eq "" "$(cat "$STUBLOG")" "no stub ran ($SAFETY_STUBS)"
-  assert_eq "" "$(safety_gitlog_remote)" "git: no fetch, push, pull, clone or ls-remote"
-  assert_true "the git wrapper logged setup's git calls (the check is not vacuous)" test -s "$GITLOG"
+  if [ -f .claude/settings.local.json ]; then
+    run_claude_hook PostToolUse post-commit-sync "$(posttool_json 'git commit -qam code')" PATH="$SAFE_PATH" DOC_TOOLS=
+    assert_eq "0" "$RUN_RC" "the Claude post-commit sync: exit 0 (stderr: $RUN_ERR)"
+    run_claude_hook Stop session-summary "$STOP_JSON" PATH="$SAFE_PATH" DOC_TOOLS=
+    assert_eq "0" "$RUN_RC" "the Claude session summary: exit 0 (stderr: $RUN_ERR)"
+  fi
+  assert_eq "" "$(cat "$STUBLOG")" "no stub ran ($SAFETY_STUBS), and no git reached for a remote (the transport trap)"
+  assert_eq "" "$(safety_gitlog_remote)" "the wrapper saw no remote verb"
   assert_true "no .github/" test ! -e .github
   assert_eq "null" "$(jq '.tiers.ci' .claude/doc-superpowers/installed.json 2>&1)" "installed.json: no tiers.ci"
   assert_eq "$SETUP_DEFAULT_RECORD" "$(jq -c .setup .claude/doc-superpowers/installed.json 2>&1)" "installed.json: .setup is the defaults"
@@ -8529,6 +8571,48 @@ test_setup_refuses_symlinked_record() {
   assert_contains "$RUN_ERR" ".claude/doc-superpowers/installed.local.json is a symbolic link" "…naming it"
   assert_eq "$h" "$(hash_file "$tgt")" "…the link's target unchanged"
   assert_eq "$before" "$(setup_snapshot)" "…nothing written: the Claude hooks still installed"
+  teardown
+}
+
+test_setup_refuses_links_on_step_paths() {
+  echo "test: #51 setup --yes refuses a symbolic link at any path a step writes (the review's team and local paths, a directory as a directory), not only at setup's own records: a linked .claude/settings.local.json (install --claude's), .gitattributes (install --git's), .claude/hooks/ (on the way to the hook scripts) exits 1 before the first step, naming the link, nothing written"
+  setup
+  local tgt d h before
+  tgt=$(harness_mktemp target)
+  d=$(harness_mktemp_d elsewhere)
+  mkdir -p .claude
+  printf '{}\n' > "$tgt"
+  h=$(hash_file "$tgt")
+  ln -s "$tgt" .claude/settings.local.json
+  before=$(setup_snapshot)
+  run_setup -- --yes
+  assert_eq "1" "$RUN_RC" "a linked .claude/settings.local.json: exit 1 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_ERR" ".claude/settings.local.json is a symbolic link" "…naming it"
+  assert_contains "$RUN_ERR" "nothing was changed" "…saying nothing was changed"
+  assert_eq "" "$RUN_OUT" "…no step ran"
+  assert_eq "$h" "$(hash_file "$tgt")" "…the link's target unchanged"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written (the merge driver not installed either)"
+  teardown
+  setup
+  printf '*.png binary\n' > "$tgt"
+  h=$(hash_file "$tgt")
+  ln -s "$tgt" .gitattributes
+  before=$(setup_snapshot)
+  run_setup -- --yes
+  assert_eq "1" "$RUN_RC" "a linked .gitattributes: exit 1 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_ERR" ".gitattributes is a symbolic link" "…naming it"
+  assert_eq "$h" "$(hash_file "$tgt")" "…the link's target unchanged"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
+  teardown
+  setup
+  mkdir -p .claude
+  ln -s "$d" .claude/hooks
+  before=$(setup_snapshot)
+  run_setup -- --yes
+  assert_eq "1" "$RUN_RC" "a linked .claude/hooks/: exit 1 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_ERR" ".claude/hooks is a symbolic link (on the way to .claude/hooks/doc-superpowers" "…naming the link on the way"
+  assert_eq "" "$(ls -A "$d")" "…nothing written where it points"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
   teardown
 }
 
@@ -8666,6 +8750,7 @@ test_setup_yes_writes_what_review_listed
 test_setup_idempotent
 test_setup_rerun_after_failed_step
 test_setup_refuses_symlinked_record
+test_setup_refuses_links_on_step_paths
 test_setup_yes_refusals
 test_setup_record_writers
 test_setup_exclude_block

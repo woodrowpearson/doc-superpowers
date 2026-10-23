@@ -9,7 +9,11 @@
 # stderr, nothing written) when:
 #   - a step has no op_ function yet: "setup: <op>: not implemented yet";
 #   - a step's opcheck_ function refuses (EXEC_ERROR says why): a file setup
-#     writes itself is a symbolic link or is reached through one.
+#     writes itself is a symbolic link or is reached through one;
+#   - a path the review lists as committed for the team or local to you
+#     (W_TEAM, W_LOCAL: the installer's too) is a symbolic link or is reached
+#     through one. The installer would refuse it as well, but only at its
+#     own step, after the steps before it had run.
 # Then it runs the steps, printing "<n>. <the review's text>" before each;
 # the installer's own output passes through. A step that fails stops the run:
 # "setup: step <n> (<op>) failed; done: <ops>; re-run to finish" on stderr,
@@ -295,6 +299,17 @@ exec_plan() {
     fi
     fn="opcheck_${op//-/_}"
     if declare -F "$fn" >/dev/null && ! "$fn" "${_EXEC_F[@]:1}"; then
+      echo "setup: $EXEC_ERROR; nothing was changed" >&2
+      return 1
+    fi
+  done
+  # Every path a step writes in the repository or in git's directory, as the
+  # review lists it (a directory as itself): the installer refuses a link
+  # too, but only at its own step, after the earlier steps have run.
+  for e in ${W_TEAM[@]+"${W_TEAM[@]}"} ${W_LOCAL[@]+"${W_LOCAL[@]}"}; do
+    p="${e%%"$_PLAN_T"*}"
+    [ "$p" = / ] || p="${p%/}"
+    if ! _exec_no_link "$p"; then
       echo "setup: $EXEC_ERROR; nothing was changed" >&2
       return 1
     fi
