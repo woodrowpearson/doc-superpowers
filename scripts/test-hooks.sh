@@ -7214,8 +7214,9 @@ SETUP="$(bash_bin_shim "$SCRIPT_DIR/doc-superpowers")"
 SETUP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # run_setup [VAR=value ...] -- <args...>: run `doc-superpowers setup <args>`
-# from the cwd, with PATH="$REAL_PATH" (a VAR=value pair adds to or overrides
-# the environment) and stdin from $RUN_STDIN. Sets RUN_RC, RUN_OUT (stdout) and
+# from the cwd, with PATH="$REAL_PATH" ($SETUP_PATH instead when set: the
+# safety stubs, safety_stubs_on; a VAR=value pair adds to or overrides the
+# environment) and stdin from $RUN_STDIN. Sets RUN_RC, RUN_OUT (stdout) and
 # RUN_ERR (stderr), like run_hooked.
 run_setup() {
   local errf envs=()
@@ -7226,7 +7227,7 @@ run_setup() {
   [ "$#" -gt 0 ] && shift
   errf=$(harness_mktemp setup.err)
   RUN_RC=0
-  RUN_OUT=$(env PATH="$REAL_PATH" ${envs[@]+"${envs[@]}"} "$SETUP" setup "$@" <"$RUN_STDIN" 2>"$errf") || RUN_RC=$?
+  RUN_OUT=$(env PATH="${SETUP_PATH:-$REAL_PATH}" ${envs[@]+"${envs[@]}"} "$SETUP" setup "$@" <"$RUN_STDIN" 2>"$errf") || RUN_RC=$?
   RUN_ERR=$(cat "$errf")
   rm -f "$errf"
 }
@@ -7516,7 +7517,7 @@ test_setup_set_validation() {
   run_setup -- --list --set search=on --set harness=codex
   assert_eq "1" "$RUN_RC" "harness without claude-code while doc-search is on: refused (exit 1)"
   assert_contains "$RUN_ERR" "claude-code" "…saying why"
-  for f in --yes --apply --build --for-team --link-bin --no-link-bin --plain; do
+  for f in --apply --build --for-team --link-bin --no-link-bin --plain; do
     run_setup -- "$f"
     assert_eq "3" "$RUN_RC" "$f: exit 3 until its task"
     assert_contains "$RUN_ERR" "setup: $f: not implemented yet" "$f: says so"
@@ -8262,6 +8263,381 @@ test_setup_review_lists_only_real_writes() {
   teardown
 }
 
+# --- setup: the executor, --yes, the safety proof (#51) ------------------------
+
+# safety_stubs_on: the safety proof's PATH (design §10). A directory first on
+# PATH holds a recording stub for each of $SAFETY_STUBS (#!/bin/sh: append
+# "$0 $*" to $STUBLOG, exit 0) and a git wrapper that appends its argv to
+# $GITLOG, exits 128 when any argument is fetch, push, pull, clone or
+# ls-remote, and otherwise execs the real git (found before PATH changes).
+# The log paths are written into the stubs, so a caller that clears the
+# environment is still logged. Sets SAFE_PATH (the stubs, then $REAL_PATH),
+# STUBLOG and GITLOG (exported; empty files), PATH="$SAFE_PATH" in this shell
+# (the test's own git commands go through the wrapper) and SETUP_PATH, so
+# every run_setup (setup_yes_as_reviewed's too) runs under the stubs.
+# run_hooked and run_claude_hook set PATH themselves: pass them
+# PATH="$SAFE_PATH". safety_stubs_off restores PATH and clears SETUP_PATH.
+SAFETY_STUBS="curl wget uv gh npm pip pip3 python3 node ssh nc"
+_SAFETY_SAVED_PATH="" SETUP_PATH=""
+safety_stubs_on() {
+  local dir real_git s
+  real_git=$(type -P git)
+  dir=$(harness_mktemp_d stubs)
+  STUBLOG=$(harness_mktemp stub.log)
+  GITLOG=$(harness_mktemp git.log)
+  export STUBLOG GITLOG
+  for s in $SAFETY_STUBS; do
+    # shellcheck disable=SC2016  # $0 and $* belong to the stub
+    printf '#!/bin/sh\necho "$0 $*" >> '\''%s'\''\nexit 0\n' "$STUBLOG" > "$dir/$s"
+    chmod +x "$dir/$s"
+  done
+  # shellcheck disable=SC2016  # $* $@ and $a belong to the wrapper
+  printf '#!/bin/sh\necho "$*" >> '\''%s'\''\nfor a in "$@"; do\n  case "$a" in\n    fetch | push | pull | clone | ls-remote)\n      echo "git wrapper: refused: git $a (this test contacts no remote)" >&2\n      exit 128\n      ;;\n  esac\ndone\nexec '\''%s'\'' "$@"\n' \
+    "$GITLOG" "$real_git" > "$dir/git"
+  chmod +x "$dir/git"
+  SAFE_PATH="$dir:$REAL_PATH"
+  _SAFETY_SAVED_PATH="$PATH"
+  PATH="$SAFE_PATH"
+  SETUP_PATH="$SAFE_PATH"
+}
+safety_stubs_off() {
+  [ -z "$_SAFETY_SAVED_PATH" ] || PATH="$_SAFETY_SAVED_PATH"
+  _SAFETY_SAVED_PATH="" SETUP_PATH=""
+}
+
+# The git calls in $GITLOG that would reach a remote (none may).
+safety_gitlog_remote() {
+  grep -E '(^| )(fetch|push|pull|clone|ls-remote)( |$)' "$GITLOG" || true
+}
+
+# setup_fs_state: "<path>TAB<x|->TAB<hash or link target>" for every file and
+# link setup could change in the fixture: the work tree (with HOME and
+# XDG_CONFIG_HOME, which live in it; .git left out), git's hooks, .git/config
+# and .git/info/exclude. Paths relative to the fixture's top, sorted.
+setup_fs_state() {
+  local f x
+  {
+    find . -path ./.git -prune -o \( -type f -o -type l \) -print
+    find .git/hooks \( -type f -o -type l \) -print
+    printf '%s\n' .git/config .git/info/exclude
+  } | sed 's|^\./||' | LC_ALL=C sort -u | while IFS= read -r f; do
+    x=-
+    [ ! -x "$f" ] || x=x
+    if [ -L "$f" ]; then
+      printf '%s\t%s\tL %s\n' "$f" "$x" "$(readlink "$f")"
+    elif [ -f "$f" ]; then
+      printf '%s\t%s\t%s\n' "$f" "$x" "$(hash_file "$f")"
+    fi
+  done
+}
+
+# setup_changed_paths <before> <after> <status before> <status after>: the
+# paths whose setup_fs_state line, or whose `git status --porcelain --ignored
+# -uall` line, differs, sorted.
+setup_changed_paths() {
+  {
+    { diff <(printf '%s\n' "$1") <(printf '%s\n' "$2") || true; } | sed -n 's/^[<>] //p' | cut -f1
+    { diff <(printf '%s\n' "$3") <(printf '%s\n' "$4") || true; } | sed -n 's/^[<>] ...//p'
+  } | sed '/^$/d' | LC_ALL=C sort -u
+}
+
+# setup_cover <review paths>: each path on stdin as the review path that
+# covers it (itself, or a listed directory "<dir>/" it is under), else as it
+# is; sorted, unique.
+setup_cover() {
+  local p r hit
+  while IFS= read -r p; do
+    hit="$p"
+    while IFS= read -r r; do
+      case "$r" in
+        */) case "$p" in "$r"*) hit="$r" ;; esac ;;
+        *) [ "$p" != "$r" ] || hit="$r" ;;
+      esac
+    done <<<"$1"
+    printf '%s\n' "$hit"
+  done | LC_ALL=C sort -u
+}
+
+# setup_not_ignored <path>: git does not ignore <path>.
+setup_not_ignored() {
+  ! git check-ignore -q -- "$1"
+}
+
+# setup_yes_as_reviewed <label> [args…]: --dry-run [args…], then --yes
+# [args…]: what changed is what the review listed (outside paths made
+# relative to the fixture), the team's paths committable and the ones local
+# to you in the work tree ignored by git. Leaves --yes's RUN_* set.
+setup_yes_as_reviewed() {
+  local label="$1" team mine outside listed before after sbefore safter changed p
+  shift
+  run_setup -- --dry-run "$@"
+  assert_eq "0" "$RUN_RC" "$label: --dry-run exits 0 (stderr: $RUN_ERR)"
+  team=$(review_paths 'Committed for the team:' | sed '/^(nothing)$/d')
+  mine=$(review_paths 'Local to you:' | sed '/^(nothing)$/d')
+  outside=$(review_paths 'Local to you (outside the repository):' | sed -e '/^(nothing)$/d' -e "s|^$TEST_DIR/||")
+  listed=$(printf '%s\n%s\n%s\n' "$team" "$mine" "$outside" | sed '/^$/d' | LC_ALL=C sort -u)
+  before=$(setup_fs_state)
+  sbefore=$(git status --porcelain --ignored -uall)
+  run_setup -- --yes "$@"
+  assert_eq "0" "$RUN_RC" "$label: --yes exits 0 (stderr: $RUN_ERR)"
+  after=$(setup_fs_state)
+  safter=$(git status --porcelain --ignored -uall)
+  changed=$(setup_changed_paths "$before" "$after" "$sbefore" "$safter" | setup_cover "$listed")
+  assert_eq "$listed" "$changed" "$label: the paths --yes changed are the paths the review listed"
+  while IFS= read -r p; do
+    [ -n "$p" ] && [ -e "$p" ] || continue
+    assert_true "$label: $p (committed for the team) is not ignored by git" setup_not_ignored "$p"
+  done <<<"$team"
+  while IFS= read -r p; do
+    case "$p" in "" | .git/* | /*) continue ;; esac
+    [ -e "$p" ] || continue
+    assert_true "$label: $p (local to you) is ignored by git" git check-ignore -q -- "$p"
+  done <<<"$mine"
+}
+
+test_setup_yes_defaults_safety() {
+  echo "test: #51 the safety proof (design §10): a default setup --yes, then a commit that leaves a doc stale, with a recording stub for every downloader and network client first on PATH and a git wrapper refusing every remote verb (origin set to a URL that fails): no stub runs, no remote is contacted, only the paths the review listed are written, no .github/, no tiers.ci, the defaults recorded, the Claude gate and the commit exit 0, the env hook and ~/.local/bin untouched"
+  indexed_fixture
+  safety_stubs_on
+  git remote add origin https://example.invalid/x.git
+  setup_yes_as_reviewed "a default run under the stubs"
+  git add -A
+  echo changed >> src/util.js
+  git add src/util.js
+  # The Claude gate judges the commit about to be made (the change staged).
+  RUN_RC=99 RUN_OUT="" RUN_ERR="no .claude/settings.local.json: the Claude hooks are not installed"
+  if [ -f .claude/settings.local.json ]; then
+    run_claude_hook PreToolUse pre-commit-gate "$(pretool_json 'git commit -m code')" PATH="$SAFE_PATH"
+  fi
+  assert_eq "0" "$RUN_RC" "the Claude gate on that commit: exit 0, DOC_SUPERPOWERS_STRICT unset (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT$RUN_ERR" "docs/architecture.md" "…it ran, and named the doc the commit leaves stale"
+  run_hooked PATH="$SAFE_PATH" -- git commit -qam code
+  assert_eq "0" "$RUN_RC" "the commit, leaving docs/architecture.md stale: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_ERR" "docs/architecture.md" "…the pre-commit hook setup installed ran, and reported the stale doc"
+  assert_eq "" "$(cat "$STUBLOG")" "no stub ran ($SAFETY_STUBS)"
+  assert_eq "" "$(safety_gitlog_remote)" "git: no fetch, push, pull, clone or ls-remote"
+  assert_true "the git wrapper logged setup's git calls (the check is not vacuous)" test -s "$GITLOG"
+  assert_true "no .github/" test ! -e .github
+  assert_eq "null" "$(jq '.tiers.ci' .claude/doc-superpowers/installed.json 2>&1)" "installed.json: no tiers.ci"
+  assert_eq "$SETUP_DEFAULT_RECORD" "$(jq -c .setup .claude/doc-superpowers/installed.json 2>&1)" "installed.json: .setup is the defaults"
+  assert_eq "2" "$(jq '.schema_version' .claude/doc-superpowers/installed.json 2>&1)" "installed.json: schema_version 2"
+  assert_true "the env hook untouched: no \$XDG_CONFIG_HOME/doc-search" test ! -e "$XDG_CONFIG_HOME/doc-search"
+  assert_true "no \$HOME/.local/bin" test ! -e "$HOME/.local/bin"
+  safety_stubs_off
+  teardown
+}
+
+test_setup_yes_writes_what_review_listed() {
+  echo "test: #51 setup --yes writes exactly what its --dry-run review listed, split as listed (the work tree, HOME, git's hooks, .git/config, .git/info/exclude); it ends with the git add line of the team's paths it changed"
+  setup
+  setup_yes_as_reviewed "defaults, a fresh repository"
+  assert_eq "  git add -- .gitattributes .claude/doc-superpowers/installed.json" "$(review_section 'Then commit:')" \
+    "defaults: Then commit: the team's two paths"
+  setup_yes_as_reviewed "a team record, --set claude=off (your own)" --set claude=off
+  assert_eq "  (nothing)" "$(review_section 'Then commit:')" "claude=off, your own: no team path changed, nothing to commit"
+  setup_yes_as_reviewed "back on, --set claude=on" --set claude=on
+  teardown
+}
+
+# setup_assert_noop <label>: a plain --yes now says nothing to do and changes
+# no byte (setup_snapshot: .git/config's content included) and no mtime in the
+# work tree (.claude/, HOME and XDG_CONFIG_HOME are in it), git's hooks and
+# info/exclude. .git/config's mtime is left out (design §10).
+setup_assert_noop() {
+  local before marker
+  before=$(setup_snapshot)
+  marker=$(harness_mktemp marker)
+  # Whole-second mtimes: anything written after this is strictly newer.
+  sleep 1
+  run_setup -- --yes
+  assert_eq "0" "$RUN_RC" "$1: --yes again: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "nothing to do" "$RUN_OUT" "$1: it says nothing to do"
+  assert_eq "$before" "$(setup_snapshot)" "$1: no byte changed"
+  assert_eq "" "$(find "$TEST_DIR" -path "$TEST_DIR/.git" -prune -o -newer "$marker" -print
+    find "$TEST_DIR/.git/hooks" "$TEST_DIR/.git/info/exclude" -newer "$marker" -print)" \
+    "$1: no mtime changed in the work tree, .git/hooks, .git/info/exclude"
+}
+
+test_setup_idempotent() {
+  echo "test: #51 setup --yes again says nothing to do and changes no byte and no mtime: after a default run, and after a per-user override was recorded (the local record, the exclude block)"
+  setup
+  run_setup -- --yes
+  assert_eq "0" "$RUN_RC" "the first --yes: exit 0 (stderr: $RUN_ERR)"
+  setup_assert_noop "after a default run"
+  run_setup -- --yes --set claude=off
+  assert_eq "0" "$RUN_RC" "--yes --set claude=off: exit 0 (stderr: $RUN_ERR)"
+  setup_assert_noop "after claude=off was recorded as yours"
+  teardown
+}
+
+test_setup_rerun_after_failed_step() {
+  echo "test: #51 a step that fails stops setup --yes with exit 2, naming the step and the steps done; the records are not written; a re-run finishes the job"
+  setup
+  echo "a file, not a directory" > .claude
+  run_setup -- --yes
+  assert_eq "2" "$RUN_RC" "install --claude fails (.claude is a file): exit 2"
+  assert_contains "$RUN_ERR" "setup: step 2 (claude-install) failed; done: git-install; re-run to finish" \
+    "stderr names the failed step and the steps done"
+  assert_true "the merge driver was installed (step 1 ran)" grep -qF 'doc-index' .gitattributes
+  rm .claude
+  run_setup -- --yes
+  assert_eq "0" "$RUN_RC" "the re-run: exit 0 (stderr: $RUN_ERR)"
+  inst status --json --git --claude
+  assert_eq "installed installed installed installed installed|registered|configured|active active active" \
+    "$(jq -r '[([.tiers.git.hooks[].state] | join(" ")), .tiers.git.merge_driver.state, .tiers.git.gitattributes.state, ([.tiers.claude.hooks[].state] | join(" "))] | join("|")' <<<"$IOUT" 2>&1)" \
+    "everything installed: the 5 git hooks, the merge driver, .gitattributes, the 3 Claude hooks"
+  assert_eq "$SETUP_DEFAULT_RECORD" "$(jq -c .setup .claude/doc-superpowers/installed.json 2>&1)" "the team record written"
+  run_setup -- --yes
+  assert_eq "nothing to do" "$RUN_OUT" "a third --yes: nothing to do"
+  teardown
+}
+
+test_setup_refuses_symlinked_record() {
+  echo "test: #51 setup --yes never writes a record through a symbolic link: a linked installed.json, a linked directory on its way, a linked installed.local.json: exit 1 before the first step, nothing written, the link's target unchanged"
+  setup
+  local tgt h before d
+  tgt=$(harness_mktemp target.json)
+  printf '{"schema_version": 2}\n' > "$tgt"
+  h=$(hash_file "$tgt")
+  mkdir -p .claude/doc-superpowers
+  ln -s "$tgt" .claude/doc-superpowers/installed.json
+  before=$(setup_snapshot)
+  run_setup -- --yes
+  assert_eq "1" "$RUN_RC" "a linked installed.json: exit 1"
+  assert_contains "$RUN_ERR" ".claude/doc-superpowers/installed.json is a symbolic link" "…naming it"
+  assert_contains "$RUN_ERR" "nothing was changed" "…saying nothing was changed"
+  assert_eq "$h" "$(hash_file "$tgt")" "…the link's target unchanged"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written (no step ran)"
+  rm .claude/doc-superpowers/installed.json
+  rmdir .claude/doc-superpowers
+  d=$(harness_mktemp_d elsewhere)
+  ln -s "$d" .claude/doc-superpowers
+  before=$(setup_snapshot)
+  run_setup -- --yes
+  assert_eq "1" "$RUN_RC" "a linked .claude/doc-superpowers/: exit 1"
+  assert_contains "$RUN_ERR" ".claude/doc-superpowers is a symbolic link" "…naming the link"
+  assert_eq "" "$(ls -A "$d")" "…nothing written where it points"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
+  rm .claude/doc-superpowers
+  setup_applied_defaults
+  printf '{}\n' > "$tgt"
+  h=$(hash_file "$tgt")
+  ln -s "$tgt" .claude/doc-superpowers/installed.local.json
+  before=$(setup_snapshot)
+  run_setup -- --yes --set claude=off
+  assert_eq "1" "$RUN_RC" "a linked installed.local.json: exit 1"
+  assert_contains "$RUN_ERR" ".claude/doc-superpowers/installed.local.json is a symbolic link" "…naming it"
+  assert_eq "$h" "$(hash_file "$tgt")" "…the link's target unchanged"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written: the Claude hooks still installed"
+  teardown
+}
+
+test_setup_yes_refusals() {
+  echo "test: #51 setup --yes refuses before the first step, writing nothing: a step setup cannot run yet (exit 1, naming it), a plan the model refuses (exit 1), --yes with --dry-run (exit 3)"
+  setup
+  local before
+  before=$(setup_snapshot)
+  # shellcheck disable=SC2016  # the snippet runs in the child bash
+  setup_lib 'source "$ROOT/scripts/setup/lib-plan.sh"
+    source "$ROOT/scripts/setup/lib-exec.sh"
+    probe_run
+    model_base_init
+    plan_build
+    PLAN=(record-team "no-such-op	x" claude-install)
+    rc=0
+    exec_plan || rc=$?
+    echo "rc=$rc"'
+  assert_contains "$SL_OUT" "setup: no-such-op: not implemented yet" "exec_plan: an op without its op_ function is named"
+  assert_contains "$SL_OUT" "rc=1" "…exit 1"
+  assert_eq "$before" "$(setup_snapshot)" "…checked before the first step: nothing written (record-team came first)"
+  run_setup -- --yes --set search=on
+  assert_eq "1" "$RUN_RC" "--yes --set search=on: exit 1 until its steps exist"
+  assert_contains "$RUN_ERR" "setup: search-config: not implemented yet" "…naming the first such step"
+  run_setup -- --yes --set ci.workflows=doc-review-pr
+  assert_eq "1" "$RUN_RC" "--yes --set ci.workflows=doc-review-pr: exit 1"
+  assert_contains "$RUN_ERR" "setup: ci-install: not implemented yet" "…naming ci-install"
+  run_setup -- --dry-run --yes
+  assert_eq "3" "$RUN_RC" "--dry-run --yes: exit 3"
+  assert_contains "$RUN_ERR" "--dry-run" "…naming both"
+  run_setup -- --yes --dry-run
+  assert_eq "3" "$RUN_RC" "--yes --dry-run: exit 3"
+  assert_eq "$before" "$(setup_snapshot)" "nothing written by any of them"
+  setup_applied_defaults
+  before=$(setup_snapshot)
+  run_setup -- --yes --set git=off
+  assert_eq "1" "$RUN_RC" "a refused plan (git=off against the team's merge driver): exit 1"
+  assert_contains "$RUN_ERR" "nothing was changed" "…saying nothing was changed"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
+  teardown
+}
+
+test_setup_record_writers() {
+  echo "test: #51 the record writers: record-team sets .setup in installed.json with jq, keeping every other key byte for byte (.tiers.ci as install --ci wrote it, schema_version 2); install --ci afterwards keeps .setup; a record or exclude block whose content would not change is not written (mtime kept)"
+  setup
+  local f=.claude/doc-superpowers/installed.json old marker
+  inst install --ci --workflows=doc-freshness-pr
+  assert_eq "0" "$IRC" "install --ci (output: $(head -c 300 <<<"$IOUT"))"
+  old=$(cat "$f")
+  run_setup -- --yes
+  assert_eq "0" "$RUN_RC" "--yes with a CI-only record: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "$old" "$(jq 'del(.setup)' "$f" 2>&1)" "every other key kept, byte for byte (jq's layout is the installer's own)"
+  assert_eq "$SETUP_DEFAULT_RECORD" "$(jq -c .setup "$f" 2>&1)" ".setup written"
+  inst install --ci --workflows=doc-freshness-pr --cron '0 8 * * 1'
+  assert_eq "0" "$IRC" "install --ci afterwards (output: $(head -c 300 <<<"$IOUT"))"
+  assert_eq "$SETUP_DEFAULT_RECORD" "$(jq -c .setup "$f" 2>&1)" "…keeps .setup"
+  assert_eq "0 8 * * 1" "$(jq -r .tiers.ci.cron "$f" 2>&1)" "…and records its own change"
+  run_setup -- --yes --set claude=off
+  assert_eq "0" "$RUN_RC" "--yes --set claude=off: exit 0 (stderr: $RUN_ERR)"
+  marker=$(harness_mktemp marker)
+  sleep 1
+  # shellcheck disable=SC2016  # the snippet runs in the child bash
+  setup_lib 'source "$ROOT/scripts/setup/lib-plan.sh"
+    source "$ROOT/scripts/setup/lib-exec.sh"
+    probe_run
+    model_base_init
+    plan_build
+    PLAN_TEAM_SETUP=$(jq -c .setup "$PROBE_STATE_FILE")
+    PLAN_LOCAL_RECORD=$(jq -c . "$PROBE_LOCAL_FILE")
+    op_record_team
+    echo "team wrote=$EXEC_WROTE"
+    op_record_local
+    echo "local wrote=$EXEC_WROTE"
+    op_exclude_local
+    echo "exclude rc=$?"'
+  assert_eq "0" "$SL_RC" "the writers ran (output: $(head -c 300 <<<"$SL_OUT"))"
+  assert_eq "team wrote=0
+local wrote=0
+exclude rc=0" "$SL_OUT" "an unchanged record is not written; the exclude block is there once"
+  assert_eq "" "$(find .claude .git/info -newer "$marker" -print)" "no mtime changed in .claude/ or .git/info/"
+  assert_eq "1" "$(grep -c '^# doc-superpowers setup:begin$' .git/info/exclude)" "one exclude block"
+  teardown
+}
+
+test_setup_exclude_block() {
+  echo "test: #51 the local record is kept out of git by setup's own block in info/exclude (not the Claude tier's): written before the record, once, and kept by install --claude and uninstall --claude"
+  setup
+  local ex=.git/info/exclude
+  setup_applied_defaults
+  run_setup -- --yes --set claude=off
+  assert_eq "0" "$RUN_RC" "--yes --set claude=off: exit 0 (stderr: $RUN_ERR)"
+  assert_eq '{"format":1,"overrides":{"claude":false},"search":{"cache":null}}' \
+    "$(jq -c . .claude/doc-superpowers/installed.local.json 2>&1)" "the local record: claude off, yours"
+  assert_eq "# doc-superpowers setup:begin
+.claude/doc-superpowers/installed.local.json
+# doc-superpowers setup:end" "$(sed -n '/^# doc-superpowers setup:begin$/,/^# doc-superpowers setup:end$/p' "$ex")" \
+    "the exclude block: setup's markers around the local record's path"
+  assert_eq "1" "$(grep -c '^# doc-superpowers setup:begin$' "$ex")" "…once"
+  assert_true "the local record is ignored by git" git check-ignore -q -- .claude/doc-superpowers/installed.local.json
+  assert_contains "$(git status --porcelain -uall)" "installed.json" "…the team record is not (it is committed)"
+  assert_not_contains "$(git status --porcelain -uall)" "installed.local.json" "git status does not list the local record"
+  inst install --claude
+  assert_true "install --claude: still ignored" git check-ignore -q -- .claude/doc-superpowers/installed.local.json
+  inst uninstall --claude
+  assert_true "uninstall --claude: still ignored" git check-ignore -q -- .claude/doc-superpowers/installed.local.json
+  assert_eq "1" "$(grep -c '^# doc-superpowers setup:begin$' "$ex")" "…the block kept, once"
+  teardown
+}
+
 echo ""
 echo "=== setup: model, probe, --list (#51) ==="
 test_setup_catalog
@@ -8285,6 +8661,14 @@ test_setup_plan_order
 test_setup_dry_run_release_notes_readme
 test_setup_plan_merge_driver_is_teams
 test_setup_review_lists_only_real_writes
+test_setup_yes_defaults_safety
+test_setup_yes_writes_what_review_listed
+test_setup_idempotent
+test_setup_rerun_after_failed_step
+test_setup_refuses_symlinked_record
+test_setup_yes_refusals
+test_setup_record_writers
+test_setup_exclude_block
 
 test_claude_hook_contract_held() {
   echo "test: every Claude hook run above held the contract (exit 0, or 2 only under STRICT; stdout one JSON object or nothing)"
