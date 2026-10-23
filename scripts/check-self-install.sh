@@ -43,8 +43,8 @@ base=$(esc "$(jq -r '.tiers.ci.base_branch' "$state")")
 cron=$(esc "$(jq -r '.tiers.ci.cron' "$state")")
 strict=$(jq -r 'if .tiers.ci.ci_strict == true then 1 else 0 end' "$state")
 installed=$(jq -r '.tiers.ci.workflows // {} | to_entries[] | select(.value.state == "installed") | .key' "$state")
+version="" market="" steps_run=""
 [ -n "$installed" ] || drift "$state" "records no installed workflow"
-version=""
 for t in scripts/hooks/ci/*.yml; do
   w=$(basename "$t" .yml)
   f=.github/workflows/$w.yml
@@ -55,14 +55,28 @@ for t in scripts/hooks/ci/*.yml; do
   if [ -z "$version" ] && grep -q '__VERSION__' "$t"; then
     version=$(esc "v$("$BASH_BIN" scripts/doc-tools.sh tools version)")
   fi
+  # The AI templates' marketplace URL (install.sh plugin_marketplace_url):
+  # the recorded --marketplace-url, else plugin.json's repository as .git.
+  if [ -z "$market" ] && grep -q '__MARKETPLACE_URL__' "$t"; then
+    market=$(jq -r '.tiers.ci.marketplace_url // empty' "$state")
+    if [ -z "$market" ]; then
+      market=$(jq -r '.repository | if type == "object" then .url else . end // empty' .claude-plugin/plugin.json 2>/dev/null || true)
+      market="${market%/}"
+      case "$market" in "" | *.git) ;; *) market="$market.git" ;; esac
+    fi
+    market=$(esc "$market")
+  fi
   sed -e "s|__BASE_BRANCH__|$base|g" -e "s|__VERSION__|$version|g" \
     -e "s|__CRON_SCHEDULE__|$cron|g" -e "s|__CI_STRICT__|$strict|g" \
+    -e "s|__MARKETPLACE_URL__|$market|g" \
     "$t" > "$work/$w.rendered.yml"
   diff -u "$work/$w.rendered.yml" "$f" \
     || drift "$f" "differs from $t rendered with the choices in $state"
   for p in $(grep -oE '\.github/scripts/[A-Za-z0-9._/-]+\.sh' "$f" | sort -u || true); do
     [ -x "$p" ] || drift "$f" "runs $p, which is not vendored (or not executable)"
   done
+  steps_run="$steps_run $(grep -v '^[[:space:]]*#' "$f" | grep -oE '\.github/scripts/doc-superpowers-steps/[A-Za-z0-9._-]+\.sh' \
+    | sed 's|.*/||' | sort -u | tr '\n' ' ' || true)"
   # On a ledger host (docs/ledger/config.json), the claims step's V5 reads
   # ledger trackers through the ledger set beside the vendored doc-tools.sh
   # (install --ci ships it there only).
@@ -110,11 +124,36 @@ for d in .github/scripts/*/; do
       *.sh) [ -x "$f" ] || drift "$f" "is not executable" ;;
     esac
   done
+  # The step scripts go one by one (below); every other set whole.
+  [ "$d" != doc-superpowers-steps ] || continue
   for p in "$src"/*.sh "$src"/*.awk "$src"/*.jq; do
     [ -f "$p" ] || continue
     [ -e ".github/scripts/$d/$(basename "$p")" ] \
       || drift ".github/scripts/$d" "lacks $(basename "$p") (a partial helper install)"
   done
+done
+# doc-superpowers-steps/ holds exactly the step scripts the installed
+# workflows run, with each sibling one of them runs ("$(dirname "$0")/<name>.sh"):
+# install --ci vendors no other.
+queue=$(printf '%s' "$steps_run" | tr -s ' ' | sed 's/^ //; s/ $//') need=""
+while [ -n "$queue" ]; do
+  n="${queue%% *}"
+  if [ "$n" = "$queue" ]; then queue=""; else queue="${queue#* }"; fi
+  case " $need " in *" $n "*) continue ;; esac
+  need="$need $n"
+  p=scripts/hooks/ci/doc-superpowers-steps/$n
+  [ -f "$p" ] || continue
+  [ -x ".github/scripts/doc-superpowers-steps/$n" ] \
+    || drift ".github/scripts/doc-superpowers-steps" "lacks $n, which an installed workflow's step script runs"
+  queue=$(printf '%s %s' "$queue" "$(grep -v '^[[:space:]]*#' "$p" | grep -oE '\$\(dirname "\$0"\)/[A-Za-z0-9_.-]+\.sh' \
+    | sed 's|.*/||' | tr '\n' ' ' || true)" | tr -s ' ' | sed 's/^ //; s/ $//')
+done
+for f in .github/scripts/doc-superpowers-steps/*; do
+  [ -f "$f" ] || continue
+  case " $need " in
+    *" $(basename "$f") "*) ;;
+    *) drift "$f" "is a step script no installed workflow runs (install --ci removes it)" ;;
+  esac
 done
 # The git tier's one committed piece: the index merge-driver attribute.
 if [ "$(git check-attr merge -- docs/.doc-index.json)" != "docs/.doc-index.json: merge: doc-index" ]; then

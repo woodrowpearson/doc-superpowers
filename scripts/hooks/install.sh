@@ -184,9 +184,10 @@ Tiers:
               post-commit-sync  PostToolUse  reports the docs a commit left stale
               session-summary   Stop         reports docs citing changed working-tree code
   --ci      GitHub Actions workflows, plus doc-tools.sh (and the helpers the
-            installed workflows run) vendored into .github/scripts/ via
-            doc-tools.sh tools install. Default: the shell workflows; the
-            Claude-powered ones are opt-in by name (--workflows=).
+            installed workflows run: each step script one of them runs, no
+            other) vendored into .github/scripts/ via doc-tools.sh tools
+            install. Default: the shell workflows; the Claude-powered ones are
+            opt-in by name (--workflows=).
   --all     All three tiers.
   --ledger  The work ledger's hooks: an opt-in set, never part of --all, that
             needs docs/ledger/config.json. Marked blocks
@@ -252,13 +253,21 @@ CI options (install --ci / --all):
                             a freshness check that cannot run, doc-spec-verify's
                             claims job on a claims check that cannot run (its
                             findings fail it either way)
+  --marketplace-url URL     the git URL the Claude-powered workflows fetch the
+                            plugin from, at its release tag (default: the
+                            plugin's own repository, plugin.json's
+                            "repository"; recorded only when given, and
+                            --marketplace-url= clears the record). Use a mirror
+                            your organization controls to keep the plugin's
+                            home out of the project's files
   --helpers=<true|false>    deprecated, and inert: the helpers ship exactly
                             while an installed workflow runs them.
                             --helpers=false only refuses doc-pr-release
                             (selected, or already installed)
   --force                   also re-install workflows removed on purpose
   The choices are recorded (.claude/doc-superpowers/installed.json, commit it):
-  a plain 'install --ci' reproduces the recorded set, branch, cron and strict.
+  a plain 'install --ci' reproduces the recorded set, branch, cron, strict and
+  marketplace URL.
 
 Uninstall options (uninstall --ci):
   --workflows=<csv|all|none>  which workflows (default: all of them, and the
@@ -702,6 +711,7 @@ render_workflow() {
     -e "s|__VERSION__|v$R_VERSION|g" \
     -e "s|__CRON_SCHEDULE__|$R_CRON|g" \
     -e "s|__CI_STRICT__|$R_STRICT|g" \
+    -e "s|__MARKETPLACE_URL__|$R_MARKET|g" \
     "$1"
 }
 
@@ -1872,6 +1882,30 @@ valid_cron() {
   local re='^[A-Za-z0-9*,/-]+([[:space:]]+[A-Za-z0-9*,/-]+){4}$'
   [[ "$1" =~ $re ]]
 }
+# A marketplace URL: what git clone takes and a double-quoted YAML value
+# carries as is — no space, quote, backslash or $ (no expression), and not
+# an option.
+valid_marketplace_url() {
+  local re='^[A-Za-z0-9._~:/@%+=,][A-Za-z0-9._~:/@%+=,-]*$'
+  [[ "$1" =~ $re ]]
+}
+
+# plugin_marketplace_url: the plugin's own repository (plugin.json's
+# "repository", a URL or {url}) as a git URL ending in .git — where a
+# Claude-powered workflow fetches the plugin unless --marketplace-url names
+# another. Empty when plugin.json names none.
+plugin_marketplace_url() {
+  local u
+  u=$(jq -r '.repository | if type == "object" then .url else . end // empty' \
+    "$SKILL_DIR/.claude-plugin/plugin.json" 2>/dev/null) || u=""
+  u="${u%/}"
+  case "$u" in
+    "") return 0 ;;
+    *.git) ;;
+    *) u="$u.git" ;;
+  esac
+  printf '%s' "$u"
+}
 
 # Parse a --workflows CSV into CSV_NAMES: trimmed, de-duplicated, validated.
 parse_workflow_csv() {
@@ -1988,6 +2022,12 @@ preflight_ci() {
   CI_STRICT="${CI_STRICT:-false}"
   valid_branch "$CI_BASE" || die "the recorded base branch '$CI_BASE' is not a valid branch name; pass --base-branch. Nothing was changed."
   valid_cron "$CI_CRON" || die "the recorded cron '$CI_CRON' is not 5 cron fields; pass --cron. Nothing was changed."
+  # The marketplace URL: flag > recorded > (when a template needs one, below)
+  # the plugin's own repository. Only a given one is recorded.
+  CI_MARKET="$STATE_MARKET"
+  [ "$OPT_MARKET_SET" != 1 ] || CI_MARKET="$OPT_MARKET"
+  [ -z "$CI_MARKET" ] || valid_marketplace_url "$CI_MARKET" \
+    || die "the recorded marketplace URL '$CI_MARKET' is not a git URL a workflow can carry; pass --marketplace-url. Nothing was changed."
 
   CI_DISK=$(disk_workflows)
   # Every install --ci retires every retired workflow.
@@ -2070,7 +2110,7 @@ preflight_ci() {
   fi
 
   # sed-escaped once, in the main shell (the version lookup is cached here).
-  R_BASE=$(sed_repl "$CI_BASE") R_CRON=$(sed_repl "$CI_CRON") R_STRICT=0 R_VERSION=""
+  R_BASE=$(sed_repl "$CI_BASE") R_CRON=$(sed_repl "$CI_CRON") R_STRICT=0 R_VERSION="" R_MARKET=""
   if [ "$CI_STRICT" = true ]; then
     R_STRICT=1
   fi
@@ -2078,6 +2118,21 @@ preflight_ci() {
     if grep -q '__VERSION__' "$SCRIPT_DIR/ci/$w.yml"; then
       ci_version
       R_VERSION=$(sed_repl "$VERSION")
+      break
+    fi
+  done
+  # Like the version: a plugin.json naming no usable repository does not
+  # abort the install. One WARN, an empty URL, and that workflow's plugin
+  # step fails with an ::error:: until it is re-installed with one.
+  local market="$CI_MARKET"
+  for w in $CI_RENDER; do
+    if grep -q '__MARKETPLACE_URL__' "$SCRIPT_DIR/ci/$w.yml"; then
+      [ -n "$market" ] || market=$(plugin_marketplace_url)
+      if [ -n "$market" ] && valid_marketplace_url "$market"; then
+        R_MARKET=$(sed_repl "$market")
+      else
+        echo "  WARN: $SKILL_DIR/.claude-plugin/plugin.json names no repository a workflow can fetch the plugin from ('$market'); the Claude-powered workflows get DOC_SUPERPOWERS_MARKETPLACE_URL \"\", and their plugin step fails until you re-install with --marketplace-url <git URL>" >&2
+      fi
       break
     fi
   done
@@ -2127,6 +2182,62 @@ needed_helpers() {
     done
   done
   printf '%s' "$need"
+}
+
+# The step scripts (doc-superpowers-steps/<name>.sh) the managed workflows on
+# disk run, derived from the files, not kept by hand: each one a workflow's
+# line outside a comment names under .github/scripts/doc-superpowers-steps/
+# (one a hashFiles('<path>') != '' guards counts only when another workflow
+# runs it, as in workflow_runs_helper_dir), and, transitively, each sibling a
+# step script runs as "$(dirname "$0")/<name>.sh" (prepare-agent.sh
+# snapshots commit-changes.sh), read from the plugin's copy. Space-separated
+# names, sorted.
+STEPS_SRC="$SCRIPT_DIR/ci/doc-superpowers-steps"
+needed_steps() {
+  local w f refs ref n need="" queue=""
+  for w in $KNOWN_WORKFLOWS; do
+    f=".github/workflows/$w.yml"
+    is_managed_workflow "$f" || continue
+    refs=$(awk '!/^[ \t]*#/' "$f" | grep -oE '\.github/scripts/doc-superpowers-steps/[A-Za-z0-9_.-]+\.sh' | sort -u || true)
+    while IFS= read -r ref; do
+      [ -n "$ref" ] || continue
+      grep -qF "hashFiles('$ref') != ''" "$f" && continue
+      n="${ref##*/}"
+      in_list "$n" "$need" || need="${need:+$need }$n"
+    done <<<"$refs"
+  done
+  queue="$need"
+  while [ -n "$queue" ]; do
+    n="${queue%% *}"
+    if [ "$n" = "$queue" ]; then queue=""; else queue="${queue#* }"; fi
+    [ -f "$STEPS_SRC/$n" ] || continue
+    refs=$(awk '!/^[ \t]*#/' "$STEPS_SRC/$n" | grep -oE '\$\(dirname "\$0"\)/[A-Za-z0-9_.-]+\.sh' || true)
+    while IFS= read -r ref; do
+      [ -n "$ref" ] || continue
+      ref="${ref##*/}"
+      in_list "$ref" "$need" && continue
+      need="$need $ref"
+      queue="${queue:+$queue }$ref"
+    done <<<"$refs"
+  done
+  # shellcheck disable=SC2086  # names, one word each
+  [ -z "$need" ] || printf '%s\n' $need | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//'
+}
+
+# unused_steps <needed>: the plugin's step scripts vendored in
+# $VENDOR_DEST/doc-superpowers-steps/ that <needed> (needed_steps) does not
+# name — an older install vendored every one, or install --ci kept an edited
+# copy. Repository-relative paths, space-separated.
+unused_steps() {
+  local f n out=""
+  for f in "$STEPS_SRC"/*.sh; do
+    [ -f "$f" ] || continue
+    n="${f##*/}"
+    in_list "$n" "$1" && continue
+    [ -e "$VENDOR_DEST/doc-superpowers-steps/$n" ] || continue
+    out="${out:+$out }$VENDOR_DEST/doc-superpowers-steps/$n"
+  done
+  printf '%s' "$out"
 }
 
 # workflow_runs_claims <workflow file>: a line outside a comment names the
@@ -2182,14 +2293,23 @@ retire_workflows() {
 
 # Vendored files follow the installed workflows: needed helper dirs are
 # installed (doc-tools.sh always, on install), the others removed —
-# `tools uninstall` keeps an edited or foreign file and says so.
+# `tools uninstall` keeps an edited or foreign file and says so. The step
+# scripts go one by one (needed_steps): a project receives only those its
+# workflows run, so doc-ledger-publish alone ships no prepare-agent.sh.
 vendor_sync() {
-  local need d args=()
+  local need steps="" d f args=() drop=()
   need=$(needed_helpers)
+  if in_list doc-superpowers-steps "$need"; then
+    steps=$(needed_steps)
+  fi
   if [ "$1" = install ]; then
     args=(tools install --dest "$VENDOR_DEST")
     for d in $need; do
+      [ "$d" != doc-superpowers-steps ] || continue
       args+=(--helper "$d")
+    done
+    for d in $steps; do
+      args+=(--step "$d")
     done
     run_tools "${args[@]}"
   fi
@@ -2199,6 +2319,12 @@ vendor_sync() {
       run_tools tools uninstall --dest "$VENDOR_DEST" --helper "$d"
     fi
   done
+  # With the set kept, the step scripts no installed workflow runs go.
+  [ -n "$steps" ] || return 0
+  for f in $(unused_steps "$steps"); do
+    drop+=(--step "${f##*/}")
+  done
+  [ "${#drop[@]}" -eq 0 ] || run_tools tools uninstall --dest "$VENDOR_DEST" "${drop[@]}"
 }
 
 # vendored_ledger_adapter: one of the plugin's ledger adapters is in
@@ -2231,7 +2357,7 @@ install_ci() {
     echo "  Existing $w.yml found (not doc-superpowers-managed), skipping."
   done
   retire_workflows
-  state_set_choices "$CI_BASE" "$CI_CRON" "$CI_STRICT"
+  state_set_choices "$CI_BASE" "$CI_CRON" "$CI_STRICT" "$CI_MARKET"
   vendor_sync install
   state_flush
 
@@ -2239,7 +2365,7 @@ install_ci() {
   nforeign=$(set -- $CI_FOREIGN; echo $#)
   nskip=$(set -- $CI_SKIP; echo $#)
   echo "CI/CD workflows: $installed installed, $refreshed refreshed, $nforeign skipped (existing non-managed), $nskip skipped (intentionally uninstalled)"
-  echo "  Choices (recorded in $STATE_FILE): base branch $CI_BASE, cron '$CI_CRON', strict $CI_STRICT"
+  echo "  Choices (recorded in $STATE_FILE): base branch $CI_BASE, cron '$CI_CRON', strict $CI_STRICT${CI_MARKET:+, marketplace $CI_MARKET}"
   for w in $CI_SKIP; do
     echo "  skipping $w.yml (previously uninstalled; pass --workflows=$w to override, or --force)"
   done
@@ -2381,9 +2507,9 @@ status_ci() {
   done
   if [ "$state_ok" = 1 ] && [ "$STATE_HAS_CI" = 1 ]; then
     if $JSON; then
-      st_rec ci.choices "${STATE_BASE:-main}" "${STATE_CRON:-0 9 * * 1}" "${STATE_STRICT:-false}"
+      st_rec ci.choices "${STATE_BASE:-main}" "${STATE_CRON:-0 9 * * 1}" "${STATE_STRICT:-false}" "$STATE_MARKET"
     else
-      echo "  choices: base branch ${STATE_BASE:-main}, cron '${STATE_CRON:-0 9 * * 1}', strict ${STATE_STRICT:-false} ($STATE_FILE)"
+      echo "  choices: base branch ${STATE_BASE:-main}, cron '${STATE_CRON:-0 9 * * 1}', strict ${STATE_STRICT:-false}${STATE_MARKET:+, marketplace $STATE_MARKET} ($STATE_FILE)"
     fi
   fi
   # On a ledger host, a claims workflow without the ledger set beside
@@ -2420,6 +2546,15 @@ status_ci() {
     [ "$d" != adapters ] || label="ledger adapters"
     echo "  $label: $n in $VENDOR_DEST/$d/"
   done
+  # A vendored step script no installed workflow runs (an older install
+  # vendored them all; install --ci keeps an edited one): removable.
+  for f in $(unused_steps "$(needed_steps)"); do
+    if $JSON; then
+      st_rec ci.removable "$f"
+    else
+      printf "  ⚠ %s: no installed workflow runs it — removable (install --ci removes an unmodified copy; delete an edited one yourself)\n" "$f"
+    fi
+  done
   if [ -f "$VENDOR_DEST/doc-tools.sh" ]; then
     if $JSON; then
       st_rec ci.vendored "$VENDOR_DEST/doc-tools.sh"
@@ -2451,12 +2586,14 @@ _STATUS_JSON_JQ='
     elif $r[0] == "ci.state" then
       .tiers.ci = {state_file: $r[1], state_readable: ($r[2] == "true"), state_error: ($r[3] // "" | n),
                    workflows: {}, retired: [], choices: null, claims_without_ledger_helpers: [],
-                   helpers: {}, doc_tools_vendored: null}
+                   helpers: {}, removable_vendored: [], doc_tools_vendored: null}
     elif $r[0] == "ci.wf" then .tiers.ci.workflows[$r[1]] = {state: $r[2]}
     elif $r[0] == "ci.retired" then .tiers.ci.retired += [$r[1]]
-    elif $r[0] == "ci.choices" then .tiers.ci.choices = {base_branch: $r[1], cron: $r[2], ci_strict: ($r[3] == "true")}
+    elif $r[0] == "ci.choices" then .tiers.ci.choices = {base_branch: $r[1], cron: $r[2], ci_strict: ($r[3] == "true"),
+                                                      marketplace_url: ($r[4] // "" | n)}
     elif $r[0] == "ci.ledger_gap" then .tiers.ci.claims_without_ledger_helpers += [$r[1]]
     elif $r[0] == "ci.helpers" then .tiers.ci.helpers[$r[1]] = ($r[2] | tonumber)
+    elif $r[0] == "ci.removable" then .tiers.ci.removable_vendored += [$r[1]]
     elif $r[0] == "ci.vendored" then .tiers.ci.doc_tools_vendored = $r[1]
     elif $r[0] == "search.state" then .tiers.search = {launcher: $r[1], mcp_entry: $r[2]}
     else . end)
@@ -2511,6 +2648,8 @@ DO_GIT=false DO_CLAUDE=false DO_CI=false DO_LEDGER=false DO_LEDGER_CLAUDE=false 
 # --claude named itself (not through --all, which never reports a ledger set).
 CLAUDE_NAMED=false
 OPT_BASE="" OPT_CRON="" OPT_STRICT="" HELPERS=true FORCE=false TRANSIENT=false
+# --marketplace-url: OPT_MARKET_SET=1 once given ("" then clears the record).
+OPT_MARKET="" OPT_MARKET_SET=0
 WF_MODE=plain CSV_NAMES=""
 SEEN_CI_OPTS=""
 # --merge-driver-only: the git tier is the merge driver alone (no hook).
@@ -2522,7 +2661,7 @@ allowed() {
   case "$COMMAND:$1" in
     *:--git | *:--claude | *:--ci | *:--all | *:--ledger | *:--ledger-claude | *:--search | *:--merge-driver-only) return 0 ;;
     status:--json) return 0 ;;
-    install:--workflows | install:--base-branch | install:--cron | install:--ci-strict | install:--helpers | install:--force) return 0 ;;
+    install:--workflows | install:--base-branch | install:--cron | install:--ci-strict | install:--helpers | install:--force | install:--marketplace-url) return 0 ;;
     uninstall:--workflows | uninstall:--transient) return 0 ;;
   esac
   return 1
@@ -2537,12 +2676,12 @@ while [ $# -gt 0 ]; do
     *) value="" has_value=0 ;;
   esac
   case "$name" in
-    --git | --claude | --ci | --all | --ledger | --ledger-claude | --search | --merge-driver-only | --json | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient) ;;
+    --git | --claude | --ci | --all | --ledger | --ledger-claude | --search | --merge-driver-only | --json | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url) ;;
     *) usage_error "unknown option: $arg" ;;
   esac
   allowed "$name" || usage_error "$name does not apply to $COMMAND"
   case "$name" in
-    --base-branch | --cron | --workflows | --helpers)
+    --base-branch | --cron | --workflows | --helpers | --marketplace-url)
       if [ "$has_value" = 0 ]; then
         [ $# -gt 0 ] || die "$name requires a value"
         value="$1"
@@ -2570,6 +2709,11 @@ while [ $# -gt 0 ]; do
       valid_cron "$value" || die "invalid --cron '$value': 5 fields of digits, names and * , - /"
       OPT_CRON="$value"
       ;;
+    --marketplace-url)
+      [ -z "$value" ] || valid_marketplace_url "$value" \
+        || die "invalid --marketplace-url '$value': a git URL of letters, digits and . _ ~ : / @ % + = , - (no space, quote or \$), not starting with -"
+      OPT_MARKET="$value" OPT_MARKET_SET=1
+      ;;
     --ci-strict)
       case "$has_value:$value" in
         0:* | 1:true) OPT_STRICT=true ;;
@@ -2594,7 +2738,7 @@ while [ $# -gt 0 ]; do
     --transient) TRANSIENT=true ;;
   esac
   case "$name" in
-    --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient)
+    --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url)
       SEEN_CI_OPTS="${SEEN_CI_OPTS:+$SEEN_CI_OPTS }$name"
       ;;
   esac
