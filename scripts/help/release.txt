@@ -12,7 +12,9 @@ Terminal:   doc-superpowers version                     the current version
 Skill:      /doc-superpowers release [--from=<ref>]
 Committed:  one release commit: the RELEASE-NOTES.md entry, the fragments it
             consumed (deleted), the manifests' version, CLAUDE.md and
-            README.md fixes. Nothing is pushed.
-Local:      the git tag vX.Y.Z, only if you say yes.
+            README.md fixes. The commit is not pushed: it must reach main.
+Local:      the git tag vX.Y.Z, only if you say yes; then it offers to push
+            the tag (git push origin vX.Y.Z), and checks it with
+            doc-superpowers tools check-version --tag.
 Undo:       git revert the release commit and git tag -d vX.Y.Z.
 Reference:  references/release.md

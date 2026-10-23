@@ -18,7 +18,7 @@ Agent: /doc-superpowers <action>      Terminal: doc-superpowers <command>
   claims         executable spec claims (off by default)     help claims
   help [topic]   this page, or one topic; also: version, tools <args>
 
-In a terminal: setup, hooks, search, tools, version, help. The rest: agent.
+Agent only: init, audit, review-pr, update, diagram, sync, release, spec-*.
 New here: doc-superpowers setup, then /doc-superpowers init
 doc-superpowers help <topic>
   (topics: setup search hooks ci ledger claims release)

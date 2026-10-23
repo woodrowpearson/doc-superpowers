@@ -1030,7 +1030,7 @@ assert_true "eval spec-inject-ledger / allocates-no-key spares the sweep, valida
 /w/scripts/doc-tools.sh ledger notices --gate"
 assert_true "…and trips on a key allocation" grep -qE -- "${_lgneg:-^$}" <<<"/w/scripts/doc-tools.sh ledger new --ledger auth --summary x"
 # Required cases: fixtures that build the scenario, runnable here.
-_required="update-from-audit update-from-session-report spec-generate-from-design hooks-install-all sync-index release-draft release-draft-untagged spec-inject-execute spec-verify-review spec-inject-amends release-fragment-merge hooks-status-uninstall spec-inject-claims spec-inject-claims-inert spec-inject-ledger"
+_required="setup-defaults update-from-audit update-from-session-report spec-generate-from-design hooks-install-all sync-index release-draft release-draft-untagged spec-inject-execute spec-verify-review spec-inject-amends release-fragment-merge hooks-status-uninstall spec-inject-claims spec-inject-claims-inert spec-inject-ledger"
 for _e in $_required; do
   _setup=$(jq -r --arg e "$_e" '.evals[] | select(.name == $e) | .setup // ""' "$EVALS_JSON")
   if [ -z "$_setup" ]; then
@@ -1895,11 +1895,7 @@ for _t in $_TOPICS; do
     grep -Eq '^Skill:.* /doc-superpowers' "$_HELPD/$_t.txt"
   _r="references/$(_ds_ref "$_t")"
   assert_true "$_t.txt: its Reference line names $_r" grep -q "^Reference:.*$_r" "$_HELPD/$_t.txt"
-  # references/setup.md is written by the skill-and-docs task; check the file
-  # exists once it does (SKILL.md's own path check then covers it too).
-  if [ "$_r" != "references/setup.md" ] || [ -e "$REPO_ROOT/$_r" ]; then
-    assert_true "$_t.txt: $_r exists" test -f "$REPO_ROOT/$_r"
-  fi
+  assert_true "$_t.txt: $_r exists" test -f "$REPO_ROOT/$_r"
 done
 # setup's fixed defaults, verbatim (the lines may wrap: compare flattened)
 _st="$(tr '\n' ' ' 2>/dev/null <"$_HELPD/setup.txt" | tr -s ' ' || true)"
@@ -1918,6 +1914,15 @@ assert_contains "$(cat "$_HELPD/ci.txt" 2>/dev/null || true)" "doc-freshness-pr"
 assert_contains "$(cat "$_HELPD/search.txt" 2>/dev/null || true)" "docs/search/config.json" "search.txt names the switch"
 assert_contains "$(cat "$_HELPD/ledger.txt" 2>/dev/null || true)" "docs/ledger/config.json" "ledger.txt names the switch"
 assert_contains "$(cat "$_HELPD/claims.txt" 2>/dev/null || true)" "docs/spec-claims/" "claims.txt names the switch"
+# The ledger's post-commit leg pushes only with in-flight on (references/ledger.md
+# → Hooks); release offers a tag push (references/release.md step 12); the
+# ledger, claims and fragments verbs run from a terminal (tools <verb>).
+assert_contains "$(tr '\n' ' ' 2>/dev/null <"$_HELPD/ledger.txt" | tr -s ' ' || true)" "(when in-flight is enabled)" \
+  "ledger.txt: the post-commit leg pushes only when in-flight is enabled"
+_rl="$(tr '\n' ' ' 2>/dev/null <"$_HELPD/release.txt" | tr -s ' ' || true)"
+assert_not_contains "$_rl" "Nothing is pushed" "release.txt does not say nothing is pushed…"
+assert_contains "$_rl" "git push origin vX.Y.Z" "…it names the tag push release offers"
+assert_not_contains "$_ov" "The rest: agent" "overview.txt does not call every other command agent-only (tools <verb> runs in a terminal)"
 
 # --- errors ---
 _ds_run "$_DS" help nosuch
@@ -2026,6 +2031,118 @@ _ds_run env DOC_SUPERPOWERS_ROOT= GIT_CEILING_DIRECTORIES="$(dirname "$_repo")" 
 assert_eq "root=$_stub" "$_DS_OUT" "…an empty DOC_SUPERPOWERS_ROOT counts as unset"
 _ds_run env DOC_SUPERPOWERS_ROOT="/an explicit/root" GIT_CEILING_DIRECTORIES="$(dirname "$_repo")" sh -c 'cd "$1" && exec "$2" "$3" search status' _ "$_repo/sub/dir" "$BASH_BIN" "$_sd"
 assert_eq "root=/an explicit/root" "$_DS_OUT" "…an explicit DOC_SUPERPOWERS_ROOT still wins"
+
+# =============================================================================
+echo "--- setup and help: the skill's actions and references/setup.md ---"
+# The skill drives setup's engine through its flags (the Bash tool has no
+# terminal, design §4.3) and shows help's output verbatim, so the two stay one
+# text. The flags and the item ids the reference must document are read from
+# the code: setup.sh's case arms and catalog.json.
+_SU_REF="$REPO_ROOT/references/setup.md"
+_su=$(_read "$_SU_REF")
+assert_true "references/setup.md exists" test -f "$_SU_REF"
+assert_contains "$SKILLMD" '`references/setup.md`' "SKILL.md's references table names references/setup.md"
+assert_contains "$SKILLMD" 'scripts/doc-superpowers' "SKILL.md names the dispatcher scripts/doc-superpowers"
+assert_contains "$SKILLMD" 'except `hooks`, `setup`, `help`, `release` and `ledger`' \
+  "SKILL.md: setup and help skip discovery, as hooks, release and ledger do"
+_su_qr=$(_section "$SKILLMD" "## Quick Reference")
+for _a in setup help; do
+  assert_true "SKILL.md's Quick Reference has a $_a row" test -n "$(_cell "$_su_qr" "\`$_a\`" "Purpose")"
+done
+assert_line_matches "$(_section "$SKILLMD" "## Usage")" '^Actions:.* setup \| help( |$)' "SKILL.md's Usage lists setup and help"
+_su_help=$(_section "$SKILLMD" '### `help`')
+_su_setup=$(_section "$SKILLMD" '### `setup`')
+for _s in help setup; do
+  _b=$_su_help
+  [ "$_s" = help ] || _b=$_su_setup
+  assert_true "SKILL.md has a ### \`$_s\` action section" test -n "$_b"
+  assert_line_matches "$_b" '^\*\*REQUIRED:\*\* Read `\$ROOT/references/setup\.md`' "…$_s opens with the REQUIRED pointer to references/setup.md"
+done
+assert_contains "$_su_help" '"$ROOT/scripts/doc-superpowers" help' "help runs the dispatcher's help"
+assert_contains "$_su_help" "verbatim" "help shows the output verbatim (the skill never paraphrases it)"
+for _f in --dry-run --list --yes --build --for-team; do
+  assert_contains "$_su_setup" "$_f" "SKILL.md's setup section uses $_f"
+done
+assert_contains "$_su_setup" "background" "SKILL.md's setup section runs a build in the background"
+# The reference's sections, in order.
+assert_eq "## What setup does
+## The defaults
+## The flow
+## Items
+## Flags and exit codes
+## The records
+## The env hook
+## Harness entries
+## The terminal command
+## Help" "$(grep -E '^## ' <<<"$_su" || true)" "setup.md: the ten sections, in order, and no other"
+# Every flag setup.sh parses: its case arms, the "--a | --b)" arm included.
+_su_flags=$(grep -oE '^ *--[a-z-]+( \| --[a-z-]+)*\)' "$REPO_ROOT/scripts/setup/setup.sh" | tr -d ' )' | tr '|' '\n' | sort -u)
+assert_true "setup.sh parses at least 10 flags ($(wc -l <<<"$_su_flags" | tr -d ' '))" test "$(wc -l <<<"$_su_flags")" -ge 10
+_su_fx=$(_section "$_su" "## Flags and exit codes")
+for _f in $_su_flags; do
+  assert_contains "$_su_fx" "\`$_f" "setup.md's Flags and exit codes documents $_f"
+done
+for _c in 0 1 2 3; do
+  assert_line_matches "$_su_fx" "^\| \`$_c\` \|" "setup.md's Flags and exit codes has a row for exit $_c"
+done
+# Every catalog item.
+_su_items=$(_section "$_su" "## Items")
+_su_ids=$(jq -r '.items[].id' "$REPO_ROOT/scripts/setup/catalog.json")
+assert_true "catalog.json has items" test -n "$_su_ids"
+for _id in $_su_ids; do
+  assert_contains "$_su_items" "\`$_id\`" "setup.md's Items documents \`$_id\`"
+done
+# The strings a user or an agent acts on, read from the code.
+_su_norec=$(sed -n 's/.*die "\(no team setup recorded[^"]*\)".*/\1/p' "$REPO_ROOT/scripts/setup/setup.sh")
+assert_true "setup.sh has the no-record message" test -n "$_su_norec"
+assert_contains "$_su" "$_su_norec" "setup.md quotes setup.sh's no-record message"
+assert_contains "$_su" "nothing to do" "setup.md names the nothing-to-do line"
+_su_env=$(sed -n 's/^PLAN_ENVHOOK_BEGIN="\(.*\)"$/\1/p' "$REPO_ROOT/scripts/setup/lib-plan.sh")
+assert_true "lib-plan.sh defines the env hook's begin marker" test -n "$_su_env"
+assert_contains "$(_section "$_su" "## The env hook")" "$_su_env" "setup.md's env hook section shows lib-plan.sh's begin marker"
+_su_shim=$(sed -n 2p "$REPO_ROOT/scripts/setup/shim.sh")
+assert_contains "$(_section "$_su" "## The terminal command")" "$_su_shim" "setup.md's terminal command section names the shim's marker line"
+# An existing shim of ours counts as in place whatever it holds (Task 9): it is
+# never refreshed, and the way to re-render it is --no-link-bin, then --link-bin.
+assert_contains "$(_section "$_su" "## The terminal command")" "never refreshed" "setup.md: an existing shim is never refreshed…"
+assert_contains "$(_section "$_su" "## The terminal command")" '`--no-link-bin`, then `--link-bin`' "…and re-rendered with --no-link-bin, then --link-bin"
+assert_contains "$(_section "$_su" "## The records")" '"format": 1' "setup.md's records section shows the format"
+assert_contains "$HOOKSREF" "references/setup.md" "hooks.md points to setup"
+# Task 11's carried fixes: when the Codex check ran, and the doc-search row.
+assert_contains "$(_section "$_ds" '## Other clients')" "Codex on 2026-10-22" "search.md's Other clients dates the Codex check"
+_su_row=$(grep -E '^\| doc-search MCP server' <<<"$MAPPINGS" || true)
+assert_true "tool-mappings: a doc-search MCP server row" test -n "$_su_row"
+assert_not_contains "$_su_row" "by hand; unverified" "tool-mappings: the doc-search row is not 'by hand; unverified' any more…"
+assert_contains "$_su_row" "Other clients" "…it points at search.md's Other clients…"
+assert_contains "$_su_row" "setup" "…and says setup writes the entries"
+# The evals: setup's defaults (Apply these, then Write only), and help.
+_su_ev='.evals[] | select(.name == "setup-defaults")'
+assert_contains "$(jq -r "$_su_ev | .prompt" "$EVALS_JSON")" "/doc-superpowers setup" "eval setup-defaults: the prompt is /doc-superpowers setup"
+_su_has() { # <jq condition on one assertion> <msg>
+  assert_eq "true" "$(jq "[$_su_ev | .assertions[] | select($1)] | length == 1" "$EVALS_JSON")" "$2"
+}
+_su_has '.type == "tool_call_check" and .command == "doc-superpowers\"? setup --dry-run" and (.negate // false | not)' "eval setup-defaults: runs setup --dry-run"
+_su_has '.type == "tool_call_check" and .command == "doc-superpowers\"? setup --yes" and (.negate // false | not)' "eval setup-defaults: runs setup --yes"
+_su_has '.type == "tool_call_check" and .command == "--build" and .negate == true' "eval setup-defaults: never --build (Write only)"
+_su_has '.type == "file_exists" and .path == ".gitattributes"' "eval setup-defaults: the merge driver's .gitattributes"
+_su_has '.type == "file_not_exists" and .path == ".github/workflows/doc-freshness-pr.yml"' "eval setup-defaults: no CI"
+_su_has '.type == "content_check" and .path == ".claude/doc-superpowers/installed.json" and .pattern == "\"setup\""' "eval setup-defaults: the team record"
+# Its two commands match the ones SKILL.md's setup section prescribes ($ROOT
+# as an agent substitutes it), and the help eval's matches help's.
+_su_cmds=$(grep -oE '`"\$ROOT/scripts/doc-superpowers" [^`]*`' <<<"$_su_setup$_su_help" | tr -d '`' | sed 's|\$ROOT|/w|g' || true)
+assert_true "SKILL.md's setup and help sections prescribe dispatcher commands" test -n "$_su_cmds"
+for _n in 1 2; do
+  _re=$(jq -r "[$_su_ev | .assertions[] | select(.type == \"tool_call_check\" and (.negate // false | not)) | .command][$((_n - 1))] // \"^\$\"" "$EVALS_JSON")
+  assert_line_matches "$_su_cmds" "$_re" "eval setup-defaults: $_re matches a command SKILL.md prescribes"
+done
+_hre=$(jq -r '[.evals[] | select(.name == "help-topic") | .assertions[] | select(.type == "tool_call_check") | .command][0] // "^$"' "$EVALS_JSON")
+assert_true "eval help-topic: its command matches the dispatcher's help, quoted" grep -qE -- "$_hre" <<<'"/w/scripts/doc-superpowers" help ledger'
+assert_true "…and bare" grep -qE -- "$_hre" <<<'/w/scripts/doc-superpowers help ledger'
+assert_true "eval help-topic: it checks the output carries help ledger's first line verbatim" \
+  test "$(jq -r '[.evals[] | select(.name == "help-topic") | .assertions[] | select(.type == "output_check") | .pattern // empty][0] // ""' "$EVALS_JSON")" = "$(head -n 1 "$_HELPD/ledger.txt")"
+# A dispatcher command pattern allows the closing quote, as doc-tools.sh's do.
+_unq=$(jq -r '.evals[] | .name as $e | .assertions[] | .name as $a | (.command // empty) | select(test("doc-superpowers (setup|help|hooks|tools|search|version)")) | "\($e)/\($a): \(.)"' "$EVALS_JSON")
+assert_eq "" "$_unq" "every doc-superpowers command pattern allows the closing quote (\"?)"
 
 # =============================================================================
 echo "--- leak scan: tracked files ship to every install (#29) ---"
