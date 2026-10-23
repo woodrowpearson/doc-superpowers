@@ -1,0 +1,26 @@
+doc-superpowers help ci: GitHub Actions workflows
+
+Workflows check the docs on every pull request and on a schedule. They run on
+GitHub, so they are committed and shared: nothing here is per user.
+
+Default:    off. setup leaves CI at none. "hooks install --ci" on its own
+            installs the 2 default shell workflows named below.
+Terminal:   doc-superpowers hooks install --ci [--workflows=<csv|all|none>]
+              [--base-branch NAME] [--cron EXPR] [--ci-strict[=true|false]]
+            doc-superpowers setup --set ci.workflows=doc-freshness-pr
+Skill:      /doc-superpowers hooks install --ci
+Workflows:  9 templates.
+  shell, no secret:  doc-freshness-pr  doc-freshness-schedule (the default 2)
+                     doc-ledger-publish (opt-in; for a ledger host)
+  Claude-powered:    doc-audit-update  doc-pr-full-cycle  doc-pr-release
+                     doc-release  doc-review-pr  doc-spec-verify
+                     (they need CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY)
+Options:    base branch main, cron "0 9 * * 1", strict off (strict makes a
+            stale doc fail the PR check instead of warn).
+Committed:  .github/workflows/<name>.yml, .github/scripts/ (doc-tools.sh and
+            the step scripts the workflows run),
+            .claude/doc-superpowers/installed.json.
+Local:      nothing.
+Undo:       doc-superpowers hooks uninstall --ci [--workflows=<csv|all>]
+            then commit what it removed.
+Reference:  references/hooks.md

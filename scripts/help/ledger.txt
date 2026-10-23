@@ -1,0 +1,25 @@
+doc-superpowers help ledger: keyed work items
+
+The ledger keeps work items as issues (markdown files, docs/issues/ by
+default). Everything else is generated from them: a stable key per item,
+ledger pages, related work, and notices about work on other branches.
+
+Default:    off. docs/ledger/config.json turns it on ({} is complete).
+            Without it every verb prints "not enabled" and exits 0.
+Terminal:   doc-superpowers tools ledger init            start
+            doc-superpowers tools ledger <verb>   show ls find related new
+              link note view validate publish ...  (tools ledger --help)
+            doc-superpowers setup --set ledger=on
+Skill:      /doc-superpowers ledger <verb> [args]
+            /doc-superpowers ledger file [<title>]     file an item
+            /doc-superpowers ledger declare            link what a change did
+Committed:  docs/ledger/config.json and the items (docs/issues/*.md).
+Local:      rendered views, under .git. Opt-in hook sets, never in --all:
+            hooks install --ledger adds git legs: pre-commit validate blocks
+            on any failure, and post-commit pushes in-flight refs to the
+            remote in the background. --ledger-claude adds 2 Claude events.
+            "ledger publish" pushes the views to its views branch.
+Undo:       doc-superpowers hooks uninstall --ledger --ledger-claude
+            Delete docs/ledger/config.json to make every verb inert; the
+            items stay as plain files. setup never removes the config.
+Reference:  references/ledger.md
