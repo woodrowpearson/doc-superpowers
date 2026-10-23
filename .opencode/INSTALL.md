@@ -42,6 +42,13 @@ Start a new OpenCode session. Try:
 audit my project's documentation
 ```
 
+## Set up a repository
+
+The entry point, once per repository: ask for `/doc-superpowers setup`, or run the plugin's `scripts/doc-superpowers setup` in a terminal — `~/.config/opencode/plugins/doc-superpowers/scripts/doc-superpowers setup` for the local install (a full-screen picker; `--link-bin` adds the terminal command `~/.local/bin/doc-superpowers`). It starts from fixed safe defaults — the doc-index merge driver and the 5 report-only git hooks; nothing downloads, nothing reaches the network, no CI — and shows every write before it makes one; it never commits, and prints the `git add` line instead. `doc-superpowers help` (or `/doc-superpowers help`) prints a one-screen map of every feature; [`references/setup.md`](../references/setup.md) is the full reference.
+
+- The defaults also install the 3 Claude Code hooks, which OpenCode does not run: untick *Claude hooks* (`--set claude=off`) unless you use Claude Code too.
+- With doc-search on, tick *OpenCode* under *Harness* (`--set harness=claude-code,opencode`): setup merges the doc-search entry into the project's `opencode.json` under `mcp`, keeping every other key (your `plugin` line included).
+
 ## Available Commands
 
 | Command | Purpose |
@@ -52,6 +59,8 @@ audit my project's documentation
 | `update` | Execute doc updates from audit |
 | `diagram` | Regenerate diagrams |
 | `sync` | Sync doc index with filesystem |
+| `setup` | Set this repository up in one pass: fixed safe defaults, every write shown first |
+| `help` | One-screen help: every feature and command, or one topic |
 | `hooks install` | Install workflow hooks |
 | `hooks status` | Show installed hooks |
 | `hooks uninstall` | Remove installed hooks |
@@ -67,7 +76,7 @@ The plugin at `.opencode/plugins/doc-superpowers.js` registers the skill path an
 
 ## Hooks
 
-Install the tiers that work outside Claude Code with `hooks install --git --ci`; in a project with a work ledger (`docs/ledger/config.json`), also its git legs, `hooks install --ledger`. The Claude hook tier and the ledger's Claude events (`--ledger-claude`) need Claude Code; see the matrix.
+`setup` (above) installs the default tiers and records the choice. To install the tiers that work outside Claude Code by hand: `hooks install --git --ci`; in a project with a work ledger (`docs/ledger/config.json`), also its git legs, `hooks install --ledger`. The Claude hook tier and the ledger's Claude events (`--ledger-claude`) need Claude Code; see the matrix.
 
 ## Spec Lifecycle
 

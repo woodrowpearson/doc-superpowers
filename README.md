@@ -15,6 +15,7 @@ doc-superpowers is a Claude Code skill that treats documentation as a first-clas
 - **Updates** stale docs with agent-verified changes (`update`)
 - **Regenerates** architecture and workflow diagrams (`diagram`)
 - **Syncs** doc indexes with the filesystem (`sync`)
+- **Sets a repository up** in one pass (`setup`): fixed safe defaults, every write shown before it is made, the team's choice recorded so each contributor's clone can reproduce it
 - **Installs** opt-in workflow hooks for automated freshness monitoring (`hooks`)
 - **Tracks specifications** through implementation with formal spec lifecycle (`spec-generate`, `spec-inject`, `spec-verify`)
 - **Checks spec claims** (opt-in, with `docs/spec-claims/`): executable claims quoted from a spec's normative text, each bound to a check, run by `doc-tools.sh claims` and gated through the spec actions and the hooks
@@ -84,6 +85,20 @@ Not supported. `npx skills add woodrowpearson/doc-superpowers` copies only the s
 
 In a client other than Claude Code, [`references/tool-mappings.md`](references/tool-mappings.md) maps the skill's tool names to the client's and says which hook tiers and features it supports.
 
+## Set up a repository
+
+After installing, run setup once in each repository, from the agent or a terminal:
+
+```
+/doc-superpowers setup                         # the agent: the same choices, asked as questions
+"$ROOT/scripts/doc-superpowers" setup          # a terminal: a full-screen picker ($ROOT: the plugin's root)
+doc-superpowers setup                          # the same, once setup has linked ~/.local/bin/doc-superpowers
+```
+
+It starts from fixed defaults — the doc-index merge driver, the 5 report-only git hooks, the 3 Claude Code hooks — with doc-search, CI, the work ledger, spec claims and the terminal command off until you tick them. **The safety rule: the defaults block no commit, download nothing, call no network and add no CI; nothing is written until you confirm the review, and nothing downloads without *Write and build* and a yes.** setup never commits: it prints the `git add` line for the team's files (`.gitattributes` and the team record, `.claude/doc-superpowers/installed.json`), and a teammate's clone reproduces the recorded setup with `doc-superpowers setup --apply`. `--dry-run` shows the plan and writes nothing. [`references/setup.md`](references/setup.md) has every item, flag and record.
+
+`doc-superpowers help` (or `/doc-superpowers help`) prints a one-screen map of every feature and command; `doc-superpowers help <topic>` one feature (`setup`, `search`, `hooks`, `ci`, `ledger`, `claims`, `release`).
+
 ## Upgrading from 2.x
 
 v3.0.0 changes what the installer writes, the doc-index schema and a few verbs' contracts. An install made by 2.x keeps working badly rather than failing: its hooks carry the same marker, and the v2 Claude gate read an environment variable nothing sets, so it never gated. `install.sh status` now says so (`⚠ … outdated: re-run install --git` / `--claude`). In each repository that has doc-superpowers installed:
@@ -102,7 +117,7 @@ v3.0.0 changes what the installer writes, the doc-index schema and a few verbs' 
 ```
 /doc-superpowers <action> [scope]
 
-Actions: init | audit | review-pr | update | diagram | sync | hooks | release | spec-generate | spec-inject | spec-verify | ledger
+Actions: init | audit | review-pr | update | diagram | sync | hooks | setup | help | release | spec-generate | spec-inject | spec-verify | ledger
 Scopes:  all | one scope from Detect Scopes (application, api-contracts, data-layer, …)
 ```
 
@@ -118,6 +133,8 @@ Scopes:  all | one scope from Detect Scopes (application, api-contracts, data-la
 | `update` | Apply fixes from an audit report (`--report=<path>`; else this session's audit, else the freshness check), then archive the applied report | After audit identifies stale docs |
 | `diagram` | Regenerate architecture diagrams | After structural changes |
 | `sync` | Sync doc index with filesystem, check CLAUDE.md and README.md currency | After adding/removing doc files |
+| `setup` | Choose what to turn on in this repository, in one pass: fixed safe defaults, every write shown first, the team's choice recorded (`references/setup.md`) | Once per repository; `setup --apply` in a teammate's clone |
+| `help` | Print the one-screen help, or one topic, exactly as a terminal's `doc-superpowers help` does | Finding a feature or a command |
 | `hooks` | Install workflow hooks (git, Claude Code, CI/CD), and the opt-in sets (the work ledger's, doc-search's MCP server) | Setting up automated freshness monitoring |
 | `release` | Draft release notes entry from git history | Cutting a new version |
 | `spec-generate` | Generate formal specs from design doc; scans overlapping specs for stale content | After brainstorming produces a design spec |
@@ -210,7 +227,7 @@ It is **inert without `docs/search/config.json`**: every tool answers `doc-searc
 
 ### Workflow Integration
 
-Install opt-in hooks for automated freshness monitoring:
+Install opt-in hooks for automated freshness monitoring. `setup` (*Set up a repository* above) runs these installer commands for you and records the choice; run them directly to manage one tier:
 
 ```bash
 # Install all hook tiers
@@ -387,6 +404,9 @@ doc-superpowers/
 │   ├── src/doc_search/   # server, CLI, searcher, semble engines, the local transformer docs embedder, cloud leg (read and write paths)
 │   └── tests/            # pytest suite (no network: a tiny test-built model, fake cloud clients)
 ├── scripts/
+│   ├── doc-superpowers   # The dispatcher: help, setup, version, and hooks / tools / search pass-throughs (the terminal command)
+│   ├── help/             # The help text, one file per topic (overview, setup, search, hooks, ci, ledger, claims, release)
+│   ├── setup/            # setup's engine: setup.sh, catalog.json, the model / probe / plan / exec / harness libraries, the prompt UI and the TUI, the ~/.local/bin shim template
 │   ├── doc-tools.sh      # Bundled freshness tooling
 │   ├── test-doc-tools.sh # Test suite for doc-tools.sh
 │   ├── test-helpers.sh   # Shared test utilities
@@ -416,6 +436,7 @@ doc-superpowers/
 │   ├── agent-prompt-template.md   # Review agent prompt template + scope focus areas
 │   ├── output-templates.md        # Audit report format + spec compliance report
 │   ├── release.md                 # `release` action steps
+│   ├── setup.md                   # `setup` and `help`: the defaults, items, flags, records, env hook, harness entries, terminal command
 │   ├── hooks.md                   # `hooks` action: tiers, consent table, CI templates
 │   ├── spec-lifecycle-actions.md  # Detailed procedures for spec lifecycle actions
 │   ├── spec-lifecycle-protocol.md # Spec lifecycle integration guide
