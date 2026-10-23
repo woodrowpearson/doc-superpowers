@@ -67,7 +67,7 @@ PLAN_TEAM_SETUP="" PLAN_LOCAL_RECORD="" PLAN_TEAM_CHANGED=0 PLAN_LOCAL_CHANGED=0
 _PLAN_W=()
 _PLAN_GROUPS="|"
 _PLAN_HOOKS="" _PLAN_EXCLUDE="" _PLAN_GITCONFIG="" _PLAN_ENVFILE="" _PLAN_BIN=""
-_PLAN_LAUNCHER=absent _PLAN_ENTRY=absent _PLAN_BUILD=0
+_PLAN_LAUNCHER=absent _PLAN_ENTRY=absent _PLAN_BUILD=0 _PLAN_GONE="|"
 
 # The records, from the selection. The team's .setup keeps the keys the record
 # already holds that setup does not know, and its harness list's order when it
@@ -231,10 +231,19 @@ _plan_cache_dirs() {
   _PLAN_DS_CACHE="${DOC_SEARCH_CACHE_LOCATION:-$cdir/doc-search}"
 }
 
-# _plan_w <team|local|outside> <path> <what>: one write; a path written by
-# several steps is one line, its texts joined with "; ".
+# _plan_w <team|local|outside> <path> <what> [gone]: one write; a path written
+# by several steps is one line, its texts joined with "; ". <gone> 1: the step
+# may delete the path (its last such step decides: _PLAN_GONE lists them).
 _plan_w() {
   local key="$1$_PLAN_T$2$_PLAN_T" k=0 e what
+  if [ "${4:-0}" = 1 ]; then
+    case "$_PLAN_GONE" in
+      *"|$2|"*) ;;
+      *) _PLAN_GONE="$_PLAN_GONE$2|" ;;
+    esac
+  else
+    _PLAN_GONE=${_PLAN_GONE//"|$2|"/|}
+  fi
   while [ "$k" -lt "${#_PLAN_W[@]}" ]; do
     e="${_PLAN_W[k]}"
     case "$e" in
@@ -252,12 +261,40 @@ _plan_w() {
   _PLAN_W+=("$key$3")
 }
 
-# _plan_op_writes <op line>: the writes of one step.
+# _plan_wf_foreign <workflow>: .github/workflows/<workflow>.yml is there and
+# not doc-superpowers-managed (install.sh's is_managed_workflow: the marker in
+# its first 5 lines), so install --ci skips it.
+_plan_wf_foreign() {
+  local f="$TOP/.github/workflows/$1.yml"
+  [ -e "$f" ] || [ -L "$f" ] || return 1
+  [ -f "$f" ] || return 0
+  ! awk 'NR > 5 { exit } /doc-superpowers workflow v[0-9]/ { m = 1; exit } END { exit !m }' "$f"
+}
+
+# _plan_rn_readme_removable: uninstalling doc-pr-release's helpers removes
+# RELEASE-NOTES.next/README.md (doc-tools.sh tools uninstall): a regular file
+# identical to the plugin's fragment-format spec, alone in its directory.
+_plan_rn_readme_removable() {
+  local d="$TOP/RELEASE-NOTES.next" e
+  [ -f "$d/README.md" ] && [ ! -L "$d/README.md" ] || return 1
+  cmp -s "$ROOT/scripts/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md" "$d/README.md" || return 1
+  for e in "$d"/* "$d"/.[!.]* "$d"/..?*; do
+    [ -e "$e" ] || [ -L "$e" ] || continue
+    [ "$e" = "$d/README.md" ] || return 1
+  done
+  return 0
+}
+
+# _plan_op_writes <op line>: the writes of one step, as the installer makes
+# them (a file it leaves untouched is not one).
 _plan_op_writes() {
-  local op a b c d w gone
+  local op a b c d w gone g=0
   IFS="$_PLAN_T" read -r op a b c d <<<"$1"
   case "$op" in
-    *-uninstall | *-remove | bin-unlink) gone=", removed" ;;
+    *-uninstall | *-remove | bin-unlink)
+      gone=", removed"
+      g=1
+      ;;
     *) gone="" ;;
   esac
   case "$op" in
@@ -268,7 +305,7 @@ _plan_op_writes() {
     ledger-config) _plan_w team docs/ledger/config.json "the work ledger's switch: {}" ;;
     claims-config) _plan_w team docs/spec-claims/config.json "spec claims' switch: {\"schema\": 1}" ;;
     git-install | git-uninstall)
-      _plan_w team .gitattributes "the merge driver's block$gone"
+      _plan_w team .gitattributes "the merge driver's block$gone" "$g"
       _plan_w local "$_PLAN_GITCONFIG" "the merge driver's registration$gone"
       if [ "$a" = hooks ]; then
         if [ -n "$gone" ]; then w="the git hooks, removed"; else w="the 5 report-only git hooks"; fi
@@ -282,19 +319,33 @@ _plan_op_writes() {
       ;;
     ci-install | ci-uninstall)
       for w in ${a//,/ }; do
-        _plan_w team ".github/workflows/$w.yml" "the $w workflow$gone"
+        # install --ci skips a workflow file that is not its own.
+        [ -n "$gone" ] || ! _plan_wf_foreign "$w" || continue
+        _plan_w team ".github/workflows/$w.yml" "the $w workflow$gone" "$g"
       done
       if [ -n "$gone" ]; then
-        _plan_w team .github/scripts/ "the vendored files no installed workflow runs, removed"
+        _plan_w team .github/scripts/ "the vendored files no installed workflow runs, removed" 1
         _plan_w team "$PROBE_STATE_FILE" "the workflows recorded as removed (.tiers.ci)"
+        if _model_csv_has "$a" doc-pr-release && _plan_rn_readme_removable; then
+          _plan_w team RELEASE-NOTES.next/README.md "the fragment format spec, removed" 1
+        fi
       else
         _plan_w team .github/scripts/ "doc-tools.sh and the helpers the workflows run, vendored"
         _plan_w team "$PROBE_STATE_FILE" "the CI choices (.tiers.ci)"
+        if _model_csv_has "$a" doc-pr-release && [ ! -e "$TOP/RELEASE-NOTES.next/README.md" ] \
+          && [ ! -L "$TOP/RELEASE-NOTES.next/README.md" ]; then
+          _plan_w team RELEASE-NOTES.next/README.md "the fragment format spec (doc-pr-release's)"
+        fi
       fi
       ;;
-    search-install | search-uninstall)
-      _plan_w team .claude/doc-superpowers/search-mcp.sh "doc-search's launcher$gone"
-      _plan_w team .mcp.json "the doc-search server entry for Claude Code$gone"
+    search-install)
+      # install --search leaves a launcher and an entry that are right alone.
+      [ "$_PLAN_LAUNCHER" = installed ] || _plan_w team .claude/doc-superpowers/search-mcp.sh "doc-search's launcher"
+      [ "$_PLAN_ENTRY" = registered ] || _plan_w team .mcp.json "the doc-search server entry for Claude Code"
+      ;;
+    search-uninstall)
+      [ "$_PLAN_LAUNCHER" = absent ] || _plan_w team .claude/doc-superpowers/search-mcp.sh "doc-search's launcher, removed" 1
+      [ "$_PLAN_ENTRY" = absent ] || _plan_w team .mcp.json "the doc-search server entry for Claude Code, removed" 1
       ;;
     ledger-install | ledger-uninstall)
       _plan_w local "$_PLAN_HOOKS" "the ledger's blocks in pre-commit, pre-push and post-commit$gone"
@@ -306,7 +357,7 @@ _plan_op_writes() {
       ;;
     harness-add | harness-remove)
       _plan_harness "$a"
-      _plan_w team "$_PH_FILE" "the doc-search server entry for $_PH_NAME$gone"
+      _plan_w team "$_PH_FILE" "the doc-search server entry for $_PH_NAME$gone" "$g"
       ;;
     envhook)
       _plan_w outside "$_PLAN_ENVFILE" "your env hook's doc-superpowers block (doc-search's cache path, DOC_SUPERPOWERS_ROOT): per user and per host, read in every repository on this host"
@@ -467,8 +518,26 @@ _plan_net_dl() {
 plan_build() {
   local out sel inst st x y rm add h m cache hroot strict b c
   PLAN=() W_TEAM=() W_LOCAL=() W_OUTSIDE=() NET=() DL=() _PLAN_W=()
-  _PLAN_GROUPS="|" PLAN_ERROR=""
+  _PLAN_GROUPS="|" _PLAN_GONE="|" PLAN_ERROR=""
   PLAN_TEAM_SETUP="" PLAN_LOCAL_RECORD="" PLAN_TEAM_CHANGED=0 PLAN_LOCAL_CHANGED=0
+  # The merge driver is the team's (its .gitattributes block is committed): a
+  # per-user git value that adds or removes it, against the team record, would
+  # flip that block for everyone. Only the team's choice may (--for-team);
+  # hooks and merge-driver both keep the driver, so either is a user's own.
+  if [ -n "$PROBE_TEAM" ] && [ "$PLAN_FOR_TEAM" != 1 ]; then
+    _plan_team_value git
+    _plan_sel git
+    case "$_PTV:$_PS" in
+      hooks:off | merge-driver:off)
+        PLAN_ERROR="git=off removes the merge driver, which is the team's (.gitattributes): pass --for-team to change the team's choice"
+        return 1
+        ;;
+      off:hooks | off:merge-driver)
+        PLAN_ERROR="git=$_PS adds the merge driver, which is the team's (.gitattributes): pass --for-team to change the team's choice"
+        return 1
+        ;;
+    esac
+  fi
   if ! out=$(cd "$TOP" && git rev-parse --git-path hooks --git-path info/exclude --git-path config 2>&1); then
     PLAN_ERROR="git rev-parse --git-path failed: ${out%%$'\n'*}"
     return 1
@@ -781,7 +850,7 @@ _plan_print_section() {
 # team, local to you, outside the repository), the network, the downloads,
 # and the git add line for the team's paths.
 plan_render_review() {
-  local n=0 line e paths=""
+  local n=0 line e p paths="" all=""
   echo "Steps:"
   if [ "${#PLAN[@]}" -eq 0 ]; then
     echo "  (nothing)"
@@ -796,13 +865,23 @@ plan_render_review() {
   _plan_print_section "Local to you (outside the repository):" path ${W_OUTSIDE[@]+"${W_OUTSIDE[@]}"}
   _plan_print_section "Network:" net ${NET[@]+"${NET[@]}"}
   _plan_print_section "Downloads:" dl ${DL[@]+"${DL[@]}"}
+  # The git add line runs as printed: a path a step may delete is on it only
+  # when git tracks it (else git add fails for every path), and then -A
+  # stages the deletion.
   echo "Then commit:"
-  if [ "${#W_TEAM[@]}" -eq 0 ]; then
+  for e in ${W_TEAM[@]+"${W_TEAM[@]}"}; do
+    p="${e%%"$_PLAN_T"*}"
+    case "$_PLAN_GONE" in
+      *"|$p|"*)
+        (cd "$TOP" && git ls-files --error-unmatch -- "$p" >/dev/null 2>&1) || continue
+        all=" -A"
+        ;;
+    esac
+    paths="$paths $(_plan_shell_word "$p")"
+  done
+  if [ -z "$paths" ]; then
     echo "  (nothing)"
     return 0
   fi
-  for e in "${W_TEAM[@]}"; do
-    paths="$paths $(_plan_shell_word "${e%%"$_PLAN_T"*}")"
-  done
-  printf '  git add --%s\n' "$paths"
+  printf '  git add%s --%s\n' "$all" "$paths"
 }

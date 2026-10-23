@@ -7818,8 +7818,10 @@ test_setup_dry_run_writes_nothing() {
   assert_true "no ~/.local/bin written" test ! -e "$HOME/.local/bin"
   setup_applied_defaults
   before=$(setup_snapshot)
-  run_setup -- --dry-run --set git=off --set claude=off
+  run_setup -- --dry-run --set git=off --set claude=off --for-team
   assert_eq "0" "$RUN_RC" "an applied repository, uninstalls planned: exit 0 (stderr: $RUN_ERR)"
+  run_setup -- --dry-run --set git=off
+  assert_eq "1" "$RUN_RC" "a refused plan (the team's merge driver): exit 1"
   run_setup -- --dry-run --set git=merge-driver --set search=on
   assert_eq "0" "$RUN_RC" "a transition planned: exit 0 (stderr: $RUN_ERR)"
   assert_eq "$before" "$(setup_snapshot)" "an applied repository: nothing written"
@@ -8129,6 +8131,137 @@ ledger-claude-uninstall" "the ledger sets unticked: uninstalled"
   teardown
 }
 
+test_setup_dry_run_release_notes_readme() {
+  echo "test: #51 doc-pr-release's RELEASE-NOTES.next/README.md: the review lists it when install --ci creates it (absent) and when uninstall --ci removes it (the plugin's copy, alone); the git add line runs as printed, staging the deletions it names"
+  setup
+  local readme=RELEASE-NOTES.next/README.md line rc=0
+  run_setup -- --dry-run --set ci.workflows=doc-pr-release
+  assert_eq "0" "$RUN_RC" "exit 0 (stderr: $RUN_ERR)"
+  assert_true "install: $readme committed for the team" grep -qxF "$readme" <<<"$(review_paths 'Committed for the team:')"
+  assert_contains "$(review_section 'Then commit:')" "$readme" "…and on the git add line"
+  setup_applied_defaults
+  inst install --ci --workflows=doc-pr-release
+  assert_eq "0" "$IRC" "install --ci --workflows=doc-pr-release (output: $IOUT)"
+  assert_true "the installer created $readme" test -f "$readme"
+  run_setup -- --dry-run --set ci.workflows=doc-pr-release,doc-review-pr
+  assert_true "present: install --ci leaves it alone, so it is not listed" test -z "$(grep -xF "$readme" <<<"$(review_paths 'Committed for the team:')")"
+  echo "edited" >> "$readme"
+  run_setup -- --dry-run --set ci.workflows=none
+  assert_true "uninstall, the spec edited: kept, so not listed" test -z "$(grep -xF "$readme" <<<"$(review_paths 'Committed for the team:')")"
+  cp "$SETUP_ROOT/scripts/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md" "$readme"
+  run_setup -- --dry-run --set ci.workflows=none
+  assert_contains "$(review_section 'Committed for the team:')" "$readme  the fragment format spec, removed" "uninstall, the plugin's copy alone: listed, removed"
+  assert_eq "  git add -- .claude/doc-superpowers/installed.json" "$(review_section 'Then commit:')" \
+    "untracked paths the step deletes are not on the git add line (git add would fail on them)"
+  git add -A && git commit -qm "the CI tier"
+  run_setup -- --dry-run --set ci.workflows=none
+  line=$(review_section 'Then commit:')
+  assert_eq "  git add -A -- .github/workflows/doc-pr-release.yml .github/scripts/ .claude/doc-superpowers/installed.json $readme" "$line" \
+    "tracked: the deleted paths are on the line, with -A"
+  inst uninstall --ci --workflows=doc-pr-release
+  assert_eq "0" "$IRC" "uninstall --ci --workflows=doc-pr-release (output: $IOUT)"
+  assert_true "the installer removed $readme" test ! -e "$readme"
+  eval "${line#  }" >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "the printed git add line runs"
+  assert_contains "$(git diff --cached --name-status)" "D	$readme" "…and stages the deletion of $readme"
+  assert_contains "$(git diff --cached --name-status)" "D	.github/workflows/doc-pr-release.yml" "…and of the workflow"
+  teardown
+}
+
+test_setup_plan_merge_driver_is_teams() {
+  echo "test: #51 the merge driver is the team's: with a team record, a per-user git value that adds or removes it is refused (exit 1, nothing written, naming --for-team); hooks <-> merge-driver stays a per-user override; --for-team makes it the team's"
+  setup
+  local before msg_off="git=off removes the merge driver, which is the team's (.gitattributes): pass --for-team to change the team's choice"
+  setup_applied_defaults
+  before=$(setup_snapshot)
+  run_setup -- --dry-run --set git=off
+  assert_eq "1" "$RUN_RC" "team hooks, --set git=off: exit 1"
+  assert_contains "$RUN_ERR" "setup: $msg_off" "…saying why, and naming --for-team"
+  assert_eq "" "$RUN_OUT" "…nothing on stdout"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
+  # shellcheck disable=SC2016  # the snippet runs in the child bash
+  setup_lib 'source "$ROOT/scripts/setup/lib-plan.sh"; probe_run; model_base_init; model_set git off
+    if plan_build; then echo built; else echo "refused: $PLAN_ERROR"; fi'
+  assert_eq "refused: $msg_off" "$SL_OUT" "plan_build returns 1 with PLAN_ERROR"
+  run_setup -- --dry-run --set git=off --for-team
+  assert_eq "0" "$RUN_RC" "--for-team: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$(review_section 'Steps:')" "hooks uninstall --git" "…uninstall --git"
+  assert_contains "$(review_section 'Then commit:')" ".claude/doc-superpowers/installed.json" "…the team record on the git add line"
+  plan_ops 'model_set git off; PLAN_FOR_TEAM=1' 'printf "%s\n" "${PLAN[@]}" | tr "\t" "|"; echo "$PLAN_TEAM_SETUP" | jq -r .git'
+  assert_eq "git-uninstall|hooks
+record-team
+off" "$SL_OUT" "--for-team: uninstall --git and the team record with git off"
+  run_setup -- --dry-run --set git=merge-driver
+  assert_eq "0" "$RUN_RC" "hooks -> merge-driver keeps the driver: allowed (stderr: $RUN_ERR)"
+  plan_ops 'model_set git merge-driver' 'printf "%s\n" "${PLAN[@]}" | tr "\t" "|"; echo "$PLAN_LOCAL_RECORD" | jq -c .overrides'
+  assert_eq "git-uninstall|hooks
+git-install|merge-driver
+exclude-local
+record-local
+{\"git\":\"merge-driver\"}" "$SL_OUT" "…a per-user override in the local record; the team record unchanged"
+  printf '%s\n' '{"format":1,"overrides":{"git":"off"},"search":{"cache":null}}' > .claude/doc-superpowers/installed.local.json
+  run_setup -- --dry-run
+  assert_eq "1" "$RUN_RC" "a local record overriding git=off against the team's hooks: refused too"
+  assert_contains "$RUN_ERR" "--for-team" "…naming --for-team"
+  rm -f .claude/doc-superpowers/installed.local.json
+  inst uninstall --git
+  setup_applied_defaults '{"format":1,"harnesses":["claude-code"],"git":"off","claude":true,"search":null,"ledger":null,"claims":false}'
+  inst uninstall --git
+  run_setup -- --dry-run
+  assert_eq "0" "$RUN_RC" "team off, nothing installed, no change: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "nothing to do" "$(tail -n 1 <<<"$RUN_OUT")" "…nothing to do"
+  run_setup -- --dry-run --set git=hooks
+  assert_eq "1" "$RUN_RC" "team off, --set git=hooks: exit 1"
+  assert_contains "$RUN_ERR" "git=hooks adds the merge driver, which is the team's (.gitattributes): pass --for-team" "…saying why"
+  run_setup -- --dry-run --set git=merge-driver
+  assert_eq "1" "$RUN_RC" "team off, --set git=merge-driver: exit 1"
+  assert_contains "$RUN_ERR" "git=merge-driver adds the merge driver" "…saying why"
+  run_setup -- --dry-run --set git=hooks --for-team
+  assert_eq "0" "$RUN_RC" "--for-team: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$(review_section 'Then commit:')" ".gitattributes" "…the merge driver's block on the git add line"
+  teardown
+}
+
+test_setup_review_lists_only_real_writes() {
+  echo "test: #51 the review lists only what a step writes: install --search leaves a right launcher and entry alone, install --ci skips a workflow file that is not its own; the git add line leaves out an untracked path a step deletes"
+  setup
+  local team
+  mkdir -p docs/search
+  echo '{}' > docs/search/config.json
+  inst install --search
+  echo "# edited" >> .claude/doc-superpowers/search-mcp.sh
+  run_setup -- --dry-run
+  assert_eq "0" "$RUN_RC" "exit 0 (stderr: $RUN_ERR)"
+  team=$(review_paths 'Committed for the team:')
+  assert_true "an outdated launcher: listed" grep -qxF .claude/doc-superpowers/search-mcp.sh <<<"$team"
+  assert_true "a registered entry: .mcp.json not listed" test -z "$(grep -xF .mcp.json <<<"$team")"
+  inst install --search
+  jq '.mcpServers["doc-search"].command = "other"' .mcp.json > .mcp.json.new && mv .mcp.json.new .mcp.json
+  run_setup -- --dry-run
+  team=$(review_paths 'Committed for the team:')
+  assert_true "another entry: .mcp.json listed" grep -qxF .mcp.json <<<"$team"
+  assert_true "a launcher that is the plugin's: not listed" test -z "$(grep -xF .claude/doc-superpowers/search-mcp.sh <<<"$team")"
+  rm -f .claude/doc-superpowers/search-mcp.sh
+  run_setup -- --dry-run --set search=off
+  team=$(review_paths 'Committed for the team:')
+  assert_true "search off, no launcher: .mcp.json listed (removed)" grep -qxF .mcp.json <<<"$team"
+  assert_true "…the absent launcher not" test -z "$(grep -xF .claude/doc-superpowers/search-mcp.sh <<<"$team")"
+  assert_not_contains "$(review_section 'Then commit:')" ".mcp.json" "…and untracked, .mcp.json is not on the git add line"
+  mkdir -p .github/workflows
+  echo "name: mine" > .github/workflows/doc-review-pr.yml
+  run_setup -- --dry-run --set ci.workflows=doc-review-pr,doc-freshness-pr
+  team=$(review_paths 'Committed for the team:')
+  assert_true "a workflow install --ci writes: listed" grep -qxF .github/workflows/doc-freshness-pr.yml <<<"$team"
+  assert_true "a workflow file of the user's (skipped): not listed" test -z "$(grep -xF .github/workflows/doc-review-pr.yml <<<"$team")"
+  inst install --git
+  run_setup -- --dry-run --set git=off
+  assert_eq "0" "$RUN_RC" "no team record: git=off is the first record's choice (stderr: $RUN_ERR)"
+  assert_true ".gitattributes listed (its block removed)" grep -qxF .gitattributes <<<"$(review_paths 'Committed for the team:')"
+  assert_not_contains "$(review_section 'Then commit:')" ".gitattributes" "…untracked: not on the git add line"
+  assert_not_contains "$(review_section 'Then commit:')" " -A " "…and no -A without a tracked deletion"
+  teardown
+}
+
 echo ""
 echo "=== setup: model, probe, --list (#51) ==="
 test_setup_catalog
@@ -8149,6 +8282,9 @@ test_setup_dry_run_ci_consent
 test_setup_dry_run_ledger_network
 test_setup_plan_nothing_to_do
 test_setup_plan_order
+test_setup_dry_run_release_notes_readme
+test_setup_plan_merge_driver_is_teams
+test_setup_review_lists_only_real_writes
 
 test_claude_hook_contract_held() {
   echo "test: every Claude hook run above held the contract (exit 0, or 2 only under STRICT; stdout one JSON object or nothing)"

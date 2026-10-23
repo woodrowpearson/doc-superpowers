@@ -11,7 +11,8 @@
 #                       plan's steps, what they write, the network, the
 #                       downloads, the git add line); write nothing; exit 0
 #   --build             with --dry-run: the review includes the build
-#   --yes --apply --for-team --link-bin --no-link-bin --plain, and --build
+#   --for-team          with --dry-run: the per-user values are the team's
+#   --yes --apply --link-bin --no-link-bin --plain, and --build or --for-team
 #                       without --dry-run: not implemented yet (exit 3)
 #
 # The layers (design §5): lib-model.sh (the catalog, the selection, --set and
@@ -50,6 +51,7 @@ not_yet() {
 
 MODE=""
 BUILD=0
+FOR_TEAM=0
 SETS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -64,7 +66,7 @@ while [ "$#" -gt 0 ]; do
     --yes) not_yet --yes ;;
     --apply) not_yet --apply ;;
     --build) BUILD=1 ;;
-    --for-team) not_yet --for-team ;;
+    --for-team) FOR_TEAM=1 ;;
     --link-bin) not_yet --link-bin ;;
     --no-link-bin) not_yet --no-link-bin ;;
     --plain) not_yet --plain ;;
@@ -75,6 +77,9 @@ done
 # --build is the download consent of --yes and --apply (later tasks); with
 # --dry-run it shows the build in the review.
 [ "$BUILD" = 0 ] || [ "$MODE" = dry-run ] || not_yet --build
+# --for-team makes the per-user values the team's (the --yes flow is a later
+# task's); with --dry-run the review shows that plan.
+[ "$FOR_TEAM" = 0 ] || [ "$MODE" = dry-run ] || not_yet --for-team
 
 command -v jq >/dev/null 2>&1 || die "jq is needed (1.6 or later); nothing was changed"
 model_load_catalog "$ROOT/scripts/setup/catalog.json" || die "$MODEL_ERROR" 2
@@ -107,6 +112,7 @@ done
 # --dry-run: the summary, a blank line, the review; nothing written.
 if [ "$MODE" = dry-run ]; then
   PLAN_BUILD_REQUESTED="$BUILD"
+  PLAN_FOR_TEAM="$FOR_TEAM"
   plan_build || die "$PLAN_ERROR; nothing was changed"
   plan_render_summary
   echo ""
