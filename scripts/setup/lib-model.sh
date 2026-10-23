@@ -36,13 +36,23 @@
 #
 # DISABLED_OPT: the options this host's checks disable while the item stays
 # usable (gte while static works), one "<id>=<option>TAB<reason>" line each
-# (Task 8's host checks fill it; empty here). model_option_disabled <id>
-# <option> reads it.
+# (probe_host_checks fills it). model_option_disabled <id> <option> reads it.
+# model_set refuses to select a disabled option (an item or option that is
+# already selected stays as it is).
+#
+# A base that selects a disabled option falls back (model_base_init): git
+# hooks to merge-driver (not to off, which would drop the team's driver; an
+# installed hooks mode is kept), any other option to what is installed. The
+# option the base wanted is kept in HOSTWISH[i], so that the records setup
+# writes keep the team's choice: one host's quirk is not the team's setting.
+# model_hostfall <id> says whether <id> is still on its fallback (an explicit
+# model_set clears the wish). model_host_skips lists those, in MODEL_SKIPPED.
 #
 # model_apply_skips (setup --apply): every ticked item this host's checks
 # disable, or whose selected option they disable, is left as it is installed,
-# and named in MODEL_SKIPPED ("<id>TAB<reason>" lines): the teammate did not
-# choose the record, so one unusable item must not block the rest.
+# and named in MODEL_SKIPPED ("<id>TAB<reason>" lines; an option's reason
+# starts "<option>: "): the teammate did not choose the record, so one
+# unusable item must not block the rest.
 #
 # Every function that can refuse returns 1 with MODEL_ERROR set, and then has
 # changed nothing.
@@ -55,6 +65,9 @@ MODEL_ERROR=""
 MODEL_VALUE=""
 MODEL_SKIPPED=()
 DISABLED_OPT=""
+HOSTWISH=()
+MODEL_WISH=""
+MODEL_OPT_REASON=""
 
 # One jq pass: the groups line, then one line per item, fields separated by
 # US; a newline inside a text becomes RS, and any other control character is
@@ -86,7 +99,7 @@ model_load_catalog() {
   esac
   CAT_ID=() CAT_GROUP=() CAT_KIND=() CAT_OPTIONS=() CAT_DEFAULT=() CAT_SCOPE=()
   CAT_PERUSER=() CAT_LABEL=() CAT_DETAILS=() CAT_UNDO=() CAT_WRITES=() CAT_REQUIRES=()
-  DISABLED=() HINT=() LOCKED=() BASE=() SEL=()
+  DISABLED=() HINT=() LOCKED=() HOSTWISH=() BASE=() SEL=()
   # GROUPS is a bash special variable (the user's group ids): an assignment to
   # it has no effect until it is unset.
   unset GROUPS
@@ -110,6 +123,7 @@ model_load_catalog() {
     DISABLED[i]=""
     HINT[i]=""
     LOCKED[i]=""
+    HOSTWISH[i]=""
     BASE[i]="$f_def"
     SEL[i]="$f_def"
     i=$((i + 1))
@@ -307,7 +321,7 @@ model_check() {
 # of a disabled parent, and a harness set without claude-code while search is
 # on.
 model_set() {
-  local id="$1" i v pid="" pval pi j
+  local id="$1" i v pid="" pval pi j o
   model_check "$id" "$2" || return 1
   v="$MODEL_VALUE"
   _model_i "$id"
@@ -319,6 +333,19 @@ model_set() {
   if [ -n "${LOCKED[i]}" ] && _model_is_off "$i" "$v"; then
     MODEL_ERROR="$id cannot be turned off here: ${LOCKED[i]}"
     return 1
+  fi
+  # An option this host's checks disable cannot be newly selected.
+  if [ -n "$DISABLED_OPT" ]; then
+    case "${CAT_KIND[i]}" in
+      toggle | choice | multi)
+        for o in ${v//,/ }; do
+          if ! _model_csv_has "${SEL[i]}" "$o" && model_option_disabled "$id" "$o"; then
+            MODEL_ERROR="$o is not available here: $MODEL_OPT_REASON"
+            return 1
+          fi
+        done
+        ;;
+    esac
   fi
   # A child ticked or given a value turns its parent on; one set off does not.
   if [ -n "${CAT_REQUIRES[i]}" ] && ! _model_is_off "$i" "$v"; then
@@ -342,11 +369,13 @@ model_set() {
     MODEL_ERROR="harness: claude-code stays on while doc-search is on (install --search always registers the Claude Code entry in .mcp.json); keep claude-code in '$v', or set search=off first"
     return 1
   fi
-  # Every check passed: change the selection.
+  # Every check passed: change the selection (a choice made here is no
+  # fallback of the host's).
   if [ -n "$pid" ]; then
     model_set "$pid" "$pval" || return 1
   fi
   SEL[i]="$v"
+  HOSTWISH[i]=""
   if _model_is_off "$i" "$v"; then
     j=0
     while [ "$j" -lt "$CAT_N" ]; do
@@ -461,9 +490,58 @@ model_base_init() {
       BASE[i]="$MODEL_VALUE"
     fi
   fi
+  _model_host_fallbacks
   i=0
   while [ "$i" -lt "$CAT_N" ]; do
     SEL[i]="${BASE[i]}"
+    i=$((i + 1))
+  done
+  return 0
+}
+
+# _model_host_fallbacks: a base that selects an option this host disables
+# falls back (see DISABLED_OPT at the top); the wish is kept in HOSTWISH.
+_model_host_fallbacks() {
+  local i=0 v inst to
+  [ -n "$DISABLED_OPT" ] || return 0
+  while [ "$i" -lt "$CAT_N" ]; do
+    HOSTWISH[i]=""
+    case "${CAT_KIND[i]}" in
+      toggle | choice)
+        v="${BASE[i]}"
+        if model_option_disabled "${CAT_ID[i]}" "$v"; then
+          inst=$(probe_installed "${CAT_ID[i]}") || inst="${CAT_DEFAULT[i]}"
+          to="$inst"
+          if [ "${CAT_ID[i]}" = git ] && [ "$inst" != hooks ]; then to=merge-driver; fi
+          if [ "$to" != "$v" ]; then
+            HOSTWISH[i]="$v"
+            BASE[i]="$to"
+          fi
+        fi
+        ;;
+    esac
+    i=$((i + 1))
+  done
+}
+
+# model_hostfall <id>: 0, with MODEL_WISH (the option the base wanted), when
+# <id> sits on a host fallback; else 1.
+model_hostfall() {
+  MODEL_WISH=""
+  _model_i "$1" || return 1
+  [ -n "${HOSTWISH[_MI]}" ] && [ "${SEL[_MI]}" = "${BASE[_MI]}" ] || return 1
+  MODEL_WISH="${HOSTWISH[_MI]}"
+}
+
+# model_host_skips: MODEL_SKIPPED = the items that sit on a host fallback,
+# as "<id>TAB<option>: <reason>", in catalog order.
+model_host_skips() {
+  local i=0
+  MODEL_SKIPPED=()
+  while [ "$i" -lt "$CAT_N" ]; do
+    if model_hostfall "${CAT_ID[i]}" && model_option_disabled "${CAT_ID[i]}" "$MODEL_WISH"; then
+      MODEL_SKIPPED+=("${CAT_ID[i]}"$'\t'"$MODEL_WISH: $MODEL_OPT_REASON")
+    fi
     i=$((i + 1))
   done
   return 0
@@ -530,6 +608,12 @@ model_apply_skips() {
   MODEL_SKIPPED=()
   while [ "$i" -lt "$CAT_N" ]; do
     why="${DISABLED[i]}"
+    if [ -z "$why" ] && model_hostfall "${CAT_ID[i]}" && model_option_disabled "${CAT_ID[i]}" "$MODEL_WISH"; then
+      # On its fallback already: only named.
+      MODEL_SKIPPED+=("${CAT_ID[i]}"$'\t'"$MODEL_WISH: $MODEL_OPT_REASON")
+      i=$((i + 1))
+      continue
+    fi
     if [ -z "$why" ] && _model_sel_opt_disabled "$i"; then why="$_MSO_WHY"; fi
     if [ -n "$why" ] && ! _model_is_off "$i" "${SEL[i]}"; then
       inst=$(probe_installed "${CAT_ID[i]}") || inst="${CAT_DEFAULT[i]}"

@@ -11,7 +11,7 @@ Default:    On:  the merge driver, the 5 report-only git hooks, the 3 Claude
 Terminal:   doc-superpowers setup       the full-screen picker on a terminal
               --plain         ask questions instead of the picker
               --dry-run       print the plan and the review; write nothing
-              --list          every item with its value, scope and any reason
+              --list          every item, with its scope, reason and hint
               --set id=value  change one item, repeatable (search=on)
               --yes           apply the selection without asking (base + --set)
               --apply         install the team's recorded setup in this clone

@@ -7419,7 +7419,7 @@ doc-review-pr: "*) echo "ci details: one line per workflow" ;; esac
 }
 
 test_setup_list_defaults() {
-  echo "test: #51 setup --list in a fresh repository: the fixed defaults (merge driver + 5 hooks, 3 Claude hooks, claude-code; nothing else), one line per item (<id>=<value>, scope, label, options, disabled reason), exit 0, nothing written"
+  echo "test: #51 setup --list in a fresh repository: the fixed defaults (merge driver + 5 hooks, 3 Claude hooks, claude-code; nothing else), one line per item (<id>=<value>, scope, label, options, disabled reason, hint), exit 0, nothing written"
   setup
   local before after kv
   before=$(setup_snapshot)
@@ -7431,7 +7431,7 @@ test_setup_list_defaults() {
     assert_eq "${kv#*=}" "$(list_val "${kv%%=*}")" "--list: $kv"
   done
   assert_eq "15" "$(grep -c . <<<"$RUN_OUT")" "one line per item"
-  assert_eq "" "$(awk -F'\t' 'NF != 5' <<<"$RUN_OUT")" "every line has 5 tab-separated fields"
+  assert_eq "" "$(awk -F'\t' 'NF != 6' <<<"$RUN_OUT")" "every line has 6 tab-separated fields"
   assert_eq "mixed|hooks,merge-driver,off|" "$(list_field git 2)|$(list_field git 4)|$(list_field git 5)" "git: scope, options, no disabled reason"
   assert_eq "team|claude-code,codex,cursor,opencode,gemini" "$(list_field harness 2)|$(list_field harness 4)" "harness: scope, options"
   assert_eq "outside" "$(list_field bin 2)" "bin: outside the repository"
@@ -7772,7 +7772,7 @@ test_setup_dry_run_defaults() {
 [ ] Spec claims  off
 [ ] Terminal command  off'
   assert_eq "$expect" "$(head -n 8 <<<"$RUN_OUT")" "the summary: one line per group, in order"
-  assert_eq "" "$(sed -n 9p <<<"$RUN_OUT")" "a blank line after the summary"
+  assert_eq "blank" "$(awk 'NR > 8 && /^$/ { print "blank"; exit } NR > 8 && !/^  hint: / { print "other: " $0; exit }' <<<"$RUN_OUT")" "after the group lines: the scan hints, then a blank line"
   assert_eq "Committed for the team:|Local to you:|Local to you (outside the repository):|Network:|Downloads:|Then commit:" \
     "$(grep -xE 'Committed for the team:|Local to you:|Local to you \(outside the repository\):|Network:|Downloads:|Then commit:' <<<"$RUN_OUT" | paste -s -d '|' -)" \
     "the six section headers, each once, in order"
@@ -9802,6 +9802,287 @@ test_setup_codex_untick_user_subtable() {
   teardown
 }
 
+# --- setup: host checks and scan hints (#51) ----------------------------------
+
+# host_stubs <os> <arch> <macOS version>: SETUP_PATH = a directory of stubs
+# first (uname, sw_vers, uv), so that a run sees that host. "fail" as the os
+# makes uname and sw_vers fail (a check that cannot decide).
+host_stubs() {
+  local dir
+  dir=$(harness_mktemp_d hoststubs)
+  if [ "$1" = fail ]; then
+    printf '#!/bin/sh\nexit 1\n' > "$dir/uname"
+    printf '#!/bin/sh\nexit 1\n' > "$dir/sw_vers"
+  else
+    printf '#!/bin/sh\ncase "$1" in -s) echo %s ;; -m) echo %s ;; *) echo %s ;; esac\n' "$1" "$2" "$1" > "$dir/uname"
+    printf '#!/bin/sh\necho %s\n' "$3" > "$dir/sw_vers"
+  fi
+  printf '#!/bin/sh\nexit 0\n' > "$dir/uv"
+  chmod +x "$dir"/uname "$dir"/sw_vers "$dir"/uv
+  SETUP_PATH="$dir:$REAL_PATH"
+}
+
+# A global git config that sets core.hooksPath: its path.
+host_global_hookspath() {
+  local g
+  g=$(harness_mktemp gitconfig)
+  printf '[core]\n\thooksPath = %s\n' "$SUITE_TMP/globalhooks" > "$g"
+  printf '%s' "$g"
+}
+
+test_setup_host_checks() {
+  echo "test: #51 host checks only disable, with a reason: gte on arm64 macOS below 14 or on a host that is neither macOS nor Linux (the static model stays); a global core.hooksPath or a work-tree one (.husky) disables the git tier's hooks mode (the merge driver stays); the terminal command when ~/.local/bin is unwritable or holds a file that is not setup's shim; a check that cannot decide disables nothing; --set of a disabled option exits 1"
+  setup
+  local before g reason ov
+  # arm64 macOS 13.6: gte is off, static stays.
+  host_stubs Darwin arm64 13.6
+  run_setup -- --list
+  assert_eq "0" "$RUN_RC" "arm64 macOS 13.6: --list exits 0 (stderr: $RUN_ERR)"
+  assert_contains "$(list_field search.model 5)" "macOS 14" "…search.model: the reason names macOS 14"
+  assert_contains "$(list_field search.model 5)" "gte:" "…and the option it disables"
+  assert_eq "static" "$(list_val search.model)" "…the value stays static"
+  assert_eq "" "$(list_field search 5)" "…doc-search itself is not disabled"
+  assert_eq "" "$(list_field git 5)" "…nor git"
+  before=$(setup_snapshot)
+  run_setup -- --yes --set search.model=gte
+  assert_eq "1" "$RUN_RC" "…--yes --set search.model=gte: exit 1"
+  assert_contains "$RUN_ERR" "macOS 14" "…stderr gives the reason"
+  assert_eq "" "$RUN_OUT" "…no step ran"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
+  run_setup -- --dry-run --set search.model=gte
+  assert_eq "1" "$RUN_RC" "…--dry-run --set search.model=gte: exit 1 too"
+  run_setup -- --list --set search.model=gte
+  assert_eq "1" "$RUN_RC" "…--list --set search.model=gte: exit 1 too"
+  run_setup -- --dry-run --set search=on
+  assert_eq "0" "$RUN_RC" "…--set search=on (static) is fine (stderr: $RUN_ERR)"
+  assert_contains "$(head -n 8 <<<"$RUN_OUT")" "[x] doc-search  on, static model" "…the summary: static"
+  assert_contains "$RUN_OUT" "search.model: gte is off here: onnxruntime 1.31 needs macOS 14" "…and the summary says why gte is off"
+  run_setup -- --yes --set search=on
+  assert_eq "0" "$RUN_RC" "…--yes --set search=on: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "null" "$(jq '.docs.model' docs/search/config.json 2>&1)" "…the config holds the static model"
+  teardown
+
+  # arm64 macOS 14.5, Intel macOS, Linux: gte stays available; the estimate hint.
+  setup
+  head -c 27000 /dev/zero | tr '\0' x > docs/big.md
+  host_stubs Darwin arm64 14.5
+  run_setup -- --list
+  assert_eq "" "$(list_field search.model 5)" "arm64 macOS 14.5: no reason"
+  assert_eq "a gte first build: about 3 s here" "$(list_field search.model 6)" "…the estimate: 37 chunks at 16 a second"
+  run_setup -- --list --set search.model=gte
+  assert_eq "0" "$RUN_RC" "…--set search.model=gte: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "gte" "$(list_val search.model)" "…gte selected"
+  host_stubs Darwin x86_64 12.7
+  run_setup -- --list
+  assert_eq "" "$(list_field search.model 5)" "Intel macOS: no reason (the old macOS only matters on arm64)"
+  assert_eq "a gte first build: about 11 s here" "$(list_field search.model 6)" "…the estimate: 37 chunks at 3.6 a second"
+  host_stubs Linux x86_64 ""
+  run_setup -- --list
+  assert_eq "" "$(list_field search.model 5)" "Linux: no reason"
+  assert_eq "" "$(list_field search.model 6)" "…and no estimate"
+  host_stubs FreeBSD amd64 ""
+  run_setup -- --list
+  assert_contains "$(list_field search.model 5)" "macOS and Linux only" "FreeBSD: gte is off, the reason says why"
+  assert_contains "$(list_field search.model 5)" "FreeBSD" "…naming the host"
+  assert_eq "" "$(list_field search.model 6)" "…no estimate"
+  run_setup -- --yes --set search.model=gte
+  assert_eq "1" "$RUN_RC" "…--yes --set search.model=gte: exit 1"
+  host_stubs fail "" ""
+  run_setup -- --list
+  assert_eq "" "$(list_field search.model 5)" "uname failing: a check that cannot decide disables nothing"
+  host_stubs Darwin arm64 ""
+  run_setup -- --list
+  assert_eq "" "$(list_field search.model 5)" "no macOS version: nothing disabled"
+  SETUP_PATH=""
+  teardown
+
+  # A global core.hooksPath: hooks mode is off, the merge driver stays.
+  setup
+  g=$(host_global_hookspath)
+  run_setup GIT_CONFIG_GLOBAL="$g" -- --list
+  assert_eq "merge-driver" "$(list_val git)" "global core.hooksPath: the base falls back to merge-driver, not off"
+  reason=$(list_field git 5)
+  assert_contains "$reason" "core.hooksPath is set in your global git config" "…the reason names the scope"
+  assert_contains "$reason" "hooks:" "…and the option it disables"
+  run_setup GIT_CONFIG_GLOBAL="$g" -- --list --set git=hooks
+  assert_eq "1" "$RUN_RC" "…--set git=hooks: exit 1"
+  assert_contains "$RUN_ERR" "global git config" "…stderr gives the reason"
+  run_setup GIT_CONFIG_GLOBAL="$g" -- --dry-run
+  assert_eq "0" "$RUN_RC" "…--dry-run: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "[x] Git hooks  merge driver only" "…the summary: the merge driver alone"
+  assert_contains "$RUN_OUT" "git: hooks is off here: core.hooksPath is set in your global git config" "…with the reason under it"
+  assert_contains "$RUN_OUT" "install the merge driver alone" "…the step installs the merge driver only"
+  run_setup GIT_CONFIG_GLOBAL="$g" -- --yes
+  assert_eq "0" "$RUN_RC" "…--yes: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "install the merge driver alone" "…it installed the merge driver only"
+  assert_true "…the driver is registered" test -n "$(git config --get merge.doc-index.driver)"
+  assert_contains "$(cat .gitattributes)" "doc-index" "…and .gitattributes routes the index to it"
+  assert_true "…no git hook of ours" test ! -e .git/hooks/pre-commit
+  assert_eq "hooks" "$(jq -r '.setup.git' .claude/doc-superpowers/installed.json 2>&1)" "…the team record keeps hooks: one host's quirk is not the team's setting"
+  ov=null
+  if [ -e .claude/doc-superpowers/installed.local.json ]; then ov=$(jq '.overrides.git' .claude/doc-superpowers/installed.local.json); fi
+  assert_eq "null" "$ov" "…and no override of yours"
+  assert_contains "$(tail -n 1 <<<"$RUN_OUT")" "skipped: git: hooks: core.hooksPath is set in your global git config" "…the last line names what was skipped"
+  run_setup GIT_CONFIG_GLOBAL="$g" -- --yes
+  assert_eq "0" "$RUN_RC" "…a second --yes: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "nothing to do" "…nothing to do"
+  # The owed end-to-end --apply test: a record asking for hooks, a host that cannot.
+  teardown
+  setup
+  mkdir -p .claude/doc-superpowers
+  printf '{"schema_version":2,"setup":%s}\n' "$SETUP_DEFAULT_RECORD" > .claude/doc-superpowers/installed.json
+  run_setup GIT_CONFIG_GLOBAL="$g" -- --apply
+  assert_eq "0" "$RUN_RC" "--apply on that host: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "install the merge driver alone" "…the merge driver alone"
+  assert_contains "$RUN_OUT" "install the 3 Claude Code hooks" "…and the rest of the record"
+  assert_contains "$(tail -n 1 <<<"$RUN_OUT")" "skipped: git: hooks: core.hooksPath is set in your global git config" "…the last line is skipped: <id>: <option>: <reason>"
+  assert_eq "1" "$(grep -c '^skipped: ' <<<"$RUN_OUT")" "…one skipped line"
+  assert_eq "$SETUP_DEFAULT_RECORD" "$(jq -c .setup .claude/doc-superpowers/installed.json)" "…the team record untouched"
+  run_setup GIT_CONFIG_GLOBAL="$g" -- --apply --dry-run
+  assert_eq "0" "$RUN_RC" "…--apply --dry-run: exit 0"
+  assert_contains "$(tail -n 1 <<<"$RUN_OUT")" "skipped: git: hooks: " "…also ends with the skipped line"
+  teardown
+
+  # A work-tree core.hooksPath (Husky): hooks mode is off, and says so.
+  setup
+  mkdir .husky
+  printf '#!/bin/sh\n' > .husky/pre-commit
+  git add .husky && git commit -qm husky
+  git config core.hooksPath .husky
+  run_setup -- --list
+  reason=$(list_field git 5)
+  assert_eq "merge-driver" "$(list_val git)" "core.hooksPath .husky: the base falls back to merge-driver"
+  assert_contains "$reason" ".husky" "…the reason names the folder"
+  assert_contains "$reason" "committed with this machine's plugin path" "…says the hooks would be committed with this machine's plugin path"
+  assert_contains "$reason" "merge driver alone stays" "…and that the merge driver alone stays"
+  run_setup -- --dry-run
+  assert_not_contains "$(review_section 'Local to you:')" ".husky" "…the review lists no hooks folder under Local to you"
+  assert_not_contains "$(review_section 'Committed for the team:')" ".husky" "…nor under Committed for the team"
+  run_setup -- --yes --set git=hooks
+  assert_eq "1" "$RUN_RC" "…--yes --set git=hooks: exit 1"
+  assert_contains "$RUN_ERR" ".husky" "…naming the folder"
+  run_setup -- --yes
+  assert_eq "0" "$RUN_RC" "…--yes: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "#!/bin/sh" "$(cat .husky/pre-commit)" "…the Husky hook is untouched"
+  assert_eq "" "$(git status --porcelain -- .husky)" "…nothing written under .husky"
+  git config core.hooksPath "$PWD/.husky"
+  run_setup -- --list
+  assert_contains "$(list_field git 5)" ".husky" "an absolute path inside the work tree is the same"
+  git config core.hooksPath .git/custom-hooks
+  run_setup -- --list
+  assert_eq "" "$(list_field git 5)" "a folder under .git is installed into, as before: not disabled"
+  git config core.hooksPath ../elsewhere-hooks
+  run_setup -- --list
+  assert_eq "" "$(list_field git 5)" "a folder outside the work tree: not disabled"
+  teardown
+
+  # The terminal command.
+  setup
+  mkdir -p "$HOME/.local/bin"
+  run_setup -- --list
+  # shellcheck disable=SC2088  # a message, not a path
+  assert_eq "" "$(list_field bin 5)" "~/.local/bin writable and empty: not disabled"
+  printf '#!/bin/sh\necho mine\n' > "$HOME/.local/bin/doc-superpowers"
+  run_setup -- --list
+  assert_contains "$(list_field bin 5)" "not setup's shim" "another file at ~/.local/bin/doc-superpowers: disabled, with the reason"
+  run_setup -- --yes --set bin=on
+  assert_eq "1" "$RUN_RC" "…--yes --set bin=on: exit 1"
+  assert_contains "$RUN_ERR" "not setup's shim" "…naming the reason"
+  printf '#!/bin/sh\n# doc-superpowers terminal shim v1\n' > "$HOME/.local/bin/doc-superpowers"
+  run_setup -- --list
+  assert_eq "" "$(list_field bin 5)" "the shim's marker on line 2: ours, not disabled"
+  assert_eq "on" "$(list_val bin)" "…and installed"
+  rm -f "$HOME/.local/bin/doc-superpowers"
+  chmod 555 "$HOME/.local/bin"
+  if [ -w "$HOME/.local/bin" ]; then
+    echo "  (running as a user who can write anywhere: the unwritable-folder case is skipped)"
+  else
+    run_setup -- --list
+    # shellcheck disable=SC2088  # a message, not a path
+    assert_contains "$(list_field bin 5)" "not writable" "~/.local/bin not writable: disabled"
+    run_setup -- --dry-run
+    assert_contains "$RUN_OUT" "is off here: ~/.local/bin is not writable" "…the summary says why"
+  fi
+  chmod 755 "$HOME/.local/bin"
+  teardown
+}
+
+test_setup_host_disabled_option_in_record() {
+  echo "test: #51 a team record holding gte on a host that cannot run it: --apply installs the rest, keeps the installed value (static), names the option last (skipped: search.model: gte: <reason>) and exits 0; a plain --yes does the same and leaves the record saying gte; --set of the option is refused"
+  setup
+  local rec before f=.claude/doc-superpowers/installed.json
+  rec='{"format":1,"harnesses":["claude-code"],"git":"hooks","claude":true,"search":{"model":"transformer:gte-modernbert-base"},"ledger":null,"claims":false}'
+  mkdir -p .claude/doc-superpowers
+  printf '{"schema_version":2,"setup":%s}\n' "$rec" > "$f"
+  host_stubs Darwin arm64 13.6
+  run_setup -- --list
+  assert_eq "on|static" "$(list_val search)|$(list_val search.model)" "the base: doc-search on, the model falls back to static"
+  run_setup -- --apply
+  assert_eq "0" "$RUN_RC" "--apply: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$(tail -n 1 <<<"$RUN_OUT")" "skipped: search.model: gte: onnxruntime 1.31 needs macOS 14" "…the last line names the option and the reason"
+  assert_eq "null" "$(jq '.docs.model' docs/search/config.json 2>&1)" "…the config written holds the static model"
+  assert_eq "$rec" "$(jq -c .setup "$f")" "…the team record untouched"
+  run_setup -- --apply
+  assert_eq "0" "$RUN_RC" "…--apply again: exit 0"
+  assert_contains "$RUN_OUT" "nothing to do" "…nothing to do"
+  assert_contains "$(tail -n 1 <<<"$RUN_OUT")" "skipped: search.model: gte: " "…and still names the option"
+  run_setup -- --yes
+  assert_eq "0" "$RUN_RC" "a plain --yes: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "$rec" "$(jq -c .setup "$f")" "…the record still says gte"
+  assert_eq "static" "$(jq -r '.docs.model // "static"' docs/search/config.json)" "…and the config still holds the static model"
+  assert_contains "$(tail -n 1 <<<"$RUN_OUT")" "skipped: search.model: gte: " "…the skipped line is there too"
+  before=$(setup_snapshot)
+  run_setup -- --yes --set search.model=gte
+  assert_eq "1" "$RUN_RC" "--yes --set search.model=gte: exit 1"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written"
+  SETUP_PATH=""
+  teardown
+}
+
+test_setup_hints_never_change_defaults() {
+  echo "test: #51 scan hints show and never decide: in a fixture with .cursor/, more docs, a GitHub remote and a doc index, --list is the fresh fixture's output except for the hint column (the 6th), the summary's group lines and the plan are the same; the hints say what each scan found; spec claims already present show their hint"
+  setup
+  local fresh scan fresh_head fresh_steps
+  host_stubs Darwin arm64 14.5
+  run_setup -- --list
+  fresh="$RUN_OUT"
+  assert_eq "" "$(awk -F'\t' 'NF != 6' <<<"$fresh")" "every --list line has 6 tab-separated fields"
+  assert_eq "1 docs (default corpus)" "$(list_field search 6)" "fresh: the corpus count (docs/architecture.md)"
+  assert_eq "no doc index yet: run /doc-superpowers init" "$(list_field git 6)" "…no doc index yet"
+  assert_eq "no GitHub remote" "$(list_field ci.workflows 6)" "…no GitHub remote"
+  assert_eq "" "$(list_field harness 6)" "…no harness detected"
+  assert_eq "" "$(list_field claims 6)" "…no spec claims"
+  run_setup -- --dry-run
+  fresh_head=$(head -n 8 <<<"$RUN_OUT")
+  fresh_steps=$(awk '$0 == "Steps:" {f=1} f && /^$/ {exit} f' <<<"$RUN_OUT")
+  assert_contains "$RUN_OUT" "  hint: Git hooks: no doc index yet: run /doc-superpowers init" "--dry-run: the summary shows the hints"
+  assert_contains "$RUN_OUT" "  hint: CI workflows: no GitHub remote" "…all of them"
+  mkdir -p .cursor .gemini docs/guides docs/archive
+  printf '# a\n' > docs/guides/a.md
+  printf '# b\n' > README.md
+  printf '# old\n' > docs/archive/old.md
+  printf 'not markdown\n' > docs/notes.txt
+  printf '{}\n' > docs/.doc-index.json
+  git remote add origin https://github.com/example/example.git
+  run_setup -- --list
+  scan="$RUN_OUT"
+  assert_eq "$(cut -f1-5 <<<"$fresh")" "$(cut -f1-5 <<<"$scan")" "scanned: --list is the fresh output except for the hint column"
+  assert_eq "3 docs (default corpus)" "$(list_field search 6)" "…3 docs (architecture, guides/a, README: docs/archive/, the doc index and a .txt are not the corpus)"
+  assert_eq "detected: .cursor/, .gemini/" "$(list_field harness 6)" "…the harnesses found"
+  assert_eq "claude-code" "$(list_val harness)" "…and none of them selected"
+  assert_eq "" "$(list_field git 6)" "…the doc index exists: no hint"
+  assert_eq "" "$(list_field ci.workflows 6)" "…a GitHub remote: no hint"
+  run_setup -- --dry-run
+  assert_eq "$fresh_head" "$(head -n 8 <<<"$RUN_OUT")" "the summary's group lines are the same"
+  assert_eq "$fresh_steps" "$(awk '$0 == "Steps:" {f=1} f && /^$/ {exit} f' <<<"$RUN_OUT")" "…and so are the steps"
+  assert_contains "$RUN_OUT" "  hint: Harness: detected: .cursor/, .gemini/" "…the summary lists the detected harnesses as a hint"
+  mkdir -p docs/spec-claims
+  run_setup -- --list
+  assert_eq "docs/spec-claims/ already present: its pre-commit leg blocks on findings" "$(list_field claims 6)" "spec claims present: their hint"
+  SETUP_PATH=""
+  teardown
+}
+
 echo ""
 echo "=== setup: model, probe, --list (#51) ==="
 test_setup_catalog
@@ -9864,6 +10145,9 @@ test_setup_exclude_survives_claude_uninstall
 test_setup_migrates_ci_only_record
 test_setup_installed_union_removes_nothing
 test_setup_codex_untick_user_subtable
+test_setup_host_checks
+test_setup_host_disabled_option_in_record
+test_setup_hints_never_change_defaults
 
 test_claude_hook_contract_held() {
   echo "test: every Claude hook run above held the contract (exit 0, or 2 only under STRICT; stdout one JSON object or nothing)"
