@@ -515,7 +515,7 @@ test_shipped_scripts_pass_shellcheck() {
   # Paths relative to the root, so `-x` follows the scripts' source
   # directives the way they are written.
   local s="$root/scripts"
-  for f in "$s"/doc-tools.sh "$s"/doc-superpowers "$s"/merge-doc-index.sh "$s"/ledger/*.sh "$s"/adapters/*.sh "$s"/search/*.sh \
+  for f in "$s"/doc-tools.sh "$s"/doc-superpowers "$s"/setup/*.sh "$s"/merge-doc-index.sh "$s"/ledger/*.sh "$s"/adapters/*.sh "$s"/search/*.sh \
     "$s"/hooks/*.sh "$s"/hooks/claude/*.sh "$s"/hooks/ci/doc-pr-release/*.sh \
     "$s"/hooks/ci/doc-superpowers-steps/*.sh "$s"/hooks/git/* \
     "$s"/check-ci.sh "$s"/check-self-install.sh "$s"/leak-scan.sh "$s"/install-maintainer-hooks.sh; do
@@ -564,6 +564,7 @@ test_scripts_are_free_of_bash4_only_constructs() {
   for candidate in \
     "$repo_root"/scripts/doc-tools.sh \
     "$repo_root"/scripts/doc-superpowers \
+    "$repo_root"/scripts/setup/*.sh \
     "$repo_root"/scripts/merge-doc-index.sh \
     "$repo_root"/scripts/ledger/*.sh \
     "$repo_root"/scripts/adapters/*.sh \
@@ -829,6 +830,7 @@ test_shipped_jq_is_free_of_jq17_only_forms() {
   for candidate in \
     "$repo_root"/scripts/doc-tools.sh \
     "$repo_root"/scripts/doc-superpowers \
+    "$repo_root"/scripts/setup/*.sh \
     "$repo_root"/scripts/merge-doc-index.sh \
     "$repo_root"/scripts/ledger/*.sh \
     "$repo_root"/scripts/adapters/*.sh \
@@ -6975,7 +6977,7 @@ test_i10_no_hidden_sed_or_ripgrep_dependency() {
   echo "test: no shipped script needs GNU sed or ripgrep; CI installs no GNU sed"
   local repo_root f hits=""
   repo_root="$(cd "$SCRIPT_DIR/.." && pwd)"
-  for f in "$repo_root"/scripts/doc-tools.sh "$repo_root"/scripts/doc-superpowers \
+  for f in "$repo_root"/scripts/doc-tools.sh "$repo_root"/scripts/doc-superpowers "$repo_root"/scripts/setup/*.sh \
     "$repo_root"/scripts/merge-doc-index.sh "$repo_root"/scripts/hooks/*.sh "$repo_root"/scripts/hooks/claude/*.sh \
     "$repo_root"/scripts/hooks/git/* "$repo_root"/scripts/hooks/ci/*/*.sh \
     "$repo_root"/scripts/hooks/ci/*.yml "$repo_root"/.github/workflows/*.yml; do

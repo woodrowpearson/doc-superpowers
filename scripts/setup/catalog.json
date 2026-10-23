@@ -1,0 +1,320 @@
+{
+  "format": 1,
+  "groups": [
+    "Harness",
+    "doc-search",
+    "Git hooks",
+    "Claude hooks",
+    "CI workflows",
+    "Work ledger",
+    "Spec claims",
+    "Terminal command"
+  ],
+  "items": [
+    {
+      "id": "harness",
+      "group": "Harness",
+      "kind": "multi",
+      "options": ["claude-code", "codex", "cursor", "opencode", "gemini"],
+      "default": "claude-code",
+      "scope": "team",
+      "per_user": false,
+      "label": "Agent clients",
+      "details": "The agent clients this repository is set up for, committed for the team. With doc-search on, each ticked client gets the doc-search MCP server entry in its project file; without doc-search nothing is written, and setup prints each client's install steps (its INSTALL guide). claude-code stays on while doc-search is on: install --search always registers the Claude Code entry in .mcp.json. Blocks no commit. Reaches no network itself; a client that starts doc-search downloads its packages on first start, after that client's own approval prompt.",
+      "option_details": {
+        "claude-code": "Claude Code: the doc-search entry in .mcp.json, written by install --search.",
+        "codex": "Codex: a marked [mcp_servers.doc-search] block in .codex/config.toml. Codex loads it only for a trusted project.",
+        "cursor": "Cursor: the doc-search entry in .cursor/mcp.json (unverified: no CLI to check it with).",
+        "opencode": "OpenCode: the doc-search entry under mcp in opencode.json.",
+        "gemini": "Gemini CLI: the doc-search entry under mcpServers in .gemini/settings.json."
+      },
+      "undo": "doc-superpowers setup --yes --set harness=claude-code",
+      "writes": [
+        {"scope": "team", "path": ".mcp.json"},
+        {"scope": "team", "path": ".codex/config.toml"},
+        {"scope": "team", "path": ".cursor/mcp.json"},
+        {"scope": "team", "path": "opencode.json"},
+        {"scope": "team", "path": ".gemini/settings.json"}
+      ],
+      "requires": null
+    },
+    {
+      "id": "search",
+      "group": "doc-search",
+      "kind": "toggle",
+      "options": ["on", "off"],
+      "default": "off",
+      "scope": "team",
+      "per_user": false,
+      "label": "doc-search (one MCP server over the docs and the code)",
+      "details": "doc-search: one MCP server over the docs and the code (references/search.md), committed for the team: docs/search/config.json (setup writes it with jq, never through doc-search init, which runs uv), the launcher .claude/doc-superpowers/search-mcp.sh and the doc-search entry in .mcp.json, plus each ticked client's entry. Blocks no commit. Network: setup downloads nothing unless you choose Write and build (or pass --build); otherwise each contributor's client downloads the Python packages and semble's model on its first start of the server, after its own approval prompt. Unticking it removes the launcher and the entries; docs/search/config.json is left in place.",
+      "option_details": {},
+      "undo": "doc-superpowers setup --yes --set search=off",
+      "writes": [
+        {"scope": "team", "path": "docs/search/config.json"},
+        {"scope": "team", "path": ".claude/doc-superpowers/search-mcp.sh"},
+        {"scope": "team", "path": ".mcp.json"}
+      ],
+      "requires": null
+    },
+    {
+      "id": "search.model",
+      "group": "doc-search",
+      "kind": "choice",
+      "options": ["static", "gte"],
+      "default": "static",
+      "scope": "team",
+      "per_user": false,
+      "label": "Docs model",
+      "details": "The model doc-search ranks the docs with, committed for the team (docs.model in docs/search/config.json). Blocks no commit. Reaches the network only through a build (Write and build, --build, or a client's first start of the server).",
+      "option_details": {
+        "static": "semble's default static model: a small download and a quick first build.",
+        "gte": "transformer:gte-modernbert-base: about 150 MB more to download, and a first build that can take hours (much longer on Intel than on Apple silicon)."
+      },
+      "undo": "doc-superpowers setup --yes --set search.model=static",
+      "writes": [
+        {"scope": "team", "path": "docs/search/config.json"}
+      ],
+      "requires": "search=on"
+    },
+    {
+      "id": "search.cache",
+      "group": "doc-search",
+      "kind": "value",
+      "options": ["host", "<absolute path>"],
+      "default": "host",
+      "scope": "local",
+      "per_user": false,
+      "label": "Index cache location",
+      "details": "Where doc-search keeps its index caches, local to you: host is the host default, or an absolute path. A path goes into your env hook, outside the repository (${DOC_SEARCH_ENV_FILE:-${XDG_CONFIG_HOME:-~/.config}/doc-search/env.sh}), which is per user and per host: it applies to every repository on this host. Recorded in .claude/doc-superpowers/installed.local.json (untracked). Blocks no commit. Reaches no network.",
+      "option_details": {},
+      "undo": "doc-superpowers setup --yes --set search.cache=host",
+      "writes": [
+        {"scope": "local", "path": ".claude/doc-superpowers/installed.local.json"},
+        {"scope": "outside", "path": "~/.config/doc-search/env.sh"}
+      ],
+      "requires": "search=on"
+    },
+    {
+      "id": "git",
+      "group": "Git hooks",
+      "kind": "choice",
+      "options": ["hooks", "merge-driver", "off"],
+      "default": "hooks",
+      "scope": "mixed",
+      "per_user": true,
+      "label": "Git hooks and the merge driver",
+      "details": "The docs/.doc-index.json merge driver (committed for the team: a block in .gitattributes; local to you: its git config) and five report-only git hooks, local to you, where git runs hooks: pre-commit reports the docs a commit leaves stale; post-merge reports the docs a merge left stale or missing; post-checkout reports the docs stale on the branch checked out; prepare-commit-msg lists stale docs as comment lines; pre-push reminds about unreleased commits. They block a commit only under DOC_SUPERPOWERS_STRICT=1, or with docs/spec-claims/ (a claims finding blocks the pre-commit). They reach no network. The installer installs the hooks as a whole: hence three modes. Per user: after the first record, a change is yours only unless saved for the team.",
+      "option_details": {
+        "hooks": "the merge driver and the 5 hooks (install --git).",
+        "merge-driver": "the merge driver alone, no hook (install --git --merge-driver-only).",
+        "off": "neither."
+      },
+      "undo": "doc-superpowers hooks uninstall --git",
+      "writes": [
+        {"scope": "team", "path": ".gitattributes"},
+        {"scope": "local", "path": ".git/config"},
+        {"scope": "local", "path": ".git/hooks/"}
+      ],
+      "requires": null
+    },
+    {
+      "id": "claude",
+      "group": "Claude hooks",
+      "kind": "toggle",
+      "options": ["on", "off"],
+      "default": "on",
+      "scope": "local",
+      "per_user": true,
+      "label": "Claude Code hooks",
+      "details": "Three Claude Code hooks, local to you: registered in .claude/settings.local.json, scripts in .claude/hooks/doc-superpowers/, both kept out of git through .git/info/exclude. pre-commit-gate (PreToolUse) checks the staged tree of a git commit; post-commit-sync (PostToolUse) reports the docs a commit left stale; session-summary (Stop) reports the docs citing changed working-tree code. The gate blocks a commit only under DOC_SUPERPOWERS_STRICT=1. They reach no network. Per user: after the first record, a change is yours only unless saved for the team.",
+      "option_details": {},
+      "undo": "doc-superpowers hooks uninstall --claude",
+      "writes": [
+        {"scope": "local", "path": ".claude/settings.local.json"},
+        {"scope": "local", "path": ".claude/hooks/doc-superpowers/"},
+        {"scope": "local", "path": ".git/info/exclude"}
+      ],
+      "requires": null
+    },
+    {
+      "id": "ci.workflows",
+      "group": "CI workflows",
+      "kind": "multi",
+      "options": [
+        "doc-freshness-pr",
+        "doc-freshness-schedule",
+        "doc-ledger-publish",
+        "doc-audit-update",
+        "doc-pr-full-cycle",
+        "doc-pr-release",
+        "doc-release",
+        "doc-review-pr",
+        "doc-spec-verify"
+      ],
+      "default": "none",
+      "scope": "team",
+      "per_user": false,
+      "label": "GitHub Actions workflows",
+      "details": "GitHub Actions workflows, committed for the team: .github/workflows/, doc-tools.sh and the helpers they run vendored into .github/scripts/, and the choices recorded in .claude/doc-superpowers/installed.json. They run on GitHub, so every one reaches the network there; the AI ones (doc-audit-update, doc-review-pr, doc-release, doc-spec-verify, doc-pr-full-cycle, doc-pr-release) need the CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY secret. They block no local commit; with strict on, the PR checks fail on what is otherwise a warning. What each one may do in the repository:",
+      "option_details": {
+        "doc-freshness-pr": "(default set) runs on PR open/sync; contents: read, pull-requests: write; one PR comment (updated each push); --ci-strict fails the check.",
+        "doc-freshness-schedule": "(default set) runs on a weekly cron; contents: read, issues: write; opens/updates/closes an audit issue (with docs/spec-claims/: also for spec-claims findings).",
+        "doc-ledger-publish": "(no AI) runs every 30 minutes, and by hand; contents: write; pull-requests + issues: read; with docs/ledger/config.json, ledger publish pushes one commit to the views branch (views.branch, default doc-ledger-views) and, with in-flight awareness on, deletes stale in-flight refs; without it, nothing.",
+        "doc-audit-update": "(AI) runs on a push to a non-base branch that leaves indexed docs stale or missing (not Dependabot's); contents: write; a checked step commits docs/ and indexed docs to that branch: the doc updates and the audit report itself (docs/plans/<date>-audit-report.md), one per run that finds work.",
+        "doc-pr-full-cycle": "(AI) runs on PR open touching indexed docs or their code; contents + pull-requests: write; a checked step commits docs/ and indexed docs to the PR branch.",
+        "doc-pr-release": "(AI) runs on PR pushes; contents + pull-requests: write; a checked step commits the PR's fragment to the PR branch, and edits the PR body.",
+        "doc-release": "(AI) runs on a push to release/**; contents + pull-requests: write; a checked step commits the release files to a new branch and opens a PR.",
+        "doc-review-pr": "(AI) runs on PR open/sync touching indexed docs or their code, and on @claude PR comments by members; contents: read, pull-requests + issues: write; PR comments only (its tools edit no file).",
+        "doc-spec-verify": "(AI) runs on PR open/sync touching indexed specs or their code, and its claims job (no AI) on every same-repository PR; contents: read, pull-requests: write; a PR comment only (its tools edit no file); with docs/spec-claims/, the claims job fails the check on findings and, while doc-pr-release is installed, writes the PR's spec amendments into a spec-claims section at the top of the PR description."
+      },
+      "undo": "doc-superpowers hooks uninstall --ci",
+      "writes": [
+        {"scope": "team", "path": ".github/workflows/"},
+        {"scope": "team", "path": ".github/scripts/"},
+        {"scope": "team", "path": ".claude/doc-superpowers/installed.json"}
+      ],
+      "requires": null
+    },
+    {
+      "id": "ci.base_branch",
+      "group": "CI workflows",
+      "kind": "value",
+      "options": ["<branch name>"],
+      "default": "main",
+      "scope": "team",
+      "per_user": false,
+      "label": "Base branch",
+      "details": "The branch the workflows treat as the base, committed for the team (in the workflows and installed.json). A branch name git accepts. Blocks no commit. The workflows reach the network on GitHub; this value itself reaches no network.",
+      "option_details": {},
+      "undo": "doc-superpowers setup --yes --set ci.base_branch=main",
+      "writes": [
+        {"scope": "team", "path": ".github/workflows/"},
+        {"scope": "team", "path": ".claude/doc-superpowers/installed.json"}
+      ],
+      "requires": "ci.workflows=doc-freshness-pr,doc-freshness-schedule"
+    },
+    {
+      "id": "ci.cron",
+      "group": "CI workflows",
+      "kind": "value",
+      "options": ["<5 cron fields>"],
+      "default": "0 9 * * 1",
+      "scope": "team",
+      "per_user": false,
+      "label": "Schedule (cron)",
+      "details": "When the scheduled workflows run (UTC), committed for the team (in the workflows and installed.json): 5 cron fields, as GitHub takes them. Blocks no commit. The workflows reach the network on GitHub; this value itself reaches no network.",
+      "option_details": {},
+      "undo": "doc-superpowers setup --yes --set 'ci.cron=0 9 * * 1'",
+      "writes": [
+        {"scope": "team", "path": ".github/workflows/"},
+        {"scope": "team", "path": ".claude/doc-superpowers/installed.json"}
+      ],
+      "requires": "ci.workflows=doc-freshness-pr,doc-freshness-schedule"
+    },
+    {
+      "id": "ci.strict",
+      "group": "CI workflows",
+      "kind": "toggle",
+      "options": ["on", "off"],
+      "default": "off",
+      "scope": "team",
+      "per_user": false,
+      "label": "Strict PR checks",
+      "details": "Strict PR checks, committed for the team (in the workflows and installed.json): the PR checks fail on what is otherwise a warning. doc-freshness-pr fails on stale docs or a freshness check that cannot run, and doc-spec-verify's claims job on a claims check that cannot run. It can block a PR merge where checks are required, never a local commit. The workflows reach the network on GitHub; this switch itself reaches no network.",
+      "option_details": {},
+      "undo": "doc-superpowers setup --yes --set ci.strict=off",
+      "writes": [
+        {"scope": "team", "path": ".github/workflows/"},
+        {"scope": "team", "path": ".claude/doc-superpowers/installed.json"}
+      ],
+      "requires": "ci.workflows=doc-freshness-pr,doc-freshness-schedule"
+    },
+    {
+      "id": "ledger",
+      "group": "Work ledger",
+      "kind": "toggle",
+      "options": ["on", "off"],
+      "default": "off",
+      "scope": "team",
+      "per_user": false,
+      "label": "Work ledger",
+      "details": "The work ledger: work items kept as issue files, with stable keys, views, related work and in-flight notices (references/ledger.md). Turning it on writes docs/ledger/config.json = {}, committed for the team; doc-superpowers help ledger points to ledger init. By itself it blocks no commit (its hook sets below can). Network: with keys.mode cas (the default), issuing a key fetches and pushes the counter ref on the remote. setup cannot turn it off while docs/ledger/config.json exists: that switch is the team's data, removed by hand.",
+      "option_details": {},
+      "undo": "git rm docs/ledger/config.json",
+      "writes": [
+        {"scope": "team", "path": "docs/ledger/config.json"}
+      ],
+      "requires": null
+    },
+    {
+      "id": "ledger.git",
+      "group": "Work ledger",
+      "kind": "toggle",
+      "options": ["on", "off"],
+      "default": "off",
+      "scope": "local",
+      "per_user": true,
+      "label": "Ledger git hooks",
+      "details": "The ledger's git legs, local to you (marked blocks where git runs hooks): pre-commit runs ledger validate --staged and blocks the commit on any failure; pre-push refuses provisional keys a push adds (keys.mode cas); post-commit runs ledger inflight --push in the background. Network: with inflight.enabled (off in the {} config setup writes), the post-commit leg pushes this branch's in-flight ref. Per user: after the first record, a change is yours only unless saved for the team.",
+      "option_details": {},
+      "undo": "doc-superpowers hooks uninstall --ledger",
+      "writes": [
+        {"scope": "local", "path": ".git/hooks/"}
+      ],
+      "requires": "ledger=on"
+    },
+    {
+      "id": "ledger.claude",
+      "group": "Work ledger",
+      "kind": "toggle",
+      "options": ["on", "off"],
+      "default": "off",
+      "scope": "local",
+      "per_user": true,
+      "label": "Ledger Claude Code hooks",
+      "details": "The ledger's two Claude Code events, local to you: ledger-session-notices (SessionStart) shows the unacked in-flight notices, offline; ledger-state-watch (PostToolUse) suggests ledger note when state lands under state_watch.paths. They block no commit and reach no network. Per user: after the first record, a change is yours only unless saved for the team.",
+      "option_details": {},
+      "undo": "doc-superpowers hooks uninstall --ledger-claude",
+      "writes": [
+        {"scope": "local", "path": ".claude/settings.local.json"},
+        {"scope": "local", "path": ".claude/hooks/doc-superpowers/"}
+      ],
+      "requires": "ledger=on"
+    },
+    {
+      "id": "claims",
+      "group": "Spec claims",
+      "kind": "toggle",
+      "options": ["on", "off"],
+      "default": "off",
+      "scope": "team",
+      "per_user": false,
+      "label": "Spec claims",
+      "details": "Executable spec claims (references/spec-claims.md). Turning it on writes docs/spec-claims/config.json = {\"schema\": 1}, committed for the team; doc-superpowers help claims points to the adapters. It can block a commit: with docs/spec-claims/, the git pre-commit claims leg blocks a commit on a finding, whatever DOC_SUPERPOWERS_STRICT says; the pre-push leg only reports. setup reaches no network; the claims' adapters run your tests, which reach whatever those tests reach. setup cannot turn it off while docs/spec-claims/ exists: that directory is the team's data, removed by hand.",
+      "option_details": {},
+      "undo": "git rm -r docs/spec-claims",
+      "writes": [
+        {"scope": "team", "path": "docs/spec-claims/config.json"}
+      ],
+      "requires": null
+    },
+    {
+      "id": "bin",
+      "group": "Terminal command",
+      "kind": "toggle",
+      "options": ["on", "off"],
+      "default": "off",
+      "scope": "outside",
+      "per_user": false,
+      "label": "Terminal command (~/.local/bin/doc-superpowers)",
+      "details": "A small shell script at ~/.local/bin/doc-superpowers, outside the repository and local to you, that runs this plugin's doc-superpowers command from any terminal (a plugin install puts nothing on PATH). It finds the plugin at run time, so a plugin update does not break it. An existing file there that is not this shim is never replaced. If ~/.local/bin is not on PATH, setup prints the line to add; it never edits a shell profile. Blocks no commit. Reaches no network.",
+      "option_details": {},
+      "undo": "doc-superpowers setup --yes --no-link-bin",
+      "writes": [
+        {"scope": "outside", "path": "~/.local/bin/doc-superpowers"}
+      ],
+      "requires": null
+    }
+  ]
+}
