@@ -1,6 +1,6 @@
 ---
 name: doc-superpowers
-description: Use when documentation is missing, stale, or inconsistent with code — or when auditing doc freshness, reviewing PR doc impact, managing formal specs/ADRs, setting up doc automation hooks, drafting release notes, keeping a work ledger of issue files, or setting up doc-search (one MCP server over the docs and the code). Also use when the user mentions doc quality, stale docs, architecture docs, spec tracking, design-to-spec conversion, release notes, work items or issue keys, ledger views, related work, or in-flight branches.
+description: Use when documentation is missing, stale, or inconsistent with code — or when setting up a repository for it, auditing doc freshness, reviewing PR doc impact, managing formal specs/ADRs, setting up doc automation hooks, drafting release notes, keeping a work ledger of issue files, or setting up doc-search (one MCP server over the docs and the code). Also use when the user mentions doc quality, stale docs, architecture docs, spec tracking, design-to-spec conversion, release notes, work items or issue keys, ledger views, related work, or in-flight branches.
 ---
 
 # doc-superpowers
@@ -27,6 +27,8 @@ flowchart TD
 | `update` | Apply fixes from an audit report | `--report=<path>`, this session's audit, or `check-freshness`; optional `[scope]` |
 | `diagram` | Regenerate Mermaid diagrams | Existing docs, optional `[scope]` |
 | `sync` | Sync doc index with filesystem | `docs/.doc-index.json` |
+| `setup` | Set this repository up in one pass: fixed safe defaults, every write shown first, the team's choice recorded | none; `--dry-run`, `--list`, `--set <id>=<value>`, `--yes`, `--apply`, `--build`, `--for-team`, `--link-bin` |
+| `help` | One-screen help: every feature and command, the same text as the terminal's | optional `[topic]`: `setup`, `search`, `hooks`, `ci`, `ledger`, `claims`, `release` |
 | `hooks` | Install git/Claude/CI hooks | `--git`, `--claude`, `--ci`, `--all`; the opt-in sets — the work ledger's `--ledger`, `--ledger-claude` and doc-search's MCP server `--search` (never in `--all`) |
 | `spec-generate` | Design doc → formal specs | `--design-doc=<path>` |
 | `spec-inject` | Inject spec tasks into plans | `--phase=plan\|execute` |
@@ -42,6 +44,7 @@ flowchart TD
 | `references/output-templates.md` | Audit report format (P0–P3, with its Update Tasks) + spec compliance report |
 | `references/doc-spec.md` | Generated-doc templates, naming, CLAUDE.md / README.md update rules, doc-index schema |
 | `references/release.md` | **REQUIRED** for `release` — steps 1–12 |
+| `references/setup.md` | **REQUIRED** for `setup` and `help` — what setup does, the defaults, the flow, the items, flags and exit codes, the records, the env hook, the harness entries, the terminal command, help |
 | `references/hooks.md` | **REQUIRED** for `hooks` — installer routing, consent table, CI templates |
 | `references/spec-lifecycle-actions.md` | **REQUIRED** for `spec-generate` / `spec-inject` / `spec-verify` — procedures and the Spec Status Model |
 | `references/spec-claims.md` | **REQUIRED** when `docs/spec-claims/` exists — claim schema, checks, adapters, direction policy |
@@ -59,9 +62,10 @@ flowchart TD
 
 ```
 /doc-superpowers <action> [scope]
+/doc-superpowers setup | help [topic]
 /doc-superpowers ledger <verb> [args] | ledger file [<title>] | ledger declare [--range <a>..<b> | --pr <n>] [--items <item>…]
 
-Actions: init | audit | review-pr | update | diagram | sync | hooks | release | spec-generate | spec-inject | spec-verify | ledger
+Actions: init | audit | review-pr | update | diagram | sync | hooks | setup | help | release | spec-generate | spec-inject | spec-verify | ledger
 Scopes:  all | one scope from Detect Scopes (application, api-contracts, data-layer, …)
 ```
 
@@ -98,7 +102,7 @@ They hold for every action, and for every agent this skill dispatches (they are 
 
 Run before any action to understand the project's documentation infrastructure.
 
-**Discovery is universal** — all actions run discovery as their first step, except `hooks` (scaffolding, routes directly to installer), `release` (parses RELEASE-NOTES.md and commits directly) and `ledger` (routes directly to `doc-tools.sh ledger`). Those three still run *Detect Bundled Tooling* first: their REQUIRED references and the installer come from `$ROOT`, so tool resolution runs for every action. Audit *defines* the discovery logic (it is the canonical implementation). Other actions invoke the same discovery function.
+**Discovery is universal** — all actions run discovery as their first step, except `hooks`, `setup`, `help`, `release` and `ledger`: `hooks` (scaffolding) routes directly to the installer, `setup` to setup's engine and `help` to the help text (both through the dispatcher, `scripts/doc-superpowers`), `release` parses RELEASE-NOTES.md and commits directly, and `ledger` routes directly to `doc-tools.sh ledger`. Those five still run *Detect Bundled Tooling* first: their REQUIRED references, the installer and the dispatcher come from `$ROOT`, so tool resolution runs for every action. Audit *defines* the discovery logic (it is the canonical implementation). Other actions invoke the same discovery function.
 
 ### Detect Bundled Tooling
 
@@ -121,7 +125,7 @@ ROOT=$(cd "$ROOT" && pwd -P) && DOC_TOOLS="$ROOT/scripts/doc-tools.sh"
 echo "ROOT=$ROOT"; echo "DOC_TOOLS=$DOC_TOOLS"
 ```
 
-If it prints the error instead of the two paths, **stop**: the tooling is not where this skill is installed, so no index verb can run — tell the user. Shell variables do not survive between tool calls in most clients, so use the two printed paths literally from here on: `$DOC_TOOLS <subcommand>` below means that path, the references are in `$ROOT/references/`, and the installer is `"$ROOT/scripts/hooks/install.sh"`. Run every `$DOC_TOOLS` command from the repository's top level (`cd "$(git rev-parse --show-toplevel)"` first): the index is keyed by paths from the root, and a repository subcommand run from a subdirectory exits 2, writing nothing.
+If it prints the error instead of the two paths, **stop**: the tooling is not where this skill is installed, so no index verb can run — tell the user. Shell variables do not survive between tool calls in most clients, so use the two printed paths literally from here on: `$DOC_TOOLS <subcommand>` below means that path, the references are in `$ROOT/references/`, the installer is `"$ROOT/scripts/hooks/install.sh"`, and the dispatcher (`setup`, `help`) is `"$ROOT/scripts/doc-superpowers"`. Run every `$DOC_TOOLS` command from the repository's top level (`cd "$(git rev-parse --show-toplevel)"` first): the index is keyed by paths from the root, and a repository subcommand run from a subdirectory exits 2, writing nothing.
 
 **Prerequisites:** `doc-tools.sh` needs `git`, `jq` **≥ 1.6** (the index writers use `--args` / `$ARGS.positional`), and `sha256sum` or `shasum`. When one is missing, or `jq` is older than 1.6, every subcommand except `--help` / `help` and `tools version` (which need neither jq nor git) exits non-zero with a message naming what to install or upgrade. The work ledger's reference adapters (`doc-superpowers:ledger-pr-gh`, `doc-superpowers:ledger-items-gh`) and `ledger init --sources github` also need `gh`, authenticated — only when a project's config names them.
 
@@ -323,9 +327,11 @@ docs/
 ```mermaid
 flowchart TD
     A{Has docs/ directory?} -->|yes| R{Which request?}
-    A -->|no| B{Asked for hooks, a release<br>or a spec action?}
+    A -->|no| B{Asked for setup, help, hooks,<br>a release or a spec action?}
     B -->|no| C[init]
     B -->|yes| R
+    R -->|set up this repository| K[setup]
+    R -->|what can it do, help| Q[help]
     R -->|set up hooks| D[hooks]
     R -->|cut a release| F[release]
     R -->|work items, ledger views,<br>related or in-flight work| G[ledger]
@@ -535,9 +541,26 @@ Update is the **write counterpart** to audit's analysis (audit edits no doc; its
 
 **REQUIRED:** Read `$ROOT/references/release.md` before any step — it holds steps 1–12. In short: parse RELEASE-NOTES.md; find the range start (the latest version's tag; else the commit that added its `## vX.Y.Z` heading — an untagged release is still a release; with no version entry, the nearest `v*` tag, else `ROOT`); merge the `RELEASE-NOTES.next/PR-*.md` fragments **before** drafting (`$DOC_TOOLS fragments merge <start> HEAD`; exit 3 = an earlier release never reached this branch → stop); suggest the version bump; dispatch the drafting agent; show the draft; prepend it; remove exactly the consumed fragments (`… --remove`, never a glob); bump the manifests the project has; commit the release in ONE commit; offer the tag, and once it is pushed verify it with `$DOC_TOOLS check-version --tag`. The release commit must reach `main`.
 
+### `setup` — Set up this repository
+
+**REQUIRED:** Read `$ROOT/references/setup.md` before step 1 — the defaults, the items and their ids, the flags and exit codes, the records and what each write is. No discovery. The Bash tool has no terminal, so drive setup's engine through its flags, with the same screens its full-screen UI shows. Run every command from the repository (setup acts on its top level). Steps that ask the user use one question round each.
+
+1. **Show.** Run `"$ROOT/scripts/doc-superpowers" setup --dry-run` and show its output, the summary then the review, verbatim in a code block.
+2. **Ask** one question: *Apply these* / *Customize* / *Cancel*. Cancel: stop, nothing was written.
+3. **Customize.** Run `"$ROOT/scripts/doc-superpowers" setup --list` (per item: `<id>=<value>`, scope, label, options, a disabled or locked reason, a hint) and ask which groups to change; then one question round per group, its items and options from the list (an item's details are in `$ROOT/scripts/setup/catalog.json`). Never offer what the list shows disabled or locked. Then run `"$ROOT/scripts/doc-superpowers" setup --dry-run --set <id>=<value> …` with every change and show the new review verbatim. Exit 1: show its line, and ask again.
+4. **Confirm** one question: *Write and build* / *Write only* / *Back* (to step 2). Offer *Write and build* only with doc-search on and only when `setup --dry-run --set … --build` (the same `--set`s) exits 0 — exit 1 means this host cannot build (`uv not found`): say so. *Write and build* needs a second, explicit yes to the download line that run printed under *Downloads:* (`this run (the build): …`); anything else is *Write only*. When a team record exists and a per-user item changed (`git`, `claude`, `ledger.git`, `ledger.claude`), ask in the same round: *for you only* (the default) / *for the team*.
+5. **Write.** Run `"$ROOT/scripts/doc-superpowers" setup --yes --set <id>=<value> … [--for-team] [--build] [--link-bin]`: the step-3 changes; `--for-team` only for *for the team*; `--build` only after that explicit yes; `--link-bin` only when the user ticked the terminal command. With `--build`, run the command in the background (a gte first build can take hours) and say so; report when it ends. Exit 1: refused, nothing written — show the line. Exit 2: a step failed — show which steps ran; re-running finishes the job. Exit 3: fix the command line.
+6. **Report** what was written (the numbered steps the run printed) and the `git add -- …` line under *Then commit:*, verbatim. Never commit unless asked.
+
+Then tell the user that `doc-superpowers setup` in a terminal is the full-screen version. NEVER hand-write a file setup writes (the records, the configs, the harness entries, the env hook block): route through setup. A teammate's clone of a repository with a recorded setup: `"$ROOT/scripts/doc-superpowers" setup --apply` (no questions; `--apply --dry-run` previews it).
+
+### `help` — One-screen help
+
+**REQUIRED:** Read `$ROOT/references/setup.md` → *Help*. No discovery. Run `"$ROOT/scripts/doc-superpowers" help [topic]` (topics: `setup`, `search`, `hooks`, `ci`, `ledger`, `claims`, `release`; none for the overview) and show its output verbatim, in a code block: no paraphrase, no summary, nothing added or removed inside the block. The terminal's `doc-superpowers help` prints the same text. An unknown topic exits 3 with the topic list on stderr: show it. After the block, at most one line pointing to the action or reference the user asked about.
+
 ### `hooks` — Install Workflow Hooks
 
-**REQUIRED:** Read `$ROOT/references/hooks.md` before running the installer — it holds the tier options, the consent table for `--ci`, the CI templates and the installer's placement and refusal rules. The non-negotiables:
+**REQUIRED:** Read `$ROOT/references/hooks.md` before running the installer — it holds the tier options, the consent table for `--ci`, the CI templates and the installer's placement and refusal rules. For a repository being set up, `setup` (above) chooses the tiers in one pass and records the team's choice; `hooks` is the installer itself. The non-negotiables:
 - ALWAYS route to the installer, `"$ROOT/scripts/hooks/install.sh" <install|status|uninstall> [flags]`. NEVER add hook entries to `.claude/settings.json` / `.claude/settings.local.json` or copy templates by hand.
 - The Claude tier is per-user (`.claude/settings.local.json`, excluded through git's `info/exclude`).
 - Before `--ci`, show the user the consent table (each workflow's permissions and what it commits) and what an AI job's agent can reach, recommend protecting the base branch and `release/**` with required human review, and get a yes; name only the workflows they agreed to.
@@ -648,6 +671,7 @@ Agent reports without specific evidence (exact doc text vs exact code text) are 
 | Running `spec-inject` without `spec-generate` first | Run `spec-generate` to create governing specs before injecting into plans |
 | Auto-updating spec content on drift | Only update status and Implementation Notes when aligned AND the **Spec Status Model** permits the write — target role, ladder status, forward transition; see `references/spec-lifecycle-actions.md`. Flag drifted content for human review |
 | Running `spec-inject --phase=execute` after every task | Run after each chunk, not each task — per-task is excessive and noisy |
+| Paraphrasing `help`, or hand-writing what `setup` writes | Show `doc-superpowers help [topic]`'s output verbatim (the terminal prints the same text); route every setup change through `setup --yes --set …` |
 
 ### Red Flags — STOP and Reconsider
 

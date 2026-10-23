@@ -16,8 +16,9 @@ Skill:      /doc-superpowers ledger <verb> [args]
 Committed:  docs/ledger/config.json and the items (docs/issues/*.md).
 Local:      rendered views, under .git. Opt-in hook sets, never in --all:
             hooks install --ledger adds git legs: pre-commit validate blocks
-            on any failure, and post-commit pushes in-flight refs to the
-            remote in the background. --ledger-claude adds 2 Claude events.
+            on any failure, and post-commit (when in-flight is enabled)
+            pushes in-flight refs to the remote in the background.
+            --ledger-claude adds 2 Claude events.
             "ledger publish" pushes the views to its views branch.
 Undo:       doc-superpowers hooks uninstall --ledger --ledger-claude
             Delete docs/ledger/config.json to make every verb inert; the
