@@ -24,7 +24,7 @@
 # the run changed (W_TEAM, those whose content changed), or "  (nothing)". An
 # empty plan prints "nothing to do" and returns 0.
 #
-# The steps (bin-link and bin-unlink are a later task's):
+# The steps:
 #   search-config <static|gte>          docs/search/config.json, setup's own
 #                                       copy of doc-search init's defaults
 #                                       (search-config.json; gte: docs.model
@@ -56,6 +56,12 @@
 #                                       hook (plan_envhook_merge), sh -n
 #                                       checked before the mv
 #   exclude-local                       setup's own block in git's info/exclude
+#   bin-link / bin-unlink               the terminal command ~/.local/bin/doc-superpowers
+#                                       (shim.sh, rendered by exec_shim_render;
+#                                       mode 755), written or removed only when
+#                                       absent or setup's own (the marker on
+#                                       line 2): a file of the user's is refused
+#                                       before the first step
 #   record-team                         installed.json's .setup = PLAN_TEAM_SETUP
 #   record-local                        installed.local.json = PLAN_LOCAL_RECORD
 #   build                               sh .claude/doc-superpowers/search-mcp.sh
@@ -123,16 +129,17 @@ _exec_writable() {
   return 0
 }
 
-# _exec_write <path> <content> [check] [exact]: <path> holds <content> and a
-# newline (with "exact" as the fourth argument, <content> alone: its own bytes,
-# a missing final newline included): a temp file beside it, then mv (an existing file keeps its mode, a
-# new one is 644); refused through a link; skipped when the content is the
-# same. <check>, a function, is run on the temp file before the mv: when it
-# fails (EXEC_ERROR says why) the temp file is removed and nothing is
-# written. EXEC_WROTE is 1 when it wrote.
+# _exec_write <path> <content> [check] [exact] [mode]: <path> holds <content>
+# and a newline (with "exact" as the fourth argument, <content> alone: its own
+# bytes, a missing final newline included): a temp file beside it, then mv
+# (an existing file keeps its mode, a new one is 644; with <mode>, both get
+# <mode>); refused through a link; skipped when the content is the same (and,
+# with <mode>, so is the mode). <check>, a function, is run on the temp file
+# before the mv: when it fails (EXEC_ERROR says why) the temp file is removed
+# and nothing is written. EXEC_WROTE is 1 when it wrote.
 # shellcheck disable=SC2034  # EXEC_WROTE is the writers' interface, read by their callers
 _exec_write() {
-  local f="$1" dir mode=644 m nl='\n'
+  local f="$1" dir mode=644 m nl='\n' want="${5:-}"
   [ "${4:-}" != exact ] || nl=''
   EXEC_WROTE=0
   if ! _exec_writable "$f"; then
@@ -140,7 +147,8 @@ _exec_write() {
     return 1
   fi
   # shellcheck disable=SC2059  # nl is "\n" or empty: the format's own newline
-  if [ -f "$f" ] && printf "%s$nl" "$2" | cmp -s - "$f"; then
+  if [ -f "$f" ] && printf "%s$nl" "$2" | cmp -s - "$f" \
+    && { [ -z "$want" ] || [ "$(_exec_file_mode "$f" || true)" = "$want" ]; }; then
     return 0
   fi
   dir=$(dirname "$f")
@@ -148,7 +156,11 @@ _exec_write() {
     echo "setup: cannot create $dir" >&2
     return 1
   fi
-  if [ -f "$f" ] && m=$(_exec_file_mode "$f"); then mode="$m"; fi
+  if [ -n "$want" ]; then
+    mode="$want"
+  elif [ -f "$f" ] && m=$(_exec_file_mode "$f"); then
+    mode="$m"
+  fi
   if ! _EXEC_TMP=$(mktemp "$dir/.${f##*/}.XXXXXX"); then
     _EXEC_TMP=""
     echo "setup: cannot create a temp file beside $f" >&2
@@ -499,6 +511,89 @@ op_envhook() {
   fi
   # _exec_write adds the last newline back.
   _exec_write "$f" "${new%$'\n'}" _exec_sh_n
+}
+
+# bin-link / bin-unlink: the terminal command, ~/.local/bin/doc-superpowers
+# (design §4.2), outside the repository and local to you. The file is
+# scripts/setup/shim.sh with @CLONE_ROOT@ replaced (exec_shim_render), mode
+# 755. A file there without the shim's marker on line 2
+# (PROBE_SHIM_MARKER) is the user's: never replaced, never removed; the probe
+# disables the item for it already, and the opcheck_ functions refuse it
+# before the first step, should it appear after the plan was made.
+exec_bin_path() {
+  printf '%s' "${HOME:-}/.local/bin/doc-superpowers"
+}
+
+# exec_shim_render: the shim's text: shim.sh with @CLONE_ROOT@ replaced by
+# ROOT, sh-quoted, when setup runs from a clone (ROOT outside the plugin
+# cache, compared as lib-plan.sh does), else by '' (the shim then finds the
+# newest version in the plugin cache).
+exec_shim_render() {
+  local tpl q="''"
+  tpl=$(cat "$ROOT/scripts/setup/shim.sh") || return 1
+  case "$tpl" in
+    *@CLONE_ROOT@*) ;;
+    *) return 1 ;;
+  esac
+  _plan_root_in_cache || q=$(_plan_sh_quote "$ROOT")
+  # Split, not ${tpl//…/…}: bash 5.2 reads a & in a replacement as the match.
+  printf '%s%s%s' "${tpl%%@CLONE_ROOT@*}" "$q" "${tpl#*@CLONE_ROOT@}"
+}
+
+# _exec_bin_check: the shim's path may be written or removed by setup: HOME
+# set, no link on the way (the file and ~/.local/bin), and nothing there or
+# setup's own shim.
+_exec_bin_check() {
+  local f
+  if [ -z "${HOME:-}" ]; then
+    EXEC_ERROR="HOME is not set: the terminal command goes in ~/.local/bin"
+    return 1
+  fi
+  f=$(exec_bin_path)
+  _exec_writable "$f" || return 1
+  if [ -e "$f" ] && ! _probe_bin_ours; then
+    # shellcheck disable=SC2088  # display text: the file, as a user writes it
+    EXEC_ERROR="~/.local/bin/doc-superpowers exists and is not setup's shim (line 2 is not \"$PROBE_SHIM_MARKER\"); setup leaves it alone"
+    return 1
+  fi
+  return 0
+}
+opcheck_bin_link() {
+  _exec_bin_check
+}
+op_bin_link() {
+  local f text
+  if ! _exec_bin_check; then
+    echo "setup: $EXEC_ERROR" >&2
+    return 1
+  fi
+  f=$(exec_bin_path)
+  if ! text=$(exec_shim_render); then
+    echo "setup: cannot read $ROOT/scripts/setup/shim.sh" >&2
+    return 1
+  fi
+  _exec_write "$f" "$text" "" "" 755 || return 1
+  # setup never edits a shell profile: it says what to add.
+  case ":${PATH:-}:" in
+    *":$HOME/.local/bin:"* | *":$HOME/.local/bin/:"*) ;;
+    *)
+      # shellcheck disable=SC2016  # the line to add, as the user types it
+      echo 'add ~/.local/bin to your PATH: export PATH="$HOME/.local/bin:$PATH"'
+      ;;
+  esac
+}
+opcheck_bin_unlink() {
+  _exec_bin_check
+}
+op_bin_unlink() {
+  local f
+  if ! _exec_bin_check; then
+    echo "setup: $EXEC_ERROR" >&2
+    return 1
+  fi
+  f=$(exec_bin_path)
+  [ -e "$f" ] || return 0
+  rm -f "$f"
 }
 
 # record-team: installed.json's .setup becomes PLAN_TEAM_SETUP, set with jq
