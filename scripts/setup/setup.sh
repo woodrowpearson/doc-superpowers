@@ -5,9 +5,10 @@
 # worktree is its own top level); outside a work tree it exits 1.
 #
 #   --list              print every item: <id>=<value> TAB <scope> TAB <label>
-#                       TAB <options> TAB <disabled reason, or "(locked:
-#                       <reason>)" for the ledger and spec claims while their
-#                       switch exists>
+#                       TAB <options> TAB <disabled reason: the host's, for an
+#                       item ("<reason>") or for an option ("<option>:
+#                       <reason>"), or "(locked: <reason>)" for the ledger and
+#                       spec claims while their switch exists> TAB <hint>
 #   --set <id>=<value>  change one item (repeatable; --set=<id>=<value> too)
 #   --dry-run           print the summary, a blank line, then the review (the
 #                       plan's steps, what they write, the network, the
@@ -167,9 +168,10 @@ model_base_init || die "$MODEL_ERROR; nothing was changed"
 for _s in ${SETS[@]+"${SETS[@]}"}; do
   model_set "${_s%%=*}" "${_s#*=}" || die "--set $_s: $MODEL_ERROR"
 done
-# --apply: the items this host's checks disable are skipped (left as they
-# are), named last.
-if [ "$APPLY" = 1 ]; then model_apply_skips; fi
+# The items this host's checks disable: with --apply, skipped (left as they
+# are); otherwise the options the base fell back from (a hooks mode this host
+# cannot offer), listed with the reason; named last.
+if [ "$APPLY" = 1 ]; then model_apply_skips; else model_host_skips; fi
 print_skipped() {
   local e
   for e in ${MODEL_SKIPPED[@]+"${MODEL_SKIPPED[@]}"}; do
@@ -190,7 +192,8 @@ if [ "$MODE" = dry-run ]; then
   echo ""
   plan_render_review
   if plan_is_empty; then echo "nothing to do"; fi
-  print_skipped
+  # The summary says why an option is off here; --apply names what it skipped.
+  if [ "$APPLY" = 1 ]; then print_skipped; fi
   exit 0
 fi
 
@@ -212,10 +215,22 @@ fi
 _i=0
 while [ "$_i" -lt "$CAT_N" ]; do
   _reason="${DISABLED[_i]}"
+  if [ -z "$_reason" ] && [ -n "$DISABLED_OPT" ]; then
+    while IFS= read -r _line; do
+      case "$_line" in
+        "${CAT_ID[_i]}="*)
+          _line="${_line#*=}"
+          _reason="${_reason:+$_reason; }${_line%%$'\t'*}: ${_line#*$'\t'}"
+          ;;
+      esac
+    done <<<"$DISABLED_OPT"
+  fi
   [ -n "$_reason" ] || [ -z "${LOCKED[_i]}" ] || _reason="(locked: ${LOCKED[_i]})"
   _reason="${_reason//$'\t'/ }"
   _reason="${_reason//$'\n'/ }"
-  printf '%s=%s\t%s\t%s\t%s\t%s\n' "${CAT_ID[_i]}" "${SEL[_i]}" "${CAT_SCOPE[_i]}" "${CAT_LABEL[_i]}" \
-    "${CAT_OPTIONS[_i]}" "$_reason"
+  _hint="${HINT[_i]//$'\t'/ }"
+  _hint="${_hint//$'\n'/ }"
+  printf '%s=%s\t%s\t%s\t%s\t%s\t%s\n' "${CAT_ID[_i]}" "${SEL[_i]}" "${CAT_SCOPE[_i]}" "${CAT_LABEL[_i]}" \
+    "${CAT_OPTIONS[_i]}" "$_reason" "$_hint"
   _i=$((_i + 1))
 done

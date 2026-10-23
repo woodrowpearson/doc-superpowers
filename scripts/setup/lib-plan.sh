@@ -528,6 +528,15 @@ _plan_set() {
   fi
 }
 
+# _plan_rec <id>: _PS = the value a record keeps for <id>: SEL, except that an
+# item on a host fallback (model_hostfall: this host cannot offer the option
+# the base wanted) keeps the option the base wanted, since one host's quirk is
+# not the team's setting.
+_plan_rec() {
+  _plan_sel "$1"
+  if model_hostfall "$1"; then _PS="$MODEL_WISH"; fi
+}
+
 # _plan_promoted <id>: --for-team makes this run's value of <id> the team's:
 # PLAN_FOR_TEAM, and <id> named in PLAN_FOR_TEAM_IDS or changed against the
 # base. A per-user value this run does not set stays as it is: the record's
@@ -545,7 +554,7 @@ _plan_promoted() {
 # the selection.
 _plan_team_value() {
   local line
-  _plan_sel "$1"
+  _plan_rec "$1"
   _PTV="$_PS"
   if [ -z "$PROBE_TEAM" ] || _plan_promoted "$1"; then return 0; fi
   while IFS= read -r line; do
@@ -565,7 +574,7 @@ _plan_records() {
   local harness search model ledger claims cache
   for id in git claude ledger.git ledger.claude; do
     _plan_team_value "$id"
-    _plan_sel "$id"
+    _plan_rec "$id"
     v=""
     if [ -n "$PROBE_TEAM" ] && ! _plan_promoted "$id" && [ "$_PTV" != "$_PS" ]; then v="$_PS"; fi
     case "$id" in
@@ -579,7 +588,7 @@ _plan_records() {
   if ! model_is_on ledger; then olgit="" olclaude=""; fi
   _plan_sel harness && harness="$_PS"
   _plan_sel search && search="$_PS"
-  _plan_sel search.model && model="$_PS"
+  _plan_rec search.model && model="$_PS"
   _plan_sel ledger && ledger="$_PS"
   _plan_sel claims && claims="$_PS"
   _plan_sel search.cache && cache="$_PS"
@@ -900,12 +909,40 @@ _plan_group_text() {
   _PG_TEXT="$t"
 }
 
+# _plan_group_notes <group> <ticked>: what this host cannot offer in the
+# group, one indented line each: an item it disables ("<label> is off here:
+# <reason>"), and, while the group is ticked, an option it disables
+# ("<id>: <option> is off here: <reason>"). A host check only says what is
+# off; it never changes the selection.
+_plan_group_notes() {
+  local i=0 line
+  while [ "$i" -lt "$CAT_N" ]; do
+    if [ "${CAT_GROUP[i]}" = "$1" ]; then
+      if [ -n "${DISABLED[i]}" ]; then
+        printf '    %s is off here: %s\n' "${CAT_LABEL[i]}" "${DISABLED[i]}"
+      fi
+      if [ "$2" = 1 ] && [ -n "$DISABLED_OPT" ]; then
+        while IFS= read -r line; do
+          case "$line" in
+            "${CAT_ID[i]}="*)
+              line="${line#*=}"
+              printf '    %s: %s is off here: %s\n' "${CAT_ID[i]}" "${line%%"$_PLAN_T"*}" "${line#*"$_PLAN_T"}"
+              ;;
+          esac
+        done <<<"$DISABLED_OPT"
+      fi
+    fi
+    i=$((i + 1))
+  done
+}
+
 # plan_render_summary: one line per group, in order: "[x] <Group>  <value
 # text>" or "[ ] <Group>  off", then " (changed)" when the group differs from
 # the base and " (already installed)" when it is ticked, in place, and no step
-# acts on it.
+# acts on it. Under a group, what this host cannot offer in it. After the
+# groups, the scan hints ("  hint: <Group>: <text>"): shown, never applied.
 plan_render_summary() {
-  local g i first changed line
+  local g i first changed line ticked
   for g in "${GROUPS[@]}"; do
     first=-1 changed=0 i=0
     while [ "$i" -lt "$CAT_N" ]; do
@@ -930,6 +967,14 @@ plan_render_summary() {
       esac
     fi
     printf '%s\n' "$line"
+    ticked=0
+    if model_is_on "${CAT_ID[first]}"; then ticked=1; fi
+    _plan_group_notes "$g" "$ticked"
+  done
+  i=0
+  while [ "$i" -lt "$CAT_N" ]; do
+    if [ -n "${HINT[i]}" ]; then printf '  hint: %s: %s\n' "${CAT_GROUP[i]}" "${HINT[i]}"; fi
+    i=$((i + 1))
   done
 }
 

@@ -27,6 +27,19 @@
 #                       ("uv not found"), or empty. It disables the build, not
 #                       the doc-search item: setup writes the config, the
 #                       launcher and the entries without uv.
+#   DISABLED[i]         (the terminal command) why this host cannot offer an
+#                       item at all; DISABLED_OPT (lib-model.sh): the options
+#                       it cannot offer while the item stays usable, one
+#                       "<id>=<option>TAB<reason>" line each: gte (arm64 macOS
+#                       below 14, a host that is neither macOS nor Linux) and
+#                       the git tier's hooks mode (a global or system
+#                       core.hooksPath, or a local one inside the work tree).
+#                       A check that cannot decide disables nothing. They are
+#                       the only things a host check does: it never changes a
+#                       selection (probe_host_checks).
+#   HINT[i]             what the repository suggests, for the lists and the
+#                       summary (probe_hints). A hint never changes SEL or
+#                       BASE, and nothing reads it but the renderers.
 # Then, from what status --json and the files on disk say:
 #   probe_installed <id>  the installed value, in the item's value space (the
 #                         default for a value nothing records)
@@ -47,6 +60,9 @@ TOP=""
 PROBE_STATUS="" PROBE_TEAM="" PROBE_LOCAL="" PROBE_RECORD_ERROR="" PROBE_ERROR=""
 PROBE_TEAM_VALUES="" PROBE_LOCAL_VALUES=""
 HOST_NO_BUILD=""
+_PB_OS="" _PB_ARCH=""
+_PB_HP_FOREIGN=false _PB_HP_SCOPE="" _PB_HP_DIR=""
+_PB_CORPUS_N=0 _PB_CORPUS_BYTES=0
 
 # The facts probe_installed and probe_state read (set by probe_run).
 _PB_GIT_HOOKS=""     # "<hook>:<state> ..." (references/hooks.md lists the states)
@@ -84,7 +100,10 @@ _PROBE_STATUS_JQ='
       ($t.ci.choices.cron // ""),
       (if $t.ci.choices.ci_strict == true then "true" else "false" end),
       ($t.search.launcher // "absent"),
-      ($t.search.mcp_entry // "absent")
+      ($t.search.mcp_entry // "absent"),
+      (if $t.git.hooks_path_foreign == true then "true" else "false" end),
+      ($t.git.hooks_path_scope // ""),
+      ($t.git.hooks_dir // "")
     ] | map(s) | join("\u001f")'
 
 # installed.json's .setup (design §6.1): its compact JSON on the first line,
@@ -241,7 +260,8 @@ probe_run() {
   fi
   PROBE_STATUS="$out"
   IFS="$_PROBE_US" read -r _PB_GIT_HOOKS _PB_MD _PB_ATTR _PB_CLAUDE _PB_CI_READABLE _PB_CI_ERROR \
-    _PB_CI_WF _PB_CI_CHOSEN _PB_CI_BASE _PB_CI_CRON _PB_CI_STRICT _PB_LAUNCHER _PB_MCP <<<"$line"
+    _PB_CI_WF _PB_CI_CHOSEN _PB_CI_BASE _PB_CI_CRON _PB_CI_STRICT _PB_LAUNCHER _PB_MCP \
+    _PB_HP_FOREIGN _PB_HP_SCOPE _PB_HP_DIR <<<"$line"
 
   # The team record: refused as state.sh refuses it, else its .setup.
   if [ "$_PB_CI_READABLE" != true ]; then
@@ -303,6 +323,201 @@ probe_run() {
   # The host checks: the build runs doc-search through uv.
   HOST_NO_BUILD=""
   command -v uv >/dev/null 2>&1 || HOST_NO_BUILD="uv not found"
+  probe_host_checks
+  probe_hints
+  return 0
+}
+
+# _probe_disable_opt <id> <option> <reason>: one DISABLED_OPT line.
+_probe_disable_opt() {
+  local r="${3//$'\t'/ }"
+  r="${r//$'\n'/ }"
+  DISABLED_OPT="${DISABLED_OPT:+$DISABLED_OPT$'\n'}$1=$2"$'\t'"$r"
+}
+
+# _probe_hooks_dir_inside: 0, with _PHD (the folder, relative to the top),
+# when core.hooksPath is this repository's own (local or worktree scope) and
+# points at a folder inside the work tree that is not under .git. git hands
+# the folder back as written (relative to the top) or absolute.
+_probe_hooks_dir_inside() {
+  local d="$_PB_HP_DIR" t phys rel=""
+  _PHD=""
+  case "$_PB_HP_SCOPE" in
+    local | worktree) ;;
+    *) return 1 ;;
+  esac
+  [ -n "$d" ] || return 1
+  case "$d" in
+    /*)
+      phys=$(cd "$d" 2>/dev/null && pwd -P) || phys=""
+      for t in "$TOP" "$(cd "$TOP" 2>/dev/null && pwd -P)"; do
+        [ -n "$t" ] || continue
+        case "$d" in
+          "$t"/*)
+            rel="${d#"$t"/}"
+            break
+            ;;
+        esac
+        case "$phys" in
+          "$t"/*)
+            rel="${phys#"$t"/}"
+            break
+            ;;
+        esac
+      done
+      ;;
+    .. | ../*) ;;
+    *) rel="${d#./}" ;;
+  esac
+  while :; do
+    case "$rel" in
+      */) rel="${rel%/}" ;;
+      *) break ;;
+    esac
+  done
+  case "$rel" in
+    "" | . | .git | .git/* | ..*/* | */../*) return 1 ;;
+  esac
+  _PHD="$rel"
+}
+
+# probe_host_checks: what this host cannot do, as reasons that disable and
+# never decide (design §5.4): DISABLED_OPT (gte, the git tier's hooks mode)
+# and DISABLED[] of the terminal command. A check that cannot decide (no
+# uname, no version) disables nothing.
+# shellcheck disable=SC2034  # DISABLED is the probe's interface, read by setup.sh and the renderers
+probe_host_checks() {
+  local ver major val f bindir why
+  DISABLED_OPT=""
+  _PB_OS=$(uname -s 2>/dev/null) || _PB_OS=""
+  _PB_ARCH=$(uname -m 2>/dev/null) || _PB_ARCH=""
+  case "$_PB_OS" in
+    Darwin)
+      if [ "$_PB_ARCH" = arm64 ]; then
+        ver=$(sw_vers -productVersion 2>/dev/null) || ver=""
+        major="${ver%%.*}"
+        case "$major" in
+          "" | *[!0-9]*) ;;
+          *)
+            if [ "$major" -lt 14 ]; then
+              _probe_disable_opt search.model gte "onnxruntime 1.31 needs macOS 14 (this Mac runs macOS $ver); the static model works"
+            fi
+            ;;
+        esac
+      fi
+      ;;
+    Linux | "") ;;
+    *) _probe_disable_opt search.model gte "the gte model runs on macOS and Linux only (this host is $_PB_OS); the static model works" ;;
+  esac
+
+  if [ "$_PB_HP_FOREIGN" = true ]; then
+    val=$(cd "$TOP" && git config --get core.hooksPath 2>/dev/null) || val=""
+    _probe_disable_opt git hooks "core.hooksPath is set in your ${_PB_HP_SCOPE:-global} git config${val:+ ($val)}: git runs every repository's hooks from there, so install --git refuses it; the merge driver alone can be installed"
+  elif _probe_hooks_dir_inside; then
+    _probe_disable_opt git hooks "core.hooksPath is $_PHD/, a folder inside this repository: install --git would write the hooks there, and they would be committed with this machine's plugin path; the merge driver alone stays"
+  fi
+
+  # The terminal command.
+  if _model_i bin; then
+    DISABLED[_MI]=""
+    if [ -n "${HOME:-}" ]; then
+      bindir="$HOME/.local/bin"
+      f="$bindir/doc-superpowers"
+      why=""
+      if [ -e "$bindir" ] && [ ! -d "$bindir" ]; then
+        # shellcheck disable=SC2088  # display text: the folder, as a user writes it
+        why="~/.local/bin is not a directory"
+      elif [ -d "$bindir" ] && [ ! -w "$bindir" ]; then
+        # shellcheck disable=SC2088  # display text: the folder, as a user writes it
+        why="~/.local/bin is not writable"
+      elif { [ -e "$f" ] || [ -L "$f" ]; } && ! _probe_bin_ours; then
+        # shellcheck disable=SC2088  # display text: the file, as a user writes it
+        why="~/.local/bin/doc-superpowers exists and is not setup's shim (line 2 is not \"$PROBE_SHIM_MARKER\"); setup leaves it alone"
+      fi
+      DISABLED[_MI]="$why"
+    fi
+  fi
+  return 0
+}
+
+# _probe_corpus: _PB_CORPUS_N and _PB_CORPUS_BYTES, the default docs corpus
+# (docs.include docs/**/*.md and *.md, docs.exclude docs/archive/** and the
+# doc index) among the files git lists. Nothing is read from a remote.
+_probe_corpus() {
+  local list
+  _PB_CORPUS_N=0 _PB_CORPUS_BYTES=0
+  list=$(cd "$TOP" && git -c core.quotepath=off ls-files --cached --others --exclude-standard 2>/dev/null |
+    awk '/\.md$/ && index($0, "docs/archive/") != 1' || true)
+  [ -n "$list" ] || return 0
+  _PB_CORPUS_N=$(printf '%s\n' "$list" | wc -l | tr -d ' ')
+  _PB_CORPUS_BYTES=$(cd "$TOP" && printf '%s\n' "$list" | tr '\n' '\0' | xargs -0 cat 2>/dev/null | wc -c | tr -d ' ') || _PB_CORPUS_BYTES=0
+  [ -n "$_PB_CORPUS_BYTES" ] || _PB_CORPUS_BYTES=0
+}
+
+# _probe_duration <seconds>: _PD = "N s", "N min" or "H h M min", rounded up.
+_probe_duration() {
+  local s="$1" m h
+  [ "$s" -ge 1 ] || s=1
+  if [ "$s" -lt 90 ]; then
+    _PD="$s s"
+  elif [ "$s" -lt 5400 ]; then
+    _PD="$(((s + 59) / 60)) min"
+  else
+    m=$(((s + 59) / 60))
+    h=$((m / 60))
+    m=$((m % 60))
+    if [ "$m" -eq 0 ]; then _PD="$h h"; else _PD="$h h $m min"; fi
+  fi
+}
+
+# probe_hints: HINT[i] per item, from the repository and the host: shown in
+# --list's last column and under the summary, never applied (design §5.4).
+# shellcheck disable=SC2034  # HINT is the probe's interface, read by setup.sh and the renderers
+probe_hints() {
+  local i=0 h="" f rate chunks secs url found=0
+  while [ "$i" -lt "$CAT_N" ]; do
+    HINT[i]=""
+    i=$((i + 1))
+  done
+  _probe_corpus
+  if _model_i search; then
+    HINT[_MI]="$_PB_CORPUS_N docs (default corpus)"
+  fi
+  # A first gte build: the corpus bytes over semble's ~750-character chunks,
+  # at the per-host rates references/search.md gives; no estimate elsewhere.
+  if _model_i search.model && ! model_option_disabled search.model gte; then
+    rate=""
+    case "$_PB_OS:$_PB_ARCH" in
+      Darwin:arm64) rate=160 ;;
+      Darwin:x86_64) rate=36 ;;
+    esac
+    if [ -n "$rate" ]; then
+      chunks=$(((_PB_CORPUS_BYTES + 749) / 750))
+      secs=$(((chunks * 10 + rate - 1) / rate))
+      _probe_duration "$secs"
+      HINT[_MI]="a gte first build: about $_PD here"
+    fi
+  fi
+  if _model_i harness; then
+    for f in .cursor/ .codex/ .gemini/ opencode.json; do
+      if [ -e "$TOP/${f%/}" ]; then h="${h:+$h, }$f"; fi
+    done
+    [ -z "$h" ] || HINT[_MI]="detected: $h"
+  fi
+  if _model_i git && [ ! -e "$TOP/docs/.doc-index.json" ]; then
+    HINT[_MI]="no doc index yet: run /doc-superpowers init"
+  fi
+  if _model_i ci.workflows; then
+    while IFS= read -r url; do
+      case "$url" in
+        *github.com*) found=1 ;;
+      esac
+    done < <(cd "$TOP" && git config --get-regexp '^remote\..*\.url$' 2>/dev/null || true)
+    [ "$found" = 1 ] || HINT[_MI]="no GitHub remote"
+  fi
+  if _model_i claims && [ -d "$TOP/docs/spec-claims" ]; then
+    HINT[_MI]="docs/spec-claims/ already present: its pre-commit leg blocks on findings"
+  fi
   return 0
 }
 
