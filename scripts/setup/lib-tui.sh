@@ -36,7 +36,9 @@
 #                 screen and hides the cursor, and restores all three on
 #                 return and on EXIT, INT, TERM and HUP (exit 130, 143, 129;
 #                 the signals exit, and the EXIT trap restores: see
-#                 _tui_signal). stty is never touched off a terminal.
+#                 _tui_signal). The EXIT, INT, TERM and HUP traps it found are
+#                 put back on return (the EXIT one chained while it runs).
+#                 stty is never touched off a terminal.
 #
 # The screens and their keys (q quits from any screen, the end of input too):
 #   summary  plan_render_summary; Apply these (the per-user question first
@@ -78,7 +80,7 @@ TUI_TTY=0 TUI_COLS=80 TUI_LINES=24 TUI_UTF8=0 TUI_COLOR=0 TUI_LINE=""
 KEY=""
 UI_SCREEN=summary UI_CUR=0 UI_OPEN="" UI_TOP=0 UI_MSG="" UI_BACK=summary UI_TITLE=""
 UI_ROWS=() UI_ACTS=() UI_BODY=() UI_TEXT="" UI_ASIS=wrap
-_TUI_PEND="" _TUI_HAS_PEND=0 _TUI_STTY="" _TUI_ACTIVE=0 _TUI_SIG=0 _TUI_DONE=0 _TUI_DIRTY=1 _TUI_TREE_CUR=0
+_TUI_PEND="" _TUI_HAS_PEND=0 _TUI_STTY="" _TUI_ACTIVE=0 _TUI_SIG=0 _TUI_PREV_TRAPS="" _TUI_PREV_EXIT="" _TUI_DONE=0 _TUI_DIRTY=1 _TUI_TREE_CUR=0
 _TUI_TB="" _TUI_TC="" _TUI_TP="" _TUI_HL="" _TUI_RL="" _TUI_MN=0 _TUI_REPO="" _TUI_I=0 _TUI_O="" _TUI_G=""
 _TUI_WR=() _TUI_F=()
 _TUI_SP="                                                                                "
@@ -156,7 +158,7 @@ _tui_enter() {
 _tui_restore() {
   [ "$_TUI_ACTIVE" = 1 ] || return 0
   _TUI_ACTIVE=0
-  printf '\033[?25h\033[?1049l'
+  printf '\033[?25h\033[?1049l' 2>/dev/null || true
   stty "$_TUI_STTY" <&3 2>/dev/null || stty "$_TUI_STTY" </dev/tty 2>/dev/null || true
 }
 
@@ -170,11 +172,30 @@ _tui_signal() {
   exit "$1"
 }
 
-# _tui_on_exit: the EXIT trap while the TUI runs: restore the terminal, then
-# say that nothing was written when a signal stopped it.
+# _tui_on_exit: the EXIT trap while the TUI runs: restore the terminal, say
+# that nothing was written when a signal stopped it, then run the EXIT trap
+# the TUI found in place (chained, not lost).
 _tui_on_exit() {
   _tui_restore
   [ "$_TUI_SIG" = 0 ] || echo "setup: interrupted: nothing was written" >&2
+  [ -z "$_TUI_PREV_EXIT" ] || eval "$_TUI_PREV_EXIT"
+}
+
+# _tui_trap_cmd -- <command> EXIT: _TUI_PREV_EXIT = <command>, from one line
+# of `trap -p EXIT` (run as "_tui_trap_cmd" plus the line minus its "trap").
+_tui_trap_cmd() {
+  _TUI_PREV_EXIT="$2"
+}
+
+# _tui_save_traps: the EXIT, INT, TERM and HUP traps in place before the TUI
+# (_TUI_PREV_TRAPS, as `trap -p` prints them; _TUI_PREV_EXIT, the EXIT trap's
+# command), which tui_run puts back on return.
+_tui_save_traps() {
+  local p
+  _TUI_PREV_TRAPS=$(trap -p EXIT INT TERM HUP)
+  _TUI_PREV_EXIT=""
+  p=$(trap -p EXIT)
+  [ -z "$p" ] || eval "_tui_trap_cmd ${p#trap }"
 }
 
 # --- Keys --------------------------------------------------------------------
@@ -1042,7 +1063,7 @@ _tui_key_summary() {
   case "$KEY" in
     up) [ "$UI_CUR" -le 0 ] || UI_CUR=$((UI_CUR - 1)) ;;
     down) [ "$UI_CUR" -ge 3 ] || UI_CUR=$((UI_CUR + 1)) ;;
-    enter | right | space)
+    enter | right)
       case "$UI_CUR" in
         0) _tui_apply ;;
         1)
@@ -1070,7 +1091,7 @@ _tui_key_scope() {
       ;;
   esac
   case "$KEY" in
-    enter | space | char:[yYtT])
+    enter | char:[yYtT])
       plan_for_team "$UI_CUR"
       _tui_go_review
       ;;
@@ -1085,7 +1106,7 @@ _tui_key_review() {
     up) [ "$UI_TOP" -le 0 ] || UI_TOP=$((UI_TOP - 1)) ;;
     down) UI_TOP=$((UI_TOP + 1)) ;;
     esc) _tui_go_summary ;;
-    enter | space)
+    enter)
       case "${UI_ACTS[UI_CUR]}" in
         build)
           plan_build_question
@@ -1152,6 +1173,7 @@ tui_run() {
   _TUI_REPO="${TOP:-$PWD}"
   _TUI_REPO="${_TUI_REPO##*/}"
   tui_size
+  _tui_save_traps
   trap '_tui_on_exit' EXIT
   trap '_tui_signal 130' INT
   trap '_tui_signal 143' TERM
@@ -1168,4 +1190,5 @@ tui_run() {
   done
   _tui_restore
   trap - EXIT INT TERM HUP
+  [ -z "$_TUI_PREV_TRAPS" ] || eval "$_TUI_PREV_TRAPS"
 }

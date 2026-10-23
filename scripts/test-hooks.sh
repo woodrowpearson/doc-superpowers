@@ -10476,8 +10476,9 @@ test_setup_prompt_peruser_question() {
   echo "test: #51 the prompt UI asks once, with a team record and a per-user item changed: 'Save the per-user changes for: [y]ou only  [t]he team' (default y): y (or an empty answer) records your own override, t the team's choice"
   setup
   setup_applied_defaults
-  run_setup_prompt 'c\n4\n1\n\n\na\n\no\n' --
+  run_setup_prompt 'c\n4\n1\nd 1\n\n\na\n\no\n' --
   assert_eq "0" "$RUN_RC" "claude off, you only (the default): exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "Team: on; you: off" "d 1: the details show the team's value and yours"
   assert_contains "$RUN_OUT" "Save the per-user changes for: [y]ou only  [t]he team" "the question"
   assert_eq "1" "$(grep -c 'Save the per-user changes for' <<<"$RUN_OUT")" "…asked once"
   assert_eq "false|true" "$(jq -r .overrides.claude .claude/doc-superpowers/installed.local.json 2>&1)|$(jq -r .setup.claude .claude/doc-superpowers/installed.json 2>&1)" \
@@ -10681,11 +10682,14 @@ test_setup_tui_narrow() {
 }
 
 test_setup_tui_eof_quits() {
-  echo "test: #51 the TUI: the end of input quits and writes nothing, on every screen (summary, tree, a value being edited, the review, the build question); so does q, and Cancel"
+  echo "test: #51 the TUI: the end of input quits and writes nothing, on every screen (summary, tree, a value being edited, the review, the build question, the per-user question); so does q, and Cancel; space never chooses an action (only enter does), so spaces write nothing"
   local before k
   setup
   before=$(setup_snapshot)
-  for k in '' '\033[B\n' '\n' 'q' '\033[B\nq' '\033[B\033[B\033[B\n' "\\033[B\\n$(tui_downs 4)\\n$(tui_downs 12)e"; do
+  # Space toggles in the tree and never chooses: on the summary, the review
+  # and the per-user question it is no answer, so spaces alone write nothing.
+  for k in '' '\033[B\n' '\n' 'q' '\033[B\nq' '\033[B\033[B\033[B\n' "\\033[B\\n$(tui_downs 4)\\n$(tui_downs 12)e" \
+    '  ' '          ' ' \033[B \033[B  \033[A \033[B\033[B  '; do
     run_setup_tui "$k" --
     assert_eq "0" "$RUN_RC" "keys '$k' then the end of input: exit 0 (stderr: $RUN_ERR)"
     assert_contains "$RUN_OUT" "Quit: nothing was written." "…says nothing was written"
@@ -10694,6 +10698,22 @@ test_setup_tui_eof_quits() {
   run_setup_tui '\n\033[D\n' -- --set search=on
   assert_eq "0" "$RUN_RC" "the build question, then the end of input: exit 0 (stderr: $RUN_ERR)"
   assert_contains "$(tui_frame last)" ". Continue? [y/N]" "…the build question was asked"
+  assert_contains "$RUN_OUT" "Quit: nothing was written." "…then quit"
+  assert_eq "$before" "$(setup_snapshot)" "…and nothing was written"
+  # Spaces on the review (Write and build offered) choose nothing.
+  run_setup_tui '\n    ' -- --set search=on
+  assert_eq "0" "$RUN_RC" "the review, spaces, then the end of input: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$(tui_frame last)" "> Write only" "…still on the review, the cursor on Write only"
+  assert_contains "$RUN_OUT" "Quit: nothing was written." "…then quit"
+  assert_eq "$before" "$(setup_snapshot)" "…and nothing was written"
+  teardown
+  # Spaces on the per-user question choose nothing either.
+  setup
+  setup_applied_defaults
+  before=$(setup_snapshot)
+  run_setup_tui "\\033[B\\n$(tui_downs 3) \\033\\n    " --
+  assert_eq "0" "$RUN_RC" "the per-user question, spaces, then the end of input: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$(tui_frame last)" "Save the per-user changes for:" "…still on the question"
   assert_contains "$RUN_OUT" "Quit: nothing was written." "…then quit"
   assert_eq "$before" "$(setup_snapshot)" "…and nothing was written"
   teardown
@@ -10747,6 +10767,8 @@ test_setup_tui_scope_and_build() {
   # Claude hooks (row 3) unticked, Esc, Apply these: the question; enter: you only.
   run_setup_tui "\\033[B\\n$(tui_downs 3) \\033\\n\\n\\n" --
   assert_eq "0" "$RUN_RC" "claude off, you only: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "Team: on; you: on" "the details pane: the team's value and yours"
+  assert_contains "$RUN_OUT" "Team: on; you: off" "…yours, once unticked"
   assert_contains "$RUN_OUT" "Save the per-user changes for:" "the question"
   assert_contains "$RUN_OUT" "> You only" "…the cursor on You only"
   assert_contains "$RUN_OUT" "  The team" "…and The team"
@@ -10792,6 +10814,39 @@ test_setup_tui_scope_and_build() {
   assert_contains "$(cat "$STUBLOG")" "doc-search index" "…the build"
   assert_eq "" "$(safety_gitlog_remote)" "git: no remote verb"
   safety_stubs_off
+  teardown
+}
+
+test_setup_tui_traps_kept() {
+  echo "test: #51 tui_run puts back the EXIT, INT, TERM and HUP traps it found when it returns, and when a signal stops it, runs the EXIT trap it found after its own"
+  local out rc=0
+  setup
+  # shellcheck disable=SC2016  # the snippet runs in the child bash
+  out=$(PATH="$REAL_PATH" "$BASH_BIN" -c 'set -euo pipefail
+    ROOT="$1"
+    for l in model probe plan exec prompt tui; do source "$ROOT/scripts/setup/lib-$l.sh"; done
+    model_load_catalog "$ROOT/scripts/setup/catalog.json"
+    probe_run
+    model_base_init
+    LOG="$2"
+    trap "echo prior exit >> \"\$LOG\"" EXIT
+    trap "echo prior int" INT
+    COLUMNS=100 LINES=30 NO_COLOR=1 tui_run 3<<<"q" >/dev/null
+    echo "result: $TUI_RESULT"
+    trap -p EXIT INT TERM
+    tui_read_key() { kill -TERM $$; }
+    COLUMNS=100 LINES=30 NO_COLOR=1 tui_run 3<<<"q" >/dev/null
+    echo "not reached"' _ "$SETUP_ROOT" "$TEST_DIR/exit.log" 2>&1) || rc=$?
+  assert_contains "$out" "result: quit" "q: tui_run returns quit"
+  assert_contains "$out" "trap -- 'echo prior exit >> " "…the EXIT trap it found is back"
+  assert_contains "$out" "trap -- 'echo prior int' SIGINT" "…and the INT trap"
+  assert_not_contains "$out" "_tui_" "…none of its own is left"
+  assert_eq "143" "$rc" "a TERM while it runs: exit 143"
+  assert_contains "$out" "interrupted: nothing was written" "…saying nothing was written"
+  # (Into a file: bash 5 runs an EXIT trap with the redirections of the
+  # function it exits from still in place, here tui_run's >/dev/null.)
+  assert_eq "prior exit" "$(cat "$TEST_DIR/exit.log" 2>&1)" "…then the EXIT trap it found runs, once"
+  assert_not_contains "$out" "not reached" "…and nothing after"
   teardown
 }
 
@@ -10964,6 +11019,7 @@ test_setup_tui_narrow
 test_setup_tui_eof_quits
 test_setup_tui_same_plan
 test_setup_tui_scope_and_build
+test_setup_tui_traps_kept
 test_setup_tui_tty_restore
 
 test_claude_hook_contract_held() {
