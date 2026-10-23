@@ -424,7 +424,15 @@ probe_host_checks() {
       bindir="$HOME/.local/bin"
       f="$bindir/doc-superpowers"
       why=""
-      if [ -e "$bindir" ] && [ ! -d "$bindir" ]; then
+      # setup never writes through a link (the executor refuses one on the
+      # file or its folder): say so here, before the user ticks the item.
+      if [ -L "$bindir" ]; then
+        # shellcheck disable=SC2088  # display text: the folder, as a user writes it
+        why="~/.local/bin is a symbolic link: setup never writes through a link, which could point anywhere"
+      elif [ -L "$f" ]; then
+        # shellcheck disable=SC2088  # display text: the file, as a user writes it
+        why="~/.local/bin/doc-superpowers is a symbolic link: setup never writes through a link, which could point anywhere"
+      elif [ -e "$bindir" ] && [ ! -d "$bindir" ]; then
         # shellcheck disable=SC2088  # display text: the folder, as a user writes it
         why="~/.local/bin is not a directory"
       elif [ -d "$bindir" ] && [ ! -w "$bindir" ]; then

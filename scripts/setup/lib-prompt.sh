@@ -32,7 +32,7 @@
 # disabled item, an invalid value) prints its reason; a value is asked again.
 
 PROMPT_RESULT=""
-_PR_LINE="" _PR_NEXT="" _PR_EOF=0 _PR_GROUP=""
+_PR_LINE="" _PR_NEXT="" _PR_EOF=0 _PR_GROUP="" _PR_N=""
 _PR_ITEMS=()
 
 # _prompt_read [prompt]: _PR_LINE, the next answer (fd 3), spaces around it
@@ -59,12 +59,20 @@ _prompt_read() {
   return 0
 }
 
-# _prompt_number <answer> <max>: the answer is a number from 1 to <max>.
+# _prompt_number <answer> <max>: the answer is a number from 1 to <max>;
+# _PR_N is its value in decimal. Leading zeros are dropped first (bash
+# reads 08 as octal in an index), and an answer longer than <max> is refused
+# before any numeric test (no "integer expression expected" for a huge one).
 _prompt_number() {
+  local v
+  _PR_N=""
   case "$1" in
     "" | *[!0-9]*) return 1 ;;
   esac
-  [ "$1" -ge 1 ] && [ "$1" -le "$2" ]
+  v="${1#"${1%%[!0]*}"}"
+  [ -n "$v" ] && [ "${#v}" -le "${#2}" ] || return 1
+  [ "$v" -ge 1 ] && [ "$v" -le "$2" ] || return 1
+  _PR_N="$v"
 }
 
 # _prompt_plan: plan_build for the summary and the groups (what is already
@@ -103,7 +111,7 @@ _prompt_item_line() {
   local i="$2" box="[ ]" line
   case "${CAT_KIND[i]}" in
     toggle | multi) if model_is_on "${CAT_ID[i]}"; then box="[x]"; fi ;;
-    *) if ! _prompt_parent_off "$i"; then box="[x]"; fi ;;
+    *) if ! _prompt_parent_off "$i" && ! _model_is_off "$i" "${SEL[i]}"; then box="[x]"; fi ;;
   esac
   line="  $1) $box ${CAT_LABEL[i]}"
   [ "${CAT_KIND[i]}" = toggle ] || line="$line: ${SEL[i]}"
@@ -170,7 +178,7 @@ _prompt_multi() {
     fi
     opts=() csv=""
     for o in ${CAT_OPTIONS[i]//,/ }; do opts+=("$o"); done
-    o="${opts[_PR_LINE - 1]}"
+    o="${opts[_PR_N - 1]}"
     if _model_csv_has "${SEL[i]}" "$o"; then
       for p in "${opts[@]}"; do
         if [ "$p" != "$o" ] && _model_csv_has "${SEL[i]}" "$p"; then csv="${csv:+$csv,}$p"; fi
@@ -204,7 +212,7 @@ _prompt_choice() {
       printf '  answer a number from 1 to %d, or an empty line\n' "$n"
       continue
     fi
-    _prompt_set "${CAT_ID[i]}" "${opts[_PR_LINE - 1]}" && return 0
+    _prompt_set "${CAT_ID[i]}" "${opts[_PR_N - 1]}" && return 0
   done
 }
 
@@ -282,7 +290,7 @@ _prompt_groups() {
       return 0
     fi
     if _prompt_number "$_PR_LINE" "${#GROUPS[@]}"; then
-      _PR_GROUP="${GROUPS[_PR_LINE - 1]}"
+      _PR_GROUP="${GROUPS[_PR_N - 1]}"
       _PR_NEXT=items
       return 0
     fi
@@ -311,14 +319,14 @@ _prompt_items() {
         k="${_PR_LINE#??}"
         k="${k#"${k%%[![:space:]]*}"}"
         if _prompt_number "$k" "$n"; then
-          _prompt_details "${_PR_ITEMS[k - 1]}"
+          _prompt_details "${_PR_ITEMS[_PR_N - 1]}"
           _PR_NEXT=items
           return 0
         fi
         ;;
       *)
         if _prompt_number "$_PR_LINE" "$n"; then
-          _prompt_item "${_PR_ITEMS[_PR_LINE - 1]}" || return 1
+          _prompt_item "${_PR_ITEMS[_PR_N - 1]}" || return 1
           _PR_NEXT=items
           return 0
         fi

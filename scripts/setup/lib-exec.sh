@@ -572,7 +572,7 @@ op_bin_link() {
     echo "setup: cannot read $ROOT/scripts/setup/shim.sh" >&2
     return 1
   fi
-  _exec_write "$f" "$text" "" "" 755 || return 1
+  _exec_write "$f" "$text" _exec_sh_n "" 755 || return 1
   # setup never edits a shell profile: it says what to add.
   case ":${PATH:-}:" in
     *":$HOME/.local/bin:"* | *":$HOME/.local/bin/:"*) ;;
