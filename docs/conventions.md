@@ -176,7 +176,7 @@ There is no `archived_at` field. The `docs/archive/` path and the `deprecated` s
 
 ### Discovery-First
 
-Every action runs the discovery phase before doing work (except `hooks` and `release`). `hooks` is a scaffolding command that routes directly to the installer; `release` parses RELEASE-NOTES.md and commits directly. This is non-negotiable — generic fallbacks are always less precise than detected tooling.
+Every action runs the discovery phase before doing work (except `hooks`, `setup`, `help`, `release` and `ledger`). `hooks` is a scaffolding command that routes directly to the installer; `setup` and `help` route to the dispatcher `scripts/doc-superpowers` (setup's engine, the help text); `release` parses RELEASE-NOTES.md and commits directly; `ledger` routes to `doc-tools.sh ledger`. This is non-negotiable — generic fallbacks are always less precise than detected tooling.
 
 ### Parallel Agent Dispatch
 
@@ -323,7 +323,7 @@ Hooks are organized into three tiers, each independently installable, plus the w
 | Work-ledger Claude events | `--ledger-claude` | ledger-session-notices.sh (SessionStart), ledger-state-watch.sh (PostToolUse, matcher `Write\|Edit\|MultiEdit`), with hook-lib.sh |
 | doc-search MCP server | `--search` | `.claude/doc-superpowers/search-mcp.sh` (a byte copy of `scripts/search/launch.sh`) and the `doc-search` entry in the project's `.mcp.json`, both committed |
 
-Use `--all` to install all three tiers at once. The ledger sets are never part of `--all`, each refuses to install without `docs/ledger/config.json` (exit 1, nothing written), and like the git and Claude tiers they are per-clone / per-user and never recorded in `installed.json`. doc-search's `--search` set is never part of `--all` either, refuses to install without `docs/search/config.json`, and is not recorded in `installed.json`; its two files are committed, so every contributor gets the server.
+Use `--all` to install all three tiers at once. The ledger sets are never part of `--all`, each refuses to install without `docs/ledger/config.json` (exit 1, nothing written), and like the git and Claude tiers they are per-clone / per-user and their state is never recorded in `installed.json` (`doc-superpowers setup` records the team's *choice* of them in its `setup` object, `references/setup.md`). doc-search's `--search` set is never part of `--all` either, refuses to install without `docs/search/config.json`, and is not recorded in `installed.json`; its two files are committed, so every contributor gets the server.
 
 ### Installation Rules
 
@@ -369,7 +369,7 @@ The Claude tier is **per-user**. It **copies** hook scripts to `.claude/hooks/do
 | `--force` | off | Also re-install workflows uninstalled on purpose |
 | `--transient` | off | `uninstall` only: record the removal as temporary (`intentional: false`), so the next plain `install --ci` puts the workflow back. Without it the removal is intentional, and a plain `install --ci` leaves the workflow out |
 
-The choices are recorded in `.claude/doc-superpowers/installed.json` (schema 2: `.tiers.ci.{base_branch,cron,ci_strict,workflows}`); a plain `install --ci` reproduces them. Vendoring goes through `doc-tools.sh tools install|uninstall --helper <set>` (`doc-pr-release`, `doc-superpowers-steps`, `ledger`), per installed workflow.
+The choices are recorded in `.claude/doc-superpowers/installed.json` (schema 2: `.tiers.ci.{base_branch,cron,ci_strict,workflows}`; a top-level `setup` object beside it is setup's team record, which the installer keeps); a plain `install --ci` reproduces them. Vendoring goes through `doc-tools.sh tools install|uninstall --helper <set>` (`doc-pr-release`, `doc-superpowers-steps`, `ledger`), per installed workflow.
 
 **Retired workflows.** `doc-index-update` was retired in v3.0.0 (it re-baselined every doc edited on the base branch, unread, and failed every run). It is in `install.sh`'s `RETIRED_WORKFLOWS`: any `install --ci` (and a full `uninstall --ci`, or `uninstall --ci --workflows=doc-index-update`) removes a copy that carries the workflow marker and drops its state entry; a file of that name without the marker is kept and reported. `install --ci --workflows=doc-index-update` is an error.
 

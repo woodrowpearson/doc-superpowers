@@ -3,10 +3,18 @@
 # uses install.sh's tmp_beside / commit_tmp write discipline).
 #
 # File: .claude/doc-superpowers/installed.json, relative to the repository top
-# and COMMITTED, so the CI tier's choices are the team's. Only the CI tier is
-# recorded: the git tier lives in .git (per clone) and the Claude tier in
-# .claude/settings.local.json (per user), so a committed record of either
-# would be wrong for every other contributor.
+# and COMMITTED, so the CI tier's choices are the team's. Only the CI tier's
+# STATE is recorded here: the git tier's state lives in .git (per clone) and
+# the Claude tier's in .claude/settings.local.json (per user), so a committed
+# record of either state would be wrong for every other contributor.
+#
+# doc-superpowers setup (scripts/setup/, references/setup.md → The records)
+# adds a top-level "setup" object: the team's CHOICE of tiers ("git":
+# hooks|merge-driver|off, "claude": true|false, the harnesses, doc-search,
+# the ledger, spec claims), which `setup --apply` installs in each
+# contributor's clone. This file never reads or validates it; state_flush
+# keeps it as it keeps every top-level key it does not own, which is why
+# schema_version stays 2 (a 3.8.0 installer refuses anything above).
 #
 # Schema (schema_version 2):
 # {
