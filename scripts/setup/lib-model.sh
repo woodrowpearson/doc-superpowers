@@ -127,6 +127,13 @@ model_get() {
   printf '%s\n' "${SEL[_MI]}"
 }
 
+# model_is_on <id>: 0 when SEL ticks the item (not off; not none for a
+# multi; a value item always is), 1 when it does not, 2 for an unknown id.
+model_is_on() {
+  _model_i "$1" || return 2
+  ! _model_is_off "$_MI" "${SEL[_MI]}"
+}
+
 # model_changed <id>: 0 when SEL differs from BASE.
 model_changed() {
   _model_i "$1" || return 1

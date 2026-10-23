@@ -7,13 +7,18 @@
 #   --list              print every item: <id>=<value> TAB <scope> TAB <label>
 #                       TAB <options> TAB <disabled reason>
 #   --set <id>=<value>  change one item (repeatable; --set=<id>=<value> too)
-#   --dry-run --yes --apply --build --for-team --link-bin --no-link-bin
-#   --plain             not implemented yet (exit 3)
+#   --dry-run           print the summary, a blank line, then the review (the
+#                       plan's steps, what they write, the network, the
+#                       downloads, the git add line); write nothing; exit 0
+#   --build             with --dry-run: the review includes the build
+#   --yes --apply --for-team --link-bin --no-link-bin --plain, and --build
+#                       without --dry-run: not implemented yet (exit 3)
 #
 # The layers (design §5): lib-model.sh (the catalog, the selection, --set and
-# requires) and lib-probe.sh (installer status, the records, what is
-# installed). Exit codes: 0 done; 1 refused, nothing written; 2 a step
-# failed; 3 usage.
+# requires), lib-probe.sh (installer status, the records, what is installed)
+# and lib-plan.sh (the selection against what is installed: the steps, the
+# summary and the review). Exit codes: 0 done; 1 refused, nothing written; 2
+# a step failed; 3 usage.
 set -euo pipefail
 unset CDPATH
 
@@ -27,6 +32,8 @@ ROOT="$(dirname "$(dirname "$_setup_dir")")"
 source "$ROOT/scripts/setup/lib-model.sh"
 # shellcheck source=scripts/setup/lib-probe.sh
 source "$ROOT/scripts/setup/lib-probe.sh"
+# shellcheck source=scripts/setup/lib-plan.sh
+source "$ROOT/scripts/setup/lib-plan.sh"
 
 die() {
   echo "setup: $1" >&2
@@ -42,6 +49,7 @@ not_yet() {
 }
 
 MODE=""
+BUILD=0
 SETS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -52,10 +60,10 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --set=*) SETS+=("${1#--set=}") ;;
-    --dry-run) not_yet --dry-run ;;
+    --dry-run) MODE=dry-run ;;
     --yes) not_yet --yes ;;
     --apply) not_yet --apply ;;
-    --build) not_yet --build ;;
+    --build) BUILD=1 ;;
     --for-team) not_yet --for-team ;;
     --link-bin) not_yet --link-bin ;;
     --no-link-bin) not_yet --no-link-bin ;;
@@ -64,6 +72,9 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+# --build is the download consent of --yes and --apply (later tasks); with
+# --dry-run it shows the build in the review.
+[ "$BUILD" = 0 ] || [ "$MODE" = dry-run ] || not_yet --build
 
 command -v jq >/dev/null 2>&1 || die "jq is needed (1.6 or later); nothing was changed"
 model_load_catalog "$ROOT/scripts/setup/catalog.json" || die "$MODEL_ERROR" 2
@@ -77,7 +88,10 @@ for _s in ${SETS[@]+"${SETS[@]}"}; do
   model_check "${_s%%=*}" "${_s#*=}" || usage_error "--set $_s: $MODEL_ERROR"
 done
 
-[ "$MODE" = list ] || not_yet "interactive mode"
+case "$MODE" in
+  list | dry-run) ;;
+  *) not_yet "interactive mode" ;;
+esac
 
 _top=$(git rev-parse --show-toplevel 2>/dev/null) || _top=""
 [ -n "$_top" ] || die "not a git repository (run setup inside a repository's work tree)"
@@ -89,6 +103,17 @@ model_base_init || die "$MODEL_ERROR; nothing was changed"
 for _s in ${SETS[@]+"${SETS[@]}"}; do
   model_set "${_s%%=*}" "${_s#*=}" || die "--set $_s: $MODEL_ERROR"
 done
+
+# --dry-run: the summary, a blank line, the review; nothing written.
+if [ "$MODE" = dry-run ]; then
+  PLAN_BUILD_REQUESTED="$BUILD"
+  plan_build || die "$PLAN_ERROR; nothing was changed"
+  plan_render_summary
+  echo ""
+  plan_render_review
+  if plan_is_empty; then echo "nothing to do"; fi
+  exit 0
+fi
 
 # --list: one line per item, in catalog order. A reason is one line.
 _i=0
