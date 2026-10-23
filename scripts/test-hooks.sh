@@ -8121,11 +8121,21 @@ git-install|merge-driver" "hooks to merge driver: uninstall --git, then install 
   plan_ops 'model_set claude off'
   assert_contains "$SL_OUT" "claude-uninstall" "claude off: uninstall --claude"
   mkdir -p .cursor
-  echo '{"mcpServers":{"doc-search":{"command":"sh"},"other":{"command":"x"}}}' > .cursor/mcp.json
+  # shellcheck disable=SC2016  # JSON text: ${workspaceFolder} is Cursor's
+  printf '%s\n' '{"mcpServers":{"other":{"command":"x"},"doc-search":{"command":"sh","args":["-c","cd \"$1\" && exec sh .claude/doc-superpowers/search-mcp.sh serve","sh","${workspaceFolder}"]}}}' > .cursor/mcp.json
   plan_ops
-  assert_contains "$SL_OUT" "harness-remove|cursor" "a Cursor entry with doc-search off: removed"
+  assert_not_contains "$SL_OUT" "harness-" "a Cursor entry that is merely there, doc-search off: not removed (nothing unticks it)"
   plan_ops 'model_set search on; model_set harness claude-code'
   assert_contains "$SL_OUT" "harness-remove|cursor" "Cursor unticked with doc-search on: removed"
+  plan_ops 'model_set harness claude-code'
+  assert_contains "$SL_OUT" "harness-remove|cursor" "Cursor unticked with doc-search off: removed"
+  echo '{"mcpServers":{"doc-search":{"command":"sh"},"other":{"command":"x"}}}' > .cursor/mcp.json
+  plan_ops 'model_set search on; model_set harness claude-code'
+  assert_not_contains "$SL_OUT" "harness-" "an entry that differs from setup's is the user's: not removed, unticked or not"
+  plan_ops 'model_set search on; model_set harness claude-code,cursor'
+  assert_contains "$SL_OUT" "harness-add|cursor" "…and ticking cursor over it plans the add (the step refuses)"
+  # shellcheck disable=SC2016  # JSON text: ${workspaceFolder} is Cursor's
+  printf '%s\n' '{"mcpServers":{"other":{"command":"x"},"doc-search":{"command":"sh","args":["-c","cd \"$1\" && exec sh .claude/doc-superpowers/search-mcp.sh serve","sh","${workspaceFolder}"]}}}' > .cursor/mcp.json
   plan_ops 'model_set search on'
   assert_not_contains "$SL_OUT" "harness-" "Cursor ticked (base: installed) and present: no harness step"
   mkdir -p docs/ledger "$HOME/.local/bin"
@@ -9037,20 +9047,188 @@ test_setup_harness_keeps_other_content() {
   teardown
 }
 
-test_setup_harness_removal_removes_created_files() {
-  echo "test: #51 a harness file setup created goes with its entry when nothing else is in it (a codex file holding only the block, an object holding only the entry, opencode.json holding only \$schema and the entry), and its empty directory; a record that lists the harness still lists only what is ticked"
+test_setup_harness_removal_keeps_files() {
+  echo "test: #51 removal takes out only setup's entry (the doc-search key; the marked Codex block) and never deletes a file, a directory or the server table, even when setup created them: after add and untick, .cursor/mcp.json holds {\"mcpServers\":{}}, opencode.json its \$schema and an empty mcp, .codex/config.toml is empty; a committed {\"mcpServers\":{}}, an empty .codex/config.toml and a user's empty mcp key stay as they were; the review line says the file stays"
   setup
+  local before
   run_setup -- --yes --set search=on --set harness=$SETUP_ALL_HARNESSES
   assert_eq "0" "$RUN_RC" "all five: exit 0 (stderr: $RUN_ERR)"
+  run_setup -- --dry-run --set harness=claude-code
+  assert_contains "$RUN_OUT" "the file stays" "the review says the file stays"
   run_setup -- --yes --set harness=claude-code
   assert_eq "0" "$RUN_RC" "untick the four: exit 0 (stderr: $RUN_ERR)"
-  assert_true ".codex removed" test ! -e .codex
-  assert_true ".cursor removed" test ! -e .cursor
-  assert_true "opencode.json removed" test ! -e opencode.json
-  assert_true ".gemini removed" test ! -e .gemini
+  assert_eq "" "$(cat .codex/config.toml)" ".codex/config.toml stays, empty"
+  assert_eq "0" "$(wc -c < .codex/config.toml | tr -d ' ')" "…zero bytes"
+  assert_eq '{"mcpServers":{}}' "$(jq -c . .cursor/mcp.json)" ".cursor/mcp.json stays, its server table empty"
+  assert_eq '{"$schema":"https://opencode.ai/config.json","mcp":{}}' "$(jq -c . opencode.json)" "opencode.json stays"
+  assert_eq '{"mcpServers":{}}' "$(jq -c . .gemini/settings.json)" ".gemini/settings.json stays"
   assert_true ".mcp.json stays (Claude Code's entry)" test -f .mcp.json
   assert_eq "$(jq -nc '["claude-code"]')" "$(jq -c .setup.harnesses .claude/doc-superpowers/installed.json)" "the record: claude-code"
-  setup_assert_noop "after the harness files went"
+  setup_assert_noop "after the entries went"
+  teardown
+  # Files the team already had.
+  setup
+  mkdir -p .cursor .codex
+  printf '{"mcpServers":{}}\n' > .cursor/mcp.json
+  : > .codex/config.toml
+  printf '{"mcp":{}}\n' > opencode.json
+  before=$(setup_snapshot)
+  run_setup -- --yes --set search=on --set harness=claude-code,codex,cursor,opencode
+  assert_eq "0" "$RUN_RC" "files the team had: exit 0 (stderr: $RUN_ERR)"
+  run_setup -- --yes --set harness=claude-code
+  assert_eq "0" "$RUN_RC" "untick: exit 0 (stderr: $RUN_ERR)"
+  assert_eq '{"mcpServers":{}}' "$(jq -c . .cursor/mcp.json)" "a committed {\"mcpServers\":{}} stays"
+  assert_eq "0" "$(wc -c < .codex/config.toml | tr -d ' ')" "an empty .codex/config.toml stays, empty"
+  assert_eq '{"mcp":{}}' "$(jq -c . opencode.json)" "a user's empty mcp key stays"
+  teardown
+}
+
+test_setup_harness_user_entries_kept() {
+  echo "test: #51 an entry the user wrote is never setup's to remove: with no record and doc-search off, a plain --dry-run and --yes leave a hand-written .cursor/mcp.json doc-search entry (and the file) alone; so does a recorded run (harness=claude-code) over a contributor's hand-added entry; unticking a harness leaves an entry that differs from setup's; only a registered entry goes, when this run unticks its harness or turns doc-search off; ticking a harness whose file holds a different doc-search entry is refused before any step (exit 1, naming the file and the key), and the dry-run says so"
+  setup
+  local mine before
+  mkdir -p .cursor
+  mine='{"mcpServers":{"doc-search":{"command":"sh","args":["my/own/launcher.sh","serve"]}}}'
+  printf '%s\n' "$mine" > .cursor/mcp.json
+  cp .cursor/mcp.json "$TEST_DIR/cursor.orig"
+  run_setup -- --dry-run
+  assert_eq "0" "$RUN_RC" "no record, a hand-written entry: --dry-run exit 0 (stderr: $RUN_ERR)"
+  assert_not_contains "$RUN_OUT" "doc-search server entry" "…it plans nothing about the entry"
+  assert_not_contains "$RUN_OUT" ".cursor/mcp.json" "…and does not list the file"
+  run_setup -- --yes
+  assert_eq "0" "$RUN_RC" "…--yes: exit 0 (stderr: $RUN_ERR)"
+  assert_true "…the file is byte-identical" cmp -s "$TEST_DIR/cursor.orig" .cursor/mcp.json
+  assert_eq "$(jq -nc '["claude-code"]')" "$(jq -c .setup.harnesses .claude/doc-superpowers/installed.json)" "…and the record lists claude-code alone"
+  # The documented hand-added entry (exactly setup's), against a record without cursor, doc-search off.
+  printf '%s\n' '{"mcpServers":{"doc-search":{"command":"sh","args":["-c","cd \"$1\" && exec sh .claude/doc-superpowers/search-mcp.sh serve","sh","${workspaceFolder}"]}}}' > .cursor/mcp.json
+  cp .cursor/mcp.json "$TEST_DIR/cursor.orig"
+  run_setup -- --yes
+  assert_eq "0" "$RUN_RC" "a recorded run over a contributor's registered entry: exit 0 (stderr: $RUN_ERR)"
+  assert_true "…the file is byte-identical" cmp -s "$TEST_DIR/cursor.orig" .cursor/mcp.json
+  # Ticking over a different entry: refused before any step.
+  printf '%s\n' "$mine" > .cursor/mcp.json
+  run_setup -- --dry-run --set search=on --set harness=claude-code,cursor
+  assert_eq "0" "$RUN_RC" "ticking cursor over a different entry: --dry-run exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "Not setup's" "…the dry-run says it is not setup's"
+  assert_contains "$RUN_OUT" ".cursor/mcp.json" "…naming the file"
+  before=$(setup_snapshot)
+  run_setup -- --yes --set search=on --set harness=claude-code,cursor
+  assert_eq "1" "$RUN_RC" "…--yes: exit 1"
+  assert_contains "$RUN_ERR" ".cursor/mcp.json" "…naming the file"
+  assert_contains "$RUN_ERR" '"doc-search"' "…and the key"
+  assert_contains "$RUN_ERR" "nothing was changed" "…nothing was changed"
+  assert_eq "$before" "$(setup_snapshot)" "…nothing written (no config, no launcher)"
+  # Unticking a harness whose entry was edited by hand; only the registered ones go.
+  printf '{}\n' > .cursor/mcp.json
+  run_setup -- --yes --set search=on --set harness=$SETUP_ALL_HARNESSES
+  assert_eq "0" "$RUN_RC" "all five, after removing the entry: exit 0 (stderr: $RUN_ERR)"
+  jq '.mcpServers["doc-search"].args = ["mine"]' .cursor/mcp.json > .cursor/mcp.tmp && mv .cursor/mcp.tmp .cursor/mcp.json
+  cp .cursor/mcp.json "$TEST_DIR/cursor.orig"
+  run_setup -- --yes --set harness=claude-code,codex,opencode,gemini
+  assert_eq "0" "$RUN_RC" "untick cursor, its entry edited by hand: exit 0 (stderr: $RUN_ERR)"
+  assert_true "…its file is untouched" cmp -s "$TEST_DIR/cursor.orig" .cursor/mcp.json
+  run_setup -- --yes --set search=off
+  assert_eq "0" "$RUN_RC" "doc-search off: exit 0 (stderr: $RUN_ERR)"
+  assert_true "…the hand-edited entry is still untouched" cmp -s "$TEST_DIR/cursor.orig" .cursor/mcp.json
+  assert_eq "false" "$(jq '.mcp | has("doc-search")' opencode.json)" "…while the registered entries went (opencode)"
+  assert_eq "false" "$(jq '.mcpServers | has("doc-search")' .gemini/settings.json)" "…(gemini)"
+  teardown
+}
+
+test_setup_codex_user_definitions() {
+  echo "test: #51 a Codex file whose own lines define doc-search is refused untouched (exit 1, already defines [mcp_servers.doc-search]), in every spelling: a quoted header, a subtable, a doc-search key (and a dotted one) under [mcp_servers], a top-level mcp_servers.doc-search key, an inline mcp_servers table; a doc-search key in another table, and a comment, are not definitions"
+  setup
+  local before body i=0
+  mkdir -p .codex
+  for body in \
+    '[mcp_servers]
+doc-search = { command = "mine" }' \
+    '[mcp_servers]
+"doc-search".command = "mine"' \
+    'mcp_servers.doc-search.command = "mine"
+model = "x"' \
+    '[mcp_servers."doc-search"]
+command = "mine"' \
+    '[ mcp_servers . doc-search . env ]
+A = "1"' \
+    'mcp_servers = { other = { command = "x" } }' \
+    'model = "x"
+[mcp_servers]
+other = { command = "x" }
+doc-search.args = ["a"]'; do
+    i=$((i + 1))
+    printf '%s\n' "$body" > .codex/config.toml
+    before=$(setup_snapshot)
+    run_setup -- --yes --set search=on --set harness=claude-code,codex
+    assert_eq "1" "$RUN_RC" "definition $i: exit 1"
+    assert_contains "$RUN_ERR" "already defines [mcp_servers.doc-search]" "definition $i: already defines [mcp_servers.doc-search]"
+    assert_eq "$before" "$(setup_snapshot)" "definition $i: nothing written"
+  done
+  printf '%s\n' '# [mcp_servers.doc-search] is what setup writes' '[mcp_servers.other]' 'doc-search = "a value, not a server"' > .codex/config.toml
+  run_setup -- --yes --set search=on --set harness=claude-code,codex
+  assert_eq "0" "$RUN_RC" "a comment and a doc-search key in another table: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "1" "$(grep -c '^\[mcp_servers.doc-search\]' .codex/config.toml)" "…the block is added"
+  teardown
+}
+
+test_setup_harness_review_matches_exec() {
+  echo "test: #51 the review's Then commit: line equals the executor's for a harness removal: an untracked .cursor/mcp.json with other content, whose entry goes, is on both (the file is not a deleted path)"
+  setup
+  local want
+  mkdir -p .cursor
+  printf '{"mcpServers":{"other":{"command":"x"}}}\n' > .cursor/mcp.json
+  run_setup -- --yes --set search=on --set harness=claude-code,cursor
+  assert_eq "0" "$RUN_RC" "cursor on: exit 0 (stderr: $RUN_ERR)"
+  run_setup -- --dry-run --set harness=claude-code
+  assert_eq "0" "$RUN_RC" "--dry-run untick: exit 0 (stderr: $RUN_ERR)"
+  want=$(review_section 'Then commit:')
+  assert_contains "$want" ".cursor/mcp.json" "the review's git add line names the untracked file"
+  run_setup -- --yes --set harness=claude-code
+  assert_eq "0" "$RUN_RC" "--yes untick: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "$want" "$(review_section 'Then commit:')" "the executor's git add line is the review's"
+  assert_eq '{"mcpServers":{"other":{"command":"x"}}}' "$(jq -c . .cursor/mcp.json)" "the other server stays"
+  teardown
+}
+
+test_setup_codex_refresh_and_ending() {
+  echo "test: #51 setup's Codex block is refreshed when its content differs (a hand-edited or older one: the plan says refresh, --yes puts the current block back in place, a second run is nothing to do); a file's own ending is restored on removal: without a final newline, with one, with trailing blank lines, and a block with text after it"
+  setup
+  local orig orig_text
+  orig=$(harness_mktemp codex.orig)
+  run_setup -- --yes --set search=on --set harness=claude-code,codex
+  assert_eq "0" "$RUN_RC" "codex on: exit 0 (stderr: $RUN_ERR)"
+  sed -i.bak 's/startup_timeout_sec = 60/startup_timeout_sec = 5/' .codex/config.toml
+  rm -f .codex/config.toml.bak
+  run_setup -- --dry-run --set search=on --set harness=claude-code,codex
+  assert_contains "$(review_section 'Steps:')" "refresh the doc-search server entry for Codex" "an edited block: the plan refreshes it"
+  run_setup -- --yes --set search=on --set harness=claude-code,codex
+  assert_eq "0" "$RUN_RC" "refresh: exit 0 (stderr: $RUN_ERR)"
+  assert_eq "$SETUP_CODEX_BLOCK" "$(cat .codex/config.toml)" "…the current block is back"
+  run_setup -- --yes --set search=on --set harness=claude-code,codex
+  assert_eq "0|nothing to do" "$RUN_RC|$RUN_OUT" "…and then nothing to do"
+  # Endings: add, then untick, gives the original bytes back.
+  for orig_text in 'model = "x"' 'model = "x"
+' 'model = "x"
+
+
+' ''; do
+    printf '%s' "$orig_text" > .codex/config.toml
+    cp .codex/config.toml "$orig"
+    run_setup -- --yes --set search=on --set harness=claude-code,codex
+    assert_eq "0" "$RUN_RC" "an ending: add: exit 0 (stderr: $RUN_ERR)"
+    assert_eq "1" "$(grep -c 'setup:begin doc-search' .codex/config.toml)" "…one block"
+    run_setup -- --yes --set search=on --set harness=claude-code
+    assert_eq "0" "$RUN_RC" "…untick: exit 0 (stderr: $RUN_ERR)"
+    assert_true "…the original bytes are back ($(wc -c < "$orig" | tr -d ' ') bytes)" cmp -s "$orig" .codex/config.toml
+  done
+  # A block with the user's text after it.
+  printf 'model = "x"\n' > .codex/config.toml
+  run_setup -- --yes --set search=on --set harness=claude-code,codex
+  printf '[other]\nkey = 1\n' >> .codex/config.toml
+  run_setup -- --yes --set search=on --set harness=claude-code
+  assert_eq 'model = "x"
+[other]
+key = 1' "$(cat .codex/config.toml)" "text after the block: only the block went"
   teardown
 }
 
@@ -9293,7 +9471,11 @@ test_setup_no_uv_build_refused
 test_setup_harness_entries
 test_setup_harness_file_names
 test_setup_harness_keeps_other_content
-test_setup_harness_removal_removes_created_files
+test_setup_harness_removal_keeps_files
+test_setup_harness_user_entries_kept
+test_setup_codex_user_definitions
+test_setup_harness_review_matches_exec
+test_setup_codex_refresh_and_ending
 test_setup_harness_refuses
 test_setup_codex_block_idempotent
 test_setup_harness_space_path
