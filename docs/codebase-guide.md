@@ -422,7 +422,8 @@ User invokes /doc-superpowers setup (or doc-superpowers setup in a terminal)
         the network and the downloads
       → --dry-run: summary + review, nothing written
   → The skill shows it verbatim; asks Apply these / Customize (--list, --dry-run --set …) / Cancel;
-    then Write and build / Write only / Back (and for you only / for the team when a per-user item changed)
+    then Write and build / Write only / Back (and for you only / for the team when a per-user item changed;
+    for the team: --dry-run --set … --for-team, that review confirmed before the write)
   → "$ROOT/scripts/doc-superpowers" setup --yes --set … [--for-team] [--build] [--link-bin]
     → exec_plan: every step checked first (links, shapes, entries of the user's: exit 1, nothing written),
       then run in order ("<n>. <text>"); a failure stops it (exit 2: re-run finishes)

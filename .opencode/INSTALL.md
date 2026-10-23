@@ -46,7 +46,7 @@ audit my project's documentation
 
 The entry point, once per repository: ask for `/doc-superpowers setup`, or run the plugin's `scripts/doc-superpowers setup` in a terminal — `~/.config/opencode/plugins/doc-superpowers/scripts/doc-superpowers setup` for the local install (a full-screen picker; `--link-bin` adds the terminal command `~/.local/bin/doc-superpowers`). It starts from fixed safe defaults — the doc-index merge driver and the 5 report-only git hooks; nothing downloads, nothing reaches the network, no CI — and shows every write before it makes one; it never commits, and prints the `git add` line instead. `doc-superpowers help` (or `/doc-superpowers help`) prints a one-screen map of every feature; [`references/setup.md`](../references/setup.md) is the full reference.
 
-- The defaults also install the 3 Claude Code hooks, which OpenCode does not run: untick *Claude hooks* (`--set claude=off`) unless you use Claude Code too.
+- The defaults also install the 3 Claude Code hooks, which OpenCode does not run. The repository's first setup run records this as the team's choice, which each teammate's `setup --apply` installs: if anyone on the team uses Claude Code, leave it on there and untick it for yourself afterwards (a later `--set claude=off` is a per-user override, kept in your untracked `installed.local.json`); untick it on the first run (`--set claude=off`) only when nobody does.
 - With doc-search on, tick *OpenCode* under *Harness* (`--set harness=claude-code,opencode`): setup merges the doc-search entry into the project's `opencode.json` under `mcp`, keeping every other key (your `plugin` line included).
 
 ## Available Commands
