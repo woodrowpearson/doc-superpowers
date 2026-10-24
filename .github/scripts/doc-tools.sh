@@ -2928,8 +2928,8 @@ fragments merge|cmd_fragments_merge|repo|paths-out= remove
   <range-start>, or by a v* release tag cut from this history after it,
   whose release commit has not reached <range-end> (merge or cherry-pick
   it first); 1 on any other failure.
-tools install|cmd_tools_install|deps|dest= with-helpers helper=*
-  [--dest <path>] [--with-helpers | --helper <set>...]
+tools install|cmd_tools_install|deps|dest= with-helpers helper=* step=*
+  [--dest <path>] [--with-helpers | --helper <set>... --step <script>...]
   Vendor doc-tools.sh into <path> (default .github/scripts); with
   --with-helpers also every helper set the CI templates run, with --helper
   <set> (repeatable) only those: doc-pr-release and doc-superpowers-steps
@@ -2937,7 +2937,11 @@ tools install|cmd_tools_install|deps|dest= with-helpers helper=*
   (scripts/ledger/*.sh, *.awk, *.jq → <path>/ledger/) and reference
   adapters (scripts/adapters/*.sh → <path>/adapters/), which the vendored
   doc-tools.sh runs from beside itself; shipping doc-pr-release also
-  creates RELEASE-NOTES.next/README.md (only if absent). Files are
+  creates RELEASE-NOTES.next/README.md (only if absent). --step <script>
+  (repeatable; .sh optional) vendors only those step scripts of
+  doc-superpowers-steps, exactly as named (install --ci names the ones its
+  workflows run, with the step scripts those run); it replaces
+  --helper doc-superpowers-steps. Files are
   replaced atomically; an existing file keeps its mode, every script ends
   up executable (the templates run them directly), and a new awk or jq
   program is 644.
@@ -2945,14 +2949,15 @@ tools install|cmd_tools_install|deps|dest= with-helpers helper=*
   before anything is written. Run from a vendored copy it can only copy
   itself (onto itself it only makes sure the copy is executable); a helper
   request then exits 1, writing nothing.
-tools uninstall|cmd_tools_uninstall|deps|dest= helper=*
-  [--dest <path>] [--helper <set>...]
+tools uninstall|cmd_tools_uninstall|deps|dest= helper=* step=*
+  [--dest <path>] [--helper <set>... --step <script>...]
   Remove from <path> each vendored file that is byte-identical to the
   plugin's copy; a file with local edits (or from another plugin
   version) and a file you added are kept and reported, and so is a helper
   directory that still holds them. With --helper <set> (repeatable), only
   those helper sets (doc-tools.sh stays; ledger is <path>/ledger/ and
-  <path>/adapters/). A symbolic link on the
+  <path>/adapters/); with --step <script>, only those step scripts (each
+  one kept is reported). A symbolic link on the
   way is refused. With the doc-pr-release helpers it also removes
   RELEASE-NOTES.next/README.md when it is byte-identical to the plugin's
   fragment-format spec and the only file there (an edited one, or one
@@ -3472,6 +3477,7 @@ _shellcheck_opt_names() {
   _OPT_create="" _OPT_title="" _OPT_body_file="" _OPT_paths="" _OPT_sev=""
   _OPT_no_repo_adapters="" _OPT_strict="" _OPT_top="" _OPT_pr=""
   _OPTV_items=() _OPTV_claims=() _OPTV_code_refs=() _OPTV_code_refs_from=() _OPTV_config=() _OPTV_helper=() _OPTV_holds=()
+  _OPTV_step=()
 }
 
 # Repository verbs run only inside a git work tree, at its top level. Checked
@@ -6847,11 +6853,13 @@ _tools_copy() {
 }
 
 # The helper directories a tools install/uninstall acts on: every one for
-# --with-helpers, the --helper ones (validated) otherwise; "" for none.
+# --with-helpers, the --helper ones (validated) otherwise, and
+# doc-superpowers-steps for --step; "" for none.
 _tools_helper_selection() {
   local d sel=""
   if [ -n "${_OPT_with_helpers:-}" ]; then
     [ "${#_OPTV_helper[@]}" -eq 0 ] || _usage_error "$1" "--with-helpers and --helper are exclusive"
+    [ "${#_OPTV_step[@]}" -eq 0 ] || _usage_error "$1" "--with-helpers and --step are exclusive"
     printf '%s' "$_TOOLS_HELPER_DIRS"
     return 0
   fi
@@ -6865,7 +6873,45 @@ _tools_helper_selection() {
       *) sel="${sel:+$sel }$d" ;;
     esac
   done
+  if [ "${#_OPTV_step[@]}" -gt 0 ]; then
+    case " $sel " in
+      *" doc-superpowers-steps "*) _usage_error "$1" "--helper doc-superpowers-steps (every step script) and --step are exclusive" ;;
+    esac
+    sel="${sel:+$sel }doc-superpowers-steps"
+  fi
   printf '%s' "$sel"
+}
+
+# The step scripts --step names (validated, each with its .sh), or "" for
+# none — every one of the set, when the set is selected.
+_tools_step_selection() {
+  local s n sel="" src="$SCRIPT_DIR/hooks/ci/doc-superpowers-steps"
+  for s in ${_OPTV_step[@]+"${_OPTV_step[@]}"}; do
+    n="${s%.sh}.sh"
+    case "$n" in
+      */* | .* | *[!A-Za-z0-9_.-]*) _usage_error "$1" "--step takes a step script's name (scripts/hooks/ci/doc-superpowers-steps/<name>.sh), not '$s'" ;;
+    esac
+    # From a vendored copy there is no set to check against: its helper
+    # refusal (exit 1) follows.
+    if _tools_is_plugin && [ ! -f "$src/$n" ]; then
+      _usage_error "$1" "unknown step script '$s' (the plugin's are scripts/hooks/ci/doc-superpowers-steps/*.sh)"
+    fi
+    case " $sel " in
+      *" $n "*) ;;
+      *) sel="${sel:+$sel }$n" ;;
+    esac
+  done
+  printf '%s' "$sel"
+}
+
+# _tools_in_steps <file> <steps>: <file> is in the selection — always, when
+# <steps> is empty or the part is not the step scripts' (_TP_SET).
+_tools_in_steps() {
+  [ -n "$2" ] && [ "$_TP_SET" = doc-superpowers-steps ] || return 0
+  case " $2 " in
+    *" ${1##*/} "*) return 0 ;;
+  esac
+  return 1
 }
 
 # _tools_no_link <path>: refuse (before anything is written) when <path> or a
@@ -6888,8 +6934,9 @@ _tools_no_link() {
 
 cmd_tools_install() {
   [ $# -eq 0 ] || _usage_error "tools install" "takes no arguments (got '$1')"
-  local dest="${_OPT_dest:-.github/scripts}" helpers f n p
+  local dest="${_OPT_dest:-.github/scripts}" helpers steps f n p
   helpers=$(_tools_helper_selection "tools install")
+  steps=$(_tools_step_selection "tools install")
   local src="$SCRIPT_DIR/doc-tools.sh"
 
   # Everything a helper install needs is checked before anything is written.
@@ -6904,6 +6951,7 @@ cmd_tools_install() {
       [ -d "$_TP_SRC" ] || _die "the plugin's helper directory $_TP_SRC is missing. Nothing was installed."
       for f in "$_TP_SRC"/*.sh "$_TP_SRC"/*.awk "$_TP_SRC"/*.jq; do
         [ -f "$f" ] || continue
+        _tools_in_steps "$f" "$steps" || continue
         _tools_no_link "$dest/$_TP_SUB/${f##*/}"
       done
     done
@@ -6929,6 +6977,7 @@ cmd_tools_install() {
     n=0
     for f in "$_TP_SRC"/*.sh "$_TP_SRC"/*.awk "$_TP_SRC"/*.jq; do
       [ -f "$f" ] || continue
+      _tools_in_steps "$f" "$steps" || continue
       case "$f" in
         *.sh) _tools_copy "$f" "$dest/$_TP_SUB/${f##*/}" 755 1 ;;
         *) _tools_copy "$f" "$dest/$_TP_SUB/${f##*/}" 644 ;;
@@ -6954,8 +7003,9 @@ cmd_tools_install() {
 
 cmd_tools_uninstall() {
   [ $# -eq 0 ] || _usage_error "tools uninstall" "takes no arguments (got '$1')"
-  local dest="${_OPT_dest:-.github/scripts}" only
+  local dest="${_OPT_dest:-.github/scripts}" only steps
   only=$(_tools_helper_selection "tools uninstall")
+  steps=$(_tools_step_selection "tools uninstall")
   local src="$SCRIPT_DIR/doc-tools.sh"
   if ! _tools_is_plugin; then
     echo "ERROR: tools uninstall deletes only files identical to the plugin's copies, and $src is a vendored copy with nothing to compare them with. Run the plugin's doc-tools.sh. Nothing was removed." >&2
@@ -6996,16 +7046,23 @@ cmd_tools_uninstall() {
     n=0
     for p in "$_TP_SRC"/*.sh "$_TP_SRC"/*.awk "$_TP_SRC"/*.jq; do
       [ -f "$p" ] || continue
+      _tools_in_steps "$p" "$steps" || continue
       f="$dest/$_TP_SUB/${p##*/}"
       if [ -f "$f" ] && ! [ "$p" -ef "$f" ] && cmp -s "$p" "$f"; then
         rm -f "$f" || _die "cannot remove $f"
         n=$((n + 1))
+      elif [ -n "$steps" ] && [ "$_TP_SET" = doc-superpowers-steps ] && [ -f "$f" ] && ! [ "$p" -ef "$f" ]; then
+        # A named step script stays when it is not the plugin's copy.
+        echo "Kept $f (it differs from the plugin's copy: local edits or another version; delete it by hand if it is not needed)"
+        kept=$((kept + 1))
       fi
     done
     [ "$n" -eq 0 ] || echo "Removed $n $_TP_LABEL from $dest/$_TP_SUB/"
     removed=$((removed + n))
     if rmdir "$dest/$_TP_SUB" 2>/dev/null; then
       :
+    elif [ -n "$steps" ] && [ "$_TP_SET" = doc-superpowers-steps ]; then
+      : # the step scripts not named stay, and each named one kept was said
     else
       echo "Kept $dest/$_TP_SUB/ (it holds files that are not unmodified plugin helpers: local edits or your own)"
       kept=$((kept + 1))

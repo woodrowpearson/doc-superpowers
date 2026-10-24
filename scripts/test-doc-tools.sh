@@ -2390,6 +2390,48 @@ test_tools_helper_selects_directories() {
   teardown
 }
 
+test_tools_step_selects_step_scripts() {
+  # install.sh (install --ci) vendors only the step scripts its workflows run:
+  # --step <script> is that selection inside doc-superpowers-steps, for install
+  # and uninstall, exactly as named.
+  echo "test: tools install/uninstall --step <script> act on the named step scripts only"
+  setup
+  local output exit_code steps=.github/scripts/doc-superpowers-steps
+  exit_code=0
+  output=$("$DOC_TOOLS" tools install --step ledger-publish.sh --step freshness-check.sh 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "install --step x2 exits 0"
+  assert_eq "freshness-check.sh ledger-publish.sh" "$(cd "$steps" 2>/dev/null && echo *)" "exactly the named step scripts are vendored"
+  assert_true "…executable" test -x "$steps/ledger-publish.sh"
+  assert_contains "$output" "Installed 2 doc-superpowers-steps helpers → $steps/" "the report counts them"
+  assert_file_exists ".github/scripts/doc-tools.sh" "doc-tools.sh is vendored with them"
+  exit_code=0
+  "$DOC_TOOLS" tools install --step prepare-agent >/dev/null 2>&1 || exit_code=$?
+  assert_eq "0" "$exit_code" "a name without .sh is the script of that name"
+  assert_true "…prepare-agent.sh is vendored" test -x "$steps/prepare-agent.sh"
+  { echo "# a local edit" >> "$steps/freshness-check.sh"; } 2>/dev/null || true
+  exit_code=0
+  output=$("$DOC_TOOLS" tools uninstall --step prepare-agent.sh --step freshness-check.sh 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "uninstall --step x2 exits 0"
+  assert_file_not_exists "$steps/prepare-agent.sh" "an unmodified named step script is removed"
+  assert_file_exists "$steps/freshness-check.sh" "an edited one is kept"
+  assert_contains "$output" "Kept $steps/freshness-check.sh" "…and reported"
+  assert_file_exists "$steps/ledger-publish.sh" "a step script not named stays"
+  assert_file_exists ".github/scripts/doc-tools.sh" "doc-tools.sh stays"
+  exit_code=0
+  output=$("$DOC_TOOLS" tools install --step bogus.sh 2>&1) || exit_code=$?
+  assert_eq "2" "$exit_code" "a step script the plugin does not ship is a usage error"
+  exit_code=0
+  output=$("$DOC_TOOLS" tools install --step ../doc-tools.sh 2>&1) || exit_code=$?
+  assert_eq "2" "$exit_code" "…and so is a path"
+  exit_code=0
+  output=$("$DOC_TOOLS" tools install --with-helpers --step prepare-agent.sh 2>&1) || exit_code=$?
+  assert_eq "2" "$exit_code" "--with-helpers and --step are exclusive"
+  exit_code=0
+  output=$("$DOC_TOOLS" tools install --helper doc-superpowers-steps --step prepare-agent.sh 2>&1) || exit_code=$?
+  assert_eq "2" "$exit_code" "--helper doc-superpowers-steps (the whole set) and --step are exclusive"
+  teardown
+}
+
 test_tools_refuses_symlinked_parent() {
   # _tmp_beside refused a symlinked target; a symlinked directory on the way
   # (a committed .github/scripts -> elsewhere) sent the copy, or the removal,
@@ -8017,6 +8059,7 @@ run_tests() {
   test_tools_status_reports_drift
   test_tools_install_unknown_flag_errors
   test_tools_helper_selects_directories
+  test_tools_step_selects_step_scripts
   test_tools_refuses_symlinked_parent
 
   # --- doc-path key normalization (add-entry + siblings) ---

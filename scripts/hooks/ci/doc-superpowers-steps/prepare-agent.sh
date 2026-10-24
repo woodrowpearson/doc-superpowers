@@ -11,7 +11,11 @@
 # Env:
 #   DOC_SUPERPOWERS_VERSION          vX.Y.Z — the workflow's env, rendered by
 #                                    the installer from its own version
-#   DOC_SUPERPOWERS_MARKETPLACE_URL  default https://github.com/woodrowpearson/doc-superpowers.git
+#   DOC_SUPERPOWERS_MARKETPLACE_URL  the git URL to clone the plugin from — the
+#                                    workflow's env, rendered by the installer
+#                                    (the plugin's own repository, or install
+#                                    --ci --marketplace-url). No default: a
+#                                    project's vendored copy names no URL
 #   RUNNER_TEMP, GITHUB_OUTPUT       set by the runner
 #
 # The agent edits files in the checkout, and a mistake could reach the
@@ -27,12 +31,13 @@
 # Outputs: marketplace=<absolute directory>; head=<the checkout's HEAD> (the
 # commit step checks the agent left it there); checker=<the checker snapshot>.
 #
-# Exit codes: 0; 1 (with an ::error::) when the version is not a release, its
-# tag cannot be fetched, or the manifests at the tag name another version.
+# Exit codes: 0; 1 (with an ::error::) when the version is not a release, the
+# marketplace URL is not set, its tag cannot be fetched, or the manifests at
+# the tag name another version.
 set -euo pipefail
 
 VERSION="${DOC_SUPERPOWERS_VERSION:-}"
-URL="${DOC_SUPERPOWERS_MARKETPLACE_URL:-https://github.com/woodrowpearson/doc-superpowers.git}"
+URL="${DOC_SUPERPOWERS_MARKETPLACE_URL:-}"
 
 err() {
   echo "::error::doc-superpowers: $*"
@@ -46,6 +51,7 @@ fi
 if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   err "DOC_SUPERPOWERS_VERSION is '$VERSION', not a released vX.Y.Z: the installer that rendered this workflow could not read its plugin version. Re-run 'install --ci' from a released doc-superpowers plugin."
 fi
+[ -n "$URL" ] || err "DOC_SUPERPOWERS_MARKETPLACE_URL is not set: the workflow's env names the git URL to fetch doc-superpowers $VERSION from, and the installer renders it. Re-run 'install --ci' (with --marketplace-url <git URL> to fetch from a mirror), which writes this workflow and its step scripts together."
 head=$(git rev-parse --verify HEAD 2>/dev/null) || err "no checkout here (git rev-parse HEAD failed)"
 
 dir=$(mktemp -d "$RUNNER_TEMP/doc-superpowers-plugin.XXXXXX") || err "cannot create a directory under $RUNNER_TEMP"
