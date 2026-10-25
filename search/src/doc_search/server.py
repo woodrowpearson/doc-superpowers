@@ -270,7 +270,7 @@ def build_server(
             str | None,
             Field(
                 description="Path of another worktree of this repository to search. Default: the client's "
-                "worktree, else the launch one (`status` names it)."
+                "worktree, else the launch one (`status` names it); a relative path is read against it."
             ),
         ] = None,
     ) -> str:
@@ -304,7 +304,7 @@ def build_server(
             str | None,
             Field(
                 description="Path of another worktree of this repository to read from. Default: the client's "
-                "worktree, else the launch one (`status` names it)."
+                "worktree, else the launch one (`status` names it); a relative path is read against it."
             ),
         ] = None,
     ) -> str:
@@ -322,7 +322,7 @@ def build_server(
             str | None,
             Field(
                 description="Path of another worktree of this repository. Default: the client's worktree, "
-                "else the launch one (`status` names it)."
+                "else the launch one (`status` names it); a relative path is read against it."
             ),
         ] = None,
     ) -> str:

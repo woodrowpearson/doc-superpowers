@@ -6458,6 +6458,9 @@ test_launcher_client_cwd() {
     /bin/sh -c 'cd "$1" && exec /bin/sh "$2" serve' sh "$top" "$SCRIPT_DIR/search/launch.sh" 2>&1)
   assert_eq "client=/given" "$out" "…a DOC_SEARCH_CLIENT_CWD already set is kept"
   out=$(cd "$client" && env -u DOC_SEARCH_CLIENT_CWD DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= PATH="$bin:$REAL_PATH" \
+    /bin/sh -c 'cd "$1" && /bin/sh "$2" serve; true' sh "$top" "$SCRIPT_DIR/search/launch.sh" 2>&1)
+  assert_eq "client=$top" "$out" "…a wrapper without exec is the parent: its cwd (the server then keeps the launch worktree)"
+  out=$(cd "$client" && env -u DOC_SEARCH_CLIENT_CWD DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= PATH="$bin:$REAL_PATH" \
     /bin/sh -c 'cd "$1" && exec /bin/sh "$2" status' sh "$top" "$SCRIPT_DIR/search/launch.sh" 2>&1)
   assert_eq "client=unset" "$out" "another verb: not set"
   teardown

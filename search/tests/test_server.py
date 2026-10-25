@@ -340,6 +340,7 @@ def test_client_worktree_is_the_default(git_repo, tiny_model: str, tmp_path: Pat
     query = {"query": "discount policy rate tax", "scope": "docs"}
 
     server = build_server(repo.root, pool=pool, client_cwd=str(other / "docs"))
+    assert other in pool.resident()  # the default's builds start at once, before any call
     found = call(server, "search", query)
     ready(pool, other)
     assert "docs/discount.md" in found

@@ -42,9 +42,11 @@
 # while the session runs in a worktree. The server makes the worktree holding
 # $DOC_SEARCH_CLIENT_CWD its default, when it is one of this repository's
 # (references/search.md -> worktree). The client is this process's parent
-# ($PPID; an `exec` in an `sh -c` wrapper keeps the pid): its cwd from /proc,
-# else lsof. A value already set is kept; none found leaves it unset, and the
-# default is then the launch worktree.
+# ($PPID: true for `sh <launcher> serve`, and for an `sh -c` wrapper that
+# `exec`s it; a wrapper that does not exec is the parent itself): its cwd from
+# /proc, else lsof (-b: never block on a dead network mount). A value already
+# set is kept; none found leaves it unset, and the default is then the launch
+# worktree.
 #
 # Failures are one stderr line and exit 2.
 
@@ -72,7 +74,7 @@ if [ "${1:-}" = serve ] && [ -z "${DOC_SEARCH_CLIENT_CWD:-}" ]; then
   if [ -z "$CLIENT_CWD" ]; then
     LSOF=$(command -v lsof 2>/dev/null) || LSOF=/usr/sbin/lsof
     if [ -x "$LSOF" ]; then
-      CLIENT_CWD=$("$LSOF" -w -a -p "$PPID" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)
+      CLIENT_CWD=$("$LSOF" -b -w -a -p "$PPID" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)
     fi
   fi
   if [ -n "$CLIENT_CWD" ]; then
