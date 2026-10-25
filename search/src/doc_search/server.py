@@ -204,7 +204,14 @@ class Runtime:
         return self.tools.related(path, self.worktree(worktree), line, limit)
 
     def status(self, *, warm: bool = True) -> str:
-        return self.tools.status(self.default, warm=warm, default_note=self.default_note)
+        tree, note = self.default, self.default_note
+        try:
+            resolve_worktree(self.repo, None, self.default)  # a default removed since start: report the launch one
+        except ValueError as err:
+            tree, note = self.repo.top, flat(err)
+        except GitError:
+            pass  # git cannot list the worktrees now; status reads the default as it was chosen
+        return self.tools.status(tree, warm=warm, default_note=note)
 
 
 def _default_worktree(repo: RepoInfo, client_cwd: str | None) -> tuple[Path, str | None]:
