@@ -351,6 +351,13 @@ def test_client_worktree_is_the_default(git_repo, tiny_model: str, tmp_path: Pat
     assert f"default worktree: {other} (the client's working directory; the server was launched in {repo.root})" in status
     assert status.index(f"\nworktree: {other}\n") < status.index(f"\nworktree: {repo.root}\n")  # the default first
 
+    # the default removed mid-session: calls are refused, status reports the launch worktree and says why
+    repo.git("worktree", "remove", "--force", str(other))
+    assert "no longer a worktree of this repository; pass worktree" in call(server, "search", query)
+    status = call(server, "status")
+    assert f"default worktree: {repo.root} (the default worktree {other} is no longer a worktree" in status
+    assert status.index(f"\nworktree: {repo.root}\n") < status.find(f"\nworktree: {other}\n") or f"\nworktree: {other}\n" not in status
+
     # a directory outside the repository keeps the launch worktree, and status says why
     foreign = tmp_path / "elsewhere"
     foreign.mkdir()
