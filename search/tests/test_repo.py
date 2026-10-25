@@ -11,6 +11,7 @@ from doc_search.repo import (
     GitError,
     NotARepo,
     RepoInfo,
+    client_worktree,
     confine,
     diff_names,
     git,
@@ -112,6 +113,38 @@ def test_resolve_worktree(git_repo, tmp_path: Path) -> None:
     assert resolve_worktree(info, str(alias)) == linked
     # a relative path is read against the launch top
     assert resolve_worktree(info, "../" + linked.name) == linked
+
+
+def test_resolve_worktree_default(git_repo) -> None:
+    """A call that names no worktree gets `default` when one is given; a named one still wins."""
+    repo = git_repo()
+    repo.write("a.txt", "a\n")
+    repo.commit("base")
+    linked = repo.add_worktree("one", "feat")
+    info = RepoInfo.from_cwd(repo.root)
+
+    assert resolve_worktree(info, None, linked) == linked
+    assert resolve_worktree(info, "  ", linked) == linked
+    assert resolve_worktree(info, str(repo.root), linked) == repo.root
+    assert resolve_worktree(info, None, None) == repo.root
+
+
+def test_client_worktree(git_repo, tmp_path: Path) -> None:
+    """The worktree holding a client's working directory, or None for anything that is not one of ours."""
+    repo = git_repo()
+    repo.write("src/a.txt", "a\n")
+    repo.commit("base")
+    linked = repo.add_worktree("one", "feat")
+    stranger = git_repo("stranger")
+    stranger.write("b.txt", "b\n")
+    stranger.commit("other repository")
+    info = RepoInfo.from_cwd(repo.root)
+
+    assert client_worktree(info, str(linked)) == linked
+    assert client_worktree(info, str(linked / "src")) == linked  # a subdirectory: its worktree
+    assert client_worktree(info, str(repo.root)) == repo.root
+    for path in (None, "", "  ", str(stranger.root), str(tmp_path), str(tmp_path / "missing")):
+        assert client_worktree(info, path) is None, path
 
 
 def test_resolve_worktree_rejects_foreign_path(git_repo, tmp_path: Path) -> None:

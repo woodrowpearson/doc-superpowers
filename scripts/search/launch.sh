@@ -36,6 +36,16 @@
 # to stderr (stdout is the MCP stream). It runs in this shell: it should only
 # set variables, and an `exit` in it ends the launcher.
 #
+# The client's working directory (serve only): an MCP client may start the
+# server outside the worktree its session works in. The Claude desktop app, for
+# one, starts project servers in the main checkout (--project-config-root)
+# while the session runs in a worktree. The server makes the worktree holding
+# $DOC_SEARCH_CLIENT_CWD its default, when it is one of this repository's
+# (references/search.md -> worktree). The client is this process's parent
+# ($PPID; an `exec` in an `sh -c` wrapper keeps the pid): its cwd from /proc,
+# else lsof. A value already set is kept; none found leaves it unset, and the
+# default is then the launch worktree.
+#
 # Failures are one stderr line and exit 2.
 
 fail() {
@@ -54,6 +64,20 @@ if [ -f "$ENV_HOOK" ] && [ -r "$ENV_HOOK" ]; then
     . "$ENV_HOOK" >&2
   else
     echo "doc-search: ignoring the env hook $ENV_HOOK (it does not parse)" >&2
+  fi
+fi
+
+if [ "${1:-}" = serve ] && [ -z "${DOC_SEARCH_CLIENT_CWD:-}" ]; then
+  CLIENT_CWD=$(readlink "/proc/$PPID/cwd" 2>/dev/null) || CLIENT_CWD=""
+  if [ -z "$CLIENT_CWD" ]; then
+    LSOF=$(command -v lsof 2>/dev/null) || LSOF=/usr/sbin/lsof
+    if [ -x "$LSOF" ]; then
+      CLIENT_CWD=$("$LSOF" -w -a -p "$PPID" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)
+    fi
+  fi
+  if [ -n "$CLIENT_CWD" ]; then
+    DOC_SEARCH_CLIENT_CWD=$CLIENT_CWD
+    export DOC_SEARCH_CLIENT_CWD
   fi
 fi
 
