@@ -304,6 +304,8 @@ doc-search · docs: semble potion-code-16M-v2 (+cloud: gemini-embedding-001) · 
 - **Refresh:** before a call, an index is revalidated when its last check is older than `max(search.rescan_seconds, 3 × its last build time)`, the cooldown semble's own server uses. Revalidation uses `semble.cache.get_validated_cache`. A stale index is rebuilt through `SembleIndex.from_path`, which re-indexes incrementally (semble ≥ 0.5.2), and saved with `semble.cache.save_index_to_cache`.
 - **Worktree targeting:** `search`, `fetch` and `related` take an optional `worktree`. The default is the launch worktree; any worktree of the **same repository** (`git worktree list`) is accepted, and anything else is refused. At most two worktrees' index pairs stay in memory (least recently used).
 
+  > ⚠️ **AMENDED 2026-10-24 — the default is the client's worktree.** An MCP client may start the server outside its session's worktree (the Claude desktop app starts project servers in the main checkout, `--project-config-root`). For `serve` the launcher exports its parent process's cwd as `DOC_SEARCH_CLIENT_CWD`; the worktree holding it is the default when it is one of this repository's, else the launch one, and `status` names it. A relative `worktree` is read against the default. MCP roots cannot carry this (deprecated in SDK 2.x, SEP-2577; no back-channel inside a tool call). Landed on branch `feat/search-client-worktree-default`; contract: `references/search.md` → *Tools* → `worktree`.
+
 | Tool | Parameters | Behavior |
 |---|---|---|
 | `search` | `query`, `scope` (`all`\|`docs`\|`code`, default `all`), `limit` (1–50, default 10), `doc_type` (str or list), `path_prefix`, `include_terminal` (bool), `worktree` | As described in §6. |

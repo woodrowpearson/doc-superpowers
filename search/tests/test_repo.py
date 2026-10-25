@@ -127,6 +127,13 @@ def test_resolve_worktree_default(git_repo) -> None:
     assert resolve_worktree(info, "  ", linked) == linked
     assert resolve_worktree(info, str(repo.root), linked) == repo.root
     assert resolve_worktree(info, None, None) == repo.root
+    # a relative path is read against the default, so `.` is the default
+    assert resolve_worktree(info, ".", linked) == linked
+    assert resolve_worktree(info, "../" + repo.root.name, linked) == repo.root
+    # a default removed after it was chosen is refused, never swapped for the launch top
+    repo.git("worktree", "remove", "--force", str(linked))
+    with pytest.raises(ValueError, match="no longer a worktree of this repository"):
+        resolve_worktree(info, None, linked)
 
 
 def test_client_worktree(git_repo, tmp_path: Path) -> None:
@@ -143,6 +150,13 @@ def test_client_worktree(git_repo, tmp_path: Path) -> None:
     assert client_worktree(info, str(linked)) == linked
     assert client_worktree(info, str(linked / "src")) == linked  # a subdirectory: its worktree
     assert client_worktree(info, str(repo.root)) == repo.root
+    alias = tmp_path / "alias"
+    alias.symlink_to(linked)
+    assert client_worktree(info, str(alias)) == linked  # a symlinked spelling of the worktree
+    nested = linked / "vendor" / "nested"
+    nested.mkdir(parents=True)
+    repo.git("init", "-q", str(nested))
+    assert client_worktree(info, str(nested)) is None  # a repository inside the worktree is another repository
     for path in (None, "", "  ", str(stranger.root), str(tmp_path), str(tmp_path / "missing")):
         assert client_worktree(info, path) is None, path
 

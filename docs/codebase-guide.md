@@ -509,14 +509,16 @@ The server is the uv package `search/`, started by the client through the commit
 ```
 .mcp.json → sh .claude/doc-superpowers/search-mcp.sh serve
   → launch.sh: find doc-superpowers ($DOC_SUPERPOWERS_ROOT → this checkout → newest plugin-cache version);
+    for serve, export the parent process's cwd (the MCP client's) as DOC_SEARCH_CLIENT_CWD unless set;
     exec uv run --project <root>/search --frozen --no-dev [--extra cloud] [--extra local-transformer] doc-search serve
   → server.build_server → Runtime: RepoInfo.from_cwd, load_config (absent: every tool answers the inert
     line; invalid: "invalid config"), the corpus of the launch worktree, IndexPool, the cloud leg (built
-    without the network; one that cannot be built answers with its reason), then the launch worktree's
-    builds start in the background
+    without the network; one that cannot be built answers with its reason), _default_worktree (the
+    worktree holding DOC_SEARCH_CLIENT_CWD when it is one of this repository's, else the launch one;
+    status names it), then the default worktree's builds start in the background
 search(query, scope, limit, doc_type, path_prefix, include_terminal, worktree)
   → limit None → search.default_limit; a blank doc_type value or path_prefix is dropped
-  → resolve_worktree (one of git worktree list, else refused) → IndexPool.get(wait ≤ 20 s): the docs + code
+  → resolve_worktree (none → the default worktree, re-checked; relative → against it; one of git worktree list, else refused) → IndexPool.get(wait ≤ 20 s): the docs + code
     pair (loaded from semble's cache when valid, else SembleIndex.from_path, one build at a time pool-wide,
     docs first, and one per index host-wide under its build lock (buildlock.py; a waiter loads what the
     holder saved); revalidated after max(rescan_seconds, 3 × build seconds), build seconds timed from the build

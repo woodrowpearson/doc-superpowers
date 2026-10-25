@@ -128,14 +128,19 @@ def worktrees(repo: RepoInfo) -> list[Path]:
 def resolve_worktree(repo: RepoInfo, requested: str | None, default: Path | None = None) -> Path:
     """The worktree a request names. `None` (or an empty string) is `default`, else the launch top.
 
-    A relative path is read against the launch top. A path that is not exactly one of the
-    repository's worktrees is refused, so a tool argument cannot point at another directory.
+    A relative path is read against `default` (else the launch top), so `.` means the default. A
+    path that is not exactly one of the repository's worktrees is refused, so a tool argument
+    cannot point at another directory. A `default` other than the launch top is checked the same
+    way on every use: a worktree removed after the server started is refused, not searched.
     """
+    base = default if default is not None else repo.top
     if requested is None or not requested.strip():
-        return default if default is not None else repo.top
+        if base != repo.top and base not in worktrees(repo):
+            raise ValueError(f"the default worktree {base} is no longer a worktree of this repository; pass worktree")
+        return base
     path = Path(requested)
     if not path.is_absolute():
-        path = repo.top / path
+        path = base / path
     try:
         real = path.resolve()
     except (OSError, RuntimeError) as err:
