@@ -125,14 +125,14 @@ def worktrees(repo: RepoInfo) -> list[Path]:
     return found
 
 
-def resolve_worktree(repo: RepoInfo, requested: str | None) -> Path:
-    """The worktree a request names. `None` (or an empty string) is the launch top.
+def resolve_worktree(repo: RepoInfo, requested: str | None, default: Path | None = None) -> Path:
+    """The worktree a request names. `None` (or an empty string) is `default`, else the launch top.
 
     A relative path is read against the launch top. A path that is not exactly one of the
     repository's worktrees is refused, so a tool argument cannot point at another directory.
     """
     if requested is None or not requested.strip():
-        return repo.top
+        return default if default is not None else repo.top
     path = Path(requested)
     if not path.is_absolute():
         path = repo.top / path
@@ -143,6 +143,26 @@ def resolve_worktree(repo: RepoInfo, requested: str | None) -> Path:
     if real not in worktrees(repo):
         raise ValueError(f"not a worktree of this repository: {requested}")
     return real
+
+
+def client_worktree(repo: RepoInfo, path: str | None) -> Path | None:
+    """The worktree of this repository that holds `path` (an MCP client's working directory), or None.
+
+    None for an empty path, a directory git cannot read, another repository, or a worktree that
+    `git worktree list` does not list: the caller then keeps the launch top.
+    """
+    if path is None or not path.strip():
+        return None
+    try:
+        found = RepoInfo.from_cwd(Path(path))
+    except (NotARepo, OSError):
+        return None
+    if found.common_dir != repo.common_dir:
+        return None
+    try:
+        return found.top if found.top in worktrees(repo) else None
+    except GitError:
+        return None
 
 
 def _has_dot_git(parts: tuple[str, ...] | list[str]) -> bool:

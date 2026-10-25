@@ -325,13 +325,49 @@ def test_worktree_param(git_repo, tiny_model: str, tmp_path: Path) -> None:
     assert "not a worktree of this repository" in call(server, "related", {"path": "docs/a.md", "worktree": "/"})
 
 
+def test_client_worktree_is_the_default(git_repo, tiny_model: str, tmp_path: Path) -> None:
+    """A server launched in one worktree for a client working in another searches the client's by default.
+
+    The Claude desktop app starts project servers in the main checkout while the session runs in a
+    worktree; the launcher passes the client's working directory as `client_cwd`.
+    """
+    repo, pool, _ = enabled(git_repo, tiny_model)
+    other = repo.add_worktree("b", "branch-b")
+    (other / "docs").mkdir(exist_ok=True)
+    (other / "docs" / "discount.md").write_text(BRANCH_DOC, encoding="utf-8")
+    repo.git("add", "-A", cwd=other)
+    repo.git("commit", "-q", "-m", "discount", cwd=other)
+    query = {"query": "discount policy rate tax", "scope": "docs"}
+
+    server = build_server(repo.root, pool=pool, client_cwd=str(other / "docs"))
+    found = call(server, "search", query)
+    ready(pool, other)
+    assert "docs/discount.md" in found
+    # a named worktree still wins over the default
+    assert "docs/discount.md" not in call(server, "search", {**query, "worktree": str(repo.root)})
+    ready(pool, repo.root)
+    status = call(server, "status")
+    assert f"default worktree: {other} (the client's working directory; the server was launched in {repo.root})" in status
+    assert status.index(f"\nworktree: {other}\n") < status.index(f"\nworktree: {repo.root}\n")  # the default first
+
+    # a directory outside the repository keeps the launch worktree, and status says why
+    foreign = tmp_path / "elsewhere"
+    foreign.mkdir()
+    server = build_server(repo.root, pool=pool, client_cwd=str(foreign))
+    assert "docs/discount.md" not in call(server, "search", query)
+    assert "is not a worktree of this repository" in call(server, "status")
+    # the client in the launch worktree, or no client directory at all: no default line
+    for client_cwd in (str(repo.root), None):
+        assert "default worktree:" not in call(build_server(repo.root, pool=pool, client_cwd=client_cwd), "status")
+
+
 def test_git_failure_resolving_a_worktree_is_one_line(
     git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo, pool, server = enabled(git_repo, tiny_model)
     ready(pool, repo.root)
 
-    def broken(repo_info, requested):
+    def broken(repo_info, requested, default=None):
         raise GitError("git worktree list failed (128): fatal: bad object\nhint: run git fsck")
 
     monkeypatch.setattr("doc_search.server.resolve_worktree", broken)

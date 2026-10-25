@@ -6438,6 +6438,31 @@ test_search_status_and_json() {
   teardown
 }
 
+test_launcher_client_cwd() {
+  echo "test: launcher: serve exports the parent process's cwd as DOC_SEARCH_CLIENT_CWD (the client's worktree becomes the server's default); a value already set is kept; other verbs do not set it"
+  setup
+  local envroot bin client top out
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  client=$(cd "$(harness_mktemp_d client)" && pwd -P)
+  top=$(pwd -P)
+  bin=$(harness_mktemp_d cwduv)
+  printf '#!/bin/sh\nprintf "client=%%s\\n" "${DOC_SEARCH_CLIENT_CWD:-unset}"\n' > "$bin/uv"
+  chmod +x "$bin/uv"
+  # The parent (this subshell) sits in $client; the launcher itself starts in the repository, as an
+  # MCP client's `sh -c "exec sh <launcher> serve"` does when its project dir is not its cwd.
+  out=$(cd "$client" && env -u DOC_SEARCH_CLIENT_CWD DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= PATH="$bin:$REAL_PATH" \
+    /bin/sh -c 'cd "$1" && exec /bin/sh "$2" serve' sh "$top" "$SCRIPT_DIR/search/launch.sh" 2>&1)
+  assert_eq "client=$client" "$out" "serve: the parent's cwd, not the launcher's"
+  out=$(cd "$client" && env DOC_SEARCH_CLIENT_CWD=/given DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= PATH="$bin:$REAL_PATH" \
+    /bin/sh -c 'cd "$1" && exec /bin/sh "$2" serve' sh "$top" "$SCRIPT_DIR/search/launch.sh" 2>&1)
+  assert_eq "client=/given" "$out" "…a DOC_SEARCH_CLIENT_CWD already set is kept"
+  out=$(cd "$client" && env -u DOC_SEARCH_CLIENT_CWD DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= PATH="$bin:$REAL_PATH" \
+    /bin/sh -c 'cd "$1" && exec /bin/sh "$2" status' sh "$top" "$SCRIPT_DIR/search/launch.sh" 2>&1)
+  assert_eq "client=unset" "$out" "another verb: not set"
+  teardown
+}
+
 echo ""
 echo "=== doc-search: the launcher and the opt-in --search set ==="
 test_launcher_resolution_order
@@ -6446,6 +6471,7 @@ test_launcher_transformer_extra
 test_launcher_without_uv
 test_launcher_is_posix_sh
 test_launcher_env_hook
+test_launcher_client_cwd
 test_search_install_refused_without_config
 test_search_install_writes_launcher_and_entry
 test_search_install_idempotent
