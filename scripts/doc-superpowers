@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# doc-superpowers: the terminal's entry point, and the one invocation every
+# client uses ("$ROOT/scripts/doc-superpowers <command>", through the $ROOT that
+# SKILL.md's Detect Bundled Tooling resolves).
+#
+#   doc-superpowers help|-h|--help [topic]   scripts/help/<topic|overview>.txt
+#   doc-superpowers setup [flags]            scripts/setup/setup.sh
+#   doc-superpowers version                  doc-tools.sh tools version
+#   doc-superpowers hooks …                  scripts/hooks/install.sh …
+#   doc-superpowers tools …                  scripts/doc-tools.sh …
+#   doc-superpowers search …                 doc-search's launcher
+#
+# Every sub-script runs as "$BASH" <script> (never a bare `bash`), so the
+# interpreter that runs this file is the one that runs them. $ROOT is this
+# file's directory's parent. Symlinks of this FILE are resolved with a readlink
+# loop (bash 3.2 on macOS has no `readlink -f`); the directory is then taken
+# with a logical `pwd`, so a plugin-cache directory reached through a symlink
+# keeps its own path as $ROOT. Exit codes: a sub-script's own, or 3 for usage.
+set -euo pipefail
+unset CDPATH
+
+TOPICS="setup search hooks ci ledger claims release"
+
+_self="${BASH_SOURCE[0]}"
+_hops=0
+while [ -L "$_self" ]; do
+  _hops=$((_hops + 1))
+  if [ "$_hops" -gt 40 ]; then
+    echo "doc-superpowers: too many symbolic links resolving $_self" >&2
+    exit 2
+  fi
+  # A relative link target is relative to the directory that holds the link
+  # (physically: -P), as the kernel reads it.
+  _dir="$(cd -P "$(dirname "$_self")" && pwd)"
+  _link="$(readlink "$_self")"
+  case "$_link" in
+    /*) _self="$_link" ;;
+    *) _self="$_dir/$_link" ;;
+  esac
+done
+_dir="$(cd "$(dirname "$_self")" && pwd)"
+ROOT="$(dirname "$_dir")"
+
+topic_error() {
+  echo "doc-superpowers: $1" >&2
+  echo "topics: $TOPICS" >&2
+  exit 3
+}
+
+cmd_help() {
+  local file topic found t
+  if [ $# -eq 0 ]; then
+    file=overview
+  elif [ $# -eq 1 ]; then
+    topic="$1"
+    found=""
+    for t in $TOPICS; do
+      if [ "$t" = "$topic" ]; then found=1; fi
+    done
+    [ -n "$found" ] || topic_error "unknown help topic '$topic'"
+    file="$topic"
+  else
+    topic_error "help takes at most one topic (got $#)"
+  fi
+  if [ ! -f "$ROOT/scripts/help/$file.txt" ]; then
+    echo "doc-superpowers: help text not found: $ROOT/scripts/help/$file.txt" >&2
+    exit 2
+  fi
+  cat "$ROOT/scripts/help/$file.txt"
+}
+
+# search: the launcher runs this plugin's doc-search (DOC_SUPERPOWERS_ROOT,
+# unless the caller set one), not whichever install it would find itself.
+cmd_search() {
+  local top
+  export DOC_SUPERPOWERS_ROOT="${DOC_SUPERPOWERS_ROOT:-$ROOT}"
+  top="$(git rev-parse --show-toplevel 2>/dev/null)" || top=""
+  # A project that installed doc-search committed its own launcher.
+  if [ -n "$top" ] && [ -f "$top/.claude/doc-superpowers/search-mcp.sh" ]; then
+    exec sh "$top/.claude/doc-superpowers/search-mcp.sh" "$@"
+  fi
+  exec sh "$ROOT/scripts/search/launch.sh" "$@"
+}
+
+if [ $# -eq 0 ]; then
+  cmd_help
+  exit 0
+fi
+cmd="$1"
+shift
+case "$cmd" in
+  help | -h | --help) cmd_help "$@" ;;
+  setup) exec "$BASH" "$ROOT/scripts/setup/setup.sh" "$@" ;;
+  version) exec "$BASH" "$ROOT/scripts/doc-tools.sh" tools version "$@" ;;
+  hooks) exec "$BASH" "$ROOT/scripts/hooks/install.sh" "$@" ;;
+  tools) exec "$BASH" "$ROOT/scripts/doc-tools.sh" "$@" ;;
+  search) cmd_search "$@" ;;
+  *)
+    echo "doc-superpowers: unknown command '$cmd' (doc-superpowers help)" >&2
+    exit 3
+    ;;
+esac

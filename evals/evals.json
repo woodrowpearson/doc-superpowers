@@ -1695,6 +1695,91 @@
           "description": "Only the plan is modified"
         }
       ]
+    },
+    {
+      "id": 24,
+      "name": "setup-defaults",
+      "prompt": "Set doc-superpowers up in this repository. /doc-superpowers setup — when you ask, I pick Apply these, then Write only.",
+      "expected_output": "Should read references/setup.md, run the dispatcher's setup --dry-run and show the summary and review verbatim, ask Apply these / Customize / Cancel, then Write and build / Write only / Back (no build is offered: doc-search is off by default), then run setup --yes with no --build and no --set: the merge driver (.gitattributes) and the 5 report-only git hooks, the 3 per-user Claude Code hooks, and the team record (.setup in .claude/doc-superpowers/installed.json). No CI workflow, no doc-search, no ledger, no spec claims, no terminal command. Shows what was written and the git add line; never commits.",
+      "files": [
+        "evals/fixtures/setup-defaults/setup.sh",
+        "evals/fixtures/lib.sh"
+      ],
+      "assertions": [
+        {
+          "name": "previews-with-dry-run",
+          "type": "tool_call_check",
+          "command": "doc-superpowers\"? setup --dry-run",
+          "description": "Shows the summary and the review first (setup --dry-run), through the dispatcher"
+        },
+        {
+          "name": "writes-with-yes",
+          "type": "tool_call_check",
+          "command": "doc-superpowers\"? setup --yes",
+          "description": "Applies the selection with setup --yes, after the user's answers"
+        },
+        {
+          "name": "never-builds",
+          "type": "tool_call_check",
+          "command": "--build",
+          "negate": true,
+          "description": "Write only: never passes --build (the download consent)"
+        },
+        {
+          "name": "installs-the-merge-driver",
+          "type": "file_exists",
+          "path": ".gitattributes",
+          "description": "The default git tier writes the merge driver's .gitattributes block"
+        },
+        {
+          "name": "adds-no-ci",
+          "type": "file_not_exists",
+          "path": ".github/workflows/doc-freshness-pr.yml",
+          "description": "The defaults add no CI workflow"
+        },
+        {
+          "name": "records-the-team-setup",
+          "type": "content_check",
+          "path": ".claude/doc-superpowers/installed.json",
+          "pattern": "\"setup\"",
+          "description": "The team's choice is recorded: a setup object in installed.json"
+        },
+        {
+          "name": "shows-the-review-verbatim",
+          "type": "output_check",
+          "pattern": "Committed for the team:",
+          "description": "Shows setup's review as it printed it, not a paraphrase"
+        },
+        {
+          "name": "never-commits",
+          "type": "tool_call_check",
+          "command": "git commit",
+          "negate": true,
+          "description": "Prints the git add line; committing is the user's call"
+        }
+      ],
+      "setup": "evals/fixtures/setup-defaults/setup.sh"
+    },
+    {
+      "id": 25,
+      "name": "help-topic",
+      "prompt": "What does the work ledger do, and how do I turn it on? /doc-superpowers help ledger",
+      "expected_output": "Should run the dispatcher's help ledger and show its output verbatim in a code block: the same text a terminal's doc-superpowers help ledger prints, never a paraphrase. At most one line after the block.",
+      "files": [],
+      "assertions": [
+        {
+          "name": "runs-help",
+          "type": "tool_call_check",
+          "command": "doc-superpowers\"? help ledger",
+          "description": "Runs the dispatcher's help for the topic"
+        },
+        {
+          "name": "shows-it-verbatim",
+          "type": "output_check",
+          "pattern": "doc-superpowers help ledger: keyed work items",
+          "description": "The output carries the topic's first line exactly as scripts/help/ledger.txt has it"
+        }
+      ]
     }
   ],
   "assertion_fields": {

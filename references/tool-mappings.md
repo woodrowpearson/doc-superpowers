@@ -39,7 +39,7 @@ Use the tool that does the same job in your client. Only the skill's own referen
 | Work-ledger git legs (`--ledger`) | yes | yes | yes | yes | yes |
 | Work-ledger Claude events (`--ledger-claude`: `SessionStart`, `PostToolUse` `Write\|Edit\|MultiEdit`) | yes | unverified, as for `--claude`; whether Cursor maps `SessionStart` is undocumented | no | no | no |
 | CI tier (`--ci`) | yes | yes | yes | yes | yes |
-| doc-search MCP server (`--search`; snippets in `references/search.md`) | `.mcp.json`, by the installer | `.cursor/mcp.json` by hand; unverified | `config.toml` `[mcp_servers]` by hand; unverified | `opencode.json` `mcp` by hand; unverified | `.gemini/settings.json` by hand; unverified |
+| doc-search MCP server (`--search`; `setup` writes each entry; what was verified: `references/search.md` → *Other clients*) | `.mcp.json`, by the installer | `.cursor/mcp.json`; unverified | `.codex/config.toml`; loaded, trusted project | `opencode.json`; loaded and started | `.gemini/settings.json`; loaded and started, from the top |
 | Web search / fetch | yes | yes | search only, model-dependent | yes | yes |
 | Diagram PNGs (`diagram`) | with a Mermaid MCP server | with a Mermaid MCP server | with a Mermaid MCP server | with a Mermaid MCP server | with a Mermaid MCP server |
 
@@ -56,6 +56,7 @@ Every client finds the bundled tooling the same way: from the skill's own direct
 - **Claude Code** substitutes `${CLAUDE_SKILL_DIR}` when it loads the skill, so the block runs as written.
 - **Any other client** leaves it literal: put in the path of the directory the client loaded `SKILL.md` from (the skill path it reports, or the path you read the file at).
 - The Claude Code plugin cache (`~/.claude/plugins/cache/doc-superpowers/doc-superpowers/<version>/`) is only a fallback, tried when `$ROOT` holds no executable `doc-tools.sh`; with neither, the block stops rather than run a tool that is not there.
+- **Terminal command:** `$ROOT/scripts/doc-superpowers` (`setup`, `help`), in every client; `setup` can link it as `~/.local/bin/doc-superpowers`.
 - CI workflows do not resolve at all: they call the vendored `.github/scripts/doc-tools.sh` by that literal path, the one their `--allowedTools` grants.
 
 ## Client notes
