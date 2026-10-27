@@ -241,6 +241,10 @@ def _serve(args: argparse.Namespace) -> int:
 
 # -- init ----------------------------------------------------------------------------------------------------
 
+# Top-level keys `init` leaves out of the file it writes: absent, they take their defaults. A plugin older
+# than 3.10.0 rejects them as unknown, so a repository that never opted into the gate must not carry them.
+INIT_OMITS = ("required", "requires")
+
 
 def _init(args: argparse.Namespace) -> int:
     top = RepoInfo.from_cwd(Path.cwd()).top
@@ -248,7 +252,8 @@ def _init(args: argparse.Namespace) -> int:
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         with open(target, "x", encoding="utf-8") as handle:  # exclusive: it never overwrites
-            handle.write(json.dumps(DEFAULTS, indent=2) + "\n")
+            written = {key: value for key, value in DEFAULTS.items() if key not in INIT_OMITS}
+            handle.write(json.dumps(written, indent=2) + "\n")
     except FileExistsError:
         print(f"doc-search: {CONFIG_REL} exists; not changed")
         return 0
