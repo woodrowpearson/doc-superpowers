@@ -5900,9 +5900,10 @@ srl_root() {
 }
 
 # srl_run [VAR=value …] -- <launcher args…>: run the launcher (under /bin/sh)
-# in the cwd with the fake uv in front. DOC_SUPERPOWERS_ROOT and
-# CLAUDE_PLUGIN_CACHE are empty unless given. Sets RUN_RC and RUN_OUT
-# (stdout + stderr).
+# in the cwd with the fake uv in front. DOC_SUPERPOWERS_ROOT,
+# CLAUDE_PLUGIN_CACHE and CODEX_HOME are empty unless given (an empty
+# CODEX_HOME is $HOME/.codex, under the fixture's HOME). Sets RUN_RC and
+# RUN_OUT (stdout + stderr).
 srl_run() {
   local envs=()
   while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
@@ -5911,7 +5912,7 @@ srl_run() {
   done
   [ "$#" -gt 0 ] && shift
   RUN_RC=0
-  RUN_OUT=$(env DOC_SUPERPOWERS_ROOT= CLAUDE_PLUGIN_CACHE= PATH="$SRL_BIN:$REAL_PATH" ${envs[@]+"${envs[@]}"} \
+  RUN_OUT=$(env DOC_SUPERPOWERS_ROOT= CLAUDE_PLUGIN_CACHE= CODEX_HOME= PATH="$SRL_BIN:$REAL_PATH" ${envs[@]+"${envs[@]}"} \
     /bin/sh "$SCRIPT_DIR/search/launch.sh" "$@" 2>&1) || RUN_RC=$?
 }
 
@@ -5968,6 +5969,45 @@ test_launcher_resolution_order() {
   srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- query "a b" --limit 3
   assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search query a b --limit 3" "$RUN_OUT" "arguments are passed on after doc-search"
   assert_eq "10" "$(cat "$SRL_BIN/argc")" "…each as one word (\"a b\" is not split)"
+  teardown
+}
+
+test_launcher_codex_root() {
+  echo "test: launcher: the Codex install \${CODEX_HOME:-\$HOME/.codex}/doc-superpowers, when it has search/pyproject.toml, is a root — after DOC_SUPERPOWERS_ROOT and this repository, before the plugin cache"
+  setup
+  local envroot top cache codex
+  envroot=$(harness_mktemp_d envroot)
+  codex=$(harness_mktemp_d codexhome)
+  top=$(pwd -P)
+  cache="$HOME/.claude/plugins/cache"
+  srl_root "$cache/mkt/doc-superpowers/9.9.9"
+  mkdir -p "$codex/doc-superpowers"
+  srl_run CODEX_HOME="$codex" -- serve
+  assert_eq "uv run --project $cache/mkt/doc-superpowers/9.9.9/search --frozen --no-dev doc-search serve" "$RUN_OUT" "a Codex doc-superpowers without search/pyproject.toml is not a root: the cache"
+  srl_root "$codex/doc-superpowers"
+  srl_run CODEX_HOME="$codex" -- serve
+  assert_eq "0" "$RUN_RC" "\$CODEX_HOME/doc-superpowers: exit 0"
+  assert_eq "uv run --project $codex/doc-superpowers/search --frozen --no-dev doc-search serve" "$RUN_OUT" "…and it is chosen over the plugin cache"
+  # Unset (or empty) CODEX_HOME: $HOME/.codex.
+  srl_root "$HOME/.codex/doc-superpowers"
+  RUN_RC=0
+  RUN_OUT=$(env -u CODEX_HOME DOC_SUPERPOWERS_ROOT= CLAUDE_PLUGIN_CACHE= PATH="$SRL_BIN:$REAL_PATH" \
+    /bin/sh "$SCRIPT_DIR/search/launch.sh" serve 2>&1) || RUN_RC=$?
+  assert_eq "uv run --project $HOME/.codex/doc-superpowers/search --frozen --no-dev doc-search serve" "$RUN_OUT" "CODEX_HOME unset: \$HOME/.codex/doc-superpowers"
+  srl_run CODEX_HOME= -- serve
+  assert_eq "uv run --project $HOME/.codex/doc-superpowers/search --frozen --no-dev doc-search serve" "$RUN_OUT" "…and empty CODEX_HOME is unset"
+  srl_run CODEX_HOME="$envroot/no-codex" -- serve
+  assert_eq "uv run --project $cache/mkt/doc-superpowers/9.9.9/search --frozen --no-dev doc-search serve" "$RUN_OUT" "a set CODEX_HOME without doc-superpowers: \$HOME/.codex is not consulted, the cache is"
+  # This repository, when it is doc-superpowers itself, still wins over it.
+  srl_root "$top"
+  mkdir -p scripts
+  : > scripts/doc-tools.sh
+  srl_run CODEX_HOME="$codex" -- serve
+  assert_eq "uv run --project $top/search --frozen --no-dev doc-search serve" "$RUN_OUT" "this repository wins over the Codex install"
+  # And DOC_SUPERPOWERS_ROOT wins over all of them.
+  srl_root "$envroot"
+  srl_run CODEX_HOME="$codex" DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search serve" "$RUN_OUT" "DOC_SUPERPOWERS_ROOT wins over the Codex install"
   teardown
 }
 
@@ -6074,6 +6114,8 @@ test_launcher_without_uv() {
 test_launcher_is_posix_sh() {
   echo "test: launcher: a POSIX sh script — #!/bin/sh, no bashism; runs under every sh on this host"
   assert_eq "#!/bin/sh" "$(sed -n 1p "$SCRIPT_DIR/search/launch.sh")" "the shebang is /bin/sh"
+  assert_true "line 2 is the version stamp '# doc-search launcher vX.Y.Z'" \
+    test -n "$(sed -n 2p "$SCRIPT_DIR/search/launch.sh" | grep -E '^# doc-search launcher v[0-9]+\.[0-9]+\.[0-9]+$' || true)"
   assert_true "it holds no bash-only construct ([[, arrays, \${//}, <<<, \$'…')" \
     test -z "$(grep -nE '\[\[|<<<|\$'"'"'|\$\{[A-Za-z_]+(//|,,|\^\^|/)|^[[:space:]]*(declare|local -a|mapfile|readarray)[[:space:]]' "$SCRIPT_DIR/search/launch.sh" || true)"
   local sh
@@ -6469,6 +6511,7 @@ test_launcher_client_cwd() {
 echo ""
 echo "=== doc-search: the launcher and the opt-in --search set ==="
 test_launcher_resolution_order
+test_launcher_codex_root
 test_launcher_cloud_extra
 test_launcher_transformer_extra
 test_launcher_without_uv

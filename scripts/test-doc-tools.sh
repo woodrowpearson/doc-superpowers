@@ -1471,6 +1471,113 @@ test_check_version_passes_when_synced() {
   teardown
 }
 
+# setup_launcher_stamp <line 2>: scripts/search/launch.sh (mode 755) with
+# <line 2> as its second line. Line 4 is a second stamp-shaped line: only the
+# first one in the first 5 lines is the stamp.
+setup_launcher_stamp() {
+  mkdir -p scripts/search
+  printf '#!/bin/sh\n%s\n# the header\n# doc-search launcher v0.0.1\necho launched\n' "$1" > scripts/search/launch.sh
+  chmod 755 scripts/search/launch.sh
+}
+
+test_bump_version_rewrites_launcher_stamp() {
+  echo "test: bump-version also rewrites the launcher stamp (scripts/search/launch.sh, '# doc-search launcher vX.Y.Z'), with sed, all or nothing"
+  setup
+  setup_version_files
+  setup_launcher_stamp "# doc-search launcher v1.0.0"
+  local output exit_code expected
+  set +e
+  output=$("$DOC_TOOLS" bump-version 9.8.7 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_contains "$output" "bump: scripts/search/launch.sh (1.0.0 → 9.8.7)" "reports the stamp bump"
+  assert_contains "$output" "Updated 6 file(s) to v9.8.7" "the five manifests and the stamp"
+  expected=$(printf '#!/bin/sh\n# doc-search launcher v9.8.7\n# the header\n# doc-search launcher v0.0.1\necho launched')
+  assert_eq "$expected" "$(cat scripts/search/launch.sh)" "line 2 is v9.8.7; every other line, the later stamp-shaped one too, is unchanged"
+  assert_eq "9.8.7" "$(jq -r .version package.json)" "package.json bumped"
+  assert_eq "9.8.7" "$(jq -r .version .claude-plugin/plugin.json)" "plugin.json bumped"
+  assert_eq "9.8.7" "$(jq -r .metadata.version .claude-plugin/marketplace.json)" "marketplace.json bumped"
+  assert_eq "9.8.7" "$(jq -r .version .cursor-plugin/plugin.json)" "cursor plugin.json bumped"
+  assert_eq "9.8.7" "$(jq -r .version gemini-extension.json)" "gemini-extension.json bumped"
+  assert_eq "755" "$(_test_file_mode scripts/search/launch.sh)" "the launcher keeps its mode"
+  assert_eq "launch.sh" "$(ls -A scripts/search)" "no backup or temp file is left beside it"
+  output=$("$DOC_TOOLS" bump-version 9.8.7 2>&1)
+  assert_contains "$output" "ok:   scripts/search/launch.sh (already 9.8.7)" "again: the stamp is already current"
+  assert_contains "$output" "Updated 0 file(s)" "…and nothing is written"
+  # All or nothing: a launcher without a stamp in its first 5 lines writes nothing.
+  printf '#!/bin/sh\n#\n#\n#\n#\n# doc-search launcher v9.8.7\n' > scripts/search/launch.sh
+  set +e
+  output=$("$DOC_TOOLS" bump-version 9.9.9 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "no stamp in the first 5 lines: exits 1"
+  assert_contains "$output" "scripts/search/launch.sh" "…naming the launcher"
+  assert_contains "$output" "nothing was written" "…and saying nothing was written"
+  assert_eq "9.8.7" "$(jq -r .version package.json)" "…package.json is not bumped"
+  assert_eq "# doc-search launcher v9.8.7" "$(sed -n 6p scripts/search/launch.sh)" "…nor the launcher"
+  # …and a manifest that is not JSON leaves the stamp alone.
+  setup_launcher_stamp "# doc-search launcher v9.8.7"
+  echo 'not json' > gemini-extension.json
+  set +e
+  "$DOC_TOOLS" bump-version 9.9.9 >/dev/null 2>&1
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "a manifest that is not JSON: exits 1"
+  assert_eq "# doc-search launcher v9.8.7" "$(sed -n 2p scripts/search/launch.sh)" "…and the stamp is not bumped"
+  teardown
+}
+
+# _test_file_mode <file>: its octal permission bits (GNU or BSD stat).
+_test_file_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
+
+test_check_version_checks_launcher_stamp() {
+  echo "test: check-version also checks the launcher stamp against RELEASE-NOTES.md, naming scripts/search/launch.sh"
+  setup
+  setup_version_files
+  local output exit_code
+  setup_launcher_stamp "# doc-search launcher v1.0.0"
+  set +e
+  output=$("$DOC_TOOLS" check-version 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "the stamp matches: exits 0"
+  assert_contains "$output" "ok:       scripts/search/launch.sh" "…listing the launcher"
+  assert_contains "$output" "PASS: all 6 file(s) match v1.0.0" "…six files checked"
+  setup_launcher_stamp "# doc-search launcher v0.9.0"
+  set +e
+  output=$("$DOC_TOOLS" check-version 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "a different stamp: exits 1"
+  assert_contains "$output" "MISMATCH: scripts/search/launch.sh has 0.9.0 (expected 1.0.0)" "…naming the launcher and both versions"
+  assert_contains "$output" "Run: doc-tools.sh bump-version 1.0.0" "…and the fix"
+  setup_launcher_stamp "# doc-search launcher"
+  set +e
+  output=$("$DOC_TOOLS" check-version 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "line 2 is not a stamp: exits 1"
+  assert_contains "$output" "MISMATCH: scripts/search/launch.sh has 0.0.1 (expected 1.0.0)" "…the first stamp line within the first 5 (line 4, v0.0.1) is the stamp"
+  printf '#!/bin/sh\necho launched\n' > scripts/search/launch.sh
+  set +e
+  output=$("$DOC_TOOLS" check-version 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "a launcher with no stamp at all: exits 1"
+  assert_contains "$output" "MISMATCH: scripts/search/launch.sh has no launcher stamp" "…naming the launcher"
+  rm -f scripts/search/launch.sh
+  set +e
+  output=$("$DOC_TOOLS" check-version 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "no launcher (a project that vendors doc-tools.sh): not checked, exits 0"
+  assert_not_contains "$output" "launch.sh" "…and not mentioned"
+  teardown
+}
+
 # --- fragments subcommand ---
 
 _write_fragment() {
@@ -4162,6 +4269,7 @@ test_i4_help_lists_every_dispatchable_verb() {
   done < <(sed -n '/^VERSION_FILES=(/,/^)/p' "$SCRIPT_DIR/doc-tools.sh" | sed -n 's/^ *"\([^:]*\):.*/\1/p')
   assert_eq "" "$wrong" "bump-version --help names every VERSION_FILES entry"
   assert_contains "$bump" "never written" "bump-version --help says RELEASE-NOTES.md is never written"
+  assert_contains "$bump" "scripts/search/launch.sh" "bump-version --help names the launcher stamp it also writes"
 }
 
 test_i4_flags_anywhere_and_unknown_flags_exit_2() {
@@ -8010,6 +8118,8 @@ run_tests() {
   test_bump_version_requires_arg
   test_check_version_detects_mismatch
   test_check_version_passes_when_synced
+  test_bump_version_rewrites_launcher_stamp
+  test_check_version_checks_launcher_stamp
   test_fragments_list_empty
   test_fragments_list_valid
   test_fragments_validate_drifted
