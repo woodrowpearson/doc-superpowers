@@ -14,8 +14,8 @@ from pathlib import Path
 
 from doc_search.config import parse_version
 
-STAMP_RE = re.compile(r"# doc-search launcher v([0-9]+\.[0-9]+\.[0-9]+)")
-"""One whole stamp line (match it with `fullmatch`); group 1 is the version."""
+STAMP_RE = re.compile(r"^# doc-search launcher v([0-9]+\.[0-9]+\.[0-9]+)$")
+"""One whole stamp line, without its line ending (match it with `fullmatch`); group 1 is the version."""
 
 _STAMP_WITHIN = 5
 """The stamp is looked for in this many leading lines."""
@@ -39,7 +39,8 @@ def plugin_version(root: Path) -> tuple[int, int, int] | None:
 def launcher_stamp(path: Path) -> tuple[int, int, int] | None:
     """The version of the first stamp line within the first 5 lines of `path`; None when there is none."""
     try:
-        with path.open(encoding="utf-8", errors="replace") as handle:
+        # newline="": a CRLF line keeps its "\r" and is no stamp, as for check-version's grep.
+        with path.open(encoding="utf-8", errors="replace", newline="") as handle:
             for _ in range(_STAMP_WITHIN):
                 line = handle.readline()
                 if not line:

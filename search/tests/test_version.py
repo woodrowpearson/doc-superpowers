@@ -54,6 +54,17 @@ def test_a_malformed_stamp_gives_none(tmp_path: Path) -> None:
         assert STAMP_RE.fullmatch(line) is None, line
 
 
+def test_a_crlf_stamp_line_gives_none(tmp_path: Path) -> None:
+    path = tmp_path / "crlf.sh"
+    path.write_bytes(b"#!/bin/sh\r\n# doc-search launcher v1.0.0\r\n")
+    assert launcher_stamp(path) is None
+
+
+def test_the_pattern_is_anchored() -> None:
+    assert STAMP_RE.pattern.startswith("^")
+    assert STAMP_RE.pattern.endswith("$")
+
+
 def test_a_missing_file_gives_none(tmp_path: Path) -> None:
     assert launcher_stamp(tmp_path / "absent.sh") is None
 
