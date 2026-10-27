@@ -326,11 +326,14 @@ def test_every_known_key_is_accepted(tmp_path: Path) -> None:
             },
         },
         "search": {"default_limit": 50, "terminal_statuses": ["archived"], "rescan_seconds": 0},
+        "required": True,
+        "requires": ">=3.10.0",
     }
     cfg = load(tmp_path, full)
     assert cfg.cloud is not None and cfg.cloud.firestore.database == "corpus"
     assert cfg.search.default_limit == 50 and cfg.search.rescan_seconds == 0
     assert cfg.docs.threads == 4
+    assert cfg.required is True and cfg.requires == (3, 10, 0)
 
 
 @pytest.mark.parametrize("bad", [51, 1000])
@@ -356,3 +359,52 @@ def test_rescan_seconds_must_be_finite_and_not_negative(tmp_path: Path, bad: obj
 @pytest.mark.parametrize("good", [0, 0.5, 5, 30])
 def test_rescan_seconds_allows_zero(tmp_path: Path, good: float) -> None:
     assert load(tmp_path, {"search": {"rescan_seconds": good}}).search.rescan_seconds == good
+
+
+def test_required_defaults_false_and_requires_none(tmp_path: Path) -> None:
+    cfg = load(tmp_path, {})
+    assert cfg.required is False
+    assert cfg.requires is None
+
+
+def test_required_and_requires_parse(tmp_path: Path) -> None:
+    cfg = load(tmp_path, {"required": True, "requires": ">=3.10.0"})
+    assert (cfg.required, cfg.requires) == (True, (3, 10, 0))
+
+
+@pytest.mark.parametrize("bad", ["3.10.0", ">3.10.0", ">=3.10", ">=v3.10.0", 5])
+def test_requires_rejects_other_forms(tmp_path: Path, bad: object) -> None:
+    write_config(tmp_path, {"requires": bad})
+    with pytest.raises(ConfigError) as err:
+        load_config(tmp_path, {})
+    assert 'requires must be ">=X.Y.Z"' in str(err.value)
+
+
+def test_required_must_be_bool(tmp_path: Path) -> None:
+    write_config(tmp_path, {"required": "yes"})
+    with pytest.raises(ConfigError) as err:
+        load_config(tmp_path, {})
+    assert "required must be true or false" in str(err.value)
+
+
+@pytest.mark.parametrize(
+    ("text", "parsed"),
+    [
+        ("3.10.0", (3, 10, 0)),
+        ("0.0.0", (0, 0, 0)),
+        ("12.345.6789", (12, 345, 6789)),
+        ("3.10", None),
+        ("3.10.0.1", None),
+        ("v3.10.0", None),
+        (">=3.10.0", None),
+        ("3.10.0-rc1", None),
+        (" 3.10.0", None),
+        ("3.10.0\n", None),
+        ("3.x.0", None),
+        ("", None),
+    ],
+)
+def test_parse_version(text: str, parsed: tuple[int, int, int] | None) -> None:
+    from doc_search.config import parse_version
+
+    assert parse_version(text) == parsed
