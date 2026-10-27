@@ -1,0 +1,20 @@
+doc-superpowers help release: draft the next release notes entry
+
+release reads the commits since the last release, merges the per-PR notes
+fragments (RELEASE-NOTES.next/PR-*.md), drafts a RELEASE-NOTES.md entry for
+you to edit, then bumps the version and offers a tag.
+
+Default:    nothing automatic: it runs only when you ask. The CI workflow
+            doc-pr-release (off by default) drafts a fragment for each PR.
+Terminal:   doc-superpowers version                     the current version
+            doc-superpowers tools fragments merge <start> HEAD
+            doc-superpowers tools bump-version X.Y.Z    (or check-version)
+Skill:      /doc-superpowers release [--from=<ref>]
+Committed:  one release commit: the RELEASE-NOTES.md entry, the fragments it
+            consumed (deleted), the manifests' version, CLAUDE.md and
+            README.md fixes. The commit is not pushed: it must reach main.
+Local:      the git tag vX.Y.Z, only if you say yes; then it offers to push
+            the tag (git push origin vX.Y.Z), and checks it with
+            doc-superpowers tools check-version --tag.
+Undo:       git revert the release commit and git tag -d vX.Y.Z.
+Reference:  references/release.md

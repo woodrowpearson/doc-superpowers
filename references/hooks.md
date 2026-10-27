@@ -6,6 +6,8 @@ installer, `$DOC_TOOLS` = `$ROOT/scripts/doc-tools.sh`).
 
 Scaffolding command — installs opt-in hooks into the target project for automated freshness monitoring. No discovery phase needed.
 
+**Setting a repository up?** `doc-superpowers setup` (`/doc-superpowers setup`; `references/setup.md`) chooses the tiers and the opt-in sets in one pass, from fixed safe defaults (the merge driver, the 5 report-only git hooks, the 3 Claude hooks; no CI, no download), shows every write first, and records the team's choice for `setup --apply` in each contributor's clone. It runs this installer for every tier and set it installs, so everything below still holds; this reference is the installer itself.
+
 ```
 /doc-superpowers hooks install [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search]
 /doc-superpowers hooks status [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--json]
@@ -183,7 +185,7 @@ AI workflows need a `CLAUDE_CODE_OAUTH_TOKEN` (preferred) or `ANTHROPIC_API_KEY`
 Vendored files are removed through `doc-tools.sh tools uninstall`: a file with local edits (or from another plugin version) is kept and reported as `Kept …` — relay those lines to the user; the uninstall is not "clean" then. `RELEASE-NOTES.next/README.md` goes with the `doc-pr-release` helpers only when it is byte-identical to the plugin's fragment-format spec and the only file in `RELEASE-NOTES.next/`; an edited copy, and any fragment, stay.
 
 **State** (`.claude/doc-superpowers/installed.json`, committed — tell the user to commit it with the workflows):
-- It records the CI tier only (the git and Claude tiers are per-clone / per-user): the workflow set (`installed`, or `uninstalled` with `intentional`), `base_branch`, `cron`, `ci_strict`, `marketplace_url` (only when `--marketplace-url` gave one: the plugin's own repository, the default, is never recorded), and each workflow's `installed_at` (set once, never rewritten on a refresh).
+- It records the CI tier only (the git and Claude tiers are per-clone / per-user): the workflow set (`installed`, or `uninstalled` with `intentional`), `base_branch`, `cron`, `ci_strict`, `marketplace_url` (only when `--marketplace-url` gave one: the plugin's own repository, the default, is never recorded), and each workflow's `installed_at` (set once, never rewritten on a refresh). A top-level `setup` object beside `tiers` is `doc-superpowers setup`'s team record (`references/setup.md` → *The records*), which every installer write keeps.
 - A plain `install --ci` reproduces the recorded choices and refreshes exactly the recorded workflows (it adds no default); flags override a choice and are recorded. Upgrading a pre-3.0 install keeps the choices found in its rendered workflows.
 - A doc-superpowers workflow on disk counts as installed whatever the state says, and is refreshed.
 - An unreadable state file (a merge conflict, the wrong shape) is never overwritten: install and uninstall exit 1 and `status` warns. Have the user resolve the conflict, or move the file to `installed.json.corrupt` — the next install then rebuilds it from disk and installs nothing that is not already there.

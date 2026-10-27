@@ -1,0 +1,24 @@
+doc-superpowers help search: one MCP server over the docs and the code
+
+doc-search answers "where is this specified, and where is it implemented": one
+ranked list of docs and code, from two local indexes per worktree.
+
+Default:    off. docs/search/config.json turns it on ({} is complete);
+            without it the server answers "not enabled" and nothing runs.
+            Needs uv, git and jq. The first build downloads packages and an
+            embedding model; model gte (transformer:gte-modernbert-base) is
+            a larger download and a long first build.
+Terminal:   doc-superpowers setup --set search=on [--set search.model=gte]
+            doc-superpowers search init | index | query "<text>" | status
+            doc-superpowers hooks install --search    (needs the config)
+Skill:      /doc-superpowers hooks install --search
+Committed:  docs/search/config.json, .claude/doc-superpowers/search-mcp.sh
+            (the launcher), .mcp.json (the doc-search entry); for each
+            ticked harness: .codex/config.toml, .cursor/mcp.json,
+            .gemini/settings.json or opencode.json.
+Local:      the index cache (semble's; safe to delete). Outside the
+            repository: ~/.config/doc-search/env.sh (cache path, plugin root).
+Undo:       doc-superpowers hooks uninstall --search removes the entry and
+            the launcher. Delete docs/search/config.json to make a server
+            that is still registered inert.
+Reference:  references/search.md
