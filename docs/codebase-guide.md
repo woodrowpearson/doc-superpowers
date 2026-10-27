@@ -390,7 +390,7 @@ User invokes /doc-superpowers release [--from=<ref>]
     → Prepend new version entry to RELEASE-NOTES.md (after header, before previous entry)
     → `doc-tools.sh fragments merge <start|ROOT> HEAD --remove`: `git rm` exactly the consumed fragments (never a glob)
     → Bump version in the manifests the project has — never hand-edit individual version strings
-      → `doc-tools.sh bump-version X.Y.Z`, then `doc-tools.sh check-version` to confirm every manifest matches (skipped when the project has none of the five)
+      → `doc-tools.sh bump-version X.Y.Z`, then `doc-tools.sh check-version` to confirm every manifest, and the launcher stamp in a tree with `scripts/search/launch.sh`, matches (skipped when the project has none of the five manifests)
     → Sync CLAUDE.md and README.md per references/doc-spec.md rules
       → Catches drift accumulated across the released commits
     → Commit the release: entry + fragment deletions + manifests + CLAUDE.md/README.md in ONE commit
@@ -508,7 +508,7 @@ The server is the uv package `search/`, started by the client through the commit
 
 ```
 .mcp.json → sh .claude/doc-superpowers/search-mcp.sh serve
-  → launch.sh: find doc-superpowers ($DOC_SUPERPOWERS_ROOT → this checkout → newest plugin-cache version);
+  → launch.sh: find doc-superpowers ($DOC_SUPERPOWERS_ROOT → this checkout → ${CODEX_HOME:-$HOME/.codex}/doc-superpowers → newest plugin-cache version);
     for serve, export the parent process's cwd (the MCP client's) as DOC_SEARCH_CLIENT_CWD unless set;
     exec uv run --project <root>/search --frozen --no-dev [--extra cloud] [--extra local-transformer] doc-search serve
   → server.build_server → Runtime: RepoInfo.from_cwd, load_config (absent: every tool answers the inert
