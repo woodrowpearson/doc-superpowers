@@ -3320,6 +3320,9 @@ ck_clone() {
   local c
   c="$(harness_mktemp_d ck-clone)/clone"
   git clone -q -b feature "$1" "$c" && cp "$1/.git/ck-base" "$c/.git/ck-base" || return 1
+  # A clone does not copy the source's local identity, and this suite runs with no global
+  # config: a test that commits in the clone fails wherever git cannot guess an email.
+  git -C "$c" config user.email t@t.com && git -C "$c" config user.name t || return 1
   printf '%s' "$c"
 }
 

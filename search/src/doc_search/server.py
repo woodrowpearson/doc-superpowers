@@ -1,9 +1,10 @@
 """The MCP server (design section 7): four tools over one repository's docs and code.
 
 `build_server(cwd)` loads the configuration once. Without `docs/search/config.json` every tool answers
-the inert line; with an invalid one, an `invalid config` line. When enabled it starts the launch
+the inert line; with an invalid one, an `invalid config` line. When enabled it starts the default
 worktree's index builds at once (`IndexPool.get(..., wait_s=0)`), so the indexes warm up while the
-client connects. A tool call waits for them at most `wait_s`, then answers that the index is building.
+client connects. The default worktree is the client's (`client_cwd`, from `DOC_SEARCH_CLIENT_CWD`) when
+that is a worktree of this repository, else the launch one. A tool call waits for them at most `wait_s`, then answers that the index is building.
 
 Tools return text. Anything that cannot be answered is one line starting `doc-search:`. Blocking work
 (git, a first build, a semble query) runs on a worker thread, never on the event loop.
@@ -12,6 +13,7 @@ Tools return text. Anything that cannot be answered is one line starting `doc-se
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from collections.abc import Callable
 from functools import partial
@@ -30,7 +32,7 @@ from .corpus import Corpus
 from .docindex import DocIndex
 from .engines import IndexPool
 from .render import flat, render_search
-from .repo import GitError, NotARepo, RepoInfo, resolve_worktree
+from .repo import GitError, NotARepo, RepoInfo, client_worktree, resolve_worktree
 from .searcher import Searcher
 from .tools import FETCH_CONTEXT, DocTools
 from .types import SearchRequest
@@ -95,9 +97,18 @@ class Runtime:
     """
 
     def __init__(
-        self, cwd: Path, pool: IndexPool | None, wait_s: float, *, warm: bool = True, fallback: bool = True
+        self,
+        cwd: Path,
+        pool: IndexPool | None,
+        wait_s: float,
+        *,
+        warm: bool = True,
+        fallback: bool = True,
+        client_cwd: str | None = None,
     ) -> None:
         self.repo: RepoInfo | None = None
+        self.default: Path | None = None  # the worktree a call without `worktree` gets
+        self.default_note: str | None = None  # why it is not the launch worktree, for `status`
         self.cfg: Config | None = None
         self.pool: IndexPool | None = None
         self.searcher: Searcher | None = None
@@ -128,6 +139,7 @@ class Runtime:
             return
         if self.repo is None:
             return  # enabled, but there is no repository to search
+        self.default, self.default_note = _default_worktree(self.repo, client_cwd)
         self.pool = pool if pool is not None else IndexPool(self.cfg, fallback=fallback)
         # The same cloud leg serves `search` and `status`. It is built without touching the network; one that
         # cannot be built (no cloud extra, no project) is a leg that says so, never a crash.
@@ -135,7 +147,7 @@ class Runtime:
         self.searcher = Searcher(self.cfg, self.repo, self.pool, self.corpus_for, cloud=cloud, wait_s=wait_s)
         self.tools = DocTools(self.cfg, self.repo, self.pool, self.corpus_for, cloud=cloud, wait_s=wait_s)
         if warm:
-            self.pool.get(self.repo.top, wait_s=0)  # start the builds now; the first call finds them under way
+            self.pool.get(self.default, wait_s=0)  # start the builds now; the first call finds them under way
 
     # -- shared by the tools ----------------------------------------------------------------
 
@@ -148,9 +160,9 @@ class Runtime:
             return corpus
 
     def worktree(self, requested: str | None) -> Path:
-        """The worktree a call names (the launch worktree by default), or a refusal line."""
+        """The worktree a call names (the default one when it names none), or a refusal line."""
         try:
-            return resolve_worktree(self.repo, requested)
+            return resolve_worktree(self.repo, requested, self.default)
         except ValueError as err:
             raise _Refusal(f"doc-search: {flat(err)}") from err
         except GitError as err:  # git's stderr can run to several lines
@@ -192,16 +204,44 @@ class Runtime:
         return self.tools.related(path, self.worktree(worktree), line, limit)
 
     def status(self, *, warm: bool = True) -> str:
-        return self.tools.status(self.repo.top, warm=warm)
+        tree, note = self.default, self.default_note
+        try:
+            resolve_worktree(self.repo, None, self.default)  # a default removed since start: report the launch one
+        except ValueError as err:
+            tree, note = self.repo.top, flat(err)
+        except GitError:
+            pass  # git cannot list the worktrees now; status reads the default as it was chosen
+        return self.tools.status(tree, warm=warm, default_note=note)
 
 
-def build_server(cwd: Path, *, pool: IndexPool | None = None, wait_s: float = 20.0) -> MCPServer:
+def _default_worktree(repo: RepoInfo, client_cwd: str | None) -> tuple[Path, str | None]:
+    """The default worktree and, when the client named a directory, the `status` line's note.
+
+    An MCP client may start the server outside the worktree its session works in (the Claude desktop
+    app starts project servers in the main checkout while the session runs in a worktree), so the
+    launcher passes the client's working directory. Its worktree is the default when it is one of this
+    repository's; anything else keeps the launch worktree, and the note says why.
+    """
+    if client_cwd is None or not client_cwd.strip():
+        return repo.top, None
+    found = client_worktree(repo, client_cwd)
+    if found is None:
+        return repo.top, f"the client's working directory {client_cwd} is not a worktree of this repository"
+    if found == repo.top:
+        return repo.top, None
+    return found, f"the client's working directory; the server was launched in {repo.top}"
+
+
+def build_server(
+    cwd: Path, *, pool: IndexPool | None = None, wait_s: float = 20.0, client_cwd: str | None = None
+) -> MCPServer:
     """The MCP server for the repository around `cwd`.
 
     `pool` is for tests that need to see the indexes; `wait_s` is how long a call waits for a first
-    build before it answers that the index is building (design section 7: 20 s).
+    build before it answers that the index is building (design section 7: 20 s). `client_cwd` is the
+    MCP client's working directory; its worktree becomes the default (`Runtime`).
     """
-    rt = Runtime(cwd, pool, wait_s)
+    rt = Runtime(cwd, pool, wait_s, client_cwd=client_cwd)
     server = MCPServer("doc-search", version=__version__, instructions=INSTRUCTIONS)
 
     @server.tool(name="search", description=SEARCH_DESCRIPTION)
@@ -235,7 +275,10 @@ def build_server(cwd: Path, *, pool: IndexPool | None = None, wait_s: float = 20
         ] = False,
         worktree: Annotated[
             str | None,
-            Field(description="Path of another worktree of this repository to search. Default: the launch one."),
+            Field(
+                description="Path of another worktree of this repository to search. Default: the client's "
+                "worktree, else the launch one (`status` names it); a relative path is read against it."
+            ),
         ] = None,
     ) -> str:
         # An empty or blank filter value is no filter: `doc_type=""` would otherwise match no doc at all.
@@ -266,7 +309,10 @@ def build_server(cwd: Path, *, pool: IndexPool | None = None, wait_s: float = 20
         context: Annotated[int, Field(description="Lines either side of `line`. Default 20.")] = FETCH_CONTEXT,
         worktree: Annotated[
             str | None,
-            Field(description="Path of another worktree of this repository to read from. Default: the launch one."),
+            Field(
+                description="Path of another worktree of this repository to read from. Default: the client's "
+                "worktree, else the launch one (`status` names it); a relative path is read against it."
+            ),
         ] = None,
     ) -> str:
         return await rt.run(partial(rt.fetch, path, start_line, end_line, line, context, worktree))
@@ -281,7 +327,10 @@ def build_server(cwd: Path, *, pool: IndexPool | None = None, wait_s: float = 20
         limit: Annotated[int, Field(description="How many related items to return. Default 10.")] = 10,
         worktree: Annotated[
             str | None,
-            Field(description="Path of another worktree of this repository. Default: the launch one."),
+            Field(
+                description="Path of another worktree of this repository. Default: the client's worktree, "
+                "else the launch one (`status` names it); a relative path is read against it."
+            ),
         ] = None,
     ) -> str:
         return await rt.run(partial(rt.related, path, line, limit, worktree))
@@ -294,5 +343,9 @@ def build_server(cwd: Path, *, pool: IndexPool | None = None, wait_s: float = 20
 
 
 def serve(cwd: Path) -> None:
-    """Run the server for the repository around `cwd` on stdio until the client disconnects."""
-    anyio.run(build_server(cwd).run_stdio_async)
+    """Run the server for the repository around `cwd` on stdio until the client disconnects.
+
+    `DOC_SEARCH_CLIENT_CWD` (set by the launcher from its parent process, or by the user) names the
+    client's working directory.
+    """
+    anyio.run(build_server(cwd, client_cwd=os.environ.get("DOC_SEARCH_CLIENT_CWD")).run_stdio_async)
