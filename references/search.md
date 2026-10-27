@@ -87,6 +87,8 @@ The docs legs are fused per **file** (reciprocal rank fusion, k = 60): each leg 
 | `search.default_limit` | `10` | The default `limit` of the `search` tool and of the `query` verb's `--limit`: an integer from 1 to 50 |
 | `search.terminal_statuses` | `["deprecated", "superseded", "archived"]` | Doc statuses hidden unless `include_terminal` |
 | `search.rescan_seconds` | `5` | An index is rechecked against the tree at most this often, and no more often than 3 × its last build time: a finite number ≥ 0 |
+| `required` | `false` | `true` makes doc-search a gate in this repository: it must be ready, not only available. `false` keeps the soft behavior. `true` or `false`. A plugin older than 3.10.0 answers `invalid config: unknown key required`: the cue to update |
+| `requires` | `null` | The version floor for the plugin and for the committed launcher copy: `">=X.Y.Z"` exactly (no other operator, no `v`, all three numbers), or `null` for none. A plugin older than 3.10.0 answers `invalid config: unknown key requires` |
 
 An unknown key, at any level, is an error that names it (`doc-search: invalid config: unknown key cloud.firestore.databse`): a misspelled key never silently keeps its default.
 
