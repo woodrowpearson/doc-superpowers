@@ -17,6 +17,7 @@ from doc_search.config import (
     FirestoreCfg,
     VertexCfg,
     load_config,
+    parse_version,
 )
 from doc_search.transformer import REGISTRY, spec_for_path
 
@@ -405,6 +406,4 @@ def test_required_must_be_bool(tmp_path: Path) -> None:
     ],
 )
 def test_parse_version(text: str, parsed: tuple[int, int, int] | None) -> None:
-    from doc_search.config import parse_version
-
     assert parse_version(text) == parsed

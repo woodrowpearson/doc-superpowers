@@ -233,7 +233,9 @@ def test_init_writes_once(git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     assert done.code == 0 and done.err == ""
     written = (fresh.root / CONFIG_REL).read_text()
-    assert written == json.dumps(DEFAULTS, indent=2) + "\n"  # the defaults verbatim, nothing widened
+    # the defaults, nothing widened, without the two gate keys (test_init_leaves_the_gate_keys_out)
+    expected = {key: value for key, value in DEFAULTS.items() if key not in ("required", "requires")}
+    assert written == json.dumps(expected, indent=2) + "\n"
     assert json.loads(written)["docs"]["include"] == ["docs/**/*.md", "*.md"]
     assert done.lines[-1] == "corpus: 3 files would be indexed"
     assert any(line.startswith("docs.include") and "docs/**/*.md" in line for line in done.lines)
@@ -264,6 +266,23 @@ def test_init_writes_once(git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.chdir(outside)
     nowhere = run("init")
     assert nowhere.code == 2 and nowhere.err.startswith("doc-search: not inside a git work tree")
+
+
+def test_init_leaves_the_gate_keys_out(git_repo, monkeypatch: pytest.MonkeyPatch, run) -> None:
+    """A 3.9 plugin rejects `required` and `requires` as unknown keys: a repository that never opted
+    into the gate must not carry them just because 3.10's `init` wrote its config."""
+    fresh = git_repo()
+    fresh.write("README.md", "# Hello\n")
+    fresh.commit("seed")
+    monkeypatch.chdir(fresh.root)
+
+    assert run("init").code == 0
+
+    written = json.loads((fresh.root / CONFIG_REL).read_text())
+    assert "required" not in written and "requires" not in written
+    cfg = load_config(fresh.root, {})
+    assert cfg is not None
+    assert cfg.required is False and cfg.requires is None
 
 
 # --- query -----------------------------------------------------------------------------------------------

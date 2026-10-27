@@ -14,7 +14,7 @@ doc-search is opt-in per repository: `docs/search/config.json` turns it on, and 
    uv run --project "$ROOT/search" --frozen doc-search init
    ```
 
-   `init` writes `docs/search/config.json` with the defaults (*Configuration*), verbatim, prints each choice and how many corpus files would be indexed, and never overwrites an existing config (`docs/search/config.json exists; not changed`). Adjust `docs.include` / `docs.exclude` if the count is off, and set `docs.model` to `transformer:gte-modernbert-base` if you want the local transformer (*Modes*; `init` itself needs no extra), then commit the file.
+   `init` writes `docs/search/config.json` with the defaults (*Configuration*), verbatim except that it leaves out `required` and `requires` (absent, they keep their defaults, and a plugin older than 3.10.0 would reject them), prints each choice and how many corpus files would be indexed, and never overwrites an existing config (`docs/search/config.json exists; not changed`). Adjust `docs.include` / `docs.exclude` if the count is off, and set `docs.model` to `transformer:gte-modernbert-base` if you want the local transformer (*Modes*; `init` itself needs no extra), then commit the file.
 2. **Register the server.** `/doc-superpowers hooks install --search` (`bash "$ROOT/scripts/hooks/install.sh" install --search`; `references/hooks.md` → *doc-search set*). It copies the launcher to `.claude/doc-superpowers/search-mcp.sh` and merges a `doc-search` entry into the project's `.mcp.json`:
 
    ```json
