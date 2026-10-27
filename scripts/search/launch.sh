@@ -1,4 +1,5 @@
 #!/bin/sh
+# doc-search launcher v3.9.0
 # doc-search launcher (POSIX sh): runs the doc-search CLI / MCP server through
 # uv, from wherever doc-superpowers is installed.
 #
@@ -11,9 +12,14 @@
 #   1. $DOC_SUPERPOWERS_ROOT, when it has search/pyproject.toml
 #   2. the repository this is run in, when it is doc-superpowers itself
 #      (search/pyproject.toml and scripts/doc-tools.sh)
-#   3. the newest numeric X.Y.Z directory under
+#   3. ${CODEX_HOME:-$HOME/.codex}/doc-superpowers, the Codex install, when it
+#      has search/pyproject.toml
+#   4. the newest numeric X.Y.Z directory under
 #      ${CLAUDE_PLUGIN_CACHE:-$HOME/.claude/plugins/cache}/*/doc-superpowers/
 #      that has search/pyproject.toml
+#
+# Line 2 is the version stamp, the plugin's version: doc-tools.sh bump-version
+# writes it and check-version checks it.
 #
 # Extras: --extra cloud when docs/search/config.json (at the repository top)
 # has a non-null "cloud"; --extra local-transformer (after cloud) when its
@@ -93,6 +99,13 @@ fi
 
 if [ -z "$ROOT" ] && [ -n "$TOP" ] && [ -f "$TOP/search/pyproject.toml" ] && [ -f "$TOP/scripts/doc-tools.sh" ]; then
   ROOT=$TOP
+fi
+
+if [ -z "$ROOT" ]; then
+  CODEX=${CODEX_HOME:-$HOME/.codex}/doc-superpowers
+  if [ -f "$CODEX/search/pyproject.toml" ]; then
+    ROOT=$CODEX
+  fi
 fi
 
 if [ -z "$ROOT" ]; then

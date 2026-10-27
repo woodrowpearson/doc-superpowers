@@ -2242,17 +2242,22 @@ bump-version|cmd_bump_version|deps|
   <MAJOR.MINOR.PATCH>
   Write the version into the 5 manifest files: package.json,
   .claude-plugin/plugin.json, .claude-plugin/marketplace.json,
-  .cursor-plugin/plugin.json, gemini-extension.json. RELEASE-NOTES.md is
+  .cursor-plugin/plugin.json, gemini-extension.json; and into the launcher
+  stamp, the first "# doc-search launcher vX.Y.Z" line in the first 5 lines
+  of scripts/search/launch.sh, when that file exists. RELEASE-NOTES.md is
   the canonical version: check-version reads it, and it is never written.
-  All or nothing: every manifest found is read first, and one that is not
-  valid JSON writes nothing (exit 1); so does finding none (run it from the
-  repo root). Each file keeps its mode.
+  All or nothing: every file found is read first, and a manifest that is
+  not valid JSON, or a launcher without a stamp, writes nothing (exit 1);
+  so does finding no manifest (run it from the repo root). Each file keeps
+  its mode.
 check-version|cmd_check_version|deps|tag warn remote=
   [--tag [--remote <name>] [--warn]]
-  Verify that every manifest carries RELEASE-NOTES.md's version: its first
-  release heading, a line "## vMAJOR.MINOR.PATCH …" outside code fences (a
-  pre-release suffix is refused, not skipped). Exits 1 on a mismatch, a
-  manifest that is not valid JSON, or no manifest found.
+  Verify that every manifest, and the launcher stamp of
+  scripts/search/launch.sh when that file exists, carries RELEASE-NOTES.md's
+  version: its first release heading, a line "## vMAJOR.MINOR.PATCH …"
+  outside code fences (a pre-release suffix is refused, not skipped). Exits
+  1 on a mismatch, a manifest that is not valid JSON, a launcher without a
+  stamp, or no manifest found.
   --tag also requires the tag v<version> on the remote (--remote, default
   origin), read with git ls-remote: a local tag is not enough, since a
   consumer's AI workflows clone the tag of the version they installed. The
@@ -5761,6 +5766,23 @@ VERSION_FILES=(
   "gemini-extension.json:.version"
 )
 
+# The launcher's version stamp: the first line "# doc-search launcher vX.Y.Z"
+# within the first 5 lines of scripts/search/launch.sh (its line 2). Not JSON,
+# so not in VERSION_FILES: bump-version rewrites it with sed, check-version
+# reads it with grep. A tree without the launcher (a project that vendors
+# doc-tools.sh) has no stamp to keep.
+LAUNCHER_STAMP_FILE="scripts/search/launch.sh"
+
+# _launcher_stamp <file>: prints "<line number> <version>" for its stamp;
+# returns 1 when the first 5 lines hold none.
+_launcher_stamp() {
+  local hit line
+  hit=$(head -n 5 "$1" 2>/dev/null | grep -nE '^# doc-search launcher v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1) || true
+  [ -n "$hit" ] || return 1
+  line="${hit#*:}"
+  printf '%s %s\n' "${hit%%:*}" "${line#'# doc-search launcher v'}"
+}
+
 _no_manifest_error() {
   echo "ERROR: no manifest found (none of: ${VERSION_FILES[*]%%:*}) — run $1 from the repository root." >&2
   exit 1
@@ -5816,6 +5838,25 @@ cmd_bump_version() {
     exit 1
   fi
 
+  # The launcher stamp, rendered the same way before anything is replaced.
+  local stamp stamp_line stamp_current="" stamp_what=skip stamp_tmp=""
+  if [ -f "$LAUNCHER_STAMP_FILE" ]; then
+    if ! stamp=$(_launcher_stamp "$LAUNCHER_STAMP_FILE"); then
+      echo "ERROR: $LAUNCHER_STAMP_FILE has no launcher stamp (a line \"# doc-search launcher vX.Y.Z\" in its first 5 lines); nothing was written." >&2
+      exit 1
+    fi
+    stamp_line="${stamp%% *}"
+    stamp_current="${stamp#* }"
+    if [ "$stamp_current" = "$new_version" ]; then
+      stamp_what=ok
+    else
+      _tmp_beside "$LAUNCHER_STAMP_FILE"
+      sed "${stamp_line}s/.*/# doc-search launcher v${new_version}/" "$LAUNCHER_STAMP_FILE" > "$_TMP" ||
+        _die "cannot render the stamp of $LAUNCHER_STAMP_FILE; nothing was written."
+      stamp_what=bump stamp_tmp="$_TMP"
+    fi
+  fi
+
   local updated=0
   i=0
   for entry in "${VERSION_FILES[@]}"; do
@@ -5831,6 +5872,15 @@ cmd_bump_version() {
     esac
     i=$((i + 1))
   done
+  case "$stamp_what" in
+    skip) echo "  skip: $LAUNCHER_STAMP_FILE (not found)" ;;
+    ok) echo "  ok:   $LAUNCHER_STAMP_FILE (already $new_version)" ;;
+    bump)
+      _replace_file "$stamp_tmp" "$LAUNCHER_STAMP_FILE"
+      echo "  bump: $LAUNCHER_STAMP_FILE ($stamp_current → $new_version)"
+      updated=$((updated + 1))
+      ;;
+  esac
 
   echo "Updated $updated file(s) to v$new_version"
 }
@@ -5872,6 +5922,19 @@ cmd_check_version() {
   done
 
   [ "$checked" -gt 0 ] || _no_manifest_error check-version
+
+  if [ -f "$LAUNCHER_STAMP_FILE" ]; then
+    checked=$((checked + 1))
+    if ! actual=$(_launcher_stamp "$LAUNCHER_STAMP_FILE"); then
+      echo "  MISMATCH: $LAUNCHER_STAMP_FILE has no launcher stamp (expected \"# doc-search launcher v$canonical\" in its first 5 lines)"
+      mismatched=$((mismatched + 1))
+    elif [ "${actual#* }" != "$canonical" ]; then
+      echo "  MISMATCH: $LAUNCHER_STAMP_FILE has ${actual#* } (expected $canonical)"
+      mismatched=$((mismatched + 1))
+    else
+      echo "  ok:       $LAUNCHER_STAMP_FILE"
+    fi
+  fi
 
   local tag_fail=0
   [ "$tag" != 1 ] || _check_version_tag "v$canonical" "$remote" "$warn_only" || tag_fail=1
