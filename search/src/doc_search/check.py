@@ -9,9 +9,11 @@ that decides wins:
 4. the committed launcher copy absent, or below `requires`: `not-ready`; differing from the plugin's own
    but meeting the floor: `degraded`, remembered;
 5. with a transformer docs model and no transformer index: the static fallback valid is `degraded`, stale
-   is refreshed (with a static docs config), absent is `not-ready`;
+   is refreshed, absent is `not-ready`;
 6. any static or code index absent: `not-ready` (no build here);
-7. anything stale: one refresh, bounded by the budget, then the cache states are read once more;
+7. anything stale: when required, one refresh, bounded by the budget, then the cache states are read once
+   more (with no transformer index the refresh runs on a static docs config: `check` never starts a first
+   transformer build); when not required, no refresh: `not-in-force`, `not required here (stale: …)`;
 8. required: the result stands;
 9. not required: `not-in-force`, the reason naming the state it would have been;
 10. `mcp` says whether this developer's client is expected to run the MCP server.
@@ -45,6 +47,7 @@ LAUNCHER_REL = ".claude/doc-superpowers/search-mcp.sh"
 
 INDEX_FIX = f"sh {LAUNCHER_REL} index"
 PLUGIN_FIX = "claude plugin update doc-superpowers"
+CONFIG_FIX = f"edit {CONFIG_REL}, then run sh {LAUNCHER_REL} check"
 
 _EXITS: dict[str, int] = {"ready": 0, "degraded": 0, "not-ready": 1, "not-in-force": 4}
 _REQUIRED_RE = re.compile(r'"required"\s*:\s*true')
@@ -90,24 +93,30 @@ def config_says_required(top: Path) -> bool:
 
 def outside(env: Mapping[str, str], where: Path) -> Verdict:
     """The verdict outside a git work tree: not in force."""
-    return _verdict("not-in-force", "not in a git work tree", None, False, None, "absent", mcp_state(where, env))
+    version = plugin_version(plugin_root())
+    mcp = mcp_state(where, env)
+    return _verdict("not-in-force", "not in a git work tree", None, False, None, "absent", version, mcp)
 
 
 def assess(top: Path, *, budget_s: float, env: Mapping[str, str]) -> Verdict:
-    """The verdict for the worktree at `top`, refreshing stale indexes for at most `budget_s` seconds."""
+    """The verdict for the worktree at `top`. Only a required config refreshes stale indexes (for at most
+    `budget_s` seconds); otherwise the would-be state comes from the cache states alone."""
     top = Path(top).resolve()
     mcp = mcp_state(top, env)
+    version = plugin_version(plugin_root())
     try:
         cfg = load_config(top, env)
     except ConfigError as err:
         required = config_says_required(top)
         state: State = "not-ready" if required else "not-in-force"
-        return _verdict(state, f"invalid config: {err}", None, required, None, _launcher(top, None)[0], mcp)
+        fix = CONFIG_FIX if required else None
+        launcher = _launcher(top, None)[0]
+        return _verdict(state, f"invalid config: {err}", fix, required, None, launcher, version, mcp)
     if cfg is None:
-        return _verdict("not-in-force", f"no {CONFIG_REL}", None, False, None, _launcher(top, None)[0], mcp)
+        return _verdict("not-in-force", f"no {CONFIG_REL}", None, False, None, _launcher(top, None)[0], version, mcp)
 
     launcher, launcher_reason = _launcher(top, cfg.requires)
-    would = _would_be(top, cfg, launcher, launcher_reason, budget_s, env)
+    would = _would_be(top, cfg, launcher, launcher_reason, budget_s, version, env)
     if not cfg.required and would.state != "not-in-force":
         summary = would.state + (f": {would.reason}" if would.reason else "")
         would = dataclasses.replace(would, state="not-in-force", reason=f"not required here ({summary})")
@@ -121,11 +130,11 @@ def _verdict(
     required: bool,
     requires: tuple[int, int, int] | None,
     launcher: LauncherState,
+    version: tuple[int, int, int] | None,
     mcp: McpState = "not-registered",
     cache: dict[str, str | None] | None = None,
     refreshed: bool = False,
 ) -> Verdict:
-    version = plugin_version(plugin_root())
     return Verdict(
         state=state,
         reason=reason,
@@ -150,9 +159,11 @@ def _would_be(
     launcher: LauncherState,
     launcher_reason: str | None,
     budget_s: float,
+    version: tuple[int, int, int] | None,
     env: Mapping[str, str],
 ) -> Verdict:
-    """Rows 3 to 7: the verdict as if the repository required doc-search."""
+    """Rows 3 to 7: the verdict as if the repository required doc-search. Row 7 refreshes only when it does:
+    a stale index of a repository that does not require doc-search is reported, not refreshed."""
 
     def verdict(
         state: State,
@@ -161,9 +172,9 @@ def _would_be(
         cache: dict[str, str | None] | None = None,
         refreshed: bool = False,
     ) -> Verdict:
-        return _verdict(state, reason, fix, cfg.required, cfg.requires, launcher, cache=cache, refreshed=refreshed)
+        floor = cfg.requires
+        return _verdict(state, reason, fix, cfg.required, floor, launcher, version, cache=cache, refreshed=refreshed)
 
-    version = plugin_version(plugin_root())
     if cfg.requires is not None and (version is None or version < cfg.requires):
         shown = _dotted(version) if version is not None else "(version unknown)"
         reason = f"doc-superpowers {shown} is below requires >={_dotted(cfg.requires)}"
@@ -177,9 +188,14 @@ def _would_be(
     cache = _cache(pool, top, cfg)
     problem, building, stale = _classify(cfg, cache)
     refreshed = False
+    if problem is None and stale and not cfg.required:
+        summary = f"stale: {', '.join(stale)} index stale"
+        return verdict("not-in-force", f"not required here ({summary})", INDEX_FIX, cache=cache)
     if problem is None and stale:
         refreshed = True
-        refresh_cfg = _static_docs(cfg) if "static docs" in stale else cfg
+        # No transformer index: the static config refreshes what is stale, so no first transformer build starts.
+        no_transformer = cfg.docs.transformer is not None and cache["docs"] == "absent"
+        refresh_cfg = _static_docs(cfg) if no_transformer else cfg
         got = (pool if refresh_cfg is cfg else IndexPool(refresh_cfg, fallback=False)).get(top, wait_s=budget_s)
         if isinstance(got, Building):
             problem = f"refresh did not finish within {budget_s:g}s"
