@@ -16,7 +16,8 @@ that decides wins:
    transformer build); when not required, no refresh: `not-in-force`, `not required here (stale: …)`;
 8. required: the result stands;
 9. not required: `not-in-force`, the reason naming the state it would have been;
-10. `mcp` says whether this developer's client is expected to run the MCP server.
+10. `mcp` says, per client, whether this developer's client is expected to run the MCP server: the one client
+    the hook names (`gate --client claude|codex`), or each of them when none is named.
 
 Exit codes: 0 ready or degraded, 1 not-ready, 4 not-in-force (the CLI's 3 is usage).
 """
@@ -41,6 +42,10 @@ from .version import launcher_stamp, plugin_root, plugin_version
 State = Literal["ready", "degraded", "not-ready", "not-in-force"]
 LauncherState = Literal["current", "differs", "below-floor", "absent"]
 McpState = Literal["expected", "off", "not-registered"]
+Client = Literal["claude", "codex"]
+
+CLIENTS: tuple[Client, ...] = ("claude", "codex")
+"""The clients whose MCP registration `check` reads: Claude Code (`.mcp.json`) and Codex (its `config.toml`s)."""
 
 LAUNCHER_REL = ".claude/doc-superpowers/search-mcp.sh"
 """The launcher copy a project commits (install.sh install --search writes it)."""
@@ -68,7 +73,7 @@ class Verdict:
     requires: str | None  # the floor as the config writes it, `>=X.Y.Z`
     version: str | None  # the running plugin's version
     launcher: LauncherState
-    mcp: McpState
+    mcp: dict[str, McpState]  # per client: the one the hook named, or each of CLIENTS
     cache: dict[str, str | None]
     refreshed: bool
 
@@ -94,6 +99,11 @@ def config_says_required(top: Path) -> bool:
     return _REQUIRED_RE.search(text) is not None
 
 
+def mcp_line(mcp: Mapping[str, McpState]) -> str:
+    """`claude=expected codex=not-registered`: each client's state, as the `mcp:` line shows it."""
+    return " ".join(f"{client}={state}" for client, state in mcp.items())
+
+
 def outside(env: Mapping[str, str], where: Path) -> Verdict:
     """The verdict outside a git work tree: not in force."""
     version = plugin_version(plugin_root())
@@ -101,11 +111,12 @@ def outside(env: Mapping[str, str], where: Path) -> Verdict:
     return _verdict("not-in-force", "not in a git work tree", None, False, None, "absent", version, mcp)
 
 
-def assess(top: Path, *, budget_s: float, env: Mapping[str, str]) -> Verdict:
+def assess(top: Path, *, budget_s: float, env: Mapping[str, str], client: Client | None = None) -> Verdict:
     """The verdict for the worktree at `top`. Only a required config refreshes stale indexes (for at most
-    `budget_s` seconds); otherwise the would-be state comes from the cache states alone."""
+    `budget_s` seconds); otherwise the would-be state comes from the cache states alone. `mcp` is `client`'s
+    state, or each client's when it is None."""
     top = Path(top).resolve()
-    mcp = mcp_state(top, env)
+    mcp = mcp_state(top, env, client)
     version = plugin_version(plugin_root())
     try:
         cfg = load_config(top, env)
@@ -134,7 +145,7 @@ def _verdict(
     requires: tuple[int, int, int] | None,
     launcher: LauncherState,
     version: tuple[int, int, int] | None,
-    mcp: McpState = "not-registered",
+    mcp: dict[str, McpState] | None = None,
     cache: dict[str, str | None] | None = None,
     refreshed: bool = False,
 ) -> Verdict:
@@ -146,7 +157,7 @@ def _verdict(
         requires=f">={_dotted(requires)}" if requires is not None else None,
         version=_dotted(version) if version is not None else None,
         launcher=launcher,
-        mcp=mcp,
+        mcp=mcp if mcp is not None else {},
         cache=cache if cache is not None else {},
         refreshed=refreshed,
     )
@@ -297,22 +308,31 @@ def _install_fix() -> str:
     return f"bash {shlex.quote(str(plugin_root() / 'scripts' / 'hooks' / 'install.sh'))} install --search"
 
 
-def mcp_state(top: Path, env: Mapping[str, str]) -> McpState:
-    """Row 10: `off` by the developer's switch; `expected` when a client config registers the server."""
+def mcp_state(top: Path, env: Mapping[str, str], client: Client | None = None) -> dict[str, McpState]:
+    """Row 10, per client (`client`, or each of CLIENTS): `off` by the developer's switch, for every client;
+    `expected` when that client's config registers the server (Claude Code: `.mcp.json`; Codex: the project's
+    `.codex/config.toml` or `${CODEX_HOME:-~/.codex}/config.toml`); else `not-registered`."""
+    clients = CLIENTS if client is None else (client,)
     if env.get("DOC_SEARCH_MCP", "").strip() == "0":
-        return "off"
+        return {name: "off" for name in clients}
+    registers = {"claude": _claude_registers, "codex": _codex_registers}
+    return {name: "expected" if registers[name](top, env) else "not-registered" for name in clients}
+
+
+def _claude_registers(top: Path, env: Mapping[str, str]) -> bool:
+    """Whether the project's `.mcp.json` registers `doc-search` (Claude Code)."""
     try:
         servers = json.loads((top / ".mcp.json").read_text(encoding="utf-8")).get("mcpServers")
-        if isinstance(servers, dict) and "doc-search" in servers:
-            return "expected"
     except (OSError, ValueError, AttributeError):
-        pass
+        return False
+    return isinstance(servers, dict) and "doc-search" in servers
+
+
+def _codex_registers(top: Path, env: Mapping[str, str]) -> bool:
+    """Whether the user's or the project's Codex config has an `mcp_servers.doc-search` table."""
     home = env.get("HOME") or str(Path.home())
     codex_home = Path(env.get("CODEX_HOME") or Path(home) / ".codex")
-    for toml in (codex_home / "config.toml", top / ".codex" / "config.toml"):
-        if _toml_registers(toml):
-            return "expected"
-    return "not-registered"
+    return any(_toml_registers(toml) for toml in (codex_home / "config.toml", top / ".codex" / "config.toml"))
 
 
 def _toml_registers(path: Path) -> bool:

@@ -6506,11 +6506,12 @@ SGT_CMD_PREFIX='sh "$(git rev-parse --show-toplevel)/.claude/doc-superpowers/sea
 SGT_CLAUDE=".claude/settings.json"
 SGT_CODEX=".codex/hooks.json"
 
-# sgt_want <claude|codex>: the hooks object install --search-gate writes, compact.
+# sgt_want <claude|codex>: the hooks object install --search-gate writes, compact
+# (session-start names the client).
 sgt_want() {
   jq -cn --arg p "$SGT_CMD_PREFIX" --arg who "$1" '
     def h($e; $t): [{type: "command", command: "\($p) \($e)", timeout: $t}];
-    {SessionStart: [{matcher: "startup|resume|clear|compact", hooks: h("session-start"; 45)}],
+    {SessionStart: [{matcher: "startup|resume|clear|compact", hooks: h("session-start --client \($who)"; 45)}],
      UserPromptSubmit: [{hooks: h("prompt"; 45)}],
      PreToolUse: [(if $who == "claude" then {matcher: "*"} else {} end) + {hooks: h("tool"; 10)}]}'
 }
@@ -6807,6 +6808,43 @@ test_search_gate_not_in_all() {
   teardown
 }
 
+test_search_gate_replaces_pre_client_entries() {
+  echo "test: search-gate: a SessionStart entry from before --client (gate session-start alone) is ours: status reads the file partial, install replaces it (no duplicate), uninstall removes it"
+  sgt_fixture '{"required": true}'
+  local f who
+  for f in "$SGT_CLAUDE" "$SGT_CODEX"; do
+    who=claude
+    [ "$f" = "$SGT_CLAUDE" ] || who=codex
+    mkdir -p "${f%/*}"
+    jq -n --argjson h "$(sgt_want "$who")" '{hooks: $h} | .hooks.SessionStart[0].hooks[0].command |= (rtrimstr(" --client claude") | rtrimstr(" --client codex"))' > "$f"
+  done
+  assert_eq "$SGT_CMD_PREFIX session-start" "$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$SGT_CODEX")" "the fixture: the old command"
+  inst status --search-gate
+  assert_contains "$IOUT" "⚠ .claude/settings.json: partial: missing or changed: SessionStart (re-run install --search-gate)" "status: Claude Code's file partial, SessionStart named"
+  assert_contains "$IOUT" "⚠ .codex/hooks.json: partial: missing or changed: SessionStart (re-run install --search-gate)" "…Codex's too"
+  inst status --search-gate --json
+  assert_eq "partial:partial" "$(srh_json '"\(.tiers.search_gate.claude_settings):\(.tiers.search_gate.codex_hooks)"')" "…and in JSON"
+  inst install --search-gate
+  assert_eq "0" "$IRC" "install --search-gate: exit 0"
+  assert_eq "$(sgt_want claude)" "$(sgt_jq "$SGT_CLAUDE" .hooks)" "Claude Code: the old entry replaced, none duplicated"
+  assert_eq "$(sgt_want codex)" "$(sgt_jq "$SGT_CODEX" .hooks)" "…Codex too"
+  # An old entry beside the new one: two of ours is partial; install leaves one.
+  jq --arg c "$SGT_CMD_PREFIX session-start" '.hooks.SessionStart += [{hooks: [{type: "command", command: $c, timeout: 45}]}]' "$SGT_CLAUDE" > "$SGT_CLAUDE.tmp" && mv "$SGT_CLAUDE.tmp" "$SGT_CLAUDE"
+  inst status --search-gate --json
+  assert_eq "partial" "$(srh_json .tiers.search_gate.claude_settings)" "old and new together: partial"
+  inst install --search-gate
+  assert_eq "$(sgt_want claude)" "$(sgt_jq "$SGT_CLAUDE" .hooks)" "…install leaves the new one alone"
+  # Uninstall removes an old entry too.
+  for f in "$SGT_CLAUDE" "$SGT_CODEX"; do
+    jq '.hooks.SessionStart[0].hooks[0].command |= (rtrimstr(" --client claude") | rtrimstr(" --client codex"))' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  done
+  inst uninstall --search-gate
+  assert_eq "0" "$IRC" "uninstall --search-gate: exit 0"
+  assert_file_not_exists "$SGT_CLAUDE" "…the old entries removed with ours: the file goes"
+  assert_file_not_exists "$SGT_CODEX" "…both files"
+  teardown
+}
+
 test_search_uninstall_refused_while_gated() {
   echo "test: search-gate: uninstall --search alone is refused (exit 1, the message naming uninstall --search-gate, nothing changed) while either hook file holds the gate's entries, whose commands run the launcher it would remove; with --search-gate too it removes both"
   sgt_fixture '{"required": true}'
@@ -6991,7 +7029,7 @@ test_search_gate_shipped_rule_is_current() {
 test_search_gate_hooks_run_the_launcher() {
   echo "test: search-gate: the registered PreToolUse command, run as a client runs it (sh -c, from a subdirectory, the event on stdin), reaches the committed launcher: with a not-ready verdict it denies rg and allows the fix command"
   sgt_fixture '{"required": true}'
-  local envroot cmd f ev vf
+  local envroot cmd f ev vf who
   envroot=$(harness_mktemp_d sgtroot)
   srl_root "$envroot"
   inst install --search-gate
@@ -7009,6 +7047,12 @@ test_search_gate_hooks_run_the_launcher() {
     srg_event "$ev" Bash "sh .claude/doc-superpowers/search-mcp.sh index"
     RUN_OUT=$(cd sub/dir && env DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= CODEX_HOME= DOC_SEARCH_GATE= PATH="$SRL_BIN:$REAL_PATH" sh -c "$cmd" < "$ev" 2>&1) || true
     assert_eq "" "$RUN_OUT" "$f: the fix command allowed (silent)"
+    # SessionStart names its client: doc-search gate gets --client.
+    cmd=$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$f")
+    RUN_OUT=$(cd sub/dir && env DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= CODEX_HOME= DOC_SEARCH_GATE= PATH="$SRL_BIN:$REAL_PATH" sh -c "$cmd" < /dev/null 2>&1) || true
+    who=claude
+    [ "$f" = "$SGT_CLAUDE" ] || who=codex
+    assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search gate session-start --client $who" "$RUN_OUT" "$f: SessionStart runs doc-search gate session-start --client $who"
   done
   teardown
 }
@@ -7285,6 +7329,8 @@ test_launcher_check_gate_without_uv_required() {
   assert_true "…one JSON object (jq -e .)" srg_is_json
   want="doc-search is required here and not ready: $SRG_UV_REASON. Fix: install uv. Only the user can run this fix; you may run only sh .claude/doc-superpowers/search-mcp.sh index, status or check. Do no work until it is ready: tell the user this line and stop."
   assert_eq "$(jq -cn --arg r "$want" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $r}}')" "$(srg_compact)" "…adds the reason as context"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate session-start --client codex
+  assert_eq "$(jq -cn --arg r "$want" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $r}}')" "$(srg_compact)" "…the same with --client codex"
   # …and both keep the verdict file, as doc-search gate does: two LF lines.
   srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate tool
   assert_eq "$(srg_deny "doc-search is required here and not ready: $SRG_UV_REASON; fix: install uv. Stop and report this to the user; do not work around it.")" "$(srg_compact)" \
@@ -7380,6 +7426,20 @@ test_launcher_check_gate_exec_doc_search() {
   assert_eq "0:3" "$RUN_PIPE:$RUN_RC" "…its stdin drained first (a large event's writer exits 0)"
   srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate
   assert_eq "3:" "$RUN_RC:$RUN_OUT" "gate with no event: exit 3"
+  # --client claude|codex (what install --search-gate registers for session-start) is passed on.
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate session-start --client claude
+  assert_eq "0:uv run --project $envroot/search --frozen --no-dev doc-search gate session-start --client claude" "$RUN_RC:$RUN_OUT" "gate session-start --client claude: passed on"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate prompt --client=codex
+  assert_eq "0:uv run --project $envroot/search --frozen --no-dev doc-search gate prompt --client=codex" "$RUN_RC:$RUN_OUT" "…--client=codex too"
+  for c in "--client cursor" "--client" "--client="; do
+    # shellcheck disable=SC2086  # the option and its value, split on purpose
+    srg_pipe "$SRG_TMP/big-usage.json" DOC_SUPERPOWERS_ROOT="$envroot" -- gate session-start $c
+    assert_eq "0:3::doc-search: usage: gate session-start|prompt|tool [--client claude|codex]" "$RUN_PIPE:$RUN_RC:$RUN_OUT:$RUN_ERR" "gate session-start $c: a usage error on stderr, exit 3, its stdin drained"
+  done
+  ev="$SRG_TMP/rgc.json"
+  srg_event "$ev" Bash "rg foo"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool --client claude
+  assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "gate tool --client claude: decides as without it"
   teardown
 }
 
@@ -7724,6 +7784,7 @@ test_search_gate_not_in_all
 test_search_gate_status_and_json
 test_search_uninstall_refused_while_gated
 test_search_gate_status_warns_launcher_differs
+test_search_gate_replaces_pre_client_entries
 test_search_gate_rule_drift
 test_search_gate_shipped_rule_is_current
 test_search_gate_hooks_run_the_launcher

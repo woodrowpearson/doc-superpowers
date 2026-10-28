@@ -6,7 +6,8 @@ The client hooks run `sh <top>/.claude/doc-superpowers/search-mcp.sh gate <event
 `check`'s `assess`, writes the verdict file, and prints the client's JSON (the same for Claude Code and Codex)
 or nothing. It always exits 0: the decision is the JSON.
 
-- `session-start`: the verdict as context; not-ready says to do no work until it is ready, and that only the user
+- `session-start`: the verdict as context, its `mcp:` line naming the client the hook passes (`--client
+  claude|codex`; each client when none is passed); not-ready says to do no work until it is ready, and that only the user
   can run a fix the tool gate does not allow, or a first transformer build. Not in force: nothing.
 - `prompt`: not-ready blocks the prompt with the reason and the fix; anything else: nothing.
 - An exception in `assess` is not-ready (`check failed: <type>: <message>`) when the raw config says
@@ -28,7 +29,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .check import LAUNCHER_REL, TRANSFORMER_NOT_BUILT, Verdict, assess, config_says_required
+from .check import CLIENTS, LAUNCHER_REL, TRANSFORMER_NOT_BUILT, Client, Verdict, assess, config_says_required, mcp_line
 from .repo import git
 
 EVENTS = ("session-start", "prompt")
@@ -116,14 +117,15 @@ def hook_output(event: str, verdict: Verdict) -> dict[str, Any] | None:
         head = "doc-search: ready"
         if verdict.state == "degraded":
             head += f" (degraded: {reason})" if reason else " (degraded)"
-        text = f"{head}\nmcp: {verdict.mcp}"
+        text = f"{head}\nmcp: {mcp_line(verdict.mcp)}"
     return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}
 
 
-def judge(top: Path, *, budget_s: float, env: Mapping[str, str]) -> Verdict:
-    """`assess`, with an exception turned into a verdict: not-ready when the raw config says required."""
+def judge(top: Path, *, budget_s: float, env: Mapping[str, str], client: Client | None = None) -> Verdict:
+    """`assess` for `client`, with an exception turned into a verdict: not-ready when the raw config says
+    required."""
     try:
-        return assess(top, budget_s=budget_s, env=env)
+        return assess(top, budget_s=budget_s, env=env, client=client)
     except Exception as err:  # noqa: BLE001 - any failure of the probe is a verdict, never a crash
         required = config_says_required(top)
         return Verdict(
@@ -134,7 +136,7 @@ def judge(top: Path, *, budget_s: float, env: Mapping[str, str]) -> Verdict:
             requires=None,
             version=None,
             launcher="absent",  # not looked at: the hooks do not show it
-            mcp="not-registered",
+            mcp={name: "not-registered" for name in (CLIENTS if client is None else (client,))},  # not looked at
             cache={},
             refreshed=False,
         )

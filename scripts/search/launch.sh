@@ -6,7 +6,8 @@
 #   sh .claude/doc-superpowers/search-mcp.sh serve     (what .mcp.json runs)
 #   sh .claude/doc-superpowers/search-mcp.sh check     (the readiness probe)
 #   sh "$(git rev-parse --show-toplevel)/.claude/doc-superpowers/search-mcp.sh" \
-#     gate session-start|prompt|tool                   (what the client hooks run)
+#     gate session-start|prompt|tool [--client claude|codex]
+#                                                      (what the client hooks run)
 #
 # install.sh install --search copies this file to
 # .claude/doc-superpowers/search-mcp.sh and registers it in .mcp.json. The copy
@@ -94,7 +95,8 @@
 # every one is denied, with a fixed reason.
 # check's answer goes to stdout, as doc-search's does: the line, or with
 # --format json one object (see check_answer). gate prints one JSON object or
-# nothing and exits 0 (3 for an unknown event). It never echoes the event,
+# nothing and exits 0 (3 for an unknown event, or a --client other than claude
+# or codex; doc-search gate reads --client, the answers here do not need it). It never echoes the event,
 # and it drains stdin it does not read, so the client's write never blocks.
 #
 # Other failures are one stderr line and exit 2.
@@ -307,6 +309,30 @@ answer_check_gate() {
         exit 3
         ;;
     esac
+    # --client claude|codex: the client whose MCP registration the session-start
+    # line names (doc-search gate reads it; the answers here do not need it).
+    PREV=""
+    for ARG in "$@"; do
+      CLIENT=-
+      if [ "$PREV" = --client ]; then CLIENT=$ARG; fi
+      case $ARG in
+        --client=*) CLIENT=${ARG#--client=} ;;
+      esac
+      case $CLIENT in
+        - | claude | codex) ;;
+        *)
+          drain
+          echo "doc-search: usage: gate session-start|prompt|tool [--client claude|codex]" >&2
+          exit 3
+          ;;
+      esac
+      PREV=$ARG
+    done
+    if [ "$PREV" = --client ]; then
+      drain
+      echo "doc-search: usage: gate session-start|prompt|tool [--client claude|codex]" >&2
+      exit 3
+    fi
     if [ "$GATE_OFF" = true ]; then
       gate_silent
     fi
