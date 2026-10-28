@@ -6594,6 +6594,12 @@ srg_deny() {
   jq -cn --arg r "$1" '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $r}}'
 }
 
+# srg_check_json <state> <exit> <reason> [fix]: check's JSON answer, compact.
+srg_check_json() {
+  jq -cn --arg s "$1" --argjson e "$2" --arg r "$3" --arg f "${4:-}" \
+    '{state: $s, exit: $e, reason: $r, fix: (if $f == "" then null else $f end)}'
+}
+
 # srg_compact: RUN_OUT as compact JSON ("NOT JSON" when it does not parse).
 srg_compact() {
   jq -c . <<<"$RUN_OUT" 2>/dev/null || echo "NOT JSON"
@@ -6650,8 +6656,12 @@ test_launcher_check_gate_outside_a_work_tree() {
   cd "$out"
   srg_run /dev/null GIT_CEILING_DIRECTORIES="$SUITE_TMP" DOC_SUPERPOWERS_ROOT="$envroot" -- check
   assert_eq "4:doc-search: not in force: not a git work tree:" "$RUN_RC:$RUN_OUT:$RUN_ERR" "check: the line on stdout, exit 4 (uv is not run)"
-  srg_run /dev/null GIT_CEILING_DIRECTORIES="$SUITE_TMP" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check --format json
+  srg_run /dev/null GIT_CEILING_DIRECTORIES="$SUITE_TMP" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
   assert_eq "4:doc-search: not in force: not a git work tree" "$RUN_RC:$RUN_OUT" "…the same with no uv"
+  srg_run /dev/null GIT_CEILING_DIRECTORIES="$SUITE_TMP" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check --format json
+  assert_eq "4" "$RUN_RC" "check --format json: exit 4"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  assert_eq "$(srg_check_json not-in-force 4 "not a git work tree")" "$(srg_compact)" "…the verdict as JSON, fix null"
   srg_run /dev/null GIT_CEILING_DIRECTORIES="$SUITE_TMP" -- check
   assert_eq "4:doc-search: not in force: not a git work tree" "$RUN_RC:$RUN_OUT" "…and with no root (outside a work tree comes first)"
   for e in session-start prompt; do
@@ -6681,6 +6691,10 @@ test_launcher_check_gate_without_a_root() {
   assert_eq "4:doc-search: not in force: doc-superpowers is not installed for this developer:" "$RUN_RC:$RUN_OUT:$RUN_ERR" "check: the line on stdout, exit 4"
   srg_run /dev/null PATH="$nouv" -- check
   assert_eq "4:doc-search: not in force: doc-superpowers is not installed for this developer" "$RUN_RC:$RUN_OUT" "…the same with no uv (no root comes first)"
+  srg_run /dev/null -- check --format json
+  assert_eq "4" "$RUN_RC" "check --format json: exit 4"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  assert_eq "$(srg_check_json not-in-force 4 "doc-superpowers is not installed for this developer")" "$(srg_compact)" "…the verdict as JSON, fix null"
   for e in session-start prompt; do
     srg_run /dev/null PATH="$nouv" -- gate "$e"
     assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate $e, required, no uv: silent, exit 0"
@@ -6695,13 +6709,27 @@ test_launcher_check_gate_without_a_root() {
 test_launcher_check_gate_without_uv_required() {
   echo "test: launcher: no uv where the raw config says \"required\": true — check: 'not ready: uv not found', exit 1; gate prompt blocks and gate session-start adds context, as JSON; gate tool decides as usual"
   srh_fixture '{"required": true}'
-  local envroot nouv vf ev want
+  local envroot nouv nojq vf ev want
   envroot=$(harness_mktemp_d envroot)
   srl_root "$envroot"
   nouv=$(srg_nouv_path)
   vf=$(git rev-parse --git-path doc-search-gate)
   srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
   assert_eq "1:doc-search: not ready: $SRG_UV_REASON:" "$RUN_RC:$RUN_OUT:$RUN_ERR" "check: the line on stdout, exit 1"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check --format json
+  assert_eq "1" "$RUN_RC" "check --format json: exit 1"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  assert_eq "$(srg_check_json not-ready 1 "$SRG_UV_REASON" "install uv")" "$(srg_compact)" "…the verdict as JSON, with its fix"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check --budget 5 --format=json
+  assert_eq "$(srg_check_json not-ready 1 "$SRG_UV_REASON" "install uv")" "$(srg_compact)" "…--format=json, after another option, too"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check --format json --format text
+  assert_eq "1:doc-search: not ready: $SRG_UV_REASON" "$RUN_RC:$RUN_OUT" "…the last --format wins (text)"
+  # Without jq: the same object, printed as a fixed string.
+  nojq=$(make_nojq_path)
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nojq" -- check --format json
+  assert_eq "1" "$RUN_RC" "without jq, check --format json: exit 1"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  assert_eq "$(srg_check_json not-ready 1 "$SRG_UV_REASON" "install uv")" "$(srg_compact)" "…the same verdict"
   srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate prompt
   assert_eq "0" "$RUN_RC" "gate prompt: exit 0"
   assert_true "…one JSON object (jq -e .)" srg_is_json
@@ -6752,6 +6780,12 @@ test_launcher_check_gate_without_uv_not_required() {
   vf=$(git rev-parse --git-path doc-search-gate)
   srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
   assert_eq "4:doc-search: not in force: $SRG_UV_REASON:" "$RUN_RC:$RUN_OUT:$RUN_ERR" "check: the line on stdout, exit 4"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check --format json
+  assert_eq "4" "$RUN_RC" "check --format json: exit 4"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  assert_eq "$(srg_check_json not-in-force 4 "$SRG_UV_REASON")" "$(srg_compact)" "…the verdict as JSON, fix null"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$(make_nojq_path)" -- check --format json
+  assert_eq "$(srg_check_json not-in-force 4 "$SRG_UV_REASON")" "$(srg_compact)" "…without jq too (fix null)"
   for e in session-start prompt; do
     srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate "$e"
     assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate $e: silent, exit 0"
@@ -6793,6 +6827,9 @@ test_launcher_check_gate_exec_doc_search() {
   assert_true "…and uv was never run" test ! -e "$SRL_BIN/argc"
   srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate stop
   assert_eq "3::doc-search: usage: gate session-start|prompt|tool" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate stop: a usage error on stderr, exit 3"
+  printf '{"tool_name":"Bash","tool_input":{"command":"%s"}}' "$(head -c 300000 /dev/zero | tr '\0' x)" > "$SRG_TMP/big-usage.json"
+  srg_pipe "$SRG_TMP/big-usage.json" DOC_SUPERPOWERS_ROOT="$envroot" -- gate stop
+  assert_eq "0:3" "$RUN_PIPE:$RUN_RC" "…its stdin drained first (a large event's writer exits 0)"
   srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate
   assert_eq "3:" "$RUN_RC:$RUN_OUT" "gate with no event: exit 3"
   teardown
@@ -6816,6 +6853,12 @@ test_launcher_gate_tool() {
   printf 'not-ready-ish\nx\n' > "$vf"
   srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
   assert_eq "0:" "$RUN_RC:$RUN_OUT" "line 1 not exactly not-ready: silent"
+  printf 'not-ready\r\nindex absent\r\n' > "$vf"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "a CRLF file: line 1 is not-ready once its CR is dropped, rg denied (fail closed)"
+  printf 'not-ready\r\r\nx\n' > "$vf"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0:" "$RUN_RC:$RUN_OUT" "…only one CR is dropped: not-ready and two CRs is not not-ready, silent"
   reason="index absent: \"docs\" at C:\\x; fix: $SRG_LAUNCHER_FIX index"
   printf 'not-ready\n%s\n' "$reason" > "$vf"
   want="doc-search is required here and not ready: $reason. Stop and report this to the user; do not work around it."
@@ -6824,11 +6867,14 @@ test_launcher_gate_tool() {
     "$SRG_LAUNCHER_FIX check" \
     "$SRG_LAUNCHER_FIX check --format text" \
     "sh \"$top/.claude/doc-superpowers/search-mcp.sh\" status --format json" \
-    "sh $top/.claude/doc-superpowers/search-mcp.sh index"; do
+    "sh $top/.claude/doc-superpowers/search-mcp.sh index" \
+    "sh \"/a dir/with spaces/.claude/doc-superpowers/search-mcp.sh\" check --format json" \
+    "sh \".claude/doc-superpowers/search-mcp.sh\" index"; do
     srg_event "$ev" Bash "$c"
     srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
     assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "allowed: $c"
   done
+  # shellcheck disable=SC2016  # the single-quoted commands are literal shell syntax under test
   for c in "$SRG_LAUNCHER_FIX index && rm -rf x" \
     "$SRG_LAUNCHER_FIX index; ls" \
     "$SRG_LAUNCHER_FIX index | cat" \
@@ -6843,7 +6889,17 @@ test_launcher_gate_tool() {
     " $SRG_LAUNCHER_FIX index" \
     "$SRG_LAUNCHER_FIX index"$'\n'"rm -rf x" \
     "rm -rf x"$'\n'"$SRG_LAUNCHER_FIX index" \
-    "$SRG_LAUNCHER_FIX index"$'\n'; do
+    "$SRG_LAUNCHER_FIX index"$'\n' \
+    'sh `id`/.claude/doc-superpowers/search-mcp.sh index' \
+    'sh $(touch${IFS}pwned)/.claude/doc-superpowers/search-mcp.sh index' \
+    'sh "$(curl${IFS}x)"/.claude/doc-superpowers/search-mcp.sh" index' \
+    'sh >victim/.claude/doc-superpowers/search-mcp.sh index' \
+    'sh <victim/.claude/doc-superpowers/search-mcp.sh index' \
+    "sh a"$'\t'"b/.claude/doc-superpowers/search-mcp.sh index" \
+    "$SRG_LAUNCHER_FIX"$'\t'"index" \
+    'sh "x/.claude/doc-superpowers/search-mcp.sh index' \
+    'sh x"/.claude/doc-superpowers/search-mcp.sh" index' \
+    'sh a b/.claude/doc-superpowers/search-mcp.sh index'; do
     srg_event "$ev" Bash "$c"
     srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
     assert_eq "0" "$RUN_RC" "denied, exit 0: $(printf '%s' "$c" | tr '\n' '/')"

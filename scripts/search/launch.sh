@@ -73,14 +73,15 @@
 #     gate session-start and prompt are silent.
 # gate tool never runs uv. It reads the verdict file doc-search gate keeps,
 # $(git rev-parse --git-path doc-search-gate): line 1 the verdict, line 2 the
-# reason and fix. Unless line 1 is not-ready it is silent. While it is, a Bash
-# call whose whole command matches GATE_ALLOWED (the fix commands) is allowed
-# and every other tool call is denied, line 2 in the reason. Without jq the
-# call cannot be read, so every one is denied, with a fixed reason.
-# check's line goes to stdout, as doc-search's does. gate prints one JSON
-# object or nothing and exits 0 (3 for an unknown event). It never echoes the
-# event, and it drains stdin it does not read, so the client's write never
-# blocks.
+# reason and fix. Unless line 1 is not-ready (one trailing CR ignored) it is
+# silent. While it is, a Bash call whose whole command matches
+# GATE_ALLOWED_PLAIN or GATE_ALLOWED_QUOTED (the fix commands) is allowed and
+# every other tool call is denied, line 2 in the reason. Without jq the call
+# cannot be read, so every one is denied, with a fixed reason.
+# check's answer goes to stdout, as doc-search's does: the line, or with
+# --format json one object (see check_answer). gate prints one JSON object or
+# nothing and exits 0 (3 for an unknown event). It never echoes the event,
+# and it drains stdin it does not read, so the client's write never blocks.
 #
 # Other failures are one stderr line and exit 2.
 
@@ -105,14 +106,21 @@ config_required() {
   if [ -z "$TOP" ] || [ ! -f "$TOP/docs/search/config.json" ]; then
     return 1
   fi
-  # Every ASCII blank becomes a space, so " *" is Python's \s across lines.
+  # tr turns the ASCII whitespace (\t \n \v \f \r) into spaces, so " *" spans
+  # lines as Python's \s does; the Unicode spaces \s also matches are not covered.
   tr '\t\n\v\f\r' '     ' 2>/dev/null <"$TOP/docs/search/config.json" | grep -Eq '"required" *: *true'
 }
 
 # gate_tool: the PreToolUse decision, from the verdict file and the event.
 gate_tool() {
   VERDICT=$(git rev-parse --git-path doc-search-gate 2>/dev/null) || VERDICT=""
-  if [ -z "$VERDICT" ] || [ ! -f "$VERDICT" ] || [ "$(sed -n 1p "$VERDICT" 2>/dev/null)" != not-ready ]; then
+  if [ -z "$VERDICT" ] || [ ! -f "$VERDICT" ]; then
+    gate_silent
+  fi
+  # Line 1, one trailing CR dropped: a CRLF file still denies (fail closed).
+  LINE1=$(sed -n 1p "$VERDICT" 2>/dev/null) || LINE1=""
+  LINE1=${LINE1%"$(printf '\r')"}
+  if [ "$LINE1" != not-ready ]; then
     gate_silent
   fi
   if ! command -v jq >/dev/null 2>&1; then
@@ -122,11 +130,11 @@ gate_tool() {
   fi
   if [ -t 0 ]; then EVENT=""; else EVENT=$(cat); fi
   # A newline anywhere is refused: jq's $ also matches before a final newline.
-  if printf '%s' "$EVENT" | jq -e --arg re "$GATE_ALLOWED" '
+  if printf '%s' "$EVENT" | jq -e --arg plain "$GATE_ALLOWED_PLAIN" --arg quoted "$GATE_ALLOWED_QUOTED" '
     .tool_name == "Bash"
     and (.tool_input.command | type) == "string"
     and (.tool_input.command | test("[\n\r]") | not)
-    and (.tool_input.command | test($re))' >/dev/null 2>&1; then
+    and (.tool_input.command | test($plain) or test($quoted))' >/dev/null 2>&1; then
     exit 0
   fi
   REASON=$(sed -n 2p "$VERDICT" 2>/dev/null) || REASON=""
@@ -141,23 +149,61 @@ gate_tool() {
   exit 0
 }
 
+# check_answer <state> <exit> <reason> [fix]: check's answer, then exit
+# <exit>. Text: "doc-search: <state, dashes as spaces>: <reason>". With
+# --format json: {"state", "exit", "reason", "fix"} (fix null when none), the
+# names doc-search's own verdict uses; without jq the fixed strings are
+# printed as they are (none holds a quote or a backslash).
+check_answer() {
+  if [ "$FORMAT" = json ]; then
+    if command -v jq >/dev/null 2>&1; then
+      jq -n --arg state "$1" --argjson exit "$2" --arg reason "$3" --arg fix "${4:-}" \
+        '{state: $state, exit: $exit, reason: $reason, fix: (if $fix == "" then null else $fix end)}'
+    else
+      FIX_JSON=null
+      if [ -n "${4:-}" ]; then FIX_JSON="\"$4\""; fi
+      printf '{"state": "%s", "exit": %s, "reason": "%s", "fix": %s}\n' "$1" "$2" "$3" "$FIX_JSON"
+    fi
+  else
+    echo "doc-search: $(printf '%s' "$1" | tr '-' ' '): $3"
+  fi
+  exit "$2"
+}
+
 # answer_check_gate <verb> [event] …: answer check or gate here where
 # doc-search cannot run (see above); return to exec it otherwise.
 answer_check_gate() {
-  # Set here, after the env hook, so nothing it sets can change them. The
-  # final $ is outside the quotes: this file's POSIX check refuses a dollar
-  # sign right before a single quote (bash's ANSI-C quoting).
+  # Set here, after the env hook, so nothing it sets can change them.
   UV_MISSING="uv not found (https://docs.astral.sh/uv/)"
   GATE_NOT_READY="doc-search is required here and not ready"
   GATE_STOP="Stop and report this to the user; do not work around it."
-  GATE_ALLOWED='^sh (\"?[^ ;&|]*/)?\.claude/doc-superpowers/search-mcp\.sh\"? (index|status|check)( --format (text|json))?'\$
+  # The fix commands allowed while not ready, whole: the launcher path holds
+  # only [A-Za-z0-9_./-], and spaces too when double-quoted, so no shell
+  # syntax (substitution, redirection, a second command) can ride along. The
+  # final $ is outside the quotes: this file's POSIX check refuses a dollar
+  # sign right before a single quote (bash's ANSI-C quoting).
+  GATE_ALLOWED_PLAIN='^sh ([A-Za-z0-9_./-]*/)?\.claude/doc-superpowers/search-mcp\.sh (index|status|check)( --format (text|json))?'\$
+  GATE_ALLOWED_QUOTED='^sh "([A-Za-z0-9_. /-]*/)?\.claude/doc-superpowers/search-mcp\.sh" (index|status|check)( --format (text|json))?'\$
   VERB=$1
   EVENT_NAME=""
+  FORMAT=text
+  if [ "$VERB" = check ]; then
+    # check's --format, as argparse reads it (the last one wins).
+    PREV=""
+    for ARG in "$@"; do
+      if [ "$PREV" = --format ]; then FORMAT=$ARG; fi
+      case $ARG in
+        --format=*) FORMAT=${ARG#--format=} ;;
+      esac
+      PREV=$ARG
+    done
+  fi
   if [ "$VERB" = gate ]; then
     EVENT_NAME=${2:-}
     case $EVENT_NAME in
       session-start | prompt | tool) ;;
       *)
+        drain
         echo "doc-search: usage: gate session-start|prompt|tool" >&2
         exit 3
         ;;
@@ -168,13 +214,11 @@ answer_check_gate() {
   fi
   if [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" != true ]; then
     if [ "$VERB" = gate ]; then gate_silent; fi
-    echo "doc-search: not in force: not a git work tree"
-    exit 4
+    check_answer not-in-force 4 "not a git work tree"
   fi
   if [ -z "$ROOT" ]; then
     if [ "$VERB" = gate ]; then gate_silent; fi
-    echo "doc-search: not in force: doc-superpowers is not installed for this developer"
-    exit 4
+    check_answer not-in-force 4 "doc-superpowers is not installed for this developer"
   fi
   if [ "$EVENT_NAME" = tool ]; then
     gate_tool
@@ -195,12 +239,10 @@ answer_check_gate() {
         exit 0
         ;;
     esac
-    echo "doc-search: not ready: $UV_MISSING"
-    exit 1
+    check_answer not-ready 1 "$UV_MISSING" "install uv"
   fi
   if [ "$VERB" = gate ]; then gate_silent; fi
-  echo "doc-search: not in force: $UV_MISSING"
-  exit 4
+  check_answer not-in-force 4 "$UV_MISSING"
 }
 
 ENV_HOOK=${DOC_SEARCH_ENV_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/doc-search/env.sh}
