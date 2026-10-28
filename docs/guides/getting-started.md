@@ -138,8 +138,9 @@ If you ask for a work ledger (or `docs/ledger/config.json` already exists), it a
 /doc-superpowers hooks install --ledger        # pre-commit validate, pre-push provisional-key check (+ undeclared-contract-change advisories, unless validate.undeclared_contract_change is false), post-commit in-flight push
 /doc-superpowers hooks install --ledger-claude # Claude Code: SessionStart notices, the state-watch hook (per-user)
 
-# With doc-search (docs/search/config.json): its opt-in set, never part of --all
+# With doc-search (docs/search/config.json): its opt-in sets, never part of --all
 /doc-superpowers hooks install --search        # .claude/doc-superpowers/search-mcp.sh + the .mcp.json entry (commit both)
+/doc-superpowers hooks install --search-gate   # the readiness gate: hooks in .claude/settings.json + .codex/hooks.json (commit both)
 ```
 
 The installer acts on the repository's top level from any subdirectory, puts git hooks where git runs them, keeps a hook of yours (a marked block after its `#!` line runs ours), and refuses — writing nothing — a symbolic link on a path it would write or a global or system `core.hooksPath`. The Claude tier is per-user: `.claude/settings.local.json` and `.claude/hooks/doc-superpowers/` are excluded from git through git's `info/exclude` (`git rev-parse --git-path info/exclude`, which is not `.git/info/exclude` in a linked worktree or a submodule).
@@ -297,9 +298,9 @@ For code review and commit review integration, see `references/integration-patte
 | `/doc-superpowers update [scope] [--report=<path>]` | Execute doc updates from an audit report (default: this session's audit, else the freshness check) |
 | `/doc-superpowers diagram [scope]` | Regenerate architecture and workflow diagrams |
 | `/doc-superpowers sync` | Sync doc index with filesystem |
-| `/doc-superpowers hooks install [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--workflows=<csv\|all\|none>] [--force] [--base-branch NAME] [--cron EXPR] [--ci-strict[=true\|false]] [--marketplace-url URL]` | Install workflow hooks (CI: the shell workflows by default, the rest by name; choices recorded; the ledger sets and doc-search's `--search` opt-in, never in `--all`) |
-| `/doc-superpowers hooks status [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search]` | Show installed hooks |
-| `/doc-superpowers hooks uninstall [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--workflows=<csv\|all\|none>] [--transient]` | Remove installed hooks (granular CI uninstall; `--transient` keeps state non-intentional) |
+| `/doc-superpowers hooks install [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [--workflows=<csv\|all\|none>] [--force] [--base-branch NAME] [--cron EXPR] [--ci-strict[=true\|false]] [--marketplace-url URL]` | Install workflow hooks (CI: the shell workflows by default, the rest by name; choices recorded; the ledger sets and doc-search's `--search` opt-in, never in `--all`) |
+| `/doc-superpowers hooks status [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate]` | Show installed hooks |
+| `/doc-superpowers hooks uninstall [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [--workflows=<csv\|all\|none>] [--transient]` | Remove installed hooks (granular CI uninstall; `--transient` keeps state non-intentional) |
 | `/doc-superpowers spec-generate --design-doc=<path>` | Generate formal specs from design doc |
 | `/doc-superpowers spec-inject --phase=plan\|execute --specs=<paths> [--plan=<path>]` | Inject spec tasks into the plan (`--plan` required) or track drift after a chunk |
 | `/doc-superpowers release [--from=<ref>]` | Draft release notes entry from git history |

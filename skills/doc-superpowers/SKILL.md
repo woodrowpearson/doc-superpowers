@@ -29,7 +29,7 @@ flowchart TD
 | `sync` | Sync doc index with filesystem | `docs/.doc-index.json` |
 | `setup` | Set this repository up in one pass: fixed safe defaults, every write shown first, the team's choice recorded | none; `--dry-run`, `--list`, `--set <id>=<value>`, `--yes`, `--apply`, `--build`, `--for-team`, `--link-bin` |
 | `help` | One-screen help: every feature and command, the same text as the terminal's | optional `[topic]`: `setup`, `search`, `hooks`, `ci`, `ledger`, `claims`, `release` |
-| `hooks` | Install git/Claude/CI hooks | `--git`, `--claude`, `--ci`, `--all`; the opt-in sets — the work ledger's `--ledger`, `--ledger-claude` and doc-search's MCP server `--search` (never in `--all`) |
+| `hooks` | Install git/Claude/CI hooks | `--git`, `--claude`, `--ci`, `--all`; the opt-in sets — the work ledger's `--ledger`, `--ledger-claude`, doc-search's MCP server `--search` and its readiness gate `--search-gate` (never in `--all`) |
 | `spec-generate` | Design doc → formal specs | `--design-doc=<path>` |
 | `spec-inject` | Inject spec tasks into plans | `--phase=plan\|execute` |
 | `spec-verify` | Verify spec compliance | `--mode=post-execute\|review` |
@@ -567,7 +567,7 @@ Then tell the user that `doc-superpowers setup` in a terminal is the full-screen
 - Never pass `--force` unless the user asked for exactly that.
 - A project that runs its own git hooks and wants only the index merge driver: `install --git --merge-driver-only` (no hook is written). For a state a script reads, use `status --json`, never the human lines; the git hooks' time budget and the advice the hooks print are set by `DOC_SUPERPOWERS_HOOK_BUDGET` / `DOC_SUPERPOWERS_ADVICE` or `.claude/doc-superpowers/hooks.conf` (`$ROOT/references/hooks.md` → *Hook budgets and advice*).
 - The work ledger's sets (`--ledger`, `--ledger-claude`) are opt-in, never part of `--all`, refused without `docs/ledger/config.json`, and not recorded in `installed.json`; `$ROOT/references/hooks.md` → *Ledger sets*. Before `--ci --workflows=doc-ledger-publish`, show its consent row like any other workflow's.
-- doc-search's set (`--search`: a committed launcher and the project's `.mcp.json` entry) is opt-in in the same way and refused without `docs/search/config.json`; `$ROOT/references/hooks.md` → *doc-search set*, and `$ROOT/references/search.md` for turning the server on.
+- doc-search's set (`--search`: a committed launcher and the project's `.mcp.json` entry) is opt-in in the same way and refused without `docs/search/config.json`; `$ROOT/references/hooks.md` → *doc-search set*, and `$ROOT/references/search.md` for turning the server on. Its gate (`--search-gate`: committed hook entries in `.claude/settings.json` and `.codex/hooks.json` that run the launcher's `gate`) is a set of its own: it also needs the `--search` launcher, and gates only where the config sets `"required": true`; `$ROOT/references/hooks.md` → *doc-search gate set*.
 - An install another version made (2.x included) reads `⚠ … outdated` in `install.sh status`: re-run that tier (a ledger set: `install --ledger` or `--ledger-claude`), and walk the user through `$ROOT/README.md` → *Upgrading from 2.x* (v2's AI workflows, the per-user Claude tier, hooks in unconfigured directories, retyping design specs).
 
 ### `ledger` — Work Ledger (opt-in)

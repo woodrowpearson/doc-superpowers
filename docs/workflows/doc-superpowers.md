@@ -358,16 +358,16 @@ Scaffolding command that installs opt-in hooks into the target project for autom
 ### Subcommands
 
 ```
-/doc-superpowers hooks install   [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search]
+/doc-superpowers hooks install   [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate]
                                  [--workflows=<csv|all|none>]
                                  [--force] [--base-branch NAME] [--cron EXPR] [--ci-strict[=true|false]]
                                  [--marketplace-url URL]
-/doc-superpowers hooks status    [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search]
-/doc-superpowers hooks uninstall [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search]
+/doc-superpowers hooks status    [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate]
+/doc-superpowers hooks uninstall [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate]
                                  [--workflows=<csv|all|none>] [--transient]
 ```
 
-A flag a subcommand does not take exits 2; CI options need `--ci` or `--all`. `--ledger` and `--ledger-claude` are the work ledger's opt-in sets: never part of `--all`, each refused without `docs/ledger/config.json` (exit 1, nothing written). `--search` is doc-search's, under the same rules with `docs/search/config.json`. Every subcommand acts on `git rev-parse --show-toplevel` of the current directory (a linked worktree or a submodule is its own top level), and refuses — before writing anything — a symbolic link at a write target or on the way to it, and a `core.hooksPath` from the global or system git config.
+A flag a subcommand does not take exits 2; CI options need `--ci` or `--all`. `--ledger` and `--ledger-claude` are the work ledger's opt-in sets: never part of `--all`, each refused without `docs/ledger/config.json` (exit 1, nothing written). `--search` is doc-search's, under the same rules with `docs/search/config.json`; `--search-gate` is its readiness gate, which also needs the `--search` launcher (never part of `--search` either). Every subcommand acts on `git rev-parse --show-toplevel` of the current directory (a linked worktree or a submodule is its own top level), and refuses — before writing anything — a symbolic link at a write target or on the way to it, and a `core.hooksPath` from the global or system git config.
 
 ### Tier Options
 
@@ -379,6 +379,7 @@ A flag a subcommand does not take exits 2; CI options need `--ci` or `--all`. `-
 | Work-ledger git legs | `--ledger` | Marked `# ledger-superpowers:begin`/`:end` blocks (never whole files) in `pre-commit` (`ledger validate --staged`), `pre-push` (`ledger validate --pushed`) and `post-commit` (`ledger inflight --push`, in the background). Opt-in, never in `--all`, refused without `docs/ledger/config.json`, per-clone, not recorded in `installed.json` |
 | Work-ledger Claude events | `--ledger-claude` | Per-user, in `.claude/settings.local.json` with its own `info/exclude` block: `ledger-session-notices.sh` (SessionStart) and `ledger-state-watch.sh` (PostToolUse, matcher `Write\|Edit\|MultiEdit`), with `hook-lib.sh`. Never installs `--claude`; opt-in, never in `--all`, refused without the config, not recorded |
 | doc-search MCP server | `--search` | Committed, not per-user: the launcher `.claude/doc-superpowers/search-mcp.sh` (a byte copy of `scripts/search/launch.sh`) and the `doc-search` server merged into the project's `.mcp.json` per key. Opt-in, never in `--all`, refused without `docs/search/config.json`, not recorded in `installed.json`; `status --json --search` reports `.tiers.search` |
+| doc-search readiness gate | `--search-gate` | Committed: three hook entries running the launcher's `gate` — `SessionStart` (`gate session-start`), `UserPromptSubmit` (`gate prompt`), `PreToolUse` (`gate tool`) — merged per handler into `.claude/settings.json` (Claude Code) and `.codex/hooks.json` (Codex: a trusted project, each hook approved in `/hooks`). Opt-in, never in `--all` or `--search`, refused without the config or the launcher, not recorded; they gate only where the config sets `"required": true`; `status --json --search-gate` reports `.tiers.search_gate` |
 
 ### Hook Contracts
 
@@ -394,6 +395,7 @@ Every hook except `pre-push` runs its freshness check scoped to the paths it car
   - `post-commit`: `ledger inflight --push` in the background, stdin `/dev/null`, output to `<git common dir>/doc-superpowers/ledger/push.log`; it never prompts (`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, ssh `-o BatchMode=yes`) and pushes this branch's in-flight ref only with `inflight.enabled` and commits beyond the base — the one hook with a network side effect.
 - **Work-ledger Claude events** (`--ledger-claude`): thin wrappers over the hook modes `ledger notices --hook` and `ledger state-watch --hook`, always exit 0. SessionStart `ledger-session-notices.sh`: the unacked `stop` and `heads-up` notices for the session's branch, offline (`DOC_TOOLS_LEDGER_OFFLINE=1`), at most 15 lines, under a 2 s `_bounded` budget; silent with none or with in-flight awareness off. PostToolUse `Write|Edit|MultiEdit` `ledger-state-watch.sh`: advisory — when a write under `state_watch.paths` names an item key and a `state_watch.patterns` phrase, one `additionalContext` line suggests `ledger note`. With `state_watch.paths` and no `state_watch.patterns` it never fires (`status` warns; `ledger validate --all` reports class `config`). A host registering the hook mode in its own committed `settings.json` sets the matcher `Write|Edit|MultiEdit` itself: `status` never inspects such entries.
 - **doc-search set** (`--search`; `references/hooks.md` → *doc-search set*): no hook runs anything. The client starts the server from the project's `.mcp.json` entry (`sh .claude/doc-superpowers/search-mcp.sh serve`), and the launcher finds doc-superpowers when it runs (`$DOC_SUPERPOWERS_ROOT`, a doc-superpowers checkout, the Codex install `${CODEX_HOME:-$HOME/.codex}/doc-superpowers`, the newest plugin-cache version), then runs `uv run --frozen --no-dev` on its `search/` package, adding `--extra cloud` when the config has a `cloud` object and `--extra local-transformer` when `docs.model` is a `transformer:` model (without `jq`: `--all-extras --no-extra local-transformer`, or `--all-extras` when `grep` finds a `transformer:` model). `status` reads the launcher as `installed` (byte-identical to the plugin's), `outdated` or absent, and the entry as registered, a different command, or absent.
+- **doc-search gate set** (`--search-gate`; `references/hooks.md` → *doc-search gate set*, `references/search.md` → `gate`): each client runs `sh "$(git rev-parse --show-toplevel)/.claude/doc-superpowers/search-mcp.sh" gate <event>` with the event on stdin. `session-start` and `prompt` run `check` and keep the worktree's verdict file; `tool` only reads that file and, while it says not ready, denies every tool call but the launcher's `index`, `status` and `check`. With no doc-superpowers root, no config, a config that does not set `"required": true`, or `DOC_SEARCH_GATE=0`, the hooks print nothing and allow everything.
 - **Claude Code hooks** read the event JSON on stdin (`.tool_input.command`). Before resolving `doc-tools.sh`, they test the command against one POSIX ERE, kept byte-identical in both hooks:
 
   ```text
@@ -830,9 +832,9 @@ Claims are enabled when `docs/spec-claims/` exists. The chunk gate and the final
 | `/doc-superpowers update [--report=<path>] [scope]` | Apply the fixes of the audit report named by `--report`, else this session's audit, else discovery's `check-freshness` list |
 | `/doc-superpowers diagram [scope]` | Regenerate architecture and workflow diagrams |
 | `/doc-superpowers sync` | Sync doc index with filesystem |
-| `/doc-superpowers hooks install [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude]` | Install workflow hooks into target project (the ledger sets: opt-in, never in `--all`) |
-| `/doc-superpowers hooks status [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude]` | Show installed hooks per tier, and each ledger set |
-| `/doc-superpowers hooks uninstall [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude]` | Remove installed hooks |
+| `/doc-superpowers hooks install [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate]` | Install workflow hooks into target project (the ledger and doc-search sets: opt-in, never in `--all`) |
+| `/doc-superpowers hooks status [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate]` | Show installed hooks per tier, and each opt-in set |
+| `/doc-superpowers hooks uninstall [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate]` | Remove installed hooks |
 | `/doc-superpowers release [--from=<ref>]` | Draft release notes entry from git history (`--from` overrides the range start) |
 | `/doc-superpowers spec-generate --design-doc=<path>` | Generate formal specs from a design document |
 | `/doc-superpowers spec-inject --phase=plan --plan=<path> --specs=<paths>` | Inject spec maintenance tasks into implementation plan |
