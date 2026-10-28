@@ -2,7 +2,7 @@
 `check-ci.sh` now takes an interpreter path that holds a space, and every test suite runs its fixtures under a spaced path, whatever `TMPDIR` is.
 
 ### Fixes
-- **`check-ci.sh --bash` with a spaced path.** The interpreter list was space-joined and word-split, so `--bash "/Volumes/My Disk/bin/bash"` stopped with `--bash /Volumes/My: not an executable bash` (exit 2), and so did a detected interpreter under such a path. The list is now one path per line.
+- **`check-ci.sh --bash` with a spaced path.** The interpreter list was space-joined and word-split, so `--bash "/opt/my tools/bin/bash"` stopped with `--bash /opt/my: not an executable bash` (exit 2), and so did a detected interpreter under such a path. The list is now one path per line.
 
 ### Other
 - Tests: the harness root (`test-helpers.sh`) is named `doc-sp test`, so every shim, fixture repo, fake `HOME`, scratch file and installed workflow in all seven suites sits under a spaced path on every run. Before, the suites hit a spaced path only on a host whose `TMPDIR` had one, and three of them failed there on test bugs alone: `test-hooks.sh` passed an unquoted `GIT_EDITOR` (git runs it through `sh`) and wrote unquoted assignments into the doc-search env hook; `test-doc-pr-release.sh` word-split a workflow file list and rejected any step output whose value held a space (a `$RUNNER_TEMP` report path can; the check is now one `key=` line of at most 4,096 bytes), and `test-hooks.sh` cut a logged `BASH_BIN=` path at its first space. The `check-ci.sh` self-tests now pass a spaced `--bash` path on every run.
