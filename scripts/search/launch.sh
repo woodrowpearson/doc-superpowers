@@ -64,20 +64,26 @@
 #   - outside a git work tree: check prints "not in force: not a git work
 #     tree" and exits 4; gate is silent;
 #   - no root: check prints "not in force: doc-superpowers is not installed for
-#     this developer" and exits 4; gate is silent;
+#     this developer" and exits 4; gate is silent (session-start and prompt
+#     remove the verdict file);
 #   - no uv, where the raw text of docs/search/config.json (at the repository
 #     top) matches "required"\s*:\s*true, across lines, as doc-search's own
-#     test does: check prints "not ready: uv not found" and exits 1, gate
-#     prompt blocks the prompt and gate session-start adds the line as context;
+#     test does: check prints "not ready: uv not found" and exits 1; gate
+#     session-start and prompt write the verdict file as doc-search gate does,
+#     then prompt blocks the prompt and session-start adds the line as
+#     context, in doc-search gate's words;
 #   - no uv otherwise: check prints "not in force: uv not found" and exits 4;
-#     gate session-start and prompt are silent.
-# gate tool never runs uv. It reads the verdict file doc-search gate keeps,
-# $(git rev-parse --git-path doc-search-gate): line 1 the verdict, line 2 the
-# reason and fix. Unless line 1 is not-ready (one trailing CR ignored) it is
-# silent. While it is, a Bash call whose whole command matches
-# GATE_ALLOWED_PLAIN or GATE_ALLOWED_QUOTED (the fix commands) is allowed and
-# every other tool call is denied, line 2 in the reason. Without jq the call
-# cannot be read, so every one is denied, with a fixed reason.
+#     gate session-start and prompt remove the verdict file and are silent.
+# The verdict file, $(git rev-parse --git-path doc-search-gate), is kept by
+# gate session-start and prompt (doc-search's, or this file's where it
+# answers): two LF lines while not ready, line 1 not-ready and line 2
+# "<reason>; fix: <fix>", written to a temp file beside it and moved over it;
+# absent otherwise. gate tool never runs uv: it reads that file. Unless line 1
+# is not-ready (one trailing CR ignored) it is silent. While it is, a Bash call
+# whose whole command matches GATE_ALLOWED_PLAIN or GATE_ALLOWED_QUOTED (the
+# fix commands) is allowed and every other tool call is denied, line 2 (one
+# trailing CR dropped) in the reason. Without jq the call cannot be read, so
+# every one is denied, with a fixed reason.
 # check's answer goes to stdout, as doc-search's does: the line, or with
 # --format json one object (see check_answer). gate prints one JSON object or
 # nothing and exits 0 (3 for an unknown event). It never echoes the event,
@@ -111,6 +117,24 @@ config_required() {
   tr '\t\n\v\f\r' '     ' 2>/dev/null <"$TOP/docs/search/config.json" | grep -Eq '"required" *: *true'
 }
 
+# gate_keep <line 2>: write the verdict file as not-ready, atomically (a temp
+# file beside it, then mv over it). A failure leaves it as it was.
+gate_keep() {
+  VERDICT=$(git rev-parse --git-path doc-search-gate 2>/dev/null) || VERDICT=""
+  [ -n "$VERDICT" ] || return 0
+  if ! (printf 'not-ready\n%s\n' "$1" >"$VERDICT.tmp.$$" && mv -f "$VERDICT.tmp.$$" "$VERDICT") 2>/dev/null; then
+    rm -f "$VERDICT.tmp.$$" 2>/dev/null
+  fi
+  return 0
+}
+
+# gate_forget: remove the verdict file (not in force); a missing one is fine.
+gate_forget() {
+  VERDICT=$(git rev-parse --git-path doc-search-gate 2>/dev/null) || VERDICT=""
+  if [ -n "$VERDICT" ]; then rm -f "$VERDICT" 2>/dev/null; fi
+  return 0
+}
+
 # gate_tool: the PreToolUse decision, from the verdict file and the event.
 gate_tool() {
   VERDICT=$(git rev-parse --git-path doc-search-gate 2>/dev/null) || VERDICT=""
@@ -138,6 +162,7 @@ gate_tool() {
     exit 0
   fi
   REASON=$(sed -n 2p "$VERDICT" 2>/dev/null) || REASON=""
+  REASON=${REASON%"$(printf '\r')"}
   if [ -n "$REASON" ]; then
     REASON="$GATE_NOT_READY: $REASON. $GATE_STOP"
   else
@@ -177,6 +202,8 @@ answer_check_gate() {
   UV_MISSING="uv not found (https://docs.astral.sh/uv/)"
   GATE_NOT_READY="doc-search is required here and not ready"
   GATE_STOP="Stop and report this to the user; do not work around it."
+  # doc-search gate's sentence where the fix is not one the agent may run.
+  GATE_USER_ONLY="Only the user can run this fix; you may run only sh .claude/doc-superpowers/search-mcp.sh index, status or check."
   # The fix commands allowed while not ready, whole: the launcher path holds
   # only [A-Za-z0-9_./-], and spaces too when double-quoted, so no shell
   # syntax (substitution, redirection, a second command) can ride along. The
@@ -217,7 +244,10 @@ answer_check_gate() {
     check_answer not-in-force 4 "not a git work tree"
   fi
   if [ -z "$ROOT" ]; then
-    if [ "$VERB" = gate ]; then gate_silent; fi
+    if [ "$VERB" = gate ]; then
+      if [ "$EVENT_NAME" != tool ]; then gate_forget; fi
+      gate_silent
+    fi
     check_answer not-in-force 4 "doc-superpowers is not installed for this developer"
   fi
   if [ "$EVENT_NAME" = tool ]; then
@@ -230,18 +260,23 @@ answer_check_gate() {
     case $EVENT_NAME in
       session-start)
         drain
-        printf '%s\n' "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"$GATE_NOT_READY: $UV_MISSING. Fix: install uv. Do no work until it is ready: tell the user this line and stop.\"}}"
+        gate_keep "$UV_MISSING; fix: install uv"
+        printf '%s\n' "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"$GATE_NOT_READY: $UV_MISSING. Fix: install uv. $GATE_USER_ONLY Do no work until it is ready: tell the user this line and stop.\"}}"
         exit 0
         ;;
       prompt)
         drain
-        printf '%s\n' "{\"decision\":\"block\",\"reason\":\"$GATE_NOT_READY: $UV_MISSING. Run: install uv — then send your message again. (Set DOC_SEARCH_GATE=0 to turn the gate off for yourself.)\"}"
+        gate_keep "$UV_MISSING; fix: install uv"
+        printf '%s\n' "{\"decision\":\"block\",\"reason\":\"$GATE_NOT_READY: $UV_MISSING. Fix: install uv — then send your message again. (Set DOC_SEARCH_GATE=0 to turn the gate off for yourself.)\"}"
         exit 0
         ;;
     esac
     check_answer not-ready 1 "$UV_MISSING" "install uv"
   fi
-  if [ "$VERB" = gate ]; then gate_silent; fi
+  if [ "$VERB" = gate ]; then
+    gate_forget
+    gate_silent
+  fi
   check_answer not-in-force 4 "$UV_MISSING"
 }
 

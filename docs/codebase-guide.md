@@ -47,7 +47,8 @@ doc-superpowers/
 │   │   ├── searcher.py fusion.py render.py  # the legs (docs, ident, code, cloud) and file-keyed RRF with the per-kind floor; the markdown answer
 │   │   ├── tools.py      # fetch, related, status
 │   │   ├── server.py     # the MCP server (MCPServer, SDK v2): four tools over one Runtime; cli.py builds the same Runtime
-│   │   ├── cli.py evaluate.py  # doc-search serve | init | index | query | status | eval; known-answer evaluation
+│   │   ├── cli.py evaluate.py  # doc-search serve | init | index | query | status | eval | check | gate; known-answer evaluation
+│   │   ├── check.py gate.py  # the readiness probe (`check`'s verdict) and the client hooks' entry (`gate session-start|prompt`), which keeps the verdict file `gate tool` reads
 │   │   ├── chunker.py    # the cloud write path's heading-bounded chunker
 │   │   └── cloud/        # read.py (the cloud leg: Vertex query → Firestore find_nearest, branch-changed suppression), write.py (the guarded indexer), vertex.py (google-genai embeddings), __init__.py (the one gateway to the extra's modules: CloudUnavailable without it; gRPC fork support off before they load)
 │   └── tests/            # pytest: never the network (a test-built Model2Vec model, a fake transformer and a tiny ONNX graph, fake Firestore and Vertex); the live tests (test_live.py: semble's default model, and the gte-modernbert docs model, end to end) only under DOC_SEARCH_LIVE=1
@@ -263,7 +264,7 @@ doc-superpowers/
 | Work ledger adapters | `scripts/ledger/adapters.sh` (`_lg_adapter`, `_lg_adapter_path`: `doc-superpowers:<name>` → `scripts/adapters/<name>.sh`; the JSON-lines contracts); `scripts/adapters/` |
 | Work ledger hook legs | `scripts/hooks/git/ledger-*`, `scripts/hooks/claude/ledger-*.sh`; the hook modes in `scripts/ledger/hooks.sh` and `inflight.sh`; installer: `scripts/hooks/install.sh` (`LG_BEGIN`/`LG_END`, `LEDGER_GIT_HOOKS`, `LEDGER_CLAUDE_HOOKS`) |
 | Work ledger tests and bench | `scripts/test-ledger.sh`; `scripts/bench-ledger.sh` |
-| doc-search (the MCP server) | `search/src/doc_search/` — `server.py` (tools), `cli.py` (verbs, exit codes), `searcher.py` (legs and fusion), `engines.py` (semble index pairs), `transformer.py` `encode_cache.py` `progress.py` (the opt-in local docs embedder), `cloud/` (read and write paths); reference `references/search.md`; design `docs/superpowers/specs/2026-10-19-doc-search-design.md` |
+| doc-search (the MCP server) | `search/src/doc_search/` — `server.py` (tools), `cli.py` (verbs, exit codes), `check.py` `gate.py` (the readiness gate), `searcher.py` (legs and fusion), `engines.py` (semble index pairs), `transformer.py` `encode_cache.py` `progress.py` (the opt-in local docs embedder), `cloud/` (read and write paths); reference `references/search.md`; design `docs/superpowers/specs/2026-10-19-doc-search-design.md` |
 | doc-search install set | `scripts/hooks/install.sh` `# --- doc-search's set (--search)` (`install_search`, `uninstall_search`, `status_search`, `search_state`); the launcher `scripts/search/launch.sh` |
 | doc-search names and setup | `docs/conventions.md` → *doc-search names* (config path, launcher, server and tool names, CLI verbs, `DOC_SEARCH_CLOUD`); `docs/guides/getting-started.md` → *doc-search (opt-in)*; the containers in `docs/architecture/system-overview.md` |
 | doc-search tests | `search/tests/` (pytest; `bash scripts/check-ci.sh search` runs `uv run --project search --frozen --all-extras pytest -q`); the `--search` set in `scripts/test-hooks.sh` |

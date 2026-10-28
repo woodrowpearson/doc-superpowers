@@ -1,9 +1,10 @@
-"""The `doc-search` command line (design section 9): serve, init, index, query, status, eval, check.
+"""The `doc-search` command line (design section 9): serve, init, index, query, status, eval, check, gate.
 
 Exit codes: 0 ok (inert included), 1 findings, 2 could not run, 3 usage. When several apply, 1 wins over 2,
-and 2 over 0. Without `docs/search/config.json` every verb but `init` and `check` prints the inert line and
-exits 0; with an invalid one it prints `doc-search: invalid config: <message>` on stderr and exits 2. `check`
-has exits of its own (check.py): 0 ready or degraded, 1 not-ready, 3 usage, 4 not-in-force.
+and 2 over 0. Without `docs/search/config.json` every verb but `init`, `check` and `gate` (silent) prints the inert
+line and exits 0; with an invalid one it prints `doc-search: invalid config: <message>` on stderr and exits 2. `check`
+has exits of its own (check.py): 0 ready or degraded, 1 not-ready, 3 usage, 4 not-in-force. `gate` (gate.py), the
+client hooks' entry, always exits 0 (3 for usage): its decision is the JSON it prints.
 
 The verbs that search (`query`, `status`, `eval`) use the same `Runtime` as the MCP tools. `index`, `query` and
 `eval` are foreground work and wait for a build without a bound (a build that is cached once is fast the next
@@ -41,6 +42,7 @@ from .docindex import DocIndex
 from .encode_cache import cache_size, encode_cache_path
 from .engines import FOREGROUND_WAIT_S, Building, IndexPool, WorktreeIndexes
 from .evaluate import EvalFileError, run_eval
+from .gate import EVENTS, hook_output, judge, verdict_path, write_verdict
 from .progress import ProgressView, read_progress
 from .render import render_search
 from .repo import GitError, NotARepo, RepoInfo, resolve_worktree
@@ -139,14 +141,21 @@ def _build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argumen
     status = verb("status", "How doc-search is set up here and whether the saved indexes are valid (builds nothing).")
     status.add_argument("--format", choices=("text", "json"), default="text")
 
+    def budget(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument(
+            "--budget",
+            type=lambda t: int(_number(t, name="--budget", low=1, high=600, whole=True)),
+            default=CHECK_BUDGET_S,
+            help="seconds the refresh may take, 1-600 (default: 20)",
+        )
+
     probe = verb("check", "Whether doc-search can answer here now, refreshing stale indexes within --budget (a gate).")
     probe.add_argument("--format", choices=("text", "json"), default="text")
-    probe.add_argument(
-        "--budget",
-        type=lambda t: int(_number(t, name="--budget", low=1, high=600, whole=True)),
-        default=CHECK_BUDGET_S,
-        help="seconds the refresh may take, 1-600 (default: 20)",
-    )
+    budget(probe)
+
+    hook = verb("gate", "The client hooks' entry: check, keep the verdict file, print the hook's JSON (always exit 0).")
+    hook.add_argument("event", choices=EVENTS, help="the hook event (the launcher answers `tool` itself)")
+    budget(hook)
 
     ev = verb("eval", "Known-answer evaluation: recall@k and MRR per leg, and the semble-single decision.")
     ev.add_argument("file", help='JSON lines: {"query", "expect": [paths], "kind"?}')
@@ -546,6 +555,38 @@ def _check(args: argparse.Namespace) -> int:
     return verdict.exit_code()
 
 
+# -- gate ----------------------------------------------------------------------------------------------------
+
+
+def _gate(args: argparse.Namespace) -> int:
+    """The hook entry (gate.py): read and drop the event on stdin, judge, keep the verdict file, print the JSON."""
+    _drain_stdin()
+    try:
+        top = RepoInfo.from_cwd(Path.cwd()).top
+    except (NotARepo, GitError):
+        return 0
+    verdict = judge(top, budget_s=args.budget, env=os.environ)
+    try:
+        write_verdict(verdict_path(top), verdict)
+    except (GitError, OSError) as err:
+        print(" ".join(f"doc-search: gate: cannot keep the verdict file: {err}".split()), file=sys.stderr)
+    output = hook_output(args.event, verdict)
+    if output is not None:
+        print(json.dumps(output))
+    return 0
+
+
+def _drain_stdin() -> None:
+    """Read the hook event to its end and drop it, so the client's write never blocks (not from a terminal)."""
+    stream = sys.stdin
+    try:
+        if stream is None or stream.isatty():
+            return
+        getattr(stream, "buffer", stream).read()
+    except (OSError, ValueError):
+        pass
+
+
 # -- eval ----------------------------------------------------------------------------------------------------
 
 
@@ -586,6 +627,7 @@ _VERBS = {
     "status": _status,
     "eval": _eval,
     "check": _check,
+    "gate": _gate,
 }
 
 
