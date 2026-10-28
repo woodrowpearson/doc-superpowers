@@ -1445,8 +1445,12 @@ test_i8_ai_steps_runnable_and_scoped() {
   assert_eq "" "$bad" "AI steps can run (token, pinned plugin) and are least-privilege (scoped tools, turn cap)"
   assert_eq "7" "$n" "7 AI steps checked (6 templates; doc-review-pr has a PR job and a comment job)"
   assert_eq "" "$(grep -l 'id-token' "$ALL_REPO"/.github/workflows/*.yml || true)" "no workflow asks for id-token (GH #5 is fixed with github_token)"
-  assert_eq "" "$(grep -L 'DOC_SUPERPOWERS_VERSION: "v' $(for wf in $AI_WORKFLOWS; do printf '%s ' "$ALL_REPO/.github/workflows/$wf.yml"; done) || true)" \
-    "every AI workflow carries the installed version its plugin step pins"
+  # One grep per file: a spaced $ALL_REPO must not word-split into the file list.
+  local unpinned=""
+  for wf in $AI_WORKFLOWS; do
+    grep -q 'DOC_SUPERPOWERS_VERSION: "v' "$ALL_REPO/.github/workflows/$wf.yml" 2>/dev/null || unpinned="$unpinned $wf"
+  done
+  assert_eq "" "$unpinned" "every AI workflow carries the installed version its plugin step pins"
 }
 
 test_i8_every_job_has_a_timeout() {
@@ -1694,6 +1698,13 @@ _out() {
   sed -n "s/^$2=//p" "$1" | tail -n 1
 }
 
+# The lines of a step-output file that are not one key=value line: a heredoc
+# (key<<EOF), anything else that is not key=, or a value too big to be a scalar.
+# A value may hold spaces — $RUNNER_TEMP, and so a report path, can.
+_out_bad_lines() {
+  awk '!/^[a-z_]+=/ || length($0) > 4096' "$1"
+}
+
 FRESHNESS=.github/scripts/doc-superpowers-steps/freshness-check.sh
 
 # freshness_repo: the CI tier installed; docs/a.md cites src/, docs/b.md
@@ -1740,7 +1751,7 @@ test_i8_freshness_gate() {
     "$(jq -r '[.docs | to_entries[] | "\(.key)=\(.value.status)"] | join(" ")' "$report" 2>/dev/null)" \
     "the report file holds exactly the stale and missing docs"
   assert_eq "$out.tmp/freshness.json" "$(ls "$out.tmp/freshness.json" 2>/dev/null)" "the raw result is \$RUNNER_TEMP/freshness.json"
-  assert_eq "" "$(grep -vE '^[a-z_]+=[^[:space:]]*$' "$out" || true)" "every step output is one key=value line (no heredoc, nothing index-sized)"
+  assert_eq "" "$(_out_bad_lines "$out")" "every step output is one key=value line (no heredoc, nothing index-sized)"
 
   rc=0
   run_installed "$repo" "$out" RANGE="$rng" DOC_SUPERPOWERS_STRICT=1 -- "$FRESHNESS" gate || rc=$?
@@ -3386,7 +3397,7 @@ test_claims_check_pr_empty_store_converged_plan_passes() {
     "…the empty store gives unverifiable-here advisories, never findings"
   assert_eq "$out.tmp/claims-report.json" "$(_out "$out" report)" "report is \$RUNNER_TEMP/claims-report.json"
   assert_eq "3" "$(jq '[.[] | .verb] | length' "$(_out "$out" report)" 2>/dev/null)" "…an array of the 3 verdicts (validate, run, attest)"
-  assert_eq "" "$(grep -vE '^[a-z_]+=[^[:space:]]*$' "$out" || true)" "every step output is one key=value line"
+  assert_eq "" "$(_out_bad_lines "$out")" "every step output is one key=value line"
 }
 
 test_claims_check_pr_findings_exit_1() {

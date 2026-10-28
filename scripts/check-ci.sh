@@ -77,6 +77,7 @@ err() {
   fi
 }
 
+# BASHES holds one interpreter path per line: a path may contain spaces.
 FAST=0 VERBOSE=0 BASHES="" NAMED=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -84,10 +85,10 @@ while [ $# -gt 0 ]; do
     --verbose | -v) VERBOSE=1 ;;
     --bash)
       [ $# -ge 2 ] || { err "--bash requires a path"; exit 2; }
-      BASHES="$BASHES $2"
+      BASHES="$BASHES$2"$'\n'
       shift
       ;;
-    --bash=*) BASHES="$BASHES ${1#--bash=}" ;;
+    --bash=*) BASHES="$BASHES${1#--bash=}"$'\n' ;;
     --list) printf '%s\n' $CHECKS; exit 0 ;;
     -h | --help) usage; exit 0 ;;
     -*) err "unknown option '$1' (see --help)"; exit 2 ;;
@@ -129,21 +130,25 @@ detect_bashes() {
     # The floor first: a bash-4-only construct breaks there.
     printf '%s\n' "${old:-$new}"
   else
-    printf '%s\n' $new $old
+    [ -z "$new" ] || printf '%s\n' "$new"
+    [ -z "$old" ] || printf '%s\n' "$old"
   fi
 }
 
 if [ -n "$BASHES" ]; then
   given="$BASHES" BASHES=""
-  for b in $given; do
+  while IFS= read -r b; do
+    [ -n "$b" ] || continue
     # A bare name (tests.yml's ubuntu leg passes "bash") is looked up on PATH.
     case "$b" in
       */*) ;;
       *) b=$(command -v "$b" 2>/dev/null || printf '%s' "$b") ;;
     esac
     bash_major "$b" >/dev/null || { err "--bash $b: not an executable bash"; exit 2; }
-    BASHES="$BASHES $b"
-  done
+    BASHES="$BASHES$b"$'\n'
+  done <<EOF
+$given
+EOF
 else
   BASHES=$(detect_bashes)
   [ -n "$BASHES" ] || { err "no bash interpreter found"; exit 2; }
@@ -163,7 +168,7 @@ FAILED=0
 record() { RESULTS="$RESULTS$1"$'\n'; }
 
 # A check's own interpreter for the non-suite checks: the first one.
-FIRST_BASH=$(printf '%s\n' $BASHES | head -n 1)
+FIRST_BASH=$(printf '%s\n' "$BASHES" | sed -n '/./{p;q;}')
 
 check_toolchain() {
   local rc=0 yaml
@@ -187,9 +192,11 @@ check_toolchain() {
   echo "yaml:       $yaml"
   echo "node:       $(node --version 2>/dev/null || echo missing)"
   echo "shellcheck: $(shellcheck --version 2>/dev/null | awk '/^version:/ { print $2 }' || true)"
-  for b in $BASHES; do
-    echo "bash:       $b — $("$b" --version | head -n 1)"
-  done
+  while IFS= read -r b; do
+    [ -z "$b" ] || echo "bash:       $b — $("$b" --version | head -n 1)"
+  done <<EOF
+$BASHES
+EOF
   return "$rc"
 }
 
@@ -291,7 +298,12 @@ for c in $RUN; do
       fi
       ;;
     *)
-      for b in $BASHES; do run_suite "$c" "$b"; done
+      # fd 3, so a suite never reads the interpreter list on its stdin.
+      while IFS= read -r b <&3; do
+        [ -z "$b" ] || run_suite "$c" "$b"
+      done 3<<EOF
+$BASHES
+EOF
       ;;
   esac
 done
