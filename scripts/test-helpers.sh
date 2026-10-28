@@ -31,10 +31,16 @@ BASH_BIN="${BASH_BIN:-${BASH:-bash}}"
 # suite. Registering the traps in the main shell is the only placement that
 # works. Suites must not register their own EXIT/INT/TERM traps; create
 # scratch paths with harness_mktemp / harness_mktemp_d instead.
-_HARNESS_TMP=$(mktemp -d -t doc-sp-test.XXXXXX) || {
+#
+# The root's name holds a space, so every shim, fixture repo, fake HOME and
+# scratch path is a spaced path on every run, whatever TMPDIR is: a word-split
+# path in a hook, a step script or a test fails here, not only on a host whose
+# TMPDIR (or a user whose repo path) has one.
+_HARNESS_BASE=$(mktemp -d -t doc-sp-test.XXXXXX) || {
   echo "ERROR: mktemp -d failed for the test harness root" >&2
   exit 1
 }
+_HARNESS_TMP="$_HARNESS_BASE/doc-sp test"
 _SHIM_DIR="$_HARNESS_TMP/shim"
 SUITE_TMP="$_HARNESS_TMP/tmp"
 mkdir -p "$_SHIM_DIR" "$SUITE_TMP" "$_HARNESS_TMP/home" "$_HARNESS_TMP/xdg" || exit 1
@@ -45,7 +51,7 @@ TEST_DIR=""
 _harness_cleanup() {
   cd / 2>/dev/null || true
   [ -n "${TEST_DIR:-}" ] && rm -rf "$TEST_DIR"
-  [ -n "${_HARNESS_TMP:-}" ] && rm -rf "$_HARNESS_TMP"
+  [ -n "${_HARNESS_BASE:-}" ] && rm -rf "$_HARNESS_BASE"
   return 0
 }
 # INT/TERM must END the run: a handler that only cleans up would return into
